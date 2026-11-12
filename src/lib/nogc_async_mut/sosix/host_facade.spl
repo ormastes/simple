@@ -24,10 +24,12 @@ The `variants/` overlay selects a module ROOT at compile time. That fits a
 per-host tool binary (unlike the compiler, which is multi-target at runtime from
 one binary and is therefore explicitly disqualified from a host-OS variants axis
 by the seam-qualification bar in `.claude/skills/spipe.md`). It is still not
-warranted for the whole facade: Windows process capture has an operation-specific
-strict byte provider, while directory listing, spawn and ordinary console text
-remain unsupported here. Their admission stays separate; supporting one operation
-does not admit the POSIX text routes for every Windows operation.
+warranted for the whole facade: process capture has an operation-specific
+strict byte provider, while ordinary console text remains unsupported here.
+Directory listing and spawn admit Windows by delegating to the cross-platform
+host providers (the same `dir_list_optional` / spawn seam capture uses), with
+UTF-8 admission unchanged. Their admission stays separate; supporting one
+operation does not admit the POSIX text routes for every Windows operation.
 """
 
 use std.nogc_sync_mut.io_runtime.{platform_name}
@@ -113,7 +115,12 @@ fn sosix_dir_list_checked(path: text) -> Result<[text], TextIoError>:
     val admitted: text = match sosix_admit_c_string(path, false):
         case Ok(v): v
         case Err(e): return Err(e)
-    sosix_require_posix_text_provider()?
+    # Directory entry text is admitted below, so the host dir provider only
+    # has to enumerate names. `dir_list_optional` is already cross-platform
+    # (readdir on POSIX, FindFirstFile/read_dir on Windows); only non-Windows
+    # hosts keep the POSIX provider requirement.
+    if platform_name() != "windows":
+        sosix_require_posix_text_provider()?
     # Native provider currently collapses some open failures to an empty
     # array. Preserve that limitation; nil is the only reported failure.
     val raw = dir_list_optional(admitted)
@@ -259,11 +266,15 @@ fn sosix_spawn_checked(cmd: text, args: [text]) -> Result<i64, TextIoError>:
     val admitted: text = match sosix_admit_c_string(cmd, false):
         case Ok(v): v
         case Err(e): return Err(e)
-    sosix_require_posix_text_provider()?
+    # Spawn resolves through the same host seams as capture: POSIX requires
+    # the ordinary text provider, while Windows resolves bare names through
+    # the Windows executable lookup and spawns the resolved PE path.
+    if platform_name() != "windows":
+        sosix_require_posix_text_provider()?
     if admitted == "": return Err(TextIoError.Io("empty executable name"))
     sosix_arguments_checked(args)?
     var resolved = admitted
-    if not admitted.contains("/"):
+    if not admitted.contains("/") and not (platform_name() == "windows" and (admitted.contains("\\") or admitted.contains(":"))):
         val found = sosix_which_checked(admitted)?
         if val path = found: resolved = path
         else: return Err(TextIoError.Io("SOSIX executable not found: {admitted}"))

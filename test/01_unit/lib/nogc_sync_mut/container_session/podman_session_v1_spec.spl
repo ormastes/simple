@@ -1,0 +1,171 @@
+# Command-builder and scripted-runner coverage for the podman session layer.
+# No podman is executed here; the real engine is exercised by
+# test/03_system/app/container/feature/podman_session_live_spec.spl.
+use std.nogc_sync_mut.container_session.podman_session_v1.*
+
+# Scripted engine: a set of container names that "exist". `run` adds the
+# name unless the mode says the client died first; `rm` removes it.
+var fake_calls: [text] = []
+var fake_present: [text] = []
+var fake_mode: text = ""
+
+fn fake_reset(mode: text, present: [text]):
+    fake_calls = []
+    fake_present = present
+    fake_mode = mode
+
+fn fake_has(name: text) -> bool:
+    for item in fake_present:
+        if item == name: return true
+    false
+
+fn fake_drop(name: text):
+    var kept: [text] = []
+    for item in fake_present:
+        if item != name: kept.push(item)
+    fake_present = kept
+
+fn fake_runner(argv: [text], timeout_ms: i64) -> (text, text, i64):
+    fake_calls.push(argv.join(" "))
+    val verb = argv[1]
+    if verb == "run":
+        val name = argv[4]
+        if fake_mode == "timeout":
+            fake_present.push(name)
+            return ("", "[TIMEOUT: Process killed after 1s]", -1)
+        if fake_mode == "error": return ("", "boom", 3)
+        return ("container-ok\n", "", 0)
+    if verb == "rm":
+        if fake_mode == "rm-fails": return ("", "cannot remove", 125)
+        if fake_mode == "rm-slow":
+            # The engine's answer for a tty-attached workload: kill delivered,
+            # exit not yet observed. The next attempt finds it gone.
+            fake_mode = ""
+            return ("", "Error: could not be stopped: given PID did not die within timeout", 125)
+        fake_drop(argv[argv.len() - 1])
+        return ("", "", 0)
+    if verb == "container":
+        if fake_mode == "exists-unknown": return ("", "engine down", 125)
+        return ("", "", if fake_has(argv[3]): 0 else: 1)
+    if verb == "ps":
+        if fake_mode == "list-fails": return ("", "engine down", 125)
+        return (fake_present.join("\n") + "\n", "", 0)
+    ("", "unexpected", 2)
+
+fn spec_v1(name: text) -> PodmanSessionSpecV1:
+    PodmanSessionSpecV1(name: name, owner: "owner-1", image: "busybox:1.36", command: ["echo", "container-ok"])
+
+describe "Podman session argv":
+    it "builds a rootless run with name, recovery labels, keep-id, mounts and workdir":
+        var spec = spec_v1("simple-podman-test-a")
+        spec.tty = true
+        spec.network = "host"
+        spec.workdir = "/work/tree"
+        spec.timeout_seconds = 30
+        spec.env = ["TERM=xterm"]
+        spec.mounts = [PodmanMountV1(source: "/work/tree", target: "/work/tree", read_only: false),
+            PodmanMountV1(source: "/opt/seed", target: "/opt/seed", read_only: true)]
+        expect(podman_session_run_argv_v1(spec).unwrap()).to_equal(["podman", "run", "--rm", "--name", "simple-podman-test-a",
+            "--label", "io.simpleorch.session.owner=owner-1", "--label", "io.simpleorch.session.name=simple-podman-test-a",
+            "--interactive", "--tty", "--detach-keys=", "--network", "host", "--userns", "keep-id", "--timeout", "30",
+            "--volume", "/work/tree:/work/tree:rw", "--volume", "/opt/seed:/opt/seed:ro",
+            "--workdir", "/work/tree", "--env", "TERM=xterm", "busybox:1.36", "echo", "container-ok"])
+
+    it "renders the Go template with two braces, not the collapsed literal":
+        val argv = podman_session_owned_argv_v1("owner-1")
+        expect(argv[argv.len() - 1].len()).to_equal(10)
+        expect(argv[argv.len() - 1].starts_with("\u{7b}\u{7b}.Names")).to_equal(true)
+        expect(argv[4]).to_equal("label=io.simpleorch.session.owner=owner-1")
+
+    it "refuses option-like, separator-bearing and relative operands":
+        var spec = spec_v1("-rf")
+        expect(podman_session_run_argv_v1(spec).unwrap_err()).to_equal("podman-session-name-invalid")
+        spec = spec_v1("ok")
+        spec.image = "--privileged"
+        expect(podman_session_run_argv_v1(spec).unwrap_err()).to_equal("podman-session-image-invalid")
+        spec = spec_v1("ok")
+        spec.mounts = [PodmanMountV1(source: "/a:/etc", target: "/b", read_only: false)]
+        expect(podman_session_run_argv_v1(spec).unwrap_err()).to_equal("podman-session-mount-invalid")
+        spec = spec_v1("ok")
+        spec.workdir = "relative"
+        expect(podman_session_run_argv_v1(spec).unwrap_err()).to_equal("podman-session-workdir-invalid")
+        spec = spec_v1("ok")
+        spec.network = "bridge;rm"
+        expect(podman_session_run_argv_v1(spec).unwrap_err()).to_equal("podman-session-network-unsupported")
+        spec = spec_v1("ok")
+        spec.env = ["=x"]
+        expect(podman_session_run_argv_v1(spec).unwrap_err()).to_equal("podman-session-env-invalid")
+        spec = spec_v1("ok")
+        spec.command = []
+        expect(podman_session_run_argv_v1(spec).unwrap_err()).to_equal("podman-session-command-empty")
+
+describe "Podman session cleanup through a scripted engine":
+    it "reaps after a normal exit and proves absence":
+        fake_reset("", [])
+        val run = podman_session_run_v1(spec_v1("simple-podman-test-n"), 1000, fake_runner)
+        expect(run.error).to_equal("")
+        expect(run.exit_code).to_equal(0)
+        expect(run.stdout).to_equal("container-ok\n")
+        expect(run.reaped).to_equal(true)
+        expect(fake_calls.len()).to_equal(3)
+        expect(fake_calls[1]).to_equal("podman rm --force --volumes --time 0 --ignore simple-podman-test-n")
+        expect(fake_calls[2]).to_equal("podman container exists simple-podman-test-n")
+
+    it "reaps the container a timed-out client left behind":
+        fake_reset("timeout", [])
+        val run = podman_session_run_v1(spec_v1("simple-podman-test-t"), 1000, fake_runner)
+        expect(run.exit_code).to_equal(-1)
+        expect(run.reaped).to_equal(true)
+        expect(run.error).to_equal("")
+        expect(fake_present.len()).to_equal(0)
+
+    it "reaps after a failing workload and keeps its exit code":
+        fake_reset("error", [])
+        val run = podman_session_run_v1(spec_v1("simple-podman-test-e"), 1000, fake_runner)
+        expect(run.exit_code).to_equal(3)
+        expect(run.stderr).to_equal("boom")
+        expect(run.reaped).to_equal(true)
+
+    it "never reports reaped while the engine still lists the container":
+        fake_reset("rm-fails", ["simple-podman-test-s"])
+        expect(podman_session_reap_v1("simple-podman-test-s", fake_runner).unwrap_err())
+            .to_equal("podman-session-still-present: rm exit 125: cannot remove")
+        expect(fake_calls.len()).to_equal(10)
+        fake_reset("exists-unknown", [])
+        expect(podman_session_reap_v1("simple-podman-test-s", fake_runner).unwrap_err())
+            .to_equal("podman-session-absence-unknown: exists exit 125")
+
+    it "repeats removal when the engine has killed the workload but not yet seen it exit":
+        fake_reset("rm-slow", ["simple-podman-test-w"])
+        expect(podman_session_reap_v1("simple-podman-test-w", fake_runner).unwrap()).to_equal(true)
+        expect(fake_calls.len()).to_equal(4)
+        expect(fake_present.len()).to_equal(0)
+
+    it "reports presence, absence and unknown separately":
+        fake_reset("", ["simple-podman-test-p"])
+        expect(podman_session_exists_v1("simple-podman-test-p", fake_runner).unwrap()).to_equal(true)
+        expect(podman_session_exists_v1("simple-podman-test-q", fake_runner).unwrap()).to_equal(false)
+        fake_reset("exists-unknown", [])
+        expect(podman_session_exists_v1("simple-podman-test-p", fake_runner).unwrap_err())
+            .to_equal("podman-session-absence-unknown: exists exit 125")
+
+    it "runs nothing for an invalid spec, a tty spec or a non-positive timeout":
+        fake_reset("", [])
+        var spec = spec_v1("bad name")
+        expect(podman_session_run_v1(spec, 1000, fake_runner).error).to_equal("podman-session-name-invalid")
+        spec = spec_v1("ok")
+        spec.tty = true
+        expect(podman_session_run_v1(spec, 1000, fake_runner).error).to_equal("podman-session-run-tty-unsupported")
+        expect(podman_session_run_v1(spec_v1("ok"), 0, fake_runner).error).to_equal("podman-session-timeout-invalid")
+        expect(fake_calls.len()).to_equal(0)
+
+    it "recovers every container a killed supervisor left under its owner label":
+        fake_reset("", ["simple-podman-test-o1", "simple-podman-test-o2"])
+        expect(podman_session_reap_owner_v1("owner-1", fake_runner).unwrap())
+            .to_equal(["simple-podman-test-o1", "simple-podman-test-o2"])
+        expect(fake_present.len()).to_equal(0)
+        expect(fake_calls[0]).to_contain("label=io.simpleorch.session.owner=owner-1")
+        fake_reset("list-fails", ["simple-podman-test-o1"])
+        expect(podman_session_reap_owner_v1("owner-1", fake_runner).unwrap_err())
+            .to_equal("podman-session-list-failed: exit 125")
+        expect(fake_present.len()).to_equal(1)

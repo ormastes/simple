@@ -1,0 +1,326 @@
+# semantic_api tag walker — recursive primitive-leaf discovery over the
+# resolved flat type-tag pools (unified unit/primitive-API plan 2026-11-12
+# §0.5, §7, §9 P0).
+#
+# The TEXT walker (type_walk.spl) serves callers that only hold signature
+# text. The LIVE lint holds parsed declarations whose types are already
+# resolved to interned type tags (compiler.core.types: fixed tags, and the
+# Option / array / tuple / Result / Dict / union / pointer / function /
+# named-generic pools). Walking the tag graph instead of re-parsing text
+# means: no second parse, no source scan, and a memo keyed by the interned
+# TypeId so every type node is visited once per lint run however many
+# declarations share it (§7: "memoize (TypeId, visibility ctx)").
+#
+# Leaves (one per distinct type PATH, so `Dict<i64, i64>` yields two):
+#   - canonical bare primitives (compiler.semantics.lint.primitive_types)
+#   - the index class (`usize`/`isize`, named-type spelled)
+#   - raw pointers (`*T`): the pointer itself is the leaf; its pointee is
+#     not walked again, so a `*u8` is ONE finding, not two
+# Not leaves: text/char family (classified, allowed), `any`, `nil`, `void`,
+# generic parameters, newunit / `unit` / custom-primitive domain types, and
+# every named domain type (its own fields are checked at ITS declaration
+# with the effective visibility the exported-graph checker computes).
+#
+# Aliases: `type Fd = i64` is resolved through an alias map the caller
+# populates from this module's DECL_TYPE_ALIAS decls (name -> aliased tag);
+# a cycle (`type A = B`, `type B = A`) is detected and bails clean.
+
+use compiler.core.types.{
+    TYPE_VOID, TYPE_BOOL, TYPE_I64, TYPE_F64, TYPE_TEXT,
+    TYPE_ARRAY_I64, TYPE_ARRAY_TEXT, TYPE_ARRAY_BOOL, TYPE_ARRAY_ANY,
+    TYPE_DICT, TYPE_STRUCT, TYPE_FN, TYPE_ANY, TYPE_NIL,
+    TYPE_OPTION, TYPE_OPTION_I64, TYPE_OPTION_F64, TYPE_OPTION_TEXT, TYPE_OPTION_BOOL,
+    TYPE_RESULT, TYPE_U8, TYPE_U16, TYPE_U32, TYPE_U64, TYPE_I8, TYPE_I16, TYPE_I32,
+    TYPE_NAMED_BASE,
+    fixed_type_tag_name,
+    is_union_tag, union_tag_to_id, union_type_get_members,
+    is_intersection_tag, intersection_tag_to_id, intersection_type_get_members,
+    is_refinement_tag, refinement_tag_to_id, refinement_type_base,
+    is_dict_tag, dict_tag_to_id, dict_type_get_key, dict_type_get_value,
+    is_result_tag, result_tag_to_id, result_type_get_ok, result_type_get_err,
+    is_tuple_type_tag, tuple_type_tag_to_id, tuple_type_get_elems,
+    is_option_generic_tag, option_generic_tag_to_id, option_generic_type_get_inner,
+    is_array_generic_tag, array_generic_tag_to_id, array_generic_type_get_elem,
+    is_isolated_tag, isolated_tag_to_id, isolated_type_get_inner,
+    is_exclusive_tag, exclusive_tag_to_id, exclusive_type_get_inner,
+    is_reference_tag, reference_tag_to_id, reference_type_get_inner,
+    is_pointer_tag, pointer_tag_to_id, pointer_type_get_inner,
+    is_atomic_tag, atomic_tag_to_id, atomic_type_get_inner,
+    is_weak_tag, weak_tag_to_id, weak_type_get_inner,
+    is_function_tag, function_tag_to_id, function_type_known,
+    function_type_get_params, function_type_get_ret,
+    named_type_name, named_generic_instance_index,
+    named_generic_instance_base, named_generic_instance_arg_tags,
+    newunit_find, unit_decl_find, custom_primitive_find
+}
+use compiler.semantics.lint.primitive_types.{primitive_class_of, primitive_class_is_public_api_leak}
+
+# One primitive leaf reached on one type path.
+struct TagLeaf:
+    leaf: text        # "i64" | "usize" | "pointer" | ...
+    class_name: text  # primitive_class_of(leaf), "pointer" for raw pointers
+    path: text        # rendered type path from the declared type to the leaf
+
+# ---------------------------------------------------------------------------
+# per-run state: memo keyed by interned tag, alias map from this module
+# ---------------------------------------------------------------------------
+
+var _TAG_MEMO: Dict<text, [TagLeaf]> = {}
+var _TAG_MEMO_HITS: i64 = 0
+var _TAG_MEMO_MISSES: i64 = 0
+var _ALIAS_TAGS: Dict<text, i64> = {}
+var _ALIAS_IN_PROGRESS: Dict<text, bool> = {}
+# Named (domain) types referenced from any walked surface this run. The
+# exported-graph checker uses it to promote an in-file private type that a
+# public surface reaches into the effectively-exported set.
+var _NAMED_REFS: [text] = []
+var _NAMED_REF_SEEN: Dict<text, bool> = {}
+
+fn semantic_api_tag_memo_reset():
+    """Start a lint run: forget every memoized tag and alias."""
+    _TAG_MEMO = {}
+    _TAG_MEMO_HITS = 0
+    _TAG_MEMO_MISSES = 0
+    _ALIAS_TAGS = {}
+    _ALIAS_IN_PROGRESS = {}
+    _NAMED_REFS = []
+    _NAMED_REF_SEEN = {}
+
+fn _record_named_ref(name: text):
+    if not _NAMED_REF_SEEN.contains_key(name):
+        _NAMED_REF_SEEN[name] = true
+        _NAMED_REFS.push(name)
+
+fn semantic_api_tag_named_refs() -> [text]:
+    """Distinct named types referenced by every tag walked so far this run
+    (insertion order)."""
+    _NAMED_REFS
+
+fn semantic_api_tag_memo_hits() -> i64:
+    _TAG_MEMO_HITS
+
+fn semantic_api_tag_memo_misses() -> i64:
+    _TAG_MEMO_MISSES
+
+fn semantic_api_tag_alias_register(name: text, aliased_tag: i64):
+    """Record `type NAME = <aliased_tag>` from this module."""
+    _ALIAS_TAGS[name] = aliased_tag
+
+fn semantic_api_tag_alias_lookup(name: text) -> i64:
+    """Aliased tag for NAME, or -1 when NAME is not an alias here."""
+    if _ALIAS_TAGS.contains_key(name):
+        return _ALIAS_TAGS[name]
+    -1
+
+# ---------------------------------------------------------------------------
+# rendering
+# ---------------------------------------------------------------------------
+
+fn _render_list(tags: [i64], sep: text) -> text:
+    var out = ""
+    var i = 0
+    while i < tags.len():
+        if i > 0:
+            out = out + sep
+        out = out + semantic_api_tag_render(tags[i])
+        i = i + 1
+    out
+
+fn semantic_api_tag_render(tag: i64) -> text:
+    """Readable spelling of a type tag (generic args rendered recursively)."""
+    if tag < 0:
+        return ""
+    val fixed = fixed_type_tag_name(tag)
+    if fixed != "":
+        return fixed
+    if tag >= TYPE_NAMED_BASE:
+        val gi = named_generic_instance_index(tag)
+        if gi >= 0:
+            return named_generic_instance_base(gi) + "<" + _render_list(named_generic_instance_arg_tags(gi), ", ") + ">"
+        return named_type_name(tag - TYPE_NAMED_BASE)
+    if is_option_generic_tag(tag):
+        return "Option<" + semantic_api_tag_render(option_generic_type_get_inner(option_generic_tag_to_id(tag))) + ">"
+    if is_array_generic_tag(tag):
+        return "[" + semantic_api_tag_render(array_generic_type_get_elem(array_generic_tag_to_id(tag))) + "]"
+    if is_tuple_type_tag(tag):
+        return "(" + _render_list(tuple_type_get_elems(tuple_type_tag_to_id(tag)), ", ") + ")"
+    if is_result_tag(tag):
+        val rid = result_tag_to_id(tag)
+        return "Result<" + semantic_api_tag_render(result_type_get_ok(rid)) + ", " + semantic_api_tag_render(result_type_get_err(rid)) + ">"
+    if is_dict_tag(tag):
+        val did = dict_tag_to_id(tag)
+        return "Dict<" + semantic_api_tag_render(dict_type_get_key(did)) + ", " + semantic_api_tag_render(dict_type_get_value(did)) + ">"
+    if is_union_tag(tag):
+        return _render_list(union_type_get_members(union_tag_to_id(tag)), " | ")
+    if is_intersection_tag(tag):
+        return _render_list(intersection_type_get_members(intersection_tag_to_id(tag)), " & ")
+    if is_refinement_tag(tag):
+        return semantic_api_tag_render(refinement_type_base(refinement_tag_to_id(tag))) + " where ..."
+    if is_pointer_tag(tag):
+        return "*" + semantic_api_tag_render(pointer_type_get_inner(pointer_tag_to_id(tag)))
+    if is_reference_tag(tag):
+        return "&" + semantic_api_tag_render(reference_type_get_inner(reference_tag_to_id(tag)))
+    if is_isolated_tag(tag):
+        return "isolated<" + semantic_api_tag_render(isolated_type_get_inner(isolated_tag_to_id(tag))) + ">"
+    if is_exclusive_tag(tag):
+        return "exclusive<" + semantic_api_tag_render(exclusive_type_get_inner(exclusive_tag_to_id(tag))) + ">"
+    if is_atomic_tag(tag):
+        return "Atomic<" + semantic_api_tag_render(atomic_type_get_inner(atomic_tag_to_id(tag))) + ">"
+    if is_weak_tag(tag):
+        return "Weak<" + semantic_api_tag_render(weak_type_get_inner(weak_tag_to_id(tag))) + ">"
+    if is_function_tag(tag):
+        val fid = function_tag_to_id(tag)
+        if not function_type_known(fid):
+            return "fn"
+        return "fn(" + _render_list(function_type_get_params(fid), ", ") + ") -> " + semantic_api_tag_render(function_type_get_ret(fid))
+    "type_" + "{tag}"
+
+# ---------------------------------------------------------------------------
+# recursive walk (memoized per tag)
+# ---------------------------------------------------------------------------
+
+fn _leaf(name: text, class_name: text, path: text) -> TagLeaf:
+    TagLeaf(leaf: name, class_name: class_name, path: path)
+
+fn _prefix_paths(leaves: [TagLeaf], prefix: text, suffix: text) -> [TagLeaf]:
+    var out: [TagLeaf] = []
+    for l in leaves:
+        out.push(TagLeaf(leaf: l.leaf, class_name: l.class_name, path: prefix + l.path + suffix))
+    out
+
+fn _walk_list(tags: [i64], open_text: text, sep: text, close_text: text) -> [TagLeaf]:
+    """Leaves of every element, each path wrapped as open<..elem..>close with
+    the sibling positions elided so two leaves on different paths stay distinct."""
+    var out: [TagLeaf] = []
+    var i = 0
+    while i < tags.len():
+        val sub = semantic_api_tag_leaves(tags[i])
+        if sub.len() > 0:
+            var prefix = open_text
+            var j = 0
+            while j < i:
+                prefix = prefix + "_" + sep
+                j = j + 1
+            var suffix = ""
+            var k = i + 1
+            while k < tags.len():
+                suffix = suffix + sep + "_"
+                k = k + 1
+            suffix = suffix + close_text
+            for l in _prefix_paths(sub, prefix, suffix):
+                out.push(l)
+        i = i + 1
+    out
+
+fn _named_leaves(tag: i64) -> [TagLeaf]:
+    val gi = named_generic_instance_index(tag)
+    if gi >= 0:
+        # A generic instance `Name<A, B>`: the base is a wrapper, every
+        # argument is walked (Option<[u64]> reaches u64).
+        _record_named_ref(named_generic_instance_base(gi))
+        return _walk_list(named_generic_instance_arg_tags(gi), named_generic_instance_base(gi) + "<", ", ", ">")
+    val name = named_type_name(tag - TYPE_NAMED_BASE)
+    if name == "":
+        return []
+    _record_named_ref(name)
+    # Domain types registered through newunit / unit / custom primitives are
+    # never leaves, whatever they wrap.
+    if newunit_find(name) >= 0 or unit_decl_find(name) >= 0 or custom_primitive_find(name) >= 0:
+        return []
+    # Aliases declared in this module resolve to their aliased tag.
+    val aliased = semantic_api_tag_alias_lookup(name)
+    if aliased >= 0:
+        if _ALIAS_IN_PROGRESS.contains_key(name) and _ALIAS_IN_PROGRESS[name]:
+            return []   # alias cycle: bail clean rather than loop
+        _ALIAS_IN_PROGRESS[name] = true
+        val sub = semantic_api_tag_leaves(aliased)
+        _ALIAS_IN_PROGRESS[name] = false
+        return _prefix_paths(sub, name + "=", "")
+    # Index class (`usize`) and any bare primitive spelled as a named type.
+    val cls = primitive_class_of(name)
+    if primitive_class_is_public_api_leak(cls):
+        return [_leaf(name, cls, name)]
+    []
+
+fn _compute_tag_leaves(tag: i64) -> [TagLeaf]:
+    if tag < 0:
+        return []
+    val fixed = fixed_type_tag_name(tag)
+    if fixed != "":
+        if tag == TYPE_BOOL or tag == TYPE_I64 or tag == TYPE_F64 or tag == TYPE_U8 or tag == TYPE_U16 or tag == TYPE_U32 or tag == TYPE_U64 or tag == TYPE_I8 or tag == TYPE_I16 or tag == TYPE_I32:
+            return [_leaf(fixed, primitive_class_of(fixed), fixed)]
+        if tag == TYPE_ARRAY_I64:
+            return [_leaf("i64", "integer", "[i64]")]
+        if tag == TYPE_ARRAY_BOOL:
+            return [_leaf("bool", "bool", "[bool]")]
+        if tag == TYPE_OPTION_I64:
+            return [_leaf("i64", "integer", "Option<i64>")]
+        if tag == TYPE_OPTION_F64:
+            return [_leaf("f64", "float", "Option<f64>")]
+        if tag == TYPE_OPTION_BOOL:
+            return [_leaf("bool", "bool", "Option<bool>")]
+        # text / [text] / Option<text> / any / nil / void / erased wrappers
+        return []
+    if tag >= TYPE_NAMED_BASE:
+        return _named_leaves(tag)
+    if is_option_generic_tag(tag):
+        return _prefix_paths(semantic_api_tag_leaves(option_generic_type_get_inner(option_generic_tag_to_id(tag))), "Option<", ">")
+    if is_array_generic_tag(tag):
+        return _prefix_paths(semantic_api_tag_leaves(array_generic_type_get_elem(array_generic_tag_to_id(tag))), "[", "]")
+    if is_tuple_type_tag(tag):
+        return _walk_list(tuple_type_get_elems(tuple_type_tag_to_id(tag)), "(", ", ", ")")
+    if is_result_tag(tag):
+        val rid = result_tag_to_id(tag)
+        return _walk_list([result_type_get_ok(rid), result_type_get_err(rid)], "Result<", ", ", ">")
+    if is_dict_tag(tag):
+        val did = dict_tag_to_id(tag)
+        return _walk_list([dict_type_get_key(did), dict_type_get_value(did)], "Dict<", ", ", ">")
+    if is_union_tag(tag):
+        return _walk_list(union_type_get_members(union_tag_to_id(tag)), "", " | ", "")
+    if is_intersection_tag(tag):
+        return _walk_list(intersection_type_get_members(intersection_tag_to_id(tag)), "", " & ", "")
+    if is_refinement_tag(tag):
+        return semantic_api_tag_leaves(refinement_type_base(refinement_tag_to_id(tag)))
+    if is_pointer_tag(tag):
+        # The raw pointer is the leaf; the pointee is deliberately not walked
+        # again so one `*u8` is exactly one finding.
+        return [_leaf("pointer", "pointer", semantic_api_tag_render(tag))]
+    if is_reference_tag(tag):
+        return _prefix_paths(semantic_api_tag_leaves(reference_type_get_inner(reference_tag_to_id(tag))), "&", "")
+    if is_isolated_tag(tag):
+        return _prefix_paths(semantic_api_tag_leaves(isolated_type_get_inner(isolated_tag_to_id(tag))), "isolated<", ">")
+    if is_exclusive_tag(tag):
+        return _prefix_paths(semantic_api_tag_leaves(exclusive_type_get_inner(exclusive_tag_to_id(tag))), "exclusive<", ">")
+    if is_atomic_tag(tag):
+        return _prefix_paths(semantic_api_tag_leaves(atomic_type_get_inner(atomic_tag_to_id(tag))), "Atomic<", ">")
+    if is_weak_tag(tag):
+        return _prefix_paths(semantic_api_tag_leaves(weak_type_get_inner(weak_tag_to_id(tag))), "Weak<", ">")
+    if is_function_tag(tag):
+        val fid = function_tag_to_id(tag)
+        if not function_type_known(fid):
+            return []
+        var out: [TagLeaf] = []
+        for l in _walk_list(function_type_get_params(fid), "fn(", ", ", ")"):
+            out.push(l)
+        for l in _prefix_paths(semantic_api_tag_leaves(function_type_get_ret(fid)), "fn(..) -> ", ""):
+            out.push(l)
+        return out
+    []
+
+fn semantic_api_tag_leaves(tag: i64) -> [TagLeaf]:
+    """All primitive leaves reachable from `tag`, one per type path.
+    Memoized on the interned tag for the current lint run."""
+    val key = "{tag}"
+    if _TAG_MEMO.contains_key(key):
+        _TAG_MEMO_HITS = _TAG_MEMO_HITS + 1
+        return _TAG_MEMO[key]
+    _TAG_MEMO_MISSES = _TAG_MEMO_MISSES + 1
+    val leaves = _compute_tag_leaves(tag)
+    _TAG_MEMO[key] = leaves
+    leaves
+
+export TagLeaf
+export semantic_api_tag_memo_reset, semantic_api_tag_memo_hits, semantic_api_tag_memo_misses
+export semantic_api_tag_alias_register, semantic_api_tag_alias_lookup
+export semantic_api_tag_named_refs
+export semantic_api_tag_render, semantic_api_tag_leaves

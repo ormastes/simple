@@ -89,6 +89,30 @@ fn _bitmap_clear_all(bitmap_addr: u64, size_bytes: u64):
         mmio_write8(bitmap_addr + i, 0xFF)  # All allocated
         i = i + 1
 
+fn _bitmap_clear_run(manager: PhysMemManager, start_page: u64, page_count: u64):
+    """Clear a whole run of page bits [start_page, start_page + page_count).
+
+    Semantically identical to calling `_bitmap_clear` per page, but the full
+    interior bytes are written directly as 0x00 — no per-bit read-modify-write.
+    The identity-init free loop clears over 16K pages per call, and the seed
+    interpreter charges ~milliseconds per MMIO op, so per-bit clearing alone
+    blew the 300s child budget (2026-11-12, work/fix-pmm-crash-20261112).
+    """
+    if page_count == 0:
+        return
+    val last_bit = start_page + page_count
+    var bit = start_page
+    if bit % BITS_PER_BYTE != 0:
+        while bit % BITS_PER_BYTE != 0 and bit < last_bit:
+            _bitmap_clear(manager, bit)
+            bit = bit + 1
+    while bit + BITS_PER_BYTE <= last_bit:
+        mmio_write8(manager.bitmap_addr + bit / BITS_PER_BYTE, 0)
+        bit = bit + BITS_PER_BYTE
+    while bit < last_bit:
+        _bitmap_clear(manager, bit)
+        bit = bit + 1
+
 # ============================================================================
 # PMM Initialization
 # ============================================================================
@@ -326,11 +350,8 @@ fn pmm_init_identity_range(total_memory: u64, kernel_start: u64, kernel_end: u64
 
     val usable_start_page = kernel_start / PAGE_SIZE
     if total_pages > usable_start_page:
-        var page = usable_start_page
-        while page < total_pages:
-            _bitmap_clear(g_pmm, page)
-            g_pmm.free_pages = g_pmm.free_pages + 1
-            page = page + 1
+        _bitmap_clear_run(g_pmm, usable_start_page, total_pages - usable_start_page)
+        g_pmm.free_pages = g_pmm.free_pages + (total_pages - usable_start_page)
 
     val bitmap_start_page = bitmap_addr / PAGE_SIZE
     val bitmap_page_count = (bitmap_bytes + PAGE_SIZE - 1) / PAGE_SIZE

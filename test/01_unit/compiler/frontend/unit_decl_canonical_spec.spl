@@ -1,0 +1,184 @@
+# @cover src/compiler/10.frontend/core/_ParserDecls/enum_module_body.spl 20%
+# @cover src/compiler/10.frontend/core/types.spl 40%
+# @cover src/compiler/30.types/units/unit_registry.spl 70%
+"""
+## Purpose and audience
+Executable contract for the canonical `UnitDecl` record (unified unit plan
+2026-11-12, section 3 and acceptance items 4 and 5). `unit Name: T as Suffix`
+is parsed contextually at the declaration site while `unit` keeps working as
+the empty return type; `newunit` and numeric `newtype` lower into the same
+record with `legacy_origin` set and raise deprecation WARNINGS (SPL-UNIT-001,
+SPL-UNIT-003), never errors. One registry is built from one pool, literal
+suffixes are case-sensitive, and a suffix collision is a deterministic error.
+## Operator workflow
+bin/simple test test/01_unit/compiler/frontend/unit_decl_canonical_spec.spl
+## Compatibility and limitations
+Drives the pure-Simple parser directly (parser_init_with_path +
+parse_module_body); it does not run the seed parser.
+## Verification guidance and troubleshooting
+A parser error on `unit X: u64 as s` means the contextual arm regressed; a
+missing SPL-UNIT-001 line means the deprecation warning was dropped; an
+executed=0 verdict means the spec itself failed to load.
+"""
+
+use std.spec
+use compiler.core.types.{
+    reset_all_pools, TYPE_I64, TYPE_U64, type_tag_name,
+    unit_decl_find, unit_decl_count, unit_decl_role_at, unit_decl_short_symbol_at,
+    unit_decl_underlying_tag_at, unit_decl_legacy_origin_at, unit_decl_register,
+    newunit_register, newunit_count, newunit_find,
+    named_type_find
+}
+use compiler.core.parser.{parser_has_errors, parser_init_with_path, parser_warnings_get, parser_warnings_clear}
+use compiler.core.parser_decls.{parse_module_body}
+use compiler.types.units.unit_registry.{
+    UnitRegistry, unit_registry_build, unit_registry_collect_newunits,
+    unit_registry_collisions
+}
+
+fn spec_parse(source: text, path: text):
+    reset_all_pools()
+    parser_init_with_path(source, path)
+    parser_warnings_clear()
+    parse_module_body()
+
+fn spec_warning_count_with(code: text) -> i64:
+    var n = 0
+    for w in parser_warnings_get():
+        if w.contains(code):
+            n = n + 1
+    n
+
+# @manual_section: canonical unit declaration
+describe "Canonical UnitDecl record":
+    describe "REQ-UNIT-DECL-01: unit keyword parses contextually":
+        it "unit Name: T as Suffix records a canonical nominal row without warnings":
+            # @req REQ-UNIT-DECL-01
+            # @capture(statistics): canonical row fields and parser warning count
+            step("parse a unit declaration with a suffix")
+            spec_parse("unit ByteCount: u64 as Bc\n", "unit_decl_basic.spl")
+            step("the parser accepted it")
+            expect(parser_has_errors()).to_equal(false)
+            step("the canonical pool holds one row with no legacy origin")
+            val idx = unit_decl_find("ByteCount")
+            assert_true(idx >= 0)
+            expect(unit_decl_role_at(idx)).to_equal("nominal")
+            expect(unit_decl_short_symbol_at(idx)).to_equal("Bc")
+            expect(type_tag_name(unit_decl_underlying_tag_at(idx))).to_equal("u64")
+            expect(unit_decl_legacy_origin_at(idx)).to_equal("")
+            step("the type is constructible (struct registered)")
+            assert_true(named_type_find("ByteCount") >= 0)
+            step("no deprecation warning fires for the canonical spelling")
+            expect(spec_warning_count_with("SPL-UNIT-")).to_equal(0)
+
+        it "unit without a suffix is recorded with an empty short symbol":
+            # @req REQ-UNIT-DECL-01
+            step("parse a suffix-less unit declaration")
+            spec_parse("unit Lba: u64\n", "unit_decl_nosuffix.spl")
+            expect(parser_has_errors()).to_equal(false)
+            val idx = unit_decl_find("Lba")
+            assert_true(idx >= 0)
+            expect(unit_decl_short_symbol_at(idx)).to_equal("")
+
+        it "unit still works as the empty return type":
+            # @req REQ-UNIT-DECL-01
+            # @capture(statistics): canonical rows registered by a `-> unit` function
+            step("parse a function returning unit followed by a unit declaration")
+            val src = "fn noop() -> unit:\n    pass\n\nunit Width: i64 as w\n"
+            spec_parse(src, "unit_return_type.spl")
+            expect(parser_has_errors()).to_equal(false)
+            step("only the declaration produced a canonical row")
+            expect(unit_decl_count()).to_equal(1)
+            expect(unit_decl_find("Width")).to_equal(0)
+
+        it "a bare identifier spelled unit in expression position is not a declaration":
+            # @req REQ-UNIT-DECL-01
+            step("parse an assignment whose target is an identifier named unit")
+            spec_parse("fn f():\n    val unit = 3\n    val y = unit\n", "unit_ident.spl")
+            expect(parser_has_errors()).to_equal(false)
+            expect(unit_decl_count()).to_equal(0)
+
+    describe "REQ-UNIT-DECL-02: legacy spellings lower to the same record":
+        it "newunit lowers into the canonical pool with legacy_origin newunit and warns SPL-UNIT-001":
+            # @req REQ-UNIT-DECL-02
+            # @capture(statistics): legacy row fields and SPL-UNIT-001 count
+            step("parse a newunit declaration")
+            spec_parse("newunit UserId: i64 as uid\n", "legacy_newunit.spl")
+            step("it is accepted, never rejected")
+            expect(parser_has_errors()).to_equal(false)
+            step("the canonical row carries legacy_origin")
+            val idx = unit_decl_find("UserId")
+            assert_true(idx >= 0)
+            expect(unit_decl_role_at(idx)).to_equal("nominal")
+            expect(unit_decl_short_symbol_at(idx)).to_equal("uid")
+            expect(unit_decl_legacy_origin_at(idx)).to_equal("newunit")
+            step("exactly one deprecation warning with the stable code")
+            expect(spec_warning_count_with("SPL-UNIT-001")).to_equal(1)
+            step("the legacy view still sees it (consumers of newunit_find keep working)")
+            assert_true(newunit_find("UserId") >= 0)
+
+        it "numeric newtype lowers into the canonical pool with legacy_origin newtype and its own warning code":
+            # @req REQ-UNIT-DECL-02
+            # @capture(statistics): legacy row fields and SPL-UNIT-003 count
+            step("parse a numeric newtype declaration")
+            spec_parse("newtype Meters = i64\n", "legacy_newtype.spl")
+            expect(parser_has_errors()).to_equal(false)
+            val idx = unit_decl_find("Meters")
+            assert_true(idx >= 0)
+            expect(unit_decl_legacy_origin_at(idx)).to_equal("newtype")
+            expect(unit_decl_short_symbol_at(idx)).to_equal("")
+            expect(spec_warning_count_with("SPL-UNIT-003")).to_equal(1)
+            expect(spec_warning_count_with("SPL-UNIT-001")).to_equal(0)
+
+        it "non-numeric newtype is not a unit and does not warn":
+            # @req REQ-UNIT-DECL-02
+            step("parse a text newtype")
+            spec_parse("newtype Label = text\n", "legacy_newtype_text.spl")
+            expect(parser_has_errors()).to_equal(false)
+            expect(unit_decl_find("Label")).to_equal(-1)
+            expect(spec_warning_count_with("SPL-UNIT-")).to_equal(0)
+
+    describe "REQ-UNIT-DECL-03: one registry, case-sensitive suffixes":
+        it "_Bc and _bc resolve to distinct unit types":
+            # @req REQ-UNIT-DECL-03
+            # @capture(statistics): registry lookups for both suffix spellings
+            step("declare byte and bit counts differing only in suffix case")
+            spec_parse("unit ByteCount: u64 as Bc\nunit BitCount: u64 as bc\n", "case_suffix.spl")
+            expect(parser_has_errors()).to_equal(false)
+            val reg = unit_registry_build()
+            match reg.lookup_entry("Bc"):
+                case Some(e): expect(e.full_symbol).to_equal("ByteCount")
+                case None: assert_true(false)
+            match reg.lookup_entry("bc"):
+                case Some(e): expect(e.full_symbol).to_equal("BitCount")
+                case None: assert_true(false)
+            expect(unit_registry_collisions(reg).len()).to_equal(0)
+
+        it "a suffix collision is reported deterministically":
+            # @req REQ-UNIT-DECL-03
+            # @capture(statistics): collision diagnostics for two names sharing one suffix
+            step("declare two units with the same suffix")
+            spec_parse("unit Alpha: u64 as x\nunit Beta: u64 as x\n", "collision.spl")
+            val reg = unit_registry_build()
+            val c = unit_registry_collisions(reg)
+            expect(c.len()).to_equal(1)
+            assert_true(c[0].contains("SPL-UNIT-004"))
+            assert_true(c[0].contains("x"))
+            assert_true(c[0].contains("Alpha"))
+            assert_true(c[0].contains("Beta"))
+            step("building again yields the identical message (deterministic)")
+            val c2 = unit_registry_collisions(unit_registry_build())
+            expect(c2[0]).to_equal(c[0])
+
+        it "newunit and unit rows share one registry without duplicate entries":
+            # @req REQ-UNIT-DECL-03
+            step("register one legacy and one canonical row directly")
+            reset_all_pools()
+            newunit_register("LegacyId", "lid", TYPE_I64)
+            unit_decl_register("FreshId", "nominal", "fid", TYPE_U64, "")
+            val reg = unit_registry_build()
+            expect(reg.entry_count()).to_equal(2)
+            step("the legacy collector reports only legacy-origin rows")
+            val reg2 = UnitRegistry.new()
+            expect(unit_registry_collect_newunits(reg2)).to_equal(1)
+            expect(newunit_count()).to_equal(1)

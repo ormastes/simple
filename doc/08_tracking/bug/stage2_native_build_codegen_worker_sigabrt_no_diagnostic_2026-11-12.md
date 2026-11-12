@@ -8,8 +8,11 @@ Run 15's Stage 2 (`bfe789dd411`, aarch64, cranelift) building the test runner
 (`src/app/test_runner_new/main.spl`, matrix phase-C shape: positional entry, `--low-memory
 --entry-closure --threads 2`, `SIMPLE_FILE_WORKERS=0`, `SIMPLE_MIR_SHARD_COUNT=8`,
 `SIMPLE_NATIVE_BUILD_THREADS=1`) after the receiver of `update_rust_test_database` was typed
-`RunnerTestDbCore` (commit `e5947985ef7`, superseded): parse, HIR and MIR complete for all
-352/354 modules with zero module failures, then the first staged codegen batch dies:
+`RunnerTestDbCore` (commit `e5947985ef7`, superseded): parse and HIR complete for all 352 modules, MIR is in
+progress (`[build] phase=mir done=64` of 352; `[mir] 100/352` shard progress) with zero module
+failures when the first staged codegen batch starts, and the worker dies during that interleaved
+MIR+codegen stretch — so the panicking unit is either a batch-1 codegen unit or the next MIR
+module after `rust_test_runner`:
 
 ```
 [build] phase=native_compile state=running unit_kind=modules done=0 total=8 ... current=app.test_runner_new...

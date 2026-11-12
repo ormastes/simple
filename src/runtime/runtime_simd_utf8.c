@@ -83,31 +83,41 @@
 #define RT_TEXT_SLICE_SITE_RT_SLICE_SIMPLE 3
 #define RT_TEXT_SLICE_SITE_SELF_TEST       4
 
-/* ================================================================
- * Reserved-Field Cache Helpers
- * ================================================================ */
-
+/* Cache write/read for the shared reserved-word layout in
+ * runtime_simd_dispatch.h. The write is a compare-and-swap loop so it can
+ * never drop a concurrently-set RT_CORE_STRING_FLAG_* bit (the old plain
+ * read-modify-write cleared them); it only writes when the valid bit is
+ * not yet set, and the cached value is deterministic for immutable text,
+ * so a lost race against an identical write is harmless. */
 static inline void cache_cp_count(RtCoreStringSimd* s, int64_t count) {
     if (!s) return;
-    if (count < 0 || (uint64_t)count > SIMD_CACHE_CPCOUNT_MASK) return;
-    uint32_t r = s->reserved;
-    r |= SIMD_CACHE_FLAG_CPCOUNT_VALID;
-    r = (r & ~SIMD_CACHE_CPCOUNT_MASK) | ((uint32_t)count & SIMD_CACHE_CPCOUNT_MASK);
-    s->reserved = r;
+    if (count < 0 || (uint64_t)count > RT_STR_CACHE_CP_MAX) return;
+    uint32_t want = RT_STR_CACHE_CP_VALID | ((uint32_t)count << RT_STR_CACHE_CP_SHIFT);
+    uint32_t old = __atomic_load_n(&s->reserved, __ATOMIC_RELAXED);
+    while (!(old & RT_STR_CACHE_CP_VALID)) {
+        uint32_t next = (old & ~RT_STR_CACHE_CP_FIELD) | want;
+        if (__atomic_compare_exchange_n(&s->reserved, &old, next, 0,
+                                        __ATOMIC_RELAXED, __ATOMIC_RELAXED))
+            return;
+    }
 }
 
 static inline int64_t cached_cp_count(const RtCoreStringSimd* s) {
+    uint32_t r;
     if (!s) return -1;
-    if (!(s->reserved & SIMD_CACHE_FLAG_CPCOUNT_VALID)) return -1;
-    return (int64_t)(s->reserved & SIMD_CACHE_CPCOUNT_MASK);
+    r = __atomic_load_n(&s->reserved, __ATOMIC_RELAXED);
+    if (!(r & RT_STR_CACHE_CP_VALID)) return -1;
+    return (int64_t)((r & RT_STR_CACHE_CP_FIELD) >> RT_STR_CACHE_CP_SHIFT);
 }
 
-/* Check the reserved-field ASCII cache.
+/* Check the reserved-field ASCII memo.
  * Returns 1 if the string is known all-ASCII, 0 otherwise (unknown or not ASCII).
- * Bit 31 (SIMD_CACHE_FLAG_IS_ASCII) is set when the string is confirmed all-ASCII. */
+ * Bit 3 (RT_STR_RESERVED_ASCII_MEMO == RT_CORE_STRING_FLAG_ASCII) is set when the
+ * string is confirmed all-ASCII; it is the SAME memo spl_core_string_is_ascii
+ * maintains in runtime_native.c, so the two TUs benefit from each other's scans. */
 static inline int rt_str_is_ascii_cached(const RtCoreStringSimd* s) {
     if (!s) return 0;
-    return (s->reserved & SIMD_CACHE_FLAG_IS_ASCII) ? 1 : 0;
+    return (__atomic_load_n(&s->reserved, __ATOMIC_RELAXED) & SIMD_CACHE_FLAG_IS_ASCII) ? 1 : 0;
 }
 
 /* ================================================================
@@ -677,6 +687,11 @@ int64_t rt_text_count_codepoints_cached(int64_t value) {
     /* Dispatch to best available implementation */
     int64_t count = routed_utf8_count(
         (const uint8_t*)s->data, s->len);
+
+    /* An all-ASCII result also establishes the shared ASCII memo (bit 3),
+     * which spl_core_string_is_ascii consults in runtime_native.c. */
+    if ((uint64_t)count == s->len)
+        __atomic_fetch_or(&s->reserved, RT_STR_RESERVED_ASCII_MEMO, __ATOMIC_RELAXED);
 
     /* Cache the result */
     cache_cp_count(s, count);

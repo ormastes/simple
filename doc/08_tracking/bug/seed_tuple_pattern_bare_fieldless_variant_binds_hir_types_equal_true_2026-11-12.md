@@ -129,3 +129,28 @@ field sub-patterns in the seed are still untyped (`struct_fields_condition`).
 Behavioural consequence: Stage 2 compilers built by the fixed seed run
 `hir_types_equal` strictly, like Stage 3; previously-lax agreement checks on
 the Stage 2 lane can now refuse.
+
+## Follow-up: payload-variant names in a slot bind (2026-11-12)
+
+The #8497 slot test used `subject_enum_has_variant`, whose local path accepts a
+PAYLOAD variant name (its global fallback and pure-Simple's
+`enum_unit_pattern_names` gate are unit-only). So `case (Int, _):` over an enum
+with `Int(bits)` became a variant test and dropped the binder: an arm body
+reading `Int` failed to compile (`GlobalLoad: unresolved identifier 'Int'`)
+under the merged seed, while run-14 Stage 2 binds it.
+
+Fix: `subject_enum_has_unit_variant` for sub-pattern slots (condition walk and
+`collect_pattern_bindings` with `in_slot`). The TOP-LEVEL caller keeps the
+any-variant predicate on purpose: a bare top-level payload-variant arm
+(`case Clocked:` over `VhdlProcessKind`, `vhdl_backend.spl:351-371`) is a
+payload-ignoring variant test on pure-Simple too — its HIR binds it but MIR
+re-reads it as the variant (`expr_dispatch.spl`, bug
+`match_unqualified_imported_enum_variant_default_arms_2026-10-24`) — and run-14
+Stage 2 prints `top_level(Int)=1`. Making it unit-only there would silently turn
+those three VHDL arms into a catch-all on Stage 2.
+
+Fixture: `test/fixtures/compiler/tuple_pattern_bare_payload_variant_binds_native.spl`
+(merged seed: build fails; fixed seed: exit 0; run-14 Stage 2: exit 0). The seed
+tree-walk interpreter still treats a bare payload-variant name in a slot as a
+variant test (`interpreter_patterns.rs`), so it disagrees with both compilers
+there.
