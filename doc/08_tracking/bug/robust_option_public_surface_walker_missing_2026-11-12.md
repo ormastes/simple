@@ -1,6 +1,6 @@
 # No lint flags `Option<T>` on the public surface (S-12)
 
-**Status:** OPEN 2026-11-12 — P0 ships the RED acceptance spec; P1 lands the `robust_option_surface` rule.
+**Status:** FIXED 2026-11-12 (P1) — `src/compiler/90.tools/lint/rules/robust_option_surface_rule.spl` registered in `static_rules.spl`; acceptance, reproducing and generalization specs green on the seed. P2+ residue (cross-file export closure, explicit accessor methods, `ROB-OPT-003`) stays listed under "Unblock condition".
 **Severity:** Warning-tier policy gap (no runtime defect).
 **Affected file:** `src/compiler/90.tools/lint/static_rules.spl:30-52` (rule table has no `robust_option_surface` row); `src/compiler/35.semantics/lint/semantic_api/checker.spl:51-52` (primitive walker is standalone, not an optional walker).
 **Spec files:** `test/01_unit/compiler/semantics/robust_option_surface_spec.spl` (acceptance S-12); P1 adds `test/01_unit/compiler/lint/robust_option_surface_rule_spec.spl` (reproducing) and `test/01_unit/compiler/lint/robust_option_surface_generalization_spec.spl` (generalization).
