@@ -2,7 +2,7 @@
 use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
 use compiler.frontend.parser_types.*
-use compiler.frontend.parser_types_expr.{parser_type_kind_named_name, parser_type_kind_named_args}
+use compiler.frontend.parser_types_expr.{ExprKind, parser_type_kind_named_name, parser_type_kind_named_args, parser_type_kind_is_optional}
 use compiler.hir.hir_lowering.types.HirLowering
 use compiler.hir.hir_lowering.expressions.*
 use compiler.common.attributes.{parse_layout_attrs, parse_export_attrs, parse_platform_attrs, ExportAttr}
@@ -12,7 +12,19 @@ use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_lowering._Items.lowering_helpers.{PlatformAttrFields, platform_attr_fields_for}
 
 impl HirLowering:
-    me lower_param(p: Param, inferred_callable: HirType? = nil, declared_receiver: HirType? = nil) -> HirParam:
+    me lower_param(p: Param, inferred_callable: HirType? = None, declared_receiver: HirType? = None) -> HirParam:
+        # A `= None` default only makes sense on an Option (`T?`) parameter:
+        # nil/None never reaches a non-optional slot in safe code, and this
+        # declaration-side rule is what lets call sites treat an omitted
+        # `= None` default as a constant (seed is_constant_default twin).
+        if p.has_default and p.has_type_:
+            val default_is_none = match p.default.kind:
+                case ExprKind.Ident(n): n == "None"
+                case _: false
+            # Discriminant probe, not `case TypeKind.Optional(_)` (seed
+            # pattern hazard: variant-vs-struct name collision).
+            if default_is_none and not (parser_type_kind_is_optional(p.type_.kind) or parser_type_kind_named_name(p.type_.kind) == "Option"):
+                self.error("parameter `{p.name}` defaults to None but is not declared optional (`T?`)", p.span)
         # An unannotated fn parameter (`fn format_table_row(cells, widths, ...)`,
         # std.common.format_utils) is dynamic in the seed/interpreter. Lowering
         # it to Infer left an inference variable nothing resolves, and MIR

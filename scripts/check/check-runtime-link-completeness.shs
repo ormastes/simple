@@ -25,8 +25,23 @@
 #   --jobs N          parallel C compiles (default 8).
 #   --resolve-only    print the resolved llvm-nm and exit (exit 2 + message if none).
 #   --keep DIR        object/work directory (default: mktemp under build/).
-# Exit: 0 = complete, 1 = missing symbols (listed as `MISSING <sym>`),
-#       2 = usage / toolchain / compile failure.
+# Closure-strict check (on by default; --no-closure-strict disables):
+#   --closure-root F  a module linked into EVERY native closure (repeatable).
+#                     Default: src/lib/nogc_sync_mut/sffi/host.spl and
+#                     src/app/cli/native_build_worker.spl.
+#   Every extern declared there must be defined on THIS host platform by the
+#   core-C list, by the C sources the Rust runtime's build.rs compiles, or by
+#   a `pub extern "C" fn` in src/compiler_rust/runtime/src whose `#[cfg]`
+#   admits this platform. The allowlist does NOT apply: "unreferenced by the
+#   real link" only holds on ELF/Mach-O, where --gc-sections drops the dead
+#   wrapper first. COFF (lld-link / ld.lld -m i386pep) resolves before
+#   /OPT:REF, so 75 allowlisted host.spl wrappers failed the Windows Stage 2
+#   link on 2026-11-12 (bug stage2_none_default_not_call_site_constant). Run
+#   natively on each OS (CI: runtime-link-completeness-platforms.yml) to see
+#   the platform variance; a guarded C file (`#if __linux__`) or a
+#   `#[cfg(unix)]` Rust export is invisible on the host it excludes.
+# Exit: 0 = complete, 1 = missing symbols (listed as `MISSING <sym>` /
+#       `MISSING-CLOSURE <sym>`), 2 = usage / toolchain / compile failure.
 set -eu
 
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
@@ -39,6 +54,8 @@ ALLOW_FILE="scripts/check/runtime_link_completeness_allow.sdn"
 JOBS=8
 WORK_DIR=""
 RESOLVE_ONLY=0
+CLOSURE_STRICT=1
+CLOSURE_ROOTS=""
 
 die() { printf 'runtime-link-completeness: %s\n' "$1" >&2; exit 2; }
 
@@ -54,7 +71,10 @@ $2"; shift 2 ;;
         --resolve-only) RESOLVE_ONLY=1; shift ;;
         --jobs) [ $# -ge 2 ] || die "missing value for --jobs"; JOBS=$2; shift 2 ;;
         --keep) [ $# -ge 2 ] || die "missing value for --keep"; WORK_DIR=$2; shift 2 ;;
-        -h|--help) sed -n "2,34p" "$0"; exit 0 ;;
+        --closure-root) [ $# -ge 2 ] || die "missing value for --closure-root"; CLOSURE_ROOTS="$CLOSURE_ROOTS
+$2"; shift 2 ;;
+        --no-closure-strict) CLOSURE_STRICT=0; shift ;;
+        -h|--help) sed -n "2,50p" "$0"; exit 0 ;;
         *) die "unknown argument: $1" ;;
     esac
 done
@@ -64,18 +84,24 @@ if [ -z "$DECL_ROOTS" ] && [ -z "$OBJECT_DIRS" ]; then
 src/lib/nogc_sync_mut/sffi/host.spl
 src/app/cli/native_build_worker.spl"
 fi
+if [ -z "$CLOSURE_ROOTS" ]; then
+    CLOSURE_ROOTS="src/lib/nogc_sync_mut/sffi/host.spl
+src/app/cli/native_build_worker.spl"
+fi
 
 # --- toolchain: clang + llvm-nm only (Windows: llvm-mingw UCRT) -------------
 CC=${CC:-}
 NM=${NM:-}
+HOST_OS=linux; HOST_FAM=unix
 case "$(uname -s)" in
     MINGW*|MSYS*|CYGWIN*|Windows_NT)
-        IS_WINDOWS=1
+        IS_WINDOWS=1; HOST_OS=windows; HOST_FAM=windows
         for d in "$HOME"/.simple/toolchains/llvm-mingw-*-ucrt-x86_64/bin; do
             [ -x "$d/clang.exe" ] || continue
             [ -n "$CC" ] || CC="$d/clang.exe"
             [ -n "$NM" ] || NM="$d/llvm-nm.exe"
         done ;;
+    Darwin) IS_WINDOWS=0; HOST_OS=macos ;;
     *) IS_WINDOWS=0 ;;
 esac
 [ -n "$CC" ] || CC=clang
@@ -162,6 +188,82 @@ hosted_win32"
 fi
 LC_ALL=C sort -u "$WORK_DIR/defined.txt" -o "$WORK_DIR/defined.txt"
 
+# --- closure-strict: what THIS platform's real link can define ----------------
+if [ "$CLOSURE_STRICT" = 1 ]; then
+    : >"$WORK_DIR/closure_required.txt"
+    for root in $CLOSURE_ROOTS; do
+        [ -e "$root" ] || die "closure root not found: $root"
+        grep -rhoE '^[[:space:]]*(pub[[:space:]]+)?extern[[:space:]]+fn[[:space:]]+(rt|spl)_[A-Za-z0-9_]+' \
+            --include='*.spl' "$root" 2>/dev/null |
+            sed -E 's/.*fn[[:space:]]+//' >>"$WORK_DIR/closure_required.txt" || true
+    done
+    LC_ALL=C sort -u "$WORK_DIR/closure_required.txt" -o "$WORK_DIR/closure_required.txt"
+    if [ -n "$RUNTIME_LIB" ]; then
+        cp "$WORK_DIR/defined.txt" "$WORK_DIR/defined_native.txt"
+    else
+        # Core-C objects of this platform only: the Linux superset above adds
+        # hosted_cocoa/hosted_win32 so Linux CI can judge their declarations,
+        # but those objects are not in a Linux link.
+        for obj in "$WORK_DIR"/obj/*.o; do
+            case "$HOST_OS:$(basename "$obj" .o)" in
+                linux:hosted_cocoa|linux:hosted_win32|macos:hosted_win32|windows:hosted_cocoa) continue ;;
+            esac
+            "$NM" --defined-only -g "$obj" 2>/dev/null | awk 'NF>=3{print $NF}'
+        done | sed -E 's/^_//' >"$WORK_DIR/defined_native.txt"
+        # C sources the Rust runtime lane (src/compiler_rust/runtime/build.rs)
+        # compiles into libsimple_native_all; each is platform-guarded inside
+        # (#if __linux__ ...), so compiling it natively yields exactly this
+        # host's exports. One that does not compile here defines nothing here.
+        BUILD_RS=src/compiler_rust/runtime/build.rs
+        # Fail closed on a sparse checkout: an absent Rust tree would read as
+        # "defines nothing" and flag every Rust-backed extern.
+        for need in "$BUILD_RS" src/compiler_rust/runtime/src src/compiler_rust/native_all/src; do
+            [ -e "$need" ] || die "closure-strict needs $need (sparse checkout? add it, or pass --no-closure-strict)"
+        done
+        mkdir -p "$WORK_DIR/rlobj"
+        running=0
+        for name in $(sed -n '/^fn compile_c_runtime_sources/,/^}/p' "$BUILD_RS" | grep -oE '"[A-Za-z0-9_/]+\.c"' | tr -d '"' | sort -u); do
+            src="src/runtime/$name"
+            [ -f "$src" ] || continue
+            obj="$WORK_DIR/rlobj/$(printf '%s' "$name" | tr '/' '_').o"
+            # shellcheck disable=SC2086
+            ( "$CC" $FLAGS "$src" -o "$obj" >"$obj.log" 2>&1 || printf 'NOTE: rust-lane C source %s does not compile on %s; counted as defining nothing here\n' "$name" "$HOST_OS" >&2 ) &
+            running=$((running + 1))
+            if [ "$running" -ge "$JOBS" ]; then wait; running=0; fi
+        done
+        wait
+        for obj in "$WORK_DIR"/rlobj/*.o; do
+            [ -f "$obj" ] || continue
+            "$NM" --defined-only -g "$obj" 2>/dev/null | awk 'NF>=3{print $NF}'
+        done | sed -E 's/^_//' >>"$WORK_DIR/defined_native.txt"
+        # Rust exports, honouring the nearest preceding #[cfg(...)] platform
+        # attribute: windows/unix families, target_os = "...", and not(...).
+        find src/compiler_rust/runtime/src src/compiler_rust/native_all/src -name '*.rs' -print |
+            while IFS= read -r rs; do
+                awk -v os="$HOST_OS" -v fam="$HOST_FAM" '
+                    function admits(c,   inner, neg, hit) {
+                        if (c == "") return 1
+                        neg = (c ~ /not\(/)
+                        hit = 0
+                        if (c ~ /[(,[:space:]]windows[),[:space:]]/ && fam == "windows") hit = 1
+                        if (c ~ /[(,[:space:]]unix[),[:space:]]/ && fam == "unix") hit = 1
+                        if (c ~ ("target_os = \"" os "\"")) hit = 1
+                        if (c !~ /[(,[:space:]](windows|unix)[),[:space:]]|target_os/) return 1
+                        return neg ? !hit : hit
+                    }
+                    /^[[:space:]]*#\[cfg\(/ { cfg = $0; next }
+                    /^[[:space:]]*#\[/ { next }
+                    /pub( unsafe)? extern "C" fn (rt|spl)_[A-Za-z0-9_]+/ {
+                        if (admits(cfg)) { n = $0; sub(/.*fn /, "", n); sub(/[^A-Za-z0-9_].*/, "", n); print n }
+                        cfg = ""; next
+                    }
+                    { cfg = "" }' "$rs"
+            done >>"$WORK_DIR/defined_native.txt"
+    fi
+    LC_ALL=C sort -u "$WORK_DIR/defined_native.txt" -o "$WORK_DIR/defined_native.txt"
+    LC_ALL=C comm -23 "$WORK_DIR/closure_required.txt" "$WORK_DIR/defined_native.txt" >"$WORK_DIR/missing_closure.txt"
+fi
+
 if [ -n "$ALLOW_FILE" ]; then
     [ -f "$ALLOW_FILE" ] || die "allow file not found: $ALLOW_FILE"
     sed -e 's/#.*//' -e 's/^[[:space:]]*-[[:space:]]*//' -e 's/[[:space:]]//g' "$ALLOW_FILE" | grep -E '^(rt|spl)_[A-Za-z0-9_]+$' |
@@ -174,7 +276,15 @@ REQ=$(wc -l <"$WORK_DIR/required.txt" | tr -d ' ')
 DEF=$(wc -l <"$WORK_DIR/defined.txt" | tr -d ' ')
 MISS=$(wc -l <"$WORK_DIR/missing.txt" | tr -d ' ')
 printf 'runtime-link-completeness: required=%s defined=%s missing=%s work=%s\n' "$REQ" "$DEF" "$MISS" "$WORK_DIR"
-if [ "$MISS" -gt 0 ]; then
+CMISS=0
+if [ "$CLOSURE_STRICT" = 1 ]; then
+    CREQ=$(wc -l <"$WORK_DIR/closure_required.txt" | tr -d ' ')
+    CDEF=$(wc -l <"$WORK_DIR/defined_native.txt" | tr -d ' ')
+    CMISS=$(wc -l <"$WORK_DIR/missing_closure.txt" | tr -d ' ')
+    printf 'runtime-link-completeness: closure-strict host=%s required=%s defined=%s missing=%s\n' "$HOST_OS" "$CREQ" "$CDEF" "$CMISS"
+    sed 's/^/MISSING-CLOSURE /' "$WORK_DIR/missing_closure.txt"
+fi
+if [ "$MISS" -gt 0 ] || [ "$CMISS" -gt 0 ]; then
     sed 's/^/MISSING /' "$WORK_DIR/missing.txt"
     printf 'STATUS: FAIL\n'
     exit 1

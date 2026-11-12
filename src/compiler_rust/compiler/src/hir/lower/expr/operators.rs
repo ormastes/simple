@@ -462,7 +462,7 @@ impl Lowerer {
 
     /// `T?` in either of its two HIR spellings: the registry's optional id
     /// (`register_optional`, from `T?`) or the builtin `Option<T>` enum.
-    fn is_optional_source_type(&self, ty: TypeId) -> bool {
+    pub(super) fn is_optional_source_type(&self, ty: TypeId) -> bool {
         if self.module.types.optional_inner(ty).is_some() {
             return true;
         }
