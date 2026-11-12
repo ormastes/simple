@@ -87,3 +87,27 @@ bug recorded — the value-position Option match lowering still needs a real
 compiler fix; until then this shape must not be reintroduced in
 freestanding-lane code).
 
+
+## 2026-11-12 fix attempt (baremetal lane, work/fix-baremetal-20261112)
+
+Reviewed at 7a06b4aafd5, lane file scope includes
+`src/lib/common/encoding/sfnt.spl`:
+
+- **Workaround verified intact.** `parse_fvar_axes` still uses the Option-free
+  flat scalar scan (found flag + i64 offset/length), the duplicate-axis check
+  is an indexed `while` with typed locals, `validate_default_glyf_font` /
+  `sfnt_manifest_default_axes_match` use `_sfnt_has_table` + statement-form
+  matches, and `_sfnt_collect_names` uses index-assignment rebuild. No
+  val-assigned Option payload extraction remains on the boot path.
+- **Regression spec already exists.**
+  `test/01_unit/lib/common/encoding/sfnt_fvar_option_match_spec.spl` pins the
+  exact faulted `val table = match find_table(...)` shape (must return the
+  None arm for static fonts, the Some payload for variable fonts) plus
+  positive/negative `parse_fvar_axes` and sibling gvar/avar/name lookups.
+- **The compiler Option-marshalling defect itself is NOT fixed** — the fix
+  belongs in src/compiler (value-position match lowering), which is outside
+  this lane's allowed file scope. No native re-run claimed; host has no
+  admitted compiler.
+
+**Status: OPEN** (compiler defect; workaround + spec in place at HEAD).
+DB row updated.

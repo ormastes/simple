@@ -185,3 +185,36 @@ work with a global frame checkpoint reset. After integration, rebuild the actual
 WM guest, exercise repeated maximize/restore/input frames, verify bounded live
 memory and compare retained glyph/surface pixels. No QEMU or full WM result is
 claimed by these host C tests, and this prerequisite does not close the bug.
+
+## 2026-11-12 fix attempt (baremetal lane, work/fix-baremetal-20261112)
+
+Verified at 7a06b4aafd5 (no guest/QEMU run — host limits; one host C probe +
+one freestanding compile instead):
+
+- **The 2026-11-10 reclaim allocator IS the allocator at this commit.**
+  `examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c` routes
+  `malloc`/`free`/`realloc` through `simpleos_reclaim_*`
+  (`arch/common/simpleos_reclaim_heap.h`, in lane scope). The historical
+  512 MiB sizing is NOT present here — the heap is 192 MiB with the 144 MiB
+  warn watermark; with real reclamation landed that sizing is no longer the
+  primary exposure, but generated-array owners still never call `free`.
+- **Host probe PASS.** Compiled `simpleos_reclaim_heap.h` with the exact
+  wrapper semantics from baremetal_stubs.c under clang -O2 and ran: 3,000
+  temporary 1 MiB frame cycles around a 64-byte retained sentinel (watermark
+  returns to baseline; sentinel intact), neighbour coalescing, honest NULL on
+  over-capacity allocation with consistent follow-on state, realloc
+  shrink/grow byte preservation, and 20,000 mixed-owner operations ending in
+  a full heap rewind to `used=0`. Result: `RECLAIM_PROBE_PASS used_final=0`.
+- **Freestanding compile PASS.** Complete `baremetal_stubs.c` compiles for
+  `x86_64-unknown-none` (`-ffreestanding -fno-builtin -fno-stack-protector
+  -mno-red-zone -fno-pic`, clang, exit 0).
+
+Still open (out of lane scope): the retained-vs-temporary owner integration
+for generated arrays / `read_pixels` snapshots lives in engine2d
+(`src/lib/gc_async_mut/**` outside the one renderer file this lane may
+touch), and the repeated maximize/restore/input QEMU evidence run has not
+happened. `rt_dealloc` intentionally still does not infer ownership.
+
+**Status: fix-implemented-verification-pending** (allocator half verified at
+C level; parent bug stays open pending owner integration + QEMU WM rerun).
+DB row updated.

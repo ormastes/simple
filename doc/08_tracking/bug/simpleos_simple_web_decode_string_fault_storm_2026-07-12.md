@@ -229,3 +229,34 @@ run `sh scripts/check/check-simpleos-wm-fullscreen-evidence.shs` in the
 SimpleOS QEMU phase and retain the production theme-parser, framebuffer, fault,
 and maximum-RSS receipts. The current production-path regression does not
 substitute for a fresh native guest run.
+
+## 2026-11-12 fix attempt (baremetal lane, work/fix-baremetal-20261112)
+
+Audited `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl`
+(the lane's in-scope renderer file) at 7a06b4aafd5:
+
+- **No decode-string fault-class receivers remain in this file.** No
+  `starts_with` on potentially type-erased split/trim receivers, no `char_at`;
+  the 2026-07-13 interpolation-forced dispatch and the 2026-11-05 gradient
+  byte-scan fixes are not in this file's current shape.
+- **Fixed a residual index-space mismatch in the degenerate-parse diagnostic
+  branch** (4 sites: the `lt_portable` '<' counter, the 96-element head dump,
+  the 96-element mid dump, the per-part 12-element prefix dump). These probed
+  with `char_code_at` — CODEPOINT-indexed on this lane
+  (`rt_string_char_code_at` walks UTF-8) — bounded by `len()`, which is BYTES.
+  On any multi-byte document the counter under-counted every '<' after a
+  non-ASCII character (misleading the split-vs-portable comparison) and each
+  dump element re-walked the string O(n). All four now use `byte_at` (byte
+  index space; 0x3C never occurs inside a UTF-8 multi-byte sequence), the same
+  idiom the foundation file already uses at
+  `simple_web_html_layout_renderer_foundation.spl:190`. Diagnostic-branch only;
+  no healthy-frame path changed.
+- **Out of lane scope, still open:** `is_gradient_angle_token`'s benign
+  char_at/len mismatch lives in `..._foundation.spl` (not in the allowed file
+  list), and the canonical SimpleOS zero-exception three-content-frame gate
+  still awaits an admitted compiler + QEMU run. The renderer file is ~146 KB,
+  over the 128 KiB stage3 parser-input budget, so a stage2/stage3 native probe
+  of it is not meaningful.
+
+**Status: fix-implemented-verification-pending** (static review + idiom
+parity only; native verification pending admitted compiler). DB row updated.
