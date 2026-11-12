@@ -3,7 +3,7 @@
 - Status: fix-implemented (verification pending a runtime-authority + Stage 2 rebuild)
 - Severity: P1. On Linux, every HIR shard pool (the coordinator and the Stage 3 capsule) still ran serially after #8639 and #8663.
 - Found: 2026-11-12, by the Phase 3 lane on aarch64 Linux; recorded 2026-11-13
-- Component: `src/runtime/runtime_process.c` (`rt_process_pin_executable`, `rt_hal_static_elf_fd`) and `src/runtime/runtime_process_owned.c` (Process Observation V4 Linux launch)
+- Component: `src/runtime/runtime_process_owned.c` (Linux pin since 2026-11-13, beside the Darwin pin; was `runtime_process.c`, which the Rust runtime crate never compiles) and `src/compiler_rust/runtime/src/value/sffi/env_process.rs` (Rust stubs)
 - Previous gate: `profile_hir_workers_darwin_only_linux_lacks_process_group_retire_2026-11-12.md`
 
 ## Observation
@@ -140,11 +140,77 @@ new exported `rt_*` symbol.
   `src/runtime/test/*.c` including the previous gate's selfcheck); the two new
   selfchecks join that advisory class, as the previous one did.
 
+## Run 18 (b26b93aa54d): the C fix was never linked into Stage 2
+
+Run 18 admitted Stage 2, then both Phase 2 tool rows failed the same way:
+`[hir-shard] owner=0/2@0 status=CRASH ... reason: owned executable pin was rejected`,
+then `error: HIR aggregate failure`. The fix above had landed, but the binary
+did not contain it: `grep -a simple-rthal` and `grep -a "dynamic ELF admitted"`
+both found 0 matches in `stage3/aarch64-unknown-linux-gnu/stage2-admitted/simple`.
+
+Linkage, confirmed with nm:
+- Stage 2 links `libsimple_native_all.a`, which is the Rust runtime crate plus
+  the C objects that `compiler_rust/runtime/build.rs` compiles. That list has
+  `runtime_process_owned.c` on every OS. It has never had `runtime_process.c`.
+- So on Linux the only definitions were the `#[cfg(not(target_os = "macos"))]`
+  fail-closed stubs in `compiler_rust/runtime/src/value/sffi/env_process.rs`.
+  nm on run 18's `stage2-runtime-authority/libsimple_native_all.a` shows
+  `rt_process_pin_executable_owned_value`, `_acquire_`, `_sha256_value` and
+  `_close_..._owned` as `T` in a `simple_runtime ... rcgu.o`. The archive
+  contains no `simple-rthal` string.
+- macOS already had the right arrangement: its pin lives in
+  `runtime_process_owned.c` and the Rust stubs are cfg'd out there.
+
+Fix (same layout as macOS):
+- `runtime_process_owned.c` now holds the Linux pin, in a
+  `#if defined(__linux__) && !defined(RT_OWNED_EXTERNAL_PIN)` block next to
+  the Darwin pin. Moved in: the ELF admission helpers, the owned handle table,
+  raw `rt_process_pin_executable`, the owned pin and its `_value` form,
+  acquire, the digest, and both owned closes.
+- `runtime_process.c` keeps only the non-Linux fail-closed definitions, plus
+  the raw-fd `rt_process_close_pinned_executable` and
+  `rt_process_spawn_pinned_piped`.
+- No new `rt_*` names were added, and each lane still defines each symbol once.
+- The six Rust stubs are now `cfg(not(any(macos, linux)))`. They are kept for
+  the other OSes, and the text-based dual ratchet still sees them.
+- Second trap, closed: the crate compiles `runtime_process_owned.c` without
+  `_GNU_SOURCE`, and glibc gates `F_ADD_SEALS`/`F_SEAL_*` behind `__USE_GNU`.
+  The moved `#if !defined(F_ADD_SEALS) ... return -1` branch would therefore
+  have compiled the pin to a silent refusal. The block now defines the UAPI
+  seal constants when they are missing, and `#error`s without
+  `SYS_memfd_create`.
+- Third defect, found by the new crate-lane test: the pin's private SHA-256
+  copy (`pin_sha_block`) had 63 round constants (`0xc76c51a3` was missing), so
+  `rt_process_pinned_executable_sha256_value` was not SHA-256. For
+  `/usr/bin/true` it gave `b3e1b10f...` where `sha256sum` gives `a82c1b5f...`.
+  The old selfcheck hashed its reference with that same function, so it
+  compared the wrong value with itself. The digest now streams through the
+  shared `owned_sha256_block`. The selfcheck adds the FIPS 180-2 "abc" vector
+  and hashes its reference with the one-shot `owned_sha256`.
+- Harnesses that stub the pin and include `runtime_process_owned.c` now define
+  `RT_OWNED_EXTERNAL_PIN`, as the Darwin harnesses already did.
+
+Red to green (cheapest tier, `cargo build -p simple-runtime --features runtime-symbol-table`, LTO off):
+- nm `libsimple_runtime.a`, before: the six pin symbols were `T` in a Rust
+  `rcgu.o` and the archive held 0 `simple-rthal` strings. After: all seven are
+  `T` in `runtime_process_owned.o`, none come from an rcgu object, and the
+  archive holds 1 `simple-rthal` string.
+- `cargo test -p simple-runtime --lib linux_owned_pin`
+  (`env_process.rs::linux_owned_pin_tests`) pins `/usr/bin/true` through the
+  crate ABI. It checks the handle, that the acquired fd is the `simple-rthal`
+  memfd, that the digest equals `sha256sum`, and close. Before: FAIL
+  (`returned -1`). After the move, without the SHA fix: FAIL (digest
+  mismatch). After both: PASS.
+- `runtime_process_pin_dynamic_elf_linux_selfcheck.c`: PASS (29 checks).
+
 ## Native confirmation: PENDING, needs a rebuild
 `runtime_process.c` and `runtime_process_owned.c` changed, so the deployed
 runtime authority and the Stage 2 built against it do not carry this fix. Steps:
 1. Phase 1 runtime authority: `cargo -p simple-native-all -p spl_hosted_runtime`
-   plus `-p simple-runtime --features runtime-symbol-table`, LTO off.
+   plus `-p simple-runtime --features runtime-symbol-table`, LTO off. Before
+   Stage 2, gate on the archive: `nm` must show `rt_process_pin_executable_owned_value`
+   defined by `runtime_process_owned.o` (no `rcgu.o`), and `grep -a -c simple-rthal`
+   on `libsimple_native_all.a` must be >= 1. Run 18 skipped this check and shipped the stubs.
 2. Stage 2 (`--full-bootstrap --stop-after-stage2 --backend=cranelift`, lane
    `SIMPLE_CACHE_SCOPE` pinned), then the 3-file pre-flight: expect
    `completed_workers=2` and two `[rt-pin] dynamic ELF admitted` lines in the

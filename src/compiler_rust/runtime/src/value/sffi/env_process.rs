@@ -3291,43 +3291,109 @@ mod tests {
 }
 // The sealed executable owner is currently implemented only by the admitted C
 // runtime.  Keep the Rust runtime lane explicit and fail closed until it owns
-// an equivalent sealed-image table and digest implementation.  On macOS the C
-// runtime_process_owned.c (compiled into this crate by build.rs) defines the
-// Darwin snapshot pin for observation V4, so these stubs must not exist there.
-#[cfg(not(target_os = "macos"))]
+// an equivalent sealed-image table and digest implementation.  On macOS and
+// Linux the C runtime_process_owned.c (compiled into this crate by build.rs)
+// defines the real pin -- the Darwin snapshot pin and the Linux sealed memfd --
+// so these stubs must not exist there: on Linux they used to shadow the C
+// owner and made every Stage 2 profile HIR worker pin fail.
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 #[no_mangle]
 pub unsafe extern "C" fn rt_process_pin_executable_owned(_path: *const std::ffi::c_char) -> i64 {
     -1
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 #[no_mangle]
 pub unsafe extern "C" fn rt_process_pin_executable_owned_value(_path: *const u8, _path_len: u64) -> i64 {
     -1
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 #[no_mangle]
 pub extern "C" fn rt_process_close_pinned_executable_owned(_handle: i64) -> bool {
     false
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 #[no_mangle]
 pub extern "C" fn rt_process_close_pinned_executable_owned_value(_handle: i64) -> i32 {
     0
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 #[no_mangle]
 pub extern "C" fn rt_process_acquire_pinned_executable(_handle: i64) -> i64 {
     -1
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 #[no_mangle]
 pub extern "C" fn rt_process_pinned_executable_sha256_value(_handle: i64) -> RuntimeValue {
     RuntimeValue::NIL
+}
+
+/// The crate-exported owned pin must be the real C sealed-memfd owner on Linux
+/// (doc/08_tracking/bug/profile_hir_workers_linux_pin_rejects_dynamic_elf_2026-11-12.md):
+/// the Stage 2 compiler links this crate, never runtime_process.c, so a Rust
+/// stub here made every profile HIR worker report "owned executable pin was
+/// rejected". Pins a dynamic, root-owned system ELF through the exported ABI.
+#[cfg(all(test, target_os = "linux"))]
+mod linux_owned_pin_tests {
+    use crate::value::collections::{rt_array_get, rt_array_len};
+    use crate::value::RuntimeValue;
+
+    #[allow(clashing_extern_declarations)]
+    extern "C" {
+        fn rt_process_pin_executable_owned_value(path: *const u8, path_len: u64) -> i64;
+        fn rt_process_acquire_pinned_executable(handle: i64) -> i64;
+        fn rt_process_pinned_executable_sha256_value(handle: i64) -> RuntimeValue;
+        fn rt_process_close_pinned_executable_owned_value(handle: i64) -> i32;
+    }
+
+    fn dynamic_fixture() -> &'static str {
+        ["/usr/bin/true", "/bin/true"]
+            .into_iter()
+            .find(|path| std::path::Path::new(path).exists())
+            .expect("a system true(1) binary")
+    }
+
+    #[test]
+    fn owned_pin_admits_dynamic_elf_through_crate_abi() {
+        let path = dynamic_fixture();
+        let expected = std::process::Command::new("sha256sum")
+            .arg(path)
+            .output()
+            .expect("sha256sum");
+        let expected = String::from_utf8(expected.stdout).unwrap();
+        let expected = expected.split_whitespace().next().unwrap().to_string();
+        unsafe {
+            let handle = rt_process_pin_executable_owned_value(path.as_ptr(), path.len() as u64);
+            assert!(handle > 0, "owned pin of dynamic ELF {path} returned {handle}");
+
+            let fd = rt_process_acquire_pinned_executable(handle);
+            assert!(fd >= 3, "acquire returned {fd}");
+            let link = std::fs::read_link(format!("/proc/self/fd/{fd}")).unwrap();
+            assert!(
+                link.to_string_lossy().contains("simple-rthal"),
+                "acquired fd is not the sealed memfd: {link:?}"
+            );
+            libc::close(fd as i32);
+
+            let digest = rt_process_pinned_executable_sha256_value(handle);
+            assert!(!digest.is_nil(), "pinned digest is nil");
+            assert_eq!(rt_array_len(digest), 32);
+            let hex: String = (0..32)
+                .map(|i| format!("{:02x}", rt_array_get(digest, i).as_int()))
+                .collect();
+            assert_eq!(hex, expected, "pinned digest differs from sha256sum");
+
+            assert_eq!(rt_process_close_pinned_executable_owned_value(handle), 1);
+            assert!(
+                rt_process_acquire_pinned_executable(handle) < 0,
+                "closed pin still acquirable"
+            );
+        }
+    }
 }
 
 /// Rust-lane counterpart for platforms where the canonical C OwnedProcess V3
