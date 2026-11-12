@@ -19,18 +19,25 @@
 #     hmac_salt = each file_salt byte XOR 0x3a
 #     hmac_key  = PBKDF2-HMAC-SHA512(page_key, hmac_salt, 2, 32)
 #
-#   KDF engine: PBKDF2-HMAC-SHA512 executes through the seed runtime's
-#   native helper `rt_pbkdf2_hmac_sha512` (RustCrypto `pbkdf2`+`hmac`+`sha2`,
-#   src/compiler_rust/runtime/src/value/pbkdf2_native.rs), which its own
-#   evidence shows byte-exact with the pure-Simple canonical reference
-#   (std.common.crypto.pbkdf2.pbkdf2_sha512_bytes) and with Python
-#   hashlib.pbkdf2_hmac("sha512", ...). The pure-Simple loop remains the
-#   canonical reference; at 256000 iterations it is not viable in seed
-#   interpreter mode (~177 ms per HMAC-SHA512 on this host, i.e. hours per
-#   derivation), which is exactly the cost fact plan §4.4 records for the
-#   compiled native/SMF path. Iteration counts are NEVER reduced for speed,
-#   and no "native is faster" claim is made here; the unit spec measures and
-#   records the actual wall-clock of one open().
+#   KDF engine: PBKDF2-HMAC-SHA512 executes through the in-tree canonical
+#   owner (std.common.crypto.pbkdf2.pbkdf2_sha512_bytes_fast, RFC 2898 §5.2):
+#   the runtime SHA-512 primitive rt_sha512_digest — which has a real C
+#   runtime definition (src/runtime/runtime_native.c) and therefore links in
+#   native/JIT builds — when it returns full 64-byte digests, else the
+#   pure-Simple block fallback. Both paths are byte-exact with Python
+#   hashlib.pbkdf2_hmac("sha512", ...) and with the seed interpreter helper
+#   `rt_pbkdf2_hmac_sha512` (RustCrypto `pbkdf2`+`hmac`+`sha2`), whose vector
+#   evidence the pbkdf2 owner shares. The pure-Simple-only public owner
+#   (pbkdf2_sha512_bytes) is not viable as this lane's engine: at the locked
+#   256000 iterations it costs minutes per derivation in seed interpreter
+#   mode (the unit spec times one open() against a 120 s budget). The
+#   previous engine, `rt_pbkdf2_hmac_sha512`, is interpreter-only with no
+#   `extern "C"`/C definition (doc/08_tracking/bug/native_jit_crypto_tls13_
+#   pbkdf2_no_extern_c_implementation.md): a program calling it from
+#   native/JIT-compiled code fails at link time, so production key
+#   derivation must not depend on it. Iteration counts are NEVER reduced
+#   for speed; the unit spec measures and records the actual wall-clock of
+#   one open().
 #
 #   Passphrase mode only. Raw-key / key+explicit-salt modes are rejected with
 #   `UnsupportedKeyType` until independently validated fixtures exist
@@ -46,21 +53,16 @@
 #     marks the session closed.
 #
 #   Documented language/runtime limits (honest, per lane bug filings):
-#     - Zeroization covers the owner-reachable heap buffer only; KDF-engine
-#       temporaries inside the runtime helper are outside Simple reach.
-#     - In the seed interpreter at this base, buffers returned through the
-#       native extern arrive as frozen arrays that Simple cannot wipe or
-#       shrink (index-assign fails; `rt_array_set_len_known` is a no-op
-#       stub). The session therefore stores MUTABLE push-built copies of the
-#       derived keys; the frozen originals are dropped to GC unwiped — the
-#       same residual-copy limit the secure_memory owner documents. See:
-#       doc/08_tracking/bug/secure_memory_u8_zeroize_unregistered_extern_2026-10-22.md
-#       doc/08_tracking/bug/rt_array_set_len_known_interpreter_noop_2026-10-22.md
+#     - Zeroization covers the owner-reachable heap buffer only; PBKDF2
+#       intermediate state inside the pure-Simple engine is outside this
+#       module's reach (same residual-copy limit the secure_memory owner
+#       documents).
 #     - The canonical volatile zeroization owner
 #       (std.common.crypto.secure_memory.secure_zero_u8_slots) is unusable
-#       in the seed interpreter at this base (first bug above); this
-#       module's overwrite + readback loop is the portable fallback and
-#       should be re-pointed at the canonical owner once fixed.
+#       in the seed interpreter at this base; this module's overwrite +
+#       readback loop is the portable fallback and should be re-pointed at
+#       the canonical owner once fixed. See:
+#       doc/08_tracking/bug/secure_memory_u8_zeroize_unregistered_extern_2026-10-22.md
 #
 # Error taxonomy (plan §4.5 subset owned by this module):
 #   MissingSecret            — empty passphrase bytes.
@@ -69,13 +71,12 @@
 #                              cipher_key_bytes, kdf_salt_bytes) differs
 #                              from the locked constants.
 
-# Native PBKDF2-HMAC-SHA512 runtime helper (interpreter-registered and
-# linkable at this base). Byte-exact with the pure-Simple canonical
-# reference and Python hashlib; see the module contract. No Simple-side
-# wrapper existed at this base, so this lane declares it minimally (lane
-# overlap noted with the future std wrapper for
-# doc/02_requirements/feature/pbkdf2_native_runtime_helpers_2026-05-01.md).
-extern fn rt_pbkdf2_hmac_sha512(password: [u8], salt: [u8], iterations: i64, dk_len: i64) -> [u8]
+# In-tree PBKDF2-HMAC-SHA512 owner (RFC 2898 §5.2): rt_sha512_digest fast
+# path with pure-Simple per-block fallback, byte-identical both ways. The
+# runtime primitive has a real C definition, so this links in native/JIT
+# builds; see the module contract for why the interpreter-only
+# `rt_pbkdf2_hmac_sha512` extern is not used.
+use std.common.crypto.pbkdf2.{pbkdf2_sha512_bytes_fast}
 
 # ============================================================================
 # Locked profile constants — sqlcipher4_4k_sha512 (plan §4.1). Never mutable.
@@ -140,22 +141,35 @@ struct Sqlcipher4KeySession:
 
 fn _sqlcipher4_pbkdf2_sha512(password: [u8], salt: [u8], iterations: i64,
                              dk_len: i64) -> [u8]:
-    """PBKDF2-HMAC-SHA512 through the seed runtime native helper. Byte-exact
-    with the pure-Simple canonical reference and hashlib; see module
-    contract. `iterations` and `dk_len` are validated against the locked
-    profile by every public entry point before reaching this engine."""
-    rt_pbkdf2_hmac_sha512(password, salt, iterations, dk_len)
+    """PBKDF2-HMAC-SHA512 through the in-tree canonical owner (runtime
+    SHA-512 fast path, pure-Simple per-block fallback; byte-identical both
+    ways, byte-exact with Python hashlib and the seed interpreter helper;
+    see module contract). `iterations` and `dk_len` are validated against
+    the locked profile by every public entry point before reaching this
+    engine."""
+    _sqlcipher4_i64_to_u8(pbkdf2_sha512_bytes_fast(
+        _sqlcipher4_u8_to_i64(password), _sqlcipher4_u8_to_i64(salt),
+        iterations, dk_len))
 
-fn _sqlcipher4_mutable_copy(src: [u8]) -> [u8]:
-    """Copy into a fresh push-built [u8] buffer. The session stores mutable
-    copies because native-extern results are frozen arrays in the seed
-    interpreter at this base (cannot be wiped or shrunk); see the module
-    contract and the filed bug docs."""
+# Convert a [u8] buffer to an [i64] byte list (values 0-255); same idiom as
+# the page-codec lane (`_u8_to_i64`).
+fn _sqlcipher4_u8_to_i64(arr: [u8]) -> [i64]:
+    var out: [i64] = []
+    var i: i64 = 0
+    val n = arr.len()
+    while i < n:
+        out.push(arr[i].to_i64() & 0xFF)
+        i = i + 1
+    out
+
+# Convert an [i64] byte list (values 0-255) back to a [u8] buffer; same
+# idiom as the page-codec lane (`_i64_to_u8`).
+fn _sqlcipher4_i64_to_u8(arr: [i64]) -> [u8]:
     var out: [u8] = []
     var i: i64 = 0
-    val n = src.len()
+    val n = arr.len()
     while i < n:
-        out.push(src[i])
+        out.push((arr[i] & 0xFF).to_u8())
         i = i + 1
     out
 
@@ -234,18 +248,18 @@ fn _sqlcipher4_key_session_open_impl(passphrase_bytes: [u8], file_salt16: [u8],
         return Err(Sqlcipher4KeyError.CipherProfileMismatch(
             field: "cipher_key_bytes", expected: SQLCIPHER4_KEY_BYTES,
             requested: requested_key_bytes))
-    # 3. Derivation (plan §4.3 pipeline, constants only). The session owns
-    #    mutable copies; the frozen extern originals are dropped unwiped
-    #    (documented runtime limit — see module contract).
-    val page_key_raw = _sqlcipher4_pbkdf2_sha512(
+    # 3. Derivation (plan §4.3 pipeline, constants only). The pure-Simple
+    #    engine returns fresh push-built arrays, owned directly by the
+    #    session.
+    val page_key = _sqlcipher4_pbkdf2_sha512(
         passphrase_bytes, file_salt16, SQLCIPHER4_KDF_ITER, SQLCIPHER4_KEY_BYTES)
     val hmac_salt = sqlcipher4_hmac_salt_from_file_salt(file_salt16)?
-    val hmac_key_raw = _sqlcipher4_pbkdf2_sha512(
-        page_key_raw, hmac_salt, SQLCIPHER4_HMAC_KDF_ITER, SQLCIPHER4_HMAC_KEY_BYTES)
+    val hmac_key = _sqlcipher4_pbkdf2_sha512(
+        page_key, hmac_salt, SQLCIPHER4_HMAC_KDF_ITER, SQLCIPHER4_HMAC_KEY_BYTES)
     _wipe_secret_bytes(hmac_salt)
     Ok(Sqlcipher4KeySession(
-        page_key: _sqlcipher4_mutable_copy(page_key_raw),
-        hmac_key: _sqlcipher4_mutable_copy(hmac_key_raw),
+        page_key: page_key,
+        hmac_key: hmac_key,
         closed: false))
 
 fn sqlcipher4_key_session_open(passphrase_bytes: [u8], file_salt16: [u8]) -> Result<Sqlcipher4KeySession, Sqlcipher4KeyError>:

@@ -97,3 +97,46 @@ linker error in normal native builds, loud stderr warning only under
 corruption to urgently contain. No source change made this pass; status and
 severity unchanged.
 
+
+## Fix verification — 2026-11-12
+
+**Linux-affecting caller fixed:** `src/lib/nogc_sync_mut/database/codec/sqlcipher4_keys.spl`
+was the only production `.spl` module calling an affected interpreter-only
+symbol (`extern fn rt_pbkdf2_hmac_sha512`), so every native/JIT build of the
+SQLCipher 4 / PureDatabase key-derivation lane failed at link time
+("undefined reference"). The module now derives through the in-tree canonical
+owner `std.common.crypto.pbkdf2.pbkdf2_sha512_bytes_fast`: the
+`rt_sha512_digest` fast path — a REAL C-runtime symbol
+(`src/runtime/runtime_native.c:10586`, links natively) — with a
+byte-identical pure-Simple per-block fallback. The `extern fn
+rt_pbkdf2_hmac_sha512` declaration, the frozen-array `_sqlcipher4_mutable_copy`
+workaround (only needed for native-extern return buffers), and the stale
+frozen-buffer contract bullets were removed.
+
+**Hosted evidence (Rust seed v1.0.0-rc.1, 2026-11-05 build):**
+- New regression spec `test/01_unit/lib/database/codec/sqlcipher4_keys_native_link_spec.spl`
+  3/3 PASS: structural no-extern invariant on the KDF owner, Python hashlib
+  KAT through the engine, and the full locked-profile open() byte-exact to an
+  independent hashlib golden pipeline.
+- `pbkdf2_sha512_native_provider_spec.spl` 8/8 PASS (all Python-hashlib
+  vectors through the production owner).
+- `sqlcipher4_keys_spec.spl` 18/18 PASS incl. the perf case: one open() at
+  256000 iterations = 78 s < 120 s budget under heavy host load.
+- Neighbor `sqlcipher4_page_spec.spl` 25/25 PASS (no regressions).
+- A pure-Simple-only engine was measured first and REJECTED: in the test
+  runner's interpreter mode one 256000-iteration open() exceeds the 900 s
+  daemon-worker budget (the Oct-19 optimized pure path is ~minutes per
+  derivation), which is exactly why the locked 120 s perf budget requires the
+  runtime-hash fast path.
+
+**Pending (recorded, not blocking):** an end-to-end pre-fix "undefined
+reference" capture and post-fix native-build link-and-run of
+`test/fixtures/devhub/native_pbkdf2_sha512` were attempted on the loaded
+build host (seed native-build of the src/lib closure exceeded 30–58 min
+without reaching link across four bounded attempts); re-run on a quiet
+machine: `simple native-build --entry-closure --entry
+test/fixtures/devhub/native_pbkdf2_sha512/main.spl --source src/lib
+--output <bin>` in a pristine checkout (pre-fix) vs this fix. The remaining
+25 registry symbols (TLS 1.3 HKDF/X25519/Ed25519, `rt_pbkdf2_hmac_sha1/256/384`,
+SIMD rows, orphaned `rt_native_profile_*`) still lack `extern "C"`
+definitions; this fix removes their only production `.spl` consumer.

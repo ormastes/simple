@@ -201,3 +201,43 @@ Stage3 command:
 ```sh
 env -u SIMPLE_BOOTSTRAP SIMPLE_NO_STUB_FALLBACK=1 <stage3-simple> native-build --entry test/03_system/native/runtime_lane_value_representation.spl -o /tmp/b && /tmp/b; echo rc=$?
 ```
+
+## Fix verification (2026-11-12, Lane C source-set swap)
+
+**Fix:** `src/app/compile/native.spl` `rt_sources` now compiles the modern
+core-C set (`runtime_native.c`, `runtime_legacy_core.c`, + the Lane B
+`build_c_runtime_library` unconditional inputs, + `runtime_socket_nonblock.c`
+for `simple_local_unix_origin_v1`) with
+`-DSIMPLE_CORE_C_STANDALONE=1 -DSIMPLE_RUNTIME_MEMORY_OWNER=1`, instead of
+legacy `runtime.c` + 4 satellites. Legacy `runtime.c` is excluded wholesale
+(its monolithic exports collide with `runtime_native.c` on ~85 symbols with
+the divergent untagged vs `RT_VALUE_TAG_HEAP`-tagged representation that is
+this bug). Ownership macros mirror `tools.rs` and
+`runtime_compiler.spl` exactly (legacy_core owns `spl_thread_cpu_count`;
+runtime_memory.c owns the allocator family).
+
+**Mechanical verification (all host cc/nm, 2026-11-12):**
+- All 33 sources compile together with the two defines; ZERO duplicate
+  public rt_*/spl_* symbols across the set (nm-verified).
+- Synthetic link of a C driver exercising the fixture's entry points
+  (rt_enum_new/discriminant/payload, spl_array_*, spl_str_cmp/concat/len,
+  rt_print_value) links clean with no undefined symbols.
+- `scripts/check/check-runtime-symbol-lane-divergence.shs` updated
+  (LANE_C_FILES now matches native.spl; Lane B/C compiled with their real
+  defines) and re-run: `runtime_symbol_lane_divergence_new=0`,
+  `_ok=true`; 17 newly-visible pre-existing cross-lane pairs (weak-fallback
+  vs strong-owner, or the documented pool-ABI owner split) baselined with
+  reasons.
+
+**Behavioural evidence / infra limitation:** the new fixture
+`test/03_system/native/native_lane_modern_runtime_representation.spl`
+(enum payloads incl. enums inside a generic array, Option<text>, text
+concat/len) returns rc=42 under the seed interpreter, matching the doc
+fixture's rc=42. A seed-hosted `native-build` of the doc's repro could NOT
+be completed in this environment: the seed's parse shard reports "collected
+zero source files" for the test/03_system entry in all four attempted
+invocation forms (doc form, with/without --seed-ok, absolute path,
+--entry-closure + --source roots) before any codegen — a seed-side entry
+resolution limitation; the doc's repro prescribes a stage3 self-hosted
+binary. Native-lane behavioural re-run remains open for a stage3-capable
+environment.
