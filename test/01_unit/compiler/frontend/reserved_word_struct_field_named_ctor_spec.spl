@@ -1,0 +1,125 @@
+# @cover src/compiler/10.frontend/core/_ParserDecls/fn_struct_decls.spl
+# @cover src/compiler/10.frontend/core/parser_expr.spl
+"""
+# Reserved-word struct field names: `ctor` and `spawn`
+
+**Category:** Compiler / Frontend / Parser
+**Bug:** doc/08_tracking/bug/simple_lang_reserved_word_struct_field_named_ctor_2026-11-10.md
+
+## Overview
+
+Pins the canonical pure-Simple frontend behavior for struct fields whose
+names collide with reserved words — reported as `ctor` in the bug-doc title,
+and evidenced as `spawn` in the doc body and workaround:
+
+- field DECLARATION (`ctor: i64` / `spawn: i64` inside a struct body),
+- named-argument CONSTRUCTION (`CtorField(ctor: 42)`,
+  `ProbeRet(a: 1, spawn: 3)`), and
+- field ACCESS (`built.ctor`, `....spawn`)
+
+must all parse, and the named-argument label must survive into the call AST.
+
+Compiler-lane investigation 2026-11-12 found the `ctor` reservation claimed
+by the bug title does not exist at this tree state: `ctor` is not in the
+pure-Simple `keyword_lookup` table (src/compiler/10.frontend/core/tokens.spl)
+nor in the Rust seed lexer (src/compiler_rust/parser/src/lexer/identifiers.rs),
+so the declaration parses in both parsers. The doc's actual reproducible
+defect is `spawn`: the Rust seed reserves it (`"spawn" => TokenKind::Spawn`)
+and its argument parser rejects `spawn:` labels ("expected Comma, found
+Colon"), while the canonical pure-Simple parser already accepts keywords as
+named-argument labels (parse_call_arg_raw in parser_expr.spl). This spec
+drives real source through the canonical frontend so the correct behavior
+stays pinned regardless of which parser a given lane runs.
+"""
+
+use std.spec.*
+use compiler.core.parser.{parse_module, parser_has_errors}
+use compiler.core.ast.{ast_reset, decl_count, decl_get_name, decl_get_fields,
+    decl_get_tag, decl_get_body, DECL_FN, DECL_STRUCT}
+use compiler.core.ast_expr.{expr_get_tag, expr_get_str, expr_get_left,
+    expr_get_args, expr_get_arg_names, expr_get_int, stmt_get_expr,
+    EXPR_CALL, EXPR_FIELD_ACCESS, EXPR_INT_LIT}
+
+fn find_decl(name: text) -> i64:
+    for index in 0..decl_count():
+        if decl_get_name(index) == name:
+            return index
+    -1
+
+fn require_decl(name: text) -> i64:
+    val index = find_decl(name)
+    expect(index).to_be_greater_than(-1)
+    index
+
+fn require_fn_body(name: text) -> [i64]:
+    val index = require_decl(name)
+    if index < 0:
+        assert(false)
+        return []
+    expect(decl_get_tag(index)).to_equal(DECL_FN)
+    decl_get_body(index)
+
+describe "struct field named ctor parses at declaration, construction, and access":
+    it "declares a struct whose only field is named ctor":
+        ast_reset()
+        parse_module("struct CtorField:\n    ctor: i64\n",
+            "reserved_word_ctor_field_decl.spl")
+        expect(parser_has_errors()).to_equal(false)
+        val index = require_decl("CtorField")
+        if index >= 0:
+            expect(decl_get_fields(index)).to_equal(["ctor"])
+        else:
+            assert(false)
+
+    it "constructs with a named ctor argument and accesses the ctor field":
+        ast_reset()
+        parse_module("struct CtorField:\n    ctor: i64\nfn make() -> i64:\n    val built = CtorField(ctor: 42)\n    built.ctor\n",
+            "reserved_word_ctor_field_use.spl")
+        expect(parser_has_errors()).to_equal(false)
+        expect(decl_get_fields(require_decl("CtorField"))).to_equal(["ctor"])
+        val body = require_fn_body("make")
+        expect(body.len()).to_equal(2)
+        val binding = stmt_get_expr(body[0])
+        expect(expr_get_tag(binding)).to_equal(EXPR_CALL)
+        expect(expr_get_str(expr_get_left(binding))).to_equal("CtorField")
+        expect(expr_get_arg_names(binding)).to_equal(["ctor"])
+        val args = expr_get_args(binding)
+        expect(args.len()).to_equal(1)
+        expect(expr_get_tag(args[0])).to_equal(EXPR_INT_LIT)
+        expect(expr_get_int(args[0])).to_equal(42)
+        val access = stmt_get_expr(body[1])
+        expect(expr_get_tag(access)).to_equal(EXPR_FIELD_ACCESS)
+        expect(expr_get_str(access)).to_equal("ctor")
+        expect(expr_get_str(expr_get_left(access))).to_equal("built")
+
+describe "struct field named spawn constructs with named arguments (bug-doc evidence case)":
+    it "declares the doc's ProbeRet struct with a spawn field":
+        ast_reset()
+        parse_module("struct ProbeRet:\n    a: i64\n    spawn: i64\n",
+            "reserved_word_spawn_field_decl.spl")
+        expect(parser_has_errors()).to_equal(false)
+        val index = require_decl("ProbeRet")
+        if index >= 0:
+            expect(decl_get_fields(index)).to_equal(["a", "spawn"])
+        else:
+            assert(false)
+
+    it "parses ProbeRet(a: 1, spawn: 3).spawn with labels intact":
+        ast_reset()
+        parse_module("struct ProbeRet:\n    a: i64\n    spawn: i64\nfn make() -> i64:\n    ProbeRet(a: 1, spawn: 3).spawn\n",
+            "reserved_word_spawn_field_use.spl")
+        expect(parser_has_errors()).to_equal(false)
+        expect(decl_get_fields(require_decl("ProbeRet"))).to_equal(["a", "spawn"])
+        val body = require_fn_body("make")
+        expect(body.len()).to_equal(1)
+        val access = stmt_get_expr(body[0])
+        expect(expr_get_tag(access)).to_equal(EXPR_FIELD_ACCESS)
+        expect(expr_get_str(access)).to_equal("spawn")
+        val call = expr_get_left(access)
+        expect(expr_get_tag(call)).to_equal(EXPR_CALL)
+        expect(expr_get_str(expr_get_left(call))).to_equal("ProbeRet")
+        expect(expr_get_arg_names(call)).to_equal(["a", "spawn"])
+        val args = expr_get_args(call)
+        expect(args.len()).to_equal(2)
+        expect(expr_get_int(args[0])).to_equal(1)
+        expect(expr_get_int(args[1])).to_equal(3)
