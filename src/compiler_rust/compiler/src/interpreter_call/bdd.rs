@@ -183,6 +183,13 @@ thread_local! {
     // library's own `test_pending` counter is a module global the interpreter
     // cannot observe from here, so the `pending` arm raises this flag.
     pub(crate) static BDD_PENDING_IN_IT: RefCell<bool> = const { RefCell::new(false) };
+    // Whether the current "it" block's `pending(...)` reason starts with
+    // `BLOCKED:` -- an environment-gated example (counted BLOCKED, never a pass).
+    pub(crate) static BDD_PENDING_BLOCKED: RefCell<bool> = const { RefCell::new(false) };
+    // Examples counted BLOCKED in this process (pending BLOCKED: or a failure
+    // whose message starts with `precondition:`). They are recorded as skipped in
+    // BDD_TEST_RESULTS and named here so the SPEC FILE VERDICT carries `blocked=`.
+    pub(crate) static BDD_BLOCKED_TOTAL: RefCell<usize> = const { RefCell::new(0) };
     // Failure message from expect (for display in it block)
     pub(crate) static BDD_FAILURE_MSG: RefCell<BddFailures> = const { RefCell::new(BddFailures::new()) };
     // Provisional "hollow call" failure: a bare `expect(<call>)` whose result is
@@ -1074,6 +1081,7 @@ pub(super) fn eval_bdd_builtin(
             BDD_FAILURE_MSG.with(|cell| cell.borrow_mut().clear());
             BDD_PROVISIONAL_MSG.with(|cell| *cell.borrow_mut() = None);
             BDD_PENDING_IN_IT.with(|cell| *cell.borrow_mut() = false);
+            BDD_PENDING_BLOCKED.with(|cell| *cell.borrow_mut() = false);
             BDD_INSIDE_IT.with(|cell| *cell.borrow_mut() = true);
 
             BDD_LAZY_VALUES.with(|cell| {
@@ -1175,7 +1183,33 @@ pub(super) fn eval_bdd_builtin(
 
                     let pending = BDD_PENDING_IN_IT.with(|cell| *cell.borrow());
                     let desc_path = get_current_describe_path();
-                    if failed {
+                    // BLOCKED: an environment-gated example -- a failure whose
+                    // message is `precondition: ...` (an `Err("precondition: ...")`
+                    // surfaced by the example) or `pending("BLOCKED: ...")`. Never
+                    // a pass and never a failure: recorded as skipped and counted
+                    // in BDD_BLOCKED_TOTAL so the verdict line carries `blocked=`.
+                    // The ✗ + message lines are kept so the pure-Simple runner's
+                    // `parse_blocked_examples` reads the same shape from either
+                    // binary. Bug: llm_caret_env_gated_specs_no_blocked_outcome_2026-11-12.
+                    let precondition_blocked = failed
+                        && failure_msg
+                            .as_deref()
+                            .map(|m| m.trim_start().starts_with("precondition:"))
+                            .unwrap_or(false);
+                    let pending_blocked = !failed && pending && BDD_PENDING_BLOCKED.with(|cell| *cell.borrow());
+                    if precondition_blocked || pending_blocked {
+                        if precondition_blocked {
+                            println!("{}\x1b[31m✗ {}\x1b[0m", indent_str, name_str);
+                            if let Some(msg) = &failure_msg {
+                                println!("{}  \x1b[31m{}\x1b[0m", indent_str, msg);
+                            }
+                        } else {
+                            println!("{}\x1b[33m○ {} (pending)\x1b[0m", indent_str, name_str);
+                        }
+                        BDD_BLOCKED_TOTAL.with(|cell| *cell.borrow_mut() += 1);
+                        BDD_IGNORED_TESTS.with(|cell| cell.borrow_mut().push(name_str.clone()));
+                        record_test_result(desc_path, name_str.clone(), true, true);
+                    } else if failed {
                         println!("{}\x1b[31m✗ {}\x1b[0m", indent_str, name_str);
                         if let Some(msg) = failure_msg {
                             println!("{}  \x1b[31m{}\x1b[0m", indent_str, msg);
@@ -1276,6 +1310,9 @@ pub(super) fn eval_bdd_builtin(
                 //    counts the "... pending" marker the Simple body prints.
                 if BDD_INSIDE_IT.with(|cell| *cell.borrow()) {
                     BDD_PENDING_IN_IT.with(|cell| *cell.borrow_mut() = true);
+                    if extract_desc_str(args, "").trim_start().starts_with("BLOCKED:") {
+                        BDD_PENDING_BLOCKED.with(|cell| *cell.borrow_mut() = true);
+                    }
                 } else if BDD_INDENT.with(|cell| *cell.borrow()) > 0 {
                     record_describe_level_skip(extract_desc_str(args, "unnamed"));
                 }
@@ -2343,6 +2380,8 @@ pub fn clear_bdd_state() {
     BDD_COUNTS.with(|cell| *cell.borrow_mut() = (0, 0));
     BDD_TOTALS.with(|cell| *cell.borrow_mut() = (0, 0));
     BDD_PENDING_IN_IT.with(|cell| *cell.borrow_mut() = false);
+    BDD_PENDING_BLOCKED.with(|cell| *cell.borrow_mut() = false);
+    BDD_BLOCKED_TOTAL.with(|cell| *cell.borrow_mut() = 0);
     BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = false);
     BDD_EXPECT_PROVISIONAL.with(|cell| *cell.borrow_mut() = false);
     BDD_MATCHER_RAN.with(|cell| *cell.borrow_mut() = false);
@@ -2383,6 +2422,12 @@ pub fn get_ignored_tests() -> Vec<String> {
 /// Get individual test results: (describe_path, test_name, passed, skipped)
 pub fn get_test_results() -> Vec<(String, String, bool, bool)> {
     BDD_TEST_RESULTS.with(|cell| cell.borrow().clone())
+}
+
+/// Number of examples counted BLOCKED (environment missing). Each is also one
+/// of the skipped entries in `get_test_results`.
+pub fn get_blocked_test_count() -> usize {
+    BDD_BLOCKED_TOTAL.with(|cell| *cell.borrow())
 }
 
 #[cfg(test)]
