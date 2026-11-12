@@ -84,6 +84,9 @@ val APK_MAX_MODULE_UNCOMPRESSED_SIZE: i64 = 268435456
 # Catalog record kinds (design §11.1: FacetRoute / JoinpointRoute / StartupAspect)
 val APK_ENTRY_FACET: i64 = 0
 val APK_ENTRY_JOINPOINT: i64 = 1
+# Startup key routing marker: match the catalog row's real kind instead of a
+# fixed one (see _apk_prepare_facet_body_opened_v1).
+val APK_ENTRY_ANY_KIND: i64 = -1
 val APK_ENTRY_STARTUP: i64 = 2
 
 # Activation modes (design §9.4)
@@ -2312,7 +2315,7 @@ fn apk_activate_startup(ld: i64, catalog: [u8]) -> i64:
                 if not apk_activation_stack_enter_v1(ld, key):
                     return 0
                 val prepared = _apk_prepare_facet_body_opened_v1(
-                    ld, catalog, cat, key, true, nil, APK_ENTRY_STARTUP)
+                    ld, catalog, cat, key, true, nil, APK_ENTRY_ANY_KIND)
                 apk_activation_stack_exit_v1(ld, key)
                 match prepared:
                     Ok(ready):
@@ -2430,6 +2433,15 @@ fn _apk_prepare_facet_body_opened_v1(ld: i64, catalog: [u8],
                 catalog, index, _ld_profile[ld], facet_key)
     elif _ld_profile[ld] != "":
         route = apk_catalog_route_in_profile_v1(catalog, cat, _ld_profile[ld], facet_key)
+    elif route_kind == APK_ENTRY_ANY_KIND:
+        # Startup activation collects keys by ACTIVATION, so the catalog row
+        # may carry any entry kind: facet+startup-activation (legacy packs)
+        # and startup-kind rows (instrumentation packs) both resolve here.
+        route = _apk_catalog_route_kind(catalog, cat, facet_key, APK_ENTRY_STARTUP)
+        if not route.found:
+            route = _apk_catalog_route_kind(catalog, cat, facet_key, APK_ENTRY_FACET)
+            if not route.found:
+                route = _apk_catalog_route_kind(catalog, cat, facet_key, APK_ENTRY_JOINPOINT)
     else:
         route = _apk_catalog_route_kind(catalog, cat, facet_key, route_kind)
     if not route.ok:
