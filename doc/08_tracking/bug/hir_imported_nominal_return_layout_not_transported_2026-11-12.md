@@ -1,6 +1,6 @@
 # HIR does not transport the layout of an imported callable's third-module return type
 
-- **Status:** open
+- **Status:** verification-pending
 - **Severity:** P2 (lint false positive plus missing layout for downstream consumers)
 - **Found:** 2026-11-12, audit-fixes lane
 - **Spec:** `test/01_unit/compiler/lint/frontend_diag/inferred_type_fallback_use_spec.spl`
@@ -63,3 +63,17 @@ an owner design decision.
 `symbol.type_.?` to be false. The current surface transports the polymorphic
 signature `fn(T) -> T`, and no warning fires. The expectation now asserts that
 the result stays `TypeParam(T)`, which is the real "deferred" invariant.
+
+## Fix (2026-11-12, work/hir-imported-layouts-20261112)
+
+Implemented the recommended non-owning carrier:
+`HirModule.imported_layouts: Dict<SymbolId, HirStruct> = {}` (`20.hir/hir_types.spl`).
+`register_imported_symbol`'s composite branch
+(`_Items/module_import_registration.spl`) fills it for every imported
+struct. It uses the importer-projected surface field types that are already
+computed for `struct_field_types_by_name`. `HirModule.structs` is unchanged,
+so the MIR declaration and provider consumers see no new owner. The lint
+`hir_frontend_type_unresolved` also consults `imported_layouts`. The spec probe
+reads `imported_layouts` and asserts that `structs` does NOT own the symbol.
+Result: `inferred_type_fallback_use_spec` went from 22/25 to 25/25 on the phase-1 seed.
+Native verification is still pending.
