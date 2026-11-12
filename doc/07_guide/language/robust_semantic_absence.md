@@ -31,10 +31,31 @@ phase E.
 | Term | Meaning | Robust-safe usage |
 |---|---|---|
 | `None` | The enum variant of a typed legacy optional | `case None:` only when matching a proven `Option<T>` at an allowed compatibility/boundary site; **not** a new raw absence literal |
-| `nil` | Raw nil/null literal | Rejected in safe source including assignment, return, comparison and `case nil:`; only explicit `unsafe:` / `danger:` |
+| `nil` | Raw nil/null literal | Rejected in safe source including assignment, return, comparison and `case nil:`; only explicit `unsafe:` / `danger:` — **except** as the value of the unit type `Nil` (see § Unit type) |
+| `Nil` | The unit type ("succeeded, nothing to return"); its single value is `nil` | `Result<Nil, E>` / `Ok(nil)`, `-> Nil` / `return nil`; never `Nil?` and never absence |
 | `NotInit<T>` | Reserved storage before the first valid `T` is constructed | Private/pool/stack backing only, with compiler proof before reading; not a substitutable `T` |
 | `Err(E)` / meaningful enum | Failure, cancellation, disconnected, unavailable, etc. | Preferred for explicit domain semantics |
 | `T = default` | Valid and documented contract default | Allowed only after checking default constructor, invariants, callers, behavior and ABI |
+
+## Unit type
+
+`Nil` is the unit type and `nil` is its only value (Ruby/Crystal spelling):
+
+```simple
+fn save(path: text) -> Result<Nil, text>:
+    if path == "":
+        return Err("empty path")
+    Ok(nil)
+```
+
+- `Nil` is unit, never absence. Absence is `T?` / `None`. `Nil?` and
+  `Option<Nil>` are rejected.
+- In safe code `nil` is legal only where a `Nil` value is expected (`Ok(nil)`
+  for `Result<Nil, E>`, `return nil` for `-> Nil`). Any other `nil` is the raw
+  null and stays `unsafe:`-only (`NIL-UNSAFE-001`).
+- `()` is accepted as the same type; new code prefers `Nil`.
+- Rationale and cross-language comparison:
+  `doc/01_research/language/types/unit_type_nil_spelling_2026-11-12.md`.
 
 Do not rewrite `nil` tokens into `None` tokens mechanically: their current representation and source meaning differ. Do not rewrite `Option<T>` into `NotInit<T>`; initialization progress and domain absence are different concepts.
 
