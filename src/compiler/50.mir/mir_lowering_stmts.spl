@@ -2316,16 +2316,46 @@ impl MirLowering:
                 self.forget_local_hir_type(local.id)
             else:
                 var assigned_value = value_local
+                # any_slot_holds_untagged_scalar_2026-08-05: a var whose
+                # DECLARED type is Any keeps that erased identity across
+                # re-assignment; the concrete scalar type of the assigned
+                # value must not overwrite it (the remember site below would
+                # otherwise stamp `Float`/`Int` onto an Any slot, and
+                # to_text/eq consumers then read the tagged word as raw).
+                var assign_keep_declared_any: HirType? = None
                 val found_declared_type = self.find_local_hir_type(local.id)
                 match found_declared_type:
                     case Some(declared_type):
                         # Staged-native Optional transport can preserve Some
                         # while losing its struct payload as raw zero.
                         if declared_type != None and declared_type != 0:
+                            match declared_type.kind:
+                                case HirTypeKind.Any | HirTypeKind.TypeParam(_, _):
+                                    assign_keep_declared_any = Some(declared_type)
+                                case _: ()
                             assigned_value = self.coerce_native_trait_assignment(value_local, value_kind, declared_type, span)
                             match declared_type.kind:
                                 case HirTypeKind.Optional(_):
                                     assigned_value = self.ensure_option_handle(assigned_value, declared_type)
+                                case HirTypeKind.Any | HirTypeKind.TypeParam(_, _):
+                                    # any_slot_holds_untagged_scalar_2026-08-05
+                                    # (pure-Simple parity gap): the Let-site
+                                    # Any arm above boxes the initializer, but
+                                    # plain re-assignment (`var ai: Any = 42;
+                                    # ai = 43`) stored the RAW scalar and
+                                    # unmarked the local, so a later consumer
+                                    # that boxes its operand (an Any-typed
+                                    # call result) compared a tagged value
+                                    # against a raw one -- `ab = false` held
+                                    # raw zext 0 and `ab == any_id(false)`
+                                    # compared tagged-int 0 against
+                                    # SPECIAL_FALSE 19 (seed JIT answers
+                                    # true; pure-Simple answered false).
+                                    # box_runtime_value is a no-op for an
+                                    # already-tagged/str/array/dict local, and
+                                    # it marks its result so the marker
+                                    # propagation below re-marks the target.
+                                    assigned_value = self.box_runtime_value(assigned_value)
                                 case _:
                                     ()
                     case None:
@@ -2395,12 +2425,23 @@ impl MirLowering:
                 match found_assigned_hir_type:
                     case Some(assigned_hir_type):
                         if assigned_hir_type != None and assigned_hir_type != 0:
-                            self.remember_local_hir_type(local.id, assigned_hir_type, self.local_hir_type_isolation_state(assigned_value.id), self.local_hir_type_resource_state(assigned_value.id))
+                            match assign_keep_declared_any:
+                                case Some(keep_any_type):
+                                    # any_slot_holds_untagged_scalar_2026-08-05:
+                                    # an Any-declared target stays Any; see the
+                                    # capture site above.
+                                    self.remember_local_hir_type(local.id, keep_any_type, self.local_hir_type_isolation_state(assigned_value.id), self.local_hir_type_resource_state(assigned_value.id))
+                                case None:
+                                    self.remember_local_hir_type(local.id, assigned_hir_type, self.local_hir_type_isolation_state(assigned_value.id), self.local_hir_type_resource_state(assigned_value.id))
                         else:
                             self.forget_local_hir_type(local.id)
                     case None:
-                        if not self.builtin_keeps_numeric_type_on_assign(local, assigned_value, found_declared_type) and not self.builtin_keeps_array_type_on_assign(assigned_value, found_declared_type):
-                            self.forget_local_hir_type(local.id)
+                        match assign_keep_declared_any:
+                            case Some(keep_any_type):
+                                self.remember_local_hir_type(local.id, keep_any_type, self.local_hir_type_isolation_state(local.id), self.local_hir_type_resource_state(local.id))
+                            case None:
+                                if not self.builtin_keeps_numeric_type_on_assign(local, assigned_value, found_declared_type) and not self.builtin_keeps_array_type_on_assign(assigned_value, found_declared_type):
+                                    self.forget_local_hir_type(local.id)
                 # Bug (array-of-structs field misread), CONFLICT-FLAG
                 # (mir_lowering_stmts.spl is fenced): a `var`-reassignment
                 # (`pts = pts.push(...)`, etc.) must carry
