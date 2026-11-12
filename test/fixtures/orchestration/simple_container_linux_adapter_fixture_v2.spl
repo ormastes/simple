@@ -74,9 +74,21 @@ pub fn linux_container_adapter_fixture_v2(results: [ScriptedCommandResultV1],
         container_scope_fence_id_v2(scope).unwrap(), 7, linux_container_policy_fixture_v2(), engine, engine, results)
     assert(opened.is_ok(), "exact scripted policy provider construction failed")
     val provider = opened.unwrap()
-    match provider.set_scripted_effect_clock_v1(samples_unix_ms):
-        case Err(reason): assert(false, reason)
-        case Ok(_): pass
+    # `samples_unix_ms` is exactly the number of effect-clock reads the case
+    # is entitled to: one per managed create/start (launch deadline), two per
+    # stop/destroy under a control deadline (admission, then the pre-exec
+    # check), one per absence or execution-user observation.
+    #
+    # An EMPTY list states "this case reads no clock". That is the provider's
+    # own initial state — no samples, so any read returns -1 and the effect
+    # fails closed — and `set_scripted_effect_clock_v1` deliberately refuses
+    # an empty list (`container-effect-clock-fixture-limit`), so it is not
+    # called. A case that passes [] and then does read the clock fails on the
+    # clock error instead of passing on a borrowed sample.
+    if samples_unix_ms.len() > 0:
+        match provider.set_scripted_effect_clock_v1(samples_unix_ms):
+            case Err(reason): assert(false, reason)
+            case Ok(_): pass
     val observed = ContainerHostObservationV2(backend: "linux-podman", native_machine_id: scope.native_machine_id,
         native_boot_id: scope.boot_id, provider_identity_digest: engine.identity_digest,
         execution_os: "linux", architecture: "x86_64", continuity_assurance: scope.continuity_mode,
