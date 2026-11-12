@@ -281,7 +281,7 @@ fn query_workspace_diagnostics(dir_path: text, cmd_args: [text]) -> i64:
                     if lint_count.0 > 0:
                         file_has_issues = true
                         file_diag_count = file_diag_count + lint_count.0
-                        json_file_entries.push("{\"file\":\"{spl_file}\",\"diagnostics\":[{lint_count.1}]}")
+                        json_file_entries.push("{\"file\":\"{_check_json_escape(spl_file)}\",\"diagnostics\":[{lint_count.1}]}")
                 else:
                     val lint_count = _emit_source_lint_diagnostics(spl_file, source, format)
                     if lint_count > 0:
@@ -318,6 +318,27 @@ fn _collect_spl_files(dir: text, files: [text]):
         elif not entry.contains("."):
             _collect_spl_files(full_path, files)
 
+fn _check_json_escape(s: text) -> text:
+    s.replace("\\", "\\\\").replace("\"", "\\\"")
+
+# DEPR001 `fixes[]` entry in the ranked DiagnosticFix shape
+# (diagnostic_v1 render_ranked_fix_json): `Type__method` -> `Type.method`.
+# Span start/end are file byte offsets; line/col are 1-based byte columns.
+fn _depr001_fix_json(file: text, line_start: i64, line_num: i64, start_col: i64, end_col: i64, name: text) -> text:
+    val dunder = name.index_of("__")
+    val new_text = name.substring(0, dunder) + "." + name.substring(dunder + 2)
+    val f = _check_json_escape(file)
+    val start = line_start + start_col - 1
+    val end = line_start + end_col - 1
+    val span = "{{\"start\":{start},\"end\":{end},\"line\":{line_num},\"col\":{start_col}}}"
+    "{{\"id\":\"DEPR001.dot_call\",\"title\":\"Use `{new_text}()`\",\"description\":\"Type__method() is deprecated; call the method with `.`\",\"confidence\":\"safe\",\"rank\":1,\"applicability\":\"automatic\",\"replacements\":[{{\"file\":\"{f}\",\"span\":{span},\"new_text\":\"{new_text}\"}}],\"preconditions\":[{{\"file\":\"{f}\",\"span\":{span},\"expected_text\":\"{name}\"}}]}}"
+
+# One `check --format=json` per-file entry for the source lint pass, or "".
+pub fn query_check_lint_file_json_v1(file: text, source: text) -> text:
+    val lint = _collect_lint_diagnostics_json(file, source)
+    if lint.0 == 0: return ""
+    "{{\"file\":\"{_check_json_escape(file)}\",\"diagnostics\":[{lint.1}]}}"
+
 fn _collect_lint_diagnostics_json(file: text, source: text) -> (i64, text):
     """Run source-based lint checks and return (count, json_diagnostics_string).
     This captures diagnostics as JSON strings instead of printing them.
@@ -331,16 +352,20 @@ fn _collect_lint_diagnostics_json(file: text, source: text) -> (i64, text):
     var deprecated_dunder_i = 0
 
     var li = 0
+    var line_start = 0
+    var next_line_start = 0
     while li < lines.len():
         val line = lines[li]
         val trimmed = line.trim()
+        line_start = next_line_start
+        next_line_start = line_start + line.byte_len() + 1
         val line_num = li + 1
 
         # DEPR001: deprecated Type__method() calls from shared lexical facts.
         while (deprecated_dunder_i < deprecated_dunders.len() and
             deprecated_dunders[deprecated_dunder_i].line == line_num):
             val fact = deprecated_dunders[deprecated_dunder_i]
-            parts.push("{\"severity\":2,\"code\":\"DEPR001\",\"message\":\"'{fact.name}()' uses deprecated Type__method() syntax\",\"line\":{line_num},\"col\":{fact.start_column},\"end_line\":{line_num},\"end_col\":{fact.end_column},\"tags\":[2],\"source\":\"simple-lint\"}")
+            parts.push("{\"severity\":2,\"code\":\"DEPR001\",\"message\":\"'{fact.name}()' uses deprecated Type__method() syntax\",\"line\":{line_num},\"col\":{fact.start_column},\"end_line\":{line_num},\"end_col\":{fact.end_column},\"tags\":[2],\"source\":\"simple-lint\",\"fixes\":[{_depr001_fix_json(file, line_start, line_num, fact.start_column, fact.end_column, fact.name)}]}")
             count = count + 1
             deprecated_dunder_i = deprecated_dunder_i + 1
 

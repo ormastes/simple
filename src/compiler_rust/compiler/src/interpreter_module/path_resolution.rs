@@ -634,6 +634,38 @@ fn resolve_unit_module_path(parts: &[String], base_dir: &Path) -> Result<PathBuf
 }
 
 /// Clear the path resolution cache (called between test runs)
+/// `src/app/<name>` entries that are git symlinks. With `core.symlinks=false`
+/// (the Windows default) git checks them out as plain text files holding the
+/// link target, so `app.<name>.*` must resolve to the target directory.
+/// Keep in sync with `driver_entry_closure_core.spl` and the tracked links.
+const APP_SYMLINK_ALIASES: &[(&str, &str)] = &[
+    ("cmm_lsp", "examples/10_tooling/trace32_tools/cmm_lsp"),
+    ("t32_lsp_mcp", "examples/10_tooling/trace32_tools/t32_lsp_mcp"),
+    ("mcp_t32", "examples/10_tooling/trace32_tools/t32_mcp"),
+    ("t32_cli", "examples/10_tooling/trace32_tools/t32_cli"),
+];
+
+fn resolve_app_symlink_alias(root: &Path, parts: &[String]) -> Option<PathBuf> {
+    let target = APP_SYMLINK_ALIASES.iter().find(|(name, _)| *name == parts[1])?.1;
+    let alias_dir = root.join(target);
+    if !p_is_dir(&alias_dir) {
+        return None;
+    }
+    let rest: PathBuf = parts[2..].iter().collect();
+    if !parts[2..].is_empty() {
+        let mut file = alias_dir.join(&rest);
+        file.set_extension("spl");
+        if p_exists(&file) && p_is_file(&file) {
+            return Some(file);
+        }
+    }
+    let init = alias_dir.join(&rest).join("__init__.spl");
+    if p_exists(&init) && p_is_file(&init) {
+        return Some(init);
+    }
+    None
+}
+
 pub fn clear_path_resolution_cache() {
     PATH_RESOLUTION_CACHE.with(|cache| cache.borrow_mut().clear());
     PROJECT_ROOT_CACHE.with(|cache| cache.borrow_mut().clear());
@@ -986,6 +1018,12 @@ fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<Pat
                         if let Some(found) = resolve_with_numbered_dirs(&compiler_shared_dir, &parts[1..]) {
                             return Ok(found);
                         }
+                    }
+                }
+
+                if parts.len() > 1 && parts[0] == "app" {
+                    if let Some(found) = resolve_app_symlink_alias(&current, parts) {
+                        return Ok(found);
                     }
                 }
 
@@ -1632,6 +1670,34 @@ mod tests {
             resolve_module_path(&parts, &repo.join("src")).is_err(),
             "a module outside the enclosing repository must not resolve"
         );
+    }
+
+    /// With `core.symlinks=false`, `src/app/cmm_lsp` is a text file holding the
+    /// link target; `app.cmm_lsp.*` must still resolve to the real directory.
+    #[test]
+    fn app_symlink_placeholder_file_resolves_through_alias_table() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path();
+        fs::create_dir_all(repo.join(".git")).unwrap();
+        fs::create_dir_all(repo.join("src/app")).unwrap();
+        fs::write(repo.join("src/app/cmm_lsp"), "../../examples/10_tooling/trace32_tools/cmm_lsp").unwrap();
+        let target = repo.join("examples/10_tooling/trace32_tools/cmm_lsp");
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("cmm_parser.spl"), "fn marker():\n    0\n").unwrap();
+        fs::write(target.join("__init__.spl"), "").unwrap();
+
+        let leaf = vec!["app".to_string(), "cmm_lsp".to_string(), "cmm_parser".to_string()];
+        assert_eq!(
+            resolve_module_path(&leaf, &repo.join("src")).unwrap(),
+            target.join("cmm_parser.spl")
+        );
+        let pkg = vec!["app".to_string(), "cmm_lsp".to_string()];
+        assert_eq!(
+            resolve_module_path(&pkg, &repo.join("src")).unwrap(),
+            target.join("__init__.spl")
+        );
+        let unknown = vec!["app".to_string(), "not_aliased".to_string(), "x".to_string()];
+        assert!(resolve_module_path(&unknown, &repo.join("src")).is_err());
     }
 
     /// A nested git worktree marks its root with a `.git` *file*, not a

@@ -190,7 +190,19 @@ impl<M: Module> CodegenBackend<M> {
         let target_sig = build_mir_signature(lambda, self.module.isa().default_call_conv());
         let skip = usize::from(has_ctx);
         let user_params: Vec<TypeId> = lambda.params.iter().skip(skip).map(|p| p.ty).collect();
-        self.emit_boxed_thunk(raw_name, target_id, target_sig, user_params, lambda.return_type, has_ctx, false)
+        // A bool-result lambda is DECLARED I64 (shared.rs keeps the body
+        // full-width), so `lambda.return_type` alone made `box_result` answer
+        // a tagged INTEGER 0/1: `xs.map(\x: not (x > 1))` printed `[1, 0, 0]`
+        // instead of `[true, false, false]`. The outlined-body metadata keeps
+        // the real result type; box it as a BOOL. A typed `-> bool` call site
+        // decodes it with `rt_value_unbox_int`, which answers 1/0 for a
+        // tagged bool exactly as for a tagged int.
+        let returns_bool = lambda
+            .outlined_bodies
+            .get(&lambda.entry_block)
+            .is_some_and(|meta| meta.lambda_returns_bool);
+        let ret_ty = if returns_bool { TypeId::BOOL } else { lambda.return_type };
+        self.emit_boxed_thunk(raw_name, target_id, target_sig, user_params, ret_ty, has_ctx, false)
     }
 
     /// `F$boxed` for a function this unit only imports. The target's ABI is

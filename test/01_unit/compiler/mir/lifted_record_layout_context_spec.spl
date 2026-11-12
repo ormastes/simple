@@ -73,6 +73,57 @@ fn lifted_record_provider_calls(mir: MirModule) -> i64:
                     case _: ()
     count
 
+
+# A consumer-local array-returning function over an IMPORTED record, called
+# inside lifted bodies. The element shape is registered from the consumer's
+# own prescan under the imported symbol's canonical owner spelling, so the
+# lifted lowering must fold it onto the provider's registered layout key
+# (declared_struct_layout_key reads struct_identity_layout_key). Mirrors the
+# native SSpec shape `fn spec_schema() -> [ConfigFieldDescriptor]` used from
+# `it` closures (config_core specs, run 16).
+val lifted_local_provider = "pub struct Entry:\n    prefix: i64\n    value: text\npub fn entries() -> [Entry]:\n    [Entry(prefix: 21, value: \"provider\")]\n"
+val lifted_local_consumer = "use app.lifted_local.provider.\{entries, Entry}\nfn local_entries() -> [Entry]:\n    entries()\nfn invoke(callback: fn() -> i64) -> i64:\n    callback()\nfn inspect() -> i64:\n    val ordinary = local_entries()[0].prefix\n    val first = invoke(\\: local_entries()[0].prefix)\n    val sibling = invoke(\\: local_entries()[0].value.len())\n    ordinary + first + sibling\n"
+
+fn lifted_local_array_fixture() -> LiftedRecordLayoutFixture:
+    val log = Logger(level: 0)
+    val provider_ast = parse_full_frontend(lifted_local_provider, "app/lifted_local/provider.spl", "app.lifted_local.provider", log)
+    val consumer_ast = parse_full_frontend(lifted_local_consumer, "app/lifted_local/consumer.spl", "app.lifted_local.consumer", log)
+    var modules: Dict<text, ParserModule> = {}
+    modules["app.lifted_local.provider"] = provider_ast
+    val files = [SourceFile(path: "app/lifted_local/provider.spl", content: lifted_local_provider, module_name: "app.lifted_local.provider")]
+    match module_surfaces_from_modules(modules, files):
+        case Ok(surfaces):
+            var provider_lowering = hirlowering_for_module("app/lifted_local/provider.spl", surfaces)
+            var consumer_lowering = hirlowering_for_module("app/lifted_local/consumer.spl", surfaces)
+            val provider = provider_lowering.lower_module(provider_ast)
+            val consumer = consumer_lowering.lower_module(consumer_ast)
+            expect(provider_lowering.errors.len()).to_equal(0)
+            expect(consumer_lowering.errors.len()).to_equal(0)
+            var lowering = MirLowering.new(consumer.symbols)
+            var hir_modules: Dict<text, HirModule> = {}
+            hir_modules["provider"] = provider
+            hir_modules["consumer"] = consumer
+            lowering.prescan_module_struct_names(hir_modules, "provider")
+            lowering.prescan_module_struct_names(hir_modules, "consumer")
+            expect(lowering.composite_layout_owner_counts["app.lifted_local.provider::Entry"]).to_equal(1)
+            val mir = lowering.lower_module(consumer, [provider, consumer])
+            return LiftedRecordLayoutFixture(lowering: lowering, mir: mir)
+        case Err(reason): fail("local array provider surface failed: " + reason)
+
+fn lifted_local_array_calls(mir: MirModule) -> i64:
+    var count = 0
+    for function in mir.functions.values():
+        for block in function.blocks:
+            for instruction in block.instructions:
+                match instruction.kind:
+                    case MirInstKind.Call(_, callee, _):
+                        match callee.kind:
+                            case MirOperandKind.Const(MirConstValue.Str(name), _):
+                                if name.ends_with("local_entries"): count = count + 1
+                            case _: ()
+                    case _: ()
+    count
+
 describe "lifted record provider layout context":
     it "preserves imported array owners through ordinary nested and sibling calls":
         val fixture = lifted_record_layout_fixture()
@@ -94,3 +145,13 @@ describe "lifted record provider layout context":
             if error.fatal and error.message.contains("array return record element has conflicting or unknown provider field types"):
                 rejected = true
         expect(rejected).to_be(true)
+
+    it "folds a consumer-local array return over an imported record inside lifted bodies":
+        val fixture = lifted_local_array_fixture()
+        var layout_errors: [text] = []
+        for error in fixture.lowering.errors:
+            if error.message.contains("array return record element"):
+                layout_errors.push(error.message)
+        expect(layout_errors).to_equal([])
+        expect(fixture.lowering.errors.len()).to_equal(0)
+        expect(lifted_local_array_calls(fixture.mir)).to_equal(3)

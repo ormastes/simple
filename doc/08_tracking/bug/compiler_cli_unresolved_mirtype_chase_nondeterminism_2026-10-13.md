@@ -510,3 +510,116 @@ doubled-mapping pattern exists for compiler.blocks (15.blocks parent files
 vs 15.blocks/blocks) but no lib stubs shadow it in the current closure —
 left untouched; (c) the canonical-lane derivation check from cycle 38 rejects
 out-of-tree probe entries (test/_probe_root_tmp) — cosmetic for probes only.
+
+## 2026-11-12 append (goal-mode bootstrap lane): cycle-39 fix commit LOST
+
+The cycle-39 fix cited above as `14c7986dd16` (phase-1 closure native-owner
+retry + residual fixes) is NOT an ancestor of origin/release/1.0.0 and does not
+exist on any local or remote branch (`git log --all --grep` finds nothing). The
+lane branch (fix/mirtype-unresolved-20261013, worktree wt-20261013-mirtype) was
+never merged or was lost in a subsequent tree wipe (this repo has multiple
+"restore tree wiped by" commits, e.g. ae55a746719).
+
+Partial survival at tip (verified 2026-11-12): the closure native-owner
+mechanism `driver_closure_native_owner_v1` (src/compiler/80.driver/
+driver_entry_closure_core.spl:1824) IS present, and the
+`env_get_opt` facade in module_surface_registry_index.spl is present. What
+could not be found: any commit touching module_import_resolution.spl /
+module_surface_registry_index.spl / module_import_registration.spl /
+driver_entry_closure_core.spl between c7431e088615 and tip.
+
+Consequence: the 2026-11-12 fable campaign (pinned c7431e088615) reproduced
+this bug's named victim family in compiler_cli_build ("missing module surface
+for .render/.session/.error_codes/.commands" in src/app/t32_cli +
+"unresolved type: LineStartTable" in src/lib/editor/services). A
+whole-program-lane rerun on tip source (same worktree, build/goal-p4/build3.log)
+built 3122/3122 surfaces and entered HIR with 0 errors — consistent with the
+nondeterministic/order-dependent classification; final verdict pending that
+run's HIR outcome.
+
+## 2026-11-12 append 2: full-CLI reproduction on tip (af5e27e46de), precise victim set
+
+Whole-program lane (SIMPLE_FILE_WORKERS=0, frozen stage2 574c95d2, 3122-module closure,
+build/goal-p4/build3.log in worktree simple-boot-goal-20261112): HIR completed all modules
+with per-module count=0, then collect-all reported `7 module(s) poisoned, 23 error(s)
+collected across 3122 source(s) in phase 3 (HIR lowering)`.
+
+Victims (error counts from the log):
+- src/app/mcp_t32/protocol.spl — ~100 unresolved (Eq, Ord, std, list, unit, Value, TypeScheme, LayoutBox, VisibilityWarning)
+- src/app/editor/{commands,editor_controller,editor_ctrl_wiki,editor_markdown_helpers}.spl — 39 unresolved (Eq, Ord, LayoutBox, list, unit)
+- src/lib/editor/services/md_diagnostics.spl — 29+ `unresolved type: LineStartTable`
+- `missing module surface for diagnostic_batch / diagnostic_v1 / fix_ranking / fix_transaction / source_position` (std.common.diagnostics submodules)
+
+Decisive datapoint: md_diagnostics.spl ALREADY imports LineStartTable explicitly
+(`use std.common.diagnostics.{... LineStartTable}`, line 13) and the package __init__
+re-exports it (`export source_position.{LineStartTable, ...}`, line 24) — the explicit
+named import through a bare per-item package re-export fails to bind. This is the
+documented bare-per-item-re-export -> package-sibling-inference arm failure, one level
+downstream of the lost cycle-39 closure fix (which is present in partial form and does
+not cover it). Fix lane opened: work/chasefix-20261112.
+
+
+## Cycle 40 (2026-11-12, chasefix lane, work/chasefix-20261112): sibling-arm fold mismatch + __init__ parent-bucket defect found and fixed
+Re-examined the chase's package-sibling inference arm
+(module_reexport_materialization.spl) against the 2026-11-12 victim shape
+(`use std.common.diagnostics.{... LineStartTable}` through the package
+__init__'s `export source_position.{...}`). Two concrete defects, both
+pinned with direct arm probes (test/01_unit/compiler/hir/
+package_qualified_reexport_chase_spec.spl drives
+find_reexport_source_walk with the export-origin index and import rows
+stripped so the arm is the only route -- the degraded window shard runs
+observe via origin-owner bail / cross-wired rows):
+
+1. FOLD MISMATCH: build_package_sibling_index keys every bucket by
+   hir_pkg_canonical_module_name(registry_name) -- which folds a leading
+   `std.` to `lib.` -- but the arm computed its lookup package from the
+   UNFOLDED facade spelling (cached_surface_package_name over
+   surface_registry_name_by_physical_index). Any facade whose first
+   registry alias is std.-spelled therefore searched an EMPTY bucket,
+   found zero siblings, and (state.complete and state.valid) memoized a
+   false negative that resurfaced as hard `unresolved type` in innocent
+   importers. Probe receipt (pre-fix): [sibprobe] facade=lib.zzc.facade
+   module_name=std.zzc.facade package=std.zzc siblings=0 -> [sibprobe-miss].
+2. __INIT__ PARENT-BUCKET: for a package __init__ facade, re-exported
+   items live in modules of the package the facade NAMES (its children,
+   bucket `lib.<pkg>`), but the arm only searched
+   package_name_from_name(facade) -- the PARENT package (`lib.<parent>`).
+   Probe receipt (pre-fix): facade=lib.zzc.diagnostics.__init__
+   package=std.zzc.diagnostics siblings=0 -> [sibprobe-miss].
+
+In a HEALTHY registry the arm is normally never reached for these shapes
+(export-origin index / import row / qualified route resolve first -- the
+end-to-end victim-shape scenario in the spec is green before and after),
+which is why the defect only surfaced in the degraded whole-program
+windows and survived every prior cycle.
+
+FIX (module_reexport_materialization.spl, find_reexport_source_walk
+sibling arm): derive the facade name from the scalar alias arrays as
+before, canonicalize it through hir_pkg_canonical_module_name, and search
+BOTH candidate buckets -- module_surface_package_name_from_name(canon)
+(parent package, regular facades) and canon itself (the package an
+__init__/package-alias facade names) -- unioned with per-surface dedupe
+(one physical sibling can carry several spellings across both buckets)
+under the existing exactly-one-match rule. Ambiguity still returns
+not-found; seed-parity soft tolerance untouched. The env-gated sibprobe
+line now prints registry_name/canon/packages.
+
+Verification (seed interpreter, worktree):
+- package_qualified_reexport_chase_spec: 4/4 PASS with the fix; the two
+  std.-spelled arm probes were RED before it (found=false), the neutral
+  control and the end-to-end victim-shape scenarios green both ways.
+- module_surface_numbered_path_spec 4/4, callable_dependency_frozen_alias_retry_spec 6/6,
+  bare_export_facade_chain_reexport_spec 2/2, imported_optional_argument_reexport_hop_regression_spec 3/3 PASS.
+- reexport_physical_cache_spec 16/4 and reexport_cycle_memo_spec 2/1 FAIL
+  IDENTICALLY at the base commit (pre-existing, not regressions);
+  same_named_package_facade_reexport_spec IMPROVED from 2/3 to 4/1.
+
+Medium-closure status: the frozen stage2 binary (stage3/aarch64...
+/stage2-admitted/simple) reproduces infra BLOCKERS, not the chase failure
+-- every native-build attempt (md_diagnostics / md_lsp_main entries,
+SIMPLE_SCV_INVENTORY_COLD_INIT=1, fresh cache dirs) died in cold-HIR
+receipt capture ('cold-hir-lowered-module-missing:<entry>') before/at HIR
+with zero unresolved-type errors; that receipt gate is SCV/admission
+state entangled with the main checkout's journal, not the chase. The
+3122-module full-CLI repro remains the parent's recorded evidence; a
+candidate-built stage2 rerun is the follow-up.

@@ -436,6 +436,8 @@ pub use sffi::{
     rt_file_exists_probe_end,
     rt_file_is_char_device,
     rt_file_is_regular_no_follow,
+    rt_file_modified,
+    rt_file_modified_time,
     rt_file_stat,
     // File ops
     rt_file_canonicalize,

@@ -1520,6 +1520,46 @@ impl Lowerer {
         Ok(found)
     }
 
+    /// Declared callback parameter types of every `fn(...)`-typed user
+    /// parameter of the methods of `owner`; `generics` are the type-parameter
+    /// names in scope on the owner (the method's own are added per method).
+    fn record_method_callback_param_types(
+        &mut self,
+        owner: &str,
+        generics: &[String],
+        methods: &[simple_parser::ast::FunctionDef],
+    ) {
+        use simple_parser::ast::Type;
+        for method in methods {
+            let user_params = if method.params.first().is_some_and(|p| p.name == "self") {
+                &method.params[1..]
+            } else {
+                &method.params[..]
+            };
+            if !user_params.iter().any(|p| matches!(p.ty, Some(Type::Function { .. }))) {
+                continue;
+            }
+            let erased = |name: &String| generics.contains(name) || method.generic_params.contains(name);
+            let callbacks = user_params
+                .iter()
+                .map(|p| match &p.ty {
+                    Some(Type::Function { params, .. }) => Some(
+                        params
+                            .iter()
+                            .map(|ty| match ty {
+                                Type::Simple(name) if erased(name) => None,
+                                other => Some(other.clone()),
+                            })
+                            .collect(),
+                    ),
+                    _ => None,
+                })
+                .collect();
+            self.method_callback_param_types
+                .insert(format!("{}.{}", owner, method.name), callbacks);
+        }
+    }
+
     fn collect_fn_param_defaults(&mut self, ast_module: &Module) {
         for item in &ast_module.items {
             if let Node::Function(f) = item {
@@ -1560,6 +1600,7 @@ impl Lowerer {
                     _ => None,
                 };
                 if let Some(owner) = owner {
+                    self.record_method_callback_param_types(owner, &impl_block.generic_params, &impl_block.methods);
                     let module_owner = Self::flatten_owner_of(impl_block.attributes.iter().map(|a| a.name.as_str()));
                     for method in &impl_block.methods {
                         let user_params = if method.params.first().is_some_and(|p| p.name == "self") {
@@ -1575,6 +1616,7 @@ impl Lowerer {
                 }
             }
             if let Node::Class(class) = item {
+                self.record_method_callback_param_types(&class.name, &class.generic_params, &class.methods);
                 let module_owner = Self::flatten_owner_of(class.attributes.iter().map(|a| a.name.as_str()));
                 for method in &class.methods {
                     let user_params = if method.params.first().is_some_and(|p| p.name == "self") {
@@ -1589,6 +1631,7 @@ impl Lowerer {
                 }
             }
             if let Node::Struct(struct_) = item {
+                self.record_method_callback_param_types(&struct_.name, &struct_.generic_params, &struct_.methods);
                 let module_owner = Self::flatten_owner_of(struct_.attributes.iter().map(|a| a.name.as_str()));
                 for method in &struct_.methods {
                     let user_params = if method.params.first().is_some_and(|p| p.name == "self") {
@@ -1680,6 +1723,7 @@ impl Lowerer {
         let qualified = super::flatten_struct_owner::module_with_owner_qualified_structs(
             ast_module,
             &self.flatten_owner_import_bindings,
+            &self.flatten_owner_glob_sources,
         )
         .map_err(|alias| {
             LowerError::Unsupported(format!(
@@ -1729,7 +1773,17 @@ impl Lowerer {
         let mut chunks: Vec<(FunctionContext, Vec<HirStmt>)> = Vec::new();
         let mut dyn_ctx = FunctionContext::new(TypeId::VOID);
         let mut dyn_body: Vec<HirStmt> = Vec::new();
+        // Flatten owner of the global declared by the current item: the owner
+        // marker const immediately preceding it (same rule as
+        // `flatten_global_owner::declaration_owners`).
+        let mut marked_owner: Option<String> = None;
         for item in &ast_module.items {
+            let declaring_owner = marked_owner.take();
+            if let Node::Const(c) = item {
+                if let Some(owner) = c.name.strip_prefix(crate::interpreter::FLATTEN_GLOBAL_OWNER_MARKER_PREFIX) {
+                    marked_owner = Some(owner.to_string());
+                }
+            }
             let (name, value): (String, &Expr) = match item {
                 Node::Let(l) => match (extract_pattern_name(&l.pattern), l.value.as_ref()) {
                     (Some(n), Some(v)) => (n, v),
@@ -1754,8 +1808,14 @@ impl Lowerer {
             }
             let global_ty = *self.globals.get(&name).unwrap_or(&TypeId::ANY);
             // Resolve the initializer's own references through the owner
-            // of the global it initializes (flattened same-name globals).
-            let initializer_owner = self.flatten_global_symbol_owners.get(&name).cloned().flatten();
+            // of the global it initializes. `flatten_global_symbol_owners`
+            // only knows COLLIDING (renamed) globals; every other imported
+            // module's global is owned by its marker. Leaving that `None`
+            // lowered `val c = imported_fn(0)` as if the entry file wrote it,
+            // so the importer's own `use` was ignored ("<entry file> neither
+            // defines nor imports it").
+            let initializer_owner =
+                self.flatten_global_symbol_owners.get(&name).cloned().flatten().or(declaring_owner);
             let previous_owner = std::mem::replace(&mut self.current_function_owner, initializer_owner);
             let previous_type_scope = self.enter_flatten_struct_scope();
             let hir_val = self.lower_expr(value, &mut dyn_ctx);

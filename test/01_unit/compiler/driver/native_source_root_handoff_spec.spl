@@ -3,6 +3,7 @@ use app.io._CliCompile.native_build_closure.{
     _native_build_entry_closure, _nb_scv_snapshot_path_v1,
     native_build_closure_source_roots_v1}
 use std.nogc_async_mut.sosix.environment.{sosix_cwd}
+use std.nogc_sync_mut.io.env_ops.{env_set, env_get}
 use compiler.common.driver_core_types.{CompileOptions, compileoptions_normalize_mir_optimization}
 use compiler.common.source_root_resolution.{SourceRootResolutionV1}
 use compiler.driver.driver_build.native_source_root_handoff.{
@@ -84,3 +85,21 @@ describe "native worker source root handoff":
         val rejected = native_source_root_paths_v1([], "test/fixtures/compiler")
         expect(rejected.is_err()).to_equal(true)
         expect(rejected.unwrap_err()).to_equal("SOURCE_ROOT_SELECTORS_MISSING")
+
+    it "admits the MC/DC static probe owner into an import-free entry only when the mode is on":
+        # native_entry_closure_preclosed_walk_omits_mcdc_static_probe_owner_2026-11-12:
+        # the frozen preclosed request skips the pipeline scan that adds this
+        # synthetic edge, so the walk itself must carry it.
+        val entry = "test/fixtures/compiler/composition_roots/00.ambiguous/owner.spl"
+        val previous = env_get("SIMPLE_MCDC_MODE") ?? ""
+        env_set("SIMPLE_MCDC_MODE", "on")
+        val with_probe = _native_build_entry_closure(entry, [])
+        env_set("SIMPLE_MCDC_MODE", "off")
+        val without_probe = _native_build_entry_closure(entry, [])
+        env_set("SIMPLE_MCDC_MODE", previous)
+        var admitted = false
+        for p in with_probe:
+            if p.ends_with("/mcdc/static_probe.spl"): admitted = true
+        expect(admitted).to_equal(true)
+        for p in without_probe:
+            expect(p.ends_with("/mcdc/static_probe.spl")).to_equal(false)

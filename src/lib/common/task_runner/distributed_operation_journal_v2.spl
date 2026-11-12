@@ -9,7 +9,8 @@ use std.nogc_sync_mut.database.wal.{WalEntry, WalEntryType}
 use std.nogc_sync_mut.database.wal_segmented.{database_wal_current_v1,
     database_wal_revision_open_v1, database_wal_segment_read_strict_v1, database_wal_commit_v1}
 use std.nogc_sync_mut.io.file_ops.{file_lock, file_unlock, file_atomic_write, file_read_regular_no_follow_bounded}
-use std.nogc_sync_mut.io_runtime.{dir_create, file_delete}
+use std.nogc_sync_mut.io_runtime.{file_delete}
+use std.nogc_sync_mut.io.dir_entry_ops.{directory_create_private}
 use std.nogc_sync_mut.io.file_lock_owned_v2.{FileLockOwnerV2, FileLockOpenV2,
     FileLockReleaseStateV2, file_lock_open_owned_v2, file_lock_release_owned_v2,
     file_lock_owner_live_v2, file_lock_owner_state_v2}
@@ -69,7 +70,9 @@ fn distributed_operation_journal_open_v2(root: text, authority_digest: text, non
     if root == "" or not builder_digest_valid_v1(authority_digest) or not builder_digest_valid_v1(nonce) or
             maximum_events <= 0 or maximum_events > 100000:
         return Err("OPERATION_JOURNAL_CONFIGURATION_INVALID")
-    dir_create(root, true)
+    # The journal holds signed authority state and its root is later opened
+    # as a trusted directory; create it private instead of 0777 & ~umask.
+    directory_create_private(root)
     val held = file_lock(root + "/parent.lock", 1)
     if held < 0: return Err("OPERATION_JOURNAL_ALREADY_OWNED")
     val lease = "DISTRIBUTED-OPERATION-LEASE-V2\n{nonce}\n{authority_digest}\n"
@@ -228,7 +231,9 @@ pub fn distributed_operation_journal_open_owned_v2(root: text, authority_digest:
     if (root == "" or not builder_digest_valid_v1(authority_digest) or
             not builder_digest_valid_v1(nonce) or maximum_events <= 0 or maximum_events > 100000):
         return DistributedOperationJournalOpenV2.Rejected("OPERATION_JOURNAL_CONFIGURATION_INVALID")
-    dir_create(root, true)
+    # The journal holds signed authority state and its root is later opened
+    # as a trusted directory; create it private instead of 0777 & ~umask.
+    directory_create_private(root)
     val acquired = file_lock_open_owned_v2(root + "/parent.lock", 1)
     var held: Option<FileLockOwnerV2> = nil
     match acquired:

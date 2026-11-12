@@ -284,6 +284,20 @@ bootstrap_startup_jobs_apply_policy() {
       if [ "$selfhost_jobs" -gt "$jobs_memory_fit" ]; then
         selfhost_jobs=$jobs_memory_fit
         jobs_memory_reason=memory-clamped
+        # Stage 3 must run on >= 2 workers (2026-11-12). This is a REQUEST,
+        # not an admission: the compiler re-admits it against the enforcing
+        # tree RSS guard and host headroom (shard_threads_guarded_floor_v1 in
+        # src/app/cli/shard_mem_clamp.spl) and stays serial when two workers
+        # do not fit. A serial resolved request is left serial. It is NOT a
+        # guarantee: this clamp fires when startup MemAvailable < 2 x worker
+        # budget, while the compiler floor needs tree cap <= MemAvailable -
+        # headroom, so the request only yields 2 workers if memory frees up
+        # between startup and Stage 3. It also widens the enforced tree cap by
+        # one per-job step (tree-rss-policy.shs) even when the compiler stays
+        # serial (review of #8596).
+        if [ "$selfhost_jobs_resolved" -ge 2 ] && [ "$selfhost_jobs" -lt 2 ]; then
+          selfhost_jobs=2
+        fi
       fi
       [ "$jobs_memory_reason" != memory-clamped ] || job_source="${job_source}+memory"
     fi

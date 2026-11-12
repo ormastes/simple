@@ -1,0 +1,68 @@
+# Imported method signatures without a surface callable type (no `->`):
+# receiver-split param registry consulted by MIR symbol_to_operand.
+# Stage 3 census 2026-11-12: `w.put_f64(b_value)` in generated hir_codec.spl
+# panicked Cranelift (E-BACKEND-CRANELIFT-CALL-ABI, callee signature unknown).
+use std.spec.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId, SymbolKind}
+use compiler.mir.mir_data.{bootstrap_fn_param_hir_types_register, bootstrap_fn_param_hir_types_lookup,
+    mir_method_receiver_tail_key_v1, mir_method_receiver_handle_word_kind_v1,
+    bootstrap_method_receiver_tail_params_lookup_v1, bootstrap_method_receiver_tail_params_register_v1}
+
+fn tail_f64() -> HirType:
+    HirType(kind: HirTypeKind.Float(64), span: Span.empty())
+
+fn tail_named(id: i64) -> HirType:
+    HirType(kind: HirTypeKind.Named(SymbolId(id: id), []), span: Span.empty())
+
+fn tail_float_bits(type_: HirType) -> i64:
+    match type_.kind:
+        case HirTypeKind.Float(bits): bits
+        case _: -1
+
+describe "method receiver-tail signature registry":
+    it "keys receiver tails apart from the full param record":
+        expect(mir_method_receiver_tail_key_v1("app.w.W.put_f64")).to_equal("app.w.W.put_f64#receiver-tail")
+
+    it "answers an f64 tail for a method whose surface type is nil":
+        val link = "spec.tail.W.put_f64"
+        bootstrap_fn_param_hir_types_register(mir_method_receiver_tail_key_v1(link), [tail_f64()])
+        val found = bootstrap_method_receiver_tail_params_lookup_v1(link)
+        expect(found == nil).to_equal(false)
+        if val params = found:
+            expect(params.len()).to_equal(1)
+            expect(tail_float_bits(params[0])).to_equal(64)
+        # The full record (receiver included) is not consulted and stays absent.
+        expect(bootstrap_fn_param_hir_types_lookup(link) == nil).to_equal(true)
+
+    it "keeps a tail whose first non-receiver param is Named unknown":
+        # `me put_pair(p: Pair, v: f64)`: the Named param is provider-local, so
+        # the whole tail is rejected and the call keeps failing loudly.
+        val link = "spec.tail.W.put_pair"
+        bootstrap_fn_param_hir_types_register(mir_method_receiver_tail_key_v1(link), [tail_named(7), tail_f64()])
+        expect(bootstrap_method_receiver_tail_params_lookup_v1(link) == nil).to_equal(true)
+
+    it "rejects a conflicting receiver-tail re-registration instead of last-writer-wins":
+        # Two provider spellings that sanitize to one key with different tails
+        # (review of #8594): the key must become unknown, never the last list.
+        val link = "spec.tail.W.collide"
+        bootstrap_method_receiver_tail_params_register_v1(link, [tail_f64()])
+        bootstrap_method_receiver_tail_params_register_v1(link, [tail_f64()])
+        expect(bootstrap_method_receiver_tail_params_lookup_v1(link) == nil).to_equal(false)
+        bootstrap_method_receiver_tail_params_register_v1(link, [tail_f64(), tail_f64()])
+        expect(bootstrap_method_receiver_tail_params_lookup_v1(link) == nil).to_equal(true)
+
+    it "answers nothing for an unregistered method":
+        expect(bootstrap_method_receiver_tail_params_lookup_v1("spec.tail.W.never_registered") == nil).to_equal(true)
+
+describe "method receiver handle word":
+    it "admits only the leading self/me of a plain class or struct owner":
+        expect(mir_method_receiver_handle_word_kind_v1("self", Some(SymbolKind.Class), false)).to_equal(true)
+        expect(mir_method_receiver_handle_word_kind_v1("me", Some(SymbolKind.Struct), false)).to_equal(true)
+
+    it "refuses unit/newtype owners, other owners and non-receiver names":
+        expect(mir_method_receiver_handle_word_kind_v1("self", Some(SymbolKind.Struct), true)).to_equal(false)
+        expect(mir_method_receiver_handle_word_kind_v1("self", Some(SymbolKind.Enum), false)).to_equal(false)
+        expect(mir_method_receiver_handle_word_kind_v1("self", Some(SymbolKind.TypeAlias), false)).to_equal(false)
+        expect(mir_method_receiver_handle_word_kind_v1("self", None, false)).to_equal(false)
+        expect(mir_method_receiver_handle_word_kind_v1("v", Some(SymbolKind.Class), false)).to_equal(false)

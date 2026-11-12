@@ -363,6 +363,29 @@ pub fn rt_file_size(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
+/// `rt_file_modified(path) -> i64`: native whole-second mtime via the linked
+/// runtime twin (`simple_runtime::value::rt_file_modified`); -1 on failure
+/// (missing file, path over 4095 bytes, invalid UTF-8). The `file_modified`
+/// facade in src/lib/nogc_sync_mut/sffi/io.spl is its only live caller.
+pub fn rt_file_modified(args: &[Value]) -> Result<Value, CompileError> {
+    let path = extract_path(args, 0)?;
+    let path_rv = simple_runtime::value::rt_string_new(path.as_ptr(), path.len() as u64);
+    Ok(Value::Int(simple_runtime::value::rt_file_modified(path_rv)))
+}
+
+/// `rt_file_modified_time(path) -> i64`: same native mtime policy as
+/// `rt_file_modified`; the `file_modified_time` facade in
+/// src/lib/nogc_sync_mut/sffi/io.spl (re-exported through
+/// std.nogc_sync_mut.io.file_ops) is its live caller, and `scv snapshot`
+/// reaches it through the std.nogc_sync_mut.database/daemon_sdk lock paths.
+/// Without this row the interpret lane died with
+/// "unknown extern function: rt_file_modified_time" (PB-1).
+pub fn rt_file_modified_time(args: &[Value]) -> Result<Value, CompileError> {
+    let path = extract_path(args, 0)?;
+    let path_rv = simple_runtime::value::rt_string_new(path.as_ptr(), path.len() as u64);
+    Ok(Value::Int(simple_runtime::value::rt_file_modified_time(path_rv)))
+}
+
 /// Open a raw Unix file descriptor for the loader's mmap path.
 #[cfg(unix)]
 pub fn rt_open_fd(args: &[Value]) -> Result<Value, CompileError> {

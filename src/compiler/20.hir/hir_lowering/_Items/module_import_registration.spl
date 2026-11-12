@@ -47,6 +47,51 @@ use compiler.frontend.core.types.{primitive_integer_bit_width_from_name, custom_
 use compiler.core.{int_to_str}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 
+fn hir_imported_struct_layout(symbol: SymbolId, composite: ModuleSurfaceComposite, field_types: Dict<text, HirType>) -> HirStruct:
+    """Non-owning layout of an imported struct (HirModule.imported_layouts).
+    Field types are the importer-projected surface types. Fields carry no
+    importer symbol and no default body: the declaring module owns both."""
+    var fields: [HirField] = []
+    for raw_field in composite.fields:
+        val field: ModuleSurfaceField = raw_field
+        fields = fields.push(HirField(
+            symbol: SymbolId(id: -1),
+            name: field.name,
+            type_: field_types[field.name],
+            has_default: false,
+            default: HirExpr(kind: HirExprKind.NilLit, has_type_: true, type_: HirType(kind: HirTypeKind.Unit, span: composite.span), span: composite.span),
+            visibility: field.visibility,
+            is_public: field.visibility == Visibility.Public,
+            is_volatile: false,
+            has_bits_attr: false,
+            bits_width: 0,
+            has_fixed_address: false,
+            fixed_address: 0,
+            span: composite.span
+        ))
+    HirStruct(
+        symbol: symbol,
+        name: composite.name,
+        type_params: [],
+        fields: fields,
+        visibility: composite.visibility,
+        is_public: composite.is_public,
+        has_doc_comment: false,
+        doc_comment: "",
+        span: composite.span,
+        has_layout_attr: false,
+        layout_attr: parse_layout_attrs([]),
+        has_platform_attr: false,
+        platform_has_error: false,
+        platform_has_warning: false,
+        platform_diagnostic_message: "",
+        platform_diagnostic_line: 0,
+        is_generic_template: composite.type_params.len() > 0,
+        has_specialization_of: false,
+        specialization_of: "",
+        type_bindings: {}
+    )
+
 impl HirLowering:
     me resolve_qualified_named_type(name: text, span: Span) -> i64:
         # Fully qualified annotations name their declaring module, not a local
@@ -747,6 +792,11 @@ impl HirLowering:
             self.prescan_type_parameters = saved_parameters
             val canonical_composite_name = imported_mod.module_name + "." + imported_name
             self.struct_field_types_by_name[canonical_composite_name] = imported_field_types
+            # bug=hir_imported_nominal_return_layout_not_transported_2026-11-12:
+            # carry the declaring surface's layout in the NON-owning side table.
+            if kind == SymbolKind.Struct:
+                self.imported_layouts[imported_type] = hir_imported_struct_layout(
+                    imported_type, composite, imported_field_types)
             var imported_type_param_names: [text] = []
             for raw_imported_tp in composite.type_params:
                 val imported_tp: ParserTypeParam = raw_imported_tp
