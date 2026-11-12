@@ -349,6 +349,14 @@ fn posix_abi_serves_path_identity_externs() {
     for name in ["malloc", "free", "realpath", "readlink", "open", "read", "pread", "write", "close", "fsync"] {
         assert!(super::posix_abi::is_supported_name(name), "{name} not served by posix_abi");
     }
+    // retained_file_abi.spl's Linux branch declares exactly these three.
+    for name in ["statx", "openat", "geteuid"] {
+        assert_eq!(
+            super::posix_abi::is_supported_name(name),
+            cfg!(target_os = "linux"),
+            "{name} must be served by posix_abi on Linux only"
+        );
+    }
     let expected_host_owner = if cfg!(any(target_os = "macos", target_os = "freebsd")) {
         Some("__error")
     } else if cfg!(target_os = "linux") {

@@ -6,7 +6,11 @@
 //! * `src/lib/nogc_sync_mut/io/_PathIdentityPosix/errno_abi.spl`: the host's
 //!   errno-address owner (see [`ERRNO_ADDRESS_NAME`])
 //! * `src/lib/nogc_sync_mut/io/retained_file_abi.spl` (non-Windows branch):
-//!   `open`, `read`, `pread`, `write`, `close`, `fsync`, and `statx` on Linux
+//!   `open`, `read`, `pread`, `write`, `close`, `fsync`, and on Linux `statx`,
+//!   `openat` and `geteuid` (its `@when(os="linux")` block declares exactly
+//!   those three; serving only `statx` left every retained-file open that
+//!   walks beneath a directory descriptor dead with "unknown extern
+//!   function: openat")
 //!
 //! This is the POSIX twin of `windows_abi.rs`: the native link path resolves
 //! these names against libc, but the seed interpreter had no implementation
@@ -46,11 +50,16 @@ use std::cell::Cell;
 use std::collections::BTreeSet;
 use std::sync::Mutex;
 
-/// Declared libc externs implemented on every Unix host (`statx` is added on
-/// Linux in [`is_supported_name`]).
+/// Declared libc externs implemented on every Unix host ([`LINUX_NAMES`] are
+/// added on Linux in [`is_supported_name`]).
 const COMMON_NAMES: &[&str] = &[
     "malloc", "free", "realpath", "readlink", "open", "read", "pread", "write", "close", "fsync",
 ];
+
+/// Externs `retained_file_abi.spl` declares only in its Linux branch. They
+/// are claimed only there, so a host whose `.spl` branch does not declare
+/// them keeps the explicit unknown-extern error.
+pub const LINUX_NAMES: &[&str] = &["statx", "openat", "geteuid"];
 
 /// The libc errno-address function of this host, or `None` on a Unix host
 /// with no known spelling.
@@ -92,7 +101,7 @@ thread_local! {
 pub fn is_supported_name(name: &str) -> bool {
     COMMON_NAMES.contains(&name)
         || ERRNO_ADDRESS_NAME == Some(name)
-        || (cfg!(target_os = "linux") && name == "statx")
+        || (cfg!(target_os = "linux") && LINUX_NAMES.contains(&name))
 }
 
 fn check_arity(name: &str, args: &[Value], allowed: &[usize]) -> Result<(), CompileError> {
@@ -221,6 +230,9 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
         "open" => &[2, 3],
         "pread" => &[4],
         "statx" if cfg!(target_os = "linux") => &[5],
+        // Fixed four-argument form: the declaration always passes `mode`.
+        "openat" if cfg!(target_os = "linux") => &[4],
+        "geteuid" if cfg!(target_os = "linux") => &[0],
         _ => return Err(super::common::unknown_function(name)),
     };
     check_arity(name, args, arity)?;
@@ -264,6 +276,12 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
                 a[3] as libc::c_uint,
                 ptr(a[4]),
             ) as i64,
+            #[cfg(target_os = "linux")]
+            "openat" => libc::openat(a[0] as libc::c_int, ptr(a[1]), a[2] as libc::c_int, a[3] as libc::c_uint) as i64,
+            // geteuid cannot fail and does not set errno; the capture below
+            // then records whatever the thread already had, as libc would leave it.
+            #[cfg(target_os = "linux")]
+            "geteuid" => libc::geteuid() as i64,
             _ => return Err(super::common::unknown_function(name)),
         }
     };
@@ -296,7 +314,75 @@ mod tests {
         }
         assert!(!is_supported_name("rt_malloc"));
         assert!(!is_supported_name("GetProcessHeap"));
-        assert_eq!(is_supported_name("statx"), cfg!(target_os = "linux"));
+        for name in LINUX_NAMES {
+            assert_eq!(is_supported_name(name), cfg!(target_os = "linux"), "{name}");
+        }
+    }
+
+    /// `retained_file_abi.spl` opens a no-follow child beneath an owned
+    /// directory descriptor; before `openat` was served every such open died
+    /// with "unknown extern function: openat" in the interpreter.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn openat_opens_a_child_beneath_a_directory_descriptor_and_reports_errno() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("child"), b"below").unwrap();
+        let dir = c_text(temp.path().to_str().unwrap());
+        let dir_fd = int_of(dispatch(
+            "open",
+            &[Value::Int(dir), Value::Int((libc::O_RDONLY | libc::O_DIRECTORY) as i64)],
+        ));
+        assert!(dir_fd >= 0);
+        let child = c_text("child");
+        let flags = (libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC) as i64;
+        let fd = int_of(dispatch(
+            "openat",
+            &[Value::Int(dir_fd), Value::Int(child), Value::Int(flags), Value::Int(0)],
+        ));
+        assert!(fd >= 0);
+        let buffer = c_text("     ");
+        assert_eq!(int_of(dispatch("read", &[Value::Int(fd), Value::Int(buffer), Value::Int(5)])), 5);
+        assert_eq!(unsafe { std::slice::from_raw_parts(buffer as *const u8, 5) }, b"below");
+        assert_eq!(int_of(dispatch("close", &[Value::Int(fd)])), 0);
+
+        // A missing child fails with ENOENT through the interpreter's errno cell.
+        let absent = c_text("absent");
+        assert_eq!(
+            int_of(dispatch(
+                "openat",
+                &[Value::Int(dir_fd), Value::Int(absent), Value::Int(flags), Value::Int(0)]
+            )),
+            -1
+        );
+        let cell = int_of(dispatch(ERRNO_ADDRESS_NAME.unwrap(), &[]));
+        assert_eq!(unsafe { *(cell as *const i32) }, libc::ENOENT);
+
+        // A symlink child is refused by O_NOFOLLOW (ELOOP), which is the
+        // property the retained-file owner relies on.
+        std::os::unix::fs::symlink(temp.path().join("child"), temp.path().join("link")).unwrap();
+        let link = c_text("link");
+        assert_eq!(
+            int_of(dispatch(
+                "openat",
+                &[Value::Int(dir_fd), Value::Int(link), Value::Int(flags), Value::Int(0)]
+            )),
+            -1
+        );
+        assert_eq!(unsafe { *(cell as *const i32) }, libc::ELOOP);
+
+        assert_eq!(int_of(dispatch("close", &[Value::Int(dir_fd)])), 0);
+        for p in [dir, child, buffer, absent, link] {
+            dispatch("free", &[Value::Int(p)]).unwrap();
+        }
+        // The fixed four-argument declaration is the only accepted arity.
+        assert!(dispatch("openat", &[Value::Int(0), Value::Int(0), Value::Int(0)]).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn geteuid_is_the_real_effective_uid_and_takes_no_arguments() {
+        assert_eq!(int_of(dispatch("geteuid", &[])), unsafe { libc::geteuid() } as i64);
+        assert!(dispatch("geteuid", &[Value::Int(0)]).is_err());
     }
 
     /// Only this host's errno spelling is claimed; every other spelling falls
