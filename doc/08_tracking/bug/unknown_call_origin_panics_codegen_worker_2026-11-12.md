@@ -63,3 +63,12 @@ With the run-13 Stage 2 binary, from a tree that does NOT carry the HIR
 fix, `SIMPLE_BOOTSTRAP=1 <stage2> native-build src/app/office/word/word_app.spl
 --backend=cranelift --low-memory --entry-closure --threads 1 --cache-dir <d> -o <o>`
 aborts in ~15 s (EXIT=134). Any future Unknown producer has the same effect.
+
+## Addendum (2026-11-13): second producer observed
+
+The s3gen stage3 self-build (pinned df719eff44cf, which CONTAINS the run-13 HIR fix
+168a972855a) hit the same panic in codegen of `compiler.driver_cache.driver_hir_archive_schedule_v1`
+(SIGABRT, ~36 GiB RSS, memory rules satisfied). Tracked separately in
+`unknown_call_origin_driver_hir_archive_stage3_2026-11-13.md`. Confirms the fail-stop shape
+remains the exposure: any future Unknown producer kills the whole staged build with no
+per-unit census.
