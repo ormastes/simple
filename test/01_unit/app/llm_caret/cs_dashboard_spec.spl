@@ -31,7 +31,7 @@ measurements — treat that as a product defect, not a test artifact.
 use std.spec.*
 use app.llm_caret.cs_dashboard.{cs_resolve_exe, windows_executable_names,
     CsAgent, CsDashboard, cs_dashboard_new, cs_refresh, cs_render,
-    cs_handle_command, cs_help_text, cs_launch_argv, cs_apply_action, cs_fit_sgr
+    cs_handle_command, cs_help_text, cs_launch_argv, cs_launch_argv_with_extras, cs_apply_action, cs_fit_sgr
 }
 use app.llm_caret.pane_backend.{pane_spawn, pane_kill}
 
@@ -153,6 +153,37 @@ describe "cs dashboard - launching agents":
 
         step("an invalid spec yields no command at all")
         expect(cs_launch_argv("claudee").len()).to_equal(0)  # oracle: an unparsable spec must produce no argv
+
+    it "passes extra words after the spec through to the agent argv":
+        # @req REQ-CSDASH-005
+        step("extras ride on the action string and the agent spec")
+        val d = cs_dashboard_new("caret")
+        val (after, answer) = cs_handle_command(d, "/launch caret:slang/m --config /tmp/a.sdn")
+        expect(answer.ends_with("--config /tmp/a.sdn")).to_equal(true)
+        expect(after.agents.len()).to_equal(1)
+        expect(after.agents[0].spec).to_contain("--config /tmp/a.sdn")
+
+        step("argv gets the extras appended verbatim, in order")
+        val argv = cs_launch_argv_with_extras("caret:slang/m", ["--config", "/tmp/a.sdn"])
+        expect(argv.len()).to_equal(cs_launch_argv("caret:slang/m").len() + 2)
+        expect(argv[argv.len() - 2]).to_equal("--config")
+        expect(argv[argv.len() - 1]).to_equal("/tmp/a.sdn")
+
+    it "keeps the no-extras launch action unchanged":
+        # @req REQ-CSDASH-005
+        step("plain launch")
+        val d = cs_dashboard_new("caret")
+        val (after, answer) = cs_handle_command(d, "/launch caret:slang/m")
+        expect(answer).to_equal("launch:a1 caret:slang/m")
+        expect(after.agents[0].spec).to_equal("caret:slang/m")
+
+    it "still rejects an invalid first word when extras follow":
+        # @req REQ-CSDASH-004
+        step("bad harness with extras")
+        val d = cs_dashboard_new("caret")
+        val (after, answer) = cs_handle_command(d, "/launch nope:x --config y")
+        expect(after.agents.len()).to_equal(0)
+        expect(answer).to_contain("unknown harness")
 
 describe "cs dashboard - selecting and maximizing panes":
     # @manual_section: cs-dashboard-panes

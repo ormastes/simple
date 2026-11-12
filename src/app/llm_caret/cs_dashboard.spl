@@ -71,7 +71,7 @@ fn _usage_text(a: CsAgent) -> text:
 
 fn cs_help_text() -> text:
     val lines = [
-        "/launch <spec>   launch an agent (harness[:provider][/model])",
+        "/launch <spec> [args...]   launch an agent (harness[:provider][/model])",
         "/switch <n|id>   select an agent and focus its pane",
         "/max             maximize the selected agent's pane",
         "/key <name>      press enter|esc|tab|space|up|down|left|right|ctrl-c in its pane",
@@ -171,18 +171,27 @@ fn cs_handle_command(d: CsDashboard, line: text) -> (CsDashboard, text):
         return (d, _agent_list_text(d))
 
     if cmd == "/launch":
-        val spec = parse_harness_spec(arg)
+        # Extra args are space-split words; an arg containing spaces is not supported.
+        val launch_words = _words(arg)
+        val first = if launch_words.len() > 0: launch_words[0] else: ""
+        val spec = parse_harness_spec(first)
         if not spec.valid:
             return (d, spec.error)
         val display = harness_spec_display(spec)
+        var extras_text = ""
+        var wi = 1
+        while wi < launch_words.len():
+            extras_text = extras_text + " " + launch_words[wi]
+            wi = wi + 1
+        val shown = display + extras_text
         val agent_id = "a" + (d.agents.len() + 1).to_text()
-        val fresh = CsAgent(agent_id: agent_id, spec: display,
+        val fresh = CsAgent(agent_id: agent_id, spec: shown,
             status: "pending: not launched", pid: -1, pane_id: "",
             cpu_pct: -1.0, rss_mb: -1, detail: "queued by /launch")
         val agents = d.agents + [fresh]
         val next = _dash(d, d.manager_status, agents, agents.len() - 1,
             _logged(d, "launch " + display + " as " + agent_id))
-        return (next, "launch:" + agent_id + " " + display)
+        return (next, "launch:" + agent_id + " " + shown)
 
     if cmd == "/switch":
         val idx = _resolve(d, arg)
@@ -586,6 +595,13 @@ fn cs_launch_argv(spec_text: text) -> [text]:
         return [spec.harness, "--model", spec.model]
     [spec.harness]
 
+# Launch argv plus extra words appended verbatim, in order. Invalid spec -> [].
+fn cs_launch_argv_with_extras(spec_text: text, extras: [text]) -> [text]:
+    val argv = cs_launch_argv(spec_text)
+    if argv.len() == 0:
+        return []
+    argv + extras
+
 # Resolves a launch command to something that can actually be executed:
 # SIMPLE_BINARY, then PATH, then the repo-local wrapper. Returns "" when the
 # command genuinely cannot be found, so the caller reports that instead of
@@ -674,8 +690,13 @@ fn cs_apply_action(d: CsDashboard, action: text) -> (CsDashboard, text):
         return (d, "pane backend refused to kill " + words[2])
     if head.starts_with("launch:"):
         val agent_id = head.split(":")[1]
-        val spec_text = _rest(words)
-        val argv = cs_launch_argv(spec_text)
+        val spec_text = if words.len() > 1: words[1] else: ""
+        var extras: [text] = []
+        var xi = 2
+        while xi < words.len():
+            extras = extras + [words[xi]]
+            xi = xi + 1
+        val argv = cs_launch_argv_with_extras(spec_text, extras)
         if argv.len() == 0:
             return (d, "cannot launch " + spec_text + ": invalid spec")
         var args: [text] = []
@@ -723,4 +744,4 @@ export CsAgent, CsDashboard
 export cs_dashboard_new, cs_refresh, cs_render, cs_handle_command, cs_help_text
 export cs_frame_rows, cs_fit, cs_fit_sgr, cs_agent_area, cs_stderr_path, cs_poll_screens
 export cs_resize_agents
-export cs_launch_argv, cs_apply_action, cs_resolve_exe, windows_executable_names
+export cs_launch_argv, cs_launch_argv_with_extras, cs_apply_action, cs_resolve_exe, windows_executable_names
