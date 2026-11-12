@@ -31,19 +31,35 @@ fn run_sdoctest_mode(options: TestOptions, config: SdoctestConfig) -> SdoctestRu
     # Config-driven: `path_runs: include` widens an implicit path-scoped run to
     # the configured sources; an explicit --sdoctest or .md target stays narrow.
     val widen = config.path_run_include_sources and not options.sdoctest and not cli_path.ends_with(".md")
-    val files = discover_sdoctest_files_for_path_run(config, cli_path, widen)
+    val discovered = discover_sdoctest_files_for_path_run(config, cli_path, widen)
+    # Registration uses the same canonical extractor as execution
+    # (extract_sdoctest_blocks: closed, non-empty ```simple/spl/sdoctest
+    # fences — the contract test_manifest_scanner.count_sdoctest_blocks
+    # documents): a markdown file with zero extractable blocks is not a
+    # doctest file. It contributes zero tests and is skipped from the run
+    # count, never reported as a failure.
+    var files: [text] = []
+    for f in discovered:
+        if extract_sdoctest_blocks(f).len() > 0:
+            files.push(f)
+
+    # Fail-closed is reserved for an explicit doctest request: the --sdoctest
+    # flag or a directly named .md file. A directory positional target names
+    # specs — the markdown lane is a config-enabled complement of that run, so
+    # zero runnable blocks under it is a legal no-op, not an error.
+    val explicit_doc_target = options.sdoctest or cli_path.ends_with(".md")
 
     if options.list:
         print_sdoctest_list(files, config)
         return SdoctestRunResult(files: [], total: 0, passed: 0, failed: 0, skipped: 0, errors: 0, accepted: 0, duration_ms: 0)
 
     if files.len() == 0:
-        if cli_path != "":
-            # Explicit target (a single .md file or directory the caller named
-            # directly) that produced zero matching files is a fail-closed
+        if explicit_doc_target:
+            # An explicit doctest request (a single .md file or a --sdoctest
+            # target) that produced zero runnable files is a fail-closed
             # error, not a silent no-op — mirrors the single-file spec
-            # arbiter's "no examples executed" contract. Config-driven sweeps
-            # (cli_path == "") keep their existing zero-is-ok semantics.
+            # arbiter's "no examples executed" contract. Config-driven and
+            # spec-directory sweeps keep their zero-is-ok semantics.
             print "error: test-runner: no doctest blocks found"
             return SdoctestRunResult(files: [], total: 0, passed: 0, failed: 1, skipped: 0, errors: 0, accepted: 0, duration_ms: 0)
         print "No sdoctest files found."
@@ -81,12 +97,12 @@ fn run_sdoctest_mode(options: TestOptions, config: SdoctestConfig) -> SdoctestRu
     val run_end = time_now_unix_micros()
     val duration_ms = (run_end - run_start) / 1000
 
-    if cli_path != "" and total == 0:
-        # The explicit target resolved to a real file (or files), but none of
-        # them contained an extractable sdoctest block (e.g. markdown with no
-        # fences/markers). Fail-closed, matching the zero-files-found case
-        # above — an explicitly named target with nothing to run is an error,
-        # not a silent pass.
+    if explicit_doc_target and total == 0:
+        # The explicit doctest request resolved to real file(s), but every
+        # extracted block was ignored (or otherwise produced nothing to run).
+        # Fail-closed, matching the zero-files-found case above — an explicit
+        # request with nothing to run is an error, not a silent pass. Sweeps
+        # without an explicit request stay zero-is-ok.
         print "error: test-runner: no doctest blocks found"
         return SdoctestRunResult(files: file_results, total: 0, passed: 0, failed: 1, skipped: skipped, errors: errors, accepted: accepted, duration_ms: duration_ms)
 
