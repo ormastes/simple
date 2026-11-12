@@ -5657,7 +5657,9 @@ impl MirLowering:
         # Only live value-producing edges participate: a returning arm has no
         # value at this merge. Reuse the if/elif all-arm identity join before
         # admitting collection operations on the copied runtime handle.
-        self.remember_merged_arm_identity(result, merged_arm_locals)
+        # Under an expected type the all-untyped Ok/Err join is withheld,
+        # matching the if/elif joins: the expected type owns the slot.
+        self.remember_merged_arm_identity(result, merged_arm_locals, expected_type == None)
         if merged_arm_locals.len() > 0 and self.find_local_hir_type(result.id) != None:
             var all_arrays = true
             var all_dicts = true
@@ -6258,12 +6260,19 @@ impl MirLowering:
     me untyped_result_ctor_payload_witness(local: LocalId, expression: HirExpr) -> HirType?:
         """Payload type of an untyped `Ok(p)` / `Err(p)`: the lowered payload's
         retained type, the expression's own type, a declared struct field's
-        type, or a native text word. Anything else is unknown, never guessed."""
+        type, or a native text word. Anything else is unknown, never guessed.
+        A payload whose type mentions a type parameter (`Ok(x)` with `x: T`)
+        is generic, not a concrete witness: every tier refuses it, so the
+        join never records `Result<T, E>` as if it were concrete."""
         if val known = self.find_local_hir_type(local.id):
+            if self.hir_type_mentions_type_param(known, self.symbols):
+                return None
             match known.kind:
                 case HirTypeKind.Infer(_, _) | HirTypeKind.Error | HirTypeKind.Any: ()
                 case _: return Some(known)
         if val known = self.enum_match_expr_type(expression):
+            if self.hir_type_mentions_type_param(known, self.symbols):
+                return None
             match known.kind:
                 case HirTypeKind.Infer(_, _) | HirTypeKind.Error | HirTypeKind.Any: ()
                 case _: return Some(known)

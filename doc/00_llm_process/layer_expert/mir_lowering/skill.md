@@ -729,6 +729,16 @@ spec `test/01_unit/compiler/50.mir/array_hof_lambda_record_param_field_spec.spl`
   vacuously. Behavioural check = a Stage 2 built from the worktree by the seed
   (stage2-command.transcript argv, ~250 s) native-building
   `test/fixtures/compiler/hir_untyped_if_result_subject/*.spl`.
+- Follow-up (post-merge review): the match join (`lower_enum_match_flat` ->
+  `remember_merged_arm_identity(.., expected_type == None)`) now withholds the
+  all-ctor join under an expected type, like the if/elif joins; and every
+  witness tier refuses a payload type that mentions a type parameter
+  (`Ok(x)` with `x: T` -> no witness). MIR-level probe: `SIMPLE_ANYQ_PROBE=1`
+  prints `early-Let remember ... init_hir_type=` per Let; the generic fixture
+  flips non-nil -> nil. Open, NOT fixed here: an annotated
+  `val r: Result<i64, text> = if/match .. Ok(x_u8) ..` still copies the join's
+  `Result<u8, text>` over the annotation (`let_declared_type_override_v1`
+  returns 0 for a Result init); no native behaviour difference observed.
 
 ## 2026-11-12 — struct ctor operands are in DECLARED order (pinned, no-repro)
 
