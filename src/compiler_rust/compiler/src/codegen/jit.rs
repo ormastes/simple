@@ -245,7 +245,7 @@ impl JitCompiler {
     /// (see `MirLowerer::lower_lambda_expr`); generators, futures and actors
     /// have their own instructions. See `compile_module` for why its presence
     /// disqualifies a module from JIT execution.
-    fn first_lambda_function_impl(mir: &MirModule) -> Option<String> {
+    pub(crate) fn first_lambda_function_impl(mir: &MirModule) -> Option<String> {
         Self::first_unsupported_lambda(mir).map(|(name, _)| name)
     }
 
@@ -349,10 +349,22 @@ impl JitCompiler {
                         callee,
                         param_types,
                         return_type,
+                        signature_declared,
                         ..
                     } = inst
                     {
                         let _ = callee;
+                        // An `ANY` slot of a DECLARED signature (`fn(T) -> T`,
+                        // `fn(any) -> any`) is a tagged `RuntimeValue` word:
+                        // MIR lowering coerced every argument into its declared
+                        // slot, the boxed entry answers a tagged word, and both
+                        // sides carry an `ANY` word verbatim. Only an `ANY`
+                        // that is a mere guess (no declared function type)
+                        // has no correct encoding and stays refused.
+                        let slot_ok = |ty: crate::hir::TypeId| {
+                            crate::codegen::jit_closure_abi_supports(ty)
+                                || (*signature_declared && ty == crate::hir::TypeId::ANY)
+                        };
                         // A VOID result carries no value, so no encoding can be
                         // wrong for it: `block()` on a `fn()` (every std.spec
                         // `describe`/`it`/`skip_if` body) is carryable.
@@ -363,12 +375,21 @@ impl JitCompiler {
                         // keeping such bodies I64.) skip_if's `condition()` is this.
                         let return_ok = *return_type == crate::hir::TypeId::VOID
                             || *return_type == crate::hir::TypeId::BOOL
-                            || crate::codegen::jit_closure_abi_supports(*return_type);
-                        if !(return_ok
-                            && param_types
-                                .iter()
-                                .all(|ty| crate::codegen::jit_closure_abi_supports(*ty)))
-                        {
+                            || slot_ok(*return_type);
+                        // A narrow integer PARAMETER is carryable too: the call
+                        // site widens it (by signedness) and boxes it, and the
+                        // boxed entry decodes and narrows it to the type the
+                        // body declares (`fn(text, i32)`). A narrow RESULT is not
+                        // admitted: the outlined body is declared I64 for it.
+                        let param_ok = |ty: crate::hir::TypeId| {
+                            use crate::hir::TypeId;
+                            slot_ok(ty)
+                                || matches!(
+                                    ty,
+                                    TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::U8 | TypeId::U16 | TypeId::U32
+                                )
+                        };
+                        if !(return_ok && param_types.iter().all(|ty| param_ok(*ty))) {
                             return Some((
                                 func.name.clone(),
                                 format!(

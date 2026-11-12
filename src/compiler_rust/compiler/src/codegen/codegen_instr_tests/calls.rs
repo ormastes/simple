@@ -54,6 +54,7 @@ fn codegen_closure_create_and_indirect_call() {
         return_type: TypeId::I64,
         args: vec![arg],
         effect: crate::mir::Effect::Compute,
+        signature_declared: false,
     });
     block.terminator = Terminator::Return(Some(dest));
 
@@ -112,6 +113,7 @@ fn codegen_indirect_call_boxes_concrete_float_with_any_param_type() {
         return_type: TypeId::F64,
         args: vec![arg],
         effect: crate::mir::Effect::Compute,
+        signature_declared: false,
     });
     block.terminator = Terminator::Return(Some(dest));
 
@@ -154,6 +156,7 @@ fn codegen_indirect_call_boxes_f32_with_any_param_type() {
         return_type: TypeId::F64,
         args: vec![arg],
         effect: crate::mir::Effect::Compute,
+        signature_declared: false,
     });
     block.terminator = Terminator::Return(Some(dest));
     let mut module = MirModule::new();
@@ -184,6 +187,7 @@ fn codegen_indirect_call_keeps_word_shaped_any_argument() {
         return_type: TypeId::I64,
         args: vec![arg],
         effect: crate::mir::Effect::Compute,
+        signature_declared: false,
     });
     block.terminator = Terminator::Return(Some(dest));
     let mut module = MirModule::new();
