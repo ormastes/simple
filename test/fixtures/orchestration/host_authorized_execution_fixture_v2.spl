@@ -15,11 +15,26 @@ use std.nogc_sync_mut.daemon_sdk.distributed_grant_verification_v2.{distributed_
 use std.common.contracts.distributed_control_codec_v2.{distributed_encode_operation_v2, distributed_encode_grant_v2}
 use std.common.crypto.ed25519.pure_ed25519_sign_from_seed_v1
 use std.common.crypto.sha256.sha256_text
-use std.nogc_sync_mut.io.file_ops.secure_temp_dir
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_exists}
+use std.nogc_sync_mut.io_runtime.dir_remove
 use std.nogc_async_mut.container.providers.linux.oci_runtime_v1.*
 use std.nogc_async_mut.container.providers.linux.engine_policy_v1.*
 use std.nogc_async_mut.container.providers.linux.request_v1.linux_oci_request_digest_v1
 use std.nogc_async_mut.container.providers.linux.request_codec_v1.linux_oci_retained_request_encode_v1
+
+# Roots created by this module in the current spec process. Specs call
+# `host_execution_fixture_sweep_v2` from `after_each`, so a fixture or example
+# that fails before its own dispose still leaves no `/tmp` directory behind.
+# Only exact tracked paths are removed, never a glob: other sessions run the
+# same specs concurrently.
+var host_execution_fixture_roots_v2: [text] = []
+
+pub fn host_execution_fixture_sweep_v2() -> i64:
+    var removed = 0
+    for root in host_execution_fixture_roots_v2:
+        if file_exists(root) and dir_remove(root, true): removed = removed + 1
+    host_execution_fixture_roots_v2 = []
+    removed
 
 pub struct HostExecutionFixtureV2:
     root: text
@@ -43,8 +58,6 @@ pub fn host_execution_expired_clock_v2() -> HostReservationAuthorizationContextV
 
 # mode: success | create-failed | start-failed | inspect-mismatch | inspect-failed | expiry-before-start | short-native-id | effect-expired | intent-obstructed | unsupported-device | wrong-backend | resolver-success | resolver-recover-failed | resolver-inspect-failed.
 pub fn host_execution_fixture_v2(mode: text, operation_id: text = "operation_1") -> HostExecutionFixtureV2:
-    val root = secure_temp_dir("/tmp", "host-execution-fixture").unwrap()
-    val state_dir = root + "/provider"
     val scope = ContainerHostScopeV2(physical_host_id: "worker_1", service_scope_id: "user_1", native_machine_id: "machine-1",
         boot_id: "boot-1", provider_generation: 7, continuity_mode: "native-boot-incarnation-v1", continuity_id: "boot-1")
     val fence_id = container_scope_fence_id_v2(scope).unwrap()
@@ -52,8 +65,13 @@ pub fn host_execution_fixture_v2(mode: text, operation_id: text = "operation_1")
         expected_uid: 1000, expected_graph_root: "/home/test/storage", expected_run_root: "/run/user/1000/storage",
         expected_storage_driver: "overlay")
     val info = "{\"host\":{\"security\":{\"rootless\":true},\"serviceIsRemote\":false}," +
-        "\"store\":{\"graphRoot\":\"/home/test/storage\",\"runRoot\":\"/run/user/1000/storage\",\"graphDriverName\":\"overlay\",\"graphOptions\":{}},\"version\":{\"Version\":\"5.0.0\"}}"
+        "\"store\":{\"graphRoot\":\"/home/test/storage\",\"runRoot\":\"/run/user/1000/storage\",\"graphDriverName\":\"overlay\",\"graphOptions\":{}},\"version\":{\"Version\":\"5.0.0\"}" + "}"
     val engine_observation = linux_oci_engine_info_observation_v1(engine_policy, info, "a".repeat(64), 1000).unwrap()
+    # Every pure fallible step above runs before the directory exists; the
+    # root is tracked so a later failing step or example cannot leak it.
+    val root = secure_temp_dir("/tmp", "host-execution-fixture").unwrap()
+    host_execution_fixture_roots_v2.push(root)
+    val state_dir = root + "/provider"
     val request = LinuxOciRequestV1(pod_uid: "workload", attempt: 1, operation_id: operation_id,
         image: "example/agent@sha256:" + "a".repeat(64), bundle_path: "", command: ["/agent"], args: [], timeout_ms: 100,
         cpu_limit_millis: 1000, memory_limit_bytes: 512, pid_limit: 64, network_policy: "none", filesystem_policy: "read-only")
