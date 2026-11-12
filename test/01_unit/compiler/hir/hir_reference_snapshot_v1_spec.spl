@@ -3,6 +3,7 @@
 # Runtime: UNRUN; execute only with the qualified engine authorized by the parent.
 use std.spec.{describe, it, expect}
 use std.spec.step
+use std.nogc_sync_mut.sffi.fault.{fault_set_max_recursion_depth}
 use compiler.common.driver_core_types.{SourceFile}
 use compiler.frontend.parser_types.{ParserModule}
 use compiler.frontend._FlatAstBridge.module_assembly.{parse_and_build_module_checked_reference_v1}
@@ -57,13 +58,19 @@ fn reference_role_count_v1(facts: HirReferenceModuleFactsV1, origin: text, role:
 
 describe("resolved HIR reference facts v1", fn():
     it("walks a deep actual HIR expression without an artificial depth ceiling", fn():
-        step("Parse and lower 192 nested unary expressions around one actual callable reference")
-        val depth = 192
+        step("Parse and lower 96 nested unary expressions (under the parser's deliberate 128-level guard) around one actual callable reference")
+        val depth = 96
         var expression = "target()"
         for position in 0..depth:
             expression = "(-" + expression + ")"
         val source = "fn target() -> i64:\n    return 1\nfn caller() -> i64:\n    return " + expression + "\n"
+        # The collector is worklist-based; the only depth ceiling in this path
+        # is the seed interpreter's 1000-frame guard, which the recursive-descent
+        # parser spends on 96 nested unary/paren levels. Lift the harness guard
+        # for this example only so the walk itself is what is measured.
+        fault_set_max_recursion_depth(6000)
         val result = collect_reference_fixture_v1([("pkg.deep", source)], 0)
+        fault_set_max_recursion_depth(1000)
         expect(result.is_ok()).to_equal(true)
         val facts = result.unwrap()
         expect(reference_role_count_v1(facts, "8:pkg.deep:0", "call")).to_equal(1)
@@ -104,6 +111,19 @@ describe("resolved HIR reference facts v1", fn():
         for row in facts.references:
             if row.origin_key == origin and row.role == "call":
                 expect(row.local_symbol_id).to_equal(declaration_id)
+    )
+    it("keeps real byte spans on a bare identifier call argument after Unicode", fn():
+        step("Prevention: positional ident args once got span 0, expression spans were char offsets")
+        val source = "# λ\nfn target(x: i64) -> i64:\n    return x\nfn caller(y: i64) -> i64:\n    return target(y)\n"
+        val result = collect_reference_fixture_v1([("pkg.argspan", source)], 0)
+        expect(result.is_ok()).to_equal(true)
+        val facts = result.unwrap()
+        val origin = facts.declarations[0].origin_key
+        expect(reference_role_count_v1(facts, origin, "call")).to_equal(1)
+        for row in facts.references:
+            if row.origin_key == origin and row.role == "call":
+                expect(row.byte_start).to_equal(81)
+                expect(row.line).to_equal(5)
     )
     it("keeps parameter and nested-block shadows separate from callable origins", fn():
         step("Resolve real parameter/local bindings and ignore comments and strings")
@@ -167,7 +187,9 @@ describe("resolved HIR reference facts v1", fn():
         var imports = 0
         var aliases = 0
         for row in facts.references:
-            expect(source[row.byte_start:row.byte_end]).to_equal(row.spelling)
+            # byte_start/byte_end are BYTE offsets; `s[a:b]` slices by code point
+            # (owner decision 2026-11-07), so decode the byte range explicitly.
+            expect(source.to_bytes()[row.byte_start:row.byte_end]).to_equal(row.spelling.to_bytes())
             if row.role == "import-source":
                 imports = imports + 1
                 expect(row.line == 2 or row.line == 3).to_equal(true)
@@ -205,10 +227,10 @@ describe("resolved HIR reference facts v1", fn():
             expect(first.spelling).to_equal("use")
             var final_token = first
             for token in index.tokens:
-                if token.codepoint_start >= import_.span.start and token.codepoint_end <= import_.span.end:
+                if token.byte_start >= import_.span.start and token.byte_end <= import_.span.end:
                     final_token = token
             expect(final_token.spelling).to_equal("*")
-            expect(final_token.codepoint_end).to_equal(import_.span.end)
+            expect(final_token.byte_end).to_equal(import_.span.end)
         expect(module.imports[0].span.end < module.imports[1].span.start).to_equal(true)
     )
     it("refuses a candidate whose new spelling captures a parameter binding", fn():
