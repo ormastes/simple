@@ -7,7 +7,7 @@ use std.nogc_sync_mut.io.file_ops.{file_atomic_write}
 use app.io.mod (cli_get_args)
 use app.doc_coverage.scanner.mod.{scan_file_for_docs, discover_source_files}
 use app.doc_coverage.types.doc_item.{DocItem, DocKind}
-use app.doc_coverage.scanner.file_scanner (filter_public_only)
+use app.doc_coverage.scanner.file_scanner (filter_public_only, discover_directory_files)
 use app.doc_coverage.analysis.sdoctest_coverage.{load_sdoctest_blocks, suggest_missing_tags, compute_sdoctest_coverage}
 use app.doc_coverage.analysis.init_parser.{parse_init_file, PublicApiGroup, PublicApiItem}
 use app.doc_coverage.analysis.group_sdoctest.{check_group_sdoctest}
@@ -182,8 +182,11 @@ fn handle_doc_coverage_command(args: [text]) -> i64:
 
     # Discover source files
     val patterns: [text] = []
-    val all_files = discover_source_files(root, patterns)
-    val files = filter_public_only(all_files)
+    var files = filter_public_only(discover_source_files(root, patterns))
+    if files.len() == 0:
+        # `root` is not a repo root: treat it as an explicit directory and scan
+        # it directly (an explicit target is never narrowed to public API).
+        files = discover_directory_files(root, patterns)
 
     if files.len() == 0:
         print "No source files found in {root}"
@@ -535,6 +538,7 @@ fn item_in_blocks(name: text, blocks: [text]) -> bool:
 # =========================================================================
 
 export handle_doc_coverage_command
+export doc_coverage_command_args
 
 
 # =========================================================================
@@ -552,13 +556,27 @@ export handle_doc_coverage_command
 # `handle_doc_coverage_command` starts parsing at index 1, so it receives
 # the slice beginning at the subcommand name.
 
-fn main() -> i64:
-    val raw_args = cli_get_args()
-    var cmd_args: [text] = []
-    var i = 2
+fn doc_coverage_command_args(raw_args: [text]) -> [text]:
+    # The subcommand token may or may not be present depending on how the
+    # driver launched the script (dispatch: [bin, script, "doc-coverage", ...];
+    # `run script ...`: [script, ...]). Slice after the token when found, else
+    # after the script path, so a root argument is never swallowed.
+    var start = -1
+    var i = 0
     while i < raw_args.len():
-        cmd_args = cmd_args.push(raw_args[i])
+        if raw_args[i] == "doc-coverage":
+            start = i
         i = i + 1
-    if cmd_args.len() == 0:
-        cmd_args = cmd_args.push("doc-coverage")
-    handle_doc_coverage_command(cmd_args)
+    var out: [text] = ["doc-coverage"]
+    var j = 0
+    if start >= 0:
+        j = start + 1
+    else:
+        j = 1
+    while j < raw_args.len():
+        out.push(raw_args[j])
+        j = j + 1
+    out
+
+fn main() -> i64:
+    handle_doc_coverage_command(doc_coverage_command_args(cli_get_args()))
