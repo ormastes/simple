@@ -1680,6 +1680,7 @@ impl Lowerer {
         let qualified = super::flatten_struct_owner::module_with_owner_qualified_structs(
             ast_module,
             &self.flatten_owner_import_bindings,
+            &self.flatten_owner_glob_sources,
         )
         .map_err(|alias| {
             LowerError::Unsupported(format!(

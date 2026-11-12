@@ -1308,6 +1308,7 @@ impl Lowerer {
                 let scope = super::module_lowering::struct_scope_for(
                     &self.flatten_struct_owners,
                     &self.flatten_owner_import_bindings,
+                    &self.flatten_owner_glob_sources,
                     owner.as_deref(),
                 );
                 self.flatten_struct_scopes.insert(owner, scope.clone());

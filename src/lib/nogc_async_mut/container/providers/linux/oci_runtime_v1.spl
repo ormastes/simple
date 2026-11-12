@@ -1145,7 +1145,17 @@ impl LinuxOciRuntimeProviderV1:
                 runtime_command_empty())
         self._load_persisted_intent(request)
         val index = self._find(request.pod_uid, request.attempt)
-        val saved_intent = self._durable_intent_for(request)
+        var saved_intent = self._durable_intent_for(request)
+        if saved_intent.operation_id == "":
+            # A prepared-only attempt has no intent row yet: prepare_pod records
+            # the request binding (identity with an empty native ID, phase
+            # PREPARED) and nothing else. That binding was matched against this
+            # request's digest by `_request_binding_error` above and is the same
+            # record `retained_intent_v1` returns for it, so an uncertain create
+            # is reconciled from it instead of being refused as unbound.
+            val prepared_key = self._binding_key(request)
+            if self.request_bindings.has(prepared_key):
+                saved_intent = self.request_bindings[prepared_key].identity
         if saved_intent.operation_id == "":
             return self._rejected("recover", "intent-binding-required", runtime_command_empty())
         if saved_intent.operation_id != "" and request.operation_id != "" and

@@ -1,0 +1,71 @@
+# @req REQ-LSP-FORMAT-002
+use std.spec
+use std.common.json.value.{JsonValue, json_value_object_from, json_value_serialize}
+use std.common.json.parser.{json_parse}
+use std.common.json.object_ops.{json_object_get}
+use std.common.json.array_ops.{json_array_get, json_array_length}
+use std.common.json.types.{json_get_type, json_to_string}
+use std.nogc_sync_mut.lsp.lsp_handlers.{lsp_handle_did_open, lsp_handle_did_change, lsp_handle_did_close, lsp_handle_formatting}
+use std.io_runtime.{write_file, file_delete, time_now_unix_micros}
+use std.nogc_sync_mut.env.platform.{get_temp_dir}
+
+fn fo_open(uri: text, version: i64, source: text) -> text:
+    val doc = json_value_object_from([("uri", JsonValue.Str(uri)), ("version", JsonValue.Int(version)), ("text", JsonValue.Str(source))])
+    json_value_serialize(json_value_object_from([("textDocument", doc)]))
+
+fn fo_change(uri: text, version: i64, source: text) -> text:
+    val doc = json_value_object_from([("uri", JsonValue.Str(uri)), ("version", JsonValue.Int(version))])
+    val change = json_value_object_from([("text", JsonValue.Str(source))])
+    json_value_serialize(json_value_object_from([("textDocument", doc), ("contentChanges", JsonValue.Array([change]))]))
+
+fn fo_close(uri: text) -> text:
+    val doc = json_value_object_from([("uri", JsonValue.Str(uri))])
+    json_value_serialize(json_value_object_from([("textDocument", doc)]))
+
+fn fo_uri(path: text) -> text:
+    if path.starts_with("/"): return "file://" + path
+    "file:///" + path.replace("\\", "/")
+
+fn fo_format_body(uri: text) -> text:
+    val doc = json_value_object_from([("uri", JsonValue.Str(uri))])
+    json_value_serialize(json_value_object_from([("textDocument", doc)]))
+
+fn fo_edits(reply: text) -> any:
+    val response = json_parse(reply)
+    expect(response != nil).to_equal(true)
+    expect(json_object_get(response, "error")).to_be_nil()
+    json_object_get(response, "result")
+
+describe "LSP formatting over unsaved overlay":
+    # @req REQ-LSP-FORMAT-002
+    it "formats the unsaved didChange text instead of the on-disk file":
+        step("Disk holds one function; the editor buffer holds another, unsaved")
+        val path = get_temp_dir() + "/lsp_fmt_overlay_{time_now_unix_micros()}.spl"
+        expect(write_file(path, "fn fo_disk_v1() -> i64:\n    3+4\n")).to_equal(true)
+        val uri = fo_uri(path)
+        lsp_handle_did_open(fo_open(uri, 1, "fn fo_disk_v1() -> i64:\n    3+4\n"))
+        lsp_handle_did_change(fo_change(uri, 2, "fn fo_buffer_v1() -> i64:\n    5+6\n"))
+        step("Request formatting while the overlay is unsaved")
+        val reply = lsp_handle_formatting("21", fo_format_body(uri))
+        lsp_handle_did_close(fo_close(uri))
+        val _ = file_delete(path)
+        val result = fo_edits(reply)
+        expect(json_get_type(result)).to_equal("array")
+        expect(json_array_length(result)).to_equal(1)
+        val new_text = json_to_string(json_object_get(json_array_get(result, 0), "newText"))
+        step("Capture evidence: the edit is derived from the buffer, not disk")
+        expect(new_text.contains("fo_buffer_v1")).to_equal(true)
+        expect(new_text.contains("5 + 6")).to_equal(true)
+        expect(new_text.contains("fo_disk_v1")).to_equal(false)
+
+    # @req REQ-LSP-FORMAT-002
+    it "still formats the on-disk file when no overlay is open":
+        step("No didOpen: formatting reads disk")
+        val path = get_temp_dir() + "/lsp_fmt_disk_{time_now_unix_micros()}.spl"
+        expect(write_file(path, "fn fo_only_disk_v1() -> i64:\n    7+8\n")).to_equal(true)
+        val reply = lsp_handle_formatting("22", fo_format_body(fo_uri(path)))
+        val _ = file_delete(path)
+        val result = fo_edits(reply)
+        expect(json_array_length(result)).to_equal(1)
+        val new_text = json_to_string(json_object_get(json_array_get(result, 0), "newText"))
+        expect(new_text.contains("7 + 8")).to_equal(true)

@@ -1,7 +1,7 @@
 # NOT_RUN: policy regressions; these do not qualify a native launch provider.
 use std.spec.{describe, it, expect}
 use app.cli.worker_hir_profile_v1.{worker_hir_argument_error_v1, worker_hir_stage3_capsule_environment_keys_v1,
-    worker_hir_tool_build_environment_keys_v1,
+    worker_hir_tool_build_environment_keys_v1, worker_hir_base_environment_keys_v1, worker_hir_environment_value_error_v1,
     worker_hir_environment_key_admitted_v1, worker_hir_child_validate_v1}
 use app.cli.worker_hir_owner_v1.{worker_hir_cleanup_deadline_v1,
     worker_hir_remaining_budget_v1, worker_hir_environment_sort_v1}
@@ -101,6 +101,48 @@ describe "worker HIR profile admission":
         # Set to "1" by run_bootstrap_stage3_process_route for every threads>1
         # bootstrap native-build; restored exactly (absent) afterwards.
         expect(worker_hir_environment_key_admitted_v1("SIMPLE_BOOTSTRAP_INTERNAL_NATIVE_BUILD_ROUTING")).to_equal(true)
+
+    it "pins the exact base environment allowlist":
+        # Membership alone let a widened list pass review (#8610 post-merge review).
+        val pinned = [
+            "HOME", "USER", "LOGNAME", "SHELL", "PATH", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL",
+            "LC_CTYPE", "TZ", "TERM", "CI", "PWD", "OLDPWD", "SHLVL", "_", "SIMPLE_BIN",
+            "SIMPLE_BINARY", "SIMPLE_LIB", "SIMPLE_EXECUTION_MODE",
+            "SIMPLE_BOOTSTRAP_INTERNAL_NATIVE_BUILD_ROUTING", "SIMPLE_NATIVE_BUILD_WORKER",
+            "SIMPLE_HIR_WORKER_PROFILE_V1", "SIMPLE_BUILD_PROGRESS_EVENTS",
+            "SIMPLE_COMPILE_FAIL_FAST", "SIMPLE_FRONTEND_CACHE_DIR", "SIMPLE_FRONTEND_CACHE_SCOPE",
+            "SIMPLE_HIR_CACHE", "SIMPLE_HIR_CACHE_DIR", "SIMPLE_CACHE_SCOPE",
+            "SIMPLE_USER_STORAGE_ROOT", "SIMPLE_GLOBAL_DATASET_MAX_BYTES", "SIMPLE_HIR_SHARD_QUEUE",
+            "SIMPLE_HIR_SHARD_OWNER", "SIMPLE_HIR_SHARD_CLAIM_LIMIT", "SIMPLE_PARSE_CLOSURE_REQUEST",
+            "SIMPLE_PARSE_CLOSURE_REQUEST_DIGEST", "SIMPLE_PARSE_CLOSURE_CONSUMER",
+            "SIMPLE_PARSE_CLOSURE_SELECTED_COUNT", "SIMPLE_SCV_COMMIT_ID",
+            "SIMPLE_SCV_INVENTORY_DIGEST", "SIMPLE_SCV_INVENTORY_GENERATION",
+            "SIMPLE_SCV_REVISION_ID", "SIMPLE_SCV_SNAPSHOT_ROOT", "SIMPLE_SCV_SOURCE_DRIFTED",
+            "SIMPLE_SCV_SOURCE_INVENTORY_DIGEST", "SIMPLE_SCV_TREE_ID",
+            "SIMPLE_COMPILER_PHASE_PROFILE_FILE", "SIMPLE_MEM_SNAPSHOT_FILE",
+            "SIMPLE_NATIVE_BUILD_CACHE_DIR", "SIMPLE_RT_OBJ_CACHE_DIR", "SIMPLE_NO_STUB_FALLBACK",
+            "SIMPLE_NATIVE_ARENA_DECLS", "SIMPLE_HIR_SHARDING", "SIMPLE_PARSE_SHARDING",
+            "SIMPLE_SHARD_SMALL_CLOSURE_MAX", "SIMPLE_HIR_SHARD_WORKER_KB",
+            "SIMPLE_MANAGED_NATIVE_TOOLS", "SIMPLE_MANAGED_NATIVE_TOOL_AUTHORITY_PATH",
+            "SIMPLE_MANAGED_NATIVE_TOOL_AUTHORITY_SHA256",
+            "SIMPLE_MANAGED_PHASE4_SOURCE_AUTHORITY_PATH",
+            "SIMPLE_MANAGED_PHASE4_SOURCE_AUTHORITY_SHA256", "SIMPLE_MANAGED_PHASE4_SOURCE_ROOT",
+            "SIMPLE_MANAGED_RUNTIME_AUTHORITY_PATH", "SIMPLE_MANAGED_RUNTIME_SNAPSHOT_PATH",
+            "SIMPLE_MANAGED_RUNTIME_SNAPSHOT_SHA256"
+        ]
+        expect(worker_hir_base_environment_keys_v1()).to_equal(pinned)
+
+    it "refuses route-selecting keys with any other value":
+        expect(worker_hir_environment_value_error_v1("SIMPLE_BOOTSTRAP_INTERNAL_NATIVE_BUILD_ROUTING", "1")).to_equal("")
+        for bad in ["", "0", "true", "2"]:
+            expect(worker_hir_environment_value_error_v1("SIMPLE_BOOTSTRAP_INTERNAL_NATIVE_BUILD_ROUTING", bad) == "").to_equal(false)
+        expect(worker_hir_environment_value_error_v1("SIMPLE_FILE_WORKERS", "0")).to_equal("")
+        for bad in ["", "1", "auto"]:
+            expect(worker_hir_environment_value_error_v1("SIMPLE_FILE_WORKERS", bad) == "").to_equal(false)
+        expect(worker_hir_environment_value_error_v1("SIMPLE_EXECUTION_MODE", "")).to_equal("")
+        expect(worker_hir_environment_value_error_v1("SIMPLE_EXECUTION_MODE", "native")).to_equal("")
+        expect(worker_hir_environment_value_error_v1("SIMPLE_EXECUTION_MODE", "interpret") == "").to_equal(false)
+        expect(worker_hir_environment_value_error_v1("HOME", "")).to_equal("")
 
     it "still rejects ambient and loader-injection keys":
         for name in ["SSH_CLIENT", "LS_COLORS", "GH_TOKEN", "CLAUDECODE", "LD_PRELOAD",
