@@ -110,6 +110,35 @@ fn outlined_lambda_declares_its_real_return_type() {
     assert_eq!(outlined.return_type, TypeId::F64);
 }
 
+/// A lambda whose result is `any` returns an ALREADY tagged word, so its
+/// outlined function must declare `ANY`, not I64: the boxed entry boxes an
+/// I64 result, which tagged the word a second time and made
+/// `[1, 2, 3].map(\\x: anyv(x))` answer `[8, 16, 24]`.
+#[test]
+fn outlined_any_result_lambda_declares_any_not_i64() {
+    let mir = compile_to_mir(
+        "fn anyv(x: i64) -> any:\n    x\n\nfn test() -> any:\n    val xs = [1, 2, 3]\n    return xs.map(\\x: anyv(x))\n",
+    )
+    .expect("mir lowering failed");
+    let lambda_result = mir
+        .functions
+        .iter()
+        .flat_map(|f| f.blocks.iter())
+        .flat_map(|b| b.instructions.iter())
+        .find_map(|inst| match inst {
+            MirInst::ClosureCreate { return_type, .. } => Some(*return_type),
+            _ => None,
+        })
+        .expect("no ClosureCreate");
+    assert_eq!(lambda_result, TypeId::ANY, "precondition: the lambda's result is `any`");
+    let expanded = crate::codegen::shared::expand_with_outlined(&mir);
+    let outlined = expanded
+        .iter()
+        .find(|f| f.name.contains("_outlined_"))
+        .expect("no outlined lambda function");
+    assert_eq!(outlined.return_type, TypeId::ANY);
+}
+
 /// Sub-register and untyped boundary types are not carryable by the unboxed
 /// closure ABI. `BOOL` lowers to `i8` and crashed the process when a lambda
 /// returned one; `ANY` has no correct encoding at all.
