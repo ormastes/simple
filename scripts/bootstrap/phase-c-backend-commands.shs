@@ -23,6 +23,73 @@ bootstrap_phase_c_validate_backend_receipt() {
     [ "$(manifest_value verification_backend "$pcb_receipt")" = "$pcb_backend" ]
 }
 
+# Exact launch environment of a Phase C tool-build row (compiler_cli_build,
+# test_runner_build, mcp_build, lsp_build): host basics, the toolchain pins
+# bootstrap_phase_run_command exports, and the keys the verifier, the tree-RSS
+# policy, the product frontend policy and bootstrap_phase_c_run_tool_build set
+# for the row. Nothing else reaches the row: bootstrap-fable-17 (2026-11-12,
+# ea253974c0e) launched the row from the caller's whole shell, and the HIR
+# worker profile (src/app/cli/worker_hir_profile_v1.spl, reject-never-sanitize)
+# refused it in one line naming 111 keys (GITHUB_TOKEN, TMUX, CLAUDE_CODE_*,
+# BOOTSTRAP_VERIFY_*, SIMPLE_BOOTSTRAP_*_ROOT, ...), which is fatal for the row
+# ("error: HIR aggregate failure; final worker and artifact publication
+# blocked"). Earlier Stage 2 compilers never started the pool on this row:
+# under the pre-fb5a084c30f seed, `match raw.to_i64(): case Some(value)` in
+# native_build_closure_selected_count_v1 bound 3, so the small-closure clamp
+# zeroed the HIR pool (closure_files=3 measured with run 13 and run 16 Stage 2
+# binaries, 3134 with run 17's); run 16's rows also ran at one compiler job.
+# Every key here must be admitted by that profile; the contract test
+# (test/01_unit/scripts/bootstrap_phase_c_backend_command_contract_test.shs)
+# cross-checks the two lists so they cannot drift apart again. Keys the row
+# does not consume below the launch (BOOTSTRAP_VERIFY_*, the campaign roots,
+# SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_*, the tree-RSS cap SOURCE/BOUND
+# diagnostics, SIMPLE_BUILD_PROGRESS_SNAPSHOT) are deliberately absent.
+bootstrap_phase_c_tool_row_environment_keys() {
+  printf '%s\n' \
+    PATH HOME USER LOGNAME SHELL TMPDIR TMP TEMP LANG LC_ALL LC_CTYPE TZ TERM CI \
+    SYSTEMROOT WINDIR COMSPEC PATHEXT OS \
+    CC CXX SIMPLE_CC INCLUDE LIB LIBPATH LIBRARY_PATH SIMPLE_WINDOWS_ABI \
+    SIMPLE_TOOLCHAINS_ROOT SIMPLE_HOST_CONFIG \
+    SIMPLE_BOOTSTRAP_SESSION_ID SIMPLE_BOOTSTRAP_SESSION_EXEC \
+    SIMPLE_BOOTSTRAP_PROCESS_OBSERVER SIMPLE_BOOTSTRAP_PROCESS_OBSERVER_SHA256 \
+    SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS \
+    SIMPLE_BINARY SIMPLE_PROJECT_ROOT SIMPLE_NO_STUB_FALLBACK SIMPLE_NO_BOOTSTRAP_DELEGATE \
+    SIMPLE_NATIVE_BUILD_CACHE_DIR SIMPLE_RT_OBJ_CACHE_DIR SIMPLE_FRONTEND_CACHE_DIR SIMPLE_HIR_CACHE_DIR \
+    SIMPLE_NATIVE_RUNTIME_BUNDLE SIMPLE_RUNTIME_PATH SIMPLE_NATIVE_BUILD_TARGET SIMPLE_NATIVE_BUILD_THREADS \
+    SIMPLE_ABI_POLICY SIMPLE_RUNTIME_RISCV64_VECTOR SIMPLE_BOOTSTRAP_STAGE3 SIMPLE_BOOTSTRAP_STAGE4 \
+    SIMPLE_MEM_SNAPSHOT_FILE SIMPLE_COMPILER_PHASE_PROFILE SIMPLE_COMPILER_PHASE_PROFILE_FILE SIMPLE_EVIDENCE_RUN_ID \
+    SIMPLE_COMPILE_FAIL_FAST SIMPLE_KERNEL_K1_POLICY \
+    SIMPLE_CACHE_SCOPE SIMPLE_CACHE SIMPLE_NATIVE_ARENA_DECLS SIMPLE_FRONTEND_CACHE SIMPLE_HIR_CACHE \
+    SIMPLE_MANAGED_NATIVE_TOOLS SIMPLE_MANAGED_NATIVE_TOOL_AUTHORITY_PATH SIMPLE_MANAGED_NATIVE_TOOL_AUTHORITY_SHA256 \
+    SIMPLE_MANAGED_RUNTIME_AUTHORITY_PATH SIMPLE_MANAGED_RUNTIME_SNAPSHOT_PATH SIMPLE_MANAGED_RUNTIME_SNAPSHOT_SHA256 \
+    SIMPLE_FILE_WORKERS SIMPLE_MIR_SHARD_COUNT \
+    SIMPLE_SHARD_MEM_CLAMP SIMPLE_PARSE_SHARD_WORKER_KB SIMPLE_HIR_SHARD_WORKER_KB SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB \
+    SIMPLE_PROCESS_TREE_RSS_SCOPE_GROUP SIMPLE_PROCESS_TREE_RSS_DECLARED_JOBS SIMPLE_PROCESS_TREE_RSS_RECEIPT \
+    SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB SIMPLE_BOOTSTRAP_RSS_CAP_MODE
+}
+
+# Re-launch "$@" from `env -i` plus the keys above, each with its exact
+# current value (present-but-empty stays present). The command argv is not
+# touched: every owner (run_task's managed-tool block, bootstrap_phase_run_command,
+# run-process-group-timeout.shs) keys on argv[0]=compiler argv[1]=native-build,
+# which an `env VAR=... compiler` argv prefix broke in run 6 (2026-11-06); the
+# wrapper therefore sits around the timeout owner, like Phase 4 direct's
+# `env -i ... sh "$timeout_helper"`. `printenv` reads each value without eval;
+# a value ending in a newline would lose it (no row key carries one).
+bootstrap_phase_c_tool_row_exec() {
+  [ "$#" -gt 0 ] || { echo 'phase C tool row: no command to launch' >&2; return 125; }
+  case "${SIMPLE_BOOTSTRAP_SESSION_ID+x}${SIMPLE_BOOTSTRAP_SESSION_EXEC+x}" in
+    xx|'') ;;
+    *) echo 'phase C tool row: incomplete inherited session contract' >&2; return 125 ;;
+  esac
+  for pcb_row_key in $(bootstrap_phase_c_tool_row_environment_keys); do
+    if pcb_row_value=$(printenv -- "$pcb_row_key"); then
+      set -- "$pcb_row_key=$pcb_row_value" "$@"
+    fi
+  done
+  exec env -i "$@"
+}
+
 # Apply the product frontend share before the process-tree owner starts. On a
 # fanout host the share is the resolved command cap (priced per declared job by
 # tree-rss-policy.shs); its watchdog resolves the same cap from the same

@@ -765,22 +765,26 @@ run_measured_timeout() {
   measured_timeout=$2
   measured_grace=$3
   shift 3
+  set -- "$source_root/scripts/bootstrap/run-process-group-timeout.shs" \
+    "$measured_timeout" "$measured_grace" "$@"
+  # Phase C tool rows launch from an exact constructed environment. The wrapper
+  # goes around the timeout owner (so the owner, its watchdog and the compiler
+  # all see it), never as an argv prefix on the compiler: every owner keys on
+  # argv[0]=compiler argv[1]=native-build. See phase-c-backend-commands.shs.
+  if [ "${measured_exact_env:-}" = phase-c-tool-row ]; then
+    set -- sh "$source_root/scripts/bootstrap/phase-c-tool-row-exec.shs" "$@"
+  fi
   case "$rss_time_style" in
     gnu)
-      "$rss_time" -f '%M' -o "$metric_file" \
-        "$source_root/scripts/bootstrap/run-process-group-timeout.shs" \
-        "$measured_timeout" "$measured_grace" "$@" ;;
+      "$rss_time" -f '%M' -o "$metric_file" "$@" ;;
     darwin|bsd-kib)
-      LC_ALL=C "$rss_time" -l -o "$metric_file" \
-        "$source_root/scripts/bootstrap/run-process-group-timeout.shs" \
-        "$measured_timeout" "$measured_grace" "$@" ;;
+      LC_ALL=C "$rss_time" -l -o "$metric_file" "$@" ;;
     *)
       if [ "$rss_measurement" = proc-group-rss-kib ]; then
         # Preserve the caller stream before the asynchronous shell substitutes
         # /dev/null for stdin in its child.
         exec 4<&0
-        "$source_root/scripts/bootstrap/run-process-group-timeout.shs" \
-          "$measured_timeout" "$measured_grace" "$@" <&4 &
+        "$@" <&4 &
         measured_pid=$!
         exec 4<&-
         peak_rss_kib=0
@@ -805,8 +809,7 @@ run_measured_timeout() {
         return "$measured_status"
       else
         printf 'unavailable\n' >"$metric_file"
-        "$source_root/scripts/bootstrap/run-process-group-timeout.shs" \
-          "$measured_timeout" "$measured_grace" "$@"
+        "$@"
       fi
       ;;
   esac
@@ -1093,6 +1096,17 @@ run_task() {
            SIMPLE_PROJECT_ROOT SIMPLE_ABI_POLICY SIMPLE_RUNTIME_RISCV64_VECTOR \
            SIMPLE_PROCESS_TREE_RSS_SCOPE_GROUP
          bootstrap_phase_c_apply_frontend_policy || exit 88
+        # Exact row environment (bootstrap-fable-17, 2026-11-12): the HIR
+        # worker profile refused the inherited caller shell. Selected here,
+        # applied by run_measured_timeout around the timeout owner, after
+        # bootstrap_phase_run_command has exported its toolchain pins.
+        # module_compile_* rows keep the inherited launch (unchanged
+        # behaviour): their object-mode key SIMPLE_NATIVE_BUILD_EMIT_OBJECT is
+        # neither a tool-row key nor admitted by the HIR profile, so an exact
+        # launch would not make their pool admissible either.
+        case "$task" in
+          compiler_cli_build|test_runner_build|mcp_build|lsp_build) measured_exact_env=phase-c-tool-row ;;
+        esac
         bootstrap_phase_run_command run_with_timeout "$@"
       elif [ "$phase" = stage1 ] && [ "${1:-}" = "$compiler_snapshot" ] && \
          [ "${2:-}" = native-build ]; then
