@@ -1,3 +1,8 @@
+/* Non-Windows test: the POSIX/Linux/macOS APIs it uses have no Windows build here. */
+#if defined(_WIN32)
+#include <stdio.h>
+int main(void) { puts("SKIP: rt_cache_host_unix_sealed_v2_selfcheck is POSIX-only; no Windows build"); return 77; }
+#else
 /* Prepared Unix ABI regression; runtime execution UNRUN in this Windows session. */
 #define _GNU_SOURCE
 static int probe_fsync(int fd);
@@ -15,3 +20,5 @@ int64_t c=rt_cache_host_secure_temp_v1(r);CHECK(c>0);CHECK(rt_cache_host_write_t
 CHECK(rt_cache_host_close_v1(s)==0);CHECK(rt_cache_host_close_v1(s)<0);CHECK(!fstatat(find_cap(r)->fd,"object",&published,AT_SYMLINK_NOFOLLOW));
 t=rt_cache_host_secure_temp_v1(r);CHECK(t>0);CHECK(rt_cache_host_write_temp_v1(t,0,(uint8_t*)"real",4)==4);struct cache_cap *cap=find_cap(t);CHECK(!unlinkat(cap->parent_fd,cap->temp_name,0));int swapped=openat(cap->parent_fd,cap->temp_name,O_WRONLY|O_CREAT|O_EXCL,0600);CHECK(swapped>=0);CHECK(write(swapped,"swap",4)==4);CHECK(!close(swapped));CHECK(rt_cache_host_publish_retained_noreplace_v2(t,(uint8_t*)"swapped",7)<0);CHECK(rt_cache_host_close_v1(t)<0);CHECK(!fstatat(find_cap(r)->fd,"swapped",&published,AT_SYMLINK_NOFOLLOW));
 t=rt_cache_host_secure_temp_v1(r);CHECK(t>0);CHECK(rt_cache_host_write_temp_v1(t,0,(uint8_t*)"real",4)==4);fail_at=2;flush_calls=0;CHECK(rt_cache_host_publish_retained_noreplace_v2(t,(uint8_t*)"flushfail",9)<0);fail_at=0;CHECK(rt_cache_host_close_v1(t)<0);CHECK(!fstatat(find_cap(r)->fd,"flushfail",&published,AT_SYMLINK_NOFOLLOW));CHECK(rt_cache_host_close_v1(r)==0);printf("PASS %d actual C Unix ABI checks; fixture=%s\n",checks,dir);return 0;}
+
+#endif /* !_WIN32 */

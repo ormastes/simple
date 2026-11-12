@@ -1,3 +1,8 @@
+/* Non-Windows test: the POSIX/Linux/macOS APIs it uses have no Windows build here. */
+#if defined(_WIN32)
+#include <stdio.h>
+int main(void) { puts("SKIP: rt_file_publish_directory_macos_selfcheck is POSIX-only; no Windows build"); return 77; }
+#else
 #include <assert.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -61,3 +66,5 @@ int main(void) {
     puts("rt_file_publish_directory_macos_selfcheck: PASS");
     return 0;
 }
+
+#endif /* !_WIN32 */

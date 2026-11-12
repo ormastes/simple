@@ -1,0 +1,57 @@
+"""
+## Purpose and audience
+
+Executable contract for `simple check` failure semantics (REQ-DIAG-004/005/006
+CLI half): a source with a parse or type error makes the check entry exit
+NONZERO and leaves no build artifact next to the source. Runs the working-tree
+`src/app/check/main.spl` under the repo binary. Audience: diag-P2.
+"""
+# @cover src/app/cli/check.spl
+
+use std.spec
+use std.io_runtime.{dir_list}
+use std.nogc_sync_mut.io.file_ops.{file_write, secure_temp_dir}
+use std.nogc_sync_mut.env.platform.{get_temp_dir}
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+fn simple_binary() -> text:
+    if rt_file_exists("bin/simple.exe"): return "bin/simple.exe"
+    "bin/simple"
+
+fn entries_of(dir: text) -> [text]:
+    var out: [text] = []
+    for e in dir_list(dir):
+        if e != "." and e != "..":
+            out.push(e)
+    out
+
+# Writes `source` into a fresh private dir, runs check on it, returns
+# (exit code, combined output, directory entries afterwards).
+fn check_fixture(source: text) -> (i64, text, [text]):
+    val dir = secure_temp_dir(get_temp_dir(), "simple-check-no-artifact-").unwrap()
+    val path = dir + "/bad.spl"
+    expect(file_write(path, source)).to_equal(true)
+    val (stdout, stderr, code) = rt_process_run(simple_binary(), ["run", "src/app/check/main.spl", path])
+    (code, stdout + stderr, entries_of(dir))
+
+# @manual_section: check_failure_no_artifact
+describe "simple check fails closed with no artifact (REQ-DIAG-004/005/006)":
+    it "exits nonzero on a parse error and writes nothing beside the source":
+        # @req REQ-DIAG-004
+        # @capture(value): check output
+        step("Check a file whose `val x =` has no expression")
+        val (code, output, entries) = check_fixture("fn main():\n    val x =\n")
+        expect(code != 0).to_equal(true)
+        expect(output.contains("E0002")).to_equal(true)
+        expect(entries).to_equal(["bad.spl"])
+
+    it "exits nonzero on a type error and writes nothing beside the source":
+        # @req REQ-DIAG-005
+        # @req REQ-DIAG-006
+        step("Check a file assigning text to an i64 binding")
+        val (code, output, entries) = check_fixture("fn main():\n    val x: i64 = \"no\"\n    print x\n")
+        expect(code != 0).to_equal(true)
+        expect(output.contains("error")).to_equal(true)
+        expect(entries).to_equal(["bad.spl"])

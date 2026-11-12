@@ -1,3 +1,8 @@
+/* Non-Windows test: the POSIX/Linux/macOS APIs it uses have no Windows build here. */
+#if defined(_WIN32)
+#include <stdio.h>
+int main(void) { puts("SKIP: rt_tcp_write_nosigpipe_selfcheck is POSIX-only; no Windows build"); return 77; }
+#else
 /* Compile the actual native owner, as in rt_allocation_registry_churn_selfcheck.
  * The fallback variant removes socket capabilities only in this test TU. */
 #if defined(SIMPLE_TCP_CHECK_THREAD_FALLBACK)
@@ -118,3 +123,5 @@ int main(void) {
     puts("PASS tcp write/write_text/write_bytes: default-SIGPIPE child survives EPIPE; pending signal preserved; exact/partial bytes, EAGAIN, EBADF, empty and close controls");
     return 0;
 }
+
+#endif /* !_WIN32 */

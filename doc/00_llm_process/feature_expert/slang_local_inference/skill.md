@@ -108,6 +108,41 @@ backend does — that is what the seam is for.
   build script in the worktree (also fixes the `2>/dev/null`-silent
   "GGUF recognised but no ggml backend library is configured" error).
 
+## Server run recipe, caret wiring, caret suite (verified 2026-11-12, GB10)
+
+```bash
+cd <worktree> && SIMPLE_RUST_SEED_WARNING=0 SIMPLE_TIMEOUT_SECONDS=0 \
+  <seed> run src/app/slang_server/main.spl -- \
+  --plaintext-development --models=/home/yoon/dev/model --port=8721 --n-ctx=32768
+```
+
+- Endpoints `GET /v1/models`, `POST /v1/chat/completions`; model loads lazily on
+  the first completion. Test with `nc` (curl/wget are hook-blocked).
+- caret → server: config `defaults: provider: slang` + `slang: base_url:
+  http://127.0.0.1:8721`, `model: <dir>`; run `main.spl --config <file>
+  --workspace <worktree> --dangerously-allow-all`. `slang` = HTTP client
+  (`SLANG_BASE_URL`), `slang_local` = in-process (`SLANG_MODEL_ROOT`).
+- caret suite: `bin/cs [session]` inside tmux; `/launch <spec> [args...]`
+  (args appended verbatim, space-split), `/switch /max /key /kill /agents`.
+  Spec `harness[:provider][/model]`; one worktree + `work/<topic>` branch + PR
+  per agent. Keep briefs short; a 30B model cannot digest `spipe.md`.
+
+### Traps
+- **Stale seed:** before 2026-11-09 (`afb36d2e0a5`) HTTP hangs in CLOSE-WAIT;
+  without PR #8492 the memory gate reads `/proc/meminfo` as "" (fsync EINVAL on
+  procfs counted as a close failure in `rt_io_file_close`) and refuses every
+  model; `--n-ctx` is also missing. Rebuild: `cd src/compiler_rust && cargo build
+  --release --bin simple`.
+- **cgroup + CUDA:** never run the server under `systemd-run -p MemoryMax=`; the
+  GB10 CUDA context is charged to the cgroup and `ggml_cuda_init` fails OOM.
+- **nvcc host clang:** nvcc 13.0 rejects clang >= 21; build llama.cpp with
+  clang-18 (`CMAKE_CUDA_HOST_COMPILER`), see the guide.
+- **Default ctx is 4096:** too small for a caret agent; pass `--n-ctx=32768`.
+- **Open:** intermittent CUDA OOM when a second CUDA process starts while one
+  holds a model (aborts the server; single-server/two-client fix in progress);
+  JIT demotions to the interpreter (`_first_safetensors` bare `dir_list`;
+  caret `telemetry().active_requests` inferred as `RingTelemetry`). Both still work.
+
 ## Related
 
 `doc/05_design/ml/slang/slang_master_plan.md`,

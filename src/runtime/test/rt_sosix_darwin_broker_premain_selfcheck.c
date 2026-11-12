@@ -1,3 +1,8 @@
+/* Non-Windows test: the POSIX/Linux/macOS APIs it uses have no Windows build here. */
+#if defined(_WIN32)
+#include <stdio.h>
+int main(void) { puts("SKIP: rt_sosix_darwin_broker_premain_selfcheck is POSIX-only; no Windows build"); return 77; }
+#else
 /* Linked into a test copy of the canonical helper, before its main function. */
 #include <crt_externs.h>
 #include <libproc.h>
@@ -21,3 +26,5 @@ __attribute__((constructor)) static void verify_premain(void) {
         (void)write(fd, "entered", 7); close(fd);
     }
 }
+
+#endif /* !_WIN32 */

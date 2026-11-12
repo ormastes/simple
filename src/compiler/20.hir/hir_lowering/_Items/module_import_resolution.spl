@@ -741,12 +741,17 @@ impl HirLowering:
         any plain `export` list or glob re-export is opaque to the seed
         (`module_surface_is_opaque`) and skipped here too.
 
-        A non-baselined pair is a hard error [E-HIR-PRIVATE-IMPORT-001]. It
-        was staged (warning by default, error under a SIMPLE_STRICT_PRIVATE_IMPORTS
-        toggle) while the Stage 2 (bootstrap_main) and full-CLI (main.spl)
-        closures carried 49 distinct non-baselined pairs the seed never reached;
-        those 49 fns were promoted to `pub` (2026-11-12, census 0 on both
-        closures, see the bug doc) and the toggle was removed.
+        STAGED like W-HIR-UNDECL-IMPORT-001 (same reason: census non-zero).
+        A non-baselined pair is a recorded warning [W-HIR-PRIVATE-IMPORT-001]
+        by default and a hard error [E-HIR-PRIVATE-IMPORT-001] under
+        SIMPLE_STRICT_PRIVATE_IMPORTS=1. Textual census over the Stage 2
+        (bootstrap_main) and full-CLI (main.spl) closures found 49 distinct
+        non-baselined pairs the seed never reached (listed in the bug doc);
+        a hard default would stop Stage 2 on the first of them. Those 49 were
+        promoted to `pub` and the default flipped in #8456 (2026-11-12); run 14's
+        real-resolver full-CLI build then failed HIR on 78+ more non-baselined
+        importers the textual census missed, so the default is a warning again
+        until the real-resolver census is promoted.
         Returns true only when the import was rejected (nothing registered)."""
         if not importer_path.contains("/"):
             return false
@@ -766,8 +771,12 @@ impl HirLowering:
         if private_import_is_baselined(imported.canonical_path, name):
             self.warning("[visibility-warning] '{name}' is a private fn of module '{module_label}' ({imported.canonical_path}); mark it `pub` or `export` it (imported from {importer_path})", span)
             return false
-        self.error("[E-HIR-PRIVATE-IMPORT-001] private fn `{name}` of module `{module_label}` ({imported.canonical_path}) is not visible to {importer_path}; mark it `pub` or `export` it", span)
-        true
+        val message = "private fn `{name}` of module `{module_label}` ({imported.canonical_path}) is not visible to {importer_path}; mark it `pub` or `export` it"
+        if (hir_module_env_get("SIMPLE_STRICT_PRIVATE_IMPORTS") ?? "") == "1":
+            self.error("[E-HIR-PRIVATE-IMPORT-001] " + message, span)
+            return true
+        self.warning("[W-HIR-PRIVATE-IMPORT-001] " + message, span)
+        false
 
     me resolve_package_sibling_symbols(module: ParserModule):
         """Directory-package semantics: files in one source directory share a

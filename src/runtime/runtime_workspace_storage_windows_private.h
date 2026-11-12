@@ -2,6 +2,15 @@
  * the envelope, never a free-space estimate or Linux project-quota emulation. */
 #ifndef SIMPLE_WORKSPACE_STORAGE_WINDOWS_PRIVATE_H
 #define SIMPLE_WORKSPACE_STORAGE_WINDOWS_PRIVATE_H
+/* Same stale-capability errno as runtime_workspace_storage_v1.c, which
+ * defines it before including this header; standalone tests include it alone. */
+#ifndef WS_STALE_ERROR_V1
+#if defined(_WIN32) && !defined(ESTALE)
+#define WS_STALE_ERROR_V1 EBADF
+#else
+#define WS_STALE_ERROR_V1 ESTALE
+#endif
+#endif
 #include <windows.h>
 #include <winioctl.h>
 #include <aclapi.h>

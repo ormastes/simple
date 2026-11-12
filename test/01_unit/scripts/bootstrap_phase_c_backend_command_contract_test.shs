@@ -11,7 +11,7 @@ unset native_internal_timeout
 bootstrap_tree_rss_row_cap_enter() { return 0; }
 bootstrap_tree_rss_row_cap_leave() { return 0; }
 tmp=$(mktemp -d) || exit 1
-trap 'rm -f "$tmp"/argv "$tmp"/receipt "$tmp"/expected "$tmp"/command.argv; rmdir "$tmp"' EXIT HUP INT TERM
+trap 'rm -f "$tmp"/argv "$tmp"/receipt "$tmp"/expected "$tmp"/command.argv "$tmp"/policy.log; rmdir "$tmp"' EXIT HUP INT TERM
 
 hash_stream() {
   if command -v sha256sum >/dev/null 2>&1; then sha256sum | awk '{ print $1 }'
@@ -65,5 +65,54 @@ fi
 if bootstrap_phase_c_run_tool_build invalid cli_build /p/compiler /p/cli.spl /p/cli /p/cache-cli 1; then
   echo 'invalid backend accepted' >&2; exit 1
 fi
+
+
+# Frontend-policy refusals must explain themselves. The policy runs inside the
+# row wrapper, whose stdout+stderr ARE the row log, and the wrapper maps any
+# failure to exit 88. Run 15 (bfe789dd411, 2026-11-12) recorded
+# compiler_cli_build status=88 after 0 s with a 0-byte log: the row's 60 GiB
+# elevated ceiling needs 3/4 of MemAvailable >= the ceiling, which co-resident
+# lanes had consumed, and the refusal was never printed.
+. "$root/scripts/check/lib/bootstrap-stage3/command-snapshot.shs"
+source_root=$root
+pure_tool_threads=2
+policy_status=0
+(
+  unset BOOTSTRAP_TREE_RSS_MEMINFO_PATH BOOTSTRAP_TREE_RSS_TEST_FIXTURE \
+    SIMPLE_PROCESS_TREE_RSS_MEMINFO_PATH SIMPLE_PROCESS_TREE_RSS_TEST_FIXTURE
+  # A ceiling no real host can admit (Linux: above 3/4 of MemAvailable;
+  # hosts without /proc/meminfo: no real headroom evidence at all).
+  SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=999999999999999
+  SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB=999999999999999
+  SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_SOURCE=phase-policy
+  SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND=cli-row-mir-shards
+  SIMPLE_BOOTSTRAP_RSS_CAP_MODE=enforce
+  export SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB \
+    SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_SOURCE SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND \
+    SIMPLE_BOOTSTRAP_RSS_CAP_MODE
+  bootstrap_phase_c_apply_frontend_policy
+) >"$tmp/policy.log" 2>&1 || policy_status=$?
+[ "$policy_status" -ne 0 ] || { echo 'unadmittable elevated ceiling accepted' >&2; exit 1; }
+grep -Fq 'verification-frontend-policy-error: tree RSS policy: ' "$tmp/policy.log" || {
+  echo 'frontend-policy ceiling refusal left no reason in the row log' >&2; exit 1;
+}
+
+# A contradictory inherited scheduling request is refused by the product
+# frontend owner; that refusal must also name itself.
+policy_status=0
+(
+  SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=4194304
+  SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_SOURCE=phase-policy
+  SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND=budget
+  SIMPLE_HIR_SHARD_WORKER_KB=1
+  export SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_SOURCE \
+    SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND SIMPLE_HIR_SHARD_WORKER_KB
+  unset SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB
+  bootstrap_phase_c_apply_frontend_policy
+) >"$tmp/policy.log" 2>&1 || policy_status=$?
+[ "$policy_status" -ne 0 ] || { echo 'contradictory frontend request accepted' >&2; exit 1; }
+grep -Fq 'verification-frontend-policy-error: product frontend policy refused cap 4194304 KiB' "$tmp/policy.log" || {
+  echo 'product frontend refusal left no reason in the row log' >&2; exit 1;
+}
 
 echo 'PASS: Phase C commands, backend cache identity, and receipt validation'

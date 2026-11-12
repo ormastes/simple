@@ -1,18 +1,23 @@
 # LSP codeAction wiring over the typed fix model (REQ-DIAG-011).
 # Lists come from ranked_candidates_for(); applies go through EditTransaction
 # and a versioned documentChanges WorkspaceEdit is emitted only on Applied.
-# Positions are zero-based lines and byte-based characters.
+# Positions are zero-based lines and UTF-16 code-unit characters (LSP).
 use std.common.json.serializer.{json_escape_string}
 use std.common.diagnostics.diagnostic_batch.{FixCandidate, DiagnosticActionIndex}
 use std.common.diagnostics.fix_ranking.{ranked_candidates_for}
-use std.common.diagnostics.fix_transaction.{EditTransaction}
+use std.common.diagnostics.fix_transaction.{EditTransaction, ApplyResult, DocumentSnapshot}
+use std.common.diagnostics.source_position.{LineStartTable, byte_to_position, span_to_range}
+use std.nogc_sync_mut.lsp.lsp_diag_action_store.{LspDiagActionEntry}
 
 fn jstr(s: text) -> text:
     "\"" + json_escape_string(s) + "\""
 
+# Byte offset -> (line, UTF-16 character); (-1, -1) for an offset that is out
+# of range or splits a UTF-8 scalar.
 pub fn lsp_byte_offset_position(body: text, offset: i64) -> (i64, i64):
-    val parts = body.substring(0, offset).split("\n")
-    (parts.len() - 1, parts[parts.len() - 1].byte_len())
+    match byte_to_position(body, LineStartTable.build(body), offset):
+        Some(p): (p.line, p.character)
+        None: (-1, -1)
 
 fn action_json(diagnostic_id: text, c: FixCandidate, preferred: bool) -> text:
     var out = "{\"title\":" + jstr(c.title) + ",\"kind\":\"quickfix\""
@@ -35,16 +40,15 @@ pub fn lsp_diag_code_actions_json(index: DiagnosticActionIndex, diagnostic_id: t
         rows.push(action_json(diagnostic_id, c, prefer))
     "[" + rows.join(",") + "]"
 
-fn position_json(p: (i64, i64)) -> text:
-    "{\"line\":" + p.0.to_text() + ",\"character\":" + p.1.to_text() + "}"
+fn position_json(line: i64, character: i64) -> text:
+    "{\"line\":" + line.to_text() + ",\"character\":" + character.to_text() + "}"
 
-pub fn lsp_diag_apply_json(tx: EditTransaction, c: FixCandidate) -> text:
-    val result = tx.apply(c)
-    if not result.applied():
-        return "{\"status\":" + jstr(result.status.name()) + ",\"reason\":" + jstr(result.reason) + "}"
+# documentChanges for an Applied result; "" when any range is unmappable.
+fn workspace_edit_json(tx: EditTransaction, result: ApplyResult, c: FixCandidate) -> text:
     var changes: [text] = []
     for f in result.changed_files:
         val before = tx.text_of(f)
+        val table = LineStartTable.build(before)
         var version = 0
         match tx.document(f):
             Some(d): version = d.version
@@ -52,9 +56,61 @@ pub fn lsp_diag_apply_json(tx: EditTransaction, c: FixCandidate) -> text:
         var edits: [text] = []
         for r in c.replacements:
             if r.file == f:
-                val range = "{\"start\":" + position_json(lsp_byte_offset_position(before, r.span.start))
-                    + ",\"end\":" + position_json(lsp_byte_offset_position(before, r.span.end)) + "}"
-                edits.push("{\"range\":" + range + ",\"newText\":" + jstr(r.new_text) + "}")
+                match span_to_range(before, table, r.span.start, r.span.end):
+                    Some(rg):
+                        val range = "{\"start\":" + position_json(rg.start.line, rg.start.character)
+                            + ",\"end\":" + position_json(rg.end.line, rg.end.character) + "}"
+                        edits.push("{\"range\":" + range + ",\"newText\":" + jstr(r.new_text) + "}")
+                    None:
+                        return ""
         changes.push("{\"textDocument\":{\"uri\":" + jstr("file://" + f) + ",\"version\":" + version.to_text()
             + "},\"edits\":[" + edits.join(",") + "]}")
-    "{\"status\":\"applied\",\"edit\":{\"documentChanges\":[" + changes.join(",") + "]}}"
+    "{\"documentChanges\":[" + changes.join(",") + "]}"
+
+pub fn lsp_diag_apply_json(tx: EditTransaction, c: FixCandidate) -> text:
+    val result = tx.apply(c)
+    if not result.applied():
+        return "{\"status\":" + jstr(result.status.name()) + ",\"reason\":" + jstr(result.reason) + "}"
+    val edit = workspace_edit_json(tx, result, c)
+    if edit == "":
+        return "{\"status\":\"unmappable_range\",\"reason\":\"edit span is not on a UTF-8 scalar boundary\"}"
+    "{\"status\":\"applied\",\"edit\":" + edit + "}"
+
+fn starts_on_line(c: FixCandidate, file: text, body: text, table: LineStartTable, line: i64) -> bool:
+    for r in c.replacements:
+        if r.file == file:
+            match byte_to_position(body, table, r.span.start):
+                Some(p):
+                    if p.line == line: return true
+                None: pass
+    false
+
+# Live codeAction list for one document line, built from the published
+# batch's candidates and the editor snapshot. Only candidates the transaction
+# actually applies are offered, each with its versioned edit. None when the
+# store has nothing applicable for this line.
+pub fn lsp_diag_live_actions_json(entry: LspDiagActionEntry, file: text, body: text, line: i64) -> text?:
+    val table = LineStartTable.build(body)
+    val tx = EditTransaction.new(file_parent(file), entry.source_hash)
+        .with_document(DocumentSnapshot.new(file, entry.version, entry.source_hash, body))
+    var rows: [text] = []
+    var preferred_taken = false
+    for id in entry.ids:
+        for c in ranked_candidates_for(entry.index, id):
+            if not c.is_enabled() or not starts_on_line(c, file, body, table, line): continue
+            val result = tx.apply(c)
+            if not result.applied(): continue
+            val edit = workspace_edit_json(tx, result, c)
+            if edit == "": continue
+            var row = "{\"title\":" + jstr(c.title) + ",\"kind\":\"quickfix\""
+            if not preferred_taken:
+                preferred_taken = true
+                row = row + ",\"isPreferred\":true"
+            rows.push(row + ",\"edit\":" + edit + ",\"data\":{\"diagnostic_id\":" + jstr(id) + ",\"candidate_id\":" + jstr(c.id) + "}}")
+    if rows.len() == 0: return None
+    Some("[" + rows.join(",") + "]")
+
+fn file_parent(file: text) -> text:
+    val slash = file.last_index_of("/")
+    if slash <= 0: return "/"
+    file.substring(0, slash)

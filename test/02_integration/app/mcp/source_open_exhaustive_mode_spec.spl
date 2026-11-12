@@ -1,0 +1,97 @@
+# @req REQ-MCP-7-7
+# Exhaustive mode: no selection policy (nothing is folded or deselected), but
+# output stays paged under the same per-page caps as every structured view
+# (<= 64 nodes, <= 12288-byte payload). A cursor walks every outline node and
+# the only omissions are budget_page rows carrying a reopen handle.
+use std.spec.step
+use app.mcp.main_dispatch.{dispatch_tool}
+use std.common.string_core.{str_len}
+use std.common.json.value.{JsonValue, json_parse_value_strict, json_value_field, json_value_text_or, json_value_items, json_value_has}
+
+val FIXTURE = "test/fixture/source_view/navigate.spl"
+val FIXTURE_NODES = 9
+
+fn view_payload(response: text) -> JsonValue:
+    expect(str_len(response)).to_be_less_than(16385)
+    val wire = json_parse_value_strict(response).unwrap()
+    val result = json_value_field(wire, "result")
+    expect(json_value_field(result, "isError")).to_equal(JsonValue.Bool(false))
+    val content = json_value_items(json_value_field(result, "content"))
+    val inner = json_value_text_or(json_value_field(content[0], "text"), "")
+    expect(str_len(inner)).to_be_less_than(12289)
+    json_parse_value_strict(inner).unwrap()
+
+fn count_reason(payload: JsonValue, reason: text) -> i64:
+    var count = 0
+    for entry in json_value_items(json_value_field(payload, "omission_ledger")):
+        if json_value_text_or(json_value_field(entry, "reason"), "") == reason: count = count + 1
+    count
+
+fn request(id: text, extra: text) -> JsonValue:
+    view_payload(dispatch_tool(id, "source_open", "{\"path\":\"" + FIXTURE + "\",\"mode\":\"exhaustive\"" + extra + "}"))
+
+describe "source_open exhaustive mode":
+    it "returns status ok with the explicit per-page cap":
+        step("request exhaustive mode")
+        val payload = request("30", "")
+        expect(json_value_text_or(json_value_field(payload, "status"), "")).to_equal("ok")
+        expect(json_value_text_or(json_value_field(payload, "mode"), "")).to_equal("exhaustive")
+        val cap = json_value_field(payload, "exhaustive_page_cap")
+        expect(json_value_field(cap, "max_nodes")).to_equal(JsonValue.Int(64))
+        expect(json_value_field(cap, "max_payload_bytes")).to_equal(JsonValue.Int(12288))
+
+    it "ledger has no folded_body or not_selected rows where outline has some":
+        step("outline on the same file folds bodies")
+        val outline = view_payload(dispatch_tool("31", "source_open", "{\"path\":\"" + FIXTURE + "\"}"))
+        expect(count_reason(outline, "folded_body") + count_reason(outline, "not_selected")).to_be_greater_than(0)
+        step("exhaustive omits nothing by selection")
+        val payload = request("32", "")
+        expect(count_reason(payload, "folded_body")).to_equal(0)
+        expect(count_reason(payload, "not_selected")).to_equal(0)
+        expect(count_reason(payload, "import_group")).to_equal(0)
+        for entry in json_value_items(json_value_field(payload, "omission_ledger")):
+            expect(json_value_text_or(json_value_field(entry, "reason"), "")).to_equal("budget_page")
+            expect(json_value_has(entry, "reopen")).to_equal(true)
+        expect(json_value_items(json_value_field(payload, "folds")).len()).to_equal(0)
+
+    it "cursor pages reach the last node and their union is every node":
+        step("page with max_nodes=2 until the cursor is exhausted")
+        var seen: [i64] = []
+        var cursor = ""
+        var snapshot = ""
+        var pages = 0
+        var done = false
+        while not done and pages < 20:
+            val extra = if cursor == "": ",\"max_nodes\":2" else: ",\"max_nodes\":2,\"cursor\":\"" + cursor + "\",\"snapshot_id\":\"" + snapshot + "\""
+            val payload = request("33", extra)
+            expect(json_value_text_or(json_value_field(payload, "status"), "")).to_equal("ok")
+            val segments = json_value_items(json_value_field(payload, "segments"))
+            expect(segments.len()).to_be_less_than(3)
+            for segment in segments:
+                match json_value_field(segment, "node"):
+                    JsonValue.Int(n):
+                        if not seen.contains(n): seen.push(n)
+                    _: expect("node index").to_equal("missing")
+            snapshot = json_value_text_or(json_value_field(payload, "snapshot_id"), "")
+            cursor = json_value_text_or(json_value_field(payload, "next_cursor"), "")
+            pages = pages + 1
+            if cursor == "": done = true
+        expect(done).to_equal(true)
+        expect(pages).to_be_greater_than(1)
+        expect(seen.len()).to_equal(FIXTURE_NODES)
+        expect(seen).to_contain(FIXTURE_NODES - 1)
+
+    it "rejects a page cap above 64 nodes and a target":
+        step("max_nodes above the cap is an error, not an unbounded page")
+        val big = dispatch_tool("34", "source_open", "{\"path\":\"" + FIXTURE + "\",\"mode\":\"exhaustive\",\"max_nodes\":65}")
+        expect(big).to_contain("invalid_structure_budget")
+        val targeted = dispatch_tool("35", "source_open", "{\"path\":\"" + FIXTURE + "\",\"mode\":\"exhaustive\",\"target\":\"Controller\"}")
+        expect(targeted).to_contain("target_not_supported_in_exhaustive_mode")
+
+    it "intent is resolved and reported but does not narrow exhaustive":
+        step("exhaustive plus intent keeps mode and the full walk")
+        val payload = request("36", ",\"intent\":\"process\"")
+        expect(json_value_text_or(json_value_field(payload, "mode"), "")).to_equal("exhaustive")
+        expect(json_value_has(payload, "intent_resolution")).to_equal(true)
+        expect(count_reason(payload, "folded_body")).to_equal(0)
+        expect(count_reason(payload, "not_selected")).to_equal(0)
