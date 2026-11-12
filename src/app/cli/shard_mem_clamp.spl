@@ -653,18 +653,28 @@ pub fn shard_tree_budget_kb_for(declared_kb: i64, cgroup_kb: i64) -> i64:
     declared_kb
 
 # Parallel floor (2026-11-12): Stage 3 and the tool builds must run with at
-# least two workers. When an ENFORCING tree RSS guard is known (the watchdog
-# exports its cap as the tree budget and SIMPLE_BOOTSTRAP_RSS_CAP_MODE=enforce)
-# and two whole estimates plus the coordinator's measured peak fit inside that
-# cap, the 60%/40% reserve no longer forces a serial run: the guard is the
-# authority for the remaining headroom. Without a known enforced cap, or when
-# two estimates do not physically fit, the clamp result stands. Never raises a
-# serial request or an already admitted fanout.
+# least two workers. The 60%/40% reserve may be overridden only where the
+# ENFORCING tree RSS guard is the binding bound:
+#   - the watchdog enforces the tree cap (SIMPLE_BOOTSTRAP_RSS_CAP_MODE=enforce,
+#     cap exported as the tree budget);
+#   - host free memory is known and the cap fits inside it after the host
+#     headroom (tree <= avail - headroom), so the guard fires before the host
+#     runs dry;
+#   - two whole estimates plus the coordinator fit the cap. A measured
+#     coordinator peak is used; unknown (-1) reserves the tree policy's 4 GiB
+#     phase base (BOOTSTRAP_TREE_RSS_PHASE_BASE_KIB).
+# Otherwise the clamp result stands. Never raises a serial request or an
+# already admitted fanout; the pool's live commit admission still gates each
+# spawn (its peak_live_workers line reports what really ran).
+pub const SHARD_FLOOR_UNKNOWN_PARENT_KB_V1: i64 = 4194304
+
 pub fn shard_threads_guarded_floor_v1(requested: i64, cap: i64, tree_kb: i64,
-        budget_kb: i64, parent_peak_kb: i64, rss_mode: text) -> i64:
+        avail_kb: i64, headroom_kb: i64, budget_kb: i64, parent_peak_kb: i64,
+        rss_mode: text) -> i64:
     if requested < 2 or cap >= 2: return cap
     if rss_mode != "enforce" or tree_kb <= 0 or budget_kb <= 0: return cap
-    val parent_kb = if parent_peak_kb > 0: parent_peak_kb else: 0
+    if avail_kb <= 0 or headroom_kb < 0 or tree_kb > avail_kb - headroom_kb: return cap
+    val parent_kb = if parent_peak_kb >= 0: parent_peak_kb else: SHARD_FLOOR_UNKNOWN_PARENT_KB_V1
     if budget_kb > (tree_kb - parent_kb) / 2: return cap
     2
 
@@ -698,13 +708,13 @@ pub fn shard_threads_mem_cap(requested: i64, budget_kb: i64, parent_peak_kb: i64
         if cap_kb > 0 or avail_kb > 0 or tree_kb > 0:
             if clamp_workers < cap: cap = clamp_workers
         print "[hir-shard] admission worker estimate={budget_kb} kB (coordinator peak {parent_peak_kb} kB reserved for the coordinator only); warmup pool only, RSS guard authoritative"
-    # Host free memory still bounds the floor: the guard owns the tree cap,
-    # not memory the rest of the host is using.
-    val floor_tree_kb = if avail_kb > 0 and avail_kb < tree_kb: avail_kb else: tree_kb
-    val floored = shard_threads_guarded_floor_v1(bounded, cap, floor_tree_kb, budget_kb,
-        parent_peak_kb, env_get("SIMPLE_BOOTSTRAP_RSS_CAP_MODE") ?? "")
+    # The floor needs measured host free memory even when the host clamp is off.
+    val floor_avail_kb = if avail_kb > 0: avail_kb else: shard_mem_available_kb()
+    val floor_headroom_kb = shard_tree_headroom_kib_v1()
+    val floored = shard_threads_guarded_floor_v1(bounded, cap, tree_kb, floor_avail_kb,
+        floor_headroom_kb, budget_kb, parent_peak_kb, env_get("SIMPLE_BOOTSTRAP_RSS_CAP_MODE") ?? "")
     if floored != cap:
-        print "[shard] parallel floor: {cap} -> {floored} worker(s) under the enforcing RSS guard (tree {floor_tree_kb} kB fits 2 x {budget_kb} kB)"
+        print "[shard] parallel floor: admission cap {cap} -> {floored} under the enforcing RSS guard (tree {tree_kb} kB <= free {floor_avail_kb} - headroom {floor_headroom_kb} kB, fits 2 x {budget_kb} kB); live commit admission still gates each spawn"
         cap = floored
     if cap < requested:
         print "[shard] threads={cap} (requested {requested}, host max_threads bound={bounded}, available={avail_kb} kB, tree budget={tree_kb} kB (declared {declared_kb} kB, cgroup memory.max {cgroup_kb} kB), worker budget={budget_kb} kB, parent peak={parent_peak_kb} kB)"

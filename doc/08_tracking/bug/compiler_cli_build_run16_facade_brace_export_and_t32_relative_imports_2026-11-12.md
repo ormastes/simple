@@ -34,7 +34,7 @@ Two halves, both now agreeing with the `export A, B from sibling` form:
    dotless name to the absolute resolver only, so the sibling was missed even
    when its surface was committed (log line 13382 `commit-done
    src/lib/common/diagnostics/diagnostic_v1.spl` vs. the error). Fix: a
-   dotless module part becomes `.ident`; a dotted one stays absolute
+   dotless module part becomes `.ident`; a dotted one is taken as spelled (`saw_dot` rule)
    (`src/lib/nogc_sync_mut/database/vector/__init__.spl` relies on that).
 2. **Entry-closure scanner**
    (`src/compiler/80.driver/driver_entry_closure_core.spl`,
@@ -43,7 +43,7 @@ Two halves, both now agreeing with the `export A, B from sibling` form:
    whole-content early-out admitted only files containing `use `/`import `/
    ` from `. `source_position.spl` is reachable only through the facade and
    has NO phase-2 surface line in the run-16 log (3094 surfaced of 4694).
-   Fix: a `.{` export line is collected as `.sibling` (dotted stays absolute)
+   Fix: a `.{` export line is collected as `.sibling` (dotted taken as spelled); single-member `export sibling.Name` is followed too
    and `export ` admits the scan.
 
 Cheap repro (6.5 min, run from a fresh worktree, Stage 2 binary above):
@@ -92,7 +92,7 @@ to the logical `app.t32_cli.types` spelling. Run 13 (`f8ad54b28467`) had the
 same symlinks in its closure and passed HIR, so the regression is inside
 `f8ad54b28467..c7431e088615`.
 
-## Class C — OPEN: `app.mcp_t32.protocol` uses names it never imports
+## Class C — FIXED (2026-11-12): `app.mcp_t32.protocol` uses names it never imports
 
 `unresolved name: t32_nl` (x3), `T32_USE_JSON_LINES` (x2), `t32_server_name`,
 `rt_file_read_text`, `print_raw` (x2). `t32_nl`/`t32_server_name` are defined
@@ -102,3 +102,12 @@ in `examples/10_tooling/trace32_tools/t32_mcp/main.spl` and used from
 with exactly `1 module(s) poisoned, 8 error(s)`, all in `protocol.spl`.
 Source defect in the example tree (introduced by `6889c95ddd6`); independent
 of A and B.
+
+**Fix (class C):** `protocol.spl` now owns `T32_USE_JSON_LINES`, `t32_nl`,
+`t32_server_name`, `t32_server_version` (main.spl imports them; it cannot be
+the owner without a cycle) and declares `extern fn rt_file_read_text` /
+`extern fn print_raw` (C runtime symbol, tagged-text ABI). Red→green:
+`test/01_unit/app/mcp_t32/mcp_t32_protocol_owned_names_spec.spl` 0/2 → 2/2,
+and a Stage 2 `native-build` of a tiny entry importing
+`app.mcp_t32.protocol` goes from `1 module(s) poisoned, 8 error(s)` to a
+linked binary that emits a framed `initialize` reply.

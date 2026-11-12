@@ -6413,11 +6413,13 @@ impl MirLowering:
         if name == "":
             name = "unknown_{self.symbol_id_value(symbol)}"
         var signature = MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)
+        var sym_type_present = false
         # Presence tests alone do not unwrap HirSymbol?/HirType?: match the
         # concrete payload kinds (same ABI defect class as 4710b22a991).
         if val present_sym_type = optional_sym:
             val sym_type_owner: HirSymbol = present_sym_type
             if val present_sym_hir_type = sym_type_owner.type_:
+                sym_type_present = true
                 val concrete_sym_hir_type: HirType = present_sym_hir_type
                 match concrete_sym_hir_type.kind:
                     case HirTypeKind.Function(params, ret, _):
@@ -6427,6 +6429,20 @@ impl MirLowering:
                         signature = MirSignature(params: mir_params, return_type: self.lower_type(ret), is_variadic: false,
                             declared_params: mir_params, declared_params_known: true)
                     case _: ()
+        # An imported method without `->` has no callable type on its surface
+        # symbol (declared_surface_callable_type returns nil), so Cranelift saw
+        # no declared params and refused its f64 arguments (Stage 3 census,
+        # hir_codec.spl `w.put_f64`). Only then -- never over a known type --
+        # take the provider-prescanned receiver-tail params: the receiver is the
+        # handle word, the return stays the i64 default (an f64 result still
+        # fails loudly in cl_call_abi_mismatch).
+        if not sym_type_present:
+            if val tail_params = bootstrap_method_receiver_tail_params_lookup_v1(name):
+                var receiver_params: [MirType] = [MirType.i64()]
+                for tail_param in tail_params:
+                    receiver_params = receiver_params.push(self.lower_type(tail_param))
+                signature = MirSignature(params: receiver_params, return_type: MirType.i64(), is_variadic: false,
+                    declared_params: receiver_params, declared_params_known: true)
         MirOperand(kind: MirOperandKind.Const(
             MirConstValue.Str(name),
             MirType(kind: MirTypeKind.FuncPtr(signature))

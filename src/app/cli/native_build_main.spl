@@ -4,7 +4,8 @@ use app.cli.worker_hir_owner_v1.{WorkerHirOwnerV1, worker_hir_owner_start_v1, wo
 use app.cli.native_build_hir_warmup_outcome.{native_build_hir_warmup_outcome_v1, native_build_capsule_user_args_v1}
 # Lightweight entrypoint for `simple native-build`.
 
-use app.io.env_ops.{env_get, env_set, cwd, host_os}
+use app.io.env_ops.{env_get, env_set, env_unset, cwd, host_os}
+use app.cli.native_build_env_restore_v1.{native_build_env_saved_v1, native_build_env_restore_v1}
 use app.io.process_ops.{process_run_timeout, process_run_timeout_live, process_spawn_async, process_wait, process_kill, process_is_running}
 use app.io.cli_ops.{_cli_self_exe_via_pid_query, cli_kernel_executable_path}
 use app.cli.native_build_producer_binding.{bootstrap_native_build_producer_binding}
@@ -895,7 +896,7 @@ fn run_parse_shards_with_base(base: [text], count: i64, simple_bin: text, timeou
         case Err(msg): panic(msg)
         case Ok(_): pass
     val queue_dir = parse_shard_queue_dir()
-    val old_queue = env_get("SIMPLE_PARSE_SHARD_QUEUE") ?? ""
+    val old_queue = native_build_env_saved_v1("SIMPLE_PARSE_SHARD_QUEUE")
     if queue_dir != "":
         env_set("SIMPLE_PARSE_SHARD_QUEUE", queue_dir)
     var indices: [i64] = []
@@ -918,7 +919,7 @@ fn run_parse_shards_with_base(base: [text], count: i64, simple_bin: text, timeou
         val failed_again = spawn_parse_shards(base, failed, count, simple_bin, timeout_ms, split_flag)
         done = count - failed_again.len()
     if queue_dir != "":
-        env_set("SIMPLE_PARSE_SHARD_QUEUE", old_queue)
+        native_build_env_restore_v1("SIMPLE_PARSE_SHARD_QUEUE", old_queue)
         val _removed = dir_remove_all(queue_dir)
     val mode = if queue_dir != "": "queue" else: "static"
     print "[parse-shard] {done}/{count} shard(s) completed split={mode}"
@@ -1061,10 +1062,16 @@ fn native_build_capsule_hir_ledger_run_v1(args: [text], queue_dir: text, count: 
             eprint "[hir-shard] BLOCKED: {reason}"
             return LedgerShardRunV1(code: 1, failed_modules: 0, total_claims: 0,
                 blocked_reason: reason, all_stopped: true)
-    val old_worker_marker = env_get("SIMPLE_NATIVE_BUILD_WORKER") ?? ""
+    # Restore the marker exactly: a present-but-empty SIMPLE_* key would be
+    # folded into the in-process environment fingerprint
+    # (native_build_environment_snapshot_fingerprint_v1) and shift its cache scope.
+    val old_worker_marker = env_get_nullable("SIMPLE_NATIVE_BUILD_WORKER")
     env_set("SIMPLE_NATIVE_BUILD_WORKER", "1")
     val run = native_build_hir_ledger_run_in_v1(forwarded, queue_dir, count, simple_bin, timeout_ms)
-    env_set("SIMPLE_NATIVE_BUILD_WORKER", old_worker_marker)
+    if val previous = old_worker_marker:
+        env_set("SIMPLE_NATIVE_BUILD_WORKER", previous)
+    else:
+        env_unset("SIMPLE_NATIVE_BUILD_WORKER")
     run
 
 # Shared worker-pool driver for the HIR and MIR shard ledgers
@@ -1096,8 +1103,8 @@ pub fn native_build_path_parent_v1(path: text) -> text:
 fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
         base: [text], queue_dir: text, args: [text], count: i64, parallel: i64,
         simple_bin: text, timeout_ms: i64) -> LedgerShardRunV1:
-    val old_queue = env_get(queue_env) ?? ""
-    val old_owner = env_get(owner_env) ?? ""
+    val old_queue = native_build_env_saved_v1(queue_env)
+    val old_owner = native_build_env_saved_v1(owner_env)
     if not env_set(queue_env, queue_dir):
         return LedgerShardRunV1(code: 1, failed_modules: 0, total_claims: 0,
             blocked_reason: "worker queue environment could not be installed", all_stopped: true)
@@ -1105,18 +1112,18 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
     var hir_pool_cleanup_deadline: i64 = 0
     if label == "hir-shard":
         if base.len() < 3 or base[0] != "run" or base[1] != "src/app/cli/native_build_worker.spl":
-            env_set(queue_env, old_queue)
+            native_build_env_restore_v1(queue_env, old_queue)
             eprint("[hir-shard] BLOCKED: HIR profile requires the canonical internal worker route")
             return LedgerShardRunV1(code: 1, failed_modules: 0, total_claims: 0,
                 blocked_reason: "HIR profile requires the canonical internal worker route", all_stopped: true)
         if count <= 0 or count > 128 or parallel <= 0 or parallel > 128:
-            env_set(queue_env, old_queue)
+            native_build_env_restore_v1(queue_env, old_queue)
             eprint("[hir-shard] BLOCKED: HIR profile worker count exceeds 128-owner bound")
             return LedgerShardRunV1(code: 1, failed_modules: 0, total_claims: 0,
                 blocked_reason: "HIR profile worker count exceeds 128-owner bound", all_stopped: true)
         val selection = native_build_entry_and_sources_v1(args)
         if selection.is_empty():
-            env_set(queue_env, old_queue)
+            native_build_env_restore_v1(queue_env, old_queue)
             eprint("[hir-shard] BLOCKED: HIR profile has no explicit entry")
             return LedgerShardRunV1(code: 1, failed_modules: 0, total_claims: 0,
                 blocked_reason: "HIR profile has no explicit entry", all_stopped: true)
@@ -1125,7 +1132,7 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
         match worker_hir_profile_admit_v1(base[2:], selection[0], selection[1:], deadline):
             case Ok(profile): hir_profiles = [profile]
             case Err(reason):
-                env_set(queue_env, old_queue)
+                native_build_env_restore_v1(queue_env, old_queue)
                 eprint("[hir-shard] profile admission rejected: " + reason)
                 return LedgerShardRunV1(code: 1, failed_modules: 0, total_claims: 0,
                     blocked_reason: reason, all_stopped: true)
@@ -1140,7 +1147,7 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
     val producer = env_get("SIMPLE_FRONTEND_CACHE_SCOPE") ?? ""
     val producer_key = if producer == "": "unknown" else: producer
     val peak_record = "{native_build_path_parent_v1(queue_dir)}/{label}.{producer_key}.peak_kib"
-    val old_dataset_cap = env_get("SIMPLE_GLOBAL_DATASET_MAX_BYTES") ?? ""
+    val old_dataset_cap = native_build_env_saved_v1("SIMPLE_GLOBAL_DATASET_MAX_BYTES")
     val budget_knob = if label == "mir-shard": "SIMPLE_MIR_SHARD_WORKER_KB" else: "SIMPLE_HIR_SHARD_WORKER_KB"
     val static_kib = if label == "mir-shard": shard_worker_budget_kb(budget_knob, SHARD_MIR_WORKER_KB_V1) else: shard_worker_budget_kb(budget_knob, SHARD_HIR_WORKER_KB_V1)
     val override_kib = shard_mem_available_kb_from_field(env_get(budget_knob) ?? "")
@@ -1165,6 +1172,9 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
     var done: i64 = 0
     var all_stopped = true
     var total_claims: i64 = 0
+    # Live-admitted concurrency actually reached (the start-time cap is only an
+    # upper bound: shard_commit_spawn_admit_v1 still gates every spawn).
+    var peak_live: i64 = 0
     while pending.len() > 0 and not hir_shard_recovery_blocked(queue_dir):
         var replacements: [i64] = []
         # Slot pool, not waves: a worker starts as soon as any of the
@@ -1205,6 +1215,7 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
                 indices = indices.push(index)
                 started_ms = started_ms.push(time_now_monotonic_ms())
                 live_private = live_private.push(0)
+                if pids.len() > peak_live: peak_live = pids.len()
             if pids.len() == 0:
                 break
             # Reap the first live worker that exited, failed to wait, or ran
@@ -1348,9 +1359,9 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
         else:
             pending = []
         generation = generation + 1
-    env_set(queue_env, old_queue)
-    env_set(owner_env, old_owner)
-    env_set("SIMPLE_GLOBAL_DATASET_MAX_BYTES", old_dataset_cap)
+    native_build_env_restore_v1(queue_env, old_queue)
+    native_build_env_restore_v1(owner_env, old_owner)
+    native_build_env_restore_v1("SIMPLE_GLOBAL_DATASET_MAX_BYTES", old_dataset_cap)
     if observed_peak_kib > 0:
         val _peak_written = file_atomic_write(peak_record, "{observed_peak_kib}")
         print "[{label}] measured worker peak commit={observed_peak_kib} kB (static estimate {static_kib} kB, previous run {recorded_peak} kB)"
@@ -1359,7 +1370,7 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
         failed_workers = failed_workers + 1
         eprint "[{label}] inventory incomplete rows={unfinished} policy_fail_fast={fail_fast}"
     val failed_modules = hir_shard_recovery_failure_count(queue_dir)
-    print "[{label}] completed_workers={done} failed_workers={failed_workers} failed_modules={failed_modules} unfinished={unfinished} ledger={queue_dir}"
+    print "[{label}] completed_workers={done} failed_workers={failed_workers} failed_modules={failed_modules} unfinished={unfinished} peak_live_workers={peak_live}/{window_size} ledger={queue_dir}"
     if first_error_line != "":
         print first_error_line
     # Name every failed row: a count alone hid eight go-to-end MIR failures in
@@ -2097,10 +2108,10 @@ fn run_native_build_worker_inner(raw_args: [text]) -> i64:
             env_set("SIMPLE_NATIVE_BUILD_WORKER", old_worker_marker)
             return 0
         print "[native-build-warm] final artifact restore refused; running normal worker"
-    val old_warm_candidate = env_get(NATIVE_BUILD_WARM_CANDIDATE_ENV) ?? ""
+    val old_warm_candidate = native_build_env_saved_v1(NATIVE_BUILD_WARM_CANDIDATE_ENV)
     # Never leak a caller's stale candidate into warm-up children. The real
     # worker receives only this invocation's pid-private path below.
-    env_set(NATIVE_BUILD_WARM_CANDIDATE_ENV, "")
+    env_unset(NATIVE_BUILD_WARM_CANDIDATE_ENV)
     # process_run_timeout_live relays the worker's stdout/stderr to ours AS
     # THEY ARE PRODUCED (see process_ops.spl), so a slow-but-progressing
     # multi-minute worker no longer reads as a silent hang. stdout/stderr
@@ -2154,7 +2165,7 @@ fn run_native_build_worker_inner(raw_args: [text]) -> i64:
             val authority = compiler_source_authority_open_published_v1(source_root)
             if not authority.valid:
                 env_set("SIMPLE_NATIVE_BUILD_WORKER", old_worker_marker)
-                env_set(NATIVE_BUILD_WARM_CANDIDATE_ENV, old_warm_candidate)
+                native_build_env_restore_v1(NATIVE_BUILD_WARM_CANDIDATE_ENV, old_warm_candidate)
                 eprint "SCV-E-HIR-ADMISSION: " + authority.reason
                 return 1
         val hir_result = run_hir_shards(forwarded_args, hir_shard_count, simple_bin, native_build_timeout_ms(args))
@@ -2166,7 +2177,7 @@ fn run_native_build_worker_inner(raw_args: [text]) -> i64:
             eprint "[go-to-end] HIR shard aggregate failure; continuing to the final worker"
         elif hir_result != 0:
             env_set("SIMPLE_NATIVE_BUILD_WORKER", old_worker_marker)
-            env_set(NATIVE_BUILD_WARM_CANDIDATE_ENV, old_warm_candidate)
+            native_build_env_restore_v1(NATIVE_BUILD_WARM_CANDIDATE_ENV, old_warm_candidate)
             eprint "error: HIR aggregate failure; final worker and artifact publication blocked"
             return hir_result
     # MIR + codegen in bounded worker processes (opt-in SIMPLE_MIR_SHARDING=1).
@@ -2180,7 +2191,7 @@ fn run_native_build_worker_inner(raw_args: [text]) -> i64:
     log_build_trace("coordinator:shards mir_parallel={mir_shard_parallel}")
     if mir_shard_parallel < 0:
         env_set("SIMPLE_NATIVE_BUILD_WORKER", old_worker_marker)
-        env_set(NATIVE_BUILD_WARM_CANDIDATE_ENV, old_warm_candidate)
+        native_build_env_restore_v1(NATIVE_BUILD_WARM_CANDIDATE_ENV, old_warm_candidate)
         eprint "error: MIR shard admission refused; no serial fallback"
         return 1
     if mir_shard_parallel > 0:
@@ -2200,13 +2211,13 @@ fn run_native_build_worker_inner(raw_args: [text]) -> i64:
                     fallback_action = native_mir_shard_fallback_action_v1(1, true, inprocess_opt_in)
         if mir_outcome == "fallback" and fallback_action == "refuse":
             env_set("SIMPLE_NATIVE_BUILD_WORKER", old_worker_marker)
-            env_set(NATIVE_BUILD_WARM_CANDIDATE_ENV, old_warm_candidate)
+            native_build_env_restore_v1(NATIVE_BUILD_WARM_CANDIDATE_ENV, old_warm_candidate)
             eprint "error: MIR shard pass recorded no module verdict (every MIR worker stopped before claiming a module); refusing the unbounded unsharded in-process MIR fallback (stage3 attempt 1 grew it past 10.6 GB). Check the [mir-shard] owner=... lines above; set SIMPLE_MIR_SHARD_INPROCESS_FALLBACK=1 to allow the in-process lowering explicitly."
             return 1
         if mir_outcome == "link":
             if not env_set("SIMPLE_MIR_SHARD_LINK", mir_ledger):
                 env_set("SIMPLE_NATIVE_BUILD_WORKER", old_worker_marker)
-                env_set(NATIVE_BUILD_WARM_CANDIDATE_ENV, old_warm_candidate)
+                native_build_env_restore_v1(NATIVE_BUILD_WARM_CANDIDATE_ENV, old_warm_candidate)
                 eprint "error: MIR link ledger environment could not be installed"
                 return 1
         elif mir_outcome == "fallback":
@@ -2215,7 +2226,7 @@ fn run_native_build_worker_inner(raw_args: [text]) -> i64:
             eprint "[mir-shard] WARNING: shard pass recorded no module verdict; SIMPLE_MIR_SHARD_INPROCESS_FALLBACK=1 opts in to UNBOUNDED in-process unsharded MIR"
         else:
             env_set("SIMPLE_NATIVE_BUILD_WORKER", old_worker_marker)
-            env_set(NATIVE_BUILD_WARM_CANDIDATE_ENV, old_warm_candidate)
+            native_build_env_restore_v1(NATIVE_BUILD_WARM_CANDIDATE_ENV, old_warm_candidate)
             eprint "error: MIR shard aggregate failure; link and artifact publication blocked"
             return 1
     # Publish the candidate path only for the real worker. Parse-shard_main
@@ -2279,13 +2290,13 @@ fn run_native_build_worker_inner(raw_args: [text]) -> i64:
         if output_ok:
             file_delete(output_path)
         native_build_record_postbuild_v1(false, output_path)
-        env_set(NATIVE_BUILD_WARM_CANDIDATE_ENV, old_warm_candidate)
+        native_build_env_restore_v1(NATIVE_BUILD_WARM_CANDIDATE_ENV, old_warm_candidate)
         stderr_write("error: SIMPLE_NO_STUB_FALLBACK=1 rejected native-build output containing unresolved-symbol stub evidence.\n")
         stderr_write("  The worker reported success, but strict mode forbids publishing or caching a fabricated binary.\n")
         return 1
     val _warm_promoted = native_build_warm_receipt_finish(
         warm_receipt, stdout, code == 0, output_ok)
-    env_set(NATIVE_BUILD_WARM_CANDIDATE_ENV, old_warm_candidate)
+    native_build_env_restore_v1(NATIVE_BUILD_WARM_CANDIDATE_ENV, old_warm_candidate)
     # Parse/HIR/MIR shard children exit before link by design; a missing -o
     # there is not a failure (it marked every successful parse shard FAILED).
     val shard_child_run = (env_get("SIMPLE_PARSE_SHARD") ?? "") != "" or

@@ -1,0 +1,84 @@
+"""
+## Purpose and audience
+
+End-to-end contract for unified diagnostics (REQ-DIAG-011, U1 follow-up):
+`check --format=json` output (a JSON ARRAY of per-file entries, DEPR001 rows
+carrying `fixes[]`) is parsed by the LSP consumer, the batch's fix candidates
+are recorded for the editor's document version, the live codeAction handler
+serves them, and applying the candidate rewrites the source. Audience: diag-P2.
+"""
+# @cover src/app/cli/query_check.spl
+# @cover src/lib/nogc_sync_mut/lsp/lsp_handlers.spl
+# @cover src/lib/nogc_sync_mut/lsp/lsp_diag_action_store.spl
+
+use std.spec
+use std.common.json.value.{JsonValue, json_value_object_from, json_value_serialize}
+use std.common.diagnostics.fix_transaction.{DocumentSnapshot, EditTransaction}
+use std.nogc_sync_mut.lsp.lsp_diag_action_store.{lsp_diag_action_store_clear}
+use std.nogc_sync_mut.lsp.lsp_document_sync.{lsp_document_sync_apply}
+use std.nogc_sync_mut.lsp.lsp_code_action_handler.{lsp_code_action_response}
+use std.nogc_sync_mut.lsp.lsp_handlers.{lsp_check_json_parse_v1, lsp_diag_record_batch_v1}
+use app.cli.query_check.{query_check_lint_file_json_v1}
+
+val PATH = "/w/depr.spl"
+val URI = "file:///w/depr.spl"
+val SRC = "fn main():\n    val p = Point__origin()\n    val q = Shape__unit()\n"
+val FIXED_FIRST = "fn main():\n    val p = Point.origin()\n    val q = Shape__unit()\n"
+
+fn doc_ref() -> JsonValue:
+    json_value_object_from([("uri", JsonValue.Str(URI))])
+
+fn open_doc(version: i64) -> bool:
+    val doc = json_value_object_from([("uri", JsonValue.Str(URI)), ("version", JsonValue.Int(version)), ("text", JsonValue.Str(SRC))])
+    lsp_document_sync_apply("textDocument/didOpen", json_value_serialize(json_value_object_from([("textDocument", doc)])))
+
+fn close_doc():
+    lsp_document_sync_apply("textDocument/didClose", json_value_serialize(json_value_object_from([("textDocument", doc_ref())])))
+
+fn code_action_body(line: i64) -> text:
+    val pos = json_value_object_from([("line", JsonValue.Int(line)), ("character", JsonValue.Int(0))])
+    val range = json_value_object_from([("start", pos), ("end", pos)])
+    json_value_serialize(json_value_object_from([("textDocument", doc_ref()), ("range", range)]))
+
+fn check_output() -> text:
+    "[" + query_check_lint_file_json_v1(PATH, SRC) + "]"
+
+# @manual_section: lsp_check_json_code_action_e2e
+describe "check --format=json fixes reach the live codeAction (REQ-DIAG-011)":
+    it "parses every diagnostic of the check JSON array":
+        # @req REQ-DIAG-011
+        # @capture(value): check --format=json output
+        step("Produce check JSON for a file with two DEPR001 calls")
+        val out = check_output()
+        step("Parse it with the LSP consumer")
+        val parsed = lsp_check_json_parse_v1(out, PATH, 3)
+        expect(parsed.items.len()).to_equal(2)
+        expect(parsed.items[0].contains("\"code\":\"DEPR001\"")).to_equal(true)
+        expect(parsed.items[0].contains("\"start\":{\"line\":1,\"character\":12}")).to_equal(true)
+
+    it "records one fix candidate per DEPR001 row":
+        # @req REQ-DIAG-011
+        val parsed = lsp_check_json_parse_v1(check_output(), PATH, 3)
+        expect(parsed.ids.len()).to_equal(2)
+        expect(parsed.index.candidates_for(parsed.ids[0]).len()).to_equal(1)
+
+    it "serves the DEPR001 rewrite from the published batch":
+        # @req REQ-DIAG-011
+        # @capture(value): live codeAction response
+        step("Open version 3, publish the parsed check batch, request line 1")
+        expect(open_doc(3)).to_equal(true)
+        lsp_diag_record_batch_v1(URI, lsp_check_json_parse_v1(check_output(), PATH, 3))
+        val json = lsp_code_action_response("7", code_action_body(1), "")
+        close_doc()
+        lsp_diag_action_store_clear(URI)
+        expect(json.contains("\"newText\":\"Point.origin\"")).to_equal(true)
+        expect(json.contains("\"version\":3")).to_equal(true)
+        expect(json.contains("\"start\":{\"line\":1,\"character\":12}")).to_equal(true)
+
+    it "applies the served candidate and rewrites only that call":
+        # @req REQ-DIAG-011
+        val parsed = lsp_check_json_parse_v1(check_output(), PATH, 3)
+        val tx = EditTransaction.new("/w", "").with_document(DocumentSnapshot.new(PATH, 3, "", SRC))
+        val result = tx.apply(parsed.index.candidates_for(parsed.ids[0])[0])
+        expect(result.applied()).to_equal(true)
+        expect(result.text_of(PATH)).to_equal(FIXED_FIRST)

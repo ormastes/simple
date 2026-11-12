@@ -136,6 +136,26 @@ fn _text_list_eq(a: [text], b: [text]) -> bool:
         i = i + 1
     true
 
+
+# Provider-table view for mir_method_receiver_handle_word_kind_v1: the owner of
+# a `self: Named(owner)` receiver, read from the DEFINING module's symbols.
+fn mir_method_receiver_is_handle_word_v1(receiver: HirParam, provider_symbols: SymbolTable) -> bool:
+    var owner_kind: SymbolKind? = None
+    var owner_custom = false
+    match receiver.type_.kind:
+        case HirTypeKind.Named(owner_symbol, _):
+            if val owner = provider_symbols.get_symbol_raw(owner_symbol.id):
+                val owner_info: HirSymbol = owner
+                owner_kind = Some(owner_info.kind)
+                var bare = owner_info.name
+                val colon = bare.last_index_of("::")
+                if colon >= 0: bare = bare.substring(colon + 2)
+                val dot = bare.last_index_of(".")
+                if dot >= 0: bare = bare.substring(dot + 1)
+                owner_custom = custom_primitive_is_name(bare) or
+                    custom_primitive_underlying_type_tag_by_symbol(owner_symbol.id) >= 0
+        case _: return false
+    mir_method_receiver_handle_word_kind_v1(receiver.name, owner_kind, owner_custom)
 fn mir_lower_trace_enabled() -> bool:
     val trace = mir_lower_env_get("SIMPLE_COMPILER_TRACE") ?? ""
     val phase = mir_lower_env_get("SIMPLE_COMPILER_PHASE_PROFILE") ?? ""
@@ -178,7 +198,7 @@ pub fn mir_dynamic_module_init_name(module_name_path: text, bootstrap_module_ind
     elif bootstrap_module_index >= 0:
         unique_name = unique_name + "_" + bootstrap_module_index.to_text()
     "__module_init_" + unique_name + "_dynamic"
-use compiler.frontend.core.types.{custom_primitive_underlying_type_tag_by_symbol}
+use compiler.frontend.core.types.{custom_primitive_underlying_type_tag_by_symbol, custom_primitive_is_name}
 use compiler.core.interpreter.hashmap.{hm_hash_text}
 
 # Import struct definitions from types module
@@ -2300,6 +2320,29 @@ impl MirLowering:
             # Relocated callables use this exact admitted link, not the bare name.
             # Keep symbol-free admission and ambiguity checks in the registry.
             bootstrap_fn_param_hir_types_register(prescan_call_name, prescan_param_tys)
+            # Receiver-split METHOD signature (Stage 3 f64 call ABI, 2026-11-12).
+            # The list above starts with the receiver `self: Named(owner)` and is
+            # therefore always rejected as symbol-bearing, so an imported method
+            # whose surface type is nil (no `->`, module_callable_types.spl
+            # declared_surface_callable_type) reached Cranelift with no declared
+            # params and panicked on an f64 argument. Register the NON-receiver
+            # params under the receiver-tail key; the receiver itself is the
+            # handle word only for a plain class/struct owner (a unit/newtype owner
+            # may lower to F64 and is left unknown). The same symbol-free
+            # admission applies to the tail, so a symbol-bearing tail stays
+            # rejected (unknown) and keeps failing loudly.
+            if fn_is_method and not fn_is_static and fn_params.len() > 0:
+                if mir_method_receiver_is_handle_word_v1(fn_params[0], module_symbols):
+                    var prescan_tail_tys: [HirType] = []
+                    var prescan_tail_index = 1
+                    while prescan_tail_index < fn_params.len():
+                        prescan_tail_tys.push(fn_params[prescan_tail_index].type_)
+                        prescan_tail_index = prescan_tail_index + 1
+                    val prescan_tail_name = prescan_call_name.replace("::", ".")
+                    bootstrap_method_receiver_tail_params_register_v1(prescan_tail_name, prescan_tail_tys)
+                    val prescan_tail_sanitized = prescan_tail_name.replace("-", "_")
+                    if prescan_tail_sanitized != prescan_tail_name:
+                        bootstrap_method_receiver_tail_params_register_v1(prescan_tail_sanitized, prescan_tail_tys)
     me register_builtin_enum_seeds():
         """Register the built-in Result/Option variant and runtime-identity
         seeds. Extracted from lower_module's tail (2026-10-17) so lanes that

@@ -18,13 +18,18 @@
 #      only through the facade (source_position.spl) was never loaded at all
 #      (cheap repro: closure of 3 sources, 5 siblings missing).
 # Both halves now agree with the `from` form: a single-segment module part is
-# the facade's physical sibling, spelled `.ident`; a dotted one stays absolute
+# the facade's physical sibling, spelled `.ident`; a dotted one -- rooted or
+# rootless (`export formatters.json_formatter.{...}`) -- is a module path taken
+# as spelled, the `saw_dot` rule of parse_export_source_module
 # (src/lib/nogc_sync_mut/database/vector/__init__.spl relies on that).
+# Follow-up (2026-11-12): the single-member form `export sibling.Name`
+# (diagnostics/__init__.spl: `export severity.Severity`) was also never
+# followed by the closure sibling scanner; green only via transitive imports.
 
 use std.spec.step
 
 use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
-use compiler.driver.driver_source_loading.{_driver_entry_import_module_paths}
+use compiler.driver.driver_source_loading.{_driver_entry_import_module_paths, _driver_entry_sibling_module_paths}
 
 describe "facade `export sibling.{...}` re-export":
     """Pins the run-16 routed repro: a braced re-export of a bare sibling must
@@ -40,8 +45,8 @@ describe "facade `export sibling.{...}` re-export":
         expect(module.imports[0].items[0].name).to_equal("DiagnosticV1")
         expect(module.imports[0].items[1].name).to_equal("LabelV1")
 
-    it "parser keeps a dotted module part absolute":
-        step("parser keeps a dotted module part absolute")
+    it "parser takes a dotted module part as spelled":
+        step("parser takes a dotted module part as spelled")
         val module = parse_and_build_module(
             "export std.database.vector.types.{{DistanceMetric}}\n", "vector_facade.spl")
         expect(module.imports.len()).to_equal(1)
@@ -64,8 +69,21 @@ describe "facade `export sibling.{...}` re-export":
         expect(imports.contains(".source_position")).to_equal(true)
         expect(imports.contains(".fix_ranking")).to_equal(true)
 
-    it "closure scanner keeps a dotted braced export absolute":
-        step("closure scanner keeps a dotted braced export absolute")
+    it "closure scanner takes a dotted braced export as spelled":
+        step("closure scanner takes a dotted braced export as spelled")
         val imports = _driver_entry_import_module_paths(
             "export std.database.vector.types.{{DistanceMetric, VectorEntry}}\n")
         expect(imports).to_equal(["std.database.vector.types"])
+
+    it "closure sibling scanner follows single-member `export sibling.Name`":
+        step("closure sibling scanner follows single-member export sibling.Name")
+        val facade = "export severity.Severity\n" +
+            "export span.Span\n" +
+            "export a.b.C\n" +
+            "export Plain\n" +
+            "export use helpers\n"
+        val sibs = _driver_entry_sibling_module_paths(facade)
+        expect(sibs.contains(".severity")).to_equal(true)
+        expect(sibs.contains(".span")).to_equal(true)
+        expect(sibs.contains(".a")).to_equal(false)
+        expect(sibs.contains(".Plain")).to_equal(false)
