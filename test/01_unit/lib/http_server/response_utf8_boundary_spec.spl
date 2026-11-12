@@ -1,6 +1,9 @@
 use std.spec
 use std.nogc_sync_mut.http_server.types.{HttpResponse}
 use std.nogc_sync_mut.http_server.response.{serialize_response}
+use std.nogc_sync_mut.http_server.types.{HttpRequest, HttpMethod}
+use std.nogc_sync_mut.http_server.proxy.{reverse_proxy_route, reverse_proxy_serialize_request, reverse_proxy_serialize_request_headers}
+use std.nogc_sync_mut.http_server.h2_server.{h2_response_body_len}
 use std.common.text_bytes.{text_to_utf8_bytes, bytes_to_text}
 
 describe "HTTP response UTF-8 provider boundary":
@@ -19,3 +22,13 @@ describe "HTTP response UTF-8 provider boundary":
         val wire = serialize_response(HttpResponse.ok(""))
         expect(wire).to_end_with("\r\n\r\n")
         expect(bytes_to_text(text_to_utf8_bytes(wire))).to_equal(wire)
+
+    it "h2 response length counts body bytes, not characters":
+        expect(h2_response_body_len(HttpResponse.ok("é한😀"))).to_equal(9)
+
+    it "proxy request Content-Length counts body bytes":
+        val route = reverse_proxy_route("/api", "127.0.0.1:9000")
+        var req = HttpRequest.new(HttpMethod.Post, "/api/x")
+        req.body = "é한😀"
+        expect(reverse_proxy_serialize_request(req, route).contains("Content-Length: 9\r\n")).to_equal(true)
+        expect(reverse_proxy_serialize_request_headers(req, route).contains("Content-Length: 9\r\n")).to_equal(true)
