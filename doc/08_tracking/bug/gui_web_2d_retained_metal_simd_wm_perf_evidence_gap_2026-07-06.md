@@ -99,3 +99,24 @@ Multiple `gpt-5.3-codex-spark` sidecar launches were attempted for Metal,
 SIMD/aarch, hosted WM, and SimpleOS/QEMU lanes. Each Spark worker failed with
 the usage-limit error, so this blocker was filed from the main rollout rather
 than from a completed Spark sidecar.
+
+## Fix verification
+
+2026-11-12: added the missing retained Web 2D WM perf receipt producer
+`scripts/check/check-wm-retained-web2d-perf-evidence.shs` (recommended fix
+items 1 and 4). It assembles a receipt from a live WM run directory
+(`launch.log` with `[hosted-wm] frame-presented` markers, presented-buffer
+before/after PPM captures, executable, frame timing samples, RSS measurement)
+and admits it through the existing `--validate-retained-perf-receipt` schema
+gate. It fails honestly when: `metal` is requested on a non-Darwin host
+(`backend-unavailable:metal-on-<os>`), any frame marker reports
+`fallback=true` or a fallback/provenance-rejected marker appears
+(`backend-fallback` / `content-provenance-rejected`), the readback source is
+cache-only (`non-live-readback`), fewer than 20 retained samples remain after
+warmup (`insufficient-samples`), or the frame/RSS budget is exceeded. Verified
+by `sh scripts/check/check-wm-retained-web2d-perf-evidence.shs --self-test`
+(pass) and the new regression spec
+`test/03_system/check/wm_retained_web2d_perf_receipt_spec.spl` (5/5 PASS on
+the hosted seed, interpreter mode). The live Metal/CPU SIMD hosted-WM and
+SimpleOS/QEMU campaigns still need a GPU-capable host with an admitted
+self-hosted binary; this change does not claim live performance verification.
