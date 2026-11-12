@@ -9,8 +9,9 @@
 # These types are shared by the analyzer (cmm_analyzer.spl) and the
 # LSP diagnostic publisher (lsp_diagnostics.spl).
 
-export CmmDiagnostic, CmmDiagnosticKind, DiagnosticCollector
-export format_diagnostic, severity_text, make_diagnostic
+export CmmDiagnostic, CmmDiagnosticKind, CmmRelatedInfo, DiagnosticCollector
+export format_diagnostic, severity_text, make_diagnostic, make_coded_diagnostic, with_related
+export CMM_CODE_UNCLASSIFIED
 
 # ---------------------------------------------------------------------------
 # Diagnostic severity
@@ -26,13 +27,30 @@ enum CmmDiagnosticKind:
 # Diagnostic value
 # ---------------------------------------------------------------------------
 
+# Secondary location attached to a diagnostic (LSP relatedInformation,
+# DiagnosticV1 secondary label). Positions are 1-based line/column.
+struct CmmRelatedInfo:
+    message: text
+    line: i64
+    column: i64
+    end_line: i64
+    end_column: i64
+
+# Code assigned when a producer has not classified the finding yet. Every
+# producer in this package assigns a specific CMM1xxx code at creation; this
+# value only survives for legacy call sites and is itself a registered code.
+val CMM_CODE_UNCLASSIFIED = "CMM1999"
+
 struct CmmDiagnostic:
     kind: CmmDiagnosticKind
     message: text
     line: i64
     column: i64
     end_line: i64
-    end_column: i64
+    end_column: i64            # exclusive, 1-based character column
+    code: text                 # stable CMM1xxx code, assigned at creation
+    expected: [text]           # what the parser expected (empty for analyzer findings)
+    related: [CmmRelatedInfo]  # secondary locations (label candidates, ...)
 
 # ---------------------------------------------------------------------------
 # Formatting helpers
@@ -55,13 +73,35 @@ fn severity_text(kind: CmmDiagnosticKind) -> text:
 
 # Shorthand constructor for a single-position diagnostic.
 fn make_diagnostic(kind: CmmDiagnosticKind, msg: text, line: i64, col: i64) -> CmmDiagnostic:
+    make_coded_diagnostic(kind, CMM_CODE_UNCLASSIFIED, msg, line, col, line, col)
+
+# Constructor used by every producer: the code is fixed when the finding is
+# created, never patched on afterwards.
+fn make_coded_diagnostic(kind: CmmDiagnosticKind, code: text, msg: text, line: i64, col: i64, end_line: i64, end_col: i64) -> CmmDiagnostic:
     CmmDiagnostic(
         kind: kind,
         message: msg,
         line: line,
         column: col,
-        end_line: line,
-        end_column: col
+        end_line: end_line,
+        end_column: end_col,
+        code: code,
+        expected: [],
+        related: []
+    )
+
+# Return a copy of `d` with one more related location.
+fn with_related(d: CmmDiagnostic, info: CmmRelatedInfo) -> CmmDiagnostic:
+    CmmDiagnostic(
+        kind: d.kind,
+        message: d.message,
+        line: d.line,
+        column: d.column,
+        end_line: d.end_line,
+        end_column: d.end_column,
+        code: d.code,
+        expected: d.expected,
+        related: d.related.push(info)
     )
 
 # ---------------------------------------------------------------------------
@@ -79,7 +119,10 @@ class DiagnosticCollector:
             line: line,
             column: col,
             end_line: line,
-            end_column: col
+            end_column: col,
+            code: CMM_CODE_UNCLASSIFIED,
+            expected: [],
+            related: []
         ))
 
     # Add an error diagnostic spanning a range of positions.
@@ -90,7 +133,10 @@ class DiagnosticCollector:
             line: line,
             column: col,
             end_line: end_line,
-            end_column: end_col
+            end_column: end_col,
+            code: CMM_CODE_UNCLASSIFIED,
+            expected: [],
+            related: []
         ))
 
     # Add a warning diagnostic at a single position.
@@ -101,7 +147,10 @@ class DiagnosticCollector:
             line: line,
             column: col,
             end_line: line,
-            end_column: col
+            end_column: col,
+            code: CMM_CODE_UNCLASSIFIED,
+            expected: [],
+            related: []
         ))
 
     # Add a warning diagnostic spanning a range of positions.
@@ -112,7 +161,10 @@ class DiagnosticCollector:
             line: line,
             column: col,
             end_line: end_line,
-            end_column: end_col
+            end_column: end_col,
+            code: CMM_CODE_UNCLASSIFIED,
+            expected: [],
+            related: []
         ))
 
     # Add an info diagnostic at a single position.
@@ -123,7 +175,10 @@ class DiagnosticCollector:
             line: line,
             column: col,
             end_line: line,
-            end_column: col
+            end_column: col,
+            code: CMM_CODE_UNCLASSIFIED,
+            expected: [],
+            related: []
         ))
 
     # Add a hint diagnostic at a single position.
@@ -134,7 +189,10 @@ class DiagnosticCollector:
             line: line,
             column: col,
             end_line: line,
-            end_column: col
+            end_column: col,
+            code: CMM_CODE_UNCLASSIFIED,
+            expected: [],
+            related: []
         ))
 
     # Return the total number of diagnostics collected.

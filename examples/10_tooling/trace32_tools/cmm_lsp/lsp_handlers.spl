@@ -13,12 +13,15 @@
 export handle_initialize, handle_did_open, handle_did_change, handle_did_close
 export handle_completion, handle_hover, handle_definition, handle_document_symbol
 export build_diagnostics_notification, build_empty_diagnostics_notification
+export build_versioned_diagnostics_notification, handle_code_action
 
 use lsp_document.{DocumentStore, CmmDocument}
 use cmm_ast.{CmmProgram}
 use cmm_commands.{CmmCommandDB, CmmCommandInfo, lookup_command, get_completions}
 use cmm_functions.{CmmFuncDB, CmmFuncInfo, lookup_function, get_function_completions}
-use cmm_diagnostics.{CmmDiagnostic, CmmDiagnosticKind}
+use cmm_diagnostics.{CmmDiagnostic, CmmDiagnosticKind, CmmRelatedInfo}
+use cmm_source_index.{CmmSourceIndex, build_source_index}
+use cmm_parser_core.{CMM_UNEXPECTED_TOKEN}
 use cmm_analyzer.{CmmAnalysisResult, CmmSymbolTable, CmmSymbol, CmmSymbolKind}
 use lsp_json.{JsonPair, json_object, json_array, json_string, json_number, json_bool, json_null}
 use lsp_json.{json_get_string, json_get_int, json_get_object, escape_json}
@@ -49,6 +52,7 @@ fn handle_initialize(params: text) -> text:
     cap_pairs.push(JsonPair(key: "hoverProvider", value: json_bool(true)))
     cap_pairs.push(JsonPair(key: "definitionProvider", value: json_bool(true)))
     cap_pairs.push(JsonPair(key: "documentSymbolProvider", value: json_bool(true)))
+    cap_pairs.push(JsonPair(key: "codeActionProvider", value: json_bool(true)))
     val capabilities = json_object(cap_pairs)
 
     # Server info
@@ -489,44 +493,43 @@ fn make_document_symbol(name: text, kind: i64, line: i64, col: i64) -> text:
 # publishDiagnostics notification builder
 # ---------------------------------------------------------------------------
 
-# Build a textDocument/publishDiagnostics notification for a document.
-# Returns the full JSON-RPC notification text, or nil if no document found.
+# Build a textDocument/publishDiagnostics notification for the document's
+# current version. Returns nil if no document is open under `uri`.
 fn build_diagnostics_notification(uri: text, store: DocumentStore) -> text?:
     val doc = store.get_document(uri)
     if not doc.?:
         return nil
-
     val document = doc ?? CmmDocument(uri: "", content: "", version: 0, program: parse_empty_program(), analysis: empty_analysis())
+    build_versioned_diagnostics_notification(uri, store, document.version)
 
+# Versioned publisher: the notification carries `version`, and a request for
+# a version the store no longer holds yields nil, so a slow analysis of an
+# older text can never clear or overwrite the diagnostics of a newer one.
+# Ranges are UTF-16 (LSP default encoding); every item carries its CMM code
+# and secondary locations as relatedInformation.
+fn build_versioned_diagnostics_notification(uri: text, store: DocumentStore, version: i64) -> text?:
+    val doc = store.get_document(uri)
+    if not doc.?:
+        return nil
+    val document = doc ?? CmmDocument(uri: "", content: "", version: 0, program: parse_empty_program(), analysis: empty_analysis())
+    if document.version != version:
+        return nil
+
+    val index = build_source_index(document.content)
     var diag_items: [text] = []
+    # analysis.diagnostics already merges the parser's typed findings
     val diagnostics = document.analysis.diagnostics
     var i = 0
     while i < diagnostics.len():
-        val d = diagnostics[i]
-        diag_items.push(make_lsp_diagnostic(d))
+        diag_items.push(make_lsp_diagnostic(diagnostics[i], uri, index))
         i = i + 1
 
-    # Also include parse errors from the program
-    val parse_errors = document.program.errors
-    i = 0
-    while i < parse_errors.len():
-        # Parse errors are just text; create a diagnostic at line 0
-        var err_pairs: [JsonPair] = []
-        val err_range = make_range(0, 0, 0, 1)
-        err_pairs.push(JsonPair(key: "range", value: err_range))
-        err_pairs.push(JsonPair(key: "severity", value: json_number(1)))
-        err_pairs.push(JsonPair(key: "source", value: json_string("cmm")))
-        err_pairs.push(JsonPair(key: "message", value: json_string(parse_errors[i])))
-        diag_items.push(json_object(err_pairs))
-        i = i + 1
-
-    # Build notification params
     var params_pairs: [JsonPair] = []
     params_pairs.push(JsonPair(key: "uri", value: json_string(uri)))
+    params_pairs.push(JsonPair(key: "version", value: json_number(version)))
     params_pairs.push(JsonPair(key: "diagnostics", value: json_array(diag_items)))
     val notif_params = json_object(params_pairs)
 
-    # Build JSON-RPC notification (no id)
     var notif_pairs: [JsonPair] = []
     notif_pairs.push(JsonPair(key: "jsonrpc", value: json_string("2.0")))
     notif_pairs.push(JsonPair(key: "method", value: json_string("textDocument/publishDiagnostics")))
@@ -545,12 +548,15 @@ fn build_empty_diagnostics_notification(uri: text) -> text:
     notif_pairs.push(JsonPair(key: "params", value: notif_params))
     json_object(notif_pairs)
 
+# LSP Range for 1-based (line, col) .. (end_line, end_col) in UTF-16 units.
+fn make_utf16_range(index: CmmSourceIndex, line: i64, col: i64, end_line: i64, end_col: i64) -> text:
+    val sl = if line >= 1: line - 1 else: 0
+    val el = if end_line >= 1: end_line - 1 else: 0
+    make_range(sl, index.utf16_character(line, col), el, index.utf16_character(end_line, end_col))
+
 # Convert a CmmDiagnostic to an LSP Diagnostic JSON object.
-fn make_lsp_diagnostic(d: CmmDiagnostic) -> text:
-    # LSP lines/columns are 0-based; CMM diagnostics are 1-based
-    val start_line = d.line - 1
-    val end_line = d.end_line - 1
-    val diag_range = make_range(start_line, zero_based_col(d.column), end_line, zero_based_col(d.end_column))
+fn make_lsp_diagnostic(d: CmmDiagnostic, uri: text, index: CmmSourceIndex) -> text:
+    val diag_range = make_utf16_range(index, d.line, d.column, d.end_line, d.end_column)
 
     # Severity: 1=Error, 2=Warning, 3=Information, 4=Hint
     val severity = diagnostic_kind_to_severity(d.kind)
@@ -558,9 +564,79 @@ fn make_lsp_diagnostic(d: CmmDiagnostic) -> text:
     var pairs: [JsonPair] = []
     pairs.push(JsonPair(key: "range", value: diag_range))
     pairs.push(JsonPair(key: "severity", value: json_number(severity)))
+    pairs.push(JsonPair(key: "code", value: json_string(d.code)))
     pairs.push(JsonPair(key: "source", value: json_string("cmm")))
     pairs.push(JsonPair(key: "message", value: json_string(d.message)))
+    if d.related.len() > 0:
+        var related_items: [text] = []
+        for info in d.related:
+            var loc_pairs: [JsonPair] = []
+            loc_pairs.push(JsonPair(key: "uri", value: json_string(uri)))
+            loc_pairs.push(JsonPair(key: "range", value: make_utf16_range(index, info.line, info.column, info.end_line, info.end_column)))
+            var rel_pairs: [JsonPair] = []
+            rel_pairs.push(JsonPair(key: "location", value: json_object(loc_pairs)))
+            rel_pairs.push(JsonPair(key: "message", value: json_string(info.message)))
+            related_items.push(json_object(rel_pairs))
+        pairs.push(JsonPair(key: "relatedInformation", value: json_array(related_items)))
     json_object(pairs)
+
+# ---------------------------------------------------------------------------
+# textDocument/codeAction
+# ---------------------------------------------------------------------------
+
+# Reviewable fix suggestions for the diagnostics intersecting the requested
+# range. Every action is `isPreferred: false` and carries
+# data.confidence / data.autoApply = false: the editor shows it, the user
+# applies it; nothing is applied automatically. data.version pins the
+# document version the edit was computed against.
+fn handle_code_action(params: text, store: DocumentStore) -> text:
+    val td = json_get_object(params, "textDocument") ?? "{}"
+    val uri = json_get_string(td, "uri") ?? ""
+    val range_obj = json_get_object(params, "range") ?? "{}"
+    val range_start = json_get_object(range_obj, "start") ?? "{}"
+    val range_end = json_get_object(range_obj, "end") ?? "{}"
+    val first_line = json_get_int(range_start, "line") ?? 0
+    val last_line = json_get_int(range_end, "line") ?? first_line
+
+    val doc = store.get_document(uri)
+    if not doc.?:
+        return json_array([])
+    val document = doc ?? CmmDocument(uri: "", content: "", version: 0, program: parse_empty_program(), analysis: empty_analysis())
+    val index = build_source_index(document.content)
+
+    var actions: [text] = []
+    for d in document.analysis.diagnostics:
+        val zero_line = d.line - 1
+        if zero_line < first_line or zero_line > last_line:
+            continue
+        if d.code == CMM_UNEXPECTED_TOKEN:
+            actions.push(make_delete_token_action("Remove unexpected ')'", d, uri, index, document.version))
+    json_array(actions)
+
+fn make_delete_token_action(title: text, d: CmmDiagnostic, uri: text, index: CmmSourceIndex, version: i64) -> text:
+    val edit_range = make_utf16_range(index, d.line, d.column, d.end_line, d.end_column)
+    var text_edit: [JsonPair] = []
+    text_edit.push(JsonPair(key: "range", value: edit_range))
+    text_edit.push(JsonPair(key: "newText", value: json_string("")))
+    var changes: [JsonPair] = []
+    changes.push(JsonPair(key: uri, value: json_array([json_object(text_edit)])))
+    var edit: [JsonPair] = []
+    edit.push(JsonPair(key: "changes", value: json_object(changes)))
+
+    var data: [JsonPair] = []
+    data.push(JsonPair(key: "code", value: json_string(d.code)))
+    data.push(JsonPair(key: "confidence", value: json_string("likely")))
+    data.push(JsonPair(key: "autoApply", value: json_bool(false)))
+    data.push(JsonPair(key: "version", value: json_number(version)))
+
+    var action: [JsonPair] = []
+    action.push(JsonPair(key: "title", value: json_string(title)))
+    action.push(JsonPair(key: "kind", value: json_string("quickfix")))
+    action.push(JsonPair(key: "isPreferred", value: json_bool(false)))
+    action.push(JsonPair(key: "diagnostics", value: json_array([make_lsp_diagnostic(d, uri, index)])))
+    action.push(JsonPair(key: "edit", value: json_object(edit)))
+    action.push(JsonPair(key: "data", value: json_object(data)))
+    json_object(action)
 
 # Convert diagnostic kind to LSP severity number.
 fn diagnostic_kind_to_severity(kind: CmmDiagnosticKind) -> i64:
@@ -716,7 +792,7 @@ fn zero_based_col(col: i64) -> i64:
 # ---------------------------------------------------------------------------
 
 fn parse_empty_program() -> CmmProgram:
-    CmmProgram(statements: [], file_path: "", errors: [], warnings: [])
+    CmmProgram(statements: [], file_path: "", errors: [], warnings: [], parse_diagnostics: [])
 
 fn empty_analysis() -> CmmAnalysisResult:
     CmmAnalysisResult(diagnostics: [], symbols: CmmSymbolTable(symbols: []))
