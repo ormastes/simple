@@ -12,6 +12,10 @@ use std.nogc_sync_mut.io.retained_file.{
 }
 use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, directory_fsync, file_rename, file_is_regular_no_follow}
 use std.nogc_sync_mut.io.dir_ops.{dir_remove, dir_is_real_no_follow}
+use std.nogc_sync_mut.io.dir_entry_ops.{
+    directory_stream_open, directory_stream_count, directory_stream_entry,
+    directory_stream_close
+}
 use std.nogc_sync_mut.fs.host_path.{host_is_windows_host}
 use std.common.crypto.sha256.{sha256_u8_hex}
 
@@ -117,6 +121,28 @@ fn _sosix_atomic_copy_parent_v1(destination: text) -> Result<text, SosixAtomicCo
     elif host_is_windows_host() and separator == 2: parent = destination[0:3]
     Ok(parent)
 
+# Present-leaf observation without following the leaf: a native readdir scan of
+# the (trusted, already verified real) parent. Both no-follow stat predicates
+# above answer false for a symlink — indistinguishable from absence — while
+# this scan sees the leaf entry itself, so a symlink destination (including a
+# dangling one) is classified PRESENT and routed through the retained
+# read/verify path below, exactly as the previous path_entry_present-based
+# classification did. rt_readdir entry names are plain leaf names on the
+# Windows and POSIX providers; the scan tolerates either by exact-name match.
+fn _sosix_atomic_copy_leaf_observed_v1(parent: text, leaf: text) -> bool:
+    val handle = directory_stream_open(parent)
+    if handle <= 0:
+        return false
+    val count = directory_stream_count(handle)
+    var observed = false
+    var index = 0
+    while index < count:
+        if directory_stream_entry(handle, index) == leaf:
+            observed = true
+        index = index + 1
+    directory_stream_close(handle)
+    observed
+
 fn _sosix_atomic_copy_cleanup_v1(stage_dir: text) -> bool:
     dir_remove(stage_dir, true)
 
@@ -157,10 +183,17 @@ fn sosix_atomic_copy_verified_v1(
     # outcome — present, absent, directory — to DestinationInspect, while
     # retained_file_open/secure_temp_dir/file_rename all accept those paths.
     # A destination that exists as a real directory cannot be read as the
-    # payload target: that is a read-class failure, not absence.
+    # payload target: that is a read-class failure, not absence. A destination
+    # leaf observed in the parent without following it (regular file, symlink
+    # including dangling, or any other entry) keeps the verify-then-replace
+    # contract: retained_file_open follows links, so the link target's content
+    # is read and digest-verified before a mismatch ever reaches the atomic
+    # no-write-through rename that replaces the link.
     if dir_is_real_no_follow(destination):
         return Err(_sosix_atomic_copy_error_v1(SosixAtomicCopyErrorKindV1.DestinationRead, false))
-    if file_is_regular_no_follow(destination):
+    val leaf_separator = destination.rfind("/")
+    val leaf = destination[leaf_separator + 1:destination.len()]
+    if file_is_regular_no_follow(destination) or _sosix_atomic_copy_leaf_observed_v1(parent, leaf):
         val existing = _sosix_atomic_copy_read_destination_v1(destination, expected_bytes)
         match existing:
             case Ok(bytes):
