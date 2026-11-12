@@ -3,7 +3,8 @@ use std.spec.{describe, it, expect}
 use app.cli.worker_hir_profile_v1.{worker_hir_argument_error_v1, worker_hir_stage3_capsule_environment_keys_v1,
     worker_hir_tool_build_environment_keys_v1, worker_hir_base_environment_keys_v1, worker_hir_environment_value_error_v1,
     worker_hir_unsupported_environment_keys_v1,
-    worker_hir_environment_key_admitted_v1, worker_hir_child_validate_v1}
+    worker_hir_environment_key_admitted_v1, worker_hir_child_validate_v1,
+    worker_hir_pool_skip_without_closure_v1}
 use app.cli.worker_hir_owner_v1.{worker_hir_cleanup_deadline_v1,
     worker_hir_remaining_budget_v1, worker_hir_environment_sort_v1}
 use std.common.process.observation_v4.{ProcessObservationEnvironmentV4}
@@ -39,6 +40,19 @@ describe "worker HIR profile admission":
 
     it "rejects directory fallback without a frozen closure":
         expect(worker_hir_argument_error_v1(["--entry", "src/main.spl"])).to_contain("frozen")
+
+    it "skips an ordinary HIR pool over a bulk build with no frozen closure":
+        val bulk = ["--source", "src/lib", "--entry", "src/app/simple_lsp_mcp/main.spl", "-o", "out.exe"]
+        expect(worker_hir_pool_skip_without_closure_v1(bulk, "")).to_equal(true)
+        expect(worker_hir_pool_skip_without_closure_v1(bulk, "auto")).to_equal(true)
+
+    it "keeps an explicit SIMPLE_HIR_SHARDING=1 request fail-closed":
+        expect(worker_hir_pool_skip_without_closure_v1(["--entry", "src/main.spl"], "1")).to_equal(false)
+
+    it "never skips a frozen-closure build or another argument refusal":
+        expect(worker_hir_pool_skip_without_closure_v1(["--entry-closure", "--entry", "src/main.spl"], "")).to_equal(false)
+        expect(worker_hir_pool_skip_without_closure_v1(["src/main.spl", "--backend=llvm"], "")).to_equal(false)
+        expect(worker_hir_pool_skip_without_closure_v1(["--entry", "src/main.spl", "--plugin", "x"], "")).to_equal(false)
 
     it "rejects mixed MIR parse and file-unit routes":
         for mode in ["--mir-shard=0/1", "--parse-shard=0/1", "--file-worker-unit", "--mode=jit"]:

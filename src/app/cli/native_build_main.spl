@@ -1,5 +1,6 @@
 use app.io.time_ops.{sleep_ms}
-use app.cli.worker_hir_profile_v1.{WorkerHirProfileV1, worker_hir_profile_admit_v1, worker_hir_profile_for_owner_v1}
+use app.cli.worker_hir_profile_v1.{WorkerHirProfileV1, worker_hir_profile_admit_v1, worker_hir_profile_for_owner_v1,
+    worker_hir_pool_skip_without_closure_v1}
 use app.cli.worker_hir_owner_v1.{WorkerHirOwnerV1, worker_hir_owner_start_v1, worker_hir_owner_retain_failure_v1}
 use app.cli.native_build_hir_warmup_outcome.{native_build_hir_warmup_outcome_v1, native_build_capsule_user_args_v1}
 # Lightweight entrypoint for `simple native-build`.
@@ -2160,8 +2161,15 @@ fn run_native_build_worker_inner(raw_args: [text]) -> i64:
     # Then fill the HIR cache the same way, so the real build's HIR phase is
     # all hits too. Runs AFTER the parse shards: each HIR child's own parse
     # phase is then pure cache hits.
-    val hir_shard_count = native_build_shard_count_for_closure_v1(
+    var hir_shard_count = native_build_shard_count_for_closure_v1(
         native_build_hir_shard_count(args), closure_files, small_closure_max)
+    # The HIR worker profile admits only a frozen entry closure. An ordinary
+    # warm-up over a bulk (--entry without --entry-closure) build lowers HIR in
+    # process instead of being refused into an aggregate failure that depended
+    # on whether free memory admitted a worker at all.
+    if hir_shard_count > 0 and worker_hir_pool_skip_without_closure_v1(args, env_get("SIMPLE_HIR_SHARDING") ?? ""):
+        print "[hir-shard] no frozen entry closure (--entry-closure absent); HIR pool skipped, coordinator lowers HIR in process"
+        hir_shard_count = 0
     log_build_trace("coordinator:shards hir={hir_shard_count}")
     if hir_shard_count > 0:
         # Explicit HIR-only warming may bypass the parse-publication phase,
