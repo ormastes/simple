@@ -1,0 +1,186 @@
+"""
+## Purpose and audience
+Reproduction and regression spec for the 2026-11-12 whole-program HIR failure
+class (`unresolved type: LineStartTable` in src/lib/editor/services/
+md_diagnostics.spl and siblings, doc/08_tracking/bug/
+compiler_cli_unresolved_mirtype_chase_nondeterminism_2026-10-13.md).
+The re-export chase's package-sibling inference arm
+(module_reexport_materialization.spl, find_reexport_source_walk) had two
+defects, both pinned here with direct arm probes (export-origin index and
+import rows stripped so the arm is the only remaining route, exactly the
+degraded window the whole-program runs observe):
+1. FOLD MISMATCH: the sibling index (build_package_sibling_index) is keyed by
+   CANONICAL names -- hir_pkg_canonical_module_name folds a leading `std.` to
+   `lib.` -- but the arm computed its package from the UNFOLDED facade
+   spelling, so every std.-spelled facade searched an empty bucket and
+   memoized a false chase negative (later a hard `unresolved type` in an
+   innocent importer).
+2. __INIT__ FACADE: for a package `__init__` facade, re-exported items live
+   in modules of the package the facade NAMES (its children), not in the
+   parent package of the facade's module name; the arm only searched the
+   parent bucket.
+Audience: compiler engineers maintaining HIR import/re-export materialization
+(src/compiler/20.hir/hir_lowering/_Items/module_reexport_materialization.spl).
+## Operator workflow
+Run this spec with the seed-hosted runner from the repo root:
+./src/compiler_rust/target/bootstrap/simple test test/01_unit/compiler/hir/package_qualified_reexport_chase_spec.spl --mode=interpreter
+Read the per-scenario verdict lines.
+## Compatibility and limitations
+Fixture data is local to this spec. Admission mirrors the driver's dual-tree
+alias shape (path-derived identity + spelling aliases), exactly like
+same_named_package_facade_reexport_spec.spl. The direct probes call
+find_reexport_source_walk on a mutated frozen surface; they pin the arm's
+contract, not the end-to-end import path (the last scenario guards that).
+# @manual: primary
+REQ-COMPILER-HIR-001
+"""
+
+use std.spec.{describe, it, expect}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface_types.{ModuleSurfaceExportOriginIndex}
+use test.helpers.module_surface_owner_fixture.{module_surfaces_from_test_modules}
+
+fn pqr_logger() -> Logger:
+    Logger(level: 0)
+
+fn pqr_module(source: text, name: text, log: Logger) -> Module:
+    parse_full_frontend(source, name, name, log)
+
+fn pqr_module_at(source: text, path: text, name: text, log: Logger) -> Module:
+    parse_full_frontend(source, path, name, log)
+
+fn pqr_unresolved_count(lowering: HirLowering) -> i64:
+    var unresolved_count = 0
+    var error_index = 0
+    while error_index < lowering.errors.len():
+        if lowering.errors[error_index].message.contains("unresolved"):
+            unresolved_count = unresolved_count + 1
+        error_index = error_index + 1
+    unresolved_count
+
+fn pqr_consumer_source(facade: text) -> text:
+    "use " + facade + ".\{LineStartTable\}\nfn take(t: LineStartTable) -> i64:\n    t.tag\n\nfn main() -> i64:\n    take(LineStartTable(tag: 7))"
+
+# Drive find_reexport_source_walk directly with the package-sibling inference
+# arm as the ONLY possible route: the facade re-exports LineStartTable BARE
+# (`export LineStartTable`, route target -1), and the probe strips the
+# export-origin index and the import rows that would otherwise resolve first
+# in a healthy registry (the degraded window the whole-program shard runs
+# observe via origin-owner bail / cross-wired rows).
+fn pqr_sibling_arm_probe(facade_path: text, facade_name: text,
+        declarant_path: text, declarant_name: text) -> bool:
+    val declarant_source = "pub struct LineStartTable:\n    tag: i64\n\nexport LineStartTable"
+    val facade_source = "export LineStartTable"
+    val log = pqr_logger()
+    var modules: Dict<text, Module> = {}
+    modules[declarant_name] = pqr_module_at(declarant_source, declarant_path, declarant_name, log)
+    modules[facade_name] = pqr_module_at(facade_source, facade_path, facade_name, log)
+    val sources = [
+        SourceFile(path: declarant_path, content: declarant_source, module_name: declarant_name),
+        SourceFile(path: facade_path, content: facade_source, module_name: facade_name)
+    ]
+    val surfaces_result = module_surfaces_from_test_modules(modules, sources)
+    expect(surfaces_result.is_ok()).to_be_truthy()
+    val surfaces = surfaces_result.unwrap()
+    var facade_index = -1
+    var scan = 0
+    while scan < surfaces.surfaces.len():
+        if surfaces.surfaces[scan].module_name == facade_name:
+            facade_index = scan
+        scan = scan + 1
+    expect(facade_index >= 0).to_equal(true)
+    val facade: ModuleSurface = surfaces.surfaces[facade_index]
+    facade.export_origin_index = ModuleSurfaceExportOriginIndex(
+        origins: {}, index_by_name: {}, names: [], owner_modules: [],
+        source_names: [], resolution_kinds: [], frozen: false)
+    facade.imports = []
+    facade.import_target_indices = []
+    facade.import_target_names = []
+    facade.import_resolution_traces = []
+    facade.import_item_offsets = [0]
+    facade.import_item_names = []
+    facade.import_item_aliases = []
+    facade.import_item_has_alias = []
+    var lowering = hirlowering_for_module(facade_name, surfaces)
+    val state: HirReexportWalkState = HirReexportWalkState.fresh()
+    val hop: HirReexportSource = lowering.find_reexport_source_walk(
+        facade_index, "LineStartTable", 0, state)
+    hop.found
+
+fn expect_std_spelled_facade_sibling_arm_resolves():
+    # RED before the fix: the facade's registry spelling is std.-prefixed
+    # (src/std path), the arm computes package `std.zzc` and looks it up
+    # UNFOLDED against buckets keyed `lib.*` -- an empty bucket and a
+    # memoized false chase negative.
+    expect(pqr_sibling_arm_probe(
+        "src/std/zzc/facade.spl", "std.zzc.facade",
+        "src/std/zzc/helper.spl", "std.zzc.helper")).to_equal(true)
+
+fn expect_neutral_spelled_facade_sibling_arm_resolves():
+    # Control: identical shape without the std prefix. The canonical fold is
+    # identity, so the arm's bucket lookup already hits; GREEN before and
+    # after the fix.
+    expect(pqr_sibling_arm_probe(
+        "neut/zzc/facade.spl", "neut.zzc.facade",
+        "neut/zzc/helper.spl", "neut.zzc.helper")).to_equal(true)
+
+fn expect_std_init_facade_sibling_arm_resolves():
+    # The package __init__ shape (the std.common.diagnostics victim family):
+    # the declarant lives in the package the facade NAMES
+    # (`lib.zzc.diagnostics` after the fold), not in the parent
+    # (`lib.zzc`). RED before the fix.
+    expect(pqr_sibling_arm_probe(
+        "src/std/zzc/diagnostics/__init__.spl", "std.zzc.diagnostics.__init__",
+        "src/std/zzc/diagnostics/source_position.spl", "std.zzc.diagnostics.source_position")).to_equal(true)
+
+fn expect_package_qualified_per_item_reexport_resolves():
+    # The real std.common.diagnostics __init__ shape, minimized: the submodule
+    # declares + exports LineStartTable; the __init__ re-exports per-item
+    # qualified (`export source_position.{LineStartTable}`); the consumer uses
+    # the package form. Resolves through the facade's recorded import row /
+    # qualified route -- GREEN before and after; guards the arms that run
+    # before the sibling inference against regressions from the fix.
+    val leaf_source = "pub struct LineStartTable:\n    tag: i64\n\nexport LineStartTable"
+    val facade_source = "export source_position.\{LineStartTable\}"
+    val consumer_source = pqr_consumer_source("std.zzc.diagnostics")
+
+    val log = pqr_logger()
+    var modules: Dict<text, Module> = {}
+    val leaf_lib = pqr_module_at(leaf_source, "src/lib/zzc/diagnostics/source_position.spl", "lib.zzc.diagnostics.source_position", log)
+    val facade_lib = pqr_module_at(facade_source, "src/lib/zzc/diagnostics/__init__.spl", "lib.zzc.diagnostics.__init__", log)
+    val consumer_lib = pqr_module_at(consumer_source, "src/lib/zzc/diagnostics_consumer.spl", "lib.zzc.diagnostics_consumer", log)
+    modules["lib.zzc.diagnostics.source_position"] = leaf_lib
+    modules["std.zzc.diagnostics.source_position"] = leaf_lib
+    modules["lib.zzc.diagnostics.__init__"] = facade_lib
+    modules["lib.zzc.diagnostics"] = facade_lib
+    modules["std.zzc.diagnostics"] = facade_lib
+    modules["lib.zzc.diagnostics_consumer"] = consumer_lib
+    modules["std.zzc.diagnostics_consumer"] = consumer_lib
+
+    val sources = [
+        SourceFile(path: "src/lib/zzc/diagnostics/source_position.spl", content: leaf_source, module_name: "lib.zzc.diagnostics.source_position"),
+        SourceFile(path: "src/lib/zzc/diagnostics/__init__.spl", content: facade_source, module_name: "lib.zzc.diagnostics.__init__"),
+        SourceFile(path: "src/lib/zzc/diagnostics_consumer.spl", content: consumer_source, module_name: "lib.zzc.diagnostics_consumer")
+    ]
+    val surfaces_result = module_surfaces_from_test_modules(modules, sources)
+    expect(surfaces_result.is_ok()).to_be_truthy()
+    val surfaces = surfaces_result.unwrap()
+
+    var lowering = hirlowering_for_module("std.zzc.diagnostics_consumer", surfaces)
+    val _hir = lowering.lower_module(modules["std.zzc.diagnostics_consumer"])
+    expect(pqr_unresolved_count(lowering)).to_equal(0)
+
+describe("package-sibling inference arm of the re-export chase"):
+    it("resolves a bare re-export through a std.-spelled facade (fold mismatch)"):
+        expect_std_spelled_facade_sibling_arm_resolves()
+    it("resolves a bare re-export through a neutral-spelled facade (control)"):
+        expect_neutral_spelled_facade_sibling_arm_resolves()
+    it("resolves a bare re-export through a std.-spelled package __init__ facade"):
+        expect_std_init_facade_sibling_arm_resolves()
+    it("binds a package-form named import through `export sibling.{Item}` (victim shape)"):
+        expect_package_qualified_per_item_reexport_resolves()
