@@ -35,6 +35,7 @@ struct CsContainerRequest:
     workspace: text
     rest: [text]
     error: text
+    env: [text] = []
 
 # Lexically normal absolute path — no empty or `.` components, no trailing
 # slash — or "" when the path is relative, contains `..`, or contains a
@@ -90,17 +91,25 @@ fn cs_container_request(extras: [text]) -> CsContainerRequest:
     var mounts: [PodmanMountV1] = []
     var workspace = ""
     var rest: [text] = []
+    var env: [text] = []
     var seen = false
     var i = 0
     while i < extras.len():
         val word = extras[i]
-        if word == "--container" or word == "--container-network" or word == "--container-mount":
+        if (word == "--container" or word == "--container-network" or word == "--container-mount" or
+                word == "--container-env"):
             if i + 1 >= extras.len(): return _cs_container_bad(word + " needs a value")
             val value = extras[i + 1]
             if word == "--container":
                 if value == "" or value.starts_with("-"): return _cs_container_bad("--container needs an image")
                 image = value
                 seen = true
+            elif word == "--container-env":
+                # KEY=VALUE handed to the container's environment, e.g. the git
+                # identity: the agent runs as a user with no home and no
+                # ~/.gitconfig inside the image.
+                if value.index_of("=") <= 0: return _cs_container_bad("--container-env wants KEY=VALUE, got " + value)
+                env = env + [value]
             elif word == "--container-network":
                 if value != "host" and value != "none" and value != "private":
                     return _cs_container_bad("--container-network must be host, none or private")
@@ -117,9 +126,10 @@ fn cs_container_request(extras: [text]) -> CsContainerRequest:
             workspace = word.substring(12, word.len())
         rest = rest + [word]
         i = i + 1
-    if not seen and (mounts.len() > 0 or network != "host"):
-        return _cs_container_bad("--container-mount/--container-network need --container <image>")
-    CsContainerRequest(image: image, network: network, mounts: mounts, workspace: workspace, rest: rest, error: "")
+    if not seen and (mounts.len() > 0 or network != "host" or env.len() > 0):
+        return _cs_container_bad("--container-mount/--container-network/--container-env need --container <image>")
+    CsContainerRequest(image: image, network: network, mounts: mounts, workspace: workspace, rest: rest, error: "",
+        env: env)
 
 fn _cs_container_token(value: text) -> text:
     var out = ""
@@ -206,7 +216,7 @@ fn cs_container_argv(session: text, agent_id: text, exe: text, agent_args: [text
         owner: cs_container_owner(session), image: request.image,
         command: [exe] + agent_args, workdir: repo_root, mounts: mounts,
         network: request.network, tty: true, keep_id: true,
-        env: ["TERM=" + (if term == "": "xterm-256color" else: term), "HOME=/tmp"],
+        env: ["TERM=" + (if term == "": "xterm-256color" else: term), "HOME=/tmp"] + request.env,
         instance: instance)
     podman_session_run_argv_v1(spec)
 

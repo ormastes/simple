@@ -108,6 +108,21 @@ both delete the client's stderr spool. A cs killed by SIGKILL cannot clean up:
 the next cs on that session refuses to reuse the name and `/reap` removes
 everything under the owner label.
 
+## Real bug-fixing agent in a container (2026-11-12)
+
+- Image: `config/container/caret_agent.Containerfile` (debian trixie-slim +
+  git + libgcc-s1 + procps, 213 MB, no compiler). busybox lacks git.
+- A git **worktree** workspace needs the main repo's `.git` mounted rw
+  (`--container-mount <main>/.git:<main>/.git:rw`); otherwise git inside says
+  "not a git repository". The repo-local identity then applies.
+  `--container-env KEY=VALUE` covers an identity that lives in `~/.gitconfig`.
+- The `--config` file is outside the repo: mount it ro explicitly.
+- Push stays host-side: no credential is mounted, on purpose.
+- Proof: session `ctr-proof-1`, agent a1 fixed a one-line expectation, ran the
+  spec inside (1 passed) and committed 60 s after the prompt; `/kill`, `/reap`
+  and `/quit` left 0 containers and 0 spools. Exact launch line:
+  `doc/07_guide/app/llm/local_llm_slang_caret_setup.md` section 8.
+
 ## Measurements (2026-11-12, aarch64, podman 4.9.3 rootless, runc)
 
 - Live spec: normal exit 0, failing exit 7, timeout kill (exit -1), orphan
