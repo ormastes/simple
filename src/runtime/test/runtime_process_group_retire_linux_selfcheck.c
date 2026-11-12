@@ -89,6 +89,7 @@ int rt_process_stream_launch_not_started_v2(int64_t a, const char* b, int64_t c,
 int rt_process_stream_publish_broker_v2(int64_t a, const char* b, int64_t c, const char* d, int64_t e, int64_t f) {
     (void)a; (void)b; (void)c; (void)d; (void)e; (void)f; return ENOTSUP; }
 int simple_local_unix_origin_v1(void) { return 0; }
+#define RT_OWNED_EXTERNAL_PIN 1 /* This harness stubs the executable pin. */
 #include "../runtime_process_owned.c"
 
 static int failures = 0, checks = 0;
