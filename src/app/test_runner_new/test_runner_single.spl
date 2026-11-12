@@ -59,6 +59,8 @@ use std.test_runner.test_runner_execute.{run_test_file_interpreter, mcdc_compile
 use std.test_runner.test_runner_mcdc_report.{test_runner_mcdc_run_gate}
 
 use std.io_runtime.{file_exists, file_read_nullable}
+use std.io_runtime.{is_dir}
+use std.io_runtime.{dir_walk}
 use std.nogc_sync_mut.spec.dir_prevention.{DIR_PREVENTION_ENV, DIR_PREVENTION_SEP, dir_prevention_env_value}
 @unsafe(reason: "raw test-source/coverage text ABI; helper return types cannot carry I/O errors", capabilities: [ffi])
 extern fn rt_file_read_text(path: text) -> text?
@@ -1342,6 +1344,138 @@ fn _single_mcdc_attempt(args: [text], path: text, mcdc_mode: text, binary: text,
 
 fn main() -> i64:
     val args = clean_args()
+    val dir_at = _single_directory_target_index(args)
+    if dir_at >= 0:
+        return run_directory_target(args, args[dir_at], dir_at)
+    run_single_target(args)
+
+# --- Directory targets -------------------------------------------------------
+# This lane used to reject a directory target outright ("expected .spl test
+# file"), which forced every sweep onto either the daemon lane (a fresh
+# 252-module worker resolution per file) or one full process spawn per
+# enumerated spec. Both re-pay the runner's fixed module-load cost on EVERY
+# file, which is what capped directory sweeps (see doc/08_tracking/bug/
+# test_invocation_fixed_setup_cost_caps_every_sweep_2026-08-17.md). Accepting a
+# directory here keeps this process's already-resolved module graph warm and
+# runs each discovered spec through the identical per-file machinery below, so
+# a sweep pays the fixed setup cost ONCE per process instead of once per file.
+
+fn _single_directory_target_index(args: [text]) -> i64:
+    """Index of the single positional token when it is exactly one existing
+    directory, else -1. Mirrors the option-skipping rules of
+    parse_child_run so an option value is never mistaken for a target."""
+    var found = -1
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "--compiler":
+            i = i + 2
+            continue
+        if _single_option_takes_value(arg):
+            i = i + 2
+            continue
+        val equals_at = arg.index_of("=")
+        if equals_at > 0 and _single_option_takes_value(arg[0:equals_at]):
+            i = i + 1
+            continue
+        if not arg.starts_with("-"):
+            if found >= 0:
+                return -1
+            found = i
+        i = i + 1
+    if found >= 0 and is_dir(args[found]):
+        return found
+    -1
+
+fn _single_text_lte(a: text, b: text) -> bool:
+    """Lexicographic a <= b via char_code — text `<`/`>` miscompiles to a raw
+    pointer compare on the native flat-HIR path (see extract_number_before)."""
+    val n = if a.byte_len() < b.byte_len(): a.byte_len() else: b.byte_len()
+    var i = 0
+    while i < n:
+        val ca = a.char_code_at(i)
+        val cb = b.char_code_at(i)
+        if ca != cb:
+            return ca < cb
+        i = i + 1
+    a.byte_len() <= b.byte_len()
+
+fn _single_sorted_texts(items: [text]) -> [text]:
+    """Deterministic sweep order (rt_dir_walk order is filesystem-dependent)."""
+    var out: [text] = []
+    for item in items:
+        var j = out.len()
+        while j > 0 and not _single_text_lte(out[j - 1], item):
+            j = j - 1
+        out.insert(j, item)
+    out
+
+fn _single_directory_specs(dir: text) -> [text]:
+    """Recursive *_spec.spl files under dir, sorted for deterministic order."""
+    var specs: [text] = []
+    for path in dir_walk(dir):
+        if path.ends_with("_spec.spl"):
+            specs.push(path)
+    _single_sorted_texts(specs)
+
+fn run_directory_target(args: [text], dir: text, dir_at: i64) -> i64:
+    """Run every spec under dir sequentially through run_single_target.
+
+    Per-file semantics (timeouts, tags, verdict lines, exit codes) are exactly
+    those of invoking this runner once per file; the only difference is that
+    the runner's own module graph is resolved once. Exit code 4
+    (EmptySelection, e.g. a --tag the file does not carry) is neutral, matching
+    how full-runner sweeps neutralise rather than fail unselected files."""
+    val specs = _single_directory_specs(dir)
+    if specs.len() == 0:
+        print "Simple Test Runner child"
+        print "error: no *_spec.spl files found under directory: {dir}"
+        return 1
+    if args.contains("--list"):
+        for spec in specs:
+            print spec
+        return 0
+    var files_passed = 0
+    var files_failed = 0
+    var files_neutral = 0
+    for spec in specs:
+        # Same invocation as `test <spec> --no-session-daemon` with the rest of
+        # the argument vector preserved: drop the directory positional by
+        # INDEX (an option value equal to the directory name must survive),
+        # append the concrete spec path.
+        var file_args: [text] = []
+        var i = 0
+        while i < args.len():
+            if i != dir_at:
+                file_args.push(args[i])
+            i = i + 1
+        file_args.push(spec)
+        if files_passed + files_failed + files_neutral > 0:
+            print ""
+        val code = run_single_target(file_args)
+        if code == 0:
+            files_passed = files_passed + 1
+        elif code == 4:
+            files_neutral = files_neutral + 1
+        else:
+            files_failed = files_failed + 1
+    print ""
+    print "========================================="
+    print "Directory Test Summary"
+    print "========================================="
+    print "Directory: {dir}"
+    print "Files: {specs.len()}"
+    print "Passed: {files_passed}"
+    print "Failed: {files_failed}"
+    if files_neutral > 0:
+        print "Neutral: {files_neutral}"
+    print "Results: {files_passed + files_failed} total, {files_passed} passed, {files_failed} failed"
+    if files_failed > 0:
+        1
+    else:
+        0
+
+fn run_single_target(args: [text]) -> i64:
     if args.contains("--spl-doctest") and not _single_has_md_target(args):
         return _single_run_spl_doctest(args)
     if _single_is_md_run(args):
