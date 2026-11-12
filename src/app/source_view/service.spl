@@ -19,6 +19,37 @@ use std.nogc_sync_mut.source.structure.{source_project_structure_v1, source_view
 
 # Compact help is returned only on demand (`help: "ess"`), never pushed.
 val SOURCE_ESSENTIAL_HELP_V1 = "Essential: open <symbol> (target=) | intent=<text> | raw | outline\nFold: outline closes all bodies; focused/intent opens one block\nMore: cursor+snapshot_id page; max_bytes/max_nodes bound every view"
+
+fn source_help_category_v1(available: [text], unsupported: [(text, text)]) -> JsonValue:
+    var ready: [JsonValue] = []
+    for item in available: ready.push(JsonValue.Str(item))
+    var missing: [JsonValue] = []
+    for (operation, reason) in unsupported:
+        missing.push(json_value_object_from([("operation", JsonValue.Str(operation)), ("reason", JsonValue.Str(reason))]))
+    json_value_object_from([("available", JsonValue.Array(ready)), ("unsupported", JsonValue.Array(missing))])
+
+fn source_advanced_help_v1() -> JsonValue:
+    # Advanced help (`help: "adv"`) is returned only on demand. Every category
+    # states what this slice can do; unsupported operations carry a reason.
+    val semantic = "semantic provider unavailable in this slice; syntax outline only"
+    val session = "no authenticated agent session binding; per-agent state unavailable"
+    val debugger = "no debugger bridge in the source_open tool"
+    val history = "no VCS or edit-history provider bound to source_open"
+    val fixes = "no code-action provider bound to source_open"
+    json_value_object_from([
+        ("display", source_help_category_v1(["outline", "raw", "focused", "intent", "depth", "cursor"],
+            [("num", session), ("info", session), ("hint", session)])),
+        ("analyze", source_help_category_v1([],
+            [("callers", semantic), ("callees", semantic), ("refs", semantic), ("writes", semantic),
+             ("type", semantic), ("flow", semantic), ("cfg", semantic), ("slice", semantic)])),
+        ("debug", source_help_category_v1([],
+            [("stack", debugger), ("locals", debugger), ("watch", debugger), ("frame", debugger),
+             ("repl", debugger), ("capabilities", debugger)])),
+        ("history", source_help_category_v1([], [("changes", history), ("diff", history), ("impact", history)])),
+        ("config", source_help_category_v1([], [("env", session), ("config", session), ("explain", session)])),
+        ("fix", source_help_category_v1([], [("actions", fixes), ("preview", fixes), ("apply", fixes)])),
+        ("navigation", source_help_category_v1(["target=<symbol>", "omission_ledger[].reopen", "next_cursor"],
+            [("view_handle", session), ("diagnostic_id", semantic), ("back_forward", session)]))])
 use std.common.json.value.{JsonValue, json_parse_value_strict, json_value_field,
     json_value_text_or, json_value_items, json_value_object_from,
     json_value_serialize}
@@ -151,8 +182,18 @@ fn source_display_lines_v1(source: text, first_line: i64, numbers: bool) -> text
         index = index + 1
     parts.join("")
 
+fn source_issues_within_v1(outline: SourceOutlineV1, span: SourceRangeV1) -> i64:
+    # Syntax issues whose span starts inside `span`; aggregate for folded nodes.
+    var count = 0
+    for issue in outline.issues:
+        if issue.span.start_byte >= span.start_byte and issue.span.start_byte < span.end_byte:
+            count = count + 1
+    count
+
 fn source_fold_marker_v1(outline: SourceOutlineV1, view: SourceStructuredViewV1, node_index: i64) -> text:
     # Synthetic row text after the `|` boundary for a folded node; "" when open.
+    # A folded body with syntax issues shows their count so closing a body never
+    # hides that something is wrong inside it.
     var folded = false
     for fold in view.folds:
         if fold.node_index == node_index: folded = true
@@ -160,8 +201,38 @@ fn source_fold_marker_v1(outline: SourceOutlineV1, view: SourceStructuredViewV1,
     var members = 0
     for node in outline.nodes:
         if node.parent_index == node_index: members = members + 1
-    if members > 0: return "| + " + str(members) + " members"
-    "| + body"
+    val hidden = source_issues_within_v1(outline, outline.nodes[node_index].body_range)
+    val suffix = if hidden > 0: "  syntax_issues:" + str(hidden) else: ""
+    if members > 0: return "| + " + str(members) + " members" + suffix
+    "| + body" + suffix
+
+fn source_omission_ledger_v1(outline: SourceOutlineV1, view: SourceStructuredViewV1,
+        next_cursor: text) -> JsonValue:
+    # One row per omitted range: why it is absent and how to retrieve it. An
+    # omitted gap is attributed to the fold it overlaps (the gap also carries
+    # the line break after a folded body); otherwise it is `not_selected`.
+    var rows: [JsonValue] = []
+    for span in view.projection.omitted:
+        var reason = "not_selected"
+        var node_name = ""
+        var reopen: [(text, JsonValue)] = [("mode", JsonValue.Str("raw")), ("start_byte", JsonValue.Int(span.start_byte)),
+            ("max_bytes", JsonValue.Int(span.end_byte - span.start_byte))]
+        for fold in view.folds:
+            for range in fold.ranges:
+                if range.start_byte < span.end_byte and range.end_byte > span.start_byte and reason == "not_selected":
+                    if fold.node_index < 0:
+                        reason = "import_group"
+                    else:
+                        reason = "folded_body"
+                        node_name = outline.nodes[fold.node_index].qualified_name
+                        reopen = [("mode", JsonValue.Str("focused")), ("target", JsonValue.Str(node_name))]
+        if reason == "not_selected" and next_cursor != "":
+            reason = "budget_page"
+            reopen = [("cursor", JsonValue.Str(next_cursor))]
+        rows.push(json_value_object_from([
+            ("range", source_range_json_v1(span)), ("reason", JsonValue.Str(reason)),
+            ("node_name", JsonValue.Str(node_name)), ("reopen", json_value_object_from(reopen))]))
+    JsonValue.Array(rows)
 
 fn source_rendered_append_v1(rendered: [text], source: text, marker: text) -> [text]:
     # Decorations live only after the complete source line; never inside it.
@@ -221,6 +292,12 @@ fn source_structure_payload_v1(path: text, snapshot: SourceSnapshotV1,
             ("expanded", JsonValue.Bool(source_view_node_expanded_v1(outline, view, node_index)))]))
         rendered = source_rendered_append_v1(rendered, source, source_fold_marker_v1(outline, view, node_index))
         index = index + 1
+    # Summary names what ran (syntax) and what is hidden in folds; it never
+    # claims "0 errors" for analysis that did not run.
+    var hidden_issues = 0
+    for fold in view.folds:
+        for span in fold.ranges: hidden_issues = hidden_issues + source_issues_within_v1(outline, span)
+    rendered.push("| syntax_issues:" + str(outline.total_issues) + " hidden:" + str(hidden_issues) + " (semantics not evaluated)")
     rendered.push("| [ess] [adv]")
     var folds: [JsonValue] = []
     for fold in view.folds:
@@ -257,7 +334,12 @@ fn source_structure_payload_v1(path: text, snapshot: SourceSnapshotV1,
         ("completeness", JsonValue.Str(view.projection.completeness)),
         ("partial_context", JsonValue.Bool(partial)),
         ("segments", JsonValue.Array(segments)), ("folds", JsonValue.Array(folds)),
-        ("omitted_ranges", JsonValue.Array(omitted)), ("diagnostics", JsonValue.Array(issues)),
+        ("omitted_ranges", JsonValue.Array(omitted)),
+        ("omission_ledger", source_omission_ledger_v1(outline, view, next_cursor)),
+        ("selection_coverage", json_value_object_from([
+            ("selected_bytes", JsonValue.Int(bytes.len())), ("source_bytes", JsonValue.Int(original.len())),
+            ("analysis", JsonValue.Str("syntax_only"))])),
+        ("diagnostics", JsonValue.Array(issues)),
         ("total_diagnostics", JsonValue.Int(outline.total_issues)),
         ("next_cursor", JsonValue.Str(next_cursor)),
         ("rendered", JsonValue.Str(rendered.join("\n"))),
@@ -265,6 +347,7 @@ fn source_structure_payload_v1(path: text, snapshot: SourceSnapshotV1,
         ("footer", JsonValue.Str("[ess] [adv]"))]
     if intent_requested: fields.push(("intent_resolution", source_intent_json_v1(intent)))
     if help == "ess": fields.push(("essential_help", JsonValue.Str(SOURCE_ESSENTIAL_HELP_V1)))
+    if help == "adv": fields.push(("advanced_help", source_advanced_help_v1()))
     source_safe_json_v1(json_value_serialize(json_value_object_from(fields)))
 
 fn source_open_context_v1(body: text, numbers: bool, workspace_root: text) -> SourceOpenResultV1:
@@ -276,8 +359,8 @@ fn source_open_context_v1(body: text, numbers: bool, workspace_root: text) -> So
     if mode != "raw" and mode != "outline" and mode != "focused":
         return source_result_error_v1("unsupported", "unsupported_source_mode")
     val help = json_value_text_or(json_value_field(arguments, "help"), "")
-    if help != "" and help != "ess":
-        return source_result_error_v1("unsupported", "unsupported_help_topic; only ess is available")
+    if help != "" and help != "ess" and help != "adv":
+        return source_result_error_v1("unsupported", "unsupported_help_topic; only ess and adv are available")
     val intent_text = json_value_text_or(json_value_field(arguments, "intent"), "")
     if str_len(intent_text) > 512: return source_result_error_v1("error", "intent_too_long")
     if intent_text != "" and mode == "raw":

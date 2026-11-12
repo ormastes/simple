@@ -378,7 +378,7 @@ fn _put_u32(page: [u8], off: i64, v: i64) -> [u8]:
 fn _serialize_leaf(cells: [_WCell], usable: i64, page_size: i64, base: i64) -> [u8]:
     var page = _blank_page(page_size)
     val n = cells.len()
-    var content = page_size
+    var content = usable
     var ptrs: [i64] = []
     for cell in cells:
         val local = local_payload_len(cell.payload.len(), usable, false)
@@ -432,10 +432,10 @@ fn _serialize_overflow_page(cell: _WCell, usable: i64, page_size: i64, idx: i64)
     page
 
 # Serialize one table-interior page (type 0x05).
-fn _serialize_interior(node: _WInterior, page_size: i64, base: i64) -> [u8]:
+fn _serialize_interior(node: _WInterior, usable: i64, page_size: i64, base: i64) -> [u8]:
     var page = _blank_page(page_size)
     val n = node.children.len()
-    var content = page_size
+    var content = usable
     var ptrs: [i64] = []
     var i: i64 = 0
     while i < n:
@@ -474,8 +474,7 @@ fn _serialize_interior(node: _WInterior, page_size: i64, base: i64) -> [u8]:
 # Build all pages of one table b-tree. Page ids are base..base+count-1 in
 # allocation order (leaves left-to-right, their overflow chains, then
 # interior levels bottom-up; the root is the LAST page).
-fn _build_table_pages(cells: [_WCell], page_size: i64, base: i64) -> Result<_WTablePages, SqliteError>:
-    val usable = page_size
+fn _build_table_pages(cells: [_WCell], page_size: i64, usable: i64, base: i64) -> Result<_WTablePages, SqliteError>:
     var leaves = _pack_leaves(cells, usable, usable)
 
     var pages: [[u8]] = []
@@ -558,7 +557,7 @@ fn _build_table_pages(cells: [_WCell], page_size: i64, base: i64) -> Result<_WTa
                 idx = idx + 1
     for level in levels:
         for node in level:
-            pages.push(_serialize_interior(node, page_size, 0))
+            pages.push(_serialize_interior(node, usable, page_size, 0))
 
     if pages.len() != alloc_ptr - base:
         return Err(SqliteError.CorruptPage( message: "table page accounting drifted: {pages.len()} pages for range {base}..{alloc_ptr - 1}"))
@@ -569,9 +568,8 @@ fn _build_table_pages(cells: [_WCell], page_size: i64, base: i64) -> Result<_WTa
 # ---------------------------------------------------------------------------
 
 # Returns (page_1_with_header_space, overflow_pages).
-fn _build_schema_pages(cells: [_WCell], page_size: i64) -> Result<_WSchemaPages, SqliteError>:
-    val usable = page_size
-    val capacity = page_size - 100
+fn _build_schema_pages(cells: [_WCell], page_size: i64, usable: i64) -> Result<_WSchemaPages, SqliteError>:
+    val capacity = usable - 100
     val leaves = _pack_leaves(cells, capacity, usable)
     if leaves.len() > 1:
         return Err(SqliteError.UnsupportedFeature( what: "sqlite_schema spanning multiple b-tree pages"))
@@ -608,8 +606,16 @@ fn _build_schema_pages(cells: [_WCell], page_size: i64) -> Result<_WSchemaPages,
 # for every declared table. Deterministic: identical inputs -> identical
 # bytes. UTF-8, 4096-byte pages, rollback-journal header versions.
 fn sqlite_format_create_image(schema_sql: text, tables: [SqliteTableData]) -> Result<[u8], SqliteError>:
+    sqlite_format_create_image_reserved(schema_sql, tables, 0)
+
+# Same image with `reserved` bytes kept free at the end of every page (header
+# byte 20). SQLCipher 4 needs 80 for its per-page IV+HMAC trailer, so a
+# plaintext image meant for that codec is laid out with usable = 4016.
+pub fn sqlite_format_create_image_reserved(schema_sql: text, tables: [SqliteTableData], reserved: i64) -> Result<[u8], SqliteError>:
     val page_size = WRITER_PAGE_SIZE
-    val usable = page_size
+    if reserved < 0 or reserved > 255 or page_size - reserved < 480:
+        return Err(SqliteError.InvalidInput( message: "reserved bytes per page must be 0..255 and leave at least 480 usable bytes, got {reserved}"))
+    val usable = page_size - reserved
 
     # 1. Parse + strictly validate the schema statements.
     var defs: [_WTableDef] = []
@@ -657,13 +663,13 @@ fn sqlite_format_create_image(schema_sql: text, tables: [SqliteTableData]) -> Re
         var schema_cells: [_WCell] = []
         var di: i64 = 0
         for tdef in defs:
-            val table_pages = _build_table_pages(all_cells[di], page_size, bases[di])?
+            val table_pages = _build_table_pages(all_cells[di], page_size, usable, bases[di])?
             val rootpage = table_pages.root
             val record = sqlite_record_encode([ DbValue.Text(value: "table"), DbValue.Text(value: tdef.name), DbValue.Text(value: tdef.name), DbValue.Integer(value: rootpage), DbValue.Text(value: tdef.stmt) ])
             schema_cells.push(_WCell(rid: di + 1, payload: record, overflow: []))
             di = di + 1
 
-        val schema = _build_schema_pages(schema_cells, page_size)?
+        val schema = _build_schema_pages(schema_cells, page_size, usable)?
         val needed = schema.overflow.len()
         if needed == schema_overflow:
             converged = true
@@ -678,21 +684,21 @@ fn sqlite_format_create_image(schema_sql: text, tables: [SqliteTableData]) -> Re
     var schema_cells_final: [_WCell] = []
     var di: i64 = 0
     for tdef in defs:
-        val table_pages = _build_table_pages(all_cells[di], page_size, bases[di])?
+        val table_pages = _build_table_pages(all_cells[di], page_size, usable, bases[di])?
         val record = sqlite_record_encode([ DbValue.Text(value: "table"), DbValue.Text(value: tdef.name), DbValue.Text(value: tdef.name), DbValue.Integer(value: table_pages.root), DbValue.Text(value: tdef.stmt) ])
         schema_cells_final.push(_WCell(rid: di + 1, payload: record, overflow: []))
         for pg in table_pages.pages:
             file_pages.push(pg)
         di = di + 1
 
-    val schema = _build_schema_pages(schema_cells_final, page_size)?
+    val schema = _build_schema_pages(schema_cells_final, page_size, usable)?
     if schema.overflow.len() != schema_overflow:
         return Err(SqliteError.UnsupportedFeature( what: "sqlite_schema layout changed during final build"))
 
     # 5. The 100-byte header replaces the first 100 bytes of page 1 (built as
     # its own buffer and spliced in, so no write goes through a parameter).
     val page_count = 1 + schema.overflow.len() + file_pages.len()
-    var image: [u8] = _build_header(page_count, page_size)
+    var image: [u8] = _build_header(page_count, page_size, reserved)
     var hi: i64 = 100
     while hi < schema.page1.len():
         image.push(schema.page1[hi])
@@ -706,7 +712,7 @@ fn sqlite_format_create_image(schema_sql: text, tables: [SqliteTableData]) -> Re
     Ok(image)
 
 # Build the 100-byte SQLite database header.
-fn _build_header(page_count: i64, page_size: i64) -> [u8]:
+fn _build_header(page_count: i64, page_size: i64, reserved: i64) -> [u8]:
     var image = _blank_page(100)
     # "SQLite format 3" as raw bytes (literal, not text.bytes(): the seed's
     # rt_array_bytes_* externs are not all linked yet — see
@@ -723,7 +729,7 @@ fn _build_header(page_count: i64, page_size: i64) -> [u8]:
         image = _put_u16(image, 16, page_size)
     image[18] = 1u8   # file format write version: legacy (rollback journal)
     image[19] = 1u8   # file format read version: legacy
-    image[20] = 0u8   # reserved bytes per page
+    image[20] = reserved as u8   # reserved bytes per page
     image[21] = 64u8  # max embedded payload fraction
     image[22] = 32u8  # min embedded payload fraction
     image[23] = 32u8  # leaf payload fraction

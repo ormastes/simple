@@ -5,14 +5,35 @@
 # `cmm_parser_stmts.spl`.
 
 use cmm_tokens.{CmmTokenKind, CmmToken}
+use cmm_diagnostics.{CmmDiagnostic, CmmDiagnosticKind, make_coded_diagnostic}
 
-export CmmParser, CmmParseError, to_upper_cmm
+export CmmParser, CmmParseError, to_upper_cmm, parse_error_to_diagnostic
+export CMM_SYNTAX_ERROR, CMM_UNEXPECTED_TOKEN, CMM_UNTERMINATED_BLOCK, CMM_MISSING_BODY
+export CMM_EXPECTED_MACRO_NAME, CMM_ELSE_WITHOUT_IF
 
-# Parse error with source location
+# Parser-owned CMM codes (CMM10xx syntax, CMM11xx structure). The analyzer
+# owns CMM1102/CMM1103 and CMM12xx; cmm_error_codes.spl registers them all.
+val CMM_SYNTAX_ERROR = "CMM1000"
+val CMM_UNEXPECTED_TOKEN = "CMM1001"
+val CMM_UNTERMINATED_BLOCK = "CMM1002"
+val CMM_MISSING_BODY = "CMM1003"
+val CMM_EXPECTED_MACRO_NAME = "CMM1004"
+val CMM_ELSE_WITHOUT_IF = "CMM1101"
+
+# Typed parse error: stable code, half-open 1-based column span, and what the
+# parser expected at that point (for fix suggestions).
 struct CmmParseError:
     message: text
     line: i64
     column: i64
+    end_column: i64
+    code: text
+    expected: [text]
+
+fn parse_error_to_diagnostic(e: CmmParseError, kind: CmmDiagnosticKind) -> CmmDiagnostic:
+    var d = make_coded_diagnostic(kind, e.code, e.message, e.line, e.column, e.line, e.end_column)
+    d.expected = e.expected
+    d
 
 # Main parser state. Methods are distributed across multiple files via impl
 # blocks that all import this shared core.
@@ -22,6 +43,7 @@ class CmmParser:
     errors: [text]
     recover_unclosed: bool
     warnings: [text]
+    parse_diagnostics: [CmmDiagnostic]
 
 impl CmmParser:
     fn is_at_end() -> bool:
@@ -235,9 +257,27 @@ impl CmmParser:
                 case CmmTokenKind.RParen: return
                 case _: self.advance()
 
+    # Generic syntax error at the current token.
     fn make_error(message: text) -> CmmParseError:
-        val tok = self.peek()
-        CmmParseError(message: message, line: tok.line, column: tok.column)
+        self.make_coded_error_at(self.peek(), CMM_SYNTAX_ERROR, message, [])
+
+    # Typed error anchored on `tok` (half-open span over the token text).
+    fn make_coded_error_at(tok: CmmToken, code: text, message: text, expected: [text]) -> CmmParseError:
+        val width = if tok.text.len() > 0: tok.text.len() else: 1
+        CmmParseError(message: message, line: tok.line, column: tok.column,
+                      end_column: tok.column + width, code: code, expected: expected)
+
+    # Record a typed error as a diagnostic. The legacy `errors` text list is
+    # kept for callers that only know the old shape.
+    me record_parse_error(e: CmmParseError, legacy_message: text):
+        self.errors = self.errors.push("Line " + str(e.line) + ": " + legacy_message)
+        self.parse_diagnostics = self.parse_diagnostics.push(parse_error_to_diagnostic(e, CmmDiagnosticKind.Error))
+
+    # Tolerant-policy recovery: still a finding with the same code, reported
+    # as a warning rather than silently dropped.
+    me record_recovery_warning(e: CmmParseError, legacy_message: text):
+        self.warnings = self.warnings.push("Line " + str(e.line) + ": " + legacy_message)
+        self.parse_diagnostics = self.parse_diagnostics.push(parse_error_to_diagnostic(e, CmmDiagnosticKind.Warning))
 
 # --- Case-insensitive helpers ---
 

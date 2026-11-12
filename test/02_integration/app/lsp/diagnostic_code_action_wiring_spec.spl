@@ -1,0 +1,91 @@
+"""
+## Purpose and audience
+
+Executable contract for `std.nogc_sync_mut.lsp.lsp_diag_code_action`: the LSP
+codeAction wiring over the typed fix model (REQ-DIAG-011). The action list is
+built from `ranked_candidates_for(index, diagnostic_id)` in ranked order; an
+apply is routed through `EditTransaction` and a versioned `documentChanges`
+WorkspaceEdit is emitted ONLY on `ApplyStatus.Applied`. Every refusal emits a
+typed status and no edit. Audience: diag-P2 (LSP wiring), diag-P6.
+"""
+# @cover src/lib/nogc_sync_mut/lsp/lsp_diag_code_action.spl
+
+use std.spec
+use std.common.diagnostics.diagnostic_v1.{FixConfidence}
+use std.common.diagnostics.span.{Span}
+use std.common.diagnostics.diagnostic_batch.{FixCandidate, DiagnosticActionIndex}
+use std.common.diagnostics.fix_transaction.{DocumentSnapshot, EditTransaction}
+use std.nogc_sync_mut.lsp.lsp_diag_code_action.{lsp_diag_code_actions_json, lsp_diag_apply_json, lsp_byte_offset_position}
+
+val ROOT = "/w"
+val HASH = "xxh3:aa07"
+val BODY = "fn f():\n    val x = 1\n    x = 2\n"
+
+fn span_at(start: i64, end: i64) -> Span:
+    Span.new(start, end, 2, 5)
+
+# `val` sits at bytes 12..15 (line 1, character 4).
+fn val_to_var(version: i64) -> FixCandidate:
+    FixCandidate.new("fx_var", "Change `val` to `var`", "assigned twice", FixConfidence.Safe, version)
+        .with_replacement("/w/a.spl", span_at(12, 15), "var", "val")
+
+fn drop_assign(version: i64) -> FixCandidate:
+    FixCandidate.new("fx_drop", "Remove reassignment", "drop line", FixConfidence.Uncertain, version)
+        .with_replacement("/w/a.spl", span_at(22, 32), "", "    x = 2\n")
+
+fn tx(version: i64, hash: text) -> EditTransaction:
+    EditTransaction.new(ROOT, hash).with_document(DocumentSnapshot.new("/w/a.spl", version, hash, BODY))
+
+# @manual_section: lsp_diag_code_action
+describe "LSP codeAction wiring over ranked candidates and EditTransaction (REQ-DIAG-011)":
+    it "lists candidates in ranked order with the top enabled one preferred":
+        # @req REQ-DIAG-011
+        # @capture(value): codeAction list JSON
+        step("Index an unsafe candidate before a safe one for the same diagnostic")
+        val index = DiagnosticActionIndex.new().add("d1", drop_assign(7)).add("d1", val_to_var(7))
+        val json = lsp_diag_code_actions_json(index, "d1")
+        val safe_at = json.index_of("fx_var") ?? -1
+        val unsafe_at = json.index_of("fx_drop") ?? -1
+        expect(safe_at >= 0).to_equal(true)
+        expect(unsafe_at > safe_at).to_equal(true)
+        expect(json.contains("\"kind\":\"quickfix\"")).to_equal(true)
+        expect(json.contains("\"isPreferred\":true")).to_equal(true)
+
+    it "reports a disabled candidate with its reason and never prefers it":
+        # @req REQ-DIAG-011
+        val index = DiagnosticActionIndex.new().add("d1", val_to_var(7).disabled("ambiguous binding"))
+        val json = lsp_diag_code_actions_json(index, "d1")
+        expect(json.contains("\"disabled\":{\"reason\":\"ambiguous binding\"}")).to_equal(true)
+        expect(json.contains("\"isPreferred\":true")).to_equal(false)
+
+    it "lists no actions for an unknown diagnostic id":
+        # @req REQ-DIAG-011
+        expect(lsp_diag_code_actions_json(DiagnosticActionIndex.new(), "nope")).to_equal("[]")
+
+    it "converts byte offsets to zero-based LSP line and character":
+        # @req REQ-DIAG-011
+        val p = lsp_byte_offset_position(BODY, 12)
+        expect(p.0).to_equal(1)
+        expect(p.1).to_equal(4)
+
+    it "emits a versioned documentChanges edit when the transaction applies":
+        # @req REQ-DIAG-011
+        # @capture(value): WorkspaceEdit JSON
+        step("Apply the version-7 candidate to a version-7 snapshot")
+        val json = lsp_diag_apply_json(tx(7, HASH), val_to_var(7))
+        expect(json.contains("\"documentChanges\"")).to_equal(true)
+        expect(json.contains("\"uri\":\"file:///w/a.spl\",\"version\":7")).to_equal(true)
+        expect(json.contains("\"range\":{\"start\":{\"line\":1,\"character\":4},\"end\":{\"line\":1,\"character\":7}}")).to_equal(true)
+        expect(json.contains("\"newText\":\"var\"")).to_equal(true)
+
+    it "Journey D: a stale version emits a typed refusal and no edit":
+        # @req REQ-DIAG-011
+        val json = lsp_diag_apply_json(tx(8, HASH), val_to_var(7))
+        expect(json.contains("\"status\":\"stale_version\"")).to_equal(true)
+        expect(json.contains("documentChanges")).to_equal(false)
+
+    it "a disabled candidate emits disabled_candidate and no edit":
+        # @req REQ-DIAG-011
+        val json = lsp_diag_apply_json(tx(7, HASH), val_to_var(7).disabled("ambiguous"))
+        expect(json.contains("\"status\":\"disabled_candidate\"")).to_equal(true)
+        expect(json.contains("documentChanges")).to_equal(false)

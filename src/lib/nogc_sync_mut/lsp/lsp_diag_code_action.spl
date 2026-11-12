@@ -1,0 +1,60 @@
+# LSP codeAction wiring over the typed fix model (REQ-DIAG-011).
+# Lists come from ranked_candidates_for(); applies go through EditTransaction
+# and a versioned documentChanges WorkspaceEdit is emitted only on Applied.
+# Positions are zero-based lines and byte-based characters.
+use std.common.json.serializer.{json_escape_string}
+use std.common.diagnostics.diagnostic_batch.{FixCandidate, DiagnosticActionIndex}
+use std.common.diagnostics.fix_ranking.{ranked_candidates_for}
+use std.common.diagnostics.fix_transaction.{EditTransaction}
+
+fn jstr(s: text) -> text:
+    "\"" + json_escape_string(s) + "\""
+
+pub fn lsp_byte_offset_position(body: text, offset: i64) -> (i64, i64):
+    val parts = body.substring(0, offset).split("\n")
+    (parts.len() - 1, parts[parts.len() - 1].byte_len())
+
+fn action_json(diagnostic_id: text, c: FixCandidate, preferred: bool) -> text:
+    var out = "{\"title\":" + jstr(c.title) + ",\"kind\":\"quickfix\""
+    if preferred:
+        out = out + ",\"isPreferred\":true"
+    match c.disabled_reason:
+        Some(reason):
+            out = out + ",\"disabled\":{\"reason\":" + jstr(reason) + "}"
+        None:
+            pass
+    out + ",\"data\":{\"diagnostic_id\":" + jstr(diagnostic_id) + ",\"candidate_id\":" + jstr(c.id) + "}}"
+
+pub fn lsp_diag_code_actions_json(index: DiagnosticActionIndex, diagnostic_id: text) -> text:
+    var rows: [text] = []
+    var preferred_taken = false
+    for c in ranked_candidates_for(index, diagnostic_id):
+        val prefer = not preferred_taken and c.is_enabled()
+        if prefer:
+            preferred_taken = true
+        rows.push(action_json(diagnostic_id, c, prefer))
+    "[" + rows.join(",") + "]"
+
+fn position_json(p: (i64, i64)) -> text:
+    "{\"line\":" + p.0.to_text() + ",\"character\":" + p.1.to_text() + "}"
+
+pub fn lsp_diag_apply_json(tx: EditTransaction, c: FixCandidate) -> text:
+    val result = tx.apply(c)
+    if not result.applied():
+        return "{\"status\":" + jstr(result.status.name()) + ",\"reason\":" + jstr(result.reason) + "}"
+    var changes: [text] = []
+    for f in result.changed_files:
+        val before = tx.text_of(f)
+        var version = 0
+        match tx.document(f):
+            Some(d): version = d.version
+            None: pass
+        var edits: [text] = []
+        for r in c.replacements:
+            if r.file == f:
+                val range = "{\"start\":" + position_json(lsp_byte_offset_position(before, r.span.start))
+                    + ",\"end\":" + position_json(lsp_byte_offset_position(before, r.span.end)) + "}"
+                edits.push("{\"range\":" + range + ",\"newText\":" + jstr(r.new_text) + "}")
+        changes.push("{\"textDocument\":{\"uri\":" + jstr("file://" + f) + ",\"version\":" + version.to_text()
+            + "},\"edits\":[" + edits.join(",") + "]}")
+    "{\"status\":\"applied\",\"edit\":{\"documentChanges\":[" + changes.join(",") + "]}}"
