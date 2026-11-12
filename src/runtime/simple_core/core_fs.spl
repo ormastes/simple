@@ -502,10 +502,20 @@ pub fn rt_file_read_bytes(path_ptr_raw: i64, path_len: i64) -> i64:
     if size > 0:
         val out_ptr = out & -8
         val data = _sffi_core_fs_load_i64(out_ptr, 24)
-        val bytes_read = _sffi_core_fs_read(fd, data, size)
-        if bytes_read < 0:
-            _sffi_core_fs_close(fd)
-            return 3
+        # Loop on short reads (twin of the Rust read fix, bug doc
+        # seed_file_read_bytes_nil_after_in_process_write_2026-11-12.md):
+        # one read() may return fewer bytes than requested.
+        var bytes_read = 0
+        var reading = true
+        while reading and bytes_read < size:
+            val got = _sffi_core_fs_read(fd, data + bytes_read, size - bytes_read)
+            if got < 0:
+                _sffi_core_fs_close(fd)
+                return 3
+            if got == 0:
+                reading = false
+            else:
+                bytes_read = bytes_read + got
         if bytes_read < size:
             _sffi_core_fs_store_i64(out_ptr, 8, bytes_read)
     _sffi_core_fs_close(fd)
