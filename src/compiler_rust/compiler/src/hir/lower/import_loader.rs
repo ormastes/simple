@@ -462,6 +462,7 @@ impl Lowerer {
         // later), the referenced type is already in the registry.
         // We register ALL types, not just imported ones, because imported types
         // may have fields that reference non-imported types from the same file.
+        let own_consts = super::module_lowering::const_literal_census(items);
         for item in items {
             self.preregister_imported_type_placeholder(item);
         }
@@ -549,7 +550,19 @@ impl Lowerer {
                 }
                 Node::Function(func_def) => {
                     if self.should_import_symbol(&func_def.name, target) {
-                        let defaults: Vec<_> = func_def.params.iter().map(|p| p.default.clone()).collect();
+                        // A default naming a scalar-literal `const` the imported
+                        // module itself declares is recorded as that literal
+                        // (callee scope); a const the callee merely imports is
+                        // not resolved on this lane and stays rejected.
+                        let defaults: Vec<_> = func_def.params.iter().map(|p| match &p.default {
+                            Some(Expr::Identifier(name))
+                                if !func_def.params.iter().any(|other| other.name == *name)
+                                    && !items.iter().any(|item| matches!(item, Node::Function(f) if f.name == *name)) =>
+                            {
+                                own_consts.get(&(None, name.clone())).cloned().flatten().or_else(|| p.default.clone())
+                            }
+                            default => default.clone(),
+                        }).collect();
                         self.record_imported_fn_owner(&func_def.name);
                         if let Some(path) = &self.current_file {
                             self.imported_fn_param_defaults

@@ -1,0 +1,89 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# Routed live defect (boot-fable run 16, release/1.0.0 pin c7431e08861,
+# Stage 2 matrix row compiler_cli_build): `[collect-all] 37 module(s)
+# poisoned, 95 error(s)`, rooted at
+#   src/lib/common/diagnostics/__init__.spl: missing module surface for diagnostic_v1
+# (and diagnostic_batch, source_position, fix_ranking, fix_transaction).
+# The facade spells its re-exports as `export sibling.{A, B}`. Two halves
+# dropped that form while every neighbouring spelling worked:
+#   1. parse_export_decl's `export ident.{...}` branch emitted the BARE module
+#      `diagnostic_v1`, while `export A, B from diagnostic_v1` emits
+#      `.diagnostic_v1` (parse_export_source_module). HIR's
+#      resolve_module_key_relative sends a dotless name to the absolute
+#      resolver only, so the sibling was never found even when its surface
+#      was committed (run-16 log line 13382 vs the error).
+#   2. The entry-closure scanner followed `export X.*`, `export use`, and
+#      `export ... from M`, but not `export X.{...}`, so a sibling reachable
+#      only through the facade (source_position.spl) was never loaded at all
+#      (cheap repro: closure of 3 sources, 5 siblings missing).
+# Both halves now agree with the `from` form: a single-segment module part is
+# the facade's physical sibling, spelled `.ident`; a dotted one -- rooted or
+# rootless (`export formatters.json_formatter.{...}`) -- is a module path taken
+# as spelled, the `saw_dot` rule of parse_export_source_module
+# (src/lib/nogc_sync_mut/database/vector/__init__.spl relies on that).
+# Follow-up (2026-11-12): the single-member form `export sibling.Name`
+# (diagnostics/__init__.spl: `export severity.Severity`) was also never
+# followed by the closure sibling scanner; green only via transitive imports.
+
+use std.spec.step
+
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.driver.driver_source_loading.{_driver_entry_import_module_paths, _driver_entry_sibling_module_paths}
+
+describe "facade `export sibling.{...}` re-export":
+    """Pins the run-16 routed repro: a braced re-export of a bare sibling must
+    bind to the sibling in both the parser and the entry-closure scanner."""
+
+    it "parser emits the sibling as a relative module (routed repro)":
+        step("parser emits the sibling as a relative module")
+        val module = parse_and_build_module(
+            "export diagnostic_v1.{{DiagnosticV1, LabelV1}}\n", "diagnostics_facade.spl")
+        expect(module.imports.len()).to_equal(1)
+        expect(module.imports[0].module).to_equal(".diagnostic_v1")
+        expect(module.imports[0].items.len()).to_equal(2)
+        expect(module.imports[0].items[0].name).to_equal("DiagnosticV1")
+        expect(module.imports[0].items[1].name).to_equal("LabelV1")
+
+    it "parser takes a dotted module part as spelled":
+        step("parser takes a dotted module part as spelled")
+        val module = parse_and_build_module(
+            "export std.database.vector.types.{{DistanceMetric}}\n", "vector_facade.spl")
+        expect(module.imports.len()).to_equal(1)
+        expect(module.imports[0].module).to_equal("std.database.vector.types")
+
+    it "parser leaves an already-relative module part alone":
+        step("parser leaves an already-relative module part alone")
+        val module = parse_and_build_module(
+            "export use .types.{{T32BridgeResult}}\n", "relative_facade.spl")
+        expect(module.imports[0].module).to_equal(".types")
+
+    it "closure scanner collects the braced sibling like `export ... from`":
+        step("closure scanner collects the braced sibling")
+        val facade = "export severity.Severity\n" +
+            "export diagnostic_v1.{{DiagnosticV1, LabelV1}}\n" +
+            "export source_position.{{LineStartTable, Utf16Position}}\n" +
+            "export DiagnosticFix from fix_ranking\n"
+        val imports = _driver_entry_import_module_paths(facade)
+        expect(imports.contains(".diagnostic_v1")).to_equal(true)
+        expect(imports.contains(".source_position")).to_equal(true)
+        expect(imports.contains(".fix_ranking")).to_equal(true)
+
+    it "closure scanner takes a dotted braced export as spelled":
+        step("closure scanner takes a dotted braced export as spelled")
+        val imports = _driver_entry_import_module_paths(
+            "export std.database.vector.types.{{DistanceMetric, VectorEntry}}\n")
+        expect(imports).to_equal(["std.database.vector.types"])
+
+    it "closure sibling scanner follows single-member `export sibling.Name`":
+        step("closure sibling scanner follows single-member export sibling.Name")
+        val facade = "export severity.Severity\n" +
+            "export span.Span\n" +
+            "export a.b.C\n" +
+            "export Plain\n" +
+            "export use helpers\n"
+        val sibs = _driver_entry_sibling_module_paths(facade)
+        expect(sibs.contains(".severity")).to_equal(true)
+        expect(sibs.contains(".span")).to_equal(true)
+        expect(sibs.contains(".a")).to_equal(false)
+        expect(sibs.contains(".Plain")).to_equal(false)

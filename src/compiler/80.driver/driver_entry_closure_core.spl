@@ -825,7 +825,10 @@ fn _driver_entry_import_module_paths_text_fallback(content: text) -> [text]:
     # Whole-content early-out, mirroring the `mod `/`export ` gate in
     # _driver_entry_sibling_paths below: a file with no use/import keyword at all
     # cannot contribute, and one `contains` beats splitting it into lines.
-    if not content.contains("use ") and not content.contains("import ") and not content.contains(" from "):
+    # `export sibling.{...}` facades carry imports with none of the other
+    # keywords (see the `.{` branch below), so `export ` admits the scan too.
+    if not content.contains("use ") and not content.contains("import ") and
+            not content.contains(" from ") and not content.contains("export "):
         return []
     var result: [text] = []
     var in_doc = false
@@ -914,6 +917,25 @@ fn _driver_entry_import_module_paths_text_fallback(content: text) -> [text]:
             # facade, doc/08_tracking/bug/
             # bootstrap_main_closure_pulls_src_os_hir_failures_2026_10_20.md).
             if tail != "" and not tail.contains("."):
+                tail = "." + tail
+        elif line.starts_with("export ") and line.contains(".{"):
+            # `export sibling.{A, B}` is the braced twin of `export A, B from
+            # sibling`: the parser emits the dotless module part as `.sibling`
+            # (parser_decls_use.spl parse_export_decl), so the closure must
+            # load that physical sibling too. It was never collected -- only
+            # `export X.*`, `export use`, and `export ... from` were -- so a
+            # sibling reachable through the facade alone
+            # (src/lib/common/diagnostics/source_position.spl) never entered
+            # the closure and every importer of LineStartTable died in HIR
+            # (run-16 compiler_cli_build: closure of 3 sources for an entry
+            # importing std.common.diagnostics). Same `saw_dot` rule as
+            # parse_export_source_module: only a DOTLESS module part is a
+            # sibling and gets the `.` prefix; a dotted one (rooted
+            # `export std.x.y.{...}` or rootless `export formatters.json_formatter.{...}`,
+            # src/app/llm_diagnostics/mod.spl) is a module path collected as spelled.
+            tail = line.substring(7).trim()
+            val brace_at = _driver_text_index_of(tail, ".{")
+            if brace_at > 0 and not tail[0:brace_at].contains("."):
                 tail = "." + tail
         else:
             continue
@@ -1064,6 +1086,21 @@ fn _driver_entry_sibling_path(line: text) -> text:
         val base = tail[0:tail.len() - 2].trim()
         if base != "" and not base.contains(" ") and not base.contains(","):
             return "." + base
+    if line.starts_with("export ") and not line.starts_with("export use ") and
+            not line.contains("{") and not line.contains(" from ") and not line.contains(","):
+        # `export sibling.Name` (src/lib/common/diagnostics/__init__.spl:
+        # `export severity.Severity`) re-exports ONE member of the facade's
+        # physical sibling: the parser keeps it as the export name
+        # `sibling.Name` and the HIR re-export chase binds `sibling` next to
+        # the facade. Until 2026-11-12 the closure never followed it, so it was
+        # green only when some other importer happened to load the sibling.
+        # Exactly one dot: a rootless dotted path (`export a.b.C`) is a module
+        # path, not a sibling (the `saw_dot` rule of parse_export_source_module).
+        val tail = line.substring(7).trim()
+        val parts = tail.split(".")
+        if parts.len() == 2 and parts[0] != "" and parts[1] != "" and
+                not tail.contains(" ") and not tail.contains("*"):
+            return "." + parts[0]
     ""
 
 pub fn _driver_entry_sibling_module_paths(content: text) -> [text]:
@@ -1525,6 +1562,9 @@ fn _driver_resolve_entry_import_exact(module_path: text, entry_dir: text) -> tex
     val mcp_t32_mapped = _driver_resolve_rewritten_import(module_path, "app.mcp_t32", "examples/10_tooling/trace32_tools/t32_mcp", entry_dir)
     if mcp_t32_mapped != "":
         return mcp_t32_mapped
+    val t32_lsp_mcp_mapped = _driver_resolve_rewritten_import(module_path, "app.t32_lsp_mcp", "examples/10_tooling/trace32_tools/t32_lsp_mcp", entry_dir)
+    if t32_lsp_mcp_mapped != "":
+        return t32_lsp_mcp_mapped
     val cmm_app_mapped = _driver_resolve_rewritten_import(module_path, "app.cmm_lsp", "examples/10_tooling/trace32_tools/cmm_lsp", entry_dir)
     if cmm_app_mapped != "":
         return cmm_app_mapped

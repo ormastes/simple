@@ -8,6 +8,23 @@ use std.io_runtime.{
 }
 use std.spec.engine_probe.{simple_binary}
 use app.io.sysinfo_ops.{getpid}
+use std.nogc_sync_mut.spec.{skip}
+
+# The LLVM native backend this regression exercises is only implemented by the
+# rebuilt pure-Simple producer; the Rust bootstrap seed lacks it. Skipping (not
+# failing) keeps this honest on hosts where only the seed is available. The
+# `--version` identity check mirrors the test runner's MC/DC degrade decision.
+fn rust_seed_toolchain(binary: text) -> bool:
+    val (out, err, code) = process_run_timeout(binary, ["--version"], 10000)
+    if code != 0:
+        return false
+    val identity = out + "\n" + err
+    identity.contains("bootstrap seed only") or identity.contains("Simple Language v")
+
+fn compiler_unsupported_reason() -> text:
+    if rust_seed_toolchain(selected_compiler()):
+        return "the selected compiler is the Rust bootstrap seed, which lacks the LLVM native backend"
+    ""
 
 val PROBE = "test/02_integration/compiler/backend/probe_guarded_optional_reference_semantics.spl"
 
@@ -17,6 +34,10 @@ fn selected_compiler() -> text:
 
 describe "LLVM guarded optional reference semantics":
     slow_it "narrows only the payload inside an optional presence guard":
+        val unsupported = compiler_unsupported_reason()
+        if unsupported != "":
+            skip("narrows only the payload inside an optional presence guard", unsupported)
+            return
         val output_dir = "build/tmp/guarded_optional_reference_{getpid()}"
         val source_root = output_dir + "/source"
         val cache_dir = output_dir + "/cache"

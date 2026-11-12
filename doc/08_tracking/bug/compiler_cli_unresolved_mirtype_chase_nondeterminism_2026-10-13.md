@@ -510,3 +510,29 @@ doubled-mapping pattern exists for compiler.blocks (15.blocks parent files
 vs 15.blocks/blocks) but no lib stubs shadow it in the current closure —
 left untouched; (c) the canonical-lane derivation check from cycle 38 rejects
 out-of-tree probe entries (test/_probe_root_tmp) — cosmetic for probes only.
+
+## 2026-11-12 append (goal-mode bootstrap lane): cycle-39 fix commit LOST
+
+The cycle-39 fix cited above as `14c7986dd16` (phase-1 closure native-owner
+retry + residual fixes) is NOT an ancestor of origin/release/1.0.0 and does not
+exist on any local or remote branch (`git log --all --grep` finds nothing). The
+lane branch (fix/mirtype-unresolved-20261013, worktree wt-20261013-mirtype) was
+never merged or was lost in a subsequent tree wipe (this repo has multiple
+"restore tree wiped by" commits, e.g. ae55a746719).
+
+Partial survival at tip (verified 2026-11-12): the closure native-owner
+mechanism `driver_closure_native_owner_v1` (src/compiler/80.driver/
+driver_entry_closure_core.spl:1824) IS present, and the
+`env_get_opt` facade in module_surface_registry_index.spl is present. What
+could not be found: any commit touching module_import_resolution.spl /
+module_surface_registry_index.spl / module_import_registration.spl /
+driver_entry_closure_core.spl between c7431e088615 and tip.
+
+Consequence: the 2026-11-12 fable campaign (pinned c7431e088615) reproduced
+this bug's named victim family in compiler_cli_build ("missing module surface
+for .render/.session/.error_codes/.commands" in src/app/t32_cli +
+"unresolved type: LineStartTable" in src/lib/editor/services). A
+whole-program-lane rerun on tip source (same worktree, build/goal-p4/build3.log)
+built 3122/3122 surfaces and entered HIR with 0 errors — consistent with the
+nondeterministic/order-dependent classification; final verdict pending that
+run's HIR outcome.
