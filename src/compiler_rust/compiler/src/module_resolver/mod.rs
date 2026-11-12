@@ -312,6 +312,37 @@ mod tests {
         assert_eq!(resolved.path, native.join("mach_inst.spl"));
     }
 
+    /// `use test.fixtures.x` names the WORKSPACE's `test/` tree. A spec below
+    /// a directory that itself contains a `src` folder (the test tree mirrors
+    /// `src/lib/nogc_async_mut/src` as `test/01_unit/lib/nogc_async_mut/src`)
+    /// gets that directory as its detected project root, where `test/` does
+    /// not exist. The top-level lookup must then try the enclosing roots:
+    /// the import was reported as `module path segment `test` not found`, a
+    /// hard error on the JIT lane, and the spec executed 0 examples.
+    #[test]
+    fn test_resolve_project_namespace_through_an_enclosing_root() {
+        let dir = create_test_project();
+        let fixtures = dir.path().join("test").join("fixtures").join("orchestration");
+        fs::create_dir_all(&fixtures).unwrap();
+        fs::write(fixtures.join("adapter_fixture.spl"), "fn fixture(): 0").unwrap();
+        // The nested "project": a test directory that mirrors a `src` folder.
+        let nested = dir.path().join("test").join("01_unit").join("lib").join("nogc_async_mut");
+        fs::create_dir_all(nested.join("src")).unwrap();
+        let spec_dir = nested.join("container");
+        fs::create_dir_all(&spec_dir).unwrap();
+
+        let resolver = ModuleResolver::new(nested.clone(), nested.join("src"));
+        let path = ModulePath::new(vec![
+            "test".into(),
+            "fixtures".into(),
+            "orchestration".into(),
+            "adapter_fixture".into(),
+        ]);
+        let resolved = resolver.resolve(&path, &spec_dir.join("codec_spec.spl")).unwrap();
+
+        assert_eq!(resolved.path, fixtures.join("adapter_fixture.spl"));
+    }
+
     #[test]
     fn test_resolve_explicit_numbered_layer_segments() {
         let dir = create_test_project();
