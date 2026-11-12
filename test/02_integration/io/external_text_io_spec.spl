@@ -1,9 +1,27 @@
 # Pure conversion/error facade prerequisites: no resource is opened or adopted.
+#
+# ## Compatibility and limitations
+#
+# Every example except "rejects unchecked malformed internal text on output
+# and legacy input" runs on every host (pure codec/metadata conversions).
+# That example must first materialize malformed UTF-8 as internal `text`
+# (`bytes_to_text([255u8])`); the Windows seed runtime cannot represent
+# malformed UTF-8 text at all and raises a seed semantic error
+# (`type mismatch: cannot convert str to int`), so the example is skipped on
+# Windows with an explicit reason. The oracle is unchanged and remains
+# qualified on POSIX hosts.
 use std.spec
+use std.nogc_sync_mut.env.platform.{is_windows}
+use std.nogc_sync_mut.spec.{skip}
 use std.common.encoding.external_text.{Encoding, TextByteOrder, BomPolicy, ExternalFormat, CodecErrorKind, utf8_format}
 use std.common.text_bytes.{bytes_to_text, text_to_utf8_bytes}
 use std.io.types.{IoError, IoErrorKind}
 use std.nogc_sync_mut.io.external_text_io.{TextIoError, io_external_text, io_external_bytes, io_external_from_internal, io_internal_text, io_text_error_message, io_legacy_utf8}
+
+fn malformed_text_unsupported() -> text:
+    if is_windows():
+        return "Windows seed runtime cannot materialize malformed UTF-8 text (bytes_to_text of invalid UTF-8 raises a seed semantic error); the malformed-text oracle remains qualified on POSIX hosts"
+    ""
 
 describe "typed external text conversion facade":
     it "preserves strict metadata and payload errors as nested Codec errors":
@@ -31,17 +49,21 @@ describe "typed external text conversion facade":
         expect(io_external_bytes(encoded).unwrap()).to_equal([255, 254, 65, 0, 0, 0])
         expect(text_to_utf8_bytes(io_internal_text(encoded).unwrap())).to_equal([65, 0])
 
-    it "rejects unchecked malformed internal text on output and legacy input":
-        val malformed = bytes_to_text([255u8])
-        match io_external_from_internal(malformed, utf8_format()):
-            case Err(TextIoError.Codec(error)):
-                expect(error.kind).to_equal(CodecErrorKind.InvalidUtf8)
-                expect(error.byte_offset).to_equal(0)
-            case _: assert(false)
-        match io_legacy_utf8([65u8, 255u8]):
-            case Err(message): expect(message).to_contain("external text at byte 1:")
-            case Ok(value): assert(false)
-        expect(text_to_utf8_bytes(io_legacy_utf8([65u8, 0u8]).unwrap())).to_equal([65, 0])
+    val malformed_unsupported = malformed_text_unsupported()
+    if malformed_unsupported != "":
+        skip("rejects unchecked malformed internal text on output and legacy input", malformed_unsupported)
+    else:
+        it "rejects unchecked malformed internal text on output and legacy input":
+            val malformed = bytes_to_text([255u8])
+            match io_external_from_internal(malformed, utf8_format()):
+                case Err(TextIoError.Codec(error)):
+                    expect(error.kind).to_equal(CodecErrorKind.InvalidUtf8)
+                    expect(error.byte_offset).to_equal(0)
+                case _: assert(false)
+            match io_legacy_utf8([65u8, 255u8]):
+                case Err(message): expect(message).to_contain("external text at byte 1:")
+                case Ok(value): assert(false)
+            expect(text_to_utf8_bytes(io_legacy_utf8([65u8, 0u8]).unwrap())).to_equal([65, 0])
 
     it "renders existing error variants without changing nested transport details":
         val cause = IoError(kind: IoErrorKind.ConnectionReset, message: "reset", source: nil)

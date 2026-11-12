@@ -1,7 +1,24 @@
-"""Actual bounded POSIX pipe tests. Native fixture must be supplied; UNRUN."""
+"""Actual bounded pipe tests for the SOSIX checked stdin session.
+
+## Compatibility and limitations
+
+Every example pipes declared bytes into the native
+`SIMPLE_STDIN_SESSION_FIXTURE` child through a POSIX `/bin/sh` `printf`
+pipeline and observes raw fd0 behavior (borrowed reads after logical close,
+provider error on a closed descriptor). The fixture binary is built only by
+the admitted POSIX compiler campaign, and the fd0 observations have no honest
+Windows provider, so all examples are skipped on Windows with an explicit
+reason. On POSIX hosts the native fixture remains required: a missing fixture
+is a FAILURE, never a skipped or fabricated native pass.
+"""
 use std.spec
+use std.nogc_sync_mut.env.platform.{is_windows}
+use std.nogc_sync_mut.spec.{skip}
 use std.nogc_sync_mut.io_runtime.{env_get_nullable}
 use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+use std.nogc_sync_mut.io.text_session.{utf8_text_session_codec, text_session_codec}
+use std.common.encoding.external_text.{Encoding, TextByteOrder, BomPolicy}
+use std.nogc_async_mut.sosix.stdin.{sosix_stdin_utf8}
 
 fn check_stdin_session(mode: text, script: text):
     val fixture = env_get_nullable("SIMPLE_STDIN_SESSION_FIXTURE").unwrap()
@@ -11,39 +28,82 @@ fn check_stdin_session(mode: text, script: text):
     expect(result.0).to_equal("stdin-session-ok\n")
     expect(result.1).to_equal("")
 
-describe "SOSIX checked stdin on an actual pipe":
-    it "preserves UTF8 NUL and split supplementary scalar":
-        check_stdin_session("utf8", "printf '\\101\\000\\360\\237\\231\\202' | \"$1\" \"$2\"")
-    it "decodes UTF16LE BOM and surrogate pair":
-        check_stdin_session("utf16le", "printf '\\377\\376\\075\\330\\102\\336\\000\\000\\132\\000' | \"$1\" \"$2\"")
-    it "decodes UTF16BE BOM and surrogate pair":
-        check_stdin_session("utf16be", "printf '\\376\\377\\330\\075\\336\\102\\000\\000\\000\\132' | \"$1\" \"$2\"")
-    it "preserves a requested BOM as scalar text":
-        check_stdin_session("preserve", "printf '\\357\\273\\277Z' | \"$1\" \"$2\"")
-    it "rejects forbidden BOM without consuming the following scalar":
-        check_stdin_session("forbid", "printf '\\357\\273\\277Z' | \"$1\" \"$2\"")
-    it "reports missing UTF16 BOM":
-        check_stdin_session("missing-bom", "printf '\\101\\000' | \"$1\" \"$2\"")
-    it "sticks to malformed UTF8 error without another read":
-        check_stdin_session("invalid", "printf '\\377Z' | \"$1\" \"$2\"")
-    it "rejects truncated UTF8 only when EOF is observed":
-        check_stdin_session("truncated", "printf '\\360\\237' | \"$1\" \"$2\"")
-    it "rejects truncated UTF16 at EOF":
-        check_stdin_session("truncated16", "printf '\\075\\330' | \"$1\" \"$2\"")
-    it "rejects invalid read sizes before IO and never closes borrowed stdin":
-        check_stdin_session("closed", "printf 'AB' | \"$1\" \"$2\"")
-    it "distinguishes empty EOF from an incomplete scalar":
-        check_stdin_session("empty", "printf '' | \"$1\" \"$2\"")
-    it "rejects unknown formats and invalid limits before consuming input":
-        check_stdin_session("metadata", "printf 'Z' | \"$1\" \"$2\"")
+fn sosix_stdin_session_unsupported() -> text:
+    if is_windows():
+        return "Windows host: SIMPLE_STDIN_SESSION_FIXTURE is a native POSIX fixture (built only by the admitted POSIX compiler campaign) and the examples pipe bytes through /bin/sh printf pipelines with raw fd0 observations; no honest Windows stdin-session provider exists"
+    ""
 
-    it "decodes UTF32LE with immutable BOM and endian policy":
-        check_stdin_session("utf32le", "printf '\\377\\376\\000\\000\\102\\366\\001\\000\\000\\000\\000\\000' | \"$1\" \"$2\"")
-    it "decodes UTF32BE with immutable BOM and endian policy":
-        check_stdin_session("utf32be", "printf '\\000\\000\\376\\377\\000\\001\\366\\102\\000\\000\\000\\000' | \"$1\" \"$2\"")
-    it "preserves a typed sticky provider failure for closed fd0":
-        check_stdin_session("provider-error", "exec 0<&-; exec \"$1\" \"$2\"")
-    it "shares logical close across ordinary class references":
-        check_stdin_session("alias-close", "printf 'Z' | \"$1\" \"$2\"")
-    it "cancels pending input without finishing or closing the descriptor":
-        check_stdin_session("cancel-pending", "printf '\\360\\237\\231\\202' | \"$1\" \"$2\"")
+describe "SOSIX checked stdin on an actual pipe":
+    it "admits stdin session metadata and reports the host provider capability honestly":
+        # Runs on every host without the native fixture: pins the codec
+        # metadata oracles the fixture modes rely on (invalid limits and
+        # unknown/byte-order-less encodings are rejected before any IO) and
+        # records the honest SOSIX capability for the host's fd0 provider.
+        expect(utf8_text_session_codec(0, 1).is_err()).to_equal(true)
+        expect(utf8_text_session_codec(16777217, 1).is_err()).to_equal(true)
+        expect(text_session_codec(Encoding.Unknown("guess"), TextByteOrder.NotApplicable, BomPolicy.Preserve, Encoding.Utf8, TextByteOrder.NotApplicable, BomPolicy.Preserve, 8, 8).is_err()).to_equal(true)
+        expect(text_session_codec(Encoding.Utf16, TextByteOrder.NotApplicable, BomPolicy.Preserve, Encoding.Utf8, TextByteOrder.NotApplicable, BomPolicy.Preserve, 8, 8).is_err()).to_equal(true)
+        val session = sosix_stdin_utf8(16)
+        if is_windows():
+            # Honest capability: the checked byte provider behind fd0 is not
+            # admitted on Windows; the pipe examples below stay qualified on
+            # POSIX hosts instead of failing on a missing fixture.
+            expect(session.is_err()).to_equal(true)
+        else:
+            expect(session.is_ok()).to_equal(true)
+
+    val unsupported = sosix_stdin_session_unsupported()
+    if unsupported != "":
+        skip("preserves UTF8 NUL and split supplementary scalar", unsupported)
+        skip("decodes UTF16LE BOM and surrogate pair", unsupported)
+        skip("decodes UTF16BE BOM and surrogate pair", unsupported)
+        skip("preserves a requested BOM as scalar text", unsupported)
+        skip("rejects forbidden BOM without consuming the following scalar", unsupported)
+        skip("reports missing UTF16 BOM", unsupported)
+        skip("sticks to malformed UTF8 error without another read", unsupported)
+        skip("rejects truncated UTF8 only when EOF is observed", unsupported)
+        skip("rejects truncated UTF16 at EOF", unsupported)
+        skip("rejects invalid read sizes before IO and never closes borrowed stdin", unsupported)
+        skip("distinguishes empty EOF from an incomplete scalar", unsupported)
+        skip("rejects unknown formats and invalid limits before consuming input", unsupported)
+        skip("decodes UTF32LE with immutable BOM and endian policy", unsupported)
+        skip("decodes UTF32BE with immutable BOM and endian policy", unsupported)
+        skip("preserves a typed sticky provider failure for closed fd0", unsupported)
+        skip("shares logical close across ordinary class references", unsupported)
+        skip("cancels pending input without finishing or closing the descriptor", unsupported)
+    else:
+        it "preserves UTF8 NUL and split supplementary scalar":
+            check_stdin_session("utf8", "printf '\\101\\000\\360\\237\\231\\202' | \"$1\" \"$2\"")
+        it "decodes UTF16LE BOM and surrogate pair":
+            check_stdin_session("utf16le", "printf '\\377\\376\\075\\330\\102\\336\\000\\000\\132\\000' | \"$1\" \"$2\"")
+        it "decodes UTF16BE BOM and surrogate pair":
+            check_stdin_session("utf16be", "printf '\\376\\377\\330\\075\\336\\102\\000\\000\\000\\132' | \"$1\" \"$2\"")
+        it "preserves a requested BOM as scalar text":
+            check_stdin_session("preserve", "printf '\\357\\273\\277Z' | \"$1\" \"$2\"")
+        it "rejects forbidden BOM without consuming the following scalar":
+            check_stdin_session("forbid", "printf '\\357\\273\\277Z' | \"$1\" \"$2\"")
+        it "reports missing UTF16 BOM":
+            check_stdin_session("missing-bom", "printf '\\101\\000' | \"$1\" \"$2\"")
+        it "sticks to malformed UTF8 error without another read":
+            check_stdin_session("invalid", "printf '\\377Z' | \"$1\" \"$2\"")
+        it "rejects truncated UTF8 only when EOF is observed":
+            check_stdin_session("truncated", "printf '\\360\\237' | \"$1\" \"$2\"")
+        it "rejects truncated UTF16 at EOF":
+            check_stdin_session("truncated16", "printf '\\075\\330' | \"$1\" \"$2\"")
+        it "rejects invalid read sizes before IO and never closes borrowed stdin":
+            check_stdin_session("closed", "printf 'AB' | \"$1\" \"$2\"")
+        it "distinguishes empty EOF from an incomplete scalar":
+            check_stdin_session("empty", "printf '' | \"$1\" \"$2\"")
+        it "rejects unknown formats and invalid limits before consuming input":
+            check_stdin_session("metadata", "printf 'Z' | \"$1\" \"$2\"")
+
+        it "decodes UTF32LE with immutable BOM and endian policy":
+            check_stdin_session("utf32le", "printf '\\377\\376\\000\\000\\102\\366\\001\\000\\000\\000\\000\\000' | \"$1\" \"$2\"")
+        it "decodes UTF32BE with immutable BOM and endian policy":
+            check_stdin_session("utf32be", "printf '\\000\\000\\376\\377\\000\\001\\366\\102\\000\\000\\000\\000' | \"$1\" \"$2\"")
+        it "preserves a typed sticky provider failure for closed fd0":
+            check_stdin_session("provider-error", "exec 0<&-; exec \"$1\" \"$2\"")
+        it "shares logical close across ordinary class references":
+            check_stdin_session("alias-close", "printf 'Z' | \"$1\" \"$2\"")
+        it "cancels pending input without finishing or closing the descriptor":
+            check_stdin_session("cancel-pending", "printf '\\360\\237\\231\\202' | \"$1\" \"$2\"")
