@@ -51,10 +51,19 @@ supplement is scanned, and ELF weak semantics let the C copies lose.
 
 - `linker.rs`, Windows `is_native_all` branch: when the bundle is
   core-c-bootstrap, build the supplement first, read both defined-symbol sets
-  (fail closed when either is empty), and add every symbol defined by both
-  archives to the retention roots, so the native_all members are extracted
-  before the supplement is read. Roots go through a `@native_all_roots.rsp`
-  response file (hundreds of `-Wl,-u,` exceed the 32 KiB command line).
+  (fail closed when either is empty), find the native_all MEMBERS that define
+  a symbol both archives define (`nm -A`), extract them with `llvm-ar x` and
+  list them as plain objects ahead of both archives. Objects are defined the
+  moment they are read, so no member-extraction order can override them.
+  First attempt (PR #8436) only added the shared symbols as `-u` roots; the
+  rebuilt Stage 2 still resolved 181 of them (rt_utf8_validate, rt_atexit_*,
+  rt_io_udp_*, ...) into the supplement, because lld-COFF handles `/include`
+  after the input-file resolution loop, by which time runtime_native.obj
+  (fetched for a C-only reference) had already supplied the first definition.
+  lldb on the rejected binary: `rt_core_report_invalid_array_once` <-
+  `splc_utf8_array_to_bytes` <- `rt_utf8_validate` (C copy) <-
+  `text_bytes.utf8_bytes_valid` <- `external_text_decode` <- host_limits file
+  read at native-build startup. The roots stay (harmless) in a response file.
 - `runtime_native.c`: `rt_text_is_ascii` and `rt_file_list_dir` read the
   handle through `rt_string_len`/`rt_string_data` (`core_text_dup_abi`),
   which resolve to whichever runtime owns strings in the link.

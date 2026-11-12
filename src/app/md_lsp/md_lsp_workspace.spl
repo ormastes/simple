@@ -1,97 +1,87 @@
 # Document store for the Simple language markdown LSP server.
-# Manages open documents and their cached ASTs.
+# Manages open documents, their cached ASTs, and the forward link graph used
+# to invalidate only the documents an edit actually touches.
 
 use std.common.markdown
 use std.common.markdown.block.{MarkdownBlock}
+use std.editor.services.md_diagnostics.{MdLinkContext, md_link_targets, md_wiki_inbound_key}
+use std.editor.services.md_wiki_index.{MdWikiDocument, md_wiki_document}
 use app.md_lsp.md_lsp_markdown.{split_lines, parse_blocks, extract_headings}
 
 struct MdDocument:
     uri: text
+    path: text          # workspace-relative, "/"-separated
     content: text
     version: i64
     ast: [MarkdownBlock]
     headings: [(i64, text)]
+    targets: [text]     # outgoing edges: resolved relative paths + "wiki:<slug>"
 
 class MdWorkspace:
     documents: [MdDocument]
+    root_path: text
+    graph_complete: bool
 
 impl MdWorkspace:
     static fn new() -> MdWorkspace:
-        MdWorkspace(documents: [])
+        MdWorkspace(documents: [], root_path: "", graph_complete: false)
 
-    me open_document(uri: text, content: text, version: i64):
+    # Workspace root from `initialize.rootUri` (already uri-decoded path).
+    me set_root(path: text):
+        var p = path
+        while p.ends_with("/"):
+            p = p.slice(0, p.len() - 1)
+        self.root_path = p
+
+    # The workspace graph only ever holds OPEN documents here; a caller that
+    # has indexed the whole vault declares completeness so orphan/unresolved
+    # wiki codes may be reported. Until then they are withheld.
+    me mark_graph_complete():
+        self.graph_complete = true
+
+    fn relative_path(uri: text) -> text:
+        var p = if uri.starts_with("file://") then uri.slice(7, uri.len()) else: uri
+        if self.root_path != "" and p.starts_with(self.root_path + "/"):
+            p = p.slice(self.root_path.len() + 1, p.len())
+        while p.starts_with("/"):
+            p = p.slice(1, p.len())
+        p
+
+    fn _build(uri: text, content: text, version: i64) -> MdDocument:
         val lines = split_lines(content)
         val ast = parse_blocks(lines)
-        val headings = extract_headings(ast)
-        val doc = MdDocument(
-            uri: uri,
-            content: content,
-            version: version,
-            ast: ast,
-            headings: headings
-        )
+        val path = self.relative_path(uri)
+        MdDocument(uri: uri, path: path, content: content, version: version, ast: ast,
+                   headings: extract_headings(ast), targets: md_link_targets(content, path))
+
+    fn _without(uri: text) -> [MdDocument]:
         var new_docs: [MdDocument] = []
-        var i = 0
-        var len = self.documents.length()
-        while i < len:
-            val existing = self.documents[i]
+        for existing in self.documents:
             if existing.uri != uri:
                 new_docs = new_docs.push(existing)
-            i = i + 1
-        new_docs = new_docs.push(doc)
+        new_docs
+
+    me open_document(uri: text, content: text, version: i64):
+        var new_docs = self._without(uri)
+        new_docs = new_docs.push(self._build(uri, content, version))
         self.documents = new_docs
 
     me update_document(uri: text, content: text, version: i64):
-        val lines = split_lines(content)
-        val ast = parse_blocks(lines)
-        val headings = extract_headings(ast)
-        val doc = MdDocument(
-            uri: uri,
-            content: content,
-            version: version,
-            ast: ast,
-            headings: headings
-        )
-        var new_docs: [MdDocument] = []
-        var i = 0
-        var len = self.documents.length()
-        while i < len:
-            val existing = self.documents[i]
-            if existing.uri != uri:
-                new_docs = new_docs.push(existing)
-            i = i + 1
-        new_docs = new_docs.push(doc)
-        self.documents = new_docs
+        self.open_document(uri, content, version)
 
     me close_document(uri: text):
-        var new_docs: [MdDocument] = []
-        var i = 0
-        var len = self.documents.length()
-        while i < len:
-            val existing = self.documents[i]
-            if existing.uri != uri:
-                new_docs = new_docs.push(existing)
-            i = i + 1
-        self.documents = new_docs
+        self.documents = self._without(uri)
 
     fn get_document(uri: text) -> MdDocument:
-        var i = 0
-        var len = self.documents.length()
-        while i < len:
-            val doc = self.documents[i]
+        for doc in self.documents:
             if doc.uri == uri:
                 return doc
-            i = i + 1
-        MdDocument(uri: "", content: "", version: 0, ast: [], headings: [])
+        MdDocument(uri: "", path: "", content: "", version: 0, ast: [], headings: [], targets: [])
 
     fn has_document(uri: text) -> bool:
-        var i = 0
-        var len = self.documents.length()
-        while i < len:
-            val doc = self.documents[i]
+        for doc in self.documents:
             if doc.uri == uri:
                 return true
-            i = i + 1
         false
 
     fn document_count() -> i64:
@@ -99,10 +89,32 @@ impl MdWorkspace:
 
     fn all_uris() -> [text]:
         var uris: [text] = []
-        var i = 0
-        var len = self.documents.length()
-        while i < len:
-            val doc = self.documents[i]
+        for doc in self.documents:
             uris = uris.push(doc.uri)
-            i = i + 1
         uris
+
+    # Cross-file facts for diagnosing `uri`, drawn from the open documents.
+    fn link_context(uri: text) -> MdLinkContext:
+        val me_doc = self.get_document(uri)
+        val inbound_key = md_wiki_inbound_key(me_doc.path)
+        var files: [text] = []
+        var wiki: [MdWikiDocument] = []
+        var has_inbound = false
+        for doc in self.documents:
+            files.push(doc.path)
+            wiki.push(md_wiki_document(doc.path, doc.content))
+            if doc.uri != uri and (doc.targets.contains(me_doc.path) or doc.targets.contains(inbound_key)):
+                has_inbound = true
+        MdLinkContext(existing_files: files, wiki_documents: wiki, graph_complete: self.graph_complete, has_inbound: has_inbound)
+
+    # Open documents that any of `targets` points at (by path or wiki key),
+    # excluding `except_uri`. These are the documents whose inbound-edge facts
+    # changed when the owner of `targets` was edited, opened or closed.
+    fn dependents(targets: [text], except_uri: text) -> [text]:
+        var out: [text] = []
+        for doc in self.documents:
+            if doc.uri == except_uri:
+                continue
+            if targets.contains(doc.path) or targets.contains(md_wiki_inbound_key(doc.path)):
+                out.push(doc.uri)
+        out

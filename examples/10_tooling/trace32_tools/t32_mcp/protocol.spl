@@ -11,7 +11,7 @@ use std.io_runtime.{env_get_opt, process_run}
 use .json_helpers.{
     Q, LB, RB, SB_L, SB_R,
     escape_json, js, jp, jo1, jo2, jo3, jo4,
-    jsonrpc_result, jsonrpc_error
+    jsonrpc_result, jsonrpc_error, t32_extract_field_raw
 }
 
 extern fn stdin_read_char() -> text
@@ -109,46 +109,15 @@ fn t32_has_method(msg: text, name: text) -> bool:
     return msg.contains("\"method\":\"" + name + "\"") or msg.contains("\"method\": \"" + name + "\"")
 
 fn t32_extract_request_id(msg: text) -> text:
-    # Extract numeric JSON-RPC id using only .contains() (avoids broken substring ==)
-    val prefix = "\"id\":"
-    val prefix_sp = "\"id\": "
-    var pfx = prefix
-    if msg.contains(prefix_sp):
-        pfx = prefix_sp
-    elif not msg.contains(prefix):
+    # JSON-RPC ids may be numbers OR strings ("id":"1"). The previous
+    # digit-probing loop only recognised numeric ids and echoed `"id":null`
+    # for every string id, so MCP clients could not correlate responses.
+    # Reuse the raw JSON field extractor, which preserves the value's own
+    # quoting (`"1"` stays `"1"`, `7` stays `7`).
+    val raw = t32_extract_field_raw(msg, "id")
+    if raw == "":
         return "null"
-    # Build id digit-by-digit using .contains() checks
-    var result = ""
-    var searching = true
-    while searching:
-        searching = false
-        var d = 0
-        while d <= 9:
-            val candidate = result + str(d)
-            val with_comma = pfx + candidate + ","
-            val with_close = pfx + candidate + "}"
-            val with_space = pfx + candidate + " "
-            if msg.contains(with_comma) or msg.contains(with_close) or msg.contains(with_space):
-                return candidate
-            # Check if candidate is a prefix of a longer number
-            var has_more = false
-            var e = 0
-            while e <= 9:
-                if msg.contains(pfx + candidate + str(e)):
-                    has_more = true
-                    break
-                e = e + 1
-            if has_more:
-                result = candidate
-                searching = true
-                break
-            d = d + 1
-    if result != "":
-        return result
-    # Check for "null" id
-    if msg.contains(pfx + "null"):
-        return "null"
-    return "null"
+    raw
 
 # --- JSON-RPC helpers (inlined) ---
 
@@ -671,3 +640,6 @@ fn t32_make_tool_schema(name: text, description: text) -> text:
         jp("annotations", annotations)
     )
     tool_obj
+
+export t32_validate_identifier, t32_is_all_digits, t32_is_hex_address, t32_has_shell_meta, t32_shell_escape
+export t32_make_tool_schema

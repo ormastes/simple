@@ -1,0 +1,177 @@
+"""
+## Purpose and audience
+
+Executable contract for `std.common.diagnostics.fix_transaction`: the
+revision-checked edit transaction behind every LSP codeAction apply
+(REQ-DIAG-011, Journeys D and F). A candidate is applied ONLY when, for every
+file it touches, the document version matches the candidate's required
+version, the batch source hash matches the active snapshot, the replacement
+spans are in bounds and non-overlapping, every expected-old-text precondition
+still holds, and every path stays inside the workspace root. Any failure
+applies ZERO edits and reports a typed status plus the unchanged content.
+Audience: diag-P2 (LSP wiring), diag-P6 (verification).
+"""
+# @cover src/lib/common/diagnostics/fix_transaction.spl
+
+use std.spec
+use std.common.diagnostics.diagnostic_v1.{FixConfidence}
+use std.common.diagnostics.span.{Span}
+use std.common.diagnostics.diagnostic_batch.{FixCandidate}
+use std.common.diagnostics.fix_transaction.{
+    ApplyStatus, DocumentSnapshot, EditTransaction, ApplyResult
+}
+
+val ROOT = "/w"
+val HASH7 = "xxh3:aa07"
+
+fn span_at(start: i64, end: i64) -> Span:
+    Span.new(start, end, 1, start + 1)
+
+fn doc(file: text, version: i64, hash: text, body: text) -> DocumentSnapshot:
+    DocumentSnapshot.new(file, version, hash, body)
+
+# Candidate computed against version 7: replace "val" with "var" at bytes 0..3.
+fn val_to_var(version: i64) -> FixCandidate:
+    FixCandidate.new("fx_var", "Change `val` to `var`", "assigned twice", FixConfidence.Safe, version)
+        .with_replacement("/w/a.spl", span_at(0, 3), "var", "val")
+
+fn tx_with_a(version: i64, hash: text, body: text) -> EditTransaction:
+    EditTransaction.new(ROOT, hash).with_document(doc("/w/a.spl", version, hash, body))
+
+# @manual_section: fix_transaction
+describe "Revision-checked edit transaction (REQ-DIAG-011)":
+    it "applies a candidate whose version, hash, bounds and expected text all match, reporting the new text":
+        # @req REQ-DIAG-011
+        # @capture(value): status + new document text
+        step("Snapshot version 7 and apply the version-7 candidate")
+        val result = tx_with_a(7, HASH7, "val x = 1\nx = 2\n").apply(val_to_var(7))
+        expect(result.status.name()).to_equal("applied")
+        expect(result.changed_files.join(",")).to_equal("/w/a.spl")
+        expect(result.text_of("/w/a.spl")).to_equal("var x = 1\nx = 2\n")
+
+    it "Journey D: a delayed version-7 candidate against a version-8 document mutates nothing and reports stale_version":
+        # @req REQ-DIAG-011
+        step("Document advanced to version 8 with a new hash; the stale reply still names version 7")
+        val body = "val x = 1\nx = 2\n# edited\n"
+        val result = EditTransaction.new(ROOT, "xxh3:bb08")
+            .with_document(doc("/w/a.spl", 8, "xxh3:bb08", body))
+            .apply(val_to_var(7))
+        expect(result.status.name()).to_equal("stale_version")
+        expect(result.applied()).to_equal(false)
+        expect(result.changed_files.len()).to_equal(0)
+        expect(result.text_of("/w/a.spl")).to_equal(body)
+        expect(result.reason.contains("7")).to_equal(true)
+        expect(result.reason.contains("8")).to_equal(true)
+
+    it "refuses with stale_hash when the version matches but the batch source hash does not":
+        # @req REQ-DIAG-011
+        val body = "val x = 1\n"
+        step("Same version 7 but the active snapshot hash differs from the batch hash")
+        val result = EditTransaction.new(ROOT, HASH7)
+            .with_document(doc("/w/a.spl", 7, "xxh3:deadbeef", body))
+            .apply(val_to_var(7))
+        expect(result.status.name()).to_equal("stale_hash")
+        expect(result.text_of("/w/a.spl")).to_equal(body)
+
+    it "refuses with precondition_mismatch when the expected old text is no longer at the span":
+        # @req REQ-DIAG-011
+        val body = "let x = 1\n"
+        step("The span now holds `let`, the candidate expected `val`")
+        val result = tx_with_a(7, HASH7, body).apply(val_to_var(7))
+        expect(result.status.name()).to_equal("precondition_mismatch")
+        expect(result.reason.contains("val")).to_equal(true)
+        expect(result.reason.contains("let")).to_equal(true)
+        expect(result.text_of("/w/a.spl")).to_equal(body)
+
+    it "Journey F: overlapping replacements apply zero edits and report overlapping_edits":
+        # @req REQ-DIAG-011
+        val body = "abcdef\n"
+        val overlapping = FixCandidate.new("fx_ov", "two edits", "", FixConfidence.Likely, 7)
+            .with_replacement("/w/a.spl", span_at(0, 3), "XYZ", "abc")
+            .with_replacement("/w/a.spl", span_at(2, 5), "123", "cde")
+        step("Apply a candidate whose two spans share byte 2")
+        val result = tx_with_a(7, HASH7, body).apply(overlapping)
+        expect(result.status.name()).to_equal("overlapping_edits")
+        expect(result.text_of("/w/a.spl")).to_equal(body)
+
+    it "refuses an out-of-bounds span with out_of_bounds and keeps the content hash unchanged":
+        # @req REQ-DIAG-011
+        val body = "ab\n"
+        val oob = FixCandidate.new("fx_oob", "past end", "", FixConfidence.Safe, 7)
+            .with_replacement("/w/a.spl", span_at(1, 9), "", "b\n")
+        val result = tx_with_a(7, HASH7, body).apply(oob)
+        expect(result.status.name()).to_equal("out_of_bounds")
+        expect(result.hash_of("/w/a.spl")).to_equal(HASH7)
+        expect(result.text_of("/w/a.spl")).to_equal(body)
+
+    it "Journey F: a replacement path escaping the workspace root is refused as path_denied":
+        # @req REQ-DIAG-011
+        val body = "val x\n"
+        val escape = FixCandidate.new("fx_esc", "escape", "", FixConfidence.Safe, 7)
+            .with_replacement("/w/a.spl", span_at(0, 3), "var", "val")
+            .with_replacement("/w/../etc/passwd", span_at(0, 0), "x", "")
+        step("Apply a two-file candidate whose second path leaves /w")
+        val result = tx_with_a(7, HASH7, body).apply(escape)
+        expect(result.status.name()).to_equal("path_denied")
+        expect(result.reason.contains("/w/../etc/passwd")).to_equal(true)
+        step("The in-root file was NOT partially edited")
+        expect(result.text_of("/w/a.spl")).to_equal(body)
+
+    it "refuses a disabled candidate with disabled_candidate and echoes its disabled reason":
+        # @req REQ-DIAG-011
+        val body = "val x\n"
+        val off = val_to_var(7).disabled("parser status partial_recovery: insufficient evidence")
+        val result = tx_with_a(7, HASH7, body).apply(off)
+        expect(result.status.name()).to_equal("disabled_candidate")
+        expect(result.reason.contains("partial_recovery")).to_equal(true)
+        expect(result.text_of("/w/a.spl")).to_equal(body)
+
+    it "refuses with unknown_document when a touched file has no snapshot in the transaction":
+        # @req REQ-DIAG-011
+        val body = "val x\n"
+        val two = FixCandidate.new("fx_two", "two files", "", FixConfidence.Likely, 7)
+            .with_replacement("/w/a.spl", span_at(0, 3), "var", "val")
+            .with_replacement("/w/b.spl", span_at(0, 3), "var", "val")
+        step("Only a.spl is snapshotted")
+        val result = tx_with_a(7, HASH7, body).apply(two)
+        expect(result.status.name()).to_equal("unknown_document")
+        expect(result.reason.contains("/w/b.spl")).to_equal(true)
+        expect(result.text_of("/w/a.spl")).to_equal(body)
+
+    it "applies a multi-file, multi-span candidate atomically with zero-width insertions and descending-safe offsets":
+        # @req REQ-DIAG-011
+        # @capture(value): both resulting documents
+        val a_body = "fn f():\n    pass\n"
+        val b_body = "f()\n"
+        val multi = FixCandidate.new("fx_multi", "rename f to g", "", FixConfidence.Likely, 7)
+            .with_replacement("/w/a.spl", span_at(3, 4), "g", "f")
+            .with_replacement("/w/a.spl", span_at(17, 17), "# renamed\n", "")
+            .with_replacement("/w/b.spl", span_at(0, 1), "g", "f")
+        step("Snapshot both files at version 7 and apply")
+        val result = EditTransaction.new(ROOT, HASH7)
+            .with_document(doc("/w/a.spl", 7, HASH7, a_body))
+            .with_document(doc("/w/b.spl", 7, HASH7, b_body))
+            .apply(multi)
+        expect(result.status.name()).to_equal("applied")
+        expect(result.text_of("/w/a.spl")).to_equal("fn g():\n    pass\n# renamed\n")
+        expect(result.text_of("/w/b.spl")).to_equal("g()\n")
+        expect(result.changed_files.join(",")).to_equal("/w/a.spl,/w/b.spl")
+
+    it "names every refusal status distinctly and never as applied":
+        # @req REQ-DIAG-011
+        val statuses = [ApplyStatus.Applied, ApplyStatus.StaleVersion, ApplyStatus.StaleHash,
+                        ApplyStatus.PreconditionMismatch, ApplyStatus.OverlappingEdits,
+                        ApplyStatus.OutOfBounds, ApplyStatus.PathDenied,
+                        ApplyStatus.DisabledCandidate, ApplyStatus.UnknownDocument]
+        var names: [text] = []
+        for s in statuses:
+            names.push(s.name())
+        # @capture(table): status -> name
+        expect(names.join(",")).to_equal("applied,stale_version,stale_hash,precondition_mismatch,overlapping_edits,out_of_bounds,path_denied,disabled_candidate,unknown_document")
+        var refusals = 0
+        var i = 1
+        while i < statuses.len():
+            if not statuses[i].is_applied():
+                refusals = refusals + 1
+            i = i + 1
+        expect(refusals).to_equal(8)

@@ -16,7 +16,7 @@
 ## Overview
 
 Guards against T32 MCP server runtime failures:
-- Bug 11: `rt_time_ms()` missing in native runtime — replaced with
+- Bug 11: `current_time_ms()` missing in native runtime — replaced with
   `rt_time_now_unix_micros() / 1000` wrapper
 - Bug 12: Process hangs silently — debug mode default flipped to ON
 - Bug 13: `rt_file_append_text("/proc/self/fd/1")` fails for stdout —
@@ -35,14 +35,14 @@ use std.spec.step
 # Import the wrapper function from job_manager (tests the fix)
 use std.spec.step
 
-use app.mcp_t32.job_manager.{rt_time_ms}
+use std.nogc_sync_mut.io.time_ops.{current_time_ms}
 
 
 # Extern fns that T32 MCP modules depend on — declare here to verify they
 # resolve at load time.  If any is missing from native_all the spec fails
 # to load, which is the point.
 extern fn rt_time_now_unix_micros() -> i64
-extern fn stdout_write(data: text) -> i64
+# The protocol writes replies with `print_raw` (protocol.spl) and flushes via rt_stdout_flush.
 extern fn rt_stdout_flush() -> i64?
 extern fn stderr_write(data: text) -> i64
 extern fn stderr_flush() -> i64
@@ -86,14 +86,14 @@ describe "Bug 11 — rt_time_ms native availability":
         it "returns a positive value":
             # @req REQ-SSPEC-SYSTEM
             step("returns a positive value")
-            val ms = rt_time_ms()
+            val ms = current_time_ms()
             expect(ms > 0).to_equal(true)
 
         it "is roughly micros / 1000":
             # @req REQ-SSPEC-SYSTEM
             step("is roughly micros / 1000")
             val micros = rt_time_now_unix_micros()
-            val ms = rt_time_ms()
+            val ms = current_time_ms()
             # Should be within 1 second of each other
             val diff = ms - (micros / 1000)
             expect(diff > -1000).to_equal(true)
@@ -118,14 +118,16 @@ describe "Bug 12 — debug mode defaults to ON":
 # Bug 13: stdout_write — must NOT use rt_file_append_text for stdout
 # ============================================================================
 
-describe "Bug 13 — stdout_write extern exists":
+describe "Bug 13 — stdout reply path is live (print_raw + rt_stdout_flush)":
 
-    context "stdout_write extern fn":
-        it "is callable and returns non-negative":
+    context "stdout writer used by t32_write_stdout_message":
+        it "accepts an empty payload and flushes without error":
             # @req REQ-SSPEC-SYSTEM
-            step("is callable and returns non-negative")
+            step("accepts an empty payload and flushes without error")
             # Writing an empty string should succeed (return >= 0)
-            val result = stdout_write("")
+            print_raw("")
+            val flushed = rt_stdout_flush()
+            val result = flushed ?? 0
             expect(result >= 0).to_equal(true)
 
     context "rt_stdout_flush extern fn":
@@ -164,7 +166,7 @@ describe "T32 MCP extern fn guard — prevents missing-function bugs":
             expect(home.len() >= 0).to_equal(true)
 
         it "rt_env_cwd exists":
-            val cwd = io_runtime_cwd()
+            val cwd = rt_env_cwd() ?? ""
             expect(cwd.len() > 0).to_equal(true)
 
     context "file I/O functions":
@@ -193,7 +195,7 @@ describe "T32 MCP extern fn guard — prevents missing-function bugs":
         it "rt_process_run exists":
             # @req REQ-SSPEC-SYSTEM
             step("rt_process_run exists")
-            val (stdout, stderr, code) = rt_process_run("/bin/echo", ["guard_test"])
+            val (stdout, stderr, code) = rt_process_run("sh", ["-c", "echo guard_test"])
             expect(code).to_equal(0)
             expect(stdout).to_contain("guard_test")
 
