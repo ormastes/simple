@@ -788,10 +788,17 @@ impl HirLowering:
         val fld: ParserField = f
         val fld_type: Type = fld.type_
         val type_ = self.lower_type(fld_type)
-        self.lower_field_with_type(fld, type_)
+        self.lower_field_with_type(fld, type_, true)
 
-    me lower_field_with_type(fld: ParserField, type_: HirType) -> HirField:
-        val symbol = self.symbols.define(fld.name, SymbolKind.Field, Some(type_), fld.span, fld.visibility, false, nil)
+    me lower_field_with_type(fld: ParserField, type_: HirType, bind_lexical: bool) -> HirField:
+        # Struct/class fields bind inside their own pushed Class scope. Enum
+        # struct-variant payload fields have no such scope (the variant name
+        # itself must stay module-visible), so they pass bind_lexical=false:
+        # a payload field is never a legal bare reference, and binding it
+        # shadowed same-named callables for every body lowered after the enum
+        # (UIEvent.MouseEvent(button:) turned `button(...)` in app.office
+        # class methods into a Field callee with no proven MIR call origin).
+        val symbol = self.symbols.define_with_binding(fld.name, SymbolKind.Field, Some(type_), fld.span, fld.visibility, false, nil, bind_lexical)
 
         # Lower default without closures to avoid bootstrap SSA issues.
         # `ParserField.default` is a DESUGARED plain Expr field gated by `has_default`
@@ -941,7 +948,7 @@ impl HirLowering:
                 for f in fields:
                     val fld: ParserField = f
                     val lowered_type = self.lower_variant_declared_type(fld.type_, owner_module, project_imported_payloads)
-                    hir_fields = hir_fields.push(self.lower_field_with_type(fld, lowered_type))
+                    hir_fields = hir_fields.push(self.lower_field_with_type(fld, lowered_type, false))
                 kind = HirVariantKind.Struct(hir_fields)
 
         var discriminant = HirExpr(kind: HirExprKind.NilLit, has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: v.span), span: v.span)
