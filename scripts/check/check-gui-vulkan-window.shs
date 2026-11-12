@@ -136,26 +136,69 @@ trap cleanup EXIT INT TERM
 
     # The showcase renders via Vulkan and writes SHOWCASE_PPM BEFORE it opens the
     # winit window, so the Vulkan-rendered frame is captured even if winit is
-    # unavailable in this binary. Give the present loop a moment, then try to
-    # capture the live X window from the PRIVATE Xvfb root.
+    # unavailable in this binary.
+    #
+    # 2026-11-12 (gui_vulkan_window_blank_wsi_capture): the capture loop used
+    # to start xwd ~2s after OFFSCREEN_PPM appeared, which is written BEFORE
+    # the winit window opens -- so the capture could run before the window
+    # mapped and before its first present reached the Xvfb root pixmap (the
+    # bug record's "capture reading before the first present" suspect). Wait
+    # for the window to actually map on the PRIVATE display first (xwininfo
+    # is optional; without it the old timing is kept), then prefer capturing
+    # the mapped window by id over the whole root, and record honestly when
+    # the app exited before ever mapping a window -- a distinct failure from
+    # a mapped-but-blank window surface (blank_wsi).
+    win_id=""
+    if have xwininfo; then
+        map_waited=0
+        while [ "$map_waited" -lt 30 ]; do
+            win_id=$(xwininfo -display "$DISPLAY" -root -children 2>/dev/null \
+                | sed -n 's/^[[:space:]][[:space:]]*\(0x[0-9a-fA-F]*\).*/\1/p' \
+                | head -n 1 || true)
+            [ -n "$win_id" ] && break
+            kill -0 "$app_pid" 2>/dev/null || break
+            sleep 1
+            map_waited=$((map_waited + 1))
+        done
+        echo "window_mapped_wait_secs=$map_waited"
+        echo "window_id=$win_id"
+    fi
+
     capture_attempt=1
     last_capture_attempt=0
     win_colors=0
+    app_alive=1
     while [ "$capture_attempt" -le 10 ]; do
         last_capture_attempt=$capture_attempt
         sleep 2
-        if xwd -display "$DISPLAY" -root -out "$WORK_DIR/root.xwd" 2>/dev/null; then
-            convert "$WORK_DIR/root.xwd" "$WIN_PNG" 2>/dev/null || true
-            convert "$WORK_DIR/root.xwd" "$WIN_PPM" 2>/dev/null || true
-            rm -f "$WORK_DIR/root.xwd"
-            if [ -f "$WIN_PPM" ]; then
-                win_colors=$(convert "$WIN_PPM" -format "%k" info: 2>/dev/null || echo 0)
-                [ "${win_colors:-0}" -ge 3 ] && break
+        kill -0 "$app_pid" 2>/dev/null || app_alive=0
+        # Prefer the mapped winit window; fall back to the root pixmap.
+        capture_root=1
+        if [ -n "$win_id" ]; then
+            if xwd -display "$DISPLAY" -id "$win_id" -out "$WORK_DIR/win.xwd" 2>/dev/null; then
+                convert "$WORK_DIR/win.xwd" "$WIN_PNG" 2>/dev/null || true
+                convert "$WORK_DIR/win.xwd" "$WIN_PPM" 2>/dev/null || true
+                rm -f "$WORK_DIR/win.xwd"
+                capture_root=0
             fi
         fi
+        if [ "$capture_root" -eq 1 ]; then
+            if xwd -display "$DISPLAY" -root -out "$WORK_DIR/root.xwd" 2>/dev/null; then
+                convert "$WORK_DIR/root.xwd" "$WIN_PNG" 2>/dev/null || true
+                convert "$WORK_DIR/root.xwd" "$WIN_PPM" 2>/dev/null || true
+                rm -f "$WORK_DIR/root.xwd"
+            fi
+        fi
+        if [ -f "$WIN_PPM" ]; then
+            win_colors=$(convert "$WIN_PPM" -format "%k" info: 2>/dev/null || echo 0)
+            [ "${win_colors:-0}" -ge 3 ] && break
+        fi
+        # No point retrying once the app is gone and never mapped a window.
+        [ "$app_alive" -eq 0 ] && [ -z "$win_id" ] && break
         capture_attempt=$((capture_attempt + 1))
     done
     echo "window_capture_attempts=$last_capture_attempt"
+    echo "app_alive_at_last_capture=$app_alive"
 
     cleanup; app_pid=""; vfb_pid=""
 
@@ -176,11 +219,16 @@ trap cleanup EXIT INT TERM
     #   unavailable_no_winit — SIMPLE_BIN lacks the rt_winit runtime (seed/deploy)
     #   blank_wsi            — window mapped but its GPU/WSI surface is not
     #                          reflected in the Xvfb root pixmap (not capturable)
+    #   app_exited_no_window — the app process ended before mapping any window
+    #                          on the private display, so the present path never
+    #                          ran (distinct from a mapped-but-blank surface)
     win_status=blank_wsi
     if grep -aq 'unknown extern function: rt_winit' "$APP_LOG" 2>/dev/null; then
         win_status=unavailable_no_winit
     elif [ "${win_colors:-0}" -ge 3 ]; then
         win_status=captured
+    elif [ "$app_alive" -eq 0 ] && [ -z "$win_id" ]; then
+        win_status=app_exited_no_window
     fi
     echo "window_capture_status=$win_status"
 

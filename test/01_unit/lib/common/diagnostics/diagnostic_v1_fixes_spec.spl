@@ -1,0 +1,106 @@
+"""
+## Purpose and audience
+
+Executable contract for the additive DiagnosticV1 extension (plan §5, P0):
+lifecycle fields, multi-fix `fixes[]` of DiagnosticFix (id, title, rank,
+confidence, applicability, replacements, revision preconditions) built from
+the existing ranked `FixCandidate`s, and the legacy `fix` alias that points at
+the first Safe/Likely fix. JSON emission stays byte-compatible for a
+diagnostic that uses none of the new fields. Audience: CLI JSON, LSP and
+editor adapters.
+"""
+# @cover src/lib/common/diagnostics/diagnostic_v1.spl
+# @cover src/lib/common/diagnostics/fix_ranking.spl
+
+use std.spec
+use std.common.diagnostics.span.{Span}
+use std.common.diagnostics.diagnostic_v1.{
+    FixConfidence, FixApplicability, DiagnosticFix, DiagnosticLifecycle, DiagnosticV1
+}
+use std.common.diagnostics.diagnostic_batch.{FixCandidate}
+use std.common.diagnostics.fix_ranking.{diagnostic_fixes_from_candidates}
+use std.common.json.parser.{json_parse}
+use std.common.json.array_ops.{json_array_get, json_array_length}
+use std.common.json.object_ops.{json_object_get, json_object_has}
+use std.common.string_core.{char_from_code}
+
+fn span_at(start: i64, end: i64) -> Span:
+    Span.new(start, end, 1, start + 1)
+
+fn sample_fixes() -> [DiagnosticFix]:
+    val uncertain = FixCandidate.new("f_unc", "cast", "unchecked", FixConfidence.Uncertain, 3)
+        .with_replacement("a.spl", span_at(0, 1), "y", "x")
+    val likely = FixCandidate.new("f_lik", "use unit", "rename keyword", FixConfidence.Likely, 3)
+        .with_replacement("a.spl", span_at(0, 7), "unit", "newunit")
+    diagnostic_fixes_from_candidates([uncertain, likely])
+
+# @manual_section: diagnostic_v1_fixes
+describe "DiagnosticV1 fixes[] + legacy fix alias (plan §5)":
+    it "ranks candidates into fixes[] and aliases the first Safe/Likely one as fix":
+        # @req REQ-DIAG-POLICY-005
+        # @capture(value): fixes ids in rank order and the alias id
+        step("Convert two ranked candidates and attach them")
+        val d = DiagnosticV1.warning("SPL-UNIT-001", "newunit is deprecated").with_fixes(sample_fixes())
+        expect(d.fixes.len()).to_equal(2)
+        expect(d.fixes[0].id).to_equal("f_lik")
+        expect(d.fixes[0].rank).to_equal(1)
+        expect(d.fixes[1].rank).to_equal(2)
+        expect(d.fixes[0].applicability.name()).to_equal("review_required")
+        expect(d.fixes[0].preconditions.len()).to_equal(1)
+        expect(d.fixes[0].preconditions[0].expected_text).to_equal("newunit")
+        match d.fix:
+            Some(f): expect(f.id).to_equal("f_lik")
+            nil: expect("no alias").to_equal("alias f_lik")
+
+    it "leaves the legacy alias empty when only Uncertain fixes exist":
+        # @req REQ-DIAG-POLICY-005
+        val only = FixCandidate.new("f_unc", "cast", "unchecked", FixConfidence.Uncertain, 3)
+        val d = DiagnosticV1.warning("SPL-UNIT-002", "m").with_fixes(diagnostic_fixes_from_candidates([only]))
+        expect(d.has_fix()).to_equal(false)
+        expect(d.fixes.len()).to_equal(1)
+
+    it "round-trips fixes[], the legacy fix and lifecycle through JSON":
+        # @req REQ-DIAG-POLICY-005
+        step("Emit JSON with fixes and lifecycle, parse it back")
+        val life = DiagnosticLifecycle.new("2026-11-12", "2026-11-12", "2027-05-01", "2027.2",
+            "robust", "2026.11", "sha256:abc")
+        val d = DiagnosticV1.warning("SPL-UNIT-001", "newunit is deprecated")
+            .with_fixes(sample_fixes()).with_lifecycle(life)
+        val parsed = json_parse(d.to_json())
+        expect(parsed.?).to_equal(true)
+        val root = parsed.unwrap()
+        val fixes = json_object_get(root, "fixes").unwrap()
+        expect(json_array_length(fixes)).to_equal(2)
+        val first = json_array_get(fixes, 0).unwrap()
+        expect(jfield(first, "id")).to_equal("f_lik")
+        expect(jfield(first, "title")).to_equal("use unit")
+        expect(jfield(first, "applicability")).to_equal("review_required")
+        expect(jfield(first, "rank")).to_equal(1.0)
+        expect(json_array_length(json_object_get(first, "preconditions").unwrap())).to_equal(1)
+        val legacy = json_object_get(root, "fix").unwrap()
+        expect(jfield(legacy, "id")).to_equal("f_lik")
+        expect(json_object_has(legacy, "title")).to_equal(false)
+        val lc = json_object_get(root, "lifecycle").unwrap()
+        expect(jfield(lc, "policy_digest")).to_equal("sha256:abc")
+        expect(jfield(lc, "error_since_edition")).to_equal("2027.2")
+
+    it "emits byte-identical legacy JSON when no new field is used":
+        # @req REQ-DIAG-POLICY-005
+        val d = DiagnosticV1.error("E0001", "bad")
+            .with_fix(DiagnosticFix.new("x", "desc", FixConfidence.Safe))
+        val j = d.to_json()
+        expect(j.contains("\"fixes\"")).to_equal(false)
+        expect(j.contains("\"lifecycle\"")).to_equal(false)
+        expect(j.ends_with("\"fix\":" + char_lbrace() + "\"id\":\"x\",\"description\":\"desc\",\"replacements\":[],\"confidence\":\"safe\"" + char_rbrace() + char_rbrace()))
+            .to_equal(true)
+
+fn char_lbrace() -> text:
+    char_from_code(123)
+
+fn char_rbrace() -> text:
+    char_from_code(125)
+
+# Parsed JSON values are tagged (kind, value) tuples; return the value part.
+fn jfield(obj: any, key: text) -> any:
+    val tagged = json_object_get(obj, key).unwrap()
+    tagged[1]

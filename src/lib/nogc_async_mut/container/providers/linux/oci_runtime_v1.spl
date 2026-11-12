@@ -606,9 +606,9 @@ impl LinuxOciRuntimeProviderV1:
                 reason: "engine-probe-failed: " + run.1.trim())
         var health_args: [text] = ["info", "--format"]
         if self.engine == OCI_ENGINE_DOCKER:
-            health_args.push("{{.ServerVersion}}")
+            health_args.push("{{{{.ServerVersion}}}}")
         else:
-            health_args.push("{{.Host.Security.Rootless}}")
+            health_args.push("{{{{.Host.Security.Rootless}}}}")
         val health = process_run_timeout(self.engine, health_args, self.timeout_ms)
         if health.2.to_i64() != 0 or health.0.trim() == "" or
                 (self.engine == OCI_ENGINE_PODMAN and health.0.trim() != "true"):
@@ -1535,6 +1535,25 @@ impl LinuxOciRuntimeProviderV1:
         while self.intents.len() >= OCI_MAX_RETAINED_RECORDS:
             if not self._evict_oldest_destroyed(request.pod_uid, request.attempt):
                 return
+        # A bound record enters the cache together with its request binding.
+        # `_read_persisted_intent` skips the binding while the binding cache is
+        # full; caching the identity alone would make a bound tombstone look
+        # like a legacy unbound record (`intent-legacy-unbound`).
+        match self._read_bound_intent(request):
+            case Ok(bound):
+                val key = self._binding_key(request)
+                if not self.request_bindings.has(key):
+                    if self.request_bindings.len() >= OCI_MAX_RETAINED_RECORDS: return
+                    if bound.identity.operation_id != loaded.operation_id or
+                            bound.identity.native_id != loaded.native_id or
+                            bound.identity.phase != loaded.phase: return
+                    val digest = match linux_oci_request_digest_v1(request):
+                        case Ok(value): value
+                        case Err(_): return
+                    match runtime_bound_intent_match_v2(bound, digest, request.operation_id):
+                        case Ok(_): self.request_bindings[key] = bound
+                        case Err(_): return
+            case Err(_): pass
         self.intents.push(loaded)
 
     fn _durable_intent_for(request: LinuxOciRequestV1) -> RuntimeIntentV1:

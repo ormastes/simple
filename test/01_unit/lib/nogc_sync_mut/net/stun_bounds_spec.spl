@@ -1,0 +1,63 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-LIB
+# STUN: header offset, attribute range, and XOR-MAPPED-ADDRESS value bounds.
+
+use std.spec.step
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.net.stun.{stun_parse_header, stun_decode_attributes, stun_decode_xor_mapped_address, stun_binding_request, StunHeaderResult}
+
+fn txn() -> [u8]:
+    [1u8, 2u8, 3u8, 4u8, 5u8, 6u8, 7u8, 8u8, 9u8, 10u8, 11u8, 12u8]
+
+describe "STUN wraparound and truncation bounds":
+    it "a header offset near i64 max is refused instead of wrapping":
+        # @req REQ-SSPEC-LIB
+        step("parse header at offset 0x7FFFFFFFFFFFFFF0")
+        val msg = stun_binding_request(txn())
+        val r = stun_parse_header(msg, 0x7FFFFFFFFFFFFFF0)
+        var refused = false
+        match r:
+            case Err(_): refused = true
+            case Ok(_): refused = false
+        expect(refused).to_equal(true)
+
+    it "an attribute length near i64 max decodes nothing":
+        # @req REQ-SSPEC-LIB
+        step("decode attributes with offset 20 and length 0x7FFFFFFFFFFFFFF0")
+        val msg = stun_binding_request(txn())
+        val attrs = stun_decode_attributes(msg, 20, 0x7FFFFFFFFFFFFFF0)
+        expect(attrs.len()).to_equal(0)
+
+    it "a truncated IPv4 XOR-MAPPED-ADDRESS value yields an empty address":
+        # @req REQ-SSPEC-LIB
+        step("decode a 3-byte value claiming family IPv4")
+        val v: [u8] = [0u8, 1u8, 0u8]
+        val a = stun_decode_xor_mapped_address(v, txn())
+        expect(a.ip_bytes.len()).to_equal(0)
+        expect(a.family).to_equal(0)
+
+    it "a truncated IPv6 XOR-MAPPED-ADDRESS value yields an empty address":
+        # @req REQ-SSPEC-LIB
+        step("decode an 8-byte value claiming family IPv6")
+        val v: [u8] = [0u8, 2u8, 0u8, 0u8, 1u8, 2u8, 3u8, 4u8]
+        val a = stun_decode_xor_mapped_address(v, txn())
+        expect(a.ip_bytes.len()).to_equal(0)
+
+    it "an IPv6 value with a short transaction id yields an empty address":
+        # @req REQ-SSPEC-LIB
+        step("decode a full 20-byte IPv6 value with a 4-byte txn id")
+        var v: [u8] = [0u8, 2u8, 0u8, 0u8]
+        var i = 0
+        while i < 16:
+            v.push(0u8)
+            i = i + 1
+        val short_txn: [u8] = [1u8, 2u8, 3u8, 4u8]
+        val a = stun_decode_xor_mapped_address(v, short_txn)
+        expect(a.ip_bytes.len()).to_equal(0)
+
+    it "an empty value yields an empty address":
+        # @req REQ-SSPEC-LIB
+        step("decode an empty value")
+        val v: [u8] = []
+        val a = stun_decode_xor_mapped_address(v, txn())
+        expect(a.ip_bytes.len()).to_equal(0)

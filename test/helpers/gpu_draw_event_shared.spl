@@ -30,9 +30,9 @@ use std.nogc_async_mut.compute.exec_target.{
 use std.nogc_async_mut.compute.backend_dispatch.{
     dispatch_reduce_i64_forced, dispatch_is_device, dispatch_backend_name
 }
-use std.nogc_sync_mut.text_layout.font_renderer.{FontRenderer}
 use std.nogc_sync_mut.text_layout.font_rasterizer.{
-    reset_bitmap_font_raster_stats, bitmap_font_accelerator_stats
+    reset_bitmap_font_raster_stats, bitmap_font_accelerator_stats,
+    rasterize_bitmap_accelerated
 }
 
 # Opaque black is the SoftwareBackend init() background (backend_software.spl:112).
@@ -300,9 +300,17 @@ pub fn assert_require_absent_fails_closed():
 # ---------------------------------------------------------------------------
 # The bitmap-font rasterizer proves GPU offload via a checksum-verified payload
 # published through {PREFIX}_BITMAP_FONT_* env vars (PREFIX in
-# CUDA/ROCM/HIP/METAL/OPENCL). no-payload -> CPU, matching -> GPU, corrupt
+# CUDA/ROCM/HIP/METAL/OPENCL/VULKAN). no-payload -> CPU, matching -> GPU, corrupt
 # checksum -> rejected (falls back). A payload-agnostic "GPU offloaded" report
 # would be a cover-up and these bodies fail it.
+#
+# These bodies drive `rasterize_bitmap_accelerated` — the public payload-gated
+# rasterization entrypoint this spec's @cover annotations name
+# (src/lib/nogc_sync_mut/text_layout/font_rasterizer.spl) — instead of
+# FontRenderer.get_glyph: the renderer's bitmap fallback calls the plain CPU
+# rasterizer and never consults the gate, so routing through it records no
+# accelerator stats and proves nothing about payload discrimination (the exact
+# vacuous-green class this header warns about).
 fn _bitmap_checksum(pixels: [u8], width: i32, height: i32, advance: i32) -> i64:
     var sum: i64 = 0
     var i = 0
@@ -339,17 +347,10 @@ fn set_bitmap_payload(prefix: text, codepoint: text, reason: text):
     env_set(prefix + "_BITMAP_FONT_GLYPH_0_PIXELS", "255,0,0,255")
     env_set(prefix + "_BITMAP_FONT_GLYPH_0_CHECKSUM", checksum.to_text())
 
-fn _bitmap_renderer() -> FontRenderer:
-    var renderer = FontRenderer.new()
-    renderer.use_vector = false
-    renderer.use_bitmap = true
-    return renderer
-
 pub fn assert_bitmap_no_payload(prefix: text, codepoint: i32):
     clear_bitmap_payload(prefix)
     reset_bitmap_font_raster_stats()
-    var renderer = _bitmap_renderer()
-    val glyph = renderer.get_glyph(codepoint, 16)
+    val glyph = rasterize_bitmap_accelerated(codepoint, 16)
     val stats = bitmap_font_accelerator_stats()
     expect(glyph.width).to_be_greater_than(0)
     expect(stats.gpu_returned_glyphs).to_equal(0)
@@ -360,8 +361,7 @@ pub fn assert_bitmap_matching(prefix: text, reason: text):
     clear_bitmap_payload(prefix)
     reset_bitmap_font_raster_stats()
     set_bitmap_payload(prefix, "66", reason)
-    var renderer = _bitmap_renderer()
-    val glyph = renderer.get_glyph(66, 16)
+    val glyph = rasterize_bitmap_accelerated(66, 16)
     val stats = bitmap_font_accelerator_stats()
     expect(glyph.width).to_equal(2)
     expect(glyph.height).to_equal(2)
@@ -378,8 +378,7 @@ pub fn assert_bitmap_corrupt_rejected(prefix: text, reason: text):
     set_bitmap_payload(prefix, "66", reason)
     # Corrupt the checksum: the payload must be rejected and CPU must run.
     env_set(prefix + "_BITMAP_FONT_GLYPH_0_CHECKSUM", "1")
-    var renderer = _bitmap_renderer()
-    val glyph = renderer.get_glyph(66, 16)
+    val glyph = rasterize_bitmap_accelerated(66, 16)
     val stats = bitmap_font_accelerator_stats()
     expect(glyph.width).to_be_greater_than(0)
     expect(stats.gpu_returned_glyphs).to_equal(0)

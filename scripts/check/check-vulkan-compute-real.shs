@@ -1,22 +1,31 @@
 #!/bin/sh
 # Fail when a binary advertises Vulkan but cannot actually do Vulkan compute.
 #
-# `default = []` in compiler/Cargo.toml means a normal build has no `vulkan`
-# feature. In that build `rt_vulkan_is_available` / `_init` / `_device_count`
-# still work -- they run over interpreter_extern/gpu.rs's own dlopen path,
-# independent of the feature -- while every buffer and dispatch entry point
-# compiles to a `#[cfg(not(feature = "vulkan"))]` stub returning 0.
-#
-# The result is the worst kind of failure: the probe is green, the device
-# enumerates, a buffer handle comes back non-zero, and every transfer silently
-# does nothing. bench_2d_vulkan.spl printed its banner and exited 0 on a host
-# where Vulkan is fully functional, which reads as a broken benchmark rather
-# than a binary that cannot do Vulkan. See
+# History: `default = []` in compiler/Cargo.toml once meant a normal build had
+# no `vulkan` feature while the probe surface (`rt_vulkan_is_available` et al.)
+# still answered over interpreter_extern/gpu.rs's dlopen path. The probe was
+# green, the device enumerated, a buffer handle came back non-zero, and every
+# transfer silently did nothing -- bench_2d_vulkan.spl printed its banner and
+# exited 0 on a host where Vulkan is fully functional. See
 # doc/08_tracking/bug/vulkan_feature_off_makes_gpu_benchmarks_silently_noop_2026-09-13.md
 #
-# Detection: a feature-enabled build links ash's real entry points. A
-# feature-disabled one does not. Verdict is the last line of stdout:
-#   PASS — vulkan compute is real in <binary>
+# Current source shape (audited 2026-11-12 at release/1.0.0): gpu.rs carries
+# TWO Vulkan families. The `rt_vk_*` runtime-crate family is feature-gated, but
+# its availability handler answers 0 when the feature is off (honest). The
+# `rt_vulkan_*` interpreter family owns an UNCONDITIONAL dlopen implementation
+# (mod vulkan_dlopen) and is registered unconditionally -- so a default build
+# can genuinely compute, and it legitimately has NO static ash symbols.
+#
+# Consequence for detection: the old static-symbol check (grep nm output for
+# ash DeviceFn/InstanceFn) now false-FAILs working dlopen builds. The
+# authoritative discriminator is behavioral: run the binary against a minimal
+# probe that exercises availability -> init -> device count -> buffer alloc ->
+# host-to-device copy, and refuse the "handle non-zero but transfer silent"
+# signature the bug documented.
+#
+# Verdict is the last line of stdout:
+#   PASS — vulkan compute is real in <binary> (execution probe)
+#   PASS — vulkan compute is real in <binary> (symbol evidence only; run on the build host for the execution probe)
 #   FAIL — <binary> advertises Vulkan but its compute path is stubbed
 #   ERROR — nothing was checked
 set -eu
@@ -25,33 +34,104 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
 bin=${VULKAN_CHECK_BINARY:-$root/src/compiler_rust/target/release/simple.exe}
 [ -f "$bin" ] || bin=$root/src/compiler_rust/target/release/simple
 
-nm=$(command -v llvm-nm || command -v nm || true)
-
 if [ ! -f "$bin" ]; then
     echo "ERROR — nothing was checked (no built binary at $bin)"
     exit 2
 fi
-if [ -z "$nm" ]; then
-    # Absence of a symbol reader is absence of evidence, never a pass.
-    echo "ERROR — nothing was checked (no llvm-nm/nm on PATH)"
-    exit 2
+
+tmpdir=$(mktemp -d "${TMPDIR:-/tmp}/vulkan-compute-real.XXXXXX")
+trap 'rm -rf "$tmpdir"' EXIT HUP INT TERM
+probe=$tmpdir/probe.spl
+
+cat > "$probe" <<'EOF'
+# Minimal Vulkan compute-reality probe. Imports nothing from stdlib so it runs
+# on any seed/self-hosted binary regardless of stdlib vintage. Always exits 0;
+# the shell script parses the stage lines, so a runner failure is never
+# mistaken for a probe verdict.
+extern fn rt_vulkan_is_available() -> bool
+extern fn rt_vulkan_init() -> bool
+extern fn rt_vulkan_device_count() -> i64
+extern fn rt_vulkan_alloc_buffer(size: i64, usage: i64) -> i64
+extern fn rt_vulkan_copy_to_buffer_u32(handle: i64, words: [u32], offset: i64) -> bool
+
+fn main():
+    val available = rt_vulkan_is_available()
+    print "vcr_stage=is_available ok={if available: 1 else: 0}\n"
+    if not available:
+        print "vcr_verdict=no-device\n"
+        return
+    if not rt_vulkan_init():
+        print "vcr_stage=init ok=0\n"
+        print "vcr_verdict=noop\n"
+        return
+    print "vcr_stage=init ok=1\n"
+    val count = rt_vulkan_device_count()
+    print "vcr_stage=device_count ok={if count > 0: 1 else: 0}\n"
+    if count <= 0:
+        print "vcr_verdict=noop\n"
+        return
+    val handle = rt_vulkan_alloc_buffer(1024, 0)
+    print "vcr_stage=alloc_buffer ok={if handle > 0: 1 else: 0}\n"
+    if handle <= 0:
+        print "vcr_verdict=noop\n"
+        return
+    val words: [u32] = [1u32, 2u32, 3u32, 4u32]
+    val copied = rt_vulkan_copy_to_buffer_u32(handle, words, 0)
+    print "vcr_stage=host_to_device_copy ok={if copied: 1 else: 0}\n"
+    if not copied:
+        print "vcr_verdict=noop\n"
+        return
+    print "vcr_verdict=real\n"
+EOF
+
+out=""
+if out=$("$bin" run "$probe" 2>"$tmpdir/stderr"); then
+    :
+else
+    rc=$?
+    # A runner failure (wrong platform, missing stdlib, segfault) is absence of
+    # evidence, never a FAIL verdict on the binary itself.
+    echo "ERROR — execution probe could not run $bin (exit $rc):"
+    sed 's/^/       /' "$tmpdir/stderr" | head -5 || true
 fi
 
-syms=$("$nm" "$bin" 2>/dev/null || true)
-if [ -z "$syms" ]; then
-    echo "ERROR — nothing was checked (no symbols readable from $bin)"
-    exit 2
+if [ -n "$out" ] && printf '%s\n' "$out" | grep -q "^vcr_verdict="; then
+    printf '%s\n' "$out" | grep "^vcr_stage=" || true
+    verdict=$(printf '%s\n' "$out" | sed -n 's/^vcr_verdict=//p' | tail -1)
+    case "$verdict" in
+        real)
+            echo "PASS — vulkan compute is real in $bin (execution probe)"
+            exit 0
+            ;;
+        noop)
+            echo "FAIL — $bin advertises Vulkan but its compute path is stubbed"
+            echo "       for the seed: cargo build --release --bin simple --features vulkan"
+            echo "FAIL — vulkan compute is NOT real in this binary"
+            exit 1
+            ;;
+        no-device)
+            echo "ERROR — nothing was checked (no Vulkan device/loader on this host)"
+            exit 2
+            ;;
+        *)
+            echo "ERROR — nothing was checked (unparseable probe verdict '$verdict')"
+            exit 2
+            ;;
+    esac
 fi
 
-# ash's device/instance loaders are present only in a --features vulkan build.
-ash_hits=$(printf '%s\n' "$syms" | grep -c -i "ash.*DeviceFn\|ash.*InstanceFn\|gpu_allocator" || true)
-
-if [ "${ash_hits:-0}" -lt 1 ]; then
-    echo "FAIL — $bin advertises Vulkan but its compute path is stubbed"
-    echo "       rebuild with: cargo build --release --bin simple --features vulkan"
-    echo "FAIL — vulkan compute is NOT real in this binary"
-    exit 1
+# Execution probe unavailable (e.g. Windows .exe audited from another host).
+# Fall back to the historical static check, clearly labeled as the weaker
+# evidence it is. Absence of ash symbols is NOT a fail: dlopen builds carry
+# none while still computing.
+nm=$(command -v llvm-nm || command -v nm || true)
+if [ -n "$nm" ]; then
+    syms=$("$nm" "$bin" 2>/dev/null || true)
+    ash_hits=$(printf '%s\n' "$syms" | grep -c -i "ash.*DeviceFn\|ash.*InstanceFn\|gpu_allocator" || true)
+    if [ "${ash_hits:-0}" -ge 1 ]; then
+        echo "PASS — vulkan compute is real in $bin (symbol evidence only; run on the build host for the execution probe)"
+        exit 0
+    fi
 fi
-
-echo "PASS — vulkan compute is real in $bin"
-exit 0
+echo "ERROR — nothing was checked (execution probe unavailable and no static ash symbols; a working dlopen build has neither)"
+exit 2

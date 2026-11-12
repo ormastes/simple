@@ -155,7 +155,7 @@ pub fn stun_parse_header(bytes: [u8], offset: i64) -> StunHeaderResult:
     """
     if offset < 0:
         return StunHeaderResult.Err("negative STUN header offset")
-    if offset + STUN_HEADER_SIZE > bytes.len():
+    if offset > bytes.len() or STUN_HEADER_SIZE > bytes.len() - offset:
         return StunHeaderResult.Err("buffer too short for STUN header")
     val msg_type = _stun_u16_be(bytes, offset)
     # Top 2 bits MUST be zero (RFC 8489 section 5)
@@ -230,7 +230,7 @@ pub fn stun_decode_attributes(bytes: [u8], offset: i64, length: i64) -> [StunAtt
     var attrs: [StunAttribute] = []
     if offset < 0 or length < 0:
         return attrs
-    if offset > bytes.len() or offset + length > bytes.len():
+    if offset > bytes.len() or length > bytes.len() - offset:
         return attrs
     var pos = offset
     val end = offset + length
@@ -265,7 +265,7 @@ pub fn stun_parse_message(bytes: [u8]) -> StunMessageResult:
         case Err(msg):
             return StunMessageResult.Err(msg)
         case Ok(hdr):
-            if STUN_HEADER_SIZE + hdr.msg_length > bytes.len():
+            if hdr.msg_length > bytes.len() - STUN_HEADER_SIZE:
                 return StunMessageResult.Err("message truncated")
             val attrs = stun_decode_attributes(bytes, STUN_HEADER_SIZE, hdr.msg_length)
             return StunMessageResult.Ok(StunMessage(
@@ -334,12 +334,18 @@ pub fn stun_decode_xor_mapped_address(value: [u8], txn_id: [u8]) -> StunMappedAd
     txn_id: 12-byte transaction ID (needed for IPv6 XOR).
     Returns: StunMappedAddr with decoded family, port, and IP bytes.
     """
+    val empty_addr = StunMappedAddr(family: 0, port: 0, ip_bytes: [])
+    # Bounds: family+port need 4 bytes; IPv4 needs 8, IPv6 needs 20 + a 12-byte txn id.
+    if value.len() < 4:
+        return empty_addr
     val family = value[1] & 0xff
     val xport = _stun_u16_be(value, 2)
     val port = xport ^ ((STUN_MAGIC_COOKIE >> 16) & 0xffff)
 
     var ip_bytes: [u8] = []
     if family == STUN_ADDR_FAMILY_IPV4:
+        if value.len() < 8:
+            return empty_addr
         # XOR with magic cookie bytes
         val cb0 = (STUN_MAGIC_COOKIE >> 24) & 0xff
         val cb1 = (STUN_MAGIC_COOKIE >> 16) & 0xff
@@ -350,6 +356,8 @@ pub fn stun_decode_xor_mapped_address(value: [u8], txn_id: [u8]) -> StunMappedAd
         ip_bytes.push((value[6] ^ cb2) & 0xff)
         ip_bytes.push((value[7] ^ cb3) & 0xff)
     elif family == STUN_ADDR_FAMILY_IPV6:
+        if value.len() < 20 or txn_id.len() < 12:
+            return empty_addr
         # XOR with magic cookie (4 bytes) + txn_id (12 bytes) = 16 bytes
         var xor_key: [u8] = []
         _stun_put_u32_be(xor_key, STUN_MAGIC_COOKIE)
