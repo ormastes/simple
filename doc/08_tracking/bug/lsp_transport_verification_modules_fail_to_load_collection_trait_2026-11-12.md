@@ -1,7 +1,7 @@
 # LSP transport / verification modules fail to load: `text` vs trait `Collection`
 
 - Date: 2026-11-12
-- Status: open
+- Status: verification-pending
 - Severity: P2 (blocks every behavioural spec of the LSP diagnostics handler)
 - Found by: pub-fn audit lane (work/audit-fixes-20261112)
 
@@ -34,3 +34,21 @@ without `/bin/sh`. The `/bin/sh` fix landed with it. The spec stays red
 Find the `Collection` bound that `text` is checked against in the transport
 or verification import closure. Then add the missing `text` impl, or fix the
 bound.
+
+## Fix (2026-11-12)
+
+Root cause: `lsp/transport.spl` had four unused legacy imports (`sys`,
+`io.stdio`, `core.json`, `core.string`). `core.string` resolves to the seed's
+stale std snapshot (`src/compiler_rust/lib/std/src/core/string_ops.spl`), whose
+`impl Collection<char> for text` is empty, so the trait check rejected it.
+`verification.spl` failed only because it imports `lsp.transport`. Removed the
+unused imports.
+
+Evidence: `diagnostics_portable_subprocess_spec.spl` went from
+`outcome=ERROR executed=0` to `outcome=OK executed=1 passed=1 failed=0`.
+
+Latent trap, not fixed here: any module that still does `import core.string`
+hits the same error. Other importers: `gc_async_mut/lsp/transport.spl`,
+`nogc_async_mut/lsp/transport.spl`, `app/dap/*`, `app/protocol/transport.spl`.
+The seed reads the std snapshot from its build tree (p1 worktree), not from the
+working checkout, so a fix to `string_ops.spl` can't be checked from a lane.
