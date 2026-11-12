@@ -1,0 +1,74 @@
+"""
+# `simple check` output as typed diagnostics and one DiagnosticBatchV1 (REQ-DIAG-005)
+
+The query layer decodes compiler output once into `DiagnosticV1` values; the
+legacy flat line JSON is rendered from that typed value, so every surface
+(CLI, LSP, MCP) sees the same code and primary span. A failed check with no
+located diagnostic is an `InternalError` batch, never a clean one.
+"""
+use std.spec
+use std.spec.step
+use app.cli.query_diagnostics.{query_check_line_to_diagnostic_v1, query_diagnostic_v1_line_json,
+    query_check_output_diagnostics_v1, query_check_batch_v1}
+use std.common.diagnostics.diagnostic_batch.{BatchStatus}
+use std.common.diagnostics.severity.{Severity}
+
+val FILE = "sample.spl"
+
+describe "typed check output decoding":
+    it "decodes a located error line into a DiagnosticV1 with code, span and file":
+        # @req REQ-DIAG-005
+        step("Decode an error and a warning line addressed to the checked file")
+        val err = query_check_line_to_diagnostic_v1(FILE, "sample.spl:3:7: error: expected type annotation")
+        expect(err != nil).to_equal(true)
+        val d = err.unwrap()
+        expect(d.code).to_equal("E0001")
+        expect(d.message).to_equal("expected type annotation")
+        expect(d.file.unwrap()).to_equal(FILE)
+        expect(d.span.unwrap().line).to_equal(3)
+        expect(d.span.unwrap().col).to_equal(7)
+        expect(d.severity.name()).to_equal(Severity.Error.name())
+        val warn = query_check_line_to_diagnostic_v1(FILE, "sample.spl:9:1: warning: unused variable x").unwrap()
+        expect(warn.severity.name()).to_equal(Severity.Warning.name())
+        expect(warn.message).to_equal("unused variable x")
+        step("Lines about other files or without a location are not diagnostics of this file")
+        expect(query_check_line_to_diagnostic_v1(FILE, "other.spl:1:1: error: boom") == nil).to_equal(true)
+        expect(query_check_line_to_diagnostic_v1(FILE, "   ") == nil).to_equal(true)
+
+    it "renders the legacy line JSON from the typed value with the same code and position":
+        # @req REQ-DIAG-005
+        val d = query_check_line_to_diagnostic_v1(FILE, "sample.spl:3:7: error: expected type annotation").unwrap()
+        val json = query_diagnostic_v1_line_json(d)
+        expect(json).to_contain("\"severity\":1")
+        expect(json).to_contain("\"code\":\"E0001\"")
+        expect(json).to_contain("\"line\":3")
+        expect(json).to_contain("\"col\":7")
+        expect(json).to_contain("\"source\":\"simple\"")
+        val warn = query_check_line_to_diagnostic_v1(FILE, "sample.spl:9:1: warning: unused variable x").unwrap()
+        expect(query_diagnostic_v1_line_json(warn)).to_contain("\"severity\":2")
+
+    it "keeps three distinct errors in one batch with distinct stable ids and PartialRecovery status":
+        # @req REQ-DIAG-004
+        val output = "sample.spl:1:5: error: first\nnoise line\nsample.spl:4:2: error: second\nsample.spl:9:1: error: third\n"
+        val typed = query_check_output_diagnostics_v1(FILE, output)
+        expect(typed.len()).to_equal(3)
+        val batch = query_check_batch_v1(FILE, output, 1, 4, "hash-1")
+        expect(batch.len()).to_equal(3)
+        expect(batch.status.name()).to_equal(BatchStatus.PartialRecovery.name())
+        expect(batch.producer).to_equal("simple-check")
+        expect(batch.matches_document(4, "hash-1")).to_equal(true)
+        expect(batch.diagnostics[0].id != batch.diagnostics[1].id).to_equal(true)
+        expect(batch.diagnostics[1].id != batch.diagnostics[2].id).to_equal(true)
+        expect(batch.diagnostics[2].diagnostic.span.unwrap().line).to_equal(9)
+
+    it "derives Complete from clean evidence and InternalError from a silent failure":
+        # @req REQ-DIAG-005
+        step("Exit 0 with only a warning is Complete")
+        val warn_only = query_check_batch_v1(FILE, "sample.spl:9:1: warning: unused variable x\n", 0, 1, "h")
+        expect(warn_only.status.name()).to_equal(BatchStatus.Complete.name())
+        expect(warn_only.len()).to_equal(1)
+        step("Exit 1 with no located diagnostic is InternalError, not a clean batch")
+        val silent = query_check_batch_v1(FILE, "something crashed\n", 1, 1, "h")
+        expect(silent.len()).to_equal(0)
+        expect(silent.status.name()).to_equal(BatchStatus.InternalError.name())
+        expect(silent.incomplete_reason.unwrap()).to_contain("exited 1")

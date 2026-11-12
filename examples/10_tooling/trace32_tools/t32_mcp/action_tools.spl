@@ -13,79 +13,27 @@ use .job_manager.{t32_job_list, t32_job_get, t32_job_cancel, t32_job_to_json}
 use .dialog_tools.{handle_t32_dialog_parse, handle_t32_dialog_get, handle_t32_dialog_set, handle_t32_dialog_click}
 use .json_helpers.{t32_LB, t32_RB, t32_SB_L, t32_SB_R, t32_escape_json, t32_js, t32_jp, t32_jo1, t32_jo2, t32_extract_field, t32_extract_field_raw, t32_extract_nested, t32_make_error, t32_make_json_result, t32_make_tool_error, t32_make_tool_result}
 use .session_tools.{t32_find_current_session, t32_run_remote, t32_add_history}
+use .protocol.{t32_validate_identifier, t32_is_hex_address, t32_has_shell_meta}
 use .session_state.{MCP_T32_SESSIONS, MCP_T32_CURRENT_CORE, MCP_T32_HISTORY, t32_history_fields}
 pub use .tool_common.{t32_mcp_session_ids}
 
 # --- Action/field state ---
-# Field state is stored per-session in a T32FieldDict
-# keyed as "session_id:field_key"
-# Uses hash-bucket approach for O(1)-ish lookup
+# Field state is stored per-session as two parallel flat arrays keyed
+# "session_id:field_key". The previous hash-bucket class mutated nested
+# arrays (`self.bucket_keys[b].push(..)`), which operated on a copy under
+# the seed's array value semantics, so a stored value could never be read
+# back (t32_mcp_bugfix_spec "stores and retrieves a value" was red).
 
-val T32_FIELD_DICT_BUCKETS: i64 = 64
+var MCP_T32_FIELD_KEYS: [text] = []
+var MCP_T32_FIELD_VALUES: [text] = []
 
-class T32FieldDict:
-    bucket_keys: [[text]]
-    bucket_values: [[text]]
-
-    static fn create() -> T32FieldDict:
-        var bk: [[text]] = []
-        var bv: [[text]] = []
-        var i: i64 = 0
-        while i < T32_FIELD_DICT_BUCKETS:
-            bk.push([])
-            bv.push([])
-            i = i + 1
-        T32FieldDict(bucket_keys: bk, bucket_values: bv)
-
-    fn hash_key(key: text) -> i64:
-        var h: i64 = 5381
-        var i: i64 = 0
-        while i < key.len():
-            h = ((h * 33) + key.char_at(i)) % 1000000007
-            i = i + 1
-        if h < 0:
-            h = 0 - h
-        h % T32_FIELD_DICT_BUCKETS
-
-    fn get(key: text) -> text:
-        val b = self.hash_key(key)
-        val keys = self.bucket_keys[b]
-        var idx: i64 = 0
-        for k in keys:
-            if k == key:
-                return self.bucket_values[b][idx]
-            idx = idx + 1
-        ""
-
-    me set(key: text, value: text):
-        val b = self.hash_key(key)
-        var keys = self.bucket_keys[b]
-        var idx: i64 = 0
-        for k in keys:
-            if k == key:
-                self.bucket_values[b][idx] = value
-                return
-            idx = idx + 1
-        self.bucket_keys[b].push(key)
-        self.bucket_values[b].push(value)
-
-    me delete(key: text):
-        val b = self.hash_key(key)
-        var keys = self.bucket_keys[b]
-        var idx: i64 = 0
-        for k in keys:
-            if k == key:
-                # Remove by swapping with last element
-                val last_idx = keys.len() - 1
-                if idx != last_idx:
-                    self.bucket_keys[b][idx] = self.bucket_keys[b][last_idx]
-                    self.bucket_values[b][idx] = self.bucket_values[b][last_idx]
-                self.bucket_keys[b].pop()
-                self.bucket_values[b].pop()
-                return
-            idx = idx + 1
-
-var MCP_T32_FIELD_DICT: T32FieldDict = T32FieldDict.create()
+fn t32_field_index(lookup: text) -> i64:
+    var idx: i64 = 0
+    for k in MCP_T32_FIELD_KEYS:
+        if k == lookup:
+            return idx
+        idx = idx + 1
+    -1
 
 fn t32_resolve_field_alias(key: text) -> text:
     if key == "pc": return "register.PC"
@@ -95,16 +43,34 @@ fn t32_resolve_field_alias(key: text) -> text:
     key
 
 fn t32_field_state_get(session_id: text, field_key: text) -> text:
-    val lookup = session_id + ":" + field_key
-    MCP_T32_FIELD_DICT.get(lookup)
+    val idx = t32_field_index(session_id + ":" + field_key)
+    if idx < 0:
+        return ""
+    MCP_T32_FIELD_VALUES[idx]
 
 fn t32_field_state_set(session_id: text, field_key: text, value: text):
     val lookup = session_id + ":" + field_key
-    MCP_T32_FIELD_DICT.set(lookup, value)
+    val idx = t32_field_index(lookup)
+    if idx >= 0:
+        MCP_T32_FIELD_VALUES[idx] = value
+        return
+    MCP_T32_FIELD_KEYS = MCP_T32_FIELD_KEYS + [lookup]
+    MCP_T32_FIELD_VALUES = MCP_T32_FIELD_VALUES + [value]
 
 fn t32_field_state_delete(session_id: text, field_key: text):
-    val lookup = session_id + ":" + field_key
-    MCP_T32_FIELD_DICT.delete(lookup)
+    val idx = t32_field_index(session_id + ":" + field_key)
+    if idx < 0:
+        return
+    var keys: [text] = []
+    var values: [text] = []
+    var i: i64 = 0
+    for k in MCP_T32_FIELD_KEYS:
+        if i != idx:
+            keys.push(k)
+            values.push(MCP_T32_FIELD_VALUES[i])
+        i = i + 1
+    MCP_T32_FIELD_KEYS = keys
+    MCP_T32_FIELD_VALUES = values
 
 # --- Helpers for error suggestions ---
 
@@ -204,20 +170,80 @@ fn t32_field_to_eval(field_key: text) -> text:
         return "Register(R2)"
     if field_key == "r3":
         return "Register(R3)"
-    # register.NAME -> Register(NAME)
+    # status.* -> live target-state PRACTICE functions
+    if field_key == "status.mode" or field_key == "mode":
+        return "DEBUGMODE()"
+    if field_key == "status.system" or field_key == "system":
+        return "SYStem.MODE()"
+    if field_key == "status.trace" or field_key == "trace":
+        return "Trace.STATE()"
+    if field_key == "status.cursor" or field_key == "cursor":
+        return "TRACK.ADDRESS()"
+    if t32_is_status_field(field_key):
+        return "STATE.RUN()"
+    # register.NAME -> Register(NAME); the name is an identifier, never a command
     if field_key.starts_with("register."):
         val reg_name = field_key.substring(9)
+        if not t32_validate_identifier(reg_name):
+            return ""
         return "Register(" + reg_name + ")"
     # var.NAME -> Var.VALUE(NAME)
     if field_key.starts_with("var."):
         val var_name = field_key.substring(4)
+        if not t32_validate_identifier(var_name):
+            return ""
         return "Var.VALUE(" + var_name + ")"
-    # memory.ADDR -> Data.Long(ADDR)
+    # memory.ADDR -> Data.Long(ADDR); ADDR must be a hex address
     if field_key.starts_with("memory."):
         val addr = field_key.substring(7)
+        if not t32_is_hex_address(addr):
+            return ""
         return "Data.Long(" + addr + ")"
-    # Fallback: use field_key as raw EVAL expression
+    # Fallback: raw EVAL expression — refused when it carries shell/command
+    # separators, since the text is handed to the T32 remote verbatim.
+    if not t32_eval_expr_is_safe(field_key):
+        return ""
     field_key
+
+# A raw PRACTICE expression may use parentheses (`PRACTICE.STATE()`), so the
+# generic shell-meta check is too strict here; only command separators and
+# shell expansion characters are refused.
+fn t32_eval_expr_is_safe(expr: text) -> bool:
+    for ch in expr:
+        if ch == ";" or ch == "|" or ch == "&" or ch == "`" or ch == "$":
+            return false
+        if ch == "<" or ch == ">" or ch == "\n" or ch == "\r":
+            return false
+    expr.trim() != ""
+
+# --- Status field helpers (consumed by t32_field_get and status_snapshot) ---
+
+fn t32_is_status_field(field_key: text) -> bool:
+    if field_key == "status" or field_key == "status.current":
+        return true
+    if field_key == "mode" or field_key == "system" or field_key == "trace" or field_key == "cursor":
+        return true
+    field_key.starts_with("status.")
+
+# Collapse (STATE.RUN(), SYStem.MODE(), DEBUGMODE()) into one of
+# running | stopped | disconnected.
+fn t32_normalize_current_status(run_state: text, debug_mode: text, system_mode: text) -> text:
+    val sys = system_mode.trim().to_lower()
+    if sys == "down" or sys == "nodebug" or sys == "":
+        return "disconnected"
+    if run_state.trim() == "1" or debug_mode.trim().to_lower() == "run":
+        return "running"
+    "stopped"
+
+fn t32_toolbar_run_enabled(status: text) -> text:
+    if status == "stopped":
+        return "true"
+    "false"
+
+fn t32_toolbar_stop_enabled(status: text) -> text:
+    if status == "running":
+        return "true"
+    "false"
 
 fn handle_t32_field_get(id: text, body: text) -> text:
     val field_key = t32_extract_field(body, "field_key")
@@ -229,6 +255,8 @@ fn handle_t32_field_get(id: text, body: text) -> text:
         Some(session):
             # Map field key to T32 EVAL expression
             val eval_expr = t32_field_to_eval(field_key)
+            if eval_expr == "":
+                return t32_make_tool_error(id, -32602, "Rejected field key: " + field_key + ". Use pc/sp/lr/cpsr/r0-r3, register.NAME, var.NAME, memory.0xADDR, status.*, or a PRACTICE expression without ; | & ` $ < >")
             val eval_cmd = "EVAL " + eval_expr
             var stdout = ""
             var rc: i64 = 0
@@ -250,6 +278,9 @@ fn handle_t32_field_get(id: text, body: text) -> text:
             return t32_make_tool_result(id, r)
 
 fn t32_field_to_set_cmd(field_key: text, value: text) -> text:
+    # The value is spliced into a T32 command line: refuse separators/shell meta.
+    if value == "" or t32_has_shell_meta(value):
+        return ""
     # Map common field keys to T32 set commands
     if field_key == "pc":
         return "Register.Set PC " + value
@@ -270,14 +301,20 @@ fn t32_field_to_set_cmd(field_key: text, value: text) -> text:
     # register.NAME -> Register.Set NAME value
     if field_key.starts_with("register."):
         val reg_name = field_key.substring(9)
+        if not t32_validate_identifier(reg_name):
+            return ""
         return "Register.Set " + reg_name + " " + value
     # var.NAME -> Var.Set NAME = value
     if field_key.starts_with("var."):
         val var_name = field_key.substring(4)
+        if not t32_validate_identifier(var_name):
+            return ""
         return "Var.Set " + var_name + " = " + value
     # memory.ADDR -> Data.Set ADDR %Long value
     if field_key.starts_with("memory."):
         val addr = field_key.substring(7)
+        if not t32_is_hex_address(addr):
+            return ""
         return "Data.Set " + addr + " %Long " + value
     # Fallback: raw command
     ""
@@ -601,3 +638,5 @@ fn t32_dispatch_tool(id: text, body: text) -> text:
     t32_make_error(id, -32602, t32_err_unknown_tool(tool_name))
 
 export t32_dispatch_tool, t32_make_resources_list, t32_handle_resource_read
+export t32_field_state_get, t32_field_state_set, t32_field_state_delete, t32_field_to_eval, t32_field_to_set_cmd
+export t32_is_status_field, t32_normalize_current_status, t32_toolbar_run_enabled, t32_toolbar_stop_enabled
