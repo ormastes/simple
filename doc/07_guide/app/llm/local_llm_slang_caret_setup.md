@@ -182,9 +182,17 @@ Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf --local-dir
 ```bash
 cd <worktree> && SIMPLE_RUST_SEED_WARNING=0 SIMPLE_TIMEOUT_SECONDS=0 \
   <seed> run src/app/slang_server/main.spl -- \
-  --plaintext-development --models=/home/yoon/dev/model --port=8721 --n-ctx=32768
+  --plaintext-development --models=/home/yoon/dev/model \
+  --model=Qwen3-Coder-30B-A3B-Q4_K_M --port=8721 --n-ctx=32768
 ```
 
+- `--model=<id>` is required (PR #8514). The server preloads that model at
+  startup, so a load failure (memory gate, CUDA init) appears before the port
+  opens, not on the first request.
+- One server process serves several concurrent sessions (PR #8514; verified with
+  two caret agents at once). Each request renders the whole `messages` list
+  through the GGUF chat template. Two long generations together take about 1.9x
+  the time of one: decode is not yet batched.
 - `--plaintext-development` is mandatory (loopback dev only; production needs TLS).
 - `--n-ctx=<tokens>` sets the per-request context. The default 4096 is too small
   for a caret agent (tool prompt plus one file read overflows it); caret's
@@ -192,8 +200,7 @@ cd <worktree> && SIMPLE_RUST_SEED_WARNING=0 SIMPLE_TIMEOUT_SECONDS=0 \
   fails with `Error: --n-ctx must be a positive integer`.
 - Endpoints: `GET /v1/models` (every model slang recognises on disk, runnable or
   not) and `POST /v1/chat/completions` (real tokens for GGUF; 503
-  `model_not_runnable` with a reason otherwise). The model loads lazily on the
-  first completion, so the first request is slow.
+  `model_not_runnable` with a reason otherwise).
 
 Smoke test (Bash `curl`/`wget` are blocked by repo hooks; use `nc`):
 
@@ -243,6 +250,12 @@ slang:
 ```
 
 `--prompt "..."` prints one reply and exits; the tool loop runs only in the TUI.
+
+Tool notes (PR #8514):
+- `bash` runs in `--workspace`, not in caret's own working directory.
+- `edit_file(path, old_text, new_text)` writes only when `old_text` occurs
+  exactly once, so tell local models to use it instead of `write_file`. A 30B
+  model rewriting a whole file with `write_file` truncated it twice in testing.
 
 ## 8. Caret suite (cs)
 
@@ -299,19 +312,32 @@ runs `gh pr create --base release/1.0.0`; a higher model reviews and
 admin-merges. Keep briefs short: a 30B local model cannot digest
 `.claude/skills/spipe.md`.
 
+Agents inside podman (PR #8532): `/launch <spec> --container <image>
+[--container-mount src:dst[:ro|rw]] [--container-network ...]` runs the agent
+through the Simple container layer (`podman_session_v1`). `/kill`, `/quit` and
+cs exit remove the container; `/reap` removes leftovers. With `busybox` add
+`--container-mount /lib/aarch64-linux-gnu/libgcc_s.so.1:/lib/libgcc_s.so.1`,
+and pass the served model name (the default `slang-local` is rejected). Details:
+`doc/00_llm_process/feature_expert/podman_container/skill.md`.
+
+Driving a cs agent from outside (for example `tmux send-keys`): the chat line
+types text into the agent pane but does not submit it; follow it with
+`/key enter`.
+
 ## 9. Known issues (open)
 
 - **GB10 intermittent CUDA OOM.** CUDA context creation can fail with "out of
   memory" in `ggml_cuda_init` when a second CUDA process starts while a slang
-  process holds a loaded model; the failure aborts the whole server. Two
-  separate server processes are not reliable yet. Direction: one server process
-  serving two concurrent clients. In progress; no final command yet.
-- **JIT demotion, server.** The server falls back to the interpreter because
-  `native_formats.spl` `_first_safetensors` calls an unimported bare `dir_list`
-  ("ambiguous call to dir_list: 2 co-compiled definitions"). Works, slower. Open.
-- **JIT demotion, caret.** Caret falls back to the interpreter because
-  `PAGED_MANAGER.telemetry().active_requests` is inferred as `RingTelemetry`.
-  Works, slower. Open.
+  process holds a loaded model. Run one server for all agents.
+- **Prefix-restore crash.** After hours of two-agent load, the server aborted
+  with `CUDA error: an illegal memory access` right after
+  `state_read_meta: cell_count = 15809` (restoring a cached prompt prefix).
+  Restart the server; a fix is in progress.
+- **JIT demotion.** Fixed: `dir_list` (PR #8524), `RingTelemetry` (PR #8518)
+  and `jo1(p1:)` (PR #8531). Still open: an unbraced single-symbol
+  `use a.b.fn` is not counted as an import by the co-compiled ambiguity check
+  (`ambiguous call to dir_create ... neither defines nor imports it`), so caret
+  still runs in the interpreter. It works, just slower.
 
 ## 10. Troubleshooting
 

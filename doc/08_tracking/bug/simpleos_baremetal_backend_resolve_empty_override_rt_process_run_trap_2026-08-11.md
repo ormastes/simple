@@ -341,3 +341,23 @@ objdump -dr build/os/simpleos_wm_simple_web_check_32.elf | grep rt_process_run
 TODO(deferred-environment): after Linux bootstrap admits the runtime, run the
 visible-display evidence command above in SimpleOS QEMU and retain serial output
 plus elapsed-time and max-RSS evidence.
+
+## Fix verification
+2026-11-12: Hosted re-run of the root-cause (c) regression spec
+`test/01_unit/lib/gpu/engine2d/backend_qualcomm_spec.spl` reproduced the
+hollow-verification defect: the spec errored at parse time
+(`reason=parse-error`, 0 examples executed) because four nested
+`describe` blocks (`create`, `RenderBackend trait`, `Adreno tuning`,
+`platform support`) had their `it` bodies at the wrong indentation, so
+the (c) source fix was never actually exercised by CI. Fixed indentation
+only. Seed-hosted result: `outcome=OK declared>=20 executed=20 passed=20
+failed=0` (real PASS, no pass_todo). Neighboring specs:
+`test/01_unit/gpu/qualcomm_vulkan_target_profile_spec.spl` 11/11 PASS;
+`backend_vulkan_text_fallback_spec.spl` 2/2 PASS;
+`host_bug_a07_baremetal_backend_probe_spec.spl` 4/4 PASS.
+`engine_platform_spec.spl` 23/24 with one pre-existing environment
+failure (`keeps explicit GPU compute diagnostics on requested backends`,
+turnip probing /dev/dri/renderD128) unrelated to this change. The
+baremetal serial gate itself remains pending a Stage-4 bootstrap
+artifact; the Qualcomm x86_64 source-level guard is now genuinely
+spec-covered.

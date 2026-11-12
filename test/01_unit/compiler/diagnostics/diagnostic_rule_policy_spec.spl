@@ -1,0 +1,179 @@
+"""
+## Purpose and audience
+
+Executable contract for `compiler.common.diagnostics.diagnostic_rule_policy`
+(plan §4, P0): the scheduled per-rule severity policy that sits beside
+DiagnosticV1. Covers loading the shipped SDN policy, the resolution order
+(fatal/security > edition mandatory > profile baseline > schedule > scoped
+exception > warning phase), clock independence + digest reproducibility, and
+the warning-phase rule that a security rule is never silently downgraded.
+Audience: driver/lint/LSP adapters that resolve a diagnostic's severity.
+"""
+# @cover src/compiler/00.common/diagnostics/diagnostic_rule_policy.spl
+# @cover src/compiler/00.common/assurance/warning_phase.spl
+
+use std.spec
+use std.nogc_sync_mut.fs.text_io.{file_read_text}
+use compiler.common.diagnostics.diagnostic_rule_policy.{
+    RuleLevel, DiagnosticPolicySnapshot, PolicyResolveContext,
+    load_diagnostic_policy_text, diagnostic_policy_default_path
+}
+use compiler.common.assurance.warning_phase.{
+    phased_rule_severity_rank, severity_rank_deny, severity_rank_advisory
+}
+
+fn shipped() -> DiagnosticPolicySnapshot:
+    match load_diagnostic_policy_text(file_read_text(diagnostic_policy_default_path())):
+        Ok(s): s
+        Err(e):
+            panic("shipped policy failed to load: " + e)
+
+fn ctx_at(profile: text, edition: text, release_date: text) -> PolicyResolveContext:
+    PolicyResolveContext.new(profile, edition, release_date)
+
+# @manual_section: diagnostic_rule_policy
+describe "DiagnosticRulePolicy load (plan §4)":
+    it "loads the three seeded rules with their schedule fields and a sha256 digest":
+        # @req REQ-DIAG-POLICY-001
+        # @capture(value): rule count, SPL-TYPE-001 schedule, digest prefix
+        step("Load config/policy/diagnostic_policy.sdn")
+        val s = shipped()
+        step("Inspect the dense table and one rule's lifecycle fields")
+        expect(s.rule_count()).to_equal(3)
+        expect(s.has_rule("SPL-UNIT-001")).to_equal(true)
+        expect(s.has_rule("SPL-UNIT-002")).to_equal(true)
+        val r = s.rule("SPL-TYPE-001")
+        expect(r.error_not_before_date).to_equal("2027-05-01")
+        expect(r.error_since_lang_version).to_equal("2027.2")
+        expect(r.exception_policy).to_equal("reason_required")
+        expect(s.digest.starts_with("sha256:")).to_equal(true)
+        expect(s.digest.len()).to_equal(71)
+
+    it "rejects an unknown severity spelling instead of defaulting":
+        # @req REQ-DIAG-POLICY-001
+        step("Load a policy whose mode level is a typo")
+        val src = "diagnostic_policy:\n    version: 1\n    rules:\n        X-1:\n            modes:\n                default: denny\n"
+        match load_diagnostic_policy_text(src):
+            Ok(_): expect("loaded").to_equal("rejected")
+            Err(e): expect(e.contains("denny")).to_equal(true)
+
+describe "DiagnosticRulePolicy resolution order (plan §4)":
+    it "uses the profile baseline: SPL-TYPE-001 warns in moderate and denies in robust":
+        # @req REQ-DIAG-POLICY-002
+        val s = shipped()
+        step("Resolve on the current edition in two profiles")
+        val m = s.resolve("SPL-TYPE-001", ctx_at("moderate", "2026.11", "2026-11-12"), RuleLevel.Warn)
+        val r = s.resolve("SPL-TYPE-001", ctx_at("robust", "2026.11", "2026-11-12"), RuleLevel.Warn)
+        expect(m.level.name()).to_equal("warn")
+        expect(m.stage).to_equal("profile")
+        expect(r.level.name()).to_equal("deny")
+
+    it "makes an edition-mandatory rule deny only when edition AND release date are both reached":
+        # @req REQ-DIAG-POLICY-002
+        val s = shipped()
+        step("Edition 2027.2 but released before error_not_before")
+        val early = s.resolve("SPL-UNIT-001", ctx_at("moderate", "2027.2", "2027-04-30"), RuleLevel.Warn)
+        step("Edition 2027.2 released on error_not_before")
+        val due = s.resolve("SPL-UNIT-001", ctx_at("moderate", "2027.2", "2027-05-01"), RuleLevel.Warn)
+        expect(early.level.name()).to_equal("warn")
+        expect(due.level.name()).to_equal("deny")
+        expect(due.stage).to_equal("edition")
+
+    it "keeps a rule silent before its warn schedule starts":
+        # @req REQ-DIAG-POLICY-002
+        val s = shipped()
+        val before = s.resolve("SPL-UNIT-001", ctx_at("moderate", "2026.8", "2026-09-01"), RuleLevel.Warn)
+        expect(before.level.name()).to_equal("allow")
+        expect(before.stage).to_equal("schedule")
+
+    it "honours a scoped exception only when the rule's exception policy allows it":
+        # @req REQ-DIAG-POLICY-002
+        val s = shipped()
+        step("Exception on a deprecation rule vs on the security rule")
+        val c = ctx_at("moderate", "2026.11", "2026-11-12").with_scoped_exception()
+        val dep = s.resolve("SPL-UNIT-001", c, RuleLevel.Warn)
+        val sec = s.resolve("SPL-UNIT-002", c, RuleLevel.Warn)
+        expect(dep.level.name()).to_equal("allow")
+        expect(dep.stage).to_equal("exception")
+        expect(sec.level.name()).to_equal("deny")
+        expect(sec.stage).to_equal("security")
+
+    it "lets fatal corruption outrank every other stage":
+        # @req REQ-DIAG-POLICY-002
+        val s = shipped()
+        val c = ctx_at("moderate", "2026.8", "2026-09-01").with_fatal()
+        val r = s.resolve("SPL-UNIT-001", c, RuleLevel.Warn)
+        expect(r.level.name()).to_equal("deny")
+        expect(r.stage).to_equal("fatal")
+
+    it "passes an unregistered code through at its emitted level":
+        # @req REQ-DIAG-POLICY-002
+        val s = shipped()
+        val r = s.resolve("E9999", ctx_at("robust", "2026.11", "2026-11-12"), RuleLevel.Advisory)
+        expect(r.level.name()).to_equal("advisory")
+        expect(r.stage).to_equal("unregistered")
+
+describe "DiagnosticRulePolicy reproducibility (plan §4)":
+    it "gives the same severity and digest for the same edition and snapshot on any day":
+        # @req REQ-DIAG-POLICY-003
+        # @capture(value): two independent loads + resolves compare equal
+        step("Load twice and resolve with identical inputs")
+        val a = shipped()
+        val b = shipped()
+        val ra = a.resolve("SPL-TYPE-001", ctx_at("strict", "2026.11", "2026-11-12"), RuleLevel.Warn)
+        val rb = b.resolve("SPL-TYPE-001", ctx_at("strict", "2026.11", "2026-11-12"), RuleLevel.Warn)
+        expect(a.digest).to_equal(b.digest)
+        expect(ra.level.name()).to_equal(rb.level.name())
+        expect(ra.policy_digest).to_equal(a.digest)
+
+    it "uses policy_as_of for rehearsal instead of the release date":
+        # @req REQ-DIAG-POLICY-003
+        val s = shipped()
+        step("Release dated before error_not_before, rehearsal as of after it")
+        val c = ctx_at("moderate", "2027.2", "2027-01-01").with_policy_as_of("2027-06-01")
+        val r = s.resolve("SPL-UNIT-001", c, RuleLevel.Warn)
+        expect(r.level.name()).to_equal("deny")
+        expect(r.effective_date).to_equal("2027-06-01")
+
+    it "changes the digest when a rule's schedule changes":
+        # @req REQ-DIAG-POLICY-003
+        val base = "diagnostic_policy:\n    version: 1\n    rules:\n        X-1:\n            error_not_before_date: \"2027-05-01\"\n            modes:\n                default: warn\n"
+        val moved = "diagnostic_policy:\n    version: 1\n    rules:\n        X-1:\n            error_not_before_date: \"2027-06-01\"\n            modes:\n                default: warn\n"
+        var da = ""
+        var db = ""
+        match load_diagnostic_policy_text(base):
+            Ok(s): da = s.digest
+            Err(e): da = e
+        match load_diagnostic_policy_text(moved):
+            Ok(s): db = s.digest
+            Err(e): db = e
+        expect(da.starts_with("sha256:")).to_equal(true)
+        expect(da == db).to_equal(false)
+
+describe "Warning phase per-rule scheduling (plan §4)":
+    it "downgrades a non-security deny one rung under the blanket phase":
+        # @req REQ-DIAG-POLICY-004
+        expect(phased_rule_severity_rank(severity_rank_deny(), severity_rank_advisory(), true, false, false))
+            .to_equal(severity_rank_deny() - 1)
+
+    it "downgrades only the selected rule when the phase is selective":
+        # @req REQ-DIAG-POLICY-004
+        val s = shipped()
+        val c = ctx_at("robust", "2026.11", "2026-11-12").with_phased_rule("SPL-TYPE-001")
+        val r = s.resolve("SPL-TYPE-001", c, RuleLevel.Warn)
+        expect(r.level.name()).to_equal("warn")
+        expect(r.rehearsal).to_equal(true)
+        val plain = s.resolve("SPL-TYPE-001", ctx_at("robust", "2026.11", "2026-11-12"), RuleLevel.Warn)
+        expect(plain.rehearsal).to_equal(false)
+
+    it "never downgrades a security rule, blanket or selective":
+        # @req REQ-DIAG-POLICY-004
+        step("Pure rank transform with the security flag set")
+        expect(phased_rule_severity_rank(severity_rank_deny(), severity_rank_advisory(), true, true, true))
+            .to_equal(severity_rank_deny())
+        step("Policy resolve with blanket phase and the rule selected")
+        val s = shipped()
+        val c = ctx_at("robust", "2026.11", "2026-11-12").with_warning_phase().with_phased_rule("SPL-UNIT-002")
+        val r = s.resolve("SPL-UNIT-002", c, RuleLevel.Warn)
+        expect(r.level.name()).to_equal("deny")
+        expect(r.rehearsal).to_equal(false)

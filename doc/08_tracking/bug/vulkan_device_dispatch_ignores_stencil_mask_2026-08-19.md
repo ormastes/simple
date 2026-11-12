@@ -132,3 +132,32 @@ write, with completion state preserved. This is an explicit unsupported-work
 domain, not partial drawing or invented successful rendering. The same shared
 pure admission helper guards direct emulation calls. Near-axis and pre-write
 refusal scenarios remain authored/UNRUN alongside the previous cases.
+
+## 2026-11-12 presence verification (vulkan-mac lane, work/fix-vulkan-mac-20261112)
+
+Statically re-verified the 2026-11-07 repair against `7a06b4aafd5` (it is
+committed in this tree, not merely held):
+
+- All five masked entrypoints gate on `mask_buf.len() > 0` and route to the
+  shared host decompositions: `draw_line` (both axis/diagonal routes,
+  `backend_vulkan.spl:1426`), `draw_circle` (`:1486`),
+  `draw_circle_filled` (`:1490`), `draw_triangle_filled` (`:1530`),
+  `draw_gradient_rect` (`:1556`); unmasked branches keep the device kernels.
+- The arithmetic-domain repairs are present in `backend_emu.spl`:
+  `emu_line_host_work_admitted_v1` budget guard (max(4096, w*h) centre
+  steps, refusal before any write), i64-widened line error/doubled-error,
+  axis single-run stamping, i64 triangle edge functions with
+  `triangle-dispatch-size-invalid` span refusal and framebuffer-intersected
+  scan bounds, clipped rectangle bounds, bounded i64 circle floor-sqrt, and
+  i64 gradient channel interpolation.
+- The device-free regression spec
+  `test/01_unit/lib/gpu/engine2d/backend_vulkan_mask_plane_spec.spl` exists
+  (4x2 pixel oracles for all five entrypoints, both line routes, negative
+  radius, unknown-completion and extreme-span refusals).
+
+Runtime execution of the spec is still UNRUN on this host: the Oct-31 seed
+fails semantically on current src/lib (`byte_len`), and the provisional
+stage2 binary has no test/run command. Vulkan-vs-software masked-scene
+readback parity (`native_shader_backend_readback_matrix_spec.spl`) likewise
+awaits the admitted compiler. Status: fix-implemented-verification-pending
+(no new source change this lane).

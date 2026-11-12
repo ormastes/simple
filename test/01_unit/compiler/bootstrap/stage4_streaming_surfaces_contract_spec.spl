@@ -88,8 +88,12 @@ describe "Stage4 streaming surface ownership":
         expect(desugar).to_contain("function_headers: desugared_function_headers")
         expect(declarations).to_contain("pub class ModuleSurfaceParserOwner:")
         expect(declarations).to_contain("pub fn module_surface_from_owner(\n    owner: ModuleSurfaceParserOwner, source: SourceFile, source_index: i64\n) -> Result<ModuleSurface, text>:")
-        expect(declarations).to_contain("val callable = if owner.value.function_headers.contains_key(name):")
-        expect(declarations).to_contain("module_surface_callable_from_header(owner.value.function_headers[name])")
+        # Retargeted 2026-11-12: 205ea9e92a1 flattened ModuleSurfaceParserOwner
+        # to handle-sized limbs; `owner.value` is gone and the single sanctioned
+        # read path is `module_surface_owner_value(owner)` into `module_local`.
+        # Callables are still projected through the compact function headers.
+        expect(declarations).to_contain("val module_local: ParserModule = module_surface_owner_value(owner)")
+        expect(declarations).to_contain("val callable = if module_local.function_headers.contains_key(name):\n            val fn_header: ParserFunctionHeader = module_local.function_headers[name]\n            module_surface_callable_from_header(fn_header)")
         expect(helper).to_contain("val module_owner = ModuleSurfaceParserOwner.new(module)")
         expect(helper).to_contain("val surface_result = module_surface_from_owner(\n            module_owner, source, source_index)")
         expect(helper).to_contain("log_module_surface_stage(source_path, \"parse-start\")")
@@ -108,9 +112,14 @@ describe "Stage4 streaming surface ownership":
         expect(types).to_contain("type_alias_values: [ModuleSurfaceTypeAlias]")
         expect(types).to_contain("default_methods: [ParserFunction]")
         expect(types).to_contain("variants: [Variant]")
-        expect(declarations).to_contain("for name in owner.value.type_aliases.keys():")
+        # Retargeted 2026-11-12: 205ea9e92a1 reads aliases from the
+        # reconstructed `module_local` (no `owner.value`); 3d6a3b7a0f6 made
+        # alias_position a `var` re-derived from the frozen type_alias_names
+        # on a NAMEIDX six-miss (CHAINTABLE-HARDEN).
+        expect(declarations).to_contain("for name in module_local.type_aliases.keys():")
         expect(lowering).to_contain("if module_surface_name_position(m.type_alias_names, name) >= 0:")
-        expect(registration).to_contain("val alias_position = self.surface_name_position(surface_key, \"A\", imported_name)")
+        expect(registration).to_contain("var alias_position = self.surface_name_position(surface_key, \"A\", imported_name)")
+        expect(registration).to_contain("alias_position = module_surface_name_position(imported_mod.type_alias_names, imported_name)")
 
     it "requires every explicit Stage4 admission condition without a resource-profile gate":
         # @req REQ-SSPEC-UNIT

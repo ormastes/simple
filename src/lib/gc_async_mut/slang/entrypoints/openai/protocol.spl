@@ -10,6 +10,8 @@
 # binding a port.
 
 use std.common.json.parser.{json_parse_with_error}
+use std.common.json.object_ops.{json_object_get}
+use std.common.json.array_ops.{json_array_get, json_array_length}
 
 # One HTTP answer: numeric status plus a JSON body. Carrying the status as a
 # plain i32 keeps this module free of any HTTP server dependency.
@@ -86,7 +88,18 @@ fn json_string_field(source: text, key: text) -> text:
     while i < source.len():
         val ch = source.char_at(i)
         if escaped:
-            out = out + ch
+            # Decode the JSON control escapes. Dropping only the backslash
+            # turned every "\n" of a multi-line prompt into a literal "n"
+            # (measured 2026-11-12: "...alpha\nassistant:" reached the model
+            # as "alphanassistant:"). \uXXXX is still passed through undecoded.
+            if ch == "n":
+                out = out + "\n"
+            elif ch == "t":
+                out = out + "\t"
+            elif ch == "r":
+                out = out + "\r"
+            else:
+                out = out + ch
             escaped = false
         elif ch == "\\":
             escaped = true
@@ -192,22 +205,55 @@ fn parse_chat_request(body: text) -> Result<ChatRequest, text>:
         stream: false
     ))
 
-# Read a JSON string value for the LAST occurrence of `key`, rather than the
-# first. Chat requests carry one "content" per message, so the last one is the
-# newest turn — which is the prompt the engine must answer. Reading the first
-# would answer the system prompt instead, silently and plausibly.
-fn json_string_field_last(source: text, key: text) -> text:
-    val marker = "\"" + key + "\""
-    var at = source.rfind(marker)
-    if at < 0:
-        return ""
-    json_string_field(source.slice(at, source.len()), key)
+struct ChatMessage:
+    role: text
+    content: text
+
+# Every message of the request, in order, through the std JSON parser (so
+# escapes including \uXXXX are decoded). `content` may be a string, null (read
+# as empty) or an array of {"type":"text","text":...} parts, which are joined.
+# A body that does not parse, or has no messages array, yields no messages.
+fn chat_messages_from_body(body: text) -> [ChatMessage]:
+    var messages: [ChatMessage] = []
+    val parsed = json_parse_with_error(body)
+    if parsed.1 != "":
+        return messages
+    val list = json_object_get(parsed.0, "messages")
+    if list == nil or list.0 != "array":
+        return messages
+    val count = json_array_length(list)
+    var i = 0
+    while i < count:
+        val entry = json_array_get(list, i)
+        i = i + 1
+        if entry == nil or entry.0 != "object":
+            continue
+        val role = json_object_get(entry, "role")
+        if role == nil or role.0 != "string":
+            continue
+        val content = json_object_get(entry, "content")
+        var body_text = ""
+        if content != nil and content.0 == "string":
+            body_text = content.1
+        elif content != nil and content.0 == "array":
+            val parts = json_array_length(content)
+            var p = 0
+            while p < parts:
+                val part = json_array_get(content, p)
+                p = p + 1
+                if part == nil or part.0 != "object":
+                    continue
+                val part_text = json_object_get(part, "text")
+                if part_text != nil and part_text.0 == "string":
+                    body_text = body_text + part_text.1
+        messages.push(ChatMessage(role: role.1, content: body_text))
+    messages
 
 # OpenAI chat-completion envelope. Only emitted for text that a model actually
 # produced: nothing in this file fabricates a completion, and the stub path in
 # serving_chat.spl still returns an error rather than calling this.
 fn openai_chat_completion_response(model: text, content: text, prompt_tokens: i64, completion_tokens: i64) -> ApiResponse:
-    val body = "{\"id\":\"chatcmpl-slang\",\"object\":\"chat.completion\",\"created\":0,\"model\":\"" + _escape_json_text(model) + "\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"" + _escape_json_text(content) + "\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":" + prompt_tokens.to_text() + ",\"completion_tokens\":" + completion_tokens.to_text() + ",\"total_tokens\":" + (prompt_tokens + completion_tokens).to_text() + "}}"
+    val body = "{\"id\":\"chatcmpl-slang\",\"object\":\"chat.completion\",\"created\":0,\"model\":\"" + _escape_json_text(model) + "\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"" + _escape_json_text(content) + "\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":" + prompt_tokens.to_text() + ",\"completion_tokens\":" + completion_tokens.to_text() + ",\"total_tokens\":" + (prompt_tokens + completion_tokens).to_text() + "}}}}"
     ApiResponse(status: 200, body: body)
 
 # OpenAI error envelope: {"error":{"message","type","param","code"}}.
@@ -217,7 +263,7 @@ fn openai_error_response(status: i32, message: text, err_type: text, code: text,
     var inner = "\"message\":\"" + _escape_json_text(message) + "\",\"type\":\"" + _escape_json_text(err_type) + "\",\"param\":null,\"code\":\"" + _escape_json_text(code) + "\""
     if detail_json != "":
         inner = inner + "," + detail_json
-    ApiResponse(status: status, body: "{\"error\":{" + inner + "}}")
+    ApiResponse(status: status, body: "{\"error\":{" + inner + "}}}}")
 
 # OpenAI model-list envelope: {"object":"list","data":[{...}]}.
 fn openai_models_response(ids: [text], owner: text) -> ApiResponse:
@@ -233,4 +279,4 @@ fn openai_models_response(ids: [text], owner: text) -> ApiResponse:
 export ApiResponse, ChatRequest
 export json_string_field, json_int_field, json_bool_field_is_true, json_array_object_count
 export parse_chat_request, openai_error_response, openai_models_response
-export json_string_field_last, openai_chat_completion_response
+export ChatMessage, chat_messages_from_body, openai_chat_completion_response

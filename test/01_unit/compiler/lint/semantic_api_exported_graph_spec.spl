@@ -1,0 +1,240 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# Semantic-API exported-graph checker (unified unit/primitive-API plan
+# 2026-11-12 §10.1): the live primitive_api authority walks the parsed,
+# type-resolved declaration arena and reports one finding per primitive
+# leaf PATH reachable from the effectively exported type graph. Private
+# items stay silent; extern fns are an explicit FFI boundary.
+
+use std.spec.*
+use std.spec.step
+use compiler.core.ast.{ast_reset, module_get_decls}
+use compiler.core.parser.{parse_module_silent, parser_set_had_error}
+use compiler.semantics.lint.semantic_api.exported_graph.{
+    SemanticApiFinding, check_semantic_api_decls,
+    semantic_api_findings_non_boundary, semantic_api_findings_boundary
+}
+use compiler.semantics.lint.semantic_api.tag_walk.{semantic_api_tag_memo_hits}
+use compiler.semantics.lint.primitive_types.{primitive_class_of, is_public_api_primitive_name}
+use compiler.tools.lint.main.{Linter, LintLevel, LintProfile, lint_cli_source}
+
+fn _findings_of(source: text) -> [SemanticApiFinding]:
+    ast_reset()
+    parse_module_silent(source, "/tmp/semantic_api_graph_fixture.spl")
+    parser_set_had_error(false)
+    semantic_api_findings_non_boundary(check_semantic_api_decls(module_get_decls()))
+
+fn _boundary_of(source: text) -> [SemanticApiFinding]:
+    ast_reset()
+    parse_module_silent(source, "/tmp/semantic_api_graph_fixture.spl")
+    parser_set_had_error(false)
+    semantic_api_findings_boundary(check_semantic_api_decls(module_get_decls()))
+
+fn _members(fs: [SemanticApiFinding]) -> [text]:
+    var out: [text] = []
+    for f in fs:
+        out.push("{f.item_name}/{f.member}/{f.leaf}")
+    out
+
+fn _lint_codes(profile: LintProfile, path: text, source: text) -> [text]:
+    var linter = Linter.new(false)
+    linter.config.set_profile(profile)
+    var out: [text] = []
+    for r in lint_cli_source(linter, path, source):
+        if r.lint.code == "primitive_api":
+            val lvl = if r.lint.level == LintLevel.Deny: "deny" else: if r.lint.level == LintLevel.Warn: "warn" else: "allow"
+            out.push("{r.line}:{lvl}")
+    out
+
+describe "semantic_api exported-graph checker":
+    context "public fn signatures (MC-API-001)":
+        it "flags i64, u64, bool and f64 params plus the return, one per path":
+            # @req REQ-SSPEC-COMPILER
+            step("parse a pub fn with four primitive params and a bool return")
+            val fs = _findings_of("pub fn mix(a: i64, b: u64, c: bool, d: f64) -> bool:\n    c\n")
+            expect(fs.len()).to_equal(5)
+            expect(fs[0].code).to_equal("MC-API-001")
+            expect(fs[0].member).to_equal("param 'a'")
+            expect(fs[0].leaf).to_equal("i64")
+            expect(fs[4].member).to_equal("return")
+            expect(fs[4].leaf).to_equal("bool")
+
+        it "flags usize as the index class":
+            # @req REQ-SSPEC-COMPILER
+            step("usize is a public-API primitive even though it is not in the 11-type table")
+            expect(primitive_class_of("usize")).to_equal("index")
+            expect(is_public_api_primitive_name("usize")).to_equal(true)
+            val fs = _findings_of("pub fn at(i: usize) -> Item:\n    Item()\n")
+            expect(fs.len()).to_equal(1)
+            expect(fs[0].leaf).to_equal("usize")
+            expect(fs[0].class_name).to_equal("index")
+
+        it "does not flag the text family or char":
+            # @req REQ-SSPEC-COMPILER
+            step("text/str/char are classified, never flagged")
+            expect(primitive_class_of("text")).to_equal("text")
+            expect(primitive_class_of("char")).to_equal("char")
+            val fs = _findings_of("pub fn name(s: text, c: char) -> text:\n    s\n")
+            expect(fs.len()).to_equal(0)
+
+        it "reaches a leaf through nested generics Option<[u64]> with the path spelled":
+            # @req REQ-SSPEC-COMPILER
+            step("nested Option<[u64]> yields exactly one finding whose path names the nesting")
+            val fs = _findings_of("pub fn sizes() -> Option<[u64]>:\n    nil\n")
+            expect(fs.len()).to_equal(1)
+            expect(fs[0].leaf).to_equal("u64")
+            expect(fs[0].path).to_equal("Option<[u64]>")
+
+        it "reaches leaves through tuples and Dict<K, V>, one finding per path":
+            # @req REQ-SSPEC-COMPILER
+            step("(text, i32) is one path; Dict<i64, i64> is two")
+            val t = _findings_of("pub fn pair() -> (text, i32):\n    (\"\", 0)\n")
+            expect(t.len()).to_equal(1)
+            expect(t[0].leaf).to_equal("i32")
+            val d = _findings_of("pub fn table(m: Dict<i64, i64>) -> Unit:\n    Unit()\n")
+            expect(d.len()).to_equal(2)
+            expect(d[0].path).to_equal("Dict<i64, _>")
+            expect(d[1].path).to_equal("Dict<_, i64>")
+
+        it "reaches a leaf through a generic instance Result<Count, u8>":
+            # @req REQ-SSPEC-COMPILER
+            step("the base name is a wrapper; every argument is walked")
+            val fs = _findings_of("class Count:\n    pub n: Total\npub fn parse() -> Result<Count, u8>:\n    Err(0)\n")
+            expect(fs.len()).to_equal(1)
+            expect(fs[0].leaf).to_equal("u8")
+
+        it "resolves a module alias: type Fd = i64 used in a pub fn":
+            # @req REQ-SSPEC-COMPILER
+            step("the alias name is chased to its aliased tag")
+            val fs = _findings_of("type Fd = i64\npub fn read(fd: Fd) -> Bytes:\n    Bytes()\n")
+            expect(fs.len()).to_equal(1)
+            expect(fs[0].leaf).to_equal("i64")
+            expect(fs[0].path).to_equal("Fd=i64")
+
+        it "reports a raw pointer once, not once for the pointer and once for the pointee":
+            # @req REQ-SSPEC-COMPILER
+            step("*u8 is one finding of class pointer")
+            val fs = _findings_of("pub fn raw(p: *u8) -> Handle:\n    Handle()\n")
+            expect(fs.len()).to_equal(1)
+            expect(fs[0].class_name).to_equal("pointer")
+
+        it "skips the receiver of a method but not its other params":
+            # @req REQ-SSPEC-COMPILER
+            step("pub me scale(factor: f64) on a pub class flags only factor")
+            val fs = _findings_of("pub class Box:\n    pub me scale(factor: f64):\n        pass\n")
+            expect(fs.len()).to_equal(1)
+            expect(fs[0].member).to_equal("param 'factor'")
+
+    context "fields, enum payloads and aliases (MC-API-002)":
+        it "flags a pub field of a pub class and stays silent on its private field":
+            # @req REQ-SSPEC-COMPILER
+            step("only the exported field is on the API surface")
+            val fs = _findings_of("pub class Packet:\n    pub flags: u8\n    seq: u32\n")
+            expect(fs.len()).to_equal(1)
+            expect(fs[0].code).to_equal("MC-API-002")
+            expect(fs[0].member).to_equal("field 'flags'")
+
+        it "flags enum variant payloads, named and positional":
+            # @req REQ-SSPEC-COMPILER
+            step("Bad(payload: i64) and Raw(u16) are both walked; Clean is silent")
+            val fs = _findings_of("pub enum Ev:\n    Bad(payload: i64)\n    Raw(u16)\n    Clean\n")
+            expect(fs.len()).to_equal(2)
+            expect(fs[0].member).to_equal("variant 'Bad' field 'payload'")
+            expect(fs[0].leaf).to_equal("i64")
+            expect(fs[1].member).to_equal("variant 'Raw' payload #0")
+            expect(fs[1].leaf).to_equal("u16")
+
+        it "flags a public alias to a primitive at the alias itself":
+            # @req REQ-SSPEC-COMPILER
+            step("export Fd makes the alias part of the surface")
+            val fs = _findings_of("type Fd = i64\nexport Fd\n")
+            expect(fs.len()).to_equal(1)
+            expect(fs[0].member).to_equal("alias")
+
+    context "effective visibility":
+        it "keeps private items silent (counterexample)":
+            # @req REQ-SSPEC-COMPILER
+            step("a private fn, a private class field and a private enum emit nothing")
+            val fs = _findings_of("fn helper(x: i64) -> i64:\n    x\nclass Hidden:\n    pub n: i64\nenum Secret:\n    V(i32)\n")
+            expect(fs.len()).to_equal(0)
+
+        it "treats an export list as visibility (__init__ style)":
+            # @req REQ-SSPEC-COMPILER
+            step("export helper promotes a non-pub fn to the surface")
+            val fs = _findings_of("fn helper(x: i64) -> i64:\n    x\nexport helper\n")
+            expect(fs.len()).to_equal(2)
+
+        it "treats export * as everything public":
+            # @req REQ-SSPEC-COMPILER
+            step("export * makes the plain fn part of the surface")
+            val fs = _findings_of("fn helper(x: i64) -> Unit:\n    Unit()\nexport *\n")
+            expect(fs.len()).to_equal(1)
+
+        it "promotes a private type reached from a public surface":
+            # @req REQ-SSPEC-COMPILER
+            step("pub fn make() -> Inner exports Inner's pub field transitively")
+            val fs = _findings_of("class Inner:\n    pub n: i64\npub fn make() -> Inner:\n    Inner(n: 0)\n")
+            expect(fs.len()).to_equal(1)
+            expect(fs[0].item_name).to_equal("Inner")
+            expect(fs[0].member).to_equal("field 'n'")
+
+        it "does not crash on re-exports and reports nothing for them":
+            # @req REQ-SSPEC-COMPILER
+            step("export use other.thing and export other.* carry no in-file definitions")
+            val fs = _findings_of("export use compiler.core.types.span_line\nexport compiler.core.ast.*\n")
+            expect(fs.len()).to_equal(0)
+
+        it "walks class-body methods with the owner's visibility":
+            # @req REQ-SSPEC-COMPILER
+            step("pub fn eq(other) -> bool inside a pub class is API; a private method is not")
+            val fs = _findings_of("pub class P:\n    pub id: Ident\n    pub fn eq(other: P) -> bool:\n        true\n    fn hidden(n: i64) -> i64:\n        n\n")
+            var saw_eq = false
+            var saw_hidden = false
+            for f in fs:
+                if f.item_name == "P.eq" and f.member == "return" and f.leaf == "bool":
+                    saw_eq = true
+                if f.item_name == "P.hidden":
+                    saw_hidden = true
+            expect(saw_eq).to_equal(true)
+            expect(saw_hidden).to_equal(false)
+
+    context "FFI boundary (MC-API-003)":
+        it "reports extern fn signatures separately, never as a primitive_api finding":
+            # @req REQ-SSPEC-COMPILER
+            step("extern fn rt_read(fd: i64) -> i64 is two boundary findings and zero API findings")
+            val src = "extern fn rt_read(fd: i64) -> i64\n"
+            expect(_findings_of(src).len()).to_equal(0)
+            val b = _boundary_of(src)
+            expect(b.len()).to_equal(2)
+            expect(b[0].code).to_equal("MC-API-003")
+            expect(b[0].boundary).to_equal(true)
+
+    context "memoization":
+        it "visits a shared type node once per run":
+            # @req REQ-SSPEC-COMPILER
+            step("two pub fns spelling Option<[u64]> reuse the memoized leaf set")
+            val fs = _findings_of("pub fn a() -> Option<[u64]>:\n    nil\npub fn b(x: Option<[u64]>) -> Unit:\n    Unit()\n")
+            expect(fs.len()).to_equal(2)
+            expect(semantic_api_tag_memo_hits() >= 1).to_equal(true)
+
+    context "live lint wiring":
+        it "emits primitive_api once per path with Deny under robust and Warn under moderate":
+            # @req REQ-SSPEC-COMPILER
+            step("the same source through lint_cli_source carries code primitive_api at the decl line")
+            val src = "pub fn sizes() -> Option<[u64]>:\n    nil\n"
+            val robust = _lint_codes(LintProfile.Robust, "/tmp/semantic_api_graph_robust.spl", src)
+            expect(robust.len()).to_equal(1)
+            expect(robust[0]).to_equal("1:deny")
+            val moderate = _lint_codes(LintProfile.Moderate, "/tmp/semantic_api_graph_moderate.spl", src)
+            expect(moderate.len()).to_equal(1)
+            expect(moderate[0]).to_equal("1:warn")
+
+        it "stays silent for a private fn and honours @allow(primitive_api)":
+            # @req REQ-SSPEC-COMPILER
+            step("private counterexample and item-scoped allow both yield no primitive_api result")
+            val private_codes = _lint_codes(LintProfile.Robust, "/tmp/semantic_api_graph_private.spl", "fn sizes() -> Option<[u64]>:\n    nil\n")
+            expect(private_codes.len()).to_equal(0)
+            val allowed = _lint_codes(LintProfile.Robust, "/tmp/semantic_api_graph_allowed.spl", "@allow(primitive_api) # reason: wire adapter\npub fn sizes() -> Option<[u64]>:\n    nil\n")
+            expect(allowed.len()).to_equal(0)
+            val file_allowed = _lint_codes(LintProfile.Robust, "/tmp/semantic_api_graph_file_allowed.spl", "#![allow(primitive_api)]\npub fn sizes() -> Option<[u64]>:\n    nil\n")
+            expect(file_allowed.len()).to_equal(0)

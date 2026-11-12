@@ -1,0 +1,27 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# NVMe lba + sector_count admission must not wrap u64; packed layout preserved.
+
+use std.spec.step
+use std.spec.{describe, it, expect}
+use os.drivers.nvme.nvme_transfer_command.{nvme_io_lba_range_reason, nvme_read_io_command}
+
+describe "NVMe lba range wraparound":
+    it "an lba near u64 max is refused instead of wrapping past the namespace":
+        # @req REQ-SSPEC-UNIT
+        step("lba 0xFFFFFFFFFFFFFFFF, count 2, namespace 16 sectors")
+        expect(nvme_io_lba_range_reason(0xFFFFFFFFFFFFFFFFu64, 2u32, 16u64)).to_equal("nvme-io-beyond-namespace-capacity")
+
+    it "a full-capacity namespace admits only the last in-range window":
+        # @req REQ-SSPEC-UNIT
+        step("namespace of u64 max sectors: lba max-8 + 8 ok, lba max-7 + 8 refused")
+        expect(nvme_io_lba_range_reason(0xFFFFFFFFFFFFFFF7u64, 8u32, 0xFFFFFFFFFFFFFFFFu64)).to_equal("ready")
+        expect(nvme_io_lba_range_reason(0xFFFFFFFFFFFFFFF8u64, 8u32, 0xFFFFFFFFFFFFFFFFu64)).to_equal("nvme-io-beyond-namespace-capacity")
+
+    it "a high lba keeps the cdw10/cdw11 split exact":
+        # @req REQ-SSPEC-UNIT
+        step("lba 0x1_2345_6789 split into low/high dwords, cdw12 = count - 1")
+        val cmd = nvme_read_io_command(0x123456789u64, 4u32, 0x200000u64, 0x200000000u64).unwrap()
+        expect(cmd.cdw10).to_equal(0x23456789u32)
+        expect(cmd.cdw11).to_equal(1u32)
+        expect(cmd.cdw12).to_equal(3u32)

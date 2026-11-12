@@ -1,6 +1,9 @@
 # @req REQ-SOSIX-ATOMIC-COPY-V1
 use std.spec.*
-use std.nogc_sync_mut.io.dir_ops.{dir_create, dir_list, dir_remove}
+use std.nogc_sync_mut.io.dir_ops.{dir_create, dir_remove}
+use std.nogc_sync_mut.io.dir_entry_ops.{
+    directory_stream_open, directory_stream_count, directory_stream_close
+}
 use std.nogc_sync_mut.io.file_ops.{file_modified_time}
 use std.nogc_sync_mut.fs.host_path.{host_is_windows_host}
 use std.nogc_sync_mut.io.retained_file.{
@@ -15,6 +18,20 @@ use std.nogc_sync_mut.sosix.atomic_copy_v1.{
 }
 
 val ROOT: text = "/tmp/sosix_atomic_copy_v1_spec"
+
+# Entry-count oracle. `dir_list` shells out to `ls` and `dir_walk` rides
+# rt_dir_walk — both silently return no entries on a native Windows host — so
+# the count is taken through the rt_readdir directory-stream provider, which
+# observes the same directory the fixtures write through. The provider lists
+# real entries only: "." and ".." dot-entries are excluded from
+# directory_stream_count, so the counts below are true fixture-entry counts.
+fn root_entry_count(path: text) -> i64:
+    val handle = directory_stream_open(path)
+    if handle <= 0:
+        return -1
+    val count = directory_stream_count(handle)
+    directory_stream_close(handle)
+    count
 
 fn write_atomic_copy_fixture(path: text, bytes: [u8]) -> bool:
     val file = match retained_file_open(path, 16777216u64, true):
@@ -69,7 +86,7 @@ describe "SOSIX verified binary atomic copy V1":
         expect(write_atomic_copy_fixture(source_path, bytes)).to_be(true)
         expect(write_atomic_copy_fixture(destination, bytes)).to_be(true)
         val before_time = file_modified_time(destination)
-        val before_entries = dir_list(ROOT).len()
+        val before_entries = root_entry_count(ROOT)
         val held_destination = match open_atomic_copy_fixture(destination):
             case Ok(file): file
             case Err(_):
@@ -95,7 +112,7 @@ describe "SOSIX verified binary atomic copy V1":
         val held_identity_result = retained_file_identity_unchanged(held_destination)
         expect(held_identity_result.is_ok()).to_be(true)
         expect(file_modified_time(destination)).to_equal(before_time)
-        expect(dir_list(ROOT).len()).to_equal(before_entries)
+        expect(root_entry_count(ROOT)).to_equal(before_entries)
         val after_destination = match open_atomic_copy_fixture(destination):
             case Ok(file): file
             case Err(_):
@@ -180,7 +197,7 @@ describe "SOSIX verified binary atomic copy V1":
         expect(result.is_err()).to_be(true)
         if result.is_err(): expect(result.unwrap_err().kind).to_equal(SosixAtomicCopyErrorKindV1.SourceDigestMismatch)
         expect_atomic_copy_bytes(destination, old_bytes)
-        expect(dir_list(ROOT).len()).to_equal(2)
+        expect(root_entry_count(ROOT)).to_equal(2)
         expect(source_closed).to_be(true)
 
     it "creates an absent destination from the frozen binary source":
@@ -221,7 +238,7 @@ describe "SOSIX verified binary atomic copy V1":
         val source_closed = source.close()
         expect(result.is_err()).to_be(true)
         if result.is_err(): expect(result.unwrap_err().kind).to_equal(SosixAtomicCopyErrorKindV1.DestinationRead)
-        expect(dir_list(ROOT).len()).to_equal(2)
+        expect(root_entry_count(ROOT)).to_equal(2)
         expect(source_closed).to_be(true)
 
     it "does not collapse a missing parent into a missing destination":
@@ -238,7 +255,7 @@ describe "SOSIX verified binary atomic copy V1":
         val source_closed = source.close()
         expect(result.is_err()).to_be(true)
         if result.is_err(): expect(result.unwrap_err().kind).to_equal(SosixAtomicCopyErrorKindV1.DestinationInspect)
-        expect(dir_list(ROOT).len()).to_equal(1)
+        expect(root_entry_count(ROOT)).to_equal(1)
         expect(source_closed).to_be(true)
 
     it "copies an empty binary object without inventing a nonzero extent":

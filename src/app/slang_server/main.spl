@@ -29,7 +29,7 @@ use std.nogc_sync_mut.http_server.server.{SimpleHttpServer, SecureServerPolicy, 
 use std.nogc_sync_mut.http_server.router.{Router}
 use std.nogc_sync_mut.http_server.types.{HttpRequest, HttpResponse, http_method_to_text, http_status_from_code, pure_text_to_i64}
 use std.gc_async_mut.slang.entrypoints.openai.api_server.{slang_api_dispatch}
-use std.gc_async_mut.slang.engine.llm_engine.{engine_set_n_ctx_text}
+use std.gc_async_mut.slang.engine.llm_engine.{engine_set_n_ctx_text, engine_preload}
 use std.io_runtime.{get_args}
 
 # Handlers are plain function pointers, so the configured model root is held
@@ -85,6 +85,21 @@ fn main():
     if not plaintext:
         print "Error: pass --plaintext-development explicitly; production startup requires TLS"
         return
+
+    # Connections are handled on one thread each, so the model has to be
+    # resident before the first accept (see engine_preload). Each in-flight
+    # request then owns its own context over the shared weights, and requests
+    # decode concurrently.
+    val preload = _arg_value(args, "--model=", "")
+    if preload == "":
+        print "Error: pass --model=<id> (a directory name under --models); the model must be resident before the first connection is accepted"
+        return
+    match engine_preload(SLANG_MODEL_ROOT, preload):
+        Err(reason):
+            print "Error: --model={preload} could not be loaded: {reason}"
+            return
+        Ok(_):
+            print "  resident:   {preload} (loaded before accept; one context per in-flight request)"
 
     match plaintext_development_capability("slang local serving over loopback"):
         Err(e):

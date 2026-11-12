@@ -2186,6 +2186,11 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_memory_barrier", memory::rt_memory_barrier);
     insert_simple!("rt_load_barrier", memory::rt_load_barrier);
     insert_simple!("rt_store_barrier", memory::rt_store_barrier);
+    // CPU control-register / TLB primitives: host no-ops (see the handlers in
+    // memory.rs) so kernel-memory specs can run VMM flows on the interpreter.
+    insert_simple!("rt_read_cr3", memory::rt_read_cr3);
+    insert_simple!("rt_write_cr3", memory::rt_write_cr3);
+    insert_simple!("rt_invlpg", memory::rt_invlpg);
     insert_simple!("rt_ptr_write_u8", memory::rt_ptr_write_u8);
     insert_simple!("rt_ptr_write_bytes", memory::rt_ptr_write_bytes);
     insert_simple!("rt_ptr_write_bytes_raw", memory::rt_ptr_write_bytes_raw);

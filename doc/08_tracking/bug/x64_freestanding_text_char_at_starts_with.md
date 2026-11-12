@@ -148,3 +148,33 @@ in the merged kernel (NVMe BAR high + FAT stream open). The sshd exec dispatch
 (this session) is already wired and calls `fs_exec_spawn_ring3` correctly; it is
 gated on this reader landing.
 
+
+## 2026-11-12 fix attempt (baremetal lane, work/fix-baremetal-20261112)
+
+State at 7a06b4aafd5, lane file scope `examples/09_embedded/simple_os/**` +
+baremetal runtime C:
+
+1. **Deep-stack `starts_with` residual: UNFIXED, out of lane scope.** The
+   frame-depth-sensitive mis-discrimination is a compiler codegen defect
+   (src/compiler), which this lane may not touch. The raw-byte workaround in
+   `ssh_session.spl` must stay. No new execution evidence claimed.
+2. **Loader/boot-integration blocker: verified already landed.** The
+   documented fix (a) — pre-read `/FSEXEC.ELF` into the static path-read
+   buffer before pmm/vmm — is present at HEAD in
+   `examples/09_embedded/simple_os/arch/x86_64/ssh_ring3_entry.spl:62-75`
+   (pre-nvme/net/vmm preload + `simpleos_fat32_note_preload_size` receipt).
+3. **In-scope defect fixed: `simpleos_fat32_note_preload_size` had NO C
+   definition anywhere in the tree** — the extern in ssh_ring3_entry.spl
+   would silently bind to an auto-generated weak NIL stub (the exact
+   silent-stub class of baremetal_entry_closure_class_instantiation_fault).
+   Added the real definition to
+   `examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c`
+   (stores the size; new `simpleos_fat32_preload_size()` getter exposes it
+   to the exec path). **Verified:** the complete `baremetal_stubs.c` compiles
+   for `x86_64-unknown-none` with
+   `-ffreestanding -fno-builtin -fno-stack-protector -mno-red-zone -fno-pic`
+   (clang, exit 0) and `nm` shows `T simpleos_fat32_note_preload_size` /
+   `T simpleos_fat32_preload_size`. Consumption of the resident buffer by
+   the spawn path is `src/os/**` work — out of this lane's scope.
+
+**Status: OPEN** (compiler codegen residual). DB row updated.

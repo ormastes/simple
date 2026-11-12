@@ -1875,6 +1875,34 @@ pub fn rt_store_barrier(args: &[Value]) -> Result<Value, CompileError> {
     memory_barrier(args, std::sync::atomic::Ordering::Release, "rt_store_barrier")
 }
 
+/// Interpreter no-op counterparts of the native CPU control-register and TLB
+/// primitives (`rt_read_cr3` / `rt_write_cr3` / `rt_invlpg` in
+/// `runtime_native.c` and baremetal `runtime_minimal.c`). The host
+/// interpreter has no CR3 or TLB: reads return 0 and the mutating calls do
+/// nothing, which is exactly what the kernel-memory integration specs
+/// (test/02_integration/os/) need to exercise VMM flows end to end
+/// (2026-11-12, work/fix-pmm-crash-20261112).
+pub fn rt_read_cr3(args: &[Value]) -> Result<Value, CompileError> {
+    if !args.is_empty() {
+        return Err(CompileError::runtime("rt_read_cr3 requires 0 arguments"));
+    }
+    Ok(Value::Int(0))
+}
+
+pub fn rt_write_cr3(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 1 {
+        return Err(CompileError::runtime("rt_write_cr3 requires 1 argument (value)"));
+    }
+    Ok(Value::Nil)
+}
+
+pub fn rt_invlpg(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 1 {
+        return Err(CompileError::runtime("rt_invlpg requires 1 argument (addr)"));
+    }
+    Ok(Value::Nil)
+}
+
 /// Volatile read/write family mirroring the native runtime's
 /// `rt_volatile_read_u{8,16,32,64}` / `rt_volatile_write_u{8,16,32,64}`.
 /// Addresses are process-memory addresses, as with the sibling raw pointer
