@@ -1,7 +1,7 @@
 # HIR cache never hits: every lookup rejected with header:1 (2026-10-26)
 
 **Date:** 2026-10-26
-**Status:** open
+**Status:** fixed (verified 2026-11-12, see below)
 **Evidence:** `C:/dev/hircfg-probe/logs/`, `C:/dev/hircfg-probe/summary.txt`
 **Compiler:** `build/s2hw/stage2.exe`, run as `native-build --source src --entry src/hello.spl --target <triple> --cache-dir C:/dev/hircfg-probe/cache --emit-object`
 **Severity:** P2
@@ -78,3 +78,33 @@ argv0.exe (`native_build_compiler_exe_candidates_v1`); when none hashes, print
 once instead of failing silently. Spec
 `test/01_unit/compiler/80.driver/compiler_exe_hash_candidates_spec.spl` 3/3.
 Pending: stage3 repeat-build run showing hits>0.
+
+## Verified fixed 2026-11-12 (aarch64 Linux, admitted pure-Simple Stage 2)
+Compiler: `build/bootstrap-fable-13/stage2/aarch64-unknown-linux-gnu/simple`
+(pinned source f8ad54b28467), `native-build src/compiler/bootstrap_admission/p2_add.spl
+--backend=cranelift --threads 1`, `SIMPLE_CACHE_SCOPE=hircache-probe-20261112`,
+same cache dir across runs:
+
+```
+run1 (cold)   [hir-cache] hits=0 misses=1 stores=1 ... rejected=absent:1,header:0,...   24 s
+run2 (repeat) [hir-cache] hits=1 misses=0 stores=0 ... rejected=absent:0,header:0,...    7 s
+              [hir-cache] adopted=1 lowered=0
+run3 (--target x86_64-unknown-linux-gnu --emit-object)  hits=0 misses=1 stores=1  (second key 9e808c2b...)
+run4 (aarch64 again)                                     hits=1 misses=0 stores=0  (own key 97490549... intact)
+```
+
+Both filed symptoms are gone: the repeat build hits, and a second target writes
+its own entry instead of overwriting the first (the key folds the target context,
+`_hir_cache_key_target_part`). Both stored headers are identical and carry a real
+`frontend-exe=<sha256>` (no `uncacheable-` token), so the 2026-11-07/11-09 fixes
+hold on this host. Regression guards, all green on the Rust seed at the release tip:
+`hir_cache_hit_across_processes_spec` 3/3 ("writes two distinct files for two
+targets"), `hir_cache_header_determinism_spec` 4/4, `hir_cache_key_target_spec` 4/4,
+`compiler_exe_hash_candidates_spec` 3/3. The original Windows bare-name `.exe`
+case remains spec-verified only (not re-run here).
+
+Status: fixed. The modules that are still cold on every Stage 3 build on this host
+are a different class — the HIR codec cannot decode a nil-encoded non-optional enum
+scalar (an unlabeled `break` is `HirExprKind.Break(label: text, value: HirExpr?)`
+with `label` on the wire as `\N`); tracked in
+`stage2_native_hir_cache_selfcheck_enum_wire_decode_2026-11-12.md`.

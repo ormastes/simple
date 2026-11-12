@@ -24,7 +24,7 @@ use std.common.image.ppm_decode.{encode_ppm_p6}
 use std.gc_async_mut.gpu.engine2d.backend_software.{SoftwareBackend}
 use std.gc_async_mut.gpu.engine2d.color.{rgba, color_r, color_g, color_b, color_a}
 use std.nogc_async_mut.compute.exec_target.{
-    DeviceClass, ComputeBackend, EnforceMode, BackendCaps, ExecTarget,
+    ComputeDeviceClass, ComputeBackend, EnforceMode, BackendCaps, ExecTarget,
     resolve_exec_target
 }
 use std.nogc_async_mut.compute.backend_dispatch.{
@@ -70,7 +70,7 @@ fn _caps_has(backend: text, caps: BackendCaps) -> bool:
         return caps.has_webgpu
     return false
 
-fn probe_backend(backend: text, caps: BackendCaps) -> BackendProbe:
+pub fn probe_backend(backend: text, caps: BackendCaps) -> BackendProbe:
     if _caps_has(backend, caps):
         return BackendProbe(backend: backend, available: true, reason: "")
     return BackendProbe(
@@ -139,7 +139,7 @@ fn _source_is_known(source: text) -> bool:
 # `engine2d_readback_with_identity` and so must publish identity > 0; the DirectX
 # DXVK lane (backend_directx.spl:452/454) uses `engine2d_readback_with_handle`
 # and publishes NO identity, so demanding one there would be a false red.
-fn assert_provenance_invariants(label: text, source: text, handle: i64, identity: i64, pixel_count: i64, expected_px: i64, attests_identity: bool):
+pub fn assert_provenance_invariants(label: text, source: text, handle: i64, identity: i64, pixel_count: i64, expected_px: i64, attests_identity: bool):
     if not _source_is_known(source):
         print "[probe-provenance] {label}: UNKNOWN READBACK SOURCE '{source}' — outside the honest vocabulary, failing closed"
     expect(_source_is_known(source)).to_equal(true)
@@ -157,7 +157,7 @@ fn assert_provenance_invariants(label: text, source: text, handle: i64, identity
 # Prints GPU-PROVEN or an explicit "proves NOTHING about the GPU path" skip line,
 # and RETURNS whether a device is proven. Device-only assertions hang off this
 # return value — off a FACT, never off the probe.
-fn report_outcome(label: text, source: text, handle: i64, identity: i64, pixel_count: i64, expected_px: i64) -> bool:
+pub fn report_outcome(label: text, source: text, handle: i64, identity: i64, pixel_count: i64, expected_px: i64) -> bool:
     if device_proven(source, handle, identity, pixel_count, expected_px):
         print "[probe-gpu] {label}: GPU-PROVEN — a device produced this frame (source={source} handle={handle} identity={identity} pixels={pixel_count})"
         return true
@@ -187,7 +187,7 @@ fn report_no_frame(label: text, source: text) -> bool:
 # The absolute drawing oracle is a real framebuffer download encoded as a P6
 # PPM (doc research: encode_ppm_p6 at common/image/ppm_decode.spl:111). Callers
 # feed a [u32] ARGB readback and get a header-prefixed byte stream.
-fn read_pixels_ppm(width: i32, height: i32, pixels: [u32]) -> [u8]:
+pub fn read_pixels_ppm(width: i32, height: i32, pixels: [u32]) -> [u8]:
     return encode_ppm_p6(width as u32, height as u32, pixels)
 
 # ---------------------------------------------------------------------------
@@ -205,7 +205,7 @@ fn expected_kernel_marker(target: PortableComputeTarget) -> text:
         case Metal: "[[thread_position_in_grid]]"
         case WebGpu: "@compute @workgroup_size"
 
-fn assert_fill_kernel_markers(target: PortableComputeTarget, name: text):
+pub fn assert_fill_kernel_markers(target: PortableComputeTarget, name: text):
     val a = emit_portable_u32_fill_kernel(target, name)
     expect(a.source).to_contain(expected_kernel_marker(target))
     expect(a.source).to_contain(name)
@@ -213,19 +213,19 @@ fn assert_fill_kernel_markers(target: PortableComputeTarget, name: text):
     if target == PortableComputeTarget.Metal:
         expect(a.source).to_contain("kernel void {name}")
 
-fn assert_add_kernel_markers(target: PortableComputeTarget, name: text):
+pub fn assert_add_kernel_markers(target: PortableComputeTarget, name: text):
     val a = emit_portable_u32_add_kernel(target, name)
     expect(a.source).to_contain(expected_kernel_marker(target))
     expect(a.source).to_contain(name)
 
 # Reject / unknown-backend branch: the portable emitter accepts
 # cuda/hip/opencl/metal/webgpu; Vulkan and any unknown name are closed.
-fn assert_kernel_backend_rejected(backend_name: text, expected_status: text):
+pub fn assert_kernel_backend_rejected(backend_name: text, expected_status: text):
     val d = portable_compute_backend_target_diagnostic(backend_name)
     assert_false(d.accepted)
     expect(d.status).to_equal(expected_status)
 
-fn assert_kernel_backend_accepted(backend_name: text, expected_target: text):
+pub fn assert_kernel_backend_accepted(backend_name: text, expected_target: text):
     val d = portable_compute_backend_target_diagnostic(backend_name)
     assert_true(d.accepted)
     expect(d.target_name).to_equal(expected_target)
@@ -255,14 +255,14 @@ fn caps_for(backend: ComputeBackend) -> BackendCaps:
     return c
 
 fn gpu_target(backend: ComputeBackend) -> ExecTarget:
-    return resolve_exec_target(DeviceClass.Gpu, backend, EnforceMode.Suggest, caps_for(backend))
+    return resolve_exec_target(ComputeDeviceClass.Gpu, backend, EnforceMode.Suggest, caps_for(backend))
 
 fn bool_to_i(b: bool) -> i64:
     if b:
         return 1
     return 0
 
-fn assert_payload_gating(backend: ComputeBackend):
+pub fn assert_payload_gating(backend: ComputeBackend):
     val target = gpu_target(backend)
     # The requested device really resolved to itself and is a device lane.
     expect(target.backend).to_equal(backend)
@@ -283,15 +283,15 @@ fn assert_payload_gating(backend: ComputeBackend):
 # ---------------------------------------------------------------------------
 # ExecTarget suggest vs require-absent (fail-closed) shared body.
 # ---------------------------------------------------------------------------
-fn assert_suggest_falls_back():
+pub fn assert_suggest_falls_back():
     # GPU class, SUGGEST, bare machine: never fails — falls back to CPU.
-    val t = resolve_exec_target(DeviceClass.Gpu, ComputeBackend.NoneBackend, EnforceMode.Suggest, BackendCaps.none())
+    val t = resolve_exec_target(ComputeDeviceClass.Gpu, ComputeBackend.NoneBackend, EnforceMode.Suggest, BackendCaps.none())
     assert_true(t.resolved)
     assert_true(t.is_cpu())
 
-fn assert_require_absent_fails_closed():
+pub fn assert_require_absent_fails_closed():
     # GPU class, REQUIRE, bare machine: resolved=false so the caller rt_exit 70.
-    val t = resolve_exec_target(DeviceClass.Gpu, ComputeBackend.NoneBackend, EnforceMode.Require, BackendCaps.none())
+    val t = resolve_exec_target(ComputeDeviceClass.Gpu, ComputeBackend.NoneBackend, EnforceMode.Require, BackendCaps.none())
     assert_false(t.resolved)
     expect(t.backend).to_equal(ComputeBackend.NoneBackend)
 
@@ -345,7 +345,7 @@ fn _bitmap_renderer() -> FontRenderer:
     renderer.use_bitmap = true
     return renderer
 
-fn assert_bitmap_no_payload(prefix: text, codepoint: i32):
+pub fn assert_bitmap_no_payload(prefix: text, codepoint: i32):
     clear_bitmap_payload(prefix)
     reset_bitmap_font_raster_stats()
     var renderer = _bitmap_renderer()
@@ -356,7 +356,7 @@ fn assert_bitmap_no_payload(prefix: text, codepoint: i32):
     expect(stats.cpu_fallback_hits).to_be_greater_than(0)
     expect(stats.unavailable_reason).to_equal("production-gpu-dispatch-not-wired")
 
-fn assert_bitmap_matching(prefix: text, reason: text):
+pub fn assert_bitmap_matching(prefix: text, reason: text):
     clear_bitmap_payload(prefix)
     reset_bitmap_font_raster_stats()
     set_bitmap_payload(prefix, "66", reason)
@@ -372,7 +372,7 @@ fn assert_bitmap_matching(prefix: text, reason: text):
     expect(stats.unavailable_reason).to_equal(reason)
     clear_bitmap_payload(prefix)
 
-fn assert_bitmap_corrupt_rejected(prefix: text, reason: text):
+pub fn assert_bitmap_corrupt_rejected(prefix: text, reason: text):
     clear_bitmap_payload(prefix)
     reset_bitmap_font_raster_stats()
     set_bitmap_payload(prefix, "66", reason)
@@ -401,7 +401,7 @@ fn new_surface(width: i32, height: i32) -> SoftwareBackend:
 fn _px(pixels: [u32], width: i32, x: i32, y: i32) -> u32:
     return pixels[(y * width + x) as i64]
 
-fn assert_color_eq(actual: u32, expected: u32):
+pub fn assert_color_eq(actual: u32, expected: u32):
     expect(color_r(actual)).to_equal(color_r(expected))
     expect(color_g(actual)).to_equal(color_g(expected))
     expect(color_b(actual)).to_equal(color_b(expected))
@@ -409,7 +409,7 @@ fn assert_color_eq(actual: u32, expected: u32):
 
 # Draw one primitive on a fresh surface, read the framebuffer back, and assert
 # the drawn fixed point equals the draw color and the background point stays bg.
-fn assert_primitive_readback(kind: text):
+pub fn assert_primitive_readback(kind: text):
     val col = rgba(255, 0, 0, 255)
     val w = 20
     val h = 20

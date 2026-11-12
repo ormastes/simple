@@ -509,6 +509,9 @@ fn _preferred_host_key_match(client_list: text, server_list: text) -> text:
 fn _is_aes_gcm(cipher: text) -> bool:
     cipher == "aes256-gcm@openssh.com" or cipher == "aes128-gcm@openssh.com"
 
+fn _is_supported_cipher(cipher: text) -> bool:
+    _is_aes_gcm(cipher) or _is_aes256_ctr(cipher)
+
 fn _is_aes256_ctr(cipher: text) -> bool:
     cipher == "aes256-ctr"
 
@@ -561,24 +564,16 @@ fn ssh_negotiate_algorithms(client: SshKexInit, server: SshKexInit) -> Result<Ss
     if host_key == "":
         return Err("no matching host key algorithm")
 
-    var cipher_c2s = ""
-    if _list_contains(client.encryption_client_to_server, "aes256-gcm@openssh.com") and _list_contains(server.encryption_client_to_server, "aes256-gcm@openssh.com"):
-        cipher_c2s = "aes256-gcm@openssh.com"
-    elif _list_contains(client.encryption_client_to_server, "aes128-gcm@openssh.com") and _list_contains(server.encryption_client_to_server, "aes128-gcm@openssh.com"):
-        cipher_c2s = "aes128-gcm@openssh.com"
-    elif _list_contains(client.encryption_client_to_server, "aes256-ctr") and _list_contains(server.encryption_client_to_server, "aes256-ctr"):
-        cipher_c2s = "aes256-ctr"
-    if cipher_c2s == "":
+    # RFC 4253 section 7.1: the first client-proposed algorithm that also
+    # appears on the server's list wins. Fail closed when that first common
+    # name is outside the implemented allowlist — never skip ahead to a
+    # weaker mutually-listed preference.
+    val cipher_c2s = _first_match(client.encryption_client_to_server, server.encryption_client_to_server)
+    if cipher_c2s == "" or not _is_supported_cipher(cipher_c2s):
         return Err("no matching cipher (c2s)")
 
-    var cipher_s2c = ""
-    if _list_contains(client.encryption_server_to_client, "aes256-gcm@openssh.com") and _list_contains(server.encryption_server_to_client, "aes256-gcm@openssh.com"):
-        cipher_s2c = "aes256-gcm@openssh.com"
-    elif _list_contains(client.encryption_server_to_client, "aes128-gcm@openssh.com") and _list_contains(server.encryption_server_to_client, "aes128-gcm@openssh.com"):
-        cipher_s2c = "aes128-gcm@openssh.com"
-    elif _list_contains(client.encryption_server_to_client, "aes256-ctr") and _list_contains(server.encryption_server_to_client, "aes256-ctr"):
-        cipher_s2c = "aes256-ctr"
-    if cipher_s2c == "":
+    val cipher_s2c = _first_match(client.encryption_server_to_client, server.encryption_server_to_client)
+    if cipher_s2c == "" or not _is_supported_cipher(cipher_s2c):
         return Err("no matching cipher (s2c)")
 
     var mac_c2s = ""

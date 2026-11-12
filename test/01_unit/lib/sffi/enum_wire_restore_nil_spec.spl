@@ -1,0 +1,61 @@
+# @tag:in-development
+"""
+# enum_wire_restore_nil rebuilds a typed enum whose wire slot was nil
+
+The HIR codec decodes a nil-encoded non-optional scalar (the `label` of an
+unlabeled `HirExprKind.Break(label: text, value: HirExpr?)`, wire tag 37) by
+constructing the typed prototype and asking `enum_wire_restore_nil` to put the
+runtime nil word back into that slot. The restored value must still carry the
+prototype's enum identity and discriminant and expose the nil slot through
+`enum_wire_nil_slot`, or every HIR cache entry holding such a node is rejected
+at decode (`enum wire enum allocation failed`).
+
+Known RED (filed, do not weaken):
+`doc/08_tracking/bug/stage2_native_hir_cache_selfcheck_enum_wire_decode_2026-11-12.md`
+— `src/lib/nogc_sync_mut/sffi/enum_wire.spl` declares `rt_enum_new -> i64` (RTI-007
+workaround 99a45712909) so the rebuilt handle is corrupted in every lane; the seed
+interpreter additionally has no `rt_enum_new` entry (interpreter_extern/mod.rs).
+Unblock: restore `rt_enum_new<T> -> T`, keep the handle intact through the
+`Result<T, text>` return on the native lane, and back `rt_enum_new` in the seed
+interpreter table.
+"""
+use std.nogc_sync_mut.sffi.enum_wire.{enum_wire_restore_nil, enum_wire_nil_slot}
+
+enum WireProbe:
+    Unit
+    One(label: text)
+    Pair(label: text, value: i64?)
+
+fn verdict<T>(restored: Result<T, text>) -> text:
+    match restored:
+        case Ok(_): "ok"
+        case Err(detail): detail
+
+fn slot_text(slot: Result<bool, text>) -> text:
+    match slot:
+        case Ok(is_nil): "nil={is_nil}"
+        case Err(detail): detail
+
+describe "enum_wire_restore_nil keeps the prototype identity":
+    it "restores a single-field variant with its only slot nil":
+        val restored = enum_wire_restore_nil<WireProbe>(WireProbe.One(""), 1, [0])
+        expect(verdict<WireProbe>(restored)).to_equal("ok")
+        match restored:
+            case Ok(value): expect(slot_text(enum_wire_nil_slot<WireProbe>(value, 1, 0))).to_equal("nil=true")
+            case Err(_): ()
+
+    it "restores a two-field variant with slot 0 nil and slot 1 intact":
+        val restored = enum_wire_restore_nil<WireProbe>(WireProbe.Pair("", Some(7)), 2, [0])
+        expect(verdict<WireProbe>(restored)).to_equal("ok")
+        match restored:
+            case Ok(value):
+                expect(slot_text(enum_wire_nil_slot<WireProbe>(value, 2, 0))).to_equal("nil=true")
+                expect(slot_text(enum_wire_nil_slot<WireProbe>(value, 2, 1))).to_equal("nil=false")
+                match value:
+                    case WireProbe.Pair(_, kept): expect(kept ?? -1).to_equal(7)
+                    case _: expect("variant").to_equal("WireProbe.Pair")
+            case Err(_): ()
+
+    it "returns the prototype unchanged when no slot is nil":
+        val restored = enum_wire_restore_nil<WireProbe>(WireProbe.Pair("x", None), 2, [])
+        expect(verdict<WireProbe>(restored)).to_equal("ok")
