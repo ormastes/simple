@@ -47,6 +47,8 @@ use compiler.semantics.lint.collection_patterns.{check_collection_patterns}
 use compiler.semantics.lint.star_import.{check_star_export_file}
 use compiler.semantics.lint.stub_impl.{check_stub_impl}
 use compiler.semantics.lint.wide_public.{check_wide_public_file}
+use compiler.semantics.lint.semantic_api.exported_graph.{check_semantic_api_decls}
+use compiler.tools.fix.rules.impl_.lint_allow.{lines_allow_rule, line_is_allowed}
 use compiler.semantics.lint.option_me_call.{check_option_me_call_source}
 use compiler.semantics.lint.required_comment.{check_required_comment, required_comment_source_may_match}
 use compiler.common.assurance.mc_exceptions.{mc_exception_report_line}
@@ -232,6 +234,52 @@ fn lint_cli_source_with_parsed_revision(
         return results
     lint_cli_append_parsed_results(linter, path, content, revision.decls, results)
 
+fn _append_semantic_api_results(
+    config: LintConfig, path: String, content: String, decls: [i64],
+    initial_results: [LintRunResult]
+) -> [LintRunResult]:
+    """primitive_api — the recursive exported-type-graph checker
+    (compiler.semantics.lint.semantic_api.exported_graph) is the live
+    authority: public fns/fields/enum payloads/aliases/class-body members,
+    nested generics, tuples, aliases, export lists. It emits exactly one
+    finding per (item, member, type path). Private items are silent. The
+    shallow text rule (lint_checks.spl `check_primitive_api`) is the quick
+    scanner; a text finding on a line this checker also reports is dropped so
+    one leak is reported once. `@allow(primitive_api)` is honoured per line
+    and file-wide. Extern/FFI signatures (MC-API-003) are a boundary, not an
+    API leak: reported as `primitive_api_boundary` only under Critical, never
+    denied. Robust/Critical keep `primitive_api=deny` (config_and_model
+    `_strict_robust_levels`), which is what fails admission closed."""
+    var results = initial_results
+    val lines = content.split("\n")
+    if lines_allow_rule(lines, "primitive_api"):
+        return results
+    val findings = check_semantic_api_decls(decls)
+    val critical = config.profile.? and config.profile.unwrap() == LintProfile.Critical
+    var reported_lines: Dict<text, bool> = {}
+    for f in findings:
+        if f.line > 0 and line_is_allowed(lines, f.line - 1, "primitive_api"):
+            continue
+        val code = if f.boundary: "primitive_api_boundary" else: "primitive_api"
+        if f.boundary and not critical:
+            continue
+        val policy = lint_policy_decision(config, code, LintLevel.Warn, LintEvidenceTier.ParsedStructural)
+        if not policy.keep: continue
+        val level = if f.boundary and policy.level == LintLevel.Deny: LintLevel.Warn else: policy.level
+        val lint = LintDiag.new(code, level, LintCategory.Warning, f.fmt())
+            .with_evidence_tier(LintEvidenceTier.ParsedStructural)
+        results.push(LintRunResult.new(path, f.line, 0, lint))
+        if not f.boundary:
+            reported_lines["{f.line}"] = true
+    if reported_lines.len() == 0:
+        return results
+    var deduped: [LintRunResult] = []
+    for r in results:
+        if r.lint.code == "primitive_api" and r.lint.easy_fix.? and reported_lines.contains_key("{r.line}"):
+            continue
+        deduped.push(r)
+    deduped
+
 fn lint_cli_append_parsed_results(
     linter: Linter, path: String, content: String, decls: [i64],
     initial_results: [LintRunResult]
@@ -354,6 +402,7 @@ fn lint_cli_append_parsed_results(
         val message = "{warning.message} ({warning.export_count} symbols, threshold {warning.threshold})"
         val lint = LintDiag.new(warning.code, level, LintCategory.Warning, message)
         results.push(LintRunResult.new(path, warning.line, 0, lint))
+    results = _append_semantic_api_results(config, path, content, decls, results)
     # OPTME001 — a `me` (mutating) method called through a `T?` receiver
     # silently discards the write. Single-file index: this path only resolves
     # classes declared in the SAME file. The cross-file census (most real sites

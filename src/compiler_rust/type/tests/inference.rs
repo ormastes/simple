@@ -59,9 +59,9 @@ fn infers_tuple_literal() {
 #[test]
 fn grouped_import_alias_is_available_to_type_checking() {
     let items = parse_items(
-        r#"use os.kernel.boot.mmio_hardware.{mmio_read64 as hardware_mmio_read64}
+        r#"use os.kernel.boot.mmio_hardware.{hardware_mmio_read64 as hw_read64}
 fn read_hardware(addr: u64) -> u64:
-    hardware_mmio_read64(addr)
+    hw_read64(addr)
 "#,
     );
 

@@ -34,3 +34,35 @@ loudly (never `ok=true exit=0`). Keep `backends_spec.spl` strict; it goes green 
 Related (different symptom, same area):
 `doc/08_tracking/bug/vulkan_instance_init_fails_under_run_but_not_test_2026-08-25.md`.
 
+
+## 2026-11-12 fix attempt — lane fix-runpath-gpu-20261112 (investigated, no in-scope fix)
+
+Located the shared state named in the suspects: the GMB-1 mailbox arena and
+its sentinel/reader cursor live in
+`src/lib/common/svmg/mailbox_const.spl` / `src/lib/common/svmg/ref_vm.spl`
+and are consumed by the lane executors in
+`src/lib/gc_async_mut/gpu_lane/` (`cuda_vm_executor.spl`,
+`vulkan_vm_executor.spl`, `cuda_lane_session.spl`,
+`vulkan_lane_session.spl`) plus `std.nogc_sync_mut.test_runner.gpu_mailbox`.
+The re-arm/teardown-ordering fix ("either fix the shared state so both
+lanes run in one process, or make the second lane FAIL loudly") belongs in
+those files. This lane's touch scope covers only
+`src/lib/nogc_sync_mut/gpu/vulkan_vm/**`, which does not exist in the tree
+(the executor is under `gc_async_mut/gpu_lane`) — so the fix site is out of
+scope and no fake change was made.
+
+Also noted: on current HEAD the hosted `vulkan_vm` lane
+(`_run_vulkan_vm_lane` in `test_executor_hosted_lanes.spl`) runs a canned
+`HALT 7` program per process and never runs CUDA and Vulkan lanes in one
+process, so the interference still has no coverage — matching this
+record's observation.
+
+Recommended reassignment: a lane owning `src/lib/gc_async_mut/gpu_lane/**`
+(and, if the fail-loud half is chosen, `src/lib/common/svmg/**`), with a
+two-backend same-process conformance spec kept strict per the Unblock
+section.
+
+Verification pending: `examples/08_gpu/backends/backends_spec.spl` going
+green (4 passed) on a 2x-NVIDIA Vulkan 1.4 host.
+
+Status: OPEN (suspects confirmed in source; fix site out of lane scope).

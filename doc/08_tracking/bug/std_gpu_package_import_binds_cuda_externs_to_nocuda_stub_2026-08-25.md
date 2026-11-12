@@ -78,3 +78,37 @@ Re-verify this symptom only with a binary built from the tree under test, or aft
 ## Round 15 note (2026-11-07, work/r15-stdlib-20261107)
 
 Repro spec test/01_unit/lib/gpu_import_path_parity_spec.spl (@tag:host-cuda): package vs direct import device-count parity. Vacuous (0==0) on GPU-less Windows; verify on a CUDA host.
+
+## 2026-11-12 package-surface repair (vulkan-mac lane, work/fix-vulkan-mac-20261112)
+
+Re-checked the current tree at `7a06b4aafd5` with the seed's module-resolution
+rule in hand (module_loader.rs: a GLOB import of `X` prefers the sibling
+`X/__init__.spl` package over the `X.spl` file when the package exists). The
+2026-08-25 "not a bug" correction stands for the seed dispatch mechanism, but
+it exposed a current stdlib-source gap in scope for this lane: the
+`std.gpu` PACKAGE (`src/lib/gc_async_mut/gpu/__init__.spl`) did not
+re-export any device-query function, so `use std.gpu.*` +
+`gpu_device_count()` failed with an undefined symbol — the documented
+tutorial surface could not even ask how many GPUs exist, while the direct
+import (`use std.gc_async_mut.gpu_ops.*`) could.
+
+Fix (parity by construction, no new provider, no behavior change for the
+direct path): `gpu/__init__.spl` now re-exports `gpu_init`, `gpu_set_device`,
+`gpu_device_count`, `gpu_device_name`, `gpu_device_compute_capability`, and
+`gpu_device_total_memory` FROM `gc_async_mut.gpu_ops` — the same module the
+direct import and the `gpu.spl` hub bind — so both import paths are
+guaranteed the same rt_cuda_* provider by construction. Names were checked
+for collision against the package's existing curated exports
+(device/memory/context/builtins/graphics); none.
+
+Host verification (this Mac has no CUDA, so 0 == 0, but the previously
+failing package path now executes):
+
+    package_import.spl (`use std.gpu.*`)     -> COUNT=0
+    direct_import.spl  (`use std.gc_async_mut.gpu_ops.*`) -> COUNT=0
+
+The parity spec `test/01_unit/lib/gpu_import_path_parity_spec.spl` itself
+cannot run under the Oct-31 seed (test-runner code uses `byte_len`, the
+documented seed semantic gap); it is expected to run green on any CUDA host
+or under the admitted compiler. Status: fix-implemented-verification-pending
+(CUDA-host N==N parity pending).

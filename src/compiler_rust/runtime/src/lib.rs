@@ -752,6 +752,26 @@ pub extern "C" fn rt_store_barrier() {
     std::sync::atomic::fence(std::sync::atomic::Ordering::Release);
 }
 
+// CPU control-register / TLB primitives, implemented as host no-ops.
+//
+// These three are real instructions in the C runtimes (`runtime_native.c`,
+// baremetal `runtime_minimal.c`) used by native/freestanding kernel builds.
+// Under the interpreter there is no CR3 or TLB to touch: the kernel-memory
+// integration specs (test/02_integration/os/) run PMM/VMM flows on the host
+// and previously died here with "extern is declared in Simple but backed by
+// no implementation". `rt_read_cr3` returns 0 — the current address space on
+// the host is a fiction the specs never assert against.
+#[no_mangle]
+pub extern "C" fn rt_read_cr3() -> i64 {
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn rt_write_cr3(_value: i64) {}
+
+#[no_mangle]
+pub extern "C" fn rt_invlpg(_addr: i64) {}
+
 /// Optimization barrier for constant-time code -- returns its argument.
 ///
 /// Contract: `extern fn rt_black_box(value: i64) -> i64`

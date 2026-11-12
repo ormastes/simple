@@ -9,9 +9,8 @@
 # + `exact_ratio_mul/div` arithmetic from `src/lib/common/units/model/world_units.spl`.
 
 use compiler.core.types.{
-    newunit_count, newunit_name_at, newunit_suffix_at, newunit_underlying_tag_at,
     unit_decl_count, unit_decl_name_at, unit_decl_role_at, unit_decl_short_symbol_at,
-    unit_decl_underlying_tag_at, unit_decl_alias_of_at,
+    unit_decl_underlying_tag_at, unit_decl_alias_of_at, unit_decl_legacy_origin_at,
     type_tag_name
 }
 use std.common.units.model.world_units.{
@@ -70,6 +69,7 @@ class UnitRegistry:
     by_path: {text: UnitEntry}          # "unit.simple-lang.length.km" -> entry
     composites: {text: UnitExpression}  # "kmph" -> folded UnitExpression
     registered: i64                    # unique entries passed to register_entry
+    collisions: [text]                 # SPL-UNIT-004 messages, in registration order
 
     pub static fn new() -> UnitRegistry:
         """Empty registry — use register_unit / register_composite / unit_registry_build to populate."""
@@ -78,7 +78,8 @@ class UnitRegistry:
             by_full: {},
             by_path: {},
             composites: {},
-            registered: 0
+            registered: 0,
+            collisions: []
         )
 
     pub me register_unit(name: text, expr: UnitExpression) -> UnitEntry:
@@ -106,9 +107,22 @@ class UnitRegistry:
         Entries with an empty short_symbol (aliases and markers declared
         without a suffix) are indexed by full name only — an empty string is
         not a lookup key. `registered` counts each call once, so an entry
-        living in several indices still counts as one."""
+        living in several indices still counts as one.
+
+        Suffix lookup is a plain dict key match, so `Bc` and `bc` are distinct.
+        A second full name claiming an already-indexed suffix is a collision:
+        the first registration keeps the suffix and a deterministic
+        SPL-UNIT-004 message is recorded (registration order is the parser's
+        declaration order, so the message is stable across builds)."""
         if entry.short_symbol != "":
-            self.by_short[entry.short_symbol] = entry
+            match self.by_short.get(entry.short_symbol):
+                case Some(prior):
+                    if prior.full_symbol != entry.full_symbol:
+                        self.collisions.push("SPL-UNIT-004: unit suffix `_" + entry.short_symbol + "` is already declared by `" + prior.full_symbol + "`; `" + entry.full_symbol + "` must use a distinct suffix")
+                    else:
+                        self.by_short[entry.short_symbol] = entry
+                case None:
+                    self.by_short[entry.short_symbol] = entry
         if entry.full_symbol != "" and entry.full_symbol != entry.short_symbol:
             self.by_full[entry.full_symbol] = entry
         if entry.module_path != "":
@@ -280,50 +294,58 @@ fn unit_registry_build() -> UnitRegistry:
     """Build the registry consumed at compile start (after parsing, before
     typecheck).
 
-    Source of truth: two parser-side pools in compiler.core.types — the
-    legacy newunit records (`newunit Name: T as suffix`, role "nominal") and
-    the canonical unit-declaration records (`unit` declarations with role
-    nominal/alias/marker/...). The parser stores declarations as flat ids, so
-    there is no Module AST value to walk. Remaining gap: `unit.*` catalog
-    modules with `unit`/`composite` declarations — those decl forms are not
-    parsed yet; extend this builder once Track C pins their shapes."""
+    Source of truth: ONE parser-side pool in compiler.core.types — the
+    canonical unit-declaration records. `unit`, `newunit`, and numeric
+    `newtype` all lower into that pool (the legacy spellings with
+    legacy_origin set), so there is exactly one registration per declared
+    unit and no duplicate registries. The parser stores declarations as flat
+    ids, so there is no Module AST value to walk. Remaining gap: `unit.*`
+    catalog modules with `composite` declarations — not parsed yet."""
     val reg = UnitRegistry.new()
-    unit_registry_collect_newunits(reg)
     unit_registry_collect_unit_decls(reg)
     reg
 
-fn unit_registry_collect_newunits(reg: UnitRegistry) -> i64:
-    """Register every parser-recorded `newunit Name: T as suffix` into `reg`.
+pub fn unit_registry_collisions(reg: UnitRegistry) -> [text]:
+    """Deterministic SPL-UNIT-004 suffix-collision messages recorded while
+    building `reg` (declaration order). Empty when every suffix is unique."""
+    reg.collisions
 
-    short_symbol = the literal suffix (what `10_uid` looks up),
-    full_symbol  = the declared type name,
-    kind         = the underlying primitive's name (e.g. 'i64'),
-    role         = "nominal" — legacy spellings lower to the canonical role.
-    Newunits are nominal 1:1 wrappers — Count class, unit base factor.
+fn unit_registry_entry_from_decl(i: i64) -> UnitEntry:
+    val name = unit_decl_name_at(i)
+    val short = unit_decl_short_symbol_at(i)
+    val tag = unit_decl_underlying_tag_at(i)
+    val kind = if tag == 0: "" else: type_tag_name(tag)
+    val base = if short != "": short else: name
+    val origin = unit_decl_legacy_origin_at(i)
+    val path_prefix = if origin == "newunit": "newunit." else: "unit."
+    unit_entry(
+        short_symbol: short,
+        full_symbol: name,
+        module_path: path_prefix + name,
+        kind: kind,
+        klass: UnitClass.Count,
+        base_factor: exact_ratio(1, 1),
+        expression: unit_expression_from_base(base),
+        role: unit_decl_role_at(i),
+        alias_of: unit_decl_alias_of_at(i)
+    )
+
+fn unit_registry_collect_newunits(reg: UnitRegistry) -> i64:
+    """Register only the legacy-origin (`newunit`) rows of the canonical pool
+    into `reg`. Kept as a view for callers that want the deprecated subset;
+    unit_registry_build does not call it (it would double-register).
     Returns the number of entries registered."""
     var n = 0
     var i = 0
-    while i < newunit_count():
-        val name = newunit_name_at(i)
-        val suffix = newunit_suffix_at(i)
-        val entry = unit_entry(
-            short_symbol: suffix,
-            full_symbol: name,
-            module_path: "newunit." + name,
-            kind: type_tag_name(newunit_underlying_tag_at(i)),
-            klass: UnitClass.Count,
-            base_factor: exact_ratio(1, 1),
-            expression: unit_expression_from_base(suffix),
-            role: "nominal",
-            alias_of: ""
-        )
-        reg.register_entry(entry)
-        n = n + 1
+    while i < unit_decl_count():
+        if unit_decl_legacy_origin_at(i) == "newunit":
+            reg.register_entry(unit_registry_entry_from_decl(i))
+            n = n + 1
         i = i + 1
     n
 
 fn unit_registry_collect_unit_decls(reg: UnitRegistry) -> i64:
-    """Register every canonical `unit` declaration into `reg`.
+    """Register every canonical unit-declaration row into `reg`.
 
     short_symbol = the declared suffix ("" for suffix-less declarations —
     those stay full-name-only in the registry indices),
@@ -336,23 +358,7 @@ fn unit_registry_collect_unit_decls(reg: UnitRegistry) -> i64:
     var n = 0
     var i = 0
     while i < unit_decl_count():
-        val name = unit_decl_name_at(i)
-        val short = unit_decl_short_symbol_at(i)
-        val tag = unit_decl_underlying_tag_at(i)
-        val kind = if tag == 0: "" else: type_tag_name(tag)
-        val base = if short != "": short else: name
-        val entry = unit_entry(
-            short_symbol: short,
-            full_symbol: name,
-            module_path: "unit." + name,
-            kind: kind,
-            klass: UnitClass.Count,
-            base_factor: exact_ratio(1, 1),
-            expression: unit_expression_from_base(base),
-            role: unit_decl_role_at(i),
-            alias_of: unit_decl_alias_of_at(i)
-        )
-        reg.register_entry(entry)
+        reg.register_entry(unit_registry_entry_from_decl(i))
         n = n + 1
         i = i + 1
     n

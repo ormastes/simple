@@ -4582,8 +4582,17 @@ static int spl_core_string_is_ascii(RtCoreString* s) {
 }
 
 static int64_t spl_core_string_cp_len(RtCoreString* s) {
-    if (spl_core_string_is_ascii(s)) return (int64_t)s->len;
-    return (int64_t)spl_text_cp_len_bytes((const uint8_t*)s->data, s->len);
+    /* Cached path first: one atomic load instead of an O(n) scan on every
+     * call (rt_slice / rt_text_find / len() re-enter here per piece). */
+    int64_t cached = rt_str_cached_cp_count(s);
+    if (cached >= 0) return cached;
+    if (spl_core_string_is_ascii(s)) {
+        rt_str_cache_cp_count(s, s->len);
+        return (int64_t)s->len;
+    }
+    uint64_t n = spl_text_cp_len_bytes((const uint8_t*)s->data, s->len);
+    rt_str_cache_cp_count(s, n);
+    return (int64_t)n;
 }
 
 static int64_t spl_core_string_byte_to_cp(RtCoreString* s, uint64_t byte) {
@@ -4773,10 +4782,11 @@ static uint64_t rt_str_first_non_ascii(const uint8_t* data, uint64_t len) {
  * strings are immutable and the flag is positive-only (set => proven ASCII;
  * unset => unknown), so a missed cache only costs a rescan, never a wrong answer.
  *
- * NOTE: deliberately does NOT touch the cp-count field (bits [29:0]). That field
- * overlaps RT_CORE_STRING_FLAG_SHARED at bit 0, so writing a cp-count would clear
- * the SHARED bit and defeat rt_string_free's refusal to free interned literals.
- * See the report accompanying this change. */
+ * NOTE: deliberately does NOT touch the cp-count field. That field shares the
+ * `reserved` word with RT_CORE_STRING_FLAG_* (low nibble); the layout in
+ * runtime_simd_dispatch.h now keeps them disjoint (count in bits [29:4], valid
+ * at bit 30, ASCII memo at bit 3), but this fast path has no count to write.
+ * See doc/08_tracking/bug/rt_text_slice_cp_index_quadratic_scv_prime_hang_2026-11-12.md. */
 int64_t rt_string_char_code_at(int64_t string, int64_t index) {
     RtCoreString* s = rt_core_as_string(string);
     const uint8_t* data;
@@ -4803,7 +4813,7 @@ int64_t rt_string_char_code_at(int64_t string, int64_t index) {
         uint64_t first_hi = rt_str_first_non_ascii(data, len);
         if (first_hi == len) {
             /* Whole string is ASCII: char index == byte index, now and forever. */
-            if (s) s->reserved |= SIMD_CACHE_FLAG_IS_ASCII;
+            if (s) __atomic_fetch_or(&s->reserved, SIMD_CACHE_FLAG_IS_ASCII, __ATOMIC_RELAXED);
             return data[index];
         }
         if (first_hi > (uint64_t)index) {
@@ -5950,7 +5960,7 @@ int64_t rt_slice(int64_t value, int64_t start, int64_t end, int64_t step) {
     const uint8_t* sd = (const uint8_t*)s->data;
     int ascii = spl_core_string_is_ascii(s);
     int64_t byte_len = (int64_t)s->len;
-    int64_t len = ascii ? byte_len : (int64_t)spl_text_cp_len_bytes(sd, s->len);
+    int64_t len = ascii ? byte_len : spl_core_string_cp_len(s);
     int64_t begin = start;
     int64_t finish = end;
     int64_t stride = step;
@@ -6247,6 +6257,11 @@ static char* core_text_dup_abi(int64_t value) {
 }
 
 int64_t rt_text_is_ascii(int64_t value) {
+    /* Heap text: consult/update the shared positive-only ASCII memo so
+     * repeated callers (e.g. str_split's dispatch) pay O(1) after the first
+     * scan instead of re-walking the buffer every call. */
+    RtCoreString* s = rt_core_as_string(value);
+    if (s) return spl_core_string_is_ascii(s) ? 1 : 0;
     int64_t len = rt_string_len(value);
     if (len < 0) return 0;
     const uint8_t* data = rt_string_data(value);
@@ -20004,38 +20019,47 @@ int64_t spl_str_ptr(const char* value) {
 /* ================================================================
  * Reserved-Field Cache Helpers for RtCoreString
  *
- * Bit layout (see runtime_simd_dispatch.h for constants):
- *   Bit 31     = is-ASCII validity flag
- *   Bit 30     = cp-count validity flag
- *   Bit 29     = is-ASCII value (meaningful only when bit 31 = 1)
- *   Bits [28:0] = codepoint count (meaningful only when bit 30 = 1)
+ * Bit layout (see runtime_simd_dispatch.h for the shared contract):
+ *   Bit  3      = all-ASCII memo (== RT_CORE_STRING_FLAG_ASCII)
+ *   Bit 30      = cp-count-valid
+ *   Bits [29:4] = codepoint count (26 bits, cap RT_STR_CACHE_CP_MAX)
+ * The write is a compare-and-swap loop: it only stores when the valid bit
+ * is not yet set, so it can never drop a concurrently-set
+ * RT_CORE_STRING_FLAG_* bit, and the cached value is deterministic for
+ * immutable heap text, so losing a race against an identical write is
+ * harmless. Strings at/above the count cap are never cached.
  * ================================================================ */
 
 void rt_str_cache_cp_count(RtCoreString* s, uint64_t count) {
     if (!s) return;
-    if (count > SIMD_CACHE_CPCOUNT_MASK) return;
-    uint32_t r = s->reserved;
-    r |= SIMD_CACHE_FLAG_CPCOUNT_VALID;
-    r = (r & ~SIMD_CACHE_CPCOUNT_MASK) | ((uint32_t)count & SIMD_CACHE_CPCOUNT_MASK);
-    s->reserved = r;
+    if (count > RT_STR_CACHE_CP_MAX) return;
+    uint32_t want = RT_STR_CACHE_CP_VALID | ((uint32_t)count << RT_STR_CACHE_CP_SHIFT);
+    uint32_t old = __atomic_load_n(&s->reserved, __ATOMIC_RELAXED);
+    while (!(old & RT_STR_CACHE_CP_VALID)) {
+        uint32_t next = (old & ~RT_STR_CACHE_CP_FIELD) | want;
+        if (__atomic_compare_exchange_n(&s->reserved, &old, next, 0,
+                                        __ATOMIC_RELAXED, __ATOMIC_RELAXED))
+            return;
+    }
 }
 
 int64_t rt_str_cached_cp_count(RtCoreString* s) {
+    uint32_t r;
     if (!s) return -1;
-    if (!(s->reserved & SIMD_CACHE_FLAG_CPCOUNT_VALID)) return -1;
-    return (int64_t)(s->reserved & SIMD_CACHE_CPCOUNT_MASK);
+    r = __atomic_load_n(&s->reserved, __ATOMIC_RELAXED);
+    if (!(r & RT_STR_CACHE_CP_VALID)) return -1;
+    return (int64_t)((r & RT_STR_CACHE_CP_FIELD) >> RT_STR_CACHE_CP_SHIFT);
 }
 
 void rt_str_set_ascii_flag(RtCoreString* s, int is_ascii) {
-    if (!s) return;
-    if (is_ascii)
-        s->reserved |= SIMD_CACHE_FLAG_IS_ASCII;
-    /* Non-ASCII: don't cache (positive-only flag per spec) */
+    if (!s || !is_ascii) return;
+    /* Positive-only memo, same atomic discipline as spl_core_string_is_ascii. */
+    __atomic_fetch_or(&s->reserved, RT_STR_RESERVED_ASCII_MEMO, __ATOMIC_RELAXED);
 }
 
 int rt_str_is_ascii_cached(RtCoreString* s) {
     if (!s) return -1;
-    if (s->reserved & SIMD_CACHE_FLAG_IS_ASCII) return 1;
+    if (__atomic_load_n(&s->reserved, __ATOMIC_RELAXED) & RT_STR_RESERVED_ASCII_MEMO) return 1;
     return -1; /* unknown (could be ASCII or not) */
 }
 

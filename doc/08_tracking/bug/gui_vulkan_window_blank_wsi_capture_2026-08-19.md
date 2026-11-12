@@ -49,3 +49,42 @@ present.
 - Grant: run `sh scripts/check/check-gui-vulkan-window.shs` on a Linux lane
   with Xvfb + a Vulkan ICD (lavapipe acceptable per script header) and attach
   `build/gui-window-evidence/evidence.log`.
+
+## 2026-11-12 fix attempt — lane fix-runpath-gpu-20261112 (check-script hardening landed; present defect still OPEN)
+
+In-scope change to `scripts/check/check-gui-vulkan-window.shs` (the only
+lane-owned file for this record):
+
+1. **Window-mapping wait before capture** (the record's "capture reading
+   before the first present" suspect). Phase B previously started `xwd`
+   ~2s after `OFFSCREEN_PPM` appeared, which the showcase writes BEFORE
+   opening the winit window — so the capture could run before the window
+   mapped and before its first present reached the Xvfb root pixmap. The
+   script now polls `xwininfo -root -children` on the PRIVATE display (up
+   to 30s, optional tool — without it the old timing is kept) and records
+   `window_mapped_wait_secs` / `window_id`.
+2. **Capture the mapped window by id** (`xwd -id`) with root-pixmap
+   fallback, instead of only ever reading the root.
+3. **Honest liveness + new status.** The loop records
+   `app_alive_at_last_capture`, and a new `app_exited_no_window` status
+   distinguishes "the app died before mapping any window, so the WSI
+   present path never ran" from a mapped-but-blank surface (`blank_wsi`).
+
+Verification done here (macOS host, no Xvfb — full lane still requires
+Linux Xvfb + Vulkan ICD per the 2026-11-11 addendum):
+- `sh -n` passes.
+- End-to-end harness run with stubbed Xvfb/xwininfo/xwd/convert/timeout
+  and a stub `simple` binary: mapped-window path classifies
+  `window_capture_status=captured` with `window_id` set after
+  `window_mapped_wait_secs=0`; no-window + app-exited path classifies
+  `app_exited_no_window` with `app_alive_at_last_capture=0`. Gate logic
+  (renderer/offscreen/oracle hard asserts, window capture soft) unchanged.
+
+What this does NOT fix: `present=false` / blank WSI surface itself lives in
+the runtime winit/Vulkan present path (`winit_present_rgba`, outside this
+lane's touch scope), so the record stays OPEN, BLOCKED on a Linux Xvfb
+evidence lane, with the capture-timing suspect now ruled out by
+construction.
+
+Status: fix-implemented-verification-pending (script); underlying
+present-path defect OPEN.

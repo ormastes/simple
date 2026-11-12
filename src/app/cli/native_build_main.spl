@@ -1,7 +1,7 @@
 use app.io.time_ops.{sleep_ms}
 use app.cli.worker_hir_profile_v1.{WorkerHirProfileV1, worker_hir_profile_admit_v1, worker_hir_profile_for_owner_v1}
 use app.cli.worker_hir_owner_v1.{WorkerHirOwnerV1, worker_hir_owner_start_v1, worker_hir_owner_retain_failure_v1}
-use app.cli.native_build_hir_warmup_outcome.{native_build_hir_warmup_outcome_v1}
+use app.cli.native_build_hir_warmup_outcome.{native_build_hir_warmup_outcome_v1, native_build_capsule_user_args_v1}
 # Lightweight entrypoint for `simple native-build`.
 
 use app.io.env_ops.{env_get, env_set, cwd, host_os}
@@ -1018,17 +1018,54 @@ fn run_hir_shards(args: [text], count: i64, simple_bin: text, timeout_ms: i64) -
 # It returns the actual ledger/retirement verdict, not a test-only success flag.
 pub fn native_build_hir_ledger_run_v1(args: [text], count: i64, simple_bin: text,
         timeout_ms: i64) -> LedgerShardRunV1:
-    var base = ["run", "src/app/cli/native_build_worker.spl"]
-    for arg in args:
-        base = base.push(arg)
     val queue_dir = hir_shard_queue_dir(args)
     if queue_dir == "":
         eprint "[hir-shard] BLOCKED: cannot establish invocation ledger"
         return LedgerShardRunV1(code: 1, failed_modules: 0, total_claims: 0,
             blocked_reason: "cannot establish HIR ledger", all_stopped: true)
+    native_build_hir_ledger_run_in_v1(args, queue_dir, count, simple_bin, timeout_ms)
+
+# HIR pool over an already-established ledger, always through the canonical
+# internal worker route the HIR profile admits (`run native_build_worker.spl`).
+fn native_build_hir_ledger_run_in_v1(args: [text], queue_dir: text, count: i64,
+        simple_bin: text, timeout_ms: i64) -> LedgerShardRunV1:
+    var base = ["run", "src/app/cli/native_build_worker.spl"]
+    for arg in args:
+        base = base.push(arg)
     run_ledger_shards("hir-shard", "--hir-shard", "SIMPLE_HIR_SHARD_QUEUE",
         "SIMPLE_HIR_SHARD_OWNER", base, queue_dir, args, count, count,
         simple_bin, timeout_ms)
+
+# Stage 3 capsule HIR warm-up. Since 35541505cd5 (2026-11-07) the HIR pool
+# admits only the canonical internal worker route plus a policy handoff; the
+# capsule passed its `native-build ...` base, was refused before any spawn
+# (silently), and every Stage 3 lowered HIR and MIR serially in process
+# (early Phase 3 census, 2026-11-12). Same route, handoff and worker marker
+# as the coordinator (native_build_hir_ledger_run_v1 caller).
+fn native_build_capsule_hir_ledger_run_v1(args: [text], queue_dir: text, count: i64,
+        simple_bin: text, timeout_ms: i64) -> LedgerShardRunV1:
+    val user_args = native_build_capsule_user_args_v1(args)
+    val policy = match environment_variant_policy_handoff_prepare_v1(user_args):
+        case Ok(value): value
+        case Err(failure):
+            val reason = "capsule HIR policy handoff unavailable: " +
+                environment_variant_policy_handoff_owner_error_label_v1(failure)
+            eprint "[hir-shard] BLOCKED: {reason}"
+            return LedgerShardRunV1(code: 1, failed_modules: 0, total_claims: 0,
+                blocked_reason: reason, all_stopped: true)
+    val forwarded = match environment_variant_policy_handoff_attach_v1(user_args, policy.encoded_payload):
+        case Ok(value): value
+        case Err(failure):
+            val reason = "capsule HIR policy handoff not attached: " +
+                environment_variant_policy_handoff_owner_error_label_v1(failure)
+            eprint "[hir-shard] BLOCKED: {reason}"
+            return LedgerShardRunV1(code: 1, failed_modules: 0, total_claims: 0,
+                blocked_reason: reason, all_stopped: true)
+    val old_worker_marker = env_get("SIMPLE_NATIVE_BUILD_WORKER") ?? ""
+    env_set("SIMPLE_NATIVE_BUILD_WORKER", "1")
+    val run = native_build_hir_ledger_run_in_v1(forwarded, queue_dir, count, simple_bin, timeout_ms)
+    env_set("SIMPLE_NATIVE_BUILD_WORKER", old_worker_marker)
+    run
 
 # Shared worker-pool driver for the HIR and MIR shard ledgers
 # (driver_hir_recovery.spl). Spawns `count` owners at most `parallel` at a
@@ -1069,15 +1106,18 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
     if label == "hir-shard":
         if base.len() < 3 or base[0] != "run" or base[1] != "src/app/cli/native_build_worker.spl":
             env_set(queue_env, old_queue)
+            eprint("[hir-shard] BLOCKED: HIR profile requires the canonical internal worker route")
             return LedgerShardRunV1(code: 1, failed_modules: 0, total_claims: 0,
                 blocked_reason: "HIR profile requires the canonical internal worker route", all_stopped: true)
         if count <= 0 or count > 128 or parallel <= 0 or parallel > 128:
             env_set(queue_env, old_queue)
+            eprint("[hir-shard] BLOCKED: HIR profile worker count exceeds 128-owner bound")
             return LedgerShardRunV1(code: 1, failed_modules: 0, total_claims: 0,
                 blocked_reason: "HIR profile worker count exceeds 128-owner bound", all_stopped: true)
         val selection = native_build_entry_and_sources_v1(args)
         if selection.is_empty():
             env_set(queue_env, old_queue)
+            eprint("[hir-shard] BLOCKED: HIR profile has no explicit entry")
             return LedgerShardRunV1(code: 1, failed_modules: 0, total_claims: 0,
                 blocked_reason: "HIR profile has no explicit entry", all_stopped: true)
         val budget_ms = if timeout_ms > 0: timeout_ms else: 3600000
@@ -1536,8 +1576,7 @@ pub fn native_build_focused_capsule_shards_v1(base: [text], args: [text], allow_
             hir_ok = false
         else:
             print "[capsule-shard] hir shards={hir_count} ledger={hir_queue}"
-            val hir_run = run_ledger_shards("hir-shard", "--hir-shard", "SIMPLE_HIR_SHARD_QUEUE",
-                "SIMPLE_HIR_SHARD_OWNER", base, hir_queue, args, hir_count, hir_count,
+            val hir_run = native_build_capsule_hir_ledger_run_v1(args, hir_queue, hir_count,
                 simple_bin, timeout_ms)
             val hir_outcome = native_build_hir_warmup_outcome_v1(hir_run.code, hir_run.all_stopped)
             if hir_outcome == "fail":
@@ -1548,7 +1587,7 @@ pub fn native_build_focused_capsule_shards_v1(base: [text], args: [text], allow_
                 return "fail"
             hir_ok = hir_outcome == "ready"
             if not hir_ok:
-                eprint "[capsule-shard] HIR warm-up failed (exit={hir_run.code} failed_modules={hir_run.failed_modules}); in-process build redoes HIR and reports it"
+                eprint "[capsule-shard] HIR warm-up failed (exit={hir_run.code} failed_modules={hir_run.failed_modules} reason={hir_run.blocked_reason}); in-process build redoes HIR and reports it"
     var result = ""
     val mir_flag = env_get("SIMPLE_MIR_SHARDING") ?? ""
     if allow_mir and hir_ok and mir_flag != "0":
