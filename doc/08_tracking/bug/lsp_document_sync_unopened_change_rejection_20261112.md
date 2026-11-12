@@ -1,7 +1,7 @@
 # LSP document sync fails to reject changes on unopened documents
 
 **Date:** 2026-11-12  
-**Status:** OPEN  
+**Status:** verification-pending  
 **Category:** LSP / Document Sync
 
 ## Symptom
@@ -41,3 +41,12 @@ Either:
 - `src/lib/nogc_sync_mut/lsp/lsp_document_sync.spl` (line 82 - implicit return)
 - `src/lib/nogc_sync_mut/lsp/server.spl` (line 124-143 - update_doc implementation)
 - `test/01_unit/app/lsp/document_sync_spec.spl` (line 101-106 - test case)
+
+## Resolution (2026-11-12)
+Root cause was in the spec, not the product. The failing expectation was the
+second one: `"{invalid}"` is an interpolated string literal, so evaluating it
+raised `semantic: variable \`invalid\` not found` and failed the example before
+`lsp_document_sync_apply` ran. The unopened `didChange` already returned
+`false` (`update_doc` -> `find_doc < 0`). Fix: use the raw literal
+`r"{invalid}"` so the adapter receives malformed JSON as intended.
+Before: `executed=15 passed=14 failed=1`; after: `executed=15 passed=15 failed=0`.
