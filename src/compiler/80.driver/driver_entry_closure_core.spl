@@ -928,8 +928,11 @@ fn _driver_entry_import_module_paths_text_fallback(content: text) -> [text]:
             # (src/lib/common/diagnostics/source_position.spl) never entered
             # the closure and every importer of LineStartTable died in HIR
             # (run-16 compiler_cli_build: closure of 3 sources for an entry
-            # importing std.common.diagnostics). A dotted module part is an
-            # absolute path and is collected as spelled.
+            # importing std.common.diagnostics). Same `saw_dot` rule as
+            # parse_export_source_module: only a DOTLESS module part is a
+            # sibling and gets the `.` prefix; a dotted one (rooted
+            # `export std.x.y.{...}` or rootless `export formatters.json_formatter.{...}`,
+            # src/app/llm_diagnostics/mod.spl) is a module path collected as spelled.
             tail = line.substring(7).trim()
             val brace_at = _driver_text_index_of(tail, ".{")
             if brace_at > 0 and not tail[0:brace_at].contains("."):
@@ -1083,6 +1086,21 @@ fn _driver_entry_sibling_path(line: text) -> text:
         val base = tail[0:tail.len() - 2].trim()
         if base != "" and not base.contains(" ") and not base.contains(","):
             return "." + base
+    if line.starts_with("export ") and not line.starts_with("export use ") and
+            not line.contains("{") and not line.contains(" from ") and not line.contains(","):
+        # `export sibling.Name` (src/lib/common/diagnostics/__init__.spl:
+        # `export severity.Severity`) re-exports ONE member of the facade's
+        # physical sibling: the parser keeps it as the export name
+        # `sibling.Name` and the HIR re-export chase binds `sibling` next to
+        # the facade. Until 2026-11-12 the closure never followed it, so it was
+        # green only when some other importer happened to load the sibling.
+        # Exactly one dot: a rootless dotted path (`export a.b.C`) is a module
+        # path, not a sibling (the `saw_dot` rule of parse_export_source_module).
+        val tail = line.substring(7).trim()
+        val parts = tail.split(".")
+        if parts.len() == 2 and parts[0] != "" and parts[1] != "" and
+                not tail.contains(" ") and not tail.contains("*"):
+            return "." + parts[0]
     ""
 
 pub fn _driver_entry_sibling_module_paths(content: text) -> [text]:
