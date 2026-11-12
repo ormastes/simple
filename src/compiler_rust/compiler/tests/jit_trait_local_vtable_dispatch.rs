@@ -25,7 +25,7 @@ fn write(root: &Path, rel: &str, body: &str) {
     fs::write(path, body).unwrap();
 }
 
-const REDUCER: &str = "trait Reducer:\n    fn bits() -> i64\n\nclass Slot:\n    r: Reducer\n\n\
+const REDUCER: &str = "trait Reducer:\n    fn bits() -> i64\n    fn tag() -> i64\n\nclass Slot:\n    r: Reducer\n\n\
 pub fn annotated_bits(slot: Slot?) -> i64:\n    if val Some(s) = slot:\n        val x: Reducer = s.r\n        return x.bits()\n    -1\n\n\
 pub fn field_local_bits(slot: Slot?) -> i64:\n    if val Some(s) = slot:\n        val x = s.r\n        return x.bits()\n    -1\n";
 
@@ -34,10 +34,10 @@ const AB: &str = "class A:\n    n: i64\n    fn bits() -> i64:\n        self.n\n\
 class B:\n    n: i64\n    fn bits() -> i64:\n        self.n + 1\n\n\
 pub fn ab_sum() -> i64:\n    A(n: 1).bits() + B(n: 1).bits()\n";
 
-const NOMINAL: &str = "use db.reducer.{Reducer}\n\nclass C with Reducer:\n    n: i64\n    fn bits() -> i64:\n        self.n\n";
+const NOMINAL: &str = "use db.reducer.{Reducer}\n\nclass C with Reducer:\n    n: i64\n    fn bits() -> i64:\n        self.n\n    fn tag() -> i64:\n        1\n";
 
 /// Same method set as `Reducer`, but no `with Reducer`: no vtable header.
-const STRUCTURAL: &str = "class D:\n    n: i64\n    fn bits() -> i64:\n        self.n\n";
+const STRUCTURAL: &str = "class D:\n    n: i64\n    fn bits() -> i64:\n        self.n\n    fn tag() -> i64:\n        2\n";
 
 /// Flatten `main_body` (plus the fixed modules) through the real loader, lower,
 /// JIT-compile and run `main`.
@@ -80,18 +80,31 @@ fn zero_conformers_still_compile_and_the_call_is_never_reached() {
     assert_eq!(compile_and_run(&main), Ok(-100 - 10 + 3));
 }
 
+/// Only a structural conformer in the unit (no implementor carries a vtable):
+/// the call keeps the by-name bind to that one class and returns its value.
+#[test]
+fn sole_structural_conformer_keeps_the_by_name_bind() {
+    let main = format!(
+        "{IMPORTS}use impls.d.{{D}}\n\nfn main() -> i64:\n    val s = Slot(r: D(n: 9))\n    \
+         annotated_bits(Some(s)) * 100 + field_local_bits(Some(s)) * 10 + ab_sum() - 3\n"
+    );
+    assert_eq!(compile_and_run(&main), Ok(990));
+}
+
 const CHILD_ENV: &str = "SIMPLE_TEST_JIT_STRUCTURAL_CONFORMER_CHILD";
 
 /// Child half of `structural_conformer_fails_cleanly_not_sigsegv`; a no-op
 /// unless spawned by it, because the expected outcome ends the process.
+/// The trait IS implemented (`C`), so the call is a vtable call, and a `D`
+/// (no `with`, no vtable word) reaches it.
 #[test]
 fn structural_conformer_child() {
     if std::env::var_os(CHILD_ENV).is_none() {
         return;
     }
     let main = format!(
-        "{IMPORTS}use impls.d.{{D}}\n\nfn main() -> i64:\n    val s = Slot(r: D(n: 9))\n    \
-         annotated_bits(Some(s)) + ab_sum()\n"
+        "{IMPORTS}use impls.c.{{C}}\nuse impls.d.{{D}}\n\nfn main() -> i64:\n    val c = Slot(r: C(n: 7))\n    \
+         val s = Slot(r: D(n: 9))\n    annotated_bits(Some(c)) + annotated_bits(Some(s)) + ab_sum()\n"
     );
     let result = compile_and_run(&main);
     println!("child-result={result:?}");

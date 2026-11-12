@@ -41,14 +41,28 @@ because it masks to address 0.
 
 ## Fix (JIT)
 
-Under `JITModule` the unit is the whole program, so every stamped vtable is a
-local data object. The virtual call now compares the loaded word against that
-set. On a miss, including a NIL receiver, it calls `rt_method_not_found`,
-which exits 70 with `Runtime error: Method ... not found`. It no longer jumps
-through field data.
+1. **Sole structural conformer, trait not implemented**
+   (`mir/lower/lowering_expr_method.rs`). This is the symptom above. If the
+   trait has no implementation in the unit and exactly one class conforms
+   structurally, a declared-trait receiver now binds that class by name
+   (#8683's bind). It no longer emits a vtable load that the object cannot
+   satisfy. The example now returns `d` / `9`.
+   - Test: `sole_structural_conformer_keeps_the_by_name_bind`.
+2. **Every other virtual call under the JIT**
+   (`codegen/instr/closures_structs.rs` `emit_jit_vtable_receiver_guard`).
+   Under `JITModule` the unit is the whole program, so every stamped vtable is
+   a local data object. The loaded word is compared against that set.
+   - On a miss, including a NIL receiver, the call goes to
+     `rt_method_not_found`, which exits 70 with `Runtime error: Method ... not
+     found`. It no longer jumps through field data.
+   - This covers a structural conformer when the trait *is* implemented
+     elsewhere in the unit, and a trait with two or more structural
+     conformers.
+   - Test: `structural_conformer_fails_cleanly_not_sigsegv` (C implements,
+     D reaches the call).
 
-Test: `src/compiler_rust/compiler/tests/jit_trait_local_vtable_dispatch.rs`
-`structural_conformer_fails_cleanly_not_sigsegv`.
+Both tests are in
+`src/compiler_rust/compiler/tests/jit_trait_local_vtable_dispatch.rs`.
 
 ## Scope / still open
 

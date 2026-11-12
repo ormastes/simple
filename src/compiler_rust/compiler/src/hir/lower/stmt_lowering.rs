@@ -309,6 +309,26 @@ impl Lowerer {
     }
 
     pub(super) fn trait_declaration_for_current_owner(&self, authored_name: &str) -> Option<HirTraitDispatch> {
+        // In a flattened unit, a function from an imported module carries its
+        // flatten owner, and `register_trait` keys a flattened trait by that
+        // same owner string, not by `current_file` (the compile root). Look
+        // in the owner first, then in the owner's own `use` binding for the
+        // name; anything else keeps the file-keyed lookup.
+        if let Some(owner) = self.current_function_owner.as_deref() {
+            let declared_in = |owner: &str, name: &str| {
+                self.trait_declared_owners.get(std::path::Path::new(owner)).and_then(|traits| traits.get(name)).cloned()
+            };
+            if let Some(found) = declared_in(owner, authored_name) {
+                return Some(found);
+            }
+            if let Some((source_owner, source_name)) =
+                self.flatten_owner_import_bindings.get(owner).and_then(|bindings| bindings.get(authored_name))
+            {
+                if let Some(found) = declared_in(source_owner, source_name) {
+                    return Some(found);
+                }
+            }
+        }
         self.trait_declaration_in_file(authored_name, self.current_file.as_deref())
     }
 
@@ -334,6 +354,9 @@ impl Lowerer {
                 Expr::Identifier(name) if ctx.lookup(name).is_none() => format!("{}.{}", name, method),
                 _ => return None,
             },
+            // `val s = base.field` where `field` is declared with a trait
+            // type: the same owner a direct `base.field.m()` call gets.
+            Expr::FieldAccess { receiver, field } => return self.trait_field_dispatch(receiver, field, ctx),
             _ => return None,
         };
         // A local declaration (including a None tombstone) wins over an alias.
