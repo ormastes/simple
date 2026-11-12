@@ -2023,7 +2023,7 @@ fn try_compile_builtin_method_call<M: Module>(
 
     // Handle slice specially since it has optional parameters
     if method == "slice" || method == "substring" {
-        let Some(&slice_id) = ctx.runtime_funcs.get("rt_slice") else {
+        let Some(&slice_id) = ctx.runtime_funcs.get("rt_slice_text_bytes") else {
             return Ok(None);
         };
         let slice_ref = ctx.module.declare_func_in_func(slice_id, builder.func);
@@ -2039,9 +2039,9 @@ fn try_compile_builtin_method_call<M: Module>(
         let end = if args.len() > 1 {
             get_vreg_or_default(ctx, builder, &args[1])
         } else {
-            // Default to collection length (code points for text, the unit rt_slice uses)
-            let cp_len = string_cp_len_ref(ctx, builder);
-            inline_runtime_len_value(builder, receiver_val, ctx.baremetal, ctx.fam_arrays, cp_len)
+            // Open end: the runtime clamps to the receiver's own length, in its
+            // own unit (BYTES for text here, elements for an array).
+            builder.ins().iconst(types::I64, i64::MAX)
         };
 
         // step argument (optional, defaults to 1)

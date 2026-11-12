@@ -6028,6 +6028,31 @@ int64_t rt_slice(int64_t value, int64_t start, int64_t end, int64_t step) {
     return rt_string_new((const uint8_t*)s->data + begin, (uint64_t)(finish - begin));
 }
 
+/* `.slice(a, b)` / `.substring(a, b)` METHOD entry: same ABI as rt_slice, but
+ * a text receiver is cut at BYTE offsets clamped to 0..=byte_len() (owner
+ * decision 2026-11-07; ADR-005 "Staging";
+ * doc/05_design/language/text/text_len_counts_characters_2026-11-07.md).
+ * rt_slice itself serves the `s[a:b]` operator and stays code-point indexed.
+ * A range that splits a multi-byte code point is copied RAW, like
+ * spl_str_slice: no snapping and no U+FFFD. Any other receiver, and a
+ * zero/negative step, is rt_slice. Twin of the Rust runtime crate's symbol. */
+int64_t rt_slice_text_bytes(int64_t value, int64_t start, int64_t end, int64_t step) {
+    RtCoreString* s = rt_core_as_string(value);
+    if (!s || step < 1) return rt_slice(value, start, end, step);
+    int64_t len = (int64_t)s->len;
+    int64_t finish = end < 0 ? 0 : (end > len ? len : end);
+    int64_t begin = start < 0 ? 0 : (start > finish ? finish : start);
+    if (step != 1 || begin >= finish) return rt_string_new((const uint8_t*)s->data, 0);
+    if (rt_text_slice_audit_level() != 0) {
+        rt_text_slice_audit_note(RT_TEXT_SLICE_SITE_RT_SLICE_C, "rt_slice_text_bytes_c",
+                                 begin, finish,
+                                 (const uint8_t*)s->data, (uint64_t)len,
+                                 (const uint8_t*)s->data + begin,
+                                 (uint64_t)(finish - begin));
+    }
+    return rt_string_new((const uint8_t*)s->data + begin, (uint64_t)(finish - begin));
+}
+
 int64_t rt_string_starts_with(int64_t value, int64_t prefix) {
     RtCoreString* s = rt_core_as_string(value);
     RtCoreString* p = rt_core_as_string(prefix);

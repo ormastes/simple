@@ -117,3 +117,45 @@ and the pure-Simple twin, with parity:
   not define `rt_string_char_count`, so the Cranelift inline keeps the byte load
   there (`string_cp_len_ref` returns `None` when `ctx.baremetal`); Phase 3
   self-hosted verification (stage2/stage3 compile the pure-Simple MIR change).
+
+## 2026-11-12 — seed `substring`/`slice(a, b)`/`index_of` back to byte offsets
+
+The 2026-11-09 note above ("superseding the stay byte-offset wording") is
+withdrawn for the seed. The owner decision of 2026-11-07 stands and is what
+ADR-005 "Staging", the design doc table and the syntax reference state:
+`len()`, `s[i]`, `s[a:b]` are code points; `byte_len`, `byte_at`,
+`substring`, `slice(a, b)`, `index_of`/`find`/`find_str`,
+`last_index_of`/`rfind` are byte offsets.
+
+Why it could not stay flipped: `4183b795175` had already moved the stdlib byte
+scanners to `byte_len()` + `byte_at` + `substring`. With code-point
+`substring` every such scanner cut the wrong range on non-ASCII input; the SDN
+parser re-encoded `{error: "日本", schema: x}` as `{cess: ..., ema: ...}`.
+
+Seed change (interpreter and Cranelift/LLVM lowering):
+
+- `interpreter_method/string.rs`: `slice`/`substring`, the `index_of` family
+  and `rfind` take and return byte offsets again; a cut inside a code point
+  keeps the raw bytes (`Value::StrBytes`), as `spl_str_slice` does.
+- New runtime entry `rt_slice_text_bytes` (Rust runtime + C twin), same ABI as
+  `rt_slice`. Method calls lower to it; `rt_slice` keeps serving `s[a:b]` in
+  code points. The open-end form passes `i64::MAX` (clamped to `byte_len()`),
+  not `rt_len`.
+- Rust runtime `rt_string_find` / `rt_text_find` / `rt_string_rfind` /
+  `rt_string_index_of` return byte offsets.
+- `rt_string_char_count` (Rust) counts lead bytes on raw bytes instead of
+  answering -1 for text that is not valid UTF-8, matching the C runtime.
+
+Open after this change:
+
+- C runtime `rt_string_find` / `rt_text_find` / `rt_string_rfind` and the
+  `simple_core/core_string.spl` twin are still code-point indexed, while the
+  pure-Simple MIR lowers text `substring` to byte-indexed `spl_str_slice`. The
+  self-hosted lane is therefore mixed on non-ASCII text.
+- `X.substring(a, X.len())` (same receiver) is a byte cut bounded by a
+  code-point count: 940 sites in `src/lib`, 726 in `src/app`, 380 in
+  `src/compiler`. On non-ASCII text it drops the last
+  `byte_len() - len()` bytes. Rewrite to `X.substring(a)` or
+  `X.substring(a, X.byte_len())`; both are correct under either unit.
+- `char_code_at` is listed as a byte API in the design doc but is
+  character-indexed in the interpreter and both runtimes. Not changed here.

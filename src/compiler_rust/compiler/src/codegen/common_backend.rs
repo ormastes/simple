@@ -429,6 +429,7 @@ pub(crate) fn referenced_call_names(functions: &[MirFunction]) -> HashSet<String
                             "rt_len",
                             "rt_method_not_found",
                             "rt_slice",
+                            "rt_slice_text_bytes",
                             "rt_string_concat",
                             "rt_string_ends_with",
                             "rt_string_len",
@@ -637,6 +638,7 @@ pub(crate) fn runtime_symbol_is_codegen_root(name: &str) -> bool {
             | "rt_contains"
             | "rt_len"
             | "rt_slice"
+            | "rt_slice_text_bytes"
             | "rt_alloc"
             | "rt_struct_alloc"
             | "rt_struct_receiver_valid"
