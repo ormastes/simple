@@ -73,7 +73,7 @@ pub const SHAPE_ERROR_TAG: &str = "error[option-pattern-shape]";
 
 /// Static name for the subject type, or `None` when the type is one this check
 /// deliberately stays silent about.
-fn never_option_type_name(ty: &HirType) -> Option<&'static str> {
+pub(crate) fn never_option_type_name(ty: &HirType) -> Option<&'static str> {
     match ty {
         HirType::Int { .. } => Some("int"),
         HirType::Float { .. } => Some("float"),
