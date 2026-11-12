@@ -117,3 +117,39 @@ describe "placeholder lambda callback argument ownership":
         expect(expr_owner_tag(numbered)).to_equal(EXPR_LAMBDA)
         expect(lambda_param_count(numbered)).to_equal(2)
         expect(lambda_has_body(numbered)).to_equal(true)
+
+describe "repeated placeholder arity in one-argument callbacks":
+    """
+    Contract (syntax_quick_reference § Placeholder Lambda): every bare `_`
+    is a NEW positional parameter, so `_ > 1 and _ < 3` is a two-parameter
+    lambda and `_.a != X or _.b != X or _.c != X` a three-parameter one.
+    Passing either to a one-argument callback (`filter`, `any`, ...) is a
+    source bug: cranelift rejected `FeatureDatabase.incomplete_features`
+    with "mismatched argument count: got 1, expected 3" (bootstrap run 13,
+    2026-11-12) and the seed interpreter silently yields `[]`. The numbered
+    form `_1 ... _1` names ONE parameter (param count = max number).
+    """
+    it "desugars repeated `_1` in a filter callback to an arity-1 lambda":
+        val numbered = parse_method_call_arg("[1, 2, 3].filter(_1 > 1 and _1 < 3)\n", "filter")
+        expect(numbered).to_be_greater_than(-1)
+        expect(expr_owner_tag(numbered)).to_equal(EXPR_LAMBDA)
+        expect(lambda_param_count(numbered)).to_equal(1)
+        expect(lambda_has_body(numbered)).to_equal(true)
+
+    it "desugars a three-way `_1` member predicate to an arity-1 lambda":
+        val member = parse_method_call_arg(
+            "xs.filter(_1.pure_status != 0 or _1.hybrid_status != 0 or _1.llvm_status != 0)\n", "filter")
+        expect(member).to_be_greater_than(-1)
+        expect(expr_owner_tag(member)).to_equal(EXPR_LAMBDA)
+        expect(lambda_param_count(member)).to_equal(1)
+
+    it "keeps the contract that repeated bare `_` is multi-parameter":
+        val bare = parse_method_call_arg("[1, 2, 3].filter(_ > 1 and _ < 3)\n", "filter")
+        expect(bare).to_be_greater_than(-1)
+        expect(expr_owner_tag(bare)).to_equal(EXPR_LAMBDA)
+        expect(lambda_param_count(bare)).to_equal(2)
+
+    it "evaluates `[1,2,3].filter(_1 > 1 and _1 < 3)` to [2]":
+        val got = [1, 2, 3].filter(_1 > 1 and _1 < 3)
+        expect(got.len()).to_equal(1)
+        expect(got[0]).to_equal(2)

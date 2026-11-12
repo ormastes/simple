@@ -24,9 +24,7 @@ use lsp_handlers.{build_diagnostics_notification, build_empty_diagnostics_notifi
 use cmm_commands.{build_command_db, CmmCommandDB}
 use cmm_functions.{build_function_db, CmmFuncDB}
 
-extern fn input() -> text
 extern fn stdin_read_char() -> text
-extern fn to_int(s: text) -> i64
 
 var _store = DocumentStore(documents: [])
 var _cmd_db = build_command_db()
@@ -35,6 +33,22 @@ var _func_db = build_function_db()
 # ---------------------------------------------------------------------------
 # Stdio helpers
 # ---------------------------------------------------------------------------
+
+# Read one header line from stdin, including its trailing "\n" (or "\r\n").
+# Returns "" on EOF. Built on `stdin_read_char` because the runtime backs no
+# `input()` extern: the previous `extern fn input() -> text` declaration
+# resolved to nothing and the server exited before answering `initialize`.
+fn read_header_line() -> text:
+    var parts: [text] = []
+    while true:
+        val ch = stdin_read_char()
+        if ch == "":
+            if parts.len() == 0:
+                return ""
+            return parts.join("")
+        parts.push(ch)
+        if ch == "\n":
+            return parts.join("")
 
 # Read exactly `count` characters from stdin.
 fn read_n_chars(count: i64) -> text:
@@ -85,7 +99,7 @@ fn extract_content_length(header: text) -> i64:
             break
     if num_str == "":
         return 0
-    to_int(num_str)
+    int(num_str)
 
 # ---------------------------------------------------------------------------
 # Transport — read and write JSON-RPC messages over stdio
@@ -97,7 +111,7 @@ fn read_message() -> text?:
     # Read headers until blank line
     var content_length = 0
     while true:
-        val header_line = input()
+        val header_line = read_header_line()
         # EOF or empty (blank separator line)
         if header_line == "" or header_line == "\r\n" or header_line == "\r" or header_line == "\n":
             if content_length > 0:

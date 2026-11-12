@@ -9,7 +9,8 @@ message text, and a failed parse never yields zero diagnostics.
 use std.spec.{describe, it, expect, step}
 use compiler.core.parser.{parse_module, parse_module_silent_checked, parser_get_error_records}
 use compiler.common.diagnostics.diagnostic_v1.{DiagnosticV1}
-use compiler.driver.driver_parse_diagnostic.{driver_parse_diagnostics_v1, driver_parse_diagnostics_v1_json, DRIVER_PARSE_ERROR_CODE}
+use compiler.driver.driver_parse_diagnostic.{driver_parse_diagnostics_v1, driver_parse_diagnostics_v1_json, driver_parse_batch_v1, DRIVER_PARSE_ERROR_CODE}
+use std.common.diagnostics.diagnostic_batch.{BatchStatus}
 
 describe "parser typed emit":
     it "records the mismatch position and token kinds at a parser_expect site":
@@ -57,3 +58,26 @@ describe "parser typed emit":
         parse_module("val answer: i64 = 42\n", "clear_good.spl")
         expect(parser_get_error_records().len()).to_equal(0)
         expect(driver_parse_diagnostics_v1("clear_good.spl").len()).to_equal(0)
+
+    it "publishes the parse as a PartialRecovery DiagnosticBatchV1 with stable ids":
+        # @req REQ-DIAG-004
+        step("Parse two independent errors and lift them into one batch")
+        expect(parse_module_silent_checked("val broken: = 1\nval ok: i64 = 2\nval other: i64 3\n", "batch_emit.spl")).to_equal(true)
+        val batch = driver_parse_batch_v1("batch_emit.spl", "file:///batch_emit.spl", 7, "h-abc", 3)
+        expect(batch.producer).to_equal("simple-parser")
+        expect(batch.document_version).to_equal(7)
+        expect(batch.matches_document(7, "h-abc")).to_equal(true)
+        expect(batch.matches_document(8, "h-abc")).to_equal(false)
+        expect(batch.status.name()).to_equal(BatchStatus.PartialRecovery.name())
+        expect(batch.len()).to_equal(parser_get_error_records().len())
+        expect(batch.len()).to_be_greater_than(1)
+        step("Each entry keeps its own position; ids differ per occurrence")
+        expect(batch.diagnostics[0].diagnostic.span.unwrap().line).to_equal(1)
+        expect(batch.diagnostics[batch.len() - 1].diagnostic.span.unwrap().line).to_equal(3)
+        expect(batch.diagnostics[0].id != batch.diagnostics[1].id).to_equal(true)
+        expect(batch.diagnostics[0].id).to_start_with("E0001@batch_emit.spl#1:")
+        step("A clean parse is a Complete, empty batch")
+        parse_module("val answer: i64 = 42\n", "batch_clean.spl")
+        val clean = driver_parse_batch_v1("batch_clean.spl", "", 1, "h", 1)
+        expect(clean.len()).to_equal(0)
+        expect(clean.status.name()).to_equal(BatchStatus.Complete.name())

@@ -8,6 +8,10 @@ use app.cli.query_helpers.{_extract_flag}
 use app.cli.query_error_codes.{query_extract_error_code}
 use app.cli.query_rich_common.{_DIAG_COLLECT_MODE, _DIAG_COLLECTED, _diag_emit_or_collect, _find_in_line_from, _parse_error_location, query_split_structured_error, query_file_read_rich, query_file_exists, query_dir_list, query_process_run, query_json_escape, query_emit_mcp_diagnostics_wrapper}
 use app.cli.query_lint.{_emit_lint_if_readable, _emit_source_lint_diagnostics, _collect_lint_diagnostics_json}
+use std.common.diagnostics.diagnostic_v1.{DiagnosticV1}
+use std.common.diagnostics.severity.{Severity}
+use std.common.diagnostics.span.{Span}
+use std.common.diagnostics.diagnostic_batch.{DiagnosticBatchV1, BatchStatus, diagnostic_stable_id}
 
 fn query_check(file: text, cmd_args: [text]) -> i64:
     val format = _extract_flag(cmd_args, "--format", "text")
@@ -406,31 +410,98 @@ fn _split_top_level_json_objects_range(
         i = i + 1
     result
 
-fn _parse_check_output_line_json(file: text, line: text) -> text:
+# --- Typed query API (REQ-DIAG-005) ---
+# One `file:line:col: [severity:] message` line of compiler output -> one
+# DiagnosticV1. This is the single decoding path: the legacy JSON line, the
+# LSP batch and the MCP wrapper all render from the same typed value, so a
+# defect carries one code and one primary span on every surface.
+pub fn query_check_line_to_diagnostic_v1(file: text, line: text) -> DiagnosticV1?:
     val trimmed = line.trim()
     if trimmed == "":
-        return ""
+        return nil
     val prefix = file + ":"
     if not trimmed.starts_with(prefix):
-        return ""
+        return nil
     val parsed = _parse_error_location(trimmed.substring(prefix.len()))
     val line_num = parsed.0
     val col_num = parsed.1
     var msg = parsed.2
-    var severity = 1
+    var severity = Severity.Error
     if msg.starts_with("warning"):
-        severity = 2
+        severity = Severity.Warning
         msg = _strip_diag_severity_prefix(msg, "warning")
     elif msg.starts_with("info"):
-        severity = 3
+        severity = Severity.Info
         msg = _strip_diag_severity_prefix(msg, "info")
     elif msg.starts_with("hint"):
-        severity = 4
+        severity = Severity.Help
         msg = _strip_diag_severity_prefix(msg, "hint")
     elif msg.starts_with("error"):
         msg = _strip_diag_severity_prefix(msg, "error")
     val code = _extract_error_code(msg, "ParseError")
-    "{\"severity\":{severity},\"code\":{_json_text(code)},\"message\":{_json_text(msg)},\"line\":{line_num},\"col\":{col_num},\"end_line\":{line_num},\"end_col\":{col_num},\"tags\":[],\"source\":\"simple\"}"
+    val span = Span(start: 0, end: 0, line: line_num, col: col_num, file: file, length: 0)
+    Some(DiagnosticV1.new(severity, code, msg).with_file(file).with_span(span))
+
+# Numeric LSP severity (1 error .. 4 hint) for the legacy line JSON.
+fn _diagnostic_v1_lsp_severity(d: DiagnosticV1) -> i64:
+    match d.severity:
+        Severity.Error: 1
+        Severity.Warning: 2
+        Severity.Info: 3
+        Severity.Note: 3
+        Severity.Help: 4
+
+# Legacy flat line JSON (consumed by the LSP `_parse_json_diagnostic` and the
+# MCP wrapper). Rendered FROM the typed value, never built in parallel.
+pub fn query_diagnostic_v1_line_json(d: DiagnosticV1) -> text:
+    var line_num = 0
+    var col_num = 0
+    if d.span != nil:
+        val s = d.span.unwrap()
+        line_num = s.line
+        col_num = s.col
+    val severity = _diagnostic_v1_lsp_severity(d)
+    "{\"severity\":{severity},\"code\":{_json_text(d.code)},\"message\":{_json_text(d.message)},\"line\":{line_num},\"col\":{col_num},\"end_line\":{line_num},\"end_col\":{col_num},\"tags\":[],\"source\":\"simple\"}"
+
+# Every diagnostic in normalized `check` output, typed, in output order.
+pub fn query_check_output_diagnostics_v1(file: text, clean_output: text) -> [DiagnosticV1]:
+    var out: [DiagnosticV1] = []
+    for raw in clean_output.split("\n"):
+        val d = query_check_line_to_diagnostic_v1(file, raw)
+        if d != nil:
+            out.push(d.unwrap())
+    out
+
+# The whole `check` run as one DiagnosticBatchV1. Status is derived from the
+# evidence, never from the exit code alone:
+#   exit 0, no errors      -> Complete
+#   errors present         -> PartialRecovery (the compiler kept going)
+#   exit != 0, no evidence -> InternalError (a failure with zero diagnostics is
+#                             reported as such, never as a clean batch)
+pub fn query_check_batch_v1(file: text, clean_output: text, check_code: i64, document_version: i64, source_hash: text) -> DiagnosticBatchV1:
+    var batch = DiagnosticBatchV1.new("simple-check", file, "", document_version, source_hash, 0)
+    var errors = 0
+    var occurrence = 0
+    for d in query_check_output_diagnostics_v1(file, clean_output):
+        var node_identity = "0:0"
+        if d.span != nil:
+            val s = d.span.unwrap()
+            node_identity = "{s.line}:{s.col}"
+        batch = batch.push(diagnostic_stable_id(d.code, file, node_identity, occurrence), d)
+        occurrence = occurrence + 1
+        if _diagnostic_v1_lsp_severity(d) == 1:
+            errors = errors + 1
+    if errors > 0:
+        return batch.with_status(BatchStatus.PartialRecovery, "check reported {errors} error(s)")
+    if check_code != 0:
+        return batch.with_status(BatchStatus.InternalError, "check exited {check_code} without a located diagnostic")
+    batch
+
+fn _parse_check_output_line_json(file: text, line: text) -> text:
+    val d = query_check_line_to_diagnostic_v1(file, line)
+    if d == nil:
+        return ""
+    query_diagnostic_v1_line_json(d.unwrap())
 
 fn _strip_diag_severity_prefix(msg: text, severity_word: text) -> text:
     var rest = msg.substring(severity_word.len()).trim()

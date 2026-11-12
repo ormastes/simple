@@ -1,0 +1,132 @@
+"""
+## Purpose and audience
+
+Executable contract for `std.common.diagnostics.fix_ranking`: deterministic,
+explainable ordering of the multiple `FixCandidate`s a producer attaches to
+one diagnostic (REQ-DIAG-010, Journey F). Ordering is correctness first
+(enabled before disabled, Safe < Likely < Uncertain), then scope (files
+touched), then edit size, then candidate id — never "shortest edit wins"
+alone. Audience: LSP codeAction adapters (Simple, CMM, Markdown) that present
+the ranked list and its per-candidate rationale.
+"""
+# @cover src/lib/common/diagnostics/fix_ranking.spl
+
+use std.spec
+use std.common.diagnostics.diagnostic_v1.{FixConfidence}
+use std.common.diagnostics.span.{Span}
+use std.common.diagnostics.diagnostic_batch.{FixCandidate, DiagnosticActionIndex}
+use std.common.diagnostics.fix_ranking.{
+    rank_candidates, rank_key_of, explain_ranking, ranked_candidates_for
+}
+
+fn span_at(start: i64, end: i64) -> Span:
+    Span.new(start, end, 1, start + 1)
+
+fn cand(id: text, conf: FixConfidence) -> FixCandidate:
+    FixCandidate.new(id, "title " + id, "why " + id, conf, 7)
+
+# @manual_section: fix_ranking
+describe "Fix candidate ranking (REQ-DIAG-010)":
+    it "orders Safe before Likely before Uncertain regardless of producer order and edit size":
+        # @req REQ-DIAG-010
+        # @capture(value): ranked id order for an Uncertain/Likely/Safe producer order
+        step("Build three candidates where the Uncertain one has the SHORTEST edit")
+        val uncertain = cand("c_uncertain", FixConfidence.Uncertain)
+            .with_replacement("a.spl", span_at(0, 1), "", "x")
+        val likely = cand("c_likely", FixConfidence.Likely)
+            .with_replacement("a.spl", span_at(0, 4), "Some(v)", "v.ok")
+        val safe = cand("c_safe", FixConfidence.Safe)
+            .with_replacement("a.spl", span_at(0, 12), "val x: i64 = 1", "var x: i64 = 1")
+        step("Rank with the worst candidate first in producer order")
+        val ranked = rank_candidates([uncertain, likely, safe])
+        var ids: [text] = []
+        for c in ranked:
+            ids.push(c.id)
+        expect(ids.join(",")).to_equal("c_safe,c_likely,c_uncertain")
+
+    it "pushes disabled candidates after every enabled one even when they are Safe":
+        # @req REQ-DIAG-010
+        step("A disabled Safe candidate competes with an enabled Uncertain one")
+        val disabled_safe = cand("d_safe", FixConfidence.Safe)
+            .with_replacement("a.spl", span_at(0, 1), "y", "x")
+            .disabled("parser status partial_recovery: insufficient evidence")
+        val live_uncertain = cand("u_live", FixConfidence.Uncertain)
+            .with_replacement("a.spl", span_at(0, 1), "z", "x")
+        val ranked = rank_candidates([disabled_safe, live_uncertain])
+        expect(ranked[0].id).to_equal("u_live")
+        expect(ranked[1].id).to_equal("d_safe")
+        expect(ranked[1].is_enabled()).to_equal(false)
+
+    it "prefers the narrower scope (fewer files) at equal confidence, then the smaller edit, then the id":
+        # @req REQ-DIAG-010
+        # @capture(table): id -> rank key fields
+        step("Two Likely candidates: one touches two files, one touches one file with a larger edit")
+        val two_files = cand("l_two_files", FixConfidence.Likely)
+            .with_replacement("a.spl", span_at(0, 1), "b", "a")
+            .with_replacement("b.spl", span_at(0, 1), "b", "a")
+        val one_file_big = cand("l_one_file", FixConfidence.Likely)
+            .with_replacement("a.spl", span_at(0, 10), "replacement text", "0123456789")
+        val one_file_small_z = cand("l_zeta", FixConfidence.Likely)
+            .with_replacement("a.spl", span_at(0, 2), "ab", "01")
+        val one_file_small_a = cand("l_alpha", FixConfidence.Likely)
+            .with_replacement("a.spl", span_at(0, 2), "ab", "01")
+        val ranked = rank_candidates([two_files, one_file_big, one_file_small_z, one_file_small_a])
+        var ids: [text] = []
+        for c in ranked:
+            ids.push(c.id)
+        expect(ids.join(",")).to_equal("l_alpha,l_zeta,l_one_file,l_two_files")
+        step("The rank key exposes the fields that produced that order")
+        val k_two = rank_key_of(two_files)
+        val k_one = rank_key_of(one_file_big)
+        expect(k_two.file_count).to_equal(2)
+        expect(k_one.file_count).to_equal(1)
+        expect(k_one.edit_size).to_equal(26)   # 10 removed + 16 inserted bytes
+        expect(k_two.confidence_rank).to_equal(k_one.confidence_rank)
+
+    it "is deterministic: ranking any permutation of the same candidates yields the same order":
+        # @req REQ-DIAG-010
+        val a = cand("p_a", FixConfidence.Likely).with_replacement("a.spl", span_at(0, 1), "b", "a")
+        val b = cand("p_b", FixConfidence.Safe).with_replacement("a.spl", span_at(0, 3), "bbb", "aaa")
+        val c = cand("p_c", FixConfidence.Likely).with_replacement("a.spl", span_at(0, 1), "c", "a")
+        val d = cand("p_d", FixConfidence.Uncertain).with_replacement("a.spl", span_at(0, 1), "d", "a")
+        val orders = [[a, b, c, d], [d, c, b, a], [c, a, d, b], [b, d, a, c]]
+        var joined: [text] = []
+        # @capture(value): joined id order per permutation
+        step("Rank four permutations")
+        for perm in orders:
+            var ids: [text] = []
+            for x in rank_candidates(perm):
+                ids.push(x.id)
+            joined.push(ids.join(","))
+        expect(joined[0]).to_equal("p_b,p_a,p_c,p_d")
+        expect(joined[1]).to_equal(joined[0])
+        expect(joined[2]).to_equal(joined[0])
+        expect(joined[3]).to_equal(joined[0])
+
+    it "explains every position with the confidence, scope, edit size and disabled reason it was ranked on":
+        # @req REQ-DIAG-010
+        val safe = cand("e_safe", FixConfidence.Safe).with_replacement("a.spl", span_at(0, 2), "ab", "01")
+        val off = cand("e_off", FixConfidence.Likely).with_replacement("a.spl", span_at(0, 2), "ab", "01")
+            .disabled("stale: expected text changed")
+        step("Explain the ranked list")
+        val lines = explain_ranking(rank_candidates([off, safe]))
+        expect(lines.len()).to_equal(2)
+        expect(lines[0].contains("#1 e_safe")).to_equal(true)
+        expect(lines[0].contains("confidence=safe")).to_equal(true)
+        expect(lines[0].contains("files=1")).to_equal(true)
+        expect(lines[0].contains("edit_size=4")).to_equal(true)
+        expect(lines[1].contains("#2 e_off")).to_equal(true)
+        expect(lines[1].contains("disabled: stale: expected text changed")).to_equal(true)
+
+    it "ranks straight out of a DiagnosticActionIndex while leaving the producer index untouched":
+        # @req REQ-DIAG-010
+        step("Index two candidates for one diagnostic in producer order Uncertain, Safe")
+        val u = cand("i_u", FixConfidence.Uncertain).with_replacement("a.spl", span_at(0, 1), "b", "a")
+        val s = cand("i_s", FixConfidence.Safe).with_replacement("a.spl", span_at(0, 1), "c", "a")
+        val index = DiagnosticActionIndex.new().add("D1", u).add("D1", s)
+        val ranked = ranked_candidates_for(index, "D1")
+        expect(ranked[0].id).to_equal("i_s")
+        expect(ranked[1].id).to_equal("i_u")
+        step("Producer order in the index is preserved for compat consumers")
+        expect(index.candidates_for("D1")[0].id).to_equal("i_u")
+        expect(ranked_candidates_for(index, "missing").len()).to_equal(0)
