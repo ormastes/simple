@@ -1,0 +1,165 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# @cover src/compiler/70.backend/backend/jit_interpreter.spl
+# @cover src/compiler/50.mir/_MirLowering/module_lowering.spl
+# @tag: unit, compiler, mir, jit, enum, registry, match
+#
+# JIT-lane enum-registry parity (hosted browser_engine false
+# "missing return in non-unit function '_level_rank'" family).
+#
+# Root cause: the AOT lane registers every module's own enum inventory before
+# any lowering (driver mir_setup -> prescan_module_struct_names +
+# register_module_enum_inventory_v1 + register_module_composite_inventory_v1,
+# the B5b gap closure documented in register_module_enum_inventory_v1's
+# docstring). The JIT lane built a FRESH MirLowering per hot function and
+# called lower_function directly, so a function whose body matches on its OWN
+# module's enum (the gc_async_mut browser_engine logging.spl shape:
+# `_level_rank(l: BrowserLogLevel) -> i64` with all five qualified arms)
+# degraded every arm to "enum match: unknown variant (no registered enum
+# declares it)" -- a context-dependent semantic-analysis failure that exists
+# only because the standalone lowering ran without the module's registry.
+# On the seed's interpreter the same lost-registry shape surfaces one frame
+# later as the false E-SFFI-016 "missing return" (the reported symptom).
+#
+# These specs pin the analysis two ways: the lever (unregistered standalone
+# lowering MUST still produce the loud unknown-variant errors, so a spec that
+# accidentally registers everything is detected), and the fix (the
+# registration sequence try_jit_compile now performs MUST resolve the
+# exhaustive own-enum match with zero errors, and the real try_jit_compile
+# entry point must not report MIR-lowering failures for it).
+
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.backend.jit_interpreter.{JitInterpreterBackend, JitInterpreterConfig}
+use compiler.backend.backend_types.{BackendError}
+
+fn lines(xs: [text]) -> text:
+    xs.join("\n") + "\n"
+
+# The real defect shape, trimmed from
+# src/lib/gc_async_mut/gpu/browser_engine/shared/logging.spl: a module-private
+# free function returning i64 whose body is one exhaustive match over all five
+# variants of its own module's enum, plus a method that calls it.
+val logging_shape = lines([
+    "pub enum BrowserLogLevel:",
+    "    Trace",
+    "    Debug",
+    "    Info",
+    "    Warn",
+    "    Error",
+    "",
+    "fn _level_rank(l: BrowserLogLevel) -> i64:",
+    "    match l:",
+    "        BrowserLogLevel.Trace: 0",
+    "        BrowserLogLevel.Debug: 1",
+    "        BrowserLogLevel.Info:  2",
+    "        BrowserLogLevel.Warn:  3",
+    "        BrowserLogLevel.Error: 4",
+    "",
+    "pub class Logger:",
+    "    name: text",
+    "    min_level: BrowserLogLevel",
+    "",
+    "    static fn new(name: text, level: BrowserLogLevel) -> Logger:",
+    "        Logger(name: name, min_level: level)",
+    "",
+    "    me should_log(msg_level: BrowserLogLevel) -> bool:",
+    "        _level_rank(msg_level) >= _level_rank(self.min_level)"
+])
+
+fn hir_for_logging() -> HirModule:
+    val log = Logger(level: 0)
+    val ast = parse_full_frontend(logging_shape, "std/browser_engine/shared/logging.spl", "std.browser_engine.shared.logging", log)
+    var modules: Dict<text, Module> = {}
+    modules["std.browser_engine.shared.logging"] = ast
+    val sources = [SourceFile(path: "std/browser_engine/shared/logging.spl", content: logging_shape, module_name: "std.browser_engine.shared.logging")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var hl = hirlowering_for_module("std.browser_engine.shared.logging", surfaces)
+    hl.lower_module(ast)
+
+fn find_fn(hir: HirModule, name: text) -> HirFunction:
+    var found: HirFunction? = None
+    for fk in hir.functions.keys():
+        val f: HirFunction = hir.functions[fk]
+        if f.name == name:
+            found = Some(f)
+    # The fixture defines both functions; a miss is a fixture bug, not a
+    # testcase, so fail fast on the unwrap rather than fabricating a value.
+    val present: HirFunction = found.unwrap()
+    present
+
+fn lower_without_registry(hir: HirModule, fn_name: text) -> [text]:
+    """The pre-fix JIT shape: fresh MirLowering, straight to lower_function."""
+    var lowering = MirLowering.new(hir.symbols)
+    lowering.lower_function(find_fn(hir, fn_name))
+    var msgs: [text] = []
+    for e in lowering.errors:
+        msgs.push(e.message)
+    msgs
+
+fn lower_with_jit_registry(hir: HirModule, fn_name: text) -> [text]:
+    """The fixed JIT shape: register the module's own inventories first,
+    exactly the sequence try_jit_compile performs."""
+    var lowering = MirLowering.new(hir.symbols)
+    var single: Dict<text, HirModule> = {}
+    single["jit"] = hir
+    lowering.prescan_module_struct_names(single, "jit")
+    lowering.register_module_enum_bootstrap_inventory_v1([hir])
+    lowering.register_module_composite_inventory_v1([hir])
+    lowering.lower_function(find_fn(hir, fn_name))
+    var msgs: [text] = []
+    for e in lowering.errors:
+        msgs.push(e.message)
+    msgs
+
+describe "jit lane own-enum registry parity":
+    it "lever: unregistered standalone lowering still flags every arm unknown":
+        val hir = hir_for_logging()
+        val msgs = lower_without_registry(hir, "_level_rank")
+        var unknown = 0
+        for m in msgs:
+            if m.contains("unknown variant"):
+                unknown = unknown + 1
+        expect(unknown).to_equal(5)
+
+    it "fix: the try_jit_compile registration sequence resolves the match":
+        val hir = hir_for_logging()
+        val msgs = lower_with_jit_registry(hir, "_level_rank")
+        var bad = 0
+        for m in msgs:
+            if m.contains("unknown variant") or m.contains("missing return"):
+                bad = bad + 1
+        expect(bad).to_equal(0)
+
+    it "fix: the caller method lowers clean through the same sequence":
+        val hir = hir_for_logging()
+        val msgs = lower_with_jit_registry(hir, "should_log")
+        var bad = 0
+        for m in msgs:
+            if m.contains("unknown variant") or m.contains("missing return"):
+                bad = bad + 1
+        expect(bad).to_equal(0)
+
+    it "entry point: try_jit_compile never reports a lowering failure for it":
+        val hir = hir_for_logging()
+        val backend = JitInterpreterBackend.new(JitInterpreterConfig.always_jit())
+        val result = backend.try_jit_compile(find_fn(hir, "_level_rank"), hir)
+        match result:
+            case Ok(_):
+                expect(true).to_equal(true)
+            case Err(err):
+                # Only environment-level failures (exec manager) are tolerable;
+                # any MIR-lowering failure names the analysis regression.
+                print "try_jit_compile err: [" + err.message + "]"
+                expect(err.message.contains("MIR lowering failed")).to_equal(false)
+                expect(err.message.contains("unknown variant")).to_equal(false)
+                expect(err.message.contains("missing return")).to_equal(false)
