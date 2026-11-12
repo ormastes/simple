@@ -3725,6 +3725,14 @@ run_rust_authority_env() {
       [ -n "${BOOTSTRAP_STAGE3_GIT_MAX_MILLISECONDS:-}" ]; then
     set -- "BOOTSTRAP_STAGE3_GIT_MAX_MILLISECONDS=$BOOTSTRAP_STAGE3_GIT_MAX_MILLISECONDS" "$@"
   fi
+  # Preserve an explicit disk floor through preflight's env -i: the check
+  # reads MIN_FREE_GB / SIMPLE_BOOTSTRAP_MIN_FREE_GB, and the sanitized
+  # environment otherwise silently drops both (preflight then enforces the
+  # 20 GiB default on hosts the wrapper explicitly relaxed).
+  if [ "$rust_env_log" = bootstrap-preflight ] &&
+      [ -n "${SIMPLE_BOOTSTRAP_MIN_FREE_GB:-}" ]; then
+    set -- "MIN_FREE_GB=$SIMPLE_BOOTSTRAP_MIN_FREE_GB" "$@"
+  fi
   if [ "${os}" != windows ] && [ "${CXX+x}" = x ]; then set -- "CXX=$CXX" "$@"; fi
   if [ "${AR+x}" = x ]; then set -- "AR=$AR" "$@"; fi
   if [ "${LD+x}" = x ]; then set -- "LD=$LD" "$@"; fi
