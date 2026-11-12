@@ -29,11 +29,15 @@ code/spec, so a retarget would be weakening the assertion.
 | spec | failure | finding |
 |---|---|---|
 | `bootstrap/llvm_aggregate_shared_binding_contract_spec.spl` (2 tests) | `expected -1 to equal 0` | It spawns `bin/simple compile`, and a fresh worktree has no `bin/simple` (exit -1). Needs a deployed full CLI. |
+| `95.interp/interpreter/*` (10 files, 27 tests) | `expected 126 to equal 0` / `false to equal true` | They spawn `bin/simple` through `process_run_timeout`, which a fresh worktree does not have (exit 126). Needs a deployed full CLI. |
 
 ## Resolved since filing
 
 - `bootstrap/entry_package_facade_precedence_spec.spl`: a spec bug. The fixture string `".variables.{env_get_or}"` was unescaped interpolation (#8561).
 - `30.types/cfg_decl_check_spec.spl` and `50.mir/entry_closure_imported_class_probe_symbols_spec.spl`: private functions were imported across modules (`empty_type_env`, `empty_subst_map`, `probe_events_len`); they are now `pub` (#8558).
+- `50.mir/closure_capture_write_spec.spl` and `closure_capture_write_forms_spec.spl` (23 tests): the plain `name = expr` statement fast path (c1fdb67f5fe) created its target and STMT_ASSIGN with span 0, so the captured-write diagnostic lost its line (#8603).
+- `50.mir/compound_assignment_operator_mapping_spec.spl`, `enum_match_divergence_spec.spl`, `nul_literal_raw_constructor_operand_spec.spl`, and 1 of 3 in `for_in_runtime_tuple_decode_spec.spl`: these specs were stale (#8602).
+- `50.mir/struct_ctor_field_local_spec.spl`, `mir_option_result_qualified_field_spec.spl` and `user_enum_discriminant_positional_spec.spl`: these specs were stale (#8614).
 
 ## Real source bug, not fixed here
 
@@ -47,8 +51,41 @@ code/spec, so a retarget would be weakening the assertion.
 
 - `20.hir/bootstrap_regressions/unresolved_name_eager_resolution_spec.spl` (2 tests). A name declared in a never-imported sibling module produces no `unresolved name` error.
 - `30.types/written_any_compile_mode_spec.spl` (1). The `assert_equal` failure carries no step detail.
-- 50.mir (seed-run at `6a8c584709f`, partial): roughly 30 failing files, including closure capture writes, compound-assign mapping, enum match divergence, the bare-variant retained subject, the hwir riscv projections and the generic type-param eq/hash lowering. Per-file detail will follow in the 50.mir sweep report.
-- Possible seed hangs: `50.mir/flat_pool_reader_mir_lowering_spec.spl` and `50.mir/mir_receiver_shapes_spec.spl` were each still running when their 1800s chunk timed out. Each is being re-run alone with a 600s timeout.
+- 50.mir, rest of the sweep (seed-run at `88a17aa6e20`): these files still fail and are not fixed:
+  - `for_in_runtime_tuple_decode` (2 tests, struct elements bound by value);
+  - `generic_self_method_result_ctor`;
+  - `generic_struct_field_instance_paths`;
+  - `generic_type_param_eq_hash_lowering`;
+  - `stage2_generic_class_receiver` (`expected other to equal named1`);
+  - `result_enum_payload_record_provenance`;
+  - `result_err_generic_original_binder`;
+  - `provider_method_demand_determinism`;
+  - `imported_struct_operator_owner`;
+  - `mir_provider_trait_impl_once_per_closure_prevention`;
+  - `typed_u64_push_layout` (2 tests);
+  - `bare_variant_retained_subject`;
+  - `bootstrap_cli_named_array_index`;
+  - `builtin_method_extras_guard`;
+  - `compile_error_owner_layout`;
+  - `any_index_read`;
+  - the hwir riscv projections (`control_projection`, `lsu_projection`, `completion_skid`);
+  - `hwir_riscv_scalar_decoder` (0 examples executed).
+- **Not hangs:** `50.mir/flat_pool_reader_mir_lowering_spec.spl` passes 3/3 alone but takes 367s (CPU-bound, flat RSS of about 1.1 GB; it MIR-lowers the real `flat_pool_codec.spl`). `50.mir/mir_receiver_shapes_spec.spl` passes 7/7 alone in 20s. Both were only still running when their 1800s chunks timed out. flat_pool is a perf item, not a hang.
+- **Specs that import a non-exported helper:** the seed now hard-errors (`error: semantic: private fn ... is not visible to <spec>`), so the whole file runs 0 examples. Affected specs:
+  - `60.mir_opt/general_patterns_spec` (`clib_parity_rule_is_general`, `clib_parity_domain_rule_count`, and more, reported one per run);
+  - `60.mir_opt/string_builder_opt_spec` (`string_builder_opt_run_on_function`, `string_builder_opt_enabled_for`);
+  - `70.backend/cranelift_ssa_phi_nary_slot_spec` (`cranelift_ssa_phi_dest_ids`, `cranelift_local_slot_sizes`);
+  - `99.loader/module_loader_mangle_owner_spec` (`mangle_name`);
+  - `50.mir/any_index_read_spec` (`create_collection_opt_pass`).
+
+  Some of these functions are genuinely cross-module and should be `pub`: `string_builder_opt_run_on_function` is called from `mir_opt/mod.spl`, and `clib_parity_rule_is_general` is export-used by `pattern/__init__.spl`. Others are test-only internals, where the choice between `pub` and a test-facing API is the owner's. A two-function `pub` fix was not enough to make either 60.mir_opt spec run, so none is proposed here.
+- **Seed misattribution:** in `50.mir/try_struct_payload_field_for_in_spec.spl` the seed reports private `result_err_field_type_key_v2` (`50.mir/_MirLoweringExpr/result_err_record_owner.spl`) as "not visible to `00.common/dependency/member_visibility.spl`". The function is only called inside its own module, so this is likely a seed interpreter (c) caller-module tracking bug.
+- `80.driver`: 5 failures, including:
+  - `compiler_driver_identity_release_spec`: `compiler.driver` does not export `driver_hir_archive_production_controller_v1`, an archive symbol removed with 40.mono;
+  - `nonvacuity_receipts_acceptance_spec`;
+  - `shs_exit_hygiene_acceptance_spec`.
+
+  All three look like stale source pins.
 ## Side finding
 
 `src/app/io/_CliCompile/native_build.spl:197` `_nb_resolve_segs` keeps its own
