@@ -98,6 +98,10 @@ struct slang_prefix_entry {
     uint64_t last_used;
     int64_t pins;
     int unavailable;
+    /* Provenance of the snapshot: it is restored only into a request built
+     * from the same model load and with the same context size. */
+    uint64_t model_generation;
+    int64_t context_limit;
 };
 
 struct slang_request {
@@ -117,6 +121,9 @@ struct slang_request {
     int active;
     int cancelled;
     int legacy_logits_valid;
+    /* Set once this context has decoded a full micro-batch; see
+     * slang_request_warm. */
+    int warm;
     int physical_only;
     int64_t context_limit;
 #if SLANG_HAS_EXTERNAL_PAGED_PROVIDER
@@ -190,6 +197,7 @@ static int64_t g_request_capacity = SLANG_REQUEST_DEFAULT_ENTRIES;
 static int64_t g_request_count = 0;
 static int64_t g_compat_handle = 0;
 static uint64_t g_model_generation = 0;
+static int g_model_offloaded = 0;
 static char g_load_str[SLANG_STR_CAP];
 static int64_t g_load_str_len = 0;
 static int g_matched_cpu_context = 0;
@@ -469,6 +477,7 @@ static int64_t slang_model_load_locked(int64_t n_gpu_layers) {
         return SLANG_ERR_EXHAUSTED;
     }
     g_model_generation++;
+    g_model_offloaded = mp.n_gpu_layers != 0;
     return 0;
 }
 
@@ -848,9 +857,66 @@ int64_t slang_ggml_kv_clear(void) {
     return slang_ggml_request_kv_clear(g_compat_handle);
 }
 
+/* True when sequence 0 of the request KV holds exactly positions 0..count-1.
+ * A snapshot is only worth keeping, and a restore only worth trusting, when
+ * the cells in the KV are the ones the token list says they are. */
+static int slang_request_kv_holds(struct slang_request *request, int64_t count) {
+    llama_memory_t memory = llama_get_memory(request->ctx);
+    if (count <= 0) return llama_memory_seq_pos_max(memory, 0) < 0;
+    return llama_memory_seq_pos_min(memory, 0) == 0 &&
+           (int64_t)llama_memory_seq_pos_max(memory, 0) == count - 1;
+}
+
+/* The first decode a context ever runs must be one FULL micro-batch.
+ *
+ * Measured 2026-11-12 on llama.cpp b10794, CUDA (GB10), Qwen3-Coder-30B-A3B
+ * Q4_K_M, n_ubatch 512: a fresh context whose first micro-batch has certain
+ * sizes below n_ubatch (2 of the 206 sizes tried) aborts the process inside
+ * llama_decode with "CUDA error: an illegal memory access" (Xid 31, FAULT_PDE
+ * VIRT_READ), with or without a prefix restore. The same sizes are harmless
+ * once the context has run a full micro-batch. A cold agent prompt is longer
+ * than n_ubatch, so its first micro-batch is always full; a prefix restore is
+ * what leaves a short suffix as a context's first decode, which is why the
+ * abort showed up right after a restore.
+ *
+ * This is a workaround for a fault below this shim, not a repair of it. A
+ * prompt shorter than one micro-batch gets a throwaway full micro-batch first
+ * (here), and a restore gives reuse back until its suffix is a full
+ * micro-batch (slang_request_prefix_prepare_locked). Returns 0 when the
+ * throwaway decode fails; the caller then fails the request, never the
+ * process.
+ *
+ * The rule costs up to one micro-batch of decode, so it applies only where the
+ * fault was seen: a context that has not yet run a full micro-batch, on a
+ * model with layers offloaded, whose micro-batch is smaller than its context
+ * (the matched-CPU profile sets n_ubatch = n_ctx). */
+static int64_t slang_request_first_ubatch(struct slang_request *request) {
+    if (request->warm || !g_model_offloaded) return 0;
+    int64_t ubatch = (int64_t)llama_n_ubatch(request->ctx);
+    return ubatch > 0 && ubatch < request->context_limit ? ubatch : 0;
+}
+
+static int slang_request_warm(struct slang_request *request) {
+    int64_t ubatch = slang_request_first_ubatch(request);
+    if (ubatch == 0 || request->tok_len <= 0 || request->tok_len >= ubatch) return 1;
+    llama_token *filler = (llama_token *)malloc((size_t)ubatch * sizeof(llama_token));
+    if (filler == NULL) return 0;
+    for (int64_t i = 0; i < ubatch; i++) filler[i] = request->tok[i % request->tok_len];
+    llama_memory_clear(llama_get_memory(request->ctx), true);
+    int decoded = llama_decode(request->ctx, llama_batch_get_one(filler, (int32_t)ubatch)) == 0;
+    free(filler);
+    llama_memory_clear(llama_get_memory(request->ctx), true);
+    request->legacy_logits_valid = 0;
+    if (decoded) request->warm = 1;
+    return decoded;
+}
+
 /* Selects the longest cacheable prefix owned by this serial context. The
- * snapshot is restored only after exact token comparison. One trailing token
- * is recomputed so the backend produces fresh boundary logits. */
+ * snapshot is restored only after exact token comparison, only into a request
+ * of the same model load and context size, and it is kept only if the KV then
+ * holds exactly the reused positions. On any doubt the snapshot is dropped and
+ * the whole prompt is prefilled again. At least one trailing token is
+ * recomputed so the backend produces fresh boundary logits. */
 static int64_t slang_request_prefix_prepare_locked(int64_t handle) {
     struct slang_request *request = slang_request_get(handle);
     if (request == NULL) return SLANG_ERR_INVALID;
@@ -863,6 +929,8 @@ static int64_t slang_request_prefix_prepare_locked(int64_t handle) {
         struct slang_prefix_entry *entry = &g_prefix[i];
         if (entry->state == NULL || entry->unavailable || entry->token_count <= 1 ||
             request->tok_len < entry->token_count) continue;
+        if (entry->model_generation != request->model_generation ||
+            entry->context_limit != request->context_limit) continue;
         if (memcmp(request->tok, entry->tokens,
                    (size_t)entry->token_count * sizeof(llama_token)) != 0)
             continue;
@@ -878,13 +946,28 @@ static int64_t slang_request_prefix_prepare_locked(int64_t handle) {
         if (llama_state_seq_set_data(request->ctx, entry->state,
                                      entry->state_size, 0) ==
             entry->state_size) {
-            request->eval_start = entry->token_count - 1;
-            if (llama_memory_seq_rm(llama_get_memory(request->ctx), 0,
-                                    (llama_pos)request->eval_start, -1)) {
+            int64_t reuse = entry->token_count - 1;
+            int64_t ubatch = slang_request_first_ubatch(request);
+            /* See slang_request_warm: a context that has never decoded must
+             * start with a full micro-batch, so give some reuse back. */
+            if (ubatch > 0 && request->tok_len >= ubatch &&
+                request->tok_len - reuse < ubatch)
+                reuse = request->tok_len - ubatch;
+            if (reuse > 0 &&
+                llama_memory_seq_rm(llama_get_memory(request->ctx), 0,
+                                    (llama_pos)reuse, -1) &&
+                slang_request_kv_holds(request, reuse)) {
+                request->eval_start = reuse;
                 entry->last_used = ++g_prefix_clock;
                 g_prefix_hits++;
                 g_prefix_tokens_reused += request->eval_start;
                 return request->eval_start;
+            }
+            if (reuse <= 0) {
+                slang_request_release_lease_locked(request);
+                llama_memory_clear(llama_get_memory(request->ctx), true);
+                g_prefix_misses++;
+                return 0;
             }
         }
         g_prefix_restore_failures++;
@@ -897,6 +980,12 @@ static int64_t slang_request_prefix_prepare_locked(int64_t handle) {
 }
 
 int64_t slang_ggml_request_prefix_prepare(int64_t handle) {
+    /* The warm-up decodes, so it runs before the lock is taken, like every
+     * other decode. The KV is cleared again on both paths below. */
+    struct slang_request *request = slang_request_get(handle);
+    if (request != NULL && request->ctx != NULL && !request->cancelled &&
+        !slang_request_warm(request))
+        return SLANG_ERR_DECODE;
     SLANG_LOCK();
     int64_t result = slang_request_prefix_prepare_locked(handle);
     SLANG_UNLOCK();
@@ -937,8 +1026,9 @@ static void slang_prefix_admit(struct slang_request *request) {
         g_prefix[exact].last_used = ++g_prefix_clock;
         return;
     }
+    if (request->tok_len <= 0 || !slang_request_kv_holds(request, request->tok_len)) return;
     size_t state_size = llama_state_seq_get_size(request->ctx, 0);
-    if (state_size == 0 || request->tok_len <= 0) return;
+    if (state_size == 0) return;
     size_t token_bytes = (size_t)request->tok_len * sizeof(llama_token);
     if (state_size > SIZE_MAX - token_bytes) {
         g_prefix_rejected_bytes = INT64_MAX;
@@ -977,6 +1067,8 @@ static void slang_prefix_admit(struct slang_request *request) {
     g_prefix[slot].state = state;
     g_prefix[slot].state_size = state_size;
     g_prefix[slot].retained_bytes = candidate_bytes;
+    g_prefix[slot].model_generation = request->model_generation;
+    g_prefix[slot].context_limit = request->context_limit;
     g_prefix[slot].last_used = ++g_prefix_clock;
     g_prefix_resident_bytes += candidate_bytes;
     g_prefix_resident_entries++;
@@ -999,6 +1091,13 @@ int64_t slang_ggml_request_eval_prompt(int64_t handle) {
     if (request->eval_start < 0 || request->eval_start > request->tok_len)
         return SLANG_ERR_DECODE;
     int64_t suffix_len = request->tok_len - request->eval_start;
+    /* A caller that skipped prefix_prepare still gets the full first
+     * micro-batch, as long as the KV is empty and so safe to clear. */
+    if (request->eval_start == 0 && slang_request_kv_holds(request, 0) &&
+        !slang_request_warm(request)) {
+        slang_request_release_lease(request);
+        return SLANG_ERR_DECODE;
+    }
     if (suffix_len > 0) {
         struct llama_batch batch = llama_batch_get_one(
             request->tok + request->eval_start, (int32_t)suffix_len);
@@ -1006,6 +1105,7 @@ int64_t slang_ggml_request_eval_prompt(int64_t handle) {
             slang_request_release_lease(request);
             return SLANG_ERR_DECODE;
         }
+        if (suffix_len >= (int64_t)llama_n_ubatch(request->ctx)) request->warm = 1;
     }
     SLANG_LOCK();
     if (suffix_len > 0) g_prefix_tokens_prefilled += suffix_len;

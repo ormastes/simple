@@ -187,3 +187,34 @@ Neither this repair nor fixture timing is an optimization result. The canonical
 fixed-setup-cost record remains open with current runner latency/RSS unmeasured.
 
 Post-repair shell GREEN (one repair cycle): setup-cost selftest reported 4 fixtures checked, selftest only/no setup cost measured; session setup selftest reported 5 fixtures checked. Both commands exited 0. This is actual shell-owner evidence; the Simple SSpec and runner performance remain UNRUN/UNMEASURED.
+
+## Fix verification (2026-11-12, worktree lane work/lfix-test-setup-cost-20261112)
+
+Hosted repro on the Rust seed (this machine, warm daemon): every daemon-path
+request still pays a fixed ~7–9s before a <1s spec body (worker re-resolves the
+runner's 252-module graph per request; loader trace sums 3.6s of module loads,
+17 of them in src/compiler/10.frontend), and `test <dir>` on the full-runner
+path took 85s for 3 specs. The per-request worker cost remains seed-side per
+this doc's Fix status (seed `compile` of the worker fails on an HIR arity
+limit, so an .smf-cached worker is not reachable from .spl either).
+
+The directory half of the bug — "--no-session-daemon rejects directory
+targets", the trap that committed every sweep to the re-resolving path — is
+fixed in pure Simple: `src/app/test_runner_new/test_runner_single.spl` now
+accepts exactly one existing directory, walks `*_spec.spl` recursively in
+deterministic order, and runs each through the unchanged per-file machinery in
+the same process, so the fixed setup cost is paid once per process, not once
+per file. Empty directories fail closed; `--tag` non-selection (exit 4) is
+neutral in the aggregate; mixed file+dir input still refuses to drop files.
+
+Measurement (seed, same tree): `test test/01_unit/_mcdc_probe
+--no-session-daemon` — 3 specs incl. one honest FAIL — completes in ~2.1s with
+correct per-file verdicts and aggregate exit 1, vs 85s through the full runner.
+Single-file invocations and the daemon lane are unchanged (repro spec
+test_daemon_env_override_passthrough still PASSes, 39.5s).
+
+REQ-TEST-DIR-001: the --no-session-daemon lane must accept a directory target
+and pay the runner's fixed setup once per process. Executable SSpec:
+test/02_integration/app/test_runner/single_runner_directory_target_spec.spl
+(3 examples, hosted seed PASS 2026-11-12, no pass_todo); manual:
+doc/06_spec/02_integration/app/test_runner/single_runner_directory_target_spec.md.

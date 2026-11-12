@@ -8,6 +8,7 @@ row can close.
 """
 # @cover src/compiler/50.mir/_MirLowering/function_lowering.spl
 # @cover src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl
+# @cover src/compiler/50.mir/mir_lowering_stmts.spl
 # Regression: doc/08_tracking/bug/any_slot_holds_untagged_scalar_2026-08-05.md
 
 use std.spec.*
@@ -100,3 +101,33 @@ describe "Any RuntimeValue consumer semantics", tag: ["only-compiled"]:
         val mir = lower_any_mir("fn probe(value: Any) -> text:\n    value.to_text()\n", "to_text")
 
         expect(mir).to_contain("rt_value_to_string")
+
+    it "keeps Any-typed vars tagged across re-assignment":
+        var local_bool: Any = true
+        local_bool = false
+        var local_int: Any = 42
+        local_int = 43
+        var local_float: Any = 1.5
+        local_float = 2.5
+
+        expect(local_bool == false).to_equal(true)
+        expect(local_bool == any_identity(false)).to_equal(true)
+        expect(local_int == 43).to_equal(true)
+        expect(local_int == any_identity(43)).to_equal(true)
+        expect(local_float == 2.5).to_equal(true)
+        expect(local_float == any_identity(2.5)).to_equal(true)
+        expect(local_bool.to_text()).to_equal("false")
+        expect(local_int.to_text()).to_equal("43")
+        expect(local_float.to_text()).to_equal("2.5")
+
+    it "re-tags scalars stored into Any-typed vars by assignment":
+        val int_mir = lower_any_mir("fn probe() -> bool:\n    var value: Any = 42\n    value = 43\n    value == 43\n", "reassign_int")
+        val bool_mir = lower_any_mir("fn probe() -> bool:\n    var value: Any = true\n    value = false\n    value == value\n", "reassign_bool")
+        val float_mir = lower_any_mir("fn probe() -> text:\n    var value: Any = 1.5\n    value = 2.5\n    value.to_text()\n", "reassign_float")
+
+        expect(occurrences(int_mir, "rt_value_int_wide")).to_equal(3)
+        expect(int_mir).to_contain("rt_native_eq")
+        expect(occurrences(bool_mir, "\"value\":-8")).to_equal(2)
+        expect(occurrences(bool_mir, "\"value\":19")).to_equal(2)
+        expect(occurrences(float_mir, "rt_value_float")).to_equal(2)
+        expect(float_mir).to_contain("rt_value_to_string")
