@@ -22,6 +22,17 @@ fn verification_seed(offset: i64) -> [u8]:
     for i in 0..32: seed.push((i + offset) as u8)
     seed
 
+# Per-process memo of the two golden signatures: [issuer sig, issuer key, approval sig,
+# approver key]. Seeds and messages are constants, so the values never change; each call
+# hands out fresh copies because specs tamper with signature bytes in place. Each pure
+# Ed25519 sign costs ~0.9 s interpreted and fixtures call this ~11 times per build.
+var VERIFICATION_GOLDEN_V2: [[u8]] = []
+
+fn verification_copy(bytes: [u8]) -> [u8]:
+    var out: [u8] = []
+    for byte in bytes: out.push(byte)
+    out
+
 fn verification_key(identity: text, role: text, public_key: [u8]) -> DistributedAuthorityKeyV2:
     DistributedAuthorityKeyV2(identity: identity, role: role, revision: 1,
         public_key: public_key, principal: "user_1", project: "project_1", host_id: "worker_1",
@@ -39,24 +50,26 @@ fn verification_fixture() -> VerificationFixtureV2:
     val request_digest = sha256_text(request_wire)
     val approval_message = "DBC_APPROVAL_SIGNATURE_V2\napprover_1\n1\n" + grant_digest +
         "\n" + request_digest + "\n4\n3\n190\n"
-    val issuer_signature = pure_ed25519_sign_from_seed_v1(verification_seed(1), verification_bytes(grant_message))
-    val approval_signature = pure_ed25519_sign_from_seed_v1(verification_seed(65), verification_bytes(approval_message))
+    if VERIFICATION_GOLDEN_V2.len() == 0:
+        val issued = pure_ed25519_sign_from_seed_v1(verification_seed(1), verification_bytes(grant_message))
+        val approved = pure_ed25519_sign_from_seed_v1(verification_seed(65), verification_bytes(approval_message))
+        VERIFICATION_GOLDEN_V2 = [issued.signature, issued.public_key, approved.signature, approved.public_key]
     val grant = ExecutionGrantV2(id: "grant_1", principal: "user_1", project: "project_1",
         host_id: "worker_1", operations: ["build"], environment_digest: "a".repeat(64),
         policy_revision: 4, revocation_epoch: 2, expires_at: 200,
         maximum_memory_bytes: 1024, maximum_duration_ms: 1000)
     val signed = DistributedSignedGrantV2(grant: grant, issuer_id: "issuer_1", key_revision: 1,
-        signature: issuer_signature.signature)
+        signature: verification_copy(VERIFICATION_GOLDEN_V2[0]))
     val approval = DistributedSignedApprovalV2(approver_id: "approver_1", key_revision: 1,
         grant_digest: grant_digest, request_digest: request_digest, policy_revision: 4,
-        session_generation: 3, expires_at: 190, signature: approval_signature.signature)
+        session_generation: 3, expires_at: 190, signature: verification_copy(VERIFICATION_GOLDEN_V2[2]))
     val request = OperationEnvelopeV2(version: 2, id: "operation_1", payload_digest: "b".repeat(64),
         principal: "user_1", project: "project_1", host_id: "worker_1", operation: "build",
         environment_digest: "a".repeat(64), policy_revision: 4, revocation_epoch: 2,
         session_generation: 3, memory_bytes: 512, duration_ms: 500)
     VerificationFixtureV2(signed: signed, approval: approval,
-        issuer: verification_key("issuer_1", "grant-issuer", issuer_signature.public_key),
-        approver: verification_key("approver_1", "human-approver", approval_signature.public_key), request: request)
+        issuer: verification_key("issuer_1", "grant-issuer", verification_copy(VERIFICATION_GOLDEN_V2[1])),
+        approver: verification_key("approver_1", "human-approver", verification_copy(VERIFICATION_GOLDEN_V2[3])), request: request)
 
 fn verification_error(fixture: VerificationFixtureV2) -> text:
     match distributed_verify_grant_approval_v2(fixture.signed, fixture.approval, fixture.issuer,

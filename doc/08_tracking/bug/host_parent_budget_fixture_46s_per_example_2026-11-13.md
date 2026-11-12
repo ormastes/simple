@@ -2,7 +2,7 @@
 
 - Date: 2026-11-13
 - Severity: P3 (perf; spec passes)
-- Status: open
+- Status: fixed (see Resolution)
 - File: `test/fixtures/orchestration/host_parent_budget_fixture_v1.spl:18`
 
 ## Measurement
@@ -35,3 +35,20 @@ Profile inside `host_helper_fixture_v1`. If signing dominates, compute the deter
 signed records once per process and reuse them; temp roots and capacity owners stay per
 example, so isolation does not change. Do not raise the spec's time budget without first
 making the fixture cheaper.
+
+## Resolution
+`verification_fixture()` (`test/fixtures/daemon_sdk/distributed_authority_verification_fixture_v2.spl`)
+recomputed two constant Ed25519 signatures on every call: 1.75 s each time, about 11
+calls per helper build. They are now computed once per process, and every call
+returns fresh byte copies, so specs that tamper with signature bytes in place stay
+isolated from one another. The per-operation signatures in `helper_fixture_signed_v1` are
+still computed on every call.
+
+| Spec | Before | After |
+|---|---|---|
+| `host_service_domain_v2_spec` | 284 s, 11/11 | 84 s, 11/11 |
+| `distributed_grant_verification_v2_spec` | – | 8/8 |
+| `distributed_authority_snapshot_v2_spec` | – | 10/10 |
+| `host_runtime_exec_begin_v3_spec` | – | 11/11 |
+| `host_cleanup_spec` (tamper cases) | – | 10/10 |
+| `host_authorized_execution_spec` (tamper cases) | – | 11/11 |
