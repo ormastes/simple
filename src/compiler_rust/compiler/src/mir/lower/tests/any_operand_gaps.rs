@@ -122,3 +122,58 @@ fn any_unary_minus_dispatches_at_run_time() {
     );
     let _ = CallTarget::from_name("rt_any_sub");
 }
+
+/// `for i in 0..v` with `v: any`: the bound is decoded once; the raw counter
+/// was compared with the tagged word (`v = 4` ran 32 iterations).
+#[test]
+fn any_range_bound_is_decoded() {
+    let insts = instructions_of(
+        "fn r(v: any) -> i64:\n    var acc = 0\n    for i in 0..v:\n        acc = acc + i\n    return acc\n",
+        "r",
+    );
+    assert_eq!(unboxed_int_regs(&insts).len(), 1, "the bound must be decoded exactly once: {insts:?}");
+}
+
+/// `p.x = v` with `v: any` and `x: i64` stores the decoded integer.
+#[test]
+fn any_value_assigned_to_a_raw_struct_field_is_decoded() {
+    let insts = instructions_of(
+        "struct P:\n    x: i64\n\nfn set(v: any) -> i64:\n    var p = P(x: 0)\n    p.x = v\n    return p.x\n",
+        "set",
+    );
+    let unboxed = unboxed_int_regs(&insts);
+    let stored: Vec<VReg> = insts
+        .iter()
+        .filter_map(|inst| match inst {
+            MirInst::FieldSet { value, .. } => Some(*value),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(stored.len(), 1, "{insts:?}");
+    assert!(unboxed.contains(&stored[0]), "field must receive the decoded integer: {insts:?}");
+}
+
+/// `v as f64` with `v: any` must not convert the raw bits of a tagged word.
+#[test]
+fn any_cast_to_float_decodes_through_the_runtime() {
+    let insts = instructions_of("fn c(v: any) -> f64:\n    return v as f64\n", "c");
+    assert_eq!(calls_to(&insts, "rt_any_mul").len(), 1, "{insts:?}");
+    let decoded: Vec<VReg> = insts
+        .iter()
+        .filter_map(|inst| match inst {
+            MirInst::UnboxFloat { dest, .. } => Some(*dest),
+            _ => None,
+        })
+        .collect();
+    let cast_sources: Vec<VReg> = insts
+        .iter()
+        .filter_map(|inst| match inst {
+            MirInst::Cast { source, .. } => Some(*source),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        cast_sources.iter().all(|source| decoded.contains(source)),
+        "every cast must read the decoded float: {insts:?}"
+    );
+}

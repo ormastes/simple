@@ -769,6 +769,47 @@ impl<'a> MirLowerer<'a> {
             (source_reg, inner.ty)
         };
 
+        // `v as <numeric>` with `v: any`: the source is a tagged word, and
+        // `MirInst::Cast` converts raw bits (`v as f64` with `v = 3` answered
+        // 24.0). For a float target the value may be an int or a float box, so
+        // promote through the run-time dispatched `v * 1.0` and decode the
+        // float; for an integer target decode the tagged integer.
+        let (source_reg, from_ty) = if from_ty == TypeId::ANY
+            && !Self::is_raw_literal_typed_any(inner)
+            && Self::is_native_scalar(target)
+            && target != TypeId::BOOL
+            && target != TypeId::CHAR
+        {
+            if matches!(target, TypeId::F32 | TypeId::F64) {
+                let one = self.lower_float_expr(1.0)?;
+                let decoded = self.with_func(|func, current_block| {
+                    let boxed_one = func.new_vreg();
+                    let product = func.new_vreg();
+                    let decoded = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::BoxFloat {
+                        dest: boxed_one,
+                        value: one,
+                    });
+                    block.instructions.push(MirInst::Call {
+                        dest: Some(product),
+                        target: crate::mir::CallTarget::from_name("rt_any_mul"),
+                        args: vec![source_reg, boxed_one],
+                    });
+                    block.instructions.push(MirInst::UnboxFloat {
+                        dest: decoded,
+                        value: product,
+                    });
+                    decoded
+                })?;
+                (decoded, TypeId::F64)
+            } else {
+                (self.unbox_scalar_for_raw_slot(TypeId::I64, TypeId::ANY, source_reg)?, TypeId::I64)
+            }
+        } else {
+            (source_reg, from_ty)
+        };
+
         self.with_func(|func, current_block| {
             let dest = func.new_vreg();
             let block = func.block_mut(current_block).unwrap();
