@@ -54,3 +54,15 @@ shards spawn via plain `process_spawn_async`, native_build_main.spl:1213).
    deadline's origin clock when `remaining_ms <= 0` (one-line diagnostic).
 2. Check the deadline producer (row scheduler) for the clock basis; align to monotonic.
 3. Re-run the slim stage-2 matrix row compiler_cli_build on a quiet box.
+
+## Fix landed (2026-11-13 ~04:45): clamp to the V4 maximum instead of refusing
+
+`worker_hir_remaining_budget_v1` returned -1 whenever the remaining budget
+exceeded PROCESS_OBSERVATION_MAX_DEADLINE_MS (1 h). The parent deadline
+defaults to 6 h (DEFAULT_TIMEOUT_MS = 21600000), so every default-timeout HIR
+worker launch failed pre-spawn with "deadline expired or exceeds V4 bound" —
+deterministic, dual-worker, claimed=0. The clock domains were never mismatched
+(deadline and check both use time_now_monotonic_ms); the budget was simply
+over the V4 wall-clock cap by construction. Fix: clamp the over-long budget to
+3600000 ms. Spec: worker_hir_profile_v1_spec.spl pins the clamp and the
+expired-deadline -1 cases.
