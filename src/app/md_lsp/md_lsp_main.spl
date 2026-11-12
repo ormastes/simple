@@ -16,96 +16,18 @@ extern fn rt_eprintln(s: text)
 
 use app.md_lsp.md_lsp_workspace
 use app.md_lsp.md_lsp_handler
+use app.md_lsp.md_lsp_transport.{md_lsp_frame_header, md_lsp_frame}
 use app.protocol.mcp_request_envelope.{mcp_parse_request_envelope_v1}
-
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
 
 fn _md_lsp_log(message: text):
     rt_eprintln("[md-lsp] " + message)
 
-fn _md_lsp_parse_content_length(header_line: text) -> i64:
-    val prefix = "Content-Length:"
-    if not header_line.starts_with(prefix):
-        return 0
-    val rest = header_line.substring(prefix.len())
-    val trimmed = rest.trim()
-    var result: i64 = 0
-    var i = 0
-    if trimmed.len() == 0:
-        return -1
-    while i < trimmed.byte_len():
-        val digit = trimmed.byte_at(i) - 48
-        if digit < 0 or digit > 9:
-            return -1
-        if result > 922337203685477580 or (result == 922337203685477580 and digit > 7):
-            return -1
-        result = result * 10 + digit
-        i = i + 1
-    result
-
-fn _md_lsp_has_id(json: text) -> bool:
-    val search = "\"id\":"
-    json.contains(search)
-
-fn _md_lsp_extract_field(json: text, key: text) -> text:
-    val search = "\"" + key + "\":"
-    val idx_opt = json.index_of(search)
-    var idx = -1
-    match idx_opt:
-        Some(i): idx = i
-        nil: return ""
-    if idx < 0:
-        return ""
-    val start = idx + search.len()
-    val after = json.substring(start).trim()
-    if after.starts_with("\""):
-        val inner = after.substring(1)
-        val end_opt = inner.index_of("\"")
-        var end_idx = -1
-        match end_opt:
-            Some(i): end_idx = i
-            nil: return ""
-        if end_idx < 0:
-            return ""
-        return inner.substring(0, end_idx)
-    elif after.starts_with("{") or after.starts_with("["):
-        # Return nested object/array as-is (find balanced close)
-        var depth = 0
-        var j = 0
-        val alen = after.len()
-        var parts: [text] = []
-        while j < alen:
-            val ch = after.char_at(j)
-            if ch == "{" or ch == "[":
-                depth = depth + 1
-            elif ch == "}" or ch == "]":
-                depth = depth - 1
-            parts = parts.push(ch)
-            j = j + 1
-            if depth == 0:
-                return parts.join("")
-        return parts.join("")
-    else:
-        # number or keyword (null, true, false)
-        var parts: [text] = []
-        var j = 0
-        val alen = after.len()
-        while j < alen:
-            val ch = after.char_at(j)
-            if ch == "," or ch == "}" or ch == "]" or ch == " " or ch == "\n" or ch == "\r":
-                return parts.join("")
-            parts = parts.push(ch)
-            j = j + 1
-        parts.join("")
-
-fn _md_lsp_frame(json: text) -> text:
-    val byte_count = json.len()
-    "Content-Length: " + str(byte_count) + "\r\n\r\n" + json
+fn _md_lsp_emit(json: text):
+    rt_stdout_write_text(md_lsp_frame(json))
+    rt_stdout_flush()
 
 # ---------------------------------------------------------------------------
-# Main server loop
+# Main server loop (stdio only; framing lives in md_lsp_transport)
 # ---------------------------------------------------------------------------
 
 fn md_lsp_server_main():
@@ -119,29 +41,23 @@ fn md_lsp_server_main():
             return
 
         # Consume the entire header block before reading exactly the body.
-        var content_length: i64 = 0
-        var found_header = false
+        var header_lines: [text] = []
         var ended_headers = false
         for _hiter in range(0, 100):
             val header_line = rt_stdin_read_line_text()
             if header_line == "":
                 return
-            val header = header_line.trim()
-            if header == "":
+            if header_line.trim() == "":
                 ended_headers = true
                 break
-            if header.starts_with("Content-Length:"):
-                if found_header:
-                    _md_lsp_log("duplicate Content-Length")
-                    return
-                content_length = _md_lsp_parse_content_length(header)
-                found_header = true
-        if not ended_headers or not found_header or content_length <= 0:
+            header_lines.push(header_line)
+        val header = md_lsp_frame_header(header_lines)
+        if not ended_headers or not header.valid:
             _md_lsp_log("invalid message headers")
             return
 
-        # Step 3: Read exactly content_length bytes of JSON body
-        val json = rt_stdin_read_chars_text(content_length)
+        # Read exactly content_length bytes of JSON body
+        val json = rt_stdin_read_chars_text(header.content_length)
         if json == "":
             continue
 
@@ -149,24 +65,20 @@ fn md_lsp_server_main():
         val envelope = mcp_parse_request_envelope_v1(json)
         if not envelope.valid:
             val reason = if envelope.error_code == -32700: "Parse error" else: "Invalid Request"
-            val response = _md_lsp_error_response(envelope.request_id_raw, envelope.error_code, reason)
-            rt_stdout_write_text(_md_lsp_frame(response))
-            rt_stdout_flush()
+            _md_lsp_emit(_md_lsp_error_response(envelope.request_id_raw, envelope.error_code, reason))
             continue
         val method = envelope.method
         val params_json = envelope.params_raw
 
-        # Step 5: Dispatch
         if method == "exit":
             running = false
         elif envelope.has_id:
             val response = md_lsp_handle_request_raw(method, params_json, envelope.request_id_raw, workspace)
             if response != "":
-                val framed = _md_lsp_frame(response)
-                rt_stdout_write_text(framed)
-                rt_stdout_flush()
+                _md_lsp_emit(response)
         else:
-            md_lsp_handle_notification(method, params_json, workspace)
+            for publish in md_lsp_handle_notification_publishing(method, params_json, workspace):
+                _md_lsp_emit(publish.json)
 
     _md_lsp_log("md-lsp server stopped")
 

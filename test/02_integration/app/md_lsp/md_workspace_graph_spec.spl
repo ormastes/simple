@@ -1,0 +1,140 @@
+# @cover src/app/md_lsp/md_lsp_handler.spl 60%
+# @cover src/app/md_lsp/md_lsp_workspace.spl 70%
+"""
+## Purpose and audience
+The Markdown LSP publishes real `textDocument/publishDiagnostics`
+notifications with UTF-16 ranges, and a document edit republishes only the
+documents whose graph edges it touched. Audience: the md_lsp maintainer.
+## Operator workflow
+bin/simple test test/02_integration/app/md_lsp/md_workspace_graph_spec.spl
+## Compatibility and limitations
+In-process: notifications are driven through the handler with hand-built
+params JSON; no stdio, no process. Root is `file:///ws`.
+## Verification guidance and troubleshooting
+A RED on `character` means a byte column leaked into the wire; a RED on the
+republish set means invalidation widened to the whole workspace (or missed a
+dependent).
+"""
+# Lifecycle: doc/03_plan/release/1.0.0/inputs_2026-11-12/unified_diagnostics_parser_recovery_fix_suggestions_plan_2026-11-12.md (REQ-DIAG-009, Journey C)
+# @manual_section: markdown-lsp-graph
+
+use std.spec
+use app.md_lsp.md_lsp_workspace.{MdWorkspace}
+use app.md_lsp.md_lsp_handler.{md_lsp_handle_notification_publishing, md_lsp_handle_request_raw, MdLspPublish}
+
+fn open_params(uri: text, version: i64, content_json: text) -> text:
+    "{\"textDocument\":{\"uri\":\"" + uri + "\",\"languageId\":\"markdown\",\"version\":" + version.to_text() + ",\"text\":\"" + content_json + "\"}}"
+
+fn change_params(uri: text, version: i64, content_json: text) -> text:
+    "{\"textDocument\":{\"uri\":\"" + uri + "\",\"version\":" + version.to_text() + "},\"contentChanges\":[{\"text\":\"" + content_json + "\"}]}"
+
+fn close_params(uri: text) -> text:
+    "{\"textDocument\":{\"uri\":\"" + uri + "\"}}"
+
+fn uris_of(published: [MdLspPublish]) -> [text]:
+    var out: [text] = []
+    for p in published:
+        out.push(p.uri)
+    out
+
+fn publish_for(published: [MdLspPublish], uri: text) -> text:
+    for p in published:
+        if p.uri == uri:
+            return p.json
+    ""
+
+fn count_in(haystack: text, needle: text) -> i64:
+    var n = 0
+    var i = 0
+    while i + needle.len() <= haystack.len():
+        if haystack.slice(i, i + needle.len()) == needle:
+            n = n + 1
+            i = i + needle.len()
+        else:
+            i = i + 1
+    n
+
+val INDEX = "file:///ws/index.md"
+val GUIDE = "file:///ws/guide.md"
+val OTHER = "file:///ws/notes/other.md"
+
+fn fresh_workspace() -> MdWorkspace:
+    var ws = MdWorkspace.new()
+    md_lsp_handle_request_raw("initialize", "{\"rootUri\":\"file:///ws\"}", "1", ws)
+    ws
+
+describe "Markdown LSP — publishDiagnostics and graph invalidation":
+
+    it "publishes a real publishDiagnostics notification with UTF-16 character offsets":
+        # @req REQ-DIAG-008
+        var ws = fresh_workspace()
+        # @capture(publish_rows): method, uri, version, code, range.start.character
+        step("Open a document whose broken link follows a two-byte codepoint")
+        val published = md_lsp_handle_notification_publishing("textDocument/didOpen", open_params(INDEX, 7, "caf\u{e9} [x](nope.md)\\n"), ws)
+        expect(uris_of(published).contains(INDEX)).to_equal(true)
+        val json = publish_for(published, INDEX)
+        expect(json.contains("\"method\":\"textDocument/publishDiagnostics\"")).to_equal(true)
+        expect(json.contains("\"uri\":\"" + INDEX + "\"")).to_equal(true)
+        expect(json.contains("\"version\":7")).to_equal(true)
+        expect(json.contains("\"code\":\"MD1001\"")).to_equal(true)
+        expect(json.contains("\"start\":{\"line\":0,\"character\":5}")).to_equal(true)  # oracle: "café " is 5 UTF-16 units, 6 bytes
+        expect(json.contains("\"end\":{\"line\":0,\"character\":17}")).to_equal(true)  # oracle: 5 + 12 for "[x](nope.md)"
+        expect(json.contains("\"severity\":2")).to_equal(true)  # oracle: LSP Warning
+        expect(json.contains("\"source\":\"markdown\"")).to_equal(true)
+
+    it "republishes only the documents whose edges the edit touched":
+        # @req REQ-DIAG-009
+        var ws = fresh_workspace()
+        md_lsp_handle_notification_publishing("textDocument/didOpen", open_params(GUIDE, 1, "# Guide\\n"), ws)
+        md_lsp_handle_notification_publishing("textDocument/didOpen", open_params(OTHER, 1, "# Other\\n"), ws)
+        md_lsp_handle_notification_publishing("textDocument/didOpen", open_params(INDEX, 1, "[g](guide.md) [[guide]]\\n"), ws)
+        # @capture(publish_rows): republished uri set after dropping the guide edge
+        step("Edit index.md so it no longer links to guide.md")
+        val published = md_lsp_handle_notification_publishing("textDocument/didChange", change_params(INDEX, 2, "no links now\\n"), ws)
+        val uris = uris_of(published)
+        expect(uris.contains(INDEX)).to_equal(true)
+        expect(uris.contains(GUIDE)).to_equal(true)  # oracle: guide lost its inbound edge
+        expect(uris.contains(OTHER)).to_equal(false)  # oracle: other.md shares no edge with index.md
+        expect(uris.len()).to_equal(2)
+
+    it "withholds MD1102 while the graph is incomplete and reports it once complete":
+        # @req REQ-DIAG-009
+        var ws = fresh_workspace()
+        md_lsp_handle_notification_publishing("textDocument/didOpen", open_params(INDEX, 1, "[g](guide.md)\\n"), ws)
+        val partial = md_lsp_handle_notification_publishing("textDocument/didOpen", open_params(GUIDE, 1, "# Guide\\n"), ws)
+        # @capture(publish_rows): MD1102 presence under both graph states
+        step("Open guide.md with the graph incomplete, complete the graph, then cut its only inbound edge")
+        expect(publish_for(partial, GUIDE).contains("MD1102")).to_equal(false)
+        expect(publish_for(partial, GUIDE).contains("\"status\":\"partial_recovery\"")).to_equal(true)
+        ws.mark_graph_complete()
+        val after = md_lsp_handle_notification_publishing("textDocument/didChange", change_params(INDEX, 2, "nothing\\n"), ws)
+        val guide_json = publish_for(after, GUIDE)
+        expect(guide_json.contains("\"code\":\"MD1102\"")).to_equal(true)
+        expect(guide_json.contains("\"status\":\"complete\"")).to_equal(true)
+        expect(count_in(guide_json, "\"code\":\"MD1001\"")).to_equal(0)
+
+    it "clears diagnostics on close and republishes the documents it linked to":
+        # @req REQ-DIAG-009
+        var ws = fresh_workspace()
+        ws.mark_graph_complete()
+        md_lsp_handle_notification_publishing("textDocument/didOpen", open_params(GUIDE, 1, "# Guide\\n"), ws)
+        md_lsp_handle_notification_publishing("textDocument/didOpen", open_params(INDEX, 1, "[g](guide.md) [b](bad.md)\\n"), ws)
+        # @capture(publish_rows): empty list for the closed uri; guide republished as orphan
+        step("Close index.md, the only document linking to guide.md")
+        val published = md_lsp_handle_notification_publishing("textDocument/didClose", close_params(INDEX), ws)
+        expect(publish_for(published, INDEX).contains("\"diagnostics\":[]")).to_equal(true)
+        expect(publish_for(published, GUIDE).contains("\"code\":\"MD1102\"")).to_equal(true)
+        expect(uris_of(published).len()).to_equal(2)
+        expect(ws.has_document(INDEX)).to_equal(false)
+
+    it "resolves relative links from a nested document against open workspace files":
+        # @req REQ-DIAG-009
+        var ws = fresh_workspace()
+        ws.mark_graph_complete()
+        md_lsp_handle_notification_publishing("textDocument/didOpen", open_params(GUIDE, 1, "# Guide\\n"), ws)
+        # @capture(publish_rows): MD1001 count for ../guide.md vs ../missing.md
+        step("Open notes/other.md linking up to guide.md and to a missing sibling")
+        val published = md_lsp_handle_notification_publishing("textDocument/didOpen", open_params(OTHER, 1, "[g](../guide.md) [m](../missing.md)\\n"), ws)
+        val json = publish_for(published, OTHER)
+        expect(count_in(json, "\"code\":\"MD1001\"")).to_equal(1)  # oracle: ../guide.md resolves to the open guide.md
+        expect(json.contains("missing.md")).to_equal(true)

@@ -99,7 +99,7 @@ fn cli_print_shared_optimization_inventory(command: text):
         print "  - Release MIR/self-hosted builds normalize to standard unless --opt-level overrides it."
 
 # Pure Simple compiler implementation (no Rust SFFI dependency)
-fn cli_compile_pure_simple(source_file: text, output_file: text, output_format: text, backend: text, verbose: bool, release: bool, low_memory: bool, opt_level: i64, profile: text, debug_trace_level: text, coverage_enabled: bool, mcdc_mode_text: text, mcdc_owner_bytes: i64, mcdc_global_bytes: i64, xray_enabled: bool = false, native_target: text = "") -> i64:
+fn cli_compile_pure_simple(source_file: text, output_file: text, output_format: text, backend: text, verbose: bool, release: bool, low_memory: bool, opt_level: i64, profile: text, debug_trace_level: text, coverage_enabled: bool, mcdc_mode_text: text, mcdc_owner_bytes: i64, mcdc_global_bytes: i64, xray_enabled: bool = false, native_target: text = "", nogc_require_strict: bool = false) -> i64:
     var out = output_file
     if out == "":
         # Default output based on format
@@ -155,6 +155,7 @@ fn cli_compile_pure_simple(source_file: text, output_file: text, output_format: 
         options.debug_trace_level = debug_trace_level
     options.coverage_enabled = coverage_enabled
     options.xray_enabled = xray_enabled
+    options.nogc_require_strict = nogc_require_strict
     if xray_enabled and native_target != "":
         # Parity with the standalone compiler (80.driver/main.spl sets
         # cli_mode_text): without it the positional input is not an AOT
@@ -264,18 +265,26 @@ fn cli_xray_native_target(target: text) -> text:
         return "{host_arch()}-unknown-linux-gnu"
     ""
 
-fn cli_compile_xray_native(source_file: text, out: text, output_format: text, backend: text, verbose: bool, release: bool, low_memory: bool, opt_level: i64, profile: text, debug_trace_level: text, coverage_enabled: bool, mcdc_mode_text: text, mcdc_owner_bytes: i64, mcdc_global_bytes: i64, target: text) -> i64:
+fn cli_compile_xray_native(source_file: text, out: text, output_format: text, backend: text, verbose: bool, release: bool, low_memory: bool, opt_level: i64, profile: text, debug_trace_level: text, coverage_enabled: bool, mcdc_mode_text: text, mcdc_owner_bytes: i64, mcdc_global_bytes: i64, target: text, nogc_require_strict: bool = false) -> i64:
     val native_target = cli_xray_native_target(target)
     val old_native_target = env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
     if native_target != "" and not env_set("SIMPLE_NATIVE_BUILD_TARGET", native_target):
         _cli_eprint("Error: could not export SIMPLE_NATIVE_BUILD_TARGET={native_target}")
         return 1
-    val status = cli_compile_pure_simple(source_file, out, output_format, backend, verbose, release, low_memory, opt_level, profile, debug_trace_level, coverage_enabled, mcdc_mode_text, mcdc_owner_bytes, mcdc_global_bytes, true, native_target)
+    val status = cli_compile_pure_simple(source_file, out, output_format, backend, verbose, release, low_memory, opt_level, profile, debug_trace_level, coverage_enabled, mcdc_mode_text, mcdc_owner_bytes, mcdc_global_bytes, true, native_target, nogc_require_strict)
     env_set("SIMPLE_NATIVE_BUILD_TARGET", old_native_target)
     status
 
 fn _cli_is_wasm_target(t: text) -> bool:
     t == "wasm32" or t == "wasm32-wasi" or t == "wasm64" or t.starts_with("wasm32-") or t.starts_with("wasm64-")
+
+# `--nogc-strict`: conforming no-GC build (CompileOptions.nogc_require_strict).
+# Exact flag only; no value form, so a typo cannot silently weaken the policy.
+pub fn cli_compile_nogc_strict_requested(args: [text]) -> bool:
+    for arg in args:
+        if arg == "--nogc-strict":
+            return true
+    false
 
 fn cli_validate_opt_level_args(args: [text]) -> i64:
     var i = 0
@@ -332,6 +341,7 @@ fn cli_compile(args: [text]) -> i64:
     var debug_trace_level: text = ""
     var coverage_enabled: bool = false
     var xray_enabled: bool = false
+    var nogc_require_strict: bool = false
     var mcdc_mode_text: text = ""
     var mcdc_owner_bytes: i64 = 0
     var mcdc_global_bytes: i64 = 0
@@ -360,6 +370,7 @@ fn cli_compile(args: [text]) -> i64:
             print "  --emit-c              Emit C++20 source code (C backend)"
             print "  --coverage            Enable coverage instrumentation"
             print "  --xray                Emit XRay sleds (static switch; off by default)"
+            print "  --nogc-strict         Conforming no-GC build: every admitted module must be @no_gc(strict) and checked"
             print "  --mcdc                Enable static MC/DC instrumentation"
             print "  --mcdc-mode=<mode>    MC/DC mode: static-off, static-on, dynamic-aspect"
             print "  --no-mcdc             Fully disable MC/DC instrumentation"
@@ -552,6 +563,8 @@ fn cli_compile(args: [text]) -> i64:
             coverage_enabled = true
         elif arg == "--xray":
             xray_enabled = true
+        elif cli_compile_nogc_strict_requested([arg]):
+            nogc_require_strict = true
         elif arg == "--mcdc":
             mcdc_mode_text = "on"
         elif arg == "--no-mcdc":
@@ -720,8 +733,8 @@ fn cli_compile(args: [text]) -> i64:
         if (backend == "llvm-lib" or backend == "llvmlib" or coverage_enabled or xray_enabled or mcdc_mode_text != "" or
             mcdc_owner_bytes > 0 or mcdc_global_bytes > 0):
             if xray_enabled and backend == "native":
-                return cli_compile_xray_native(source_file, out, output_format, backend, verbose, release, low_memory, opt_level, profile, debug_trace_level, coverage_enabled, mcdc_mode_text, mcdc_owner_bytes, mcdc_global_bytes, target)
-            return cli_compile_pure_simple(source_file, out, output_format, backend, verbose, release, low_memory, opt_level, profile, debug_trace_level, coverage_enabled, mcdc_mode_text, mcdc_owner_bytes, mcdc_global_bytes, xray_enabled)
+                return cli_compile_xray_native(source_file, out, output_format, backend, verbose, release, low_memory, opt_level, profile, debug_trace_level, coverage_enabled, mcdc_mode_text, mcdc_owner_bytes, mcdc_global_bytes, target, nogc_require_strict)
+            return cli_compile_pure_simple(source_file, out, output_format, backend, verbose, release, low_memory, opt_level, profile, debug_trace_level, coverage_enabled, mcdc_mode_text, mcdc_owner_bytes, mcdc_global_bytes, xray_enabled, "", nogc_require_strict)
         return compile_native_source(source_file, out, verbose, "", false, backend, release, opt_level, use_lto, march_target)
 
     if target.starts_with("baremetal-"):
@@ -766,7 +779,7 @@ fn cli_compile(args: [text]) -> i64:
         if not env_set("SIMPLE_NATIVE_BUILD_TARGET", target):
             _cli_eprint("Error: could not export SIMPLE_NATIVE_BUILD_TARGET={target}")
             return 1
-        val target_status = cli_compile_pure_simple(source_file, output_file, if output_format == "": "smf" else: output_format, backend, verbose, release, low_memory, opt_level, profile, debug_trace_level, coverage_enabled, mcdc_mode_text, mcdc_owner_bytes, mcdc_global_bytes, xray_enabled)
+        val target_status = cli_compile_pure_simple(source_file, output_file, if output_format == "": "smf" else: output_format, backend, verbose, release, low_memory, opt_level, profile, debug_trace_level, coverage_enabled, mcdc_mode_text, mcdc_owner_bytes, mcdc_global_bytes, xray_enabled, "", nogc_require_strict)
         env_set("SIMPLE_NATIVE_BUILD_TARGET", old_native_target)
         return target_status
 
@@ -774,7 +787,7 @@ fn cli_compile(args: [text]) -> i64:
     # or --format, `compile` emits an SMF module (the seed CLI's contract).
     if output_format == "":
         output_format = "smf"
-    return cli_compile_pure_simple(source_file, output_file, output_format, backend, verbose, release, low_memory, opt_level, profile, debug_trace_level, coverage_enabled, mcdc_mode_text, mcdc_owner_bytes, mcdc_global_bytes, xray_enabled)
+    return cli_compile_pure_simple(source_file, output_file, output_format, backend, verbose, release, low_memory, opt_level, profile, debug_trace_level, coverage_enabled, mcdc_mode_text, mcdc_owner_bytes, mcdc_global_bytes, xray_enabled, "", nogc_require_strict)
 
 fn compile_baremetal(source_file: text, target: text, emit: text, output_file: text, verbose: bool) -> i64:
     if verbose:

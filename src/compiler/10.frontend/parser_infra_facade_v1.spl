@@ -1,0 +1,72 @@
+# Parser-infra facade (v1) — the Simple frontend's token / span / line-start /
+# recovery surface, exported for reuse by non-Simple parsers (CMM, Markdown).
+#
+# Owner decision 9 (unified diagnostics plan, 2026-11-12): CMM reuses the
+# Simple frontend's token, span and line-start infrastructure instead of
+# carrying its own. This module EXPORTS what already exists; it does not
+# re-implement lexing. Everything here is request-owned and immutable: no
+# lexer global state escapes (see `core_reference_tokens_v1`).
+#
+#   tokens      CoreReferenceTokenV1 / core_reference_tokens_v1  (byte + codepoint spans)
+#   spans       token_to_span / tokens_to_span -> std.common.diagnostics.Span (token kinds stay i64 codes)
+#   line starts LineStartTable, byte_to_position, span_to_range (0-based UTF-16)
+#   recovery    RecoveryStepV1 / recover_to_sync_token  (bounded panic-mode driver)
+#
+# The Simple parser itself has no detachable recovery driver (its recovery is
+# interleaved with global parse state), so the driver below is the one piece
+# that is new: a pure, bounded skip-to-sync step over a token slice. It
+# guarantees progress or termination and never reports success for a skip
+# that hit the budget or EOF — the caller maps that onto `partial_recovery`.
+
+use compiler.frontend.core.lexer_struct.{CoreReferenceTokenV1, core_reference_tokens_v1}
+use std.common.diagnostics.span.{Span}
+use std.common.diagnostics.source_position.{LineStartTable, Utf16Position, Utf16Range, byte_to_position, position_to_byte, span_to_range}
+
+# Span of a reference token in the shared diagnostic vocabulary (byte offsets,
+# 1-based line/col) — the exact token range, never a one-character fallback.
+fn token_to_span(tok: CoreReferenceTokenV1) -> Span:
+    Span.new(tok.byte_start, tok.byte_end, tok.line, tok.column)
+
+# Span covering tokens[first..=last] (inclusive). Returns None when the range
+# is empty or out of bounds, so a caller cannot emit a fabricated span.
+fn tokens_to_span(tokens: [CoreReferenceTokenV1], first: i64, last: i64) -> Span?:
+    if first < 0 or last < first or last >= tokens.len():
+        return None
+    val a = tokens[first]
+    val b = tokens[last]
+    Span.new(a.byte_start, b.byte_end, a.line, a.column)
+
+# Result of one bounded recovery step.
+#   next_index  index of the sync token (or tokens.len() when terminated at EOF)
+#   skipped     tokens consumed by the skip, always >= 1 on progress
+#   found_sync  true  -> a sync token was reached within the budget
+#               false -> budget exhausted or EOF: recovery TERMINATED, not succeeded
+struct RecoveryStepV1:
+    next_index: i64
+    skipped: i64
+    found_sync: bool
+
+# Bounded panic-mode recovery: starting at `from` (the offending token), skip
+# forward until a token whose kind is in `sync_kinds`, consuming at most
+# `max_skip` tokens. Always advances by at least one token when any remain, so
+# a loop over it cannot stall; `found_sync == false` is a terminal outcome the
+# caller must surface as partial recovery, never as a clean parse.
+fn recover_to_sync_token(tokens: [CoreReferenceTokenV1], from: i64, sync_kinds: [i64], max_skip: i64) -> RecoveryStepV1:
+    val n = tokens.len()
+    if from >= n or from < 0:
+        return RecoveryStepV1(next_index: n, skipped: 0, found_sync: false)
+    val budget = if max_skip < 1: 1 else: max_skip
+    # Progress guarantee: the offending token itself is always consumed.
+    var i = from + 1
+    var skipped = 1
+    while i < n and skipped <= budget:
+        if sync_kinds.contains(tokens[i].kind):
+            return RecoveryStepV1(next_index: i, skipped: skipped, found_sync: true)
+        i = i + 1
+        skipped = skipped + 1
+    RecoveryStepV1(next_index: i, skipped: skipped, found_sync: false)
+
+export CoreReferenceTokenV1, core_reference_tokens_v1
+export Span, LineStartTable, Utf16Position, Utf16Range, byte_to_position, position_to_byte, span_to_range
+export token_to_span, tokens_to_span
+export RecoveryStepV1, recover_to_sync_token

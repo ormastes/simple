@@ -106,10 +106,21 @@ use compiler.frontend.core.parser_lexical_bindings.{ParserLexicalBindings}
 # Each parse owns one ParserState; `par_state` is the single active-context
 # slot. take hands the active state out and installs a fresh one; install
 # makes a state active (O(1) swap; no per-field copy list to forget).
+# Positioned parser error, recorded from the token stream at the error site so
+# downstream diagnostics never reconstruct line/col from the message text.
+pub struct ParserErrorRecord:
+    line: i64
+    col: i64
+    length: i64      # byte length of the offending token (>= 1)
+    message: text    # message without the "line L:C: " prefix
+    expected: text   # token kind name the parser wanted ("" when not a mismatch)
+    found: text      # token kind name actually seen ("" when not a mismatch)
+
 pub struct ParserState:
     # Owned by this Parser lifecycle; unresolved outer names stay unresolved.
     par_lexical_bindings: ParserLexicalBindings
     par_errors: [text]
+    par_error_records: [ParserErrorRecord]
     par_warnings: [text]
     par_struct_names: [text]
     par_had_error: bool
@@ -143,6 +154,7 @@ fn parser_state_fresh() -> ParserState:
     ParserState(
         par_lexical_bindings: ParserLexicalBindings(authority: 0, scope_authorities: []),
         par_errors: [],
+        par_error_records: [],
         par_warnings: [],
         par_struct_names: [],
         par_had_error: false,
@@ -217,6 +229,7 @@ pub fn parser_promote_transient_owners() -> bool:
         rt_transient_heap_promote(par_state.par_line_slot) and
         rt_transient_heap_promote(par_state.par_col_slot) and
         rt_transient_heap_promote(par_state.par_errors) and
+        rt_transient_heap_promote(par_state.par_error_records) and
         rt_transient_heap_promote(par_state.par_warnings) and
         rt_transient_heap_promote(par_state.par_struct_names) and
         type_pools_promote_hir_owners() and
@@ -399,6 +412,7 @@ fn parser_init_with_path(source: text, path: text):
     # file's scratch explicitly scope-local.
     par_state.par_lexical_bindings = ParserLexicalBindings(authority: 0, scope_authorities: [])
     par_state.par_errors = []
+    par_state.par_error_records = []
     par_state.par_warnings = []
     par_state.par_struct_names = []
     if par_state.par_kind_slot == nil:
@@ -551,7 +565,9 @@ fn parser_expect(expected: i64) -> bool:
     par_had_error_set(true)
     par_had_error_mirror_set()
     par_record_error(msg)
-    par_first_error_mirror_set(par_line_get(), par_col_get(), "expected " + tok_kind_name(expected) + ", got " + tok_kind_name(par_kind_get()) + " '" + par_text_get() + "'")
+    val short_msg = "expected " + tok_kind_name(expected) + ", got " + tok_kind_name(par_kind_get()) + " '" + par_text_get() + "'"
+    par_record_error_at(par_line_get(), par_col_get(), par_text_get().byte_len(), short_msg, tok_kind_name(expected), tok_kind_name(par_kind_get()))
+    par_first_error_mirror_set(par_line_get(), par_col_get(), short_msg)
     false
 
 fn parser_error(msg: text):
@@ -563,6 +579,7 @@ fn parser_error(msg: text):
     par_had_error_set(true)
     par_had_error_mirror_set()
     par_record_error(full)
+    par_record_error_at(par_line_get(), par_col_get(), par_text_get().byte_len(), msg, "", "")
     par_first_error_mirror_set(par_line_get(), par_col_get(), msg)
 
 # A diagnostic found after the parse (a whole-module check), reported at the
@@ -576,6 +593,7 @@ fn parser_error_at(line: i64, col: i64, msg: text):
     par_had_error_set(true)
     par_had_error_mirror_set()
     par_record_error(full)
+    par_record_error_at(line, col, 1, msg, "", "")
     par_first_error_mirror_set(line, col, msg)
 
 # Append to the recorded-error list that backs parser_get_errors() and
@@ -588,6 +606,24 @@ fn par_record_error(msg: text):
     if par_state.par_errors == nil:
         par_state.par_errors = []
     par_state.par_errors.push(msg)
+
+# Positioned twin of par_record_error: the same error, with line/col/length
+# captured at the site (never parsed back out of the message text). Length is
+# at least 1 so a span always covers something highlightable.
+fn par_record_error_at(line: i64, col: i64, length: i64, msg: text, expected: text, found: text):
+    if par_state.par_error_records == nil:
+        par_state.par_error_records = []
+    var span_len = length
+    if span_len < 1:
+        span_len = 1
+    par_state.par_error_records.push(ParserErrorRecord(
+        line: line, col: col, length: span_len, message: msg,
+        expected: expected, found: found))
+
+fn parser_get_error_records() -> [ParserErrorRecord]:
+    if par_state.par_error_records == nil:
+        return []
+    par_state.par_error_records
 
 fn parser_guarded_int_text(t: text) -> i64:
     # Lexer bugs must surface as located parser errors, not location-less
@@ -1479,6 +1515,8 @@ fn parse_module_file(source: text, path: text):
     # Nil-guards: module-level vars may be nil in native binaries
     if par_state.par_errors == nil:
         par_state.par_errors = []
+    if par_state.par_error_records == nil:
+        par_state.par_error_records = []
     if par_state.par_warnings == nil:
         par_state.par_warnings = []
     if par_state.par_struct_names == nil:
@@ -1629,6 +1667,10 @@ pub fn flat_parser_state_restore(r: FlatPoolReader) -> bool:
     par_state.par_diagnostic_emit_count = flat_pool_dec_scalar_i64(r)
     par_state.par_diagnostics_suppressed = flat_pool_dec_scalar_bool(r)
     par_state.par_errors = flat_pool_dec_text(r)
+    # Positioned records are not part of the cache blob: an erroring parse is
+    # never published to the cache (see parse_diagnostic_receipt_spec), so a
+    # restored state carries no records by construction.
+    par_state.par_error_records = []
     par_state.par_fixed_array_elem = flat_pool_dec_scalar_i64(r)
     par_state.par_fixed_array_size = flat_pool_dec_scalar_i64(r)
     par_state.par_had_error = flat_pool_dec_scalar_bool(r)

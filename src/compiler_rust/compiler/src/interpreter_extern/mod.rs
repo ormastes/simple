@@ -70,7 +70,7 @@ pub mod io;
 pub mod network;
 pub mod filesystem;
 pub mod file_io;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 mod snapshot_links;
 pub mod bootstrap_runtime;
 pub mod io_file;
@@ -1409,7 +1409,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_dir_create", file_io::rt_dir_create);
     insert_simple!("rt_dir_exists", file_io::rt_dir_exists);
     insert_simple!("rt_dir_is_real_no_follow", file_io::rt_dir_is_real_no_follow);
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     {
         insert_simple!("rt_snapshot_symlink_create_nofollow_v1", snapshot_links::create);
         insert_simple!("rt_snapshot_symlink_match_nofollow_v1", snapshot_links::matches);

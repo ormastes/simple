@@ -1,7 +1,46 @@
 # Provider-neutral syntax projection. No source grammar or semantic resolver.
 use std.common.source.contracts.{SourceSnapshotV1, SourceRangeV1,
-    SourceOutlineNodeV1, SourceOutlineV1, SourceFoldV1, SourceStructuredViewV1}
+    SourceOutlineNodeV1, SourceOutlineV1, SourceFoldV1, SourceStructuredViewV1,
+    SourceIntentResolutionV1}
 use std.nogc_sync_mut.source.projection.{source_project_ranges_v1}
+use std.common.text_bytes.{text_to_utf8_bytes, bytes_to_text}
+
+fn source_intent_tokens_v1(intent: text) -> [text]:
+    # Identifier-shaped tokens, keeping `.` so `Class.method` stays one token.
+    var tokens: [text] = []
+    var current: [u8] = []
+    for b in text_to_utf8_bytes(intent):
+        val keep = (b >= 48 and b <= 57) or (b >= 65 and b <= 90) or (b >= 97 and b <= 122) or b == 95 or b == 46 or b >= 128
+        if keep:
+            current.push(b)
+        else:
+            if current.len() > 0: tokens.push(bytes_to_text(current))
+            current = []
+    if current.len() > 0: tokens.push(bytes_to_text(current))
+    tokens
+
+pub fn source_outline_intent_v1(outline: SourceOutlineV1, intent: text) -> SourceIntentResolutionV1:
+    # Lexical only: an intent token that equals a node's qualified name or
+    # simple name selects it. Qualified matches win over simple-name matches.
+    var qualified: [i64] = []
+    var simple: [i64] = []
+    for token in source_intent_tokens_v1(intent):
+        var index = 0
+        for node in outline.nodes:
+            if node.kind != "import":
+                if token == node.qualified_name and not source_index_contains_v1(qualified, index):
+                    qualified.push(index)
+                elif token == node.name and not source_index_contains_v1(simple, index):
+                    simple.push(index)
+            index = index + 1
+    val matches = if qualified.len() > 0: qualified else: simple
+    var candidates: [text] = []
+    for index in matches: candidates.push(outline.nodes[index].qualified_name)
+    if matches.len() == 1:
+        return SourceIntentResolutionV1("resolved", matches[0], candidates[0], "intent_token_matches_unique_symbol", candidates)
+    if matches.len() == 0:
+        return SourceIntentResolutionV1("unresolved", -1, "", "no_intent_token_names_a_symbol; lexical_match_only", candidates)
+    SourceIntentResolutionV1("ambiguous", -1, "", "intent_tokens_name_several_symbols; supply target", candidates)
 
 fn source_sorted_indices_v1(nodes: [SourceOutlineNodeV1]) -> [i64]:
     # Stable bottom-up merge sort preserves node-array parent identities.
@@ -61,6 +100,30 @@ pub fn source_outline_target_v1(outline: SourceOutlineV1, target: text) -> Resul
     if found < 0: return Err("unresolved_syntax_target")
     Ok(found)
 
+fn source_target_body_tokens_v1(snapshot: SourceSnapshotV1, outline: SourceOutlineV1,
+        target_index: i64) -> [text]:
+    # Identifier tokens of the focused target's full source; empty without a target.
+    if target_index < 0: return []
+    val span = outline.nodes[target_index].full_range
+    val bytes = text_to_utf8_bytes(snapshot.source)
+    if span.start_byte < 0 or span.end_byte > bytes.len() or span.end_byte < span.start_byte: return []
+    var slice: [u8] = []
+    var position = span.start_byte
+    while position < span.end_byte:
+        slice.push(bytes[position])
+        position = position + 1
+    source_intent_tokens_v1(bytes_to_text(slice))
+
+fn source_import_named_by_v1(module_path: text, tokens: [text]) -> bool:
+    # Relevance is lexical: the import's last path segment (or the whole
+    # path) appears as a token in the target body. No semantic resolution.
+    if tokens.len() == 0: return false
+    val segments = module_path.split(".")
+    val tail = segments[segments.len() - 1]
+    for token in tokens:
+        if token == module_path or token == tail: return true
+    false
+
 pub fn source_project_structure_v1(snapshot: SourceSnapshotV1, outline: SourceOutlineV1,
         mode: text, target: text, depth: i64, start_index: i64,
         max_nodes: i64, max_bytes: i64) -> Result<SourceStructuredViewV1, text>:
@@ -72,6 +135,7 @@ pub fn source_project_structure_v1(snapshot: SourceSnapshotV1, outline: SourceOu
     var target_index = -1
     if mode == "focused": target_index = source_outline_target_v1(outline, target)?
     val order = source_sorted_indices_v1(outline.nodes)
+    val target_tokens = source_target_body_tokens_v1(snapshot, outline, target_index)
     var candidates: [i64] = []
     var import_ranges: [SourceRangeV1] = []
     for index in order:
@@ -79,7 +143,12 @@ pub fn source_project_structure_v1(snapshot: SourceSnapshotV1, outline: SourceOu
         if node.parent_index < -1 or node.parent_index >= index:
             return Err("invalid_outline_parent")
         if node.kind == "import" and index != target_index:
-            import_ranges.push(node.full_range)
+            # An import the target body names lexically is shown as source;
+            # the others stay one synthetic group with per-item ranges.
+            if not source_import_named_by_v1(node.name, target_tokens):
+                import_ranges.push(node.full_range)
+                continue
+            candidates.push(index)
             continue
         var visible = node.parent_index < 0 or depth == 2
         if mode == "focused":

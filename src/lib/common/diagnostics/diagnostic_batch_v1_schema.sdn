@@ -1,0 +1,85 @@
+# DiagnosticBatchV1 + DiagnosticActionIndex schema
+#
+# Data-shape description of diagnostic_batch.spl, adjacent to
+# diagnostic_v1_schema.sdn (which it references for `diagnostic_v1`, `span`,
+# `fix_confidence`). The JSON renderers (DiagnosticBatchV1.to_json,
+# DiagnosticActionIndex.to_json) are the interchange format for payloads.
+
+diagnostic_batch_v1_schema:
+  version: 1
+  description: >
+    One batch per analysed document snapshot. Batch status is separate from
+    diagnostic severity: an empty diagnostics list under partial_recovery,
+    stale, cancelled, unsupported or internal_error is NOT a clean document.
+    Stable ids derive from code + file id + node identity + occurrence, never
+    from line/column or message text; consumers check document_version and
+    source_hash before trusting an id.
+
+  enums:
+    batch_status:
+      values: [complete, partial_recovery, stale, cancelled, unsupported, internal_error]
+      meaning:
+        complete: "analysis finished; diagnostics may contain errors/warnings"
+        partial_recovery: "parsing/indexing recovered enough to return useful facts; unreliable regions marked"
+        stale: "input version/hash no longer matches the active document"
+        cancelled: "superseded/cancelled computation; do not publish a cleared list"
+        unsupported: "the requested analysis is not implemented for this surface"
+        internal_error: "execution/transport/index failure; keep last valid evidence, never claim clean"
+
+  stable_id:
+    format: "<code>@<file_id>#<node_identity>/<occurrence>"
+    inputs: [code, file_id, node_identity, occurrence]
+    excluded: [line, col, message]
+
+  structs:
+    batch_diagnostic:
+      fields:
+        id: text              # diagnostic_stable_id(...)
+        diagnostic: diagnostic_v1
+
+    diagnostic_batch_v1:
+      fields:
+        schema_version: i64   # always 1
+        producer: text        # e.g. "simple_driver", "cmm_lsp", "md_lsp"
+        file_id: text         # canonical file id, not the path
+        uri: text
+        document_version: i64
+        source_hash: text     # XXH3-128 hex of the analysed text, producer-computed
+        analysis_generation: i64
+        status: batch_status
+        incomplete_reason: text?   # null only when status == complete
+        diagnostics: [batch_diagnostic]
+        related_files: [text]
+
+    fix_precondition:
+      fields:
+        file: text
+        span: span
+        expected_text: text   # exact text the span must still contain to apply
+
+    fix_candidate:
+      fields:
+        id: text
+        title: text
+        explanation: text
+        confidence: fix_confidence
+        replacements: [fix_replacement]
+        preconditions: [fix_precondition]   # one per replacement, same order
+        required_document_version: i64
+        enabled: bool                        # derived: disabled_reason == null
+        disabled_reason: text?
+
+    action_entry:
+      fields:
+        diagnostic_id: text
+        candidates: [fix_candidate]   # producer order: correctness, scope, confidence, edit size
+
+    diagnostic_action_index:
+      fields:
+        entries: [action_entry]
+
+  compatibility:
+    legacy_fix: >
+      DiagnosticActionIndex.compat_fix_for(id) projects the first ENABLED
+      candidate onto the legacy single DiagnosticV1.fix (id, title as
+      description, confidence, replacements).

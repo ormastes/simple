@@ -1,0 +1,160 @@
+# Source Position — byte offset <-> 0-based UTF-16 line/character
+#
+# The ONE conversion every LSP/MCP producer (Simple, CMM, Markdown) routes
+# through. Parsers keep byte offsets internally (`Span.start/end`); LSP wants
+# 0-based line + UTF-16 code-unit character. One byte is NOT one code unit:
+#   - 1-byte scalar (ASCII, tab)            -> 1 unit
+#   - 2- and 3-byte scalars (é, CJK, Hangul) -> 1 unit
+#   - 4-byte scalar (emoji, astral)          -> 2 units (surrogate pair)
+#   - combining marks are their own scalar   -> their own unit
+#
+# Line terminators: "\n", "\r\n" and a lone "\r" (LSP semantics). Terminator
+# bytes belong to the line they end; converting an offset INSIDE a terminator
+# yields that line's end-of-line position (so the LF of a CRLF collapses onto
+# the CR's position — the only non-round-tripping boundary, documented in
+# source_position_spec).
+#
+# Build `LineStartTable` ONCE per document snapshot and reuse it for every
+# conversion in that snapshot; conversions are O(line length) walks from the
+# line start, never whole-file scans.
+#
+# Ambiguity is rejected, never guessed: a byte offset on a UTF-8 continuation
+# byte, a character index that splits a surrogate pair, a character past the
+# line's end, a line past the table, or an offset past EOF all return None.
+
+struct Utf16Position:
+    line: i64        # 0-based
+    character: i64   # 0-based UTF-16 code units from the line start
+
+struct Utf16Range:
+    start: Utf16Position
+    end: Utf16Position
+
+struct LineStartTable:
+    starts: [i64]    # byte offset of each line's first byte; starts[0] == 0
+    byte_len: i64    # total byte length of the snapshot text
+
+fn _is_continuation(b: i64) -> bool:
+    b >= 128 and b < 192
+
+# Byte width of the scalar whose lead byte is `b` (1..4); continuation bytes
+# and invalid leads report 1 so a walk always advances.
+fn _scalar_width(b: i64) -> i64:
+    if b < 128: 1
+    elif b < 192: 1
+    elif b < 224: 2
+    elif b < 240: 3
+    else: 4
+
+fn _scalar_units(b: i64) -> i64:
+    if b >= 240: 2 else: 1
+
+fn _is_terminator(b: i64) -> bool:
+    b == 10 or b == 13
+
+impl LineStartTable:
+    static fn build(src: text) -> LineStartTable:
+        var starts: [i64] = [0]
+        val n = src.byte_len()
+        var i = 0
+        while i < n:
+            val b = src.byte_at(i)
+            if b == 10:
+                starts.push(i + 1)
+            elif b == 13:
+                if i + 1 < n and src.byte_at(i + 1) == 10:
+                    i = i + 1
+                starts.push(i + 1)
+            i = i + 1
+        LineStartTable(starts: starts, byte_len: n)
+
+    fn line_count() -> i64:
+        self.starts.len()
+
+    # Byte offset of the first byte of `line`; -1 when the line does not exist.
+    fn line_start(line: i64) -> i64:
+        if line < 0 or line >= self.starts.len(): -1
+        else: self.starts[line]
+
+    # 0-based line containing byte `offset` (binary search). Terminator bytes
+    # belong to the line they end; `offset == byte_len` is the last line.
+    # Out-of-range offsets report -1.
+    fn line_of_byte(offset: i64) -> i64:
+        if offset < 0 or offset > self.byte_len:
+            return -1
+        var lo = 0
+        var hi = self.starts.len() - 1
+        while lo < hi:
+            val mid = (lo + hi + 1) / 2
+            if self.starts[mid] <= offset:
+                lo = mid
+            else:
+                hi = mid - 1
+        lo
+
+# Byte offset just past the last content byte of `line` (before its terminator).
+fn _line_content_end(src: text, table: LineStartTable, line: i64) -> i64:
+    val next = line + 1
+    var end = table.byte_len
+    if next < table.starts.len():
+        end = table.starts[next]
+        # Step back over the terminator ("\n", "\r", or "\r\n").
+        if end > 0 and src.byte_at(end - 1) == 10:
+            end = end - 1
+        if end > 0 and src.byte_at(end - 1) == 13:
+            end = end - 1
+    end
+
+# Byte offset -> UTF-16 position. None when `offset` is outside 0..byte_len
+# or lands on a UTF-8 continuation byte (not a scalar boundary).
+fn byte_to_position(src: text, table: LineStartTable, offset: i64) -> Utf16Position?:
+    if offset < 0 or offset > table.byte_len:
+        return None
+    if offset < table.byte_len and _is_continuation(src.byte_at(offset)):
+        return None
+    val line = table.line_of_byte(offset)
+    val start = table.starts[line]
+    val content_end = _line_content_end(src, table, line)
+    var limit = offset
+    if limit > content_end:
+        limit = content_end
+    var units = 0
+    var i = start
+    while i < limit:
+        val b = src.byte_at(i)
+        units = units + _scalar_units(b)
+        i = i + _scalar_width(b)
+    Some(Utf16Position(line: line, character: units))
+
+# UTF-16 position -> byte offset. None when the line is outside the table, the
+# character lies past the line's content end, or it splits a surrogate pair.
+fn position_to_byte(src: text, table: LineStartTable, pos: Utf16Position) -> i64?:
+    if pos.line < 0 or pos.line >= table.starts.len() or pos.character < 0:
+        return None
+    val content_end = _line_content_end(src, table, pos.line)
+    var i = table.starts[pos.line]
+    var units = 0
+    while units < pos.character:
+        if i >= content_end:
+            return None
+        val b = src.byte_at(i)
+        units = units + _scalar_units(b)
+        i = i + _scalar_width(b)
+    if units != pos.character:
+        return None   # landed between the two halves of a surrogate pair
+    Some(i)
+
+# Byte span -> UTF-16 range; zero-width spans are valid; an inverted span or
+# any endpoint that byte_to_position rejects yields None.
+fn span_to_range(src: text, table: LineStartTable, start_byte: i64, end_byte: i64) -> Utf16Range?:
+    if end_byte < start_byte:
+        return None
+    match byte_to_position(src, table, start_byte):
+        Some(s):
+            match byte_to_position(src, table, end_byte):
+                Some(e): Some(Utf16Range(start: s, end: e))
+                None: None
+        None: None
+
+export Utf16Position, Utf16Range, LineStartTable
+export byte_to_position, position_to_byte, span_to_range

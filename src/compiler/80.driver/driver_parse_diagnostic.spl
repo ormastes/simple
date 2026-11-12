@@ -1,5 +1,15 @@
 # Snapshot a parser-owned diagnostic while the caller still owns its lifetime.
 use compiler.core.parser.{parser_first_error_get, parser_get_errors}
+use compiler.core.parser.{ParserErrorRecord, parser_get_error_records}
+use compiler.common.diagnostics.diagnostic_v1.{DiagnosticV1, render_diagnostic_v1_json}
+use compiler.common.diagnostics.span.{Span}
+use std.common.diagnostics.diagnostic_batch.{DiagnosticBatchV1, BatchStatus, diagnostic_stable_id}
+use compiler.core.types.{int_to_str}
+
+# Stable code for every parser-site error (matches query_error_codes
+# "ParseError"); the interpreter's load path reports the same code so
+# push/pull/CLI consumers never see two codes for one defect.
+pub val DRIVER_PARSE_ERROR_CODE: text = "E0001"
 
 pub fn driver_format_parse_error(source_path: text, detail: text) -> text:
     if detail != "":
@@ -16,3 +26,73 @@ pub fn driver_parse_error_message(source_path: text) -> text:
     if errors.len() > 0:
         return driver_format_parse_error(source_path, errors[0])
     driver_format_parse_error(source_path, "")
+
+# One positioned parser record -> one typed diagnostic. The primary span is
+# taken from the record, never reconstructed from message text; a token
+# mismatch keeps its expected/found pair as a note so fix suggestion layers
+# can reason about it without re-parsing the message.
+pub fn driver_parse_record_to_diagnostic(source_path: text, rec: ParserErrorRecord) -> DiagnosticV1:
+    val span = Span(start: 0, end: rec.length, line: rec.line, col: rec.col, file: source_path, length: rec.length)
+    var d = DiagnosticV1.error(DRIVER_PARSE_ERROR_CODE, rec.message)
+        .with_file(source_path)
+        .with_span(span)
+        .with_label(source_path, span, rec.message)
+    if rec.expected != "":
+        d = d.with_note("expected " + rec.expected + ", found " + rec.found)
+    d
+
+# Every error the last parse recorded, as typed diagnostics, in emission
+# order. Falls back to the scalar first-error receipt (line:col:msg) only when
+# the positioned list is empty but the parser still flagged failure, so a
+# caller never sees "failed" with zero diagnostics.
+pub fn driver_parse_diagnostics_v1(source_path: text) -> [DiagnosticV1]:
+    var out: [DiagnosticV1] = []
+    for rec in parser_get_error_records():
+        out.push(driver_parse_record_to_diagnostic(source_path, rec))
+    if out.len() > 0:
+        return out
+    val first_error = parser_first_error_get()
+    if first_error != "":
+        val rec = driver_parse_receipt_record(first_error)
+        out.push(driver_parse_record_to_diagnostic(source_path, rec))
+    out
+
+# "<line>:<col>:<message>" receipt -> record (length 1: the receipt carries
+# no token width).
+fn driver_parse_receipt_record(receipt: text) -> ParserErrorRecord:
+    val first = receipt.index_of(":")
+    if first < 0:
+        return ParserErrorRecord(line: 1, col: 1, length: 1, message: receipt, expected: "", found: "")
+    val rest = receipt.substring(first + 1, receipt.len())
+    val second = rest.index_of(":")
+    if second < 0:
+        return ParserErrorRecord(line: 1, col: 1, length: 1, message: receipt, expected: "", found: "")
+    val line = receipt.substring(0, first).parse_int() ?? 1
+    val col = rest.substring(0, second).parse_int() ?? 1
+    val msg = rest.substring(second + 1, rest.len())
+    ParserErrorRecord(line: line, col: col, length: 1, message: msg, expected: "", found: "")
+
+# The parse as one DiagnosticBatchV1 (diag-P1 contract). A parse that
+# recorded errors is `PartialRecovery` — the parser kept going after the first
+# error and the batch is what it could still establish, never a fake success.
+# `document_version` / `source_hash` identify the analyzed snapshot so an LSP
+# consumer can discard a batch the editor has already superseded.
+pub fn driver_parse_batch_v1(source_path: text, uri: text, document_version: i64, source_hash: text, analysis_generation: i64) -> DiagnosticBatchV1:
+    var batch = DiagnosticBatchV1.new("simple-parser", source_path, uri, document_version, source_hash, analysis_generation)
+    var occurrence = 0
+    for d in driver_parse_diagnostics_v1(source_path):
+        var node_identity = "0:0"
+        if d.span != nil:
+            val s = d.span.unwrap()
+            node_identity = int_to_str(s.line) + ":" + int_to_str(s.col)
+        batch = batch.push(diagnostic_stable_id(d.code, source_path, node_identity, occurrence), d)
+        occurrence = occurrence + 1
+    if batch.len() > 0:
+        batch = batch.with_status(BatchStatus.PartialRecovery, "parser recovered after " + int_to_str(batch.len()) + " error(s); later statements may be incomplete")
+    batch
+
+pub fn driver_parse_diagnostics_v1_json(source_path: text) -> [text]:
+    var out: [text] = []
+    for d in driver_parse_diagnostics_v1(source_path):
+        out.push(render_diagnostic_v1_json(d))
+    out

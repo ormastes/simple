@@ -49,3 +49,44 @@ clear diagnostic at the declaration site, or make named-argument parsing
 context-aware so a known struct type's field labels parse regardless of
 keyword overlap. The current failure mode (line-number-less parse error at
 every importer) costs far more to diagnose than either option.
+
+## Addendum 2026-11-12 — compiler-lane investigation (work/compiler-ctor-field-bugs-20261112)
+
+The doc filename says `ctor`; the body and workaround describe `spawn`. Both
+were investigated on release/1.0.0 (HEAD 35e7682892a). Findings:
+
+### `ctor` is not reserved anywhere (title premise does not hold)
+
+- Pure-Simple lexer: `keyword_lookup` (src/compiler/10.frontend/core/tokens.spl:369)
+  has no `ctor` entry; `ctor` lexes as an ordinary identifier (TOK_IDENT).
+- Rust seed lexer: `src/compiler_rust/parser/src/lexer/identifiers.rs` has no
+  `ctor` keyword arm.
+- Empirical: `struct Foo:\n    ctor: i64` with `Foo(ctor: 42)` and `.ctor`
+  access parses AND runs on the seed binary, and parses through the canonical
+  pure-Simple frontend (`parse_full_frontend` / `parse_module`). No fix exists
+  to make; no parser change was needed.
+
+### Reproducible defect is the doc body's `spawn` case, seed-side only
+
+- Seed: `ProbeRet(a: 1, spawn: 3)` fails with the documented
+  "function arguments: expected Comma, found Colon" (no line number), because
+  the seed reserves `spawn` (`"spawn" => TokenKind::Spawn`,
+  identifiers.rs:227) and its call-argument parser rejects keyword tokens as
+  labels.
+- Canonical pure-Simple parser already accepts keywords as named-argument
+  labels: `parse_call_arg_raw` (src/compiler/10.frontend/core/parser_expr.spl:758-771)
+  does a snapshot lookahead (`ident:` / `ident =`) for any `keyword_lookup`
+  token before keyword-specific primary parsing, and struct-field parsing
+  (`fn_struct_decls.spl`, `use_kw_segment_text`) already accepts keyword-named
+  fields. The `spawn:`/`ctor:`/`type:` named-argument forms all parse with
+  labels intact.
+
+### Consequence
+
+This is a seed-vs-canonical divergence, not a canonical-parser bug. Per lane
+ownership, the seed-side fix (context-aware named-argument labels in
+src/compiler_rust) belongs to the seed lane; the canonical behavior is pinned
+by test/01_unit/compiler/frontend/reserved_word_struct_field_named_ctor_spec.spl.
+The single-line form `struct Foo: ctor: i64` fails with "expected Indent" for
+ANY field name (verified with plain `bar`) — that is generic indentation
+syntax, not keyword-related.

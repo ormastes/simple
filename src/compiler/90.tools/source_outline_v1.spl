@@ -4,6 +4,9 @@
 # lex_current_token_byte_span before outline_lexer receives Token.span. All
 # native spans below are therefore already bytes; do not convert them twice.
 use compiler.frontend.treesitter.outline.{TreeSitter}
+# The façade module owns `TreeSitter.parse_outline`; import it so the impl
+# block is loaded on every route that reaches this provider (MCP source_open).
+use compiler.frontend.treesitter.{treesitter_parse_outline_v1}
 use compiler.frontend.treesitter.outline_lexer.{treesitter_new}
 use compiler.frontend.treesitter_types.{FunctionOutline, FieldOutline, ErrorSeverity}
 use compiler.frontend.core.lexer_types.{LexSpan}
@@ -28,8 +31,13 @@ fn source_native_leaf_v1(nodes: [SourceOutlineNodeV1], bytes: [u8],
         span: LexSpan, body_start: i64) -> [SourceOutlineNodeV1]:
     var result = nodes
     val header = source_native_header_v1(bytes, span, body_start)
-    val full = SourceRangeV1(header.start_byte, span.end_pos)
-    val body = if body_start > span.start: SourceRangeV1(body_start, span.end_pos) else: SourceRangeV1(span.end_pos, span.end_pos)
+    # A multi-line body span ends after the NEXT line's indentation (the dedent
+    # token); drop those spaces/tabs so siblings never overlap.
+    var end_pos = span.end_pos
+    while end_pos > span.start and end_pos <= bytes.len() and (bytes[end_pos - 1] == 32 or bytes[end_pos - 1] == 9):
+        end_pos = end_pos - 1
+    val full = SourceRangeV1(header.start_byte, end_pos)
+    val body = if body_start > span.start: SourceRangeV1(body_start, end_pos) else: SourceRangeV1(end_pos, end_pos)
     result.push(SourceOutlineNodeV1(name, qualified, kind, parent, full, header, body))
     result
 
@@ -76,7 +84,7 @@ pub fn source_native_outline_v1(snapshot: SourceSnapshotV1) -> Result<SourceOutl
     if bytes.len() > 65536: return Err("native_outline_source_limit_65536")
     var parser = treesitter_new(snapshot.source)
     parser.heuristic_mode = false
-    val parsed = parser.parse_outline()
+    val parsed = treesitter_parse_outline_v1(parser)
     var nodes: [SourceOutlineNodeV1] = []
     for item in parsed.imports:
         nodes = source_native_leaf_v1(nodes, bytes, item.module, "import", -1, item.module, item.span, 0)
