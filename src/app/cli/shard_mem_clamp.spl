@@ -652,6 +652,22 @@ pub fn shard_tree_budget_kb_for(declared_kb: i64, cgroup_kb: i64) -> i64:
         return cgroup_kb
     declared_kb
 
+# Parallel floor (2026-11-12): Stage 3 and the tool builds must run with at
+# least two workers. When an ENFORCING tree RSS guard is known (the watchdog
+# exports its cap as the tree budget and SIMPLE_BOOTSTRAP_RSS_CAP_MODE=enforce)
+# and two whole estimates plus the coordinator's measured peak fit inside that
+# cap, the 60%/40% reserve no longer forces a serial run: the guard is the
+# authority for the remaining headroom. Without a known enforced cap, or when
+# two estimates do not physically fit, the clamp result stands. Never raises a
+# serial request or an already admitted fanout.
+pub fn shard_threads_guarded_floor_v1(requested: i64, cap: i64, tree_kb: i64,
+        budget_kb: i64, parent_peak_kb: i64, rss_mode: text) -> i64:
+    if requested < 2 or cap >= 2: return cap
+    if rss_mode != "enforce" or tree_kb <= 0 or budget_kb <= 0: return cap
+    val parent_kb = if parent_peak_kb > 0: parent_peak_kb else: 0
+    if budget_kb > (tree_kb - parent_kb) / 2: return cap
+    2
+
 # An explicit opt-out disables the host estimate, not a known enclosing cap
 # (declared budget or cgroup memory.max). Host config max_threads
 # (SIMPLE_HOST_MAX_THREADS) bounds the request on every platform; it can only
@@ -682,6 +698,14 @@ pub fn shard_threads_mem_cap(requested: i64, budget_kb: i64, parent_peak_kb: i64
         if cap_kb > 0 or avail_kb > 0 or tree_kb > 0:
             if clamp_workers < cap: cap = clamp_workers
         print "[hir-shard] admission worker estimate={budget_kb} kB (coordinator peak {parent_peak_kb} kB reserved for the coordinator only); warmup pool only, RSS guard authoritative"
+    # Host free memory still bounds the floor: the guard owns the tree cap,
+    # not memory the rest of the host is using.
+    val floor_tree_kb = if avail_kb > 0 and avail_kb < tree_kb: avail_kb else: tree_kb
+    val floored = shard_threads_guarded_floor_v1(bounded, cap, floor_tree_kb, budget_kb,
+        parent_peak_kb, env_get("SIMPLE_BOOTSTRAP_RSS_CAP_MODE") ?? "")
+    if floored != cap:
+        print "[shard] parallel floor: {cap} -> {floored} worker(s) under the enforcing RSS guard (tree {floor_tree_kb} kB fits 2 x {budget_kb} kB)"
+        cap = floored
     if cap < requested:
         print "[shard] threads={cap} (requested {requested}, host max_threads bound={bounded}, available={avail_kb} kB, tree budget={tree_kb} kB (declared {declared_kb} kB, cgroup memory.max {cgroup_kb} kB), worker budget={budget_kb} kB, parent peak={parent_peak_kb} kB)"
     cap
