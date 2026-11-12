@@ -1,0 +1,101 @@
+name: Runtime Link Completeness (per platform)
+
+# WHY THIS WORKFLOW EXISTS
+# ------------------------
+# `scripts/check/check-runtime-link-completeness.shs` decides which runtime
+# symbols exist by COMPILING the C runtime on the host it runs on and by
+# reading `#[cfg]` on the Rust runtime exports. A C file guarded by
+# `#if defined(__linux__) || defined(__APPLE__)` (runtime_renderdoc.c) and a
+# `#[cfg(unix)]` export both vanish on Windows, where the COFF linker also
+# resolves every declared extern BEFORE section GC. The required Linux gate
+# therefore cannot see Windows' missing symbols: on 2026-11-12 the Windows
+# Stage 2 link failed on 75 host.spl externs the Linux run called "defined
+# or unreferenced". This job runs the same gate natively on each hosted OS so
+# the platform variance is a CI verdict, not a 25-minute bootstrap lane.
+
+on:
+  pull_request:
+    paths:
+      - 'src/runtime/**'
+      - 'src/compiler_rust/runtime/**'
+      - 'src/compiler_rust/native_all/src/**'
+      - 'src/lib/nogc_sync_mut/sffi/host.spl'
+      - 'src/app/cli/native_build_worker.spl'
+      - 'src/compiler/70.backend/backend/runtime_compiler.spl'
+      - 'scripts/check/check-runtime-link-completeness.shs'
+      - 'scripts/check/runtime_link_completeness_allow.sdn'
+      - 'scripts/lib/resolve-llvm-nm.shs'
+      - '.github/workflows/runtime-link-completeness-platforms.yml'
+  push:
+    branches: [main, 'release/**']
+    paths:
+      - 'src/runtime/**'
+      - 'src/compiler_rust/runtime/**'
+      - 'src/compiler_rust/native_all/src/**'
+      - 'src/lib/nogc_sync_mut/sffi/host.spl'
+      - 'src/app/cli/native_build_worker.spl'
+      - 'src/compiler/70.backend/backend/runtime_compiler.spl'
+      - 'scripts/check/check-runtime-link-completeness.shs'
+      - 'scripts/check/runtime_link_completeness_allow.sdn'
+      - 'scripts/lib/resolve-llvm-nm.shs'
+      - '.github/workflows/runtime-link-completeness-platforms.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    name: link-completeness (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Install LLVM (Linux)
+        if: runner.os == 'Linux'
+        shell: sh
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends llvm clang
+
+      - name: Install LLVM (macOS)
+        if: runner.os == 'macOS'
+        shell: sh
+        run: |
+          brew install llvm >/dev/null
+          echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
+
+      # The Windows lane is llvm-mingw UCRT (never MSVC, never GCC): the same
+      # pin scripts/setup/bootstrap-prereqs.shs installs on a dev host, read
+      # from that script so the two cannot drift.
+      - name: Install llvm-mingw (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -eu
+          eval "$(grep -E '^LLVM_MINGW_PIN_(VERSION|SHA256)=' scripts/setup/bootstrap-prereqs.shs)"
+          name="llvm-mingw-${LLVM_MINGW_PIN_VERSION}-ucrt-x86_64"
+          root="$HOME/.simple/toolchains"
+          mkdir -p "$root"
+          curl -sSL -o "$root/$name.zip" "https://github.com/mstorsjo/llvm-mingw/releases/download/${LLVM_MINGW_PIN_VERSION}/$name.zip"
+          echo "${LLVM_MINGW_PIN_SHA256}  $root/$name.zip" | sha256sum -c -
+          unzip -q "$root/$name.zip" -d "$root"
+          test -x "$root/$name/bin/clang.exe"
+
+      - name: Resolve llvm-nm
+        shell: bash
+        run: sh scripts/check/check-runtime-link-completeness.shs --resolve-only
+
+      - name: Runtime link completeness (closure-strict, native platform)
+        shell: bash
+        run: |
+          out=$(sh scripts/check/check-runtime-link-completeness.shs); rc=$?
+          printf '%s\n' "$out" | grep -E 'runtime-link-completeness:|^MISSING|STATUS'
+          exit "$rc"

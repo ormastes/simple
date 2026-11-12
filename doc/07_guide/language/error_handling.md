@@ -23,6 +23,11 @@ fn divide(a: i64, b: i64) -> Result<i64, text>:
 
 ### Option
 
+Compatibility-only example: `return nil` in a safe return is `NIL-UNSAFE-001`,
+and a public `Option<T>` input/field is `ROB-OPT-001`/`-002`. Robust APIs use
+`Result` or a domain enum — see
+[robust_semantic_absence.md](robust_semantic_absence.md).
+
 ```simple:skip
 enum Option<T>:
     Some(T)

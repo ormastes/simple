@@ -1,0 +1,72 @@
+# Purpose and audience: acceptance evidence (design S-12) for compiler lint maintainers.
+# @req REQ-SSPEC-COMPILER
+# design: doc/05_design/language/robust_types/robust_types_layer_contracts_2026-11-12.md §9 S-12
+"""
+# S-12: the resolved public-API walker flags every raw optional on the public surface
+
+A public parameter, a public field (and its generated accessor), an in-file
+alias of an optional, a nested generic/tuple/fn-type optional and an in-file
+re-exported declaration are all flagged by `robust_option_surface`
+(`ROB-OPT-001` for inputs, `ROB-OPT-002` for attributes) at warning severity.
+Private declarations, extern boundaries and return types are not.
+"""
+
+# @tag: unit, compiler, lint, robust
+
+use std.spec.*
+use compiler.tools.lint.static_rules.{LintParamsV1, LintUnit, StaticLintFinding, StaticLintLevel, StaticLintRule, static_lint_rule_table, run_static_lint_rule_table}
+
+fn rob_opt_findings(src: text) -> [StaticLintFinding]:
+    var rules: [StaticLintRule] = []
+    for rule in static_lint_rule_table():
+        if rule.id() == "robust_option_surface": rules.push(rule)
+    val run = run_static_lint_rule_table(LintParamsV1.defaults(), LintUnit("src/lib/example.spl", src), rules)
+    var out: [StaticLintFinding] = []
+    for finding in run.findings:
+        if finding.code.starts_with("ROB-OPT"): out.push(finding)
+    out
+
+fn codes(src: text) -> [text]:
+    [f.code for f in rob_opt_findings(src)]
+
+describe "S-12 resolved public-API walker":
+    it "flags a public parameter that exposes Option<T>":
+        val found = rob_opt_findings("pub fn connect(host: Host, timeout: Option<Duration>) -> Result<Session, Error>:\n    pass\n")
+        expect(found.len()).to_equal(1)
+        expect(found[0].code).to_equal("ROB-OPT-001")
+        expect(found[0].line_num).to_equal(1)
+        expect(found[0].message.contains("timeout")).to_equal(true)
+
+    it "flags a public field and names its generated accessor":
+        val found = rob_opt_findings("pub struct Connection:\n    socket: Option<Socket>\n    error: ConnectionError?\n")
+        expect(codes("pub struct Connection:\n    socket: Option<Socket>\n    error: ConnectionError?\n")).to_equal(["ROB-OPT-002", "ROB-OPT-002"])
+        expect(found[0].line_num).to_equal(2)
+        expect(found[1].line_num).to_equal(3)
+        expect(found[0].message.contains("accessor")).to_equal(true)
+
+    it "flags a getter on a public class field":
+        expect(codes("pub class Session:\n    peer: Option<Peer>\n\n    fn id() -> i64: 1\n")).to_equal(["ROB-OPT-002"])
+
+    it "resolves an in-file alias to its optional target":
+        expect(codes("type MaybeSocket = Option<Socket>\npub fn attach(s: MaybeSocket):\n    pass\n")).to_equal(["ROB-OPT-001"])
+        expect(codes("type Peer = Socket\npub fn attach(s: Peer):\n    pass\n")).to_equal([])
+
+    it "flags optionals nested in generics, tuples and fn types":
+        expect(codes("pub fn a(items: List<Option<Item>>):\n    pass\n")).to_equal(["ROB-OPT-001"])
+        expect(codes("pub fn b(pair: (Item, Item?)):\n    pass\n")).to_equal(["ROB-OPT-001"])
+        expect(codes("pub fn c(cb: fn(Option<Item>) -> Item):\n    pass\n")).to_equal(["ROB-OPT-001"])
+        expect(codes("pub fn d(m: Dict<text, [Item?]>):\n    pass\n")).to_equal(["ROB-OPT-001"])
+
+    it "treats an in-file export as public":
+        expect(codes("struct Conn:\n    socket: Option<Socket>\n\nexport Conn\n")).to_equal(["ROB-OPT-002"])
+        expect(codes("fn open(s: Option<Socket>):\n    pass\n\nexport open\n")).to_equal(["ROB-OPT-001"])
+
+    it "leaves private declarations, externs and return types alone":
+        expect(codes("fn helper(s: Option<Socket>):\n    pass\n")).to_equal([])
+        expect(codes("struct Slot:\n    socket: Option<Socket>\n")).to_equal([])
+        expect(codes("pub extern fn rt_peek(p: Option<i64>) -> i64\n")).to_equal([])
+        expect(codes("pub fn find(id: Id) -> Option<User>:\n    None\n")).to_equal([])
+
+    it "reports at warning severity, never deny":
+        for finding in rob_opt_findings("pub fn f(a: Option<A>, b: B?):\n    pass\n"):
+            expect(finding.level == StaticLintLevel.Warn).to_equal(true)
