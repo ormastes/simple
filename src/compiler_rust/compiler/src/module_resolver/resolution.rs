@@ -845,6 +845,28 @@ impl ModuleResolver {
                     }
                 }
 
+                // Strategy 6: the detected project root may be a NESTED
+                // directory that merely contains a `src` folder (the test tree
+                // mirrors `src/lib/<x>/src` as `test/01_unit/lib/<x>/src`, so a
+                // spec below it gets that directory as its root). A top-level
+                // namespace such as `test.fixtures.*` then lives in an
+                // ENCLOSING root. Last resort only, so no import that resolves
+                // today can change.
+                if segments[0] != "crate" && segments.len() > 1 {
+                    let mut outer = self.project_root.parent();
+                    while let Some(candidate) = outer {
+                        if p_is_dir(&candidate.join("src")) {
+                            let outer_dir = candidate.join(&segments[0]);
+                            if p_is_dir(&outer_dir) {
+                                if let Ok(resolved) = self.resolve_from_base(&outer_dir, &segments[1..], path) {
+                                    return Ok(resolved);
+                                }
+                            }
+                        }
+                        outer = candidate.parent();
+                    }
+                }
+
                 Err(err)
             }
         }
