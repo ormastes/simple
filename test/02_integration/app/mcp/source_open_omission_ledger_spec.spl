@@ -1,0 +1,100 @@
+# @req REQ-MCP-7-6 REQ-MCP-7-7 REQ-MCP-8-3
+# Selection before serialization: every structured view carries an omission
+# ledger (range, reason, retrieval handle), folded nodes carry aggregate syntax
+# issue counts, no view claims "0 errors" for analysis that did not run, and
+# the advanced help table is returned only on demand with unsupported
+# categories labelled by reason.
+use std.spec.step
+use app.mcp.main_dispatch.{dispatch_tool}
+use std.common.string_core.{str_len}
+use std.common.json.value.{JsonValue, json_parse_value_strict, json_value_field, json_value_text_or, json_value_items, json_value_has}
+use std.nogc_sync_mut.io.file_ops.{file_read}
+
+val FIXTURE = "test/fixture/source_view/navigate.spl"
+
+fn view_payload(response: text) -> JsonValue:
+    expect(str_len(response)).to_be_less_than(16385)
+    val wire = json_parse_value_strict(response).unwrap()
+    val result = json_value_field(wire, "result")
+    expect(json_value_field(result, "isError")).to_equal(JsonValue.Bool(false))
+    val content = json_value_items(json_value_field(result, "content"))
+    json_parse_value_strict(json_value_text_or(json_value_field(content[0], "text"), "")).unwrap()
+
+fn ledger_entries(payload: JsonValue, reason: text) -> [JsonValue]:
+    var found: [JsonValue] = []
+    for entry in json_value_items(json_value_field(payload, "omission_ledger")):
+        if json_value_text_or(json_value_field(entry, "reason"), "") == reason: found.push(entry)
+    found
+
+describe "source_open omission ledger":
+    it "lists every omitted range with a reason and a retrieval handle":
+        # @capture(protocol_json): omission ledger rows for a focused view
+        step("open Controller.process focused")
+        val payload = view_payload(dispatch_tool("20", "source_open", "{\"path\":\"" + FIXTURE + "\",\"mode\":\"focused\",\"target\":\"Controller.process\"}"))
+        val ledger = json_value_items(json_value_field(payload, "omission_ledger"))
+        expect(ledger.len()).to_equal(json_value_items(json_value_field(payload, "omitted_ranges")).len())
+        step("grouped imports reopen through raw paging at their own byte offset")
+        val imports = ledger_entries(payload, "import_group")
+        expect(imports.len()).to_equal(2)
+        val reopen = json_value_field(imports[0], "reopen")
+        expect(json_value_text_or(json_value_field(reopen, "mode"), "")).to_equal("raw")
+        expect(json_value_field(reopen, "start_byte")).to_equal(JsonValue.Int(0))
+        step("a folded body reopens by focusing its own symbol")
+        val folded = ledger_entries(payload, "folded_body")
+        expect(folded.len()).to_be_greater_than(0)
+        var submit_handle = JsonValue.Null
+        for entry in folded:
+            if json_value_text_or(json_value_field(entry, "node_name"), "") == "Controller.submit":
+                submit_handle = json_value_field(entry, "reopen")
+        expect(json_value_text_or(json_value_field(submit_handle, "mode"), "")).to_equal("focused")
+        expect(json_value_text_or(json_value_field(submit_handle, "target"), "")).to_equal("Controller.submit")
+        step("coverage is stated as bytes, not as a completeness promise")
+        val coverage = json_value_field(payload, "selection_coverage")
+        val selected = json_value_field(coverage, "selected_bytes")
+        val total = json_value_field(coverage, "source_bytes")
+        expect(total).to_equal(JsonValue.Int(str_len(file_read(FIXTURE))))
+        expect(selected == total).to_equal(false)
+        expect(json_value_text_or(json_value_field(coverage, "analysis"), "")).to_equal("syntax_only")
+
+    it "never claims zero errors; folded markers carry only syntax issue counts":
+        step("open the plain outline")
+        val payload = view_payload(dispatch_tool("21", "source_open", "{\"path\":\"" + FIXTURE + "\"}"))
+        val rendered = json_value_text_or(json_value_field(payload, "rendered"), "")
+        expect(rendered).to_contain("| syntax_issues:0 hidden:0 (semantics not evaluated)")
+        expect(rendered.contains("0 errors")).to_equal(false)
+        expect(rendered.contains("E:0")).to_equal(false)
+        step("outline closes every body including the synthetic import group")
+        var labels: [text] = []
+        for fold in json_value_items(json_value_field(payload, "folds")):
+            labels.push(json_value_text_or(json_value_field(fold, "label"), ""))
+        expect(labels).to_contain("imports")
+        expect(labels).to_contain("Controller")
+        expect(labels).to_contain("create_controller")
+
+    it "returns exact undecorated source in raw mode":
+        step("open raw")
+        val payload = view_payload(dispatch_tool("22", "source_open", "{\"path\":\"" + FIXTURE + "\",\"mode\":\"raw\"}"))
+        expect(json_value_text_or(json_value_field(payload, "source_text"), "")).to_equal(file_read(FIXTURE))
+        expect(json_value_has(payload, "rendered")).to_equal(false)
+        expect(json_value_has(payload, "omission_ledger")).to_equal(false)
+
+describe "source_open advanced help on demand":
+    it "returns the category table with unsupported operations labelled by reason":
+        step("request help=adv")
+        val payload = view_payload(dispatch_tool("23", "source_open", "{\"path\":\"" + FIXTURE + "\",\"help\":\"adv\"}"))
+        val help = json_value_field(payload, "advanced_help")
+        val display = json_value_field(help, "display")
+        var available: [text] = []
+        for item in json_value_items(json_value_field(display, "available")): available.push(json_value_text_or(item, ""))
+        expect(available).to_contain("outline")
+        expect(available).to_contain("raw")
+        expect(available).to_contain("focused")
+        val analyze = json_value_field(help, "analyze")
+        expect(json_value_items(json_value_field(analyze, "available")).len()).to_equal(0)
+        val unsupported = json_value_items(json_value_field(analyze, "unsupported"))
+        expect(unsupported.len()).to_be_greater_than(0)
+        expect(json_value_text_or(json_value_field(unsupported[0], "reason"), "")).to_contain("semantic")
+        expect(json_value_has(payload, "essential_help")).to_equal(false)
+        step("the table is absent from a plain open")
+        val plain = view_payload(dispatch_tool("24", "source_open", "{\"path\":\"" + FIXTURE + "\"}"))
+        expect(json_value_has(plain, "advanced_help")).to_equal(false)
