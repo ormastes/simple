@@ -1,15 +1,17 @@
 # @cover src/lib/editor/services/md_diagnostics.spl 70%
 """
 ## Purpose and audience
-Markdown diagnostics carry typed `MD*` codes on exact byte spans and are
-registered in the shared `ErrorRegistry` without colliding with compiler
-codes. Audience: the editor/LSP maintainer who needs the code -> span -> fix
-contract pinned before wiring Markdown diagnostics into any client.
+Markdown diagnostics carry typed `MD*` codes on exact byte spans, ride the
+shared `DiagnosticV1` / `DiagnosticBatchV1` contract, and are registered in
+the shared `ErrorRegistry` without colliding with compiler codes. Audience:
+the editor/LSP maintainer who needs the code -> span -> fix contract pinned
+before wiring Markdown diagnostics into any client.
 ## Operator workflow
 bin/simple test test/01_unit/app/md_lsp/md_diagnostic_adapter_spec.spl
 ## Compatibility and limitations
-Pure in-process analysis; no files, no process spawn. Columns are UTF-8 byte
-offsets inside the line, which is what the LSP layer converts to UTF-16.
+Pure in-process analysis; no files, no process spawn. Spans are byte offsets
+(shared `Span`, 1-based line/col) which the LSP layer converts to UTF-16 via
+`LineStartTable`.
 ## Verification guidance and troubleshooting
 A RED on a span usually means a check widened to a whole line again; a RED on
 the registry means a code was reassigned in error_explanations.spl.
@@ -21,27 +23,42 @@ the registry means a code was reassigned in error_explanations.spl.
 use std.spec
 use std.editor.services.md_diagnostics.*
 use std.editor.services.md_wiki_index.{md_wiki_document, MdWikiDocument}
+use std.common.diagnostics.{DiagnosticV1, DiagnosticBatchV1, Span}
 use app.md_lsp.md_lsp_codes.{md_lsp_register_codes}
 use compiler.common.error_explanations.{ErrorRegistry}
 
-fn codes_of(diags: [MdDiagnostic]) -> [text]:
-    var out: [text] = []
-    for d in diags:
-        out.push(d.code)
+fn rows(batch: DiagnosticBatchV1) -> [DiagnosticV1]:
+    var out: [DiagnosticV1] = []
+    for bd in batch.diagnostics:
+        out.push(bd.diagnostic)
     out
 
-fn first_with(diags: [MdDiagnostic], code: text) -> MdDiagnostic:
+fn first_with(diags: [DiagnosticV1], code: text) -> DiagnosticV1:
     for d in diags:
         if d.code == code:
             return d
-    MdDiagnostic(code: "", path: "", line: -1, col: -1, end_line: -1, end_col: -1, severity: "", message: "", source: "", has_fix: false, fix_text: "")
+    DiagnosticV1.error("", "")
 
-fn count_code(diags: [MdDiagnostic], code: text) -> i64:
+fn count_code(diags: [DiagnosticV1], code: text) -> i64:
     var n = 0
     for d in diags:
         if d.code == code:
             n = n + 1
     n
+
+# 0-based line / byte column / byte end column of the primary span.
+fn line0(d: DiagnosticV1) -> i64:
+    d.span.unwrap().line - 1
+
+fn col0(d: DiagnosticV1) -> i64:
+    d.span.unwrap().col - 1
+
+fn end_col0(d: DiagnosticV1) -> i64:
+    val sp = d.span.unwrap()
+    sp.col - 1 + sp.length
+
+fn fix_text(d: DiagnosticV1) -> text:
+    d.fix.unwrap().replacements[0].new_text
 
 fn local_ctx(files: [text]) -> MdLinkContext:
     MdLinkContext(existing_files: files, wiki_documents: [], graph_complete: false, has_inbound: false)
@@ -54,13 +71,17 @@ describe "Markdown diagnostics — typed codes on byte spans":
         # @capture(diagnostic_rows): code, line, col, end_col of the MD1001 row
         step("Diagnose a document whose first link targets a missing file")
         val batch = md_diagnose_batch(content, "index.md", 1, local_ctx(["index.md"]))
-        val d = first_with(batch.diagnostics, "MD1001")
+        val d = first_with(rows(batch), "MD1001")
         expect(d.code).to_equal("MD1001")
-        expect(d.line).to_equal(2)  # oracle: the link is on the third line (0-based 2)
-        expect(d.col).to_equal(4)  # oracle: "see " is four bytes before "["
-        expect(d.end_col).to_equal(21)  # oracle: "[guide](guide.md)" is 17 bytes, 4 + 17
-        expect(d.severity).to_equal("warning")
-        expect(count_code(batch.diagnostics, "MD1001")).to_equal(1)  # oracle: index.md exists, only guide.md is broken
+        expect(line0(d)).to_equal(2)  # oracle: the link is on the third line (0-based 2)
+        expect(col0(d)).to_equal(4)  # oracle: "see " is four bytes before "["
+        expect(end_col0(d)).to_equal(21)  # oracle: "[guide](guide.md)" is 17 bytes, 4 + 17
+        expect(d.span.unwrap().start).to_equal(9)  # oracle: "# T\n\n" is 5 bytes, plus 4
+        expect(d.severity.name()).to_equal("warning")
+        expect(count_code(rows(batch), "MD1001")).to_equal(1)  # oracle: index.md exists, only guide.md is broken
+        expect(batch.producer).to_equal("md-lsp")
+        expect(batch.document_version).to_equal(1)
+        expect(batch.source_hash.len()).to_equal(32)  # oracle: XXH3-128 hex
 
     it "reports an unknown anchor as MD1002 and a duplicate heading as MD1004":
         # @req REQ-DIAG-008
@@ -69,11 +90,12 @@ describe "Markdown diagnostics — typed codes on byte spans":
         step("Diagnose a document with a dangling anchor and a repeated heading")
         val diags = md_diagnose_typed(content, "a.md")
         val anchor = first_with(diags, "MD1002")
-        expect(anchor.line).to_equal(2)  # oracle: anchor link is on line index 2
-        expect(anchor.col).to_equal(0)
-        expect(anchor.end_col).to_equal(13)  # oracle: "[x](#missing)" is 13 bytes
+        expect(line0(anchor)).to_equal(2)  # oracle: anchor link is on line index 2
+        expect(col0(anchor)).to_equal(0)
+        expect(end_col0(anchor)).to_equal(13)  # oracle: "[x](#missing)" is 13 bytes
         val dup = first_with(diags, "MD1004")
-        expect(dup.line).to_equal(4)  # oracle: the second "# Intro" is line index 4
+        expect(line0(dup)).to_equal(4)  # oracle: the second "# Intro" is line index 4
+        expect(col0(dup)).to_equal(2)  # oracle: span starts at the heading text, after "# "
 
     it "reports an unclosed fence as MD1005 and ignores links inside the fence":
         # @req REQ-DIAG-008
@@ -81,10 +103,10 @@ describe "Markdown diagnostics — typed codes on byte spans":
         # @capture(diagnostic_rows): only MD1005 survives; no MD1001/MD1002 from fenced text
         step("Diagnose a document whose fence never closes and contains links")
         val batch = md_diagnose_batch(content, "t.md", 3, local_ctx(["t.md"]))
-        expect(count_code(batch.diagnostics, "MD1005")).to_equal(1)  # oracle: one open fence
-        expect(first_with(batch.diagnostics, "MD1005").line).to_equal(2)  # oracle: fence opens on line index 2
-        expect(count_code(batch.diagnostics, "MD1001")).to_equal(0)
-        expect(count_code(batch.diagnostics, "MD1002")).to_equal(0)
+        expect(count_code(rows(batch), "MD1005")).to_equal(1)  # oracle: one open fence
+        expect(line0(first_with(rows(batch), "MD1005"))).to_equal(2)  # oracle: fence opens on line index 2
+        expect(count_code(rows(batch), "MD1001")).to_equal(0)
+        expect(count_code(rows(batch), "MD1002")).to_equal(0)
 
     it "reports invalid frontmatter as MD1006 with the property line span":
         # @req REQ-DIAG-008
@@ -93,8 +115,8 @@ describe "Markdown diagnostics — typed codes on byte spans":
         step("Diagnose frontmatter that repeats a property key")
         val diags = md_diagnose_typed(content, "f.md")
         val d = first_with(diags, "MD1006")
-        expect(d.line).to_equal(2)  # oracle: second "title:" is line index 2
-        expect(d.end_col).to_equal(8)  # oracle: "title: b" is 8 bytes
+        expect(line0(d)).to_equal(2)  # oracle: second "title:" is line index 2
+        expect(end_col0(d)).to_equal(8)  # oracle: "title: b" is 8 bytes
 
     it "reports a missing image alt as MD1101 on the image span":
         # @req REQ-DIAG-008
@@ -103,8 +125,8 @@ describe "Markdown diagnostics — typed codes on byte spans":
         step("Diagnose an inline image without alt text")
         val diags = md_diagnose_typed(content, "i.md")
         val d = first_with(diags, "MD1101")
-        expect(d.col).to_equal(5)  # oracle: "text " is five bytes
-        expect(d.end_col).to_equal(17)  # oracle: "![](pic.png)" is 12 bytes, 5 + 12
+        expect(col0(d)).to_equal(5)  # oracle: "text " is five bytes
+        expect(end_col0(d)).to_equal(17)  # oracle: "![](pic.png)" is 12 bytes, 5 + 12
 
     it "reports structure problems as MD1103 and never fixes a two-space hard break":
         # @req REQ-DIAG-008
@@ -118,16 +140,17 @@ describe "Markdown diagnostics — typed codes on byte spans":
         var trailing_fixes = 0
         var fixed_lines: [i64] = []
         for d in diags:
-            if d.code == "MD1103" and d.has_fix:
-                fixed_lines.push(d.line)
-                if d.line == 5:
-                    marker_fix = d.fix_text
-                    marker_col = d.col
-                if d.line == 7:
+            if d.code == "MD1103" and d.has_fix():
+                fixed_lines.push(line0(d))
+                expect(d.fix.unwrap().confidence.name()).to_equal("safe")
+                if line0(d) == 5:
+                    marker_fix = fix_text(d)
+                    marker_col = col0(d)
+                if line0(d) == 7:
                     trailing_fixes = trailing_fixes + 1
-                    expect(d.col).to_equal(8)  # oracle: "line one" is eight bytes, the space follows
-                    expect(d.end_col).to_equal(9)
-                    expect(d.fix_text).to_equal("")
+                    expect(col0(d)).to_equal(8)  # oracle: "line one" is eight bytes, the space follows
+                    expect(end_col0(d)).to_equal(9)
+                    expect(fix_text(d)).to_equal("")
         expect(marker_fix).to_equal("-")
         expect(marker_col).to_equal(0)
         expect(trailing_fixes).to_equal(1)  # oracle: exactly one single-trailing-space line
@@ -139,9 +162,9 @@ describe "Markdown diagnostics — typed codes on byte spans":
         # @capture(diagnostic_rows): MD1104 count and absence of MD1001
         step("Diagnose links that leave the workspace root")
         val batch = md_diagnose_batch(content, "u.md", 1, local_ctx(["u.md"]))
-        expect(count_code(batch.diagnostics, "MD1104")).to_equal(2)  # oracle: both targets escape
-        expect(count_code(batch.diagnostics, "MD1001")).to_equal(0)
-        expect(first_with(batch.diagnostics, "MD1104").severity).to_equal("error")
+        expect(count_code(rows(batch), "MD1104")).to_equal(2)  # oracle: both targets escape
+        expect(count_code(rows(batch), "MD1001")).to_equal(0)
+        expect(first_with(rows(batch), "MD1104").severity.name()).to_equal("error")
 
     it "reports an unresolved wiki link as MD1003 only against the supplied graph":
         # @req REQ-DIAG-009
@@ -151,11 +174,15 @@ describe "Markdown diagnostics — typed codes on byte spans":
         # @capture(diagnostic_rows): MD1003 span and count
         step("Diagnose wiki links and embeds with one missing target and one fenced link")
         val batch = md_diagnose_batch(content, "index.md", 2, ctx)
-        expect(count_code(batch.diagnostics, "MD1003")).to_equal(1)  # oracle: only notes/missing is unresolved
-        val d = first_with(batch.diagnostics, "MD1003")
-        expect(d.col).to_equal(4)
-        expect(d.end_col).to_equal(21)  # oracle: "[[notes/missing]]" is 17 bytes, 4 + 17
-        expect(batch.status).to_equal("complete")
+        expect(count_code(rows(batch), "MD1003")).to_equal(1)  # oracle: only notes/missing is unresolved
+        val d = first_with(rows(batch), "MD1003")
+        expect(col0(d)).to_equal(4)
+        expect(end_col0(d)).to_equal(21)  # oracle: "[[notes/missing]]" is 17 bytes, 4 + 17
+        expect(batch.status.name()).to_equal("complete")
+        val targets = md_link_targets(content, "index.md")
+        expect(targets.contains("wiki:guide")).to_equal(true)  # oracle: both [[guide]] and ![[guide]] collapse to one edge
+        expect(targets.contains("wiki:fenced")).to_equal(false)  # oracle: fenced text is not an edge
+        expect(targets.len()).to_equal(2)  # oracle: notes/missing + guide
 
     it "recovers partially instead of inventing an orphan when the graph is incomplete":
         # @req REQ-DIAG-009
@@ -163,11 +190,34 @@ describe "Markdown diagnostics — typed codes on byte spans":
         # @capture(diagnostic_rows): status and MD1102 count under both graph states
         step("Diagnose a document with no inbound edges while indexing is incomplete, then complete")
         val partial = md_diagnose_batch(content, "lonely.md", 1, MdLinkContext(existing_files: ["lonely.md"], wiki_documents: [], graph_complete: false, has_inbound: false))
-        expect(partial.status).to_equal("partial_recovery")
-        expect(count_code(partial.diagnostics, "MD1102")).to_equal(0)
+        expect(partial.status.name()).to_equal("partial_recovery")
+        expect(partial.incomplete_reason.is_some()).to_equal(true)
+        expect(count_code(rows(partial), "MD1102")).to_equal(0)
         val complete = md_diagnose_batch(content, "lonely.md", 1, MdLinkContext(existing_files: ["lonely.md"], wiki_documents: [], graph_complete: true, has_inbound: false))
-        expect(complete.status).to_equal("complete")
-        expect(count_code(complete.diagnostics, "MD1102")).to_equal(1)  # oracle: complete graph, zero inbound edges
+        expect(complete.status.name()).to_equal("complete")
+        expect(count_code(rows(complete), "MD1102")).to_equal(1)  # oracle: complete graph, zero inbound edges
+        expect(end_col0(first_with(rows(complete), "MD1102"))).to_equal(8)  # oracle: "# Lonely" is 8 bytes
+
+    it "measures spans in bytes even when a multibyte codepoint precedes the token":
+        # @req REQ-DIAG-008
+        val content = "caf\u{e9} [x](nope.md)\n"
+        # @capture(diagnostic_rows): Span.start / col in bytes for a link after e-acute
+        step("Diagnose a broken link that follows a two-byte codepoint")
+        val batch = md_diagnose_batch(content, "m.md", 1, local_ctx(["m.md"]))
+        val d = first_with(rows(batch), "MD1001")
+        expect(d.span.unwrap().start).to_equal(6)  # oracle: "café " is 6 bytes (5 codepoints)
+        expect(d.span.unwrap().col).to_equal(7)  # oracle: 1-based byte column
+        expect(d.span.unwrap().length).to_equal(12)  # oracle: "[x](nope.md)" is 12 bytes
+
+    it "gives every row a stable id distinct within the batch":
+        # @req REQ-DIAG-008
+        val content = "[a](x.md) [b](y.md)\n"
+        # @capture(diagnostic_rows): ids of two MD1001 rows
+        step("Diagnose two broken links on one line")
+        val batch = md_diagnose_batch(content, "d.md", 1, local_ctx(["d.md"]))
+        expect(batch.len()).to_equal(2)
+        expect(batch.diagnostics[0].id == batch.diagnostics[1].id).to_equal(false)
+        expect(batch.diagnostics[0].id.starts_with("MD1001@d.md#byte:0/")).to_equal(true)
 
     it "registers the MD codes in a fresh ErrorRegistry without colliding":
         # @req REQ-DIAG-008
