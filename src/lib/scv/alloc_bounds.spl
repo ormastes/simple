@@ -3,10 +3,14 @@
 # Every unbounded growth point in SCV (object load, tree decode, delta apply,
 # parser input) charges its request against a sealed DomainArenaV1 quota BEFORE
 # the bytes are materialised. A request the arena reports as Exhausted is
-# rejected with a named error and the store is left untouched. The arena is a
-# bookkeeping ledger (no host allocation); the point is that the bound is the
-# MCI-v2 contract's quota mechanism, not an ad-hoc `if n > max` scattered
-# across modules.
+# rejected with a named error and the store is left untouched. The arena quota
+# is the capacity of its materialised staging/committed byte banks and is
+# structurally capped at DOMAIN_ARENA_V1_MAX_QUOTA_BYTES (65536); SCV bounds
+# are far larger, so requests are charged in granule units — one unit per
+# `granule` bytes/entries — where each granule divides its bound exactly and
+# maps it into the arena's legal quota range. The bound stays the MCI-v2
+# contract's quota mechanism, not an ad-hoc `if n > max` scattered across
+# modules.
 
 use nogc_sync_mut.mission_critical.domain_arena_v1.{DomainArenaV1, DomainArenaAllocationV1}
 use nogc_sync_mut.mission_critical.domain_arena_v1.{RelaxedAllocationProfileV1}
@@ -37,32 +41,47 @@ pub val SCV_MAX_PARSER_INPUT_BYTES: i64 = 67108864
 # Domain id for the SCV storage arena inside the MCI-v2 profile space.
 pub val SCV_ALLOC_DOMAIN_ID: u32 = 7u32
 
-# Charge `requested` units against a fresh single-generation arena whose quota
-# is `bound`. Returns "" when admitted, else a named fail-closed error.
-fn scv_alloc_charge(kind: text, requested: i64, bound: i64) -> text:
+# Arena charging granules. DomainArenaV1 refuses quota_bytes above
+# DOMAIN_ARENA_V1_MAX_QUOTA_BYTES (65536), far below the byte/entry bounds
+# above. Each granule divides its bound exactly and maps it into (0, 65536],
+# so charging ceil(requested/granule) against a quota of bound/granule admits
+# exactly the requests requested <= bound: 268435456/4096 = 65536,
+# 1000000/16 = 62500, 67108864/1024 = 65536.
+val SCV_OBJECT_BYTES_ARENA_GRANULE: i64 = 4096
+val SCV_TREE_ENTRIES_ARENA_GRANULE: i64 = 16
+val SCV_DELTA_TARGET_ARENA_GRANULE: i64 = 4096
+val SCV_PARSER_INPUT_ARENA_GRANULE: i64 = 1024
+
+# Charge `requested` units, counted in `granule`-sized arena units, against a
+# fresh single-generation arena whose quota is `bound / granule` units.
+# Returns "" when admitted, else a named fail-closed error.
+fn scv_alloc_charge(kind: text, requested: i64, bound: i64, granule: i64) -> text:
     if requested < 0:
         return "ERROR scv allocation bound: {kind} negative request {requested}\n"
     if requested == 0:
         return ""
-    var arena = DomainArenaV1.from_sealed_profile(1u64, scv_alloc_profile(bound as u64))
+    var charge_units = requested / granule
+    if requested % granule != 0:
+        charge_units = charge_units + 1
+    var arena = DomainArenaV1.from_sealed_profile(1u64, scv_alloc_profile((bound / granule) as u64))
     val checkpoint = arena.checkpoint()
-    match arena.try_allocate(requested as u64, ARENA_CONTEXT_NORMAL):
+    match arena.try_allocate(charge_units as u64, ARENA_CONTEXT_NORMAL):
         DomainArenaAllocationV1.Allocated(_):
             arena.commit(checkpoint)
             ""
         DomainArenaAllocationV1.Exhausted(why): "ERROR scv allocation bound exceeded: {kind} requested {requested}, bound {bound} (arena reason {why.reason})\n"
 
 fn scv_bound_object_bytes(size: i64) -> text:
-    scv_alloc_charge("object bytes", size, SCV_MAX_OBJECT_BYTES)
+    scv_alloc_charge("object bytes", size, SCV_MAX_OBJECT_BYTES, SCV_OBJECT_BYTES_ARENA_GRANULE)
 
 fn scv_bound_tree_entries(count: i64) -> text:
-    scv_alloc_charge("tree entries", count, SCV_MAX_TREE_ENTRIES)
+    scv_alloc_charge("tree entries", count, SCV_MAX_TREE_ENTRIES, SCV_TREE_ENTRIES_ARENA_GRANULE)
 
 fn scv_bound_delta_target_bytes(size: i64) -> text:
-    scv_alloc_charge("delta target bytes", size, SCV_MAX_DELTA_TARGET_BYTES)
+    scv_alloc_charge("delta target bytes", size, SCV_MAX_DELTA_TARGET_BYTES, SCV_DELTA_TARGET_ARENA_GRANULE)
 
 fn scv_bound_parser_input_bytes(size: i64) -> text:
-    scv_alloc_charge("parser input bytes", size, SCV_MAX_PARSER_INPUT_BYTES)
+    scv_alloc_charge("parser input bytes", size, SCV_MAX_PARSER_INPUT_BYTES, SCV_PARSER_INPUT_ARENA_GRANULE)
 
 export SCV_MAX_OBJECT_BYTES, SCV_MAX_TREE_ENTRIES, SCV_MAX_DELTA_TARGET_BYTES
 export SCV_MAX_PARSER_INPUT_BYTES, SCV_ALLOC_DOMAIN_ID
