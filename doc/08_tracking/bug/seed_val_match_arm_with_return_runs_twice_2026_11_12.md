@@ -56,3 +56,10 @@ Minimal repro / regression spec:
 `test/01_unit/language/val_match_err_arm_return_runs_once_spec.spl`.
 The statement-form workaround in `t32_cli/mod.spl` can be reverted once a seed
 with this fix is deployed.
+
+## Workaround reverted (2026-11-13)
+
+Phase-1 seed rebuilt from release/1.0.0 `f344ea0f281` (includes #8667 and
+#8675), sha256 `277ce18d0e8cf866df148d2312210b3e56ee77807d214c706fcb72d81cc01173`.
+`t32_cli_main` is back to `val dispatch_args = match ...`;
+`test/01_unit/app/t32_cli/access_cli_grammar_spec.spl` executed=16 passed=16 failed=0.
