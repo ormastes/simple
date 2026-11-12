@@ -1,0 +1,218 @@
+# Revision-checked edit transaction (REQ-DIAG-011)
+#
+# The ONLY path by which a `FixCandidate` turns into document text. The
+# transaction holds an immutable snapshot of every open document (file,
+# version, source hash, text) plus the batch source hash the candidate was
+# computed against, and `apply` validates EVERYTHING before writing anything:
+#
+#   disabled_candidate     candidate advertised with a disabled reason
+#   path_denied            a replacement path leaves the workspace root (or has `..`)
+#   unknown_document       a touched file has no snapshot in the transaction
+#   stale_version          document version != candidate.required_document_version
+#   stale_hash             document source hash != batch source hash
+#   out_of_bounds          a span is negative, inverted or past the text end
+#   overlapping_edits      two spans on one file share bytes (zero-width allowed)
+#   precondition_mismatch  expected old text no longer at the span
+#
+# Any failure returns the UNCHANGED snapshots and a typed status with a
+# reason the editor can show as `disabled.reason`; there is no partial apply
+# (Journey D snapshot race, Journey F safety). Hashes are supplied by the
+# producer/caller (XXH3 hex), never recomputed here, so a stale reply can
+# never be "repaired" by re-hashing. Replacements are applied per file in
+# descending start-offset order so earlier offsets stay valid.
+
+use std.common.diagnostics.span.{Span}
+use std.common.diagnostics.diagnostic_v1.{FixReplacement}
+use std.common.diagnostics.diagnostic_batch.{FixCandidate, FixPrecondition}
+
+enum ApplyStatus:
+    Applied
+    StaleVersion
+    StaleHash
+    PreconditionMismatch
+    OverlappingEdits
+    OutOfBounds
+    PathDenied
+    DisabledCandidate
+    UnknownDocument
+
+impl ApplyStatus:
+    fn name() -> text:
+        match self:
+            ApplyStatus.Applied: "applied"
+            ApplyStatus.StaleVersion: "stale_version"
+            ApplyStatus.StaleHash: "stale_hash"
+            ApplyStatus.PreconditionMismatch: "precondition_mismatch"
+            ApplyStatus.OverlappingEdits: "overlapping_edits"
+            ApplyStatus.OutOfBounds: "out_of_bounds"
+            ApplyStatus.PathDenied: "path_denied"
+            ApplyStatus.DisabledCandidate: "disabled_candidate"
+            ApplyStatus.UnknownDocument: "unknown_document"
+
+    fn is_applied() -> bool:
+        match self:
+            ApplyStatus.Applied: true
+            _: false
+
+struct DocumentSnapshot:
+    file: text
+    version: i64
+    source_hash: text
+    body: text
+
+impl DocumentSnapshot:
+    static fn new(file: text, version: i64, source_hash: text, body: text) -> DocumentSnapshot:
+        DocumentSnapshot(file: file, version: version, source_hash: source_hash, body: body)
+
+struct ApplyResult:
+    status: ApplyStatus
+    reason: text
+    candidate_id: text
+    documents: [DocumentSnapshot]   # post-apply on success, the untouched snapshots otherwise
+    changed_files: [text]
+
+impl ApplyResult:
+    fn applied() -> bool:
+        self.status.is_applied()
+
+    fn text_of(file: text) -> text:
+        for d in self.documents:
+            if d.file == file:
+                return d.body
+        ""
+
+    fn hash_of(file: text) -> text:
+        for d in self.documents:
+            if d.file == file:
+                return d.source_hash
+        ""
+
+struct EditTransaction:
+    workspace_root: text
+    batch_source_hash: text
+    documents: [DocumentSnapshot]
+
+fn refuse(tx: EditTransaction, c: FixCandidate, status: ApplyStatus, reason: text) -> ApplyResult:
+    ApplyResult(status: status, reason: reason, candidate_id: c.id, documents: tx.documents, changed_files: [])
+
+fn path_inside_root(root: text, file: text) -> bool:
+    if file.contains(".."): return false
+    val prefix = if root.ends_with("/"): root else: root + "/"
+    file.starts_with(prefix)
+
+fn span_in_bounds(s: Span, body_len: i64) -> bool:
+    s.start >= 0 and s.end >= s.start and s.end <= body_len
+
+# Zero-width spans may touch a neighbour; non-empty spans must not share bytes.
+fn spans_overlap(a: Span, b: Span) -> bool:
+    if a.start == a.end or b.start == b.end:
+        return false
+    a.start < b.end and b.start < a.end
+
+# Indices into `c.replacements` for `file`, sorted by descending start offset.
+fn replacement_indices_desc(c: FixCandidate, file: text) -> [i64]:
+    var idx: [i64] = []
+    var i = 0
+    while i < c.replacements.len():
+        if c.replacements[i].file == file:
+            idx.push(i)
+        i = i + 1
+    var out: [i64] = []
+    while out.len() < idx.len():
+        var best = -1
+        for j in idx:
+            if not out.contains(j):
+                if best < 0 or c.replacements[j].span.start > c.replacements[best].span.start:
+                    best = j
+        out.push(best)
+    out
+
+fn apply_to_body(body: text, c: FixCandidate, order: [i64]) -> text:
+    var result = body
+    for i in order:
+        val r = c.replacements[i]
+        val n = result.byte_len()
+        result = result.substring(0, r.span.start) + r.new_text + result.substring(r.span.end, n)
+    result
+
+impl EditTransaction:
+    static fn new(workspace_root: text, batch_source_hash: text) -> EditTransaction:
+        EditTransaction(workspace_root: workspace_root, batch_source_hash: batch_source_hash, documents: [])
+
+    fn with_document(doc: DocumentSnapshot) -> EditTransaction:
+        var result = self
+        result.documents.push(doc)
+        result
+
+    fn document(file: text) -> DocumentSnapshot?:
+        for d in self.documents:
+            if d.file == file:
+                return Some(d)
+        None
+
+    # Validate every file, span and precondition; mutate nothing unless all pass.
+    fn apply(c: FixCandidate) -> ApplyResult:
+        match c.disabled_reason:
+            Some(reason):
+                return refuse(self, c, ApplyStatus.DisabledCandidate, "candidate " + c.id + " is disabled: " + reason)
+            None:
+                pass
+        val files = c.affected_files()
+        for f in files:
+            if not path_inside_root(self.workspace_root, f):
+                return refuse(self, c, ApplyStatus.PathDenied, "path " + f + " is outside workspace root " + self.workspace_root)
+        for f in files:
+            match self.document(f):
+                None:
+                    return refuse(self, c, ApplyStatus.UnknownDocument, "no snapshot for " + f + " in transaction")
+                Some(d):
+                    if d.version != c.required_document_version:
+                        return refuse(self, c, ApplyStatus.StaleVersion,
+                            f + " is at version " + d.version.to_text() + ", candidate requires version " + c.required_document_version.to_text())
+                    if d.source_hash != self.batch_source_hash:
+                        return refuse(self, c, ApplyStatus.StaleHash,
+                            f + " hash " + d.source_hash + " differs from batch hash " + self.batch_source_hash)
+        var i = 0
+        while i < c.replacements.len():
+            val r = c.replacements[i]
+            val body_len = self.text_len_of(r.file)
+            if not span_in_bounds(r.span, body_len):
+                return refuse(self, c, ApplyStatus.OutOfBounds,
+                    r.file + " span " + r.span.start.to_text() + ".." + r.span.end.to_text() + " exceeds " + body_len.to_text() + " bytes")
+            var j = i + 1
+            while j < c.replacements.len():
+                if c.replacements[j].file == r.file and spans_overlap(r.span, c.replacements[j].span):
+                    return refuse(self, c, ApplyStatus.OverlappingEdits,
+                        r.file + " spans " + r.span.start.to_text() + ".." + r.span.end.to_text() + " and "
+                        + c.replacements[j].span.start.to_text() + ".." + c.replacements[j].span.end.to_text() + " overlap")
+                j = j + 1
+            i = i + 1
+        for p in c.preconditions:
+            val body = self.text_of(p.file)
+            val actual = body.substring(p.span.start, p.span.end)
+            if actual != p.expected_text:
+                return refuse(self, c, ApplyStatus.PreconditionMismatch,
+                    p.file + " span " + p.span.start.to_text() + ".." + p.span.end.to_text()
+                    + " expected `" + p.expected_text + "` but found `" + actual + "`")
+        # All checks passed: build the new snapshots in one pass.
+        var docs: [DocumentSnapshot] = []
+        var changed: [text] = []
+        for d in self.documents:
+            if files.contains(d.file):
+                val new_body = apply_to_body(d.body, c, replacement_indices_desc(c, d.file))
+                docs.push(DocumentSnapshot(file: d.file, version: d.version, source_hash: d.source_hash, body: new_body))
+                changed.push(d.file)
+            else:
+                docs.push(d)
+        ApplyResult(status: ApplyStatus.Applied, reason: "", candidate_id: c.id, documents: docs, changed_files: changed)
+
+    fn text_of(file: text) -> text:
+        match self.document(file):
+            Some(d): d.body
+            None: ""
+
+    fn text_len_of(file: text) -> i64:
+        val body = self.text_of(file)
+        body.byte_len()
+
+export ApplyStatus, DocumentSnapshot, ApplyResult, EditTransaction

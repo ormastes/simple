@@ -18,7 +18,7 @@
 # the smallest range that settles the question — never the file, which for
 # these models is 12 GB a shard.
 
-use std.io_runtime.{file_exists, read_file, dir_list, file_size, is_dir, file_read_text_at_nullable}
+use std.io_runtime.{file_exists, read_file, dir_list_optional, file_size, is_dir, file_read_text_at_nullable}
 use std.gc_async_mut.slang.model_executor.model_loader.manifest.{parse_manifest}
 
 # What kind of artifact a directory holds, and therefore which loader — if any
@@ -62,10 +62,14 @@ fn _join(root: text, name: text) -> text:
 # directory claims.
 fn dir_byte_size(dir: text) -> i64:
     var total = 0
-    for name in dir_list(dir):
-        val p = _join(dir, name)
-        if not is_dir(p):
-            total = total + file_size(p)
+    match dir_list_optional(dir):
+        case Some(names):
+            for name in names:
+                val p = _join(dir, name)
+                if not is_dir(p):
+                    total = total + file_size(p)
+        case nil:
+            pass
     total
 
 # True when `path` starts with the four-byte GGUF magic. The read is 4 bytes at
@@ -85,12 +89,16 @@ fn has_safetensors_header(path: text) -> bool:
 # file that actually carries the magic.
 fn gguf_entry_shard(dir: text) -> text:
     var best = ""
-    for name in dir_list(dir):
-        if name.ends_with(".gguf"):
-            val p = _join(dir, name)
-            if has_gguf_magic(p):
-                if best == "" or name < best:
-                    best = name
+    match dir_list_optional(dir):
+        case Some(names):
+            for name in names:
+                if name.ends_with(".gguf"):
+                    val p = _join(dir, name)
+                    if has_gguf_magic(p):
+                        if best == "" or name < best:
+                            best = name
+        case nil:
+            pass
     if best == "":
         return ""
     _join(dir, best)
@@ -167,10 +175,16 @@ fn scan_model_root(model_root: text, ggml_available: bool) -> [NativeModel]:
     var out: [NativeModel] = []
     if model_root.trim() == "":
         return out
-    for name in dir_list(model_root):
-        val p = _join(model_root, name)
-        if is_dir(p):
-            out.push(describe_model(p, ggml_available))
+    # dir_list_optional: the bare name `dir_list` has co-compiled variants with
+    # differing return types that mis-dispatch under some closures.
+    match dir_list_optional(model_root):
+        case Some(names):
+            for name in names:
+                val p = _join(model_root, name)
+                if is_dir(p):
+                    out.push(describe_model(p, ggml_available))
+        case nil:
+            pass
     out
 
 export ModelFormat, model_format_text, NativeModel
