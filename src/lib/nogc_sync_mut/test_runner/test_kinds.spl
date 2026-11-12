@@ -24,6 +24,7 @@ use std.nogc_sync_mut.io.env_ops.{env_get}
 use std.nogc_sync_mut.test_runner.rust_test_runner.{parse_cargo_test_output}
 
 val TEST_KIND_RUST_MANIFEST: text = "src/compiler_rust/Cargo.toml"
+val TEST_KIND_RUST_WINDOWS_TARGET: text = "x86_64-pc-windows-gnullvm"
 val TEST_KIND_SHS_DIR: text = "scripts/check"
 val TEST_KIND_C_DIR: text = "src/runtime/test"
 val TEST_KIND_PERF_DIR: text = "test/05_perf"
@@ -117,9 +118,47 @@ pub fn test_kind_tool(kind: text) -> text:
     if kind == "shs-selftest": return "sh"
     ""
 
+fn _test_kind_mingw_clang_in(toolchains: text) -> text:
+    """`<toolchains>/llvm-mingw-*-ucrt-x86_64/bin/clang.exe` when one exists, else ""."""
+    if not is_dir(toolchains):
+        return ""
+    val prefix = toolchains + "/"
+    for raw in dir_walk_native(toolchains):
+        val p = raw.replace("\\", "/")
+        val at = p.index_of(prefix)
+        if at < 0:
+            continue
+        val rel = p.substring(at + prefix.len())
+        val slash = rel.index_of("/")
+        val name = if slash >= 0: rel.substring(0, slash) else: rel
+        if name.starts_with("llvm-mingw-") and name.ends_with("-ucrt-x86_64"):
+            val clang = prefix + name + "/bin/clang.exe"
+            if file_exists(clang):
+                return clang
+    ""
+
+pub fn test_kind_c_compiler_from(cc: text, mingw_root: text, home: text) -> text:
+    """Pure resolution: `cc` when set, else the llvm-mingw UCRT clang under
+    `mingw_root` or `home/.simple/toolchains`, else `clang`."""
+    if cc != "":
+        return cc
+    if mingw_root != "":
+        val root_clang = mingw_root.replace("\\", "/") + "/bin/clang.exe"
+        if file_exists(root_clang):
+            return root_clang
+    if home != "":
+        val found = _test_kind_mingw_clang_in(home.replace("\\", "/") + "/.simple/toolchains")
+        if found != "":
+            return found
+    "clang"
+
 pub fn test_kind_c_compiler() -> text:
-    """`$CC` when set (e.g. the llvm-mingw clang on Windows), else `clang`."""
+    """`$CC` when set; on a Windows host the llvm-mingw UCRT clang (never MSVC); else `clang`."""
     val cc = env_get("CC")
+    if cc == "" and host_is_windows_host():
+        val user_home = env_get("USERPROFILE")
+        val home = if user_home != "": user_home else: env_get("HOME")
+        return test_kind_c_compiler_from("", env_get("SIMPLE_MINGW_ROOT"), home)
     if cc != "": cc else: "clang"
 
 fn _test_kind_first_error(stderr: text) -> text:
@@ -134,9 +173,23 @@ pub fn test_kind_tool_skip_reason(kind: text) -> text:
     """"" when the kind's tool runs here, else the SKIP reason."""
     val tool = test_kind_tool(kind)
     val (probe_out, probe_err, code) = process_run_bounded(tool, ["--version"], 30000, 4096)
-    if code == 0:
+    if code != 0:
+        return "{tool} not runnable on this host (`{tool} --version` exit {code})"
+    if kind == "rust":
+        return _test_kind_rust_target_skip()
+    ""
+
+fn _test_kind_rust_target_skip() -> text:
+    """"" when the Windows Rust target is installed (or not needed here), else the SKIP reason."""
+    if not host_is_windows_host():
         return ""
-    "{tool} not runnable on this host (`{tool} --version` exit {code})"
+    val (target_out, target_err, target_code) = process_run_bounded("rustup", ["target", "list", "--installed"], 30000, 64 * 1024)
+    if target_code != 0:
+        return "cannot verify Rust target {TEST_KIND_RUST_WINDOWS_TARGET} (`rustup target list --installed` exit {target_code})"
+    for line in target_out.split("\n"):
+        if line.trim() == TEST_KIND_RUST_WINDOWS_TARGET:
+            return ""
+    "Rust target {TEST_KIND_RUST_WINDOWS_TARGET} not installed (`rustup target add {TEST_KIND_RUST_WINDOWS_TARGET}`)"
 
 fn _test_kind_filtered(items: [text], filter: text) -> [text]:
     if filter == "":
@@ -149,6 +202,9 @@ fn _test_kind_filtered(items: [text], filter: text) -> [text]:
 
 fn _test_kind_run_rust(filter: text) -> i64:
     var args = ["test", "--manifest-path", TEST_KIND_RUST_MANIFEST]
+    if host_is_windows_host():
+        args.push("--target")
+        args.push(TEST_KIND_RUST_WINDOWS_TARGET)
     if filter != "":
         args.push("--")
         args.push(filter)
