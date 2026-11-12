@@ -670,6 +670,30 @@ fn top(k: Kind) -> i64:\n    match k:\n        case Int:\n            return 1\n
     assert_eq!(body("top").matches("rt_enum_check_variant").count(), 1);
 }
 
+/// A bare unit variant in a struct-field sub-pattern (named and positional
+/// spellings) is a variant test, like other slots; a lowercase field pattern
+/// still binds without a test.
+/// Bug: doc/08_tracking/bug/seed_struct_field_slot_bare_unit_variant_neither_tested_nor_bound_2026-11-12.md
+#[test]
+fn test_bare_unit_variant_in_struct_field_is_variant_test() {
+    let source = "enum Color:\n    Red\n    Green\n\nclass Holder:\n    c: Color\n    n: i64\n\n\
+fn named(h: Holder) -> i64:\n    match h:\n        case Holder { c: Red, n: n }:\n            return n\n        case _:\n            return 0\n\n\
+fn positional(h: Holder) -> i64:\n    match h:\n        case Holder(Red, n):\n            return n\n        case _:\n            return 0\n\n\
+fn binder(h: Holder) -> i64:\n    match h:\n        case Holder(c, n):\n            return n\n";
+    let module = parse_and_lower(source).unwrap();
+    let checks = |name: &str| -> usize {
+        let func = module
+            .functions
+            .iter()
+            .find(|f| f.name == name)
+            .unwrap_or_else(|| panic!("missing fn {name}"));
+        format!("{:?}", func.body).matches("rt_enum_check_variant").count()
+    };
+    assert_eq!(checks("named"), 1, "named field `c: Red` must test the variant");
+    assert_eq!(checks("positional"), 1, "positional field `Red` must test the variant");
+    assert_eq!(checks("binder"), 0, "lowercase field patterns bind, they must not test");
+}
+
 #[test]
 fn test_multi_field_enum_payload_keeps_array_type() {
     let source = "enum Payload:\n    Item(text, i64, text)\n\nfn third(value: Payload) -> text:\n    match value:\n        case Payload.Item(_, _, result):\n            return result\n        case _:\n            return \"\"\n";

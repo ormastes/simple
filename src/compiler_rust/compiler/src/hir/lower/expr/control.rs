@@ -1569,6 +1569,12 @@ impl Lowerer {
     ///
     /// A struct pattern is itself irrefutable — the type system already fixed
     /// the class — so this returns `None` unless some FIELD is refutable.
+    ///
+    /// Each field is tested against its DECLARED type, the one
+    /// `collect_pattern_bindings` binds with, so a bare unit variant in a field
+    /// (`case Holder { c: Red, .. }`, `case Holder(Red, n)`) is a variant test
+    /// under the same unit-only slot rule as tuple/array/payload slots.
+    /// Bug: doc/08_tracking/bug/seed_struct_field_slot_bare_unit_variant_neither_tested_nor_bound_2026-11-12.md
     pub(crate) fn struct_fields_condition(
         &mut self,
         slot: &HirExpr,
@@ -1596,7 +1602,7 @@ impl Lowerer {
                 },
                 ty: field_ty,
             };
-            let Some(test) = self.subpattern_condition(&field_expr, field_pattern, ctx) else {
+            let Some(test) = self.subpattern_condition_typed(&field_expr, field_ty, field_pattern, ctx) else {
                 continue;
             };
             combined = Some(match combined {
