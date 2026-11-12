@@ -5,6 +5,11 @@ set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
 . "$root/scripts/bootstrap/phase-c-backend-commands.shs"
 unset native_internal_timeout
+# The tool build enters the tree RSS row-cap policy (scripts/bootstrap/lib/
+# tree-rss-policy.shs); the argv contract is independent of it, so the policy
+# owner is stubbed here.
+bootstrap_tree_rss_row_cap_enter() { return 0; }
+bootstrap_tree_rss_row_cap_leave() { return 0; }
 tmp=$(mktemp -d) || exit 1
 trap 'rm -f "$tmp"/argv "$tmp"/receipt "$tmp"/expected "$tmp"/command.argv; rmdir "$tmp"' EXIT HUP INT TERM
 
@@ -17,14 +22,14 @@ manifest_key_count() { awk -F= -v key="$1" '$1 == key { n++ } END { print n+0 }'
 run_matrix_task() { printf '%s\n' "$@" >"$tmp/argv"; }
 run_task() { printf '%s\n' "$@" >"$tmp/argv"; }
 
-bootstrap_phase_c_run_tool_build llvm cli_build /p/compiler /p/cli.spl /p/cli 10
+bootstrap_phase_c_run_tool_build llvm cli_build /p/compiler /p/cli.spl /p/cli /p/cache-cli 10
 printf '%s\n' cli_build --verification-expect-executable=/p/cli /p/compiler native-build \
-  /p/cli.spl --backend=llvm --low-memory --threads 10 -o /p/cli >"$tmp/expected"
+  /p/cli.spl --backend=llvm --low-memory --entry-closure --cache-dir /p/cache-cli --threads 10 -o /p/cli >"$tmp/expected"
 cmp -s "$tmp/argv" "$tmp/expected" || { echo 'LLVM tool argv mismatch' >&2; exit 1; }
 
-bootstrap_phase_c_run_tool_build cranelift runner_build /p/compiler /p/runner.spl /p/runner 10
+bootstrap_phase_c_run_tool_build cranelift runner_build /p/compiler /p/runner.spl /p/runner /p/cache-runner 10
 printf '%s\n' runner_build --verification-expect-executable=/p/runner /p/compiler native-build \
-  /p/runner.spl --backend=cranelift --low-memory --threads 10 -o /p/runner >"$tmp/expected"
+  /p/runner.spl --backend=cranelift --low-memory --entry-closure --cache-dir /p/cache-runner --threads 10 -o /p/runner >"$tmp/expected"
 cmp -s "$tmp/argv" "$tmp/expected" || { echo 'Cranelift tool argv mismatch' >&2; exit 1; }
 
 bootstrap_phase_c_run_module_build cranelift /p/compiler /p/module.spl /p/module.o "$tmp" 20
@@ -57,7 +62,7 @@ printf 'verification_backend=llvm\n' >>"$tmp/receipt"
 if bootstrap_phase_c_validate_backend_receipt llvm "$tmp/receipt"; then
   echo 'duplicate backend receipt accepted' >&2; exit 1
 fi
-if bootstrap_phase_c_run_tool_build invalid cli_build /p/compiler /p/cli.spl /p/cli 1; then
+if bootstrap_phase_c_run_tool_build invalid cli_build /p/compiler /p/cli.spl /p/cli /p/cache-cli 1; then
   echo 'invalid backend accepted' >&2; exit 1
 fi
 
