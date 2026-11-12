@@ -1,0 +1,24 @@
+# LSP compiler-diagnostics subprocess portability
+#
+# collect_compiler_diagnostics used to run `/bin/sh -c "timeout 60 ..."`,
+# which does not exist on a Windows host, so push diagnostics were silently
+# empty there. It must run the checker directly with a portable timeout.
+
+# @req: REQ-APP-APP_TOOL-001 — LSP diagnostics run on every host platform.
+
+use std.spec
+use std.spec.step
+use std.io_runtime.{file_write, env_set, dir_create_all, file_exists}
+use std.nogc_sync_mut.lsp.handlers.diagnostics.{collect_compiler_diagnostics}
+
+describe "LSP compiler diagnostics subprocess":
+    it "reports a diagnostic for a broken file without requiring /bin/sh":
+        step("write a fixture with an undefined name")
+        dir_create_all("build/tmp")
+        val path = "build/tmp/lsp_diag_portable_fixture.spl"
+        file_write(path, "fn main():\n    val y = undefined_name_zz + 1\n    print y\n")
+        step("point the handler at the in-tree binary")
+        env_set("SIMPLE_BINARY", if file_exists("bin/simple.exe"): "bin/simple.exe" else: "bin/simple")
+        step("collect diagnostics")
+        val diags = collect_compiler_diagnostics(path)
+        expect(diags.len() > 0).to_equal(true)
