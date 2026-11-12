@@ -2,10 +2,16 @@
 #include <stdlib.h>
 #include <string.h>
 struct llama_model { int live; };
-struct llama_context { uint32_t n_ctx; int64_t n_tokens; };
+struct llama_context { uint32_t n_ctx; int64_t n_tokens; int64_t decodes; };
 struct llama_sampler { int live; };
 struct llama_vocab { int live; };
 static struct llama_vocab vocab = {1};
+static int corrupt_restore_once;
+static int short_decode_once;
+static int64_t restore_calls;
+static int64_t short_first_decodes;
+static int64_t decode_calls;
+static uint32_t n_ubatch = 1;
 static int fail_restore_once = 0;
 static int fail_remove_once = 0;
 static int fail_serialize_once = 0;
@@ -39,10 +45,22 @@ bool llama_vocab_is_eog(const struct llama_vocab *v, llama_token t) { (void)v; r
 int32_t llama_token_to_piece(const struct llama_vocab *v, llama_token t, char *out, int32_t cap, int32_t l, bool s) { (void)v; (void)l; (void)s; if (cap < 1) return -1; out[0] = (char)t; return 1; }
 llama_memory_t llama_get_memory(const struct llama_context *c) { return (void *)c; }
 void llama_memory_clear(llama_memory_t m, bool data) { (void)data; ((struct llama_context *)m)->n_tokens = 0; }
-bool llama_memory_seq_rm(llama_memory_t m, llama_seq_id id, llama_pos p0, llama_pos p1) { (void)id; (void)p1; if (fail_remove_once) { fail_remove_once = 0; return false; } ((struct llama_context *)m)->n_tokens = p0; return true; }
+bool llama_memory_seq_rm(llama_memory_t m, llama_seq_id id, llama_pos p0, llama_pos p1) { (void)id; (void)p1; if (fail_remove_once) { fail_remove_once = 0; return false; } if (((struct llama_context *)m)->n_tokens > p0) ((struct llama_context *)m)->n_tokens = p0; return true; }
 size_t llama_state_seq_get_size(struct llama_context *c, llama_seq_id id) { (void)c; (void)id; return sizeof(int64_t); }
 size_t llama_state_seq_get_data(struct llama_context *c, uint8_t *d, size_t n, llama_seq_id id) { (void)id; if (fail_serialize_once) { fail_serialize_once = 0; return 0; } if (n < sizeof(c->n_tokens)) return 0; memcpy(d, &c->n_tokens, sizeof(c->n_tokens)); return sizeof(c->n_tokens); }
-size_t llama_state_seq_set_data(struct llama_context *c, const uint8_t *d, size_t n, llama_seq_id id) { (void)id; if (fail_restore_once) { fail_restore_once = 0; return 0; } if (n < sizeof(c->n_tokens)) return 0; memcpy(&c->n_tokens, d, sizeof(c->n_tokens)); return sizeof(c->n_tokens); }
+size_t llama_state_seq_set_data(struct llama_context *c, const uint8_t *d, size_t n, llama_seq_id id) { (void)id; restore_calls++; if (corrupt_restore_once) { corrupt_restore_once = 0; if (n < sizeof(c->n_tokens)) return 0; memcpy(&c->n_tokens, d, sizeof(c->n_tokens)); c->n_tokens -= 2; return sizeof(c->n_tokens); } if (fail_restore_once) { fail_restore_once = 0; return 0; } if (n < sizeof(c->n_tokens)) return 0; memcpy(&c->n_tokens, d, sizeof(c->n_tokens)); return sizeof(c->n_tokens); }
 struct llama_batch llama_batch_get_one(llama_token *t, int32_t n) { return (struct llama_batch){t, n}; }
-int32_t llama_decode(struct llama_context *c, struct llama_batch b) { if (fail_decode_once) { fail_decode_once = 0; return 1; } c->n_tokens += b.n_tokens; return c->n_tokens > c->n_ctx ? 1 : 0; }
+int32_t llama_decode(struct llama_context *c, struct llama_batch b) { if (fail_decode_once) { fail_decode_once = 0; return 1; } decode_calls++; if (c->decodes++ == 0 && (uint32_t)b.n_tokens < n_ubatch) short_first_decodes++; if (short_decode_once) { short_decode_once = 0; c->n_tokens -= 1; } c->n_tokens += b.n_tokens; return c->n_tokens > c->n_ctx ? 1 : 0; }
 llama_token llama_sampler_sample(struct llama_sampler *s, struct llama_context *c, int32_t i) { (void)s; (void)c; (void)i; return 2; }
+/* Fault injection for the fail-closed restore checks. */
+void mock_llama_corrupt_restore_once(void) { corrupt_restore_once = 1; }
+void mock_llama_short_decode_once(void) { short_decode_once = 1; }
+int64_t mock_llama_restore_calls(void) { return restore_calls; }
+void mock_llama_set_n_ubatch(uint32_t n) { n_ubatch = n; }
+int64_t mock_llama_short_first_decodes(void) { return short_first_decodes; }
+int64_t mock_llama_decode_calls(void) { return decode_calls; }
+uint32_t llama_n_ubatch(const struct llama_context *c) { (void)c; return n_ubatch; }
+const char * llama_model_chat_template(const struct llama_model *m, const char *name) { (void)m; (void)name; return NULL; }
+int32_t llama_chat_apply_template(const char *t, const struct llama_chat_message *msgs, size_t n, bool add, char *buf, int32_t len) { (void)t; (void)msgs; (void)n; (void)add; (void)buf; (void)len; return -1; }
+llama_pos llama_memory_seq_pos_min(llama_memory_t m, llama_seq_id id) { (void)id; return ((struct llama_context *)m)->n_tokens > 0 ? 0 : -1; }
+llama_pos llama_memory_seq_pos_max(llama_memory_t m, llama_seq_id id) { (void)id; return (llama_pos)((struct llama_context *)m)->n_tokens - 1; }
