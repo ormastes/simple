@@ -7955,10 +7955,10 @@ impl MirLowering:
         self.error_fatal("dynamic callback requires a callable with proven arity and tagged ABI", Some(value.span))
         None
 
-    me lower_lambda_value(lam: HirExpr, runtime_any_abi: bool = false) -> MirOperand?:
+    me lower_lambda_value(lam: HirExpr, runtime_any_abi: bool = false, param_records: [text] = []) -> MirOperand?:
         # Builtin word callbacks and contextual tagged callbacks have distinct
         # boundaries. Declaration-owned slots use the typed entry below.
-        self.lower_lambda_value_for_type(lam, None, runtime_any_abi)
+        self.lower_lambda_value_for_type(lam, None, runtime_any_abi, param_records)
 
     me erased_callback_record_bindings_for_call(args: [HirCallArg], call_param_types: [HirType], lowered: [MirOperand]) -> Dict<text, text>:
         """Binder name -> struct layout key, from every positional argument
@@ -8267,7 +8267,7 @@ impl MirLowering:
                 return Some(HirType(kind: HirTypeKind.Tuple(new_members), span: ty.span))
             case _: None
 
-    me lower_lambda_value_for_type(lam: HirExpr, declared: HirType?, runtime_any_abi: bool = false) -> MirOperand?:
+    me lower_lambda_value_for_type(lam: HirExpr, declared: HirType?, runtime_any_abi: bool = false, param_records: [text] = []) -> MirOperand?:
         if runtime_any_abi and declared != None:
             self.error_fatal("lambda cannot combine declared and contextual tagged ABI authority", Some(lam.span))
             return None
@@ -8573,7 +8573,18 @@ impl MirLowering:
                                         print "[erased-callback-lift] param={qi} binder={binder_name} bound={self.erased_callback_record_bindings.contains(binder_name)}"
                                     if self.erased_callback_record_bindings.contains(binder_name):
                                         lw.struct_value_syms[argument_local.id] = self.erased_callback_record_bindings[binder_name]
+                                case HirTypeKind.Named(_, _):
+                                    # A declared record slot (`fn(S) -> i64`):
+                                    # the parameter is that record. Without
+                                    # this, `\f: f.c` read field 0.
+                                    val declared_record = self.optional_payload_struct_name(declared_params[qi])
+                                    if declared_record != "":
+                                        lw.struct_value_syms[argument_local.id] = declared_record
                                 case _: ()
+                        # The caller proved the record this parameter receives
+                        # (an array-HOF element, `array_hof_element_record_owner`).
+                        if qi < param_records.len() and param_records[qi] != "" and not lw.struct_value_syms.contains(argument_local.id):
+                            lw.struct_value_syms[argument_local.id] = param_records[qi]
                         lw.bind_local(psym, argument_local)
                     qi = qi + 1
                 if capture_syms.len() > 0:
