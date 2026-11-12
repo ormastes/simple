@@ -45,6 +45,8 @@ fn is_condition_present(condition_expr: &Expr, val: &Value) -> bool {
 fn bind_lambda_param(captured: &Env, params: &[String], value: &Value) -> Env {
     let mut env = captured.clone();
     if let Some(param) = params.first() {
+        // Local, so a same-named imported fn (`error`) cannot win the lookup.
+        env.mark_local(param.clone());
         env.insert(param.clone(), value.clone());
     }
     env
@@ -157,6 +159,9 @@ pub(crate) fn eval_array_reduce(
             for item in arr {
                 crate::interpreter::check_execution_limit()?;
                 let mut local_env = Env::clone(&captured);
+                for p in params.iter().take(2) {
+                    local_env.mark_local(p.clone());
+                }
                 if params.len() >= 2 {
                     local_env.insert(params[0].clone(), acc);
                     local_env.insert(params[1].clone(), item.clone());
@@ -372,6 +377,9 @@ pub(crate) fn eval_dict_filter(
         for (k, v) in map {
             crate::interpreter::check_execution_limit()?;
             let mut local_env = captured.clone();
+            for p in params.iter().take(2) {
+                local_env.mark_local(p.clone());
+            }
             if params.len() >= 2 {
                 local_env.insert(params[0].clone(), Value::dict_entry_key_for_iteration(v, k));
                 local_env.insert(params[1].clone(), Value::dict_entry_value_for_iteration(v));
