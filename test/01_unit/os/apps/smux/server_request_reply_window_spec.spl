@@ -1,0 +1,60 @@
+# @cover src/os/apps/smux/server.spl 10%
+"""
+# smux owner request: caller-chosen reply window
+
+## Overview
+
+`smux_server_request` gave every request a fixed 1s read timeout. The owner
+handles `spawn-window` and `kill-window` inline (a ConPTY plus a shell), which
+takes longer than 1s on a loaded box, so the client gave up on a request the
+owner had ALREADY applied: `agent_attach` reported `error` while the window
+existed (agent_workspace_spec, 2026-11-12). `smux_server_request_within`
+lets a caller that waits for owner WORK choose its reply window; the 1s
+default remains for liveness queries.
+
+Fixture: a loopback listener bound to 127.0.0.1:0 that is never accepted. A
+connect succeeds through the backlog, the request is written, and no reply
+ever comes — so how long the client waits is exactly the reply window.
+"""
+use std.spec.*
+use std.nogc_sync_mut.io.tcp.{TcpListener}
+use std.nogc_sync_mut.io.time_ops.{current_time_ms}
+use os.apps.smux.server.{smux_server_request, smux_server_request_within}
+
+val TOKEN: text = "0123456789abcdef0123456789abcdef"
+
+fn silent_owner_addr() -> text:
+    val listener = match TcpListener.bind("127.0.0.1:0"):
+        Err(e): panic("bind failed: {e.message}")
+        Ok(l): l
+    match listener.local_addr():
+        Err(e): panic("local_addr failed: {e.message}")
+        Ok(a): a
+
+describe "smux_server_request_within":
+    it "rejects a reply window below the 1s liveness default instead of truncating waits":
+        # @req REQ-SMUX-OWNER-REQUEST-WINDOW
+        step("A sub-second window is refused before any connection is made")
+        val r = smux_server_request_within("127.0.0.1:1", TOKEN, "list-sessions", 999)
+        expect(r.is_err()).to_be(true)
+        expect(r.unwrap_err()).to_equal("invalid smux reply window")
+
+    it "waits the caller's whole reply window for an owner that is still working":
+        # @req REQ-SMUX-OWNER-REQUEST-WINDOW
+        val addr = silent_owner_addr()
+        step("The 1s default gives up on a silent owner in about a second")
+        val t0 = current_time_ms()
+        val quick = smux_server_request(addr, TOKEN, "spawn-window s w 80 24 sh")
+        val quick_ms = current_time_ms() - t0
+        expect(quick.is_err()).to_be(true)
+        expect(quick.unwrap_err()).to_not_equal("smux owner unavailable")
+        expect(quick_ms).to_be_less_than(4000)
+
+        step("A 3s window keeps the same request open for at least 3s")
+        val t1 = current_time_ms()
+        val patient = smux_server_request_within(addr, TOKEN, "spawn-window s w 80 24 sh", 3000)
+        val patient_ms = current_time_ms() - t1
+        expect(patient.is_err()).to_be(true)
+        expect(patient.unwrap_err()).to_not_equal("smux owner unavailable")
+        expect(patient_ms).to_be_greater_than(2999)
+        expect(patient_ms).to_be_greater_than(quick_ms)
