@@ -565,6 +565,7 @@ val upper = {k.upper(): v for k, v in data}
 ## Optional & Null Handling
 
 **Rule:** `nil` is not allowed in safe compiled code. Handle `T?` only via `None`, `.?`, `??`, `if val`, or `match`; `nil` is allowed only inside `unsafe:` blocks and interpreted scripts.
+**One exception — the unit type:** `Nil` is the unit type and `nil` its only value, so `fn f() -> Result<Nil, text>: Ok(nil)` and `-> Nil` / `return nil` are safe. `Nil` never means absence (`Nil?` is rejected). See `doc/07_guide/language/robust_semantic_absence.md` § Unit type.
 
 ### Safe Navigation (`?.`)
 
