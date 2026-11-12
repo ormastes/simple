@@ -1,6 +1,6 @@
 # nogc checker: scalar copy of a field read is treated as the owner (false NOGC-OWN-002)
 
-- Status: open
+- Status: verification-pending (fixed 2026-11-12 in infer.spl + projection_escape.spl; gaps spec 9/9 on seed interpreter, native verification pending)
 - Area: src/compiler/35.semantics/param_effects/infer.spl (caller-side local scan)
 - Repro: test/01_unit/compiler/semantics/param_effects/nogc_contract_behaviour_gaps_spec.spl
   ("accepts a local whose transfer is its last use")

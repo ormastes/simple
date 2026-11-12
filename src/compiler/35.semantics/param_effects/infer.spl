@@ -60,16 +60,47 @@ fn _method_sym(ctx: PeCtx, method: text, res: MethodResolution) -> i64:
         case FreeFunction(fid): return fid.id
         case _: return -1
 
-fn _summary_for_method(ctx: PeCtx, method: text, res: MethodResolution) -> [text]:
+fn _receiver_class_id(ctx: PeCtx, recv: HirExpr) -> i64:
+    """Class symbol of the receiver: the owner's declared class when `recv`
+    is the owner, else its annotated type. -1 when unknown."""
+    if _is_owner(ctx, recv) and ctx.owner_class_id >= 0: return ctx.owner_class_id
+    if recv.has_type_ and recv.type_ != nil: return _type_class_id(recv.type_)
+    -1
+
+fn _class_method_sym(ctx: PeCtx, class_id: i64, method: text) -> i64:
+    for c in ctx.module.classes.values():
+        if c.symbol.id == class_id and c.methods.contains_key(method):
+            val mid: SymbolId = c.methods[method]
+            return mid.id
+    -1
+
+fn _resolve_method_sym(ctx: PeCtx, recv: HirExpr, method: text, res: MethodResolution) -> i64:
+    """Symbol of the called method. Lowering leaves `recv.method()` Unresolved
+    for a reference-typed receiver (`n: &Node`), so fall back to the receiver's
+    class method table, then to a module method whose name is unique."""
     val sid = _method_sym(ctx, method, res)
+    if sid >= 0: return sid
+    val class_id = _receiver_class_id(ctx, recv)
+    if class_id >= 0:
+        # `impl C:` methods are not in HirClass.methods; their `self` type is.
+        val keyed = "{class_id}.{method}"
+        if ctx.method_sym_by_name.contains_key(keyed): return ctx.method_sym_by_name[keyed]
+        val by_class = _class_method_sym(ctx, class_id, method)
+        if by_class >= 0: return by_class
+    if ctx.method_sym_by_name.contains_key(method): return ctx.method_sym_by_name[method]
+    -1
+
+fn _summary_for_sym(ctx: PeCtx, sid: i64) -> [text]:
     if sid >= 0:
         val local = _effects_by_sym(ctx.by_sym, sid)
         if local.len() > 0: return local
     # V1 imported rows lack declaring identity: never trust them for methods.
     []
 
-fn _receiver_offset(ctx: PeCtx, method: text, res: MethodResolution, summary: [text], nargs: i64) -> i64:
-    val sid = _method_sym(ctx, method, res)
+fn _summary_for_method(ctx: PeCtx, method: text, res: MethodResolution) -> [text]:
+    _summary_for_sym(ctx, _method_sym(ctx, method, res))
+
+fn _receiver_offset(ctx: PeCtx, sid: i64, res: MethodResolution) -> i64:
     if sid >= 0 and ctx.method_ids.contains_key(sid): return 1
     match res:
         case FreeFunction(_):
@@ -272,8 +303,9 @@ fn _consumes(ctx: PeCtx, e: HirExpr, line: i64) -> bool:
                     hit = true
             return hit
         case MethodCall(recv, method, args, res):
-            val summary = _summary_for_method(ctx, method, res)
-            val offset = _receiver_offset(ctx, method, res, summary, args.len())
+            val sid = _resolve_method_sym(ctx, recv, method, res)
+            val summary = _summary_for_sym(ctx, sid)
+            val offset = _receiver_offset(ctx, sid, res)
             val builtin = builtin_collection_receiver(ctx, recv, res)
             var hit = false
             if _root_is_owner(ctx, recv):
@@ -535,6 +567,10 @@ fn _flow_expr(ctx: PeCtx, e: HirExpr, tail: bool) -> PeFlow:
 
 fn _param_effect(ctx: PeCtx, f: HirFunction, p: HirParam) -> ParamEffectEntry:
     ctx.reset([p.symbol.id])
+    # Set before any early return: receiver resolution reads it, and a stale
+    # class from the previous parameter would name the wrong method table.
+    ctx.owner_class_id = _type_class_id(p.type_)
+    ctx.owner_is_receiver = p.name == "self"
     val tc = declared_parameter_category(p.type_)
     if f.is_extern:
         if tc != "" or hir_type_is_short_candidate(p.type_) or not hir_type_ownership_is_known(p.type_):
@@ -551,8 +587,6 @@ fn _param_effect(ctx: PeCtx, f: HirFunction, p: HirParam) -> ParamEffectEntry:
         if p.is_mutable:
             return ParamEffectEntry(name: p.name, effect: "mutate-short", reason: "declared `mut`")
         return ParamEffectEntry(name: p.name, effect: "read-short", reason: "")
-    ctx.owner_class_id = _type_class_id(p.type_)
-    ctx.owner_is_receiver = p.name == "self"
     val flow = _flow_block(ctx, f.body, true)
     if ctx.amb_code == "NOGC-IMPORT-CALLBACK-PENDING" and (flow.any or ctx.consume_reason != ""):
         ctx.ambiguous("NOGC-BOR-001", "short parameter also escapes independently of its pending import proof", ctx.line)
@@ -592,6 +626,15 @@ fn _new_ctx(module: HirModule, class_names: {text: bool}, imported: {text: [text
     for f in module.functions.values():
         if f.is_method:
             method_ids[f.symbol.id] = true
+            # Name fallback for Unresolved receiver calls: a duplicated
+            # method name resolves to nobody (-1) rather than to a guess.
+            if unique_methods.contains_key(f.name): unique_methods[f.name] = -1
+            else: unique_methods[f.name] = f.symbol.id
+            # Class-keyed row from the receiver's declared type: `impl C:`
+            # methods are absent from HirClass.methods but carry `self: C`.
+            if f.params.len() > 0 and f.params[0].name == "self":
+                val owner = _type_class_id(f.params[0].type_)
+                if owner >= 0: unique_methods["{owner}.{f.name}"] = f.symbol.id
     val ctx = PeCtx(module: module, class_ids: class_ids, struct_ids: struct_ids, class_names: class_names,
         by_sym: {}, by_name: imported, method_sym_by_name: unique_methods,
         method_ids: method_ids, class_field_types: {}, local_ids: {},
@@ -679,6 +722,9 @@ pub fn infer_param_effects(module: HirModule, class_names: {text: bool}, importe
             for d in _local_transfer_diags(ctx, f):
                 diags.push(d)
             val discarded = PeDiagSink(items: [])
+            # No owner in this scan: receiver classes come from types alone.
+            ctx.reset([])
+            ctx.owner_class_id = -1
             _scan_discarded_block(ctx, f, f.body, discarded)
             for d in discarded.items:
                 diags.push(d)
@@ -695,6 +741,27 @@ fn _local_class(ctx: PeCtx, ty: HirType, init: HirExpr) -> bool:
         case StructLit(t, _): return _type_class(ctx, t) == "class"
         case Call(callee, _, _): return _is_class_ctor(ctx, callee)
         case _: return false
+
+fn _ctor_class_id(ctx: PeCtx, callee: HirExpr) -> i64:
+    match callee.kind:
+        case Var(sym): return sym.id
+        case NamedVar(sym, name):
+            if sym.id >= 0 and _symbol_is_type(ctx, sym.id, true): return sym.id
+            for c in ctx.module.classes.values():
+                if c.name == name: return c.symbol.id
+            return -1
+        case _: return -1
+
+fn _local_class_id(ctx: PeCtx, ty: HirType, init: HirExpr) -> i64:
+    """Class symbol of a class local, from its annotation or its constructor.
+    Untyped `val b = Node(...)` has no symbol type, so field reads on `b`
+    need this to tell a scalar copy (`b.v`) from an alias."""
+    val declared = _type_class_id(ty)
+    if declared >= 0: return declared
+    match init.kind:
+        case StructLit(t, _): return _type_class_id(t)
+        case Call(callee, _, _): return _ctor_class_id(ctx, callee)
+        case _: return -1
 
 class PeDiagSink:
     items: [ParamEffectDiag]
@@ -715,7 +782,7 @@ fn _scan_block_locals(ctx: PeCtx, f: HirFunction, b: HirBlock, is_body: bool, ou
             case Let(sym, ty, init):
                 if _local_class(ctx, ty, init):
                     ctx.reset([sym.id])
-                    ctx.owner_class_id = -1
+                    ctx.owner_class_id = _local_class_id(ctx, ty, init)
                     ctx.owner_is_receiver = false
                     var rest: [HirStmt] = []
                     var k = i + 1
@@ -772,9 +839,9 @@ fn _scan_discarded_block(ctx: PeCtx, f: HirFunction, b: HirBlock, out: PeDiagSin
 
 fn _scan_discarded_expr(ctx: PeCtx, f: HirFunction, e: HirExpr, is_stmt: bool, out: PeDiagSink):
     match e.kind:
-        case MethodCall(_, method, args, res):
+        case MethodCall(recv, method, args, res):
             if is_stmt:
-                val summary = _summary_for_method(ctx, method, res)
+                val summary = _summary_for_sym(ctx, _resolve_method_sym(ctx, recv, method, res))
                 if summary.len() == args.len() + 1 and _effect_at(summary, 0) == "consume":
                     out.add(ParamEffectDiag(code: "NOGC-OWN-003", function: f.name, param: "self",
                         message: "`{method}` consumes its receiver and returns the new owner, but the result is discarded; rebind it (`x = x.{method}(...)`) or chain the call", line: e.span.line))

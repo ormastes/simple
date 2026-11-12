@@ -1,68 +1,46 @@
-# @tag:in-development
 # @req REQ-MEM-3-1
 # @req REQ-MEM-3-6
 """
 ## Purpose and audience
-Known checker gaps split out of nogc_contract_behaviour_spec.spl; expected RED
-until the bugs below are fixed. Bugs:
+Regression and prevention cases for two checker defects that were split out of
+nogc_contract_behaviour_spec.spl while they were RED:
 doc/08_tracking/bug/nogc_checker_scalar_field_read_aliases_owner_2026-11-12.md
+  (a scalar copy of an owner's field was treated as an alias of the owner)
 doc/08_tracking/bug/nogc_checker_explicit_self_receiver_unresolved_2026-11-12.md
+  (`recv.method()` on a reference-typed receiver lowers Unresolved, so the
+  receiver contract was never consulted and NOGC-OWN-003 could not fire)
+Each defect has its repro, same-pattern accepting twins, and a rejecting twin
+that pins the checker to fail closed where provenance really is retained.
 """
 # Lifecycle: doc/03_plan/release/1.0.0/inputs_2026-11-06/simple_nogc_ownership_memory_hardening_plan.md ;
 # doc/02_requirements/feature/release100_memory_mcp_lsp.md
 
 use std.spec.*
 use compiler.common.config.{Logger}
-use compiler.common.driver_core_types.{SourceFile, driver_core_compile_options_default}
+use compiler.common.driver_core_types.{SourceFile}
 use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.hir.hir_types.{HirModule}
 use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.hir.hir_lowering.items.*
 use compiler.hir.hir_lowering.module_surface.{module_surface_from_owner, ModuleSurfaceParserOwner}
-use compiler.driver.driver_hir_pipeline_support.{driver_nogc_param_effect_errors_v1, driver_admit_nogc_param_effects_v1}
-use compiler.driver.driver_types.{CompileContext}
-use compiler.semantics.param_effects.effects.{param_effect_report_effect}
-use compiler.semantics.param_effects.infer.{infer_param_effects}
+use compiler.driver.driver_hir_pipeline_support.{driver_nogc_param_effect_errors_v1}
 
 val PRELUDE = "class Node:\n    v: i64\n\nclass Holder:\n    head: Node?\n    items: [Node]\n\nclass Box:\n    inner: Node\n\nclass Pair:\n    a: Node\n    b: Node\n\n"
-val PATH = "testdata/contract_behaviour.spl"
-val MODULE = "contract_behaviour"
-
-fn lower(body: text, strict: bool) -> HirModule:
-    var parsed = parse_full_frontend(PRELUDE + body, PATH, MODULE, Logger(level: 0))
-    parsed.nogc_strict = strict
-    var lowering = HirLowering.with_filename(PATH)
-    lowering.lower_module(parsed)
+val PATH = "testdata/contract_behaviour_gaps.spl"
+val MODULE = "contract_behaviour_gaps"
 
 # Production strict gate: the fatal diagnostics the driver would raise.
-fn gate(body: text, strict: bool = true) -> [text]:
+fn gate(body: text) -> [text]:
     val source_text = PRELUDE + body
     var parsed = parse_full_frontend(source_text, PATH, MODULE, Logger(level: 0))
-    parsed.nogc_strict = strict
+    parsed.nogc_strict = true
     val source = SourceFile(path: PATH, content: source_text, module_name: MODULE)
     val surface = module_surface_from_owner(ModuleSurfaceParserOwner.new(parsed), source, 0).unwrap()
     var lowering = HirLowering.with_filename(PATH)
     val actual: HirModule = lowering.lower_module(parsed)
-    driver_nogc_param_effect_errors_v1({}, [actual], [surface])
-
-# Production admission: the context a real build would continue with.
-fn admit(body: text, strict: bool = true) -> CompileContext:
-    val source_text = PRELUDE + body
-    var parsed = parse_full_frontend(source_text, PATH, MODULE, Logger(level: 0))
-    parsed.nogc_strict = strict
-    val source = SourceFile(path: PATH, content: source_text, module_name: MODULE)
-    val surface = module_surface_from_owner(ModuleSurfaceParserOwner.new(parsed), source, 0).unwrap()
-    var lowering = HirLowering.with_filename(PATH)
-    val actual: HirModule = lowering.lower_module(parsed)
-    val ctx = CompileContext.create(driver_core_compile_options_default())
-    ctx.hir_modules[MODULE] = actual
-    ctx.validation_module_array = [actual]
-    ctx.bootstrap_entry_hir = actual
-    driver_admit_nogc_param_effects_v1(ctx, [surface])
-    ctx
-
-fn effect(body: text, function: text, param: text) -> text:
-    param_effect_report_effect(infer_param_effects(lower(body, true), {}, {}), function, param)
+    val errors = driver_nogc_param_effect_errors_v1({}, [actual], [surface])
+    step("observed strict-gate diagnostics: [{errors.join(\" | \")}]")
+    errors
 
 fn count_code(lines: [text], code: text) -> i64:
     var n = 0
@@ -75,20 +53,50 @@ fn has_code(lines: [text], code: text) -> bool:
 
 # Shared fixtures
 val PUSH_OWNER = "fn ps(xs: [Node], n: &Node):\n    xs.push(n)\n"
-val READ_SHORT = "fn rd(n: Node) -> i64:\n    n.v\n"
+val PUSH_BOX = "fn pb(bs: [Box], b: &Box):\n    bs.push(b)\n"
+val INTO_NEXT = "impl Node:\n    fn into_next(self: &Node) -> &Node:\n        self\n\n"
 
 
-describe "REQ-MEM-3-1 gap: scalar copy of a field is not an owner alias":
-    it "accepts a local whose transfer is its last use":
+describe "REQ-MEM-3-1 scalar copy of an owner's field is a value, not an alias":
+    it "accepts an untyped class local whose transfer follows a scalar field copy":
+        step("owner `b` is constructed without a type annotation, `keep` copies `b.v`, `b` is then consumed")
         val errors = gate(PUSH_OWNER + "\nfn caller2(xs: [Node]) -> i64:\n    val b = Node(v: 2)\n    val keep = b.v\n    ps(xs, b)\n    keep\n")
         expect(errors.len()).to_equal(0)
 
+    it "accepts the same copy when the local is annotated with its class":
+        val errors = gate(PUSH_OWNER + "\nfn caller3(xs: [Node]) -> i64:\n    val b: Node = Node(v: 2)\n    val keep = b.v\n    ps(xs, b)\n    keep\n")
+        expect(errors.len()).to_equal(0)
+
+    it "accepts a scalar copied through a nested class field (`bx.inner.v`)":
+        val errors = gate(PUSH_BOX + "\nfn caller4(bs: [Box]) -> i64:\n    val bx = Box(inner: Node(v: 3))\n    val keep = bx.inner.v\n    pb(bs, bx)\n    keep\n")
+        expect(errors.len()).to_equal(0)
+
+    it "still rejects using a class-typed field alias after the owner was transferred":
+        step("`alias = bx.inner` retains provenance of `bx`; reading it after `pb(bs, bx)` is a use after transfer")
+        val errors = gate(PUSH_BOX + "\nfn caller5(bs: [Box]) -> i64:\n    val bx = Box(inner: Node(v: 3))\n    val alias = bx.inner\n    pb(bs, bx)\n    alias.v\n")
+        assert_true(has_code(errors, "NOGC-OWN-002"))
+
 describe "REQ-MEM-3-6 exactly-once cleanup, checker-visible half (mutation: cleanup edge removed)":
     it "rejects discarding the new owner returned by a receiver-consuming method":
-        val body = "impl Node:\n    fn into_next(self: &Node) -> &Node:\n        self\n\nfn drop_it(n: &Node):\n    n.into_next()\n"
-        val errors = gate(body)
-        expect(has_code(errors, "NOGC-OWN-003")).to_equal(true)
+        val errors = gate(INTO_NEXT + "fn drop_it(n: &Node):\n    n.into_next()\n")
+        assert_true(has_code(errors, "NOGC-OWN-003"))
+        expect_not(has_code(errors, "NOGC-AMB-004"))
 
     it "accepts rebinding the new owner returned by a receiver-consuming method":
-        val body = "impl Node:\n    fn into_next(self: &Node) -> &Node:\n        self\n\nfn keep_it(n: &Node) -> &Node:\n    val m = n.into_next()\n    m\n"
-        expect(gate(body).len()).to_equal(0)
+        val errors = gate(INTO_NEXT + "fn keep_it(n: &Node) -> &Node:\n    val m = n.into_next()\n    m\n")
+        expect(errors.len()).to_equal(0)
+
+    it "rejects discarding the new owner when the receiver is an untyped class local":
+        val errors = gate(INTO_NEXT + "fn drop_local():\n    val n = Node(v: 1)\n    n.into_next()\n")
+        assert_true(has_code(errors, "NOGC-OWN-003"))
+
+    it "accepts a read-only method with an explicit `self: Node` receiver called on an owning reference":
+        step("the receiver contract resolves to read-short, so no NOGC-AMB-004 is raised")
+        val errors = gate("impl Node:\n    fn peek(self: Node) -> i64:\n        self.v\n\nfn use_it(n: &Node) -> i64:\n    n.peek()\n")
+        expect_not(has_code(errors, "NOGC-AMB-004"))
+        expect(errors.len()).to_equal(0)
+
+    it "resolves a method name shared by two classes through the receiver's class":
+        step("`tag` exists on Node and Box; `n: &Node` picks Node's read-only contract")
+        val errors = gate("impl Node:\n    fn tag(self: Node) -> i64:\n        self.v\n\nimpl Box:\n    fn tag(self: Box) -> i64:\n        1\n\nfn amb(n: &Node) -> i64:\n    n.tag()\n")
+        expect(errors.len()).to_equal(0)
