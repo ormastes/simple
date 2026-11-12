@@ -50,6 +50,25 @@ fn _module_path_naming_char_index_of_byte(value: text, byte_index: i64) -> i64:
         b = b + 1
     chars
 
+fn _module_path_naming_suffix_after(value: text, needle: text) -> text:
+    # `needle` is "/src/"-shaped; the suffix must start with it minus the
+    # leading "/". `substring` units differ by lane (pure-Simple native and the
+    # seed interpreter slice bytes, the seed JIT/native lane slices characters;
+    # bug substring_units_differ_by_execution_lane_2026-11-12), so slice at the
+    # byte index, verify against the needle, and fall back to the character
+    # index. "" means the needle is absent.
+    val byte_index = _module_path_naming_text_index_of(value, needle)
+    if byte_index < 0:
+        return ""
+    val expected = needle.substring(1)
+    val by_bytes = value.substring(byte_index + 1)
+    if by_bytes.starts_with(expected):
+        return by_bytes
+    val by_chars = value.substring(_module_path_naming_char_index_of_byte(value, byte_index) + 1)
+    if by_chars.starts_with(expected):
+        return by_chars
+    ""
+
 fn _module_path_naming_text_index_of(value: text, needle: text) -> i64:
     if needle == "":
         return 0
@@ -63,7 +82,7 @@ fn _module_path_naming_text_index_of(value: text, needle: text) -> i64:
         while offset < needle_len and value.byte_at(start + offset) == needle.byte_at(offset):
             offset = offset + 1
         if offset == needle_len:
-            return _module_path_naming_char_index_of_byte(value, start)
+            return start
         start = start + 1
     -1
 
@@ -169,12 +188,12 @@ fn module_source_relative_path(path: text) -> text:
         mod_path = mod_path.substring(3)
     if mod_path.starts_with("./"):
         mod_path = mod_path.substring(2)
-    val absolute_src = _module_path_naming_text_index_of(mod_path, "/src/")
-    if absolute_src >= 0:
-        return mod_path.substring(absolute_src + 1)
-    val absolute_examples = _module_path_naming_text_index_of(mod_path, "/examples/")
-    if absolute_examples >= 0:
-        return mod_path.substring(absolute_examples + 1)
+    val after_src = _module_path_naming_suffix_after(mod_path, "/src/")
+    if after_src != "":
+        return after_src
+    val after_examples = _module_path_naming_suffix_after(mod_path, "/examples/")
+    if after_examples != "":
+        return after_examples
     mod_path
 
 fn module_relative_name_from_path(path: text, relative_name: text) -> text:
