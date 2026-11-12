@@ -36,6 +36,23 @@
 
 #include "llama.h"
 
+/* One lock for the state every request shares: the request slot table, the
+ * compat handle, the prefix cache and the model pointer. Each request owns its
+ * llama_context, sampler and buffers, so llama_decode and sampling run OUTSIDE
+ * the lock and two requests decode concurrently. Entry points take the lock;
+ * `_locked` helpers require it. Not recursive. */
+#if defined(_WIN32)
+#  include <windows.h>
+static SRWLOCK g_state_lock = SRWLOCK_INIT;
+#  define SLANG_LOCK()   AcquireSRWLockExclusive(&g_state_lock)
+#  define SLANG_UNLOCK() ReleaseSRWLockExclusive(&g_state_lock)
+#else
+#  include <pthread.h>
+static pthread_mutex_t g_state_lock = PTHREAD_MUTEX_INITIALIZER;
+#  define SLANG_LOCK()   pthread_mutex_lock(&g_state_lock)
+#  define SLANG_UNLOCK() pthread_mutex_unlock(&g_state_lock)
+#endif
+
 #if defined(__has_include)
 #  if __has_include("llama-slang-paged.h")
 #    include "llama-slang-paged.h"
@@ -334,6 +351,80 @@ int64_t slang_ggml_str_push(int64_t byte) {
     return g_load_str_len;
 }
 
+/* ---- chat template --------------------------------------------------- */
+
+/* Reads "<decimal byte count>:" at *at and returns the count, or -1. */
+static int64_t slang_chat_frame_len(const char *s, int64_t len, int64_t *at) {
+    int64_t i = *at, n = 0, digits = 0;
+    while (i < len && s[i] >= '0' && s[i] <= '9') {
+        n = n * 10 + (s[i] - '0');
+        if (n > len) return -1;
+        i++; digits++;
+    }
+    if (digits == 0 || i >= len || s[i] != ':' || n > len - (i + 1)) return -1;
+    *at = i + 1;
+    return n;
+}
+
+/* Replaces the request string buffer, which must hold the chat as frames
+ * "<role bytes>:<role><content bytes>:<content>" (one pair per message, in
+ * order), with the prompt the MODEL's own chat template renders for it,
+ * ending in the assistant generation prefix. Returns 1 when the GGUF template
+ * was applied and 2 when llama.cpp does not recognise it (or the model carries
+ * none) and ChatML was used instead. */
+int64_t slang_ggml_request_chat_render(int64_t handle) {
+    struct slang_request *request = slang_request_get(handle);
+    if (request == NULL) return SLANG_ERR_INVALID;
+    if (g_model == NULL) return SLANG_ERR_NO_MODEL;
+    const char *src = request->str;
+    int64_t len = request->str_len;
+    int64_t fields = 0;
+    for (int64_t at = 0; at < len; fields++) {
+        int64_t n = slang_chat_frame_len(src, len, &at);
+        if (n < 0) return SLANG_ERR_INVALID;
+        at += n;
+    }
+    if (fields == 0 || (fields % 2) != 0) return SLANG_ERR_INVALID;
+    size_t count = (size_t)(fields / 2);
+    struct llama_chat_message *messages =
+        (struct llama_chat_message *)calloc(count, sizeof(*messages));
+    char *work = (char *)malloc((size_t)len + (size_t)fields + 1);
+    char *rendered = (char *)malloc(SLANG_STR_CAP);
+    int64_t result = SLANG_ERR_OVERFLOW;
+    if (messages != NULL && work != NULL && rendered != NULL) {
+        char *cursor = work;
+        int64_t at = 0;
+        for (int64_t field = 0; field < fields; field++) {
+            int64_t n = slang_chat_frame_len(src, len, &at);
+            memcpy(cursor, src + at, (size_t)n);
+            cursor[n] = '\0';
+            if ((field % 2) == 0) messages[field / 2].role = cursor;
+            else messages[field / 2].content = cursor;
+            cursor += n + 1;
+            at += n;
+        }
+        const char *tmpl = llama_model_chat_template(g_model, NULL);
+        int32_t n = tmpl == NULL ? -1 :
+            llama_chat_apply_template(tmpl, messages, count, true, rendered, SLANG_STR_CAP);
+        result = 1;
+        if (n < 0) {
+            n = llama_chat_apply_template("chatml", messages, count, true, rendered, SLANG_STR_CAP);
+            result = 2;
+        }
+        if (n < 0) {
+            result = SLANG_ERR_TOKENIZE;
+        } else if (n >= SLANG_STR_CAP) {
+            result = SLANG_ERR_OVERFLOW;
+        } else {
+            memcpy(request->str, rendered, (size_t)n);
+            request->str[n] = '\0';
+            request->str_len = n;
+        }
+    }
+    free(messages); free(work); free(rendered);
+    return result;
+}
+
 /* ---- output byte buffer --------------------------------------------- */
 
 int64_t slang_ggml_request_out_len(int64_t handle) {
@@ -365,7 +456,7 @@ int64_t slang_ggml_backend_init(void) {
 
 /* Loads the model whose path is in the string buffer. n_gpu_layers < 0 means
  * "offload everything"; 0 keeps the model on the CPU. */
-int64_t slang_ggml_model_load(int64_t n_gpu_layers) {
+static int64_t slang_model_load_locked(int64_t n_gpu_layers) {
     if (g_model != NULL) return SLANG_ERR_ALREADY;
     if (g_load_str_len == 0) return SLANG_ERR_LOAD_FAILED;
     struct llama_model_params mp = llama_model_default_params();
@@ -379,6 +470,13 @@ int64_t slang_ggml_model_load(int64_t n_gpu_layers) {
     }
     g_model_generation++;
     return 0;
+}
+
+int64_t slang_ggml_model_load(int64_t n_gpu_layers) {
+    SLANG_LOCK();
+    int64_t result = slang_model_load_locked(n_gpu_layers);
+    SLANG_UNLOCK();
+    return result;
 }
 
 int64_t slang_ggml_request_configure(int64_t entries) {
@@ -401,7 +499,7 @@ int64_t slang_ggml_context_profile_configure(int64_t matched_cpu, int64_t thread
     return 0;
 }
 
-static int64_t slang_request_create_impl(int64_t n_ctx, int physical_only) {
+static int64_t slang_request_create_locked(int64_t n_ctx, int physical_only) {
     if (g_model == NULL) return SLANG_ERR_NO_MODEL;
     if (n_ctx <= 0 || n_ctx > INT32_MAX) return SLANG_ERR_INVALID;
     if (g_request_count >= g_request_capacity) return SLANG_ERR_BUSY;
@@ -465,22 +563,36 @@ static int64_t slang_request_create_impl(int64_t n_ctx, int physical_only) {
     return slang_request_handle(slot, generation);
 }
 
+static int64_t slang_request_create_impl(int64_t n_ctx, int physical_only) {
+    SLANG_LOCK();
+    int64_t handle = slang_request_create_locked(n_ctx, physical_only);
+    SLANG_UNLOCK();
+    return handle;
+}
+
 int64_t slang_ggml_request_create(int64_t n_ctx) {
     return slang_request_create_impl(n_ctx > 0 ? n_ctx : 4096, 0);
 }
 
 int64_t slang_ggml_ctx_create(int64_t n_ctx) {
-    if (slang_compat_request() != NULL) return SLANG_ERR_ALREADY;
-    int64_t handle = slang_ggml_request_create(n_ctx);
-    if (handle < 0) return handle;
-    g_compat_handle = handle;
-    return 0;
+    SLANG_LOCK();
+    int64_t result = SLANG_ERR_ALREADY;
+    if (slang_compat_request() == NULL) {
+        result = slang_request_create_locked(n_ctx > 0 ? n_ctx : 4096, 0);
+        if (result >= 0) {
+            g_compat_handle = result;
+            result = 0;
+        }
+    }
+    SLANG_UNLOCK();
+    return result;
 }
 
 /* Capability bits are stable at the ABI boundary. Bit 0 is resident weights,
  * bit 1 is request isolation, bit 2 is serial exact-prefix restore, and bit 3
  * is bounded serial multi-entry prefix retention, and bit 4 is generation-
- * checked independent request ownership under one serial executor. Bit 5 is
+ * checked independent request ownership; independent requests may decode
+ * concurrently, one thread per request handle (see g_state_lock). Bit 5 is
  * advertised only when this shim was compiled against the complete external
  * paged-request API. */
 int64_t slang_ggml_capabilities(void) {
@@ -523,7 +635,7 @@ static void slang_prefix_clear_all(int count_eviction) {
         slang_prefix_drop(i, count_eviction);
 }
 
-int64_t slang_ggml_prefix_cache_configure(int64_t entries, int64_t bytes) {
+static int64_t slang_prefix_cache_configure_locked(int64_t entries, int64_t bytes) {
     if (entries < 0 || entries > SLANG_PREFIX_CACHE_MAX_ENTRIES || bytes < 0)
         return SLANG_ERR_OVERFLOW;
     if ((uint64_t)bytes > (uint64_t)SIZE_MAX) return SLANG_ERR_OVERFLOW;
@@ -550,7 +662,14 @@ int64_t slang_ggml_prefix_cache_configure(int64_t entries, int64_t bytes) {
     return g_prefix_capacity;
 }
 
-static void slang_request_release_lease(struct slang_request *request) {
+int64_t slang_ggml_prefix_cache_configure(int64_t entries, int64_t bytes) {
+    SLANG_LOCK();
+    int64_t result = slang_prefix_cache_configure_locked(entries, bytes);
+    SLANG_UNLOCK();
+    return result;
+}
+
+static void slang_request_release_lease_locked(struct slang_request *request) {
     if (request->lease_slot < 0) return;
     struct slang_prefix_entry *entry = &g_prefix[request->lease_slot];
     if (entry->pins > 0) entry->pins--;
@@ -560,13 +679,19 @@ static void slang_request_release_lease(struct slang_request *request) {
     if (entry->unavailable && entry->pins == 0) slang_prefix_drop(slot, 0);
 }
 
-int64_t slang_ggml_request_close(int64_t handle) {
+static void slang_request_release_lease(struct slang_request *request) {
+    SLANG_LOCK();
+    slang_request_release_lease_locked(request);
+    SLANG_UNLOCK();
+}
+
+static int64_t slang_request_close_locked(int64_t handle) {
     struct slang_request *request = slang_request_get(handle);
     if (request == NULL) return SLANG_ERR_INVALID;
 #if SLANG_HAS_EXTERNAL_PAGED_PROVIDER
     slang_physical_request_detach(handle);
 #endif
-    slang_request_release_lease(request);
+    slang_request_release_lease_locked(request);
     if (request->smpl) llama_sampler_free(request->smpl);
     if (request->ctx) llama_free(request->ctx);
     free(request->str); free(request->out); free(request->tok);
@@ -581,6 +706,13 @@ int64_t slang_ggml_request_close(int64_t handle) {
     return 0;
 }
 
+int64_t slang_ggml_request_close(int64_t handle) {
+    SLANG_LOCK();
+    int64_t result = slang_request_close_locked(handle);
+    SLANG_UNLOCK();
+    return result;
+}
+
 int64_t slang_ggml_request_cancel(int64_t handle) {
     struct slang_request *request = slang_request_get(handle);
     if (request == NULL) return SLANG_ERR_INVALID;
@@ -590,13 +722,13 @@ int64_t slang_ggml_request_cancel(int64_t handle) {
 
 /* Frees in reverse construction order and resets every handle, so a caller
  * that stops and restarts a model in one process leaks nothing. */
-int64_t slang_ggml_free(void) {
+static int64_t slang_free_locked(void) {
 #if SLANG_HAS_EXTERNAL_PAGED_PROVIDER
     if (g_physical_pool.active) return SLANG_ERR_BUSY;
 #endif
     int compat_active = slang_compat_request() != NULL;
     if (g_request_count > (compat_active ? 1 : 0)) return SLANG_ERR_BUSY;
-    if (compat_active) slang_ggml_request_close(g_compat_handle);
+    if (compat_active) slang_request_close_locked(g_compat_handle);
     if (g_model) { llama_model_free(g_model);  g_model = NULL; }
     slang_prefix_clear_all(0);
     g_prefix_capacity = SLANG_PREFIX_CACHE_DEFAULT_ENTRIES;
@@ -609,6 +741,13 @@ int64_t slang_ggml_free(void) {
     g_request_capacity = SLANG_REQUEST_DEFAULT_ENTRIES;
     g_compat_handle = 0; g_load_str_len = 0; g_load_str[0] = '\0';
     return 0;
+}
+
+int64_t slang_ggml_free(void) {
+    SLANG_LOCK();
+    int64_t result = slang_free_locked();
+    SLANG_UNLOCK();
+    return result;
 }
 
 /* ---- vocab / tokenizer ---------------------------------------------- */
@@ -712,12 +851,12 @@ int64_t slang_ggml_kv_clear(void) {
 /* Selects the longest cacheable prefix owned by this serial context. The
  * snapshot is restored only after exact token comparison. One trailing token
  * is recomputed so the backend produces fresh boundary logits. */
-int64_t slang_ggml_request_prefix_prepare(int64_t handle) {
+static int64_t slang_request_prefix_prepare_locked(int64_t handle) {
     struct slang_request *request = slang_request_get(handle);
     if (request == NULL) return SLANG_ERR_INVALID;
     if (request->ctx == NULL) return SLANG_ERR_INVALID;
     if (request->cancelled) return SLANG_ERR_CANCELLED;
-    slang_request_release_lease(request);
+    slang_request_release_lease_locked(request);
     request->eval_start = 0;
     request->selected_prefix = -1;
     for (int64_t i = 0; i < SLANG_PREFIX_CACHE_MAX_ENTRIES; i++) {
@@ -750,11 +889,18 @@ int64_t slang_ggml_request_prefix_prepare(int64_t handle) {
         }
         g_prefix_restore_failures++;
         entry->unavailable = 1;
-        slang_request_release_lease(request);
+        slang_request_release_lease_locked(request);
     }
     llama_memory_clear(llama_get_memory(request->ctx), true);
     g_prefix_misses++;
     return 0;
+}
+
+int64_t slang_ggml_request_prefix_prepare(int64_t handle) {
+    SLANG_LOCK();
+    int64_t result = slang_request_prefix_prepare_locked(handle);
+    SLANG_UNLOCK();
+    return result;
 }
 
 int64_t slang_ggml_prefix_prepare(void) {
@@ -860,9 +1006,11 @@ int64_t slang_ggml_request_eval_prompt(int64_t handle) {
             slang_request_release_lease(request);
             return SLANG_ERR_DECODE;
         }
-        g_prefix_tokens_prefilled += suffix_len;
     }
+    SLANG_LOCK();
+    if (suffix_len > 0) g_prefix_tokens_prefilled += suffix_len;
     slang_prefix_admit(request);
+    SLANG_UNLOCK();
     request->eval_start = request->tok_len;
     request->legacy_logits_valid = 1;
     return request->tok_len;

@@ -9,6 +9,7 @@
 #   bash        - run a shell command (timeout, capture stdout/stderr/exit)
 #   read_file   - real FS read, line-numbered, offset/limit
 #   write_file  - real FS write, refused outside workspace root
+#   edit_file   - exact unique-occurrence string replacement in a workspace file
 #   list_dir    - real directory listing
 #   glob        - simple `*` glob within the workspace
 #   mail_list / mail_read / mail_send      - IMAP/SMTP (infra_mail.spl)
@@ -18,7 +19,7 @@
 # Permission model:
 #   read-only tools (read_file / list_dir / glob / mail_list / mail_read /
 #   storage_ls / storage_get / wiki_search / wiki_read) are auto-allowed
-#   mutating tools (bash / write_file / mail_send / storage_put / wiki_write) require
+#   mutating tools (bash / write_file / edit_file / mail_send / storage_put / wiki_write) require
 #   explicit allow (allow_list or allow_all). With no grant the policy default is "ask"; in non-interactive
 #   mode "ask" resolves to DENY and the model gets a permission-error tool_result
 #   instead of any execution.
@@ -235,7 +236,7 @@ fn is_read_only_tool(name: text) -> bool:
         name == "wiki_search" or name == "wiki_read"
 
 fn is_mutating_tool(name: text) -> bool:
-    name == "bash" or name == "write_file" or name == "mail_send" or name == "storage_put" or
+    name == "bash" or name == "write_file" or name == "edit_file" or name == "mail_send" or name == "storage_put" or
         name == "wiki_write"
 
 fn is_known_tool(name: text) -> bool:
@@ -248,7 +249,7 @@ fn tool_schemas() -> [text]:
     val q = _Q()
     val obj_schema = _LB() + q + "type" + q + ": " + q + "object" + q + ", " + q + "properties" + q + ": " + _LB() + _RB() + _RB()
     var base: [text] = []
-    for name in ["bash", "read_file", "write_file", "list_dir", "glob"]:
+    for name in ["bash", "read_file", "write_file", "edit_file", "list_dir", "glob"]:
         base.push(_LB() + q + "name" + q + ": " + q + name + q + ", " + q + "description" + q + ": " + q + "workspace tool " + name + q + ", " + q + "input_schema" + q + ": " + obj_schema + _RB())
     base + mail_tool_schemas() + storage_tool_schemas() + wiki_tool_schemas()
 
@@ -312,7 +313,10 @@ fn _sq(s: text) -> text:
 # Executors (only reachable through run_tool)
 # ============================================================================
 
-fn exec_bash(input: text) -> ToolResult:
+# bash runs from the workspace root, the same root read_file/write_file resolve
+# against; without the `cd` it inherited caret's own cwd, so an agent's relative
+# commands (`bin/simple test ...`, `git diff`) ran in a different tree.
+fn exec_bash(workspace_root: text, input: text) -> ToolResult:
     val command = _json_get_str(input, "command")
     if command == "":
         return new_tool_error("", "bash: missing required 'command'")
@@ -322,7 +326,9 @@ fn exec_bash(input: text) -> ToolResult:
     var secs = timeout_ms / 1000
     if secs < 1:
         secs = 1
-    val wrapped = "timeout " + secs.to_text() + " /bin/sh -c " + _sq(command)
+    var wrapped = "timeout " + secs.to_text() + " /bin/sh -c " + _sq(command)
+    if workspace_root != "":
+        wrapped = "cd " + _sq(workspace_root) + " && " + wrapped
     val (out, errout, code) = process_run("/bin/sh", ["-c", wrapped])
     val stdout = out ?? ""
     val stderr = errout ?? ""
@@ -372,6 +378,40 @@ fn exec_write_file(policy: PermissionPolicy, input: text) -> ToolResult:
     if not ok:
         return new_tool_error("", "write_file: failed to write " + path)
     new_tool_result("", "wrote " + content.len().to_text() + " bytes to " + path)
+
+fn _count_occurrences(s: text, needle: text) -> i64:
+    var n = 0
+    var pos = 0
+    while pos <= s.len() - needle.len():
+        val i = _idx(s.substring(pos), needle)
+        if i < 0:
+            break
+        n = n + 1
+        pos = pos + i + needle.len()
+    n
+
+fn exec_edit_file(policy: PermissionPolicy, input: text) -> ToolResult:
+    val path = _json_get_str(input, "path")
+    val (full, err) = guard_path(policy, path)
+    if err != "":
+        return new_tool_error("", "edit_file: " + err)
+    if not file_exists(full):
+        return new_tool_error("", "edit_file: file not found: " + path)
+    val old_text = _json_get_str(input, "old_text")
+    val new_text = _json_get_str(input, "new_text")
+    if old_text == "":
+        return new_tool_error("", "edit_file: old_text must not be empty")
+    val raw = read_file_text(full)
+    val n = _count_occurrences(raw, old_text)
+    if n == 0:
+        return new_tool_error("", "edit_file: old_text not found in " + path)
+    if n > 1:
+        return new_tool_error("", "edit_file: old_text occurs " + n.to_text() + " times in " + path + "; include more surrounding lines so it is unique")
+    val at = _idx(raw, old_text)
+    val updated = raw.substring(0, at) + new_text + raw.substring(at + old_text.len())
+    if not file_write(full, updated):
+        return new_tool_error("", "edit_file: failed to write " + path)
+    new_tool_result("", "edited " + path + ": replaced 1 occurrence (" + old_text.len().to_text() + " -> " + new_text.len().to_text() + " chars)")
 
 fn exec_list_dir(policy: PermissionPolicy, input: text) -> ToolResult:
     var path = _json_get_str(input, "path")
@@ -458,11 +498,13 @@ fn run_tool(policy: PermissionPolicy, call: ToolCall) -> ToolResult:
     # decision == "allow": dispatch to the real executor
     var res = new_tool_error(call.id, "unknown tool: " + call.name)
     if call.name == "bash":
-        res = exec_bash(call.input)
+        res = exec_bash(policy.workspace_root, call.input)
     elif call.name == "read_file":
         res = exec_read_file(policy, call.input)
     elif call.name == "write_file":
         res = exec_write_file(policy, call.input)
+    elif call.name == "edit_file":
+        res = exec_edit_file(policy, call.input)
     elif call.name == "list_dir":
         res = exec_list_dir(policy, call.input)
     elif call.name == "glob":

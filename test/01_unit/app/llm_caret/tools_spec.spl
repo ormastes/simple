@@ -166,10 +166,24 @@ describe "Bash gating and execution":
         val marker = WS_ROOT + "/bash_allowed_marker.txt"
         _clean(marker)
         val p = policy_with_allow(WS_ROOT, ["bash"])
-        val call = new_tool_call("b3", "bash", "{\"command\":\"printf done > " + marker + "\"}")
+        # bash runs from the workspace root, so the relative name lands in WS_ROOT.
+        val call = new_tool_call("b3", "bash", "{\"command\":\"printf done > bash_allowed_marker.txt\"}")
         val res = run_tool(p, call)
         assert_false(res.is_error)
         assert_true(rt_file_exists(marker))
+
+    it "should run bash inside the workspace root, like the file tools":
+        # read_file/write_file resolve against the workspace; bash used the
+        # caller's cwd, so an agent's `bin/simple test ...` ran in another tree.
+        _setup()
+        val marker = WS_ROOT + "/bash_cwd_marker.txt"
+        _clean(marker)
+        val p = allow_all_policy(WS_ROOT)
+        val call = new_tool_call("b5", "bash", "{\"command\":\"printf here > bash_cwd_marker.txt\"}")
+        val res = run_tool(p, call)
+        assert_false(res.is_error)
+        assert_true(rt_file_exists(marker))
+        _clean(marker)
 
     it "should report non-zero bash exit codes":
         val p = allow_all_policy(WS_ROOT)
@@ -266,6 +280,54 @@ describe "write_file executor":
         val res = run_tool(p, call)
         assert_true(res.is_error)
         expect(res.content).to_contain("traversal")
+
+describe "edit_file executor":
+    it "should replace one unique occurrence and keep the rest byte-identical":
+        _setup()
+        val path = WS_ROOT + "/edit_ok.txt"
+        _clean(path)
+        rt_file_write_text(path, "alpha\nbeta line\ngamma\n")
+        val nl = "\\" + "n"
+        val input = _LB() + _kv("path", "edit_ok.txt") + "," + _kv("old_text", "beta line") + "," + _kv("new_text", "BETA" + nl + "  second") + _RB()
+        val p = policy_with_allow(WS_ROOT, ["edit_file"])
+        val res = run_tool(p, new_tool_call("e1", "edit_file", input))
+        assert_false(res.is_error)
+        expect(res.content).to_contain("replaced 1 occurrence")
+        expect(rt_file_read_text(path) ?? "").to_equal("alpha\nBETA\n  second\ngamma\n")
+
+    it "should error and leave the file unchanged when old_text is not found":
+        _setup()
+        val path = WS_ROOT + "/edit_miss.txt"
+        _clean(path)
+        rt_file_write_text(path, "alpha\nbeta\n")
+        val input = _LB() + _kv("path", "edit_miss.txt") + "," + _kv("old_text", "zzz") + "," + _kv("new_text", "x") + _RB()
+        val p = policy_with_allow(WS_ROOT, ["edit_file"])
+        val res = run_tool(p, new_tool_call("e2", "edit_file", input))
+        assert_true(res.is_error)
+        expect(res.content).to_contain("not found")
+        expect(rt_file_read_text(path) ?? "").to_equal("alpha\nbeta\n")
+
+    it "should error on an ambiguous old_text and leave the file unchanged":
+        _setup()
+        val path = WS_ROOT + "/edit_dup.txt"
+        _clean(path)
+        rt_file_write_text(path, "x = 1\nx = 1\n")
+        val input = _LB() + _kv("path", "edit_dup.txt") + "," + _kv("old_text", "x = 1") + "," + _kv("new_text", "x = 2") + _RB()
+        val p = policy_with_allow(WS_ROOT, ["edit_file"])
+        val res = run_tool(p, new_tool_call("e3", "edit_file", input))
+        assert_true(res.is_error)
+        expect(res.content).to_contain("2 times")
+        expect(rt_file_read_text(path) ?? "").to_equal("x = 1\nx = 1\n")
+
+    it "should refuse paths outside the workspace root":
+        val p = allow_all_policy(WS_ROOT)
+        val input = _LB() + _kv("path", "../x") + "," + _kv("old_text", "a") + "," + _kv("new_text", "b") + _RB()
+        val res = run_tool(p, new_tool_call("e4", "edit_file", input))
+        assert_true(res.is_error)
+        expect(res.content).to_contain("traversal")
+
+    it "should default to ask like write_file":
+        expect(permission_decision(default_policy(WS_ROOT), "edit_file")).to_equal("ask")
 
 describe "Path guard":
     it "should block parent traversal":
