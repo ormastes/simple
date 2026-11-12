@@ -6225,17 +6225,34 @@ int64_t rt_text_to_upper_ascii(int64_t value) {
     return rt_string_ascii_case(value, 0);
 }
 
+/* NUL-terminated copy of a `text` handle read through the shared rt_string_*
+ * ABI rather than this file's private registry. In the Windows
+ * core-c-bootstrap link this file is a SUPPLEMENT behind the Rust native_all
+ * archive: strings are Rust-owned, rt_string_len/rt_string_data resolve to the
+ * Rust owner, and rt_core_as_string rejects every one of them. The two
+ * C-only exports below (nothing in native_all defines them) must therefore
+ * never decode a handle privately. In a pure core-C binary the same calls
+ * resolve to this file's own accessors, so both compositions agree.
+ * See doc/08_tracking/bug/stage2_windows_mixed_runtime_owner_array_handle_2026-11-12.md */
+static char* core_text_dup_abi(int64_t value) {
+    int64_t len = rt_string_len(value);
+    if (len < 0) return NULL;
+    const uint8_t* data = rt_string_data(value);
+    if (!data && len != 0) return NULL;
+    char* out = (char*)rt_observed_malloc_v1((size_t)len + 1);
+    if (!out) return NULL;
+    if (len > 0) memcpy(out, data, (size_t)len);
+    out[len] = '\0';
+    return out;
+}
+
 int64_t rt_text_is_ascii(int64_t value) {
-    RtCoreString* s = rt_core_as_string(value);
-    if (!s) {
-        int64_t promoted;
-        if (rt_string_promote_raw_receiver(value, &promoted)) {
-            return rt_text_is_ascii(promoted);
-        }
-        return 0;
-    }
-    for (uint64_t i = 0; i < s->len; i++) {
-        if (((uint8_t)s->data[i]) > 0x7f) return 0;
+    int64_t len = rt_string_len(value);
+    if (len < 0) return 0;
+    const uint8_t* data = rt_string_data(value);
+    if (!data) return len == 0 ? 1 : 0;
+    for (int64_t i = 0; i < len; i++) {
+        if (data[i] > 0x7f) return 0;
     }
     return 1;
 }
@@ -17711,7 +17728,8 @@ int64_t rt_file_mode(int64_t path_value) {
  * follows the in-file precedent (MultiByteToWideChar with CP_UTF8 /
  * MB_ERR_INVALID_CHARS, as used by rt_mmap_raw's path handling). */
 int64_t rt_file_list_dir(int64_t path_value) {
-    char* path = rt_core_string_to_cpath(path_value);
+    /* ABI accessors, not rt_core_string_to_cpath: see core_text_dup_abi. */
+    char* path = core_text_dup_abi(path_value);
     if (!path) return rt_core_nil();
 #if defined(_WIN32)
     size_t path_len = strlen(path);

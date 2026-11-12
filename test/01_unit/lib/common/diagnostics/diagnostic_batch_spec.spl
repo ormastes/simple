@@ -1,0 +1,155 @@
+"""
+## Purpose and audience
+
+Executable contract for the adjacent batch/action-index layer in
+`std.common.diagnostics.diagnostic_batch`: `DiagnosticBatchV1` (snapshot
+identity + status separate from severity), `BatchStatus`, stable diagnostic
+ids, and `DiagnosticActionIndex` (ordered multi-candidate fixes with
+preconditions and disabled reasons, projected back onto the legacy single
+`DiagnosticV1.fix`). Traces REQ-DIAG-001 (canonical model). Audience: the
+Simple/CMM/Markdown emit lanes and the fix-service lane that build on it.
+"""
+# @cover src/lib/common/diagnostics/diagnostic_batch.spl
+
+use std.spec
+use std.common.diagnostics.diagnostic_v1.{DiagnosticV1, DiagnosticFix, FixConfidence}
+use std.common.diagnostics.span.{Span}
+use std.common.diagnostics.diagnostic_batch.{
+    BatchStatus, DiagnosticBatchV1, FixCandidate, DiagnosticActionIndex,
+    diagnostic_stable_id, batch_status_parse
+}
+
+fn sample_batch() -> DiagnosticBatchV1:
+    DiagnosticBatchV1.new("cmm_lsp", "f:17", "file:///w/a.cmm", 4, "xxh3:00ff", 9)
+
+# @manual_section: diagnostic_batch
+describe "DiagnosticBatchV1 contract":
+    it "derives a stable id from code, file id, node identity and occurrence only":
+        # @req REQ-DIAG-001
+        # @capture(value): ids for the same node at two positions and two occurrences
+        step("Compute the id twice for the same node identity")
+        val first = diagnostic_stable_id("CMM0001", "f:17", "stmt:block0/3", 0)
+        val again = diagnostic_stable_id("CMM0001", "f:17", "stmt:block0/3", 0)
+        expect(first).to_equal(again)
+        step("Change only the occurrence, then only the code")
+        val second_occurrence = diagnostic_stable_id("CMM0001", "f:17", "stmt:block0/3", 1)
+        val other_code = diagnostic_stable_id("CMM0002", "f:17", "stmt:block0/3", 0)
+        expect(second_occurrence == first).to_equal(false)
+        expect(other_code == first).to_equal(false)
+        expect(first.contains("CMM0001")).to_equal(true)
+        expect(first.contains("f:17")).to_equal(true)
+
+    it "names every batch status and parses each name back to the same status":
+        # @req REQ-DIAG-001
+        val all = [BatchStatus.Complete, BatchStatus.PartialRecovery, BatchStatus.Stale,
+                   BatchStatus.Cancelled, BatchStatus.Unsupported, BatchStatus.InternalError]
+        var round_tripped = 0
+        var names: [text] = []
+        # @capture(table): status name -> parsed status
+        step("Round-trip each status through name() and batch_status_parse()")
+        for s in all:
+            names.push(s.name())
+            match batch_status_parse(s.name()):
+                Some(back):
+                    if back.name() == s.name():
+                        round_tripped = round_tripped + 1
+                None:
+                    round_tripped = round_tripped
+        expect(round_tripped).to_equal(6)  # oracle: plan table lists six statuses
+        expect(names.join(",")).to_equal("complete,partial_recovery,stale,cancelled,unsupported,internal_error")
+        step("Reject an unknown status name")
+        expect(batch_status_parse("green").?).to_equal(false)
+
+    it "carries snapshot identity, status and reason into its JSON without losing diagnostics":
+        # @req REQ-DIAG-001
+        val span = Span.new(4, 9, 2, 5)
+        val d1 = DiagnosticV1.error("CMM0001", "unmatched `)`").with_file("a.cmm").with_span(span)
+        val d2 = DiagnosticV1.warning("CMM0100", "unused label").with_file("a.cmm")
+        val id1 = diagnostic_stable_id("CMM0001", "f:17", "stmt:0", 0)
+        val id2 = diagnostic_stable_id("CMM0100", "f:17", "label:L1", 0)
+        var batch = sample_batch()
+        batch = batch.push(id1, d1).push(id2, d2)
+            .with_status(BatchStatus.PartialRecovery, "recovered after statement 3")
+            .with_related_file("inc/common.cmm")
+        # @capture(json): rendered batch
+        step("Render the batch")
+        val rendered = batch.to_json()
+        expect(batch.len()).to_equal(2)  # oracle: two pushes
+        expect(rendered.contains("\"schema_version\":1")).to_equal(true)
+        expect(rendered.contains("\"producer\":\"cmm_lsp\"")).to_equal(true)
+        expect(rendered.contains("\"document_version\":4")).to_equal(true)
+        expect(rendered.contains("\"source_hash\":\"xxh3:00ff\"")).to_equal(true)
+        expect(rendered.contains("\"analysis_generation\":9")).to_equal(true)
+        expect(rendered.contains("\"status\":\"partial_recovery\"")).to_equal(true)
+        expect(rendered.contains("\"incomplete_reason\":\"recovered after statement 3\"")).to_equal(true)
+        expect(rendered.contains("\"related_files\":[\"inc/common.cmm\"]")).to_equal(true)
+        step("Check both diagnostics survive with their ids and codes")
+        expect(rendered.contains("\"id\":\"" + id1 + "\"")).to_equal(true)
+        expect(rendered.contains("\"id\":\"" + id2 + "\"")).to_equal(true)
+        expect(rendered.contains("\"code\":\"CMM0001\"")).to_equal(true)
+        expect(rendered.contains("\"code\":\"CMM0100\"")).to_equal(true)
+        expect(rendered.contains("\"message\":\"unmatched `)`\"")).to_equal(true)
+
+    it "defaults to complete with no reason and tells a fresh snapshot from a stale one":
+        # @req REQ-DIAG-001
+        val batch = sample_batch()
+        # @capture(value): default status and the snapshot match verdicts
+        step("Inspect the defaults")
+        expect(batch.status.name()).to_equal("complete")
+        expect(batch.to_json().contains("\"incomplete_reason\":null")).to_equal(true)
+        step("Compare against the active document version and hash")
+        expect(batch.matches_document(4, "xxh3:00ff")).to_equal(true)
+        expect(batch.matches_document(5, "xxh3:00ff")).to_equal(false)
+        expect(batch.matches_document(4, "xxh3:0100")).to_equal(false)
+
+# @manual_section: diagnostic_action_index
+describe "DiagnosticActionIndex contract":
+    it "keeps candidate order, skips disabled candidates for the legacy projection and reports unknown ids as empty":
+        # @req REQ-DIAG-001
+        val span = Span.new(10, 11, 3, 2)
+        val id = diagnostic_stable_id("CMM0001", "f:17", "stmt:0", 0)
+        val remove = FixCandidate.new("CMM0001:remove", "remove stray `)`", "the token has no opening partner", FixConfidence.Likely, 4)
+            .with_replacement("a.cmm", span, "", ")")
+            .disabled("statement is inside an unreliable recovery region")
+        val insert = FixCandidate.new("CMM0001:open", "insert `(` before the expression", "balances the parenthesis", FixConfidence.Uncertain, 4)
+            .with_replacement("a.cmm", Span.at(6, 3, 1), "(", "")
+        var index = DiagnosticActionIndex.new()
+        index = index.add(id, remove).add(id, insert)
+        # @capture(table): candidates in producer order with their enabled flags
+        step("Read the candidates back in producer order")
+        val candidates = index.candidates_for(id)
+        expect(candidates.len()).to_equal(2)  # oracle: two adds for one diagnostic
+        expect(candidates[0].id).to_equal("CMM0001:remove")
+        expect(candidates[0].is_enabled()).to_equal(false)
+        expect(candidates[0].disabled_reason ?? "").to_equal("statement is inside an unreliable recovery region")
+        expect(candidates[1].is_enabled()).to_equal(true)
+        expect(candidates[0].preconditions[0].expected_text).to_equal(")")
+        expect(candidates[0].affected_files().join(",")).to_equal("a.cmm")
+        step("Project the legacy single fix from the first ENABLED candidate")
+        match index.compat_fix_for(id):
+            Some(fix):
+                expect(fix.id).to_equal("CMM0001:open")
+                expect(fix.confidence.name()).to_equal("uncertain")
+                expect(fix.replacements[0].new_text).to_equal("(")
+            None:
+                expect(false).to_equal(true)
+        step("Ask for a diagnostic the index never saw")
+        expect(index.candidates_for("nope").len()).to_equal(0)  # oracle: unknown id
+        expect(index.compat_fix_for("nope").?).to_equal(false)
+
+    it "renders candidates with confidence, required version, preconditions and disabled reason":
+        # @req REQ-DIAG-001
+        val id = diagnostic_stable_id("MD0003", "f:2", "link:7", 0)
+        val cand = FixCandidate.new("MD0003:retarget", "retarget link", "unique match in vault", FixConfidence.Likely, 12)
+            .with_replacement("notes/a.md", Span.new(40, 52, 5, 9), "[[b]]", "[[old]]")
+            .disabled("two files match")
+        val index = DiagnosticActionIndex.new().add(id, cand)
+        # @capture(json): rendered action index
+        step("Render the action index")
+        val rendered = index.to_json()
+        expect(rendered.contains("\"diagnostic_id\":\"" + id + "\"")).to_equal(true)
+        expect(rendered.contains("\"confidence\":\"likely\"")).to_equal(true)
+        expect(rendered.contains("\"required_document_version\":12")).to_equal(true)
+        expect(rendered.contains("\"expected_text\":\"[[old]]\"")).to_equal(true)
+        expect(rendered.contains("\"disabled_reason\":\"two files match\"")).to_equal(true)
+        expect(rendered.contains("\"new_text\":\"[[b]]\"")).to_equal(true)
