@@ -1,0 +1,69 @@
+# @req REQ-PUBVIEW-001 REQ-PUBVIEW-002 REQ-PUBVIEW-004 REQ-PUBVIEW-006
+# MCP source_open public view on the two-feature x two-layer fixture
+# test/fixtures/mdsoc_pubview: default `public` inside an __init__.spl boundary,
+# every hidden declaration has an omission_ledger row naming its class and the
+# reveal argument, each level reveals exactly the expected extra declaration,
+# and the rendered text carries the in-band hint.
+# design: doc/05_design/app/source_view/public_view_by_feature_layer.md
+use std.spec
+use std.spec.step
+use app.source_view.service.{source_open_result_v1}
+use std.common.json.value.{JsonValue, json_parse_value_strict, json_value_field, json_value_text_or, json_value_items}
+
+val X_CORE = "test/fixtures/mdsoc_pubview/feature_x/10.core/core.spl"
+
+fn open(extra: text) -> JsonValue:
+    val result = source_open_result_v1("{\"path\":\"" + X_CORE + "\",\"mode\":\"outline\"" + extra + "}")
+    json_parse_value_strict(result.payload).unwrap()
+
+fn rendered(payload: JsonValue) -> text:
+    json_value_text_or(json_value_field(payload, "rendered"), "")
+
+fn hidden_rows(payload: JsonValue) -> [JsonValue]:
+    var rows: [JsonValue] = []
+    for row in json_value_items(json_value_field(payload, "omission_ledger")):
+        if json_value_text_or(json_value_field(row, "reason"), "") == "visibility_hidden": rows.push(row)
+    rows
+
+describe "source_open public view":
+    it "defaults to public inside a boundary and hints in the rendered text":
+        # @capture(default): outline of feature_x/10.core/core.spl at the default level
+        val payload = open("")
+        expect(json_value_text_or(json_value_field(payload, "visibility"), "")).to_equal("public")
+        expect(json_value_text_or(json_value_field(payload, "visibility_default"), "")).to_equal("public (mdsoc_boundary)")
+        val text = rendered(payload)
+        expect(text.contains("x_core_api")).to_equal(true)
+        expect(text.contains("x_core_secret")).to_equal(false)
+        expect(text.contains("XCoreType")).to_equal(false)
+        expect(text.contains("⋯ 3 hidden (1 feature_private fn, 1 module_private fn, 1 layer_private type) — reveal: source_open visibility=\"feature_private\"")).to_equal(true)
+        expect(json_value_field(json_value_field(payload, "hidden_summary"), "hidden")).to_equal(JsonValue.Int(3))
+
+    it "every hidden declaration has a ledger row with its class and reveal handle":
+        # @capture(ledger): omission_ledger rows with reason visibility_hidden
+        val rows = hidden_rows(open(""))
+        expect(rows.len()).to_equal(3)
+        var classes: [text] = []
+        for row in rows:
+            classes.push(json_value_text_or(json_value_field(row, "node_name"), "") + ":" + json_value_text_or(json_value_field(row, "visibility_class"), ""))
+            expect(json_value_text_or(json_value_field(json_value_field(row, "reopen"), "visibility"), "")).to_equal(json_value_text_or(json_value_field(row, "visibility_class"), ""))
+        expect(classes).to_equal(["x_core_shared:feature_private", "x_core_secret:module_private", "XCoreType:layer_private"])
+
+    it "each reveal level adds exactly one declaration and `all` hides nothing":
+        step("feature_private")
+        val feature = open(",\"visibility\":\"feature_private\"")
+        expect(rendered(feature).contains("x_core_shared")).to_equal(true)
+        expect(hidden_rows(feature).len()).to_equal(2)
+        step("layer_private")
+        val layer = open(",\"visibility\":\"layer_private\"")
+        expect(rendered(layer).contains("XCoreType")).to_equal(true)
+        expect(hidden_rows(layer).len()).to_equal(1)
+        step("all")
+        val everything = open(",\"visibility\":\"all\"")
+        expect(rendered(everything).contains("x_core_secret")).to_equal(true)
+        expect(hidden_rows(everything).len()).to_equal(0)
+        expect(rendered(everything).contains("⋯")).to_equal(false)
+
+    it "a focused target hidden by visibility is refused with the reveal class":
+        val result = source_open_result_v1("{\"path\":\"" + X_CORE + "\",\"mode\":\"focused\",\"target\":\"x_core_secret\"}")
+        expect(result.payload.contains("target_hidden_by_visibility")).to_equal(true)
+        expect(result.payload.contains("visibility=\\\"module_private\\\"")).to_equal(true)
