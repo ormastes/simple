@@ -1,8 +1,30 @@
 # Seed JIT: ANY-operand lowering gaps block the `ANY` default for unannotated lambda params (2026-11-12)
 
-Status: OPEN. These gaps exist today for any `ANY` value (generic results,
-placeholder lambdas). They become mainstream if an unannotated named lambda
-parameter defaults to `ANY` instead of `I64`, so that change is NOT landed.
+Status: FIXED on `work/jit-any-operand-gaps-20261112`. The four gaps below,
+three more found by a wider sweep, and the lambda-parameter type recovery are
+fixed; the default is flipped in the same stack.
+
+| Commit | What |
+|---|---|
+| `f8c28afd9a5` | array/text index, struct field init, `ANY` + numeric, unary minus |
+| `003762ac439` | range bound (`for i in 0..v`), field assignment (`p.x = v`), numeric cast (`v as f64`) |
+| `3256c1b3ece` | a lambda parameter's own type is used inside its body (`\i: xs[i]`) |
+| `47422985fec` | closure-holding local gets a pointer-sized slot |
+| `b9f9277fe0e` | unannotated lambda params default to `ANY`; declared `ANY` closure boundaries admitted |
+| `c21de391b02` | mutex lock FFI result declared `i64?` (needed once the boundary is admitted) |
+
+After the stack: a 35-shape `any`-parameter operator sweep has no mismatch,
+and a 30-shape integer lambda sweep (each case isolated) matches the old I64
+default with no regression. Tests: `mir::lower::tests::any_operand_gaps`.
+
+Known remaining limit: `v as <integer type>` with `v: any` holding a FLOAT is
+decoded as a tagged integer.
+
+Original report follows.
+
+These gaps existed for any `ANY` value (generic results, placeholder
+lambdas). They become mainstream if an unannotated named lambda parameter
+defaults to `ANY` instead of `I64`.
 
 ## Context
 
