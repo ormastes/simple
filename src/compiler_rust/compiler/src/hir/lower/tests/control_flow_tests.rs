@@ -640,6 +640,36 @@ fn boxed(w: Wrap) -> i64:\n    match w:\n        case Box(Red):\n            ret
     assert_eq!(checks("boxed"), 2, "outer tag + bare variant in the payload slot");
 }
 
+/// Only a UNIT variant name is a variant test in a sub-pattern slot; a bare
+/// payload-variant name there (`case (Int, _)` with `Int(bits)`) is a binder
+/// the arm body can read. At top level a bare payload-variant name stays the
+/// payload-ignoring variant test.
+#[test]
+fn test_bare_payload_variant_name_binds_in_slot_but_tests_at_top_level() {
+    let source = "enum Kind:\n    Int(bits: i64)\n    Str\n\n\
+fn slot(a: Kind, b: Kind) -> Kind:\n    match (a, b):\n        case (Int, _):\n            return Int\n\n\
+fn slot_unit(a: Kind, b: Kind) -> i64:\n    match (a, b):\n        case (Str, _):\n            return 1\n        case _:\n            return 0\n\n\
+fn top(k: Kind) -> i64:\n    match k:\n        case Int:\n            return 1\n        case _:\n            return 0\n";
+    let module = parse_and_lower(source).unwrap();
+    let body = |name: &str| -> String {
+        let func = module
+            .functions
+            .iter()
+            .find(|f| f.name == name)
+            .unwrap_or_else(|| panic!("missing fn {name}"));
+        format!("{:?}", func.body)
+    };
+    let slot = body("slot");
+    assert_eq!(
+        slot.matches("rt_enum_check_variant").count(),
+        0,
+        "payload name in a slot binds: {slot}"
+    );
+    assert!(slot.contains("Let"), "the slot binder must be emitted: {slot}");
+    assert_eq!(body("slot_unit").matches("rt_enum_check_variant").count(), 1);
+    assert_eq!(body("top").matches("rt_enum_check_variant").count(), 1);
+}
+
 #[test]
 fn test_multi_field_enum_payload_keeps_array_type() {
     let source = "enum Payload:\n    Item(text, i64, text)\n\nfn third(value: Payload) -> text:\n    match value:\n        case Payload.Item(_, _, result):\n            return result\n        case _:\n            return \"\"\n";
