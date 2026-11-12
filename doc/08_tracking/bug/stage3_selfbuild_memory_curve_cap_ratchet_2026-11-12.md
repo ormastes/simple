@@ -101,3 +101,28 @@ GiB. Skipping the 34 GiB step, attempt I (run-stage3i.sh) launches with
 ceiling 58720256 / cap 54525952 (52 GiB) when the box is quiet
 (3/4 * MemAvailable >= 56 GiB). Caches are warm (38 aot-*.o + HIR + native
 staged 200), so resume cost is MIR-lower forward progress only.
+
+## Attempt I result #1 (2026-11-13 ~01:14 KST): NOT a cap kill — host-headroom guard
+
+run-stage3i.sh (ceiling 58720256 / cap 54525952) passed the 26 GiB kill point
+cleanly: mir-lower reached 512+ modules, RSS ~35 GiB and climbing, well under
+the 52 GiB cap. It then aborted exit=125
+reason=shutdown-unverified-lock-retained — the runtime headroom watchdog
+(`runtime_reserve_mib=49152`, tied to the 48 GiB stage2 transcript ceiling)
+tripped at MemAvailable=50248520 KiB (~47.9 GiB) because ANOTHER session's
+bootstrap lane (simple-boot-fable, pinned-f8ad54b28467, its own stage3 with a
+40G MemoryMax scope) was building concurrently. Host math: my admitted growth
+(48) + fable's scope (40) + other sessions cannot keep 48 GiB free on a
+121.7 GiB box — the guard is CORRECT to refuse coexistence.
+
+Fail-closed behavior worked as designed: terminate_unit could not prove all
+descendants stopped -> the lane retained build/bootstrap-s3gen.lock and
+exited 125 for operator inspection. Recovery: verified zero surviving
+processes from pinned-df719eff44cf, confirmed the lock pid (965524) dead,
+removed the lock dir, relaunched the same gate script. Atomically published
+cache artifacts (aot objects, staged MIR) remain reusable.
+
+Lesson recorded for future lanes: the exclusive-admission gate (no concurrent
+native-build AT LAUNCH) is necessary but NOT sufficient — the runtime guard
+needs the box to STAY quiet for the whole run. Lanes on a shared host must
+serialize their heavy builds or expect reserve-crossed aborts.
