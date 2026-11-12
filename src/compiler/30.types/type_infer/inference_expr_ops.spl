@@ -14,10 +14,85 @@ use compiler.traits.traits.*
 use type_infer_types.*
 use compiler.semantics.narrowing.*
 use compiler.types.type_infer_types.{HmInferContext}
+use compiler.types.units.unit_ops.{
+    UnitOpVerdict, unit_op_verdict,
+    UNIT_OP_ADD, UNIT_OP_SUB, UNIT_OP_MUL, UNIT_OP_DIV, UNIT_OP_MOD, UNIT_OP_POW,
+    UNIT_OP_CMP, UNIT_OP_BIT, UNIT_OPERAND_INT, UNIT_OPERAND_FLOAT
+}
 
 impl HmInferContext:
+    me unit_gate_operand_name(ty: HirType) -> text:
+        """Matrix spelling of an operand: declared type name, "int"/"float"
+        for raw numerics, "" for anything the unit matrix ignores."""
+        match ty.kind:
+            case Int(_, _): UNIT_OPERAND_INT
+            case Float(_): UNIT_OPERAND_FLOAT
+            case Named(symbol, _):
+                match self.symbol_names.get(symbol.id):
+                    case Some(n): n
+                    case None: ""
+            case _: ""
+
+    me unit_gate_named_type(name: text, span: Span) -> Option<HirType>:
+        for id in self.symbol_names.keys():
+            if self.symbol_names[id] == name:
+                return Some(HirType(kind: HirTypeKind.Named(symbol: SymbolId(id: id), args: []), span: span))
+        None
+
+    me unit_gate_op_class(op: HirBinOp) -> text:
+        match op:
+            case Add: UNIT_OP_ADD
+            case Sub: UNIT_OP_SUB
+            case Mul: UNIT_OP_MUL
+            case Div: UNIT_OP_DIV
+            case Mod: UNIT_OP_MOD
+            case Pow: UNIT_OP_POW
+            case Eq | NotEq | Lt | LtEq | Gt | GtEq: UNIT_OP_CMP
+            case BitAnd | BitOr | BitXor | Shl | Shr: UNIT_OP_BIT
+            case _: ""
+
+    me unit_op_gate(op: HirBinOp, left: HirType, right: HirType, span: Span) -> Option<Result<HirType, TypeInferError>>:
+        """Unit operator gate, consulted BEFORE the numeric fallback.
+
+        Zero cost for raw numerics: the matrix is only asked when at least one
+        resolved operand is a Named type. Declared units get only the
+        operations their role approves (compiler.types.units.unit_ops); an
+        unapproved combination is SPL-UNIT-002. Non-unit Named types fall
+        through to the existing inference (NotUnit)."""
+        val cls = self.unit_gate_op_class(op)
+        if cls == "":
+            return None
+        val l = self.resolve(left)
+        val r = self.resolve(right)
+        val l_named = match l.kind:
+            case Named(_, _): true
+            case _: false
+        val r_named = match r.kind:
+            case Named(_, _): true
+            case _: false
+        if not l_named and not r_named:
+            return None
+        val ln = self.unit_gate_operand_name(l)
+        val rn = self.unit_gate_operand_name(r)
+        match unit_op_verdict(cls, ln, rn):
+            case NotUnit: None
+            case Deny(message): Some(Err(TypeInferError.Other(message: message, span: span)))
+            case Allow(result):
+                if result == "bool":
+                    return Some(Ok(HirType(kind: HirTypeKind.Bool, span: span)))
+                if result == ln:
+                    return Some(Ok(l))
+                if result == rn:
+                    return Some(Ok(r))
+                match self.unit_gate_named_type(result, span):
+                    case Some(t): Some(Ok(t))
+                    case None: Some(Err(TypeInferError.Undefined(name: result, span: span)))
+
     me infer_binary_op(op: HirBinOp, left: HirType, right: HirType, span: Span) -> Result<HirType, TypeInferError>:
         """Infer type of binary operation."""
+        match self.unit_op_gate(op, left, right, span):
+            case Some(verdict): return verdict
+            case None: pass
         match op:
             # Arithmetic: operands same type, return same type
             case Add | Sub | Mul | Div | Mod | Pow:
