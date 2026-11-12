@@ -10,6 +10,7 @@ Configuration files for build, test, packaging, and tooling.
 | `bootstrap.sdn` | Bootstrap configuration |
 | `ci` | CI registries: `components.sdn` (separately built kernels/plugins/SIMD variants, read by scripts/ci/plan-components.shs) |
 | `cef` | CEF (Chromium Embedded Framework) binary-distribution pin (`cef_pin.sdn`) — version + per-platform archive digests for the Chrome render dynlib |
+| `container` | Container images for tooling (`caret_agent.Containerfile`: caret-suite agent image for `cs --container`) |
 | `critical_files.sdn` | Critical file guard configuration |
 | `critical_mode.sdn` | Mission-critical mode: dynamic-acquire lint severity + gpu.backend manifest pin |
 | `di.sdn` | Dependency injection configuration |
