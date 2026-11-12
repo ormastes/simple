@@ -1769,6 +1769,101 @@ impl Lowerer {
     /// The part names deliberately do NOT start with `__module_init_`: every
     /// init-root scan (codegen `find_dynamic_init_func_ids`, the native linker's
     /// constructor scan) must still see only the root, or a part would run twice.
+    /// Give an unannotated module global whose initializer is a method-call
+    /// chain (`var G = Manager.create(..).unwrap()`) the struct/class type the
+    /// initializer evaluates to. Global registration runs before any signature
+    /// is known and typed such a global ANY; a later `G.telemetry()` then had
+    /// no receiver type and was dispatched by bare method name, which codegen
+    /// refuses when two types declare it (`[CODEGEN-AMBIGUOUS-METHOD]`).
+    ///
+    /// Runs after declarations are registered and before any body is lowered.
+    /// Only a struct/class result is adopted: its value is a heap word in an
+    /// ANY slot and in a typed slot alike, so the global's representation and
+    /// its initializer are unchanged. A scalar result keeps ANY (the slot
+    /// stays tagged).
+    fn refine_module_global_types(&mut self, ast_module: &Module) {
+        for item in &ast_module.items {
+            let Node::Let(l) = item else { continue };
+            let (Some(name), Some(value)) = (extract_pattern_name(&l.pattern), l.value.as_ref()) else {
+                continue;
+            };
+            if l.ty.is_some()
+                || extract_pattern_type(&l.pattern).is_some()
+                || self.globals.get(&name) != Some(&TypeId::ANY)
+                || !matches!(value, Expr::MethodCall { .. })
+            {
+                continue;
+            }
+            let Some(declared) = Self::static_call_chain_result_type(ast_module, value) else {
+                continue;
+            };
+            // A name declared by several flattened modules needs the global's
+            // owner to pick the declaration; this pass has none, so leave such
+            // a global ANY rather than bind another module's type.
+            let mut named = Vec::new();
+            Self::collect_type_names(&declared, &mut named);
+            Self::collect_static_receiver_names(value, &mut named);
+            if named.iter().any(|n| self.flatten_struct_owners.contains_key(n)) {
+                continue;
+            }
+            let Ok(ty) = self.resolve_type(&declared) else { continue };
+            if matches!(self.module.types.get(ty), Some(HirType::Struct { .. })) {
+                self.globals.insert(name, ty);
+            }
+        }
+    }
+
+    fn collect_type_names(ty: &ast::Type, out: &mut Vec<String>) {
+        match ty {
+            ast::Type::Simple(name) => out.push(name.clone()),
+            ast::Type::Generic { name, args } => {
+                out.push(name.clone());
+                args.iter().for_each(|arg| Self::collect_type_names(arg, out));
+            }
+            ast::Type::Optional(inner) => Self::collect_type_names(inner, out),
+            _ => {}
+        }
+    }
+
+    fn collect_static_receiver_names(expr: &Expr, out: &mut Vec<String>) {
+        if let Expr::MethodCall { receiver, .. } = expr {
+            match receiver.as_ref() {
+                Expr::Identifier(name) => out.push(name.clone()),
+                inner => Self::collect_static_receiver_names(inner, out),
+            }
+        }
+    }
+
+    /// Declared result type of `Type.method(..)`, optionally followed by
+    /// `.unwrap()` / `.expect(..)` (then the `T` of a declared `Result<T, E>`,
+    /// `Option<T>` or `T?`), read from the declaration in this unit. `None`
+    /// for any other shape or when the method is not declared here.
+    fn static_call_chain_result_type(ast_module: &Module, expr: &Expr) -> Option<ast::Type> {
+        use ast::Type;
+        let Expr::MethodCall { receiver, method, .. } = expr else {
+            return None;
+        };
+        if matches!(method.as_str(), "unwrap" | "expect") {
+            return match Self::static_call_chain_result_type(ast_module, receiver)? {
+                Type::Generic { name, args } if matches!(name.as_str(), "Result" | "Option") => args.into_iter().next(),
+                Type::Optional(inner) => Some(*inner),
+                _ => None,
+            };
+        }
+        let Expr::Identifier(type_name) = receiver.as_ref() else {
+            return None;
+        };
+        let declared = |methods: &[ast::FunctionDef]| {
+            methods.iter().find(|m| &m.name == method).and_then(|m| m.return_type.clone())
+        };
+        ast_module.items.iter().find_map(|item| match item {
+            Node::Class(c) if &c.name == type_name => declared(&c.methods),
+            Node::Struct(s) if &s.name == type_name => declared(&s.methods),
+            Node::Impl(i) if matches!(&i.target_type, Type::Simple(n) if n == type_name) => declared(&i.methods),
+            _ => None,
+        })
+    }
+
     fn lower_dynamic_module_init(&mut self, ast_module: &Module) -> LowerResult<()> {
         let mut chunks: Vec<(FunctionContext, Vec<HirStmt>)> = Vec::new();
         let mut dyn_ctx = FunctionContext::new(TypeId::VOID);
@@ -2254,6 +2349,8 @@ impl Lowerer {
             }
         }
 
+        self.refine_module_global_types(ast_module);
+
         // Second pass: lower function bodies and class/struct methods
         for item in &ast_module.items {
             match item {
@@ -2695,6 +2792,8 @@ impl Lowerer {
         for item in &ast_module.items {
             self.register_declarations_from_node(item)?;
         }
+
+        self.refine_module_global_types(ast_module);
 
         // Second pass: lower function bodies
         for item in &ast_module.items {
