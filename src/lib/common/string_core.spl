@@ -207,6 +207,25 @@ fn str_split(s: text, sep: text) -> [text]:
             result.push(str_slice(s, off, next))
             off = next
         return result
+    # Non-ASCII haystack: the index_of/str_slice loop below converts
+    # code-point indices to byte offsets with a fresh O(n) walk per piece
+    # (rt_slice/rt_text_find), so splitting a large non-ASCII string is
+    # O(n * pieces) and hung the Stage 2 scv_prime cold inventory init
+    # (doc/08_tracking/bug/rt_text_slice_cp_index_quadratic_scv_prime_hang_2026-11-12.md).
+    # Separator hits are byte positions, so one byte walk yields
+    # byte-identical pieces with a single pass over the input.
+    if not text_is_ascii(s):
+        val sb = rt_text_to_bytes(s)
+        val pb = rt_text_to_bytes(sep)
+        val nlb = pb.len()
+        var bstart = 0
+        var bhit = str_byte_find(sb, pb, 0)
+        while bhit >= 0:
+            result.push(rt_bytes_to_text(sb.slice(bstart, bhit)))
+            bstart = bhit + nlb
+            bhit = str_byte_find(sb, pb, bstart)
+        result.push(rt_bytes_to_text(sb.slice(bstart, sb.len())))
+        return result
     # Jump between separators with the native byte search (rt_text_find):
     # one call per piece. A per-byte slice+compare allocated once per input
     # byte and timed out the Stage 2 cold-init inventory (~292 MiB of .spl).
@@ -218,6 +237,30 @@ fn str_split(s: text, sep: text) -> [text]:
         hit = s.index_of(sep, start)
     result.push(str_slice(s, start, rt_string_len(s)))
     result
+
+# First byte offset of `needle` in `hay` at/after `from`; -1 when absent.
+# Byte-exact scan whose inner loop exits on the first-byte mismatch, the same
+# complexity as the memcmp loop inside rt_text_find but with no code-point
+# <-> byte conversion around it (rt_text_find pays an O(n) cp_to_byte for
+# `start` plus an O(hit) byte_to_cp for the answer on non-ASCII text).
+fn str_byte_find(hay: [u8], needle: [u8], from: i64) -> i64:
+    val hl = hay.len()
+    val nl = needle.len()
+    if nl == 0:
+        return if from <= hl: from else: hl
+    var i = from
+    var found = -1
+    while i + nl <= hl and found < 0:
+        var j = 0
+        var matched = true
+        while j < nl and matched:
+            if hay[i + j] != needle[j]:
+                matched = false
+            j = j + 1
+        if matched:
+            found = i
+        i = i + 1
+    found
 
 fn str_join(parts: [text], sep: text) -> text:
     parts.join(sep)
@@ -299,6 +342,7 @@ fn char_from_code_inline(code: i64) -> text:
 # fully covered byte math). The regression spec still asserts the correct
 # end-to-end behavior so this is caught the moment the toolchain gap closes.
 extern fn rt_bytes_to_text(bytes: [u8]) -> text
+extern fn rt_text_to_bytes(s: text) -> [u8]
 
 # UTF-8 encode a single validated codepoint (0..0x10FFFF, non-surrogate) and
 # hand the raw bytes to the runtime byte->text conversion. Mirrors

@@ -2957,6 +2957,26 @@ uint64_t simpleos_fat32_path_read_buffer_addr(void)
     return (uint64_t)(uintptr_t)simpleos_fat32_path_read_buf;
 }
 
+/* Boot-time preload receipt for the merged SSH+ring-3 kernel
+ * (ssh_ring3_entry.spl). The entry pre-reads /FSEXEC.ELF into
+ * simpleos_fat32_path_read_buf BEFORE vmm (exec-time FAT streaming returns 0
+ * post-vmm in that kernel), then calls simpleos_fat32_note_preload_size() so
+ * the exec path can consume the resident bytes instead of re-streaming.
+ * This definition must stay: without it the extern binds to an auto-generated
+ * weak NIL stub (the silent-stub class of
+ * doc/08_tracking/bug/baremetal_entry_closure_class_instantiation_fault_2026-07-06.md). */
+static uint64_t simpleos_fat32_preload_size_state;
+
+void simpleos_fat32_note_preload_size(uint64_t sz)
+{
+    simpleos_fat32_preload_size_state = sz;
+}
+
+uint64_t simpleos_fat32_preload_size(void)
+{
+    return simpleos_fat32_preload_size_state;
+}
+
 static int64_t simpleos_fat32_read_known_app_size_raw(uint64_t app_id)
 {
     const char *name = simpleos_known_app_name(app_id);

@@ -47,6 +47,22 @@ pub fn worker_hir_argument_error_v1(args: [text]) -> text:
         if switches.contains(arg):
             index = index + 1
             continue
+        # `--mode` selects the native output layout; only the two native-build
+        # modes are admitted (`--mode=jit` stays a mixed-route refusal).
+        # build-phase4-direct-product.shs passes `--mode dynload --threads N`.
+        if arg == "--mode" or arg.starts_with("--mode="):
+            var mode = ""
+            var width = 1
+            if arg == "--mode":
+                width = 2
+                if index + 1 < args.len():
+                    mode = args[index + 1]
+            else:
+                mode = arg.substring(7)
+            if mode != "dynload" and mode != "one-binary":
+                return "unsupported HIR worker mode: " + mode
+            index = index + width
+            continue
         var matched = false
         for name in values:
             if arg == name:
@@ -87,7 +103,52 @@ pub fn worker_hir_environment_key_admitted_v1(key: text) -> bool:
         "SIMPLE_MANAGED_PHASE4_SOURCE_AUTHORITY_PATH", "SIMPLE_MANAGED_PHASE4_SOURCE_AUTHORITY_SHA256",
         "SIMPLE_MANAGED_PHASE4_SOURCE_ROOT", "SIMPLE_MANAGED_RUNTIME_AUTHORITY_PATH",
         "SIMPLE_MANAGED_RUNTIME_SNAPSHOT_PATH", "SIMPLE_MANAGED_RUNTIME_SNAPSHOT_SHA256"]
-    admitted.contains(key)
+    admitted.contains(key) or worker_hir_stage3_capsule_environment_keys_v1().contains(key) or
+        worker_hir_tool_build_environment_keys_v1().contains(key)
+
+# Exact launch environment of the Stage 3 capsule: the Stage 3 block of
+# bootstrap-from-scratch.sh / resume-stage3-from-admitted.sh, the transcribed
+# runner (scripts/check/lib/bootstrap-stage3/command-snapshot.shs) and the keys
+# process-tree-rss-watchdog.pl exports to its tree. Until 2026-11-12 the
+# capsule never reached this profile (it was refused on its base before
+# admission), so none of these had been reviewed.
+pub fn worker_hir_stage3_capsule_environment_keys_v1() -> [text]:
+    ["RUST_LOG", "LIBRARY_PATH", "LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING",
+        "MALLOC_ARENA_MAX", "MALLOC_TRIM_THRESHOLD_", "MSYS2_ENV_CONV_EXCL",
+        "SIMPLE_BOOTSTRAP", "SIMPLE_BOOTSTRAP_STAGE3", "SIMPLE_BOOTSTRAP_WHOLE_PROGRAM",
+        "SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256", "SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB",
+        "SIMPLE_BOOTSTRAP_RSS_CAP_MODE", "SIMPLE_BOOTSTRAP_SESSION_ID", "SIMPLE_BOOTSTRAP_SESSION_EXEC",
+        "SIMPLE_BOOTSTRAP_PROCESS_OBSERVER", "SIMPLE_BOOTSTRAP_PROCESS_OBSERVER_SHA256",
+        "SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB", "SIMPLE_FILE_WORKERS",
+        "SIMPLE_ABI_POLICY", "SIMPLE_ABI_ADMISSION_RECEIPT", "SIMPLE_PLUGIN_MANIFEST_POLICY",
+        "SIMPLE_KERNEL_K1_POLICY", "SIMPLE_COVERAGE_CUTOVER_STATE", "SIMPLE_K1_COMPOSITION_SHA256_BEFORE",
+        "SIMPLE_NO_DEPRECATED_WARNINGS", "SIMPLE_STAGE3_STREAMING_SURFACES",
+        "SIMPLE_NATIVE_STAGED_CODEGEN_BATCH", "SIMPLE_NATIVE_GO_TO_END", "SIMPLE_KEEP_SOURCE_CONTENTS",
+        "SIMPLE_MIR_TAG_PROBE", "SIMPLE_FRONTEND_CACHE", "SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_READ",
+        "SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT", "SIMPLE_PACKAGE_INDEX_COLD_INIT",
+        "SIMPLE_SAFETY_PROFILE", "SIMPLE_ASSURANCE_WARNING_PHASE", "SIMPLE_COMPILER_PHASE_PROFILE",
+        "SIMPLE_EVIDENCE_RUN_ID", "SIMPLE_NATIVE_BUILD_TARGET", "SIMPLE_NATIVE_BUILD_THREADS",
+        "SIMPLE_RUNTIME_PATH", "SIMPLE_NATIVE_RUNTIME_BUNDLE",
+        "SIMPLE_WINDOWS_ABI", "CC", "INCLUDE", "LIB", "LIBPATH", "OS"]
+
+# Exact launch environment of the Phase 4 direct product build (the `env -i`
+# block of build-phase4-direct-product.shs plus run-build.shs and
+# run-process-group-timeout.shs) and the phase C tool-build pins
+# (phase-c-backend-commands.shs, product-frontend-policy.shs). Phase C rows
+# additionally inherit the ambient caller environment, which no allowlist can
+# cover; that lane needs a curated `env -i` launch like Phase 4 direct.
+pub fn worker_hir_tool_build_environment_keys_v1() -> [text]:
+    ["SIMPLE_FILE_WORKERS", "SIMPLE_MIR_SHARD_COUNT", "SIMPLE_PARSE_SHARD_WORKER_KB",
+        "SIMPLE_PARSE_SHARD_MAX", "SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB",
+        "SIMPLE_NATIVE_BUILD_RUST", "SIMPLE_BOOTSTRAP_STAGE3", "SIMPLE_BOOTSTRAP_STAGE4",
+        "SIMPLE_NATIVE_BUILD_TARGET", "SIMPLE_NATIVE_BUILD_THREADS", "SIMPLE_NATIVE_RUNTIME_BUNDLE",
+        "SIMPLE_RUNTIME_PATH", "SIMPLE_PROJECT_ROOT", "SIMPLE_CACHE_PROJECT", "SIMPLE_CACHE",
+        "XDG_CACHE_HOME", "SIMPLE_PROCESS_TREE_RSS_SCOPE_GROUP", "SIMPLE_PROCESS_TREE_RSS_DECLARED_JOBS",
+        "SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB", "SIMPLE_BOOTSTRAP_RSS_CAP_MODE",
+        "SIMPLE_PROCESS_TREE_RSS_RECEIPT", "SIMPLE_TOOLCHAINS_ROOT", "SIMPLE_HOST_CONFIG",
+        "SIMPLE_BOOTSTRAP_SESSION_ID", "SIMPLE_BOOTSTRAP_SESSION_EXEC",
+        "SIMPLE_BOOTSTRAP_PROCESS_OBSERVER", "SIMPLE_BOOTSTRAP_PROCESS_OBSERVER_SHA256",
+        "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT"]
 
 pub fn worker_hir_profile_admit_v1(args: [text], entry: text,
         sources: [text], deadline_ms: i64) -> Result<WorkerHirProfileV1, text>:
@@ -120,6 +181,10 @@ pub fn worker_hir_profile_admit_v1(args: [text], entry: text,
         if seen.has(pair.0): return Err("duplicate HIR worker environment key")
         if pair.0 == "SIMPLE_EXECUTION_MODE" and pair.1 != "" and pair.1 != "native":
             return Err("HIR profile requires compiled internal worker dispatch")
+        # A HIR-profile worker belongs to the two-pass route; the per-file unit
+        # lane spawns its own children and never comes through this profile.
+        if pair.0 == "SIMPLE_FILE_WORKERS" and pair.1 != "0":
+            return Err("HIR profile requires SIMPLE_FILE_WORKERS=0")
         seen[pair.0] = true
         bytes = bytes + pair.0.byte_len() + pair.1.byte_len()
         if bytes > 65536: return Err("HIR worker environment exceeds byte bound")

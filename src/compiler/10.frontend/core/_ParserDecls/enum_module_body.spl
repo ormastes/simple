@@ -37,7 +37,7 @@ use compiler.core.types.{TYPE_OPTION, TYPE_OPTION_I64, TYPE_OPTION_F64, TYPE_OPT
 use compiler.core.types.{TYPE_RESULT, TYPE_NAMED_BASE, TYPE_DICT, TYPE_FN, TYPE_ANY}
 use compiler.core.types.{int_to_str, type_tag_name, flat_span_new}
 use compiler.core.types.{named_type_register, named_type_update, named_type_find, custom_primitive_register, named_generic_instance_register}
-use compiler.core.types.{newunit_register}
+use compiler.core.types.{newunit_register, unit_decl_register_origin}
 use compiler.core.types.{primitive_integer_bit_width_from_name, primitive_backing_bits_from_name}
 use compiler.core.types.{custom_primitive_integer_bit_width_by_name, custom_primitive_backing_bits_by_name}
 use compiler.core.parser.{par_kind_get, par_text_get, par_line_get, par_col_get}
@@ -319,6 +319,44 @@ fn parse_macro_decl(visibility: text):
 # `resource: text` fields in 85.mdsoc/weaving/join_point_kind.spl, ...),
 # including inside the compiler's own source -- a hard keyword would break the
 # compiler's own rebuild. Recognition is declaration-start position only.
+# `unit Name: T [as suffix]` is recognised contextually: the identifier `unit`
+# followed (after inline whitespace) by an identifier start. `unit` stays a
+# plain identifier everywhere else, including `-> unit` return types, so no
+# keyword is added and the lookahead is one character scan.
+fn current_ident_is_unit_decl() -> bool:
+    val pos = lex_skip_inline_ws_after_token()
+    if pos < 0:
+        return false
+    is_ident_start_char(lex_source_char_at(pos))
+
+fn unit_decl_inner_is_numeric(inner_type: i64) -> bool:
+    val n = type_tag_name(inner_type)
+    if n == "i64" or n == "i32" or n == "i16" or n == "i8":
+        return true
+    if n == "u64" or n == "u32" or n == "u16" or n == "u8":
+        return true
+    if n == "f64" or n == "f32" or n == "Int" or n == "Float":
+        return true
+    false
+
+# One lowering for `unit`, `newunit`, and numeric `newtype`: a single-field
+# struct (`value`) plus a canonical UnitDecl row. `legacy_origin` is "" for the
+# canonical spelling, else the deprecated keyword that produced the row.
+fn parser_lower_unit_decl(name: text, inner_type: i64, suffix: text, legacy_origin: text):
+    named_type_register(name, ["value"], [inner_type])
+    custom_primitive_register(name, inner_type)
+    if legacy_origin == "newunit":
+        newunit_register(name, suffix, inner_type)
+    else:
+        unit_decl_register_origin(name, "nominal", suffix, inner_type, "", legacy_origin)
+    val field_names: [text] = ["value"]
+    val field_types: [i64] = [inner_type]
+    val field_defaults: [i64] = [-1]
+    val field_bits: [i64] = [-1]
+    val d = decl_struct_def(name, field_names, field_types, field_defaults, field_bits, 0)
+    module_add_decl(d)
+    parser_reset_pending_vhdl_decorators()
+
 fn current_ident_is_resource_decl() -> bool:
     val pos = lex_skip_inline_ws_after_token()
     if pos < 0:
@@ -2034,10 +2072,26 @@ fn parse_module_body():
                 # which dispatches via the full elif chain (fn, use, struct, val, etc.).
                 # Multiple stacked annotations also work: each loop iteration consumes one @.
                 pass_dn
+        elif par_kind_get() == 6 and par_text_get() == "unit" and current_ident_is_unit_decl():
+            # unit ByteCount: u64 as Bc -- canonical nominal unit declaration.
+            # `as suffix` is optional; a suffix-less unit is full-name-only in
+            # the registry. No deprecation warning for the canonical spelling.
+            parser_advance()
+            val u_name = par_text_get()
+            parser_expect(6)
+            parser_expect(161)
+            val u_inner = parser_parse_type()
+            var u_suffix = ""
+            if par_kind_get() == TOK_KW_AS:
+                parser_advance()
+                u_suffix = par_text_get()
+                parser_expect(6)
+            parser_lower_unit_decl(u_name, u_inner, u_suffix, "")
         elif par_kind_get() == 219:
-            # newunit UserId: i64 as uid -- nominal ABI-transparent wrapper.
-            # The suffix is accepted by this frontend for syntax parity; runtime
-            # suffix literal registration is handled by the Rust unit parser path.
+            # newunit UserId: i64 as uid -- deprecated spelling of `unit`.
+            # Lowers into the same canonical record (legacy_origin "newunit")
+            # and raises SPL-UNIT-001 as a WARNING; it is never rejected.
+            parser_warn("SPL-UNIT-001: `newunit` is deprecated; declare `unit Name: T as suffix` instead")
             parser_advance()
             val nt_name = par_text_get()
             parser_expect(6)
@@ -2049,17 +2103,7 @@ fn parse_module_body():
                 parser_error("expected 'as' in newunit declaration")
             val suffix_name = par_text_get()
             parser_expect(6)
-            pass_dn
-            named_type_register(nt_name, ["value"], [inner_type])
-            custom_primitive_register(nt_name, inner_type)
-            newunit_register(nt_name, suffix_name, inner_type)
-            val nt_field_names: [text] = ["value"]
-            val nt_field_types: [i64] = [inner_type]
-            val nt_field_defaults: [i64] = [-1]
-            val nt_field_bits: [i64] = [-1]
-            val nt_d = decl_struct_def(nt_name, nt_field_names, nt_field_types, nt_field_defaults, nt_field_bits, 0)
-            module_add_decl(nt_d)
-            parser_reset_pending_vhdl_decorators()
+            parser_lower_unit_decl(nt_name, inner_type, suffix_name, "newunit")
         elif par_kind_get() == 198:
             # newtype Meters = i64 -- wrapper struct with single 'value' field
             # For numeric inner types, auto-derives __add__, __sub__, __mul__, __div__, __eq__, __lt__, __gt__
@@ -2069,42 +2113,23 @@ fn parse_module_body():
             parser_expect(100)
             val inner_type = parser_parse_type()
             # Pre-register newtype so type references resolve (same as parse_struct_decl)
-            pass_dn
-            named_type_register(nt_name, ["value"], [inner_type])
-            custom_primitive_register(nt_name, inner_type)
-            val nt_field_names: [text] = ["value"]
-            val nt_field_types: [i64] = [inner_type]
-            val nt_field_defaults: [i64] = [-1]
-            val nt_field_bits: [i64] = [-1]
-            val nt_d = decl_struct_def(nt_name, nt_field_names, nt_field_types, nt_field_defaults, nt_field_bits, 0)
-            module_add_decl(nt_d)
-            parser_reset_pending_vhdl_decorators()
-
-            # Check if inner type is numeric — auto-derive operator methods
-            val inner_name = type_tag_name(inner_type)
-            val is_i64: bool = inner_name == "i64"
-            val is_i32: bool = inner_name == "i32"
-            val is_i16: bool = inner_name == "i16"
-            val is_i8: bool = inner_name == "i8"
-            val is_u64: bool = inner_name == "u64"
-            val is_u32: bool = inner_name == "u32"
-            val is_u16: bool = inner_name == "u16"
-            val is_u8: bool = inner_name == "u8"
-            val is_f64: bool = inner_name == "f64"
-            val is_f32: bool = inner_name == "f32"
-            val is_int: bool = inner_name == "Int"
-            val is_float: bool = inner_name == "Float"
-            val is_numeric_a: bool = is_i64 or is_i32
-            val is_numeric_b: bool = is_i16 or is_i8
-            val is_numeric_c: bool = is_u64 or is_u32
-            val is_numeric_d: bool = is_u16 or is_u8
-            val is_numeric_e: bool = is_f64 or is_f32
-            val is_numeric_f: bool = is_int or is_float
-            val is_numeric_ab: bool = is_numeric_a or is_numeric_b
-            val is_numeric_cd: bool = is_numeric_c or is_numeric_d
-            val is_numeric_ef: bool = is_numeric_e or is_numeric_f
-            val is_numeric_abcd: bool = is_numeric_ab or is_numeric_cd
-            val is_numeric: bool = is_numeric_abcd or is_numeric_ef
+            val is_numeric: bool = unit_decl_inner_is_numeric(inner_type)
+            if is_numeric:
+                # A numeric newtype is a unit in compat mode: same canonical
+                # record (legacy_origin "newtype"), own warning code, and its
+                # auto-derived operators are kept (never silently dropped).
+                parser_warn("SPL-UNIT-003: numeric `newtype` auto-derives arithmetic; migrate to `unit " + nt_name + ": " + type_tag_name(inner_type) + " as <suffix>` and declare approved operators")
+                parser_lower_unit_decl(nt_name, inner_type, "", "newtype")
+            else:
+                named_type_register(nt_name, ["value"], [inner_type])
+                custom_primitive_register(nt_name, inner_type)
+                val nt_field_names: [text] = ["value"]
+                val nt_field_types: [i64] = [inner_type]
+                val nt_field_defaults: [i64] = [-1]
+                val nt_field_bits: [i64] = [-1]
+                val nt_d = decl_struct_def(nt_name, nt_field_names, nt_field_types, nt_field_defaults, nt_field_bits, 0)
+                module_add_decl(nt_d)
+                parser_reset_pending_vhdl_decorators()
 
             if is_numeric:
                 # Resolve the newtype's type tag for return types

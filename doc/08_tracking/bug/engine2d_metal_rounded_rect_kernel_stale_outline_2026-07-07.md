@@ -112,3 +112,30 @@ dispatch state instead of leaving the op unrepresented.
   reproduces identically on the unmodified base commit — pre-existing,
   unrelated to this fix).
 
+
+## 2026-11-12 fix attempt (release/1.0.0 source verification)
+
+Re-checked on `release/1.0.0` (7a06b4aafd5). The FILL fix is present and has
+since been superseded by a stronger implementation, with the rationale
+recorded in the kernel source itself:
+
+- `kernel_draw_rounded_rect` (`backend_metal_msl.spl:598-700`) is a genuine
+  FILL with 2D dispatch over the `[0,w) x [0,h)` bounding box, now expressing
+  the SHARED ROUNDED-RECT CORNER COVERAGE FORMULA v1 (2026-09-12): seven
+  disjoint regions, per-pixel coverage via `_rr_cov256` (integer Newton
+  `isqrt`, not `metal::sqrt`), alpha-modulated `blend_src_over`. The comment
+  explicitly documents why it superseded the 2026-07-07 seven-primitives-in-
+  order replay (overlapping footprints made alpha<255 fills order-dependent).
+- `MetalBackend.capability()` pushes `OP_DRAW_ROUNDED_RECT` gated on
+  `session.pipe_rounded_rect != 0` (`backend_metal.spl:932-934`) — the
+  "device present AND pipeline actually compiled" honesty signal.
+- The independent Simple-level formula oracle context
+  ("Rounded-rect FILL parity fix (2026-07-07, AA'd 2026-09-12)") is present
+  in `test/02_integration/rendering/engine2d_shared_raster_parity_spec.spl`,
+  and the `rounded_rect` scene is asserted by
+  `engine2d_cpu_metal_parity_run.spl` on this branch.
+
+Verification status: **fixed-unverified** — mechanism confirmed in source;
+native bit-exact re-run of
+`check-engine2d-cpu-metal-parity-evidence.shs` /
+`check-engine2d-gpu-offload-evidence.shs` pending the admitted compiler.

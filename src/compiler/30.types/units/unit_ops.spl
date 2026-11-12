@@ -1,0 +1,223 @@
+# Unit operator matrix — the single verdict table shared by the compiler's
+# type-inference gate (inference_expr_ops.spl) and the interpreter's binary
+# dispatch (src/app/interpreter/expr/arithmetic.spl).
+#
+# Policy (unified unit plan 2026-11-12, section 3.1 and decision 7): a new
+# nominal unit gets NO implicit arithmetic. Only the operations approved by
+# its declared role are allowed; every other combination is denied with the
+# stable code SPL-UNIT-002. Severity mapping is owned by the diagnostic policy
+# (lane U1); this module only decides allow/deny and the result identity.
+#
+# Facts come from the canonical UnitDecl pool (compiler.core.types):
+#   role "nominal"  — a count/quantity: U+U -> U, U-U -> U, U*int -> U,
+#                     int*U -> U, U/int -> U, U/U denied (ratio not enabled),
+#                     comparisons -> bool. No U+int, no U-int.
+#   role "point"    — an absolute position whose delta type is `alias_of`
+#                     (Timestamp with Duration, ByteOffset with ByteCount):
+#                     P-P -> D, P+D -> P, D+P -> P, P-D -> P, P+P denied,
+#                     comparisons -> bool, no scalar arithmetic.
+#   role "index"    — ordering only: comparisons -> bool, all arithmetic denied.
+#   role "alias"    — resolves to its target before the rules above.
+#   legacy_origin "newtype" — compat mode: the auto-derived +,-,*,/ between
+#                     two values of the SAME newtype stay allowed (never
+#                     silently dropped); mixing with anything else is denied.
+# Bitwise, modulo, and power on any unit are denied unless a later wave
+# declares them.
+
+use compiler.core.types.{
+    unit_decl_find, unit_decl_role_at, unit_decl_alias_of_at, unit_decl_legacy_origin_at
+}
+
+# Operator classes understood by the matrix. Callers map their own operator
+# enums onto these names so the table has one spelling.
+val UNIT_OP_ADD: text = "add"
+val UNIT_OP_SUB: text = "sub"
+val UNIT_OP_MUL: text = "mul"
+val UNIT_OP_DIV: text = "div"
+val UNIT_OP_MOD: text = "mod"
+val UNIT_OP_POW: text = "pow"
+val UNIT_OP_CMP: text = "cmp"      # == != < <= > >=
+val UNIT_OP_BIT: text = "bit"      # & | ^ << >>
+
+# Operand spellings for non-unit operands.
+val UNIT_OPERAND_INT: text = "int"
+val UNIT_OPERAND_FLOAT: text = "float"
+
+enum UnitOpVerdict:
+    NotUnit                   # neither operand is a declared unit: numeric fallback applies
+    Allow(result: text)       # result type name; "bool" for comparisons
+    Deny(message: text)       # SPL-UNIT-002 message
+
+pub fn unit_op_is_unit(name: text) -> bool:
+    unit_decl_find(name) >= 0
+
+fn unit_op_resolve_alias(name: text) -> text:
+    var cur = name
+    var hops = 0
+    while hops < 8:
+        val idx = unit_decl_find(cur)
+        if idx < 0:
+            return cur
+        if unit_decl_role_at(idx) != "alias":
+            return cur
+        val target = unit_decl_alias_of_at(idx)
+        if target == "" or target == cur:
+            return cur
+        cur = target
+        hops = hops + 1
+    cur
+
+fn unit_op_role(name: text) -> text:
+    val idx = unit_decl_find(name)
+    if idx < 0:
+        return ""
+    unit_decl_role_at(idx)
+
+fn unit_op_delta(name: text) -> text:
+    val idx = unit_decl_find(name)
+    if idx < 0:
+        return ""
+    unit_decl_alias_of_at(idx)
+
+fn unit_op_is_legacy_newtype(name: text) -> bool:
+    val idx = unit_decl_find(name)
+    if idx < 0:
+        return false
+    unit_decl_legacy_origin_at(idx) == "newtype"
+
+fn unit_op_is_scalar(name: text) -> bool:
+    name == UNIT_OPERAND_INT or name == UNIT_OPERAND_FLOAT
+
+fn unit_op_deny(op: text, lhs: text, rhs: text, why: text) -> UnitOpVerdict:
+    UnitOpVerdict.Deny("SPL-UNIT-002: `" + lhs + " " + op + " " + rhs + "` is not an approved unit operation: " + why)
+
+pub fn unit_op_verdict(op: text, lhs_in: text, rhs_in: text) -> UnitOpVerdict:
+    """Decide whether `lhs op rhs` is approved and what identity it yields.
+
+    `lhs_in`/`rhs_in` are type names: a declared unit name, "int"/"float" for
+    raw numerics, or anything else (treated as a non-unit). The verdict is a
+    pure function of the UnitDecl pool, so the compiler and the interpreter
+    cannot disagree."""
+    val lhs = unit_op_resolve_alias(lhs_in)
+    val rhs = unit_op_resolve_alias(rhs_in)
+    val lu = unit_op_is_unit(lhs)
+    val ru = unit_op_is_unit(rhs)
+    if not lu and not ru:
+        return UnitOpVerdict.NotUnit
+    if op == UNIT_OP_BIT:
+        return unit_op_deny(op, lhs, rhs, "bitwise operators are not defined on units")
+    if op == UNIT_OP_MOD or op == UNIT_OP_POW:
+        return unit_op_deny(op, lhs, rhs, "modulo and power are not defined on units")
+
+    # Compat: a numeric newtype keeps its auto-derived operators with itself.
+    if lu and ru and lhs == rhs and unit_op_is_legacy_newtype(lhs):
+        if op == UNIT_OP_CMP:
+            return UnitOpVerdict.Allow("bool")
+        return UnitOpVerdict.Allow(lhs)
+
+    if lu and ru:
+        val lrole = unit_op_role(lhs)
+        val rrole = unit_op_role(rhs)
+        if lhs == rhs:
+            if op == UNIT_OP_CMP:
+                return UnitOpVerdict.Allow("bool")
+            if lrole == "nominal":
+                if op == UNIT_OP_ADD or op == UNIT_OP_SUB:
+                    return UnitOpVerdict.Allow(lhs)
+                if op == UNIT_OP_DIV:
+                    return unit_op_deny(op, lhs, rhs, "unit/unit ratio is not enabled for `" + lhs + "`")
+                return unit_op_deny(op, lhs, rhs, "a count times a count has no declared dimension")
+            if lrole == "point":
+                if op == UNIT_OP_SUB:
+                    val d = unit_op_delta(lhs)
+                    if d == "":
+                        return unit_op_deny(op, lhs, rhs, "point `" + lhs + "` declares no delta type")
+                    return UnitOpVerdict.Allow(d)
+                return unit_op_deny(op, lhs, rhs, "two absolute positions cannot be combined; subtract them to get a delta")
+            return unit_op_deny(op, lhs, rhs, "role `" + lrole + "` permits comparison only")
+        # Different units: only point/delta pairs are approved.
+        if lrole == "point" and unit_op_delta(lhs) == rhs:
+            if op == UNIT_OP_ADD or op == UNIT_OP_SUB:
+                return UnitOpVerdict.Allow(lhs)
+            return unit_op_deny(op, lhs, rhs, "a point and its delta combine only by + or -")
+        if rrole == "point" and unit_op_delta(rhs) == lhs:
+            if op == UNIT_OP_ADD:
+                return UnitOpVerdict.Allow(rhs)
+            return unit_op_deny(op, lhs, rhs, "a delta and a point combine only by +")
+        return unit_op_deny(op, lhs, rhs, "distinct units never mix implicitly")
+
+    # Exactly one unit operand.
+    val unit_name = if lu: lhs else: rhs
+    val other = if lu: rhs else: lhs
+    if not unit_op_is_scalar(other):
+        return unit_op_deny(op, lhs, rhs, "`" + other + "` is not a unit or a scalar")
+    val role = unit_op_role(unit_name)
+    if role != "nominal":
+        return unit_op_deny(op, lhs, rhs, "role `" + role + "` has no scalar arithmetic")
+    if op == UNIT_OP_MUL:
+        return UnitOpVerdict.Allow(unit_name)
+    if op == UNIT_OP_DIV and lu:
+        return UnitOpVerdict.Allow(unit_name)
+    if op == UNIT_OP_CMP:
+        return unit_op_deny(op, lhs, rhs, "comparing a unit with a raw scalar needs an explicit conversion")
+    unit_op_deny(op, lhs, rhs, "no implicit arithmetic between a unit and a raw scalar; convert explicitly")
+
+# ---------------------------------------------------------------------------
+# Value-level evaluation (interpreter side). Integer payloads only; the result
+# identity is the matrix verdict. Overflow is checked so a denied-overflow can
+# never reach unchecked arithmetic.
+# ---------------------------------------------------------------------------
+
+enum UnitValueResult:
+    Value(type_name: text, value: i64)
+    Truth(value: bool)
+    Error(message: text)
+    Fallthrough                          # NotUnit: the caller's numeric path applies
+
+fn unit_value_checked(op: text, l: i64, r: i64) -> Option<i64>:
+    if op == UNIT_OP_ADD:
+        val s = l + r
+        if (r > 0 and s < l) or (r < 0 and s > l):
+            return None
+        return Some(s)
+    if op == UNIT_OP_SUB:
+        val s = l - r
+        if (r > 0 and s > l) or (r < 0 and s < l):
+            return None
+        return Some(s)
+    if op == UNIT_OP_MUL:
+        if l == 0 or r == 0:
+            return Some(0)
+        val p = l * r
+        if p / r != l:
+            return None
+        return Some(p)
+    if op == UNIT_OP_DIV:
+        if r == 0:
+            return None
+        return Some(l / r)
+    None
+
+pub fn unit_value_binop(op: text, cmp_kind: text, lhs_type: text, lhs: i64, rhs_type: text, rhs: i64) -> UnitValueResult:
+    """Evaluate `lhs op rhs` on unit-tagged integer payloads.
+
+    `op` is a UNIT_OP_* class; for UNIT_OP_CMP, `cmp_kind` is one of
+    "eq","ne","lt","le","gt","ge" (ignored otherwise)."""
+    match unit_op_verdict(op, lhs_type, rhs_type):
+        case NotUnit:
+            UnitValueResult.Fallthrough
+        case Deny(message):
+            UnitValueResult.Error(message)
+        case Allow(result):
+            if op == UNIT_OP_CMP:
+                var t = false
+                if cmp_kind == "eq": t = lhs == rhs
+                elif cmp_kind == "ne": t = lhs != rhs
+                elif cmp_kind == "lt": t = lhs < rhs
+                elif cmp_kind == "le": t = lhs <= rhs
+                elif cmp_kind == "gt": t = lhs > rhs
+                elif cmp_kind == "ge": t = lhs >= rhs
+                return UnitValueResult.Truth(t)
+            match unit_value_checked(op, lhs, rhs):
+                case Some(v): UnitValueResult.Value(result, v)
+                case None: UnitValueResult.Error("SPL-UNIT-002: `" + lhs_type + " " + op + " " + rhs_type + "` overflowed or divided by zero; use a checked helper")

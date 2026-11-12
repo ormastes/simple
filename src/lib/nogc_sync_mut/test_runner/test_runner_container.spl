@@ -2,6 +2,7 @@
 # Process arguments remain separate values; this module never invokes a shell.
 
 use std.nogc_sync_mut.io.process_ops.process_run
+use std.io_runtime.{getpid, process_run_timeout}
 use std.nogc_sync_mut.io.file_ops.file_exists
 use std.nogc_sync_mut.io_runtime.time_now_monotonic_ms
 
@@ -56,6 +57,71 @@ fn container_check_image(image: text, runtime: text) -> bool:
     val result = process_run(runtime, ["image", "inspect", image])
     result.2 == 0
 
+pub const CONTAINER_TEST_DEFAULT_TIMEOUT_MS_V1: i64 = 600000
+
+fn container_test_name_valid_v1(name: text) -> bool:
+    """Engine container name: 1..63 of [A-Za-z0-9_.-], alphanumeric first."""
+    if name.len() < 1 or name.len() > 63: return false
+    for index in 0..name.len():
+        val byte = name.byte_at(index)
+        val alnum = (byte >= 48 and byte <= 57) or (byte >= 65 and byte <= 90) or (byte >= 97 and byte <= 122)
+        if index == 0 and not alnum: return false
+        if not alnum and byte != 95 and byte != 46 and byte != 45: return false
+    true
+
+pub fn container_test_named_argv_v1(argv: [text], name: text) -> Result<[text], text>:
+    """Insert `--name <name>` after `run --rm` so the container can be reaped by exact name."""
+    if argv.len() < 2 or argv[0] != "run" or argv[1] != "--rm": return Err("invalid-container-run-argv")
+    if not container_test_name_valid_v1(name): return Err("invalid-container-name")
+    var named = ["run", "--rm", "--name", name]
+    var index = 2
+    while index < argv.len():
+        named.push(argv[index])
+        index = index + 1
+    Ok(named)
+
+pub fn container_test_reap_argv_v1(name: text) -> [text]:
+    ["rm", "--force", "--volumes", name]
+
+pub fn container_test_absent_argv_v1(name: text) -> [text]:
+    ["container", "inspect", name]
+
+fn container_test_host_runner_v1(runtime: text, args: [text], timeout_ms: i64) -> (text, text, i64):
+    val result = process_run_timeout(runtime, args, timeout_ms)
+    (result.0, result.1, result.2 as i64)
+
+pub fn container_run_test_bounded_v1(test_file: text, runtime: text, image: text, memory_mb: i64,
+        cpu_count: f64, network: text, readonly: bool, workspace: text, name: text, timeout_ms: i64,
+        runner: fn(text, [text], i64) -> (text, text, i64)) -> (text, text, i64, i64):
+    """
+    Bounded run with a kill path. The engine client is killed at `timeout_ms`;
+    the container it started outlives the client (`--rm` only fires on a normal
+    exit), so it is force-removed by exact name after EVERY outcome and its
+    absence is checked. A container that cannot be proven gone is an error.
+    """
+    if not container_runtime_supported_v1(runtime):
+        return ("", "Unsupported container runtime: {runtime}", 1, 0)
+    if timeout_ms <= 0:
+        return ("", "invalid-container-timeout", 1, 0)
+    val base = container_test_argv_v1(test_file, image, memory_mb, cpu_count, network, readonly, workspace)
+    if base.is_err():
+        return ("", base.unwrap_err(), 1, 0)
+    val argv = container_test_named_argv_v1(base.unwrap(), name)
+    if argv.is_err():
+        return ("", argv.unwrap_err(), 1, 0)
+    val start_time = time_now_ms()
+    if start_time < 0:
+        return ("", "Container monotonic clock unavailable", 1, 0)
+    val result = runner(runtime, argv.unwrap(), timeout_ms)
+    val end_time = time_now_ms()
+    val removed = runner(runtime, container_test_reap_argv_v1(name), 30000)
+    val probe = runner(runtime, container_test_absent_argv_v1(name), 30000)
+    if end_time < start_time:
+        return (result.0, result.1 + "\nContainer monotonic clock failed", 1, 0)
+    if probe.2 == 0:
+        return (result.0, result.1 + "\nContainer {name} still present after forced removal", 1, end_time - start_time)
+    (result.0, result.1, result.2, end_time - start_time)
+
 fn container_run_test(
     test_file: text,
     runtime: text,
@@ -66,20 +132,10 @@ fn container_run_test(
     readonly: bool,
     workspace: text
 ) -> (text, text, i64, i64):
-    """Return stdout, stderr, exit code and elapsed ms. Clock failures are errors."""
-    if not container_runtime_supported_v1(runtime):
-        return ("", "Unsupported container runtime: {runtime}", 1, 0)
-    val argv = container_test_argv_v1(test_file, image, memory_mb, cpu_count, network, readonly, workspace)
-    if argv.is_err():
-        return ("", argv.unwrap_err(), 1, 0)
-    val start_time = time_now_ms()
-    if start_time < 0:
-        return ("", "Container monotonic clock unavailable", 1, 0)
-    val result = process_run(runtime, argv.unwrap())
-    val end_time = time_now_ms()
-    if end_time < start_time:
-        return (result.0, result.1 + "\nContainer monotonic clock failed", 1, 0)
-    (result.0, result.1, result.2, end_time - start_time)
+    """Return stdout, stderr, exit code and elapsed ms; bounded by the default timeout."""
+    val name = "simple-test-" + getpid().to_text() + "-" + time_now_ms().to_text()
+    container_run_test_bounded_v1(test_file, runtime, image, memory_mb, cpu_count, network, readonly,
+        workspace, name, CONTAINER_TEST_DEFAULT_TIMEOUT_MS_V1, container_test_host_runner_v1)
 
 fn container_build_test_image(runtime: text, dockerfile_path: text, image_name: text) -> bool:
     if not container_runtime_supported_v1(runtime):
