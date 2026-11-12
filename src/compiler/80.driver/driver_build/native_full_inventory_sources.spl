@@ -16,6 +16,8 @@ use std.scv.compile_source_inventory_core.{
     compile_source_inventory_digest_v1
 }
 use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded}
+use std.io_runtime.{dir_exists, file_exists}
+use compiler.driver.driver_build.native_entry_closure_receipt.{native_entry_closure_root_valid_v1}
 
 val NATIVE_FULL_INVENTORY_MAX_SOURCES_V1: i64 = 20000
 
@@ -54,10 +56,12 @@ fn native_cold_entry_plain_spelling_v1(path: text) -> text:
         return plain
     path
 
-# Cold entry closure must open the same frozen source named by the SCV
-# inventory. Preserve the caller's logical entry separately for module lookup.
-fn native_cold_entry_snapshot_path_v1(
-    snapshot_root: text, checkout_root: text, requested_entry: text
+# THE checkout/snapshot spelling -> repository-relative identity mapping.
+# Every cold-path spelling that must open the frozen tree (the entry AND the
+# closure source roots) goes through this one function, so a file is never
+# admitted under both `<snapshot>/src/...` and the live `src/...` spelling.
+fn native_cold_snapshot_identity_v1(
+    snapshot_root: text, checkout_root: text, path: text
 ) -> Result<text, text>:
     if snapshot_root == "" or snapshot_root.ends_with("/") or
             checkout_root == "" or checkout_root.ends_with("/"):
@@ -65,7 +69,7 @@ fn native_cold_entry_snapshot_path_v1(
     # Windows: the cwd reads back as C:\... while argv carries C:/..., so
     # compare both in the plain forward-slash spelling SCV already uses.
     val checkout = native_cold_entry_plain_spelling_v1(checkout_root)
-    var identity = native_cold_entry_plain_spelling_v1(requested_entry)
+    var identity = native_cold_entry_plain_spelling_v1(path)
     val snapshot = native_cold_entry_plain_spelling_v1(snapshot_root)
     if checkout == "" or identity == "" or snapshot == "":
         return Err("cold-entry-source-identity-invalid")
@@ -77,10 +81,51 @@ fn native_cold_entry_snapshot_path_v1(
         return Err("cold-entry-source-identity-invalid")
     while identity.starts_with("./"):
         identity = identity.substring(2, identity.len())
+    while identity.len() > 1 and identity.ends_with("/"):
+        identity = identity.substring(0, identity.len() - 1)
+    Ok(identity)
+
+# Cold entry closure must open the same frozen source named by the SCV
+# inventory. Preserve the caller's logical entry separately for module lookup.
+fn native_cold_entry_snapshot_path_v1(
+    snapshot_root: text, checkout_root: text, requested_entry: text
+) -> Result<text, text>:
+    val identity = native_cold_snapshot_identity_v1(
+        snapshot_root, checkout_root, requested_entry)?
     if not compile_source_inventory_path_valid_v1(identity) or
             not identity.ends_with(".spl"):
         return Err("cold-entry-source-identity-invalid")
     Ok("{snapshot_root}/{identity}")
+
+# A closure source root (`src/app`, a file root, or an already-frozen
+# spelling) rebased onto the same frozen tree as the cold entry. Without this
+# a walk seeded with the frozen entry resolved qualified imports through the
+# LIVE `--source` roots while importer-relative imports stayed frozen, and the
+# same file was admitted twice (`native module name collision`).
+fn native_cold_source_root_snapshot_path_v1(
+    snapshot_root: text, checkout_root: text, root: text
+) -> Result<text, text>:
+    val identity = native_cold_snapshot_identity_v1(
+        snapshot_root, checkout_root, root)?
+    if not native_entry_closure_root_valid_v1(identity):
+        return Err("cold-source-root-identity-invalid")
+    Ok("{snapshot_root}/{identity}")
+
+# Rebase every closure root the frozen tree contains. A root with no frozen
+# copy (outside the inventory families) holds no file that could also be
+# reached under a snapshot spelling, so it is kept as given.
+fn native_cold_source_roots_snapshot_v1(
+    snapshot_root: text, checkout_root: text, roots: [text]
+) -> [text]:
+    var rebased: [text] = []
+    for root in roots:
+        var selected = root
+        match native_cold_source_root_snapshot_path_v1(snapshot_root, checkout_root, root):
+            case Ok(frozen):
+                if dir_exists(frozen) or file_exists(frozen): selected = frozen
+            case Err(_): ()
+        rebased = rebased.push(selected)
+    rebased
 
 # Pure join seam for focused coverage. Every indexed .spl must occur in the
 # admitted SCV compile inventory with the same SHA and byte count; no source
@@ -210,4 +255,4 @@ export NATIVE_FULL_INVENTORY_MAX_SOURCES_V1
 export NativeFullInventorySourcesV1
 export native_full_inventory_select_v1, native_full_inventory_source_paths_v1
 export native_full_inventory_requires_cold_index_v1
-export native_cold_entry_snapshot_path_v1
+export native_cold_entry_snapshot_path_v1, native_cold_source_root_snapshot_path_v1, native_cold_source_roots_snapshot_v1
