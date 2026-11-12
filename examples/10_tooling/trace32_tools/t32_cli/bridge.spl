@@ -3,19 +3,10 @@
 # Shared execution layer connecting CLI commands to MCP tool logic
 # without JSON-RPC framing. All functions return Result<T32BridgeResult, text>.
 
-use std.io_runtime.{read_file}
-use app.t32_cli.types.{T32BridgeResult}
-use app.mcp_t32.session_state.{McpT32Session, MCP_T32_SESSIONS, MCP_T32_CURRENT_SESSION, MCP_T32_CURRENT_CORE, MCP_T32_AREA_READY, MCP_T32_AREA_NAME}
-export use app.t32_cli.bridge_access.{
-    bridge_require_session, bridge_exec, bridge_gui_status,
-    bridge_sessions_list, bridge_eval,
-    bridge_window_list, bridge_window_open, bridge_window_capture,
-    bridge_window_describe, bridge_screenshot,
-    bridge_action_invoke, bridge_action_invoke_with_request, t32_action_request_id,
-    bridge_action_list, bridge_field_get, bridge_field_set,
-    bridge_history_tail, bridge_resources_list, bridge_resource_read
-}
-use app.t32_cli.session.{
+use std.io_runtime.{read_file, file_exists, process_run}
+use .types.{T32BridgeResult}
+use app.mcp_t32.session_state.{McpT32Session, t32_session_core_count}
+use .session.{
     CLI_SESSIONS, CLI_CURRENT_SESSION, CLI_CURRENT_CORE, CliSessionInfo,
     cli_current_session_info, cli_sessions_list, cli_session_open,
     cli_session_close, cli_session_use, cli_session_info, cli_run_t32rem,
@@ -26,8 +17,16 @@ use app.t32_cli.session.{
 use app.mcp_t32.session_tools.{
     t32_find_backend, t32_get_backend_type, t32_run_remote,
     t32_find_current_session, t32_add_history, t32_check_blocking,
-    t32_has_blocking, t32_query_errors,
-    t32_poll_practice_state, t32_scan_cmm_file
+    t32_has_blocking, t32_query_gui_status_json, t32_query_errors,
+    t32_poll_practice_state, t32_scan_cmm_file,
+    MCP_T32_SESSIONS, MCP_T32_CURRENT_SESSION, MCP_T32_CURRENT_CORE,
+    MCP_T32_HISTORY, MCP_T32_AREA_READY, MCP_T32_AREA_NAME
+}
+
+# MCP imports — action/field layer
+use app.mcp_t32.action_tools.{
+    t32_field_to_eval, t32_field_to_set_cmd, t32_field_state_set,
+    t32_key_before_pipe, t32_mcp_session_ids
 }
 use app.mcp_t32.window_tools.{
     t32_get_window_catalog, t32_get_window_actions,
@@ -45,17 +44,24 @@ use app.mcp_t32.job_manager.{t32_job_list, t32_job_get, t32_job_cancel, T32Job}
 
 # MCP imports — dialog tools
 use app.mcp_t32.dialog_tools.{
-    t32_collect_dialogs, t32_clear_parsed_dialog_elements, t32_parsed_dialog_elements,
+    t32_collect_dialogs, T32_PARSED_DIALOG_ELEMENTS,
     t32_find_parsed_dialog_element, t32_dialog_query_command,
     t32_dialog_set_command, t32_dialog_detect_query,
     t32_dialog_has_query_type, t32_dialog_has_action,
     t32_dialog_action_allowed, t32_dialog_execute_command,
-    t32_dialog_parse_exist_result
+    t32_dialog_parse_exist_result, t32_validate_identifier
 }
-use app.mcp_t32.json_helpers.{t32_validate_identifier}
 
-use cmm_lsp.cmm_parser.{parse_cmm_source}
-
+use ..cmm_lsp.cmm_parser.{parse_cmm_source}
+export use app.t32_cli.bridge_access.{
+    bridge_require_session, bridge_exec, bridge_gui_status,
+    bridge_sessions_list, bridge_eval,
+    bridge_window_list, bridge_window_open, bridge_window_capture,
+    bridge_window_describe, bridge_screenshot,
+    bridge_action_invoke, bridge_action_invoke_with_request, t32_action_request_id,
+    bridge_action_list, bridge_field_get, bridge_field_set,
+    bridge_history_tail, bridge_resources_list, bridge_resource_read
+}
 # ============================================================================
 # Session functions (5)
 # ============================================================================
@@ -152,7 +158,9 @@ fn bridge_session_info(session_id: text) -> Result<T32BridgeResult, text>:
         for s in MCP_T32_SESSIONS:
             if s.id == session_id:
                 target_session = Some(s)
-        if not target_session.?:
+        if target_session.?:
+            pass_do_nothing
+        else:
             return Err("Session not found: {session_id}")
     else:
         target_session = t32_find_current_session()
@@ -605,12 +613,12 @@ fn bridge_dialog_parse(source: text) -> Result<T32BridgeResult, text>:
         if file_content != "":
             cmm_source = file_content
     val program = parse_cmm_source(cmm_source)
-    t32_clear_parsed_dialog_elements()
+    T32_PARSED_DIALOG_ELEMENTS = []
     var elements: [text] = []
     var labels: [text] = []
     val dialog_count = t32_collect_dialogs(program.statements, elements, labels)
     var rows: [[text]] = [["Label", "Type", "Queryable", "Clickable", "Settable"]]
-    for item in t32_parsed_dialog_elements():
+    for item in T32_PARSED_DIALOG_ELEMENTS:
         var q = "no"
         if item.queryable:
             q = "yes"
@@ -649,7 +657,7 @@ fn bridge_dialog_get(label: text, query_type: text) -> Result<T32BridgeResult, t
                 return Err("Dialog element '{label}' expects type '{parsed.value_type}', not '{requested_type}'")
             if requested_type == "":
                 requested_type = parsed.value_type
-        nil: ()
+        nil: pass_do_nothing
     val session = bridge_require_session()?
     var detected_type = requested_type
     var value = ""
@@ -693,7 +701,7 @@ fn bridge_dialog_set(label: text, action: text, value: text) -> Result<T32Bridge
                 return Err("Dialog element '{label}' uses a generated label and cannot be set at runtime")
             if not t32_dialog_action_allowed(parsed.supported_actions, actual_action):
                 return Err("Dialog element '{label}' is type '{parsed.widget_type}' and does not support action '{actual_action}'")
-        nil: ()
+        nil: pass_do_nothing
     val cmd = t32_dialog_set_command(label, actual_action)
     if cmd == "":
         return Err("Invalid dialog action: {actual_action}")
