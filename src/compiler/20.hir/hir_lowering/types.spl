@@ -1201,7 +1201,7 @@ impl HirLowering:
                     oinner = inner
                 case _:
                     pass
-            kind = HirTypeKind.Optional(self.lower_type(oinner))
+            kind = self.optional_of_non_unit(self.lower_type(oinner), lt.span)
         elif kind_disc_v == d_ref:
             var rinner: Type = lt
             var rmut: bool = false
@@ -1274,6 +1274,16 @@ impl HirLowering:
 
         HirType(kind: kind, span: lt.span)
 
+    me optional_of_non_unit(inner: HirType, span: Span) -> HirTypeKind:
+        # `Nil` (= `()`) is the unit type, never absence: `Nil?` and
+        # `Option<Nil>` are rejected rather than lowered to an Optional.
+        match inner.kind:
+            case HirTypeKind.Unit:
+                self.error("`Nil?` / `Option<Nil>`: Nil is the unit type, never absence; use `Nil` or an Option of a real type", span)
+                return HirTypeKind.Error
+            case _: ()
+        HirTypeKind.Optional(inner)
+
     me lower_named_instance_kind(name: text, args: [Type], span: Span) -> HirTypeKind:
         """`Name<args>` annotation of a user type.
 
@@ -1324,7 +1334,7 @@ impl HirLowering:
         # deliberately keeps the pre-existing fall-through behavior.
         if name == "Option":
             if hir_args.len() == 1:
-                return HirTypeKind.Optional(hir_args[0])
+                return self.optional_of_non_unit(hir_args[0], span)
             if hir_args.len() == 0:
                 return HirTypeKind.Optional(HirType(
                     kind: HirTypeKind.Any, span: span))
@@ -1514,12 +1524,8 @@ impl HirLowering:
                 # module can declare a type of this name — but it costs
                 # nothing and keeps the precedence rule uniform.
                 #
-                # Deliberately NOT an arm for uppercase `Nil`: the library
-                # dialect that writes `Result<Nil, text>` (lib/common/debug/
-                # service_v1.spl) is a separate source-policy question; it
-                # stays erroring until that policy is decided. A module that
-                # declares its own `Nil` resolves through the symbol lookup
-                # above as before.
+                # Uppercase `Nil` is the separate `elif name == "Nil"` arm
+                # below (the unit type, owner decision 2026-11-12).
                 #
                 # Semantics: distinct from `unit`/`void` (-> Unit above) and
                 # from an Optional's absence state; threaded as itself through
@@ -1534,6 +1540,17 @@ impl HirLowering:
                         HirTypeKind.Error
                     else:
                         HirTypeKind.Nil
+                # `Nil` is the unit type, the same type as `()` (owner decision
+                # 2026-11-12, doc/07_guide/language/robust_semantic_absence.md
+                # § Unit type): `Result<Nil, E>` / `-> Nil`. After the symbol
+                # lookup so a declared `Nil` still wins (none exists today);
+                # qualified variants (`Value.Nil`) never reach this bare arm.
+                elif name == "Nil":
+                    if hir_args.len() != 0:
+                        self.error("Nil type takes no type arguments", span)
+                        HirTypeKind.Error
+                    else:
+                        HirTypeKind.Unit
                 # SEED-PARITY (2026-08-01): the three rules below all sit AFTER
                 # the symbol lookup, exactly where the seed puts them
                 # (type_resolver.rs:141 single-letter, :178 tuple, :182 bare
