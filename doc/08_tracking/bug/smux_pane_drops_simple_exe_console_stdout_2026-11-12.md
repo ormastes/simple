@@ -81,3 +81,16 @@ Run `bin/simple.exe run <any script that prints>` as a pane command and
 capture; then bisect between the seed's stdout path when `isatty` is true
 and `smux` ConPTY screen capture. The spec example stays red (no skip) until
 then.
+
+## Follow-up 2026-11-12 (lane caret-capture): remaining workspace_recovery red
+
+`workspace_recovery_system_spec` "starts the attach command ..." stayed red
+(11/12) after PR #8582: the 302-char line never appeared within 30 s and the
+pane showed only `echo EXACT_42`. Pre-existing on `origin/release/1.0.0`
+`bc0ee732506` (`executed=12 passed=11 failed=1`). Bisected as this doc's next
+step asked: stdout is not dropped. A pane write of the 307-char command is
+accepted whole, and the owner polls fast. The shell's readline then echoes
+typed input at ~0.25 s per character, so the command line takes ~75 s. Filed
+separately as `smux_pane_readline_typed_input_per_char_latency_2026-11-12.md`.
+The spec step now has the shell produce the 300 columns from a short command,
+so it still checks capture of a wide line.
