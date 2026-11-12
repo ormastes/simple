@@ -56,7 +56,7 @@ supplement is scanned, and ELF weak semantics let the C copies lose.
   before the supplement is read. Roots go through a `@native_all_roots.rsp`
   response file (hundreds of `-Wl,-u,` exceed the 32 KiB command line).
 - `runtime_native.c`: `rt_text_is_ascii` and `rt_file_list_dir` read the
-  handle through `rt_string_len`/`rt_string_data` (`rt_core_text_dup_abi`),
+  handle through `rt_string_len`/`rt_string_data` (`core_text_dup_abi`),
   which resolve to whichever runtime owns strings in the link.
 
 Remaining C-only exports that still decode privately and are referenced by the

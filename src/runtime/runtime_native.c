@@ -6234,7 +6234,7 @@ int64_t rt_text_to_upper_ascii(int64_t value) {
  * never decode a handle privately. In a pure core-C binary the same calls
  * resolve to this file's own accessors, so both compositions agree.
  * See doc/08_tracking/bug/stage2_windows_mixed_runtime_owner_array_handle_2026-11-12.md */
-static char* rt_core_text_dup_abi(int64_t value) {
+static char* core_text_dup_abi(int64_t value) {
     int64_t len = rt_string_len(value);
     if (len < 0) return NULL;
     const uint8_t* data = rt_string_data(value);
@@ -17728,8 +17728,8 @@ int64_t rt_file_mode(int64_t path_value) {
  * follows the in-file precedent (MultiByteToWideChar with CP_UTF8 /
  * MB_ERR_INVALID_CHARS, as used by rt_mmap_raw's path handling). */
 int64_t rt_file_list_dir(int64_t path_value) {
-    /* ABI accessors, not rt_core_string_to_cpath: see rt_core_text_dup_abi. */
-    char* path = rt_core_text_dup_abi(path_value);
+    /* ABI accessors, not rt_core_string_to_cpath: see core_text_dup_abi. */
+    char* path = core_text_dup_abi(path_value);
     if (!path) return rt_core_nil();
 #if defined(_WIN32)
     size_t path_len = strlen(path);
