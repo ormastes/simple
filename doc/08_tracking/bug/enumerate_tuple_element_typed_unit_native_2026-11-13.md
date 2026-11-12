@@ -35,3 +35,9 @@ linked to this record. Restore the `enumerate()` form when fixed.
 Type the tuple pattern elements of `for (a, b) in xs.enumerate()` from the
 element type of `xs` (`(i64, T)`), in HIR, so MIR/LLVM never see a unit-typed
 `b`. Add a native regression spec (a field read + enum comparison on `b`).
+
+## Second form (2026-11-13)
+
+Same class through a lambda parameter: `self.probes.filter(\probe: ... probe.state == DebugProbeStateV1.Applied)`
+lowered `service_v1.__lambda_lift_2` with `rt_native_eq(void ...)`. `receipts_for`/`probes_for`
+now use indexed loops, linked to this record; restore `.filter` with the owner fix.
