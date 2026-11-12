@@ -1,6 +1,6 @@
 # Seed (Windows): rt_snapshot_symlink_* externs registered only under `#[cfg(unix)]` (2026-11-12)
 
-- **Status:** OPEN — seed-side defect ROUTED to the compiler-seed lane
+- **Status:** FIXED — seed-side (`src/compiler_rust`), fix on `work/seed-bugs-20261112`
 - **Severity:** P2 (test-lane blocker on Windows; product path unaffected on unix)
 - **Found:** 2026-11-12, release/1.0.0 Windows seed lane (phase-1 bug sweep)
 - **Area:** seed extern registration (`src/compiler_rust`), owned by the compiler-seed lane
@@ -47,3 +47,30 @@ Add the `cfg(windows)` registration (the Rust `snapshot_links` module needs a
 Windows implementation — `CreateSymbolicLinkW`-backed or an explicit
 `unimplemented`-style error that the specs can probe for), then re-run the two
 specs on a rebuilt Windows seed.
+
+## Resolution (2026-11-12, compiler-seed lane)
+
+Fixed on `work/seed-bugs-20261112`:
+
+- `compiler/src/interpreter_extern/mod.rs`: `mod snapshot_links` and the three
+  `rt_snapshot_*` registrations are no longer `#[cfg(unix)]`-gated.
+- `compiler/src/interpreter_extern/snapshot_links.rs`: the lexical contract
+  (absolute-path shape, root confinement, exact raw link text) is shared; the
+  Unix descriptor implementation stays under `#[cfg(unix)]`; a new
+  `#[cfg(windows)]` implementation mirrors the C runtime
+  (`runtime_core_host_services.c` + `runtime_win_long_path.h`): long-path
+  widen, real-parents reparse walk, reparse-point attribute checks,
+  `FSCTL_GET_REPARSE_POINT` exact raw-target readback (wire layout parsed
+  manually like the C code), `CreateSymbolicLinkW` with
+  `SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE` and the
+  `ERROR_INVALID_PARAMETER` retry, and `FILE_ATTRIBUTE_READONLY` sealing for
+  files only (directory readonly is a documented `-1` on Windows, matching the
+  C runtime).
+- New `compiler/tests/interpreter_snapshot_links_windows.rs` twin test
+  (privilege-aware: collapses to the fail-closed guarantee on hosts without
+  symlink creation rights).
+
+Verified with the rebuilt seed (exact commands and output in the PR/commit):
+both previously-red specs
+(`test/01_unit/app/bootstrap_builder/link_transport_spec.spl`,
+`manifest_inventory_spec.spl`) pass, and the new Windows cargo tests pass.
