@@ -14,7 +14,7 @@ use cmm_tokens.{CmmTokenKind, CmmToken}
 use cmm_ast.{CmmProgram, CmmStmt, CmmExpr, CmmLiteral, CmmSpan, CmmDialogItem, span, span_range}
 use cmm_lexer.{lex_cmm_source}
 use cmm_parser_core
-use cmm_parser_core.{CmmParser, CmmParseError, to_upper_cmm}
+use cmm_parser_core.{CmmParser, CmmParseError, to_upper_cmm, CMM_UNEXPECTED_TOKEN}
 
 # Load the impl blocks that extend CmmParser without importing every helper
 # symbol from those modules into this file's namespace.
@@ -46,7 +46,11 @@ impl CmmParser:
                 case CmmTokenKind.Eof:
                     break
                 case CmmTokenKind.RParen:
-                    # Stray closing paren at top level — skip silently
+                    # Stray closing paren at top level: a typed finding, not a silent skip
+                    val rp = self.peek()
+                    val stray = self.make_coded_error_at(rp, CMM_UNEXPECTED_TOKEN, "Unexpected ) without an open block", ["statement"])
+                    self.record_parse_error(stray, "Unexpected )")
+                    stmts = stmts.push(CmmStmt.ErrorNode(stray.message, span(rp.line, rp.column)))
                     self.advance()
                 case _:
                     match self.parse_statement():
@@ -55,12 +59,9 @@ impl CmmParser:
                             # Skip any remaining tokens on this line (trailing comments, annotations)
                             self.skip_to_next_line()
                         case Err(e):
-                            val tok = self.peek()
                             val msg = if self.recover_unclosed: e.message else: "Failed to parse statement"
-                            val error_line = if self.recover_unclosed: e.line else: tok.line
-                            val error_column = if self.recover_unclosed: e.column else: tok.column
-                            self.errors = self.errors.push("Line " + str(error_line) + ": " + msg)
-                            stmts = stmts.push(CmmStmt.ErrorNode(msg, span(error_line, error_column)))
+                            self.record_parse_error(e, msg)
+                            stmts = stmts.push(CmmStmt.ErrorNode(e.message, span(e.line, e.column)))
                             self.skip_to_next_line()
                     # Consume trailing newline / comment after statement
                     if not self.is_at_end():
@@ -71,7 +72,7 @@ impl CmmParser:
                                 val ctok = self.advance()
                                 stmts = stmts.push(CmmStmt.CommentLine(c, span(ctok.line, ctok.column)))
                             case _: ()
-        CmmProgram(statements: stmts, file_path: "", errors: self.errors, warnings: self.warnings)
+        CmmProgram(statements: stmts, file_path: "", errors: self.errors, warnings: self.warnings, parse_diagnostics: self.parse_diagnostics)
 
 # --- Public API ---
 
@@ -82,5 +83,5 @@ fn parse_cmm_source(source: text) -> CmmProgram:
 # Strict CLI/validation and tolerant editor callers share one method owner.
 fn parse_cmm_source_with_policy(source: text, recover_unclosed: bool) -> CmmProgram:
     val tokens = lex_cmm_source(source)
-    var parser = CmmParser(tokens: tokens, current: 0, errors: [], recover_unclosed: recover_unclosed, warnings: [])
+    var parser = CmmParser(tokens: tokens, current: 0, errors: [], recover_unclosed: recover_unclosed, warnings: [], parse_diagnostics: [])
     parser.parse_program()

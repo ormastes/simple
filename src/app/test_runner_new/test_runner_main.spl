@@ -19,6 +19,7 @@ use std.io_runtime.{get_args}
 
 use std.test_runner.test_runner_types.{TestExecutionMode, TestFileResult, TestOptions, TestRunResult, TEST_OUTPUT_CAPTURE_BYTES, classify_test_run_result, test_run_outcome_exit_code, test_empty_selection_is_success, test_file_result_is_unverified, test_file_result_outcome_class}
 use std.test_runner.test_runner_args.{parse_test_args, test_args_validation_error}
+use std.nogc_sync_mut.test_runner.test_kinds.{test_kind_requested, test_kind_strip_args, test_kind_validation_error, test_kind_is_external, test_kind_perf_path, test_kind_list_table, run_external_test_kind}
 use std.test_runner.native_compile_contract.{native_test_library_lanes_error, native_test_library_mode_error, native_test_library_resume_error}
 use std.test_runner.compiler_select.{select_test_child_binary}
 use std.test_runner.test_config.{TestConfig, load_test_config}
@@ -1398,7 +1399,11 @@ fn run_test_cli() -> i64:
             return 2
     if parsed.public_sdn_requested:
         return run_test_sdn_wrapper(parsed.forwarded_args) as i64
-    val args = parsed.forwarded_args
+    # `--kind=<k>` selects one test kind; in-runner kinds become their
+    # existing flags, external kinds (rust, shs-selftest, c-runtime) are
+    # dispatched to std.test_runner.test_kinds after argument validation.
+    val test_kind = test_kind_requested(parsed.forwarded_args)
+    val args = test_kind_strip_args(parsed.forwarded_args)
     val sdn_worker = parsed.worker
     val sdn_result_path = parsed.result_path
     if sdn_worker:
@@ -1414,8 +1419,23 @@ fn run_test_cli() -> i64:
     if args_error != "":
         print "Error: {args_error}"
         return 2
+    val kind_error = test_kind_validation_error(test_kind)
+    if kind_error != "":
+        print "Error: {kind_error}"
+        return 2
+    if test_kind == "list":
+        return test_kind_list_table()
 
     var options = parse_test_args(args)
+    if test_kind_is_external(test_kind):
+        if sdn_worker:
+            eprint "ERROR: --kind={test_kind} has no SDN worker output"
+            return 2
+        val kind_filter = if options.path_explicit: options.path else: ""
+        return run_external_test_kind(test_kind, kind_filter, options.list)
+    if test_kind == "perf" and not options.path_explicit:
+        options.path = test_kind_perf_path(test_kind, options.path, options.path_explicit)
+        options.path_explicit = true
     # --compiler=phase2: fail closed (exit 2) unless the phase2 full CLI is
     # present and matches its declared sha256; then children run on it.
     match select_test_child_binary(options.compiler):

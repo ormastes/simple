@@ -1,0 +1,242 @@
+# Test Kinds — one `--kind=<k>` selector over every kind of test in the repo.
+#
+# In-runner kinds reuse the existing lanes (they only translate to options):
+#   unit, integration, system   -> --unit / --integration / --system level filter
+#   perf                        -> spec lane over test/05_perf
+#   sdoctest                    -> markdown doctest lane (--sdoctest)
+#   spl-doctest                 -> source-comment doctest lane (--spl-doctest)
+# External kinds are enumerated and executed here:
+#   rust          -> cargo test over src/compiler_rust (workspace)
+#   shs-selftest  -> `sh <guard> --selftest` for scripts/check/*.shs that have one
+#   c-runtime     -> $CC (default clang) build + run of src/runtime/test/*.c
+#
+# A missing tool (cargo, clang, sh) is reported as SKIP with its reason and
+# exit 7 (unsupported scenario) — never a silent pass. A C test that cannot be
+# built standalone is UNBUILT (exit 5, unverified), never counted as passed.
+# `--kind=<k> --list` enumerates without running; an explicit positional path
+# filters items by substring (for rust it is the cargo test-name filter).
+
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+use std.nogc_sync_mut.io.dir_ops.{dir_walk_native, dir_create_all, is_dir}
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_read}
+use std.nogc_sync_mut.fs.host_path.{host_is_windows_host}
+use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.nogc_sync_mut.test_runner.rust_test_runner.{parse_cargo_test_output}
+
+val TEST_KIND_RUST_MANIFEST: text = "src/compiler_rust/Cargo.toml"
+val TEST_KIND_SHS_DIR: text = "scripts/check"
+val TEST_KIND_C_DIR: text = "src/runtime/test"
+val TEST_KIND_PERF_DIR: text = "test/05_perf"
+
+pub fn test_kind_names() -> [text]:
+    ["unit", "integration", "system", "perf", "sdoctest", "spl-doctest", "rust", "shs-selftest", "c-runtime"]
+
+pub fn test_kind_is_known(kind: text) -> bool:
+    for name in test_kind_names():
+        if name == kind:
+            return true
+    false
+
+pub fn test_kind_is_external(kind: text) -> bool:
+    kind == "rust" or kind == "shs-selftest" or kind == "c-runtime"
+
+pub fn test_kind_requested(args: [text]) -> text:
+    """The value of the last `--kind=<k>` argument, or "" when absent."""
+    var kind = ""
+    for arg in args:
+        if arg.starts_with("--kind="):
+            kind = arg.substring(7)
+    kind
+
+pub fn test_kind_strip_args(args: [text]) -> [text]:
+    """Drop `--kind=` and translate an in-runner kind to its existing flag."""
+    val kind = test_kind_requested(args)
+    var out: [text] = []
+    for arg in args:
+        if not arg.starts_with("--kind="):
+            out.push(arg)
+    if kind == "unit":
+        out.push("--unit")
+    elif kind == "integration":
+        out.push("--integration")
+    elif kind == "system":
+        out.push("--system")
+    elif kind == "sdoctest":
+        out.push("--sdoctest")
+    elif kind == "spl-doctest":
+        out.push("--spl-doctest")
+    out
+
+pub fn test_kind_validation_error(kind: text) -> text:
+    if kind == "" or kind == "list" or test_kind_is_known(kind):
+        return ""
+    val known = test_kind_names().join(", ")
+    "unknown test kind: {kind} (known: {known}, list)"
+
+pub fn test_kind_perf_path(kind: text, path: text, path_explicit: bool) -> text:
+    """perf selects test/05_perf unless the caller already named a path."""
+    if kind == "perf" and not path_explicit:
+        return TEST_KIND_PERF_DIR
+    path
+
+fn _test_kind_children(dir: text, suffix: text) -> [text]:
+    var out: [text] = []
+    if not is_dir(dir):
+        return out
+    val prefix = dir + "/"
+    for raw in dir_walk_native(dir):
+        val p = raw.replace("\\", "/")
+        var rel = p
+        val at = p.index_of(prefix)
+        if at >= 0:
+            rel = p.substring(at + prefix.len())
+        if rel == "" or rel.contains("/") or not rel.ends_with(suffix):
+            continue
+        out.push(prefix + rel)
+    out
+
+pub fn test_kind_enumerate(kind: text) -> [text]:
+    """Every runnable item of an external kind, as repo-relative paths."""
+    if kind == "rust":
+        if file_exists(TEST_KIND_RUST_MANIFEST):
+            return [TEST_KIND_RUST_MANIFEST]
+        return []
+    if kind == "c-runtime":
+        return _test_kind_children(TEST_KIND_C_DIR, ".c")
+    if kind == "shs-selftest":
+        var out: [text] = []
+        for script in _test_kind_children(TEST_KIND_SHS_DIR, ".shs"):
+            if (file_read(script) ?? "").contains("--selftest"):
+                out.push(script)
+        return out
+    []
+
+pub fn test_kind_tool(kind: text) -> text:
+    if kind == "rust": return "cargo"
+    if kind == "c-runtime": return test_kind_c_compiler()
+    if kind == "shs-selftest": return "sh"
+    ""
+
+pub fn test_kind_c_compiler() -> text:
+    """`$CC` when set (e.g. the llvm-mingw clang on Windows), else `clang`."""
+    val cc = env_get("CC")
+    if cc != "": cc else: "clang"
+
+fn _test_kind_first_error(stderr: text) -> text:
+    val lines = stderr.split("\n")
+    for line in lines:
+        val t = line.trim()
+        if t.starts_with("error") or t.contains(": error") or t.contains(" error:") or t.contains("fatal error"):
+            return t
+    lines[0]
+
+pub fn test_kind_tool_skip_reason(kind: text) -> text:
+    """"" when the kind's tool runs here, else the SKIP reason."""
+    val tool = test_kind_tool(kind)
+    val (probe_out, probe_err, code) = process_run_bounded(tool, ["--version"], 30000, 4096)
+    if code == 0:
+        return ""
+    "{tool} not runnable on this host (`{tool} --version` exit {code})"
+
+fn _test_kind_filtered(items: [text], filter: text) -> [text]:
+    if filter == "":
+        return items
+    var out: [text] = []
+    for item in items:
+        if item.contains(filter.replace("\\", "/")):
+            out.push(item)
+    out
+
+fn _test_kind_run_rust(filter: text) -> i64:
+    var args = ["test", "--manifest-path", TEST_KIND_RUST_MANIFEST]
+    if filter != "":
+        args.push("--")
+        args.push(filter)
+    val (stdout, stderr, code) = process_run_bounded("cargo", args, 7200000, 64 * 1024 * 1024)
+    val (total, passed, failed, ignored) = parse_cargo_test_output(stdout + "\n" + stderr)
+    print "rust: {total} total, {passed} passed, {failed} failed, {ignored} ignored (cargo exit {code})"
+    if code != 0:
+        print "  FAIL     cargo test: {_test_kind_first_error(stderr)}"
+        return 1
+    if total == 0:
+        print "ERROR — nothing was verified: cargo test reported no test results"
+        return 5
+    0
+
+fn _test_kind_c_output(item: text) -> text:
+    var name = item.substring(TEST_KIND_C_DIR.len() + 1)
+    name = name.substring(0, name.len() - 2)
+    if host_is_windows_host():
+        return "build/test_kinds/c_runtime/{name}.exe"
+    "build/test_kinds/c_runtime/{name}"
+
+fn _test_kind_run_item(kind: text, item: text) -> text:
+    """PASS / FAIL / UNBUILT verdict word for one item, with a printed line."""
+    if kind == "shs-selftest":
+        val (sh_out, sh_err, code) = process_run_bounded("sh", [item, "--selftest"], 600000, 1024 * 1024)
+        if code == 0:
+            print "  PASS     {item}"
+            return "PASS"
+        print "  FAIL     {item} (exit {code})"
+        return "FAIL"
+    val output = _test_kind_c_output(item)
+    val (build_out, build_err, build_code) = process_run_bounded(test_kind_c_compiler(),
+        ["-std=gnu11", "-I", "src/runtime", "-I", TEST_KIND_C_DIR, item, "-o", output], 300000, 256 * 1024)
+    if build_code != 0:
+        val first = _test_kind_first_error(build_err)
+        print "  UNBUILT  {item}: {first}"
+        return "UNBUILT"
+    val (run_out, run_err, run_code) = process_run_bounded(output, [], 300000, 1024 * 1024)
+    if run_code == 0:
+        print "  PASS     {item}"
+        return "PASS"
+    print "  FAIL     {item} (exit {run_code})"
+    "FAIL"
+
+pub fn test_kind_list_table() -> i64:
+    print "test kinds (--kind=<k>):"
+    print "  unit, integration, system  spec lane, level filter"
+    print "  perf                       spec lane over {TEST_KIND_PERF_DIR}"
+    print "  sdoctest                   markdown doctest lane"
+    print "  spl-doctest                source-comment doctest lane"
+    print "  rust                       cargo test --manifest-path {TEST_KIND_RUST_MANIFEST}"
+    print "  shs-selftest               sh {TEST_KIND_SHS_DIR}/<guard>.shs --selftest"
+    print "  c-runtime                  clang build + run of {TEST_KIND_C_DIR}/*.c"
+    0
+
+pub fn run_external_test_kind(kind: text, filter: text, list_only: bool) -> i64:
+    """Enumerate (list_only) or run one external kind; exit code per runner convention."""
+    val items = _test_kind_filtered(test_kind_enumerate(kind), if kind == "rust": "" else: filter)
+    if list_only:
+        for item in items:
+            print item
+        print "{kind}: {items.len()} item(s)"
+        return 0
+    if items.len() == 0:
+        print "ERROR — nothing was checked: no {kind} items found"
+        return 4
+    val skip = test_kind_tool_skip_reason(kind)
+    if skip != "":
+        print "SKIP — {kind}: {skip}; {items.len()} item(s) not run"
+        return 7
+    if kind == "rust":
+        return _test_kind_run_rust(filter)
+    if kind == "c-runtime":
+        val _ = dir_create_all("build/test_kinds/c_runtime")
+    var passed = 0
+    var failed = 0
+    var unbuilt = 0
+    for item in items:
+        val verdict = _test_kind_run_item(kind, item)
+        if verdict == "PASS":
+            passed = passed + 1
+        elif verdict == "FAIL":
+            failed = failed + 1
+        else:
+            unbuilt = unbuilt + 1
+    print "{kind}: {items.len()} item(s), {passed} passed, {failed} failed, {unbuilt} unbuilt"
+    if failed > 0:
+        return 1
+    if unbuilt > 0:
+        return 5
+    0

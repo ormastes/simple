@@ -1,0 +1,51 @@
+# T32 LSP MCP `cmm_diagnostics` tool: the response carries the canonical
+# `diagnostics_v1` records and a batch status next to the legacy array
+# (REQ-DIAG-007, Journey B).
+# @req REQ-DIAG-007
+use std.spec
+use app.t32_lsp_mcp.tools.{handle_cmm_diagnostics}
+
+# The tool result is JSON text embedded as a string in content[0].text, so
+# every quote of the inner document is escaped once in the response.
+fn escaped(needle: text) -> text:
+    var out = ""
+    var i = 0
+    while i < needle.len():
+        val ch = needle[i]
+        if ch == "\"":
+            out = out + "\\\""
+        else:
+            out = out + ch
+        i = i + 1
+    out
+
+fn count_of(haystack: text, needle: text) -> i64:
+    var count = 0
+    var i = 0
+    val n = needle.len()
+    while i + n <= haystack.len():
+        if haystack[i:i + n] == needle:
+            count = count + 1
+            i = i + n
+        else:
+            i = i + 1
+    count
+
+describe "T32 MCP cmm_diagnostics carries diagnostics_v1 [importance=critical; importance_weight=3]":
+    it "reports partial_recovery with one DiagnosticV1 per finding for the Journey B script":
+        step("Call the tool with an unresolved GOTO, a malformed inner block and a valid trailing statement")
+        val args = "{\"source\":\"start:\\nGOTO missing_label\\nIF 1\\n(\\n  LOCAL\\n  PRINT 2\\n)\\nPRINT 3\\n\"}"
+        val response = handle_cmm_diagnostics("7", args)
+        # @capture(protocol_json): MCP tools/call response for cmm_diagnostics
+        expect(response.contains(escaped("\"status\":\"partial_recovery\""))).to_equal(true)
+        expect(response.contains(escaped("\"diagnostics_v1\":["))).to_equal(true)
+        step("Both independent findings survive with their codes in the canonical records")
+        expect(count_of(response, escaped("\"code\":\"CMM1004\""))).to_be_greater_than(0)
+        expect(count_of(response, escaped("\"code\":\"CMM1102\""))).to_be_greater_than(0)
+        expect(response.contains("missing_label")).to_equal(true)
+
+    it "reports complete with an empty diagnostics_v1 array for a clean script":
+        val response = handle_cmm_diagnostics("8", "{\"source\":\"PRINT 1\\n\"}")
+        expect(response.contains(escaped("\"status\":\"complete\""))).to_equal(true)
+        expect(response.contains(escaped("\"diagnostics_v1\":[]"))).to_equal(true)
+        expect(response.contains(escaped("\"count\":0"))).to_equal(true)
