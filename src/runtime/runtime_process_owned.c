@@ -1161,6 +1161,19 @@ RT_OWNED_MAYBE_UNUSED static int owned_confirm_exec_v4(pid_t pid, int exec_error
 }
 #endif
 
+/* A Linux pin may hold a system-loader dynamic image (runtime_process.c
+ * rt_hal_pinnable_elf_fd): its libraries resolve from the system loader paths
+ * only. Any LD_* variable moves that resolution (LD_PRELOAD, LD_LIBRARY_PATH,
+ * LD_AUDIT, ...), so a pinned launch environment carrying one is refused
+ * before any slot or child exists, on every path that fexecve()s a pin. The
+ * prefix rule is deliberate: glibc honours more than the three well-known
+ * names. */
+RT_OWNED_MAYBE_UNUSED static int pov4_environment_steers_loader(char* const* environment) {
+    for (size_t i = 0; environment && environment[i]; i++)
+        if (strncmp(environment[i], "LD_", 3) == 0) return 1;
+    return 0;
+}
+
 RT_OWNED_MAYBE_UNUSED static bool owned_process_start(const char* cmd, const char* const* argv,
                                const uint8_t* input, uint64_t input_len, int pipe_stdin,
                                int pinned_executable_fd,
@@ -1173,6 +1186,12 @@ RT_OWNED_MAYBE_UNUSED static bool owned_process_start(const char* cmd, const cha
     if (!token || !receipt) {
         if (pinned_executable_fd >= 0) close(pinned_executable_fd);
         if (configured_cwd_fd >= 0) close(configured_cwd_fd);
+        return false;
+    }
+    if (pinned_executable_fd >= 0 && v4 && pov4_environment_steers_loader(v4->environment)) {
+        close(pinned_executable_fd);
+        if (configured_cwd_fd >= 0) close(configured_cwd_fd);
+        errno = EPERM;
         return false;
     }
     memset(token, 0, sizeof(*token)); memset(receipt, 0, sizeof(*receipt));
@@ -3314,6 +3333,11 @@ static enum Pov4StartOutcome pov4_start_exact(
     errno = ENOTSUP;
     return POV4_START_NO_CHILD;
 #else
+    if (pov4_environment_steers_loader(request->environment)) {
+        close(executable_fd); close(cwd_fd);
+        *exec_error_out = EPERM;
+        errno = EPERM; return POV4_START_NO_CHILD;
+    }
     uint64_t output_limit = request->stdout_limit + request->stderr_limit;
     RtOwnedCapturedByte* retained = NULL;
     if (output_limit) {
