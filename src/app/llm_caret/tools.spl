@@ -312,7 +312,10 @@ fn _sq(s: text) -> text:
 # Executors (only reachable through run_tool)
 # ============================================================================
 
-fn exec_bash(input: text) -> ToolResult:
+# bash runs from the workspace root, the same root read_file/write_file resolve
+# against; without the `cd` it inherited caret's own cwd, so an agent's relative
+# commands (`bin/simple test ...`, `git diff`) ran in a different tree.
+fn exec_bash(workspace_root: text, input: text) -> ToolResult:
     val command = _json_get_str(input, "command")
     if command == "":
         return new_tool_error("", "bash: missing required 'command'")
@@ -322,7 +325,9 @@ fn exec_bash(input: text) -> ToolResult:
     var secs = timeout_ms / 1000
     if secs < 1:
         secs = 1
-    val wrapped = "timeout " + secs.to_text() + " /bin/sh -c " + _sq(command)
+    var wrapped = "timeout " + secs.to_text() + " /bin/sh -c " + _sq(command)
+    if workspace_root != "":
+        wrapped = "cd " + _sq(workspace_root) + " && " + wrapped
     val (out, errout, code) = process_run("/bin/sh", ["-c", wrapped])
     val stdout = out ?? ""
     val stderr = errout ?? ""
@@ -458,7 +463,7 @@ fn run_tool(policy: PermissionPolicy, call: ToolCall) -> ToolResult:
     # decision == "allow": dispatch to the real executor
     var res = new_tool_error(call.id, "unknown tool: " + call.name)
     if call.name == "bash":
-        res = exec_bash(call.input)
+        res = exec_bash(policy.workspace_root, call.input)
     elif call.name == "read_file":
         res = exec_read_file(policy, call.input)
     elif call.name == "write_file":
