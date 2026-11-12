@@ -219,19 +219,43 @@ describe "Markdown diagnostics — typed codes on byte spans":
         expect(batch.diagnostics[0].id == batch.diagnostics[1].id).to_equal(false)
         expect(batch.diagnostics[0].id.starts_with("MD1001@d.md#byte:0/")).to_equal(true)
 
+    it "reports a heading missing space as MD1105 on the heading marker":
+        # @req REQ-DIAG-008
+        val content = "# Good\n##Bad\n### Also Good\n#NoSpace\n"
+        # @capture(diagnostic_rows): MD1105 on lines with missing spaces
+        step("Diagnose headings where the marker lacks a following space")
+        val diags = md_diagnose_typed(content, "h.md")
+        expect(count_code(diags, "MD1105")).to_equal(2)  # oracle: ##Bad and #NoSpace lack spaces
+        val bad = first_with(diags, "MD1105")
+        expect(line0(bad)).to_equal(1)  # oracle: ##Bad is on line index 1
+        expect(col0(bad)).to_equal(0)
+        expect(end_col0(bad)).to_equal(2)  # oracle: "##" is two bytes
+
+    it "reports an empty link as MD1106 on the link span":
+        # @req REQ-DIAG-008
+        val content = "see [text]() and [good](ok.md) and [](missing.md)\n"
+        # @capture(diagnostic_rows): MD1106 count and spans
+        step("Diagnose links with empty URLs")
+        val batch = md_diagnose_batch(content, "e.md", 1, local_ctx(["ok.md", "e.md"]))
+        expect(count_code(rows(batch), "MD1106")).to_equal(2)  # oracle: [text]() and [] have empty URLs
+        val first_empty = first_with(rows(batch), "MD1106")
+        expect(line0(first_empty)).to_equal(0)
+        expect(col0(first_empty)).to_equal(4)  # oracle: "see " is four bytes
+        expect(end_col0(first_empty)).to_equal(13)  # oracle: "[text]()" is nine bytes, 4 + 9
+
     it "registers the MD codes in a fresh ErrorRegistry without colliding":
         # @req REQ-DIAG-008
         var reg = ErrorRegistry.create()
-        # @capture(registry_rows): MD1001..MD1104 absent before, present after
+        # @capture(registry_rows): MD1001..MD1106 absent before, present after
         step("Register the Markdown codes against the compiler registry")
         val before = reg.get("MD1001")
         expect(before.is_some()).to_equal(false)
         val registered = md_lsp_register_codes(reg)
-        expect(registered.registered).to_equal(10)  # oracle: plan lists ten MD codes
+        expect(registered.registered).to_equal(12)  # oracle: plan lists twelve MD codes (MD1001-MD1006, MD1101-MD1104, MD1105-MD1106)
         expect(registered.collision).to_equal(false)
-        val after = reg.get("MD1102")
+        val after = reg.get("MD1106")
         expect(after.is_some()).to_equal(true)
-        expect(after.unwrap().title).to_equal("Orphan Document")
+        expect(after.unwrap().title).to_equal("Empty Link")
         val again = md_lsp_register_codes(reg)
         expect(again.collision).to_equal(true)  # oracle: second registration refuses, registers nothing
         expect(again.registered).to_equal(0)

@@ -1,0 +1,48 @@
+# @cover src/app/devhub/adapter_github.spl 40%
+"""
+## Purpose and audience
+Pure URL and argument-building helpers in devhub adapters: GitHub, Jira, Outlook, MinIO.
+These helpers construct shell arguments, error messages, and URL components with no network I/O.
+Audience: devhub maintainer writing specs for URL construction and error handling paths.
+## Operator workflow
+bin/simple test test/01_unit/app/devhub/devhub_helpers_spec.spl
+## Compatibility and limitations
+Pure in-process analysis; no files, no network, no process spawn.
+## Verification guidance and troubleshooting
+A RED on a helper usually means the helper's text transformation changed or the oracle was wrong.
+"""
+
+use std.spec
+use app.devhub.adapter_github.{gh_binary, gh_actionable_error}
+
+describe "DevHub pure helpers — URL and argument building":
+
+    it "returns gh binary path from environment or default":
+        # @req REQ-DEVHUB-001
+        step("Verify gh_binary() falls back to default when env var is unset")
+        val binary = gh_binary()
+        expect(binary == "" or binary.contains("gh")).to_equal(true)  # oracle: either "gh" or an absolute path ending in gh
+        expect(binary.len()).to_be_greater_than(0)
+
+    it "maps gh auth failures to actionable error messages":
+        # @req REQ-DEVHUB-002
+        val not_logged_in = "github.com: You're not logged into github.com. To use GitHub CLI with github.com, first run `gh auth login`"
+        step("Map a not-authenticated error to an actionable message")
+        val msg = gh_actionable_error(not_logged_in)
+        expect(msg.contains("gh is not authenticated")).to_equal(true)
+        expect(msg.contains("gh auth login")).to_equal(true)
+
+    it "maps generic gh errors to fallback message with stderr text":
+        # @req REQ-DEVHUB-002
+        val generic_error = "error: some API call failed"
+        step("Map a generic gh error to a fallback message")
+        val msg = gh_actionable_error(generic_error)
+        expect(msg.contains("gh error:")).to_equal(true)
+        expect(msg.contains("API call failed")).to_equal(true)
+
+    it "returns empty stderr message as a debugging prompt":
+        # @req REQ-DEVHUB-002
+        step("Map empty stderr to debugging prompt")
+        val msg = gh_actionable_error("")
+        expect(msg.contains("gh error")).to_equal(true)
+        expect(msg.contains("auth status")).to_equal(true)
