@@ -15,10 +15,23 @@ runs, each under `MemoryMax=16G`).
 | 1-4, 11 | 4 ms to 0.2 s |
 | 5-10 (each calls `host_parent_budget_fixture_v1()`) | 45.8-49.4 s |
 
-The fixture builds three larger fixtures (helper, execution, claim). Nobody has yet
-measured which of the three is the expensive one.
+The fixture builds three sub-fixtures. Measured in one probe example on the same seed
+(`time_now_monotonic_ms` around each call):
+
+| Sub-fixture | Time |
+|---|---|
+| `host_helper_fixture_v1()` | 37.7 s |
+| `host_execution_fixture_v2("success")` | 3.6 s |
+| `host_claim_fixture_v1()` | 4.4 s |
+
+`host_helper_fixture_v1` (`test/fixtures/orchestration/host_helper_fixture_v1.spl:61`) opens
+and prepares a capacity owner and builds several signed grants and approvals
+(`helper_fixture_signed_v1`, `helper_fixture_approval_v1`, `verification_fixture()`). The
+likely cost is signing and verification running in pure Simple on the interpreter, but this
+part has not been profiled.
 
 ## Fix direction
-Profile the three sub-fixtures, then make the expensive one cheaper or build the parent
-fixture once per file. Do not raise the spec's time budget without first making the
-fixture cheaper.
+Profile inside `host_helper_fixture_v1`. If signing dominates, compute the deterministic
+signed records once per process and reuse them; temp roots and capacity owners stay per
+example, so isolation does not change. Do not raise the spec's time budget without first
+making the fixture cheaper.
