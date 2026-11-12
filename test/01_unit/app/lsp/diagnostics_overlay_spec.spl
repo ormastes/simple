@@ -1,0 +1,99 @@
+"""
+# LSP diagnostics analyze the latest unsaved text (REQ-DIAG-006)
+
+After `didChange`, diagnostics must describe the editor's current bytes, not
+the file on disk; a result computed for a superseded version is obsolete and
+must not be published; push and pull share one analysis source.
+"""
+use std.spec
+use std.spec.step
+use std.common.json.value.{JsonValue, json_value_object_from, json_value_serialize}
+use std.nogc_sync_mut.lsp.lsp_handlers.{lsp_handle_did_open, lsp_handle_did_change, lsp_handle_did_close,
+    lsp_diagnostics_stage_source_v1, lsp_diagnostics_release_source_v1,
+    lsp_diagnostics_source_is_current_v1, lsp_diagnostics_for_uri_v1}
+use std.nogc_sync_mut.lsp.lsp_file_uri.{lsp_file_uri_to_path}
+use std.io_runtime.{file_exists, read_file, write_file, file_delete, time_now_unix_micros}
+use std.nogc_sync_mut.env.platform.{get_temp_dir}
+
+fn sync_open(uri: text, version: i64, source: text) -> text:
+    val doc = json_value_object_from([("uri", JsonValue.Str(uri)), ("version", JsonValue.Int(version)), ("text", JsonValue.Str(source))])
+    json_value_serialize(json_value_object_from([("textDocument", doc)]))
+
+fn sync_change(uri: text, version: i64, source: text) -> text:
+    val doc = json_value_object_from([("uri", JsonValue.Str(uri)), ("version", JsonValue.Int(version))])
+    val change = json_value_object_from([("text", JsonValue.Str(source))])
+    json_value_serialize(json_value_object_from([("textDocument", doc), ("contentChanges", JsonValue.Array([change]))]))
+
+fn disk_fixture(name: text, content: text) -> (text, text):
+    val path = get_temp_dir() + "/lsp_overlay_{name}_{time_now_unix_micros()}.spl"
+    expect(write_file(path, content)).to_equal(true)
+    var uri = "file:///" + path.replace("\\", "/")
+    if path.starts_with("/"): uri = "file://" + path
+    (path, uri)
+
+val CLEAN = "val answer: i64 = 42\n"
+val BROKEN = "val answer: i64 = 42\nval other: i64 = 1\nval broken: = 1\n"
+
+describe "LSP unsaved-overlay diagnostics source":
+    it "analyzes disk when the editor text equals the file and stages the overlay once it differs":
+        # @req REQ-DIAG-006
+        step("Open a document whose editor text matches disk")
+        val (path, uri) = disk_fixture("same", CLEAN)
+        lsp_handle_did_open(sync_open(uri, 1, CLEAN))
+        val on_disk = lsp_diagnostics_stage_source_v1(uri, lsp_file_uri_to_path(uri))
+        expect(on_disk.overlay).to_equal(false)
+        expect(on_disk.staged).to_equal(false)
+        expect(on_disk.version).to_equal(1)
+        step("Change the buffer without saving: the staged copy holds the NEW text")
+        lsp_handle_did_change(sync_change(uri, 2, BROKEN))
+        val staged = lsp_diagnostics_stage_source_v1(uri, lsp_file_uri_to_path(uri))
+        expect(staged.overlay).to_equal(true)
+        expect(staged.staged).to_equal(true)
+        expect(staged.version).to_equal(2)
+        expect(staged.path != path).to_equal(true)
+        expect(read_file(staged.path)).to_equal(BROKEN)
+        expect(read_file(path)).to_equal(CLEAN)
+        step("Releasing the source removes the staged copy and leaves disk alone")
+        lsp_diagnostics_release_source_v1(staged)
+        expect(file_exists(staged.path)).to_equal(false)
+        expect(file_exists(path)).to_equal(true)
+        lsp_handle_did_close(sync_open(uri, 2, BROKEN))
+        val _ = file_delete(path)
+
+    it "marks a staged source obsolete once a newer change or a close supersedes it":
+        # @req REQ-DIAG-006
+        step("Stage version 2, then accept version 3")
+        val (path, uri) = disk_fixture("obsolete", CLEAN)
+        lsp_handle_did_open(sync_open(uri, 1, CLEAN))
+        lsp_handle_did_change(sync_change(uri, 2, BROKEN))
+        val v2 = lsp_diagnostics_stage_source_v1(uri, lsp_file_uri_to_path(uri))
+        expect(lsp_diagnostics_source_is_current_v1(v2)).to_equal(true)
+        lsp_handle_did_change(sync_change(uri, 3, BROKEN + "\n"))
+        expect(lsp_diagnostics_source_is_current_v1(v2)).to_equal(false)
+        step("A stale (older) change is refused, so the current source stays current")
+        val v3 = lsp_diagnostics_stage_source_v1(uri, lsp_file_uri_to_path(uri))
+        lsp_handle_did_change(sync_change(uri, 2, CLEAN))
+        expect(lsp_diagnostics_source_is_current_v1(v3)).to_equal(true)
+        step("Close supersedes every staged source")
+        lsp_handle_did_close(sync_open(uri, 3, BROKEN))
+        expect(lsp_diagnostics_source_is_current_v1(v3)).to_equal(false)
+        lsp_diagnostics_release_source_v1(v2)
+        lsp_diagnostics_release_source_v1(v3)
+        val _ = file_delete(path)
+
+    it "reports the unsaved error while disk is clean and flags the batch as current":
+        # @req REQ-DIAG-006
+        step("Disk is clean; the buffer carries a parse error on line 3")
+        val (path, uri) = disk_fixture("real", CLEAN)
+        lsp_handle_did_open(sync_open(uri, 1, CLEAN))
+        lsp_handle_did_change(sync_change(uri, 2, BROKEN))
+        val (items, current) = lsp_diagnostics_for_uri_v1(uri, lsp_file_uri_to_path(uri))
+        expect(current).to_equal(true)
+        expect(items.len()).to_be_greater_than(0)
+        expect(items.join(",")).to_contain("expected type annotation")
+        step("The same snapshot analyzed from disk alone would be clean")
+        lsp_handle_did_close(sync_open(uri, 2, BROKEN))
+        val (disk_items, disk_current) = lsp_diagnostics_for_uri_v1(uri, lsp_file_uri_to_path(uri))
+        expect(disk_current).to_equal(true)
+        expect(disk_items.join(",").contains("expected type annotation")).to_equal(false)
+        val _ = file_delete(path)

@@ -1,0 +1,97 @@
+#!/bin/sh
+# check-nogc-checker-wiring.shs -- AC-GATE-02 for the no-GC ownership checker.
+#
+# Plan: doc/03_plan/release/1.0.0/inputs_2026-11-06/simple_nogc_ownership_memory_hardening_plan.md
+# §12.3 "Bypass no-GC ownership checking" / §12.4 "a gate must verify
+# invocation and executed cardinality, not simply search for a function name".
+#
+# The checker's admission path (driver_admit_nogc_param_effects_v1 and the
+# `nogc_require_strict` policy) is exercised by the specs listed in
+# scripts/check/nogc_checker_gate_baseline.txt. This gate RUNS those specs
+# through the production driver and compares the `SPEC FILE VERDICT` line's
+# executed/passed cardinality against that protected baseline. Removing the
+# checker call, deleting examples, or weakening a spec into a no-op all lower
+# the executed/passed count below the baseline and FAIL here; the gate never
+# greps product source for a symbol.
+#
+# Verdict (last stdout line):
+#   PASS  -- <n> spec(s) checked, executed>=baseline, 0 failed          exit 0
+#   FAIL  -- <n> spec(s) checked, <k> below baseline or failing: <names> exit 1
+#   ERROR -- nothing was checked (<reason>)                             exit 2
+# A spec whose run yields executed=0 or no verdict line is ERROR-class and
+# named; the gate never counts it as a pass. --selftest classifies synthetic
+# verdict lines and runs before every scan.
+set -u
+
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+BASELINE="$ROOT/scripts/check/nogc_checker_gate_baseline.txt"
+SIMPLE="${SIMPLE_BINARY:-$ROOT/bin/simple}"
+[ -x "$SIMPLE" ] || { [ -x "$SIMPLE.exe" ] && SIMPLE="$SIMPLE.exe"; }
+TIMEOUT_S="${NOGC_GATE_TIMEOUT_S:-600}"
+
+# classify <verdict-line-or-empty> <min_executed> <min_passed>
+# prints: OK | BELOW executed=<n> passed=<p> | FAILING failed=<f> | NOVERDICT | ZERO
+classify() {
+    line=$1; min_exec=$2; min_pass=$3
+    [ -n "$line" ] || { echo NOVERDICT; return; }
+    exec_n=$(printf '%s\n' "$line" | sed -n 's/.*executed=\([0-9]*\).*/\1/p')
+    pass_n=$(printf '%s\n' "$line" | sed -n 's/.*passed=\([0-9]*\).*/\1/p')
+    fail_n=$(printf '%s\n' "$line" | sed -n 's/.*failed=\([0-9]*\).*/\1/p')
+    [ -n "$exec_n" ] && [ -n "$pass_n" ] && [ -n "$fail_n" ] || { echo NOVERDICT; return; }
+    [ "$exec_n" -gt 0 ] || { echo ZERO; return; }
+    [ "$fail_n" -eq 0 ] || { echo "FAILING failed=$fail_n"; return; }
+    if [ "$exec_n" -lt "$min_exec" ] || [ "$pass_n" -lt "$min_pass" ]; then
+        echo "BELOW executed=$exec_n passed=$pass_n"; return
+    fi
+    echo OK
+}
+
+selftest() {
+    v="SPEC FILE VERDICT: x_spec.spl outcome=OK declared>=6 executed=6 passed=6 failed=0 skipped=0 dropped=0"
+    [ "$(classify "$v" 6 6)" = OK ] || { echo "selftest: healthy verdict must be OK"; exit 2; }
+    [ "$(classify "$v" 7 7)" = "BELOW executed=6 passed=6" ] || { echo "selftest: fewer examples than baseline must be BELOW"; exit 2; }
+    v2="SPEC FILE VERDICT: x_spec.spl outcome=ERROR declared>=6 executed=6 passed=3 failed=3 skipped=0 dropped=0"
+    [ "$(classify "$v2" 6 6)" = "FAILING failed=3" ] || { echo "selftest: failing examples must be FAILING"; exit 2; }
+    v3="SPEC FILE VERDICT: x_spec.spl outcome=ERROR declared>=6 executed=0 passed=0 failed=0 skipped=0 dropped=0"
+    [ "$(classify "$v3" 6 6)" = ZERO ] || { echo "selftest: executed=0 must be ZERO, never a pass"; exit 2; }
+    [ "$(classify "" 6 6)" = NOVERDICT ] || { echo "selftest: missing verdict line must be NOVERDICT"; exit 2; }
+    [ "$(classify "garbage" 6 6)" = NOVERDICT ] || { echo "selftest: unparsable verdict must be NOVERDICT"; exit 2; }
+    echo "selftest: 6 fixture(s) ok"
+}
+
+selftest
+[ "${1:-}" = "--selftest" ] && exit 0
+
+[ -r "$BASELINE" ] || { echo "ERROR — nothing was checked (baseline $BASELINE missing)"; exit 2; }
+[ -x "$SIMPLE" ] || { echo "ERROR — nothing was checked (no runnable simple binary at $SIMPLE)"; exit 2; }
+
+checked=0; bad=0; bad_names=""; err_names=""
+tmp=$(mktemp -d 2>/dev/null || mktemp -d -t nogcgate)
+while read -r spec min_exec min_pass; do
+    case "$spec" in ''|'#'*) continue ;; esac
+    [ -f "$ROOT/$spec" ] || { err_names="$err_names $spec(missing-spec)"; continue; }
+    log="$tmp/$(basename "$spec").log"
+    ( cd "$ROOT" && "$SIMPLE" test "$spec" --no-session-daemon --timeout "$TIMEOUT_S" ) >"$log" 2>&1
+    verdict=$(grep "SPEC FILE VERDICT:" "$log" | tail -n 1)
+    result=$(classify "$verdict" "$min_exec" "$min_pass")
+    checked=$((checked + 1))
+    echo "nogc-checker-gate: $spec -> $result (baseline executed>=$min_exec passed>=$min_pass)"
+    case "$result" in
+        OK) ;;
+        BELOW*|FAILING*) bad=$((bad + 1)); bad_names="$bad_names $spec($result)" ;;
+        *) err_names="$err_names $spec($result)" ;;
+    esac
+done < "$BASELINE"
+rm -rf "$tmp"
+
+if [ -n "$err_names" ]; then
+    echo "ERROR — nothing was checked for:$err_names ($checked spec(s) ran)"
+    exit 2
+fi
+[ "$checked" -gt 0 ] || { echo "ERROR — nothing was checked (baseline has no rows)"; exit 2; }
+if [ "$bad" -gt 0 ]; then
+    echo "FAIL — $checked spec(s) checked, $bad below baseline or failing:$bad_names"
+    exit 1
+fi
+echo "PASS — $checked spec(s) checked, executed>=baseline, 0 failed"
+exit 0
