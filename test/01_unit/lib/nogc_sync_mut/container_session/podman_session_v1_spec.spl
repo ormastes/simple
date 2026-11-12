@@ -8,13 +8,18 @@ use std.nogc_sync_mut.container_session.podman_session_v1.*
 var fake_calls: [text] = []
 var fake_present: [text] = []
 var fake_mode: text = ""
+# Instance label carried by every scripted container, and their shared ID.
+var fake_instance: text = ""
+val FAKE_ID = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
 
 fn fake_reset(mode: text, present: [text]):
     fake_calls = []
     fake_present = present
     fake_mode = mode
+    fake_instance = ""
 
 fn fake_has(name: text) -> bool:
+    if name == FAKE_ID: return fake_present.len() > 0
     for item in fake_present:
         if item == name: return true
     false
@@ -42,8 +47,13 @@ fn fake_runner(argv: [text], timeout_ms: i64) -> (text, text, i64):
             # exit not yet observed. The next attempt finds it gone.
             fake_mode = ""
             return ("", "Error: could not be stopped: given PID did not die within timeout", 125)
-        fake_drop(argv[argv.len() - 1])
+        if argv[argv.len() - 1] == FAKE_ID: fake_present = []
+        else: fake_drop(argv[argv.len() - 1])
         return ("", "", 0)
+    if verb == "container" and argv[2] == "inspect":
+        if fake_mode == "inspect-fails": return ("", "Error: engine down", 125)
+        if not fake_has(argv[argv.len() - 1]): return ("", "Error: no such container", 125)
+        return (FAKE_ID + "|" + fake_instance + "\n", "", 0)
     if verb == "container":
         if fake_mode == "exists-unknown": return ("", "engine down", 125)
         return ("", "", if fake_has(argv[3]): 0 else: 1)
@@ -59,6 +69,7 @@ describe "Podman session argv":
     it "builds a rootless run with name, recovery labels, keep-id, mounts and workdir":
         var spec = spec_v1("simple-podman-test-a")
         spec.tty = true
+        spec.instance = "proc-1"
         spec.network = "host"
         spec.workdir = "/work/tree"
         spec.timeout_seconds = 30
@@ -67,6 +78,7 @@ describe "Podman session argv":
             PodmanMountV1(source: "/opt/seed", target: "/opt/seed", read_only: true)]
         expect(podman_session_run_argv_v1(spec).unwrap()).to_equal(["podman", "run", "--rm", "--name", "simple-podman-test-a",
             "--label", "io.simpleorch.session.owner=owner-1", "--label", "io.simpleorch.session.name=simple-podman-test-a",
+            "--label", "io.simpleorch.session.instance=proc-1",
             "--interactive", "--tty", "--detach-keys=", "--network", "host", "--userns", "keep-id", "--timeout", "30",
             "--volume", "/work/tree:/work/tree:rw", "--volume", "/opt/seed:/opt/seed:ro",
             "--workdir", "/work/tree", "--env", "TERM=xterm", "busybox:1.36", "echo", "container-ok"])
@@ -169,3 +181,40 @@ describe "Podman session cleanup through a scripted engine":
         expect(podman_session_reap_owner_v1("owner-1", fake_runner).unwrap_err())
             .to_equal("podman-session-list-failed: exit 125")
         expect(fake_present.len()).to_equal(1)
+
+describe "Podman session ownership: a name is not ownership":
+    it "refuses to remove a container another process launched under the same name":
+        fake_reset("", ["cs-s-a1"])
+        fake_instance = "other-process"
+        expect(podman_session_reap_instance_v1("cs-s-a1", "this-process", fake_runner).unwrap_err())
+            .to_equal("podman-session-foreign-instance: cs-s-a1 belongs to 'other-process'")
+        expect(fake_present).to_equal(["cs-s-a1"])
+        expect(fake_calls.len()).to_equal(1)
+        expect(fake_calls[0]).to_start_with("podman container inspect --format ")
+
+    it "refuses a container with no instance label at all":
+        fake_reset("", ["cs-s-a1"])
+        expect(podman_session_reap_instance_v1("cs-s-a1", "this-process", fake_runner).unwrap_err())
+            .to_equal("podman-session-foreign-instance: cs-s-a1 belongs to ''")
+        expect(fake_present.len()).to_equal(1)
+
+    it "removes its own container by the inspected ID, not by the shared name":
+        fake_reset("", ["cs-s-a1"])
+        fake_instance = "this-process"
+        expect(podman_session_reap_instance_v1("cs-s-a1", "this-process", fake_runner).unwrap()).to_equal(true)
+        expect(fake_present.len()).to_equal(0)
+        expect(fake_calls[1]).to_equal("podman rm --force --volumes --time 0 --ignore " + FAKE_ID)
+        expect(fake_calls[2]).to_equal("podman container exists " + FAKE_ID)
+
+    it "treats an already absent container as gone and an unreadable engine as unknown":
+        fake_reset("", [])
+        expect(podman_session_reap_instance_v1("cs-s-a1", "this-process", fake_runner).unwrap()).to_equal(true)
+        fake_reset("inspect-fails", ["cs-s-a1"])
+        expect(podman_session_reap_instance_v1("cs-s-a1", "this-process", fake_runner).unwrap_err())
+            .to_start_with("podman-session-identity-unknown: inspect exit 125")
+        expect(fake_present.len()).to_equal(1)
+
+    it "renders the identity template with two braces around each field":
+        val format = podman_session_identity_argv_v1("cs-s-a1")[4]
+        expect(format.starts_with("\u{7b}\u{7b}.Id\u{7d}\u{7d}|\u{7b}\u{7b}index .Config.Labels ")).to_equal(true)
+        expect(format.ends_with("io.simpleorch.session.instance\"\u{7d}\u{7d}")).to_equal(true)

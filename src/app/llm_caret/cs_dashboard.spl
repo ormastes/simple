@@ -22,8 +22,9 @@ use std.nogc_async_mut.sosix.{sosix_proc_usage, sosix_is_running, sosix_which,
 use std.io_runtime.{env_get, file_exists, cwd}
 use app.io.mod.{file_remove}
 use app.llm_caret.cs_container.{CsContainerRequest, cs_container_request, cs_container_argv,
-    cs_container_name, cs_container_spec_is_container, cs_container_reap, cs_container_real_path,
-    cs_container_present, cs_container_reap_session}
+    cs_container_name, cs_container_reap, cs_container_real_path,
+    cs_container_present, cs_container_reap_session, cs_container_instance,
+    cs_container_mark_launched, cs_container_launched}
 use app.llm_caret.harness_spec.{parse_harness_spec, harness_spec_display}
 use app.llm_caret.pane_backend.{Pane, pane_backend_name,
     pane_list, pane_select, pane_zoom, pane_spawn_at, pane_resize, pane_kill,
@@ -78,7 +79,7 @@ fn cs_help_text() -> text:
         "/launch <spec> [args...]   launch an agent (harness[:provider][/model])",
         "    --container <image>    run it in a container via the Simple container layer",
         "    --container-mount <src>:<dst>[:ro|rw]  --container-network host|none|private",
-        "/reap            remove every container this session owns (after a killed cs)",
+        "/reap            remove EVERY container on this session, any cs's (after a killed cs)",
         "/switch <n|id>   select an agent and focus its pane",
         "/max             maximize the selected agent's pane",
         "/key <name>      press enter|esc|tab|space|up|down|left|right|ctrl-c in its pane",
@@ -671,16 +672,11 @@ fn _detach(d: CsDashboard, agent_id: text) -> CsDashboard:
 
 # Executes one action line produced by cs_handle_command and reports what
 # actually happened. Anything this cannot do is named, never silently swallowed.
-fn _cs_agent_in_container(d: CsDashboard, agent_id: text) -> bool:
-    for a in d.agents:
-        if a.agent_id == agent_id:
-            return cs_container_spec_is_container(a.spec)
-    false
-
 # Runs the agent through the Simple container layer: the pane's process is
 # the engine client attached to the container's tty. A container left by an
-# existing container of the same name refuses the launch (see /reap), and one
-# that failed to get a pane is reaped, so no path leaves a container without a
+# existing container of the same name refuses the launch (see /reap). A
+# refused or failed launch leaves the agent unmarked, so it can never cause a
+# removal: the name may be another cs's live container. See
 # roster entry.
 fn _cs_launch_in_container(d: CsDashboard, agent_id: text, exe: text, args: [text],
         container: CsContainerRequest) -> (CsDashboard, text):
@@ -689,7 +685,7 @@ fn _cs_launch_in_container(d: CsDashboard, agent_id: text, exe: text, args: [tex
     if real_exe == "" or repo_root == "":
         return (d, "cannot launch " + agent_id + ": could not resolve the binary or repo path")
     val engine_argv = match cs_container_argv(d.session, agent_id, real_exe, args, repo_root,
-            env_get("TERM") ?? "", container):
+            env_get("TERM") ?? "", env_get("HOME") ?? "", cs_container_instance(), container):
         case Ok(value): value
         case Err(reason): return (d, "cannot launch " + agent_id + ": " + reason)
     val engine = _which(engine_argv[0])
@@ -709,8 +705,11 @@ fn _cs_launch_in_container(d: CsDashboard, agent_id: text, exe: text, args: [tex
     val pane = pane_spawn_at(d.session, agent_id, engine, engine_args, _cs_pane_cols,
         _cs_pane_rows, cs_stderr_path(d.session, agent_id))
     if pane.pane_id == "":
-        val _reaped = cs_container_reap(d.session, agent_id)
+        # No pane means no engine client ran, so no container exists to reap.
         return (d, "pane backend could not spawn a pane for " + agent_id)
+    # Only now does this process own a container for the agent. Every
+    # removal is gated on this mark AND on the engine-side instance label.
+    cs_container_mark_launched(d.session, agent_id)
     (_attach(d, agent_id, pane), "launched " + agent_id + " in pane " + pane.pane_id +
         " inside container " + cs_container_name(d.session, agent_id))
 
@@ -721,7 +720,7 @@ fn _cs_launch_in_container(d: CsDashboard, agent_id: text, exe: text, args: [tex
 fn cs_reap_containers(d: CsDashboard) -> text:
     var note = ""
     for a in d.agents:
-        if cs_container_spec_is_container(a.spec):
+        if cs_container_launched(d.session, a.agent_id):
             val reap_error = cs_container_reap(d.session, a.agent_id)
             if reap_error != "":
                 note = note + "container " + cs_container_name(d.session, a.agent_id) + " NOT removed: " + reap_error + "\n"
@@ -753,20 +752,22 @@ fn cs_apply_action(d: CsDashboard, action: text) -> (CsDashboard, text):
     if head == "pane:kill":
         val killed = pane_kill(d.session, words[2])
         # Closing the pane only ends the engine CLIENT; the container outlives
-        # it. Reap by name whether or not the pane kill succeeded, and never
-        # report a kill while the engine still lists the container.
+        # it. Reap whether or not the pane kill succeeded — but only a
+        # container this process launched, verified by its instance label.
         var container_note = ""
-        if _cs_agent_in_container(d, words[1]):
+        if cs_container_launched(d.session, words[1]):
             val reap_error = cs_container_reap(d.session, words[1])
             if reap_error != "":
-                return (d, "container " + cs_container_name(d.session, words[1]) +
-                    " NOT removed: " + reap_error)
-            # The engine client's stderr spool is this agent's only temp file.
-            val _spool = file_remove(cs_stderr_path(d.session, words[1]))
-            container_note = ", removed container " + cs_container_name(d.session, words[1])
+                container_note = "; container " + cs_container_name(d.session, words[1]) +
+                    " NOT removed: " + reap_error
+            else:
+                # The engine client's stderr spool is this agent's only temp file.
+                val _spool = file_remove(cs_stderr_path(d.session, words[1]))
+                container_note = ", removed container " + cs_container_name(d.session, words[1])
         if killed:
-            # Forget the pane id: a backend may reuse it for the next spawn, and
-            # the killed agent must not then be reported as that pane's owner.
+            # Forget the pane id even when the reap failed: the pane IS gone, a
+            # backend may reuse its id for the next spawn, and the killed agent
+            # must not then be reported as that pane's owner.
             return (cs_refresh(_detach(d, words[1])), "killed pane " + words[2] + container_note)
         return (d, "pane backend refused to kill " + words[2] + container_note)
     if head == "container:reap-session":

@@ -24,7 +24,9 @@
 use std.nogc_sync_mut.container_session.podman_session_v1.{PodmanMountV1,
     PodmanSessionSpecV1, podman_session_run_argv_v1, podman_session_reap_v1,
     podman_session_reap_owner_v1, podman_session_host_runner_v1, podman_session_exists_v1,
-    podman_session_token_valid_v1, podman_session_path_valid_v1}
+    podman_session_reap_instance_v1, podman_session_token_valid_v1, podman_session_path_valid_v1}
+use std.common.crypto.sha256.sha256_text
+use std.io_runtime.{getpid, time_now_unix_micros}
 
 struct CsContainerRequest:
     image: text
@@ -33,6 +35,34 @@ struct CsContainerRequest:
     workspace: text
     rest: [text]
     error: text
+
+# Lexically normal absolute path — no empty or `.` components, no trailing
+# slash — or "" when the path is relative, contains `..`, or contains a
+# character `--volume` treats as a separator. `..` is refused rather than
+# resolved: the policy below is decided on the text the engine will receive.
+fn cs_container_normal_path(path: text) -> text:
+    if not podman_session_path_valid_v1(path): return ""
+    var out = ""
+    for part in path.split("/"):
+        if part == "" or part == ".": continue
+        if part == "..": return ""
+        out = out + "/" + part
+    if out == "": return "/"
+    out
+
+fn _cs_under(path: text, root: text) -> bool:
+    root != "" and (path == root or path.starts_with(root + "/"))
+
+# Why `path` may not be mounted read-write, or "". An agent container must
+# not be handed the whole filesystem, the operator's home, or a system tree.
+fn cs_container_rw_refusal(path: text, home: text) -> text:
+    val normal_home = cs_container_normal_path(home)
+    for exact in ["/", "/home", "/root", "/var", "/run", "/opt", "/tmp", "/mnt", "/srv"]:
+        if path == exact: return "refusing read-write mount of " + path
+    if normal_home != "" and path == normal_home: return "refusing read-write mount of the home directory " + path
+    for tree in ["/etc", "/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/boot", "/dev", "/proc", "/sys"]:
+        if _cs_under(path, tree): return "refusing read-write mount inside " + tree + ": " + path
+    ""
 
 fn _cs_container_bad(reason: text) -> CsContainerRequest:
     CsContainerRequest(image: "", network: "host", mounts: [], workspace: "", rest: [], error: reason)
@@ -45,9 +75,11 @@ fn _cs_container_mount(value: text) -> Result<PodmanMountV1, text>:
     if parts.len() == 3:
         if parts[2] == "rw": read_only = false
         elif parts[2] != "ro": return Err("--container-mount mode must be ro or rw, got " + parts[2])
-    if not podman_session_path_valid_v1(parts[0]) or not podman_session_path_valid_v1(parts[1]):
-        return Err("--container-mount paths must be absolute: " + value)
-    Ok(PodmanMountV1(source: parts[0], target: parts[1], read_only: read_only))
+    val source = cs_container_normal_path(parts[0])
+    val target = cs_container_normal_path(parts[1])
+    if source == "" or target == "":
+        return Err("--container-mount paths must be absolute and free of '..': " + value)
+    Ok(PodmanMountV1(source: source, target: target, read_only: read_only))
 
 # Splits the container options out of a launch's extra words. `image == ""`
 # with no error means "no container requested". `--workspace` is observed but
@@ -97,39 +129,85 @@ fn _cs_container_token(value: text) -> text:
         out = out + (if alnum or byte == 45 or byte == 95 or byte == 46: value.substring(index, index + 1) else: "-")
     out
 
+# `cs-<readable prefix>-<10 hex of sha256(session)>`. The readable part is
+# lossy ("a b" and "a-b" both read "a-b"), so the digest of the exact session
+# text carries the identity: distinct sessions never share an owner label.
 fn cs_container_owner(session: text) -> text:
-    "cs-" + _cs_container_token(session)
+    var readable = _cs_container_token(session)
+    if readable.len() > 24: readable = readable.substring(0, 24)
+    "cs-" + readable + "-" + sha256_text(session).substring(0, 10)
 
 fn cs_container_name(session: text, agent_id: text) -> text:
     cs_container_owner(session) + "-" + _cs_container_token(agent_id)
 
-fn _cs_under(path: text, root: text) -> bool:
-    root != "" and (path == root or path.starts_with(root + "/"))
+# This cs PROCESS: pid plus start time. Agent ids restart at a1 in every cs,
+# so two cs on one session derive the same container names; only this nonce,
+# stamped on the container as a label, tells them apart.
+var _cs_container_instance_id: text = ""
+
+fn cs_container_instance() -> text:
+    if _cs_container_instance_id == "":
+        _cs_container_instance_id = "cs" + getpid().to_text() + "-" + time_now_unix_micros().to_text()
+    _cs_container_instance_id
+
+# Containers THIS process launched successfully. A roster entry that merely
+# asked for `--container` (refused launch, failed spawn) is never in here, so
+# it can never cause a removal.
+var _cs_container_launched: [text] = []
+
+fn cs_container_mark_launched(session: text, agent_id: text):
+    val name = cs_container_name(session, agent_id)
+    if not cs_container_launched(session, agent_id):
+        _cs_container_launched = _cs_container_launched + [name]
+
+fn cs_container_launched(session: text, agent_id: text) -> bool:
+    val name = cs_container_name(session, agent_id)
+    for item in _cs_container_launched:
+        if item == name: return true
+    false
+
+fn cs_container_forget(session: text, agent_id: text):
+    val name = cs_container_name(session, agent_id)
+    var kept: [text] = []
+    for item in _cs_container_launched:
+        if item != name: kept = kept + [item]
+    _cs_container_launched = kept
 
 # Engine-client argv for one containerized agent. Pure. `exe` and `repo_root`
 # must be absolute, symlink-free host paths; `agent_args` are the agent's
 # arguments after the executable.
 fn cs_container_argv(session: text, agent_id: text, exe: text, agent_args: [text],
-        repo_root: text, term: text, request: CsContainerRequest) -> Result<[text], text>:
+        repo_root: text, term: text, home: text, instance: text,
+        request: CsContainerRequest) -> Result<[text], text>:
     if request.error != "": return Err(request.error)
     if request.image == "": return Err("no container image requested")
     if not podman_session_path_valid_v1(exe): return Err("container launch needs an absolute executable path, got " + exe)
     if not podman_session_path_valid_v1(repo_root): return Err("container launch needs an absolute repo root, got " + repo_root)
-    if request.workspace != "" and not podman_session_path_valid_v1(request.workspace):
-        return Err("container launch needs an absolute --workspace, got " + request.workspace)
+    var workspace = ""
+    if request.workspace != "":
+        workspace = cs_container_normal_path(request.workspace)
+        if workspace == "":
+            return Err("container launch needs an absolute --workspace free of '..', got " + request.workspace)
+        val refusal = cs_container_rw_refusal(workspace, home)
+        if refusal != "": return Err(refusal + " (--workspace)")
+    for mount in request.mounts:
+        if not mount.read_only:
+            val mount_refusal = cs_container_rw_refusal(mount.source, home)
+            if mount_refusal != "": return Err(mount_refusal + " (--container-mount)")
     # One volume per destination: a workspace that IS the repo root is a
     # single read-write mount, not a read-only one shadowed by a second.
-    var mounts = [PodmanMountV1(source: repo_root, target: repo_root, read_only: request.workspace != repo_root)]
-    if request.workspace != "" and request.workspace != repo_root:
-        mounts = mounts + [PodmanMountV1(source: request.workspace, target: request.workspace, read_only: false)]
-    if not _cs_under(exe, repo_root) and not _cs_under(exe, request.workspace):
+    var mounts = [PodmanMountV1(source: repo_root, target: repo_root, read_only: workspace != repo_root)]
+    if workspace != "" and workspace != repo_root:
+        mounts = mounts + [PodmanMountV1(source: workspace, target: workspace, read_only: false)]
+    if not _cs_under(exe, repo_root) and not _cs_under(exe, workspace):
         mounts = mounts + [PodmanMountV1(source: exe, target: exe, read_only: true)]
     mounts = mounts + request.mounts
     val spec = PodmanSessionSpecV1(name: cs_container_name(session, agent_id),
         owner: cs_container_owner(session), image: request.image,
         command: [exe] + agent_args, workdir: repo_root, mounts: mounts,
         network: request.network, tty: true, keep_id: true,
-        env: ["TERM=" + (if term == "": "xterm-256color" else: term), "HOME=/tmp"])
+        env: ["TERM=" + (if term == "": "xterm-256color" else: term), "HOME=/tmp"],
+        instance: instance)
     podman_session_run_argv_v1(spec)
 
 # True when this roster spec text was launched with --container.
@@ -139,12 +217,18 @@ fn cs_container_spec_is_container(spec_text: text) -> bool:
         if word != "": words = words + [word]
     cs_container_request(words).image != ""
 
-# Stops and removes one agent's container and proves it gone. "" on success.
+# Stops and removes one agent's container and proves it gone. "" on success
+# or when this process never launched it. The engine is asked which process
+# the container belongs to before anything is removed; a foreign container is
+# reported, never touched.
 fn cs_container_reap(session: text, agent_id: text) -> text:
+    if not cs_container_launched(session, agent_id): return ""
     val name = cs_container_name(session, agent_id)
     if not podman_session_token_valid_v1(name): return "container name invalid: " + name
-    match podman_session_reap_v1(name, podman_session_host_runner_v1):
-        case Ok(_): ""
+    match podman_session_reap_instance_v1(name, cs_container_instance(), podman_session_host_runner_v1):
+        case Ok(_):
+            cs_container_forget(session, agent_id)
+            ""
         case Err(reason): reason
 
 # "" = no container of that name, "exists" = the engine lists one, else why
@@ -173,4 +257,6 @@ fn cs_container_real_path(path: text) -> text:
 export CsContainerRequest
 export cs_container_request, cs_container_owner, cs_container_name, cs_container_argv
 export cs_container_spec_is_container, cs_container_reap, cs_container_reap_session
-export cs_container_real_path, cs_container_present
+export cs_container_real_path, cs_container_present, cs_container_instance
+export cs_container_mark_launched, cs_container_launched, cs_container_forget
+export cs_container_normal_path, cs_container_rw_refusal
