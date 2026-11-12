@@ -1,6 +1,7 @@
 # Parent-only parse-selection transaction. The worker consumes durable files;
 # no inventory, source text, or source-scan container crosses this boundary.
 use app.io.env_ops.{env_set, env_get}
+use app.cli.native_build_env_restore_v1.{native_build_env_saved_v1, native_build_env_restore_v1}
 use compiler.common.library_mode_policy_v1.{library_mode_closure_digest_v1}
 use std.io_runtime.{dir_create_all, getpid, time_now_monotonic_ms}
 use std.nogc_sync_mut.io.file_ops.{file_hash_sha256}
@@ -229,8 +230,15 @@ pub fn native_build_publish_parse_closure_v1(source_root: text, roots: [text],
     # begin must leave the caller's existing scope and globals untouched.
     driver_entry_scan_cache_release()
     native_build_closure_release_snapshot_memo_v1()
+    # The closure walk freezes the entry (native_build_closure.spl
+    # _nb_scv_freeze_v1) and points SIMPLE_NATIVE_BUILD_ENTRY at the SCV snapshot
+    # copy for its own later codegen. This parent only publishes; leaving the
+    # key set put it into every HIR worker environment, which the HIR profile
+    # refuses (2026-11-12), and each worker freezes its own entry anyway.
+    val saved_native_entry = native_build_env_saved_v1("SIMPLE_NATIVE_BUILD_ENTRY")
     val publication = native_build_parse_closure_write_v1(source_root, roots,
         entry_identity, policy_digest, producer, frontend_cache_dir, library_mode)
+    native_build_env_restore_v1("SIMPLE_NATIVE_BUILD_ENTRY", saved_native_entry)
     if transient_array_scope_state_v1() != 1:
         # A checkpoint already tried to end its scope. Never retry a failed
         # retirement or mistake an inactive owner for a new scope we can end.
