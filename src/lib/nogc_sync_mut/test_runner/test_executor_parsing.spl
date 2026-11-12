@@ -367,6 +367,37 @@ fn extract_error_message(output: text) -> text:
 
 val SCENARIO_OMISSION_PREFIX = "__SIMPLE_SCENARIO_OMISSION_V1__|"
 
+# Examples that could not run because their ENVIRONMENT is missing. Two
+# authored forms are recognised, both from the child's own per-example output:
+#   * `pending("BLOCKED: <reason>")`  -> the spec library prints
+#     `it BLOCKED: <reason> ... pending`;
+#   * a failed example whose first message line is `precondition: <reason>`
+#     (an `Err("precondition: ...")` surfaced by the example) -> `✗ <name>`
+#     followed by that line.
+# Returns (blocked_pending, blocked_failed, first_reason). A blocked example is
+# never a pass; callers subtract `blocked_failed` from the failure tally and
+# report the file as BLOCKED only when no OTHER example failed.
+# Bug: llm_caret_env_gated_specs_no_blocked_outcome_2026-11-12.
+fn parse_blocked_examples(output: text) -> (i64, i64, text):
+    var blocked_pending = 0
+    var blocked_failed = 0
+    var reason = ""
+    var after_failure = false
+    for raw_line in output.split("\n"):
+        val clean = strip_ansi(raw_line).trim()
+        if clean.starts_with("it BLOCKED:") and clean.ends_with("... pending"):
+            blocked_pending = blocked_pending + 1
+            if reason == "":
+                reason = clean[11:].replace("... pending", "").trim()
+            after_failure = false
+            continue
+        if after_failure and clean.starts_with("precondition:"):
+            blocked_failed = blocked_failed + 1
+            if reason == "":
+                reason = clean
+        after_failure = clean.starts_with("✗ ")
+    (blocked_pending, blocked_failed, reason)
+
 fn parse_test_omission_evidence(output: text) -> ([TestOmissionEvidence], text):
     var evidence: [TestOmissionEvidence] = []
     for raw_line in output.split("\n"):
@@ -906,6 +937,18 @@ fn _make_result_from_output_core(file_path: text, stdout: text, stderr: text, ex
             timed_out: false, cached: false, blocked: blocked,
             unsupported: unsupported, omission_evidence: omissions), combined)
 
+    # Environment-gated examples (`pending("BLOCKED: ...")`,
+    # `Err("precondition: ...")`): counted BLOCKED, never passed, never OK, and
+    # only when nothing else failed -- a real failure keeps the file ERROR.
+    val (blocked_pending, blocked_failed, blocked_reason) = parse_blocked_examples(combined)
+    if blocked_pending + blocked_failed > 0 and failed - blocked_failed <= 0:
+        val shown_pending = if pending >= blocked_pending: pending - blocked_pending else: 0
+        return TestFileResult(
+            path: file_path, passed: passed, failed: 0, skipped: skipped,
+            pending: shown_pending, duration_ms: duration_ms, setup_ms: 0,
+            error: "BLOCKED: {blocked_reason}", timed_out: false, cached: false,
+            blocked: blocked_pending + blocked_failed)
+
     if passed == 0 and failed == 0:
         if exit_code == 0:
             # Combined stdout/stderr has passed truncation, omission and
@@ -1401,7 +1444,7 @@ export extract_compiler_coverage_manifest_sdn, strip_compiler_coverage_manifest_
 export extract_compiler_mcdc_obligation_manifest, mcdc_obligation_manifest_absent
 export find_simple_new_binary, find_runtime_lib_dir, find_simple_binary
 export explicit_simple_binary_from_env, argv0_simple_binary, explicit_binary_before_argv0
-export extract_error_message, parse_test_output, parse_test_omission_evidence
+export extract_error_message, parse_test_output, parse_test_omission_evidence, parse_blocked_examples
 export extract_number_before, extract_number_after_colon
 export build_child_args, make_result_from_output, read_structured_test_evidence, make_result_from_structured_evidence
 export read_structured_test_expectations, vacuous_result_error, vacuous_spec_baselined, spec_source_has_raw_assert

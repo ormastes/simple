@@ -1,0 +1,249 @@
+# @cover src/compiler/30.types/units/unit_ops.spl 90%
+# @cover src/compiler/30.types/type_infer/inference_expr_ops.spl 30%
+"""
+## Purpose and audience
+Executable contract for the unit operator gate (unified unit plan 2026-11-12,
+sections 3.1, 6 and acceptance item 6). New nominal units get no implicit
+arithmetic; the §3.1 matrix is applied through declared roles; an illegal
+combination (ByteCount+BitCount, Timestamp+Timestamp, ByteIndex+ByteIndex)
+is denied with SPL-UNIT-002. The same matrix drives the compiler's inference
+gate and the interpreter's value-level dispatch, so both are checked here
+against the same declarations and must agree.
+## Operator workflow
+bin/simple test test/01_unit/compiler/types/unit_op_matrix_spec.spl
+## Compatibility and limitations
+Point roles (Timestamp with Duration delta) are registered through the pool
+API; the `unit` grammar currently declares nominal units only. The
+interpreter under src/app/interpreter is exercised through the shared
+value-level evaluator it dispatches to (unit_value_binop).
+## Verification guidance and troubleshooting
+A Deny where Allow is expected means a matrix row regressed; an Allow on a
+REJECT row means implicit arithmetic leaked back; a compiler/interpreter
+disagreement means one side stopped consulting the shared table.
+"""
+
+use std.spec
+use compiler.core.types.{reset_all_pools, TYPE_U64, TYPE_I64, unit_decl_register, unit_decl_register_origin}
+use compiler.core.parser.{parser_init_with_path, parser_has_errors}
+use compiler.core.parser_decls.{parse_module_body}
+use compiler.types.units.unit_ops.{
+    UnitOpVerdict, unit_op_verdict, UnitValueResult, unit_value_binop
+}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId}
+use compiler.hir.hir_operators.{HirBinOp}
+use compiler.types.type_infer_types.{HmInferContext, TypeInferError}
+# impl blocks for HmInferContext live in these modules; import them so the
+# static constructor and infer_binary_op are visible to the spec.
+use compiler.types.type_infer.context.*
+use compiler.types.type_infer.core.*
+use compiler.types.type_infer.generalization.*
+use compiler.types.type_infer.inference.*
+use compiler.types.type_infer.inference_control.*
+use compiler.types.type_infer.inference_expr.*
+use compiler.types.type_infer.inference_expr_calls.*
+use compiler.types.type_infer.inference_expr_ops.*
+use compiler.types.type_infer.inference_effects.*
+
+fn spec_declare_world():
+    reset_all_pools()
+    parser_init_with_path("unit ByteCount: u64 as Bc\nunit BitCount: u64 as bc\nunit DurationMs: u64 as ms\nnewtype Width = i64\n", "matrix_world.spl")
+    parse_module_body()
+    # point roles: alias_of names the delta type
+    unit_decl_register("ByteOffset", "point", "bo", TYPE_U64, "ByteCount")
+    unit_decl_register("Timestamp", "point", "ts", TYPE_U64, "DurationMs")
+    unit_decl_register("ByteIndex", "index", "bi", TYPE_U64, "")
+    unit_decl_register("Lba", "nominal", "lba", TYPE_U64, "")
+
+fn verdict_text(v: UnitOpVerdict) -> text:
+    match v:
+        case NotUnit: "notunit"
+        case Allow(r): "allow:" + r
+        case Deny(m):
+            if m.starts_with("SPL-UNIT-002"): "deny"
+            else: "deny-without-code"
+
+fn allow_of(op: text, l: text, r: text) -> text:
+    verdict_text(unit_op_verdict(op, l, r))
+
+fn ctx_with(names: [text]) -> (HmInferContext, [HirType]):
+    val ctx = HmInferContext.with_builtins()
+    var tys: [HirType] = []
+    var i = 0
+    while i < names.len():
+        val id = 900000 + i
+        ctx.symbol_names[id] = names[i]
+        ctx.symbol_kinds[id] = "struct"
+        tys.push(HirType(kind: HirTypeKind.Named(symbol: SymbolId(id: id), args: []), span: Span.empty()))
+        i = i + 1
+    (ctx, tys)
+
+fn infer_text(ctx: HmInferContext, op: HirBinOp, l: HirType, r: HirType) -> text:
+    match ctx.infer_binary_op(op, l, r, Span.empty()):
+        case Ok(t):
+            match t.kind:
+                case Bool: "ok:bool"
+                case Named(sym, _):
+                    match ctx.symbol_names.get(sym.id):
+                        case Some(n): "ok:" + n
+                        case None: "ok:?"
+                case _: "ok:other"
+        case Err(e):
+            match e:
+                case Other(message, _):
+                    if message.starts_with("SPL-UNIT-002"): "deny"
+                    else: "err:" + message
+                case _: "err:other"
+
+fn value_text(r: UnitValueResult) -> text:
+    match r:
+        case Fallthrough: "fallthrough"
+        case Truth(t): if t: "true" else: "false"
+        case Value(n, v): n + "=" + "{v}"
+        case Error(m):
+            if m.starts_with("SPL-UNIT-002"): "deny"
+            else: "error-without-code"
+
+# @manual_section: unit operator matrix
+describe "Unit operator matrix (section 3.1)":
+    describe "REQ-UNIT-OPS-01: no implicit arithmetic for new nominal units":
+        it "ByteCount+BitCount and Lba+ByteCount are denied with SPL-UNIT-002":
+            # @req REQ-UNIT-OPS-01
+            # @capture(statistics): matrix verdicts for cross-unit mixes
+            step("declare the units through the parser")
+            spec_declare_world()
+            expect(parser_has_errors()).to_equal(false)
+            step("cross-unit addition is denied")
+            expect(allow_of("add", "ByteCount", "BitCount")).to_equal("deny")
+            expect(allow_of("add", "Lba", "ByteCount")).to_equal("deny")
+            step("unit plus raw scalar is denied; scaling by a scalar is approved")
+            expect(allow_of("add", "ByteCount", "int")).to_equal("deny")
+            expect(allow_of("mul", "ByteCount", "int")).to_equal("allow:ByteCount")
+            expect(allow_of("mul", "int", "ByteCount")).to_equal("allow:ByteCount")
+            expect(allow_of("div", "ByteCount", "int")).to_equal("allow:ByteCount")
+            step("raw numerics never reach the matrix")
+            expect(allow_of("add", "int", "int")).to_equal("notunit")
+
+        it "same-unit counts add and subtract, ratio and bitwise are denied":
+            # @req REQ-UNIT-OPS-01
+            spec_declare_world()
+            expect(allow_of("add", "ByteCount", "ByteCount")).to_equal("allow:ByteCount")
+            expect(allow_of("sub", "ByteCount", "ByteCount")).to_equal("allow:ByteCount")
+            expect(allow_of("div", "ByteCount", "ByteCount")).to_equal("deny")
+            expect(allow_of("mul", "ByteCount", "ByteCount")).to_equal("deny")
+            expect(allow_of("bit", "ByteCount", "ByteCount")).to_equal("deny")
+            expect(allow_of("mod", "ByteCount", "ByteCount")).to_equal("deny")
+            expect(allow_of("cmp", "ByteCount", "ByteCount")).to_equal("allow:bool")
+            expect(allow_of("cmp", "ByteCount", "BitCount")).to_equal("deny")
+
+    describe "REQ-UNIT-OPS-02: points, deltas, and indices":
+        it "Timestamp-Timestamp is Duration and Timestamp+Timestamp is denied":
+            # @req REQ-UNIT-OPS-02
+            # @capture(statistics): point/delta verdicts
+            spec_declare_world()
+            expect(allow_of("sub", "Timestamp", "Timestamp")).to_equal("allow:DurationMs")
+            expect(allow_of("add", "Timestamp", "Timestamp")).to_equal("deny")
+            expect(allow_of("add", "Timestamp", "DurationMs")).to_equal("allow:Timestamp")
+            expect(allow_of("add", "DurationMs", "Timestamp")).to_equal("allow:Timestamp")
+            expect(allow_of("sub", "Timestamp", "DurationMs")).to_equal("allow:Timestamp")
+            expect(allow_of("sub", "DurationMs", "Timestamp")).to_equal("deny")
+            expect(allow_of("add", "DurationMs", "DurationMs")).to_equal("allow:DurationMs")
+
+        it "ByteOffset+ByteCount is ByteOffset and ByteIndex+ByteIndex is denied":
+            # @req REQ-UNIT-OPS-02
+            spec_declare_world()
+            expect(allow_of("add", "ByteOffset", "ByteCount")).to_equal("allow:ByteOffset")
+            expect(allow_of("sub", "ByteOffset", "ByteOffset")).to_equal("allow:ByteCount")
+            expect(allow_of("add", "ByteIndex", "ByteIndex")).to_equal("deny")
+            expect(allow_of("cmp", "ByteIndex", "ByteIndex")).to_equal("allow:bool")
+            expect(allow_of("mul", "ByteIndex", "int")).to_equal("deny")
+
+    describe "REQ-UNIT-OPS-03: legacy newtype compat keeps its derived operators":
+        it "Width+Width, Width*Width stay allowed; Width+ByteCount is denied":
+            # @req REQ-UNIT-OPS-03
+            spec_declare_world()
+            expect(allow_of("add", "Width", "Width")).to_equal("allow:Width")
+            expect(allow_of("mul", "Width", "Width")).to_equal("allow:Width")
+            expect(allow_of("div", "Width", "Width")).to_equal("allow:Width")
+            expect(allow_of("add", "Width", "ByteCount")).to_equal("deny")
+
+    describe "REQ-UNIT-OPS-04: compiler gate applies the matrix before the numeric fallback":
+        it "infer_binary_op denies ByteCount+BitCount and types Timestamp-Timestamp as DurationMs":
+            # @req REQ-UNIT-OPS-04
+            # @capture(statistics): inference verdicts through HmInferContext
+            spec_declare_world()
+            val (ctx, tys) = ctx_with(["ByteCount", "BitCount", "Timestamp", "DurationMs", "Width"])
+            step("illegal combinations are SPL-UNIT-002 errors")
+            expect(infer_text(ctx, HirBinOp.Add, tys[0], tys[1])).to_equal("deny")
+            expect(infer_text(ctx, HirBinOp.Add, tys[2], tys[2])).to_equal("deny")
+            step("approved combinations keep or derive the unit identity")
+            expect(infer_text(ctx, HirBinOp.Add, tys[0], tys[0])).to_equal("ok:ByteCount")
+            expect(infer_text(ctx, HirBinOp.Sub, tys[2], tys[2])).to_equal("ok:DurationMs")
+            expect(infer_text(ctx, HirBinOp.Lt, tys[0], tys[0])).to_equal("ok:bool")
+            expect(infer_text(ctx, HirBinOp.Mul, tys[4], tys[4])).to_equal("ok:Width")
+            step("a unit plus a raw int is denied, not unified")
+            val int_ty = HirType(kind: HirTypeKind.Int(64, true), span: Span.empty())
+            expect(infer_text(ctx, HirBinOp.Add, tys[0], int_ty)).to_equal("deny")
+            expect(infer_text(ctx, HirBinOp.Mul, tys[0], int_ty)).to_equal("ok:ByteCount")
+
+        it "raw int arithmetic still unifies through the numeric fallback":
+            # @req REQ-UNIT-OPS-04
+            spec_declare_world()
+            val (ctx, _tys) = ctx_with(["ByteCount"])
+            val int_ty = HirType(kind: HirTypeKind.Int(64, true), span: Span.empty())
+            match ctx.infer_binary_op(HirBinOp.Add, int_ty, int_ty, Span.empty()):
+                case Ok(t):
+                    match t.kind:
+                        case Int(bits, _): expect(bits).to_equal(64)
+                        case _: assert_true(false)
+                case Err(_): assert_true(false)
+
+    describe "REQ-UNIT-OPS-05: interpreter parity":
+        it "value-level dispatch yields the same verdicts and keeps the unit tag":
+            # @req REQ-UNIT-OPS-05
+            # @capture(statistics): interpreter-side results for the same declarations
+            spec_declare_world()
+            step("approved ops keep identity")
+            expect(value_text(unit_value_binop("add", "", "ByteCount", 12, "ByteCount", 30))).to_equal("ByteCount=42")
+            expect(value_text(unit_value_binop("sub", "", "Timestamp", 50, "Timestamp", 20))).to_equal("DurationMs=30")
+            expect(value_text(unit_value_binop("mul", "", "ByteCount", 6, "int", 7))).to_equal("ByteCount=42")
+            expect(value_text(unit_value_binop("cmp", "lt", "ByteCount", 1, "ByteCount", 2))).to_equal("true")
+            step("denied ops are SPL-UNIT-002, the same code the compiler emits")
+            expect(value_text(unit_value_binop("add", "", "ByteCount", 1, "BitCount", 2))).to_equal("deny")
+            expect(value_text(unit_value_binop("add", "", "Timestamp", 1, "Timestamp", 2))).to_equal("deny")
+            expect(value_text(unit_value_binop("add", "", "ByteIndex", 1, "ByteIndex", 2))).to_equal("deny")
+            step("raw numerics fall through to the interpreter's numeric path")
+            expect(value_text(unit_value_binop("add", "", "int", 1, "int", 2))).to_equal("fallthrough")
+
+        it "overflow and division by zero never reach unchecked arithmetic":
+            # @req REQ-UNIT-OPS-05
+            spec_declare_world()
+            val big: i64 = 9223372036854775807
+            expect(value_text(unit_value_binop("add", "", "ByteCount", big, "ByteCount", 1))).to_equal("deny")
+            expect(value_text(unit_value_binop("mul", "", "ByteCount", big, "int", 2))).to_equal("deny")
+            expect(value_text(unit_value_binop("div", "", "ByteCount", 5, "int", 0))).to_equal("deny")
+
+        it "compiler and interpreter agree on every matrix row":
+            # @req REQ-UNIT-OPS-05
+            # @capture(statistics): row-by-row agreement count
+            spec_declare_world()
+            val ops: [text] = ["add", "sub", "mul", "div"]
+            val names: [text] = ["ByteCount", "BitCount", "Timestamp", "DurationMs", "ByteIndex", "Width", "int"]
+            var rows = 0
+            var agree = 0
+            for op in ops:
+                for l in names:
+                    for r in names:
+                        rows = rows + 1
+                        val c = verdict_text(unit_op_verdict(op, l, r))
+                        val i = value_text(unit_value_binop(op, "", l, 3, r, 1))
+                        val c_allow = c.starts_with("allow:")
+                        val i_allow = i.contains("=")
+                        val c_deny = c == "deny"
+                        val i_deny = i == "deny"
+                        val c_nu = c == "notunit"
+                        val i_nu = i == "fallthrough"
+                        if (c_allow and i_allow) or (c_deny and i_deny) or (c_nu and i_nu):
+                            agree = agree + 1
+            expect(rows).to_equal(196)
+            expect(agree).to_equal(rows)

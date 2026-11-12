@@ -493,6 +493,41 @@ The distinction in one line: **in-development means the code is missing;
 everything else means the test or the environment is wrong.** Only the first is
 this tag's business.
 
+### `BLOCKED` — the environment is missing (2026-11-12)
+
+An example that cannot run on this host because a server, fixture config,
+helper binary or credential is absent is **BLOCKED**: counted, visible, never a
+pass, never `OK`, and never a bare failure. Two authored forms are recognised:
+
+| Spec writes | Child prints | Counted as |
+|---|---|---|
+| `pending("BLOCKED: <reason>")` | `it BLOCKED: <reason> ... pending` | blocked |
+| an example that fails with `Err("precondition: <reason>")` | `✗ <name>` then `precondition: <reason>` | blocked |
+
+Use the `precondition:` prefix **only** when the real cause is a missing
+environment (unset/relative `SMUX_*_TEST_CONFIG`, no `/bin/sh`, no live server).
+A malformed fixture the operator did provide, or a product defect, is a plain
+failure.
+
+File verdict rules (`verdict_outcome_token`, `src/app/test_daemon/light_protocol.spl`):
+
+- any real failure → `outcome=ERROR` (a blocked example never hides a failure);
+- otherwise any blocked example → `outcome=BLOCKED`, also when other examples passed;
+- the verdict line carries `blocked=<n>` beside `in_development=<n>`, and a
+  `SPEC FILE BLOCKED: <path> blocked=<n> reason=<first reason>` line follows it;
+- `Results:` appends `, <n> blocked` and the summary prints `Blocked: <n>` and
+  `BLOCKED <path>: <reason>` instead of `PASS`;
+- **exit code 6** (`TestRunOutcome.BlockedScenario`) — distinct from pass (0),
+  failure (1) and unverified (5), so each gate decides how to treat it;
+- `test_db.sdn` records the row as status `blocked` and `test_result.md` has a
+  `Blocked (environment missing)` row.
+
+The Rust seed's single-file runner prints the same field
+(`... skipped=<n> blocked=<n> dropped=<n>`, `outcome=BLOCKED`, exit 6). When an
+older seed child prints no `outcome=BLOCKED`, the pure-Simple runner adds its
+own BLOCKED verdict line after the child's, and the last verdict line is the
+authoritative one. Pinned by `test/01_unit/app/test_daemon/blocked_outcome_spec.spl`.
+
 ---
 ## Gherkin-Style Syntax
 

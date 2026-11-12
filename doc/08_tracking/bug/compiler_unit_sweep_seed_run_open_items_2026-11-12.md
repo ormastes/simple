@@ -30,13 +30,25 @@ code/spec, so a retarget would be weakening the assertion.
 |---|---|---|
 | `bootstrap/llvm_aggregate_shared_binding_contract_spec.spl` (2 tests) | `expected -1 to equal 0` | It spawns `bin/simple compile`, and a fresh worktree has no `bin/simple` (exit -1). Needs a deployed full CLI. |
 
+## Resolved since filing
+
+- `bootstrap/entry_package_facade_precedence_spec.spl`: a spec bug. The fixture string `".variables.{env_get_or}"` was unescaped interpolation (#8561).
+- `30.types/cfg_decl_check_spec.spl` and `50.mir/entry_closure_imported_class_probe_symbols_spec.spl`: private functions were imported across modules (`empty_type_env`, `empty_subst_map`, `probe_events_len`); they are now `pub` (#8558).
+
+## Real source bug, not fixed here
+
+- `20.hir/export_origin_generated_comment_foreign_package_spec.spl` ("does not fail a package sibling that prebinds the facade's exports"). The staged `[W-HIR-UNDECL-IMPORT-001]` diagnostic, added by 54356c20894 at `src/compiler/20.hir/hir_lowering/_Items/module_import_registration.spl:1105-1112`, also fires on the implicit package-sibling glob prebind (`register_package_sibling_symbols`, `module_import_resolution.spl:158`). The message there names a `use pkg.runtime.{...}` that the importer never wrote. The diagnostic was meant for braced imports only, so it needs to know whether it is running under glob expansion. Owner: the 54356c20894 lane.
+
+## Probably owned elsewhere
+
+- `50.mir/mir_verify/mir_verify_rule_registry_spec.spl`: `config/compiler/mir_verify_rules.sdn` parses, but its `rules:` block sequence of maps comes back with 0 rows (the spec expects 18). The SDN block-sequence parsing in `src/lib/common/sdn/parser.spl` was being edited in the shared checkout at the time.
+
 ## Not yet triaged (behavioural; need a focused run)
 
-- `bootstrap/entry_package_facade_precedence_spec.spl` (2 tests): `_driver_entry_import_module_paths(file_read(facade))` returns `[]` for a fixture `__init__.spl` holding `export use std.env.variables.{env_get_or}`. A standalone repro of the same scan on the same content (relative path, no `SIMPLE_SCV_SNAPSHOT_ROOT`) returns 1 path. The difference is in the fixture path or the snapshot-root env, not in the scanner.
-- `20.hir/bootstrap_regressions/unresolved_name_eager_resolution_spec.spl` (2), `20.hir/export_origin_generated_comment_foreign_package_spec.spl` (1, new `W-HIR-UNDECL-IMPORT-001` on a package sibling that prebinds facade exports).
-- `30.types/cfg_decl_check_spec.spl` (1): `semantic: private fn empty_type_env of type_infer_types.spl is not visible to type_infer/__init__.spl`. `src/compiler/30.types/__init__.spl:20` export-uses the private `empty_type_env` (and `empty_subst_map`).
-- `30.types/written_any_compile_mode_spec.spl` (1).
-
+- `20.hir/bootstrap_regressions/unresolved_name_eager_resolution_spec.spl` (2 tests). A name declared in a never-imported sibling module produces no `unresolved name` error.
+- `30.types/written_any_compile_mode_spec.spl` (1). The `assert_equal` failure carries no step detail.
+- 50.mir (seed-run at `6a8c584709f`, partial): roughly 30 failing files, including closure capture writes, compound-assign mapping, enum match divergence, the bare-variant retained subject, the hwir riscv projections and the generic type-param eq/hash lowering. Per-file detail will follow in the 50.mir sweep report.
+- Possible seed hangs: `50.mir/flat_pool_reader_mir_lowering_spec.spl` and `50.mir/mir_receiver_shapes_spec.spl` were each still running when their 1800s chunk timed out. Each is being re-run alone with a 600s timeout.
 ## Side finding
 
 `src/app/io/_CliCompile/native_build.spl:197` `_nb_resolve_segs` keeps its own
