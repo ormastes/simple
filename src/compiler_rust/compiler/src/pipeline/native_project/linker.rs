@@ -2264,7 +2264,7 @@ int main(int argc, char** argv) {
                                 cmd.arg("-Wl,--no-whole-archive");
                             }
                         } else {
-                            let roots = Self::runtime_retention_symbols(
+                            let mut roots = Self::runtime_retention_symbols(
                                 object_paths,
                                 &main_o,
                                 init_o.as_ref(),
@@ -2284,15 +2284,134 @@ int main(int argc, char** argv) {
                                     runtime_lib.display()
                                 ));
                             }
+                            // core-c-bootstrap layering: native_all first, the
+                            // core-C supplement second, `--allow-multiple-definition`
+                            // (below). "First definition wins" is decided by
+                            // member EXTRACTION order, not archive order: a
+                            // shared rt_* symbol first needed after
+                            // runtime_native.obj is pulled (for a C-only
+                            // rt_iocp_*/rt_process_* root) resolves to the C
+                            // copy, whose rt_core_as_array/as_string registry
+                            // rejects every Rust-owned handle. Measured
+                            // 2026-11-12: the Windows Stage 2 compiler printed
+                            // "rejected invalid array handle before dereference"
+                            // at startup and spun to the sanity timeout; 774 of
+                            // its referenced rt_* symbols were defined by both
+                            // archives, 26 of them array-registry readers.
+                            // Root every symbol BOTH archives define so the
+                            // native_all members are extracted before the
+                            // supplement is scanned -- the same discipline the
+                            // Linux capsule branch applies ("force the actual
+                            // native-all member before weak fallback definitions
+                            // arrive in the supplement").
+                            if runtime_bundle_requests_core_c_bootstrap(&self.config.runtime_bundle) {
+                                let supplement = build_core_c_runtime_supplement_library(
+                                    &temp_dir.join("core_c_bootstrap_supplement"),
+                                )
+                                .ok_or_else(|| "failed to build the core-c-bootstrap runtime supplement".to_string())?;
+                                let owned = Self::read_defined_symbol_set(runtime_lib)?;
+                                let supplied = Self::read_defined_symbol_set(&supplement)?;
+                                if owned.is_empty() || supplied.is_empty() {
+                                    return Err(format!(
+                                        "core-c-bootstrap: could not read the defined symbol set of {} / {} -- refusing to link with an unknown runtime owner",
+                                        runtime_lib.display(),
+                                        supplement.display()
+                                    ));
+                                }
+                                let mut shared: Vec<String> = supplied
+                                    .iter()
+                                    .filter(|symbol| owned.contains(*symbol) && !roots.contains(*symbol))
+                                    .cloned()
+                                    .collect();
+                                shared.sort();
+                                // `-u`/`/include` roots are NOT enough on COFF: lld
+                                // handles them after the input-file resolution
+                                // loop, so by then runtime_native.obj (fetched for
+                                // a C-only reference) has already supplied the
+                                // first definition of every shared symbol it
+                                // carries. Measured 2026-11-12 on the rooted Stage 2
+                                // link: 181 shared symbols still resolved into the
+                                // supplement, rt_utf8_validate among them. Plain
+                                // OBJECTS are defined the moment they are read, so
+                                // extract the native_all members that define a
+                                // shared symbol and list them ahead of both archives.
+                                let shared_set: HashSet<&String> = shared.iter().collect();
+                                let listing = nm_command()?
+                                    .arg("-A")
+                                    .arg("-g")
+                                    .arg("-p")
+                                    .arg("--defined-only")
+                                    .arg(external_tool_path(runtime_lib))
+                                    .output()
+                                    .map_err(|e| format!("nm -A {}: {e}", runtime_lib.display()))?;
+                                if !listing.status.success() {
+                                    return Err(format!("nm -A {} failed", runtime_lib.display()));
+                                }
+                                let mut members: Vec<String> = Vec::new();
+                                for line in String::from_utf8_lossy(&listing.stdout).lines() {
+                                    let parts: Vec<&str> = line.split_whitespace().collect();
+                                    if parts.len() < 3 {
+                                        continue;
+                                    }
+                                    let name = parts[parts.len() - 1].to_string();
+                                    if !shared_set.contains(&name) {
+                                        continue;
+                                    }
+                                    let member = parts[0].trim_end_matches(':').rsplit(':').next().unwrap_or("");
+                                    if !member.is_empty() && !members.iter().any(|m| m == member) {
+                                        members.push(member.to_string());
+                                    }
+                                }
+                                if members.is_empty() {
+                                    return Err(format!(
+                                        "core-c-bootstrap: no native_all member defines any of the {} shared rt_* symbols ({})",
+                                        shared.len(),
+                                        runtime_lib.display()
+                                    ));
+                                }
+                                let extract_dir = temp_dir.join("native_all_owner_members");
+                                std::fs::create_dir_all(&extract_dir)
+                                    .map_err(|e| format!("create {}: {e}", extract_dir.display()))?;
+                                let archive_abs = if runtime_lib.is_absolute() {
+                                    runtime_lib.to_path_buf()
+                                } else {
+                                    std::env::current_dir().map_err(|e| e.to_string())?.join(runtime_lib)
+                                };
+                                let ar = super::tools::find_archive_tool()?;
+                                let status = std::process::Command::new(&ar)
+                                    .current_dir(&extract_dir)
+                                    .arg("x")
+                                    .arg(external_tool_path(&archive_abs))
+                                    .args(&members)
+                                    .status()
+                                    .map_err(|e| format!("{ar} x: {e}"))?;
+                                if !status.success() {
+                                    return Err(format!("{ar} x {} failed extracting {} owner member(s)", archive_abs.display(), members.len()));
+                                }
+                                for member in &members {
+                                    let obj = extract_dir.join(member);
+                                    if !obj.is_file() {
+                                        return Err(format!("owner member {} was not extracted from {}", member, archive_abs.display()));
+                                    }
+                                    cmd.arg(external_tool_path(&obj));
+                                }
+                                roots.extend(shared);
+                            }
                             // x64 `extern "C"` names are undecorated -- measured
                             // with nm on the real archive (`T rt_api_surface_extract`,
                             // `I __IMPORT_DESCRIPTOR_kernel32`, both bare).
-                            for root in &roots {
-                                if is_msvc {
+                            // Hundreds of roots exceed CreateProcess's 32 KiB
+                            // command line; clang expands `@file`.
+                            if is_msvc {
+                                for root in &roots {
                                     msvc_link_args.push(format!("/INCLUDE:{root}"));
-                                } else {
-                                    cmd.arg(format!("-Wl,-u,{root}"));
                                 }
+                            } else {
+                                let rsp_path = temp_dir.join("native_all_roots.rsp");
+                                let body: String = roots.iter().map(|root| format!("-Wl,-u,{root}\n")).collect();
+                                std::fs::write(&rsp_path, body)
+                                    .map_err(|e| format!("write {}: {e}", rsp_path.display()))?;
+                                cmd.arg(format!("@{}", rsp_path.display()));
                             }
                             cmd.arg(external_tool_path(runtime_lib));
                         }

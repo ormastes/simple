@@ -1,0 +1,53 @@
+# @req REQ-MEM-1-1
+# @req REQ-MEM-3-8
+"""
+## Purpose and audience
+`simple compile --nogc-strict` is the operator switch for a conforming no-GC
+build (memory hardening plan §1.1 / §3.8): it must reach
+`CompileOptions.nogc_require_strict`, default to off, and survive the option
+normalization copy that has historically dropped tail fields of large
+aggregates. Category: Compiler CLI.
+## Operator workflow
+bin/simple test test/01_unit/app/cli_nogc_strict_flag_spec.spl
+## Compatibility and limitations
+Argument parsing and option transport only; the policy the flag enables is
+covered by test/01_unit/compiler/semantics/param_effects/nogc_admission_truth_spec.spl.
+## Verification guidance and troubleshooting
+RED means the flag is no longer recognized, is on by default, or
+`compileoptions_normalize_mir_optimization` stopped preserving the field.
+"""
+use std.spec.*
+use app.io._CliCompile.compile_opt_and_driver.{cli_compile_nogc_strict_requested}
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.common.driver_compile_options.{compileoptions_normalize_mir_optimization}
+
+describe "compile --nogc-strict flag":
+    it "is off unless the operator asks for it":
+        expect(cli_compile_nogc_strict_requested(["compile", "a.spl"])).to_equal(false)
+        expect(cli_compile_nogc_strict_requested([])).to_equal(false)
+        expect(cli_compile_nogc_strict_requested(["compile", "--xray", "a.spl"])).to_equal(false)
+
+    it "is recognized anywhere in the compile argument list":
+        expect(cli_compile_nogc_strict_requested(["compile", "--nogc-strict", "a.spl"])).to_equal(true)
+        expect(cli_compile_nogc_strict_requested(["a.spl", "--native", "--nogc-strict"])).to_equal(true)
+
+    it "does not accept a prefix or a value form":
+        expect(cli_compile_nogc_strict_requested(["--nogc-strict=1"])).to_equal(false)
+        expect(cli_compile_nogc_strict_requested(["--nogc"])).to_equal(false)
+
+describe "nogc_require_strict option transport":
+    it "defaults to a non-conforming (legacy-tolerant) build":
+        val options = driver_core_compile_options_default()
+        expect(options.nogc_require_strict).to_equal(false)
+
+    it "survives MIR optimization normalization when set":
+        var options = driver_core_compile_options_default()
+        options.nogc_require_strict = true
+        options.release = true
+        val normalized = compileoptions_normalize_mir_optimization(options)
+        expect(normalized.nogc_require_strict).to_equal(true)
+        expect(normalized.release).to_equal(true)
+
+    it "stays off through normalization when not set":
+        val normalized = compileoptions_normalize_mir_optimization(driver_core_compile_options_default())
+        expect(normalized.nogc_require_strict).to_equal(false)
