@@ -63,34 +63,56 @@ Spec: `test/01_unit/compiler/bootstrap/entry_closure_export_brace_sibling_spec.s
 (0/5 before, 5/5 after, seed `bb472edeb8170164…`). Six facades in the tree
 use the braced form; this was the first one inside the full-CLI closure.
 
-## Class B — OPEN: `.x` relative imports in the symlinked t32 app dirs
+## Class B — FIXED (2026-11-12): `.x` relative imports in the symlinked t32 app dirs
 
 ~60 of the 95 errors: every `use .types.{...}` / `.bridge` / `.render` /
 `.commands` / `.cli_shell` / `.error_codes` / `.session` in
 `src/app/t32_cli/*` and every `.session_state` / `.session_tools` /
 `.json_helpers` / ... in `src/app/mcp_t32/*` report `missing module surface
-for .x`, with `unresolved name: t32_validate_identifier` (x9) downstream.
-All those files DID get phase-2 surfaces (log lines 290, 1448-1478, 4706)
-under their alias path `src/app/t32_cli/...`; the miss is in phase-3
-resolution. `src/app/t32_cli` and `src/app/mcp_t32` are symlinks into
-`examples/10_tooling/trace32_tools/`.
+for .x`. All those files DID get phase-2 surfaces under their alias path
+`src/app/t32_cli/...`; the miss is in phase-3 resolution. `src/app/t32_cli`
+and `src/app/mcp_t32` are symlinks into `examples/10_tooling/trace32_tools/`.
 
-Evidence that the symlink is the variable: the same `app.t32_cli.mod` entry
-native-built with the same Stage 2 binary from a fresh worktree resolves every
-`.x` import (0 "missing module surface" across 236 sources) -- but that run
-compiled inside an SCV snapshot (`build/scv/snapshots/scv-revision-v2-...`),
-which materialises the aliases as copied directories. The matrix compiles the
-pinned checkout in place (relative `src/app/...` paths in the log, no
-`build/scv/snapshots`), where the symlinks are real. Forcing the in-place
-shape from a worktree (`SIMPLE_SCV_SNAPSHOT_ROOT=$PWD`) is refused
-(`parse-shard closure authority rejected: snapshot-open-not-owned`), so no
-cheap reproducer yet. Leads: the frozen `import_target_names` freeze in
-`module_surface_registry_index.spl:550-629` and the physical-path branch of
-`resolve_module_key_relative` (`module_import_registration.spl:1233`), which
-returns the physical resolution even when it is "" instead of falling through
-to the logical `app.t32_cli.types` spelling. Run 13 (`f8ad54b28467`) had the
-same symlinks in its closure and passed HIR, so the regression is inside
-`f8ad54b28467..c7431e088615`.
+**Reproducer (run12, ~1 min, same Stage 2 binary `574c95d2...`).** The
+matrix row's real argv is built by
+`scripts/bootstrap/phase-c-backend-commands.shs` `bootstrap_phase_c_run_tool_build`:
+`native-build <entry> --backend=llvm --low-memory --entry-closure --cache-dir ..
+--timeout ..` with `SIMPLE_FILE_WORKERS=0 SIMPLE_MIR_SHARD_COUNT=8` -- a
+positional entry, NO `--source` roots. That shape takes the in-process
+capsule route (`driver:compile:start ... input_files=src/app/cli/<entry>`,
+relative), which never admits an SCV snapshot, so the symlinks stay real.
+A t32-only probe entry (`use app.t32_cli.mod.{t32_cli_main}`) under
+`src/app/cli/` with that argv and the row env gives
+`[collect-all] 16 module(s) poisoned, 54 error(s) collected across 236
+source(s)`, all 54 `missing module surface for .<sibling>` (mod.spl x20,
+cli_shell x15, session_tools x13, action_tools x10, bridge x6, ...) -- the
+run-16 shape. The same entry with `--source` roots (coordinator route, SCV
+snapshot, symlinked dirs materialised as real dirs) resolves every import.
+
+**Root cause.** `ModuleSurface.canonical_path` is `rt_path_absolute`
+(realpath), so for a symlinked facade it is
+`.../examples/10_tooling/trace32_tools/t32_cli/mod.spl`; `canonical_name`
+is derived from it too (`examples.10_tooling.trace32_tools.t32_cli.mod`),
+while the registry key is the lexical `module_name` `app.t32_cli.mod` (the
+only spellings in `index_by_name`). Both relative resolvers --
+`module_surface_resolve_relative_key` (`module_surface_registry_index.spl`,
+feeds the frozen `import_target_names`) and `resolve_module_key_relative`
+(`module_import_registration.spl`, phase-3 fallback at
+`module_import_resolution.spl:510`) -- derive the sibling key from
+`canonical_path` (`examples.10_tooling.trace32_tools.t32_cli.types`), miss,
+and RETURN that miss instead of splicing the logical sibling
+(`app.t32_cli` + `.types`). The early return is deliberate for the twin-tier
+case (2026-10-13, `relative_tier_sibling_owner_spec.spl`), so the fix keeps
+it whenever the facade's own realpath-derived spelling IS a registered key
+and falls through to the logical splice (from `module_name` / `ctx_name`,
+the registered spelling) only for a displaced facade.
+
+Red -> green: `test/01_unit/compiler/hir/symlinked_facade_relative_sibling_spec.spl`
+(builds a registry on the tracked symlink with synthetic module text) 0/2
+before, 2/2 after; `relative_tier_sibling_owner_spec.spl` 4/4 and
+`module_surface_numbered_path_spec.spl` 4/4 unchanged. The Stage 2 binary is
+baked from `c7431e088615`, so run12 cannot be re-run green until the next
+Stage 2 is built from this source; the spec is the green evidence.
 
 ## Class C — FIXED (2026-11-12): `app.mcp_t32.protocol` uses names it never imports
 
