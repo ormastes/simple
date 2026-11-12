@@ -62,3 +62,40 @@ J2 lane: `build/bootstrap-jgen/stage3/aarch64-unknown-linux-gnu/stage3-native-ca
 3. Consider aHIR-level unit-type alias table so `()` and `Nil` share one canonical identity.
 4. After fix: K lane (re-pin, stage2, stage3) -- scripts already staged as run-k-stage2.sh /
    run-k-stage3.sh in the jgen worktree.
+
+## Decisive context (2026-11-13 ~07:05): this is the 02821241513 family, not Nil-specific
+
+`02821241513` "fix(blocks): sql/shell helpers return the SqlQuery/ShellCommands
+payload types" (IN the df719eff44cf..3a0aac3773a range) records the identical
+pattern: "The seed accepted it; the Windows Phase 2 MIR rejected both
+constructions (payload type mismatch at 0)". So the enum-payload check is known
+to DIVERGE between the seed-built compiler and self-hosted/Phase-2 binaries --
+6bfa14881e1 is not the cause; it merely added more loosely-typed constructions
+for the stricter self-hosted check to reject. The CustomBlock instance
+(SIMPLE_ENUM_PAYLOAD_TRACE=1, 57-min single-module repro on the J2 stage2 binary):
+
+    [enum-payload] module=compiler.hir.generated.hir_codec expected='named#63'
+    remembered='named#63?' source='named#63?' mir=present
+    at hc_dec_hir_expr_kind line ~5102: HirExprKind.CustomBlock(f_kind, f_value)
+    with `var f_value: BlockValue? = nil` vs declared payload `value: BlockValue`
+    (hir_definitions.spl:689).
+
+The sibling error "match has multiple wildcard arms (arm 1)" in
+core_codegen.translate_function_with_ir_handle_impl is the SAME class: a
+match-validation diagnostic the self-hosted binary's frontend emits and the
+seed's does not. Root cause is a fixpoint break in match/check evaluation
+between seed and self-hosted codegen -- NOT in Nil handling.
+
+## Fix strategy (two lanes)
+
+A. Whack-a-mole (precedent 02821241513): align each rejected construction to
+   the declared payload type (unwrap the optional at the ctor site). The
+   hir_codec instance is GENERATED code -- fix the codec generator's optional
+   local emission, not the file. Sites from the J2 log: hir_codec x2
+   (CustomBlock, HirExprKind decode), expression_core/statements (Break),
+   accessor_forwarding (MethodCall), declaration_default_rewrite (StringLit),
+   convert_nodes (ExprKind.StringLit), cranelift_jit_lane (CompileResult x2),
+   driver_aot_vhdl_output (CodegenError), core_codegen (wildcard arm).
+B. Root cause: find the match/check-evaluation divergence (likely match-arm
+   selection or wildcard handling) between seed and self-hosted codegen; that
+   fixes the whole family and the "multiple wildcard arms" class too.
