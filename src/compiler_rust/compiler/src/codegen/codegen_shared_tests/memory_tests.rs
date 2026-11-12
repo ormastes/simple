@@ -427,6 +427,7 @@ shared_module_test!(shared_closure_create_and_indirect_call,
             return_type: TypeId::I64,
             args: vec![arg],
             effect: crate::mir::Effect::Compute,
+            signature_declared: false,
         });
         block.terminator = Terminator::Return(Some(dest));
 
@@ -455,6 +456,7 @@ shared_module_test!(shared_closure_create_and_indirect_call,
             return_type: TypeId::I64,
             args: vec![VReg(1)],
             effect: crate::mir::Effect::Compute,
+            signature_declared: false,
         },
     ]
 );

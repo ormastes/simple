@@ -494,6 +494,14 @@ pub enum MirInst {
         args: Vec<VReg>,
         /// Effect annotation for the call
         effect: Effect,
+        /// `param_types`/`return_type` are the callee's DECLARED function
+        /// type and the arguments were coerced to those slots
+        /// (`coerce_args_for_param_slots`). Then an `ANY` slot is, by the
+        /// declared-slot convention, a tagged `RuntimeValue` word (an erased
+        /// generic `T`, or `any`) rather than a value of unknown encoding,
+        /// and the JIT closure ABI may carry it. `false` when the signature
+        /// is only a guess from the argument types.
+        signature_declared: bool,
     },
 
     // =========================================================================

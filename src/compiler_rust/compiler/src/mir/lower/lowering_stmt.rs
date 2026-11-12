@@ -520,6 +520,18 @@ impl<'a> MirLowerer<'a> {
                 let val_reg = self.float_slot_from_int_literal(target.ty, value, raw_val_reg)?;
                 let ty = if val_reg != raw_val_reg { target.ty } else { value.ty };
 
+                // A tagged value (`any`, erased `T`) assigned to a RAW scalar
+                // field is decoded, as struct construction does. `p.x = v`
+                // with `v: any = 4` stored the tagged word (`p.x` read 32).
+                let val_reg = if matches!(target.kind, HirExprKind::FieldAccess { .. })
+                    && val_reg == raw_val_reg
+                    && !Self::is_raw_literal_typed_any(value)
+                {
+                    self.unbox_scalar_for_raw_slot(target.ty, value.ty, val_reg)?
+                } else {
+                    val_reg
+                };
+
                 // Emit unit bound check if assigning to a unit type with constraints
                 self.emit_unit_bound_check(ty, val_reg)?;
 
@@ -2745,11 +2757,26 @@ impl<'a> MirLowerer<'a> {
         use crate::hir::BinOp;
         use crate::mir::MirInst;
 
-        let loop_ty = range_counter_type(start_expr.ty, end_expr.ty);
+        // A range bound that is statically `ANY` is a tagged word; the
+        // counter is a raw integer. Decode the bound once (`for i in 0..v`
+        // with `v: any = 4` ran 32 iterations: the raw counter was compared
+        // with the tagged 4).
+        let raw_bound_ty = |ty: TypeId| if ty == TypeId::ANY { TypeId::I64 } else { ty };
+        let loop_ty = range_counter_type(raw_bound_ty(start_expr.ty), raw_bound_ty(end_expr.ty));
 
         // Lower start and end expressions
         let start_reg = self.lower_expr(start_expr)?;
         let end_reg = self.lower_expr(end_expr)?;
+        let start_reg = if start_expr.ty == TypeId::ANY && !Self::is_raw_literal_typed_any(start_expr) {
+            self.unbox_scalar_for_raw_slot(TypeId::I64, TypeId::ANY, start_reg)?
+        } else {
+            start_reg
+        };
+        let end_reg = if end_expr.ty == TypeId::ANY && !Self::is_raw_literal_typed_any(end_expr) {
+            self.unbox_scalar_for_raw_slot(TypeId::I64, TypeId::ANY, end_reg)?
+        } else {
+            end_reg
+        };
 
         // Bind the loop variable: prefer the exact HIR-allocated local index
         // (see HirStmt::For binder above — name search is ambiguous with

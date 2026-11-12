@@ -3205,6 +3205,7 @@ fn vector_add(a: i64, b: i64, out: i64, n: i64):
                 return_type: crate::hir::TypeId::I32,
                 args: vec![],
                 effect: crate::mir::Effect::Compute,
+                signature_declared: false,
             },
             "indirect dispatch",
         );

@@ -926,6 +926,7 @@ pub fn compile_instruction<M: Module>(
             return_type,
             args,
             effect: _,
+            ..
         } => {
             compile_indirect_call(ctx, builder, dest, *callee, param_types, *return_type, args);
         }
