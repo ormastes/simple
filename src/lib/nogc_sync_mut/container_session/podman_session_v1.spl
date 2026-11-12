@@ -1,0 +1,202 @@
+# Podman-backed session for the Simple container layer.
+#
+# One rootless `podman run --rm` workload with a caller-chosen name, bind
+# mounts and an owner label. This is the small, grant-free sibling of
+# `LinuxOciRuntimeProviderV1` (create/start/wait under signed authority): it
+# serves callers that attach a terminal or wait in the foreground — the caret
+# suite's agent panes and the legacy test-runner container backend.
+#
+# Cleanup contract. The session writes NO file of its own (no cidfile, no
+# journal), so the only artifact is the container. `--rm` removes it on a
+# normal exit, but killing the `podman run` client (SIGKILL, closed pty,
+# timeout) leaves the container behind — measured on podman 4.9.3. Therefore:
+#   * every session carries `--name` and two labels;
+#   * `podman_session_reap_v1` force-removes by exact name and then proves
+#     absence with `container exists`;
+#   * `podman_session_reap_owner_v1` finds every container of one owner by
+#     label, so a new supervisor reaps what a killed one left.
+# All effects go through an injected runner, so specs script podman.
+
+use std.nogc_sync_mut.io.process_ops.process_run_timeout
+
+pub const PODMAN_SESSION_PROGRAM_V1 = "podman"
+pub const PODMAN_SESSION_OWNER_LABEL_V1 = "io.simpleorch.session.owner"
+pub const PODMAN_SESSION_NAME_LABEL_V1 = "io.simpleorch.session.name"
+pub const PODMAN_SESSION_CONTROL_TIMEOUT_MS_V1: i64 = 30000
+
+pub struct PodmanMountV1:
+    source: text
+    target: text
+    read_only: bool
+
+pub struct PodmanSessionSpecV1:
+    name: text
+    owner: text
+    image: text
+    command: [text]
+    workdir: text = ""
+    mounts: [PodmanMountV1] = []
+    # "host" | "none" | "private" (podman's rootless default network)
+    network: text = "none"
+    tty: bool = false
+    keep_id: bool = true
+    env: [text] = []
+    # Engine-side lifetime cap in seconds (`podman run --timeout`); 0 = none.
+    timeout_seconds: i64 = 0
+
+pub struct PodmanSessionRunV1:
+    stdout: text
+    stderr: text
+    exit_code: i64
+    reaped: bool
+    error: text
+
+# Container names and owner labels: 1..63 of [A-Za-z0-9_.-], alnum first.
+pub fn podman_session_token_valid_v1(value: text) -> bool:
+    if value.len() < 1 or value.len() > 63: return false
+    for index in 0..value.len():
+        val byte = value.byte_at(index)
+        val alnum = (byte >= 48 and byte <= 57) or (byte >= 65 and byte <= 90) or (byte >= 97 and byte <= 122)
+        if index == 0 and not alnum: return false
+        if not alnum and byte != 95 and byte != 46 and byte != 45: return false
+    true
+
+fn _podman_plain_v1(value: text) -> bool:
+    if value == "": return false
+    for index in 0..value.len():
+        if value.byte_at(index) < 32 or value.byte_at(index) == 127: return false
+    true
+
+# Absolute, and free of the characters `--volume` treats as separators.
+pub fn podman_session_path_valid_v1(path: text) -> bool:
+    _podman_plain_v1(path) and path.starts_with("/") and not path.contains(":") and not path.contains(",")
+
+fn _podman_env_valid_v1(entry: text) -> bool:
+    val cut = entry.index_of("=")
+    if cut <= 0 or not _podman_plain_v1(entry): return false
+    val key = entry.substring(0, cut)
+    for index in 0..key.len():
+        val byte = key.byte_at(index)
+        val alnum = (byte >= 48 and byte <= 57) or (byte >= 65 and byte <= 90) or (byte >= 97 and byte <= 122)
+        if not alnum and byte != 95: return false
+    true
+
+# "" when the spec is acceptable, else a stable reason.
+pub fn podman_session_validate_v1(spec: PodmanSessionSpecV1) -> text:
+    if not podman_session_token_valid_v1(spec.name): return "podman-session-name-invalid"
+    if not podman_session_token_valid_v1(spec.owner): return "podman-session-owner-invalid"
+    if not _podman_plain_v1(spec.image) or spec.image.starts_with("-") or spec.image.contains(" "):
+        return "podman-session-image-invalid"
+    if spec.command.len() == 0 or spec.command[0] == "": return "podman-session-command-empty"
+    for word in spec.command:
+        if word.contains("\u{0}"): return "podman-session-command-invalid"
+    if spec.network != "host" and spec.network != "none" and spec.network != "private":
+        return "podman-session-network-unsupported"
+    if spec.workdir != "" and not podman_session_path_valid_v1(spec.workdir):
+        return "podman-session-workdir-invalid"
+    for mount in spec.mounts:
+        if not podman_session_path_valid_v1(mount.source) or not podman_session_path_valid_v1(mount.target):
+            return "podman-session-mount-invalid"
+    for entry in spec.env:
+        if not _podman_env_valid_v1(entry): return "podman-session-env-invalid"
+    if spec.timeout_seconds < 0: return "podman-session-timeout-invalid"
+    ""
+
+# Full argv, element 0 is the program. Pure.
+pub fn podman_session_run_argv_v1(spec: PodmanSessionSpecV1) -> Result<[text], text>:
+    val reason = podman_session_validate_v1(spec)
+    if reason != "": return Err(reason)
+    var argv = [PODMAN_SESSION_PROGRAM_V1, "run", "--rm", "--name", spec.name,
+        "--label", PODMAN_SESSION_OWNER_LABEL_V1 + "=" + spec.owner,
+        "--label", PODMAN_SESSION_NAME_LABEL_V1 + "=" + spec.name]
+    if spec.tty: argv = argv + ["--interactive", "--tty"]
+    if spec.network != "private": argv = argv + ["--network", spec.network]
+    if spec.keep_id: argv = argv + ["--userns", "keep-id"]
+    if spec.timeout_seconds > 0: argv = argv + ["--timeout", spec.timeout_seconds.to_text()]
+    for mount in spec.mounts:
+        argv = argv + ["--volume", mount.source + ":" + mount.target + ":" + (if mount.read_only: "ro" else: "rw")]
+    if spec.workdir != "": argv = argv + ["--workdir", spec.workdir]
+    for entry in spec.env: argv = argv + ["--env", entry]
+    Ok(argv + [spec.image] + spec.command)
+
+# Force-remove by exact name. `--ignore` makes an already-absent container a
+# success; `--time 0` skips the stop grace period; `--volumes` drops anonymous
+# volumes so storage is released with the container.
+pub fn podman_session_reap_argv_v1(name: text) -> [text]:
+    [PODMAN_SESSION_PROGRAM_V1, "rm", "--force", "--volumes", "--time", "0", "--ignore", name]
+
+# Exit 0 = exists, 1 = absent, anything else = unknown.
+pub fn podman_session_exists_argv_v1(name: text) -> [text]:
+    [PODMAN_SESSION_PROGRAM_V1, "container", "exists", name]
+
+pub fn podman_session_owned_argv_v1(owner: text) -> [text]:
+    [PODMAN_SESSION_PROGRAM_V1, "ps", "--all", "--filter",
+        "label=" + PODMAN_SESSION_OWNER_LABEL_V1 + "=" + owner, "--format", "{{{{.Names}}}}"]
+
+# Real runner: argv -> (stdout, stderr, exit code). A timed-out client is
+# killed by the process owner; the container it started is NOT, which is why
+# callers reap by name afterwards.
+pub fn podman_session_host_runner_v1(argv: [text], timeout_ms: i64) -> (text, text, i64):
+    if argv.len() == 0: return ("", "podman-session-argv-empty", -1)
+    var args: [text] = []
+    var index = 1
+    while index < argv.len():
+        args.push(argv[index])
+        index = index + 1
+    val result = process_run_timeout(argv[0], args, timeout_ms)
+    (result.0, result.1, result.2 as i64)
+
+# Ok(true) only after the engine itself reports the name absent.
+pub fn podman_session_reap_v1(name: text,
+        runner: fn([text], i64) -> (text, text, i64)) -> Result<bool, text>:
+    if not podman_session_token_valid_v1(name): return Err("podman-session-name-invalid")
+    val removed = runner(podman_session_reap_argv_v1(name), PODMAN_SESSION_CONTROL_TIMEOUT_MS_V1)
+    val probe = runner(podman_session_exists_argv_v1(name), PODMAN_SESSION_CONTROL_TIMEOUT_MS_V1)
+    if probe.2 == 1: return Ok(true)
+    if probe.2 == 0: return Err("podman-session-still-present: rm exit " + removed.2.to_text())
+    Err("podman-session-absence-unknown: exists exit " + probe.2.to_text())
+
+# Names of every container (any state) carrying this owner label.
+pub fn podman_session_owned_v1(owner: text,
+        runner: fn([text], i64) -> (text, text, i64)) -> Result<[text], text>:
+    if not podman_session_token_valid_v1(owner): return Err("podman-session-owner-invalid")
+    val listed = runner(podman_session_owned_argv_v1(owner), PODMAN_SESSION_CONTROL_TIMEOUT_MS_V1)
+    if listed.2 != 0: return Err("podman-session-list-failed: exit " + listed.2.to_text())
+    var names: [text] = []
+    for line in listed.0.split("\n"):
+        val name = line.trim()
+        if name == "": continue
+        if not podman_session_token_valid_v1(name): return Err("podman-session-list-name-invalid")
+        names.push(name)
+    Ok(names)
+
+# Recovery for a killed supervisor: reap everything the owner left. Returns
+# the reaped names; stops at the first container that cannot be proven gone.
+pub fn podman_session_reap_owner_v1(owner: text,
+        runner: fn([text], i64) -> (text, text, i64)) -> Result<[text], text>:
+    val names = podman_session_owned_v1(owner, runner)?
+    for name in names:
+        val reaped = podman_session_reap_v1(name, runner)?
+    Ok(names)
+
+# Foreground, non-tty run bounded by `timeout_ms`. The container is reaped by
+# name after EVERY outcome — normal exit, non-zero exit, spawn failure or
+# timeout — so no path depends on recognising how the client ended.
+pub fn podman_session_run_v1(spec: PodmanSessionSpecV1, timeout_ms: i64,
+        runner: fn([text], i64) -> (text, text, i64)) -> PodmanSessionRunV1:
+    if spec.tty:
+        return PodmanSessionRunV1(stdout: "", stderr: "", exit_code: -1, reaped: false,
+            error: "podman-session-run-tty-unsupported")
+    if timeout_ms <= 0:
+        return PodmanSessionRunV1(stdout: "", stderr: "", exit_code: -1, reaped: false,
+            error: "podman-session-timeout-invalid")
+    val argv = match podman_session_run_argv_v1(spec):
+        case Ok(value): value
+        case Err(reason):
+            return PodmanSessionRunV1(stdout: "", stderr: "", exit_code: -1, reaped: false, error: reason)
+    val result = runner(argv, timeout_ms)
+    match podman_session_reap_v1(spec.name, runner):
+        case Ok(_):
+            PodmanSessionRunV1(stdout: result.0, stderr: result.1, exit_code: result.2, reaped: true, error: "")
+        case Err(reason):
+            PodmanSessionRunV1(stdout: result.0, stderr: result.1, exit_code: result.2, reaped: false, error: reason)
