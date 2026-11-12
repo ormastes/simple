@@ -24,7 +24,7 @@ use std.nogc_sync_mut.lsp.lsp_diag_action_store.{lsp_diag_action_store_record, l
 use std.common.diagnostics.diagnostic_batch.{DiagnosticActionIndex}
 use std.nogc_sync_mut.lsp.lsp_document_sync.{lsp_document_sync_apply, lsp_document_sync_uri, lsp_document_snapshot, lsp_document_snapshot_matches, lsp_read_analyzed_source}
 use std.nogc_sync_mut.lsp.lsp_query_command.{lsp_fast_query_command_v1, lsp_code_query_command_v1,
-    lsp_heavy_query_command_v1, lsp_visibility_query_command_v1, lsp_run_query_command_v1}
+    lsp_heavy_query_command_v1, lsp_visibility_query_command_v1, lsp_run_query_command_v1, LspQueryCommandV1}
 
 # REQ-LSPVIS-008: Track whether client supports structured visibility metadata.
 # Set during initialize from client capabilities.experimental.simpleVisibility.
@@ -32,6 +32,9 @@ var CLIENT_SUPPORTS_VISIBILITY: bool = false
 # Set by `initialize`; unsolicited publishDiagnostics (didChange) only flow in
 # an initialized session, so pre-handshake notifications never spawn a check.
 var LSP_SESSION_INITIALIZED: bool = false
+# MDSOC+ reveal level for symbol listings; "" = per-file default (public
+# inside an __init__.spl boundary, all for an open module). REQ-PUBVIEW-008.
+var LSP_VISIBILITY_LEVEL: text = ""
 
 fn client_supports_visibility() -> bool:
     CLIENT_SUPPORTS_VISIBILITY
@@ -120,6 +123,11 @@ fn lsp_handle_initialize(id: text) -> text:
 
 fn lsp_handle_initialize_with_body(id: text, body: text) -> text:
     LSP_SESSION_INITIALIZED = true
+    val init_options = extract_nested(json=body, key="initializationOptions")
+    if init_options != "" and init_options.contains("visibility"):
+        val requested = extract_field(json=init_options, key="visibility")
+        if lsp_visibility_level_known(requested):
+            LSP_VISIBILITY_LEVEL = requested
     # REQ-LSPVIS-008: Read client experimental.simpleVisibility capability
     if body != "":
         val experimental_raw = extract_nested(json=body, key="experimental")
@@ -136,6 +144,8 @@ fn lsp_handle_initialize_with_body(id: text, body: text) -> text:
     caps.push(jp("hoverProvider", "true"))
     caps.push(jp("definitionProvider", "true"))
     caps.push(jp("referencesProvider", "true"))
+    caps.push(jp("renameProvider", "true"))
+    caps.push(jp("documentFormattingProvider", "true"))
     caps.push(jp("documentSymbolProvider", "true"))
     caps.push(jp("semanticTokensProvider", semantic_provider))
     caps.push(jp("implementationProvider", "true"))
@@ -146,6 +156,7 @@ fn lsp_handle_initialize_with_body(id: text, body: text) -> text:
     caps.push(jp("codeActionProvider", jo1(jp("codeActionKinds", code_action_kinds))))
     val diag_provider = jo2(jp("interFileDependencies", "false"), jp("workspaceDiagnostics", "false"))
     caps.push(jp("diagnosticProvider", diag_provider))
+    caps.push(jp("executeCommandProvider", jo1(jp("commands", SB_L() + js("simple.setVisibility") + SB_R()))))
     val capabilities_obj = LB() + caps.join(",") + RB()
     val server_info = jo2(jp("name", js("simple-lsp")), jp("version", js("0.1.0")))
     val experimental = jo1(jp("simpleVisibilityProvider", "true"))
@@ -469,7 +480,7 @@ fn _parse_location(output: text) -> text:
 
 # --- References (fast path) ---
 
-fn lsp_handle_references(id: text, body: text) -> text:
+fn _reference_query_lines(body: text, include_decl: bool) -> [text]:
     val uri = _extract_uri(body)
     val file_path = _uri_to_path(uri)
     val line = _extract_line(body)
@@ -480,18 +491,16 @@ fn lsp_handle_references(id: text, body: text) -> text:
     var out = ""
     var exit_code: i64 = 0
     (out, exit_code) = lsp_run_query_command_v1(_find_simple_binary(), cmd)
+    var kept: [text] = []
     if exit_code != 0 or out.trim() == "":
-        return make_json_result(id=id, result=SB_L() + SB_R())
+        return kept
     # `context.includeDeclaration: false` drops lines whose role is the
     # declaration of the queried symbol (the role is derived from the printed
     # source text, so no second child run is needed).
-    val include_decl = lsp_references_include_declaration_v1(body)
     var symbol = ""
     if not include_decl:
         symbol = lsp_query_symbol_at_v1(file_path, (line.to_int() ?? 0) + 1, (col.to_int() ?? 0) + 1)
-    val lines = out.split("\n")
-    var locs: [text] = []
-    for loc_line in lines:
+    for loc_line in out.split("\n"):
         val trimmed = loc_line.trim()
         if trimmed == "" or trimmed.starts_with("No ") or trimmed.starts_with("Error"):
             continue
@@ -501,10 +510,78 @@ fn lsp_handle_references(id: text, body: text) -> text:
                     if lsp_reference_role_v1(parsed.trailer, symbol) == "declaration":
                         continue
                 case nil: pass
+        kept.push(trimmed)
+    kept
+
+fn lsp_handle_references(id: text, body: text) -> text:
+    var locs: [text] = []
+    for trimmed in _reference_query_lines(body, lsp_references_include_declaration_v1(body)):
         val loc = _parse_location(trimmed)
         if loc != "null":
             locs.push(loc)
     make_json_result(id=id, result=SB_L() + locs.join(",") + SB_R())
+
+# --- Rename (WorkspaceEdit from the references query) ---
+
+pub fn lsp_handle_rename(id: text, body: text) -> text:
+    val new_name = extract_field(json=body, key="newName")
+    val file_path = _uri_to_path(_extract_uri(body))
+    val symbol = lsp_query_symbol_at_v1(file_path, (_extract_line(body).to_int() ?? 0) + 1, (_extract_character(body).to_int() ?? 0) + 1)
+    if new_name == "" or symbol == "":
+        return make_json_result(id=id, result="null")
+    var uris: [text] = []
+    var edits_by_uri: [[text]] = []
+    for trimmed in _reference_query_lines(body, true):
+        match lsp_parse_query_location_v1(trimmed):
+            case Some(loc):
+                val line_num = if loc.line > 0: loc.line - 1 else: 0
+                val col_num = lsp_location_lsp_column_v1(loc, _source_line_at(loc.file, loc.line))
+                val range = jo2(
+                    jp("start", jo2(jp("line", str(line_num)), jp("character", str(col_num)))),
+                    jp("end", jo2(jp("line", str(line_num)), jp("character", str(col_num + symbol.len()))))
+                )
+                val edit = jo2(jp("range", range), jp("newText", js(new_name)))
+                val loc_uri = _lsp_location_uri(loc.file)
+                var idx = -1
+                var i = 0
+                while i < uris.len():
+                    if uris[i] == loc_uri:
+                        idx = i
+                    i = i + 1
+                if idx < 0:
+                    uris.push(loc_uri)
+                    edits_by_uri.push([edit])
+                else:
+                    edits_by_uri[idx].push(edit)
+            case nil: pass
+    var entries: [text] = []
+    var k = 0
+    while k < uris.len():
+        entries.push(jp(uris[k], SB_L() + edits_by_uri[k].join(",") + SB_R()))
+        k = k + 1
+    make_json_result(id=id, result=jo1(jp("changes", LB() + entries.join(",") + RB())))
+
+# --- Formatting (canonical formatter, run as a child like the queries) ---
+
+pub fn lsp_handle_formatting(id: text, body: text) -> text:
+    val file_path = _uri_to_path(_extract_uri(body))
+    val original = read_file(file_path)
+    val cmd = LspQueryCommandV1(["src/compiler/90.tools/formatter/main.spl", file_path], 30000)
+    var out = ""
+    var exit_code: i64 = 0
+    (out, exit_code) = lsp_run_query_command_v1(_find_simple_binary(), cmd)
+    if exit_code != 0 or out.starts_with("Error"):
+        return make_json_result(id=id, result=SB_L() + SB_R())
+    # The formatter prints the document followed by print()'s own newline.
+    val formatted = if out.ends_with("\n"): out[0:out.len() - 1] else: out
+    if formatted == original:
+        return make_json_result(id=id, result=SB_L() + SB_R())
+    val end_line = original.split("\n").len()
+    val range = jo2(
+        jp("start", jo2(jp("line", "0"), jp("character", "0"))),
+        jp("end", jo2(jp("line", str(end_line)), jp("character", "0")))
+    )
+    make_json_result(id=id, result=SB_L() + jo2(jp("range", range), jp("newText", js(formatted))) + SB_R())
 
 # --- Hover (fast path) ---
 
@@ -513,6 +590,9 @@ fn lsp_handle_hover(id: text, body: text) -> text:
     val file_path = _uri_to_path(uri)
     val line = _extract_line(body)
     val col = _extract_character(body)
+    # Line 0 is the module header: hover there is the module's hidden summary (REQ-PUBVIEW-008).
+    if line == "0" and file_path != "":
+        return make_json_result(id=id, result=lsp_hover_hidden_summary_result(file_path))
     val query_line = str((line.to_int() ?? 0) + 1)
     val query_col = str((col.to_int() ?? 0) + 1)
     var cmd = lsp_visibility_query_command_v1(["hover", lsp_query_file_argument_v1(file_path), query_line, query_col])
@@ -520,8 +600,8 @@ fn lsp_handle_hover(id: text, body: text) -> text:
     var exit_code: i64 = 0
     (out, exit_code) = lsp_run_query_command_v1(_find_simple_binary(), cmd)
     val payload = lsp_extract_query_json_payload(out)
-    if exit_code != 0 or payload == "":
-        return make_json_result(id=id, result="null")
+    if exit_code != 0 or payload == "" or payload == "null":
+        return make_json_result(id=id, result=lsp_hover_hidden_summary_result(file_path))
     make_json_result(id=id, result=payload)
 
 # --- Completion (fast path) ---
@@ -549,7 +629,7 @@ fn lsp_handle_document_symbol(id: text, body: text) -> text:
     val file_path = _uri_to_path(uri)
     if file_path == "":
         return make_json_result(id=id, result=SB_L() + SB_R())
-    var cmd = lsp_visibility_query_command_v1(["symbols", lsp_query_file_argument_v1(file_path), "--requester", lsp_query_file_argument_v1(file_path)])
+    var cmd = lsp_visibility_query_command_v1(["symbols", lsp_query_file_argument_v1(file_path), "--requester", lsp_query_file_argument_v1(file_path)] + lsp_visibility_args(body))
     var out = ""
     var exit_code: i64 = 0
     (out, exit_code) = lsp_run_query_command_v1(_find_simple_binary(), cmd)
@@ -604,7 +684,7 @@ fn lsp_handle_implementation(id: text, body: text) -> text:
 
 fn lsp_handle_workspace_symbol(id: text, body: text) -> text:
     val query = extract_nested(json=body, key="query")
-    var cmd = lsp_visibility_query_command_v1(["workspace-symbols", "--query", query, "--requester", "src/"])
+    var cmd = lsp_visibility_query_command_v1(["workspace-symbols", "--query", query, "--requester", "src/"] + lsp_visibility_args(body))
     var out = ""
     var exit_code: i64 = 0
     (out, exit_code) = lsp_run_query_command_v1(_find_simple_binary(), cmd)
@@ -927,3 +1007,77 @@ fn lsp_handle_ast_views(id: text, body: text) -> text:
     if payload == "":
         return make_error(id, -32603, "simple/ast/views: no result (exit {code})")
     make_json_result(id=id, result=payload)
+
+# --- MDSOC+ public view (REQ-PUBVIEW-008) ---
+
+fn lsp_visibility_level_known(level: text) -> bool:
+    level == "public" or level == "feature_private" or level == "layer_private" or level == "all"
+
+pub fn lsp_visibility_level() -> text:
+    LSP_VISIBILITY_LEVEL
+
+# Per-request `simpleVisibility` wins over the session level set through
+# initializationOptions.simple.visibility or simple.setVisibility.
+fn lsp_visibility_args(body: text) -> [text]:
+    var args: [text] = []
+    val requested = extract_nested(json=body, key="simpleVisibility")
+    val level = if lsp_visibility_level_known(requested): requested else: LSP_VISIBILITY_LEVEL
+    if level != "":
+        args.push("--visibility")
+        args.push(level)
+    val feature = extract_nested(json=body, key="feature")
+    if feature != "":
+        args.push("--feature")
+        args.push(feature)
+    val layer = extract_nested(json=body, key="layer")
+    if layer != "":
+        args.push("--layer")
+        args.push(layer)
+    args
+
+# workspace/executeCommand {command: "simple.setVisibility", arguments: ["<level>"]}
+pub fn lsp_handle_execute_command(id: text, body: text) -> text:
+    val command = extract_nested(json=body, key="command")
+    if command != "simple.setVisibility":
+        return make_error(id, -32601, "unknown command: " + command)
+    val arguments = extract_nested_raw(json=body, key="arguments")
+    var level = ""
+    for candidate in ["feature_private", "layer_private", "public", "all"]:
+        if level == "" and arguments.contains(Q() + candidate + Q()): level = candidate
+    if level == "":
+        return make_error(id, -32602, "simple.setVisibility needs one of public, feature_private, layer_private, all")
+    LSP_VISIBILITY_LEVEL = level
+    make_json_result(id=id, result=jo1(jp("visibility", js(level))))
+
+fn lsp_hidden_summary_payload(file_path: text) -> text:
+    var args: [text] = ["hidden-summary", lsp_query_file_argument_v1(file_path)]
+    if LSP_VISIBILITY_LEVEL != "":
+        args.push("--visibility")
+        args.push(LSP_VISIBILITY_LEVEL)
+    var out = ""
+    var exit_code: i64 = 0
+    (out, exit_code) = lsp_run_query_command_v1(_find_simple_binary(), lsp_visibility_query_command_v1(args))
+    val payload = lsp_extract_query_json_payload(out)
+    if exit_code != 0 or payload == "": return ""
+    payload
+
+# simple/hiddenSummary {textDocument: {uri}} -> the file's hidden summary.
+pub fn lsp_handle_hidden_summary(id: text, body: text) -> text:
+    val file_path = _uri_to_path(_extract_uri(body))
+    if file_path == "":
+        return make_json_result(id=id, result="null")
+    val payload = lsp_hidden_summary_payload(file_path)
+    if payload == "":
+        return make_json_result(id=id, result="null")
+    make_json_result(id=id, result=payload)
+
+# Hover on the module header (line 0) or on a position with no symbol answers
+# with the file's hidden summary so a reader learns what the listing hides.
+fn lsp_hover_hidden_summary_result(file_path: text) -> text:
+    val payload = lsp_hidden_summary_payload(file_path)
+    if payload == "": return "null"
+    val hint = extract_field(json=payload, key="hint")
+    val default_rule = extract_field(json=payload, key="visibility_default")
+    if hint == "": return "null"
+    val value = hint + "\n\nvisibility_default: " + default_rule
+    jo1(jp("contents", jo2(jp("kind", js("markdown")), jp("value", js(value)))))

@@ -1,0 +1,191 @@
+# @cover scripts/check/check-wm-retained-web2d-perf-evidence.shs 80%
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-SYSTEM
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+"""
+# WM retained Web 2D perf receipt capture
+
+## Overview
+
+Validates the retained Web 2D WM perf evidence producer
+(`scripts/check/check-wm-retained-web2d-perf-evidence.shs`) that closes the
+retained Metal/SIMD WM perf evidence gap tracked in
+`doc/08_tracking/bug/gui_web_2d_retained_metal_simd_wm_perf_evidence_gap_2026-07-06.md`.
+The producer assembles a retained-frame performance receipt from a live WM
+run's artifacts (launch log, presented-buffer before/after captures,
+executable, frame timing samples, RSS measurement) and admits it through the
+schema validator in `check-wm-production-fullscreen-evidence.shs`.
+
+**Plan:** doc/03_plan/agent_tasks/gui_rendering_parallel_agent_plan_2026-06-27.md
+**Requirements:** N/A
+**Research:** N/A
+**Design:** doc/07_guide/tooling/renderdoc_capture_infra.md
+
+## Acceptance
+
+- A well-formed hosted `cpu_simd` run directory is captured into a receipt
+  that passes schema admission with live-frame provenance intact.
+- A `metal` request on a non-Darwin host fails honestly with
+  `backend-unavailable:metal-on-<os>` instead of degrading to a software row.
+- A launch log with `fallback=true` frame markers fails with
+  `backend-fallback`.
+- A launch log with a cache-only readback source fails with
+  `non-live-readback`.
+- Fewer than 20 retained samples after warmup fails with
+  `insufficient-samples`.
+
+## Syntax
+
+```sh
+SIMPLE_LIB=src bin/simple test --no-session-daemon \
+  test/03_system/check/wm_retained_web2d_perf_receipt_spec.spl \
+  --mode=interpreter --clean --fail-fast
+```
+
+## Evidence Contract
+
+This spec does not render real WM frames. It creates controlled live-run
+fixture directories (launch log, PPM captures, samples, executable) and sends
+them through the same producer a real hosted WM evidence run would use. The
+fixtures keep timing, RSS, checksum, backend, and readback provenance valid so
+each scenario proves exactly one honest-failure gate without depending on a
+live GUI/GPU host.
+
+The producer must never present a fallback or cache-only run as retained live
+evidence: those receipts must be rejected before schema admission, and only a
+receipt whose launch log, captures, executable, and digests all agree may
+reach `wm_retained_web2d_perf_schema_status=pass`.
+
+## Test Matrix
+
+1. Valid hosted `cpu_simd` run directory: capture and schema admission pass.
+2. `metal` backend request on a non-Darwin host: honest unavailability fail.
+3. Launch log with `fallback=true` frame markers: backend-fallback fail.
+4. Launch log with `source=cache` readback: non-live-readback fail.
+5. Ten retained samples with warmup 4: insufficient-samples fail.
+
+## Required Output Rows
+
+Reviewers should inspect these producer rows before accepting a retained WM
+Web 2D perf receipt:
+
+- `wm_retained_web2d_perf_capture_status`
+- `wm_retained_web2d_perf_capture_reason` (on failure)
+- `wm_retained_web2d_perf_schema_status` (from schema admission)
+
+## Failure Semantics
+
+`backend-unavailable:metal-on-linux` means the producer refused to record a
+Metal row on a host with no Metal device. `backend-fallback` means a
+frame-presented marker reported a fallback render. `non-live-readback` means
+the readback did not come from the presented buffer (or device, for Metal).
+`insufficient-samples` means fewer than 20 retained frames remained after
+warmup, so p50/p95 are not meaningful.
+
+## Completion Boundary
+
+Passing this spec proves producer admission and honest-failure behavior only.
+It does not prove a live hosted WM or SimpleOS WM run meets the retained
+performance budget; the live campaign on a GPU-capable host is still required
+per the bug doc.
+"""
+
+# @tag: system, gui, wm, perf
+
+use std.spec.step
+
+use std.spec.*
+use std.io_runtime.{file_read, process_run}
+
+fn fixture_run_command(root: text, backend: text, source: text, fallback: text, samples: text) -> text:
+    "rm -rf " + root + " && mkdir -p " + root + " && " +
+    "printf 'platform=hosted\\nbackend=" + backend + "\\nviewport_width=8\\nviewport_height=6\\nwarmup_frames=4\\nframe_budget_ns=12500000\\nmax_rss_kib=100000\\nrss_budget_kib=262144\\nbaseline_p95_ns=5000000\\nbaseline_max_rss_kib=100000\\nbaseline_source_revision=test-baseline\\nsource_revision=test-source\\n' > " + root + "/frames.env && " +
+    "i=1; while [ \"$i\" -le " + samples + " ]; do " +
+    "printf '[hosted-wm] frame-presented renderer=engine2d-draw-ir content=simple-web route=shared-wm-scene-draw-ir host=linux-windowed width=8 height=6 raster=simple-2d-winit-buffer fallback=" + fallback + " revision=%s backend=" + backend + ";source=" + source + ";handle=1;checksum=12345;completed=true;width=8;height=6; identity=bitmap-default;target=cpu\\n' \"$i\" >> " + root + "/launch.log; " +
+    "printf '%s\\n' $(( 4000000 + i * 1000 )) >> " + root + "/frame_samples_ns.txt; " +
+    "i=$(( i + 1 )); done && " +
+    "printf 'synthetic-wm-native\\n' > " + root + "/executable && " +
+    "perl -e 'open my $f, \">:raw\", $ARGV[0] or die; print $f \"P6\\n8 6\\n255\\n\"; print $f \"\\x01\\x02\\x03\" x 48;' " + root + "/before.ppm && " +
+    "perl -e 'open my $f, \">:raw\", $ARGV[0] or die; print $f \"P6\\n8 6\\n255\\n\"; print $f \"\\x03\\x02\\x01\" x 48;' " + root + "/after.ppm"
+
+fn capture_command(root: text) -> text:
+    "sh scripts/check/check-wm-retained-web2d-perf-evidence.shs --capture-retained-perf-receipt " + root + " " + root + "/receipt.env"
+
+describe "WM retained Web 2D perf receipt capture":
+    # @manual scenario evidence
+
+    it "admits a well-formed hosted cpu_simd retained perf receipt":
+        # @req REQ-SSPEC-SYSTEM
+        step("admits a well-formed hosted cpu_simd retained perf receipt")
+        step("Create a controlled live-run fixture directory")
+        val (_setup_out, _setup_err, setup_code) = process_run("/bin/sh", ["-c", fixture_run_command("build/test-wm-retained-web2d-perf-valid", "cpu_simd", "presented-pixel-buffer", "false", "30")])
+        expect(setup_code).to_equal(0)
+
+        step("Capture the retained perf receipt and admit it through the schema validator")
+        val (stdout, _stderr, code) = process_run("/bin/sh", ["-c", capture_command("build/test-wm-retained-web2d-perf-valid")])
+        expect(code).to_equal(0)
+        expect(stdout).to_contain("wm_retained_web2d_perf_schema_status=pass platform=hosted backend=cpu_simd")
+        expect(stdout).to_contain("wm_retained_web2d_perf_capture_status=pass")
+
+        step("Assert the receipt retains live-frame provenance fields")
+        val receipt = file_read("build/test-wm-retained-web2d-perf-valid/receipt.env")
+        expect(receipt).to_contain("platform=hosted")
+        expect(receipt).to_contain("backend=cpu_simd")
+        expect(receipt).to_contain("actual_backend=cpu_simd")
+        expect(receipt).to_contain("fallback=none")
+        expect(receipt).to_contain("readback_source=presented-pixel-buffer")
+        expect(receipt).to_contain("workload=filesystem-wm-client-live-retained-frame")
+        expect(receipt).to_contain("sample_frames=26")
+
+    it "fails honestly when metal is requested on a non-Darwin host":
+        # @req REQ-SSPEC-SYSTEM
+        step("fails honestly when metal is requested on a non-Darwin host")
+        step("Detect the host operating system")
+        val (uname_out, _uname_err, uname_code) = process_run("/bin/sh", ["-c", "uname -s"])
+        expect(uname_code).to_equal(0)
+        if uname_out != "Darwin":
+            step("Create a metal-requested live-run fixture directory")
+            val (_setup_out, _setup_err, setup_code) = process_run("/bin/sh", ["-c", fixture_run_command("build/test-wm-retained-web2d-perf-metal", "metal", "device_readback", "false", "30")])
+            expect(setup_code).to_equal(0)
+
+            step("Assert the producer refuses the metal row with an honest unavailability reason")
+            val (stdout, _stderr, code) = process_run("/bin/sh", ["-c", capture_command("build/test-wm-retained-web2d-perf-metal")])
+            expect(code).to_equal(1)
+            expect(stdout).to_contain("wm_retained_web2d_perf_capture_status=fail reason=backend-unavailable:metal-on-")
+
+    it "fails honestly on backend fallback markers in the launch log":
+        # @req REQ-SSPEC-SYSTEM
+        step("fails honestly on backend fallback markers in the launch log")
+        step("Create a live-run fixture whose frame markers report a fallback render")
+        val (_setup_out, _setup_err, setup_code) = process_run("/bin/sh", ["-c", fixture_run_command("build/test-wm-retained-web2d-perf-fallback", "cpu_simd", "presented-pixel-buffer", "true", "30")])
+        expect(setup_code).to_equal(0)
+
+        step("Assert the producer rejects the fallback run")
+        val (stdout, _stderr, code) = process_run("/bin/sh", ["-c", capture_command("build/test-wm-retained-web2d-perf-fallback")])
+        expect(code).to_equal(1)
+        expect(stdout).to_contain("wm_retained_web2d_perf_capture_status=fail reason=backend-fallback")
+
+    it "fails honestly on cache-only readback provenance":
+        # @req REQ-SSPEC-SYSTEM
+        step("fails honestly on cache-only readback provenance")
+        step("Create a live-run fixture whose readback source is a cache")
+        val (_setup_out, _setup_err, setup_code) = process_run("/bin/sh", ["-c", fixture_run_command("build/test-wm-retained-web2d-perf-cache", "cpu_simd", "cache", "false", "30")])
+        expect(setup_code).to_equal(0)
+
+        step("Assert the producer rejects the non-live readback")
+        val (stdout, _stderr, code) = process_run("/bin/sh", ["-c", capture_command("build/test-wm-retained-web2d-perf-cache")])
+        expect(code).to_equal(1)
+        expect(stdout).to_contain("wm_retained_web2d_perf_capture_status=fail reason=non-live-readback")
+
+    it "fails honestly when retained samples are insufficient":
+        # @req REQ-SSPEC-SYSTEM
+        step("fails honestly when retained samples are insufficient")
+        step("Create a live-run fixture with ten retained frame samples")
+        val (_setup_out, _setup_err, setup_code) = process_run("/bin/sh", ["-c", fixture_run_command("build/test-wm-retained-web2d-perf-short", "cpu_simd", "presented-pixel-buffer", "false", "10")])
+        expect(setup_code).to_equal(0)
+
+        step("Assert the producer rejects the undersampled run")
+        val (stdout, _stderr, code) = process_run("/bin/sh", ["-c", capture_command("build/test-wm-retained-web2d-perf-short")])
+        expect(code).to_equal(1)
+        expect(stdout).to_contain("wm_retained_web2d_perf_capture_status=fail reason=insufficient-samples")

@@ -1,20 +1,40 @@
 use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+use std.nogc_sync_mut.env.platform.{is_windows, get_temp_dir}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove_all}
+use std.nogc_sync_mut.io.file_ops.{file_exists, secure_temp_dir}
+use std.env.variables.{env_get}
+use std.nogc_sync_mut.io.env_ops.{cwd}
+use test.helpers.simple_cli_spawn_fixture.{simple_cli_run}
 
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+val CLI_RUN_TIMEOUT_MS: i64 = 120000
+val CLI_RUN_MAX_OUT: i64 = 16777216
+
+fn _cli_repo_root() -> text:
+    cwd().replace("\\", "/")
 
 fn _run_unreal(args: [text]) -> (text, text, i64):
-    val joined = args.join(" ")
-    rt_process_run("/bin/sh", [
-        "-c",
-        "REPO=$(pwd); SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/unreal_cli/main.spl\" " + joined
-    ])
+    simple_cli_run(["src/app/unreal_cli/main.spl"] + args, CLI_RUN_TIMEOUT_MS)
 
 fn _run_unreal_temp(args: [text]) -> (text, text, i64):
-    val joined = args.join(" ")
-    rt_process_run("/bin/sh", [
-        "-c",
-        "REPO=$(pwd); TMP=/tmp/simple_unreal_cli_$$; rm -rf \"$TMP\"; mkdir -p \"$TMP\"; cd \"$TMP\"; SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/unreal_cli/main.spl\" " + joined + "; CODE=$?; test -f \"$TMP/MyGame/MyGame.uproject\" && echo scaffold-ok; rm -rf \"$TMP\"; exit $CODE"
-    ])
+    val repo = _cli_repo_root()
+    val program = if is_windows(): repo + "/bin/simple.exe" else: repo + "/bin/simple"
+    val lib = repo + "/src"
+    val scope = match secure_temp_dir(get_temp_dir(), "unreal-cli-scaffold-"):
+        Ok(path): path.replace("\\", "/")
+        Err(reason): return ("", "error: scaffold scope: " + reason, 125)
+    val joined = (["src/app/unreal_cli/main.spl"] + args).join(" ")
+    val (shell, shell_args) = if is_windows():
+        val sh = env_get("ComSpec") ?? "cmd.exe"
+        val cmd = "cd /d " + scope + " && set \"SIMPLE_LIB=" + lib + "\" && " + program + " run " + joined
+        (sh, ["/d", "/c", cmd])
+    else:
+        ("/bin/sh", ["-c", "cd \"" + scope + "\" && SIMPLE_LIB=\"" + lib + "\" \"" + program + "\" run " + joined])
+    val (out, err, code) = process_run_bounded(shell, shell_args, CLI_RUN_TIMEOUT_MS, CLI_RUN_MAX_OUT)
+    val scaffolded = file_exists(scope + "/MyGame/MyGame.uproject")
+    val _removed = dir_remove_all(scope)
+    val marked = if scaffolded: out + "\nscaffold-ok" else: out
+    (marked, err, code)
 
 describe "unreal cli log mode CLI options":
     # @manual scenario evidence

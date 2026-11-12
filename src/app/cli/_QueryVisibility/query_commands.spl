@@ -10,6 +10,10 @@ use app.cli.query_forwarding.{forwarding_resolve_at}
 use app.cli.query_rich_common.{query_file_read_rich, query_file_exists, query_process_run, query_cli_get_args}
 use app.cli.query_sanitize.{sanitize_path, sanitize_symbol}
 use common.text_advanced.{escape_json}
+use app.cli._QueryVisibility.symbol_views.{visibility_class_from_facts, visibility_level_or_error,
+    layer_id_of, symbol_view_admits, symbol_view_summary, symbol_view_summary_json, symbol_view_summary_entry}
+use std.nogc_sync_mut.source.visibility_view.{SourceVisibleSymbolV1}
+use std.nogc_sync_mut.io.dir_ops.{dir_walk, is_dir}
 
 fn query_visibility_nonnegative_int_or_zero(value: text) -> i64:
     val trimmed = value.trim()
@@ -68,7 +72,11 @@ fn query_visibility_main() -> i64:
     if subcmd == "completions" and args.len() >= 4:
         return query_visibility_completions(file: args[1], line_num: query_visibility_nonnegative_int_or_zero(args[2]), col: query_visibility_nonnegative_int_or_zero(args[3]))
     if subcmd == "symbols" and args.len() >= 2:
-        return query_visibility_symbols(file: args[1], requester_file: query_visibility_flag_value(args, "--requester", args[1]))
+        return query_visibility_symbols(file: args[1], requester_file: query_visibility_flag_value(args, "--requester", args[1]),
+            level: query_visibility_flag_value(args, "--visibility", ""),
+            feature: query_visibility_flag_value(args, "--feature", ""), layer: query_visibility_flag_value(args, "--layer", ""))
+    if subcmd == "hidden-summary" and args.len() >= 2:
+        return query_visibility_hidden_summary(file: args[1], level: query_visibility_flag_value(args, "--visibility", ""))
     if subcmd == "visibility":
         var file = ""
         if args.len() >= 2 and not args[1].starts_with("--"):
@@ -88,7 +96,11 @@ fn query_visibility_main() -> i64:
             elif args[j] == "--requester" and j + 1 < args.len():
                 requester = args[j + 1]
             j = j + 1
-        return query_visibility_workspace_symbols(query, requester)
+        return query_visibility_workspace_symbols(query, requester,
+            level: query_visibility_flag_value(args, "--visibility", ""),
+            feature: query_visibility_flag_value(args, "--feature", ""),
+            layer: query_visibility_flag_value(args, "--layer", ""),
+            root: query_visibility_flag_value(args, "--root", "src"))
     if subcmd == "semantic-tokens" and args.len() >= 2:
         var start_line = 0
         var end_line = 0
@@ -173,35 +185,142 @@ fn query_visibility_completions(file: text, line_num: i64, col: i64) -> i64:
     print "[" + items.join(",") + "]"
     0
 
-fn query_visibility_symbols(file: text, requester_file: text) -> i64:
+# --- MDSOC+ public view (REQ-PUBVIEW-001..009) ---
+# Fact gathering for the classifier seam (symbol_views.visibility_class_from_facts).
+pub fn visibility_class_of(symbol: text, owner_file: text) -> text:
+    val declared = declared_visibility(symbol, owner_file)
+    val has_boundary = nearest_boundary_dir(owner_file) != ""
+    val layer_exported = exported_by(symbol, owner_file) != ""
+    val feature_dir = feature_dir_of(owner_file)
+    var feature_exported = false
+    if feature_dir != "":
+        feature_exported = list_has_text(feature_root_export_names(feature_dir), symbol) or
+            (feature_file_exposed(feature_dir, owner_file) and declared != "private")
+    visibility_class_from_facts(declared, has_boundary, layer_exported, feature_dir != "", feature_exported)
+
+# Names the capsule ROOT manifest exports (not the nested layer manifests —
+# those make a symbol feature-private, the root makes it public).
+fn feature_root_export_names(feature_dir: text) -> [text]:
+    val content = query_file_read_rich(feature_dir + "/__init__.spl") ?? ""
+    var names: [text] = []
+    for line in content.split("\n"):
+        for name in feature_export_names_in_line(line.trim()):
+            if not list_has_text(names, name):
+                names = names.push(name)
+    names
+
+fn file_visible_symbols(file: text) -> [SourceVisibleSymbolV1]:
+    val feature = feature_id_of(file)
+    val layer = layer_id_of(file, layer_dir_name(file))
+    var result: [SourceVisibleSymbolV1] = []
+    for parsed in parse_symbols_in_file(file_path: file):
+        if parsed.kind == "domain": continue
+        result.push(SourceVisibleSymbolV1(parsed.name, parsed.kind, visibility_class_of(parsed.name, file), feature, layer))
+    result
+
+fn query_visibility_symbols(file: text, requester_file: text, level: text, feature: text, layer: text) -> i64:
     val clean_file = sanitize_path(file)
     val requester = sanitize_path(requester_file_part(requester_file))
     if clean_file == "":
         print "[]"
         return 1
+    val has_boundary = nearest_boundary_dir(clean_file) != ""
+    val effective = match visibility_level_or_error(level, has_boundary):
+        Ok(value): value
+        Err(reason):
+            print "{\"error\":" + json_text(reason) + "}"
+            return 1
+    val classified = file_visible_symbols(clean_file)
     var items: [text] = []
-    val symbols = parse_symbols_in_file(file_path: clean_file)
-    for parsed in symbols:
+    var index = 0
+    for parsed in parse_symbols_in_file(file_path: clean_file):
+        if parsed.kind == "domain": continue
+        val symbol = classified[index]
+        index = index + 1
+        if not symbol_view_admits(symbol, effective, feature, layer): continue
         val vis = visibility_json(symbol: parsed.name, owner_file: clean_file, requester_file: requester)
         val range = symbol_range_json(parsed)
-        items = items.push("{\"name\":" + json_text(parsed.name) + ",\"kind\":" + str(symbol_kind_number(parsed.kind)) + ",\"detail\":" + json_text("[" + visibility_display(symbol: parsed.name, owner_file: clean_file) + "]") + ",\"range\":" + range + ",\"selectionRange\":" + range + ",\"simpleVisibility\":" + vis + "}")
+        items = items.push("{\"name\":" + json_text(parsed.name) + ",\"kind\":" + str(symbol_kind_number(parsed.kind)) + ",\"detail\":" + json_text("[" + visibility_display(symbol: parsed.name, owner_file: clean_file) + "]") + ",\"range\":" + range + ",\"selectionRange\":" + range + ",\"visibilityClass\":" + json_text(symbol.visibility_class) + ",\"simpleVisibility\":" + vis + "}")
+    val summary = symbol_view_summary(classified, effective, feature, layer)
+    if summary.hidden > 0:
+        items = items.push(symbol_view_summary_entry(summary, has_boundary, ""))
     print "[" + items.join(",") + "]"
     0
 
-fn query_visibility_workspace_symbols(query: text, requester_file: text) -> i64:
+fn query_visibility_hidden_summary(file: text, level: text) -> i64:
+    val clean_file = sanitize_path(file)
+    if clean_file == "":
+        print "{}"
+        return 1
+    val has_boundary = nearest_boundary_dir(clean_file) != ""
+    val effective = match visibility_level_or_error(level, has_boundary):
+        Ok(value): value
+        Err(reason):
+            print "{\"error\":" + json_text(reason) + "}"
+            return 1
+    print symbol_view_summary_json(symbol_view_summary(file_visible_symbols(clean_file), effective, "", ""), has_boundary)
+    0
+
+# Feature selector: a capsule id (`a.b.feature_x`) or a directory path.
+fn feature_selector_dir(feature: text) -> text:
+    if feature == "": return ""
+    if is_dir(feature): return feature
+    val path = feature.replace(".", "/")
+    if is_dir("src/" + path): return "src/" + path
+    if is_dir(path): return path
+    ""
+
+fn workspace_view_files(root: text, feature: text, layer: text) -> [text]:
+    val base = if feature != "": feature_selector_dir(feature) else: root
+    if base == "": return []
+    var files: [text] = []
+    for path in dir_walk(base):
+        val normalized = path.replace("\\", "/")
+        if not normalized.ends_with(".spl") or normalized.ends_with("__init__.spl"): continue
+        if layer != "" and layer_id_of(normalized, layer_dir_name(normalized)) != layer: continue
+        files.push(normalized)
+        if files.len() >= 200: break
+    files
+
+fn query_visibility_workspace_symbols(query: text, requester_file: text, level: text,
+        feature: text, layer: text, root: text) -> i64:
     val clean_query = sanitize_symbol(query.trim())
-    if clean_query == "":
+    val selected = feature != "" or layer != ""
+    if clean_query == "" and not selected:
         print "[]"
         return 0
+    val effective = match visibility_level_or_error(level, true):
+        Ok(value): value
+        Err(reason):
+            print "{\"error\":" + json_text(reason) + "}"
+            return 1
+    var candidates: [ParsedSymbol] = []
+    if selected:
+        for file in workspace_view_files(root, feature, layer):
+            for parsed in parse_symbols_in_file(file_path: file):
+                if parsed.kind != "domain": candidates.push(parsed)
+    else:
+        candidates = grep_workspace_symbol_candidates(root, clean_query)
+    var classified: [SourceVisibleSymbolV1] = []
     var items: [text] = []
-    val candidates = grep_workspace_symbol_candidates("src", clean_query)
     for candidate in candidates:
-        if candidate.name == "" or not candidate.name.lower().contains(clean_query.lower()):
+        if candidate.name == "" or (clean_query != "" and not candidate.name.lower().contains(clean_query.lower())):
             continue
+        val owner = candidate.file_path.replace("\\", "/")
+        val symbol = SourceVisibleSymbolV1(candidate.name, candidate.kind, visibility_class_of(candidate.name, owner),
+            feature_id_of(owner), layer_id_of(owner, layer_dir_name(owner)))
+        classified.push(symbol)
+        # Selector match on the symbol's own identity: a capsule id selector
+        # matches by id; a directory selector already bounded the walk.
+        val feature_key = if feature != "" and symbol.feature != feature: "" else: feature
+        if not symbol_view_admits(symbol, effective, feature_key, layer): continue
         val range = symbol_range_json(candidate)
-        items = items.push("{\"name\":" + json_text(candidate.name) + ",\"kind\":" + str(symbol_kind_number(candidate.kind)) + ",\"location\":{\"uri\":" + json_text("file://" + candidate.file_path) + ",\"range\":" + range + "}}}")
+        items = items.push("{\"name\":" + json_text(candidate.name) + ",\"kind\":" + str(symbol_kind_number(candidate.kind)) + ",\"visibilityClass\":" + json_text(symbol.visibility_class) + ",\"feature\":" + json_text(symbol.feature) + ",\"layer\":" + json_text(symbol.layer) + ",\"location\":{\"uri\":" + json_text("file://" + owner) + ",\"range\":" + range + "}" + "}")
         if items.len() >= 100:
             break
+    val summary = symbol_view_summary(classified, effective, "", layer)
+    if summary.hidden > 0:
+        items = items.push(symbol_view_summary_entry(summary, true, "file://" + root))
     print "[" + items.join(",") + "]"
     0
 
@@ -726,7 +845,7 @@ fn friend_packages(owner_file: text) -> [text]:
             friends = friends.push(trimmed.substring(7).trim())
     friends
 
-fn nearest_boundary_dir(file_path: text) -> text:
+pub fn nearest_boundary_dir(file_path: text) -> text:
     var current = parent_dir(file_path)
     while current != "":
         val manifest = current + "/__init__.spl"
