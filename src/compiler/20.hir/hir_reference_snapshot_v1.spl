@@ -18,11 +18,27 @@ struct HirReferenceTokenV1:
     kind: i64
     spelling: text
 
+# Lexer receipts carry BYTE offsets. `s[a:b]` slices by code point (owner
+# decision 2026-11-07 / ADR-005) and the seed currently applies the same unit
+# to `slice`/`substring`, so compare the original bytes through the only
+# byte-unit accessor both engines agree on (`byte_at`).
+pub fn reference_bytes_match_v1(source: text, byte_start: i64, byte_end: i64, spelling: text) -> bool:
+    if byte_start < 0 or byte_end > source.byte_len() or byte_end - byte_start != spelling.byte_len():
+        return false
+    var offset = 0
+    while offset < spelling.byte_len():
+        if source.byte_at(byte_start + offset) != spelling.byte_at(offset):
+            return false
+        offset = offset + 1
+    true
+
 class HirReferenceSourceIndexV1:
     file: text
     revision_sha256: text
     source: text
     tokens: [HirReferenceTokenV1]
+    # Keyed by byte_start: parser/LexSpan offsets are UTF-8 BYTE offsets
+    # (lexer_byte_spans_spec, 2026-09-27); codepoint_* ride along as receipts.
     token_by_start: Dict<i64, i64>
 
     static fn build(source: text, file: text, revision_sha256: text, max_tokens: i64) -> Result<HirReferenceSourceIndexV1, text>:
@@ -42,13 +58,13 @@ class HirReferenceSourceIndexV1:
                 row.line < 1 or row.column < 1):
                 return Err("invalid_span: lexer receipt has invalid original-source bounds")
             if (row.codepoint_start < previous_codepoint_end or row.byte_start < previous_byte_end or
-                index.token_by_start.contains_key(row.codepoint_start)):
+                index.token_by_start.contains_key(row.byte_start)):
                 return Err("invalid_span: overlapping original-source token starts")
-            if row.spelling == "" or source[row.byte_start:row.byte_end] != row.spelling:
+            if row.spelling == "" or not reference_bytes_match_v1(source, row.byte_start, row.byte_end, row.spelling):
                 return Err("invalid_span: lexer receipt disagrees with original bytes")
             if row.kind <= 0 or row.kind == 180 or row.kind == 181 or row.kind == 182 or row.kind == 190 or row.kind == 191:
                 return Err("invalid_span: lexer receipt contains a synthetic or invalid token")
-            index.token_by_start[row.codepoint_start] = index.tokens.len()
+            index.token_by_start[row.byte_start] = index.tokens.len()
             index.tokens.push(HirReferenceTokenV1(codepoint_start: row.codepoint_start,
                 codepoint_end: row.codepoint_end, byte_start: row.byte_start, byte_end: row.byte_end,
                 line: row.line, column: row.column, kind: row.kind, spelling: row.spelling))
@@ -56,21 +72,21 @@ class HirReferenceSourceIndexV1:
             previous_byte_end = row.byte_end
         Ok(index)
 
-    fn token_at(codepoint_start: i64) -> Result<HirReferenceTokenV1, text>:
-        if not self.token_by_start.contains_key(codepoint_start):
+    fn token_at(byte_start: i64) -> Result<HirReferenceTokenV1, text>:
+        if not self.token_by_start.contains_key(byte_start):
             return Err("invalid_span: no original token at exact parser offset")
-        Ok(self.tokens[self.token_by_start[codepoint_start]])
+        Ok(self.tokens[self.token_by_start[byte_start]])
 
-    fn token_position(codepoint_start: i64) -> Result<i64, text>:
-        if not self.token_by_start.contains_key(codepoint_start):
+    fn token_position(byte_start: i64) -> Result<i64, text>:
+        if not self.token_by_start.contains_key(byte_start):
             return Err("invalid_span: no original token at exact parser offset")
-        Ok(self.token_by_start[codepoint_start])
+        Ok(self.token_by_start[byte_start])
 
     fn require_token(position: i64, spelling: text, end: i64) -> Result<HirReferenceTokenV1, text>:
         if position < 0 or position >= self.tokens.len():
             return Err("invalid_span: grammar token absent from original source")
         val token = self.tokens[position]
-        if token.codepoint_end > end or token.spelling != spelling:
+        if token.byte_end > end or token.spelling != spelling:
             return Err("unsupported_syntax: original token grammar disagrees with parsed declaration")
         Ok(token)
 
@@ -202,14 +218,14 @@ fn hir_reference_declarations_v1(module: ParserModule, index: HirReferenceSource
     var token_position = 0
     while token_position < index.tokens.len():
         val token = index.tokens[token_position]
-        if token.codepoint_start < covered_until:
-            if range_ends.contains_key(token.codepoint_start):
+        if token.byte_start < covered_until:
+            if range_ends.contains_key(token.byte_start):
                 return Err("invalid_span: overlapping top-level declaration provenance")
-            if token.codepoint_end > covered_until:
+            if token.byte_end > covered_until:
                 return Err("invalid_span: original token crosses a declaration boundary")
-        elif range_ends.contains_key(token.codepoint_start):
-            covered_until = range_ends[token.codepoint_start]
-            if token.codepoint_end > covered_until:
+        elif range_ends.contains_key(token.byte_start):
+            covered_until = range_ends[token.byte_start]
+            if token.byte_end > covered_until:
                 return Err("invalid_span: original token crosses a declaration boundary")
             covered_ranges = covered_ranges + 1
         else:
@@ -220,7 +236,7 @@ fn hir_reference_declarations_v1(module: ParserModule, index: HirReferenceSource
                 return Err("unsupported_syntax: original token outside admitted top-level declaration ranges")
             val following = index.tokens[token_position + 1]
             if (following.line != token.line or following.spelling != "fn" or following.kind != 20 or
-                not function_starts.contains_key(following.codepoint_start)):
+                not function_starts.contains_key(following.byte_start)):
                 return Err("unsupported_syntax: visibility token lacks an immediate same-line admitted function")
         token_position = token_position + 1
     if covered_ranges != range_ends.len():
@@ -253,10 +269,10 @@ class HirReferenceCollectorV1:
             symbol_aliases: {}, terminal_declarations: {}, seen_facts: {}, worklist: [],
             symbols: nil, source_index: nil, declarations_prepared: false)
 
-    fn source_token_at(codepoint_start: i64) -> Result<HirReferenceTokenV1, text>:
+    fn source_token_at(byte_start: i64) -> Result<HirReferenceTokenV1, text>:
         if self.source_index == nil:
             return Err("invalid_span: no active original-source index")
-        self.source_index.?.token_at(codepoint_start)
+        self.source_index.?.token_at(byte_start)
 
     fn symbol_at(raw_id: i64) -> Result<HirSymbol, text>:
         if self.symbols == nil or raw_id < 0:
@@ -294,9 +310,9 @@ class HirReferenceCollectorV1:
     me emit(module_ordinal: i64, symbol: i64, declaration: HirReferenceDeclarationV1, role: text, token: HirReferenceTokenV1) -> Result<bool, text>:
         if self.source_index == nil:
             return Err("invalid_span: no active original-source index")
-        if token.byte_start < 0 or token.byte_end <= token.byte_start or token.byte_end > self.source_index.?.source.len():
+        if token.byte_start < 0 or token.byte_end <= token.byte_start or token.byte_end > self.source_index.?.source.byte_len():
             return Err("invalid_span: reference token outside original source")
-        if self.source_index.?.source[token.byte_start:token.byte_end] != token.spelling:
+        if not reference_bytes_match_v1(self.source_index.?.source, token.byte_start, token.byte_end, token.spelling):
             return Err("invalid_span: reference token no longer matches original bytes")
         val key = "{token.byte_start}:{token.byte_end}:{role}"
         if self.seen_facts.contains_key(key):
@@ -343,7 +359,7 @@ class HirReferenceCollectorV1:
             var path = ""
             while position < self.source_index.?.tokens.len():
                 val segment = self.source_index.?.tokens[position]
-                if segment.kind != 6 or segment.codepoint_end > span.end:
+                if segment.kind != 6 or segment.byte_end > span.end:
                     return Err("unsupported_syntax: import module path is not an absolute identifier path")
                 path = path + segment.spelling
                 position = position + 1
@@ -406,9 +422,9 @@ class HirReferenceCollectorV1:
                     self.emit(module_ordinal, raw_id, declaration, "alias-declaration", alias_token)?
                 item_position = item_position + 1
             val closing_token = self.source_index.?.require_token(position, closer, span.end)?
-            if closing_token.codepoint_end != span.end:
+            if closing_token.byte_end != span.end:
                 return Err("invalid_span: import boundary does not end at its consumed closing token")
-            if position + 1 < self.source_index.?.tokens.len() and self.source_index.?.tokens[position + 1].codepoint_start < span.end:
+            if position + 1 < self.source_index.?.tokens.len() and self.source_index.?.tokens[position + 1].byte_start < span.end:
                 return Err("unsupported_syntax: unconsumed token within parsed import boundary")
         if admitted.len() != origins.rows.len():
             return Err("unresolved_origin: imported callable event lacks an admitted source import")
@@ -419,7 +435,7 @@ class HirReferenceCollectorV1:
         if span.start < 0 or span.end <= span.start or span.line < 1:
             return Err("invalid_span: HIR variable use has synthetic source provenance")
         val token = self.source_token_at(span.start)?
-        if token.kind != 6 or token.codepoint_end != span.end:
+        if token.kind != 6 or token.byte_end != span.end:
             return Err("invalid_span: HIR variable range is not exactly one original identifier")
         if self.symbol_origins.contains_key(raw_id):
             if token.spelling != self.symbol_spellings[raw_id]:
@@ -464,9 +480,9 @@ class HirReferenceCollectorV1:
         for declaration in declarations:
             if declaration.module_ordinal != module_ordinal or declaration.module_name != module_name:
                 return Err("unresolved_origin: declarations do not belong to configured module")
-            if declaration_tokens.contains_key(declaration.token.codepoint_start):
+            if declaration_tokens.contains_key(declaration.token.byte_start):
                 return Err("unresolved_origin: duplicate local declaration provenance")
-            declaration_tokens[declaration.token.codepoint_start] = declaration
+            declaration_tokens[declaration.token.byte_start] = declaration
         if module.functions.len() != declarations.len():
             return Err("unresolved_origin: lowered functions do not exactly cover parsed declarations")
         for symbol_id in module.functions.keys():
@@ -485,9 +501,9 @@ class HirReferenceCollectorV1:
             val position = index.token_position(function_.span.start)?
             index.require_token(position, "fn", function_.span.end)?
             val token = index.require_token(position + 1, function_.name, function_.span.end)?
-            if not declaration_tokens.contains_key(token.codepoint_start):
+            if not declaration_tokens.contains_key(token.byte_start):
                 return Err("unresolved_origin: real function has no exact parsed declaration token")
-            val declaration = declaration_tokens[token.codepoint_start]
+            val declaration = declaration_tokens[token.byte_start]
             if declaration.name != function_.name or self.symbol_origins.contains_key(symbol_id.id):
                 return Err("unresolved_origin: conflicting local callable identity")
             self.symbol_origins[symbol_id.id] = declaration
