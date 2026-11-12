@@ -562,9 +562,18 @@ fn create_outlined_function(
         // signature disagree with the value its `Return` terminator produces,
         // and disagree again with the `IndirectCall` signature built from
         // `return_type` at the call site — the two halves of the same lie that
-        // forced the previous closure-ABI attempt to be reverted. `ANY` (no
-        // inferred type) keeps the old I64 behaviour.
+        // forced the previous closure-ABI attempt to be reverted.
         BodyKind::Lambda if crate::codegen::jit_closure_abi_supports(lambda_return_type) => lambda_return_type,
+        // An `ANY`-typed lambda result is ALREADY a tagged `RuntimeValue`
+        // word: MIR lowering boxes a raw scalar into the `any` return slot
+        // (`BoxInt`/`BoxFloat` before the `Return`). Declaring the outlined
+        // function I64 made the boxed entry (`closure_boxed_entry.rs`
+        // `box_result`) tag that word a SECOND time, so every runtime-facing
+        // caller read a shifted value: `xs.map(\x: any_fn(x))` over
+        // `[1, 2, 3]` answered `[8, 16, 24]`, and a tagged float/text came
+        // back as a garbage integer. Declaring `ANY` keeps the same Cranelift
+        // i64 signature and lets the boxed entry pass the word through.
+        BodyKind::Lambda if lambda_return_type == crate::hir::TypeId::ANY => crate::hir::TypeId::ANY,
         BodyKind::Lambda => crate::hir::TypeId::I64,
         BodyKind::Actor => crate::hir::TypeId::VOID,
     };

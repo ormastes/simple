@@ -41,7 +41,11 @@ pub(crate) fn save_pattern_scope(pattern: &Pattern, env: &mut Env) -> Vec<(Strin
             // declared narrow width of an outer `val y: i32` it shadows (see
             // `CowEnv::declared_int_widths` INVARIANT). Stashed once per
             // loop here; `restore_pattern_scope` puts it back.
-            env.shadow_declared_int_width(&name);
+            // Block-local for the whole loop (twin of `exec_for`): without it a
+            // same-named imported fn (`error`) reachable as a module global
+            // wins over the loop variable inside an `it`/block body. This
+            // also stashes the outer declared int width.
+            env.enter_block_local(name.clone());
             (name, prior)
         })
         .collect()
@@ -52,7 +56,7 @@ pub(crate) fn save_pattern_scope(pattern: &Pattern, env: &mut Env) -> Vec<(Strin
 pub(crate) fn restore_pattern_scope(saved: Vec<(String, Option<Value>)>, env: &mut Env) {
     for (name, prior) in saved {
         // Twin of the stash in `bind_for_pattern_value`.
-        env.unshadow_declared_int_width(&name);
+        env.exit_block_local(&name);
         match prior {
             Some(value) => {
                 env.insert(name, value);

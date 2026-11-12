@@ -1,0 +1,80 @@
+# @req REQ-LANG-SCOPE-SHADOW-001
+"""
+# A local binding shadows a same-named function
+
+A `for` loop variable, `val`, or lambda parameter named like a builtin or an
+imported or module-level function (`error`, `print`, `len`, `type`; `assert` is a keyword)
+must resolve to the local value. If the function were picked instead, a method
+call on it would fail with "method contains not found on type function".
+"""
+use std.spec.{describe, it, expect, step}
+use std.common.error.{error}
+
+fn warn(msg: text) -> text:
+    "W:" + msg
+
+fn count_bad_errors(items: [text]) -> i64:
+    var n = 0
+    for error in items:
+        if error.contains("bad"):
+            n = n + 1
+    n
+
+fn count_bad_warns(items: [text]) -> i64:
+    var n = 0
+    for warn in items:
+        if warn.contains("bad"):
+            n = n + 1
+    n
+
+struct Report:
+    errors: [text]
+
+describe "Loop variables shadow builtin and imported function names":
+    it "a loop variable named error over a text list is the element, not the imported error fn":
+        step("iterate a local text list with loop variable `error` and call a text method on it")
+        val errors = ["a bad thing", "fine"]
+        var hits: [text] = []
+        for error in errors:
+            if error.contains("bad"):
+                hits.push(error)
+        expect(hits.len()).to_equal(1)
+        expect(hits[0]).to_equal("a bad thing")
+
+    it "a loop variable named error inside a function and over a struct field resolves to the element":
+        step("count matches through a helper fn and through a struct field list")
+        expect(count_bad_errors(["bad", "ok", "bad again"])).to_equal(2)
+        val report = Report(errors: ["x bad", "y"])
+        var n = 0
+        for error in report.errors:
+            n = n + error.len()
+        expect(n).to_equal(6)
+
+    it "the imported error fn is still callable after a loop shadowed its name":
+        step("shadow `error` in a loop, then call the imported fn")
+        for error in ["bad"]:
+            expect(error.starts_with("b")).to_be(true)
+        expect(error("boom").message).to_equal("boom")
+
+    it "a loop variable named like a module-level fn (warn) is the element":
+        expect(count_bad_warns(["bad", "bad", "ok"])).to_equal(2)
+        expect(warn("x")).to_equal("W:x")
+
+    it "loop variables named print, len and type are the elements":
+        step("each builtin name as a loop variable keeps the element's text methods")
+        var seen: [text] = []
+        for print in ["p1"]:
+            seen.push(print.upper())
+        for len in ["l22"]:
+            seen.push(len.upper())
+        for type in ["t3"]:
+            seen.push(type.upper())
+        expect(seen.join(",")).to_equal("P1,L22,T3")
+        print("builtin print still works after shadowing")
+
+    it "val and lambda parameters named error shadow the fn":
+        val error = "bad local"
+        expect(error.contains("bad")).to_be(true)
+        val picked = ["ok", "bad"].filter(\error: error.contains("bad"))
+        expect(picked).to_equal(["bad"])
+        expect(["ok", "bad"].any(\error: error.contains("bad"))).to_be(true)
