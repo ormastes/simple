@@ -44,6 +44,24 @@ records what it shares with that path.
 - **Default detach keys.** An attached tty reserves ctrl-p,ctrl-q, swallowing
   the agent's own Ctrl-P and leaving a running container behind a detached
   client. The layer passes `--detach-keys=`.
+- **A name is not ownership.** Agent ids restart at `a1` in every cs, so two
+  cs on one session derive the same container name. The first version reaped
+  by name whenever the roster spec said `--container`; a cs whose launch was
+  REFUSED then force-removed the other cs's live container on `/quit` or
+  `/kill`. Removal now needs both: the process recorded a successful spawn
+  (`cs_container_mark_launched`), and the engine reports this process's
+  `io.simpleorch.session.instance` label (`podman_session_reap_instance_v1`,
+  which then removes by the inspected container ID). `/reap` is the one
+  deliberate exception and says so in the help text.
+- **Session names are hashed into the owner label**: `cs-<readable>-<10 hex
+  of sha256(session)>`; "a b" and "a-b" used to share an owner.
+- **Read-write mounts are policed on the normalised path**: `..` is refused,
+  and `/`, `$HOME`, `/home`, `/var`, `/tmp`, ... (exact) and `/etc`, `/usr`,
+  `/lib*`, `/dev`, `/proc`, `/sys`, ... (whole tree) cannot be mounted rw.
+- **`container inspect` on a missing container exits 125 on podman, 1 on
+  docker.** The test-runner backend calls a container gone only for that exit
+  plus "no such container"; a dead daemon or timeout is "unknown" and fails
+  the run.
 - **Names are per session, not per cs process.** A launch refuses when
   `cs-<session>-<agent>` already exists instead of removing it (it may belong
   to a second cs). `/reap` is the explicit recovery after a killed cs.

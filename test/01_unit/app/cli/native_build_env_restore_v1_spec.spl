@@ -1,0 +1,37 @@
+# Coordinator env save/restore leaves a previously ABSENT key absent, so the
+# HIR worker profile (key-presence admission) is not refused by a stray empty
+# key (2026-11-12: SIMPLE_BOOTSTRAP_INTERNAL_NATIVE_BUILD_ROUTING,
+# SIMPLE_PARSE_SHARD_QUEUE, SIMPLE_NATIVE_BUILD_WARM_CLOSURE_CANDIDATE).
+use std.spec.*
+use app.io.env_ops.{env_set, env_unset}
+use std.nogc_sync_mut.io_runtime.{env_get_nullable}
+use app.cli.native_build_env_restore_v1.{native_build_env_saved_v1, native_build_env_restore_v1}
+
+describe "native-build exact env restore":
+    it "restores an absent key as absent, not present-empty":
+        val key = "SIMPLE_SPEC_ENV_RESTORE_ABSENT_V1"
+        env_unset(key)
+        val saved = native_build_env_saved_v1(key)
+        expect(saved == nil).to_equal(true)
+        env_set(key, "1")
+        native_build_env_restore_v1(key, saved)
+        expect(env_get_nullable(key) == nil).to_equal(true)
+
+    it "restores a present key to its exact value":
+        val key = "SIMPLE_SPEC_ENV_RESTORE_PRESENT_V1"
+        env_set(key, "kept")
+        val saved = native_build_env_saved_v1(key)
+        env_set(key, "temporary")
+        native_build_env_restore_v1(key, saved)
+        expect(env_get_nullable(key) ?? "").to_equal("kept")
+        env_unset(key)
+
+    it "keeps a present-empty key present-empty":
+        val key = "SIMPLE_SPEC_ENV_RESTORE_EMPTY_V1"
+        env_set(key, "")
+        val saved = native_build_env_saved_v1(key)
+        env_set(key, "x")
+        native_build_env_restore_v1(key, saved)
+        expect(env_get_nullable(key) == nil).to_equal(false)
+        expect(env_get_nullable(key) ?? "?").to_equal("")
+        env_unset(key)

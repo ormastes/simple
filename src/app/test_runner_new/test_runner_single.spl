@@ -49,16 +49,18 @@ use std.test_runner.test_config.{load_test_config}
 use std.test_runner.test_runner_modes.{run_spl_doctest_mode}
 use std.test_runner.sdoctest.config.{load_sdoctest_config}
 use std.test_runner.sdoctest.runner.{run_sdoctest_mode, print_sdoctest_summary}
-use std.test_runner.test_executor_parsing.{make_result_from_output, spec_source_has_raw_assert, shell_safe_child_binary_path}
+use std.test_runner.test_executor_parsing.{make_result_from_output, parse_blocked_examples, spec_source_has_raw_assert, shell_safe_child_binary_path}
 use std.string_core.{char_code}
 use std.common.coverage_sdn.{parse_coverage_sdn, merge_coverage, render_coverage_sdn}
 use common.plugin.aspect_params.{aspect_coverage_cutover_policy_v1}
-use app.test_daemon.light_protocol.{timeout_verdict_line, has_verdict_line, exit_code_reason, unrun_verdict_line, unrun_reason}
+use app.test_daemon.light_protocol.{timeout_verdict_line, has_verdict_line, exit_code_reason, unrun_verdict_line, unrun_reason, ran_verdict_line, blocked_reason_line}
 use std.test_runner.test_runner_config.{resolve_effective_profile, apply_mcdc_mode_env, mcdc_mode_error_message}
 use std.test_runner.test_runner_execute.{run_test_file_interpreter, mcdc_compiler_lacks_probes, MCDC_UNAVAILABLE_REASON}
 use std.test_runner.test_runner_mcdc_report.{test_runner_mcdc_run_gate}
 
 use std.io_runtime.{file_exists, file_read_nullable}
+use std.io_runtime.{is_dir}
+use std.io_runtime.{dir_walk}
 use std.nogc_sync_mut.spec.dir_prevention.{DIR_PREVENTION_ENV, DIR_PREVENTION_SEP, dir_prevention_env_value}
 @unsafe(reason: "raw test-source/coverage text ABI; helper return types cannot carry I/O errors", capabilities: [ffi])
 extern fn rt_file_read_text(path: text) -> text?
@@ -507,7 +509,7 @@ fn spec_timeout_secs_directive(file_path: text) -> i64:
         return 0
     value
 
-fn print_summary(path: text, passed: i64, failed: i64, skipped: i64, pending: i64, duration_ms: i64, unverified: text, process_error: bool = false):
+fn print_summary(path: text, passed: i64, failed: i64, skipped: i64, pending: i64, duration_ms: i64, unverified: text, process_error: bool = false, blocked: i64 = 0, blocked_reason: text = ""):
     print ""
     print "========================================="
     print "Test Summary"
@@ -515,18 +517,23 @@ fn print_summary(path: text, passed: i64, failed: i64, skipped: i64, pending: i6
     print "Files: 1"
     print "Passed: {passed}"
     print "Failed: {failed}"
+    # Skips and blocked examples are appended to the AUTHORITATIVE results line,
+    # not left to a secondary line. A skip that is only visible on a secondary
+    # line is a skip the aggregate verdict does not carry, which is how
+    # capability-probe skips were laundered into passes. `total` stays
+    # passed + failed (the parsers' canonical-Results invariant).
+    var results = "Results: {passed + failed} total, {passed} passed, {failed} failed"
     if skipped > 0:
-        # Skips are appended to the AUTHORITATIVE results line, not left to the
-        # separate "Skipped:" line below. A skip that is only visible on a
-        # secondary line is a skip the aggregate verdict does not carry, which
-        # is how capability-probe skips were laundered into passes.
-        print "Results: {passed + failed} total, {passed} passed, {failed} failed, {skipped} skipped"
-    else:
-        print "Results: {passed + failed} total, {passed} passed, {failed} failed"
+        results = results + ", {skipped} skipped"
+    if blocked > 0:
+        results = results + ", {blocked} blocked"
+    print results
     if skipped > 0:
         print "Skipped: {skipped}"
     if pending > 0:
         print "Pending: {pending}"
+    if blocked > 0:
+        print "Blocked: {blocked}"
     print "Duration: {duration_ms}ms"
     if process_error:
         print ""
@@ -543,6 +550,10 @@ fn print_summary(path: text, passed: i64, failed: i64, skipped: i64, pending: i6
         # session pastes as evidence.
         print ""
         print "UNVERIFIED {path}: {unverified}"
+    elif blocked > 0:
+        # Environment missing: never a pass. Exit code 6 (BlockedScenario).
+        print ""
+        print "BLOCKED {path}: {blocked_reason}"
     else:
         print ""
         print "PASS {path}"
@@ -1333,6 +1344,138 @@ fn _single_mcdc_attempt(args: [text], path: text, mcdc_mode: text, binary: text,
 
 fn main() -> i64:
     val args = clean_args()
+    val dir_at = _single_directory_target_index(args)
+    if dir_at >= 0:
+        return run_directory_target(args, args[dir_at], dir_at)
+    run_single_target(args)
+
+# --- Directory targets -------------------------------------------------------
+# This lane used to reject a directory target outright ("expected .spl test
+# file"), which forced every sweep onto either the daemon lane (a fresh
+# 252-module worker resolution per file) or one full process spawn per
+# enumerated spec. Both re-pay the runner's fixed module-load cost on EVERY
+# file, which is what capped directory sweeps (see doc/08_tracking/bug/
+# test_invocation_fixed_setup_cost_caps_every_sweep_2026-08-17.md). Accepting a
+# directory here keeps this process's already-resolved module graph warm and
+# runs each discovered spec through the identical per-file machinery below, so
+# a sweep pays the fixed setup cost ONCE per process instead of once per file.
+
+fn _single_directory_target_index(args: [text]) -> i64:
+    """Index of the single positional token when it is exactly one existing
+    directory, else -1. Mirrors the option-skipping rules of
+    parse_child_run so an option value is never mistaken for a target."""
+    var found = -1
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "--compiler":
+            i = i + 2
+            continue
+        if _single_option_takes_value(arg):
+            i = i + 2
+            continue
+        val equals_at = arg.index_of("=")
+        if equals_at > 0 and _single_option_takes_value(arg[0:equals_at]):
+            i = i + 1
+            continue
+        if not arg.starts_with("-"):
+            if found >= 0:
+                return -1
+            found = i
+        i = i + 1
+    if found >= 0 and is_dir(args[found]):
+        return found
+    -1
+
+fn _single_text_lte(a: text, b: text) -> bool:
+    """Lexicographic a <= b via char_code — text `<`/`>` miscompiles to a raw
+    pointer compare on the native flat-HIR path (see extract_number_before)."""
+    val n = if a.byte_len() < b.byte_len(): a.byte_len() else: b.byte_len()
+    var i = 0
+    while i < n:
+        val ca = a.char_code_at(i)
+        val cb = b.char_code_at(i)
+        if ca != cb:
+            return ca < cb
+        i = i + 1
+    a.byte_len() <= b.byte_len()
+
+fn _single_sorted_texts(items: [text]) -> [text]:
+    """Deterministic sweep order (rt_dir_walk order is filesystem-dependent)."""
+    var out: [text] = []
+    for item in items:
+        var j = out.len()
+        while j > 0 and not _single_text_lte(out[j - 1], item):
+            j = j - 1
+        out.insert(j, item)
+    out
+
+fn _single_directory_specs(dir: text) -> [text]:
+    """Recursive *_spec.spl files under dir, sorted for deterministic order."""
+    var specs: [text] = []
+    for path in dir_walk(dir):
+        if path.ends_with("_spec.spl"):
+            specs.push(path)
+    _single_sorted_texts(specs)
+
+fn run_directory_target(args: [text], dir: text, dir_at: i64) -> i64:
+    """Run every spec under dir sequentially through run_single_target.
+
+    Per-file semantics (timeouts, tags, verdict lines, exit codes) are exactly
+    those of invoking this runner once per file; the only difference is that
+    the runner's own module graph is resolved once. Exit code 4
+    (EmptySelection, e.g. a --tag the file does not carry) is neutral, matching
+    how full-runner sweeps neutralise rather than fail unselected files."""
+    val specs = _single_directory_specs(dir)
+    if specs.len() == 0:
+        print "Simple Test Runner child"
+        print "error: no *_spec.spl files found under directory: {dir}"
+        return 1
+    if args.contains("--list"):
+        for spec in specs:
+            print spec
+        return 0
+    var files_passed = 0
+    var files_failed = 0
+    var files_neutral = 0
+    for spec in specs:
+        # Same invocation as `test <spec> --no-session-daemon` with the rest of
+        # the argument vector preserved: drop the directory positional by
+        # INDEX (an option value equal to the directory name must survive),
+        # append the concrete spec path.
+        var file_args: [text] = []
+        var i = 0
+        while i < args.len():
+            if i != dir_at:
+                file_args.push(args[i])
+            i = i + 1
+        file_args.push(spec)
+        if files_passed + files_failed + files_neutral > 0:
+            print ""
+        val code = run_single_target(file_args)
+        if code == 0:
+            files_passed = files_passed + 1
+        elif code == 4:
+            files_neutral = files_neutral + 1
+        else:
+            files_failed = files_failed + 1
+    print ""
+    print "========================================="
+    print "Directory Test Summary"
+    print "========================================="
+    print "Directory: {dir}"
+    print "Files: {specs.len()}"
+    print "Passed: {files_passed}"
+    print "Failed: {files_failed}"
+    if files_neutral > 0:
+        print "Neutral: {files_neutral}"
+    print "Results: {files_passed + files_failed} total, {files_passed} passed, {files_failed} failed"
+    if files_failed > 0:
+        1
+    else:
+        0
+
+fn run_single_target(args: [text]) -> i64:
     if args.contains("--spl-doctest") and not _single_has_md_target(args):
         return _single_run_spl_doctest(args)
     if _single_is_md_run(args):
@@ -1635,6 +1778,12 @@ fn main() -> i64:
     # `failed == 0` -> exit 0, i.e. a silent green for a run that produced no
     # verified result at all.
     var unverified_error = ""
+    val (blocked_pending, blocked_failed, blocked_reason) = parse_blocked_examples(combined)
+    val blocked_total = blocked_pending + blocked_failed
+    val raw_failed = if has_verdict == 1 and verdict_failed > real_failed: verdict_failed else: real_failed
+    val nonblocked_failed = raw_failed - blocked_failed
+    val blocked_passed = if has_verdict == 1: verdict_passed else: real_passed
+    var blocked_count = 0
     if code == -1 or code == 143 or code == 144:
         # The runtime collapses timeout AND death-by-signal onto the one -1
         # sentinel; 143/144 arrive when an intermediate shell propagates a
@@ -1661,6 +1810,17 @@ fn main() -> i64:
                 print timeout_verdict_line(run.path, "child-timeout", timeout_ms)
             else:
                 print unrun_verdict_line(run.path, "child-died-by-signal")
+    elif blocked_total > 0 and nonblocked_failed <= 0 and not was_truncated:
+        # BLOCKED: every non-passing example is environment-gated
+        # (`pending("BLOCKED: ...")` / `Err("precondition: ...")`) and nothing
+        # else failed. Never a pass, never OK, never a bare failure -- counted
+        # on its own and exited 6. Checked before the zero-evidence branch: a
+        # blocked-only file has zero passes by construction and would
+        # otherwise read as "no examples executed".
+        # Bug: llm_caret_env_gated_specs_no_blocked_outcome_2026-11-12.
+        passed = blocked_passed
+        failed = 0
+        blocked_count = blocked_total
     elif has_evidence == 1 and evidence_passed + evidence_failed == 0:
         failed = 1
         passed = 0
@@ -1833,8 +1993,19 @@ fn main() -> i64:
     if mcdc_mode == "on" or mcdc_mode == "dynamic":
         if not _single_mcdc_attempt(args, run.path, mcdc_mode, binary, run.timeout_secs) and failed == 0 and unverified_error == "":
             failed = 1
-    print_summary(run.path, passed, failed, real_skipped, real_pending, duration_ms,
-        if failed == 0: unverified_error else: "", process_error)
+    val is_blocked = blocked_count > 0 and failed == 0 and unverified_error == "" and not process_error
+    if is_blocked:
+        # One verdict class for the file. The Rust seed child prints its own
+        # verdict line with `blocked=`; synthesize ours only when the child's
+        # line did not already carry outcome=BLOCKED, so a seed that predates the
+        # field still yields an honest, parseable BLOCKED line.
+        if not combined.contains("outcome=BLOCKED"):
+            print ran_verdict_line(run.path, passed, 0, 0, "", blocked_count)
+        print blocked_reason_line(run.path, blocked_count, blocked_reason)
+    val shown_pending = if is_blocked and real_pending >= blocked_pending: real_pending - blocked_pending else: real_pending
+    print_summary(run.path, passed, failed, real_skipped, shown_pending, duration_ms,
+        if failed == 0: unverified_error else: "", process_error,
+        if is_blocked: blocked_count else: 0, blocked_reason)
     if cov_on and cov_sdn != "":
         _cov_print_report(run.path, cov_sdn)
     if failed == 0 and unverified_error != "":
@@ -1850,6 +2021,10 @@ fn main() -> i64:
         # agree. Surveyed scripts/**: nothing branches on 2-vs-5 for
         # unverifiedness (all callers test rc == 0 only).
         return 5
+    if is_blocked:
+        # BLOCKED: environment missing. Neither pass (0) nor failure (1); 6 is
+        # TestRunOutcome.BlockedScenario so gates choose how to treat it.
+        return 6
     if failed == 0 and not process_error:
         return 0
     1

@@ -439,18 +439,34 @@ fn _serve_on(bound_listener: TcpListener, address: text, token: text, initialize
                 # Keep partial input until the absolute deadline; never restart
                 # its clock when a peer trickles bytes into the socket.
             if not finished and client.replying:
-                var end = client.offset + 4096
-                if end > client.output.len():
-                    end = client.output.len()
-                val written = client.stream.write(client.output[client.offset:end])
-                if written.is_ok():
+                # Drain as much of the reply as the socket takes NOW. One 4 KiB
+                # chunk per loop turn was not enough: every turn also polls the
+                # pane PTYs through the VT screen, so a pane printing a few
+                # hundred KB made each turn tens of milliseconds and a 400 KB
+                # `history-joined` reply (100 turns) hit the 2 s client deadline
+                # half-sent; the client saw "incomplete smux response" and
+                # `capture_pane` reported an EMPTY transcript (smux pane drops
+                # console stdout, 2026-11-12). Progress also renews the deadline:
+                # the clock bounds a peer that stops reading, not a long reply.
+                var progressed = false
+                while not finished:
+                    var end = client.offset + 4096
+                    if end > client.output.len():
+                        end = client.output.len()
+                    val written = client.stream.write(client.output[client.offset:end])
+                    if written.is_err():
+                        # WouldBlock (conflated with errors by the facade): keep
+                        # the exact remaining bytes for the next turn.
+                        break
                     val count = written.unwrap()
                     if count <= 0:
                         finished = true
                     else:
+                        progressed = true
                         client.offset = client.offset + count
                         finished = client.offset >= client.output.len()
-                # A short or WouldBlock write retains the exact remaining bytes.
+                if progressed and not finished:
+                    client.deadline = time_now_monotonic_ms() + CLIENT_DEADLINE_MS
             if finished:
                 if client.stop_owner:
                     stop = true

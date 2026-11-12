@@ -8,7 +8,7 @@ use compiler.treesitter.{TreeSitter, OutlineModule, ParseError}
 # LIMITATION: Awaiting tree-sitter satellite SFFI
 import lsp.handlers.verification as verification
 
-use std.io_runtime.{process_run}
+use std.io_runtime.{process_run_timeout, env_set}
 use std.io_runtime.{env_get}
 use std.io_runtime.{file_exists}
 
@@ -78,11 +78,14 @@ fn generate_diagnostics(tree: Tree) -> [Dict]:
 fn collect_compiler_diagnostics(file_path: String) -> [Dict]:
     var diagnostics: [Dict] = []
     val bin = _find_simple_binary()
-    val cmd = "timeout 60 " + bin + " src/app/cli/query.spl check " + file_path + " --format=json"
+    # Run the checker directly: `/bin/sh -c "timeout 60 ..."` does not exist on
+    # Windows, which left push diagnostics silently empty there.
+    env_set("NO_COLOR", "1")
+    val args = ["src/app/cli/query.spl", "check", file_path, "--format=json"]
     var stdout = ""
     var stderr = ""
     var code: i64 = 0
-    (stdout, stderr, code) = process_run("/bin/sh", ["-c", "export NO_COLOR=1 TERM=dumb; " + cmd])
+    (stdout, stderr, code) = process_run_timeout(bin, args, 60000)
     if stdout.trim() == "":
         return diagnostics
     val lines = stdout.split("\n")

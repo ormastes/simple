@@ -2,7 +2,7 @@
 # Process arguments remain separate values; this module never invokes a shell.
 
 use std.nogc_sync_mut.io.process_ops.process_run
-use std.io_runtime.{getpid, process_run_timeout}
+use std.io_runtime.{getpid, process_run_timeout, env_get}
 use std.nogc_sync_mut.io.file_ops.file_exists
 use std.nogc_sync_mut.io_runtime.time_now_monotonic_ms
 
@@ -10,10 +10,10 @@ pub fn container_runtime_supported_v1(runtime: text) -> bool:
     """Only the two supported CLI adapters may be executed."""
     runtime == "docker" or runtime == "podman"
 
-fn container_argument_valid_v1(value: text) -> bool:
+pub fn container_argument_valid_v1(value: text) -> bool:
     value != "" and not value.contains("\u{0}")
 
-fn container_image_valid_v1(image: text) -> bool:
+pub fn container_image_valid_v1(image: text) -> bool:
     container_argument_valid_v1(image) and not image.starts_with("-")
 
 pub fn container_test_argv_v1(test_file: text, image: text, memory_mb: i64,
@@ -42,7 +42,7 @@ pub fn container_build_argv_v1(dockerfile_path: text, image_name: text) -> Resul
         return Err("invalid-container-image")
     Ok(["build", "--file={dockerfile_path}", "--tag={image_name}", "."])
 
-fn container_detect_runtime() -> text:
+pub fn container_detect_runtime() -> text:
     val docker_check = process_run("docker", ["--version"])
     if docker_check.2 == 0:
         return "docker"
@@ -51,13 +51,40 @@ fn container_detect_runtime() -> text:
         return "podman"
     "none"
 
-fn container_check_image(image: text, runtime: text) -> bool:
+pub fn container_check_image(image: text, runtime: text) -> bool:
     if not container_runtime_supported_v1(runtime) or not container_image_valid_v1(image):
         return false
     val result = process_run(runtime, ["image", "inspect", image])
     result.2 == 0
 
-pub const CONTAINER_TEST_DEFAULT_TIMEOUT_MS_V1: i64 = 600000
+# Ceiling for a caller that states no limit. `container_run_test` had no
+# timeout at all before it gained a kill path, and whole suites run under it,
+# so the default is a 24 h backstop against a hung engine, not a test budget.
+# SIMPLE_CONTAINER_TEST_TIMEOUT_MS sets a real per-run limit.
+pub const CONTAINER_TEST_DEFAULT_TIMEOUT_MS_V1: i64 = 86400000
+
+pub fn container_test_timeout_ms_v1(configured: text) -> i64:
+    """Positive decimal milliseconds from the environment text, else the 24 h default."""
+    if configured == "" or configured.len() > 12: return CONTAINER_TEST_DEFAULT_TIMEOUT_MS_V1
+    var value = 0
+    for index in 0..configured.len():
+        val byte = configured.byte_at(index)
+        if byte < 48 or byte > 57: return CONTAINER_TEST_DEFAULT_TIMEOUT_MS_V1
+        value = value * 10 + (byte - 48)
+    if value <= 0: return CONTAINER_TEST_DEFAULT_TIMEOUT_MS_V1
+    value
+
+pub fn container_test_absence_v1(exit_code: i64, stdout: text, stderr: text) -> text:
+    """
+    Classify `container inspect <name>`: "present", "gone" or "unknown".
+    Gone needs BOTH the engine's not-found exit (docker 1, podman 125 — measured
+    on podman 4.9.3) and its "no such container" text. Any other failure — a
+    dead daemon, a timeout, a permission error — is unknown, never gone.
+    """
+    if exit_code == 0: return "present"
+    val said = (stdout + "\n" + stderr).lower()
+    if (exit_code == 1 or exit_code == 125) and said.contains("no such container"): return "gone"
+    "unknown"
 
 fn container_test_name_valid_v1(name: text) -> bool:
     """Engine container name: 1..63 of [A-Za-z0-9_.-], alphanumeric first."""
@@ -118,11 +145,14 @@ pub fn container_run_test_bounded_v1(test_file: text, runtime: text, image: text
     val probe = runner(runtime, container_test_absent_argv_v1(name), 30000)
     if end_time < start_time:
         return (result.0, result.1 + "\nContainer monotonic clock failed", 1, 0)
-    if probe.2 == 0:
+    val absence = container_test_absence_v1(probe.2, probe.0, probe.1)
+    if absence == "present":
         return (result.0, result.1 + "\nContainer {name} still present after forced removal", 1, end_time - start_time)
+    if absence == "unknown":
+        return (result.0, result.1 + "\nContainer {name} removal unverified: inspect exit {probe.2}", 1, end_time - start_time)
     (result.0, result.1, result.2, end_time - start_time)
 
-fn container_run_test(
+pub fn container_run_test(
     test_file: text,
     runtime: text,
     image: text,
@@ -132,12 +162,13 @@ fn container_run_test(
     readonly: bool,
     workspace: text
 ) -> (text, text, i64, i64):
-    """Return stdout, stderr, exit code and elapsed ms; bounded by the default timeout."""
+    """Return stdout, stderr, exit code and elapsed ms; see CONTAINER_TEST_DEFAULT_TIMEOUT_MS_V1."""
     val name = "simple-test-" + getpid().to_text() + "-" + time_now_ms().to_text()
     container_run_test_bounded_v1(test_file, runtime, image, memory_mb, cpu_count, network, readonly,
-        workspace, name, CONTAINER_TEST_DEFAULT_TIMEOUT_MS_V1, container_test_host_runner_v1)
+        workspace, name, container_test_timeout_ms_v1(env_get("SIMPLE_CONTAINER_TEST_TIMEOUT_MS") ?? ""),
+        container_test_host_runner_v1)
 
-fn container_build_test_image(runtime: text, dockerfile_path: text, image_name: text) -> bool:
+pub fn container_build_test_image(runtime: text, dockerfile_path: text, image_name: text) -> bool:
     if not container_runtime_supported_v1(runtime):
         return false
     val argv = container_build_argv_v1(dockerfile_path, image_name)
@@ -152,7 +183,7 @@ fn time_now_ms() -> i64:
     """Use the time owner; never synthesize an elapsed-time sample."""
     time_now_monotonic_ms()
 
-fn container_get_version(runtime: text) -> text:
+pub fn container_get_version(runtime: text) -> text:
     if not container_runtime_supported_v1(runtime):
         return ""
     val result = process_run(runtime, ["--version"])
@@ -160,7 +191,7 @@ fn container_get_version(runtime: text) -> text:
         return ""
     result.0.trim()
 
-fn container_cleanup_volumes(runtime: text) -> bool:
+pub fn container_cleanup_volumes(runtime: text) -> bool:
     """
     Refuse deletion: this compatibility API has no exact volume identity or
     ownership receipt. False is an explicit unsupported result with no effects.

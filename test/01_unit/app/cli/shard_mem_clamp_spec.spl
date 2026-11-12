@@ -315,29 +315,37 @@ describe "shard memory clamp":
 
 describe "shard thread floor under an enforcing RSS guard":
     # Stage 3 / tool builds must run with >= 2 workers when the enforcing
-    # watchdog cap physically fits two estimates (+ the coordinator's peak).
-    # The 60%/40% split stays the admission rule above that floor
-    # (early Phase 3 lane, 2026-11-12).
+    # watchdog cap is the binding bound (tree <= host free - headroom) and two
+    # estimates plus the coordinator fit it. Args: requested, cap, tree, avail,
+    # headroom, estimate, parent peak (-1 = unknown), rss mode (2026-11-12).
     it "lifts the run 15 matrix parse row from 1 to 2":
-        # [shard] threads=1 (requested 2, tree budget=54525952 kB, worker budget=25165824 kB)
-        expect(shard_threads_guarded_floor_v1(2, 1, 54525952, 25165824, -1, "enforce")).to_equal(2)
+        # [shard] threads=1 (requested 2, available=82136864 kB, tree budget=54525952 kB, worker budget=25165824 kB)
+        expect(shard_threads_guarded_floor_v1(2, 1, 54525952, 82136864, 25165824, 25165824, -1, "enforce")).to_equal(2)
 
     it "lifts a tight Stage 3 HIR pool to 2":
-        expect(shard_threads_guarded_floor_v1(4, 1, 20971520, 9000000, 17788, "enforce")).to_equal(2)
+        expect(shard_threads_guarded_floor_v1(4, 1, 20971520, 60000000, 25165824, 9000000, 17788, "enforce")).to_equal(2)
+
+    it "keeps the clamp when host free memory, not the guard, is binding":
+        # tree 52 GiB, free 30 GiB, HIR estimate 9 GB: the host would run dry
+        # before the watchdog fired (review of #8522).
+        expect(shard_threads_guarded_floor_v1(2, 0, 54525952, 31457280, 25165824, 9000000, 17788, "enforce")).to_equal(0)
+        expect(shard_threads_guarded_floor_v1(2, 1, 54525952, 31457280, 25165824, 9000000, -1, "enforce")).to_equal(1)
+        expect(shard_threads_guarded_floor_v1(2, 1, 54525952, 0, 25165824, 9000000, -1, "enforce")).to_equal(1)
 
     it "keeps the clamp without an enforcing guard":
-        expect(shard_threads_guarded_floor_v1(2, 1, 54525952, 25165824, -1, "")).to_equal(1)
-        expect(shard_threads_guarded_floor_v1(2, 1, 54525952, 25165824, -1, "monitor")).to_equal(1)
+        expect(shard_threads_guarded_floor_v1(2, 1, 54525952, 82136864, 25165824, 25165824, -1, "")).to_equal(1)
+        expect(shard_threads_guarded_floor_v1(2, 1, 54525952, 82136864, 25165824, 25165824, -1, "monitor")).to_equal(1)
 
-    it "keeps the clamp when two estimates do not fit the cap":
-        expect(shard_threads_guarded_floor_v1(2, 1, 40000000, 25165824, -1, "enforce")).to_equal(1)
-        expect(shard_threads_guarded_floor_v1(2, 1, 54525952, 25165824, 5000000, "enforce")).to_equal(1)
-        expect(shard_threads_guarded_floor_v1(2, 0, 10000000, 9000000, -1, "enforce")).to_equal(0)
+    it "keeps the clamp when two estimates and the coordinator do not fit the cap":
+        expect(shard_threads_guarded_floor_v1(2, 1, 40000000, 82136864, 25165824, 25165824, -1, "enforce")).to_equal(1)
+        expect(shard_threads_guarded_floor_v1(2, 1, 54525952, 82136864, 25165824, 25165824, 5000000, "enforce")).to_equal(1)
+        # Unknown coordinator peak reserves the 4 GiB phase base: 2 x 25165825 + 4 GiB > 52 GiB.
+        expect(shard_threads_guarded_floor_v1(2, 1, 54525952, 82136864, 25165824, 25165825, -1, "enforce")).to_equal(1)
 
     it "keeps the clamp when the cap or estimate is unknown":
-        expect(shard_threads_guarded_floor_v1(2, 1, 0, 9000000, -1, "enforce")).to_equal(1)
-        expect(shard_threads_guarded_floor_v1(2, 1, 54525952, 0, -1, "enforce")).to_equal(1)
+        expect(shard_threads_guarded_floor_v1(2, 1, 0, 82136864, 25165824, 9000000, -1, "enforce")).to_equal(1)
+        expect(shard_threads_guarded_floor_v1(2, 1, 54525952, 82136864, 25165824, 0, -1, "enforce")).to_equal(1)
 
     it "never raises a serial request or an admitted fanout":
-        expect(shard_threads_guarded_floor_v1(1, 1, 54525952, 9000000, -1, "enforce")).to_equal(1)
-        expect(shard_threads_guarded_floor_v1(4, 3, 54525952, 9000000, -1, "enforce")).to_equal(3)
+        expect(shard_threads_guarded_floor_v1(1, 1, 20971520, 60000000, 25165824, 9000000, -1, "enforce")).to_equal(1)
+        expect(shard_threads_guarded_floor_v1(4, 3, 20971520, 60000000, 25165824, 9000000, -1, "enforce")).to_equal(3)

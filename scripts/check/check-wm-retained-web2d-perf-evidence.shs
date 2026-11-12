@@ -1,0 +1,313 @@
+#!/bin/sh
+set -eu
+
+# Retained Web 2D WM perf evidence capture (hosted WM / SimpleOS WM).
+#
+# Assembles a retained-frame performance receipt from a live WM run's
+# artifacts (launch log, presented-buffer before/after captures, executable,
+# frame timing samples, RSS measurement) and admits it through the schema
+# validator in check-wm-production-fullscreen-evidence.shs.
+#
+# Fails honestly: a metal request on a non-Darwin host, any backend fallback
+# marker, a cache-only readback, or headless/missing live-frame markers all
+# reject the receipt instead of degrading to a weaker claim.
+usage() {
+    echo "usage: $0 --capture-retained-perf-receipt RUN_DIR RECEIPT.env" >&2
+    echo "       $0 --self-test" >&2
+    exit 2
+}
+
+fail() {
+    echo "wm_retained_web2d_perf_capture_status=fail reason=$1"
+    exit 1
+}
+
+receipt_field() {
+    sed -n "s/^$1=//p" "$frames_env" | tail -n 1
+}
+
+require_field() {
+    value=$(receipt_field "$1")
+    [ -n "$value" ] || fail "missing-$1"
+    printf '%s\n' "$value"
+}
+
+positive_int() {
+    case "$1" in ''|*[!0-9]*|0*) return 1 ;; esac
+}
+
+sha256_file() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    else
+        fail sha256-tool-unavailable
+    fi
+}
+
+# Extract a `key=value` token from a launch-log line whose provenance segment
+# uses `;` separators (frame_provenance format).
+provenance_field() {
+    printf '%s\n' "$1" | tr ';' ' ' | awk -v key="$2" '
+        {
+            for (i = 1; i <= NF; i++) {
+                split($i, pair, "=")
+                if (pair[1] == key) {
+                    print pair[2]
+                    exit
+                }
+            }
+        }
+    '
+}
+
+last_frame_line() {
+    grep -E '^\[hosted-wm\] frame-presented ' "$1" | tail -n 1 || true
+}
+
+capture_receipt() {
+    run_dir=$1
+    receipt_out=$2
+    frames_env="$run_dir/frames.env"
+    [ -d "$run_dir" ] || fail missing-run-dir
+    [ -f "$frames_env" ] || fail missing-frames-env
+
+    platform=$(require_field platform)
+    backend=$(require_field backend)
+    case "$platform:$backend" in
+        hosted:software|hosted:cpu_simd|hosted:metal|simpleos:software|simpleos:cpu_simd) ;;
+        *) fail unsupported-platform-backend ;;
+    esac
+    # Metal is a Darwin/aarch64 lane. On any other host an honest receipt says
+    # the backend is unavailable; it must never be re-labelled as software.
+    if [ "$backend" = metal ] && [ "$(uname -s)" != Darwin ]; then
+        fail "backend-unavailable:metal-on-$(uname -s | tr '[:upper:]' '[:lower:]')"
+    fi
+    viewport_width=$(require_field viewport_width)
+    viewport_height=$(require_field viewport_height)
+    positive_int "$viewport_width" || fail invalid-viewport_width
+    positive_int "$viewport_height" || fail invalid-viewport_height
+    warmup_frames=$(require_field warmup_frames)
+    positive_int "$warmup_frames" || fail invalid-warmup_frames
+    frame_budget_ns=$(require_field frame_budget_ns)
+    positive_int "$frame_budget_ns" || fail invalid-frame_budget_ns
+    max_rss_kib=$(require_field max_rss_kib)
+    positive_int "$max_rss_kib" || fail invalid-max_rss_kib
+    rss_budget_kib=$(require_field rss_budget_kib)
+    positive_int "$rss_budget_kib" || fail invalid-rss_budget_kib
+    baseline_p95_ns=$(require_field baseline_p95_ns)
+    positive_int "$baseline_p95_ns" || fail invalid-baseline_p95_ns
+    baseline_max_rss_kib=$(require_field baseline_max_rss_kib)
+    positive_int "$baseline_max_rss_kib" || fail invalid-baseline_max_rss_kib
+    baseline_source_revision=$(require_field baseline_source_revision)
+    source_revision=$(require_field source_revision)
+
+    launch_log="$run_dir/launch.log"
+    [ -s "$launch_log" ] || fail missing-launch-log
+    frame_lines=$(grep -Ec '^\[hosted-wm\] frame-presented ' "$launch_log" || true)
+    [ "$frame_lines" -ge 1 ] || fail missing-frame-presented-markers
+    # A live retained frame never falls back and never comes from the cache or
+    # a rejected draw-IR retry.
+    if grep -E '^\[hosted-wm\] frame-presented ' "$launch_log" | grep -Ev '(^|[ ;])fallback=false([; ]|$)' >/dev/null; then
+        fail backend-fallback
+    fi
+    if grep -Eq '^\[hosted-wm\] content-provenance-rejected|backend=native-safe-fallback|^\[hosted-wm\] draw-ir-rejected retry=compatibility' "$launch_log"; then
+        fail content-provenance-rejected
+    fi
+    last_line=$(last_frame_line "$launch_log")
+    actual_backend=$(provenance_field "$last_line" backend)
+    [ -n "$actual_backend" ] || fail missing-backend-provenance
+    [ "$actual_backend" = "$backend" ] || fail "backend-fallback:requested-$backend-actual-$actual_backend"
+    readback_source=$(provenance_field "$last_line" source)
+    case "$backend:$readback_source" in
+        software:presented-pixel-buffer|cpu_simd:presented-pixel-buffer|metal:device_readback) ;;
+        *:cache|*:cache-only) fail non-live-readback ;;
+        *) fail non-live-readback ;;
+    esac
+
+    samples_file="$run_dir/frame_samples_ns.txt"
+    [ -s "$samples_file" ] || fail missing-frame-samples
+    total_samples=$(grep -Ec '^[0-9]+$' "$samples_file" || true)
+    [ "$total_samples" -gt "$warmup_frames" ] || fail insufficient-samples
+    sample_frames=$(( total_samples - warmup_frames ))
+    [ "$sample_frames" -ge 20 ] || fail insufficient-samples
+    percentiles=$(tail -n "+$(( warmup_frames + 1 ))" "$samples_file" | sort -n | awk '
+        { a[NR] = $1 }
+        END {
+            i50 = int((NR + 1) / 2)
+            i95 = int(NR * 0.95)
+            if (i95 < 1) i95 = 1
+            print a[i50], a[i95]
+        }')
+    frame_p50_ns=${percentiles% *}
+    frame_p95_ns=${percentiles#* }
+    [ "$frame_p95_ns" -le "$frame_budget_ns" ] || fail frame-budget-exceeded
+    [ "$max_rss_kib" -le "$rss_budget_kib" ] || fail rss-budget-exceeded
+
+    before_capture="$run_dir/before.ppm"
+    after_capture="$run_dir/after.ppm"
+    [ -s "$before_capture" ] || fail missing-before-capture
+    [ -s "$after_capture" ] || fail missing-after-capture
+    for capture in "$before_capture" "$after_capture"; do
+        dims=$(perl -e '
+            use strict;
+            my ($path) = @ARGV;
+            open my $file, "<:raw", $path or exit 1;
+            local $/;
+            my $data = <$file>;
+            $data =~ /\AP6\r?\n(\d+) (\d+)\r?\n255\r?\n/s or exit 2;
+            my ($width, $height) = ($1, $2);
+            length(substr($data, $+[0])) == $width * $height * 3 or exit 3;
+            print "$width $height\n";
+        ' "$capture") || fail invalid-capture
+        [ "$dims" = "$viewport_width $viewport_height" ] || fail capture-viewport-mismatch
+    done
+    checksum_before=$(sha256_file "$before_capture")
+    checksum_after=$(sha256_file "$after_capture")
+    [ "$checksum_before" != "$checksum_after" ] || fail unchanged-framebuffer
+
+    executable="$run_dir/executable"
+    [ -s "$executable" ] || fail missing-executable
+    executable_sha256=$(sha256_file "$executable")
+
+    # Retained launch log: the run's own log plus the capture marker the schema
+    # validator requires; the digest binds exactly this retained copy.
+    retained_log="$(dirname -- "$receipt_out")/launch.retained.log"
+    mkdir -p "$(dirname -- "$receipt_out")"
+    cp "$launch_log" "$retained_log"
+    echo "wm_retained_web2d_perf_capture backend=$backend viewport=${viewport_width}x${viewport_height} samples=$sample_frames" >>"$retained_log"
+    launch_log_sha256=$(sha256_file "$retained_log")
+
+    cat >"$receipt_out" <<EOF
+platform=$platform
+backend=$backend
+actual_backend=$actual_backend
+status=pass
+fallback=none
+workload=filesystem-wm-client-live-retained-frame
+readback_source=$readback_source
+readback_mode=pixels
+source_revision=$source_revision
+executable_path=$executable
+executable_sha256=$executable_sha256
+before_capture_path=$before_capture
+checksum_before=$checksum_before
+capture_path=$after_capture
+checksum_after=$checksum_after
+launch_log_path=$retained_log
+launch_log_sha256=$launch_log_sha256
+viewport_width=$viewport_width
+viewport_height=$viewport_height
+warmup_frames=$warmup_frames
+sample_frames=$sample_frames
+frame_p50_ns=$frame_p50_ns
+frame_p95_ns=$frame_p95_ns
+frame_budget_ns=$frame_budget_ns
+max_rss_kib=$max_rss_kib
+rss_budget_kib=$rss_budget_kib
+baseline_p95_ns=$baseline_p95_ns
+baseline_max_rss_kib=$baseline_max_rss_kib
+baseline_platform=$platform
+baseline_backend=$backend
+baseline_viewport_width=$viewport_width
+baseline_viewport_height=$viewport_height
+baseline_source_revision=$baseline_source_revision
+EOF
+
+    validator_output=$(sh "$(dirname -- "$0")/check-wm-production-fullscreen-evidence.shs" \
+        --validate-retained-perf-receipt "$receipt_out") || fail schema-admission-rejected
+    printf '%s\n' "$validator_output"
+    echo "wm_retained_web2d_perf_capture_status=pass platform=$platform backend=$backend viewport=${viewport_width}x${viewport_height} p50_ns=$frame_p50_ns p95_ns=$frame_p95_ns max_rss_kib=$max_rss_kib samples=$sample_frames"
+}
+
+# --- synthetic fixtures: prove the honest-failure gates and one admission ----
+write_fixture_run() {
+    dir=$1
+    backend=$2
+    source=$3
+    fallback=$4
+    sample_count=$5
+    mkdir -p "$dir"
+    cat >"$dir/frames.env" <<EOF
+platform=hosted
+backend=$backend
+viewport_width=8
+viewport_height=6
+warmup_frames=4
+frame_budget_ns=12500000
+max_rss_kib=100000
+rss_budget_kib=262144
+baseline_p95_ns=5000000
+baseline_max_rss_kib=100000
+baseline_source_revision=test-baseline
+source_revision=test-source
+EOF
+    : >"$dir/launch.log"
+    i=1
+    while [ "$i" -le "$sample_count" ]; do
+        echo "[hosted-wm] frame-presented renderer=engine2d-draw-ir content=simple-web route=shared-wm-scene-draw-ir host=linux-windowed width=8 height=6 raster=simple-2d-winit-buffer fallback=$fallback revision=$i backend=$backend;source=$source;handle=1;checksum=12345;completed=true;width=8;height=6; identity=bitmap-default;target=cpu" >>"$dir/launch.log"
+        i=$(( i + 1 ))
+    done
+    : >"$dir/frame_samples_ns.txt"
+    i=1
+    while [ "$i" -le "$sample_count" ]; do
+        echo $(( 4000000 + i * 1000 )) >>"$dir/frame_samples_ns.txt"
+        i=$(( i + 1 ))
+    done
+    printf 'synthetic-wm-native\n' >"$dir/executable"
+    perl -e 'open my $f, ">:raw", $ARGV[0] or die; print $f "P6\n8 6\n255\n"; print $f "\x01\x02\x03" x 48;' "$dir/before.ppm"
+    perl -e 'open my $f, ">:raw", $ARGV[0] or die; print $f "P6\n8 6\n255\n"; print $f "\x03\x02\x01" x 48;' "$dir/after.ppm"
+}
+
+expect_capture_fail() {
+    dir=$1
+    reason=$2
+    output=$(/bin/sh "$0" --capture-retained-perf-receipt "$dir" "$dir/receipt.env" 2>&1) && return 1
+    [ "$output" = "wm_retained_web2d_perf_capture_status=fail reason=$reason" ] || {
+        echo "self-test: expected reason=$reason, got: $output" >&2
+        return 1
+    }
+}
+
+if [ "${1:-}" = --self-test ]; then
+    tmp=$(mktemp -d)
+    trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+
+    write_fixture_run "$tmp/valid" cpu_simd presented-pixel-buffer false 30
+    output=$(/bin/sh "$0" --capture-retained-perf-receipt "$tmp/valid" "$tmp/valid/receipt.env") || exit 1
+    printf '%s\n' "$output" | grep -Fq "wm_retained_web2d_perf_schema_status=pass platform=hosted backend=cpu_simd" || exit 1
+    printf '%s\n' "$output" | grep -Fq "wm_retained_web2d_perf_capture_status=pass" || exit 1
+    grep -Fq "sample_frames=26" "$tmp/valid/receipt.env" || exit 1
+    grep -Fq "readback_source=presented-pixel-buffer" "$tmp/valid/receipt.env" || exit 1
+
+    if [ "$(uname -s)" != Darwin ]; then
+        write_fixture_run "$tmp/metal" metal device_readback false 30
+        expect_capture_fail "$tmp/metal" "backend-unavailable:metal-on-$(uname -s | tr '[:upper:]' '[:lower:]')" || exit 1
+    fi
+
+    write_fixture_run "$tmp/fallback" cpu_simd presented-pixel-buffer true 30
+    expect_capture_fail "$tmp/fallback" backend-fallback || exit 1
+
+    write_fixture_run "$tmp/cache" cpu_simd cache false 30
+    expect_capture_fail "$tmp/cache" non-live-readback || exit 1
+
+    write_fixture_run "$tmp/short" cpu_simd presented-pixel-buffer false 10
+    expect_capture_fail "$tmp/short" insufficient-samples || exit 1
+
+    write_fixture_run "$tmp/overshoot" cpu_simd presented-pixel-buffer false 30
+    sed 's/^frame_budget_ns=.*/frame_budget_ns=1000/' "$tmp/overshoot/frames.env" >"$tmp/overshoot/next.env"
+    mv "$tmp/overshoot/next.env" "$tmp/overshoot/frames.env"
+    expect_capture_fail "$tmp/overshoot" frame-budget-exceeded || exit 1
+
+    echo wm_retained_web2d_perf_capture_self_test_status=pass
+    exit 0
+fi
+
+if [ "${1:-}" = --capture-retained-perf-receipt ]; then
+    [ "$#" -eq 3 ] || usage
+    capture_receipt "$2" "$3"
+    exit 0
+fi
+
+usage

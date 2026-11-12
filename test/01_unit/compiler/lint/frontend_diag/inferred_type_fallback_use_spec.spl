@@ -77,8 +77,8 @@ fn imported_node_return_has_layout(hir: HirModule) -> bool:
             case Function(_, result, _):
                 match result.kind:
                     case Named(owner, _):
-                        if not hir.structs.contains_key(owner): return false
-                        val layout = hir.structs[owner]
+                        if not hir.imported_layouts.contains_key(owner) or hir.structs.contains_key(owner): return false
+                        val layout = hir.imported_layouts[owner]
                         if layout.symbol.id != owner.id or layout.fields.len() != 1: return false
                         val field = layout.fields[0]
                         if field.name != "n": return false
@@ -309,7 +309,18 @@ describe "W-HIR-INFER-001 for an unavailable imported return signature":
         for symbol in hir.symbols.symbols.values():
             if symbol.name == "node_get":
                 expect(symbol.generic_param_count).to_equal(1)
-                expect(symbol.type_.?).to_equal(false)
+                # The surface now transports the polymorphic signature
+                # (`fn(T) -> T`); deferral means the result stays a type
+                # parameter, never a concrete or erased type.
+                expect(symbol.type_.?).to_equal(true)
+                var result_is_type_param = false
+                match symbol.type_.unwrap().kind:
+                    case Function(_, result, _):
+                        match result.kind:
+                            case TypeParam(name, _): result_is_type_param = name == "T"
+                            case _: result_is_type_param = false
+                    case _: result_is_type_param = false
+                expect(result_is_type_param).to_equal(true)
                 found_generic = true
         expect(found_generic).to_equal(true)
         expect(infer_findings(hir, "W-HIR-INFER-001").len()).to_equal(0)
