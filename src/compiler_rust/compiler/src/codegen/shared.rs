@@ -627,6 +627,7 @@ fn create_outlined_function(
             kind,
             &live_ins_map,
             &lambda_capture_local_indices,
+            lambda_return_type,
             functions,
             &func.name,
         );
@@ -659,6 +660,7 @@ fn create_outlined_function(
                     frame_slots: None,
                     is_lambda: false,
                     lambda_capture_local_indices: Vec::new(),
+                    lambda_returns_bool: false,
                 },
             );
         }
@@ -672,6 +674,7 @@ fn create_outlined_function(
                 frame_slots: None,
                 is_lambda: false,
                 lambda_capture_local_indices: Vec::new(),
+                lambda_returns_bool: false,
             },
         );
     }
@@ -783,6 +786,7 @@ fn set_lambda_capture_metadata(
     kind: BodyKind,
     live_ins_map: &std::collections::HashMap<crate::mir::BlockId, std::collections::HashSet<crate::mir::VReg>>,
     lambda_capture_local_indices: &[usize],
+    lambda_return_type: crate::hir::TypeId,
     functions: &mut [MirFunction],
     original_func_name: &str,
 ) {
@@ -800,6 +804,7 @@ fn set_lambda_capture_metadata(
         frame_slots: None,
         is_lambda: kind == BodyKind::Lambda,
         lambda_capture_local_indices: lambda_capture_local_indices.to_vec(),
+        lambda_returns_bool: kind == BodyKind::Lambda && lambda_return_type == crate::hir::TypeId::BOOL,
     };
     if let Some(orig) = functions.iter_mut().find(|f| f.name == original_func_name) {
         orig.outlined_bodies.insert(body_block, meta.clone());
