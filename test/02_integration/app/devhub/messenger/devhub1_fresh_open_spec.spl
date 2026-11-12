@@ -1,25 +1,18 @@
-# Lane devhub1 target 2 — open REAL freshly-provisioned encrypted files.
+# Lane devhub1 target 2 — open REAL freshly-provisioned encrypted files,
+# provisioned in pure Simple (no external tooling).
 #
-# Inputs come from the repo's own provision tooling driven by
-# test/fixtures/database/sqlcipher4/devhub1_provision_fresh.py, which builds
-# the caret1 acceptance image and encrypts it with a CSPRNG passphrase
-# (encrypt_image runs the reference round-trip + sqlite oracles before any
-# byte is emitted). The encrypted files live under
-# build/review/p3fix-devhub1-20261111-fresh/ (gitignored); the passphrase
-# reaches this spec only through SIMPLE_SECRET_DEVHUB1_FRESH in the process
-# environment, mirroring provision.py --native. Nothing here is a mock.
+# test/support/devhub1_provision.spl builds the caret1 acceptance messenger
+# image (2 rooms, 3 members, 46 messages incl. an overflowing body) with the
+# repo's sqlite_format writer in the reserved-80 layout and encrypts it with
+# the pure-Simple SQLCipher 4 codec under a CSPRNG salt + passphrase. Only
+# ciphertext (fresh / tamper_first / short.bin) and a non-secret manifest
+# are written, to a TEMP scratch dir; the passphrase reaches the decrypt
+# path only through SIMPLE_SECRET_DEVHUB1_FRESH in this process.
 #
-# Operator workflow:
-#   eval "$(python3 test/fixtures/database/sqlcipher4/devhub1_provision_fresh.py | grep '^DEVHUB1_')"
-#   export SIMPLE_SECRET_DEVHUB1_FRESH="$DEVHUB1_FRESH_SECRET"
-#   export DEVHUB1_FRESH_DIR="$DEVHUB1_FRESH_DIR"
-#   bin/simple test test/02_integration/app/devhub/messenger/devhub1_fresh_open_spec.spl \
-#     --mode=interpreter --no-cache
+#   bin/simple test test/02_integration/app/devhub/messenger/devhub1_fresh_open_spec.spl
 #
-# Row-cell VALUE text (`.to_text()`) is intentionally not asserted: that
-# decode boundary is caret2's concurrent lane. This spec asserts the decrypt
-# path end to end at the page/structure/row-count level and byte-level facts
-# from direct page decodes.
+# Row-cell VALUE text is asserted only where the writer input is known here;
+# the full decode boundary is caret2's lane.
 
 """
 ## Purpose and audience
@@ -28,10 +21,10 @@ SQLCipher 4 decrypt path with verified plaintext.
 Audience: devhub secured-storage reviewers; interop lane owners.
 """
 
-# @timeout_secs 2400 (interpreted AES over the multi-page fixture is slow)
+# @timeout_secs 2400 (interpreted AES over the multi-page image is slow)
 
 use std.spec.*
-use std.io_runtime.{env_get_opt, file_read_bytes_result}
+use std.io_runtime.{env_get_opt, time_now_unix_micros, file_size}
 use std.env.{env_set, env_unset}
 use std.nogc_sync_mut.database.server.storage_port.{
     storage_backend_sqlcipher4_open, StorageOpenResult
@@ -42,14 +35,12 @@ use nogc_sync_mut.database.codec.sqlcipher4_page.{
     sqlcipher4_page_close
 }
 use nogc_sync_mut.database.codec.codec_registry.{CodecSessionV1}
+use test.support.devhub1_provision.*
 
 extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
 
-val FRESH_SECRET_ENV: text = "SIMPLE_SECRET_DEVHUB1_FRESH"
-val FRESH_SECRET_REF: text = "secret://devhub1/fresh"
-
-fn _fresh_dir() -> text:
-    env_get_opt("DEVHUB1_FRESH_DIR") ?? ""
+val stamp: text = time_now_unix_micros().to_string()
+val prov: Devhub1Provisioned = devhub1_provision_fresh(devhub1_scratch_dir("devhub1_fresh_" + stamp))
 
 fn _u8_at(arr: [u8], idx: i64) -> i64:
     rt_bytes_u8_at(arr, idx) & 0xFF
@@ -58,76 +49,96 @@ fn _require(condition: bool, boundary: text):
     if not condition:
         fail("fresh secured DB: {boundary}")
 
+fn _page(bytes: [u8], n: i64) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < 4096:
+        out.push(bytes[(n - 1) * 4096 + i])
+        i = i + 1
+    out
+
 describe "REQ-DEVHUB1-FRESH-001: provisioned environment and file geometry":
     # @req REQ-DEVHUB1-FRESH-001
-    it "has a provisioned directory, CSPRNG secret, and whole-page multi-page file":
-        _require(_fresh_dir() != "", "DEVHUB1_FRESH_DIR is set")
-        _require(env_get_opt(FRESH_SECRET_ENV) ?? "" != "", "fresh secret is set")
-        match file_read_bytes_result(_fresh_dir() + "/fresh.sqlcipher4"):
-            case Ok(bytes):
-                _require(bytes.len() > 4096 * 4, "multi-page geometry")
-                _require(bytes.len() % 4096 == 0, "whole 4096-byte pages")
-            case Err(_):
-                _require(false, "fresh file readable")
+    it "has a scratch directory, CSPRNG secret, and whole-page multi-page files on disk":
+        _require(prov.stage == "", "provisioner stage failed: {prov.stage}")
+        step "secret in the environment only (64 hex chars)"
+        expect(prov.secret.len()).to_equal(64)
+        expect(env_get_opt(DEVHUB1_FRESH_ENV) ?? "").to_equal(prov.secret)
+        step "ciphertext geometry"
+        _require(prov.encrypted.len() > 4096 * 4, "multi-page geometry")
+        _require(prov.encrypted.len() % 4096 == 0, "whole 4096-byte pages")
+        expect(prov.page_count).to_equal(prov.encrypted.len() / 4096)
+        step "files written: fresh, tamper_first (same width), short.bin (100 bytes)"
+        expect(file_size(prov.db_path)).to_equal(prov.encrypted.len())
+        expect(file_size(prov.dir + "/tamper_first.sqlcipher4")).to_equal(prov.encrypted.len())
+        expect(file_size(prov.dir + "/short.bin")).to_equal(100)
+        expect(file_size(prov.dir + "/manifest.sdn") > 0).to_be_true()
 
 describe "REQ-DEVHUB1-FRESH-002: direct codec page decode of the fresh file":
     # @req REQ-DEVHUB1-FRESH-002
     it "authenticates and decodes page 1 and a later page byte-exactly":
-        match file_read_bytes_result(_fresh_dir() + "/fresh.sqlcipher4"):
-            case Ok(bytes):
-                var page1: [u8] = []
-                var page2: [u8] = []
-                var i = 0
-                while i < 4096:
-                    page1.push(bytes[i])
-                    page2.push(bytes[4096 + i])
-                    i = i + 1
-                val salt = match sqlcipher4_page1_salt(page1):
-                    case Ok(s): s
-                    case Err(e):
-                        _require(false, "salt extract: {e}")
-                        []
-                val session = match sqlcipher4_page_open_key(FRESH_SECRET_REF, salt):
-                    case Ok(s): s
-                    case Err(e):
-                        _require(false, "key session: {e}")
-                        CodecSessionV1(codec_id: "", open: false, secret_material: [])
-                val body1 = match sqlcipher4_page_decode_with_session(1, page1, session):
-                    case Ok(b): b
-                    case Err(e):
-                        _require(false, "page 1 decode: {e}")
-                        []
-                # Byte-level plaintext facts: virtual [0,16) is the salt,
-                # [16,18) is the SQLite 4096 page-size field, [20] is the
-                # 80-byte reserved count, [18]==1 and [19]==1 legacy versions.
-                _require(body1.len() == 4016, "page 1 body width")
-                _require(body1[16] == 0x10u8 and body1[17] == 0x00u8, "page-size field")
-                _require(body1[18] == 0x01u8 and body1[19] == 0x01u8, "legacy versions")
-                _require(body1[20] == 0x50u8, "reserved bytes 80")
-                var salt_ok = true
-                i = 0
-                while i < 16:
-                    if _u8_at(body1, i) != _u8_at(salt, i):
-                        salt_ok = false
-                    i = i + 1
-                _require(salt_ok, "salt round-trips at virtual [0,16)")
-                val body2 = match sqlcipher4_page_decode_with_session(2, page2, session):
-                    case Ok(b): b
-                    case Err(e):
-                        _require(false, "page 2 decode: {e}")
-                        []
-                _require(body2.len() == 4016, "page 2 body width")
-                val _closed = sqlcipher4_page_close(session)
-            case Err(_):
-                _require(false, "fresh file readable")
+        _require(prov.stage == "", "provisioner stage failed: {prov.stage}")
+        val page1 = _page(prov.encrypted, 1)
+        val page2 = _page(prov.encrypted, 2)
+        val salt = match sqlcipher4_page1_salt(page1):
+            case Ok(s): s
+            case Err(e):
+                _require(false, "salt extract: {e}")
+                []
+        val session = match sqlcipher4_page_open_key(DEVHUB1_FRESH_REF, salt):
+            case Ok(s): s
+            case Err(e):
+                _require(false, "key session: {e}")
+                CodecSessionV1(codec_id: "", open: false, secret_material: [])
+        val body1 = match sqlcipher4_page_decode_with_session(1, page1, session):
+            case Ok(b): b
+            case Err(e):
+                _require(false, "page 1 decode: {e}")
+                []
+        step "page 1 plaintext facts: salt at [0,16), page size, versions, reserved 80"
+        _require(body1.len() == 4016, "page 1 body width")
+        _require(body1[16] == 0x10u8 and body1[17] == 0x00u8, "page-size field")
+        _require(body1[18] == 0x01u8 and body1[19] == 0x01u8, "legacy versions")
+        _require(body1[20] == 0x50u8, "reserved bytes 80")
+        var salt_ok = true
+        var i = 0
+        while i < 16:
+            if _u8_at(body1, i) != _u8_at(salt, i):
+                salt_ok = false
+            i = i + 1
+        _require(salt_ok, "salt round-trips at virtual [0,16)")
+        step "page 1 body [16,4016) and page 2 body match the writer's plaintext"
+        var same1 = true
+        i = 16
+        while i < 4016:
+            if _u8_at(body1, i) != _u8_at(prov.image, i):
+                same1 = false
+            i = i + 1
+        expect(same1).to_be_true()
+        val body2 = match sqlcipher4_page_decode_with_session(2, page2, session):
+            case Ok(b): b
+            case Err(e):
+                _require(false, "page 2 decode: {e}")
+                []
+        _require(body2.len() == 4016, "page 2 body width")
+        var same2 = true
+        i = 0
+        while i < 4016:
+            if _u8_at(body2, i) != _u8_at(prov.image, 4096 + i):
+                same2 = false
+            i = i + 1
+        expect(same2).to_be_true()
+        val _closed = sqlcipher4_page_close(session)
 
 describe "REQ-DEVHUB1-FRESH-003: full storage-port open and row structure":
     # @req REQ-DEVHUB1-FRESH-003
-    it "opens the snapshot; sqlite structure and row counts come back correct":
-        match storage_backend_sqlcipher4_open(_fresh_dir() + "/fresh.sqlcipher4", FRESH_SECRET_REF):
+    it "opens the snapshot; sqlite structure, row counts and known cells come back correct":
+        _require(prov.stage == "", "provisioner stage failed: {prov.stage}")
+        match storage_backend_sqlcipher4_open(prov.db_path, DEVHUB1_FRESH_REF):
             case Ok(StorageOpenResult.SqliteView(view)):
                 _require(view.page_size == 4096, "view page size")
                 _require(view.page_count > 4, "view page count")
+                _require(view.page_count == prov.page_count, "view page count equals provisioned pages")
                 _require(view.reserved_bytes == 80, "view reserved bytes")
                 _require(view.image.len() == view.page_count * 4096, "view image width")
                 _require(_u8_at(view.image, 0) == 0x53 and _u8_at(view.image, 1) == 0x51, "sqlite magic")
@@ -135,6 +146,7 @@ describe "REQ-DEVHUB1-FRESH-003: full storage-port open and row structure":
                     case Ok(rows):
                         _require(rows.len() == 2, "room row count")
                         _require(rows[0].values.len() == 3, "room cell count")
+                        expect(rows[0].values[1].as_text() ?? "").to_equal("fresh general ✓")
                     case Err(e):
                         _require(false, "room rows: {e}")
                 match sqlite_format_read_table_bytes(view.image, "room_member"):
@@ -146,6 +158,8 @@ describe "REQ-DEVHUB1-FRESH-003: full storage-port open and row structure":
                     case Ok(rows):
                         _require(rows.len() == 46, "messages row count")
                         _require(rows[0].values.len() == 7, "messages cell count")
+                        # Row id 15 carries the overflowing body (11216+ bytes).
+                        expect((rows[4].values[3].as_text() ?? "").len() > 11000).to_be_true()
                     case Err(e):
                         _require(false, "messages rows: {e}")
             case Ok(StorageOpenResult.NativeStore(_)):
@@ -156,24 +170,25 @@ describe "REQ-DEVHUB1-FRESH-003: full storage-port open and row structure":
 describe "REQ-DEVHUB1-FRESH-004: fail-closed negatives on the fresh inputs":
     # @req REQ-DEVHUB1-FRESH-004
     it "tampered page and truncated file fail closed; wrong key fails authentication":
-        match storage_backend_sqlcipher4_open(_fresh_dir() + "/tamper_first.sqlcipher4", FRESH_SECRET_REF):
+        _require(prov.stage == "", "provisioner stage failed: {prov.stage}")
+        match storage_backend_sqlcipher4_open(prov.dir + "/tamper_first.sqlcipher4", DEVHUB1_FRESH_REF):
             case Ok(_):
                 _require(false, "tampered fresh file must not open")
             case Err(e):
                 expect(e.code()).to_equal("STORAGE_PORT_AUTHENTICATION_FAILED")
-        match storage_backend_sqlcipher4_open(_fresh_dir() + "/short.bin", FRESH_SECRET_REF):
+        match storage_backend_sqlcipher4_open(prov.dir + "/short.bin", DEVHUB1_FRESH_REF):
             case Ok(_):
                 _require(false, "short fresh file must not open")
             case Err(e):
                 expect(e.code()).to_equal("STORAGE_PORT_CORRUPT_SOURCE")
-        val saved = env_get_opt(FRESH_SECRET_ENV) ?? ""
-        val _w = env_set(FRESH_SECRET_ENV, "wrong-devhub1-fresh-secret-0")
-        match storage_backend_sqlcipher4_open(_fresh_dir() + "/fresh.sqlcipher4", FRESH_SECRET_REF):
+        val saved = env_get_opt(DEVHUB1_FRESH_ENV) ?? ""
+        val _w = env_set(DEVHUB1_FRESH_ENV, "wrong-devhub1-fresh-secret-0")
+        match storage_backend_sqlcipher4_open(prov.db_path, DEVHUB1_FRESH_REF):
             case Ok(_):
                 _require(false, "wrong secret must fail closed")
             case Err(e):
                 expect(e.code()).to_equal("STORAGE_PORT_AUTHENTICATION_FAILED")
         if saved == "":
-            val _u = env_unset(FRESH_SECRET_ENV)
+            val _u = env_unset(DEVHUB1_FRESH_ENV)
         else:
-            val _r = env_set(FRESH_SECRET_ENV, saved)
+            val _r = env_set(DEVHUB1_FRESH_ENV, saved)
