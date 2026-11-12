@@ -1,6 +1,7 @@
 # NOT_RUN: policy regressions; these do not qualify a native launch provider.
 use std.spec.{describe, it, expect}
-use app.cli.worker_hir_profile_v1.{worker_hir_argument_error_v1,
+use app.cli.worker_hir_profile_v1.{worker_hir_argument_error_v1, worker_hir_stage3_capsule_environment_keys_v1,
+    worker_hir_tool_build_environment_keys_v1,
     worker_hir_environment_key_admitted_v1, worker_hir_child_validate_v1}
 use app.cli.worker_hir_owner_v1.{worker_hir_cleanup_deadline_v1,
     worker_hir_remaining_budget_v1, worker_hir_environment_sort_v1}
@@ -19,6 +20,21 @@ describe "worker HIR profile admission":
             "--backend=cranelift", "--low-memory", "--cache-dir", "/tmp/c", "--timeout", "7200",
             "--threads", "2", "-o", "/tmp/out"])).to_equal("")
         expect(worker_hir_argument_error_v1(["a.spl", "b.spl"])).to_contain("unsupported")
+
+    it "admits the native-build output modes Stage 4 direct builds pass":
+        # build-phase4-direct-product.shs passes `--mode dynload` with
+        # `--threads N`; once shard threads >= 2 the profile refused it as
+        # `unsupported HIR worker option: --mode` (early Phase 3 lane, 2026-11-12).
+        for mode in ["dynload", "one-binary"]:
+            expect(worker_hir_argument_error_v1(["--entry-closure", "--entry", "src/main.spl",
+                "--mode", mode, "--threads", "2"])).to_equal("")
+            expect(worker_hir_argument_error_v1(["--entry-closure", "--mode=" + mode])).to_equal("")
+
+    it "rejects every other native-build mode spelling":
+        for args in [["--entry-closure", "--mode", "jit"], ["--entry-closure", "--mode=jit"],
+                ["--entry-closure", "--mode"], ["--entry-closure", "--mode="],
+                ["--entry-closure", "--mode", "--threads"], ["--entry-closure", "--build-mode", "dynload"]]:
+            expect(worker_hir_argument_error_v1(args) == "").to_equal(false)
 
     it "rejects directory fallback without a frozen closure":
         expect(worker_hir_argument_error_v1(["--entry", "src/main.spl"])).to_contain("frozen")
@@ -39,6 +55,51 @@ describe "worker HIR profile admission":
         expect(worker_hir_environment_key_admitted_v1("SIMPLE_SCV_INVENTORY_DIGEST")).to_equal(true)
         for name in ["DYLD_INSERT_LIBRARIES", "LD_PRELOAD", "LD_LIBRARY_PATH",
                 "SIMPLE_NATIVE_GROUP_MANIFEST", "SIMPLE_FILE_WORKER_UNIT", "SIMPLE_PLUGIN", "FUTURE_ROUTE"]:
+            expect(worker_hir_environment_key_admitted_v1(name)).to_equal(false)
+
+    it "admits the exact Stage 3 capsule launch environment":
+        # Pinned from bootstrap-from-scratch.sh's Stage 3 block, the
+        # transcribed runner and process-tree-rss-watchdog.pl (2026-11-12).
+        val stage3 = ["RUST_LOG", "LIBRARY_PATH", "LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING",
+            "MALLOC_ARENA_MAX", "MALLOC_TRIM_THRESHOLD_", "MSYS2_ENV_CONV_EXCL",
+            "SIMPLE_BOOTSTRAP", "SIMPLE_BOOTSTRAP_STAGE3", "SIMPLE_BOOTSTRAP_WHOLE_PROGRAM",
+            "SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256", "SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB",
+            "SIMPLE_BOOTSTRAP_RSS_CAP_MODE", "SIMPLE_BOOTSTRAP_SESSION_ID", "SIMPLE_BOOTSTRAP_SESSION_EXEC",
+            "SIMPLE_BOOTSTRAP_PROCESS_OBSERVER", "SIMPLE_BOOTSTRAP_PROCESS_OBSERVER_SHA256",
+            "SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB", "SIMPLE_FILE_WORKERS",
+            "SIMPLE_ABI_POLICY", "SIMPLE_ABI_ADMISSION_RECEIPT", "SIMPLE_PLUGIN_MANIFEST_POLICY",
+            "SIMPLE_KERNEL_K1_POLICY", "SIMPLE_COVERAGE_CUTOVER_STATE", "SIMPLE_K1_COMPOSITION_SHA256_BEFORE",
+            "SIMPLE_NO_DEPRECATED_WARNINGS", "SIMPLE_STAGE3_STREAMING_SURFACES",
+            "SIMPLE_NATIVE_STAGED_CODEGEN_BATCH", "SIMPLE_NATIVE_GO_TO_END", "SIMPLE_KEEP_SOURCE_CONTENTS",
+            "SIMPLE_MIR_TAG_PROBE", "SIMPLE_FRONTEND_CACHE", "SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_READ",
+            "SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT", "SIMPLE_PACKAGE_INDEX_COLD_INIT",
+            "SIMPLE_SAFETY_PROFILE", "SIMPLE_ASSURANCE_WARNING_PHASE", "SIMPLE_COMPILER_PHASE_PROFILE",
+            "SIMPLE_EVIDENCE_RUN_ID", "SIMPLE_NATIVE_BUILD_TARGET", "SIMPLE_NATIVE_BUILD_THREADS",
+            "SIMPLE_RUNTIME_PATH", "SIMPLE_NATIVE_RUNTIME_BUNDLE",
+            "SIMPLE_WINDOWS_ABI", "CC", "INCLUDE", "LIB", "LIBPATH", "OS"]
+        expect(worker_hir_stage3_capsule_environment_keys_v1()).to_equal(stage3)
+        for name in stage3:
+            expect(worker_hir_environment_key_admitted_v1(name)).to_equal(true)
+
+    it "admits the exact Phase 4 direct and phase C tool-build environment":
+        val tools = ["SIMPLE_FILE_WORKERS", "SIMPLE_MIR_SHARD_COUNT", "SIMPLE_PARSE_SHARD_WORKER_KB",
+            "SIMPLE_PARSE_SHARD_MAX", "SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB",
+            "SIMPLE_NATIVE_BUILD_RUST", "SIMPLE_BOOTSTRAP_STAGE3", "SIMPLE_BOOTSTRAP_STAGE4",
+            "SIMPLE_NATIVE_BUILD_TARGET", "SIMPLE_NATIVE_BUILD_THREADS", "SIMPLE_NATIVE_RUNTIME_BUNDLE",
+            "SIMPLE_RUNTIME_PATH", "SIMPLE_PROJECT_ROOT", "SIMPLE_CACHE_PROJECT", "SIMPLE_CACHE",
+            "XDG_CACHE_HOME", "SIMPLE_PROCESS_TREE_RSS_SCOPE_GROUP", "SIMPLE_PROCESS_TREE_RSS_DECLARED_JOBS",
+            "SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB", "SIMPLE_BOOTSTRAP_RSS_CAP_MODE",
+            "SIMPLE_PROCESS_TREE_RSS_RECEIPT", "SIMPLE_TOOLCHAINS_ROOT", "SIMPLE_HOST_CONFIG",
+            "SIMPLE_BOOTSTRAP_SESSION_ID", "SIMPLE_BOOTSTRAP_SESSION_EXEC",
+            "SIMPLE_BOOTSTRAP_PROCESS_OBSERVER", "SIMPLE_BOOTSTRAP_PROCESS_OBSERVER_SHA256",
+            "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT"]
+        expect(worker_hir_tool_build_environment_keys_v1()).to_equal(tools)
+        for name in tools:
+            expect(worker_hir_environment_key_admitted_v1(name)).to_equal(true)
+
+    it "still rejects ambient and loader-injection keys":
+        for name in ["SSH_CLIENT", "LS_COLORS", "GH_TOKEN", "CLAUDECODE", "LD_PRELOAD",
+                "LD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES", "SIMPLE_FILE_WORKER_UNIT", "SIMPLE_PLUGIN"]:
             expect(worker_hir_environment_key_admitted_v1(name)).to_equal(false)
 
     it "rejects invalid shard ordinals before source admission":

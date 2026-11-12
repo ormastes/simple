@@ -884,8 +884,16 @@ impl Lowerer {
                 let nested = match pattern {
                     Pattern::Enum {
                         payload: Some(payload_patterns),
+                        name: outer_enum,
                         ..
-                    } => self.nested_payload_condition(variant, &subject_ref, payload_patterns, ctx),
+                    } => self.nested_payload_condition(
+                        outer_enum,
+                        variant,
+                        subject_ty,
+                        &subject_ref,
+                        payload_patterns,
+                        ctx,
+                    ),
                     _ => None,
                 };
 
@@ -985,19 +993,34 @@ impl Lowerer {
     /// Scope: fully recursive over variant and literal sub-patterns, at any
     /// nesting depth. Tuple/array/struct sub-patterns in payload position are
     /// still treated as irrefutable and are tracked separately in the bug doc.
+    ///
+    /// `outer_enum` / `subject_ty` name the enum the variant belongs to (the
+    /// pattern's qualifier, `_` when bare, and the subject's static type), so
+    /// each payload slot is tested against its DECLARED type — a bare unit
+    /// variant in a slot (`case Box(Red):`) is then a variant test. The field
+    /// types come from the same `get_enum_variant_field_types_with_hint` call
+    /// `collect_pattern_bindings` makes, so the condition and the binder agree
+    /// on which bare names are variants rather than bindings.
     pub(crate) fn nested_payload_condition(
         &mut self,
+        outer_enum: &str,
         outer_variant: &str,
+        subject_ty: TypeId,
         subject_ref: &HirExpr,
         payload_patterns: &[Pattern],
         ctx: &mut FunctionContext,
     ) -> Option<HirExpr> {
         let arity = payload_patterns.len();
         let mut combined: Option<HirExpr> = None;
+        let field_types = self.get_enum_variant_field_types_with_hint(outer_enum, outer_variant, subject_ty);
 
         for (i, p) in payload_patterns.iter().enumerate() {
             let slot_expr = Self::payload_slot_expr(outer_variant, subject_ref, i, arity);
-            let Some(test) = self.subpattern_condition(&slot_expr, p, ctx) else {
+            let slot_ty = field_types
+                .as_ref()
+                .and_then(|types| types.get(i).copied())
+                .unwrap_or(TypeId::ANY);
+            let Some(test) = self.subpattern_condition_typed(&slot_expr, slot_ty, p, ctx) else {
                 continue;
             };
             combined = Some(match combined {
@@ -1099,9 +1122,41 @@ impl Lowerer {
     /// level down. Descending only one level made
     /// `case C(L2.S(L3.X(n)), tag)` select on `L2.S` alone, so an `L3.Y`
     /// subject took the `L3.X` arm.
+    ///
+    /// The slot's static type is unknown here; see
+    /// [`Self::subpattern_condition_typed`] for the typed walk.
     pub(crate) fn subpattern_condition(
         &mut self,
         slot: &HirExpr,
+        pattern: &Pattern,
+        ctx: &mut FunctionContext,
+    ) -> Option<HirExpr> {
+        self.subpattern_condition_typed(slot, TypeId::ANY, pattern, ctx)
+    }
+
+    /// [`Self::subpattern_condition`] with the slot's DECLARED static type
+    /// (`TypeId::ANY` when unknown). The slot expression itself stays
+    /// ANY-typed; `slot_ty` only decides whether a bare identifier is a
+    /// variant test.
+    ///
+    /// A bare `Red` in a tuple element / array element / enum payload slot
+    /// whose declared type is an enum owning a variant `Red` is a VARIANT
+    /// TEST, exactly as a top-level `case Red:` is in
+    /// `lower_pattern_condition_stmt`, and as the tree-walk interpreter and the
+    /// pure-Simple frontend (`lower_match_pattern_with_union_v1`) decide it.
+    /// Treating it as an irrefutable binder made `case (Red, Red):` match every
+    /// pair, which made the seed-compiled `hir_types_equal`
+    /// (`case (Bool, Bool): true`) answer true for unrelated types.
+    /// `collect_pattern_bindings` already excluded such names from the arm's
+    /// bindings using the same element/field types, so the two halves agree.
+    /// A name that is NOT a variant of the slot's enum (including a variant of
+    /// some OTHER enum) stays a binding; pattern names never consult outer
+    /// locals, so a same-named local does not turn a variant back into a binder.
+    /// Bug: doc/08_tracking/bug/seed_tuple_pattern_bare_fieldless_variant_binds_hir_types_equal_true_2026-11-12.md
+    pub(crate) fn subpattern_condition_typed(
+        &mut self,
+        slot: &HirExpr,
+        slot_ty: TypeId,
         pattern: &Pattern,
         ctx: &mut FunctionContext,
     ) -> Option<HirExpr> {
@@ -1119,13 +1174,31 @@ impl Lowerer {
             );
         }
         match pattern {
+            // A bare unit variant of the slot's declared enum: variant test.
+            Pattern::Identifier(name) if self.subject_enum_has_unit_variant(slot_ty, name) => Some(HirExpr {
+                kind: HirExprKind::BuiltinCall {
+                    name: "rt_enum_check_variant".to_string(),
+                    args: vec![
+                        slot.clone(),
+                        HirExpr {
+                            kind: HirExprKind::Integer(self.enum_runtime_id_for_type(slot_ty)),
+                            ty: TypeId::I64,
+                        },
+                        HirExpr {
+                            kind: HirExprKind::Integer(simple_runtime::value::hash_variant_discriminant(name) as i64),
+                            ty: TypeId::I64,
+                        },
+                    ],
+                },
+                ty: TypeId::BOOL,
+            }),
             // Irrefutable: binds or ignores, never rejects.
             Pattern::Wildcard
             | Pattern::Identifier(_)
             | Pattern::MutIdentifier(_)
             | Pattern::MoveIdentifier(_)
             | Pattern::Rest => None,
-            Pattern::Typed { pattern, .. } => self.subpattern_condition(slot, pattern, ctx),
+            Pattern::Typed { pattern, .. } => self.subpattern_condition_typed(slot, slot_ty, pattern, ctx),
             Pattern::Literal(lit_expr) => {
                 // `case A(0, y)` must reject `A(9, 7)`. Without this the arm was
                 // irrefutable and the first literal arm swallowed every value.
@@ -1199,7 +1272,7 @@ impl Lowerer {
                 // the pattern does accept.
                 let mut acc: Option<HirExpr> = None;
                 for alt in alternatives {
-                    let test = self.subpattern_condition(slot, alt, ctx)?;
+                    let test = self.subpattern_condition_typed(slot, slot_ty, alt, ctx)?;
                     acc = Some(match acc {
                         None => test,
                         Some(prev) => HirExpr {
@@ -1243,7 +1316,7 @@ impl Lowerer {
                     let deeper = payload
                         .as_ref()
                         .filter(|_| variant == "Some")
-                        .and_then(|inner| self.nested_payload_condition(variant, slot, inner, ctx));
+                        .and_then(|inner| self.nested_payload_condition(name, variant, slot_ty, slot, inner, ctx));
                     return Some(match deeper {
                         None => presence,
                         Some(inner_test) => HirExpr {
@@ -1283,7 +1356,7 @@ impl Lowerer {
                 };
                 let deeper = payload
                     .as_ref()
-                    .and_then(|inner| self.nested_payload_condition(variant, slot, inner, ctx));
+                    .and_then(|inner| self.nested_payload_condition(name, variant, slot_ty, slot, inner, ctx));
                 Some(match deeper {
                     None => tag_test,
                     Some(inner_test) => HirExpr {
@@ -1307,8 +1380,8 @@ impl Lowerer {
                 }
                 self.struct_fields_condition(slot, name, &positional, ctx)
             }
-            Pattern::Tuple(elements) => self.sequence_condition(slot, elements, false, ctx),
-            Pattern::Array(elements) => self.sequence_condition(slot, elements, true, ctx),
+            Pattern::Tuple(elements) => self.sequence_condition_typed(slot, slot_ty, elements, false, ctx),
+            Pattern::Array(elements) => self.sequence_condition_typed(slot, slot_ty, elements, true, ctx),
         }
     }
 
@@ -1417,7 +1490,33 @@ impl Lowerer {
         is_array: bool,
         ctx: &mut FunctionContext,
     ) -> Option<HirExpr> {
+        self.sequence_condition_typed(slot, slot.ty, patterns, is_array, ctx)
+    }
+
+    /// [`Self::sequence_condition`] with the sequence's declared type, so each
+    /// element is tested against ITS type (`HirType::Tuple` element `i`, or
+    /// the `HirType::Array` element type) — the same resolution
+    /// `collect_pattern_bindings` uses for the binders.
+    pub(crate) fn sequence_condition_typed(
+        &mut self,
+        slot: &HirExpr,
+        seq_ty: TypeId,
+        patterns: &[Pattern],
+        is_array: bool,
+        ctx: &mut FunctionContext,
+    ) -> Option<HirExpr> {
         let slots = Self::sequence_element_slots(slot, patterns, is_array)?;
+        // Tuple slots are only ever leading positions (a tuple rest with
+        // trailing elements has no addressable form, see
+        // `sequence_element_slots`), so slot `i` is tuple element `i`.
+        let element_ty = |i: usize| -> TypeId {
+            match self.module.types.get(seq_ty) {
+                Some(HirType::Tuple(types)) if !is_array => types.get(i).copied().unwrap_or(TypeId::ANY),
+                Some(HirType::Array { element, .. }) if is_array => *element,
+                _ => TypeId::ANY,
+            }
+        };
+        let slot_types: Vec<TypeId> = (0..slots.len()).map(element_ty).collect();
 
         let mut combined: Option<HirExpr> = None;
         if is_array {
@@ -1437,8 +1536,8 @@ impl Lowerer {
             });
         }
 
-        for (elem_expr, sub) in &slots {
-            let Some(test) = self.subpattern_condition(elem_expr, sub, ctx) else {
+        for ((elem_expr, sub), elem_ty) in slots.iter().zip(slot_types) {
+            let Some(test) = self.subpattern_condition_typed(elem_expr, elem_ty, sub, ctx) else {
                 continue;
             };
             combined = Some(match combined {
@@ -1470,6 +1569,12 @@ impl Lowerer {
     ///
     /// A struct pattern is itself irrefutable — the type system already fixed
     /// the class — so this returns `None` unless some FIELD is refutable.
+    ///
+    /// Each field is tested against its DECLARED type, the one
+    /// `collect_pattern_bindings` binds with, so a bare unit variant in a field
+    /// (`case Holder { c: Red, .. }`, `case Holder(Red, n)`) is a variant test
+    /// under the same unit-only slot rule as tuple/array/payload slots.
+    /// Bug: doc/08_tracking/bug/seed_struct_field_slot_bare_unit_variant_neither_tested_nor_bound_2026-11-12.md
     pub(crate) fn struct_fields_condition(
         &mut self,
         slot: &HirExpr,
@@ -1497,7 +1602,7 @@ impl Lowerer {
                 },
                 ty: field_ty,
             };
-            let Some(test) = self.subpattern_condition(&field_expr, field_pattern, ctx) else {
+            let Some(test) = self.subpattern_condition_typed(&field_expr, field_ty, field_pattern, ctx) else {
                 continue;
             };
             combined = Some(match combined {
@@ -1716,7 +1821,7 @@ impl Lowerer {
     /// Returns a list of (name, type) pairs for variables that should be bound.
     pub fn extract_pattern_bindings(&self, pattern: &Pattern, subject_ty: TypeId) -> Vec<(String, TypeId)> {
         let mut bindings = Vec::new();
-        self.collect_pattern_bindings(pattern, subject_ty, &mut bindings);
+        self.collect_pattern_bindings(pattern, subject_ty, false, &mut bindings);
         bindings
     }
 
@@ -1740,6 +1845,29 @@ impl Lowerer {
                     .iter()
                     .any(|(variant, payload)| variant == name && payload.is_none())
             })
+    }
+
+    /// [`Self::subject_enum_has_variant`] restricted to UNIT (payload-less)
+    /// variants — the rule for a bare name in a SUB-pattern slot
+    /// (`case (Red, _)`, `case Box(Red)`). A bare name that spells a payload
+    /// variant there (`case (Int, _)` with `Int(bits)`) is a BINDER, as in the
+    /// pure-Simple frontend, whose HIR gate is `enum_unit_pattern_names`
+    /// (`expression_components.spl`, `lower_match_pattern_with_union_v1`).
+    /// A TOP-LEVEL bare payload-variant arm (`case Clocked:` over
+    /// `VhdlProcessKind`) stays a payload-ignoring variant test on both
+    /// lanes: pure-Simple re-reads that top-level binder as the variant in
+    /// MIR (`expr_dispatch.spl`, bug
+    /// match_unqualified_imported_enum_variant_default_arms_2026-10-24), so
+    /// the top-level caller keeps the any-variant predicate.
+    /// Bug: doc/08_tracking/bug/seed_tuple_pattern_bare_fieldless_variant_binds_hir_types_equal_true_2026-11-12.md
+    pub(crate) fn subject_enum_has_unit_variant(&self, subject_ty: TypeId, name: &str) -> bool {
+        match self.module.types.get(subject_ty) {
+            Some(HirType::Enum { variants, .. }) if !variants.is_empty() => variants
+                .iter()
+                .any(|(variant, fields)| variant == name && fields.as_ref().is_none_or(|f| f.is_empty())),
+            // Empty local list: the global-summary fallback is already unit-only.
+            _ => self.subject_enum_has_variant(subject_ty, name),
+        }
     }
 
     /// Stable runtime identity for a statically known enum. Zero keeps the
@@ -1858,10 +1986,24 @@ impl Lowerer {
     }
 
     /// Recursively collect bindings from a pattern
-    fn collect_pattern_bindings(&self, pattern: &Pattern, expected_ty: TypeId, bindings: &mut Vec<(String, TypeId)>) {
+    fn collect_pattern_bindings(
+        &self,
+        pattern: &Pattern,
+        expected_ty: TypeId,
+        in_slot: bool,
+        bindings: &mut Vec<(String, TypeId)>,
+    ) {
         match pattern {
             Pattern::Identifier(name) => {
-                if !self.subject_enum_has_variant(expected_ty, name) {
+                // Same predicate as the condition walk: top level any variant
+                // (`lower_pattern_condition_stmt`), a sub-pattern slot unit
+                // variants only (`subpattern_condition_typed`).
+                let is_variant = if in_slot {
+                    self.subject_enum_has_unit_variant(expected_ty, name)
+                } else {
+                    self.subject_enum_has_variant(expected_ty, name)
+                };
+                if !is_variant {
                     bindings.push((name.clone(), expected_ty));
                 }
             }
@@ -1882,7 +2024,7 @@ impl Lowerer {
                         .as_ref()
                         .and_then(|types| types.get(i).copied())
                         .unwrap_or(TypeId::ANY);
-                    self.collect_pattern_bindings(p, elem_ty, bindings);
+                    self.collect_pattern_bindings(p, elem_ty, true, bindings);
                 }
             }
             Pattern::Enum {
@@ -1931,7 +2073,7 @@ impl Lowerer {
                                 .unwrap_or("unknown");
                             eprintln!("[PB] {enum_name}.{variant_name} slot{i} expected_ty={:?} field_ty={:?} ({:?}) in {fpath}", expected_ty, field_ty, self.module.types.get(field_ty), );
                         }
-                        self.collect_pattern_bindings(p, field_ty, bindings);
+                        self.collect_pattern_bindings(p, field_ty, true, bindings);
                     }
                 }
             }
@@ -1948,7 +2090,7 @@ impl Lowerer {
                         .and_then(|f| f.iter().find(|(n, _)| n == field_name))
                         .map(|(_, ty)| *ty)
                         .unwrap_or(TypeId::ANY);
-                    self.collect_pattern_bindings(field_pattern, field_ty, bindings);
+                    self.collect_pattern_bindings(field_pattern, field_ty, true, bindings);
                 }
             }
             Pattern::Array(patterns) => {
@@ -1962,18 +2104,18 @@ impl Lowerer {
                     _ => TypeId::ANY,
                 };
                 for p in patterns {
-                    self.collect_pattern_bindings(p, element_ty, bindings);
+                    self.collect_pattern_bindings(p, element_ty, true, bindings);
                 }
             }
             Pattern::Or(patterns) => {
                 // Or patterns should bind the same variables - just use first pattern
                 if let Some(first) = patterns.first() {
-                    self.collect_pattern_bindings(first, expected_ty, bindings);
+                    self.collect_pattern_bindings(first, expected_ty, in_slot, bindings);
                 }
             }
             Pattern::Typed { pattern, ty: _ } => {
                 // Type annotation on pattern - recurse into inner pattern
-                self.collect_pattern_bindings(pattern, expected_ty, bindings);
+                self.collect_pattern_bindings(pattern, expected_ty, in_slot, bindings);
             }
             // Patterns that don't introduce bindings
             Pattern::Wildcard

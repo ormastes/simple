@@ -57,7 +57,7 @@ struct X509Certificate:
     public_key: X509PublicKey
     signature: [u8]           # signature value bytes
 
-enum X509ParseResult:
+enum X509DerParseResult:
     Ok(cert: X509Certificate)
     Err(msg: text)
 
@@ -168,11 +168,11 @@ fn _x_expect_tag(data: [u8], off: u64, want: u8, label: text) -> X509TlvResult:
 #                     off=next: INTEGER exponent
 # ============================================================================
 
-fn _x_parse_spki(spki_bytes: [u8]) -> X509ParseResult:
+fn _x_parse_spki(spki_bytes: [u8]) -> X509DerParseResult:
     # Step 1: outer SEQUENCE
     val outer_r = _x_expect_tag(spki_bytes, 0, 0x30, "spki outer SEQUENCE")
     if val X509TlvResult.Err(msg) = outer_r:
-        return X509ParseResult.Err(msg: msg)
+        return X509DerParseResult.Err(msg: msg)
     # outer_tlv.value = the contents of the outer SEQUENCE
     if val X509TlvResult.Ok(outer_tlv) = outer_r:
         val oseq = outer_tlv.value
@@ -180,7 +180,7 @@ fn _x_parse_spki(spki_bytes: [u8]) -> X509ParseResult:
         # Step 2: AlgorithmIdentifier SEQUENCE (first item in oseq)
         val alg_r = _x_expect_tag(oseq, 0, 0x30, "spki alg SEQUENCE")
         if val X509TlvResult.Err(msg) = alg_r:
-            return X509ParseResult.Err(msg: msg)
+            return X509DerParseResult.Err(msg: msg)
         if val X509TlvResult.Ok(alg_tlv) = alg_r:
             # Step 3: OID inside AlgorithmIdentifier
             val oid_r = _x_expect_tag(alg_tlv.value, 0, 0x06, "spki oid")
@@ -191,34 +191,34 @@ fn _x_parse_spki(spki_bytes: [u8]) -> X509ParseResult:
             # Step 4: BITSTRING (at alg_tlv.next_off within oseq)
             val bs_r = _x_expect_tag(oseq, alg_tlv.next_off, 0x03, "spki bitstring")
             if val X509TlvResult.Err(msg) = bs_r:
-                return X509ParseResult.Err(msg: msg)
+                return X509DerParseResult.Err(msg: msg)
             if val X509TlvResult.Ok(bs_tlv) = bs_r:
                 if bs_tlv.value.len() < 2:
-                    return X509ParseResult.Err(msg: "spki: BITSTRING too short")
+                    return X509DerParseResult.Err(msg: "spki: BITSTRING too short")
                 # Skip unused-bits byte
                 val inner_key = _x_slice(bs_tlv.value, 1, bs_tlv.value.len() - 1)
 
                 # Step 5: RSAPublicKey SEQUENCE
                 val rsa_r = _x_expect_tag(inner_key, 0, 0x30, "RSAPublicKey SEQUENCE")
                 if val X509TlvResult.Err(msg) = rsa_r:
-                    return X509ParseResult.Err(msg: msg)
+                    return X509DerParseResult.Err(msg: msg)
                 if val X509TlvResult.Ok(rsa_tlv) = rsa_r:
                     val rk = rsa_tlv.value
 
                     # Step 6: modulus INTEGER
                     val mod_r = _x_expect_tag(rk, 0, 0x02, "RSA modulus")
                     if val X509TlvResult.Err(msg) = mod_r:
-                        return X509ParseResult.Err(msg: msg)
+                        return X509DerParseResult.Err(msg: msg)
                     if val X509TlvResult.Ok(mod_tlv) = mod_r:
                         val modulus = _x_strip_padding(mod_tlv.value)
 
                         # Step 7: exponent INTEGER
                         val exp_r = _x_expect_tag(rk, mod_tlv.next_off, 0x02, "RSA exponent")
                         if val X509TlvResult.Err(msg) = exp_r:
-                            return X509ParseResult.Err(msg: msg)
+                            return X509DerParseResult.Err(msg: msg)
                         if val X509TlvResult.Ok(exp_tlv) = exp_r:
                             val exponent = _x_strip_padding(exp_tlv.value)
-                            return X509ParseResult.Ok(cert: X509Certificate(
+                            return X509DerParseResult.Ok(cert: X509Certificate(
                                 version: 0,
                                 serial: [],
                                 sig_alg_oid: "",
@@ -234,7 +234,7 @@ fn _x_parse_spki(spki_bytes: [u8]) -> X509ParseResult:
                                 ),
                                 signature: []
                             ))
-    X509ParseResult.Err(msg: "spki: parse failed")
+    X509DerParseResult.Err(msg: "spki: parse failed")
 
 # ============================================================================
 # Full certificate parser
@@ -256,18 +256,18 @@ fn _x_parse_spki(spki_bytes: [u8]) -> X509ParseResult:
 # }
 # ============================================================================
 
-fn x509_parse_der(der: [u8]) -> X509ParseResult:
+fn x509_parse_der(der: [u8]) -> X509DerParseResult:
     # Outer Certificate SEQUENCE
     val cert_r = _x_expect_tag(der, 0, 0x30, "Certificate SEQUENCE")
     if val X509TlvResult.Err(msg) = cert_r:
-        return X509ParseResult.Err(msg: msg)
+        return X509DerParseResult.Err(msg: msg)
     if val X509TlvResult.Ok(cert_tlv) = cert_r:
         val cert_val = cert_tlv.value
 
         # TBSCertificate SEQUENCE (first item in cert_val)
         val tbs_r = _x_expect_tag(cert_val, 0, 0x30, "TBSCertificate SEQUENCE")
         if val X509TlvResult.Err(msg) = tbs_r:
-            return X509ParseResult.Err(msg: msg)
+            return X509DerParseResult.Err(msg: msg)
         if val X509TlvResult.Ok(tbs_tlv) = tbs_r:
             val tbs = tbs_tlv.value
             var pos: u64 = 0
@@ -286,7 +286,7 @@ fn x509_parse_der(der: [u8]) -> X509ParseResult:
             # serialNumber INTEGER
             val ser_r = _x_expect_tag(tbs, pos, 0x02, "serialNumber")
             if val X509TlvResult.Err(msg) = ser_r:
-                return X509ParseResult.Err(msg: msg)
+                return X509DerParseResult.Err(msg: msg)
             var serial_bytes: [u8] = []
             if val X509TlvResult.Ok(ser_tlv) = ser_r:
                 serial_bytes = _x_strip_padding(ser_tlv.value)
@@ -295,7 +295,7 @@ fn x509_parse_der(der: [u8]) -> X509ParseResult:
             # signature AlgorithmIdentifier SEQUENCE
             val sa_r = _x_expect_tag(tbs, pos, 0x30, "signature AlgId")
             if val X509TlvResult.Err(msg) = sa_r:
-                return X509ParseResult.Err(msg: msg)
+                return X509DerParseResult.Err(msg: msg)
             var sig_alg_oid = ""
             if val X509TlvResult.Ok(sa_tlv) = sa_r:
                 val oid_r = _x_expect_tag(sa_tlv.value, 0, 0x06, "sig alg OID")
@@ -306,7 +306,7 @@ fn x509_parse_der(der: [u8]) -> X509ParseResult:
             # issuer Name SEQUENCE
             val iss_r = _x_expect_tag(tbs, pos, 0x30, "issuer")
             if val X509TlvResult.Err(msg) = iss_r:
-                return X509ParseResult.Err(msg: msg)
+                return X509DerParseResult.Err(msg: msg)
             var issuer_raw: [u8] = []
             if val X509TlvResult.Ok(iss_tlv) = iss_r:
                 issuer_raw = _x_slice(tbs, pos, iss_tlv.next_off - pos)
@@ -315,7 +315,7 @@ fn x509_parse_der(der: [u8]) -> X509ParseResult:
             # validity SEQUENCE
             val val_r = _x_expect_tag(tbs, pos, 0x30, "validity")
             if val X509TlvResult.Err(msg) = val_r:
-                return X509ParseResult.Err(msg: msg)
+                return X509DerParseResult.Err(msg: msg)
             var not_before: [u8] = []
             var not_after: [u8] = []
             if val X509TlvResult.Ok(val_tlv) = val_r:
@@ -330,7 +330,7 @@ fn x509_parse_der(der: [u8]) -> X509ParseResult:
             # subject Name SEQUENCE
             val subj_r = _x_expect_tag(tbs, pos, 0x30, "subject")
             if val X509TlvResult.Err(msg) = subj_r:
-                return X509ParseResult.Err(msg: msg)
+                return X509DerParseResult.Err(msg: msg)
             var subject_raw: [u8] = []
             if val X509TlvResult.Ok(subj_tlv) = subj_r:
                 subject_raw = _x_slice(tbs, pos, subj_tlv.next_off - pos)
@@ -339,7 +339,7 @@ fn x509_parse_der(der: [u8]) -> X509ParseResult:
             # subjectPublicKeyInfo SEQUENCE
             val spki_r = _x_expect_tag(tbs, pos, 0x30, "subjectPublicKeyInfo")
             if val X509TlvResult.Err(msg) = spki_r:
-                return X509ParseResult.Err(msg: msg)
+                return X509DerParseResult.Err(msg: msg)
             var pub_key = X509PublicKey(
                 algorithm_oid: "",
                 modulus: [],
@@ -350,13 +350,13 @@ fn x509_parse_der(der: [u8]) -> X509ParseResult:
             if val X509TlvResult.Ok(spki_seq) = spki_r:
                 val spki_bytes = _x_slice(tbs, pos, spki_seq.next_off - pos)
                 val pk_r = _x_parse_spki(spki_bytes)
-                if val X509ParseResult.Ok(pk_cert) = pk_r:
+                if val X509DerParseResult.Ok(pk_cert) = pk_r:
                     pub_key = pk_cert.public_key
                     spki_ok = true
                 pos = spki_seq.next_off
 
             if not spki_ok:
-                return X509ParseResult.Err(msg: "x509: SPKI parse failed")
+                return X509DerParseResult.Err(msg: "x509: SPKI parse failed")
 
             # signatureAlgorithm + signatureValue are in cert_val AFTER TBSCertificate
             val outer_after_tbs = tbs_tlv.next_off
@@ -371,7 +371,7 @@ fn x509_parse_der(der: [u8]) -> X509ParseResult:
                     if sv_tlv.value.len() > 1:
                         sig_bytes = _x_slice(sv_tlv.value, 1, sv_tlv.value.len() - 1)
 
-            return X509ParseResult.Ok(cert: X509Certificate(
+            return X509DerParseResult.Ok(cert: X509Certificate(
                 version: version,
                 serial: serial_bytes,
                 sig_alg_oid: sig_alg_oid,
@@ -382,11 +382,11 @@ fn x509_parse_der(der: [u8]) -> X509ParseResult:
                 public_key: pub_key,
                 signature: sig_bytes
             ))
-    X509ParseResult.Err(msg: "x509_parse_der: outer parse failed")
+    X509DerParseResult.Err(msg: "x509_parse_der: outer parse failed")
 
 # Parse a SubjectPublicKeyInfo DER blob directly (no full certificate wrapper).
-fn x509_parse_spki(spki_der: [u8]) -> X509ParseResult:
+fn x509_parse_spki(spki_der: [u8]) -> X509DerParseResult:
     _x_parse_spki(spki_der)
 
 export x509_parse_der, x509_parse_spki
-export X509Certificate, X509PublicKey, X509ParseResult, X509TlvResult, X509TlvOk
+export X509Certificate, X509PublicKey, X509DerParseResult, X509TlvResult, X509TlvOk

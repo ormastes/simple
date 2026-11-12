@@ -49,6 +49,36 @@ impl FixReplacement:
     static fn new(file: text, span: Span, new_text: text) -> FixReplacement:
         FixReplacement(file: file, span: span, new_text: new_text)
 
+# --- Whether a fix may be applied without review (plan §5) ---
+
+enum FixApplicability:
+    Automatic        # may be applied by `--apply-safe`
+    ReviewRequired   # needs preview + human acceptance
+    Unavailable      # advertised but not applicable now
+
+impl FixApplicability:
+    fn name() -> text:
+        match self:
+            FixApplicability.Automatic: "automatic"
+            FixApplicability.ReviewRequired: "review_required"
+            FixApplicability.Unavailable: "unavailable"
+
+    # Safe -> Automatic, Likely/Uncertain -> ReviewRequired, disabled -> Unavailable.
+    static fn for_confidence(confidence: FixConfidence, enabled: bool) -> FixApplicability:
+        if not enabled:
+            return FixApplicability.Unavailable
+        match confidence:
+            FixConfidence.Safe: FixApplicability.Automatic
+            FixConfidence.Likely: FixApplicability.ReviewRequired
+            FixConfidence.Uncertain: FixApplicability.ReviewRequired
+
+# --- Exact file-revision precondition for one replacement ---
+
+struct FixPrecondition:
+    file: text
+    span: Span
+    expected_text: text   # exact text the span must still contain to apply
+
 # --- A machine-applicable fix for a diagnostic ---
 
 struct DiagnosticFix:
@@ -56,10 +86,25 @@ struct DiagnosticFix:
     description: text               # What the fix does
     replacements: [FixReplacement]   # Text replacements to apply
     confidence: FixConfidence        # Is this safe to auto-apply?
+    # Additive multi-fix fields (plan §5). Not emitted in the legacy `fix` JSON.
+    title: text                      # Short action title ("" = use description)
+    rank: i64                        # 1-based rank among this diagnostic's fixes (0 = unranked)
+    applicability: FixApplicability
+    preconditions: [FixPrecondition] # file revision preconditions, one per replacement
 
 impl DiagnosticFix:
     static fn new(id: text, description: text, confidence: FixConfidence) -> DiagnosticFix:
-        DiagnosticFix(id: id, description: description, replacements: [], confidence: confidence)
+        DiagnosticFix(id: id, description: description, replacements: [], confidence: confidence,
+            title: description, rank: 0,
+            applicability: FixApplicability.for_confidence(confidence, true),
+            preconditions: [])
+
+    # Safe/Likely fixes are eligible for the legacy single `fix` alias.
+    fn is_alias_eligible() -> bool:
+        match self.confidence:
+            FixConfidence.Safe: true
+            FixConfidence.Likely: true
+            FixConfidence.Uncertain: false
 
     # Add a replacement to this fix
     fn with_replacement(file: text, span: Span, new_text: text) -> DiagnosticFix:
@@ -93,6 +138,26 @@ impl LabelV1:
     static fn secondary(file: text, span: Span, message: text) -> LabelV1:
         LabelV1(file: file, span: span, message: message, primary: false)
 
+# --- Rule lifecycle metadata stamped by the per-rule policy (plan §4/§5) ---
+
+struct DiagnosticLifecycle:
+    rule_created_on: text
+    warn_since: text
+    error_not_before: text
+    error_since_edition: text
+    active_profile: text
+    effective_language_edition: text
+    policy_digest: text
+
+impl DiagnosticLifecycle:
+    static fn new(rule_created_on: text, warn_since: text, error_not_before: text,
+            error_since_edition: text, active_profile: text,
+            effective_language_edition: text, policy_digest: text) -> DiagnosticLifecycle:
+        DiagnosticLifecycle(rule_created_on: rule_created_on, warn_since: warn_since,
+            error_not_before: error_not_before, error_since_edition: error_since_edition,
+            active_profile: active_profile, effective_language_edition: effective_language_edition,
+            policy_digest: policy_digest)
+
 # --- The canonical diagnostic ---
 
 struct DiagnosticV1:
@@ -106,7 +171,9 @@ struct DiagnosticV1:
     help: [text]                  # Help suggestions (list, not a single message)
     children: [DiagnosticV1]      # Nested/child diagnostics
     macro_trace: [MacroFrame]     # Macro expansion chain, outermost-first
-    fix: DiagnosticFix?           # Suggested machine-applicable fix
+    fix: DiagnosticFix?           # Legacy alias: first Safe/Likely entry of `fixes` (or set directly)
+    fixes: [DiagnosticFix]        # Ranked multi-fix list (additive; omitted from JSON when empty)
+    lifecycle: DiagnosticLifecycle? # Rule policy stamp (additive; omitted from JSON when nil)
 
 impl DiagnosticV1:
     static fn new(severity: Severity, code: text, message: text) -> DiagnosticV1:
@@ -121,7 +188,9 @@ impl DiagnosticV1:
             help: [],
             children: [],
             macro_trace: [],
-            fix: nil
+            fix: nil,
+            fixes: [],
+            lifecycle: nil
         )
 
     static fn error(code: text, message: text) -> DiagnosticV1:
@@ -179,6 +248,23 @@ impl DiagnosticV1:
     fn with_fix(fix: DiagnosticFix) -> DiagnosticV1:
         var result = self
         result.fix = Some(fix)
+        result
+
+    # Attach ranked fixes; the legacy `fix` alias becomes the first Safe/Likely
+    # entry (nil when every fix is Uncertain).
+    fn with_fixes(fixes: [DiagnosticFix]) -> DiagnosticV1:
+        var result = self
+        result.fixes = fixes
+        result.fix = nil
+        for f in fixes:
+            if f.is_alias_eligible():
+                result.fix = Some(f)
+                return result
+        result
+
+    fn with_lifecycle(lifecycle: DiagnosticLifecycle) -> DiagnosticV1:
+        var result = self
+        result.lifecycle = Some(lifecycle)
         result
 
     # === Accessors ===
@@ -280,6 +366,43 @@ fn render_fix_json(fix: DiagnosticFix) -> text:
         json_pair("confidence", json_string(fix.confidence.name()))
     ])
 
+fn render_precondition_v1_json(p: FixPrecondition) -> text:
+    json_object([
+        json_pair("file", json_string(p.file)),
+        json_pair("span", render_span_json(p.span)),
+        json_pair("expected_text", json_string(p.expected_text))
+    ])
+
+# Full `fixes[]` entry: the legacy keys first, then the additive ones.
+fn render_ranked_fix_json(fix: DiagnosticFix) -> text:
+    var items: [text] = []
+    for r in fix.replacements:
+        items.push(render_replacement_json(r))
+    var pres: [text] = []
+    for p in fix.preconditions:
+        pres.push(render_precondition_v1_json(p))
+    json_object([
+        json_pair("id", json_string(fix.id)),
+        json_pair("description", json_string(fix.description)),
+        json_pair("replacements", json_array(items)),
+        json_pair("confidence", json_string(fix.confidence.name())),
+        json_pair("title", json_string(fix.title)),
+        json_pair("rank", json_int(fix.rank)),
+        json_pair("applicability", json_string(fix.applicability.name())),
+        json_pair("preconditions", json_array(pres))
+    ])
+
+fn render_lifecycle_json(l: DiagnosticLifecycle) -> text:
+    json_object([
+        json_pair("rule_created_on", json_string(l.rule_created_on)),
+        json_pair("warn_since", json_string(l.warn_since)),
+        json_pair("error_not_before", json_string(l.error_not_before)),
+        json_pair("error_since_edition", json_string(l.error_since_edition)),
+        json_pair("active_profile", json_string(l.active_profile)),
+        json_pair("effective_language_edition", json_string(l.effective_language_edition)),
+        json_pair("policy_digest", json_string(l.policy_digest))
+    ])
+
 fn render_macro_frame_json(frame: MacroFrame) -> text:
     json_object([
         json_pair("name", json_string(frame.name)),
@@ -336,10 +459,23 @@ fn render_diagnostic_v1_json(d: DiagnosticV1) -> text:
         nil:
             pairs.push(json_pair("fix", "null"))
 
+    # Additive keys are emitted only when used, so legacy output is byte-identical.
+    if d.fixes.len() > 0:
+        var fix_items: [text] = []
+        for f in d.fixes:
+            fix_items.push(render_ranked_fix_json(f))
+        pairs.push(json_pair("fixes", json_array(fix_items)))
+    match d.lifecycle:
+        Some(l):
+            pairs.push(json_pair("lifecycle", render_lifecycle_json(l)))
+        nil:
+            pass
+
     json_object(pairs)
 
 # Public exports
-export FixConfidence, FixReplacement, DiagnosticFix, MacroFrame, LabelV1, DiagnosticV1
+export FixConfidence, FixApplicability, FixPrecondition, FixReplacement, DiagnosticFix
+export DiagnosticLifecycle, MacroFrame, LabelV1, DiagnosticV1
 export render_diagnostic_v1_json, render_span_json
 # JSON fragment helpers shared with diagnostic_batch.spl (same brace policy).
 export json_object, json_array, json_pair, json_string, json_int, json_bool

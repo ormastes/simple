@@ -104,3 +104,36 @@ Not attempted here: the acceptance criteria (Xvfb/physical surface live
 presentation, verification readback outside timed frames, zero-readback
 timed frames, 7680x4320 p50/p95 + RSS + presentation receipts) require a
 Linux display environment and are out of scope for a Windows P3 lane.
+
+## 2026-11-12 source trace (vulkan-mac lane, work/fix-vulkan-mac-20261112)
+
+Re-traced the presentation path at `7a06b4aafd5` to establish what is and is
+not still disconnected:
+
+- `Engine2D.present_window_device()` (`engine.spl:3603`) forwards to the
+  strict-submission Vulkan owner and records the backend write-back.
+- `VulkanBackend._present_device` (`backend_vulkan.spl:1989`) refuses
+  fail-closed without a live `presentation_swapchain`/device framebuffer,
+  flushes pending compute, then copies the Engine2D device framebuffer into
+  the acquired swapchain image on-device via
+  `vulkan_sffi_present_buffer{,_regions}` — no host readback
+  (`present_readback_bytes = 0` is recorded before the call).
+- The SFFI surface (`src/lib/nogc_sync_mut/gpu/engine2d/sffi_vulkan.spl:1349`)
+  delegates to `rt_vulkan_present_buffer{,_regions}` plus byte/rect receipts
+  (`rt_vulkan_last_present_copy_bytes/rects`), i.e. the one device/swapchain
+  owner allocated by `rt_vulkan_init_window_present`.
+- Compositor-side gates exist on both ends: `vulkan_present_damage_gate.spl`
+  (rect validation, overlap rejection, receipt byte accounting) and
+  `host_compositor_core.spl` validates `latest_vulkan_frame_receipt()`
+  freshness/content (`exact-vulkan-present-receipt`,
+  `stale-vulkan-present-receipt` refusal).
+
+Conclusion: at the Simple-source layer the buffer-to-swapchain transfer is a
+single-registry, device-local path with receipt accounting; the disconnect
+named in the 2026-08-11 defect (no API transfers the buffer into a canonical
+acquired image) is not present in this tree's source. What remains open is
+exactly what the 2026-11-11 triage recorded: live presentation proof (Xvfb or
+physical surface, verification readback outside timed frames, zero-readback
+timed frames, 7680x4320 p50/p95 + receipts), which needs a display
+environment and an admitted compiler — neither available to this lane. No
+source change was made; status remains open (PARTIAL).

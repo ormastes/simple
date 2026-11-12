@@ -1,3 +1,8 @@
+/* Non-Windows test: the POSIX/Linux/macOS APIs it uses have no Windows build here. */
+#if defined(_WIN32)
+#include <stdio.h>
+int main(void) { puts("SKIP: rt_sosix_darwin_process_selfcheck is POSIX-only; no Windows build"); return 77; }
+#else
 /* Native component test. Does not qualify the sealed-image V4 contract. */
 #define _DARWIN_C_SOURCE
 #include <sys/types.h>
@@ -107,3 +112,5 @@ int main(int argc, char **argv) {
     puts("Darwin owned process snapshot component: PASS (not sealed V4)");
     return 0;
 }
+
+#endif /* !_WIN32 */

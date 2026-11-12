@@ -32,6 +32,9 @@ use std.spec.{describe, it, expect}
 use std.gc_async_mut.slang.entrypoints.openai.protocol.{parse_chat_request, openai_error_response, openai_models_response, json_string_field, json_int_field, json_array_object_count}
 use std.gc_async_mut.slang.entrypoints.openai.serving_models.{discover_models, model_ids, find_model, read_model_entry}
 use std.gc_async_mut.slang.entrypoints.openai.api_server.{slang_api_dispatch}
+use std.gc_async_mut.slang.entrypoints.openai.protocol.{chat_messages_from_body, openai_chat_completion_response}
+use std.common.json.parser.{json_parse_with_error}
+use std.gc_async_mut.slang.entrypoints.openai.serving_chat.{chat_frames_from_body}
 use std.gc_async_mut.slang.engine.llm_engine.{engine_set_lib_path}
 use std.io_runtime.{dir_create_all, file_write, dir_remove_all}
 
@@ -181,6 +184,45 @@ describe "a recognised model that is not a slang pack is routed to the engine":
         expect(json_string_field(response.body, "code")).to_equal("model_not_runnable")
         expect(response.body.find("\"stub\":false") >= 0).to_equal(true)
         expect(json_string_field(response.body, "message").len() > 0).to_equal(true)
+
+describe "JSON string fields decode control escapes":
+    it "turns an escaped newline into a newline, not the letter n":
+        val body = "{\"content\":\"user: hi\\nassistant:\"}"
+        expect(json_string_field(body, "content")).to_equal("user: hi\nassistant:")
+
+    it "keeps escaped quotes and backslashes as the character itself":
+        val body = "{\"content\":\"a\\\"b\\\\c\\td\"}"
+        expect(json_string_field(body, "content")).to_equal("a\"b\\c\td")
+
+describe "the chat prompt is assembled from every message":
+    it "reads all messages in order, decoding escapes, null content and text parts":
+        val body = "{\"model\":\"m\",\"messages\":[{\"role\":\"system\",\"content\":\"be brief\"},{\"role\":\"user\",\"content\":\"a\\nb \\u00e9\"},{\"role\":\"assistant\",\"content\":null},{\"role\":\"tool\",\"content\":[{\"type\":\"text\",\"text\":\"p1\"},{\"type\":\"text\",\"text\":\"p2\"}]}]}"
+        val messages = chat_messages_from_body(body)
+        expect(messages.len()).to_equal(4)
+        expect(messages[0].role).to_equal("system")
+        expect(messages[0].content).to_equal("be brief")
+        expect(messages[1].content).to_equal("a\nb é")
+        expect(messages[2].role).to_equal("assistant")
+        expect(messages[2].content).to_equal("")
+        expect(messages[3].role).to_equal("tool")
+        expect(messages[3].content).to_equal("p1p2")
+
+    it "frames every message with byte counts, system prompt first":
+        val body = "{\"model\":\"m\",\"messages\":[{\"role\":\"system\",\"content\":\"be brief\"},{\"role\":\"user\",\"content\":\"hi\"},{\"role\":\"assistant\",\"content\":\"yo\"},{\"role\":\"user\",\"content\":\"\\u00e9\"}]}"
+        expect(chat_frames_from_body(body)).to_equal("6:system8:be brief4:user2:hi9:assistant2:yo4:user2:é")
+
+    it "yields no prompt when no message has readable content":
+        expect(chat_frames_from_body("{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"  \"}]}")).to_equal("")
+
+describe "every envelope is complete JSON":
+    it "closes the chat completion object":
+        val body = openai_chat_completion_response("m", "café \"q\"\n", 1, 2).body
+        expect(json_parse_with_error(body).1).to_equal("")
+        expect(body.ends_with("\"total_tokens\":3}}}}")).to_equal(true)
+
+    it "closes the error object":
+        val body = openai_error_response(400, "bad", "invalid_request_error", "invalid_request", "").body
+        expect(json_parse_with_error(body).1).to_equal("")
 
 describe "routing and envelopes":
     it "answers 404 for an unknown route":

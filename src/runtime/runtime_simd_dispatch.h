@@ -238,23 +238,34 @@ static inline RtCoreStringSimd* simd_as_string(int64_t value) {
 }
 
 /* ================================================================
- * Reserved-Field Cache Bit Layout
+ * Reserved-Word Cache Bit Layout (shared contract, all runtime TUs)
  *
- *   Bits [31:30] = flags:
- *     00 = uncached
- *     01 = codepoint-count cached
- *     10 = is-ASCII (positive-only: string is all-ASCII)
- *     11 = both cached
- *   Bits [29:0]  = codepoint count (max ~1 billion)
+ * The low nibble of `reserved` is owned by RT_CORE_STRING_FLAG_*
+ * (SHARED=1, TRANSIENT=2, SESSION=4, ASCII=8), read and mutated with
+ * atomics; cache bits MUST NOT overlap them. The previous layout stored
+ * the cp count in bits [29:0], which collided with the flag bits: a
+ * cached count of 8 set the ASCII memo on a non-ASCII string, flag bits
+ * 1/2/4 corrupted the count, and a cache write (r &= ~mask) cleared the
+ * SHARED/TRANSIENT/SESSION flags. See doc/08_tracking/bug/
+ * rt_text_slice_cp_index_quadratic_scv_prime_hang_2026-11-12.md.
  *
- * Bit 31 = is-ASCII flag (set = all-ASCII; clear = unknown/non-ASCII)
- * Bit 30 = cp-count-cached flag
- * Bits [29:0] = codepoint count (meaningful only when bit 30 = 1)
+ *   Bit  3       = all-ASCII memo (== RT_CORE_STRING_FLAG_ASCII;
+ *                  positive-only: set once a scan proves all-ASCII)
+ *   Bit 30       = cp-count-valid
+ *   Bits [29:4]  = codepoint count, 26 bits (max 67,108,863 codepoints,
+ *                  ~256 MiB of 4-byte UTF-8). Strings at/above the cap
+ *                  simply never cache; they keep the pre-fix O(n) cost.
  * ================================================================ */
 
-#define SIMD_CACHE_FLAG_IS_ASCII      (1U << 31)
-#define SIMD_CACHE_FLAG_CPCOUNT_VALID (1U << 30)
-#define SIMD_CACHE_CPCOUNT_MASK       0x3FFFFFFFU  /* bits [29:0] */
+#define RT_STR_RESERVED_ASCII_MEMO    (1U << 3)
+#define RT_STR_CACHE_CP_VALID         (1U << 30)
+#define RT_STR_CACHE_CP_SHIFT         4
+#define RT_STR_CACHE_CP_FIELD         (0x3FFFFFFU << RT_STR_CACHE_CP_SHIFT)
+#define RT_STR_CACHE_CP_MAX           0x3FFFFFFU  /* 67,108,863 */
+
+/* Legacy aliases so existing call sites keep compiling with the same names. */
+#define SIMD_CACHE_FLAG_IS_ASCII      RT_STR_RESERVED_ASCII_MEMO
+#define SIMD_CACHE_FLAG_CPCOUNT_VALID RT_STR_CACHE_CP_VALID
 
 /* ================================================================
  * SimdTextDispatch — function-pointer table for text operations

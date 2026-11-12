@@ -2810,6 +2810,17 @@ impl Lowerer {
         }
         match pattern {
             Pattern::Identifier(bound_name) | Pattern::MutIdentifier(bound_name) => {
+                // Only names this arm actually binds. A bare unit variant
+                // (`case (Red, x):`) is excluded from the arm's bindings by
+                // `collect_pattern_bindings` and tested by
+                // `subpattern_condition_typed`; without this guard an OUTER
+                // local that happens to share the variant's name was found in
+                // `local_map` and overwritten with the slot value. Same rule
+                // as the top-level identifier binder in
+                // `build_pattern_binding_stmts`.
+                if !binding_type_map.contains_key(bound_name) {
+                    return;
+                }
                 let Some(&local_idx) = ctx.local_map.get(bound_name) else {
                     return;
                 };
@@ -3577,8 +3588,16 @@ impl Lowerer {
                 let nested = match pattern {
                     Pattern::Enum {
                         payload: Some(payload_patterns),
+                        name: outer_enum,
                         ..
-                    } => self.nested_payload_condition(variant, &subject_ref, payload_patterns, ctx),
+                    } => self.nested_payload_condition(
+                        outer_enum,
+                        variant,
+                        subject_ty,
+                        &subject_ref,
+                        payload_patterns,
+                        ctx,
+                    ),
                     _ => None,
                 };
 

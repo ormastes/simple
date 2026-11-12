@@ -1,7 +1,7 @@
 # Scalar projections copy values; all other projections retain source provenance.
 use compiler.hir.hir_definitions.*
 use compiler.hir.hir_types.*
-use compiler.semantics.param_effects.context.{PeCtx}
+use compiler.semantics.param_effects.context.{PeCtx, _is_owner}
 
 fn projection_scalar(type_: HirType) -> bool:
     if type_ == nil: return false
@@ -26,6 +26,46 @@ fn projection_inner(type_: HirType) -> HirType:
             return projection_inner(inner)
         case _: return type_
 
+fn projection_field_type(ctx: PeCtx, type_id: i64, name: text) -> HirType?:
+    """Declared type of field `name` of the module class/struct `type_id`."""
+    for class_ in ctx.module.classes.values():
+        if class_.symbol.id == type_id:
+            for field in class_.fields:
+                if field.name == name: return Some(field.type_)
+    for struct_ in ctx.module.structs.values():
+        if struct_.symbol.id == type_id:
+            for field in struct_.fields:
+                if field.name == name: return Some(field.type_)
+    nil
+
+fn projection_field_scalar(ctx: PeCtx, type_id: i64, name: text) -> bool:
+    match projection_field_type(ctx, type_id, name):
+        case Some(type_): return projection_scalar(type_)
+        case None: return false
+
+fn projection_type_id(type_: HirType) -> i64:
+    if type_ == nil: return -1
+    match projection_inner(type_).kind:
+        case Named(symbol, _): return symbol.id
+        case Optional(inner): return projection_type_id(inner)
+        case _: return -1
+
+fn projection_place_class(ctx: PeCtx, place: HirExpr) -> i64:
+    """Class/struct symbol of a place rooted at the owner (`b`, `b.inner`,
+    `b.inner.next`), walking declared field types from the owner's class.
+    -1 when any step is unknown."""
+    match place.kind:
+        case Var(_) | NamedVar(_, _):
+            if _is_owner(ctx, place): return ctx.owner_class_id
+            return -1
+        case Field(base, name, _):
+            val base_id = projection_place_class(ctx, base)
+            if base_id < 0: return -1
+            match projection_field_type(ctx, base_id, name):
+                case Some(type_): return projection_type_id(type_)
+                case None: return -1
+        case _: return -1
+
 pub(package) fn projection_copies_scalar(ctx: PeCtx, expr: HirExpr, base: HirExpr) -> bool:
     if expr.has_type_ and expr.type_ != nil: return projection_scalar(expr.type_)
     match projection_base_type(ctx, base):
@@ -39,16 +79,15 @@ pub(package) fn projection_copies_scalar(ctx: PeCtx, expr: HirExpr, base: HirExp
                         case _: return false
                 case Field(_, name, _):
                     match type_.kind:
-                        case Named(symbol, _):
-                            for class_ in ctx.module.classes.values():
-                                if class_.symbol.id == symbol.id:
-                                    for field in class_.fields:
-                                        if field.name == name: return projection_scalar(field.type_)
-                            for struct_ in ctx.module.structs.values():
-                                if struct_.symbol.id == symbol.id:
-                                    for field in struct_.fields:
-                                        if field.name == name: return projection_scalar(field.type_)
+                        case Named(symbol, _): return projection_field_scalar(ctx, symbol.id, name)
                         case _: pass
                 case _: pass
         case None: pass
+    # An untyped class local (`val b = Node(...)`) has no symbol type; the
+    # owner's class, recorded by the caller-side scan, still names its fields.
+    match expr.kind:
+        case Field(_, name, _):
+            val base_id = projection_place_class(ctx, base)
+            if base_id >= 0: return projection_field_scalar(ctx, base_id, name)
+        case _: pass
     false

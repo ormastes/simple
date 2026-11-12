@@ -1,0 +1,316 @@
+# semantic_api exported-graph checker — the LIVE primitive-API authority
+# (unified unit/primitive-API plan 2026-11-12 §0.5, §1, §9 P0, §10.1).
+#
+# Runs over the parsed declaration arena (compiler.core.ast decl indices,
+# the same input every other parsed-structural lint consumes) AFTER the
+# parser has resolved every annotation to an interned type tag. It walks the
+# EFFECTIVELY EXPORTED type graph of one module:
+#
+#   roots      `pub`/`pub(..)` decls, names in `export` lists, everything
+#              when the module says `export *`
+#   fns / me   MC-API-001 — every param (receiver skipped) and the return
+#   fields     MC-API-002 — struct/class fields that are themselves public
+#   payloads   MC-API-002 — enum variant payload fields (named or positional)
+#   aliases    MC-API-002 — a public `type X = i64`
+#   methods    class/struct bodies, `impl` blocks and parser-GENERATED
+#              derive impls all land as impl-block method decls, so they
+#              are walked with the owner's effective visibility
+#   promotion  a named type that is PRIVATE here but reachable from any
+#              public surface is effectively exported; its fields and
+#              methods are walked too (fixpoint, each decl once)
+#   externs    MC-API-003 — `extern fn` signatures are an explicit FFI
+#              boundary: reported separately, never under primitive_api,
+#              so the caller can apply a boundary policy (off by default)
+#
+# Private decls that nothing public reaches are never walked and stay
+# silent. Re-exports (`export use M.{..}` / `export M.*`) carry no in-file
+# definitions: their items are checked when M itself is linted.
+#
+# Memoization: tag_walk.spl caches the leaf set per interned TypeId for the
+# run; this file additionally visits each (decl, visibility context) once,
+# so a shared type costs one walk however many signatures spell it.
+# No source text is scanned: the only text consulted is a decl name.
+#
+# @allow(primitive_api) scoping is applied by the lint wiring (90.tools)
+# from the finding lines, keeping this layer free of source-text rules.
+
+use compiler.core.ast.{
+    decl_get_tag, decl_get_name, decl_get_param_names, decl_get_param_types,
+    decl_get_ret_type, decl_get_fields, decl_get_field_types, decl_get_field_bits,
+    decl_get_field_visibility, decl_get_visibility_text, decl_get_imports,
+    decl_get_body, decl_get_span
+}
+use compiler.core.types.{span_is_valid, span_line}
+use compiler.semantics.lint.semantic_api.tag_walk.{
+    TagLeaf, semantic_api_tag_memo_reset, semantic_api_tag_alias_register,
+    semantic_api_tag_named_refs, semantic_api_tag_render, semantic_api_tag_leaves
+}
+
+# Mirrors compiler.core.ast decl tags (decl_nodes.spl): read by literal so a
+# cross-module `const` read cannot silently misroute under the self-hosted
+# build (the same reason convert_flat_type dispatches on text).
+fn _tag_fn() -> i64: 1
+fn _tag_extern_fn() -> i64: 2
+fn _tag_struct() -> i64: 3
+fn _tag_export() -> i64: 7
+fn _tag_enum() -> i64: 8
+fn _tag_impl() -> i64: 9
+fn _tag_type_alias() -> i64: 17
+
+struct SemanticApiFinding:
+    code: text        # "MC-API-001" fn | "MC-API-002" field/payload/alias | "MC-API-003" extern
+    item_name: text   # fn / struct / class / enum / alias name
+    member: text      # "param 'n'" | "return" | "field 'f'" | "variant 'V' field 'x'" | "alias"
+    type_text: text   # rendered declared type
+    leaf: text        # primitive leaf reached ("i64", "usize", "pointer", ...)
+    class_name: text  # semantic class of the leaf
+    path: text        # type path from the declared type to the leaf
+    line: i64         # 1-based decl line, 0 when the span is unknown
+    boundary: bool    # true for the extern/FFI code
+
+    fn fmt() -> text:
+        val via = if self.path == self.leaf: "" else: " via {self.path}"
+        "{self.code}: public API {self.member} of '{self.item_name}' exposes bare primitive '{self.leaf}'{via} (declared '{self.type_text}')"
+
+# class (reference type): helpers mutate the shared visited set and findings.
+class _ExportedGraph:
+    decls: [i64]
+    export_all: bool
+    exported_names: Dict<text, bool>
+    # in-file type decl (struct/class/enum/alias) by name
+    type_decl_by_name: Dict<text, i64>
+    # effectively public names (pub, exported, or reached from a public surface)
+    effective_public: Dict<text, bool>
+    # (decl, ctx) visited set
+    visited: Dict<text, bool>
+    findings: [SemanticApiFinding]
+
+fn _decl_line(idx: i64) -> i64:
+    val sp = decl_get_span(idx)
+    if span_is_valid(sp):
+        return span_line(sp)
+    0
+
+fn _strip_alias(name: text) -> text:
+    val i = name.index_of(":")
+    if i >= 0:
+        return name.slice(0, i)
+    name
+
+fn _is_pub_text(vis: text) -> bool:
+    vis != "" and vis != "private"
+
+fn _graph_is_public(g: _ExportedGraph, idx: i64) -> bool:
+    if g.export_all:
+        return true
+    if _is_pub_text(decl_get_visibility_text(idx)):
+        return true
+    val name = decl_get_name(idx)
+    if name != "" and g.exported_names.contains_key(name):
+        return true
+    if name != "" and g.effective_public.contains_key(name):
+        return true
+    false
+
+fn _push_leaves(g: _ExportedGraph, code: text, item_name: text, member: text, tag: i64, line: i64, boundary: bool):
+    val leaves = semantic_api_tag_leaves(tag)
+    if leaves.len() == 0:
+        return
+    val rendered = semantic_api_tag_render(tag)
+    for l in leaves:
+        g.findings.push(SemanticApiFinding(
+            code: code, item_name: item_name, member: member, type_text: rendered,
+            leaf: l.leaf, class_name: l.class_name, path: l.path, line: line, boundary: boundary))
+
+fn _check_fn_decl(g: _ExportedGraph, idx: i64, code: text, boundary: bool):
+    val key = "{idx}:pub"
+    if g.visited.contains_key(key):
+        return
+    g.visited[key] = true
+    val name = _display_name(decl_get_name(idx))
+    val line = _decl_line(idx)
+    val pnames = decl_get_param_names(idx)
+    val ptypes = decl_get_param_types(idx)
+    var i = 0
+    while i < ptypes.len():
+        val pname = if i < pnames.len(): pnames[i] else: "#{i}"
+        if pname == "self" or pname == "me":
+            i = i + 1
+            continue
+        _push_leaves(g, code, name, "param '{pname}'", ptypes[i], line, boundary)
+        i = i + 1
+    val ret = decl_get_ret_type(idx)
+    if ret > 0:
+        _push_leaves(g, code, name, "return", ret, line, boundary)
+
+fn _check_struct_decl(g: _ExportedGraph, idx: i64):
+    val key = "{idx}:pub"
+    if g.visited.contains_key(key):
+        return
+    g.visited[key] = true
+    val name = decl_get_name(idx)
+    val line = _decl_line(idx)
+    val fnames = decl_get_fields(idx)
+    val ftypes = decl_get_field_types(idx)
+    val fvis = decl_get_field_visibility(idx)
+    var i = 0
+    while i < ftypes.len():
+        val vis = if i < fvis.len(): fvis[i] else: "private"
+        if not _is_pub_text(vis) and not g.export_all:
+            i = i + 1
+            continue
+        val fname = if i < fnames.len(): fnames[i] else: "#{i}"
+        _push_leaves(g, "MC-API-002", name, "field '{fname}'", ftypes[i], line, false)
+        i = i + 1
+
+fn _check_enum_decl(g: _ExportedGraph, idx: i64):
+    val key = "{idx}:pub"
+    if g.visited.contains_key(key):
+        return
+    g.visited[key] = true
+    val name = decl_get_name(idx)
+    val line = _decl_line(idx)
+    val variants = decl_get_fields(idx)
+    val payload_types = decl_get_field_types(idx)
+    val counts = decl_get_field_bits(idx)
+    val payload_names = decl_get_param_names(idx)
+    var offset = 0
+    var v = 0
+    while v < variants.len():
+        val count = if v < counts.len(): counts[v] else: 0
+        var k = 0
+        while k < count:
+            val flat = offset + k
+            if flat >= payload_types.len():
+                break
+            val fname = if flat < payload_names.len(): payload_names[flat] else: "#"
+            val member = if fname == "#" or fname == "": "variant '{variants[v]}' payload #{k}" else: "variant '{variants[v]}' field '{fname}'"
+            _push_leaves(g, "MC-API-002", name, member, payload_types[flat], line, false)
+            k = k + 1
+        offset = offset + count
+        v = v + 1
+
+fn _check_alias_decl(g: _ExportedGraph, idx: i64):
+    # An alias reached only by PROMOTION (a public fn names it) is already
+    # reported at every use site with the alias in the path; report the
+    # alias itself only when it is exported in its own right.
+    if not (g.export_all or _is_pub_text(decl_get_visibility_text(idx)) or g.exported_names.contains_key(decl_get_name(idx))):
+        return
+    val key = "{idx}:pub"
+    if g.visited.contains_key(key):
+        return
+    g.visited[key] = true
+    _push_leaves(g, "MC-API-002", decl_get_name(idx), "alias", decl_get_ret_type(idx), _decl_line(idx), false)
+
+fn _check_impl_decl(g: _ExportedGraph, idx: i64):
+    """Methods of an impl block (class/struct body, `impl T:`, derive-generated)
+    whose owner is effectively public. An owner not declared in this file
+    (extension of an imported type) counts as public."""
+    val owner = decl_get_name(idx)
+    var owner_public = true
+    if g.type_decl_by_name.contains_key(owner):
+        owner_public = _graph_is_public(g, g.type_decl_by_name[owner])
+    if not owner_public:
+        return
+    # A parser-GENERATED impl (derive: eq/to_string/...) carries no source
+    # span; its members are callable API, so they inherit the owner's
+    # effective visibility instead of the arena's "private" default.
+    # Class-body impl decls ALSO carry span 0, so "generated" is decided per
+    # MEMBER: a member with no source span was synthesised (derive).
+    for mid in decl_get_body(idx):
+        if decl_get_tag(mid) != _tag_fn():
+            continue
+        val generated = not span_is_valid(decl_get_span(mid))
+        if not generated and not _is_pub_text(decl_get_visibility_text(mid)) and not g.export_all:
+            continue
+        _check_fn_decl(g, mid, "MC-API-001", false)
+
+fn _walk_public_roots(g: _ExportedGraph) -> bool:
+    """One pass over the decls; returns true when a new finding or a new
+    effectively-public promotion happened (so the caller loops to fixpoint)."""
+    val before_findings = g.findings.len()
+    for idx in g.decls:
+        val tag = decl_get_tag(idx)
+        if tag == _tag_fn():
+            if _graph_is_public(g, idx):
+                _check_fn_decl(g, idx, "MC-API-001", false)
+        elif tag == _tag_extern_fn():
+            _check_fn_decl(g, idx, "MC-API-003", true)
+        elif tag == _tag_struct():
+            if _graph_is_public(g, idx):
+                _check_struct_decl(g, idx)
+        elif tag == _tag_enum():
+            if _graph_is_public(g, idx):
+                _check_enum_decl(g, idx)
+        elif tag == _tag_type_alias():
+            if _graph_is_public(g, idx):
+                _check_alias_decl(g, idx)
+        elif tag == _tag_impl():
+            _check_impl_decl(g, idx)
+    # Promote in-file private types that a public surface reached.
+    var promoted = false
+    for name in semantic_api_tag_named_refs():
+        if g.effective_public.contains_key(name):
+            continue
+        if not g.type_decl_by_name.contains_key(name):
+            continue
+        val tidx = g.type_decl_by_name[name]
+        if _graph_is_public(g, tidx):
+            continue
+        g.effective_public[name] = true
+        promoted = true
+    promoted or g.findings.len() != before_findings
+
+fn check_semantic_api_decls(decls: [i64]) -> [SemanticApiFinding]:
+    """Entry point for the live lint: every primitive leaf reachable from this
+    module's effectively exported type graph, one finding per type path."""
+    semantic_api_tag_memo_reset()
+    var g = _ExportedGraph(
+        decls: decls, export_all: false, exported_names: {}, type_decl_by_name: {},
+        effective_public: {}, visited: {}, findings: [])
+    # Pass 0: export surface, in-file type index, alias map.
+    for idx in decls:
+        val tag = decl_get_tag(idx)
+        if tag == _tag_export():
+            for n in decl_get_imports(idx):
+                val base = _strip_alias(n)
+                if base == "*":
+                    g.export_all = true
+                elif base != "" and not base.ends_with(".*"):
+                    g.exported_names[base] = true
+        elif tag == _tag_struct() or tag == _tag_enum() or tag == _tag_type_alias():
+            val name = decl_get_name(idx)
+            if name != "":
+                g.type_decl_by_name[name] = idx
+            if tag == _tag_type_alias():
+                semantic_api_tag_alias_register(name, decl_get_ret_type(idx))
+    # Fixpoint over promotions; each decl is visited once per context.
+    var rounds = 0
+    while _walk_public_roots(g) and rounds < 64:
+        rounds = rounds + 1
+    g.findings
+
+fn semantic_api_findings_non_boundary(findings: [SemanticApiFinding]) -> [SemanticApiFinding]:
+    var out: [SemanticApiFinding] = []
+    for f in findings:
+        if not f.boundary:
+            out.push(f)
+    out
+
+fn semantic_api_findings_boundary(findings: [SemanticApiFinding]) -> [SemanticApiFinding]:
+    var out: [SemanticApiFinding] = []
+    for f in findings:
+        if f.boundary:
+            out.push(f)
+    out
+
+export SemanticApiFinding
+export check_semantic_api_decls
+export semantic_api_findings_non_boundary, semantic_api_findings_boundary
+
+fn _display_name(name: text) -> text:
+    """Class-body methods are arena-named `Owner__method`; report `Owner.method`."""
+    val at = name.find("__")
+    if at <= 0:
+        return name
+    name.substring(0, at) + "." + name.substring(at + 2, name.len())

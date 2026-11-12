@@ -335,6 +335,14 @@ the env var points to the correct seed target.
    stage2/stage3 round-trip + test subset). Gate failures are hard stops.
 3. **stage2 binary is ephemeral:** only used during bootstrap. After stage3
    succeeds, discard it — no production reliance on stage2 artifacts.
+4. **Seed sub-pattern semantics leak into Stage 2 logic (fixed 2026-11-12):**
+   the seed used to bind a bare unit variant inside a tuple/array/payload
+   sub-pattern (`case (Bool, Bool):`) as a catch-all, so every seed-compiled
+   Stage 2 answered `hir_types_equal` true for unrelated types. A Stage 2 vs
+   Stage 3 behaviour split in pure-Simple logic can be a SEED lowering bug —
+   probe the same source with the seed `run` (JIT, same HIR lowering) and a
+   no-`main` copy (tree-walk interpreter). Record:
+   `doc/08_tracking/bug/seed_tuple_pattern_bare_fieldless_variant_binds_hir_types_equal_true_2026-11-12.md`.
 
 ## Multi-Error Recovery Strategy
 

@@ -1,3 +1,8 @@
+/* Non-Windows test: the POSIX/Linux/macOS APIs it uses have no Windows build here. */
+#if defined(_WIN32)
+#include <stdio.h>
+int main(void) { puts("SKIP: rt_sosix_darwin_signature_selfcheck is POSIX-only; no Windows build"); return 77; }
+#else
 #include "../runtime_sosix_darwin_signature_private.h"
 #include <assert.h>
 #include <fcntl.h>
@@ -84,3 +89,5 @@ int main(int argc,char **argv) {
     assert(WIFEXITED(status)&&WEXITSTATUS(status)==0);
     puts("PASS: authenticated in-memory signature provisions an executable accepted by AMFI");
 }
+
+#endif /* !_WIN32 */

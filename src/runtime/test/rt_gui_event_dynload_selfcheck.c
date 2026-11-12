@@ -1,3 +1,8 @@
+/* Non-Windows test: the POSIX/Linux/macOS APIs it uses have no Windows build here. */
+#if defined(_WIN32)
+#include <stdio.h>
+int main(void) { puts("SKIP: rt_gui_event_dynload_selfcheck is POSIX-only; no Windows build"); return 77; }
+#else
 #include "runtime.h"
 #include <assert.h>
 #include <stdio.h>
@@ -110,3 +115,5 @@ int main(int argc, char **argv) {
     puts("GUI event lifecycle PASS");
     return 0;
 }
+
+#endif /* !_WIN32 */

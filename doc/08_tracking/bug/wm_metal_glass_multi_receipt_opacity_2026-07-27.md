@@ -339,3 +339,42 @@ Corrects the list above: on `release/1.0.0` only TWO of the methods
   runtime host GPU queue returning false) — host has no Vulkan device; NOT caused
   by the deletion. `host_compositor_entry_spec` 55/63 identical with and
   without this change (same 8 reds listed above).
+
+## 2026-11-12 fix attempt (release/1.0.0 — merged fix commit cited, source re-verified)
+
+The 2026-11-02 close-invalid revalidation kept this row open because "no
+merged fix commit or passing regression [was] cited in the bug doc or git
+history". That evidence now exists:
+
+- **Merged fix commit: `fa6bab7921e` "fix(metal): validate every WM glass
+  material receipt" (2026-07-27)**, confirmed an ancestor of
+  `release/1.0.0` HEAD (7a06b4aafd5) via `git merge-base --is-ancestor`.
+  It touched `draw_ir_adv.spl` (+347), `host_compositor_core.spl` (+90),
+  `backend_metal.spl`, `draw_ir_target_metal.spl`, `engine.spl`,
+  `window_scene_draw_ir.spl`, and added the focused specs
+  (`backend_metal_device_identity_spec.spl`,
+  `backend_readback_handle_contract_spec.spl` updates,
+  `draw_ir_adv_spec.spl`, `host_compositor_entry_spec.spl`) plus the strict
+  native fixture `test/02_integration/rendering/macos_metal_glass_receipts_native.spl`.
+- **Defect 1 (inactive/sub-opaque opacity)**: the fail-closed gate is
+  present at `draw_ir_adv.spl:2730-2743` — a Metal-selected sub-opaque
+  parent-sampling batch returns
+  `metal-parent-material-subopaque-requires-gpu-only-delta` with ordered
+  unfulfilled receipts instead of manufacturing a mirror-backed child
+  (`_engine2d_draw_ir_unfulfilled_metal_receipts`). CPU seeded/delta path
+  (500/930) is intact beside it.
+- **Defect 2 (multi-receipt last-wins)**: per-receipt ordered validation is
+  present at `host_compositor_core.spl:139-152` (requested/material/
+  unfulfilled counts plus per-index receipt checks against the presented
+  framebuffer handle/device).
+- **Defect 3 (spec name mismatch)**: `window_scene_draw_ir_spec.spl`
+  expects `engine2d-rounded-material-v1` (lines 276/334), matching
+  production emission.
+- 2026-11-04 seed-interpreter evidence (this doc above): device-identity
+  2/2, readback-handle 1/1, all Metal receipt host cases pass; remaining
+  reds are Vulkan/seed-semantics, not Metal glass.
+
+Verification status: **fix-implemented-verification-pending** — the merged
+fix is cited and source-verified; native Metal execution (strict fixture,
+admitted producer) still pending, per the admission constraints documented
+above. DB row updated to `fix-implemented-verification-pending`.
