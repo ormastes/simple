@@ -87,3 +87,18 @@ compiler.driver.driver_pipeline_lowering** (functions=48), with idx 8
 wrappers, sha256_text, std.-alias imports) -- consistent with the registry
 origin-miss hypothesis. J lane (tip pin incl. #8703 named panic) will confirm
 the callee name definitively.
+
+## Hypothesis refinement (2026-11-13 ~03:45): duplicate extern declarations
+
+compiler.mir._MirLowering.transient_owner_sffi RE-DECLARES the same runtime
+externs (rt_transient_array_scope_begin/pause/end, rt_transient_heap_promote,
+rt_transient_heap_promote_share_begin/end) that lib.nogc_sync_mut.sffi.transient
+already declares. driver_pipeline_lowering consumes the _v1 wrappers from
+transient_owner_sffi, while driver_hir_archive_schedule_v1 consumed the wrappers
+from lib...sffi.transient -- and the LATTER codegen'd fine at 02:05:51. The
+stage2-admitted binary and the seed-built compiler may resolve the duplicate
+extern ownership differently (declaration chosen per symbol-table insertion
+order; defining_module then points at a module whose registry row was never
+populated for this compilation, or at a non-Function/Method symbol), yielding
+MirCallOrigin.Unknown only in the self-hosted build. Fix direction depends on
+the callee name the J lane's #8703 named panic will print.
