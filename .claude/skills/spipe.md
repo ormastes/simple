@@ -3197,12 +3197,28 @@ pitfalls (fixed 64-bit hex rendering, no endianness conversion in
 
 ## Running spipe through a local LLM (caret + slang)
 
-A local GGUF model loaded via slang can drive the spipe flow itself through
-caret's TUI agent loop (bash/read/write tools): point `--workspace` at an
-isolated worktree, `--dangerously-allow-all` with that sandbox underneath,
-and prompt it to read this skill, run `bin/simple test <area>`, fix, and
-re-run — never to git commit. Full setup (model root, shim build, tmux
-headless recipe, prompt pattern):
+A local GGUF model can drive the spipe flow through caret's TUI agent loop
+(bash/read/write tools). Two lanes:
+
+- **In-process:** `--provider slang_local` with `SLANG_MODEL_ROOT=<model root>`; no server.
+- **Server:** run `src/app/slang_server/main.spl -- --plaintext-development
+  --models=<root> --port=8721 --n-ctx=32768`, then point caret at it with a
+  config (`defaults: provider: slang`, `slang: base_url`, `model`).
+
+Launch agents through the caret suite (`bin/cs`, inside tmux), one isolated
+worktree per agent:
+
+```
+/launch caret:slang/<model> --config <agent>.sdn --workspace <worktree> --dangerously-allow-all
+```
+
+Rules for local models: give a SHORT brief (file:line, repro spec, expected
+result, landing steps), for example `build/TASK.md` in the worktree. A 30B
+model cannot digest this skill file, so do not tell it to read it. Never
+`--dangerously-allow-all` without an isolated `--workspace`. Needs a current
+seed (HTTP and the memory gate are broken on seeds older than 2026-11-12).
+
+Full setup, caret suite commands and troubleshooting:
 `doc/07_guide/app/llm/local_llm_slang_caret_setup.md`.
 
 ## Spec-writing rules that cost a session (2026-09-27)

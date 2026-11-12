@@ -229,6 +229,10 @@ fn source_omission_ledger_v1(outline: SourceOutlineV1, view: SourceStructuredVie
         if reason == "not_selected" and next_cursor != "":
             reason = "budget_page"
             reopen = [("cursor", JsonValue.Str(next_cursor))]
+        elif reason == "not_selected" and view.mode == "exhaustive":
+            # Exhaustive never deselects: a remaining gap (inter-node bytes or
+            # a body larger than one page) reopens through raw paging.
+            reason = "budget_page"
         rows.push(json_value_object_from([
             ("range", source_range_json_v1(span)), ("reason", JsonValue.Str(reason)),
             ("node_name", JsonValue.Str(node_name)), ("reopen", json_value_object_from(reopen))]))
@@ -322,7 +326,7 @@ fn source_structure_payload_v1(path: text, snapshot: SourceSnapshotV1,
     val intent_requested = intent.status != ""
     # An intent that did not resolve to one block leaves the view partial by definition.
     val partial = view.projection.completeness != "complete" or outline.syntax_status != "parsed" or
-        (intent_requested and intent.status != "resolved")
+        (intent_requested and intent.status != "resolved" and view.mode != "exhaustive")
     var fields: [(text, JsonValue)] = [
         ("schema_version", JsonValue.Int(1)), ("status", JsonValue.Str("ok")),
         ("mode", JsonValue.Str(view.mode)), ("path", JsonValue.Str(path)),
@@ -345,6 +349,9 @@ fn source_structure_payload_v1(path: text, snapshot: SourceSnapshotV1,
         ("rendered", JsonValue.Str(rendered.join("\n"))),
         ("limitations", JsonValue.Array(limitations)),
         ("footer", JsonValue.Str("[ess] [adv]"))]
+    if view.mode == "exhaustive":
+        fields.push(("exhaustive_page_cap", json_value_object_from([
+            ("max_nodes", JsonValue.Int(64)), ("max_payload_bytes", JsonValue.Int(12288))])))
     if intent_requested: fields.push(("intent_resolution", source_intent_json_v1(intent)))
     if help == "ess": fields.push(("essential_help", JsonValue.Str(SOURCE_ESSENTIAL_HELP_V1)))
     if help == "adv": fields.push(("advanced_help", source_advanced_help_v1()))
@@ -356,7 +363,7 @@ fn source_open_context_v1(body: text, numbers: bool, workspace_root: text) -> So
         Ok(value): value
         Err(_): return source_result_error_v1("error", "invalid_json_arguments")
     var mode = json_value_text_or(json_value_field(arguments, "mode"), "outline")
-    if mode != "raw" and mode != "outline" and mode != "focused":
+    if mode != "raw" and mode != "outline" and mode != "focused" and mode != "exhaustive":
         return source_result_error_v1("unsupported", "unsupported_source_mode")
     val help = json_value_text_or(json_value_field(arguments, "help"), "")
     if help != "" and help != "ess" and help != "adv":
@@ -400,6 +407,8 @@ fn source_open_context_v1(body: text, numbers: bool, workspace_root: text) -> So
         val depth = match source_integer_argument_v1(arguments, "depth", 1):
             Ok(value): value
             Err(reason): return source_result_error_v1("error", reason)
+        # Exhaustive keeps the same per-page caps (<=64 nodes, max_bytes, and the
+        # 12288-byte payload cap); it removes selection, not bounds.
         val max_nodes = match source_integer_argument_v1(arguments, "max_nodes", 32):
             Ok(value): value
             Err(reason): return source_result_error_v1("error", reason)
@@ -408,7 +417,9 @@ fn source_open_context_v1(body: text, numbers: bool, workspace_root: text) -> So
         if intent_text != "":
             if target != "": return source_result_error_v1("error", "intent_and_target_are_exclusive")
             intent = source_outline_intent_v1(outline, intent_text)
-            if intent.status == "resolved":
+            # Exhaustive + intent: the intent is resolved and reported in
+            # intent_resolution, but never narrows the exhaustive walk.
+            if intent.status == "resolved" and mode != "exhaustive":
                 mode = "focused"
                 target = intent.target
         val result_identity = source_outline_result_identity_v1(outline)

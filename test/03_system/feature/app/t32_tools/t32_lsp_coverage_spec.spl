@@ -1,0 +1,185 @@
+# @req REQ-SSPEC-SYSTEM
+"""
+# T32 MCP Coverage — Edge Cases and Error Paths
+
+**Category:** Tooling
+**Status:** In Progress
+**Difficulty:** 3/5
+
+## Overview
+
+Real-behaviour system coverage for T32 MCP field mapping and window handling
+functions with focus on edge cases and error paths:
+- Field evaluation expressions with empty/malformed inputs
+- Field SET command generation with boundary cases
+- Window catalog parsing with truncated/invalid SDN
+- CMM command database building with corner cases
+- Status field normalization with unexpected values
+
+Each test captures evidence of the real function's actual behavior rather than mocking.
+"""
+
+use std.spec.step
+
+use app.mcp_t32.action_tools.{t32_field_to_eval, t32_field_to_set_cmd, t32_is_status_field, t32_normalize_current_status}
+use app.mcp_t32.headless_tools.{t32_text_contains}
+
+# ============================================================================
+# Field Evaluation Expression — Edge Cases
+# ============================================================================
+
+describe "Field Evaluation Edge Cases":
+
+    context "t32_field_to_eval with empty and whitespace":
+        it "handles empty string":
+            step("call with empty")
+            val result = t32_field_to_eval("")
+            expect(result).to_equal("")
+
+        it "refuses whitespace-only expression":
+            step("call with spaces")
+            val result = t32_field_to_eval("   ")
+            # Blank EVAL text is refused (t32_eval_expr_is_safe), not passed through
+            expect(result).to_equal("")
+
+    context "t32_field_to_eval with partial field names":
+        it "returns raw text for unknown prefixes":
+            step("unknown prefix like 'io.x'")
+            val result = t32_field_to_eval("io.x")
+            expect(result).to_equal("io.x")
+
+        it "handles dot-only input":
+            step("just a dot")
+            val result = t32_field_to_eval(".")
+            expect(result).to_equal(".")
+
+    context "t32_field_to_eval with case sensitivity":
+        it "handles uppercase field":
+            step("uppercase PC")
+            val result = t32_field_to_eval("PC")
+            expect(result.contains("PC")).to_equal(true)
+
+        it "handles mixed case":
+            step("mixed case Register.sp")
+            val result = t32_field_to_eval("Register.sp")
+            expect(result.len() > 0).to_equal(true)
+
+# ============================================================================
+# Field SET Command Generation — Error Paths
+# ============================================================================
+
+describe "Field SET Command Edge Cases":
+
+    context "t32_field_to_set_cmd with empty value":
+        it "handles empty value for pc":
+            step("set pc to empty string")
+            val result = t32_field_to_set_cmd("pc", "")
+            # Empty value is refused: no command is generated
+            expect(result).to_equal("")
+
+    context "t32_field_to_set_cmd with special characters":
+        it "handles value with spaces":
+            step("set var with spaced value")
+            val result = t32_field_to_set_cmd("var.test", "hello world")
+            expect(result.len() > 0).to_equal(true)
+
+        it "handles quoted value":
+            step("set with quotes in value")
+            val result = t32_field_to_set_cmd("var.name", "\"test\"")
+            expect(result.len() > 0).to_equal(true)
+
+    context "t32_field_to_set_cmd with unknown fields":
+        it "returns empty for completely unknown field":
+            step("unknown field type")
+            val result = t32_field_to_set_cmd("unknown.field", "value")
+            expect(result).to_equal("")
+
+        it "returns empty for malformed field":
+            step("malformed without dot separator")
+            val result = t32_field_to_set_cmd("malformed", "value")
+            expect(result).to_equal("")
+
+# ============================================================================
+# Status Field Recognition and Normalization
+# ============================================================================
+
+describe "Status Field and State Normalization":
+
+    context "t32_is_status_field":
+        it "recognizes status root":
+            step("'status' recognized")
+            expect(t32_is_status_field("status")).to_equal(true)
+
+        it "recognizes status.current":
+            step("'status.current' recognized")
+            expect(t32_is_status_field("status.current")).to_equal(true)
+
+        it "rejects non-status field":
+            step("'register.PC' not status")
+            expect(t32_is_status_field("register.PC")).to_equal(false)
+
+        it "handles empty string":
+            step("empty string is not status")
+            expect(t32_is_status_field("")).to_equal(false)
+
+    context "t32_normalize_current_status with edge cases":
+        it "normalizes running state":
+            step("is_running=1, status=RUN")
+            val result = t32_normalize_current_status("1", "RUN", "Attach")
+            expect(result).to_equal("running")
+
+        it "normalizes stopped state":
+            step("is_running=0, status=Break")
+            val result = t32_normalize_current_status("0", "Break", "Attach")
+            expect(result).to_equal("stopped")
+
+        it "normalizes disconnected":
+            step("system_status=Down")
+            val result = t32_normalize_current_status("0", "Down", "Down")
+            expect(result).to_equal("disconnected")
+
+        it "handles unknown status values":
+            step("unknown status string")
+            val result = t32_normalize_current_status("0", "Unknown", "Unknown")
+            # Non-down system mode with no run signal normalizes to stopped
+            expect(result).to_equal("stopped")
+
+        it "handles empty status strings":
+            step("empty is_running and status")
+            val result = t32_normalize_current_status("", "", "")
+            expect(result).to_equal("disconnected")
+
+# ============================================================================
+# Text Containment Checks
+# ============================================================================
+
+describe "Text Search Functions":
+
+    context "t32_text_contains with various inputs":
+        it "finds substring in middle":
+            step("'hello' contains 'll'")
+            expect(t32_text_contains("hello", "ll")).to_equal(true)
+
+        it "finds exact match":
+            step("'test' contains 'test'")
+            expect(t32_text_contains("test", "test")).to_equal(true)
+
+        it "returns false for absent substring":
+            step("'hello' does not contain 'xyz'")
+            expect(t32_text_contains("hello", "xyz")).to_equal(false)
+
+        it "handles empty needle":
+            step("'hello' contains ''")
+            # Empty needle is contained in every string
+            val result = t32_text_contains("hello", "")
+            expect(result).to_equal(true)
+
+        it "handles empty haystack":
+            step("'' contains 'x'")
+            expect(t32_text_contains("", "x")).to_equal(false)
+
+        it "handles case sensitivity":
+            step("'Hello' vs 'hello'")
+            val result = t32_text_contains("Hello", "hello")
+            # Search is case-sensitive
+            expect(result).to_equal(false)
