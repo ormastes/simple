@@ -1,0 +1,85 @@
+# Purpose: the legacy container test backend is bounded, killable and leaves
+# no container behind on normal exit, failure or timeout. Scripted engine only.
+use std.nogc_sync_mut.test_runner.test_runner_container.{
+    container_run_test_bounded_v1, container_test_named_argv_v1, container_test_reap_argv_v1
+}
+use std.io_runtime.read_file_text
+
+var engine_calls: [text] = []
+var engine_present: [text] = []
+var engine_mode: text = ""
+
+fn engine_reset(mode: text):
+    engine_calls = []
+    engine_present = []
+    engine_mode = mode
+
+fn engine_runner(runtime: text, args: [text], timeout_ms: i64) -> (text, text, i64):
+    engine_calls.push(runtime + " " + args.join(" ") + " @" + timeout_ms.to_text())
+    if args[0] == "run":
+        if engine_mode == "timeout" or engine_mode == "stuck":
+            engine_present.push(args[3])
+            return ("partial", "[TIMEOUT: Process killed after 2s]", -1)
+        if engine_mode == "fail": return ("", "spec failed", 1)
+        return ("ok", "", 0)
+    if args[0] == "rm":
+        if engine_mode != "stuck": engine_present = []
+        return ("", "", 0)
+    if args[0] == "container":
+        return ("", "", if engine_present.len() > 0: 0 else: 1)
+    ("", "unexpected", 2)
+
+fn run_bounded(timeout_ms: i64) -> (text, text, i64, i64):
+    container_run_test_bounded_v1("spec.spl", "podman", "runner:tag", 256, 1.0, "none", true,
+        "/tmp/work", "simple-test-1-2", timeout_ms, engine_runner)
+
+describe "Bounded legacy container test run":
+    it "names the container so it can be reaped by exact name":
+        val named = container_test_named_argv_v1(["run", "--rm", "--network=none", "img", "test", "a.spl"], "simple-test-1-2").unwrap()
+        expect(named).to_equal(["run", "--rm", "--name", "simple-test-1-2", "--network=none", "img", "test", "a.spl"])
+        expect(container_test_named_argv_v1(["run", "--rm", "img"], "--privileged").unwrap_err()).to_equal("invalid-container-name")
+        expect(container_test_named_argv_v1(["build", "."], "ok").unwrap_err()).to_equal("invalid-container-run-argv")
+        expect(container_test_reap_argv_v1("simple-test-1-2")).to_equal(["rm", "--force", "--volumes", "simple-test-1-2"])
+
+    it "passes the timeout to the client and reaps after a normal exit":
+        engine_reset("")
+        val result = run_bounded(2000)
+        expect(result.0).to_equal("ok")
+        expect(result.2).to_equal(0)
+        expect(engine_calls.len()).to_equal(3)
+        expect(engine_calls[0]).to_start_with("podman run --rm --name simple-test-1-2 ")
+        expect(engine_calls[0]).to_end_with(" @2000")
+        expect(engine_calls[1]).to_equal("podman rm --force --volumes simple-test-1-2 @30000")
+        expect(engine_calls[2]).to_equal("podman container inspect simple-test-1-2 @30000")
+
+    it "reaps the container a timed-out client left and reports the timeout":
+        engine_reset("timeout")
+        val result = run_bounded(2000)
+        expect(result.2).to_equal(-1)
+        expect(result.1).to_contain("TIMEOUT")
+        expect(engine_present.len()).to_equal(0)
+
+    it "reaps after a failing run and keeps the exit code":
+        engine_reset("fail")
+        val result = run_bounded(2000)
+        expect(result.2).to_equal(1)
+        expect(result.1).to_equal("spec failed")
+        expect(engine_calls.len()).to_equal(3)
+
+    it "reports a container that survives forced removal instead of a clean result":
+        engine_reset("stuck")
+        val result = run_bounded(2000)
+        expect(result.2).to_equal(1)
+        expect(result.1).to_contain("still present after forced removal")
+
+    it "refuses a non-positive timeout before any engine call":
+        engine_reset("")
+        val result = run_bounded(0)
+        expect(result.1).to_equal("invalid-container-timeout")
+        expect(engine_calls.len()).to_equal(0)
+
+    it "has one owner: the app copy is a re-export with no stub clock or shell":
+        val app = read_file_text("src/app/test_runner_new/test_runner_container.spl")
+        expect(app).to_contain("export use std.nogc_sync_mut.test_runner.test_runner_container.*")
+        expect(app.contains("fn time_now_ms")).to_equal(false)
+        expect(app.contains("shell(")).to_equal(false)
