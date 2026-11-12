@@ -894,6 +894,15 @@ fn should_flatten_nested_import(use_stmt: &UseStmt, source: &str) -> bool {
     }
 }
 
+/// The one flatten decision for every import form (`use`, `pub use`/`export
+/// use`, `common use`, comma multi-use). `pub use a.b.f` used to skip the
+/// module-file arm, so a function reachable only through such a re-export never
+/// reached the JIT unit (caret: `smux_runtime_binding_bind_v3`, "unresolved
+/// external symbol ... cross-module Simple function").
+fn should_flatten_import(use_stmt: &UseStmt, source: &str, resolved: &Path) -> bool {
+    should_flatten_nested_import(use_stmt, source) || single_import_targets_module_file(&use_stmt.target, resolved)
+}
+
 /// True when a `Single`/`Aliased` import resolves to a standalone module file,
 /// either by naming the file or one of its symbols. Package aggregators stay
 /// lazy because their requested symbol may belong to a sibling provider.
@@ -2513,8 +2522,7 @@ fn load_module_with_imports_internal(
         if let Node::UseStmt(use_stmt) = &item {
             if let Some(resolved) = resolve_use_to_path(use_stmt, path.parent().unwrap_or(Path::new("."))) {
                 if flatten_imports {
-                    let flatten_this_import = should_flatten_nested_import(use_stmt, &source)
-                        || single_import_targets_module_file(&use_stmt.target, &resolved);
+                    let flatten_this_import = should_flatten_import(use_stmt, &source, &resolved);
                     let mut imported = load_module_with_imports_internal(
                         &resolved,
                         visited,
@@ -2574,7 +2582,7 @@ fn load_module_with_imports_internal(
             };
             if let Some(resolved) = resolve_use_to_path(&temp_use, path.parent().unwrap_or(Path::new("."))) {
                 if flatten_imports {
-                    let flatten_this_import = should_flatten_nested_import(&temp_use, &source);
+                    let flatten_this_import = should_flatten_import(&temp_use, &source, &resolved);
                     let mut imported = load_module_with_imports_internal(
                         &resolved,
                         visited,
@@ -2625,7 +2633,7 @@ fn load_module_with_imports_internal(
             };
             if let Some(resolved) = resolve_use_to_path(&temp_use, path.parent().unwrap_or(Path::new("."))) {
                 if flatten_imports {
-                    let flatten_this_import = should_flatten_nested_import(&temp_use, &source);
+                    let flatten_this_import = should_flatten_import(&temp_use, &source, &resolved);
                     let mut imported = load_module_with_imports_internal(
                         &resolved,
                         visited,
@@ -2678,7 +2686,7 @@ fn load_module_with_imports_internal(
                 };
                 if let Some(resolved) = resolve_use_to_path(&temp_use, path.parent().unwrap_or(Path::new("."))) {
                     if flatten_imports {
-                        let flatten_this_import = should_flatten_nested_import(&temp_use, &source);
+                        let flatten_this_import = should_flatten_import(&temp_use, &source, &resolved);
                         let mut imported = load_module_with_imports_internal(
                             &resolved,
                             visited,
