@@ -490,7 +490,15 @@ pub fn rt_io_file_close(args: &[Value]) -> Result<Value, CompileError> {
             return Ok(Value::Bool(false));
         }
         let file = unsafe { File::from_raw_fd(fd as i32) };
-        let ok = file.sync_all().is_ok();
+        // fsync fails with EINVAL on descriptors that cannot be synchronized
+        // (procfs, sysfs, pipes): POSIX defines that as "nothing to sync", not
+        // a close failure. Treating it as failure made every `file_read` of
+        // /proc/meminfo return "" (slang's memory gate then refused all loads).
+        // The C twin (runtime_native.c rt_io_file_close) never fsyncs at all.
+        let ok = match file.sync_all() {
+            Ok(()) => true,
+            Err(error) => error.raw_os_error() == Some(libc::EINVAL),
+        };
         drop(file);
         Ok(Value::Bool(ok))
     }
@@ -634,6 +642,17 @@ mod close_value_tests {
         assert!(matches!(fd, Value::Int(n) if n > 0));
         assert_eq!(rt_io_file_close_value(&[fd]).unwrap(), Value::Int(1));
         let _ = std::fs::remove_file(&path);
+    }
+
+    // procfs rejects fsync with EINVAL; a read of /proc/meminfo must still
+    // close cleanly or `file_read` returns "" and slang's memory gate refuses
+    // every model load on Linux.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn close_value_reports_one_for_a_procfs_fd() {
+        let fd = rt_io_file_open(&[Value::text("/proc/self/status".to_string()), Value::Int(0)]).unwrap();
+        assert!(matches!(fd, Value::Int(n) if n >= 0));
+        assert_eq!(rt_io_file_close_value(&[fd]).unwrap(), Value::Int(1));
     }
 }
 

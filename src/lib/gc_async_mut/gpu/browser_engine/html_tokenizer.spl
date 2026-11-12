@@ -86,45 +86,40 @@ fn _raw_tag_char_matches(c: text, lower: text) -> bool:
     val lower_code = lower_bytes[0] as i64
     code >= 65 and code <= 90 and code + 32 == lower_code
 
-fn _find_raw_end_tag(html: text, tag: text, start: i32) -> i32:
+fn _find_raw_end_tag_b(hb: [u8], tag_bytes: [u8], start: i64) -> i64:
+    """Byte-offset scan for </tag on the pre-decoded document bytes.
+
+    The main loop's `pos` is a BYTE offset into hb; the previous text-based
+    helper sliced by char offsets, so any multi-byte character earlier in the
+    document desynced raw-text (title/textarea/script/style) termination.
+    """
+    val n = hb.len()
+    val tag_len = tag_bytes.len()
     var pos = start
-    while pos < html.len():
-        if (
-            html.slice(pos, pos + 2) == "</" and
-            pos + 2 + tag.len() <= html.len()
-        ):
+    while pos < n:
+        if hb[pos] == 60 and pos + 1 < n and hb[pos + 1] == 47 and
+                pos + 2 + tag_len <= n:
             var tag_i = 0
-            while (
-                tag_i < tag.len() and
-                _raw_tag_char_matches(
-                    html.slice(pos + 2 + tag_i, pos + 3 + tag_i),
-                    tag.slice(tag_i, tag_i + 1)
-                )
+            while tag_i < tag_len and (
+                hb[pos + 2 + tag_i] == tag_bytes[tag_i] or
+                (hb[pos + 2 + tag_i] >= 65 and hb[pos + 2 + tag_i] <= 90 and
+                    hb[pos + 2 + tag_i] + 32 == tag_bytes[tag_i])
             ):
                 tag_i = tag_i + 1
-            if tag_i == tag.len():
-                val boundary_pos = pos + 2 + tag.len()
-                val boundary = if boundary_pos < html.len():
-                    html.slice(boundary_pos, boundary_pos + 1)
+            if tag_i == tag_len:
+                val boundary_pos = pos + 2 + tag_len
+                val boundary_ok = if boundary_pos >= n:
+                    true
                 else:
-                    ""
-                if (
-                    boundary == ">" or boundary == " " or boundary == "\t" or
-                    boundary == "\n" or boundary == "\r" or boundary == "/"
-                ):
+                    val b = hb[boundary_pos]
+                    b == 62 or b == 32 or b == 9 or b == 10 or b == 13 or b == 47
+                if boundary_ok:
                     var close = boundary_pos
-                    while (
-                        close < html.len() and
-                        html.slice(close, close + 1) != ">" and
-                        html.slice(close, close + 1) != "<"
-                    ):
+                    while close < n and hb[close] != 62 and hb[close] != 60:
                         close = close + 1
-                    if (
-                        close < html.len() and
-                        html.slice(close, close + 1) == ">"
-                    ):
+                    if close < n and hb[close] == 62:
                         return pos
-                    if close < html.len():
+                    if close < n:
                         pos = close
                         continue
         pos = pos + 1
@@ -176,15 +171,14 @@ pub fn html_tokenizer_tokenize_with_limits(
     val sink = _TokenSink(tokens: [], limit: token_limit, truncated: false)
     var pos = 0
     val html = t.html
-    val n = html.len()
     # Decode the WHOLE document to bytes exactly once. The main scan loop and
     # its `_find_*_b`/`_scan_char_data_b` helpers below index into this same
-    # array by byte offset instead of each re-decoding `html.bytes()` (or
-    # allocating a length-1 `text` via `html.slice(i, i+1)`) per character —
-    # see doc/10_metrics/ui/web_perf_round6_2026-09-13.md for the regression
-    # this avoids (a prior attempt called `.bytes()` inside `_find_char`
-    # itself, redecoding the full remaining document on every invocation).
+    # array by BYTE offset — so `n` must be the BYTE length (hb.len()), not
+    # the character length html.len(): for documents containing multi-byte
+    # characters the two differ, and a char-count bound silently truncated
+    # the byte array mid-character (the raw-text/entity desync class).
     val hb = text_to_bytes(html)
+    val n = hb.len()
     var retained_attrs = 0
     # Raw-text mode for script/style and RCDATA mode for textarea.
     var raw_text_tag = ""
@@ -193,9 +187,11 @@ pub fn html_tokenizer_tokenize_with_limits(
         val chb = hb[pos]
         if raw_text_tag != "":
             val current_raw_tag = raw_text_tag
-            val found_end = _find_raw_end_tag(html, current_raw_tag, pos)
+            val found_end = _find_raw_end_tag_b(hb, text_to_bytes(current_raw_tag), pos)
             val raw_end = if found_end < 0: n else: found_end
-            val raw_data = html.slice(pos, raw_end)
+            # Decode the byte span to text once; everything below this line
+            # works on the decoded raw_data with its own char offsets.
+            val raw_data = bytes_to_text(hb.slice(pos, raw_end))
             if raw_data.len() > 0:
                 if raw_text_decodes_entities:
                     var raw_pos = 0
@@ -239,41 +235,41 @@ pub fn html_tokenizer_tokenize_with_limits(
                 val nextb = hb[pos + 1]
                 if nextb == 33:
                     # Comment or doctype
-                    if pos + 3 < n and html.slice(pos + 2, pos + 4) == "--":
+                    if pos + 3 < n and bytes_to_text(hb.slice(pos + 2, pos + 4)) == "--":
                         # Comment: <!-- ... -->
                         if (
                             pos + 4 < n and
-                            html.slice(pos + 4, pos + 5) == ">"
+                            bytes_to_text(hb.slice(pos + 4, pos + 5)) == ">"
                         ):
                             val _ = sink.push(_tok_comment(""))
                             pos = pos + 5
                         elif (
                             pos + 5 < n and
-                            html.slice(pos + 4, pos + 6) == "->"
+                            bytes_to_text(hb.slice(pos + 4, pos + 6)) == "->"
                         ):
                             val _ = sink.push(_tok_comment(""))
                             pos = pos + 6
                         else:
-                            val comment_end = _find_substr(
-                                html, "-->", pos + 4
+                            val comment_end = _find_bytes3_b(
+                                hb, n, 45u8, 45u8, 62u8, pos + 4
                             )
                             if comment_end < 0:
-                                val comment_data = html.slice(pos + 4, n)
+                                val comment_data = bytes_to_text(hb.slice(pos + 4, n))
                                 val _ = sink.push(_tok_comment(comment_data))
                                 pos = n
                             else:
-                                val comment_data2 = html.slice(
+                                val comment_data2 = bytes_to_text(hb.slice(
                                     pos + 4, comment_end
-                                )
+                                ))
                                 val _ = sink.push(_tok_comment(comment_data2))
                                 pos = comment_end + 3
-                    elif pos + 8 < n and html.slice(pos + 2, pos + 9).lower() == "doctype":
+                    elif pos + 8 < n and bytes_to_text(hb.slice(pos + 2, pos + 9)).lower() == "doctype":
                         # Doctype
                         val gt = _find_byte(hb, n, 62, pos)
                         if gt < 0:
                             pos = n
                         else:
-                            val dt_inner = html.slice(pos + 9, gt).trim()
+                            val dt_inner = bytes_to_text(hb.slice(pos + 9, gt)).trim()
                             val dt_parts = _split_first_word(dt_inner)
                             val _ = sink.push(_tok_doctype(dt_parts))
                             pos = gt + 1
@@ -291,7 +287,7 @@ pub fn html_tokenizer_tokenize_with_limits(
                         val _ = sink.push(_tok_char("<"))
                         pos = pos + 1
                     else:
-                        val tag_raw = html.slice(pos + 2, gt).trim().lower()
+                        val tag_raw = bytes_to_text(hb.slice(pos + 2, gt)).trim().lower()
                         val tag_name = _strip_tag_name(tag_raw)
                         val _ = sink.push(_tok_end(tag_name))
                         pos = gt + 1
@@ -312,7 +308,7 @@ pub fn html_tokenizer_tokenize_with_limits(
                         val self_closing = (
                             gt4 > 0 and hb[gt4 - 1] == 47
                         )
-                        val inner = html.slice(pos + 1, if self_closing: gt4 - 1 else: gt4).trim()
+                        val inner = bytes_to_text(hb.slice(pos + 1, if self_closing: gt4 - 1 else: gt4)).trim()
                         val parsed = _parse_start_tag(
                             inner, attr_limit - retained_attrs
                         )
@@ -335,14 +331,25 @@ pub fn html_tokenizer_tokenize_with_limits(
                     val _ = sink.push(_tok_char("<"))
                     pos = pos + 1
         elif chb == 38:
-            # Named entity reference
-            val entity_result = _parse_entity(html, pos, false)
+            # Named entity reference. `pos` is a byte offset, so delegate to
+            # the text parser on a decoded candidate window and map the end
+            # position back to bytes.
+            var window_end = if pos + 48 < n: pos + 48 else: n
+            # Entities are pure ASCII; never split a multi-byte UTF-8
+            # sequence at the window edge (a partial decode yields U+FFFD).
+            if window_end < n:
+                while window_end > pos and hb[window_end - 1] > 127u8:
+                    window_end = window_end - 1
+            val decoded = bytes_to_text(hb.slice(pos, window_end))
+            val entity_result = _parse_entity(decoded, 0, false)
             val _ = sink.push(_tok_char(entity_result.decoded))
-            pos = entity_result.end_pos
+            # end_pos is a char offset inside the decoded window; convert the
+            # consumed prefix back to bytes before advancing the byte cursor.
+            pos = pos + text_to_bytes(decoded.slice(0, entity_result.end_pos)).len()
         else:
             # Regular character data — accumulate until < or &
             val end_pos = _scan_char_data_b(hb, n, pos)
-            val char_data = html.slice(pos, end_pos)
+            val char_data = bytes_to_text(hb.slice(pos, end_pos))
             if char_data.len() > 0:
                 val _ = sink.push(_tok_char(char_data))
             pos = end_pos
@@ -696,6 +703,15 @@ fn _find_byte(hb: [u8], n: i32, target: u8, start: i32) -> i32:
     var i = start
     while i < n:
         if hb[i] == target:
+            return i
+        i = i + 1
+    -1
+
+fn _find_bytes3_b(hb: [u8], n: i32, b0: u8, b1: u8, b2: u8, start: i32) -> i32:
+    """First occurrence of the three-byte sequence (e.g. '-->') in hb."""
+    var i = start
+    while i + 2 < n:
+        if hb[i] == b0 and hb[i + 1] == b1 and hb[i + 2] == b2:
             return i
         i = i + 1
     -1

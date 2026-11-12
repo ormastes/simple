@@ -296,8 +296,15 @@ pub unsafe extern "C" fn rt_io_file_close(fd: i64) -> bool {
             return false;
         }
         let file = File::from_raw_fd(fd as i32);
-        // Surface a write-back error rather than losing it in the drop.
-        let ok = file.sync_all().is_ok();
+        // Surface a write-back error rather than losing it in the drop. EINVAL
+        // means the descriptor cannot be synchronized (procfs, sysfs, pipes):
+        // nothing to write back, so the close itself succeeded. Without this
+        // every `read_file("/proc/meminfo")` came back "" and slang's memory
+        // gate refused all model loads on Linux.
+        let ok = match file.sync_all() {
+            Ok(()) => true,
+            Err(error) => error.raw_os_error() == Some(libc::EINVAL),
+        };
         drop(file);
         ok
     }
@@ -471,6 +478,18 @@ mod tests {
 
     unsafe fn open(path: &str, mode: i64) -> i64 {
         rt_io_file_open(path.as_ptr(), path.len() as u64, mode)
+    }
+
+    // procfs rejects fsync with EINVAL; closing a read-only /proc fd must
+    // still report success or `read_file("/proc/meminfo")` returns "".
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn close_of_procfs_fd_succeeds() {
+        unsafe {
+            let fd = open("/proc/self/status", 0);
+            assert!(fd >= 0, "ReadOnly open of /proc/self/status failed");
+            assert!(rt_io_file_close(fd));
+        }
     }
 
     #[test]
