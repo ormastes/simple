@@ -22,7 +22,7 @@ Configuration files for build, test, packaging, and tooling.
 | `mcp` | MCP server configurations |
 | `packaging` | Packaging configurations |
 | `perf` | Entry-point import-closure baselines (`entry_closure_baselines.sdn`) frozen by check-entry-closure-ratchet.shs |
-| `policy` | Policy tables: `unsafe_region_owners.sdn` (E-MC-REP-001 owner/reviewers by path area) |
+| `policy` | Policy tables: `unsafe_region_owners.sdn` (E-MC-REP-001 owner/reviewers by path area), `diagnostic_policy.sdn` (scheduled per-rule diagnostic severity, DiagnosticRulePolicy) |
 | `process.sdn` | Process configuration |
 | `README_DOCKER.md` | Docker readme |
 | `resources` | Resource files |
