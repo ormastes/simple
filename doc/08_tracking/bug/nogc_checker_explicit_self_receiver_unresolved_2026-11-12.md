@@ -1,6 +1,6 @@
 # nogc checker: method with explicit `self: &T` consuming receiver is not resolved (NOGC-AMB-004, no NOGC-OWN-003)
 
-- Status: open
+- Status: verification-pending (fixed 2026-11-12 in infer.spl + projection_escape.spl; gaps spec 9/9 on seed interpreter, native verification pending)
 - Area: src/compiler/35.semantics/param_effects/infer.spl `_receiver_offset` / `_summary_for_method`
 - Repro: test/01_unit/compiler/semantics/param_effects/nogc_contract_behaviour_gaps_spec.spl (REQ-MEM-3-6)
 

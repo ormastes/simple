@@ -1,3 +1,8 @@
+/* Non-Windows test: the POSIX/Linux/macOS APIs it uses have no Windows build here. */
+#if defined(_WIN32)
+#include <stdio.h>
+int main(void) { puts("SKIP: rt_cranelift_bridge_stub_named_trap_selfcheck is POSIX-only; no Windows build"); return 77; }
+#else
 /* Behavioural self-check for the Cranelift JIT bridge NAMED-TRAP stubs.
  *
  * See src/runtime/runtime_cranelift_bridge_stub.c and
@@ -190,3 +195,5 @@ int main(void) {
            failures, failures == 1 ? "" : "s");
     return failures ? 1 : 0;
 }
+
+#endif /* !_WIN32 */

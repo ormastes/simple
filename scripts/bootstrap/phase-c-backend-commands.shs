@@ -28,10 +28,28 @@ bootstrap_phase_c_validate_backend_receipt() {
 # tree-rss-policy.shs); its watchdog resolves the same cap from the same
 # --threads, so the exported budget and the enforced cap agree. Code generation
 # still receives the caller's --threads value.
+#
+# Every refusal names itself on stderr as verification-frontend-policy-error.
+# The caller runs this inside the row wrapper, whose stdout+stderr ARE the row
+# log, and maps any failure to exit 88. A silent return left run 15
+# (bfe789dd411, 2026-11-12) with compiler_cli_build status=88 after 0 s and a
+# 0-byte log: that row's elevated ceiling (the 60 GiB cli-row-mir-shards cap)
+# is re-admitted here against live MemAvailable (3/4 of available >= ceiling),
+# and co-resident lanes had consumed the headroom the phase-start admission
+# saw. The refusal is correct; only its silence was the defect.
+bootstrap_phase_c_frontend_policy_error() {
+  printf 'verification-frontend-policy-error: %s\n' "$1" >&2
+  return 1
+}
+
 bootstrap_phase_c_apply_frontend_policy() {
-  . "$source_root/scripts/bootstrap/lib/tree-rss-policy.shs" || return 1
-  . "$source_root/scripts/bootstrap/lib/product-frontend-policy.shs" || return 1
-  bootstrap_tree_rss_resolve "$pure_tool_threads" "$source_root" || return 1
+  . "$source_root/scripts/bootstrap/lib/tree-rss-policy.shs" ||
+    bootstrap_phase_c_frontend_policy_error "cannot load $source_root/scripts/bootstrap/lib/tree-rss-policy.shs" || return 1
+  . "$source_root/scripts/bootstrap/lib/product-frontend-policy.shs" ||
+    bootstrap_phase_c_frontend_policy_error "cannot load $source_root/scripts/bootstrap/lib/product-frontend-policy.shs" || return 1
+  bootstrap_tree_rss_resolve "$pure_tool_threads" "$source_root" ||
+    bootstrap_phase_c_frontend_policy_error "${bootstrap_tree_rss_refusal:-tree RSS policy refused without a recorded reason} (threads ${pure_tool_threads:-unset})" ||
+    return 1
   # Thread the resolved job-scaled ceiling through: the frontend environment
   # validates cap <= ceiling, and without the resolved value it falls back to
   # the static 8 GiB ceiling -- which refuses every cap above 8 GiB (the
@@ -40,9 +58,12 @@ bootstrap_phase_c_apply_frontend_policy() {
   # no log (frontend policy failure inside the row wrapper).
   pcb_frontend_rows=$(bootstrap_product_frontend_policy qualified \
     "$bootstrap_tree_rss_cap_kib" "${SIMPLE_BOOTSTRAP_RSS_CAP_MODE:-enforce}" \
-    "$bootstrap_tree_rss_ceiling_kib") || return 1
+    "$bootstrap_tree_rss_ceiling_kib") ||
+    bootstrap_phase_c_frontend_policy_error "product frontend policy refused cap $bootstrap_tree_rss_cap_kib KiB (ceiling $bootstrap_tree_rss_ceiling_kib KiB, rss mode ${SIMPLE_BOOTSTRAP_RSS_CAP_MODE:-enforce}); an inherited SIMPLE_SHARD_MEM_CLAMP/SIMPLE_PARSE_SHARD_*/SIMPLE_HIR_SHARD_WORKER_KB/SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB contradicts scripts/bootstrap/lib/product-frontend-policy.shs, or cap > ceiling" ||
+    return 1
   while IFS= read -r pcb_frontend_setting; do
-    export "$pcb_frontend_setting" || return 1
+    export "$pcb_frontend_setting" ||
+      bootstrap_phase_c_frontend_policy_error "cannot export '$pcb_frontend_setting'" || return 1
     printf 'verification_frontend_policy=%s\n' "$pcb_frontend_setting"
   done <<EOF
 $pcb_frontend_rows

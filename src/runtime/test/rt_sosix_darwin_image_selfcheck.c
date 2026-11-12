@@ -1,3 +1,8 @@
+/* Non-Windows test: the POSIX/Linux/macOS APIs it uses have no Windows build here. */
+#if defined(_WIN32)
+#include <stdio.h>
+int main(void) { puts("SKIP: rt_sosix_darwin_image_selfcheck is POSIX-only; no Windows build"); return 77; }
+#else
 #include "../runtime_sosix_darwin_image_private.h"
 #include <assert.h>
 #include <stdio.h>
@@ -31,3 +36,5 @@ int main(int argc, char **args) {
     assert(sosix_darwin_image_close(&image, generation) == ESTALE);
     puts("darwin image owner selfcheck passed");
 }
+
+#endif /* !_WIN32 */

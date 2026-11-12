@@ -3,7 +3,9 @@
 How to run a local GGUF model through slang's ggml backend and use it from
 caret — including letting the local model run the spipe (SSpec) development
 flow. Verified 2026-09-16 on a GB10 host (128G unified memory) with
-`Qwen3-Coder-Next-Q4_K_M` (4-shard, 46G) and `Qwen3.5-9B-Q3_K_M` (4.7G).
+`Qwen3-Coder-Next-Q4_K_M` (4-shard, 46G) and `Qwen3.5-9B-Q3_K_M` (4.7G); the
+server and caret-suite sections (6-10) were verified 2026-11-12 with
+`Qwen3-Coder-30B-A3B-Q4_K_M`.
 
 ## 1. Put a GGUF model under a model root
 
@@ -29,6 +31,29 @@ typed reason — expected, not a bug. Architecture support follows the linked
 llama.cpp revision (Qwen3.5 needs `qwen35` graph builders).
 
 ## 2. Build the ggml backend shim in the tree you run from
+
+The shim links against a llama.cpp build. `scripts/check/build-slang-ggml-shim.shs`
+defaults `LLAMA_ROOT` to `/home/yoon/dev/llama.cpp`; a fresh host has no `build/`
+there, so build it first (once per host, not per worktree).
+
+### llama.cpp with CUDA (clang-18 host compiler)
+
+nvcc 13.0 rejects clang >= 21 as the host compiler ("unsupported clang version!
+clang version must be less than 21"), so pass clang-18 explicitly. Never GCC
+(repo rule).
+
+```bash
+cd /home/yoon/dev/llama.cpp
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_C_COMPILER=/usr/bin/clang-18 \
+  -DCMAKE_CXX_COMPILER=/usr/lib/llvm-18/bin/clang++ \
+  -DCMAKE_CUDA_HOST_COMPILER=/usr/lib/llvm-18/bin/clang++ \
+  -DBUILD_SHARED_LIBS=ON -DGGML_CUDA=ON -DGGML_NATIVE=ON -DLLAMA_CURL=OFF \
+  -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_SERVER=OFF
+cmake --build build -j 10
+```
+
+Then, in each worktree:
 
 ```bash
 sh scripts/check/build-slang-ggml-shim.shs   # -> build/sffi/libslang_ggml.so
@@ -143,6 +168,163 @@ Finish with: tests run, pass/fail, files changed, root cause per fix.
 
 Forcing "do NOT commit" keeps the landing decision with the human session
 that owns the lane (per `.claude/rules/vcs.md`, worktrees are where ordinary
-changes are authored, and a local model must not push).
+changes are authored, and a local model must not push). The parallel-agent
+pattern in section 8 does the opposite on purpose: each agent owns its own
+worktree and branch and opens its own PR.
+
+## 6. Run the slang OpenAI-compatible server
+
+Verified 2026-11-12 (GB10, `Qwen3-Coder-30B-A3B-Q4_K_M`, 18.5 GB:
+`hf download unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF
+Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf --local-dir
+/home/yoon/dev/model/Qwen3-Coder-30B-A3B-Q4_K_M`).
+
+```bash
+cd <worktree> && SIMPLE_RUST_SEED_WARNING=0 SIMPLE_TIMEOUT_SECONDS=0 \
+  <seed> run src/app/slang_server/main.spl -- \
+  --plaintext-development --models=/home/yoon/dev/model --port=8721 --n-ctx=32768
+```
+
+- `--plaintext-development` is mandatory (loopback dev only; production needs TLS).
+- `--n-ctx=<tokens>` sets the per-request context. The default 4096 is too small
+  for a caret agent (tool prompt plus one file read overflows it); caret's
+  in-process `slang_local` path uses 32768. A non-positive or non-numeric value
+  fails with `Error: --n-ctx must be a positive integer`.
+- Endpoints: `GET /v1/models` (every model slang recognises on disk, runnable or
+  not) and `POST /v1/chat/completions` (real tokens for GGUF; 503
+  `model_not_runnable` with a reason otherwise). The model loads lazily on the
+  first completion, so the first request is slow.
+
+Smoke test (Bash `curl`/`wget` are blocked by repo hooks; use `nc`):
+
+```bash
+printf 'POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: <n>\r\nConnection: close\r\n\r\n<json>' \
+  | nc -q 900 127.0.0.1 8721
+```
+
+For "Say exactly: hello world" the reply was
+`{"choices":[{"message":{"role":"assistant","content":"\n\nHello world!"}}]}`.
+
+**Do not wrap the server in `systemd-run -p MemoryMax=...`.** On GB10 the CUDA
+context is host memory charged to the cgroup, and `cudaSetDevice` then fails
+with "out of memory" in `ggml_cuda_init`. slang's own fit gate
+(`memory_budget.spl`: MemAvailable minus 1/16 of total as headroom) is the guard.
+
+Seed-age prerequisites (the server and caret run on the Rust seed):
+
+- A seed built before 2026-11-09 (commit `afb36d2e0a5`, process-global
+  interpreter socket registry) cannot serve HTTP: connections hang in CLOSE-WAIT
+  and `GET /v1/models` never answers.
+- A seed without PR #8492 (merged 2026-11-12 into `release/1.0.0`) reads
+  `/proc/meminfo` as an empty string, so the memory gate refuses every model
+  ("could not establish available memory (no MemAvailable in /proc/meminfo
+  ...)"). It also lacks `--n-ctx`.
+- Rebuild: `cd src/compiler_rust && cargo build --release --bin simple`
+  (`target/release/simple`, ~1.5 min warm).
+
+## 7. Point caret at the server
+
+Provider `slang` is an HTTP client to `SLANG_BASE_URL` (default
+`http://localhost:8721`); `slang_local` is the in-process engine (needs
+`SLANG_MODEL_ROOT`, no server). Config file (section headers unindented and
+ending in `:`, keys indented):
+
+```
+defaults:
+    provider: slang
+slang:
+    base_url: http://127.0.0.1:8721
+    model: Qwen3-Coder-30B-A3B-Q4_K_M
+```
+
+```bash
+<seed> run src/app/llm_caret/main.spl --config <file> \
+  --workspace <isolated worktree> --dangerously-allow-all
+```
+
+`--prompt "..."` prints one reply and exits; the tool loop runs only in the TUI.
+
+## 8. Caret suite (cs)
+
+`cs` is a dashboard that launches and watches several agents in tmux panes.
+Run it inside a tmux window (verified in a window named `caret-suite`, pane
+backend shown as `connected: smux`):
+
+```bash
+bin/cs [session]          # wraps bin/caret with CARET_ENTRY=src/app/llm_caret/cs_main.spl
+SIMPLE_BINARY=<seed> <seed> run src/app/llm_caret/cs_main.spl <session-name>   # direct
+```
+
+`SIMPLE_BINARY` selects which `simple` spawns the agents (order: `SIMPLE_BINARY`,
+`PATH`, `bin/simple`).
+
+Dashboard: header `cs <session> · connected: <backend> · N agents · N running`;
+an AGENTS list; DETAIL (spec, pane id, pid, status, cpu, rss, stderr path
+`/tmp/cs-<session>-<agent>.stderr`); LOG; the live screen of the selected
+agent's pane on the right; an input line at the bottom.
+
+| Command | Effect |
+|---|---|
+| `/launch <spec> [args...]` | start an agent |
+| `/switch <n\|id>` | select an agent |
+| `/max` | maximise the selected pane |
+| `/key <enter\|esc\|tab\|space\|up\|down\|left\|right\|ctrl-c>` | send a key |
+| `/kill <n\|id>` | kill an agent |
+| `/agents` | list agents |
+| `/help`, `/quit` | help, exit |
+
+Any non-command line is sent as chat to the selected agent's pane.
+
+Spec grammar: `harness[:provider][/model]`. Harnesses: `claude`, `codex`,
+`kimi`, `opencode`, `gemini`, `caret`. Only `caret` takes a provider
+(`claude_api`, `openai`, `openai_compat`, `kimi`, `glm`, `slang`, `slang_local`,
+`local_torch`, `dummy`, `deepseek`); a caret spec spawns
+`simple run src/app/llm_caret/main.spl --provider P --model M`.
+
+Words after the spec (PR #8492) are appended verbatim to the agent argv. They
+are split on spaces, so an argument containing spaces is not supported, and a
+typo after the spec becomes an agent argument. Two agents, each with its own
+config and workspace:
+
+```
+/launch caret:slang/Qwen3-Coder-30B-A3B-Q4_K_M --config /path/agent-a.sdn --workspace /path/worktree-a --dangerously-allow-all
+/launch caret:slang/Qwen3-Coder-30B-A3B-Q4_K_M --config /path/agent-b.sdn --workspace /path/worktree-b --dangerously-allow-all
+```
+
+Pattern used for parallel bug fixing: one isolated worktree plus a
+`work/<topic>` branch per agent (`branch.<b>.merge=refs/heads/release/1.0.0`),
+and a short `build/TASK.md` brief per bug (file:line, repro spec, expected
+result, fix sketch, landing steps). Each agent commits, pushes its branch and
+runs `gh pr create --base release/1.0.0`; a higher model reviews and
+admin-merges. Keep briefs short: a 30B local model cannot digest
+`.claude/skills/spipe.md`.
+
+## 9. Known issues (open)
+
+- **GB10 intermittent CUDA OOM.** CUDA context creation can fail with "out of
+  memory" in `ggml_cuda_init` when a second CUDA process starts while a slang
+  process holds a loaded model; the failure aborts the whole server. Two
+  separate server processes are not reliable yet. Direction: one server process
+  serving two concurrent clients. In progress; no final command yet.
+- **JIT demotion, server.** The server falls back to the interpreter because
+  `native_formats.spl` `_first_safetensors` calls an unimported bare `dir_list`
+  ("ambiguous call to dir_list: 2 co-compiled definitions"). Works, slower. Open.
+- **JIT demotion, caret.** Caret falls back to the interpreter because
+  `PAGED_MANAGER.telemetry().active_requests` is inferred as `RingTelemetry`.
+  Works, slower. Open.
+
+## 10. Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `GET /v1/models` never answers; connection stuck in CLOSE-WAIT | seed older than 2026-11-09 | rebuild the seed (section 6) |
+| "could not establish available memory (no MemAvailable in /proc/meminfo ...)" | seed without PR #8492 | rebuild the seed from a tree containing it |
+| `Error: --n-ctx must be a positive integer` | bad `--n-ctx` value | pass a positive integer |
+| Agent overflows context on first file read | default `--n-ctx` 4096 | start the server with `--n-ctx=32768` |
+| `cudaSetDevice` "out of memory" in `ggml_cuda_init` | server under a cgroup `MemoryMax`, or a second CUDA process | remove the cgroup wrapper; run one CUDA process (section 9) |
+| nvcc "unsupported clang version" building llama.cpp | clang >= 21 as host compiler | use clang-18 (section 2) |
+| `spl_dlsym: unresolved symbol` | shim built from older source | rebuild the shim in this worktree |
+| 503 `model_not_runnable` | non-GGUF or unsupported model | use a GGUF; read the reason in the response |
+| Agent argument ignored or misparsed after `/launch` | args are space-split | no spaces inside one argument |
 
 Design context: `doc/00_llm_process/feature_expert/slang_local_inference/skill.md`.

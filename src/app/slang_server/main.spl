@@ -19,12 +19,17 @@
 #
 # Usage:
 #   simple run src/app/slang_server/main.spl -- --plaintext-development \
-#       --models=<dir> [--host=127.0.0.1] [--port=8721]
+#       --models=<dir> [--host=127.0.0.1] [--port=8721] [--n-ctx=<tokens>]
+#
+# --n-ctx sets the per-request context window (engine default 4096). Agent
+# clients such as caret need far more: a tool-use system prompt plus one file
+# read already overflows 4096.
 
 use std.nogc_sync_mut.http_server.server.{SimpleHttpServer, SecureServerPolicy, plaintext_development_capability}
 use std.nogc_sync_mut.http_server.router.{Router}
 use std.nogc_sync_mut.http_server.types.{HttpRequest, HttpResponse, http_method_to_text, http_status_from_code, pure_text_to_i64}
 use std.gc_async_mut.slang.entrypoints.openai.api_server.{slang_api_dispatch}
+use std.gc_async_mut.slang.engine.llm_engine.{engine_set_n_ctx_text}
 use std.io_runtime.{get_args}
 
 # Handlers are plain function pointers, so the configured model root is held
@@ -63,9 +68,15 @@ fn main():
     var port = pure_text_to_i64(_arg_value(args, "--port=", "8721")).to_i32()
     if port <= 0:
         port = 8721
+    val n_ctx = _arg_value(args, "--n-ctx=", "")
+    if n_ctx != "" and not engine_set_n_ctx_text(n_ctx):
+        print "Error: --n-ctx must be a positive integer, got '{n_ctx}'"
+        return
 
     print "slang OpenAI-compatible server (phase A6 surface, ggml-backed engine)"
     print "  model root: {SLANG_MODEL_ROOT}"
+    if n_ctx != "":
+        print "  context:    {n_ctx} tokens per request"
     print "  GET  /v1/models           -> every model slang recognises on disk"
     print "  POST /v1/chat/completions -> real tokens for a GGUF model when the ggml"
     print "                               backend is built; 503 model_not_runnable, with the"

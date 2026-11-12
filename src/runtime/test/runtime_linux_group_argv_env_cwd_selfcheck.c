@@ -1,3 +1,8 @@
+/* Non-Windows test: the POSIX/Linux/macOS APIs it uses have no Windows build here. */
+#if defined(_WIN32)
+#include <stdio.h>
+int main(void) { puts("SKIP: runtime_linux_group_argv_env_cwd_selfcheck is POSIX-only; no Windows build"); return 77; }
+#else
 /* Real-runtime Linux cgroup V2 process-owner ABI probe.
  * The parent uses the production runtime arrays, strings, sealed image path,
  * cgroup owner, and process lifecycle. The same ELF is its checked child. */
@@ -484,3 +489,5 @@ int main(int argc, char **argv) {
     fprintf(stderr, "usage: %s v2-argv-env-cwd <exact-unit.service> <private-evidence-dir>\n", argv[0]);
     return 2;
 }
+
+#endif /* !_WIN32 */

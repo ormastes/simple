@@ -1,0 +1,102 @@
+"""
+## Purpose and audience
+
+Executable contract for the LIVE codeAction path (REQ-DIAG-011): the handler
+`lsp_code_action_response` answers from the fix candidates recorded for the
+last publishDiagnostics batch of the editor's current document version, with
+edit ranges in UTF-16 code units as LSP requires. Audience: diag-P2.
+"""
+# @cover src/lib/nogc_sync_mut/lsp/lsp_diag_code_action.spl
+# @cover src/lib/nogc_sync_mut/lsp/lsp_diag_action_store.spl
+# @cover src/lib/nogc_sync_mut/lsp/lsp_code_action_handler.spl
+
+use std.spec
+use std.common.json.value.{JsonValue, json_value_object_from, json_value_serialize}
+use std.common.diagnostics.diagnostic_v1.{FixConfidence}
+use std.common.diagnostics.span.{Span}
+use std.common.diagnostics.diagnostic_batch.{FixCandidate, DiagnosticActionIndex}
+use std.common.diagnostics.fix_transaction.{DocumentSnapshot, EditTransaction}
+use std.nogc_sync_mut.lsp.lsp_diag_code_action.{lsp_diag_apply_json, lsp_byte_offset_position}
+use std.nogc_sync_mut.lsp.lsp_diag_action_store.{lsp_diag_action_store_record, lsp_diag_action_store_clear}
+use std.nogc_sync_mut.lsp.lsp_document_sync.{lsp_document_sync_apply}
+use std.nogc_sync_mut.lsp.lsp_code_action_handler.{lsp_code_action_response}
+
+val PATH = "/w/live.spl"
+val URI = "file:///w/live.spl"
+val HASH = "xxh3:live"
+# Line 0: "# " (2 bytes) + e-acute (2 bytes, 1 unit) + U+1F600 (4 bytes, 2 units) + " ".
+# `val` therefore starts at byte 9 but at UTF-16 character 6.
+val BODY = "# \u{e9}\u{1F600} val\nx = 1\n"
+
+fn val_to_var(version: i64) -> FixCandidate:
+    FixCandidate.new("fx_var", "Change `val` to `var`", "assigned twice", FixConfidence.Safe, version)
+        .with_replacement(PATH, Span.new(9, 12, 1, 10), "var", "val")
+
+fn doc_ref() -> JsonValue:
+    json_value_object_from([("uri", JsonValue.Str(URI))])
+
+fn open_doc(version: i64) -> bool:
+    val doc = json_value_object_from([("uri", JsonValue.Str(URI)), ("version", JsonValue.Int(version)), ("text", JsonValue.Str(BODY))])
+    lsp_document_sync_apply("textDocument/didOpen", json_value_serialize(json_value_object_from([("textDocument", doc)])))
+
+fn close_doc():
+    lsp_document_sync_apply("textDocument/didClose", json_value_serialize(json_value_object_from([("textDocument", doc_ref())])))
+
+fn code_action_body(line: i64) -> text:
+    val pos = json_value_object_from([("line", JsonValue.Int(line)), ("character", JsonValue.Int(0))])
+    val range = json_value_object_from([("start", pos), ("end", pos)])
+    json_value_serialize(json_value_object_from([("textDocument", doc_ref()), ("range", range)]))
+
+# @manual_section: lsp_diag_code_action_live
+describe "Live codeAction answers from the published batch with UTF-16 ranges (REQ-DIAG-011)":
+    it "maps a byte offset after non-ASCII text to its UTF-16 character":
+        # @req REQ-DIAG-011
+        val p = lsp_byte_offset_position(BODY, 9)
+        expect(p.0).to_equal(0)
+        expect(p.1).to_equal(6)
+
+    it "emits UTF-16 edit ranges when the fix follows non-ASCII text":
+        # @req REQ-DIAG-011
+        # @capture(value): WorkspaceEdit JSON
+        val tx = EditTransaction.new("/w", HASH).with_document(DocumentSnapshot.new(PATH, 3, HASH, BODY))
+        val json = lsp_diag_apply_json(tx, val_to_var(3))
+        expect(json.contains("\"range\":{\"start\":{\"line\":0,\"character\":6},\"end\":{\"line\":0,\"character\":9}}")).to_equal(true)
+
+    it "serves a recorded candidate for the current version without a query child":
+        # @req REQ-DIAG-011
+        # @capture(value): live codeAction response
+        step("Open version 3, record the batch's candidates, request line 0")
+        expect(open_doc(3)).to_equal(true)
+        lsp_diag_action_store_record(URI, 3, HASH, DiagnosticActionIndex.new().add("d1", val_to_var(3)), ["d1"])
+        val json = lsp_code_action_response("5", code_action_body(0), "")
+        close_doc()
+        lsp_diag_action_store_clear(URI)
+        expect(json.contains("\"title\":\"Change `val` to `var`\"")).to_equal(true)
+        expect(json.contains("\"version\":3")).to_equal(true)
+        expect(json.contains("\"start\":{\"line\":0,\"character\":6}")).to_equal(true)
+        expect(json.contains("\"isPreferred\":true")).to_equal(true)
+
+    it "never serves candidates recorded for an older version":
+        # @req REQ-DIAG-011
+        expect(open_doc(4)).to_equal(true)
+        lsp_diag_action_store_record(URI, 3, HASH, DiagnosticActionIndex.new().add("d1", val_to_var(3)), ["d1"])
+        val json = lsp_code_action_response("5", code_action_body(0), "")
+        close_doc()
+        lsp_diag_action_store_clear(URI)
+        expect(json.contains("Change `val` to `var`")).to_equal(false)
+
+    it "offers nothing from the store for a line without candidates":
+        # @req REQ-DIAG-011
+        expect(open_doc(3)).to_equal(true)
+        lsp_diag_action_store_record(URI, 3, HASH, DiagnosticActionIndex.new().add("d1", val_to_var(3)), ["d1"])
+        val json = lsp_code_action_response("5", code_action_body(1), "")
+        close_doc()
+        lsp_diag_action_store_clear(URI)
+        expect(json.contains("Change `val` to `var`")).to_equal(false)
+
+    it "applies a byte-span fix after non-ASCII text without shifting it":
+        # @req REQ-DIAG-011
+        val tx = EditTransaction.new("/w", HASH).with_document(DocumentSnapshot.new(PATH, 3, HASH, BODY))
+        val result = tx.apply(val_to_var(3))
+        expect(result.applied()).to_equal(true)
+        expect(result.text_of(PATH)).to_equal("# \u{e9}\u{1F600} var\nx = 1\n")
