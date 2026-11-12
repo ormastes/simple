@@ -200,6 +200,29 @@ fn method_call_lambda_takes_declared_callback_param_types() {
     );
 }
 
+/// The LOCAL that holds a closure must be pointer-sized. HIR types a lambda as
+/// its body type, so `val f = \\x: x > 1` declared `f` as `bool`: codegen gave
+/// it an 8-bit slot and truncated the closure handle (`f(2)` crashed,
+/// `xs.filter(f)` answered `[]`). The `Store`/`Load` were already retyped; the
+/// slot itself was not.
+#[test]
+fn local_holding_a_bool_result_closure_is_pointer_sized() {
+    let mir = compile_to_mir("fn test() -> bool:\n    val f = \\x: x > 1\n    return f(2)\n")
+        .expect("mir lowering failed");
+    let test = mir.functions.iter().find(|f| f.name == "test").expect("test fn");
+    let closure_local = test
+        .blocks
+        .iter()
+        .flat_map(|b| b.instructions.iter())
+        .find_map(|inst| match inst {
+            MirInst::LocalAddr { local_index, .. } => Some(*local_index),
+            _ => None,
+        })
+        .expect("closure local");
+    let slot = &test.locals[closure_local - test.params.len()];
+    assert_eq!(slot.ty, TypeId::I64, "closure-holding local `{}` must be I64", slot.name);
+}
+
 /// Sub-register and untyped boundary types are not carryable by the unboxed
 /// closure ABI. `BOOL` lowers to `i8` and crashed the process when a lambda
 /// returned one; `ANY` has no correct encoding at all.

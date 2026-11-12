@@ -198,6 +198,15 @@ fn propagate_in_function(function: &mut MirFunction) {
         .filter(|(_, sig)| sig.is_some())
         .map(|(local_index, _)| *local_index)
         .collect();
+    // ...and the slot itself: a `bool`-result lambda gave the local an 8-bit
+    // slot, which truncated the closure handle on the way in (`val f = \\x: x
+    // > 1; f(2)` jumped to 0; `xs.filter(f)` saw a non-closure).
+    let nparams = function.params.len();
+    for local_index in &closure_locals {
+        if let Some(local) = local_index.checked_sub(nparams).and_then(|i| function.locals.get_mut(i)) {
+            local.ty = TypeId::I64;
+        }
+    }
     let closure_addr_regs: std::collections::HashSet<VReg> = addr_local
         .iter()
         .filter(|(_, local_index)| closure_locals.contains(local_index))
