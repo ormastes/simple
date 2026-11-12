@@ -1,0 +1,247 @@
+# Integration layer, I/O and crypto: a secured database file is CREATED by the
+# pure-Simple codec, closed, and reopened through the production storage port.
+#
+# Every other dense spec reads a committed fixture that a Python generator
+# encrypted.  This spec closes the write side of the loop without an external
+# oracle: it decodes the committed pages under the public passphrase, re-encrypts
+# the same plaintext under a NEW passphrase and a NEW salt (fresh IV per page),
+# writes the result as a new .sqlcipher4 file, closes both key sessions, and then
+# proves the new file through the same server storage port the DevHub messenger
+# uses: the new key reads every table back against ground truth, the old key is
+# rejected, and the new key does not open the old file.
+#
+# Expected rows come from dense_ground_truth.json (Python's sqlite3 over the
+# plaintext image), never from the code under test.  The Phase 1 seed decrypts
+# or encrypts one page in roughly 45 s, so each page crosses the codec exactly
+# three times here: decode once, encode once, and once more inside the reopen.
+# Lifecycle: doc/03_plan/agent_tasks/devhub_messenger_master.md ;
+# doc/04_architecture/app/devhub/messenger_gateway.md ;
+# doc/05_design/app/devhub/messenger_sdn_and_api.md
+# @manual_section: storage-port-rekey-roundtrip
+# @timeout_secs 3600 (interpreted AES + PBKDF2 over 9 pages, three passes)
+
+"""
+## Purpose and audience
+Purpose: prove the secured-database write path end to end in pure Simple —
+create an encrypted file, close it, reopen it with the right key, read rows,
+and be rejected with the wrong key.
+Audience: devhub secured-storage reviewers; codec owners.
+"""
+
+use std.spec.*
+use test.support.devhub_messenger_dense.*
+use std.common.json.value.{JsonValue, json_value_field}
+use std.common.crypto.sha256.{sha256_bytes}
+use std.env.{env_get}
+use std.io_runtime.{time_now_unix_micros, file_read_bytes_result}
+use std.nogc_sync_mut.io.file_ops.{file_write_bytes, file_exists}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
+use std.database.server.storage_port.{database_storage_port_v1, DatabaseStoragePortV1, StorageReadView}
+use std.database.sql.types.{DbRow}
+use nogc_sync_mut.database.codec.codec_registry.{CodecSessionV1}
+use nogc_sync_mut.database.codec.sqlcipher4_page.{
+    sqlcipher4_page_open_key, sqlcipher4_page_encode_with_session, sqlcipher4_page_close,
+    sqlcipher4_page1_salt, SQLCIPHER4_PAGE1_SALT_BYTES
+}
+
+val PAGE: i64 = 4096
+val truth = dense_truth()
+val public_secret: text = truth_passphrase(truth)
+val stamp: text = time_now_unix_micros().to_string()
+# A passphrase the committed fixture was never encrypted under.
+val rekey_secret: text = "rekey-roundtrip-" + stamp
+val source_bytes: [u8] = dense_file_bytes(DENSE_BASE)
+val source_pages: i64 = source_bytes.len() / PAGE
+
+fn scratch_dir() -> text:
+    val base = env_get("TEMP")
+    val root = if base != "": base else: "/tmp"
+    root.replace("\\", "/") + "/devhub_rekey_" + stamp
+
+val out_path: text = scratch_dir() + "/rekeyed.sqlcipher4"
+
+# Spec-chosen bytes derived from a label: distinct per label, fixed length.
+fn derived_bytes(label: text, n: i64) -> [u8]:
+    var seed: [i64] = []
+    for ch in (label + "|" + stamp).bytes():
+        seed.push(ch.to_i64() & 0xFF)
+    val digest = sha256_bytes(seed)
+    var out: [u8] = []
+    var i = 0
+    while i < n:
+        out.push((digest[i % digest.len()] & 0xFF).to_u8())
+        i = i + 1
+    out
+
+val new_salt: [u8] = derived_bytes("salt", SQLCIPHER4_PAGE1_SALT_BYTES)
+
+# Decode every committed page under the public passphrase: [] on any failure.
+fn decode_all(file: [u8]) -> [[u8]]:
+    val _pub = dense_set_secret(public_secret)
+    val session = dense_session(file)
+    if session == nil:
+        return []
+    var bodies: [[u8]] = []
+    var n = 1
+    while n <= source_pages:
+        val body = decode_body(n, page_slice(file, n), session.?)
+        if body.len() == 0:
+            return []
+        bodies.push(body)
+        n = n + 1
+    val _closed = sqlcipher4_page_close(session.?)
+    bodies
+
+# Page-1 body with the new salt in [0,16); other pages unchanged.
+fn with_new_salt(body: [u8]) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < body.len():
+        if i < SQLCIPHER4_PAGE1_SALT_BYTES:
+            out.push(new_salt[i])
+        else:
+            out.push(body[i])
+        i = i + 1
+    out
+
+# Encrypt the bodies under the new passphrase + new salt; "" on success,
+# otherwise the stage that failed.
+fn encrypt_all(bodies: [[u8]]) -> (text, [u8]):
+    val _new = dense_set_secret(rekey_secret)
+    val session: CodecSessionV1 = match sqlcipher4_page_open_key(DENSE_REF, new_salt):
+        case Ok(s): s
+        case Err(_): return ("open_key", [])
+    var image: [u8] = []
+    var n = 1
+    while n <= bodies.len():
+        val body = if n == 1: with_new_salt(bodies[0]) else: bodies[n - 1]
+        val page_no = n
+        val iv_rng = fn(k: i64) -> [u8]: derived_bytes("iv-{page_no}", k)
+        match sqlcipher4_page_encode_with_session(n, body, session, iv_rng):
+            case Ok(page):
+                for b in page:
+                    image.push(b)
+            case Err(_):
+                return ("encode_page_{n}", [])
+        n = n + 1
+    val _closed = sqlcipher4_page_close(session)
+    ("", image)
+
+val bodies: [[u8]] = decode_all(source_bytes)
+val encrypted = encrypt_all(bodies)
+val encrypt_stage: text = encrypted.0
+val new_image: [u8] = encrypted.1
+val _dir = dir_create_all(scratch_dir())
+val written: bool = new_image.len() > 0 and file_write_bytes(out_path, new_image)
+# Both sessions are closed above; from here the file is the only carrier.
+
+val _reopen_secret = dense_set_secret(rekey_secret)
+val rk_view: StorageReadView? = if written: dense_open_view(out_path) else: nil
+val rk_port: DatabaseStoragePortV1 = database_storage_port_v1()
+
+fn read_rows(table: text) -> [DbRow]:
+    if rk_view == nil:
+        return []
+    match rk_port.read_table(rk_view.?, table):
+        case Ok(rows): rows
+        case Err(_): []
+
+val rk_room_rows: [DbRow] = read_rows("room")
+val rk_member_rows: [DbRow] = read_rows("room_member")
+val rk_message_rows: [DbRow] = read_rows("messages")
+
+fn rk_tables() -> JsonValue:
+    json_value_field(truth, "tables")
+
+fn page_bytes_differ(a: [u8], b: [u8], page_no: i64) -> bool:
+    var i = (page_no - 1) * PAGE
+    val end = page_no * PAGE
+    while i < end:
+        if a[i] != b[i]:
+            return true
+        i = i + 1
+    false
+
+describe "create: the codec writes a whole secured database under a new key":
+    it "decodes every committed page and re-encrypts it under the new passphrase":
+        # @req REQ-MSGR-REKEY-001
+        step("Decode the 9 committed pages under the public key, encode them under the new key, write the file")
+        # @capture(statistics): page count decoded, encode stage, bytes written
+        expect(source_pages).to_equal(tn(truth, "page_count"))
+        expect(bodies.len()).to_equal(source_pages)
+        expect(encrypt_stage).to_equal("")
+        expect(new_image.len()).to_equal(source_pages * PAGE)
+        expect(written).to_equal(true)
+        expect(file_exists(out_path)).to_equal(true)
+
+    it "stores the new salt in the clear on page 1 and changes every ciphertext page":
+        # @req REQ-MSGR-REKEY-002
+        step("Compare the on-disk salt and the page bodies of the new file with the committed one")
+        # @capture(protocol_binary): page-1 salt of the written file against the spec-chosen salt
+        val on_disk = match file_read_bytes_result(out_path):
+            case Ok(b): b
+            case Err(_): []
+        expect(on_disk.len()).to_equal(source_pages * PAGE)
+        val salt_read = match sqlcipher4_page1_salt(page_slice(on_disk, 1)):
+            case Ok(s): s
+            case Err(_): []
+        expect(salt_read == new_salt).to_equal(true)
+        expect(salt_read == page_slice(source_bytes, 1).slice(0, SQLCIPHER4_PAGE1_SALT_BYTES)).to_equal(false)
+        var changed = 0
+        var n = 1
+        while n <= source_pages:
+            if page_bytes_differ(on_disk, source_bytes, n):
+                changed = changed + 1
+            n = n + 1
+        expect(changed).to_equal(source_pages)
+
+describe "reopen: the production storage port reads the new file with the new key":
+    it "opens the written file with the geometry the generator wrote":
+        # @req REQ-MSGR-REKEY-003
+        step("Open the new file through the storage port under the new passphrase")
+        # @capture(statistics): page_size, page_count and text_encoding of the reopened view
+        expect(rk_view == nil).to_equal(false)
+        val view = rk_view.?
+        expect(view.page_size).to_equal(tn(truth, "page_size"))
+        expect(view.page_count).to_equal(tn(truth, "page_count"))
+
+    it "reads the room and room_member tables back exactly":
+        # @req REQ-MSGR-REKEY-004
+        step("Read both small tables from the reopened view and diff them against ground truth")
+        # @capture(statistics): row count, cell count and mismatches per table
+        val room = json_value_field(rk_tables(), "room")
+        expect(column_names(rk_room_rows)).to_equal(truth_columns(room))
+        expect(table_diff(rk_room_rows, room)).to_equal("rows={rows_in(room)} cells={rows_in(room) * cols_in(room)} bad=")
+        val member = json_value_field(rk_tables(), "room_member")
+        expect(column_names(rk_member_rows)).to_equal(truth_columns(member))
+        expect(table_diff(rk_member_rows, member)).to_equal("rows={rows_in(member)} cells={rows_in(member) * cols_in(member)} bad=")
+
+    it "reads the multi-page message table and its overflow body back exactly":
+        # @req REQ-MSGR-REKEY-005
+        step("Read the messages table across interior, leaf and overflow pages of the reopened view")
+        # @capture(statistics): row count, cell count, mismatches and overflow body length
+        val want = json_value_field(rk_tables(), "messages")
+        expect(column_names(rk_message_rows)).to_equal(truth_columns(want))
+        expect(table_diff(rk_message_rows, want)).to_equal("rows={rows_in(want)} cells={rows_in(want) * cols_in(want) - 1} bad=")
+        val want_body = expected_overflow_body(json_value_field(truth, "overflow"))
+        expect(rk_message_rows.len() > 4).to_equal(true)
+        val got_body = rk_message_rows[4].values[3].to_text()
+        expect(got_body == want_body).to_equal(true)
+        expect(got_body.len() > 11000).to_equal(true)
+
+describe "key binding: each file opens under its own key only":
+    it "rejects the old public passphrase against the new file":
+        # @req REQ-MSGR-REKEY-006
+        step("Open the new file through the storage port under the committed fixture's passphrase")
+        # @capture(protocol_json): storage-port error code and message for the stale key
+        val verdict = port_verdict_with_secret(public_secret, out_path, DENSE_REF, rekey_secret)
+        expect(verdict_code(verdict)).to_equal("STORAGE_PORT_AUTHENTICATION_FAILED")
+        expect(leaks_none(verdict_message(verdict), [public_secret, rekey_secret])).to_equal(true)
+
+    it "rejects the new passphrase against the committed file":
+        # @req REQ-MSGR-REKEY-007
+        step("Open the committed fixture through the storage port under the new passphrase")
+        # @capture(protocol_json): storage-port error code for the new key on the old file
+        val verdict = port_verdict(dense_path(DENSE_BASE), "sqlcipher4", DENSE_REF)
+        expect(verdict_code(verdict)).to_equal("STORAGE_PORT_AUTHENTICATION_FAILED")
+        val _restore = dense_set_secret(public_secret)
