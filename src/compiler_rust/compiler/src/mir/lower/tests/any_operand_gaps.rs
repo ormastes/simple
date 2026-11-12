@@ -227,3 +227,48 @@ fn module_global_takes_the_type_of_an_unwrapped_static_call() {
         "the call must be bound to the receiver's own type: {insts:?}"
     );
 }
+
+const IMPL_LESS_TRAIT: &str = "trait Strategy:\n    fn provider_identity() -> text\n    fn reduce(n: i64) -> i64\n\n\
+     class Other:\n    n: i64\n\n    fn provider_identity() -> text:\n        \"other\"\n\n\
+     class Third:\n    n: i64\n\n    fn provider_identity() -> text:\n        \"third\"\n\n";
+
+/// The caret shape: the trait object is read from a field into a local.
+const PICK_FROM_SLOT: &str = "class Slot:\n    reducer: Strategy\n\n\
+     fn pick(slot: Slot) -> text:\n    val strategy = slot.reducer\n    return strategy.provider_identity()\n";
+
+fn static_call_names(source: &str, function: &str) -> Vec<String> {
+    instructions_of(source, function)
+        .iter()
+        .filter_map(|inst| match inst {
+            MirInst::MethodCallStatic { func_name, .. } => Some(func_name.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A receiver typed as a trait that NOTHING in the unit implements is
+/// dispatched by method name. Classes that merely share that one method name
+/// are not candidates: an implementor must provide EVERY method of the trait.
+/// When exactly one class in the unit does, the call binds to it instead of
+/// being refused as ambiguous (`[CODEGEN-AMBIGUOUS-METHOD]`).
+#[test]
+fn impl_less_trait_receiver_binds_the_only_conforming_class() {
+    // No class provides `reduce`, so none conforms: the bare name is kept and
+    // codegen keeps refusing it (no run-time by-name dispatch exists for an
+    // object of a conforming class defined outside the unit).
+    let none = static_call_names(
+        &format!("{IMPL_LESS_TRAIT}{PICK_FROM_SLOT}"),
+        "pick",
+    );
+    assert_eq!(none, vec!["provider_identity".to_string()]);
+
+    // Exactly one class provides the whole trait: bind it.
+    let one = static_call_names(
+        &format!(
+            "{IMPL_LESS_TRAIT}class Full:\n    n: i64\n\n    fn provider_identity() -> text:\n        \"full\"\n\n    \
+             fn reduce(n: i64) -> i64:\n        n\n\n{PICK_FROM_SLOT}"
+        ),
+        "pick",
+    );
+    assert_eq!(one, vec!["Full.provider_identity".to_string()]);
+}
