@@ -422,9 +422,11 @@ fn _css_resolve_vars(
         chunks[chunk_count] = replacement_text
         chunk_count = chunk_count + 1
         scan = close + 1
-    if scan < css_len and vg >= 400:
-        return CssVarResolution.BudgetExceeded
     if scan < css_len and chunk_count < chunks.len():
+        # A pass that hit the 400-substitution cap mid-sheet still made
+        # progress: return the partially resolved text (suffix appended
+        # verbatim) and let the caller re-pass over it. Only a hard budget
+        # wall (state.remaining exhausted) bails wholesale from here.
         val suffix = css.substring(scan, css_len)
         if resolved_len + suffix.len() > SIMPLE_WEB_MAX_HTML_BYTES:
             return CssVarResolution.Invalid
@@ -897,25 +899,35 @@ fn _extract_css_vw_with_rule_limit(
         val css_raw = html.substring(open + 1, close)
         val _ppc_tv = if _ppc_on: time_now_micros() else: 0
         val css_var_state = CssVarResolutionState.new(custom_props)
-        val css_resolution = _css_resolve_vars(
-            css_raw, css_var_state, 0, 0, false
-        )
-        val css = match css_resolution:
-            CssVarResolution.Resolved(resolved_css):
-                resolved_css
-            _:
-                css_raw
-        # The OTHER silent path: the substitution pass bailed WHOLESALE
-        # (budget/depth/invalid) and the sheet is used RAW, so every `var()`
-        # in it stays literal. Distinct from the per-`var()` unresolved case
-        # reported by `css-var-unresolved` inside `_css_resolve_vars`, and the
-        # two must not be confused — the 2026-08-08 WM rung-(d) misdiagnosis
-        # came from mistaking one for the other. Silent on a healthy sheet.
-        match css_resolution:
-            CssVarResolution.Resolved(_):
-                pass
-            _:
-                if _web_style_trace_enabled(): print "[web-style-producer] css-var-pass-bailed block={guard} props_len={custom_props.len()} css_len={css_raw.len()}"
+        # One substitution pass rewrites at most 400 `var()` occurrences (the
+        # chunk-array bound inside `_css_resolve_vars`), and a realistic theme
+        # sheet exceeds that — the wholesale bail then used the RAW text with
+        # every remaining `var()` still literal, so late-sheet rules lost their
+        # colours (glass accent panels). Re-pass over the partially resolved
+        # text until no `var(` remains, the text stops changing, or the shared
+        # substitution budget exhausts.
+        var css = css_raw
+        var css_passes = 0
+        var css_pass_bailed = false
+        while css_passes < 8 and css.index_of("var(") >= 0:
+            css_passes = css_passes + 1
+            match _css_resolve_vars(css, css_var_state, 0, 0, false):
+                CssVarResolution.Resolved(resolved_css):
+                    if resolved_css == css:
+                        css_passes = 8
+                    else:
+                        css = resolved_css
+                _:
+                    css_passes = 8
+                    css_pass_bailed = true
+        # The OTHER silent path: the substitution loop bailed WHOLESALE
+        # (budget/depth/invalid) and the sheet keeps unresolved `var()` text.
+        # Distinct from the per-`var()` unresolved case reported by
+        # `css-var-unresolved` inside `_css_resolve_vars`, and the two must not
+        # be confused — the 2026-08-08 WM rung-(d) misdiagnosis came from
+        # mistaking one for the other. Silent on a healthy sheet.
+        if css_pass_bailed and _web_style_trace_enabled():
+            print "[web-style-producer] css-var-pass-bailed block={guard} props_len={custom_props.len()} css_len={css_raw.len()}"
         # Rule-boundary scan: split the sheet ONCE on "{"/"}" natively rather
         # than walking it a character at a time in interpreted Simple (which
         # cost seconds-to-minutes on a realistic theme sheet). See
