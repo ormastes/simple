@@ -87,3 +87,31 @@ positional_payload_brace_dict_spec.spl 9/9, positional_payload_spelling_spec.spl
 5/5; repro fixture test/fixtures/repro/compiler/positional_brace_dict_payload/
 main.spl prints a=207 b=13 c=5, exit 0. Cycles: 1. Evidence:
 build/review/p2fix-compiler-20261110.sdn.
+
+## 2026-11-12 verify lane (bug-posbracedict-20261112)
+
+The 2026-11-06 verify-sweep2 FAIL (`b05_a2`: `M({text: i64})` matched as
+`case E.M(d): d.len()` -> `unresolved method call: len`) does not reproduce on
+an admitted native producer that includes the parser repair. No compiler
+source change was needed.
+
+- Native: Stage 2 aarch64 `build/bootstrap-fable-13/stage2/aarch64-unknown-linux-gnu/simple`
+  (source pin `f8ad54b28467`, which contains `061ee2d4735`, `57818fbbdef` and
+  `036b4597d431`; sha256 prefix `2fb9ecacbf41145f`),
+  `SIMPLE_BOOTSTRAP=1 simple native-build test/fixtures/repro/verify_sweep2/b05_a2.spl --backend=cranelift --threads 1`
+  exit 0; the binary exits 0 and prints `PASS eqord`, `PASS dictpayload`,
+  `PASS tailrange`, `PASS unitalias`. Stage 3 was not run.
+- MIR-layer regression spec (the layer the sweep failed in; the HIR spec only
+  pins variant shape): `test/01_unit/compiler/50.mir/positional_brace_dict_payload_match_spec.spl`,
+  5/5 on the pinned seed (sha256 prefix `56834dffffd8cd89`). It discriminates:
+  with the `142` (dict token) arm removed from
+  `src/compiler/10.frontend/core/_ParserDecls/enum_module_body.spl:583` it
+  fails 4/5 with exactly `unresolved method call 'len'`; restored, 5/5.
+  Negative cases kept green: named dict field in a struct-style variant,
+  named dict field in a struct literal, typed `Dict<text, i64>` payload, and
+  `.len()` on an `i64` payload binding is still reported.
+- `phase_memo_ownership.spl:5-6` already uses the brace form; no `@workaround`
+  remains.
+
+Status stays with the claim lifecycle (`bug-claim.shs done` after the PR
+merges).
