@@ -80,6 +80,7 @@ SplArray* rt_process_pinned_executable_sha256_value(int64_t handle) {
     return a;
 }
 
+#define RT_OWNED_EXTERNAL_PIN 1 /* This harness stubs the executable pin. */
 #include "../runtime_process_owned.c"
 
 static void put_u64(SplArray* a, uint64_t value) {

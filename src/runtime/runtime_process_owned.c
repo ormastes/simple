@@ -5259,6 +5259,391 @@ static uint64_t owned_darwin_pin_retain(int fd) { (void)fd; return 0; }
 static void owned_darwin_pin_release(uint64_t ref) { (void)ref; }
 #endif
 
+#if defined(__linux__) && !defined(RT_OWNED_EXTERNAL_PIN)
+/* Linux executable pin (sealed memfd + fexecve) and its owned-handle table.
+ * Lives here, not in runtime_process.c, for the same reason the Darwin pin
+ * above does: the Rust seed/Stage 2 runtime crate (compiler_rust/runtime/
+ * build.rs) compiles this file but never runtime_process.c, so until this move
+ * the crate exported fail-closed Rust stubs instead and every profile HIR
+ * worker on Linux reported "owned executable pin was rejected"
+ * (doc/08_tracking/bug/profile_hir_workers_linux_pin_rejects_dynamic_elf_2026-11-12.md).
+ * Harnesses that stub the pin define RT_OWNED_EXTERNAL_PIN. */
+#include <elf.h>
+#ifndef SYS_memfd_create
+#error "Linux executable pin requires SYS_memfd_create"
+#endif
+/* glibc exposes the seal ABI only under _GNU_SOURCE, which this translation
+ * unit does not define (the crate build passes no -D_GNU_SOURCE). Without
+ * these the pin used to compile to a silent `return -1`. Values are the stable
+ * Linux UAPI (include/uapi/linux/fcntl.h). */
+#ifndef F_ADD_SEALS
+#define F_ADD_SEALS (1024 + 9)
+#endif
+#ifndef F_GET_SEALS
+#define F_GET_SEALS (1024 + 10)
+#endif
+#ifndef F_SEAL_SEAL
+#define F_SEAL_SEAL 0x0001
+#endif
+#ifndef F_SEAL_SHRINK
+#define F_SEAL_SHRINK 0x0002
+#endif
+#ifndef F_SEAL_GROW
+#define F_SEAL_GROW 0x0004
+#endif
+#ifndef F_SEAL_WRITE
+#define F_SEAL_WRITE 0x0008
+#endif
+
+#define RT_PINNED_EXEC_MAX 16
+struct RtPinnedExecutable {
+    uint64_t handle;
+    int fd;
+};
+static struct RtPinnedExecutable s_pinned_executables[RT_PINNED_EXEC_MAX];
+static pthread_mutex_t s_pinned_executables_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* Pinnable ELF image classes (Linux). The pin seals the file bytes in a memfd
+ * and later spawns execute exactly those bytes with fexecve.
+ *
+ *  static  — ET_EXEC with neither PT_INTERP nor PT_DYNAMIC. Everything that
+ *            runs is the pinned bytes. Admitted for ELFCLASS32 and ELFCLASS64.
+ *  system-loader dynamic (Darwin parity, 2026-11-13) — ELFCLASS64, ET_EXEC or
+ *            ET_DYN, with exactly one PT_INTERP and one PT_DYNAMIC. Only the
+ *            main image is pinned and digest-bound; the loader named by
+ *            PT_INTERP and its DT_NEEDED closure are resolved by the kernel
+ *            and the loader at exec and are NOT pinned — the same contract the
+ *            Darwin pin gives (Mach-O main image snapshot; dyld and every dylib
+ *            unpinned). It is admitted only when library resolution cannot be
+ *            steered away from the system loader paths: PT_INTERP is an
+ *            absolute path to a root-owned regular file that is not group- or
+ *            other-writable; the image carries no DT_RPATH/DT_RUNPATH; every
+ *            DT_NEEDED is a bare soname (no '/'). Loader-steering environment
+ *            (LD_*) is refused by the owned launch (runtime_process_owned.c).
+ *            Each admission prints one `[rt-pin]` line on stderr.
+ *  refused — PT_DYNAMIC without PT_INTERP (static PIE, shared objects),
+ *            PT_INTERP without PT_DYNAMIC, ELFCLASS32 dynamic images, any
+ *            image whose loader closure fails the rules above.
+ *
+ * `loader_out` (PATH_MAX bytes, may be NULL) receives the admitted PT_INTERP
+ * path, or "" for the static class. */
+#define RT_HAL_ELF_MAX_LOADS 64
+#define RT_HAL_ELF_MAX_DYN_ENTRIES 4096
+#define RT_HAL_ELF_MAX_NEEDED 256
+#define RT_HAL_ELF_MAX_STRTAB (1024 * 1024)
+
+static bool hal_elf64_loader_closure_ok(int fd, off_t size, const Elf64_Ehdr* eh,
+                                           char* loader_out) {
+    Elf64_Phdr interp, dynamic, loads[RT_HAL_ELF_MAX_LOADS];
+    int interp_count = 0, dynamic_count = 0, load_count = 0;
+    memset(&interp, 0, sizeof(interp)); memset(&dynamic, 0, sizeof(dynamic));
+    for (Elf64_Half i = 0; i < eh->e_phnum; i++) {
+        Elf64_Phdr ph;
+        off_t at = (off_t)(eh->e_phoff + (Elf64_Off)i * sizeof(ph));
+        if (pread(fd, &ph, sizeof(ph), at) != (ssize_t)sizeof(ph)) return false;
+        if (ph.p_type == PT_INTERP) { interp = ph; interp_count++; }
+        else if (ph.p_type == PT_DYNAMIC) { dynamic = ph; dynamic_count++; }
+        else if (ph.p_type == PT_LOAD) {
+            if (load_count == RT_HAL_ELF_MAX_LOADS) return false;
+            loads[load_count++] = ph;
+        }
+    }
+    if (interp_count != 1 || dynamic_count != 1) return false;
+    /* Loader: the exact path the kernel will open at exec. */
+    if (interp.p_filesz < 2 || interp.p_filesz > PATH_MAX ||
+        interp.p_offset > (Elf64_Off)size || interp.p_filesz > (Elf64_Xword)size - interp.p_offset)
+        return false;
+    char loader[PATH_MAX];
+    if (pread(fd, loader, (size_t)interp.p_filesz, (off_t)interp.p_offset) != (ssize_t)interp.p_filesz)
+        return false;
+    if (loader[interp.p_filesz - 1] != '\0' || loader[0] != '/' ||
+        strlen(loader) != (size_t)interp.p_filesz - 1) return false;
+    struct stat ld;
+    if (stat(loader, &ld) != 0 || !S_ISREG(ld.st_mode) || ld.st_uid != 0 ||
+        (ld.st_mode & (S_IWGRP | S_IWOTH)) != 0) return false;
+    /* Dynamic section: no search-path steering; every NEEDED a bare soname. */
+    if (dynamic.p_filesz < sizeof(Elf64_Dyn) || dynamic.p_filesz % sizeof(Elf64_Dyn) != 0 ||
+        dynamic.p_offset > (Elf64_Off)size || dynamic.p_filesz > (Elf64_Xword)size - dynamic.p_offset ||
+        dynamic.p_filesz / sizeof(Elf64_Dyn) > RT_HAL_ELF_MAX_DYN_ENTRIES) return false;
+    Elf64_Addr strtab = 0; Elf64_Xword strsz = 0;
+    Elf64_Xword needed[RT_HAL_ELF_MAX_NEEDED]; size_t needed_count = 0;
+    for (Elf64_Xword off = 0; off < dynamic.p_filesz; off += sizeof(Elf64_Dyn)) {
+        Elf64_Dyn d;
+        if (pread(fd, &d, sizeof(d), (off_t)(dynamic.p_offset + off)) != (ssize_t)sizeof(d)) return false;
+        if (d.d_tag == DT_NULL) break;
+        if (d.d_tag == DT_RPATH || d.d_tag == DT_RUNPATH) return false;
+        if (d.d_tag == DT_STRTAB) strtab = d.d_un.d_ptr;
+        else if (d.d_tag == DT_STRSZ) strsz = d.d_un.d_val;
+        else if (d.d_tag == DT_NEEDED) {
+            if (needed_count == RT_HAL_ELF_MAX_NEEDED) return false;
+            needed[needed_count++] = d.d_un.d_val;
+        }
+    }
+    if (needed_count > 0) {
+        if (strtab == 0 || strsz == 0 || strsz > RT_HAL_ELF_MAX_STRTAB) return false;
+        off_t string_offset = -1;
+        for (int i = 0; i < load_count; i++) {
+            if (strtab >= loads[i].p_vaddr && strtab - loads[i].p_vaddr < loads[i].p_filesz &&
+                strsz <= loads[i].p_filesz - (strtab - loads[i].p_vaddr)) {
+                string_offset = (off_t)(loads[i].p_offset + (strtab - loads[i].p_vaddr));
+                break;
+            }
+        }
+        if (string_offset < 0 || string_offset > size || strsz > (Elf64_Xword)(size - string_offset))
+            return false;
+        char* strings = (char*)malloc((size_t)strsz);
+        if (!strings) return false;
+        if (pread(fd, strings, (size_t)strsz, string_offset) != (ssize_t)strsz) { free(strings); return false; }
+        for (size_t i = 0; i < needed_count; i++) {
+            if (needed[i] >= strsz) { free(strings); return false; }
+            const char* name = strings + needed[i];
+            size_t room = (size_t)(strsz - needed[i]);
+            size_t length = strnlen(name, room);
+            if (length == 0 || length == room || memchr(name, '/', length)) { free(strings); return false; }
+        }
+        free(strings);
+    }
+    if (loader_out) memcpy(loader_out, loader, (size_t)interp.p_filesz);
+    return true;
+}
+
+static bool hal_pinnable_elf_fd(int fd, off_t size, char* loader_out) {
+    if (loader_out) loader_out[0] = '\0';
+    unsigned char ident[EI_NIDENT];
+    if (pread(fd, ident, sizeof(ident), 0) != (ssize_t)sizeof(ident) ||
+        memcmp(ident, ELFMAG, SELFMAG) != 0 || ident[EI_DATA] != ELFDATA2LSB)
+        return false;
+    if (ident[EI_CLASS] == ELFCLASS64) {
+        Elf64_Ehdr eh;
+        if (pread(fd, &eh, sizeof(eh), 0) != (ssize_t)sizeof(eh) ||
+            (eh.e_type != ET_EXEC && eh.e_type != ET_DYN) ||
+            eh.e_phentsize != sizeof(Elf64_Phdr) ||
+            eh.e_phnum == 0 || eh.e_phoff > (Elf64_Off)size ||
+            (uint64_t)eh.e_phnum * sizeof(Elf64_Phdr) > (uint64_t)size - eh.e_phoff) return false;
+        bool has_interp = false, has_dynamic = false;
+        for (Elf64_Half i = 0; i < eh.e_phnum; i++) {
+            Elf64_Phdr ph;
+            off_t at = (off_t)(eh.e_phoff + (Elf64_Off)i * sizeof(ph));
+            if (pread(fd, &ph, sizeof(ph), at) != (ssize_t)sizeof(ph)) return false;
+            if (ph.p_type == PT_INTERP) has_interp = true;
+            if (ph.p_type == PT_DYNAMIC) has_dynamic = true;
+        }
+        if (!has_interp && !has_dynamic) return eh.e_type == ET_EXEC;
+        if (has_interp && has_dynamic) return hal_elf64_loader_closure_ok(fd, size, &eh, loader_out);
+        return false;
+    }
+    if (ident[EI_CLASS] == ELFCLASS32) {
+        Elf32_Ehdr eh;
+        if (pread(fd, &eh, sizeof(eh), 0) != (ssize_t)sizeof(eh) ||
+            eh.e_type != ET_EXEC || eh.e_phentsize != sizeof(Elf32_Phdr) ||
+            eh.e_phnum == 0 || eh.e_phoff > (Elf32_Off)size ||
+            (uint64_t)eh.e_phnum * sizeof(Elf32_Phdr) > (uint64_t)size - eh.e_phoff) return false;
+        for (Elf32_Half i = 0; i < eh.e_phnum; i++) {
+            Elf32_Phdr ph;
+            off_t at = (off_t)(eh.e_phoff + (Elf32_Off)i * sizeof(ph));
+            if (pread(fd, &ph, sizeof(ph), at) != (ssize_t)sizeof(ph)) return false;
+            if (ph.p_type == PT_INTERP || ph.p_type == PT_DYNAMIC) return false;
+        }
+        return true;
+    }
+    return false;
+}
+
+static int64_t pinned_handle_install(int fd) {
+    if (pthread_mutex_lock(&s_pinned_executables_lock) != 0) return -1;
+    int free_slot = -1;
+    for (int i = 0; i < RT_PINNED_EXEC_MAX; i++) {
+        if (s_pinned_executables[i].handle == 0 && free_slot < 0) free_slot = i;
+    }
+    if (free_slot < 0) { pthread_mutex_unlock(&s_pinned_executables_lock); errno = EAGAIN; return -1; }
+    uint64_t candidate = 0;
+    for (int attempt = 0; attempt < 16 && candidate == 0; attempt++) {
+        uint64_t random = 0;
+        ssize_t count = syscall(SYS_getrandom, &random, sizeof(random), 0);
+        if (count == (ssize_t)sizeof(random))
+            candidate = random & UINT64_C(0x0fffffffffffffff);
+        else if (count < 0 && errno == EINTR) attempt--;
+        else break;
+        for (int i = 0; i < RT_PINNED_EXEC_MAX && candidate; i++)
+            if (s_pinned_executables[i].handle == candidate) candidate = 0;
+    }
+    if (!candidate) { pthread_mutex_unlock(&s_pinned_executables_lock); errno = EAGAIN; return -1; }
+    s_pinned_executables[free_slot].handle = candidate;
+    s_pinned_executables[free_slot].fd = fd;
+    pthread_mutex_unlock(&s_pinned_executables_lock);
+    return (int64_t)candidate;
+}
+
+int64_t rt_process_acquire_pinned_executable(int64_t handle) {
+    if (handle <= 0) return -1;
+    if (pthread_mutex_lock(&s_pinned_executables_lock) != 0) return -1;
+    int duplicate = -1;
+    for (int i = 0; i < RT_PINNED_EXEC_MAX; i++) {
+        if (s_pinned_executables[i].handle == (uint64_t)handle) {
+            duplicate = fcntl(s_pinned_executables[i].fd, F_DUPFD_CLOEXEC, 3);
+            break;
+        }
+    }
+    pthread_mutex_unlock(&s_pinned_executables_lock);
+    if (duplicate < 0) return -1;
+    struct stat st;
+    int seals = fcntl(duplicate, F_GET_SEALS);
+    if (fstat(duplicate, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size <= 0 ||
+        st.st_size > (off_t)(64 * 1024 * 1024) || seals < 0 ||
+        (seals & (F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL)) !=
+        (F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL) ||
+        !hal_pinnable_elf_fd(duplicate, st.st_size, NULL)) {
+        close(duplicate); errno = ESTALE; return -1;
+    }
+    return duplicate;
+}
+
+/* Streams the sealed image through the shared owned_sha256_block. Until
+ * 2026-11-13 this used a private copy whose round-constant table had 63 entries
+ * (0xc76c51a3 missing), so the "digest" was not SHA-256 and matched only
+ * itself. */
+SplArray* rt_process_pinned_executable_sha256_value(int64_t handle) {
+    int fd = (int)rt_process_acquire_pinned_executable(handle);
+    if (fd < 0) return NULL;
+    struct stat image;
+    if (fstat(fd, &image) != 0 || image.st_size <= 0 || image.st_size > (off_t)(64 * 1024 * 1024)) {
+        close(fd); return NULL;
+    }
+    uint32_t state[8]={0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19};
+    uint8_t block[64], buffer[4096]; uint64_t total = 0; off_t offset = 0; size_t used = 0; int failed = 0;
+    while (offset < image.st_size) {
+        size_t want = (size_t)(image.st_size - offset);
+        if (want > sizeof(buffer)) want = sizeof(buffer);
+        ssize_t n = pread(fd, buffer, want, offset);
+        if (n < 0) { if (errno == EINTR) continue; failed = 1; break; }
+        if (n == 0) { failed = 1; break; }
+        if (UINT64_MAX - total < (uint64_t)n) { failed = 1; break; }
+        total += (uint64_t)n; offset += n;
+        for (ssize_t i=0;i<n;i++) { block[used++] = buffer[i]; if (used == 64) { owned_sha256_block(state, block); used = 0; } }
+    }
+    if (!failed && total == (uint64_t)image.st_size && total <= UINT64_MAX / 8) {
+        block[used++] = 0x80;
+        if (used > 56) { while (used < 64) block[used++] = 0; owned_sha256_block(state, block); used = 0; }
+        while (used < 56) block[used++] = 0;
+        uint64_t bits = total * 8;
+        for (int i=7;i>=0;i--) block[used++] = (uint8_t)(bits >> (8*i));
+        owned_sha256_block(state, block);
+    } else failed = 1;
+    close(fd);
+    if (failed) return NULL;
+    SplArray* result = rt_array_new(32);
+    if (!result) return NULL;
+    for (int i=0;i<8;i++) for (int j=3;j>=0;j--)
+        if (!rt_array_push(result, rt_value_int((state[i] >> (8*j)) & 255))) { rt_array_free(result); return NULL; }
+    return result;
+}
+
+bool rt_process_close_pinned_executable_owned(int64_t handle) {
+    if (handle <= 0 || pthread_mutex_lock(&s_pinned_executables_lock) != 0)
+        return false;
+    int fd = -1;
+    for (int i = 0; i < RT_PINNED_EXEC_MAX; i++) {
+        if (s_pinned_executables[i].handle == (uint64_t)handle) {
+            fd = s_pinned_executables[i].fd;
+            memset(&s_pinned_executables[i], 0, sizeof(s_pinned_executables[i]));
+            break;
+        }
+    }
+    pthread_mutex_unlock(&s_pinned_executables_lock);
+    return fd >= 0 && close(fd) == 0;
+}
+
+/* Linux-only race-free executable pinning for the RT/HAL comparator host.
+ * The caller hashes /proc/self/fd/<returned-fd>; later spawns execute this same
+ * open file description with fexecve, so pathname replacement cannot change
+ * the admitted image. The descriptor remains caller-owned and reusable. */
+int64_t rt_process_pin_executable(const char* canonical_path) {
+    if (!canonical_path || canonical_path[0] != '/') return -1;
+    int source = open(canonical_path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (source < 0) return -1;
+    struct stat st;
+    if (fstat(source, &st) != 0 || !S_ISREG(st.st_mode) ||
+        st.st_size <= 0 || st.st_size > (off_t)(64 * 1024 * 1024) ||
+        (st.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH)) == 0 ||
+        !hal_pinnable_elf_fd(source, st.st_size, NULL)) {
+        close(source);
+        return -1;
+    }
+    int pinned = (int)syscall(SYS_memfd_create, "simple-rthal", 0x0003U);
+    if (pinned < 0) { close(source); return -1; }
+    uint8_t buffer[65536];
+    off_t copied = 0;
+    for (;;) {
+        ssize_t count = read(source, buffer, sizeof(buffer));
+        if (count == 0) break;
+        if (count < 0) {
+            if (errno == EINTR) continue;
+            close(source); close(pinned); return -1;
+        }
+        if (copied > st.st_size - count) {
+            close(source); close(pinned); errno = EFBIG; return -1;
+        }
+        ssize_t offset = 0;
+        while (offset < count) {
+            ssize_t written = write(
+                pinned, buffer + offset, (size_t)(count - offset));
+            if (written < 0 && errno == EINTR) continue;
+            if (written <= 0) {
+                close(source); close(pinned); return -1;
+            }
+            offset += written;
+        }
+        copied += count;
+    }
+    close(source);
+    struct stat pinned_stat;
+    char loader[PATH_MAX];
+    if (copied != st.st_size || lseek(pinned, 0, SEEK_SET) < 0 || fchmod(pinned, 0500) != 0 ||
+        fcntl(pinned, F_ADD_SEALS,
+              F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL) != 0 ||
+        fstat(pinned, &pinned_stat) != 0 || pinned_stat.st_size != copied ||
+        !hal_pinnable_elf_fd(pinned, pinned_stat.st_size, loader) ||
+        (fcntl(pinned, F_GET_SEALS) & (F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL)) !=
+            (F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL)) {
+        close(pinned);
+        return -1;
+    }
+    if (loader[0] != '\0') {
+        /* The weaker class is never admitted silently. */
+        fprintf(stderr, "[rt-pin] dynamic ELF admitted (system-loader class, Darwin parity): "
+                "main image sealed and digest-bound; loader %s and its DT_NEEDED libraries "
+                "are not pinned: %s\n", loader, canonical_path);
+    }
+    return (int64_t)pinned;
+}
+
+int64_t rt_process_pin_executable_owned(const char* canonical_path) {
+    int raw_fd = (int)rt_process_pin_executable(canonical_path);
+    if (raw_fd < 0) return -1;
+    int owner_fd = fcntl(raw_fd, F_DUPFD_CLOEXEC, 3);
+    if (owner_fd < 0) { close(raw_fd); return -1; }
+    int64_t handle = pinned_handle_install(owner_fd);
+    if (handle < 0) close(owner_fd);
+    close(raw_fd);
+    return handle;
+}
+
+int64_t rt_process_pin_executable_owned_value(const uint8_t* path, uint64_t path_len) {
+    if (!path || path_len == 0 || path_len > 4096 || path_len > SIZE_MAX - 1 ||
+        path[0] != '/' || memchr(path, '\0', (size_t)path_len)) return -1;
+    char* copied = (char*)malloc((size_t)path_len + 1);
+    if (!copied) return -1;
+    memcpy(copied, path, (size_t)path_len); copied[path_len] = '\0';
+    int64_t handle = rt_process_pin_executable_owned(copied);
+    free(copied);
+    return handle;
+}
+
+int rt_process_close_pinned_executable_owned_value(int64_t handle) {
+    return rt_process_close_pinned_executable_owned(handle) ? 1 : 0;
+}
+#endif /* __linux__ && !RT_OWNED_EXTERNAL_PIN */
+
 #endif /* POSIX owner */
 
 /* Non-POSIX hosts, plus Darwin for every family except observation V4. */

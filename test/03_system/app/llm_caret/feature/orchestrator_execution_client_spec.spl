@@ -1,6 +1,7 @@
 # AUTHORED_UNRUN. Production codec/client cases with synthetic wire facts;
 # these are not process execution, container or completed AgentSession proof.
 # @req REQ-CARET-EXECUTION-001 REQ-CARET-EXECUTION-002 REQ-CARET-EXECUTION-003
+use std.nogc_sync_mut.fs.host_path.host_path_is_absolute
 use std.spec.{describe, it, expect, step}
 use app.llm_caret.orchestrator_execution_client_v2.{CaretExecutionRequestV2,
     caret_execution_argv_v2, caret_execution_timeout_ms_v2, caret_execution_decode_v2,
@@ -15,10 +16,14 @@ use std.common.crypto.sha256.sha256_text
 use std.common.sdn.value.SdnValue
 use std.common.sdn.encode.sdn_encode_canonical
 
+# The validators are host-aware: on Windows a lone leading "/" is drive-relative and
+# rejected, so the POSIX fixture paths get a drive prefix there.
+val FIXTURE_ROOT = if host_path_is_absolute("/tmp"): "" else: "C:"
+
 fn execution_request(action: text) -> CaretExecutionRequestV2:
-    CaretExecutionRequestV2(executable: "/opt/simple/simple_orchestrator", action: action,
-        state_root: "/private/controller state", controller_id: "controller-a", request_uid: "request-a",
-        packet_path: if action == "inspect-execution": "" else: "/private/packet with spaces.sdn")
+    CaretExecutionRequestV2(executable: FIXTURE_ROOT + "/opt/simple/simple_orchestrator", action: action,
+        state_root: FIXTURE_ROOT + "/private/controller state", controller_id: "controller-a", request_uid: "request-a",
+        packet_path: if action == "inspect-execution": "" else: FIXTURE_ROOT + "/private/packet with spaces.sdn")
 
 fn prepared_host_reply(operation: text) -> text:
     val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1),
@@ -52,10 +57,10 @@ describe "Caret correlated execution client":
         step("Build distinct dispatch resume and execution inspection requests")
         for action in ["dispatch", "resume-execution"]:
             val args = caret_execution_argv_v2(execution_request(action)).unwrap()
-            expect(args).to_equal([action, "/private/controller state", "controller-a", "request-a", "/private/packet with spaces.sdn"])
+            expect(args).to_equal([action, FIXTURE_ROOT + "/private/controller state", "controller-a", "request-a", FIXTURE_ROOT + "/private/packet with spaces.sdn"])
             expect(caret_execution_timeout_ms_v2(action)).to_equal(120000)
         expect(caret_execution_argv_v2(execution_request("inspect-execution")).unwrap()).to_equal(
-            ["inspect-execution", "/private/controller state", "controller-a", "request-a"])
+            ["inspect-execution", FIXTURE_ROOT + "/private/controller state", "controller-a", "request-a"])
         expect(caret_execution_timeout_ms_v2("inspect-execution")).to_equal(30000)
 
     it "rejects invalid calls before invoking any controller":
@@ -63,7 +68,7 @@ describe "Caret correlated execution client":
         var relative = execution_request("dispatch")
         relative.executable = "simple_orchestrator"
         var extra = execution_request("inspect-execution")
-        extra.packet_path = "/private/unexpected.sdn"
+        extra.packet_path = FIXTURE_ROOT + "/private/unexpected.sdn"
         for request in [relative, extra, execution_request("submit")]:
             val reply = caret_execution_request_v2(request)
             expect(reply.confirmed).to_equal(false)

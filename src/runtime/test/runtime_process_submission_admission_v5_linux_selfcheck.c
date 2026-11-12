@@ -108,6 +108,7 @@ SplArray* rt_process_pinned_executable_sha256_value(int64_t token) {
 }
 #define POV5_ADMISSION_CLOCK_GETTIME test_unix_clock
 #define fork test_real_fork
+#define RT_OWNED_EXTERNAL_PIN 1 /* This harness stubs the executable pin. */
 #include "../runtime_process_owned.c"
 #undef fork
 

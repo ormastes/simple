@@ -2,7 +2,7 @@
 # Other preexisting compatibility helpers are outside this repair.
 
 use compiler.blocks.definition.{ConstValue}
-use compiler.blocks.value.{BlockValue, JsonValue, JsonKind}
+use compiler.blocks.value.{BlockValue, JsonValue, JsonKind, ShellCommands, SqlQuery, SqlKind}
 use compiler.blocks.builtin_blocks_json_bridge.{block_json_parse_kind_v1}
 
 fn sql_keywords() -> [text]:
@@ -10,11 +10,27 @@ fn sql_keywords() -> [text]:
      "TABLE", "INTO", "VALUES", "JOIN", "ON", "AND", "OR", "NOT", "NULL",
      "ORDER", "BY", "GROUP", "HAVING", "LIMIT", "OFFSET", "AS", "DISTINCT"]
 
-fn parse_shell_commands(payload: text) -> [text]:
-    [payload]
+# Return the payload types BlockValue.Shell / BlockValue.Sql declare. These
+# used to return the raw text ([text] / text), which the seed accepted and the
+# pure-Simple MIR rejects ("enum construction ... payload type mismatch").
+# ponytail: raw payload + leading SQL keyword only; no token/table/param
+# parsing — add it when a caller reads commands/tables/columns/params.
+fn parse_shell_commands(payload: text) -> ShellCommands:
+    ShellCommands(raw: payload, commands: [])
 
-fn parse_sql_query(payload: text) -> text:
-    payload
+fn sql_query_kind(payload: text) -> SqlKind:
+    val head = payload.trim().upper()
+    if head.starts_with("SELECT"): return SqlKind.Select
+    if head.starts_with("INSERT"): return SqlKind.Insert
+    if head.starts_with("UPDATE"): return SqlKind.Update
+    if head.starts_with("DELETE"): return SqlKind.Delete
+    if head.starts_with("CREATE"): return SqlKind.Create
+    if head.starts_with("ALTER"): return SqlKind.Alter
+    if head.starts_with("DROP"): return SqlKind.Drop
+    SqlKind.Other
+
+fn parse_sql_query(payload: text) -> SqlQuery:
+    SqlQuery(raw: payload, kind: sql_query_kind(payload), tables: [], columns: [], params: [])
 
 fn validate_regex(pattern: text) -> Result<bool, text>:
     Ok(true)

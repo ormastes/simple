@@ -13,7 +13,8 @@
  *   cc -std=c11 -O0 -Wall -Wextra -pthread \
  *     src/runtime/test/runtime_process_pin_dynamic_elf_linux_selfcheck.c \
  *     -o /tmp/pin-dynamic-elf && /tmp/pin-dynamic-elf
- * Checks: (1) the dynamic self image pins; (2) the owned digest equals the
+ * Checks: (0) the reference SHA-256 passes a known-answer vector;
+ * (1) the dynamic self image pins; (2) the owned digest equals the
  * SHA-256 of the file bytes; (3) the acquired sealed memfd fexecve()s and the
  * child runs under the system loader (its /proc/self/exe is the memfd);
  * (4) copies patched to carry DT_RUNPATH, DT_RPATH, no PT_INTERP, or a
@@ -82,8 +83,20 @@ int64_t simple_fork_parent_wait_bounded_bytes(int64_t child_pid, int64_t timeout
     (void)child_pid; (void)timeout_ms; (void)max_output_bytes; return -1; }
 int simple_local_unix_origin_v1(void) { return 0; }
 int simple_process_launch_admission_check_v1(int64_t expires_at_unix_ms) { (void)expires_at_unix_ms; return 0; }
+int8_t rt_value_is_int(int64_t value) { (void)value; return 1; }
+int64_t rt_free_deep(int64_t value) { (void)value; return 1; }
+int64_t rt_array_bytes_validate(int64_t value) { (void)value; return -1; }
+int64_t rt_array_bytes_copy_checked(int64_t value, uint8_t* out, int64_t cap) {
+    (void)value; (void)out; (void)cap; return -1; }
+int64_t rt_proc_start_time(int64_t pid) { (void)pid; return -1; }
 
+/* runtime_process.c keeps the raw-fd close/spawn; the pin itself (raw,
+ * owned, acquire, digest) lives in runtime_process_owned.c, the TU the Rust
+ * runtime crate -- and so every Stage 2 compiler -- actually links. This
+ * harness defines _GNU_SOURCE; the crate does not, and the crate-lane test
+ * env_process.rs::linux_owned_pin_tests covers that compilation mode. */
 #include "../runtime_process.c"
+#include "../runtime_process_owned.c"
 
 static int failures = 0, checks = 0;
 #define CHECK(cond, what) do { checks++; if (!(cond)) { fprintf(stderr, "FAIL: %s\n", what); failures++; } } while (0)
@@ -91,33 +104,35 @@ static int failures = 0, checks = 0;
 static char scratch[PATH_MAX / 2];
 static char self_path[PATH_MAX];
 
-/* Whole-file SHA-256 through the pin's own block function. */
+/* Whole-file SHA-256 through the shared one-shot owned_sha256 (a different
+ * padding path from the pin's streaming digest). Its block function is pinned
+ * to the FIPS 180-2 "abc" vector by check (0); until 2026-11-13 this harness
+ * hashed with the pin's own private block copy, whose round-constant table was
+ * one entry short, so check (2) compared that wrong digest with itself. */
+static int sha256_kat_abc(void) {
+    static const uint8_t want[32] = {
+        0xba,0x78,0x16,0xbf,0x8f,0x01,0xcf,0xea,0x41,0x41,0x40,0xde,0x5d,0xae,0x22,0x23,
+        0xb0,0x03,0x61,0xa3,0x96,0x17,0x7a,0x9c,0xb4,0x10,0xff,0x61,0xf2,0x00,0x15,0xad};
+    uint8_t got[32];
+    owned_sha256((const uint8_t*)"abc", 3, got);
+    return memcmp(got, want, sizeof(want)) == 0;
+}
 static int sha256_path(const char* path, uint8_t out[32]) {
     int fd = open(path, O_RDONLY | O_CLOEXEC);
     if (fd < 0) return 0;
-    uint32_t s[8] = {0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19};
-    uint8_t block[64]; size_t used = 0; uint64_t total = 0; uint8_t buf[4096];
-    for (;;) {
-        ssize_t n = read(fd, buf, sizeof(buf));
-        if (n < 0) { close(fd); return 0; }
-        if (n == 0) break;
-        total += (uint64_t)n;
-        for (ssize_t i = 0; i < n; i++) {
-            block[used++] = buf[i];
-            if (used == 64) { pin_sha_block(s, block); used = 0; }
-        }
+    struct stat st;
+    if (fstat(fd, &st) != 0 || st.st_size <= 0) { close(fd); return 0; }
+    uint8_t* bytes = malloc((size_t)st.st_size);
+    if (!bytes) { close(fd); return 0; }
+    off_t got = 0;
+    while (got < st.st_size) {
+        ssize_t n = read(fd, bytes + got, (size_t)(st.st_size - got));
+        if (n <= 0) { free(bytes); close(fd); return 0; }
+        got += n;
     }
     close(fd);
-    block[used++] = 0x80;
-    if (used > 56) { while (used < 64) block[used++] = 0; pin_sha_block(s, block); used = 0; }
-    while (used < 56) block[used++] = 0;
-    uint64_t bits = total * 8;
-    for (int i = 7; i >= 0; i--) block[used++] = (uint8_t)(bits >> (8 * i));
-    pin_sha_block(s, block);
-    for (int i = 0; i < 8; i++) {
-        out[4*i] = (uint8_t)(s[i] >> 24); out[4*i+1] = (uint8_t)(s[i] >> 16);
-        out[4*i+2] = (uint8_t)(s[i] >> 8); out[4*i+3] = (uint8_t)s[i];
-    }
+    owned_sha256(bytes, (size_t)st.st_size, out);
+    free(bytes);
     return 1;
 }
 
@@ -231,6 +246,8 @@ int main(int argc, char** argv) {
         printf("OK %s\n", exe);
         return 0;
     }
+    /* (0) The reference digest is real SHA-256. */
+    CHECK(sha256_kat_abc(), "owned_sha256 matches the FIPS 180-2 abc vector");
     const char* base = getenv("TMPDIR");
     if (!base || !*base) base = "/tmp";
     snprintf(scratch, sizeof(scratch), "%s/pin-dynamic-elf-XXXXXX", base);
