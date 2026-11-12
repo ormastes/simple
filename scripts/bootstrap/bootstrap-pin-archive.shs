@@ -31,6 +31,15 @@ pin_archive() {
     pa_sha=$(git -C "$pa_repo" rev-parse --verify "${pa_rev}^{commit}" 2>/dev/null) || {
         echo "ERROR — nothing was checked (cannot resolve rev '${pa_rev}')" >&2; return 2; }
     pa_dir="${pa_parent}/pinned-$(echo "$pa_sha" | cut -c1-12)"
+    # Reuse an intact snapshot of the same sha: a bootstrap output tree lives
+    # INSIDE the snapshot (<snapshot>/build/<lane>), so re-materialising it on a
+    # resume would delete the admitted Stage 2 the resume is about to consume.
+    if [ "$(cat "$pa_dir/.bootstrap-pinned-sha" 2>/dev/null)" = "$pa_sha" ] &&
+       [ "$(git -C "$pa_dir" rev-parse HEAD 2>/dev/null)" = "$pa_sha" ]; then
+        echo "pinned-archive: ${pa_sha} reused (intact snapshot) -> ${pa_dir}" >&2
+        printf '%s\n' "$pa_dir"
+        return 0
+    fi
     rm -rf "$pa_dir.tmp"; mkdir -p "$pa_parent" || return 2
     if [ "$(git -C "$pa_repo" config --get core.symlinks 2>/dev/null)" = false ]; then
         # core.symlinks=false (Windows): `git archive | tar` cannot create the
