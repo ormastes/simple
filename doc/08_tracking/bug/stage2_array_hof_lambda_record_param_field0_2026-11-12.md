@@ -88,3 +88,17 @@ parameter stays the i64 handle, which `rt_value_as_int_wide` passes through).
 
 The lifted copy of `val g = \t: t.c` (used only when `g` escapes as a value)
 still has no record for `t`; nothing at that site proves one.
+
+Open nits from the Fable pre-landing review of PR #8468 (LAND-WITH-NITS):
+
+- `src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl:8580`: the
+  declared `fn(S)` slot arm records `optional_payload_struct_name` (the bare
+  struct name), where the for-in path records the qualified
+  `struct_value_provenance_key`. With a contested bare `struct S` across
+  modules, `lib_hof(xs, \t: t.c)` keeps the field-0 fallback silently.
+- The fold accumulator parameter is still unproven:
+  `ts.fold(T(..), \acc, t: acc.c)` reads field 0 (only the element parameter,
+  index 1, gets a record).
+- Native AFTER is pending: the next Stage 2 rebuild must run
+  `test/fixtures/compiler/array_hof_lambda_record_field_native.spl` and expect
+  `map=3,6 filter=1 any=1 all=1`, exit 0. Nothing runs it automatically.
