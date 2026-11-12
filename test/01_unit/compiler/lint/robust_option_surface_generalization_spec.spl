@@ -1,0 +1,63 @@
+# Purpose and audience: generalization evidence for the ROB-OPT public-surface lint, for lint maintainers.
+# @req REQ-SSPEC-COMPILER
+# bug: doc/08_tracking/bug/robust_option_public_surface_walker_missing_2026-11-12.md
+"""
+# `robust_option_surface` across the shapes next to the reproducing case
+
+Nested optionals, alias chains, multi-line signatures, visibility through an
+enclosing owner, `impl` blocks, in-file exports, and text that merely looks
+like an optional (comments, strings, docstrings, `OptionSet`, defaults).
+"""
+
+# @tag: unit, compiler, lint, robust
+
+use std.spec.*
+use compiler.tools.lint.static_rules.{LintParamsV1, LintUnit, StaticLintFinding, run_static_lint_rule_table}
+use compiler.tools.lint.rules.robust_option_surface_rule.{robust_option_surface_lint_rule}
+
+fn codes(src: text) -> [text]:
+    val run = run_static_lint_rule_table(LintParamsV1.defaults(), LintUnit("src/lib/example.spl", src), [robust_option_surface_lint_rule()])
+    [f.code for f in run.findings]
+
+describe "robust_option_surface generalization":
+    it "walks generics, arrays, dict shorthand, tuples and fn types":
+        expect(codes("pub fn a(x: Result<Option<A>, E>):\n    pass\n")).to_equal(["ROB-OPT-001"])
+        expect(codes("pub fn b(x: [A?]):\n    pass\n")).to_equal(["ROB-OPT-001"])
+        expect(codes("pub fn c(x: {text: Option<A>}):\n    pass\n")).to_equal(["ROB-OPT-001"])
+        expect(codes("pub fn d(x: (A, (B, C?))):\n    pass\n")).to_equal(["ROB-OPT-001"])
+        expect(codes("pub fn e(x: fn(A) -> Option<B>):\n    pass\n")).to_equal(["ROB-OPT-001"])
+        expect(codes("pub fn f(x: Result<A, E>, y: [A], z: fn(A) -> B):\n    pass\n")).to_equal([])
+
+    it "follows alias chains declared before or after use and tolerates cycles":
+        expect(codes("pub fn f(x: Outer):\n    pass\ntype Outer = List<Inner>\ntype Inner = Option<A>\n")).to_equal(["ROB-OPT-001"])
+        expect(codes("type Loop = Loop\npub fn f(x: Loop):\n    pass\n")).to_equal([])
+        expect(codes("pub type Boxed<T> = Option<T>\npub fn f(x: Boxed<A>):\n    pass\n")).to_equal(["ROB-OPT-001"])
+
+    it "joins a multi-line signature and reports the header line":
+        val src = "pub fn connect(\n    host: Host,\n    timeout: Option<Duration>\n) -> Result<Session, Error>:\n    pass\n"
+        val run = run_static_lint_rule_table(LintParamsV1.defaults(), LintUnit("src/lib/example.spl", src), [robust_option_surface_lint_rule()])
+        expect([f.code for f in run.findings]).to_equal(["ROB-OPT-001"])
+        expect(run.findings[0].line_num).to_equal(1)
+
+    it "requires the enclosing owner to be public too":
+        expect(codes("class Hidden:\n    pub fn f(x: Option<A>):\n        pass\n")).to_equal([])
+        expect(codes("struct Hidden:\n    x: Option<A>\n")).to_equal([])
+        expect(codes("pub class Shown:\n    x: Option<A>\n    fn g(y: Option<A>):\n        pass\n")).to_equal(["ROB-OPT-002"])
+        expect(codes("pub struct S:\n    a: A\nimpl S:\n    pub fn f(x: Option<A>):\n        pass\n")).to_equal(["ROB-OPT-001"])
+        expect(codes("struct S:\n    a: A\nimpl S:\n    pub fn f(x: Option<A>):\n        pass\n")).to_equal([])
+        expect(codes("pub struct S:\n    a: A\nimpl Show for S:\n    pub fn f(x: Option<A>):\n        pass\n")).to_equal(["ROB-OPT-001"])
+
+    it "treats in-file exports as public and leaves everything else private":
+        expect(codes("fn f(x: Option<A>):\n    pass\nexport f, g\n")).to_equal(["ROB-OPT-001"])
+        expect(codes("class C:\n    x: A?\nexport C\n")).to_equal(["ROB-OPT-002"])
+        expect(codes("fn f(x: Option<A>):\n    pass\nexport use std.text.*\n")).to_equal([])
+
+    it "ignores lookalikes: comments, strings, docstrings, defaults, OptionSet, body lines":
+        expect(codes("pub fn f(x: A):  # was Option<A>\n    pass\n")).to_equal([])
+        expect(codes("pub fn f(x: text = \"a?\"):\n    pass\n")).to_equal([])
+        expect(codes("pub fn f(x: A):\n    \"\"\"takes Option<A>?\"\"\"\n    pass\n")).to_equal([])
+        expect(codes("pub fn f(x: OptionSet, y: MyOption):\n    pass\n")).to_equal([])
+        expect(codes("pub struct S:\n    a: A\n    fn f():\n        val x: Option<A> = None\n        Foo(cb: fn(Option<A>) -> B)\n")).to_equal([])
+        expect(codes("pub fn find(id: Id) -> Option<User>:\n    None\n")).to_equal([])
+        expect(codes("pub extern fn rt_peek(p: i64?) -> i64\n")).to_equal([])
+        expect(codes("pub enum E:\n    Some(Option<A>)\n")).to_equal([])

@@ -1,0 +1,223 @@
+# ROB-OPT-001 / ROB-OPT-002: the public surface must not expose a raw optional.
+#
+# Design: doc/05_design/language/robust_types/robust_types_layer_contracts_2026-11-12.md
+# §2 (public surface) and §7 (diagnostics). Guide: doc/07_guide/language/robust_semantic_absence.md.
+#
+#   ROB-OPT-001  a `pub fn` / `pub me` (or in-file `export`ed fn) parameter
+#                whose type reaches `Option<T>` / `Optional<T>` / `T?`
+#   ROB-OPT-002  a field of a `pub struct` / `pub class` (or in-file exported
+#                one) whose type reaches a raw optional -- the field is both a
+#                constructor input and a generated accessor
+#
+# "Reaches" is recursive through generics, arrays, dicts, tuples, fn types
+# and in-file `type X = ...` / `alias X = ...` aliases. One pass collects
+# aliases and `export` names, one pass walks declarations; nothing rescans.
+# Not covered here (P2+): return types and locals (ROB-OPT-003), explicit
+# accessor methods, enum payloads, cross-file `__init__.spl` export closure,
+# reviewed HAL/interpreter capabilities. `extern fn` is skipped. Warning
+# severity only; the level is `allow` by default and `warn` in the Robust and
+# Critical profiles (config_and_model.spl).
+use compiler.tools.lint.lint_rule_api.{LintParamsV1, LintUnit, StaticLintCategory, StaticLintFinding, StaticLintLevel, StaticLintRule, lint_rule_provider_iface, static_lint_rule}
+use compiler.tools.lint.rules.nil_return_non_optional_rule.{nrl_blank_triple_spans, nrl_code_of, nrl_header_name, nrl_indent_of, nrl_is_extern_header, nrl_is_word_char, nrl_paren_balance, nrl_strip_modifiers, nrl_triple_quote_count}
+
+struct RosOwner:
+    indent: i64
+    is_pub: bool
+    has_fields: bool
+
+fn ros_split_top(s: text, sep: text) -> [text]:
+    # Split at bracket depth 0 (wrt <> [] () {}); `->` is not a closer.
+    var parts: [text] = []
+    var depth = 0
+    var start = 0
+    var i = 0
+    while i < s.len():
+        val ch = s.substring(i, i + 1)
+        if ch == "<" or ch == "[" or ch == "(" or ch == "{":
+            depth = depth + 1
+        elif ch == "]" or ch == ")" or ch == "}":
+            depth = depth - 1
+        elif ch == ">":
+            if not (i > 0 and s.substring(i - 1, i) == "-"): depth = depth - 1
+        elif ch == sep and depth == 0:
+            parts.push(s.substring(start, i))
+            start = i + 1
+        i = i + 1
+    parts.push(s.substring(start, s.len()))
+    parts
+
+fn ros_words(s: text) -> [text]:
+    # Identifier tokens not preceded by `.`.
+    var out: [text] = []
+    var i = 0
+    while i < s.len():
+        if nrl_is_word_char(s.substring(i, i + 1)):
+            var j = i
+            while j < s.len() and nrl_is_word_char(s.substring(j, j + 1)):
+                j = j + 1
+            if i == 0 or s.substring(i - 1, i) != ".": out.push(s.substring(i, j))
+            i = j
+        else:
+            i = i + 1
+    out
+
+fn ros_reaches_optional(ty: text, aliases: Dict<text, text>, depth: i64) -> bool:
+    if ty.contains("?"): return true
+    for w in ros_words(ty):
+        # Word-bounded identifiers only: `OptionSet` / `MyOption` are not `Option`.
+        if w == "Option" or w == "Optional": return true
+        if depth < 8 and aliases.contains_key(w) and ros_reaches_optional(aliases[w], aliases, depth + 1): return true
+    false
+
+fn ros_is_pub(t: text) -> bool:
+    t.starts_with("pub ") or t.starts_with("pub(")
+
+fn ros_owner_name(s: text) -> text:
+    # `struct Name` / `class Name` / `enum Name` / `trait Name` / `impl Name` / `impl Trait for Name`.
+    for kw in ["struct ", "class ", "impl ", "enum ", "trait ", "extend "]:
+        if s.starts_with(kw):
+            var rest = s.substring(kw.len(), s.len()).trim()
+            val at = rest.index_of(" for ", 0)
+            if at >= 0: rest = rest.substring(at + 5, rest.len()).trim()
+            var n = 0
+            while n < rest.len() and nrl_is_word_char(rest.substring(n, n + 1)):
+                n = n + 1
+            return rest.substring(0, n)
+    ""
+
+fn ros_type_of(entry: text) -> text:
+    # `name: Type = default` -> `Type`; "" when untyped.
+    val parts = ros_split_top(entry, ":")
+    if parts.len() < 2: return ""
+    var ty = parts[1]
+    var i = 2
+    while i < parts.len():
+        ty = ty + ":" + parts[i]
+        i = i + 1
+    ros_split_top(ty, "=")[0].trim()
+
+fn ros_name_of(entry: text) -> text:
+    var name = ros_split_top(entry, ":")[0].trim()
+    if name.starts_with("mut "): name = name.substring(4, name.len()).trim()
+    name
+
+fn ros_params(header: text) -> [text]:
+    val lp = header.index_of("(", 0)
+    if lp < 0: return []
+    var depth = 0
+    var i = lp
+    while i < header.len():
+        val ch = header.substring(i, i + 1)
+        if ch == "(" or ch == "[" or ch == "{" or ch == "<": depth = depth + 1
+        if ch == ")" or ch == "]" or ch == "}": depth = depth - 1
+        if ch == ">" and not (i > 0 and header.substring(i - 1, i) == "-"): depth = depth - 1
+        if depth == 0: break
+        i = i + 1
+    val inner = header.substring(lp + 1, i).trim()
+    if inner == "": return []
+    ros_split_top(inner, ",")
+
+fn ros_finding(code: text, line_num: i64, col: i64, what: text, name: text, ty: text) -> StaticLintFinding:
+    val hint = if code == "ROB-OPT-001": "use a concrete type, a proved default, a domain enum, or split the API" else: "use a payload enum or a state-specific type with a non-optional field"
+    val tail = if code == "ROB-OPT-002": " (constructor input and generated accessor)" else: ""
+    StaticLintFinding(code, StaticLintLevel.Warn, StaticLintCategory.Safety,
+        "public {what} `{name}` exposes raw optional `{ty}`{tail}", hint, line_num, col)
+
+pub fn check_robust_option_surface(content: text) -> [StaticLintFinding]:
+    # Pass 1: strip strings, comments and docstrings, keeping line numbers;
+    # collect in-file aliases and exported names.
+    var codes: [text] = []
+    var aliases: Dict<text, text> = {}
+    var exported: [text] = []
+    var pub_types: [text] = []
+    var in_doc = false
+    for line in content.split("\n"):
+        val quotes = if line.contains("\""): nrl_triple_quote_count(line) else: 0
+        if in_doc:
+            if quotes % 2 == 1: in_doc = false
+            codes.push("")
+            continue
+        if quotes % 2 == 1:
+            in_doc = true
+            codes.push("")
+            continue
+        val code = nrl_code_of(if quotes > 0: nrl_blank_triple_spans(line) else: line)
+        codes.push(code)
+        val s = nrl_strip_modifiers(code.trim())
+        if (s.starts_with("type ") or s.starts_with("alias ")) and s.contains("="):
+            val eq = s.index_of("=", 0)
+            val lhs = s.substring(s.index_of(" ", 0), eq).trim()
+            val lt = lhs.index_of("<", 0)
+            aliases[if lt >= 0: lhs.substring(0, lt).trim() else: lhs] = s.substring(eq + 1, s.len()).trim()
+        elif code.trim().starts_with("export ") and not code.trim().starts_with("export use "):
+            for name in code.trim().substring(7, code.trim().len()).split(","):
+                exported.push(name.trim())
+        elif ros_is_pub(code.trim()) and not s.starts_with("impl ") and ros_owner_name(s) != "":
+            pub_types.push(ros_owner_name(s))
+
+    # Pass 2: one walk over declarations.
+    var findings: [StaticLintFinding] = []
+    var owners: [RosOwner] = []
+    var body_indent = -1
+    var i = 0
+    while i < codes.len():
+        val code = codes[i]
+        val t = code.trim()
+        if t == "":
+            i = i + 1
+            continue
+        val indent = nrl_indent_of(code)
+        if body_indent >= 0 and indent > body_indent:
+            i = i + 1
+            continue
+        body_indent = -1
+        while owners.len() > 0 and indent <= owners[owners.len() - 1].indent:
+            owners.pop()
+        val owner_pub = owners.len() == 0 or owners[owners.len() - 1].is_pub
+        val s = nrl_strip_modifiers(t)
+        val owner_name = ros_owner_name(s)
+        if owner_name != "":
+            # An `impl` block takes the visibility of the type it extends.
+            val visible = ros_is_pub(t) or exported.contains(owner_name) or (s.starts_with("impl ") and pub_types.contains(owner_name))
+            owners.push(RosOwner(indent, owner_pub and visible, s.starts_with("struct ") or s.starts_with("class ")))
+            i = i + 1
+            continue
+        val fn_name = nrl_header_name(t)
+        if fn_name != "":
+            var header = t
+            var j = i
+            while nrl_paren_balance(header) > 0 and j + 1 < codes.len():
+                j = j + 1
+                header = header + " " + codes[j].trim()
+            if not nrl_is_extern_header(t) and owner_pub and (ros_is_pub(t) or exported.contains(fn_name)):
+                for p in ros_params(header):
+                    val name = ros_name_of(p)
+                    if name == "self" or name == "me" or name == "": continue
+                    val ty = ros_type_of(p)
+                    if ty != "" and ros_reaches_optional(ty, aliases, 0):
+                        val col = code.index_of(name + ":", 0)
+                        findings.push(ros_finding("ROB-OPT-001", i + 1, if col >= 0: col + 1 else: 1, "input", name, ty))
+            body_indent = indent
+            i = j + 1
+            continue
+        if owners.len() > 0 and owners[owners.len() - 1].has_fields and owner_pub:
+            val name = ros_name_of(t)
+            val ty = ros_type_of(t)
+            var is_field = ty != "" and name != "" and not s.starts_with("val ") and not s.starts_with("var ")
+            for ch in ros_words(name):
+                if ch != name: is_field = false
+            if is_field and ros_reaches_optional(ty, aliases, 0):
+                findings.push(ros_finding("ROB-OPT-002", i + 1, indent + 1, "field", name, ty))
+        i = i + 1
+    findings
+
+# Uniquely named on purpose: a private `check_rule` here collides with the
+# sibling rules' `check_rule` under cross-module symbol resolution and
+# hijacks their dispatch (same reason nil_return_non_optional_check_rule is).
+fn robust_option_surface_check_rule(params: LintParamsV1, unit: LintUnit) -> [StaticLintFinding]:
+    val _ = params
+    if not unit.path.ends_with(".spl"): return []
+    check_robust_option_surface(unit.content)
+
+pub fn robust_option_surface_lint_rule() -> StaticLintRule:
+    static_lint_rule("robust_option_surface", lint_rule_provider_iface("robust_option_surface"), robust_option_surface_check_rule)

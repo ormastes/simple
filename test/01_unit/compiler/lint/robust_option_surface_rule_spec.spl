@@ -1,0 +1,57 @@
+# Purpose and audience: reproducing evidence for the ROB-OPT public-surface lint, for lint maintainers.
+# @req REQ-SSPEC-COMPILER
+# bug: doc/08_tracking/bug/robust_option_public_surface_walker_missing_2026-11-12.md
+"""
+# `robust_option_surface`: a public input or field must not expose a raw optional
+
+ROB-OPT-001 flags a `pub fn` / `pub me` parameter whose type is `Option<T>`
+or `T?`; ROB-OPT-002 flags a field of a `pub struct` / `pub class` (the field
+is both a constructor input and a generated accessor). Findings are warnings,
+never deny, and the rule is registered in the static lint table with an
+`allow` default that the Robust and Critical profiles raise to `warn`.
+"""
+
+# @tag: unit, compiler, lint, robust
+
+use std.spec.*
+use compiler.tools.lint.static_rules.{LintParamsV1, LintUnit, StaticLintFinding, StaticLintLevel, static_lint_rule_table, run_static_lint_rule_table}
+use compiler.tools.lint.rules.robust_option_surface_rule.{robust_option_surface_lint_rule}
+use compiler.tools.lint._LintMain.config_and_model.{build_default_levels, canonical_lint_rule_profile_descriptors}
+
+fn findings(src: text) -> [StaticLintFinding]:
+    val run = run_static_lint_rule_table(LintParamsV1.defaults(), LintUnit("src/lib/example.spl", src), [robust_option_surface_lint_rule()])
+    run.findings
+
+describe "robust_option_surface lint":
+    it "flags Option<T> and T? on a pub fn parameter with ROB-OPT-001":
+        val found = findings("pub fn connect(host: Host, timeout: Option<Duration>, retries: i64?) -> Result<Session, Error>:\n    pass\n")
+        expect([f.code for f in found]).to_equal(["ROB-OPT-001", "ROB-OPT-001"])
+        expect(found[0].line_num).to_equal(1)
+        expect(found[0].column).to_equal(28)
+        expect(found[0].message.contains("`timeout`")).to_equal(true)
+        expect(found[1].message.contains("`retries`")).to_equal(true)
+
+    it "flags a pub me parameter and skips the receiver":
+        val found = findings("pub class Pool:\n    pub me take(self, slot: Slot?) -> Slot:\n        slot\n")
+        expect([f.code for f in found]).to_equal(["ROB-OPT-001"])
+        expect(found[0].line_num).to_equal(2)
+
+    it "flags a pub struct field with ROB-OPT-002 naming the accessor":
+        val found = findings("pub struct Connection:\n    socket: Option<Socket>\n    retries: i64\n")
+        expect(found.len()).to_equal(1)
+        expect(found[0].code).to_equal("ROB-OPT-002")
+        expect(found[0].line_num).to_equal(2)
+        expect(found[0].message.contains("accessor")).to_equal(true)
+
+    it "reports warnings only":
+        for f in findings("pub fn f(a: Option<A>):\n    pass\npub struct S:\n    b: B?\n"):
+            expect(f.level == StaticLintLevel.Warn).to_equal(true)
+
+    it "is registered with an allow default raised to warn in Robust and Critical":
+        expect([r.id() for r in static_lint_rule_table()]).to_contain("robust_option_surface")
+        expect(build_default_levels()["robust_option_surface"]).to_equal("allow")
+        for rule in canonical_lint_rule_profile_descriptors():
+            if rule.name == "robust_option_surface":
+                expect(rule.strict_level).to_equal("allow")
+                expect(rule.robust_level).to_equal("warn")
+                expect(rule.critical_level).to_equal("warn")
