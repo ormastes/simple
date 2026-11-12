@@ -729,3 +729,15 @@ spec `test/01_unit/compiler/50.mir/array_hof_lambda_record_param_field_spec.spl`
   vacuously. Behavioural check = a Stage 2 built from the worktree by the seed
   (stage2-command.transcript argv, ~250 s) native-building
   `test/fixtures/compiler/hir_untyped_if_result_subject/*.spl`.
+
+## 2026-11-12 — struct ctor operands are in DECLARED order (pinned, no-repro)
+
+`Aggregate(Struct)` operands are the field values in declared order regardless
+of the named-argument order at the call site (`M(z: 3, x: 1, y: 2)` -> `1,2,3`),
+and `GetField` carries the declared slot. A negative literal arrives as
+`UnaryOp(Neg, Copy(<const local>))`, not as a negative `Const` — a MIR probe
+that only reads `Const` operands sees a plain local there. The s3_fable44
+`P(a: 7).a == 7` FAIL did not reproduce on Stage 2 `bootstrap-fable-13`
+(cranelift + llvm). Spec `test/01_unit/compiler/50.mir/struct_i64_field_ctor_spec.spl`;
+native twin `test/fixtures/compiler/struct_i64_field_ctor_native.spl`; bug
+`native_struct_i64_field_ctor_reads_wrong_value_2026-11-05`.
