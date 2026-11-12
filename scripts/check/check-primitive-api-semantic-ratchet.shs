@@ -1,0 +1,62 @@
+#!/bin/sh
+# check-primitive-api-semantic-ratchet.shs — ratchet on the recursive
+# primitive_api checker (compiler.semantics.lint.semantic_api.exported_graph,
+# wired into `simple lint`'s parsed-structural pass 2026-11-12).
+#
+# WHY: wiring the exported-type-graph walker surfaced many new public
+# primitive leaks in the stdlib (plan §2 P0 libraries). They are real debt
+# and are NOT mass-fixed; this freezes the measured per-file count in
+# scripts/check/primitive_api_semantic_baseline.txt. GROWTH fails; a count
+# that FELL is a stale baseline and also fails (same contract as
+# check-frontend-diag-ratchet.shs). Regenerate only with --generate-baseline
+# after reading the diff.
+#
+# SCOPE: the files listed in the baseline (plan §2 P0 sample). Counts are
+# `primitive_api` lines of `$SIMPLE_BIN lint <file>` (MC-API-001/002 graph
+# findings plus any quick-scanner text finding not deduped); boundary
+# findings (primitive_api_boundary, MC-API-003) are reported but not counted.
+#
+# VERDICT (last line of stdout)
+#   PASS  — <n> file(s) checked, <k> finding(s) (baseline <b>)   exit 0
+#   FAIL  — ...                                                 exit 1
+#   ERROR — nothing was checked (<reason>)                      exit 2
+set -u
+here=$(cd "$(dirname "$0")" && pwd)
+root=$(cd "$here/../.." && pwd)
+baseline="$here/primitive_api_semantic_baseline.txt"
+SIMPLE_BIN=${SIMPLE_BIN:-"$root/bin/simple"}
+[ -x "$SIMPLE_BIN" ] || { [ -x "$SIMPLE_BIN.exe" ] && SIMPLE_BIN="$SIMPLE_BIN.exe"; }
+gen=0
+[ "${1:-}" = "--generate-baseline" ] && gen=1
+
+[ -x "$SIMPLE_BIN" ] || { echo "ERROR — nothing was checked (no runnable $SIMPLE_BIN)"; exit 2; }
+[ -f "$baseline" ] || { echo "ERROR — nothing was checked (missing $baseline)"; exit 2; }
+
+count_file() {
+    out=$(cd "$root" && "$SIMPLE_BIN" lint "$1" 2>&1)
+    rc=$?
+    if [ $rc -ge 124 ]; then echo "CRASH"; return; fi
+    printf '%s\n' "$out" | grep -c '\(warning\|error\)\[primitive_api\]'
+}
+
+n=0; total=0; base_total=0; fail=0; tmp=$(mktemp)
+grep -v '^#' "$baseline" | grep -v '^[[:space:]]*$' | while read -r path expected; do
+    got=$(count_file "$path")
+    if [ "$got" = "CRASH" ]; then echo "ERROR $path lint crashed/timed out"; echo "crash" >> "$tmp"; continue; fi
+    echo "$path $got" >> "$tmp.new"
+    if [ "$gen" = 1 ]; then echo "$path $got"; continue; fi
+    if [ "$got" -gt "$expected" ]; then echo "FAIL $path: $got > baseline $expected (new public primitive leak)"; echo "fail" >> "$tmp"
+    elif [ "$got" -lt "$expected" ]; then echo "FAIL $path: $got < baseline $expected (stale baseline; run --generate-baseline)"; echo "fail" >> "$tmp"
+    else echo "ok   $path: $got"; fi
+done
+if [ "$gen" = 1 ]; then
+    { echo "# path count — frozen primitive_api (semantic graph) findings per file."; echo "# Regenerate: sh scripts/check/check-primitive-api-semantic-ratchet.shs --generate-baseline"; cat "$tmp.new"; } > "$baseline"
+    echo "PASS — baseline regenerated: $(grep -vc '^#' "$baseline") file(s)"; rm -f "$tmp" "$tmp.new"; exit 0
+fi
+[ -f "$tmp.new" ] || { echo "ERROR — nothing was checked (empty baseline)"; rm -f "$tmp"; exit 2; }
+n=$(wc -l < "$tmp.new" | tr -d ' ')
+total=$(awk '{s+=$2} END {print s+0}' "$tmp.new")
+base_total=$(grep -v '^#' "$baseline" | awk 'NF==2 {s+=$2} END {print s+0}')
+if grep -q crash "$tmp" 2>/dev/null; then echo "ERROR — nothing was checked (lint crashed)"; rm -f "$tmp" "$tmp.new"; exit 2; fi
+if grep -q fail "$tmp" 2>/dev/null; then echo "FAIL — $n file(s) checked, $total finding(s) (baseline $base_total)"; rm -f "$tmp" "$tmp.new"; exit 1; fi
+echo "PASS — $n file(s) checked, $total finding(s) (baseline $base_total)"; rm -f "$tmp" "$tmp.new"; exit 0

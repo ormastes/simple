@@ -261,3 +261,19 @@ declares no `SdnValue`-typed code at all); left as-is, harmless.
 ## HIR-P2 HC triage 2026-11-05
 
 Audit deliverable done (renames + DUP001 checker scripts/check/check-type-name-collisions.shs). Remaining work is the by-name class/enum registry keying in eval_tables.spl, tracked by interp_class_name_collision_breaks_test_db_persistence_2026-08-10; the collision-warning spec already pins the diagnostic. Re-scoped: candidate to close in favour of that row once owner confirms; left OPEN.
+
+## Fix verification
+
+2026-11-12 (worktree simple-lfix-dup-type-20261112): discovered the audit's
+`crypto/x509.spl` rename (`X509ParseResult` → `X509DerParseResult`) had been
+silently reverted by tree-restore commit ae55a746719, re-introducing the
+duplicate `enum X509ParseResult` (crypto twin vs cert/x509_typed.spl, different
+variant payloads). Re-applied the rename (26 self-contained uses + export line;
+zero external consumers). Repro: co-loading both modules hosted (seed) fired a
+same-signature collision on `x509_parse_der`; post-rename only the pre-existing
+out-of-scope function-name duplicate warning remains. New regression spec
+`test/01_unit/lib/common/crypto/x509_der_parse_result_collision_regression_spec.spl`
+— 2/2 hosted PASS with fix, 1/2 FAIL on pristine (mis-resolution). Neighbors:
+cert/x509_spec 21/21 PASS, class_name_collision_warning_spec 2/2 PASS,
+bytes_to_hex_guard_spec 3/3 PASS. `enum_same_name_import_collision_spec.spl`
+1/3 on both pristine and patched — pre-existing, unrelated.
