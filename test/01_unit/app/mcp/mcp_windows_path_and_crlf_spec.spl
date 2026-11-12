@@ -17,54 +17,62 @@ value) rather than throw or read out of bounds.
 """
 
 use std.spec.{describe, it, expect}
+use std.text.{NL}
+use std.common.string_core.{char_from_code}
 use app.mcp.main_lazy_json.{extract_field, extract_field_raw, extract_id}
 use app.mcp.main_lazy_ctx_tools.{ctx_unescape_json, ctx_unescape_cell, ctx_escape_cell, ctx_parse_string_array}
 
 describe "extract_field — Windows path payloads":
     it "decodes a drive-letter backslash path escaped once per JSON rules":
         # Wire bytes for {"path":"C:\\Users\\me\\file.spl"} — each real
-        # backslash is doubled in the JSON string body.
+        # backslash is doubled in the JSON string body. extract_field is the
+        # single decode pass (quote-stripped, JSON-unescaped) used by every
+        # production caller, so it alone must yield the decoded path.
         val body = "{\"path\":\"C:\\\\Users\\\\me\\\\file.spl\"}"
         val raw = extract_field(body, "path")
-        expect(ctx_unescape_json(raw)).to_equal("C:\\Users\\me\\file.spl")
+        expect(raw).to_equal("C:\\Users\\me\\file.spl")
 
     it "decodes a UNC path (\\\\server\\share)":
         val body = "{\"path\":\"\\\\\\\\server\\\\share\\\\dir\\\\f.txt\"}"
         val raw = extract_field(body, "path")
-        expect(ctx_unescape_json(raw)).to_equal("\\\\server\\share\\dir\\f.txt")
+        expect(raw).to_equal("\\\\server\\share\\dir\\f.txt")
 
     it "decodes a forward-slash (MSYS-style) path unchanged":
         val body = "{\"path\":\"/c/a/b/file.spl\"}"
-        expect(ctx_unescape_json(extract_field(body, "path"))).to_equal("/c/a/b/file.spl")
+        expect(extract_field(body, "path")).to_equal("/c/a/b/file.spl")
 
     it "decodes a \\\\?\\ extended-length path prefix":
         val body = "{\"path\":\"\\\\\\\\?\\\\C:\\\\Users\\\\me\\\\f.txt\"}"
-        expect(ctx_unescape_json(extract_field(body, "path"))).to_equal("\\\\?\\C:\\Users\\me\\f.txt")
+        expect(extract_field(body, "path")).to_equal("\\\\?\\C:\\Users\\me\\f.txt")
 
     it "decodes a path containing spaces":
         val body = "{\"path\":\"C:\\\\Program Files\\\\Simple\\\\bin\\\\simple.exe\"}"
-        expect(ctx_unescape_json(extract_field(body, "path"))).to_equal("C:\\Program Files\\Simple\\bin\\simple.exe")
+        expect(extract_field(body, "path")).to_equal("C:\\Program Files\\Simple\\bin\\simple.exe")
 
     it "decodes a path containing non-ASCII (Korean) segments":
         val body = "{\"path\":\"C:\\\\Users\\\\\uD55C\uAE00\\\\f.txt\"}"
-        val decoded = ctx_unescape_json(extract_field(body, "path"))
+        val decoded = extract_field(body, "path")
         expect(decoded.contains("\\Users\\")).to_equal(true)
         expect(decoded.ends_with("\\f.txt")).to_equal(true)
 
     it "preserves a trailing separator rather than dropping it":
         val body = "{\"path\":\"C:\\\\a\\\\b\\\\\"}"
-        expect(ctx_unescape_json(extract_field(body, "path"))).to_equal("C:\\a\\b\\")
+        expect(extract_field(body, "path")).to_equal("C:\\a\\b\\")
 
     it "leaves a drive-relative path (no separator after the colon) untouched":
         val body = "{\"path\":\"C:foo\\\\bar.txt\"}"
-        expect(ctx_unescape_json(extract_field(body, "path"))).to_equal("C:foo\\bar.txt")
+        expect(extract_field(body, "path")).to_equal("C:foo\\bar.txt")
 
 describe "extract_field / extract_field_raw — embedded CRLF and control text":
     it "extracts a string value containing an escaped CRLF pair intact":
+        # extract_field is the single decode pass: the escaped CRLF comes back
+        # as real control bytes (built here without literal escape ambiguity).
+        val cr = char_from_code(13)
         val body = "{\"code\":\"line1\\r\\nline2\"}"
         val raw = extract_field(body, "code")
-        expect(raw).to_equal("line1\\r\\nline2")
-        expect(ctx_unescape_json(raw)).to_equal("line1\r\nline2")
+        expect(raw).to_equal("line1" + cr + NL + "line2")
+        # A second decode pass over already-decoded text is identity.
+        expect(ctx_unescape_json(raw)).to_equal("line1" + cr + NL + "line2")
 
     it "does not stop at a literal CR/LF byte pasted raw inside the request line":
         # Some clients send genuinely malformed JSON with a raw CR inside the
@@ -98,7 +106,7 @@ describe "extract_field — malformed / partial / huge input, fail closed":
 
     it "ignores a UTF-8 BOM prefix ahead of the JSON object":
         val body = "\uFEFF{\"path\":\"C:\\\\a\\\\b\"}"
-        expect(ctx_unescape_json(extract_field(body, "path"))).to_equal("C:\\a\\b")
+        expect(extract_field(body, "path")).to_equal("C:\\a\\b")
 
     it "extracts the correct value even inside a very long line (huge sibling field)":
         var pad = ""
@@ -107,7 +115,7 @@ describe "extract_field — malformed / partial / huge input, fail closed":
             pad = pad + "x"
             i = i + 1
         val body = "{\"filler\":\"" + pad + "\",\"path\":\"C:\\\\a\\\\b.txt\"}"
-        expect(ctx_unescape_json(extract_field(body, "path"))).to_equal("C:\\a\\b.txt")
+        expect(extract_field(body, "path")).to_equal("C:\\a\\b.txt")
 
     it "extract_id falls back to the null literal on a missing id":
         expect(extract_id("{\"method\":\"tools/list\"}")).to_equal("null")
