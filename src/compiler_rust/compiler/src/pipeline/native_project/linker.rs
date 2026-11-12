@@ -2264,7 +2264,7 @@ int main(int argc, char** argv) {
                                 cmd.arg("-Wl,--no-whole-archive");
                             }
                         } else {
-                            let roots = Self::runtime_retention_symbols(
+                            let mut roots = Self::runtime_retention_symbols(
                                 object_paths,
                                 &main_o,
                                 init_o.as_ref(),
@@ -2284,15 +2284,63 @@ int main(int argc, char** argv) {
                                     runtime_lib.display()
                                 ));
                             }
+                            // core-c-bootstrap layering: native_all first, the
+                            // core-C supplement second, `--allow-multiple-definition`
+                            // (below). "First definition wins" is decided by
+                            // member EXTRACTION order, not archive order: a
+                            // shared rt_* symbol first needed after
+                            // runtime_native.obj is pulled (for a C-only
+                            // rt_iocp_*/rt_process_* root) resolves to the C
+                            // copy, whose rt_core_as_array/as_string registry
+                            // rejects every Rust-owned handle. Measured
+                            // 2026-11-12: the Windows Stage 2 compiler printed
+                            // "rejected invalid array handle before dereference"
+                            // at startup and spun to the sanity timeout; 774 of
+                            // its referenced rt_* symbols were defined by both
+                            // archives, 26 of them array-registry readers.
+                            // Root every symbol BOTH archives define so the
+                            // native_all members are extracted before the
+                            // supplement is scanned -- the same discipline the
+                            // Linux capsule branch applies ("force the actual
+                            // native-all member before weak fallback definitions
+                            // arrive in the supplement").
+                            if runtime_bundle_requests_core_c_bootstrap(&self.config.runtime_bundle) {
+                                let supplement = build_core_c_runtime_supplement_library(
+                                    &temp_dir.join("core_c_bootstrap_supplement"),
+                                )
+                                .ok_or_else(|| "failed to build the core-c-bootstrap runtime supplement".to_string())?;
+                                let owned = Self::read_defined_symbol_set(runtime_lib)?;
+                                let supplied = Self::read_defined_symbol_set(&supplement)?;
+                                if owned.is_empty() || supplied.is_empty() {
+                                    return Err(format!(
+                                        "core-c-bootstrap: could not read the defined symbol set of {} / {} -- refusing to link with an unknown runtime owner",
+                                        runtime_lib.display(),
+                                        supplement.display()
+                                    ));
+                                }
+                                let mut shared: Vec<String> = supplied
+                                    .iter()
+                                    .filter(|symbol| owned.contains(*symbol) && !roots.contains(*symbol))
+                                    .cloned()
+                                    .collect();
+                                shared.sort();
+                                roots.extend(shared);
+                            }
                             // x64 `extern "C"` names are undecorated -- measured
                             // with nm on the real archive (`T rt_api_surface_extract`,
                             // `I __IMPORT_DESCRIPTOR_kernel32`, both bare).
-                            for root in &roots {
-                                if is_msvc {
+                            // Hundreds of roots exceed CreateProcess's 32 KiB
+                            // command line; clang expands `@file`.
+                            if is_msvc {
+                                for root in &roots {
                                     msvc_link_args.push(format!("/INCLUDE:{root}"));
-                                } else {
-                                    cmd.arg(format!("-Wl,-u,{root}"));
                                 }
+                            } else {
+                                let rsp_path = temp_dir.join("native_all_roots.rsp");
+                                let body: String = roots.iter().map(|root| format!("-Wl,-u,{root}\n")).collect();
+                                std::fs::write(&rsp_path, body)
+                                    .map_err(|e| format!("write {}: {e}", rsp_path.display()))?;
+                                cmd.arg(format!("@{}", rsp_path.display()));
                             }
                             cmd.arg(external_tool_path(runtime_lib));
                         }

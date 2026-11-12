@@ -1,0 +1,59 @@
+"""
+# Parser sites emit positioned, typed diagnostics (REQ-DIAG-004 / REQ-DIAG-005)
+
+Each parser error site records line/col/length at the token where the error
+was seen, and the driver turns those records into `DiagnosticV1` values with a
+stable code and a primary span. Nothing here re-derives a position from the
+message text, and a failed parse never yields zero diagnostics.
+"""
+use std.spec.{describe, it, expect, step}
+use compiler.core.parser.{parse_module, parse_module_silent_checked, parser_get_error_records}
+use compiler.common.diagnostics.diagnostic_v1.{DiagnosticV1}
+use compiler.driver.driver_parse_diagnostic.{driver_parse_diagnostics_v1, driver_parse_diagnostics_v1_json, DRIVER_PARSE_ERROR_CODE}
+
+describe "parser typed emit":
+    it "records the mismatch position and token kinds at a parser_expect site":
+        # @req REQ-DIAG-004
+        step("Parse a declaration missing its `=` on line 2")
+        expect(parse_module_silent_checked("val ok: i64 = 1\nval other: i64 2\n", "expect_site.spl")).to_equal(true)
+        val records = parser_get_error_records()
+        expect(records.len()).to_be_greater_than(0)
+        val rec = records[0]
+        expect(rec.line).to_equal(2)
+        expect(rec.col).to_be_greater_than(1)
+        expect(rec.length).to_be_greater_than(0)
+        expect(rec.message).to_contain("expected =")
+        expect(rec.expected.len()).to_be_greater_than(0)
+        expect(rec.found.len()).to_be_greater_than(0)
+
+    it "maps every record to a DiagnosticV1 with code, file and primary span":
+        # @req REQ-DIAG-005
+        step("Parse a malformed annotation and lift the records")
+        expect(parse_module_silent_checked("val broken: = 1\n", "typed_emit.spl")).to_equal(true)
+        val diags = driver_parse_diagnostics_v1("typed_emit.spl")
+        expect(diags.len()).to_equal(parser_get_error_records().len())
+        val d = diags[0]
+        expect(d.code).to_equal(DRIVER_PARSE_ERROR_CODE)
+        expect(d.code).to_equal("E0001")
+        expect(d.file.unwrap()).to_equal("typed_emit.spl")
+        val span = d.span.unwrap()
+        expect(span.line).to_equal(1)
+        expect(span.col).to_be_greater_than(1)
+        expect(span.length).to_be_greater_than(0)
+        expect(d.message).to_contain("expected type annotation")
+        expect(d.labels.len()).to_equal(1)
+        expect(d.labels[0].primary).to_equal(true)
+        step("The JSON projection carries the same code and position")
+        val json = driver_parse_diagnostics_v1_json("typed_emit.spl")
+        expect(json.len()).to_equal(diags.len())
+        expect(json[0]).to_contain("\"code\":\"E0001\"")
+        expect(json[0]).to_contain("\"line\":1")
+
+    it "clears records when the next module parses cleanly":
+        # @req REQ-DIAG-004
+        step("Follow a bad module with a good one")
+        expect(parse_module_silent_checked("val broken: = 1\n", "clear_bad.spl")).to_equal(true)
+        expect(parser_get_error_records().len()).to_be_greater_than(0)
+        parse_module("val answer: i64 = 42\n", "clear_good.spl")
+        expect(parser_get_error_records().len()).to_equal(0)
+        expect(driver_parse_diagnostics_v1("clear_good.spl").len()).to_equal(0)

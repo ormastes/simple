@@ -76,3 +76,30 @@ The interp spec is 0/5 on the deployed seed, matching this document's recorded
 the seed-fix lane (src/compiler_rust, out of scope here). Kernel/noalloc
 static-zero proof remains deferred per this document. Cycles: 1. Evidence:
 build/review/p2fix-compiler-20261110.sdn.
+
+## 2026-11-12 fix (lane fable-bug-noinitvar-20261112) — the last nil residue was the fixed-array path
+
+Different class than the title: no HIR zero pass is needed (owner item 14 superseded it) and
+both existing specs were already green on the fresh seed (parser 7/7, interp 5/5). The one
+live residue was `fixed_array_no_init_default_expr` (`parser_stmts.spl`): for a module var
+`var g: [T; N]` whose element `T` is imported, later-declared, a class (classes register as
+`DECL_STRUCT`, so `struct_zero_expr_v1` zero-filled them), or any named type under the
+kernel/noalloc gate, it returned `expr_array_repeat(expr_nil_lit(0), N)` — a nil array in
+safe code, with a stale comment still citing the retired item-8 nil contract.
+
+- Fix: the helper reports `explicit initializer required for fixed-size array of <T>` and
+  returns -1; both callers (`parser_decls_use.spl` module path, `var_no_init_default_expr`
+  local path) stop on -1 without a second generic error. The module path additionally
+  rejects a class element via `parser_is_class_decl_v1`, mirroring the bare-var check.
+  An earlier-declared struct element still zero-fills with one literal per slot.
+- Red/green: `test/01_unit/compiler/parser/module_noinit_enum_class_zero_spec.spl` new
+  scenario (imported / later-declared / class / kernel-mode struct element arrays) 7/8 ->
+  8/8; `module_noinit_zero_default_spec.spl` k2 flipped from pinning the nil slots to
+  requiring the initializer, 15/15. `module_noinit_named_nil_parity_spec.spl` is 8/9 both
+  before and after (the MIR `parse_full_frontend` zero-lowering harness issue, unrelated).
+- src/ sites: the only two module-level `[Named; N]` no-init declarations were the unused
+  `trap_frames` in `baremetal/riscv/startup.spl` and `riscv32/startup.spl` (zero references
+  anywhere; struct declared after the var) — deleted. Both files' flat-parser first error is
+  unchanged before/after (line 40/60 `[u8; STACK_SIZE * 4]`, non-literal size; pre-existing).
+- Still deferred, unchanged: native static-zero proof for kernel BSS globals (item 14 keeps
+  the explicit-initializer rule there instead).

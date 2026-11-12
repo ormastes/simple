@@ -1,0 +1,102 @@
+# Host-portable spawn harness for specs that invoke the repo's simple CLI
+# (bin/simple) as a real child process. The POSIX-only pattern
+# (raw rt_process_run + /bin/sh + $REPO/bin/simple) cannot run on native
+# Windows children; this helper builds the equivalent sh / cmd invocation per
+# host, always with SIMPLE_LIB bound to the repository's src/ tree.
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+use std.nogc_sync_mut.env.platform.{is_windows, get_temp_dir}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_create_exclusive, file_delete}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove_all}
+use std.env.variables.{env_get}
+use std.nogc_sync_mut.io.env_ops.{cwd}
+
+val CLI_SPAWN_MAX_OUTPUT: i64 = 16777216
+
+fn _cli_repo_root() -> text:
+    cwd().replace("\\", "/")
+
+fn _cli_program(repo: text) -> text:
+    if is_windows(): repo + "/bin/simple.exe" else: repo + "/bin/simple"
+
+# One shell argv that runs `<repo>/bin/simple run <run_args...>` with
+# SIMPLE_LIB=<repo>/src on the current host.
+fn _cli_shell_argv(repo: text, run_args: [text]) -> (text, [text]):
+    val program = _cli_program(repo)
+    val lib = repo + "/src"
+    if is_windows():
+        val shell = env_get("ComSpec") ?? "cmd.exe"
+        # cmd rejects a quoted executable path after `&&`; repo paths carry no
+        # spaces, so the program and run target stay bare.
+        val cmd = "set \"SIMPLE_LIB=" + lib + "\" && " + program + " run " + run_args.join(" ")
+        (shell, ["/d", "/c", cmd])
+    else:
+        ("/bin/sh", ["-c", "SIMPLE_LIB=\"" + lib + "\" \"" + program + "\" run " + run_args.join(" ")])
+
+pub fn simple_cli_run(run_args: [text], timeout_ms: i64) -> (text, text, i64):
+    """Run the repo CLI with args (already including the `run` target)."""
+    val (shell, shell_args) = _cli_shell_argv(_cli_repo_root(), run_args)
+    process_run_bounded(shell, shell_args, timeout_ms, CLI_SPAWN_MAX_OUTPUT)
+
+# Core of the stdin variants: write stdin_text to a private temp file and
+# return the host shell argv that runs `program args < file` (caller removes
+# the scope dir).
+fn _host_stdin_argv(program: text, args: [text], input_path: text) -> (text, [text]):
+    val redirect = if is_windows():
+        " < " + input_path.replace("/", "\\")
+    else:
+        " < \"" + input_path + "\""
+    if is_windows():
+        val shell = env_get("ComSpec") ?? "cmd.exe"
+        (shell, ["/d", "/c", program + " " + args.join(" ") + redirect])
+    else:
+        ("/bin/sh", ["-c", "\"" + program + "\" " + args.join(" ") + redirect])
+
+pub fn host_run_stdin(program: text, args: [text], stdin_text: text,
+        timeout_ms: i64) -> (text, text, i64):
+    """Run an arbitrary program feeding stdin_text via shell redirection
+    (no SIMPLE_LIB binding; used for compiled-server specs)."""
+    val scope = match secure_temp_dir(get_temp_dir(), "host-run-stdin-"):
+        Ok(path): path.replace("\\", "/")
+        Err(reason): return ("", "error: stdin scope: " + reason, 125)
+    val input_path = scope + "/input.txt"
+    if not file_create_exclusive(input_path, stdin_text):
+        val _removed = dir_remove_all(scope)
+        return ("", "error: stdin fixture creation failed", 125)
+    val (shell, shell_args) = _host_stdin_argv(program, args, input_path)
+    val (out, err, code) = process_run_bounded(shell, shell_args, timeout_ms, CLI_SPAWN_MAX_OUTPUT)
+    val _removed = dir_remove_all(scope)
+    (out, err, code)
+
+pub fn simple_cli_run_stdin(run_args: [text], stdin_text: text,
+        timeout_ms: i64) -> (text, text, i64):
+    """Run the repo CLI feeding stdin_text to the child's stdin (via shell
+    redirection from a private temp file, removed after the run)."""
+    val scope = match secure_temp_dir(get_temp_dir(), "simple-cli-stdin-"):
+        Ok(path): path.replace("\\", "/")
+        Err(reason): return ("", "error: CLI stdin scope: " + reason, 125)
+    val input_path = scope + "/input.txt"
+    if not file_create_exclusive(input_path, stdin_text):
+        val _removed = dir_remove_all(scope)
+        return ("", "error: CLI stdin fixture creation failed", 125)
+    val repo = _cli_repo_root()
+    val program = _cli_program(repo)
+    val lib = repo + "/src"
+    val (shell, shell_args) = if is_windows():
+        val sh = env_get("ComSpec") ?? "cmd.exe"
+        # cmd rejects a quoted executable path after `&&`; repo paths carry no
+        # spaces, so the program and run target stay bare.
+        val cmd = "set \"SIMPLE_LIB=" + lib + "\" && " + program + " run " + run_args.join(" ") + _stdin_redirect(input_path)
+        (sh, ["/d", "/c", cmd])
+    else:
+        ("/bin/sh", ["-c", "SIMPLE_LIB=\"" + lib + "\" \"" + program + "\" run " + run_args.join(" ") + " < \"" + input_path + "\""])
+    val (out, err, code) = process_run_bounded(shell, shell_args, timeout_ms, CLI_SPAWN_MAX_OUTPUT)
+    val _removed = dir_remove_all(scope)
+    (out, err, code)
+
+fn _stdin_redirect(input_path: text) -> text:
+    # Windows: unquoted target (the spawn layer rejects a quoted path after
+    # `<`); secure_temp_dir paths carry no spaces.
+    if is_windows():
+        " < " + input_path.replace("/", "\\")
+    else:
+        " < \"" + input_path + "\""
