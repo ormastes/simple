@@ -792,9 +792,11 @@ var custom_primitive_symbol_ids: [i64] = []
 # key: two modules declaring the same struct name must get distinct ids, or the
 # second declaration's `named_type_update` clobbers the first module's layout
 # (bug bare_name_registry_collision_trigger_conditions_2026-07-30).
-# Kept out of the flat-pool snapshot on purpose: the snapshot path resets per
-# module, where ownership is moot; `named_type_module_at` tolerates a shorter
-# array after a restore.
+# Carried by the flat-pool snapshot (FlatPoolState) with the registry it keys:
+# the public-summary validation parse takes fresh pools and reinstates the
+# caller's, which must come back with their ownership intact
+# (bug stage2_parse_shard_segv_named_type_find_2026-11-13).
+# `named_type_module_at` tolerates a shorter array after a restore.
 var named_type_modules: [text] = []
 var named_type_current_module: text = ""
 
@@ -1772,9 +1774,10 @@ pub fn type_pools_promote_hir_owners() -> bool:
     promoted = _type_pool_promote_root_arr_i64([union_type_members]) and promoted
     promoted = _type_pool_promote_root_i64([result_type_ok]) and promoted
     promoted = _type_pool_promote_root_i64([result_type_err]) and promoted
-    # Public-summary validation performs a low-level parse after the retained
-    # full parse's scratch scope ends. That parser resets AST nodes but does
-    # not reset these type registries, so their live owners must survive too.
+    # Added for the public-summary validation parse, which now runs on its own
+    # fresh pools (project_public_summary_v1 takes/installs FlatPoolState) and
+    # no longer touches these owners. Kept: the retained parse's Option/array
+    # type tags index these registries.
     promoted = _type_pool_promote_root_i64([option_generic_inner_tags]) and promoted
     promoted = _type_pool_promote_root_i64([array_generic_elem_tags]) and promoted
     promoted
@@ -2239,6 +2242,8 @@ pub struct FlatPoolState:
     scope_starts: [i64]
     current_scope_depth: i64
     named_type_names: [text]
+    named_type_modules: [text]
+    named_type_current_module: text
     named_type_arguments: [[i64]]
     named_type_layout_owners: [i64]
     named_type_field_names: [[text]]
@@ -2305,6 +2310,8 @@ pub fn flat_pool_state_take() -> FlatPoolState:
         scope_starts: scope_starts,
         current_scope_depth: current_scope_depth,
         named_type_names: named_type_names,
+        named_type_modules: named_type_modules,
+        named_type_current_module: named_type_current_module,
         named_type_arguments: named_type_arguments,
         named_type_layout_owners: named_type_layout_owners,
         named_type_field_names: named_type_field_names,
@@ -2373,7 +2380,8 @@ pub fn flat_pool_state_install(s: FlatPoolState):
     scope_starts = s.scope_starts
     current_scope_depth = s.current_scope_depth
     named_type_names = s.named_type_names
-    named_type_modules = []
+    named_type_modules = s.named_type_modules
+    named_type_current_module = s.named_type_current_module
     named_type_arguments = s.named_type_arguments
     named_type_layout_owners = s.named_type_layout_owners
     named_type_field_names = s.named_type_field_names
