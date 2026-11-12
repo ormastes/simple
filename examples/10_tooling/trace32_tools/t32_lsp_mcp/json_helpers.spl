@@ -130,40 +130,38 @@ fn lsp_extract_field(json: text, key: text) -> text:
     val raw = lsp_extract_field_raw(json, key)
     if raw == "null":
         return ""
-    if raw.starts_with(lsp_Q()):
-        val parts = raw.split(lsp_Q())
-        if parts.len() >= 2:
-            return parts[1]
+    if raw.starts_with(lsp_Q()) and raw.len() >= 2:
+        # `_raw` returns the still-JSON-escaped value re-quoted through
+        # lsp_js, so it is escaped twice; undo both layers. Before this a
+        # multi-line `source` argument reached the parser as one line with
+        # literal "\n" text.
+        val inner = raw.substring(1, raw.len() - 1)
+        return lsp_unescape_json_string(lsp_unescape_json_string(inner))
     return raw
 
 fn lsp_unescape_json_string(s: text) -> text:
-    var parts: [text] = []
+    # Text accumulation, not `[text].push`: under the test runner `push` on a
+    # local array did not mutate and the function returned "" (lane diag-P3
+    # 2026-11-12; `run` was fine).
+    var out = ""
     var i = 0
     while i < s.len():
         val ch = s.substring(i, i + 1)
-        if ch != "\\":
-            parts.push(ch)
+        if ch != "\\" or i + 1 >= s.len():
+            out = out + ch
             i = i + 1
-            continue
-        if i + 1 >= s.len():
-            parts.push(ch)
-            i = i + 1
-            continue
-        val next = s.substring(i + 1, i + 2)
-        if next == "n":
-            parts.push("\n")
-        elif next == "r":
-            parts.push("\r")
-        elif next == "t":
-            parts.push("\t")
-        elif next == "\"":
-            parts.push("\"")
-        elif next == "\\":
-            parts.push("\\")
         else:
-            parts.push(next)
-        i = i + 2
-    parts.join("")
+            val next = s.substring(i + 1, i + 2)
+            if next == "n":
+                out = out + "\n"
+            elif next == "r":
+                out = out + "\r"
+            elif next == "t":
+                out = out + "\t"
+            else:
+                out = out + next
+            i = i + 2
+    out
 
 fn lsp_extract_field_raw(json: text, key: text) -> text:
     val search = lsp_Q() + key + lsp_Q() + ":"
