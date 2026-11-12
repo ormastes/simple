@@ -52,6 +52,11 @@ fn run_spl_doctest_mode(options: TestOptions, config: TestConfig) -> SdoctestRun
     # test/ and thereby omit production documentation examples.
     val cli_path = doctest_discovery_scope_path(options)
     val explicit_target = cli_path != ""
+    # Fail-closed is reserved for an explicit --spl-doctest request. A
+    # directory positional target names specs — the comment-doctest lane is a
+    # config-enabled complement of that run, so zero doctests under it is a
+    # legal no-op, not an error.
+    val explicit_doc_request = options.spl_doctest
     var files: [text] = []
     if explicit_target:
         if cli_path.ends_with(".spl"):
@@ -69,11 +74,11 @@ fn run_spl_doctest_mode(options: TestOptions, config: TestConfig) -> SdoctestRun
         return SdoctestRunResult(files: [], total: 0, passed: 0, failed: 0, skipped: 0, errors: 0, accepted: 0, duration_ms: 0)
 
     if files.len() == 0:
-        if explicit_target:
-            # An explicitly named target with nothing to run is fail-closed —
-            # mirrors the sdoctest md lane and the single-file spec arbiter's
-            # "no examples executed" contract. Config-driven sweeps (no
-            # target) keep their existing zero-is-ok semantics.
+        if explicit_target and explicit_doc_request:
+            # An explicit --spl-doctest target with nothing to run is
+            # fail-closed — mirrors the sdoctest md lane and the single-file
+            # spec arbiter's "no examples executed" contract. Config-driven
+            # sweeps and spec-directory runs keep their zero-is-ok semantics.
             print "error: test-runner: no doctest blocks found"
             return SdoctestRunResult(files: [], total: 0, passed: 0, failed: 1, skipped: 0, errors: 0, accepted: 0, duration_ms: 0)
         print "No SPL files with doctests found."
@@ -125,10 +130,10 @@ fn run_spl_doctest_mode(options: TestOptions, config: TestConfig) -> SdoctestRun
 
     val duration_ms = (time_now_unix_micros() - run_start) / 1000
 
-    if explicit_target and total == 0:
-        # The explicit target resolved to a real file, but it contained no
-        # extractable doctest (e.g. no ///-or-## fenced block). Fail-closed,
-        # same rationale as the zero-files-found case above.
+    if explicit_target and explicit_doc_request and total == 0:
+        # The explicit --spl-doctest target resolved to a real file, but it
+        # contained no extractable doctest (e.g. no ///-or-## fenced block).
+        # Fail-closed, same rationale as the zero-files-found case above.
         print "error: test-runner: no doctest blocks found"
         return SdoctestRunResult(files: file_results, total: 0, passed: 0, failed: 1, skipped: skipped, errors: errors_count, accepted: 0, duration_ms: duration_ms)
 
