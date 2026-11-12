@@ -119,6 +119,6 @@ sha256 `2fb9ecacbf41145f51aff32104978b39485ada4a07d06c8109c38c030a8a340c`,
 `6.0 6.0 9.0 8.0 6.28318 10.0` (case and arrow Triangle arms agree). Literal-arm
 and enum-payload arrow programs also build and print `one` / `8.0`.
 
-Regression spec: `test/01_unit/compiler/frontend/match_arrow_arm_parse_spec.spl`
+Regression spec: `test/01_unit/compiler/frontend/match_pipe_arrow_arm_parse_spec.spl`
 (literal, guard, multi-binding payload, case control, syntax-error negative
 control): pinned seed `test` reports 5 total, 5 passed, 0 failed.
