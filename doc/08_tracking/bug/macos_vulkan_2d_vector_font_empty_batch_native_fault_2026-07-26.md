@@ -766,3 +766,34 @@ be checked before any run.
 Status: open. The shaper and collector defects are fixed (local branch
 `work/bug-vkrows-20261104`). The budgets row is blocked on the
 interpreter extern gap. The SimpleOS row has not been run.
+
+## 2026-11-12 fix attempt (vulkan-mac lane, work/fix-vulkan-mac-20261112)
+
+The reproduced-evidence section's concrete product-source trap was still
+present at `7a06b4aafd5`: `Engine2D.font_execution_attempts()` and
+`Engine2D.font_execution_target()` were declared `fn` while reading `self`
+(`engine.spl:438-439`), immediately below the in-tree comment naming exactly
+that shape as the documented nil-receiver trap. Three sibling font-receipt
+getters had already been converted to `me`; these two had not.
+
+Changed (all receiver-syntax call sites unchanged; no free-function call of
+these symbols exists anywhere in src/, test/, or examples/):
+
+- `src/lib/gc_async_mut/gpu/engine2d/engine.spl` — `font_execution_attempts`,
+  `font_execution_target`, and `draw_ir_font_evidence` are now `me` methods.
+- `src/lib/gc_async_mut/gpu/engine2d/draw_ir_target.spl` — the
+  `DrawIrRenderTarget` trait declares `font_execution_target` and
+  `draw_ir_font_evidence` as `me` so the implementers keep matching their
+  contract (glob/member dispatch of both is receiver-syntax only).
+- `src/lib/gc_async_mut/gpu/engine2d/draw_ir_target_metal.spl` — the
+  `MetalDrawIrRenderTarget` implementer converted to match the trait.
+
+Static verification only: the nil-receiver fault is a native-codegen-path
+failure, and no admitted self-hosted compiler exists on this host (the Oct-31
+seed predates current source semantics; the stage2 provisional binary cannot
+run tests). Acceptance items 2–8 (producer checkpoint, 100 px Bungee quads,
+cold/warm cache, Vulkan execution, device readback, live capture) remain
+blocked on the admitted compiler from the in-flight bootstrap; the existing
+regression specs (`font_empty_batch_fail_closed_spec.spl`,
+`sfnt_glyf_bungee_native_probe.spl`, `engine_vulkan_font_route_spec.spl`) are
+the rerun set. Status: fix-implemented-verification-pending.

@@ -1,0 +1,415 @@
+# DiagnosticRulePolicy — scheduled per-rule severity (plan §4, P0).
+#
+# Lives beside DiagnosticV1; it is not a second lint framework. A policy
+# snapshot is loaded once per session from SDN (config/policy/
+# diagnostic_policy.sdn) into a dense table: every rule gets a slot, and the
+# per-mode baseline level is precomputed into `baseline[slot * M + mode]`, so a
+# severity lookup is one dict hit plus one array index.
+#
+# Reproducibility: severity is a pure function of (rule, profile, language
+# edition, release date or `policy_as_of`, snapshot). The wall clock is never
+# read, so the same edition + snapshot resolves identically on any day. The
+# snapshot's `digest` (sha256 over a canonical, key-sorted rendering) is what
+# build metadata / cache keys pin.
+#
+# Resolution order (first decisive stage wins):
+#   1. fatal parser/type corruption            -> deny   (stage "fatal")
+#   2. security invariant (category security)  -> deny   (stage "security"; no exception, no phase)
+#   3. edition mandatory: edition >= error_since_lang_version AND the release
+#      (or as-of) date >= error_not_before_date -> deny  (stage "edition")
+#   4. rule schedule: before warn_since (date and edition) -> allow (stage "schedule")
+#   5. profile baseline (mode override, else `default`)  (stage "profile")
+#   6. scoped exception, when exception_policy permits -> allow (stage "exception")
+#   7. warning phase (blanket or per-rule) rehearses one rung lower; result
+#      carries `rehearsal: true` so it can never qualify a release artifact.
+# Unregistered codes pass through at the producer's emitted level.
+
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.parser.{parse}
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.assurance.warning_phase.{phased_rule_severity_rank, severity_rank_advisory}
+
+pub enum RuleLevel:
+    Allow       # silent
+    Advisory    # log-only, still reported
+    Warn        # reported, does not fail the build
+    Deny        # fails the build
+
+impl RuleLevel:
+    fn name() -> text:
+        match self:
+            RuleLevel.Allow: "allow"
+            RuleLevel.Advisory: "advisory"
+            RuleLevel.Warn: "warn"
+            RuleLevel.Deny: "deny"
+
+    # Same ordinal as warning_phase.spl (advisory 0, warn 1, deny 2); allow -1.
+    fn rank() -> i64:
+        match self:
+            RuleLevel.Allow: -1
+            RuleLevel.Advisory: 0
+            RuleLevel.Warn: 1
+            RuleLevel.Deny: 2
+
+fn rule_level_from_rank(rank: i64) -> RuleLevel:
+    if rank >= 2:
+        return RuleLevel.Deny
+    if rank == 1:
+        return RuleLevel.Warn
+    if rank == 0:
+        return RuleLevel.Advisory
+    RuleLevel.Allow
+
+pub fn rule_level_parse(raw: text) -> RuleLevel?:
+    if raw == "allow": return Some(RuleLevel.Allow)
+    if raw == "advisory": return Some(RuleLevel.Advisory)
+    if raw == "warn": return Some(RuleLevel.Warn)
+    if raw == "deny": return Some(RuleLevel.Deny)
+    None
+
+pub struct ModeOverride:
+    mode: text
+    level: RuleLevel
+
+# One rule's schedule. "" = field not set.
+pub struct DiagnosticRulePolicy:
+    rule_id: text
+    description: text
+    created_on: text
+    warn_since_date: text
+    warn_since_lang_version: text
+    error_not_before_date: text
+    error_since_lang_version: text
+    remove_not_before_date: text
+    remove_since_lang_version: text
+    mode_overrides: [ModeOverride]
+    category: text
+    replacement: text
+    exception_policy: text      # allowed | reason_required | forbidden
+
+impl DiagnosticRulePolicy:
+    fn is_security() -> bool:
+        self.category == "security"
+
+    fn allows_exception() -> bool:
+        self.exception_policy != "forbidden" and not self.is_security()
+
+# Fixed dense mode axis (profiles + CI). Index 0 is the `default` column.
+pub fn policy_mode_names() -> [text]:
+    ["default", "advisory", "moderate", "strict", "robust", "critical", "verified", "ci"]
+
+fn policy_mode_index(mode: text) -> i64:
+    val names = policy_mode_names()
+    var i = 0
+    while i < names.len():
+        if names[i] == mode:
+            return i
+        i = i + 1
+    0
+
+# Inputs that decide severity. No wall clock: `release_date` is the date the
+# toolchain release is published with; `policy_as_of` ("" = unset) overrides it
+# for reproducible CI rehearsal.
+pub struct PolicyResolveContext:
+    profile: text
+    language_edition: text
+    release_date: text
+    policy_as_of: text
+    fatal: bool
+    scoped_exception: bool
+    warning_phase: bool
+    phased_rules: [text]
+
+impl PolicyResolveContext:
+    static fn new(profile: text, language_edition: text, release_date: text) -> PolicyResolveContext:
+        PolicyResolveContext(profile: profile, language_edition: language_edition,
+            release_date: release_date, policy_as_of: "", fatal: false,
+            scoped_exception: false, warning_phase: false, phased_rules: [])
+
+    fn with_policy_as_of(date: text) -> PolicyResolveContext:
+        var r = self
+        r.policy_as_of = date
+        r
+
+    fn with_fatal() -> PolicyResolveContext:
+        var r = self
+        r.fatal = true
+        r
+
+    fn with_scoped_exception() -> PolicyResolveContext:
+        var r = self
+        r.scoped_exception = true
+        r
+
+    fn with_warning_phase() -> PolicyResolveContext:
+        var r = self
+        r.warning_phase = true
+        r
+
+    fn with_phased_rule(rule_id: text) -> PolicyResolveContext:
+        var r = self
+        r.phased_rules.push(rule_id)
+        r
+
+    fn effective_date() -> text:
+        if self.policy_as_of != "": self.policy_as_of else: self.release_date
+
+pub struct ResolvedSeverity:
+    rule_id: text
+    level: RuleLevel
+    stage: text          # fatal | security | edition | schedule | profile | exception | unregistered
+    rehearsal: bool      # true when a warning phase lowered the level
+    policy_digest: text
+    effective_date: text
+    profile: text
+    language_edition: text
+
+pub struct DiagnosticPolicySnapshot:
+    version: i64
+    rules: [DiagnosticRulePolicy]
+    digest: text
+    slot_by_code: Dict<text, i64>
+    baseline: [RuleLevel]        # rules.len() * policy_mode_names().len()
+
+impl DiagnosticPolicySnapshot:
+    fn rule_count() -> i64:
+        self.rules.len()
+
+    fn slot_of(code: text) -> i64:
+        match self.slot_by_code.get(code):
+            Some(s): s
+            None: -1
+
+    fn has_rule(code: text) -> bool:
+        self.slot_of(code) >= 0
+
+    # Caller checks has_rule first; an unknown code returns an empty policy.
+    fn rule(code: text) -> DiagnosticRulePolicy:
+        val slot = self.slot_of(code)
+        if slot < 0:
+            return empty_rule_policy(code)
+        self.rules[slot]
+
+    # O(1): one dict hit + one dense array index.
+    fn baseline_level(slot: i64, mode: text) -> RuleLevel:
+        self.baseline[slot * policy_mode_names().len() + policy_mode_index(mode)]
+
+    fn resolve(code: text, ctx: PolicyResolveContext, emitted: RuleLevel) -> ResolvedSeverity:
+        val date = ctx.effective_date()
+        var out = ResolvedSeverity(rule_id: code, level: emitted, stage: "unregistered",
+            rehearsal: false, policy_digest: self.digest, effective_date: date,
+            profile: ctx.profile, language_edition: ctx.language_edition)
+        if ctx.fatal:
+            out.level = RuleLevel.Deny
+            out.stage = "fatal"
+            return out
+        val slot = self.slot_of(code)
+        if slot < 0:
+            return out
+        val r = self.rules[slot]
+        if r.is_security():
+            out.level = RuleLevel.Deny
+            out.stage = "security"
+            return out
+        var mandatory = false
+        if edition_reached(ctx.language_edition, r.error_since_lang_version) and date_reached(date, r.error_not_before_date):
+            mandatory = true
+        if edition_reached(ctx.language_edition, r.remove_since_lang_version) and date_reached(date, r.remove_not_before_date):
+            mandatory = true
+        if mandatory:
+            out.level = RuleLevel.Deny
+            out.stage = "edition"
+        else:
+            val warn_by_date = date_reached(date, r.warn_since_date)
+            val warn_by_edition = edition_reached(ctx.language_edition, r.warn_since_lang_version)
+            if not warn_by_date and not warn_by_edition:
+                out.level = RuleLevel.Allow
+                out.stage = "schedule"
+                return out
+            out.level = self.baseline_level(slot, ctx.profile)
+            out.stage = "profile"
+            if ctx.scoped_exception and r.allows_exception():
+                out.level = RuleLevel.Allow
+                out.stage = "exception"
+                return out
+        val phased = ctx.phased_rules.contains(code)
+        val before = out.level.rank()
+        val after = phased_rule_severity_rank(before, severity_rank_advisory(), ctx.warning_phase, phased, false)
+        if after != before:
+            out.level = rule_level_from_rank(after)
+            out.rehearsal = true
+        out
+
+fn empty_rule_policy(code: text) -> DiagnosticRulePolicy:
+    DiagnosticRulePolicy(rule_id: code, description: "", created_on: "", warn_since_date: "",
+        warn_since_lang_version: "", error_not_before_date: "", error_since_lang_version: "",
+        remove_not_before_date: "", remove_since_lang_version: "", mode_overrides: [],
+        category: "", replacement: "", exception_policy: "allowed")
+
+# --- Date / edition comparison (no date library, no clock) ---
+
+# ISO YYYY-MM-DD compares exactly lexicographically. "" threshold = never.
+fn date_reached(date: text, threshold: text) -> bool:
+    if threshold == "" or date == "":
+        return false
+    date >= threshold
+
+fn edition_component(raw: text) -> i64:
+    val digits = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]
+    var n = 0
+    for ch in raw:
+        var d = 0
+        while d < 10:
+            if digits[d] == ch:
+                n = n * 10 + d
+            d = d + 1
+    n
+
+# Dotted numeric editions ("2026.11" < "2027.2"). "" threshold = never.
+fn edition_reached(edition: text, threshold: text) -> bool:
+    if threshold == "" or edition == "":
+        return false
+    val a = edition.split(".")
+    val b = threshold.split(".")
+    var i = 0
+    while i < a.len() or i < b.len():
+        val x = if i < a.len(): edition_component(a[i]) else: 0
+        val y = if i < b.len(): edition_component(b[i]) else: 0
+        if x != y:
+            return x > y
+        i = i + 1
+    true
+
+# --- Loading ---
+
+pub fn diagnostic_policy_default_path() -> text:
+    "config/policy/diagnostic_policy.sdn"
+
+fn sdn_text_field(node: SdnValue, key: text) -> text:
+    match node.get(key):
+        Some(v):
+            match v.as_str():
+                Some(s): s
+                None: v.to_text()
+        None: ""
+
+fn sorted_texts(items: [text]) -> [text]:
+    var out: [text] = []
+    for item in items:
+        var next: [text] = []
+        var placed = false
+        for o in out:
+            if not placed and item < o:
+                next.push(item)
+                placed = true
+            next.push(o)
+        if not placed:
+            next.push(item)
+        out = next
+    out
+
+fn canonical_rule_text(r: DiagnosticRulePolicy) -> text:
+    var parts: [text] = [r.rule_id, r.description, r.created_on, r.warn_since_date,
+        r.warn_since_lang_version, r.error_not_before_date, r.error_since_lang_version,
+        r.remove_not_before_date, r.remove_since_lang_version, r.category, r.replacement,
+        r.exception_policy]
+    for m in r.mode_overrides:
+        parts.push(m.mode + "=" + m.level.name())
+    parts.join("|")
+
+fn parse_rule(rule_id: text, node: SdnValue) -> Result<DiagnosticRulePolicy, text>:
+    var overrides: [ModeOverride] = []
+    var modes_node = node
+    var has_modes = false
+    match node.get("modes"):
+        Some(mv):
+            modes_node = mv
+            has_modes = true
+        None: has_modes = false
+    if has_modes:
+        var mode_dict: Dict<text, SdnValue> = {}
+        match modes_node.as_dict():
+            Some(d): mode_dict = d
+            None: return Err(rule_id + ": `modes` must be a mapping")
+        for mode in sorted_texts(mode_dict.keys()):
+            val raw = sdn_text_field(modes_node, mode)
+            match rule_level_parse(raw):
+                Some(level): overrides.push(ModeOverride(mode: mode, level: level))
+                None: return Err(rule_id + ": unknown severity `" + raw + "` for mode " + mode)
+    var exception_policy = sdn_text_field(node, "exception_policy")
+    if exception_policy == "":
+        exception_policy = "allowed"
+    if exception_policy != "allowed" and exception_policy != "reason_required" and exception_policy != "forbidden":
+        return Err(rule_id + ": unknown exception_policy `" + exception_policy + "`")
+    Ok(DiagnosticRulePolicy(rule_id: rule_id,
+        description: sdn_text_field(node, "description"),
+        created_on: sdn_text_field(node, "created_on"),
+        warn_since_date: sdn_text_field(node, "warn_since_date"),
+        warn_since_lang_version: sdn_text_field(node, "warn_since_lang_version"),
+        error_not_before_date: sdn_text_field(node, "error_not_before_date"),
+        error_since_lang_version: sdn_text_field(node, "error_since_lang_version"),
+        remove_not_before_date: sdn_text_field(node, "remove_not_before_date"),
+        remove_since_lang_version: sdn_text_field(node, "remove_since_lang_version"),
+        mode_overrides: overrides,
+        category: sdn_text_field(node, "category"),
+        replacement: sdn_text_field(node, "replacement"),
+        exception_policy: exception_policy))
+
+fn baseline_for(r: DiagnosticRulePolicy, mode: text) -> RuleLevel:
+    var fallback = RuleLevel.Warn
+    for m in r.mode_overrides:
+        if m.mode == mode:
+            return m.level
+        if m.mode == "default":
+            fallback = m.level
+    fallback
+
+# Parse a policy document and build the dense table once. Fails closed on an
+# unknown severity / exception spelling rather than defaulting.
+pub fn load_diagnostic_policy_text(source: text) -> Result<DiagnosticPolicySnapshot, text>:
+    var root = SdnValue.Null
+    match parse(source):
+        Ok(v): root = v
+        Err(e): return Err("diagnostic policy parse error: " + e)
+    var top = root
+    match root.get("diagnostic_policy"):
+        Some(t): top = t
+        None: return Err("diagnostic policy: missing `diagnostic_policy` root")
+    var version = 0
+    match top.get("version"):
+        Some(v):
+            match v.as_i64():
+                Some(n): version = n
+                None: version = 0
+        None: version = 0
+    if version != 1:
+        return Err("diagnostic policy: unsupported version " + version.to_text())
+    var rules_node = top
+    match top.get("rules"):
+        Some(rn): rules_node = rn
+        None: return Err("diagnostic policy: missing `rules`")
+    var rule_dict: Dict<text, SdnValue> = {}
+    match rules_node.as_dict():
+        Some(d): rule_dict = d
+        None: return Err("diagnostic policy: `rules` must be a mapping")
+    var rules: [DiagnosticRulePolicy] = []
+    var slots: Dict<text, i64> = {}
+    var baseline: [RuleLevel] = []
+    var canon: [text] = ["v" + version.to_text()]
+    for id in sorted_texts(rule_dict.keys()):
+        var node = rules_node
+        match rules_node.get(id):
+            Some(n): node = n
+            None: return Err("diagnostic policy: rule vanished: " + id)
+        match parse_rule(id, node):
+            Ok(r):
+                slots[id] = rules.len()
+                rules.push(r)
+                for mode in policy_mode_names():
+                    baseline.push(baseline_for(r, mode))
+                canon.push(canonical_rule_text(r))
+            Err(e): return Err("diagnostic policy: " + e)
+    Ok(DiagnosticPolicySnapshot(version: version, rules: rules,
+        digest: "sha256:" + sha256_text(canon.join("\n")),
+        slot_by_code: slots, baseline: baseline))
+

@@ -1,0 +1,45 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-LIB
+# HttpLimits: negative sentinels / negative measured sizes fail closed.
+
+use std.spec.step
+use std.spec.{describe, it, expect}
+use std.common.net.http_core.{HttpLimits, http_limits_default, check_body_size, check_header_count, decode_chunked_bounded, body_decision}
+
+fn limits_with_body(max_body: i64) -> HttpLimits:
+    val d = http_limits_default()
+    HttpLimits(max_request_line_bytes: d.max_request_line_bytes, max_header_count: d.max_header_count, max_header_size_bytes: d.max_header_size_bytes, max_body_bytes: max_body, max_requests_per_connection: d.max_requests_per_connection)
+
+describe "HttpLimits negative-sentinel handling":
+    it "a negative measured body size is refused":
+        # @req REQ-SSPEC-LIB
+        step("check_body_size(-1) under default limits")
+        expect(check_body_size(-1, http_limits_default()).?).to_equal(true)
+
+    it "a negative header count is refused":
+        # @req REQ-SSPEC-LIB
+        step("check_header_count(-1) under default limits")
+        expect(check_header_count(-1, http_limits_default()).?).to_equal(true)
+
+    it "a negative max_body_bytes sentinel admits nothing, not even an empty body":
+        # @req REQ-SSPEC-LIB
+        step("check_body_size(0) with max_body_bytes = -1")
+        expect(check_body_size(0, limits_with_body(-1)).?).to_equal(true)
+
+    it "a body within the default limit is admitted":
+        # @req REQ-SSPEC-LIB
+        step("check_body_size(10)")
+        expect(check_body_size(10, http_limits_default()).?).to_equal(false)
+
+    it "a single chunk larger than max_body is refused with 413":
+        # @req REQ-SSPEC-LIB
+        step("decode a 16-byte chunk against max_body 4")
+        val res = decode_chunked_bounded("10\r\n0123456789abcdef\r\n0\r\n\r\n", 4)
+        expect(res.0).to_start_with("413")
+
+    it "a negative max_body refuses any Content-Length":
+        # @req REQ-SSPEC-LIB
+        step("body_decision with Content-Length 0 and max_body -1")
+        val headers: [(text, text)] = [("Content-Length", "0")]
+        val d = body_decision(headers, -1, false)
+        expect(d.0).to_start_with("413")

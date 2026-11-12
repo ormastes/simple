@@ -84,3 +84,19 @@ Requirement options and the selected-capability design are recorded in:
 - `doc/05_design/runtime/vulkan_async_compute_submission_ring.md`
 - `doc/03_plan/sys_test/vulkan_async_compute_submission_ring.md`
 
+
+## 2026-11-12 lane triage (vulkan-mac lane, work/fix-vulkan-mac-20261112)
+
+Re-read against current source. The required runtime fix is in the Rust
+runtime owner (`VulkanState.quarantined_compute` / `rt_vulkan_begin_compute`
+gate / `rt_vulkan_destroy_fence` handle-only revocation), i.e.
+`src/compiler_rust` + `src/runtime` — outside this lane's file scope
+(src/lib gpu/vulkan/sffi/compositor + scripts/check only). The pure-Simple
+side was re-confirmed non-authoritative: `VulkanLaneSession` and the engine
+backend hold copied integer handles and cannot inspect or release the native
+quarantine entries, so no safe Simple-only ring exists against the current
+API, matching the 2026-09-09 ownership review. No source change made. The
+acceptance design documents under
+doc/02_requirements/feature|nfr/vulkan_async_compute_submission_ring.md and
+doc/05_design/runtime/vulkan_async_compute_submission_ring.md remain the
+specification for the runtime owner. Status: open.

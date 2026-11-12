@@ -75,3 +75,27 @@ the documented recipe passes entry collection on the seed and proceeds to an
 unrelated parse error. A full re-run of the CUDA probe recipe is host-heavy
 (Linux CUDA host) and was not repeated from this Windows lane. No code change
 this lane; header flipped to match the verified disposition.
+
+## 2026-11-12 P3 fix-runpath-gpu lane — re-verified, aggregate DB row synced to closed
+
+Static re-verification at this lane's pinned HEAD `7a06b4aafd5` (no
+working compiler on this host, so no live re-run of the CUDA probe recipe):
+
+- `git merge-base --is-ancestor 9e7e7a526edb HEAD` — ANCESTOR (PR #7597 in
+  this tree).
+- `src/compiler/80.driver/driver_source_pipeline_loading.spl` (around
+  line 1004) carries the fail-closed zero-source diagnostic naming the true
+  cause ("the entry must be a path to a .spl file ... not a module path ...
+  resolved relative to the current working directory") plus the ROOT FIX
+  that loads the entry's transitive import closure — exactly the defect and
+  wrong-diagnosis complaint this record documents.
+- The per-bug db file
+  (`doc/08_tracking/bug/db/native_build_entry_closure_collects_zero_files_cuda_fill_probe_2026-08-19.sdn`)
+  already recorded `closed` on 2026-11-09; only the aggregate
+  `bug_db.sdn` row was still `open`. This lane synced the aggregate row to
+  `closed` with an updated title and `updated_at=2026-11-12`.
+
+No code change this lane (nothing left to fix in scope). A full re-run of
+the CUDA fill native probe recipe remains pending a Linux CUDA host.
+
+Status: CLOSED (superseded upstream; bookkeeping synced).

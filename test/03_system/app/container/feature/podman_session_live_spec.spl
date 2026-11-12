@@ -1,0 +1,63 @@
+# REAL podman smoke for the session layer: normal exit, failing workload,
+# timeout kill, and recovery of a killed supervisor's container by label.
+# Opt-in: SIMPLE_PODMAN_SMOKE=1 and a local busybox:1.36 image. Without the
+# gate every example prints "PODMAN SMOKE NOT RUN" and asserts nothing about
+# podman — a green run without that gate is NOT podman evidence.
+use std.nogc_sync_mut.container_session.podman_session_v1.*
+use std.io_runtime.{env_get, getpid}
+
+fn smoke_enabled() -> bool:
+    if (env_get("SIMPLE_PODMAN_SMOKE") ?? "") == "1": return true
+    print "PODMAN SMOKE NOT RUN (set SIMPLE_PODMAN_SMOKE=1)"
+    false
+
+fn smoke_owner() -> text:
+    "simple-podman-test-" + getpid().to_text()
+
+fn smoke_spec(suffix: text, command: [text]) -> PodmanSessionSpecV1:
+    PodmanSessionSpecV1(name: smoke_owner() + "-" + suffix, owner: smoke_owner(),
+        image: "busybox:1.36", command: command)
+
+fn smoke_owned() -> [text]:
+    podman_session_owned_v1(smoke_owner(), podman_session_host_runner_v1).unwrap()
+
+describe "Podman session against the real engine (opt-in)":
+    it "runs a workload to normal exit and leaves no container":
+        if smoke_enabled():
+            val run = podman_session_run_v1(smoke_spec("ok", ["echo", "container-ok"]), 60000, podman_session_host_runner_v1)
+            print "LIVE normal exit={run.exit_code} reaped={run.reaped} error={run.error}"
+            expect(run.error).to_equal("")
+            expect(run.exit_code).to_equal(0)
+            expect(run.stdout.trim()).to_equal("container-ok")
+            expect(run.reaped).to_equal(true)
+            expect(smoke_owned().len()).to_equal(0)
+
+    it "keeps a failing workload's exit code and leaves no container":
+        if smoke_enabled():
+            val run = podman_session_run_v1(smoke_spec("err", ["sh", "-c", "exit 7"]), 60000, podman_session_host_runner_v1)
+            print "LIVE error exit={run.exit_code} reaped={run.reaped} error={run.error}"
+            expect(run.exit_code).to_equal(7)
+            expect(run.reaped).to_equal(true)
+            expect(smoke_owned().len()).to_equal(0)
+
+    it "reaps the container when the client is killed at the timeout":
+        if smoke_enabled():
+            val run = podman_session_run_v1(smoke_spec("kill", ["sleep", "300"]), 4000, podman_session_host_runner_v1)
+            print "LIVE timeout exit={run.exit_code} reaped={run.reaped} error={run.error}"
+            expect(run.exit_code != 0).to_equal(true)
+            expect(run.reaped).to_equal(true)
+            expect(run.error).to_equal("")
+            expect(smoke_owned().len()).to_equal(0)
+
+    it "finds and reaps by label what a killed supervisor left running":
+        if smoke_enabled():
+            # A "supervisor" that dies without cleaning up: its client is
+            # killed at the timeout and nothing reaps the container.
+            val argv = podman_session_run_argv_v1(smoke_spec("orphan", ["sleep", "300"])).unwrap()
+            val abandoned = podman_session_host_runner_v1(argv, 4000)
+            val left = smoke_owned()
+            print "LIVE orphan left={left.len()}"
+            expect(left).to_equal([smoke_owner() + "-orphan"])
+            expect(podman_session_reap_owner_v1(smoke_owner(), podman_session_host_runner_v1).unwrap())
+                .to_equal([smoke_owner() + "-orphan"])
+            expect(smoke_owned().len()).to_equal(0)

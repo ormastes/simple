@@ -20,10 +20,11 @@
 #   - no backend built -> 503, naming the library that is absent
 #   - will not fit     -> 503, naming the arithmetic that refused it
 
-use std.gc_async_mut.slang.entrypoints.openai.protocol.{ApiResponse, parse_chat_request, openai_error_response, openai_chat_completion_response, json_string_field_last}
+use std.gc_async_mut.slang.entrypoints.openai.protocol.{ApiResponse, parse_chat_request, openai_error_response, openai_chat_completion_response, chat_messages_from_body}
 use std.gc_async_mut.slang.entrypoints.openai.serving_models.{SlangModelEntry, discover_models, find_model}
 use std.gc_async_mut.slang.model_executor.model_loader.native_formats.{NativeModel, scan_model_root}
-use std.gc_async_mut.slang.engine.llm_engine.{engine_backend_available, engine_complete, engine_lib_path}
+use std.gc_async_mut.slang.engine.llm_engine.{engine_backend_available, engine_complete_chat, engine_lib_path}
+use std.gc_async_mut.slang.model_executor.backend.{chat_frame}
 
 # The most advanced phase of slang's OWN engine that is actually present.
 # Unchanged at A1, deliberately: the ggml backend routes AROUND the native
@@ -67,19 +68,29 @@ fn engine_refusal_response(model: text, reason: text) -> ApiResponse:
     val detail = "\"slang\":{\"stub\":false,\"engine\":\"slang\",\"backend\":\"ggml\",\"backend_library\":\"" + engine_lib_path() + "\",\"backend_available\":" + (if engine_backend_available(): "true" else: "false") + ",\"implemented_phase\":\"" + slang_implemented_phase() + "\",\"missing_inference_phases\":" + _missing_phases_json() + "}"
     openai_error_response(503, "model '" + model + "' cannot be served: " + reason, "server_error", "model_not_runnable", detail)
 
-# The prompt is the newest message's content. Requests with no readable content
-# are refused rather than served an empty prompt, which a model would answer
-# with plausible noise.
-fn _prompt_from_body(body: text) -> text:
-    json_string_field_last(body, "content")
+# The prompt is EVERY message, in order: a client that sends a system prompt
+# and the running history (an agent tool loop does both) must have the model
+# see all of it. Requests with no readable content are refused rather than
+# served an empty prompt, which a model would answer with plausible noise.
+fn chat_frames_from_body(body: text) -> text:
+    var framed = ""
+    var readable = false
+    for message in chat_messages_from_body(body):
+        if message.content.trim() != "":
+            readable = true
+        framed = framed + chat_frame(message.role, message.content)
+    if readable:
+        framed
+    else:
+        ""
 
 fn serve_chat_completions(model_root: text, body: text) -> ApiResponse:
     match parse_chat_request(body):
         Err(reason):
             openai_error_response(400, reason, "invalid_request_error", "invalid_request", "")
         Ok(request):
-            val prompt = _prompt_from_body(body)
-            if prompt.trim() == "":
+            val framed = chat_frames_from_body(body)
+            if framed == "":
                 return openai_error_response(400, "no readable message content in the request", "invalid_request_error", "invalid_request", "")
             # A native slang pack is answered by the pack-aware refusal, which
             # can report tensor and chunk counts the generic path cannot.
@@ -92,7 +103,7 @@ fn serve_chat_completions(model_root: text, body: text) -> ApiResponse:
                     found = m
             if found == nil:
                 return model_not_found_response(request.model)
-            match engine_complete(model_root, request.model, prompt, request.max_tokens):
+            match engine_complete_chat(model_root, request.model, framed, request.max_tokens):
                 Err(reason):
                     engine_refusal_response(request.model, reason)
                 Ok(content):
@@ -100,4 +111,4 @@ fn serve_chat_completions(model_root: text, body: text) -> ApiResponse:
 
 export slang_implemented_phase, slang_missing_inference_phases
 export model_not_runnable_response, model_not_found_response, engine_refusal_response
-export serve_chat_completions
+export serve_chat_completions, chat_frames_from_body

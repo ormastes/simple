@@ -307,6 +307,9 @@ fn decode_chunked_bounded(encoded: text, max_body: i32) -> (text, text):
         rest = rest.slice(nl + 2, rest.len())
         if size == 0:
             return ("", body)
+        # Refuse an oversize chunk before materialising it (no transient overshoot).
+        if max_body < 0 or size > max_body - body.len():
+            return ("413 Chunked body too large: {body.len() + size} bytes", "")
         if rest.len() < size:
             return ("400 Malformed chunked body: truncated chunk", "")
         body = body + rest.slice(0, size)
@@ -456,7 +459,8 @@ fn check_request_line(line: text, limits: HttpLimits) -> HttpParseError?:
     nil
 
 fn check_header_count(count: i64, limits: HttpLimits) -> HttpParseError?:
-    if count > limits.max_header_count:
+    # Fail closed: a negative count or a negative (sentinel) limit admits nothing.
+    if count < 0 or limits.max_header_count < 0 or count > limits.max_header_count:
         return Some(HttpParseError.TooManyHeaders(count, limits.max_header_count))
     nil
 
@@ -467,7 +471,8 @@ fn check_header_size(name: text, value: text, limits: HttpLimits) -> HttpParseEr
     nil
 
 fn check_body_size(size: i64, limits: HttpLimits) -> HttpParseError?:
-    if size > limits.max_body_bytes:
+    # Fail closed: a negative size or a negative (sentinel) limit admits nothing.
+    if size < 0 or limits.max_body_bytes < 0 or size > limits.max_body_bytes:
         return Some(HttpParseError.BodyTooLarge(size, limits.max_body_bytes))
     nil
 

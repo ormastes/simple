@@ -24,7 +24,14 @@ describe "canonical tier module resolution":
         # The CLI fallback moved to native_build_closure.spl (5409b246adc) and
         # the HIR import fallback to module_import_registration.spl
         # (4b88aebf00b); the surface registry index carries two more loops.
+        # Retargeted 2026-11-12: b2b6e51a633 hoisted the CLI tier list into
+        # source_root_std_family_order_v1() and 7b595fe78d4 then routed the CLI
+        # closure walk through the driver's shared closure-import resolver
+        # (driver_entry_closure_core.spl since 98519d733d6), so the CLI keeps no
+        # local tier literal and the canonical list lives in one function.
         val compile_targets = file_read("src/app/io/_CliCompile/native_build_closure.spl")
+        val std_family_order = file_read("src/compiler/00.common/source_root_resolution.spl")
+        val closure_core = file_read("src/compiler/80.driver/driver_entry_closure_core.spl")
         val hir_modules = file_read("src/compiler/20.hir/hir_lowering/_Items/module_import_registration.spl")
         val surface_index = file_read("src/compiler/20.hir/hir_lowering/module_surface_registry_index.spl")
         val seed_modules = file_read("src/compiler_rust/compiler/src/module_resolver/resolution.rs")
@@ -32,7 +39,13 @@ describe "canonical tier module resolution":
 
         val first_seed_fallback = seed_interpreter.index_of("for subdir in &[")
         val first_surface_loop = surface_index.index_of("for tier in [")
-        expect(follows_canonical_order(compile_targets, "for tier in [", 0)).to_equal(true)
+        val order_sig = "pub fn source_root_std_family_order_v1() -> [text]:"
+        val order_at = std_family_order.index_of(order_sig)
+        expect(order_at).to_be_greater_than(-1)
+        expect(follows_canonical_order(std_family_order, "[", order_at + order_sig.len())).to_equal(true)
+        expect(closure_core).to_contain("for family in source_root_std_family_order_v1():")
+        expect(compile_targets).to_contain("val module_paths = driver_closure_import_specs_v1(f)")
+        expect(compile_targets.contains("\"nogc_async_mut\"")).to_equal(false)
         expect(follows_canonical_order(hir_modules, "for tier in [", 0)).to_equal(true)
         expect(follows_canonical_order(surface_index, "for tier in [", 0)).to_equal(true)
         expect(follows_canonical_order(surface_index, "for tier in [", first_surface_loop + 1)).to_equal(true)

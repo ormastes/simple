@@ -181,6 +181,25 @@ impl JitInterpreterBackend:
             if self.config.mode == JitMode.AlwaysJit:
                 return Err(BackendError.compile_error("@cfg-disabled function {fn_.name} for this target", Some(fn_.span)))
             return Ok(())
+        # Registry parity with the AOT lane (driver mir_setup): a fresh
+        # MirLowering owns EMPTY enum-variant and struct-layout registries, and
+        # lower_function -- unlike lower_module -- runs no provider pass that
+        # registers this module's own declarations. A hot function matching on
+        # its OWN module's enum (browser_engine `_level_rank` over
+        # BrowserLogLevel) then degraded every arm to "enum match: unknown
+        # variant" and silently fell back to interpretation -- the same
+        # demand-incomplete registry gap the AOT lane closed with
+        # register_module_enum_inventory_v1 (B5b,
+        # CompilerProfile.to_text). The bootstrap inventory variant also
+        # registers runtime ids and the builtin Option/Result seeds, which
+        # enum construction sites require (stage3 site-19); lower_function
+        # bypasses every provider pass exactly like that lane. The module is
+        # in hand here; the registrations are idempotent with the AOT setup.
+        var jit_registry_modules: Dict<text, HirModule> = {}
+        jit_registry_modules["jit"] = module
+        lowering.prescan_module_struct_names(jit_registry_modules, "jit")
+        lowering.register_module_enum_bootstrap_inventory_v1([module])
+        lowering.register_module_composite_inventory_v1([module])
         val mir_fn = lowering.lower_function(fn_)
 
         if lowering.errors.len() > 0:
