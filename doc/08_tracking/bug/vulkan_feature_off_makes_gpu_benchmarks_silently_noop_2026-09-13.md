@@ -112,3 +112,45 @@ PASS. Default-build execution, native/JIT routing and real transfer/dispatch
 must be bound to their actual selected provider before declaring the whole
 record resolved. No GPU, performance or platform checks were run in this
 audit, and the canonical BugDB row remains untouched and OPEN.
+
+## 2026-11-12 behavioral detection + live verification (vulkan-mac lane, work/fix-vulkan-mac-20261112)
+
+Confirmed the 2026-11-07 audit's source claims at `7a06b4aafd5` by direct
+reading of `interpreter_extern/gpu.rs` + `interpreter_extern/mod.rs`: the
+`rt_vk_*` runtime-crate family is `#[cfg(feature = "vulkan")]`-gated (and its
+availability handler answers 0 when the feature is off — honest), while the
+`rt_vulkan_*` interpreter family (`mod vulkan_dlopen`) is registered
+unconditionally and is fully implemented in a default build. The original
+false-advertisement mechanism therefore no longer exists on the interpreter
+surface; candidate fix 1 (gating the interpreter availability handler on the
+cargo feature) remains correctly rejected.
+
+Rewrote `scripts/check/check-vulkan-compute-real.shs` to match the two-family
+reality. The old verdict rested on static ash symbols, which now FALSE-FAIL
+working dlopen builds (they legitimately have no static ash symbols). The
+rewritten script embeds a stdlib-free probe (`extern fn rt_vulkan_*` only)
+that exercises availability -> init -> device count -> buffer alloc ->
+host-to-device copy and parses the stage lines, so:
+
+- probe verdict `real`   -> PASS (execution evidence)
+- probe verdict `noop`   -> FAIL (the documented silent-stub signature)
+- probe verdict `no-device` / runner failure -> ERROR (fail-closed, absence
+  of evidence is never a pass)
+- execution impossible (e.g. cross-host .exe) -> clearly labeled
+  symbol-evidence fallback; missing symbols alone are ERROR, not FAIL
+
+Live verification on this host (macOS 26, M4, Homebrew MoltenVK) against the
+default Oct-31 seed binary:
+
+    vcr_stage=is_available ok=1
+    vcr_stage=init ok=1
+    vcr_stage=device_count ok=1
+    vcr_stage=alloc_buffer ok=1
+    vcr_stage=host_to_device_copy ok=1
+    PASS — vulkan compute is real in .../bin/simple (execution probe)
+
+`sh -n` clean; no-binary and no-Vulkan cases exit 2 with ERROR as designed.
+Remaining: re-running `bench_2d_vulkan.spl` end-to-end on an admitted
+self-hosted binary to bind the benchmark path itself (the probe proves the
+compute surface it depends on). Status: fixed (detection); benchmark rerun
+pending the admitted compiler.
