@@ -6255,6 +6255,30 @@ impl MirLowering:
                 case _: return Some(known)
         self.option_map_value_hir_type(local, expression.span)
 
+    me untyped_result_ctor_payload_witness(local: LocalId, expression: HirExpr) -> HirType?:
+        """Payload type of an untyped `Ok(p)` / `Err(p)`: the lowered payload's
+        retained type, the expression's own type, a declared struct field's
+        type, or a native text word. Anything else is unknown, never guessed."""
+        if val known = self.find_local_hir_type(local.id):
+            match known.kind:
+                case HirTypeKind.Infer(_, _) | HirTypeKind.Error | HirTypeKind.Any: ()
+                case _: return Some(known)
+        if val known = self.enum_match_expr_type(expression):
+            match known.kind:
+                case HirTypeKind.Infer(_, _) | HirTypeKind.Error | HirTypeKind.Any: ()
+                case _: return Some(known)
+        match expression.kind:
+            case Field(base, field_name, _):
+                if val declared = self.declared_field_hir_type(base, field_name):
+                    if not self.hir_type_mentions_type_param(declared, self.symbols):
+                        match declared.kind:
+                            case HirTypeKind.Infer(_, _) | HirTypeKind.Error | HirTypeKind.Any: ()
+                            case _: return Some(declared)
+            case _: ()
+        if self.local_is_str(local):
+            return Some(HirType(kind: HirTypeKind.Str, span: expression.span))
+        None
+
     me lower_enum_construct_named(enum_name: text, variant: text, args: [HirCallArg]) -> LocalId:
         """Same as lower_enum_lit but entered from the MethodCall path, where
         `Shape.Circle(7)` arrives as receiver=`Shape`, method=`Circle`. The enum
@@ -6417,8 +6441,17 @@ impl MirLowering:
             else:
                 # Untyped `Ok(..)` / `Err(..)`: no Result HIR type is known
                 # here. Record the constructor so a merge can adopt the type
-                # of its typed arms (mir_unresolved_method_inferred_receiver_2026-10-24).
+                # of its typed arms (mir_unresolved_method_inferred_receiver_2026-10-24),
+                # and its payload's witnessed type so an all-constructor
+                # join can own `Result<ok, err>` itself
+                # (stage2_if_expr_result_join_untyped_match_payload_2026-11-07).
                 self.untyped_result_ctor_locals[tagged.id] = true
+                if args.len() == 1:
+                    if val witness = self.untyped_result_ctor_payload_witness(payload_local, args[0].value):
+                        if variant == "Ok":
+                            self.untyped_ok_ctor_payload_types[tagged.id] = witness
+                        else:
+                            self.untyped_err_ctor_payload_types[tagged.id] = witness
             return tagged
         payload_local
 

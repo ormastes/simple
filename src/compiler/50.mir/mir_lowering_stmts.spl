@@ -3871,8 +3871,43 @@ impl MirLowering:
                 return
             arm_i = arm_i + 1
         if first_typed < 0:
+            self.remember_all_untyped_result_ctor_join(dest, arm_locals)
             return
         self.copy_local_hir_type_metadata(arm_locals[first_typed].id, dest.id)
+
+    me remember_all_untyped_result_ctor_join(dest: LocalId, arm_locals: [LocalId]):
+        """`val r = if c: Ok(a) else: Err(b)`: every arm is an untyped Result
+        constructor, so no arm can lend the join its type and `match r:
+        case Ok(x)` resolved the bare variant against every enum declaring
+        `Ok` ("ambiguous (declared in multiple enums)" once another did).
+        Own `Result<ok, err>` from the constructors' witnessed payload types
+        when at least one `Ok` and one `Err` arm carry one and each side
+        agrees (`hir_types_equal`). A side with no witness, or disagreeing
+        witnesses, leaves the slot unknown rather than guessed
+        (stage2_if_expr_result_join_untyped_match_payload_2026-11-07)."""
+        var ok_local = -1
+        var err_local = -1
+        var arm_i = 0
+        while arm_i < arm_locals.len():
+            val arm_local: LocalId = arm_locals[arm_i]
+            if self.untyped_ok_ctor_payload_types.contains(arm_local.id):
+                if ok_local < 0:
+                    ok_local = arm_local.id
+                elif not hir_types_equal(self.untyped_ok_ctor_payload_types[ok_local], self.untyped_ok_ctor_payload_types[arm_local.id]):
+                    return
+            elif self.untyped_err_ctor_payload_types.contains(arm_local.id):
+                if err_local < 0:
+                    err_local = arm_local.id
+                elif not hir_types_equal(self.untyped_err_ctor_payload_types[err_local], self.untyped_err_ctor_payload_types[arm_local.id]):
+                    return
+            else:
+                return
+            arm_i = arm_i + 1
+        if ok_local < 0 or err_local < 0:
+            return
+        val ok_type: HirType = self.untyped_ok_ctor_payload_types[ok_local]
+        val err_type: HirType = self.untyped_err_ctor_payload_types[err_local]
+        self.remember_local_hir_type(dest.id, HirType(kind: HirTypeKind.Result(ok_type, err_type), span: ok_type.span), 0, 0)
 
     me remember_merged_optional_arm_type(dest: LocalId, arm_locals: [LocalId]):
         """`val r = match o: case Some(e): Some(f(e)); case nil: nil` and
