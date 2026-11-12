@@ -132,7 +132,10 @@ and an ERROR after phase 3 (staged). See
 
 ## Union Types
 
-A union type means a value can be one of several types:
+A union type means a value can be one of several types. The `| nil` shapes
+below are **compatibility-only** (legacy engine behaviour); a robust public API
+uses `Result` or a domain enum — see
+[robust_semantic_absence.md](robust_semantic_absence.md).
 
 ```simple
 type IntOrText = i64 | text
