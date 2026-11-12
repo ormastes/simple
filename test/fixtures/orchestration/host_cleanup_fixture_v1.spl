@@ -19,6 +19,7 @@ use std.nogc_sync_mut.sffi.fs.file_atomic_write_mode
 use std.nogc_async_mut.container.api_v2.SimpleContainerOwnerV2
 use std.nogc_async_mut.container.providers.linux.oci_runtime_v1.{ScriptedCommandResultV1, build_destroy_command}
 use std.nogc_async_mut.container.providers.linux.engine_policy_v1.linux_oci_engine_route_v1
+use std.common.contracts.orchestration.host_capacity_v1.{host_available_capacity_v1}
 
 pub struct HostCleanupFixtureV1:
     local: HostLocalRootV1
@@ -75,14 +76,19 @@ pub fn host_cleanup_fixture_v1(mode: text = "success") -> HostCleanupFixtureV1:
                 args: linux_oci_engine_route_v1(policy, ["container", "exists", "1".repeat(64)]).unwrap(), stdout: "", stderr: "",
                 exit_code: if mode == "absence-unknown": 125 else: 1)
             provider.scripted_results = provider.scripted_results.push(terminal).push(terminal).push(destroy).push(absence)
-            assert(provider.set_scripted_effect_clock_v1([now.grant_clock + 1000, now.grant_clock + 1001]).is_ok())
+            # Three samples, one per clock read on the cleanup path: destroy's
+            # control admission, its final pre-exec check in `_execute`, and the
+            # independent absence observation. Two left the absence observation
+            # with an exhausted clock (`absence-observation-clock-unavailable`).
+            assert(provider.set_scripted_effect_clock_v1([now.grant_clock + 1000, now.grant_clock + 1001,
+                now.grant_clock + 1002]).is_ok())
             adapter.provider = provider
             local.container = SimpleContainerOwnerV2.Linux(scope, adapter)
         case _: fail("cleanup fixture requires explicit Linux scripted adapter")
     HostCleanupFixtureV1(local, signed, approval, now)
 
 pub fn host_cleanup_assert_charged_v1(local: HostLocalRootV1):
-    val available = std.common.contracts.orchestration.host_capacity_v1.host_available_capacity_v1(local.capacity.ledger).unwrap()
+    val available = host_available_capacity_v1(local.capacity.ledger).unwrap()
     expect(available.cpu_millis).to_equal(1000)
     expect(available.memory_bytes).to_equal(1536)
     expect(local.capacity.journal.operations["operation_1"].state).to_equal("executing")

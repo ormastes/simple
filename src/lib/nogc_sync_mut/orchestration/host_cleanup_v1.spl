@@ -24,7 +24,7 @@ use std.nogc_async_mut.container.api_v2.{simple_container_control_v2, simple_con
 use std.nogc_sync_mut.daemon_sdk.distributed_authority_snapshot_v2.distributed_verify_grant_approval_from_snapshot_v2
 use std.nogc_sync_mut.daemon_sdk.operation_dispatch_v2.daemon_operation_exact_v2
 use std.common.crypto.sha256.sha256_text
-use std.nogc_sync_mut.io.file_ops.{file_exists, file_read_regular_no_follow_bounded}
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_read_regular_no_follow_bounded, file_is_regular_no_follow}
 
 pub struct HostCleanupTurnV1:
     local: HostLocalRootV1
@@ -117,7 +117,13 @@ pub fn host_cleanup_v1(local: HostLocalRootV1, operation_id: text,
         return HostCleanupTurnV1(current, Some(receipt.unwrap()), false, "")
     if not ["executing", "outcome-unknown"].contains(state.state): return HostCleanupTurnV1(current, nil, false, "host-cleanup-execution-required")
     val retained_receipt_path = current.capacity.journal.root + "/host-cleanup-receipts-v1/" + sha256_text(operation_id) + ".sdn"
-    if file_exists(retained_receipt_path):
+    # Only a regular file can be a retained receipt. `file_exists` is also
+    # true for a directory or a dangling-link target, and taking that branch
+    # for an obstruction returned an evidence error BEFORE the native destroy,
+    # leaving the terminal container in place. An obstruction is now met where
+    # it belongs: at no-replace receipt publication after destroy, with the
+    # verified intent retained and the owner still charged.
+    if file_is_regular_no_follow(retained_receipt_path):
         val evidence = host_cleanup_evidence_v1(current.capacity.journal.root, retained.operation)
         if evidence.is_err(): return HostCleanupTurnV1(current, nil, true, evidence.unwrap_err())
         val receipt = host_cleanup_receipt_decode_v1(evidence.unwrap())
