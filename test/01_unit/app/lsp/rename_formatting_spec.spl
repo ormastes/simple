@@ -1,0 +1,67 @@
+# @req REQ-LSP-RENAME-001 REQ-LSP-FORMAT-001
+use std.spec
+use std.nogc_sync_mut.io.file_ops.{file_write, secure_temp_dir}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove_all}
+use std.common.json.parser.{json_parse}
+use std.common.json.object_ops.{json_object_get, json_object_keys}
+use std.common.json.array_ops.{json_array_get, json_array_length}
+use std.common.json.types.{json_get_type, json_to_number, json_to_string}
+use std.nogc_sync_mut.lsp.lsp_handlers.{lsp_handle_rename, lsp_handle_formatting, lsp_handle_initialize}
+
+fn rf_result_v1(reply: text) -> any:
+    val response = json_parse(reply)
+    expect(response != nil).to_equal(true)
+    expect(json_object_get(response, "error")).to_be_nil()
+    json_object_get(response, "result")
+
+describe "LSP rename and formatting":
+    # @req REQ-LSP-RENAME-001 REQ-LSP-FORMAT-001
+    it "advertises rename and document formatting providers":
+        step("Decode initialize capabilities")
+        val caps = json_object_get(rf_result_v1(lsp_handle_initialize("1")), "capabilities")
+        expect(json_get_type(json_object_get(caps, "renameProvider"))).to_equal("boolean")
+        expect(json_get_type(json_object_get(caps, "documentFormattingProvider"))).to_equal("boolean")
+
+    # @req REQ-LSP-RENAME-001
+    it "renames every reference of the selected symbol in a WorkspaceEdit":
+        step("Rename a function referenced twice")
+        val root = secure_temp_dir("/tmp", "simple-lsp-rename-v1-").unwrap()
+        val path = root + "/fixture.spl"
+        val source = "fn rf_target_v1(v: i64) -> i64:\n    v\n\nfn rf_user_v1() -> i64:\n    rf_target_v1(1)\n"
+        expect(file_write(path, source)).to_equal(true)
+        val body = "{\"textDocument\":{\"uri\":\"file://{path}\"},\"position\":{\"line\":4,\"character\":6},\"newName\":\"rf_renamed_v1\"}"
+        val reply = lsp_handle_rename("7", body)
+        dir_remove_all(root)
+        val result = rf_result_v1(reply)
+        expect(json_get_type(result)).to_equal("object")
+        val changes = json_object_get(result, "changes")
+        val uris = json_object_keys(changes)
+        expect(uris.len()).to_equal(1)
+        expect(uris[0].ends_with("/fixture.spl")).to_equal(true)
+        val edits = json_object_get(changes, uris[0])
+        expect(json_get_type(edits)).to_equal("array")
+        expect(json_array_length(edits)).to_equal(2)
+        var i = 0
+        while i < json_array_length(edits):
+            val edit = json_array_get(edits, i)
+            expect(json_to_string(json_object_get(edit, "newText"))).to_equal("rf_renamed_v1")
+            val range = json_object_get(edit, "range")
+            val s = json_to_number(json_object_get(json_object_get(range, "start"), "character"))
+            val e = json_to_number(json_object_get(json_object_get(range, "end"), "character"))
+            expect(e - s).to_equal(12.0)
+            i = i + 1
+
+    # @req REQ-LSP-FORMAT-001
+    it "returns a whole-document TextEdit with the formatter output":
+        step("Format a file with irregular spacing")
+        val root = secure_temp_dir("/tmp", "simple-lsp-format-v1-").unwrap()
+        val path = root + "/fixture.spl"
+        expect(file_write(path, "fn rf_fmt_v1() -> i64:\n    1+2\n")).to_equal(true)
+        val body = "{\"textDocument\":{\"uri\":\"file://{path}\"},\"options\":{\"tabSize\":4,\"insertSpaces\":true}}"
+        val reply = lsp_handle_formatting("8", body)
+        dir_remove_all(root)
+        val result = rf_result_v1(reply)
+        expect(json_get_type(result)).to_equal("array")
+        expect(json_array_length(result)).to_equal(1)
+        val new_text = json_to_string(json_object_get(json_array_get(result, 0), "newText"))
+        expect(new_text.contains("1 + 2")).to_equal(true)

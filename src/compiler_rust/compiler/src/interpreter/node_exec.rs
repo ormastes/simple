@@ -229,8 +229,18 @@ pub(crate) fn coerce_to_declared_field_of(class_def: &ClassDef, field: &str, val
 
 /// Class name of the object stored at `owner` (a class instance or object).
 fn owner_class_name(env: &Env, owner: &super::place::Place) -> Option<String> {
-    let slot = super::place::place_slot_ref(env, owner)?;
-    match slot {
+    // `place_slot_ref` cannot borrow through a shared `ClassInstance` hop, so a
+    // three-level `a.b.c.f = v` owner (`a.b.c`) resolved to None and the store
+    // skipped u64 coercion. Walk owned values instead; a ClassInstance field
+    // hop reads through `field()`.
+    let mut slot = env.get(&owner.root)?.clone();
+    for projection in &owner.projections {
+        slot = match (&slot, projection) {
+            (Value::ClassInstance(inst), super::place::Projection::Field(name)) => inst.field(name)?,
+            _ => super::place::step_ref(&slot, projection)?.clone(),
+        };
+    }
+    match &slot {
         Value::ClassInstance(inst) => Some(inst.class().to_string()),
         Value::Object { class, .. } => Some(class.clone()),
         _ => None,

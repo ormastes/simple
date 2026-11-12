@@ -217,14 +217,14 @@ fn is_unrun_failure(output: text) -> bool:
 
 pub fn aggregate_spec_file_verdict_line(path: text, passed: i64, failed: i64,
         in_development: i64, error: text, degraded: text,
-        timed_out: bool, duration_ms: i64) -> text:
+        timed_out: bool, duration_ms: i64, blocked: i64 = 0) -> text:
     if timed_out:
         return timeout_verdict_line(path, "aggregate-lane-timeout", duration_ms)
     if error.starts_with("test-runner: BDD process failure after authenticated pass"):
         return process_failure_verdict_line(path, passed, in_development)
     if error != "" and is_unrun_failure(error):
         return unrun_verdict_line(path, unrun_reason(error))
-    ran_verdict_line(path, passed, failed, in_development, degraded)
+    ran_verdict_line(path, passed, failed, in_development, degraded, blocked)
 
 # Verdict line for a spec the AGGREGATING (directory) lane actually ran.
 #
@@ -253,12 +253,26 @@ pub fn aggregate_spec_file_verdict_line(path: text, passed: i64, failed: i64,
 # the module ran to completion while the counts said a test failed, and readers
 # took the token. See doc/08_tracking/bug/
 # test_runner_exits_zero_on_failed_spec_2026-08-21.md
-fn verdict_outcome_token(executed: i64, failed: i64) -> text:
+# `blocked` (2026-11-12) counts examples that could not run because their
+# ENVIRONMENT is missing -- `pending("BLOCKED: ...")` or an
+# `Err("precondition: ...")` failure (parse_blocked_examples). A blocked example
+# is never a pass and never OK: any blocked example with no real failure makes
+# the file `outcome=BLOCKED`; a real failure still wins (`ERROR`). Exit code 6
+# (TestRunOutcome.BlockedScenario) so gates can decide how to treat it.
+# See doc/08_tracking/bug/llm_caret_env_gated_specs_no_blocked_outcome_2026-11-12.md
+fn verdict_outcome_token(executed: i64, failed: i64, blocked: i64 = 0) -> text:
     if failed > 0:
         return "ERROR"
+    if blocked > 0:
+        return "BLOCKED"
     if executed <= 0:
         return "NOT_RUN"
     "OK"
+
+# Human-readable companion of a BLOCKED verdict: the reason is free text, so it
+# lives on its own line instead of breaking the verdict's one-token-per-key shape.
+pub fn blocked_reason_line(path: text, blocked: i64, reason: text) -> text:
+    "SPEC FILE BLOCKED: {path} blocked={blocked} reason={reason}"
 
 # `in_development` counts examples that RAN and were then neutralised by
 # `# @tag:in-development`. They are executed work and must be counted as such:
@@ -280,10 +294,10 @@ fn verdict_outcome_token(executed: i64, failed: i64) -> text:
 # never compiled read as an ordinary red. The token carries no whitespace (see
 # `verdict_degrade_token_field` in test_runner_execute.spl) so a reader
 # splitting this line on whitespace still sees exactly one token per key.
-fn ran_verdict_line(path: text, passed: i64, failed: i64, in_development: i64 = 0, degraded: text = "") -> text:
-    val executed = passed + failed + in_development
-    val outcome = verdict_outcome_token(executed, failed)
-    val base = "SPEC FILE VERDICT: {path} outcome={outcome} declared>={executed} executed={executed} passed={passed} failed={failed} in_development={in_development} dropped=0"
+fn ran_verdict_line(path: text, passed: i64, failed: i64, in_development: i64 = 0, degraded: text = "", blocked: i64 = 0) -> text:
+    val executed = passed + failed + in_development + blocked
+    val outcome = verdict_outcome_token(executed, failed, blocked)
+    val base = "SPEC FILE VERDICT: {path} outcome={outcome} declared>={executed} executed={executed} passed={passed} failed={failed} in_development={in_development} blocked={blocked} dropped=0"
     if degraded == "": base else: base + " degraded={degraded}"
 
 # Human-readable gloss for a process exit status seen on the test lane. Exit

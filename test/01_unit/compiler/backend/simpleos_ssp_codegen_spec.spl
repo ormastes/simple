@@ -55,7 +55,11 @@ describe "SimpleOS LLVM stack protector policy":
         step("Translate a hosted SimpleOS MIR function with an escaping 64-byte stack buffer")
         val ir = ssp_probe_ir("simpleos", false, false, "hosted")
         expect(ir).to_contain("@__simple_main() nounwind sspstrong")
-        expect(ir).to_contain("alloca [64 x i8]")
+        # MIR arrays are boxed references: Alloc of an Array local emits the
+        # pointer slot (`alloca ptr`), not an inline `[64 x i8]` stack object.
+        # `sspstrong` is the function-level attribute; LLVM places the actual
+        # canary wherever a stack object's address escapes.
+        expect(ir).to_contain("alloca ptr, align 8")
         expect(ir).to_contain("call void @ssp_escape(ptr")
 
     it "leaves SimpleOS kernel and cross-host Linux output uninstrumented":
@@ -72,5 +76,9 @@ describe "SimpleOS LLVM stack protector policy":
     it "keeps naked SimpleOS functions free of stack instrumentation":
         step("Translate a naked hosted SimpleOS function")
         val ir = ssp_probe_ir("simpleos", false, true, "hosted")
-        expect(ir).to_contain(" naked noinline")
+        # Fail-closed naked contract (pure_backend_naked_fn_gaps_2026-08-28): a
+        # naked body that is not exactly one raw asm block poisons the module
+        # with E-NAKED-BODY instead of emitting instrumentable IR.
+        expect(ir).to_contain("E-NAKED-BODY")
+        expect(ir).to_contain("simple_llvm_codegen_error")
         expect(ir.contains("sspstrong")).to_equal(false)
