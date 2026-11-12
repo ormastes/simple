@@ -3743,7 +3743,7 @@ impl MirLowering:
             self.runtime_dict_locals[dest.id] = true
             self.mark_runtime_value_local(dest.id)
 
-    me remember_merged_arm_identity(dest: LocalId, arm_locals: [LocalId]):
+    me remember_merged_arm_identity(dest: LocalId, arm_locals: [LocalId], allow_untyped_ctor_join: bool = true):
         """Give an untyped value-position if/elif merge slot its arms' type.
 
         `val s = if c: f() else: g()` has no HIR expression type (the HIR If
@@ -3754,7 +3754,10 @@ impl MirLowering:
         arm agrees: no arm may be a nil literal (that would need an Optional
         wrapper), every arm must carry the same struct name (or none), and the
         HIR type is adopted only when every arm has one and all are equal
-        (`hir_types_equal`); otherwise the slot stays unknown."""
+        (`hir_types_equal`); otherwise the slot stays unknown.
+        `allow_untyped_ctor_join` false (a match lowered under an expected
+        type) withholds only the all-untyped-constructor Result join, as the
+        if/elif joins do by never calling here under an expected type."""
         if arm_locals.len() == 0:
             return
         var arm_recorded_structs: [text] = []
@@ -3805,7 +3808,7 @@ impl MirLowering:
         if all_typed and self.find_local_hir_type(dest.id) == None:
             self.copy_local_hir_type_metadata(arm_locals[typed_index].id, dest.id)
         elif self.find_local_hir_type(dest.id) == None:
-            self.remember_merged_result_ctor_arm_type(dest, arm_locals)
+            self.remember_merged_result_ctor_arm_type(dest, arm_locals, allow_untyped_ctor_join)
 
     me let_declared_type_override_v1(init_local_id: i64, declared: HirType) -> i64:
         """Whether an annotated `val x: T = init` must record T instead of
@@ -3844,7 +3847,7 @@ impl MirLowering:
             case None: ()
         0
 
-    me remember_merged_result_ctor_arm_type(dest: LocalId, arm_locals: [LocalId]):
+    me remember_merged_result_ctor_arm_type(dest: LocalId, arm_locals: [LocalId], allow_untyped_ctor_join: bool):
         """`val r = if val h = x: lower(h) else: Err("missing")` — one arm is a
         call with a declared `Result<T, E>`, the other an untyped `Ok(..)` /
         `Err(..)` constructor that retains no HIR type, so the all-typed join
@@ -3871,7 +3874,8 @@ impl MirLowering:
                 return
             arm_i = arm_i + 1
         if first_typed < 0:
-            self.remember_all_untyped_result_ctor_join(dest, arm_locals)
+            if allow_untyped_ctor_join:
+                self.remember_all_untyped_result_ctor_join(dest, arm_locals)
             return
         self.copy_local_hir_type_metadata(arm_locals[first_typed].id, dest.id)
 

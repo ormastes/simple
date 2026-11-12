@@ -1,3 +1,8 @@
+/* Non-Windows test: the POSIX/Linux/macOS APIs it uses have no Windows build here. */
+#if defined(_WIN32)
+#include <stdio.h>
+int main(void) { puts("SKIP: rt_sosix_darwin_broker_admission_selfcheck is POSIX-only; no Windows build"); return 77; }
+#else
 #include "../runtime_sosix_darwin_broker_admission_private.h"
 #include <assert.h>
 #include <sys/stat.h>
@@ -164,3 +169,5 @@ int main(int argc, char **argv) {
     puts("generic_v4_capability: not_claimed");
     puts("darwin_broker_admission: pass");
 }
+
+#endif /* !_WIN32 */

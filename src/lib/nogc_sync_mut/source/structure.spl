@@ -124,11 +124,30 @@ fn source_import_named_by_v1(module_path: text, tokens: [text]) -> bool:
         if token == module_path or token == tail: return true
     false
 
+fn source_node_has_children_v1(outline: SourceOutlineV1, index: i64) -> bool:
+    for node in outline.nodes:
+        if node.parent_index == index: return true
+    false
+
+fn source_admitted_span_v1(outline: SourceOutlineV1, index: i64, target_index: i64,
+        exhaustive: bool, max_bytes: i64) -> SourceRangeV1:
+    # Exhaustive shows a leaf in full when it fits one page, else its header;
+    # containers show their header and their children carry the rest.
+    val node = outline.nodes[index]
+    if index == target_index: return node.full_range
+    if exhaustive and not source_node_has_children_v1(outline, index):
+        if node.full_range.end_byte - node.full_range.start_byte <= max_bytes: return node.full_range
+    node.header_range
+
 pub fn source_project_structure_v1(snapshot: SourceSnapshotV1, outline: SourceOutlineV1,
         mode: text, target: text, depth: i64, start_index: i64,
         max_nodes: i64, max_bytes: i64) -> Result<SourceStructuredViewV1, text>:
     if snapshot.snapshot_id != outline.snapshot_id: return Err("stale_outline_snapshot")
-    if mode != "outline" and mode != "focused": return Err("unsupported_structure_mode")
+    if mode != "outline" and mode != "focused" and mode != "exhaustive": return Err("unsupported_structure_mode")
+    # Exhaustive: no selection policy (every node, imports individually, no
+    # folds). Paging caps are unchanged; the cursor walks every node.
+    val exhaustive = mode == "exhaustive"
+    if exhaustive and target != "": return Err("target_not_supported_in_exhaustive_mode")
     if depth < 1 or depth > 2: return Err("outline_depth_must_be_1_or_2")
     if max_nodes <= 0 or max_nodes > 64 or max_bytes <= 0: return Err("invalid_structure_budget")
     if outline.nodes.len() > 512: return Err("outline_node_limit_512")
@@ -142,6 +161,9 @@ pub fn source_project_structure_v1(snapshot: SourceSnapshotV1, outline: SourceOu
         val node = outline.nodes[index]
         if node.parent_index < -1 or node.parent_index >= index:
             return Err("invalid_outline_parent")
+        if exhaustive:
+            candidates.push(index)
+            continue
         if node.kind == "import" and index != target_index:
             # An import the target body names lexically is shown as source;
             # the others stay one synthetic group with per-item ranges.
@@ -176,7 +198,7 @@ pub fn source_project_structure_v1(snapshot: SourceSnapshotV1, outline: SourceOu
         var fits = trial.len() <= max_nodes
         for admitted in trial:
             val node = outline.nodes[admitted]
-            val span = if admitted == target_index: node.full_range else: node.header_range
+            val span = source_admitted_span_v1(outline, admitted, target_index, exhaustive, max_bytes)
             if span.end_byte < span.start_byte: return Err("invalid_outline_span")
             val count = span.end_byte - span.start_byte
             if count > max_bytes - used:
@@ -197,14 +219,14 @@ pub fn source_project_structure_v1(snapshot: SourceSnapshotV1, outline: SourceOu
     for index in order:
         if not source_index_contains_v1(selected_nodes, index): continue
         val node = outline.nodes[index]
-        ranges.push(if index == target_index: node.full_range else: node.header_range)
+        ranges.push(source_admitted_span_v1(outline, index, target_index, exhaustive, max_bytes))
         visible_nodes.push(index)
         var has_visible_child = false
         for child in selected_nodes:
             if outline.nodes[child].parent_index == index: has_visible_child = true
         # An opened container cannot simultaneously claim its whole body is
         # folded. Descendant folds and the omission ledger describe its gaps.
-        if index != target_index and not has_visible_child and node.body_range.end_byte > node.body_range.start_byte:
+        if not exhaustive and index != target_index and not has_visible_child and node.body_range.end_byte > node.body_range.start_byte:
             folds.push(SourceFoldV1(node.qualified_name, index, [node.body_range]))
     var projection = source_project_ranges_v1(snapshot, ranges, max_bytes)?
     projection.evidence_kind = "syntax_candidate"

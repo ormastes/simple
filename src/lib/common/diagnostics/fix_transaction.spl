@@ -22,6 +22,7 @@
 # descending start-offset order so earlier offsets stay valid.
 
 use std.common.diagnostics.span.{Span}
+use std.common.string_core.{string_to_byte_array, string_from_byte_array}
 use std.common.diagnostics.diagnostic_v1.{FixReplacement}
 use std.common.diagnostics.diagnostic_batch.{FixCandidate, FixPrecondition}
 
@@ -127,12 +128,22 @@ fn replacement_indices_desc(c: FixCandidate, file: text) -> [i64]:
         out.push(best)
     out
 
+# Spans are BYTE offsets; text.substring indexes code points, so slice bytes.
+fn byte_slice(s: text, start: i64, end: i64) -> text:
+    val bytes = string_to_byte_array(s)
+    var out: [u8] = []
+    var i = start
+    while i < end:
+        out.push(bytes[i])
+        i = i + 1
+    string_from_byte_array(out)
+
 fn apply_to_body(body: text, c: FixCandidate, order: [i64]) -> text:
     var result = body
     for i in order:
         val r = c.replacements[i]
         val n = result.byte_len()
-        result = result.substring(0, r.span.start) + r.new_text + result.substring(r.span.end, n)
+        result = byte_slice(result, 0, r.span.start) + r.new_text + byte_slice(result, r.span.end, n)
     result
 
 impl EditTransaction:
@@ -189,7 +200,7 @@ impl EditTransaction:
             i = i + 1
         for p in c.preconditions:
             val body = self.text_of(p.file)
-            val actual = body.substring(p.span.start, p.span.end)
+            val actual = byte_slice(body, p.span.start, p.span.end)
             if actual != p.expected_text:
                 return refuse(self, c, ApplyStatus.PreconditionMismatch,
                     p.file + " span " + p.span.start.to_text() + ".." + p.span.end.to_text()
