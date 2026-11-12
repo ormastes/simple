@@ -690,3 +690,17 @@ to the caller (4 read as 200634408607585). Integer sinks now call
 binder still decodes that payload a second time (4 -> 0) — producer/consumer
 disagree on whether an `Any` payload is tagged. Bug:
 `doc/08_tracking/bug/native_list_any_get_i64_sink_returns_option_handle_2026-11-07.md`.
+
+## 2026-11-12 — array-HOF lambda parameters need the element record
+
+`resolve_field_index` returns 0 when the base local has no `struct_value_syms`
+row and no HIR `Named` type, and an untyped lambda parameter has neither. The
+`for` loop publishes the element record (`array_element_struct_syms` ->
+`struct_value_syms[loop_var]`); `lower_array_map` (inlined lambda) and the
+lifted `filter`/`any`/`all`/`fold` lambdas did not, so `xs.map(\f: f.c)` read
+`f.a` natively. `array_hof_element_record_owner(arr)` gives the element record;
+pass it as `param_records` to `lower_lambda_value[_for_type]` when you add a
+new array HOF. Trap: a direct call (`g(s)`) is correct and hides the bug,
+because the argument local already carries its record. Bug:
+`doc/08_tracking/bug/stage2_array_hof_lambda_record_param_field0_2026-11-12.md`;
+spec `test/01_unit/compiler/50.mir/array_hof_lambda_record_param_field_spec.spl`.

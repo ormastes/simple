@@ -5746,7 +5746,7 @@ impl MirLowering:
                                     return self.lower_array_map(unresolved_receiver_local, map_params, map_body)
                             case _: ()
                     if method == "filter" and args.len() == 1:
-                        val filter_lambda_operand = self.lower_lambda_value(args[0].value)
+                        val filter_lambda_operand = self.lower_lambda_value(args[0].value, false, [self.array_hof_element_record_owner(unresolved_receiver_local)])
                         if val filter_lam_op = filter_lambda_operand:
                             return self.lower_array_filter(unresolved_receiver_local, filter_lam_op)
                         # A predicate held in a variable/param
@@ -5764,11 +5764,11 @@ impl MirLowering:
                     # The 0-arg SIMD `Mask.any()` keeps its own dispatch: this
                     # arm requires the one closure argument.
                     if (method == "any" or method == "all") and args.len() == 1:
-                        val any_all_lambda_operand = self.lower_lambda_value(args[0].value)
+                        val any_all_lambda_operand = self.lower_lambda_value(args[0].value, false, [self.array_hof_element_record_owner(unresolved_receiver_local)])
                         if val any_all_lam_op = any_all_lambda_operand:
                             return self.lower_array_any_all(unresolved_receiver_local, any_all_lam_op, method == "any")
                     if method == "fold" and args.len() == 2:
-                        val fold_lambda_operand = self.lower_lambda_value(args[1].value)
+                        val fold_lambda_operand = self.lower_lambda_value(args[1].value, false, ["", self.array_hof_element_record_owner(unresolved_receiver_local)])
                         if val fold_lam_op = fold_lambda_operand:
                             val fold_init_raw = self.lower_expr(args[0].value)
                             return self.lower_array_fold(unresolved_receiver_local, fold_init_raw, fold_lam_op)
@@ -6793,6 +6793,37 @@ impl MirLowering:
             )))
         ), call_origin: MirCallOrigin.Runtime)
 
+    me array_hof_element_record_owner(arr: LocalId) -> text:
+        """Record owner of `arr`'s elements for an array-HOF lambda parameter, or "".
+
+        The same two tiers the for-loop element binding uses
+        (mir_lowering_stmts.spl): the published `array_element_struct_syms`
+        row, else the declared `[Record]` HIR element type. A plain-value
+        array (no row, or the `__runtime_array__` placeholder) answers "", so
+        int/text/bool element lambdas are unchanged.
+        """
+        if self.array_element_struct_syms.has(arr.id):
+            val published: text = self.array_element_struct_syms.get(arr.id) ?? ""
+            if published == "__runtime_array__":
+                return ""
+            return published
+        if val arr_hir = self.find_local_hir_type(arr.id):
+            match arr_hir.kind:
+                case HirTypeKind.Array(element_hir, _) | HirTypeKind.Slice(element_hir):
+                    match element_hir.kind:
+                        case HirTypeKind.Named(element_symbol, _):
+                            # Presence does not unwrap HirSymbol?: bind the payload explicitly (4710b22a991 class).
+                            val optional_element_info: HirSymbol? = self.symbols.get_symbol_raw(element_symbol.id)
+                            if val present_element_info = optional_element_info:
+                                val element_info: HirSymbol = present_element_info
+                                if element_info.kind == SymbolKind.Struct:
+                                    return self.struct_value_provenance_key(element_info)
+                                if element_info.kind == SymbolKind.Class:
+                                    return element_info.name
+                        case _: ()
+                case _: ()
+        ""
+
     me lower_array_map(arr: LocalId, map_params: [HirParam], map_body: HirExpr) -> LocalId:
         """Lower `arr.map(\\x: expr)` for a runtime `[i64]` array.
 
@@ -6860,6 +6891,12 @@ impl MirLowering:
         val elem_tagged = get_call ?? b_get.new_temp(MirType.i64())
         self.builder = b_get
         val elem_raw = self.decode_runtime_value(elem_tagged, elem_type)
+        # The untyped lambda parameter is bound to this element: give it the
+        # element record, as the for-loop binding does, or `\f: f.c` reads
+        # field 0 (stage2_array_hof_lambda_record_param_field0_2026-11-12).
+        val elem_owner = self.array_hof_element_record_owner(arr)
+        if elem_owner != "":
+            self.struct_value_syms[elem_raw.id] = elem_owner
         val mapped_raw = self.lower_inline_lambda_with_locals(map_params, map_body, [elem_raw])
         if val found_mapped_type = self.local_mir_type_of(mapped_raw):
             mapped_elem_type = found_mapped_type

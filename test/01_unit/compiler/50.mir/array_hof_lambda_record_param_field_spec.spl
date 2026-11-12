@@ -1,0 +1,127 @@
+# @req REQ-SSPEC-COMPILER
+# @cover src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl
+# @cover src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl
+"""
+# MIR lowering: an array-HOF lambda parameter carries the element record
+
+Stage 2 native printed `0 0` for `xs.map(\f: f.c)` over `[S(a:..,b:..,c:..)]`:
+the untyped lambda parameter `f` had no record identity, so
+`resolve_field_index` fell back to field 0 and `f.c` read `f.a`. A `for`
+loop over the same array already publishes the element owner
+(`array_element_struct_syms` -> `struct_value_syms`); the map/filter/any/all
+lambda parameter did not. Calling the same lambda directly was correct,
+because the call argument already carried its record.
+
+Every fixture reads a field that is NOT field 0, so a field-0 fallback can
+never coincide with the correct index.
+"""
+
+# @tag: unit, compiler, mir, lambda, array
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+
+struct HofLowered:
+    fatal: [text]
+    host_fields: [i64]
+    lifted_fields: [i64]
+    lifted: i64
+
+val HOF_RECORD: text = "struct T:\n    a: i64\n    b: i64\n    c: i64\n\n"
+
+fn hof_lower(src: text) -> HofLowered:
+    val file = "testdata/fixture_hof_record_param.spl"
+    val parsed = parse_full_frontend(HOF_RECORD + src, file, "fixture_hof_record_param", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(file)
+    val hir = hir_lowering.lower_module(parsed)
+    var lowering = MirLowering.new_for_target(hir.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    val mir = lowering.lower_module(hir)
+    var fatal: [text] = []
+    for e in hir_lowering.errors:
+        fatal = fatal.push("hir: " + e.message)
+    for e in lowering.errors:
+        if e.fatal:
+            fatal = fatal.push("mir: " + e.message)
+    var host_fields: [i64] = []
+    var lifted_fields: [i64] = []
+    var lifted = 0
+    for function in mir.functions.values():
+        val is_lifted = function.name.contains("__lambda_lift_")
+        if is_lifted:
+            lifted = lifted + 1
+        for block in function.blocks:
+            for instruction in block.instructions:
+                match instruction.kind:
+                    case MirInstKind.GetField(_, _, field_index):
+                        if is_lifted:
+                            lifted_fields = lifted_fields.push(field_index)
+                        else:
+                            host_fields = host_fields.push(field_index)
+                    case _: pass
+    for m in fatal:
+        print "diagnostic: {m}"
+    print "host_fields={host_fields} lifted={lifted} lifted_fields={lifted_fields}"
+    HofLowered(fatal: fatal, host_fields: host_fields, lifted_fields: lifted_fields, lifted: lifted)
+
+describe "array HOF lambda parameter reads the element record's field":
+    it "map over a declared [T] reads field c (index 2), not field 0":
+        val low = hof_lower("fn f(ts: [T]) -> [i64]:\n    ts.map(\\t: t.c)\n")
+        expect(low.fatal.len()).to_equal(0)
+        expect(low.host_fields).to_equal([2])
+
+    it "map over an array literal (the Stage 2 repro shape)":
+        val low = hof_lower("fn f() -> [i64]:\n    val xs = [T(a: 1, b: 2, c: 3), T(a: 4, b: 5, c: 6)]\n    xs.map(\\t: t.c)\n")
+        expect(low.fatal.len()).to_equal(0)
+        expect(low.host_fields).to_equal([2])
+
+    it "map lambda with a capture still reads field b":
+        val low = hof_lower("fn f(ts: [T], k: i64) -> [i64]:\n    ts.map(\\t: t.b + k)\n")
+        expect(low.fatal.len()).to_equal(0)
+        expect(low.host_fields).to_equal([1])
+
+    it "filter predicate (lifted lambda) reads field c":
+        val low = hof_lower("fn f(ts: [T]) -> i64:\n    ts.filter(\\t: t.c != 0).len()\n")
+        expect(low.fatal.len()).to_equal(0)
+        expect(low.lifted).to_equal(1)
+        expect(low.lifted_fields).to_equal([2])
+
+    it "any predicate reads field b":
+        val low = hof_lower("fn f(ts: [T]) -> bool:\n    ts.any(\\t: t.b == 5)\n")
+        expect(low.fatal.len()).to_equal(0)
+        expect(low.lifted_fields).to_equal([1])
+
+    it "all predicate reads field c":
+        val low = hof_lower("fn f(ts: [T]) -> bool:\n    ts.all(\\t: t.c > 0)\n")
+        expect(low.fatal.len()).to_equal(0)
+        expect(low.lifted_fields).to_equal([2])
+
+    it "nested record field through the lambda parameter":
+        val low = hof_lower("struct W:\n    pad: i64\n    inner: T\n\nfn f(ws: [W]) -> [i64]:\n    ws.map(\\w: w.inner.c)\n")
+        expect(low.fatal.len()).to_equal(0)
+        expect(low.host_fields).to_equal([1, 2])
+
+    it "negative: a directly called lambda already reads field c":
+        val low = hof_lower("fn f() -> i64:\n    val g = \\t: t.c\n    g(T(a: 1, b: 2, c: 3))\n")
+        expect(low.fatal.len()).to_equal(0)
+        expect(low.host_fields).to_equal([2])
+
+    it "negative: an int-array map gains no record field read":
+        val low = hof_lower("fn f(xs: [i64]) -> [i64]:\n    xs.map(\\x: x + 1)\n")
+        expect(low.fatal.len()).to_equal(0)
+        expect(low.host_fields).to_equal([])
+
+    it "fold lambda reads field c of its element (second) parameter":
+        val low = hof_lower("fn f(ts: [T]) -> i64:\n    ts.fold(0, \\acc, t: acc + t.c)\n")
+        expect(low.fatal.len()).to_equal(0)
+        expect(low.lifted_fields).to_equal([2])
+
+    it "user HOF with a declared fn(T) -> i64 slot reads field c":
+        val low = hof_lower("fn apply(ts: [T], g: fn(T) -> i64) -> i64:\n    g(ts[0])\n\nfn f(ts: [T]) -> i64:\n    apply(ts, \\t: t.c)\n")
+        expect(low.fatal.len()).to_equal(0)
+        expect(low.lifted_fields).to_equal([2])
