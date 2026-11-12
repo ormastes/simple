@@ -312,6 +312,33 @@ fn local_holding_a_bool_result_closure_is_pointer_sized() {
     assert_eq!(slot.ty, TypeId::I64, "closure-holding local `{}` must be I64", slot.name);
 }
 
+/// A narrow integer PARAMETER (`fn(text, i32)`) is carryable: the call site
+/// widens and boxes it, the boxed entry decodes and narrows it to the type the
+/// body declares. It was refused only because `jit_closure_abi_supports`
+/// admits 64-bit register types, which de-JITed every module co-compiling
+/// `SimpleHttpServer.start_with_callback(.., on_ready: fn(text, i32))`.
+/// A narrow RESULT stays refused (the outlined body's sub-register return).
+#[test]
+fn jit_admits_narrow_integer_closure_parameters() {
+    let refused = |source: &str| {
+        let mir = compile_to_mir(source).expect("mir lowering failed");
+        crate::codegen::JitCompiler::first_lambda_function_impl(&mir)
+    };
+    let lambda = "fn test() -> i64:\n    val f = \\x: x\n    return f(1)\n";
+    for ty in ["i32", "i16", "i8", "u32", "u16", "u8"] {
+        assert_eq!(
+            refused(&format!("fn run(f: fn(text, {ty}), p: {ty}):\n    f(\"h\", p)\n\n{lambda}")),
+            None,
+            "a `{ty}` closure parameter must be admitted"
+        );
+    }
+    assert_eq!(
+        refused(&format!("fn run(f: fn(i64) -> i32) -> i32:\n    return f(1)\n\n{lambda}")),
+        Some("run".to_string()),
+        "a narrow closure RESULT stays refused"
+    );
+}
+
 /// Sub-register and untyped boundary types are not carryable by the unboxed
 /// closure ABI. `BOOL` lowers to `i8` and crashed the process when a lambda
 /// returned one; `ANY` has no correct encoding at all.
