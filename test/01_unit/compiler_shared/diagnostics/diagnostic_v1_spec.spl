@@ -1,16 +1,56 @@
+"""
+## Purpose and audience
+
+DiagnosticV1 round-trips through its JSON renderer with the fields that
+drifted between the thin pure-Simple Diagnostic and the Rust seed's richer
+type: a stable (non-optional) code, multi-file labels, a nested child
+diagnostic, a macro expansion chain, and a confidence-scored suggested fix.
+Since the extraction to `std.common.diagnostics`, it also proves that the
+`compiler.common.diagnostics.*` paths are re-exports of the SAME types
+(REQ-DIAG-001), for every lane that still imports the compiler path.
+"""
 # @cover src/compiler/00.common/diagnostics/diagnostic_v1.spl
-#
-# DiagnosticV1 round-trips through its JSON renderer with the fields that
-# drifted between the thin pure-Simple Diagnostic and the Rust seed's richer
-# type: a stable (non-optional) code, multi-file labels, a nested child
-# diagnostic, a macro expansion chain, and a confidence-scored suggested fix.
+# @cover src/lib/common/diagnostics/diagnostic_v1.spl
 
 use std.spec
 use compiler.common.diagnostics.diagnostic_v1.{DiagnosticV1, DiagnosticFix, FixConfidence}
 use compiler.common.diagnostics.span.{Span}
+use compiler.common.diagnostics.severity.{Severity}
+use std.common.diagnostics.diagnostic_v1.{DiagnosticV1 as StdDiagnosticV1, render_diagnostic_v1_json}
+use std.common.diagnostics.span.{Span as StdSpan}
+use std.common.diagnostics.diagnostic_batch.{DiagnosticBatchV1, diagnostic_stable_id}
 
+# Takes the compiler-path type; fed a value built through the std path.
+fn code_of(d: DiagnosticV1) -> text:
+    d.code
+
+# Takes the std-path span type; fed a value built through the compiler path.
+fn span_len_of(s: StdSpan) -> i64:
+    s.length
+
+# @manual_section: diagnostic_v1
 describe "DiagnosticV1":
+    it "names the same type through the std.common and compiler.common import paths":
+        # @req REQ-DIAG-001
+        val compiler_span = Span.new(4, 9, 2, 5)
+        # @capture(value): a std-path diagnostic flowing through compiler-path functions and back
+        step("Build a diagnostic through std.common with a compiler.common Severity and Span")
+        val d = StdDiagnosticV1.new(Severity.Error, "E7001", "cross-path").with_span(compiler_span)
+        step("Pass it to a function typed with the compiler.common DiagnosticV1")
+        expect(code_of(d)).to_equal("E7001")
+        step("Pass the compiler.common Span to a function typed with the std.common Span")
+        expect(span_len_of(compiler_span)).to_equal(5)  # oracle: 9 - 4
+        step("Render through the std path and store in a batch; both see one value")
+        val batch = DiagnosticBatchV1.new("spl", "f:1", "file:///m.spl", 1, "xxh3:0", 1)
+            .push(diagnostic_stable_id("E7001", "f:1", "expr:0", 0), d)
+        expect(render_diagnostic_v1_json(d)).to_equal(d.to_json())
+        expect(batch.to_json().contains("\"code\":\"E7001\"")).to_equal(true)
+        expect(batch.to_json().contains("\"line\":2")).to_equal(true)
+
     it "round-trips a stable code, multi-file labels, a nested child, and a confidence-scored fix":
+        # @req REQ-DIAG-001
+        # @capture(json): rendered diagnostic with labels, child and fix
+        step("Build a diagnostic with every V1 field populated and render it")
         val primary_span = Span.new(4, 9, 2, 5)
         val other_file_span = Span.new(0, 3, 1, 1)
 
@@ -58,6 +98,9 @@ describe "DiagnosticV1":
         expect(rendered).to_contain("\"new_text\":\";\"")
 
     it "renders zero fixes and no children as an empty array and a null fix":
+        # @req REQ-DIAG-001
+        # @capture(json): rendered minimal diagnostic
+        step("Render a warning with only a note attached")
         val diag = DiagnosticV1.warning("W3001", "unused import")
             .with_note("prefix with _ to silence this warning")
 
@@ -73,6 +116,9 @@ describe "DiagnosticV1":
         expect(rendered).to_contain("\"macro_trace\":[]")
 
     it "renders a macro expansion chain with each frame's own file and span":
+        # @req REQ-DIAG-001
+        # @capture(json): rendered macro trace
+        step("Render a diagnostic carrying two macro frames")
         val site = Span.new(10, 14, 5, 2)
         val diag = DiagnosticV1.error("E4001", "recursive macro expansion")
             .with_macro_frame("derive_eq", site, "macros.spl")

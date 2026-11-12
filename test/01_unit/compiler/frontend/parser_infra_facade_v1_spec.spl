@@ -1,0 +1,108 @@
+"""
+## Purpose and audience
+
+The parser-infra facade is the surface CMM (and other non-Simple parsers)
+reuse instead of carrying their own lexer/span/line-start code (owner
+decision 9). This spec proves the exported pieces compose: the request-owned
+token receipt yields exact byte spans, those spans convert into the shared
+`Span` and into 0-based UTF-16 LSP ranges through `LineStartTable`, and the
+bounded recovery driver always makes progress and never reports a sync it
+did not reach (REQ-DIAG-001, REQ-DIAG-003, REQ-DIAG-004 groundwork).
+"""
+# @cover src/compiler/10.frontend/parser_infra_facade_v1.spl
+
+use std.spec
+use compiler.frontend.parser_infra_facade_v1.{
+    CoreReferenceTokenV1, core_reference_tokens_v1, token_to_span, tokens_to_span,
+    LineStartTable, span_to_range, RecoveryStepV1, recover_to_sync_token
+}
+
+fn index_of_spelling(tokens: [CoreReferenceTokenV1], spelling: text) -> i64:
+    var i = 0
+    while i < tokens.len():
+        if tokens[i].spelling == spelling:
+            return i
+        i = i + 1
+    -1
+
+# @manual_section: parser_infra_facade
+describe "parser infra facade v1":
+    it "maps a reference token to the shared Span with exact byte offsets and 1-based line/col":
+        # @req REQ-DIAG-001
+        # @capture(value): token spans for an identifier on line 2
+        val src = "val a = 1\nval b = \"가나\" + 2\n"
+        step("Lex the source through the request-owned token receipt")
+        val tokens = core_reference_tokens_v1(src, 100).unwrap()
+        val idx = index_of_spelling(tokens, "\"가나\"")
+        expect(idx > 0).to_equal(true)
+        step("Convert the Korean string-literal token to a Span")
+        val s = token_to_span(tokens[idx])
+        expect(s.start).to_equal(18)   # oracle: "val a = 1\n" 10 bytes + "val b = " 8 bytes
+        expect(s.end).to_equal(26)     # oracle: 2 quotes + 2 Hangul syllables x 3 bytes
+        expect(s.length).to_equal(8)
+        expect(s.line).to_equal(2)
+        expect(s.col).to_equal(9)
+        step("A token range spans from the first token's start to the last token's end")
+        val joined = tokens_to_span(tokens, idx, idx + 2).unwrap()
+        expect(joined.start).to_equal(18)
+        expect(joined.end).to_equal(30)  # oracle: 26 + " + 2" (4 bytes)
+        step("An empty or out-of-range token slice yields no span rather than a fabricated one")
+        expect(tokens_to_span(tokens, idx, idx - 1).is_none()).to_equal(true)
+        expect(tokens_to_span(tokens, 0, tokens.len()).is_none()).to_equal(true)
+
+    it "projects a token span into a 0-based UTF-16 LSP range through the line-start table":
+        # @req REQ-DIAG-003
+        # @capture(value): UTF-16 range of a token after an emoji on the same line
+        val src = "x = 1\ny = \"😀\" + zed\n"
+        step("Lex and locate the identifier after the emoji string")
+        val tokens = core_reference_tokens_v1(src, 100).unwrap()
+        val idx = index_of_spelling(tokens, "zed")
+        expect(idx > 0).to_equal(true)
+        val s = token_to_span(tokens[idx])
+        step("Project its byte span with the shared LineStartTable")
+        val table = LineStartTable.build(src)
+        val r = span_to_range(src, table, s.start, s.end).unwrap()
+        expect(r.start.line).to_equal(1)
+        expect(r.start.character).to_equal(11)   # oracle: y,space,=,space,",😀(2 units),",space,+,space = 11
+        expect(r.end.line).to_equal(1)
+        expect(r.end.character).to_equal(14)
+
+    it "recovers to the next sync token within budget and reports the exact skip count":
+        # @req REQ-DIAG-004
+        # @capture(value): recovery step from a malformed token to the next ':'
+        val src = "fn a( ) ) -> i64: 1\n"
+        val tokens = core_reference_tokens_v1(src, 100).unwrap()
+        val bad = index_of_spelling(tokens, ")") + 1   # the second, unmatched ')'
+        val colon = index_of_spelling(tokens, ":")
+        val colon_kind = tokens[colon].kind
+        step("Skip from the unmatched ')' to the ':' sync token")
+        val r = recover_to_sync_token(tokens, bad, [colon_kind], 10)
+        expect(r.found_sync).to_equal(true)
+        expect(r.next_index).to_equal(colon)
+        expect(r.skipped).to_equal(colon - bad)
+        expect(tokens[r.next_index].spelling).to_equal(":")
+
+    it "terminates with found_sync=false when the budget or EOF is hit, still making progress":
+        # @req REQ-DIAG-004
+        # @capture(value): terminal recovery steps
+        val src = "a b c d e\n"
+        val tokens = core_reference_tokens_v1(src, 100).unwrap()
+        step("Budget of 2 cannot reach a sync kind that is 4 tokens away")
+        val far = tokens[4].kind + 1000   # a kind no token has
+        val r1 = recover_to_sync_token(tokens, 0, [far], 2)
+        expect(r1.found_sync).to_equal(false)
+        expect(r1.skipped).to_equal(3)       # offending token + 2 budget
+        expect(r1.next_index).to_equal(3)
+        expect(r1.next_index > 0).to_equal(true)
+        step("No sync token at all runs to EOF and stops there")
+        val r2 = recover_to_sync_token(tokens, 0, [far], 100)
+        expect(r2.found_sync).to_equal(false)
+        expect(r2.next_index).to_equal(tokens.len())
+        step("Starting at EOF consumes nothing and is terminal")
+        val r3 = recover_to_sync_token(tokens, tokens.len(), [far], 5)
+        expect(r3.found_sync).to_equal(false)
+        expect(r3.skipped).to_equal(0)
+        step("A non-positive budget still consumes the offending token (progress guarantee)")
+        val r4 = recover_to_sync_token(tokens, 1, [far], 0)
+        expect(r4.skipped >= 1).to_equal(true)
+        expect(r4.next_index > 1).to_equal(true)
