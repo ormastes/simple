@@ -4,6 +4,27 @@ use std.spec.*
 use std.io_runtime.{env_get_opt, env_set, env_remove_process, file_exists, dir_create_all}
 use app.io.process_ops.{process_run_timeout}
 use app.io.sysinfo_ops.{getpid}
+use std.nogc_sync_mut.spec.{skip}
+
+# The LLVM native backend these examples exercise is only implemented by the
+# rebuilt pure-Simple producer; the Rust bootstrap seed lacks it. Skipping (not
+# failing) when the selected producer is unavailable matches this file's
+# authored "runtime verification remains pending" contract. The `--version`
+# identity check mirrors the test runner's MC/DC degrade decision.
+fn rust_seed_toolchain(binary: text) -> bool:
+    val (out, err, code) = process_run_timeout(binary, ["--version"], 10000)
+    if code != 0:
+        return false
+    val identity = out + "\n" + err
+    identity.contains("bootstrap seed only") or identity.contains("Simple Language v")
+
+fn producer_unsupported_reason() -> text:
+    val producer = env_get_opt("SIMPLE_BINARY") ?? ""
+    if producer == "":
+        return "SIMPLE_BINARY is unset; these examples require the rebuilt pure-Simple producer"
+    if rust_seed_toolchain(producer):
+        return "the selected SIMPLE_BINARY is the Rust bootstrap seed, which lacks the LLVM native backend"
+    ""
 
 val ABSENT_KEY = "SIMPLE_LLVM_ENV_OWNER_ABSENT_20261107"
 val POSITIVE_KEY = "SIMPLE_LLVM_ENV_OWNER_POSITIVE_20261107"
@@ -49,17 +70,33 @@ fn check_env_owner_fixture(name: text, expected: text):
 
 describe "LLVM native env_get definition ownership":
     slow_it "calls a source-local optional text definition before its caller":
+        val unsupported = producer_unsupported_reason()
+        if unsupported != "":
+            skip("calls a source-local optional text definition before its caller", unsupported)
+            return
         step("An absent process key must still return the local Some payload")
         check_env_owner_fixture("local_before", "env_get local before: local-value")
 
     slow_it "calls a source-local definition after its caller and forward reference":
+        val unsupported = producer_unsupported_reason()
+        if unsupported != "":
+            skip("calls a source-local definition after its caller and forward reference", unsupported)
+            return
         step("The aaa_caller body is emitted before env_get and must keep its source owner")
         check_env_owner_fixture("local_after", "env_get local after: local-value")
 
     slow_it "retains an imported bare extern alias on the runtime owner":
+        val unsupported = producer_unsupported_reason()
+        if unsupported != "":
+            skip("retains an imported bare extern alias on the runtime owner", unsupported)
+            return
         step("A separate provider's extern alias must read the positive environment value")
         check_env_owner_fixture("imported_alias", "env_get imported alias: runtime-value")
 
     slow_it "preserves a colliding local integer function's parameter and return ABI":
+        val unsupported = producer_unsupported_reason()
+        if unsupported != "":
+            skip("preserves a colliding local integer function's parameter and return ABI", unsupported)
+            return
         step("A local env_get(i64) returning i64 must compute 42 without a runtime alias")
         check_env_owner_fixture("local_integer", "env_get local integer: 42")

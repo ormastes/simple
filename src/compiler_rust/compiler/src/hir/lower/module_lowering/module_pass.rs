@@ -1729,7 +1729,17 @@ impl Lowerer {
         let mut chunks: Vec<(FunctionContext, Vec<HirStmt>)> = Vec::new();
         let mut dyn_ctx = FunctionContext::new(TypeId::VOID);
         let mut dyn_body: Vec<HirStmt> = Vec::new();
+        // Flatten owner of the global declared by the current item: the owner
+        // marker const immediately preceding it (same rule as
+        // `flatten_global_owner::declaration_owners`).
+        let mut marked_owner: Option<String> = None;
         for item in &ast_module.items {
+            let declaring_owner = marked_owner.take();
+            if let Node::Const(c) = item {
+                if let Some(owner) = c.name.strip_prefix(crate::interpreter::FLATTEN_GLOBAL_OWNER_MARKER_PREFIX) {
+                    marked_owner = Some(owner.to_string());
+                }
+            }
             let (name, value): (String, &Expr) = match item {
                 Node::Let(l) => match (extract_pattern_name(&l.pattern), l.value.as_ref()) {
                     (Some(n), Some(v)) => (n, v),
@@ -1754,8 +1764,14 @@ impl Lowerer {
             }
             let global_ty = *self.globals.get(&name).unwrap_or(&TypeId::ANY);
             // Resolve the initializer's own references through the owner
-            // of the global it initializes (flattened same-name globals).
-            let initializer_owner = self.flatten_global_symbol_owners.get(&name).cloned().flatten();
+            // of the global it initializes. `flatten_global_symbol_owners`
+            // only knows COLLIDING (renamed) globals; every other imported
+            // module's global is owned by its marker. Leaving that `None`
+            // lowered `val c = imported_fn(0)` as if the entry file wrote it,
+            // so the importer's own `use` was ignored ("<entry file> neither
+            // defines nor imports it").
+            let initializer_owner =
+                self.flatten_global_symbol_owners.get(&name).cloned().flatten().or(declaring_owner);
             let previous_owner = std::mem::replace(&mut self.current_function_owner, initializer_owner);
             let previous_type_scope = self.enter_flatten_struct_scope();
             let hir_val = self.lower_expr(value, &mut dyn_ctx);
