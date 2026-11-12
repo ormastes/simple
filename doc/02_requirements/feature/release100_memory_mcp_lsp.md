@@ -33,7 +33,7 @@ Each `REQ-*` row incorporates **all** text and subsections at the referenced sec
 | Requirement | Selected plan section | Acceptance owner | Status |
 |---|---|---|---|
 | REQ-MEM-1 | [1 Decisions and scope](../../03_plan/release/1.0.0/inputs_2026-11-06/simple_nogc_ownership_memory_hardening_plan.md) | memory_audit / root | OPEN |
-| REQ-MEM-1-1 | [1.1 Required defaults](../../03_plan/release/1.0.0/inputs_2026-11-06/simple_nogc_ownership_memory_hardening_plan.md) | memory_audit / root | OPEN |
+| REQ-MEM-1-1 | [1.1 Required defaults](../../03_plan/release/1.0.0/inputs_2026-11-06/simple_nogc_ownership_memory_hardening_plan.md) | memory_audit / root | PARTIAL (lane mem-p1: admission truth + nogc_require_strict policy; executed spec test/01_unit/compiler/semantics/param_effects/nogc_admission_truth_spec.spl 12/12 on seed interpreter) |
 | REQ-MEM-1-2 | [1.2 What “recover” means](../../03_plan/release/1.0.0/inputs_2026-11-06/simple_nogc_ownership_memory_hardening_plan.md) | memory_audit / root | OPEN |
 | REQ-MEM-1-3 | [1.3 Scope of guarantees](../../03_plan/release/1.0.0/inputs_2026-11-06/simple_nogc_ownership_memory_hardening_plan.md) | memory_audit / root | OPEN |
 | REQ-MEM-1-4 | [1.4 Implementation notation](../../03_plan/release/1.0.0/inputs_2026-11-06/simple_nogc_ownership_memory_hardening_plan.md) | memory_audit / root | OPEN |
@@ -50,7 +50,7 @@ Each `REQ-*` row incorporates **all** text and subsections at the referenced sec
 | REQ-MEM-3-5 | [3.5 Containers, replacement, and failed operations](../../03_plan/release/1.0.0/inputs_2026-11-06/simple_nogc_ownership_memory_hardening_plan.md) | memory_audit / root | OPEN |
 | REQ-MEM-3-6 | [3.6 Exactly-once cleanup and foreign resources](../../03_plan/release/1.0.0/inputs_2026-11-06/simple_nogc_ownership_memory_hardening_plan.md) | memory_audit / root | OPEN |
 | REQ-MEM-3-7 | [3.7 One mandatory checker across execution routes](../../03_plan/release/1.0.0/inputs_2026-11-06/simple_nogc_ownership_memory_hardening_plan.md) | memory_audit / root | OPEN |
-| REQ-MEM-3-8 | [3.8 Compatibility and bootstrap recovery](../../03_plan/release/1.0.0/inputs_2026-11-06/simple_nogc_ownership_memory_hardening_plan.md) | memory_audit / root | OPEN |
+| REQ-MEM-3-8 | [3.8 Compatibility and bootstrap recovery](../../03_plan/release/1.0.0/inputs_2026-11-06/simple_nogc_ownership_memory_hardening_plan.md) | memory_audit / root | PARTIAL (lane mem-p1: admission truth + nogc_require_strict policy; executed spec test/01_unit/compiler/semantics/param_effects/nogc_admission_truth_spec.spl 12/12 on seed interpreter) |
 | REQ-MEM-4 | [4 Cyclic relationships and configurable detection](../../03_plan/release/1.0.0/inputs_2026-11-06/simple_nogc_ownership_memory_hardening_plan.md) | memory_audit / root | OPEN |
 | REQ-MEM-4-1 | [4.1 Ownership cycles are not ordinary graph cycles](../../03_plan/release/1.0.0/inputs_2026-11-06/simple_nogc_ownership_memory_hardening_plan.md) | memory_audit / root | OPEN |
 | REQ-MEM-4-2 | [4.2 Recommended representations](../../03_plan/release/1.0.0/inputs_2026-11-06/simple_nogc_ownership_memory_hardening_plan.md) | memory_audit / root | OPEN |
@@ -130,7 +130,7 @@ Each `REQ-*` row incorporates **all** text and subsections at the referenced sec
 | REQ-MCP-1-2 | [1.2 Terminology](../../03_plan/release/1.0.0/inputs_2026-11-06/simple_mcp_lsp_source_debugging_improvement_plan_2026-10-29.md) | mcp_lsp_audit / source_view / root | OPEN |
 | REQ-MCP-2 | [2 Inspected baseline and concrete gaps](../../03_plan/release/1.0.0/inputs_2026-11-06/simple_mcp_lsp_source_debugging_improvement_plan_2026-10-29.md) | mcp_lsp_audit / source_view / root | OPEN |
 | REQ-MCP-2-1 | [2.1 Evidence standard](../../03_plan/release/1.0.0/inputs_2026-11-06/simple_mcp_lsp_source_debugging_improvement_plan_2026-10-29.md) | mcp_lsp_audit / source_view / root | OPEN |
-| REQ-MCP-2-2 | [2.2 First audit deliverable](../../03_plan/release/1.0.0/inputs_2026-11-06/simple_mcp_lsp_source_debugging_improvement_plan_2026-10-29.md) | mcp_lsp_audit / source_view / root | OPEN |
+| REQ-MCP-2-2 | [2.2 First audit deliverable](../../03_plan/release/1.0.0/inputs_2026-11-06/simple_mcp_lsp_source_debugging_improvement_plan_2026-10-29.md) | mcp_lsp_audit / source_view / root | PARTIAL: narrowed seven-defect audit in [intent_view_audit_2026-11-12](../../09_report/mcp_lsp/intent_view_audit_2026-11-12.md); `capability_audit.sdn` matrix still OPEN |
 | REQ-MCP-3 | [3 Architecture and ownership](../../03_plan/release/1.0.0/inputs_2026-11-06/simple_mcp_lsp_source_debugging_improvement_plan_2026-10-29.md) | mcp_lsp_audit / source_view / root | OPEN |
 | REQ-MCP-3-1 | [3.1 Shared services, thin frontends](../../03_plan/release/1.0.0/inputs_2026-11-06/simple_mcp_lsp_source_debugging_improvement_plan_2026-10-29.md) | mcp_lsp_audit / source_view / root | OPEN |
 | REQ-MCP-3-2 | [3.2 Logical library boundaries](../../03_plan/release/1.0.0/inputs_2026-11-06/simple_mcp_lsp_source_debugging_improvement_plan_2026-10-29.md) | mcp_lsp_audit / source_view / root | OPEN |
@@ -300,7 +300,7 @@ These exact IDs remain independent required rows. Each needs positive and negati
 | AC-METRIC-01 | Known allocations and process fixtures calibrate bytes/KiB/pages; missing metrics are unavailable, never zero  OPEN |
 | AC-METRIC-02 | Repeated equivalent units show bounded scratch after warmup; intentionally retained artifacts are separately attributed  OPEN |
 | AC-DB-01 | Group migration preserves every existing unrelated row/table and status; malformed/partial input causes no write  OPEN |
-| AC-GATE-01 | Zero executed tests, omitted mandatory backend, or missing proof root cannot report PASS  OPEN |
+| AC-GATE-01 | Zero executed tests, omitted mandatory backend, or missing proof root cannot report PASS  PARTIAL (zero-checked closure cannot report conforming no-GC: NOGC-POLICY-005, nogc_admission_truth_spec.spl; backend/proof-root halves still OPEN) |
 | AC-GATE-02 | Removing/bypassing a checker, cleanup operation, or required test is detected by an independent gate  OPEN |
 
 ## Formal obligations
