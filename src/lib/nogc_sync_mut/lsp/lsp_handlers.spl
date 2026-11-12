@@ -32,6 +32,9 @@ var CLIENT_SUPPORTS_VISIBILITY: bool = false
 # Set by `initialize`; unsolicited publishDiagnostics (didChange) only flow in
 # an initialized session, so pre-handshake notifications never spawn a check.
 var LSP_SESSION_INITIALIZED: bool = false
+# MDSOC+ reveal level for symbol listings; "" = per-file default (public
+# inside an __init__.spl boundary, all for an open module). REQ-PUBVIEW-008.
+var LSP_VISIBILITY_LEVEL: text = ""
 
 fn client_supports_visibility() -> bool:
     CLIENT_SUPPORTS_VISIBILITY
@@ -120,6 +123,11 @@ fn lsp_handle_initialize(id: text) -> text:
 
 fn lsp_handle_initialize_with_body(id: text, body: text) -> text:
     LSP_SESSION_INITIALIZED = true
+    val init_options = extract_nested(json=body, key="initializationOptions")
+    if init_options != "" and init_options.contains("visibility"):
+        val requested = extract_field(json=init_options, key="visibility")
+        if lsp_visibility_level_known(requested):
+            LSP_VISIBILITY_LEVEL = requested
     # REQ-LSPVIS-008: Read client experimental.simpleVisibility capability
     if body != "":
         val experimental_raw = extract_nested(json=body, key="experimental")
@@ -148,6 +156,7 @@ fn lsp_handle_initialize_with_body(id: text, body: text) -> text:
     caps.push(jp("codeActionProvider", jo1(jp("codeActionKinds", code_action_kinds))))
     val diag_provider = jo2(jp("interFileDependencies", "false"), jp("workspaceDiagnostics", "false"))
     caps.push(jp("diagnosticProvider", diag_provider))
+    caps.push(jp("executeCommandProvider", jo1(jp("commands", SB_L() + js("simple.setVisibility") + SB_R()))))
     val capabilities_obj = LB() + caps.join(",") + RB()
     val server_info = jo2(jp("name", js("simple-lsp")), jp("version", js("0.1.0")))
     val experimental = jo1(jp("simpleVisibilityProvider", "true"))
@@ -581,6 +590,9 @@ fn lsp_handle_hover(id: text, body: text) -> text:
     val file_path = _uri_to_path(uri)
     val line = _extract_line(body)
     val col = _extract_character(body)
+    # Line 0 is the module header: hover there is the module's hidden summary (REQ-PUBVIEW-008).
+    if line == "0" and file_path != "":
+        return make_json_result(id=id, result=lsp_hover_hidden_summary_result(file_path))
     val query_line = str((line.to_int() ?? 0) + 1)
     val query_col = str((col.to_int() ?? 0) + 1)
     var cmd = lsp_visibility_query_command_v1(["hover", lsp_query_file_argument_v1(file_path), query_line, query_col])
@@ -588,8 +600,8 @@ fn lsp_handle_hover(id: text, body: text) -> text:
     var exit_code: i64 = 0
     (out, exit_code) = lsp_run_query_command_v1(_find_simple_binary(), cmd)
     val payload = lsp_extract_query_json_payload(out)
-    if exit_code != 0 or payload == "":
-        return make_json_result(id=id, result="null")
+    if exit_code != 0 or payload == "" or payload == "null":
+        return make_json_result(id=id, result=lsp_hover_hidden_summary_result(file_path))
     make_json_result(id=id, result=payload)
 
 # --- Completion (fast path) ---
@@ -617,7 +629,7 @@ fn lsp_handle_document_symbol(id: text, body: text) -> text:
     val file_path = _uri_to_path(uri)
     if file_path == "":
         return make_json_result(id=id, result=SB_L() + SB_R())
-    var cmd = lsp_visibility_query_command_v1(["symbols", lsp_query_file_argument_v1(file_path), "--requester", lsp_query_file_argument_v1(file_path)])
+    var cmd = lsp_visibility_query_command_v1(["symbols", lsp_query_file_argument_v1(file_path), "--requester", lsp_query_file_argument_v1(file_path)] + lsp_visibility_args(body))
     var out = ""
     var exit_code: i64 = 0
     (out, exit_code) = lsp_run_query_command_v1(_find_simple_binary(), cmd)
@@ -672,7 +684,7 @@ fn lsp_handle_implementation(id: text, body: text) -> text:
 
 fn lsp_handle_workspace_symbol(id: text, body: text) -> text:
     val query = extract_nested(json=body, key="query")
-    var cmd = lsp_visibility_query_command_v1(["workspace-symbols", "--query", query, "--requester", "src/"])
+    var cmd = lsp_visibility_query_command_v1(["workspace-symbols", "--query", query, "--requester", "src/"] + lsp_visibility_args(body))
     var out = ""
     var exit_code: i64 = 0
     (out, exit_code) = lsp_run_query_command_v1(_find_simple_binary(), cmd)
@@ -995,3 +1007,77 @@ fn lsp_handle_ast_views(id: text, body: text) -> text:
     if payload == "":
         return make_error(id, -32603, "simple/ast/views: no result (exit {code})")
     make_json_result(id=id, result=payload)
+
+# --- MDSOC+ public view (REQ-PUBVIEW-008) ---
+
+fn lsp_visibility_level_known(level: text) -> bool:
+    level == "public" or level == "feature_private" or level == "layer_private" or level == "all"
+
+pub fn lsp_visibility_level() -> text:
+    LSP_VISIBILITY_LEVEL
+
+# Per-request `simpleVisibility` wins over the session level set through
+# initializationOptions.simple.visibility or simple.setVisibility.
+fn lsp_visibility_args(body: text) -> [text]:
+    var args: [text] = []
+    val requested = extract_nested(json=body, key="simpleVisibility")
+    val level = if lsp_visibility_level_known(requested): requested else: LSP_VISIBILITY_LEVEL
+    if level != "":
+        args.push("--visibility")
+        args.push(level)
+    val feature = extract_nested(json=body, key="feature")
+    if feature != "":
+        args.push("--feature")
+        args.push(feature)
+    val layer = extract_nested(json=body, key="layer")
+    if layer != "":
+        args.push("--layer")
+        args.push(layer)
+    args
+
+# workspace/executeCommand {command: "simple.setVisibility", arguments: ["<level>"]}
+pub fn lsp_handle_execute_command(id: text, body: text) -> text:
+    val command = extract_nested(json=body, key="command")
+    if command != "simple.setVisibility":
+        return make_error(id, -32601, "unknown command: " + command)
+    val arguments = extract_nested_raw(json=body, key="arguments")
+    var level = ""
+    for candidate in ["feature_private", "layer_private", "public", "all"]:
+        if level == "" and arguments.contains(Q() + candidate + Q()): level = candidate
+    if level == "":
+        return make_error(id, -32602, "simple.setVisibility needs one of public, feature_private, layer_private, all")
+    LSP_VISIBILITY_LEVEL = level
+    make_json_result(id=id, result=jo1(jp("visibility", js(level))))
+
+fn lsp_hidden_summary_payload(file_path: text) -> text:
+    var args: [text] = ["hidden-summary", lsp_query_file_argument_v1(file_path)]
+    if LSP_VISIBILITY_LEVEL != "":
+        args.push("--visibility")
+        args.push(LSP_VISIBILITY_LEVEL)
+    var out = ""
+    var exit_code: i64 = 0
+    (out, exit_code) = lsp_run_query_command_v1(_find_simple_binary(), lsp_visibility_query_command_v1(args))
+    val payload = lsp_extract_query_json_payload(out)
+    if exit_code != 0 or payload == "": return ""
+    payload
+
+# simple/hiddenSummary {textDocument: {uri}} -> the file's hidden summary.
+pub fn lsp_handle_hidden_summary(id: text, body: text) -> text:
+    val file_path = _uri_to_path(_extract_uri(body))
+    if file_path == "":
+        return make_json_result(id=id, result="null")
+    val payload = lsp_hidden_summary_payload(file_path)
+    if payload == "":
+        return make_json_result(id=id, result="null")
+    make_json_result(id=id, result=payload)
+
+# Hover on the module header (line 0) or on a position with no symbol answers
+# with the file's hidden summary so a reader learns what the listing hides.
+fn lsp_hover_hidden_summary_result(file_path: text) -> text:
+    val payload = lsp_hidden_summary_payload(file_path)
+    if payload == "": return "null"
+    val hint = extract_field(json=payload, key="hint")
+    val default_rule = extract_field(json=payload, key="visibility_default")
+    if hint == "": return "null"
+    val value = hint + "\n\nvisibility_default: " + default_rule
+    jo1(jp("contents", jo2(jp("kind", js("markdown")), jp("value", js(value)))))
