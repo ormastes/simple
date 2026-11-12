@@ -1,0 +1,37 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# Checked span admission: count * stride and offset + length must not wrap.
+
+use std.spec
+use std.spec.step
+use common.memory.packed_span.{PackedSpanRegistry, BufferSpanRef, PACKED_SPAN_OK, PACKED_SPAN_OUT_OF_BOUNDS, PACKED_SPAN_BAD_STRIDE}
+
+describe "packed span checked admission":
+    it "refuses a count * stride product that wraps u32 onto the declared length":
+        # @req REQ-SSPEC-UNIT
+        step("count 0x40000001 * stride 4 wraps to 4 in u32; declared length 4")
+        val reg = PackedSpanRegistry.create(2)
+        val slot = reg.register(64)
+        val gen = reg.generation_of(slot)
+        val r = BufferSpanRef(object_slot: slot as u32, object_generation: gen, byte_offset: 0u32, byte_length: 4u32, element_count: 0x40000001u32, element_stride: 4u32)
+        val v = reg.resolve(r)
+        assert_true(v != PACKED_SPAN_OK)
+        assert_true(v == PACKED_SPAN_BAD_STRIDE)
+
+    it "refuses an offset near u32 max whose end exceeds the backing":
+        # @req REQ-SSPEC-UNIT
+        step("offset 0xFFFFFFFC + length 8 must be out of bounds, not wrapped")
+        val reg = PackedSpanRegistry.create(2)
+        val slot = reg.register(64)
+        val gen = reg.generation_of(slot)
+        val r = BufferSpanRef(object_slot: slot as u32, object_generation: gen, byte_offset: 0xFFFFFFFCu32, byte_length: 8u32, element_count: 2u32, element_stride: 4u32)
+        assert_true(reg.resolve(r) == PACKED_SPAN_OUT_OF_BOUNDS)
+
+    it "admits a window ending exactly at the backing length":
+        # @req REQ-SSPEC-UNIT
+        step("offset 56 + 8 bytes == 64")
+        val reg = PackedSpanRegistry.create(2)
+        val slot = reg.register(64)
+        val gen = reg.generation_of(slot)
+        val r = BufferSpanRef(object_slot: slot as u32, object_generation: gen, byte_offset: 56u32, byte_length: 8u32, element_count: 2u32, element_stride: 4u32)
+        assert_true(reg.resolve(r) == PACKED_SPAN_OK)
