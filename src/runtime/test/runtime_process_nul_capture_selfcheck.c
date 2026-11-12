@@ -1,3 +1,8 @@
+/* Non-Windows test: the POSIX/Linux/macOS APIs it uses have no Windows build here. */
+#if defined(_WIN32)
+#include <stdio.h>
+int main(void) { puts("SKIP: runtime_process_nul_capture_selfcheck is POSIX-only; no Windows build"); return 0; }
+#else
 /* Native POSIX process capture must retain byte lengths, not strlen lengths. */
 #include "runtime.h"
 #include <assert.h>
@@ -63,3 +68,5 @@ int main(int argc, char** argv) {
     puts("PASS: binary stdout/stderr, exit status, cap, timeout/reap, length reset");
     return 0;
 }
+
+#endif /* !_WIN32 */

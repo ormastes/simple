@@ -1,3 +1,8 @@
+/* Non-Windows test: the POSIX/Linux/macOS APIs it uses have no Windows build here. */
+#if defined(_WIN32)
+#include <stdio.h>
+int main(void) { puts("SKIP: runtime_linux_group_start_ownership_selfcheck is POSIX-only; no Windows build"); return 0; }
+#else
 /* Inject kernel boundaries to exercise the real start/collect owner code.
  * This is lifecycle fault evidence, not cgroup containment qualification. */
 #define _GNU_SOURCE
@@ -355,3 +360,5 @@ int main(void) {
     puts("runtime_linux_group_start_ownership: PASS (injected lifecycle only)");
     return 0;
 }
+
+#endif /* !_WIN32 */

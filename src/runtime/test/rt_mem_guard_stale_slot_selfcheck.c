@@ -1,3 +1,8 @@
+/* Non-Windows test: the POSIX/Linux/macOS APIs it uses have no Windows build here. */
+#if defined(_WIN32)
+#include <stdio.h>
+int main(void) { puts("SKIP: rt_mem_guard_stale_slot_selfcheck is POSIX-only; no Windows build"); return 0; }
+#else
 /* Stale-slot use-after-free self-check for the native-C guard-page
  * allocator (`runtime_memory_guard.h`).
  *
@@ -118,3 +123,5 @@ int main(void) {
            failures, failures == 1 ? "" : "s");
     return failures ? 1 : 0;
 }
+
+#endif /* !_WIN32 */

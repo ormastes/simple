@@ -1,3 +1,8 @@
+/* Non-Windows test: the POSIX/Linux/macOS APIs it uses have no Windows build here. */
+#if defined(_WIN32)
+#include <stdio.h>
+int main(void) { puts("SKIP: process_capture_admission_concurrency_selfcheck is POSIX-only; no Windows build"); return 0; }
+#else
 /* Focused Linux/POSIX regression against the ACTUAL capture/fork owners.
  * The child-delay atfork seam delays real native child setup; it does not
  * replace the admission implementation, clock, wait, pipe or capture model.
@@ -206,3 +211,5 @@ int main(int argc, char** argv) {
     printf("PASS capture admission/concurrency: %d checks; actual POSIX owners, atomic CLOEXEC, forced overlap, delayed preexec, EOF while other child live, status pipe, no-entry, inherited env, limits, timeout/reap\n", checks);
     return 0;
 }
+
+#endif /* !_WIN32 */

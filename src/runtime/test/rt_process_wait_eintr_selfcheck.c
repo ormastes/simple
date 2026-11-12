@@ -1,3 +1,8 @@
+/* Non-Windows test: the POSIX/Linux/macOS APIs it uses have no Windows build here. */
+#if defined(_WIN32)
+#include <stdio.h>
+int main(void) { puts("SKIP: rt_process_wait_eintr_selfcheck is POSIX-only; no Windows build"); return 0; }
+#else
 /* Self-check: rt_process_wait() must survive an interrupted wait and must
  * report a signal-terminated child distinguishably from a failed wait.
  *
@@ -116,3 +121,5 @@ int main(void) {
     printf("PASS\n");
     return 0;
 }
+
+#endif /* !_WIN32 */

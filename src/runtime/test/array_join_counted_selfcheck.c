@@ -1,3 +1,8 @@
+/* Non-Windows test: the POSIX/Linux/macOS APIs it uses have no Windows build here. */
+#if defined(_WIN32)
+#include <stdio.h>
+int main(void) { puts("SKIP: array_join_counted_selfcheck is POSIX-only; no Windows build"); return 0; }
+#else
 /* Real runtime contract fixture. Link with --wrap=malloc,--wrap=calloc,--wrap=free and the paired runtime.
  * baseline mode records the old NUL loss; candidate mode requires counted bytes.
  * Overflow cases deliberately alter registered metadata, restore it, and require
@@ -141,3 +146,5 @@ int main(int argc,char** argv) {
     printf("%s checks=%d PASS\n",baseline?"baseline":"candidate",checks);
     return 0;
 }
+
+#endif /* !_WIN32 */

@@ -1,3 +1,8 @@
+/* Non-Windows test: the POSIX/Linux/macOS APIs it uses have no Windows build here. */
+#if defined(_WIN32)
+#include <stdio.h>
+int main(void) { puts("SKIP: rt_sosix_darwin_bound_image_selfcheck is POSIX-only; no Windows build"); return 0; }
+#else
 static void before_spawn_attack(void *image);
 #define SOSIX_DARWIN_IMAGE_BEFORE_SPAWN(image) before_spawn_attack(image)
 #include "../runtime_sosix_darwin_process_private.h"
@@ -111,3 +116,5 @@ int main(int argc,char **argv) {
     puts("PASS: provisioned owner denies direct and injected custom dependencies before constructors");
     close(source);
 }
+
+#endif /* !_WIN32 */

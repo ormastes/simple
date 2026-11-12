@@ -1,3 +1,8 @@
+/* Non-Windows test: the POSIX/Linux/macOS APIs it uses have no Windows build here. */
+#if defined(_WIN32)
+#include <stdio.h>
+int main(void) { puts("SKIP: vector_http_avx512_selfcheck is POSIX-only; no Windows build"); return 0; }
+#else
 #define _GNU_SOURCE
 #include "../simple_vector_kernel_abi_v1.h"
 #include <dlfcn.h>
@@ -105,3 +110,5 @@ int main(int argc,char **argv) {
     printf("vector_http_provider=pass mode=%s cases=%u http_vector_iterations=%llu bitmap_supported=%d guard_pages=true input_preserved=true\n",argc==4?"cross-target":forced?"forced-no-bw":"native",cases,(unsigned long long)http_iterations,bitmap_supported);
     return 0;
 }
+
+#endif /* !_WIN32 */

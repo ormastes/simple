@@ -1,3 +1,8 @@
+/* Non-Windows test: the POSIX/Linux/macOS APIs it uses have no Windows build here. */
+#if defined(_WIN32)
+#include <stdio.h>
+int main(void) { puts("SKIP: linux_container_user_observation_v1_selfcheck is POSIX-only; no Windows build"); return 0; }
+#else
 /* Actual Core-C observer fixture. Child processes are owned only by this
  * harness; the production observer must never signal, wait for or adopt them. */
 #define _GNU_SOURCE
@@ -82,3 +87,5 @@ int main(void){
     fputs("UNSUPPORTED: Linux native observer fixture requires Linux\n",stderr);return 77;
 #endif
 }
+
+#endif /* !_WIN32 */

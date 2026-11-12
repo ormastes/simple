@@ -1,3 +1,8 @@
+/* Non-Windows test: the POSIX/Linux/macOS APIs it uses have no Windows build here. */
+#if defined(_WIN32)
+#include <stdio.h>
+int main(void) { puts("SKIP: rt_sosix_darwin_broker_transport_selfcheck is POSIX-only; no Windows build"); return 0; }
+#else
 #include "../runtime_sosix_darwin_broker_transport_private.h"
 #include <assert.h>
 #include <fcntl.h>
@@ -206,3 +211,5 @@ int main(int argc, char **argv) {
     puts("darwin_broker_transport: pass");
     return 0;
 }
+
+#endif /* !_WIN32 */

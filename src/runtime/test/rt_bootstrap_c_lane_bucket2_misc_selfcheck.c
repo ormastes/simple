@@ -1,3 +1,8 @@
+/* Non-Windows test: the POSIX/Linux/macOS APIs it uses have no Windows build here. */
+#if defined(_WIN32)
+#include <stdio.h>
+int main(void) { puts("SKIP: rt_bootstrap_c_lane_bucket2_misc_selfcheck is POSIX-only; no Windows build"); return 0; }
+#else
 /* Stage2 bootstrap link (core-C-only lane): behavioural proof for 30 of the
  * "bucket 2, Rust-only misc" symbols added to runtime_native.c to close part
  * of the undefined-symbol set found when relinking the real Stage2 failed-
@@ -342,3 +347,5 @@ int main(void) {
     fprintf(stderr, "FAIL: %d assertion(s) failed\n", failures);
     return 1;
 }
+
+#endif /* !_WIN32 */

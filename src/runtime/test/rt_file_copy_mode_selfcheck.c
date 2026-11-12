@@ -1,3 +1,8 @@
+/* Non-Windows test: the POSIX/Linux/macOS APIs it uses have no Windows build here. */
+#if defined(_WIN32)
+#include <stdio.h>
+int main(void) { puts("SKIP: rt_file_copy_mode_selfcheck is POSIX-only; no Windows build"); return 0; }
+#else
 #include <assert.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -68,3 +73,5 @@ int main(int argc, char **argv) {
     puts("rt_file_copy_mode_selfcheck: PASS (copy, publish, execute, data mode)");
     return 0;
 }
+
+#endif /* !_WIN32 */

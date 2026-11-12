@@ -1,3 +1,8 @@
+/* Non-Windows test: the POSIX/Linux/macOS APIs it uses have no Windows build here. */
+#if defined(_WIN32)
+#include <stdio.h>
+int main(void) { puts("SKIP: rt_tls_client_openssl_selfcheck is POSIX-only; no Windows build"); return 0; }
+#else
 #include "runtime.h"
 
 #include <arpa/inet.h>
@@ -380,3 +385,5 @@ int main(int argc, char **argv) {
     printf("SELFCHECK PASSED mode=%s\n", argv[1]);
     return 0;
 }
+
+#endif /* !_WIN32 */

@@ -1,3 +1,8 @@
+/* Non-Windows test: the POSIX/Linux/macOS APIs it uses have no Windows build here. */
+#if defined(_WIN32)
+#include <stdio.h>
+int main(void) { puts("SKIP: process_capture_legacy_close_range_selfcheck is POSIX-only; no Windows build"); return 0; }
+#else
 /* Linux compatibility witness against actual production capture owners.
  * A genuine seccomp filter denies close_range before any tested launch.
  * Legacy text/raw/unbounded capture must execute; new strong capture must
@@ -89,3 +94,5 @@ int main(int argc, char** argv) {
     return 77;
 #endif
 }
+
+#endif /* !_WIN32 */

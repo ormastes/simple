@@ -1,3 +1,8 @@
+/* Non-Windows test: the POSIX/Linux/macOS APIs it uses have no Windows build here. */
+#if defined(_WIN32)
+#include <stdio.h>
+int main(void) { puts("SKIP: cuda_bitmap_provider_failure_selfcheck is POSIX-only; no Windows build"); return 0; }
+#else
 /* Deterministic failure-policy unit test of the actual provider owner.
  * Mocked Driver API calls here are NOT CUDA device execution evidence. */
 #include "../providers/cuda/bitmap_provider_v1.c"
@@ -70,3 +75,5 @@ int main(void) {
     puts("cuda_provider_failure_policy=pass exhaustion=permanent timeout=retained drain_failure=quarantined destroy_failure=retained context_failure=quarantined mocked_driver=true");
     return 0;
 }
+
+#endif /* !_WIN32 */

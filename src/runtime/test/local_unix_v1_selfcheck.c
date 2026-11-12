@@ -1,3 +1,8 @@
+/* Non-Windows test: the POSIX/Linux/macOS APIs it uses have no Windows build here. */
+#if defined(_WIN32)
+#include <stdio.h>
+int main(void) { puts("SKIP: local_unix_v1_selfcheck is POSIX-only; no Windows build"); return 0; }
+#else
 /* New actual Linux local-socket contract witness. Raw listeners, descriptor
  * inspection and teardown belong ONLY to this test harness. Link normal CoreC
  * providers; do not compile runtime_socket_nonblock.c separately as included. */
@@ -130,3 +135,5 @@ int main(void) {
     return 0;
 }
 #endif
+
+#endif /* !_WIN32 */

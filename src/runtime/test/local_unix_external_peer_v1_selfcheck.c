@@ -1,3 +1,8 @@
+/* Non-Windows test: the POSIX/Linux/macOS APIs it uses have no Windows build here. */
+#if defined(_WIN32)
+#include <stdio.h>
+int main(void) { puts("SKIP: local_unix_external_peer_v1_selfcheck is POSIX-only; no Windows build"); return 0; }
+#else
 /* EXTERNAL peer protocol: invoke server/client separately under ALREADY
  * provisioned distinct UIDs. Never creates users, forks peers, changes identity
  * or elevates privilege. Parent path provisioning is outside this harness. */
@@ -62,3 +67,5 @@ int main(int argc,char** argv) {
     return 2;
 }
 #endif
+
+#endif /* !_WIN32 */
