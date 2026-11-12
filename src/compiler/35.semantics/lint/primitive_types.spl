@@ -2,13 +2,22 @@
 #
 # Every primitive_api consumer (primitive_api.spl, primitive_api_arena.spl,
 # app.cli query_lint `_pa_is_primitive`, fix rule
-# compiler.tools.fix.rules.impl_.lint_primitive_api) must use these helpers or
-# mirror the list verbatim with a comment pointing here. The Rust seed mirror
-# is src/compiler_rust/compiler/src/lint/rules.rs PRIMITIVE_TYPES.
+# compiler.tools.fix.rules.impl_.lint_primitive_api, and the semantic_api
+# exported-graph checker) must use these helpers or mirror the list verbatim
+# with a comment pointing here. The Rust seed mirror is
+# src/compiler_rust/compiler/src/lint/rules.rs PRIMITIVE_TYPES.
 #
 # `bool` IS included (mission-critical plan 2026-07): bare bool in public
 # APIs is a primitive_api concern like the numeric primitives.
 # Parity is enforced by test/01_unit/compiler/lint/primitive_types_parity_spec.spl.
+#
+# Semantic classes (unified unit/primitive-API plan 2026-11-12 §1/§10.1):
+# the table above is the DENY set. `usize`/`isize` are an additional
+# public-API deny class ("index": a platform-width count/index with no
+# domain). The text family (`text`, `str`, `String`) and `char` are
+# CLASSIFIED so inventories can bucket them, but they are NOT flagged by
+# default: a text parameter is a valid API shape (names, paths, messages),
+# so blanket-flagging it would drown the real findings.
 #
 # Function-based (no module-level globals) so native-build --entry cannot
 # silently zero the table (MODINIT001).
@@ -26,4 +35,45 @@ fn is_bare_primitive_name(name: text) -> bool:
             return true
     false
 
+fn primitive_index_types() -> [text]:
+    """Platform-width index/count primitives: flagged in public APIs like the
+    numeric table, classified separately so a fix can propose a count/index
+    unit instead of a width."""
+    ["usize", "isize"]
+
+fn primitive_text_types() -> [text]:
+    """Text family: classified, never flagged by default."""
+    ["text", "str", "String"]
+
+fn primitive_class_of(name: text) -> text:
+    """Semantic class of a type NAME: "integer" | "float" | "bool" | "index" |
+    "text" | "char" | "" (not a primitive)."""
+    if name == "bool":
+        return "bool"
+    if name == "f32" or name == "f64":
+        return "float"
+    if is_bare_primitive_name(name):
+        return "integer"
+    for p in primitive_index_types():
+        if name == p:
+            return "index"
+    for p in primitive_text_types():
+        if name == p:
+            return "text"
+    if name == "char":
+        return "char"
+    ""
+
+fn primitive_class_is_public_api_leak(class_name: text) -> bool:
+    """Classes that a public API must not expose bare. Text/char are valid
+    API shapes and stay allowed."""
+    class_name == "integer" or class_name == "float" or class_name == "bool" or class_name == "index"
+
+fn is_public_api_primitive_name(name: text) -> bool:
+    """True when a public API exposing `name` bare is a primitive_api finding:
+    the canonical table plus the index class."""
+    primitive_class_is_public_api_leak(primitive_class_of(name))
+
 export bare_primitive_types, is_bare_primitive_name
+export primitive_index_types, primitive_text_types, primitive_class_of
+export primitive_class_is_public_api_leak, is_public_api_primitive_name

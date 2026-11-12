@@ -714,7 +714,9 @@ fn append_flattened_import_binding_markers(
     module_path: &Path,
     owner_name: &str,
 ) {
-    let Some(source_path) = resolve_use_to_path(use_stmt, module_path.parent().unwrap_or(Path::new("."))) else {
+    let Some((source_path, target_is_symbol)) =
+        resolve_use_to_path_and_kind(use_stmt, module_path.parent().unwrap_or(Path::new(".")))
+    else {
         return;
     };
     let source_name = normalize_path_key(&source_path).to_string_lossy().into_owned();
@@ -739,6 +741,13 @@ fn append_flattened_import_binding_markers(
             }
         }
         ImportTarget::Glob => add_marker("*", "*"),
+        // `use a.b.x` / `use a.b.x as y`: when `x` is not itself a module file
+        // the statement imports the SYMBOL `x` from module `a.b`, exactly like
+        // `use a.b.{x}`, and must record the same binding. Without it the
+        // importer "neither defines nor imports" `x` for the co-compiled
+        // ambiguity check. A whole-module import (`use a.b`) binds no symbol.
+        ImportTarget::Single(name) if target_is_symbol => add_marker(name, name),
+        ImportTarget::Aliased { name, alias } if target_is_symbol => add_marker(alias, name),
         ImportTarget::Single(_) | ImportTarget::Aliased { .. } => {}
     }
 }
@@ -2741,7 +2750,7 @@ fn load_module_with_imports_internal(
 type ResolveUseKey = (PathBuf, Vec<String>, String);
 
 thread_local! {
-    static RESOLVE_USE_CACHE: RefCell<Option<HashMap<ResolveUseKey, Option<PathBuf>>>> = const { RefCell::new(None) };
+    static RESOLVE_USE_CACHE: RefCell<Option<HashMap<ResolveUseKey, Option<(PathBuf, bool)>>>> = const { RefCell::new(None) };
     static RESOLVE_USE_CACHE_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
@@ -2771,16 +2780,23 @@ impl Drop for ResolveUseCacheScope {
 }
 
 fn resolve_use_to_path(use_stmt: &UseStmt, base: &Path) -> Option<PathBuf> {
+    resolve_use_to_path_and_kind(use_stmt, base).map(|(path, _)| path)
+}
+
+/// `resolve_use_to_path` plus whether a `Single`/`Aliased` target names a
+/// SYMBOL of the resolved module (`use a.b.x`, `x` declared in `a/b.spl`)
+/// rather than a module file (`use a.b`). Always `false` for `Group`/`Glob`.
+fn resolve_use_to_path_and_kind(use_stmt: &UseStmt, base: &Path) -> Option<(PathBuf, bool)> {
     let segments = &use_stmt.path.segments;
     let deprecated_ffi = segments.iter().filter(|s| s.as_str() != "crate" && s.as_str() != "self" && s.as_str() != ".").take(2).map(|s| s.as_str()).eq(["std", "ffi"]);
     if deprecated_ffi {
-        return resolve_use_to_path_uncached(use_stmt, base);
+        return resolve_use_to_path_and_kind_uncached(use_stmt, base);
     }
     let key: ResolveUseKey = (base.to_path_buf(), segments.clone(), format!("{:?}", use_stmt.target));
     if let Some(hit) = RESOLVE_USE_CACHE.with(|cache| cache.borrow().as_ref().and_then(|map| map.get(&key).cloned())) {
         return hit;
     }
-    let resolved = resolve_use_to_path_uncached(use_stmt, base);
+    let resolved = resolve_use_to_path_and_kind_uncached(use_stmt, base);
     RESOLVE_USE_CACHE.with(|cache| {
         if let Some(map) = cache.borrow_mut().as_mut() {
             map.insert(key, resolved.clone());
@@ -2789,7 +2805,12 @@ fn resolve_use_to_path(use_stmt: &UseStmt, base: &Path) -> Option<PathBuf> {
     resolved
 }
 
+#[cfg(test)]
 fn resolve_use_to_path_uncached(use_stmt: &UseStmt, base: &Path) -> Option<PathBuf> {
+    resolve_use_to_path_and_kind_uncached(use_stmt, base).map(|(path, _)| path)
+}
+
+fn resolve_use_to_path_and_kind_uncached(use_stmt: &UseStmt, base: &Path) -> Option<(PathBuf, bool)> {
     let mut parts: Vec<String> = use_stmt
         .path
         .segments
@@ -2876,12 +2897,15 @@ fn resolve_use_to_path_uncached(use_stmt: &UseStmt, base: &Path) -> Option<PathB
     };
 
     if let Some(resolved) = resolve_parts(&parts) {
-        return Some(resolved);
+        return Some((resolved, false));
     }
 
     if matches!(use_stmt.target, ImportTarget::Single(_) | ImportTarget::Aliased { .. }) {
+        // The target is not a module file: it names a symbol of the module the
+        // remaining path resolves to (if any path remains).
         parts.pop();
-        return resolve_parts(&parts);
+        let target_is_symbol = !parts.is_empty();
+        return resolve_parts(&parts).map(|resolved| (resolved, target_is_symbol));
     }
 
     None
@@ -3063,6 +3087,59 @@ mod tests {
             layer.join("pkg_b.spl").canonicalize().unwrap(),
             "same-named file keeps winning over the package marker"
         );
+    }
+
+    /// `use a.b.x` (unbraced, `x` a symbol of module `a.b`) must record the same
+    /// import binding as `use a.b.{x}`; a whole-module `use a.b` records none.
+    #[test]
+    fn unbraced_single_symbol_use_emits_import_binding_marker() {
+        let temp = tempfile::tempdir().unwrap();
+        let consumer_path = temp.path().join("unbraced_consumer_mod.spl");
+        let leaf_path = temp.path().join("unbraced_leaf_mod.spl");
+        let pkg_leaf_path = temp.path().join("unbraced_pkg_dir").join("unbraced_inner_mod.spl");
+        fs::create_dir_all(pkg_leaf_path.parent().unwrap()).unwrap();
+        let leaf_src = "fn unbraced_helper_fn() -> i64:\n    1\n\nstruct UnbracedType:\n    v: i64\n";
+        fs::write(&leaf_path, leaf_src).unwrap();
+        fs::write(&pkg_leaf_path, "fn inner_fn() -> i64:\n    2\n").unwrap();
+        clear_module_source_text_cache();
+
+        let source = "use unbraced_leaf_mod.unbraced_helper_fn\n\
+                      use unbraced_leaf_mod.unbraced_helper_fn as unbraced_alias_fn\n\
+                      use unbraced_leaf_mod.UnbracedType\n\
+                      use unbraced_leaf_mod\n\
+                      use unbraced_pkg_dir.unbraced_inner_mod\n\
+                      use unbraced_pkg_dir.unbraced_inner_mod as unbraced_inner_alias\n";
+        let module = Parser::new(source).parse().expect("consumer must parse");
+        let use_count = module.items.iter().filter(|item| matches!(item, Node::UseStmt(_))).count();
+        assert_eq!(use_count, 6, "every line must parse as a use statement");
+
+        let flattened = strip_flattened_import_nodes(module, &consumer_path);
+        let importer = normalize_path_key(&consumer_path).to_string_lossy().into_owned();
+        let leaf = normalize_path_key(&leaf_path).to_string_lossy().into_owned();
+        let markers: Vec<String> = flattened
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Node::Const(marker) if marker.name.starts_with(FLATTEN_IMPORT_BINDING_MARKER_PREFIX) => {
+                    Some(marker.name.clone())
+                }
+                _ => None,
+            })
+            .collect();
+
+        let mut expected = vec![
+            import_binding_marker_name(&importer, "unbraced_helper_fn", &leaf, "unbraced_helper_fn"),
+            import_binding_marker_name(&importer, "unbraced_alias_fn", &leaf, "unbraced_helper_fn"),
+            import_binding_marker_name(&importer, "UnbracedType", &leaf, "UnbracedType"),
+            // A bare `use m` parses as a glob of `m` (pre-existing behaviour).
+            import_binding_marker_name(&importer, "*", &leaf, "*"),
+        ];
+        expected.sort();
+        let mut actual = markers.clone();
+        actual.sort();
+        // Exactly the three symbol imports plus the bare-module glob; the
+        // whole-module imports `use pkg.m` / `use pkg.m as a` bind no symbol.
+        assert_eq!(actual, expected);
     }
 
     #[test]
