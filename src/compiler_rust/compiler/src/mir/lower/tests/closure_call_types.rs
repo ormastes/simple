@@ -139,6 +139,33 @@ fn outlined_any_result_lambda_declares_any_not_i64() {
     assert_eq!(outlined.return_type, TypeId::ANY);
 }
 
+/// A bool-result lambda is outlined as I64 (full-width body), so the outlined
+/// metadata must still say the result is a BOOL: the boxed entry uses it to
+/// answer a tagged bool. Without it `xs.map(\\x: x > 1)` printed `[0, 1, 1]`.
+#[test]
+fn outlined_bool_result_lambda_is_marked_for_bool_boxing() {
+    let returns_bool = |source: &str| {
+        let mir = compile_to_mir(source).expect("mir lowering failed");
+        let expanded = crate::codegen::shared::expand_with_outlined(&mir);
+        let outlined = expanded
+            .iter()
+            .find(|f| f.name.contains("_outlined_"))
+            .expect("no outlined lambda function");
+        assert_eq!(outlined.return_type, TypeId::I64, "body stays full-width");
+        outlined
+            .outlined_bodies
+            .get(&outlined.entry_block)
+            .expect("outlined lambda metadata")
+            .lambda_returns_bool
+    };
+    assert!(returns_bool(
+        "fn test() -> any:\n    val xs = [1, 2, 3]\n    return xs.map(\\x: x > 1)\n"
+    ));
+    assert!(!returns_bool(
+        "fn test() -> any:\n    val xs = [1, 2, 3]\n    return xs.map(\\x: x + 1)\n"
+    ));
+}
+
 /// Sub-register and untyped boundary types are not carryable by the unboxed
 /// closure ABI. `BOOL` lowers to `i8` and crashed the process when a lambda
 /// returned one; `ANY` has no correct encoding at all.
