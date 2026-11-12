@@ -70,7 +70,11 @@ fn parse_init_file(file_path: text) -> ([PublicApiGroup], [PublicApiItem]):
     var groups: [PublicApiGroup] = []
     var ungrouped_items: [PublicApiItem] = []
 
-    var current_group = nil
+    # A typed placeholder plus a flag, not `nil`: a nil-initialised var is typed
+    # struct 'Nil' by HIR, so `current_group.items` dropped every importer
+    # (doc-coverage) off the JIT.
+    var current_group: PublicApiGroup = PublicApiGroup.create("", 0, file_path)
+    var has_group = false
     var line_num = 0
 
     for line in lines:
@@ -85,14 +89,15 @@ fn parse_init_file(file_path: text) -> ([PublicApiGroup], [PublicApiItem]):
         val is_group_header = _is_group_header(trimmed)
         if is_group_header:
             # Save previous group if exists
-            if current_group != nil:
+            if has_group:
                 val items_count = current_group.items.len()
                 if items_count > 0:
                     groups.push(current_group)
 
             # Start new group
             val group_name = _extract_group_name(trimmed)
-            current_group = PublicApiGroup__create(group_name, line_num, file_path)
+            current_group = PublicApiGroup.create(group_name, line_num, file_path)
+            has_group = true
             continue
 
         # Detect item in group (comment with dash: "# - item_name")
@@ -100,12 +105,12 @@ fn parse_init_file(file_path: text) -> ([PublicApiGroup], [PublicApiItem]):
         if is_item:
             val item_name = _extract_item_name(trimmed)
 
-            if current_group != nil:
+            if has_group:
                 # Add to current group
                 current_group.items.push(item_name)
             else:
                 # Ungrouped item
-                val item = PublicApiItem__create(item_name, line_num, file_path)
+                val item = PublicApiItem.create(item_name, line_num, file_path)
                 ungrouped_items.push(item)
 
             continue
@@ -115,14 +120,14 @@ fn parse_init_file(file_path: text) -> ([PublicApiGroup], [PublicApiItem]):
         if is_use_statement:
             val funcs = _extract_use_functions(trimmed)
             for func in funcs:
-                if current_group != nil:
+                if has_group:
                     current_group.items.push(func)
                 else:
-                    val item = PublicApiItem__create(func, line_num, file_path)
+                    val item = PublicApiItem.create(func, line_num, file_path)
                     ungrouped_items.push(item)
 
     # Save final group
-    if current_group != nil:
+    if has_group:
         val items_count = current_group.items.len()
         if items_count > 0:
             groups.push(current_group)
