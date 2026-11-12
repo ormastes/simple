@@ -1,0 +1,93 @@
+"""
+## Purpose and audience
+Executable spec of the primitive_api finding contract (plan
+`unified_unit_primitive_api_scheduled_diagnostics_plan_2026-11-12` §1 / §9 P0,
+acceptance item 2) for lint and fix-pipeline maintainers. Scope: one finding
+per offending type path, the exact span of the offending type token, and no
+fake (no-op) EasyFix. Out of scope: the semantic exported-graph checker
+(lane U2) and DiagnosticV1 multi-fix (lane U1).
+## Operator workflow
+Run: bin/simple test test/01_unit/compiler/lint/primitive_api_single_finding_spec.spl
+## Compatibility and limitations
+Spans are byte offsets plus 1-based byte columns; UTF-16 ranges belong to the
+DiagnosticV1 adapter. The text scanner still reads single-line `pub fn` heads.
+## Verification guidance and troubleshooting
+A failure names which contract broke: a duplicate finding, a moved span, or a
+replacement that would be offered to `simple fix` / code actions.
+"""
+# @feature: primitive-api-lint
+# @manual_section: primitive-api-single-finding
+
+use std.spec.*
+use compiler.tools.fix.rules.impl_.lint_primitive_api.{primitive_api_findings, check_primitive_api}
+use compiler.tools.fix.builtins.{builtin_fix_producers, run_builtin_producer}
+use compiler.tools.fix.producer.{fix_unit_from_source}
+use compiler.tools.lint.main.{Linter}
+
+val SRC = "# header\n    pub fn truncate(value: i64, name: text) -> i32:\n        return value as i32\n"
+
+fn _fake_fix_count(source: text) -> i64:
+    var n = 0
+    for fix in check_primitive_api(source, "sample.spl"):
+        n = n + fix.replacements.len()
+    n
+
+fn _producer_primitive_fixes(source: text) -> i64:
+    var n = 0
+    for p in builtin_fix_producers():
+        for fix in run_builtin_producer(p.code, fix_unit_from_source("sample.spl", source)):
+            if fix.id.contains("primitive_api"):
+                n = n + 1
+    n
+
+describe "primitive_api single finding":
+    """
+    One help-only primitive_api finding per offending type, with the exact
+    span of the type token, through both the rule API and the Linter.
+    """
+    it "reports each offending type path exactly once":
+        # @req REQ-DPOL-002
+        # @capture(statistics): finding count and type paths for the i64/i32 fixture
+        step("Scan a pub fn with a bare i64 param and an i32 return")
+        val findings = primitive_api_findings("sample.spl", SRC.split("\n"))
+        expect(findings.len()).to_equal(2)  # oracle: one i64 param + one i32 return; text is not a bare numeric primitive
+        expect(findings[0].type_path).to_equal("truncate.param.value")  # oracle: fixture param name
+        expect(findings[1].type_path).to_equal("truncate.return")  # oracle: fixture return position
+
+    it "points the span at the offending type token, not the line":
+        # @req REQ-DPOL-003
+        # @capture(statistics): line, column and byte span of each finding
+        step("Compare spans with the byte position of the type in the fixture")
+        val findings = primitive_api_findings("sample.spl", SRC.split("\n"))
+        val p = findings[0]
+        expect(p.line).to_equal(2)  # oracle: the pub fn is on line 2
+        expect(p.column).to_equal(28)  # oracle: 4 indent + 23 chars of "pub fn truncate(value: " precede i64
+        expect(p.start).to_equal(9 + 27)  # oracle: "# header\n" is 9 bytes, then 27 bytes into line 2
+        expect(p.end - p.start).to_equal(3)  # oracle: len("i64")
+        expect(SRC.slice(p.start, p.end)).to_equal("i64")  # oracle: the span covers exactly the type
+        val r = findings[1]
+        expect(SRC.slice(r.start, r.end)).to_equal("i32")  # oracle: return span covers exactly the type
+
+    it "offers no fix whose edit would leave the text unchanged":
+        # @req REQ-DPOL-004
+        # @capture(statistics): replacement count and fix-producer primitive_api count
+        step("Count replacements on the compat records and in the fix producers")
+        expect(check_primitive_api(SRC, "sample.spl").len()).to_equal(2)  # oracle: one help-only record per finding
+        expect(_fake_fix_count(SRC)).to_equal(0)  # oracle: help only, never a replacement
+        expect(_producer_primitive_fixes(SRC)).to_equal(0)  # oracle: simple fix / code actions get no primitive_api fix
+
+    it "emits one lint result per finding through the linter":
+        # @req REQ-DPOL-002
+        # @capture(statistics): primitive_api lint results with line/column
+        step("Run Linter.lint_source and count primitive_api results")
+        var linter = Linter.new()
+        val results = linter.lint_source("sample.spl", SRC)
+        var n = 0
+        var col = 0
+        for r in results:
+            if r.lint.code == "primitive_api":
+                n = n + 1
+                if col == 0:
+                    col = r.column
+        expect(n).to_equal(2)  # oracle: registry + direct double invocation used to yield 4
+        expect(col).to_equal(28)  # oracle: column of the i64 token

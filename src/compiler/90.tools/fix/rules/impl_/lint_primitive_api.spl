@@ -98,95 +98,154 @@ fn primitive_api_audit_report(source: text, file: text) -> text:
         out = out + "{entry.file}:{entry.line}: {entry.item_name} {entry.position} uses {entry.primitive_type} reason={entry.reason_code} suggest={entry.suggested_wrapper}\n"
     out
 
-fn check_primitive_api(source: text, file: text) -> [EasyFix]:
-    check_primitive_api_with_lines(file, source.split("\n"))
+# One primitive_api finding: exact span of the offending type token.
+# There is no fix — the help text names the migration; a replacement that
+# rewrote the line with itself used to be offered as an EasyFix (no-op).
+pub struct PrimitiveApiFinding:
+    code: text
+    file: text
+    symbol: text
+    type_path: text
+    primitive_type: text
+    line: i64
+    column: i64
+    start: i64
+    end: i64
+    message: text
+    help: text
 
-fn check_primitive_api_with_lines(file: text, lines: [text]) -> [EasyFix]:
-    var fixes: [EasyFix] = []
+# Single owner of primitive_api detection. The lint driver consumes this
+# directly; the EasyFix producers no longer carry the rule (nothing to apply).
+# Findings are deduplicated by (code, symbol, type path, span).
+pub fn primitive_api_findings(file: text, lines: [text]) -> [PrimitiveApiFinding]:
+    var out: [PrimitiveApiFinding] = []
+    var seen: [text] = []
     var line_num = 0
     var byte_offset = 0
 
     # File-scope suppression: `#![allow(primitive_api)]` in the header block.
     if lines_allow_rule(lines, "primitive_api"):
-        return fixes
+        return out
 
     for line in lines:
         line_num = line_num + 1
+        val line_start = byte_offset
+        byte_offset = byte_offset + line.len() + 1
         val trimmed = line.trim()
-
-        val is_extern_fn = trimmed.starts_with("extern fn ")
         val is_pub_fn = trimmed.starts_with("pub fn ") or
             trimmed.starts_with("pub me ") or
             trimmed.starts_with("pub static fn ")
-        if is_extern_fn or not is_pub_fn:
-            byte_offset = byte_offset + line.len() + 1
+        if not is_pub_fn:
             continue
-
         # Item-scope suppression: `@allow(primitive_api)` / `#[allow(...)]`
         # on the comment/annotation lines directly above this declaration.
         if line_is_allowed(lines, line_num - 1, "primitive_api"):
-            byte_offset = byte_offset + line.len() + 1
             continue
 
-        if not is_extern_fn and is_pub_fn:
-            val item_name = _extract_public_function_name(trimmed)
-            val params = _extract_params(trimmed)
-            val return_type = _extract_return_type(trimmed)
+        val item_name = _extract_public_function_name(trimmed)
+        val params = _extract_params(trimmed)
+        val return_type = _extract_return_type(trimmed)
 
-            var all_types: [text] = []
-            for param in params:
-                val pt = _extract_param_type(param)
-                if pt != "":
-                    all_types.push(pt)
-            if return_type != "":
-                all_types.push(return_type)
+        var all_types: [text] = []
+        for param in params:
+            val pt = _extract_param_type(param)
+            if pt != "":
+                all_types.push(pt)
+        if return_type != "":
+            all_types.push(return_type)
 
-            var is_pure_math = all_types.len() > 0 and _all_same_primitive(all_types)
-            # AC-D2 (primitive_api_lint_ac_d1_and_ac_d2_are_contradictory_2026-08-04):
-            # the all-same-primitive exemption is for pure math only. A pub fn
-            # whose entire body forwards its own params to an extern fn mirrors
-            # the extern signature and must still be flagged.
-            if is_pure_math and _extern_passthrough_body(lines, line_num, item_name, params):
-                is_pure_math = false
+        # TODO(primitive_api): retire the `_all_same_primitive` blanket
+        # exemption in favour of a scoped, documented pure-math exemption
+        # (plan 2026-11-12 §4). Kept for now: removing it flags every
+        # `pub fn f(a: i64, b: i64) -> i64` math helper in src/lib and fails
+        # the policies that deny primitive_api before lane U4 migrates them.
+        var is_pure_math = all_types.len() > 0 and _all_same_primitive(all_types)
+        # AC-D2 (primitive_api_lint_ac_d1_and_ac_d2_are_contradictory_2026-08-04):
+        # a pub fn whose entire body forwards its own params to an extern fn
+        # mirrors the extern signature and must still be flagged.
+        if is_pure_math and _extern_passthrough_body(lines, line_num, item_name, params):
+            is_pure_math = false
+        if is_pure_math:
+            continue
 
-            if not is_pure_math:
-                for param in params:
-                    val param_type = _extract_param_type(param)
-                    if _is_bare_primitive_type(param_type):
-                        val param_name = _extract_param_name(param)
-                        var fix = EasyFix.create(
-                            id: "L:primitive_api:{line_num}",
-                            description: "public API parameter '{param_name}' uses bare primitive type '{param_type}'",
-                            confidence: FixConfidence.Uncertain
-                        )
-                        fix.add_replacement(Replacement.create(
-                            file: file,
-                            start: byte_offset,
-                            end: byte_offset + line.len(),
-                            line: line_num,
-                            column: 1,
-                            new_text: line
-                        ))
-                        fixes.push(fix)
+        val indent = _leading_ws_len(line)
+        val paren = trimmed.find("(")
+        var seg_start = paren + 1
+        for param in params:
+            val param_type = _extract_param_type(param)
+            if _is_bare_primitive_type(param_type):
+                val param_name = _extract_param_name(param)
+                val colon = param.find(":")
+                val ty_col = seg_start + colon + 1 + _leading_ws_len(param.slice(colon + 1))
+                val f = _finding(file, "{item_name}.param.{param_name}", param_type,
+                    line_num, indent + ty_col, line_start,
+                    "public API parameter '{param_name}' of '{item_name}' uses bare primitive type '{param_type}'")
+                out = _push_unique(out, seen, f)
+                seen.push(_finding_key(f))
+            seg_start = seg_start + param.len() + 1
 
-                if _is_bare_primitive_type(return_type):
-                    var fix = EasyFix.create(
-                        id: "L:primitive_api:{line_num}",
-                        description: "public API return type uses bare primitive type '{return_type}'",
-                        confidence: FixConfidence.Uncertain
-                    )
-                    fix.add_replacement(Replacement.create(
-                        file: file,
-                        start: byte_offset,
-                        end: byte_offset + line.len(),
-                        line: line_num,
-                        column: 1,
-                        new_text: line
-                    ))
-                    fixes.push(fix)
+        if _is_bare_primitive_type(return_type):
+            val arrow = trimmed.find("->")
+            val ty_col = arrow + 2 + _leading_ws_len(trimmed.slice(arrow + 2))
+            val f = _finding(file, "{item_name}.return", return_type,
+                line_num, indent + ty_col, line_start,
+                "public API return type of '{item_name}' uses bare primitive type '{return_type}'")
+            out = _push_unique(out, seen, f)
+            seen.push(_finding_key(f))
 
-        byte_offset = byte_offset + line.len() + 1
+    out
 
+# col0 = 0-based byte column of the type token within its line.
+fn _finding(file: text, type_path: text, ty: text, line: i64, col0: i64, line_start: i64, message: text) -> PrimitiveApiFinding:
+    val symbol = type_path.slice(0, type_path.find("."))
+    PrimitiveApiFinding(
+        code: "primitive_api",
+        file: file,
+        symbol: symbol,
+        type_path: type_path,
+        primitive_type: ty,
+        line: line,
+        column: col0 + 1,
+        start: line_start + col0,
+        end: line_start + col0 + ty.len(),
+        message: message,
+        help: "replace '{ty}' with a semantic unit/domain type (e.g. `unit {_suggest_wrapper_name(symbol, ty)}: {ty}`), or add `@allow(primitive_api)` with a reason at an ABI/math boundary"
+    )
+
+fn _finding_key(f: PrimitiveApiFinding) -> text:
+    "{f.code}|{f.symbol}|{f.type_path}|{f.start}|{f.end}"
+
+fn _push_unique(out: [PrimitiveApiFinding], seen: [text], f: PrimitiveApiFinding) -> [PrimitiveApiFinding]:
+    val key = _finding_key(f)
+    for k in seen:
+        if k == key:
+            return out
+    var next = out
+    next.push(f)
+    next
+
+fn _leading_ws_len(s: text) -> i64:
+    var i = 0
+    while i < s.len():
+        val c = s.slice(i, i + 1)
+        if c != " " and c != "\t":
+            return i
+        i = i + 1
+    i
+
+# Compat view for callers that count findings as EasyFix records. Each record
+# is help-only: it carries NO replacement, so it can never be applied.
+fn check_primitive_api(source: text, file: text) -> [EasyFix]:
+    check_primitive_api_with_lines(file, source.split("\n"))
+
+fn check_primitive_api_with_lines(file: text, lines: [text]) -> [EasyFix]:
+    var fixes: [EasyFix] = []
+    for f in primitive_api_findings(file, lines):
+        fixes.push(EasyFix.create(
+            id: "L:primitive_api:{f.line}:{f.column}",
+            description: f.message,
+            confidence: FixConfidence.Uncertain
+        ))
     fixes
 
 fn _all_same_primitive(types: [text]) -> bool:
