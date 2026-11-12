@@ -159,3 +159,74 @@ Open after this change:
   `X.substring(a, X.byte_len())`; both are correct under either unit.
 - `char_code_at` is listed as a byte API in the design doc but is
   character-indexed in the interpreter and both runtimes. Not changed here.
+
+## 2026-11-13 — owner decision recorded; sources and C runtime follow
+
+**Owner decision (2026-11-13):** `substring(a, b)`, `slice(a, b)` and
+`index_of` take BYTE offsets (ADR-005 "Staging", syntax reference
+`doc/07_guide/quick_reference/syntax_quick_reference.md`). `len()`, `s[i]`
+and `s[a:b]` stay code points. This reverses PR #7877 (`04969955c75`,
+`db56bd08e19`) for those methods. Branch `work/text-byte-offsets-20261113`.
+
+The 2026-11-12 note named the same-receiver `X.substring(a, X.len())` form
+as the cause of the imap/engine2d/smtp multibyte regressions. That was
+incomplete. Rewriting that form alone left them at 2/9, 3/6 and 6/7. All
+three hoist the length into a local (`val len = line.length()`) and scan
+bytes with it. Changes:
+
+- Same-receiver inline bound `R.substring/slice(.., R.len())` changed to
+  `R.byte_len()`: 2628 sites (src/lib 1169, src/app 945, src/compiler 514).
+- The `.length()` alias in the same position: 158 sites (138 / 18 / 2).
+- A local `N = R.len()|R.length()` whose every use bounds a byte cut on R:
+  182 declarations (108 / 25 / 49), out of 1410 candidates.
+- C runtime and `simple_core/core_string.spl`: `rt_string_find`,
+  `rt_text_find` and `rt_string_rfind` return byte offsets, matching the Rust
+  runtime. `rt_text_len_slice_codepoint_selfcheck.c`: red at check 45 on the
+  old runtime, PASS with 62 checks on the new one.
+
+Left unchanged:
+
+- 56 array/byte receivers.
+- 44 `X.len() - Y.len()` bounds. These are right today when the prefix is
+  ASCII; the fully byte form needs `Y.byte_len()` too.
+- 67 `X.len() - 1` or variable-k bounds that have no end check on X.
+- All `s[a:b]` slices, and every bound that is another text's `len()`.
+
+`scripts/check/check-text-len-unit-mix.shs` was already red on origin
+(1382). It is 1397 after this change. By (file, receiver), 64 entries are
+new and 51 are gone. Of the new ones, 23 are rule 2 (`prefix.len()` used as
+a byte width beside a byte-scanned receiver). The other 41 are functions
+that also index R by code point. Both kinds are real residual unit mixes,
+and the gate was not loosened.
+
+Evidence uses the seed from origin `fe75b13a584` against the seed from the
+branch (same Rust/C as the final sha). Specs were run serially under
+MemoryMax=24G.
+
+| spec | origin | seed fix only | branch |
+|---|---|---|---|
+| imap/parse_multibyte | 9/9 | 2/9 | 9/9 |
+| simple_web_engine2d_class_name_multibyte | 6/6 | 3/6 | 6/6 |
+| smtp/send_email_validate_multibyte | 7/7 | 6/7 | 7/7 |
+| test_runner_new/sdn_wrapper | 9/10 | 10/10 | 10/10 |
+| test_runner_new/sdn_worker_protocol | 7/9 | 9/9 | 9/9 |
+| sweep (110 files: json/sdn/text/string_core + utf8/multibyte) | 1688/1745, 79 files OK | — | 1705/1745, 87 files OK |
+
+Sweep rows that changed (all improvements, none regressed):
+`text_ops_bom` 2→3/3, `string_core_case_utf8` 10→12/12,
+`string_core_ops` 206→207/207, `str_split_empty_sep_multibyte` 1→2/2,
+`security_sanitize_utf8` 3→7/8, and the two ADR-005 specs 6→8/8 and 8→11/11.
+
+Seed cargo suites on the branch (clang + lld): `cargo test --release -p
+simple-runtime --lib` has 1538 passed, 0 failed, 12 ignored. `-p
+simple-compiler --test interpreter_utf8_slice_boundary` has 6 passed.
+
+Still open:
+
+- src/compiler sources were changed but bootstrap was not run, so the
+  self-hosted compiler was not rebuilt or exercised.
+- 23 new rule-2 offenders, such as `line.substring(prefix.len(), ..)` and
+  `while i <= hlen - nlen` with `nlen = needle.len()`. Another text's
+  `len()` is still used as a byte width. These are wrong for a non-ASCII
+  needle or prefix, under either unit.
+- `char_code_at` is unchanged, as in the previous note.
