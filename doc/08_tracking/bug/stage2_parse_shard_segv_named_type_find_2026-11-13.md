@@ -1,7 +1,7 @@
 # Stage 2 parse shard SIGSEGV in `named_type_find` (companion public-summary re-parse)
 
 - id: stage2_parse_shard_segv_named_type_find_2026-11-13
-- status: open
+- status: fixed in source (seed red->green); native confirmation pending a Stage 2 rebuild
 - severity: P2 (parse warm-up shards die; the build continues without the
   parser cache, so every downstream phase pays a cold parse)
 - found: 2026-11-13, bootstrap-fable-17 Phase 2 matrix `test_runner_build`
@@ -105,3 +105,142 @@ not crash.
    the text elements or only the array spine.
 3. Pin with a seed/native spec that parses two modules through the fiber
    window and then re-parses the first through `project_public_summary_v1`.
+
+## Root cause (2026-11-13)
+
+The public-summary validation parse ran on the retained file parse's flat
+type pools after that parse's transient scope had reclaimed most of them.
+
+1. `parse_full_frontend_selected_v1`
+   (`src/compiler/80.driver/driver_source_parse_selected.spl:184`) opens a
+   borrowed transient scope. Inside it, `parse_and_build_module_with_scope_owner`
+   (`src/compiler/10.frontend/_FlatAstBridge/module_assembly.spl:1707`) calls
+   `reset_all_pools()` (`src/compiler/10.frontend/core/types.spl:1797`), which
+   replaces every flat-pool owner with an array allocated *in the scope*.
+2. At scope end only the owners that `type_pools_promote_hir_owners`
+   (`types.spl:1755`) promotes stay alive. That is 16 owners, among them
+   `named_type_names`, `named_type_arguments` and `named_type_layout_owners`.
+   Everything else is freed: `named_type_modules`, `named_type_field_names`,
+   `named_type_field_types`, the span/tok/sym pools, the newunit/unit_decl/fn_sig
+   pools and the tuple/function/pointer/reference/... registries.
+3. `module_tldr_companion_view_sections_v1` -> `project_public_summary_v1`
+   then calls `parse_module_silent_checked` on the generated `_tldr.spl` text
+   (`src/compiler/10.frontend/cache_artifact/public_summary_projector.spl:336`, pre-fix line).
+   That low-level entry resets the AST but **not** the flat pools, so it reads
+   and writes the freed arrays. The crash site is `named_type_find`
+   (`types.spl:870`): `named_type_module_at(i) == named_type_current_module`.
+   The left operand is a word from the freed `named_type_modules` spine, and
+   `rt_text_eq_any` treats it as a C string. That is its documented contract
+   for any aligned word >= 0x10000, so the runtime is not at fault.
+
+Evidence (gdb on the replayed child, run 17 Stage 2, four runs):
+- The return address `0x6f764c` in `named_type_find` follows `bl named_type_module_at`
+  (`+272`) and then `blr rt_text_eq_any` (`+296`) with `x1 = named_type_current_module`.
+  So the faulting compare is line 870, not line 869.
+- `named_type_current_module` = "simple-s..." (the `_tldr.spl` path). This
+  confirms the crash is in the summary re-parse.
+- Live owners (promoted `named_type_names`, `named_type_arguments`,
+  `named_type_layout_owners`, `union_type_members`, `dict_type_keys`, plus
+  `scope_starts`, unpromoted; why it survives was not investigated) always carry a valid Array header `0x0000002000000002`.
+  The other unpromoted owners never do. `named_type_modules` read as all-zero, as a
+  String header, or as words from a reused block. `named_type_field_names` and
+  `named_type_field_types` read as malloc free-list words. `span_pool_*`,
+  `newunit_names`, `unit_decl_names`, `function_param_tags` (ASCII bytes) and
+  `fn_sig_names` (ASCII bytes) are freed or reused as well.
+- The crash sites vary from run to run, and all of them read unpromoted owners:
+  `named_type_find`->`named_type_module_at`, `named_type_register`->`named_type_fields`,
+  and `named_type_register` itself. Whether a crash happens at all depends on
+  whether the freed block has been reused, which explains the
+  non-determinism and why one-file closures pass.
+- `named_type_modules` was added 2026-11-10 (`d3e81389006`). It made
+  `named_type_find` read an unpromoted owner on every lookup, which turned a
+  latent use-after-free into a crash on nearly every parse shard. Commit
+  `46873d020c0` (2026-11-07) had already patched this same path by promoting
+  two more registries one at a time.
+
+## Fix
+
+`project_public_summary_v1` now runs the validation parse on fresh flat pools
+and then reinstates the caller's pools: `flat_pool_state_take()` before the
+parse and `flat_pool_state_install()` after it. The parse no longer touches a
+retained owner, freed or alive, and stops registering `_tldr.spl` types into
+the retained registry. `FlatPoolState` now carries `named_type_modules` and
+`named_type_current_module`, so the round trip keeps declaring-module ownership
+(before this change, install reset `named_type_modules` to `[]`).
+`rt_text_eq_any` is unchanged, and no nil or `any` is widened.
+
+This is the first production caller of `flat_pool_state_take`/`install`. Until
+now the only caller was the `parse_context` stage-1 path, which is test-only.
+
+Red -> green (seed interpreter, `test/01_unit/compiler/cache/public_summary_validation_parse_isolation_spec.spl`):
+- red: `expected 1 to equal -1` (`SummaryOnlyBar` leaked into the retained
+  registry), `expected 2 to equal 1` (named types), `expected 4 to equal 2`
+  (span pool grew in the retained context).
+- green: 2/2. These also still pass: `flat_pool_state_take_install_spec`,
+  `parse_context_take_install_spec`, `parse_context_interleave_spec`,
+  `frontend_semantic_artifact_builder_spec`, `named_type_registry_cross_module_collision_spec`,
+  `summary_store_v1_spec` and `virtual_summary_registration_protocol_spec`.
+
+## Native confirmation (pending)
+
+The seed interpreter does not reclaim transient scopes, so the spec pins the
+isolation contract, not the use-after-free itself. To confirm natively:
+rebuild Stage 2 from the fixed sha, then rerun the T0 matrix above. Expected
+results: the 11-file `stage2_result_map_storage_roots.spl` closure
+(`SIMPLE_SHARD_SMALL_CLOSURE_MAX=0`) goes from 3/4 shard SIGSEGV to 0/4; the
+333-file `test_runner_new/main.spl` and the 562-file `stage2_nominal_owner_keys.spl`
+closures complete with every shard at exit 0, and `[parse-shard] N/N shard(s) completed`.
+
+### Completeness audit of the re-parse's other reads
+
+`parser_init_with_path` (`parser.spl:401`) runs these resets before the parse
+body reaches `named_type_find`:
+
+- `layer_eq_registry_reset_module`, `effect_registry_reset_module`,
+  `rt_criticality_reset_module` and `aspect_registry_reset_module` filter by
+  path, so they *read* their registries. Every owner they read is promoted by
+  its `*_promote_transient_owner` function. All four of those are called from
+  `frontend_promote_parse_registry_owners_v1`
+  (`src/compiler/10.frontend/retained_parse_owners_v1.spl:13`), which runs on the
+  retained path through `driver_promote_retained_frontend_owners_v1`.
+- `resource_registry_reset`, `lock_level_metadata_reset`, `representation_parser_reset_v1`,
+  `parser_generic_constraints_reset`, the three `*_pending_reset` functions and
+  `parser_collection_site_reset` replace the whole owner and never read the old one.
+- `ast_reset` operates on decl/AST pools. Those are promoted by
+  `decl_pools_promote_transient_owners` and `parser_decls_pools_promote_transient_owners`,
+  which `parser_promote_transient_owners` (`parser.spl:226`) calls. They were not
+  audited field by field. In every observed crash the parse got past `ast_reset`
+  and failed only on `types.spl` owners.
+
+The `types.spl` flat pools were the one family that was not isolated and not
+fully promoted. This fix isolates that family.
+
+### Native-only risks (verify on the Stage 2 rebuild)
+
+- `flat_pool_state_take`/`install` has never run natively in production. Its
+  only previous caller, `parse_context`, is test-only. It builds a struct of
+  about 70 fields, many of them `[[i64]]`/`[[text]]`, and the neighbouring
+  code already carries `@workaround phase3_global_pool_generic_inference_workaround_2026_10_10`.
+  Stage 2 codegen for it is therefore unproven.
+- In a parse shard, `take` copies the dead owner words into the struct, and
+  `install` writes them back. That is safe only if a native field store never
+  dereferences the stored value. In the runtime, `rt_object_field_set`
+  (`objects.rs:132`) is a plain store. Stores that Stage 2 inlines were not
+  inspected.
+
+### Memory
+
+Each call now allocates a fresh set of about 70 empty pool owners, the
+snapshot struct, and the summary parse's own spans and type entries outside any
+transient scope. `install` drops them and nothing frees them. Before the fix,
+the same summary-parse growth went into the reclaimed arrays instead. This was
+estimated, not measured: under ~10 KB per file, so up to ~30 MB across a
+3134-file closure, split across shard processes. The same projector also runs
+in the main driver (`module_artifacts_v1.spl:222,516`). Measure RSS on the
+Stage 2 rerun.
+
+Lint (seed): `public_summary_projector.spl` shows the same 1 error and 6
+warnings before and after the change. The error is `W-ANY-NOTRUN`, and the
+warnings are on lines this change did not touch. The new spec has 0 errors.
+`types.spl` was not linted because it exceeds the lint cost budget
+(`.claude/rules/commands.md`).
