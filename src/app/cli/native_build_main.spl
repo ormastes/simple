@@ -4,7 +4,7 @@ use app.cli.worker_hir_owner_v1.{WorkerHirOwnerV1, worker_hir_owner_start_v1, wo
 use app.cli.native_build_hir_warmup_outcome.{native_build_hir_warmup_outcome_v1, native_build_capsule_user_args_v1}
 # Lightweight entrypoint for `simple native-build`.
 
-use app.io.env_ops.{env_get, env_set, cwd, host_os}
+use app.io.env_ops.{env_get, env_set, env_unset, cwd, host_os}
 use app.io.process_ops.{process_run_timeout, process_run_timeout_live, process_spawn_async, process_wait, process_kill, process_is_running}
 use app.io.cli_ops.{_cli_self_exe_via_pid_query, cli_kernel_executable_path}
 use app.cli.native_build_producer_binding.{bootstrap_native_build_producer_binding}
@@ -1061,10 +1061,16 @@ fn native_build_capsule_hir_ledger_run_v1(args: [text], queue_dir: text, count: 
             eprint "[hir-shard] BLOCKED: {reason}"
             return LedgerShardRunV1(code: 1, failed_modules: 0, total_claims: 0,
                 blocked_reason: reason, all_stopped: true)
-    val old_worker_marker = env_get("SIMPLE_NATIVE_BUILD_WORKER") ?? ""
+    # Restore the marker exactly: a present-but-empty SIMPLE_* key would be
+    # folded into the in-process environment fingerprint
+    # (native_build_environment_snapshot_fingerprint_v1) and shift its cache scope.
+    val old_worker_marker = env_get_nullable("SIMPLE_NATIVE_BUILD_WORKER")
     env_set("SIMPLE_NATIVE_BUILD_WORKER", "1")
     val run = native_build_hir_ledger_run_in_v1(forwarded, queue_dir, count, simple_bin, timeout_ms)
-    env_set("SIMPLE_NATIVE_BUILD_WORKER", old_worker_marker)
+    if val previous = old_worker_marker:
+        env_set("SIMPLE_NATIVE_BUILD_WORKER", previous)
+    else:
+        env_unset("SIMPLE_NATIVE_BUILD_WORKER")
     run
 
 # Shared worker-pool driver for the HIR and MIR shard ledgers
