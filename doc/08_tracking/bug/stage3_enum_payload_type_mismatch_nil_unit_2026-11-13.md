@@ -134,3 +134,29 @@ lowering for the arm-selection divergence (likely candidate: or-pattern /
 multi-constructor arm selection in a scrutinee-dependent match, or a
 fall-through branch whose condition involves a registry lookup that resolves
 differently in the self-hosted binary -- chase-family residual).
+
+## Differential trace result (2026-11-13 ~07:40): seed never runs the check
+
+On the 15-line repro with SIMPLE_ENUM_PAYLOAD_PATH_TRACE=1 +
+SIMPLE_ENUM_PAYLOAD_TRACE=1:
+- SEED: RC=0, ZERO trace lines -- the seed lowers the enum construction via a
+  route that never calls enum_payload_local_compatible (its log shows an
+  "enum-contract pass: 0 diagnostic(s)" instead).
+- J2 stage2-admitted: RC=1, trace shows
+  `remembered module=use2 local=8 expected='named#1' actual='named#1?'`
+  then strict rejection inside enum_payload_local_compatible.
+
+So the divergence is CONTROL FLOW at the construction-lowering call site, not
+data: both binaries contain the same check source, but the self-hosted binary
+routes constructions through the checked path where the seed routes them
+around it. The checker's strictness is a red herring -- the fixpoint break is
+in the caller (emit/lower enum construction dispatch).
+
+## Next concrete step
+
+Seed-lane instrumentation rebuild: add eprintln tracing to the enum-
+construction dispatch caller (the site that decides checked vs unchecked
+route), rebuild stage2 with the SEED (~11 min, run-k-stage2.sh pattern), run
+the 15-line repro, capture the seed's route. Diff against the J2 binary's
+route on the same input. The diverging branch condition is the fixpoint
+break; fix it, then K lane.
