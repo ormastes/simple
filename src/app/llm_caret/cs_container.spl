@@ -15,13 +15,15 @@
 # and the resolved Simple binary read-only when it lives outside both.
 #
 # Naming is deterministic — `cs-<session>-<agent>` under owner `cs-<session>`
-# — so /kill, /quit and a restarted cs can find a container without any state
-# file. The layer writes no temp file either; the container is the only
-# artifact and `--rm` plus an explicit reap remove it.
+# — so /kill and the end of the cs loop can find a container without any state
+# file, and `/reap` finds what a killed cs left. The layer creates no temp
+# file; the container is the only artifact and `--rm` plus an explicit reap
+# remove it. A launch never removes an existing container of the same name:
+# it may belong to another cs on the same session.
 
 use std.nogc_sync_mut.container_session.podman_session_v1.{PodmanMountV1,
     PodmanSessionSpecV1, podman_session_run_argv_v1, podman_session_reap_v1,
-    podman_session_reap_owner_v1, podman_session_host_runner_v1,
+    podman_session_reap_owner_v1, podman_session_host_runner_v1, podman_session_exists_v1,
     podman_session_token_valid_v1, podman_session_path_valid_v1}
 
 struct CsContainerRequest:
@@ -115,8 +117,10 @@ fn cs_container_argv(session: text, agent_id: text, exe: text, agent_args: [text
     if not podman_session_path_valid_v1(repo_root): return Err("container launch needs an absolute repo root, got " + repo_root)
     if request.workspace != "" and not podman_session_path_valid_v1(request.workspace):
         return Err("container launch needs an absolute --workspace, got " + request.workspace)
-    var mounts = [PodmanMountV1(source: repo_root, target: repo_root, read_only: true)]
-    if request.workspace != "":
+    # One volume per destination: a workspace that IS the repo root is a
+    # single read-write mount, not a read-only one shadowed by a second.
+    var mounts = [PodmanMountV1(source: repo_root, target: repo_root, read_only: request.workspace != repo_root)]
+    if request.workspace != "" and request.workspace != repo_root:
         mounts = mounts + [PodmanMountV1(source: request.workspace, target: request.workspace, read_only: false)]
     if not _cs_under(exe, repo_root) and not _cs_under(exe, request.workspace):
         mounts = mounts + [PodmanMountV1(source: exe, target: exe, read_only: true)]
@@ -143,8 +147,19 @@ fn cs_container_reap(session: text, agent_id: text) -> text:
         case Ok(_): ""
         case Err(reason): reason
 
-# Removes every container this cs session owns, including ones a previous,
-# killed cs left behind. Returns the names removed, or the reason it could not.
+# "" = no container of that name, "exists" = the engine lists one, else why
+# the engine could not say.
+fn cs_container_present(session: text, agent_id: text) -> text:
+    match podman_session_exists_v1(cs_container_name(session, agent_id), podman_session_host_runner_v1):
+        case Ok(present):
+            if present: return "exists"
+            ""
+        case Err(reason): reason
+
+# Operator-invoked recovery (`/reap`): removes every container carrying this
+# session's owner label, including ones a killed cs left behind. It is never
+# run implicitly — names are per SESSION, not per cs process, so an automatic
+# sweep would kill the agents of a second cs on the same session.
 fn cs_container_reap_session(session: text) -> Result<[text], text>:
     podman_session_reap_owner_v1(cs_container_owner(session), podman_session_host_runner_v1)
 
@@ -158,4 +173,4 @@ fn cs_container_real_path(path: text) -> text:
 export CsContainerRequest
 export cs_container_request, cs_container_owner, cs_container_name, cs_container_argv
 export cs_container_spec_is_container, cs_container_reap, cs_container_reap_session
-export cs_container_real_path
+export cs_container_real_path, cs_container_present

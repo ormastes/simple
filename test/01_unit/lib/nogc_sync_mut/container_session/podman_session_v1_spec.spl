@@ -37,6 +37,11 @@ fn fake_runner(argv: [text], timeout_ms: i64) -> (text, text, i64):
         return ("container-ok\n", "", 0)
     if verb == "rm":
         if fake_mode == "rm-fails": return ("", "cannot remove", 125)
+        if fake_mode == "rm-slow":
+            # The engine's answer for a tty-attached workload: kill delivered,
+            # exit not yet observed. The next attempt finds it gone.
+            fake_mode = ""
+            return ("", "Error: could not be stopped: given PID did not die within timeout", 125)
         fake_drop(argv[argv.len() - 1])
         return ("", "", 0)
     if verb == "container":
@@ -62,7 +67,7 @@ describe "Podman session argv":
             PodmanMountV1(source: "/opt/seed", target: "/opt/seed", read_only: true)]
         expect(podman_session_run_argv_v1(spec).unwrap()).to_equal(["podman", "run", "--rm", "--name", "simple-podman-test-a",
             "--label", "io.simpleorch.session.owner=owner-1", "--label", "io.simpleorch.session.name=simple-podman-test-a",
-            "--interactive", "--tty", "--network", "host", "--userns", "keep-id", "--timeout", "30",
+            "--interactive", "--tty", "--detach-keys=", "--network", "host", "--userns", "keep-id", "--timeout", "30",
             "--volume", "/work/tree:/work/tree:rw", "--volume", "/opt/seed:/opt/seed:ro",
             "--workdir", "/work/tree", "--env", "TERM=xterm", "busybox:1.36", "echo", "container-ok"])
 
@@ -124,9 +129,24 @@ describe "Podman session cleanup through a scripted engine":
     it "never reports reaped while the engine still lists the container":
         fake_reset("rm-fails", ["simple-podman-test-s"])
         expect(podman_session_reap_v1("simple-podman-test-s", fake_runner).unwrap_err())
-            .to_equal("podman-session-still-present: rm exit 125")
+            .to_equal("podman-session-still-present: rm exit 125: cannot remove")
+        expect(fake_calls.len()).to_equal(10)
         fake_reset("exists-unknown", [])
         expect(podman_session_reap_v1("simple-podman-test-s", fake_runner).unwrap_err())
+            .to_equal("podman-session-absence-unknown: exists exit 125")
+
+    it "repeats removal when the engine has killed the workload but not yet seen it exit":
+        fake_reset("rm-slow", ["simple-podman-test-w"])
+        expect(podman_session_reap_v1("simple-podman-test-w", fake_runner).unwrap()).to_equal(true)
+        expect(fake_calls.len()).to_equal(4)
+        expect(fake_present.len()).to_equal(0)
+
+    it "reports presence, absence and unknown separately":
+        fake_reset("", ["simple-podman-test-p"])
+        expect(podman_session_exists_v1("simple-podman-test-p", fake_runner).unwrap()).to_equal(true)
+        expect(podman_session_exists_v1("simple-podman-test-q", fake_runner).unwrap()).to_equal(false)
+        fake_reset("exists-unknown", [])
+        expect(podman_session_exists_v1("simple-podman-test-p", fake_runner).unwrap_err())
             .to_equal("podman-session-absence-unknown: exists exit 125")
 
     it "runs nothing for an invalid spec, a tty spec or a non-positive timeout":

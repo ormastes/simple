@@ -6,7 +6,7 @@
 # serves callers that attach a terminal or wait in the foreground — the caret
 # suite's agent panes and the legacy test-runner container backend.
 #
-# Cleanup contract. The session writes NO file of its own (no cidfile, no
+# Cleanup contract. The session creates NO file of its own (no cidfile, no
 # journal), so the only artifact is the container. `--rm` removes it on a
 # normal exit, but killing the `podman run` client (SIGKILL, closed pty,
 # timeout) leaves the container behind — measured on podman 4.9.3. Therefore:
@@ -109,7 +109,10 @@ pub fn podman_session_run_argv_v1(spec: PodmanSessionSpecV1) -> Result<[text], t
     var argv = [PODMAN_SESSION_PROGRAM_V1, "run", "--rm", "--name", spec.name,
         "--label", PODMAN_SESSION_OWNER_LABEL_V1 + "=" + spec.owner,
         "--label", PODMAN_SESSION_NAME_LABEL_V1 + "=" + spec.name]
-    if spec.tty: argv = argv + ["--interactive", "--tty"]
+    # An attached tty otherwise reserves ctrl-p,ctrl-q as a detach sequence:
+    # it swallows the workload's own Ctrl-P and, when typed, leaves a running
+    # container behind a dead client. The empty value disables it.
+    if spec.tty: argv = argv + ["--interactive", "--tty", "--detach-keys="]
     if spec.network != "private": argv = argv + ["--network", spec.network]
     if spec.keep_id: argv = argv + ["--userns", "keep-id"]
     if spec.timeout_seconds > 0: argv = argv + ["--timeout", spec.timeout_seconds.to_text()]
@@ -146,15 +149,43 @@ pub fn podman_session_host_runner_v1(argv: [text], timeout_ms: i64) -> (text, te
     val result = process_run_timeout(argv[0], args, timeout_ms)
     (result.0, result.1, result.2 as i64)
 
+# ": <first non-empty stderr line>" for a diagnostic, "" when there is none.
+fn _podman_first_line_v1(stderr: text) -> text:
+    for line in stderr.split("\n"):
+        if line.trim() != "": return ": " + line.trim()
+    ""
+
+# Ok(true) = the engine lists the name, Ok(false) = it reports it absent.
+pub fn podman_session_exists_v1(name: text,
+        runner: fn([text], i64) -> (text, text, i64)) -> Result<bool, text>:
+    if not podman_session_token_valid_v1(name): return Err("podman-session-name-invalid")
+    val probe = runner(podman_session_exists_argv_v1(name), PODMAN_SESSION_CONTROL_TIMEOUT_MS_V1)
+    if probe.2 == 0: return Ok(true)
+    if probe.2 == 1: return Ok(false)
+    Err("podman-session-absence-unknown: exists exit " + probe.2.to_text())
+
+pub const PODMAN_SESSION_REAP_ATTEMPTS_V1: i64 = 5
+
 # Ok(true) only after the engine itself reports the name absent.
+#
+# `rm --force --time 0` SIGKILLs the workload and waits only briefly; with a
+# tty client still attached podman 4.9.3 answers exit 125 "could not be
+# stopped: given PID did not die within timeout" although the kill was
+# delivered and the container disappears moments later. Removal is therefore
+# repeated, a bounded number of times, until `container exists` says absent.
 pub fn podman_session_reap_v1(name: text,
         runner: fn([text], i64) -> (text, text, i64)) -> Result<bool, text>:
     if not podman_session_token_valid_v1(name): return Err("podman-session-name-invalid")
-    val removed = runner(podman_session_reap_argv_v1(name), PODMAN_SESSION_CONTROL_TIMEOUT_MS_V1)
-    val probe = runner(podman_session_exists_argv_v1(name), PODMAN_SESSION_CONTROL_TIMEOUT_MS_V1)
-    if probe.2 == 1: return Ok(true)
-    if probe.2 == 0: return Err("podman-session-still-present: rm exit " + removed.2.to_text())
-    Err("podman-session-absence-unknown: exists exit " + probe.2.to_text())
+    var last = ""
+    var attempt = 0
+    while attempt < PODMAN_SESSION_REAP_ATTEMPTS_V1:
+        val removed = runner(podman_session_reap_argv_v1(name), PODMAN_SESSION_CONTROL_TIMEOUT_MS_V1)
+        val probe = runner(podman_session_exists_argv_v1(name), PODMAN_SESSION_CONTROL_TIMEOUT_MS_V1)
+        if probe.2 == 1: return Ok(true)
+        if probe.2 != 0: return Err("podman-session-absence-unknown: exists exit " + probe.2.to_text())
+        last = "podman-session-still-present: rm exit " + removed.2.to_text() + _podman_first_line_v1(removed.1)
+        attempt = attempt + 1
+    Err(last)
 
 # Names of every container (any state) carrying this owner label.
 pub fn podman_session_owned_v1(owner: text,

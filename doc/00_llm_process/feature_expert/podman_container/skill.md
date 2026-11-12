@@ -35,6 +35,18 @@ records what it shares with that path.
   (`rm --force --volumes --time 0 --ignore`) and prove absence with
   `container exists` (exit 1). `podman_session_run_v1` does this after every
   outcome; a killed supervisor is recovered with `podman_session_reap_owner_v1`.
+- **`rm --force --time 0` can answer 125 while succeeding.** With a tty
+  client still attached, podman reports "could not be stopped: given PID did
+  not die within timeout" although SIGKILL was delivered; the container is
+  gone moments later. `podman_session_reap_v1` repeats removal (5 attempts)
+  until `container exists` says absent. Found by `/quit` with a live agent —
+  a smoke that always `/kill`s first never reaches it.
+- **Default detach keys.** An attached tty reserves ctrl-p,ctrl-q, swallowing
+  the agent's own Ctrl-P and leaving a running container behind a detached
+  client. The layer passes `--detach-keys=`.
+- **Names are per session, not per cs process.** A launch refuses when
+  `cs-<session>-<agent>` already exists instead of removing it (it may belong
+  to a second cs). `/reap` is the explicit recovery after a killed cs.
 - **`{{` / `}}` collapse to one brace in every double-quoted literal.** A Go
   template must be written `{{{{.Names}}}}`. Three inspect formats and the
   health probe reached podman as single-brace text while their scripted specs,
@@ -72,8 +84,11 @@ records what it shares with that path.
 Repo root is mounted read-only, `--workspace` read-write, the resolved Simple
 binary read-only, all at the same paths; network defaults to `host` so the
 agent reaches the slang server on `localhost:8721`. The container is named
-`cs-<session>-<agent>` under owner `cs-<session>`. `/kill` and `/quit` reap it
-and delete the client's stderr spool.
+`cs-<session>-<agent>` under owner `cs-<session>`. `/kill` reaps it; the end
+of either cs loop (`/quit`, EOF, Ctrl-C/D) reaps every containerized agent;
+both delete the client's stderr spool. A cs killed by SIGKILL cannot clean up:
+the next cs on that session refuses to reuse the name and `/reap` removes
+everything under the owner label.
 
 ## Measurements (2026-11-12, aarch64, podman 4.9.3 rootless, runc)
 
@@ -83,8 +98,18 @@ and delete the client's stderr spool.
   agent TUI rendered in the pane, chat text delivered to the container tty,
   `/kill a1` -> "killed pane id3, removed container cs-<session>-a1",
   0 owned / 0 total containers, 0 `cs-<session>-*.stderr` files afterwards.
-- Not observed: a model reply from the slang server inside the container
-  within 90 s of sending the prompt.
+- `/quit` and stdin EOF with the agent still running: container removed,
+  spool removed. cs killed with SIGKILL: container left in `stopping` (its
+  tty vanished), relaunch on that session refused while it existed, and it
+  had removed itself (`--rm`) before `/reap` ran ~20 s later. `/reap` against
+  a real leftover is covered by the live spec's orphan example.
+- Model round trip from inside the container (same flags, one-shot):
+  `--provider slang --model Qwen3-Coder-30B-A3B-Q4_K_M --prompt "Reply with
+  exactly: container-pong"` printed `container-pong`, exit 0. The default
+  model name `slang-local` is rejected by the server; pass the served model.
+- Not observed: a reply rendered in the cs pane. The piped (non-tty) cs loop
+  only repaints on input, and the dummy agent shows the same, so this is a
+  capture limit of the smoke, not a container problem.
 
 ## Open
 

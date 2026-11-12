@@ -22,7 +22,8 @@ use std.nogc_async_mut.sosix.{sosix_proc_usage, sosix_is_running, sosix_which,
 use std.io_runtime.{env_get, file_exists, cwd}
 use app.io.mod.{file_remove}
 use app.llm_caret.cs_container.{CsContainerRequest, cs_container_request, cs_container_argv,
-    cs_container_name, cs_container_spec_is_container, cs_container_reap, cs_container_real_path}
+    cs_container_name, cs_container_spec_is_container, cs_container_reap, cs_container_real_path,
+    cs_container_present, cs_container_reap_session}
 use app.llm_caret.harness_spec.{parse_harness_spec, harness_spec_display}
 use app.llm_caret.pane_backend.{Pane, pane_backend_name,
     pane_list, pane_select, pane_zoom, pane_spawn_at, pane_resize, pane_kill,
@@ -77,6 +78,7 @@ fn cs_help_text() -> text:
         "/launch <spec> [args...]   launch an agent (harness[:provider][/model])",
         "    --container <image>    run it in a container via the Simple container layer",
         "    --container-mount <src>:<dst>[:ro|rw]  --container-network host|none|private",
+        "/reap            remove every container this session owns (after a killed cs)",
         "/switch <n|id>   select an agent and focus its pane",
         "/max             maximize the selected agent's pane",
         "/key <name>      press enter|esc|tab|space|up|down|left|right|ctrl-c in its pane",
@@ -226,6 +228,9 @@ fn cs_handle_command(d: CsDashboard, line: text) -> (CsDashboard, text):
         if target.pane_id == "":
             return (d, "agent " + target.agent_id + " has no pane to press keys in")
         return (d, "key:" + target.agent_id + " " + target.pane_id + " " + arg)
+
+    if cmd == "/reap":
+        return (d, "container:reap-session")
 
     if cmd == "/kill":
         val idx = _resolve(d, arg)
@@ -674,8 +679,9 @@ fn _cs_agent_in_container(d: CsDashboard, agent_id: text) -> bool:
 
 # Runs the agent through the Simple container layer: the pane's process is
 # the engine client attached to the container's tty. A container left by an
-# earlier agent of the same name is reaped first, and one that failed to get a
-# pane is reaped again, so no path leaves a container without a roster entry.
+# existing container of the same name refuses the launch (see /reap), and one
+# that failed to get a pane is reaped, so no path leaves a container without a
+# roster entry.
 fn _cs_launch_in_container(d: CsDashboard, agent_id: text, exe: text, args: [text],
         container: CsContainerRequest) -> (CsDashboard, text):
     val real_exe = cs_container_real_path(exe)
@@ -689,9 +695,12 @@ fn _cs_launch_in_container(d: CsDashboard, agent_id: text, exe: text, args: [tex
     val engine = _which(engine_argv[0])
     if engine == "":
         return (d, "cannot launch " + agent_id + ": '" + engine_argv[0] + "' is not on PATH")
-    val stale = cs_container_reap(d.session, agent_id)
-    if stale != "":
-        return (d, "cannot launch " + agent_id + ": stale container not removed: " + stale)
+    val present = cs_container_present(d.session, agent_id)
+    if present == "exists":
+        return (d, "cannot launch " + agent_id + ": container " + cs_container_name(d.session, agent_id) +
+            " already exists (another cs on this session, or left by a killed one): /reap removes it")
+    if present != "":
+        return (d, "cannot launch " + agent_id + ": container state unknown: " + present)
     var engine_args: [text] = []
     var i = 1
     while i < engine_argv.len():
@@ -705,8 +714,9 @@ fn _cs_launch_in_container(d: CsDashboard, agent_id: text, exe: text, args: [tex
     (_attach(d, agent_id, pane), "launched " + agent_id + " in pane " + pane.pane_id +
         " inside container " + cs_container_name(d.session, agent_id))
 
-# Removes every container of this session's containerized agents; called when
-# the operator quits so no agent container outlives its dashboard. Returns a
+# Removes every container of this dashboard's containerized agents; called
+# when either cs loop ends (quit, EOF, Ctrl-C/D) so no agent container
+# outlives its dashboard. Returns a
 # note for the operator, "" when there was nothing to do.
 fn cs_reap_containers(d: CsDashboard) -> text:
     var note = ""
@@ -759,6 +769,12 @@ fn cs_apply_action(d: CsDashboard, action: text) -> (CsDashboard, text):
             # the killed agent must not then be reported as that pane's owner.
             return (cs_refresh(_detach(d, words[1])), "killed pane " + words[2] + container_note)
         return (d, "pane backend refused to kill " + words[2] + container_note)
+    if head == "container:reap-session":
+        match cs_container_reap_session(d.session):
+            case Ok(names):
+                if names.len() == 0: return (d, "no containers owned by session " + d.session)
+                return (d, "removed containers: " + names.join(" "))
+            case Err(reason): return (d, "containers NOT removed: " + reason)
     if head.starts_with("launch:"):
         val agent_id = head.split(":")[1]
         val spec_text = if words.len() > 1: words[1] else: ""
