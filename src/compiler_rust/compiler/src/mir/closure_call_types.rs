@@ -230,6 +230,7 @@ fn propagate_in_function(function: &mut MirFunction) {
                 param_types,
                 return_type,
                 args,
+                signature_declared,
                 ..
             } = inst
             else {
@@ -248,21 +249,31 @@ fn propagate_in_function(function: &mut MirFunction) {
             // reinterpret the argument's bits. Poison the site to ANY instead;
             // the JIT admission guard refuses such a module and the interpreter
             // (which is dynamically typed) produces the right answer.
+            //
+            // An `ANY` lambda parameter (an unannotated one) is different: it
+            // takes a tagged word of any type, and the call site boxes each
+            // argument by the CALLER's slot type, so every caller type is
+            // compatible and the caller's own type is kept for that slot.
             let compatible = param_types
                 .iter()
                 .zip(sig_params.iter())
-                .all(|(caller, callee)| *caller == TypeId::ANY || caller == callee);
+                .all(|(caller, callee)| *caller == TypeId::ANY || *callee == TypeId::ANY || caller == callee);
             if !compatible {
                 param_types.iter_mut().for_each(|slot| *slot = TypeId::ANY);
                 *return_type = TypeId::ANY;
                 continue;
             }
             for (slot, inferred) in param_types.iter_mut().zip(sig_params.iter()) {
-                *slot = *inferred;
+                if *inferred != TypeId::ANY {
+                    *slot = *inferred;
+                }
             }
             if *return_type == TypeId::ANY {
                 *return_type = *sig_ret;
             }
+            // The signature now IS the closure's own: an `ANY` slot left in it
+            // is the tagged word that lambda takes or answers, not a guess.
+            *signature_declared = true;
         }
     }
 }

@@ -177,3 +177,26 @@ fn any_cast_to_float_decodes_through_the_runtime() {
         "every cast must read the decoded float: {insts:?}"
     );
 }
+
+/// Inside a lambda body the parameter's type is the LAMBDA's, not whatever
+/// later local of the enclosing function reuses its index. `val f = \\i: xs[i]`
+/// recovered `f`'s own slot type for `i` and read the element with the tagged
+/// index (`f(2)` on `[10, 20, 30]` answered 0).
+#[test]
+fn lambda_param_index_is_decoded_inside_the_lambda_body() {
+    let mir = compile_to_mir("fn test() -> any:\n    val xs = [10, 20, 30]\n    val f = \\i: xs[i]\n    return f(2)\n")
+        .expect("mir lowering failed");
+    let insts: Vec<MirInst> = mir
+        .functions
+        .iter()
+        .flat_map(|f| f.blocks.iter())
+        .flat_map(|b| b.instructions.iter().cloned())
+        .collect();
+    let unboxed = unboxed_int_regs(&insts);
+    let index_args: Vec<VReg> = calls_to(&insts, "rt_typed_words_i64_at")
+        .into_iter()
+        .filter_map(|args| args.get(1).copied())
+        .collect();
+    assert_eq!(index_args.len(), 1, "{insts:?}");
+    assert!(unboxed.contains(&index_args[0]), "index must be decoded: {insts:?}");
+}
