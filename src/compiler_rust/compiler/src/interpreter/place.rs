@@ -663,7 +663,7 @@ pub(crate) fn place_read(env: &Env, place: &Place) -> Option<Value> {
 }
 
 /// Read-only counterpart of `step_mut`.
-fn step_ref<'a>(slot: &'a Value, projection: &Projection) -> Option<&'a Value> {
+pub(crate) fn step_ref<'a>(slot: &'a Value, projection: &Projection) -> Option<&'a Value> {
     if matches!(projection, Projection::Unwrap) {
         return unwrap_place_ref(slot);
     }

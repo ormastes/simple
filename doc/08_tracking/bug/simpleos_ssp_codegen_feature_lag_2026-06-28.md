@@ -98,3 +98,19 @@ TODO: after the Linux bootstrap publishes an admitted self-hosted compiler,
 run the SSP system spec above and `sh scripts/check/check-simpleos-bootstrap-qemu.shs --full`.
 Retain the linked kernel symbols, guest failure-handler receipt, and peak RSS;
 the focused Clang/source checks do not close this QEMU acceptance row.
+
+## Fix verification
+2026-11-12: the focused hosted repro spec
+`test/01_unit/compiler/backend/simpleos_ssp_codegen_spec.spl` failed 2/5 under
+the Rust seed on release/1.0.0. Both failures were stale assertions against
+intentional upstream contracts, not SSP policy regressions: (1) MIR arrays are
+boxed references, so `Alloc` of an `Array(U8,64)` local emits an `alloca ptr`
+slot, never an inline `alloca [64 x i8]` — the spec now asserts the real slot
+while keeping the `sspstrong` / escape-call assertions; (2) the fail-closed
+naked contract (E-NAKED-BODY, pure_backend_naked_fn_gaps_2026-08-28, landed
+2026-11-09) poisons a non-asm naked body instead of emitting
+` naked noinline` IR — the spec now asserts the error module and absence of
+`sspstrong`. Spec repaired; verified 5/5 PASS hosted (seed, interpreter mode).
+Neighbors green: hardening_preset_policy 12/12, naked_no_prologue 11/11,
+aarch64_float_reject 8/8. Still open per above: default Cranelift-route SSP
+policy and QEMU guest evidence.

@@ -1,0 +1,95 @@
+# Query visibility — MDSOC+ public-view projection for symbol listings.
+#
+# `visibility_class_from_facts` is THE classifier seam: it turns the text-level
+# facts the query_visibility module already derives (declared visibility, layer
+# `__init__.spl` export, feature capsule export) into one of the four classes
+# of doc/05_design/app/source_view/public_view_by_feature_layer.md. When lane
+# U2's effective-visibility result (src/compiler/35.semantics/lint) lands, the
+# fact gathering in query_commands.visibility_class_of swaps to it here; the
+# projection below does not change.
+#
+# Leaf module: imports only the std projection and symbol_resolution helpers,
+# never query_commands (which imports this file).
+use std.nogc_sync_mut.source.visibility_view.{SourceVisibleSymbolV1, SourceHiddenSummaryV1,
+    source_visibility_level_valid_v1, source_visibility_admits_v1, source_selector_admits_v1,
+    source_hidden_summary_v1, source_hidden_hint_v1, source_hidden_summary_json_v1}
+use std.common.json.value.{JsonValue, json_value_serialize}
+use app.cli._QueryVisibility.symbol_resolution.{parent_dir, text_chars}
+
+# JSON string through the canonical serializer (symbol_resolution.json_text
+# mangles embedded quotes).
+fn json_str(value: text) -> text:
+    json_value_serialize(JsonValue.Str(value))
+
+pub fn visibility_class_from_facts(declared: text, has_boundary: bool, layer_exported: bool,
+        in_feature: bool, feature_exported: bool) -> text:
+    if declared == "private": return "module_private"
+    if declared == "up": return "layer_private"
+    if declared == "peer" or declared == "package" or declared == "internal": return "feature_private"
+    # declared == "public"
+    if not has_boundary: return "public"
+    if not layer_exported: return "layer_private"
+    if in_feature and not feature_exported: return "feature_private"
+    "public"
+
+# The public-only default applies inside an MDSOC boundary; an open module has
+# no feature or layer to be private to, so its default is `all` and says so.
+pub fn visibility_default_level(has_boundary: bool) -> text:
+    if has_boundary: "public" else: "all"
+
+pub fn visibility_default_reason(has_boundary: bool) -> text:
+    if has_boundary: "public (mdsoc_boundary)" else: "all (open_module_no_init_boundary)"
+
+pub fn visibility_level_or_error(requested: text, has_boundary: bool) -> Result<text, text>:
+    if requested == "": return Ok(visibility_default_level(has_boundary))
+    if not source_visibility_level_valid_v1(requested):
+        return Err("unsupported_visibility; use public, feature_private, layer_private or all")
+    Ok(requested)
+
+# Layer identity: nearest ancestor directory named `NN.name` (an MDSOC layer),
+# else the first path segment under src/ (lib, app, ...).
+pub fn layer_id_of(file_path: text, fallback: text) -> text:
+    var current = parent_dir(file_path)
+    var remaining = 64
+    while current != "" and remaining > 0:
+        val slash = current.last_index_of("/")
+        val base = if slash >= 0: current.substring(slash + 1) else: current
+        if layer_dir_basename_is_layer(base): return base
+        val next = parent_dir(current)
+        if next == current: break
+        current = next
+        remaining = remaining - 1
+    fallback
+
+fn layer_dir_basename_is_layer(base: text) -> bool:
+    val dot = base.index_of(".")
+    if dot <= 0 or dot + 1 >= base.len(): return false
+    for ch in text_chars(base.substring(0, dot)):
+        if ch < "0" or ch > "9": return false
+    true
+
+pub fn symbol_view_admits(symbol: SourceVisibleSymbolV1, level: text, feature: text, layer: text) -> bool:
+    source_visibility_admits_v1(symbol.visibility_class, level) and source_selector_admits_v1(symbol, feature, layer)
+
+pub fn symbol_view_summary(symbols: [SourceVisibleSymbolV1], level: text, feature: text, layer: text) -> SourceHiddenSummaryV1:
+    source_hidden_summary_v1(symbols, level, feature, layer)
+
+pub fn symbol_view_hint(summary: SourceHiddenSummaryV1) -> text:
+    source_hidden_hint_v1(summary, "lsp")
+
+pub fn symbol_view_summary_json(summary: SourceHiddenSummaryV1, has_boundary: bool) -> text:
+    val body = json_value_serialize(source_hidden_summary_json_v1(summary, "lsp"))
+    # Prepend the effective default so a reader knows which rule applied.
+    "{\"visibility_default\":" + json_str(visibility_default_reason(has_boundary)) + "," + body.substring(1)
+
+# Synthetic trailing entry for documentSymbol / workspace/symbol: the LLM reads
+# the list, so the list itself carries the hint (notifications get dropped by
+# bridges). kind 1 = File; zero range at the file start.
+pub fn symbol_view_summary_entry(summary: SourceHiddenSummaryV1, has_boundary: bool, uri: text) -> text:
+    # `}}` is a brace escape in Simple string literals; close the object by concatenation.
+    val zero = "{\"start\":{\"line\":0,\"character\":0},\"end\":{\"line\":0,\"character\":0}" + "}"
+    val location = if uri == "": "\"range\":" + zero + ",\"selectionRange\":" + zero
+        else: "\"location\":{\"uri\":" + json_str(uri) + ",\"range\":" + zero + "}"
+    "{\"name\":" + json_str(symbol_view_hint(summary)) + ",\"kind\":1,\"detail\":" +
+        json_str("hidden symbols summary; visibility=" + summary.visibility) + "," + location +
+        ",\"simpleHiddenSummary\":" + symbol_view_summary_json(summary, has_boundary) + "}"

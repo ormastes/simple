@@ -22,6 +22,9 @@ use std.io_runtime.{process_run_timeout}
 pub const PODMAN_SESSION_PROGRAM_V1 = "podman"
 pub const PODMAN_SESSION_OWNER_LABEL_V1 = "io.simpleorch.session.owner"
 pub const PODMAN_SESSION_NAME_LABEL_V1 = "io.simpleorch.session.name"
+# Identifies the PROCESS that launched the container. Owner and name are
+# shared by every supervisor on one session; only this label says "mine".
+pub const PODMAN_SESSION_INSTANCE_LABEL_V1 = "io.simpleorch.session.instance"
 pub const PODMAN_SESSION_CONTROL_TIMEOUT_MS_V1: i64 = 30000
 
 pub struct PodmanMountV1:
@@ -43,6 +46,8 @@ pub struct PodmanSessionSpecV1:
     env: [text] = []
     # Engine-side lifetime cap in seconds (`podman run --timeout`); 0 = none.
     timeout_seconds: i64 = 0
+    # Launching-process nonce; "" omits the label.
+    instance: text = ""
 
 pub struct PodmanSessionRunV1:
     stdout: text
@@ -100,6 +105,8 @@ pub fn podman_session_validate_v1(spec: PodmanSessionSpecV1) -> text:
     for entry in spec.env:
         if not _podman_env_valid_v1(entry): return "podman-session-env-invalid"
     if spec.timeout_seconds < 0: return "podman-session-timeout-invalid"
+    if spec.instance != "" and not podman_session_token_valid_v1(spec.instance):
+        return "podman-session-instance-invalid"
     ""
 
 # Full argv, element 0 is the program. Pure.
@@ -109,6 +116,8 @@ pub fn podman_session_run_argv_v1(spec: PodmanSessionSpecV1) -> Result<[text], t
     var argv = [PODMAN_SESSION_PROGRAM_V1, "run", "--rm", "--name", spec.name,
         "--label", PODMAN_SESSION_OWNER_LABEL_V1 + "=" + spec.owner,
         "--label", PODMAN_SESSION_NAME_LABEL_V1 + "=" + spec.name]
+    if spec.instance != "":
+        argv = argv + ["--label", PODMAN_SESSION_INSTANCE_LABEL_V1 + "=" + spec.instance]
     # An attached tty otherwise reserves ctrl-p,ctrl-q as a detach sequence:
     # it swallows the workload's own Ctrl-P and, when typed, leaves a running
     # container behind a dead client. The empty value disables it.
@@ -176,16 +185,56 @@ pub const PODMAN_SESSION_REAP_ATTEMPTS_V1: i64 = 5
 pub fn podman_session_reap_v1(name: text,
         runner: fn([text], i64) -> (text, text, i64)) -> Result<bool, text>:
     if not podman_session_token_valid_v1(name): return Err("podman-session-name-invalid")
+    _podman_session_reap_ref_v1(name, runner)
+
+# `target` is a validated name or a 64-hex container ID.
+fn _podman_session_reap_ref_v1(target: text,
+        runner: fn([text], i64) -> (text, text, i64)) -> Result<bool, text>:
     var last = ""
     var attempt = 0
     while attempt < PODMAN_SESSION_REAP_ATTEMPTS_V1:
-        val removed = runner(podman_session_reap_argv_v1(name), PODMAN_SESSION_CONTROL_TIMEOUT_MS_V1)
-        val probe = runner(podman_session_exists_argv_v1(name), PODMAN_SESSION_CONTROL_TIMEOUT_MS_V1)
+        val removed = runner(podman_session_reap_argv_v1(target), PODMAN_SESSION_CONTROL_TIMEOUT_MS_V1)
+        val probe = runner(podman_session_exists_argv_v1(target), PODMAN_SESSION_CONTROL_TIMEOUT_MS_V1)
         if probe.2 == 1: return Ok(true)
         if probe.2 != 0: return Err("podman-session-absence-unknown: exists exit " + probe.2.to_text())
         last = "podman-session-still-present: rm exit " + removed.2.to_text() + _podman_first_line_v1(removed.1)
         attempt = attempt + 1
     Err(last)
+
+# `<64-hex id>|<instance label>` of the container currently holding `name`.
+pub fn podman_session_identity_argv_v1(name: text) -> [text]:
+    [PODMAN_SESSION_PROGRAM_V1, "container", "inspect", "--format",
+        "{{{{.Id}}}}|{{{{index .Config.Labels \"" + PODMAN_SESSION_INSTANCE_LABEL_V1 + "\"}}}}", name]
+
+fn _podman_id_valid_v1(value: text) -> bool:
+    if value.len() != 64: return false
+    for index in 0..value.len():
+        val byte = value.byte_at(index)
+        if not ((byte >= 48 and byte <= 57) or (byte >= 97 and byte <= 102)): return false
+    true
+
+# Reap `name` only if THIS process launched it. A name is not ownership: two
+# supervisors on one session derive the same names, so removing by name alone
+# lets one kill the other's live workload. The container's instance label is
+# read first; a different (or missing) label is refused with no removal, and
+# removal then targets the inspected container ID, not the name, so a
+# container that takes the name afterwards is never touched.
+# Ok(true) = gone (removed here, or already absent).
+pub fn podman_session_reap_instance_v1(name: text, instance: text,
+        runner: fn([text], i64) -> (text, text, i64)) -> Result<bool, text>:
+    if not podman_session_token_valid_v1(name): return Err("podman-session-name-invalid")
+    if not podman_session_token_valid_v1(instance): return Err("podman-session-instance-invalid")
+    val seen = runner(podman_session_identity_argv_v1(name), PODMAN_SESSION_CONTROL_TIMEOUT_MS_V1)
+    if seen.2 != 0:
+        val still_listed = podman_session_exists_v1(name, runner)?
+        if not still_listed: return Ok(true)
+        return Err("podman-session-identity-unknown: inspect exit " + seen.2.to_text() + _podman_first_line_v1(seen.1))
+    val fields = seen.0.trim().split("|")
+    if fields.len() != 2 or not _podman_id_valid_v1(fields[0]):
+        return Err("podman-session-identity-unknown: malformed inspect output")
+    if fields[1] != instance:
+        return Err("podman-session-foreign-instance: " + name + " belongs to '" + fields[1] + "'")
+    _podman_session_reap_ref_v1(fields[0], runner)
 
 # Names of every container (any state) carrying this owner label.
 pub fn podman_session_owned_v1(owner: text,

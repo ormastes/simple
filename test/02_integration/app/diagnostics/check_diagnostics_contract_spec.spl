@@ -7,56 +7,63 @@ user-facing output.
 """
 
 use std.spec
+use std.nogc_sync_mut.io.process_ops.{process_run}
+use std.nogc_sync_mut.env.platform.{get_temp_dir}
+use std.nogc_sync_mut.io.file_ops.{file_write, file_exists, secure_temp_dir}
+use std.io_runtime.{dir_remove}
 
-extern fn rt_file_write_text(path: text, content: text) -> bool
-extern fn rt_file_delete(path: text) -> bool
-extern fn rt_file_exists(path: text) -> bool
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+var TEMP_ROOT: text = ""
 
-val PARSE_FIXTURE_PATH = "/tmp/simple_check_diagnostics_contract_parse.spl"
-val WARNING_FIXTURE_PATH = "/tmp/simple_check_diagnostics_contract_warning.spl"
-val MISSING_FIXTURE_PATH = "/tmp/simple_check_diagnostics_contract_missing.spl"
-val TYPE_FIXTURE_PATH = "/tmp/simple_check_diagnostics_contract_type.spl"
-val RETURN_FIXTURE_PATH = "/tmp/simple_check_diagnostics_contract_return.spl"
+fn get_temp_path(name: text) -> text:
+    if TEMP_ROOT == "":
+        val temp_dir = get_temp_dir()
+        val result = secure_temp_dir(temp_dir, "simple-check-diagnostics-").unwrap()
+        TEMP_ROOT = result
+    TEMP_ROOT + "/" + name
 
-# Runs the repo's check entry point under $SIMPLE_BIN (default bin/simple) so the
-# contract is verified against the working-tree source, not a stale deployed binary.
+# Runs the repo's check entry point using the simple binary
 fn run_check(args: [text]) -> (text, text, i64):
-    var quoted: [text] = []
+    var full_args: [text] = []
+    full_args.push("run")
+    full_args.push("./src/app/check/main.spl")
     for a in args:
-        quoted.push("'" + a.replace("'", "'\\''") + "'")
-    val joined = quoted.join(" ")
-    rt_process_run("/bin/sh", [
-        "-c",
-        "REPO=$(pwd); SIMPLE_LIB=\"$REPO/src\" \"${SIMPLE_BIN:-$REPO/bin/simple}\" run \"$REPO/src/app/check/main.spl\" " + joined
-    ])
+        full_args.push(a)
+
+    # Windows checkouts ship bin/simple.exe; POSIX ships bin/simple.
+    val binary = if file_exists("./bin/simple.exe"): "./bin/simple.exe" else: "./bin/simple"
+    process_run(binary, full_args)
 
 fn seed_invalid_source():
     val source = "fn main():\n    val x =\n"
-    expect(rt_file_write_text(PARSE_FIXTURE_PATH, source)).to_equal(true)
+    val path = get_temp_path("parse.spl")
+    expect(file_write(path, source)).to_equal(true)
 
 fn seed_unresolved_import_source():
     val source = "use definitely.missing.module\nfn main():\n    val x = 1\n"
-    expect(rt_file_write_text(WARNING_FIXTURE_PATH, source)).to_equal(true)
+    val path = get_temp_path("warning.spl")
+    expect(file_write(path, source)).to_equal(true)
 
 fn seed_type_mismatch_source():
     val source = "fn main():\n    val x: i64 = \"text\"\n"
-    expect(rt_file_write_text(TYPE_FIXTURE_PATH, source)).to_equal(true)
+    val path = get_temp_path("type.spl")
+    expect(file_write(path, source)).to_equal(true)
 
 fn seed_return_mismatch_source():
     val source = "fn value() -> bool:\n    return 1\n"
-    expect(rt_file_write_text(RETURN_FIXTURE_PATH, source)).to_equal(true)
+    val path = get_temp_path("return.spl")
+    expect(file_write(path, source)).to_equal(true)
 
-fn remove_missing_fixture():
-    if rt_file_exists(MISSING_FIXTURE_PATH):
-        rt_file_delete(MISSING_FIXTURE_PATH)
-    expect(rt_file_exists(MISSING_FIXTURE_PATH)).to_equal(false)
+fn cleanup_temps():
+    if TEMP_ROOT != "":
+        if dir_remove(TEMP_ROOT, true):
+            TEMP_ROOT = ""
 
 describe "`simple check` diagnostics":
     it "prints stable parse code and help in text output":
         seed_invalid_source()
 
-        val (stdout, stderr, code) = run_check([PARSE_FIXTURE_PATH])
+        val path = get_temp_path("parse.spl")
+        val (stdout, stderr, code) = run_check([path])
         val combined = stdout + stderr
 
         expect(code).to_equal(1)
@@ -69,7 +76,8 @@ describe "`simple check` diagnostics":
     it "serializes stable parse code and help in JSON output":
         seed_invalid_source()
 
-        val (stdout, stderr, code) = run_check(["--json", PARSE_FIXTURE_PATH])
+        val path = get_temp_path("parse.spl")
+        val (stdout, stderr, code) = run_check(["--json", path])
         val combined = stdout + stderr
 
         expect(code).to_equal(1)
@@ -83,7 +91,8 @@ describe "`simple check` diagnostics":
     it "prints stable type mismatch code and help in text output":
         seed_type_mismatch_source()
 
-        val (stdout, stderr, code) = run_check([TYPE_FIXTURE_PATH])
+        val path = get_temp_path("type.spl")
+        val (stdout, stderr, code) = run_check([path])
         val combined = stdout + stderr
 
         expect(code).to_equal(1)
@@ -96,7 +105,8 @@ describe "`simple check` diagnostics":
     it "serializes stable type mismatch code and help in JSON output":
         seed_type_mismatch_source()
 
-        val (stdout, stderr, code) = run_check(["--json", TYPE_FIXTURE_PATH])
+        val path = get_temp_path("type.spl")
+        val (stdout, stderr, code) = run_check(["--json", path])
         val combined = stdout + stderr
 
         expect(code).to_equal(1)
@@ -111,7 +121,8 @@ describe "`simple check` diagnostics":
     it "prints stable return type mismatch code and help in text output":
         seed_return_mismatch_source()
 
-        val (stdout, stderr, code) = run_check([RETURN_FIXTURE_PATH])
+        val path = get_temp_path("return.spl")
+        val (stdout, stderr, code) = run_check([path])
         val combined = stdout + stderr
 
         expect(code).to_equal(1)
@@ -124,7 +135,8 @@ describe "`simple check` diagnostics":
     it "serializes stable return type mismatch code and help in JSON output":
         seed_return_mismatch_source()
 
-        val (stdout, stderr, code) = run_check(["--json", RETURN_FIXTURE_PATH])
+        val path = get_temp_path("return.spl")
+        val (stdout, stderr, code) = run_check(["--json", path])
         val combined = stdout + stderr
 
         expect(code).to_equal(1)
@@ -139,7 +151,8 @@ describe "`simple check` diagnostics":
     it "prints stable warning code and help in text output":
         seed_unresolved_import_source()
 
-        val (stdout, stderr, code) = run_check([WARNING_FIXTURE_PATH])
+        val path = get_temp_path("warning.spl")
+        val (stdout, stderr, code) = run_check([path])
         val combined = stdout + stderr
 
         expect(code).to_equal(0)
@@ -152,7 +165,8 @@ describe "`simple check` diagnostics":
     it "serializes warning status and help in JSON output":
         seed_unresolved_import_source()
 
-        val (stdout, stderr, code) = run_check(["--json", WARNING_FIXTURE_PATH])
+        val path = get_temp_path("warning.spl")
+        val (stdout, stderr, code) = run_check(["--json", path])
         val combined = stdout + stderr
 
         expect(code).to_equal(0)
@@ -163,9 +177,8 @@ describe "`simple check` diagnostics":
         expect(combined).to_contain("\"check the module path or add the source root with --source-root\"")
 
     it "prints stable file read code and help in text output":
-        remove_missing_fixture()
-
-        val (stdout, stderr, code) = run_check([MISSING_FIXTURE_PATH])
+        val missing_path = get_temp_path("missing.spl")
+        val (stdout, stderr, code) = run_check([missing_path])
         val combined = stdout + stderr
 
         expect(code).to_equal(1)
@@ -174,9 +187,8 @@ describe "`simple check` diagnostics":
         expect(combined).to_contain("= help: check that the path exists and is readable")
 
     it "serializes stable file read code and help in JSON output":
-        remove_missing_fixture()
-
-        val (stdout, stderr, code) = run_check(["--json", MISSING_FIXTURE_PATH])
+        val missing_path = get_temp_path("missing-json.spl")
+        val (stdout, stderr, code) = run_check(["--json", missing_path])
         val combined = stdout + stderr
 
         expect(code).to_equal(1)
@@ -185,3 +197,6 @@ describe "`simple check` diagnostics":
         expect(combined).to_contain("\"code\": \"E0001\"")
         expect(combined).to_contain("\"cannot read file")
         expect(combined).to_contain("\"check that the path exists and is readable\"")
+
+    after_each():
+        cleanup_temps()

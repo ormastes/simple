@@ -70,12 +70,20 @@ fn run_visibility_hover(file: text, line0: i64, char0: i64, requester: text) -> 
     run_command_text(find_simple_binary(), [query_visibility_path(), "hover", file, str(line0 + 1), str(char0 + 1), "--requester", requester])
 
 fn run_lsp_symbols(file: text) -> text:
-    run_visibility_symbols(file, "")
+    run_visibility_symbols(file, "", "", "", "")
 
 # `requester` is always passed through — "" means "no requester" (only
-# boundary-crossing symbols reachable), never the file itself.
-fn run_visibility_symbols(file: text, requester: text) -> text:
-    run_command_text(find_simple_binary(), [query_visibility_path(), "symbols", file, "--requester", requester])
+# boundary-crossing symbols reachable), never the file itself. `visibility`
+# is the MDSOC+ reveal level (public default inside a boundary); `feature` /
+# `layer` narrow the list. REQ-PUBVIEW-009.
+fn run_visibility_symbols(file: text, requester: text, visibility: text, feature: text, layer: text) -> text:
+    run_command_text(find_simple_binary(), [query_visibility_path(), "symbols", file, "--requester", requester, "--visibility", visibility, "--feature", feature, "--layer", layer])
+
+# Workspace view: by feature (one capsule across its layers), by layer (one
+# layer across features) or by query; same reveal levels and hidden summary.
+fn run_visibility_workspace_symbols(query: text, visibility: text, feature: text, layer: text, root: text) -> text:
+    val base = if root == "": "src" else: root
+    run_command_text(find_simple_binary(), [query_visibility_path(), "workspace-symbols", "--query", query, "--visibility", visibility, "--feature", feature, "--layer", layer, "--root", base])
 
 # Two-set view (layerPublic / featurePublic) for a requester location.
 fn run_visibility_sets(file: text, requester: text, source: text) -> text:
@@ -385,6 +393,8 @@ fn detect_tool_name(body: text) -> text:
                 return "lsp_outgoing_calls"
             if direct == "saml_analyze":
                 return "saml_analyze"
+            if direct == "lsp_workspace_symbols":
+                return "lsp_workspace_symbols"
     if requested == "lsp_definition":
         return "lsp_definition"
     if requested == "lsp_references":
@@ -393,6 +403,8 @@ fn detect_tool_name(body: text) -> text:
         return "lsp_hover"
     if requested == "lsp_symbols":
         return "lsp_symbols"
+    if requested == "lsp_workspace_symbols":
+        return "lsp_workspace_symbols"
     if requested == "lsp_diagnostics":
         return "lsp_diagnostics"
     if requested == "lsp_completion":
@@ -528,8 +540,11 @@ fn handle_tool_call(id: text, body: text) -> text:
             return command_result(id, run_saml_analyze(file, spec_dir))
         if tool_name == "lsp_symbols":
             val (requester, _source) = lsp_resolve_requester(arg_field(args: args_body, key: "requester"))
-            return command_result(id, run_visibility_symbols(file, requester))
+            return command_result(id, run_visibility_symbols(file, requester, arg_field(args: args_body, key: "visibility"), arg_field(args: args_body, key: "feature"), arg_field(args: args_body, key: "layer")))
         return diagnostics_result(id, file, run_lsp_diagnostics(file))
+
+    if tool_name == "lsp_workspace_symbols":
+        return command_result(id, run_visibility_workspace_symbols(arg_field(args: args_body, key: "query"), arg_field(args: args_body, key: "visibility"), arg_field(args: args_body, key: "feature"), arg_field(args: args_body, key: "layer"), arg_field(args: args_body, key: "root")))
 
     jsonrpc_error(id, -32602, "Unknown tool: " + tool_name)
 
@@ -544,6 +559,7 @@ export arg_int_field
 export run_lsp_query
 export run_visibility_query
 export run_visibility_symbols
+export run_visibility_workspace_symbols
 export run_visibility_hover
 export run_visibility_sets
 export run_lsp_diagnostics

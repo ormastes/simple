@@ -8,14 +8,53 @@ use std.common.text_bytes.{text_to_utf8_bytes, bytes_to_text, utf8_bytes_valid}
 use std.common.crypto.sha256.{sha256_text}
 use std.common.string_core.{str_len}
 use std.common.source.contracts.{SourceSnapshotV1, SourceRangeV1, SourceProjectionV1,
-    SourceOutlineV1, SourceStructuredViewV1, SourceIntentResolutionV1}
+    SourceOutlineV1, SourceOutlineNodeV1, SourceStructuredViewV1, SourceIntentResolutionV1}
 use std.nogc_sync_mut.source.projection.{source_project_raw_v1}
 # Module-level on purpose: a function-local `use` loads only the named function
 # and leaves the TreeSitter impl blocks unloaded (method parse_outline /
 # parse_top_level_item not found on every structural source_open).
 use compiler.tools.source_outline_v1.{source_native_outline_v1}
 use std.nogc_sync_mut.source.structure.{source_project_structure_v1, source_view_node_expanded_v1,
-    source_outline_intent_v1}
+    source_outline_intent_v1, source_outline_without_nodes_v1}
+# MDSOC+ public view (REQ-PUBVIEW-001/006): the classifier seam lives with the
+# query_visibility CLI; the projection is the shared std library.
+use std.nogc_sync_mut.source.visibility_view.{SourceVisibleSymbolV1, SourceHiddenSummaryV1,
+    source_visibility_admits_v1, source_hidden_summary_v1, source_hidden_hint_v1, source_hidden_summary_json_v1}
+use app.cli._QueryVisibility.symbol_views.{visibility_level_or_error, visibility_default_reason}
+use app.cli._QueryVisibility.query_commands.{visibility_class_of, nearest_boundary_dir}
+
+# A hidden top-level node: its full range, qualified name and class.
+struct SourceHiddenNodeV1:
+    span: SourceRangeV1
+    name: text
+    visibility_class: text
+
+fn source_node_classifiable_v1(node: SourceOutlineNodeV1) -> bool:
+    # Structural nodes carry no visibility of their own and are never hidden.
+    node.parent_index < 0 and node.kind != "import" and node.kind != "export" and
+        node.kind != "impl" and node.kind != "static_assert"
+
+fn source_visible_symbols_v1(outline: SourceOutlineV1, file: text) -> [SourceVisibleSymbolV1]:
+    var symbols: [SourceVisibleSymbolV1] = []
+    for node in outline.nodes:
+        if source_node_classifiable_v1(node):
+            symbols.push(SourceVisibleSymbolV1(node.name, node.kind, visibility_class_of(node.name, file), "", ""))
+    symbols
+
+fn source_hidden_nodes_v1(outline: SourceOutlineV1, symbols: [SourceVisibleSymbolV1], level: text) -> ([i64], [SourceHiddenNodeV1]):
+    var indices: [i64] = []
+    var hidden: [SourceHiddenNodeV1] = []
+    var symbol_index = 0
+    var index = 0
+    for node in outline.nodes:
+        if source_node_classifiable_v1(node):
+            val symbol = symbols[symbol_index]
+            symbol_index = symbol_index + 1
+            if not source_visibility_admits_v1(symbol.visibility_class, level):
+                indices.push(index)
+                hidden.push(SourceHiddenNodeV1(node.full_range, node.qualified_name, symbol.visibility_class))
+        index = index + 1
+    (indices, hidden)
 
 # Compact help is returned only on demand (`help: "ess"`), never pushed.
 val SOURCE_ESSENTIAL_HELP_V1 = "Essential: open <symbol> (target=) | intent=<text> | raw | outline\nFold: outline closes all bodies; focused/intent opens one block\nMore: cursor+snapshot_id page; max_bytes/max_nodes bound every view"
@@ -207,16 +246,29 @@ fn source_fold_marker_v1(outline: SourceOutlineV1, view: SourceStructuredViewV1,
     "| + body" + suffix
 
 fn source_omission_ledger_v1(outline: SourceOutlineV1, view: SourceStructuredViewV1,
-        next_cursor: text) -> JsonValue:
+        next_cursor: text, hidden: [SourceHiddenNodeV1]) -> JsonValue:
     # One row per omitted range: why it is absent and how to retrieve it. An
     # omitted gap is attributed to the fold it overlaps (the gap also carries
     # the line break after a folded body); otherwise it is `not_selected`.
+    # A visibility-hidden declaration is attributed first (REQ-PUBVIEW-006):
+    # nothing is hidden without a row naming its class and the reveal level.
     var rows: [JsonValue] = []
     for span in view.projection.omitted:
         var reason = "not_selected"
         var node_name = ""
         var reopen: [(text, JsonValue)] = [("mode", JsonValue.Str("raw")), ("start_byte", JsonValue.Int(span.start_byte)),
             ("max_bytes", JsonValue.Int(span.end_byte - span.start_byte))]
+        # One adjacent gap may cover several hidden declarations: one row each.
+        var hidden_rows = 0
+        for node in hidden:
+            if node.span.start_byte < span.end_byte and node.span.end_byte > span.start_byte:
+                hidden_rows = hidden_rows + 1
+                rows.push(json_value_object_from([
+                    ("range", source_range_json_v1(node.span)), ("reason", JsonValue.Str("visibility_hidden")),
+                    ("node_name", JsonValue.Str(node.name)), ("visibility_class", JsonValue.Str(node.visibility_class)),
+                    ("reopen", json_value_object_from([("visibility", JsonValue.Str(node.visibility_class)),
+                        ("mode", JsonValue.Str("focused")), ("target", JsonValue.Str(node.name))]))]))
+        if hidden_rows > 0: continue
         for fold in view.folds:
             for range in fold.ranges:
                 if range.start_byte < span.end_byte and range.end_byte > span.start_byte and reason == "not_selected":
@@ -263,7 +315,8 @@ fn source_intent_json_v1(resolution: SourceIntentResolutionV1) -> JsonValue:
 fn source_structure_payload_v1(path: text, snapshot: SourceSnapshotV1,
         outline: SourceOutlineV1, view: SourceStructuredViewV1,
         query_key: text, result_identity: text, numbers: bool,
-        intent: SourceIntentResolutionV1, help: text) -> text:
+        intent: SourceIntentResolutionV1, help: text,
+        hidden: [SourceHiddenNodeV1], summary: SourceHiddenSummaryV1, has_boundary: bool) -> text:
     val bytes = text_to_utf8_bytes(view.projection.source_text)
     val original = text_to_utf8_bytes(snapshot.source)
     var segments: [JsonValue] = []
@@ -302,6 +355,9 @@ fn source_structure_payload_v1(path: text, snapshot: SourceSnapshotV1,
     for fold in view.folds:
         for span in fold.ranges: hidden_issues = hidden_issues + source_issues_within_v1(outline, span)
     rendered.push("| syntax_issues:" + str(outline.total_issues) + " hidden:" + str(hidden_issues) + " (semantics not evaluated)")
+    # The in-band visibility hint: what the public view hides and the exact
+    # argument that reveals it (REQ-PUBVIEW-004).
+    if summary.hidden > 0: rendered.push("| " + source_hidden_hint_v1(summary, "source_open"))
     rendered.push("| [ess] [adv]")
     var folds: [JsonValue] = []
     for fold in view.folds:
@@ -339,7 +395,10 @@ fn source_structure_payload_v1(path: text, snapshot: SourceSnapshotV1,
         ("partial_context", JsonValue.Bool(partial)),
         ("segments", JsonValue.Array(segments)), ("folds", JsonValue.Array(folds)),
         ("omitted_ranges", JsonValue.Array(omitted)),
-        ("omission_ledger", source_omission_ledger_v1(outline, view, next_cursor)),
+        ("omission_ledger", source_omission_ledger_v1(outline, view, next_cursor, hidden)),
+        ("visibility", JsonValue.Str(summary.visibility)),
+        ("visibility_default", JsonValue.Str(visibility_default_reason(has_boundary))),
+        ("hidden_summary", source_hidden_summary_json_v1(summary, "source_open")),
         ("selection_coverage", json_value_object_from([
             ("selected_bytes", JsonValue.Int(bytes.len())), ("source_bytes", JsonValue.Int(original.len())),
             ("analysis", JsonValue.Str("syntax_only"))])),
@@ -401,9 +460,20 @@ fn source_open_context_v1(body: text, numbers: bool, workspace_root: text) -> So
     if mode != "raw":
         if not path.ends_with(".spl"):
             return source_result_error_v1("unsupported", "native_structure_provider_unavailable_for_language; explicit raw mode remains available")
-        val outline = match source_load_native_outline_v1(snapshot):
+        val full_outline = match source_load_native_outline_v1(snapshot):
             Ok(value): value
             Err(reason): return source_result_error_v1("error", reason)
+        # Public view: default `public` inside an __init__.spl boundary, `all`
+        # for an open module; hidden top-level nodes leave the outline and
+        # get an omission-ledger row each (REQ-PUBVIEW-001/006).
+        val has_boundary = nearest_boundary_dir(file) != ""
+        val level = match visibility_level_or_error(json_value_text_or(json_value_field(arguments, "visibility"), ""), has_boundary):
+            Ok(value): value
+            Err(reason): return source_result_error_v1("unsupported", reason)
+        val symbols = source_visible_symbols_v1(full_outline, file)
+        val (hidden_indices, hidden_nodes) = source_hidden_nodes_v1(full_outline, symbols, level)
+        val summary = source_hidden_summary_v1(symbols, level, "", "")
+        val outline = source_outline_without_nodes_v1(full_outline, hidden_indices)
         val depth = match source_integer_argument_v1(arguments, "depth", 1):
             Ok(value): value
             Err(reason): return source_result_error_v1("error", reason)
@@ -413,6 +483,9 @@ fn source_open_context_v1(body: text, numbers: bool, workspace_root: text) -> So
             Ok(value): value
             Err(reason): return source_result_error_v1("error", reason)
         var target = json_value_text_or(json_value_field(arguments, "target"), "")
+        for node in hidden_nodes:
+            if target != "" and (node.name == target or node.name.ends_with("." + target)):
+                return source_result_error_v1("unsupported", "target_hidden_by_visibility; reopen with visibility=\"" + node.visibility_class + "\"")
         var intent = SourceIntentResolutionV1("", -1, "", "", [])
         if intent_text != "":
             if target != "": return source_result_error_v1("error", "intent_and_target_are_exclusive")
@@ -425,7 +498,7 @@ fn source_open_context_v1(body: text, numbers: bool, workspace_root: text) -> So
         val result_identity = source_outline_result_identity_v1(outline)
         val query_key = sha256_text(json_value_serialize(JsonValue.Array([
             JsonValue.Str(snapshot_id), JsonValue.Str(mode), JsonValue.Str(target),
-            JsonValue.Str(result_identity),
+            JsonValue.Str(result_identity), JsonValue.Str(level),
             JsonValue.Int(depth), JsonValue.Int(max_nodes), JsonValue.Int(max_bytes)])))
         val cursor = json_value_text_or(json_value_field(arguments, "cursor"), "")
         val start_index = match source_structure_cursor_v1(cursor, query_key, expected):
@@ -434,7 +507,7 @@ fn source_open_context_v1(body: text, numbers: bool, workspace_root: text) -> So
         val view = match source_project_structure_v1(snapshot, outline, mode, target, depth, start_index, max_nodes, max_bytes):
             Ok(value): value
             Err(reason): return source_result_error_v1("error", reason)
-        return source_bounded_payload_v1(source_structure_payload_v1(path, snapshot, outline, view, query_key, result_identity, numbers, intent, help))
+        return source_bounded_payload_v1(source_structure_payload_v1(path, snapshot, outline, view, query_key, result_identity, numbers, intent, help, hidden_nodes, summary, has_boundary))
     val projection = match source_project_raw_v1(snapshot, start_byte, max_bytes):
         Ok(value): value
         Err(reason): return source_result_error_v1("error", reason)
