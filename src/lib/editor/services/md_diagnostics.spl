@@ -9,6 +9,241 @@
 
 use std.common.markdown.{markdown_slugify}
 use std.editor.services.diagnostics.{EditorDiagnostic}
+use std.editor.services.md_wiki_index.{MdWikiDocument, md_wiki_parse_link_target, md_wiki_target_exists}
+
+# Typed Markdown diagnostic: an MD1xxx code on an exact byte span, with an
+# optional safe fix (`has_fix` + `fix_text` replaces exactly [col, end_col)).
+# Codes (plan 2026-11-12 unified diagnostics): MD1001 broken local link,
+# MD1002 unknown anchor, MD1003 unresolved wiki-link/embed, MD1004 duplicate
+# heading, MD1005 unclosed fence, MD1006 invalid frontmatter property,
+# MD1101 missing image alt, MD1102 orphan document, MD1103 inconsistent
+# heading/list structure, MD1104 unsafe/escaping path.
+pub struct MdDiagnostic:
+    code: text
+    path: text
+    line: i64
+    col: i64
+    end_line: i64
+    end_col: i64
+    severity: text
+    message: text
+    source: text
+    has_fix: bool
+    fix_text: text
+
+# Cross-file facts the caller already owns. `graph_complete` false means the
+# workspace index is still being built: graph-derived codes (MD1003, MD1102)
+# are withheld and the batch status is `partial_recovery`, never a false orphan.
+pub struct MdLinkContext:
+    existing_files: [text]
+    wiki_documents: [MdWikiDocument]
+    graph_complete: bool
+    has_inbound: bool
+
+# Batch result; `status` follows the shared vocabulary (complete,
+# partial_recovery, stale, cancelled, unsupported, internal_error).
+pub struct MdDiagnosticBatch:
+    path: text
+    version: i64
+    status: text
+    diagnostics: [MdDiagnostic]
+
+pub fn md_diagnostic_to_editor(d: MdDiagnostic) -> EditorDiagnostic:
+    EditorDiagnostic(path: d.path, line: d.line, col: d.col, end_line: d.end_line,
+                     end_col: d.end_col, severity: d.severity, message: d.message, source: d.source)
+
+fn _md_typed(ds: [EditorDiagnostic], code: text, has_fix: bool, fix_text: text) -> [MdDiagnostic]:
+    var out: [MdDiagnostic] = []
+    for d in ds:
+        out.push(MdDiagnostic(code: code, path: d.path, line: d.line, col: d.col, end_line: d.end_line,
+                              end_col: d.end_col, severity: d.severity, message: d.message,
+                              source: d.source, has_fix: has_fix, fix_text: fix_text))
+    out
+
+fn _md_push_all(dst: [MdDiagnostic], src: [MdDiagnostic]) -> [MdDiagnostic]:
+    var out = dst
+    for d in src:
+        out.push(d)
+    out
+
+# Document-local typed checks (no cross-file knowledge needed).
+pub fn md_diagnose_typed(content: text, path: text) -> [MdDiagnostic]:
+    var out: [MdDiagnostic] = []
+    out = _md_push_all(out, _md_typed(md_check_broken_heading_links(content, path), "MD1002", false, ""))
+    out = _md_push_all(out, _md_typed(md_check_duplicate_headings(content, path), "MD1004", false, ""))
+    out = _md_push_all(out, _md_typed(md_check_empty_headings(content, path), "MD1004", false, ""))
+    out = _md_push_all(out, _md_typed(md_check_unclosed_code_fences(content, path), "MD1005", false, ""))
+    out = _md_push_all(out, _md_typed(md_check_frontmatter_property_schema(content, path, []), "MD1006", false, ""))
+    out = _md_push_all(out, _md_typed(md_check_missing_alt_text(content, path), "MD1101", false, ""))
+    out = _md_push_all(out, _md_typed(md_check_heading_level_skip(content, path), "MD1103", false, ""))
+    out = _md_push_all(out, _md_check_list_marker_typed(content, path))
+    # Trailing single space: the safe fix deletes exactly that byte. Two or
+    # more trailing spaces are a hard line break and are never reported.
+    out = _md_push_all(out, _md_typed(md_check_trailing_whitespace(content, path), "MD1103", true, ""))
+    out
+
+# Full batch: local checks plus link/graph checks against the supplied context.
+pub fn md_diagnose_batch(content: text, path: text, version: i64, ctx: MdLinkContext) -> MdDiagnosticBatch:
+    var out = md_diagnose_typed(content, path)
+    out = _md_push_all(out, _md_check_local_links_typed(content, path, ctx.existing_files))
+    var status = "partial_recovery"
+    if ctx.graph_complete:
+        status = "complete"
+        out = _md_push_all(out, _md_check_wiki_links_typed(content, path, ctx.wiki_documents))
+        if not ctx.has_inbound:
+            val lines = content.split("\n")
+            val first_len = if lines.len() > 0 then lines[0].len() else: 0
+            out.push(MdDiagnostic(code: "MD1102", path: path, line: 0, col: 0, end_line: 0, end_col: first_len,
+                                  severity: "info", message: "Orphan document: no other document links here",
+                                  source: "markdown", has_fix: false, fix_text: ""))
+    MdDiagnosticBatch(path: path, version: version, status: status, diagnostics: out)
+
+# MD1103 for a mixed list marker, with the safe fix: replace the one marker
+# byte with the marker the list started with.
+fn _md_check_list_marker_typed(content: text, path: text) -> [MdDiagnostic]:
+    var results: [MdDiagnostic] = []
+    if content.len() == 0:
+        return results
+    val lines = content.split("\n")
+    var in_fence = false
+    var list_marker = ""
+    var i = 0
+    while i < lines.len():
+        val line = lines[i]
+        val trimmed = line.trim()
+        if trimmed.starts_with("```"):
+            in_fence = not in_fence
+            list_marker = ""
+            i = i + 1
+            continue
+        if not in_fence:
+            val marker = _md_diag_list_marker(trimmed)
+            if marker != "":
+                if list_marker == "":
+                    list_marker = marker
+                elif list_marker != marker:
+                    val mcol = _md_diag_indent_width(line)
+                    results.push(MdDiagnostic(code: "MD1103", path: path, line: i, col: mcol, end_line: i, end_col: mcol + 1,
+                                              severity: "hint",
+                                              message: "Inconsistent list marker: \"" + marker + "\" mixed with \"" + list_marker + "\"",
+                                              source: "markdown", has_fix: true, fix_text: list_marker))
+            elif trimmed.len() == 0:
+                list_marker = ""
+        i = i + 1
+    results
+
+# MD1001 (target missing) / MD1104 (target escapes the workspace root) for
+# [text](relative/path) links, resolved relative to the document's directory.
+fn _md_check_local_links_typed(content: text, path: text, existing_files: [text]) -> [MdDiagnostic]:
+    var results: [MdDiagnostic] = []
+    if content.len() == 0:
+        return results
+    val lines = content.split("\n")
+    for item in _md_diag_find_links_with_positions(content):
+        val url = item.url
+        val is_external = url.starts_with("http://") or url.starts_with("https://") or url.starts_with("#") or url.starts_with("mailto:") or url.len() == 0
+        if is_external:
+            continue
+        val local_path = _md_diag_strip_fragment(url)
+        var end_col = item.end_col
+        if item.line < lines.len() and end_col > lines[item.line].len():
+            end_col = lines[item.line].len()
+        val resolved = _md_diag_resolve_relative(path, local_path)
+        if resolved == "":
+            results.push(MdDiagnostic(code: "MD1104", path: path, line: item.line, col: item.col, end_line: item.line, end_col: end_col,
+                                      severity: "error", message: "Link target escapes the workspace root: \"" + local_path + "\"",
+                                      source: "markdown", has_fix: false, fix_text: ""))
+            continue
+        var found = false
+        for f in existing_files:
+            if f == resolved or f == local_path:
+                found = true
+                break
+        if not found:
+            results.push(MdDiagnostic(code: "MD1001", path: path, line: item.line, col: item.col, end_line: item.line, end_col: end_col,
+                                      severity: "warning", message: "Local link target not found: \"" + local_path + "\"",
+                                      source: "markdown", has_fix: false, fix_text: ""))
+    results
+
+# MD1003 for [[target]] and ![[target]] whose target is not in the supplied
+# document set. Fenced text is skipped.
+fn _md_check_wiki_links_typed(content: text, path: text, documents: [MdWikiDocument]) -> [MdDiagnostic]:
+    var results: [MdDiagnostic] = []
+    val lines = content.split("\n")
+    var in_fence = false
+    var line_idx = 0
+    while line_idx < lines.len():
+        val line = lines[line_idx]
+        if line.trim().starts_with("```"):
+            in_fence = not in_fence
+            line_idx = line_idx + 1
+            continue
+        if not in_fence:
+            var col = 0
+            while col + 1 < line.len():
+                if line.slice(col, col + 2) == "[[":
+                    val close = _md_diag_find_text(line, "]]", col + 2)
+                    if close < 0:
+                        break
+                    val is_embed = col > 0 and line[col - 1:col] == "!"
+                    val start_col = if is_embed then col - 1 else: col
+                    val parsed = md_wiki_parse_link_target(line.slice(col + 2, close))
+                    if parsed.0.len() > 0 and not md_wiki_target_exists(documents, parsed.0):
+                        val kind = if is_embed then "embed" else: "wiki link"
+                        results.push(MdDiagnostic(code: "MD1003", path: path, line: line_idx, col: start_col, end_line: line_idx, end_col: close + 2,
+                                                  severity: "warning", message: "Unresolved " + kind + ": \"" + parsed.0 + "\"",
+                                                  source: "markdown", has_fix: false, fix_text: ""))
+                    col = close + 2
+                else:
+                    col = col + 1
+        line_idx = line_idx + 1
+    results
+
+# Resolve `target` relative to the directory of `doc_path`, normalising "."
+# and "..". Returns "" when the target is absolute or climbs above the root.
+fn _md_diag_resolve_relative(doc_path: text, target: text) -> text:
+    if target.starts_with("/") or target.starts_with("\\"):
+        return ""
+    if target.len() >= 2 and target[1:2] == ":":
+        return ""
+    var segs: [text] = []
+    val slash = _md_diag_last_char(doc_path, "/")
+    if slash >= 0:
+        for s in doc_path.slice(0, slash).split("/"):
+            if s.len() > 0:
+                segs.push(s)
+    for s in target.split("/"):
+        if s == "" or s == ".":
+            continue
+        if s == "..":
+            if segs.len() == 0:
+                return ""
+            segs.pop()
+        else:
+            segs.push(s)
+    segs.join("/")
+
+fn _md_diag_last_char(haystack: text, needle: text) -> i64:
+    var i = haystack.len() - 1
+    while i >= 0:
+        if haystack[i:i + 1] == needle:
+            return i
+        i = i - 1
+    -1
+
+fn _md_diag_find_text(haystack: text, needle: text, start: i64) -> i64:
+    var i = start
+    while i + needle.len() <= haystack.len():
+        if haystack.slice(i, i + needle.len()) == needle:
+            return i
+        i = i + 1
+    -1
+
+fn _md_diag_indent_width(line: text) -> i64:
+    var i = 0
+    while i < line.len() and (line[i:i + 1] == " " or line[i:i + 1] == "\t"):
+        i = i + 1
+    i
 
 struct MdPropertySchemaRule:
     key: text
@@ -21,6 +256,7 @@ struct MdPropertySchemaRule:
 struct MdDiagLinkRef:
     line: i64
     col: i64
+    end_col: i64
     label: text
     url: text
 
@@ -181,10 +417,14 @@ fn md_check_duplicate_headings(content: text, path: text) -> [EditorDiagnostic]:
         var k = 0
         while k < j:
             if heading_levels[k] == cur_lvl and heading_texts[k] == cur_text:
+                # Exact token: the heading text after "#... ", not the marker.
+                var text_col = cur_lvl + 1
+                if text_col > lines[cur_line].len():
+                    text_col = lines[cur_line].len()
                 val d = EditorDiagnostic(
                     path: path,
                     line: cur_line,
-                    col: 0,
+                    col: text_col,
                     end_line: cur_line,
                     end_col: lines[cur_line].len(),
                     severity: "warning",
@@ -242,8 +482,8 @@ fn md_check_broken_heading_links(content: text, path: text) -> [EditorDiagnostic
                     break
                 k = k + 1
             if not found:
-                # Clamp end_col to actual line length to prevent out-of-range positions.
-                var end_col = link_col + link_url.len() + 2
+                # Exact token span: the parser records the byte after ")".
+                var end_col = item.end_col
                 if link_line < lines.len():
                     var line_len = lines[link_line].len()
                     if end_col > line_len:
@@ -358,8 +598,8 @@ fn md_check_missing_alt_text(content: text, path: text) -> [EditorDiagnostic]:
         var alt_text = item.label
         var alt_len = alt_text.trim().len()
         if alt_len == 0:
-            # Compute end_col inline — avoid hoisted array in for-loop scope
-            var end_col = diag_col + 4
+            # Exact token span: the parser records the byte after ")".
+            var end_col = item.end_col
             val img_lines = content.split("\n")
             var img_line_count = img_lines.len()
             if diag_line < img_line_count:
@@ -513,7 +753,7 @@ fn md_validate_local_links(content: text, path: text, existing_files: [text]) ->
                     break
                 k = k + 1
             if not found:
-                var link_end_col = link_col + link_url.len() + 2
+                var link_end_col = item.end_col
                 if link_line < lines.len():
                     val llen = lines[link_line].len()
                     if link_end_col > llen:
@@ -599,7 +839,7 @@ fn _md_diag_find_links_with_positions(content: text) -> [MdDiagLinkRef]:
                             url = url + line[after_bracket + 1:k]
                             # Strip optional title from url
                             val url_clean = _md_diag_strip_url_title(url)
-                            val entry = MdDiagLinkRef(line: line_idx, col: link_start_col, label: display, url: url_clean)
+                            val entry = MdDiagLinkRef(line: line_idx, col: link_start_col, end_col: k + 1, label: display, url: url_clean)
                             results.push(entry)
                             col = k + 1
                             continue
@@ -658,7 +898,7 @@ fn _md_diag_find_images_with_positions(content: text) -> [MdDiagLinkRef]:
                             while ui < url.len() and url[ui:ui + 1] != " ":
                                 ui = ui + 1
                             url_clean = url.slice(0, ui).trim()
-                            val img_entry = MdDiagLinkRef(line: line_idx, col: img_start_col, label: alt, url: url_clean)
+                            val img_entry = MdDiagLinkRef(line: line_idx, col: img_start_col, end_col: k + 1, label: alt, url: url_clean)
                             results.push(img_entry)
                             col = k + 1
                             continue

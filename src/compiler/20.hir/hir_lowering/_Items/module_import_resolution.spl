@@ -44,6 +44,76 @@ use compiler.frontend.core.types.{is_dict_tag, dict_tag_to_id, dict_type_get_key
 use compiler.frontend.core.types.{primitive_integer_bit_width_from_name, custom_primitive_integer_bit_width_by_name}
 use compiler.core.{int_to_str}
 use std.nogc_sync_mut.io.process_ops.{eprint}
+use std.nogc_sync_mut.io_runtime.{file_exists, dir_exists, file_read_nullable}
+
+# Process-wide cache of scripts/check/private_import_baseline.txt (~20k
+# `rel|name` rows), keyed by the repository root it was read from. One
+# HirLowering exists per module, so the cache lives at module level (same
+# pattern as hir_phase_profile.spl). Scalar hash-chain table, never a Dict:
+# contains_key on a Dict mis-reports under Stage-2 native codegen (BOOT-20).
+var _priv_import_baseline_root: text = ""
+var _priv_import_baseline_keys: [text] = []
+var _priv_import_baseline_buckets: [i64] = []
+var _priv_import_baseline_next: [i64] = []
+val PRIV_IMPORT_BASELINE_REL = "scripts/check/private_import_baseline.txt"
+val PRIV_IMPORT_BASELINE_MASK: i64 = 32767
+
+fn private_import_dir_of(path: text) -> text:
+    val parts = path.split("/")
+    parts[0:parts.len() - 1].join("/")
+
+fn private_import_repo_root(module_path: text) -> text:
+    """First ancestor directory of `module_path` holding a `.git` entry (a
+    directory, or the file a worktree carries), or "" when there is none."""
+    var dir = private_import_dir_of(module_path)
+    while dir != "":
+        val marker = dir + "/.git"
+        if file_exists(marker) or dir_exists(marker):
+            return dir
+        if not dir.contains("/"):
+            return ""
+        dir = private_import_dir_of(dir)
+    ""
+
+fn private_import_baseline_load(root: text):
+    if _priv_import_baseline_root == root:
+        return
+    _priv_import_baseline_root = root
+    _priv_import_baseline_keys = []
+    _priv_import_baseline_next = []
+    var buckets: [i64] = []
+    var fill = 0
+    while fill <= PRIV_IMPORT_BASELINE_MASK:
+        buckets = buckets.push(-1)
+        fill = fill + 1
+    _priv_import_baseline_buckets = buckets
+    val content = file_read_nullable(root + "/" + PRIV_IMPORT_BASELINE_REL) ?? ""
+    for raw_line in content.split("\n"):
+        val line = raw_line.trim()
+        if line == "":
+            continue
+        val bucket = hash_text(line) & PRIV_IMPORT_BASELINE_MASK
+        _priv_import_baseline_next = _priv_import_baseline_next.push(_priv_import_baseline_buckets[bucket])
+        _priv_import_baseline_buckets[bucket] = _priv_import_baseline_keys.len()
+        _priv_import_baseline_keys = _priv_import_baseline_keys.push(line)
+
+fn private_import_is_baselined(module_path: text, name: text) -> bool:
+    """`rel|name` is frozen in the baseline at the repository root that
+    contains `module_path`. Only that root's baseline counts; a module outside
+    any repository (a scratch fixture) has none, so every pair is new."""
+    val root = private_import_repo_root(module_path)
+    if root == "":
+        return false
+    private_import_baseline_load(root)
+    if _priv_import_baseline_keys.len() == 0:
+        return false
+    val key = module_path.substring(root.len() + 1) + "|" + name
+    var index = _priv_import_baseline_buckets[hash_text(key) & PRIV_IMPORT_BASELINE_MASK]
+    while index >= 0:
+        if _priv_import_baseline_keys[index] == key:
+            return true
+        index = _priv_import_baseline_next[index]
+    false
 
 impl HirLowering:
     me qualify_imported_function_symbol(sym_id: SymbolId, imported_mod_name: text, imported_name: text):
@@ -583,11 +653,21 @@ impl HirLowering:
                         if module_alias != "" and not self.import_binding_or_invalid(module_alias).is_valid():
                             self.symbols.define(module_alias, SymbolKind.Module, nil, imp.span, Visibility.Private, false, Some(imported_surface.module_name))
                 else:
+                    # A dotted single `use m.name as alias` reaches this branch as
+                    # one aliased item whose source spells the whole path; the
+                    # seed's import-time visibility check fires on braced groups
+                    # only (`requested_group_import_names`), so mirror that.
+                    val braced_group = not (imp.items.len() == 1 and
+                        imp.items[0].has_alias and imp.items[0].name == imp.module)
                     var item_idx = item_start
                     while item_idx < item_end:
                         val item_name = item_names[item_idx]
                         val local_name = imported_symbol_local_name(
                             item_name, item_has_alias[item_idx], item_aliases[item_idx])
+                        if braced_group and self.private_fn_import_denied(
+                                imported_surface, imp.module, item_name, importer_source_path, imp.span):
+                            item_idx = item_idx + 1
+                            continue
                         # An explicit named import is a declaration about its
                         # target surface.  Do not use the local symbol table
                         # as the oracle here: an unrelated local declaration
@@ -646,6 +726,53 @@ impl HirLowering:
                 if imp.items.len() > 0:
                     self.error("missing module surface for {imp.module}", imp.span)
             import_idx = import_idx + 1
+
+    me private_fn_import_denied(imported: ModuleSurface, module_label: text, name: text, importer_path: text, span: Span) -> bool:
+        """interp_private_names_selfhost_check_2026-11-09: mirror of the seed
+        interpreter's import-time `check_private_use_names`
+        (src/compiler_rust/.../interpreter_module/module_loader.rs). A braced
+        `use m.{name}` that names a bare (non-pub) top-level `fn` of `m` from a
+        file in a DIFFERENT directory is a visibility violation. A `rel|name`
+        pair frozen in scripts/check/private_import_baseline.txt at the
+        repository root is the seed's `[visibility-warning]` (legacy, ratchets
+        down). Same-directory siblings are the documented compatibility
+        exception; an importer with no directory (logical name, no registered
+        surface) is skipped like the seed's `current_file: None`; a module with
+        any plain `export` list or glob re-export is opaque to the seed
+        (`module_surface_is_opaque`) and skipped here too.
+
+        STAGED like W-HIR-UNDECL-IMPORT-001 (same reason: census non-zero).
+        A non-baselined pair is a recorded warning [W-HIR-PRIVATE-IMPORT-001]
+        by default and a hard error [E-HIR-PRIVATE-IMPORT-001] under
+        SIMPLE_STRICT_PRIVATE_IMPORTS=1. Textual census over the Stage 2
+        (bootstrap_main) and full-CLI (main.spl) closures found 49 distinct
+        non-baselined pairs the seed never reached (listed in the bug doc);
+        a hard default would stop Stage 2 on the first of them.
+        Returns true only when the import was rejected (nothing registered)."""
+        if not importer_path.contains("/"):
+            return false
+        if private_import_dir_of(importer_path) == private_import_dir_of(imported.canonical_path):
+            return false
+        if imported.exports.len() > 0:
+            return false
+        for is_glob in imported.export_route_is_glob:
+            if is_glob:
+                return false
+        val pos = module_surface_name_position(imported.callable_names, name)
+        if pos < 0 or pos >= imported.callable_values.len():
+            return false
+        val callable: ModuleSurfaceCallable = imported.callable_values[pos]
+        if callable.visibility != Visibility.Private or callable.is_method or callable.is_extern:
+            return false
+        if private_import_is_baselined(imported.canonical_path, name):
+            self.warning("[visibility-warning] '{name}' is a private fn of module '{module_label}' ({imported.canonical_path}); mark it `pub` or `export` it (imported from {importer_path})", span)
+            return false
+        val message = "private fn `{name}` of module `{module_label}` ({imported.canonical_path}) is not visible to {importer_path}; mark it `pub` or `export` it"
+        if (hir_module_env_get("SIMPLE_STRICT_PRIVATE_IMPORTS") ?? "") == "1":
+            self.error("[E-HIR-PRIVATE-IMPORT-001] " + message, span)
+            return true
+        self.warning("[W-HIR-PRIVATE-IMPORT-001] " + message, span)
+        false
 
     me resolve_package_sibling_symbols(module: ParserModule):
         """Directory-package semantics: files in one source directory share a

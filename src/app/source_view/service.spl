@@ -8,9 +8,17 @@ use std.common.text_bytes.{text_to_utf8_bytes, bytes_to_text, utf8_bytes_valid}
 use std.common.crypto.sha256.{sha256_text}
 use std.common.string_core.{str_len}
 use std.common.source.contracts.{SourceSnapshotV1, SourceRangeV1, SourceProjectionV1,
-    SourceOutlineV1, SourceStructuredViewV1}
+    SourceOutlineV1, SourceStructuredViewV1, SourceIntentResolutionV1}
 use std.nogc_sync_mut.source.projection.{source_project_raw_v1}
-use std.nogc_sync_mut.source.structure.{source_project_structure_v1, source_view_node_expanded_v1}
+# Module-level on purpose: a function-local `use` loads only the named function
+# and leaves the TreeSitter impl blocks unloaded (method parse_outline /
+# parse_top_level_item not found on every structural source_open).
+use compiler.tools.source_outline_v1.{source_native_outline_v1}
+use std.nogc_sync_mut.source.structure.{source_project_structure_v1, source_view_node_expanded_v1,
+    source_outline_intent_v1}
+
+# Compact help is returned only on demand (`help: "ess"`), never pushed.
+val SOURCE_ESSENTIAL_HELP_V1 = "Essential: open <symbol> (target=) | intent=<text> | raw | outline\nFold: outline closes all bodies; focused/intent opens one block\nMore: cursor+snapshot_id page; max_bytes/max_nodes bound every view"
 use std.common.json.value.{JsonValue, json_parse_value_strict, json_value_field,
     json_value_text_or, json_value_items, json_value_object_from,
     json_value_serialize}
@@ -99,8 +107,6 @@ fn source_bounded_payload_v1(payload: text) -> SourceOpenResultV1:
     SourceOpenResultV1(payload, false)
 
 fn source_load_native_outline_v1(snapshot: SourceSnapshotV1) -> Result<SourceOutlineV1, text>:
-    # Keep native syntax dependencies off raw reads and initialize/tools/list.
-    use compiler.tools.source_outline_v1.{source_native_outline_v1}
     source_native_outline_v1(snapshot)
 
 pub fn source_outline_result_identity_v1(outline: SourceOutlineV1) -> text:
@@ -145,12 +151,50 @@ fn source_display_lines_v1(source: text, first_line: i64, numbers: bool) -> text
         index = index + 1
     parts.join("")
 
+fn source_fold_marker_v1(outline: SourceOutlineV1, view: SourceStructuredViewV1, node_index: i64) -> text:
+    # Synthetic row text after the `|` boundary for a folded node; "" when open.
+    var folded = false
+    for fold in view.folds:
+        if fold.node_index == node_index: folded = true
+    if not folded: return ""
+    var members = 0
+    for node in outline.nodes:
+        if node.parent_index == node_index: members = members + 1
+    if members > 0: return "| + " + str(members) + " members"
+    "| + body"
+
+fn source_rendered_append_v1(rendered: [text], source: text, marker: text) -> [text]:
+    # Decorations live only after the complete source line; never inside it.
+    var rows = rendered
+    val lines = source.split("\n")
+    var index = 0
+    while index < lines.len():
+        if index + 1 == lines.len() and lines[index] == "": break
+        val last = index + 1 == lines.len() or (index + 2 == lines.len() and lines[index + 1] == "")
+        if last and marker != "": rows.push(lines[index] + "  " + marker)
+        else: rows.push(lines[index])
+        index = index + 1
+    rows
+
+fn source_intent_json_v1(resolution: SourceIntentResolutionV1) -> JsonValue:
+    var candidates: [JsonValue] = []
+    for candidate in resolution.candidates: candidates.push(JsonValue.Str(candidate))
+    json_value_object_from([
+        ("status", JsonValue.Str(resolution.status)),
+        ("target", JsonValue.Str(resolution.target)),
+        ("reason", JsonValue.Str(resolution.reason)),
+        ("candidates", JsonValue.Array(candidates))])
+
 fn source_structure_payload_v1(path: text, snapshot: SourceSnapshotV1,
         outline: SourceOutlineV1, view: SourceStructuredViewV1,
-        query_key: text, result_identity: text, numbers: bool) -> text:
+        query_key: text, result_identity: text, numbers: bool,
+        intent: SourceIntentResolutionV1, help: text) -> text:
     val bytes = text_to_utf8_bytes(view.projection.source_text)
     val original = text_to_utf8_bytes(snapshot.source)
     var segments: [JsonValue] = []
+    var rendered: [text] = []
+    for fold in view.folds:
+        if fold.node_index < 0: rendered.push("| + " + fold.label + " (" + str(fold.ranges.len()) + ")")
     var position = 0
     var original_position = 0
     var line = 1
@@ -175,7 +219,9 @@ fn source_structure_payload_v1(path: text, snapshot: SourceSnapshotV1,
             ("first_line", JsonValue.Int(line)), ("source_text", JsonValue.Str(source)),
             ("display_text", JsonValue.Str(source_display_lines_v1(source, line, numbers))),
             ("expanded", JsonValue.Bool(source_view_node_expanded_v1(outline, view, node_index)))]))
+        rendered = source_rendered_append_v1(rendered, source, source_fold_marker_v1(outline, view, node_index))
         index = index + 1
+    rendered.push("| [ess] [adv]")
     var folds: [JsonValue] = []
     for fold in view.folds:
         var ranges: [JsonValue] = []
@@ -196,7 +242,11 @@ fn source_structure_payload_v1(path: text, snapshot: SourceSnapshotV1,
     limitations.push(JsonValue.Str("relevant_import_semantics_not_evaluated"))
     limitations.push(JsonValue.Str("provider_build_provenance_unavailable; outline_result_identity_bound"))
     val next_cursor = if view.next_index >= 0: query_key + ":" + str(view.next_index) else: ""
-    val result = json_value_object_from([
+    val intent_requested = intent.status != ""
+    # An intent that did not resolve to one block leaves the view partial by definition.
+    val partial = view.projection.completeness != "complete" or outline.syntax_status != "parsed" or
+        (intent_requested and intent.status != "resolved")
+    var fields: [(text, JsonValue)] = [
         ("schema_version", JsonValue.Int(1)), ("status", JsonValue.Str("ok")),
         ("mode", JsonValue.Str(view.mode)), ("path", JsonValue.Str(path)),
         ("snapshot_id", JsonValue.Str(snapshot.snapshot_id)),
@@ -205,23 +255,33 @@ fn source_structure_payload_v1(path: text, snapshot: SourceSnapshotV1,
         ("outline_result_id", JsonValue.Str(result_identity)),
         ("syntax_status", JsonValue.Str(outline.syntax_status)),
         ("completeness", JsonValue.Str(view.projection.completeness)),
-        ("partial_context", JsonValue.Bool(view.projection.completeness != "complete" or outline.syntax_status != "parsed")),
+        ("partial_context", JsonValue.Bool(partial)),
         ("segments", JsonValue.Array(segments)), ("folds", JsonValue.Array(folds)),
         ("omitted_ranges", JsonValue.Array(omitted)), ("diagnostics", JsonValue.Array(issues)),
         ("total_diagnostics", JsonValue.Int(outline.total_issues)),
         ("next_cursor", JsonValue.Str(next_cursor)),
+        ("rendered", JsonValue.Str(rendered.join("\n"))),
         ("limitations", JsonValue.Array(limitations)),
-        ("footer", JsonValue.Str("[ess] [adv]"))])
-    source_safe_json_v1(json_value_serialize(result))
+        ("footer", JsonValue.Str("[ess] [adv]"))]
+    if intent_requested: fields.push(("intent_resolution", source_intent_json_v1(intent)))
+    if help == "ess": fields.push(("essential_help", JsonValue.Str(SOURCE_ESSENTIAL_HELP_V1)))
+    source_safe_json_v1(json_value_serialize(json_value_object_from(fields)))
 
 fn source_open_context_v1(body: text, numbers: bool, workspace_root: text) -> SourceOpenResultV1:
     if str_len(body) > 4096: return source_result_error_v1("error", "request_too_large")
     val arguments = match json_parse_value_strict(body):
         Ok(value): value
         Err(_): return source_result_error_v1("error", "invalid_json_arguments")
-    val mode = json_value_text_or(json_value_field(arguments, "mode"), "outline")
+    var mode = json_value_text_or(json_value_field(arguments, "mode"), "outline")
     if mode != "raw" and mode != "outline" and mode != "focused":
         return source_result_error_v1("unsupported", "unsupported_source_mode")
+    val help = json_value_text_or(json_value_field(arguments, "help"), "")
+    if help != "" and help != "ess":
+        return source_result_error_v1("unsupported", "unsupported_help_topic; only ess is available")
+    val intent_text = json_value_text_or(json_value_field(arguments, "intent"), "")
+    if str_len(intent_text) > 512: return source_result_error_v1("error", "intent_too_long")
+    if intent_text != "" and mode == "raw":
+        return source_result_error_v1("unsupported", "intent_requires_structured_mode")
     val path = json_value_text_or(json_value_field(arguments, "path"), "")
     val file = match source_workspace_file_v1(path, workspace_root):
         Ok(value): value
@@ -260,7 +320,14 @@ fn source_open_context_v1(body: text, numbers: bool, workspace_root: text) -> So
         val max_nodes = match source_integer_argument_v1(arguments, "max_nodes", 32):
             Ok(value): value
             Err(reason): return source_result_error_v1("error", reason)
-        val target = json_value_text_or(json_value_field(arguments, "target"), "")
+        var target = json_value_text_or(json_value_field(arguments, "target"), "")
+        var intent = SourceIntentResolutionV1("", -1, "", "", [])
+        if intent_text != "":
+            if target != "": return source_result_error_v1("error", "intent_and_target_are_exclusive")
+            intent = source_outline_intent_v1(outline, intent_text)
+            if intent.status == "resolved":
+                mode = "focused"
+                target = intent.target
         val result_identity = source_outline_result_identity_v1(outline)
         val query_key = sha256_text(json_value_serialize(JsonValue.Array([
             JsonValue.Str(snapshot_id), JsonValue.Str(mode), JsonValue.Str(target),
@@ -273,7 +340,7 @@ fn source_open_context_v1(body: text, numbers: bool, workspace_root: text) -> So
         val view = match source_project_structure_v1(snapshot, outline, mode, target, depth, start_index, max_nodes, max_bytes):
             Ok(value): value
             Err(reason): return source_result_error_v1("error", reason)
-        return source_bounded_payload_v1(source_structure_payload_v1(path, snapshot, outline, view, query_key, result_identity, numbers))
+        return source_bounded_payload_v1(source_structure_payload_v1(path, snapshot, outline, view, query_key, result_identity, numbers, intent, help))
     val projection = match source_project_raw_v1(snapshot, start_byte, max_bytes):
         Ok(value): value
         Err(reason): return source_result_error_v1("error", reason)

@@ -1,0 +1,251 @@
+# SQLCipher4 salt binding and chained key rotation over the dense fixture.
+#
+# The committed fixture `dense_multipage.sqlcipher4` is the only input.  Every
+# derived file is written under the session's TEMP directory with a per-run
+# stamp, so no committed byte is touched and reruns never collide.
+#
+# Behaviours pinned here that no other devhub spec covers:
+#   * the clear-text page-1 salt is key-binding material: the same passphrase
+#     over a fresh salt yields a different ciphertext on every page and still
+#     opens, so an on-disk salt is not an identifier of the key;
+#   * tampering the clear-text salt alone (ciphertext, IV and HMAC untouched)
+#     is detected as an authentication failure, not admitted as a wrong-but-
+#     harmless header, and the rejection names no secret;
+#   * a second rotation A -> B -> C leaves a file that opens under C only:
+#     the intermediate key B and the original key A are both rejected, and the
+#     rows survive both hops byte for byte.
+#
+# @tag:in-development is deliberately NOT set: this spec executes on the seed.
+
+use std.spec.*
+use test.support.devhub_messenger_dense.*
+use std.common.json.value.{JsonValue, json_value_field}
+use std.common.crypto.sha256.{sha256_bytes}
+use std.env.{env_get}
+use std.io_runtime.{time_now_unix_micros, file_size}
+use std.nogc_sync_mut.io.file_ops.{file_write_bytes, file_exists}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
+use std.database.server.storage_port.{database_storage_port_v1, DatabaseStoragePortV1, StorageReadView}
+use std.database.sql.types.{DbRow}
+use nogc_sync_mut.database.codec.codec_registry.{CodecSessionV1}
+use nogc_sync_mut.database.codec.sqlcipher4_page.{
+    sqlcipher4_page_open_key, sqlcipher4_page_encode_with_session, sqlcipher4_page_close,
+    sqlcipher4_page1_salt, SQLCIPHER4_PAGE1_SALT_BYTES
+}
+
+val PAGE: i64 = 4096
+val truth = dense_truth()
+val secret_a: text = truth_passphrase(truth)
+val stamp: text = time_now_unix_micros().to_string()
+val secret_b: text = "salt-binding-b-" + stamp
+val secret_c: text = "salt-binding-c-" + stamp
+val source_bytes: [u8] = dense_file_bytes(DENSE_BASE)
+val source_pages: i64 = source_bytes.len() / PAGE
+val source_sha: text = dense_file_sha256(DENSE_BASE)
+
+fn scratch_dir() -> text:
+    val base = env_get("TEMP")
+    val root = if base != "": base else: "/tmp"
+    root.replace("\\", "/") + "/devhub_salt_binding_" + stamp
+
+val resalted_path: text = scratch_dir() + "/resalted_same_key.sqlcipher4"
+val salt_tampered_path: text = scratch_dir() + "/salt_tampered.sqlcipher4"
+val hop_b_path: text = scratch_dir() + "/hop_b.sqlcipher4"
+val hop_c_path: text = scratch_dir() + "/hop_c.sqlcipher4"
+
+# Spec-chosen bytes derived from a label: distinct per label, fixed length.
+fn derived_bytes(label: text, n: i64) -> [u8]:
+    var seed: [i64] = []
+    for ch in (label + "|" + stamp).bytes():
+        seed.push(ch.to_i64() & 0xFF)
+    val digest = sha256_bytes(seed)
+    var out: [u8] = []
+    var i = 0
+    while i < n:
+        out.push((digest[i % digest.len()] & 0xFF).to_u8())
+        i = i + 1
+    out
+
+# Decode every page of `file` under `secret`: [] on any failure.
+fn decode_all(file: [u8], secret: text) -> [[u8]]:
+    val _set = dense_set_secret(secret)
+    val session = dense_session(file)
+    if session == nil:
+        return []
+    val pages = file.len() / PAGE
+    var bodies: [[u8]] = []
+    var n = 1
+    while n <= pages:
+        val body = decode_body(n, page_slice(file, n), session.?)
+        if body.len() == 0:
+            return []
+        bodies.push(body)
+        n = n + 1
+    val _closed = sqlcipher4_page_close(session.?)
+    bodies
+
+fn with_salt(body: [u8], salt: [u8]) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < body.len():
+        if i < SQLCIPHER4_PAGE1_SALT_BYTES:
+            out.push(salt[i])
+        else:
+            out.push(body[i])
+        i = i + 1
+    out
+
+# Encrypt `bodies` under `secret` with `salt`; ("", image) or (failed stage, []).
+fn encrypt_all(bodies: [[u8]], secret: text, salt: [u8], label: text) -> (text, [u8]):
+    val _set = dense_set_secret(secret)
+    val session: CodecSessionV1 = match sqlcipher4_page_open_key(DENSE_REF, salt):
+        case Ok(s): s
+        case Err(_): return ("open_key", [])
+    var image: [u8] = []
+    var n = 1
+    while n <= bodies.len():
+        val body = if n == 1: with_salt(bodies[0], salt) else: bodies[n - 1]
+        val page_no = n
+        val iv_rng = fn(k: i64) -> [u8]: derived_bytes("{label}-iv-{page_no}", k)
+        match sqlcipher4_page_encode_with_session(n, body, session, iv_rng):
+            case Ok(page):
+                for b in page:
+                    image.push(b)
+            case Err(_):
+                return ("encode_page_{n}", [])
+        n = n + 1
+    val _closed = sqlcipher4_page_close(session)
+    ("", image)
+
+# Decrypt under `from`, re-encrypt under `to` with a label-derived salt, write.
+# Returns ("", image) or (failed stage, []); the image is written only on success.
+# The image is threaded in memory to the next hop: see
+# doc/08_tracking/bug/seed_file_read_bytes_nil_after_in_process_write_2026-11-12.md.
+fn rotate(file: [u8], from: text, to: text, label: text, out_path: text) -> (text, [u8]):
+    val bodies = decode_all(file, from)
+    if bodies.len() == 0:
+        return ("decode", [])
+    val salt = derived_bytes("{label}-salt", SQLCIPHER4_PAGE1_SALT_BYTES)
+    val encrypted = encrypt_all(bodies, to, salt, label)
+    if encrypted.0 != "":
+        return (encrypted.0, [])
+    val wrote_ok = file_write_bytes(out_path, encrypted.1)
+    if not wrote_ok:
+        return ("write", [])
+    ("", encrypted.1)
+
+
+fn pages_differing(a: [u8], b: [u8]) -> i64:
+    var changed = 0
+    var n = 1
+    while n <= source_pages:
+        var i = (n - 1) * PAGE
+        val end = n * PAGE
+        var differs = false
+        while i < end and not differs:
+            if a[i] != b[i]:
+                differs = true
+            i = i + 1
+        if differs:
+            changed = changed + 1
+        n = n + 1
+    changed
+
+fn open_rows(path: text, secret: text, table: text) -> [DbRow]:
+    val _set = dense_set_secret(secret)
+    val view: StorageReadView? = dense_open_view(path)
+    if view == nil:
+        return []
+    val port: DatabaseStoragePortV1 = database_storage_port_v1()
+    val rows = match port.read_table(view.?, table):
+        case Ok(r): r
+        case Err(_): []
+    val _closed = port.close_view(view.?)
+    rows
+
+val _dir = dir_create_all(scratch_dir())
+
+# Scenario 1: same passphrase, fresh salt.
+val resalted = rotate(source_bytes, secret_a, secret_a, "resalt", resalted_path)
+val resalt_stage: text = resalted.0
+val resalted_bytes: [u8] = resalted.1
+
+# Scenario 2: clear-text salt tampered, everything else intact.
+val salt_tampered_image: [u8] = page_flipped(source_bytes, 3)
+val salt_tampered_written: bool = file_write_bytes(salt_tampered_path, salt_tampered_image)
+
+# Scenario 3: chained rotation A -> B -> C.
+val hop_b = rotate(source_bytes, secret_a, secret_b, "hop-b", hop_b_path)
+val hop_b_stage: text = hop_b.0
+val hop_b_bytes: [u8] = hop_b.1
+val hop_c = if hop_b_stage == "": rotate(hop_b_bytes, secret_b, secret_c, "hop-c", hop_c_path) else: ("skipped", [])
+val hop_c_stage: text = hop_c.0
+
+val _restore = dense_set_secret(secret_a)
+
+describe "the page-1 salt binds the key: same passphrase, fresh salt":
+    it "re-encrypts every page differently and still opens under the same passphrase":
+        # @req REQ-MSGR-SALT-001
+        step("Decrypt under the public key, re-encrypt under the same key with a spec-chosen salt, reopen")
+        # @capture(statistics): rotation stage, pages changed, reopened page geometry
+        expect(source_pages).to_equal(tn(truth, "page_count"))
+        expect(resalt_stage).to_equal("")
+        expect(resalted_bytes.len()).to_equal(source_bytes.len())
+        expect(pages_differing(resalted_bytes, source_bytes)).to_equal(source_pages)
+        val verdict = port_verdict_with_secret(secret_a, resalted_path, DENSE_REF, secret_a)
+        expect(verdict).to_equal("OK|")
+        val room = json_value_field(json_value_field(truth, "tables"), "room")
+        val rows = open_rows(resalted_path, secret_a, "room")
+        expect(table_diff(rows, room)).to_equal("rows={rows_in(room)} cells={rows_in(room) * cols_in(room)} bad=")
+
+describe "a tampered clear-text salt is an authentication failure":
+    it "rejects the file whose only change is one salt byte and names no secret":
+        # @req REQ-MSGR-SALT-002
+        step("Flip byte 3 of page 1 (inside the 16-byte salt) on a copy and open it through the storage port")
+        # @capture(protocol_json): storage-port code and message for the salt-tampered copy
+        expect(salt_tampered_written).to_equal(true)
+        expect(pages_differing(salt_tampered_image, source_bytes)).to_equal(1)
+        val salt_read = match sqlcipher4_page1_salt(page_slice(salt_tampered_image, 1)):
+            case Ok(s): s
+            case Err(_): []
+        expect(salt_read == page_slice(source_bytes, 1).slice(0, SQLCIPHER4_PAGE1_SALT_BYTES)).to_equal(false)
+        val verdict = port_verdict_with_secret(secret_a, salt_tampered_path, DENSE_REF, secret_a)
+        expect(verdict_code(verdict)).to_equal("STORAGE_PORT_AUTHENTICATION_FAILED")
+        expect(leaks_none(verdict_message(verdict), [secret_a])).to_equal(true)
+
+    it "leaves the committed source byte-identical after the rejected open":
+        # @req REQ-MSGR-SALT-003
+        step("Re-hash the committed fixture after every open above")
+        # @capture(protocol_binary): SHA-256 of the committed fixture before and after
+        expect(source_sha != "").to_equal(true)
+        expect(dense_file_sha256(DENSE_BASE)).to_equal(source_sha)
+
+describe "chained rotation A -> B -> C opens under C only":
+    it "produces a second-hop file whose rows match the ground truth":
+        # @req REQ-MSGR-ROTATE-001
+        step("Rotate the committed file to key B, then rotate that file to key C, read the rooms under C")
+        # @capture(statistics): hop stages, page count, row/cell diff of the room table under C
+        expect(hop_b_stage).to_equal("")
+        expect(hop_c_stage).to_equal("")
+        expect(file_exists(hop_c_path)).to_equal(true)
+        expect(file_size(hop_c_path)).to_equal(source_bytes.len())
+        val room = json_value_field(json_value_field(truth, "tables"), "room")
+        val rows = open_rows(hop_c_path, secret_c, "room")
+        expect(table_diff(rows, room)).to_equal("rows={rows_in(room)} cells={rows_in(room) * cols_in(room)} bad=")
+
+    it "rejects the intermediate key B and the original key A against the final file":
+        # @req REQ-MSGR-ROTATE-002
+        step("Open the hop-C file under B and under A through the storage port")
+        # @capture(protocol_json): storage-port codes for both stale keys
+        val under_b = port_verdict_with_secret(secret_b, hop_c_path, DENSE_REF, secret_a)
+        val under_a = port_verdict_with_secret(secret_a, hop_c_path, DENSE_REF, secret_a)
+        expect(verdict_code(under_b)).to_equal("STORAGE_PORT_AUTHENTICATION_FAILED")
+        expect(verdict_code(under_a)).to_equal("STORAGE_PORT_AUTHENTICATION_FAILED")
+        expect(leaks_none(verdict_message(under_b) + verdict_message(under_a), [secret_a, secret_b, secret_c])).to_equal(true)
+
+    it "keeps the intermediate file readable under B and closed to C":
+        # @req REQ-MSGR-ROTATE-003
+        step("Open the hop-B file under B (admitted) and under C (rejected)")
+        # @capture(protocol_json): storage-port verdicts for the intermediate file
+        expect(port_verdict_with_secret(secret_b, hop_b_path, DENSE_REF, secret_a)).to_equal("OK|")
+        expect(verdict_code(port_verdict_with_secret(secret_c, hop_b_path, DENSE_REF, secret_a))).to_equal("STORAGE_PORT_AUTHENTICATION_FAILED")

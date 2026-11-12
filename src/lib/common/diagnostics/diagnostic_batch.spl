@@ -1,0 +1,314 @@
+# Diagnostic Batch V1 + Action Index
+#
+# Adjacent to `DiagnosticV1` (diagnostic_v1.spl) — NOT a rewrite of it. A
+# producer (Simple driver, CMM LSP, Markdown LSP) publishes one
+# `DiagnosticBatchV1` per analysed document snapshot. The batch carries:
+#   - snapshot identity: producer, file_id, uri, document_version,
+#     source_hash (XXH3-128 hex, computed by the producer), analysis_generation
+#   - `status`, which is SEPARATE from severity (a batch with zero
+#     diagnostics and status `partial_recovery` is NOT a clean document)
+#   - `incomplete_reason` for every non-`complete` status
+#   - `diagnostics`: (stable id, DiagnosticV1) pairs
+#   - `related_files` the analysis consulted
+#
+# Stable ids (`diagnostic_stable_id`) derive from rule code + canonical file id
+# + structural node identity + occurrence — never line/col or message text,
+# which both change under edits. A consumer must still check the batch's
+# document_version/source_hash (`matches_document`) before trusting an id.
+#
+# `DiagnosticActionIndex` maps a diagnostic id to ORDERED `FixCandidate`s
+# (producer ranks: correctness first, then scope, confidence, edit size). Each
+# candidate carries exact preconditions (expected old text per replacement),
+# the snapshot version it was computed against and an optional disabled
+# reason. `compat_fix_for` projects the first ENABLED candidate onto the legacy
+# single `DiagnosticFix` so `DiagnosticV1.fix` consumers keep working.
+#
+# Data-shape description for tooling: diagnostic_batch_v1_schema.sdn.
+
+use std.common.diagnostics.span.{Span}
+use std.common.diagnostics.diagnostic_v1.{
+    DiagnosticV1, DiagnosticFix, FixReplacement, FixConfidence,
+    render_diagnostic_v1_json, render_span_json,
+    json_object, json_array, json_pair, json_string, json_int, json_bool
+}
+
+# --- Batch result status (separate from diagnostic severity) ---
+
+enum BatchStatus:
+    Complete          # Analysis finished; diagnostics may contain errors/warnings
+    PartialRecovery   # Parsing/indexing recovered enough to return useful facts
+    Stale             # Input version/hash no longer matches the active document
+    Cancelled         # Superseded/cancelled computation; do not publish a cleared list
+    Unsupported       # The requested analysis is not implemented for this surface
+    InternalError     # Execution/transport/index failure; keep last valid evidence
+
+impl BatchStatus:
+    fn name() -> text:
+        match self:
+            BatchStatus.Complete: "complete"
+            BatchStatus.PartialRecovery: "partial_recovery"
+            BatchStatus.Stale: "stale"
+            BatchStatus.Cancelled: "cancelled"
+            BatchStatus.Unsupported: "unsupported"
+            BatchStatus.InternalError: "internal_error"
+
+fn batch_status_parse(name: text) -> BatchStatus?:
+    if name == "complete": Some(BatchStatus.Complete)
+    elif name == "partial_recovery": Some(BatchStatus.PartialRecovery)
+    elif name == "stale": Some(BatchStatus.Stale)
+    elif name == "cancelled": Some(BatchStatus.Cancelled)
+    elif name == "unsupported": Some(BatchStatus.Unsupported)
+    elif name == "internal_error": Some(BatchStatus.InternalError)
+    else: None
+
+# --- Stable diagnostic identity ---
+
+# `code`: rule code ("CMM0001"); `file_id`: canonical file id (not the path);
+# `node_identity`: structural identity of the offending node (e.g.
+# "stmt:block0/3", "link:7"); `occurrence`: disambiguator when the same rule
+# fires more than once on the same node.
+fn diagnostic_stable_id(code: text, file_id: text, node_identity: text, occurrence: i64) -> text:
+    code + "@" + file_id + "#" + node_identity + "/" + occurrence.to_text()
+
+# --- A diagnostic as published inside a batch ---
+
+struct BatchDiagnostic:
+    id: text
+    diagnostic: DiagnosticV1
+
+# --- The batch ---
+
+struct DiagnosticBatchV1:
+    schema_version: i64
+    producer: text
+    file_id: text
+    uri: text
+    document_version: i64
+    source_hash: text
+    analysis_generation: i64
+    status: BatchStatus
+    incomplete_reason: text?
+    diagnostics: [BatchDiagnostic]
+    related_files: [text]
+
+impl DiagnosticBatchV1:
+    static fn new(producer: text, file_id: text, uri: text, document_version: i64, source_hash: text, analysis_generation: i64) -> DiagnosticBatchV1:
+        DiagnosticBatchV1(
+            schema_version: 1,
+            producer: producer,
+            file_id: file_id,
+            uri: uri,
+            document_version: document_version,
+            source_hash: source_hash,
+            analysis_generation: analysis_generation,
+            status: BatchStatus.Complete,
+            incomplete_reason: None,
+            diagnostics: [],
+            related_files: []
+        )
+
+    fn push(id: text, diagnostic: DiagnosticV1) -> DiagnosticBatchV1:
+        var result = self
+        result.diagnostics.push(BatchDiagnostic(id: id, diagnostic: diagnostic))
+        result
+
+    fn with_status(status: BatchStatus, reason: text) -> DiagnosticBatchV1:
+        var result = self
+        result.status = status
+        result.incomplete_reason = Some(reason)
+        result
+
+    fn with_related_file(path: text) -> DiagnosticBatchV1:
+        var result = self
+        result.related_files.push(path)
+        result
+
+    fn len() -> i64:
+        self.diagnostics.len()
+
+    # True when this batch still describes the active document snapshot.
+    fn matches_document(document_version: i64, source_hash: text) -> bool:
+        self.document_version == document_version and self.source_hash == source_hash
+
+    fn to_json() -> text:
+        render_diagnostic_batch_json(self)
+
+# --- Fix candidates and the action index ---
+
+struct FixPrecondition:
+    file: text
+    span: Span
+    expected_text: text   # exact text the span must still contain to apply
+
+struct FixCandidate:
+    id: text
+    title: text
+    explanation: text
+    confidence: FixConfidence
+    replacements: [FixReplacement]
+    preconditions: [FixPrecondition]     # one per replacement, same order
+    required_document_version: i64        # snapshot the candidate was computed against
+    disabled_reason: text?                # Some(reason) = advertised but not applicable
+
+impl FixCandidate:
+    static fn new(id: text, title: text, explanation: text, confidence: FixConfidence, required_document_version: i64) -> FixCandidate:
+        FixCandidate(
+            id: id,
+            title: title,
+            explanation: explanation,
+            confidence: confidence,
+            replacements: [],
+            preconditions: [],
+            required_document_version: required_document_version,
+            disabled_reason: None
+        )
+
+    # Add one replacement together with the exact text it expects to replace.
+    fn with_replacement(file: text, span: Span, new_text: text, expected_text: text) -> FixCandidate:
+        var result = self
+        result.replacements.push(FixReplacement.new(file, span, new_text))
+        result.preconditions.push(FixPrecondition(file: file, span: span, expected_text: expected_text))
+        result
+
+    fn disabled(reason: text) -> FixCandidate:
+        var result = self
+        result.disabled_reason = Some(reason)
+        result
+
+    fn is_enabled() -> bool:
+        not self.disabled_reason.?
+
+    # Distinct files touched, in first-seen order.
+    fn affected_files() -> [text]:
+        var files: [text] = []
+        for r in self.replacements:
+            if not files.contains(r.file):
+                files.push(r.file)
+        files
+
+    # Legacy single-fix projection (`DiagnosticV1.fix` shape).
+    fn to_compat_fix() -> DiagnosticFix:
+        var fix = DiagnosticFix.new(self.id, self.title, self.confidence)
+        for r in self.replacements:
+            fix = fix.with_replacement(r.file, r.span, r.new_text)
+        fix
+
+struct ActionEntry:
+    diagnostic_id: text
+    candidates: [FixCandidate]
+
+struct DiagnosticActionIndex:
+    entries: [ActionEntry]
+
+impl DiagnosticActionIndex:
+    static fn new() -> DiagnosticActionIndex:
+        DiagnosticActionIndex(entries: [])
+
+    # Append a candidate for `diagnostic_id`; producer order is preserved.
+    fn add(diagnostic_id: text, candidate: FixCandidate) -> DiagnosticActionIndex:
+        var result = self
+        var i = 0
+        while i < result.entries.len():
+            if result.entries[i].diagnostic_id == diagnostic_id:
+                result.entries[i].candidates.push(candidate)
+                return result
+            i = i + 1
+        result.entries.push(ActionEntry(diagnostic_id: diagnostic_id, candidates: [candidate]))
+        result
+
+    fn candidates_for(diagnostic_id: text) -> [FixCandidate]:
+        for e in self.entries:
+            if e.diagnostic_id == diagnostic_id:
+                return e.candidates
+        []
+
+    # First ENABLED candidate projected onto the legacy single DiagnosticFix.
+    fn compat_fix_for(diagnostic_id: text) -> DiagnosticFix?:
+        for c in self.candidates_for(diagnostic_id):
+            if c.is_enabled():
+                return Some(c.to_compat_fix())
+        None
+
+    fn to_json() -> text:
+        render_action_index_json(self)
+
+# === JSON rendering (same brace policy as diagnostic_v1.spl) ===
+
+fn render_optional_text_json(value: text?) -> text:
+    match value:
+        Some(v): json_string(v)
+        None: "null"
+
+fn render_batch_diagnostic_json(bd: BatchDiagnostic) -> text:
+    json_object([
+        json_pair("id", json_string(bd.id)),
+        json_pair("diagnostic", render_diagnostic_v1_json(bd.diagnostic))
+    ])
+
+fn render_diagnostic_batch_json(b: DiagnosticBatchV1) -> text:
+    var items: [text] = []
+    for d in b.diagnostics:
+        items.push(render_batch_diagnostic_json(d))
+    var related: [text] = []
+    for f in b.related_files:
+        related.push(json_string(f))
+    json_object([
+        json_pair("schema_version", json_int(b.schema_version)),
+        json_pair("producer", json_string(b.producer)),
+        json_pair("file_id", json_string(b.file_id)),
+        json_pair("uri", json_string(b.uri)),
+        json_pair("document_version", json_int(b.document_version)),
+        json_pair("source_hash", json_string(b.source_hash)),
+        json_pair("analysis_generation", json_int(b.analysis_generation)),
+        json_pair("status", json_string(b.status.name())),
+        json_pair("incomplete_reason", render_optional_text_json(b.incomplete_reason)),
+        json_pair("diagnostics", json_array(items)),
+        json_pair("related_files", json_array(related))
+    ])
+
+fn render_precondition_json(p: FixPrecondition) -> text:
+    json_object([
+        json_pair("file", json_string(p.file)),
+        json_pair("span", render_span_json(p.span)),
+        json_pair("expected_text", json_string(p.expected_text))
+    ])
+
+fn render_candidate_json(c: FixCandidate) -> text:
+    var reps: [text] = []
+    for r in c.replacements:
+        reps.push(json_object([
+            json_pair("file", json_string(r.file)),
+            json_pair("span", render_span_json(r.span)),
+            json_pair("new_text", json_string(r.new_text))
+        ]))
+    var pres: [text] = []
+    for p in c.preconditions:
+        pres.push(render_precondition_json(p))
+    json_object([
+        json_pair("id", json_string(c.id)),
+        json_pair("title", json_string(c.title)),
+        json_pair("explanation", json_string(c.explanation)),
+        json_pair("confidence", json_string(c.confidence.name())),
+        json_pair("replacements", json_array(reps)),
+        json_pair("preconditions", json_array(pres)),
+        json_pair("required_document_version", json_int(c.required_document_version)),
+        json_pair("enabled", json_bool(c.is_enabled())),
+        json_pair("disabled_reason", render_optional_text_json(c.disabled_reason))
+    ])
+
+fn render_action_index_json(index: DiagnosticActionIndex) -> text:
+    var entries: [text] = []
+    for e in index.entries:
+        var cands: [text] = []
+        for c in e.candidates:
+            cands.push(render_candidate_json(c))
+        entries.push(json_object([
+            json_pair("diagnostic_id", json_string(e.diagnostic_id)),
+            json_pair("candidates", json_array(cands))
+        ]))
+    json_object([json_pair("entries", json_array(entries))])
+
+export BatchStatus, batch_status_parse, diagnostic_stable_id
+export BatchDiagnostic, DiagnosticBatchV1
+export FixPrecondition, FixCandidate, ActionEntry, DiagnosticActionIndex
+export render_diagnostic_batch_json, render_action_index_json
