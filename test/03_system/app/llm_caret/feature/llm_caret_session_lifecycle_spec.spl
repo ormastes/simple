@@ -1,0 +1,185 @@
+# @cover src/app/llm_caret/main.spl 20%
+# @cover src/app/llm_caret/session.spl 40%
+# @cover src/app/llm_caret/chat_tui.spl 15%
+# @cover src/app/llm_caret/tools.spl 10%
+"""
+# LLM Caret Session Lifecycle System Spec
+
+## Overview
+
+Drives the real `main.spl` entrypoint and its production session hooks
+in-process, with no terminal, no network, and no paid provider: the dummy
+provider answers every prompt. The scenarios cover the user-facing surface
+that the other caret system specs do not reach end to end:
+
+- `run_main_args` argument admission (`--help`, unknown option, unknown
+  provider, missing `--config`, missing `--resume`, `--metal-gui` redirect)
+  and the one-shot `--prompt` path;
+- the slash-command lifecycle over the REAL hooks built by
+  `_build_session_hooks` — `/sessions`, `/model`, `/provider`, `/new`,
+  `/resume` — persisting to and reading back from an isolated `$HOME`;
+- `--resume <id>` on the CLI path against a session that the hooks wrote;
+- tool gating produced by `--dangerously-allow-all` / default policy when the
+  gated agent loop runs a mutating tool.
+
+**Requirement IDs:** REQ-LLM-CARET-FULL-003, REQ-LLM-CARET-FULL-006
+**Requirements:** doc/02_requirements/feature/llm_caret_claude_cli_full_parity.md
+**Design:** doc/05_design/llm_caret_claude_cli_full_parity.md
+"""
+
+use std.spec.*
+use app.io.mod.{env_get, env_set, dir_remove_all, file_exists, file_write, file_read, dir_create_all}
+use app.llm_caret.types.{Message, new_user_message}
+use app.llm_caret.session.{Session, save_session, load_session, session_path}
+use app.llm_caret.tools.{
+    ModelResponse, new_model_text, new_model_tools, new_tool_call, run_tool
+}
+use app.llm_caret.chat.{run_agent_loop}
+use app.llm_caret.chat_tui.{dispatch_slash, slash_help_text}
+use app.llm_caret.main.{
+    run_main_args, parse_main_args, main_configure, main_session_id,
+    _build_session_hooks, _build_policy, _resolve_workspace
+}
+
+val HOME_ROOT: text = "build/tmp/llm_caret_session_lifecycle/home"
+val WORKSPACE_ROOT: text = "build/tmp/llm_caret_session_lifecycle/workspace"
+var _gated_turn: i64 = 0
+
+fn _isolate_home() -> text:
+    val original = env_get("HOME") ?? ""
+    dir_remove_all(HOME_ROOT)
+    dir_create_all(HOME_ROOT)
+    env_set("HOME", HOME_ROOT)
+    original
+
+fn _restore_home(original: text):
+    env_set("HOME", original)
+    dir_remove_all(HOME_ROOT)
+
+fn _reset_runtime():
+    main_configure("dummy", "dummy-hello", "", "", "", "", "", 0)
+
+fn _assistant(content: text) -> Message:
+    Message(role: "assistant", content: content)
+
+describe "LLM Caret session lifecycle":
+    """Real main.spl entrypoint and production session hooks, dummy provider, isolated HOME."""
+    describe "REQ-LLM-CARET-FULL-003: run_main_args admission":
+        """Argument admission and the one-shot --prompt path of run_main_args."""
+        it "should accept the one-shot dummy prompt and reject malformed invocations":
+            # @req REQ-LLM-CARET-FULL-003
+            # @req REQ-SSPEC-SYSTEM
+            _reset_runtime()
+            step("Run the one-shot dummy prompt through the real entrypoint")
+            expect(run_main_args(["--provider", "dummy", "--prompt", "hi"])).to_equal(0)
+            step("Help exits 0 without touching the provider")
+            expect(run_main_args(["--help"])).to_equal(0)
+            step("Unknown option, provider, config and resume id are usage errors")
+            expect(run_main_args(["--bogus-flag"])).to_equal(2)
+            expect(run_main_args(["--provider", "no_such_provider", "--prompt", "hi"])).to_equal(2)
+            expect(run_main_args(["--provider", "dummy", "--config", WORKSPACE_ROOT + "/missing.sdn"])).to_equal(2)
+            val original = _isolate_home()
+            expect(run_main_args(["--provider", "dummy", "--resume", "sess-does-not-exist"])).to_equal(2)
+            _restore_home(original)
+            step("The Metal GUI is redirected to its companion entry")
+            expect(run_main_args(["--provider", "dummy", "--metal-gui", "--prompt", "x"])).to_equal(2)
+
+    describe "REQ-LLM-CARET-FULL-006: slash commands over the production hooks":
+        """/sessions /model /provider /resume /new over _build_session_hooks with on-disk persistence."""
+        it "should persist, list, switch, resume and renew a session through the real hooks":
+            # @req REQ-LLM-CARET-FULL-006
+            # @req REQ-SSPEC-SYSTEM
+            _reset_runtime()
+            val original = _isolate_home()
+            val hooks = _build_session_hooks("sess-lifecycle-a")
+
+            step("An isolated HOME starts with no saved sessions")
+            expect(dispatch_slash("sessions", "", hooks).message).to_equal("No saved sessions.")
+            expect(dispatch_slash("help", "", hooks).message).to_equal(slash_help_text())
+
+            step("Persisting the conversation writes a session file under HOME")
+            hooks.on_persist("sess-lifecycle-a", [new_user_message("hi"), _assistant("hello")])
+            expect(file_exists(session_path("sess-lifecycle-a"))).to_be(true)
+            expect(dispatch_slash("sessions", "", hooks).message).to_contain("sess-lifecycle-a")
+
+            step("/model and /provider update the runtime and report the switch")
+            val model_result = dispatch_slash("model", "dummy-other", hooks)
+            expect(model_result.message).to_equal("model set to dummy-other")
+            expect(model_result.status_model).to_equal("dummy-other")
+            val bad_provider = dispatch_slash("provider", "no_such_provider", hooks)
+            expect(bad_provider.message).to_contain("unknown provider: no_such_provider")
+            expect(bad_provider.message).to_contain("dummy")
+            expect(bad_provider.status_provider).to_equal("")
+            val good_provider = dispatch_slash("provider", "dummy", hooks)
+            expect(good_provider.message).to_equal("provider set to dummy")
+            expect(good_provider.status_provider).to_equal("dummy")
+            expect(main_session_id()).to_equal("")
+
+            step("/resume restores the persisted transcript and backend")
+            val resumed = dispatch_slash("resume", "sess-lifecycle-a", hooks)
+            expect(resumed.message).to_equal("resumed session sess-lifecycle-a")
+            expect(resumed.replace_conv).to_be(true)
+            expect(resumed.loaded_messages.len()).to_equal(2)
+            expect(resumed.loaded_messages[0].role).to_equal("user")
+            expect(resumed.loaded_messages[1].content).to_equal("hello")
+            expect(resumed.status_provider).to_equal("dummy")
+            expect(resumed.status_session).to_equal("sess-lifecycle-a")
+            val missing = dispatch_slash("resume", "sess-missing", hooks)
+            expect(missing.replace_conv).to_be(false)
+            expect(missing.message).to_equal("no saved session 'sess-missing'")
+
+            step("/new issues a fresh session id and keeps the saved one on disk")
+            val renewed = dispatch_slash("new", "", hooks)
+            expect(renewed.new_conv).to_be(true)
+            expect(renewed.new_session_id.starts_with("sess-")).to_be(true)
+            expect(renewed.new_session_id).to_not_equal("sess-lifecycle-a")
+            expect(file_exists(session_path("sess-lifecycle-a"))).to_be(true)
+
+            step("--resume on the CLI path accepts the session the hooks wrote")
+            expect(run_main_args(["--resume", "sess-lifecycle-a", "--prompt", "again"])).to_equal(0)
+            _restore_home(original)
+
+    describe "REQ-LLM-CARET-FULL-003: tool gating from CLI flags":
+        """Default vs --dangerously-allow-all policy applied by run_tool and the gated agent loop."""
+        it "should deny a mutating tool by default and allow it under --dangerously-allow-all":
+            # @req REQ-LLM-CARET-FULL-003
+            # @req REQ-SSPEC-SYSTEM
+            dir_remove_all(WORKSPACE_ROOT)
+            dir_create_all(WORKSPACE_ROOT)
+            val write_call = new_tool_call(
+                "call-1", "write_file",
+                "{\"path\": \"gated.txt\", \"content\": \"written\"}"
+            )
+
+            step("Default policy denies write_file in non-interactive mode")
+            val restricted = _build_policy(parse_main_args([]), WORKSPACE_ROOT)
+            val denied = run_tool(restricted, write_call)
+            expect(denied.is_error).to_be(true)
+            expect(denied.content).to_contain("requires approval")
+            expect(file_exists(WORKSPACE_ROOT + "/gated.txt")).to_be(false)
+
+            step("--dangerously-allow-all lets the same call write inside the workspace")
+            val allowed = _build_policy(parse_main_args(["--dangerously-allow-all"]), WORKSPACE_ROOT)
+            val written = run_tool(allowed, write_call)
+            expect(written.is_error).to_be(false)
+            expect(file_read(WORKSPACE_ROOT + "/gated.txt")).to_equal("written")
+
+            step("Path traversal is refused even under allow-all")
+            val escape = run_tool(allowed, new_tool_call(
+                "call-2", "write_file",
+                "{\"path\": \"../escape.txt\", \"content\": \"x\"}"
+            ))
+            expect(escape.is_error).to_be(true)
+            expect(escape.content).to_contain("not allowed")
+
+            step("The gated agent loop surfaces the denial to the model and finishes")
+            _gated_turn = 0
+            val responder = fn(msgs: [Message]) -> ModelResponse:
+                _gated_turn = _gated_turn + 1
+                if _gated_turn == 1:
+                    return new_model_tools("writing", [write_call])
+                new_model_text("done")
+            val result = run_agent_loop(restricted, [new_user_message("write it")], responder, 4)
+            expect(result.final_text).to_equal("done")
+            expect(_gated_turn).to_equal(2)
+            dir_remove_all(WORKSPACE_ROOT)
