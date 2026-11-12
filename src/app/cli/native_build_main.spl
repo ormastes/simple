@@ -1103,8 +1103,8 @@ pub fn native_build_path_parent_v1(path: text) -> text:
 fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
         base: [text], queue_dir: text, args: [text], count: i64, parallel: i64,
         simple_bin: text, timeout_ms: i64) -> LedgerShardRunV1:
-    val old_queue = env_get(queue_env) ?? ""
-    val old_owner = env_get(owner_env) ?? ""
+    val old_queue = native_build_env_saved_v1(queue_env)
+    val old_owner = native_build_env_saved_v1(owner_env)
     if not env_set(queue_env, queue_dir):
         return LedgerShardRunV1(code: 1, failed_modules: 0, total_claims: 0,
             blocked_reason: "worker queue environment could not be installed", all_stopped: true)
@@ -1112,18 +1112,18 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
     var hir_pool_cleanup_deadline: i64 = 0
     if label == "hir-shard":
         if base.len() < 3 or base[0] != "run" or base[1] != "src/app/cli/native_build_worker.spl":
-            env_set(queue_env, old_queue)
+            native_build_env_restore_v1(queue_env, old_queue)
             eprint("[hir-shard] BLOCKED: HIR profile requires the canonical internal worker route")
             return LedgerShardRunV1(code: 1, failed_modules: 0, total_claims: 0,
                 blocked_reason: "HIR profile requires the canonical internal worker route", all_stopped: true)
         if count <= 0 or count > 128 or parallel <= 0 or parallel > 128:
-            env_set(queue_env, old_queue)
+            native_build_env_restore_v1(queue_env, old_queue)
             eprint("[hir-shard] BLOCKED: HIR profile worker count exceeds 128-owner bound")
             return LedgerShardRunV1(code: 1, failed_modules: 0, total_claims: 0,
                 blocked_reason: "HIR profile worker count exceeds 128-owner bound", all_stopped: true)
         val selection = native_build_entry_and_sources_v1(args)
         if selection.is_empty():
-            env_set(queue_env, old_queue)
+            native_build_env_restore_v1(queue_env, old_queue)
             eprint("[hir-shard] BLOCKED: HIR profile has no explicit entry")
             return LedgerShardRunV1(code: 1, failed_modules: 0, total_claims: 0,
                 blocked_reason: "HIR profile has no explicit entry", all_stopped: true)
@@ -1132,7 +1132,7 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
         match worker_hir_profile_admit_v1(base[2:], selection[0], selection[1:], deadline):
             case Ok(profile): hir_profiles = [profile]
             case Err(reason):
-                env_set(queue_env, old_queue)
+                native_build_env_restore_v1(queue_env, old_queue)
                 eprint("[hir-shard] profile admission rejected: " + reason)
                 return LedgerShardRunV1(code: 1, failed_modules: 0, total_claims: 0,
                     blocked_reason: reason, all_stopped: true)
@@ -1147,7 +1147,7 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
     val producer = env_get("SIMPLE_FRONTEND_CACHE_SCOPE") ?? ""
     val producer_key = if producer == "": "unknown" else: producer
     val peak_record = "{native_build_path_parent_v1(queue_dir)}/{label}.{producer_key}.peak_kib"
-    val old_dataset_cap = env_get("SIMPLE_GLOBAL_DATASET_MAX_BYTES") ?? ""
+    val old_dataset_cap = native_build_env_saved_v1("SIMPLE_GLOBAL_DATASET_MAX_BYTES")
     val budget_knob = if label == "mir-shard": "SIMPLE_MIR_SHARD_WORKER_KB" else: "SIMPLE_HIR_SHARD_WORKER_KB"
     val static_kib = if label == "mir-shard": shard_worker_budget_kb(budget_knob, SHARD_MIR_WORKER_KB_V1) else: shard_worker_budget_kb(budget_knob, SHARD_HIR_WORKER_KB_V1)
     val override_kib = shard_mem_available_kb_from_field(env_get(budget_knob) ?? "")
@@ -1359,9 +1359,9 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
         else:
             pending = []
         generation = generation + 1
-    env_set(queue_env, old_queue)
-    env_set(owner_env, old_owner)
-    env_set("SIMPLE_GLOBAL_DATASET_MAX_BYTES", old_dataset_cap)
+    native_build_env_restore_v1(queue_env, old_queue)
+    native_build_env_restore_v1(owner_env, old_owner)
+    native_build_env_restore_v1("SIMPLE_GLOBAL_DATASET_MAX_BYTES", old_dataset_cap)
     if observed_peak_kib > 0:
         val _peak_written = file_atomic_write(peak_record, "{observed_peak_kib}")
         print "[{label}] measured worker peak commit={observed_peak_kib} kB (static estimate {static_kib} kB, previous run {recorded_peak} kB)"
