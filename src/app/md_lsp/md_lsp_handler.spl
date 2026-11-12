@@ -9,6 +9,7 @@ use app.md_lsp.md_lsp_markdown.{split_lines, parse_blocks_with_ranges, compute_f
 use .md_lsp_workspace.{MdWorkspace, MdDocument}
 use std.editor.services.md_diagnostics.{md_diagnose_batch}
 use std.common.diagnostics.{DiagnosticBatchV1, DiagnosticV1, LineStartTable, span_to_range, FixConfidence, FixCandidate, DiagnosticActionIndex, ranked_candidates_for, EditTransaction, DocumentSnapshot}
+use std.common.string_core.{string_to_byte_array, string_from_byte_array}
 
 # One outbound `textDocument/publishDiagnostics` notification, ready to frame.
 pub struct MdLspPublish:
@@ -530,7 +531,7 @@ fn md_lsp_code_action_raw(params_json: text, req_id: text, workspace: MdWorkspac
             val fix = d.fix.unwrap()
             var c = FixCandidate.new(fix.id, fix.description, d.message, fix.confidence, doc.version)
             for r in fix.replacements:
-                c = c.with_replacement(r.file, r.span, r.new_text, doc.content.substring(r.span.start, r.span.end))
+                c = c.with_replacement(r.file, r.span, r.new_text, _md_lsp_byte_slice(doc.content, r.span.start, r.span.end))
             index = index.add(bd.id, c)
             if not ids.contains(bd.id):
                 ids.push(bd.id)
@@ -724,3 +725,14 @@ fn md_lsp_code_action(params_json: text, req_id: i64, workspace: MdWorkspace) ->
 
 fn md_lsp_handle_request(method: text, params_json: text, req_id: i64, workspace: MdWorkspace) -> text:
     md_lsp_handle_request_raw(method, params_json, str(req_id), workspace)
+
+# Spans are BYTE offsets; text.substring indexes code points, so slice bytes
+# (matches EditTransaction's byte-sliced precondition check).
+fn _md_lsp_byte_slice(s: text, start: i64, end: i64) -> text:
+    val bytes = string_to_byte_array(s)
+    var out: [u8] = []
+    var i = start
+    while i < end:
+        out.push(bytes[i])
+        i = i + 1
+    string_from_byte_array(out)
