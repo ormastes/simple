@@ -1,0 +1,212 @@
+# @req REQ-MEM-3-1
+# @req REQ-MEM-3-2
+# @req REQ-MEM-3-3
+# @req REQ-MEM-3-4
+# @req REQ-MEM-3-5
+# @req REQ-MEM-3-7
+# @req AC-GATE-02
+"""
+## Purpose and audience
+Checker BEHAVIOUR for memory hardening plan §3.1-§3.7, observed through the
+production strict driver gate (`driver_nogc_param_effect_errors_v1`) and the
+admission path (`driver_admit_nogc_param_effects_v1`), never through the
+inference report alone. Every describe maps to one plan section; every
+rejecting example has an accepting twin so an implementation that rejects (or
+accepts) everything fails. The §12.3 mutation families "replace a required
+move with an owning copy" and
+"extend a borrow across a
+return/store/await" are each pinned by a negative example here, so the
+AC-GATE-02 cardinality baseline protects them.
+Category: Compiler.
+## Operator workflow
+bin/simple test test/01_unit/compiler/semantics/param_effects/nogc_contract_behaviour_spec.spl
+## Compatibility and limitations
+Source-to-HIR only. MIR cleanup-edge generation (§3.4/§3.6 "generate cleanup
+from live-on-exit facts") and native/JIT route parity (§3.7, §12.2) are
+covered by the route matrix, not here; this spec pins the one checker those
+routes must consume.
+## Verification guidance and troubleshooting
+RED usually means a diagnostic code moved (NOGC-BOR-001, NOGC-AMB-00x,
+NOGC-OWN-002/003) or the driver gate stopped surfacing checker diagnostics as
+fatal errors for a strict module.
+"""
+# Lifecycle: doc/03_plan/release/1.0.0/inputs_2026-11-06/simple_nogc_ownership_memory_hardening_plan.md ;
+# doc/02_requirements/feature/release100_memory_mcp_lsp.md
+
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile, driver_core_compile_options_default}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surface_from_owner, ModuleSurfaceParserOwner}
+use compiler.driver.driver_hir_pipeline_support.{driver_nogc_param_effect_errors_v1, driver_admit_nogc_param_effects_v1}
+use compiler.driver.driver_types.{CompileContext}
+use compiler.semantics.param_effects.effects.{param_effect_report_effect}
+use compiler.semantics.param_effects.infer.{infer_param_effects}
+
+val PRELUDE = "class Node:\n    v: i64\n\nclass Holder:\n    head: Node?\n    items: [Node]\n\nclass Box:\n    inner: Node\n\nclass Pair:\n    a: Node\n    b: Node\n\n"
+val PATH = "testdata/contract_behaviour.spl"
+val MODULE = "contract_behaviour"
+
+fn lower(body: text, strict: bool) -> HirModule:
+    var parsed = parse_full_frontend(PRELUDE + body, PATH, MODULE, Logger(level: 0))
+    parsed.nogc_strict = strict
+    var lowering = HirLowering.with_filename(PATH)
+    lowering.lower_module(parsed)
+
+# Production strict gate: the fatal diagnostics the driver would raise.
+fn gate(body: text, strict: bool = true) -> [text]:
+    val source_text = PRELUDE + body
+    var parsed = parse_full_frontend(source_text, PATH, MODULE, Logger(level: 0))
+    parsed.nogc_strict = strict
+    val source = SourceFile(path: PATH, content: source_text, module_name: MODULE)
+    val surface = module_surface_from_owner(ModuleSurfaceParserOwner.new(parsed), source, 0).unwrap()
+    var lowering = HirLowering.with_filename(PATH)
+    val actual: HirModule = lowering.lower_module(parsed)
+    driver_nogc_param_effect_errors_v1({}, [actual], [surface])
+
+# Production admission: the context a real build would continue with.
+fn admit(body: text, strict: bool = true) -> CompileContext:
+    val source_text = PRELUDE + body
+    var parsed = parse_full_frontend(source_text, PATH, MODULE, Logger(level: 0))
+    parsed.nogc_strict = strict
+    val source = SourceFile(path: PATH, content: source_text, module_name: MODULE)
+    val surface = module_surface_from_owner(ModuleSurfaceParserOwner.new(parsed), source, 0).unwrap()
+    var lowering = HirLowering.with_filename(PATH)
+    val actual: HirModule = lowering.lower_module(parsed)
+    val ctx = CompileContext.create(driver_core_compile_options_default())
+    ctx.hir_modules[MODULE] = actual
+    ctx.validation_module_array = [actual]
+    ctx.bootstrap_entry_hir = actual
+    driver_admit_nogc_param_effects_v1(ctx, [surface])
+    ctx
+
+fn effect(body: text, function: text, param: text) -> text:
+    param_effect_report_effect(infer_param_effects(lower(body, true), {}, {}), function, param)
+
+fn count_code(lines: [text], code: text) -> i64:
+    var n = 0
+    for line in lines:
+        if line.contains(code): n = n + 1
+    n
+
+fn has_code(lines: [text], code: text) -> bool:
+    count_code(lines, code) > 0
+
+# Shared fixtures
+val STORE_OWNER = "fn keep(h: Holder, n: &Node):\n    h.head = Some(n)\n"
+val PUSH_OWNER = "fn ps(xs: [Node], n: &Node):\n    xs.push(n)\n"
+val READ_SHORT = "fn rd(n: Node) -> i64:\n    n.v\n"
+
+describe "REQ-MEM-3-1 one active owner (OWN-01/OWN-02)":
+    it "transfers ownership on field store, container insertion and construction without a diagnostic":
+        val body = STORE_OWNER + "\n" + PUSH_OWNER + "\nfn wrap(n: &Node) -> Box:\n    Box(inner: n)\n"
+        expect(gate(body).len()).to_equal(0)
+        expect(effect(body, "keep", "n")).to_equal("consume")
+        expect(effect(body, "ps", "n")).to_equal("consume")
+        expect(effect(body, "wrap", "n")).to_equal("consume")
+
+    it "rejects using a local after its ownership moved into a field (mutation: move replaced by copy)":
+        val errors = gate("fn caller(h: Holder) -> i64:\n    val a = Node(v: 1)\n    h.head = Some(a)\n    a.v\n")
+        expect(has_code(errors, "NOGC-OWN-002")).to_equal(true)
+
+    it "reads through a short borrow without creating a second owner":
+        expect(gate(READ_SHORT).len()).to_equal(0)
+        expect(effect(READ_SHORT, "rd", "n")).to_equal("read-short")
+
+describe "REQ-MEM-3-2 strictly short borrowing (mutation: borrow extended across return/store/await)":
+    it "rejects returning a short parameter":
+        val errors = gate("fn escape(n: Node) -> Node:\n    n\n")
+        expect(errors.len()).to_equal(1)
+        expect(has_code(errors, "NOGC-BOR-001")).to_equal(true)
+
+    it "rejects storing a short parameter into a field":
+        val errors = gate("fn keepref(h: Holder, n: Node):\n    h.head = Some(n)\n")
+        expect(has_code(errors, "NOGC-BOR-001")).to_equal(true)
+
+    it "rejects keeping a short parameter across a suspension":
+        val errors = gate("fn susp(n: Node):\n    yield 1\n    val after = n.v\n")
+        expect(has_code(errors, "NOGC-BOR-001")).to_equal(true)
+
+    it "rejects capture by an escaping callback without a non-escape contract":
+        val errors = gate("fn cb(n: Node):\n    register(\\: n.v)\n")
+        expect(has_code(errors, "NOGC-AMB-003")).to_equal(true)
+
+    it "accepts a borrow whose last access ends before the short boundary":
+        expect(gate("fn before(n: Node) -> i64:\n    val v = n.v\n    yield 1\n    v\n").len()).to_equal(0)
+
+    it "accepts forwarding a borrow through a synchronous non-retaining call":
+        expect(gate(READ_SHORT + "\nfn fwd(n: Node) -> i64:\n    rd(n)\n").len()).to_equal(0)
+
+describe "REQ-MEM-3-3 function and method contracts":
+    it "distinguishes an inspector from a consuming function on the same type":
+        val body = READ_SHORT + "\nfn pick(n: &Node) -> &Node:\n    n\n"
+        expect(gate(body).len()).to_equal(0)
+        expect(effect(body, "rd", "n")).to_equal("read-short")
+        expect(effect(body, "pick", "n")).to_equal("consume")
+
+    it "represents a mutating receiver as mutate-short, not consume":
+        val body = "impl Node:\n    me bump():\n        self.v = self.v + 1\n"
+        expect(gate(body).len()).to_equal(0)
+        expect(effect(body, "bump", "self")).to_equal("mutate-short")
+
+    it "never infers away unknown foreign retention of a class parameter":
+        val errors = gate("extern fn ext_take(n: Node) -> i64\nextern fn ext_num(x: i64) -> i64\n")
+        expect(count_code(errors, "NOGC-AMB-004")).to_equal(1)
+
+    it "rejects a short receiver escaping from a builder instead of inventing a lifetime":
+        val errors = gate("impl Holder:\n    me with_head(n: &Node) -> Holder:\n        self.head = Some(n)\n        self\n")
+        expect(has_code(errors, "NOGC-BOR-001")).to_equal(true)
+
+describe "REQ-MEM-3-4 owner state machine over real control flow":
+    it "accepts a move on a returning branch that cannot reach the later use":
+        expect(gate("fn maybe(n: &Node, other: &Node, f: bool) -> &Node:\n    if f:\n        return n\n    other\n").len()).to_equal(0)
+
+    it "rejects a use after a conditional move on a merging branch":
+        val errors = gate("fn bad2(h: Holder, n: &Node, f: bool) -> i64:\n    if f:\n        h.head = Some(n)\n    n.v\n")
+        expect(count_code(errors, "NOGC-AMB-001")).to_equal(1)
+
+    it "rejects a use after an unconditional move":
+        val errors = gate("fn bad(h: Holder, n: &Node) -> i64:\n    h.head = Some(n)\n    n.v\n")
+        expect(count_code(errors, "NOGC-AMB-001")).to_equal(1)
+
+    it "does not resurrect a moved owner inside a loop":
+        val errors = gate("fn lp(xs: [Node], n: &Node):\n    for i in 0..3:\n        xs.push(n)\n")
+        expect(count_code(errors, "NOGC-AMB-002")).to_equal(1)
+
+describe "REQ-MEM-3-5 containers, replacement and other transfer forms":
+    it "treats push, constructor, global store and if-expression return as transfers":
+        val body = PUSH_OWNER + "\nvar GN = Node(v: 0)\n\nfn setg(n: &Node):\n    GN = n\n\nfn ift(a: &Node, other: &Node, c: bool) -> &Node:\n    val r = if c: a else: other\n    r\n"
+        expect(gate(body).len()).to_equal(0)
+        expect(effect(body, "ps", "n")).to_equal("consume")
+        expect(effect(body, "setg", "n")).to_equal("consume")
+        expect(effect(body, "ift", "a")).to_equal("consume")
+
+    it "rejects inserting the same owner twice in one construction":
+        val errors = gate("fn dbl(n: &Node) -> Pair:\n    Pair(a: n, b: n)\n")
+        expect(count_code(errors, "NOGC-AMB-001")).to_equal(1)
+
+    it "rejects using a local after it was pushed into a container":
+        val errors = gate(PUSH_OWNER + "\nfn caller(xs: [Node]) -> i64:\n    val b = Node(v: 2)\n    ps(xs, b)\n    b.v\n")
+        expect(has_code(errors, "NOGC-OWN-002")).to_equal(true)
+
+describe "REQ-MEM-3-7 one mandatory checker across routes":
+    it "raises the same fatal code through the gate and through admission for a strict module":
+        val body = "fn escape(n: Node) -> Node:\n    n\n"
+        expect(has_code(gate(body), "NOGC-BOR-001")).to_equal(true)
+        val ctx = admit(body)
+        expect(ctx.error_count_value).to_be_greater_than(0)
+        expect(has_code(ctx.errors, "NOGC-BOR-001")).to_equal(true)
+
+    it "marks a strict admitted module as ownership-required and keeps it error free":
+        val ctx = admit(READ_SHORT)
+        expect(ctx.error_count_value).to_equal(0)
+        expect(ctx.nogc_ownership_required).to_equal(true)
+
+    it "only a legacy module policy, never a route, disables the checker":
+        expect(gate("fn escape(n: Node) -> Node:\n    n\n", false).len()).to_equal(0)
+        val ctx = admit("fn escape(n: Node) -> Node:\n    n\n", false)
+        expect(ctx.error_count_value).to_equal(0)
+        expect(has_code(ctx.warnings, "NOGC-NOTE-001")).to_equal(true)
