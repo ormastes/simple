@@ -7,6 +7,13 @@ use std.common.markdown
 use std.common.json.tokenizer.{json_unescape_string}
 use app.md_lsp.md_lsp_markdown.{split_lines, parse_blocks_with_ranges, compute_folding_ranges}
 use .md_lsp_workspace.{MdWorkspace, MdDocument}
+use std.editor.services.md_diagnostics.{md_diagnose_batch}
+use std.common.diagnostics.{DiagnosticBatchV1, DiagnosticV1, LineStartTable, span_to_range}
+
+# One outbound `textDocument/publishDiagnostics` notification, ready to frame.
+pub struct MdLspPublish:
+    uri: text
+    json: text
 
 # ---------------------------------------------------------------------------
 # JSON building helpers (inline, identical pattern to json_helpers.spl)
@@ -561,26 +568,89 @@ fn _md_lsp_build_line_replace_action(uri: text, line_num: i64, old_line: text, n
 # Notification handler (no response)
 # ---------------------------------------------------------------------------
 
-fn md_lsp_handle_notification(method: text, params_json: text, workspace: MdWorkspace):
-    if method == "initialized":
-        return
-    if method == "textDocument/didOpen":
+fn _md_lsp_severity_code(d: DiagnosticV1) -> text:
+    val name = d.severity.name()
+    if name == "error":
+        return "1"
+    if name == "warning":
+        return "2"
+    if name == "help":
+        return "4"
+    "3"
+
+# Renders one shared DiagnosticV1 as an LSP Diagnostic. Byte span -> UTF-16
+# range through the snapshot's LineStartTable; a span that cannot be mapped
+# (should not happen for producer-made spans) collapses to the line start.
+fn _md_lsp_diagnostic_json(content: text, table: LineStartTable, d: DiagnosticV1, id: text) -> text:
+    var range_json = "{" + _jp("start", "{" + _jp("line", "0") + "," + _jp("character", "0") + "}") + "," + _jp("end", "{" + _jp("line", "0") + "," + _jp("character", "0") + "}") + "}"
+    if d.span.is_some():
+        val sp = d.span.unwrap()
+        val mapped = span_to_range(content, table, sp.start, sp.end)
+        if mapped.is_some():
+            val r = mapped.unwrap()
+            val start_pos = "{" + _jp("line", str(r.start.line)) + "," + _jp("character", str(r.start.character)) + "}"
+            val end_pos = "{" + _jp("line", str(r.end.line)) + "," + _jp("character", str(r.end.character)) + "}"
+            range_json = "{" + _jp("start", start_pos) + "," + _jp("end", end_pos) + "}"
+    "{" + _jp("range", range_json) + "," + _jp("severity", _md_lsp_severity_code(d)) + "," + _jp("code", _js(d.code)) + "," + _jp("source", _js("markdown")) + "," + _jp("message", _js(d.message)) + "," + _jp("data", "{" + _jp("id", _js(id)) + "}") + "}"
+
+fn _md_lsp_publish_notification(uri: text, version: i64, status: text, diagnostics_json: text) -> text:
+    val params = "{" + _jp("uri", _js(uri)) + "," + _jp("version", str(version)) + "," + _jp("diagnostics", diagnostics_json) + "," + _jp("status", _js(status)) + "}"
+    "{" + _jp("jsonrpc", _js("2.0")) + "," + _jp("method", _js("textDocument/publishDiagnostics")) + "," + _jp("params", params) + "}"
+
+# Diagnoses the open document at `uri` against the workspace graph and renders
+# the publishDiagnostics notification for it.
+pub fn md_lsp_publish_json(uri: text, workspace: MdWorkspace) -> text:
+    val doc = workspace.get_document(uri)
+    val batch = md_diagnose_batch(doc.content, doc.path, doc.version, workspace.link_context(uri))
+    val table = LineStartTable.build(doc.content)
+    var items: [text] = []
+    for bd in batch.diagnostics:
+        items.push(_md_lsp_diagnostic_json(doc.content, table, bd.diagnostic, bd.id))
+    _md_lsp_publish_notification(uri, doc.version, batch.status.name(), "[" + items.join(",") + "]")
+
+fn _md_lsp_publish_set(primary: text, dependents: [text], workspace: MdWorkspace) -> [MdLspPublish]:
+    var out: [MdLspPublish] = []
+    if workspace.has_document(primary):
+        out.push(MdLspPublish(uri: primary, json: md_lsp_publish_json(primary, workspace)))
+    var seen: [text] = [primary]
+    for dep in dependents:
+        if not seen.contains(dep) and workspace.has_document(dep):
+            seen.push(dep)
+            out.push(MdLspPublish(uri: dep, json: md_lsp_publish_json(dep, workspace)))
+    out
+
+fn _md_lsp_union(a: [text], b: [text]) -> [text]:
+    var out = a
+    for t in b:
+        if not out.contains(t):
+            out.push(t)
+    out
+
+# Applies a notification to the workspace and returns the publishDiagnostics
+# notifications it implies: the edited document plus exactly the open
+# documents whose inbound edges changed (targets before and after the edit).
+pub fn md_lsp_handle_notification_publishing(method: text, params_json: text, workspace: MdWorkspace) -> [MdLspPublish]:
+    if method == "textDocument/didOpen" or method == "textDocument/didChange":
         val uri = _md_lsp_extract_uri(params_json)
         val content = _md_lsp_extract_content(params_json)
         val version = _md_lsp_extract_version(params_json)
+        val before = workspace.get_document(uri).targets
         workspace.open_document(uri, content, version)
-        return
-    if method == "textDocument/didChange":
-        val uri = _md_lsp_extract_uri(params_json)
-        val content = _md_lsp_extract_content(params_json)
-        val version = _md_lsp_extract_version(params_json)
-        workspace.update_document(uri, content, version)
-        return
+        val after = workspace.get_document(uri).targets
+        return _md_lsp_publish_set(uri, workspace.dependents(_md_lsp_union(before, after), uri), workspace)
     if method == "textDocument/didClose":
         val uri = _md_lsp_extract_uri(params_json)
+        val doc = workspace.get_document(uri)
         workspace.close_document(uri)
-        return
-    # "exit" and all other notifications: no-op
+        var out: [MdLspPublish] = [MdLspPublish(uri: uri, json: _md_lsp_publish_notification(uri, doc.version, "complete", "[]"))]
+        for p in _md_lsp_publish_set("", workspace.dependents(doc.targets, uri), workspace):
+            out.push(p)
+        return out
+    # "initialized", "exit" and all other notifications: nothing to publish
+    []
+
+fn md_lsp_handle_notification(method: text, params_json: text, workspace: MdWorkspace):
+    md_lsp_handle_notification_publishing(method, params_json, workspace)
 
 # ---------------------------------------------------------------------------
 # Main request dispatcher
@@ -588,6 +658,9 @@ fn md_lsp_handle_notification(method: text, params_json: text, workspace: MdWork
 
 fn md_lsp_handle_request_raw(method: text, params_json: text, req_id: text, workspace: MdWorkspace) -> text:
     if method == "initialize":
+        val root_start = _lsp_find_field(params_json, "\"rootUri\"")
+        if root_start >= 0:
+            workspace.set_root(lsp_uri_to_path(_lsp_extract_string(params_json, root_start)))
         return md_lsp_initialize_raw(req_id)
     if method == "textDocument/completion":
         return md_lsp_completion_raw(params_json, req_id, workspace)
