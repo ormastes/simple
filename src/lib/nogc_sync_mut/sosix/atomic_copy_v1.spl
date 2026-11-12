@@ -10,9 +10,8 @@ use std.nogc_sync_mut.io.retained_file.{
     RetainedFile, retained_file_open, retained_file_read_at,
     retained_file_identity_unchanged, retained_file_sync
 }
-use std.nogc_sync_mut.io.path_identity.{path_entry_present}
-use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, directory_fsync, file_rename}
-use std.nogc_sync_mut.io.dir_ops.{dir_remove}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, directory_fsync, file_rename, file_is_regular_no_follow}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove, dir_is_real_no_follow}
 use std.nogc_sync_mut.fs.host_path.{host_is_windows_host}
 use std.common.crypto.sha256.{sha256_u8_hex}
 
@@ -144,10 +143,24 @@ fn sosix_atomic_copy_verified_v1(
         return Err(_sosix_atomic_copy_error_v1(SosixAtomicCopyErrorKindV1.SourceDigestMismatch, false))
 
     val parent = _sosix_atomic_copy_parent_v1(destination)?
-    val present = match path_entry_present(destination):
-        case Ok(value): value
-        case Err(_): return Err(_sosix_atomic_copy_error_v1(SosixAtomicCopyErrorKindV1.DestinationInspect, false))
-    if present:
+    # The parent must be observable as a real directory. A missing (or
+    # non-directory) parent is a destination-inspection failure, never a
+    # "missing destination": staging must never create destination parents.
+    # Parents are trusted against rename per the module contract, so one
+    # no-follow real-directory observation of the parent suffices here.
+    if not dir_is_real_no_follow(parent):
+        return Err(_sosix_atomic_copy_error_v1(SosixAtomicCopyErrorKindV1.DestinationInspect, false))
+    # Classify the destination leaf with the same no-follow native predicates
+    # the rest of this module's file vocabulary uses. `path_entry_present` is
+    # deliberately NOT used here: on Windows its spelling rules reject
+    # drive-relative "/tmp/..." paths (PATH_ENTRY_LEAF), which collapsed every
+    # outcome — present, absent, directory — to DestinationInspect, while
+    # retained_file_open/secure_temp_dir/file_rename all accept those paths.
+    # A destination that exists as a real directory cannot be read as the
+    # payload target: that is a read-class failure, not absence.
+    if dir_is_real_no_follow(destination):
+        return Err(_sosix_atomic_copy_error_v1(SosixAtomicCopyErrorKindV1.DestinationRead, false))
+    if file_is_regular_no_follow(destination):
         val existing = _sosix_atomic_copy_read_destination_v1(destination, expected_bytes)
         match existing:
             case Ok(bytes):
