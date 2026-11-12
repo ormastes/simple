@@ -969,8 +969,15 @@ impl HirLowering:
             # Decide from the AST kind, not the lowered nullable HirType slot.
             val v_ast_type: Type = v_type ?? Type(kind: TypeKind.Infer, span: s.span)
             val v_has_annotation = hir_type_kind_disc(v_ast_type.kind) != hir_type_kind_disc(TypeKind.Infer)
-            val v_hir_type = if v_has_annotation:
+            # Lowered once; the bare copy feeds the non-optional Let.type_ payload
+            # (an `if ..: v_hir_type` arm there is `HirType?` and is rejected by
+            # the MIR enum payload check). The Error placeholder is never read.
+            val v_annotated_hir_type: HirType = if v_has_annotation:
                 self.lower_type(v_ast_type)
+            else:
+                HirType(kind: HirTypeKind.Error, span: s.span)
+            val v_hir_type = if v_has_annotation:
+                v_annotated_hir_type
             else:
                 nil
             # `HirStmtKind.Let.type_` is a PLAIN NULLABLE, not an Option box
@@ -1005,7 +1012,7 @@ impl HirLowering:
             self.try_register_local_struct_type(v_symbol, v_init)
             self.try_register_local_tuple_type(v_symbol, v_init)
             val v_binding_type: HirType = if v_has_annotation:
-                v_hir_type
+                v_annotated_hir_type
             else:
                 self.binding_payload_type(v_hir_init, s.bind_optional_payload)
             return HirStmt(kind: HirStmtKind.Let(v_symbol, v_binding_type, v_hir_init), span: s.span)
@@ -1341,8 +1348,10 @@ impl HirLowering:
                 ))
 
             case StmtKind.Break(label):
+                # HIR Break.label is `text` ("" = unlabeled); the AST label is `text?`.
+                val break_label: text = label ?? ""
                 HirStmtKind.Expr(HirExpr(
-                    kind: HirExprKind.Break(label, None),
+                    kind: HirExprKind.Break(break_label, None),
                     has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: s.span),
                     span: s.span
                 ))
