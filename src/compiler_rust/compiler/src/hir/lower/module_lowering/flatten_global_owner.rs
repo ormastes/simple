@@ -24,7 +24,7 @@
 
 use std::collections::HashMap;
 
-use simple_parser::ast::{Node, Pattern};
+use simple_parser::ast::{Expr, FStringPart, Node, Pattern, Type};
 use simple_parser::Module;
 
 use crate::interpreter::{flatten_owner_mangled_name, FLATTEN_GLOBAL_OWNER_MARKER_PREFIX};
@@ -103,6 +103,53 @@ fn declaration_owners(items: &[Node]) -> Vec<(usize, &str, Option<String>)> {
         }
     }
     out
+}
+
+/// `(owner, name)` of every module-global declaration -> its initializer when
+/// the declaration is a `const` bound to a scalar literal, else `None`.
+/// A name one owner declares twice is `None` too (no single value to pick).
+pub(crate) type ConstLiteralCensus = HashMap<(Option<String>, String), Option<Expr>>;
+
+/// True when `value` is a scalar literal whose natural type agrees with the
+/// const's annotation (or there is none), so inlining it elsewhere cannot
+/// change its type.
+fn scalar_literal_matches(value: &Expr, ty: Option<&Type>) -> bool {
+    let annotated = |names: &[&str]| match ty {
+        None => true,
+        Some(Type::Simple(name)) => names.contains(&name.as_str()),
+        Some(_) => false,
+    };
+    match value {
+        Expr::String(_) => annotated(&["text", "str", "String"]),
+        Expr::FString { parts, .. } => {
+            parts.iter().all(|part| matches!(part, FStringPart::Literal(_))) && annotated(&["text", "str", "String"])
+        }
+        Expr::Integer(_) => annotated(&["i64", "int"]),
+        Expr::Float(_) => annotated(&["f64", "float"]),
+        Expr::Bool(_) => annotated(&["bool"]),
+        Expr::TypedInteger(..) | Expr::TypedFloat(..) | Expr::TypedString(..) => ty.is_none(),
+        Expr::Unary { operand, .. } => {
+            ty.is_none() && matches!(operand.as_ref(), Expr::Integer(_) | Expr::Float(_))
+        }
+        _ => false,
+    }
+}
+
+/// Census of literal consts per owner. Must run on the module BEFORE
+/// `module_with_owner_qualified_globals` renames colliding declarations.
+pub(crate) fn const_literal_census(items: &[Node]) -> ConstLiteralCensus {
+    let mut census = ConstLiteralCensus::new();
+    for (index, name, owner) in declaration_owners(items) {
+        let literal = match &items[index] {
+            Node::Const(c) if scalar_literal_matches(&c.value, c.ty.as_ref()) => Some(c.value.clone()),
+            _ => None,
+        };
+        census
+            .entry((owner, name.to_string()))
+            .and_modify(|existing| *existing = None)
+            .or_insert(literal);
+    }
+    census
 }
 
 /// Rename every colliding flattened global to its owner-exact symbol.
