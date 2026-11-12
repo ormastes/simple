@@ -48,13 +48,14 @@ describe "BuildRunner worker execution integration":
     val capability = process_observation_capabilities_v4()
     if capability.is_ok() and not capability.unwrap().available:
         skip("runs the pinned producer and records the actual output digest", "process observation V4 is unavailable on this host")
+    elif not file_exists("/bin/cp"):
+        # Same convention as worker_timeout_cleanup_spec: POSIX producer
+        # fixture, no Windows variant — skip, never fail.
+        skip("runs the pinned producer and records the actual output digest", "this fixture requires POSIX /bin/cp; execution coverage is unverified on this host")
     else:
         it "runs the pinned producer and records the actual output digest":
             if capability.is_err():
                 fail("process observation capability query failed")
-                return
-            if not file_exists("/bin/cp"):
-                fail("this fixture requires /bin/cp; execution coverage is unverified")
                 return
             val root = prepare_worker_execution("success")
             val task = worker_execution_fixture(root)
@@ -77,17 +78,17 @@ describe "BuildRunner worker execution integration":
             val settlement = builder_capacity_settlement_decode_v1(file_read(root + "/capacity.settled"), receipt.identity_digest, "local").unwrap()
             expect(settlement.disposition).to_equal("no-parent-owned")
 
-    it "rejects changed staged input before launching the producer":
-        if not file_exists("/bin/cp"):
-            fail("this fixture requires /bin/cp; execution coverage is unverified")
-            return
-        val root = prepare_worker_execution("changed")
-        val task = worker_execution_fixture(root)
-        expect(builder_write_task_v1(root + "/request.sdn", task)).to_equal(true)
-        expect(file_write(root + "/work/input.txt", "tampered\n")).to_equal(true)
-        expect(builder_worker_execute_v1(root + "/request.sdn", root, "local")).to_equal(2)
-        val receipt = builder_read_result_v1(root + "/result.sdn").unwrap()
-        expect(receipt.status).to_equal("ERROR")
-        expect(receipt.outputs.len()).to_equal(0)
-        expect(file_read(root + "/worker.error")).to_contain("input digest mismatch")
-        expect(file_exists(root + "/work/output.txt")).to_equal(false)
+    if not file_exists("/bin/cp"):
+        skip("rejects changed staged input before launching the producer", "this fixture requires POSIX /bin/cp; execution coverage is unverified on this host")
+    else:
+        it "rejects changed staged input before launching the producer":
+            val root = prepare_worker_execution("changed")
+            val task = worker_execution_fixture(root)
+            expect(builder_write_task_v1(root + "/request.sdn", task)).to_equal(true)
+            expect(file_write(root + "/work/input.txt", "tampered\n")).to_equal(true)
+            expect(builder_worker_execute_v1(root + "/request.sdn", root, "local")).to_equal(2)
+            val receipt = builder_read_result_v1(root + "/result.sdn").unwrap()
+            expect(receipt.status).to_equal("ERROR")
+            expect(receipt.outputs.len()).to_equal(0)
+            expect(file_read(root + "/worker.error")).to_contain("input digest mismatch")
+            expect(file_exists(root + "/work/output.txt")).to_equal(false)

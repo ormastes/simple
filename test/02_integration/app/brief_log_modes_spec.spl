@@ -23,19 +23,27 @@ compare the captured stdout in the failing scenario to reproduce locally.
 
 use std.spec.{describe, it, expect}
 use std.spec.step
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+use std.nogc_sync_mut.env.platform.{get_temp_dir, is_windows}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_remove_all}
+use std.nogc_sync_mut.io.file_ops.{file_create_exclusive}
 
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
-
-val FIXTURE_DIR = "/tmp/simple_brief_log_mode_fixture"
+# Host-derived fixture scope; a hardcoded /tmp breaks every non-POSIX host.
+val FIXTURE_DIR = get_temp_dir().replace("\\", "/") + "/simple_brief_log_mode_fixture"
 
 fn _setup_fixture():
-    val (_out, _err, _code) = rt_process_run("/bin/sh", [
-        "-c",
-        "rm -rf " + FIXTURE_DIR + " && mkdir -p " + FIXTURE_DIR + " && printf 'fn main() -> i64:\\n    0\\n' > " + FIXTURE_DIR + "/main.spl"
-    ])
+    val _removed = dir_remove_all(FIXTURE_DIR)
+    if not dir_create_all(FIXTURE_DIR):
+        fail("could not create fixture dir " + FIXTURE_DIR)
+    if not file_create_exclusive(FIXTURE_DIR + "/main.spl",
+            "fn main() -> i64:\n    0\n"):
+        fail("could not write fixture main.spl under " + FIXTURE_DIR)
 
 fn _run_brief(args: [text]) -> (text, text, i64):
-    rt_process_run("bin/simple", args)
+    # The spawned CLI is the native executable on Windows (bin/simple is a
+    # shell-only name there).
+    val program = if is_windows(): "bin/simple.exe" else: "bin/simple"
+    process_run_bounded(program, args, 120000, 16777216)
 
 describe "brief log mode CLI options":
     it "shows shared log options in help":
