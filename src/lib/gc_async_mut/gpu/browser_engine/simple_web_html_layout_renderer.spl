@@ -2027,8 +2027,13 @@ fn _simple_web_layout_compose_document(
         val split_parts = html.split("<").len()
         var lt_portable = 0
         var lt_scan = 0
-        while lt_scan < html.len():  # cpu-lane-loop-ok: per-character '<' count over the source; runs only inside the degenerate-parse diagnostic branch (nodes.len() <= 1), which is a defect receipt, never a healthy frame
-            if html.char_code_at(lt_scan) == 60:
+        # byte_at scans the BYTE index space (0x3C never occurs inside a UTF-8
+        # multi-byte sequence, so the count is exact); char_code_at is
+        # CODEPOINT-indexed while len() is bytes, so the previous form
+        # under-counted every "<" after a multi-byte character and misled the
+        # split-vs-portable comparison on non-ASCII documents.
+        while lt_scan < html.len():  # cpu-lane-loop-ok: per-byte '<' count over the source; runs only inside the degenerate-parse diagnostic branch (nodes.len() <= 1), which is a defect receipt, never a healthy frame
+            if html.byte_at(lt_scan) == 60:
                 lt_portable = lt_portable + 1
             lt_scan = lt_scan + 1
         print "[web-layout] degenerate-parse html_len={html.len()} nodes={nodes.len()} split_parts={split_parts} lt_portable={lt_portable} rules={rules.group_parts.len()}"
@@ -2040,15 +2045,18 @@ fn _simple_web_layout_compose_document(
         # the document actually is.
         var head_codes = ""
         var dump_i = 0
-        while dump_i < 96 and dump_i < html.len():  # cpu-lane-loop-ok: fixed 96-character head dump, min(96, html.len()) - a literal bound, not a string length, and only on the degenerate-parse diagnostic branch
-            head_codes = "{head_codes} {html.char_code_at(dump_i)}"
+        # byte_at keeps the dump in the byte index space (len() is bytes);
+        # char_code_at here re-walked UTF-8 per element (O(n) each) and its
+        # codepoint index was a byte offset.
+        while dump_i < 96 and dump_i < html.len():  # cpu-lane-loop-ok: fixed 96-byte head dump, min(96, html.len()) - a literal bound, not a string length, and only on the degenerate-parse diagnostic branch
+            head_codes = "{head_codes} {html.byte_at(dump_i)}"
             dump_i = dump_i + 1
         print "[web-layout] degenerate-head-codes{head_codes}"
         var mid_codes = ""
         var mid_i = html.len() / 2
         val mid_end = mid_i + 96
-        while mid_i < mid_end and mid_i < html.len():  # cpu-lane-loop-ok: fixed 96-character mid-document dump (mid_end = mid_i + 96) - a literal bound, not a string length, and only on the degenerate-parse diagnostic branch
-            mid_codes = "{mid_codes} {html.char_code_at(mid_i)}"
+        while mid_i < mid_end and mid_i < html.len():  # cpu-lane-loop-ok: fixed 96-byte mid-document dump (mid_end = mid_i + 96) - a literal bound, not a string length, and only on the degenerate-parse diagnostic branch
+            mid_codes = "{mid_codes} {html.byte_at(mid_i)}"
             mid_i = mid_i + 1
         print "[web-layout] degenerate-mid-codes{mid_codes}"
         # 2026-07-26 second guest run: head decodes to a well-formed
@@ -2063,8 +2071,9 @@ fn _simple_web_layout_compose_document(
             val part = dump_parts[part_i]
             var part_codes = ""
             var pc = 0
-            while pc < 12 and pc < part.len():  # cpu-lane-loop-ok: fixed 12-character prefix dump per split part - a literal bound, not a string length; degenerate-parse diagnostic branch only
-                part_codes = "{part_codes} {part.char_code_at(pc)}"
+            # byte_at, same index-space reason as the head/mid dumps above.
+            while pc < 12 and pc < part.len():  # cpu-lane-loop-ok: fixed 12-byte prefix dump per split part - a literal bound, not a string length; degenerate-parse diagnostic branch only
+                part_codes = "{part_codes} {part.byte_at(pc)}"
                 pc = pc + 1
             print "[web-layout] degenerate-part i={part_i} len={part.len()} codes{part_codes}"
             part_i = part_i + 1
