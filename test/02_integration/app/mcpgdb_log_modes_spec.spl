@@ -1,8 +1,13 @@
 use std.spec.{describe, it, expect}
-use test.helpers.simple_cli_spawn_fixture.{simple_cli_run}
+use test.helpers.simple_cli_spawn_fixture.{simple_cli_run, simple_cli_run_stdin}
+use app.mcpgdb.native_runners_v1.{mcpgdb_bundle_validate_v1}
 
 fn _run_mcpgdb(args: [text]) -> (text, text, i64):
     simple_cli_run(["src/app/mcpgdb/main.spl"] + args, 120000)
+
+fn _ping_mcpgdb() -> (text, text, i64):
+    simple_cli_run_stdin(["src/app/mcpgdb/main.spl"],
+        "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"ping\"}\n", 120000)
 
 describe "mcpgdb log mode CLI options":
     # @manual scenario evidence
@@ -34,6 +39,17 @@ describe "mcpgdb log mode CLI options":
         expect(out).to_contain("\"status\":\"error\"")
         expect(out).to_contain("Unknown mcpgdb option: --surprise")
 
-    # No generic MCP ping example here: the mcpgdb entry point is a
-    # tools/call runner (resident_mi_v1 + file-mediated requests), not a
-    # stdio JSON-RPC server — a `ping` method has no handler by design.
+    it "preserves normal MCP ping handling":
+        # The server refuses to serve without its admitted tool bundle; on
+        # hosts where the bundle digests do not validate (e.g. Windows without
+        # the admitted native bundle) this is an honest skip, never a pass.
+        match mcpgdb_bundle_validate_v1(false):
+            case Ok(_): pass
+            case Err(reason):
+                skip("preserves normal MCP ping handling",
+                    "mcpgdb admitted tool bundle unavailable on this host: " + reason)
+                return
+        val (out, err, code) = _ping_mcpgdb()
+        expect(code).to_equal(0)
+        expect(out).to_contain("\"jsonrpc\":\"2.0\"")
+        expect(out).to_contain("\"result\":{}")
