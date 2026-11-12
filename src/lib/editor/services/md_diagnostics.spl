@@ -22,7 +22,8 @@ use std.common.hash.xxh3.{xxh3_128_hex_text}
 # MD1003 unresolved wiki-link/embed, MD1004 duplicate heading, MD1005
 # unclosed fence, MD1006 invalid frontmatter property, MD1101 missing image
 # alt, MD1102 orphan document, MD1103 inconsistent heading/list structure,
-# MD1104 unsafe/escaping path.
+# MD1104 unsafe/escaping path, MD1105 heading marker without space, MD1106
+# empty link target.
 
 val MD_DIAG_PRODUCER: text = "md-lsp"
 
@@ -110,6 +111,8 @@ pub fn md_diagnose_typed(content: text, path: text) -> [DiagnosticV1]:
     out = _md_push_all(out, _md_lift_all(ctx, md_check_missing_alt_text(content, path), "MD1101"))
     out = _md_push_all(out, _md_lift_all(ctx, md_check_heading_level_skip(content, path), "MD1103"))
     out = _md_push_all(out, _md_check_list_marker_typed(ctx, content, path))
+    out = _md_push_all(out, _md_check_heading_space_typed(ctx, content, path))
+    out = _md_push_all(out, _md_check_empty_link_typed(ctx, content, path))
     # Trailing single space: the safe fix deletes exactly that byte. Two or
     # more trailing spaces are a hard line break and are never reported.
     for d in md_check_trailing_whitespace(content, path):
@@ -190,6 +193,53 @@ fn _md_check_list_marker_typed(ctx: MdSpanCtx, content: text, path: text) -> [Di
                 list_marker = ""
         i = i + 1
     results
+
+# MD1105 for an ATX heading marker run (1-6 `#`) followed directly by text.
+# The span covers the marker run; the safe fix is a zero-width " " insert
+# right after it. Fenced text is skipped.
+fn _md_check_heading_space_typed(ctx: MdSpanCtx, content: text, path: text) -> [DiagnosticV1]:
+    var results: [DiagnosticV1] = []
+    val lines = content.split("\n")
+    var in_fence = false
+    var i = 0
+    while i < lines.len():
+        val line = lines[i]
+        val trimmed = line.trim()
+        if trimmed.starts_with("```"):
+            in_fence = not in_fence
+            i = i + 1
+            continue
+        if not in_fence and trimmed.starts_with("#"):
+            val lead = _md_diag_indent_width(line)
+            var level = 0
+            while lead + level < line.len() and line.char_at(lead + level) == "#":
+                level = level + 1
+            val next = lead + level
+            if level <= 6 and next < line.len() and line.char_at(next) != " " and line.char_at(next) != "\t":
+                val d = DiagnosticV1.new(Severity.Warning, "MD1105", "Heading marker is not followed by a space").with_file(path).with_span(_md_span(ctx, i, lead, next))
+                var fix = DiagnosticFix.new("md:MD1105:" + d.span.unwrap().start.to_text(), "Insert space after heading marker", FixConfidence.Safe)
+                fix.replacements = [FixReplacement.new(path, _md_span(ctx, i, next, next), " ")]
+                results.push(d.with_fix(fix))
+        i = i + 1
+    results
+
+# MD1106 for a [text](url) link whose url is empty. The span covers the whole
+# link token. A fully empty `[]()` gets the likely fix `[text](url)`.
+fn _md_check_empty_link_typed(ctx: MdSpanCtx, content: text, path: text) -> [DiagnosticV1]:
+    var results: [DiagnosticV1] = []
+    for item in _md_diag_find_links_with_positions(content):
+        if item.url.trim().len() != 0:
+            continue
+        val sp = _md_span(ctx, item.line, item.col, item.end_col)
+        val d = DiagnosticV1.new(Severity.Warning, "MD1106", "Link has an empty target").with_file(path).with_span(sp)
+        if item.label.len() == 0:
+            var fix = DiagnosticFix.new("md:MD1106:" + sp.start.to_text(), "Fill empty link", FixConfidence.Likely)
+            fix.replacements = [FixReplacement.new(path, sp, "[text](url)")]
+            results.push(d.with_fix(fix))
+        else:
+            results.push(d)
+    results
+
 
 # MD1001 (target missing) / MD1104 (target escapes the workspace root) for
 # [text](relative/path) links, resolved relative to the document's directory.

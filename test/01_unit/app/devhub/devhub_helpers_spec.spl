@@ -1,28 +1,43 @@
 # @cover src/app/devhub/adapter_github.spl 40%
+# @cover src/app/devhub/adapter_jira.spl 20%
+# @cover src/app/devhub/cmd_outlook.spl 10%
+# @cover src/app/devhub/cmd_minio.spl 10%
 """
 ## Purpose and audience
-Pure URL and argument-building helpers in devhub adapters: GitHub, Jira, Outlook, MinIO.
-These helpers construct shell arguments, error messages, and URL components with no network I/O.
-Audience: devhub maintainer writing specs for URL construction and error handling paths.
+Pure argument- and text-building helpers in devhub adapters: GitHub, Jira, Outlook, MinIO.
+These helpers resolve binaries, map error text, parse issue JSON, and dispatch CLI
+arguments with no network I/O.
+Audience: devhub maintainer writing specs for helper and error-handling paths.
 ## Operator workflow
 bin/simple test test/01_unit/app/devhub/devhub_helpers_spec.spl
 ## Compatibility and limitations
-Pure in-process analysis; no files, no network, no process spawn.
+Pure in-process analysis; no files, no network, no process spawn. The gh_binary case
+sets and removes DEVHUB_REAL_GH in the test process environment only.
 ## Verification guidance and troubleshooting
 A RED on a helper usually means the helper's text transformation changed or the oracle was wrong.
 """
 
 use std.spec
+use std.io_runtime.{env_set_process, env_remove_process}
+use std.common.json.value.{json_value_parse_opt}
 use app.devhub.adapter_github.{gh_binary, gh_actionable_error}
+use app.devhub.adapter_jira.{_parse_trace_id, _parse_jira_issue}
+use app.devhub.cmd_outlook.{_strip_quotes, _truncate, handle_outlook}
+use app.devhub.cmd_minio.{_require_transport, handle_minio}
+use app.devhub.adapter_minio.{MinioConfig}
 
-describe "DevHub pure helpers — URL and argument building":
+describe "DevHub GitHub helpers":
 
-    it "returns gh binary path from environment or default":
+    it "prefers DEVHUB_REAL_GH and falls back to bare gh when unset":
         # @req REQ-DEVHUB-001
-        step("Verify gh_binary() falls back to default when env var is unset")
-        val binary = gh_binary()
-        expect(binary == "" or binary.contains("gh")).to_equal(true)  # oracle: either "gh" or an absolute path ending in gh
-        expect(binary.len()).to_be_greater_than(0)
+        step("Point DEVHUB_REAL_GH at an absolute path")
+        env_set_process("DEVHUB_REAL_GH", "/opt/real/bin/gh")
+        val pinned = gh_binary()
+        step("Remove DEVHUB_REAL_GH")
+        env_remove_process("DEVHUB_REAL_GH")
+        val fallback = gh_binary()
+        expect(pinned).to_equal("/opt/real/bin/gh")
+        expect(fallback).to_equal("gh")  # oracle: shim-free fallback is the bare name
 
     it "maps gh auth failures to actionable error messages":
         # @req REQ-DEVHUB-002
@@ -46,3 +61,63 @@ describe "DevHub pure helpers — URL and argument building":
         val msg = gh_actionable_error("")
         expect(msg.contains("gh error")).to_equal(true)
         expect(msg.contains("auth status")).to_equal(true)
+
+describe "DevHub Jira helpers":
+
+    it "extracts the acli trace id up to the next whitespace":
+        # @req REQ-DEVHUB-003
+        step("Parse trace id from acli stderr")
+        expect(_parse_trace_id("unexpected error, trace id: ab12cd34 retry later")).to_equal("ab12cd34")
+        expect(_parse_trace_id("unexpected error, trace id: ff00\n")).to_equal("ff00")
+        expect(_parse_trace_id("plain failure without marker")).to_equal("")
+
+    it "parses nested fields of a Jira issue JSON object":
+        # @req REQ-DEVHUB-003
+        val src = "{\"key\":\"PROJ-7\",\"fields\":{\"summary\":\"Crash on boot\",\"status\":{\"name\":\"In Progress\"},\"issuetype\":{\"name\":\"Bug\"},\"priority\":{\"name\":\"High\"},\"assignee\":{\"displayName\":\"Ana\"},\"updated\":\"2026-11-12T10:00:00Z\"}}}}"  # `}}` escapes one `}` in a literal
+        step("Parse an acli issue JSON payload")
+        val issue = _parse_jira_issue(json_value_parse_opt(src).unwrap())
+        expect(issue.key).to_equal("PROJ-7")
+        expect(issue.summary).to_equal("Crash on boot")
+        expect(issue.status).to_equal("In Progress")
+        expect(issue.issue_type).to_equal("Bug")
+        expect(issue.priority).to_equal("High")
+        expect(issue.assignee).to_equal("Ana")
+        expect(issue.description).to_equal("")  # oracle: absent field maps to empty
+        expect(issue.to_display()).to_equal("PROJ-7: Crash on boot\nStatus: In Progress\nAssignee: Ana\nType: Bug\nPriority: High")
+
+describe "DevHub Outlook helpers":
+
+    it "strips only a matched pair of surrounding quotes":
+        # @req REQ-DEVHUB-004
+        step("Strip quotes from config values")
+        expect(_strip_quotes("\"inbox\"")).to_equal("inbox")
+        expect(_strip_quotes("inbox")).to_equal("inbox")
+        expect(_strip_quotes("\"")).to_equal("\"")  # oracle: a lone quote is not a pair
+
+    it "truncates long text to max_len with an ellipsis":
+        # @req REQ-DEVHUB-004
+        step("Truncate subjects for table display")
+        expect(_truncate("short", 10)).to_equal("short")
+        expect(_truncate("abcdefghijkl", 8)).to_equal("abcde...")  # oracle: 5 chars + "..." = 8
+
+    it "dispatches help to exit 0 and an unknown command to exit 1":
+        # @req REQ-DEVHUB-004
+        step("Dispatch outlook arguments without network")
+        expect(handle_outlook(["help"])).to_equal(0)
+        expect(handle_outlook(["bogus-subcommand"])).to_equal(1)
+
+describe "DevHub MinIO helpers":
+
+    it "rejects tls_skip_verify and accepts a verifying config":
+        # @req REQ-DEVHUB-005
+        step("Check transport guard on both TLS settings")
+        val ok_cfg = MinioConfig.default()
+        val bad_cfg = MinioConfig(url: "https://minio.local:9000", region: ok_cfg.region, access_key: "", secret_key: "", tls_skip_verify: true)
+        expect(_require_transport(ok_cfg)).to_equal(true)
+        expect(_require_transport(bad_cfg)).to_equal(false)
+
+    it "dispatches help to exit 0 and an unknown command to exit 1":
+        # @req REQ-DEVHUB-005
+        step("Dispatch minio arguments without network")
+        expect(handle_minio(["--help"])).to_equal(0)
+        expect(handle_minio(["bogus-subcommand"])).to_equal(1)
