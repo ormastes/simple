@@ -2324,6 +2324,77 @@ int main(int argc, char** argv) {
                                     .cloned()
                                     .collect();
                                 shared.sort();
+                                // `-u`/`/include` roots are NOT enough on COFF: lld
+                                // handles them after the input-file resolution
+                                // loop, so by then runtime_native.obj (fetched for
+                                // a C-only reference) has already supplied the
+                                // first definition of every shared symbol it
+                                // carries. Measured 2026-11-12 on the rooted Stage 2
+                                // link: 181 shared symbols still resolved into the
+                                // supplement, rt_utf8_validate among them. Plain
+                                // OBJECTS are defined the moment they are read, so
+                                // extract the native_all members that define a
+                                // shared symbol and list them ahead of both archives.
+                                let shared_set: HashSet<&String> = shared.iter().collect();
+                                let listing = nm_command()?
+                                    .arg("-A")
+                                    .arg("-g")
+                                    .arg("-p")
+                                    .arg("--defined-only")
+                                    .arg(external_tool_path(runtime_lib))
+                                    .output()
+                                    .map_err(|e| format!("nm -A {}: {e}", runtime_lib.display()))?;
+                                if !listing.status.success() {
+                                    return Err(format!("nm -A {} failed", runtime_lib.display()));
+                                }
+                                let mut members: Vec<String> = Vec::new();
+                                for line in String::from_utf8_lossy(&listing.stdout).lines() {
+                                    let parts: Vec<&str> = line.split_whitespace().collect();
+                                    if parts.len() < 3 {
+                                        continue;
+                                    }
+                                    let name = parts[parts.len() - 1].to_string();
+                                    if !shared_set.contains(&name) {
+                                        continue;
+                                    }
+                                    let member = parts[0].trim_end_matches(':').rsplit(':').next().unwrap_or("");
+                                    if !member.is_empty() && !members.iter().any(|m| m == member) {
+                                        members.push(member.to_string());
+                                    }
+                                }
+                                if members.is_empty() {
+                                    return Err(format!(
+                                        "core-c-bootstrap: no native_all member defines any of the {} shared rt_* symbols ({})",
+                                        shared.len(),
+                                        runtime_lib.display()
+                                    ));
+                                }
+                                let extract_dir = temp_dir.join("native_all_owner_members");
+                                std::fs::create_dir_all(&extract_dir)
+                                    .map_err(|e| format!("create {}: {e}", extract_dir.display()))?;
+                                let archive_abs = if runtime_lib.is_absolute() {
+                                    runtime_lib.to_path_buf()
+                                } else {
+                                    std::env::current_dir().map_err(|e| e.to_string())?.join(runtime_lib)
+                                };
+                                let ar = super::tools::find_archive_tool()?;
+                                let status = std::process::Command::new(&ar)
+                                    .current_dir(&extract_dir)
+                                    .arg("x")
+                                    .arg(external_tool_path(&archive_abs))
+                                    .args(&members)
+                                    .status()
+                                    .map_err(|e| format!("{ar} x: {e}"))?;
+                                if !status.success() {
+                                    return Err(format!("{ar} x {} failed extracting {} owner member(s)", archive_abs.display(), members.len()));
+                                }
+                                for member in &members {
+                                    let obj = extract_dir.join(member);
+                                    if !obj.is_file() {
+                                        return Err(format!("owner member {} was not extracted from {}", member, archive_abs.display()));
+                                    }
+                                    cmd.arg(external_tool_path(&obj));
+                                }
                                 roots.extend(shared);
                             }
                             // x64 `extern "C"` names are undecorated -- measured
