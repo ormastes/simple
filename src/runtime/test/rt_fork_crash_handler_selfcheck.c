@@ -1,3 +1,8 @@
+/* Non-Windows test: the POSIX/Linux/macOS APIs it uses have no Windows build here. */
+#if defined(_WIN32)
+#include <stdio.h>
+int main(void) { puts("SKIP: rt_fork_crash_handler_selfcheck is POSIX-only; no Windows build"); return 77; }
+#else
 /* Fork bridge + crash handler selfcheck (POSIX).
  *
  * Bug: doc/08_tracking/bug/crash_handler_and_fork_bridge_absent_from_seed_macos_2026-09-06.md
@@ -89,3 +94,5 @@ int main(void) {
     printf("rt_fork_crash_handler_selfcheck: %d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }
+
+#endif /* !_WIN32 */

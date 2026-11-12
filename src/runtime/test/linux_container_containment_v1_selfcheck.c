@@ -1,3 +1,8 @@
+/* Non-Windows test: the POSIX/Linux/macOS APIs it uses have no Windows build here. */
+#if defined(_WIN32)
+#include <stdio.h>
+int main(void) { puts("SKIP: linux_container_containment_v1_selfcheck is POSIX-only; no Windows build"); return 77; }
+#else
 /* AUTHORED_UNRUN. Link real Core-C plus --wrap=close. No namespace/cgroup
  * provisioning and no positive containment fixture. Wrong path and same-namespace
  * captures must preserve partial owners; this is not an empty-group proof. */
@@ -55,3 +60,5 @@ int main(void){
     return 0;
 #endif
 }
+
+#endif /* !_WIN32 */

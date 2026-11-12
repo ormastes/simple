@@ -1,3 +1,8 @@
+/* Non-Windows test: the POSIX/Linux/macOS APIs it uses have no Windows build here. */
+#if defined(_WIN32)
+#include <stdio.h>
+int main(void) { puts("SKIP: rt_mem_guard_native_selfcheck is POSIX-only; no Windows build"); return 77; }
+#else
 /* Sampled guard-page allocator self-check (native C mirror of mem_guard.rs).
  *
  * The core-C bootstrap runtime capsule compiles and runs this check.
@@ -131,3 +136,5 @@ int main(void) {
            failures, failures == 1 ? "" : "s");
     return failures ? 1 : 0;
 }
+
+#endif /* !_WIN32 */

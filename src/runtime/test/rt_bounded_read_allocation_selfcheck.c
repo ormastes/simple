@@ -1,3 +1,8 @@
+/* Non-Windows test: the POSIX/Linux/macOS APIs it uses have no Windows build here. */
+#if defined(_WIN32)
+#include <stdio.h>
+int main(void) { puts("SKIP: rt_bounded_read_allocation_selfcheck is POSIX-only; no Windows build"); return 77; }
+#else
 /* Real runtime contract tests. Link with --wrap=malloc,realloc,free,open,close,
  * fstat,read,__read_chk. The wrappers perform real file I/O and inject only named negative
  * edges or deterministic file mutations after the reader's successful stat.
@@ -238,3 +243,5 @@ int main(int argc, char** argv) {
     printf("{\"bytes\":%zu,\"limit\":%" PRId64 ",\"iterations\":%d,\"elapsed_ns\":%" PRIu64 ",\"max_read_request\":%zu,\"max_malloc_request\":%zu,\"rss_before_KiB\":%ld,\"rss_after_KiB\":%ld,\"asserted_reads\":%u}\n", n, limit, iterations, elapsed, peak_request, peak_allocation, before, after, cases);
     return 0;
 }
+
+#endif /* !_WIN32 */
