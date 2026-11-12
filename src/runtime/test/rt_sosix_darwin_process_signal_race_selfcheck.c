@@ -1,7 +1,7 @@
 /* Non-Windows test: the POSIX/Linux/macOS APIs it uses have no Windows build here. */
 #if defined(_WIN32)
 #include <stdio.h>
-int main(void) { puts("SKIP: rt_sosix_darwin_process_signal_race_selfcheck is POSIX-only; no Windows build"); return 0; }
+int main(void) { puts("SKIP: rt_sosix_darwin_process_signal_race_selfcheck is POSIX-only; no Windows build"); return 77; }
 #else
 /* Deterministic regression for the native snapshot-to-signal exit race. */
 #define _DARWIN_C_SOURCE

@@ -1,7 +1,7 @@
 /* Non-Windows test: the POSIX/Linux/macOS APIs it uses have no Windows build here. */
 #if defined(_WIN32)
 #include <stdio.h>
-int main(void) { puts("SKIP: cli_provider_v1_host_selfcheck is POSIX-only; no Windows build"); return 0; }
+int main(void) { puts("SKIP: cli_provider_v1_host_selfcheck is POSIX-only; no Windows build"); return 77; }
 #else
 /* Host proof: dlopen a real provider and cross both exact runtime ABIs. */
 #include <dlfcn.h>

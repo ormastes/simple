@@ -1,7 +1,7 @@
 /* Non-Windows test: the POSIX/Linux/macOS APIs it uses have no Windows build here. */
 #if defined(_WIN32)
 #include <stdio.h>
-int main(void) { puts("SKIP: rt_sosix_darwin_bound_image_selfcheck is POSIX-only; no Windows build"); return 0; }
+int main(void) { puts("SKIP: rt_sosix_darwin_bound_image_selfcheck is POSIX-only; no Windows build"); return 77; }
 #else
 static void before_spawn_attack(void *image);
 #define SOSIX_DARWIN_IMAGE_BEFORE_SPAWN(image) before_spawn_attack(image)

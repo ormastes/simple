@@ -1,7 +1,7 @@
 /* Non-Windows test: the POSIX/Linux/macOS APIs it uses have no Windows build here. */
 #if defined(_WIN32)
 #include <stdio.h>
-int main(void) { puts("SKIP: process_capture_admission_concurrency_selfcheck is POSIX-only; no Windows build"); return 0; }
+int main(void) { puts("SKIP: process_capture_admission_concurrency_selfcheck is POSIX-only; no Windows build"); return 77; }
 #else
 /* Focused Linux/POSIX regression against the ACTUAL capture/fork owners.
  * The child-delay atfork seam delays real native child setup; it does not

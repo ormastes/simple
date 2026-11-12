@@ -1,7 +1,7 @@
 /* Non-Windows test: the POSIX/Linux/macOS APIs it uses have no Windows build here. */
 #if defined(_WIN32)
 #include <stdio.h>
-int main(void) { puts("SKIP: rt_mem_guard_native_selfcheck is POSIX-only; no Windows build"); return 0; }
+int main(void) { puts("SKIP: rt_mem_guard_native_selfcheck is POSIX-only; no Windows build"); return 77; }
 #else
 /* Sampled guard-page allocator self-check (native C mirror of mem_guard.rs).
  *

@@ -1,7 +1,7 @@
 /* Non-Windows test: the POSIX/Linux/macOS APIs it uses have no Windows build here. */
 #if defined(_WIN32)
 #include <stdio.h>
-int main(void) { puts("SKIP: process_capture_legacy_close_range_selfcheck is POSIX-only; no Windows build"); return 0; }
+int main(void) { puts("SKIP: process_capture_legacy_close_range_selfcheck is POSIX-only; no Windows build"); return 77; }
 #else
 /* Linux compatibility witness against actual production capture owners.
  * A genuine seccomp filter denies close_range before any tested launch.

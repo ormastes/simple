@@ -1,7 +1,7 @@
 /* Non-Windows test: the POSIX/Linux/macOS APIs it uses have no Windows build here. */
 #if defined(_WIN32)
 #include <stdio.h>
-int main(void) { puts("SKIP: rt_dict_scope_read_selfcheck is POSIX-only; no Windows build"); return 0; }
+int main(void) { puts("SKIP: rt_dict_scope_read_selfcheck is POSIX-only; no Windows build"); return 77; }
 #else
 /* Real core-C boundary tests, including private overflow/reuse sabotage.
  * Compile this translation unit with runtime.c, function sections and gc-sections.

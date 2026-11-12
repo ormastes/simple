@@ -1,7 +1,7 @@
 /* Non-Windows test: the POSIX/Linux/macOS APIs it uses have no Windows build here. */
 #if defined(_WIN32)
 #include <stdio.h>
-int main(void) { puts("SKIP: rt_cache_host_unix_sealed_v2_selfcheck is POSIX-only; no Windows build"); return 0; }
+int main(void) { puts("SKIP: rt_cache_host_unix_sealed_v2_selfcheck is POSIX-only; no Windows build"); return 77; }
 #else
 /* Prepared Unix ABI regression; runtime execution UNRUN in this Windows session. */
 #define _GNU_SOURCE

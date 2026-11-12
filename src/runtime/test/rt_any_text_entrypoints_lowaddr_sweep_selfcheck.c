@@ -1,7 +1,7 @@
 /* Non-Windows test: the POSIX/Linux/macOS APIs it uses have no Windows build here. */
 #if defined(_WIN32)
 #include <stdio.h>
-int main(void) { puts("SKIP: rt_any_text_entrypoints_lowaddr_sweep_selfcheck is POSIX-only; no Windows build"); return 0; }
+int main(void) { puts("SKIP: rt_any_text_entrypoints_lowaddr_sweep_selfcheck is POSIX-only; no Windows build"); return 77; }
 #else
 /* SIMILAR-PROBLEM DETECTION sweep for the defect CLASS behind
  * native_text_eq_any_untagged_smallint_deref_2026-07-23.

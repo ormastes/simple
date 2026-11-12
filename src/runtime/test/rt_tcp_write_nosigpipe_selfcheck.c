@@ -1,7 +1,7 @@
 /* Non-Windows test: the POSIX/Linux/macOS APIs it uses have no Windows build here. */
 #if defined(_WIN32)
 #include <stdio.h>
-int main(void) { puts("SKIP: rt_tcp_write_nosigpipe_selfcheck is POSIX-only; no Windows build"); return 0; }
+int main(void) { puts("SKIP: rt_tcp_write_nosigpipe_selfcheck is POSIX-only; no Windows build"); return 77; }
 #else
 /* Compile the actual native owner, as in rt_allocation_registry_churn_selfcheck.
  * The fallback variant removes socket capabilities only in this test TU. */

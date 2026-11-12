@@ -1,7 +1,7 @@
 /* Non-Windows test: the POSIX/Linux/macOS APIs it uses have no Windows build here. */
 #if defined(_WIN32)
 #include <stdio.h>
-int main(void) { puts("SKIP: rt_text_clone_contract_selfcheck is POSIX-only; no Windows build"); return 0; }
+int main(void) { puts("SKIP: rt_text_clone_contract_selfcheck is POSIX-only; no Windows build"); return 77; }
 #else
 /* Actual runtime owners, with compile-time-only allocation/registration faults.
  * The panic stub makes the owner's nonreturning failure observable as exit 101;

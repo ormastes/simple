@@ -1,7 +1,7 @@
 /* Non-Windows test: the POSIX/Linux/macOS APIs it uses have no Windows build here. */
 #if defined(_WIN32)
 #include <stdio.h>
-int main(void) { puts("SKIP: array_join_counted_selfcheck is POSIX-only; no Windows build"); return 0; }
+int main(void) { puts("SKIP: array_join_counted_selfcheck is POSIX-only; no Windows build"); return 77; }
 #else
 /* Real runtime contract fixture. Link with --wrap=malloc,--wrap=calloc,--wrap=free and the paired runtime.
  * baseline mode records the old NUL loss; candidate mode requires counted bytes.

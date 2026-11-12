@@ -1,7 +1,7 @@
 /* Non-Windows test: the POSIX/Linux/macOS APIs it uses have no Windows build here. */
 #if defined(_WIN32)
 #include <stdio.h>
-int main(void) { puts("SKIP: local_unix_external_peer_v1_selfcheck is POSIX-only; no Windows build"); return 0; }
+int main(void) { puts("SKIP: local_unix_external_peer_v1_selfcheck is POSIX-only; no Windows build"); return 77; }
 #else
 /* EXTERNAL peer protocol: invoke server/client separately under ALREADY
  * provisioned distinct UIDs. Never creates users, forks peers, changes identity

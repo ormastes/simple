@@ -1,7 +1,7 @@
 /* Non-Windows test: the POSIX/Linux/macOS APIs it uses have no Windows build here. */
 #if defined(_WIN32)
 #include <stdio.h>
-int main(void) { puts("SKIP: vector_bitmap_target_selfcheck is POSIX-only; no Windows build"); return 0; }
+int main(void) { puts("SKIP: vector_bitmap_target_selfcheck is POSIX-only; no Windows build"); return 77; }
 #else
 #include "../simple_vector_kernel_abi_v1.h"
 #include <stdio.h>

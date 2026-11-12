@@ -1,7 +1,7 @@
 /* Non-Windows test: the POSIX/Linux/macOS APIs it uses have no Windows build here. */
 #if defined(_WIN32)
 #include <stdio.h>
-int main(void) { puts("SKIP: rt_bounded_read_fifo_selfcheck is POSIX-only; no Windows build"); return 0; }
+int main(void) { puts("SKIP: rt_bounded_read_fifo_selfcheck is POSIX-only; no Windows build"); return 77; }
 #else
 /* Link the actual C provider, never a copied reader. TEXT_ONLY selects runtime.c;
  * the default selects runtime_native.c's text and byte-array entry points.

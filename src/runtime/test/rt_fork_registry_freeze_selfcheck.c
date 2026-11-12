@@ -1,7 +1,7 @@
 /* Non-Windows test: the POSIX/Linux/macOS APIs it uses have no Windows build here. */
 #if defined(_WIN32)
 #include <stdio.h>
-int main(void) { puts("SKIP: rt_fork_registry_freeze_selfcheck is POSIX-only; no Windows build"); return 0; }
+int main(void) { puts("SKIP: rt_fork_registry_freeze_selfcheck is POSIX-only; no Windows build"); return 77; }
 #else
 /* Self-check for the fork-child heap-registry freeze
  * (spl_immortal_registry_freeze_for_fork_child_v1, called by
