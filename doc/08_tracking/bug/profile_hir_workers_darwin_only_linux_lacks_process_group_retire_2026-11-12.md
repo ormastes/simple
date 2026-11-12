@@ -4,6 +4,7 @@
 - Severity: P1. On Linux, every HIR shard pool (the coordinator and the Stage 3 capsule) runs serially.
 - Found: 2026-11-12, by the early Phase 3 lane on aarch64 Linux
 - Component: `src/runtime/runtime_process_owned.c` (Process Observation V4 owner)
+- Next gate (2026-11-12, with a Stage 2 built against this fix): `owned executable pin was rejected` — see `profile_hir_workers_linux_pin_rejects_dynamic_elf_2026-11-12.md`
 
 ## Observation
 With every env admission fixed (#8610, #8619, #8639), the HIR profile admits the pool, but every owner fails to start:
