@@ -293,7 +293,7 @@ impl<'a> MirLowerer<'a> {
     /// A literal that HIR typed `ANY` is still a RAW machine word (it is what
     /// `box_arg_for_any_param` boxes on the way INTO a tagged slot), so it must
     /// never be fed to the tagged->raw decoders.
-    fn is_raw_literal_typed_any(arg: &HirExpr) -> bool {
+    pub(super) fn is_raw_literal_typed_any(arg: &HirExpr) -> bool {
         arg.ty == TypeId::ANY
             && matches!(
                 arg.kind,

@@ -255,6 +255,60 @@ impl<'a> MirLowerer<'a> {
                             });
                         }
                     }
+                    // Exactly one `ANY` side in a float-capable op: the any
+                    // operand may be an int OR a float at run time, so no
+                    // static decode is right for it. Decoding by the concrete
+                    // side's type read a tagged int as a float (`v + 0.5` with
+                    // `v = 2` answered 0.5) and a tagged float as an int. Box
+                    // the concrete numeric side and dispatch on the tags, as
+                    // ANY+ANY does.
+                    if left_is_any != right_is_any
+                        && !Self::is_raw_literal_typed_any(left)
+                        && !Self::is_raw_literal_typed_any(right)
+                    {
+                        let concrete = if left_is_any { right } else { left };
+                        let numeric = matches!(
+                            concrete.ty,
+                            TypeId::I8
+                                | TypeId::I16
+                                | TypeId::I32
+                                | TypeId::I64
+                                | TypeId::U8
+                                | TypeId::U16
+                                | TypeId::U32
+                                | TypeId::F32
+                                | TypeId::F64
+                        );
+                        let helper = match op {
+                            BinOp::Add => Some("rt_any_add"),
+                            BinOp::Sub => Some("rt_any_sub"),
+                            BinOp::Mul => Some("rt_any_mul"),
+                            BinOp::Div => Some("rt_any_div"),
+                            BinOp::Mod => Some("rt_any_mod"),
+                            BinOp::Lt => Some("rt_any_lt"),
+                            BinOp::Gt => Some("rt_any_gt"),
+                            BinOp::LtEq => Some("rt_any_le"),
+                            BinOp::GtEq => Some("rt_any_ge"),
+                            _ => None,
+                        };
+                        if let (true, Some(helper)) = (numeric, helper) {
+                            if left_is_any {
+                                right_reg = self.box_arg_for_any_param(right_reg, right)?;
+                            } else {
+                                left_reg = self.box_arg_for_any_param(left_reg, left)?;
+                            }
+                            return self.with_func(|func, current_block| {
+                                let dest = func.new_vreg();
+                                let block = func.block_mut(current_block).unwrap();
+                                block.instructions.push(MirInst::Call {
+                                    dest: Some(dest),
+                                    target: crate::mir::CallTarget::from_name(helper),
+                                    args: vec![left_reg, right_reg],
+                                });
+                                dest
+                            });
+                        }
+                    }
                     // Float-ness comes from a concrete side when there is one;
                     // ANY+ANY reaching here is bit/shift only (integer lane).
                     let concrete_ty = if !left_is_any {
@@ -638,6 +692,29 @@ impl<'a> MirLowerer<'a> {
         } else {
             self.lower_expr(operand)?
         };
+
+        // `-v` on a tagged `ANY` word: a raw negate is right for a tagged int
+        // only by coincidence and wrong for a float box (`-anyf(2.5)` printed
+        // `<value:0x...>`). Lower it as the run-time dispatched `0 - v`.
+        if op == UnaryOp::Neg && operand.ty == TypeId::ANY && !Self::is_raw_literal_typed_any(operand) {
+            return self.with_func(|func, current_block| {
+                let zero = func.new_vreg();
+                let boxed_zero = func.new_vreg();
+                let dest = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::ConstInt { dest: zero, value: 0 });
+                block.instructions.push(MirInst::BoxInt {
+                    dest: boxed_zero,
+                    value: zero,
+                });
+                block.instructions.push(MirInst::Call {
+                    dest: Some(dest),
+                    target: crate::mir::CallTarget::from_name("rt_any_sub"),
+                    args: vec![boxed_zero, operand_reg],
+                });
+                dest
+            });
+        }
 
         self.with_func(|func, current_block| {
             let dest = func.new_vreg();
