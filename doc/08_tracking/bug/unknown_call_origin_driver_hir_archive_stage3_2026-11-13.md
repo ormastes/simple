@@ -71,3 +71,19 @@ still shadow a callable named in driver_hir_archive_schedule_v1).
    `unknown_call_origin_panics_codegen_worker_2026-11-12.md`.
 4. New pinned snapshot after the fix; stage3 attempt J from the new tip (146 commits have
    landed on release/1.0.0 since df719eff44cf).
+
+## Correction (2026-11-13 ~03:20 KST): actual panic module is likely driver_pipeline_lowering
+
+The `current=` build line lags batch logging. Cache forensics on
+stage3-native-cache prove the real order: aot objects were published at
+02:05:51-53 for batch-35 modules idx 1 (driver_hir_archive_schedule_v1),
+2 (native_staged_codegen), 3 (go_to_end), 5 (driver_aot_codegen_outputs),
+6 (driver_aot_smf_output); idx 4 (retained_source_traversal_v1, structs-only,
+no functions) emits no aot. The first module attempted after 02:05:53 with NO
+aot and NO build_cache row is therefore **idx 7,
+compiler.driver.driver_pipeline_lowering** (functions=48), with idx 8
+(driver_pipeline_execution, functions=2) next. driver_pipeline_lowering is a
+1771-line module dense in transient/sffi machinery (transient_owner_sffi
+wrappers, sha256_text, std.-alias imports) -- consistent with the registry
+origin-miss hypothesis. J lane (tip pin incl. #8703 named panic) will confirm
+the callee name definitively.
