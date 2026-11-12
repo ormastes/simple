@@ -1506,13 +1506,74 @@ static int owned_darwin_group_live(pid_t group, size_t* live) {
 }
 #endif
 
+#ifdef __linux__
+/* Live members of process group `group`, excluding zombies, from a /proc scan
+ * (Linux has no KERN_PROC_PGRP). Each /proc/<pid>/stat is split at the LAST
+ * ')' because comm may itself contain spaces and parentheses; the fields that
+ * follow are state, ppid, pgrp. A process that exits mid-scan (ENOENT/ESRCH)
+ * is absent; any other read failure is a sampling failure, never absence.
+ * Called only for an exited, still-unreaped group leader (the retire check)
+ * and at the cleanup deadline -- never on an ordinary poll tick. */
+static int owned_linux_group_live(pid_t group, size_t* live) {
+    DIR* proc = opendir("/proc");
+    if (!proc) return errno ? errno : EIO;
+    size_t count = 0;
+    int failure = 0;
+    struct dirent* entry;
+    while ((entry = readdir(proc)) != NULL) {
+        const char* name = entry->d_name;
+        if (name[0] < '1' || name[0] > '9') continue;
+        int numeric = 1;
+        for (const char* c = name; *c; c++) if (*c < '0' || *c > '9') { numeric = 0; break; }
+        if (!numeric) continue;
+        char path[64];
+        if (snprintf(path, sizeof(path), "/proc/%s/stat", name) >= (int)sizeof(path)) continue;
+        int fd = open(path, O_RDONLY | O_CLOEXEC);
+        if (fd < 0) {
+            if (errno != ENOENT && errno != ESRCH && failure == 0) failure = errno;
+            continue;
+        }
+        char line[1024];
+        ssize_t length;
+        do length = read(fd, line, sizeof(line) - 1); while (length < 0 && errno == EINTR);
+        int read_error = length < 0 ? errno : 0;
+        close(fd);
+        if (length <= 0) {
+            if (read_error != 0 && read_error != ESRCH && read_error != ENOENT && failure == 0)
+                failure = read_error;
+            continue;
+        }
+        line[length] = 0;
+        char* close_paren = strrchr(line, ')');
+        if (!close_paren) { if (failure == 0) failure = EPROTO; continue; }
+        char state = 0; long parent = 0, pgrp = 0;
+        if (sscanf(close_paren + 1, " %c %ld %ld", &state, &parent, &pgrp) != 3) {
+            if (failure == 0) failure = EPROTO;
+            continue;
+        }
+        if ((pid_t)pgrp == group && state != 'Z' && state != 'X' && state != 'x') count++;
+    }
+    closedir(proc);
+    if (failure) return failure;
+    *live = count;
+    return 0;
+}
+
+/* Fail closed: ProcessGroup retirement is advertised and admitted on Linux
+ * only when this process can read and parse its own /proc stat entry. */
+static int owned_linux_group_retire_available(void) {
+    size_t live = 0;
+    return owned_linux_group_live(getpgrp(), &live) == 0 && live > 0;
+}
+#endif
+
 /* Called with the slot lock held, only after waitid(WNOWAIT) observed the
  * exited but unreaped leader. Leader-only slots are always ready. A
  * ProcessGroup slot is ready only when its pinned group has no live member;
  * otherwise every remaining member is sent SIGKILL and the caller retries. */
 static int owned_group_retire_ready(RtOwnedSlot* slot) {
     if (!slot->group_retire) return 1;
-#ifdef RT_OWNED_DARWIN_V4
+#if defined(RT_OWNED_DARWIN_V4) || defined(__linux__)
     int64_t now = owned_now_ns();
     if (now < 0) { slot->clock_failed = 1; return 0; }
     owned_arm_unlimited_cleanup(slot, now, 0);
@@ -1525,7 +1586,14 @@ static int owned_group_retire_ready(RtOwnedSlot* slot) {
         return 1;
     }
     size_t live = 1;
+    /* Scan first; signal only a group the scan found non-empty. The exited but
+     * unreaped leader pins pgid == its pid, so the id cannot be recycled
+     * between this scan and the kill below. */
+#ifdef RT_OWNED_DARWIN_V4
     int error = owned_darwin_group_live(slot->pgid, &live);
+#else
+    int error = owned_linux_group_live(slot->pgid, &live);
+#endif
     if (error) {
         if (slot->runtime_error == 0) { slot->runtime_error = error; slot->group_sample_error = error; }
         return 0;
@@ -4185,7 +4253,10 @@ SplArray* rt_process_observation_v4_ack_collect_value(SplArray* ticket,
 
 SplArray* rt_process_observation_v4_capabilities_value(void) {
 #ifdef __linux__
-    const int64_t values[8] = {POV4_VERSION_VALUE, 8, 1, POV4_CAPABILITIES,
+    /* ProcessGroup retirement only when the /proc group scan works here. */
+    const int64_t linux_capabilities = POV4_CAPABILITIES |
+        (owned_linux_group_retire_available() ? POV4_CAP_PROCESS_GROUP_RETIRE : 0);
+    const int64_t values[8] = {POV4_VERSION_VALUE, 8, 1, linux_capabilities,
         POV4_SLOTS, RT_OWNED_ABI_MAX_OUTPUT_BYTES, POV4_MAX_WAIT_NS, 0};
 #elif defined(RT_OWNED_DARWIN_V4)
     const int64_t values[8] = {POV4_VERSION_VALUE, 8, 1, POV4_DARWIN_CAPABILITIES,
@@ -4280,7 +4351,14 @@ static SplArray* pov4_start_pinned_impl(
         int memory_unavailable = request.enforcement_kind != POV4_ENFORCEMENT_NONE ||
             request.memory_limit != 0;
 #else
-    if (request.descendant_policy != POV4_DESCENDANT_LEADER ||
+    /* ProcessGroup is admitted on Linux exactly when it is advertised. */
+#ifdef __linux__
+    int group_policy_admitted = request.descendant_policy == POV4_DESCENDANT_PROCESS_GROUP &&
+        owned_linux_group_retire_available();
+#else
+    int group_policy_admitted = 0;
+#endif
+    if ((request.descendant_policy != POV4_DESCENDANT_LEADER && !group_policy_admitted) ||
         (request.enforcement_kind != POV4_ENFORCEMENT_NONE &&
          request.enforcement_kind != POV4_ENFORCEMENT_RLIMIT_AS)) {
         int memory_unavailable = request.enforcement_kind != POV4_ENFORCEMENT_NONE &&
