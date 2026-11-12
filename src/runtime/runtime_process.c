@@ -2053,7 +2053,7 @@ done:
 #define RT_HAL_ELF_MAX_NEEDED 256
 #define RT_HAL_ELF_MAX_STRTAB (1024 * 1024)
 
-static bool rt_hal_elf64_loader_closure_ok(int fd, off_t size, const Elf64_Ehdr* eh,
+static bool hal_elf64_loader_closure_ok(int fd, off_t size, const Elf64_Ehdr* eh,
                                            char* loader_out) {
     Elf64_Phdr interp, dynamic, loads[RT_HAL_ELF_MAX_LOADS];
     int interp_count = 0, dynamic_count = 0, load_count = 0;
@@ -2128,7 +2128,7 @@ static bool rt_hal_elf64_loader_closure_ok(int fd, off_t size, const Elf64_Ehdr*
     return true;
 }
 
-static bool rt_hal_pinnable_elf_fd(int fd, off_t size, char* loader_out) {
+static bool hal_pinnable_elf_fd(int fd, off_t size, char* loader_out) {
     if (loader_out) loader_out[0] = '\0';
     unsigned char ident[EI_NIDENT];
     if (pread(fd, ident, sizeof(ident), 0) != (ssize_t)sizeof(ident) ||
@@ -2150,7 +2150,7 @@ static bool rt_hal_pinnable_elf_fd(int fd, off_t size, char* loader_out) {
             if (ph.p_type == PT_DYNAMIC) has_dynamic = true;
         }
         if (!has_interp && !has_dynamic) return eh.e_type == ET_EXEC;
-        if (has_interp && has_dynamic) return rt_hal_elf64_loader_closure_ok(fd, size, &eh, loader_out);
+        if (has_interp && has_dynamic) return hal_elf64_loader_closure_ok(fd, size, &eh, loader_out);
         return false;
     }
     if (ident[EI_CLASS] == ELFCLASS32) {
@@ -2213,7 +2213,7 @@ int64_t rt_process_acquire_pinned_executable(int64_t handle) {
         st.st_size > (off_t)(64 * 1024 * 1024) || seals < 0 ||
         (seals & (F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL)) !=
         (F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL) ||
-        !rt_hal_pinnable_elf_fd(duplicate, st.st_size, NULL)) {
+        !hal_pinnable_elf_fd(duplicate, st.st_size, NULL)) {
         close(duplicate); errno = ESTALE; return -1;
     }
     return duplicate;
@@ -2316,7 +2316,7 @@ int64_t rt_process_pin_executable(const char* canonical_path) {
     if (fstat(source, &st) != 0 || !S_ISREG(st.st_mode) ||
         st.st_size <= 0 || st.st_size > (off_t)(64 * 1024 * 1024) ||
         (st.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH)) == 0 ||
-        !rt_hal_pinnable_elf_fd(source, st.st_size, NULL)) {
+        !hal_pinnable_elf_fd(source, st.st_size, NULL)) {
         close(source);
         return -1;
     }
@@ -2359,7 +2359,7 @@ int64_t rt_process_pin_executable(const char* canonical_path) {
         fcntl(pinned, F_ADD_SEALS,
               F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL) != 0 ||
         fstat(pinned, &pinned_stat) != 0 || pinned_stat.st_size != copied ||
-        !rt_hal_pinnable_elf_fd(pinned, pinned_stat.st_size, loader) ||
+        !hal_pinnable_elf_fd(pinned, pinned_stat.st_size, loader) ||
         (fcntl(pinned, F_GET_SEALS) & (F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL)) !=
             (F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL)) {
         close(pinned);

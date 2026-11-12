@@ -52,6 +52,9 @@ Three options were read before choosing.
    actually loads; binding it means exec through a pinned ld.so with a pinned
    private library directory (a mini-sysroot). Recorded as the follow-up the
    original comment anticipated.
+   TODO (follow-up): also refuse `GLIBC_TUNABLES` in `pov4_environment_steers_loader`.
+   It tunes loader behaviour without adding a search path and the HIR worker
+   allowlist already refuses it by name, so this is defense in depth, not a gap.
 
 **Chosen: a bounded form of (2) that is exactly what the Darwin pin already
 gives.** `owned_darwin_pin_is_macho` admits any Mach-O main image; dyld and
@@ -61,7 +64,7 @@ identity). The Linux pin now gives the same guarantee for a dynamic image, and
 refuses every way the image or the environment could steer library resolution
 off the system loader paths.
 
-Admitted classes (`rt_hal_pinnable_elf_fd`, replacing `rt_hal_static_elf_fd` at
+Admitted classes (`hal_pinnable_elf_fd`, replacing `rt_hal_static_elf_fd` at
 its three call sites: pin source, sealed memfd, acquire-at-launch):
 
 - **static** — `ET_EXEC`, no `PT_INTERP`, no `PT_DYNAMIC`. Unchanged. ELFCLASS32 and ELFCLASS64.

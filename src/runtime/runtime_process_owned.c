@@ -1162,7 +1162,7 @@ RT_OWNED_MAYBE_UNUSED static int owned_confirm_exec_v4(pid_t pid, int exec_error
 #endif
 
 /* A Linux pin may hold a system-loader dynamic image (runtime_process.c
- * rt_hal_pinnable_elf_fd): its libraries resolve from the system loader paths
+ * hal_pinnable_elf_fd): its libraries resolve from the system loader paths
  * only. Any LD_* variable moves that resolution (LD_PRELOAD, LD_LIBRARY_PATH,
  * LD_AUDIT, ...), so a pinned launch environment carrying one is refused
  * before any slot or child exists, on every path that fexecve()s a pin. The

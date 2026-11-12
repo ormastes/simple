@@ -1,5 +1,5 @@
 /* Linux owned launch: the pinned image may be in the system-loader dynamic
- * class (runtime_process.c rt_hal_pinnable_elf_fd), whose only library-path
+ * class (runtime_process.c hal_pinnable_elf_fd), whose only library-path
  * guarantee is that resolution follows the system loader paths. An LD_*
  * variable in the launch environment moves that resolution, so pov4_start_exact
  * refuses such an environment before any slot or child exists.
