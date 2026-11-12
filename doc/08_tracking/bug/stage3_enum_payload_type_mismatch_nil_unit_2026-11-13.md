@@ -160,3 +160,21 @@ route), rebuild stage2 with the SEED (~11 min, run-k-stage2.sh pattern), run
 the 15-line repro, capture the seed's route. Diff against the J2 binary's
 route on the same input. The diverging branch condition is the fixpoint
 break; fix it, then K lane.
+
+## REFRAME (2026-11-13 ~07:40): fixpoint between Simple generations is INTACT
+
+Instrumented seed-built stage2 (fresh, from tip+trace patch) REJECTS the
+15-line repro identically to the J2 stage2-admitted binary. The RUST seed is
+the outlier that accepts. Both Simple-compiled generations agree (strict) --
+the self-host fixpoint holds; the new-pin SOURCES contain enum constructions
+that only the rust seed's leniency accepts (the generated codec churn from the
+sdn-protocol-codec-fixes merges #8681/fe3425d0ca6 in the range is the likely
+introducer of `var f_value: BlockValue? = nil` into the plain-Block slot).
+
+Implication: NO compiler fix is needed for the bootstrap. The K lane is pure
+source alignment (02821241513 precedent): fix the generated codec's optional
+local emission (generator, not the generated file) plus the ~7 hand-written
+sites so the declared payload types flow. The old pin passed MIR because its
+codec emitted compatible shapes. NOTE: another lane is concurrently active on
+the sdn enum-payload divergence (main-tree commit 671d5545201) -- coordinate
+before large generator changes.
