@@ -564,12 +564,23 @@ pub fn lsp_handle_rename(id: text, body: text) -> text:
 # --- Formatting (canonical formatter, run as a child like the queries) ---
 
 pub fn lsp_handle_formatting(id: text, body: text) -> text:
-    val file_path = _uri_to_path(_extract_uri(body))
-    val original = read_file(file_path)
-    val cmd = LspQueryCommandV1(["src/compiler/90.tools/formatter/main.spl", file_path], 30000)
+    val uri = _extract_uri(body)
+    val file_path = _uri_to_path(uri)
+    # Format the unsaved editor overlay when one exists (staged to a temp
+    # copy, same as diagnostics); otherwise the on-disk file.
+    val source = lsp_diagnostics_stage_source_v1(uri, file_path)
+    if source.path == "":
+        return make_json_result(id=id, result=SB_L() + SB_R())
+    val snapshot = lsp_document_snapshot(uri)
+    val original = if source.overlay and snapshot != nil: snapshot.unwrap().content else: read_file(file_path)
+    val cmd = LspQueryCommandV1(["src/compiler/90.tools/formatter/main.spl", source.path], 30000)
     var out = ""
     var exit_code: i64 = 0
     (out, exit_code) = lsp_run_query_command_v1(_find_simple_binary(), cmd)
+    lsp_diagnostics_release_source_v1(source)
+    # A newer change superseded the formatted snapshot: its edit would be stale.
+    if not lsp_diagnostics_source_is_current_v1(source):
+        return make_json_result(id=id, result=SB_L() + SB_R())
     if exit_code != 0 or out.starts_with("Error"):
         return make_json_result(id=id, result=SB_L() + SB_R())
     # The formatter prints the document followed by print()'s own newline.
