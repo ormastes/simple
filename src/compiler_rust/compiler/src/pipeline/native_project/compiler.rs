@@ -278,10 +278,12 @@ fn is_simple_name_pattern(pattern: &simple_parser::Pattern) -> bool {
 /// (`Undefined("undefined identifier: g")`) whenever the entry had no `fn main`.
 /// Position-independent (it names importer, alias and source), unlike the
 /// global-owner marker, which tags the declaration that follows it and so must
-/// stay where it is.
+/// stay where it is. The whole-module namespace marker (`use a.b as m`) is the
+/// same kind of metadata and must stay top-level for the same reason.
 fn is_import_binding_marker(node: &Node) -> bool {
     matches!(node, Node::Const(decl)
-        if decl.name.starts_with(crate::interpreter::FLATTEN_IMPORT_BINDING_MARKER_PREFIX))
+        if decl.name.starts_with(crate::interpreter::FLATTEN_IMPORT_BINDING_MARKER_PREFIX)
+            || decl.name.starts_with(crate::interpreter::FLATTEN_MODULE_NAMESPACE_MARKER_PREFIX))
 }
 
 fn is_liftable_global_decl(node: &Node) -> bool {
