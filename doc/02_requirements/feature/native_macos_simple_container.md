@@ -36,3 +36,9 @@ policy layer is implemented in pure Simple and runs on any host:
 Every host without recorded native evidence reports `Unqualified`, so
 admission is blocked (SCMAC-PLATFORM-001). Real macOS qualification of
 enforcement remains open; no requirement here is satisfied by these models.
+The direct-Seatbelt lane (`macos-seatbelt-process-v1`) is a separate profile
+with its own requirement IDs SC-MAC-001..024 in
+[simple_container_macos_seatbelt](../../05_design/simple_container_macos_seatbelt.md);
+it does not rewrite REQ-NMC-001..005. Its profile emitter, qualification model
+and fail-closed provider exist in source; no SC-MAC requirement that needs a
+native macOS receipt is satisfied yet.

@@ -82,3 +82,26 @@ identity + port + protocol + generation. `pod-ip-v1` is always rejected.
 The broker transport (open/connect/accept/poll/close) is unqualified and fails
 closed, so `endpoint-v1` admission stays blocked until a real macOS data plane
 records native evidence.
+## Separate direct-Seatbelt lane (2026-11-13)
+
+A second, independent macOS lane exists beside the signed-App-Sandbox route:
+backend `macos-seatbelt-process`, engine `macos-seatbelt-process-v1`
+(design: [simple_container_macos_seatbelt](../05_design/simple_container_macos_seatbelt.md)).
+It never aliases `docker`, `podman` or `macos-native-sandbox-v1`, and the
+signed-helper provider above is unchanged. Implemented as pure Simple under
+`src/lib/nogc_async_mut/container/providers/macos/`:
+
+- `seatbelt_profile_v1.spl` — deterministic SBPL emitter: fixed baseline
+  revision, `(deny default)`, separate read-data / read-metadata / write /
+  execute rules, strict literal escaping and byte limits, no user SBPL/regex/
+  import, direct network denied, one granted broker unix socket, digest.
+- `seatbelt_capabilities_v1.spl` — canary plan + qualification manifest; reports
+  `unqualified` until a Darwin probe records every canary for the exact OS
+  build, architecture, helper digest, runtime ABI and baseline revision.
+- `seatbelt_provider_v1.spl` — `MacOsSeatbeltAdapterV1` (facade function set),
+  §8.1 lifecycle mapping, §10.2 attempt directory plan and §8.2 launch steps.
+  Every native effect fails closed (`blocked`, `SCMAC-*` reason, lifecycle not
+  advanced) until the SOSIX Darwin sandbox owner exists and qualification
+  passes. Not yet wired into `SimpleContainerOwnerV2`.
+
+Nothing in this lane has been run on macOS; no enforcement is claimed.

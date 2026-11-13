@@ -1,0 +1,263 @@
+# macOS Seatbelt (SBPL) profile emitter for the `macos-seatbelt-process-v1`
+# engine (design doc/05_design/simple_container_macos_seatbelt.md §9.3, §10.3).
+#
+# Pure and deterministic: the same validated plan always yields the same bytes
+# and digest. The baseline is fixed and repository-controlled; callers supply
+# only typed path grants, protected roots and the broker endpoint. There is no
+# way to pass SBPL text, a regex, an include/import path or executable policy
+# code. Every literal is validated (absolute, ASCII printable, bounded, no
+# `.`/`..`/`//` segments) and then escaped, so a path can never terminate its
+# string literal or introduce a new form.
+#
+# The baseline below is UNQUALIFIED: it has not been run against any macOS
+# build. Emitting a profile is not evidence that the profile enforces anything;
+# qualification lives in seatbelt_capabilities_v1 and needs real canaries.
+#
+# Input types: the portable filesystem/endpoint policy contracts (work item C2,
+# common/contracts/container/filesystem_policy_v1 + endpoint_policy_v1) are not
+# on the release line yet. `SeatbeltPolicyInputV1` is the narrow local adapter
+# this lowering consumes; unify it with the C2 types once they land.
+
+use std.common.crypto.sha256.sha256_text
+
+pub const SEATBELT_PROFILE_SCHEMA_V1 = "simple-seatbelt-profile-v1"
+pub const SEATBELT_BASELINE_ID_V1 = "simple-seatbelt-baseline-v1"
+pub const SEATBELT_BASELINE_REVISION_V1: i64 = 1
+
+pub const SEATBELT_PATH_MAX_BYTES_V1: i64 = 1024
+pub const SEATBELT_GRANT_MAX_V1: i64 = 256
+pub const SEATBELT_PROTECTED_MAX_V1: i64 = 64
+pub const SEATBELT_PROFILE_MAX_BYTES_V1: i64 = 65536
+
+# Separate capability classes (design §9.3 item 3). IPC is not a grant class:
+# the only socket authority is the single explicitly granted broker endpoint.
+pub const SEATBELT_ACCESS_READ_DATA_V1 = "read-data"
+pub const SEATBELT_ACCESS_READ_METADATA_V1 = "read-metadata"
+pub const SEATBELT_ACCESS_WRITE_V1 = "write"
+pub const SEATBELT_ACCESS_EXECUTE_V1 = "execute"
+
+pub const SEATBELT_SCOPE_LITERAL_V1 = "literal"
+pub const SEATBELT_SCOPE_SUBPATH_V1 = "subpath"
+
+pub const SEATBELT_NETWORK_NONE_V1 = "none"
+pub const SEATBELT_NETWORK_ENDPOINT_V1 = "endpoint-v1"
+pub const SEATBELT_NETWORK_POD_IP_V1 = "pod-ip-v1"
+
+pub struct SeatbeltFsGrantInputV1:
+    path: text
+    scope: text
+    access: text
+
+# Local adapter for the pending C2 portable policy. Host paths here must
+# already be resolved by the effectful filesystem boundary (§7.2, §10.4); this
+# module performs lexical validation only and never touches the filesystem.
+pub struct SeatbeltPolicyInputV1:
+    grants: [SeatbeltFsGrantInputV1]
+    protected_roots: [text]
+    network_profile: text
+    direct_network: bool
+    broker_endpoint: text?
+
+pub struct SeatbeltProfileV1:
+    schema: text
+    baseline_id: text
+    baseline_revision: i64
+    profile_text: text
+    byte_len: i64
+    digest: text
+
+# Broad roots no grant may equal or contain (design §9.3 item 6): no blanket
+# user-home, temp, device, volume or whole-system allowance to fix compatibility.
+fn _seatbelt_broad_roots_v1() -> [text]:
+    ["/", "/Users", "/tmp", "/private", "/private/tmp", "/private/var", "/var",
+     "/Volumes", "/dev", "/System", "/Library", "/Applications", "/usr", "/etc", "/opt"]
+
+# Fixed reviewed baseline. Kept intentionally small; any extension is a new
+# baseline revision and invalidates every qualification manifest.
+fn _seatbelt_baseline_lines_v1() -> [text]:
+    ["(deny default)",
+     "(deny network*)",
+     "(deny process-fork)",
+     "(allow file-read-metadata (literal \"/\"))",
+     "(allow file-read-data file-read-metadata (subpath \"/usr/lib\"))",
+     "(allow file-read-data file-read-metadata (subpath \"/System/Library\"))",
+     "(allow file-read-data file-read-metadata (subpath \"/System/Volumes/Preboot/Cryptexes\"))",
+     "(allow file-read-data file-write-data (literal \"/dev/null\"))",
+     "(allow sysctl-read)"]
+
+fn _seatbelt_error_v1(code: text, location: text, reason: text) -> text:
+    code + " " + location + " " + reason
+
+fn _seatbelt_ancestor_or_equal_v1(ancestor: text, path: text) -> bool:
+    if ancestor == "/": return true
+    path == ancestor or path.starts_with(ancestor + "/")
+
+fn _seatbelt_alias_overlap_v1(a: text, b: text) -> bool:
+    # APFS is commonly case-insensitive: compare case-folded for overlap so a
+    # differently cased spelling cannot slip past a protected root.
+    val la = a.lower()
+    val lb = b.lower()
+    _seatbelt_ancestor_or_equal_v1(la, lb) or _seatbelt_ancestor_or_equal_v1(lb, la)
+
+# Lexical literal check. Returns the path unchanged when acceptable.
+pub fn seatbelt_path_check_v1(path: text) -> Result<text, text>:
+    val n = path.byte_len()
+    if n == 0 or n > SEATBELT_PATH_MAX_BYTES_V1: return Err("path-length-invalid")
+    if path.byte_at(0) as i64 != 47: return Err("path-not-absolute")
+    var i = 0
+    while i < n:
+        val code = path.byte_at(i) as i64
+        if code == 0: return Err("path-nul-rejected")
+        if code < 32 or code == 127: return Err("path-control-byte-rejected")
+        # Non-ASCII needs Unicode-normalization alias qualification (§10.4);
+        # reject rather than guess at NFD/NFC equivalence.
+        if code > 127: return Err("path-non-ascii-rejected")
+        i = i + 1
+    if path.contains("//"): return Err("path-empty-segment-rejected")
+    if path.contains("/./") or path.ends_with("/."): return Err("path-dot-segment-rejected")
+    if path.contains("/../") or path.ends_with("/.."): return Err("path-dotdot-segment-rejected")
+    if n > 1 and path.ends_with("/"): return Err("path-trailing-slash-rejected")
+    Ok(path)
+
+# Strict SBPL string-literal escaping. Control bytes were already rejected, so
+# only backslash and quote need escaping; the result is always one literal.
+pub fn seatbelt_literal_v1(path: text) -> Result<text, text>:
+    val checked = seatbelt_path_check_v1(path)?
+    Ok("\"" + checked.replace("\\", "\\\\").replace("\"", "\\\"") + "\"")
+
+fn _seatbelt_access_ops_v1(access: text) -> Result<text, text>:
+    if access == SEATBELT_ACCESS_READ_DATA_V1: return Ok("file-read-data")
+    if access == SEATBELT_ACCESS_READ_METADATA_V1: return Ok("file-read-metadata")
+    if access == SEATBELT_ACCESS_WRITE_V1: return Ok("file-write-data file-write-create file-write-unlink")
+    if access == SEATBELT_ACCESS_EXECUTE_V1: return Ok("process-exec")
+    Err("access-unsupported")
+
+fn _seatbelt_scope_filter_v1(scope: text) -> Result<text, text>:
+    if scope == SEATBELT_SCOPE_LITERAL_V1: return Ok("literal")
+    if scope == SEATBELT_SCOPE_SUBPATH_V1: return Ok("subpath")
+    Err("scope-unsupported")
+
+# Byte-wise ordering; `[text].sort()` is not reliable on this toolchain.
+fn _seatbelt_text_less_v1(a: text, b: text) -> bool:
+    val na = a.byte_len()
+    val nb = b.byte_len()
+    var i = 0
+    while i < na and i < nb:
+        val ca = a.byte_at(i) as i64
+        val cb = b.byte_at(i) as i64
+        if ca != cb: return ca < cb
+        i = i + 1
+    na < nb
+
+fn _seatbelt_sorted_v1(values: [text]) -> [text]:
+    var out: [text] = []
+    for value in values:
+        var placed: [text] = []
+        var inserted = false
+        for existing in out:
+            if not inserted and _seatbelt_text_less_v1(value, existing):
+                placed.push(value)
+                inserted = true
+            placed.push(existing)
+        if not inserted: placed.push(value)
+        out = placed
+    out
+
+fn _seatbelt_check_network_v1(policy: SeatbeltPolicyInputV1, protected: [text]) -> Result<text, text>:
+    if policy.network_profile == SEATBELT_NETWORK_POD_IP_V1:
+        return Err(_seatbelt_error_v1("SCMAC-NET-001", "network", "pod-ip-v1-unsupported-use-endpoint-v1"))
+    if policy.direct_network:
+        return Err(_seatbelt_error_v1("SCMAC-NET-002", "network", "direct-network-unavailable"))
+    if policy.network_profile == SEATBELT_NETWORK_NONE_V1:
+        match policy.broker_endpoint:
+            case Some(_): return Err(_seatbelt_error_v1("SCMAC-NET-002", "network", "broker-endpoint-requires-endpoint-v1"))
+            case None: return Ok("")
+    if policy.network_profile != SEATBELT_NETWORK_ENDPOINT_V1:
+        return Err(_seatbelt_error_v1("SCMAC-NET-002", "network", "network-profile-unsupported"))
+    match policy.broker_endpoint:
+        case None:
+            return Err(_seatbelt_error_v1("SCMAC-NET-002", "network", "endpoint-v1-requires-broker-endpoint"))
+        case Some(endpoint):
+            val literal = match seatbelt_literal_v1(endpoint):
+                case Ok(value): value
+                case Err(reason): return Err(_seatbelt_error_v1("SCMAC-FS-001", "broker_endpoint", reason))
+            for root in protected:
+                if _seatbelt_alias_overlap_v1(root, endpoint):
+                    return Err(_seatbelt_error_v1("SCMAC-FS-001", "broker_endpoint", "overlaps-protected-root"))
+            # Only this exact socket; never a directory, localhost or inet rule.
+            Ok("(allow network-outbound (remote unix-socket (path-literal " + literal + ")))")
+
+# Compile one deterministic profile. Diagnostics carry the INPUT index
+# (`grant[i]`, `protected_roots[i]`) so the caller can map back to an SDN span.
+pub fn seatbelt_profile_compile_v1(policy: SeatbeltPolicyInputV1) -> Result<SeatbeltProfileV1, text>:
+    if policy.grants.len() > SEATBELT_GRANT_MAX_V1:
+        return Err(_seatbelt_error_v1("SCMAC-FS-001", "grants", "grant-count-exceeded"))
+    if policy.protected_roots.len() > SEATBELT_PROTECTED_MAX_V1:
+        return Err(_seatbelt_error_v1("SCMAC-FS-001", "protected_roots", "protected-root-count-exceeded"))
+    var protected: [text] = []
+    var pi = 0
+    for root in policy.protected_roots:
+        val location = "protected_roots[" + pi.to_string() + "]"
+        val checked = seatbelt_path_check_v1(root)
+        if checked.is_err(): return Err(_seatbelt_error_v1("SCMAC-FS-002", location, checked.unwrap_err()))
+        if root == "/": return Err(_seatbelt_error_v1("SCMAC-FS-001", location, "protected-root-is-filesystem-root"))
+        if protected.contains(root): return Err(_seatbelt_error_v1("SCMAC-FS-001", location, "protected-root-duplicate"))
+        protected.push(root)
+        pi = pi + 1
+    var keys: [text] = []
+    var lines_by_key: [text] = []
+    var gi = 0
+    for grant in policy.grants:
+        val location = "grant[" + gi.to_string() + "]"
+        val ops = match _seatbelt_access_ops_v1(grant.access):
+            case Ok(value): value
+            case Err(reason): return Err(_seatbelt_error_v1("SCMAC-FS-001", location, reason))
+        val filter = match _seatbelt_scope_filter_v1(grant.scope):
+            case Ok(value): value
+            case Err(reason): return Err(_seatbelt_error_v1("SCMAC-FS-001", location, reason))
+        val literal = match seatbelt_literal_v1(grant.path):
+            case Ok(value): value
+            case Err(reason): return Err(_seatbelt_error_v1("SCMAC-FS-002", location, reason))
+        for broad in _seatbelt_broad_roots_v1():
+            if _seatbelt_ancestor_or_equal_v1(grant.path.lower(), broad.lower()):
+                return Err(_seatbelt_error_v1("SCMAC-FS-001", location, "blanket-grant-rejected"))
+        for root in protected:
+            if _seatbelt_alias_overlap_v1(root, grant.path):
+                return Err(_seatbelt_error_v1("SCMAC-FS-001", location, "overlaps-protected-root"))
+        val key = grant.access + "\t" + grant.scope + "\t" + grant.path
+        if keys.contains(key): return Err(_seatbelt_error_v1("SCMAC-FS-001", location, "grant-duplicate"))
+        keys.push(key)
+        lines_by_key.push(key + "\t(allow " + ops + " (" + filter + " " + literal + "))")
+        gi = gi + 1
+    val network_line = _seatbelt_check_network_v1(policy, protected)?
+    var body = "(version 1)\n"
+    body = body + "; " + SEATBELT_PROFILE_SCHEMA_V1 + " baseline=" + SEATBELT_BASELINE_ID_V1 +
+        " revision=" + SEATBELT_BASELINE_REVISION_V1.to_string() + "\n"
+    for line in _seatbelt_baseline_lines_v1():
+        body = body + line + "\n"
+    for entry in _seatbelt_sorted_v1(lines_by_key):
+        val parts = entry.split("\t")
+        body = body + parts[3] + "\n"
+    if network_line != "": body = body + network_line + "\n"
+    # Protected roots last: a later matching deny overrides any earlier allow.
+    for root in _seatbelt_sorted_v1(protected):
+        body = body + "(deny file-read* file-write* process-exec (subpath " + seatbelt_literal_v1(root)? + "))\n"
+    val size = body.byte_len()
+    if size > SEATBELT_PROFILE_MAX_BYTES_V1:
+        return Err(_seatbelt_error_v1("SCMAC-FS-001", "profile", "profile-byte-limit-exceeded"))
+    Ok(SeatbeltProfileV1(schema: SEATBELT_PROFILE_SCHEMA_V1, baseline_id: SEATBELT_BASELINE_ID_V1,
+        baseline_revision: SEATBELT_BASELINE_REVISION_V1, profile_text: body, byte_len: size,
+        digest: seatbelt_profile_digest_v1(body)))
+
+# Domain-separated digest over schema, baseline identity and exact bytes.
+pub fn seatbelt_profile_digest_v1(profile_text: text) -> text:
+    sha256_text(SEATBELT_PROFILE_SCHEMA_V1 + "\n" + SEATBELT_BASELINE_ID_V1 + "\n" +
+        SEATBELT_BASELINE_REVISION_V1.to_string() + "\n" + profile_text)
+
+export SeatbeltFsGrantInputV1, SeatbeltPolicyInputV1, SeatbeltProfileV1
+export seatbelt_path_check_v1, seatbelt_literal_v1, seatbelt_profile_compile_v1, seatbelt_profile_digest_v1
+export SEATBELT_PROFILE_SCHEMA_V1, SEATBELT_BASELINE_ID_V1, SEATBELT_BASELINE_REVISION_V1
+export SEATBELT_PATH_MAX_BYTES_V1, SEATBELT_GRANT_MAX_V1, SEATBELT_PROTECTED_MAX_V1, SEATBELT_PROFILE_MAX_BYTES_V1
+export SEATBELT_ACCESS_READ_DATA_V1, SEATBELT_ACCESS_READ_METADATA_V1, SEATBELT_ACCESS_WRITE_V1, SEATBELT_ACCESS_EXECUTE_V1
+export SEATBELT_SCOPE_LITERAL_V1, SEATBELT_SCOPE_SUBPATH_V1
+export SEATBELT_NETWORK_NONE_V1, SEATBELT_NETWORK_ENDPOINT_V1, SEATBELT_NETWORK_POD_IP_V1

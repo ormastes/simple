@@ -1,0 +1,413 @@
+# macOS direct-Seatbelt provider leaf: `macos-seatbelt-process` backend,
+# `macos-seatbelt-process-v1` engine (design §1.2, §6.2, §8, §9, §10.2, §12.3).
+#
+# This is a NEW lane beside, never a replacement for, the signed-App-Sandbox
+# provider (native_sandbox_provider_v1 / `macos-native-sandbox-v1`). It is
+# never aliased to docker, podman or that engine, and no unknown backend is
+# reinterpreted as this one.
+#
+# What is real here: request/scope validation, the §8.1 lifecycle mapping, the
+# §10.2 attempt directory plan, profile compilation and the §8.2 launch
+# protocol as typed data. What is NOT real yet: every native effect. Darwin
+# observation, attempt-root creation, worker admission, plan/FD transfer,
+# sandbox_init activation, exec, inspect, stop and absence must go through
+# SOSIX owners that do not exist on this line (the Darwin sandbox_init /
+# sandbox_free_error shim is work item C7). Until those owners exist AND a
+# real-host qualification manifest passes, every effect turn returns an
+# explicit blocked, owner-bearing result and the lifecycle never advances.
+# Capability discovery is not readiness (§6.3).
+
+use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, ContainerExecutionRequestV2,
+    ContainerRequestProjectionV2, ContainerActionProjectionV2, ContainerHostObservationV2,
+    container_host_scope_bytes_v2}
+use std.common.contracts.container.execution_evidence_v2.{ContainerAbsenceReceiptV2, ContainerExecutionUserReceiptV2}
+use std.common.contracts.container.effect_deadline_v1.ContainerEffectDeadlineV1
+use std.common.contracts.container.control_deadline_v1.ContainerControlDeadlineV1
+use std.common.contracts.container.runtime_v1.{RuntimeIdentityV1, RuntimeStateV1, RuntimeOperationV1,
+    RuntimeIntentV1, RUNTIME_PHASE_PREPARED, RUNTIME_PHASE_CREATED, RUNTIME_PHASE_RUNNING,
+    RUNTIME_PHASE_EXITED, RUNTIME_PHASE_DESTROYED, RUNTIME_PHASE_UNKNOWN,
+    RUNTIME_STATUS_REJECTED, RUNTIME_STATUS_BLOCKED, runtime_command_empty}
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+use std.nogc_async_mut.container.providers.macos.seatbelt_profile_v1.{SeatbeltFsGrantInputV1,
+    SeatbeltPolicyInputV1, SeatbeltProfileV1, seatbelt_path_check_v1, seatbelt_profile_compile_v1,
+    SEATBELT_ACCESS_READ_DATA_V1, SEATBELT_ACCESS_READ_METADATA_V1, SEATBELT_ACCESS_WRITE_V1,
+    SEATBELT_SCOPE_SUBPATH_V1, SEATBELT_NETWORK_ENDPOINT_V1}
+use std.nogc_async_mut.container.providers.macos.seatbelt_capabilities_v1.{SeatbeltCapabilityManifestV1,
+    SeatbeltQualificationV1, seatbelt_capability_status_v1, SEATBELT_QUALIFIED_V1}
+
+pub const MACOS_SEATBELT_BACKEND_V1 = "macos-seatbelt-process"
+pub const MACOS_SEATBELT_ENGINE_V1 = "macos-seatbelt-process-v1"
+
+# ---------------------------------------------------------------------------
+# Expected SOSIX boundary (provided by work item C7). The provider names the
+# owner it will call; it never declares an extern or a C entry itself.
+# ---------------------------------------------------------------------------
+
+pub const SEATBELT_SOSIX_SANDBOX_OWNER_V1 = "std.nogc_sync_mut.sosix.macos.seatbelt_v1"
+pub const SEATBELT_SOSIX_PROCESS_OWNER_V1 = "std.nogc_sync_mut.io.process_observation_v4"
+pub const SEATBELT_SOSIX_IPC_OWNER_V1 = "std.nogc_sync_mut.io.local_ipc_v1"
+pub const SEATBELT_SOSIX_FS_OWNER_V1 = "std.nogc_sync_mut.io.retained_file"
+
+pub struct SeatbeltSosixPortStatusV1:
+    owner: text
+    available: bool
+    reason: text
+
+# The Darwin sandbox_init/sandbox_free_error owner, Darwin local IPC and the
+# extended helper admission are not wired on this line. Report that exactly.
+pub fn seatbelt_sosix_port_status_v1() -> SeatbeltSosixPortStatusV1:
+    SeatbeltSosixPortStatusV1(owner: SEATBELT_SOSIX_SANDBOX_OWNER_V1, available: false,
+        reason: "SCMAC-PLATFORM-001 darwin-seatbelt-sosix-owner-unavailable")
+
+# ---------------------------------------------------------------------------
+# §8.1 lifecycle mapping (semantic states mapped onto RuntimeStateV1 phases).
+# ---------------------------------------------------------------------------
+
+pub const SEATBELT_STATE_VALIDATED_V1 = "validated"
+pub const SEATBELT_STATE_PREPARED_V1 = "prepared"
+pub const SEATBELT_STATE_LAUNCH_PENDING_V1 = "launch-pending"
+pub const SEATBELT_STATE_RUNNING_V1 = "running"
+pub const SEATBELT_STATE_STOPPING_V1 = "stopping"
+pub const SEATBELT_STATE_RETIRING_V1 = "retiring"
+pub const SEATBELT_STATE_ABSENT_V1 = "absent"
+pub const SEATBELT_STATE_CLOSED_V1 = "closed"
+pub const SEATBELT_STATE_OUTCOME_UNKNOWN_V1 = "outcome-unknown"
+pub const SEATBELT_STATE_QUARANTINED_V1 = "quarantined"
+
+# Returns the next semantic state or an error; never invents an edge.
+pub fn seatbelt_lifecycle_next_v1(state: text, event: text) -> Result<text, text>:
+    if state == SEATBELT_STATE_VALIDATED_V1 and event == "prepare": return Ok(SEATBELT_STATE_PREPARED_V1)
+    if state == SEATBELT_STATE_PREPARED_V1 and event == "launch": return Ok(SEATBELT_STATE_LAUNCH_PENDING_V1)
+    if state == SEATBELT_STATE_LAUNCH_PENDING_V1 and event == "admitted": return Ok(SEATBELT_STATE_RUNNING_V1)
+    if state == SEATBELT_STATE_LAUNCH_PENDING_V1 and event == "interrupted": return Ok(SEATBELT_STATE_OUTCOME_UNKNOWN_V1)
+    if state == SEATBELT_STATE_RUNNING_V1 and event == "stop": return Ok(SEATBELT_STATE_STOPPING_V1)
+    if state == SEATBELT_STATE_RUNNING_V1 and event == "leader-exit": return Ok(SEATBELT_STATE_RETIRING_V1)
+    if state == SEATBELT_STATE_STOPPING_V1 and event == "retire": return Ok(SEATBELT_STATE_RETIRING_V1)
+    if state == SEATBELT_STATE_RETIRING_V1 and event == "absence-proven": return Ok(SEATBELT_STATE_ABSENT_V1)
+    if state == SEATBELT_STATE_RETIRING_V1 and event == "uncertain": return Ok(SEATBELT_STATE_OUTCOME_UNKNOWN_V1)
+    if state == SEATBELT_STATE_OUTCOME_UNKNOWN_V1 and event == "exact-recovery": return Ok(SEATBELT_STATE_RETIRING_V1)
+    if state == SEATBELT_STATE_OUTCOME_UNKNOWN_V1 and event == "quarantine": return Ok(SEATBELT_STATE_QUARANTINED_V1)
+    if state == SEATBELT_STATE_ABSENT_V1 and event == "close": return Ok(SEATBELT_STATE_CLOSED_V1)
+    Err("seatbelt-invalid-transition-" + state + "-" + event)
+
+# Leader exit with unresolved descendants is EXITED, never DESTROYED (§8.4).
+pub fn seatbelt_runtime_phase_v1(state: text) -> text:
+    if state == SEATBELT_STATE_VALIDATED_V1 or state == SEATBELT_STATE_PREPARED_V1: return RUNTIME_PHASE_PREPARED
+    if state == SEATBELT_STATE_LAUNCH_PENDING_V1: return RUNTIME_PHASE_CREATED
+    if state == SEATBELT_STATE_RUNNING_V1 or state == SEATBELT_STATE_STOPPING_V1: return RUNTIME_PHASE_RUNNING
+    if state == SEATBELT_STATE_RETIRING_V1: return RUNTIME_PHASE_EXITED
+    if state == SEATBELT_STATE_ABSENT_V1 or state == SEATBELT_STATE_CLOSED_V1: return RUNTIME_PHASE_DESTROYED
+    RUNTIME_PHASE_UNKNOWN
+
+# Facade action -> lifecycle event. `create` is worker admission + plan
+# transfer (launch-pending); `start` requires admitted native evidence.
+fn _seatbelt_action_event_v1(action: text) -> Result<text, text>:
+    if action == "prepare": return Ok("prepare")
+    if action == "create": return Ok("launch")
+    if action == "start": return Ok("admitted")
+    if action == "stop": return Ok("stop")
+    if action == "destroy": return Ok("absence-proven")
+    Err("seatbelt-action-unsupported")
+
+# ---------------------------------------------------------------------------
+# §10.2 attempt directory plan (pure data; creation is a SOSIX fs effect).
+# ---------------------------------------------------------------------------
+
+pub struct SeatbeltAttemptDirPlanV1:
+    state_root: text
+    host_scope: text
+    attempt_root: text
+    private_dir: text
+    workspace: text
+    output: text
+    home: text
+    tmp: text
+    ipc: text
+    broker_socket: text
+
+pub fn seatbelt_attempt_key_v1(workload_uid: text, attempt: i64) -> Result<text, text>:
+    if not builder_identifier_valid_v1(workload_uid) or attempt <= 0:
+        return Err("SCMAC-ADMIT-001 attempt-identity-invalid")
+    val key = workload_uid + "-a" + attempt.to_string()
+    if key.byte_len() > 128: return Err("SCMAC-ADMIT-001 attempt-key-too-long")
+    Ok(key)
+
+pub fn seatbelt_attempt_dir_plan_v1(state_root: text, attempt_key: text) -> Result<SeatbeltAttemptDirPlanV1, text>:
+    val root_checked = seatbelt_path_check_v1(state_root)
+    if root_checked.is_err(): return Err("SCMAC-FS-002 state_root " + root_checked.unwrap_err())
+    if state_root == "/": return Err("SCMAC-FS-001 state_root filesystem-root-rejected")
+    if not builder_identifier_valid_v1(attempt_key): return Err("SCMAC-ADMIT-001 attempt-key-invalid")
+    val attempt_root = state_root + "/attempts/" + attempt_key
+    val ipc = attempt_root + "/ipc"
+    Ok(SeatbeltAttemptDirPlanV1(state_root: state_root, host_scope: state_root + "/host-scope",
+        attempt_root: attempt_root, private_dir: attempt_root + "/private",
+        workspace: attempt_root + "/workspace", output: attempt_root + "/output",
+        home: attempt_root + "/home", tmp: attempt_root + "/tmp", ipc: ipc,
+        broker_socket: ipc + "/broker.sock"))
+
+fn _grant(path: text, access: text) -> SeatbeltFsGrantInputV1:
+    SeatbeltFsGrantInputV1(path: path, scope: SEATBELT_SCOPE_SUBPATH_V1, access: access)
+
+# Default attempt policy: workspace read-only, output/home/tmp read-write,
+# host-scope and the attempt's private dir protected, siblings denied by the
+# deny-default baseline, network only through the attempt broker socket.
+# `extra_grants` carries caller-resolved toolchain/executable grants.
+pub fn seatbelt_attempt_policy_v1(dirs: SeatbeltAttemptDirPlanV1, extra_grants: [SeatbeltFsGrantInputV1],
+        network_profile: text) -> SeatbeltPolicyInputV1:
+    var grants: [SeatbeltFsGrantInputV1] = [
+        _grant(dirs.workspace, SEATBELT_ACCESS_READ_DATA_V1), _grant(dirs.workspace, SEATBELT_ACCESS_READ_METADATA_V1)]
+    for dir in [dirs.output, dirs.home, dirs.tmp]:
+        grants.push(_grant(dir, SEATBELT_ACCESS_READ_DATA_V1))
+        grants.push(_grant(dir, SEATBELT_ACCESS_READ_METADATA_V1))
+        grants.push(_grant(dir, SEATBELT_ACCESS_WRITE_V1))
+    for extra in extra_grants:
+        grants.push(extra)
+    val endpoint: text? = if network_profile == SEATBELT_NETWORK_ENDPOINT_V1: Some(dirs.broker_socket) else: None
+    SeatbeltPolicyInputV1(grants: grants, protected_roots: [dirs.host_scope, dirs.private_dir],
+        network_profile: network_profile, direct_network: false, broker_endpoint: endpoint)
+
+# ---------------------------------------------------------------------------
+# §8.2 launch protocol as a typed plan.
+# ---------------------------------------------------------------------------
+
+pub const SEATBELT_STEP_IMPLEMENTED_PURE_V1 = "implemented-pure"
+pub const SEATBELT_STEP_UNSUPPORTED_V1 = "unsupported-until-darwin-qualification"
+
+pub struct SeatbeltLaunchStepV1:
+    index: i64
+    name: text
+    owner: text
+    native_effect: bool
+    status: text
+
+fn _step(index: i64, name: text, owner: text, native_effect: bool) -> SeatbeltLaunchStepV1:
+    val status = if native_effect: SEATBELT_STEP_UNSUPPORTED_V1 else: SEATBELT_STEP_IMPLEMENTED_PURE_V1
+    SeatbeltLaunchStepV1(index: index, name: name, owner: owner, native_effect: native_effect, status: status)
+
+pub fn seatbelt_launch_plan_v1() -> [SeatbeltLaunchStepV1]:
+    [_step(1, "validate-request-capabilities-policy", "seatbelt_provider_v1", false),
+     _step(2, "resolve-host-provider-boot-scope", SEATBELT_SOSIX_PROCESS_OWNER_V1, true),
+     _step(3, "acquire-attempt-root-and-broker-leases", SEATBELT_SOSIX_FS_OWNER_V1, true),
+     _step(4, "compile-profile-and-journal-intent-before-effects", "distributed_operation_journal_v2", true),
+     _step(5, "admit-fresh-trusted-worker", SEATBELT_SOSIX_PROCESS_OWNER_V1, true),
+     _step(6, "transfer-plan-and-allowlisted-descriptors", SEATBELT_SOSIX_IPC_OWNER_V1, true),
+     _step(7, "worker-activates-sandbox-and-reports", SEATBELT_SOSIX_SANDBOX_OWNER_V1, true),
+     _step(8, "retire-bootstrap-authority-then-exec-exact-argv", SEATBELT_SOSIX_SANDBOX_OWNER_V1, true),
+     _step(9, "reconcile-native-process-exec-exit-observations", SEATBELT_SOSIX_PROCESS_OWNER_V1, true),
+     _step(10, "mark-running-on-admitted-evidence-or-quarantine", "seatbelt_provider_v1", true)]
+
+# Pure per-attempt plan: directories, policy and compiled profile.
+pub struct SeatbeltAttemptPlanV1:
+    attempt_key: text
+    dirs: SeatbeltAttemptDirPlanV1
+    profile: SeatbeltProfileV1
+
+# ---------------------------------------------------------------------------
+# Adapter (to become SimpleContainerOwnerV2.MacOsSeatbelt after C1 wiring).
+# ---------------------------------------------------------------------------
+
+pub class MacOsSeatbeltAdapterV1:
+    scope: ContainerHostScopeV2
+    _observed_host: ContainerHostObservationV2
+    _manifest: SeatbeltCapabilityManifestV1
+    _os_build: text
+    _state_root: text
+    _lifecycle: text
+
+fn _seatbelt_operation_v1(state: RuntimeStateV1, operation: text, status: text, reason: text) -> RuntimeOperationV1:
+    RuntimeOperationV1(status: status, operation: operation, command: runtime_command_empty(),
+        state: state, exit_code: -1, stdout: "", stderr: "", reason: reason)
+
+fn _seatbelt_policy_size_v1(policy_bytes: text) -> Result<bool, text>:
+    if policy_bytes.byte_len() == 0 or policy_bytes.byte_len() > 1048576:
+        return Err("container-api-policy-size")
+    Ok(true)
+
+impl MacOsSeatbeltAdapterV1:
+    # Real host observation must come from the SOSIX Darwin owner; there is
+    # no fallback to uname/sw_vers text or a caller-supplied description.
+    pub static fn observe(policy_bytes: text) -> Result<ContainerHostObservationV2, text>:
+        val sized = _seatbelt_policy_size_v1(policy_bytes)?
+        val port = seatbelt_sosix_port_status_v1()
+        if not port.available: return Err(port.reason)
+        Err("SCMAC-PLATFORM-001 darwin-seatbelt-observation-unimplemented")
+
+    # Pre-effect factory (§6.2): acquires nothing, so its text error cannot
+    # drop cleanup authority. Fails today because observation is unavailable.
+    pub static fn open(policy_bytes: text, state_root: text, scope: ContainerHostScopeV2,
+            expected_provider_identity_digest: text, timeout_ms: i64) -> Result<MacOsSeatbeltAdapterV1, text>:
+        val observed = MacOsSeatbeltAdapterV1.observe(policy_bytes)?
+        Err("SCMAC-PLATFORM-001 darwin-seatbelt-manifest-unavailable")
+
+    # Logical owner from an already-trusted observation + manifest. Validation
+    # only; a QUALIFIED manifest still cannot cause an effect while the SOSIX
+    # owner is unavailable, and every effect re-checks both.
+    pub static fn open_observed_v1(scope: ContainerHostScopeV2, observed: ContainerHostObservationV2,
+            manifest: SeatbeltCapabilityManifestV1, os_build: text, state_root: text,
+            expected_provider_identity_digest: text, timeout_ms: i64) -> Result<MacOsSeatbeltAdapterV1, text>:
+        val scope_bytes = container_host_scope_bytes_v2(scope)?
+        if scope.continuity_mode != "native-boot-incarnation-v1": return Err("container-api-continuity-unproven")
+        if observed.backend != MACOS_SEATBELT_BACKEND_V1: return Err("SCMAC-ADMIT-001 backend-mismatch")
+        if observed.execution_os != "macos": return Err("SCMAC-PLATFORM-001 execution-os-not-macos")
+        if observed.architecture != "arm64" and observed.architecture != "x86_64":
+            return Err("SCMAC-PLATFORM-001 architecture-unsupported")
+        if not builder_digest_valid_v1(expected_provider_identity_digest) or
+                observed.provider_identity_digest != expected_provider_identity_digest:
+            return Err("SCMAC-ADMIT-001 provider-identity-mismatch")
+        if observed.native_machine_id != scope.native_machine_id or observed.native_boot_id != scope.boot_id:
+            return Err("SCMAC-ADMIT-001 boot-or-machine-pin-mismatch")
+        if timeout_ms <= 0: return Err("container-adapter-timeout-invalid")
+        val dirs = seatbelt_attempt_dir_plan_v1(state_root, "probe")?
+        Ok(MacOsSeatbeltAdapterV1(scope: scope, _observed_host: observed, _manifest: manifest,
+            _os_build: os_build, _state_root: state_root, _lifecycle: SEATBELT_STATE_VALIDATED_V1))
+
+    pub fn observation() -> ContainerHostObservationV2:
+        self._observed_host
+
+    pub fn lifecycle_v1() -> text:
+        self._lifecycle
+
+    pub fn qualification_v1() -> SeatbeltQualificationV1:
+        seatbelt_capability_status_v1(self._manifest, self._os_build,
+            self._observed_host.architecture, self._observed_host.provider_identity_digest)
+
+    pub fn validate(request: ContainerExecutionRequestV2) -> Result<bool, text>:
+        val plan = request.plan
+        # Exact backend only: no docker/podman/signed-sandbox alias.
+        if plan.backend != MACOS_SEATBELT_BACKEND_V1: return Err("SCMAC-ADMIT-001 backend-mismatch")
+        if plan.physical_host_id != self.scope.physical_host_id or plan.service_scope_id != self.scope.service_scope_id or
+                plan.boot_id != self.scope.boot_id or plan.provider_generation != self.scope.provider_generation or
+                plan.native_machine_id != self.scope.native_machine_id or plan.continuity_mode != self.scope.continuity_mode or
+                plan.continuity_id != self.scope.continuity_id:
+            return Err("SCMAC-ADMIT-001 request-scope-mismatch")
+        if not builder_identifier_valid_v1(plan.workload_uid) or plan.attempt <= 0 or
+                not builder_identifier_valid_v1(plan.operation_id) or not builder_digest_valid_v1(plan.request_digest):
+            return Err("SCMAC-ADMIT-001 plan-identity-invalid")
+        if request.request_bytes.byte_len() == 0 or request.request_bytes.byte_len() > 1048576:
+            return Err("container-api-body-size")
+        Ok(true)
+
+    # The Seatbelt request codec arrives with the C2 portable policy schema.
+    # Until then no projection is fabricated.
+    pub fn project(request: ContainerExecutionRequestV2) -> Result<ContainerRequestProjectionV2, text>:
+        val valid = self.validate(request)?
+        Err("SCMAC-ADMIT-002 seatbelt-request-codec-unavailable")
+
+    # Pure attempt plan from a caller-supplied (already resolved) policy.
+    # Refusals such as pod-ip-v1 or direct network happen here, before effects.
+    pub fn project_policy_v1(request: ContainerExecutionRequestV2, extra_grants: [SeatbeltFsGrantInputV1],
+            network_profile: text) -> Result<SeatbeltAttemptPlanV1, text>:
+        val valid = self.validate(request)?
+        val key = seatbelt_attempt_key_v1(request.plan.workload_uid, request.plan.attempt)?
+        val dirs = seatbelt_attempt_dir_plan_v1(self._state_root, key)?
+        val profile = seatbelt_profile_compile_v1(seatbelt_attempt_policy_v1(dirs, extra_grants, network_profile))?
+        Ok(SeatbeltAttemptPlanV1(attempt_key: key, dirs: dirs, profile: profile))
+
+    # Actual argv/cwd come from the admitted worker; no fake guest mounts.
+    pub fn action_project(request: ContainerExecutionRequestV2) -> Result<ContainerActionProjectionV2, text>:
+        val valid = self.validate(request)?
+        Err("SCMAC-ADMIT-002 seatbelt-action-projection-requires-qualified-worker")
+
+    fn _state_v1(request: ContainerExecutionRequestV2, reason: text) -> RuntimeStateV1:
+        val plan = request.plan
+        RuntimeStateV1(phase: seatbelt_runtime_phase_v1(self._lifecycle),
+            identity: RuntimeIdentityV1(pod_uid: plan.workload_uid, attempt: plan.attempt,
+                provider_generation: plan.provider_generation, operation_id: plan.operation_id,
+                engine: MACOS_SEATBELT_ENGINE_V1, native_id: "", node_boot_id: plan.boot_id),
+            exit_code: -1, reason: reason)
+
+    # Shared fail-closed gate for every native effect. Order: request, then
+    # lifecycle edge, then qualification, then SOSIX owner availability.
+    fn _effect_gate_v1(action: text, request: ContainerExecutionRequestV2) -> RuntimeOperationV1:
+        val valid = self.validate(request)
+        if valid.is_err():
+            return _seatbelt_operation_v1(self._state_v1(request, valid.unwrap_err()), action,
+                RUNTIME_STATUS_REJECTED, valid.unwrap_err())
+        val event = _seatbelt_action_event_v1(action)
+        if event.is_err():
+            return _seatbelt_operation_v1(self._state_v1(request, event.unwrap_err()), action,
+                RUNTIME_STATUS_REJECTED, event.unwrap_err())
+        val next = seatbelt_lifecycle_next_v1(self._lifecycle, event.unwrap())
+        if next.is_err():
+            return _seatbelt_operation_v1(self._state_v1(request, next.unwrap_err()), action,
+                RUNTIME_STATUS_REJECTED, next.unwrap_err())
+        val qualification = self.qualification_v1()
+        if qualification.status != SEATBELT_QUALIFIED_V1:
+            return _seatbelt_operation_v1(self._state_v1(request, qualification.reason), action,
+                RUNTIME_STATUS_BLOCKED, qualification.reason)
+        val port = seatbelt_sosix_port_status_v1()
+        if not port.available:
+            return _seatbelt_operation_v1(self._state_v1(request, port.reason), action,
+                RUNTIME_STATUS_BLOCKED, port.reason)
+        # Unreachable until the SOSIX owner exists; still never a success.
+        _seatbelt_operation_v1(self._state_v1(request, "SCMAC-ADMIT-002 seatbelt-effect-unimplemented"),
+            action, RUNTIME_STATUS_BLOCKED, "SCMAC-ADMIT-002 seatbelt-effect-unimplemented")
+
+    # inspect/logs/wait read retained native evidence; none exists.
+    pub me read(action: text, request: ContainerExecutionRequestV2) -> RuntimeOperationV1:
+        if action != "inspect" and action != "logs" and action != "wait":
+            return _seatbelt_operation_v1(self._state_v1(request, "seatbelt-read-action-unsupported"), action,
+                RUNTIME_STATUS_REJECTED, "seatbelt-read-action-unsupported")
+        val valid = self.validate(request)
+        if valid.is_err():
+            return _seatbelt_operation_v1(self._state_v1(request, valid.unwrap_err()), action,
+                RUNTIME_STATUS_REJECTED, valid.unwrap_err())
+        _seatbelt_operation_v1(self._state_v1(request, "SCMAC-OWNER-001 no-retained-native-evidence"), action,
+            RUNTIME_STATUS_BLOCKED, "SCMAC-OWNER-001 no-retained-native-evidence")
+
+    # prepare/create/start. The effect deadline bounds NEW effects only.
+    pub me apply(action: text, request: ContainerExecutionRequestV2,
+            deadline: ContainerEffectDeadlineV1) -> RuntimeOperationV1:
+        if action == "stop" or action == "destroy":
+            return _seatbelt_operation_v1(self._state_v1(request, "seatbelt-control-authority-required"), action,
+                RUNTIME_STATUS_REJECTED, "seatbelt-control-authority-required")
+        self._effect_gate_v1(action, request)
+
+    # stop/destroy under separate control authority. Never reports absence
+    # without a qualified native proof; unknown descendants stay retained.
+    pub me control(action: text, request: ContainerExecutionRequestV2,
+            deadline: ContainerControlDeadlineV1) -> RuntimeOperationV1:
+        if action != "stop" and action != "destroy":
+            return _seatbelt_operation_v1(self._state_v1(request, "seatbelt-control-action-unsupported"), action,
+                RUNTIME_STATUS_REJECTED, "seatbelt-control-action-unsupported")
+        self._effect_gate_v1(action, request)
+
+    # No intent exists before a successful prepare wrote it.
+    pub fn intent(request: ContainerExecutionRequestV2) -> Result<RuntimeIntentV1, text>:
+        val valid = self.validate(request)?
+        Err("SCMAC-ADMIT-002 seatbelt-no-retained-intent")
+
+    # Reattach only to exact native identity/provenance; never by PID/name.
+    pub me recover(request: ContainerExecutionRequestV2, expected: RuntimeIntentV1) -> RuntimeOperationV1:
+        val valid = self.validate(request)
+        if valid.is_err():
+            return _seatbelt_operation_v1(self._state_v1(request, valid.unwrap_err()), "recover",
+                RUNTIME_STATUS_REJECTED, valid.unwrap_err())
+        if expected.engine != MACOS_SEATBELT_ENGINE_V1:
+            return _seatbelt_operation_v1(self._state_v1(request, "SCMAC-ADMIT-001 intent-engine-mismatch"),
+                "recover", RUNTIME_STATUS_REJECTED, "SCMAC-ADMIT-001 intent-engine-mismatch")
+        _seatbelt_operation_v1(self._state_v1(request, "SCMAC-OWNER-001 exact-native-recovery-unavailable"),
+            "recover", RUNTIME_STATUS_BLOCKED, "SCMAC-OWNER-001 exact-native-recovery-unavailable")
+
+    pub me absence(request: ContainerExecutionRequestV2,
+            expected: RuntimeIdentityV1) -> Result<ContainerAbsenceReceiptV2, text>:
+        val valid = self.validate(request)?
+        Err("SCMAC-OWNER-001 seatbelt-absence-unproven")
+
+    pub me execution_user(request: ContainerExecutionRequestV2,
+            expected: RuntimeIdentityV1) -> Result<ContainerExecutionUserReceiptV2, text>:
+        val valid = self.validate(request)?
+        Err("SCMAC-PLATFORM-001 seatbelt-execution-user-probe-unavailable")
+
+export MacOsSeatbeltAdapterV1, SeatbeltSosixPortStatusV1, SeatbeltAttemptDirPlanV1
+export SeatbeltLaunchStepV1, SeatbeltAttemptPlanV1
+export seatbelt_sosix_port_status_v1, seatbelt_lifecycle_next_v1, seatbelt_runtime_phase_v1
+export seatbelt_attempt_key_v1, seatbelt_attempt_dir_plan_v1, seatbelt_attempt_policy_v1, seatbelt_launch_plan_v1
+export MACOS_SEATBELT_BACKEND_V1, MACOS_SEATBELT_ENGINE_V1
+export SEATBELT_SOSIX_SANDBOX_OWNER_V1, SEATBELT_SOSIX_PROCESS_OWNER_V1, SEATBELT_SOSIX_IPC_OWNER_V1
+export SEATBELT_SOSIX_FS_OWNER_V1
+export SEATBELT_STATE_VALIDATED_V1, SEATBELT_STATE_PREPARED_V1, SEATBELT_STATE_LAUNCH_PENDING_V1
+export SEATBELT_STATE_RUNNING_V1, SEATBELT_STATE_STOPPING_V1, SEATBELT_STATE_RETIRING_V1
+export SEATBELT_STATE_ABSENT_V1, SEATBELT_STATE_CLOSED_V1, SEATBELT_STATE_OUTCOME_UNKNOWN_V1
+export SEATBELT_STATE_QUARANTINED_V1
+export SEATBELT_STEP_IMPLEMENTED_PURE_V1, SEATBELT_STEP_UNSUPPORTED_V1
