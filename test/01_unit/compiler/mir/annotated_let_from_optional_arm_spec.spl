@@ -1,0 +1,57 @@
+# @req REQ-SSPEC-UNIT
+# @cover src/compiler/20.hir/hir_lowering/statements.spl
+#
+# Regression: Phase-3 census (run-19 Stage 2 compiler, 2026-11-13) failed MIR
+# on compiler.hir.hir_lowering.statements with
+# `enum construction 'HirStmtKind.Let': payload type mismatch at 1` at the
+# three `HirStmtKind.Let(symbol, binding_type, init)` sites. Shape:
+#
+#     val hir_type = if has_annotation: self.lower_type(t) else: nil
+#     val binding_type: HirType = if has_annotation: hir_type else: payload(..)
+#
+# `hir_type` is a nullable merge, so the `binding_type` join is `HirType?`
+# and HIR records THAT for the annotated symbol (SIMPLE_ENUM_PAYLOAD_TRACE:
+# expected='named#0' remembered='named#0?' source='named#0?'); MIR then
+# refuses the `T?` word in the non-optional payload slot (never widen nil).
+# Fix: unwrap the optional through `if val annotated = hir_type:` so the join
+# is `HirType` on both arms.
+#
+# Interpreter passes both shapes; the discriminator is
+# `simple compile <probe> --format=smf` on a Stage 2 binary (red with the
+# bare-arm join, green with `if val`).
+# Record: doc/08_tracking/bug/p3_census_mir_classes_2026-11-13.md
+use std.spec.*
+
+struct _HT:
+    kind: i64
+
+enum _SK:
+    Let(sym: i64, type_: _HT, init: i64)
+
+fn _payload_type(x: i64) -> _HT:
+    _HT(kind: x)
+
+fn _lower_type(x: i64) -> _HT:
+    _HT(kind: x + 100)
+
+fn _lower(has_annotation: bool, ast: i64) -> _SK:
+    val hir_type: _HT? = if has_annotation:
+        _lower_type(ast)
+    else:
+        None
+    val binding_type: _HT = if val annotated = hir_type:
+        annotated
+    else:
+        _payload_type(7)
+    _SK.Let(1, binding_type, 2)
+
+fn _kind_of(stmt: _SK) -> i64:
+    match stmt:
+        case _SK.Let(_, t, _): t.kind
+
+describe "annotated let whose init joins an optional arm":
+    it "takes the present annotation payload":
+        expect(_kind_of(_lower(true, 1))).to_equal(101)
+
+    it "falls back to the inferred payload when the annotation is absent":
+        expect(_kind_of(_lower(false, 1))).to_equal(7)
