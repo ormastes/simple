@@ -43,6 +43,15 @@ struct AdviceRule {
     advice_type: AdviceType,
     priority: i64,
     order: usize,
+    /// `closure_created_in_test()` where the `on pc{...}` declaration ran,
+    /// with the advice definition it resolved to. An owner-less advice fn
+    /// (one nested in a block) is written there, so its body is judged from
+    /// there by the private-fn call rule, not from the join point's frame
+    /// (test_private_access_closure_attribution_2026-11-14). The origin only
+    /// applies to that exact definition: the join point looks the advice up
+    /// by NAME, which may find a different same-named fn.
+    declared: Arc<FunctionDef>,
+    origin_in_test: bool,
 }
 
 thread_local! {
@@ -63,7 +72,7 @@ pub(crate) fn register_advice(
     decl: &AopAdvice,
     functions: &HashMap<String, Arc<FunctionDef>>,
 ) -> Result<(), CompileError> {
-    if !functions.contains_key(&decl.interceptor) {
+    let Some(declared) = functions.get(&decl.interceptor).cloned() else {
         return Err(CompileError::semantic_with_context(
             format!("advice function `{}` not found", decl.interceptor),
             ErrorContext::new()
@@ -71,7 +80,7 @@ pub(crate) fn register_advice(
                 .with_code(codes::UNDEFINED_FUNCTION)
                 .with_help("define the advice function before the `on pc{...} use ...` declaration"),
         ));
-    }
+    };
     let text = pointcut_text(decl);
     let predicate = crate::predicate_parser::parse_predicate(&text).map_err(|e| {
         CompileError::semantic_with_context(
@@ -91,6 +100,8 @@ pub(crate) fn register_advice(
             advice_type: decl.advice_type,
             priority: decl.priority.unwrap_or(0),
             order,
+            declared,
+            origin_in_test: crate::interpreter::interpreter_module::closure_created_in_test(),
         });
     });
     Ok(())
@@ -154,10 +165,11 @@ fn function_signature(func: &FunctionDef) -> String {
     format!("* {}({})", func.name, params)
 }
 
-/// Advice names matching `func`, highest priority first. `before` runs
-/// highest-priority-first; `after_*` runs highest-priority-LAST (aop_spec.spl
-/// Behaviors), so the caller reverses for the after kinds.
-fn matching_advice(func: &FunctionDef, kind: AdviceType) -> Vec<String> {
+/// Advice names (with their declared definition and its origin) matching
+/// `func`, highest priority first. `before` runs highest-priority-first;
+/// `after_*` runs highest-priority-LAST (aop_spec.spl Behaviors), so the
+/// caller reverses for the after kinds.
+fn matching_advice(func: &FunctionDef, kind: AdviceType) -> Vec<(String, Arc<FunctionDef>, bool)> {
     let signature = function_signature(func);
     let attrs = function_attrs(func);
     let ctx = MatchContext::new()
@@ -172,7 +184,10 @@ fn matching_advice(func: &FunctionDef, kind: AdviceType) -> Vec<String> {
             .filter(|r| r.advice_type == kind && r.advice != func.name && r.predicate.matches(&ctx))
             .collect();
         matched.sort_by(|a, b| b.priority.cmp(&a.priority).then_with(|| a.order.cmp(&b.order)));
-        matched.into_iter().map(|r| r.advice.clone()).collect()
+        matched
+            .into_iter()
+            .map(|r| (r.advice.clone(), Arc::clone(&r.declared), r.origin_in_test))
+            .collect()
     })
 }
 
@@ -240,7 +255,7 @@ fn run_kind(
     if reverse {
         names.reverse();
     }
-    for name in names {
+    for (name, declared, declared_in_test) in names {
         // The rule outlived the scope its advice was declared in — the
         // registry is process-wide but `on ...` is a scoped statement, and a
         // nested advice function is gone once its block ends. `register_advice`
@@ -249,8 +264,11 @@ fn run_kind(
         let Some(advice_fn) = functions.get(&name).cloned() else {
             continue;
         };
+        // A same-named fn other than the declared one gets no test origin.
+        let origin_in_test = declared_in_test && Arc::ptr_eq(&declared, &advice_fn);
         IN_ADVICE.with(|c| *c.borrow_mut() = true);
-        let outcome = exec_advice_in_join_point_scope(&advice_fn, env, functions, classes, enums, impl_methods);
+        let outcome =
+            exec_advice_in_join_point_scope(&advice_fn, origin_in_test, env, functions, classes, enums, impl_methods);
         IN_ADVICE.with(|c| *c.borrow_mut() = false);
         outcome?;
     }
@@ -275,6 +293,7 @@ fn run_kind(
 /// advice-local variables do not leak into the caller.
 fn exec_advice_in_join_point_scope(
     advice_fn: &FunctionDef,
+    origin_in_test: bool,
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, Arc<ClassDef>>,
@@ -282,6 +301,10 @@ fn exec_advice_in_join_point_scope(
     impl_methods: &ImplMethods,
 ) -> Result<(), CompileError> {
     let mut advice_env = env.clone();
+    // The clone carries the join point's closure stamp; an owner-less advice
+    // body reads its origin from this env (execute_function_body), so give it
+    // the declaration's own. An owned advice fn ignores the stamp.
+    advice_env.set_closure_in_test(origin_in_test);
     super::function_exec::execute_function_body(
         advice_fn,
         HashMap::new(),

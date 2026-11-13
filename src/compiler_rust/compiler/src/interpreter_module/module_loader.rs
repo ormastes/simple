@@ -2916,17 +2916,21 @@ pub(crate) fn closure_created_in_test() -> bool {
     if let Some(origin) = CLOSURE_ORIGIN_IS_TEST.with(|c| c.get()) {
         return origin;
     }
-    let entry_file = || {
-        crate::interpreter::CURRENT_FILE.with(|c| {
+    crate::interpreter::CURRENT_EXEC_MODULE.with(|c| owner_written_in_test(c.borrow().as_deref()))
+}
+
+/// Is code owned by module `owner` written in a test file? An entry-script
+/// function (`<entry>`) and the entry's own top level (`None`) resolve to the
+/// entry file (`CURRENT_FILE`). Unknown -> false.
+pub(crate) fn owner_written_in_test(owner: Option<&str>) -> bool {
+    match owner {
+        Some("<entry>") | None => crate::interpreter::CURRENT_FILE.with(|c| {
             c.borrow()
                 .as_ref()
                 .is_some_and(|p| is_test_caller(&p.to_string_lossy()))
-        })
-    };
-    crate::interpreter::CURRENT_EXEC_MODULE.with(|c| match c.borrow().as_deref() {
-        Some("<entry>") | None => entry_file(),
+        }),
         Some(owner) => is_test_caller(owner),
-    })
+    }
 }
 
 /// `env.clone()` stamped with `closure_created_in_test()`: the captured env of
@@ -3079,6 +3083,25 @@ mod private_call_visibility_tests {
         assert!(!closure_created_in_test(), "product entry top level");
         set_owner(None);
         set_file(None);
+    }
+
+    #[test]
+    fn owner_origin_resolves_entry_to_the_entry_file() {
+        // Decorator arms judge an owned fn body by where it is written: its
+        // owner, with `<entry>` / no owner meaning the entry file.
+        let set_file = |f: Option<&str>| {
+            crate::interpreter::CURRENT_FILE.with(|c| *c.borrow_mut() = f.map(std::path::PathBuf::from));
+        };
+        set_file(Some("/repo/test/01_unit/app/x_spec.spl"));
+        assert!(owner_written_in_test(Some("<entry>")));
+        assert!(owner_written_in_test(None));
+        assert!(!owner_written_in_test(Some("/repo/src/app/runner/deco.spl")));
+        assert!(owner_written_in_test(Some("/repo/test/helpers/fx.spl")));
+        set_file(Some("/repo/src/app/main.spl"));
+        assert!(!owner_written_in_test(Some("<entry>")));
+        assert!(!owner_written_in_test(None));
+        set_file(None);
+        assert!(!owner_written_in_test(Some("<entry>")), "unknown entry file stays strict");
     }
 
     #[test]
