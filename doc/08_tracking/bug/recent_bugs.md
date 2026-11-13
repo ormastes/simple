@@ -3,7 +3,9 @@
 **Generated:** 2026-11-01
 **Status correction:** 2026-11-10 (one scoped LLVM Yield fix; not a full regeneration)
 **Database:** `doc/08_tracking/bug/bug_db.sdn`
-**Open:** 744 | **Closed:** 867
+**Open:** 464 | **Closed:** 110
+
+**Count correction 2026-11-13 (bug-db hygiene lane, dbhy-20261113):** the previous cached header (`Open: 744 | Closed: 867`, generated 2026-11-01) was stale. Corrected to bugs_active-derived counts from `bug_db.sdn` at 2026-11-13: 1398 legacy rows = open 464, closed 110 (fixing 16, fix-implemented-verification-pending 268, verified 95, fixed 414, other terminal 31). The row tables below are still the older snapshot — regenerate with `src/app/bug_gen/main.spl` before trusting row-level contents. Canonical open-bug counting is the merged shard view: `sh scripts/check/bug-db-shard.shs count` (see `doc/08_tracking/bug/db/README.md`); counting one table or grepping the legacy file under/over-counts.
 
 ## Open Bugs
 
