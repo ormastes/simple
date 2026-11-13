@@ -1,0 +1,126 @@
+# @cover src/app/devhub/messenger/adapter/sqlite_reader.spl
+# @cover src/app/devhub/messenger/adapter/sqlcipher_reader.spl
+# @cover src/app/devhub/messenger/adapter/db_common.spl
+# devhub messenger — read-only DB adapters: advertised port values, policy
+# gates, and typed failures for unreadable or mis-configured targets.
+use std.spec.*
+use std.spec.step
+use app.devhub.messenger.config.{parse_messenger_config, MessengerTarget}
+use app.devhub.messenger.plugin_access.{
+    MESSENGER_READ_PORT_ABI, messenger_reset_adapters, messenger_load_adapter,
+    MESSENGER_PORT_OK, MESSENGER_PORT_PERMISSION_DENIED, MESSENGER_PORT_CONFIG_ERROR
+}
+use app.devhub.messenger.adapter.sqlite_reader.{
+    messenger_sqlite3_db_adapter, messenger_register_sqlite3_adapter,
+    messenger_sqlite3_list_rooms, messenger_sqlite3_list_members,
+    messenger_sqlite3_history, messenger_sqlite3_fetch_message,
+    MESSENGER_SQLITE3_FORMAT, MESSENGER_SQLITE3_ADAPTER_VERSION
+}
+use app.devhub.messenger.adapter.sqlcipher_reader.{
+    messenger_sqlcipher4_db_adapter, messenger_register_sqlcipher4_adapter,
+    messenger_sqlcipher4_list_rooms, messenger_sqlcipher4_history,
+    messenger_sqlcipher4_fetch_message, messenger_sqlcipher4_list_members,
+    MESSENGER_SQLCIPHER4_FORMAT
+}
+
+fn _sdn(provider: text, fmt: text, secret: text, body_grant: text) -> text:
+    "messenger:\n" +
+    "    schema_version: 1\n" +
+    "\n" +
+    "messenger.t1:\n" +
+    "    read_provider: {provider}\n" +
+    "    send_provider: none\n" +
+    "\n" +
+    "messenger.t1.db:\n" +
+    "    path: build/test-artifacts/devhub/does-not-exist.db\n" +
+    "    format: {fmt}\n" +
+    "    access: read_only\n" +
+    secret +
+    "\n" +
+    "messenger.t1.schema:\n" +
+    "    profile_id: t1_v1\n" +
+    "    room_table: room\n" +
+    "    room_id: id\n" +
+    "    room_name: title\n" +
+    "    member_table: room_member\n" +
+    "    member_room_id: room_id\n" +
+    "    member_identity_id: member_id\n" +
+    "    message_table: messages\n" +
+    "    message_id: id\n" +
+    "    message_room_id: room_id\n" +
+    "    message_sender_id: sender_id\n" +
+    "    message_body: body\n" +
+    "    message_created_at: created_at\n" +
+    "    message_sequence: seq\n" +
+    "    timestamp_unit: ms\n" +
+    "    sequence_kind: monotonic_within_room\n" +
+    body_grant
+
+fn _target(provider: text, fmt: text, secret: text, body_grant: text) -> MessengerTarget:
+    val parsed = parse_messenger_config(_sdn(provider, fmt, secret, body_grant))
+    if not parsed.ok:
+        fail("fixture rejected: {parsed.problems}")
+    parsed.config.targets[0]
+
+fn _plain_target() -> MessengerTarget:
+    _target("sqlite3_database", "sqlite3", "    secret_ref: secret://messenger/t1/db_key\n", "")
+
+describe "messenger DB adapter port values":
+    it "should advertise the sqlite3 adapter as a read-only four-verb port":
+        val p = messenger_sqlite3_db_adapter()
+        expect(p.abi).to_equal(MESSENGER_READ_PORT_ABI)
+        expect(p.provider_id).to_equal("messenger.sqlite3_database")
+        expect(p.read_only).to_equal(true)
+        expect(p.capabilities.len()).to_equal(4)
+        expect(p.unavailable_reason).to_equal("")
+        expect(p.semantic_version).to_equal(MESSENGER_SQLITE3_ADAPTER_VERSION)
+        expect(MESSENGER_SQLITE3_FORMAT).to_equal("sqlite3")
+
+    it "should advertise the sqlcipher4 adapter as a read-only four-verb port":
+        val p = messenger_sqlcipher4_db_adapter()
+        expect(p.provider_id).to_equal("messenger.sqlcipher4_database")
+        expect(p.provider_kind).to_equal("sqlcipher4_database")
+        expect(p.read_only).to_equal(true)
+        expect(p.capabilities.join(",")).to_equal("list_rooms,list_members,history,fetch_message")
+        expect(MESSENGER_SQLCIPHER4_FORMAT).to_equal("sqlcipher4")
+
+    it "should register each adapter once and refuse a duplicate":
+        step("Start from an empty registry")
+        messenger_reset_adapters()
+        expect(messenger_register_sqlite3_adapter()).to_equal(true)
+        expect(messenger_register_sqlite3_adapter()).to_equal(false)
+        expect(messenger_register_sqlcipher4_adapter()).to_equal(true)
+        expect(messenger_register_sqlcipher4_adapter()).to_equal(false)
+        messenger_reset_adapters()
+
+describe "messenger DB adapter failures":
+    it "should answer a typed config error when the database file is missing":
+        val r = messenger_sqlite3_list_rooms(_plain_target(), "user")
+        expect(r.status).to_equal(MESSENGER_PORT_CONFIG_ERROR)
+        expect(r.exit_code).to_equal(2)
+        expect(r.payload).to_equal("")
+
+    it "should fail every read verb the same typed way for a missing file":
+        val t = _plain_target()
+        expect(messenger_sqlite3_list_members(t, "r1", "user").status).to_equal(MESSENGER_PORT_CONFIG_ERROR)
+        expect(messenger_sqlite3_history(t, "r1", 10, "user").status).to_equal(MESSENGER_PORT_CONFIG_ERROR)
+        expect(messenger_sqlite3_fetch_message(t, "m1", "user").status).to_equal(MESSENGER_PORT_CONFIG_ERROR)
+
+    it "should deny an agent the message bodies by default":
+        val t = _plain_target()
+        val h = messenger_sqlite3_history(t, "r1", 10, "agent")
+        expect(h.status).to_equal(MESSENGER_PORT_PERMISSION_DENIED)
+        expect(h.exit_code).to_equal(3)
+        expect(h.error).to_contain("agent body access denied")
+        expect(messenger_sqlite3_fetch_message(t, "m1", "agent").status).to_equal(MESSENGER_PORT_PERMISSION_DENIED)
+
+    it "should let an agent list rooms because that is not a body read":
+        val r = messenger_sqlite3_list_rooms(_plain_target(), "agent")
+        expect(r.status).to_equal(MESSENGER_PORT_CONFIG_ERROR)
+
+    it "should refuse the sqlcipher4 adapter for a missing database too":
+        val t = _target("sqlcipher4_database", "sqlcipher4", "    profile: sqlcipher4_4k_sha512\n    secret_ref: secret://messenger/t1/db_key\n", "")
+        expect(messenger_sqlcipher4_list_rooms(t, "user").status).to_equal(MESSENGER_PORT_CONFIG_ERROR)
+        expect(messenger_sqlcipher4_list_members(t, "r", "user").status).to_equal(MESSENGER_PORT_CONFIG_ERROR)
+        expect(messenger_sqlcipher4_history(t, "r", 5, "agent").status).to_equal(MESSENGER_PORT_PERMISSION_DENIED)
+        expect(messenger_sqlcipher4_fetch_message(t, "m", "user").status).to_equal(MESSENGER_PORT_CONFIG_ERROR)
