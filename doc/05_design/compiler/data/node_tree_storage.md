@@ -333,6 +333,37 @@ Blocked on the restore-cost bug above and a native-lane RSS measurement
   `driver_aot_native_output.spl`, and the three `Dict` copies in
   `driver_source_parse_retained.spl`.
 
+### 7.3 Phase D (HIR) plan — not implemented
+
+Goal: one frozen, position-independent HIR blob per module, published once and
+shared read-only by every MIR shard worker, instead of N decoded copies.
+
+1. **Spec first (RED)** — `test/02_integration/compiler/data/hir_module_arena_spec.spl`:
+   (a) for the §7.1 module set, `hir_arena_encode(hir)` -> `hir_arena_view(bytes)`
+   -> `hir_arena_materialise` lowers to a MIR dump byte-identical to lowering the
+   original `HirModule`; (b) the arena is <= the current codec blob in bytes
+   (150-183 B per AST node today); (c) a second publish of `hir:<module>` is
+   refused; (d) a `compiler.hir` rule `site: "compiler.hir.Module.nodes"`,
+   `column` selects the arena, default `direct` keeps the decoded tree.
+2. **Arena layout** (§3): u32 node slots per family (items, stmts, exprs,
+   types), one `extra: [i64]` per family for variable payloads, span table index
+   instead of four i64 fields, interned strings by id, header with
+   `schema_digest` / `physical_plan_digest` and a sha256 body digest (the cell
+   value). Start by re-encoding the existing `hir_codec` scalar stream into typed
+   sections (the `.spab` pattern), so value identity is checkable before any
+   reader reads columns in place.
+3. **Cells** — the producer publishes `hir:<module>` after lowering (driver
+   streaming path, `driver_hir_pipeline_lowering.spl`), then releases the AST
+   (`ast_reset`, and under C.2 the `ast:<module>` snapshot). MIR consumers await
+   `hir:<module>`; cycles surface as the §5 diagnostic.
+4. **Sharing** — a third answer at `hir_cache_load_in_owned_scope` (§6):
+   map the per-module arena file under `native_cache/<scope>/hir/` read-only;
+   the hirres lane keeps residency policy, this lane only the arena.
+5. **Evidence before any default flip** — per-worker and total RSS with K shard
+   workers (native lane, §1.3), identical MIR dumps on the fixture set, MIR
+   lowering wall time within 2 %. Expect the interpreter lane to repeat the
+   §7.1 lesson (decode/restore cost dominates); measure it, do not assume.
+
 ## 8. Non-goals and risks
 
 - No per-node futures, no locks (repo rule: immutable values, CAS, messages).
