@@ -1,0 +1,149 @@
+# @tag:in-development
+# @req REQ-XRAY-V1-API-01
+"""
+# XRay ("spy") backend differential — OUT (black-box) suite
+
+Builds a tiny instrumented program, runs it, toggles tracing at runtime and
+asserts on the EXTERNALLY observed edge transcript — the same assertions for
+every backend (`assert_edges`): entries == exits > 0, no foreign/other edges,
+nothing recorded after stop, timing field present on every record, traced
+results equal the untraced baseline.
+
+Why `@tag:in-development` (counted, never skipped, never a PASS claim):
+  - simple: the lane `scripts/check/check-xray-native-inprocess-e2e.shs` is
+    complete, but the deployed Rust seed on this host
+    (`src/compiler_rust/target/bootstrap/simple`, 2026-11-05) returns 0 from
+    `rt_host_dynlib_open` for EVERY library (even libm.so.6) while a C
+    `dlopen` of the same `--xray` module succeeds — see
+    doc/08_tracking/bug/seed_rt_host_dynlib_open_returns_zero_2026-11-13.md.
+    A binary built from PR5b or later turns this describe green unchanged.
+  - llvm: no Simple-compiled `--xray` LLVM binary can be traced yet (the
+    `clang_rt.xray` link + handler shim of PR4 is not landed:
+    `80.driver/driver_xray_link.spl:11`). Until then the LLVM transcript
+    comes from the C harness of `check-xray-llvm-adapter-e2e.shs`, which
+    prints no per-record timestamp, so that single check is skipped by
+    passing None — stated here, not hidden.
+Each describe runs ONE capped native build; keep them serial.
+"""
+use std.spec.*
+use std.nogc_sync_mut.io_runtime.{process_run_timeout, env_get, read_file_text, file_exists}
+
+# Per-lane wall budget. XRAY_OUT_LANE_TIMEOUT_MS shortens it when only the
+# spec's own parsing/verdict path is under test (the lanes then fail fast).
+fn lane_timeout_ms() -> i64:
+    val knob = env_get("XRAY_OUT_LANE_TIMEOUT_MS")
+    if knob != "": knob.to_i64() else: 1500000
+
+# The binary that BUILDS and HOSTS the traced module. XRAY_OUT_SIMPLE_BINARY
+# lets a lane point at a newer self-hosted binary (or a fast-failing one when
+# only the spec's own parsing is under test) without touching the runner's
+# SIMPLE_BINARY identity check.
+fn simple_binary() -> text:
+    val lane = env_get("XRAY_OUT_SIMPLE_BINARY")
+    if lane != "": return lane
+    val explicit = env_get("SIMPLE_BINARY")
+    if explicit != "": explicit else: "bin/simple"
+
+# "key=value" scalar field of a transcript line ("" when absent).
+fn field(line: text, key: text) -> text:
+    val marker = " {key}="
+    val at = line.index_of(marker)
+    if at < 0: return ""
+    val rest = line.substring(at + marker.len(), line.len())
+    val stop = rest.index_of(" ")
+    if stop < 0: rest else: rest.substring(0, stop)
+
+# "key=[a, b, c]" list field of a transcript line.
+fn list_field(line: text, key: text) -> [text]:
+    val marker = " {key}=["
+    val at = line.index_of(marker)
+    if at < 0: return []
+    val rest = line.substring(at + marker.len(), line.len())
+    val stop = rest.index_of("]")
+    if stop < 0: return []
+    val inner = rest.substring(0, stop).trim()
+    if inner == "": return []
+    var out: [text] = []
+    for item in inner.split(","): out.push(item.trim())
+    out
+
+fn lines_with(output: text, prefix: text, key: text) -> [text]:
+    var out: [text] = []
+    for line in output.split("\n"):
+        if line.starts_with(prefix) and line.contains(" {key}="): out.push(line)
+    out
+
+fn to_i64(value: text) -> i64:
+    if value == "": -1 else: value.to_i64()
+
+# The ONE assertion set every backend must satisfy.
+fn assert_edges(label: text, entries: i64, exits: i64, others: i64, after_stop: i64,
+        timestamps_nonzero: i64?, total: i64):
+    expect("{label} entries>0 {entries}" != "{label} entries>0 0").to_equal(true)
+    expect(entries > 0).to_equal(true)
+    expect(entries).to_equal(exits)
+    expect(others).to_equal(0)
+    expect(after_stop).to_equal(0)
+    if val stamps = timestamps_nonzero:
+        expect(stamps).to_equal(total)
+
+fn kept_dir(stderr: text) -> text:
+    for line in stderr.split("\n"):
+        if line.starts_with("kept: "): return line.substring(6, line.len()).trim()
+    ""
+
+fn cleanup(dir: text):
+    if dir.starts_with("/tmp/xray-inproc-e2e."):
+        process_run_timeout("rm", ["-rf", dir], 60000)
+
+describe "XRay backend differential OUT — simple (pure-Simple sleds, in-process patch)":
+    it "traces only the selected functions, toggles at runtime, matches the untraced baseline":
+        val (stdout, stderr, status) = process_run_timeout("sh",
+            ["scripts/check/check-xray-native-inprocess-e2e.shs", "--simple", simple_binary(), "--keep"], lane_timeout_ms())
+        val dir = kept_dir(stderr)
+        val log_path = "{dir}/host.log"
+        val transcript = if dir != "" and file_exists(log_path): read_file_text(log_path) else: ""
+        cleanup(dir)
+        # The lane verdict is the last stdout line; the transcript is the evidence.
+        val verdict_lines = stdout.trim().split("\n")
+        expect(verdict_lines[verdict_lines.len() - 1].starts_with("PASS")).to_equal(true)
+        expect(status as i64).to_equal(0)
+        val sessions = lines_with(transcript, "E2E ", "records")
+        expect(sessions.len() >= 2).to_equal(true)
+        for line in sessions:
+            val label = line.split(" ")[1]
+            val selected = list_field(line, "records")
+            val selected_sites = list_field(lines_with(transcript, "E2E {label} ", "selected_sites")[0], "selected_sites")
+            var entries = 0
+            var exits = 0
+            var others = 0
+            for row in selected:
+                val parts = row.split(":")
+                val kind = to_i64(parts[0])
+                if kind == 1: entries = entries + 1
+                elif kind == 2: exits = exits + 1
+                else: others = others + 1
+                # every edge belongs to a selected site
+                expect(selected_sites.contains(parts[2])).to_equal(true)
+            val tail = lines_with(transcript, "E2E {label} ", "records_after_stop")[0]
+            val results = lines_with(transcript, "E2E {label} ", "results_on")[0]
+            expect(field(results, "results_on")).to_equal(field(results, "baseline"))
+            assert_edges(label, entries, exits, others, to_i64(field(tail, "records_after_stop")),
+                Some(to_i64(field(line, "timestamps_nonzero"))), selected.len())
+
+describe "XRay backend differential OUT — llvm (compiler-rt sleds)":
+    it "traces only the selected functions, toggles at runtime, matches the untraced baseline":
+        val (stdout, _, status) = process_run_timeout("sh", ["scripts/check/check-xray-llvm-adapter-e2e.shs"], lane_timeout_ms())
+        val verdict_lines = stdout.trim().split("\n")
+        expect(verdict_lines[verdict_lines.len() - 1].starts_with("PASS")).to_equal(true)
+        expect(status as i64).to_equal(0)
+        val patched = lines_with(stdout, "INFO patched-A:", "entry")
+        expect(patched.len()).to_equal(1)
+        val line = patched[0]
+        val entries = to_i64(field(line, "entry"))
+        val exits = to_i64(field(line, "exit"))
+        val others = to_i64(field(line, "other")) + to_i64(field(line, "bad"))
+        # The C harness checks "quiescent no-fire" and "unpatch" itself (PASS lines);
+        # after-stop is therefore 0 when the lane passed. No per-record timestamp
+        # is printed by that harness: None, stated in the header.
+        assert_edges("patched-A", entries, exits, others, 0, None, entries + exits)

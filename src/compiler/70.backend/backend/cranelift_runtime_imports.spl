@@ -9,37 +9,77 @@ val CL_TYPE_I8_FOR_RUNTIME_IMPORT: i64 = 1
 val CL_TYPE_F64_FOR_RUNTIME_IMPORT: i64 = 6
 val CL_CC_PLATFORM_FOR_RUNTIME_IMPORT: i64 = -1
 val CL_LINKAGE_IMPORT_FOR_RUNTIME_IMPORT: i64 = 1
+# Provider linkage code (cranelift_sffi CRANELIFT_LINKAGE_RUNTIME_IMPORT): an
+# import that binds only through the JIT runtime symbol table, with exactly
+# its RuntimeFuncSpec signature, never through a process symbol.
+val CL_LINKAGE_RUNTIME_TABLE_IMPORT: i64 = 5
 
-# Import ledger for one host JIT module. The JIT provider binds imports by
-# process symbol lookup and aborts the host at finalize on a miss, so the JIT
-# entry (cranelift_jit_run_main) must see every import the lowering declares,
-# including ones no MIR callee names (string boxing, array/aggregate helpers).
-# Recording is keyed to one module handle; AOT modules are never recorded.
+# Import ledger for one host JIT module. The JIT provider admits an import only
+# when finalize can bind it exactly and returns 0 for any other; the JIT entry
+# (cranelift_jit_run_main) reports every refused name, including imports no
+# MIR callee names (string boxing, array/aggregate helpers). Only the module's
+# Foreign callees may bind through a process symbol; every other import is
+# declared runtime-table-only. Recording is keyed to one module handle; AOT
+# modules are never recorded and keep plain import linkage.
 # Compilation of a JIT module is single-threaded: begin, lower, end.
 var _cl_import_ledger_module_v1: i64 = 0
-var _cl_import_ledger_names_v1: [text] = []
+var _cl_import_ledger_foreign_v1: Dict<text, bool> = {}
+var _cl_import_ledger_refused_v1: [text] = []
+var _cl_import_ledger_abi_v1: [text] = []
 
-fn cl_import_ledger_begin(cl_module: i64):
+struct ClJitImportLedger:
+    refused: [text]
+    abi_errors: [text]
+
+fn cl_import_ledger_begin(cl_module: i64, foreign: Dict<text, bool>):
     _cl_import_ledger_module_v1 = cl_module
-    _cl_import_ledger_names_v1 = []
+    _cl_import_ledger_foreign_v1 = foreign
+    _cl_import_ledger_refused_v1 = []
+    _cl_import_ledger_abi_v1 = []
 
-fn cl_import_ledger_end() -> [text]:
-    """Distinct import names recorded since cl_import_ledger_begin, in first-declared order."""
-    var names: [text] = []
+fn cl_import_ledger_end() -> ClJitImportLedger:
+    """Distinct refused import names and the call-ABI refusals recorded since
+    cl_import_ledger_begin, in first-recorded order."""
+    var refused: [text] = []
     var seen: Dict<text, bool> = {}
-    for name in _cl_import_ledger_names_v1:
+    for name in _cl_import_ledger_refused_v1:
         if not seen.has(name):
             seen[name] = true
-            names = names.push(name)
+            refused = refused.push(name)
+    val ledger = ClJitImportLedger(refused: refused, abi_errors: _cl_import_ledger_abi_v1)
     _cl_import_ledger_module_v1 = 0
-    _cl_import_ledger_names_v1 = []
-    names
+    _cl_import_ledger_foreign_v1 = {}
+    _cl_import_ledger_refused_v1 = []
+    _cl_import_ledger_abi_v1 = []
+    ledger
+
+fn cl_jit_refuse_call_abi(cl_module: i64, message: text) -> bool:
+    """Record a call-ABI refusal for the JIT module being compiled.
+
+    True when recorded: the caller emits a placeholder value and the JIT entry
+    returns the refusal before finalize. False outside a JIT module: the caller
+    keeps the AOT lane's compile-error panic."""
+    if cl_module == 0 or cl_module != _cl_import_ledger_module_v1:
+        return false
+    _cl_import_ledger_abi_v1 = _cl_import_ledger_abi_v1.push(message)
+    true
+
+fn cl_jit_import_refused(cl_module: i64, handle: i64) -> bool:
+    """True when the provider refused an import of the JIT module being
+    compiled (the ledger holds its name): the caller emits a placeholder value
+    instead of a call, keeping the IR well formed until the JIT entry reports
+    the refusal. Outside a JIT module this is always false."""
+    handle == 0 and cl_module != 0 and cl_module == _cl_import_ledger_module_v1
 
 fn cl_declare_import_function(cl_module: i64, name: text, sig: i64) -> i64:
     """The one import declaration path of the Cranelift lowering."""
-    if cl_module != 0 and cl_module == _cl_import_ledger_module_v1:
-        _cl_import_ledger_names_v1 = _cl_import_ledger_names_v1.push(name)
-    cranelift_declare_function(cl_module, name, sig, CL_LINKAGE_IMPORT_FOR_RUNTIME_IMPORT)
+    if cl_module == 0 or cl_module != _cl_import_ledger_module_v1:
+        return cranelift_declare_function(cl_module, name, sig, CL_LINKAGE_IMPORT_FOR_RUNTIME_IMPORT)
+    val linkage = if _cl_import_ledger_foreign_v1.has(name): CL_LINKAGE_IMPORT_FOR_RUNTIME_IMPORT else: CL_LINKAGE_RUNTIME_TABLE_IMPORT
+    val handle = cranelift_declare_function(cl_module, name, sig, linkage)
+    if handle == 0:
+        _cl_import_ledger_refused_v1 = _cl_import_ledger_refused_v1.push(name)
+    handle
 
 fn translate_runtime_import_call_i64(ctx: i64, cl_module: i64, name: text, args: [i64]) -> i64:
     val sig = cranelift_new_signature(CL_CC_PLATFORM_FOR_RUNTIME_IMPORT)
@@ -47,6 +87,8 @@ fn translate_runtime_import_call_i64(ctx: i64, cl_module: i64, name: text, args:
         cranelift_sig_add_param(sig, CL_TYPE_I64_FOR_RUNTIME_IMPORT)
     cranelift_sig_set_return(sig, CL_TYPE_I64_FOR_RUNTIME_IMPORT)
     val handle = cl_declare_import_function(cl_module, name, sig)
+    if cl_jit_import_refused(cl_module, handle):
+        return cranelift_iconst(ctx, CL_TYPE_I64_FOR_RUNTIME_IMPORT, 0)
     val func_ref = cranelift_import_function(ctx, handle)
     return cranelift_call(ctx, func_ref, args)
 
@@ -56,6 +98,8 @@ fn translate_runtime_import_call_i8(ctx: i64, cl_module: i64, name: text, args: 
         cranelift_sig_add_param(sig, CL_TYPE_I64_FOR_RUNTIME_IMPORT)
     cranelift_sig_set_return(sig, CL_TYPE_I8_FOR_RUNTIME_IMPORT)
     val handle = cl_declare_import_function(cl_module, name, sig)
+    if cl_jit_import_refused(cl_module, handle):
+        return cranelift_iconst(ctx, CL_TYPE_I64_FOR_RUNTIME_IMPORT, 0)
     val func_ref = cranelift_import_function(ctx, handle)
     return cranelift_call(ctx, func_ref, args)
 
@@ -64,6 +108,8 @@ fn translate_runtime_import_call_void(ctx: i64, cl_module: i64, name: text, args
     for _arg in args:
         cranelift_sig_add_param(sig, CL_TYPE_I64_FOR_RUNTIME_IMPORT)
     val handle = cl_declare_import_function(cl_module, name, sig)
+    if cl_jit_import_refused(cl_module, handle):
+        return
     val func_ref = cranelift_import_function(ctx, handle)
     cranelift_call(ctx, func_ref, args)
 
@@ -72,6 +118,8 @@ fn translate_runtime_import_call_f64_i64(ctx: i64, cl_module: i64, name: text, a
     cranelift_sig_add_param(sig, CL_TYPE_F64_FOR_RUNTIME_IMPORT)
     cranelift_sig_set_return(sig, CL_TYPE_I64_FOR_RUNTIME_IMPORT)
     val handle = cl_declare_import_function(cl_module, name, sig)
+    if cl_jit_import_refused(cl_module, handle):
+        return cranelift_iconst(ctx, CL_TYPE_I64_FOR_RUNTIME_IMPORT, 0)
     val func_ref = cranelift_import_function(ctx, handle)
     return cranelift_call(ctx, func_ref, [arg])
 
@@ -80,6 +128,8 @@ fn translate_runtime_import_call_i64_f64(ctx: i64, cl_module: i64, name: text, a
     cranelift_sig_add_param(sig, CL_TYPE_I64_FOR_RUNTIME_IMPORT)
     cranelift_sig_set_return(sig, CL_TYPE_F64_FOR_RUNTIME_IMPORT)
     val handle = cl_declare_import_function(cl_module, name, sig)
+    if cl_jit_import_refused(cl_module, handle):
+        return cranelift_iconst(ctx, CL_TYPE_I64_FOR_RUNTIME_IMPORT, 0)
     val func_ref = cranelift_import_function(ctx, handle)
     return cranelift_call(ctx, func_ref, [arg])
 
@@ -90,5 +140,7 @@ fn translate_runtime_import_call_i64_i64_f64_i64(ctx: i64, cl_module: i64, name:
     cranelift_sig_add_param(sig, CL_TYPE_F64_FOR_RUNTIME_IMPORT)
     cranelift_sig_set_return(sig, CL_TYPE_I64_FOR_RUNTIME_IMPORT)
     val handle = cl_declare_import_function(cl_module, name, sig)
+    if cl_jit_import_refused(cl_module, handle):
+        return cranelift_iconst(ctx, CL_TYPE_I64_FOR_RUNTIME_IMPORT, 0)
     val func_ref = cranelift_import_function(ctx, handle)
     return cranelift_call(ctx, func_ref, [arg0, arg1, arg2])

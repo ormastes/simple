@@ -2,17 +2,20 @@
 #
 # The JIT lane lowers MIR through cranelift_codegen_adapter into a host JIT
 # module. That lowering declares every non-local named callee as a Cranelift
-# import, and the provider behind rt_cranelift_new_module binds imports by
-# process symbol lookup only: it registers no runtime symbols. An import it
-# cannot bind does not return an error, it aborts the host at
-# rt_cranelift_finalize_module ("can't resolve symbol <name>").
+# import. The provider behind rt_cranelift_new_module (the Rust seed's
+# cranelift_sffi) registers the seed JIT's runtime symbol table and admits an
+# import only when finalize can bind it exactly:
+#   - a runtime-table name, with exactly its RuntimeFuncSpec signature;
+#   - for a Foreign callee only, a process symbol.
+# A declaration the provider refuses returns 0, and the JIT entry reports the
+# name (the import ledger in cranelift_runtime_imports records it).
 #
-# So the decision is made here, once per module, before any code is generated:
+# So the decision is split:
 #   Source, defined in the module  -> local call
-#   Foreign                        -> provider import (process symbol)
-#   Runtime                        -> refused by name
-#   Source, not defined            -> refused by name
-#   Unknown origin                 -> refused by name
+#   Foreign                        -> provider import (runtime table or process symbol)
+#   Runtime                        -> provider import (runtime table only)
+#   Source, not defined            -> refused by name, before codegen
+#   Unknown origin                 -> refused by name, before codegen
 # The origin comes from MirOperand.call_origin, never from the spelling of the
 # name, and there is no name table here to drift from the seed's: the set of
 # runtime symbols that link natively is whatever the provider registers.
@@ -25,13 +28,14 @@ use compiler.mir.mir_instruction_graph.{mir_module_functions_sorted, mir_module_
 pub enum JitCalleeResolution:
     Local
     ForeignImport
+    RuntimeImport
     RuntimeUnbound
     UnresolvedSource
     UnknownOrigin
 
 pub fn jit_classify_callee(origin: MirCallOrigin, name: text, defined: Dict<text, bool>) -> JitCalleeResolution:
     match origin:
-        case MirCallOrigin.Runtime: JitCalleeResolution.RuntimeUnbound
+        case MirCallOrigin.Runtime: JitCalleeResolution.RuntimeImport
         case MirCallOrigin.Foreign: JitCalleeResolution.ForeignImport
         case MirCallOrigin.Unknown: JitCalleeResolution.UnknownOrigin
         case MirCallOrigin.Source:
@@ -45,8 +49,9 @@ pub fn jit_callee_refusal(resolution: JitCalleeResolution, name: text, caller: t
     match resolution:
         case JitCalleeResolution.Local: ""
         case JitCalleeResolution.ForeignImport: ""
+        case JitCalleeResolution.RuntimeImport: ""
         case JitCalleeResolution.RuntimeUnbound:
-            "E-JIT-RUNTIME-EXTERN-UNBOUND: {name} (called from {caller}): the Cranelift JIT provider registers no runtime symbols, so this extern cannot be linked natively"
+            "E-JIT-RUNTIME-EXTERN-UNBOUND: {name} ({caller}): the Cranelift JIT provider's runtime symbol table has no such symbol with this exact RuntimeFuncSpec signature"
         case JitCalleeResolution.UnresolvedSource:
             "E-JIT-UNRESOLVED-CALLEE: {name} (called from {caller}): not defined in the JIT module"
         case JitCalleeResolution.UnknownOrigin:
@@ -88,15 +93,15 @@ pub fn jit_module_extern_errors(module: MirModule) -> [text]:
             errors = errors.push("E-JIT-EXTERN-STATIC-UNBOUND: {static_.name} (module {module.name}): an imported static has no provider in a JIT module")
     errors
 
-pub fn jit_foreign_callee_names(module: MirModule) -> Dict<text, bool>:
-    """Names of the module's Foreign callees: the only imports the JIT may bind."""
+pub fn jit_callee_names(module: MirModule, origin: MirCallOrigin) -> Dict<text, bool>:
+    """Names of the module's named callees with `origin`."""
     var names: Dict<text, bool> = {}
     for func in mir_module_functions_sorted(module):
         for block in func.blocks:
             for inst in block.instructions:
                 match inst.kind:
                     case Call(_, callee, _):
-                        if callee.call_origin == MirCallOrigin.Foreign:
+                        if callee.call_origin == origin:
                             match callee.kind:
                                 case Const(value, _):
                                     match value:
@@ -106,14 +111,21 @@ pub fn jit_foreign_callee_names(module: MirModule) -> Dict<text, bool>:
                     case _: pass
     names
 
-pub fn jit_lowering_import_errors(module_name: text, imports: [text], foreign: Dict<text, bool>) -> [text]:
-    """Refusals for imports the lowering declared that no Foreign callee names.
+pub fn jit_refused_import_errors(module: MirModule, refused: [text]) -> [text]:
+    """Named errors for the imports whose declaration the provider refused.
 
-    The lowering declares runtime helpers on its own (string boxing, array and
-    aggregate helpers, float libcalls); the provider cannot bind them and would
-    abort the host at finalize, so they are refused here instead."""
+    A Runtime callee binds only through the provider's runtime symbol table with
+    its exact RuntimeFuncSpec signature; a Foreign callee also through a process
+    symbol; an import the lowering declares on its own (string boxing, array and
+    aggregate helpers, float libcalls) only through the runtime table."""
+    val runtime = jit_callee_names(module, MirCallOrigin.Runtime)
+    val foreign = jit_callee_names(module, MirCallOrigin.Foreign)
     var errors: [text] = []
-    for name in imports:
-        if not foreign.has(name):
-            errors = errors.push("E-JIT-LOWERING-IMPORT-UNBOUND: {name} (module {module_name}): the lowering imports it and the Cranelift JIT provider registers no runtime symbols")
+    for name in refused:
+        if runtime.has(name):
+            errors = errors.push(jit_callee_refusal(JitCalleeResolution.RuntimeUnbound, name, "module {module.name}"))
+        elif foreign.has(name):
+            errors = errors.push("E-JIT-FOREIGN-EXTERN-UNBOUND: {name} (module {module.name}): no process symbol, or a runtime-table symbol whose RuntimeFuncSpec signature differs")
+        else:
+            errors = errors.push("E-JIT-LOWERING-IMPORT-UNBOUND: {name} (module {module.name}): the lowering imports it and the Cranelift JIT provider's runtime symbol table has no such symbol with this exact signature")
     errors

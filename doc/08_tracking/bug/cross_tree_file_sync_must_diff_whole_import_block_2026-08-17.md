@@ -113,3 +113,10 @@ This record was a process defect, not a live code defect; nothing remains to
 reproduce. The rule (diff the whole import block; prefer hunk patches over
 file copies; assert no new `use` lines; verify against the target tree) stands
 as written.
+
+
+---
+
+## 2026-11-13 triage (live-P3 lane l1, work/live-p3-l1-20261113, base f790f7f266e)
+
+**FIXED (confirmed)** — Process defect, not a live code defect: `typecheck_pass_severity` exported and imported intact at this base; the documented hunk-patch rule stands as the durable artifact. Nothing to reproduce.

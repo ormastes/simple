@@ -86,3 +86,10 @@ SIMPLE_COMPILER_TRACE=1 bin/simple native-build \
 # fail: cached=0 again — but now the decline reason IS logged, capture it.
 ```
 
+
+## Triage 2026-11-13 (P3 tools lane)
+No code change this lane; the 2026-11-11 (lane ne16) addendum stands — BLOCKED
+on this host: the diagnostic prerequisite landed (per-module decline reason is
+logged), but the two-real-native-builds measurement cannot run on Windows
+(native-build hang class; never retry a hung build). The Linux grant in the
+record is the unblock path.

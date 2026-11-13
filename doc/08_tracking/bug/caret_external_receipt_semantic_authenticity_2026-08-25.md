@@ -157,3 +157,10 @@ versioned validators, as the header states.
 ## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
 
 **FIXED (confirmed)** — Fail-closed quarantine restored; two independent live PASSes (ne3 + caret2 quiet-host re-run). Five external rows remain deliberate TODO pending versioned validators.
+
+
+---
+
+## 2026-11-13 triage (live-P3 lane l1, work/live-p3-l1-20261113, base f790f7f266e)
+
+**FIXED (confirmed)** — Fail-closed quarantine intact at this base; two independent live PASSes on record (ne3 + caret2 quiet-host). Five external rows remain deliberate TODO pending versioned validators.

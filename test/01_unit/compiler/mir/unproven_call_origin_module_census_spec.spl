@@ -53,7 +53,7 @@ describe "unproven call origin module census":
     it "names an Unknown-origin call target with its function":
         val sites = mir_unproven_call_origin_sites_v1(_module(_function("read_home", [_call(_callee("env_get", MirCallOrigin.Unknown))])))
         expect(sites.len()).to_equal(1)
-        expect(sites[0]).to_equal("MIR call target lacks proven source/runtime/foreign origin: callee=env_get fn=read_home")
+        expect(sites[0]).to_equal("MIR call target lacks proven source/runtime/foreign origin: callee=env_get fn=read_home module=probe at=?")
 
     it "accepts proven source, runtime and foreign call targets":
         val proven = [
@@ -66,3 +66,18 @@ describe "unproven call origin module census":
     it "reports an Unknown callable passed as a call argument":
         val with_arg = MirInst(kind: MirInstKind.Call(None, _callee("apply", MirCallOrigin.Runtime), [_callee("callback", MirCallOrigin.Unknown)]), span: None)
         expect(mir_unproven_call_origin_sites_v1(_module(_function("hof", [with_arg]))).len()).to_equal(1)
+
+    # Census class 5 printed only `callee=env_get`: the module and the call
+    # site had to be found by bisecting 808 codegen units.
+    it "names the module and the call site's file:line:col":
+        var spanned = Span.new(40, 47, 12, 9)
+        spanned.file = "src/app/cli/bootstrap_focused_native_build.spl"
+        val call = MirInst(kind: MirInstKind.Call(None, _callee("env_get", MirCallOrigin.Unknown), []), span: Some(spanned))
+        val sites = mir_unproven_call_origin_sites_v1(_module(_function("read_home", [call])))
+        expect(sites.len()).to_equal(1)
+        expect(sites[0]).to_equal("MIR call target lacks proven source/runtime/foreign origin: callee=env_get fn=read_home module=probe at=src/app/cli/bootstrap_focused_native_build.spl:12:9")
+
+    it "keeps line:col when the span carries no file":
+        val call = MirInst(kind: MirInstKind.Call(None, _callee("env_get", MirCallOrigin.Unknown), []), span: Some(Span.new(0, 3, 4, 5)))
+        val sites = mir_unproven_call_origin_sites_v1(_module(_function("f", [call])))
+        expect(sites[0]).to_end_with("module=probe at=4:5")

@@ -211,8 +211,14 @@ Miscompile catalog: [Stage 2 native miscompile classes](../../../07_guide/compil
 - With < 30 go-to-end failures, compile the missing modules by hand and link
   with trap stubs; the in-process bypass (positional `native-build`, no
   `--entry`/`--source`) skips the worker child.
-- `bootstrap_main` crashes while printing any error (int-boxed text); read it
-  with gdb `x/s ($x0>>3)`.
+- `bootstrap_main` crashed while printing any error on run-27e (int-boxed
+  text; read it with gdb `x/s ($x0>>3)`). Not reproduced on run-21 S2 (parse,
+  HIR, MIR, link, import errors all print). Glued lines (`...false[mir-shard]`)
+  are a Stage 2 eprint build defect, not current source. Per-class status:
+  `doc/08_tracking/bug/p3_compile_error_reporting_catalog_2026-11-13.md`.
+- A crashed ledger-pool worker now prints ` signal=SIGABRT(6)` and the module
+  it died in (per-pid ICE breadcrumbs; the pool claims the ICE run on the
+  bootstrap route). Producers older than `ea3369d688d` print only `exit=-134`.
 
 ## MIR shard + go-to-end: objectless is not PASS (2026-10-25)
 

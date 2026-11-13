@@ -15,6 +15,8 @@ use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_types.{SymbolId}
 use compiler.mir.mir.*
 
+extern fn rt_getpid() -> i64
+
 fn lane_main(module_name: text, insts: [MirInst], ret: MirOperand) -> MirModule:
     val main_fn = MirFunction(
         symbol: SymbolId(id: 1), name: "main",
@@ -62,23 +64,29 @@ describe "Cranelift JIT lane executes MIR natively":
             [lane_call(mir_operand_foreign_function("labs", MirType.i64()), [lane_int(-5)])], lane_local0())
         expect(lane_verdict(k1_jit_lane_run_modules_v1([module]))).to_equal("success:5")
 
+    it "links a Runtime extern natively through the provider's runtime table":
+        expect(install_selected_k1_backend_table_v1()).to_equal(true)
+        val module = lane_main("lane_runtime_pid",
+            [lane_call(mir_operand_runtime_function("rt_getpid", MirType.i64()), [])], lane_local0())
+        expect(lane_verdict(k1_jit_lane_run_modules_v1([module]))).to_equal("success:{rt_getpid()}")
+
 describe "Cranelift JIT lane fails closed on an unbindable callee":
 
     it "reports a Runtime extern as a compile error naming module and symbol":
         expect(install_selected_k1_backend_table_v1()).to_equal(true)
         val module = lane_main("lane_runtime",
-            [lane_call(mir_operand_runtime_function("rt_time_now_unix_micros", MirType.i64()), [])], lane_local0())
+            [lane_call(mir_operand_runtime_function("rt_zz_no_such_runtime_symbol", MirType.i64()), [])], lane_local0())
         val verdict = lane_verdict(k1_jit_lane_run_modules_v1([module]))
         expect(verdict).to_start_with("codegen-error:")
         expect(verdict).to_contain("lane_runtime")
-        expect(verdict).to_contain("E-JIT-RUNTIME-EXTERN-UNBOUND: rt_time_now_unix_micros")
+        expect(verdict).to_contain("E-JIT-RUNTIME-EXTERN-UNBOUND: rt_zz_no_such_runtime_symbol")
 
-    it "does not run the last module when an earlier one is refused":
+    it "does not run the last module when an earlier one names a callee defined nowhere":
         expect(install_selected_k1_backend_table_v1()).to_equal(true)
         val refused = lane_main("lane_first",
-            [lane_call(mir_operand_runtime_function("rt_getpid", MirType.i64()), [])], lane_local0())
+            [lane_call(MirOperand(kind: MirOperandKind.Const(MirConstValue.Str("no_such_fn"), MirType.i64()), call_origin: MirCallOrigin.Source), [])], lane_local0())
         val runnable = lane_main("lane_last", [], lane_int(9))
         val verdict = lane_verdict(k1_jit_lane_run_modules_v1([refused, runnable]))
         expect(verdict).to_start_with("codegen-error:")
         expect(verdict).to_contain("lane_first")
-        expect(verdict).to_contain("rt_getpid")
+        expect(verdict).to_contain("E-JIT-UNRESOLVED-CALLEE: no_such_fn")

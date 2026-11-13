@@ -30,6 +30,7 @@
 use compiler.backend.native.mach_inst.{MachModule, MachFunction, MachBlock, MachInst, EncodedFunction, new_mach_inst, op_imm, A64_OP_RET, A64_OP_XRAY_SLED, X86_OP_RET, X86_OP_XRAY_SLED}
 use compiler.mir.mir_instruction_graph.{MirModule, mir_module_functions_sorted}
 use std.common.trace.observer_contract_v1.{TraceEventKindV1}
+use std.common.elf.elf_image_v1.{elf_image_is_elf64_le_v1, elf_image_section_by_name_v1, elf_image_section_bytes_v1}
 use std.common.trace.observer_native_map_v1.{TraceNativeSiteV1, TraceNativeEncodingV1, trace_native_off_template_v1}
 use std.common.trace.xray_native_map_format_v1.{XrayMapV1, XrayMapFunctionV1, XrayMapSiteV1, xray_map_aarch64_site_v1, xray_map_x86_64_site_v1, xray_map_encode_v1, XRAY_MAP_ISA_AARCH64_V1, XRAY_MAP_ISA_X86_64_V1, XRAY_MAP_ABI_AARCH64_SIMPLE_V1, XRAY_MAP_ABI_X86_64_SYSV_V1, XRAY_MAP_SLED_ABI_V1, XRAY_MAP_KIND_ENTRY_V1, XRAY_MAP_KIND_EXIT_V1, XRAY_MAP_AARCH64_SLED_BYTES_V1, XRAY_MAP_X86_64_SLED_BYTES_V1}
 use std.common.hash.xxh3.{xxh3_128}
@@ -257,44 +258,24 @@ fn xray_map_section_bytes_for(isa: i64, sites: [XraySledSite], func_offsets: Dic
         case Err(_):
             panic("xray: .simple_xray_map rows are inconsistent")
 
-fn xray_elf_u64(bytes: [i64], offset: i64, width: i64) -> i64:
-    var value = 0
-    for index in 0..width:
-        value = value | (bytes[offset + index] << (index * 8))
-    value
-
 # Read the `.simple_xray_map` section bytes back out of an ELF64 object
 # (object inspection for specs and the e2e check). Err when absent.
 fn xray_object_map_bytes(object: [i64]) -> Result<[u8], text>:
     xray_object_section_bytes(object, XRAY_MAP_SECTION_NAME_V1)
 
+# The backend emits object bytes as [i64]; the shared ELF reader takes [u8],
+# so the object is widened once per lookup (spec / e2e objects, not a hot path).
 fn xray_object_section_bytes(object: [i64], section_name: text) -> Result<[u8], text>:
-    if object.len() < 64: return Err("xray: not an ELF64 object")
-    val shoff = xray_elf_u64(object, 40, 8)
-    val shentsize = xray_elf_u64(object, 58, 2)
-    val shnum = xray_elf_u64(object, 60, 2)
-    val shstrndx = xray_elf_u64(object, 62, 2)
-    if shentsize != 64 or shoff + shnum * 64 > object.len() or shstrndx >= shnum:
-        return Err("xray: malformed section header table")
-    val strtab_off = xray_elf_u64(object, shoff + shstrndx * 64 + 24, 8)
-    val wanted = section_name.bytes()
-    for index in 0..shnum:
-        val header = shoff + index * 64
-        val name_at = strtab_off + xray_elf_u64(object, header, 4)
-        var same = name_at + wanted.len() < object.len() and object[name_at + wanted.len()] == 0
-        if same:
-            for k in 0..wanted.len():
-                if object[name_at + k] != (wanted[k] as i64):
-                    same = false
-        if same:
-            val offset = xray_elf_u64(object, header + 24, 8)
-            val size = xray_elf_u64(object, header + 32, 8)
-            if offset + size > object.len(): return Err("xray: map section out of bounds")
-            var out: [u8] = []
-            for k in 0..size:
-                out.push(object[offset + k] as u8)
-            return Ok(out)
-    Err("xray: no {section_name} section")
+    var image: [u8] = []
+    for byte in object:
+        image.push(byte as u8)
+    if not elf_image_is_elf64_le_v1(image): return Err("xray: not an ELF64 object")
+    val section = match elf_image_section_by_name_v1(image, section_name):
+        case Some(found): found
+        case None: return Err("xray: no {section_name} section")
+    match elf_image_section_bytes_v1(image, section):
+        case Some(bytes): Ok(bytes)
+        case None: Err("xray: map section out of bounds")
 
 export XRAY_TRAMPOLINE_SYMBOL_V1, XRAY_MAP_SECTION_NAME_V1, XraySledSite, XraySledPlan
 export xray_module_has_sleds, xray_reject_unsupported_native, xray_instrumented_function_names, xray_sled_template_aarch64, xray_insert_sleds_aarch64

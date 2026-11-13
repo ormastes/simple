@@ -97,3 +97,31 @@ cd <worktree>
 ## Lane disposition 2026-11-13 (p3-misc-b)
 
 OPEN; composite doctest mode fails on wildcard re-export while standalone import works - owner: spl-doctest/import-flattening lane (seed import/flattening divergence family).
+## Addendum 2026-11-13 (lane lp5, work/live-p3-l5-20261113) — secondary defect FIXED; primary no longer reproduces at tip
+
+Investigated on release/1.0.0 tip (tracked seed `bin/simple.exe`).
+
+**Secondary defect (reason line loses the message) — FIXED in this lane's PR.**
+`_dt_failure_reason` (`src/lib/nogc_sync_mut/test_runner/doctest_runner.spl`) returned the
+FIRST non-warning stderr line, which in a child compile failure is the `-->` span
+continuation of an earlier skipped warning — never the actual error. Reproduced with a
+```spl doctest whose composite compile-fails: the suite reported
+`--> ...\io_runtime.spl:349:41` instead of the error. Fixed with a three-pass extractor:
+(1) first `error:` line on stderr; (2) the failing example's detail from the child's spec
+stdout (`✗ <name>` + its indented `semantic: ...` line) — the seed prints example failure
+detail on stdout, while stderr only carries the generic `spec failure: N of M` tail;
+(3) last informative stderr line, skipping every warning class and its diagnostic
+decoration (spans, gutters, carets) so the fallback is a message, not a bare span.
+After the fix the same failing doctest reports
+`✗ compile-errors: semantic: ...:25:9: variable 'undefined_name_here' not found`.
+Pinned by `test/01_unit/app/test_runner/doctest_failure_reason_spec.spl` (4/4).
+
+**Primary defect (composite fails on wildcard re-export) — does NOT reproduce at tip.**
+`builder.spl`'s doctest blocks are now ` ```text ` fences (not ` ```spl `), so
+`--spl-doctest` finds no SPL blocks in it ("no doctest blocks found"), and a hand-built
+composite of `modes.spl` + the injected `use std.spec.*` + a spec block runs CLEAN
+(`simple run` exit 0) on the current seed. The seed/import-flattening behaviour recorded
+here appears already resolved; if a real `Local`-emitting writer re-enables the composite
+failure shape, re-open with a fresh repro. The `parse_binding`/`exported_symbols` note in
+this family is tracked separately under
+`smf_reader_memory_binding_decode_changes_exported_set_2026-09-19.md`.

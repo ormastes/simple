@@ -1,0 +1,403 @@
+# MDSOC: feature dimension (test fixture)
+# XRay backend harness V1 — ONE parameterized seam for the LLVM-backed and the
+# pure-Simple ("spy") tracing backends.
+#
+# Both backends implement the `XrayLlvmLeafV1` port and are driven by the same
+# `XrayLlvmAdapterV1` control plane (design C.2/C.6). This fixture wraps each
+# leaf in an `XrayBackendHarnessV1` so one spec body runs identical scenarios
+# against every backend:
+#   - LLVM:   `FakeXrayLeafV1` (compiler-rt statuses, patch unit = LLVM id)
+#   - Simple: `XrayNativeBoundLeafV1` over a simulated code page
+#             (`FakePatchPortV1`, AArch64 B/NOP words or x86-64 EB0B/6690 halves)
+# The shared "program" is three functions (ids 1..3). LLVM patches a function
+# as one id; the Simple map has an entry and an exit sled per function, so the
+# harness answers at FUNCTION level and expands to sites itself.
+#
+# No executable memory is touched; real-page evidence stays in
+# scripts/check/check-xray-native-*-e2e.shs and check-xray-llvm-adapter-e2e.shs.
+use std.common.trace.observer_contract_v1.*
+use std.common.trace.observer_native_map_v1.*
+use std.common.trace.xray_native_map_format_v1.{XRAY_MAP_AARCH64_OFF_WORD_V1, XRAY_MAP_AARCH64_ON_WORD_V1, XRAY_MAP_X86_64_OFF_WORD_V1, XRAY_MAP_X86_64_ON_WORD_V1}
+use std.nogc_sync_mut.trace.xray_llvm_adapter_v1.*
+use std.nogc_sync_mut.trace.xray_native_sled_leaf_v1.*
+
+pub const XRAY_HARNESS_BASE_V1: i64 = 1048576
+pub const XRAY_HARNESS_PAGE_V1: i64 = 4096
+pub const XRAY_HARNESS_IMAGE_V1: i64 = 512
+pub const XRAY_HARNESS_TRAMPOLINE_V1: i64 = 448
+pub const XRAY_HARNESS_FUNCTIONS_V1: i64 = 3
+pub const XRAY_HARNESS_MODULE_V1: u64 = 1
+pub const XRAY_HARNESS_INCARNATION_V1: u64 = 1
+
+# ---------------------------------------------------------------------------
+# Backend-neutral harness port
+# ---------------------------------------------------------------------------
+pub trait XrayBackendHarnessV1:
+    fn name() -> text
+    fn backend() -> TraceBackendV1
+    fn abi_profile() -> text
+    fn function_count() -> i64
+    # Dense site ids the control plane must patch to trace `function_id`.
+    fn sites_for_function(function_id: i64) -> [u32]
+    # Externally observed instrumentation state (not the adapter's bookkeeping):
+    # LLVM = compiler-rt reports the id patched; Simple = every sled word of
+    # the function reads the ON word.
+    fn function_on(function_id: i64) -> bool
+    # At least one site of the function is still live (rollback diagnostics).
+    fn function_partially_on(function_id: i64) -> bool
+    fn install_count() -> i64
+    fn channel_closed(arena: i64) -> bool
+    fn state_code() -> i64
+    fn patched_ids() -> [i64]
+    me prepare(config: TraceConfigV1, selection: TraceSelectionV1) -> Result<TracePreparedV1, TraceFailureV1>
+    me start(prepared: TracePreparedV1, arena: i64) -> Result<TraceSessionV1, TraceFailureV1>
+    me request_stop(session: TraceSessionV1) -> Result<TraceSessionStateV1, TraceFailureV1>
+    me recover() -> Result<bool, TraceFailureV1>
+    # Fault injection (PATCH-02 parity): the FIRST site of the function fails.
+    me inject_patch_failure(function_id: i64)
+    me inject_unpatch_failure(function_id: i64)
+    me inject_install_failure()
+    me clear_faults()
+
+pub fn xray_harness_config_v1(harness: XrayBackendHarnessV1) -> TraceConfigV1:
+    TraceConfigV1(instrumentation: TraceInstrumentationV1.Dynamic,
+        backend: harness.backend(), consistency: TraceConsistencyV1.RawEdges,
+        patch_mode: TracePatchModeV1.Quiescent, abi_profile: harness.abi_profile(),
+        event_mask: 7, buffer_bytes: 98304, max_contexts: 1, max_depth: 128,
+        max_resident_generations: 8)
+
+pub fn xray_harness_selection_v1(harness: XrayBackendHarnessV1, function_ids: [i64]) -> TraceSelectionV1:
+    var sites: [TraceSiteV1] = []
+    for function_id in function_ids:
+        for site in harness.sites_for_function(function_id):
+            sites.push(TraceSiteV1(module_instance: XRAY_HARNESS_MODULE_V1, site_id: site))
+    TraceSelectionV1(manifest_incarnation: XRAY_HARNESS_INCARNATION_V1, sites: sites)
+
+pub fn xray_harness_raw_selection_v1(site_ids: [u32]) -> TraceSelectionV1:
+    var sites: [TraceSiteV1] = []
+    for site in site_ids:
+        sites.push(TraceSiteV1(module_instance: XRAY_HARNESS_MODULE_V1, site_id: site))
+    TraceSelectionV1(manifest_incarnation: XRAY_HARNESS_INCARNATION_V1, sites: sites)
+
+pub fn xray_harness_on_functions_v1(harness: XrayBackendHarnessV1) -> [i64]:
+    var out: [i64] = []
+    for function_id in 1..(harness.function_count() + 1):
+        if harness.function_on(function_id): out.push(function_id)
+    out
+
+pub fn xray_harness_partially_on_functions_v1(harness: XrayBackendHarnessV1) -> [i64]:
+    var out: [i64] = []
+    for function_id in 1..(harness.function_count() + 1):
+        if harness.function_partially_on(function_id): out.push(function_id)
+    out
+
+pub fn xray_harness_failure_code_v1(failure: TraceFailureV1) -> u32:
+    trace_failure_code_v1(failure)
+
+# ---------------------------------------------------------------------------
+# LLVM backend: fake compiler-rt leaf
+# ---------------------------------------------------------------------------
+pub class FakeXrayLeafV1:
+    max_id: i64
+    install_status: i64
+    fail_patch_id: i64
+    fail_patch_status: i64
+    fail_unpatch_id: i64
+    ongoing_left: i64
+    close_busy_left: i64
+    sled_kind: TraceBackendV1
+    log: [text]
+    patched: [i64]
+    closed: [i64]
+
+impl XrayLlvmLeafV1 for FakeXrayLeafV1:
+    fn sled_kind() -> TraceBackendV1:
+        self.sled_kind
+
+    fn max_function_id() -> i64:
+        self.max_id
+
+    me install(arena: i64, generation: u64, context: u64, module_instance: u64) -> i64:
+        self.log.push("install:{arena}:{generation}")
+        self.install_status
+
+    me patch_function(id: i64) -> i64:
+        self.log.push("patch:{id}")
+        if self.ongoing_left > 0:
+            self.ongoing_left = self.ongoing_left - 1
+            return XRAY_LLVM_STATUS_ONGOING_V1
+        if id == self.fail_patch_id: return self.fail_patch_status
+        self.patched.push(id)
+        XRAY_LLVM_STATUS_SUCCESS_V1
+
+    me unpatch_function(id: i64) -> i64:
+        self.log.push("unpatch:{id}")
+        if id == self.fail_unpatch_id: return XRAY_LLVM_STATUS_FAILED_V1
+        var kept: [i64] = []
+        for current in self.patched:
+            if current != id: kept.push(current)
+        self.patched = kept
+        XRAY_LLVM_STATUS_SUCCESS_V1
+
+    me close(arena: i64) -> i64:
+        self.log.push("close:{arena}")
+        if self.close_busy_left > 0:
+            self.close_busy_left = self.close_busy_left - 1
+            return -2
+        self.closed.push(arena)
+        1
+
+pub fn xray_fake_llvm_leaf_v1(max_id: i64) -> FakeXrayLeafV1:
+    FakeXrayLeafV1(max_id: max_id, install_status: 1, fail_patch_id: 0,
+        fail_patch_status: XRAY_LLVM_STATUS_FAILED_V1, fail_unpatch_id: 0,
+        ongoing_left: 0, close_busy_left: 0, sled_kind: TraceBackendV1.Llvm, log: [], patched: [], closed: [])
+
+pub class XrayLlvmFakeHarnessV1:
+    leaf: FakeXrayLeafV1
+    adapter: XrayLlvmAdapterV1
+
+impl XrayBackendHarnessV1 for XrayLlvmFakeHarnessV1:
+    fn name() -> text: "llvm"
+    fn backend() -> TraceBackendV1: TraceBackendV1.Llvm
+    fn abi_profile() -> text: "linux-aarch64-llvm-xray"
+    fn function_count() -> i64: XRAY_HARNESS_FUNCTIONS_V1
+    fn sites_for_function(function_id: i64) -> [u32]: [function_id as u32]
+    fn function_on(function_id: i64) -> bool: self.leaf.patched.contains(function_id)
+    fn function_partially_on(function_id: i64) -> bool: self.leaf.patched.contains(function_id)
+
+    fn install_count() -> i64:
+        var count = 0
+        for line in self.leaf.log:
+            if line.starts_with("install:"): count = count + 1
+        count
+
+    fn channel_closed(arena: i64) -> bool: self.leaf.closed.contains(arena)
+    fn state_code() -> i64: self.adapter.state_code()
+    fn patched_ids() -> [i64]: self.adapter.patched_ids()
+
+    me prepare(config: TraceConfigV1, selection: TraceSelectionV1) -> Result<TracePreparedV1, TraceFailureV1>:
+        self.adapter.prepare(self.leaf, config, selection)
+
+    me start(prepared: TracePreparedV1, arena: i64) -> Result<TraceSessionV1, TraceFailureV1>:
+        self.adapter.start(self.leaf, prepared, arena)
+
+    me request_stop(session: TraceSessionV1) -> Result<TraceSessionStateV1, TraceFailureV1>:
+        self.adapter.request_stop(self.leaf, session)
+
+    me recover() -> Result<bool, TraceFailureV1>:
+        self.adapter.recover(self.leaf)
+
+    me inject_patch_failure(function_id: i64):
+        self.leaf.fail_patch_id = function_id
+
+    me inject_unpatch_failure(function_id: i64):
+        self.leaf.fail_unpatch_id = function_id
+
+    me inject_install_failure():
+        self.leaf.install_status = 0
+
+    me clear_faults():
+        self.leaf.fail_patch_id = 0
+        self.leaf.fail_unpatch_id = 0
+        self.leaf.install_status = 1
+
+pub fn xray_llvm_harness_v1() -> XrayLlvmFakeHarnessV1:
+    XrayLlvmFakeHarnessV1(leaf: xray_fake_llvm_leaf_v1(XRAY_HARNESS_FUNCTIONS_V1),
+        adapter: XrayLlvmAdapterV1.create_for_backend(XRAY_HARNESS_MODULE_V1, TraceBackendV1.Llvm))
+
+# ---------------------------------------------------------------------------
+# Simple backend: native sled leaf over a simulated code page
+# ---------------------------------------------------------------------------
+pub class FakePatchPortV1:
+    words: Dict<i64, i64>
+    halves: Dict<i64, i64>
+    writable: bool
+    fail_begin: bool
+    fail_store: bool
+    # 0 = none; otherwise only a store at this address fails (per-site fault).
+    fail_store_addr: i64
+    fail_end_left: i64
+    none: bool
+    log: [text]
+    closed: [i64]
+
+impl XrayCodePatchPortV1 for FakePatchPortV1:
+    me begin(page: i64, length: i64) -> i64:
+        self.log.push("begin:{page}:{length}")
+        if self.fail_begin: return -1
+        self.writable = true
+        0
+
+    me store_u32(addr: i64, value: i64) -> i64:
+        self.log.push("store:{addr}:{value}")
+        if self.fail_store or addr == self.fail_store_addr or not self.writable: return -1
+        self.words[addr] = value
+        0
+
+    fn load_u32(addr: i64) -> i64:
+        if self.none: return -2
+        if self.words.contains(addr): self.words[addr] else: -1
+
+    me store_u16(addr: i64, value: i64) -> i64:
+        self.log.push("store16:{addr}:{value}")
+        if self.fail_store or addr == self.fail_store_addr or not self.writable: return -1
+        self.halves[addr] = value
+        0
+
+    fn load_u16(addr: i64) -> i64:
+        if self.none: return -2
+        if self.halves.contains(addr): self.halves[addr] else: -1
+
+    me end(page: i64, length: i64) -> i64:
+        self.log.push("end:{page}:{length}")
+        if self.fail_end_left > 0:
+            self.fail_end_left = self.fail_end_left - 1
+            self.none = true
+            return -1
+        self.writable = false
+        self.none = false
+        0
+
+    me close_channel(arena: i64) -> i64:
+        self.log.push("close:{arena}")
+        self.closed.push(arena)
+        1
+
+pub class FakeDispatchV1:
+    status: i64
+    log: [text]
+
+impl XrayNativeDispatchPortV1 for FakeDispatchV1:
+    me publish(module_instance: u64, arena: i64, generation: u64) -> i64:
+        self.log.push("publish:{module_instance}:{arena}:{generation}")
+        self.status
+
+# Image: [0,64) read-only map, [64,512) RX text. Function f (1..3) starts at
+# 64*f: entry sled at +0, exit sled at +32 (AArch64, 32-byte sleds, size 64)
+# or +34 (x86-64, 13-byte sleds, size 48). Trampoline at 448.
+pub fn xray_harness_native_image_v1(encoding: TraceNativeEncodingV1, target: text,
+        abi_profile: text) -> ([u8], TraceNativeMapV1):
+    val x86 = encoding == TraceNativeEncodingV1.X64Rel32
+    val exit_delta: i64 = if x86: 34 else: 32
+    val function_size: i64 = if x86: 48 else: 64
+    var bytes: [u8] = []
+    for index in 0..XRAY_HARNESS_IMAGE_V1: bytes.push(0u8)
+    var functions: [TraceNativeFunctionV1] = []
+    var sites: [TraceNativeSiteV1] = []
+    for function_id in 1..(XRAY_HARNESS_FUNCTIONS_V1 + 1):
+        val start: i64 = 64 * function_id
+        functions.push(TraceNativeFunctionV1(function_id: function_id as u32,
+            offset: start as u64, size: function_size as u64))
+        sites.push(TraceNativeSiteV1(site_id: (2 * function_id - 1) as u32, function_id: function_id as u32,
+            kind: TraceEventKindV1.Entry, offset: start as u64,
+            target_offset: XRAY_HARNESS_TRAMPOLINE_V1 as u64, encoding: encoding))
+        sites.push(TraceNativeSiteV1(site_id: (2 * function_id) as u32, function_id: function_id as u32,
+            kind: TraceEventKindV1.Exit, offset: (start + exit_delta) as u64,
+            target_offset: XRAY_HARNESS_TRAMPOLINE_V1 as u64, encoding: encoding))
+    for site in sites:
+        val sled = trace_native_off_template_v1(site, XRAY_HARNESS_IMAGE_V1 as u64).unwrap()
+        for index in 0..sled.len(): bytes[(site.offset as i64) + index] = sled[index]
+    val manifest = TraceNativeMapV1(schema: 1, module_instance: XRAY_HARNESS_MODULE_V1,
+        manifest_incarnation: XRAY_HARNESS_INCARNATION_V1,
+        build_identity: "b", source_identity: "s", runtime_identity: "r",
+        target: target, abi_profile: abi_profile,
+        image_size: XRAY_HARNESS_IMAGE_V1 as u64, map_offset: 0, map_size: 64,
+        ranges: [
+            TraceImageRangeV1(offset: 0, size: 64, readable: true, writable: false, executable: false),
+            TraceImageRangeV1(offset: 64, size: (XRAY_HARNESS_IMAGE_V1 - 64) as u64, readable: true, writable: false, executable: true)
+        ],
+        functions: functions, sites: sites)
+    (bytes, manifest)
+
+pub fn xray_harness_port_from_image_v1(bytes: [u8]) -> FakePatchPortV1:
+    var words: Dict<i64, i64> = {}
+    var halves: Dict<i64, i64> = {}
+    var offset = 0
+    while offset + 1 < bytes.len():
+        halves[XRAY_HARNESS_BASE_V1 + offset] = (bytes[offset] as i64) | ((bytes[offset + 1] as i64) << 8)
+        if offset % 4 == 0 and offset + 3 < bytes.len():
+            words[XRAY_HARNESS_BASE_V1 + offset] = ((bytes[offset] as i64) | ((bytes[offset + 1] as i64) << 8) |
+                ((bytes[offset + 2] as i64) << 16) | ((bytes[offset + 3] as i64) << 24))
+        offset = offset + 2
+    FakePatchPortV1(words: words, halves: halves, writable: false, fail_begin: false, fail_store: false,
+        fail_store_addr: 0, fail_end_left: 0, none: false, log: [], closed: [])
+
+pub class XraySimpleFakeHarnessV1:
+    label: text
+    profile: text
+    port: FakePatchPortV1
+    dispatch: FakeDispatchV1
+    bound: XrayNativeBoundLeafV1
+    adapter: XrayLlvmAdapterV1
+
+impl XraySimpleFakeHarnessV1:
+    fn sled_of(site_id: i64) -> XrayNativeSledV1:
+        self.bound.leaf.sites[site_id - 1]
+
+    fn site_on(site_id: i64) -> bool:
+        val sled = self.sled_of(site_id)
+        val word = if sled.width == 2: self.port.load_u16(sled.addr) else: self.port.load_u32(sled.addr)
+        word == sled.on_word
+
+impl XrayBackendHarnessV1 for XraySimpleFakeHarnessV1:
+    fn name() -> text: self.label
+    fn backend() -> TraceBackendV1: TraceBackendV1.Simple
+    fn abi_profile() -> text: self.profile
+    fn function_count() -> i64: XRAY_HARNESS_FUNCTIONS_V1
+
+    fn sites_for_function(function_id: i64) -> [u32]:
+        [(2 * function_id - 1) as u32, (2 * function_id) as u32]
+
+    fn function_on(function_id: i64) -> bool:
+        self.site_on(2 * function_id - 1) and self.site_on(2 * function_id)
+
+    fn function_partially_on(function_id: i64) -> bool:
+        self.site_on(2 * function_id - 1) or self.site_on(2 * function_id)
+
+    fn install_count() -> i64: self.dispatch.log.len()
+    fn channel_closed(arena: i64) -> bool: self.port.closed.contains(arena)
+    fn state_code() -> i64: self.adapter.state_code()
+    fn patched_ids() -> [i64]: self.adapter.patched_ids()
+
+    me prepare(config: TraceConfigV1, selection: TraceSelectionV1) -> Result<TracePreparedV1, TraceFailureV1>:
+        self.adapter.prepare(self.bound, config, selection)
+
+    me start(prepared: TracePreparedV1, arena: i64) -> Result<TraceSessionV1, TraceFailureV1>:
+        self.adapter.start(self.bound, prepared, arena)
+
+    me request_stop(session: TraceSessionV1) -> Result<TraceSessionStateV1, TraceFailureV1>:
+        self.adapter.request_stop(self.bound, session)
+
+    me recover() -> Result<bool, TraceFailureV1>:
+        self.adapter.recover(self.bound)
+
+    me inject_patch_failure(function_id: i64):
+        self.port.fail_store_addr = self.sled_of(2 * function_id - 1).addr
+
+    me inject_unpatch_failure(function_id: i64):
+        self.port.fail_store_addr = self.sled_of(2 * function_id - 1).addr
+
+    me inject_install_failure():
+        self.dispatch.status = 0
+
+    me clear_faults():
+        self.port.fail_store_addr = 0
+        self.dispatch.status = 1
+
+fn xray_simple_harness_for_v1(label: text, encoding: TraceNativeEncodingV1, target: text,
+        abi_profile: text) -> XraySimpleFakeHarnessV1:
+    val (bytes, manifest) = xray_harness_native_image_v1(encoding, target, abi_profile)
+    var port = xray_harness_port_from_image_v1(bytes)
+    var dispatch = FakeDispatchV1(status: 1, log: [])
+    val leaf = XrayNativeSledLeafV1.create(manifest, bytes, XRAY_HARNESS_BASE_V1, XRAY_HARNESS_PAGE_V1).unwrap()
+    val bound = XrayNativeBoundLeafV1(leaf: leaf, port: port, dispatch: dispatch)
+    XraySimpleFakeHarnessV1(label: label, profile: abi_profile, port: port, dispatch: dispatch, bound: bound,
+        adapter: XrayLlvmAdapterV1.create_for_backend(XRAY_HARNESS_MODULE_V1, TraceBackendV1.Simple))
+
+pub fn xray_simple_aarch64_harness_v1() -> XraySimpleFakeHarnessV1:
+    xray_simple_harness_for_v1("simple-aarch64", TraceNativeEncodingV1.Arm64Branch26,
+        "aarch64-unknown-linux-gnu", "simple-aarch64-sled-v1")
+
+pub fn xray_simple_x86_64_harness_v1() -> XraySimpleFakeHarnessV1:
+    xray_simple_harness_for_v1("simple-x86_64", TraceNativeEncodingV1.X64Rel32,
+        "x86_64-unknown-linux-gnu", "simple-x86_64-sysv-sled-v1")

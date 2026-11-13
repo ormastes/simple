@@ -103,18 +103,21 @@ fn new_arena(generation: u64) -> i64:
     aligned
 
 # Drain the channel through the Simple consumer: "kind:function:site" rows.
-fn drain(arena: i64) -> [text]:
+fn drain(arena: i64) -> ([text], i64):
     val out_buf = rt_alloc(96 + 8)
     val output = out_buf + ((8 - (out_buf % 8)) % 8)
     var rows: [text] = []
+    var stamps = 0
     while trace_native_channel_poll_into_v1(arena, output, 96) == TRACE_NATIVE_CHANNEL_OK_V1:
         val header = rt_ptr_read_i64(output, 0)
         val function_site = rt_ptr_read_i64(output, 24)
         val kind = (header >> 32) & 65535
         val function_id = function_site & 4294967295
         val site_id = (function_site >> 32) & 4294967295
+        # Timestamp word (offset 48): the OUT differential asserts it is present.
+        if rt_ptr_read_i64(output, 48) != 0: stamps = stamps + 1
         rows.push("{kind}:{function_id}:{site_id}")
-    rows
+    (rows, stamps)
 
 fn call_all(entries: [i64], args: [i64]) -> text:
     var out = ""
@@ -164,8 +167,8 @@ fn session(adapter_in: XrayLlvmAdapterV1, bound: XrayNativeBoundLeafV1, module: 
     print "E2E {label} selected_sites={selected} words_on={sled_words(module)}"
     val traced_results = call_all(entries, args)
     print "E2E {label} results_on={traced_results} baseline={baseline}"
-    val records = drain(arena)
-    print "E2E {label} records={records}"
+    val (records, stamps) = drain(arena)
+    print "E2E {label} records={records} timestamps_nonzero={stamps}"
     match adapter.request_stop(bound, started):
         case Ok(_): ()
         case Err(failure):
@@ -173,7 +176,7 @@ fn session(adapter_in: XrayLlvmAdapterV1, bound: XrayNativeBoundLeafV1, module: 
             return None
     print "E2E {label} words_off={sled_words(module)}"
     val after = call_all(entries, args)
-    val late = drain(arena)
+    val (late, _) = drain(arena)
     print "E2E {label} results_off={after} records_after_stop={late.len()} lost={trace_native_channel_lost_v1(arena)}"
     if traced_results != baseline or after != baseline:
         fail("{label}: traced results differ from baseline")

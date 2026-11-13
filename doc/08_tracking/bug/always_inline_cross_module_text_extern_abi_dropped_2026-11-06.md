@@ -71,3 +71,16 @@ direct call, which keep `(ptr, len)`).
 
 Verification pending: a stage2 rebuilt from this source must be re-run on the stage3 /
 phase-4 group E path before the source workarounds are removed.
+
+## Fix (2026-11-13) — spec realigned with the call-authority model
+`inline_text_extern_abi_spec` was 3/5 on release: its two "bare env_get" fixtures declare a local
+`extern fn env_get`, which MIR lowers with `MirCallOrigin.Foreign`. Since `22f021ced66` ("preserve runtime
+authority through lowering and native consumers") `MirToLlvm` applies the runtime alias table
+(`call_func_name`, `core_codegen.spl` ~2819) only to Runtime-origin callees; Source and Foreign callees keep
+their declared symbol. That closes this defect by construction: an importer's Source `env_get` call can no
+longer be renamed to `@rt_env_get` with one boxed word. The spec still asserted the pre-22f routing
+(Foreign `env_get` -> `@rt_env_get_value`), which contradicts the authority model, so the SPEC was wrong,
+not the fix. The two examples now assert no `@rt_env_get*` rewrite and a one-word `@env_get` call;
+`llvm_env_get_local_owner_spec` models the runtime cases with `MirCallOrigin.Runtime` and pins that a
+Source `env_get` keeps its callee. Seed: inline_text_extern_abi 5/5, llvm_env_get_local_owner 4/4,
+llvm_runtime_call_origin 4/4. Native stage3 / group-E proof is still pending.

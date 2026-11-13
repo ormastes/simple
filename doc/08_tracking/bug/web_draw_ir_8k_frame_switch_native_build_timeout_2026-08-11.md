@@ -104,6 +104,13 @@ Additional acceptance:
 followed by the artifact's own seed + 200-retained-calls run and the
 `pixels`-copy profile question (identity/receipt vs 132.7 MB per-hit copy).
 
+## Triage 2026-11-13 (P3 tools lane)
+No code change this lane; the P3-boot15 addendum stands — BLOCKED on this
+Windows host (native-build and JIT-heavy closure compilation are in the known
+live hang class; the prior lane's three-cycle cap is exhausted). The
+executable gate now runs JIT-mode under a 180s budget; the native-artifact
+acceptance leg is granted to a Linux host per the record.
+
 ## 2026-11-13 (UI batch B, Linux aarch64, release/1.0.0 @ 35144b7f5e93): the "partial fix" was never in the tree; now it is. Still OPEN.
 
 **Finding.** `Engine2dCompositorBackend.try_reuse_draw_ir_composition_revision`
@@ -194,3 +201,4 @@ tree, native/JIT 8K evidence remains open, and both `native-build` and
 JIT-heavy closure compilation sit in the known-live Windows native-build hang
 class — not retried. The `sffi_vulkan.spl` env_get JIT-demotion blocker is
 tracked separately. No in-lane change.
+
