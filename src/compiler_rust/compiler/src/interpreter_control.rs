@@ -324,6 +324,31 @@ mod optional_let_binding_tests {
         assert!(matches!(optional_let_binding_condition(&name, &result, &present), Ok(LetBind::NotApplicable)));
     }
 
+    // interp_while_val_binds_option_not_payload_2026-11-13: the statement-level
+    // `while val IDENT = <T?>` must bind the payload (like `if val`), including a
+    // falsy-but-present `Some(0)`, and stop on nil.
+    #[test]
+    fn while_val_binds_optional_payload_not_wrapper() {
+        let source = "fn pk(v: i64, ok: bool) -> i64?:\n    if ok:\n        v\n    else:\n        nil\nfn main() -> i64:\n    var i = 0\n    var total = 0\n    while val m = pk(i, i < 3):\n        total = total + m * 10\n        i = i + 1\n    total\n";
+        assert_eq!(interpret_binding(source), Ok(30));
+    }
+
+    #[test]
+    fn while_val_stops_on_none_and_keeps_structural_and_loop_control() {
+        let cases = [
+            // explicit None / Some(nil) stop the loop (previously bound and looped)
+            ("fn main() -> i64:\n    var n = 0\n    while val m = None:\n        n = n + 1\n        if n > 5: return 99\n    n\n", 0),
+            ("fn main() -> i64:\n    var n = 0\n    while val m = Some(nil):\n        n = n + 1\n        if n > 5: return 99\n    n\n", 0),
+            // structural Some(x) still goes through pattern_matches
+            ("fn pk(v: i64, ok: bool) -> i64?:\n    if ok:\n        v\n    else:\n        nil\nfn main() -> i64:\n    var i = 0\n    var t = 0\n    while val Some(m) = pk(i, i < 3):\n        t = t + m + 1\n        i = i + 1\n    t\n", 6),
+            // break / continue inside a while-val body keep the unwrapped binding
+            ("fn pk(v: i64, ok: bool) -> i64?:\n    if ok:\n        v\n    else:\n        nil\nfn main() -> i64:\n    var i = 0\n    var t = 0\n    while val m = pk(i, i < 10):\n        i = i + 1\n        if m == 1: continue\n        if m == 4: break\n        t = t + m\n    t\n", 5),
+        ];
+        for (source, expected) in cases {
+            assert_eq!(interpret_binding(source), Ok(expected), "{source}");
+        }
+    }
+
     #[test]
     fn result_guard_preserves_existing_optional_presence() {
         let source = "fn make() -> Result<i64, text>: Ok(7)\nfn main() -> i64:\n    if val outer = Some(make()):\n        match outer:\n            case Ok(value): return value - 7\n            case Err(_): return 1\n    2\n";
@@ -560,13 +585,27 @@ pub(super) fn exec_while(
             check_execution_limit!();
             check_timeout!();
             let value = evaluate_expr(&while_stmt.condition, env, functions, classes, enums, impl_methods)?;
-            ensure_optional_binding_condition(pattern, &value, &while_stmt.condition)?;
-            let mut bindings = HashMap::new();
-            let matched = pattern_matches(pattern, &value, &mut bindings, enums, classes)?;
-            record_decision_site(while_stmt.span.line, while_stmt.span.column, SUB_STMT, matched);
-            if !matched {
+            // `while val IDENT = <T?>` unwraps exactly like `if val` (exec_if) and
+            // the block-closure executor (`evaluate_block_while_condition`): bind
+            // the payload, stop on nil/None. Running the bare identifier through
+            // `pattern_matches` bound the whole `Option::Some(x)` wrapper
+            // (interp_while_val_binds_option_not_payload_2026-11-13).
+            let bindings = match optional_let_binding_condition(pattern, &value, &while_stmt.condition)? {
+                LetBind::Skip => None,
+                LetBind::Bind(name, inner) => Some(HashMap::from([(name, inner)])),
+                LetBind::NotApplicable => {
+                    let mut bindings = HashMap::new();
+                    if pattern_matches(pattern, &value, &mut bindings, enums, classes)? {
+                        Some(bindings)
+                    } else {
+                        None
+                    }
+                }
+            };
+            record_decision_site(while_stmt.span.line, while_stmt.span.column, SUB_STMT, bindings.is_some());
+            let Some(bindings) = bindings else {
                 break;
-            }
+            };
             // Pattern matched - add bindings and execute body
             let saved = crate::interpreter::bind_block_scope_shadows(bindings, env);
             let ctrl = exec_block(&while_stmt.body, env, functions, classes, enums, impl_methods);

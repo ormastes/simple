@@ -304,17 +304,25 @@ fn unwrap_place_ref(slot: &Value) -> Option<&Value> {
 }
 
 fn unwrap_place_mut(slot: &mut Value) -> Option<&mut Value> {
-    match slot {
-        Value::Nil => None,
-        Value::Enum { enum_name, variant, payload }
-            if SpecialEnumType::from_name(enum_name).is_some() =>
-        {
+    // Classify first, then take the one mutable borrow we return: returning
+    // `payload` from one arm and `slot` itself from another in a single match
+    // is rejected by the borrow checker (E0505, NLL problem case #3).
+    let projects_payload = match &*slot {
+        Value::Nil => return None,
+        Value::Enum { enum_name, variant, .. } if SpecialEnumType::from_name(enum_name).is_some() => {
             match SpecialEnumKind::from_names(enum_name, variant) {
-                Some(SpecialEnumKind::OptionSome | SpecialEnumKind::ResultOk) => payload.as_deref_mut(),
-                _ => None,
+                Some(SpecialEnumKind::OptionSome | SpecialEnumKind::ResultOk) => true,
+                _ => return None,
             }
         }
-        other => Some(other),
+        _ => false,
+    };
+    if !projects_payload {
+        return Some(slot);
+    }
+    match slot {
+        Value::Enum { payload, .. } => payload.as_deref_mut(),
+        _ => None,
     }
 }
 
