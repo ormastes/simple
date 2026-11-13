@@ -90,3 +90,54 @@ describe "optional `as` numeric cast policy":
         assert_equal(opt_cast_error_count(lowering_errors(typed_narrowed)), 0)
         step("the same optional cast outside the `if val` is still an error")
         assert_equal(opt_cast_error_count(lowering_errors(typed_direct)), 1)
+
+    # Bug: pure_err01_untyped_local_of_optional_call_not_rejected_2026-11-13.
+    # A generic `T?` call result is not given a symbol type (its payload is
+    # not substituted), so the local's optional-ness comes from the callee's
+    # declared `T?` return; the cast is rejected exactly where the annotated
+    # `val m: T? = ...` twin is.
+    it "rejects the cast of an unannotated `val` initialised from a generic optional call":
+        val pick = "fn pick<T>(v: T, ok: bool) -> T?:\n    if ok:\n        v\n    else:\n        nil\n\n"
+        val generic_val = pick + "fn f() -> i64:\n    val m = pick(41, true)\n    m as i64\n"
+        val annotated = pick + "fn f() -> i64:\n    val m: i64? = pick(41, true)\n    m as i64\n"
+        step("the annotated twin is an error")
+        assert_equal(opt_cast_error_count(lowering_errors(annotated)), 1)
+        step("an unannotated `val` of a generic `T?` call cast with `as` is an error")
+        assert_equal(opt_cast_error_count(lowering_errors(generic_val)), 1)
+
+    it "rejects the cast of an unannotated `var` initialised from a generic optional call":
+        val pick = "fn pick<T>(v: T, ok: bool) -> T?:\n    if ok:\n        v\n    else:\n        nil\n\n"
+        val generic_var = pick + "fn f() -> i64:\n    var m = pick(41, true)\n    m as i64\n"
+        step("an unannotated `var` of a generic `T?` call cast with `as` is an error")
+        assert_equal(opt_cast_error_count(lowering_errors(generic_var)), 1)
+
+    it "rejects the cast of an unannotated `val` initialised from a non-generic optional call":
+        val mk = "fn mk(v: u64) -> u64?:\n    if v != 0:\n        v\n    else:\n        nil\n\n"
+        val plain_val = mk + "fn f() -> u64:\n    val m = mk(1)\n    m as u64\n"
+        step("an unannotated `val` of a non-generic `T?` call cast with `as` is an error")
+        assert_equal(opt_cast_error_count(lowering_errors(plain_val)), 1)
+
+    it "admits narrowed, defaulted, non-optional and unsafe forms of an optional-call local":
+        val pick = "fn pick<T>(v: T, ok: bool) -> T?:\n    if ok:\n        v\n    else:\n        nil\n\n"
+        val if_val = pick + "fn f() -> i64:\n    if val m = pick(41, true):\n        return m as i64\n    0\n"
+        val while_val = pick + "fn f() -> i64:\n    while val m = pick(41, true):\n        return m as i64\n    0\n"
+        val coalesced = pick + "fn f() -> i64:\n    val m = pick(41, true) ?? 0\n    m as i64\n"
+        val coalesced_later = pick + "fn f() -> i64:\n    val m = pick(41, true)\n    (m ?? 0) as i64\n"
+        val non_optional = "fn id(v: i64) -> i64:\n    v\n\nfn f() -> u8:\n    val m = id(3)\n    m as u8\n"
+        val in_unsafe = pick + "fn f() -> i64:\n    val m = pick(41, true)\n    unsafe:\n        m as i64\n"
+        val shadowed = pick + "fn f() -> i64:\n    val m = pick(41, true)\n    val m = m ?? 0\n    m as i64\n"
+
+        step("an `if val` binding of the call is accepted")
+        assert_equal(opt_cast_error_count(lowering_errors(if_val)), 0)
+        step("a `while val` binding of the call is accepted")
+        assert_equal(opt_cast_error_count(lowering_errors(while_val)), 0)
+        step("a `??`-defaulted initialiser is accepted")
+        assert_equal(opt_cast_error_count(lowering_errors(coalesced)), 0)
+        step("narrowing the local with `??` at the cast is accepted")
+        assert_equal(opt_cast_error_count(lowering_errors(coalesced_later)), 0)
+        step("a local of a non-optional call is accepted")
+        assert_equal(opt_cast_error_count(lowering_errors(non_optional)), 0)
+        step("the cast inside an unsafe block is accepted")
+        assert_equal(opt_cast_error_count(lowering_errors(in_unsafe)), 0)
+        step("a `??`-defaulted shadowing rebind is accepted")
+        assert_equal(opt_cast_error_count(lowering_errors(shadowed)), 0)
