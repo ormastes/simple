@@ -1,0 +1,218 @@
+# Purpose and audience: live-device acceptance evidence for the Vulkan runtime owner.
+# @req REQ-VKASYNC-003 REQ-VKASYNC-004 REQ-VKASYNC-005
+# @tag:in-development
+# Tracks: doc/08_tracking/bug/vulkan_no_wait_pending_submission_blocks_followup_compute_2026-09-09.md
+#   (section "2026-11-13 lane uia2"): on Linux the interpreter drives Vulkan
+#   compute through the dlopen bridge in interpreter_extern/gpu.rs, which has no
+#   ring; the ring lives only in the runtime crate, whose `vulkan` feature is off
+#   in the Linux seed. `rt_vulkan_async_session_supported` therefore answers 0
+#   and the ring cannot open. Remove the tag when one Vulkan owner serves both.
+#
+# Bug: doc/08_tracking/bug/
+# vulkan_no_wait_pending_submission_blocks_followup_compute_2026-09-09.md
+#
+# That record's acceptance asks for a Vulkan DEVICE test that enqueues at
+# least three commands before any host wait, proves all three caller fence
+# handles stay resolvable, retires one, recycles its slot, and submits a
+# fourth without device idle, then verifies no command/fence/resource owner
+# remains; plus ring-full backpressure and a stale-token negative control.
+# The runtime ring (`rt_vulkan_async_session_*`) had only injected-device
+# tests. This spec drives it on a real device through the Pure-Simple facade.
+#
+# Host-aware like vulkan_lane_session_spec.spl: with no Vulkan device the
+# probe verdict helper decides skip-versus-fail; nothing is asserted about a
+# device that is not there.
+#
+# What this does NOT prove: an unknown-completion (`VK_ERROR_DEVICE_LOST`
+# class) submission on real hardware. That transition cannot be provoked on a
+# healthy device and stays covered by the injected-device Rust tests
+# (src/compiler_rust/runtime/tests/vulkan_async_session_injected.rs).
+
+use std.spec.step
+
+use std.spipe.*
+use std.gc_async_mut.gpu_lane.vulkan_lane_session.{VulkanLaneSession}
+use std.sffi.io.{file_read_bytes}
+use std.gc_async_mut.gpu_lane.lane_probe_verdict.{
+    gpu_lane_probe_verdict, gpu_lane_probe_verdict_reason, gpu_lane_report_skip}
+use std.gc_async_mut.gpu.engine2d.vulkan_async_submission.{
+    VulkanAsyncSubmissionSession, VULKAN_ASYNC_RETIRED, VULKAN_ASYNC_PENDING,
+    VULKAN_ASYNC_INVALID, VULKAN_ASYNC_WOULD_BLOCK}
+use std.nogc_sync_mut.gpu.engine2d.sffi_vulkan.{
+    vulkan_sffi_create_descriptor_set, vulkan_sffi_destroy_descriptor_set,
+    vulkan_sffi_bind_buffer, vulkan_sffi_bind_pipeline,
+    vulkan_sffi_bind_descriptors, vulkan_sffi_dispatch, vulkan_sffi_end_compute,
+    vulkan_sffi_begin_compute, vulkan_sffi_discard_command}
+
+val _ARENA_TOUCH_SPV: text = "test/fixtures/gpu_lane/vulkan_arena_touch.spv"
+val _ARENA_BYTES: i64 = 4096
+val _RING_CAPACITY: i64 = 3
+# Host polls allowed for one no-op dispatch to complete. A poll is a
+# non-blocking fence status read; this is a ceiling, not a device-idle wait.
+val _POLL_CEILING: i64 = 200000
+
+fn _arena_pattern(len: i64) -> [u8]:
+    var out: [u8] = []
+    var i: i64 = 0
+    while i < len:
+        out.push((i % 251).to_u8())
+        i = i + 1
+    out
+
+# Record one no-op dispatch into the ring-owned command of `token` and submit
+# it. Returns the caller-visible fence handle, or a value <= 0 on refusal.
+fn _record_and_submit(ring: VulkanAsyncSubmissionSession, token: i64,
+                      pipeline: i64, descriptor: i64) -> i64:
+    val command = ring.command(token)
+    if command <= 0:
+        return -100
+    if not vulkan_sffi_bind_pipeline(command, pipeline):
+        return -101
+    if not vulkan_sffi_bind_descriptors(command, descriptor):
+        return -102
+    if not vulkan_sffi_dispatch(command, 1, 1, 1):
+        return -103
+    if not vulkan_sffi_end_compute(command):
+        return -104
+    ring.submit(token)
+
+# Poll one token until the device reports completion, bounded by the ceiling.
+fn _poll_until_complete(ring: VulkanAsyncSubmissionSession, token: i64) -> i64:
+    var polls: i64 = 0
+    var status = ring.poll(token)
+    while status == VULKAN_ASYNC_PENDING and polls < _POLL_CEILING:
+        status = ring.poll(token)
+        polls = polls + 1
+    status
+
+describe "Vulkan async submission ring on a live device":
+    # @manual scenario evidence
+    """
+    Three submissions in flight before any host wait, one retired and its slot
+    recycled for a fourth without device idle, bounded ring-full backpressure,
+    stale-token refusal, and no owner left behind.
+    """
+    it "should keep three submissions in flight, recycle a retired slot, and leave no owner behind":
+        step("Probe for a Vulkan-capable device")
+        var lane = VulkanLaneSession.create()
+        val probe_result = lane.probe()
+
+        if probe_result.starts_with("skip:"):
+            step(gpu_lane_probe_verdict_reason("vulkan", probe_result))
+            gpu_lane_report_skip("vulkan async ring", probe_result)
+            assert_equal(gpu_lane_probe_verdict("vulkan", probe_result), "skip")
+        else:
+            step("Initialize device, no-op pipeline and arena")
+            val lane_spirv = file_read_bytes(_ARENA_TOUCH_SPV)
+            expect(lane_spirv.len()).to_be_greater_than(0)
+            expect(lane.init(_ARENA_BYTES, lane_spirv, "main")).to_equal("")
+            # Device identity is evidence: print it, a step label is not echoed.
+            print("[vulkan-async-ring] device=" + lane.device_name +
+                " driver=" + lane.driver_identity)
+            expect(lane.device_name).to_not_equal("")
+            val pattern = _arena_pattern(_ARENA_BYTES)
+            assert_true(lane.arena_write(pattern))
+
+            step("Create one descriptor set per submission before any submit")
+            var descriptors: [i64] = []
+            var d: i64 = 0
+            while d < 4:
+                val descriptor = vulkan_sffi_create_descriptor_set(lane.lane_pipeline)
+                expect(descriptor).to_be_greater_than(0)
+                assert_true(vulkan_sffi_bind_buffer(descriptor, 0, lane.arena_buffer))
+                descriptors.push(descriptor)
+                d = d + 1
+
+            step("Open a capacity-3 ring")
+            var ring = VulkanAsyncSubmissionSession.open(_RING_CAPACITY)
+            assert_true(ring.is_open())
+            expect(ring.capacity).to_equal(_RING_CAPACITY)
+            expect(ring.in_flight()).to_equal(0)
+
+            step("Enqueue three commands before any host wait")
+            val token_a = ring.acquire()
+            expect(token_a).to_be_greater_than(0)
+            val fence_a = _record_and_submit(ring, token_a, lane.lane_pipeline, descriptors[0])
+            val token_b = ring.acquire()
+            expect(token_b).to_be_greater_than(0)
+            val fence_b = _record_and_submit(ring, token_b, lane.lane_pipeline, descriptors[1])
+            val token_c = ring.acquire()
+            expect(token_c).to_be_greater_than(0)
+            val fence_c = _record_and_submit(ring, token_c, lane.lane_pipeline, descriptors[2])
+            expect(fence_a).to_be_greater_than(0)
+            expect(fence_b).to_be_greater_than(0)
+            expect(fence_c).to_be_greater_than(0)
+            assert_true(fence_a != fence_b and fence_b != fence_c and fence_a != fence_c)
+            assert_true(token_a != token_b and token_b != token_c and token_a != token_c)
+            expect(ring.in_flight()).to_equal(3)
+
+            step("All three caller tokens stay resolvable while in flight")
+            val poll_a = ring.poll(token_a)
+            val poll_b = ring.poll(token_b)
+            val poll_c = ring.poll(token_c)
+            assert_true(poll_a == VULKAN_ASYNC_PENDING or poll_a == VULKAN_ASYNC_RETIRED)
+            assert_true(poll_b == VULKAN_ASYNC_PENDING or poll_b == VULKAN_ASYNC_RETIRED)
+            assert_true(poll_c == VULKAN_ASYNC_PENDING or poll_c == VULKAN_ASYNC_RETIRED)
+
+            step("A full ring applies bounded backpressure instead of a fourth slot")
+            expect(ring.acquire()).to_equal(VULKAN_ASYNC_WOULD_BLOCK)
+            expect(ring.in_flight()).to_equal(3)
+
+            step("Retire the oldest submission by polling its own fence")
+            expect(_poll_until_complete(ring, token_a)).to_equal(VULKAN_ASYNC_RETIRED)
+            expect(ring.retire(token_a)).to_equal(VULKAN_ASYNC_RETIRED)
+            expect(ring.in_flight()).to_equal(2)
+            expect(ring.published_sequence()).to_equal(1)
+
+            step("The retired token is stale: it cannot be polled, retired or resubmitted")
+            expect(ring.poll(token_a)).to_equal(VULKAN_ASYNC_INVALID)
+            expect(ring.retire(token_a)).to_equal(VULKAN_ASYNC_INVALID)
+            expect(ring.command(token_a)).to_equal(VULKAN_ASYNC_INVALID)
+            expect(ring.submit(token_a)).to_equal(VULKAN_ASYNC_INVALID)
+            expect(ring.in_flight()).to_equal(2)
+
+            step("Recycle the slot and submit a fourth command without device idle")
+            val token_d = ring.acquire()
+            expect(token_d).to_be_greater_than(0)
+            assert_true(token_d != token_a and token_d != token_b and token_d != token_c)
+            val fence_d = _record_and_submit(ring, token_d, lane.lane_pipeline, descriptors[3])
+            expect(fence_d).to_be_greater_than(0)
+            assert_true(fence_d != fence_a)
+            expect(ring.in_flight()).to_equal(3)
+
+            step("A submitted, never-polled token is not retirable: nothing is released early")
+            expect(ring.retire(token_d)).to_equal(VULKAN_ASYNC_PENDING)
+            expect(ring.in_flight()).to_equal(3)
+            expect(ring.published_sequence()).to_equal(1)
+
+            step("Retire the remaining three in submission order")
+            expect(_poll_until_complete(ring, token_b)).to_equal(VULKAN_ASYNC_RETIRED)
+            expect(ring.retire(token_b)).to_equal(VULKAN_ASYNC_RETIRED)
+            expect(_poll_until_complete(ring, token_c)).to_equal(VULKAN_ASYNC_RETIRED)
+            expect(ring.retire(token_c)).to_equal(VULKAN_ASYNC_RETIRED)
+            expect(_poll_until_complete(ring, token_d)).to_equal(VULKAN_ASYNC_RETIRED)
+            expect(ring.retire(token_d)).to_equal(VULKAN_ASYNC_RETIRED)
+            expect(ring.in_flight()).to_equal(0)
+            expect(ring.published_sequence()).to_equal(4)
+
+            step("Close the ring; no command or fence owner remains")
+            expect(ring.close()).to_equal(1)
+            assert_true(not ring.is_open())
+            # `rt_vulkan_begin_compute` refuses while ANY quarantined
+            # submission is still owned by the runtime, so a direct command
+            # beginning here is the proof that all four were released.
+            val direct = vulkan_sffi_begin_compute()
+            expect(direct).to_be_greater_than(0)
+            assert_true(vulkan_sffi_discard_command(direct))
+
+            step("The no-op dispatches left the arena unchanged")
+            val readback = lane.arena_read(_ARENA_BYTES)
+            expect(readback.len()).to_equal(_ARENA_BYTES)
+            expect(readback[0]).to_equal(pattern[0])
+            expect(readback[100]).to_equal(pattern[100])
+            expect(readback[_ARENA_BYTES - 1]).to_equal(pattern[_ARENA_BYTES - 1])
+
+            step("Every descriptor, buffer, pipeline and shader releases cleanly")
+            for descriptor in descriptors:
+                assert_true(vulkan_sffi_destroy_descriptor_set(descriptor))
+            expect(lane.shutdown()).to_equal("")
