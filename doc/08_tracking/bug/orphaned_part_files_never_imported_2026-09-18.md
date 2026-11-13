@@ -146,3 +146,16 @@ than presence of any importer, would catch that class; it is not implemented.
   this came out of, and the one deletion already made.
 - `value_access_ownership_spec_never_executes_2026-09-18.md` — found in the same
   hour, same family: a guard that cannot run is indistinguishable from one that passes.
+
+## Fix (2026-11-13) — transitively dead `_initramfs_pack/support.spl` deleted (lane fA)
+
+`src/os/port/initramfs_pack.spl` no longer imports `os.port._initramfs_pack.*` (it
+inlines its helpers), and `archive.spl` was deleted on 2026-11-09, so `support.spl` had
+zero importers anywhere in the repository (`git grep _initramfs_pack` hit only
+baseline rows). Deleted it with the three `use_target_resolves_baseline.txt` rows that
+named the deleted part-files (all census-only `UNRESOLVABLE` class, not enforced).
+Remaining: `src/app/io/_CliCompile/native_build.spl` — still read as SOURCE by
+`stage4_smoke_gate_spec`, `native_build_cache_plumbing_spec` and
+`fs_extern_optional_spec`; deleting it needs those three specs retargeted at the live
+`native_build_closure.spl` / `compile_targets.spl` (owner decision on whether their
+assertions still describe live behaviour).
