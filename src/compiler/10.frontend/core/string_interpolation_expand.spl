@@ -22,8 +22,7 @@ use compiler.core.parser.{
     parser_has_errors,
     parser_set_had_error
 }
-use compiler.frontend.core.lexer.{lex_init_with_path, lexer_state_take, lexer_state_install,
-    lex_source_byte_offset, lex_source_char_offset}
+use compiler.frontend.core.lexer.{lex_init_with_path, lexer_state_take, lexer_state_install}
 use compiler.frontend.core.parser_expr.{parse_expr}
 use compiler.core.ast_expr.{
     EXPR_CALL,
@@ -163,25 +162,30 @@ fn decode_interpolation_brace_escapes(value: text) -> text:
     # doc/08_tracking/bug/frontend_parse_per_file_cost_2026-08-21.md
     if not (value.contains("{{") or value.contains("}}")):
         return value
+    # Every index here is a code point (`len()`, `value[i:i+1]`), so the
+    # chunks are cut with `[a:b]` too: byte-offset `substring` split a
+    # multibyte character that precedes a brace into invalid UTF-8
+    # (nonascii_interpolation_byte_char_slice_cache_store_2026-11-13).
     var chunks: [text] = []
     var copied_until = 0
     var i = 0
-    while i < value.len():
+    val n = value.len()
+    while i < n:
         val ch = value[i:i + 1]
-        val next = if i + 1 < value.len(): value[i + 1:i + 2] else: ""
+        val next = if i + 1 < n: value[i + 1:i + 2] else: ""
         if ch == "{" and next == "{":
-            chunks.push(value.substring(copied_until, i))
+            chunks.push(value[copied_until:i])
             chunks.push("{")
             i = i + 2
             copied_until = i
         elif ch == "}" and next == "}":
-            chunks.push(value.substring(copied_until, i))
+            chunks.push(value[copied_until:i])
             chunks.push("}")
             i = i + 2
             copied_until = i
         else:
             i = i + 1
-    chunks.push(value.substring(copied_until, value.byte_len()))
+    chunks.push(value[copied_until:n])
     chunks.join("")
 
 # W-STR-BRACE-001 (seed parity: parser/src/lexer/strings.rs BRACE_WARNING_CODE).
@@ -249,10 +253,14 @@ pub fn parse_string_interpolation_regions(value: text, literal_span: i64 = -1) -
     var inner_start = -1
     var quote = ""
     var escaped = false
+    # Code-point indices throughout (`len()`, `value[i:i+1]`), so every cut
+    # below is `[a:b]`, never byte-offset `substring`
+    # (nonascii_interpolation_byte_char_slice_cache_store_2026-11-13).
     var i = 0
-    while i < value.len():
+    val n = value.len()
+    while i < n:
         val ch = value[i:i + 1]
-        val next = if i + 1 < value.len(): value[i + 1:i + 2] else: ""
+        val next = if i + 1 < n: value[i + 1:i + 2] else: ""
         if depth == 0 and ch == "{" and next == "{":
             i = i + 1
         elif depth == 0 and ch == "\\" and (next == "{" or next == "}"):
@@ -288,31 +296,30 @@ pub fn parse_string_interpolation_regions(value: text, literal_span: i64 = -1) -
                 # fragment quadratically. The matching indices already delimit
                 # the exact same text, including nested braces, so materialize
                 # it once at the completed-region boundary.
-                val inner = value.substring(inner_start, i)
+                val inner = value[inner_start:i]
                 var part = -1
                 if literal_span >= 0 and span_is_valid(literal_span):
-                    # Region base: literal byte start + quote + byte index into
-                    # the value, recorded as a CHAR offset like every pool span.
-                    val region_byte = lex_source_byte_offset(span_start(literal_span)) + 1 + inner_start
-                    part = parse_interpolation_fragment_at(inner, lex_source_char_offset(region_byte),
+                    # Region base: literal CHAR start + quote + code-point index
+                    # into the value; pool spans record CHAR offsets.
+                    part = parse_interpolation_fragment_at(inner, span_start(literal_span) + 1 + inner_start,
                         span_line(literal_span), span_col(literal_span) + 1 + inner_start)
                 else:
                     part = parse_interpolation_fragment(inner)
                 if part < 0:
-                    interpolation_note_malformed_region(value.substring(inner_start - 1, i + 1))
-                    chunks.push(value.substring(copied_until, inner_start - 1))
+                    interpolation_note_malformed_region(value[inner_start - 1:i + 1])
+                    chunks.push(value[copied_until:inner_start - 1])
                     chunks.push(interpolation_literalize_region(
-                        value.substring(inner_start - 1, i + 1)))
+                        value[inner_start - 1:i + 1]))
                     copied_until = i + 1
                 else:
                     parts.push(part)
         i = i + 1
     if depth != 0:
-        interpolation_note_malformed_region(value.substring(inner_start - 1, value.byte_len()))
+        interpolation_note_malformed_region(value[inner_start - 1:n])
         return (value, [])
     if copied_until == 0:
         return (value, parts)
-    chunks.push(value.substring(copied_until, value.byte_len()))
+    chunks.push(value[copied_until:n])
     (chunks.join(""), parts)
 
 fn expand_interpolated_placeholder_call_args(start_expr: i64):
