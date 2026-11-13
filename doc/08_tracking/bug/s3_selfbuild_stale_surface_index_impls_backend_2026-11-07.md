@@ -1,7 +1,7 @@
 # Stage-3 self-build: stale surface index [impls] in backend modules
 
 - **Severity:** P1 (blocks phase-3 self-bootstrap: stage3 building stage3)
-- **Status:** open
+- **Status:** fix-implemented-verification-pending (see Fix 2026-11-13)
 - **Host:** Windows x86_64, llvm-mingw
 - **Found:** 2026-11-07, leaf 63
 
@@ -28,3 +28,16 @@ The diagnostic is `hir_stale_surface_index_message` in `src/compiler/20.hir/hir_
 
 ## Workaround
 Build leaf 63 with the frozen stage2 (`fable_leaf63b.ps1`).
+
+## Fix (2026-11-13)
+- **Status:** fix-implemented-verification-pending (native stage3 self-build re-run pending).
+- Fix on `origin/release/1.0.0`: `9106a316ad1` (`HirLowering.invalidate_impl_index` at the driver
+  surface teardown + fail-closed length guards) and `ce2088532d3` (STALESURF: `ensure_impl_index`
+  keys the memo by `{generation} {physical_index} {impls.len()}`, so a shrunk/replaced impls array
+  re-indexes its live rows and a stale position is unreachable).
+- Regression: `bin/simple test test/01_unit/compiler/hir/impl_index_staleness_guard_spec.spl`
+  -> `outcome=OK executed=6 passed=6 failed=0` (seed, 2026-11-13).
+- Still open for the owner: the length key removes the stale-index crash, but if a live surface's
+  impls rows really are released early (`live_len=0` while still imported), the importer now sees
+  zero impls instead of an error. Confirm with the leaf-63 self-build (`fable_leaf63.ps1 -Exe
+  <new s3>`) that no `unknown method` failures replace the 281 HIR failures.
