@@ -58,13 +58,18 @@ pub fn library_unit_link_set_v1(plan: [LibraryUnitPlanEntryV1], target: text, pr
         frontier = next
 
     # Keys bottom-up in plan order (dependency-first), then reversed for linking.
-    var key_by_unit: {text: text} = {}
+    # A plan that is not dependency-first would mis-order the link set silently.
+    var placed: {text: bool} = {}
     var forward: [LibraryUnitLinkEntryV1] = []
     for entry in plan:
         if not in_closure.contains_key(entry.name):
             continue
         if entry.kind == "application":
             return Err("unit '{entry.name}' in the closure of '{target}' is an application and produces no archive")
+        for dep in entry.deps:
+            if not placed.contains_key(dep):
+                return Err("plan is not dependency-first: '{entry.name}' precedes its dependency '{dep}'")
+        placed[entry.name] = true
         if not source_digest_by_unit.contains_key(entry.name) or source_digest_by_unit[entry.name] == "":
             return Err("unit '{entry.name}' has no source digest")
         var dep_ifaces: [(text, text)] = []
@@ -73,7 +78,6 @@ pub fn library_unit_link_set_v1(plan: [LibraryUnitPlanEntryV1], target: text, pr
                 return Err("unit '{dep}' (dependency of '{entry.name}') has no interface digest")
             dep_ifaces.push((dep, iface_digest_by_unit[dep]))
         val key = library_unit_cache_key_v1(producer_identity, source_digest_by_unit[entry.name], dep_ifaces)
-        key_by_unit[entry.name] = key
         forward.push(LibraryUnitLinkEntryV1(unit: entry.name, unit_key: key, deps: entry.deps))
     var out: [LibraryUnitLinkEntryV1] = []
     var i = forward.len() - 1
