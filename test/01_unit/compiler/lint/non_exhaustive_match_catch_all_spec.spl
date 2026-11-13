@@ -1,0 +1,46 @@
+# @req REQ-LINT-NONEXH-001
+# non_exhaustive_match must not fire on matches that end in a `_:` / `case _:`
+# catch-all (including nested matches); a match without one still warns.
+use std.spec
+use std.spec.step
+use std.nogc_sync_mut.tooling.easy_fix.rules.{check_non_exhaustive_match}
+use compiler.tools.fix.rules.impl_.lint_code.{check_non_exhaustive_match_with_lines}
+
+describe "non_exhaustive_match catch-all detection":
+    it "does not warn on a bare-arm match that ends in a `_:` catch-all":
+        step("bare arms with a `_:` catch-all")
+        val src = "fn f(x: i64) -> bool:\n    match x:\n        1: true\n        _: false\n"
+        expect(check_non_exhaustive_match(src, "t.spl").len()).to_equal(0)
+
+    it "does not warn on a nested match when both end in a catch-all":
+        step("outer and nested match both carry `_:`")
+        val src = "fn f(v: Value) -> bool:\n    match v:\n        Ok(w):\n            match w:\n                Null: true\n                _: false\n        _: false\n"
+        expect(check_non_exhaustive_match(src, "t.spl").len()).to_equal(0)
+
+    it "still warns on a bare-arm match without a catch-all":
+        step("bare arms, no catch-all")
+        val src = "fn f(x: i64) -> bool:\n    match x:\n        1: true\n        2: false\n"
+        val fixes = check_non_exhaustive_match(src, "t.spl")
+        expect(fixes.len()).to_equal(1)
+        expect(fixes[0].replacements[0].new_text).to_contain("_:")
+
+    it "warns only for the inner match when the outer has a catch-all":
+        step("inner match lacks a catch-all")
+        val src = "fn f(v: Value) -> bool:\n    match v:\n        Ok(w):\n            match w:\n                Null: true\n        _: false\n"
+        expect(check_non_exhaustive_match(src, "t.spl").len()).to_equal(1)
+
+    it "still warns on a case-style match without `case _:`":
+        step("case-style without catch-all")
+        val src = "match x:\n    case 1: \"one\"\n    case 2: \"two\"\nval y = 0\n"
+        expect(check_non_exhaustive_match(src, "t.spl").len()).to_equal(1)
+
+describe "non_exhaustive_match catch-all detection (compiler lint path)":
+    it "does not warn on a bare-arm match that ends in a `_:` catch-all":
+        step("compiler lint copy, `_:` catch-all")
+        val lines = "fn f(x: i64) -> bool:\n    match x:\n        1: true\n        _: false\n".split("\n")
+        expect(check_non_exhaustive_match_with_lines("t.spl", lines).len()).to_equal(0)
+
+    it "still warns on a bare-arm match without a catch-all":
+        step("compiler lint copy, no catch-all")
+        val lines = "fn f(x: i64) -> bool:\n    match x:\n        1: true\n        2: false\n".split("\n")
+        expect(check_non_exhaustive_match_with_lines("t.spl", lines).len()).to_equal(1)
