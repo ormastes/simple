@@ -199,3 +199,17 @@ Owner decision needed: test-runner/tooling owner — either (a) default
 single/few-spec runs to the no-daemon lane, (b) add a cross-spec lint cache
 to the daemon session, or (c) re-justify the daemon's full-tree warm-up and
 close this as accepted-cost.
+
+
+## Triage 2026-11-13 (lane p3-async-20261113, base 80a8116e5e2) — still LIVE; owner decision stands
+
+Same-base structural check: daemon-owned execution is still the default lane
+(`src/app/test_runner_new/test_runner_args.spl` `--no-session-daemon` /
+`--session-daemon` gating unchanged) and no `SIMPLE_LINT_CACHE`-style
+cross-spec lint cache exists for `bin/simple test` — matching the 2026-11-11
+runner8 triage. Mitigation (1) (`--no-session-daemon` for single/few-spec
+runs) remains available today. This record is measurement-only; fixes (2)/(3)
+— change the small-run default, add a daemon lint cache, or re-justify the
+daemon warm-up — are an owner decision, not a bounded P3 lane fix. The
+content-bound `spirv_boundary_glslang_spec.spl` cost remains out of scope for
+the runner. No source change.

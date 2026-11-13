@@ -66,3 +66,17 @@ Verification pending: `examples/08_gpu/backends/backends_spec.spl` going
 green (4 passed) on a 2x-NVIDIA Vulkan 1.4 host.
 
 Status: OPEN (suspects confirmed in source; fix site out of lane scope).
+
+
+## Triage 2026-11-13 (lane p3-async-20261113, base 80a8116e5e2) — not reproducible on this lane (host-bound)
+
+This lane runs a Windows host with the tracked seed; the recorded
+interference requires a Linux host with 2x NVIDIA, live Vulkan 1.4.312 and a
+live CUDA lane in one process — none of which this lane can construct, and
+`backends_spec.spl` cannot run meaningfully here. No fresh reproduction was
+attempted; the evidence and suspects in the record body stand (shared
+per-process GMB-1 mailbox arena / sentinel-reader cursor consumed by the
+first lane; Vulkan/CUDA teardown ordering). The unblock condition is
+unchanged: fix the shared state so both lanes run in one process, or make the
+second lane fail loudly (never `ok=true exit=0`), keeping
+`backends_spec.spl` strict. Routed to the GPU-lane owner. No source change.
