@@ -136,6 +136,16 @@ side:
 - `_cranelift_jit_run` (K1 lane) scans every module and compiles only the
   last. Cross-module Source calls are refused as `E-JIT-UNRESOLVED-CALLEE`
   rather than linked across JIT modules.
+- A module with a public static fails closed with `E-JIT-STATICS`.
+  `cranelift_define_global_accessor_v1` always defines through the AOT entry,
+  which rejects a JIT handle. The fix is to thread the `jit` flag into
+  `declare_module_statics`, or to skip the accessor in a JIT module.
+- Some failures still panic instead of returning an error. A Foreign callee
+  with an ABI mismatch reaches `panic` in the lowering, and so does a function
+  value with no address. A Foreign symbol that is missing from the process
+  still aborts at the provider's `finalize_definitions().unwrap()`. The
+  pre-finalize allowlist only proves an import is Foreign, not that the process
+  can resolve it.
 - Passing the runtime-import parity check does not prove the ABI of a Runtime
   callee whose signature comes from its `extern fn` declaration. That import
   is refused today, so the gap is latent until the provider registers symbols.
