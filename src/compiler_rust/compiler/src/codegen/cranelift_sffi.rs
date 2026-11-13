@@ -328,6 +328,7 @@ pub const CRANELIFT_LINKAGE_RUNTIME_IMPORT: i64 = 5;
 /// The seed JIT's runtime symbol table (`jit::seed_jit_runtime_symbol_table`),
 /// resolved once with the seed JIT's own default provider. The provider is
 /// kept alive here: a dynamic provider's addresses die with it.
+#[cfg(not(compiler_backfill))]
 struct JitRuntimeSymbolTable {
     _provider: std::sync::Arc<dyn super::jit::RuntimeSymbolProvider>,
     symbols: Vec<(&'static str, *const u8)>,
@@ -337,9 +338,12 @@ struct JitRuntimeSymbolTable {
 // SAFETY: the addresses are immutable code addresses of runtime functions that
 // live as long as the process (or as `_provider`, held here forever); the
 // table is built once and never mutated.
+#[cfg(not(compiler_backfill))]
 unsafe impl Send for JitRuntimeSymbolTable {}
+#[cfg(not(compiler_backfill))]
 unsafe impl Sync for JitRuntimeSymbolTable {}
 
+#[cfg(not(compiler_backfill))]
 lazy_static! {
     static ref JIT_RUNTIME_SYMBOLS: JitRuntimeSymbolTable = {
         let provider = super::jit::default_runtime_provider();
@@ -351,6 +355,7 @@ lazy_static! {
 
 /// Every `(name, address)` the provider registers on a JIT module: the seed
 /// JIT's runtime symbol table.
+#[cfg(not(compiler_backfill))]
 pub fn jit_provider_runtime_symbols() -> &'static [(&'static str, *const u8)] {
     &JIT_RUNTIME_SYMBOLS.symbols
 }
@@ -358,6 +363,7 @@ pub fn jit_provider_runtime_symbols() -> &'static [(&'static str, *const u8)] {
 /// The signature a JIT import of `name` must have to bind through the runtime
 /// table: `None` when `name` is not registered, `Some(None)` when it is
 /// registered but has no `RuntimeFuncSpec` (its ABI cannot be proven).
+#[cfg(not(compiler_backfill))]
 fn jit_runtime_import_spec(name: &str) -> Option<Option<&'static super::runtime_sffi::RuntimeFuncSpec>> {
     JIT_RUNTIME_SYMBOLS.by_name.get(name)?;
     Some(super::runtime_sffi::spec_for_target(&simple_common::target::Target::host(), name))
@@ -369,6 +375,7 @@ fn jit_runtime_import_spec(name: &str) -> Option<Option<&'static super::runtime_
 ///   - a runtime-table name binds only with its exact RuntimeFuncSpec signature;
 ///   - any other name binds only as a plain import (`runtime_only == false`)
 ///     that the process can resolve.
+#[cfg(not(compiler_backfill))]
 fn admit_jit_import(name: &str, signature: &Signature, call_conv: CallConv, runtime_only: bool) -> Result<(), String> {
     match jit_runtime_import_spec(name) {
         Some(Some(spec)) => {
@@ -381,15 +388,38 @@ fn admit_jit_import(name: &str, signature: &Signature, call_conv: CallConv, runt
         }
         Some(None) => Err("runtime symbol has no RuntimeFuncSpec, so its ABI cannot be proven".to_string()),
         None if runtime_only => Err("not in the JIT runtime symbol table".to_string()),
-        None if super::jit::dlsym_resolves(name) => Ok(()),
+        None if super::jit_dlsym::dlsym_resolves(name) => Ok(()),
         None => Err("resolves to no runtime symbol and no process symbol".to_string()),
     }
 }
 
 /// True when finalize can resolve an import named `name`: a registered runtime
 /// symbol, or a process symbol (cranelift-jit's own lookup order).
+#[cfg(not(compiler_backfill))]
 fn jit_import_resolvable(name: &str) -> bool {
-    JIT_RUNTIME_SYMBOLS.by_name.contains_key(name) || super::jit::dlsym_resolves(name)
+    JIT_RUNTIME_SYMBOLS.by_name.contains_key(name) || super::jit_dlsym::dlsym_resolves(name)
+}
+
+// The `simple-compiler-backfill` crate compiles this file without the seed
+// JIT's runtime symbol table: that table is built from the seed's runtime
+// provider (`simple_native_loader`, `elf_utils`, `runtime_sffi` signatures),
+// none of which the backfill archive carries. A backfill JIT module therefore
+// registers no runtime symbols, refuses every runtime-table-only import by
+// name, and admits a plain import only when the process resolves it.
+#[cfg(compiler_backfill)]
+fn admit_jit_import(name: &str, _signature: &Signature, _call_conv: CallConv, runtime_only: bool) -> Result<(), String> {
+    if runtime_only {
+        Err("runtime-table import, but the compiler backfill provider has no JIT runtime symbol table".to_string())
+    } else if super::jit_dlsym::dlsym_resolves(name) {
+        Ok(())
+    } else {
+        Err("resolves to no process symbol (the compiler backfill provider has no JIT runtime symbol table)".to_string())
+    }
+}
+
+#[cfg(compiler_backfill)]
+fn jit_import_resolvable(name: &str) -> bool {
+    super::jit_dlsym::dlsym_resolves(name)
 }
 
 /// Linkage a COMDAT instance is declared with for `format`. ELF: weak inside
@@ -655,7 +685,9 @@ unsafe fn rt_cranelift_new_module_impl(name: &str, target: i64) -> i64 {
         None => return 0,
     };
 
+    #[cfg_attr(compiler_backfill, allow(unused_mut))]
     let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+    #[cfg(not(compiler_backfill))]
     super::jit::register_seed_jit_runtime_symbols(&mut builder, jit_provider_runtime_symbols());
     let module = JITModule::new(builder);
     let handle = next_handle();
@@ -3371,6 +3403,6 @@ mod abort_tests;
 #[path = "cranelift_error_latch_tests.rs"]
 mod error_latch_tests;
 
-#[cfg(all(test, any(target_arch = "x86_64", target_arch = "aarch64")))]
+#[cfg(all(test, not(compiler_backfill), any(target_arch = "x86_64", target_arch = "aarch64")))]
 #[path = "cranelift_jit_runtime_symbols_tests.rs"]
 mod jit_runtime_symbols_tests;
