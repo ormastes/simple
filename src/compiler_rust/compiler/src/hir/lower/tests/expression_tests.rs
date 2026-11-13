@@ -1971,6 +1971,10 @@ fn if_val_on_generic_optional_binds_payload_for_numeric_cast() {
             "fn ok(f: bool) -> i64:\n    if f:\n        return 1\n    elif val m = pick(41, true):\n        return m as i64\n    return 0\n",
             "`elif val`",
         ),
+        (
+            "fn ok() -> i64:\n    var i = 0\n    var t = 0\n    while val m = pick(i, i < 3):\n        t = t + (m as i64)\n        i = i + 1\n    return t\n",
+            "`while val`",
+        ),
     ] {
         parse_and_lower(&format!("{pick}{body}"))
             .unwrap_or_else(|e| panic!("{what}: `m as i64` on the narrowed binding must lower: {e}"));
