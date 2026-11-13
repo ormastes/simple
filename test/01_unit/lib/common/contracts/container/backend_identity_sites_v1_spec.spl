@@ -1,0 +1,132 @@
+# @req SC-MAC-002 SC-MAC-012 SC-MAC-022 SC-MAC-024
+# Every backend/engine hardcode site of design §2.4 consults the one mapping:
+# unknown backends are refused, Linux/Windows stay unchanged, and the macOS
+# Seatbelt identity is a known plan value whose effects/evidence stay refused.
+# Pure contract checks; no native host call. macOS qualification NOT_RUN.
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.container.execution_evidence_v2.*
+use std.common.contracts.container.bound_intent_v2.*
+use std.common.contracts.container.exec_v3.exec_runtime_bytes_v3
+use std.common.contracts.container.exec_control_v3.container_exec_control_parent_match_v3
+use std.common.contracts.container.runtime_v1.{RuntimeIdentityV1, RuntimeIntentV1}
+use std.common.contracts.container.stream_v2.*
+use std.common.build_manager.group_process_stream_profile_v3.*
+use std.common.build_manager.group_process_stream_protocol_v2.*
+use std.nogc_async_mut.container.api_v2.{simple_container_observe_v2, simple_container_open_v2}
+
+fn sites_scope_v1() -> ContainerHostScopeV2:
+    ContainerHostScopeV2(physical_host_id: "authorized-alias", service_scope_id: "service", boot_id: "native-boot",
+        provider_generation: 3, native_machine_id: "native-machine", continuity_mode: "native-boot-incarnation-v1",
+        continuity_id: "native-boot")
+
+fn sites_plan_v1(backend: text) -> ContainerExecutionPlanV2:
+    val scope = sites_scope_v1()
+    ContainerExecutionPlanV2(backend: backend, workload_uid: "workload", attempt: 1,
+        operation_id: "operation", request_digest: "a".repeat(64), physical_host_id: scope.physical_host_id,
+        service_scope_id: scope.service_scope_id, boot_id: scope.boot_id, provider_generation: scope.provider_generation,
+        native_machine_id: scope.native_machine_id, continuity_mode: scope.continuity_mode, continuity_id: scope.continuity_id)
+
+fn sites_identity_v1(engine: text) -> RuntimeIdentityV1:
+    RuntimeIdentityV1(pod_uid: "workload", attempt: 1, provider_generation: 3, operation_id: "operation",
+        engine: engine, native_id: "c".repeat(64), node_boot_id: container_scope_fence_id_v2(sites_scope_v1()).unwrap())
+
+fn sites_absence_v1(backend: text, engine: text) -> ContainerAbsenceReceiptV2:
+    ContainerAbsenceReceiptV2(backend: backend, scope: sites_scope_v1(), identity: sites_identity_v1(engine),
+        request_digest: "a".repeat(64), provider_identity_digest: "b".repeat(64), observed_unix_ms: 1000,
+        query_digest: "d".repeat(64), evidence_digest: "e".repeat(64), proof_kind: "exact-native-object-absence-v1")
+
+fn sites_intent_v1(engine: text) -> RuntimeBoundIntentV2:
+    RuntimeBoundIntentV2(identity: RuntimeIntentV1(pod_uid: "workload", attempt: 1, provider_generation: 3,
+        operation_id: "operation", engine: engine, native_id: "", node_boot_id: "fence", phase: "prepared"),
+        request_digest: "a".repeat(64))
+
+fn sites_request_v1(backend: text) -> ContainerExecutionRequestV2:
+    ContainerExecutionRequestV2(plan: sites_plan_v1(backend), request_bytes: "opaque")
+
+fn sites_output_plan_v1() -> ContainerOutputPlanV2:
+    val workload = ContainerExecutionPlanV2(backend: "linux-podman", workload_uid: "workload", attempt: 2,
+        operation_id: "parent-operation", request_digest: "a".repeat(64), physical_host_id: "authorized-alias",
+        service_scope_id: "service", boot_id: "boot", provider_generation: 7, native_machine_id: "machine",
+        continuity_mode: "native-boot-incarnation-v1", continuity_id: "boot")
+    val scope = ContainerHostScopeV2(physical_host_id: workload.physical_host_id, service_scope_id: workload.service_scope_id,
+        boot_id: workload.boot_id, provider_generation: workload.provider_generation, native_machine_id: workload.native_machine_id,
+        continuity_mode: workload.continuity_mode, continuity_id: workload.continuity_id)
+    val runtime = RuntimeIdentityV1(pod_uid: workload.workload_uid, attempt: workload.attempt,
+        operation_id: workload.operation_id, provider_generation: workload.provider_generation, engine: "podman",
+        native_id: "b".repeat(64), node_boot_id: container_scope_fence_id_v2(scope).unwrap())
+    val identity = ContainerOutputIdentityV2(operation_id: "output-operation", parent_operation_id: workload.operation_id,
+        parent_operation_digest: "c".repeat(64), parent_assignment_digest: "d".repeat(64),
+        parent_budget_digest: "e".repeat(64), binding_digest: "f".repeat(64))
+    val args = ["attach", "--no-stdin", "--sig-proxy=false", runtime.native_id]
+    val request = GroupProcessStreamRequestV2(program: "/usr/bin/podman", producer_digest: "1".repeat(64), args: args,
+        environment: ["LANG=C", "TERM=dumb"], directory: "/trusted/work", inputs: [], timeout_ms: 30000,
+        broker_program: "/trusted/broker", broker_digest: "2".repeat(64),
+        child_argv_digest: group_process_child_argv_digest_v2("/usr/bin/podman", args), launch_deadline_unix_ms: 0)
+    val budget = GroupProcessBrokerBudgetV3(cgroup_path: "/delegated/broker", device: 1, inode: 2, generation: 3,
+        policy_digest: "3".repeat(64), cpu_quota_us: 10000, cpu_period_us: 100000,
+        reserved_cpu_millis: 100, memory_limit_bytes: 16777216, reserved_memory_bytes: 16777216)
+    val profile = GroupProcessStreamProfileV3(helper_cpu: group_process_cpu_quota_v3(50).unwrap(),
+        broker: budget, child_image_mode: "trusted-local-admin-image-fd-v1")
+    val launch = GroupProcessStreamLaunchV2(root: "/trusted/output", worker_id: identity.operation_id, generation: 7,
+        snapshot_digest: "4".repeat(64), cache_identity: "5".repeat(64), memory_limit_bytes: 33554432,
+        request: request, delegated_cgroup_path: "/delegated/helpers", memory_policy: "enforce", transport_generation: 0,
+        profile_v3: Some(profile))
+    var plan = ContainerOutputPlanV2(mode: "output-follow", workload: workload, runtime: runtime, identity: identity,
+        resources: ContainerOutputResourcesV2(cpu_millis: 50, memory_bytes: 33554432), provider_identity_digest: "6".repeat(64),
+        policy_digest: "7".repeat(64), launch_template: launch, request_digest: "")
+    plan.request_digest = container_output_plan_digest_v2(plan).unwrap()
+    plan
+
+describe "backend identity mapping at every hardcode site":
+    it "facade observe/open refuse unknown backends and Seatbelt without falling through to Docker":
+        for backend in ["docker", "podman", "windows-hyperv", "macos-native-sandbox-v1", ""]:
+            expect(simple_container_observe_v2(backend, "policy").unwrap_err()).to_equal("container-api-backend-unsupported")
+            expect(simple_container_open_v2(backend, "policy", "/state", sites_scope_v1(), "b".repeat(64), 1000).unwrap_err()).to_equal("container-api-backend-unsupported")
+        expect(simple_container_observe_v2("macos-seatbelt-process", "policy").unwrap_err()).to_equal("container-api-backend-unqualified:macos-seatbelt-process")
+        expect(simple_container_open_v2("macos-seatbelt-process", "policy", "/state", sites_scope_v1(), "b".repeat(64), 1000).unwrap_err()).to_equal("container-api-backend-unqualified:macos-seatbelt-process")
+
+    it "plan codec keeps Linux/Windows, admits the Seatbelt identity and rejects unknown backends":
+        for backend in ["linux-podman", "windows-docker-process", "macos-seatbelt-process"]:
+            val bytes = container_execution_plan_bytes_v2(sites_plan_v1(backend)).unwrap()
+            expect(container_execution_plan_decode_v2(bytes).unwrap().backend).to_equal(backend)
+        for backend in ["docker", "podman", "macos-native-sandbox-v1", "macos", ""]:
+            expect(container_execution_plan_bytes_v2(sites_plan_v1(backend)).unwrap_err()).to_equal("container-execution-backend-unsupported")
+
+    it "bound intent accepts only effect-admitted engines":
+        for engine in ["podman", "docker"]:
+            val source = runtime_bound_intent_encode_v2(sites_intent_v1(engine)).unwrap()
+            expect(runtime_bound_intent_decode_v2(source).unwrap().identity.engine).to_equal(engine)
+        for engine in ["macos-seatbelt-process-v1", "macos-native-sandbox-v1", "containerd", ""]:
+            expect(runtime_bound_intent_encode_v2(sites_intent_v1(engine)).unwrap_err()).to_equal("intent-engine-unsupported")
+
+    it "absence evidence binds each admitted backend to its own engine and refuses Seatbelt":
+        val linux = container_absence_receipt_encode_v2(sites_absence_v1("linux-podman", "podman")).unwrap()
+        expect(container_absence_receipt_decode_v2(linux).unwrap().identity.engine).to_equal("podman")
+        expect(container_absence_receipt_encode_v2(sites_absence_v1("linux-podman", "docker")).unwrap_err()).to_equal("container-evidence-absence-backend-mismatch")
+        expect(container_absence_receipt_encode_v2(sites_absence_v1("windows-docker-process", "podman")).unwrap_err()).to_equal("container-evidence-absence-backend-mismatch")
+        expect(container_absence_receipt_encode_v2(sites_absence_v1("macos-seatbelt-process", "macos-seatbelt-process-v1")).unwrap_err()).to_equal("container-evidence-absence-backend-mismatch")
+        expect(container_absence_receipt_encode_v2(sites_absence_v1("macos-seatbelt-process", "docker")).unwrap_err()).to_equal("container-evidence-absence-backend-mismatch")
+        expect(container_absence_receipt_encode_v2(sites_absence_v1("unknown-backend", "docker")).unwrap_err()).to_equal("container-evidence-absence-backend-mismatch")
+
+    it "exec runtime identity refuses unadmitted engines":
+        expect(exec_runtime_bytes_v3(sites_identity_v1("podman")).is_ok()).to_equal(true)
+        expect(exec_runtime_bytes_v3(sites_identity_v1("docker")).is_ok()).to_equal(true)
+        for engine in ["macos-seatbelt-process-v1", "macos-native-sandbox-v1", "containerd"]:
+            expect(exec_runtime_bytes_v3(sites_identity_v1(engine)).unwrap_err()).to_equal("container-exec-parent-runtime-invalid")
+
+    it "exec control parent matching uses the exhaustive engine mapping with no Docker default":
+        expect(container_exec_control_parent_match_v3(sites_request_v1("linux-podman"), sites_identity_v1("podman")).unwrap()).to_equal(true)
+        expect(container_exec_control_parent_match_v3(sites_request_v1("linux-podman"), sites_identity_v1("docker")).unwrap_err()).to_equal("container-exec-control-parent-mismatch")
+        expect(container_exec_control_parent_match_v3(sites_request_v1("windows-docker-process"), sites_identity_v1("docker")).unwrap()).to_equal(true)
+        for engine in ["docker", "podman", "macos-seatbelt-process-v1"]:
+            expect(container_exec_control_parent_match_v3(sites_request_v1("macos-seatbelt-process"), sites_identity_v1(engine)).unwrap_err()).to_equal("container-exec-control-parent-mismatch")
+
+    it "stream output plans bind each admitted backend to its own engine and refuse Seatbelt or unknown":
+        val plan = sites_output_plan_v1()
+        expect(container_output_plan_digest_v2(plan).is_ok()).to_equal(true)
+        for pair in [["macos-seatbelt-process", "macos-seatbelt-process-v1"], ["macos-seatbelt-process", "docker"],
+                ["unknown-backend", "podman"], ["linux-podman", "docker"]]:
+            var changed = plan
+            changed.workload.backend = pair[0]
+            changed.runtime.engine = pair[1]
+            expect(container_output_plan_digest_v2(changed).unwrap_err()).to_equal("container-output-backend-runtime-mismatch")
