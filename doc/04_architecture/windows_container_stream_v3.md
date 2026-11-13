@@ -35,10 +35,15 @@ must name the same retained birth; it cannot create a replacement exec. Input
 and resize require separately admitted ongoing control authority; signed intent
 booleans do not supply that authority.
 
-The raw native owner is the first source checkpoint. The V3 broker, tagged
-facade, primary TTY creation fields and ongoing control consumer remain separate
-required implementation slices; their planned architecture is not a claim that
-the raw checkpoint already supplies interactive support.
+The raw owner, typed primary TTY creation, nonblocking broker stdio, Engine
+exchange, private exec claims and read-only control observer are separate source
+checkpoints. The observer's installed wrapper preserves the parent CLI baseline
+and derives a distinct control identity from the actual Engine and installed
+profile. A completed observation requires exact parent binding and both native
+connections collected. Pending or cleanup-required owners remain retained.
+The V3 broker, tagged facade and authenticated ongoing control consumer remain
+required integration work; these checkpoints do not advertise interactive
+support on an unqualified host.
 
 Source and Windows qualification are separate: native Windows execution remains
 NOT_RUN until an admitted fixture supplies actual evidence.
