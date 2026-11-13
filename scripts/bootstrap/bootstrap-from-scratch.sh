@@ -34,6 +34,13 @@ if [ "${SIMPLE_BOOTSTRAP_PINNED_ARCHIVE:-}" = "" ] && [ "${SIMPLE_BOOTSTRAP_LIVE
   }
   SIMPLE_BOOTSTRAP_PINNED_ARCHIVE=${bootstrap_pinned_dir}
   export SIMPLE_BOOTSTRAP_PINNED_ARCHIVE
+  # Opt-in retention for older pins (bootstrap-pin-prune.shs: keeps live,
+  # admitted-for-resume, young, this run's and the newest pins; never fatal).
+  if [ "${SIMPLE_BOOTSTRAP_PIN_PRUNE:-0}" = 1 ]; then
+    sh "${bootstrap_entry_dir}/bootstrap-pin-prune.shs" \
+      "${bootstrap_early_repo_root}/build/bootstrap/pinned-src" --keep "${bootstrap_pinned_dir}" --apply >&2 ||
+      echo "bootstrap-pin-prune: retention pass did not complete (ignored)" >&2
+  fi
   exec sh "${bootstrap_pinned_dir}/scripts/bootstrap/bootstrap-from-scratch.sh" "$@"
 fi
 . "${bootstrap_entry_dir}/lib/centralized-storage.shs"
