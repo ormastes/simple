@@ -100,7 +100,7 @@ Objects land under the existing lane scope, never a new tree:
 
 ```
 build/bootstrap/native_cache/<lane>/<scope_key>/units/<unit-name>/<unit_key>/
-    objects/<module>.o      lib<unit>.a (thin archive over objects/)
+    objects/<module>.o      lib<unit>.a (archive_command_build: rcsD / lib.exe; thin `T` later)
     iface.sdn               unit interface digest + per-module digests
     receipt.sdn             producer identity, scope_key, source digest, dep keys, verdict
 ```
@@ -164,6 +164,8 @@ the user-visible win. Receipt-gate and per-lane cache scope rules are unchanged.
    `library_unit_cache_key_v1`. Specs red→green, no wiring.
 2. (done) `library_unit_iface_v1.spl`: unit source digest over the real file
    set; body-free per-module digests; `iface.sdn` writer/reader.
-3. Archive writer (thin `.a` over the existing per-module objects) + receipt.
+3. (done) `library_unit_archive_v1.spl`: archive writer over `objects/` via the
+   existing archiver command builder; write-once `receipt.sdn` (unit_key
+   re-verified on read, scope_key recorded); `library_unit_archive_complete_v1`.
 4. `BuildGraph` adapter: plan → `BuildUnit`s, poison propagation.
 5. Link from archives; Stage 3 behind the flag; Stage 4 reuse; manifest drift fix.
