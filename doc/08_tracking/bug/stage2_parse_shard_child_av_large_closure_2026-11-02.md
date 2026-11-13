@@ -134,3 +134,24 @@ reap loop also sign-restores `process_wait` statuses so a zero-extended -2 is
 never recorded as an exit of a live child. Spec:
 `test/01_unit/app/cli/shard_worker_reap_spec.spl` ("parse shard death bounds
 live siblings").
+## 2026-11-13 recurrence: a live shard spins instead of crashing (devhub, frozen Phase 2)
+
+Phase 4 diagnostic: `native-build --entry src/app/devhub/main.spl` (LLVM backend, 300-file closure,
+`SIMPLE_NATIVE_BUILD_THREADS=2`) with the frozen Windows Phase 2 binary
+`C:/dev/wt-lane2/build/diag-phase4/phase2.exe`, source tree `wt-dh1` at `b7a91519cf4`.
+The frozen parent predates the sibling-death bound above.
+
+- Try 1: the log stopped after `source_closure done=300/300` and printed only
+  `[parse-shard] child alive pid=21964` and `pid=31616`.
+  Neither child crashed or finished, and the build hit `timeout 10800` (rc=124, 10801 s).
+- Try 3: same shape. Shard `--parse-fibers=0/2` (pid 30604) used 5,319 s of CPU at 387 MB working set,
+  with no log output from 21:52 to 23:21 KST. Both processes were killed by hand.
+- Try 2: same env, `timeout 1800`. This time the shards did not hang.
+  The build reached `native_compile` 9/150 by 444 s and then hit the 30-minute cap.
+- In the earlier n_devhub run on the same binary, both children died with 0xC0000005 and the parent continued.
+  That is the original AV symptom.
+  So the frozen binary's parse shards on this closure fail in two ways, nondeterministically:
+  an access violation, or an unbounded spin.
+  A spinning child never dies, so the sibling-death bound in #8937 would not fire either.
+  The parent only gets past it at the build timeout.
+- Workaround applied: `SIMPLE_PARSE_SHARDING=0 SIMPLE_FILE_FIBERS=0`.
