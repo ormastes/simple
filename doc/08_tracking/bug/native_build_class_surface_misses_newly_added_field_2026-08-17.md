@@ -195,3 +195,7 @@ Source state at HEAD `d552f63f67f8`: the registry fixes `6ae0170f5e49` (PR
 still stands and can now be inlined back as optional cleanup — its acceptance
 gate (both modqual specs green) is satisfied. No code change this lane; header
 flipped from the stale LIVE reading to FIXED-at-tip.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**FIXED (confirmed)** — boot21: both modqual pins green on the tracked seed (8/8 + 12/12); the 2026-11-10 LIVE-residual reading is itself stale at seed 46fe8f6b6def; registry fixes ancestors.

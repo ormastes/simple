@@ -99,3 +99,10 @@ them per the "Required correction" section
 (`src/compiler/80.driver/driver_vhdl_artifacts.spl`, plus
 `driver_riscv_gen2_product.spl` for write-boundary failures) and record
 concrete expected/actual per assertion.
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+Not pursued in this lane: BLOCKED re-confirmed 2026-11-11 (lane boot23): needs the self-hosted runtime lane (seed cannot emit the required artifacts). Not chaseable here.

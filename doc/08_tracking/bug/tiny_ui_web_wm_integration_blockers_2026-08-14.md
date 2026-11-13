@@ -108,3 +108,19 @@ Final reviewer: highest-capability Tiny UI/Web/WM reviewer
 ## Checkpoint review correction
 
 Highest-capability static review of commit `6a72812917a205eb471e4b921fd9b6cd04dca187` found two stale popup assertions that expected clipped dimensions in `resolved`. Follow-up `eb6e0f568303d650355b2d53b25de4b69d7a9f31` distinguishes absolute `resolved = 40x40` from effective `clip = 20x20`; the reviewer returned `PASS-for-checkpoint` for that corrected criterion. This does not close any blocker that requires pure-Simple execution or the deliberate fail-closed H4/RV32/S0 scenarios.
+
+
+---
+
+## 2026-11-13 addendum — P3 gpu lane p3-gpu-20261113 (work/p3-gpu-20261113, base 6f4cb189867)
+
+**Verdict: OPEN, unchanged — every blocker B-1..B-14 that requires an admitted
+pure-Simple Stage-4 runner remains blocked on this lane.** The only binary
+available in this worktree is the tracked Rust seed `bin/simple.exe` (prints
+the bootstrap-seed warning; inadmissible per B-3), and no
+`bin/release/<triple>/` self-hosted binary exists here; this lane is forbidden
+the bootstrap build that would produce one. The 2026-08-16 source repairs
+therefore remain source+static-evidence only. No Tiny command was run and no
+source was edited by this lane. Grant unchanged: deploy a verified pure-Simple
+Stage-4 runner, then run the B-item resume commands (starting with the Web
+paint unit spec, then `tiny_browser_stack_it_spec.spl --mode=interpreter`).

@@ -95,3 +95,7 @@ Verification actually run (seed-smoke, tracked `bin/simple.exe` build-commit
 
 Not re-measured here: the 271x latency claim itself (perf evidence was the
 2026-11-10 lane's; this lane verified correctness/parity only).
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**FIXED (confirmed)** — interp9: matcher fix in interpreter_control.rs:2690 (leading block-local int val spliced through the inline-int step machine); parity specs 2/2 + 4/4 on the seed. 271x latency claim not re-measured (correctness/parity verified only, per no-rerun rule).

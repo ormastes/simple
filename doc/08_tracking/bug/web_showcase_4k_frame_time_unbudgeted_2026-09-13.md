@@ -54,3 +54,10 @@ If it is, the budget needs to be measured per size on a known host and
 recorded somewhere the gate reads; the non-monotonicity above should be
 investigated first, since it suggests the dominant cost is not where a
 frame-time budget would assume it is.
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+no frame-time budget pinned and cost non-monotonic per in-file status; owner: web showcase lane.

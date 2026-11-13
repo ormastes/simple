@@ -177,3 +177,7 @@ with grown debt), one partially fixed; two context gates drifted red,
 one rules.sdl binding defect repaired here. None of the remaining red
 is a guard-text defect; all are real debt. Not fixable wholesale in a
 P3 lane — the per-gate owner programs stand.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**LIVE (confirmed)** — ne4 re-measured on this tip: core-lib-purity FAIL (34 new), seed-extern-registry FAIL (grown), sffi-v2-authority FAIL (3 sub-guards), bodyless-parity partial. First-hand this lane: `check-rules-sdl.shs --group quick` re-run at this base prints `PASS — 10 gates checked, 0 shrank` (the ne4 lane's digest-binding repair was made on its own branch; the committed rules.sdl at this tip is digest-consistent, so no repair is needed here). All remaining red is real debt, not guard-text defects; per-gate owner programs stand.

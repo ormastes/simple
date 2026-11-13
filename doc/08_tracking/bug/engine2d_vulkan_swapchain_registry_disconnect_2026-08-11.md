@@ -137,3 +137,19 @@ physical surface, verification readback outside timed frames, zero-readback
 timed frames, 7680x4320 p50/p95 + receipts), which needs a display
 environment and an admitted compiler — neither available to this lane. No
 source change was made; status remains open (PARTIAL).
+
+
+---
+
+## 2026-11-13 addendum — P3 gpu lane p3-gpu-20261113 (work/p3-gpu-20261113, base 6f4cb189867)
+
+**Verdict: PARTIAL, unchanged from the 2026-11-11 ne7 triage — live
+presentation proof still outstanding; not producible on a Windows P3 lane.**
+Presentation ownership remains at `present_window_device()`
+(`src/lib/gc_async_mut/gpu/engine2d/engine.spl`) with the strict-submission
+Vulkan owner and the compositor fail-closed gates; the acceptance criteria
+(Xvfb/physical surface live presentation, verification readback outside timed
+frames, zero-readback timed frames, 7680x4320 p50/p95 + RSS + presentation
+receipts) require a Linux display environment. No live presentation evidence
+was searched for or claimed here; per the v3 freeze this row stays OPEN with
+no admission without live checksum evidence.

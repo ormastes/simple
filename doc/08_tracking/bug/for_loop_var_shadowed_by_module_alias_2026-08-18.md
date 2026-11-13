@@ -113,3 +113,7 @@ rebuilt minimal reproducer), the for-binding case is covered by the
 locals-win change; no separate loop-scope fix exists or is needed. The
 library workaround (renamed loop variable) can stay or be reverted at
 the owning lane's discretion — either way the language defect is closed.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**FIXED (confirmed)** — ne9: 2026-11-05 locals-win change covers the for-binding; both witnesses green on the fresh seed (verification_diagnostics 5/5, local_shadows_builtin 1/1).

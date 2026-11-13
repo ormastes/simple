@@ -11,13 +11,49 @@ Audience: Maintainers of the SCV storage/event layers.
 """
 # @req: REQ-SCV-EVENT-JOURNAL-001
 use std.spec.{describe, it, expect, step}
-use app.io.mod (file_exists, file_read, file_write, file_delete, dir_create, dir_remove_all, process_run)
+use std.nogc_sync_mut.spec.{skip}
+use app.io.mod (file_exists, file_read, file_write, file_delete, dir_create, dir_remove_all, process_run, file_is_regular_no_follow)
 use std.scv.store.{scv_init_repo}
 use std.scv.journal.{scv_event_batch_record, scv_event_batch_commit, scv_event_batch_replay, scv_event_batch_is_committed, scv_event_batch_pending_path, scv_journal_events_path, scv_event_log, scv_journal_record_event}
 use std.nogc_sync_mut.io.time_ops.{current_time_ms}
+use std.nogc_sync_mut.env.platform.{get_temp_dir}
+
+# The runtime does not translate a POSIX "/tmp" prefix on Windows; anchor the
+# fixture repos under the host temp dir instead.
+fn _fixture_base() -> text:
+    val raw = get_temp_dir().replace("\\", "/")
+    if raw.ends_with("/"): raw.substring(0, raw.len() - 1) else: raw
+
+# The three symlink-refusal examples below can only run where `ln -s`
+# produces a REAL symlink: on hosts without symlink creation (typical Windows
+# without developer mode) MSYS `ln -s` silently creates a file COPY and the
+# refusal oracles would surface as a false product RED. Probe once (a copy is
+# still a regular file; a real symlink is not) and skip (never fail).
+var _symlink_probe_done = false
+var _symlink_probe_ok = false
+
+fn _symlinks_available() -> bool:
+    if _symlink_probe_done:
+        return _symlink_probe_ok
+    _symlink_probe_done = true
+    val probe_root = "{_fixture_base()}/scv-event-journal-symlink-probe-{current_time_ms()}"
+    if dir_create(probe_root, true):
+        val target = probe_root + "/target.txt"
+        val linked = probe_root + "/linked.txt"
+        if file_write(target, "probe\n"):
+            val (_, _, code) = process_run("ln", ["-s", target, linked])
+            _symlink_probe_ok = code == 0 and not file_is_regular_no_follow(linked)
+    dir_remove_all(probe_root)
+    _symlink_probe_ok
+
+fn _skip_without_symlinks(name: text) -> bool:
+    if not _symlinks_available():
+        skip(name, "host cannot create symlinks; this example exercises POSIX symlink-refusal semantics")
+        return true
+    false
 
 fn _repo(tag: text) -> text:
-    val root = "/tmp/scv-event-journal-{tag}-{current_time_ms()}"
+    val root = "{_fixture_base()}/scv-event-journal-{tag}-{current_time_ms()}"
     dir_create(root, true)
     scv_init_repo(root)
     root
@@ -237,10 +273,13 @@ describe "scv event journal integration (E-03)":
         dir_remove_all(path_root)
 
     it "refuses a symlinked pending leaf without following or deleting its target":
+        if _skip_without_symlinks("refuses a symlinked pending leaf without following or deleting its target"):
+            return
         step("Place a pending-name symlink to an ordinary file and attempt commit")
         val root = _repo("pending-symlink")
         val target = "{root}/outside.pending-data"
         expect(file_write(target, "kind=created path=a.txt related=\n")).to_equal(true)
+        dir_create("{root}/.scv/journal/event_batches", true)
         val (out, err, code) = process_run("ln", ["-s", target, scv_event_batch_pending_path(root, "b1")])
         expect(code).to_equal(0)
         expect(scv_event_batch_commit(root, "b1")).to_equal(false)
@@ -249,11 +288,14 @@ describe "scv event journal integration (E-03)":
         dir_remove_all(root)
 
     it "refuses a symlinked event log without replacing or following its target":
+        if _skip_without_symlinks("refuses a symlinked event log without replacing or following its target"):
+            return
         step("Point events.log at an unrelated regular file and attempt commit")
         val root = _repo("event-log-symlink")
         val target = "{root}/outside.events"
         expect(file_write(target, "keep this file\n")).to_equal(true)
         expect(scv_event_batch_record(root, "b1", "created", "a.txt", "")).to_equal(true)
+        dir_create("{root}/.scv/journal", true)
         val (out, err, code) = process_run("ln", ["-s", target, scv_journal_events_path(root)])
         expect(code).to_equal(0)
         expect(scv_event_batch_commit(root, "b1")).to_equal(false)
@@ -262,9 +304,12 @@ describe "scv event journal integration (E-03)":
         dir_remove_all(root)
 
     it "fails closed on dangling pending and lock symlinks":
+        if _skip_without_symlinks("fails closed on dangling pending and lock symlinks"):
+            return
         step("Ensure no-replace creation rejects dangling entry names before acknowledging work")
         val pending_root = _repo("dangling-pending")
         val absent_target = "{pending_root}/missing-target"
+        dir_create("{pending_root}/.scv/journal/event_batches", true)
         val (pending_out, pending_err, pending_code) = process_run("ln", ["-s", absent_target, scv_event_batch_pending_path(pending_root, "b1")])
         expect(pending_code).to_equal(0)
         expect(scv_event_batch_record(pending_root, "b1", "created", "a.txt", "")).to_equal(false)
@@ -273,6 +318,7 @@ describe "scv event journal integration (E-03)":
 
         val lock_root = _repo("dangling-lock")
         val lock_target = "{lock_root}/missing-lock-target"
+        dir_create("{lock_root}/.scv/journal", true)
         val (lock_out, lock_err, lock_code) = process_run("ln", ["-s", lock_target, "{lock_root}/.scv/journal/events.lock"])
         expect(lock_code).to_equal(0)
         expect(scv_event_batch_record(lock_root, "b1", "created", "a.txt", "")).to_equal(false)
@@ -346,7 +392,7 @@ describe "scv event journal integration (E-03)":
         val script = [
             "set -eu",
             "REPO=$(pwd)",
-            "TMP=$(mktemp -d /tmp/scv-event-cli.XXXXXX)",
+            "TMP=$(mktemp -d {_fixture_base()}/scv-event-cli.XXXXXX)",
             "scv() { SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" \"$@\"; }",
             "cd \"$TMP\"",
             "scv init >/dev/null",

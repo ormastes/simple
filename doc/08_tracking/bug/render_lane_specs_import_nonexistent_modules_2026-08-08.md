@@ -242,3 +242,57 @@ specs demand at BASE, not that session's in-flight design.
 `std.blink.css_parser.{parser,selector,tokenizer}`, `std.blink.dom.{node,interaction_state}`,
 `std.cc.entity.property_tree`, all of `std.viz.*`, `std.content.entity.web_contents`,
 `std.content.feature.render_widget_host_view`. Their specs resolve and run.
+
+
+---
+
+## 2026-11-13 addendum — P3 gpu lane p3-gpu-20261113 (work/p3-gpu-20261113, base 6f4cb189867) — PARTIAL: record table stale; most modules landed; one spec fixed this lane
+
+**Fresh measurement of all 24 previously-red specs** (tracked seed `bin/simple.exe`,
+`SIMPLE_LIB=src`, `--mode=interpreter --no-cache`, this worktree; mirrored copies
+under `lib_standalone/` and `test/unit/` not re-measured):
+
+| Spec | 2026-08-09 state | 2026-11-13 verdict |
+|---|---|---|
+| blink/block_flow | RED (missing module) | **7/7 PASS** (module landed) |
+| blink/computed_style | RED | **6/6 PASS** (landed) |
+| blink/document | RED | ERROR 0 executed — `blink.dom.document` still missing |
+| blink/flex | RED | ERROR 0 executed — `blink.layout.flex` still missing |
+| blink/form_paint | RED | **8/8 PASS** (landed) |
+| blink/hit_test | RED | **7/7 PASS** (landed) |
+| blink/html_tokenizer | RED | **8/8 PASS** |
+| blink/html_tree_builder | RED | **7/7 PASS** |
+| blink/image_paint | RED | **3/3 PASS** (landed) |
+| blink/inline_flow | RED | ERROR 0 executed — `blink.layout` (module root) still missing |
+| blink/input_event | RED | **8/8 PASS** (landed) |
+| blink/navigation_controller | RED | ERROR 0 executed — `blink.navigation.controller` missing |
+| blink/navigation_fetch | RED | ERROR 0 executed — `blink.network.fetch` + controller missing |
+| blink/paint_artifact | RED | **10/10 PASS** (landed) |
+| blink/paint_controller | RED | ERROR 0 executed — `blink.feature.paint.paint_controller` missing |
+| blink/paint_tree_walker | RED | **6/6 PASS** (landed) |
+| blink/scroll_manager | RED | ERROR 0 executed — `blink.scroll.manager` missing |
+| blink/style_cascade | RED | **39/39 PASS** (landed) |
+| blink/url/url_parser | RED | **8/8 PASS** (landed) |
+| cc/layer_base | RED | ERROR 0 executed — `cc.entity.layer_base` still missing |
+| cc/picture_layer_impl | RED | ERROR 0 executed — `cc.feature.raster_source` + `picture_layer_impl` missing |
+| cc/tile_manager | RED | ERROR 0 executed — `cc.feature.tile_manager` + `raster_buffer_provider` missing |
+| cc/tile | RED | **7/7 PASS** (landed; both `tile_id_new`/`tile_new` and `Tile.new`/`TileKey.new` shapes present) |
+| content/web_contents | RED | was 8/8 FAIL (`function _rect not found` — spec-side helper never defined); **fixed this lane: added the missing `fn _rect() -> SkRect` helper → 8/8 PASS** |
+
+**Net: 24 RED (2026-08-09) → 14 PASS, 10 import-RED.** The remaining gap is 9
+unimplemented modules (each still honestly fail-closed at import, not vacuous):
+`blink.dom.document`, `blink.layout.flex`, `blink.layout` (module root/inline
+flow), `blink.navigation.controller`, `blink.network.fetch`,
+`blink.feature.paint.paint_controller`, `blink.scroll.manager`,
+`cc.entity.layer_base`, `cc.feature.{tile_manager, raster_buffer_provider,
+raster_source, picture_layer_impl}`. The 2026-08-09 triage table's "Demanded
+surface" column remains the implementation spec for each.
+
+**Not attempted beyond web_contents:** with 10 rows still gated, full module
+implementation (value objects + verification across three mirrored trees) exceeds
+this row's 20-minute box; and the 2026-08-09 caveat about concurrently-claimed
+modules (`cc.entity.tile`/`layer_base` were "IN PROGRESS" by another session then)
+applies — most of the landed modules above arrived from such parallel lanes.
+This row's web_contents fix is spec-side only (a referenced-but-never-defined
+helper), verified non-vacuous by the file's sentinel assertions
+(`chunk_count == 2`, `last_end == 7`).

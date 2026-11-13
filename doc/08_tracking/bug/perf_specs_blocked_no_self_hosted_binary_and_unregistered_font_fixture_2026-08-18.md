@@ -84,3 +84,19 @@ asserts both are `> 0`. Neither variable is set anywhere in the repository —
 they are host-pinned perf evidence. Supplying invented values would fabricate a
 perf baseline, so this spec cannot go green on an unpinned, heavily loaded host
 regardless of the load-font fix.
+
+
+---
+
+## 2026-11-13 addendum — P3 gpu lane p3-gpu-20261113 (work/p3-gpu-20261113, base 6f4cb189867)
+
+**Verdict: BLOCKED stands — re-verified at this tip.** Blocker 2 (font fixture)
+remains fixed in-tree (`load_font_bytes(PERF_FONT, font_blob)` bytes API in
+`simple_2d_vector_fonts_perf_spec.spl`). Blocker 1 unchanged: no
+`bin/release/<triple>/` self-hosted binary exists in this worktree (verified:
+`bin/release` absent), so `multicore_green_fanout_spec.spl`'s
+`expect(stderr).to_equal("")` still cannot pass on the seed binary with its
+mandatory banner — and per this doc must not be relaxed. The lane remains
+forbidden a bootstrap rebuild. Grant unchanged: deploy the self-hosted binary
+in a bootstrap-authorized lane, set the two pinned baseline env vars from the
+pinned host, run both named specs.

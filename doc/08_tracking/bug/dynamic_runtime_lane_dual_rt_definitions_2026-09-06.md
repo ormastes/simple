@@ -147,3 +147,7 @@ projects the Rust runtime, localized to the C-only gap symbols). Reproduction
 remains grant-gated per the rt2 addendum commands (Linux ELF lane: cdylib
 build + Stage4 driver link + `nm`/`comm` dual-set measurement + array-handle
 hello under interpret/AOT). No change made in this lane.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**LIVE (confirmed)** — rt3 corroborated rt2 fresh: supplement-archive call signature unchanged, dynamic lane still appends full core-C after the shared runtime, ratchet has zero `dynamic` mentions. Owner: compiler/native_project dynamic-runtime linker lane (projection archive).

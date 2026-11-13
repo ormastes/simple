@@ -153,3 +153,7 @@ authentication succeeds, then all five caret gates fail closed with
 `caret-semantic-validator-not-implemented-<gate>` before any evidence
 attachment loads. The five external rows remain deliberate TODO pending the
 versioned validators, as the header states.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**FIXED (confirmed)** — Fail-closed quarantine restored; two independent live PASSes (ne3 + caret2 quiet-host re-run). Five external rows remain deliberate TODO pending versioned validators.

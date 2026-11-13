@@ -91,3 +91,11 @@ Residual (seed lane, separate from this row): the regression spec
 and the seed compile lane rejects it in spec context. That is the known
 seed import/flattening divergence family, not the escaping logic; the spec
 is expected to admit under the self-hosted binary used by CI.
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b bookkeeping)
+
+SUPERSEDED 2026-11-11 (runner8; fix + regression spec absorbed via merge 9e7e7a526edb) per in-file addendum. No contrary evidence found in this pass; header status left as the
+owning lane recorded it.

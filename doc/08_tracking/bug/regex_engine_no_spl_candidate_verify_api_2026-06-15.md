@@ -76,3 +76,10 @@ step. Track as a feature request alongside this bug.
 - AC-4 of `.spipe/search-custom-types/state.md`
 - `doc/03_plan/lib/search/custom_type_alpha_search_team_plan_2026-06-15.md`
 
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+open lib-friction gap (no importable .spl candidate-verify API); owner: regex lib lane.

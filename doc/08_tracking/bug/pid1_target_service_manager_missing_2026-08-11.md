@@ -110,3 +110,7 @@ SIMPLEOS_REQUIRE_PID1=1 sh scripts/os/make_os_disk.shs
 Then run the repository's RV64/QEMU service lifecycle system scenario once it
 has been added.
 
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**LIVE (confirmed)** — ne19: prerequisites landed (catalog payload entry sources exist) but all six acceptance blockers remain open (target-native static builds + provenance-valid compiler, signed VFS-loaded WorkloadManifest, SIMPLEOS_PID1_BINARY wiring, QEMU lifecycle capture, authenticated exit notifications, catalog capability resolution). Owner: SimpleOS PID1/service-manager lane.

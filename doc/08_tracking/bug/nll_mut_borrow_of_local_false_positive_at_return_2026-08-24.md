@@ -115,3 +115,7 @@ diagnostics) and the example passes `1 total, 1 passed, 0 failed`
 (exit 0). The doc's own `native-build` reproducer was also attempted but
 exceeds the lane's 120 s small-fixture native-build budget, so runtime
 proof is the interpreter-mode spec above plus the in-tree gate.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**FIXED (confirmed)** — Fixing commit 9e3eb1adccdb verified ancestor first-hand; the three structural gaps it named rewired; dedicated fail-closed gate shipped; interpreter-mode spec 1/1 green on the seed.

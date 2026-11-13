@@ -21,3 +21,10 @@ Closure requires all of the following for x86_64, AArch64, and RISC-V 64:
   operands without granting ambient filesystem access;
 - FAT32, DBFS, and NVFS launch-and-hash evidence covering the documented input
   bounds, exact help/version behavior, missing files, and unsupported options.
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+SimpleOS release/admission/artifact-blocked item per in-file status; requires the SimpleOS target-artifact pipeline and owner lanes this Windows seed lane cannot run. No change from this lane.

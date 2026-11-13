@@ -77,3 +77,21 @@ verification. Kept OPEN.**
   swapchain-image readback + checksum vs the source damage buffer in the
   `vulkan_graphics_runtime` test), which is outside a no-cargo interpreter-seed lane and
   un-runnable on this host. The "until strengthened" reporting rule below remains in force.
+
+
+---
+
+## 2026-11-13 addendum — P3 gpu lane p3-gpu-20261113 (work/p3-gpu-20261113, base 6f4cb189867)
+
+**Verdict: LIVE, unchanged — default gate lane still emits
+`scope=xvfb-device-present-proxy` at this tip (source re-verified).**
+
+- `scripts/check/check-engine2d-vulkan-window-8k.shs:243` still prints
+  `engine2d_vulkan_window_8k_evidence_status=pass scope=xvfb-device-present-proxy`
+  on the default disposable Xvfb lane; no presented-frame capture or pixel oracle
+  runs there. The PHYSICAL lane (`ENGINE2D_VULKAN_PHYSICAL=1`) remains
+  Xvfb/EDID-gated and cannot run on this Windows host.
+- Strengthening (frame capture / swapchain-image readback + checksum vs the
+  source damage buffer in the `vulkan_graphics_runtime` Rust test) is a Rust
+  runtime change outside a no-cargo lane. The "until strengthened" reporting
+  rule remains in force.
