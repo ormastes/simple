@@ -166,3 +166,10 @@ Stage-2 producer. No code change this lane.
 ## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
 
 **CLOSED/FIXED (confirmed)** — boot10 verified live: three distinct messages at planner :74/:84/:95; genesis path `explicit-full-bootstrap-stage2-trust-root` present at bootstrap-from-scratch.sh:757-776.
+
+
+---
+
+## 2026-11-13 triage (live-P3 lane l1, work/live-p3-l1-20261113, base f790f7f266e)
+
+**CLOSED/FIXED (confirmed)** — Distinct planner messages (`admission-hash-required` / `reason-not-allowed-for-target` / `receipt-write-failed`) present in `src/app/build/bootstrap_receipt_planner.spl` (grep, this base); genesis trust-root lane verified by boot10.

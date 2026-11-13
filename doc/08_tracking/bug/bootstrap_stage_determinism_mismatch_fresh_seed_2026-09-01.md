@@ -170,3 +170,10 @@ sha256sum build/review/determinism-probe-*.bin   # all equal -> this row closes
 ## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
 
 **SUPERSEDED/BLOCKED (confirmed)** — Live root cause owned by `native_codegen_object_nondeterminism_2026-10-25.md` (same-size-different-bytes signature, same-binary two-run probe). Stage-chain re-verification is a host-heavy grant; no POSIX compiler build permitted here.
+
+
+---
+
+## 2026-11-13 triage (live-P3 lane l1, work/live-p3-l1-20261113, base f790f7f266e)
+
+**SUPERSEDED/BLOCKED (confirmed)** — Live root-cause tracker `native_codegen_object_nondeterminism_2026-10-25.md` in-tree at this base (same-size-different-bytes signature). Stage-chain re-verification is a host-heavy grant; no POSIX compiler build / no whole-closure native build permitted on this Windows lane.

@@ -173,3 +173,10 @@ message contract is unit-pinned. Per-run isolation remains OPEN as stated.
 ## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
 
 **FIXED (confirmed)** — runner6: asks #1 (retain on failure) + #2a (name artifact) implemented with paired spec evidence 16/16 on the fresh seed. Per-run subdirectory isolation (#2b) remains open hygiene.
+
+
+---
+
+## 2026-11-13 triage (live-P3 lane l1, work/live-p3-l1-20261113, base f790f7f266e)
+
+**FIXED (confirmed)** — Ask #1 (retain-on-failure via `retain_source_path`, 7 refs in `test_runner_execute.spl`) and #2a (named wrapper in diagnostic) verified in source at this base; paired spec 16/16 recorded on the fresh seed. Per-run subdirectory isolation (#2b) remains open hygiene.

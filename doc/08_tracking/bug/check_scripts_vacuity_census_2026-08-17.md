@@ -361,3 +361,10 @@ is cache-lane scheduling, not done here.
 ## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
 
 **OPEN-backlog (confirmed)** — ne4 re-derived: 59/201 directly-wired gates lack an em-dash verdict; the named fail-open defects are fixed (waves 1-5). Next wave is cache-lane scheduling.
+
+
+---
+
+## 2026-11-13 triage (live-P3 lane l1, work/live-p3-l1-20261113, base f790f7f266e)
+
+**OPEN-backlog (confirmed)** — 59/201 directly-wired gates lack an em-dash verdict per ne4 re-derivation; the named fail-open defects are fixed (waves 1-5). Next wave is cache-lane scheduling, not done here.

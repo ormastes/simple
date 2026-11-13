@@ -32,7 +32,7 @@ pub use generator::*;
 pub use ghost_erasure::{
     erase_ghost_from_module, ghost_variable_count, has_ghost_variables, GhostErasureError, GhostErasureStats,
 };
-pub use hybrid::{apply_hybrid_transform, HybridStats};
+pub use hybrid::{apply_hybrid_transform, referenced_function_names, HybridStats};
 pub use instructions::*;
 pub use lower::*;
 pub use parallel::{

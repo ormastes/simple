@@ -197,3 +197,10 @@ result, so the owner-bound slice is green on two hosts. `bug_db.sdn` row moved
 open -> fixed. The B/N2 submission session, asynchronous present release and
 device-lifecycle evidence stay open under the requirement and plan docs named
 in the 2026-11-11 addendum; this record does not cover them.
+
+
+---
+
+## 2026-11-13 triage (live-P3 lane l1, work/live-p3-l1-20261113, base f790f7f266e)
+
+**FIXED (confirmed)** — `src/os/compositor/compositor_gpu_surface_owner.spl` + focused 20-scenario spec present at this base; 20/20 green recorded on two hosts (2026-11-11 Windows, 2026-11-13 Linux aarch64). B/N2 submission session, async present receipt, and device-lifecycle evidence stay open under their own requirement/plan docs.

@@ -108,3 +108,7 @@ the "works in fn main()" observation.
 
 Verdict: SUPERSEDED by 668a95c5ba39.
 
+
+## Triage 2026-11-13 (P3 tools lane)
+No code change this lane; SUPERSEDED by 668a95c5ba39 per the 2026-11-11
+addendum (56/56 on refreshed seed). Verdict trusted, not re-run.

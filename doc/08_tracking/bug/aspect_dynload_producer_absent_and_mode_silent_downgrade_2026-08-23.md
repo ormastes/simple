@@ -161,3 +161,10 @@ row 8.
 ## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
 
 **FIXED (confirmed)** — Defect B pin 8dd5d01e1601 verified ancestor of this lane's base first-hand (`git merge-base --is-ancestor`). Residual dynload packaging / typed-facet surface stays open by design.
+
+
+---
+
+## 2026-11-13 triage (live-P3 lane l1, work/live-p3-l1-20261113, base f790f7f266e)
+
+**FIXED (confirmed)** — Defect B pin `8dd5d01e1601` verified ancestor of this base; `cli_native_build_dynload_pack_notice` + `W-NATIVE-BUILD-DYNLOAD-ASPECT-PACK-NOT-PRODUCED` present in `src/app/io/_CliCompile/compile_targets.spl` (grep, this base). Residual dynload packaging / typed-facet surface stays open by design.

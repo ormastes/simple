@@ -131,3 +131,10 @@ Linux evidence lane and record the gate report under `doc/09_report/`.
 ## Triage 2026-11-13 (Linux aarch64, lane uia) — row stays OPEN
 
 Blocked on this host: needs a live Electron-on-Vulkan RenderDoc capture; neither RenderDoc nor Electron was found on PATH, /usr/bin, /opt or the home directory, and the Simple leg runs the Vulkan backend under simple run (Vulkan-init lane).
+
+
+---
+
+## 2026-11-13 triage — lane live-p3-l2 (work/live-p3-l2-20261113, worktree lp2-wt, base origin/release/1.0.0 tip)
+
+**Verdict: LIVE (host-blocked).** This host is Windows with no Simple Vulkan Engine2D + Electron Chromium/Vulkan .rdc lane; all referenced product paths still exist in the tree, so there is no stale-reference basis for closure. Grant: run `check-gui-widget-renderdoc-goal-status.shs --strict` on the Linux evidence lane.

@@ -113,3 +113,7 @@ SIMPLE_RUST_SEED_WARNING=0 timeout 90 \
   both-sides-nil symptom also no longer reproduces.
 - The recommended `.?` -> `!= nil` migration is therefore no longer required to reach green;
   both spellings now pass.
+
+## Triage 2026-11-13 (P3 tools lane)
+No code change this lane; CLOSED 2026-11-11 FIXED on release per the record
+header (verified lane ne8). Verdict trusted, not re-run.

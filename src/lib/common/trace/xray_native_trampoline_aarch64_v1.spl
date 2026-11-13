@@ -15,6 +15,8 @@
 #   sp+160..671 q0..q31
 # then x0 = site id, x1 = sled return address, BL handler, restore, RET.
 
+use std.common.isa.a64_encode_v1.{a64_branch26_words_in_range_v1, a64_bl_v1, a64_stp_x_v1, a64_ldp_x_v1, a64_stp_q_v1, a64_ldp_q_v1, a64_str_x_v1, a64_ldr_x_v1, a64_add_imm_v1, a64_sub_imm_v1}
+
 pub const XRAY_NATIVE_TRAMPOLINE_FRAME_BYTES_V1 = 672
 pub const XRAY_NATIVE_TRAMPOLINE_BL_INDEX_V1 = 35
 const XRAY_TRAMP_FLAGS_OFFSET_V1 = 128
@@ -42,26 +44,7 @@ pub fn xray_native_trampoline_saved_registers_v1() -> [text]:
 fn xray_tramp_gpr_pairs_v1() -> [i64]:
     [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 18]
 
-# STP/LDP Xt1, Xt2, [Xn, #offset] (signed offset, 64-bit).
-fn xray_a64_pair_x_v1(load: bool, rt: i64, rt2: i64, rn: i64, offset: i64) -> i64:
-    val base = if load: 0xA9400000 else: 0xA9000000
-    base | (((offset / 8) & 127) << 15) | (rt2 << 10) | (rn << 5) | rt
-
-# STP/LDP Qt1, Qt2, [Xn, #offset] (signed offset, 128-bit).
-fn xray_a64_pair_q_v1(load: bool, rt: i64, rt2: i64, rn: i64, offset: i64) -> i64:
-    val base = if load: 0xAD400000 else: 0xAD000000
-    base | (((offset / 16) & 127) << 15) | (rt2 << 10) | (rn << 5) | rt
-
-# STR/LDR Xt, [Xn, #offset] (unsigned offset).
-fn xray_a64_single_x_v1(load: bool, rt: i64, rn: i64, offset: i64) -> i64:
-    val base = if load: 0xF9400000 else: 0xF9000000
-    base | ((offset / 8) << 10) | (rn << 5) | rt
-
-# ADD/SUB Xd, Xn, #imm12 (also MOV to/from SP).
-fn xray_a64_add_imm_v1(sub: bool, rd: i64, rn: i64, imm: i64) -> i64:
-    val base = if sub: 0xD1000000 else: 0x91000000
-    base | (imm << 10) | (rn << 5) | rd
-
+# MRS/MSR have no backend twin; every other word comes from std.common.isa.
 fn xray_a64_mrs_v1(rt: i64, sysreg: i64) -> i64:
     0xD5300000 | (sysreg << 5) | rt
 
@@ -71,39 +54,39 @@ fn xray_a64_msr_v1(sysreg: i64, rt: i64) -> i64:
 # The trampoline words. `handler_words` is the signed BL displacement (in
 # instructions) from the BL to the handler; [] when a BL cannot reach it.
 pub fn xray_native_trampoline_words_aarch64_v1(handler_words: i64) -> [i64]:
-    if handler_words < -33554432 or handler_words > 33554431:
+    if not a64_branch26_words_in_range_v1(handler_words):
         return []
     val sp = XRAY_TRAMP_SP_V1
     val scratch = XRAY_TRAMP_SCRATCH_V1
     val gprs = xray_tramp_gpr_pairs_v1()
     var words: [i64] = []
     words.push(0xA9BF7BFD)                                  # stp x29, x30, [sp, #-16]!
-    words.push(xray_a64_add_imm_v1(false, 29, sp, 0))       # mov x29, sp
-    words.push(xray_a64_add_imm_v1(true, sp, sp, XRAY_NATIVE_TRAMPOLINE_FRAME_BYTES_V1))
+    words.push(a64_add_imm_v1(29, sp, 0))       # mov x29, sp
+    words.push(a64_sub_imm_v1(sp, sp, XRAY_NATIVE_TRAMPOLINE_FRAME_BYTES_V1))
     for pair in 0..8:
-        words.push(xray_a64_pair_x_v1(false, gprs[pair * 2], gprs[pair * 2 + 1], sp, pair * 16))
+        words.push(a64_stp_x_v1(gprs[pair * 2], gprs[pair * 2 + 1], sp, pair * 16))
     words.push(xray_a64_mrs_v1(9, XRAY_SYSREG_NZCV_V1))
     words.push(xray_a64_mrs_v1(10, XRAY_SYSREG_FPCR_V1))
     words.push(xray_a64_mrs_v1(11, XRAY_SYSREG_FPSR_V1))
-    words.push(xray_a64_pair_x_v1(false, 9, 10, sp, XRAY_TRAMP_FLAGS_OFFSET_V1))
-    words.push(xray_a64_single_x_v1(false, 11, sp, XRAY_TRAMP_FLAGS_OFFSET_V1 + 16))
-    words.push(xray_a64_add_imm_v1(false, scratch, sp, XRAY_TRAMP_VECTORS_OFFSET_V1))
+    words.push(a64_stp_x_v1(9, 10, sp, XRAY_TRAMP_FLAGS_OFFSET_V1))
+    words.push(a64_str_x_v1(11, sp, XRAY_TRAMP_FLAGS_OFFSET_V1 + 16))
+    words.push(a64_add_imm_v1(scratch, sp, XRAY_TRAMP_VECTORS_OFFSET_V1))
     for pair in 0..16:
-        words.push(xray_a64_pair_q_v1(false, pair * 2, pair * 2 + 1, scratch, pair * 32))
+        words.push(a64_stp_q_v1(pair * 2, pair * 2 + 1, scratch, pair * 32))
     words.push(0x2A0003E0)                                  # mov w0, w0 (zero-extend id)
     words.push(0xAA1E03E1)                                  # mov x1, x30 (sled return)
-    words.push(0x94000000 | (handler_words & 67108863))    # bl handler
-    words.push(xray_a64_add_imm_v1(false, scratch, sp, XRAY_TRAMP_VECTORS_OFFSET_V1))
+    words.push(a64_bl_v1(handler_words))                    # bl handler
+    words.push(a64_add_imm_v1(scratch, sp, XRAY_TRAMP_VECTORS_OFFSET_V1))
     for pair in 0..16:
-        words.push(xray_a64_pair_q_v1(true, pair * 2, pair * 2 + 1, scratch, pair * 32))
-    words.push(xray_a64_pair_x_v1(true, 9, 10, sp, XRAY_TRAMP_FLAGS_OFFSET_V1))
-    words.push(xray_a64_single_x_v1(true, 11, sp, XRAY_TRAMP_FLAGS_OFFSET_V1 + 16))
+        words.push(a64_ldp_q_v1(pair * 2, pair * 2 + 1, scratch, pair * 32))
+    words.push(a64_ldp_x_v1(9, 10, sp, XRAY_TRAMP_FLAGS_OFFSET_V1))
+    words.push(a64_ldr_x_v1(11, sp, XRAY_TRAMP_FLAGS_OFFSET_V1 + 16))
     words.push(xray_a64_msr_v1(XRAY_SYSREG_NZCV_V1, 9))
     words.push(xray_a64_msr_v1(XRAY_SYSREG_FPCR_V1, 10))
     words.push(xray_a64_msr_v1(XRAY_SYSREG_FPSR_V1, 11))
     for pair in 0..8:
-        words.push(xray_a64_pair_x_v1(true, gprs[pair * 2], gprs[pair * 2 + 1], sp, pair * 16))
-    words.push(xray_a64_add_imm_v1(false, sp, 29, 0))       # mov sp, x29
+        words.push(a64_ldp_x_v1(gprs[pair * 2], gprs[pair * 2 + 1], sp, pair * 16))
+    words.push(a64_add_imm_v1(sp, 29, 0))       # mov sp, x29
     words.push(0xA8C17BFD)                                  # ldp x29, x30, [sp], #16
     words.push(0xD65F03C0)                                  # ret
     words

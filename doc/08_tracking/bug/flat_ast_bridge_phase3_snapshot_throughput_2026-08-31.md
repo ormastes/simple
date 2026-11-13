@@ -171,3 +171,10 @@ gates on a hot compiler path.
 ## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
 
 **LIVE (confirmed)** — ne9 premise re-check: bridge still reads the SIMPLE_BOOTSTRAP* env mirror at multiple conversion sites; no arena mode admitted around flat_ast_to_module(). Implementation needs a measured >=3x throughput win + RSS bound + unchanged codec gates — out of traverse-lane scope.
+
+
+---
+
+## 2026-11-13 triage — lane live-p3-l2 (work/live-p3-l2-20261113, worktree lp2-wt, base origin/release/1.0.0 tip)
+
+**Verdict: LIVE (deferred).** Premise re-checked at this base: `convert_nodes.spl` still reads the `SIMPLE_BOOTSTRAP` env mirror and `module_assembly.spl` still field-falls back through `SIMPLE_BOOTSTRAP_DECL_*`; no bridge-scoped arena mode admitted around `flat_ast_to_module()`. The candidate's acceptance bar (>=3x measured throughput, RSS bound, unchanged codec/parity gates on a hot compiler path) is owner-lane work.

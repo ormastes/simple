@@ -103,3 +103,10 @@ named-anchor edits without conflict", and "structural merge preserves moved
 function body from left and right edit without conflict". Ownership question
 from 2026-08-27 (who may edit `merge*.spl`/`conflict_v2.spl`) must be
 re-resolved against the PR #7597 merge-path owner before any fix lands.
+
+## Triage 2026-11-13 (P3 tools lane)
+No code change this lane; the 2026-11-11 P3-boot22 triage stands — BLOCKED: the
+merge implementation arrived wholesale with PR #7597 after this recording, so
+whether the examples still reproduce is UNKNOWN and execution is the only
+honest answer (blocked on the deployed self-hosted binary). The ownership
+question must be re-resolved against the PR #7597 merge-path owner first.

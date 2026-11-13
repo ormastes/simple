@@ -144,3 +144,13 @@ Verified: `test/01_unit/os/vulkan/spirv_canonicalize_spec.spl` 9/9 GREEN
 both before and after this change — its 10 failures are environmental
 (spirv-as/spirv-val pinned at `/usr/bin/...`, absent on this Windows host;
 identical verdict at HEAD without the change). Canary 4/4 GREEN.
+
+## Addendum 2026-11-13 — lane lp5 (worktree lp5-wt): concurrence, no further change
+
+Confirmed at release/1.0.0 tip: the suggested fix `SpirvBuilder.emit_function_with_id(id,
+result_type_id, func_type_id, control)` is ALREADY PRESENT in-tree
+(`src/plugins/backend_vulkan/vulkan/spirv_builder.spl:329`, exactly the additive shape this
+record proposed; `emit_function()` contract unchanged). Lane p3-misc-b's same-day
+disposition (above) switched both board-vulkan boundary providers to it and verified
+`OpEntryPoint GLCompute %1 "main"` / `%1 = OpFunction %2 None %3`. Nothing further for
+this row from lp5.

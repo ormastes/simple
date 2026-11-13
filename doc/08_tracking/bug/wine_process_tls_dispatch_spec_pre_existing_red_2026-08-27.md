@@ -32,6 +32,14 @@ token must be reconciled with the gate's actual evidence vocabulary by the
 feature owner).
 
 
+## Triage 2026-11-13 (P3 tools lane)
+No code change this lane; the record stands — pre-existing RED (HEAD baseline
+1 failed of 2 before the only edit, which was comment-only). The unblock
+condition is unchanged: the PEB/TEB write-gate path must emit the documented
+`VMWriteReadback:PEBTEBLayoutBytes*` evidence token, or the feature owner
+reconciles the spec's expected token with the gate's actual evidence
+vocabulary. Owner-lane work.
+
 
 ---
 ## 2026-11-13 triage — lane live-p3-l6 (Windows host, seed bin/simple.exe, base f790f7f266e)
@@ -44,3 +52,4 @@ through `_wine_process_full_image_peb_teb_vm_write_evidence` into the dispatch
 record. The spec runs green: `declared>=2 executed=2 passed=2 failed=0`, both
 scenarios including "should require PEB/TEB VM byte-write readback before TLS
 callback dispatch record". Unblock condition met; no in-lane change.
+

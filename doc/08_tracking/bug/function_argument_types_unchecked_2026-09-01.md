@@ -82,3 +82,10 @@ build-commit `46fe8f6b6def` (seed-smoke: `SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/
 ## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
 
 **LIVE (confirmed)** — ne10 re-confirmed verbatim on the tracked seed: all three repro forms (text->i64, newtype cross-type, bare int to newtype) still run exit 0. Fix is a nominal argument-type check in the compiler — owner-lane work on the G7 critical path.
+
+
+---
+
+## 2026-11-13 triage — lane live-p3-l2 (work/live-p3-l2-20261113, worktree lp2-wt, base origin/release/1.0.0 tip)
+
+**Verdict: LIVE (deferred).** Re-confirmed by the 2026-11-11 lane on this exact tracked seed (all three repro forms run, exit 0). A nominal argument-type check is owner-lane compiler work on the G7 critical path; the risk surface (implicit conversions, `Any`, newtype/single-field-struct acceptance across the whole stdlib) makes it unsuitable for a 25-minute batch-lane attempt.
