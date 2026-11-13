@@ -1,0 +1,47 @@
+# @cover src/compiler/80.driver/driver_build/native_file_worker_v1.spl
+# The whole-program HIR gate's expiry line used to print `unclaimed=0` -- the
+# expiring worker had drained its own HIR rounds, so the figure was always 0
+# and named nothing. The reason line now carries ledger PROGRESS: inventory
+# rows (minus `excluded`) and how many have a PASS terminal.
+use std.spec
+use std.common.crypto.sha256.{sha256_text}
+use compiler.driver.driver_build.native_file_worker_v1.{
+    native_file_worker_hir_ledger_progress_v1, native_file_worker_hir_ledger_state_v1}
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_dir_remove_all(path: text) -> bool
+extern fn rt_getpid() -> i64
+
+fn terminal(queue: text, path: text, state: text) -> bool:
+    rt_file_write_text("{queue}/{sha256_text(path)}.terminal", "{state}\n1\n2\n3\n4\n5")
+
+describe "HIR ledger progress for the gate reason line":
+    it "counts inventory rows minus excluded, and PASS terminals, consistently with the gate state":
+        val queue = "build/hir_ledger_progress_{rt_getpid()}"
+        expect(rt_dir_create_all(queue)).to_equal(true)
+
+        # No inventory yet: nothing to count, gate still waiting.
+        expect(native_file_worker_hir_ledger_progress_v1(queue)).to_equal((0, 0))
+        expect(native_file_worker_hir_ledger_state_v1(queue)).to_equal(0)
+
+        expect(rt_file_write_text("{queue}/inventory", "inventory-v1\nsrc/a.spl\nsrc/b.spl\nsrc/c.spl\n")).to_equal(true)
+        expect(rt_file_write_text("{queue}/excluded", "src/c.spl\n")).to_equal(true)
+        expect(terminal(queue, "src/a.spl", "PASS")).to_equal(true)
+        expect(native_file_worker_hir_ledger_progress_v1(queue)).to_equal((2, 1))
+        expect(native_file_worker_hir_ledger_state_v1(queue)).to_equal(0)
+
+        expect(terminal(queue, "src/b.spl", "PASS")).to_equal(true)
+        expect(native_file_worker_hir_ledger_progress_v1(queue)).to_equal((2, 2))
+        expect(native_file_worker_hir_ledger_state_v1(queue)).to_equal(1)
+
+        val _rm = rt_dir_remove_all(queue)
+
+    it "does not count a non-PASS terminal as passed":
+        val queue = "build/hir_ledger_progress_fail_{rt_getpid()}"
+        expect(rt_dir_create_all(queue)).to_equal(true)
+        expect(rt_file_write_text("{queue}/inventory", "inventory-v1\nsrc/a.spl\nsrc/b.spl\n")).to_equal(true)
+        expect(terminal(queue, "src/a.spl", "FAILED")).to_equal(true)
+        expect(native_file_worker_hir_ledger_progress_v1(queue)).to_equal((2, 0))
+        expect(native_file_worker_hir_ledger_state_v1(queue)).to_equal(-1)
+        val _rm = rt_dir_remove_all(queue)
