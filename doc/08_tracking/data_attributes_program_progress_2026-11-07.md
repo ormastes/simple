@@ -81,7 +81,7 @@ Pin: `origin/release/1.0.0` @ `9100f50e680`. Lane: `work/immutable-views-async-i
 
 | Step | Deliverable | State |
 |---|---|---|
-| P0 inventory | symbol-to-requirement map + parser probes (`Immutable<T>`, `@support_async_immutable`, `async <expr>` ctor argument, `await x.field`) under `doc/08_tracking/` | pending |
+| P0 inventory | [symbol-to-requirement map + parser probes](../05_design/compiler/data/immutable_views_async_init_p0_inventory_2026-11-13.md) (`doc/08_tracking/` root is over the fan-out limit, so the map lives under `doc/05_design/compiler/data/`) | done 2026-11-13: no contract implemented; `async <expr>` ctor argument does not parse; `Immutable<T>`/`@support_async_immutable` accepted only by lenience; missing required field is nil/0-filled (`lower_struct_construct`), E1007 unused |
 | P1 verifier | SSpec ASY-03/04/05, ATTR-01/04 RED → GREEN; verifier as report over `src/compiler`+`src/lib`+`src/app`; offender count decides gate (warning / opt-in vs error) | pending |
 | P2 `Immutable<T>` | IMM-01/02; then revision/frozen handles | pending, after P1 review |
 | P3 async-init gate | ASY-01/02/06/07/08 on `phase_cell_*_v1`; blocked until the node-storage lane lands `f8db9920671` | pending |
