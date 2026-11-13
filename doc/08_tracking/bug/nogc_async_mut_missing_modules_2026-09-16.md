@@ -63,3 +63,21 @@ Named owner: **http_server package lane** (implement
 `src/lib/http_server/`, or retire the three specs with the owning lane's
 sign-off per this record's unblock condition). No spec edited, no assertion
 relaxed, no production change attempted in this lane.
+
+
+## Triage 2026-11-13 (lane p3-async-20261113, base 80a8116e5e2) — still LIVE (http_server half), reproduced once
+
+Reproduced once on this base (seed `bin/simple.exe`, `--timeout 300`):
+`test/01_unit/lib/nogc_async_mut/http_server/async_handler_lifecycle_spec.spl`
+→ `outcome=ERROR declared>=4 executed=0` —
+`Module "std.http_server" does not export 'async_handler_lifecycle'`;
+`src/lib/http_server/` still does not exist. `h2_async_dispatch` and
+`tls13_record_adapter` remain the same absence class (not re-run). The two
+debug adapters (`coordinator_service_adapter_v1`, `legacy_service_adapter_v1`)
+are present on this base; the 2026-11-11 rt3 lane's 3/3 and 5/5 evidence
+stands per the no-rerun rule.
+
+Not fixed in this lane: implementing the three http_server modules is
+substantive feature work owned by the http_server package lane (per this
+record's unblock condition); the 20-minute P3 timebox cannot absorb it and no
+spec was weakened. No source change.

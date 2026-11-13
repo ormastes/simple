@@ -277,3 +277,7 @@ re-run: the deployed fresh seed carries the fix.
 
 Not carried by seedfix A (fa6939eb4b9e is JIT tuple-destructure unbox; the
 any/all fix is seed builtin/dispatch work that predates today's seed).
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with lane ne12: FIXED at tip — the remaining any/all residual returns correct booleans on the JIT lane. No independent re-verification in this lane; disposition stands.

@@ -416,3 +416,8 @@ Caveat carried from the compiler2 addendum: no full end-to-end native build of
 a generic user was run in-lane (heavy entry-closure native build, out of lane
 mandate); the verdict rests on the disappeared subsystem + the landed
 machinery + the two green pins above.
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with lane p3fix-comp7: SUPERSEDED — the 40.mono no-op subsystem was
+replaced by hir_function_selection. No in-lane change.

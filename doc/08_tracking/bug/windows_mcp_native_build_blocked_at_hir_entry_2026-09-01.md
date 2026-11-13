@@ -186,3 +186,7 @@ error count (superseding the last unobtainable figure of 133). Do not report the
 is an entry-point count, not the MIR count.
 
 Disposition: BLOCKED. Header flipped OPEN → BLOCKED 2026-11-11 (lane p3-comp9).
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with lanes boot16/p3-comp9: BLOCKED — the verbatim grant (sanctioned native-build run) is re-recorded intact in the boot16 addendum; the Windows native-build path cannot be exercised in this lane. No in-lane change.

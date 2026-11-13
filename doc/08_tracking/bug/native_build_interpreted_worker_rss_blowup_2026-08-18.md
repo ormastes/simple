@@ -283,3 +283,7 @@ term 1's import-closure floor remains intrinsic to the spawn shape. Term 2
 (unbounded `parse`-step creep) remains unattributed; both fix surfaces are
 outside this lane (`src/compiler` agent-30 lane; `src/compiler_rust`
 seed-fix lane with the Linux gdb/sampler grant). Header flipped to LIVE.
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with lanes boot6/int10/int11: LIVE — located, not fixed (interpreted-worker RSS terms recorded there; one fixed ~2.7 GB term, one unbounded creep inside parse). Memory-retention work exceeds the per-bug timebox; disposition stands.

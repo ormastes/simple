@@ -99,3 +99,14 @@ FIXED; Rust seed frontend lane still LIVE. Keep OPEN.**
   seed frontend resolution, rebuild + refresh `bin/simple.exe`
   (`scripts/bootstrap/` seed build flow), then re-run this doc's repro
   (expect `code=4`, exit 0) and `test/01_unit/app/devhub/itf_config_spec.spl`.
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with lane ne11's lane-split verdict on this lane's exact binary
+(tracked seed @ 46fe8f6b6def): pure-Simple HIR lane FIXED
+(implicit_self_field_read_plain_fn_spec 1/1, resolving the bare field read);
+Rust seed frontend lane still LIVE (verbatim repro fails: Cranelift
+GlobalLoad 'kind' unresolved, interpreter fallback "variable 'kind' not
+found"). Remaining fix is src/compiler_rust (cargo + seed rebuild — outside
+this lane). The devhub self.kind workaround stays required on the seed.
+No in-lane change.

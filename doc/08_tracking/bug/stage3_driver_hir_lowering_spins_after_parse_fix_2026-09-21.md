@@ -160,3 +160,7 @@ Verbatim grant (from the 2026-11-04 adjudication via boot19, re-recorded intact)
    closed if it no longer reproduces.
 
 Disposition: BLOCKED. Header flipped OPEN → BLOCKED 2026-11-11 (lane p3-comp9).
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with lanes boot19/p3-comp9: BLOCKED — grant integrity verified (fa4314444bef ancestor of base); reproduction needs the sanctioned bootstrap path. No in-lane change.

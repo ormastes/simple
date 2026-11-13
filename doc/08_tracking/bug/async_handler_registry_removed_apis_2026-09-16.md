@@ -100,3 +100,13 @@ Absorbers: implementation `work/libbug-async-registry-20261105` (resolution
 section above) + verification lane p3-subj7 (2026-11-09). Follow-up rows
 (worker_spl_facade_split, async_handler_lifecycle) are tracked separately and
 untouched. Lane evidence: `build/review/p3fix-ne20-20261111.sdn`.
+
+
+## Triage 2026-11-13 (lane p3-async-20261113, base 80a8116e5e2) — confirms SUPERSEDED
+
+Same-base structural re-verification (no verdicted spec re-run, per no-rerun
+rule): `src/lib/nogc_async_mut/http_server/worker.spl:17` defines
+`submit_async_handler(fd, job_id, ...)` and `:28` carries the pinned marker
+`self.async_job_by_fd[fd] = job_id`; the per-fd registry both contract specs
+pin is present in-tree on this base. The 2026-11-09 verification evidence
+(2/2 + 3/3, seed interpreter, same branch) stands. No source change.

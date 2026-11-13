@@ -362,3 +362,7 @@ regress; it advanced past the old defect into this one.
   `hir_phase_per_module_cost_2026-08-21.md` (which already measured `driver.spl`
   as the worst case in this phase: 377 s of its 427 s HIR inside
   `materialize_imported_field_dependency`, 8,284 registrations).
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with the recorded status: FIXED (in-tree fix verified with regression spec). No independent re-verification in this lane; disposition stands.

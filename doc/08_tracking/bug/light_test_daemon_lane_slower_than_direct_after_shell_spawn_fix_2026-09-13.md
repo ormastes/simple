@@ -176,3 +176,7 @@ which needs runtime support for stdout capture or a structured verdict
 transport — a runtime/stdlib change with a bootstrap bar, not P3 scope; or
 (b) further measurement on an unloaded linux host to separate protocol cost
 from contention. Routed to the test-runner/runtime owner.
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with lane ne13: still LIVE. The 2026-11-05 wakeup protocol is in-tree unchanged (light_daemon.spl idle-loop LIGHT_WAKE stat); the recorded ~0.58 s residual gap stands as current truth. Daemon-lane perf work exceeds the per-bug timebox; disposition stands.

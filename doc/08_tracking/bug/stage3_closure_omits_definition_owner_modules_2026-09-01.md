@@ -348,3 +348,7 @@ tracked by `stage3_driver_hir_lowering_spins_after_parse_fix_2026-09-21.md`
 `bug_db.sdn:8420` note asking for a self-hosted stage3 replay pertains to
 that end-to-end greenness question, not to this row's mechanism, which is
 closed without it.
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with lane boot19: FIXED (char/byte root cause fixed by 13d7746adc0e and guarded). No independent re-verification in this lane; disposition stands.
