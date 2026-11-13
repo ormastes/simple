@@ -118,3 +118,7 @@ redeploy the seed, then re-run both specs with the same seed-smoke command.
 **Issue #2 (timer rollback)** — no fix commit identified; cannot be confirmed
 either way until the hazard above is cleared. Status stays OPEN.
 
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**PARTIAL/BLOCKED (confirmed)** — Issue #1 fixed in source: tier-explicit import fix 7f923ed08d39 verified ancestor first-hand; nogc_sync_mut engine copy guards all four body natives. Runtime verification of both issues BLOCKED on the P1 seed hazard `seed_enum_variant_bare_name_last_registration_wins_2026_10_19` (routed to seed lane by ne3/lib3); issue #2 unverifiable until then.

@@ -175,7 +175,7 @@ seed-owned. Grant: run the rspirv 0.12 re-vendor
 `dr/build/` module tree and `.cargo-checksum.json` intact), then add the driver
 feature forwarding `simple-runtime/vulkan` + `simple-compiler/vulkan`.
 
-## 2026-11-13 triage (UI batch B, Linux aarch64, release/1.0.0 @ 073fe2a89dd1): open, out of this lane
+## 2026-11-13 triage (UI batch B, Linux aarch64, release/1.0.0 @ 35144b7f5e93): open, out of this lane
 
 Unchanged since the 2026-11-11 addendum. Both remaining items are outside what
 this lane may edit:
@@ -187,3 +187,26 @@ this lane may edit:
   `src/compiler_rust/vendor/`, a seed-owner job.
 
 Row stays open. No source change.
+
+
+---
+
+## 2026-11-13 addendum — P3 gpu lane p3-gpu-20261113 (work/p3-gpu-20261113, base 6f4cb189867)
+
+**Verdict: LIVE, unchanged from the 2026-11-11 ne2 triage (source re-verified at
+this newer tip; no rerun of the docker/lavapipe lane — Linux-only).**
+
+- Gap 2 (runtime seed feature) remains closed on the refreshed tracked seed
+  (`bin/simple.exe`): the full `rt_vulkan_*` SFFI surface incl.
+  `rt_vulkan_select_device` is present and `vulkan_sffi_is_available()` gating is
+  in `src/lib/nogc_sync_mut/gpu/engine2d/sffi_vulkan.spl` (per the ne2 export
+  scan; not re-scanned here).
+- Gap 1 (genuine GPU-paint lane) remains a design item: `render_lane.spl:57`
+  still defaults to `BROWSER_RENDER_LANE_VULKAN`, which is CPU paint + device
+  present/readback with honest provenance — not browser draw IR routed through
+  engine2d GPU primitives.
+- Compiler-side `vulkan` (SPIR-V codegen) remains blocked on the vendored
+  `rspirv 0.12` E0583 re-vendor, which needs `cargo` — forbidden in this lane,
+  classified seed-owned. Grant unchanged: re-vendor rspirv 0.12 with the
+  `dr/build/` tree intact, then add the driver feature forwarding
+  `simple-runtime/vulkan` + `simple-compiler/vulkan`.

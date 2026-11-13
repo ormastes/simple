@@ -166,3 +166,7 @@ not rebuild the seed (no cargo). **Grant:** a seed lane with cargo access, to
 implement the per-module `own source hash + imported-interface digests` key
 and re-run the four-scenario gate before/after (the gate now runs in seconds
 on Windows, so before/after evidence is cheap).
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**LIVE (confirmed)** — ne17 re-ran the four-scenario gate on the fresh seed: safety direction still violated (after leaf arity change, 4 dependents served stale from cache); the gate now completes in seconds on Windows with llvm-mingw on PATH. Fix lives in the Rust engine per-module cache key — seed-lane grant (cargo).

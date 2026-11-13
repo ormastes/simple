@@ -246,3 +246,7 @@ The 10 failures are host/spec drift, not this bug (full log:
 
 None of these re-open the refusal question; recorded so a future lane does not
 read the red count as a recurrence of this row.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**CLOSED (confirmed)** — ne6 re-verified on refreshed seed: refusal string absent, test dispatches and executes; 10 reds are host/spec drift, not the refusal defect.

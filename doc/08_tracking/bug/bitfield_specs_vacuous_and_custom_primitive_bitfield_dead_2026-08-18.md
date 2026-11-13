@@ -265,3 +265,7 @@ Seed-smoke evidence (Rust seed `bin/simple.exe`, this worktree):
 
 No live rerun (prior lane's seed-smoke 14/14 on this same spec stands; per
 the lane's no-green-rerun rule). Verdict: FIXED / RESOLVED.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**RESOLVED (confirmed)** — Squash-merge 839e59ffa7dc verified ancestor first-hand; `custom_primitive_bitfield.spl` confirmed absent (`BitfieldValidator` zero refs in src/).

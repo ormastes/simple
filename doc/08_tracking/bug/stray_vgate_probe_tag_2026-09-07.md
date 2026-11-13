@@ -52,3 +52,10 @@ casually to tidy up cosmetics.
 `v`-prefixed tag name. Use something no ruleset covers, e.g. `probe-tag-gate`,
 which deletes cleanly. The same trap applies to a mistyped real release tag —
 `v1.0.2` created by accident is permanent.
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+tag deletion requires origin admin action (protected ref); not a code fix.

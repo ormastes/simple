@@ -71,3 +71,10 @@ the constant is corrected -- see the `# NOTE:` comment at the scenario site.
 
 None found in `doc/08_tracking/bug/` prior to this record (checked via
 `grep -rl "raw_rgba\|write_u32_be\|RBPA"`).
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+deliberate pin: the spec is RED (not weakened) to document the real, pinned wire format until the codec owner picks a transition. Left as recorded.

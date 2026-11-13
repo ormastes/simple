@@ -125,3 +125,7 @@ convergence is the historically-fragile part.
   default backend; rerun with `--backend=cranelift`), then run `<bin>` and
   expect `result-u8-ok`; or simply `sh
   scripts/check/check-native-crossmodule-result-u8.shs`.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**FIXED in source (confirmed)** — compiler5: 5c67273d1801 verified ancestor (lower_enum_match preserves payload type + Array marker); checker + fixture present. Native dual-backend re-proof BLOCKED by the known Windows native-build hang.

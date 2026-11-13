@@ -57,7 +57,7 @@ constant: that would trade this page's error for every other page's.
 (fixed round 15) — that was vertical and touched `html` only. `tab-bar`'s 7/7
 did not move under it, as expected.
 
-## 2026-11-13 triage (UI batch B, Linux aarch64, release/1.0.0 @ 073fe2a89dd1): LIVE, blocked on this host
+## 2026-11-13 triage (UI batch B, Linux aarch64, release/1.0.0 @ 35144b7f5e93): LIVE, blocked on this host
 
 Still live at source: `FORM_CONTROL_UA_FONT_SIZE_PX: i32 = 13`
 (`simple_web_html_layout_renderer_declarations.spl:1331`, applied at
@@ -74,3 +74,21 @@ Not fixed in this lane, for two reasons:
   other catalog pages. Landing it unmeasured would be unverified evidence.
 
 Grant: a host with Chrome for the catalog differ. Row stays open.
+
+
+---
+
+## 2026-11-13 addendum — P3 gpu lane p3-gpu-20261113 (work/p3-gpu-20261113, base 6f4cb189867)
+
+**Verdict: OPEN, characterised-not-fixed stands — the fix is a sub-pixel font
+size in the style model (design-level), not a constant nudge, and this doc
+explicitly forbids the nudge.** Fresh read at this tip:
+`FORM_CONTROL_UA_FONT_SIZE_PX` is still an integer constant in
+`src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_declarations.spl`
+and `Style.font_size` is still `i32`, so the 13.3333px UA form-control size is
+still truncated before text advance measurement and the tab-bar 1-2px
+horizontal drift signature persists by construction. Carrying fractional px
+through the style record + text measurement is a reviewed design change (it
+touches every page's layout), outside a 20-minute P3 box; not attempted. Owner
+decision this doc requests (twin-budget style: pick the semantic, land it with
+Chrome-oracle fixtures) remains the unblock.

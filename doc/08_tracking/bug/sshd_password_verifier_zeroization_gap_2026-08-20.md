@@ -13,3 +13,10 @@ Until a compiler-resistant wipe primitive and an SSH-specific verifier record
 KAT are admitted, SSHD password authentication must return false. Public-key
 authentication is unaffected. Do not restore plaintext password fields or
 default credentials as a workaround.
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+open fail-closed production gap (password verifier zeroization); owner: sshd/security lane - not a bounded side-fix.

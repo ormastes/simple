@@ -170,3 +170,10 @@ worktree on origin/release/1.0.0, isolated output):
 Then compare the four `rust-*-build.log` Cargo wall times against the recorded
 9m56s / 10m00s / 1m25s / 2m00s baseline and demonstrate the dominant repeated
 compiler units with Cargo timing/fingerprint evidence before optimizing.
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+Not pursued in this lane: BLOCKED re-confirmed 2026-11-11 (lane boot23): cargo/rustc + sanctioned full bootstrap required. Not chaseable here.

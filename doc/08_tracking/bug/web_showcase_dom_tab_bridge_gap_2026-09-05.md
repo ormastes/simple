@@ -69,3 +69,10 @@ bridge (attribute selectors, `setAttribute`/`removeAttribute`, `focus`,
 browser-session lane, and its acceptance spec does not reach a verdict within
 this host's run cap on the seed interpreter. Row stays open. Grant: a
 self-hosted native test runtime, or a longer run budget for that spec.
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+open for generic JS DOM parity per in-file status; owner: web/native bridge lane.

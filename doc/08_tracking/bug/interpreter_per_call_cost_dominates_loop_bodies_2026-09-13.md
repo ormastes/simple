@@ -118,3 +118,7 @@ build-commit `46fe8f6b6def`, `--mode=interpreter --no-cache`):
 Standing perf-debt notes (`.clone()`-density line-count, tuple-destructure
 scratch vector) are not defects and stay open as ordinary perf debt, per the
 interp6 addendum.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**SUPERSEDED (confirmed)** — int9: pins re-run green on the tracked seed (push_call_loop_env_cache 1/1, while_loop_shape_parity 7/7). Standing perf-debt notes are not defects.

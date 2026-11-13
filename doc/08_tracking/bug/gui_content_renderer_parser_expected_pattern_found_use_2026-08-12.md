@@ -95,3 +95,7 @@ retained Vulkan production frames device resident", "fails closed before
 strict Vulkan primitive execution without a Vulkan engine"). That staging
 count belongs in a separate row; this row's disposition stands SUPERSEDED.
 No source change taken.
+
+## Re-verified 2026-11-13 (Linux aarch64, lane uia)
+
+On release/1.0.0 35144b7f5e9, Linux aarch64 seed af717f53d6bce3e5 after 69166cadc70 put a fn between the use lines of gui_content_renderer.spl: test/01_unit/lib/gc_async_mut/ui/gui_content_renderer_spec.spl parses and executes 3 examples with no expected-pattern-found-Use error; test/02_integration/rendering/host_gui_content_frame_spec.spl 1/1. The 2 assertion failures in gui_content_renderer_spec (retained seed returns false on cpu) are a different defect, filed separately.

@@ -19,3 +19,10 @@ registry/catalog -> active snapshot validation -> current frame authority
 stale active or stale registration -> reject
 ```
 
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+fail-closed review record; three review cycles exhausted per in-file status.

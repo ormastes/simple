@@ -100,3 +100,27 @@ exit-code path (`bin/simple test` spawns/executes the spec differently from
 there). Fix surface is `src/compiler_rust/driver/**` (seed lane). Until fixed,
 any gate that trusts the process exit code over the verdict line remains wrong
 in the fail-closed direction.
+
+---
+
+## Addendum 2026-11-13 — lane p3-misc-b: symptom shifted on release/1.0.0 seed; still seed-lane LIVE
+
+Reproduced once on release/1.0.0 tip (`6f4cb189867`, seed `bin/simple.exe`
+copied from the primary clone) with the 7-line minimal repro:
+
+- `bin/simple run /tmp/t.spl` — exits **0** (run-path fix holds), prints
+  `1 examples, 0 failures`, but emits **no `SPEC FILE VERDICT:` line at all**.
+  Control: a normal no-`main` spec (`context_log_modes_spec.spl`) via the same
+  `run` path DOES emit the verdict line. So with `describe` as `fn main`'s tail
+  expression the driver verdict epilogue is now skipped entirely.
+- `bin/simple test /tmp/t.spl --timeout 300` — exits **1** via the fail-closed
+  `fail_closed_on_no_examples` guard in
+  `src/app/test_runner_new/test_runner_client.spl:371` ("0 examples executed:
+  produced no SPEC FILE VERDICT line and exited 0"). The pure-Simple bypass at
+  `test_runner_single.spl:1918-1954` (spec_runner_describe_tail_expression_exit_code)
+  cannot fire because `has_verdict == 0` — there is no verdict to trust.
+
+Disposition: seed-Rust-only (the epilogue that emits the child verdict lives in
+`src/compiler_rust/driver/**`; this lane has no cargo/rustc to rebuild the
+seed). Not chaseable here. The six `return ()` ink-spec workarounds remain
+required.

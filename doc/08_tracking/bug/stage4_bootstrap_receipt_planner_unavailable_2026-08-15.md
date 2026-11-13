@@ -81,3 +81,10 @@ then `bootstrap/stage3/x86_64-unknown-linux-gnu/simple build bootstrap --bootstr
 to obtain the failing System/Integration case at the runtime/dispatcher owner,
 exactly as this record's follow-up sentences require. The owner-constructed
 receipt exception for this frozen recovery remains as recorded above.
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+Not pursued in this lane: BLOCKED re-confirmed 2026-11-11 (lane boot23): frozen-worktree full-CLI SIGSEGV needs cargo/rustc + sanctioned full bootstrap. Not chaseable here.

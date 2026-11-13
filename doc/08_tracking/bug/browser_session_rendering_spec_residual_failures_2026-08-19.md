@@ -148,3 +148,20 @@ work in `src/lib/gc_async_mut/web/` and `src/lib/nogc_sync_mut/js/` that this
 record assigns to the JS-engine/browser lane, group 2 needs that lane to
 supply the missing helpers and state fields, and group 1 waits on the seed.
 No assertion was changed and no example was skipped. Row stays open.
+
+
+---
+
+## 2026-11-13 addendum — P3 gpu lane p3-gpu-20261113 (work/p3-gpu-20261113, base 6f4cb189867)
+
+**Verdict: LIVE, owner unchanged (JS-engine/browser lane) — no re-measure this
+lane.** Per the no-green-rerun rule this lane did not re-execute the two
+25-example specs; the 2026-11-11 runner6 verdicts (dom_input 19/25 with the
+six residuals enumerated in this doc; script_css_animation 6/25 in the scripted
+DOM-mutation flush path) stand on this base class. Disposition unchanged: every
+remaining mechanism lives in `src/lib/gc_async_mut/web/` /
+`src/lib/nogc_sync_mut/js/`, this doc says to coordinate with the in-flight
+JS-engine work, and a sibling lane (browser_composition_revision_counters,
+2026-11-13 addendum) just confirmed the same import graph now fails one lane
+deeper at `_snapshot_current_history_for_departure` — consistent with active
+engine-lane churn. Kept OPEN, handed back with no new action by this lane.

@@ -462,6 +462,22 @@ SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_vulkan_readback_u32_checksum(int64_t data
     (void)data; (void)pixel_count; (void)handle; (void)offset;
     return -1;
 }
+
+/*
+ * C twin of the Rust lane's `cfg(not(feature = "vulkan"))` arm of
+ * rt_vulkan_selected_device_identity_v1 (vulkan_graphics_runtime_device.rs):
+ * the core C runtime selects no Vulkan device, so there is no generation token
+ * to match and no physical-device UUID to report. It returns the same empty
+ * string the Rust lane uses for "owner absent". The Simple facade
+ * (vulkan_sffi_selected_device_identity_v1) requires exactly "v1:<hex>:<hex>"
+ * with non-zero UUIDs, so an empty string is rejected fail-closed and can never
+ * be mistaken for a real device. A Vulkan-featured provider overrides this
+ * weak definition.
+ */
+SPL_HOSTED_UNAVAILABLE_WEAK const char* rt_vulkan_selected_device_identity_v1(int64_t expected_token) {
+    (void)expected_token;
+    return "";
+}
 #endif
 
 /*
@@ -6786,6 +6802,28 @@ int64_t rt_string_char_count(int64_t value) {
     if (owner) return (int64_t)spl_text_cp_len_bytes((const uint8_t*)owner->data, owner->len);
     const char* raw = (const char*)(uintptr_t)value;
     return (int64_t)spl_text_cp_len_bytes((const uint8_t*)raw, (uint64_t)strlen(raw));
+}
+
+/* to_digit on a one-character text (ADR-005): Some(0..9) for a single ASCII
+ * decimal digit, None for anything else (non-digit, empty, multi-character,
+ * non-text). C twin of rt_string_to_digit in the Rust runtime
+ * (runtime/src/value/collections.rs), which the seed codegen emits for
+ * `.to_digit()`; without it a C-runtime link of that call is unresolved.
+ * char::to_digit(10) accepts ASCII digits only, so the two lanes agree on
+ * every input, non-ASCII included. Never a silent 0. */
+int64_t rt_string_to_digit(int64_t value) {
+    RtCoreString* s = rt_core_as_string(value);
+    if (!s) {
+        int64_t promoted;
+        if (rt_string_promote_raw_receiver(value, &promoted)) {
+            return rt_string_to_digit(promoted);
+        }
+        return rt_option_none();
+    }
+    if (s->len != 1) return rt_option_none();
+    unsigned char c = (unsigned char)s->data[0];
+    if (c < '0' || c > '9') return rt_option_none();
+    return rt_option_some(rt_value_int((int64_t)(c - '0')));
 }
 
 /* capitalize: uppercase the first character, lowercase the rest (ASCII only). */

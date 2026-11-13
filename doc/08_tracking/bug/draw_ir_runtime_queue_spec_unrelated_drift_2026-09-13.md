@@ -1,10 +1,10 @@
 # `draw_ir_runtime_queue_spec.spl` has 2 unrelated failures, discovered while re-checking a different bug
-## Open 2026-09-16 — needs owner triage
+## Fixed 2026-11-10, re-verified 2026-11-13
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-- Status: OPEN (2026-09-13)
+- Status: FIXED 2026-11-13 — spec reconciled by `65953f51a54`; re-verified 4/4 on Linux aarch64 at release/1.0.0 `35144b7f5e9` (see closing sections)
 - Found by: BUGFIX-7 lane while re-checking
   `draw_ir_sdn_roundtrip_composition_field_assign_on_non_object_2026-08-15`
   (that record's own defect does not reproduce; these two do).
@@ -64,3 +64,17 @@ Verified with the worktree seed-smoke binary (bin/simple.exe, v1.0.0-rc.1):
 Sibling `draw_ir_adv_spec.spl` 69/70 — its 1 failure ("stages retained Vulkan
 composition damage", expected 48 to equal 4) is pre-existing, identical with the
 fix stashed and unstashed.
+
+## Re-verified 2026-11-13 (Linux aarch64, lane uia)
+
+The 2026-11-10 green run was on a Windows seed. Re-run on the host class that
+filed the record, in a worktree pinned to release/1.0.0 `35144b7f5e9`, Rust seed
+sha256 prefix `af717f53d6bce3e5`:
+
+```
+simple test test/01_unit/lib/gc_async_mut/gpu/engine2d/draw_ir_runtime_queue_spec.spl
+SPEC FILE VERDICT: ... outcome=OK declared>=4 executed=4 passed=4 failed=0 skipped=0 blocked=0 dropped=0
+```
+
+The first status line above still read OPEN, which kept the tracking row open;
+it is flipped here and the shard records the closure.

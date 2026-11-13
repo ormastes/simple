@@ -105,3 +105,7 @@ The filing's literal claims (no field, no dispatch, always `"cpu"`) remain
 outdated; the residual scene-raster-to-device ask is a design-scope matter
 outside this row. Header (SUPERSEDED) unchanged; this addendum records the
 fresh re-verification.
+
+## Re-verified 2026-11-13 (Linux aarch64, lane uia)
+
+On release/1.0.0 35144b7f5e9, Linux aarch64 seed af717f53d6bce3e5: test/01_unit/lib/gpu/engine3d/vulkan_font_adapter_branch_spec.spl 5/5 passed. Scope unchanged: only the font leg dispatches through the facade; scene raster still uses the CPU renderer by design (engine.spl), and VulkanBackend3D has no device submission.

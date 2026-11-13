@@ -55,7 +55,7 @@ recorded somewhere the gate reads; the non-monotonicity above should be
 investigated first, since it suggests the dominant cost is not where a
 frame-time budget would assume it is.
 
-## 2026-11-13 triage (UI batch B, Linux aarch64, release/1.0.0 @ 073fe2a89dd1): blocked on an owner decision
+## 2026-11-13 triage (UI batch B, Linux aarch64, release/1.0.0 @ 35144b7f5e93): blocked on an owner decision
 
 No change in the tree: `scripts/check/check-web-showcase-4k-receipt.shs`
 still pins geometry and schema only. This record asks for two things this lane
@@ -68,3 +68,10 @@ cannot supply:
 
 Pinning a threshold from this host would invent the budget this record says
 must not be invented. Row stays open; no timing assertion was added.
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+no frame-time budget pinned and cost non-monotonic per in-file status; owner: web showcase lane.

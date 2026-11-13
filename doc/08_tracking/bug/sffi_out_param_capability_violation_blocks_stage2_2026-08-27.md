@@ -90,3 +90,10 @@ No `Capability error` / `Aliasing violation`. (The run then stops at link on
 missing runtime archive symbols in the sparse worktree — unrelated to HIR.)
 Not run: stage2_new4.exe (the pure-Simple lane has no `capability.rs`).
 Recommend status: closed-stale.
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+confirmed by controlled A/B, fix not yet chosen per in-file status; owner: capability-checker lane (blocks stage 2 - needs that lane verification).

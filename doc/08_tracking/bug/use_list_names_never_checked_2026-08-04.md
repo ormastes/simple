@@ -260,3 +260,10 @@ startup warnings — which reads exactly like a clean corpus.
    module loaded without reading it, when the braced names collide with names another
    module already registered. Untested and unmeasured.
 
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+reporting landed, narrowing deliberately deferred per in-file status. Owner: frontend diagnostics lane.

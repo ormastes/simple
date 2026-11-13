@@ -77,3 +77,25 @@ receipt-backed bounded-scan vs full-scan probe through the SimpleOS x86_64 QEMU
 timing entrypoint (or a `native-build` probe with `SIMPLE_KEEP_NATIVE_OBJS=1`)
 and record the metrics above; until then this row remains OPEN-BLOCKED, not a
 performance claim.
+
+
+---
+
+## 2026-11-13 addendum — P3 gpu lane p3-gpu-20261113 (work/p3-gpu-20261113, base 6f4cb189867)
+
+**Verdict: BLOCKED stands (status stays OPEN) — no change from the 2026-11-11 ne2
+disposition; the timing-verdict half of "Required resolution" remains unproducible
+on this lane.**
+
+- Environment re-checked on this Windows x86_64 lane: no `qemu-system-*` on PATH,
+  and the lane remains forbidden `cargo`/`rustc` and entry-closure native builds,
+  so neither the SimpleOS x86_64 QEMU timing entrypoint nor a
+  `native-build`+`SIMPLE_KEEP_NATIVE_OBJS=1` probe can be produced here.
+- The receipt-side fix (`last_image_source_pixels` / `last_image_examined_pixels`
+  on `BaremetalBackend`) is present in source at this base
+  (`src/lib/gc_async_mut/gpu/engine2d/backend_baremetal.spl`); per the no-green-rerun
+  rule the already-verdicted 3/3 clip spec was not re-executed.
+- Grant unchanged: a Linux-hosted lane with the self-hosted binary runs the
+  bounded-scan vs full-scan probe through the SimpleOS x86_64 QEMU timing
+  entrypoint and records p50/p95, checksum, RSS, viewport, backend, binary
+  revision, and fallback state.

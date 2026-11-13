@@ -143,3 +143,10 @@ seed — outside a P3 bug-fix lane's authority. The pre-existing
 Owner decision needed: seed/compiler lane — isolate why co-compiled impl
 blocks lose method registration in this file's shape; decide DSL builtin
 vs file-local helper precedence.
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+Not pursued in this lane: Defect 1 (impl-method dispatch, file-global) is a seed semantic-path defect live at tip under BOTH test and run per 2026-11-11 runner8 addendum; defects 2/3 closed. Owner: seed/compiler lane.
