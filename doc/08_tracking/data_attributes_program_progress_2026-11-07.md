@@ -38,10 +38,10 @@ second collector.
 | Package | Required next result | Current qualification |
 |---|---|---|
 | W0/W1a | Extend existing schema owner with explicit views/property contracts, V2 digest, SPL/SDN equivalence and conflict refusal | V2 source and 25 unit examples approved by Astra, including UTF-8 byte bounds; execution UNEXECUTED |
-| W1b | Frontend extraction, exact language type/symbol binding including qualifiers, source/config authority, off/enabled mode, driver freeze and one LSP surface | Remaining integration; no PASS claimed |
+| W1b | Frontend extraction, exact language type/symbol binding including qualifiers, source/config authority, off/enabled mode, driver freeze and one LSP surface | Remaining integration; no PASS claimed. 2026-11-13: storage-mechanism resolver `data_attr_storage_resolve_v1` landed with the SPL tag reader (`@node_tree` class + `@attr_storage`) in `node_view_gen`; `data_schema_resolver_spec` 10/10 GREEN (interpreter lane) |
 | W2a | Reuse existing HIR site identity for real AttrRead/Write places, evaluation order, nested writes, moves, borrows and logical event identity | Site side table already landed; places/lowering remain |
 | W2b | Must-resolve construction, executed default commits/retry, cleanup, readiness and interpreter parity | V1 facts landed; no compiler/runtime enforcement proof |
-| W3b | Extend existing read pilot through actual writes/construction/retirement and sparse/direct/column exact-value/presence parity | Pilot source exists; broader runtime integration remains |
+| W3b | Extend existing read pilot through actual writes/construction/retirement and sparse/direct/column exact-value/presence parity | Pilot source exists; broader runtime integration remains. 2026-11-13: storage mechanism per attribute switchable by tag or SDN rule; committed pilot reads `op` through a generated column and `inferred_type` through the sparse hash store with value parity against the AST pool owner (`ast_node_pool_pilot_spec` 6/6 GREEN) |
 | W4b | Apply existing CollectionPlan/adaptive adapter at real source sites with exact result/order/refusal evidence | Foundation landed; source-site integration remains |
 | W5b | Bind existing data record/aggregation/profile path to admitted logical emitters and one correlated session/coverage/loss identity | Prior record/profile source exists; emitters/integration remain |
 | W6 | Three-family reference workload, report-only plan, exact next-instance/next-build results and cost/peak-memory report | Depends on W3b–W5b; no combined evidence |

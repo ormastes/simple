@@ -2,19 +2,24 @@
 """
 ## Purpose and audience
 The AST node-pool pilot exposes the binary-expression family of the existing
-compiler AST pool through a generated `@node_tree` view: `source_span`, `left`
-and `op` read through the owner accessors, and the sparse analysis attribute
-`inferred_type: text?` lives in a hash-backed side store. Readers are compiler
-authors adopting typed node views and the storage owners comparing layouts.
+compiler AST pool through a generated `@node_tree` view. The storage mechanism
+of each attribute (`direct` owner accessor, `column` array indexed by node id,
+`sparse_hash` side table) is selected by a source tag (`@attr_storage("...")`
+on the `@node_tree` class or on a field) or by an SDN `data_policy.rules` row,
+both merged by the W1 resolver; the committed pilot reads `source_span` and
+`left` directly, `op` through a column and `inferred_type: text?` through a
+sparse hash store. Readers are compiler authors adopting typed node views and
+the storage owners comparing layouts.
 Plan: doc/03_plan/compiler/data/data_attributes_layout_containers_xray_2026-11-06.md
-(W3, sections 12.1, 12.3, 14.3 item 2; ATTR-25, ATTR-26). Category: Language.
+(W3, sections 3.1, 6.2, 8.4, 12.3, 14.3 item 2; ATTR-25, ATTR-26). Category: Language.
 ## Operator workflow
 bin/simple test test/02_integration/compiler/data/ast_node_pool_pilot_spec.spl
 Regenerate the view: bin/simple run src/app/compiler_schema/main.spl node_views
 ## Compatibility and limitations
 Read and access half only: no `NotInit` builder (W2c) and no native layout
-lowering. The column and hash stores are reference adapters for parity, not
-production storage.
+lowering. The generated column and hash stores are keyed by node id and filled
+by their owner; the pilot's reference adapters are for parity, not production
+storage. A `column` attribute must not be `Option<T>` (use `sparse_hash`).
 ## Verification guidance and troubleshooting
 A RED on the freshness scenario means the committed generated view differs
 from a fresh generation: regenerate it, never hand-edit it.
@@ -25,10 +30,10 @@ from a fresh generation: regenerate it, never hand-edit it.
 use std.spec.*
 use std.nogc_sync_mut.io.file_ops.{file_read}
 use std.nogc_sync_mut.tooling.easy_fix.accessor_rewrite.{apply_accessor_fixes}
-use compiler.core.ast.{expr_binary, expr_int_lit}
+use compiler.core.ast.{expr_binary, expr_int_lit, expr_get_int}
 use compiler.frontend.generated.binary_expr_view.*
 use compiler.frontend.node_pool_pilot.*
-use app.compiler_schema.node_view_gen.{node_view_generate_text, NODE_VIEW_SCHEMA_PATH}
+use app.compiler_schema.node_view_gen.{node_view_generate_text, node_view_generate_with_source_text, NODE_VIEW_SCHEMA_PATH}
 
 # The attribute values the AST pool is built from: the oracle for every store.
 struct PilotInputs:
@@ -53,9 +58,12 @@ describe "AST node pool pilot":
         # @req REQ-ATTR-25
         step("Build two binary expressions in the compiler AST pool")
         val inputs = build_nodes()
-        step("Fill a column store and a hash-row store from the same attribute values")
+        step("Fill the reference column and hash-row stores, and the generated op column, from the same attribute values")
         val columns = binary_expr_columns_v1(inputs.nodes, inputs.spans, inputs.lefts, inputs.ops).unwrap()
         val rows = binary_expr_rows_v1(inputs.nodes, inputs.spans, inputs.lefts, inputs.ops).unwrap()
+        var op_column = BinaryExprOpColumn.create()
+        for i in 0..inputs.nodes.len():
+            expect(op_column.set(inputs.nodes[i], inputs.ops[i]).is_ok()).to_equal(true)
         # @capture(exec): attribute values per storage
         step("Verify the generated view over the pool, the columns and the rows all return the built values")
         for i in 0..inputs.nodes.len():
@@ -67,11 +75,17 @@ describe "AST node pool pilot":
             expect(view.left()).to_equal(inputs.lefts[i])
             expect(columns.left(i)).to_equal(inputs.lefts[i])
             expect(rows.left(node).unwrap()).to_equal(inputs.lefts[i])
-            expect(view.op()).to_equal(inputs.ops[i])
+            # `op` is selected as a column by the committed SDN rule: the generated
+            # column answers exactly what the AST pool owner accessor answers.
+            expect(op_column.get(node).unwrap()).to_equal(expr_get_int(node))
+            expect(op_column.get(node).unwrap()).to_equal(inputs.ops[i])
             expect(columns.op(i)).to_equal(inputs.ops[i])
             expect(rows.op(node).unwrap()).to_equal(inputs.ops[i])
-        step("Verify a missing row and a mismatched column fail instead of reading zero")
+        expect(op_column.len()).to_equal(2)  # oracle: two nodes were stored
+        step("Verify a missing row, an unset column slot and a mismatched column fail instead of reading zero")
         expect("missing_row_err:{rows.op(999999).is_err()}").to_equal("missing_row_err:true")
+        expect("unset_slot_err:{op_column.get(999999).is_err()}").to_equal("unset_slot_err:true")
+        expect("negative_node_err:{op_column.set(-1, 7).is_err()}").to_equal("negative_node_err:true")
         expect("short_column_err:{binary_expr_columns_v1(inputs.nodes, [201], inputs.lefts, inputs.ops).is_err()}").to_equal("short_column_err:true")
 
     it "keeps a sparse absent entry distinct from an explicitly stored None":
@@ -141,3 +155,45 @@ describe "AST node pool pilot":
         var forged: Dict<text, text> = {}
         forged["forged.spl"] = "# @semantic_artifact node_tree compiler.ast\n" + body
         expect(apply_accessor_fixes(forged, false).0["forged.spl"] == forged["forged.spl"]).to_equal(false)
+
+    it "emits the storage mechanism selected by a source tag or an SDN rule for each attribute":
+        # @req REQ-ATTR-25
+        step("Declare the view in SPL with a class-level tag and per-field tags, and bind the owner accessors and stores in SDN")
+        val spl = "@node_tree(\"compiler.ast\")\n@attr_storage(\"direct\")\nclass BinaryExprView:\n    source_span: i64\n    left: i64\n    @attr_storage(\"column\")\n    op: i64\n    @attr_storage(\"sparse_hash\")\n    inferred_type: text?\n"
+        val bindings = "node_views:\n    binary_expr:\n        class: \"BinaryExprView\"\n        owner_import: \"compiler.core.ast\"\n        accessors:\n            source_span: \"expr_get_span\"\n            left: \"expr_get_left\"\n            op: \"expr_get_int\"\n        stores:\n            left: \"BinaryExprLeftStore\"\n            op: \"BinaryExprOpColumn\"\n            inferred_type: \"BinaryExprInferredTypeStore\"\n"
+        val tagged = node_view_generate_with_source_text(bindings, "views.sdn", spl, "src/compiler/10.frontend/pilot_decl.spl").unwrap()
+        # @capture(exec): generated headers per mechanism
+        step("Verify each attribute header names its mechanism, target and the winning declaration")
+        expect(tagged).to_contain("left: i64 required -> direct expr_get_left (spl:src/compiler/10.frontend/pilot_decl.spl:3)")
+        expect(tagged).to_contain("op: i64 required -> column BinaryExprOpColumn (spl:src/compiler/10.frontend/pilot_decl.spl:7)")
+        expect(tagged).to_contain("inferred_type: Option<text> optional -> sparse_hash BinaryExprInferredTypeStore (spl:src/compiler/10.frontend/pilot_decl.spl:9)")
+        expect(tagged).to_contain("class BinaryExprOpColumn:")
+        expect(tagged.contains("class BinaryExprLeftStore:")).to_equal(false)
+        expect(tagged).to_contain("    fn left() -> i64:\n        expr_get_left(self.node)")
+        expect(tagged.contains("fn op() -> i64")).to_equal(false)
+        step("Verify an SDN site row overrides the class tag for one field and the schema digest does not move")
+        val sdn_left = bindings + "data_policy:\n    rules:\n        left_sparse:\n            site: \"compiler.ast.BinaryExprView.left\"\n            layout: \"sparse_hash\"\n"
+        val switched = node_view_generate_with_source_text(sdn_left, "views.sdn", spl, "src/compiler/10.frontend/pilot_decl.spl").unwrap()
+        expect(switched).to_contain("left: i64 required -> sparse_hash BinaryExprLeftStore (sdn:views.sdn:")
+        expect(switched).to_contain("class BinaryExprLeftStore:")
+        expect(switched.contains("fn left() -> i64")).to_equal(false)
+        val digest_tagged = tagged.split("\n")[3]
+        expect(digest_tagged).to_contain("schema_digest ")
+        expect(switched.split("\n")[3]).to_equal(digest_tagged)
+        step("Verify a field tag and a disagreeing SDN pin are refused with both locations, and an unknown token is refused")
+        val sdn_pin = bindings + "data_policy:\n    rules:\n        op_hash:\n            site: \"compiler.ast.BinaryExprView.op\"\n            layout: \"sparse_hash\"\n            pin: true\n"
+        val conflict = node_view_generate_with_source_text(sdn_pin, "views.sdn", spl, "src/compiler/10.frontend/pilot_decl.spl")
+        expect(conflict.is_err()).to_equal(true)
+        expect(conflict.unwrap_err()).to_contain("pilot_decl.spl:7")
+        expect(conflict.unwrap_err()).to_contain("views.sdn:")
+        val unknown = node_view_generate_with_source_text(bindings, "views.sdn", spl.replace("\"column\"", "\"heap\""), "src/compiler/10.frontend/pilot_decl.spl")
+        expect(unknown.is_err()).to_equal(true)
+        expect(unknown.unwrap_err()).to_contain("heap")
+        step("Verify a column over an Option<T> attribute and a direct attribute without an owner accessor are refused")
+        val option_column = node_view_generate_with_source_text(bindings, "views.sdn", spl.replace("@attr_storage(\"sparse_hash\")", "@attr_storage(\"column\")"), "src/compiler/10.frontend/pilot_decl.spl")
+        expect(option_column.unwrap_err()).to_contain("inferred_type")
+        val no_accessor = node_view_generate_with_source_text(bindings.replace("            source_span: \"expr_get_span\"\n", ""), "views.sdn", spl, "src/compiler/10.frontend/pilot_decl.spl")
+        expect(no_accessor.unwrap_err()).to_contain("source_span")
+        step("Verify a declaration source without a @node_tree class is refused")
+        val untagged = node_view_generate_with_source_text(bindings, "views.sdn", "class Plain:\n    x: i64\n", "src/compiler/10.frontend/plain.spl")
+        expect(untagged.unwrap_err()).to_contain("no @node_tree")
