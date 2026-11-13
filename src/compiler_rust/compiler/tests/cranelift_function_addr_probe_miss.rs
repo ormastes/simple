@@ -7,6 +7,9 @@
 //! not print `cranelift: function address missing declaration <fn>` — that
 //! line reads as a codegen failure during triage.
 //! Regression: doc/08_tracking/bug/cranelift_function_addr_probe_miss_diagnostic_2026-11-06.md
+// fd-2 capture uses POSIX pipe/dup2 via `libc` (a unix-only dev-dependency);
+// on Windows this target never compiled and broke the whole `cargo test` run.
+#![cfg(unix)]
 use simple_compiler::codegen::cranelift_sffi::*;
 
 static STDERR_CAPTURE_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
