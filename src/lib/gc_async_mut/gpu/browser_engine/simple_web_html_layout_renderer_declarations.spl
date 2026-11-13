@@ -1197,6 +1197,32 @@ fn _decl_tbl_raw_or(table: [text], prop: text, fallback: text) -> text:
         return fallback
     decl_tbl_get(table, prop).trim().lower()
 
+fn _inset_token_is_auto(token: text) -> bool:
+    token == "" or token == "auto" or token == "initial" or
+        token == "unset" or token == "revert"
+
+fn _authored_inset_auto(
+    previous_auto: bool, table: [text], longhand: text, inset_index: i32,
+    axis_shorthand: text, start_longhand: text
+) -> bool:
+    var is_auto = previous_auto
+    val longhand_pos = decl_tbl_last_index(table, longhand)
+    if longhand_pos >= 0:
+        is_auto = _inset_token_is_auto(decl_tbl_get(table, longhand).trim().lower())
+    val inset_pos = decl_tbl_last_index(table, "inset")
+    if inset_pos >= 0 and inset_pos > longhand_pos:
+        is_auto = _inset_token_is_auto(
+            nth_box_token(decl_tbl_get(table, "inset"), inset_index))
+    val axis_pos = decl_tbl_last_index(table, axis_shorthand)
+    if axis_pos >= 0 and axis_pos > longhand_pos:
+        is_auto = _inset_token_is_auto(
+            nth_box_token(decl_tbl_get(table, axis_shorthand), 0))
+    val start_pos = decl_tbl_last_index(table, start_longhand)
+    if start_pos >= 0 and start_pos > longhand_pos:
+        is_auto = _inset_token_is_auto(
+            decl_tbl_get(table, start_longhand).trim().lower())
+    is_auto
+
 fn apply_authored_style_metadata(
     mut st: Style, previous: Style, table: [text],
     logical_writing_mode: text
@@ -1207,6 +1233,12 @@ fn apply_authored_style_metadata(
     st.height_auto = previous.height_auto
     st.align_items_authored = previous.align_items_authored
     st.scrollbar_width_none = previous.scrollbar_width_none
+    # Mirrors the left/top precedence in apply_decls: the longhand, then each
+    # shorthand that appears after it.
+    st.left_auto = _authored_inset_auto(
+        previous.left_auto, table, "left", 3, "inset-inline", "inset-inline-start")
+    st.top_auto = _authored_inset_auto(
+        previous.top_auto, table, "top", 0, "inset-block", "inset-block-start")
     # Same normal form as web_fractional_capture_authored_decls, which the
     # fractional resolver compares these against.
     st.transform_raw = _decl_tbl_raw_or(table, "transform", previous.transform_raw)
@@ -1604,6 +1636,8 @@ fn _tag_defaults_without_metadata(st: Style, tag: text) -> Style:
 fn tag_defaults(st: Style, tag: text) -> Style:
     val out = _tag_defaults_without_metadata(st, tag)
     out.height_auto = st.height_auto
+    out.left_auto = st.left_auto
+    out.top_auto = st.top_auto
     out.align_items_authored = st.align_items_authored
     out.scrollbar_width_none = st.scrollbar_width_none
     out.list_style_none = st.list_style_none
