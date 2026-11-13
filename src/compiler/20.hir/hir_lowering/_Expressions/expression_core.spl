@@ -604,8 +604,10 @@ impl HirLowering:
                         val mc_instance_method_raw: i64 = self.symbols.record_instance_method_scalar_raw(mc_instance_owner_raw, method_name_t)
                         mc_resolution = MethodResolution.InstanceMethod(SymbolId(id: mc_instance_owner_raw), SymbolId(id: mc_instance_method_raw))
                     var hir_args: [HirCallArg] = []
+                    val mc_lambda_hint: HirType = self.lambda_element_hint_for_method(mc_lowered_receiver.kind, method_name_t, e.span)
                     for arg in method_args_t:
                         val marg_t: CallArg = arg
+                        self.stage_lambda_param_hint(marg_t.value, mc_lambda_hint)
                         hir_args = hir_args.push(HirCallArg(
                             has_name: marg_t.has_name,
                             name: marg_t.name,
@@ -1332,8 +1334,10 @@ impl HirLowering:
                     val fallback_instance_method_raw: i64 = self.symbols.record_instance_method_scalar_raw(fallback_instance_owner_raw, method_name_t)
                     fallback_resolution = MethodResolution.InstanceMethod(SymbolId(id: fallback_instance_owner_raw), SymbolId(id: fallback_instance_method_raw))
                 var hir_args: [HirCallArg] = []
+                val fb_lambda_hint: HirType = self.lambda_element_hint_for_method(lowered_method_receiver.kind, method_name_t, e.span)
                 for arg in method_args_t:
                     val marg_t: CallArg = arg
+                    self.stage_lambda_param_hint(marg_t.value, fb_lambda_hint)
                     # All-four-fields construction: see Call arm above.
                     hir_args = hir_args.push(HirCallArg(
                         has_name: marg_t.has_name,
@@ -1445,6 +1449,15 @@ impl HirLowering:
                 # outer type_erasure grant cannot authorize its stored types.
                 val enclosing_any_unsafe_depth = self.written_any_unsafe_depth
                 self.written_any_unsafe_depth = 0
+                # Consume the element hint staged by an element-wise array
+                # method call (lambda_element_hint_for_method); clear it so no
+                # nested lambda inherits it.
+                val lam_elem_hint: HirType = self.lambda_param_hint
+                self.lambda_param_hint = HirType(kind: HirTypeKind.Error, span: e.span)
+                var lam_has_hint = false
+                match lam_elem_hint.kind:
+                    case HirTypeKind.Error: ()
+                    case _: lam_has_hint = params.len() == 1
                 self.symbols.push_scope(ScopeKind.Function)
                 var hir_params: [HirParam] = []
                 # Cycle-161 (v22, 2026-10-18): NO for-in element rebind --
@@ -1458,8 +1471,13 @@ impl HirLowering:
                 while lam_param_i < params.len():
                     val lam_p_name: text = params[lam_param_i].name
                     val lam_p_type_raw: Type = params[lam_param_i].type_
+                    val lam_p_annotated: bool = params[lam_param_i].has_type_
                     val lam_p_span: Span = params[lam_param_i].span
-                    val type_ = if lam_p_type_raw.?: self.lower_type(lam_p_type_raw) else: HirType(kind: HirTypeKind.Infer(0, 0), span: lam_p_span)
+                    var type_: HirType = HirType(kind: HirTypeKind.Infer(0, 0), span: lam_p_span)
+                    if lam_has_hint and not lam_p_annotated:
+                        type_ = lam_elem_hint
+                    elif lam_p_type_raw.?:
+                        type_ = self.lower_type(lam_p_type_raw)
                     val symbol = self.symbols.define(lam_p_name, SymbolKind.Parameter, Some(type_), lam_p_span, Visibility.Private, false, nil)
                     hir_params = hir_params.push(HirParam(
                         symbol: symbol,
