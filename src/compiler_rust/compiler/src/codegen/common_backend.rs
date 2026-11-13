@@ -627,6 +627,7 @@ pub(crate) fn runtime_symbol_is_codegen_root(name: &str) -> bool {
             | "rt_string_bytes"
             // Erased `.to_i64()`/`.to_int()` receivers synthesize this call
             // during Cranelift lowering, so it is absent from MIR call names.
+            // (`rt_any_to_int` is ALSO a MIR call now, for `any as <int>`.)
             | "rt_to_int_dynamic"
             | "rt_any_to_int"
             | "rt_string_builder_new"
@@ -718,6 +719,7 @@ pub(crate) fn runtime_symbol_is_codegen_root(name: &str) -> bool {
             // entry is likely redundant with referenced_call_names, but kept
             // for parity/safety with the explicit call-site pattern.
             | "rt_opt_i64_to_string"
+            | "rt_i64_to_hex"
             | "rt_opt_value_to_string"
             | "rt_opt_bool_to_string"
             | "rt_opt_f64_to_string"

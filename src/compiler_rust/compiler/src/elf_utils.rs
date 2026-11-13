@@ -787,6 +787,7 @@ pub(crate) fn resolve_runtime_symbol(name: &str) -> Option<usize> {
         // JIT cannot reach them (no dlsym fallback for exe symbols) and strict
         // mode refuses the module. doc/08_tracking/bug/jit_primitive_method_parity_gaps_2026-11-13.md
         "rt_opt_i64_to_string" => simple_runtime::rt_opt_i64_to_string as *const () as usize,
+        "rt_i64_to_hex" => simple_runtime::rt_i64_to_hex as *const () as usize,
         "rt_opt_value_to_string" => simple_runtime::rt_opt_value_to_string as *const () as usize,
         "rt_opt_bool_to_string" => simple_runtime::rt_opt_bool_to_string as *const () as usize,
         "rt_opt_f64_to_string" => simple_runtime::rt_opt_f64_to_string as *const () as usize,

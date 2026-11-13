@@ -1030,7 +1030,12 @@ impl ExecCore {
         // through the hosted runtime, rather than the interpreter argument
         // store. Initialize that runtime boundary before choosing a lane so
         // every execution mode observes the same supplied argv.
-        simple_runtime::value::rt_set_args_vec(&args);
+        // `set_interpreter_args` also fills the interpreter's thread-local
+        // store read by `rt_cli_get_args`/`rt_cli_arg_count`/`rt_cli_arg_at`:
+        // the JIT lane's no-main arm runs the module on the interpreter, which
+        // otherwise saw an empty argv there. See
+        // doc/08_tracking/bug/no_main_runtime_error_reruns_on_interpreter_2026-11-13.md.
+        simple_compiler::set_interpreter_args(args.clone());
 
         // The wasm lane is checked before the extension match so that it cannot
         // be reached by only one of the two run entry points. `run_file_with_args`
@@ -1052,9 +1057,15 @@ impl ExecCore {
                 }
                 if self.execution_mode.is_jit() {
                     // Try JIT first, fall back to interpreter on failure
-                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.run_file_jit(path))) {
+                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.run_file_jit_outcome(path))) {
                         Ok(Ok(exit_code)) => Ok(exit_code),
-                        Ok(Err(jit_err)) => {
+                        // The program already ran (on the interpreter, in the
+                        // no-main arm) and failed: that is the program's own
+                        // verdict, not a JIT gap. Re-running it would repeat
+                        // its output and side effects.
+                        // See doc/08_tracking/bug/no_main_runtime_error_reruns_on_interpreter_2026-11-13.md.
+                        Ok(Err(JitRunError::AlreadyExecuted(run_err))) => Err(run_err),
+                        Ok(Err(JitRunError::Unsupported(jit_err))) => {
                             // SIMPLE_JIT_STRICT fail-open fix: `first_unresolved_import`
                             // in codegen/jit.rs already tags its error message with a
                             // "SIMPLE_JIT_STRICT:" prefix specifically when the strict
@@ -1131,6 +1142,20 @@ impl ExecCore {
     /// Loads with import resolution → HIR → MIR → JIT compile → execute.
     /// Falls back to interpreter for code without `fn main()`.
     pub fn run_file_jit(&self, path: &Path) -> Result<i32, String> {
+        self.run_file_jit_outcome(path).map_err(JitRunError::into_message)
+    }
+
+    /// `run_file_jit` with the failure classified: `AlreadyExecuted` when the
+    /// program itself ran (no-main interpreter arm) and failed, so the caller
+    /// must not run it again; `Unsupported` for every other failure.
+    fn run_file_jit_outcome(&self, path: &Path) -> Result<i32, JitRunError> {
+        self.run_file_jit_inner(path).map_err(JitRunError::Unsupported)?
+    }
+
+    /// Body of `run_file_jit`. The outer `Err(String)` is a JIT-side failure
+    /// (nothing of the program ran); the inner result is the outcome of a
+    /// program that did run.
+    fn run_file_jit_inner(&self, path: &Path) -> Result<Result<i32, JitRunError>, String> {
         use simple_compiler::codegen::{ExecutionManager, LocalExecutionManager, JitBackend};
         use simple_compiler::hir;
         use simple_compiler::interpreter::{evaluate_module, set_current_file};
@@ -1371,10 +1396,12 @@ impl ExecCore {
                  (set SIMPLE_JIT_SPEC_ENTRY=1 to run a spec's module-level examples on the JIT)",
                 path.display()
             );
-            let exit_code = evaluate_module(&ast.items).map_err(|e| format!("{}", e))?;
+            // From here on the program itself runs: a failure is its verdict,
+            // never a reason to fall back and run it again.
+            let outcome = evaluate_module(&ast.items).map_err(|e| JitRunError::AlreadyExecuted(format!("{}", e)));
             set_current_file(None);
             self.collect_gc();
-            return Ok(exit_code);
+            return Ok(outcome);
         }
 
         // Module-level BDD example blocks are not reachable from the JIT entry
@@ -1480,7 +1507,7 @@ impl ExecCore {
         }
         set_current_file(None);
         self.collect_gc();
-        Ok(exit_code as i32)
+        Ok(Ok(exit_code as i32))
     }
 
     /// Get the build path for a compiled SMF file
@@ -1643,6 +1670,25 @@ fn finish_jit_spec_entry(path: &Path) -> i32 {
         1
     } else {
         0
+    }
+}
+
+/// Why the JIT lane of `run_file_with_args` did not finish with an exit code.
+#[derive(Debug)]
+enum JitRunError {
+    /// The JIT could not compile or run the program; none of it ran, so the
+    /// interpreter fallback is safe.
+    Unsupported(String),
+    /// The program already ran (the no-main arm hands the module to the
+    /// interpreter) and failed. Must propagate: a fallback would run it twice.
+    AlreadyExecuted(String),
+}
+
+impl JitRunError {
+    fn into_message(self) -> String {
+        match self {
+            JitRunError::Unsupported(msg) | JitRunError::AlreadyExecuted(msg) => msg,
+        }
     }
 }
 
@@ -1855,9 +1901,10 @@ fn interpreter_preference_reason(path: &Path, extension: &str, cli_args_backed: 
     // 2026-08-21 on src/compiler/80.driver/driver_types.spl).
     //
     // The gate existed because the JIT lane had no argv hook. It does now:
-    // `run_file_with_args` calls `simple_runtime::value::rt_set_args_vec(&args)`
-    // for EVERY lane before choosing one, so the hosted runtime's argv store is
-    // populated identically for JIT and interpreter. `cli_args_backed` is the
+    // `run_file_with_args` calls `simple_compiler::set_interpreter_args(args)`
+    // (which also calls `rt_set_args_vec`) for EVERY lane before choosing one,
+    // so the hosted runtime's argv store is populated identically for JIT and
+    // interpreter. `cli_args_backed` is the
     // real capability check -- the caller asks the symbol provider whether that
     // store's accessor is actually linked into THIS build -- so the gate now
     // fires only when the capability is genuinely absent, instead of whenever a
@@ -2309,6 +2356,7 @@ mod execution_mode_validation_tests {
         if !core.execution_mode.is_jit() {
             return; // SIMPLE_EXECUTION_MODE overrides the lane under test
         }
+        let _env = jit_env_lock();
         let result = core.run_file_with_args(&entry, vec![]);
         let err = result.expect_err("private import must be rejected, not executed by the interpreter fallback");
         assert!(err.contains("is not visible to"), "unexpected error: {err}");
@@ -2323,6 +2371,82 @@ mod execution_mode_validation_tests {
                 "interpreted retry #{attempt} must still reject: {again:?}"
             );
         }
+    }
+
+    /// no_main_runtime_error_reruns_on_interpreter_2026-11-13: a main-less
+    /// script already runs on the interpreter inside `run_file_jit`; when it
+    /// fails at runtime the driver must propagate, not run it a second time.
+    /// Red before the fix: the side-effect file held two lines.
+    #[test]
+    fn no_main_runtime_error_runs_once_on_jit_lane() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let side = dir.path().join("side.txt");
+        let entry = dir.path().join("noman.spl");
+        std::fs::write(
+            &entry,
+            format!(
+                "extern fn rt_file_append_text(path: text, content: text) -> bool\n\
+                 val ok = rt_file_append_text(\"{}\", \"A\\n\")\n\
+                 print \"A\"\n\
+                 val xs = [1]\n\
+                 print xs[5]\n",
+                side.display()
+            ),
+        )
+        .unwrap();
+        let core = super::ExecCore::new();
+        if !core.execution_mode.is_jit() {
+            return; // SIMPLE_EXECUTION_MODE overrides the lane under test
+        }
+        let _env = jit_env_lock();
+        let result = core.run_file_with_args(&entry, vec![]);
+        let err = result.expect_err("a runtime error must fail the run");
+        assert!(err.contains("index out of bounds"), "unexpected error: {err}");
+        let written = std::fs::read_to_string(&side).expect("side-effect file");
+        assert_eq!(written.lines().count(), 1, "program ran more than once: {written:?}");
+    }
+
+    /// The JIT lane's no-main arm runs the module on the interpreter; the
+    /// interpreter's `rt_cli_*` argv store must hold the supplied args there,
+    /// as it does on the interpreted lane. Red before the fix: "0|".
+    #[test]
+    fn no_main_script_sees_cli_args_on_jit_lane() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let side = dir.path().join("side.txt");
+        let entry = dir.path().join("noman_args.spl");
+        std::fs::write(
+            &entry,
+            format!(
+                "extern fn rt_file_append_text(path: text, content: text) -> bool\n\
+                 extern fn rt_cli_arg_count() -> i64\n\
+                 extern fn rt_cli_get_args() -> [text]\n\
+                 val n = rt_cli_arg_count()\n\
+                 val joined = rt_cli_get_args().join(\",\")\n\
+                 val ok = rt_file_append_text(\"{}\", \"{{n}}|{{joined}}\")\n",
+                side.display().to_string().replace('\\', "/")
+            ),
+        )
+        .unwrap();
+        let core = super::ExecCore::new();
+        if !core.execution_mode.is_jit() {
+            return; // SIMPLE_EXECUTION_MODE overrides the lane under test
+        }
+        let args = vec!["noman_args.spl".to_string(), "x".to_string(), "y".to_string()];
+        let _env = jit_env_lock();
+        let result = core.run_file_with_args(&entry, args);
+        assert_eq!(result, Ok(0), "main-less script must run");
+        let written = std::fs::read_to_string(&side).expect("side-effect file");
+        assert_eq!(written, "3|noman_args.spl,x,y");
+    }
+
+    /// Serialises the tests that run the JIT lane against the one that sets
+    /// `SIMPLE_JIT_STRICT`: under strict mode the no-main arm and the
+    /// interpreter fallback refuse to run, so a concurrent setter flakes them.
+    /// Every test that sets `SIMPLE_JIT_STRICT` or runs a fallback-capable
+    /// JIT lane must hold this guard.
+    pub(super) fn jit_env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// Every documented spelling must parse, and must parse to the lane its
@@ -2446,9 +2570,13 @@ mod jit_top_level_statement_tests {
         std::fs::write(dir.path().join("modb.spl"), "pub fn helper(x: i64) -> i64:\n    x + 41\n").unwrap();
         let entry = dir.path().join("main.spl");
         std::fs::write(&entry, "use modb.{helper}\n\nfn main() -> i64:\n    helper(1)\n").unwrap();
-        std::env::set_var("SIMPLE_JIT_STRICT", "1");
-        let rc = ExecCore::new().run_file_jit(&entry);
-        std::env::remove_var("SIMPLE_JIT_STRICT");
+        let rc = {
+            let _env = super::execution_mode_validation_tests::jit_env_lock();
+            std::env::set_var("SIMPLE_JIT_STRICT", "1");
+            let rc = ExecCore::new().run_file_jit(&entry);
+            std::env::remove_var("SIMPLE_JIT_STRICT");
+            rc
+        };
         assert_eq!(rc, Ok(42), "imported helper must run on the JIT");
     }
 

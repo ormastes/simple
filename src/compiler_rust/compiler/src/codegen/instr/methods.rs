@@ -743,6 +743,20 @@ pub(crate) fn compile_scalar_parity_method<M: Module>(
             }
         };
         Some((flag, TypeId::BOOL))
+    } else if src_ty.is_int() && method == "to_hex" && args.is_empty() {
+        // `rt_i64_to_hex` (C twin in runtime_native.c) formats the 64-bit
+        // two's-complement pattern, matching the interpreter's `{:x}`.
+        let wide = if src_ty == types::I64 {
+            receiver_val
+        } else if unsigned {
+            builder.ins().uextend(types::I64, receiver_val)
+        } else {
+            builder.ins().sextend(types::I64, receiver_val)
+        };
+        let func_id = ctx.runtime_funcs["rt_i64_to_hex"];
+        let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
+        let call = adapted_call(builder, func_ref, &[wide]);
+        Some((builder.inst_results(call)[0], TypeId::STRING))
     } else if src_ty.is_int() && matches!(method, "sign" | "signum") {
         let zero = builder.ins().iconst(src_ty, 0);
         let gt_cc = if unsigned { IntCC::UnsignedGreaterThan } else { IntCC::SignedGreaterThan };
