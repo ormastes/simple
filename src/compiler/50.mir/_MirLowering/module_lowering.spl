@@ -3203,6 +3203,45 @@ impl MirLowering:
         mir_section_profile_mark("p7_globals", module.name)
 
         if bootstrap_mode:
+            # Own-enum payload registration for the bootstrap-flat lane. This
+            # branch returns before the non-bootstrap tail's own-enum pass
+            # (step c far below), so on a shared lowering instance (the
+            # bootstrap-fixed driver lane lowers the whole closure through ONE
+            # instance after a single global enum inventory) the payload rows
+            # installed by that inventory and by earlier modules' provider
+            # passes survive every dedup: enum_registration_current is keyed
+            # by bare name and records a runtime_name that is invariant across
+            # a declaration's per-module HirEnum copies, so neither
+            # provider_enum_row_current_v1 nor enum_registration_is_current_v1
+            # can evict them. The surviving rows' HirTypes carry the
+            # REGISTERING copy's SymbolIds (per-module numbering restarts at
+            # zero), while enum_payload_local_compatible reads them through
+            # THIS module's symbol table -- so every nominal/array/tuple
+            # payload construction is rejected "payload type mismatch at N"
+            # against a foreign row (scalar payloads are symbol-free and pass,
+            # which is why only those shapes fail). The tail pass exists for
+            # exactly this reason; do the same here, before any constant or
+            # body can construct a payload. module.enums carries this
+            # consumer's re-lowered imports (consumer-local SymbolIds), so the
+            # re-registration binds rows this module's checks can resolve.
+            val bs_enum_values = module.enums.values()
+            var bs_enum_i = 0
+            while bs_enum_i < bs_enum_values.len():
+                val bs_enum_def: HirEnum = bs_enum_values[bs_enum_i]
+                self.enum_registration_current[bs_enum_def.name] = ""
+                self.register_enum_variants(bs_enum_def)
+                self.register_enum_runtime_id(bs_enum_def)
+                bs_enum_i = bs_enum_i + 1
+            if (mir_lower_env_get("SIMPLE_ENUM_REG_TRACE") ?? "") == "1":
+                eprint("[enum-reg] bs-own-enums module={module.name} count={bs_enum_values.len()}")
+                if self.enum_variant_payload_types.has("compiler.blocks.definition.ConstValue::Array"):
+                    val probe_types = self.enum_variant_payload_types["compiler.blocks.definition.ConstValue::Array"]
+                    match probe_types[0].kind:
+                        case HirTypeKind.Named(probe_sym, _):
+                            eprint("[enum-reg] bs-own-enums row module={module.name} constvalue_array_elem_id={probe_sym.id}")
+                        case _: ()
+            if bootstrap_trace:
+                print "[mir-lower] enums:registered count={bs_enum_values.len()}"
             if bootstrap_trace:
                 print "[mir-lower] fn-list:start"
             # Module-level `val` constants MUST lower BEFORE function bodies:

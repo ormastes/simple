@@ -296,3 +296,183 @@ hir_codec_optional_enum_decoder (3/3) + hir_codec_nil_scalar_reject (12/12)
 pass under the pinned seed against the regenerated codec; the two
 bare-node/struct-field codec specs fail identically on the pristine pin
 (zero-examples from the pre-14ab345965a classify breakage).
+
+## Root cause found (2026-11-13, lane work/enum-payload-registry-20261113): foreign payload-registry rows in the bootstrap-fixed lane
+
+The five-victim family (ConstValue.Array, JsonKind.Array, JsonValue.Object,
+MirTypeKind.Tuple, MirOperandKind.Copy) is NEITHER the Nil/Unit class NOR
+site-level mistyping (the Fix table above covers that class and its
+parallel-lane follow-ups). It is a REGISTRY-OWNERSHIP defect in the
+`aot:bootstrap_fixed` lane -- exactly the hazard the non-bootstrap tail
+comment at module_lowering.spl step c (the old :3345-3359 block) describes.
+
+### Lane mechanics
+
+- Gate (driver_pipeline_lowering.spl): the entry closure contains
+  `app.cli.bootstrap_main` AND `allow_bootstrap_shortcuts` (positional
+  native-build) AND `SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1` AND
+  `SIMPLE_BOOTSTRAP=1` (and not STAGE4).
+- That lane builds ONE shared `bootstrap_lowering` instance and registers
+  the whole closure's enums ONCE up front
+  (`register_module_enum_bootstrap_inventory_v1`,
+  module_lowering.spl:2401-2410; the driver comment at
+  driver_pipeline_lowering.spl:1112-1122 records why: "lower_module's
+  bootstrap-flat branch returns before the non-bootstrap tail, so on this
+  fresh lowering instance NO enum registration exists").
+- Every closure module then lowers through `lower_module`'s
+  `bootstrap_mode` branch, which RETURNS EARLY (module_lowering.spl:3205+)
+  -- the non-bootstrap tail's own-enum pass (clear
+  `enum_registration_current[name]`, re-register `module.enums`) NEVER
+  RUNS on this lane.
+- The per-module provider pass cannot repair it: both dedup predicates
+  (`provider_enum_row_current_v1`, `enum_registration_is_current_v1`) are
+  keyed by BARE NAME and compare the recorded runtime_name, which is
+  INVARIANT across a declaration's per-module HirEnum copies. Whichever
+  module's copy the inventory registered LAST keeps its rows pinned for
+  every later consumer. (HIR re-lowers every imported enum into each
+  consumer's `module.enums` with consumer-local SymbolIds --
+  20.hir/hir_lowering/_Items/module_build.spl:276-301; SymbolTable symbol
+  numbering restarts per module, hir_types.spl:375.)
+- Result: `enum_variant_payload_types` rows carry the REGISTERING copy's
+  SymbolIds, but `enum_payload_local_compatible`
+  (enum_constructor_payload.spl:326) resolves them through the CURRENT
+  module's `self.symbols` and compares against the consumer's
+  remembered/source types (consumer-local ids). A foreign id either misses
+  `symbols.symbols.has()` (kind 0) or aliases an unrelated same-numbered
+  symbol; either way `enum_payload_named_alias_equal`
+  (enum_payload_type_identity.spl:18) says no. Scalar payloads are
+  symbol-free (`mir_hir_type_is_symbol_free`) and pass on MIR-kind
+  evidence -- which is why ONLY array/tuple/nominal payloads fail, and why
+  the stage3 run sealed-failed 1650/1650 modules.
+
+### Trace evidence (minimal in-lane fixture, stage2-admitted binary sha 197b4e93)
+
+Fixture: a replacement `src/app/cli/bootstrap_main.spl` whose closure is
+13 modules (`use`s of lib.common.json.value + compiler.blocks.definition),
+plus three modules that all import `ConstValue`/`JsonValue` and construct
+BOUND-VARIABLE payloads (the exact json_to_const / mapping shapes). Run:
+`SIMPLE_BOOTSTRAP=1 SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1 native-build
+<fixture>/bootstrap_main.spl --entry-closure --threads=1 --low-memory`
+(also needs the pinned SDKROOT/MACOSX_DEPLOYMENT_TARGET vector). The fake
+entry passes the bootstrap_fixed gate, so the whole probe runs IN the
+failing lane at 13-module scale (~5 s with warm HIR cache).
+
+Unpatched, traced (SIMPLE_ENUM_PAYLOAD_TRACE=1
+SIMPLE_ENUM_PAYLOAD_PATH_TRACE=1):
+
+    [enum-payload-path] remembered module=app.cli.enumfix_m1 local=13 expected='[named#4]' actual='[named#1]'
+    [enum-payload] module=app.cli.enumfix_m1 expected='[named#4]' line=8 remembered='[named#1]' source='[named#1]' mir=present
+    [enum-payload] module=app.cli.enumfix_m1 expected='[named#3]' line=13 remembered='none' source='[named#0]' mir=present
+    [enum-payload] module=app.cli.enumfix_m2 expected='[named#4]' line=8 ...   (m2/m3: identical foreign ids)
+    [enum-payload] module=lib.common.json.value expected='[named#3]' line=85 remembered='[named#8]' source='[named#8]' mir=present
+
+- remembered/source ids are CONSUMER-local (m1's own `[ConstValue]`
+  annotation is `named#1`); the expected row was installed by ANOTHER
+  module's copy (`named#4` does not resolve to ConstValue in m1's table).
+- Even the DECLARING module reads a foreign row for its own enum:
+  lib.common.json.value's local JsonValue is `named#8`, the registry says
+  `named#3` (m1/m2/m3 import JsonValue; the inventory's LAST copy wins).
+- Errors byte-match the stage3 log family:
+  `enum construction 'compiler.blocks.definition.ConstValue.Array':
+  payload type mismatch at 0; function=trigger_m1`,
+  `'lib.common.json.value.JsonValue.Object': payload type mismatch at 1`,
+  plus in-module `JsonValue.Array at 0` from `_json_value_array_at`
+  (mirrors the stage3 log's lib.common.json.value failures).
+- Scalar control in the same functions (`ConstValue.Int(7)`, expected
+  'i64') passes via mir-evidence -- the check itself is correct; the
+  corruption is registration ownership.
+
+### A/B: same binary, same sources, only registration ownership differs
+
+- bootstrap_fixed lane (fixture entry, WHOLE_PROGRAM=1): 13 payload
+  mismatches (traces above).
+- DIRECT lane (same fixture entry, no WHOLE_PROGRAM -- the gate falls
+  through to the shared-direct lane, whose non-bootstrap tail runs the
+  own-enum pass): ZERO payload errors. Path trace:
+  `remembered module=app.cli.bootstrap_main local=7 expected='[named#4]'
+  actual='[named#4]'` -> `remembered-accept`. The only failing unit is
+  lib.common.json.value at llc ("defined with type 'i64' but expected
+  'ptr'") -- the pre-existing codegen lane artifact documented above, not
+  a payload error.
+- Interpretation: with consumer-local rows, expected == remembered and the
+  strict check accepts these exact construction shapes. The ONLY delta
+  between the two lanes' outcomes is the missing per-consumer enum
+  re-registration in the bootstrap branch.
+
+### Why the admitted stage-2 binary could not self-validate the fix
+
+The stage2-admitted binary executes its OWN compiled-in lowering logic;
+edits to 50.mir sources change only the STAGE-3 OUTPUT, not the running
+checker. (Confirmed: an instrumented patch adding an
+SIMPLE_ENUM_REG_TRACE receipt to the bootstrap branch printed NOTHING when
+the old binary compiled the fixture.) Validating lowered-code fixes
+requires either (a) the seed-rebuilt stage-2 binary, or (b) the seed's
+`native-build` dispatch, which runs `native_build_worker.spl` FROM SOURCE
+(`simple run src/app/cli/native_build_worker.spl ...`) and therefore
+executes patched compiler logic interpreted (usable but slow: the fixture
+probe did not reach MIR in 15 min).
+
+### Fix (module_lowering.spl:3205-3244, lower_module bootstrap branch)
+
+Port the tail's own-enum pass into the bootstrap branch, before any module
+constant or function body can construct a payload:
+
+    if bootstrap_mode:
+        val bs_enum_values = module.enums.values()
+        var bs_enum_i = 0
+        while bs_enum_i < bs_enum_values.len():
+            val bs_enum_def: HirEnum = bs_enum_values[bs_enum_i]
+            self.enum_registration_current[bs_enum_def.name] = ""
+            self.register_enum_variants(bs_enum_def)
+            self.register_enum_runtime_id(bs_enum_def)
+            bs_enum_i = bs_enum_i + 1
+        ... (SIMPLE_ENUM_REG_TRACE-gated bs-own-enums receipt)
+
+- Clearing the bare-name mark first forces the full re-registration (the
+  dedup would otherwise skip; same discipline as the tail pass).
+- `module.enums` holds this consumer's re-lowered imports with
+  consumer-local SymbolIds, so payload rows become resolvable through
+  `self.symbols`. Variant names/discriminants and runtime ids are
+  identical across copies (runtime id is a hash of the invariant
+  runtime_name), so emission is unaffected. The two same-named JsonValue
+  enums' collision behaviour (`enum_constructor_metadata_owner` -> "" ->
+  untyped route) is unchanged.
+- Scope: bootstrap branch only; the non-bootstrap lane is untouched (its
+  tail pass already does exactly this). Cost: O(len(module.enums)) per
+  module -- the same price the non-bootstrap lane already pays per module.
+
+### Verification status
+
+- Mechanism + before-state: traced foreign-row ids in the failing lane
+  (above), byte-matching the stage3 log family. OPEN.
+- Fix discipline: PROVEN equivalent to the direct lane's tail pass, which
+  ACCEPTS the same fixture with zero payload errors (same stage-2 binary).
+- Compiled-mode A/B (seed-rebuilt stage-2 from the patched worktree, then
+  the fixture in the bootstrap_fixed lane): seed build launched from
+  /private/tmp/perf-fix-enum with the pinned f9dd7ada764 seed
+  (log /tmp/enum-fix-probe/seed-build-patched.log, output
+  /tmp/enum-fix-probe/stage2-patched/simple); parse-bound (~1659 modules),
+  still running at handoff. NOTE: the pinned seed prints a NON-FATAL
+  "workarounds: refresh failed ... unknown canonical bug ID
+  riscv64_guest_result_text_payload_empty_2026_11_06" for this source
+  pair and continues.
+- direct-env-runtime-guard: not applicable (no new env reads beyond the
+  existing mir_lower_env_get pattern already used throughout the file).
+
+### Residual risk
+
+1. The fix is verified by equivalence with the direct lane's proven
+   discipline, not yet by a compiled stage-3 MIR run on the full closure
+   (the seed build was still parsing at handoff). If the seed build
+   completes, run the fixture A/B and, if time allows, one full
+   bootstrap_main probe to measure stage-3 MIR progress; expect the
+   payload family to vanish and possibly expose unrelated downstream
+   stage-3 defects (the doc's other open families).
+2. Per-module re-registration on the shared instance grows
+   enum_variant_payload_types churn; the transient scope promotes the
+   registries as before, but RSS on the 1650-module closure should be
+   watched on the first real stage-3 run.
+3. Same-named enum collisions within ONE consumer's module.enums keep
+   last-wins bare rows (unchanged semantics); the strict check's typed
+   path then keys off the qualified owner, and the bare collision still
+   routes to the untyped constructor path -- same as the direct lane.
