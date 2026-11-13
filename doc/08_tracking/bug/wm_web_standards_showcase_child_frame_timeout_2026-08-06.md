@@ -315,6 +315,38 @@ a non-timeout verdict. If the fallback line still fires, the residual gap is
 in the seed's HIR lowering, not the .spl sources.
 
 
+## 2026-11-13 triage (UI batch B, Linux aarch64, release/1.0.0 @ 35144b7f5e93): blocked on this host; the 2026-08-15 expectation does not hold
+
+Three capped attempts (Rust seed, 16G cgroup, `timeout 900`), none of which
+reached the child-frame handshake this record is about:
+
+1. Reproduction command as written: exits 2 in seconds with
+   `[wm-web-standards] error=no-gui-requested (launch via macos-gui-run.shs)`.
+   `main()` now requires `SIMPLE_GUI=1`; the command in "Reproduction" above
+   is stale without it.
+2. With `SIMPLE_GUI=1`, from a fresh worktree: `error=child-bridge-timeout`
+   after the 300 s bridge wait. The host launches the child as
+   `<repo_root>/bin/simple`, which a fresh worktree does not have.
+3. With `SIMPLE_GUI=1` and `bin/simple` pointed at the seed for the run: the
+   bridge arrives, then `[wm-web-standards] error=no-gui-runtime` —
+   `GuiRenderer.create("auto", ...)` returns nothing. This host has no display
+   server (`DISPLAY` and `WAYLAND_DISPLAY` unset, no Xvfb installed).
+
+Separately, the 2026-08-15 static triage predicted a JIT lane once
+`resolved_backend` was declared. That part did hold (no
+`[jit-fallback] ... resolved_backend` line appears), but the host still does
+not run compiled: the seed prints `[engine-demotion] reason=jit-compile-error
+detail=HIR lowering error: ambiguous call to env_get ...
+sffi_vulkan.spl neither defines nor imports it` and falls back to the
+interpreter. That is tracked as
+`sffi_vulkan_env_get_unimported_jit_demotion_2026-11-13.md`. Until it is fixed
+the child is on the interpreted lane, where this record already documents the
+180 s frame budget being missed.
+
+No verdict line was produced, so none is claimed. Row stays open. Grants: a
+host with a display (or Xvfb) and a `bin/simple`; and the `env_get` import fix
+so the JIT lane can be measured.
+
 
 ---
 

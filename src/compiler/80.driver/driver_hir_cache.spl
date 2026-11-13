@@ -58,12 +58,13 @@ use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName}
 use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_scope}
 use compiler.driver.driver_cache_scope_policy_v1.{hir_cache_identity_scope_v1, hir_cache_header_diff_v1}
 use compiler.driver.driver_target_hir_cache_v1.{target_hir_cache_key_suffix}
+use compiler.driver.driver_mir_shard_hir_residency_v1.{hir_module_interface_only_v1}
 use compiler.hir.target_hir.target_hir_flags.{target_hir_mode}
 use compiler.hir.target_hir.hir_target_constraints.{HirTargetConstraints, hir_target_constraints_digest, hir_target_constraints_capture}
 use compiler.hir.target_hir.hir_guard_read_scan.{hir_guard_reads_from_source}
 use std.common.crypto.sha256.{sha256_text, sha256_runtime_fallback_used}
 use std.common.encoding.utf8.{text_byte_len}
-use std.nogc_sync_mut.io.file_ops.{file_lock, file_unlock, file_write, file_create_exclusive, file_publish_noreplace, file_atomic_write}
+use std.nogc_sync_mut.io.file_ops.{file_create_exclusive, file_publish_noreplace, file_atomic_write}
 use std.nogc_sync_mut.io_runtime.{file_exists, file_read_nullable}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 use std.nogc_sync_mut.io.disk_admission.{disk_publish_admitted}
@@ -359,6 +360,9 @@ fn hir_cache_has(key: text, parser_binding: text = "", library_mode: text = "") 
 # apart.
 var _hir_cache_last_parser_objectless: bool = false
 fn hir_cache_last_parser_objectless() -> bool: _hir_cache_last_parser_objectless
+var _hir_cache_interface_only_bodies_dropped: i64 = 0
+# Function bodies dropped by interface-only loads in this process.
+fn hir_cache_interface_only_bodies_dropped_v1() -> i64: _hir_cache_interface_only_bodies_dropped
 
 # Hits stored under another SCV snapshot root and rebased onto the consuming
 # root before decode, so module.path, every Span.file and the replayed
@@ -404,9 +408,9 @@ fn hir_cache_snapshot_root_rebind_v1(blob: text, source_path: text) -> [text]:
     if new_root + rel != source_path: return []
     [old_root, new_root]
 
-fn hir_cache_load_parsed_v1(key: text, parser_binding: text, source_path: text = "", library_mode: text = "") -> HirModule?:
+fn hir_cache_load_parsed_v1(key: text, parser_binding: text, source_path: text = "", library_mode: text = "", interface_only: bool = false) -> HirModule?:
     if parser_binding.len() != 64: return None
-    val loaded = hir_cache_load(key, parser_binding, source_path, library_mode)
+    val loaded = hir_cache_load(key, parser_binding, source_path, library_mode, interface_only)
     if source_path == "" or loaded.is_none(): return loaded
     # The entry may come from the other route's spelling of this file. A
     # snapshot-root move was already rebased inside the load.
@@ -418,13 +422,16 @@ fn hir_cache_parser_binding_v1(key: text, module_name: text, path: text, source_
     if key.len() != 64 or module_name == "" or path == "" or source_identity.len() != 64: return ""
     sha256_text("parser-classification-v1\n" + key + "\n" + module_name + "\n" + sha256_text(module_source_relative_path(path)) + "\n" + source_identity + "\n" + hir_cache_header(library_mode))
 
-fn hir_cache_load(key: text, parser_binding: text = "", source_path: text = "", library_mode: text = "") -> HirModule?:
+# `interface_only` (MIR shard HIR residency, driver_mir_shard_hir_residency_v1.spl):
+# promote a body-free projection of the decoded module instead of the module;
+# the full decode dies with the scratch scope below.
+fn hir_cache_load(key: text, parser_binding: text = "", source_path: text = "", library_mode: text = "", interface_only: bool = false) -> HirModule?:
     # Initialize the persistent frontend identity before entering scratch.
     if key == "" or not hir_cache_enabled():
         return None
     if not transient_scope_begin():
         return None
-    val decoded = hir_cache_load_in_owned_scope(key, parser_binding, source_path, library_mode)
+    val decoded = hir_cache_load_in_owned_scope(key, parser_binding, source_path, library_mode, interface_only)
     val paused = transient_scope_pause()
     # `HirModule?` is Option<struct>: in native code its `nil` is a heap-boxed
     # None enum, and the owned loader allocates that box INSIDE this scope, so
@@ -460,7 +467,7 @@ fn hir_cache_load(key: text, parser_binding: text = "", source_path: text = "", 
 
 # HIR shard transactions already own the decode's scratch lifetime. They retain
 # only their small diagnostics/receipts, so no full HIR root is promoted here.
-fn hir_cache_load_in_owned_scope(key: text, parser_binding: text = "", source_path: text = "", library_mode: text = "") -> HirModule?:
+fn hir_cache_load_in_owned_scope(key: text, parser_binding: text = "", source_path: text = "", library_mode: text = "", interface_only: bool = false) -> HirModule?:
     if key == "" or not hir_cache_enabled():
         return None
     val path = hir_cache_path(key, parser_binding != "")
@@ -521,6 +528,12 @@ fn hir_cache_load_in_owned_scope(key: text, parser_binding: text = "", source_pa
     _hir_cache_last_parser_objectless = entry.parser_classification.starts_with("objectless:")
     _hir_cache_last_warnings = warnings
     _hir_cache_hits = _hir_cache_hits + 1
+    if interface_only:
+        # Still inside the decode scope: only the projection is promoted by
+        # the caller, every dropped body is freed at scope end.
+        val (projected, stripped) = hir_module_interface_only_v1(decoded.unwrap())
+        _hir_cache_interface_only_bodies_dropped = _hir_cache_interface_only_bodies_dropped + stripped
+        return Some(projected)
     decoded
 
 # One parsed entry. `reason` is "" when the entry is intact, else one of
@@ -1185,9 +1198,9 @@ fn hir_cache_summary() -> text:
 # orchestrator in native_build_main.spl passes). A shard child runs the real
 # pipeline up to and including HIR, lowers ONLY the modules it claims, stores
 # each into this cache, and exits before typecheck. The real build that
-# follows hits every entry. Same mechanism as the parse shards (work queue =
-# flock'd marker dir published as SIMPLE_HIR_SHARD_QUEUE; static path-hash
-# split when no queue is published or the lock fails).
+# follows hits every entry. Work queue = the O_EXCL claim ledger published as
+# SIMPLE_HIR_SHARD_QUEUE (driver_hir_recovery, no lock); static path-hash
+# split when no queue is published.
 #
 # DEPENDENCY LEVELS. Lowering reads only the FROZEN surfaces (every child
 # rebuilds them from front-end cache hits), so no module's HIR is an input to
@@ -1331,25 +1344,15 @@ fn _hir_shard_owns_static_counted(path: text) -> bool:
         _hir_shard_claimed = _hir_shard_claimed + 1
     owned
 
+# Static split only (lockless, concurrency_architecture.md §3). A published
+# queue is claimed through the O_EXCL ledger in driver_hir_recovery via
+# `hir_shard_begin`, which reaches this function ONLY when no queue is set; the
+# former flock'd `{hash}-{len}.claim` marker branch here was unreachable and,
+# on lock failure, fell back to the static split -- one module ownable twice.
 fn hir_shard_owns(path: text) -> bool:
     if not hir_shard_active():
         return true
-    val queue_dir = _hir_shard_queue_dir()
-    if queue_dir == "":
-        return _hir_shard_owns_static_counted(path)
-    val marker = "{queue_dir}/{driver_parse_shard_hash(path)}-{path.len()}.claim"
-    if file_exists(marker):
-        return false
-    val fd = file_lock("{queue_dir}/.lock", 30)
-    if fd < 0:
-        return _hir_shard_owns_static_counted(path)
-    var claimed = false
-    if not file_exists(marker):
-        claimed = file_write(marker, hir_shard_spec())
-    val _unlocked = file_unlock(fd)
-    if claimed:
-        _hir_shard_claimed = _hir_shard_claimed + 1
-    claimed
+    _hir_shard_owns_static_counted(path)
 
 # Topological level of every surface (index-aligned with surfaces.surfaces).
 fn hir_shard_levels(surfaces: ModuleSurfacesByName) -> [i64]:

@@ -623,6 +623,12 @@ impl HirLowering:
         # Builtins are resolved by lower_named_kind's primitive arms, never by a
         # module surface; asking an owner to declare `text` can only ever fail.
         if hir_dependency_is_builtin_type(dependency): return
+        # A fully-qualified payload spelling (`std.common.color.types.Color`)
+        # resolves through resolve_qualified_named_type in lower_named_kind
+        # (types.spl `if name.contains(".")`) and never needs an owner-side
+        # import; chasing it only emitted `[hir-payload-origin-unresolved]`
+        # (census r3, browser_engine.style.animation).
+        if hir_dependency_is_qualified_path(dependency): return
         # PAYLOADMISS: a name this owner cannot resolve is re-searched by every
         # importer and every occurrence. Container spellings dominate that cost
         # (run14: Dict 14,847, Option 9,857, Result 7,015 advisories) and they
@@ -1409,19 +1415,30 @@ impl HirLowering:
         # records the optional sugar verbatim, so `has_text` reaches here spelled
         # `has_text` and a raw check would miss it and chase `text` through the
         # owner's import table anyway. The three steps below already unwrap.
-        if hir_dependency_is_builtin_type(hir_dependency_type_name(dependency)): return
-        if self.qtype_raw_counted(imported_mod.module_name, dependency) >= 0:
+        # HASX-ONCE (2026-11-13): normalize the spelling HERE, not only inside
+        # the three steps. The declared step binds the owner-qualified type
+        # under the stripped name (`owner::Warn`), but the two `qtype_raw_counted`
+        # checks below asked for the raw `has_Warn`, never saw that binding,
+        # and ran the explicit sweep anyway -- which then reported
+        # `[hir-callable-dep-origin-unresolved] ... dependency=Warn` for a type
+        # the owner itself declares (census r3: compiler.semantics.visibility_checker
+        # `-> has_VisibilityWarning`). Pinned by
+        # test/01_unit/compiler/hir/census_r3_unresolved_name_resolver_spec.spl.
+        val dependency_name = hir_dependency_type_name(dependency)
+        if hir_dependency_is_builtin_type(dependency_name): return
+        if hir_dependency_is_qualified_path(dependency_name): return
+        if self.qtype_raw_counted(imported_mod.module_name, dependency_name) >= 0:
             return
         self.materialize_imported_callable_declared_dependency(
-            imported_mod, imported_mod_name, dependency, import_span, materialize_enum)
-        if self.qtype_raw_counted(imported_mod.module_name, dependency) >= 0:
+            imported_mod, imported_mod_name, dependency_name, import_span, materialize_enum)
+        if self.qtype_raw_counted(imported_mod.module_name, dependency_name) >= 0:
             return
         self.materialize_imported_callable_explicit_dependency(
-            imported_mod, dependency, import_span, materialize_enum)
-        if self.qtype_raw_counted(imported_mod.module_name, dependency) >= 0:
+            imported_mod, dependency_name, import_span, materialize_enum)
+        if self.qtype_raw_counted(imported_mod.module_name, dependency_name) >= 0:
             return
         self.materialize_imported_field_package_dependency(
-            imported_mod.physical_index, hir_dependency_type_name(dependency), import_span, materialize_enum)
+            imported_mod.physical_index, dependency_name, import_span, materialize_enum)
 
     me materialize_imported_owner_parameter_dependencies(imported_mod: ModuleSurface, imported_mod_name: text, owner_type_params: [ParserTypeParam], import_span: Span, materialize_enum: bool) -> bool:
         var valid = true
@@ -1437,7 +1454,16 @@ impl HirLowering:
                     var is_binder = false
                     for binder in owner_type_params:
                         if binder.name == name: is_binder = true
-                    if not is_binder and not hir_dependency_is_builtin_type(name):
+                    # An ambient builtin bound trait that NO module declares
+                    # (where K: Eq) has no owner to chase: materializing it only
+                    # produced the `[hir-reexport-chase-unresolved] item=Eq` /
+                    # `[hir-callable-dep-origin-unresolved]` pair (census r3,
+                    # lib.nogc_sync_mut.src.map `Map<K, V> where K: Hash + Eq`).
+                    # Declared spellings still win, same rule as the container
+                    # guard; the unresolved-error suppression below is unchanged.
+                    val ambient_bound = hir_owner_bound_is_ambient_builtin_trait(name) and
+                        not hir_compilation_declares_nominal(self.module_surfaces, name)
+                    if not is_binder and not hir_dependency_is_builtin_type(name) and not ambient_bound:
                         self.materialize_imported_callable_dependency_with_owner(
                             imported_mod, imported_mod_name, dependency, import_span,
                             materialize_enum, owner_type_params)
@@ -1887,7 +1913,28 @@ fn hir_dependency_is_builtin_type(dependency: text) -> bool:
     # doc/08_tracking/bug/hir_bare_fn_callable_dep_fabricated_position_2026-08-29.md
     if dependency == "fn":
         return true
+    # `unit` and `list` are lowered by lower_named_kind's primitive arms too
+    # (`case "unit" | "void": HirTypeKind.Unit`, `case "list": Array(Any)`)
+    # BEFORE any symbol lookup, so no owner can declare them. Census r3 chased
+    # both through facades (asm_match_suffix `-> unit`, http_client `-> list`)
+    # and reported `[hir-reexport-chase-unresolved]` for a spelling that never
+    # needed registration. Capitalized `Unit`/`List` are NOT here: they have no
+    # primitive arm and an undeclared one is a genuine error.
+    if dependency == "unit" or dependency == "list":
+        return true
     false
+
+fn hir_dependency_is_qualified_path(dependency: text) -> bool:
+    """True for a fully-qualified type spelling (`std.common.color.types.Color`).
+
+    lower_named_kind resolves a dotted name through `resolve_qualified_named_type`
+    against the surface registry (types.spl, the `name.contains(".")` arm), so
+    the owner-side payload/callable/field walks have nothing to materialize and
+    their miss handlers can only emit a false advisory. Deliberately NOT folded
+    into hir_dependency_is_builtin_type: the re-export chase gates on that
+    predicate too, and a dotted chase ITEM (`use facade.*` forwarding a module
+    alias row) is a real defect that must stay visible."""
+    dependency.contains(".")
 
 fn hir_dependency_is_builtin_container(dependency: text) -> bool:
     """True for the builtin-container spellings lower_named_kind resolves
