@@ -1693,11 +1693,11 @@ impl JitRunError {
 }
 
 fn jit_failure_must_propagate(jit_err: &str, strict_all: bool) -> bool {
-    // error[option-pattern-shape] is a TYPE error, not a JIT capability gap:
+    // error[SPL-PAT-001] (Option pattern shape) is a TYPE error, not a JIT capability gap:
     // demoting it to the interpreter would run the ill-typed program silently.
     strict_all
         || jit_err.contains("SIMPLE_JIT_STRICT:")
-        || jit_err.contains("error[option-pattern-shape]")
+        || jit_err.contains("error[SPL-PAT-001]")
         || is_private_fn_visibility_error(jit_err)
 }
 

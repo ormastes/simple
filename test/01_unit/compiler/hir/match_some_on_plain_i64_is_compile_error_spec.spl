@@ -1,0 +1,83 @@
+"""
+## Purpose and audience
+Regression specification for the owner decision of 2026-11-13 (supersedes
+doc/08_tracking/bug/seed_match_some_on_plain_i64_binds_wrong_value_2026_11_12.md):
+a `Some(..)` / `None` pattern matched against a subject whose static type is
+not an Option is a compile error with the stable code `SPL-PAT-001`
+(config/policy/diagnostic_policy.sdn), as in Rust (E0308) and Swift. The
+PR #8675 "flat bind" (`match <i64>: Some(j)` silently binding the subject)
+is removed. Written for compiler engineers who own HIR pattern lowering.
+
+## Operator workflow
+Run `bin/simple test test/01_unit/compiler/hir/match_some_on_plain_i64_is_compile_error_spec.spl`.
+Each scenario compiles a fixture under `fixtures/` through `simple run`
+(parse -> HIR -> MIR -> JIT), because an ill-typed fixture cannot live inside
+this spec file itself.
+
+## Compatibility and limitations
+Covers the statement form, the expression form and a `text` subject, plus the
+negative control: `T?` and `Option<T>` subjects compile and bind normally.
+The AST interpreter (`SIMPLE_EXECUTION_MODE=interpret`) has no static types and
+uses the flat Option encoding, so it cannot make this judgement; the default
+engine refuses to demote this error to the interpreter (`exec_core.rs`).
+
+## Verification guidance and troubleshooting
+If a scenario fails, inspect `report_if_never_option` in
+src/compiler_rust/compiler/src/hir/lower/option_pattern_shape_diag.rs and
+`infer_option_pattern` in src/compiler/30.types/type_infer/inference_control.spl.
+"""
+
+# @manual_section: match Some over a non-Option scrutinee
+use std.spec.step
+use app.io.mod (shell)
+
+fn run_fixture(name: text) -> (i64, text):
+    val cmd = "if [ -x bin/simple.exe ]; then S=bin/simple.exe; else S=bin/simple; fi; SIMPLE_RUST_SEED_WARNING=0 $S run test/01_unit/compiler/hir/fixtures/" + name + " 2>&1"
+    val result = shell(cmd)
+    (result.exit_code, result.stdout)
+
+describe "Some(j) over a plain i64 subject is SPL-PAT-001":
+
+    it "rejects the index_of statement-form repro with the stable code":
+        # @req OWNER-2026-11-13-OPTION-PATTERN-SHAPE
+        # @capture(value): exit code and diagnostic text
+        step("Compile `match r: Some(j)` where r = text.index_of(..) is i64")
+        val (code, out) = run_fixture("match_some_i64_repro.spl")
+        expect(code).to_equal(1)
+        expect(out).to_contain("error[SPL-PAT-001]")
+        expect(out).to_contain("pattern `Some(_)` expects Option<T>, found i64")
+
+    it "names a fix instead of binding the subject silently":
+        # @req OWNER-2026-11-13-OPTION-PATTERN-SHAPE
+        step("The diagnostic carries a fix suggestion and the program never ran")
+        val (code, out) = run_fixture("match_some_i64_repro.spl")
+        expect(code).to_equal(1)
+        expect(out).to_contain("fix:")
+        expect(out).to_contain("val j = x")
+        expect(out.contains("a=1")).to_equal(false)
+
+    it "rejects the expression form":
+        # @req OWNER-2026-11-13-OPTION-PATTERN-SHAPE
+        step("Compile `val v = match r: Some(j): ...` over an i64 parameter")
+        val (code, out) = run_fixture("match_some_expr_i64_repro.spl")
+        expect(code).to_equal(1)
+        expect(out).to_contain("error[SPL-PAT-001]")
+        expect(out.contains("v=42")).to_equal(false)
+
+    it "rejects a text subject and reports the text type":
+        # @req OWNER-2026-11-13-OPTION-PATTERN-SHAPE
+        step("Compile `match s: Some(t)` over a text local")
+        val (code, out) = run_fixture("match_some_text_repro.spl")
+        expect(code).to_equal(1)
+        expect(out).to_contain("expects Option<T>, found text")
+
+describe "Some(j) over an Option subject still compiles":
+
+    it "binds i64? and Option<i64> payloads with no SPL-PAT-001":
+        # @req OWNER-2026-11-13-OPTION-PATTERN-SHAPE
+        # @capture(value): bound values for the hit, miss, Option<T> and if-val cases
+        step("Compile and run the Option-typed control fixture")
+        val (code, out) = run_fixture("match_some_on_option_ok.spl")
+        expect(out.contains("SPL-PAT-001")).to_equal(false)
+        expect(code).to_equal(0)
+        expect(out).to_contain("a=7 b=-2 c=11 d=3")

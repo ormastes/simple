@@ -1,0 +1,178 @@
+use std.spec
+use app.io.env_ops.{env_set, env_unset}
+use app.io.cli_ops.{cli_kernel_executable_path}
+use app.cli.file_worker_pool_refusal.{file_worker_pool_refusal_v1,
+    FILE_WORKER_POOL_SCALED_FLOOR_KB_V1, file_worker_pool_usable_kb_v1,
+    file_worker_pool_budget_explicit_v1, file_worker_pool_scaled_budget_kb_v1,
+    file_worker_pool_phase_budget_kb_v1, file_worker_pool_hir_budget_kb_v1,
+    file_worker_pool_mir_budget_kb_v1, file_worker_pool_mir_price_kb_v1,
+    file_worker_pool_pointer_bits_from_elf_header_v1,
+    file_worker_pool_pointer_bits_from_windows_arch_v1,
+    file_worker_pool_host_pointer_bits_for_v1,
+    file_worker_pool_probe_pointer_bits_v1, file_worker_pool_host_pointer_bits_v1,
+    file_worker_pool_live_usable_kb_v1}
+use app.cli.shard_mem_clamp.{SHARD_HIR_WORKER_KB_V1, SHARD_MIR_WORKER_KB_V1,
+    shard_threads_cap_for, shard_worker_budget_kb, shard_tree_budget_kb_for, shard_cgroup_memory_max_kb}
+
+# "Scale to host" default per-worker budget (user decision 2026-11-13): hosts
+# that fit 2 workers at 9 GB keep every budget unchanged; smaller hosts lower
+# the budget toward usable/2 but never below the 6.5 GiB floor (measured
+# per-file worker peak 5.04-5.65 GiB + margin); explicit overrides always win.
+describe "file worker pool: scale-to-host per-worker budget":
+    val floor = FILE_WORKER_POOL_SCALED_FLOOR_KB_V1
+
+    it "the floor is 6.5 GiB, above the measured 5.65 GiB worker peak":
+        expect(floor).to_equal(6815744)
+        expect(floor > 5924454).to_be_true()
+
+    it "usable memory is 60% of the tighter of host free and the tree budget, overflow-free":
+        expect(file_worker_pool_usable_kb_v1(52000000, 0)).to_equal(31200000)
+        expect(file_worker_pool_usable_kb_v1(52000000, 4194304)).to_equal(2516582)
+        expect(file_worker_pool_usable_kb_v1(4194304, 52000000)).to_equal(2516582)
+        expect(file_worker_pool_usable_kb_v1(0, 8000000)).to_equal(4800000)
+        expect(file_worker_pool_usable_kb_v1(0, 0)).to_equal(0)
+        expect(file_worker_pool_usable_kb_v1(-1, -1)).to_equal(0)
+        expect(file_worker_pool_usable_kb_v1(9223372036854775807, 0)).to_equal(5534023222112865484)
+
+    it "an env phase value or the host worker_mem_mib key is an explicit override":
+        expect(file_worker_pool_budget_explicit_v1("", "")).to_be_false()
+        expect(file_worker_pool_budget_explicit_v1("8000000", "")).to_be_true()
+        expect(file_worker_pool_budget_explicit_v1("", "4096")).to_be_true()
+        expect(file_worker_pool_budget_explicit_v1("junk", "0")).to_be_false()
+
+    it "big host: 2 workers fit at 9 GB, so every budget is unchanged":
+        expect(file_worker_pool_scaled_budget_kb_v1(SHARD_HIR_WORKER_KB_V1, 31200000, false)).to_equal(9000000)
+        expect(file_worker_pool_scaled_budget_kb_v1(SHARD_MIR_WORKER_KB_V1, 31200000, false)).to_equal(26424115)
+
+    it "the fit test is exact at 2 x 9 GB usable":
+        expect(file_worker_pool_scaled_budget_kb_v1(9000000, 18000000, false)).to_equal(9000000)
+        expect(file_worker_pool_scaled_budget_kb_v1(9000000, 17999998, false)).to_equal(8999999)
+
+    it "medium host: lowers the budget to usable / 2, and 2 workers are admitted":
+        expect(file_worker_pool_scaled_budget_kb_v1(SHARD_HIR_WORKER_KB_V1, 15000000, false)).to_equal(7500000)
+        expect(file_worker_pool_scaled_budget_kb_v1(SHARD_MIR_WORKER_KB_V1, 15000000, false)).to_equal(7500000)
+        val avail = 25000000
+        expect(shard_threads_cap_for(2, SHARD_HIR_WORKER_KB_V1, avail)).to_equal(1)
+        val scaled = file_worker_pool_scaled_budget_kb_v1(SHARD_HIR_WORKER_KB_V1, file_worker_pool_usable_kb_v1(avail, 0), false)
+        expect(shard_threads_cap_for(2, scaled, avail)).to_equal(2)
+
+    it "small host: never goes below the 6.5 GiB floor":
+        expect(file_worker_pool_scaled_budget_kb_v1(SHARD_HIR_WORKER_KB_V1, 12000000, false)).to_equal(floor)
+        expect(file_worker_pool_scaled_budget_kb_v1(SHARD_HIR_WORKER_KB_V1, 2 * floor, false)).to_equal(floor)
+
+    it "tiny host: the floor does not fit 2 workers, so the pool refuses and names every override":
+        val avail = 4194304
+        val scaled = file_worker_pool_scaled_budget_kb_v1(SHARD_HIR_WORKER_KB_V1, file_worker_pool_usable_kb_v1(avail, 0), false)
+        expect(scaled).to_equal(floor)
+        expect(shard_threads_cap_for(2, scaled, avail)).to_equal(1)
+        val msg = file_worker_pool_refusal_v1(1, 1, avail, scaled, scaled, 2, "", false, 64)
+        expect(msg.starts_with("error:")).to_be_true()
+        expect(msg.contains("per-worker budget={floor} kB")).to_be_true()
+        expect(msg.contains("SIMPLE_HIR_SHARD_WORKER_KB")).to_be_true()
+        expect(msg.contains("SIMPLE_MIR_SHARD_WORKER_KB")).to_be_true()
+        expect(msg.contains("worker_mem_mib")).to_be_true()
+
+    it "explicit overrides always win, smaller or larger":
+        expect(file_worker_pool_scaled_budget_kb_v1(9000000, 12000000, true)).to_equal(9000000)
+        expect(file_worker_pool_scaled_budget_kb_v1(2000000, 12000000, true)).to_equal(2000000)
+
+    it "never raises a budget already below the floor, and leaves unknowns unchanged":
+        expect(file_worker_pool_scaled_budget_kb_v1(4000000, 12000000, false)).to_equal(4000000)
+        expect(file_worker_pool_scaled_budget_kb_v1(9000000, 0, false)).to_equal(9000000)
+        expect(file_worker_pool_scaled_budget_kb_v1(0, 12000000, false)).to_equal(0)
+
+    it "32-bit: the address-space clamp still binds after scaling":
+        expect(file_worker_pool_phase_budget_kb_v1(9000000, false, 15000000, 32)).to_equal(4194304)
+        expect(file_worker_pool_phase_budget_kb_v1(9000000, false, 31200000, 32)).to_equal(4194304)
+        expect(file_worker_pool_phase_budget_kb_v1(9000000, false, 2516582, 32)).to_equal(4194304)
+        expect(file_worker_pool_phase_budget_kb_v1(2000000, true, 0, 32)).to_equal(2000000)
+        expect(file_worker_pool_phase_budget_kb_v1(9000000, false, 31200000, 64)).to_equal(9000000)
+        expect(file_worker_pool_phase_budget_kb_v1(9000000, false, 15000000, 64)).to_equal(7500000)
+
+    it "live HIR budget: an env override wins exactly":
+        val _set = env_set("SIMPLE_HIR_SHARD_WORKER_KB", "1234567")
+        val got = file_worker_pool_hir_budget_kb_v1()
+        val _unset = env_unset("SIMPLE_HIR_SHARD_WORKER_KB")
+        expect(got).to_equal(1234567)
+
+    it "live HIR budget: the default is 9 GB or scaled into [floor, 9 GB)":
+        val unscaled = shard_worker_budget_kb("SIMPLE_HIR_SHARD_WORKER_KB", SHARD_HIR_WORKER_KB_V1)
+        val got = file_worker_pool_hir_budget_kb_v1()
+        expect(got == unscaled or (got >= floor and got < unscaled)).to_be_true()
+
+    it "live MIR budget: the shard path is never scaled; the pool path may be":
+        val price = file_worker_pool_mir_price_kb_v1(50)
+        val unscaled = shard_worker_budget_kb("SIMPLE_MIR_SHARD_WORKER_KB", price)
+        expect(file_worker_pool_mir_budget_kb_v1(50, false)).to_equal(unscaled)
+        val pooled = file_worker_pool_mir_budget_kb_v1(50, true)
+        expect(pooled == unscaled or (pooled >= floor and pooled < unscaled)).to_be_true()
+        val _set = env_set("SIMPLE_MIR_SHARD_WORKER_KB", "2345678")
+        val overridden = file_worker_pool_mir_budget_kb_v1(50, true)
+        val _unset = env_unset("SIMPLE_MIR_SHARD_WORKER_KB")
+        expect(overridden).to_equal(2345678)
+
+    it "live usable memory: SIMPLE_SHARD_MEM_CLAMP=0 drops host free memory, keeping the tree bound":
+        val _c = env_set("SIMPLE_SHARD_MEM_CLAMP", "0")
+        val _t = env_set("SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB", "10000000")
+        val got = file_worker_pool_live_usable_kb_v1()
+        val _uc = env_unset("SIMPLE_SHARD_MEM_CLAMP")
+        val _ut = env_unset("SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB")
+        expect(got).to_equal(file_worker_pool_usable_kb_v1(0, shard_tree_budget_kb_for(10000000, shard_cgroup_memory_max_kb())))
+        expect(got > 0).to_be_true()
+
+# The width must be the running binary's own, never the cross-build target:
+# under source/interpreted execution `@when(arch=...)` follows
+# SIMPLE_NATIVE_BUILD_TARGET, which a cross-build exports to itself and its
+# children, so a 64-bit coordinator would otherwise clamp its workers to 4 GiB.
+describe "file worker pool: host pointer width comes from the running image":
+    it "reads the ELF class from the first 5 header bytes":
+        expect(file_worker_pool_pointer_bits_from_elf_header_v1("    127  69  76  70   1\n")).to_equal(32)
+        expect(file_worker_pool_pointer_bits_from_elf_header_v1(" 127 69 76 70 2")).to_equal(64)
+        expect(file_worker_pool_pointer_bits_from_elf_header_v1(" 127 69 76 70 3")).to_equal(-1)
+        expect(file_worker_pool_pointer_bits_from_elf_header_v1(" 127 69 76 70")).to_equal(-1)
+        expect(file_worker_pool_pointer_bits_from_elf_header_v1(" 77 90 144 0 3")).to_equal(-1)
+        expect(file_worker_pool_pointer_bits_from_elf_header_v1(" 207 250 237 254 7")).to_equal(-1)
+        expect(file_worker_pool_pointer_bits_from_elf_header_v1("")).to_equal(-1)
+        expect(file_worker_pool_pointer_bits_from_elf_header_v1(" 126 69 76 70 2")).to_equal(-1)
+        expect(file_worker_pool_pointer_bits_from_elf_header_v1(" 127 68 76 70 2")).to_equal(-1)
+        expect(file_worker_pool_pointer_bits_from_elf_header_v1(" 127 69 75 70 2")).to_equal(-1)
+        expect(file_worker_pool_pointer_bits_from_elf_header_v1(" 127 69 76 71 2")).to_equal(-1)
+
+    it "Windows PROCESSOR_ARCHITECTURE is the process's own width (WOW64 sees x86)":
+        expect(file_worker_pool_pointer_bits_from_windows_arch_v1("x86")).to_equal(32)
+        expect(file_worker_pool_pointer_bits_from_windows_arch_v1("AMD64")).to_equal(64)
+        expect(file_worker_pool_pointer_bits_from_windows_arch_v1("ARM64")).to_equal(64)
+        expect(file_worker_pool_pointer_bits_from_windows_arch_v1("IA64")).to_equal(-1)
+        expect(file_worker_pool_pointer_bits_from_windows_arch_v1("")).to_equal(-1)
+
+    it "the image wins over the cfg constant, so a cross-build target cannot leak in":
+        expect(file_worker_pool_host_pointer_bits_for_v1(64, -1, 32, true)).to_equal(64)
+        expect(file_worker_pool_host_pointer_bits_for_v1(32, -1, 64, false)).to_equal(32)
+        expect(file_worker_pool_host_pointer_bits_for_v1(-1, 32, 64, true)).to_equal(32)
+        expect(file_worker_pool_host_pointer_bits_for_v1(-1, -1, 32, false)).to_equal(32)
+        expect(file_worker_pool_host_pointer_bits_for_v1(-1, -1, 32, true)).to_equal(-1)
+
+    it "SIMPLE_TARGET_ARCH also marks the cfg width as untrusted":
+        val _set = env_set("SIMPLE_TARGET_ARCH", "x86")
+        val missing = file_worker_pool_probe_pointer_bits_v1("/nonexistent/simple")
+        val _unset = env_unset("SIMPLE_TARGET_ARCH")
+        expect(missing).to_equal(-1)
+
+    it "probes this 64-bit host's image as 64 even while a 32-bit cross target is exported":
+        val _set = env_set("SIMPLE_NATIVE_BUILD_TARGET", "i686-unknown-linux-gnu")
+        val live = file_worker_pool_probe_pointer_bits_v1(cli_kernel_executable_path())
+        val missing = file_worker_pool_probe_pointer_bits_v1("/nonexistent/simple")
+        val none = file_worker_pool_probe_pointer_bits_v1("")
+        val _unset = env_unset("SIMPLE_NATIVE_BUILD_TARGET")
+        expect(live).to_equal(64)
+        expect(missing).to_equal(-1)
+        expect(none).to_equal(-1)
+
+    it "without a cross target an unreadable image falls back to the compiled width":
+        val fallback = file_worker_pool_probe_pointer_bits_v1("/nonexistent/simple")
+        expect(fallback == 32 or fallback == 64).to_be_true()
+
+    it "the cached host width is stable":
+        val first = file_worker_pool_host_pointer_bits_v1()
+        expect(first).to_equal(64)
+        expect(file_worker_pool_host_pointer_bits_v1()).to_equal(first)

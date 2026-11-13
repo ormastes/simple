@@ -37,7 +37,8 @@ pub(crate) use collections::{
 
 pub(crate) use patterns::{
     bind_for_pattern, bind_for_pattern_value, bind_pattern, bind_pattern_value, handle_functional_update,
-    handle_method_call_with_self_update, restore_pattern_scope, save_pattern_scope, sync_flat_global,
+    handle_method_call_with_self_update, owns_global_binding, release_global_aliases, restore_pattern_scope,
+    save_pattern_scope, sync_flat_global,
 };
 
 pub(crate) use utilities::{

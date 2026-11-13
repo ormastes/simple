@@ -1,0 +1,43 @@
+# Hosted internal-ELF target admission for SIMPLE_LINKER=internal.
+#
+# Pure: maps a requested (os, arch) on a given host to the arch spelling, the
+# relocation target and the default system library directories used by
+# internal_link_native_with_operations (_LinkerWrapper/native_linking.spl),
+# or to the named "internal engine: unsupported ..." error. The host pair is a
+# parameter so every row is checkable on any host.
+#
+# riscv64 is admitted here because the engine owns the RV64 decision
+# (elf/elf_static_link.spl): it links RV64 static ET_EXEC only and refuses the
+# hosted dynamic modes with a named unsupported error until RV64
+# PLT/GOT/dynamic relocations exist.
+use compiler.backend.linker.reloc_engine.{RelocArch}
+
+pub struct InternalElfHostedTargetV1:
+    arch: text
+    reloc: RelocArch
+    lib_dirs: [text]
+
+fn internal_elf_norm_arch(arch: text) -> text:
+    if arch == "amd64": return "x86_64"
+    if arch == "arm64": return "aarch64"
+    if arch == "rv64" or arch == "riscv": return "riscv64"
+    arch
+
+# @workaround bug=rti007_any_return_rows_2026-11-01 reason=bare Result return is Any in interface row (E-RTI-007); spell Result<InternalElfHostedTargetV1, text>
+pub fn internal_elf_hosted_target_v1(os: text, arch: text, host_os: text,
+        host_arch: text) -> Result<InternalElfHostedTargetV1, text>:
+    val norm = internal_elf_norm_arch(arch)
+    if os != "linux" and os != "freebsd":
+        return Err("internal engine: unsupported hosted ELF OS '{os}'")
+    if norm != "x86_64" and norm != "aarch64" and norm != "riscv64":
+        return Err("internal engine: unsupported architecture '{arch}' (internal:elf supports x86_64, aarch64 and riscv64 only)")
+    if norm != internal_elf_norm_arch(host_arch) or os != host_os:
+        return Err("internal engine: unsupported cross-host link (target {os}/{arch}; hosted ELF requires the matching sysroot)")
+    if norm == "x86_64":
+        return Ok(InternalElfHostedTargetV1(arch: norm, reloc: RelocArch.X86_64,
+            lib_dirs: ["/lib/x86_64-linux-gnu", "/usr/lib/x86_64-linux-gnu", "/lib64", "/usr/lib64"]))
+    if norm == "aarch64":
+        return Ok(InternalElfHostedTargetV1(arch: norm, reloc: RelocArch.AArch64,
+            lib_dirs: ["/lib/aarch64-linux-gnu", "/usr/lib/aarch64-linux-gnu", "/lib", "/usr/lib"]))
+    Ok(InternalElfHostedTargetV1(arch: norm, reloc: RelocArch.Riscv64,
+        lib_dirs: ["/lib/riscv64-linux-gnu", "/usr/lib/riscv64-linux-gnu", "/lib", "/usr/lib"]))

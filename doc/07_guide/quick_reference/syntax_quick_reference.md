@@ -845,6 +845,12 @@ val inc = partial1(add, 1)           # partial1(f, a) → \b: f(a, b)
 
 ## Pattern Matching
 
+**`Some`/`None` patterns require an Option subject.** `match x: Some(j)` where
+`x` is a plain `i64`/`text`/`bool`/`f64`/`char` is `error[SPL-PAT-001]`
+("pattern `Some(_)` expects Option<T>, found i64"). Bind the value directly
+(`val j = x`) or drop the pattern; use `T?` + `if val j = x:` when absence is real.
+`text.index_of` returns `i64` (`-1` on miss), not an Option.
+
 ### Basic Match
 
 Two syntaxes are supported. **Erlang-style `| ->` is preferred** (shorter):

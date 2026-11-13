@@ -40,6 +40,29 @@ fn find_user(id: i64) -> Option<User>:
 
 ---
 
+### `Some`/`None` patterns need an Option subject (`SPL-PAT-001`)
+
+A `Some(..)` or `None` pattern is only valid when the subject's static type is
+`T?` / `Option<T>`. Matching it against a plain `i64`, `text`, `bool`, `f64` or
+`char` is a compile error (as Rust `E0308` and Swift reject it); it is never a
+silent bind. `text.index_of` returns a plain `i64` (`-1` on a miss), not an
+Option:
+
+```text
+val idx = s.index_of(":")
+match idx:
+    Some(i): use(i)       # error[SPL-PAT-001]: pattern `Some(_)` expects Option<T>, found i64
+    nil: miss()
+
+val idx = s.index_of(":")  # fix: test the value itself
+if idx >= 0:
+    use(idx)
+```
+
+If absence is genuinely possible, make the subject optional (`i64?`) and use
+`if val i = x:`. The rule is `deny` in every profile
+(`config/policy/diagnostic_policy.sdn`) and takes no exception.
+
 ## The ? Operator
 
 The `?` operator propagates errors up the call stack. If the value is `Err` or `nil`, it returns early from the current function:

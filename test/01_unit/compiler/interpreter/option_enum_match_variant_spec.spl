@@ -31,11 +31,10 @@
 # like aliased_param_writeback_spec.spl does.
 #
 # WHY BOTH ENGINES: the JIT arm proves the expectations are achievable rather
-# than invented. It also pins the known-open JIT residuals (explicit-`Some`
-# construction shapes and the nested `Some(Evt.Click(x))` payload binding)
-# so they cannot move in either direction without this spec going red.
-# Those residuals live in the JIT match lowering and are tracked under
-# enum_pattern_match_optional_value_silent_fallthrough_2026-07-20.md.
+# than invented; both engines must now print ALL PASS. The nested
+# `Some(Evt.Click(x))` JIT residual was the `rt_enum_id >= 0` Some-slot guard
+# in payload_slot_expr (seed hir/lower/expr/control.rs), which took a bare
+# user enum for a Some box; it is now `== OPTION_ENUM_ID`.
 
 use std.spec.step
 
@@ -92,6 +91,7 @@ describe "match on Option<Enum> fires the user enum's variant arms":
 
         step("A `Some(...)`-wrapped pattern must still match the wrapper itself")
         expect(interp).to_contain("PASS wrapped_pattern")
+        expect(interp).to_contain("PASS wrapped_key_pattern")
 
         step("nil must NOT match a user-variant arm — it falls to the wildcard")
         expect(interp).to_contain("PASS nil_falls_through")
@@ -99,20 +99,21 @@ describe "match on Option<Enum> fires the user enum's variant arms":
         step("A literal `case nil:` arm still matches the nil scrutinee")
         expect(interp).to_contain("PASS nil_arm")
 
-    it "binds explicit-Some variant payloads under the JIT and pins the remaining residual":
+    it "binds explicit-Some and nested Some(variant) payloads under the JIT":
         # @req REQ-SSPEC-COMPILER
-        step("binds explicit-Some variant payloads under the JIT and pins the remaining residual")
-        step("The cranelift JIT match lowering does not strip the Some box for user-variant patterns")
+        step("binds explicit-Some and nested Some(variant) payloads under the JIT")
         val jit = run_probe_in_mode("jit")
 
         step("Explicit-Some shapes fire the variant arm AND bind the variant's payload, not the Some box")
         expect(jit).to_contain("PASS explicit_some_fn")
         expect(jit).to_contain("PASS local_explicit")
 
-        step("Recorded, not asserted as correct: the nested Some(...) payload binding reads nil under the JIT")
-        expect(jit).to_contain("FAIL wrapped_pattern: got some_clicknil want some_click8")
+        step("Nested Some(Evt.Click(x)) / Some(Evt.Key(code)) bind the inner payload, not nil")
+        expect(jit).to_contain("PASS wrapped_pattern")
+        expect(jit).to_contain("PASS wrapped_key_pattern")
+        expect(jit).to_contain("OPTION_ENUM_MATCH PROBE: ALL PASS")
 
-        step("The shapes the JIT already handles correctly are pinned as the parity target")
+        step("The remaining shapes stay at parity with the interpreter")
         expect(jit).to_contain("PASS implicit_wrap_fn")
         expect(jit).to_contain("PASS local_implicit")
         expect(jit).to_contain("PASS nil_falls_through")
