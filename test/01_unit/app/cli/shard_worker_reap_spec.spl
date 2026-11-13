@@ -14,7 +14,7 @@ Audience: engineers maintaining the native-build worker pools.
 """
 
 use std.spec
-use app.cli.shard_worker_reap_v1.{shard_worker_kill_stopped_v1, parse_shard_reap_v1}
+use app.cli.shard_worker_reap_v1.{shard_worker_kill_stopped_v1, shard_worker_confirm_kill_v1, parse_shard_reap_v1}
 use app.io.process_ops.{process_spawn_async, process_wait, process_kill, process_is_running}
 use std.io_runtime.{time_now_monotonic_ms}
 
@@ -48,24 +48,42 @@ describe "timed-out shard worker on this host runtime":
         expect(running).to_equal(false)
         expect(shard_worker_kill_stopped_v1(killed, reaped, running)).to_equal(true)
 
+    it "is confirmed by the probe-first sequence without a re-wait on a reaped pid":
+        val pid = process_spawn_async("sh", ["-c", "sleep 30"])
+        expect(pid).to_be_greater_than(0)
+        expect(process_wait(pid, 200)).to_equal(-2)
+        expect(shard_worker_confirm_kill_v1(pid, process_kill(pid))).to_equal(true)
+        expect(process_is_running(pid)).to_equal(false)
+
+    it "refuses to confirm a worker that was never killed and is still running":
+        val pid = process_spawn_async("sh", ["-c", "sleep 30"])
+        expect(pid).to_be_greater_than(0)
+        expect(process_wait(pid, 200)).to_equal(-2)
+        # kill=false with a live child: the 5 s re-wait times out, not stopped.
+        expect(shard_worker_confirm_kill_v1(pid, false)).to_equal(false)
+        expect(process_kill(pid)).to_equal(true)
+
 describe "parse shard reap deadline":
     it "applies one shared deadline to every child instead of one per sequential wait":
-        # child 0 outlives any deadline; child 1 would finish at 2.4 s: inside
-        # a second sequential 1.5 s window (1.5-3.0 s) but past a shared one.
+        # child 0 outlives any deadline; child 1 would finish at 4 s: inside a
+        # second sequential 1.5 s window (1.5-3.0 s would be too tight under
+        # load, so 4 s leaves ~2 s of slack past the shared expiry + grace)
+        # but past a shared one.
         val slow = process_spawn_async("sh", ["-c", "sleep 10"])
-        val late = process_spawn_async("sh", ["-c", "sleep 2.4"])
+        val late = process_spawn_async("sh", ["-c", "sleep 4"])
         expect(slow).to_be_greater_than(0)
         expect(late).to_be_greater_than(0)
         val started = time_now_monotonic_ms()
-        val failed = parse_shard_reap_v1([slow, late], [0, 1], 2, 1500)
+        val (failed, unconfirmed) = parse_shard_reap_v1([slow, late], [0, 1], 2, 1500)
         val elapsed = time_now_monotonic_ms() - started
-        print "[spec] failed={failed} elapsed_ms={elapsed}"
+        print "[spec] failed={failed} unconfirmed={unconfirmed} elapsed_ms={elapsed}"
         expect(failed).to_equal([0, 1])
+        expect(unconfirmed).to_equal([])
         expect(process_is_running(slow)).to_equal(false)
         expect(process_is_running(late)).to_equal(false)
-        expect(elapsed < 4000).to_equal(true)
+        expect(elapsed < 6000).to_equal(true)
 
     it "reports a child that exits non-zero and keeps a passing one":
         val bad = process_spawn_async("sh", ["-c", "exit 3"])
         val good = process_spawn_async("sh", ["-c", "exit 0"])
-        expect(parse_shard_reap_v1([bad, good], [4, 5], 8, 10000)).to_equal([4])
+        expect(parse_shard_reap_v1([bad, good], [4, 5], 8, 10000)).to_equal(([4], []))

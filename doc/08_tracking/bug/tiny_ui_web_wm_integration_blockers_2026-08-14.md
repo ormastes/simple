@@ -109,6 +109,16 @@ Final reviewer: highest-capability Tiny UI/Web/WM reviewer
 
 Highest-capability static review of commit `6a72812917a205eb471e4b921fd9b6cd04dca187` found two stale popup assertions that expected clipped dimensions in `resolved`. Follow-up `eb6e0f568303d650355b2d53b25de4b69d7a9f31` distinguishes absolute `resolved = 40x40` from effective `clip = 20x20`; the reviewer returned `PASS-for-checkpoint` for that corrected criterion. This does not close any blocker that requires pure-Simple execution or the deliberate fail-closed H4/RV32/S0 scenarios.
 
+## 2026-11-13 triage (UI batch B, Linux aarch64, release/1.0.0 @ 35144b7f5e93): blocked on this host
+
+Not run and not changed. Every open blocker here (B-1 through B-14) names the
+same unblock condition: one execution on an admitted pure-Simple runtime, plus
+external allocator evidence for B-7 and B-14 and the H4/RV32/S0 target
+scenarios for B-3. This host has only the Rust bootstrap seed; no self-hosted
+full-CLI binary is deployed. A seed-interpreter pass would not meet the bar
+this doc sets ("in-band counters alone do not close NFR-011"), so none is
+recorded. Row stays open. Grant: a deployed pure-Simple runtime.
+
 
 ---
 

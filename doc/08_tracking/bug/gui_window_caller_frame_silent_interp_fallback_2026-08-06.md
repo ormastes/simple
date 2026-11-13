@@ -337,3 +337,50 @@ outside this lane's write scope. Routed status unchanged.
 ## Triage 2026-11-13 (Linux aarch64, lane uia) — row stays OPEN
 
 Not attempted. Static read at release/1.0.0 c8c3e7bc4f1, Linux aarch64 (DGX Spark GB10), Rust seed af717f53d6bce3e5: the live remainder is whole-module JIT demotion, current trigger the same-name different-layout pair JsError/JsBrowserError (common/js/engine/js_error.spl alias vs nogc_sync_mut/js/engine/js_error.spl classes) rejected in the seed at hir/lower/module_lowering/module_pass.rs qualify_flattened_structs. Fix is either a JS-engine rename across about 50 importers or a seed HIR change; both belong to the compiler/JS lanes, and the trigger has already moved once.
+
+## 2026-11-13 lane uia2 — `JsBrowserError` trigger FIXED; the chain behind it measured; row stays OPEN
+
+Probe (the 2026-08-09 shape: module importing `nogc_sync_mut.ui.gui_renderer`,
+calling the real `browser_engine_pixels_at("simple://home", 8, 8)`), run as
+`SIMPLE_JIT_STRICT=1 <seed> run <probe> --no-cache` on Linux aarch64 with the
+seed-fix Rust seed, base release/1.0.0 `ad8c53a216b`. Each run exits 1 in
+about one second.
+
+**What the trigger was.** `flatten_struct_owner.rs` returns `Err(alias)` for
+any `type` alias whose target names a struct/class that several flattened
+modules declare with different layouts. `JsError` is such a class (common:
+`message/source`; nogc_sync_mut: `message/name/stack`), and
+`src/lib/common/js/engine/js_error.spl` carried
+`type JsBrowserError = JsError`. The colliding classes themselves are
+owner-qualified and are not the problem; only the alias was.
+
+**Fix (no rename needed).** The alias was imported by 28 files in the
+`common`, `gc_async_mut` and `nogc_async_mut` JS engine lanes and used by
+none of them: 28 occurrences, all on the import line. The alias, its export
+and the 28 unused imports are removed. The nine `std.js.engine.js_error`
+importers use the real nogc_sync_mut `JsBrowserError` class and are untouched.
+
+- red `test/01_unit/lib/common/js/engine/js_error_alias_owner_spec.spl`:
+  3 examples, 1 failure; green: 3 examples, 0 failures.
+- strict probe before: `type alias 'JsBrowserError' names a struct/class
+  declared with different layouts ...`; after: that text is gone.
+- JS specs after the change: `statement_dispatch_regression_spec` 6/6,
+  `ternary_expression_spec` 7/7, `js_vm_reclamation_spec` 2/4 with the same
+  two failures as the unchanged base.
+
+**The module still demotes.** Measured by qualifying each trigger in a scratch
+edit and re-running the probe (scratch edits reverted, not landed):
+
+1. `ambiguous call to env_get: 4 co-compiled definitions ...
+   nogc_sync_mut/gpu/engine2d/sffi_vulkan.spl neither defines nor imports it`
+   — already filed as `sffi_vulkan_env_get_unimported_jit_demotion_2026-11-13`.
+2. The same error for `gc_async_mut/gpu/engine2d/backend_vulkan.spl`
+   (lines 2401, 3398, 3544, 3580) — not named in that record.
+3. `Unsupported feature: cannot apply Sub to an optional value that has not
+   been unwrapped; if x != nil: does not narrow T? to T`. The diagnostic names
+   no file or function, so the site is not located.
+
+So item 2 of "What a real fix needs" is a chain of independent whole-program
+lowering failures, three deep at least, not one root cause. Nothing beyond
+step 3 was observed. The 8x8 render was never reached under strict JIT, so no
+timing claim is made.

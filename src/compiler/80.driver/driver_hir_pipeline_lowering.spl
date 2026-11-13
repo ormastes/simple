@@ -106,7 +106,14 @@ use compiler.hir.hir_codec.{hir_codec_roundtrip_selfcheck, hir_codec_roundtrip_l
 use compiler.hir.hir_codec.{hir_module_first_fn_name_p_v1, hir_module_first_fn_name_wi_v1, hir_module_first_fn_name_via_decode_v1, hir_module_decode}
 use compiler.hir.hir_codec.{hir_module_functions_at_v1, hir_fn_scalars_at_v1, hir_module_first_fn_name_v1, hir_module_first_fn_name_in_v1, hir_module_first_fn_name_ordered_in_v1, hir_module_blob_in_v1}
 use compiler.driver.driver_hir_cache.{hir_cache_enabled, hir_cache_closure_digest, hir_cache_key, hir_cache_has, hir_cache_load, hir_cache_store, hir_cache_summary, hir_cache_hits, hir_cache_last_warnings, hir_cache_parser_binding_v1, hir_cache_last_parser_objectless, hir_cache_load_parsed_v1, hir_cache_last_refusal_is_io_v1, hir_shard_active, hir_shard_owns, hir_shard_levels, hir_shard_level_count, hir_shard_visit_order, hir_shard_summary, hir_shard_deps_wanted_v1, hir_shard_publish_records_v1, hir_shard_dep_source_indices_v1}
-use compiler.driver.driver_worker_surface_closure_v1.{worker_hir_load_allowed_v1}
+use compiler.driver.driver_worker_surface_closure_v1.{worker_hir_load_allowed_v1, worker_hir_loads_restricted_v1}
+use compiler.driver.driver_build.native_mir_shard.{native_mir_shard_link_ledger_v1}
+use compiler.driver.driver_build.native_mir_shard_export_v1.{native_mir_shard_export_write_dir_v1}
+use compiler.driver.driver_hir_cache.{hir_cache_interface_only_bodies_dropped_v1}
+use compiler.driver.driver_mir_shard_hir_residency_v1.{mir_shard_hir_residency_refusal_v1,
+    mir_shard_hir_residency_arm_v1, mir_shard_hir_residency_armed_v1,
+    mir_shard_hir_residency_note_v1, mir_shard_hir_residency_counters_v1,
+    MIR_SHARD_INTERFACE_HIR_ENV_V1}
 use compiler.driver.driver_parse_diagnostic.{driver_parse_error_message}
 use compiler.driver.driver_hir_cache.{hir_cache_load_in_owned_scope, hir_cache_store_encoded_in_owned_scope, hir_cache_clear_last_warnings}
 use compiler.driver.driver_hir_cache.{HirEncodedBodyV1, hir_encoded_body_v1}
@@ -1079,6 +1086,18 @@ impl CompilerDriver:
         else:
             ""
         val hir_shard_mode: bool = hir_shard_active() and hir_closure_digest != ""
+        # MIR shard HIR residency (driver_mir_shard_hir_residency_v1.spl): decided
+        # once before the first HIR load. Opt-in; a refusal is named, never silent.
+        val hir_residency_flag = env_get(MIR_SHARD_INTERFACE_HIR_ENV_V1) ?? ""
+        if hir_residency_flag != "":
+            val hir_residency_refusal = mir_shard_hir_residency_refusal_v1(hir_residency_flag,
+                native_mir_shard_spec_v1(), native_mir_shard_link_ledger_v1(),
+                native_mir_shard_export_write_dir_v1(), env_get("SIMPLE_MIR_FORK_WORKERS") ?? "",
+                env_get("SIMPLE_FILE_WORKER_HIR_QUEUE") ?? "", worker_hir_loads_restricted_v1())
+            if mir_shard_hir_residency_arm_v1(hir_residency_refusal):
+                print "[mir-shard] hir-residency armed: non-entry HIR cache loads are interface-only; a claimed module's body reloads from the cache"
+            else:
+                print "[mir-shard] hir-residency refused reason={hir_residency_refusal}"
         # Per-file unit child (native_file_worker_v1.spl): HIR for its claims,
         # then this same process continues into MIR + object.
         val hir_unit_mode: bool = hir_shard_mode and native_file_worker_unit_active_v1()
@@ -1313,8 +1332,15 @@ impl CompilerDriver:
             if not hir_unit_mode and not worker_hir_load_allowed_v1(source.path):
                 hir_loop_pos = hir_loop_pos + 1
                 continue
+            val hir_stream_binding: text = if hir_stream_key != "":
+                hir_cache_parser_binding_v1(hir_stream_key, source.module_name, source.path, self.ctx.source_identities_owner[source_index], self.ctx.options.library_mode)
+            else:
+                ""
+            # MIR shard HIR residency: every non-entry module loads interface-only
+            # when armed; the claim loop reloads a claimed module's body.
+            val hir_stream_interface_only = mir_shard_hir_residency_armed_v1() and not is_requested_bootstrap_entry
             val hir_stream_cached: HirModule? = if hir_stream_key != "":
-                hir_cache_load_parsed_v1(hir_stream_key, hir_cache_parser_binding_v1(hir_stream_key, source.module_name, source.path, self.ctx.source_identities_owner[source_index], self.ctx.options.library_mode), source.path, self.ctx.options.library_mode)
+                hir_cache_load_parsed_v1(hir_stream_key, hir_stream_binding, source.path, self.ctx.options.library_mode, hir_stream_interface_only)
             else:
                 nil
             if (env_get("SIMPLE_M4_WORK_RECEIPT") ?? "") == "1":
@@ -1349,6 +1375,10 @@ impl CompilerDriver:
                 # without opening an otherwise unused parse scope.
                 lowering.begin_module(source.path)
                 hir_module = hir_stream_cached.unwrap()
+                if mir_shard_hir_residency_armed_v1():
+                    mir_shard_hir_residency_note_v1(source.path, source.module_name, hir_stream_key,
+                        hir_stream_binding, self.ctx.options.library_mode,
+                        if hir_stream_interface_only: "interface" else: "full")
                 val hir_registry_name = if is_requested_bootstrap_entry:
                     hir_module_logical_name_from_path(source.path)
                 else:
@@ -1618,6 +1648,8 @@ impl CompilerDriver:
         # driver_orchestration.spl.
         if (self.ctx.error_count_value > 0):
             return false
+        if mir_shard_hir_residency_armed_v1():
+            print "[mir-shard] hir-residency loaded {mir_shard_hir_residency_counters_v1()} bodies_dropped={hir_cache_interface_only_bodies_dropped_v1()}"
         log_phase("phase3:hir:validate:start keys={validation_module_keys.len()} values={validation_module_values.len()} array={self.ctx.validation_module_array.len()}")
         var validation_error_count: i64 = 0
         driver_admit_nogc_param_effects_v1(self.ctx, surfaces.surfaces)

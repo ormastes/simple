@@ -65,6 +65,35 @@ pub struct Engine2dCompositorPackedDamage:
     selected_backend: text
     rendered_command_count: i32
 
+# Scalar proof that an exact retained revision was (or was not) reused for a
+# frame switch. It carries no pixels: at 8K a pixel payload is 132.7 MB per
+# switch, and the retained surface is already identified by its seed checksum.
+pub struct Engine2dFrameSwitchReceipt:
+    reused: bool
+    pixel_count: i64
+    checksum: i64
+    producer_generation: i64
+    composition_revision: i64
+    raster_count: i64
+    submission_count: i64
+    readback_count: i64
+    readback_source: text
+    present_mode: text
+    device_present: bool
+    backend_handle: i64
+    device_identity: i64
+
+fn _engine2d_frame_switch_miss(
+    producer_generation: i64, composition_revision: i64
+) -> Engine2dFrameSwitchReceipt:
+    Engine2dFrameSwitchReceipt(
+        reused: false, pixel_count: 0, checksum: 0,
+        producer_generation: producer_generation,
+        composition_revision: composition_revision,
+        raster_count: 0, submission_count: 0, readback_count: 0,
+        readback_source: "none", present_mode: "none",
+        device_present: false, backend_handle: 0, device_identity: 0)
+
 fn _engine2d_compositor_packed_damage_reject(
     reason: text, backend: text
 ) -> Engine2dCompositorPackedDamage:
@@ -694,6 +723,53 @@ class Engine2dCompositorBackend:
             self.revision_cache_resources = resources
             self.revision_cache_result = Some(result)
         result
+
+    me try_reuse_draw_ir_composition_revision(
+        composition: DrawIrComposition,
+        resources: [SimpleOsHostGpuImageResource],
+        producer_generation: i64,
+        composition_revision: i64
+    ) -> Engine2dFrameSwitchReceipt:
+        """Frame switch on an exact retained revision, without the pixels.
+
+        Same exact-match rule as render_draw_ir_composition_resources_revision,
+        but a miss never rasters and a hit returns scalars only: the retained
+        frame is identified by its seed checksum, not copied out.
+        """
+        val selected = self.engine.backend_name()
+        if (
+            producer_generation < 0 or composition_revision < 0 or
+            composition_revision >= _ENGINE2D_REVISION_CACHE_COMPOSITION_SATURATION or
+            self.revision_cache_producer_generation != producer_generation or
+            self.revision_cache_composition_revision != composition_revision or
+            self.revision_cache_backend != selected or
+            self.revision_cache_transfer_profile != _engine2d_compositor_transfer_profile() or
+            self.revision_cache_resources != resources
+        ):
+            return _engine2d_frame_switch_miss(
+                producer_generation, composition_revision)
+        if val Some(cached_composition) = self.revision_cache_composition:
+            if cached_composition == composition:
+                if val Some(cached) = self.revision_cache_result:
+                    self.revision_reuse_count = self.revision_reuse_count + 1
+                    val gpu = _engine2d_compositor_gpu_backend(selected)
+                    return Engine2dFrameSwitchReceipt(
+                        reused: true,
+                        pixel_count: self.w.to_i64() * self.h.to_i64(),
+                        checksum: cached.readback_checksum,
+                        producer_generation: producer_generation,
+                        composition_revision: composition_revision,
+                        raster_count: 0,
+                        submission_count: 0,
+                        readback_count: 0,
+                        readback_source: (
+                            if gpu: "host_cache_after_device_copy"
+                            else: "host_cache"),
+                        present_mode: "host_cache",
+                        device_present: false,
+                        backend_handle: cached.backend_handle,
+                        device_identity: cached.device_identity)
+        _engine2d_frame_switch_miss(producer_generation, composition_revision)
 
     me render_draw_ir_composition_resources_revision_damaged(
         composition: DrawIrComposition,

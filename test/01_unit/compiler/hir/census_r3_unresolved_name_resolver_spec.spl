@@ -1,0 +1,162 @@
+"""
+# Census r3 unresolved-name resolver gaps
+
+Red->green pins for the COMPILER-side rows of the 2026-11-13 HIR unresolved-name
+census (run-19 Stage 2 compiler, full-CLI native-build). Every row here names a
+symbol that IS validly reachable, yet the owner/facade walk reported it:
+
+- `[hir-callable-dep-origin-unresolved]` for a type the OWNER itself declares
+  (`compiler.common.runtime_value_v1` -> `Value`,
+  `compiler.semantics.visibility_checker` -> `VisibilityWarning`) when the owner
+  is imported as a whole-module alias (`use owner as o`).
+- `[hir-reexport-chase-unresolved] item=std.path local=path` when a glob import
+  expands a facade whose import table carries a module alias (`use std.path as
+  path`): a module-alias row is not a re-exportable item.
+- `[hir-reexport-chase-unresolved] item=unit` / `item=list`: both spellings
+  resolve in `lower_named_kind` without any symbol, exactly like `void`/`text`,
+  so they belong in `hir_dependency_is_builtin_type`.
+- `[hir-payload-origin-unresolved] payload=std.common.color.types.Color`: a
+  fully-qualified payload type resolves through `resolve_qualified_named_type`
+  and never needs an owner-side import.
+- `[hir-reexport-chase-unresolved] item=Eq`: an ambient builtin bound trait on
+  an imported generic struct is not a field dependency.
+
+Receipts are observable in-process: every chase miss also records a
+`[W-HIR-UNDECL-IMPORT-001]` recovered diagnostic in `lowering.errors`, and the
+origin walks record their miss in the payload-origin miss memo.
+"""
+
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_lowering._Items.module_reexport_materialization.{hir_dependency_is_builtin_type, hir_payload_origin_miss_key}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.common.config.{Logger}
+use std.spec.step
+
+fn census_r3_logger() -> Logger:
+    Logger(level: 0)
+
+fn census_r3_undecl_count(messages: [text]) -> i64:
+    var count = 0
+    for message in messages:
+        if message.contains("W-HIR-UNDECL-IMPORT-001"):
+            count = count + 1
+    count
+
+describe "census r3 unresolved-name resolver gaps":
+    it "resolves an owner's own declared types under a whole-module alias import":
+        val log = census_r3_logger()
+        # `type ValueCaptureMap = {text: Value}` is the runtime_value_v1 shape:
+        # the alias body names an enum declared in the same owner, and the
+        # alias-dependency path used to run the explicit sweep unconditionally.
+        val owner_source = "struct Warn:\n    msg: text\n\nenum Val:\n    Int(v: i64)\n    Arr(items: [Val])\n\ntype ValCaptureMap = \{text: Val\}\n\nfn check(x: i64) -> has_Warn:\n    nil\n\nfn make_val(x: i64) -> Val:\n    Val.Int(v: x)\n\nfn vals(x: Val) -> [Val]:\n    [x]"
+        val consumer_source = "use compiler.census_owner as co\nfn consume() -> i64:\n    1"
+        val owner = parse_full_frontend(owner_source, "compiler.census_owner", "compiler.census_owner", log)
+        val consumer = parse_full_frontend(consumer_source, "compiler.census_consumer", "compiler.census_consumer", log)
+        var modules: Dict<text, Module> = {}
+        modules["compiler.census_owner"] = owner
+        val result = module_surfaces_from_modules(modules, [
+            SourceFile(path: "compiler/census_owner.spl", content: owner_source, module_name: "compiler.census_owner")
+        ])
+        expect(result.is_ok()).to_equal(true)
+        var lowering = hirlowering_for_module("compiler.census_consumer", result.unwrap())
+        val hir = lowering.lower_module(consumer)
+        expect(lowering.errors.len()).to_equal(0)
+        expect(lowering.payload_origin_miss_memo_lookup(hir_payload_origin_miss_key("callable compiler.census_owner", "Warn"))).to_equal(false)
+        expect(lowering.payload_origin_miss_memo_lookup(hir_payload_origin_miss_key("callable compiler.census_owner", "Val"))).to_equal(false)
+        expect(hir.symbols.lookup("co.check") != nil).to_equal(true)
+
+    it "glob-expands a facade without chasing its module-alias import row":
+        val log = census_r3_logger()
+        val path_source = "pub fn join(a: text, b: text) -> text:\n    a + b"
+        # Control row: an aliased NAMED import (`join as pjoin`) is a real
+        # symbol the glob may forward; only the module-alias row is skipped.
+        val facade_source = "use std.census_path as path\nuse std.census_path.\{join as pjoin\}\n\npub fn facade_fn(x: i64) -> i64:\n    x"
+        val consumer_source = "use app.census_facade.*\nfn consume() -> i64:\n    facade_fn(1)"
+        val path_mod = parse_full_frontend(path_source, "std.census_path", "std.census_path", log)
+        val facade = parse_full_frontend(facade_source, "app.census_facade", "app.census_facade", log)
+        val consumer = parse_full_frontend(consumer_source, "app.census_consumer", "app.census_consumer", log)
+        var modules: Dict<text, Module> = {}
+        modules["std.census_path"] = path_mod
+        modules["app.census_facade"] = facade
+        val result = module_surfaces_from_modules(modules, [
+            SourceFile(path: "std/census_path.spl", content: path_source, module_name: "std.census_path"),
+            SourceFile(path: "app/census_facade.spl", content: facade_source, module_name: "app.census_facade")
+        ])
+        expect(result.is_ok()).to_equal(true)
+        var lowering = hirlowering_for_module("app.census_consumer", result.unwrap())
+        val hir = lowering.lower_module(consumer)
+        expect(census_r3_undecl_count(lowering.diagnostic_messages)).to_equal(0)
+        expect(lowering.errors.len()).to_equal(0)
+        expect(hir.symbols.lookup("facade_fn") != nil).to_equal(true)
+        expect(hir.symbols.lookup("pjoin") != nil).to_equal(true)
+
+    it "treats unit and list as builtin spellings that need no owner":
+        expect(hir_dependency_is_builtin_type("unit")).to_equal(true)
+        expect(hir_dependency_is_builtin_type("list")).to_equal(true)
+        expect(hir_dependency_is_builtin_type("void")).to_equal(true)
+        expect(hir_dependency_is_builtin_type("List")).to_equal(false)
+        expect(hir_dependency_is_builtin_type("Unit")).to_equal(false)
+
+    it "does not chase unit or list signature spellings through the owner":
+        val log = census_r3_logger()
+        val owner_source = "fn validate(name: text) -> unit:\n    ()\n\nfn parse_query(query: text) -> list:\n    []\n\nfn build_query(params: list) -> text:\n    \"\""
+        val consumer_source = "use compiler.census_unit_owner.{validate, parse_query, build_query}\nfn consume() -> text:\n    build_query(parse_query(\"a\"))"
+        val owner = parse_full_frontend(owner_source, "compiler.census_unit_owner", "compiler.census_unit_owner", log)
+        val consumer = parse_full_frontend(consumer_source, "compiler.census_unit_consumer", "compiler.census_unit_consumer", log)
+        var modules: Dict<text, Module> = {}
+        modules["compiler.census_unit_owner"] = owner
+        val result = module_surfaces_from_modules(modules, [
+            SourceFile(path: "compiler/census_unit_owner.spl", content: owner_source, module_name: "compiler.census_unit_owner")
+        ])
+        expect(result.is_ok()).to_equal(true)
+        var lowering = hirlowering_for_module("compiler.census_unit_consumer", result.unwrap())
+        val hir = lowering.lower_module(consumer)
+        expect(census_r3_undecl_count(lowering.diagnostic_messages)).to_equal(0)
+        expect(lowering.errors.len()).to_equal(0)
+        expect(hir.symbols.lookup("build_query") != nil).to_equal(true)
+
+    it "resolves a fully-qualified enum payload type without an owner-side import":
+        val log = census_r3_logger()
+        val color_source = "struct Color:\n    r: i64\n    g: i64\n    b: i64"
+        val owner_source = "use std.census_color.types.\{Color as CssColor\}\n\nenum CssValue:\n    Number(n: f64)\n    Color(color: std.census_color.types.Color)\n\nfn css_number(n: f64) -> CssValue:\n    CssValue.Number(n: n)"
+        # The consumer destructures the qualified payload and reads a field:
+        # that is the MIR-relevant guarantee, not just a quiet lowering.
+        val consumer_source = "use lib.census_anim.\{CssValue, css_number\}\nfn red_of(v: CssValue) -> i64:\n    match v:\n        CssValue.Color(c):\n            c.r\n        CssValue.Number(n):\n            0\n\nfn consume() -> i64:\n    red_of(css_number(1.0))"
+        val color_mod = parse_full_frontend(color_source, "std.census_color.types", "std.census_color.types", log)
+        val owner = parse_full_frontend(owner_source, "lib.census_anim", "lib.census_anim", log)
+        val consumer = parse_full_frontend(consumer_source, "lib.census_anim_consumer", "lib.census_anim_consumer", log)
+        var modules: Dict<text, Module> = {}
+        modules["std.census_color.types"] = color_mod
+        modules["lib.census_anim"] = owner
+        val result = module_surfaces_from_modules(modules, [
+            SourceFile(path: "std/census_color/types.spl", content: color_source, module_name: "std.census_color.types"),
+            SourceFile(path: "lib/census_anim.spl", content: owner_source, module_name: "lib.census_anim")
+        ])
+        expect(result.is_ok()).to_equal(true)
+        var lowering = hirlowering_for_module("lib.census_anim_consumer", result.unwrap())
+        val hir = lowering.lower_module(consumer)
+        expect(lowering.errors.len()).to_equal(0)
+        expect(lowering.payload_origin_miss_memo_lookup(hir_payload_origin_miss_key("lib.census_anim", "std.census_color.types.Color"))).to_equal(false)
+        expect(hir.symbols.lookup("css_number") != nil).to_equal(true)
+
+    it "does not chase an ambient builtin where-bound trait as a field dependency":
+        val log = census_r3_logger()
+        val owner_source = "struct Pair<K, V> where K: Eq:\n    key: K\n    value: V\n\nfn pair_of(k: i64, v: text) -> Pair<i64, text>:\n    Pair(key: k, value: v)"
+        val consumer_source = "use lib.census_map.\{Pair, pair_of\}\nfn consume() -> i64:\n    pair_of(1, \"a\").key"
+        val owner = parse_full_frontend(owner_source, "lib.census_map", "lib.census_map", log)
+        val consumer = parse_full_frontend(consumer_source, "lib.census_map_consumer", "lib.census_map_consumer", log)
+        var modules: Dict<text, Module> = {}
+        modules["lib.census_map"] = owner
+        val result = module_surfaces_from_modules(modules, [
+            SourceFile(path: "lib/census_map.spl", content: owner_source, module_name: "lib.census_map")
+        ])
+        expect(result.is_ok()).to_equal(true)
+        var lowering = hirlowering_for_module("lib.census_map_consumer", result.unwrap())
+        val hir = lowering.lower_module(consumer)
+        expect(census_r3_undecl_count(lowering.diagnostic_messages)).to_equal(0)
+        expect(lowering.errors.len()).to_equal(0)
+        expect(hir.symbols.lookup("pair_of") != nil).to_equal(true)

@@ -1,0 +1,127 @@
+# Purpose and audience: compiler engineers who own HIR binding-type transport.
+# @req REQ-SSPEC-COMPILER
+"""
+# `enumerate()` binders and element-wise lambda params carry the element type
+
+Bug `enumerate_tuple_element_typed_unit_native_2026-11-13`: the pure-Simple
+compiler lowered `for (i, x) in xs.enumerate():` with `x` untyped and the
+parameter of `xs.filter(\\x: ...)` as `Infer`, so native MIR/LLVM emitted unit
+slots and llc rejected `rt_native_eq(void ...)`.
+
+This spec drives the pure-Simple HIR lowering (`HirLowering.lower_module`)
+directly on source text and inspects the produced HIR: the destructured
+`Let` types of the enumerate loop and the lambda's `HirParam.type_`. It
+proves the HIR contract only; the native codegen effect needs a rebuilt
+Phase 2 compiler.
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:hir
+
+use std.spec.{describe, it, expect}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.core.parser.{parser_has_errors}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+
+val fixture_prelude = "struct Probe:\n    state: i64\n\nstruct Holder:\n    items: [Probe]\n\n"
+
+fn lower_fixture(body: text) -> HirModule:
+    val parsed = parse_full_frontend(fixture_prelude + body, "enumty_fixture.spl", "enumty_fixture", Logger(level: 0))
+    expect(parser_has_errors()).to_equal(false)
+    var lowering = HirLowering.with_filename("enumty_fixture.spl")
+    lowering.lower_module(parsed)
+
+fn find_fn(hir: HirModule, name: text) -> HirFunction?:
+    for f in hir.functions.values():
+        if f.name == name:
+            return Some(f)
+    None
+
+# "int" | "named" | "infer" | "other" — a coarse, stable classification.
+fn type_tag(t: HirType) -> text:
+    match t.kind:
+        case HirTypeKind.Int(_, _): "int"
+        case HirTypeKind.Named(_, _): "named"
+        case HirTypeKind.Infer(_, _): "infer"
+        case _: "other"
+
+# Let types bound at the head of the first `for` body in the function.
+fn for_binder_tags(f: HirFunction) -> [text]:
+    var tags: [text] = []
+    for stmt in f.body.stmts:
+        match stmt.kind:
+            case HirStmtKind.Expr(e):
+                match e.kind:
+                    case HirExprKind.For(_, _, for_body, _):
+                        for inner in for_body.stmts:
+                            match inner.kind:
+                                case HirStmtKind.Let(_, let_type, _):
+                                    tags.push(type_tag(let_type))
+                                case _: ()
+                        return tags
+                    case _: ()
+            case _: ()
+    tags
+
+fn lambda_param_tag_in(e: HirExpr) -> text:
+    match e.kind:
+        case HirExprKind.MethodCall(_, _, args, _):
+            for a in args:
+                match a.value.kind:
+                    case HirExprKind.Lambda(params, _, _):
+                        if params.len() == 1:
+                            return type_tag(params[0].type_)
+                    case _: ()
+            "none"
+        case HirExprKind.Return(value):
+            if val v = value:
+                return lambda_param_tag_in(v)
+            "none"
+        case _: "none"
+
+# Param type tag of the single-parameter lambda passed in the function's tail.
+fn tail_lambda_param_tag(f: HirFunction) -> text:
+    if f.body.has:
+        return lambda_param_tag_in(f.body.value)
+    for stmt in f.body.stmts:
+        match stmt.kind:
+            case HirStmtKind.Expr(e):
+                val tag = lambda_param_tag_in(e)
+                if tag != "none": return tag
+            case _: ()
+    "none"
+
+describe "HIR: enumerate() binders carry the element type (enumerate_tuple_element_typed_unit_native_2026-11-13)":
+    it "types (i, x) over a [T] parameter as (i64, T)":
+        val hir = lower_fixture("fn f(xs: [Probe]) -> i64:\n    var n = 0\n    for (i, p) in xs.enumerate():\n        if p.state == 1:\n            n = n + i\n    n\n")
+        if val f = find_fn(hir, "f"):
+            expect(for_binder_tags(f)).to_equal(["int", "named"])
+        else:
+            expect("f lowered").to_equal("missing")
+
+    it "types (i, x) over a declared [T] field as (i64, T)":
+        val hir = lower_fixture("fn g(h: Holder) -> i64:\n    var n = 0\n    for (i, p) in h.items.enumerate():\n        if p.state == 1:\n            n = n + i\n    n\n")
+        if val f = find_fn(hir, "g"):
+            expect(for_binder_tags(f)).to_equal(["int", "named"])
+        else:
+            expect("g lowered").to_equal("missing")
+
+describe "HIR: element-wise lambda params carry the element type (enumerate_tuple_element_typed_unit_native_2026-11-13)":
+    it "types the filter lambda parameter as T":
+        val hir = lower_fixture("fn h(xs: [Probe]) -> [Probe]:\n    xs.filter(\\p: p.state == 1)\n")
+        if val f = find_fn(hir, "h"):
+            expect(tail_lambda_param_tag(f)).to_equal("named")
+        else:
+            expect("h lowered").to_equal("missing")
+
+    it "leaves a lambda passed to a non-element-wise method as Infer":
+        val hir = lower_fixture("fn k(xs: [Probe]) -> [Probe]:\n    xs.sort_by(\\p: p.state)\n")
+        if val f = find_fn(hir, "k"):
+            expect(tail_lambda_param_tag(f)).to_equal("infer")
+        else:
+            expect("k lowered").to_equal("missing")

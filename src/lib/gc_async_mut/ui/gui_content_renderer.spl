@@ -18,7 +18,7 @@ use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{
     Engine2dDrawIrTileOutcome,
     engine2d_draw_ir_adv_composition_with_images,
     engine2d_draw_ir_render_composition_damaged,
-    engine2d_draw_ir_render_composition_damaged_with_images,
+    engine2d_draw_ir_adv_composition_owner_with_images,
     engine2d_draw_ir_retained_idle,
     engine2d_draw_ir_retained_rejected,
 }
@@ -42,14 +42,22 @@ class GuiRetainedRenderSession:
         val composition = session.submit_widget_draw_ir(
             self.width, self.height, self.backend)
         self.engine.clear(gui_content_frame_clear_color())
-        # Preserve the executor's explicit retained Engine2D result.  The
-        # convenience composition API returns a readback receipt, not the
-        # mutated engine value needed by a later LOCAL damage replay.
-        val seeded = engine2d_draw_ir_render_composition_damaged_with_images(
-            self.engine, composition, [],
-            [0i64, 0i64, self.width.to_i64(), self.height.to_i64()], false)
-        self.engine = seeded.engine
-        if seeded.unsupported_kinds != "none" or seeded.ops_rendered <= 0:
+        # Seed through the ORDERED composition executor, the same one the
+        # one-shot `gui_session_content_frame` uses. The tiled damage executor
+        # is the wrong owner for a first frame: its fresh-device preflight
+        # refuses a label whose metric box overhangs a narrow target, and it
+        # refuses every root surface that samples its parent (window-surface
+        # glass), which is the default theme. The owner form returns the
+        # mutated Engine2D that a later LOCAL damage replay continues from; the
+        # plain convenience form returns only a readback receipt.
+        val owned = engine2d_draw_ir_adv_composition_owner_with_images(
+            self.engine, composition,
+            self.backend != "cpu" and self.backend != "software", [])
+        self.engine = owned.engine
+        val rendered = owned.result
+        if (rendered.fallback_required or rendered.rendered_command_count <= 0 or
+            rendered.skipped_command_count != rendered.occluded_command_count or
+            rendered.pixels.len() != self.width * self.height):
             self.seeded = false
             return false
         self.seeded = true

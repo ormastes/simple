@@ -1,0 +1,237 @@
+# MIR shard worker HIR residency (driver_mir_shard_hir_residency_v1).
+#
+# A spawned MIR shard worker loads the HIR of every module from the cache and
+# holds all of it, bodies included, for its whole life; it then lowers only the
+# modules it claims. These specs pin the body-free residency contract:
+#
+#   1. the arming predicate: only a spawned MIR shard worker with the opt-in
+#      flag arms; the link child, the export writer, the fork root, a per-file
+#      unit child and a module-scoped child all refuse with a named reason;
+#   2. the interface-only projection keeps every declaration the MIR provider
+#      channel reads (symbols, signatures, parameter defaults, constants,
+#      structs/classes/enums/traits incl. trait default bodies, generic and
+#      extern functions) and empties only ordinary function bodies;
+#   3. value semantics: a consumer lowers to byte-identical MIR text whether
+#      its provider is held full or interface-only;
+#   4. the held set: after the claim loop a worker holds full bodies for
+#      exactly {entry} + claimed and interface-only HIR for every other module.
+use std.spec.*
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLowering.function_lowering.*
+use compiler.mir._MirLoweringExpr.expr_dispatch.*
+use compiler.mir._MirLowering.asm_and_targets.*
+use compiler.mir.mir_lowering_stmts.*
+use test.helpers.lowering_harness.{mir_module_text, first_text_difference}
+use compiler.driver.driver_mir_shard_hir_residency_v1.{
+    mir_shard_hir_residency_refusal_v1, hir_module_interface_only_v1,
+    hir_function_keeps_body_v1, mir_shard_hir_residency_plan_v1,
+    mir_shard_hir_residency_reset_v1, mir_shard_hir_residency_arm_v1,
+    mir_shard_hir_residency_armed_v1, mir_shard_hir_residency_note_v1,
+    mir_shard_hir_residency_kind_v1, mir_shard_hir_residency_reload_key_v1,
+    mir_shard_hir_residency_mark_full_v1, mir_shard_hir_residency_held_v1,
+    mir_shard_hir_residency_interface_v1, mir_shard_hir_residency_counters_v1}
+
+val RES_RECORDS_SOURCE = "pub struct Point:\n    x: i64\n    y: i64\n\npub const LIMIT: i64 = 7\n\npub trait Area:\n    fn area() -> i64\n    fn doubled() -> i64:\n        self.area() * 2\n\npub fn make(x: i64, y: i64 = 1) -> Point:\n    Point(x: x, y: y)\n\npub fn scale(p: Point, k: i64) -> Point:\n    Point(x: p.x * k, y: p.y * k)\n\npub fn pick<T>(a: T, b: T, first: bool) -> T:\n    if first: a else: b\n\npub extern fn rt_probe_extern(v: i64) -> i64\n"
+val RES_CONSUMER_SOURCE = "use app.probe.records.\{Point, LIMIT, make, scale, pick\}\n\nfn total(p: Point) -> i64:\n    p.x + p.y + LIMIT\n\nfn build() -> i64:\n    val p = scale(make(3), 2)\n    total(p) + pick(1, 2, true)\n"
+
+class ResidencyFixture:
+    records: HirModule
+    consumer: HirModule
+
+fn residency_fixture() -> ResidencyFixture:
+    val log = Logger(level: 0)
+    val records_ast = parse_full_frontend(RES_RECORDS_SOURCE, "app/probe/records.spl", "app.probe.records", log)
+    val consumer_ast = parse_full_frontend(RES_CONSUMER_SOURCE, "app/probe/main.spl", "app.probe.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["app.probe.records"] = records_ast
+    modules["app.probe.main"] = consumer_ast
+    val files = [SourceFile(path: "app/probe/records.spl", content: RES_RECORDS_SOURCE, module_name: "app.probe.records"), SourceFile(path: "app/probe/main.spl", content: RES_CONSUMER_SOURCE, module_name: "app.probe.main")]
+    match module_surfaces_from_modules(modules, files):
+        case Err(reason): fail("module surface construction failed: {reason}")
+        case Ok(surfaces):
+            var records_lowering = hirlowering_for_module("app/probe/records.spl", surfaces)
+            var consumer_lowering = hirlowering_for_module("app/probe/main.spl", surfaces)
+            val records = records_lowering.lower_module(records_ast)
+            val consumer = consumer_lowering.lower_module(consumer_ast)
+            expect(records_lowering.errors.len()).to_equal(0)
+            expect(consumer_lowering.errors.len()).to_equal(0)
+            return ResidencyFixture(records: records, consumer: consumer)
+
+fn body_is_empty(function: HirFunction) -> bool:
+    function.body.stmts.len() == 0 and not function.body.has
+
+fn function_named(module: HirModule, name: text) -> HirFunction:
+    var found: HirFunction? = nil
+    for key in module.functions.keys():
+        val function: HirFunction = module.functions[key]
+        if function.name == name:
+            found = Some(function)
+    if found == nil:
+        fail("function {name} not found in {module.name}")
+    found.unwrap()
+
+fn lower_consumer_text(consumer: HirModule, provider: HirModule) -> text:
+    var lowering = MirLowering.new(consumer.symbols)
+    var prescan_mods: Dict<text, HirModule> = {}
+    prescan_mods["consumer"] = consumer
+    prescan_mods["records"] = provider
+    lowering.prescan_module_struct_names(prescan_mods, "consumer")
+    lowering.prescan_module_struct_names(prescan_mods, "records")
+    val mir = lowering.lower_module(consumer, [consumer, provider])
+    expect(lowering.errors.len()).to_equal(0)
+    mir_module_text(mir)
+
+describe "MIR shard HIR residency arming predicate":
+    it "arms only a spawned MIR shard worker that opted in":
+        expect(mir_shard_hir_residency_refusal_v1("1", "0/2", "", "", "", "", false)).to_equal("")
+        expect(mir_shard_hir_residency_refusal_v1("1", "1/2", "", "", "0", "", false)).to_equal("")
+
+    it "refuses without the opt-in flag (default off)":
+        expect(mir_shard_hir_residency_refusal_v1("", "0/2", "", "", "", "", false)).to_equal("flag-off")
+        expect(mir_shard_hir_residency_refusal_v1("0", "0/2", "", "", "", "", false)).to_equal("flag-off")
+
+    it "refuses outside a MIR shard worker":
+        expect(mir_shard_hir_residency_refusal_v1("1", "", "", "", "", "", false)).to_equal("not-mir-shard-worker")
+
+    it "refuses the link child, the export writer and the fork root":
+        expect(mir_shard_hir_residency_refusal_v1("1", "0/1", "/tmp/ledger", "", "", "", false)).to_equal("link-worker")
+        expect(mir_shard_hir_residency_refusal_v1("1", "0/1", "", "/tmp/export", "", "", false)).to_equal("export-writer")
+        expect(mir_shard_hir_residency_refusal_v1("1", "0/1", "", "", "3", "", false)).to_equal("fork-workers")
+
+    it "refuses a per-file unit child and a module-scoped child":
+        expect(mir_shard_hir_residency_refusal_v1("1", "0/1", "", "", "", "/tmp/hir-queue", false)).to_equal("file-worker-unit")
+        expect(mir_shard_hir_residency_refusal_v1("1", "0/1", "", "", "", "", true)).to_equal("module-scoped-unit")
+
+describe "interface-only HIR projection":
+    it "keeps every function key, name and signature and empties only ordinary bodies":
+        val fixture = residency_fixture()
+        val full = fixture.records
+        val (projected, stripped) = hir_module_interface_only_v1(full)
+        expect(projected.name).to_equal(full.name)
+        expect(projected.path).to_equal(full.path)
+        expect(projected.functions.len()).to_equal(full.functions.len())
+        var expected_stripped = 0
+        for key in full.functions.keys():
+            val before: HirFunction = full.functions[key]
+            val after: HirFunction = projected.functions[key]
+            expect(after.name).to_equal(before.name)
+            expect(after.params.len()).to_equal(before.params.len())
+            expect(after.is_extern).to_equal(before.is_extern)
+            expect(after.type_params.len()).to_equal(before.type_params.len())
+            if hir_function_keeps_body_v1(before):
+                expect(body_is_empty(after)).to_equal(body_is_empty(before))
+            else:
+                expect(body_is_empty(after)).to_equal(true)
+                if not body_is_empty(before): expected_stripped = expected_stripped + 1
+        expect(stripped).to_equal(expected_stripped)
+        expect(stripped > 0).to_equal(true)
+
+    it "empties ordinary bodies but keeps generic templates and externs whole":
+        val fixture = residency_fixture()
+        val (projected, _stripped) = hir_module_interface_only_v1(fixture.records)
+        expect(body_is_empty(function_named(fixture.records, "make"))).to_equal(false)
+        expect(body_is_empty(function_named(projected, "make"))).to_equal(true)
+        expect(body_is_empty(function_named(projected, "scale"))).to_equal(true)
+        expect(body_is_empty(function_named(fixture.records, "pick"))).to_equal(false)
+        expect(body_is_empty(function_named(projected, "pick"))).to_equal(false)
+        expect(function_named(projected, "rt_probe_extern").is_extern).to_equal(true)
+
+    it "keeps parameter defaults, constants, structs, traits with default bodies and the symbol table":
+        val fixture = residency_fixture()
+        val full = fixture.records
+        val (projected, _stripped) = hir_module_interface_only_v1(full)
+        val make_after = function_named(projected, "make")
+        expect(make_after.params[1].has_default).to_equal(true)
+        expect(projected.constants.len()).to_equal(full.constants.len())
+        expect(projected.structs.len()).to_equal(full.structs.len())
+        expect(projected.classes.len()).to_equal(full.classes.len())
+        expect(projected.enums.len()).to_equal(full.enums.len())
+        expect(projected.traits.len()).to_equal(full.traits.len())
+        expect(projected.traits.len() > 0).to_equal(true)
+        for key in full.traits.keys():
+            val before: HirTrait = full.traits[key]
+            val after: HirTrait = projected.traits[key]
+            expect(after.defaults.len()).to_equal(before.defaults.len())
+            var di = 0
+            while di < before.defaults.len():
+                expect(body_is_empty(after.defaults[di])).to_equal(body_is_empty(before.defaults[di]))
+                di = di + 1
+        expect(projected.symbols.symbols.len()).to_equal(full.symbols.symbols.len())
+        expect(projected.imports.len()).to_equal(full.imports.len())
+        expect(projected.exports.len()).to_equal(full.exports.len())
+        expect(projected.aop_advices.len()).to_equal(full.aop_advices.len())
+
+    it "is idempotent: projecting a projection strips nothing":
+        val fixture = residency_fixture()
+        val (once, first) = hir_module_interface_only_v1(fixture.records)
+        val (_twice, second) = hir_module_interface_only_v1(once)
+        expect(first > 0).to_equal(true)
+        expect(second).to_equal(0)
+
+describe "value semantics: consumer MIR is identical with a full or interface-only provider":
+    it "lowers the consumer to byte-identical MIR text":
+        val fixture = residency_fixture()
+        val full_text = lower_consumer_text(fixture.consumer, fixture.records)
+        val (interface_records, stripped) = hir_module_interface_only_v1(fixture.records)
+        expect(stripped > 0).to_equal(true)
+        val interface_text = lower_consumer_text(fixture.consumer, interface_records)
+        expect(full_text != "").to_equal(true)
+        expect(first_text_difference("app.probe.main", full_text, interface_text)).to_equal("")
+
+describe "held module set after the claim loop":
+    it "plans full bodies for the entry and the claimed modules only":
+        val (full, iface_only) = mir_shard_hir_residency_plan_v1(
+            ["app.a", "app.b", "app.c", "app.cli.bootstrap_main"], ["app.b"], "app.cli.bootstrap_main")
+        expect(full).to_equal(["app.b", "app.cli.bootstrap_main"])
+        expect(iface_only).to_equal(["app.a", "app.c"])
+
+    it "records interface-only loads, reloads claimed modules and reports the held set":
+        mir_shard_hir_residency_reset_v1()
+        expect(mir_shard_hir_residency_armed_v1()).to_equal(false)
+        expect(mir_shard_hir_residency_arm_v1("")).to_equal(true)
+        expect(mir_shard_hir_residency_armed_v1()).to_equal(true)
+        # set-once: a later refusal cannot disarm a worker mid-load
+        expect(mir_shard_hir_residency_arm_v1("flag-off")).to_equal(true)
+        expect(mir_shard_hir_residency_armed_v1()).to_equal(true)
+        val key_a = "a" * 64
+        val key_b = "b" * 64
+        val bind_a = "1" * 64
+        val bind_b = "2" * 64
+        mir_shard_hir_residency_note_v1("src/app/a.spl", "app.a", key_a, bind_a, "", "interface")
+        mir_shard_hir_residency_note_v1("src/app/b.spl", "app.b", key_b, bind_b, "", "interface")
+        mir_shard_hir_residency_note_v1("src/app/c.spl", "app.c", "c" * 64, "3" * 64, "", "interface")
+        mir_shard_hir_residency_note_v1("src/app/cli/bootstrap_main.spl", "app.cli.bootstrap_main", "d" * 64, "4" * 64, "", "full")
+        expect(mir_shard_hir_residency_held_v1()).to_equal(["app.cli.bootstrap_main"])
+        expect(mir_shard_hir_residency_interface_v1()).to_equal(["app.a", "app.b", "app.c"])
+        expect(mir_shard_hir_residency_kind_v1("src/app/b.spl")).to_equal("interface")
+        expect(mir_shard_hir_residency_kind_v1("src/app/unknown.spl")).to_equal("")
+        expect(mir_shard_hir_residency_reload_key_v1("src/app/b.spl")).to_equal([key_b, bind_b, ""])
+        expect(mir_shard_hir_residency_reload_key_v1("src/app/unknown.spl")).to_equal([])
+        # the worker claims app.b: its body comes back from the cache
+        mir_shard_hir_residency_mark_full_v1("src/app/b.spl")
+        expect(mir_shard_hir_residency_kind_v1("src/app/b.spl")).to_equal("full")
+        expect(mir_shard_hir_residency_held_v1()).to_equal(["app.b", "app.cli.bootstrap_main"])
+        expect(mir_shard_hir_residency_interface_v1()).to_equal(["app.a", "app.c"])
+        expect(mir_shard_hir_residency_counters_v1()).to_equal("hir_interface_only=2 hir_full=2 hir_reloaded=1")
+        mir_shard_hir_residency_reset_v1()
+        expect(mir_shard_hir_residency_armed_v1()).to_equal(false)
+        expect(mir_shard_hir_residency_held_v1()).to_equal([])
+
+    it "stays disarmed when the predicate refuses":
+        mir_shard_hir_residency_reset_v1()
+        expect(mir_shard_hir_residency_arm_v1("not-mir-shard-worker")).to_equal(false)
+        expect(mir_shard_hir_residency_armed_v1()).to_equal(false)
+        mir_shard_hir_residency_reset_v1()
