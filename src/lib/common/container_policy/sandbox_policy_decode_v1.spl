@@ -1,0 +1,284 @@
+# Strict decoder for `simple-container-seatbelt-policy-v1` (design §12.1, §13.3, §13.5).
+#
+# One SDN parser: the document is parsed by the canonical span-recording
+# parser through `resource_v1.parse_resource_document`, which already refuses
+# duplicate keys with a source position. This module then applies the same
+# strict profile as orchestration resources: unknown fields, wrong types,
+# unsupported enum values and non-canonical quantities are refused with the
+# exact schema path and line/column. `allowUnsandboxedFallback` is fixed false.
+#
+# Pure: no host path resolution, no probing. Capability matching is a separate
+# step (`requirements_match_v1`).
+
+use std.common.sdn.value.{SdnValue, SdnSpan}
+use std.common.diagnostics.diagnostic_v1.{DiagnosticV1}
+use std.common.contracts.orchestration.resource_v1.{
+    RejectionV1, reject, as_dict, as_array, as_text, as_int, as_quantity_text, only_known, require,
+    parse_resource_document, parse_memory_bytes, parse_cpu_millis}
+use std.common.contracts.container.sandbox_capability_v1.*
+use std.common.contracts.container.filesystem_policy_v1.*
+use std.common.contracts.container.endpoint_policy_v1.*
+use std.common.container_policy.diagnostics_v1.{scmac_schema_diagnostic_v1}
+
+# Enforced before parsing (§13.5: bounds before expensive work).
+pub const SANDBOX_POLICY_MAX_BYTES_V1 = 65536
+pub const SANDBOX_POLICY_MAX_GRANTS_V1 = 128
+
+# ---- shared strict helpers (also used by the endpoint-network decoder) ----
+
+pub fn policy_as_bool_v1(v: SdnValue, path: text, spans: Dict<text, SdnSpan>) -> Result<bool, RejectionV1>:
+    match v:
+        case SdnValue.Bool(b): Ok(b)
+        case _: Err(reject("type", path, path + " must be a boolean", spans))
+
+# Logical identifiers/references: 1..128 bytes of [A-Za-z0-9._-].
+pub fn policy_ident_ok_v1(s: text) -> bool:
+    if s.byte_len() < 1 or s.byte_len() > 128:
+        return false
+    for i in 0..s.byte_len():
+        val c = s.byte_at(i) as i64
+        val ok = (c >= 97 and c <= 122) or (c >= 65 and c <= 90) or (c >= 48 and c <= 57) or
+            c == 45 or c == 46 or c == 95
+        if not ok:
+            return false
+    true
+
+pub fn policy_ident_v1(fields: Dict<text, SdnValue>, key: text, parent: text,
+                       spans: Dict<text, SdnSpan>) -> Result<text, RejectionV1>:
+    val path = policy_child_path_v1(parent, key)
+    val s = as_text(require(fields, key, policy_envelope_v1(parent), spans)?, path, spans)?
+    if not policy_ident_ok_v1(s):
+        return Err(reject("identifier", path, path + " must be 1..128 characters of [A-Za-z0-9._-]", spans))
+    Ok(s)
+
+pub fn policy_choice_v1(fields: Dict<text, SdnValue>, key: text, parent: text, allowed: [text],
+                        spans: Dict<text, SdnSpan>) -> Result<text, RejectionV1>:
+    val path = policy_child_path_v1(parent, key)
+    val s = as_text(require(fields, key, policy_envelope_v1(parent), spans)?, path, spans)?
+    if not allowed.contains(s):
+        return Err(reject("unsupported_value", path,
+            path + " value '" + s + "' is not one of: " + allowed.join(", "), spans))
+    Ok(s)
+
+pub fn policy_required_bool_v1(fields: Dict<text, SdnValue>, key: text, parent: text,
+                               spans: Dict<text, SdnSpan>) -> Result<bool, RejectionV1>:
+    val path = policy_child_path_v1(parent, key)
+    policy_as_bool_v1(require(fields, key, policy_envelope_v1(parent), spans)?, path, spans)
+
+pub fn policy_bounded_int_v1(fields: Dict<text, SdnValue>, key: text, parent: text, lo: i64, hi: i64,
+                             spans: Dict<text, SdnSpan>) -> Result<i64, RejectionV1>:
+    val path = policy_child_path_v1(parent, key)
+    val n = as_int(require(fields, key, policy_envelope_v1(parent), spans)?, path, spans)?
+    if n < lo or n > hi:
+        return Err(reject("range", path, path + " must be " + lo.to_text() + ".." + hi.to_text(), spans))
+    Ok(n)
+
+pub fn policy_child_path_v1(parent: text, key: text) -> text:
+    if parent == "":
+        return key
+    parent + "." + key
+
+# `require`/`only_known` name the container; the document root is "document"
+# exactly as in resource_v1.
+pub fn policy_envelope_v1(parent: text) -> text:
+    if parent == "":
+        return "document"
+    parent
+
+pub fn policy_section_v1(top: Dict<text, SdnValue>, key: text, allowed: [text],
+                         spans: Dict<text, SdnSpan>) -> Result<Dict<text, SdnValue>, RejectionV1>:
+    val fields = as_dict(require(top, key, "document", spans)?, key, spans)?
+    only_known(fields, allowed, key, spans)?
+    Ok(fields)
+
+pub fn policy_parse_bounded_v1(source: text, max_bytes: i64) -> Result<(SdnValue, Dict<text, SdnSpan>), RejectionV1>:
+    if source.byte_len() > max_bytes:
+        return Err(RejectionV1(kind: "size", path: "", message: "document exceeds " + max_bytes.to_text() + " bytes",
+                               line: 0, col: 0))
+    parse_resource_document(source)
+
+pub fn policy_schema_v1(top: Dict<text, SdnValue>, expected: text, spans: Dict<text, SdnSpan>) -> Result<bool, RejectionV1>:
+    val s = as_text(require(top, "schema", "document", spans)?, "schema", spans)?
+    if s != expected:
+        return Err(reject("unsupported_schema", "schema", "unsupported schema '" + s + "'", spans))
+    Ok(true)
+
+# ---- sections ----
+
+fn decode_execution(top: Dict<text, SdnValue>, spans: Dict<text, SdnSpan>) -> Result<(text, text, SandboxEvidenceProfileV1), RejectionV1>:
+    val f = policy_section_v1(top, "execution", ["os", "isolation", "evidenceProfile", "allowUnsandboxedFallback"], spans)?
+    val os = policy_choice_v1(f, "os", "execution", ["macos"], spans)?
+    val iso = policy_choice_v1(f, "isolation", "execution", ["native-sandbox"], spans)?
+    val pname = policy_choice_v1(f, "evidenceProfile", "execution", sandbox_evidence_profile_names_v1(), spans)?
+    val fallback = policy_required_bool_v1(f, "allowUnsandboxedFallback", "execution", spans)?
+    if fallback:
+        return Err(reject("fixed_value", "execution.allowUnsandboxedFallback",
+            "execution.allowUnsandboxedFallback is fixed false: an unsandboxed fallback is never accepted", spans))
+    match sandbox_evidence_profile_v1(pname):
+        case Ok(p): Ok((os, iso, p))
+        case Err(e): Err(reject("unsupported_value", "execution.evidenceProfile", e, spans))
+
+fn decode_ops(v: SdnValue, path: text, spans: Dict<text, SdnSpan>) -> Result<[FilesystemOpV1], RejectionV1>:
+    val items = as_array(v, path, spans)?
+    if items.len() == 0:
+        return Err(reject("range", path, path + " must name at least one operation", spans))
+    var ops: [FilesystemOpV1] = []
+    for i in 0..items.len():
+        val ipath = path + "." + i.to_text()
+        val s = as_text(items[i], ipath, spans)?
+        match filesystem_op_parse_v1(s):
+            case Err(_):
+                return Err(reject("unsupported_value", ipath,
+                    ipath + " value '" + s + "' is not one of: read-data, read-metadata, write, execute, ipc", spans))
+            case Ok(op):
+                if filesystem_ops_contain_v1(ops, op):
+                    return Err(reject("duplicate_value", ipath, "operation '" + s + "' is listed twice", spans))
+                ops.push(op)
+    Ok(filesystem_ops_sorted_v1(ops))
+
+pub fn filesystem_ops_sorted_v1(ops: [FilesystemOpV1]) -> [FilesystemOpV1]:
+    var out: [FilesystemOpV1] = []
+    for rank in 0..5:
+        for o in ops:
+            if filesystem_op_rank_v1(o) == rank:
+                out.push(o)
+    out
+
+fn decode_grants(v: SdnValue, spans: Dict<text, SdnSpan>) -> Result<[FilesystemGrantV1], RejectionV1>:
+    val path = "filesystem.grants"
+    val items = as_array(v, path, spans)?
+    if items.len() > SANDBOX_POLICY_MAX_GRANTS_V1:
+        return Err(reject("size", path, path + " exceeds " + SANDBOX_POLICY_MAX_GRANTS_V1.to_text() + " entries", spans))
+    var out: [FilesystemGrantV1] = []
+    for i in 0..items.len():
+        val gpath = path + "." + i.to_text()
+        val g = as_dict(items[i], gpath, spans)?
+        only_known(g, ["root", "ops", "recursive"], gpath, spans)?
+        val root = policy_ident_v1(g, "root", gpath, spans)?
+        if root == FS_REF_PRIVATE_HOME_V1 or root == FS_REF_PRIVATE_TEMP_V1:
+            return Err(reject("reserved_ref", gpath + ".root",
+                "'" + root + "' is reserved for privateHome/privateTemp", spans))
+        val ops = decode_ops(require(g, "ops", gpath, spans)?, gpath + ".ops", spans)?
+        val recursive = policy_required_bool_v1(g, "recursive", gpath, spans)?
+        var scope = FilesystemScopeV1.ExactObject
+        if recursive:
+            scope = FilesystemScopeV1.Recursive
+        if recursive and filesystem_ops_contain_v1(ops, FilesystemOpV1.Ipc):
+            return Err(reject("ipc_scope", gpath + ".recursive",
+                "ipc authority is granted per socket, never recursively over a tree", spans))
+        out.push(FilesystemGrantV1(root_ref: root, ops: ops, scope: scope))
+    Ok(out)
+
+fn decode_filesystem(top: Dict<text, SdnValue>, spans: Dict<text, SdnSpan>) -> Result<FilesystemPolicyV1, RejectionV1>:
+    val f = policy_section_v1(top, "filesystem", ["baseline", "workspace", "workspaceAccess", "privateHome",
+        "privateTemp", "output", "denyCredentialRoots", "denySiblingAttempts", "grants"], spans)?
+    val baseline = policy_ident_v1(f, "baseline", "filesystem", spans)?
+    val workspace = policy_ident_v1(f, "workspace", "filesystem", spans)?
+    val access_s = policy_choice_v1(f, "workspaceAccess", "filesystem", ["read-only", "read-write"], spans)?
+    var access = WorkspaceAccessV1.ReadOnly
+    if access_s == "read-write":
+        access = WorkspaceAccessV1.ReadWrite
+    val home = policy_required_bool_v1(f, "privateHome", "filesystem", spans)?
+    val tmp = policy_required_bool_v1(f, "privateTemp", "filesystem", spans)?
+    val output = policy_ident_v1(f, "output", "filesystem", spans)?
+    val deny_cred = policy_required_bool_v1(f, "denyCredentialRoots", "filesystem", spans)?
+    val deny_sib = policy_required_bool_v1(f, "denySiblingAttempts", "filesystem", spans)?
+    var grants: [FilesystemGrantV1] = []
+    if f.contains_key("grants"):
+        grants = decode_grants(f["grants"], spans)?
+    Ok(FilesystemPolicyV1(baseline: baseline, workspace_ref: workspace, workspace_access: access,
+        private_home: home, private_temp: tmp, output_ref: output, deny_credential_roots: deny_cred,
+        deny_sibling_attempts: deny_sib, grants: grants))
+
+fn permission_of(s: text) -> EndpointPermissionV1:
+    if s == "allow":
+        return EndpointPermissionV1.Allow
+    EndpointPermissionV1.Deny
+
+fn decode_network(top: Dict<text, SdnValue>, spans: Dict<text, SdnSpan>) -> Result<EndpointPolicyV1, RejectionV1>:
+    val f = policy_section_v1(top, "network", ["profile", "networkRef", "clientMode", "directIp", "hostListen",
+        "publish", "udp"], spans)?
+    val profile = policy_choice_v1(f, "profile", "network", [ENDPOINT_PROFILE_ENDPOINT_V1, ENDPOINT_PROFILE_POD_IP_V1], spans)?
+    val net_ref = policy_ident_v1(f, "networkRef", "network", spans)?
+    val mode_s = policy_choice_v1(f, "clientMode", "network", ["simple", "proxy", "simple-or-proxy"], spans)?
+    var mode = EndpointClientModeV1.SimpleOrProxy
+    if mode_s == "simple":
+        mode = EndpointClientModeV1.SimpleNative
+    if mode_s == "proxy":
+        mode = EndpointClientModeV1.Proxy
+    val direct = policy_choice_v1(f, "directIp", "network", ["deny", "allow"], spans)?
+    val listen = policy_choice_v1(f, "hostListen", "network", ["deny", "allow"], spans)?
+    val publish = policy_choice_v1(f, "publish", "network", ["none"], spans)?
+    val udp = policy_choice_v1(f, "udp", "network", ["deny", "allow"], spans)?
+    Ok(EndpointPolicyV1(profile: profile, network_ref: net_ref, client_mode: mode,
+        direct_ip: permission_of(direct), host_listen: permission_of(listen), udp: permission_of(udp),
+        publish: publish))
+
+fn decode_limits(top: Dict<text, SdnValue>, spans: Dict<text, SdnSpan>) -> Result<EndpointLimitsV1, RejectionV1>:
+    val f = policy_section_v1(top, "limits", ["maxStreams", "maxQueuedBytes", "maxFrameBytes",
+        "connectTimeoutMs", "idleTimeoutMs"], spans)?
+    val streams = policy_bounded_int_v1(f, "maxStreams", "limits", 1, 4096, spans)?
+    val queued = policy_bounded_int_v1(f, "maxQueuedBytes", "limits", 1, 1073741824, spans)?
+    val frame = policy_bounded_int_v1(f, "maxFrameBytes", "limits", 1, 16777216, spans)?
+    if frame > queued:
+        return Err(reject("range", "limits.maxFrameBytes", "limits.maxFrameBytes must not exceed limits.maxQueuedBytes", spans))
+    val connect = policy_bounded_int_v1(f, "connectTimeoutMs", "limits", 1, 3600000, spans)?
+    val idle = policy_bounded_int_v1(f, "idleTimeoutMs", "limits", 1, 86400000, spans)?
+    Ok(EndpointLimitsV1(max_streams: streams, max_queued_bytes: queued, max_frame_bytes: frame,
+        connect_timeout_ms: connect, idle_timeout_ms: idle))
+
+fn decode_hard_limits(top: Dict<text, SdnValue>, spans: Dict<text, SdnSpan>) -> Result<(SandboxHardLimitV1, SandboxHardLimitV1), RejectionV1>:
+    var mem = SandboxHardLimitV1.NotRequired
+    var cpu = SandboxHardLimitV1.NotRequired
+    if not top.contains_key("resources"):
+        return Ok((mem, cpu))
+    val f = as_dict(top["resources"], "resources", spans)?
+    only_known(f, ["hardMemoryLimit", "hardCpuLimit"], "resources", spans)?
+    if f.contains_key("hardMemoryLimit"):
+        val raw = as_quantity_text(f["hardMemoryLimit"], "resources.hardMemoryLimit", spans)?
+        val bytes = parse_memory_bytes(raw)
+        if bytes <= 0:
+            return Err(reject("quantity", "resources.hardMemoryLimit",
+                "memory quantity '" + raw + "' is not a positive integer byte value", spans))
+        mem = SandboxHardLimitV1.Required(bytes)
+    if f.contains_key("hardCpuLimit"):
+        val raw = as_quantity_text(f["hardCpuLimit"], "resources.hardCpuLimit", spans)?
+        val millis = parse_cpu_millis(raw)
+        if millis <= 0:
+            return Err(reject("quantity", "resources.hardCpuLimit",
+                "cpu quantity '" + raw + "' is not a positive integer core or millicore value", spans))
+        cpu = SandboxHardLimitV1.Required(millis)
+    Ok((mem, cpu))
+
+fn decode_cleanup(top: Dict<text, SdnValue>, spans: Dict<text, SdnSpan>) -> Result<(bool, SandboxOnUnknownV1), RejectionV1>:
+    val f = policy_section_v1(top, "cleanup", ["requireQualifiedAbsence", "onUnknown"], spans)?
+    val absence = policy_required_bool_v1(f, "requireQualifiedAbsence", "cleanup", spans)?
+    val on_unknown = policy_choice_v1(f, "onUnknown", "cleanup", ["quarantine", "retain"], spans)?
+    if on_unknown == "retain":
+        return Ok((absence, SandboxOnUnknownV1.Retain))
+    Ok((absence, SandboxOnUnknownV1.Quarantine))
+
+fn decode_policy_strict(source: text) -> Result<SandboxPolicyV1, RejectionV1>:
+    val parsed = policy_parse_bounded_v1(source, SANDBOX_POLICY_MAX_BYTES_V1)?
+    val spans = parsed.1
+    val top = as_dict(parsed.0, "", spans)?
+    only_known(top, ["schema", "name", "backend", "execution", "filesystem", "network", "limits",
+        "resources", "cleanup"], "document", spans)?
+    policy_schema_v1(top, SANDBOX_POLICY_SCHEMA_V1, spans)?
+    val name = policy_ident_v1(top, "name", "", spans)?
+    val backend = policy_choice_v1(top, "backend", "", [SANDBOX_BACKEND_MACOS_SEATBELT_V1], spans)?
+    val exec = decode_execution(top, spans)?
+    val fs = decode_filesystem(top, spans)?
+    val net = decode_network(top, spans)?
+    val limits = decode_limits(top, spans)?
+    val hard = decode_hard_limits(top, spans)?
+    val cleanup = decode_cleanup(top, spans)?
+    Ok(SandboxPolicyV1(name: name, backend: backend, execution_os: exec.0, isolation: exec.1,
+        evidence: exec.2, filesystem: fs, network: net, limits: limits, hard_memory: hard.0,
+        hard_cpu: hard.1, require_qualified_absence: cleanup.0, on_unknown: cleanup.1))
+
+# Design §12.1. `source_ref` names the document in every diagnostic.
+pub fn sandbox_policy_decode_v1(sdn_bytes: text, source_ref: text) -> Result<SandboxPolicyV1, [DiagnosticV1]>:
+    match decode_policy_strict(sdn_bytes):
+        case Ok(p): Ok(p)
+        case Err(r): Err([scmac_schema_diagnostic_v1(r, source_ref)])

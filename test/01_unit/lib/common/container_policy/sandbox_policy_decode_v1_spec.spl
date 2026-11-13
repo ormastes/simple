@@ -1,0 +1,172 @@
+# Strict decode of `simple-container-seatbelt-policy-v1`.
+#
+# @req SC-MAC-003 SC-MAC-005 SC-MAC-017
+#
+# **Requirements:** doc/05_design/simple_container_macos_seatbelt.md §3.1
+# **Plan:** doc/05_design/simple_container_macos_seatbelt.md §20 P1
+# **Design:** doc/05_design/simple_container_macos_seatbelt.md §12.1, §13.3, §13.5, §18.2
+# **Research:** N/A
+#
+# ## Overview
+#
+# A host administrator authors a seatbelt provider policy in ordinary SDN. The
+# decoder reuses the canonical span-recording parser and the orchestration
+# strict profile: a duplicate key, an undeclared field, a wrong type or an
+# unsupported enum value is refused as SCMAC-SCHEMA-001 carrying the source
+# file, line/column and schema path. `allowUnsandboxedFallback` is fixed false.
+#
+# ## Examples
+#
+# `test/fixtures/container_policy/seatbelt_policy_valid.sdn` is the accepted
+# shape (design §13.3 plus two explicit grants). Each refusal case below edits
+# exactly one line of that fixture.
+use std.io_runtime.{file_read}
+use std.common.diagnostics.diagnostic_v1.{DiagnosticV1}
+use std.common.contracts.container.sandbox_capability_v1.*
+use std.common.contracts.container.filesystem_policy_v1.*
+use std.common.contracts.container.endpoint_policy_v1.*
+use std.common.container_policy.sandbox_policy_decode_v1.{sandbox_policy_decode_v1}
+
+fn valid_source() -> text:
+    file_read("test/fixtures/container_policy/seatbelt_policy_valid.sdn") ?? ""
+
+# The single refusal, or a synthetic "accepted" diagnostic so a wrongly
+# accepted document cannot satisfy a refusal expectation.
+fn refusal_of(src: text) -> DiagnosticV1:
+    match sandbox_policy_decode_v1(src, "policy.sdn"):
+        case Ok(_): DiagnosticV1.error("accepted", "document was accepted")
+        case Err(ds): ds[0]
+
+fn line_of(d: DiagnosticV1) -> i64:
+    match d.span:
+        case Some(s): s.line
+        case None: 0
+
+fn col_of(d: DiagnosticV1) -> i64:
+    match d.span:
+        case Some(s): s.col
+        case None: 0
+
+describe "Seatbelt provider policy SDN decoding":
+
+    it "accepts the design §13.3 policy and keeps grant operations separate":
+        """
+        The accepted document decodes into typed policy: the strict evidence
+        profile's guarantees, the workspace access mode, and two explicit
+        grants whose read-data / read-metadata / ipc authorities stay
+        distinct and canonically ordered.
+        """
+        step("Decode the valid fixture")
+        var name = ""
+        var grants: [FilesystemGrantV1] = []
+        var profile = ""
+        var proc_rank = -1
+        var net_profile = ""
+        match sandbox_policy_decode_v1(valid_source(), "policy.sdn"):
+            case Ok(p):
+                name = p.name
+                grants = p.filesystem.grants
+                profile = p.evidence.name
+                proc_rank = sandbox_process_rank_v1(p.evidence.process)
+                net_profile = p.network.profile
+            case Err(_): name = "refused"
+        step("Confirm identity, evidence profile and network profile")
+        expect(name).to_equal("mac-build-restricted")
+        expect(profile).to_equal("strict-owned-attempt-v1")
+        expect(proc_rank).to_equal(2)
+        expect(net_profile).to_equal("endpoint-v1")
+        step("Confirm grants keep separate, sorted operations and scopes")
+        expect(grants.len()).to_equal(2)
+        expect(grants[0].root_ref).to_equal("broker-socket")
+        expect(grants[0].ops.len()).to_equal(1)
+        expect(filesystem_op_text_v1(grants[0].ops[0])).to_equal("ipc")
+        expect(filesystem_scope_recursive_v1(grants[0].scope)).to_equal(false)
+        expect(filesystem_op_text_v1(grants[1].ops[0])).to_equal("read-data")
+        expect(filesystem_op_text_v1(grants[1].ops[1])).to_equal("read-metadata")
+        expect(filesystem_scope_recursive_v1(grants[1].scope)).to_equal(true)
+
+    it "refuses allowUnsandboxedFallback: true with its exact span":
+        """
+        The fallback switch exists only to be pinned false. A true value is a
+        schema refusal at the authored line, never an escape hatch.
+        """
+        step("Flip the fallback switch on line 8")
+        val d = refusal_of(valid_source().replace("allowUnsandboxedFallback: false", "allowUnsandboxedFallback: true"))
+        step("Confirm SCMAC-SCHEMA-001 at execution.allowUnsandboxedFallback, line 8 column 5")
+        expect(d.code).to_equal("SCMAC-SCHEMA-001")
+        expect(d.notes).to_contain("path: execution.allowUnsandboxedFallback")
+        expect(d.notes).to_contain("kind: fixed_value")
+        expect(d.file ?? "").to_equal("policy.sdn")
+        expect(line_of(d)).to_equal(8)
+        expect(col_of(d)).to_equal(5)
+
+    it "refuses a duplicate key instead of keeping the last value":
+        """
+        The ordinary parser is last-wins; the strict profile refuses the
+        repeated key and points at the repeat.
+        """
+        step("Repeat execution.os on line 6")
+        val d = refusal_of(valid_source().replace("    os: \"macos\"\n", "    os: \"macos\"\n    os: \"linux\"\n"))
+        step("Confirm a duplicate-key refusal with its span")
+        expect(d.code).to_equal("SCMAC-SCHEMA-001")
+        expect(d.notes).to_contain("kind: duplicate_key")
+        expect(line_of(d)).to_equal(6)
+
+    it "refuses an undeclared field":
+        """
+        An unknown key is an error, never an extension point.
+        """
+        step("Add network.rawSockets after line 32")
+        val d = refusal_of(valid_source().replace("    udp: \"deny\"\n", "    udp: \"deny\"\n    rawSockets: \"allow\"\n"))
+        step("Confirm unknown_field at network.rawSockets, line 33")
+        expect(d.code).to_equal("SCMAC-SCHEMA-001")
+        expect(d.notes).to_contain("kind: unknown_field")
+        expect(d.notes).to_contain("path: network.rawSockets")
+        expect(line_of(d)).to_equal(33)
+
+    it "refuses wrong types and unsupported values":
+        """
+        A quoted boolean is not a boolean; an unknown operation name is not
+        silently dropped; a frame larger than the queue is refused.
+        """
+        step("Quote privateHome")
+        val t = refusal_of(valid_source().replace("privateHome: true", "privateHome: \"true\""))
+        expect(t.notes).to_contain("kind: type")
+        expect(t.notes).to_contain("path: filesystem.privateHome")
+        step("Use an unknown grant operation")
+        val o = refusal_of(valid_source().replace("ops: [\"ipc\"]", "ops: [\"connect\"]"))
+        expect(o.notes).to_contain("kind: unsupported_value")
+        expect(o.notes).to_contain("path: filesystem.grants.0.ops.0")
+        step("Make one frame larger than the whole queue")
+        val f = refusal_of(valid_source().replace("maxFrameBytes: 65536", "maxFrameBytes: 16777216"))
+        expect(f.notes).to_contain("path: limits.maxFrameBytes")
+        step("Ask for a recursive ipc grant")
+        val r = refusal_of(valid_source().replace("ops: [\"ipc\"]\n          recursive: false", "ops: [\"ipc\"]\n          recursive: true"))
+        expect(r.notes).to_contain("kind: ipc_scope")
+
+    it "decodes hard resource requirements so admission can refuse them":
+        """
+        A hard memory cap decodes to an explicit Required value in bytes; it
+        is matching, not decoding, that refuses an unenforceable cap.
+        """
+        step("Add a resources section requiring a 512Mi hard memory limit")
+        val src = valid_source().replace("cleanup:\n", "resources:\n    hardMemoryLimit: \"512Mi\"\ncleanup:\n")
+        var bytes = 0
+        match sandbox_policy_decode_v1(src, "policy.sdn"):
+            case Ok(p):
+                match p.hard_memory:
+                    case SandboxHardLimitV1.Required(n): bytes = n
+                    case SandboxHardLimitV1.NotRequired: bytes = -1
+            case Err(_): bytes = -2
+        expect(bytes).to_equal(536870912)
+
+    it "bounds the document before parsing":
+        """
+        An oversized document is refused before the parser runs.
+        """
+        var big = valid_source()
+        while big.len() <= 65536:
+            big = big + "# padding padding padding padding padding padding padding padding\n"
+        val d = refusal_of(big)
+        expect(d.code).to_equal("SCMAC-SCHEMA-001")
+        expect(d.notes).to_contain("kind: size")

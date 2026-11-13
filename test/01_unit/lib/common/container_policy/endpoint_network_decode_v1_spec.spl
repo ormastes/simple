@@ -1,0 +1,95 @@
+# Strict decode of `simple-endpoint-network-v1`.
+#
+# @req SC-MAC-007 SC-MAC-010 SC-MAC-011 SC-MAC-017
+#
+# **Requirements:** doc/05_design/simple_container_macos_seatbelt.md §3.1
+# **Plan:** doc/05_design/simple_container_macos_seatbelt.md §20 P1
+# **Design:** doc/05_design/simple_container_macos_seatbelt.md §11.1, §13.4, §13.5
+# **Research:** N/A
+#
+# ## Overview
+#
+# A logical endpoint network names a broker-only address range, a discovery
+# suffix and default-deny ingress/egress with explicit rules. The CIDR is
+# canonical arithmetic (no host bits, bounded prefix). Only TCP is a v1
+# protocol. An allow rule and a deny rule that can match the same flow are
+# refused as SCMAC-NET-004 regardless of their order.
+#
+# ## Examples
+#
+# `endpoint_network_valid.sdn` is design §13.4; `endpoint_network_overlap.sdn`
+# lists a specific deny before a wildcard allow on the same port.
+use std.io_runtime.{file_read}
+use std.common.diagnostics.diagnostic_v1.{DiagnosticV1}
+use std.common.contracts.container.endpoint_policy_v1.*
+use std.common.container_policy.endpoint_network_decode_v1.{endpoint_network_decode_v1}
+
+fn fixture(name: text) -> text:
+    file_read("test/fixtures/container_policy/" + name) ?? ""
+
+fn refusals_of(src: text) -> [DiagnosticV1]:
+    match endpoint_network_decode_v1(src, "net.sdn"):
+        case Ok(_): [DiagnosticV1.error("accepted", "document was accepted")]
+        case Err(ds): ds
+
+fn line_of(d: DiagnosticV1) -> i64:
+    match d.span:
+        case Some(s): s.line
+        case None: 0
+
+describe "Endpoint network SDN decoding":
+
+    it "accepts the design §13.4 network with a canonical broker CIDR":
+        """
+        The accepted network keeps its generation, a canonical CIDR and two
+        TCP allow rules; defaults are deny.
+        """
+        var cidr = ""
+        var rules = 0
+        var gen = 0
+        var first_dest = ""
+        match endpoint_network_decode_v1(fixture("endpoint_network_valid.sdn"), "net.sdn"):
+            case Ok(n):
+                cidr = logical_cidr_text_v1(n.cidr)
+                rules = n.rules.len()
+                gen = n.generation
+                first_dest = endpoint_destination_text_v1(n.rules[0].destination)
+            case Err(_): cidr = "refused"
+        expect(cidr).to_equal("10.73.0.0/24")
+        expect(gen).to_equal(1)
+        expect(rules).to_equal(2)
+        expect(first_dest).to_equal("service:compiler.tools.test")
+
+    it "refuses an allow/deny overlap deterministically, whatever the rule order":
+        """
+        A wildcard allow that covers a specific deny is refused instead of
+        letting matcher order decide. The refusal names the allow rule's span.
+        """
+        val ds = refusals_of(fixture("endpoint_network_overlap.sdn"))
+        expect(ds.len()).to_equal(1)
+        expect(ds[0].code).to_equal("SCMAC-NET-004")
+        expect(ds[0].notes).to_contain("path: policy.rules.1")
+        expect(ds[0].message).to_contain("overlaps deny rule policy.rules.0")
+        expect(line_of(ds[0])).to_equal(20)
+
+    it "refuses UDP, non-deny defaults, host bits and bad DNS names":
+        """
+        Unsupported protocols and permissive defaults are schema refusals;
+        CIDR arithmetic and DNS spelling are checked, not trusted.
+        """
+        val src = fixture("endpoint_network_valid.sdn")
+        val udp = refusals_of(src.replace("protocol: \"tcp\"\n          port: 8080", "protocol: \"udp\"\n          port: 8080"))
+        expect(udp[0].code).to_equal("SCMAC-SCHEMA-001")
+        expect(udp[0].notes).to_contain("path: policy.rules.0.protocol")
+        val dflt = refusals_of(src.replace("defaultEgress: \"deny\"", "defaultEgress: \"allow\""))
+        expect(dflt[0].notes).to_contain("path: policy.defaultEgress")
+        val bits = refusals_of(src.replace("10.73.0.0/24", "10.73.0.1/24"))
+        expect(bits[0].notes).to_contain("path: addressing.cidr")
+        expect(bits[0].message).to_contain("cidr-host-bits-set")
+        val big = refusals_of(src.replace("10.73.0.0/24", "10.73.0.0/33"))
+        expect(big[0].message).to_contain("cidr-prefix-range")
+        val dns = refusals_of(src.replace("suffix: \"tools.test\"", "suffix: \"Tools..test\""))
+        expect(dns[0].notes).to_contain("path: discovery.suffix")
+        val both = refusals_of(src.replace("          destinationService: \"compiler.tools.test\"\n",
+            "          destinationService: \"compiler.tools.test\"\n          destinationHost: \"x.test\"\n"))
+        expect(both[0].notes).to_contain("kind: destination")

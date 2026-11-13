@@ -96,3 +96,18 @@ Pending parallel source dependencies: effect_deadline_v1 and both actual adapter
 modules. No stub is supplied for them. Current live Windows continuity bridge is
 still required. No build or native/SSpec/manual-generation/coverage run is made;
 status is NOT_RUN/awaiting verification, not a full runtime support claim.
+
+## Seatbelt capability admission (portable layer, 2026-11-13)
+
+Before a `macos-seatbelt-process` variant is wired into the facade, its
+policy admission exists as pure, effect-free functions in
+`std.common.container_policy`: `sandbox_policy_decode_v1`,
+`endpoint_network_decode_v1`, `sandbox_requirements_match_v1`,
+`filesystem_plan_v1` and `compute_policy_digest`, over contracts
+`common/contracts/container/{sandbox_capability_v1,filesystem_policy_v1,endpoint_policy_v1}.spl`.
+Refusals are shared `DiagnosticV1` values with SCMAC-* codes (design §18.2;
+SCMAC-SCHEMA-001 added for strict decode). A provider must call the match
+step before creating directories or launching; an `Unqualified` observation
+always refuses. Host path resolution stays in the OS boundary; planning only
+consumes resolved paths and object identities. Specs:
+`test/01_unit/lib/common/container_policy/`.

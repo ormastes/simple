@@ -1,0 +1,302 @@
+# Pure filesystem grant/deny planning and policy digest (design §7.2, §7.3, §10.2-10.4, §13.5).
+#
+# Input is RESOLVED FACTS: the effectful OS boundary has already resolved each
+# logical root to a canonical path and object identity (symlinks followed with
+# real filesystem semantics). This module never touches the host. It:
+#   - expands the policy (workspace/output/private home+tmp/explicit grants)
+#     plus the reviewed baseline into concrete grants,
+#   - builds the effective deny set (supervisor state and attempt-private
+#     always; credential / sibling-attempt roots when the policy selects them),
+#   - refuses any grant that overlaps protected authority (SCMAC-FS-001),
+#     regardless of grant order (§13.5),
+#   - refuses unresolved, ambiguous or mistyped roots (SCMAC-FS-002),
+#   - returns a canonically ordered plan whose digest is deterministic.
+
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.encode.{sdn_encode_canonical}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.diagnostics.diagnostic_v1.{DiagnosticV1}
+use std.common.contracts.container.sandbox_capability_v1.*
+use std.common.contracts.container.filesystem_policy_v1.*
+use std.common.contracts.container.endpoint_policy_v1.*
+use std.common.container_policy.diagnostics_v1.{scmac_diagnostic_v1}
+
+pub struct FilesystemResolvedFactsV1:
+    roots: [ResolvedRootV1]
+    protected: [ProtectedRootV1]
+
+pub struct PlannedGrantV1:
+    origin: text
+    root_ref: text
+    canonical_path: text
+    identity: text
+    ops: [FilesystemOpV1]
+    scope: FilesystemScopeV1
+    case_insensitive: bool
+
+pub struct FilesystemPlanV1:
+    baseline_name: text
+    baseline_revision: i64
+    grants: [PlannedGrantV1]
+    denies: [ProtectedRootV1]
+
+# ---- path relations over CANONICAL paths ----
+
+fn fold(p: text, ci: bool) -> text:
+    if ci:
+        return p.lower()
+    p
+
+# `inner` equals `outer` or lies beneath it on a component boundary.
+pub fn canonical_path_within_v1(inner: text, outer: text, case_insensitive: bool) -> bool:
+    val i = fold(inner, case_insensitive)
+    val o = fold(outer, case_insensitive)
+    if i == o or o == "/":
+        return true
+    i.starts_with(o + "/")
+
+fn canonical_path_ok(p: text) -> bool:
+    if not p.starts_with("/"):
+        return false
+    if p != "/" and p.ends_with("/"):
+        return false
+    for part in p.split("/"):
+        if part == "." or part == "..":
+            return false
+    not p.contains("//")
+
+# A grant and a deny root overlap when the grant is inside the protected root,
+# or when a recursive grant contains it. An exact-object grant on a parent
+# directory does not reach a protected child.
+pub fn grant_overlaps_protected_v1(g: PlannedGrantV1, d: ProtectedRootV1) -> bool:
+    val ci = g.case_insensitive or d.case_insensitive
+    if canonical_path_within_v1(g.canonical_path, d.canonical_path, ci):
+        return true
+    filesystem_scope_recursive_v1(g.scope) and canonical_path_within_v1(d.canonical_path, g.canonical_path, ci)
+
+# ---- ordering ----
+
+fn grant_before(a: PlannedGrantV1, b: PlannedGrantV1) -> bool:
+    if a.canonical_path != b.canonical_path:
+        return a.canonical_path < b.canonical_path
+    if a.root_ref != b.root_ref:
+        return a.root_ref < b.root_ref
+    a.origin < b.origin
+
+fn sort_grants(xs: [PlannedGrantV1]) -> [PlannedGrantV1]:
+    var out: [PlannedGrantV1] = []
+    for x in xs:
+        var placed: [PlannedGrantV1] = []
+        var inserted = false
+        for y in out:
+            if not inserted and grant_before(x, y):
+                placed.push(x)
+                inserted = true
+            placed.push(y)
+        if not inserted:
+            placed.push(x)
+        out = placed
+    out
+
+fn deny_before(a: ProtectedRootV1, b: ProtectedRootV1) -> bool:
+    if a.canonical_path != b.canonical_path:
+        return a.canonical_path < b.canonical_path
+    a.root_ref < b.root_ref
+
+fn sort_denies(xs: [ProtectedRootV1]) -> [ProtectedRootV1]:
+    var out: [ProtectedRootV1] = []
+    for x in xs:
+        var placed: [ProtectedRootV1] = []
+        var inserted = false
+        for y in out:
+            if not inserted and deny_before(x, y):
+                placed.push(x)
+                inserted = true
+            placed.push(y)
+        if not inserted:
+            placed.push(x)
+        out = placed
+    out
+
+# ---- planning ----
+
+fn fs_diag(code: text, message: text, source_ref: text, path: text) -> DiagnosticV1:
+    scmac_diagnostic_v1(code, message, source_ref, path, 0, 0)
+
+fn rw_ops() -> [FilesystemOpV1]:
+    [FilesystemOpV1.ReadData, FilesystemOpV1.ReadMetadata, FilesystemOpV1.Write]
+
+fn ro_ops() -> [FilesystemOpV1]:
+    [FilesystemOpV1.ReadData, FilesystemOpV1.ReadMetadata]
+
+fn kind_is(k: ResolvedObjectKindV1, want: text) -> bool:
+    match k:
+        ResolvedObjectKindV1.Directory: want == "directory"
+        ResolvedObjectKindV1.RegularFile: want == "file"
+        ResolvedObjectKindV1.UnixSocket: want == "socket"
+
+fn deny_selected(d: ProtectedRootV1, fsp: FilesystemPolicyV1) -> bool:
+    match d.root_class:
+        ProtectedRootClassV1.SupervisorState: true
+        ProtectedRootClassV1.AttemptPrivate: true
+        ProtectedRootClassV1.Credential: fsp.deny_credential_roots
+        ProtectedRootClassV1.SiblingAttempt: fsp.deny_sibling_attempts
+
+# Design §12.1 `filesystem_plan_v1(policy, resolved_roots, baseline)`.
+pub fn filesystem_plan_v1(policy: SandboxPolicyV1, facts: FilesystemResolvedFactsV1, baseline: FilesystemBaselineV1,
+                          source_ref: text) -> Result<FilesystemPlanV1, [DiagnosticV1]>:
+    val fsp = policy.filesystem
+    var diags: [DiagnosticV1] = []
+    if baseline.name != fsp.baseline or baseline.revision < 1:
+        diags.push(fs_diag(SCMAC_ADMIT_001, "filesystem baseline '" + baseline.name + "' revision " +
+            baseline.revision.to_text() + " does not match policy baseline '" + fsp.baseline + "'",
+            source_ref, "filesystem.baseline"))
+    # Resolved roots must be unambiguous and well formed.
+    var refs: [text] = []
+    for r in facts.roots:
+        if refs.contains(r.root_ref):
+            diags.push(fs_diag(SCMAC_FS_002, "root '" + r.root_ref + "' was resolved more than once (ambiguous remapping)",
+                source_ref, "filesystem"))
+        refs.push(r.root_ref)
+        if not canonical_path_ok(r.canonical_path) or r.identity == "":
+            diags.push(fs_diag(SCMAC_FS_002, "root '" + r.root_ref + "' has no canonical path identity",
+                source_ref, "filesystem"))
+    var denies: [ProtectedRootV1] = []
+    for d in facts.protected:
+        if not canonical_path_ok(d.canonical_path) or d.identity == "" or d.generation < 1:
+            diags.push(fs_diag(SCMAC_FS_002, "protected root '" + d.root_ref + "' has no canonical identity/generation",
+                source_ref, "filesystem"))
+        if deny_selected(d, fsp):
+            denies.push(d)
+    # Requested grants, in declaration order, with the field path that asked.
+    var wanted: [FilesystemGrantV1] = []
+    var origins: [text] = []
+    var ws_ops = ro_ops()
+    match fsp.workspace_access:
+        WorkspaceAccessV1.ReadWrite: ws_ops = rw_ops()
+        WorkspaceAccessV1.ReadOnly: pass
+    wanted.push(FilesystemGrantV1(root_ref: fsp.workspace_ref, ops: ws_ops, scope: FilesystemScopeV1.Recursive))
+    origins.push("filesystem.workspace")
+    wanted.push(FilesystemGrantV1(root_ref: fsp.output_ref, ops: rw_ops(), scope: FilesystemScopeV1.Recursive))
+    origins.push("filesystem.output")
+    if fsp.private_home:
+        wanted.push(FilesystemGrantV1(root_ref: FS_REF_PRIVATE_HOME_V1, ops: rw_ops(), scope: FilesystemScopeV1.Recursive))
+        origins.push("filesystem.privateHome")
+    if fsp.private_temp:
+        wanted.push(FilesystemGrantV1(root_ref: FS_REF_PRIVATE_TEMP_V1, ops: rw_ops(), scope: FilesystemScopeV1.Recursive))
+        origins.push("filesystem.privateTemp")
+    for i in 0..fsp.grants.len():
+        wanted.push(fsp.grants[i])
+        origins.push("filesystem.grants." + i.to_text())
+    for i in 0..baseline.grants.len():
+        val bg = baseline.grants[i]
+        if filesystem_ops_contain_v1(bg.ops, FilesystemOpV1.Write):
+            diags.push(fs_diag(SCMAC_FS_001, "baseline grant '" + bg.root_ref + "' may not include write",
+                source_ref, "filesystem.baseline"))
+        wanted.push(bg)
+        origins.push("baseline." + baseline.name + "." + i.to_text())
+    var planned: [PlannedGrantV1] = []
+    for i in 0..wanted.len():
+        val g = wanted[i]
+        val origin = origins[i]
+        var found = false
+        for r in facts.roots:
+            if r.root_ref == g.root_ref and not found:
+                found = true
+                val is_ipc = filesystem_ops_contain_v1(g.ops, FilesystemOpV1.Ipc)
+                if is_ipc and not kind_is(r.kind, "socket"):
+                    diags.push(fs_diag(SCMAC_FS_001, "ipc grant '" + g.root_ref + "' must name a Unix socket, " +
+                        "not a directory or file", source_ref, origin))
+                if not is_ipc and kind_is(r.kind, "socket"):
+                    diags.push(fs_diag(SCMAC_FS_001, "socket '" + g.root_ref + "' may only be granted ipc", source_ref, origin))
+                if filesystem_scope_recursive_v1(g.scope) and not kind_is(r.kind, "directory"):
+                    diags.push(fs_diag(SCMAC_FS_002, "recursive grant '" + g.root_ref + "' does not resolve to a directory",
+                        source_ref, origin))
+                planned.push(PlannedGrantV1(origin: origin, root_ref: g.root_ref, canonical_path: r.canonical_path,
+                    identity: r.identity, ops: g.ops, scope: g.scope, case_insensitive: r.case_insensitive))
+        if not found:
+            diags.push(fs_diag(SCMAC_FS_002, "grant root '" + g.root_ref + "' was not resolved by the host boundary",
+                source_ref, origin))
+    val sorted_grants = sort_grants(planned)
+    val sorted_denies = sort_denies(denies)
+    for g in sorted_grants:
+        for d in sorted_denies:
+            if grant_overlaps_protected_v1(g, d):
+                diags.push(fs_diag(SCMAC_FS_001, "grant '" + g.root_ref + "' (" + g.canonical_path + ") overlaps protected " +
+                    protected_root_class_text_v1(d.root_class) + " root '" + d.root_ref + "' (" + d.canonical_path +
+                    "); narrow the grant or prepare a separate workspace", source_ref, g.origin))
+    if diags.len() > 0:
+        return Err(diags)
+    Ok(FilesystemPlanV1(baseline_name: baseline.name, baseline_revision: baseline.revision,
+        grants: sorted_grants, denies: sorted_denies))
+
+# ---- canonical bytes and digest (§7.3) ----
+
+fn ops_value(ops: [FilesystemOpV1]) -> SdnValue:
+    var out: [SdnValue] = []
+    for o in ops:
+        out.push(SdnValue.String(filesystem_op_text_v1(o)))
+    SdnValue.Array(out)
+
+fn permission_text(p: EndpointPermissionV1) -> text:
+    if endpoint_permission_allows_v1(p):
+        return "allow"
+    "deny"
+
+fn client_mode_text(m: EndpointClientModeV1) -> text:
+    match m:
+        EndpointClientModeV1.SimpleNative: "simple"
+        EndpointClientModeV1.Proxy: "proxy"
+        EndpointClientModeV1.SimpleOrProxy: "simple-or-proxy"
+
+fn hard_limit_value(l: SandboxHardLimitV1) -> SdnValue:
+    match l:
+        SandboxHardLimitV1.NotRequired: SdnValue.String("not-required")
+        SandboxHardLimitV1.Required(n): SdnValue.Int(n)
+
+fn on_unknown_text(u: SandboxOnUnknownV1) -> text:
+    match u:
+        SandboxOnUnknownV1.Quarantine: "quarantine"
+        SandboxOnUnknownV1.Retain: "retain"
+
+pub fn sandbox_policy_plan_bytes_v1(policy: SandboxPolicyV1, plan: FilesystemPlanV1, provider_abi: text) -> text:
+    var grants: [SdnValue] = []
+    for g in plan.grants:
+        val gf: Dict<text, SdnValue> = {"origin": SdnValue.String(g.origin), "ref": SdnValue.String(g.root_ref),
+            "path": SdnValue.String(g.canonical_path), "identity": SdnValue.String(g.identity), "ops": ops_value(g.ops),
+            "recursive": SdnValue.Bool(filesystem_scope_recursive_v1(g.scope)),
+            "caseInsensitive": SdnValue.Bool(g.case_insensitive)}
+        grants.push(SdnValue.Dict(gf))
+    var denies: [SdnValue] = []
+    for d in plan.denies:
+        val df: Dict<text, SdnValue> = {"ref": SdnValue.String(d.root_ref),
+            "class": SdnValue.String(protected_root_class_text_v1(d.root_class)),
+            "path": SdnValue.String(d.canonical_path), "identity": SdnValue.String(d.identity),
+            "generation": SdnValue.Int(d.generation), "caseInsensitive": SdnValue.Bool(d.case_insensitive)}
+        denies.push(SdnValue.Dict(df))
+    val n = policy.network
+    val net: Dict<text, SdnValue> = {"profile": SdnValue.String(n.profile), "networkRef": SdnValue.String(n.network_ref),
+        "clientMode": SdnValue.String(client_mode_text(n.client_mode)), "directIp": SdnValue.String(permission_text(n.direct_ip)),
+        "hostListen": SdnValue.String(permission_text(n.host_listen)), "udp": SdnValue.String(permission_text(n.udp)),
+        "publish": SdnValue.String(n.publish)}
+    val l = policy.limits
+    val limits: Dict<text, SdnValue> = {"maxStreams": SdnValue.Int(l.max_streams), "maxQueuedBytes": SdnValue.Int(l.max_queued_bytes),
+        "maxFrameBytes": SdnValue.Int(l.max_frame_bytes), "connectTimeoutMs": SdnValue.Int(l.connect_timeout_ms),
+        "idleTimeoutMs": SdnValue.Int(l.idle_timeout_ms)}
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "kind": SdnValue.String("sandbox-policy-plan"),
+        "schema": SdnValue.String(SANDBOX_POLICY_SCHEMA_V1), "name": SdnValue.String(policy.name),
+        "backend": SdnValue.String(policy.backend), "executionOs": SdnValue.String(policy.execution_os),
+        "isolation": SdnValue.String(policy.isolation), "evidenceProfile": SdnValue.String(policy.evidence.name),
+        "baseline": SdnValue.String(plan.baseline_name), "baselineRevision": SdnValue.Int(plan.baseline_revision),
+        "grants": SdnValue.Array(grants), "denies": SdnValue.Array(denies), "network": SdnValue.Dict(net),
+        "limits": SdnValue.Dict(limits), "hardMemory": hard_limit_value(policy.hard_memory),
+        "hardCpu": hard_limit_value(policy.hard_cpu),
+        "requireQualifiedAbsence": SdnValue.Bool(policy.require_qualified_absence),
+        "onUnknown": SdnValue.String(on_unknown_text(policy.on_unknown)), "providerAbi": SdnValue.String(provider_abi)}
+    sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+
+# Design §7.2 `compute_policy_digest(canonical_plan, baseline, provider_abi)`.
+# The baseline name/revision travel inside the plan. A cache key, not an
+# authentication tag.
+pub fn compute_policy_digest(policy: SandboxPolicyV1, plan: FilesystemPlanV1, provider_abi: text) -> text:
+    sha256_text(sandbox_policy_plan_bytes_v1(policy, plan, provider_abi))

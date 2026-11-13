@@ -1,0 +1,154 @@
+# Pure filesystem grant/deny planning and policy digest.
+#
+# @req SC-MAC-003 SC-MAC-005 SC-MAC-006 SC-MAC-012
+#
+# **Requirements:** doc/05_design/simple_container_macos_seatbelt.md §3.1
+# **Plan:** doc/05_design/simple_container_macos_seatbelt.md §20 P1
+# **Design:** doc/05_design/simple_container_macos_seatbelt.md §7.2, §7.3, §10.2-10.4, §13.5
+# **Research:** N/A
+#
+# ## Overview
+#
+# Planning takes resolved facts from the OS boundary (canonical paths and
+# object identities) and never touches the host. A grant that reaches
+# supervisor state, attempt-private material, credentials or a sibling attempt
+# is refused as SCMAC-FS-001 whatever order the grants were written in; an
+# unresolved or ambiguous root is SCMAC-FS-002. The resulting plan is
+# canonically ordered, so its digest is identical for reordered input and
+# changes when any security-relevant fact changes.
+#
+# ## Examples
+#
+# The layout follows design §10.2 under `/state/attempts/a1/`.
+use std.io_runtime.{file_read}
+use std.common.contracts.container.sandbox_capability_v1.*
+use std.common.contracts.container.filesystem_policy_v1.*
+use std.common.container_policy.sandbox_policy_decode_v1.{sandbox_policy_decode_v1}
+use std.common.container_policy.filesystem_plan_v1.*
+use std.common.container_policy.diagnostics_v1.{scmac_codes_of_v1}
+
+fn policy() -> SandboxPolicyV1:
+    val src = file_read("test/fixtures/container_policy/seatbelt_policy_valid.sdn") ?? ""
+    sandbox_policy_decode_v1(src, "policy.sdn").unwrap()
+
+fn dir(r: text, p: text) -> ResolvedRootV1:
+    ResolvedRootV1(root_ref: r, canonical_path: p, identity: "id:" + p, kind: ResolvedObjectKindV1.Directory,
+        case_insensitive: true)
+
+fn sock(r: text, p: text) -> ResolvedRootV1:
+    ResolvedRootV1(root_ref: r, canonical_path: p, identity: "id:" + p, kind: ResolvedObjectKindV1.UnixSocket,
+        case_insensitive: true)
+
+fn prot(r: text, c: ProtectedRootClassV1, p: text) -> ProtectedRootV1:
+    ProtectedRootV1(root_ref: r, root_class: c, canonical_path: p, identity: "id:" + p, generation: 1,
+        case_insensitive: true)
+
+fn roots() -> [ResolvedRootV1]:
+    [dir("prepared-workspace", "/state/attempts/a1/workspace"), dir("prepared-output", "/state/attempts/a1/output"),
+     dir("private-home", "/state/attempts/a1/home"), dir("private-temp", "/state/attempts/a1/tmp"),
+     sock("broker-socket", "/state/attempts/a1/ipc/broker.sock"), dir("shared-cache", "/cache/immutable")]
+
+fn protected() -> [ProtectedRootV1]:
+    [prot("host-scope", ProtectedRootClassV1.SupervisorState, "/state/host-scope"),
+     prot("attempt-private", ProtectedRootClassV1.AttemptPrivate, "/state/attempts/a1/private"),
+     prot("ssh", ProtectedRootClassV1.Credential, "/Users/dev/.ssh"),
+     prot("sibling-a2", ProtectedRootClassV1.SiblingAttempt, "/state/attempts/a2")]
+
+fn baseline() -> FilesystemBaselineV1:
+    FilesystemBaselineV1(name: "darwin-build-tools-v1", revision: 3,
+        grants: [FilesystemGrantV1(root_ref: "toolchain", ops: [FilesystemOpV1.ReadData, FilesystemOpV1.ReadMetadata,
+            FilesystemOpV1.Execute], scope: FilesystemScopeV1.Recursive)])
+
+fn with_toolchain(rs: [ResolvedRootV1], path: text) -> [ResolvedRootV1]:
+    var out = rs
+    out.push(dir("toolchain", path))
+    out
+
+fn plan_codes(rs: [ResolvedRootV1], ps: [ProtectedRootV1]) -> [text]:
+    match filesystem_plan_v1(policy(), FilesystemResolvedFactsV1(roots: rs, protected: ps), baseline(), "policy.sdn"):
+        case Ok(_): []
+        case Err(ds): scmac_codes_of_v1(ds)
+
+fn digest_of(rs: [ResolvedRootV1], ps: [ProtectedRootV1], abi: text) -> text:
+    val p = policy()
+    match filesystem_plan_v1(p, FilesystemResolvedFactsV1(roots: rs, protected: ps), baseline(), "policy.sdn"):
+        case Ok(plan): compute_policy_digest(p, plan, abi)
+        case Err(ds): "refused:" + ds[0].message
+
+fn reversed_roots(rs: [ResolvedRootV1]) -> [ResolvedRootV1]:
+    var out: [ResolvedRootV1] = []
+    var i = rs.len() - 1
+    while i >= 0:
+        out.push(rs[i])
+        i = i - 1
+    out
+
+describe "Filesystem grant/deny planning":
+
+    it "plans separate grants for workspace, output, private dirs, explicit and baseline roots":
+        """
+        The §10.2 layout plans seven grants in canonical path order and four
+        deny roots (credential and sibling selected by the policy).
+        """
+        val facts = FilesystemResolvedFactsV1(roots: with_toolchain(roots(), "/opt/simple/toolchain"), protected: protected())
+        var grants = 0
+        var denies = 0
+        var first = ""
+        var ws_write = false
+        match filesystem_plan_v1(policy(), facts, baseline(), "policy.sdn"):
+            case Ok(plan):
+                grants = plan.grants.len()
+                denies = plan.denies.len()
+                first = plan.grants[0].canonical_path
+                for g in plan.grants:
+                    if g.root_ref == "prepared-workspace":
+                        ws_write = filesystem_ops_contain_v1(g.ops, FilesystemOpV1.Write)
+            case Err(ds): first = "refused: " + ds[0].message
+        expect(first).to_equal("/cache/immutable")
+        expect(grants).to_equal(7)
+        expect(denies).to_equal(4)
+        expect(ws_write).to_equal(true)
+
+    it "refuses a grant that overlaps protected authority, whatever the grant order":
+        """
+        A toolchain root that resolves to the parent of every attempt would
+        expose the private receipts and the sibling attempt. Both overlaps
+        are refused as SCMAC-FS-001; reordering the roots gives the same set.
+        """
+        val rs = with_toolchain(roots(), "/state/attempts")
+        val got = plan_codes(rs, protected())
+        expect(got).to_equal(["SCMAC-FS-001", "SCMAC-FS-001"])
+        expect(plan_codes(reversed_roots(rs), protected())).to_equal(got)
+
+    it "treats case-only aliases of protected roots as overlaps":
+        val got = plan_codes(with_toolchain(roots(), "/USERS/dev/.SSH/keys"), protected())
+        expect(got).to_equal(["SCMAC-FS-001"])
+
+    it "refuses unresolved, ambiguous and mistyped roots":
+        """
+        A missing toolchain resolution is SCMAC-FS-002; an ipc grant that
+        resolves to a directory is SCMAC-FS-001 (no IPC authority from a
+        writable tree).
+        """
+        expect(plan_codes(roots(), protected())).to_equal(["SCMAC-FS-002"])
+        var rs = with_toolchain(roots(), "/opt/simple/toolchain")
+        rs[4] = dir("broker-socket", "/state/attempts/a1/ipc")
+        expect(plan_codes(rs, protected())).to_equal(["SCMAC-FS-001"])
+        var dup = with_toolchain(roots(), "/opt/simple/toolchain")
+        dup.push(dir("shared-cache", "/cache/other"))
+        expect(plan_codes(dup, protected())).to_equal(["SCMAC-FS-002"])
+
+    it "computes a deterministic digest that tracks security-relevant inputs":
+        """
+        Reordered resolved facts give the same digest; a different provider
+        ABI or a changed object identity gives a different one.
+        """
+        val rs = with_toolchain(roots(), "/opt/simple/toolchain")
+        val a = digest_of(rs, protected(), "seatbelt-abi-v1")
+        expect(a.len()).to_equal(64)
+        expect(digest_of(reversed_roots(rs), protected(), "seatbelt-abi-v1")).to_equal(a)
+        expect(digest_of(rs, protected(), "seatbelt-abi-v2") == a).to_equal(false)
+        var changed = rs
+        changed[0] = ResolvedRootV1(root_ref: "prepared-workspace", canonical_path: "/state/attempts/a1/workspace",
+            identity: "id:replaced", kind: ResolvedObjectKindV1.Directory, case_insensitive: true)
+        expect(digest_of(changed, protected(), "seatbelt-abi-v1") == a).to_equal(false)

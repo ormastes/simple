@@ -1,0 +1,127 @@
+# Portable filesystem access policy (design simple_container_macos_seatbelt §7.1, §10.1-10.3).
+#
+# Access isolation over real host paths, not namespace virtualization. Grants
+# name LOGICAL root references; the effectful OS boundary resolves each
+# reference to a canonical path + object identity and hands those facts to
+# pure planning (`std.common.container_policy.filesystem_plan_v1`). Nothing in
+# this module touches the host filesystem.
+
+# Read data, read metadata, write/create/remove, execute and Unix-socket IPC
+# are separate authorities (§10.3). Write never implies execute; a writable
+# directory never implies IPC.
+pub enum FilesystemOpV1:
+    ReadData
+    ReadMetadata
+    Write
+    Execute
+    Ipc
+
+pub fn filesystem_op_text_v1(op: FilesystemOpV1) -> text:
+    match op:
+        FilesystemOpV1.ReadData: "read-data"
+        FilesystemOpV1.ReadMetadata: "read-metadata"
+        FilesystemOpV1.Write: "write"
+        FilesystemOpV1.Execute: "execute"
+        FilesystemOpV1.Ipc: "ipc"
+
+# Canonical order index; ops lists are kept sorted by it.
+pub fn filesystem_op_rank_v1(op: FilesystemOpV1) -> i64:
+    match op:
+        FilesystemOpV1.ReadData: 0
+        FilesystemOpV1.ReadMetadata: 1
+        FilesystemOpV1.Write: 2
+        FilesystemOpV1.Execute: 3
+        FilesystemOpV1.Ipc: 4
+
+pub fn filesystem_op_parse_v1(s: text) -> Result<FilesystemOpV1, text>:
+    if s == "read-data": return Ok(FilesystemOpV1.ReadData)
+    if s == "read-metadata": return Ok(FilesystemOpV1.ReadMetadata)
+    if s == "write": return Ok(FilesystemOpV1.Write)
+    if s == "execute": return Ok(FilesystemOpV1.Execute)
+    if s == "ipc": return Ok(FilesystemOpV1.Ipc)
+    Err("filesystem-op-unknown")
+
+pub fn filesystem_ops_contain_v1(ops: [FilesystemOpV1], op: FilesystemOpV1) -> bool:
+    val want = filesystem_op_rank_v1(op)
+    for o in ops:
+        if filesystem_op_rank_v1(o) == want:
+            return true
+    false
+
+pub enum FilesystemScopeV1:
+    ExactObject
+    Recursive
+
+pub fn filesystem_scope_recursive_v1(s: FilesystemScopeV1) -> bool:
+    match s:
+        FilesystemScopeV1.ExactObject: false
+        FilesystemScopeV1.Recursive: true
+
+pub struct FilesystemGrantV1:
+    root_ref: text
+    ops: [FilesystemOpV1]
+    scope: FilesystemScopeV1
+
+pub enum WorkspaceAccessV1:
+    ReadOnly
+    ReadWrite
+
+# The `filesystem:` section of a seatbelt policy document, validated.
+pub struct FilesystemPolicyV1:
+    baseline: text
+    workspace_ref: text
+    workspace_access: WorkspaceAccessV1
+    private_home: bool
+    private_temp: bool
+    output_ref: text
+    deny_credential_roots: bool
+    deny_sibling_attempts: bool
+    grants: [FilesystemGrantV1]
+
+# Reserved logical references the planner resolves for private directories.
+pub const FS_REF_PRIVATE_HOME_V1 = "private-home"
+pub const FS_REF_PRIVATE_TEMP_V1 = "private-temp"
+
+pub enum ResolvedObjectKindV1:
+    Directory
+    RegularFile
+    UnixSocket
+
+# A fact produced by the OS boundary: `canonical_path` is already resolved
+# with real filesystem semantics (symlinks followed, no lexical `..`), and
+# `identity` is the opaque object identity it observed. `case_insensitive` is
+# the observed volume behavior used for alias-aware overlap checks.
+pub struct ResolvedRootV1:
+    root_ref: text
+    canonical_path: text
+    identity: text
+    kind: ResolvedObjectKindV1
+    case_insensitive: bool
+
+pub enum ProtectedRootClassV1:
+    SupervisorState
+    AttemptPrivate
+    Credential
+    SiblingAttempt
+
+pub fn protected_root_class_text_v1(c: ProtectedRootClassV1) -> text:
+    match c:
+        ProtectedRootClassV1.SupervisorState: "supervisor-state"
+        ProtectedRootClassV1.AttemptPrivate: "attempt-private"
+        ProtectedRootClassV1.Credential: "credential"
+        ProtectedRootClassV1.SiblingAttempt: "sibling-attempt"
+
+# Supervisor-owned directory identity and generation (§7.1), not just a path.
+pub struct ProtectedRootV1:
+    root_ref: text
+    root_class: ProtectedRootClassV1
+    canonical_path: text
+    identity: text
+    generation: i64
+    case_insensitive: bool
+
+# Reviewed baseline expansion (e.g. toolchain read/execute roots).
+pub struct FilesystemBaselineV1:
+    name: text
+    revision: i64
+    grants: [FilesystemGrantV1]
