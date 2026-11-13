@@ -1,5 +1,12 @@
 # Purpose and audience: live-device acceptance evidence for the Vulkan runtime owner.
 # @req REQ-VKASYNC-003 REQ-VKASYNC-004 REQ-VKASYNC-005
+# @tag:in-development
+# Tracks: doc/08_tracking/bug/vulkan_no_wait_pending_submission_blocks_followup_compute_2026-09-09.md
+#   (section "2026-11-13 lane uia2"): on Linux the interpreter drives Vulkan
+#   compute through the dlopen bridge in interpreter_extern/gpu.rs, which has no
+#   ring; the ring lives only in the runtime crate, whose `vulkan` feature is off
+#   in the Linux seed. `rt_vulkan_async_session_supported` therefore answers 0
+#   and the ring cannot open. Remove the tag when one Vulkan owner serves both.
 #
 # Bug: doc/08_tracking/bug/
 # vulkan_no_wait_pending_submission_blocks_followup_compute_2026-09-09.md
@@ -99,8 +106,9 @@ describe "Vulkan async submission ring on a live device":
             val lane_spirv = file_read_bytes(_ARENA_TOUCH_SPV)
             expect(lane_spirv.len()).to_be_greater_than(0)
             expect(lane.init(_ARENA_BYTES, lane_spirv, "main")).to_equal("")
-            step("Live Vulkan device: " + lane.device_name +
-                " driver " + lane.driver_identity)
+            # Device identity is evidence: print it, a step label is not echoed.
+            print("[vulkan-async-ring] device=" + lane.device_name +
+                " driver=" + lane.driver_identity)
             expect(lane.device_name).to_not_equal("")
             val pattern = _arena_pattern(_ARENA_BYTES)
             assert_true(lane.arena_write(pattern))
@@ -171,6 +179,11 @@ describe "Vulkan async submission ring on a live device":
             expect(fence_d).to_be_greater_than(0)
             assert_true(fence_d != fence_a)
             expect(ring.in_flight()).to_equal(3)
+
+            step("A submitted, never-polled token is not retirable: nothing is released early")
+            expect(ring.retire(token_d)).to_equal(VULKAN_ASYNC_PENDING)
+            expect(ring.in_flight()).to_equal(3)
+            expect(ring.published_sequence()).to_equal(1)
 
             step("Retire the remaining three in submission order")
             expect(_poll_until_complete(ring, token_b)).to_equal(VULKAN_ASYNC_RETIRED)
