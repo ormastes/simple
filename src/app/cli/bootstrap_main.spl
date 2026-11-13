@@ -32,6 +32,7 @@ use app.cli.native_build_main.{run_native_build_worker, run_native_build_entry_v
     native_build_focused_capsule_shards_v1, run_native_file_worker_v1,
     native_build_authority_source_roots_v1, native_build_coordinator_prepublish_closure_v1,
     native_build_memory_admission_refusal_v1}
+use app.cli.native_build_hir_warmup_outcome.{native_build_stage3_capsule_mir_route_v1}
 use app.compiler_entrypoint.source_authority.{compiler_source_authority_acquire_v1,
     compiler_source_authority_publish_v1}
 use std.scv.compile_source_inventory.{compile_source_inventory_plain_checkout_v1,
@@ -528,7 +529,19 @@ pub fn run_native_build_bootstrap(args: [text]) -> i64:
                     env_get(NATIVE_BOOTSTRAP_WHOLE_PROGRAM_ENV_V1) ?? "")
                 if stage3_allow_mir:
                     print "[stage3-route] per-file worker pool + per-module link"
-                if not bootstrap_capsule_shard_prepass_routed(args, stage3_allow_mir, stage3_allow_mir):
+                # go-to-end on the two-pass route (SIMPLE_FILE_WORKERS=0): admit
+                # the MIR shard pool so a codegen panic costs one module, not the
+                # build. Authority + closure are NOT published here: Stage 3's five
+                # --source roots omit src/plugins, so an SCV snapshot of them cannot
+                # resolve the closure's plugins.* imports (bug record
+                # stage3_two_pass_hir_pool_scv_roots_omit_plugins_2026-11-13.md);
+                # the HIR pool stays refused and SIMPLE_HIR_SHARDING=0 skips it.
+                val stage3_two_pass = native_build_stage3_capsule_mir_route_v1(stage3_allow_mir,
+                    args.contains("--go-to-end") or (env_get("SIMPLE_NATIVE_GO_TO_END") ?? "") == "1",
+                    env_get(NATIVE_BOOTSTRAP_WHOLE_PROGRAM_ENV_V1) ?? "") == "two-pass"
+                if stage3_two_pass and not bootstrap_shard_child_active():
+                    print "[stage3-route] go-to-end MIR shard pool"
+                if not bootstrap_capsule_shard_prepass_routed(args, stage3_allow_mir or stage3_two_pass, stage3_allow_mir):
                     return 1
             return run_exact_stage3_focused_capsule(args)
         if env_get("SIMPLE_BOOTSTRAP_STAGE4") != "1":
