@@ -1,7 +1,9 @@
 # NOT_RUN: actual coordinator policy function, not native retirement evidence.
 use std.spec.*
 use app.cli.native_build_hir_warmup_outcome.{native_build_hir_warmup_outcome_v1, native_build_capsule_user_args_v1,
-    native_build_hir_refusal_runs_serial_v1}
+    native_build_hir_refusal_runs_serial_v1, native_build_hir_warmup_go_to_end_outcome_v1,
+    native_build_hir_warmup_admits_mir_v1, native_build_stage3_capsule_mir_route_v1,
+    native_build_mir_outcome_after_hir_failures_v1}
 
 describe "Focused HIR warmup retirement admission":
     it "continues successful warming only after all owners stop":
@@ -46,3 +48,64 @@ describe "Tool-build coordinator HIR pool refusal":
     it "does not degrade a successful warm-up":
         expect(native_build_hir_refusal_runs_serial_v1(0, false)).to_equal(false)
         expect(native_build_hir_refusal_runs_serial_v1(0, true)).to_equal(false)
+
+describe "Stage 3 go-to-end HIR warm-up with module failures":
+    # Directive 2026-11-13: HIR runs to the end, then MIR lowers every module
+    # whose HIR succeeded. A pool that started and retired every owner has
+    # warmed the HIR cache for each module that lowered; MIR shard workers redo
+    # HIR for the failed ones, drop them and their importers, and record them
+    # as failed rows, so the link stays blocked.
+    it "admits MIR shards past HIR module failures under go-to-end":
+        val outcome = native_build_hir_warmup_go_to_end_outcome_v1("fallback", false, 3, true)
+        expect(outcome).to_equal("ready-with-failures")
+        expect(native_build_hir_warmup_admits_mir_v1(outcome)).to_equal(true)
+
+    it "keeps the in-process fallback without go-to-end":
+        val outcome = native_build_hir_warmup_go_to_end_outcome_v1("fallback", false, 3, false)
+        expect(outcome).to_equal("fallback")
+        expect(native_build_hir_warmup_admits_mir_v1(outcome)).to_equal(false)
+
+    it "keeps a pool refused before any spawn on the in-process fallback":
+        # Nothing was warmed: every MIR worker would lower the whole closure's HIR.
+        val outcome = native_build_hir_warmup_go_to_end_outcome_v1("fallback", true, 0, true)
+        expect(outcome).to_equal("fallback")
+        expect(native_build_hir_warmup_admits_mir_v1(outcome)).to_equal(false)
+
+    it "keeps the in-process fallback when the pool failed without a module failure":
+        # An owner OOM-killed before claiming, a timeout or a BLOCKED ledger
+        # names no failed module: the in-process build may still succeed.
+        expect(native_build_hir_warmup_go_to_end_outcome_v1("fallback", false, 0, true)).to_equal("fallback")
+        # An unreadable failure count (-1) is not a module failure either.
+        expect(native_build_hir_warmup_go_to_end_outcome_v1("fallback", false, -1, true)).to_equal("fallback")
+
+    it "never relaxes an unconfirmed retirement or changes a clean warm-up":
+        expect(native_build_hir_warmup_go_to_end_outcome_v1("fail", false, 3, true)).to_equal("fail")
+        expect(native_build_hir_warmup_admits_mir_v1("fail")).to_equal(false)
+        expect(native_build_hir_warmup_go_to_end_outcome_v1("ready", false, 0, true)).to_equal("ready")
+        expect(native_build_hir_warmup_admits_mir_v1("ready")).to_equal(true)
+
+describe "Stage 3 capsule MIR route":
+    it "keeps the per-file pool when it is selected":
+        expect(native_build_stage3_capsule_mir_route_v1(true, false, "")).to_equal("per-file")
+        expect(native_build_stage3_capsule_mir_route_v1(true, true, "")).to_equal("per-file")
+
+    it "runs HIR and MIR shard pools on the two-pass route under go-to-end":
+        expect(native_build_stage3_capsule_mir_route_v1(false, true, "")).to_equal("two-pass")
+
+    it "keeps the two-pass route HIR warm-up only without go-to-end":
+        expect(native_build_stage3_capsule_mir_route_v1(false, false, "")).to_equal("hir-warmup")
+
+    it "keeps the whole-program route a single object":
+        expect(native_build_stage3_capsule_mir_route_v1(false, true, "1")).to_equal("hir-warmup")
+
+describe "Stage 3 go-to-end MIR verdict after HIR failures":
+    it "never links when the HIR pool recorded module failures":
+        # A HIR-failed module that never reached the MIR ledger must not let
+        # an all-PASS ledger link a binary with missing modules.
+        expect(native_build_mir_outcome_after_hir_failures_v1("link", true)).to_equal("fail")
+        expect(native_build_mir_outcome_after_hir_failures_v1("fail", true)).to_equal("fail")
+        expect(native_build_mir_outcome_after_hir_failures_v1("fallback", true)).to_equal("fail")
+
+    it "keeps every verdict of a clean HIR pool":
+        expect(native_build_mir_outcome_after_hir_failures_v1("link", false)).to_equal("link")
+        expect(native_build_mir_outcome_after_hir_failures_v1("fallback", false)).to_equal("fallback")
