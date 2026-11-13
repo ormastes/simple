@@ -892,7 +892,8 @@ fn _windows_managed_prepare_v2(state: WindowsPtyStateV1, request: WindowsManaged
     (next, prepared)
 
 @unsafe(reason: "creates only private RAW byte pipe endpoints with an exact child handle list", capabilities: [ffi, raw_ptr])
-fn _windows_managed_raw_pipes_v2(state: WindowsPtyStateV1, lease: WindowsManagedStreamLeaseV2) -> (WindowsPtyStateV1, text):
+fn _windows_managed_raw_pipes_v2(state: WindowsPtyStateV1, lease: WindowsManagedStreamLeaseV2,
+        broker_raw: bool) -> (WindowsPtyStateV1, text):
     var next = state
     val name_text = "\\\\.\\pipe\\simple-managed-raw-" + str(GetCurrentProcessId()) + "-" + str(lease.slot) + "-" + str(lease.generation)
     val name = _windows_process_wide_v1(next.heap, name_text)
@@ -907,12 +908,29 @@ fn _windows_managed_raw_pipes_v2(state: WindowsPtyStateV1, lease: WindowsManaged
     if next.input == 0: return (next, "Windows managed input client creation failed")
     if ConnectNamedPipe(next.input_server, 0) == 0 and GetLastError() != 535u32:
         return (next, "Windows managed input pipe connection failed")
-    val output_created = CreatePipe(next.arena + 8, next.arena + 16, 0, 65536u32)
-    next.output = volatile_read_u64(next.arena + 8)
-    next.output_server = volatile_read_u64(next.arena + 16)
-    if next.output == -1: next.output = 0
-    if next.output_server == -1: next.output_server = 0
-    if output_created == 0: return (next, "Windows managed output pipe creation failed")
+    if broker_raw:
+        # Keep the parent's sole-reader Peek/ReadFile profile synchronous. The
+        # child's exact output client is overlapped for bounded protocol writes.
+        val output_name = _windows_process_wide_v1(next.heap, name_text + "-broker-output")
+        next.temporaries = next.temporaries.push(output_name)
+        if output_name == 0: return (next, "Windows broker output name allocation failed")
+        next.output = CreateNamedPipeW(output_name, 524289u32, 8u32, 1u32, 65536u32, 65536u32, 0u32, 0)
+        if next.output == -1: next.output = 0
+        if next.output == 0: return (next, "Windows broker output server creation failed")
+        # GENERIC_WRITE|FILE_READ_ATTRIBUTES permits the child's actual
+        # GetNamedPipeInfo admission query on this write-only client endpoint.
+        next.output_server = CreateFileW(output_name, 1073741952u32, 0u32, 0, 3u32, 1073741824u32, 0)
+        if next.output_server == -1: next.output_server = 0
+        if next.output_server == 0: return (next, "Windows broker overlapped output client creation failed")
+        if ConnectNamedPipe(next.output, 0) == 0 and GetLastError() != 535u32:
+            return (next, "Windows broker output connection failed")
+    else:
+        val output_created = CreatePipe(next.arena + 8, next.arena + 16, 0, 65536u32)
+        next.output = volatile_read_u64(next.arena + 8)
+        next.output_server = volatile_read_u64(next.arena + 16)
+        if next.output == -1: next.output = 0
+        if next.output_server == -1: next.output_server = 0
+        if output_created == 0: return (next, "Windows managed output pipe creation failed")
     next.event = CreateEventW(0, 1, 0, 0)
     if next.event == 0: return (next, "Windows managed input event creation failed")
     volatile_write_u64(next.arena + 88, next.event)
@@ -952,7 +970,7 @@ pub fn windows_managed_stream_admit_v2(request: WindowsManagedStreamRequestV2) -
     state = launch.0
     val prepared = launch.1
     if prepared.error != "": return _windows_managed_failed_v2(lease, state, prepared.error)
-    val pipes = _windows_managed_raw_pipes_v2(state, lease)
+    val pipes = _windows_managed_raw_pipes_v2(state, lease, request.mode == "broker-raw")
     state = pipes.0
     if pipes.1 != "": return _windows_managed_failed_v2(lease, state, pipes.1)
     state.job = CreateJobObjectW(0, 0)

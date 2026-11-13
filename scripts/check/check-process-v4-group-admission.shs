@@ -1,22 +1,40 @@
 #!/bin/sh
-# Host component evidence: strict cgroup population decoding and V4 lifecycle.
+# Host component evidence: V4 lifecycle, Linux ProcessGroup retirement through
+# the real V4 start path, and strict cgroup population decoding.
 # This does not qualify all-descendant containment or the BuildRunner gate.
+# The V4 checks run first: the population-only selfcheck no longer builds
+# standalone (doc/08_tracking/bug/linux_group_owner_unavailable_selfcheck_stale_2026-11-13.md).
 set -eu
 if [ "$(uname -s)" != Linux ]; then
     echo 'process-v4-group-admission: requires Linux (not a PASS)' >&2
     exit 77
 fi
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
-sh "$root/scripts/check/check-linux-cgroup-events-parser.shs"
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/process-v4-admission.XXXXXX")
 trap 'rm -rf "$scratch"' EXIT HUP INT TERM
-cc=${CC:-cc}
+cc=${CC:-clang}  # never GCC (CLAUDE.md)
+"$cc" -std=c11 -O1 -pthread -ffunction-sections -fdata-sections \
+    -Wl,--gc-sections \
+    "$root/src/runtime/test/runtime_process_observation_v4_selfcheck.c" \
+    "$root/src/runtime/runtime_process_tree.c" \
+    -o "$scratch/v4-selfcheck"
+timeout 30 "$scratch/v4-selfcheck"
+"$cc" -std=c11 -O0 -Wall -Wextra -pthread \
+    "$root/src/runtime/test/runtime_process_group_retire_linux_selfcheck.c" \
+    "$root/src/runtime/runtime_process_tree.c" \
+    -o "$scratch/group-retire-selfcheck"
+timeout 60 "$scratch/group-retire-selfcheck"
+# Same selfcheck with test-only linker wraps for /proc, kill, clock and waitid
+# failures (no production hooks); covers every retirement error arm.
+"$cc" -std=c11 -O0 -Wall -Wextra -pthread -DGR_FAULT_WRAP \
+    -Wl,--wrap=opendir,--wrap=readdir,--wrap=open,--wrap=read \
+    -Wl,--wrap=kill,--wrap=clock_gettime,--wrap=waitid,--wrap=getpgrp \
+    "$root/src/runtime/test/runtime_process_group_retire_linux_selfcheck.c" \
+    "$root/src/runtime/runtime_process_tree.c" \
+    -o "$scratch/group-retire-fault-selfcheck"
+timeout 60 "$scratch/group-retire-fault-selfcheck"
+sh "$root/scripts/check/check-linux-cgroup-events-parser.shs"
 "$cc" -D_GNU_SOURCE -std=c11 -O1 -Wall -Wextra \
     "$root/src/runtime/test/runtime_linux_group_owner_unavailable_selfcheck.c" \
     -o "$scratch/group-selfcheck"
 timeout 10 "$scratch/group-selfcheck" --population-only
-"$cc" -std=c11 -O1 -pthread -ffunction-sections -fdata-sections \
-    -Wl,--gc-sections \
-    "$root/src/runtime/test/runtime_process_observation_v4_selfcheck.c" \
-    -o "$scratch/v4-selfcheck"
-timeout 30 "$scratch/v4-selfcheck"

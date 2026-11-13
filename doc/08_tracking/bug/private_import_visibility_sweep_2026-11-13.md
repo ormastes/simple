@@ -32,10 +32,90 @@ the cache-hit path, :1125 and :1517):
 - **same-directory exception:** importer and module in the same (canonical) directory pass;
 - pairs listed in `scripts/check/private_import_baseline.txt` (`<repo-rel path>|<name>`) only warn;
 - **no test exemption** - `test/**` importers are rejected like `src/**`.
+  *(Superseded 2026-11-13, see "Test importers exempt" below.)*
 
 Rule 2 - `check_private_call_visibility` (:2818): a call that reaches a private
 fn of another directory's module without a braced import (glob import, or no
 import) is rejected; `test/**` callers are exempt; same baseline.
+
+## Test importers exempt (owner decision 2026-11-13, `test_private_import_access_2026-11-13`, fixed)
+
+Owner decision: "test is special, can access" - tests may import private items.
+Branch `work/test-private-import-access-20261113` on `release/1.0.0` (base
+`517f20ae777`). Model: Opus (Fable unavailable).
+
+- **Seed:** `check_private_use_names` returns early when
+  `is_test_caller(importer)` - the exact predicate rule 2 already used (path
+  starts with `test/` or contains `/test/`, after `\`->`/` and leading `./`
+  stripped). Rules 1 and 2 now agree. **Open owner question (review P1):**
+  the shared predicate also exempts ~325 tracked product `.spl` files with a
+  `/test/` component (102 in `src/app/test/`, `src/**/debug/formats/test/`,
+  `src/compiler/70.backend/linker/test/`, `src/os/kernel/fs/test/`,
+  `examples/**/test/`), and - since the seed passes absolute paths - every
+  file of a checkout located under a `/test/` directory. Kept as-is because
+  the brief required the exact rule-2 definition; narrowing both rules to a
+  repo-relative `test/` prefix is the follow-up.
+- **Self-hosted:** `private_fn_import_denied` (HIR,
+  `module_import_resolution.spl`) returns early on
+  `private_import_is_test_importer`, a line-for-line mirror of `is_test_caller`.
+- Only the importer side is exempt; no fn was made `pub`; product importers
+  (`src/`, `scripts/`, `examples/` outside a `/test/` component, a `contest/`
+  dir, and a `src/` importer of a private fn defined under `test/`) are still
+  rejected. The seed fixtures live under `get_temp_dir()`; a `TMPDIR` with a
+  `/test/` component would exempt the negative examples.
+- Of the 2,697 remaining rule-1 rows above, the 1,924 with a `test/**`
+  importer stop failing.
+
+**Red -> green** (seed built from this tree, `before` = base `a2156a1f`,
+`after` = fix `ee15b57c` (sha256 prefixes), `systemd-run MemoryMax=16G timeout 900`, serial;
+no `src/` change other than the two checks):
+
+| spec | before | after |
+|---|---|---|
+| test/01_unit/lib/common/mock_spec.spl | 0/1 (load fail) | **41/41** |
+| test/01_unit/compiler/blocks/typed_parser_highlighting_spec.spl | 0/1 | **12/12** |
+| test/01_unit/compiler/mir/same_named_struct_layouts_across_modules_spec.spl | 0/1 | **4/4** |
+| test/01_unit/compiler/loader/resource_lifecycle_cardinality_spec.spl | 0/1 | **2/2** |
+| test/01_unit/app/buildrunner/remote_container_authority_v2_spec.spl | 0/1 | **10/10** |
+| test/01_unit/app/buildrunner/remote_parent_integration_v1_spec.spl | 0/1 | **5/5** |
+| test/01_unit/spec/dsl_spec.spl | 0/1 | 11/14 (rest: other class) |
+| test/01_unit/app/tooling/base64_utils_spec.spl | 0/1 | 34/38 (rest: other class) |
+
+Every "before" log has `is not visible to .../test/...`; no "after" log does.
+Specs such as yoga_layout/color_diff/termio_parser/devhub_* were already green
+"before" only through the JIT -> interpreter fallback; after, the JIT no longer
+demotes on them.
+
+New specs: `private_fn_import_visibility_prevention_spec.spl` (test importer
+loads; `contest/` and `app/` importers still get the diagnostic) and
+`private_fn_import_cross_module_visibility_spec.spl` (HIR, strict mode:
+`test/...` and `/repo/test/...` importers silent, `src/contest/...` still
+`E-HIR-PRIVATE-IMPORT-001`) - 8/11 -> 9/11 (the test-importer example
+red -> green) and 8/10 -> 10/10 (12/12 after the review added `./`, backslash and test-defined-provider probes). Rust unit test
+`test_importer_is_exempt_but_src_importer_still_errors` fails without the
+early return and passes with it. Neighbouring loader specs unchanged:
+`private_fn_call_visibility_spec` 3/3, `module_qualified_type_registry_spec`
+8/8 before and after.
+
+**Pre-existing reds, not caused here:** `private_fn_import_visibility_spec`
+(0/1) and the prevention spec's "missing from the baseline errors" / "nested
+baseline copy" examples fail identically before and after: the JIT reports the
+`is not visible` error, then the JIT -> interpreter fallback runs the program
+anyway with rc 0, so `rc != 0` assertions fail. The new negative examples
+assert the diagnostic text instead of rc for that reason.
+
+**Baseline:** rows are `definer|name` with no importer column, and
+`check-private-import-baseline.shs` calls a row stale only when the file is gone
+or the fn is no longer private - so the exemption makes nothing stale by the
+gate's definition (`--prune` would remove nothing). Rows needed only by tests
+were pruned by hand: a row was removed when (a) the Appendix A scan with the
+baseline filter off finds at least one importer and every importer is a test
+file, and (b) no non-test tracked `.spl` outside the definer's directory
+mentions the name as a token at all (covers rule-2 glob calls and scan misses).
+Rows whose definer is in `src/compiler/10.frontend` or `60.mir_opt` (127) were
+kept for the parallel w2 `pub` lane. **8,044 of 19,642 rows removed (11,598
+left)**; `check-private-import-baseline.shs --base origin/release/1.0.0`:
+`PASS - 11598 baseline entries checked, 0 stale, 0 added`.
 
 ## Census (static, awk/sh - scripts in the appendix)
 
