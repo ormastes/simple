@@ -327,3 +327,61 @@ owner lane required for the interface-digest re-key). No in-lane change.
 ## 2026-11-13 triage — lane live-p3-l2 (work/live-p3-l2-20261113, worktree lp2-wt, base origin/release/1.0.0 tip)
 
 **Verdict: LIVE (deferred).** Source re-check at this base: `hir_cache_closure_digest` still folds each surface's raw `content_hash`/`content_length`; `surface_type_encode.spl` still absent; the guard row `interface-digest-differential` still absent from `check-perf-regression-tests.shs`. The correct re-key (lossless ModuleSurface encoder over every field with per-surface fail-closed fallback) remains a dedicated owner compiler/cache lane; a partially-validated re-key would produce a silently stale compiler binary.
+
+---
+
+## 2026-11-13 — re-keyed (lane work/serial-build-fixes-20261113, commit 52cabdb826e)
+
+**Status: FIXED in source, pending a rebuilt compiler for the live measurement.**
+
+Trigger: the serial Phase 3 run (run-21 Stage 2) reused 964/966 HIR entries
+on an unchanged rerun but **0** after a 2-file edit (d884f52a818), re-paying
+~33 min of cold HIR. This is the user's "one file build" bug.
+
+What changed: `hir_cache_closure_digest` rows now carry each frozen surface's
+existing span-free semantic interface digest (`semantic_hash0..3`), sealed
+by `module_surfaces_freeze` from `module_surface_semantic_projection`
+(`20.hir/hir_lowering/module_surface_semantic_projection.spl`) plus the
+frozen import/export-route/origin fold (`_module_surface_final_semantic_digest`).
+That projection already meets the bar this record set: it encodes every
+declaration through the generated lossless AST semantic encoders
+(`ast_semantic_encode_type/expr/stmt`), folds trait default-method BODIES,
+const VALUES, field defaults and variant discriminants, sorts dictionary
+keys, excludes spans and docs, and fails closed (`semantic_cacheable=false`)
+whenever any encoder returns "". So no new encoder was written; the missing
+`surface_type_encode.spl` is not needed.
+
+Per-surface fallback: a surface that is not frozen+cacheable keeps the old
+`content_hash|content_length` row. Fallbacks are counted
+(`hir_cache_closure_fallback_count_v1`) and printed once per build:
+`[hir-cache] closure-key=interface surfaces=N content_fallbacks=M`.
+`SIMPLE_HIR_CACHE_CLOSURE_KEY=content` restores the byte rows (bisect switch,
+one release).
+
+Soundness argument: a module's HIR reads other modules only through the
+frozen registry. `HirLowering.begin_module` resets every per-module table;
+what the lowerer retains (re-export root memos, NAMEIDX, counters, the
+registry itself) is a pure function of the frozen registry. The one global
+input outside the registry, `scripts/check/private_import_baseline.txt`, was
+already outside the old key too. Mixed hit/miss closures already lower
+correctly today (attempt 2: 964 hits + 2 lowered), which exercises exactly
+the property the re-key relies on.
+
+**Decision: stale cross-module spans on a hit.** Spans are excluded from the
+interface digest. After a line-shifting edit in module A, an importer B whose
+HIR entry hits keeps the line/column it recorded for A's imported
+declarations. Effect: diagnostics or debug info that point INTO A from B's
+HIR (for example a type error reported against an imported declaration's
+span) can show A's old line numbers until B is re-lowered. Spans are
+location metadata only; this lane did not find a MIR/codegen decision that
+reads an imported declaration's span, but that was audited by reading, not
+proven by a spec. B's own diagnostics
+replay from its entry unchanged; A is always re-lowered (its own source
+digest moved), so diagnostics located in A are current. Accepted because
+keying on spans would make any line-shifting edit invalidate every importer,
+which is most of the win.
+
+Spec: `test/01_unit/compiler/80.driver/hir_cache_interface_closure_key_spec.spl`
+— red 5/6 (body-only edit moved the digest), green 6/6 (body edit keeps it;
+signature, field type, const value and trait default body edits move it;
+the legacy switch still byte-keys).
