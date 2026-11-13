@@ -15,6 +15,7 @@ use compiler.driver.driver.{compiler_driver_create}
 use compiler.common.driver_compile_options.{driver_core_compile_options_default}
 use compiler.common.driver_core_modes.{CompileMode}
 use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_canonical_path}
 
 val A_SRC: text = "pub fn base_val() -> i64:\n    1\n\npub fn ident<T>(x: T) -> T:\n    x\n"
 val B_SRC: text = 'use pkg.a.{base_val}' + "\n\npub fn mid() -> i64:\n    base_val() + 1\n"
@@ -132,4 +133,21 @@ describe "unit-lane TLDR imports (PM3)":
             if s.module_name == "pkg.d": has_d = true
         expect(has_b).to_equal(true)
         expect(has_d).to_equal(false)
+        restore_switch(saved)
+
+    # bug per_file_lane_unit_mir_physical_ownership_missing_hir_2026-11-12
+    # layer 2: a summary surface is built from a module id, so its canonical
+    # path was "<cwd>/<module/path>.spl". The worker readiness walk keys on
+    # surface.canonical_path against the admitted rows' canonical paths, so the
+    # importing unit saw every summarised import as unbuilt and failed with
+    # FILE-WORKER-E-CLOSURE-INCOMPLETE.
+    it "binds every summary surface to its admitted source row's canonical path":
+        val saved = with_switch("")
+        val root = fixture_root("canonical")
+        val mods = inventory(root)
+        val leaf = put(root, "c", C_SRC)
+        val plan = unit_tldr_plan_v1("u2", root + "/tldr", [leaf], mods)
+        expect(plan.surfaces.len()).to_equal(2)
+        for s in plan.surfaces:
+            expect(s.canonical_path).to_equal(module_surface_canonical_path(mods[s.module_name]))
         restore_switch(saved)

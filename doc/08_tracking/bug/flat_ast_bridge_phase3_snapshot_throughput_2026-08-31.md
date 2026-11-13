@@ -167,3 +167,7 @@ The status line correctly stays open. Implementing the candidate is out
 of scope for a traverse lane: the acceptance criteria demand a measured
 >=3x throughput improvement, an RSS bound, and unchanged codec/parity
 gates on a hot compiler path.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**LIVE (confirmed)** — ne9 premise re-check: bridge still reads the SIMPLE_BOOTSTRAP* env mirror at multiple conversion sites; no arena mode admitted around flat_ast_to_module(). Implementation needs a measured >=3x throughput win + RSS bound + unchanged codec gates — out of traverse-lane scope.

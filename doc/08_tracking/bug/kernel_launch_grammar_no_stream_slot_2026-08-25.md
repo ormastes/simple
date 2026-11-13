@@ -138,3 +138,7 @@ AST files (visitor, semantic-value encoder), HIR lowering, and every
 `KernelLaunch` match site — a compiler-frontend feature, not P3 scope; and the
 fully-supported path (`cuda_launch_on`) already covers the use case. Routed to
 the compiler-frontend owner as a feature request.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**LIVE (confirmed)** — ne13: interim API + `_ex` runtime symbol landed; only the grammar slot remains — AST variant still KernelLaunch(Expr,Expr,Expr,[CallArg]) and probes show `<<<` is not even recognized in expression position, so it is a compiler-frontend feature (visitor/encoder/HIR ripple), routed to that owner. cuda_launch_on covers the use case.

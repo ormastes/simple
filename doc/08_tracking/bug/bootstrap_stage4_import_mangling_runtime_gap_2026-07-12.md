@@ -119,3 +119,7 @@ Spot-check at this lane's base (origin/release/1.0.0 tip 790b54f7c4fc):
 Nothing actionable in the `src/runtime` lane; the Stage-4 linker/provider
 boundary stays with the compiler/native_project lane under the 2026-09-01
 tracker. No change made.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**SUPERSEDED (confirmed)** — Sub-issue (a) fixed at tip; sub-issue (b) provider composition remains an explicit open TODO tracked by `stage4_full_cli_unlinkable_579_unresolved_runtime_symbols_2026-09-01.md` (present in tree, rt2 spot-checked the three providers live in runtime_native.c).

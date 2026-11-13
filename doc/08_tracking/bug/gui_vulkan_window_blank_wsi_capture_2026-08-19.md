@@ -88,3 +88,19 @@ construction.
 
 Status: fix-implemented-verification-pending (script); underlying
 present-path defect OPEN.
+
+
+---
+
+## 2026-11-13 addendum — P3 gpu lane p3-gpu-20261113 (work/p3-gpu-20261113, base 6f4cb189867)
+
+**Verdict: OPEN, BLOCKED on this host — unchanged.** `scripts/check/check-gui-vulkan-window.shs`
+remains Xvfb-only by design with no `$DISPLAY` escape hatch, so it cannot run on
+this Windows host; the blank_wsi symptom is neither reproduced nor cleared here
+("does not run on Windows" is not evidence of a fix). Grant unchanged: run the
+gate on a Linux lane with Xvfb + a Vulkan ICD and attach
+`build/gui-window-evidence/evidence.log`.
+
+## Triage 2026-11-13 (Linux aarch64, lane uia) — row stays OPEN
+
+Blocked on this host: check-gui-vulkan-window.shs needs Xvfb and a gui-feature seed; this host has xwd but no Xvfb or xvfb-run, and the gate app examples/06_io/ui/widget_showcase_gui.spl is owned by another lane today. Source note: present=false in the renderer line is static metadata (BackendProbeResult.has_present is never set for Vulkan in backend_probe.spl), not a symptom.

@@ -16,3 +16,10 @@ runtime hot path.
 Required fix: profile directory lint with phase timings, reuse parsed/compiler
 state across files, avoid repeated module loading, and add a realistic warm
 latency/RSS release gate. Do not weaken or skip AST lints to meet the target.
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+open scan-latency item per in-file status (no terminal verdict produced); owner: robust-lint lane.

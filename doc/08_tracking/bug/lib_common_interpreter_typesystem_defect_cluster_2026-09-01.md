@@ -167,3 +167,7 @@ this lane): the `yaml_sequence` visibility gate;
 `module_import_spec.spl` host-hardcoded binary path; the standalone-run
 `rt_simd_add_u8x16` capacity-overflow panic (see the Vec16u8 record's
 2026-11-11 addendum).
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**FIXED (confirmed)** — interp9: clusters 3/4/5 gone with per-cluster green evidence; cluster residues trace to routed known defects (VirtMemManager tri-def, MECALL counters) or host-hardcoded spec paths.

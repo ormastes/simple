@@ -180,3 +180,10 @@ sh scripts/check/test-riscv-gen2-qualification-writer-reds.shs
 plus the reviewed-inventory promotion and the dedicated-worktree snapshot
 transaction admission this doc's "Required closure" lists, and independent
 review of the admitted revision before any mission-critical claim.
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+architectural qualification-provenance boundary; re-verified unchanged 2026-11-05. Owner: RISC-V qualification lane.

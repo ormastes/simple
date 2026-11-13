@@ -131,3 +131,7 @@ per the record's instruction. `src/app/ui/renderdoc_metrics/main.spl` stays
 single-module as its docstring constrains; not touched.
 
 **Cycles:** 0. Evidence: `build/review/p3fix-seed2-20261111.sdn`.
+
+## Re-verified 2026-11-13 (Linux aarch64, lane uia)
+
+First aarch64 retest. On release/1.0.0 35144b7f5e9, Linux aarch64 seed af717f53d6bce3e5: simple run src/app/ui/renderdoc_diff/main.spl identical_a/identical_b fixtures -> rc=0, RENDERDOC DIFF: PASS 4 event(s) aligned, 0 divergent; check-renderdoc-web-diff.shs --selftest -> rc=0, 10 fixtures, 0 failed. No SIGBUS on Linux aarch64; the original macOS aarch64 host was not retested.

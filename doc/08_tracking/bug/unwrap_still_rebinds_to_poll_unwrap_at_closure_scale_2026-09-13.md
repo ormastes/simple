@@ -257,3 +257,10 @@ local (fault address 0x48, see
 `stage2_native_method_scoped_dict_field_write_segfaults_2026-09-14.md`
 Correction 2). That site is worked around by scalar readers; the producer is
 still open, so every remaining site is still latent.
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+open residual rebind route at closure scale per in-file stage-2 verdicts; owner: method-resolution lane (seed-side verification required).

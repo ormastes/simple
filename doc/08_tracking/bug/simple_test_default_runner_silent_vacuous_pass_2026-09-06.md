@@ -162,3 +162,28 @@ exe stamp, as the 8th cache column) and effective in the deployed binary:
 
 Verdict: both manufactured-false-green paths are closed on current tip. No lane
 code change was needed; this addendum plus the status flip are the change.
+
+---
+
+## Addendum 2026-11-13 — P3 runner priority lane (work/p3-runner-lane-20261113, base 80a8116e5e2): both defects re-verified FIXED, no code change
+
+Re-verified at this lane's base (`origin/release/1.0.0` tip 80a8116e5e2), Windows
+seed-smoke binary (`bin/simple.exe`, `Simple v1.0.0-rc.1`), confirming the
+2026-11-11 runner7 addendum holds on the newer tip:
+
+**Defect 1 (default runner silent vacuous pass) — not reproducible.** Default
+route (no `SIMPLE_TEST_RUNNER_RUST`) on a trivial probe spec
+(`describe "Probe" / it "adds" / expect(1+1).to_equal(2)`) emits
+`SPEC FILE VERDICT: ... outcome=OK declared>=1 executed=1 passed=1 failed=0`
+plus `Results: 1 total, 1 passed, 0 failed`, rc=0, ~16 s wall. No silent
+exit-0 path observed.
+
+**Defect 2 (Rust runner cache keyed on spec mtime only) — fix live.** With
+`SIMPLE_TEST_RUNNER_RUST=1`: (1) second run of an unchanged spec prints
+`Skipped 1 unchanged test(s) (cached)` (cache hit); (2) `touch
+src/lib/common/engine/math3d.spl` — mtime-only change, `git status` clean —
+the next run RE-EXECUTED the spec (no `Skipped` line, real run); (3) the
+`source_tree_stamp` 8th-column key is present in source
+(`src/compiler_rust/driver/src/cli/test_runner/result_cache.rs:208,243`).
+
+No lane code change; this addendum is the change.

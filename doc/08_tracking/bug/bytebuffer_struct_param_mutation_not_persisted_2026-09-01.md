@@ -222,3 +222,7 @@ the 2026-09-01 report and the 2026-11-11 refreshed seed
 Verdict: row closed. `ByteBuffer` remains a `class` (`src/lib/common/bytes/
 span.spl:137`) and the chained-`MethodCall` write-back shape is exercised green
 by both engines' entry points used by `test` and `run`.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**FIXED (confirmed)** — ne3 re-verified interpreter lane green (ints 11/11, foundation 6/6) and the JIT SIGSEGV gone on the refreshed seed (exit 0, s.len()=2).

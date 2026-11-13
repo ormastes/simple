@@ -84,3 +84,27 @@ asserts both are `> 0`. Neither variable is set anywhere in the repository —
 they are host-pinned perf evidence. Supplying invented values would fabricate a
 perf baseline, so this spec cannot go green on an unpinned, heavily loaded host
 regardless of the load-font fix.
+
+
+---
+
+## 2026-11-13 addendum — P3 gpu lane p3-gpu-20261113 (work/p3-gpu-20261113, base 6f4cb189867)
+
+**Verdict: BLOCKED stands — re-verified at this tip.** Blocker 2 (font fixture)
+remains fixed in-tree (`load_font_bytes(PERF_FONT, font_blob)` bytes API in
+`simple_2d_vector_fonts_perf_spec.spl`). Blocker 1 unchanged: no
+`bin/release/<triple>/` self-hosted binary exists in this worktree (verified:
+`bin/release` absent), so `multicore_green_fanout_spec.spl`'s
+`expect(stderr).to_equal("")` still cannot pass on the seed binary with its
+mandatory banner — and per this doc must not be relaxed. The lane remains
+forbidden a bootstrap rebuild. Grant unchanged: deploy the self-hosted binary
+in a bootstrap-authorized lane, set the two pinned baseline env vars from the
+pinned host, run both named specs.
+
+## Triage 2026-11-13 (Linux aarch64, lane uia) — row stays OPEN
+
+Blocked on this host: multicore_green_fanout_spec asserts empty stderr, which needs a self-hosted binary (the seed banner cannot be suppressed through its env -i probe), and the vector-font spec needs host-pinned baselines. The font-fixture half is fixed (1fc1852855a). Regression found, not repaired here: transplant 88aac2ffe28 undid cbe6b94a79f in multicore_green_fanout_spec.spl (mkdir -p build/tmp in unique_probe_path; bin/simple fallback in simple_binary), so probes now fail with 98/127 before reaching the stderr assertion; origin/main carries the same reverted text.
+
+## 2026-11-13 follow-up (Linux aarch64, lane uia)
+
+Probe regression repaired: cbe6b94a79f re-applied to test/05_perf/stress/multicore_green_fanout_spec.spl (mkdir -p build/tmp; bin/simple fallback). On release/1.0.0 5221a5058a8, Linux aarch64 (DGX Spark GB10), Rust seed af717f53d6bce3e5: before, 3 examples 2 failed with the harness sentinel (expected probe_write_failed, 98); after, with SIMPLE_BIN set to the seed, the probes run and the same 2 examples fail only on the empty-stderr assertion (seed banner). Row stays open on the self-hosted-binary blocker. origin/main still carries the reverted text and needs the same change.

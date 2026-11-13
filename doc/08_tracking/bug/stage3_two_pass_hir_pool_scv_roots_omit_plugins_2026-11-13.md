@@ -1,7 +1,7 @@
 # Stage 3 two-pass HIR pool cannot be admitted: SCV roots omit src/plugins
 
 - Date: 2026-11-13
-- Status: open
+- Status: fix landed 2026-11-13 (branch work/stage3-scv-plugins-root-20261113); Stage 3 verification pending (needs a transcript showing `hir shards>=2`)
 - Area: native-build / bootstrap Stage 3 (`SIMPLE_FILE_WORKERS=0`, two-pass)
 - Found by: Stage 3 go-to-end census (worktree simple-s3census-20261113)
 
@@ -28,9 +28,9 @@ src/app/cli/bootstrap_main.spl never publishes either (the coordinator route
 does, bootstrap_main.spl `bootstrap_coordinator_publish_authority_v1` +
 `native_build_coordinator_prepublish_closure_v1`).
 
-Publishing them there is not enough. Stage 3 passes exactly five `--source`
-roots (k1 composition, cuda, src/compiler, src/app, src/lib; the exact
-capsule refuses a sixth) and reaches `src/plugins` only through the entry
+Publishing them there is not enough. The sanctioned Stage 3 (`bootstrap-from-scratch.sh`) passes five `--source`
+roots (k1 composition, cuda, src/compiler, src/app, src/lib)
+and reaches `src/plugins` only through the entry
 closure. `native_build_snapshot_source_roots_v1`
 (src/app/io/_CliCompile/native_build_snapshot_roots.spl:4) preserves explicit
 roots verbatim, so the SCV snapshot has no `src/plugins`. Tried on
@@ -48,9 +48,20 @@ error: focused native-build: unresolved import 'plugins.backend_vhdl.driver.driv
 Publisher and consumer must reconstruct the same root cut, so the closure
 namespaces the entry reaches (`src/plugins`, `src/os`) have to be added by
 `native_build_selected_snapshot_source_roots_v1` for both sides, or the
-Stage 3 argv contract has to carry them without a sixth capsule source slot.
+Stage 3 argv contract has to carry them (the exact capsule accepts six roots, `bootstrap_focused_native_build.spl:35`, so adding `--source src/plugins` there was the alternative).
 
 ## Workaround in use
 
 The Stage 3 go-to-end census runs with `SIMPLE_HIR_SHARDING=0`: no HIR pool,
 and each MIR shard worker lowers HIR itself (from the HIR cache when warm).
+
+## Fix
+
+`native_build_selected_snapshot_source_roots_v1` now adds `src/plugins` to an
+explicit root cut that holds `src/app` when the checkout has `src/plugins`
+(publisher and consumer both build their cut there), and the Stage 3 block of
+`bootstrap_main.spl` publishes SCV authority + the closure request on the
+go-to-end two-pass route. Pinned by
+`test/01_unit/app/io/_CliCompile/native_build_positional_snapshot_spec.spl`
+("selected snapshot roots of a Stage 3 explicit-root build"). The
+`SIMPLE_HIR_SHARDING=0` workaround is no longer needed.

@@ -22,3 +22,10 @@ not.
 
 Provider token usage and comparable completed-bug average: unavailable.
 
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+pre-existing provenance coverage gap per in-file status; owner: Rust-authority lane.

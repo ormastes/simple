@@ -113,3 +113,10 @@ Linux/x86_64 host, then run a try/catch fixture matrix
 `bin/simple native-build` for x86_64, AArch64 (qemu), and RV64 (qemu)
 ELF lanes, plus the runtime C frame test, and pin the llvm-lib / C++20 /
 Mach-O / RV32 rejection diagnostics in a seed-runnable spec.
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+Not pursued in this lane: BLOCKED 2026-11-11 (lane compiler6): closure needs the self-hosted native lane on POSIX ELF. Not chaseable on a Windows seed lane.

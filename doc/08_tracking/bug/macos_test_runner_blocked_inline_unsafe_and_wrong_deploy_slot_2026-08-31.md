@@ -247,3 +247,25 @@ parses `inline.spl` fine.
    still build current source. Do **not** rewrite the 53 call sites to the block form —
    that normalizes a workaround over a compact form the language is supposed to accept.
 
+
+## Addendum 2026-11-13 — P3 runner priority lane (work/p3-runner-lane-20261113, base 80a8116e5e2): source fixes re-confirmed; still deploy-blocked externally
+
+Spot-confirmed all three source-level fixes at this base (newer than the
+2026-11-11 runner4 spot-check tip b364745fdbf8):
+
+1. Inline `unsafe(...): expr` — `parse_unsafe_block_expr_if_present` at
+   `src/compiler/10.frontend/core/parser_stmts.spl:644`; the record's minimal
+   `inline.spl` repro (extern `rt_random_randint` + one-line
+   `unsafe(capabilities: [ffi]): rt_random_randint(a, b)`) prints `ok` under
+   this base's Windows seed (`bin/simple.exe run <file> --mode=interpreter`,
+   engine-demotion notice for the ffi splice only — no parse error).
+2. Deploy slot canonicalisation — `scripts/setup/release-platform.shs:7-9`
+   maps `*-apple-darwin` -> `*-apple-darwin-macho`.
+3. Bootstrap-CLI refusal — `scripts/setup/setup.shs:92-98` probes `--version`
+   and refuses to point `bin/simple` at a slot binary reporting
+   `simple-bootstrap`.
+
+Residual unchanged and external to every Windows lane: a fresh Stage-4
+full-CLI macOS deploy of `bin/release/aarch64-apple-darwin-macho/simple` is
+owned by the bootstrap lane on a macOS host. Verdict stands: SUPERSEDED at
+source level; no code change.

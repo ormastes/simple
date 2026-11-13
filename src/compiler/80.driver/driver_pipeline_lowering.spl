@@ -18,7 +18,7 @@ use compiler.driver.driver_compiler_type.{CompilerDriver}
 use compiler.driver.driver_aot_pipeline.*  # CompilerDriver.native_staged_codegen_flush_v1 lives in this impl block
 use compiler.driver.driver_build.native_staged_codegen.{native_staged_codegen_flush_due_v1, native_staged_codegen_recovery_flush_due_v1}
 use compiler.driver.driver_build.go_to_end.{go_to_end_enabled_v1, GO_TO_END_UNATTRIBUTED_V1}
-use compiler.driver.driver_build.native_mir_shard.{native_mir_shard_spec_v1,
+use compiler.driver.driver_build.native_mir_shard.{native_mir_shard_spec_v1, native_mir_shard_queue_v1,
     native_mir_shard_claim_cap_v1, native_mir_shard_claim_v1, native_mir_shard_lpt_order_v1,
     native_mir_shard_publish_pass_v1}
 use compiler.driver.driver_build.native_file_worker_v1.{native_file_worker_only_paths_from_env_v1}
@@ -45,7 +45,7 @@ use compiler.driver.driver_mir_error_owner.{driver_trace_module_mir_errors,
 use compiler.driver.driver_mir_physical_owners.{driver_mir_physical_source_indices_v1,
     driver_mir_feed_is_identity_v1, driver_mir_projected_source_identities_v1,
     driver_mir_entry_alias_projection_required_v1, driver_mir_owner_disposition_v1,
-    driver_mir_schedule_name_v1}
+    driver_mir_schedule_name_v1, driver_mir_placeholder_owner_v1, driver_mir_unit_scoped_v1}
 use compiler.driver.driver_worker_surface_closure_v1.{worker_hir_loads_restricted_v1}
 use compiler.driver.driver_mir_provider_aliases.{driver_mir_checked_provider_alias_indices_v1}
 use compiler.mir._MirLowering.provider_metadata.{mir_provider_callable_key}
@@ -758,7 +758,8 @@ impl CompilerDriver:
         # closure; the ownership gates below keep its unheld non-target rows as
         # placeholders (driver_mir_owner_disposition_v1) instead of demanding
         # HIR for the whole inventory. Targets keep the fail-closed demand.
-        val mir_unit_scoped = worker_hir_loads_restricted_v1()
+        val mir_unit_scoped = driver_mir_unit_scoped_v1(worker_hir_loads_restricted_v1(),
+            native_mir_shard_queue_v1())
         val mir_unit_targets: [text] = if mir_unit_scoped: native_file_worker_only_paths_from_env_v1() else: []
         # Phase 2's documented entry/closure route projects the phase-1
         # inventory to unique_entry_sources. Its parser already owns physical
@@ -792,7 +793,7 @@ impl CompilerDriver:
                 if not self.ctx.hir_modules.has(source.module_name):
                     if driver_mir_owner_disposition_v1(mir_unit_scoped,
                             mir_unit_targets.contains(source.path), false) == "placeholder":
-                        projected_owners = projected_owners.push(source.module_name)
+                        projected_owners = projected_owners.push(driver_mir_placeholder_owner_v1(source.path))
                         continue
                     self.ctx.add_error("MIR projected ownership missing HIR for {source.module_name}")
                     return false
@@ -881,7 +882,7 @@ impl CompilerDriver:
                 if not self.ctx.hir_modules.has(logical_name) and
                         driver_mir_owner_disposition_v1(mir_unit_scoped,
                             mir_unit_targets.contains(owner_row_path), false) == "placeholder":
-                    physical_owners = physical_owners.push(logical_name)
+                    physical_owners = physical_owners.push(driver_mir_placeholder_owner_v1(owner_row_path))
                     continue
                 if not self.ctx.hir_modules.contains_key(logical_name):
                     self.ctx.add_error("MIR physical ownership missing HIR for {logical_name}")
@@ -1387,9 +1388,11 @@ impl CompilerDriver:
                     # per-file pool, whatever HIR subset each one holds.
                     if mir_physical_ownership_active and self.ctx.hir_modules.has(staged_lookup):
                         staged_name = driver_mir_schedule_name_v1(mir_unit_scoped, true,
-                            self.ctx.hir_modules[staged_lookup].name, staged_lookup)
+                            self.ctx.hir_modules[staged_lookup].name, staged_lookup,
+                            self.ctx.sources[staged_idx].path)
                     elif mir_physical_ownership_active:
-                        staged_name = driver_mir_schedule_name_v1(mir_unit_scoped, false, "", staged_lookup)
+                        staged_name = driver_mir_schedule_name_v1(mir_unit_scoped, false, "", staged_lookup,
+                            self.ctx.sources[staged_idx].path)
                     staged_schedule = staged_schedule.push(staged_name)
                     staged_source_names = staged_source_names.push(staged_name)
                 self.native_staged_codegen.scheduled_names = staged_schedule
@@ -1419,9 +1422,11 @@ impl CompilerDriver:
                             var excl_name = excl_lookup
                             if mir_physical_ownership_active and self.ctx.hir_modules.has(excl_lookup):
                                 excl_name = driver_mir_schedule_name_v1(mir_unit_scoped, true,
-                                    self.ctx.hir_modules[excl_lookup].name, excl_lookup)
+                                    self.ctx.hir_modules[excl_lookup].name, excl_lookup,
+                                    self.ctx.sources[excl_idx].path)
                             elif mir_physical_ownership_active:
-                                excl_name = driver_mir_schedule_name_v1(mir_unit_scoped, false, "", excl_lookup)
+                                excl_name = driver_mir_schedule_name_v1(mir_unit_scoped, false, "", excl_lookup,
+                                    self.ctx.sources[excl_idx].path)
                             mir_excluded_names = mir_excluded_names.push(excl_name)
                 if not hir_shard_recovery_excluded(mir_shard_queue, mir_shard_key, mir_excluded_names):
                     self.ctx.add_error("MIR shard ledger exclusion record refused for this worker")

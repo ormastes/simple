@@ -96,3 +96,10 @@ is quiet).
   (piped stdin: one frame + notice + exit 0) is unaffected — enable fails
   on a pipe, so disable is never reached.
 
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+diagnosed with a one-line fix identified, but the fix is in the Rust seed runtime (rt_terminal_disable_raw_mode) and requires a seed rebuild - not available on this Windows lane. Owner: seed lane.
