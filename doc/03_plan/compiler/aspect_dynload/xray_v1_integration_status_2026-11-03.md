@@ -357,3 +357,7 @@ Other `b795b3f4a26`/`aba2a5f0a3e` sites, same seed and scope:
   backend's COFF sled emitter), never a skip. Explicit-path run 2026-11-13 (seed, lanes capped
   150 s, 8G scope): llvm PASS, simple FAIL (seed `rt_host_dynlib_open` bug), win64 static PASS,
   win64 in-process BLOCKED -> `passed=2 failed=2`, `IN-DEVELOPMENT EXPLICIT`.
+- Notes: the locator's 64-bit-text_base refusal is defence in depth (a wide value is also
+  refused by section containment), mirroring the runtime's uint32 truncation. The twin dump
+  prints twice under the seed (engine demotion re-runs `main`); the objects check reads the
+  first line — filed `doc/08_tracking/bug/seed_engine_demotion_reruns_main_side_effects_2026-11-13.md`.
