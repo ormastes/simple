@@ -2,26 +2,19 @@
 # @semantic_artifact node_tree compiler.ast view BinaryExprView
 # origin: config/data_policy/compiler_ast_binary_expr.sdn
 # schema_digest 23eeef5fa7603d057885c0e27e704dcef7094cf92f6cb18b7389acc8de3dc3be
-# AttrId compiler.ast#1 inferred_type: Option<text> optional -> BinaryExprInferredTypeStore (sparse)
-# AttrId compiler.ast#2 left: i64 required -> expr_get_left
-# AttrId compiler.ast#3 op: i64 required -> expr_get_int
-# AttrId compiler.ast#4 source_span: i64 required -> expr_get_span
+# physical_plan_digest ffd2c8d79d566d2c0d41be1e82845caf5419ecb3e08cd306093771e9e8589a10
+# AttrId compiler.ast#1 inferred_type: Option<text> optional -> sparse_hash BinaryExprInferredTypeStore (sdn:config/data_policy/compiler_ast_binary_expr.sdn:43)
+# AttrId compiler.ast#2 left: i64 required -> sparse_hash BinaryExprLeftStore (sdn:config/data_policy/compiler_ast_binary_expr.sdn:39)
+# AttrId compiler.ast#3 op: i64 required -> column BinaryExprOpColumn (sdn:config/data_policy/compiler_ast_binary_expr.sdn:35)
+# AttrId compiler.ast#4 source_span: i64 required -> direct expr_get_span (default)
 
-use compiler.core.ast.{expr_get_int, expr_get_left, expr_get_span}
+use compiler.core.ast.{expr_get_span}
 
 @node_tree("compiler.ast")
 class BinaryExprView:
     node: i64
 
 impl BinaryExprView:
-    # AttrId compiler.ast#2
-    fn left() -> i64:
-        expr_get_left(self.node)
-
-    # AttrId compiler.ast#3
-    fn op() -> i64:
-        expr_get_int(self.node)
-
     # AttrId compiler.ast#4
     fn source_span() -> i64:
         expr_get_span(self.node)
@@ -54,3 +47,54 @@ impl BinaryExprInferredTypeStore:
 
     fn len() -> i64:
         self.present.len()
+
+# Sparse attribute `left` (AttrId compiler.ast#2): a hash side table keyed
+# by node id. A missing entry is absent and reads fail closed, never as zero.
+class BinaryExprLeftStore:
+    values: Dict<i64, i64>
+
+impl BinaryExprLeftStore:
+    static fn create() -> BinaryExprLeftStore:
+        BinaryExprLeftStore(values: {})
+
+    me set(node: i64, value: i64):
+        self.values[node] = value
+
+    fn get(node: i64) -> Result<i64, text>:
+        if not self.values.contains_key(node):
+            return Err("absent: no left entry for node " + node.to_text())
+        Ok(self.values[node])
+
+    fn len() -> i64:
+        self.values.len()
+
+# Column attribute `op` (AttrId compiler.ast#3): one dense slot per node
+# id. An unset slot is absent and reads fail closed, never as zero.
+class BinaryExprOpColumn:
+    slots: [i64?]
+    count: i64
+
+impl BinaryExprOpColumn:
+    static fn create() -> BinaryExprOpColumn:
+        BinaryExprOpColumn(slots: [], count: 0)
+
+    me set(node: i64, value: i64) -> Result<bool, text>:
+        if node < 0:
+            return Err("column op: negative node id " + node.to_text())
+        while self.slots.len() <= node:
+            self.slots = self.slots.push(None)
+        match self.slots[node]:
+            case Some(_): pass
+            case None: self.count = self.count + 1
+        self.slots[node] = Some(value)
+        Ok(true)
+
+    fn get(node: i64) -> Result<i64, text>:
+        if node < 0 or node >= self.slots.len():
+            return Err("absent: no op slot for node " + node.to_text())
+        match self.slots[node]:
+            case Some(v): Ok(v)
+            case None: Err("absent: no op slot for node " + node.to_text())
+
+    fn len() -> i64:
+        self.count

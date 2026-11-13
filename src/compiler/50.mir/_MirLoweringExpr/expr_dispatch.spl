@@ -2035,6 +2035,16 @@ impl MirLowering:
         nil operand compares by word identity. A layout already on `chain`
         (a recursive class) is compared by identity. Returns a Bool local."""
         val layout_key = self.declared_struct_layout_key(struct_name)
+        # Fail closed on an ambiguous BARE layout: its field count and types
+        # would drive this comparison with the FIRST-registered same-named
+        # struct (p3_census_mir_classes_2026-11-13, class 2).
+        if not layout_key.contains("::") and self.struct_field_order_conflict_warned.contains(layout_key):
+            self.error_fatal("struct `==` on ambiguous bare layout '{layout_key}': declared with different field lists in several modules and no module-qualified provenance reached this value", None)
+            var fatal_bldr = self.builder
+            val fatal_result = fatal_bldr.new_temp(MirType.bool())
+            fatal_bldr.emit_const(fatal_result, MirConstValue.Bool(false), MirType.bool())
+            self.builder = fatal_bldr
+            return fatal_result
         val nil_word = self.lower_expr(HirExpr(kind: HirExprKind.NilLit,
             has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: Span.empty()), span: Span.empty()))
         var gb = self.builder
@@ -2060,6 +2070,7 @@ impl MirLowering:
 
         val field_names = self.struct_field_order.get(layout_key) ?? []
         val nested_names = self.struct_field_type_name.get(layout_key) ?? []
+        val nested_ownership_keys = self.struct_field_type_ownership_key.get(layout_key) ?? []
         val declared_field_types = self.struct_field_hir_type.get(layout_key) ?? []
         val repr_names = self.struct_field_repr_name.get(layout_key) ?? []
         var ab = self.builder
@@ -2071,13 +2082,21 @@ impl MirLowering:
             var nested_name = ""
             if fi < nested_names.len():
                 nested_name = nested_names[fi]
+            # Compare through the module-qualified layout the field declaration
+            # recorded when it is registered; the bare name stays only for the
+            # symbol lookup (same-named structs across modules).
+            var nested_layout = nested_name
+            if fi < nested_ownership_keys.len() and nested_ownership_keys[fi] != "":
+                val qualified_nested = self.declared_struct_layout_key(nested_ownership_keys[fi])
+                if self.struct_field_order.contains(qualified_nested):
+                    nested_layout = qualified_nested
             var nested_symbol = SymbolId(id: -1)
             var compare_nested = false
-            if nested_name != "" and not chain.contains(nested_name) and self.struct_field_order.contains(nested_name):
+            if nested_name != "" and not chain.contains(nested_layout) and self.struct_field_order.contains(nested_layout):
                 val nested_lookup = self.symbols.lookup_or_invalid(nested_name)
                 if nested_lookup.is_valid():
                     nested_symbol = self.canonical_mir_type_symbol(nested_lookup)
-                    compare_nested = self.struct_structural_eq_supported(nested_name)
+                    compare_nested = self.struct_structural_eq_supported(nested_layout)
             # 0 = runtime word, 1 = text, 2 = raw scalar, 3 = nested record
             var field_mode = 0
             var field_type = MirType.i64()
@@ -2106,10 +2125,10 @@ impl MirLowering:
                 var nested_chain: [text] = []
                 for seen in chain:
                     nested_chain.push(seen)
-                nested_chain.push(nested_name)
-                self.struct_value_syms[left_field.id] = nested_name
-                self.struct_value_syms[right_field.id] = nested_name
-                field_equal = self.lower_struct_structural_eq(left_field, right_field, nested_name, nested_chain)
+                nested_chain.push(nested_layout)
+                self.struct_value_syms[left_field.id] = nested_layout
+                self.struct_value_syms[right_field.id] = nested_layout
+                field_equal = self.lower_struct_structural_eq(left_field, right_field, nested_layout, nested_chain)
             elif field_mode == 1:
                 field_equal = self.emit_text_word_eq(left_field, right_field)
             elif field_mode == 2:
