@@ -465,6 +465,7 @@ Per-file src to obj is the DEFAULT (#4525 compiler, #4542 guide, scripts PR 2026
 
 Per-file pipeline flip readiness (P-F): unset `SIMPLE_FILE_WORKERS` takes `NATIVE_PER_FILE_PIPELINE_DEFAULT_V1` (`native_file_worker_v1.spl`, `"1"` since 2026-11-04: file-based src→obj is the DEFAULT); `SIMPLE_FILE_WORKERS=0` / `SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1` are per-invocation opt-outs. Never flip a shared default (config, script-global env, constant) to suit one build; pass the option at the call site with a why-comment. Stage 3 scripts pass a set value (0|1) through and hash it into the args receipt (unset = unchanged hash, resume-compatible; worker gets `per-file:fw=0|1`). Prove overlap with `sh scripts/check/check-per-file-overlap-receipt.shs <receipt dir>` (obj_done(A) < hir_start(B), first-object ms, objects/min). See `doc/07_guide/tooling/bootstrap_options.md`.
 Stage 3 run of the per-file lane is not yet proven.
+Exception (2026-11-13, owner request): Stage 3 reads `stage3_file_workers: 0` from tracked `config/bootstrap.sdn` (env `SIMPLE_FILE_WORKERS` overrides) until bug #8504 layers 2-3 are fixed; the resume's tree RSS cap now defaults to the admitted Stage 3 MemoryHigh (no private ceiling/cap pair) and its go-to-end follows `SIMPLE_BOOTSTRAP_GO_TO_END` (default 1). Table: `doc/07_guide/tooling/bootstrap_options.md` § "Repo-tracked bootstrap settings".
 
 Shard knobs, `.spab` (`SIMPLE_FRONTEND_SPAB`, opt-in), DigestV1 (unknown algo =
 miss) and the Lean cache gates: `doc/07_guide/tooling/bootstrap_options.md`.
