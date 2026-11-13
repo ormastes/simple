@@ -613,13 +613,15 @@ pub fn shard_cgroup_memory_max_paths(cgroup_path: text) -> [text]:
     var current = cgroup_path
     while current.len() > 1 and current.ends_with("/"):
         current = current.substring(0, current.byte_len() - 1)
-    while true:
+    var done = false
+    while not done:
         val prefix = if current == "/": "" else: current
         paths = paths.push("/sys/fs/cgroup" + prefix + "/memory.max")
         if current == "/":
-            break
-        val slash = current.rfind("/")
-        current = if slash <= 0: "/" else: current.substring(0, slash)
+            done = true
+        else:
+            val slash = current.rfind("/")
+            current = if slash <= 0: "/" else: current.substring(0, slash)
     paths
 
 # Smallest numeric memory.max (bytes) on the chain, in kB; 0 when every level
@@ -665,13 +667,15 @@ pub fn shard_cgroup_v1_limit_paths(cgroup_path: text) -> [text]:
     var current = cgroup_path
     while current.len() > 1 and current.ends_with("/"):
         current = current.substring(0, current.byte_len() - 1)
-    while true:
+    var done = false
+    while not done:
         val prefix = if current == "/": "" else: current
         paths = paths.push("/sys/fs/cgroup/memory" + prefix + "/memory.limit_in_bytes")
         if current == "/":
-            break
-        val slash = current.rfind("/")
-        current = if slash <= 0: "/" else: current.substring(0, slash)
+            done = true
+        else:
+            val slash = current.rfind("/")
+            current = if slash <= 0: "/" else: current.substring(0, slash)
     paths
 
 # Smallest numeric memory.limit_in_bytes (bytes) on the chain, in kB; values in
@@ -715,28 +719,36 @@ pub fn shard_cgroup_memory_max_kb() -> i64:
     val (table, _err, code) = process_run_timeout("cat", ["/proc/self/cgroup"], 2000)
     if code != 0:
         return 0
-    var best: i64 = 0
-    val v2_path = shard_cgroup_v2_path_from_proc(table)
-    if v2_path != "":
-        var fields: [text] = []
-        for candidate in shard_cgroup_memory_max_paths(v2_path):
-            val (out, _e, rc) = process_run_timeout("cat", [candidate], 2000)
-            if rc == 0:
-                fields = fields.push(out.trim())
-        best = shard_cgroup_memory_max_kb_from_fields(fields)
-    val v1_path = shard_cgroup_v1_memory_path_from_proc(table)
-    if v1_path != "":
-        var fields: [text] = []
-        for candidate in shard_cgroup_v1_limit_paths(v1_path):
-            val (out, _e, rc) = process_run_timeout("cat", [candidate], 2000)
-            if rc == 0:
-                fields = fields.push(out.trim())
-        val v1_kb = shard_cgroup_v1_limit_kb_from_fields(fields)
-        if v1_kb > 0 and (best == 0 or v1_kb < best):
-            best = v1_kb
-    best
+    var files: {text: text} = {}
+    for candidate in shard_cgroup_probe_paths_v1(table):
+        val (out, _e, rc) = process_run_timeout("cat", [candidate], 2000)
+        if rc == 0:
+            files[candidate] = out.trim()
+    shard_cgroup_memory_max_kb_from_probe_v1(table, files)
 @end
 @end
+
+# Every limit file the cgroup probe reads for a /proc/self/cgroup table: the v2
+# memory.max chain, then the v1 memory.limit_in_bytes chain.
+pub fn shard_cgroup_probe_paths_v1(table: text) -> [text]:
+    var paths = shard_cgroup_memory_max_paths(shard_cgroup_v2_path_from_proc(table))
+    for path in shard_cgroup_v1_limit_paths(shard_cgroup_v1_memory_path_from_proc(table)):
+        paths = paths.push(path)
+    paths
+
+# Pure cgroup decision: `files` maps each READABLE limit file to its trimmed
+# content (an unreadable level is absent and skipped). v2 and v1 bounds are both
+# read; when a hybrid table carries both, the tighter one wins. 0 = no cap.
+pub fn shard_cgroup_memory_max_kb_from_probe_v1(table: text, files: {text: text}) -> i64:
+    var v2_fields: [text] = []
+    for path in shard_cgroup_memory_max_paths(shard_cgroup_v2_path_from_proc(table)):
+        v2_fields = v2_fields.push(files[path] ?? "")
+    val best = shard_cgroup_memory_max_kb_from_fields(v2_fields)
+    var v1_fields: [text] = []
+    for path in shard_cgroup_v1_limit_paths(shard_cgroup_v1_memory_path_from_proc(table)):
+        v1_fields = v1_fields.push(files[path] ?? "")
+    val v1_kb = shard_cgroup_v1_limit_kb_from_fields(v1_fields)
+    if v1_kb > 0 and (best == 0 or v1_kb < best): v1_kb else: best
 
 # The enclosing cgroup cap may only tighten a declared tree budget: an
 # undeclared budget takes the cap, a declared one keeps the smaller of the two.
