@@ -801,7 +801,8 @@ pub(crate) fn exec_node(
             let plain = Value::Function {
                 name: f.name.clone(),
                 def: Arc::new(f.clone()),
-                captured_env: Arc::new(env.clone()), // Capture current scope
+                // Capture current scope, stamped with its lexical origin.
+                captured_env: Arc::new(crate::interpreter::interpreter_module::capture_env_with_origin(env)),
             };
             env.insert(f.name.clone(), plain.clone());
             // A user-defined (non-directive) decorator rebinds the name to

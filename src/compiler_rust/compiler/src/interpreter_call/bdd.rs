@@ -617,6 +617,8 @@ pub(crate) fn exec_block_value(
         }
         Value::BlockClosure { nodes, env: captured } => {
             let captured_clone = Env::clone(&captured);
+            let _closure_origin =
+                crate::interpreter::interpreter_module::ClosureOriginGuard::enter(Some(captured.closure_in_test()));
             exec_block_closure(&nodes, &captured_clone, functions, classes, enums, impl_methods)
         }
         // A pending example (`it "x"` with no body) legitimately has a Nil body.
