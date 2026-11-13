@@ -1,0 +1,71 @@
+# @cover src/app/cli/shard_worker_reap_v1.spl
+"""
+## Purpose and audience
+Purpose: the native-build shard pools (native_build_main.spl run_ledger_shards,
+spawn_parse_shards) kill a worker that outlived its deadline and then must
+decide whether it is really gone before sealing its ledger rows. On this
+host's runtimes the kill primitive itself reaps the child (seed: SIGKILL +
+wait, pid forgotten; hosted C: SIGKILL + reap after the 100 ms grace), so the
+pool's re-wait answers -1 ("no such child") for a worker that IS dead. Reading
+that -1 as "could not be reaped" BLOCKED the ledger for a worker that was
+already stopped. Parse shards also need one shared deadline: sequential
+per-child waits let the Nth child run up to N x timeout.
+Audience: engineers maintaining the native-build worker pools.
+"""
+
+use std.spec
+use app.cli.shard_worker_reap_v1.{shard_worker_kill_stopped_v1, parse_shard_reap_v1}
+use app.io.process_ops.{process_spawn_async, process_wait, process_kill, process_is_running}
+use std.io_runtime.{time_now_monotonic_ms}
+
+describe "shard worker kill confirmation":
+    it "accepts a worker the kill primitive itself reaped (wait says -1, liveness says gone)":
+        expect(shard_worker_kill_stopped_v1(true, -1, false)).to_equal(true)
+
+    it "still refuses a worker that is running or whose re-wait timed out":
+        expect(shard_worker_kill_stopped_v1(true, -2, true)).to_equal(false)
+        expect(shard_worker_kill_stopped_v1(true, -2, false)).to_equal(false)
+        expect(shard_worker_kill_stopped_v1(true, -1, true)).to_equal(false)
+        expect(shard_worker_kill_stopped_v1(true, 0, true)).to_equal(false)
+
+    it "refuses a -1 re-wait when the kill itself failed (absence of evidence)":
+        expect(shard_worker_kill_stopped_v1(false, -1, false)).to_equal(false)
+
+    it "accepts a real exit status once the process is gone":
+        expect(shard_worker_kill_stopped_v1(true, -137, false)).to_equal(true)
+        expect(shard_worker_kill_stopped_v1(false, 0, false)).to_equal(true)
+
+describe "timed-out shard worker on this host runtime":
+    it "is confirmed stopped after kill + re-wait (the pool's exact sequence)":
+        val pid = process_spawn_async("sh", ["-c", "sleep 30"])
+        expect(pid).to_be_greater_than(0)
+        expect(process_wait(pid, 200)).to_equal(-2)
+        val killed = process_kill(pid)
+        val reaped = process_wait(pid, 5000)
+        val running = process_is_running(pid)
+        print "[spec] kill={killed} rewait={reaped} running={running}"
+        expect(killed).to_equal(true)
+        expect(running).to_equal(false)
+        expect(shard_worker_kill_stopped_v1(killed, reaped, running)).to_equal(true)
+
+describe "parse shard reap deadline":
+    it "applies one shared deadline to every child instead of one per sequential wait":
+        # child 0 outlives any deadline; child 1 would finish at 2.4 s: inside
+        # a second sequential 1.5 s window (1.5-3.0 s) but past a shared one.
+        val slow = process_spawn_async("sh", ["-c", "sleep 10"])
+        val late = process_spawn_async("sh", ["-c", "sleep 2.4"])
+        expect(slow).to_be_greater_than(0)
+        expect(late).to_be_greater_than(0)
+        val started = time_now_monotonic_ms()
+        val failed = parse_shard_reap_v1([slow, late], [0, 1], 2, 1500)
+        val elapsed = time_now_monotonic_ms() - started
+        print "[spec] failed={failed} elapsed_ms={elapsed}"
+        expect(failed).to_equal([0, 1])
+        expect(process_is_running(slow)).to_equal(false)
+        expect(process_is_running(late)).to_equal(false)
+        expect(elapsed < 4000).to_equal(true)
+
+    it "reports a child that exits non-zero and keeps a passing one":
+        val bad = process_spawn_async("sh", ["-c", "exit 3"])
+        val good = process_spawn_async("sh", ["-c", "exit 0"])
+        expect(parse_shard_reap_v1([bad, good], [4, 5], 8, 10000)).to_equal([4])

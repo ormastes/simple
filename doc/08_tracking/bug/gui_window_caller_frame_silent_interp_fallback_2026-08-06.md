@@ -333,3 +333,7 @@ with different layouts ...`, loud in both modes) was not re-executed; the
 visibility item stays REFUTED and item 2 (lowering of the `gui_window` ->
 `gui_renderer` import context) stays LIVE in `src/compiler_rust`/`src/compiler`,
 outside this lane's write scope. Routed status unchanged.
+
+## Triage 2026-11-13 (Linux aarch64, lane uia) — row stays OPEN
+
+Not attempted. Static read at release/1.0.0 c8c3e7bc4f1, Linux aarch64 (DGX Spark GB10), Rust seed af717f53d6bce3e5: the live remainder is whole-module JIT demotion, current trigger the same-name different-layout pair JsError/JsBrowserError (common/js/engine/js_error.spl alias vs nogc_sync_mut/js/engine/js_error.spl classes) rejected in the seed at hir/lower/module_lowering/module_pass.rs qualify_flattened_structs. Fix is either a JS-engine rename across about 50 importers or a seed HIR change; both belong to the compiler/JS lanes, and the trigger has already moved once.
