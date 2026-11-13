@@ -121,3 +121,65 @@ retirement release, then runs the device acceptance test.
 ## Triage 2026-11-13 (Linux aarch64, lane uia) — row stays OPEN
 
 On release/1.0.0 c8c3e7bc4f1, Linux aarch64 (DGX Spark GB10), Rust seed af717f53d6bce3e5: vulkan_async_submission_contract_spec 3/3; vulkan_async_session_lifecycle_contract_spec 4/5 (red: keeps every async forward visible to the dual-lane ABI audit, a source-text contract). The runtime session ring exists (rt_vulkan_async_session_*), but its only tests use an injected device and vulkan_resident_2d.spl still submits with vulkan_counted_submit_and_wait_fence. Acceptance (live-device ring test: three enqueued before any wait, retire one, fourth without device idle) is unmet and was not written here.
+
+## 2026-11-13 lane uia2 — acceptance spec written; one seed defect fixed; row stays OPEN
+
+Host: Linux aarch64, DGX Spark. Device selected by ordinal 0 and printed by the
+spec: `NVIDIA GB10|vendor=000010de|device=00002e12|driver=912b4080|api=00404138`
+(real GPU, not llvmpipe). Base release/1.0.0 `dc14e46a737`.
+
+**Written:** `test/02_integration/gpu_lane/vulkan_async_ring_live_device_spec.spl`
+drives `VulkanAsyncSubmissionSession` on a real device. Acceptance clause to
+spec step:
+
+| clause | step |
+|---|---|
+| three commands enqueued before any host wait | "Enqueue three commands before any host wait", `in_flight == 3` |
+| all three caller fence handles resolvable | three distinct fences > 0; `poll` of each is PENDING or RETIRED |
+| ring-full applies bounded backpressure | fourth `acquire` is `WOULD_BLOCK`, `in_flight` stays 3 |
+| retire one | poll own fence to RETIRED, `retire == 1`, `published_sequence == 1` |
+| stale token blocks reuse | `poll`/`retire`/`command`/`submit` of the retired token are INVALID |
+| recycle, submit a fourth without device idle | new token, new fence, no reap/wait-idle call anywhere in the spec |
+| pending work is not released early | `retire` of the never-polled fourth is PENDING, `in_flight == 3` |
+| no command/fence/resource owner remains | `close == 1`; a direct `begin_compute` succeeds (it refuses while any quarantine entry exists); descriptors and the lane session release cleanly |
+| unknown-completion negative control | NOT covered: cannot be provoked on a healthy device; stays with the injected-device Rust tests |
+
+**It is red, and stays red on Linux.** Two independent causes, both measured:
+
+1. *Fixed here.* The interpreter has no handler for `rt_vulkan_async_session_*`;
+   it resolves them with `dlsym(RTLD_DEFAULT)` (`interpreter_extern/vulkan.rs`).
+   `src/compiler_rust/.cargo/config.toml` linked the x86_64 Linux and macOS
+   seeds with `--export-dynamic` but not aarch64 Linux. Same commit, config
+   file before/after: `nm -D` `rt_vulkan_*` 0 -> 132 (all symbols 0 -> 20527);
+   `test/01_unit/gpu/vulkan_async_session_backed_spec.spl` 2 examples, 2
+   failures (`... is not linked into this binary`) -> 2 examples, 0 failures.
+   Size 53.6 MB -> 65.8 MB; 20x `--version` 231-249 ms vs 252-253 ms.
+   `draw_ir_adv_spec` 69/70, `vulkan_lane_session_spec` 2/2,
+   `gui_content_renderer_spec` 5/5, `vulkan_async_submission_contract_spec` 3/3
+   are identical with and without the flag.
+2. *Not fixed; this is the blocker.* On Linux the interpreter runs Vulkan
+   compute on the dlopen bridge in `interpreter_extern/gpu.rs` (`VK_STATE`):
+   `rt_vulkan_init`, `begin_compute`, `bind_*`, `dispatch`, `submit_*` all have
+   bridge handlers and `EXTERN_DISPATCH` is consulted first. The ring exists
+   only in the runtime crate (`STATE`, `ASYNC_SESSIONS`), behind the crate's
+   `vulkan` feature, which `driver/Cargo.toml` enables for macOS only.
+   - default Linux seed: `rt_vulkan_async_session_supported() == 0`, `open`
+     returns handle 0.
+   - seed built with `--features vulkan`: `supported == 1`, `open` still
+     returns 0, because the device was initialised in the bridge and the
+     runtime `STATE` has none. Bridge handles (pipeline, descriptor, buffer)
+     and runtime ring commands are different handle spaces in any case.
+
+So the defect in this record is unchanged for the interpreter lane: there is no
+ring it can reach. Closing it needs one Vulkan owner for both lanes on Linux —
+either the bridge grows the ring, or the compute family is routed to the
+runtime crate when its `vulkan` feature is on. Both are owner decisions in
+`src/compiler_rust`, next to the compiled-runtime init work, and neither was
+attempted here.
+
+The spec is tagged `@tag:in-development` with this record as its tracker: it
+was written ahead of the implementation and has never been green. Running it by
+path reports the honest red verdict. `vulkan_resident_2d.spl` is untouched and
+still submits with the blocking call.
+
+Not verified: riscv64 Linux has the same missing flag in the same config file.
