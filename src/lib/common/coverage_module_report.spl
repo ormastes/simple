@@ -1,0 +1,357 @@
+# Per-module coverage figures from a SIMPLE_COVERAGE SDN artifact.
+#
+# The seed's line collector lists only lines that ran ("lines |file, line,
+# hit_count|"), so no percentage can be read from the artifact alone. This
+# module supplies the missing denominator from the module source, using the
+# statement kinds the collector records (interpreter coverage_helpers.rs
+# extract_node_location: let/const/static, assignment incl. compound, if,
+# while, for, loop, return, break, continue, match, with, context). `elif`,
+# `else`, case arms, bare expressions and continuation lines of a multi-line
+# statement are never recorded, so they are not counted.
+#
+# Line credit uses the same two gates as the test runner's report
+# (test_runner_single.spl _cov_report_for_file): the (file, line) pair must be
+# in the artifact AND the enclosing function must appear in `functions`.
+#
+# Two documented exclusions, both reported as counts so nothing is hidden:
+#  * toplevel_excluded: module-level declarations (indent 0). The seed
+#    flattens an imported module's top level into the entry program and files
+#    those hits under the entry spec, so they can never be credited to their
+#    module (RESIDUAL note in test_runner_single.spl). Counting them would cap
+#    a const-heavy module below 90% for a collector defect, not a test gap.
+#  * inactive_platform: lines inside an `@when`/`@elif`/`@else` branch that is
+#    not selected for (host_os, host_arch). They stay IN the denominator --
+#    platform branches count -- and the count tells the lane how much of the
+#    module this host cannot execute.
+#
+# Decisions and conditions come from the runtime store, which registers every
+# site statically at module load (coverage_sites.rs), so never-run sites are in
+# the denominator with 0/0 counts.
+use std.common.coverage_sdn.{parse_coverage_sdn, ParsedCoverage}
+
+pub struct CoverageModuleReport:
+    path: text
+    recorded: bool
+    exec_lines: i64
+    hit_lines: i64
+    toplevel_excluded: i64
+    inactive_platform_lines: i64
+    decisions: i64
+    decisions_both: i64
+    outcomes_hit: i64
+    conditions: i64
+    conditions_both: i64
+
+struct _CovExecLine:
+    line: i64
+    fn_name: text
+    inactive: bool
+
+struct _CovScan:
+    lines: [_CovExecLine]
+    toplevel: i64
+
+# ----------------------------------------------------------------------------
+# Source scan
+# ----------------------------------------------------------------------------
+
+fn _cov_is_indented(raw: text) -> bool:
+    raw.starts_with(" ") or raw.starts_with("\t")
+
+# Bracket depth change of one line, ignoring string literals and comments.
+fn _cov_depth_delta(t: text) -> i64:
+    var depth = 0
+    var i = 0
+    var quote = 0
+    while i < t.byte_len():
+        val b = t.byte_at(i)
+        if quote != 0:
+            if b == 92:
+                i = i + 1
+            elif b == quote:
+                quote = 0
+        elif b == 34 or b == 39:
+            quote = b
+        elif b == 35:
+            return depth
+        elif b == 40 or b == 91 or b == 123:
+            depth = depth + 1
+        elif b == 41 or b == 93 or b == 125:
+            depth = depth - 1
+        i = i + 1
+    depth
+
+fn _cov_strip_modifiers(t: text) -> text:
+    var h = t
+    var stripping = true
+    while stripping:
+        stripping = false
+        if h.starts_with("pub "):
+            h = h.substring(4)
+            stripping = true
+        elif h.starts_with("priv "):
+            h = h.substring(5)
+            stripping = true
+        elif h.starts_with("static "):
+            h = h.substring(7)
+            stripping = true
+    h
+
+fn _cov_fn_name(header: text) -> text:
+    var name = if header.starts_with("gen "): header.substring(4) else: header.substring(3)
+    for delim in ["(", ":", " ", "<"]:
+        val k = name.index_of(delim)
+        if k >= 0:
+            name = name.substring(0, k)
+    name
+
+fn _cov_is_compound_assign(t: text) -> bool:
+    t.contains(" += ") or t.contains(" -= ") or t.contains(" *= ") or t.contains(" /= ") or
+        t.contains(" %= ") or t.contains(" |= ") or t.contains(" &= ") or t.contains(" ^= ") or
+        t.contains(" <<= ") or t.contains(" >>= ")
+
+# Statement kinds the collector records; `elif` first so `elif val x = ..`
+# is not re-admitted by the assignment fallback.
+fn _cov_is_recordable(t: text) -> bool:
+    if t.starts_with("elif ") or t.starts_with("else"):
+        return false
+    if t.starts_with("val ") or t.starts_with("var ") or t.starts_with("const ") or
+            t.starts_with("if ") or t.starts_with("while ") or t.starts_with("for ") or
+            t == "loop:" or t.starts_with("loop ") or t == "return" or t.starts_with("return ") or
+            t == "break" or t == "continue" or t.starts_with("match ") or t.starts_with("with "):
+        return true
+    if _cov_is_compound_assign(t):
+        return true
+    t.contains(" = ") and not t.contains(" == ")
+
+# Tri-state platform condition: 1 selected, 0 not selected, 2 unknown.
+# Grammar seen in src/: `key="v"` terms joined by `or` (keys os, arch, feature).
+fn _cov_when_state(cond: text, host_os: text, host_arch: text) -> i64:
+    var unknown = false
+    for term in cond.split(" or "):
+        val eq = term.index_of("=")
+        if eq < 0:
+            unknown = true
+            continue
+        val key = term.substring(0, eq).trim()
+        val value = term.substring(eq + 1).trim().replace("\"", "")
+        if key == "os":
+            if value == host_os: return 1
+        elif key == "arch":
+            if value == host_arch: return 1
+        else:
+            unknown = true
+    if unknown: 2 else: 0
+
+fn _cov_when_cond(t: text) -> text:
+    val open = t.index_of("(")
+    val close = t.last_index_of(")")
+    if open < 0 or close <= open:
+        return ""
+    t.substring(open + 1, close)
+
+struct _CovFrames:
+    taken: [bool]
+    state: [i64]
+
+# Applies one `@when`/`@elif`/`@else`/`@end` line to the frame stacks and
+# returns the new stacks; other `@` lines (decorators) and stray markers with
+# no open frame leave them unchanged.
+fn _cov_directive(t: text, host_os: text, host_arch: text, frames: _CovFrames) -> _CovFrames:
+    var taken = frames.taken
+    var state = frames.state
+    if t.starts_with("@when("):
+        val st = _cov_when_state(_cov_when_cond(t), host_os, host_arch)
+        taken.push(st != 0)
+        state.push(st)
+        return _CovFrames(taken: taken, state: state)
+    if state.len() == 0:
+        return frames
+    val k = state.len() - 1
+    if t.starts_with("@elif("):
+        if taken[k]:
+            state[k] = 0
+        else:
+            val st = _cov_when_state(_cov_when_cond(t), host_os, host_arch)
+            state[k] = st
+            taken[k] = st != 0
+    elif t == "@else:" or t == "@else":
+        state[k] = if taken[k]: 0 else: 1
+        taken[k] = true
+    elif t == "@end":
+        state = state[0:k]
+        taken = taken[0:k]
+    _CovFrames(taken: taken, state: state)
+
+fn _cov_scan(source: text, host_os: text, host_arch: text) -> _CovScan:
+    var out: [_CovExecLine] = []
+    var toplevel = 0
+    # @when frames: [taken_any, current_state] per level.
+    var frames = _CovFrames(taken: [], state: [])
+    var current_fn = ""
+    var in_doc = false
+    var depth = 0
+    var line_no = 0
+    for raw in source.split("\n"):
+        line_no = line_no + 1
+        val t = raw.trim()
+        if in_doc:
+            if t.contains("\"\"\""):
+                in_doc = false
+            continue
+        if t == "" or t.starts_with("#"):
+            continue
+        if t.starts_with("\"\"\""):
+            if not (t.byte_len() >= 6 and t.substring(3).contains("\"\"\"")):
+                in_doc = true
+            continue
+        val continuation = depth > 0
+        if not continuation and t.starts_with("@"):
+            frames = _cov_directive(t, host_os, host_arch, frames)
+            continue
+        depth = depth + _cov_depth_delta(t)
+        if depth < 0:
+            depth = 0
+        if continuation:
+            continue
+        val h = _cov_strip_modifiers(t)
+        if h.starts_with("fn ") or h.starts_with("me ") or h.starts_with("gen "):
+            current_fn = _cov_fn_name(h)
+            continue
+        if not _cov_is_recordable(t):
+            continue
+        if not _cov_is_indented(raw):
+            toplevel = toplevel + 1
+            continue
+        var inactive = false
+        for st in frames.state:
+            if st == 0:
+                inactive = true
+        out.push(_CovExecLine(line: line_no, fn_name: current_fn, inactive: inactive))
+    _CovScan(lines: out, toplevel: toplevel)
+
+# Executable (denominator) line numbers of `source`, ascending.
+pub fn coverage_executable_lines(source: text, host_os: text, host_arch: text) -> [i64]:
+    var nums: [i64] = []
+    for l in _cov_scan(source, host_os, host_arch).lines:
+        nums.push(l.line)
+    nums
+
+# ----------------------------------------------------------------------------
+# Artifact matching
+# ----------------------------------------------------------------------------
+
+fn _cov_norm(p: text) -> text:
+    var s = p.trim()
+    while s.starts_with("./"):
+        s = s.substring(2)
+    s
+
+# Recorded path denoting `path`: exact, or a `/`-boundary suffix match either
+# way (absolute artifact rows vs repo-relative module paths).
+pub fn coverage_path_matches(recorded: text, path: text) -> bool:
+    val r = _cov_norm(recorded)
+    val p = _cov_norm(path)
+    r == p or r.ends_with("/" + p) or p.ends_with("/" + r)
+
+fn _cov_split(row: text) -> [text]:
+    var parts: [text] = []
+    for piece in row.split(","):
+        parts.push(piece.trim())
+    parts
+
+# (decision_id|condition_id) -> both outcomes seen, from the raw SDN; the
+# shared parser does not model the conditions section.
+fn _cov_conditions(sdn: text, path: text) -> [bool]:
+    var seen_true: {text: bool} = {}
+    var seen_false: {text: bool} = {}
+    var keys: [text] = []
+    var in_section = false
+    for raw in sdn.split("\n"):
+        if raw.starts_with("    ") or raw.starts_with("\t"):
+            if in_section:
+                val c = _cov_split(raw)
+                if c.len() >= 7 and coverage_path_matches(c[2], path):
+                    val key = c[0] + "|" + c[1]
+                    if not seen_true.contains_key(key):
+                        seen_true[key] = false
+                        seen_false[key] = false
+                        keys.push(key)
+                    if (c[5].to_i64() ?? 0) > 0: seen_true[key] = true
+                    if (c[6].to_i64() ?? 0) > 0: seen_false[key] = true
+        else:
+            in_section = raw.trim().starts_with("conditions ")
+    var out: [bool] = []
+    for k in keys:
+        out.push(seen_true[k] and seen_false[k])
+    out
+
+# ----------------------------------------------------------------------------
+# Report
+# ----------------------------------------------------------------------------
+
+pub fn coverage_module_report(path: text, source: text, sdn: text, host_os: text,
+        host_arch: text) -> CoverageModuleReport:
+    val cov: ParsedCoverage = parse_coverage_sdn(sdn)
+    var hits: {text: bool} = {}
+    var recorded = false
+    for row in cov.lines:
+        if row.hit_count > 0 and coverage_path_matches(row.file, path):
+            hits["{row.line}"] = true
+            recorded = true
+    var called: {text: bool} = {}
+    for f in cov.functions:
+        if f.call_count > 0:
+            called[f.name] = true
+    val scan = _cov_scan(source, host_os, host_arch)
+    var hit_lines = 0
+    var inactive = 0
+    for l in scan.lines:
+        if l.inactive:
+            inactive = inactive + 1
+        if hits.contains_key("{l.line}") and (l.fn_name == "" or called.contains_key(l.fn_name)):
+            hit_lines = hit_lines + 1
+    # Decisions: dedupe by id (the runtime block can repeat a row).
+    var dec_both: {text: bool} = {}
+    var dec_true: {text: bool} = {}
+    var dec_false: {text: bool} = {}
+    var dec_ids: [text] = []
+    for d in cov.decisions:
+        if coverage_path_matches(d.file, path):
+            recorded = true
+            if not dec_both.contains_key(d.id):
+                dec_ids.push(d.id)
+                dec_both[d.id] = false
+                dec_true[d.id] = false
+                dec_false[d.id] = false
+            if d.true_count > 0: dec_true[d.id] = true
+            if d.false_count > 0: dec_false[d.id] = true
+    var both = 0
+    var outcomes = 0
+    for id in dec_ids:
+        if dec_true[id]: outcomes = outcomes + 1
+        if dec_false[id]: outcomes = outcomes + 1
+        if dec_true[id] and dec_false[id]: both = both + 1
+    val conds = _cov_conditions(sdn, path)
+    var conds_both = 0
+    for c in conds:
+        if c: conds_both = conds_both + 1
+    CoverageModuleReport(path: path, recorded: recorded, exec_lines: scan.lines.len(),
+        hit_lines: hit_lines, toplevel_excluded: scan.toplevel, inactive_platform_lines: inactive,
+        decisions: dec_ids.len(), decisions_both: both, outcomes_hit: outcomes,
+        conditions: conds.len(), conditions_both: conds_both)
+
+# Percentage with one decimal, truncated (never rounded up across a gate).
+pub fn coverage_pct_text(hit: i64, total: i64) -> text:
+    if total <= 0:
+        return "0.0"
+    val tenths = (hit * 1000) / total
+    "{tenths / 10}.{tenths % 10}"
+
+pub fn coverage_module_report_text(r: CoverageModuleReport) -> text:
+    val rec = if r.recorded: "yes" else: "no"
+    "coverage-module: {r.path} lines={coverage_pct_text(r.hit_lines, r.exec_lines)}% ({r.hit_lines}/{r.exec_lines}) " +
+        "decisions={coverage_pct_text(r.decisions_both, r.decisions)}% ({r.decisions_both}/{r.decisions} both outcomes) " +
+        "outcomes={coverage_pct_text(r.outcomes_hit, r.decisions * 2)}% ({r.outcomes_hit}/{r.decisions * 2}) " +
+        "conditions={coverage_pct_text(r.conditions_both, r.conditions)}% ({r.conditions_both}/{r.conditions}) " +
+        "toplevel_excluded={r.toplevel_excluded} inactive_platform={r.inactive_platform_lines} recorded={rec}"

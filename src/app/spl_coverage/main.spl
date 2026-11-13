@@ -11,6 +11,8 @@ use std.log.{error}
 use std.sffi.coverage.{coverage_dump_sdn, coverage_enabled, coverage_clear}
 use std.fs.{file_exists, read_to_string, file_write_text}
 use std.common.coverage_sdn.{parse_coverage_sdn, merge_many, render_coverage_sdn, ParsedCoverage}
+use std.common.coverage_module_report.{coverage_module_report, coverage_module_report_text}
+use std.platform.{host_os, host_arch}
 
 fn print_help():
     print "Usage: simple spl-coverage [command]"
@@ -27,6 +29,12 @@ fn print_help():
     print "            combined report (per-line/function/decision hit counts"
     print "            summed across runs, not overwritten)."
     print "            Example: simple spl-coverage rollup --file a.sdn --file b.sdn"
+    print ""
+    print "  module    Per-module line % (executable-line denominator), decision,"
+    print "            outcome and condition coverage from one or more artifacts."
+    print "            Example: simple spl-coverage module --file a.sdn src/app/x.spl"
+    print "            --os/--arch override the host used for @when branches;"
+    print "            --min <pct> exits 1 when any module's line or decision % is below it."
     print ""
     print "Options:"
     print "  --file <path>   Read a persisted SDN coverage artifact from a prior"
@@ -211,6 +219,68 @@ fn cmd_rollup(args: [text]) -> i64:
     print rendered
     return 0
 
+# Positional (non-flag) arguments after the command word; values of the
+# value-taking flags are skipped.
+fn _module_paths(args: [text]) -> [text]:
+    var paths: [text] = []
+    var i = 1
+    while i < args.len():
+        val a = args[i]
+        if a == "--file" or a == "--os" or a == "--arch" or a == "--min":
+            i = i + 2
+            continue
+        if not a.starts_with("-"):
+            paths.push(a)
+        i = i + 1
+    paths
+
+fn cmd_module(args: [text]) -> i64:
+    val files = get_all_args(args, "--file")
+    val paths = _module_paths(args)
+    if files.len() == 0 or paths.len() == 0:
+        print "Error: module requires at least one --file <artifact.sdn> and one <module.spl>"
+        return 1
+    var sdn = ""
+    for f in files:
+        val loaded = _load_coverage_file(f)
+        if not loaded.ok:
+            print "Error: {loaded.error}"
+            return 1
+        sdn = sdn + loaded.sdn + "\n"
+    val os = get_arg(args, "--os", host_os())
+    val arch = get_arg(args, "--arch", host_arch())
+    val min_text = get_arg(args, "--min", "")
+    var min_pct = -1
+    if min_text != "":
+        var digits = true
+        for b in min_text.bytes():
+            if b < 48 or b > 57:
+                digits = false
+        if digits:
+            min_pct = min_text.to_i64() ?? -1
+    if min_text != "" and min_pct < 0:
+        print "Error: --min needs a whole percentage, got: {min_text}"
+        return 1
+    var status = 0
+    for p in paths:
+        if not file_exists(p):
+            print "Error: module source not found: {p}"
+            return 1
+        val src = match read_to_string(p):
+            case Some(content):
+                content
+            case None:
+                print "Error: could not read module source: {p}"
+                return 1
+        val r = coverage_module_report(p, src, sdn, os, arch)
+        print coverage_module_report_text(r)
+        if min_pct >= 0:
+            val line_ok = r.exec_lines > 0 and r.hit_lines * 100 >= min_pct * r.exec_lines
+            val dec_ok = r.decisions == 0 or r.decisions_both * 100 >= min_pct * r.decisions
+            if not r.recorded or not line_ok or not dec_ok:
+                status = 1
+    status
+
 fn main() -> i64:
     val args = get_cli_args()
     val log_opts = parse_log_options(args)
@@ -273,6 +343,8 @@ fn main() -> i64:
                 if progress_line != "":
                     print progress_line
             return cmd_rollup(filtered_args)
+        case "module":
+            return cmd_module(filtered_args)
         case "--help" | "-h" | "help":
             print_help()
             return 0

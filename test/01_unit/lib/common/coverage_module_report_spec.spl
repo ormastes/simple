@@ -1,0 +1,144 @@
+# Per-module coverage report: executable-line denominator, line %, and
+# decision coverage computed from a SIMPLE_COVERAGE SDN artifact.
+#
+# The seed's collector lists only lines that ran, so a percentage needs a
+# denominator from the source. test/fixtures/coverage/covreport_fixture.spl has
+# hand-counted figures, and the SDN below is the real collector output for it
+# (seed run of a spec calling covrep_classify(5), covrep_classify(0) and
+# covrep_sum([1, 2]); covrep_never is never called):
+#   executable lines 4,5,6,8,12,13,14,15,18,19,20,21 = 12
+#   covered          4,5,6,12,13,14,15              = 7   -> 58.3%
+#   decisions        line 5 (1/1), line 7 elif (0/1), line 19 (0/0) = 3
+#   both outcomes    1 of 3; outcomes hit 3 of 6
+#   line 19 "doubled > 10 and n > 0" has 2 conditions, never evaluated.
+use std.common.coverage_module_report.{coverage_executable_lines, coverage_module_report,
+    coverage_module_report_text, coverage_pct_text, CoverageModuleReport}
+
+extern fn rt_file_read_text(path: text) -> text?
+
+val FIXTURE = "test/fixtures/coverage/covreport_fixture.spl"
+val ABS = "/repo/test/fixtures/coverage/covreport_fixture.spl"
+
+fn fixture_sdn() -> text:
+    "# Coverage Report\nversion: 1.0\n\nlines |file, line, hit_count|\n" +
+    "    {ABS}, 4, 1\n    {ABS}, 5, 1\n    {ABS}, 6, 1\n" +
+    "    {ABS}, 12, 1\n    {ABS}, 13, 1\n    {ABS}, 14, 1\n    {ABS}, 15, 1\n" +
+    "    /repo/test/fixtures/coverage/other_covreport_fixture.spl, 8, 1\n\n" +
+    "functions |name, call_count|\n    covrep_classify, 2\n    covrep_sum, 1\n\n" +
+    "summary:\n    total_files: 2\n\n" +
+    "# Runtime decision/condition coverage\n# Coverage Report\nversion: 1.0\n\n" +
+    "decisions |id, file, line, column, true_count, false_count|\n" +
+    "    4238726925, {ABS}, 7, 5, 0, 1\n" +
+    "    3719163706, {ABS}, 5, 5, 1, 1\n" +
+    "    3392249526, {ABS}, 19, 5, 0, 0\n" +
+    "    3392249526, {ABS}, 19, 5, 0, 0\n\n" +
+    "conditions |decision_id, condition_id, file, line, column, true_count, false_count|\n" +
+    "    3392249526, 1, {ABS}, 19, 5, 0, 0\n" +
+    "    3392249526, 0, {ABS}, 19, 5, 0, 0\n"
+
+fn fixture_source() -> text:
+    rt_file_read_text(FIXTURE) ?? ""
+
+fn fixture_report() -> CoverageModuleReport:
+    coverage_module_report(FIXTURE, fixture_source(), fixture_sdn(), "linux", "riscv64")
+
+describe "coverage module report":
+    it "counts exactly the statement lines the collector can record":
+        val lines = coverage_executable_lines(fixture_source(), "linux", "riscv64")
+        expect(lines.len()).to_equal(12)
+        expect(lines[0]).to_equal(4)
+        expect(lines[3]).to_equal(8)
+        expect(lines[11]).to_equal(21)
+
+    it "reports line hits over the executable total with a percentage":
+        val r = fixture_report()
+        expect(r.recorded).to_equal(true)
+        expect(r.exec_lines).to_equal(12)
+        expect(r.hit_lines).to_equal(7)
+        expect(coverage_pct_text(r.hit_lines, r.exec_lines)).to_equal("58.3")
+
+    it "reports decision coverage with never-run decisions in the denominator":
+        val r = fixture_report()
+        expect(r.decisions).to_equal(3)
+        expect(r.decisions_both).to_equal(1)
+        expect(r.outcomes_hit).to_equal(3)
+        expect(r.conditions).to_equal(2)
+        expect(r.conditions_both).to_equal(0)
+
+    it "renders one greppable line per module":
+        val text_out = coverage_module_report_text(fixture_report())
+        expect(text_out).to_equal("coverage-module: test/fixtures/coverage/covreport_fixture.spl lines=58.3% (7/12) decisions=33.3% (1/3 both outcomes) outcomes=50.0% (3/6) conditions=0.0% (0/2) toplevel_excluded=0 inactive_platform=0 recorded=yes")
+
+    it "does not credit a hit line inside a function the run never called":
+        val sdn = "lines |file, line, hit_count|\n    {ABS}, 18, 1\n    {ABS}, 4, 1\n\nfunctions |name, call_count|\n    covrep_classify, 1\n"
+        val r = coverage_module_report(FIXTURE, fixture_source(), sdn, "linux", "riscv64")
+        expect(r.hit_lines).to_equal(1)
+
+    it "never matches a different file that merely shares a suffix":
+        val sdn = "lines |file, line, hit_count|\n    /repo/x_covreport_fixture.spl, 4, 1\n\nfunctions |name, call_count|\n    covrep_classify, 1\n"
+        val r = coverage_module_report(FIXTURE, fixture_source(), sdn, "linux", "riscv64")
+        expect(r.recorded).to_equal(false)
+        expect(r.hit_lines).to_equal(0)
+        expect(r.exec_lines).to_equal(12)
+        expect(coverage_module_report_text(r)).to_contain("recorded=no")
+
+    it "skips continuation lines of a multi-line call and docstrings":
+        val src = "fn f(a: i64) -> i64:\n    \"\"\"doc x = 1\n    y = 2\"\"\"\n    val v = g(\n        a = 1,\n        \"(\")\n    return v\n"
+        val lines = coverage_executable_lines(src, "linux", "riscv64")
+        expect(lines.len()).to_equal(2)
+        expect(lines[0]).to_equal(4)
+        expect(lines[1]).to_equal(7)
+
+    it "excludes module-level declarations and reports how many it excluded":
+        val src = "pub const K: i64 = 3\nval G = 1\nfn f() -> i64:\n    val a = K\n    return a\n"
+        expect(coverage_executable_lines(src, "linux", "riscv64").len()).to_equal(2)
+        val r = coverage_module_report("m.spl", src, "", "linux", "riscv64")
+        expect(r.toplevel_excluded).to_equal(2)
+
+    it "keeps lines of inactive @when platform blocks in the denominator and counts them":
+        val src = "@when(os=\"windows\"):\nfn w() -> i64:\n    return 1\n@elif(arch=\"riscv64\"):\nfn w() -> i64:\n    return 2\n@else:\nfn w() -> i64:\n    return 3\n@end\n"
+        val r = coverage_module_report("m.spl", src, "", "linux", "riscv64")
+        expect(r.exec_lines).to_equal(3)
+        expect(r.inactive_platform_lines).to_equal(2)
+        val on_windows = coverage_module_report("m.spl", src, "", "windows", "x86_64")
+        expect(on_windows.inactive_platform_lines).to_equal(2)
+        val nested = "@when(os=\"macos\" or feature=\"macho\"):\nfn m() -> i64:\n    return 1\n@end\n"
+        expect(coverage_module_report("m.spl", nested, "", "linux", "x86_64").inactive_platform_lines).to_equal(0)
+        expect(coverage_module_report("m.spl", nested, "", "macos", "aarch64").inactive_platform_lines).to_equal(0)
+
+    it "formats percentages by truncation so 89.99 never reads as 90.0":
+        expect(coverage_pct_text(8999, 10000)).to_equal("89.9")
+        expect(coverage_pct_text(0, 0)).to_equal("0.0")
+        expect(coverage_pct_text(3, 3)).to_equal("100.0")
+
+    it "reads every function-header form and skips comments, escapes and stray brackets":
+        val src = "priv fn a() -> i64:\n    val s = \"q\\\"(\" # (\n    return 1\nstatic fn b<T>(x: T) -> i64:\n    return 2\ngen c():\n    val z = 1)\n    return 3\nme d:\n    val y = (1 +\n        2)\n    return y\n"
+        val lines = coverage_executable_lines(src, "linux", "x86_64")
+        expect(lines.len()).to_equal(7)
+        val sdn = "lines |file, line, hit_count|\n    m.spl, 2, 1\n    m.spl, 5, 1\n    m.spl, 7, 1\n    m.spl, 10, 1\n\nfunctions |name, call_count|\n    a, 1\n    b, 1\n    c, 1\n    d, 0\n"
+        expect(coverage_module_report("./m.spl", src, sdn, "linux", "x86_64").hit_lines).to_equal(3)
+
+    it "handles multi-line and one-line docstrings":
+        val src = "fn f() -> i64:\n    \"\"\"one\n    val no = 1\n    two\"\"\"\n    \"\"\"single\"\"\"\n    return 1\n"
+        val lines = coverage_executable_lines(src, "linux", "x86_64")
+        expect(lines.len()).to_equal(1)
+        expect(lines[0]).to_equal(6)
+
+    it "treats unknown or malformed @when conditions as selected and ignores stray markers":
+        val src = "@end\n@else:\n@elif(os=\"linux\"):\n@when(debug):\nfn a() -> i64:\n    return 1\n@end\n@when(os=\"windows\"\nfn b() -> i64:\n    return 2\n@end\n@when(arch=\"aarch64\"):\nfn c() -> i64:\n    return 3\n@elif(os=\"windows\"):\nfn c() -> i64:\n    return 4\n@else:\nfn c() -> i64:\n    return 5\n@end\n"
+        val r = coverage_module_report("m.spl", src, "", "linux", "x86_64")
+        expect(r.exec_lines).to_equal(5)
+        expect(r.inactive_platform_lines).to_equal(2)
+
+    it "unions repeated decision and condition rows and ignores other files":
+        val sdn = "decisions |id, file, line, column, true_count, false_count|\n" +
+            "    7, m.spl, 2, 5, 1, 0\n    7, m.spl, 2, 5, 0, 2\n    8, other.spl, 2, 5, 1, 1\n\n" +
+            "conditions |decision_id, condition_id, file, line, column, true_count, false_count|\n" +
+            "    7, 0, m.spl, 2, 5, 1, 0\n    7, 0, m.spl, 2, 5, 0, 1\n    7, 1, m.spl, 2, 5, 0, 0\n    8, 0, other.spl, 2, 5, 1, 1\n"
+        val r = coverage_module_report("m.spl", "fn f(a: bool, b: bool) -> i64:\n    if a and b:\n        return 1\n    return 0\n", sdn, "linux", "x86_64")
+        expect(r.recorded).to_equal(true)
+        expect(r.decisions).to_equal(1)
+        expect(r.decisions_both).to_equal(1)
+        expect(r.outcomes_hit).to_equal(2)
+        expect(r.conditions).to_equal(2)
+        expect(r.conditions_both).to_equal(1)
