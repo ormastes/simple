@@ -90,3 +90,10 @@ cd <worktree>
   resolved (or the seed rebuilt) before any of this is measurable.
 - `spl_doctest_parse_unexpected_token_class_2026-08-24.md` — the 13 doc defects,
   now repaired; 10 of them still fail, most on THIS defect.
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+OPEN; composite doctest mode fails on wildcard re-export while standalone import works - owner: spl-doctest/import-flattening lane (seed import/flattening divergence family).

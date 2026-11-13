@@ -109,3 +109,23 @@ Seed `run` results: tls_record_capability 3/3 pass (fn exists in http_server/typ
 ## 2026-11-04 note
 
 Seed interpreter: a declared extern fn used as a first-class value (e.g. `rt_pool_submit` passed by name in `multicore_green_try_spawn`) now resolves to a callable. `multicore_green_try_spawn_contract_spec` 5/6 -> 6/6. Regression: `test/01_unit/compiler/interpreter/extern_fn_as_value_spec.spl`.
+
+
+## Triage 2026-11-13 (lane p3-async-20261113, base 80a8116e5e2) — all five named specs green on this base; ArcBox item remains
+
+Fresh re-verification with the tracked seed (`bin/simple.exe`, `--timeout 300`)
+on this Windows base — all five specs named in this record now PASS:
+
+- `concurrent/multicore_green_try_spawn_contract_spec.spl` — 6/6
+- `http_server/tls_record_capability_spec.spl` — 3/3
+- `io/driver_write_completion_spec.spl` — 5/5
+- `quic/quic_udp_initial_spec.spl` — 9/9
+- `sosix/posix_spec.spl` — 3/3 (the Windows `rt_file_open`/`rt_file_close`
+  interpreter gap from the 2026-11-04 note is resolved in the current seed:
+  the spec now opens fd=3 and passes position pread/pwrite assertions)
+
+Remaining open item: the ArcBox atomic weak-acquisition provider follow-up
+(2026-10-21) stands unchanged — it requires a native/interpreter provider
+pair with a verified layout/allocator contract (`try_inc_strong` CAS with
+acquire ordering, single-owner handoff, implicit-weak lifetime), i.e.
+`src/compiler_rust/**` work outside a pure-Simple lane. No source change.

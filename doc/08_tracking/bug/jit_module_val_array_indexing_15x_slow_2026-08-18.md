@@ -215,3 +215,7 @@ verification honestly rather than over-claiming one.
 
 Not carried by seedfix A (fa6939eb4b9e is JIT tuple unbox; unrelated to
 module-val global typing).
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with lane ne12: FIXED at tip — shipped bench at parity (~1.5 ms vs filed 47,390 us) with correct checksums. No independent re-measurement in this lane.

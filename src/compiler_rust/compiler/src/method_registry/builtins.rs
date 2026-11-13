@@ -249,7 +249,7 @@ pub static STRING_METHODS: &[MethodInfo] = &[
     },
     MethodInfo {
         name: "slice",
-        runtime_fn: RuntimeFn::Simple("rt_slice"),
+        runtime_fn: RuntimeFn::Simple("rt_slice_text_bytes"),
         param_count: 2,
         is_mutating: false,
         description: "returns a substring",

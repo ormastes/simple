@@ -100,3 +100,25 @@ unsafe block at all. The failure mode here is that it never becomes one.
 - `scripts/check/check-predicate-parser-native-build.shs` (same defect class)
 - `doc/08_tracking/bug/stage2_native_build_has_paren_idx_undeclared_global_2026-08-09.md`
 
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt)
+
+Verdict: **FIXED at tip.** The comp9 lane's 2026-11-11 fix
+(`parse_unsafe_block_expr_if_present` in value position, caps carried into HIR)
+covers the expression-position form this record filed open. Re-verified on the
+tracked seed (@ 46fe8f6b6def): `val h = unsafe(capabilities: [ffi]): 7` parses
+to EXPR_UNSAFE_BLOCK (tag 56) in the pure-Simple frontend, and the three pinning
+specs pass — `unsafe_call_argument_parser_spec` 8/8,
+`unsafe_block_expression_spec` 5/5, `unsafe_block_binding_type_spec` 3/3.
+Residual from the comp9 addendum stands: native/JIT zero-cost evidence remains
+lane-gated. Status header should read FIXED.
+
+
+---
+## 2026-11-13 triage — lane live-p3-l6 (Windows host, seed bin/simple.exe, base f790f7f266e)
+
+Independently verified FIXED at tip: `val h = unsafe(capabilities: [ffi]): 7`
+parses and all three pinning specs pass on the seed —
+`unsafe_call_argument_parser_spec` 8/8, `unsafe_block_expression_spec` 5/5,
+`unsafe_block_binding_type_spec` 3/3. The status header should read FIXED.
+No in-lane change.

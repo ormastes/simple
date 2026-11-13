@@ -61,3 +61,25 @@ line 230 was verified to map) must be audited first.
   assets/fonts/google-fonts paths and Windows C:/Windows/Faces before
   touching the loader. Serif candidates also lack the
   browser_platform_sans_faces()-style Windows hook that sans has.
+
+
+## 2026-11-13 triage (lane p3-io, work/p3-io-20261113)
+
+Still OPEN — architectural, unchanged. This lane's scripts_reorg_left repoints
+(test/specs reading and writing through the SAME layer, new `scripts/{check,os,
+qemu,rtl,fpga,setup}/` paths verified on disk before edit) are consistent with
+this record's interim rule ("specs must read and write through the same layer")
+but do not attempt the boundary totalisation. The merged-pattern work here used
+repo-relative fixture paths throughout, avoiding `/tmp` duality. No code change
+in this closure; the proper fix remains routing every path-taking rt_file call
+through `host_path_native` and adopting ONE /tmp convention for the Windows lane.
+
+
+---
+## 2026-11-13 triage — lane live-p3-l6 (Windows host, seed bin/simple.exe, base f790f7f266e)
+
+Concur: architectural boundary debt unchanged. This lane followed the record's
+interim rule (specs read and write through the same layer; repo-relative
+fixture paths, no `/tmp`). The proper fix — routing every path-taking rt_file
+call through `host_path_native` and adopting ONE /tmp convention for the
+Windows lane — remains open. No in-lane change.

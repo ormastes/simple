@@ -1,0 +1,38 @@
+# @cover src/app/interpreter/call/function_exec.spl
+# @cover src/app/interpreter/core/execution_guard.spl
+# @tag: unit, interpreter, module_load
+"""
+## Purpose and audience
+For interpreter-core maintainers. `src/app/interpreter/call/function_exec.spl`
+could not be imported at all: the load failed with `variable 'from' not found`
+because its relative `from ..core import {...}` lines never parsed as imports.
+This spec imports the module and exercises the call-depth guard it uses, so the
+`guard.drop()` release in `exec_function` sits on a module that loads.
+
+State is module-global, so every scenario resets what it changes.
+"""
+
+use std.spec.{describe, it, expect}
+use std.common.fault_detection.{current_recursion_depth, reset_recursion_depth}
+use app.interpreter.core.execution_guard.{push_call_depth}
+use app.interpreter.call.function_exec.{exec_function, exec_lambda}
+
+describe "app.interpreter.call.function_exec module load":
+    it "imports and returns the call depth to baseline after guard.drop()":
+        reset_recursion_depth()
+        val baseline = current_recursion_depth()
+        val guard = push_call_depth("probe").unwrap()
+        val pushed = current_recursion_depth()
+        guard.drop()
+        expect(pushed).to_equal(baseline + 1)
+        expect(current_recursion_depth()).to_equal(baseline)
+
+    it "releases every nested guard":
+        reset_recursion_depth()
+        val outer = push_call_depth("outer").unwrap()
+        val inner = push_call_depth("inner").unwrap()
+        val nested = current_recursion_depth()
+        inner.drop()
+        outer.drop()
+        expect(nested).to_equal(2)
+        expect(current_recursion_depth()).to_equal(0)

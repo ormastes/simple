@@ -299,3 +299,7 @@ Still blocked, exactly as the body states:
 
 No evidence contradicts the rung-3 parity or rung-4-hello claims recorded above;
 they stand un-re-run (per runaway guard, prior PASS evidence is not re-executed).
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**BLOCKED (confirmed)** — Rungs 1-2 re-verified green on refreshed seed (51/51, 25/25 per ne2). Board rung needs physical aarch64 hardware; rung 4 full-kernel gate needs an aarch64 Linux + AAVMF QEMU host. Both outside this lane.

@@ -279,6 +279,23 @@ impl _Lowerer:
                 else:
                     false
 
+    fn expr_is_float_valued(e: HirExpr) -> bool:
+        # Value-based float view, unlike expr_is_float which is opcode-support based:
+        # arithmetic on all-float operands produces a float value even when no SVM-G
+        # float opcode exists for it (REM, bitwise, shifts). Comparisons yield Bool
+        # words and are NOT float-valued.
+        match e.kind:
+            case HirExprKind.FloatLit(_, _) | HirExprKind.FloatLexeme(_, _): true
+            case HirExprKind.Binary(op, left, right):
+                match op:
+                    case HirBinOp.Add | HirBinOp.Sub | HirBinOp.Mul | HirBinOp.Div |
+                         HirBinOp.Mod | HirBinOp.BitAnd | HirBinOp.BitOr | HirBinOp.BitXor |
+                         HirBinOp.Shl | HirBinOp.Shr:
+                        self.expr_is_float_valued(left) and self.expr_is_float_valued(right)
+                    case _: false
+            case _:
+                false
+
     fn expr_is_signed_i32(e: HirExpr) -> bool:
         if not e.has_type_:
             return false
@@ -709,6 +726,16 @@ impl _Lowerer:
                         val actual_is_float = self.expr_is_float(actual)
                         val expected_is_float = self.expr_is_float(expected)
                         if actual_is_float != expected_is_float:
+                            if self.expr_is_float_valued(actual) and self.expr_is_float_valued(expected):
+                                # Both sides are float-valued; the mismatch comes from an
+                                # operator with no SVM-G float opcode (REM, bitwise, shifts).
+                                # Lower the actual operand so it fails with the precise
+                                # "unsupported binary operator on float operands" diagnostic
+                                # instead of the misleading mixed integer/float one.
+                                self.lower_expr(actual)
+                                if self.ok():
+                                    self.fail("unsupported binary operator on float operands (only + - * / == != < <= > >= lower to SVM-G v1 float opcodes; no float REM/bitwise opcode exists)")
+                                return
                             self.fail("mixed integer/float expect operands are unsupported in the SVM-G v1 lowering subset")
                             return
                         val is_float = actual_is_float and expected_is_float

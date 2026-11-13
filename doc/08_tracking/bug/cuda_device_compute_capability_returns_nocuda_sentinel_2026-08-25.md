@@ -69,3 +69,7 @@ driver rc rather than the `-3` build-sentinel so the sentinel keeps meaning
 "built without cuda"), rebuild/redeploy the seed, then verify with
 `SIMPLE_CUDA_TEST=1 bin/simple test test/03_system/acceptance/gpu_cuda_programming_acceptance_spec.spl`
 on a CUDA host (expect 5/5).
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**LIVE (confirmed)** — ne5 source-checked: gpu.rs:1382-1392 cfg(not(cuda)) branch still returns the -3 sentinel with no get_cuda_dl() fallback while sibling fns dlopen. Sibling-shaped few-line fix, but seed-Rust-only: cannot rebuild (no cargo/rustc) or verify (no NVIDIA device) on this host; grant recorded.

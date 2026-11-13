@@ -3,8 +3,8 @@
 
 extern fn sys_get_args() -> [text]
 extern fn rt_cli_get_args() -> [text]
-use std.io_runtime.{file_exists, file_read, file_write}
-use app.io.sqlite_sffi.{SqliteConnection, sqlite_open, sqlite_open_memory, sqlite_close, sqlite_execute, sqlite_query_all, sqlite_insert, sqlite_row_get}
+use std.io_runtime.{file_exists, file_read, file_write, file_read_bytes}
+use app.io.sqlite_sffi.{SqliteConnection, sqlite_open, sqlite_open_memory, sqlite_close, sqlite_execute, sqlite_query_all, sqlite_insert, sqlite_row_get, sqlite_table_exists}
 use std.db.dbfs_engine.fts.{FtsInvertedIndex, FtsSearchResult, fts_bm25_search}
 
 fn _context_file_exists_impl(path: text) -> bool:
@@ -322,6 +322,25 @@ fn _context_sql_render_rows_filtered(rows, query: text, source_filter: text, for
 
 fn _context_sql_render_rows(rows, query: text, format: text) -> text:
     _context_sql_render_rows_filtered(rows, query, "", format)
+
+fn context_sql_db_format(path: text) -> text:
+    """Detect the on-disk context database format.
+
+    A context SQL database is defined by the facade schema, not by the bytes
+    that back it: the same facade runs over real SQLite pages and over the
+    pure-database codec, so probe by opening through the facade and checking
+    for the context_packs table rather than by file magic.
+    """
+    if not file_exists(path):
+        return "missing"
+    val db = _context_sql_open(path)
+    if not db.is_valid:
+        return "unknown"
+    val has_table = sqlite_table_exists(db, "context_packs")
+    val closed = sqlite_close(db)
+    if has_table and closed:
+        return "sqlite-facade"
+    "unknown"
 
 fn context_sql_index_packs(paths: [text], target: text, db_path: text, format: text) -> text:
     val db = _context_sql_open(db_path)

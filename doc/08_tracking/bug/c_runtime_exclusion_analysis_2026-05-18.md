@@ -333,3 +333,7 @@ Spot-check at this lane's base (790b54f7c4fc):
   seed check path healthy on a runtime-adjacent stdlib module.
 
 No change made.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**SUPERSEDED (confirmed)** — Removal audit, not a defect; last blocker (runtime_db.c fate) owned by the "No external SQLite" todo. rt2 spot-checked the four named C files still on disk in the recorded states.

@@ -109,3 +109,11 @@ volatile fill, returns a typed count while preserving boolean semantics,
 keeps raw pointers inside the runtime boundary (`rt_array_fill_span` /
 interpreter kernels), and carries differential interpreter/native coverage
 plus the prevention spec. No residual.
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b bookkeeping)
+
+FIXED 2026-11-11 (p3-interp11 lane) per in-file addendum; bookkeeping concurrence. No contrary evidence found in this pass; header status left as the
+owning lane recorded it.

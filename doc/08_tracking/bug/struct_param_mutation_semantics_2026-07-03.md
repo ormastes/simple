@@ -158,3 +158,21 @@ requires changes outside this task's scope (`src/compiler_rust/**` /
 compiler HIR lowering), which needs a stage4/seed rebuild + deploy cycle to
 verify end-to-end — explicitly out of scope for this pass per task
 instructions.
+
+
+## Triage 2026-11-13 (lane p3-async-20261113, base 80a8116e5e2) — OPEN; no bounded pure-Simple fix
+
+Same-base review: the two actionable items are unchanged — (1) class-instance
+argument-passing in the compiled/JIT backend (`browser_engine_free_fn_arg_
+mutation_lost_2026-06-30.md`, still the primary fix location, seed/backend
+level), and (2) interpreter `mut`-capability enforcement for struct params.
+Fresh cross-cutting evidence from this lane's bug
+`ui_web_ws_any_cast_fails_in_spawned_thread_2026-08-04` triage (same day,
+same base): object-shaped values (class instances, text) do not survive the
+seed's `thread_spawn_with_args` transport to a spawned thread at all under
+`bin/simple run` — consistent with the same seed-level value-marshalling
+weakness family this record's compiled-path fix depends on. The documented
+low-risk mitigation (`mock: mut SbiMockSmp` explicit-capability signatures in
+`hal_smp.spl`) remains available to whoever picks up the backend fix; the
+`me`-keyword/class-vs-struct semantics documentation gap also stands. No
+source change.

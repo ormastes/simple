@@ -1,6 +1,10 @@
 # Phase-2 verification matrix `compiler_cli_build` row fails: deterministic HIR-cache store decode refusals + fixed phase-3 missing-surface victim set
 
-- Status: open (root cause narrowed; codec blob capture in progress)
+- Status: **ROOT-CAUSED + SOURCE FIX LANDED 2026-11-13 (PR #8728)** — the
+  codec root cause lives in the canonical record
+  `stage2_native_hir_cache_selfcheck_enum_wire_decode_2026-11-12.md`; this
+  doc retains the matrix-run operational detail (victim set, cross-process
+  mechanism, budget experiments).
 - Found: 2026-11-12
 - Component: bootstrap verification harness + HIR cache store roundtrip
   (`src/compiler/80.driver/driver_hir_cache.spl`,

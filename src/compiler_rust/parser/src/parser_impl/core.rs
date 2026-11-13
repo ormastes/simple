@@ -874,6 +874,8 @@ impl<'a> Parser<'a> {
                     | TokenKind::Mod    // used as module name in failsafe/__init__.spl
                     | TokenKind::Shared // used as module root in shared/contracts.spl
                     | TokenKind::Dot // from .module import (relative import)
+                    | TokenKind::DoubleDot // from ..pkg import (parent-relative import)
+                    | TokenKind::Ellipsis // from ...pkg import (grandparent-relative import)
                 ) {
                     self.parse_from_import() // Python-style: from module import {...}
                 } else {

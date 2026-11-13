@@ -462,6 +462,22 @@ SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_vulkan_readback_u32_checksum(int64_t data
     (void)data; (void)pixel_count; (void)handle; (void)offset;
     return -1;
 }
+
+/*
+ * C twin of the Rust lane's `cfg(not(feature = "vulkan"))` arm of
+ * rt_vulkan_selected_device_identity_v1 (vulkan_graphics_runtime_device.rs):
+ * the core C runtime selects no Vulkan device, so there is no generation token
+ * to match and no physical-device UUID to report. It returns the same empty
+ * string the Rust lane uses for "owner absent". The Simple facade
+ * (vulkan_sffi_selected_device_identity_v1) requires exactly "v1:<hex>:<hex>"
+ * with non-zero UUIDs, so an empty string is rejected fail-closed and can never
+ * be mistaken for a real device. A Vulkan-featured provider overrides this
+ * weak definition.
+ */
+SPL_HOSTED_UNAVAILABLE_WEAK const char* rt_vulkan_selected_device_identity_v1(int64_t expected_token) {
+    (void)expected_token;
+    return "";
+}
 #endif
 
 /*
@@ -4552,12 +4568,6 @@ static uint64_t spl_text_cp_len_bytes(const uint8_t* d, uint64_t len) {
     return n;
 }
 
-/* Code-point index of byte offset `byte` (a char boundary). */
-static int64_t spl_text_byte_to_cp(const uint8_t* d, uint64_t len, uint64_t byte) {
-    if (byte > len) byte = len;
-    return (int64_t)spl_text_cp_len_bytes(d, byte);
-}
-
 /* Byte offset of code-point index `cp`; `len` past the end. */
 static uint64_t spl_text_cp_to_byte(const uint8_t* d, uint64_t len, uint64_t cp) {
     if (spl_text_bytes_ascii(d, len)) return cp < len ? cp : len;
@@ -4593,16 +4603,6 @@ static int64_t spl_core_string_cp_len(RtCoreString* s) {
     uint64_t n = spl_text_cp_len_bytes((const uint8_t*)s->data, s->len);
     rt_str_cache_cp_count(s, n);
     return (int64_t)n;
-}
-
-static int64_t spl_core_string_byte_to_cp(RtCoreString* s, uint64_t byte) {
-    if (spl_core_string_is_ascii(s)) return (int64_t)(byte > s->len ? s->len : byte);
-    return spl_text_byte_to_cp((const uint8_t*)s->data, s->len, byte);
-}
-
-static uint64_t spl_core_string_cp_to_byte(RtCoreString* s, uint64_t cp) {
-    if (spl_core_string_is_ascii(s)) return cp < s->len ? cp : s->len;
-    return spl_text_cp_to_byte((const uint8_t*)s->data, s->len, cp);
 }
 
 /* The raw-pointer fallback MUST mirror rt_string_len's, with the identical
@@ -6028,6 +6028,31 @@ int64_t rt_slice(int64_t value, int64_t start, int64_t end, int64_t step) {
     return rt_string_new((const uint8_t*)s->data + begin, (uint64_t)(finish - begin));
 }
 
+/* `.slice(a, b)` / `.substring(a, b)` METHOD entry: same ABI as rt_slice, but
+ * a text receiver is cut at BYTE offsets clamped to 0..=byte_len() (owner
+ * decision 2026-11-07; ADR-005 "Staging";
+ * doc/05_design/language/text/text_len_counts_characters_2026-11-07.md).
+ * rt_slice itself serves the `s[a:b]` operator and stays code-point indexed.
+ * A range that splits a multi-byte code point is copied RAW, like
+ * spl_str_slice: no snapping and no U+FFFD. Any other receiver, and a
+ * zero/negative step, is rt_slice. Twin of the Rust runtime crate's symbol. */
+int64_t rt_slice_text_bytes(int64_t value, int64_t start, int64_t end, int64_t step) {
+    RtCoreString* s = rt_core_as_string(value);
+    if (!s || step < 1) return rt_slice(value, start, end, step);
+    int64_t len = (int64_t)s->len;
+    int64_t finish = end < 0 ? 0 : (end > len ? len : end);
+    int64_t begin = start < 0 ? 0 : (start > finish ? finish : start);
+    if (step != 1 || begin >= finish) return rt_string_new((const uint8_t*)s->data, 0);
+    if (rt_text_slice_audit_level() != 0) {
+        rt_text_slice_audit_note(RT_TEXT_SLICE_SITE_RT_SLICE_C, "rt_slice_text_bytes_c",
+                                 begin, finish,
+                                 (const uint8_t*)s->data, (uint64_t)len,
+                                 (const uint8_t*)s->data + begin,
+                                 (uint64_t)(finish - begin));
+    }
+    return rt_string_new((const uint8_t*)s->data + begin, (uint64_t)(finish - begin));
+}
+
 int64_t rt_string_starts_with(int64_t value, int64_t prefix) {
     RtCoreString* s = rt_core_as_string(value);
     RtCoreString* p = rt_core_as_string(prefix);
@@ -6084,10 +6109,12 @@ int64_t rt_string_find(int64_t value, int64_t needle) {
     if (!s || !n) return -1;
     if (n->len == 0) return 0;
     if (n->len > s->len) return -1;
-    /* CODE-POINT index (ADR-005 item 5), so it composes with len()/slice(). */
+    /* BYTE offset (owner decision 2026-11-13, ADR-005 "Staging"): index_of is
+     * in the byte family with substring/slice(a, b)/byte_at, bounded by
+     * byte_len(). Matches the Rust runtime rt_string_find. */
     for (uint64_t i = 0; i + n->len <= s->len; i++) {
         if (memcmp(s->data + i, n->data, (size_t)n->len) == 0) {
-            return spl_core_string_byte_to_cp(s, i);
+            return (int64_t)i;
         }
     }
     return -1;
@@ -6106,13 +6133,13 @@ int64_t rt_text_find(int64_t value, int64_t needle, int64_t start) {
     /* Negative start clamps to 0 (the two-arg index_of contract; matches the
      * Rust runtime crate and simple_core impls). */
     if (start < 0) start = 0;
-    /* `start` and the answer are CODE-POINT indices (ADR-005 item 5). */
-    int64_t cp_len = spl_core_string_cp_len(s);
-    if (n->len == 0) return start <= cp_len ? start : cp_len;
-    if (start >= cp_len || n->len > s->len) return -1;
-    uint64_t start_byte = spl_core_string_cp_to_byte(s, (uint64_t)start);
-    for (uint64_t i = start_byte; i + n->len <= s->len; i++) {
-        if (memcmp(s->data + i, n->data, (size_t)n->len) == 0) return spl_core_string_byte_to_cp(s, i);
+    /* `start` and the answer are BYTE offsets (owner decision 2026-11-13,
+     * ADR-005 "Staging"); matches the Rust runtime rt_text_find. */
+    int64_t hay_len = (int64_t)s->len;
+    if (n->len == 0) return start <= hay_len ? start : hay_len;
+    if (start >= hay_len || n->len > s->len) return -1;
+    for (uint64_t i = (uint64_t)start; i + n->len <= s->len; i++) {
+        if (memcmp(s->data + i, n->data, (size_t)n->len) == 0) return (int64_t)i;
     }
     return -1;
 }
@@ -6121,12 +6148,12 @@ int64_t rt_string_rfind(int64_t value, int64_t needle) {
     RtCoreString* s = rt_core_as_string(value);
     RtCoreString* n = rt_core_as_string(needle);
     if (!s || !n) return -1;
-    /* CODE-POINT index (ADR-005 item 5), like index_of / find. */
-    if (n->len == 0) return spl_core_string_cp_len(s);
+    /* BYTE offset, like index_of / find (owner decision 2026-11-13). */
+    if (n->len == 0) return (int64_t)s->len;
     if (n->len > s->len) return -1;
     for (uint64_t i = s->len - n->len + 1; i-- > 0;) {
         if (memcmp(s->data + i, n->data, (size_t)n->len) == 0) {
-            return spl_core_string_byte_to_cp(s, i);
+            return (int64_t)i;
         }
     }
     return -1;
@@ -6775,6 +6802,28 @@ int64_t rt_string_char_count(int64_t value) {
     if (owner) return (int64_t)spl_text_cp_len_bytes((const uint8_t*)owner->data, owner->len);
     const char* raw = (const char*)(uintptr_t)value;
     return (int64_t)spl_text_cp_len_bytes((const uint8_t*)raw, (uint64_t)strlen(raw));
+}
+
+/* to_digit on a one-character text (ADR-005): Some(0..9) for a single ASCII
+ * decimal digit, None for anything else (non-digit, empty, multi-character,
+ * non-text). C twin of rt_string_to_digit in the Rust runtime
+ * (runtime/src/value/collections.rs), which the seed codegen emits for
+ * `.to_digit()`; without it a C-runtime link of that call is unresolved.
+ * char::to_digit(10) accepts ASCII digits only, so the two lanes agree on
+ * every input, non-ASCII included. Never a silent 0. */
+int64_t rt_string_to_digit(int64_t value) {
+    RtCoreString* s = rt_core_as_string(value);
+    if (!s) {
+        int64_t promoted;
+        if (rt_string_promote_raw_receiver(value, &promoted)) {
+            return rt_string_to_digit(promoted);
+        }
+        return rt_option_none();
+    }
+    if (s->len != 1) return rt_option_none();
+    unsigned char c = (unsigned char)s->data[0];
+    if (c < '0' || c > '9') return rt_option_none();
+    return rt_option_some(rt_value_int((int64_t)(c - '0')));
 }
 
 /* capitalize: uppercase the first character, lowercase the rest (ASCII only). */

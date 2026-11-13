@@ -57,3 +57,10 @@ Re-measured: nogc_sync_mut 11088 (baseline 7974), nogc_async_mut_noalloc 399 (ba
 
 
 Round 15 update: noalloc +41 were baremetal HAL provider files, now allowlisted (doc/08_tracking/rt_boundary/noalloc_baremetal_hal_providers_2026-11-07.md). nogc_sync_mut: 240 non-allowlisted growing files listed in PR #7456 comment as follow-up.
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+regression vs a recorded baseline, NOT re-baselined per in-file status; owner: ratchet owner.

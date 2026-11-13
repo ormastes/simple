@@ -1391,11 +1391,6 @@ fn utf8_width_at(data: i64, i: i64, len: i64) -> i64:
         return 4
     return 1
 
-# Code-point index of byte offset `byte` (a char boundary).
-fn text_byte_to_cp(data: i64, len: i64, byte: i64) -> i64:
-    val bound = if byte > len: len else: byte
-    return text_cp_len_bytes(data, bound)
-
 # Byte offset of code-point index `cp`; `len` past the end.
 fn text_cp_to_byte(data: i64, len: i64, cp: i64) -> i64:
     if text_bytes_ascii(data, len) > 0:
@@ -2277,12 +2272,13 @@ pub fn rt_string_find(value: i64, needle: i64) -> i64:
         return 0
     if needle_len > len:
         return -1
-    # CODE-POINT index (ADR-005 item 5), so it composes with len()/slice().
+    # BYTE offset (owner decision 2026-11-13, ADR-005 "Staging"): index_of is
+    # in the byte family with substring/slice(a, b), bounded by byte_len().
     var i = 0
     while i + needle_len <= len:
         val cmp = _sffi_core_string_memcmp(string_data_ptr_value(ptr) + i, string_data_ptr_value(needle_ptr), needle_len)
         if cmp > -1 and cmp < 1:
-            return text_byte_to_cp(string_data_ptr_value(ptr), len, i)
+            return i
         i = i + 1
     return -1
 
@@ -2303,22 +2299,21 @@ pub fn rt_text_find(value: i64, needle: i64, start: i64) -> i64:
     val s_start = if start < 0: 0 else: start
     val len = string_len_ptr(ptr)
     val needle_len = string_len_ptr(needle_ptr)
-    # `start` and the answer are CODE-POINT indices (ADR-005 item 5).
+    # `start` and the answer are BYTE offsets (owner decision 2026-11-13).
     val data = string_data_ptr_value(ptr)
-    val cp_len = text_cp_len_bytes(data, len)
     if needle_len < 1:
-        return if s_start < cp_len: s_start else: cp_len
-    if s_start >= cp_len or needle_len > len:
+        return if s_start < len: s_start else: len
+    if s_start >= len or needle_len > len:
         return -1
-    var i = text_cp_to_byte(data, len, s_start)
+    var i = s_start
     while i + needle_len <= len:
         val cmp = _sffi_core_string_memcmp(data + i, string_data_ptr_value(needle_ptr), needle_len)
         if cmp > -1 and cmp < 1:
-            return text_byte_to_cp(data, len, i)
+            return i
         i = i + 1
     -1
 
-# rt_string_rfind — code-point index of the last occurrence of needle, or -1.
+# rt_string_rfind — byte offset of the last occurrence of needle, or -1.
 pub fn rt_string_rfind(value: i64, needle: i64) -> i64:
     val ptr = string_ptr(value)
     val needle_ptr = string_ptr(needle)
@@ -2326,16 +2321,16 @@ pub fn rt_string_rfind(value: i64, needle: i64) -> i64:
         return -1
     val len = string_len_ptr(ptr)
     val needle_len = string_len_ptr(needle_ptr)
-    # CODE-POINT index (ADR-005 item 5), like index_of / find.
+    # BYTE offset, like index_of / find (owner decision 2026-11-13).
     if needle_len < 1:
-        return text_cp_len_bytes(string_data_ptr_value(ptr), len)
+        return len
     if needle_len > len:
         return -1
     var i = len - needle_len
     while i >= 0:
         val cmp = _sffi_core_string_memcmp(string_data_ptr_value(ptr) + i, string_data_ptr_value(needle_ptr), needle_len)
         if cmp > -1 and cmp < 1:
-            return text_byte_to_cp(string_data_ptr_value(ptr), len, i)
+            return i
         i = i - 1
     return -1
 

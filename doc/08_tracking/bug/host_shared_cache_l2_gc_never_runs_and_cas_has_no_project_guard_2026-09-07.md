@@ -121,3 +121,7 @@ rightly rejected as the #319 shape).
 **Residual:** the literal `tier_router` `gc_run_if_needed` call and the
 in-`cas_store` project guard were deliberately not added; the capabilities are
 provided by the newer daemon/gateway/namespace architecture instead.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**SUPERSEDED (confirmed)** — rt3: cache tier redesigned; bounded GC is daemon-driven (evict_artifacts + CacheRetentionLimitsV1) and namespace isolation provided at the gateway/authority layer. Specs 8/8 + 8/8 on the tracked seed.

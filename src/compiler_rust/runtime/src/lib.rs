@@ -103,6 +103,8 @@ pub mod monoio_executor;
 pub mod monoio_waker;
 #[cfg(feature = "vulkan")]
 pub mod vulkan;
+pub mod vulkan_create_device_retry;
+pub mod vulkan_async_protocol;
 pub mod vulkan_graphics_runtime;
 pub mod metal_graphics_runtime;
 pub mod x86_simd_probe;
@@ -1100,6 +1102,7 @@ pub use value::{
     rt_shared_ref_count,
     rt_shared_release,
     rt_slice,
+    rt_slice_text_bytes,
     // String operations
     rt_any_add,
     rt_tagged_add,

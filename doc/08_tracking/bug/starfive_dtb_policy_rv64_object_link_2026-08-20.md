@@ -39,3 +39,7 @@ freestanding RV64 relocatable containing `starfive_dtb_policy_select`, linked
 with the compiled `starfive_runtime.c` object and board linker script without
 libc) is unchanged. No new evidence this pass. Status: OPEN, blocked on the
 admitted self-hosted compiler lane.
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with the 2026-11-05 re-verification: still blocked on the admitted pure-Simple compiler; RV64 freestanding object emission needs the sanctioned toolchain grant. No in-lane change.

@@ -21,6 +21,7 @@ use compiler.driver.driver.{compiler_driver_create, compiler_driver_run_compile}
 use lazy compiler.tools.header_gen.mod (HeaderGenerator)
 use compiler.common.shared_lib_flags.{get_shared_lib_flags, SharedLibFlags}
 use std.io_runtime.{process_run, file_delete, dir_create}
+use compiler.backend.runtime_compiler.{find_c_compiler, cxx_driver_for_c_driver_v1}
 use std.nogc_sync_mut.io.file_ops.{file_atomic_write}
 
 extern fn rt_path_join(a: text, b: text) -> text
@@ -105,6 +106,13 @@ pub fn aot_shared_library(path: text, output: text) -> CompileResult:
     match compile_result:
         case CompileResult.Success(_):
             val flags: SharedLibFlags = get_shared_lib_flags()
+            # Clang-only toolchain (CLAUDE.md: Never use GCC): bare `cc`/`c++`
+            # resolve to gcc/g++ on Debian-family hosts, so select clang.
+            val cc = find_c_compiler()
+            if cc == "":
+                file_delete(cpp_output)
+                return CompileResult.CodegenError("No clang C compiler found (clang-only toolchain, gcc is never used). Source scripts/setup/llvm-toolchain-env.shs or set SIMPLE_CC=clang-23.")
+            val cxx = cxx_driver_for_c_driver_v1(cc)
 
             var source_args: [text] = []
             var i = 0
@@ -120,7 +128,7 @@ pub fn aot_shared_library(path: text, output: text) -> CompileResult:
             source_args.push("-o")
             source_args.push(source_obj)
 
-            val (src_out, src_err, src_code) = process_run("c++", source_args)
+            val (src_out, src_err, src_code) = process_run(cxx, source_args)
             if src_code != 0:
                 file_delete(cpp_output)
                 return CompileResult.CodegenError(_combine_driver_api_process_error("C++ object compilation failed", src_out, src_err))
@@ -141,7 +149,7 @@ pub fn aot_shared_library(path: text, output: text) -> CompileResult:
             runtime_args.push("-o")
             runtime_args.push(runtime_obj)
 
-            val (rt_out, rt_err, rt_code) = process_run("cc", runtime_args)
+            val (rt_out, rt_err, rt_code) = process_run(cc, runtime_args)
             if rt_code != 0:
                 file_delete(cpp_output)
                 file_delete(source_obj)
@@ -157,7 +165,7 @@ pub fn aot_shared_library(path: text, output: text) -> CompileResult:
             link_args.push("-o")
             link_args.push(output)
 
-            val (link_out, link_err, link_code) = process_run("c++", link_args)
+            val (link_out, link_err, link_code) = process_run(cxx, link_args)
             file_delete(cpp_output)
             file_delete(source_obj)
             file_delete(runtime_obj)

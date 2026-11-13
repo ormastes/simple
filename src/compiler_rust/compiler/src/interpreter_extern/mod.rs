@@ -2777,7 +2777,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
         "rt_vulkan_create_offscreen_render_pass",
         gpu::rt_vulkan_graphics_unavailable_fn
     );
-    insert_simple!("rt_vulkan_discard_command", gpu::rt_vulkan_graphics_unavailable_fn);
+    insert_simple!("rt_vulkan_discard_command", gpu::rt_vulkan_discard_command_fn);
     insert_simple!(
         "rt_vulkan_discard_graphics_command",
         gpu::rt_vulkan_graphics_unavailable_fn
@@ -2944,6 +2944,67 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_vulkan_wait_fence", gpu::rt_vulkan_wait_fence_fn);
     insert_simple!("rt_vulkan_destroy_fence", gpu::rt_vulkan_destroy_fence_fn);
     insert_simple!("rt_vulkan_wait_idle", gpu::rt_vulkan_wait_idle_fn);
+    // Bounded async submission ring. The interpreter runs compute on the
+    // bridge device, so the bridge owns the ring too; the runtime crate's ring
+    // (reached by dlsym through `vulkan::dispatch`) cannot see that device.
+    // `snapshot`, `snapshot_word` and `abandon_device` are not served here.
+    insert_simple!(
+        "rt_vulkan_async_session_supported",
+        gpu::rt_vulkan_async_session_supported_fn
+    );
+    insert_simple!(
+        "rt_vulkan_async_session_create",
+        gpu::rt_vulkan_async_session_create_fn
+    );
+    insert_simple!(
+        "rt_vulkan_async_session_create_with_wait",
+        gpu::rt_vulkan_async_session_create_with_wait_fn
+    );
+    insert_simple!(
+        "rt_vulkan_async_session_acquire",
+        gpu::rt_vulkan_async_session_acquire_fn
+    );
+    insert_simple!(
+        "rt_vulkan_async_session_command",
+        gpu::rt_vulkan_async_session_command_fn
+    );
+    insert_simple!(
+        "rt_vulkan_async_session_submit",
+        gpu::rt_vulkan_async_session_submit_fn
+    );
+    insert_simple!("rt_vulkan_async_session_poll", gpu::rt_vulkan_async_session_poll_fn);
+    insert_simple!(
+        "rt_vulkan_async_session_retire",
+        gpu::rt_vulkan_async_session_retire_fn
+    );
+    insert_simple!(
+        "rt_vulkan_async_session_receipt",
+        gpu::rt_vulkan_async_session_receipt_fn
+    );
+    insert_simple!(
+        "rt_vulkan_async_session_cancel",
+        gpu::rt_vulkan_async_session_cancel_fn
+    );
+    insert_simple!(
+        "rt_vulkan_async_session_close",
+        gpu::rt_vulkan_async_session_close_fn
+    );
+    insert_simple!(
+        "rt_vulkan_async_session_capacity",
+        gpu::rt_vulkan_async_session_capacity_fn
+    );
+    insert_simple!(
+        "rt_vulkan_async_session_in_flight",
+        gpu::rt_vulkan_async_session_in_flight_fn
+    );
+    insert_simple!(
+        "rt_vulkan_async_session_published_sequence",
+        gpu::rt_vulkan_async_session_published_sequence_fn
+    );
+    insert_simple!(
+        "rt_vulkan_async_session_recover",
+        gpu::rt_vulkan_async_session_recover_fn
+    );
     insert_simple!("rt_opencl_is_available", gpu::rt_opencl_is_available_fn);
     insert_simple!("rt_opencl_platform_count", gpu::rt_opencl_platform_count_fn);
     insert_simple!("rt_opencl_create_context", gpu::rt_opencl_create_context_fn);
@@ -4169,8 +4230,8 @@ mod tests {
     }
 
     /// Same gap, next line of `src/lib/text.spl`. Pins the C runtime's exact
-    /// contract: LAST CODE-POINT index (ADR-005 item 5), -1 on miss, and
-    /// the empty needle returning the subject's code-point LENGTH rather than 0.
+    /// contract: LAST BYTE offset (owner decision 2026-11-07), -1 on miss, and
+    /// the empty needle returning the subject's byte LENGTH rather than 0.
     #[test]
     fn rt_string_rfind_is_registered_and_matches_c_runtime_semantics() {
         assert!(
@@ -4188,8 +4249,8 @@ mod tests {
             ("abc", "", 3),
             ("", "", 0),
             ("", "a", -1),
-            ("é🙂xé", "é", 3),
-            ("é🙂xé", "", 4),
+            ("é🙂xé", "é", 7),
+            ("é🙂xé", "", 9),
         ];
 
         for &(subject, needle, expected) in cases {
@@ -4224,7 +4285,7 @@ mod tests {
             ("abc", "", 0),
             ("", "", 0),
             ("", "a", -1),
-            ("é🙂xé", "x", 2),
+            ("é🙂xé", "x", 6),
             ("é🙂xé", "é", 0),
             ("a\0b\0c", "b\0", 2),
             ("a\0b", "\0", 1),

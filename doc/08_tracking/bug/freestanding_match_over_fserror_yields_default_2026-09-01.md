@@ -111,3 +111,9 @@ on this lane.
   then `grep -a 'production mount' build/os/nvfsrt/nvfs_server_roundtrip_ovmf.serial.log` and the
   one-run discriminator from the doc (classify a locally constructed `FsError.NotFound`; `6` ⇒
   H2 payload loss, `0` ⇒ H1 no-arm-selected).
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with lane ne10: LIVE, not re-verifiable in a no-cargo Windows lane
+(repro needs a cargo-built seed plus the OVMF freestanding gate). Grant
+command recorded in the ne10 addendum stands. No in-lane change.

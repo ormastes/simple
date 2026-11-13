@@ -96,3 +96,7 @@ Note: the parent record itself still shows OPEN as of this pass and was not
 edited by this lane (not one of its rows); the 84 NVMe `get_namespace_id`
 occurrences this file attributes are covered by the same fix. No product
 change is attributable to this row.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**SUPERSEDED (confirmed)** — ne15: parent object-dispatch defect FIXED on the fresh seed; both missing Value::ClassInstance arms exist (interpreter_method/mod.rs:1596, interpreter/expr/calls.rs:683); probe prints 3/3.

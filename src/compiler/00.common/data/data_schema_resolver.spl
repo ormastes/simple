@@ -476,3 +476,38 @@ pub fn data_policy_rules_from_sdn_v1(source: text, path: text, owner: text) -> R
     if diags.len() > 0:
         return Err(diags)
     Ok(rules)
+
+# ---------------------------------------------------------------------------
+# Node-attribute storage mechanism (plan 3.1 "stored implementation", 6.2,
+# 8.4). The mechanism is a Layout-kind choice whose tokens the node-view
+# generator owns (direct | column | sparse_hash). This is NOT a second
+# resolver: it only selects the rules that address one attribute's subject
+# chain and hands them to data_policy_resolve_rules_v1, so storage follows the
+# same plan 8.4 order as every other policy dimension:
+#   subject chain   <view>.<attr>  ExactSite      field tag / SDN `site:` row
+#                   <view>         OwningType     class tag / SDN `type:` row
+#                   <tree>         Module         SDN `module:` row
+#                   any            ProjectDefault SDN `project:` row
+#   strength        a field tag is a non-overridable source pin: it binds at
+#                   any specificity and a disagreeing build pin anywhere in the
+#                   chain is a PinConflict; a class tag is a source HINT (a
+#                   default for its fields) that a more specific build rule
+#                   refines and any build pin outranks; equal-specificity
+#                   disagreement is a diagnostic, never file order.
+# ---------------------------------------------------------------------------
+fn data_storage_rule_applies_v1(rule: DataPolicyRuleV1, tree: text, view: text, attr: text) -> bool:
+    if data_policy_kind_code_v1(rule.kind) != data_policy_kind_code_v1(DataPolicyKindV1.Layout):
+        return false
+    match rule.specificity:
+        case DataRuleSpecificityV1.ExactSite: rule.subject == view + "." + attr
+        case DataRuleSpecificityV1.OwningType: rule.subject == view
+        case DataRuleSpecificityV1.Module: rule.subject == tree
+        case DataRuleSpecificityV1.ProjectDefault: true
+
+pub fn data_attr_storage_resolve_v1(tree: text, view: text, attr: text, rules: [DataPolicyRuleV1],
+                                    default_choice: text) -> Result<DataPolicyChoiceV1, DataSchemaDiagnosticV1>:
+    var chain: [DataPolicyRuleV1] = []
+    for rule in rules:
+        if data_storage_rule_applies_v1(rule, tree, view, attr):
+            chain.push(rule)
+    data_policy_resolve_rules_v1(DataPolicyKindV1.Layout, chain, default_choice)

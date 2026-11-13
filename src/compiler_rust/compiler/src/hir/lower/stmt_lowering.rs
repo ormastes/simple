@@ -309,6 +309,26 @@ impl Lowerer {
     }
 
     pub(super) fn trait_declaration_for_current_owner(&self, authored_name: &str) -> Option<HirTraitDispatch> {
+        // In a flattened unit, a function from an imported module carries its
+        // flatten owner, and `register_trait` keys a flattened trait by that
+        // same owner string, not by `current_file` (the compile root). Look
+        // in the owner first, then in the owner's own `use` binding for the
+        // name; anything else keeps the file-keyed lookup.
+        if let Some(owner) = self.current_function_owner.as_deref() {
+            let declared_in = |owner: &str, name: &str| {
+                self.trait_declared_owners.get(std::path::Path::new(owner)).and_then(|traits| traits.get(name)).cloned()
+            };
+            if let Some(found) = declared_in(owner, authored_name) {
+                return Some(found);
+            }
+            if let Some((source_owner, source_name)) =
+                self.flatten_owner_import_bindings.get(owner).and_then(|bindings| bindings.get(authored_name))
+            {
+                if let Some(found) = declared_in(source_owner, source_name) {
+                    return Some(found);
+                }
+            }
+        }
         self.trait_declaration_in_file(authored_name, self.current_file.as_deref())
     }
 
@@ -334,6 +354,9 @@ impl Lowerer {
                 Expr::Identifier(name) if ctx.lookup(name).is_none() => format!("{}.{}", name, method),
                 _ => return None,
             },
+            // `val s = base.field` where `field` is declared with a trait
+            // type: the same owner a direct `base.field.m()` call gets.
+            Expr::FieldAccess { receiver, field } => return self.trait_field_dispatch(receiver, field, ctx),
             _ => return None,
         };
         // A local declaration (including a None tombstone) wins over an alias.
@@ -1586,10 +1609,31 @@ impl Lowerer {
                     move_mode: ast::MoveMode::Copy,
                     capture_all: false,
                 };
+                // Bind the closure at its DECLARED signature when the fn is
+                // fully annotated. HIR types a lambda as its BODY type, so an
+                // unannotated binding is not a function type, and a call to it
+                // from INSIDE another nested fn (where it is a capture, out of
+                // reach of the intraprocedural `propagate_closure_call_types`)
+                // got an `ANY` call boundary that the JIT closure ABI refuses --
+                // dropping the whole module to the interpreter. Partially
+                // annotated, generic or variadic fns keep the untyped binding.
+                // Bug: doc/08_tracking/bug/jit_lowering_clamp_f_engine_color_2026-07-02.md
+                let declared_fn_ty = match &f.return_type {
+                    Some(ret)
+                        if f.generic_params.is_empty()
+                            && f.params.iter().all(|p| p.ty.is_some() && !p.variadic) =>
+                    {
+                        Some(ast::Type::Function {
+                            params: f.params.iter().filter_map(|p| p.ty.clone()).collect(),
+                            ret: Some(Box::new(ret.clone())),
+                        })
+                    }
+                    _ => None,
+                };
                 let binding = ast::LetStmt {
                     span: f.span,
                     pattern: Pattern::Identifier(f.name.clone()),
-                    ty: None,
+                    ty: declared_fn_ty,
                     value: Some(lambda),
                     mutability: Mutability::Immutable,
                     storage_class: ast::StorageClass::Auto,

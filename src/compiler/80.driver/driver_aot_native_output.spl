@@ -87,6 +87,8 @@ use compiler.driver.smf.runtime_std_package_membership_v1.{
 use compiler.driver.cache.runtime_std_membership_policy_v1.{
     RuntimeStdMembershipPolicyOutputV1}
 use compiler.driver.driver_build.go_to_end.{go_to_end_enabled_v1}
+use compiler.driver.driver_build.go_to_end_trial_link_v1.{go_to_end_trial_link_run_v1,
+    go_to_end_trial_manifest_block_v1, GoToEndHostedTrialLinkerV1}
 use compiler.driver.driver_build.native_full_inventory_sources.{
     NativeFullInventorySourcesV1}
 use std.scv.compile_source_inventory_core.{
@@ -182,6 +184,7 @@ use compiler.common.cache.phase_compatibility_path_io.{
     phase_compatibility_publish_staged_io_v1
 }
 use compiler.mir.mir_data.{MirModule}
+use compiler.mir.mir_instruction_graph.{mir_unproven_call_origin_sites_v1}
 use compiler.mir.mir_canonical_fingerprint.{mir_module_canonical_fingerprint_v1}
 use compiler.mir_opt.storage_projection_lowering.{MirStorageViewSiteBindingV1}
 use compiler.mir_opt.mod.{TargetOptContext, target_opt_context_default}
@@ -607,7 +610,7 @@ fn driver_emit_phase2_compatibility_manifest_v1(
         val artifact_digest = sha256_text(artifact.content)
         if artifact_digest.len() != 64:
             return "unreadable-frontend-artifact:" + name
-        val subject = name.substring(0, name.len() - 4)
+        val subject = name.substring(0, name.byte_len() - 4)
         if not source_by_frontend_key.contains_key(subject):
             return "m2-frontend-source-missing:" + subject
         val source_identity = source_by_frontend_key[subject]
@@ -1794,7 +1797,7 @@ pub fn driver_native_extern_decl_site_in(content: text, shown_path: text, name: 
         val trimmed = line.trim()
         if not trimmed.starts_with("extern fn "):
             continue
-        if driver_native_extern_decl_matches(trimmed.substring(10, trimmed.len()), name):
+        if driver_native_extern_decl_matches(trimmed.substring(10, trimmed.byte_len()), name):
             return "{shown_path}:{line_no}"
     ""
 
@@ -3108,7 +3111,42 @@ impl CompilerDriver:
                 else:
                     self.go_to_end.record("codegen", go_to_end_outcome.source_path,
                         go_to_end_outcome.label() + ": " + go_to_end_outcome.diagnostics)
-            return self.go_to_end_finish_v1(object_files.len(), go_to_end_built)
+            # Trial link (driver_build/go_to_end_trial_link_v1.spl): the same
+            # hosted link line over every emitted object, reporting each
+            # undefined symbol with the failed module that defines it. Its
+            # artifact is `<output>.go-to-end-trial`, never `output`; the
+            # verdict below stays a failure.
+            var go_to_end_failed: [text] = []
+            for failed_name in self.go_to_end.modules:
+                if not go_to_end_failed.contains(failed_name):
+                    go_to_end_failed = go_to_end_failed.push(failed_name)
+            for excluded_name in self.go_to_end.excluded:
+                if not go_to_end_failed.contains(excluded_name):
+                    go_to_end_failed = go_to_end_failed.push(excluded_name)
+            # Codegen rows are recorded by source path; symbols carry module
+            # names, so add the module name of every failed path.
+            for failed_source in ctx.sources:
+                if go_to_end_failed.contains(failed_source.path) and not go_to_end_failed.contains(failed_source.module_name):
+                    go_to_end_failed = go_to_end_failed.push(failed_source.module_name)
+            val trial_opts = NativeLinkOptions(
+                libraries: ctx.options.native_libraries,
+                library_paths: ctx.options.native_library_paths,
+                linker_flags: ctx.options.native_linker_flags,
+                debug: ctx.options.debug_info,
+                verbose: ctx.options.verbose,
+                pie: true,
+                bare_metal: false,
+                opt_level: driver_opt_level,
+                stage4_backend: effective_backend,
+                stage4_compiler_hash: native_build_compiler_identity(),
+                target_triple: native_target,
+                runtime_path: env_get_nullable("SIMPLE_RUNTIME_PATH") ?? "",
+                runtime_bundle: env_get_nullable("SIMPLE_NATIVE_RUNTIME_BUNDLE") ?? ""
+            )
+            val trial = go_to_end_trial_link_run_v1(GoToEndHostedTrialLinkerV1(opts: trial_opts),
+                object_files, output, go_to_end_failed)
+            return self.go_to_end_finish_with_trial_v1(object_files.len(), go_to_end_built,
+                go_to_end_trial_manifest_block_v1(trial), trial.summary())
         if outcome_verdict != "":
             return CompileResult.CodegenError(outcome_verdict)
 
@@ -4357,6 +4395,12 @@ fn _compile_selected_module(backend_name: text, is_release: bool, opt_level: i64
                             prefetched_object: text) -> Result<text, text>:
     if not storage_snapshot.ok or storage_snapshot.module_name != name:
         return _aot_compile_failure(name, "storage-snapshot-module-mismatch")
+    # Unproven callable authority is a per-MODULE failure here, never the
+    # backend panic that killed the whole run-19 census worker (class 5 of
+    # p3_census_mir_classes_2026-11-13). Fail closed; the call is never emitted.
+    val unproven_call_sites = mir_unproven_call_origin_sites_v1(mir_module)
+    if unproven_call_sites.len() > 0:
+        return _aot_compile_failure(name, "unproven-call-origin: " + unproven_call_sites.join("; "))
     if (env_get_nullable("SIMPLE_COMPILER_TRACE") ?? "") == "1":
         print "[NATIVE] select module:done"
     if mir_module.functions.keys().len() == 0 and

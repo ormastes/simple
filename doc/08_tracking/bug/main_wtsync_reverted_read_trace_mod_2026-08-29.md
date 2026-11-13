@@ -39,3 +39,7 @@ was run (lane forbids cargo/rustc); module-declaration coherence is verified by
 direct source read. If repo `main` is still a supported surface, a main-side
 owner should confirm `4ee2dba580d`'s descendants restored the line there — but
 that is outside this release-scoped lane.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**SUPERSEDED (confirmed)** — ne14 + first-hand this lane: `pub mod read_trace;` present at lib.rs:44, module real and called from 5 import_loader sites. The chore(wtsync) clobber never applied to the release line.

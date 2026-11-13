@@ -109,3 +109,24 @@ describe "LLVM pointer and boolean bitcast lowering":
         val to_bit = emit_mir_bitcast_ir("ptr", MirType(kind: MirTypeKind.Bool))
         expect(to_pointer).to_contain("%l1 = inttoptr i1 %l0 to ptr")
         expect(to_bit).to_contain("%l1 = ptrtoint ptr %l0 to i1")
+
+    it "widens a MIR bool bitcast to an integer word with zext":
+        # lint native build: `opt.? == true` compared an Option word with a
+        # bool through a MIR Bitcast; `bitcast i1 to i64` failed llc
+        # ("invalid cast opcode for cast from 'i1' to 'i64'").
+        step("widens a MIR bool bitcast to an integer word with zext")
+        val ir = emit_mir_bitcast_ir("i1", MirType.i64())
+        expect(ir).to_contain("%l1 = zext i1 %l0 to i64")
+        expect(ir.contains("bitcast i1 %l0 to i64")).to_equal(false)
+
+    it "narrows a MIR integer bitcast to bool by truthiness":
+        step("narrows a MIR integer bitcast to bool by truthiness")
+        val ir = emit_mir_bitcast_ir("i64", MirType(kind: MirTypeKind.Bool))
+        expect(ir).to_contain("%l1 = icmp ne i64 %l0, 0")
+        expect(ir.contains("bitcast i64 %l0 to i1")).to_equal(false)
+
+    it "never emits a width-changing integer bitcast":
+        step("never emits a width-changing integer bitcast")
+        val ir = emit_mir_bitcast_ir("i32", MirType.i64())
+        expect(ir).to_contain("%l1 = sext i32 %l0 to i64")
+        expect(ir.contains("bitcast i32 %l0 to i64")).to_equal(false)

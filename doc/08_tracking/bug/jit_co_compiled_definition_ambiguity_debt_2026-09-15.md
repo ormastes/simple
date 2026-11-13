@@ -206,3 +206,7 @@ Residuals recorded honestly (not blocking the verdict):
 
 Not carried by seedfix A (fa6939eb4b9e is JIT tuple unbox; this row is
 resolver/HIR debt).
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with the 2026-11-11 addendum recorded in the body: the ambiguity debt remains tracked as a native-build blocker chain (owner decision 2026-11-09 documented the warning + \$dupN resolution design). No in-lane change.

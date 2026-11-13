@@ -1,0 +1,185 @@
+"""
+# Census r3 unresolved-name resolver: negative pins
+
+PR #8805 (`census_r3_unresolved_name_resolver_spec.spl`) stopped six classes of
+FALSE unresolved-name receipts. Every quieting rule it added is a skip, so each
+one needs its twin here: the GENUINE miss of the same shape must still warn or
+error, and a user declaration must still beat the ambient/builtin shortcut.
+
+- a qualified payload path whose owner module is ABSENT still fails hard with
+  `unresolved type: <path>` when the importer projects the payload
+- a glob-expanded facade still chases an aliased MEMBER import
+  (`use a.b.Item as X`) and still reports a missing member
+- `-> has_X` with X undeclared still records the callable-origin miss
+- a type-alias body naming an undeclared type still records the miss, while a
+  `has_X` alias body with X declared is quiet (registration.spl normalization)
+- a `trait Eq` declared inside the compilation wins over the ambient skip
+- the eq_ord_where_bound_unresolved_hir_2026_10_19 shapes (`where K: Ord + Eq`,
+  `where K: Hash + Eq + Ord`) lower cleanly in BOTH positions -- as the owner's
+  own declaration and as an imported callable -- which is the red->green proof
+  for removing that bug's `@workaround` sites
+
+Observables are in-process: chase misses record `[W-HIR-UNDECL-IMPORT-001]` in
+`lowering.diagnostic_messages`, hard misses land in `lowering.errors`, and the
+origin walks record their miss in the payload-origin miss memo.
+"""
+
+use compiler.hir.hir_lowering.types.{hirlowering_for_module, LoweringError}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_lowering._Items.module_reexport_materialization.{hir_payload_origin_miss_key}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.common.config.{Logger}
+use std.spec.step
+
+fn census_neg_logger() -> Logger:
+    Logger(level: 0)
+
+fn census_neg_undecl_count(messages: [text], needle: text) -> i64:
+    var count = 0
+    for message in messages:
+        if message.contains("W-HIR-UNDECL-IMPORT-001") and message.contains(needle):
+            count = count + 1
+    count
+
+fn census_neg_error_count(messages: [text], needle: text) -> i64:
+    var count = 0
+    for message in messages:
+        if message.contains(needle):
+            count = count + 1
+    count
+
+fn census_neg_error_messages(lowering_errors: [LoweringError]) -> [text]:
+    var out: [text] = []
+    for err in lowering_errors:
+        out = out.push(err.message)
+    out
+
+describe "census r3 unresolved-name negative pins":
+    it "still hard-fails a qualified payload path whose owner module is absent":
+        val log = census_neg_logger()
+        val owner_source = "enum CssValue:\n    Number(n: f64)\n    Color(color: std.nowhere.types.Color)\n\nfn css_number(n: f64) -> CssValue:\n    CssValue.Number(n: n)"
+        val consumer_source = "use lib.census_neg_anim.\{CssValue, css_number\}\nfn red_of(v: CssValue) -> i64:\n    match v:\n        CssValue.Color(c):\n            c.r\n        CssValue.Number(n):\n            0\n\nfn consume() -> i64:\n    red_of(css_number(1.0))"
+        val owner = parse_full_frontend(owner_source, "lib.census_neg_anim", "lib.census_neg_anim", log)
+        val consumer = parse_full_frontend(consumer_source, "lib.census_neg_anim_consumer", "lib.census_neg_anim_consumer", log)
+        var modules: Dict<text, Module> = {}
+        modules["lib.census_neg_anim"] = owner
+        val result = module_surfaces_from_modules(modules, [
+            SourceFile(path: "lib/census_neg_anim.spl", content: owner_source, module_name: "lib.census_neg_anim")
+        ])
+        expect(result.is_ok()).to_equal(true)
+        var lowering = hirlowering_for_module("lib.census_neg_anim_consumer", result.unwrap())
+        val hir = lowering.lower_module(consumer)
+        val messages = census_neg_error_messages(lowering.errors)
+        expect(census_neg_error_count(messages, "unresolved type: std.nowhere.types.Color") >= 1).to_equal(true)
+
+    it "still glob-chases an aliased member import and reports a missing member":
+        val log = census_neg_logger()
+        val path_source = "pub fn join(a: text, b: text) -> text:\n    a + b"
+        val facade_source = "use std.census_neg_path.\{join as pjoin\}\nuse std.census_neg_path.nothere as nx\n\npub fn facade_fn(x: i64) -> i64:\n    x"
+        val consumer_source = "use app.census_neg_facade.*\nfn consume() -> text:\n    pjoin(\"a\", \"b\")"
+        val path_mod = parse_full_frontend(path_source, "std.census_neg_path", "std.census_neg_path", log)
+        val facade = parse_full_frontend(facade_source, "app.census_neg_facade", "app.census_neg_facade", log)
+        val consumer = parse_full_frontend(consumer_source, "app.census_neg_consumer", "app.census_neg_consumer", log)
+        var modules: Dict<text, Module> = {}
+        modules["std.census_neg_path"] = path_mod
+        modules["app.census_neg_facade"] = facade
+        val result = module_surfaces_from_modules(modules, [
+            SourceFile(path: "std/census_neg_path.spl", content: path_source, module_name: "std.census_neg_path"),
+            SourceFile(path: "app/census_neg_facade.spl", content: facade_source, module_name: "app.census_neg_facade")
+        ])
+        expect(result.is_ok()).to_equal(true)
+        var lowering = hirlowering_for_module("app.census_neg_consumer", result.unwrap())
+        val hir = lowering.lower_module(consumer)
+        # The real member still forwards through the glob...
+        expect(hir.symbols.lookup("pjoin") != nil).to_equal(true)
+        # ...and the missing member is still a reported chase miss, not a skip.
+        expect(census_neg_undecl_count(lowering.diagnostic_messages, "nothere") >= 1).to_equal(true)
+
+    it "still records the callable-origin miss for has_X with X undeclared":
+        val log = census_neg_logger()
+        val owner_source = "fn check(x: i64) -> has_Nope:\n    nil"
+        val consumer_source = "use compiler.census_neg_owner.\{check\}\nfn consume() -> i64:\n    1"
+        val owner = parse_full_frontend(owner_source, "compiler.census_neg_owner", "compiler.census_neg_owner", log)
+        val consumer = parse_full_frontend(consumer_source, "compiler.census_neg_consumer", "compiler.census_neg_consumer", log)
+        var modules: Dict<text, Module> = {}
+        modules["compiler.census_neg_owner"] = owner
+        val result = module_surfaces_from_modules(modules, [
+            SourceFile(path: "compiler/census_neg_owner.spl", content: owner_source, module_name: "compiler.census_neg_owner")
+        ])
+        expect(result.is_ok()).to_equal(true)
+        var lowering = hirlowering_for_module("compiler.census_neg_consumer", result.unwrap())
+        val hir = lowering.lower_module(consumer)
+        expect(lowering.payload_origin_miss_memo_lookup(hir_payload_origin_miss_key("callable compiler.census_neg_owner", "Nope"))).to_equal(true)
+
+    it "still records the miss for an alias body naming an undeclared type, and is quiet for has_X with X declared":
+        val log = census_neg_logger()
+        val owner_source = "struct Warn:\n    msg: text\n\ntype Bad = \{text: Nope\}\n\ntype OptWarnMap = \{text: has_Warn\}"
+        val consumer_source = "use compiler.census_neg_alias_owner.\{Bad, OptWarnMap\}\nfn consume() -> i64:\n    1"
+        val owner = parse_full_frontend(owner_source, "compiler.census_neg_alias_owner", "compiler.census_neg_alias_owner", log)
+        val consumer = parse_full_frontend(consumer_source, "compiler.census_neg_alias_consumer", "compiler.census_neg_alias_consumer", log)
+        var modules: Dict<text, Module> = {}
+        modules["compiler.census_neg_alias_owner"] = owner
+        val result = module_surfaces_from_modules(modules, [
+            SourceFile(path: "compiler/census_neg_alias_owner.spl", content: owner_source, module_name: "compiler.census_neg_alias_owner")
+        ])
+        expect(result.is_ok()).to_equal(true)
+        var lowering = hirlowering_for_module("compiler.census_neg_alias_consumer", result.unwrap())
+        val hir = lowering.lower_module(consumer)
+        expect(lowering.payload_origin_miss_memo_lookup(hir_payload_origin_miss_key("callable compiler.census_neg_alias_owner", "Nope"))).to_equal(true)
+        expect(lowering.payload_origin_miss_memo_lookup(hir_payload_origin_miss_key("callable compiler.census_neg_alias_owner", "Warn"))).to_equal(false)
+        expect(lowering.payload_origin_miss_memo_lookup(hir_payload_origin_miss_key("callable compiler.census_neg_alias_owner", "has_Warn"))).to_equal(false)
+        expect(census_neg_undecl_count(lowering.diagnostic_messages, "Warn")).to_equal(0)
+
+    it "lets a declared trait Eq win over the ambient builtin-bound skip":
+        val log = census_neg_logger()
+        val owner_source = "trait Eq:\n    fn equals(other: i64) -> bool\n\nstruct Pair<K, V> where K: Eq:\n    key: K\n    value: V\n\nfn pair_of(k: i64, v: text) -> Pair<i64, text>:\n    Pair(key: k, value: v)"
+        val consumer_source = "use lib.census_neg_eq.\{Pair, pair_of\}\nfn consume() -> i64:\n    pair_of(1, \"a\").key"
+        val owner = parse_full_frontend(owner_source, "lib.census_neg_eq", "lib.census_neg_eq", log)
+        val consumer = parse_full_frontend(consumer_source, "lib.census_neg_eq_consumer", "lib.census_neg_eq_consumer", log)
+        var modules: Dict<text, Module> = {}
+        modules["lib.census_neg_eq"] = owner
+        val result = module_surfaces_from_modules(modules, [
+            SourceFile(path: "lib/census_neg_eq.spl", content: owner_source, module_name: "lib.census_neg_eq")
+        ])
+        expect(result.is_ok()).to_equal(true)
+        var lowering = hirlowering_for_module("lib.census_neg_eq_consumer", result.unwrap())
+        val hir = lowering.lower_module(consumer)
+        expect(census_neg_undecl_count(lowering.diagnostic_messages, "Eq")).to_equal(0)
+        expect(lowering.errors.len()).to_equal(0)
+        # The declared trait was materialized in the owner's qualified scope,
+        # i.e. the ambient skip did NOT apply to a declared spelling.
+        expect(hir.symbols.lookup_qualified_type_raw("lib.census_neg_eq", "Eq") >= 0).to_equal(true)
+
+    it "lowers the eq_ord_where_bound_unresolved_hir_2026_10_19 shapes as owner and as import":
+        val log = census_neg_logger()
+        val hash_source = "trait Hash:\n    fn hash_code() -> i64"
+        val owner_source = "use std.census_neg_hash.\{Hash\}\n\nfn ordered_key_native_usable<K>(key: K) -> bool where K: Ord + Eq:\n    true\n\nfn ordered_key_native_cmp<K>(left: K, right: K) -> i64 where K: Ord + Eq:\n    0\n\nfn sprof_generic_count<K, V>(keys: [K]) -> i64 where K: Hash + Eq + Ord:\n    keys.len()"
+        val consumer_source = "use lib.census_neg_ord.\{ordered_key_native_usable, ordered_key_native_cmp, sprof_generic_count\}\nfn consume() -> i64:\n    if ordered_key_native_usable(1):\n        ordered_key_native_cmp(1, 2) + sprof_generic_count([1, 2])\n    else:\n        0"
+        val hash_mod = parse_full_frontend(hash_source, "std.census_neg_hash", "std.census_neg_hash", log)
+        val owner = parse_full_frontend(owner_source, "lib.census_neg_ord", "lib.census_neg_ord", log)
+        val consumer = parse_full_frontend(consumer_source, "lib.census_neg_ord_consumer", "lib.census_neg_ord_consumer", log)
+        var modules: Dict<text, Module> = {}
+        modules["std.census_neg_hash"] = hash_mod
+        modules["lib.census_neg_ord"] = owner
+        val result = module_surfaces_from_modules(modules, [
+            SourceFile(path: "std/census_neg_hash.spl", content: hash_source, module_name: "std.census_neg_hash"),
+            SourceFile(path: "lib/census_neg_ord.spl", content: owner_source, module_name: "lib.census_neg_ord")
+        ])
+        expect(result.is_ok()).to_equal(true)
+        # Owner position: the bug's original fatal was `unresolved type: Ord`
+        # while lowering the declaring module itself.
+        var owner_lowering = hirlowering_for_module("lib.census_neg_ord", result.unwrap())
+        val owner_hir = owner_lowering.lower_module(owner)
+        expect(census_neg_error_count(census_neg_error_messages(owner_lowering.errors), "unresolved type")).to_equal(0)
+        expect(owner_lowering.errors.len()).to_equal(0)
+        # Import position: the callable walk must not chase Eq/Ord through the
+        # owner, while the declared Hash still resolves.
+        var lowering = hirlowering_for_module("lib.census_neg_ord_consumer", result.unwrap())
+        val hir = lowering.lower_module(consumer)
+        expect(census_neg_undecl_count(lowering.diagnostic_messages, "Eq")).to_equal(0)
+        expect(census_neg_undecl_count(lowering.diagnostic_messages, "Ord")).to_equal(0)
+        expect(lowering.errors.len()).to_equal(0)
+        expect(hir.symbols.lookup("sprof_generic_count") != nil).to_equal(true)

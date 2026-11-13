@@ -3,6 +3,9 @@
 # process per file (parse -> HIR -> MIR -> obj), then link. Whole-program is
 # opt-in per invocation only: SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1; two-pass shard
 # route: SIMPLE_FILE_WORKERS=0. Never set these as script-global defaults.
+# Exception (2026-11-13): Stage 3 takes SIMPLE_FILE_WORKERS from the tracked
+# config/bootstrap.sdn key stage3_file_workers (env overrides) while the
+# per-file route is broken (bug #8504); delete the key once it is fixed.
 # 2026-11-05: the admitted compiler's bootstrap_main.spl now applies the same
 # default to EVERY route -- plain positional native-build, Stage 4 and the
 # coordinator/Stage 3 routes (Windows batch included; it delegates here) --
@@ -31,6 +34,13 @@ if [ "${SIMPLE_BOOTSTRAP_PINNED_ARCHIVE:-}" = "" ] && [ "${SIMPLE_BOOTSTRAP_LIVE
   }
   SIMPLE_BOOTSTRAP_PINNED_ARCHIVE=${bootstrap_pinned_dir}
   export SIMPLE_BOOTSTRAP_PINNED_ARCHIVE
+  # Opt-in retention for older pins (bootstrap-pin-prune.shs: keeps live,
+  # admitted-for-resume, young, this run's and the newest pins; never fatal).
+  if [ "${SIMPLE_BOOTSTRAP_PIN_PRUNE:-0}" = 1 ]; then
+    sh "${bootstrap_entry_dir}/bootstrap-pin-prune.shs" \
+      "${bootstrap_early_repo_root}/build/bootstrap/pinned-src" --keep "${bootstrap_pinned_dir}" --apply >&2 ||
+      echo "bootstrap-pin-prune: retention pass did not complete (ignored)" >&2
+  fi
   exec sh "${bootstrap_pinned_dir}/scripts/bootstrap/bootstrap-from-scratch.sh" "$@"
 fi
 . "${bootstrap_entry_dir}/lib/centralized-storage.shs"
@@ -4712,17 +4722,18 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
   # not force the bootstrap_fixed shortcut. SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1
   # opts back into the single-instance whole-program lane (SIMPLE_BOOTSTRAP=1).
   # Same knob in resume-stage3-from-admitted.sh; both values are hashed.
-  # Per-file pipeline knob (P-F): SIMPLE_FILE_WORKERS. Unset => compiler default
-  # (NATIVE_PER_FILE_PIPELINE_DEFAULT_V1 in native_file_worker_v1.spl). When
-  # set (exactly 0 or 1) it is passed to the Stage 3 child AND hashed into
-  # the args receipt; unset adds nothing, so existing receipts stay resumable.
+  # Per-file pipeline knob (P-F): SIMPLE_FILE_WORKERS env > config/bootstrap.sdn
+  # stage3_file_workers > unset (compiler default NATIVE_PER_FILE_PIPELINE_DEFAULT_V1
+  # in native_file_worker_v1.spl); bootstrap_select_stage3_file_workers in
+  # bootstrap-jobs.shs. A selected value (exactly 0 or 1) is passed to the
+  # Stage 3 child AND hashed into the args receipt; unset adds nothing.
   stage3_per_file_env= stage3_per_file_lane=
-  case "${SIMPLE_FILE_WORKERS:-}" in
-    '') ;;
-    0|1) stage3_per_file_env="SIMPLE_FILE_WORKERS=$SIMPLE_FILE_WORKERS"
-         stage3_per_file_lane=":fw=$SIMPLE_FILE_WORKERS" ;;
-    *) echo "error: SIMPLE_FILE_WORKERS must be unset, 0 or 1" >&2; exit 1 ;;
-  esac
+  bootstrap_select_stage3_file_workers "${bootstrap_early_repo_root}/config/bootstrap.sdn" || exit 1
+  echo "Stage 3 file workers: ${stage3_file_workers:-compiler default} (source: $stage3_file_workers_source)"
+  if [ -n "$stage3_file_workers" ]; then
+    stage3_per_file_env="SIMPLE_FILE_WORKERS=$stage3_file_workers"
+    stage3_per_file_lane=":fw=$stage3_file_workers"
+  fi
   stage3_bootstrap_flag= stage3_whole_program_env=
   case "${SIMPLE_BOOTSTRAP_WHOLE_PROGRAM:-}" in
     '') ;;

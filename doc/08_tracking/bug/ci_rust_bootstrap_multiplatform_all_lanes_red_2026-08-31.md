@@ -223,3 +223,7 @@ citation of the 2026-11-09/2026-11-10 notes:
 Host limitation unchanged: true proof of B/D is a green workflow run, which
 this Windows lane cannot trigger or observe; the fix-content evidence above
 is verified at a pinned base. No change made in this lane.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**SUPERSEDED (confirmed)** — boot11 verified all four causes fixed in workflow/source at tip (Win32 backend, freetype deps, rustup target add, aarch64/riscv64 rows). A green CI run is the only unproduced evidence and is host-blocked here.

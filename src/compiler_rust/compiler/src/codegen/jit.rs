@@ -31,7 +31,7 @@ pub struct JitCompiler {
     /// Map of function names to their native function pointers
     compiled_funcs: HashMap<String, *const u8>,
     /// Runtime symbol provider (kept alive for the lifetime of the compiler;
-    /// also queried by `first_unresolved_import_called` to detect NULL-jump imports).
+    /// also queried by `unresolved_imports_called` to detect NULL-jump imports).
     provider: Arc<dyn RuntimeSymbolProvider>,
     /// Heap-backed global initialization runs once before the first JIT entry call.
     module_init_ran: AtomicBool,
@@ -176,32 +176,48 @@ impl JitCompiler {
         // reports these as a clean "undefined symbol" relocation error, but
         // JIT would crash. Detect them here and fail the JIT compile so the
         // driver's interpreter fallback runs instead (matching AOT behaviour).
-        if let Some(name) = self.first_unresolved_import_called(mir) {
+        let unresolved = self.unresolved_imports_called(mir);
+        if let Some(name) = unresolved.first() {
             // Make the de-JIT LOUD. A silent whole-module drop to the
             // interpreter is a proven catastrophic-cost defect class here: one
             // unresolvable name cost ~1000x (parse_html 3.56s -> 19.4ms,
             // compute_styles >10min -> 369ms once fixed, 365a643236b). Worse,
             // de-JITted code is *correct but slow*, so it silently hides real
             // miscompiles until someone makes it fast. Always emit a greppable
-            // marker naming the symbol.
-            let kind = unresolved_import_kind(&name);
-            eprintln!(
-                "[jit-fallback] unresolved external symbol '{name}' ({kind}): \
-                 whole module dropped to the interpreter (expect ~100-1000x slowdown). \
-                 Set SIMPLE_JIT_STRICT=1 to turn this into a hard error."
-            );
+            // marker naming EVERY symbol: naming only the first hid caret's
+            // three smux imports behind each other.
+            for each in &unresolved {
+                eprintln!(
+                    "[jit-fallback] unresolved external symbol '{each}' ({}): \
+                     whole module dropped to the interpreter (expect ~100-1000x slowdown). \
+                     Set SIMPLE_JIT_STRICT=1 to turn this into a hard error.",
+                    unresolved_import_kind(each)
+                );
+            }
+            let kind = unresolved_import_kind(name);
+            let rest = if unresolved.len() > 1 {
+                let others: Vec<String> = unresolved[1..]
+                    .iter()
+                    .map(|other| format!("'{other}' ({})", unresolved_import_kind(other)))
+                    .collect();
+                format!("; {} more unresolved: {}", others.len(), others.join(", "))
+            } else {
+                String::new()
+            };
             // Opt-in hard failure for lanes that must never silently de-JIT.
             // Off by default so legitimate fallbacks (cross-module Simple
             // method symbols) keep working.
             if jit_fallback_is_strict() {
-                self.emit_unresolved_symbol_trace(mir, &name);
+                for each in &unresolved {
+                    self.emit_unresolved_symbol_trace(mir, each);
+                }
                 return Err(BackendError::ModuleError(format!(
-                    "SIMPLE_JIT_STRICT: unresolved external symbol '{name}' ({kind}) would NULL-jump in JIT; \
+                    "SIMPLE_JIT_STRICT: unresolved external symbol '{name}' ({kind}) would NULL-jump in JIT{rest}; \
                      refusing to fall back to the interpreter"
                 )));
             }
             return Err(BackendError::ModuleError(format!(
-                "unresolved external symbol '{name}' ({kind}) would NULL-jump in JIT; deferring to interpreter"
+                "unresolved external symbol '{name}' ({kind}) would NULL-jump in JIT{rest}; deferring to interpreter"
             )));
         }
 
@@ -481,9 +497,9 @@ impl JitCompiler {
         None
     }
 
-    /// Return the name of a declared `Linkage::Import` function that will not
-    /// resolve to a real address at finalize time AND is directly called from
-    /// compiled code, if any.
+    /// Every declared `Linkage::Import` function that will not resolve to a
+    /// real address at finalize time AND is directly called from compiled
+    /// code, in declaration order (empty when all resolve).
     ///
     /// Mirrors cranelift-jit's own `lookup_symbol` (registered runtime symbols
     /// plus a `dlsym(RTLD_DEFAULT)` fallback). An import that neither resolves
@@ -497,7 +513,7 @@ impl JitCompiler {
     /// NULL slot is never jumped to, so rejecting it dropped whole modules to
     /// the interpreter for no safety gain (measured: every GPU/showcase run
     /// de-JITed on spl_thread_current_id even though the call bridged fine).
-    fn first_unresolved_import_called(&self, mir: &MirModule) -> Option<String> {
+    fn unresolved_imports_called(&self, mir: &MirModule) -> Vec<String> {
         use cranelift_module::{Linkage, Module};
         let mut directly_called: std::collections::HashSet<&str> = std::collections::HashSet::new();
         for func in &mir.functions {
@@ -517,6 +533,7 @@ impl JitCompiler {
                 }
             }
         }
+        let mut unresolved = Vec::new();
         for (_id, decl) in self.backend.module.declarations().get_functions() {
             if decl.linkage != Linkage::Import {
                 continue;
@@ -528,11 +545,11 @@ impl JitCompiler {
                     continue;
                 }
                 if directly_called.contains(name) && !jit_import_resolves(self.provider.as_ref(), name) {
-                    return Some(name.to_string());
+                    unresolved.push(name.to_string());
                 }
             }
         }
-        None
+        unresolved
     }
 
     /// Emit bounded ownership evidence for a strict unresolved JIT import.
@@ -816,7 +833,7 @@ fn dlsym_resolves(name: &str) -> bool {
     // (vendor `cranelift-jit-0.116.1/src/backend.rs::lookup_with_dlsym`):
     // `GetProcAddress` against the running executable image, then against
     // `ucrtbase.dll`. Blindly returning `true` here (the previous behaviour)
-    // meant `first_unresolved_import_called` could never detect an
+    // meant `unresolved_imports_called` could never detect an
     // unresolvable cross-module Simple symbol on Windows: cranelift-jit
     // itself would fail the SAME lookup, bind the GOT slot to NULL, and the
     // first call through it SIGSEGVs with nothing on stderr — this is the

@@ -167,3 +167,7 @@ regression spec was therefore re-run here, not trusted across the seed swap):
   are still pending (entry-closure native builds forbidden in-lane; grant
   route). The related seed-JIT tuple-destructuring miscompute recorded by
   boot7 routes to the seed-fix lane, not this row.
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with the recorded SUPERSEDED disposition (boot6/boot7 concurrence): measured, not yet fixed; the two compiler gaps and the lost-diagnostics issue are tracked with the native-build-verification debt. No in-lane change.

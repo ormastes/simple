@@ -461,6 +461,21 @@ fn _glyph_raster_cache_reset_for_test():
     _glyph_raster_cursor = 0
     _glyph_raster_hits = 0
     _glyph_raster_misses = 0
+    _fallback_ascent_keys = []
+    _fallback_ascent_values = []
+
+# Fallback-layout baseline memo. `_stage_text_active` asks the selected
+# outline face for its scaled ascender once per staged text run, through
+# `sfnt_measure_glyph_into` on the run's first codepoint -- a full table
+# directory parse, a whole-cmap-subtable parse and an outline parse, ~25 ms
+# per text command per frame on the interpreter lane, for a number that only
+# depends on (face, codepoint, size). Keyed exactly like the glyph-raster
+# cache above (rasterizer identity + codepoint + size) and mutated only inline
+# in that method body, for the same reason. A stored 0 means "the face gave
+# no ascender for this glyph", i.e. keep the ink-top baseline.
+val FALLBACK_ASCENT_CACHE_LIMIT: i64 = 512
+var _fallback_ascent_keys: [text] = []
+var _fallback_ascent_values: [i32] = []
 
 # Referenced by the shared mutex helpers below. Keep this declaration before
 # first use because SMF semantic compilation resolves module globals in order.
@@ -1885,7 +1900,22 @@ class FontRenderer:
                 val direct_count = direct_meta[5]
                 if direct_meta[7] == 310031 and direct_count >= 0 and direct_count <= 16777216:
                     var direct_pixels: [u8] = [0u8; direct_count]
-                    sfnt_render_glyph_into(self.selected_outline_blob, SFNT_GLYPH_SELECTOR_CODEPOINT, codepoint.to_i64(), font_size.to_i64(), direct_meta, direct_pixels)
+                    # Render by the glyph id the measure pass just resolved
+                    # (direct_meta[6]) instead of by codepoint. The codepoint
+                    # selector makes sfnt_render_glyph_into re-parse the whole
+                    # cmap subtable only to arrive at this same id (~20 ms per
+                    # cold glyph on the interpreter lane). The receipt slots
+                    # [15]/[16] are re-pointed at the index selector so the
+                    # render's own measure/render pairing check still holds;
+                    # the outline, bounds and coverage are computed from the
+                    # identical glyph id, so the bitmap is unchanged.
+                    val direct_glyph_id = direct_meta[6]
+                    if direct_glyph_id > 0:
+                        direct_meta[15] = SFNT_GLYPH_SELECTOR_INDEX
+                        direct_meta[16] = direct_glyph_id
+                        sfnt_render_glyph_into(self.selected_outline_blob, SFNT_GLYPH_SELECTOR_INDEX, direct_glyph_id, font_size.to_i64(), direct_meta, direct_pixels)
+                    else:
+                        sfnt_render_glyph_into(self.selected_outline_blob, SFNT_GLYPH_SELECTOR_CODEPOINT, codepoint.to_i64(), font_size.to_i64(), direct_meta, direct_pixels)
                     if direct_meta[8] == 310032 and (direct_count == 0 or direct_meta[9] > 0):
                         val direct_width = direct_meta[0] as i32
                         val direct_height = direct_meta[1] as i32
@@ -2753,11 +2783,30 @@ class FontRenderer:
                     fallback_baseline = ink_top
                 fi = fi + 1
             if self.selected_outline_blob.len() > 0:
-                var ascent_meta: [i64] = [0; 20]
-                sfnt_measure_glyph_into(self.selected_outline_blob, SFNT_GLYPH_SELECTOR_CODEPOINT,
-                    fallback_cps[0].to_i64(), font_size.to_i64(), ascent_meta)
-                if ascent_meta[7] == 310031 and ascent_meta[17] > 0:
-                    fallback_baseline = ascent_meta[17].to_i32()
+                # Memoized per (rasterizer identity, codepoint, size); see
+                # `_fallback_ascent_keys`. Only a live rasterizer identity
+                # names the blob, so anything else measures every time.
+                val ascent_memoizable = active_rasterizer != nil and font_identity != ""
+                val ascent_key = "{font_identity};cp={fallback_cps[0]};fs={font_size}"
+                var face_ascent: i32 = -1
+                if ascent_memoizable:
+                    var ascent_idx = 0
+                    while ascent_idx < _fallback_ascent_keys.len():
+                        if _fallback_ascent_keys[ascent_idx] == ascent_key:
+                            face_ascent = _fallback_ascent_values[ascent_idx]
+                        ascent_idx = ascent_idx + 1
+                if face_ascent < 0:
+                    face_ascent = 0
+                    var ascent_meta: [i64] = [0; 20]
+                    sfnt_measure_glyph_into(self.selected_outline_blob, SFNT_GLYPH_SELECTOR_CODEPOINT,
+                        fallback_cps[0].to_i64(), font_size.to_i64(), ascent_meta)
+                    if ascent_meta[7] == 310031 and ascent_meta[17] > 0:
+                        face_ascent = ascent_meta[17].to_i32()
+                    if ascent_memoizable and _fallback_ascent_keys.len() < FALLBACK_ASCENT_CACHE_LIMIT:
+                        _fallback_ascent_keys = _fallback_ascent_keys.push(ascent_key)
+                        _fallback_ascent_values = _fallback_ascent_values.push(face_ascent)
+                if face_ascent > 0:
+                    fallback_baseline = face_ascent
         var attempt = 0
         while attempt < 2:
             var quads: [FontRenderQuad] = []

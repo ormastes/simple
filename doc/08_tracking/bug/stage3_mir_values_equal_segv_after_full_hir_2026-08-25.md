@@ -192,3 +192,7 @@ SIMPLE_TIMEOUT_SECONDS=0 sh scripts/bootstrap/bootstrap-from-scratch.sh \
   --bootstrap-receipt=build/bootstrap/mustcheck-stage3-arm-body/planner-admission-v2.env \
   --jobs=1
 ```
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with the recorded status: BLOCKED AFTER THREE CYCLES — the final fix is not yet admitted; per the hard iteration cap this lane does not retry. Disposition stands.

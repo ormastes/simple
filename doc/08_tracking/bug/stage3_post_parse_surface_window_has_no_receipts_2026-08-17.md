@@ -132,3 +132,7 @@ $ grep -n "surface_build\|surface_alias\|export_origins\|surface_freeze" \
 The "still open" half — why the window costs ~30 minutes — is unchanged and was
 not measured here: naming the sub-step requires a stage-3 run to emit these new
 receipts, and a bootstrap was out of scope for this session. Nothing changed.
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with the recorded status: OPEN — receipts half FIXED in-tree (relocated to the recorded position); the remaining window is tracked with the stage-3 driver work. No in-lane change.

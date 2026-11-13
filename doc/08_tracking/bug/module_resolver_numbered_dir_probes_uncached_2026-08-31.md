@@ -109,3 +109,7 @@ compiler + runtime archive (a native-build route); native builds are not
 granted on this lane, and the native-build Windows hang is a separately
 routed live defect. Do not record the gate as passing on the strength of the
 memo alone — the memo is necessary, sufficiency still needs the gated run.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**FIXED (confirmed)** — ne15: per-process (parent,segment) memos + hit/miss counters + guard preserved + cache-clear wiring all present at resolution.rs:30-85. Sufficiency (stage2/3 gated route completes behind the memo) still needs the native grant, per the doc's own caveat.

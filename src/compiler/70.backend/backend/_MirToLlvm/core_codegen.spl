@@ -104,14 +104,14 @@ fn _sffi_string_builder_push(handle: i64, value: text):
 pub fn debug_info_prefix_map_path(path: text, root: text) -> text:
     val p = path.replace("\\", "/")
     var r = root.replace("\\", "/")
-    while r.len() > 1 and r.ends_with("/"):
-        r = r.substring(0, r.len() - 1)
-    if r == "" or p.len() <= r.len() + 1:
+    while r.byte_len() > 1 and r.ends_with("/"):
+        r = r.substring(0, r.byte_len() - 1)
+    if r == "" or p.byte_len() <= r.byte_len() + 1:
         return p
-    val head = p.substring(0, r.len())
-    val same = if r.len() >= 2 and r.substring(1, 2) == ":": head.to_lower() == r.to_lower() else: head == r
-    if same and p.substring(r.len(), r.len() + 1) == "/":
-        return p.substring(r.len() + 1, p.len())
+    val head = p.substring(0, r.byte_len())
+    val same = if r.byte_len() >= 2 and r.substring(1, 2) == ":": head.to_lower() == r.to_lower() else: head == r
+    if same and p.substring(r.byte_len(), r.byte_len() + 1) == "/":
+        return p.substring(r.byte_len() + 1, p.byte_len())
     p
 
 # DS3 debug-info path split: NOT std.nogc_sync_mut.path.{basename, dirname} --
@@ -1086,9 +1086,11 @@ impl MirTextCodegen for MirToLlvm:
         if ir_handle >= 0 or placement_naked or placement_suffix != "" or placement_prefix != "define":
             val param_str = params.join(", ")
             var dbg_suffix = ""
-            match dbg_id:
-                Some(id): dbg_suffix = " !dbg !{id}"
-                None: ()
+            # if-val, not a bare `None:` arm: bare None has ambiguous owners
+            # and degrades to a catch-all, tripping B5b next to `case _:`-style
+            # two-default matches on the strict lane.
+            if val did = dbg_id:
+                dbg_suffix = " !dbg !{did}"
             val opening = "{placement_prefix} {effective_ret_ty} @{fn_name}({param_str}){attrs}{placement_suffix}{dbg_suffix} {{"
             if ir_handle >= 0:
                 if _sffi_string_builder_len(ir_handle) > 0:
@@ -1100,9 +1102,11 @@ impl MirTextCodegen for MirToLlvm:
         else:
             val param_str = params.join(", ")
             var dbg_suffix = ""
-            match dbg_id:
-                Some(id): dbg_suffix = " !dbg !{id}"
-                None: ()
+            # if-val, not a bare `None:` arm: bare None has ambiguous owners
+            # and degrades to a catch-all, tripping B5b next to `case _:`-style
+            # two-default matches on the strict lane.
+            if val did = dbg_id:
+                dbg_suffix = " !dbg !{did}"
             val opening = "define {effective_ret_ty} @{fn_name}({param_str}){attrs}{dbg_suffix} {{"
             val builder_handle = llvm_ir_builder_handle(self.builder)
             llvm_ir_builder_push_line(opening, builder_handle)
@@ -1169,9 +1173,8 @@ impl MirTextCodegen for MirToLlvm:
             if violation == "":
                 match block.terminator:
                     case Ret(value):
-                        match value:
-                            Some(_): violation = "E-NAKED-BODY: `{name}` is @naked; it must not return a value"
-                            None: ()
+                        if value.?:
+                            violation = "E-NAKED-BODY: `{name}` is @naked; it must not return a value"
                     case Unreachable: ()
                     case _: violation = "E-NAKED-BODY: `{name}` is @naked; control flow other than fall-through is not allowed"
             block_i = block_i + 1

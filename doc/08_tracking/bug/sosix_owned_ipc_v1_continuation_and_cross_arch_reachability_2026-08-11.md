@@ -43,3 +43,10 @@ shims.
 
 No existing boot/list/program receipt proves these gates.
 
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+SOSIX cross-architecture/QEMU reachability item per in-file status; needs the SOSIX + QEMU lane. No change from this lane.

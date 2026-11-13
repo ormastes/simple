@@ -157,3 +157,7 @@ aspect-pack packaging and the typed `aspect_facet` language surface remain
 OPEN by design — `TODO(dynload-visible-skip)` stays in source until a real
 emission count exists. Lane evidence: `build/review/p3fix-ne1-20261111.sdn`
 row 8.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**FIXED (confirmed)** — Defect B pin 8dd5d01e1601 verified ancestor of this lane's base first-hand (`git merge-base --is-ancestor`). Residual dynload packaging / typed-facet surface stays open by design.

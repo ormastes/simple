@@ -136,3 +136,7 @@ newer refresh than the compiler3 addendum's `0791c2b7f4a7`), direct
 All three compiler3 observations reproduce on the current seed. No fixing
 commit identified (linter reworked broadly since 2026-09). Status header
 flipped OPEN → SUPERSEDED.
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with lane p3-comp8: SUPERSEDED — both named files and the whole named directory lint clean at tip. No independent re-verification in this lane; disposition stands.

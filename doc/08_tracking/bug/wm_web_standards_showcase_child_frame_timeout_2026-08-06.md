@@ -314,3 +314,83 @@ line; child styles 149 nodes within the 180s frame budget and the host prints
 a non-timeout verdict. If the fallback line still fires, the residual gap is
 in the seed's HIR lowering, not the .spl sources.
 
+
+## 2026-11-13 triage (UI batch B, Linux aarch64, release/1.0.0 @ 35144b7f5e93): blocked on this host; the 2026-08-15 expectation does not hold
+
+Three capped attempts (Rust seed, 16G cgroup, `timeout 900`), none of which
+reached the child-frame handshake this record is about:
+
+1. Reproduction command as written: exits 2 in seconds with
+   `[wm-web-standards] error=no-gui-requested (launch via macos-gui-run.shs)`.
+   `main()` now requires `SIMPLE_GUI=1`; the command in "Reproduction" above
+   is stale without it.
+2. With `SIMPLE_GUI=1`, from a fresh worktree: `error=child-bridge-timeout`
+   after the 300 s bridge wait. The host launches the child as
+   `<repo_root>/bin/simple`, which a fresh worktree does not have.
+3. With `SIMPLE_GUI=1` and `bin/simple` pointed at the seed for the run: the
+   bridge arrives, then `[wm-web-standards] error=no-gui-runtime` —
+   `GuiRenderer.create("auto", ...)` returns nothing. This host has no display
+   server (`DISPLAY` and `WAYLAND_DISPLAY` unset, no Xvfb installed).
+
+Separately, the 2026-08-15 static triage predicted a JIT lane once
+`resolved_backend` was declared. That part did hold (no
+`[jit-fallback] ... resolved_backend` line appears), but the host still does
+not run compiled: the seed prints `[engine-demotion] reason=jit-compile-error
+detail=HIR lowering error: ambiguous call to env_get ...
+sffi_vulkan.spl neither defines nor imports it` and falls back to the
+interpreter. That is tracked as
+`sffi_vulkan_env_get_unimported_jit_demotion_2026-11-13.md`. Until it is fixed
+the child is on the interpreted lane, where this record already documents the
+180 s frame budget being missed.
+
+No verdict line was produced, so none is claimed. Row stays open. Grants: a
+host with a display (or Xvfb) and a `bin/simple`; and the `env_get` import fix
+so the JIT lane can be measured.
+
+
+---
+
+## 2026-11-13 addendum — P3 gpu lane p3-gpu-20261113 (work/p3-gpu-20261113, base 6f4cb189867)
+
+**Verdict: cannot be re-verified end-to-end on this host — the Linux headless
+repro path is gated off here; the record's own "verification pending" run still
+needs the Linux display harness.**
+
+- Source state at this tip: the 2026-08-15 triage's structural fix IS present —
+  `resolved_backend: text` is explicitly declared
+  (`src/lib/gc_async_mut/gpu/browser_engine/simple_web_layout_engine2d_fast.spl:95`)
+  and passed at all constructor sites (`:1479`, `:1496`, `:1516`), so the
+  original `SimpleWebLayoutEngine2DReadbackResult.resolved_backend` HIR
+  inference gap is closed in source.
+- Repro attempted on this Windows host (tracked seed, `SIMPLE_WM_HEADLESS_CAPTURE=1
+  SIMPLE_TIMEOUT_SECONDS=1750 bin/simple.exe run examples/06_io/ui/wm_web_standards_showcase_gui.spl`):
+  exits rc=2 in ~30s WITHOUT any `wm_web_standards_showcase_host_headless_*`
+  verdict line — the example now fails fast at
+  `examples/06_io/ui/wm_web_standards_showcase_gui.spl:578`
+  `[wm-web-standards] error=no-gui-requested (launch via macos-gui-run.shs)`.
+  The headless-capture entry used by every Linux repro in this doc is host-gated
+  on Windows, so the child-frame-timeout verdict can be neither reproduced nor
+  cleared here.
+- New observation recorded for the seed/compiler lane: the example compile now
+  also hits `[jit-fallback] HIR lowering error: ambiguous call to env_get: 4
+  co-compiled definitions (gc_async_mut/env/variables.spl,
+  nogc_sync_mut/env/variables.spl, nogc_sync_mut/io/env_ops.spl,
+  nogc_sync_mut/io_runtime.spl) ... [compiler_cross_module_private_symbol_collision]
+  [in examples/06_io/ui/wm_web_standards_showcase_gui.spl]: whole module dropped
+  to the interpreter` — the same whole-module interpreted-fallback family this
+  doc tracks, on a new trigger name.
+- Grant: run the record's Reproduction command on the Linux display lane
+  (Docker+Xvfb or macos-gui-run) with a current seed; expected-if-fixed per the
+  2026-08-15 note. Until then the row stays OPEN with a understood-but-unverified
+  state, not a hang and not a fix.
+
+
+---
+## 2026-11-13 triage — lane live-p3-l6 (Windows host, seed bin/simple.exe, base f790f7f266e)
+
+Concur with the p3-gpu-20261113 addendum: on this Windows host the example
+exits rc=2 fast at `no-gui-requested` (the headless-capture entry is
+host-gated), so the child-frame-timeout verdict can be neither reproduced nor
+cleared here. The `resolved_backend: text` structural fix is present in source,
+and the remaining interpreted-lane blocker is the separately-tracked
+`sffi_vulkan_env_get_unimported_jit_demotion_2026-11-13.md`. No in-lane change.

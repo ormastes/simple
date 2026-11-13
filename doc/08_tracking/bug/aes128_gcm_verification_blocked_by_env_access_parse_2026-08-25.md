@@ -58,3 +58,8 @@ blocker was a parse-level defect, not a raw env read; no direct-env
 violation observed in the load path. Executable AES-128-GCM NIST-vector
 verification remains a separate coverage question for the crypto owner,
 but this record's premise is stale.
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs: SUPERSEDED stands (recorded 2026-09-16 bookkeeping review; the parse
+blocker was an unrelated env-access-host issue). No new evidence this lane.

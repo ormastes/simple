@@ -15,11 +15,18 @@ fn engine2d_readback_with_handle(pixels: [u32], source: text, backend_handle: i6
     engine2d_readback_with_identity(pixels, source, backend_handle, 0)
 
 pub fn engine2d_readback_with_identity(pixels: [u32], source: text, backend_handle: i64, device_identity: i64) -> Engine2DReadback:
-    var checksum: i64 = 0
-    var i = 0
-    while i < pixels.len():
-        checksum = (checksum + pixels[i].to_i64()) % 2147483647
-        i = i + 1
+    # checksum = (sum of pixels) mod 2147483647. Summing first and reducing
+    # once is the same value as reducing at every pixel: each pixel is below
+    # 2^32, so the i64 sum cannot overflow below 2^31 pixels (an 8 GiB
+    # surface). The element iterator plus a single cast is what the
+    # interpreter lane executes fastest (447 ms -> ~90 ms per 640x480
+    # readback; the indexed `.to_i64()` loop paid a bounds-checked index, a
+    # method call and a modulo per pixel) and is no slower under the JIT.
+    # Pinned by engine2d_interp_full_res_render_budget_spec.spl.
+    var sum: i64 = 0
+    for pixel in pixels:
+        sum = sum + (pixel as i64)
+    val checksum = sum % 2147483647
     Engine2DReadback(pixels: pixels, source: source, backend_handle: backend_handle, device_identity: device_identity, pixel_count: pixels.len().to_i64(), checksum: checksum)
 
 # ============================================================================

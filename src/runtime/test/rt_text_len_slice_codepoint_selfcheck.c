@@ -1,8 +1,10 @@
 /* C twin of the Rust runtime text length/slice unit (ADR-005 item 5, bug
  * text_len_bytes_vs_codepoint_index_bound_disagree_2026_11_03): the user-facing
- * length (rt_len / rt_string_char_count), rt_slice on text, rt_string_index_of
- * and rt_string_rfind count CODE POINTS, while rt_string_len stays the BYTE
- * primitive (byte_len(), the (data, len) text extern ABI, internal callers).
+ * length (rt_len / rt_string_char_count) and rt_slice on text (s[a:b]) count
+ * CODE POINTS, while rt_string_len stays the BYTE primitive (byte_len(), the
+ * (data, len) text extern ABI, internal callers). rt_string_index_of,
+ * rt_string_rfind and rt_text_find answer BYTE offsets (owner decision
+ * 2026-11-13), composing with rt_slice_text_bytes (substring/slice(a, b)).
  * Rust twin: collections.rs `text_len_slice_codepoint_tests`.
  * Standalone build (unused runtime TUs are dropped by section GC; the local
  * spl_panic stands in for runtime.c, so never link runtime.c with this):
@@ -20,6 +22,12 @@ void spl_panic(const char* msg) { fprintf(stderr, "PANIC: %s\n", msg ? msg : "")
  * standalone link does not pull in (an unresolved call under /FORCE would jump
  * to address 0). Audit off. */
 int64_t rt_text_slice_audit_level(void) { return 0; }
+/* rt_slice_text_bytes names the note hook behind the level guard. */
+int64_t rt_text_slice_audit_note(int site_id, const char* site_name, int64_t start, int64_t end,
+                                 const uint8_t* src, uint64_t src_len, const uint8_t* out, uint64_t out_len) {
+    (void)site_id; (void)site_name; (void)start; (void)end; (void)src; (void)src_len; (void)out; (void)out_len;
+    return 0;
+}
 
 static unsigned checks;
 #define CHECK(x) do { ++checks; if (!(x)) { fprintf(stderr, "FAIL line=%d check=%u\n", __LINE__, checks); return 1; } } while (0)
@@ -50,7 +58,7 @@ static void stress_body(void) {
         int64_t want = (k + 3 < 257 ? k + 3 : 257) - (k < 257 ? k : 257);
         if (rt_string_len(rt_slice(g_ascii, k, k + 3, 1)) != want) { g_fail = 3; return; }
         if (!text_is(rt_slice(g_utf, 12 * (i % 40), 12 * (i % 40) + 2, 1), "h\xC3\xA9")) { g_fail = 4; return; }
-        if (rt_string_find(g_utf, g_needle) != 6) { g_fail = 5; return; }
+        if (rt_string_find(g_utf, g_needle) != 7) { g_fail = 5; return; }  /* byte offset */
     }
 }
 
@@ -129,16 +137,21 @@ int main(void) {
     CHECK(text_is(rt_slice(T("hello"), 3, 5, 1), "lo"));
     CHECK(text_is(rt_slice(s, 0, 5, 2), "hlo"));  /* stride walks code points */
 
-    /* index_of / rfind in code points */
-    CHECK(rt_string_index_of(s, T("l")) == 2);
-    CHECK(rt_string_index_of(s, T("o")) == 4);
+    /* index_of / rfind / text_find in BYTE offsets (owner decision 2026-11-13,
+     * ADR-005 "Staging"); they compose with substring/slice(a, b), which
+     * lower to rt_slice_text_bytes, bounded by byte_len() (rt_string_len). */
+    CHECK(rt_string_index_of(s, T("l")) == 3);
+    CHECK(rt_string_index_of(s, T("o")) == 5);
     CHECK(rt_string_index_of(s, T("\xC3\xA9")) == 1);
     CHECK(rt_string_index_of(s, T("z")) == -1);
     CHECK(rt_string_index_of(s, T("")) == 0);
-    CHECK(rt_string_rfind(s, T("l")) == 3);
-    CHECK(rt_string_rfind(s, T("")) == 5);
+    CHECK(rt_string_rfind(s, T("l")) == 4);
+    CHECK(rt_string_rfind(s, T("")) == 6);
     CHECK(rt_string_rfind(s, T("z")) == -1);
-    CHECK(text_is(rt_slice(s, rt_string_index_of(s, T("l")), rt_len(s), 1), "llo"));
+    CHECK(rt_text_find(s, T("l"), 4) == 4);
+    CHECK(rt_text_find(s, T("l"), 5) == -1);
+    CHECK(rt_text_find(s, T(""), 99) == 6);
+    CHECK(text_is(rt_slice_text_bytes(s, rt_string_index_of(s, T("l")), rt_string_len(s), 1), "llo"));
     CHECK(rt_string_index_of(T("hello"), T("lo")) == 3);
     CHECK(rt_string_rfind(T("hello"), T("l")) == 3);
 

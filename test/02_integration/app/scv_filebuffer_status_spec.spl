@@ -24,9 +24,13 @@ use app.io.mod (cwd, dir_create_all, file_write)
 use std.nogc_sync_mut.io.file_ops.{secure_temp_dir}
 use std.nogc_sync_mut.sffi.io.{path_absolute}
 
+use std.nogc_sync_mut.env.platform.{get_temp_dir}
 use std.scv.store.{scv_write_chunk_from_file, scv_write_file_object, scv_content_id_for_file}
 use std.scv.file_buffer.{ScvFileBuffer, scv_file_buffer_read, scv_file_buffer_read_bounded, scv_file_buffer_content_id, scv_file_buffer_write_objects}
 
+# Fixture roots must live where BOTH the POSIX fixture shell and the Simple
+# filesystem APIs can address them: the runtime does not translate a POSIX
+# "/tmp" prefix on Windows, so anchor under the host temp dir instead.
 fn _new_root() -> text:
     # Host-portable fixture: canonical forward-slash spelling under the host
     # temp area (POSIX /tmp and /bin/sh mktemp do not resolve on Windows).
@@ -45,6 +49,19 @@ fn _seq_content() -> text:
     for i in 1..1501:
         out = out + "{i}x"
     out
+
+    # The FileBuffer write path also publishes a structural record under
+    # objects/syntax, so the minimal store fixture must include that dir.
+    val (out, _err, _code) = process_run("/bin/sh", ["-c", "d=$(mktemp -d {_fixture_base()}/scv-fb.XXXXXX); mkdir -p \"$d/.scv/objects/chunks\" \"$d/.scv/objects/files\" \"$d/.scv/objects/syntax\"; printf '%s' \"$d\""])
+    out.trim()
+
+fn _fixture_base() -> text:
+    get_temp_dir().replace("\\", "/")
+
+fn _write_file(path: text, spec: text):
+    # spec is a shell printf format producing the file's content
+    process_run("/bin/sh", ["-c", "{spec} > {path}"])
+
 
 describe "SCV one-read FileBuffer":
     # @manual scenario evidence

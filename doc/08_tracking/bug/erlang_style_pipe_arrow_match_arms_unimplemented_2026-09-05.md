@@ -131,3 +131,9 @@ with 16 unparseable files in tree — should not persist.
   analysed (no more "could not be parsed"), confirming the files are live-parseable.
 - **Doc claim:** `doc/07_guide/quick_reference/syntax_quick_reference.md` § Pattern Matching
   still states "Erlang-style `| ->` is preferred" — now true.
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with lane ne8: CLOSED/FIXED on release (seed 46fe8f6b6def), with
+self-hosted frontend parity. No independent re-verification in this lane;
+disposition stands.

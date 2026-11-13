@@ -44,3 +44,10 @@ It cannot be marked signed or verified.
 - A representative tensor-op benchmark shows no new call, copy, allocation,
   lookup, or dispatch overhead.
 
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+open lexical-ownership gap; owner: SFFI/torch facade lane.

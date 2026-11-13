@@ -243,3 +243,10 @@ Do not treat registry absence, local IRQ disablement, a copied TCB, or a
 source-order assertion as quiescence evidence. Until these owners converge,
 the legacy direct exit remains a known blocker and the pre-exit preparation
 capsule must not be presented as production Zombie wiring.
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+SimpleOS release/admission/artifact-blocked item per in-file status; requires the SimpleOS target-artifact pipeline and owner lanes this Windows seed lane cannot run. No change from this lane.

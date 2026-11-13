@@ -78,3 +78,7 @@ CARGO_TARGET_DIR=$PWD/build/p3-ne15/cargo-fresh \
 Expected on grant: test-binary link + assertion pass (the diagnostic and test
 are in-tree; the fresh target dir removes the mixed-incremental precondition).
 Status stays OPEN until that command executes and passes.
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with lane ne15: BLOCKED on cargo (link-failure repro needs a cargo-built seed on a native-build-healthy host). No in-lane change.

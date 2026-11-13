@@ -1,0 +1,242 @@
+# Library unit archive + receipt (slice 3 of library_unit_build_and_link.md §3-4).
+#
+# Layout under the existing lane/scope cache root (never a new tree):
+#   <cache_root>/units/<unit>/<unit_key>/objects/<module>.o
+#                                       lib<unit>.a      (archive_command_build)
+#                                       iface.sdn        (library_unit_iface_v1)
+#                                       receipt.sdn      (this file, write-once)
+#
+# The receipt is the ownership record: it is written ONCE under the final
+# unit_key (`library_unit_receipt_publish_v1` refuses an existing file), so a
+# second lane that finds a complete receipt reuses the archive instead of
+# racing for it — immutable receipt, no lock. Decoding fails closed when the
+# recorded unit_key is not `library_unit_cache_key_v1(producer, source, deps)`.
+#
+# Design: doc/05_design/compiler/incremental_build/library_unit_build_and_link.md
+
+use std.common.sdn.parser (parse)
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.encode.{sdn_encode_canonical}
+use std.io_runtime.{file_exists, file_read, file_write, file_delete, file_rename, process_run, env_get, getpid}
+use std.nogc_sync_mut.io.file_ops.{file_atomic_write}
+use std.platform.{get_host_os}
+use compiler.backend.llvm_capability.{find_archive_portable}
+use compiler.backend.linker.archive_response_file.{ArchiveCommand, archive_command_build}
+use compiler.driver.driver_build.library_unit_plan_v1.{library_unit_cache_key_v1}
+
+val LIBRARY_UNIT_RECEIPT_FORMAT_V1 = "simple/library-unit-receipt/v1"
+val LIBRARY_UNIT_VERDICT_OK_V1 = "ok"
+val LIBRARY_UNIT_VERDICT_FAILED_V1 = "failed"
+
+pub struct LibraryUnitReceiptV1:
+    unit: text
+    unit_key: text              # library_unit_cache_key_v1(producer_identity, source_digest, deps)
+    scope_key: text             # native_build_cache_scope_key (backend/cpu/opt/lane) — recorded, not only in the dir
+    producer_identity: text
+    source_digest: text
+    iface_digest: text
+    deps: [(text, text)]        # (unit name, interface digest)
+    objects: [text]             # object file names under objects/
+    verdict: text               # ok | failed
+    failed_modules: [text]      # go-to-end: non-empty iff verdict == failed
+
+pub fn library_unit_archive_dir_v1(cache_root: text, unit: text, unit_key: text) -> text:
+    "{cache_root}/units/{unit}/{unit_key}"
+
+pub fn library_unit_archive_path_v1(dir: text, unit: text) -> text:
+    "{dir}/lib{unit}.a"
+
+pub fn library_unit_receipt_path_v1(dir: text) -> text:
+    "{dir}/receipt.sdn"
+
+pub fn library_unit_iface_path_v1(dir: text) -> text:
+    "{dir}/iface.sdn"
+
+fn _library_unit_sdn_text(root: SdnValue, key: text) -> text:
+    match root.get(key):
+        case Some(v): v.as_str() ?? ""
+        case None: ""
+
+fn _library_unit_sdn_texts(root: SdnValue, key: text) -> [text]:
+    var out: [text] = []
+    match root.get(key):
+        case Some(v):
+            for item in v.as_array() ?? []:
+                out.push(item.as_str() ?? "")
+        case None:
+            pass
+    out
+
+fn _library_unit_sdn_text_array(items: [text]) -> SdnValue:
+    var values: [SdnValue] = []
+    for item in items:
+        values.push(SdnValue.String(item))
+    SdnValue.Array(values)
+
+pub fn library_unit_receipt_encode_v1(r: LibraryUnitReceiptV1) -> text:
+    var deps: [SdnValue] = []
+    for (name, iface) in r.deps:
+        var row: Dict<text, SdnValue> = {}
+        row["unit"] = SdnValue.String(name)
+        row["iface"] = SdnValue.String(iface)
+        deps.push(SdnValue.Dict(row))
+    var root: Dict<text, SdnValue> = {}
+    root["format"] = SdnValue.String(LIBRARY_UNIT_RECEIPT_FORMAT_V1)
+    root["unit"] = SdnValue.String(r.unit)
+    root["unit_key"] = SdnValue.String(r.unit_key)
+    root["scope_key"] = SdnValue.String(r.scope_key)
+    root["producer_identity"] = SdnValue.String(r.producer_identity)
+    root["source_digest"] = SdnValue.String(r.source_digest)
+    root["iface_digest"] = SdnValue.String(r.iface_digest)
+    root["deps"] = SdnValue.Array(deps)
+    root["objects"] = _library_unit_sdn_text_array(r.objects)
+    root["verdict"] = SdnValue.String(r.verdict)
+    root["failed_modules"] = _library_unit_sdn_text_array(r.failed_modules)
+    sdn_encode_canonical(SdnValue.Dict(root)) + "\n"
+
+pub fn library_unit_receipt_decode_v1(content: text) -> Result<LibraryUnitReceiptV1, text>:
+    if content.trim() == "":
+        return Err("receipt.sdn: empty")
+    val root = match parse(content):
+        case Ok(v): v
+        case Err(e): return Err("receipt.sdn: {e}")
+    val format = _library_unit_sdn_text(root, "format")
+    if format != LIBRARY_UNIT_RECEIPT_FORMAT_V1:
+        return Err("receipt.sdn: format '{format}' is not {LIBRARY_UNIT_RECEIPT_FORMAT_V1}")
+    val unit = _library_unit_sdn_text(root, "unit")
+    val unit_key = _library_unit_sdn_text(root, "unit_key")
+    val scope_key = _library_unit_sdn_text(root, "scope_key")
+    val producer = _library_unit_sdn_text(root, "producer_identity")
+    val source_digest = _library_unit_sdn_text(root, "source_digest")
+    val iface_digest = _library_unit_sdn_text(root, "iface_digest")
+    val verdict = _library_unit_sdn_text(root, "verdict")
+    if unit == "" or unit_key == "" or scope_key == "" or producer == "" or source_digest == "" or iface_digest == "":
+        return Err("receipt.sdn: a required field is missing")
+    var deps: [(text, text)] = []
+    match root.get("deps"):
+        case Some(v):
+            for row in v.as_array() ?? []:
+                val name = _library_unit_sdn_text(row, "unit")
+                val iface = _library_unit_sdn_text(row, "iface")
+                if name == "" or iface == "":
+                    return Err("receipt.sdn: dependency row without unit/iface")
+                deps.push((name, iface))
+        case None:
+            return Err("receipt.sdn: deps is missing")
+    val recomputed = library_unit_cache_key_v1(producer, source_digest, deps)
+    if recomputed != unit_key:
+        return Err("receipt.sdn: unit_key {unit_key} is not the key of its producer/source/deps ({recomputed})")
+    val failed_modules = _library_unit_sdn_texts(root, "failed_modules")
+    if verdict == LIBRARY_UNIT_VERDICT_FAILED_V1:
+        if failed_modules.len() == 0:
+            return Err("receipt.sdn: verdict failed without failed_modules")
+    elif verdict == LIBRARY_UNIT_VERDICT_OK_V1:
+        if failed_modules.len() > 0:
+            return Err("receipt.sdn: verdict ok with failed_modules")
+    else:
+        return Err("receipt.sdn: verdict '{verdict}' is not ok|failed")
+    Ok(LibraryUnitReceiptV1(unit: unit, unit_key: unit_key, scope_key: scope_key,
+        producer_identity: producer, source_digest: source_digest, iface_digest: iface_digest,
+        deps: deps, objects: _library_unit_sdn_texts(root, "objects"), verdict: verdict,
+        failed_modules: failed_modules))
+
+# Toolchain rule: LLVM only. Unit archives are written by llvm-ar; the shared
+# `find_archive_portable` fallback to binutils `ar` / `lib.exe` is refused here
+# (a separate lane removes GCC/binutils fallbacks repo-wide).
+pub fn library_unit_archiver_accepts_v1(path: text) -> bool:
+    if path == "":
+        return false
+    var base = path
+    val slash = base.last_index_of("/")
+    if slash >= 0:
+        base = base[slash + 1:]
+    val backslash = base.last_index_of("\\")
+    if backslash >= 0:
+        base = base[backslash + 1:]
+    if base.ends_with(".exe"):
+        base = base[0:base.len() - 4]
+    base.starts_with("llvm-ar")
+
+# SIMPLE_AR when set, else the portable lookup — accepted only if it is llvm-ar.
+pub fn library_unit_archiver_v1() -> Result<text, text>:
+    val configured = env_get("SIMPLE_AR")
+    val candidate = if configured != "": configured else: find_archive_portable()
+    if library_unit_archiver_accepts_v1(candidate):
+        return Ok(candidate)
+    val found = if candidate == "": "none" else: "'{candidate}'"
+    Err("unit archives require llvm-ar (found {found}); install LLVM or set SIMPLE_AR to an llvm-ar")
+
+# Archive `<dir>/objects/<name>` for every name into `<dir>/lib<unit>.a` through
+# the existing response-file command builder. Write-once and lockless: the
+# archive is built at a temp path and renamed into place, so a reader never
+# sees a partial file and a lane that lost the race keeps the existing archive.
+# Fails closed on no llvm-ar, no objects or a missing object.
+pub fn library_unit_archive_write_v1(dir: text, unit: text, objects: [text]) -> Result<text, text>:
+    if objects.len() == 0:
+        return Err("unit '{unit}': no objects to archive")
+    var paths: [text] = []
+    for name in objects:
+        val path = "{dir}/objects/{name}"
+        if not file_exists(path):
+            return Err("unit '{unit}': object '{path}' does not exist")
+        paths.push(path)
+    val archiver = match library_unit_archiver_v1():
+        case Ok(a): a
+        case Err(e): return Err("unit '{unit}': {e}")
+    val archive = library_unit_archive_path_v1(dir: dir, unit: unit)
+    if file_exists(archive):
+        return Ok(archive)
+    val tmp = "{archive}.tmp.{getpid()}"
+    val _stale_tmp = file_delete(tmp)
+    val cmd: ArchiveCommand = archive_command_build(archiver, get_host_os(), tmp, paths)
+    if cmd.response_path != "":
+        if not file_write(cmd.response_path, cmd.response_body):
+            return Err("unit '{unit}': cannot write archiver response file {cmd.response_path}")
+    val (_stdout, stderr, code) = process_run(archiver, cmd.argv)
+    if cmd.response_path != "":
+        val _rsp = file_delete(cmd.response_path)
+    if code != 0:
+        val _partial = file_delete(tmp)
+        return Err("unit '{unit}': archiver {archiver} exited {code}: {stderr}")
+    if not file_exists(tmp):
+        return Err("unit '{unit}': archiver {archiver} exited 0 but wrote no {tmp}")
+    if file_exists(archive):
+        # another lane published the same unit_key first: keep theirs
+        val _lost = file_delete(tmp)
+        return Ok(archive)
+    if not file_rename(tmp, archive):
+        val _unrenamed = file_delete(tmp)
+        return Err("unit '{unit}': cannot rename {tmp} to {archive}")
+    Ok(archive)
+
+# Write-once: Err when a receipt already exists under this unit_key dir (the
+# existing receipt is the owner; the caller reuses it).
+pub fn library_unit_receipt_publish_v1(dir: text, r: LibraryUnitReceiptV1) -> Result<text, text>:
+    val path = library_unit_receipt_path_v1(dir)
+    if file_exists(path):
+        return Err("receipt.sdn: {path} already published")
+    if file_atomic_write(path, library_unit_receipt_encode_v1(r)):
+        Ok(path)
+    else:
+        Err("receipt.sdn: cannot write {path}")
+
+pub fn library_unit_receipt_read_v1(dir: text) -> Result<LibraryUnitReceiptV1, text>:
+    val path = library_unit_receipt_path_v1(dir)
+    if not file_exists(path):
+        return Err("receipt.sdn: {path} does not exist")
+    library_unit_receipt_decode_v1(file_read(path))
+
+# Reuse decision: Ok(archive path) only for a verified receipt with verdict ok
+# AND the archive on disk; Err says why the unit cannot be reused.
+pub fn library_unit_archive_complete_v1(dir: text, unit: text) -> Result<text, text>:
+    val r = match library_unit_receipt_read_v1(dir):
+        case Ok(v): v
+        case Err(e): return Err(e)
+    if r.unit != unit:
+        return Err("receipt.sdn names unit '{r.unit}', expected '{unit}'")
+    if r.verdict != LIBRARY_UNIT_VERDICT_OK_V1:
+        return Err("unit '{unit}' receipt verdict is '{r.verdict}'")
+    val archive = library_unit_archive_path_v1(dir: dir, unit: unit)
+    if not file_exists(archive):
+        return Err("unit '{unit}' receipt is ok but {archive} is missing")
+    Ok(archive)

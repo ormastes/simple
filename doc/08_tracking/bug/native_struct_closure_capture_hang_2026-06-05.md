@@ -69,3 +69,7 @@ read-only captures; see `test/01_unit/interpreter/closure_capture_writeback_spec
 and PR #8238 work/p2-closure-capture-writeback). **Grant:** one run of the
 exact 2026-06-05 repro on a native lane with the backed channel runtime
 (Linux hosted link) to close the residual.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**STALE/blocked (confirmed)** — ne17: the literal --native flag is gone; minimal struct-capture native codegen WORKS (prints 42 under cranelift); the exact channel repro cannot evaluate here (rt_channel_* unbacked on the Windows core-c lane). Closure-capture semantics re-owned 2026-09-27 by PR #8238. Grant: one exact-repro run on a Linux lane with the backed channel runtime.

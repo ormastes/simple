@@ -955,19 +955,30 @@ case "${SIMPLE_BOOTSTRAP_WHOLE_PROGRAM:-}" in
      stage3_whole_program_env=SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1 ;;
   *) echo "error: SIMPLE_BOOTSTRAP_WHOLE_PROGRAM must be unset or exactly 1" >&2; exit 1 ;;
 esac
-# Per-file pipeline knob (P-F): SIMPLE_FILE_WORKERS. Unset => compiler default
-# (NATIVE_PER_FILE_PIPELINE_DEFAULT_V1 in native_file_worker_v1.spl). When
-# set (exactly 0 or 1) it is passed to the Stage 3 child AND hashed into
-# the args receipt; unset adds nothing, so existing receipts stay resumable. The
-# worker receives them as a lane suffix (per-file:fw=0|1).
+# Per-file pipeline knob (P-F): SIMPLE_FILE_WORKERS env > config/bootstrap.sdn
+# stage3_file_workers > unset (compiler default NATIVE_PER_FILE_PIPELINE_DEFAULT_V1
+# in native_file_worker_v1.spl); bootstrap_select_stage3_file_workers in
+# bootstrap-jobs.shs. A selected value (exactly 0 or 1) is passed to the Stage 3
+# child AND hashed into the args receipt; unset adds nothing.
+# Go-to-end: SIMPLE_BOOTSTRAP_GO_TO_END (default 1, 0 stops at the first
+# failing module), the same knob and default as the bootstrap-from-scratch.sh
+# Stage 3, forwarded as SIMPLE_NATIVE_GO_TO_END. Both reach the env -i worker
+# as per-file lane items (per-file:fw=0|1:gte=0|1), in that order.
+. "$root/scripts/bootstrap/bootstrap-jobs.shs"
+bootstrap_select_stage3_file_workers "$root/config/bootstrap.sdn" || exit 1
+echo "Stage 3 file workers: ${stage3_file_workers:-compiler default} (source: $stage3_file_workers_source)"
+stage3_go_to_end=1
+[ "${SIMPLE_BOOTSTRAP_GO_TO_END:-1}" != 0 ] || stage3_go_to_end=0
 stage3_per_file_env= stage3_per_file_lane=
-case "${SIMPLE_FILE_WORKERS:-}" in
-  '') ;;
-  0|1) stage3_per_file_env="SIMPLE_FILE_WORKERS=$SIMPLE_FILE_WORKERS"
-       stage3_per_file_lane=":fw=$SIMPLE_FILE_WORKERS" ;;
-  *) echo "error: SIMPLE_FILE_WORKERS must be unset, 0 or 1" >&2; exit 1 ;;
-esac
-case "$stage3_lowering_lane" in per-file) stage3_lowering_lane="per-file$stage3_per_file_lane" ;; esac
+if [ "$stage3_lowering_lane" = per-file ]; then
+  if [ -n "$stage3_file_workers" ]; then
+    stage3_per_file_env="SIMPLE_FILE_WORKERS=$stage3_file_workers"
+    stage3_per_file_lane=":fw=$stage3_file_workers"
+  fi
+  stage3_per_file_env="${stage3_per_file_env:+$stage3_per_file_env }SIMPLE_NATIVE_GO_TO_END=$stage3_go_to_end"
+  stage3_per_file_lane="$stage3_per_file_lane:gte=$stage3_go_to_end"
+  stage3_lowering_lane="per-file$stage3_per_file_lane"
+fi
 stage3_cold_init_env=
 case "${SIMPLE_SCV_INVENTORY_COLD_INIT:-}" in
   '') ;;
@@ -985,6 +996,29 @@ if [ -n "$stage3_compiler_ceiling_env" ]; then
   bootstrap_tree_rss_resolve "$stage3_threads" "$root" || \
     bootstrap_stage3_error "$bootstrap_tree_rss_refusal"
   stage3_compiler_cap=$bootstrap_tree_rss_cap_kib
+elif [ "$stage3_guard_watch" = linux-proc-memavailable ]; then
+  # No elevated ceiling: give the compiler tree the MemoryHigh budget this
+  # admission already reserved, within the default hard ceiling
+  # (bootstrap_tree_rss_stage3_default_cap_kib), instead of the 8 GiB
+  # compile-worker default. SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB, when set,
+  # overrides it; either value is re-validated against that ceiling here and
+  # again by the transcript owner.
+  . "$root/scripts/bootstrap/lib/tree-rss-policy.shs"
+  bootstrap_tree_rss_resolve "$stage3_threads" "$root" || \
+    bootstrap_stage3_error "$bootstrap_tree_rss_refusal"
+  if [ -n "${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB:-}" ]; then
+    # Operator pair: transported bare, attributed explicit-env by the owner.
+    stage3_compiler_cap=$bootstrap_tree_rss_cap_kib
+    stage3_compiler_cap_source=SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB
+  else
+    # Code default: transported as CAP:SOURCE:BOUND so the worker publishes
+    # the attribution and the receipt never records it as an operator pair.
+    stage3_compiler_cap=$(bootstrap_tree_rss_stage3_default_cap_attributed \
+      "$SIMPLE_BOOTSTRAP_STAGE3_MEMORY_HIGH_MIB" "$bootstrap_tree_rss_ceiling_kib") || \
+      bootstrap_stage3_error 'invalid derived Stage 3 compiler RSS cap'
+    stage3_compiler_cap_source="MemoryHigh ${SIMPLE_BOOTSTRAP_STAGE3_MEMORY_HIGH_MIB} MiB, hard ceiling ${bootstrap_tree_rss_ceiling_kib} KiB, attribution ${stage3_compiler_cap#*:}"
+  fi
+  echo "Stage 3 compiler tree RSS cap: ${stage3_compiler_cap%%:*} KiB (${stage3_compiler_cap_source})"
 fi
 stage3_args=$(bootstrap_stage3_args_sha256 \
   "RUST_LOG=error" "LIBRARY_PATH=" "SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=absent" \

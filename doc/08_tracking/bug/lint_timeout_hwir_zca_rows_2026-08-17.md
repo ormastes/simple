@@ -434,3 +434,7 @@ Lane interp9 re-triaged this row together with
 Not re-run in this lane: the guard (it lints a committed fixture inside a
 240 s budget; this Windows lane spent its budget on the eight assigned
 rows' seed-smoke evidence). Nothing in this addendum changes lint behaviour.
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with the recorded addendum: the dominant lint cost term remains the interpreted frontend (documented, not a superlinear parser); the zca_rows seed-smoke evidence stands. No in-lane change.

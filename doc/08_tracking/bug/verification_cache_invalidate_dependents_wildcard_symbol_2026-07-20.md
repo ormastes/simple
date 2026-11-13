@@ -62,3 +62,14 @@ Do not propagate the `"*"` sentinel into `changed_keys` (skip the `unit.source_s
 bin/release/x86_64-unknown-linux-gnu/simple test test/00_formal_verification/compiler/cache_correctness_spec.spl --no-session-daemon
 ```
 Failing example: "Verification Cache > invalidate_dependents > removes cached entries for units depending on changed module".
+
+
+## 2026-11-13 re-verification (lane p3-io, work/p3-io-20261113)
+
+Status line above is stale. The fix landed as `48ec132b097`
+("fix(verification): \"*\" file-level wildcard was a cache-wide invalidation
+key"); the propagating `changed_keys` no longer treats the `"*"` sentinel as a
+dependency key. On this branch the pinned spec
+`test/00_formal_verification/compiler/cache_correctness_spec.spl` passes **22/22**
+(`--mode=interpreter --no-cache`, seed bin/simple.exe). Confirmed RESOLVED; no
+source change in this closure.

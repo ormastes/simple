@@ -202,3 +202,11 @@ lane's tree at `790b54f7c4fc`: `sh scripts/check/check-tierless-std-js-imports.s
 import rewrite plus the JsRuntime tier relocation `ca7a7b84b274` inside PR
 #8159 repointed the four browser-engine consumers, and the rewrite holds).
 No source change on this branch. Remaining exposure per round 15 unchanged.
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b bookkeeping)
+
+SUPERSEDED 2026-11-11 (common/js made tier-explicit, lane p3-lib3) per in-file addendum. No contrary evidence found in this pass; header status left as the
+owning lane recorded it.
