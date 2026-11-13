@@ -82,6 +82,14 @@ fn is_interp_builtin_fn(name: text) -> bool:
      # direct_name == "len" intercept in lower_call).
      name == "len")
 
+fn is_interp_only_builtin_fn(name: text) -> bool:
+    """Interpreter builtins (`is_interp_builtin_fn`) with NO native MIR
+    lowering: bare and unimported, MIR has no owner for them. print, panic,
+    int, len, str, ... are lowered natively by name and stay accepted."""
+    name == "env_get" or name == "env_set" or name == "type_of" or
+        name == "file_exists" or name == "file_read" or name == "file_write" or
+        name == "file_delete" or name == "file_is_regular_no_follow"
+
 fn primitive_cast_type_kind(name: text) -> HirTypeKind?:
     """`i32(x)`-style primitive casts: a fixed-width numeric type name used
     as a call target is a CAST, not a function call. These names are not in
@@ -549,6 +557,13 @@ impl HirLowering:
         # the receiver resolves to a NamedVar carrying the name. Emit one so
         # it reaches that routing instead of failing to compile.
         val is_result_or_option_type_name = name == "Result" or name == "Option"
+        # Compiled lanes: an interpreter-only builtin MIR cannot lower is a
+        # missing import. The fallback below would synthesize a module-less
+        # symbol that MIR can only stamp MirCallOrigin.Unknown (run-21 Phase 3
+        # SIGABRT, driver_pipeline_lowering bare `env_get`).
+        if self.forbid_interp_builtin_fallback and is_interp_only_builtin_fn(name):
+            self.error("[E-HIR-BUILTIN-IMPORT-001] `{name}` is not imported here: it resolves only to the interpreter-only builtin, which has no native lowering; import it from its std module (e.g. `use std.io_runtime` accessors) at {span.file}:{span.line}:{span.col}", span)
+            return HirExprKind.Error
         if is_interp_builtin_fn(name) or is_bootstrap_builtin or is_result_variant or is_option_variant or is_result_or_option_type_name or is_gpu_builtin:
             val symbol_type = if is_bootstrap_builtin:
                 bootstrap_builtin_signature(name, span)
