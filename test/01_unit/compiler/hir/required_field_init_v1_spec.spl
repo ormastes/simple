@@ -42,6 +42,9 @@ use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_create_exclusive}
 use std.common.crypto.sha256.{sha256_text}
 use compiler.driver.driver_hir_cache.{hir_cache_key}
 use compiler.driver.managed_parse_group.{managed_parse_group_feature_identity_v1}
+use compiler.driver.parse_result_provider_seam_v1.{parse_result_normalize_module_v1, parse_result_normalized_output_same_v1}
+use compiler.frontend.parser_types.{ParserModule}
+use compiler.hir.hir_lowering.module_surface_declarations.{ModuleSurfaceParserOwner, module_surface_owner_value}
 
 fn check(source: text, name: text) -> RequiredInitReportV1:
     val filename = "required_init_" + name + ".spl"
@@ -83,6 +86,10 @@ fn gated(source: text, name: text, mode: text) -> text:
                 case _: "error"
             out = out + severity + ":" + e.message.split(":")[0] + ";"
     out
+
+fn module_of(source: text, name: text) -> ParserModule:
+    val filename = "required_init_module_" + name + ".spl"
+    parse_full_frontend(source, filename, filename, Logger(level: 0))
 
 fn parses(source: text, name: text) -> bool:
     val filename = "required_init_parse_" + name + ".spl"
@@ -221,6 +228,47 @@ describe "Required field initialization":
         expect(parses(named_first, "named_first")).to_equal(true)
         expect(codes(check(named_first, "named_first"))).to_equal("")
 
+    it "keeps MIR's mapping at the edges: surplus positionals, unknown names, and defaulted fields":
+        # @req REQ-IMM-ASY-01
+        step("All positional, and more positionals than fields: the surplus is dropped, no row")
+        val all_pos = NODE_CLASS + "fn make() -> HirNode:\n    HirNode(1, \"b\", 2)\n"
+        expect(codes(check(all_pos, "all_pos"))).to_equal("")
+        val surplus = NODE_CLASS + "fn make() -> HirNode:\n    HirNode(1, \"b\", 2, 3)\n"
+        expect(codes(check(surplus, "surplus"))).to_equal("")
+        step("A name that matches no field claims no slot, so the positionals still fill id and body")
+        val unknown = NODE_CLASS + "fn make() -> HirNode:\n    HirNode(1, \"b\", nope: 4)\n"
+        expect(codes(check(unknown, "unknown_name"))).to_equal("E_ATTR_REQUIRED_UNINIT:HirNode.inferred;")
+        step("A positional fills the next unclaimed field in declared order even when it has a default")
+        val dflt = "class Dflt:\n    id: i64\n    note: text = \"n\"\n    count: i64\n"
+        val named_count = dflt + "fn make() -> Dflt:\n    Dflt(1, count: 2)\n"
+        expect(codes(check(named_count, "dflt_named"))).to_equal("")
+        val shifted = dflt + "fn make() -> Dflt:\n    Dflt(1, \"m\")\n"
+        expect(codes(check(shifted, "dflt_shifted"))).to_equal("E_ATTR_REQUIRED_UNINIT:Dflt.count;")
+
+    it "judges struct declarations and struct-literal constructions like class calls":
+        # @req REQ-IMM-ASY-03
+        step("A struct constructed by call omits `y`")
+        val st = "struct P:\n    x: i64\n    y: i64\nfn make() -> P:\n    P(x: 1)\n"
+        expect(codes(check(st, "struct_call"))).to_equal("E_ATTR_REQUIRED_UNINIT:P.y;")
+        step("A struct literal `T { f: v }` omits `inferred`")
+        val lit = NODE_CLASS + "fn make() -> HirNode:\n    HirNode { id: 1, body: \"b\" }\n"
+        expect(codes(check(lit, "struct_lit"))).to_equal("E_ATTR_REQUIRED_UNINIT:HirNode.inferred;")
+
+    it "renders each field type into the ATTR-01 conflict message":
+        # @req REQ-IMM-ATTR-01
+        val src = "class Holder:\n    n: i64\nclass Box<T>:\n    v: T\n" +
+            "@node_tree(\"k\")\nclass A:\n    a: [i64]\n    b: Dict<text, i64>\n    c: f64\n    d: bool\n    e: Holder\n    f: u8\n    g: Box<i64>\n    h: char\n" +
+            "@node_tree(\"k\")\nclass B:\n    a: i64\n    b: i64\n    c: i64\n    d: i64\n    e: i64\n    f: i64\n    g: i64\n    h: i64\n"
+        val report = check(src, "attr01_keys")
+        expect(codes(report)).to_equal("E_ATTR_TYPE_CONFLICT:B.a;E_ATTR_TYPE_CONFLICT:B.b;E_ATTR_TYPE_CONFLICT:B.c;" +
+            "E_ATTR_TYPE_CONFLICT:B.d;E_ATTR_TYPE_CONFLICT:B.e;E_ATTR_TYPE_CONFLICT:B.f;" +
+            "E_ATTR_TYPE_CONFLICT:B.g;E_ATTR_TYPE_CONFLICT:B.h;")
+        var messages = ""
+        for row in report.rows:
+            messages = messages + row.message + "\n"
+        for key in ["`[i64]`", "`\{text:i64\}`", "`f64`", "`bool`", "`Holder`", "`u8`", "`Box<i64>`", "`char`"]:
+            expect(messages.contains(key)).to_equal(true)
+
 describe "Required field initialization gate (SIMPLE_REQUIRED_INIT_CHECK)":
     it "is off by default: an unannotated module lowers with no verifier diagnostic":
         # @req REQ-IMM-ASY-03
@@ -272,6 +320,19 @@ describe "Required field initialization gate (SIMPLE_REQUIRED_INIT_CHECK)":
         step("No marker under env off stays silent")
         expect(gated(body, "mod_none", "off")).to_equal("")
 
+    it "keeps the module opt-in through the async desugar rebuild":
+        # @req REQ-IMM-ASY-03
+        step("A module with an async fn is rebuilt by desugar_async; the mode must survive it")
+        val async_src = "@required_init(error)\n" + NODE_CLASS + "fn make() -> HirNode:\n    HirNode(id: 1)\n" +
+            "async fn later() -> i64:\n    1\n"
+        expect(gated(async_src, "mod_async", "off")).to_equal("error:E_ATTR_REQUIRED_UNINIT;error:E_ATTR_REQUIRED_UNINIT;")
+
+    it "ignores a module mode other than error or warning":
+        # @req REQ-IMM-ASY-03
+        val body = NODE_CLASS + "fn make() -> HirNode:\n    HirNode(id: 1)\n"
+        expect(module_of("@required_init(off)\n" + body, "mod_bad_off").required_init_mode).to_equal("")
+        expect(gated("@required_init(strict)\n" + body, "mod_bad_strict", "off")).to_equal("")
+
 describe "Required field initialization gate identity":
     it "folds the gate into the HIR cache key only when it is not off, and not into the parse identity":
         # @req REQ-IMM-ASY-03
@@ -290,3 +351,28 @@ describe "Required field initialization gate identity":
         expect(key_under(path, "error") == warning_key).to_equal(false)
         step("The managed-parse feature identity does not move with the gate")
         expect(parse_identity_under("warning")).to_equal(parse_identity_under(""))
+
+    it "adds the module opt-in to the parse node digest only when set, and keeps it through the module-surface owner":
+        # @req REQ-IMM-ASY-03
+        val src = NODE_CLASS
+        val plain = module_of(src, "digest")
+        expect(plain.required_init_mode).to_equal("")
+        var as_error = module_of(src, "digest")
+        as_error.required_init_mode = "error"
+        var as_warning = module_of(src, "digest")
+        as_warning.required_init_mode = "warning"
+        val path = "required_init_digest.spl"
+        val plain_out = parse_result_normalize_module_v1(plain, src, path, [])
+        step("An unset mode adds no material: two unmarked parses normalize identically")
+        expect(parse_result_normalized_output_same_v1(plain_out,
+            parse_result_normalize_module_v1(module_of(src, "digest"), src, path, []))).to_equal(true)
+        step("error and warning each move the node digest")
+        val error_out = parse_result_normalize_module_v1(as_error, src, path, [])
+        val warning_out = parse_result_normalize_module_v1(as_warning, src, path, [])
+        expect(parse_result_normalized_output_same_v1(plain_out, error_out)).to_equal(false)
+        expect(parse_result_normalized_output_same_v1(error_out, warning_out)).to_equal(false)
+        step("The module-surface owner round trip keeps the mode")
+        val marked = module_of("@required_init(error)\n" + src, "owner_marked")
+        expect(marked.required_init_mode).to_equal("error")
+        expect(module_surface_owner_value(ModuleSurfaceParserOwner.new(marked)).required_init_mode).to_equal("error")
+        expect(module_surface_owner_value(ModuleSurfaceParserOwner.new(plain)).required_init_mode).to_equal("")
