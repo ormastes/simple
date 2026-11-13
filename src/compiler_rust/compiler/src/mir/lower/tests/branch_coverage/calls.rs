@@ -856,7 +856,7 @@ fn code_and_split(value: text) -> i64:
         ("rt_string_trim", 1),
         ("rt_string_to_lower", 1),
         ("rt_string_to_upper", 1),
-        ("rt_slice", 4),
+        ("rt_slice_text_bytes", 4),
         ("rt_string_char_code_at", 2),
     ] {
         assert!(

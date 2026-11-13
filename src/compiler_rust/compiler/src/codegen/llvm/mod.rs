@@ -94,7 +94,7 @@ pub(crate) fn resolved_text_runtime_method(func_name: &str) -> Option<&'static s
         "split" => Some("rt_string_split"),
         "starts_with" => Some("rt_string_starts_with"),
         "rfind" => Some("rt_string_rfind"),
-        "substring" => Some("rt_slice"),
+        "substring" => Some("rt_slice_text_bytes"),
         "char_code_at" => Some("rt_string_char_code_at"),
         _ => None,
     }
@@ -147,7 +147,7 @@ mod qualified_runtime_method_tests {
             ("lib__common__string_core__str_dot_split", "rt_string_split"),
             ("lib__common__string_core__str_dot_starts_with", "rt_string_starts_with"),
             ("lib__common__string_core__str_dot_rfind", "rt_string_rfind"),
-            ("lib__common__string_core__str_dot_substring", "rt_slice"),
+            ("lib__common__string_core__str_dot_substring", "rt_slice_text_bytes"),
             (
                 "lib__common__string_core__str_dot_char_code_at",
                 "rt_string_char_code_at",

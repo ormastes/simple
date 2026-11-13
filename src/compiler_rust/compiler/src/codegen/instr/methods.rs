@@ -495,7 +495,7 @@ pub(crate) fn compile_builtin_method<M: Module>(
         | ("String", "to_f64")
         | ("string", "to_f64") => Some(call_runtime_1(ctx, builder, "rt_string_to_float", receiver_val)),
         ("Array", "slice") | ("array", "slice") | ("String", "slice") | ("string", "slice") => {
-            let slice_id = ctx.runtime_funcs["rt_slice"];
+            let slice_id = ctx.runtime_funcs["rt_slice_text_bytes"];
             let slice_ref = ctx.module.declare_func_in_func(slice_id, builder.func);
             let start = ctx.get_vreg(&args[0])?;
             let end = if args.len() > 1 {

@@ -563,7 +563,7 @@ fn test_jit_f64_call_result_print() {
 // Root cause: on Windows, `dlsym_resolves` unconditionally returned `true`
 // ("Conservative on Windows: assume resolvable"), so `jit_import_resolves`
 // could never say a directly-called `Linkage::Import` was unresolvable and
-// `first_unresolved_import_called` never fired on that platform. A call to a
+// `unresolved_imports_called` never fired on that platform. A call to a
 // cross-module Simple function symbol that cranelift-jit itself cannot
 // resolve (no registered runtime symbol, no process/CRT export — exactly the
 // shape of an `app.*`-module function call, or a function reached only
