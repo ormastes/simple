@@ -16,12 +16,17 @@ use compiler.backend.native.operand_utils.{get_phys_reg_id, get_mem_base_id, get
 use compiler.backend.native.mach_inst.{AARCH64_X0, AARCH64_X1, AARCH64_X2, AARCH64_X3, AARCH64_X4, AARCH64_X5, AARCH64_X6, AARCH64_X7, AARCH64_X8, AARCH64_X9, AARCH64_X10, AARCH64_X11, AARCH64_X12, AARCH64_X13, AARCH64_X14, AARCH64_X15, AARCH64_X16, AARCH64_X17, AARCH64_X18, AARCH64_X19, AARCH64_X20, AARCH64_X21, AARCH64_X22, AARCH64_X23, AARCH64_X24, AARCH64_X25, AARCH64_X26, AARCH64_X27, AARCH64_X28, AARCH64_X29, AARCH64_X30, AARCH64_SP}
 use compiler.backend.native.mach_inst.{A64_OP_MOV, A64_OP_MOVZ, A64_OP_MOVK, A64_OP_ADD, A64_OP_SUB, A64_OP_MUL, A64_OP_SDIV, A64_OP_AND, A64_OP_ORR, A64_OP_EOR, A64_OP_LSL, A64_OP_ASR, A64_OP_LSR, A64_OP_NEG, A64_OP_CMP, A64_OP_CSET, A64_OP_B, A64_OP_BEQ, A64_OP_BNE, A64_OP_BLT, A64_OP_BGE, A64_OP_BGT, A64_OP_BLE, A64_OP_BL, A64_OP_RET, A64_OP_LDR, A64_OP_STR, A64_OP_LDR_W, A64_OP_STR_W, A64_OP_STP, A64_OP_LDP, A64_OP_ADRP, A64_OP_ADD_IMM, A64_OP_SUB_IMM, A64_OP_NOP, A64_OP_BRK, A64_OP_CBZ, A64_OP_CBNZ, A64_OP_RBIT, A64_OP_CLZ, A64_OP_REV, A64_OP_XRAY_SLED}
 use compiler.backend.native.xray_sled_emit.{xray_sled_template_aarch64, XRAY_TRAMPOLINE_SYMBOL_V1}
+use std.common.isa.a64_encode_v1.{a64_add_imm_v1, a64_sub_imm_v1, a64_ldr_x_v1, a64_str_x_v1, a64_stp_x_v1, a64_ldp_x_v1}
 
 # ============================================================================
 # Encoding Helpers
 # ============================================================================
 
-# Emit a 32-bit instruction as 4 little-endian bytes
+# Emit a 32-bit instruction as 4 little-endian bytes. Kept module-local on
+# purpose (hot path): a call through a shared cross-module helper measured
+# 1.4x on the ELF writer's identical helpers under the seed interpreter
+# (doc/03_plan/compiler/aspect_dynload/xray_v1_integration_status_2026-11-03.md,
+# "Review round 1 fixes"; mechanism: seed_cross_module_call_overhead_2026-11-13).
 fn emit_u32_le(buf: [i64], value: i64) -> [i64]:
     var masked = value
     if masked < 0:
@@ -89,14 +94,14 @@ val JUMP_BCOND: i64 = 1       # Conditional B.cond (imm19)
 val JUMP_CBZ: i64 = 2         # CBZ (imm19)
 val JUMP_CBNZ: i64 = 3        # CBNZ (imm19)
 
-fn a64_new_encode_context() -> A64EncodeContext:
+pub fn a64_new_encode_context() -> A64EncodeContext:
     A64EncodeContext(code: [], relocations: [], block_offsets: {}, pending_jumps: [])
 
 # ============================================================================
 # Instruction Encoding
 # ============================================================================
 
-fn encode_inst_aarch64(ectx: A64EncodeContext, inst: MachInst) -> A64EncodeContext:
+pub fn encode_inst_aarch64(ectx: A64EncodeContext, inst: MachInst) -> A64EncodeContext:
     var code = ectx.code
     var relocs = ectx.relocations
     var pending = ectx.pending_jumps
@@ -292,40 +297,32 @@ fn encode_inst_aarch64(ectx: A64EncodeContext, inst: MachInst) -> A64EncodeConte
         val rn = get_phys_reg_id(inst.operands[1])
         match inst.operands[2].kind:
             case Sym(name):
+                # Relocation placeholder (imm12 filled by reloc 277); the literal
+                # form is pinned by global_addr_aarch64_riscv64_contract_spec.
                 val reloc_offset = code.len()
                 val encoding = 0x91000000 | (((rn) << 5)) | rd
                 code = emit_u32_le(code, encoding)
                 relocs.push(EncodedReloc(offset: reloc_offset, symbol_name: name, reloc_type: 277, addend: 0))
             case _:
-                val imm12 = get_imm_value(inst.operands[2]) & 0xFFF
-                val encoding = 0x91000000 | (((imm12) << 10)) | (((rn) << 5)) | rd
-                code = emit_u32_le(code, encoding)
+                code = emit_u32_le(code, a64_add_imm_v1(rd, rn, get_imm_value(inst.operands[2])))
 
     elif inst.opcode == A64_OP_SUB_IMM:
         # SUB Xd, Xn, #imm12: 0xD1000000 | (((imm12) << 10)) | (((Rn) << 5)) | Rd
         val rd = get_phys_reg_id(inst.operands[0])
         val rn = get_phys_reg_id(inst.operands[1])
-        val imm12 = get_imm_value(inst.operands[2]) & 0xFFF
-        val encoding = 0xD1000000 | (((imm12) << 10)) | (((rn) << 5)) | rd
-        code = emit_u32_le(code, encoding)
+        code = emit_u32_le(code, a64_sub_imm_v1(rd, rn, get_imm_value(inst.operands[2])))
 
     elif inst.opcode == A64_OP_LDR:
         # LDR Xd, [Xn, #off]: 0xF9400000 | ((off/8) << 10) | (((Rn) << 5)) | Rd
         val rd = get_phys_reg_id(inst.operands[0])
         val base = get_mem_base_id(inst.operands[1])
-        val offset = get_mem_offset(inst.operands[1])
-        val scaled_off = (offset / 8) & 0xFFF
-        val encoding = 0xF9400000 | (((scaled_off) << 10)) | (((base) << 5)) | rd
-        code = emit_u32_le(code, encoding)
+        code = emit_u32_le(code, a64_ldr_x_v1(rd, base, get_mem_offset(inst.operands[1])))
 
     elif inst.opcode == A64_OP_STR:
         # STR Xd, [Xn, #off]: 0xF9000000 | ((off/8) << 10) | (((Rn) << 5)) | Rd
         val rd = get_phys_reg_id(inst.operands[0])
         val base = get_mem_base_id(inst.operands[1])
-        val offset = get_mem_offset(inst.operands[1])
-        val scaled_off = (offset / 8) & 0xFFF
-        val encoding = 0xF9000000 | (((scaled_off) << 10)) | (((base) << 5)) | rd
-        code = emit_u32_le(code, encoding)
+        code = emit_u32_le(code, a64_str_x_v1(rd, base, get_mem_offset(inst.operands[1])))
 
     elif inst.opcode == A64_OP_LDR_W:
         val rd = get_phys_reg_id(inst.operands[0])
@@ -349,9 +346,8 @@ fn encode_inst_aarch64(ectx: A64EncodeContext, inst: MachInst) -> A64EncodeConte
         val writeback = inst.operands.len() == 4
         val base = if writeback: get_phys_reg_id(inst.operands[2]) else: get_mem_base_id(inst.operands[2])
         val offset = if writeback: get_imm_value(inst.operands[3]) else: get_mem_offset(inst.operands[2])
-        val opcode = if writeback: 0xA9800000 else: 0xA9000000
-        val simm7 = (offset / 8) & 0x7F
-        val encoding = opcode | (simm7 << 15) | (rt2 << 10) | (base << 5) | rt1
+        # Offset form is the shared encoder; preindexed writeback stays local.
+        val encoding = if writeback: 0xA9800000 | (((offset / 8) & 0x7F) << 15) | (rt2 << 10) | (base << 5) | rt1 else: a64_stp_x_v1(rt1, rt2, base, offset)
         code = emit_u32_le(code, encoding)
 
     elif inst.opcode == A64_OP_LDP:
@@ -362,9 +358,8 @@ fn encode_inst_aarch64(ectx: A64EncodeContext, inst: MachInst) -> A64EncodeConte
         val writeback = inst.operands.len() == 4
         val base = if writeback: get_phys_reg_id(inst.operands[2]) else: get_mem_base_id(inst.operands[2])
         val offset = if writeback: get_imm_value(inst.operands[3]) else: get_mem_offset(inst.operands[2])
-        val opcode = if writeback: 0xA8C00000 else: 0xA9400000
-        val simm7 = (offset / 8) & 0x7F
-        val encoding = opcode | (simm7 << 15) | (rt2 << 10) | (base << 5) | rt1
+        # Offset form is the shared encoder; postindexed writeback stays local.
+        val encoding = if writeback: 0xA8C00000 | (((offset / 8) & 0x7F) << 15) | (rt2 << 10) | (base << 5) | rt1 else: a64_ldp_x_v1(rt1, rt2, base, offset)
         code = emit_u32_le(code, encoding)
 
     elif inst.opcode == A64_OP_B:

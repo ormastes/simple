@@ -1,0 +1,105 @@
+# @cover src/lib/common/trace/xray_native_pe_locate_v1.spl
+# @cover src/lib/common/pe/pe_image_v1.spl
+# @req REQ-XRAY-STAGE3-WIN64-LOCATE
+"""
+# XRay stage 3 — Windows x64 PE map locator
+
+A `--xray` Windows x64 image (built in memory by the linker's own PE writer,
+test/fixtures/xray/xray_win64_pe_fixture_v1.spl) is located through the
+shared PE reader: `.sxray` holds a Windows-profile map whose text_base is the
+.text RVA, every sled's CALL is decoded to the resident trampoline, and the
+manifest (RVA offsets, r-- map range, r-x code range) plus the reconstructed
+image pass the same validator and leaf admission the Linux lanes use.
+"""
+use std.spec.*
+use std.common.trace.observer_contract_v1.*
+use std.common.trace.observer_native_map_v1.*
+use std.common.trace.xray_native_map_format_v1.*
+use std.common.trace.xray_native_pe_locate_v1.*
+use std.nogc_sync_mut.trace.xray_native_sled_leaf_v1.{XrayNativeSledLeafV1}
+use test.fixtures.xray.xray_win64_pe_fixture_v1.*
+
+val BASE: i64 = 0x7ff600000000
+val PAGE: i64 = 4096
+
+fn locate(bytes: [u8]) -> Result<XrayNativePeModuleV1, TraceFailureV1>:
+    xray_native_pe_locate_v1(bytes, BASE, 7, PAGE, "C:/app/traced.dll")
+
+fn failure_of(result: Result<XrayNativePeModuleV1, TraceFailureV1>) -> u32:
+    match result:
+        case Ok(_): 0
+        case Err(failure): trace_failure_code_v1(failure)
+
+describe "Windows x64 PE map locator":
+    it "builds an RVA manifest the shared validator and the sled leaf admit":
+        val module = locate(xray_win64_fixture_image_v1()).unwrap()
+        val manifest = module.manifest
+        expect(module.text_rva).to_equal(XRAY_WIN64_FIXTURE_TEXT_RVA_V1)
+        expect(manifest.target).to_equal(XRAY_NATIVE_TARGET_WIN64_V1)
+        expect(manifest.abi_profile).to_equal(XRAY_NATIVE_ABI_PROFILE_WIN64_V1)
+        expect(manifest.image_size).to_equal(module.image.len() as u64)
+        expect(manifest.map_offset).to_equal(XRAY_WIN64_FIXTURE_MAP_RVA_V1 as u64)
+        expect(manifest.sites.len()).to_equal(6)
+        expect(manifest.functions.len()).to_equal(3)
+        expect(manifest.sites[0].offset).to_equal(0x1000u64)
+        expect(manifest.sites[1].offset).to_equal(0x1022u64)
+        expect(manifest.sites[5].offset).to_equal((0x1000 + 128 + 34) as u64)
+        for site in manifest.sites:
+            expect(site.target_offset).to_equal((XRAY_WIN64_FIXTURE_TEXT_RVA_V1 + XRAY_WIN64_FIXTURE_TRAMPOLINE_AT_V1) as u64)
+            expect(site.encoding == TraceNativeEncodingV1.X64Rel32).to_equal(true)
+        expect(manifest.ranges[0].executable).to_equal(false)
+        expect(manifest.ranges[1].executable).to_equal(true)
+        # the reconstructed image carries the OFF activation word at every sled
+        expect(module.image[0x1000] as i64).to_equal(0xEB)
+        expect(module.image[0x1001] as i64).to_equal(0x0B)
+        expect(trace_native_map_validate_v1(manifest, module.image)).to_equal(Ok(true))
+        val leaf = XrayNativeSledLeafV1.create(manifest, module.image, BASE, PAGE).unwrap()
+        expect(leaf.sites.len()).to_equal(6)
+        expect(leaf.sites[0].addr).to_equal(BASE + 0x1000)
+        expect(leaf.sites[0].width).to_equal(2)
+
+    it "answers InstrumentationAbsent for an image without .sxray":
+        val bytes = xray_win64_fixture_image_v1()
+        var renamed = bytes
+        # the section table entry name ".sxray" -> ".sxrax"
+        var at = 0
+        while at + 6 < renamed.len():
+            if renamed[at] == 46u8 and renamed[at + 1] == 115u8 and renamed[at + 2] == 120u8 and
+                    renamed[at + 3] == 114u8 and renamed[at + 4] == 97u8 and renamed[at + 5] == 121u8:
+                renamed[at + 5] = 120u8
+                at = renamed.len()
+            at = at + 1
+        expect(failure_of(locate(renamed))).to_equal(trace_failure_code_v1(TraceFailureV1.InstrumentationAbsent))
+
+    it "refuses a writable map section, a SysV-profile map and a 64-bit text_base":
+        val map_bytes = xray_map_encode_v1(xray_win64_fixture_map_v1()).unwrap()
+        expect(failure_of(locate(xray_win64_fixture_image_with_v1(map_bytes, 0xC0000040)))).to_equal(trace_failure_code_v1(TraceFailureV1.InvalidMap))
+        var sysv = xray_win64_fixture_map_v1()
+        sysv.abi_profile = XRAY_MAP_ABI_X86_64_SYSV_V1
+        val sysv_image = xray_win64_fixture_image_with_v1(xray_map_encode_v1(sysv).unwrap(), 0x40000040)
+        expect(failure_of(locate(sysv_image))).to_equal(trace_failure_code_v1(TraceFailureV1.UnsupportedProfile))
+        var wide = xray_win64_fixture_map_v1()
+        wide.text_base = 0x100001000u64
+        val wide_image = xray_win64_fixture_image_with_v1(xray_map_encode_v1(wide).unwrap(), 0x40000040)
+        expect(failure_of(locate(wide_image))).to_equal(trace_failure_code_v1(TraceFailureV1.InvalidMap))
+
+    it "refuses non-PE bytes and an unaligned or zero module base":
+        val bytes = xray_win64_fixture_image_v1()
+        expect(failure_of(locate([127u8, 69u8, 76u8, 70u8]))).to_equal(trace_failure_code_v1(TraceFailureV1.InvalidMap))
+        expect(failure_of(xray_native_pe_locate_v1(bytes, BASE + 16, 7, PAGE, "x"))).to_equal(trace_failure_code_v1(TraceFailureV1.InvalidArgument))
+        expect(failure_of(xray_native_pe_locate_v1(bytes, 0, 7, PAGE, "x"))).to_equal(trace_failure_code_v1(TraceFailureV1.InvalidArgument))
+        expect(failure_of(xray_native_pe_locate_v1(bytes, BASE, 0, PAGE, "x"))).to_equal(trace_failure_code_v1(TraceFailureV1.InvalidArgument))
+
+    it "refuses a sled whose CALL byte was tampered":
+        val map_bytes = xray_map_encode_v1(xray_win64_fixture_map_v1()).unwrap()
+        var bytes = xray_win64_fixture_image_with_v1(map_bytes, 0x40000040)
+        val image = locate(bytes).unwrap()
+        # find the .text raw pointer: the first sled's EB 0B E8 in the file
+        var at = 0
+        while at + 3 < bytes.len():
+            if bytes[at] == 0xEBu8 and bytes[at + 1] == 0x0Bu8 and bytes[at + 2] == 0xE8u8:
+                bytes[at + 2] = 0x90u8
+                at = bytes.len()
+            at = at + 1
+        expect(image.manifest.sites.len()).to_equal(6)
+        expect(failure_of(locate(bytes))).to_equal(trace_failure_code_v1(TraceFailureV1.InvalidMap))

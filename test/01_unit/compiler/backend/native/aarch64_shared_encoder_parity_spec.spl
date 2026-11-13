@@ -1,0 +1,34 @@
+# @req REQ-XRAY-SHARED-ISA-ENCODE
+# @cover src/compiler/70.backend/backend/native/encode_aarch64.spl
+"""
+# AArch64 backend encodings shared with the XRay trampoline twin
+
+ADD/SUB imm12, LDR/STR unsigned offset and the offset (non-writeback) STP/LDP
+forms in the native AArch64 encoder are produced by std.common.isa.a64_encode_v1,
+the same encoders the XRay trampoline twin uses. Golden words are the
+architectural encodings; each line pins one encoder through the backend's
+public instruction entry point.
+"""
+use std.spec
+use std.spec.step
+use compiler.backend.native.mach_inst.{A64_OP_ADD_IMM, A64_OP_SUB_IMM, A64_OP_LDR, A64_OP_STR, A64_OP_LDP, A64_OP_STP, AARCH64_X0, AARCH64_X1, AARCH64_X2, AARCH64_X3, AARCH64_X4, AARCH64_X19, AARCH64_X20, AARCH64_X29, AARCH64_SP, new_mach_inst, op_phys, op_imm, op_mem, physical_reg, Operand}
+use compiler.backend.native.encode_aarch64.{a64_new_encode_context, encode_inst_aarch64}
+
+fn code_of(opcode: i64, operands: [Operand]) -> [i64]:
+    encode_inst_aarch64(a64_new_encode_context(), new_mach_inst(opcode, operands)).code
+
+describe "AArch64 backend encoder uses the shared ISA encoders":
+    it "encodes ADD and SUB imm12":
+        step("ADD x0, x1, #16 and SUB sp, sp, #32")
+        expect(code_of(A64_OP_ADD_IMM, [op_phys(AARCH64_X0), op_phys(AARCH64_X1), op_imm(16)])).to_equal([0x20, 0x40, 0x00, 0x91])
+        expect(code_of(A64_OP_SUB_IMM, [op_phys(AARCH64_SP), op_phys(AARCH64_SP), op_imm(32)])).to_equal([0xff, 0x83, 0x00, 0xd1])
+
+    it "encodes LDR and STR with an unsigned scaled offset":
+        step("LDR x2, [x3, #24] and STR x4, [x29, #8]")
+        expect(code_of(A64_OP_LDR, [op_phys(AARCH64_X2), op_mem(physical_reg(AARCH64_X3), 24)])).to_equal([0x62, 0x0c, 0x40, 0xf9])
+        expect(code_of(A64_OP_STR, [op_phys(AARCH64_X4), op_mem(physical_reg(AARCH64_X29), 8)])).to_equal([0xa4, 0x07, 0x00, 0xf9])
+
+    it "encodes the offset pair forms":
+        step("LDP x19, x20, [sp, #16] and STP x19, x20, [sp, #16]")
+        expect(code_of(A64_OP_LDP, [op_phys(AARCH64_X19), op_phys(AARCH64_X20), op_mem(physical_reg(AARCH64_SP), 16)])).to_equal([0xf3, 0x53, 0x41, 0xa9])
+        expect(code_of(A64_OP_STP, [op_phys(AARCH64_X19), op_phys(AARCH64_X20), op_mem(physical_reg(AARCH64_SP), 16)])).to_equal([0xf3, 0x53, 0x01, 0xa9])
