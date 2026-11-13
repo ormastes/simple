@@ -259,6 +259,10 @@ Other `b795b3f4a26`/`aba2a5f0a3e` sites, same seed and scope:
 
 #### Step 3d (2026-11-13): linker folds, branch `work/spy-xray-2-20261113`
 
+> WITHDRAWN in part (see "Review round 1 fixes" below): the `export use ... as ...` writer /
+> x64 fold did not resolve on the reviewer's pinned seed and was reverted; the ELF writer and
+> the backend emitters keep module-local LE writers. The elf_parser decision below stands.
+
 - `_ElfWriter/encoding.spl` `write_u{16,32,64}_le` and `std.common.isa.x64_encode_v1`
   `x64_push_imm32_le_v1` are now ONE body each in `std.common.binary_io`
   (`bytes_i64_push_u{16,32,64}_le`), re-exported with `export use ... as ...` so no caller

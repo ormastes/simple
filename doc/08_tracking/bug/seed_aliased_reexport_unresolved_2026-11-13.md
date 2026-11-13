@@ -24,9 +24,11 @@ The defect is binary-dependent; code in the tree must not rely on it.
 
 ## Workaround in the tree
 
-Thin local wrapper functions calling the shared body (no `as` in any import or re-export) in
-`_ElfWriter/encoding.spl`, `std.common.isa.x64_encode_v1`, `backend/native/encode_aarch64.spl`
-and `linker/coff/coff_object.spl` (`coff_is_bigobj`).
+No `as` in any import or re-export. The hot emitters keep module-local bodies (thin wrappers
+over the shared body measured 1.4x on the ELF writer): `_ElfWriter/encoding.spl` and
+`backend/native/encode_x86_64.spl` are at release content, `encode_aarch64.spl` keeps its own
+`emit_u32_le`, and `std.common.isa.x64_encode_v1.x64_push_imm32_le_v1` has its own body. Only
+`linker/coff/coff_object.spl` uses a thin wrapper (`coff_is_bigobj`, called once per object).
 
 ## Next step
 

@@ -76,7 +76,8 @@ static int xray_isa_sled_calls_trampoline(uintptr_t sled, uint32_t site_id) {
 }
 
 /* Frame (0x238 bytes below rbp-after-pushes): [rsp+0x00..0x20) shadow space,
- * ymm0-15 at +0x20, MXCSR at +0x220. rbp+0x40 = saved RFLAGS, rbp+0x48 = sled return. */
+ * ymm0-15 at +0x20, MXCSR at +0x220. Above rbp: rbp+0x00..0x30 = r11 r10 r9 r8
+ * rdx rcx rax, rbp+0x38 = saved RFLAGS, rbp+0x40 = saved rbp, rbp+0x48 = sled return. */
 __asm__(
     ".text\n"
     ".globl __simple_xray_trampoline_win64_v1\n"
