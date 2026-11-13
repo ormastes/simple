@@ -103,12 +103,12 @@ Seed-signature parity: `cranelift_runtime_import_seed_parity_spec.spl` reads the
 seed's `RuntimeFuncSpec` table and the adapter's runtime-import shims as source.
 The shims include the lowering-owned `cl_is_lowering_owned_runtime` names. The
 spec fails on any new disagreement, and on any recorded one that has
-disappeared. There are 12 recorded disagreements:
+disappeared. There are 10 recorded disagreements:
 
 - Width: `rt_array_push`, `rt_array_set` and `rt_array_set_text` return an i8
   bool in the seed and are read as i64 by the shim.
-- Missing from the seed table: 9 names (`rt_raw_f64_to_string`,
-  `rt_process_*_tuple`/`_value`/`_text`, `rt_cpuid_tuple_block`,
+- Missing from the seed table: 7 names (`rt_raw_f64_to_string`,
+  `rt_process_*` (`run_timeout_tuple`, `run_bounded_bytes_tuple`, `run_owned_observed_bounded_text`, `spawn_guarded_value`), `rt_cpuid_tuple_block`,
   `rt_env_get_value`).
 
 None of these is imported by the JIT today, because each one is refused.
