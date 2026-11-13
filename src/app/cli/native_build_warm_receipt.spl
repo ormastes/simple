@@ -24,8 +24,8 @@ use std.scv.compile_snapshot.{
     scv_compile_snapshot_acquire_v1
 }
 use std.io_runtime.{
-    dir_create_all, dir_exists, dir_list, file_copy, file_delete, file_exists,
-    file_hash_sha256, file_read, file_rename, file_write, getpid,
+    dir_create_all, dir_exists, dir_list_or_empty, file_copy, file_delete, file_exists,
+    file_hash_sha256_or_shell, file_read, file_rename, file_write, getpid,
     host_os
 }
 
@@ -76,7 +76,7 @@ fn _warm_digest_text(value: text) -> text:
     val scratch = "build/.native-warm-digest-" + getpid().to_text() + ".tmp"
     if not file_write(scratch, value):
         return ""
-    val digest = file_hash_sha256(scratch)
+    val digest = file_hash_sha256_or_shell(scratch)
     val _removed = file_delete(scratch)
     if _warm_valid_digest(digest): digest else: ""
 
@@ -406,7 +406,7 @@ fn _warm_frontend_identity(
 ) -> (text, text):
     if (env_get("SIMPLE_SCV_SOURCE_DRIFTED") ?? "") == "1":
         return ("", "")
-    val binary_digest = file_hash_sha256(simple_bin)
+    val binary_digest = file_hash_sha256_or_shell(simple_bin)
     if not _warm_valid_digest(binary_digest):
         return ("", "")
     val scv_binding = _warm_scv_binding()
@@ -479,7 +479,7 @@ fn _warm_rows_valid(rows: [text]) -> bool:
             return false
         if previous != "" and path <= previous:
             return false
-        if not file_exists(path) or file_hash_sha256(path) != digest:
+        if not file_exists(path) or file_hash_sha256_or_shell(path) != digest:
             return false
         previous = path
     true
@@ -509,7 +509,7 @@ fn _warm_copy_verified_atomic(source: text, destination: text, digest: text) -> 
     val _stale = file_delete(tmp)
     if not file_copy(source, tmp):
         return false
-    if file_hash_sha256(tmp) != digest:
+    if file_hash_sha256_or_shell(tmp) != digest:
         val _corrupt = file_delete(tmp)
         return false
     if file_rename(tmp, destination):
@@ -530,7 +530,7 @@ fn _warm_rows_for_paths(paths: [text]) -> [text]:
     for path in normalized:
         if path == previous:
             continue
-        val digest = file_hash_sha256(path)
+        val digest = file_hash_sha256_or_shell(path)
         if not _warm_valid_digest(digest):
             return []
         rows.push(path + "\t" + digest)
@@ -638,7 +638,7 @@ fn _warm_runtime_and_link_inputs(args: [text]) -> ([text], bool):
             # Match the driver's runtime-provider fingerprint: linkable files
             # directly under the configured provider, never recursive cache
             # material beneath it.
-            for entry in _warm_sort_text(dir_list(runtime) ?? []):
+            for entry in _warm_sort_text(dir_list_or_empty(runtime) ?? []):
                 val path = runtime + "/" + entry
                 if (not dir_exists(path) and (path.ends_with(".a") or
                         path.ends_with(".o") or path.ends_with(".so") or
@@ -671,7 +671,7 @@ pub fn native_build_warm_candidate_publish(paths: [text]) -> bool:
     for source_path in normalized:
         if source_path == previous:
             continue
-        val digest = file_hash_sha256(source_path)
+        val digest = file_hash_sha256_or_shell(source_path)
         if not _warm_valid_digest(digest):
             return false
         rows.push(source_path + "\t" + digest)
@@ -702,7 +702,7 @@ fn _warm_receipt_hit(
     val recorded_artifact = artifact_row.substring(0, artifact_tab)
     val artifact_digest = artifact_row.substring(artifact_tab + 1)
     if (recorded_artifact != artifact_path or not _warm_valid_digest(artifact_digest) or
-            not file_exists(artifact_path) or file_hash_sha256(artifact_path) != artifact_digest):
+            not file_exists(artifact_path) or file_hash_sha256_or_shell(artifact_path) != artifact_digest):
         # Artifact swept by the size cap or damaged: the receipt can never hit.
         if recorded_artifact == artifact_path:
             val _orphan = file_delete(path)
@@ -840,7 +840,7 @@ pub fn native_build_warm_receipt_finish(
                     for runtime_path in runtime_paths:
                         input_paths.push(runtime_path)
                     val input_rows = if runtime_ok: _warm_rows_for_paths(input_paths) else: []
-                    val output_digest = file_hash_sha256(state.output_path)
+                    val output_digest = file_hash_sha256_or_shell(state.output_path)
                     val warm_root = _warm_parent_dir(state.artifact_path)
                     if (object_paths.len() > 0 and input_rows.len() > 0 and
                             _warm_valid_digest(output_digest) and
