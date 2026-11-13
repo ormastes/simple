@@ -264,3 +264,10 @@ would only be warranted if a seed change ever makes a namespace binding win agai
 ## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
 
 **FIXED (confirmed)** — Locals-win resolution change covers the confirmed for-form; prevention specs (match-shadow 6/6, local-shadows 1/1) green per ne2. Census tables retained as historical.
+
+
+---
+
+## 2026-11-13 triage (live-P3 lane l1, work/live-p3-l1-20261113, base f790f7f266e)
+
+**FIXED (confirmed)** — Census retained as historical; locals-win resolution covers the confirmed for-form. No re-run of the verdicted prevention specs per the no-green-rerun rule.

@@ -493,9 +493,17 @@ Verdicts:
   the blocker for census work; its owner is the live runner twin in
   src/lib/nogc_sync_mut, outside this lane.
 
+
+---
+
+## 2026-11-13 triage (live-P3 lane l1, work/live-p3-l1-20261113, base f790f7f266e)
+
+**SUPERSEDED at probed sites (confirmed); live residue out of lane** — Round-1/3 fixes verified standing by runner2 at this base class; the probed census symbols no longer reproduce. Residue: (a) `compiler.mir` expr_dispatch layered to a new `local` undefined (compiler lane); (b) js-engine duplicate-class collision (lib lane cause-C decision); (c) ~350 long-tail symbols still need the per-symbol probe discriminator.
+
 ## Triage 2026-11-13 (P3 tools lane)
 No code change this lane. The 2026-11-10 P3-runner2 triage in this record
 stands: the tracked clusters are SUPERSEDED on this base; the LIVE residue
 (compiler.mir expr_dispatch `undefined identifier: local`, js-engine duplicate
 classes, ~350 long-tail symbols) is owned by the compiler/js lanes per that
 verdict, outside the P3 tools lane.
+

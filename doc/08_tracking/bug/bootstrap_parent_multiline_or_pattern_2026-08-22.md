@@ -95,8 +95,16 @@ explicit runtime capsule): owned by the Rust seed lane — the capsule/bootstrap
 fixes `8a1b47a255f6` and `b91c2221514c` (both 2026-10-22, ancestors of this
 branch) are that lane's deliveries. No code change this lane.
 
+
+---
+
+## 2026-11-13 triage (live-P3 lane l1, work/live-p3-l1-20261113, base f790f7f266e)
+
+**FIXED (confirmed)** — `hir_verification_decreases_type_valid` uses one expression-bodied match arm per admitted unsigned width (8/16/32/64/128) and `match_desugaring.spl` binds `binding_pattern`, both verified in source at this base. Seed-capsule residual belongs to the Rust seed lane.
+
 ## Triage 2026-11-13 (P3 tools lane)
 No code change this lane. The 2026-11-11 (lane boot10) verdict stands per
 runaway-guard rules (verified once, not re-run): both source-side fixes are in
 tree and the named evidence spec passes. The residual item (seed's hard-wired
 runtime builder) is owned by the Rust seed lane, outside this lane.
+

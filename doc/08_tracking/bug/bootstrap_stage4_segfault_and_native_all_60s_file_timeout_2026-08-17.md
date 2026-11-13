@@ -234,3 +234,10 @@ bootstrap/stage3/<triple>/simple native-build --source src/compiler \
   --source src/app --source src/lib --entry src/app/cli/main.spl \
   --entry-closure --threads 4 -o build/stage4/simple
 ```
+
+
+---
+
+## 2026-11-13 triage (live-P3 lane l1, work/live-p3-l1-20261113, base f790f7f266e)
+
+**Mixed disposition (confirmed)** — Defect 2 SUPERSEDED (300s timeout in `src/compiler_rust/compiler/src/pipeline/native_project/mod.rs:720,728`, no 60s default); Defect 3 FIXED-observed per boot11 seed-smoke; Defect 1 (stage-4 `load_sources` SEGV at 1793-module closure) stays OPEN-BLOCKED, needs the stage-3 self-hosted binary on a POSIX host (exact command recorded in body).

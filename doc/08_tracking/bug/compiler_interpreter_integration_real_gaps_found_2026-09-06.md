@@ -191,3 +191,10 @@ seed @ 46fe8f6b6def is the build the int lanes used), routed to the
 compiler/compiler-seed lanes. The remaining gaps are seed-side
 (src/compiler_rust) contract issues; outside this no-cargo lane's fix scope.
 Disposition stands: LIVE (partial closure only).
+
+
+---
+
+## 2026-11-13 triage (live-P3 lane l1, work/live-p3-l1-20261113, base f790f7f266e)
+
+**LIVE — partial closure only (confirmed)** — Gap-1/gap-2 absorber `9e7e7a526edb` (PR #7597, `impl_duplicate_check.rs`) verified ancestor of this base. Gaps 3 (div-zero span diagnostics), 4 (export visibility), 5 (circular-import detection) remain LIVE, seed-side (`src/compiler_rust`), owned by the compiler/compiler-seed lanes.

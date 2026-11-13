@@ -181,3 +181,16 @@ P3 lane — the per-gate owner programs stand.
 ## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
 
 **LIVE (confirmed)** — ne4 re-measured on this tip: core-lib-purity FAIL (34 new), seed-extern-registry FAIL (grown), sffi-v2-authority FAIL (3 sub-guards), bodyless-parity partial. First-hand this lane: `check-rules-sdl.shs --group quick` re-run at this base prints `PASS — 10 gates checked, 0 shrank` (the ne4 lane's digest-binding repair was made on its own branch; the committed rules.sdl at this tip is digest-consistent, so no repair is needed here). All remaining red is real debt, not guard-text defects; per-gate owner programs stand.
+
+
+---
+
+## 2026-11-13 triage (live-P3 lane l1, work/live-p3-l1-20261113, base f790f7f266e)
+
+**LIVE (confirmed)** — Remaining red is real debt, not guard-text defects: core-lib-purity (34 new),
+seed-extern-registry (grown both directions), sffi-v2-authority (3 sub-guards) per ne4's
+re-measurement at this base class; bodyless-parity partial (native-build shapes B/D with the
+compiler front-end lane). First-hand this lane: `sh scripts/check/check-rules-sdl.shs --group quick`
+re-run at this exact base prints `PASS — 10 gates checked, 0 shrank, 0 skipped (ref HEAD)` — the
+committed rules.sdl is digest-consistent here, so the ne4 lane's binding repair stands merged.
+Per-gate owner programs unchanged.
