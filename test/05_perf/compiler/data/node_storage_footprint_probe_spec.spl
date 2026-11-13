@@ -1,0 +1,93 @@
+# @cover src/compiler/00.common/data/node_lifecycle_contracts.spl 10%
+"""
+## Purpose and audience
+Node-storage footprint probe (node-tree storage design, phase B): for a fixed
+compiler-module set it reports AST pool size, the RSS added by the flat pools,
+by the boxed `ParserModule` the flat bridge builds, by HIR lowering and by MIR
+lowering, plus the HIR codec blob size (position-independent, one scalar per
+line) as the allocator-independent per-node metric. Readers are the storage
+owners deciding the default mechanism per node family.
+Design: doc/05_design/compiler/data/node_tree_storage.md section 1. Category: Infrastructure.
+## Operator workflow
+systemd-run --user --scope -p MemoryMax=8G <simple> test test/05_perf/compiler/data/node_storage_footprint_probe_spec.spl
+Record the executing binary (`readlink -f`, `stat -c '%s %y'`) with every table.
+## Compatibility and limitations
+Interpreter lane. RSS (`memory_usage()`, OS truth) on a non-shrinking
+interpreter heap is an upper bound that can read ~0 or negative on reuse; use
+the repeated rows for per-phase deltas and the HIR blob bytes per AST node for
+ranking. MIR counts include runtime-fallback placeholders because modules are
+lowered without their import surfaces. Perf lane only: ~8 minutes.
+## Verification guidance and troubleshooting
+The example never fails on numbers; it fails only when a phase does not run.
+"""
+# Lifecycle: doc/05_design/compiler/data/node_tree_storage.md
+# @manual_section: Node storage footprint probe
+
+use std.spec.*
+use std.nogc_sync_mut.io.file_ops.{file_read}
+use compiler.core.types.{reset_all_pools}
+use compiler.core.parser.{parser_init_with_path}
+use compiler.core.parser_decls.{parse_module_body}
+use compiler.frontend.core.string_interpolation_expand.{expand_string_interpolations_with_placeholder_receipt}
+use compiler.frontend.flat_ast_bridge.{flat_ast_to_module}
+use compiler.core.ast.{expr_count, stmt_count}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_codec.{hir_module_encode}
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+
+extern fn memory_usage() -> i64
+
+val PROBE_MODULES: [text] = [
+    "src/compiler/00.common/data/data_schema_resolver.spl",
+    "src/compiler/20.hir/hir_lowering/attr_access_sites.spl",
+    "src/compiler/50.mir/mir_lowering_stmts.spl",
+    "src/compiler/50.mir/mir_lowering_stmts.spl"]
+
+fn mir_inst_count(mir: MirModule) -> i64:
+    var n = 0
+    for key in mir.functions.keys():
+        val f = mir.functions[key]
+        for b in f.blocks:
+            n = n + b.instructions.len() + 1
+    n
+
+fn probe(path: text) -> bool:
+    val source = file_read(path)
+    val r0 = memory_usage()
+    reset_all_pools()
+    parser_init_with_path(source, path)
+    parse_module_body()
+    val _ = expand_string_interpolations_with_placeholder_receipt(0)
+    val r1 = memory_usage()
+    val nodes = expr_count() + stmt_count()
+    val parsed = flat_ast_to_module(path)
+    val r2 = memory_usage()
+    var hir_lowering = HirLowering.with_filename(path)
+    val hir = hir_lowering.lower_module(parsed)
+    val r3 = memory_usage()
+    val blob_bytes = hir_module_encode(hir).len()
+    var lowering = MirLowering.new(hir.symbols)
+    val mir = lowering.lower_module(hir)
+    val r4 = memory_usage()
+    val insts = mir_inst_count(mir)
+    print "PROBE path={path} src_lines={source.split("\n").len()} ast_nodes={nodes} fns={parsed.functions.len()} hir_fns={hir.functions.len()} hir_blob_bytes={blob_bytes} mir_fns={mir.functions.len()} mir_insts={insts}"
+    print "PROBE   rss_delta_bytes: pools={r1 - r0} bridge={r2 - r1} hir={r3 - r2} mir={r4 - r3} | rss_start={r0}"
+    if nodes > 0:
+        print "PROBE   per_ast_node: pools_rss={(r1 - r0) / nodes} bridge_rss={(r2 - r1) / nodes} hir_rss={(r3 - r2) / nodes} hir_blob={blob_bytes / nodes}"
+    if insts > 0:
+        print "PROBE   per_mir_inst: mir_rss={(r4 - r3) / insts}"
+    nodes > 0 and hir.functions.len() > 0 and insts > 0
+
+describe "Node storage footprint probe":
+    it "reports pool, bridge, HIR and MIR footprint per module":
+        # @req REQ-ATTR-29
+        step("Parse, bridge, lower to HIR and MIR every probe module and print one PROBE block each")
+        var all_ran = true
+        for path in PROBE_MODULES:
+            if not probe(path):
+                all_ran = false
+        # @capture(exec): PROBE lines
+        step("Verify every phase produced nodes, functions and instructions")
+        expect(all_ran).to_equal(true)

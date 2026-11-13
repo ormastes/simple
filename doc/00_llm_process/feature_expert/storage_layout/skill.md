@@ -28,6 +28,8 @@
   bounds proof, exclusive temporaries, and atomic evidence output.
 - Atomic MIR owned-raw allocator operation/fact, cross-bound to declarations by
   stable allocation identity and lowered to `rt_alloc` only after admission.
+- Per-(phase, module) write-once awaitable cells (`phase_cell_declare/publish/fail/await_v1`): double publish refused, waiters released in order, await cycle is a diagnostic with the path, failed producer excluded not blocked.
+- Node-tree storage design note with measured bytes per node per phase and the exact probe command: `doc/05_design/compiler/data/node_tree_storage.md`, probe `test/05_perf/compiler/data/node_storage_footprint_probe_spec.spl` (perf lane, ~8 min, MemoryMax=8G).
 
 ## Still proposed or incomplete
 

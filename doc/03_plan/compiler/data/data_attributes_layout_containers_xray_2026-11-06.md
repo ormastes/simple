@@ -841,6 +841,8 @@ Use whole-node builders for newly constructed pilot nodes, qualified handles for
 
 Profile a real traversal and symbol-map workload, correlating pass/site with node region/object identities. Compare logical results with instrumentation off/on and every admitted representation. Only then broaden to other node families.
 
+2026-11-13 (phase B of the node-storage lane): measured first. `doc/05_design/compiler/data/node_tree_storage.md` records interpreter-lane bytes per node for AST pools, the `flat_ast_to_module` bridge (1.35-1.53 KB per AST node, 26-42% of the bridge+HIR peak), HIR (1.9-3.0 KB RSS, 150-183 B codec blob per AST node) and MIR, from `test/05_perf/compiler/data/node_storage_footprint_probe_spec.spl`; it fixes the write-once contract and the per-(phase, module) async cell (`phase_cell_*_v1` in `node_lifecycle_contracts.spl`) and sets the phase C/D/E order (bridge first, HIR arena second, MIR third), each behind the resolver with the current layout as default.
+
 ### 12.4 BuildRunner integration
 
 BuildRunner's task graph is a dependency DAG, not automatically an ownership tree. Its parallel task/status/host arrays are candidates for a generated task view, but the scheduler remains the sole transition authority. [R15]
