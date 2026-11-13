@@ -6804,6 +6804,28 @@ int64_t rt_string_char_count(int64_t value) {
     return (int64_t)spl_text_cp_len_bytes((const uint8_t*)raw, (uint64_t)strlen(raw));
 }
 
+/* to_digit on a one-character text (ADR-005): Some(0..9) for a single ASCII
+ * decimal digit, None for anything else (non-digit, empty, multi-character,
+ * non-text). C twin of rt_string_to_digit in the Rust runtime
+ * (runtime/src/value/collections.rs), which the seed codegen emits for
+ * `.to_digit()`; without it a C-runtime link of that call is unresolved.
+ * char::to_digit(10) accepts ASCII digits only, so the two lanes agree on
+ * every input, non-ASCII included. Never a silent 0. */
+int64_t rt_string_to_digit(int64_t value) {
+    RtCoreString* s = rt_core_as_string(value);
+    if (!s) {
+        int64_t promoted;
+        if (rt_string_promote_raw_receiver(value, &promoted)) {
+            return rt_string_to_digit(promoted);
+        }
+        return rt_option_none();
+    }
+    if (s->len != 1) return rt_option_none();
+    unsigned char c = (unsigned char)s->data[0];
+    if (c < '0' || c > '9') return rt_option_none();
+    return rt_option_some(rt_value_int((int64_t)(c - '0')));
+}
+
 /* capitalize: uppercase the first character, lowercase the rest (ASCII only). */
 int64_t rt_string_capitalize(int64_t value) {
     RtCoreString* s = rt_core_as_string(value);

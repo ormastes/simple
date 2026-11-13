@@ -1063,6 +1063,7 @@ int64_t  rt_string_is_alpha(int64_t value);
 int64_t  rt_string_is_alnum(int64_t value);
 int64_t  rt_string_is_whitespace(int64_t value);
 int64_t  rt_string_char_count(int64_t value);
+int64_t  rt_string_to_digit(int64_t value);
 int64_t  rt_string_capitalize(int64_t value);
 int64_t  rt_string_swapcase(int64_t value);
 int64_t  rt_string_title(int64_t value);
