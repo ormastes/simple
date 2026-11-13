@@ -1,0 +1,203 @@
+# Seed <-> pure-Simple runtime-import signature parity.
+#
+# The Rust seed lists every runtime function its JIT/AOT may import, with the
+# exact Cranelift signature, as RuntimeFuncSpec rows
+# (src/compiler_rust/compiler/src/codegen/runtime_sffi.rs). The pure-Simple
+# Cranelift lowering keeps no such table: an import's signature comes from the
+# callee's `extern fn` declaration. The one place it does hard-code runtime
+# names against signatures is the runtime-import shims in
+# cranelift_codegen_adapter.spl (`translate_runtime_import_call_<shape>`), and
+# those are the rows that can silently disagree with the seed: a float passed
+# in an integer register, or an i8 result read as i64.
+#
+# This spec reads BOTH sides as source. Every `rt_*` name the adapter routes
+# through a shim must have a seed row of the same shape, or be listed below
+# with the reason. The list is exact in both directions: a new disagreement
+# fails, and so does a listed one that no longer disagrees.
+use std.spec.*
+
+extern fn rt_file_read_text(path: text) -> text?
+
+val SEED_SPECS = "src/compiler_rust/compiler/src/codegen/runtime_sffi.rs"
+val ADAPTER = "src/compiler/70.backend/backend/cranelift_codegen_adapter.spl"
+val SHIM_CALL = "translate_runtime_import_call_"
+
+fn between(src: text, open: text, close: text) -> text:
+    val start = src.find(open)
+    if start < 0:
+        return "<none>"
+    val rest = src.substring(start + open.len())
+    val stop = rest.find(close)
+    if stop < 0:
+        return "<none>"
+    rest.substring(0, stop)
+
+fn type_list(raw: text) -> text:
+    raw.replace(" ", "").replace("\n", "").replace("types::", "")
+
+fn seed_rows(src: text) -> Dict<text, text>:
+    """name -> `P1,P2>R` for every RuntimeFuncSpec::new row, single- or multi-line."""
+    var rows: Dict<text, text> = {}
+    val chunks = src.split("RuntimeFuncSpec::new(")
+    var i = 1
+    while i < chunks.len():
+        val chunk = chunks[i]
+        val name = between(chunk, "\"", "\"")
+        val params_at = chunk.find("&[")
+        if name != "<none>" and params_at >= 0:
+            val after_params = chunk.substring(params_at + 2)
+            val params = between(chunk, "&[", "]")
+            val returns = between(after_params, "&[", "]")
+            if params != "<none>" and returns != "<none>":
+                rows[name] = "{type_list(params)}>{type_list(returns)}"
+        i = i + 1
+    rows
+
+fn quoted_rt_names(line: text) -> [text]:
+    var names: [text] = []
+    val parts = line.split("\"")
+    var k = 1
+    while k < parts.len():
+        if parts[k].starts_with("rt_"):
+            names = names.push(parts[k])
+        k = k + 2
+    names
+
+fn shim_rows(src: text) -> [text]:
+    """`name:shape` for every rt_* name the adapter sends through a shim.
+
+    A shim call either names its callee literally, or passes `name` under an
+    `if name == "rt_a" or name == "rt_b"` guard on the nearest `if` line above."""
+    var rows: [text] = []
+    var seen: Dict<text, bool> = {}
+    val lines = src.split("\n")
+    var i = 0
+    while i < lines.len():
+        val line = lines[i]
+        val at = line.find(SHIM_CALL)
+        if at >= 0 and not line.trim().starts_with("#") and not line.trim().starts_with("use "):
+            val shape = between(line.substring(at), SHIM_CALL, "(")
+            var names = quoted_rt_names(line)
+            if names.len() == 0 and line.contains("cl_module, name"):
+                var back = i - 1
+                while back >= 0 and names.len() == 0 and i - back <= 3:
+                    if lines[back].trim().starts_with("if "):
+                        names = quoted_rt_names(lines[back])
+                    back = back - 1
+            for name in names:
+                val row = "{name}:{shape}"
+                if not seen.has(row):
+                    seen[row] = true
+                    rows = rows.push(row)
+        i = i + 1
+    # `owned_rt` shim: the guard is a predicate, so read its name list.
+    var j = 0
+    while j + 1 < lines.len():
+        if lines[j].starts_with("fn cl_is_lowering_owned_runtime("):
+            for name in quoted_rt_names(lines[j + 1]):
+                val row = "{name}:i64"
+                if not seen.has(row):
+                    seen[row] = true
+                    rows = rows.push(row)
+        j = j + 1
+    rows
+
+fn expected_seed_row(shape: text, seed_row: text) -> bool:
+    val params = between("|{seed_row}", "|", ">")
+    val returns = seed_row.substring(seed_row.find(">") + 1)
+    if shape == "f64_i64":
+        return seed_row == "F64>I64"
+    if shape == "i64_f64":
+        return seed_row == "I64>F64"
+    if shape == "i64_i64_f64_i64":
+        return seed_row == "I64,I64,F64>I64"
+    # List-shaped shims pass every argument as i64; only the result differs.
+    val all_i64 = params.replace("I64", "").replace(",", "") == ""
+    if shape == "i64":
+        return all_i64 and returns == "I64"
+    if shape == "i8":
+        return all_i64 and returns == "I8"
+    if shape == "void":
+        return all_i64 and returns == ""
+    false
+
+fn divergences(shims: [text], seed: Dict<text, text>) -> [text]:
+    var out: [text] = []
+    for row in shims:
+        val colon = row.find(":")
+        val name = row.substring(0, colon)
+        val shape = row.substring(colon + 1)
+        if not seed.has(name):
+            out = out.push("{row} seed=<absent>")
+        elif not expected_seed_row(shape, seed[name]):
+            out = out.push("{row} seed={seed[name]}")
+    out
+
+# Disagreements that exist today, in adapter source order. Each is a row the
+# pure-Simple JIT must not import under the seed's runtime without a fix.
+fn known_divergences() -> [text]:
+    [
+        # Width: the seed returns an i8 bool, the shim reads i64. The array
+        # literal discards push's result; a Runtime-origin call to it, and the
+        # lowering-owned rt_array_set/_set_text, hand the i64 to the caller.
+        "rt_array_push:i64 seed=I64,I64>I8",
+        # Absent from the seed table, so not importable by the seed's JIT.
+        # rt_process_run_bounded_bytes_tuple and rt_cpuid_tuple_block are
+        # defined in the seed runtime crate (env_process.rs) without a
+        # RuntimeFuncSpec row; the rest are not defined in the seed at all.
+        # (rt_process_run_tuple / _run_bounded_tuple gained rows upstream and
+        # now agree.)
+        "rt_raw_f64_to_string:f64_i64 seed=<absent>",
+        "rt_process_spawn_guarded_value:i64 seed=<absent>",
+        "rt_process_run_timeout_tuple:i64 seed=<absent>",
+        "rt_process_run_owned_observed_bounded_text:i64 seed=<absent>",
+        "rt_process_run_bounded_bytes_tuple:i64 seed=<absent>",
+        "rt_cpuid_tuple_block:i64 seed=<absent>",
+        "rt_env_get_value:i64 seed=<absent>",
+        # Lowering-owned (cl_is_lowering_owned_runtime): same i8/i64 width gap.
+        "rt_array_set:i64 seed=I64,I64,I64>I8",
+        "rt_array_set_text:i64 seed=I64,I64,I64>I8"
+    ]
+
+describe "seed RuntimeFuncSpec rows parse from source":
+
+    it "reads the whole table, single- and multi-line rows":
+        val seed = seed_rows(rt_file_read_text(SEED_SPECS) ?? "")
+        expect(seed.keys().len() > 1600).to_equal(true)
+        expect(seed["rt_file_exists"]).to_equal("I64,I64>I8")
+        expect(seed["rt_time_now_unix_micros"]).to_equal(">I64")
+        expect(seed["rt_value_float"]).to_equal("F64>I64")
+        expect(seed["rt_print_str"]).to_equal("I64,I64>")
+
+describe "pure-Simple runtime-import shims parse from source":
+
+    it "finds literal and guarded shim callees":
+        val shims = shim_rows(rt_file_read_text(ADAPTER) ?? "")
+        expect(shims.len() >= 15).to_equal(true)
+        expect(shims.contains("rt_value_float:f64_i64")).to_equal(true)
+        expect(shims.contains("rt_value_as_float:i64_f64")).to_equal(true)
+        expect(shims.contains("rt_array_new:i64")).to_equal(true)
+        expect(shims.contains("rt_println_str:void")).to_equal(true)
+
+describe "pure-Simple runtime-import shims match the seed signature table":
+
+    it "agrees on register class for every float-carrying shim":
+        val seed = seed_rows(rt_file_read_text(SEED_SPECS) ?? "")
+        expect(expected_seed_row("f64_i64", seed["rt_value_float"])).to_equal(true)
+        expect(expected_seed_row("i64_f64", seed["rt_value_as_float"])).to_equal(true)
+        expect(expected_seed_row("i64_i64_f64_i64", seed["rt_cranelift_fconst"])).to_equal(true)
+
+    it "rejects a shape that disagrees with the seed row":
+        expect(expected_seed_row("i64", "F64>I64")).to_equal(false)
+        expect(expected_seed_row("i64", "I64>I8")).to_equal(false)
+        expect(expected_seed_row("void", "I64>I64")).to_equal(false)
+        expect(expected_seed_row("f64_i64", "I64>I64")).to_equal(false)
+        expect(divergences(["rt_made_up:i64"], {"rt_other": "I64>I64"})).to_equal(["rt_made_up:i64 seed=<absent>"])
+
+    it "has exactly the recorded disagreements, no more and no fewer":
+        val seed = seed_rows(rt_file_read_text(SEED_SPECS) ?? "")
+        val shims = shim_rows(rt_file_read_text(ADAPTER) ?? "")
+        val actual = divergences(shims, seed)
+        for row in actual:
+            print "divergence: {row}"
+        expect(actual).to_equal(known_divergences())
