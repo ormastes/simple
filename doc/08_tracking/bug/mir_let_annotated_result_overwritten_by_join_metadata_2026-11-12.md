@@ -1,6 +1,6 @@
 # MIR: let-annotated Result type overwritten by untyped join metadata (2026-11-12)
 
-Status: FIXED (MIR-lowering spec evidence, 2026-11-13; self-host verification pending). Severity P3.
+Status: fix-implemented-verification-pending (MIR-lowering spec green 2026-11-13; runtime value and self-host unverified). Severity P3.
 
 ## Symptom
 `val r: Result<i64, text> = if/match ... Ok(x_u8) ...`. The MIR local's HIR type metadata becomes
@@ -34,35 +34,44 @@ i64 array, or pass it to `fn f(v: i64)`, and print it. Expected 300+x; a U8-hono
 
 ## Fix (2026-11-13)
 `let_declared_type_override_v1` (`src/compiler/50.mir/mir_lowering_stmts.spl`) now returns `4` when the
-annotation is a settled `Result<T, E>` (no Infer/Error payload) and the initializer local carries a
-`Result` HIR type. The early-Let call site then copies the initializer's metadata as before (optional /
-Result-err owners, `exists_collection_locals`, isolation and resource state) and re-records the declared
-type over it, so only the type changes. Optional was not changed: no red case could be built (see below).
+annotation is a settled `Result<T, E>` (no Infer, Error or `any` payload) and the initializer local
+carries a `Result` HIR type. The early-Let call site then copies the initializer's metadata as before
+(optional / Result-err owners, `exists_collection_locals`, isolation and resource state) and re-records
+the declared type over it, so only the type changes. An `any` payload keeps the old behaviour (the
+initializer wins), so nothing widens `any`.
+
+Optional was NOT changed. Every Optional shape tried was already declared before the fix:
+`val o: i64? = if c: mko(x) else: nil`, `if c: mko(x) else: mko(x)`, the same as a `match`, and the
+no-join `val o: i64? = mko(x)` (with `fn mko(x: u8) -> u8?`).
 
 ## Evidence
-Spec: `test/01_unit/compiler/mir/let_annotated_result_join_type_spec.spl` (parse -> HIR -> MIR via
-`MirLowering.new_for_target`, reads per-local HIR metadata of `pick`'s unnamed temporaries), run with the
-Rust seed (`simple-seed-v4`, sha256 prefix `af717f53d6bce3e5`) under `MemoryMax=16G`.
+Spec: `test/01_unit/compiler/mir/let_annotated_result_join_type_spec.spl`. The harness goes parse ->
+HIR -> MIR (`MirLowering.new_for_target`) and reads the per-local HIR metadata of `pick`'s unnamed
+temporaries. It was run with the Rust seed (`simple-seed-v4`, sha256 prefix `af717f53d6bce3e5`; no
+`bin/simple` was deployed on the host) under `MemoryMax=16G`.
 
-- Red before the fix: 3 of 6 fail. `val`/`var r: Result<i64, text> = if|match c: mk(x) | Err("e")` with
-  `fn mk(x: u8) -> Result<u8, text>`: no temporary carries `Result<i64, text>`, and the `r.unwrap()`
-  temporary is HIR `u8` / MIR `U8`.
-- Green after: 6 of 6.
-- The literal repro above (untyped `Ok(x + 0u8)` arm) was NOT red on this base. Under an annotation the
+- Red before the fix: 5 of 8 examples fail. These are `val`/`var r: Result<i64, text> = if|match c:
+  mk(x) | Err("e")`, the no-join `val r: Result<i64, text> = mk(x)`, and the join inside a `for` body,
+  all with `fn mk(x: u8) -> Result<u8, text>`. In each, no temporary carries `Result<i64, text>`, and the
+  `r.unwrap()` temporary is HIR `u8` / MIR `U8`.
+- Green after: 8 of 8.
+- The filed literal repro (untyped `Ok(x + 0u8)` arm) was NOT red on this base. Under an annotation the
   all-untyped-constructor join is withheld, so the binding already kept `Result<i64, text>` and the unwrap
-  was I64. Only a typed-call arm (`remember_merged_result_ctor_arm_type` / all-typed join) reached the
-  overwrite. The spec pins the literal repro as green.
-- Optional `val o: i64? = if c: mko(x) else: nil` (with `mko -> u8?`) was already declared before the fix.
-  It is pinned green.
+  was I64. The overwrite needs an initializer that carries a typed `Result<u8, text>`: a typed-call join
+  arm, or a direct call. The spec pins the literal repro and the Optional/nil join as green.
 - Negative control: an unannotated `val r = if c: mk(x) else: Err("e")` still adopts `Result<u8, text>`
   and unwraps as U8.
 - Neighbour MIR specs (18 files under `test/01_unit/compiler/mir/`, chosen for Let/Result/Optional
-  lowering): 79/93 pass both before and after, with the same 14 pre-existing failing examples in 9 files.
+  lowering, out of 384): 79/93 pass both before and after, with the same 14 pre-existing failing examples
+  in 9 files. That run predates the `any`-payload guard, which only narrows the fix back to the old
+  behaviour.
 
 ## Unverified
-No runtime value was checked. A `Result<u8, text>` payload from `mk` is now unwrapped as I64; the spec
-checks only MIR types. Self-host and bootstrap behaviour is also unchecked: every annotated Result let in
-the compiler whose initializer is a Result now takes this path, and no bootstrap was run. The second Let
-site (`mir_lowering_stmts.spl` ordinary Let arm, near `copy_local_hir_type_metadata` at ~:2144) has no
-override. The `var` case is fixed through the early-Let path, but that site was not shown to be reachable
-or unreachable for this shape.
+- No runtime value was checked. A `Result<u8, text>` payload from `mk` is now unwrapped as I64; the spec
+  checks only MIR types.
+- The harness does not run the type checker. Whether the real driver accepts a `Result<u8, text>`
+  initializer for a `Result<i64, text>` let is unchecked.
+- Self-host and bootstrap behaviour is unchecked. Every annotated Result let in the compiler whose
+  initializer is a Result now takes this path, and no bootstrap was run.
+- The ordinary Let arm (`copy_local_hir_type_metadata` at ~:2144) has no override. Every shape tried,
+  including `var` and a let in a `for` body, went through the early-Let path.
