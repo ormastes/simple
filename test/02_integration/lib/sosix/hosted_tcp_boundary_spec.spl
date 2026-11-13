@@ -9,7 +9,7 @@ No SimpleOS, async completion, or native alias qualification is implied.
 use std.spec
 use std.nogc_sync_mut.io.tcp.{TcpStream, tcp_fd_close, tcp_fd_write_text}
 use std.nogc_sync_mut.sosix.network.{
-    sosix_tcp_bind, sosix_tcp_listen, sosix_tcp_local_addr, sosix_tcp_accept_timeout,
+    sosix_tcp_bind, sosix_tcp_bind_fd, sosix_tcp_socket_create, sosix_tcp_listen, sosix_tcp_local_addr, sosix_tcp_accept_timeout,
     sosix_tcp_set_read_timeout, sosix_tcp_set_nonblocking, sosix_tcp_read_line, sosix_tcp_read,
     sosix_tcp_peer_addr, sosix_tcp_shutdown, sosix_tcp_close, sosix_tcp_write_text
 }
@@ -70,10 +70,14 @@ describe "hosted SOSIX TCP compatibility boundary":
         expect(listener_closed).to_be(true)
 
     it "exchanges loopback text through both production surfaces":
-        step("Bind an ephemeral loopback listener and discover its address")
-        val listener = sosix_tcp_bind("127.0.0.1:0")
+        step("Create, bind and listen on an ephemeral loopback socket")
+        # sosix_tcp_bind already returns a LISTENING socket (canonical provider
+        # contract); listen() is the separate step after socket_create + bind_fd.
+        val listener = sosix_tcp_socket_create(0)
         expect(listener).to_be_greater_than(-1)
-        val listening = sosix_tcp_listen(listener, 8)
+        val bound = listener >= 0 and sosix_tcp_bind_fd(listener, "127.0.0.1:0")
+        expect(bound).to_equal(true)
+        val listening = bound and sosix_tcp_listen(listener, 8)
         if not listening:
             sosix_tcp_close(listener)
         expect(listening).to_equal(true)
