@@ -25,14 +25,33 @@ pub fn shard_worker_kill_stopped_v1(killed: bool, reaped: i64, running: bool) ->
         return killed
     true
 
+# The pool's confirmation sequence after process_kill(pid) returned `killed`.
+# Probe first: a child the kill primitive already reaped is not waitable, and
+# waiting on it only prints the hosted runtime's "waitpid failed: errno=10"
+# (ECHILD) for the expected case. A child still dying gets the 5 s re-wait.
+pub fn shard_worker_confirm_kill_v1(pid: i64, killed: bool) -> bool:
+    if pid <= 0:
+        return true
+    if not process_is_running(pid):
+        return shard_worker_kill_stopped_v1(killed, -1, false)
+    var reaped = process_wait(pid, 5000)
+    # Sign-restore an i32 that crossed the wrapper boundary zero-extended
+    # (native_build_main.spl native_build_normalize_exit_code).
+    if reaped > 2147483647:
+        reaped = reaped - 4294967296
+    shard_worker_kill_stopped_v1(killed, reaped, process_is_running(pid))
+
 # Wait for every parse shard child under ONE shared deadline (`timeout_ms`
 # from now; 0 = no deadline), kill the ones that outlive it, and ALWAYS print
 # each child's exit status. run11 (2026-08-21): shard 6/8 was killed by the
 # kill_simple_monitor CPU guard and the only trace was "7/8 completed" -- the
 # non-zero wait result was counted and dropped. Until 2026-11-13 the children
 # were waited one after another, each with the full budget, so the Nth child
-# could run N x timeout_ms. Returns the failed shard indices in `indices` order.
-pub fn parse_shard_reap_v1(pids: [i64], indices: [i64], count: i64, timeout_ms: i64) -> [i64]:
+# could run N x timeout_ms. Returns (failed, unconfirmed) shard indices in
+# `indices` order: `unconfirmed` names killed children whose death could not
+# be confirmed, so the caller must not reclaim or remove the queue they may
+# still write into.
+pub fn parse_shard_reap_v1(pids: [i64], indices: [i64], count: i64, timeout_ms: i64) -> ([i64], [i64]):
     val deadline = if timeout_ms > 0: time_now_monotonic_ms() + timeout_ms else: 0
     var codes: [i64] = []
     var pending = 0
@@ -50,6 +69,7 @@ pub fn parse_shard_reap_v1(pids: [i64], indices: [i64], count: i64, timeout_ms: 
                     pending = pending - 1
             k = k + 1
     var failed: [i64] = []
+    var unconfirmed: [i64] = []
     var k = 0
     while k < pids.len():
         val i = indices[k]
@@ -64,13 +84,14 @@ pub fn parse_shard_reap_v1(pids: [i64], indices: [i64], count: i64, timeout_ms: 
             # the worker into alloc-failure (beta.9 windows leg: leaked shard
             # + worker OOM, "memory allocation of 65520 bytes failed"), and it
             # keeps writing claims into a queue the caller is about to reclaim
-            # and remove. Kill, re-wait and confirm before returning.
+            # and remove. Kill, confirm, and report an unconfirmed death.
             if pid > 0 and code == -2:
                 val killed = process_kill(pid)
-                val reaped = process_wait(pid, 5000)
-                val stopped = shard_worker_kill_stopped_v1(killed, reaped, process_is_running(pid))
+                val stopped = shard_worker_confirm_kill_v1(pid, killed)
+                if not stopped:
+                    unconfirmed = unconfirmed.push(i)
                 eprint("[parse-shard] shard={i}/{count} pid={pid} dead-child cleanup: kill={killed} stopped={stopped}")
         else:
             print "[parse-shard] shard={i}/{count} pid={pid} exit=0"
         k = k + 1
-    failed
+    (failed, unconfirmed)
