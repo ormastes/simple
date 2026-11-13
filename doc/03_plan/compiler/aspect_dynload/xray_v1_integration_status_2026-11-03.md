@@ -256,3 +256,18 @@ Other `b795b3f4a26`/`aba2a5f0a3e` sites, same seed and scope:
   four new rejecting mutations). The lane remains OUT-blocked by the seed dynlib bug, so
   "a compiled program flips set_profiling" is wired but not yet observed on a real module.
 - IN suite scenario now goes through the policy (36/36).
+
+#### Step 3d (2026-11-13): linker folds, branch `work/spy-xray-2-20261113`
+
+- `_ElfWriter/encoding.spl` `write_u{16,32,64}_le` and `std.common.isa.x64_encode_v1`
+  `x64_push_imm32_le_v1` are now ONE body each in `std.common.binary_io`
+  (`bytes_i64_push_u{16,32,64}_le`), re-exported with `export use ... as ...` so no caller
+  gains a call layer. 64 x (u16+u32+u64) writes x 20,000 through `elf_writer`: old
+  51.61 / 51.46 / 52.74 s vs shared 47.91 / 47.81 / 48.43 s (RSS 233-259 MB both). Same
+  failure set on 9 writer/encoder specs; mutating the shared writers turns
+  `elf_writer_spec` (17/18), `x86_negative_imm64` (1/9) and `x64_encode_v1` (1/2) red.
+- `linker/elf_parser.spl` is NOT folded further: it already reads every field through the
+  shared readers (`elf_inspect` -> `elf_image_u*_le_v1`, Step 3c), and its section-table
+  walk carries ELF32 support that `elf_image_v1` deliberately lacks; routing its ELF64 half
+  through `elf_image_sections_v1` would add an intermediate list per parse on the path
+  Step 3c measured.
