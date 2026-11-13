@@ -89,7 +89,8 @@ use compiler.driver.driver_build.native_file_worker_v1.{NATIVE_FILE_WORKERS_ENV_
     native_file_worker_spec_valid_v1, native_file_worker_child_args_v1, native_file_worker_batch_from_env_v1,
     native_file_worker_mir_count_v1, native_file_worker_receipt_publish_v1, native_file_worker_receipts_in_v1,
     native_file_worker_owner_claims_v1, native_file_worker_terminal_state_v1, native_file_worker_inventory_rows_v1,
-    native_file_worker_hir_ledger_state_v1, native_file_worker_object_path_v1, file_worker_overlap_proven_v1,
+    native_file_worker_hir_ledger_state_v1, native_file_worker_hir_gate_verdict_v1, NATIVE_FILE_WORKER_HIR_GATE_BUDGET_MS_V1,
+    native_file_worker_object_path_v1, file_worker_overlap_proven_v1,
     NATIVE_BOOTSTRAP_WHOLE_PROGRAM_ENV_V1, file_worker_module_scoped_selected_v1,
     NativeFileUnitInvokerV1, NATIVE_FILE_WORKER_UNIT_ENV_V1}
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_complete, HIR_SHARD_FORK_OWNER_MARK_V1}
@@ -1772,10 +1773,21 @@ pub fn run_native_file_worker_v1(args: [text]) -> i64:
             native_file_worker_note_error_v1(mir_queue, owner, "HIR child claimed nothing with rows unclaimed")
             return 1
     # HIR gate: whole-program HIR needs every module's HIR (P4 removes this wait).
-    var state = native_file_worker_hir_ledger_state_v1(hir_queue)
+    # Bounded: the poll expires at NATIVE_FILE_WORKER_HIR_GATE_BUDGET_MS_V1 and
+    # names the ledger count, so a sibling that died mid-claim without a seal
+    # cannot park this worker until the parent's reap timeout.
+    val gate_started_ms = time_now_monotonic_ms()
+    var state = native_file_worker_hir_gate_verdict_v1(
+        native_file_worker_hir_ledger_state_v1(hir_queue), 0, NATIVE_FILE_WORKER_HIR_GATE_BUDGET_MS_V1)
     while state == 0:
         thread_sleep(SHARD_POOL_POLL_MS)
-        state = native_file_worker_hir_ledger_state_v1(hir_queue)
+        state = native_file_worker_hir_gate_verdict_v1(native_file_worker_hir_ledger_state_v1(hir_queue),
+            time_now_monotonic_ms() - gate_started_ms, NATIVE_FILE_WORKER_HIR_GATE_BUDGET_MS_V1)
+    if state == -2:
+        val waited_ms = time_now_monotonic_ms() - gate_started_ms
+        native_file_worker_note_error_v1(mir_queue, owner,
+            "HIR gate deadline: ledger incomplete after {waited_ms}ms (budget {NATIVE_FILE_WORKER_HIR_GATE_BUDGET_MS_V1}ms) unclaimed={hir_shard_recovery_unclaimed_count(hir_queue)}; MIR not admitted")
+        return 1
     if state < 0:
         native_file_worker_note_error_v1(mir_queue, owner, "HIR ledger has a non-PASS module; MIR not admitted")
         return 1
