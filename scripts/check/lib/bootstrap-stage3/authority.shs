@@ -1529,6 +1529,30 @@ bootstrap_stage3_windows_gnu_cargo_tools() {
         "$bootstrap_stage3_gnu_ar"
 }
 
+# Print the Cargo environment (KEY=VALUE lines, native drive-letter paths) for
+# the x86_64-pc-windows-gnullvm target: the admitted llvm-mingw UCRT clang as
+# linker/CC driving lld, its own MinGW CRT bound first, never MSVC or GCC. This
+# is the same tool authority and link contract bootstrap-from-scratch.sh binds
+# for its Windows GNU seed build; `simple test --kind=rust` consumes it.
+bootstrap_stage3_windows_gnu_cargo_env() {
+    bswgce_tools=$(bootstrap_stage3_windows_gnu_cargo_tools "$1") || return 1
+    bswgce_linker=$(printf '%s\n' "$bswgce_tools" | sed -n 's/^linker=//p')
+    bswgce_cc=$(printf '%s\n' "$bswgce_tools" | sed -n 's/^cc=//p')
+    bswgce_ar=$(printf '%s\n' "$bswgce_tools" | sed -n 's/^ar=//p')
+    bswgce_target=x86_64-w64-windows-gnu
+    bswgce_crt=$("$bswgce_linker" --target="$bswgce_target" \
+        --print-file-name=libmingw32.a) || return 1
+    bswgce_crt=$(cygpath -m "$(printf '%s\n' "$bswgce_crt" | tr -d '\r')") || return 1
+    bswgce_libdir=$(dirname "$bswgce_crt")
+    [ -s "$bswgce_crt" ] && [ -s "$bswgce_libdir/libmingwex.a" ] || return 1
+    printf 'CARGO_TARGET_X86_64_PC_WINDOWS_GNULLVM_LINKER=%s\n' "$(cygpath -m "$bswgce_linker")"
+    printf 'CC_x86_64_pc_windows_gnullvm=%s\n' "$(cygpath -m "$bswgce_cc")"
+    printf 'AR_x86_64_pc_windows_gnullvm=%s\n' "$(cygpath -m "$bswgce_ar")"
+    printf 'CFLAGS_x86_64_pc_windows_gnullvm=--target=%s\n' "$bswgce_target"
+    printf 'CARGO_TARGET_X86_64_PC_WINDOWS_GNULLVM_RUSTFLAGS=-Lnative=%s -C link-arg=--target=%s -C link-arg=-fuse-ld=lld\n' \
+        "$bswgce_libdir" "$bswgce_target"
+}
+
 bootstrap_stage3_windows_msvc_candidate_path() {
     case "$1" in
         */msys*/*|*/mingw*/*) return 1 ;;

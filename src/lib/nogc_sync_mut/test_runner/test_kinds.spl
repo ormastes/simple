@@ -20,11 +20,14 @@ use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
 use std.nogc_sync_mut.io.dir_ops.{dir_walk_native, dir_create_all, is_dir}
 use std.nogc_sync_mut.io.file_ops.{file_exists, file_read}
 use std.nogc_sync_mut.fs.host_path.{host_is_windows_host}
-use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.nogc_sync_mut.io.env_ops.{env_get, env_set}
 use std.nogc_sync_mut.test_runner.rust_test_runner.{parse_cargo_test_output}
 
 val TEST_KIND_RUST_MANIFEST: text = "src/compiler_rust/Cargo.toml"
 val TEST_KIND_RUST_WINDOWS_TARGET: text = "x86_64-pc-windows-gnullvm"
+val TEST_KIND_RUST_WINDOWS_HOST: text = "x86_64-pc-windows-gnu"
+val TEST_KIND_RUST_TOOLCHAIN_FILE: text = "src/compiler_rust/rust-toolchain.toml"
+val TEST_KIND_RUST_WINDOWS_ENV_LIB: text = "scripts/check/lib/bootstrap-stage3/authority.shs"
 val TEST_KIND_SHS_DIR: text = "scripts/check"
 val TEST_KIND_C_DIR: text = "src/runtime/test"
 val TEST_KIND_PERF_DIR: text = "test/05_perf"
@@ -183,13 +186,58 @@ fn _test_kind_rust_target_skip() -> text:
     """"" when the Windows Rust target is installed (or not needed here), else the SKIP reason."""
     if not host_is_windows_host():
         return ""
-    val (target_out, target_err, target_code) = process_run_bounded("rustup", ["target", "list", "--installed"], 30000, 64 * 1024)
+    val toolchain = _test_kind_rust_windows_toolchain()
+    if toolchain == "":
+        return "cannot read the Rust channel from {TEST_KIND_RUST_TOOLCHAIN_FILE}"
+    val (list_out, list_err, list_code) = process_run_bounded("rustup", ["toolchain", "list"], 30000, 64 * 1024)
+    var installed = false
+    for line in list_out.split("\n"):
+        if line.trim() == toolchain or line.trim().starts_with(toolchain + " "):
+            installed = true
+    if not installed:
+        return "Rust host toolchain {toolchain} not installed (`rustup toolchain install {toolchain} --target {TEST_KIND_RUST_WINDOWS_TARGET}`); an msvc host needs MSVC link.exe, which is not a sanctioned lane"
+    val (target_out, target_err, target_code) = process_run_bounded("rustup", ["target", "list", "--installed", "--toolchain", toolchain], 30000, 64 * 1024)
     if target_code != 0:
-        return "cannot verify Rust target {TEST_KIND_RUST_WINDOWS_TARGET} (`rustup target list --installed` exit {target_code})"
+        return "cannot verify Rust target {TEST_KIND_RUST_WINDOWS_TARGET} (`rustup target list --installed --toolchain {toolchain}` exit {target_code})"
     for line in target_out.split("\n"):
         if line.trim() == TEST_KIND_RUST_WINDOWS_TARGET:
             return ""
-    "Rust target {TEST_KIND_RUST_WINDOWS_TARGET} not installed (`rustup target add {TEST_KIND_RUST_WINDOWS_TARGET}`)"
+    "Rust target {TEST_KIND_RUST_WINDOWS_TARGET} not installed (`rustup target add --toolchain {toolchain} {TEST_KIND_RUST_WINDOWS_TARGET}`)"
+
+fn _test_kind_rust_windows_toolchain() -> text:
+    """The pinned channel of src/compiler_rust/rust-toolchain.toml on a GNU host (the
+    bootstrap seed toolchain), or "" when the channel cannot be read. Cargo runs
+    from the repo root, so rustup would otherwise ignore that file and pick the
+    default (msvc) host, whose build scripts need MSVC link.exe."""
+    for line in (file_read(TEST_KIND_RUST_TOOLCHAIN_FILE) ?? "").split("\n"):
+        val t = line.trim()
+        if t.starts_with("channel"):
+            val eq = t.index_of("=")
+            if eq >= 0:
+                val channel = t.substring(eq + 1).trim().replace("\"", "")
+                if channel != "":
+                    return channel + "-" + TEST_KIND_RUST_WINDOWS_HOST
+    ""
+
+fn _test_kind_rust_windows_env() -> text:
+    """Apply the bootstrap's Windows GNU Cargo environment (shared helper
+    bootstrap_stage3_windows_gnu_cargo_env); "" on success, else the SKIP reason."""
+    val cc = test_kind_c_compiler()
+    val script = ". {TEST_KIND_RUST_WINDOWS_ENV_LIB} && bootstrap_stage3_windows_gnu_cargo_env \"$1\""
+    val (env_out, env_err, env_code) = process_run_bounded("sh", ["-c", script, "_", cc], 300000, 64 * 1024)
+    if env_code != 0:
+        return "no admitted llvm-mingw clang/lld Cargo authority for {TEST_KIND_RUST_WINDOWS_TARGET} (CC {cc}; bootstrap_stage3_windows_gnu_cargo_env exit {env_code})"
+    var applied = 0
+    for line in env_out.split("\n"):
+        val t = line.trim()
+        val eq = t.index_of("=")
+        if eq > 0:
+            val _ = env_set(t.substring(0, eq), t.substring(eq + 1))
+            applied = applied + 1
+    if applied == 0:
+        return "bootstrap_stage3_windows_gnu_cargo_env printed no Cargo environment"
+    val _ = env_set("RUSTUP_TOOLCHAIN", _test_kind_rust_windows_toolchain())
+    ""
 
 fn _test_kind_filtered(items: [text], filter: text) -> [text]:
     if filter == "":
@@ -203,6 +251,10 @@ fn _test_kind_filtered(items: [text], filter: text) -> [text]:
 fn _test_kind_run_rust(filter: text) -> i64:
     var args = ["test", "--manifest-path", TEST_KIND_RUST_MANIFEST]
     if host_is_windows_host():
+        val env_skip = _test_kind_rust_windows_env()
+        if env_skip != "":
+            print "SKIP — rust: {env_skip}; 1 item(s) not run"
+            return 7
         args.push("--target")
         args.push(TEST_KIND_RUST_WINDOWS_TARGET)
     if filter != "":
