@@ -178,3 +178,7 @@ is bootstrap-deployment admission state").
 (admitted Stage 3 required), then run this record's MC/DC/RT-HAL verification gates on
 the admitted compiler. Until Stage 3/4 admission lands, no edit in this row's scope
 can move AC-13/15/16/18; do not burn cycles on the cleared surface-freeze path.
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with the recorded addenda (2026-11-10 rt-lane): the surface-freeze SEGV blocks MC/DC/RT-HAL verification as filed; resolution sits behind the stage-3 cluster grants. No in-lane change.

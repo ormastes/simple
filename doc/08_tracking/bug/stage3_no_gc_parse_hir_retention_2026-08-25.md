@@ -193,3 +193,7 @@ Acceptance is the doc's own criteria: Stage-3 completes and publishes a valid
 candidate receipt, telemetry records peak tree RSS + per-phase progress, parse
 growth is bounded by a stated per-module budget, and the result is measured
 once against this baseline.
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with lane boot23: BLOCKED re-confirmed; disposition stands (no-GC parse/HIR retention exceeds the bootstrap memory budget; fix needs the sanctioned no-GC bootstrap run). No in-lane change.

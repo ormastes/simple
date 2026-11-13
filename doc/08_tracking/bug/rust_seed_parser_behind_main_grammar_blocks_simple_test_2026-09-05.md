@@ -149,3 +149,7 @@ evidence items reproduce at this base:
 4. `parser_leading_operator_continuation_spec.spl` → 11/11.
 
 Disposition **STALE confirmed**; no re-fix attempted (premise dead at tip).
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with lane p3-comp9: STALE — the premise no longer holds at tip; the current seed supersedes it. No in-lane change.

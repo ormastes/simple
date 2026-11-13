@@ -99,3 +99,9 @@ SUPERSEDED (substantial post-2026-08-29 HIR callable-dep work —
 
 Status: OPEN — BLOCKED pending owner grant for the entry-closure
 native MCP build.
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with lanes compiler2 + p3fix-comp6: BLOCKED (diagnostic-authority
+grant needed to fix the fabricated name/position for bare fn() callable-dep
+diagnostics). No in-lane change.

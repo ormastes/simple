@@ -138,3 +138,7 @@ multiple memory-shape fixes (entry-closure byte scan `13d7746adc0e` with the
 plausible — but per the 2026-11-04 adjudication the close must come from the
 replay, not from inference. Do not retry the f030 build itself; this doc's
 diagnostic-plan gate still stands.
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with lane boot19: BLOCKED — one bounded externally-terminated observation; root cause not attributed; needs the sanctioned bootstrap run to proceed. No in-lane change.

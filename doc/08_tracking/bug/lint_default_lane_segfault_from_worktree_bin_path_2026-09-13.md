@@ -137,3 +137,7 @@ descendant of cwd):
 
 No segfault in the default lane; the linter completes from a cwd-rooted binary
 path. The PERF-5 interpret-lane workaround is no longer required for lint.
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with lane ne14: FIXED, verified on release/1.0.0. No independent re-verification in this lane; disposition stands.

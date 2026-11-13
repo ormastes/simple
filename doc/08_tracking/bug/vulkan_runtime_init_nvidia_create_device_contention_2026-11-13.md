@@ -92,7 +92,8 @@ init failure in its log. It does not share this cause.
 
 Red -> green for the helper (`cargo test --release -p simple-compiler --lib
 vk_create_device_retry`): 2 passed / 2 failed on the single-attempt stub
-(commit "red tests"), 4 passed / 0 failed with the retry.
+(commit "red tests"), 4 passed / 0 failed with the retry. (The helper and
+these tests have since moved to the runtime crate - see § Compiled runtime lane.)
 
 ## Evidence (after), same spec and command
 
@@ -112,12 +113,77 @@ than a pure create/create race; a longer wait would only trade a clear failure
 for a slow one. Running GPU specs serially (the documented rule for this host)
 is unaffected.
 
-Not changed: the compiled runtime's `rt_vulkan_init`
-(`src/compiler_rust/runtime/src/vulkan_graphics_runtime_core.rs`, ash-based
-`VulkanDevice::new_default`). It already records its error text via
-`state.set_error`, has no retry, and was not exercised by these specs (they run
-through the interpreter extern), so its behaviour under the same contention is
-unmeasured.
+## Compiled runtime lane (ported 2026-11-13, follow-up to #8785)
+
+Lanes that create a device (`git grep -lE "vkCreateDevice|create_device\("`,
+owned code only):
+
+| lane | site | state |
+|---|---|---|
+| seed interpreter (dlopen bridge) | `compiler/src/interpreter_extern/gpu.rs` `rt_vulkan_init_fn` | fixed by #8785 |
+| compiled Rust runtime (ash) | `runtime/src/vulkan/device.rs` `VulkanDevice::new_internal` - the one `create_device` behind `rt_vulkan_init` and the `rt_vulkan_init_*_present` paths | fixed here |
+| C runtime | none. `src/runtime/runtime_dynload.c` only forwards `rt_vulkan_init` to a loaded provider (`GPU_CALL0`); `runtime_native.c` has no Vulkan init | no C edit |
+
+Out of scope: `tools/upstream-skia-ganesh-vulkan/provider.cpp` (Skia comparison
+provider, its own `vkCreateDevice`, not an `rt_vulkan_init`).
+
+Both Rust lanes now share ONE helper, the ungated
+`runtime/src/vulkan_create_device_retry.rs` (`vk_create_device_with_retry`,
+`vk_create_device_error`, `vk_result_name`); `gpu.rs` re-exports it and its
+local copy plus tests were moved there. `rt_vulkan_init` stores the bare
+`vkCreateDevice(...)` text in `last_error` (previously
+`VulkanDevice::new_default: Device creation failed: ERROR_INITIALIZATION_FAILED`),
+so `VulkanSession.init_error` reads `runtime-init: vkCreateDevice(device 0 of 2,
+queue family 0, 5 attempt(s)): VK_ERROR_INITIALIZATION_FAILED (-3)` on both
+paths. Attempts are logged with `eprintln!` (a compiled binary may have no
+`tracing` subscriber). The retry sleeps while the runtime `STATE` lock is held;
+that is the failure path only.
+
+Unit tests (`cargo test --release -p simple-runtime --lib vk_create_device_retry`):
+3 passed / 2 failed on the single-attempt stub (commit "red tests"), 5 passed /
+0 failed with the retry.
+
+### What "compiled path" means on this host
+
+The deployed Linux seed links `simple-runtime` WITHOUT the `vulkan` cargo
+feature (`driver/Cargo.toml` enables it for macOS only), and `native-build` is
+refused (`pure-Simple tool 'native-build' unavailable; refusing Rust fallback`).
+A 3-line `rt_vulkan_init()` program run by `seed-fix` returns false with
+`vulkan runtime unavailable: this build of simple_runtime was compiled without
+the vulkan cargo feature`. So a Simple program cannot reach a compiled device
+creation here. The numbers below instead drive the runtime crate's exported
+`rt_vulkan_init` / `rt_vulkan_shutdown` / `rt_vulkan_get_last_error` directly
+from a Rust example binary built with `--features vulkan` (4 init / hold 300 ms
+/ shutdown cycles per process; same probe source built at base and at the fix).
+
+### Evidence (compiled runtime, probe processes failed / inits failed)
+
+Contention source: 4 concurrent loops of the #8785 spec on `seed-fix`, running
+throughout; probe run as 4 concurrent loops x 8 processes (128 inits).
+
+| condition | base | fix |
+|---|---|---|
+| serial, no contender, 10 processes | 0 of 10 (0 of 40) | 0 of 10 (0 of 40) |
+| 4 probe loops x 8, no contender | 0 of 32 | not run |
+| 4 probe loops x 8 + spec contender, pass a | 11 of 32 (24 of 128) | 2 of 32 (2 of 128) |
+| 4 probe loops x 8 + spec contender, pass b | 25 of 32 (50 of 128) | 0 of 32 (0 of 128) |
+
+Order run: base a, [fix built], fix a, base b, fix b. Fix pass a: 16 inits hit
+-3 on attempt 1; 14 recovered (6 on attempt 2, 2 on 3, 2 on 4, 4 on 5); 2
+exhausted all 5 and failed closed with the full text. Fix pass b logged no
+retry at all - no -3 occurred in that window - so it shows only that
+contention is bursty, not that the fix removed failures. Bare probes do not
+contend with each other (0 of 32, and 1 of 64 at 8 loops); the interpreter
+spec processes are what provoke the driver. Base error text, all 74 failures:
+`VulkanDevice::new_default: Device creation failed: ERROR_INITIALIZATION_FAILED`.
+
+Success path: warm init (cycles 2-4 of the serial runs, n=30 each) median
+157.2 ms base vs 156.6 ms fix (min 154.4 / 153.9, max 162.2 / 159.7) - one
+call, no sleep, no added latency.
 
 `backend_vulkan_rect_list_spec.spl` is unchanged by this fix: still
 `expected 0 to equal 1` (0 of 1), no init failure and no retry in its log.
+
+Interpreter lane after the helper move (seed rebuilt from this change): the
+#8785 spec is 4 of 4 serially and 16 of 16 processes under 4 concurrent loops
+x 4, with one init retried and recovered - same log lines as before.

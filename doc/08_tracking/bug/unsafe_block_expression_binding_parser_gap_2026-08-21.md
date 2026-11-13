@@ -75,3 +75,10 @@ evidence needs entry-closure native builds, which are forbidden in this lane
 native unsafe-block pin exists yet.
 
 Disposition: FIXED. Header flipped Open → FIXED 2026-11-11 (lane p3-comp9).
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt)
+
+Concurs with the comp9 lane's FIXED verdict; independently re-verified the three
+pinning specs on this lane's binary (tracked seed @ 46fe8f6b6def):
+`unsafe_call_argument_parser_spec` 8/8, `unsafe_block_expression_spec` 5/5,
+`unsafe_block_binding_type_spec` 3/3. No in-lane change.

@@ -168,3 +168,7 @@ Disposition re-verified fresh on `origin/release/1.0.0` tip `dacccfc78fd10`
   PASS on the current tracked binary, and the p3-compiler3 addendum already
   records the passing debug-build/cargo verification.
 - Status header flipped OPEN → SUPERSEDED.
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with lanes p3-compiler3/p3-comp8: SUPERSEDED — the fix (EscapeResult::KeepBoth, abc4a53d3fca8) is an ancestor of this lane base; this lane binary is the tracked bin/simple.exe (build 46fe8f6b6def), which predates the fix, so a behavioral probe here still shows the filed defect. Per the known-live routing, the seed rebuild belongs to the seed-fix lane. No in-lane change.

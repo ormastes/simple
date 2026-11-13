@@ -7,16 +7,25 @@ append-only events.log with a durable committed marker, and replay is
 idempotent — a second replay commits nothing and leaves events.log
 byte-identical. The `scv event-record|event-commit|event-replay|events` CLI
 drives the same disk state.
+Compatibility and limitations: the three symlink-refusal examples require a
+host that can create real symlinks (POSIX hosts, or Windows with developer
+mode); on other Windows hosts they are skipped, never failed, because the
+fixture cannot be built.
 Audience: Maintainers of the SCV storage/event layers.
 """
 # @req: REQ-SCV-EVENT-JOURNAL-001
+use std.spec.{describe, it, expect, step, skip}
+use app.io.mod (file_exists, file_read, file_write, file_delete, dir_create, dir_remove_all, process_run)
+
 use std.spec.{describe, it, expect, step}
 use std.nogc_sync_mut.spec.{skip}
 use app.io.mod (file_exists, file_read, file_write, file_delete, dir_create, dir_remove_all, process_run, file_is_regular_no_follow)
+
 use std.scv.store.{scv_init_repo}
 use std.scv.journal.{scv_event_batch_record, scv_event_batch_commit, scv_event_batch_replay, scv_event_batch_is_committed, scv_event_batch_pending_path, scv_journal_events_path, scv_event_log, scv_journal_record_event}
 use std.nogc_sync_mut.io.time_ops.{current_time_ms}
 use std.nogc_sync_mut.env.platform.{get_temp_dir}
+
 
 # The runtime does not translate a POSIX "/tmp" prefix on Windows; anchor the
 # fixture repos under the host temp dir instead.
@@ -52,11 +61,32 @@ fn _skip_without_symlinks(name: text) -> bool:
         return true
     false
 
+
+# Fixture roots must live where BOTH the POSIX fixture shell and the Simple
+# filesystem APIs can address them: the runtime does not translate a POSIX
+# "/tmp" prefix on Windows, so anchor under the host temp dir instead.
 fn _repo(tag: text) -> text:
+    val root = get_temp_dir().replace("\\", "/") + "/scv-event-journal-{tag}-{current_time_ms()}"
+
     val root = "{_fixture_base()}/scv-event-journal-{tag}-{current_time_ms()}"
+
     dir_create(root, true)
     scv_init_repo(root)
     root
+
+# Hosts without symlink privilege (Windows without developer mode) cannot
+# build the symlink fixtures at all — MSYS `ln -s` silently falls back to a
+# plain COPY (exit 0), so probe with `test -L`, which is true only for a real
+# symlink. Skip rather than report a false product RED.
+fn _symlink_unsupported_reason() -> text:
+    val base = get_temp_dir().replace("\\", "/") + "/scv-symlink-probe-{current_time_ms()}"
+    dir_create(base, true)
+    expect(file_write("{base}/t.txt", "x\n")).to_equal(true)
+    val (_o, _e, code) = process_run("/bin/sh", ["-c", "ln -s '{base}/t.txt' '{base}/l.txt' && test -L '{base}/l.txt'"])
+    dir_remove_all(base)
+    if code == 0:
+        return ""
+    "host cannot create real symlinks (MSYS ln -s copy fallback: no SeCreateSymbolicLink privilege / developer mode)"
 
 fn _events_lines(root: text) -> i64:
     val path = scv_journal_events_path(root)
@@ -272,6 +302,60 @@ describe "scv event journal integration (E-03)":
         dir_remove_all(legacy_root)
         dir_remove_all(path_root)
 
+    # The three examples below require creating REAL symlinks. Windows hosts
+    # without SeCreateSymbolicLink privilege (developer mode) cannot create
+    # them, so the fixture cannot be built; skip rather than report a false
+    # product RED (same convention as worker_timeout_cleanup_spec).
+    val no_symlink = _symlink_unsupported_reason()
+    if no_symlink != "":
+        skip("refuses a symlinked pending leaf without following or deleting its target", no_symlink)
+        skip("refuses a symlinked event log without replacing or following its target", no_symlink)
+        skip("fails closed on dangling pending and lock symlinks", no_symlink)
+    else:
+        it "refuses a symlinked pending leaf without following or deleting its target":
+            step("Place a pending-name symlink to an ordinary file and attempt commit")
+            val root = _repo("pending-symlink")
+            val target = "{root}/outside.pending-data"
+            expect(file_write(target, "kind=created path=a.txt related=\n")).to_equal(true)
+            val (out, err, code) = process_run("ln", ["-s", target, scv_event_batch_pending_path(root, "b1")])
+            expect(code).to_equal(0)
+            expect(scv_event_batch_commit(root, "b1")).to_equal(false)
+            expect(file_exists(scv_event_batch_pending_path(root, "b1"))).to_equal(true)
+            expect(file_read(target)).to_equal("kind=created path=a.txt related=\n")
+            dir_remove_all(root)
+    
+        it "refuses a symlinked event log without replacing or following its target":
+            step("Point events.log at an unrelated regular file and attempt commit")
+            val root = _repo("event-log-symlink")
+            val target = "{root}/outside.events"
+            expect(file_write(target, "keep this file\n")).to_equal(true)
+            expect(scv_event_batch_record(root, "b1", "created", "a.txt", "")).to_equal(true)
+            val (out, err, code) = process_run("ln", ["-s", target, scv_journal_events_path(root)])
+            expect(code).to_equal(0)
+            expect(scv_event_batch_commit(root, "b1")).to_equal(false)
+            expect(file_exists(scv_event_batch_pending_path(root, "b1"))).to_equal(true)
+            expect(file_read(target)).to_equal("keep this file\n")
+            dir_remove_all(root)
+    
+        it "fails closed on dangling pending and lock symlinks":
+            step("Ensure no-replace creation rejects dangling entry names before acknowledging work")
+            val pending_root = _repo("dangling-pending")
+            val absent_target = "{pending_root}/missing-target"
+            val (pending_out, pending_err, pending_code) = process_run("ln", ["-s", absent_target, scv_event_batch_pending_path(pending_root, "b1")])
+            expect(pending_code).to_equal(0)
+            expect(scv_event_batch_record(pending_root, "b1", "created", "a.txt", "")).to_equal(false)
+            expect(scv_event_batch_commit(pending_root, "b1")).to_equal(false)
+            expect(file_exists(absent_target)).to_equal(false)
+    
+            val lock_root = _repo("dangling-lock")
+            val lock_target = "{lock_root}/missing-lock-target"
+            val (lock_out, lock_err, lock_code) = process_run("ln", ["-s", lock_target, "{lock_root}/.scv/journal/events.lock"])
+            expect(lock_code).to_equal(0)
+            expect(scv_event_batch_record(lock_root, "b1", "created", "a.txt", "")).to_equal(false)
+            expect(file_exists(lock_target)).to_equal(false)
+            dir_remove_all(pending_root)
+            dir_remove_all(lock_root)
+
     it "refuses a symlinked pending leaf without following or deleting its target":
         if _skip_without_symlinks("refuses a symlinked pending leaf without following or deleting its target"):
             return
@@ -325,6 +409,7 @@ describe "scv event journal integration (E-03)":
         expect(file_exists(lock_target)).to_equal(false)
         dir_remove_all(pending_root)
         dir_remove_all(lock_root)
+
 
     it "recovers crashes at each durable event-batch boundary without duplicate rows":
         step("Crash after pending, seal, event-row, and terminal-marker publication")

@@ -147,3 +147,7 @@ printf 'fn main()\n    print("hi")\n' > h2.spl
 ```
 
 Disposition: BLOCKED. Header flipped OPEN → BLOCKED.
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with lane comp8: BLOCKED — verification infra for the stage-2 cranelift direct path is not available in this lane class. No in-lane change.

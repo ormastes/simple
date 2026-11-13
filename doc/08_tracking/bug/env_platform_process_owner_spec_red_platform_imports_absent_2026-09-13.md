@@ -53,3 +53,12 @@ Re-verified with the worktree seed-smoke binary (bin/simple.exe, v1.0.0-rc.1,
 `--mode=interpreter`): `test/01_unit/lib/nogc_sync_mut/env_platform_process_owner_spec.spl`
 passes 1/1 (`outcome=OK`). Confirms the 2026-11-09 p3-subj7 closure; no source
 change in this closure.
+
+
+## Triage 2026-11-13 (lane p3-async-20261113, base 80a8116e5e2) — confirms CLOSED
+
+Same-base structural re-verification: `src/lib/nogc_sync_mut/env/platform.spl:5`
+imports `use std.env.types.{rt_env_home, rt_hostname, rt_env_cwd,
+rt_process_run}` — the `std.env.types` ownership contract the spec pins is
+present on this base. The 2026-11-09 verification (spec 1/1, seed
+interpreter, same branch) stands per the no-rerun rule. No source change.

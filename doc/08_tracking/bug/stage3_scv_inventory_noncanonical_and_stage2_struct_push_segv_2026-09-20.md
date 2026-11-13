@@ -149,3 +149,7 @@ the emitted comparison path before changing MIR or SCV publication.
 ## Resolution (2026-11-03)
 
 2026-11-03: marked fix-implemented-verification-pending. Section 1 reproduces only on a FreeBSD Stage 2 -> Stage 3 cold-init; needs a stage3-capable binary to remeasure. Not re-verified here.
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with lane boot14: OPEN — section 2 (stage-2 struct-push SEGV) remains the live leg; needs the sanctioned stage-2 build path to fix and verify. No in-lane change.

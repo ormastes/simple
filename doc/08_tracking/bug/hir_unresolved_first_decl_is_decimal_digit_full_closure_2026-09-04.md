@@ -225,3 +225,9 @@ recurred after that date, so adjacency is not absorption.
 
 Disposition: BLOCKED (verification infra forbidden in-lane; defect still live
 at tip). Header Status flipped from OPEN.
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with lane p3fix-comp7: BLOCKED — the resolver defect is still worked
+around in-tree (wildcard + local-binding workaround); a dedicated resolver
+owner is required. No in-lane change.

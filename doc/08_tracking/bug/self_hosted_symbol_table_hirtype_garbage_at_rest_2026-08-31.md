@@ -401,3 +401,7 @@ lane preserves the full candidate at
 `rejection.env`; only `build/bootstrap/stage2/<triple>/simple` is removed. Copy
 it and `chmod +x`. A watcher was used for the first two builds here and DIED
 during the third, which is how this was found.
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with the recorded status: OPEN — root cause localised (symbol-table HirType garbage at rest; three reader fixes treated a symptom), fix not landed. A bounded fix attempt did not converge inside the per-bug timebox in this lane. No in-lane change.

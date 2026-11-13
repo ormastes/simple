@@ -76,3 +76,26 @@ produces spurious errors of its own from truncated blocks) and file the
 root cause against the lexer/parser (`src/compiler/10.frontend/core/lexer*.spl`
 or the interpolation-scanning code specifically).
 
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Verdict: **parse failure FIXED at tip; one residual RED example found and fixed in-lane.**
+
+- Repro on the tracked seed (`bin/simple.exe` @ 46fe8f6b6def): the spec now
+  compiles and executes all 75 declared examples (74/75 on first re-run).
+- Residual: `rejects REM on float operands instead of silently emitting the
+  integer REM opcode` failed because `expect_to_equal(binop(Mod, float, float),
+  float)` hit the "mixed integer/float expect operands" diagnostic — factually
+  wrong, both operands are float. Root cause: `expr_is_float`
+  (`src/compiler/70.backend/svmg_lowering.spl`) is opcode-support based and
+  reports float REM/bitwise/shift expressions as non-float.
+- Fix (this lane, `src/compiler/70.backend/svmg_lowering.spl`): new
+  `expr_is_float_valued` predicate — value-based float view over arithmetic ops
+  (Add/Sub/Mul/Div/Mod/bitwise/shifts; comparisons excluded, they yield Bool
+  words and stay pinned to the mixed diagnostic by
+  "rejects a float comparison result compared with a float").
+  `lower_expect_to_equal` routes both-float-valued operand mismatches through
+  `lower_expr(actual)`, which fails with the precise "unsupported binary
+  operator on float operands" diagnostic.
+- After: **75/75 PASS** on the tracked seed; canary
+  `test/02_integration/app/context_log_modes_spec.spl` 4/4.

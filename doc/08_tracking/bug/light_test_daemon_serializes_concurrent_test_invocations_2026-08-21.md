@@ -130,3 +130,20 @@ the code path. Routed to the test-runner owner. The unresolved high-queue-depth
 empty-read sub-question is largely avoided by the bypass (queue depth stays ~0
 for diverting clients) but is still unexplained; do not close this bug without
 it once the pool lands.
+
+
+## Triage 2026-11-13 (lane p3-async-20261113, base 80a8116e5e2) — still LIVE, Windows-lane blocked
+
+Same-base structural check: the daemon's own loop comment still states it
+does NOT make the daemon parallel (clients divert via
+`daemon_backlog_bypass` in test_runner_client.spl); the bounded worker pool
+(load-bearing fix 1) is still not implemented. The 2026-11-03 mitigation
+(`daemon_backlog_bypass_spec` 13/13, verified 2026-11-11 lane ne13 on this
+branch) stands per the no-rerun rule and was not re-executed.
+
+Why not fixed in this lane: the worker pool is a concurrency change to the
+test-runner hot path that can only be authored AND measured on a Linux host —
+the light daemon is bypassed on non-Linux, so nothing on this Windows lane
+can exercise the code path. Routed to the test-runner owner. The
+high-queue-depth empty-read sub-question remains unexplained; do not close
+without it once the pool lands. No source change.
