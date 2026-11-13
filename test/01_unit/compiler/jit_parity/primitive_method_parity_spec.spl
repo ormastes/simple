@@ -1,0 +1,110 @@
+"""
+# JIT / interpreter parity for builtin methods on primitive types
+
+Each row is a tiny `fn main()` program. It runs once through `simple run` with
+`SIMPLE_EXECUTION_MODE=jit SIMPLE_JIT_STRICT=1` (no silent fall-back to the
+interpreter) and once with `SIMPLE_EXECUTION_MODE=interpret`. The last stdout
+line of both runs must agree, and must equal the value the interpreter's
+method dispatch (`interpreter_method/primitives.rs`, `string.rs`,
+`collections.rs`, `special/types.rs`) defines.
+
+Integer `max`/`min`/`clamp`/`abs` are owned by a separate lane and are not
+listed here.
+
+Bug: doc/08_tracking/bug/jit_primitive_method_parity_gaps_2026-11-13.md
+"""
+
+use std.spec.*
+use std.io_runtime.{shell, file_write}
+use std.common.spec.scenario_helpers.{capture_text}
+
+val PROBE_DIR = "build/probe_jit_primitive_parity"
+
+fn parity_bin() -> text:
+    val r = shell("printenv SIMPLE_PARITY_BIN")
+    val v = r.stdout.trim()
+    if v == "":
+        return "bin/simple"
+    v
+
+fn last_line(out: text) -> text:
+    val lines = out.trim().split("\n")
+    if lines.len() == 0:
+        return ""
+    lines[lines.len() - 1].trim()
+
+fn run_mode(name: text, body: text, mode: text) -> text:
+    shell("mkdir -p {PROBE_DIR}")
+    val path = "{PROBE_DIR}/{name}_{mode}.spl"
+    file_write(path, body)
+    val strict = if mode == "jit": "SIMPLE_JIT_STRICT=1 " else: ""
+    val r = shell("env SIMPLE_TIMEOUT_SECONDS=0 SIMPLE_EXECUTION_MODE={mode} {strict}timeout 120 {parity_bin()} run {path} 2>&1")
+    "rc={r.exit_code} out={last_line(r.stdout + r.stderr)}"
+
+fn program(setup: text, expr: text) -> text:
+    "fn main():\n    {setup}\n    print {expr}\n"
+
+# (name, setup statement, printed expression, expected interpreter output)
+fn parity_rows() -> [(text, text, text, text)]:
+    [
+        ("i_is_even", "val x: i64 = 4", "x.is_even()", "true"),
+        ("i_is_odd", "val x: i64 = 4", "x.is_odd()", "false"),
+        ("i_is_zero", "val x: i64 = 0", "x.is_zero()", "true"),
+        ("i_is_positive", "val x: i64 = 3", "x.is_positive()", "true"),
+        ("i_is_negative", "val x: i64 = 3", "x.is_negative()", "false"),
+        ("i_sign", "val x: i64 = -9", "x.sign()", "-1"),
+        ("i_pow", "val x: i64 = 3", "x.pow(4)", "81"),
+        ("i32_is_even", "val x: i32 = 7", "x.is_even()", "false"),
+        ("u8_to_string", "val x: u8 = 200", "x.to_string()", "200"),
+        ("i_to_f64", "val x: i64 = 7", "x.to_f64()", "7.0"),
+        ("f_is_nan", "val x = 1.5", "x.is_nan()", "false"),
+        ("f_is_finite", "val x = 1.5", "x.is_finite()", "true"),
+        ("f_floor", "val x = 2.7", "x.floor()", "2.0"),
+        ("f_trunc", "val x = -2.7", "x.trunc()", "-2.0"),
+        ("f_pow", "val x = 2.0", "x.pow(3.0)", "8.0"),
+        ("b_to_string", "val x = true", "x.to_string()", "true"),
+        ("t_upper", "val s = \"hello\"", "s.upper()", "HELLO"),
+        ("t_trim", "val s = \"  hi  \"", "\"[\" + s.trim() + \"]\"", "[hi]"),
+        ("t_split", "val s = \"a,b,c\"", "s.split(\",\").len()", "3"),
+        ("t_replace", "val s = \"aXbX\"", "s.replace(\"X\", \"-\")", "a-b-"),
+        ("t_index_of", "val s = \"hello\"", "s.index_of(\"l\")", "2"),
+        ("t_parse_int", "val s = \"123\"", "s.parse_int()", "Option::Some(123)"),
+        ("a_contains", "val a = [1, 2, 3]", "a.contains(2)", "true"),
+        ("a_sum", "val a = [1, 2, 3]", "a.sum()", "6"),
+        ("a_reduce", "val a = [1, 2, 3]", "a.reduce(0, \\acc, x: acc + x)", "6"),
+        ("a_insert", "var a = [1, 3]\n    a.insert(1, 2)", "a[1]", "2"),
+        ("d_contains_key", "val d = {\"a\": 1}", "d.contains_key(\"a\")", "true"),
+        ("o_unwrap_or", "val o: Option<i64> = None", "o.unwrap_or(5)", "5"),
+        ("o_or", "val o: Option<i64> = None", "o.or(Some(2)).unwrap()", "2"),
+        ("o_ok_or", "val o: Option<i64> = Some(4)", "o.ok_or(\"e\").is_ok()", "true"),
+    ]
+
+# Rows whose fix is too deep for this lane; each names its reason.
+fn pending_rows() -> [(text, text)]:
+    [
+        ("i_to_hex", "JIT has no int->radix-text runtime helper; needs a new rt_* symbol with a C twin"),
+        ("d_get", "print d.get(k): interpreter prints the bare value (1), JIT prints Option::Some(<undecoded payload>); Dict.get optional representation differs between engines"),
+    ]
+
+describe "builtin primitive methods agree between the JIT and the interpreter":
+    it "every parity row prints the interpreter's value under strict JIT":
+        # @req REQ-JIT-PARITY-001
+        var mismatches: [text] = []
+        for row in parity_rows():
+            val (name, setup, expr, expected) = row
+            step("run {name} under jit and interpret")
+            val body = program(setup, expr)
+            val jit = run_mode(name, body, "jit")
+            val interp = run_mode(name, body, "interpret")
+            val want = "rc=0 out={expected}"
+            if jit != want or interp != want:
+                mismatches.push("{name}: jit=[{jit}] interp=[{interp}] want=[{want}]")
+        capture_text("mismatches", mismatches.join("\n"))
+        assert_equal(mismatches.join("\n"), "")
+
+    it "rows too deep for this lane are tracked as pending with a reason":
+        # @req REQ-JIT-PARITY-002
+        for row in pending_rows():
+            val (name, reason) = row
+            pending("{name}: {reason}")
+            expect(reason.len() > 20).to_equal(true)

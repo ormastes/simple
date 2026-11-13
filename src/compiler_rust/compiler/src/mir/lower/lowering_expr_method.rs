@@ -1242,8 +1242,16 @@ impl<'a> MirLowerer<'a> {
             })?;
             self.finalize_block_jump(merge_id)?;
 
-            // merge: load the result.
+            // merge: load the result. When the receiver is a local binding,
+            // write the new array back into it: the interpreter's
+            // `var a = [1, 3]; a.insert(1, 2)` leaves `a == [1, 2, 3]`, so a
+            // statement-form insert must update the binding, not drop the
+            // spliced copy. doc/08_tracking/bug/jit_primitive_method_parity_gaps_2026-11-13.md
             self.set_current_block(merge_id)?;
+            let write_back_local = match &receiver.kind {
+                HirExprKind::Local(idx) => Some(*idx),
+                _ => None,
+            };
             return self.with_func(|func, current_block| {
                 let dest = func.new_vreg();
                 let block = func.block_mut(current_block).unwrap();
@@ -1252,6 +1260,16 @@ impl<'a> MirLowerer<'a> {
                     addr: temp_addr,
                     ty: receiver.ty,
                 });
+                if let Some(local_index) = write_back_local {
+                    let addr = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::LocalAddr { dest: addr, local_index });
+                    block.instructions.push(MirInst::Store {
+                        addr,
+                        value: dest,
+                        ty: receiver.ty,
+                    });
+                }
                 dest
             });
         }
