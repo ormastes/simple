@@ -12,7 +12,6 @@
 use compiler.backend.linker.elf_parser.{ElfRelocation, elf_reloc_sym, elf_reloc_type}
 use compiler.backend.linker.smf_writer.{RelocationType}
 use compiler.backend.linker.riscv_static_reloc.{riscv_static_width, riscv_static_delta, riscv_static_branch, riscv_static_arithmetic}
-use std.common.isa.a64_encode_v1.{a64_branch26_bytes_in_range_v1, a64_imm26_from_bytes_v1}
 use compiler.backend.linker.gpu_smf.smf_reloc_formulas.{
     smf_reloc_compute, smf_reloc_compute_rel64, smf_reloc_compute_abs32s,
     smf_reloc_compute_rel_signed, smf_reloc_compute_abs_unsigned
@@ -571,9 +570,12 @@ fn reloc_apply_aarch64(bytes: [i64], offset: i64, rtype: i64, s: i64, a: i64, p:
         val v = s + a - p
         if v & 0x3 != 0:
             return RelocResult(success: false, offset: offset, value: 0, error: "R_AARCH64_CALL26/JUMP26 branch target not 4-byte aligned: (S + A - P) & 0x3 != 0")
-        if not a64_branch26_bytes_in_range_v1(v):
+        # Kept inline on purpose: delegating this range check and imm26 field
+        # to std.common.isa.a64_encode_v1 measured 1.6x slower per relocation
+        # (xray_v1_integration_status_2026-11-03.md "Step 3c").
+        if v < -134217728 or v >= 134217728:
             return RelocResult(success: false, offset: offset, value: 0, error: "R_AARCH64_CALL26/JUMP26 branch offset out of range: (S + A - P) must be in [-2^27, 2^27)")
-        return RelocResult(success: true, offset: offset, value: a64_imm26_from_bytes_v1(v), error: "")
+        return RelocResult(success: true, offset: offset, value: (v >> 2) & 0x3ffffff, error: "")
 
     if rtype == R_AARCH64_TSTBR14 or rtype == R_AARCH64_CONDBR19:
         val v = s + a - p

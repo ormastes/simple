@@ -230,3 +230,13 @@ clang `-O1 -g` object of `src/runtime/runtime_native.c`; `parse` = 5 x `elf_pars
 call layer, no loop): parse and reads back at the old level, RSS within run noise.
 Pinned by a new `elf_image_v1_spec` example with 8 distinct byte lanes (a `<< 56` -> `<< 48`
 mutation of the u64 top lane survived the old spec and now fails 12/13).
+
+Other `b795b3f4a26`/`aba2a5f0a3e` sites, same seed and scope:
+- `reloc_engine` CALL26/JUMP26 delegation: 200,000 `reloc_apply_aarch64` CALL26 calls,
+  old 3.91 / 3.93 / 5.19 s vs delegated 6.22 / 6.12 / 8.22 s (1.6x), RSS equal. Reverted to
+  the inline check (3.87 / 3.83 s after revert); `a64_branch26_bytes_in_range_v1` and
+  `a64_imm26_from_bytes_v1` lost their only consumer and were removed with their examples.
+- `encode_x86_64.emit_i32` -> `x64_push_imm32_le_v1` (one call + 4 pushes replacing 4 helper
+  calls with a branch + division each): 1,000,000 calls, 5 alternating pairs at load ~20,
+  old 3.02 / 3.61 / 2.53 / 3.63 / 4.25 s vs new 2.07 / 4.13 / 4.62 / 2.11 / 2.11 s (median
+  3.61 vs 2.11). No regression signal; kept.
