@@ -80,6 +80,8 @@ use app.cli.native_build_streaming_request_owner.{native_build_streaming_surface
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_can_replace, hir_shard_recovery_unclaimed_count, hir_shard_aggregate_exit, hir_shard_recovery_seal, hir_shard_reap_state_v1, hir_shard_reap_deadline_hit_v1, hir_shard_recovery_owner_tree_progress_v1, hir_shard_recovery_failure_count, hir_shard_recovery_finished, hir_shard_recovery_block, hir_shard_recovery_blocked, hir_shard_recovery_reap_blocks_ledger_v1}
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_close_inventory,
     hir_shard_recovery_failed_rows_v1, hir_shard_recovery_replacements_dispatchable}
+use compiler.driver.driver_build.go_to_end_trial_link_v1.{go_to_end_trial_from_inputs_v1,
+    go_to_end_trial_inputs_from_ledger_v1, go_to_end_trial_link_options_v1}
 use compiler.driver.driver_build.native_mir_shard.{native_mir_shard_outcome_v1,
     native_mir_shard_outcome_after_hir_errors_v1, native_mir_shard_hir_compile_errors_recorded_v1,
     native_mir_shard_hir_compile_errors_path_v1}
@@ -93,7 +95,8 @@ use compiler.driver.driver_build.native_file_worker_v1.{NATIVE_FILE_WORKERS_ENV_
     native_file_worker_object_path_v1, file_worker_overlap_proven_v1,
     NATIVE_BOOTSTRAP_WHOLE_PROGRAM_ENV_V1, file_worker_module_scoped_selected_v1,
     NativeFileUnitInvokerV1, NATIVE_FILE_WORKER_UNIT_ENV_V1}
-use compiler.driver.driver_hir_recovery.{hir_shard_recovery_complete, HIR_SHARD_FORK_OWNER_MARK_V1}
+use compiler.driver.driver_hir_recovery.{hir_shard_recovery_complete, HIR_SHARD_FORK_OWNER_MARK_V1,
+    hir_shard_recovery_crashed_rows_v1}
 use compiler.driver.driver_build.native_file_unit_loop_v1.{native_file_unit_worker_loop_v1}
 use std.nogc_sync_mut.io_runtime.{thread_sleep, env_get_nullable, file_hash_sha256_or_empty}
 use compiler.driver.cache.postbuild_coordinator_v1.{postbuild_record_v1}
@@ -111,7 +114,7 @@ use compiler.driver.driver_ice_boundary.{
     ice_runtime_trap_symbol,
     ice_boundary_merge_receipt,
     ice_skip_list_extend, ice_crash_retry_budget,
-    ice_crash_retry_allowed}
+    ice_crash_retry_allowed, IceBreadcrumb}
 use app.cli.native_build_warm_receipt.{
     NATIVE_BUILD_WARM_CANDIDATE_ENV, NativeBuildWarmReceiptState,
     native_build_warm_receipt_prepare,
@@ -370,6 +373,28 @@ fn native_build_should_use_worker(args: [text]) -> bool:
 # args, so the parent can verify the worker actually produced a binary instead
 # of trusting a bare exit code of 0 (see
 # doc/08_tracking/bug/native_build_worker_zombie_parent_hang_2026-07-03.md).
+# Value of a value-consuming flag (`--backend X` / `--backend=X`), or "".
+fn native_build_flag_value_arg_v1(args: [text], flag: text) -> text:
+    var i = 0
+    while i < args.len():
+        if args[i] == flag and i + 1 < args.len(): return args[i + 1]
+        if args[i].starts_with(flag + "="): return args[i].substring(flag.byte_len() + 1)
+        i += 1
+    ""
+
+# go-to-end after a failed MIR shard pool: the pool itself ran to the end
+# (fail-fast off), so every PASS row holds an object. Trial-link them with
+# the hosted link line and write `<out>.go-to-end.sdn` naming the failed rows
+# and every undefined symbol; the caller still exits 1.
+fn native_build_go_to_end_trial_after_mir_pool_v1(mir_ledger: text, args: [text]):
+    val output = output_path_arg(args)
+    if output == "":
+        eprint "[go-to-end] no -o/--output in args; trial link skipped"
+        return
+    val opts = go_to_end_trial_link_options_v1(native_build_flag_value_arg_v1(args, "--backend"),
+        native_build_flag_value_arg_v1(args, "--target"), native_build_flag_value_arg_v1(args, "--runtime-path"))
+    eprint go_to_end_trial_from_inputs_v1(go_to_end_trial_inputs_from_ledger_v1(mir_ledger), output, opts)
+
 fn output_path_arg(args: [text]) -> text:
     var i = 0
     while i < args.len():
@@ -1012,7 +1037,24 @@ pub fn native_build_hir_ledger_run_v1(args: [text], count: i64, simple_bin: text
         eprint "[hir-shard] BLOCKED: cannot establish invocation ledger"
         return LedgerShardRunV1(code: 1, failed_modules: 0, total_claims: 0,
             blocked_reason: "cannot establish HIR ledger", all_stopped: true, refused_before_spawn: true)
-    native_build_hir_ledger_run_in_v1(args, queue_dir, count, simple_bin, timeout_ms)
+    val run = native_build_hir_ledger_run_in_v1(args, queue_dir, count, simple_bin, timeout_ms)
+    # go-to-end: a module whose worker died (CRASH) or hung (TIMEOUT) inside
+    # it is sealed in the ledger, but every MIR shard worker and the final
+    # worker would re-lower its HIR from a cache miss and die the same way,
+    # before claiming anything. Export those rows as `hir_lower:<path>` so the
+    # HIR gate (driver_hir_pipeline_lowering.spl) records each as a poisoned
+    # module instead; go_to_end_recover_hir_v1 drops its importers and MIR
+    # runs over the rest. The caller restores the variable after the final
+    # worker. Never a success: the rows stay non-PASS and the link stays blocked.
+    if run.failed_modules > 0 and (args.contains("--go-to-end") or (env_get("SIMPLE_NATIVE_GO_TO_END") ?? "") == "1"):
+        val crashed = hir_shard_recovery_crashed_rows_v1(queue_dir)
+        if crashed.len() > 0:
+            var crumbs: [IceBreadcrumb] = []
+            for path in crashed:
+                crumbs = crumbs.push(IceBreadcrumb(phase: "hir_lower", module_name: path, source_path: path, backend: ""))
+            env_set("SIMPLE_ICE_SKIP_MODULES", ice_skip_list_extend(env_get("SIMPLE_ICE_SKIP_MODULES") ?? "", crumbs))
+            eprint "[go-to-end] {crashed.len()} HIR module(s) crashed or timed out in the pool; skipped in every downstream worker: {crashed.join(", ")}"
+    run
 
 # HIR pool over an already-established ledger, always through the canonical
 # internal worker route the HIR profile admits (`run native_build_worker.spl`).
@@ -1479,7 +1521,9 @@ fn run_mir_shards(args: [text], parallel: i64, simple_bin: text, timeout_ms: i64
         eprint "[mir-shard] HIR compile errors recorded by the shard frontend ({file_read(native_mir_shard_hir_compile_errors_path_v1(queue_dir)).trim()}); deterministic, no in-process MIR retry"
     if outcome != "link":
         eprint "[mir-shard] outcome={outcome} exit={run.code} failed_modules={run.failed_modules} claims={run.total_claims} all_stopped={run.all_stopped} blocked={run.blocked_reason}"
-    if outcome == "link": (outcome, queue_dir) else: (outcome, "")
+    # The ledger is also returned on "fail": go-to-end runs its trial link
+    # over the PASS objects it holds (the caller links only on "link").
+    if outcome == "link" or outcome == "fail": (outcome, queue_dir) else: (outcome, "")
 
 # ===== Focused-capsule shard pre-pass (exact Stage3/Stage4) =================
 #
@@ -1909,11 +1953,17 @@ pub fn native_build_relaunch_past_ice_crashes(worker_bin: text, relaunch_args: [
     val dead = ice_boundary_dead_worker_modules()
     if dead.len() == 0:
         return (stdout, stderr, code_raw)
+    # Every dead module already on the skip list: the worker died inside a
+    # module it was told to step over (or died again the same way), so a
+    # re-launch would be identical and only burn the budget.
+    val skip_before = env_get("SIMPLE_ICE_SKIP_MODULES") ?? ""
+    val skip_after = ice_skip_list_extend(skip_before, dead)
+    if skip_after == skip_before:
+        return (stdout, stderr, code_raw)
     eprint_bounded(stderr)
     for crumb in dead:
         stderr_write("error: ICE: native-build worker died (exit status {code_raw}) inside {crumb.phase} of module {crumb.module_name} ({crumb.source_path}); re-launching past it, {retries_left} retries left.\n")
-    env_set("SIMPLE_ICE_SKIP_MODULES",
-        ice_skip_list_extend(env_get("SIMPLE_ICE_SKIP_MODULES") ?? "", dead))
+    env_set("SIMPLE_ICE_SKIP_MODULES", skip_after)
     ice_boundary_begin_run()
     val (next_stdout, next_stderr, next_code) = process_run_timeout_live(worker_bin, relaunch_args, timeout_ms)
     native_build_relaunch_past_ice_crashes(worker_bin, relaunch_args, timeout_ms,
@@ -2182,6 +2232,9 @@ fn run_native_build_worker_inner(raw_args: [text]) -> i64:
         print "[hir-shard] no frozen entry closure (--entry-closure absent); HIR pool skipped, coordinator lowers HIR in process"
         hir_shard_count = 0
     log_build_trace("coordinator:shards hir={hir_shard_count}")
+    # native_build_hir_ledger_run_v1 may extend the ICE skip list under
+    # go-to-end (HIR pool CRASH rows); restored after the final worker.
+    val go_to_end_skip_saved = native_build_env_saved_v1("SIMPLE_ICE_SKIP_MODULES")
     if hir_shard_count > 0:
         # Explicit HIR-only warming may bypass the parse-publication phase,
         # but never its immutable source ownership requirement. Inherited
@@ -2260,6 +2313,10 @@ fn run_native_build_worker_inner(raw_args: [text]) -> i64:
         else:
             native_build_env_restore_v1("SIMPLE_NATIVE_BUILD_WORKER", old_worker_marker)
             native_build_env_restore_v1(NATIVE_BUILD_WARM_CANDIDATE_ENV, old_warm_candidate)
+            # go-to-end: the pool ran to the end; trial-link its PASS objects
+            # and write the manifest this route never had. Still exit 1.
+            if mir_ledger != "" and (args.contains("--go-to-end") or (env_get("SIMPLE_NATIVE_GO_TO_END") ?? "") == "1"):
+                native_build_go_to_end_trial_after_mir_pool_v1(mir_ledger, args)
             eprint "error: MIR shard aggregate failure; link and artifact publication blocked"
             return 1
     # Publish the candidate path only for the real worker. Parse-shard_main
@@ -2300,6 +2357,7 @@ fn run_native_build_worker_inner(raw_args: [text]) -> i64:
         ice_dead_summary = ice_merged_summary
     if ice_relaunched:
         native_build_env_restore_v1("SIMPLE_ICE_SKIP_MODULES", old_ice_skip_saved)
+    native_build_env_restore_v1("SIMPLE_ICE_SKIP_MODULES", go_to_end_skip_saved)
     ice_boundary_release_run(ice_owned)
     if worker_spawn_trace:
         eprint "[native-build-trace] worker_spawn:returned status={code} stdout_len={stdout.len()} stderr_len={stderr.len()}"

@@ -238,6 +238,14 @@ fn _go_to_end_name_list_v1(names: [text]) -> text:
 # The manifest text. Pure: same inputs, byte-identical output.
 pub fn go_to_end_manifest_text_v1(output: text, ledger: GoToEndLedgerV1,
         object_count: i64, built_modules: [text]) -> text:
+    go_to_end_manifest_text_with_trial_v1(output, ledger, object_count, built_modules, "")
+
+# `trial_block` is the `trial_link:` section rendered by
+# go_to_end_trial_link_v1.spl (go_to_end_trial_manifest_block_v1), or "" when
+# no trial link ran: the manifest then still states `trial_link: attempted:
+# false`. Passed as text so this module stays free of the linker.
+pub fn go_to_end_manifest_text_with_trial_v1(output: text, ledger: GoToEndLedgerV1,
+        object_count: i64, built_modules: [text], trial_block: text) -> text:
     var out = "go_to_end:\n"
     out = out + "  schema: {go_to_end_sdn_quote_v1(GO_TO_END_SCHEMA_V1)}\n"
     val user_output = go_to_end_user_output_v1(output)
@@ -250,6 +258,10 @@ pub fn go_to_end_manifest_text_v1(output: text, ledger: GoToEndLedgerV1,
     for stage in ["build", "hir", "hir_dependency", "mir", "borrow", "codegen"]:
         out = out + "    {stage}: {_go_to_end_name_list_v1(ledger.stage_modules(stage))}\n"
     out = out + "  built: {_go_to_end_name_list_v1(built_modules)}\n"
+    if trial_block == "":
+        out = out + "  trial_link:\n    attempted: false\n"
+    else:
+        out = out + trial_block
     out = out + "\nfailures |stage, module, message|\n"
     var index = 0
     while index < ledger.len():
@@ -261,8 +273,14 @@ pub fn go_to_end_manifest_text_v1(output: text, ledger: GoToEndLedgerV1,
 # the caller's to skip; this never reports success.
 pub fn go_to_end_write_manifest_v1(output: text, ledger: GoToEndLedgerV1,
         object_count: i64, built_modules: [text]) -> text:
+    go_to_end_write_manifest_with_trial_v1(output, ledger, object_count, built_modules, "", "")
+
+# `trial_summary` is appended to the verdict line (go_to_end_trial_link_v1.spl
+# GoToEndTrialLinkV1.summary()); the verdict is still a failure.
+pub fn go_to_end_write_manifest_with_trial_v1(output: text, ledger: GoToEndLedgerV1,
+        object_count: i64, built_modules: [text], trial_block: text, trial_summary: text) -> text:
     val path = go_to_end_manifest_path_v1(output)
-    val text_out = go_to_end_manifest_text_v1(output, ledger, object_count, built_modules)
+    val text_out = go_to_end_manifest_text_with_trial_v1(output, ledger, object_count, built_modules, trial_block)
     val wrote = file_atomic_write(path, text_out)
     val where_text = if wrote: path else: "{path} (WRITE FAILED)"
     val n_hir = ledger.count_stage("hir")
@@ -271,4 +289,5 @@ pub fn go_to_end_write_manifest_v1(output: text, ledger: GoToEndLedgerV1,
     val n_borrow = ledger.count_stage("borrow")
     val n_codegen = ledger.count_stage("codegen")
     val n_total = ledger.len()
-    "go-to-end: {n_total} failure(s) (hir={n_hir} hir_dependency={n_dep} mir={n_mir} borrow={n_borrow} codegen={n_codegen}); {object_count} object(s) in cache; link skipped; manifest {where_text}"
+    val trial_text = if trial_summary == "": "" else: "; " + trial_summary
+    "go-to-end: {n_total} failure(s) (hir={n_hir} hir_dependency={n_dep} mir={n_mir} borrow={n_borrow} codegen={n_codegen}); {object_count} object(s) in cache; link skipped{trial_text}; manifest {where_text}"

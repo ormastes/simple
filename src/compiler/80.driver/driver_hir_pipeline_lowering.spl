@@ -66,6 +66,7 @@ use compiler.frontend.parser_types.*
 use compiler.driver.driver_source_pipeline_impl.{dtrace, driver_end_transient_parse_scope, driver_promote_frontend_registry_owners, driver_promote_retained_frontend_owners_v1}
 use compiler.driver.driver_phase_gates.{bootstrap_entry_module_name, bootstrap_entry_source_index}
 use compiler.driver.driver_phase_gates.{driver_streaming_surface_enabled}
+use compiler.driver.driver_ice_boundary.{ice_boundary_module_start, ice_boundary_module_done, ice_boundary_fail}
 use compiler.driver.driver_log_helpers.{log_debug, log_trace, log_warn, log_error, log_phase, log_build_progress, driver_phase_trace_enabled}
 use compiler.driver.driver_mem_snapshot.{mem_snapshot_begin, mem_snapshot_finish, mem_snapshot_finish_with_outcome, mem_snapshot_abort, mem_snapshot_owner_v1}
 use compiler.driver.driver_hir_pipeline_support.{
@@ -1292,8 +1293,27 @@ impl CompilerDriver:
                             hir_shard_guard_block(shard_records_err)
                             self.ctx.add_error(shard_records_err)
                             return false
+                    # ICE boundary (driver_ice_boundary.spl): the breadcrumb
+                    # names this module if the worker dies inside it, and a
+                    # module on the crash skip list (a worker already died in
+                    # it) is recorded FAILED and poisoned, never re-lowered.
+                    val hir_ice_gate = ice_boundary_module_start(source.module_name, source.path, "hir_lower", "")
+                    if hir_ice_gate != "":
+                        if not hir_shard_finish(source.path, "FAILED", false):
+                            hir_shard_guard_block("HIR shard terminal receipt publication failed")
+                            self.ctx.add_error("HIR shard terminal receipt publication failed")
+                            return false
+                        self.ctx.add_error(ice_boundary_fail(source.module_name, source.path, "hir_lower", "", hir_ice_gate) + " ({source.path})")
+                        poisoned_by_surface[surface_index] = true
+                        var skip_ctx = self.ctx
+                        skip_ctx.mark_module_poisoned(source.module_name)
+                        self.ctx = skip_ctx
+                        if skip_ctx.poison_budget_exhausted(): return false
+                        hir_loop_pos = hir_loop_pos + 1
+                        continue
                     val shard_status = self.lower_streaming_hir_shard_transaction_v1(
                         lowering, source, is_requested_bootstrap_entry, hir_stream_key)
+                    ice_boundary_module_done(source.module_name, "hir_lower")
                     if shard_status < 0 or shard_status > 3:
                         hir_shard_guard_block("HIR shard transaction failed before safe completion")
                         return false
@@ -1405,7 +1425,16 @@ impl CompilerDriver:
                     mem_snapshot_abort()
                     return false
             else:
-                val lower_result = self.lower_streaming_surface_source(lowering, source, is_requested_bootstrap_entry)
+                # ICE boundary, in-process route: same bracket and skip-list
+                # rule as the shard transaction above; a skipped module takes
+                # the streaming-error path below (FAILED terminal, poisoned).
+                val hir_ice_gate = ice_boundary_module_start(source.module_name, source.path, "hir_lower", "")
+                val lower_result: Result<HirModule, text> = if hir_ice_gate != "":
+                    Err(ice_boundary_fail(source.module_name, source.path, "hir_lower", "", hir_ice_gate) + " ({source.path})")
+                else:
+                    self.lower_streaming_surface_source(lowering, source, is_requested_bootstrap_entry)
+                if hir_ice_gate == "":
+                    ice_boundary_module_done(source.module_name, "hir_lower")
                 if lower_result.is_err():
                     # No HIR aggregate exists for this unit (parse/ownership
                     # failure), so it is poisoned by definition -- but the other
