@@ -39,14 +39,41 @@ library), `simple-rust-runtime` (src/compiler_rust, runtime), `simple-compiler`
 compiler, lib). The compiler proper becomes a library unit by changing its
 `type` once the Stage 3 binary is expressed as a link target (§6).
 
-## 2. Interface artifact
+## 2. Interface artifact — what a dependency leaks into a unit's objects
 
-Per module: the existing `interface_digest_of_source` / SIF digest
-(`simple/interface/v1`). Per unit: `interface_digest_of(["<module_id>:<module
-iface digest>", …])` — one more `simple/interface/v1` fold over the unit's
-public modules, so the unit digest changes iff some exported module interface
-changes. It is stored as `iface.sdn` beside the archive and is what dependents
-key on (§3); a body-only edit inside a unit leaves every dependent's key intact.
+MIR lowering of a module reads far more than its importers' `fn` headers
+(`mir_shard_export_summaries.md` rows 1-22): struct/class field order and
+types, layout digests, enum discriminants and payload shapes, callee signatures
+AND parameter defaults, methods/extensions, trait implementors and vtable
+shapes, imported globals/constants and externs (rows 2-19). So the per-module
+digest is **`native_interface_whole_digest_v1`** over the body-free declaration
+carrier (`cache/native_interface_slice.spl`: every declaration keeps its header
+and nested non-body lines — fields, variants, signatures with defaults — and
+drops only bodies). It is explicitly NOT `interface_digest_of_source`, whose
+`source_interface_parts` heuristic keeps only header lines and misses a field
+change. Per unit: `interface_digest_of(["simple/library-unit-iface/v1",
+"<module>:<module digest>", …])`, stored as `iface.sdn`
+(`library_unit_iface_v1.spl`, decode fails closed on format/digest mismatch).
+A body-only edit inside a unit leaves every dependent's key intact.
+
+Two rows are NOT covered by any interface digest and are handled separately:
+
+- **Row 20, generic monomorphization.** `40.mono` inserts each specialization
+  into its *template owner's* HIR, so a dependency's objects would otherwise
+  vary with its users' instantiations. Rule: a unit archive contains only
+  instances whose template AND arguments are both inside the unit. Cross-unit
+  instances are produced by the existing generic-instance pre-link lane
+  (`generic_instance_prelink_v1.md`: `needed = ∪ generic-spec(all modules)`,
+  key `generic_instance_body_key_v1(concrete_key, template body digest) +
+  producer`, COMDAT/linkonce_odr) and added to the link set beside the
+  archives. Their key already includes the template owner's **body** digest,
+  which is correct — an instance body is the dependency's body.
+- **Row 22, order-dependent counters** (`canonical_type_symbols`,
+  `mcdc_next_runtime_id`): values depend on lowering order across the whole
+  closure. Separate compilation needs them unit-deterministic (derived from
+  symbol identity, not visit order) or recorded in the receipt and rejected on
+  mismatch. **Blocker for slice 5; not solved by any digest.** Rows 12/14
+  (process-global tables) are per build process and so per unit build.
 
 ## 3. Archive layout and cache key
 
@@ -64,8 +91,8 @@ frame(unit_source_digest) ; frame(dep_1 iface) ; … )` with dependencies sorted
 by name and every component length-framed by `cache_key_frame`
 (`incremental.spl:626`) so `("ab","c")` and `("a","bc")` never collide.
 `producer_identity` is the existing `native_build_producer_identity` (exe,
-compiler, runtime, bundle, ABI); `unit_source_digest` is a sha256 over the
-unit's sorted `(path, source sha)` pairs. Dependencies enter only through their
+compiler, runtime, bundle, ABI); `unit_source_digest` is `library_unit_source_digest_v1`: sha256 over the
+unit's sorted, length-framed `(path, sha256(source))` pairs. Dependencies enter only through their
 **interface** digest, so a dependency's body change does not rebuild its users.
 
 ## 4. Dependency-ordered parallel scheduling
@@ -116,7 +143,8 @@ the user-visible win. Receipt-gate and per-lane cache scope rules are unchanged.
 1. (this change) `library_unit_plan_v1.spl`: manifest → ordered, levelled unit
    plan with cycle detection and fail-closed dependency resolution;
    `library_unit_cache_key_v1`. Specs red→green, no wiring.
-2. Unit source digest over the real file set; `iface.sdn` writer/reader.
+2. (done) `library_unit_iface_v1.spl`: unit source digest over the real file
+   set; body-free per-module digests; `iface.sdn` writer/reader.
 3. Archive writer (thin `.a` over the existing per-module objects) + receipt.
 4. `BuildGraph` adapter: plan → `BuildUnit`s, poison propagation.
 5. Link from archives; Stage 3 behind the flag; Stage 4 reuse; manifest drift fix.
