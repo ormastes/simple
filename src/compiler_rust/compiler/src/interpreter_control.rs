@@ -324,6 +324,15 @@ mod optional_let_binding_tests {
         assert!(matches!(optional_let_binding_condition(&name, &result, &present), Ok(LetBind::NotApplicable)));
     }
 
+    // interp_while_val_binds_option_not_payload_2026-11-13: the statement-level
+    // `while val IDENT = <T?>` must bind the payload (like `if val`), including a
+    // falsy-but-present `Some(0)`, and stop on nil.
+    #[test]
+    fn while_val_binds_optional_payload_not_wrapper() {
+        let source = "fn pk(v: i64, ok: bool) -> i64?:\n    if ok:\n        v\n    else:\n        nil\nfn main() -> i64:\n    var i = 0\n    var total = 0\n    while val m = pk(i, i < 3):\n        total = total + m * 10\n        i = i + 1\n    total\n";
+        assert_eq!(interpret_binding(source), Ok(30));
+    }
+
     #[test]
     fn result_guard_preserves_existing_optional_presence() {
         let source = "fn make() -> Result<i64, text>: Ok(7)\nfn main() -> i64:\n    if val outer = Some(make()):\n        match outer:\n            case Ok(value): return value - 7\n            case Err(_): return 1\n    2\n";
