@@ -84,3 +84,7 @@ asserts both are `> 0`. Neither variable is set anywhere in the repository —
 they are host-pinned perf evidence. Supplying invented values would fabricate a
 perf baseline, so this spec cannot go green on an unpinned, heavily loaded host
 regardless of the load-font fix.
+
+## Triage 2026-11-13 (Linux aarch64, lane uia) — row stays OPEN
+
+Blocked on this host: multicore_green_fanout_spec asserts empty stderr, which needs a self-hosted binary (the seed banner cannot be suppressed through its env -i probe), and the vector-font spec needs host-pinned baselines. The font-fixture half is fixed (1fc1852855a). Regression found, not repaired here: transplant 88aac2ffe28 undid cbe6b94a79f in multicore_green_fanout_spec.spl (mkdir -p build/tmp in unique_probe_path; bin/simple fallback in simple_binary), so probes now fail with 98/127 before reaching the stderr assertion; origin/main carries the same reverted text.

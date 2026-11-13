@@ -100,3 +100,7 @@ acceptance design documents under
 doc/02_requirements/feature|nfr/vulkan_async_compute_submission_ring.md and
 doc/05_design/runtime/vulkan_async_compute_submission_ring.md remain the
 specification for the runtime owner. Status: open.
+
+## Triage 2026-11-13 (Linux aarch64, lane uia) — row stays OPEN
+
+On release/1.0.0 c8c3e7bc4f1, Linux aarch64 (DGX Spark GB10), Rust seed af717f53d6bce3e5: vulkan_async_submission_contract_spec 3/3; vulkan_async_session_lifecycle_contract_spec 4/5 (red: keeps every async forward visible to the dual-lane ABI audit, a source-text contract). The runtime session ring exists (rt_vulkan_async_session_*), but its only tests use an injected device and vulkan_resident_2d.spl still submits with vulkan_counted_submit_and_wait_fence. Acceptance (live-device ring test: three enqueued before any wait, retire one, fourth without device idle) is unmet and was not written here.

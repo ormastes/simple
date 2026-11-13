@@ -39,3 +39,7 @@ Related historical evidence is in:
 
 - `doc/09_report/production_gui_web_renderer_parity_evidence_2026-06-16.md`
 - `doc/09_report/gui_renderdoc_feature_coverage_status_2026-06-21.md`
+
+## Triage 2026-11-13 (Linux aarch64, lane uia) — row stays OPEN
+
+Blocked on this host: check-production-gui-font-offload-evidence.shs refuses the Rust seed by identity (rust-seed-forbidden) and no self-hosted full-CLI binary is deployed; the pass also needs real accelerator glyph readback. Defect still in source at release/1.0.0 c8c3e7bc4f1, Linux aarch64 (DGX Spark GB10), Rust seed af717f53d6bce3e5: vector_font_offload.spl returns vector-font-gpu-glyph-return-missing.

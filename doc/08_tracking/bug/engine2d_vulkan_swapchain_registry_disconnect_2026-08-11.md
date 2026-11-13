@@ -137,3 +137,7 @@ physical surface, verification readback outside timed frames, zero-readback
 timed frames, 7680x4320 p50/p95 + receipts), which needs a display
 environment and an admitted compiler — neither available to this lane. No
 source change was made; status remains open (PARTIAL).
+
+## Triage 2026-11-13 (Linux aarch64, lane uia) — row stays OPEN
+
+On release/1.0.0 c8c3e7bc4f1, Linux aarch64 (DGX Spark GB10), Rust seed af717f53d6bce3e5 the source-level contract specs pass: engine_vulkan_present_api_spec 2/2, engine_vulkan_window_present_spec 7/7, engine2d_strict_vulkan_submit_no_readback_contract_spec 7/7. The old bridge symbols have no definition left. Blocked for closure on this host: the Acceptance section needs a live Xvfb or physical-display present with checksum, and this host has no Xvfb (xwd only) and the live tests are ignored Rust tests that go through Vulkan instance creation (other lane). Same missing evidence as engine2d_vulkan_window_8k_gate_is_device_present_proxy_2026-08-31.

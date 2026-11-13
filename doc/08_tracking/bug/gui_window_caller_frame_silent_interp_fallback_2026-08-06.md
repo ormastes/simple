@@ -319,3 +319,7 @@ line plus the hard `SIMPLE_JIT_STRICT: ... refusing to fall back` error
 UNCHANGED from the interp8 pass — the visibility item stays refuted and the
 perf-cliff item-2 root cause stays LIVE, owned by the seed JIT/HIR lowering
 lanes (`src/compiler_rust` / `src/compiler`). Header flipped accordingly.
+
+## Triage 2026-11-13 (Linux aarch64, lane uia) — row stays OPEN
+
+Not attempted. Static read at release/1.0.0 c8c3e7bc4f1, Linux aarch64 (DGX Spark GB10), Rust seed af717f53d6bce3e5: the live remainder is whole-module JIT demotion, current trigger the same-name different-layout pair JsError/JsBrowserError (common/js/engine/js_error.spl alias vs nogc_sync_mut/js/engine/js_error.spl classes) rejected in the seed at hir/lower/module_lowering/module_pass.rs qualify_flattened_structs. Fix is either a JS-engine rename across about 50 importers or a seed HIR change; both belong to the compiler/JS lanes, and the trigger has already moved once.

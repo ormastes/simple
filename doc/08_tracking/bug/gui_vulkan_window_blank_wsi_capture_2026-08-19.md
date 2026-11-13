@@ -88,3 +88,7 @@ construction.
 
 Status: fix-implemented-verification-pending (script); underlying
 present-path defect OPEN.
+
+## Triage 2026-11-13 (Linux aarch64, lane uia) — row stays OPEN
+
+Blocked on this host: check-gui-vulkan-window.shs needs Xvfb and a gui-feature seed; this host has xwd but no Xvfb or xvfb-run, and the gate app examples/06_io/ui/widget_showcase_gui.spl is owned by another lane today. Source note: present=false in the renderer line is static metadata (BackendProbeResult.has_present is never set for Vulkan in backend_probe.spl), not a symptom.

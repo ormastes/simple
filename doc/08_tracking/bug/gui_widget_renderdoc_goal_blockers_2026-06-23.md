@@ -112,3 +112,7 @@ Still blocked:
   `sh scripts/check/check-gui-widget-renderdoc-goal-status.shs --strict` with
   real Simple Vulkan Engine2D and Electron Chromium/Vulkan `.rdc` artifacts
   present, and record the resulting gate report under `doc/09_report/`.
+
+## Triage 2026-11-13 (Linux aarch64, lane uia) — row stays OPEN
+
+Blocked on this host: needs a live Electron-on-Vulkan RenderDoc capture; neither RenderDoc nor Electron was found on PATH, /usr/bin, /opt or the home directory, and the Simple leg runs the Vulkan backend under simple run (Vulkan-init lane).
