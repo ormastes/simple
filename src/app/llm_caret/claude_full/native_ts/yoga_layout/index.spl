@@ -256,7 +256,20 @@ impl Node:
         Node(style: defaultStyle(), layout: Layout.new(), parent: nilNode(), children: [], measureWidth: 0, measureHeight: 0, hasMeasureFunc: false, config: config, isDirty_: true, isReferenceBaseline_: false, hasParent: false, _hasAutoMargin: false, _hasPosition: false, _hasPadding: false, _hasBorder: false, _hasMargin: false, _hasL: false, _hasM: false, _cN: 0, _cWr: 0, _fbBasis: -1)
 
     me insertChild(child: Node, index: i64) -> ():
-        me.children = appendNode(me.children, child)
+        var out: [Node] = []
+        var i = 0
+        var placed = false
+        while i < me.children.len():
+            if i == index:
+                out.push(child)
+                placed = true
+            out.push(me.children[i])
+            i = i + 1
+        if not placed:
+            out.push(child)
+        me.children = out
+        child.parent = me
+        child.hasParent = true
         me.markDirty()
 
     me removeChild(child: Node) -> ():
@@ -585,20 +598,9 @@ impl Node:
             me.layout.height = 0
             me.isDirty_ = false
             return
-        var resolvedWidth = resolveValue(me.style.width, width)
-        var resolvedHeight = resolveValue(me.style.height, height)
-        if resolvedWidth < 0:
-            resolvedWidth = width
-        if resolvedHeight < 0:
-            resolvedHeight = height
-        me.layout.width = boundAxis(resolvedWidth, me.style.minWidth, me.style.maxWidth, width)
-        me.layout.height = boundAxis(resolvedHeight, me.style.minHeight, me.style.maxHeight, height)
-        me.layout.margin = resolveEdges4Into(me.style.margin, width, true)
-        me.layout.padding = resolveEdges4Into(me.style.padding, width, false)
-        me.layout.border = resolveEdges4Into(me.style.border, width, false)
-        me.isDirty_ = false
-        me._hasL = true
-        me._cN = me._cN + 1
+        layoutNode(me, width, height)
+        me.layout.left = 0
+        me.layout.top = 0
 
 fn nilNode() -> Node:
     Node(style: defaultStyle(), layout: Layout.new(), parent: nil, children: [], measureWidth: 0, measureHeight: 0, hasMeasureFunc: false, config: Config.new(), isDirty_: false, isReferenceBaseline_: false, hasParent: false, _hasAutoMargin: false, _hasPosition: false, _hasPadding: false, _hasBorder: false, _hasMargin: false, _hasL: false, _hasM: false, _cN: 0, _cWr: 0, _fbBasis: -1)
@@ -648,21 +650,99 @@ fn layoutNode(node: Node, width: i64, height: i64) -> ():
     cacheWrite(node, width, height)
     commitCacheOutputs(node)
 
-fn layoutChildrenSimple(node: Node) -> ():
-    var cursor = 0
+fn nonNegative(v: i64) -> i64:
+    if v < 0:
+        return 0
+    v
+
+fn nonNegativeEdges(edges: [i64]) -> [i64]:
+    [nonNegative(edges[0]), nonNegative(edges[1]), nonNegative(edges[2]), nonNegative(edges[3])]
+
+# Inner (content-box) size; -1 when the outer size is still unknown.
+fn innerSize(node: Node, axis: text) -> i64:
+    val row = axis == "row"
+    val outer = if row: node.layout.width else: node.layout.height
+    if outer < 0:
+        return -1
+    if row:
+        return nonNegative(outer - node.layout.padding[EDGE_LEFT] - node.layout.padding[EDGE_RIGHT] - node.layout.border[EDGE_LEFT] - node.layout.border[EDGE_RIGHT])
+    nonNegative(outer - node.layout.padding[EDGE_TOP] - node.layout.padding[EDGE_BOTTOM] - node.layout.border[EDGE_TOP] - node.layout.border[EDGE_BOTTOM])
+
+# Content extent of an auto-sized node: furthest child edge plus trailing padding/border.
+fn contentExtent(node: Node, axis: text) -> i64:
+    val row = axis == "row"
+    var extent = 0
     var i = 0
+    while i < node.children.len():
+        val c = node.children[i]
+        if c.style.display != "none":
+            val far = if row: c.layout.left + c.layout.width + c.layout.margin[EDGE_RIGHT] else: c.layout.top + c.layout.height + c.layout.margin[EDGE_BOTTOM]
+            if far > extent:
+                extent = far
+        i = i + 1
+    if row:
+        if node.children.len() == 0:
+            extent = node.layout.padding[EDGE_LEFT] + node.layout.border[EDGE_LEFT]
+        return extent + node.layout.padding[EDGE_RIGHT] + node.layout.border[EDGE_RIGHT]
+    if node.children.len() == 0:
+        extent = node.layout.padding[EDGE_TOP] + node.layout.border[EDGE_TOP]
+    extent + node.layout.padding[EDGE_BOTTOM] + node.layout.border[EDGE_BOTTOM]
+
+# Size one child against its parent's inner box. Auto sizes resolve to the
+# measure function, then cross-axis stretch, then content extent.
+fn layoutChild(parent: Node, child: Node, innerW: i64, innerH: i64) -> ():
+    val parentRow = isRow(parent.style.flexDirection)
+    val stretch = isStretchAlign(resolveChildAlign(parent, child))
+    child.layout.margin = nonNegativeEdges(resolveEdges4Into(child.style.margin, innerW, true))
+    child.layout.padding = resolveEdges4Into(child.style.padding, innerW, false)
+    child.layout.border = resolveEdges4Into(child.style.border, innerW, false)
+    var w = resolveValue(child.style.width, innerW)
+    var h = resolveValue(child.style.height, innerH)
+    if w < 0 and child.hasMeasureFunc:
+        w = child.measureWidth
+    if h < 0 and child.hasMeasureFunc:
+        h = child.measureHeight
+    if w < 0 and not parentRow and stretch and innerW >= 0:
+        w = nonNegative(innerW - child.layout.margin[EDGE_LEFT] - child.layout.margin[EDGE_RIGHT])
+    if h < 0 and parentRow and stretch and innerH >= 0:
+        h = nonNegative(innerH - child.layout.margin[EDGE_TOP] - child.layout.margin[EDGE_BOTTOM])
+    child.layout.width = if w >= 0: boundAxis(w, child.style.minWidth, child.style.maxWidth, innerW) else: -1
+    child.layout.height = if h >= 0: boundAxis(h, child.style.minHeight, child.style.maxHeight, innerH) else: -1
+    layoutChildrenSimple(child)
+    if w < 0:
+        child.layout.width = boundAxis(contentExtent(child, "row"), child.style.minWidth, child.style.maxWidth, innerW)
+    if h < 0:
+        child.layout.height = boundAxis(contentExtent(child, "column"), child.style.minHeight, child.style.maxHeight, innerH)
+    child.isDirty_ = false
+    cacheWrite(child, innerW, innerH)
+    commitCacheOutputs(child)
+
+fn layoutChildrenSimple(node: Node) -> ():
     val row = isRow(node.style.flexDirection)
+    val innerW = innerSize(node, "row")
+    val innerH = innerSize(node, "column")
+    val startX = node.layout.padding[EDGE_LEFT] + node.layout.border[EDGE_LEFT]
+    val startY = node.layout.padding[EDGE_TOP] + node.layout.border[EDGE_TOP]
+    var cursor = if row: startX else: startY
+    var placed = 0
+    var i = 0
     while i < node.children.len():
         val child = node.children[i]
-        layoutNode(child, node.layout.width, node.layout.height)
-        if row:
-            child.layout.left = cursor + child.layout.margin[EDGE_LEFT]
-            child.layout.top = child.layout.margin[EDGE_TOP]
-            cursor = cursor + child.layout.width + child.layout.margin[EDGE_LEFT] + child.layout.margin[EDGE_RIGHT] + resolveGap(node, "row")
+        if child.style.display == "none":
+            zeroLayoutRecursive(child)
         else:
-            child.layout.left = child.layout.margin[EDGE_LEFT]
-            child.layout.top = cursor + child.layout.margin[EDGE_TOP]
-            cursor = cursor + child.layout.height + child.layout.margin[EDGE_TOP] + child.layout.margin[EDGE_BOTTOM] + resolveGap(node, "column")
+            if placed > 0:
+                cursor = cursor + resolveGap(node, if row: "row" else: "column")
+            layoutChild(node, child, innerW, innerH)
+            if row:
+                child.layout.left = cursor + child.layout.margin[EDGE_LEFT]
+                child.layout.top = startY + child.layout.margin[EDGE_TOP]
+                cursor = cursor + child.layout.width + child.layout.margin[EDGE_LEFT] + child.layout.margin[EDGE_RIGHT]
+            else:
+                child.layout.left = startX + child.layout.margin[EDGE_LEFT]
+                child.layout.top = cursor + child.layout.margin[EDGE_TOP]
+                cursor = cursor + child.layout.height + child.layout.margin[EDGE_TOP] + child.layout.margin[EDGE_BOTTOM]
+            placed = placed + 1
         i = i + 1
 
 fn layoutAbsoluteChild(parent: Node, child: Node) -> ():
@@ -721,10 +801,17 @@ fn childMarginForAxis(child: Node, axis: text) -> i64:
         return child.layout.margin[EDGE_LEFT] + child.layout.margin[EDGE_RIGHT]
     child.layout.margin[EDGE_TOP] + child.layout.margin[EDGE_BOTTOM]
 
+# Main-axis gap: "row" uses the column gutter (0), "column" the row gutter (1);
+# either falls back to the all gutter (2). Undefined resolves to 0.
+# Avoids `i64.max`: the seed JIT has no integer max/min method dispatch
+# (doc/08_tracking/bug/int_max_min_method_unresolved_in_jit_2026-11-13.md).
 fn resolveGap(node: Node, axis: text) -> i64:
-    if axis == "row":
-        return resolveValue(node.style.gap[0], node.layout.width).max(0)
-    resolveValue(node.style.gap[1], node.layout.height).max(0)
+    val gutter = if axis == "row": 0 else: 1
+    val owner = if axis == "row": node.layout.width else: node.layout.height
+    var g = resolveValue(node.style.gap[gutter], owner)
+    if g < 0:
+        g = resolveValue(node.style.gap[2], owner)
+    nonNegative(g)
 
 fn boundAxis(value: i64, minValue: Value, maxValue: Value, ownerSize: i64) -> i64:
     var out = value
