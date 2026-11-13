@@ -606,6 +606,15 @@ impl Lowerer {
                 } else {
                     return Err(LowerError::CannotInferType);
                 };
+                if has_explicit_type {
+                    if let Some(v) = value.as_ref() {
+                        let slot = format!(
+                            "binding `{}`",
+                            Self::extract_pattern_name(&let_stmt.pattern).unwrap_or_default()
+                        );
+                        self.reject_callable_for_enum_slot(ty, v, &slot)?;
+                    }
+                }
 
                 let name = Self::extract_pattern_name(&let_stmt.pattern).unwrap_or_else(|| {
                     if self.lenient_types {

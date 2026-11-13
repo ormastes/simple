@@ -1,0 +1,95 @@
+# @tag: unit, language, interpreter, jit, enum
+# Bug: match_on_callable_scrutinee_silently_takes_first_arm_2026-11-14 (JIT residual)
+#
+# A constructor or function value passed where a parameter is declared as an
+# enum type was accepted. Under the strict JIT the match then fell silently to
+# `case _:` (rc 0), a `case Some(I8):` arm over a `Kind?` parameter matched the
+# constructor outright and printed "i8", and a function value with no wildcard
+# printed garbage with rc 0. The seed must refuse the value at the type
+# boundary on BOTH engines: a HIR lowering error under the JIT, a call-boundary
+# type mismatch in the interpreter.
+#
+# Each case runs a fixture through the compiler binary (`SIMPLE_BINARY` or
+# `bin/simple`), because the failure is a process exit.
+use std.spec
+use std.io_runtime.{process_run, file_write, dir_create_all, env_get, env_set}
+
+fn work_dir() -> text:
+    val tmp = env_get("TMPDIR")
+    val root = if tmp != "": tmp else: "/tmp"
+    val dir = root + "/simple-spec-enum-param-callable"
+    dir_create_all(dir)
+    dir
+
+fn run_in(engine: text, name: text, source: text) -> (text, text, i64):
+    val path = work_dir() + "/" + name + ".spl"
+    assert_true(file_write(path, source))
+    env_set("SIMPLE_EXECUTION_MODE", engine)
+    env_set("SIMPLE_JIT_STRICT", "1")
+    env_set("SIMPLE_RUST_SEED_WARNING", "0")
+    env_set("SIMPLE_TIMEOUT_SECONDS", "0")
+    val configured = env_get("SIMPLE_BINARY")
+    val bin = if configured == "": "bin/simple" else: configured
+    val ran = process_run(bin, ["run", path])
+    env_set("SIMPLE_EXECUTION_MODE", "interpret")
+    env_set("SIMPLE_JIT_STRICT", "0")
+    (ran[0].trim(), ran[1], ran[2])
+
+val DECLS = """class Vec4f:
+    x: i64
+
+enum Kind:
+    I8
+    F32
+
+fn helper() -> i64:
+    1
+
+"""
+
+val KIND_NAME = """fn kind_name(k: Kind) -> text:
+    match k:
+        case I8: "i8"
+        case F32: "f32"
+        case _: "other"
+
+"""
+
+fn refused(engine: text, name: text, body: text):
+    val (out, err, rc) = run_in(engine, name, DECLS + body)
+    assert_true(rc != 0)
+    assert_true(out != "other")
+    assert_true(out != "i8")
+    assert_true(err.contains("type mismatch"))
+    assert_true(err.contains("enum `Kind`"))
+
+describe "a constructor or function value bound to an enum-typed slot":
+    it "is refused by the strict JIT for a constructor argument":
+        refused("jit", "jit_ctor", KIND_NAME + "fn main():\n    print(kind_name(Vec4f))\n")
+
+    it "is refused by the strict JIT for a function argument":
+        refused("jit", "jit_func", KIND_NAME + "fn main():\n    print(kind_name(helper))\n")
+
+    it "is refused by the strict JIT for a Kind? parameter":
+        refused("jit", "jit_opt", "fn kind_opt(k: Kind?) -> text:\n    match k:\n        case Some(I8): \"i8\"\n        case _: \"other\"\n\nfn main():\n    print(kind_opt(Vec4f))\n")
+
+    it "is refused by the strict JIT for a typed val":
+        refused("jit", "jit_val", "fn main():\n    val k: Kind = Vec4f\n    match k:\n        case I8: print(\"i8\")\n        case _: print(\"other\")\n")
+
+    it "is refused by the strict JIT when the callee is declared after the caller":
+        refused("jit", "jit_fwd", "fn main():\n    print(kind_name(Vec4f))\n\n" + KIND_NAME)
+
+    it "is refused by the interpreter at the call boundary":
+        refused("interpret", "interp_ctor", KIND_NAME + "fn main():\n    print(kind_name(Vec4f))\n")
+
+    it "is refused by the interpreter for a Kind? parameter":
+        refused("interpret", "interp_opt", "fn kind_opt(k: Kind?) -> text:\n    match k:\n        case Some(I8): \"i8\"\n        case _: \"other\"\n\nfn main():\n    print(kind_opt(Vec4f))\n")
+
+    it "still runs real enum values on both engines":
+        val body = KIND_NAME + "fn main():\n    val k: Kind = Kind.F32\n    print(kind_name(k))\n    print(kind_name(Kind.I8))\n"
+        val (jout, jerr, jrc) = run_in("jit", "ok_jit", DECLS + body)
+        assert_equal(jrc, 0)
+        assert_equal(jout, "f32\ni8")
+        val (iout, ierr, irc) = run_in("interpret", "ok_interp", DECLS + body)
+        assert_equal(irc, 0)
+        assert_equal(iout, "f32\ni8")

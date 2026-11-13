@@ -1571,6 +1571,19 @@ impl Lowerer {
         }
     }
 
+    /// `Kind` / `Kind?` -> `Some("Kind")`; every other shape -> `None`.
+    fn simple_param_type_name(ty: Option<&simple_parser::ast::Type>) -> Option<String> {
+        use simple_parser::ast::Type;
+        match ty? {
+            Type::Simple(name) => Some(name.clone()),
+            Type::Optional(inner) => match inner.as_ref() {
+                Type::Simple(name) => Some(name.clone()),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     fn collect_fn_param_defaults(&mut self, ast_module: &Module) {
         for item in &ast_module.items {
             if let Node::Function(f) = item {
@@ -1587,6 +1600,14 @@ impl Lowerer {
                 // including the empty-for-variadic rule — a variadic call
                 // keeps the runtime contract on both lanes); consumed by
                 // `lower_call`'s static bool-argument admission.
+                self.fn_param_type_names.insert(
+                    symbol.clone(),
+                    if f.params.iter().any(|p| p.variadic) {
+                        Vec::new()
+                    } else {
+                        f.params.iter().map(|p| Self::simple_param_type_name(p.ty.as_ref())).collect()
+                    },
+                );
                 self.fn_param_bool.insert(
                     symbol,
                     if f.params.iter().any(|p| p.variadic) {

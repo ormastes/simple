@@ -2088,3 +2088,49 @@ fn none_default_is_constant_and_none_never_reaches_non_optional_param() {
     parse_and_lower(&format!("{f3}fn main() -> i64:\n    unsafe:\n        f3(1, None, 3)\n"))
         .expect("inside `unsafe:` the literal None is admitted");
 }
+
+// match_on_callable_scrutinee_silently_takes_first_arm_2026-11-14 (JIT
+// residual): a constructor/type or function value bound to an enum-typed slot
+// lowered, so the JIT ran `match` over it and fell silently to `case _:` (or
+// matched `case Some(I8):` over `Kind?`). It must be a lowering error at every
+// boundary the seed types: positional/named/forward-declared call arguments,
+// `Kind?` parameters, typed `val`, and same-file class field initialisers.
+#[test]
+fn callable_or_type_value_never_lowers_into_an_enum_slot() {
+    let decls = "class Vec4f:\n    x: i64\n\nenum Kind:\n    I8\n    F32\n\nclass Box:\n    k: Kind\n\nfn helper() -> i64:\n    1\n\n";
+    let kind_name = "fn kind_name(k: Kind) -> text:\n    match k:\n        case I8: \"i8\"\n        case _: \"other\"\n\n";
+    let kind_opt = "fn kind_opt(k: Kind?) -> text:\n    \"x\"\n\n";
+    let rejected = [
+        (format!("{decls}{kind_name}fn main():\n    print(kind_name(Vec4f))\n"), "argument 1 of `kind_name`", "the type `Vec4f`"),
+        (format!("{decls}{kind_name}fn main():\n    print(kind_name(helper))\n"), "argument 1 of `kind_name`", "the function `helper`"),
+        (format!("{decls}{kind_name}fn main():\n    print(kind_name(Kind))\n"), "argument 1 of `kind_name`", "the enum type `Kind`"),
+        (format!("{decls}{kind_name}fn main():\n    print(kind_name(k: Vec4f))\n"), "argument 1 of `kind_name`", "the type `Vec4f`"),
+        (
+            format!("{decls}fn pair(n: i64, k: Kind) -> i64:\n    n\n\nfn main():\n    print(pair(k: Vec4f, n: 1))\n"),
+            "argument 2 of `pair`",
+            "the type `Vec4f`",
+        ),
+        (format!("{decls}fn main():\n    print(kind_name(Vec4f))\n\n{kind_name}"), "argument 1 of `kind_name`", "the type `Vec4f`"),
+        (format!("{decls}{kind_opt}fn main():\n    print(kind_opt(Vec4f))\n"), "argument 1 of `kind_opt`", "the type `Vec4f`"),
+        (format!("{decls}fn main():\n    val k: Kind = Vec4f\n"), "binding `k`", "the type `Vec4f`"),
+        (format!("{decls}fn main():\n    val b = Box(k: helper)\n"), "field `Box.k`", "the function `helper`"),
+    ];
+    for (source, slot, found) in &rejected {
+        let err = parse_and_lower(source).expect_err(&format!("must not lower:\n{source}"));
+        let text = format!("{err}");
+        assert!(
+            text.contains("type mismatch") && text.contains(slot) && text.contains(found) && text.contains("enum `Kind`"),
+            "wrong error for:\n{source}\n{text}"
+        );
+    }
+    // Real enum values, a struct instance into a struct slot, and a function
+    // into a fn-typed slot keep lowering.
+    let admitted = format!(
+        "{decls}{kind_name}{kind_opt}fn apply(f: fn() -> i64) -> i64:\n    f()\n\nfn main():\n    val k: Kind = Kind.F32\n    val v: Vec4f = Vec4f(x: 1)\n    val b = Box(k: Kind.I8)\n    print(kind_name(k))\n    print(kind_name(b.k))\n    print(kind_opt(Kind.I8))\n    print(apply(helper))\n    print(v.x)\n"
+    );
+    parse_and_lower(&admitted).expect("real enum values and matching slots must lower");
+    // A variant spelled like its enum (`Token::Token`) is a value, not the
+    // type; named arguments in swapped order still bind to the right slot.
+    let same_named_variant = "enum Token:\n    Token\n    Other\n\nfn tok(t: Token) -> i64:\n    1\n\nfn pair(n: i64, k: Token) -> i64:\n    n\n\nfn main():\n    val t: Token = Token.Token\n    print(tok(Token.Token))\n    print(pair(k: Token.Other, n: 2))\n";
+    parse_and_lower(same_named_variant).expect("a variant named like its enum is not a type reference");
+}

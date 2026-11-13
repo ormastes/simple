@@ -20,6 +20,18 @@ macro_rules! wrap_trait_object {
 
 /// Validate unit type for parameter or return type
 macro_rules! validate_unit {
+    ($val:expr, $ty:expr, $context:expr, $enums:expr) => {
+        validate_unit!($val, $ty, $context);
+        if let Some(e) = reject_callable_for_enum_param($val, $ty, $enums) {
+            let ctx = $crate::error::ErrorContext::new()
+                .with_code($crate::error::codes::TYPE_MISMATCH)
+                .with_help("pass a variant of the enum; a function or type value can never be an enum value");
+            return Err($crate::error::CompileError::semantic_with_context(
+                format!("type mismatch: {} {}", $context, e),
+                ctx,
+            ));
+        }
+    };
     ($val:expr, $ty:expr, $context:expr) => {
         if let Some(Type::Simple(type_name)) = $ty {
             if is_unit_type(type_name) {
