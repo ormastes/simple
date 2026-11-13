@@ -314,3 +314,13 @@ Seed-smoke verification (2026-11-11, seed 0791c2b7f4a7, interpreter mode):
 Remaining serial portions are recorded follow-ups in the same plan, outside
 this bug's headline scope: MIR -> IR translation stays serial in the parent
 (pool section 6 "Still serial"), and step 4/6 MIR lowering remains serial.
+
+
+## Triage 2026-11-13 (lane p3-async-20261113, base 80a8116e5e2) — confirms SUPERSEDED
+
+Same-base structural re-verification: `driver_aot_native_output.spl:2743` step-5
+lane calls `_driver_codegen_pool_prefetch_v1(...)`, defined at
+`:4657`; the `native_codegen_pool_v1` pool scheduler and
+`ParallelBuilder.set_spawn_dispatch` are present on this base, matching the
+2026-11-11 lane-boot7 verdict (fix merged 9e7e7a526edb, PR #7597). The
+pool-spec evidence (21/21) stands per the no-rerun rule. No source change.

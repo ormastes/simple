@@ -158,3 +158,12 @@ state model and the `enum TaskState` declaration are both present in
 the prior runner lane already re-verified on this same base this week.
 
 Verdict: SUPERSEDED (nothing left to fix).
+
+
+## Triage 2026-11-13 (lane p3-async-20261113, base 80a8116e5e2) — confirms CLOSED
+
+Same-base structural re-verification: `test/01_unit/lib/std/async_spec.spl:136`
+declares `enum TaskState` and the file carries the landed registry-based
+`_async_states` state model (lines 53-63) from e8cfbc4d5e5. The 46/46
+full/interpreter/native evidence in the resolution section stands per the
+no-rerun rule. No source change.

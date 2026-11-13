@@ -67,6 +67,20 @@ green (4 passed) on a 2x-NVIDIA Vulkan 1.4 host.
 
 Status: OPEN (suspects confirmed in source; fix site out of lane scope).
 
+
+## Triage 2026-11-13 (lane p3-async-20261113, base 80a8116e5e2) — not reproducible on this lane (host-bound)
+
+This lane runs a Windows host with the tracked seed; the recorded
+interference requires a Linux host with 2x NVIDIA, live Vulkan 1.4.312 and a
+live CUDA lane in one process — none of which this lane can construct, and
+`backends_spec.spl` cannot run meaningfully here. No fresh reproduction was
+attempted; the evidence and suspects in the record body stand (shared
+per-process GMB-1 mailbox arena / sentinel-reader cursor consumed by the
+first lane; Vulkan/CUDA teardown ordering). The unblock condition is
+unchanged: fix the shared state so both lanes run in one process, or make the
+second lane fail loudly (never `ok=true exit=0`), keeping
+`backends_spec.spl` strict. Routed to the GPU-lane owner. No source change.
+
 ## 2026-11-13 — fail-loud half landed (lane uia); row stays OPEN
 
 Concrete fail-open matching the filed shape (`ok=true, exit=0, records=[]`):
@@ -96,6 +110,8 @@ met. The second fail-open candidate (dispatch succeeds, kernel writes no
 sentinel, `_decode_sentinel` falls through to `ok: true`) was left alone: the
 DBG-1 break/resume path may legitimately return a non-exit sentinel.
 
+
 ## 2026-11-13 follow-up (Linux aarch64, lane uia)
 
 After the ok=false change landed (PR 8782), test/03_system/acceptance/gpu_backend_portability_acceptance_spec.spl on release/1.0.0 5221a5058a8, Linux aarch64 (DGX Spark GB10), Rust seed af717f53d6bce3e5: 5 examples, 4 passed, 1 failed, 1 skipped (metal). The Vulkan example passes; the CUDA example fails with array index out of bounds: index is 0 but length is 0, the same shape as in backends_spec (its o.records[0] read after a live CudaVmExecutor run returned no records). No consumer of VulkanVmExecutor went red from the change.
+
