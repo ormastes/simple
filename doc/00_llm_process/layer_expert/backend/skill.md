@@ -320,3 +320,18 @@ per live module and refuses function completion and object/JIT publication.
 Free/reset clear owned failures. Isolated provider evidence is separate from
 new compiler qualification. See
 [refusal propagation](../../../08_tracking/bug/cranelift_rejected_call_publication_2026_10_30.md).
+
+## Pure-Simple JIT callee binding (2026-11-13)
+
+The K1 JIT lane runs `cranelift_jit_run_main` (`cranelift_codegen_adapter.spl`):
+the AOT lane's lowering into a host JIT module (`CL_TARGET_HOST`, `jit: true`
+selects `cranelift_define_function`). `jit_extern_resolution.spl` classifies
+named callees by `MirOperand.call_origin` once per module, before codegen.
+Local Source and Foreign callees link natively. Runtime (`rt_*`), undefined
+Source and unproven-origin callees are refused by name. The refusal exists
+because the provider registers no runtime symbols and binds by process symbol
+lookup: an unbound import aborts the host inside
+`rt_cranelift_finalize_module`, it does not return an error. Do not add an
+`rt_*` name table to lift the refusal; the provider has to register the
+symbols first. See
+[provider gap](../../../08_tracking/bug/pure_simple_jit_provider_registers_no_runtime_symbols_2026-11-13.md).
