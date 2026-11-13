@@ -24,7 +24,7 @@ use std.nogc_sync_mut.sffi.transient.{transient_scope_begin,
 use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
 use std.nogc_sync_mut.io.file_ops.{file_write_bytes,
     file_read_regular_no_follow_bounded_bytes,
-    secure_temp_dir_raw, file_publish_noreplace_raw}
+    secure_temp_dir_raw, file_publish_noreplace_raw, file_hardlink}
 use std.nogc_sync_mut.io_runtime.{
     dir_list, dir_remove, file_rename, file_copy, file_hash_sha256_or_empty, file_size
 }
@@ -317,6 +317,18 @@ fn scv_compile_snapshot_publish_staged_chunk_v1(
         return scv_compile_snapshot_source_digest_v1(final_path) == digest
     false
 
+# A materialized row is a second NAME for its content-addressed chunk, not a
+# second copy: every revision already publishes the bytes once under
+# objects/chunks/<digest>.blob, and until 2026-11-13 each revision then wrote
+# every file again (measured: 15,653 files per revision, 5 differ between
+# consecutive revisions, 172M per revision beside a 185M chunk store). Snapshot
+# files are never written in place after publication, so the shared inode is
+# safe; the callers' size+digest check on the new name stays authoritative,
+# and a failed link (cross-device, no hard links) takes their copy path.
+fn scv_compile_snapshot_link_chunk_v1(cache_root: text, digest: text, destination: text) -> bool:
+    val chunk = "{cache_root}/objects/chunks/{digest}.blob"
+    file_exists(chunk) and file_hardlink(chunk, destination)
+
 fn scv_compile_snapshot_write_chunk_v1(
     cache_root: text, staging: text, digest: text, content: [u8]
 ) -> bool:
@@ -410,7 +422,8 @@ fn scv_compile_snapshot_materialize_source_unscoped_cost_v1(
     val parent = destination[0:parent_end]
     if not dir_exists(parent):
         dir_create(parent, true)
-    val copied = file_write_bytes(destination, bytes)
+    val copied = (scv_compile_snapshot_link_chunk_v1(cache_root, digest, destination) or
+            file_write_bytes(destination, bytes))
     if cost != nil: cost!.record_copy(scv_cost_elapsed_v1(cost, copy_started))
     if not copied:
         return ScvCompileMaterializedSourceV1("snapshot-materialize-failed:{rel}", "", false)
@@ -561,7 +574,8 @@ fn scv_compile_snapshot_reuse_source_unscoped_cost_v1(
     val parent = destination[0:destination.rfind("/")]
     if not dir_exists(parent):
         dir_create(parent, true)
-    val copied = file_copy("{reuse_root}/{rel}", destination)
+    val copied = (scv_compile_snapshot_link_chunk_v1(cache_root, digest, destination) or
+            file_copy("{reuse_root}/{rel}", destination))
     if cost != nil: cost!.record_copy(scv_cost_elapsed_v1(cost, copy_started))
     if not copied:
         file_delete(destination)

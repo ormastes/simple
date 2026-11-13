@@ -7,9 +7,10 @@
 use std.spec.*
 use std.common.crypto.sha256.{sha256_text}
 use std.scv.compile_snapshot.{
-    scv_compile_snapshot_reuse_marks_v1, scv_compile_snapshot_reuse_source_v1}
+    scv_compile_snapshot_reuse_marks_v1, scv_compile_snapshot_reuse_source_v1,
+    scv_compile_snapshot_materialize_source_v1}
 use std.scv.compile_source_inventory_core.{CompileSourceInventoryEntryV1}
-use app.io.mod.{dir_create, file_exists, file_hash_sha256}
+use app.io.mod.{dir_create, file_exists, file_hash_sha256, process_run}
 use app.io.file_ops.{path_absolute}
 use std.nogc_sync_mut.io_runtime.{getpid}
 use std.nogc_sync_mut.io.file_ops.{file_write_bytes}
@@ -21,6 +22,13 @@ fn reuse_root(label: text) -> text:
 # Function-level fixture: a checkout root, a cache root whose chunk store
 # already holds the content object, a published revision directory holding
 # the materialized file, and a fresh staging directory.
+# Inode of a path as the host reports it; "" when unavailable so two missing
+# files never compare equal.
+fn reuse_inode(path: text) -> text:
+    val (out, _err, code) = process_run("stat", ["-c", "%i", path])
+    if code != 0: return ""
+    out.trim()
+
 fn reuse_entry(relative: text, content: text) -> CompileSourceInventoryEntryV1:
     val digest = sha256_text(content)
     CompileSourceInventoryEntryV1(relative, digest, digest, digest, digest, digest, content.len())
@@ -66,15 +74,18 @@ describe "SCV snapshot revision reuse (per-file)":
         expect(result.reason).to_equal("snapshot-reuse-miss:src/kept.spl")
         expect(file_exists("{root}/staging/src/kept.spl")).to_equal(false)
 
-    it "misses and leaves no staged file when the published copy was tampered":
+    # The verified chunk, not the earlier revision's file, is what a reused row
+    # is linked to: a tampered published copy is never read, and the staged row
+    # still carries exactly the admitted bytes.
+    it "materializes the admitted bytes from the verified chunk when the published copy was tampered":
         val root = reuse_root("unit-tampered")
         val content = "# published\n"
         expect(reuse_unit_fixture(root, "src/kept.spl", content, content)).to_equal(true)
         expect(file_write_bytes("{root}/build/scv/snapshots/published/src/kept.spl", text_to_utf8_bytes("# tampered\n"))).to_equal(true)
         val result = scv_compile_snapshot_reuse_source_v1(root, "{root}/build/scv", "{root}/staging",
             "{root}/build/scv/snapshots/published", reuse_entry("src/kept.spl", content))
-        expect(result.reason).to_equal("snapshot-reuse-miss:src/kept.spl")
-        expect(file_exists("{root}/staging/src/kept.spl")).to_equal(false)
+        expect(result.reason).to_equal("ok")
+        expect(file_hash_sha256("{root}/staging/src/kept.spl").unwrap()).to_equal(sha256_text(content))
 
     it "misses when the content object is absent or does not hash to the row":
         val root = reuse_root("unit-chunk")
@@ -88,3 +99,33 @@ describe "SCV snapshot revision reuse (per-file)":
             "{root}/build/scv/snapshots/published", reuse_entry("src/absent.spl", content))
         expect(missing.reason).to_equal("snapshot-reuse-miss:src/absent.spl")
 
+
+    # Storage: every revision of the same content used to hold its own copy of
+    # every file beside the content-addressed chunk (measured 2026-11-13:
+    # 15,653 files per revision, 5 differ between consecutive revisions, 172M
+    # per copy). A materialized row is a hard link to its chunk; the inode is
+    # the observable. Linux-only observation (`stat -c %i`); the copy fallback
+    # keeps the row byte-exact where linking is unavailable.
+    it "links a reused row to its content-addressed chunk instead of copying it":
+        val root = reuse_root("unit-link-reuse")
+        val content = "# published\nfn kept() -> i64:\n    1\n"
+        expect(reuse_unit_fixture(root, "src/kept.spl", content, content)).to_equal(true)
+        val result = scv_compile_snapshot_reuse_source_v1(root, "{root}/build/scv", "{root}/staging",
+            "{root}/build/scv/snapshots/published", reuse_entry("src/kept.spl", content))
+        expect(result.reason).to_equal("ok")
+        expect(file_hash_sha256("{root}/staging/src/kept.spl").unwrap()).to_equal(sha256_text(content))
+        expect(reuse_inode("{root}/staging/src/kept.spl")).to_equal(
+            reuse_inode("{root}/build/scv/objects/chunks/sha256_{sha256_text(content)}.blob"))
+
+    it "links a freshly materialized row to the chunk it just published":
+        val root = reuse_root("unit-link-fresh")
+        val content = "# fresh\nfn fresh() -> i64:\n    1\n"
+        expect(dir_create("{root}/src", true)).to_equal(true)
+        expect(dir_create("{root}/staging", true)).to_equal(true)
+        expect(file_write_bytes("{root}/src/fresh.spl", text_to_utf8_bytes(content))).to_equal(true)
+        val result = scv_compile_snapshot_materialize_source_v1(root, "{root}/build/scv", "{root}/staging",
+            reuse_entry("src/fresh.spl", content))
+        expect(result.reason).to_equal("ok")
+        expect(file_hash_sha256("{root}/staging/src/fresh.spl").unwrap()).to_equal(sha256_text(content))
+        expect(reuse_inode("{root}/staging/src/fresh.spl")).to_equal(
+            reuse_inode("{root}/build/scv/objects/chunks/sha256_{sha256_text(content)}.blob"))
