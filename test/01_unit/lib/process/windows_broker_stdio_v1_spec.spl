@@ -1,0 +1,83 @@
+use std.spec
+use std.common.process.windows_broker_stdio_v1.*
+use std.common.process.windows_job_stream_v2.*
+use std.io_runtime.file_read
+
+fn request() -> WindowsManagedStreamRequestV2:
+    WindowsManagedStreamRequestV2(program: "C:\\Simple\\broker.exe",
+        producer_digest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        args: [], environment: ["SystemRoot=C:\\Windows"], directory: "C:\\Simple",
+        cpu_millis: 100, memory_bytes: 67108864, timeout_ms: 60000,
+        launch_expires_at_unix_ms: 1000000, mode: "broker-raw", rows: 0, cols: 0)
+
+describe "Windows broker stdio pure admission and byte bounds":
+    it "REQ-WBS-001 requires actual synchronous byte input and overlapped byte output":
+        expect(windows_broker_stdio_profile_reason_v1(3, 3, true, true, 1, 0, 32, 0)).to_equal("")
+        expect(windows_broker_stdio_profile_reason_v1(3, 3, true, true, 1, 0, 16, 2)).to_equal("")
+        for mode in [16, 32, 48]:
+            expect(windows_broker_stdio_profile_reason_v1(3, 3, true, true, 1, 0, 32, mode)).to_equal("broker-stdio-overlapped-output-required")
+        expect(windows_broker_stdio_profile_reason_v1(3, 3, true, true, 1, 0, 0, 0)).to_equal("broker-stdio-synchronous-input-required")
+        expect(windows_broker_stdio_profile_reason_v1(3, 3, true, true, 1, 0, 48, 0)).to_equal("broker-stdio-synchronous-input-required")
+        expect(windows_broker_stdio_profile_reason_v1(1, 3, true, true, 1, 0, 32, 0)).to_equal("broker-stdio-pipe-endpoints-required")
+        expect(windows_broker_stdio_profile_reason_v1(3, 3, false, true, 1, 0, 32, 0)).to_equal("broker-stdio-exact-standard-endpoints-required")
+        expect(windows_broker_stdio_profile_reason_v1(3, 3, true, false, 1, 0, 32, 0)).to_equal("broker-stdio-exact-standard-endpoints-required")
+        for flags in [0, 4, 5]:
+            expect(windows_broker_stdio_profile_reason_v1(3, 3, true, true, flags, 0, 32, 0)).to_equal("broker-stdio-byte-server-input-client-output-required")
+        expect(windows_broker_stdio_profile_reason_v1(3, 3, true, true, 1, 4, 32, 0)).to_equal("broker-stdio-byte-server-input-client-output-required")
+
+    it "REQ-WBS-002 never asks the sole input reader for more than available or its current bound":
+        expect(windows_broker_stdio_read_count_v1(0, 65536).unwrap()).to_equal(0)
+        expect(windows_broker_stdio_read_count_v1(3, 65536).unwrap()).to_equal(3)
+        expect(windows_broker_stdio_read_count_v1(65536, 3).unwrap()).to_equal(3)
+        expect(windows_broker_stdio_read_count_v1(4294967295, 65536).unwrap()).to_equal(65536)
+        expect(windows_broker_stdio_read_count_v1(-1, 1).is_err()).to_equal(true)
+        expect(windows_broker_stdio_read_count_v1(1, 65537).is_err()).to_equal(true)
+
+    it "REQ-WBS-003 admits broker-raw as a distinct terminal-free managed profile":
+        val host = WindowsManagedStreamHostV2(processor_groups: 1, logical_processors: 4,
+            process_in_job: false, cpu_quantum_millis: 2)
+        var broker = request()
+        expect(windows_managed_stream_request_reason_v2(broker, host)).to_equal("")
+        broker.mode = "raw"
+        expect(windows_managed_stream_request_reason_v2(broker, host)).to_equal("")
+        broker.mode = "broker-raw"
+        broker.rows = 1
+        expect(windows_managed_stream_request_reason_v2(broker, host)).to_equal("windows-managed-stream-raw-only-no-terminal")
+
+describe "Windows broker stdio source bindings, NOT_RUN native execution":
+    it "REQ-WBS-004 preserves the raw branch and uses the same managed Job and HANDLE_LIST":
+        val source = file_read("src/lib/nogc_sync_mut/io/windows_pty_owner.spl")
+        expect(source).to_contain("request.mode == \"broker-raw\"")
+        expect(source).to_contain("next.output = CreateNamedPipeW(output_name, 524289u32, 8u32")
+        # Exact GENERIC_WRITE|FILE_READ_ATTRIBUTES; querying attributes on a
+        # GENERIC_WRITE-only client would reject the intended positive path.
+        expect(source).to_contain("next.output_server = CreateFileW(output_name, 1073741952u32, 0u32, 0, 3u32, 1073741824u32")
+        expect(source.contains("next.output_server = CreateFileW(output_name, 1073741824u32,")).to_equal(false)
+        expect(source).to_contain("val output_created = CreatePipe(")
+        expect(source).to_contain("UpdateProcThreadAttribute(attributes, 0u32, 131074u64, allowed, 16u64")
+
+    it "REQ-WBS-005 retains incomplete mode queries and pending output through cleanup":
+        val source = file_read("src/lib/nogc_sync_mut/io/windows_broker_stdio_native_v1.spl")
+        val native = file_read("src/runtime/platform/runtime_windows_pipe_file_mode_private.h")
+        expect(native).to_contain("IO_STATUS_BLOCK status;")
+        expect(native).to_contain("sizeof(SimplePipeFileModeQueryV1) <= 64")
+        expect(native).to_contain("((uint64_t)storage & 7)")
+        expect(native).to_contain("GetProcAddress(module, \"NtQueryInformationFile\")")
+        expect(native).to_contain("InterlockedCompareExchange((volatile LONG *)&query->status.Status")
+        expect(native).to_contain("WaitForSingleObject((HANDLE)(intptr_t)handle, 0)")
+        expect(native).to_contain("if (observed != WAIT_OBJECT_0) return 259;")
+        expect(native).to_contain("if (status == 259) return 259;")
+        expect(source).to_contain("next.query_pending = result == 259")
+        expect(source).to_contain("if state.pending or state.query_pending: return Ok(false)")
+        expect(source).to_contain("broker-stdio-native-release-failed-owner-retained")
+        expect(source).to_contain("if attempted: return WindowsBrokerStdioAdmissionV1.Rejected")
+        expect(source).to_contain("state.pending = true\n    retained = Some(state)\n    val submitted = WriteFile")
+
+    it "REQ-WBS-006 exposes no raw handles and guards each native entry on the pinned thread":
+        val wrapper = file_read("src/lib/nogc_sync_mut/io/windows_broker_stdio_owner_v1.spl")
+        val native = file_read("src/lib/nogc_sync_mut/io/windows_broker_stdio_native_v1.spl")
+        expect(wrapper).to_contain("@when(os=\"windows\"):")
+        expect(wrapper).to_contain("Windows broker stdio unsupported on this platform")
+        expect(native.contains("pub struct StdioState")).to_equal(false)
+        expect(native.contains("pub fn load(")).to_equal(false)
+        expect(native.split("\npub fn ").len()).to_equal(native.split("val owner = entry()").len())

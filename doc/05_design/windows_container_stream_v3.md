@@ -30,3 +30,36 @@ observed values. Requested exec User and observed container Config.User are
 separate from an unavailable Windows exec-token observation. Required native
 pipe, private-root persistence and authenticated ongoing input/resize consumers
 must be connected before advertising terminal support.
+
+The V3 planning checkpoint embeds the shared `ContainerExecRequestV3`, including
+the exact parent native runtime identity. Its public plan digest binds helper
+identity and budget, installed provider identity, policy and private broker
+template digest. The private template contains the canonical request bytes and
+is bounded to 256 KiB of UTF-8. Literal environment values remain private.
+`WindowsSimpleContainerAdapterV2.stream_plan_v3` checks retained authority and
+freshly inspects the exact running container before returning the plan. A plan
+does not launch the helper, create an exec, or grant input/resize authority.
+
+Helper admission must preserve the existing reservation domains: the operation
+payload hashes the original `HostReservationIntentV1`, whose `plan_digest`
+hashes the canonical `HostHelperPlanV1`; that helper plan's `request_digest`
+binds the stream plan digest. Exec admission is separate and uses the shared
+host-verified exec carrier. An actual exec birth maps its observed native ID to
+the exact parent, exec request, provider and stream template before start.
+These planning and birth-binding cases are authored but NOT_RUN; the shared V3
+open facade and private broker are still required consumers.
+
+The parent provider baseline and exec-control identity occupy distinct fields.
+`exec_control_identity_digest` is required for exec and absent for attach. The
+generic exec birth's provider field identifies the exec-control observation;
+it cannot be filled from the parent CLI provider baseline or a policy hash.
+The signed host exec intent binds both identities, the request, and parent
+operation/assignment/controller references. The admission carrier retains that
+original intent; the native write deadline still binds the raw exec request
+digest and child operation. The adapter's synchronous planning entry refuses
+exec planning; its owned asynchronous control probe queries actual Engine info
+and the exact retained container, validates the full process-isolation binding,
+and collects both connections before exposing an observation. The separate
+`stream_plan_with_control_v3` entry preserves the probe on every result and
+consumes only that completed observation. The shared asynchronous facade and
+verified Host broker delegation remain required integration steps.

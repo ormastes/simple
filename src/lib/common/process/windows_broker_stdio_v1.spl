@@ -1,0 +1,43 @@
+# Child broker protocol IO only; no process grant, HANDLE or supervisor.
+pub const WINDOWS_BROKER_STDIO_MAX_BYTES_V1: i64 = 65536
+
+pub struct WindowsBrokerStdioLeaseV1:
+    generation: i64
+
+pub enum WindowsBrokerStdioAdmissionV1:
+    Ready(lease: WindowsBrokerStdioLeaseV1)
+    CleanupRequired(lease: WindowsBrokerStdioLeaseV1, reason: text)
+    Rejected(reason: text)
+
+pub enum WindowsBrokerStdioReadV1:
+    Data(bytes: [u8])
+    Pending
+    End
+    Failed(reason: text)
+
+pub struct WindowsBrokerStdioPollV1:
+    write_pending: bool
+    closing: bool
+    closed: bool
+    failed: bool
+
+# GetNamedPipeInfo reports SERVER_END=1 and TYPE_MESSAGE=4. Nt file modes
+# SYNCHRONOUS_IO_ALERT=16/NONALERT=32 must be present only on input.
+pub fn windows_broker_stdio_profile_reason_v1(input_type: i64, output_type: i64,
+        shared_output_error: bool, distinct_endpoints: bool, input_pipe_flags: i64,
+        output_pipe_flags: i64, input_mode: i64, output_mode: i64) -> text:
+    if input_type != 3 or output_type != 3: return "broker-stdio-pipe-endpoints-required"
+    if not shared_output_error or not distinct_endpoints: return "broker-stdio-exact-standard-endpoints-required"
+    if input_pipe_flags != 1 or output_pipe_flags != 0: return "broker-stdio-byte-server-input-client-output-required"
+    if input_mode < 0 or output_mode < 0 or input_mode > 4294967295 or output_mode > 4294967295:
+        return "broker-stdio-file-mode-invalid"
+    val sync_input = input_mode & 48
+    if sync_input != 16 and sync_input != 32: return "broker-stdio-synchronous-input-required"
+    if (output_mode & 48) != 0: return "broker-stdio-overlapped-output-required"
+    ""
+
+pub fn windows_broker_stdio_read_count_v1(available: i64, max_bytes: i64) -> Result<i64, text>:
+    if available < 0 or available > 4294967295: return Err("broker-stdio-available-invalid")
+    if max_bytes <= 0 or max_bytes > WINDOWS_BROKER_STDIO_MAX_BYTES_V1:
+        return Err("broker-stdio-read-bound-invalid")
+    Ok(if available > max_bytes: max_bytes else: available)
