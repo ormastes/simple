@@ -1152,7 +1152,7 @@ pub(crate) fn sync_flat_global(name: &str, value: &Value) {
 /// mutation. Returns whether anything was parked; the caller MUST follow with
 /// `sync_flat_global` + `refresh_scope` (normal path via
 /// `handle_method_call_with_self_update`, error path explicitly).
-fn release_global_aliases(name: &str, env: &mut Env) -> bool {
+pub(crate) fn release_global_aliases(name: &str, env: &mut Env) -> bool {
     if env.is_local(name) {
         return false;
     }
@@ -1169,11 +1169,34 @@ fn release_global_aliases(name: &str, env: &mut Env) -> bool {
     crate::interpreter::MODULE_GLOBALS.with(|cell| {
         cell.borrow_mut().insert(name.to_string(), Value::Nil);
     });
-    let owner = crate::interpreter::CURRENT_EXEC_MODULE.with(|cell| cell.borrow().clone());
-    if let Some(owner) = owner {
-        crate::interpreter::set_owned_global(&owner, name, Value::Nil, false);
-    }
+    // Same owner resolution as `sync_flat_global`, which re-publishes into
+    // `"<entry>"` when no module is executing (the entry script's top-level
+    // code, incl. a spec `it` block). Not parking that store left it pinning
+    // the Arc, so every top-level `g.push(x)` deep-copied the whole array.
+    let owner = current_exec_owner();
+    crate::interpreter::set_owned_global(&owner, name, Value::Nil, false);
     true
+}
+
+/// The store owner of the executing code: the current module, or `"<entry>"`
+/// for the entry script's own top-level code.
+fn current_exec_owner() -> std::sync::Arc<str> {
+    crate::interpreter::CURRENT_EXEC_MODULE
+        .with(|cell| cell.borrow().clone())
+        .unwrap_or_else(|| std::sync::Arc::from("<entry>"))
+}
+
+/// True when `name` is a non-local global that the executing module owns
+/// under the same name — the only binding `release_global_aliases` +
+/// `sync_flat_global` park and re-publish exactly.
+pub(crate) fn owns_global_binding(name: &str, env: &Env) -> bool {
+    if env.is_local(name) {
+        return false;
+    }
+    match env.global_binding(name) {
+        Some((owner, source_name)) => source_name == name && owner == current_exec_owner(),
+        None => false,
+    }
 }
 
 /// True when `method` on `class` is declared `me` (a mutating method).
