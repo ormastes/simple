@@ -170,6 +170,22 @@ out=$(
     printf '%s:%s' "$BOOTSTRAP_VERIFY_BUILD_THREADS" "${SIMPLE_MIR_SHARD_WORKER_KB:-unset}"
 )
 expect 'export withdraws its own MIR pin' '1:unset' "$out"
+# The pin must reach the compiler: compiler_cli_build launches through
+# phase-c-tool-row-exec.shs (`env -i` plus bootstrap_phase_c_tool_row_environment_keys),
+# so a floored export run through that real wrapper must hand the child the
+# MIR estimate (reviewer finding: the parent-only check passed while it was dropped).
+out=$(
+    bootstrap_tree_rss_probe_host() {
+        bootstrap_tree_rss_host_total_kib=127600812
+        bootstrap_tree_rss_host_available_kib=70000000
+        bootstrap_tree_rss_host_total_source=proc-meminfo
+    }
+    SIMPLE_BOOTSTRAP_RSS_CAP_MODE=enforce
+    bootstrap_tree_rss_whole_build_export 8 '' || exit 1
+    unset SIMPLE_BOOTSTRAP_SESSION_ID SIMPLE_BOOTSTRAP_SESSION_EXEC
+    sh "$root/scripts/bootstrap/phase-c-tool-row-exec.shs" sh -c 'printf "%s" "${SIMPLE_MIR_SHARD_WORKER_KB:-dropped}"'
+)
+expect 'tool row child sees the MIR pin' 26424115 "$out"
 # Monitor-mode fixture (the ordinary selftest path): 40 GB available fits 1,
 # floor not applied and said so.
 printf 'MemTotal:       127600812 kB\nMemFree:        30000000 kB\nMemAvailable:    40000000 kB\n' >"$scratch/busy"
