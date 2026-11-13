@@ -1,0 +1,214 @@
+# Keep rule of the MIR shard interface-only HIR projection
+# (src/compiler/80.driver/driver_mir_shard_hir_residency_v1.spl).
+#
+# Shard B owns `app.probe.generics`; shard A owns `app.probe.user` and holds
+# B's module interface-only. Every body another shard may need must survive the
+# projection: generic function / generic class method / generic impl bodies
+# (including trait defaults concretized into a generic impl, which HIR does not
+# flag is_generic_template), `const fn`, @inline, and trait default bodies.
+# Everything else is dropped, and the drop is measured on real stdlib modules.
+#
+# Red before the fix: the run-21 rule (pinned 554460a6b85a, no
+# is_generic_template) emptied `Bag.first`; the tip rule still emptied the
+# concretized default `Bag.described` and the @inline `fast`.
+
+use std.spec.*
+use std.nogc_sync_mut.io.file_ops.{file_read}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.hir.hir_codec.{hir_module_encode}
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLowering.function_lowering.*
+use compiler.mir._MirLoweringExpr.expr_dispatch.*
+use compiler.mir._MirLowering.asm_and_targets.*
+use compiler.mir.mir_lowering_stmts.*
+use test.helpers.lowering_harness.{mir_module_text, first_text_difference}
+use compiler.driver.driver_mir_shard_hir_residency_v1.{hir_module_interface_only_v1,
+    hir_function_keeps_body_v1, hir_function_keeps_body_in_module_v1,
+    hir_module_generic_owner_methods_v1}
+
+val KEEP_PROVIDER_SOURCE = "pub trait Describe:\n    fn tag() -> i64\n    fn described() -> i64:\n        self.tag() + 100\n\npub struct Bag<T>:\n    item: T\n    count: i64\n\nimpl<T> Bag<T>:\n    fn first() -> T:\n        self.item\n\nimpl<T> Describe for Bag<T>:\n    fn tag() -> i64:\n        self.count\n\npub class Cell<T>:\n    value: T\n    fn peek() -> T:\n        self.value\n\n@inline\npub fn fast(x: i64) -> i64:\n    x + 1\n\npub fn plain(x: i64) -> i64:\n    val twice = \\v: v * 2\n    twice(x)\n"
+val KEEP_CONSUMER_SOURCE = "use app.probe.generics.\{Describe, Bag, Cell, fast, plain\}\n\nfn run() -> i64:\n    val bag = Bag<i64>(item: 7, count: 3)\n    val cell = Cell<i64>(value: 9)\n    bag.first() + bag.described() + cell.peek() + fast(1) + plain(2)\n"
+
+class KeepFixture:
+    provider: HirModule
+    consumer: HirModule
+
+fn keep_fixture() -> KeepFixture:
+    val log = Logger(level: 0)
+    val provider_ast = parse_full_frontend(KEEP_PROVIDER_SOURCE, "app/probe/generics.spl", "app.probe.generics", log)
+    val consumer_ast = parse_full_frontend(KEEP_CONSUMER_SOURCE, "app/probe/user.spl", "app.probe.user", log)
+    var modules: Dict<text, Module> = {}
+    modules["app.probe.generics"] = provider_ast
+    modules["app.probe.user"] = consumer_ast
+    val files = [SourceFile(path: "app/probe/generics.spl", content: KEEP_PROVIDER_SOURCE, module_name: "app.probe.generics"), SourceFile(path: "app/probe/user.spl", content: KEEP_CONSUMER_SOURCE, module_name: "app.probe.user")]
+    match module_surfaces_from_modules(modules, files):
+        case Err(reason): fail("module surface construction failed: {reason}")
+        case Ok(surfaces):
+            var provider_lowering = hirlowering_for_module("app/probe/generics.spl", surfaces)
+            var consumer_lowering = hirlowering_for_module("app/probe/user.spl", surfaces)
+            val provider = provider_lowering.lower_module(provider_ast)
+            val consumer = consumer_lowering.lower_module(consumer_ast)
+            expect(provider_lowering.errors.len()).to_equal(0)
+            expect(consumer_lowering.errors.len()).to_equal(0)
+            return KeepFixture(provider: provider, consumer: consumer)
+
+fn body_is_empty(function: HirFunction) -> bool:
+    function.body.stmts.len() == 0 and not function.body.has
+
+fn function_ending(module: HirModule, suffix: text) -> HirFunction:
+    var found: HirFunction? = nil
+    for key in module.functions.keys():
+        val function: HirFunction = module.functions[key]
+        if function.name.ends_with(suffix):
+            found = Some(function)
+    if found == nil:
+        fail("no function ending with {suffix} in {module.name}")
+    found.unwrap()
+
+# The run-21 keep rule (pinned 554460a6b85a), kept here only as the red witness.
+fn run21_keeps_body(function: HirFunction) -> bool:
+    function.is_extern or function.type_params.len() > 0 or function.is_const
+
+fn keeps_in_module(module: HirModule, function: HirFunction) -> bool:
+    hir_function_keeps_body_in_module_v1(function, module, hir_module_generic_owner_methods_v1(module))
+
+# Same neutralization as mir_shard_hir_residency_spec.spl: the lambda-lift
+# counter is process-global, so the second lowering renames the closure.
+fn strip_digits_after(s: text, marker: text) -> text:
+    val parts = s.split(marker)
+    var out = parts[0]
+    var i = 1
+    while i < parts.len():
+        val seg = parts[i]
+        var k = 0
+        while k < seg.len() and "0123456789".contains(seg.substring(k, k + 1)):
+            k = k + 1
+        out = out + marker + "N" + seg.substring(k, seg.len())
+        i = i + 1
+    out
+
+fn lift_counter_neutral(s: text) -> text:
+    strip_digits_after(strip_digits_after(s, "__lambda_lift_"), "1073741")
+
+fn lower_user_text(consumer: HirModule, provider: HirModule) -> text:
+    var lowering = MirLowering.new(consumer.symbols)
+    var prescan_mods: Dict<text, HirModule> = {}
+    prescan_mods["user"] = consumer
+    prescan_mods["generics"] = provider
+    lowering.prescan_module_struct_names(prescan_mods, "user")
+    lowering.prescan_module_struct_names(prescan_mods, "generics")
+    val mir = lowering.lower_module(consumer, [consumer, provider])
+    expect(lowering.errors.len()).to_equal(0)
+    mir_module_text(mir)
+
+fn lower_real_module(path: text, module_name: text) -> HirModule:
+    val log = Logger(level: 0)
+    val source = file_read(path)
+    expect(source != "").to_equal(true)
+    val ast = parse_full_frontend(source, path, module_name, log)
+    var modules: Dict<text, Module> = {}
+    modules[module_name] = ast
+    match module_surfaces_from_modules(modules, [SourceFile(path: path, content: source, module_name: module_name)]):
+        case Err(reason): fail("module surface construction failed for {path}: {reason}")
+        case Ok(surfaces):
+            var lowering = hirlowering_for_module(path, surfaces)
+            return lowering.lower_module(ast)
+
+describe "MIR shard interface-only HIR keeps what other shards need":
+    it "shard A instantiating shard B's generic class method sees B's body":
+        val fixture = keep_fixture()
+        val first_full = function_ending(fixture.provider, "first")
+        val peek_full = function_ending(fixture.provider, "peek")
+        expect(body_is_empty(first_full)).to_equal(false)
+        expect(body_is_empty(peek_full)).to_equal(false)
+        # red witness: the run-21 rule emptied generic class/impl method bodies
+        expect(run21_keeps_body(first_full)).to_equal(false)
+        expect(run21_keeps_body(peek_full)).to_equal(false)
+        val (projected, stripped) = hir_module_interface_only_v1(fixture.provider)
+        expect(stripped > 0).to_equal(true)
+        expect(body_is_empty(function_ending(projected, "first"))).to_equal(false)
+        expect(body_is_empty(function_ending(projected, "peek"))).to_equal(false)
+
+    it "keeps a trait default concretized into a generic impl (HIR leaves it unflagged)":
+        val fixture = keep_fixture()
+        val described_full = function_ending(fixture.provider, "described")
+        expect(body_is_empty(described_full)).to_equal(false)
+        # red witness: the function-local rule alone empties it
+        expect(hir_function_keeps_body_v1(described_full)).to_equal(false)
+        expect(keeps_in_module(fixture.provider, described_full)).to_equal(true)
+        val (projected, _stripped) = hir_module_interface_only_v1(fixture.provider)
+        expect(body_is_empty(function_ending(projected, "described"))).to_equal(false)
+        expect(body_is_empty(function_ending(projected, "tag"))).to_equal(false)
+
+    it "keeps trait default bodies in HirTrait.defaults":
+        val fixture = keep_fixture()
+        val (projected, _stripped) = hir_module_interface_only_v1(fixture.provider)
+        var defaults_seen = 0
+        for key in fixture.provider.traits.keys():
+            val before: HirTrait = fixture.provider.traits[key]
+            val after: HirTrait = projected.traits[key]
+            expect(after.defaults.len()).to_equal(before.defaults.len())
+            var di = 0
+            while di < before.defaults.len():
+                expect(body_is_empty(after.defaults[di])).to_equal(body_is_empty(before.defaults[di]))
+                defaults_seen = defaults_seen + 1
+                di = di + 1
+        expect(defaults_seen > 0).to_equal(true)
+
+    it "keeps @inline bodies":
+        val fixture = keep_fixture()
+        val fast_full = function_ending(fixture.provider, "fast")
+        expect(fast_full.func_attr.is_inline).to_equal(true)
+        expect(run21_keeps_body(fast_full)).to_equal(false)
+        val (projected, _stripped) = hir_module_interface_only_v1(fixture.provider)
+        expect(body_is_empty(function_ending(projected, "fast"))).to_equal(false)
+
+    it "still drops an ordinary body":
+        val fixture = keep_fixture()
+        val (projected, _stripped) = hir_module_interface_only_v1(fixture.provider)
+        expect(body_is_empty(function_ending(fixture.provider, "plain"))).to_equal(false)
+        expect(body_is_empty(function_ending(projected, "plain"))).to_equal(true)
+
+    it "lowers shard A's module to byte-identical MIR against a full or interface-only shard B":
+        val fixture = keep_fixture()
+        val full_text = lower_user_text(fixture.consumer, fixture.provider)
+        val (interface_provider, stripped) = hir_module_interface_only_v1(fixture.provider)
+        expect(stripped > 0).to_equal(true)
+        val interface_text = lower_user_text(fixture.consumer, interface_provider)
+        var missing_markers: [text] = []
+        for marker in ["first", "described", "peek", "fast", "plain"]:
+            if not full_text.contains(marker): missing_markers.push(marker)
+        expect(missing_markers).to_equal([])
+        expect(first_text_difference("app.probe.user", lift_counter_neutral(full_text), lift_counter_neutral(interface_text))).to_equal("")
+
+describe "interface-only HIR saves bytes on real modules":
+    it "encodes a real stdlib module set smaller after projection":
+        val paths = ["src/lib/common/format.spl", "src/lib/common/path_pure.spl",
+            "src/lib/common/target.spl", "src/lib/common/coverage_sdn.spl"]
+        var full_bytes = 0
+        var interface_bytes = 0
+        var stripped_total = 0
+        for path in paths:
+            val module_name = path.replace("src/lib/", "std.").replace(".spl", "").replace("/", ".")
+            val full = lower_real_module(path, module_name)
+            val (projected, stripped) = hir_module_interface_only_v1(full)
+            val full_encoded = hir_module_encode(full)
+            val interface_encoded = hir_module_encode(projected)
+            expect(full_encoded != "").to_equal(true)
+            expect(interface_encoded != "").to_equal(true)
+            full_bytes = full_bytes + full_encoded.byte_len()
+            interface_bytes = interface_bytes + interface_encoded.byte_len()
+            stripped_total = stripped_total + stripped
+        print "[residency-bytes] modules={paths.len()} stripped_bodies={stripped_total} full_bytes={full_bytes} interface_bytes={interface_bytes} saved_bytes={full_bytes - interface_bytes}"
+        expect(stripped_total > 0).to_equal(true)
+        expect(interface_bytes < full_bytes).to_equal(true)

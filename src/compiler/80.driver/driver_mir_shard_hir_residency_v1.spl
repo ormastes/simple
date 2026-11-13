@@ -21,11 +21,17 @@
 # The feed (ctx.mir_feed_modules) keeps the interface copies: MIR lowering
 # reads only declarations from `providers` (symbols, signatures and parameter
 # defaults, constants, structs/classes/enums, traits incl. default bodies,
-# impls, extern declarations). Bodies kept whole regardless: extern functions
-# (no body), generic templates and `const fn` (compile-time evaluated).
+# impls, extern declarations). Bodies kept whole regardless (fail closed: a
+# body is dropped only when the function is provably ordinary): extern
+# functions (no body), generic templates (fn-level type params,
+# is_generic_template, a type parameter anywhere in the signature, every
+# method of a generic class or generic impl -- including trait defaults
+# concretized into a generic impl, which HIR does not flag), `const fn`
+# (compile-time evaluated) and @inline/@always_inline. Trait default bodies
+# live in HirTrait.defaults, which the projection never touches.
 
-use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind, SymbolId}
-use compiler.hir.hir_definitions.{HirFunction, HirBlock, HirExpr, HirExprKind}
+use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind, SymbolId, SymbolKind}
+use compiler.hir.hir_definitions.{HirFunction, HirBlock, HirExpr, HirExprKind, HirClass, HirImpl}
 use compiler.common.diagnostics.span.{Span}
 
 pub const MIR_SHARD_INTERFACE_HIR_ENV_V1: text = "SIMPLE_MIR_SHARD_INTERFACE_HIR"
@@ -59,12 +65,90 @@ pub fn mir_shard_hir_residency_refusal_v1(flag: text, shard_spec: text, link_led
 
 # ===== interface-only projection (pure) =====================================
 
-# Functions whose body stays resident in an interface-only module. Generic
-# class/impl methods carry no fn-level type_params; they are flagged
-# is_generic_template instead (class_declaration_lowering.spl, trait_impl_lowering.spl).
+# Functions whose body stays resident in an interface-only module, judged on
+# the function alone. Generic class/impl methods carry no fn-level type_params;
+# they are flagged is_generic_template instead (class_declaration_lowering.spl,
+# trait_impl_lowering.spl).
 pub fn hir_function_keeps_body_v1(function: HirFunction) -> bool:
     function.is_extern or function.type_params.len() > 0 or function.is_const or
-        function.is_generic_template
+        function.is_generic_template or function.func_attr.is_inline
+
+# True when a type parameter occurs anywhere in `ty`, spelled either as
+# TypeParam or as Named of a symbol the module declares as a type parameter.
+# Kinds not walked here (Projection, Tensor, Layer) report true: fail closed.
+fn hir_type_mentions_type_param_v1(ty: HirType, module: HirModule) -> bool:
+    match ty.kind:
+        case HirTypeKind.TypeParam(_, _): true
+        case HirTypeKind.Named(symbol, args):
+            if val info = module.symbols.get_symbol_raw(symbol.id):
+                if info.kind == SymbolKind.TypeParam: return true
+            hir_types_mention_type_param_v1(args, module)
+        case HirTypeKind.Int(_, _): false
+        case HirTypeKind.Float(_): false
+        case HirTypeKind.Bool: false
+        case HirTypeKind.Char: false
+        case HirTypeKind.Str: false
+        case HirTypeKind.Unit: false
+        case HirTypeKind.Never: false
+        case HirTypeKind.Error: false
+        case HirTypeKind.DynTrait(_): false
+        # An unresolved inference variable or the erased top type is not a
+        # type parameter: neither makes the body a template.
+        case HirTypeKind.Infer(_, _): false
+        case HirTypeKind.Any: false
+        case HirTypeKind.Tuple(elements): hir_types_mention_type_param_v1(elements, module)
+        case HirTypeKind.Array(element, _): hir_type_mentions_type_param_v1(element, module)
+        case HirTypeKind.Slice(element): hir_type_mentions_type_param_v1(element, module)
+        case HirTypeKind.Dict(key, value):
+            hir_type_mentions_type_param_v1(key, module) or hir_type_mentions_type_param_v1(value, module)
+        case HirTypeKind.Ref(inner, _): hir_type_mentions_type_param_v1(inner, module)
+        case HirTypeKind.Ptr(inner, _): hir_type_mentions_type_param_v1(inner, module)
+        case HirTypeKind.Optional(inner): hir_type_mentions_type_param_v1(inner, module)
+        case HirTypeKind.Result(ok, err):
+            hir_type_mentions_type_param_v1(ok, module) or hir_type_mentions_type_param_v1(err, module)
+        case HirTypeKind.Union(members): hir_types_mention_type_param_v1(members, module)
+        case HirTypeKind.Function(params, ret, _):
+            hir_types_mention_type_param_v1(params, module) or hir_type_mentions_type_param_v1(ret, module)
+        case HirTypeKind.Isolated(inner): hir_type_mentions_type_param_v1(inner, module)
+        case HirTypeKind.Unique(inner): hir_type_mentions_type_param_v1(inner, module)
+        case HirTypeKind.Shared(inner): hir_type_mentions_type_param_v1(inner, module)
+        case HirTypeKind.Weak(inner): hir_type_mentions_type_param_v1(inner, module)
+        case _: true
+
+fn hir_types_mention_type_param_v1(types: [HirType], module: HirModule) -> bool:
+    for ty in types:
+        if hir_type_mentions_type_param_v1(ty, module): return true
+    false
+
+fn hir_signature_mentions_type_param_v1(function: HirFunction, module: HirModule) -> bool:
+    for param in function.params:
+        if hir_type_mentions_type_param_v1(param.type_, module): return true
+    hir_type_mentions_type_param_v1(function.return_type, module)
+
+# Symbol ids of every method of a generic class or a generic impl (impl<T>, or
+# an impl whose self type mentions a type parameter). HIR flags the written
+# methods of these but not the trait defaults concretized into a generic impl
+# (trait_impl_lowering.spl default loop), so membership is the rule here.
+pub fn hir_module_generic_owner_methods_v1(module: HirModule) -> Dict<i64, bool>:
+    var owned: Dict<i64, bool> = {}
+    for class_key in module.classes.keys():
+        val class_: HirClass = module.classes[class_key]
+        if class_.type_params.len() > 0 or class_.is_generic_template:
+            for method_name in class_.methods.keys():
+                owned[class_.methods[method_name].id] = true
+    for impl_ in module.impls:
+        if impl_.type_params.len() > 0 or hir_type_mentions_type_param_v1(impl_.type_, module):
+            for method_name in impl_.methods.keys():
+                owned[impl_.methods[method_name].id] = true
+    owned
+
+# Module-aware keep rule: the function-local rule, a type parameter anywhere
+# in the signature, or membership in a generic owner.
+pub fn hir_function_keeps_body_in_module_v1(function: HirFunction, module: HirModule,
+        generic_owner_methods: Dict<i64, bool>) -> bool:
+    hir_function_keeps_body_v1(function) or
+        generic_owner_methods.contains_key(function.symbol.id) or
+        hir_signature_mentions_type_param_v1(function, module)
 
 fn hir_interface_placeholder_block_v1() -> HirBlock:
     val span = Span(start: 0, end: 0, line: 0, col: 0, file: "", length: 0)
@@ -84,9 +168,11 @@ fn hir_function_body_present_v1(function: HirFunction) -> bool:
 pub fn hir_module_interface_only_v1(module: HirModule) -> (HirModule, i64):
     var functions: Dict<SymbolId, HirFunction> = {}
     var stripped = 0
+    val generic_owner_methods = hir_module_generic_owner_methods_v1(module)
     for key in module.functions.keys():
         val function: HirFunction = module.functions[key]
-        if hir_function_keeps_body_v1(function) or not hir_function_body_present_v1(function):
+        if hir_function_keeps_body_in_module_v1(function, module, generic_owner_methods) or
+                not hir_function_body_present_v1(function):
             functions[key] = function
         else:
             var projected = function
