@@ -157,3 +157,10 @@ no admission without live checksum evidence.
 ## Triage 2026-11-13 (Linux aarch64, lane uia) — row stays OPEN
 
 On release/1.0.0 c8c3e7bc4f1, Linux aarch64 (DGX Spark GB10), Rust seed af717f53d6bce3e5 the source-level contract specs pass: engine_vulkan_present_api_spec 2/2, engine_vulkan_window_present_spec 7/7, engine2d_strict_vulkan_submit_no_readback_contract_spec 7/7. The old bridge symbols have no definition left. Blocked for closure on this host: the Acceptance section needs a live Xvfb or physical-display present with checksum, and this host has no Xvfb (xwd only) and the live tests are ignored Rust tests that go through Vulkan instance creation (other lane). Same missing evidence as engine2d_vulkan_window_8k_gate_is_device_present_proxy_2026-08-31.
+
+
+---
+
+## 2026-11-13 triage — lane live-p3-l2 (work/live-p3-l2-20261113, worktree lp2-wt, base origin/release/1.0.0 tip)
+
+**Verdict: PARTIAL (deferred).** Acceptance criteria (Xvfb/physical-surface live presentation, verification readback outside timed frames, zero-readback timed frames, 8K p50/p95 + RSS + receipts) require a Linux display environment; not attempted on this Windows lane.

@@ -54,3 +54,10 @@ the same families named above.
 ## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
 
 **LIVE (confirmed)** — ne10 re-ran both guards: raw-sffi ratchet exit 2 (inventory over ceilings; signed_admitted=0 unchanged) and null-signature guard exit 1 in the named families. Unblock needs signed exact-artifact admission + provider-family hardening — a large audit lane.
+
+
+---
+
+## 2026-11-13 triage — lane live-p3-l2 (work/live-p3-l2-20261113, worktree lp2-wt, base origin/release/1.0.0 tip)
+
+**Verdict: LIVE (deferred).** Prior-lane 2026-11-11 re-run stands: raw-sffi-unsafe-ratchet exits 2 (inventory itself over ratchet ceilings, signed_admitted=0) and sffi-null-signature-guard exits 1 (stale TCP/UDP ABI expectations + missing checked crypto bindings). The provider-family review/hardening and signed exact-artifact admission are a large audit lane, out of scope for P3 traverse.

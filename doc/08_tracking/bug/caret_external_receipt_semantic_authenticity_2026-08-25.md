@@ -157,3 +157,16 @@ versioned validators, as the header states.
 ## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
 
 **FIXED (confirmed)** — Fail-closed quarantine restored; two independent live PASSes (ne3 + caret2 quiet-host re-run). Five external rows remain deliberate TODO pending versioned validators.
+
+
+---
+
+## 2026-11-13 triage (live-P3 lane l1, work/live-p3-l1-20261113, base f790f7f266e)
+
+**FIXED (confirmed)** — Fail-closed quarantine intact at this base; two independent live PASSes on record (ne3 + caret2 quiet-host). Five external rows remain deliberate TODO pending versioned validators.
+
+## 2026-11-13 resolution (P3 triage sweep, work/p3-triage-20261113) — row closed `fixed`
+
+Seed: scratchpad `vkinit/seed-fix`, runs capped `systemd-run MemoryMax=16G timeout 900`, cwd = this worktree at origin/release/1.0.0 `59caff4fd1b`.
+
+Evidence: `5fe5600c582` is an ancestor of origin/release/1.0.0. Live: `sh test/01_unit/scripts/caret_external_receipt_semantic_quarantine_test.shs` exit 0, `PASS: all five generic signed Caret receipts fail closed at the semantic quarantine` — signature-valid but semantically unvalidated receipts are rejected (`caret-semantic-validator-not-implemented-<gate>`), which closes the authenticity gap. Building the versioned semantic validators is feature work, not this defect.

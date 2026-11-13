@@ -28,6 +28,19 @@ fn uses_msvc_flags(flavor: LinkerFlavor) -> bool {
     flavor == LinkerFlavor::Msvc
 }
 
+/// Quote one argument for a clang `@response` file. llvm's response-file
+/// tokenizer treats backslash as an escape character BOTH inside and outside
+/// double quotes (`\\` -> `\`, `\"` -> `"`), so a literal Windows path must
+/// double every backslash -- single-quoted posix rsp writers are NOT
+/// clang-parseable. Measured 2026-11-12: an unescaped
+/// `"/WHOLEARCHIVE:\\?\D:\...\libspl_objects.a"` line came back mangled
+/// (clang-cl: "no such file or directory: '/WHOLEARCHIVE:...'"), because
+/// every `\x` pair collapsed to `x` and a trailing `\"` swallowed the
+/// closing quote, gluing the next line into one token.
+fn quote_cl_response_arg(arg: &str) -> String {
+    format!("\"{}\"", arg.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
 fn hosted_elf_link_args(target: Target, exact_stage4: bool) -> &'static [&'static str] {
     match target.os {
         TargetOS::Linux | TargetOS::FreeBSD if exact_stage4 => &["-no-pie"],
@@ -2336,12 +2349,20 @@ int main(int argc, char** argv) {
                                 // extract the native_all members that define a
                                 // shared symbol and list them ahead of both archives.
                                 let shared_set: HashSet<&String> = shared.iter().collect();
+                                // `nm -A` echoes the archive argument verbatim as
+                                // "<archive-arg>:<member>: ..."; the prefix must be
+                                // the exact string passed to nm so member names
+                                // that themselves carry ':' (Windows drive letters
+                                // baked into vendored CI objects, e.g.
+                                // "C:\a\rust\rust\build\...") survive the parse.
+                                let nm_archive_arg = external_tool_path(runtime_lib);
+                                let nm_archive_prefix = format!("{}:", nm_archive_arg.display());
                                 let listing = nm_command()?
                                     .arg("-A")
                                     .arg("-g")
                                     .arg("-p")
                                     .arg("--defined-only")
-                                    .arg(external_tool_path(runtime_lib))
+                                    .arg(&nm_archive_arg)
                                     .output()
                                     .map_err(|e| format!("nm -A {}: {e}", runtime_lib.display()))?;
                                 if !listing.status.success() {
@@ -2357,7 +2378,15 @@ int main(int argc, char** argv) {
                                     if !shared_set.contains(&name) {
                                         continue;
                                     }
-                                    let member = parts[0].trim_end_matches(':').rsplit(':').next().unwrap_or("");
+                                    // Strip the KNOWN "<archive-arg>:" prefix; the
+                                    // old last-colon split truncated members
+                                    // containing a drive letter ("C:\a\...").
+                                    let member = parts[0]
+                                        .strip_prefix(nm_archive_prefix.as_str())
+                                        .map(|rest| rest.trim_end_matches(':'))
+                                        .unwrap_or_else(|| {
+                                            parts[0].trim_end_matches(':').rsplit(':').next().unwrap_or("")
+                                        });
                                     if !member.is_empty() && !members.iter().any(|m| m == member) {
                                         members.push(member.to_string());
                                     }
@@ -2388,13 +2417,40 @@ int main(int argc, char** argv) {
                                 if !status.success() {
                                     return Err(format!("{ar} x {} failed extracting {} owner member(s)", archive_abs.display(), members.len()));
                                 }
+                                // Hundreds of owner members on deep worktrees
+                                // bust two Windows limits at once: each
+                                // verbatim path can exceed MAX_PATH, and the
+                                // joined command line exceeds CreateProcess's
+                                // 32 KiB (os error 206 observed 2026-11-12).
+                                // Stuff the verbatim spellings into a clang
+                                // response file: clang-cl/lld-link lift
+                                // MAX_PATH for "\\?\" paths, the @file keeps
+                                // the args off the command line, and @file
+                                // expands inline so link ORDER is unchanged.
+                                let mut owner_rsp_body = String::new();
                                 for member in &members {
                                     let obj = extract_dir.join(member);
+                                    // llvm-ar cannot materialize a member whose
+                                    // baked-in name is not a relative path (the
+                                    // CI-built compiler_builtins "C:\a\rust\..."
+                                    // objects): it sanitizes to the basename.
+                                    let obj = if obj.is_file() {
+                                        obj
+                                    } else {
+                                        let base = member.rsplit(['/', '\\']).next().unwrap_or(member);
+                                        let alt = extract_dir.join(base);
+                                        if alt.is_file() { alt } else { obj }
+                                    };
                                     if !obj.is_file() {
                                         return Err(format!("owner member {} was not extracted from {}", member, archive_abs.display()));
                                     }
-                                    cmd.arg(external_tool_path(&obj));
+                                    owner_rsp_body.push_str(&quote_cl_response_arg(&obj.display().to_string()));
+                                    owner_rsp_body.push('\n');
                                 }
+                                let owners_rsp = temp_dir.join("native_all_owner_members.rsp");
+                                std::fs::write(&owners_rsp, owner_rsp_body)
+                                    .map_err(|e| format!("write {}: {e}", owners_rsp.display()))?;
+                                cmd.arg(format!("@{}", external_tool_path(&owners_rsp).display()));
                                 roots.extend(shared);
                             }
                             // x64 `extern "C"` names are undecorated -- measured
@@ -2857,6 +2913,62 @@ int main(int argc, char** argv) {
         if self.config.verbose {
             eprintln!("Link command: {:?}", cmd);
         }
+
+        // Windows: CreateProcess caps the command line at 32,767 chars and
+        // fails the spawn with os error 206 (ERROR_FILENAME_EXCED_RANGE) --
+        // measured 2026-11-12 on the Stage 2 MSVC link, whose hundreds of
+        // /INCLUDE roots and long paths overflow the cap even after the
+        // owner-member objects moved into their own response file.
+        // clang-cl expands `@file` inline before option processing (the same
+        // mechanism the GNU roots rsp relies on), so when the assembled line
+        // approaches the cap, swap the WHOLE argument vector -- /link group
+        // included -- into one double-quoted response file. Single-quote
+        // posix rsp writers are NOT usable here: clang's tokenizer only
+        // honors double quotes.
+        #[cfg(target_os = "windows")]
+        let cmd = {
+            let mut final_cmd = cmd;
+            let args: Vec<std::ffi::OsString> =
+                final_cmd.get_args().map(|arg| arg.to_os_string()).collect();
+            let assembled: usize = args
+                .iter()
+                .map(|arg| arg.to_string_lossy().len() + 3)
+                .sum::<usize>()
+                + final_cmd.get_program().to_string_lossy().len();
+            const COMMAND_LINE_CHAR_CAP: usize = 28_000;
+            if is_msvc && assembled > COMMAND_LINE_CHAR_CAP {
+                eprintln!(
+                    "[link] command line {assembled} chars exceeds {COMMAND_LINE_CHAR_CAP}; using clang response file"
+                );
+                let rsp_path = temp_dir.join("clang_cl_link_full.rsp");
+                let mut body = String::new();
+                for arg in &args {
+                    body.push_str(&quote_cl_response_arg(&arg.to_string_lossy()));
+                    body.push('\n');
+                }
+                std::fs::write(&rsp_path, body)
+                    .map_err(|e| format!("write {}: {e}", rsp_path.display()))?;
+                let mut short_cmd = std::process::Command::new(final_cmd.get_program());
+                short_cmd.arg(format!("@{}", external_tool_path(&rsp_path).display()));
+                if let Some(dir) = final_cmd.get_current_dir() {
+                    short_cmd.current_dir(dir);
+                }
+                for (key, value) in final_cmd.get_envs() {
+                    match value {
+                        Some(value) => {
+                            short_cmd.env(key, value);
+                        }
+                        None => {
+                            short_cmd.env_remove(key);
+                        }
+                    };
+                }
+                final_cmd = short_cmd;
+            }
+            final_cmd
+        };
+        #[cfg(not(target_os = "windows"))]
+        let cmd = cmd;
 
         // GNU ld truncates a Windows verbatim path to its last component; see
         // tools::respell_args_for_external_tool.

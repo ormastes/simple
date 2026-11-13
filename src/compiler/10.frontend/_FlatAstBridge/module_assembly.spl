@@ -601,7 +601,17 @@ fn flat_ast_to_module(path: text) -> ParserModule:
                 # staged bridge never copies a stale six-word aggregate.
                 var e_discriminant = Expr(kind: ExprKind.NilLit, span: make_span())
                 if e_has_discriminant:
+                    # Enum variant discriminants keep the exact decimal lexeme:
+                    # the enum-contract report folds discriminants through
+                    # hir_fold_literal_constant_v1 and classifies a float
+                    # discriminant as NonInteger from the lexeme form
+                    # (enum_discriminant_adapter_spec pins the float-lexeme HIR
+                    # kind), the third lexeme-preserving context alongside
+                    # module-level const initializers and float match patterns.
+                    val saved_disc_float_mode = flat_bridge_lexeme_float_literals
+                    flat_bridge_lexeme_float_literals = true
                     e_discriminant = convert_flat_expr(e_discriminant_id)
+                    flat_bridge_lexeme_float_literals = saved_disc_float_mode
                 var e_payload_count: i64 = 0
                 if e_vi < e_payload_counts.len():
                     e_payload_count = e_payload_counts[e_vi]
@@ -1987,4 +1997,18 @@ fn bridge_node_tree_attributes(spellings: [text], span: Span) -> [Attribute]:
                 arg = arg.substring(1, arg.byte_len() - 1)
             out.push(Attribute(name: "node_tree",
                 args: [Expr(kind: ExprKind.StringLit(arg, None), span: span)], span: span))
+        elif spelling == "support_async_immutable":
+            # Sub-plan P1 (immutable_views_async_init_revisions_2026-11-13.md section 3.1):
+            # bare form authorizes every field for async initialization.
+            out.push(Attribute(name: "support_async_immutable", args: [], span: span))
+        elif spelling.starts_with("support_async_immutable(") and spelling.ends_with(")"):
+            # `support_async_immutable("f", "g")`: only the named fields.
+            var field_args: [Expr] = []
+            for raw_name in spelling.substring(24, spelling.byte_len() - 1).split(","):
+                var name = raw_name.trim()
+                if name.len() >= 2 and name.starts_with("\"") and name.ends_with("\""):
+                    name = name.substring(1, name.byte_len() - 1)
+                if name.len() > 0:
+                    field_args.push(Expr(kind: ExprKind.StringLit(name, None), span: span))
+            out.push(Attribute(name: "support_async_immutable", args: field_args, span: span))
     out

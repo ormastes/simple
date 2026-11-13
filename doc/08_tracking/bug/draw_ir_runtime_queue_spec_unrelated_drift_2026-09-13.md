@@ -78,3 +78,17 @@ SPEC FILE VERDICT: ... outcome=OK declared>=4 executed=4 passed=4 failed=0 skipp
 
 The first status line above still read OPEN, which kept the tracking row open;
 it is flipped here and the shard records the closure.
+
+
+---
+
+## 2026-11-13 confirmation — lane live-p3-l2 (work/live-p3-l2-20261113, worktree lp2-wt)
+
+**Confirmed FIXED at base `origin/release/1.0.0` tip — no change needed.** The
+spec-side fix recorded under "Closed 2026-11-10 (lane p3-runner3)" is present
+at this base: `test/01_unit/lib/gc_async_mut/gpu/engine2d/draw_ir_runtime_queue_spec.spl`
+imports and calls `engine2d_draw_ir_payload_summary_sdn_compat` (lines 47, 137)
+and expects `result.render.unit_id == "runtime-batch-runtime"` (line 74).
+Seed-smoke verification (`SIMPLE_LIB=src bin/simple.exe test ... --mode=interpreter --no-cache`):
+**4/4 PASS**. The `livep3_ab` slice list predates the closure; this record's
+closure stands.

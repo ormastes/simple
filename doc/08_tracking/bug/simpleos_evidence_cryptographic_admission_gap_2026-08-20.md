@@ -131,3 +131,10 @@ ready.
 ## Lane disposition 2026-11-13 (live-p3-l4, work/live-p3-l4-20261113, base f790f7f266e)
 
 Concurs with the record: still open, release-blocking for every capability-ledger PASS — the structural model (verifier_owner behind the canonical mutex, authority_owner trust/policy/time projection, performance_policy_owner catalog) is in source, but the cryptographic half remains deliberately disabled (`SIMPLEOS_EVIDENCE_*_ADMITTED` gates false) pending authoritative self-hosted concurrent-execution evidence, executable Ed25519 KAT and native constant-work evidence, capture-owner delivery, and the forgery/replay/key-revocation/restart test matrix. All of that needs the admitted Phase-2 test-capable runtime + QEMU, which this Windows lane is not. No in-lane change. Owner: SimpleOS evidence lane with the TODO(environment) grant in the record.
+
+## Triage 2026-11-13 (P3 tools lane)
+No code change this lane. The 2026-09-23 policy checkpoints stand: the
+immutable performance catalog is intentionally empty until reviewed fixture and
+baseline artifacts are preregistered (TODO(environment)); the cryptographic
+admission gap is owner/policy work, not a bounded P3 tools fix.
+

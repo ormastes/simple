@@ -1,6 +1,6 @@
 # Bitfield "coverage" is vacuous, and `custom_primitive_bitfield.spl` is unreachable code
 
-- **Status:** RESOLVED 2026-11-11 — both findings verified fixed on release/1.0.0 (P3 runner6 lane; Finding 1 via squash-merge 839e59ffa7dc of 93a6de8b95ee, Finding 2 deletion confirmed)
+- **Status:** RESOLVED 2026-11-11 (bug_db row closed 2026-11-13; live red->green recorded below) — both findings verified fixed on release/1.0.0 (P3 runner6 lane; Finding 1 via squash-merge 839e59ffa7dc of 93a6de8b95ee, Finding 2 deletion confirmed)
 - **Date:** 2026-08-18
 - **Area:** `test/01_unit/compiler/mir/bitfield_mir_spec.spl`,
   `src/compiler/50.mir/custom_primitive_bitfield.spl`
@@ -269,3 +269,43 @@ the lane's no-green-rerun rule). Verdict: FIXED / RESOLVED.
 ## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
 
 **RESOLVED (confirmed)** — Squash-merge 839e59ffa7dc verified ancestor first-hand; `custom_primitive_bitfield.spl` confirmed absent (`BitfieldValidator` zero refs in src/).
+
+## 2026-11-13 closure (P3 bitfield lane, work/p3-bitfield-20261113) — row closed `open` -> `fixed`
+
+Both findings were already fixed in source on `release/1.0.0`; the only open
+item was the `bug_db.sdn` status row, still `open`. This lane re-measured live
+and closed it.
+
+- **Finding 1 (live, red -> green).** `test/01_unit/compiler/mir/bitfield_mir_spec.spl`
+  has 14 examples, 0 `check(code.contains(...))` assertions, and imports
+  `compiler.backend.bitfield`. The legacy `test/unit/compiler/mir/` twin no
+  longer exists. Deliberate red: temporarily changed `BitLayout.mask()` in
+  `src/compiler/70.backend/bitfield.spl:94` from `(1 << self.bit_width) - 1`
+  to `- 2` (module under test, NOT the spec), ran the seed, restored the file
+  (`git status --porcelain` empty afterwards):
+  ```
+  red:   Results: 14 total, 7 passed, 7 failed   (outcome=ERROR, rc=1)
+  green: Results: 14 total, 14 passed, 0 failed  (outcome=OK, rc=0)
+  ```
+  The spec therefore fails on a compiler defect, which the original
+  literal-`contains` spec could not.
+- **Finding 2 (unreachability re-confirmed).** `src/compiler/50.mir/custom_primitive_bitfield.spl`
+  is absent. `grep -rln 'custom_primitive_bitfield\|BitfieldBackingCheck\|BitfieldFieldCheck\|BitfieldValidator' src test examples tools`
+  returns only `src/compiler/90.tools/verify/aorte_obligation_census_scan.spl:58`,
+  a comment; it now says the file was deleted.
+- `doc/08_tracking/bug/bug_db.sdn` row set to `fixed` (updated 2026-11-13),
+  and the file resealed.
+
+No spec pins were missing for the spec this bug names. Its 14 examples
+already cover mask/shift, round-trip, truncation, multi-field packing, signed
+range, and word-straddle behaviour.
+
+A wider scan (`/usr/bin/grep -rli bitfield test --include='*_spec.spl'`, 109
+files) found no other spec that asserts `contains` on a string literal it
+declares itself. Some specs, such as `test/01_unit/compiler/native/bitfield_codegen_spec.spl`,
+`test/03_system/compiler/bitfield_reorder_spec.spl`, and
+`test/01_unit/compiler/packed_struct_bitfield_spec.spl`, are source-text pins.
+They call `rt_file_read_text` on real compiler source and assert `contains` on
+the result. That is weaker than a behavioural test, but these specs can fail,
+so they are not the vacuous class this bug describes. They are out of scope
+here.

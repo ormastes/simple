@@ -385,6 +385,15 @@ pub(crate) fn compile_builtin_method<M: Module>(
             let result_i8 = call_runtime_1(ctx, builder, "rt_array_clear", receiver_val);
             Some(super::helpers::safe_extend_to_i64(builder, result_i8))
         }
+        // `[T].reserve(additional)` — capacity hint; contents and `len` are
+        // untouched and the array header never moves, so the receiver vreg
+        // stays valid. Compiled as a no-op (no runtime call): reserve has no
+        // observable effect. See the matching arm in closures_structs.rs and
+        // doc/08_tracking/bug/compiler_seed_missing_array_reserve_2026-11-12.md.
+        ("Array", "reserve") | ("array", "reserve") => {
+            let _arg_val = ctx.get_vreg(&args[0])?;
+            Some(receiver_val)
+        }
         ("Array", "merge") | ("array", "merge") => {
             let other_val = ctx.get_vreg(&args[0])?;
             let count = call_len_method(ctx, builder, "rt_array_len", other_val);

@@ -73,3 +73,13 @@ but do not attempt the boundary totalisation. The merged-pattern work here used
 repo-relative fixture paths throughout, avoiding `/tmp` duality. No code change
 in this closure; the proper fix remains routing every path-taking rt_file call
 through `host_path_native` and adopting ONE /tmp convention for the Windows lane.
+
+
+---
+## 2026-11-13 triage — lane live-p3-l6 (Windows host, seed bin/simple.exe, base f790f7f266e)
+
+Concur: architectural boundary debt unchanged. This lane followed the record's
+interim rule (specs read and write through the same layer; repo-relative
+fixture paths, no `/tmp`). The proper fix — routing every path-taking rt_file
+call through `host_path_native` and adopting ONE /tmp convention for the
+Windows lane — remains open. No in-lane change.

@@ -21,7 +21,7 @@ use app.compiler_entrypoint.source_authority.{compiler_source_authority_acquire_
 use app.cli.native_build_shard_admission.{native_build_hir_shard_policy_v1,
     native_build_shard_count_for_closure_v1, native_build_small_closure_max_v1}
 use app.cli.native_build_output_plan.{native_build_is_value_consuming_flag,
-    native_build_mir_output_requires_full_set_v1}
+    native_build_entry_and_sources_v1, native_build_mir_output_requires_full_set_v1}
 use app.cli.native_build_parse_closure_owner.{native_build_publish_parse_closure_v1,
     native_build_parse_closure_reuse_decision_v1, NATIVE_BUILD_PARSE_CLOSURE_CONSUMER_ENV_V1,
     NATIVE_BUILD_PARSE_CLOSURE_SELECTED_ENV_V1}
@@ -57,7 +57,7 @@ use std.io_runtime.{dir_create_all, dir_remove_all, dir_exists}
 use app.cli.parse_shard_queue.{parse_shard_release_claims}
 use app.cli.shard_worker_reap_v1.{shard_worker_confirm_kill_v1, parse_shard_reap_v1,
     shard_pool_poll_quantum_v1, shard_child_wait_bounded_v1}
-use app.cli.native_build_exit_status.{native_build_windows_status_label, native_build_posix_signal}
+use app.cli.native_build_exit_status.{native_build_windows_status_label, native_build_posix_signal, native_build_signal_name, native_build_exit_cause_field_v1}
 use app.cli.file_worker_pool_refusal.{file_worker_pool_refusal_v1}
 use app.cli.shard_mem_clamp.{shard_default_threads}
 use std.nogc_sync_mut.host_limits.{host_limit_value}
@@ -113,6 +113,7 @@ use compiler.driver.driver_build.native_file_worker_incremental_io_v1.{file_work
 use compiler.driver.driver_ice_boundary.{
     ice_boundary_begin_run, ice_boundary_claim_run, ice_boundary_release_run,
     ice_boundary_dead_worker_modules, ice_boundary_attribute_dead_worker_with_stderr,
+    ice_boundary_attribute_dead_pid_v1,
     ice_runtime_trap_symbol,
     ice_boundary_merge_receipt,
     ice_skip_list_extend, ice_crash_retry_budget,
@@ -1172,6 +1173,12 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
                 return LedgerShardRunV1(code: 1, failed_modules: 0, total_claims: 0,
                     blocked_reason: reason, all_stopped: true, refused_before_spawn: true)
     val fail_fast = compile_fail_fast_requested(args, env_get("SIMPLE_COMPILE_FAIL_FAST") ?? "", env_get("CI") ?? "")
+    # The bootstrap `native-build` route reaches this pool with no ICE run
+    # directory (only the worker-launch path claims one), so its workers wrote
+    # no breadcrumbs and a crash named no module: the Phase 3 census listed
+    # 1619 `failed module: CRASH` rows and not the one in flight. Claim one
+    # here when nobody did; a nested pool keeps its parent's (claim is false).
+    val pool_ice_owned = ice_boundary_claim_run(queue_dir)
     val window_size = if parallel > 0: parallel else: count
     # Measured commit admission (shard_mem_clamp.spl). The estimate starts at
     # the larger of the phase's static figure and the peak the previous run of
@@ -1351,7 +1358,15 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
                 if first_error_line == "":
                     first_error_line = native_file_worker_first_error_line_v1(label, owner, native_file_worker_error_reason_read_v1(queue_dir, owner))
                 failed_workers = failed_workers + 1
-                eprint "[{label}] owner={owner} status={state_label} exit={code} claimed={progress} sealed={sealed} finished={finished}{shard_worker_exit_hint_v1(code, label)}"
+                eprint "[{label}] owner={owner} status={state_label} exit={code} claimed={progress} sealed={sealed} finished={finished}{native_build_exit_cause_field_v1(code)}{shard_worker_exit_hint_v1(code, label)}"
+                # Name the module this worker (by pid) died in, from its own
+                # breadcrumbs; live siblings keep theirs open.
+                if owner_stopped and code != 0:
+                    val exit_cause = if deadline_hit: " {state_label}" else: native_build_exit_cause_field_v1(code)
+                    for attributed in ice_boundary_attribute_dead_pid_v1(pid, code, exit_cause):
+                        eprint "[{label}] owner={owner} {attributed}"
+                        if first_error_line == "":
+                            first_error_line = native_file_worker_first_error_line_v1(label, owner, attributed)
                 if hir_owner_reason != "":
                     eprint "[{label}] owner={owner} reason: {hir_owner_reason}"
                 if hir_shard_recovery_reap_blocks_ledger_v1(code, progress, sealed, finished):
@@ -1422,6 +1437,10 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
     # run-27e. Their errors are in the ICE receipt rows (phase mir_lower).
     for failed_row in hir_shard_recovery_failed_rows_v1(queue_dir):
         print "[{label}] failed module: {failed_row}"
+    val pool_ice_summary = ice_boundary_merge_receipt(pool_ice_owned)
+    if pool_ice_summary != "":
+        print "[{label}] {pool_ice_summary}"
+    ice_boundary_release_run(pool_ice_owned)
     val blocked = hir_shard_recovery_blocked(queue_dir)
     val blocked_reason = if blocked: file_read("{queue_dir}/BLOCKED") else: ""
     val code = if blocked: 1 else: hir_shard_aggregate_exit(failed_workers, failed_modules)
@@ -2484,7 +2503,7 @@ pub fn native_build_worker_failure_lines_v1(code: i64, stderr: text, simple_bin:
         lines.push("error: native-build worker terminated with Windows native status {windows_status} before producing a binary.\n")
     elif native_build_posix_signal(code) > 0:
         val signo = native_build_posix_signal(code)
-        lines.push("error: native-build worker terminated with signal {signo} before producing a binary; NOT a compile failure.\n")
+        lines.push("error: native-build worker terminated with signal {signo} ({native_build_signal_name(signo)}) before producing a binary; NOT a compile failure.\n")
         if signo == 11 or signo == 6:
             lines.push("  A SIGSEGV/SIGABRT is a crash in the compiler itself; take a backtrace from the core (see /var/crash).\n")
         elif signo == 9 or signo == 15:
@@ -2703,33 +2722,6 @@ pub fn native_build_coordinator_prepublish_closure_v1(worker_args: [text]) -> bo
         case Err(reason):
             eprint "error: " + reason
             false
-
-# [entry, --source dirs...] for child-side closure admission; [] without entry.
-fn native_build_entry_and_sources_v1(args: [text]) -> [text]:
-    var entry = ""
-    var sources: [text] = []
-    var index = 0
-    while index < args.len():
-        val arg = args[index]
-        if native_build_text_eq(arg, "--entry") or native_build_text_eq(arg, "--source"):
-            if index + 1 >= args.len(): return []
-            index = index + 1
-            if native_build_text_eq(arg, "--entry"): entry = args[index]
-            else: sources.push(args[index])
-        elif arg.starts_with("--entry="):
-            entry = arg.substring(8)
-        elif arg.starts_with("--source="):
-            sources.push(arg.substring(9))
-        elif native_build_is_value_consuming_flag(arg):
-            index = index + 1
-        elif not arg.starts_with("-") and entry == "":
-            entry = arg
-        index = index + 1
-    if entry == "": return []
-    var out: [text] = [entry]
-    for source in sources:
-        out.push(source)
-    out
 
 # Names the unmet stage3 entry-admission requirement behind a generic
 # SCV-E-ADMISSION refusal. "" means no known requirement is violated.

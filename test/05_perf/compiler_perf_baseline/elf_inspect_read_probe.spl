@@ -1,0 +1,34 @@
+# Linker ELF read-path probe (not a spec): times the production object parser
+# (linker/elf_parser.elf_parse_object, which reads every field through
+# linker/elf_inspect.elf_read_u*_le -> std.common.elf.elf_image_v1) and a raw
+# u16/u32/u64 read sweep over a real object.
+#
+#   clang -O1 -g -c -Isrc/runtime -Isrc/runtime/include src/runtime/runtime_native.c -o /tmp/obj.o
+#   PROBE_OBJ=/tmp/obj.o PROBE_MODE=parse PROBE_REPS=5 \
+#     systemd-run --user --scope -q -p MemoryMax=4G /usr/bin/time -f "wall=%e rss_kb=%M" \
+#     <simple> run test/05_perf/compiler_perf_baseline/elf_inspect_read_probe.spl
+#   (PROBE_MODE=read PROBE_REPS=1 for the sweep.) Numbers:
+#   doc/03_plan/compiler/aspect_dynload/xray_v1_integration_status_2026-11-03.md "Step 3c".
+use std.nogc_sync_mut.io_runtime.{file_read_bytes, env_get}
+use compiler.backend.linker.elf_parser.{elf_parse_object}
+use compiler.backend.linker.elf_inspect.{elf_read_u16_le, elf_read_u32_le, elf_read_u64_le}
+
+fn main():
+    val path = env_get("PROBE_OBJ")
+    val mode = env_get("PROBE_MODE")
+    val reps = env_get("PROBE_REPS").to_int()
+    val bytes = file_read_bytes(path)
+    var check = 0
+    if mode == "parse":
+        for r in 0..reps:
+            match elf_parse_object(bytes):
+                case Ok(obj): check = check + obj.symbols.len() + obj.relocations.len()
+                case Err(e): print("parse error: {e}")
+    else:
+        val limit = bytes.len() - 8
+        for r in 0..reps:
+            var at = 0
+            while at < limit:
+                check = check + elf_read_u16_le(bytes, at) + elf_read_u32_le(bytes, at) + (elf_read_u64_le(bytes, at) & 255)
+                at = at + 8
+    print("probe mode={mode} reps={reps} bytes={bytes.len()} check={check}")

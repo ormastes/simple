@@ -76,3 +76,14 @@ self-hosted native test runtime, or a longer run budget for that spec.
 ## Lane disposition 2026-11-13 (p3-misc-b)
 
 open for generic JS DOM parity per in-file status; owner: web/native bridge lane.
+
+
+---
+## 2026-11-13 triage — lane live-p3-l6 (Windows host, seed bin/simple.exe, base f790f7f266e)
+
+Concur with the UI-batch-B disposition: `install_dom_bridge` still generates
+`__simple_dom_matches` for `#id`/`.class`/tag selectors only, and no
+setAttribute/removeAttribute/focus/tabIndex/hidden bridge surface exists in
+`browser_session.spl`. The repair is cross-cutting JS-engine/browser-session
+feature work whose acceptance spec does not reach a verdict within this host's
+run cap on the seed interpreter. No in-lane change.

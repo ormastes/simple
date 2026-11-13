@@ -32,24 +32,31 @@ trap cleanup EXIT INT TERM
 
 fail() { FAILURES="${FAILURES}${FAILURES:+; }$1"; }
 
-# Build the fixture: one leaf, DEPS dependents that call it, one entry.
+# Build the fixture: one leaf, DEPS dependents that call it, one UNRELATED
+# module nothing imports, one entry that also calls the leaf. The unrelated
+# module is what makes the SAFETY scenario meaningful: an interface edit must
+# rebuild every dependent AND leave the unrelated module reused. (2026-11-13:
+# this fixture must declare functions with `fn` — the old `fun` spelling is not
+# a function keyword, so the fixture compiled to unresolved bare symbols with
+# no real cross-module dependency edges and the gate measured nothing.)
 make_fixture() {
     mf_dir=$1
     rm -rf "$mf_dir"
     mkdir -p "$mf_dir/src" || return 1
-    printf 'fun leaf_val() -> i64:\n    return 10\n' > "$mf_dir/src/leaf.spl"
+    printf 'fn leaf_val() -> i64:\n    return 10\n' > "$mf_dir/src/leaf.spl"
+    printf 'fn unrelated_val() -> i64:\n    return 77\n' > "$mf_dir/src/unrelated.spl"
     mf_i=1
     mf_uses=""
     mf_sum=""
     while [ "$mf_i" -le 4 ]; do
-        printf 'use leaf\n\nfun dep%s() -> i64:\n    return leaf_val() + %s\n' \
+        printf 'use leaf\n\nfn dep%s() -> i64:\n    return leaf_val() + %s\n' \
             "$mf_i" "$mf_i" > "$mf_dir/src/dep$mf_i.spl"
         mf_uses="${mf_uses}use dep${mf_i}
 "
         mf_sum="${mf_sum}${mf_sum:+ + }dep${mf_i}()"
         mf_i=$((mf_i + 1))
     done
-    printf '%s\nfun main():\n    print("%s", %s)\n' \
+    printf '%suse unrelated\n\nfn main():\n    print("%s", %s + unrelated_val())\n' \
         "$mf_uses" '{}' "$mf_sum" > "$mf_dir/src/main.spl"
 }
 
@@ -107,28 +114,31 @@ if [ "$rc" -ne 0 ]; then
     exit 2
 fi
 
-# 5 cache-eligible modules (leaf + 4 deps). The entry file is deliberately
-# excluded from the cache upstream, so it is never counted as reusable.
-echo "native object cache invalidation gate (fixture: leaf + 4 dependents + entry)"
+# 6 cache-eligible modules (leaf + 4 deps + unrelated). The entry file is
+# deliberately excluded from the cache upstream, so it is always counted as
+# rebuilt (6 reused / 1 rebuilt on a no-change build), and it also calls the
+# leaf, so an interface edit rebuilds it too.
+echo "native object cache invalidation gate (fixture: leaf + 4 dependents + unrelated + entry)"
 
 got=$(build_once "$FX")
-scenario "cold build" 0 6 "$got"
+scenario "cold build" 0 7 "$got"
 
 got=$(build_once "$FX")
-scenario "no change (all valid)" 6 0 "$got"
+scenario "no change (all valid)" 6 1 "$got"
 
 # SPEED direction: a body-only edit changes no interface, so every dependent
-# stays valid. Only the edited module may rebuild.
-printf 'fun leaf_val() -> i64:\n    return 20\n' > "$FX/src/leaf.spl"
+# stays valid. Only the edited module and the always-rebuilt entry may compile.
+printf 'fn leaf_val() -> i64:\n    return 20\n' > "$FX/src/leaf.spl"
 got=$(build_once "$FX")
-scenario "leaf BODY edit" 5 1 "$got"
+scenario "leaf BODY edit" 5 2 "$got"
 
 # SAFETY direction: the leaf's arity changes, so every dependent was compiled
-# against a signature that no longer exists. All four dependents MUST miss.
-# Reusing them is the silent-stale-object class this gate exists to catch.
-printf 'fun leaf_val(bias: i64) -> i64:\n    return 20 + bias\n' > "$FX/src/leaf.spl"
+# against a signature that no longer exists. The leaf, all four dependents and
+# the entry MUST miss; only the unrelated module may be reused. Reusing a
+# dependent is the silent-stale-object class this gate exists to catch.
+printf 'fn leaf_val(bias: i64) -> i64:\n    return 20 + bias\n' > "$FX/src/leaf.spl"
 got=$(build_once "$FX")
-scenario "leaf INTERFACE edit (arity)" 1 5 "$got"
+scenario "leaf INTERFACE edit (arity)" 1 6 "$got"
 
 if [ "$CHECKED" -eq 0 ]; then
     echo "ERROR — nothing was checked"

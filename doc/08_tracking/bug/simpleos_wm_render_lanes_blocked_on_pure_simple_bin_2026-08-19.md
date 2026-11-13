@@ -67,3 +67,9 @@ evidence can be produced on x86_64 or aarch64.
 Deploy a working pure-Simple `bin/simple` (bootstrap redeploy tracked in the
 stage-binary SEGV bug), then re-run the fullscreen lane; it builds the kernel
 itself and the aqua-glyph lane can consume the same ELF.
+
+## Triage 2026-11-13 (P3 tools lane)
+No code change this lane; the recorded unblock path stands — deploy a working
+pure-Simple bin/simple (bootstrap redeploy tracked in the stage-binary SEGV
+bug), then re-run the fullscreen lane. The QEMU + firmware chain is proven
+healthy; the blocker is the kernel builder dependency, outside this lane.

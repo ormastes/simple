@@ -1,0 +1,60 @@
+use std.spec.*
+use std.common.web.browser_renderer_protocol.{
+    browser_text_input_overlay_empty
+}
+use std.gc_async_mut.web.browser_session.{
+    BrowserRenderRevisions, BrowserRenderSnapshot
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_render_session.{
+    SimpleWebRenderSession
+}
+
+# Regression for doc/08_tracking/bug/
+# browser_composition_revision_counters_never_increment_2026-08-19.md:
+# the hosted worker reads counters.composition_revision / reuse_count after
+# every render() and saw both stuck at 0.
+
+fn counters_snapshot(html: text?, revision: i64) -> BrowserRenderSnapshot:
+    BrowserRenderSnapshot(
+        document_generation: 1,
+        revisions: BrowserRenderRevisions(
+            document_revision: revision,
+            style_revision: 1,
+            resource_revision: 1
+        ),
+        document_html: html,
+        resources_changed: false
+    )
+
+describe "SimpleWebRenderSession revision counters":
+    it "bumps composition_revision on each rendered frame":
+        val session = SimpleWebRenderSession.create()
+        expect(session.counters.composition_revision).to_equal(0)
+        session.render(
+            counters_snapshot(Some("<p>one</p>"), 1),
+            64, 64, 0, 0, browser_text_input_overlay_empty(), [], []
+        )
+        expect(session.counters.paint_count).to_equal(1)
+        expect(session.counters.composition_revision).to_equal(1)
+        session.render(
+            counters_snapshot(Some("<p>two</p>"), 2),
+            64, 64, 0, 0, browser_text_input_overlay_empty(), [], []
+        )
+        expect(session.counters.composition_revision).to_equal(2)
+        session.close()
+
+    it "bumps reuse_count and keeps composition_revision on an exact repeat":
+        val session = SimpleWebRenderSession.create()
+        session.render(
+            counters_snapshot(Some("<p>one</p>"), 1),
+            64, 64, 0, 0, browser_text_input_overlay_empty(), [], []
+        )
+        val before = session.counters.composition_revision
+        session.render(
+            counters_snapshot(nil, 1),
+            64, 64, 0, 0, browser_text_input_overlay_empty(), [], []
+        )
+        expect(session.counters.reuse_count).to_equal(1)
+        expect(session.counters.composition_revision).to_equal(before)
+        expect(before).to_equal(1)
+        session.close()

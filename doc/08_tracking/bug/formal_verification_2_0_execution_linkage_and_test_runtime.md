@@ -128,3 +128,10 @@ re-confirmed, not silently stale.
 ## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
 
 **LIVE (confirmed)** — ne9: unblock conditions unmet — seed still prints the bootstrap-only warning, no bin/release self-hosted binary, no lean4export/nanoda provisioning visible; FV gates require the FV 2.0 integration lane.
+
+
+---
+
+## 2026-11-13 triage — lane live-p3-l2 (work/live-p3-l2-20261113, worktree lp2-wt, base origin/release/1.0.0 tip)
+
+**Verdict: LIVE (deferred).** `bin/simple.exe` at this base still identifies as the Rust bootstrap seed (build-commit `46fe8f6b6def`); `bin/release/<triple>/simple` absent; no lean4export/nanoda provisioning visible. The self-hosted-binary and FV-gate unblock conditions belong to the bootstrap and FV 2.0 integration lanes; nothing a P3 traverse lane can change here.

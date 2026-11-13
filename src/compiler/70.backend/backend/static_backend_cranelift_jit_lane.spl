@@ -8,7 +8,9 @@
 # rt_cranelift_* / spl_cranelift_* reference at all.
 
 use compiler.backend.static_jit_lane.{StaticJitLaneV1}
-use compiler.backend.codegen.{CodegenPipeline, CodegenError, CraneliftCompiledModule}
+use compiler.backend.codegen.{CodegenPipeline}
+use compiler.backend.cranelift_codegen_adapter.{cranelift_jit_run_main}
+use compiler.backend.jit_extern_resolution.{jit_module_extern_errors}
 use compiler.backend.compiler.{CompilerBackendImpl}
 use compiler.mir.mir_instructions.{MirModule}
 use compiler.hir.hir_types.{HirModule}
@@ -16,31 +18,28 @@ use compiler.backend.backend_types.{BackendResult, BackendError}
 use compiler.common.driver_core_types.{CompileResult}
 
 fn _cranelift_jit_run(modules: [MirModule]) -> CompileResult:
-    var pipeline = CodegenPipeline.jit()
-    var compiled_modules: [CraneliftCompiledModule] = []
-    for module in modules:
-        match pipeline.compile_module(module):
-            case Ok(compiled):
-                compiled_modules.push(compiled)
-            case Err(e):
-                val cg_err: CodegenError = e
-                return CompileResult.CodegenError(
-                    "JIT compile error in {module.name}: {cg_err.message}")
-
-    if compiled_modules.len() == 0:
+    if modules.len() == 0:
         return CompileResult.RuntimeError("No modules compiled")
 
-    val compiled = compiled_modules[compiled_modules.len() - 1]
-    match compiled.call("main", []):
+    # Each module is its own JIT module and `main` of the last one is the
+    # entry. Refuse the whole run when any module names a callee that cannot be
+    # bound before codegen (undefined Source, unknown origin, imported static).
+    # Runtime and Foreign imports are admitted by the provider at declaration,
+    # which happens only for the entry module: earlier modules are not compiled.
+    for module in modules:
+        val refusals = jit_module_extern_errors(module)
+        if refusals.len() > 0:
+            return CompileResult.CodegenError(
+                "JIT compile error in {module.name}: {refusals.join("; ")}")
+
+    val entry_module = modules[modules.len() - 1]
+    match cranelift_jit_run_main(entry_module):
         case Ok(result):
-            compiled.release_codegen_module()
             # Success carries `text?`; the JIT entry returns i64.
             val result_text: text = "{result}"
             CompileResult.Success(result_text)
-        case Err(e):
-            compiled.release_codegen_module()
-            val cg_err: CodegenError = e
-            CompileResult.RuntimeError(cg_err.message)
+        case Err(message):
+            CompileResult.CodegenError("JIT compile error in {entry_module.name}: {message}")
 
 fn _cranelift_execute_smf(smf_path: text) -> CompileResult:
     var pipeline = CodegenPipeline.jit()

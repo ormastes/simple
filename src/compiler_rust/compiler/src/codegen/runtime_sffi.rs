@@ -452,6 +452,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_array_set_text", &[I64, I64, I64], &[I8]),
     RuntimeFuncSpec::new("rt_array_pop", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_array_clear", &[I64], &[I8]),
+    RuntimeFuncSpec::new("rt_array_reserve", &[I64, I64], &[I8]),
     RuntimeFuncSpec::new("rt_transient_array_scope_begin", &[], &[I8]),
     RuntimeFuncSpec::new("rt_transient_array_scope_pause", &[], &[I8]),
     RuntimeFuncSpec::new("rt_transient_heap_promote", &[I64], &[I8]),
@@ -2668,6 +2669,15 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_text_validate_utf8", &[I64], &[I8]),
     RuntimeFuncSpec::new("rt_transient_array_scope_identity_v1", &[], &[I64]),
     RuntimeFuncSpec::new("rt_transient_array_scope_state_v1", &[], &[I64]),
+    // Caret JIT extern wave 2: scalar-ABI C runtime exports (int64_t/double/void only).
+    RuntimeFuncSpec::new("rt_alloc_probe_count_v1", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_alloc_probe_coverage_v1", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_alloc_probe_reset_v1", &[], &[]),
+    RuntimeFuncSpec::new("rt_mem_guard_stats", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_mem_harden_check_native", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_time_now_seconds", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_time_now_seconds_f64", &[], &[F64]),
+    RuntimeFuncSpec::new("rt_linux_group_stream_release_inherited_v2", &[], &[I64]),
 ];
 
 #[cfg(test)]

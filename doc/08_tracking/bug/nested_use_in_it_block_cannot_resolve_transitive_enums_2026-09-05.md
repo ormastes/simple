@@ -91,3 +91,22 @@ Fix lives in the module loader / import-resolution of the running engine
 (seed here; pure-Simple frontend parity unverifiable on this lane).
 **Grant:** seed-lane fix, with the spec's nested-use revert as the
 acceptance run.
+
+
+## Addendum 2026-11-13 (lane work/live-p3-l3-20261113 (worktree lp3-wt, base f790f7f266e = origin/release/1.0.0 tip, seed binary build-commit 46fe8f6b6def))
+
+State unchanged from the 2026-11-11 (ne17) addendum, which stands as the
+current evidence: single-level transitive enum resolution through a nested
+`use` now works; the deeper real import graph still fails through the
+nested-use path (surface symbol changed from enums to a transitive function as
+the module graph moved). Fix lives in the running engine's module loader /
+import resolution (seed here); the spec's hoist workaround must stay until then.
+Not attempted in this lane.
+
+## Triage 2026-11-13 (P3 tools lane)
+No code change this lane; the 2026-11-11 (lane ne17) addendum stands — the
+defect is LIVE with the surface symbol changed (`vhdl_kernel_accepts` not
+found), the mechanism is the running engine's module loader / import
+resolution (seed lane), and the hoist workaround must NOT be reverted. Fix
+grant belongs to the seed lane with the nested-use revert as acceptance.
+

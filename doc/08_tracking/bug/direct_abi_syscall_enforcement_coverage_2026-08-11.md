@@ -71,3 +71,10 @@ checklist.
 ## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
 
 **LIVE/out-of-lane (confirmed)** — runner2: none of the four required-resolution items shows completion evidence; item 4 (target QEMU trap-route proof) is un-provable from a Windows host interpreter lane. Handed back to the OS-kernel lane.
+
+
+---
+
+## 2026-11-13 triage (live-P3 lane l1, work/live-p3-l1-20261113, base f790f7f266e)
+
+**LIVE — out of lane (confirmed)** — None of the four required-resolution items shows completion evidence at this base; item 4 (target QEMU C/assembly trap-route proof) is un-provable from a Windows host interpreter lane. Handed back to the OS-kernel lane with the AC table as the checklist; the host-side unit specs under `test/01_unit/os/kernel/` remain its host-side evidence base.

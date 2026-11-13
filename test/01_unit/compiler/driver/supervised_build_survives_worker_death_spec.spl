@@ -23,8 +23,17 @@ use compiler.driver.driver_build.parallel.{
     ParallelBuilder, ParallelBuildConfig, parallel_supervised_argv,
     parallel_supervised_cmd}
 use compiler.driver.driver_build.build_outcome.{BuildOutcomeKind}
+use std.nogc_sync_mut.platform.{is_windows}
 
 extern fn rt_process_spawn_async(cmd: text, args: [text]) -> i64
+
+# Per-unit wall budget for the TIMEOUT example. It must sit well above the cost
+# of spawning the two-level `/bin/sh` wrapper for a trivial `true` unit and well
+# below the slow unit's `sleep 30`. POSIX sh starts in ~1 ms, so 300 ms; MSYS
+# sh on Windows was measured at 2-3 s per level (4-7 s for the wrapper) on
+# 2026-11-13, so a 300 ms budget killed the trivial unit too.
+fn timeout_example_budget_ms() -> i64:
+    if is_windows(): 20000 else: 300
 
 # The shell body each unit's child runs, keyed by the unit's "source path".
 #
@@ -100,7 +109,7 @@ describe "unstable build mode survives worker death":
 
     it "kills a unit that exceeds its budget and records TIMEOUT, not a failure":
         step("Verify: kills a unit that exceeds its budget and records TIMEOUT, not a failure")
-        val builder = ParallelBuilder.create(ParallelBuildConfig.unstable_mode(300))
+        val builder = ParallelBuilder.create(ParallelBuildConfig.unstable_mode(timeout_example_budget_ms()))
         builder.add_unit("slow.spl", [])
         builder.add_unit("after_slow.spl", [])
 

@@ -118,3 +118,15 @@ binary.
 ## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
 
 **LIVE (confirmed)** — ne17 re-confirmed verbatim on the fresh seed: via_var write still hits the copy, no error/warning. Both offered resolutions (alias semantics vs compile-time copy diagnostic) are language-semantics owner decisions needing a buildable self-hosted binary. Flat-array workaround in tui_view.spl remains the mitigation.
+
+
+## Addendum 2026-11-13 (lane work/live-p3-l3-20261113 (worktree lp3-wt, base f790f7f266e = origin/release/1.0.0 tip, seed binary build-commit 46fe8f6b6def))
+
+Re-verified LIVE verbatim on this base: the doc's probe prints
+`nested_direct=MUT / via_var_row=VIA_VAR outer=c / flat=FLAT` — the full
+discriminator table reproduces (chained index assign works, top-level index
+assign works, binding an inner array to a `var` copies and silently discards
+the write). No error, no warning. Unblock condition unchanged: mutate through
+the binding OR make it a compile-time error. Not attempted in this lane
+(language-semantics change in both engines; needs an owner decision per the
+record's prior-art note).

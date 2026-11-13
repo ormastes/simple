@@ -226,3 +226,9 @@ by both engines' entry points used by `test` and `run`.
 ## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
 
 **FIXED (confirmed)** — ne3 re-verified interpreter lane green (ints 11/11, foundation 6/6) and the JIT SIGSEGV gone on the refreshed seed (exit 0, s.len()=2).
+
+## 2026-11-13 resolution (P3 triage sweep, work/p3-triage-20261113) — row closed `fixed`
+
+Seed: scratchpad `vkinit/seed-fix`, runs capped `systemd-run MemoryMax=16G timeout 900`, cwd = this worktree at origin/release/1.0.0 `59caff4fd1b`.
+
+Evidence (live, this lane): `test/01_unit/lib/common/bytes/ints_spec.spl` executed=11 passed=11; `test/01_unit/lib/common/bytes/bytes_foundation_spec.spl` executed=6 passed=6. The doc's minimal `run` repro (`U16le.of(0xBEEF).store(b)` then `b.freeze()`) exits 0 and prints `s.len()=2`, bytes `b0=239 b1=190` (0xEF, 0xBE) — the mutation persists and there is no SIGSEGV.

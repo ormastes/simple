@@ -53,3 +53,13 @@ Public helpers (`src/lib/common/encoding/utf8.spl:252,262`) call externs `rt_tex
 the native extern return convention (`bool` vs raw int64, tagged vs raw count) mismatches, making
 `text_is_valid_utf8("a") and text_codepoint_len("a") == 1` false. Isolate under stage3 by printing each
 helper separately for "a"; the seed interpreter does not exercise the native extern ABI. Status stays open.
+
+
+---
+## 2026-11-13 triage — lane live-p3-l6 (Windows host, seed bin/simple.exe, base f790f7f266e)
+
+Concur with the 2026-11-04 disposition: the extern-return-convention hypothesis
+(`bool`/tagged vs raw int64 for `rt_text_validate_utf8` /
+`rt_text_count_codepoints_cached`) needs stage3 native isolation to prove; the
+seed interpreter does not exercise the native extern ABI, and this lane has no
+admitted self-hosted native compiler. No in-lane change.

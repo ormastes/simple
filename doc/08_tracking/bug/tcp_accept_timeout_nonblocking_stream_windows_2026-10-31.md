@@ -53,3 +53,19 @@ fixture with source-matched admitted producers/providers, then run the DevHub
 emulator request/idle-exit regression. These checks are unrun; keep the bug in
 `waiting_verify`, not fixed/done. A source review or authored test is not Windows
 execution evidence.
+
+## Fix (2026-11-13) — hosted regression spec misused `listen` (lane n3)
+
+`hosted_tcp_boundary_spec.spl` was 2/3 on the Windows seed: the accept-timeout
+example (this bug's regression) PASSED; "exchanges loopback text" failed with
+`force unwrap failed ... Option::None` at line 85 (`address!`). Cause: it called
+`sosix_tcp_listen` on the handle returned by `sosix_tcp_bind`, which is already
+a listening socket (canonical provider contract, see `rt_io_tcp_bind` in
+`runtime_native.c`). The seed's Rust provider answers `false` for `listen` on a
+non-RawSocket entry, so the spec closed its own listener and `local_addr` was
+None. Not Windows-specific and not a runtime defect. The example now uses the
+documented pre-listen path `sosix_tcp_socket_create(0)` + `sosix_tcp_bind_fd` +
+`sosix_tcp_listen`. Result on the Windows seed:
+`bin/simple test test/02_integration/lib/sosix/hosted_tcp_boundary_spec.spl`
+-> `passed=3 failed=0`. The direct Win64 native fixture and the DevHub emulator
+regression are still unrun (they need a native build).

@@ -29,6 +29,8 @@
 use std.common.trace.observer_contract_v1.*
 use std.common.trace.observer_native_map_v1.*
 use std.common.trace.xray_native_map_format_v1.*
+use std.common.binary_io.{bytes_read_le_at}
+use std.common.elf.elf_image_v1.{elf_image_section_by_name_v1, elf_image_first_load_vaddr_v1}
 use std.nogc_sync_mut.trace.xray_native_sled_leaf_v1.{XrayNativeDispatchPortV1, XrayNativeSledLeafV1}
 
 extern fn rt_file_read_text(path: text) -> text?
@@ -124,46 +126,6 @@ pub fn xray_proc_maps_line_v1(line: text) -> XrayProcMappingV1?:
     Some(XrayProcMappingV1(start: start, end: end, readable: perms[0] == "r",
         writable: perms[1] == "w", executable: perms[2] == "x", offset: offset, path: path))
 
-fn xray_le_v1(bytes: [u8], offset: i64, width: i64) -> i64:
-    var value = 0
-    for index in 0..width:
-        value = value | ((bytes[offset + index] as i64) << (index * 8))
-    value
-
-# (sh_addr, sh_size) of the named section of an ELF64 little-endian file.
-pub fn xray_elf_section_v1(elf: [u8], name: text) -> (i64, i64)?:
-    if elf.len() < 64 or elf[0] != 127u8 or elf[4] != 2u8 or elf[5] != 1u8: return None
-    val shoff = xray_le_v1(elf, 40, 8)
-    val shentsize = xray_le_v1(elf, 58, 2)
-    val shnum = xray_le_v1(elf, 60, 2)
-    val shstrndx = xray_le_v1(elf, 62, 2)
-    if shentsize != 64 or shoff <= 0 or shoff + shnum * 64 > elf.len() or shstrndx >= shnum: return None
-    val strtab = xray_le_v1(elf, shoff + shstrndx * 64 + 24, 8)
-    val wanted = name.bytes()
-    for index in 0..shnum:
-        val header = shoff + index * 64
-        val at = strtab + xray_le_v1(elf, header, 4)
-        if at + wanted.len() >= elf.len(): continue
-        var same = elf[at + wanted.len()] == 0u8
-        for k in 0..wanted.len():
-            if elf[at + k] != wanted[k]: same = false
-        if same:
-            return Some((xray_le_v1(elf, header + 16, 8), xray_le_v1(elf, header + 32, 8)))
-    None
-
-# p_vaddr of the PT_LOAD segment that maps file offset 0.
-pub fn xray_elf_first_load_vaddr_v1(elf: [u8]) -> i64?:
-    if elf.len() < 64: return None
-    val phoff = xray_le_v1(elf, 32, 8)
-    val phentsize = xray_le_v1(elf, 54, 2)
-    val phnum = xray_le_v1(elf, 56, 2)
-    if phentsize != 56 or phoff <= 0 or phoff + phnum * 56 > elf.len(): return None
-    for index in 0..phnum:
-        val header = phoff + index * 56
-        if xray_le_v1(elf, header, 4) == 1 and xray_le_v1(elf, header + 8, 8) == 0:
-            return Some(xray_le_v1(elf, header + 16, 8))
-    None
-
 # Signed BL target of the instruction word `word` located at `at`.
 pub fn xray_a64_bl_target_v1(at: i64, word: i64) -> i64?:
     if (word & 0xFC000000) != 0x94000000: return None
@@ -188,7 +150,7 @@ fn xray_read_bytes_v1(address: i64, length: i64) -> [u8]:
 
 fn xray_read_u32_v1(address: i64) -> i64:
     val bytes = xray_read_bytes_v1(address, 4)
-    xray_le_v1(bytes, 0, 4)
+    bytes_read_le_at(bytes, 0, 4) as i64
 
 fn xray_mapping_containing_v1(mappings: [XrayProcMappingV1], address: i64, length: i64) -> XrayProcMappingV1?:
     for mapping in mappings:
@@ -230,10 +192,12 @@ pub fn xray_native_locate_module_v1(path: text, module_instance: u64, page_size:
         case Some(mapping): mapping
         case None: return Err(TraceFailureV1.InstrumentationAbsent)
     val elf = rt_file_read_bytes(path) ?? []
-    val (section_addr, section_size) = match xray_elf_section_v1(elf, ".simple_xray_map"):
+    val map_section = match elf_image_section_by_name_v1(elf, ".simple_xray_map"):
         case Some(found): found
         case None: return Err(TraceFailureV1.InstrumentationAbsent)
-    val first_vaddr = match xray_elf_first_load_vaddr_v1(elf):
+    val section_addr = map_section.sh_addr
+    val section_size = map_section.sh_size
+    val first_vaddr = match elf_image_first_load_vaddr_v1(elf):
         case Some(vaddr): vaddr
         case None: return Err(TraceFailureV1.InvalidMap)
     val bias = first.start - (first_vaddr - (first_vaddr % page_size))

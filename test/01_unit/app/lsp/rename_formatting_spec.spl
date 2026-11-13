@@ -6,7 +6,7 @@ use std.common.json.parser.{json_parse}
 use std.common.json.object_ops.{json_object_get, json_object_keys}
 use std.common.json.array_ops.{json_array_get, json_array_length}
 use std.common.json.types.{json_get_type, json_to_number, json_to_string}
-use std.nogc_sync_mut.lsp.lsp_handlers.{lsp_handle_rename, lsp_handle_formatting, lsp_handle_initialize, lsp_rename_edit_width_v1}
+use std.nogc_sync_mut.lsp.lsp_handlers.{lsp_handle_rename, lsp_handle_prepare_rename, lsp_handle_formatting, lsp_handle_initialize, lsp_rename_edit_width_v1}
 
 fn rf_result_v1(reply: text) -> any:
     val response = json_parse(reply)
@@ -50,6 +50,38 @@ describe "LSP rename and formatting":
             val e = json_to_number(json_object_get(json_object_get(range, "end"), "character"))
             expect(e - s).to_equal(12.0)
             i = i + 1
+
+    # @req REQ-LSP-RENAME-001
+    it "answers prepareRename with the identifier range at the cursor":
+        step("Prepare-rename a function reference")
+        val root = secure_temp_dir("/tmp", "simple-lsp-prepare-rename-v1-").unwrap()
+        val path = root + "/fixture.spl"
+        val source = "fn rf_target_v1(v: i64) -> i64:\n    v\n\nfn rf_user_v1() -> i64:\n    rf_target_v1(1)\n"
+        expect(file_write(path, source)).to_equal(true)
+        # Cursor inside the call at line 4 (0-based), which starts at character 4.
+        val body = "{\"textDocument\":{\"uri\":\"file://{path}\"},\"position\":{\"line\":4,\"character\":8}}"
+        val reply = lsp_handle_prepare_rename("8", body)
+        dir_remove_all(root)
+        val result = rf_result_v1(reply)
+        expect(json_get_type(result)).to_equal("object")
+        expect(json_to_string(json_object_get(result, "placeholder"))).to_equal("rf_target_v1")
+        val range = json_object_get(result, "range")
+        val s = json_to_number(json_object_get(json_object_get(range, "start"), "character"))
+        val e = json_to_number(json_object_get(json_object_get(range, "end"), "character"))
+        expect(e - s).to_equal(12.0)
+
+    # @req REQ-LSP-RENAME-001
+    it "answers prepareRename with null on a non-identifier position":
+        step("Prepare-rename a whitespace position")
+        val root = secure_temp_dir("/tmp", "simple-lsp-prepare-rename-nil-v1-").unwrap()
+        val path = root + "/fixture.spl"
+        val source = "fn rf_target_v1(v: i64) -> i64:\n    v\n"
+        expect(file_write(path, source)).to_equal(true)
+        # Line 1 (0-based) is "    v"; character 0 is indentation whitespace.
+        val body = "{\"textDocument\":{\"uri\":\"file://{path}\"},\"position\":{\"line\":1,\"character\":0}}"
+        val reply = lsp_handle_prepare_rename("9", body)
+        dir_remove_all(root)
+        expect(json_get_type(rf_result_v1(reply))).to_equal("null")
 
     # @req REQ-LSP-FORMAT-001
     it "returns a whole-document TextEdit with the formatter output":

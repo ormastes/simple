@@ -98,3 +98,16 @@ four spec workarounds as this doc's unblock condition requires.
 ## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
 
 **LIVE (confirmed)** — ne15 re-verified: chained form still fails, bound-intermediate control still passes. Chain-result type leaks into the receiver slot in seed/self-hosted inference; seed-rebuild grant recorded. The four workaround specs must keep their binds.
+
+
+## Addendum 2026-11-13 (lane work/live-p3-l3-20261113 (worktree lp3-wt, base f790f7f266e = origin/release/1.0.0 tip, seed binary build-commit 46fe8f6b6def))
+
+Re-verified LIVE verbatim on this base with the 2026-11-11 addendum's
+self-contained ReplyStore repro: the chained form
+(`expect(replies.allocate_id()).to_equal(-1)` nested in `expect`, then
+`replies.remove(...)`, then `expect(replies.allocate_id() > reply_id).to_equal(true)`)
+fails 1/1, while the bound-intermediate control (each `allocate_id()` result
+bound to a `val` first) passes on the same binary in the same session. The
+receiver-poison mechanism is unchanged. Fix path remains the record's: seed /
+self-hosted type-inference (chain-result type leaking into the receiver slot)
+plus seed rebuild; not attempted in this lane.

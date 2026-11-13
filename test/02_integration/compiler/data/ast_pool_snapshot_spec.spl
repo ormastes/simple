@@ -1,0 +1,153 @@
+# @cover src/compiler/10.frontend/snapshot/ast_pool_snapshot_v1.spl 80%
+# @timeout_secs 900
+"""
+## Purpose and audience
+Node-storage phase C (AST): a module's parsed AST is retained as one compact,
+position-independent pool snapshot (the packed `.spab` bytes, in memory) and a
+`ParserModule` is materialised from it right before HIR lowering. Readers are
+the storage owners and the driver owners adopting the `compiler.ast` rule.
+Design: doc/05_design/compiler/data/node_tree_storage.md section 7.1.
+Category: Infrastructure.
+## Operator workflow
+systemd-run --user --scope -p MemoryMax=8G bin/simple test test/02_integration/compiler/data/ast_pool_snapshot_spec.spl
+Each round-trip example prints one SNAPSHOT line per module (bytes per node,
+parse / encode / materialise microseconds).
+## Compatibility and limitations
+Interpreter lane. The default stays the boxed tree; the snapshot is selected
+only by a `compiler.ast` Layout rule (`column`).
+## Verification guidance and troubleshooting
+Equality is HIR codec byte-equality between the materialised module and the
+production front-end cache hit of the same parse (`build_module_from_flat_pool_blob`
+over the captured line blob), plus pool re-dump equality after materialisation
+and the fresh parse's function set. The fresh in-process boxed tree is NOT the
+oracle: it carries bogus offsets for some nodes that every cache hit gets right
+(doc/08_tracking/bug/fresh_parse_vs_cache_hit_span_divergence_2026-11-13.md).
+"""
+# Lifecycle: doc/05_design/compiler/data/node_tree_storage.md
+# @manual_section: AST pool snapshot
+
+use std.spec.*
+use std.nogc_sync_mut.io.file_ops.{file_read}
+use compiler.frontend.parser_types.{ParserModule}
+use compiler.frontend.flat_ast_bridge.{flat_pools_dump_all, flat_pools_clear_chunks_v1, flat_pool_capture_arm,
+    flat_pool_capture_take, parse_and_build_module_scoped, build_module_from_flat_pool_blob}
+use compiler.frontend.core.flat_pool_packed_v1.{flat_packed_decode_lines_v1}
+use compiler.frontend.snapshot.ast_pool_snapshot_v1.{AstTreeStorageV1, AstPoolSnapshotV1, AstPoolSnapshotStoreV1,
+    ast_tree_storage_code_v1, ast_tree_storage_resolve_v1, ast_tree_storage_from_sdn_v1,
+    ast_pool_snapshot_parse_v1, ast_pool_snapshot_materialise_v1,
+    ast_snapshot_store_new_v1, ast_snapshot_store_publish_v1, ast_snapshot_store_get_v1,
+    ast_snapshot_store_await_v1, ast_snapshot_cell_key_v1}
+use compiler.common.data.data_schema_contracts.{DataPolicyKindV1, DataRuleSpecificityV1, DataRuleStrengthV1,
+    DataDeclOriginV1, data_policy_rule_v1, data_decl_provenance_v1}
+use compiler.common.data.node_lifecycle_contracts.{phase_await_outcome_code_v1, phase_await_value_v1}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_codec.{hir_module_encode}
+
+use std.nogc_sync_mut.io_runtime.{time_now_unix_micros}
+
+val ROUNDTRIP_MODULES: [text] = [
+    "src/compiler/20.hir/hir_lowering/attr_access_sites.spl",
+    "src/lib/common/text_bytes.spl",
+    "src/compiler/00.common/data/data_schema_resolver.spl"]
+
+fn hir_blob(module: ParserModule, path: text) -> text:
+    var lowering = HirLowering.with_filename(path)
+    hir_module_encode(lowering.lower_module(module))
+
+# HIR of the production cache-hit restore of one fresh parse (the oracle).
+fn cache_hit_hir(path: text) -> text:
+    val source = file_read(path)
+    flat_pool_capture_arm()
+    val _fresh = parse_and_build_module_scoped(source, path, false)
+    val lines = flat_pool_capture_take()
+    match build_module_from_flat_pool_blob(lines, source, path):
+        case Some(hit): hir_blob(hit, path)
+        case None: panic("line-blob cache hit failed for {path}")
+
+fn sdn_rule(choice: text, tree: text) -> text:
+    "data_policy:\n  rules:\n    ast_storage:\n      module: \"" + tree + "\"\n      layout: " + choice + "\n      pin: true\n"
+
+fn source_tag(subject: text) -> [DataPolicyRuleV1]:
+    val at = data_decl_provenance_v1(DataDeclOriginV1.Spl, "spec.spl", 1, "spec")
+    [data_policy_rule_v1(DataPolicyKindV1.Layout, subject, DataRuleSpecificityV1.OwningType,
+        DataRuleStrengthV1.Hint, "column", false, at)]
+
+fn snapshot_of(path: text) -> (ParserModule, AstPoolSnapshotV1):
+    val source = file_read(path)
+    match ast_pool_snapshot_parse_v1(source, path, path):
+        case Ok(pair): pair
+        case Err(e): panic("snapshot parse failed for {path}: {e}")
+
+describe "AST pool snapshot (node storage phase C)":
+    it "keeps the boxed tree by default and selects the snapshot only through a compiler.ast rule":
+        step("No rule: boxed tree, from the versioned default")
+        expect(ast_tree_storage_code_v1(ast_tree_storage_resolve_v1([]).unwrap())).to_equal(1)
+        step("SDN module rule for compiler.ast, layout column: pool snapshot")
+        val snap_mode = ast_tree_storage_from_sdn_v1(sdn_rule("column", "compiler.ast"), "build.sdn").unwrap()
+        expect(ast_tree_storage_code_v1(snap_mode)).to_equal(2)
+        step("The narrow site row (the recommended key) selects only the module storage")
+        val site_rule = "data_policy:\n  rules:\n    ast_storage:\n      site: \"compiler.ast.Module.nodes\"\n      layout: column\n      pin: true\n"
+        expect(ast_tree_storage_code_v1(ast_tree_storage_from_sdn_v1(site_rule, "build.sdn").unwrap())).to_equal(2)
+        step("A rule for another tree does not apply")
+        val other = ast_tree_storage_from_sdn_v1(sdn_rule("column", "compiler.hir"), "build.sdn").unwrap()
+        expect(ast_tree_storage_code_v1(other)).to_equal(1)
+        step("A source class tag on the module view selects the snapshot too")
+        expect(ast_tree_storage_code_v1(ast_tree_storage_resolve_v1(source_tag("compiler.ast.Module")).unwrap())).to_equal(2)
+        step("An unsupported mechanism is an error naming the token, never a silent default")
+        val bad = ast_tree_storage_from_sdn_v1(sdn_rule("sparse_hash", "compiler.ast"), "build.sdn")
+        expect(bad.is_err()).to_equal(true)
+        expect(bad.unwrap_err().contains("sparse_hash")).to_equal(true)
+
+    it "materialises a ParserModule whose HIR equals the cache-hit restore on real compiler files":
+        for path in ROUNDTRIP_MODULES:
+            val oracle_hir = cache_hit_hir(path)
+            val (fresh, snap) = snapshot_of(path)
+            expect(snap.node_count > 0).to_equal(true)
+            expect(snap.bytes.len() > 0).to_equal(true)
+            expect(snap.digest.len()).to_equal(64)
+            val t0 = time_now_unix_micros()
+            val built = ast_pool_snapshot_materialise_v1(snap)
+            val materialise_us = time_now_unix_micros() - t0
+            expect(built.is_ok()).to_equal(true)
+            step("The pools restored from the snapshot re-dump to the snapshot's own lines")
+            expect(flat_pools_dump_all()).to_equal(flat_packed_decode_lines_v1(snap.bytes, flat_pools_clear_chunks_v1()))
+            val module = built.unwrap()
+            expect(module.functions.len()).to_equal(fresh.functions.len())
+            expect(hir_blob(module, path)).to_equal(oracle_hir)
+            print "SNAPSHOT path={path} nodes={snap.node_count} bytes={snap.bytes.len()} bytes_per_node={snap.bytes.len() / snap.node_count} parse_us={snap.parse_us} encode_us={snap.encode_us} materialise_us={materialise_us}"
+
+    it "keeps a materialised module self-contained after another snapshot is materialised":
+        val path_a = ROUNDTRIP_MODULES[0]
+        val path_b = ROUNDTRIP_MODULES[1]
+        val oracle_a_hir = cache_hit_hir(path_a)
+        val (_fresh_a, snap_a) = snapshot_of(path_a)
+        val (_fresh_b, snap_b) = snapshot_of(path_b)
+        val module_a = ast_pool_snapshot_materialise_v1(snap_a).unwrap()
+        val _module_b = ast_pool_snapshot_materialise_v1(snap_b).unwrap()
+        expect(hir_blob(module_a, path_a)).to_equal(oracle_a_hir)
+
+    it "refuses to materialise a snapshot over different source text":
+        val (_fresh, snap) = snapshot_of(ROUNDTRIP_MODULES[1])
+        val tampered = AstPoolSnapshotV1(module: snap.module, path: snap.path, source: snap.source + "\n# edit\n",
+            source_key: snap.source_key, bytes: snap.bytes, node_count: snap.node_count, digest: snap.digest,
+            parse_us: snap.parse_us, encode_us: snap.encode_us)
+        val refused = ast_pool_snapshot_materialise_v1(tampered)
+        expect(refused.is_err()).to_equal(true)
+        expect(refused.unwrap_err().contains("source")).to_equal(true)
+
+    it "publishes each module's snapshot once through a write-once phase cell":
+        val (_fresh, snap) = snapshot_of(ROUNDTRIP_MODULES[1])
+        val store = ast_snapshot_store_new_v1()
+        expect(ast_snapshot_store_get_v1(store, snap.module).is_err()).to_equal(true)
+        val published = ast_snapshot_store_publish_v1(store, snap).unwrap()
+        step("A second publish is refused and the first snapshot stays")
+        val again = ast_snapshot_store_publish_v1(published, snap)
+        expect(again.is_err()).to_equal(true)
+        expect(again.unwrap_err().contains("already published")).to_equal(true)
+        expect(ast_snapshot_store_get_v1(published, snap.module).unwrap().digest).to_equal(snap.digest)
+        step("A HIR consumer awaiting the module reads the frozen digest")
+        val (_after, outcome) = ast_snapshot_store_await_v1(published, "hir:" + snap.module, snap.module).unwrap()
+        expect(phase_await_outcome_code_v1(outcome)).to_equal(2)
+        expect(phase_await_value_v1(outcome)).to_equal(snap.digest)
+        expect(ast_snapshot_cell_key_v1(snap.module)).to_equal("ast:" + snap.module)

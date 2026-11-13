@@ -112,3 +112,13 @@ specs pass — `unsafe_call_argument_parser_spec` 8/8,
 `unsafe_block_expression_spec` 5/5, `unsafe_block_binding_type_spec` 3/3.
 Residual from the comp9 addendum stands: native/JIT zero-cost evidence remains
 lane-gated. Status header should read FIXED.
+
+
+---
+## 2026-11-13 triage — lane live-p3-l6 (Windows host, seed bin/simple.exe, base f790f7f266e)
+
+Independently verified FIXED at tip: `val h = unsafe(capabilities: [ffi]): 7`
+parses and all three pinning specs pass on the seed —
+`unsafe_call_argument_parser_spec` 8/8, `unsafe_block_expression_spec` 5/5,
+`unsafe_block_binding_type_spec` 3/3. The status header should read FIXED.
+No in-lane change.

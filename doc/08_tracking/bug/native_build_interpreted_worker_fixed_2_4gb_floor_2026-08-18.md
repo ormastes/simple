@@ -261,3 +261,14 @@ lane: compiled worker = bootstrap redesign; retention census = seed-fix lane
 ## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
 
 **LIVE (confirmed)** — boot6/int10/int11: measured, not fixed; worker spawn shape (interpreted run of native_build_worker.spl) and process-lifetime module-cache retention unchanged at this base. Owners: seed-fix lane (retention census + cargo rebuild grant) / bootstrap redesign (compiled worker).
+
+
+## Addendum 2026-11-13 (lane work/live-p3-l3-20261113 (worktree lp3-wt, base f790f7f266e = origin/release/1.0.0 tip, seed binary build-commit 46fe8f6b6def))
+
+Source re-check at this base: the interpreted-worker spawn shape
+(`native-build` spawns `bin/simple run src/app/cli/native_build_worker.spl`,
+so the pure-Simple compiler closure is materialised interpreted) and the
+process-lifetime module-cache retention design are unchanged. No new
+measurement: the record's owner split stands (seed-fix lane for the retention
+census + rebuild grant; bootstrap redesign for a compiled worker). Out of scope
+for a bounded P3 lane; not attempted.

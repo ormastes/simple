@@ -267,3 +267,7 @@ follow-up worth its own bug; it does not affect this row's build-output
 residency fix. No new spec run this lane — the gate files are byte-identical
 to the recorded 2026-11-09 Linux PASS state, and re-running a green check is
 forbidden.
+
+## Triage 2026-11-13 (P3 tools lane)
+No code change this lane; FIXED (2026-11-11, lane boot16) per the record
+header. Verdict trusted, not re-run.

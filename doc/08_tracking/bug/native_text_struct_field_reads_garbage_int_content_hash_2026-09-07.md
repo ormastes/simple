@@ -228,3 +228,14 @@ Linux host with the release seed (documented as "a few seconds once cached").
 ## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
 
 **blocked (confirmed)** — ne17: both reduced write-side probes (method-chain initializer; if-val extern-optional unwrap + named-field ctor) are byte-identical natively vs interpreted on the fresh seed; the doc's exact full-closure repro exceeded 280s here and was not retried. Defect, if live, needs the FileFingerprint closure on a Linux host; Rust-seed codegen lane may not rebuild the seed.
+
+
+## Addendum 2026-11-13 (lane work/live-p3-l3-20261113 (worktree lp3-wt, base f790f7f266e = origin/release/1.0.0 tip, seed binary build-commit 46fe8f6b6def))
+
+No new evidence this lane. The record's own warning is maintained: the
+predecessor's `resolve_global_field_info` location was instrumentation-refuted
+for this reproducer — do not re-apply it without new evidence. A Windows
+cranelift re-probe of `FileFingerprint.content_hash` was not attempted (heavy
+`--source src/compiler --source src/lib` closure build, and a re-probe alone
+would not localise the still-unknown corruption source). Stays OPEN as an
+investigation record.

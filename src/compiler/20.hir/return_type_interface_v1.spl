@@ -509,10 +509,14 @@ class ReturnTypeInterfaceTable:
     rows_by_key: Dict<text, text>
     # "<defining module>#<import alias>" -> declared name ("" = conflicting).
     aliases: Dict<text, text>
+    # Bumped by every store into the three dicts above. An unchanged epoch
+    # across a MIR module's transient scope proves the table holds no value
+    # that scope allocated, so the scope need not re-walk the whole table.
+    mutation_epoch: i64
 
 impl ReturnTypeInterfaceTable:
     static fn new() -> ReturnTypeInterfaceTable:
-        ReturnTypeInterfaceTable(rows_by_module: {}, rows_by_key: {}, aliases: {})
+        ReturnTypeInterfaceTable(rows_by_module: {}, rows_by_key: {}, aliases: {}, mutation_epoch: 0)
 
     fn row_at(decl: DeclRef) -> ReturnTypeRow?:
         # `.get()` not `[k]`: native bracket-read of a class-field Dict returns corrupt data
@@ -545,6 +549,7 @@ impl ReturnTypeInterfaceTable:
         rows[row.decl.decl_id] = row
         self.rows_by_module[module_id] = rows
         self.rows_by_key[key_text] = owned
+        self.mutation_epoch = self.mutation_epoch + 1
         Ok(1)
 
     me register_rows(rows: [ReturnTypeRow]) -> Result<i64, RtiError>:
@@ -581,8 +586,10 @@ impl ReturnTypeInterfaceTable:
         if val prior = self.aliases.get(key):
             if prior != name:
                 self.aliases[key] = ""
+                self.mutation_epoch = self.mutation_epoch + 1
                 return
         self.aliases[key] = name
+        self.mutation_epoch = self.mutation_epoch + 1
 
     me register_hir_module(module: HirModule) -> Result<RtiRowsV1, RtiError>:
         self.register_import_aliases(module)

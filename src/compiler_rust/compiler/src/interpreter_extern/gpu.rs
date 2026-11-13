@@ -298,6 +298,8 @@ mod cuda_dlopen {
     type CuMemcpyHtoDAsync = unsafe extern "C" fn(u64, *const c_void, usize, *mut c_void) -> i32;
     type CuMemcpyDtoHAsync = unsafe extern "C" fn(*mut c_void, u64, usize, *mut c_void) -> i32;
     type CuDeviceGetCount = unsafe extern "C" fn(*mut i32) -> i32;
+    // CUdevice_attribute values: 75 = COMPUTE_CAPABILITY_MAJOR, 76 = MINOR.
+    type CuDeviceGetAttribute = unsafe extern "C" fn(*mut i32, i32, i32) -> i32;
     type CuModuleLoadData = unsafe extern "C" fn(*mut *mut c_void, *const c_void) -> i32;
     type CuModuleUnload = unsafe extern "C" fn(*mut c_void) -> i32;
     type CuModuleGetFunction = unsafe extern "C" fn(*mut *mut c_void, *mut c_void, *const std::os::raw::c_char) -> i32;
@@ -321,6 +323,9 @@ mod cuda_dlopen {
         pub device_get_uuid: CuDeviceGetUuid,
         pub device_get_name: CuDeviceGetName,
         pub device_get_count: CuDeviceGetCount,
+        // Optional: a driver without cuDeviceGetAttribute must not invalidate
+        // the whole table (capability callers surface a negative rc instead).
+        pub device_get_attribute: Option<CuDeviceGetAttribute>,
         pub ctx_create: CuCtxCreate,
         pub ctx_set_current: CuCtxSetCurrent,
         pub ctx_destroy: CuCtxDestroy,
@@ -480,6 +485,7 @@ mod cuda_dlopen {
             device_get_uuid: sym_alt!("cuDeviceGetUuid_v2", "cuDeviceGetUuid"),
             device_get_name: sym!("cuDeviceGetName"),
             device_get_count: sym!("cuDeviceGetCount"),
+            device_get_attribute: sym_opt!("cuDeviceGetAttribute"),
             ctx_create: sym!("cuCtxCreate_v2"),
             ctx_set_current: sym!("cuCtxSetCurrent"),
             ctx_destroy: sym!("cuCtxDestroy_v2"),
@@ -1387,7 +1393,23 @@ pub fn rt_cuda_device_compute_capability_fn(args: &[Value]) -> Result<Value, Com
     }
     #[cfg(not(feature = "cuda"))]
     {
-        Ok(Value::Int(-3))
+        // Reach the real driver through dlopen like the sibling device
+        // externs; the -3 build sentinel must survive only where no driver
+        // path exists, and a host with a working driver must report its
+        // packed capability (major*10+minor, e.g. 86 for sm_86).
+        if let Some(fns) = get_cuda_dl() {
+            if let Some(get_attr) = fns.device_get_attribute {
+                let mut major = 0i32;
+                let mut minor = 0i32;
+                let r_major = unsafe { get_attr(&mut major, 75, device as i32) };
+                let r_minor = unsafe { get_attr(&mut minor, 76, device as i32) };
+                if r_major == 0 && r_minor == 0 {
+                    return Ok(Value::Int((major * 10 + minor) as i64));
+                }
+                return Ok(Value::Int(if r_major != 0 { r_major } else { r_minor } as i64));
+            }
+        }
+        Ok(Value::Int(-1))
     }
 }
 

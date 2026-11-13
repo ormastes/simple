@@ -123,3 +123,10 @@ tracker. No change made.
 ## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
 
 **SUPERSEDED (confirmed)** — Sub-issue (a) fixed at tip; sub-issue (b) provider composition remains an explicit open TODO tracked by `stage4_full_cli_unlinkable_579_unresolved_runtime_symbols_2026-09-01.md` (present in tree, rt2 spot-checked the three providers live in runtime_native.c).
+
+
+---
+
+## 2026-11-13 triage (live-P3 lane l1, work/live-p3-l1-20261113, base f790f7f266e)
+
+**SUPERSEDED (confirmed)** — All three sub-issue-(b) providers live at this base (`rt_array_concat` `src/runtime/runtime_native.c:11220`; `spl_dlsym`/`spl_wffi_call_i64` per prior lanes); superseding tracker `stage4_full_cli_unlinkable_579_unresolved_runtime_symbols_2026-09-01.md` in-tree. No `src/runtime` gap on this side of the boundary.

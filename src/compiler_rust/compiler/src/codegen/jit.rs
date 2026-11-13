@@ -67,8 +67,7 @@ impl JitCompiler {
         let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
 
         // Register runtime SFFI symbols from the provider
-        register_runtime_symbols_from_provider(&mut builder, provider.as_ref());
-        register_compiler_owned_symbols(&mut builder);
+        register_seed_jit_runtime_symbols(&mut builder, &seed_jit_runtime_symbol_table(provider.as_ref()));
 
         let module = JITModule::new(builder);
         let backend = CodegenBackend::with_module(module)?;
@@ -724,20 +723,37 @@ impl Default for JitCompiler {
     }
 }
 
-/// Register runtime SFFI function symbols with the JIT builder from a provider.
+/// The runtime symbol table every seed JIT builder registers: each runtime SFFI
+/// symbol the provider (static or dynamic) or the ELF fallback resolves, then
+/// the compiler-owned symbols, as `(name, address)` pairs.
 ///
-/// This allows the JIT to resolve external function calls to runtime SFFI functions
-/// like print, array operations, etc. The symbols are obtained from the provider,
-/// which can be static (compiled-in) or dynamic (loaded from shared library).
-fn register_runtime_symbols_from_provider(builder: &mut JITBuilder, provider: &dyn RuntimeSymbolProvider) {
+/// This is the ONE source for both JIT builders in the seed: `JitCompiler`
+/// (the seed's own JIT) and the `rt_cranelift_*` provider that pure-Simple
+/// code drives (`cranelift_sffi::rt_cranelift_new_module_impl`). Signatures
+/// for these names come from `runtime_sffi::RUNTIME_FUNCS`.
+pub(crate) fn seed_jit_runtime_symbol_table(provider: &dyn RuntimeSymbolProvider) -> Vec<(&'static str, *const u8)> {
     use simple_native_loader::RUNTIME_SYMBOL_NAMES;
 
+    let mut table = Vec::with_capacity(RUNTIME_SYMBOL_NAMES.len() + COMPILER_OWNED_RUNTIME_SYMBOLS.len());
     for &name in RUNTIME_SYMBOL_NAMES {
         if let Some(ptr) = provider.get_symbol(name) {
-            builder.symbol(name, ptr);
+            table.push((name, ptr));
         } else if let Some(addr) = crate::elf_utils::resolve_runtime_symbol(name) {
-            builder.symbol(name, addr as *const u8);
+            table.push((name, addr as *const u8));
         }
+    }
+    for &name in COMPILER_OWNED_RUNTIME_SYMBOLS {
+        if let Some(ptr) = compiler_owned_symbol(name) {
+            table.push((name, ptr));
+        }
+    }
+    table
+}
+
+/// Register a [`seed_jit_runtime_symbol_table`] with a `JITBuilder`.
+pub(crate) fn register_seed_jit_runtime_symbols(builder: &mut JITBuilder, table: &[(&'static str, *const u8)]) {
+    for &(name, ptr) in table {
+        builder.symbol(name, ptr);
     }
 }
 
@@ -766,16 +782,6 @@ fn compiler_owned_symbol(name: &str) -> Option<*const u8> {
 /// The names `compiler_owned_symbol` answers for. Kept beside it so a test can
 /// assert the two agree and neither can silently empty out.
 pub const COMPILER_OWNED_RUNTIME_SYMBOLS: &[&str] = &["rt_native_build"];
-
-/// Publish [`COMPILER_OWNED_RUNTIME_SYMBOLS`] to a `JITBuilder`, mirroring what
-/// `register_runtime_symbols_from_provider` does for the runtime-owned set.
-fn register_compiler_owned_symbols(builder: &mut JITBuilder) {
-    for &name in COMPILER_OWNED_RUNTIME_SYMBOLS {
-        if let Some(ptr) = compiler_owned_symbol(name) {
-            builder.symbol(name, ptr);
-        }
-    }
-}
 
 /// True if `name` is resolvable purely through the compiler-owned table.
 /// Exposed so the regression gate can check the same predicate the JIT uses.
@@ -817,7 +823,7 @@ fn jit_fallback_is_strict_for(strict: bool, strict_all: bool) -> bool {
 }
 
 #[cfg(not(windows))]
-fn dlsym_resolves(name: &str) -> bool {
+pub(crate) fn dlsym_resolves(name: &str) -> bool {
     let Ok(c_name) = std::ffi::CString::new(name) else {
         return false;
     };
@@ -828,7 +834,7 @@ fn dlsym_resolves(name: &str) -> bool {
 }
 
 #[cfg(windows)]
-fn dlsym_resolves(name: &str) -> bool {
+pub(crate) fn dlsym_resolves(name: &str) -> bool {
     // Mirror cranelift-jit's own Windows fallback resolver exactly
     // (vendor `cranelift-jit-0.116.1/src/backend.rs::lookup_with_dlsym`):
     // `GetProcAddress` against the running executable image, then against

@@ -1,8 +1,7 @@
 # Hosted browser render-session revision counters never increment
 
 Date: 2026-08-19
-Status: OPEN — LIVE (2026-11-11, P3 lane ne2): counter wire-up now present in lib code, but this row's
-own specs cannot load on the current seed (nested-call semantic error in the hosted-worker import graph)
+Status: FIXED (2026-11-13, lane p3-browserrev) — see "Resolution" at the end
 Found by: `test/05_perf/browser/hosted_browser_revision_wire_perf_spec.spl`,
 `test/05_perf/browser/simple_web_browser_engine_production_budget_spec.spl`
 
@@ -165,3 +164,58 @@ change). Only that file was edited.
 **Verdict: the load-blocking tree-side regression in the hosted-worker import
 graph (the exact "Next step" of this record) is FIXED and measured; the row
 stays OPEN on the behavioral residual (2) and the timing contract (3).**
+
+
+---
+
+## 2026-11-13 triage (live-P3 lane l1, work/live-p3-l1-20261113, base f790f7f266e)
+
+**Load-blocker FIXED at this base; row stays OPEN on residuals** — The intermediate-typed-`val` workaround pattern is present in `src/os/hosted/hosted_browser_renderer_policy.spl` (verified by direct read: `val line = raw_line.trim()`, `val name_part = line.slice(...)` + `val name = name_part.trim()`), and the formerly import-blocked specs now compile and execute (this lane's run of the sibling `browser_session_textarea_lifecycle_spec.spl` reaches execution). Residuals unchanged and out of this row's scope: engine-lane nested-call receiver typing one lane deeper, and the Linux-hosted timing contract.
+
+## Resolution — 2026-11-13 (lane p3-browserrev)
+
+Verdict: **FIXED.** The "writer unreachable" theory was right in effect but
+wrong in location — `SimpleWebRenderSession.render()` was never the problem
+(pinned green by
+`test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_render_session_counters_spec.spl`).
+The "nested-call `trim`" load failure recorded on 2026-11-11 no longer
+reproduces on the current seed. Two independent causes remained:
+
+1. **Worker import graph (counters stayed 0).** `BrowserSession`'s methods
+   are split across `impl` modules. `src/os/hosted/hosted_browser_renderer_worker.spl`
+   imported `browser_session_runtime.*` and `browser_session_ui_access.*`
+   but never `browser_session_loading.*`, so `handle(init)` ->
+   `begin_navigation` died with
+   `method _snapshot_current_history_for_departure not found` and
+   `render()` never ran. Fix: import the loading impl.
+2. **Compositor revision cache (reuse_count stayed 0).**
+   `Engine2dCompositorBackend.render_draw_ir_composition_resources_revision`,
+   `try_reuse_draw_ir_composition_revision` and
+   `engine2d_window_revision_exact_match` compared `DrawIrComposition` with
+   `==`, which includes the `generation` staleness token. Every wire decode
+   assigns a fresh generation, so a decoded repeat frame never matched and
+   every frame re-rastered. Fix: new
+   `draw_ir_composition_content_equal` (`src/lib/common/ui/draw_ir.spl`,
+   every field except `generation`) at all three sites.
+
+The finder specs also carried stale wire shapes (legacy
+`BrowserRendererMessage`, bare advance payload `"16"` instead of
+`"A1\t16"`, legacy reply decoder); repaired in the same change.
+
+Evidence (Rust seed, `test <spec>`, base = release/1.0.0 `f7cb252dce1`):
+
+| spec | base | fix |
+|---|---|---|
+| `test/01_unit/os/hosted/hosted_browser_renderer_worker_revision_counters_spec.spl` (new) | 0/1 | 1/1 |
+| `test/01_unit/os/compositor/engine2d_compositor_revision_generation_spec.spl` (new) | 0/2 | 2/2 |
+| `test/02_integration/rendering/hosted_browser_compositor_revision_cache_spec.spl` | 0/1 | 1/1 |
+| `test/05_perf/browser/simple_web_browser_engine_production_budget_spec.spl` | 0/8 | 2/8 (6 are intentional `production budget evidence not implemented`) |
+| `test/05_perf/browser/hosted_browser_revision_wire_perf_spec.spl` | 0/1 | 0/1 — now `render_count=12 reuse_count=14` exactly as contracted; remaining failure is pixel expectations, filed separately as `hosted_worker_absolute_main_renders_white_perf_pixels_2026-11-13` |
+
+Neighbours unchanged base -> fix: `engine2d_compositor_revision_cache_spec`
+7/8 -> 7/8, `engine2d_frame_switch_receipt_spec` 4/5 -> 4/5 (the red
+example is `engine2d_compositor_web_damage_revision_api_missing_2026-11-13`,
+a missing API, left open), `hosted_browser_frame_switch_semantic_spec` 1/1,
+`hosted_browser_renderer_worker_spec` 0/1 (spec-file parse error both
+sides), `simple_web_render_session_damage_spec` 0/2,
+`host_external_content_damage_boundary_spec` 0/7.

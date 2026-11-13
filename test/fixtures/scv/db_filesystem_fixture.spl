@@ -1,8 +1,35 @@
 # Real link fixtures. Missing host privileges fail setup; they never count as
 # successful rejection of an alias which was not actually created.
-use std.spec.{expect}
-use app.io.mod (file_write, process_run_bounded)
+#
+# `setup_item2_filesystem_link_supported()` lets specs honest-skip the
+# SymbolicLink-based examples on hosts without symlink privilege (Windows
+# requires admin or developer mode for SymbolicLink; Junction for a local
+# directory target does not need the probe).
+use std.spec.{expect, skip}
+use app.io.mod (file_write, process_run_bounded, cwd, dir_remove_all)
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir}
+use std.nogc_sync_mut.sffi.io.{path_absolute}
 use std.nogc_sync_mut.io.crypto_sffi.{random_hex}
+
+@when(os="windows"):
+fn setup_item2_filesystem_link_supported() -> bool:
+    val made = secure_temp_dir(path_absolute(cwd()), "link-probe-")
+    if made.is_err(): return false
+    val root = made.unwrap()
+    val target = "{root}/target"
+    val link = "{root}/link"
+    if not file_write(target, "x"): return false
+    val script = "{root}/probe.ps1"
+    if not file_write(script, "param([string]$LinkPath,[string]$TargetPath)\n$ErrorActionPreference = 'Stop'\nNew-Item -ItemType SymbolicLink -Path $LinkPath -Target $TargetPath | Out-Null\n"): return false
+    val (_out, _err, code) = process_run_bounded("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script, "-LinkPath", link, "-TargetPath", target], 30000, 4096)
+    dir_remove_all(root)
+    code == 0
+@else:
+fn setup_item2_filesystem_link_supported() -> bool:
+    true
+@end
+
+export setup_item2_filesystem_link_supported
 
 @when(os="windows"):
 fn setup_item2_filesystem_link(root: text, target: text, link: text, directory: bool) -> i64:
@@ -20,4 +47,4 @@ fn setup_item2_filesystem_link(root: text, target: text, link: text, directory: 
     code
 @end
 
-export setup_item2_filesystem_link
+export setup_item2_filesystem_link, setup_item2_filesystem_link_supported

@@ -272,3 +272,18 @@ native owner lane should flip that note when running the probe.
 ## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
 
 **FIXED in source (confirmed)** — ne16: get() routed through lower_dict_runtime_read with value-type resolution + struct registration; spec 6/6 (incl. the deliberately-RED-at-writing scenario). Native one-binary re-probe owed on a completing host.
+
+## Addendum 2026-11-13 (lane work/live-p3-l3-20261113) — native re-probe DONE, FIXED end-to-end
+
+The owed native-binary re-probe was performed on this Windows host via the Rust
+engine (\`SIMPLE_NATIVE_BUILD_RUST=1\`, \`--backend cranelift\`, llvm-mingw
+toolchain on PATH), exactly this doc's probes:
+
+- Probe A (\`Dict<text, i64>\`): \`getx=7\` (was the still-boxed 56 = 7<<3),
+  \`miss=-77\` (caller's nil sentinel), \`idx=7\`, \`keys=2\`, \`has=true\`.
+- Probe B (\`Dict<text, Tr>\`): all five lines correct,
+  \`hit unwrap name=Read n=5\` — the line that previously SEGFAULTED now
+  round-trips. \`get_miss_isnil=true\', \`idx name=Read n=5\'.
+
+Per-operation truth table now matches the expected column for every row this
+doc probed. Status: FIXED (was "FIXED in source; native re-probe owed").
