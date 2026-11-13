@@ -760,6 +760,13 @@ impl Lowerer {
                 );
                 let local_index = ctx.add_local(name, ty, let_stmt.mutability);
                 ctx.locals[local_index].trait_dispatch_owner = trait_dispatch_owner;
+                if let Some(HirExprKind::Lambda { params, body, .. }) = value.as_ref().map(|v| &v.kind) {
+                    let fn_ty = self.module.types.register(HirType::Function {
+                        params: params.iter().map(|(_, ty)| *ty).collect(),
+                        ret: body.ty,
+                    });
+                    ctx.lambda_local_fn_types.insert(local_index, fn_ty);
+                }
                 self.record_optional_trait_payload(let_stmt.ty.as_ref().or(pattern_type), local_index, ctx);
                 if let Some(result_payload_types) = result_projection_type {
                     ctx.result_projection_types.insert(local_index, result_payload_types);

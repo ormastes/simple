@@ -69,19 +69,27 @@ impl Lowerer {
                     // Otherwise `Some(owned)` binds ANY and a later field read
                     // loses its authored record owner. Other shapes stay erased;
                     // no field-name or layout guessing may create an owner.
-                    let ty = match (name.as_str(), args_hir.first()) {
-                        ("Some", Some(payload))
-                            if matches!(self.module.types.get(payload.ty), Some(HirType::Function { .. } | HirType::Struct { .. })) =>
+                    // A local bound to a lambda keeps the lambda's expression
+                    // type; its function type lives in `lambda_local_fn_types`.
+                    let payload_ty = match args_hir.first() {
+                        Some(HirExpr { kind: HirExprKind::Local(idx), .. }) => {
+                            ctx.lambda_local_fn_types.get(idx).copied().or(args_hir.first().map(|p| p.ty))
+                        }
+                        other => other.map(|p| p.ty),
+                    };
+                    let ty = match (name.as_str(), payload_ty) {
+                        ("Some", Some(payload_ty))
+                            if matches!(self.module.types.get(payload_ty), Some(HirType::Function { .. } | HirType::Struct { .. })) =>
                         {
                             self.module.types.register(HirType::Enum {
                                 name: "Option".to_string(),
                                 variants: vec![
-                                    ("Some".to_string(), Some(vec![payload.ty])),
+                                    ("Some".to_string(), Some(vec![payload_ty])),
                                     ("None".to_string(), None),
                                 ],
                                 generic_params: vec!["T".to_string()],
                                 is_generic_template: false,
-                                type_bindings: std::collections::HashMap::from([("T".to_string(), payload.ty)]),
+                                type_bindings: std::collections::HashMap::from([("T".to_string(), payload_ty)]),
                             })
                         }
                         _ => TypeId::ANY,

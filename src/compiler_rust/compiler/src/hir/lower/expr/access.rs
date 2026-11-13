@@ -204,6 +204,12 @@ impl Lowerer {
         if let Some(projected) = self.try_lower_annotated_result_projection(receiver, &lowered_receiver, field, ctx) {
             return Ok(projected);
         }
+        // `.ok` / `.err` on a typed Result projects the Result itself. It must
+        // run before the Ok-payload projection below, which would otherwise
+        // look `.ok` up on the payload (`i64.ok` for `Result<i64, text>`).
+        if let Some(projected) = self.try_lower_result_projection(&lowered_receiver, field) {
+            return Ok(projected);
+        }
         // Flow analysis may permit `.0` on Option<Tuple>/Result<Tuple>, but
         // the lowered receiver is still the enum container.  Project the
         // Some/Ok payload before deriving the positional element type and
