@@ -92,3 +92,13 @@ through the style record + text measurement is a reviewed design change (it
 touches every page's layout), outside a 20-minute P3 box; not attempted. Owner
 decision this doc requests (twin-budget style: pick the semantic, land it with
 Chrome-oracle fixtures) remains the unblock.
+
+
+---
+## 2026-11-13 triage — lane live-p3-l6 (Windows host, seed bin/simple.exe, base f790f7f266e)
+
+Concur: `FORM_CONTROL_UA_FONT_SIZE_PX` is still the integer constant 13 and
+`Style.font_size` is still `i32`; the fix is the sub-pixel style-model change
+this doc describes (and it forbids the constant nudge). The Chrome geometry
+differ oracle does not exist on this host, so a style-model change could not be
+verified here. No in-lane change.

@@ -264,3 +264,12 @@ still open, so every remaining site is still latent.
 ## Lane disposition 2026-11-13 (p3-misc-b)
 
 open residual rebind route at closure scale per in-file stage-2 verdicts; owner: method-resolution lane (seed-side verification required).
+
+---
+## 2026-11-13 triage — lane live-p3-l6 (Windows host, seed bin/simple.exe, base f790f7f266e)
+
+Concur with the most recent in-record triage; no fresh reproduction attempted
+(record's own grant names another host/lane). No in-lane change; disposition
+and owner unchanged.
+Residual rebind counting needs a rebuilt Stage 2 candidate and disassembly on
+the producer lane; none of that is constructible on this Windows seed lane.

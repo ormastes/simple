@@ -3,6 +3,7 @@ use compiler.common.library_mode_policy_v1.{library_mode_generic_import_v1, libr
 
 use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface, ModuleSurfacesByName, module_surface_allocate_generation, module_surface_export_origin_index_position}
 use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_logical_name_from_path, module_surface_fold_std_alias, module_surface_package_name_from_name}
+use compiler.hir.hir_lowering.module_surface_semantic_projection.{module_surface_semantic_hex_limb, module_surface_semantic_state, module_surface_semantic_mix, module_surface_semantic_finish}
 use compiler.common.cache.native_resolution_trace.{NativeResolutionProbeV1, NativeResolutionTraceV1}
 use compiler.common.module_path_naming.{module_relative_name_from_path}
 use std.common.crypto.sha256.{sha256_text}
@@ -46,6 +47,58 @@ pub(package) fn module_surface_resolution_rows_sorted_v1(rows: [text]) -> [text]
             break
         width = width * 2
     sorted
+
+# Frozen semantic identity: the construction-time declaration limbs plus the
+# resolved import, export-route, friend, and export-origin facts that only
+# exist after freeze. Restored 2026-11-13 (dropped by the 4edef8fab8e tree
+# snapshot): without it, an export rename, a facade reroute, or an eager/lazy
+# import edit left the frozen identity unchanged.
+fn _module_surface_final_semantic_digest(surface: ModuleSurface) -> text:
+    if not surface.semantic_cacheable: return ""
+    var digest = module_surface_semantic_state()
+    digest = module_surface_semantic_mix(digest, "schema", "module-surface-frozen-v1")
+    for limb in [surface.semantic_hash0, surface.semantic_hash1, surface.semantic_hash2, surface.semantic_hash3]:
+        digest = module_surface_semantic_mix(digest, "declaration-limb", "{limb}")
+    if surface.import_item_offsets.len() != surface.import_target_names.len() + 1: return ""
+    var i = 0
+    while i < surface.import_target_names.len():
+        val import_decl: ParserImport = surface.imports[i]
+        digest = module_surface_semantic_mix(digest, "import-target", surface.import_target_names[i])
+        digest = module_surface_semantic_mix(digest, "import-source", import_decl.module)
+        digest = module_surface_semantic_mix(digest, "import-lazy", "{import_decl.is_lazy}")
+        var item = surface.import_item_offsets[i]
+        val item_end = surface.import_item_offsets[i + 1]
+        while item < item_end:
+            digest = module_surface_semantic_mix(digest, "import-item-name", surface.import_item_names[item])
+            digest = module_surface_semantic_mix(digest, "import-item-alias", surface.import_item_aliases[item])
+            digest = module_surface_semantic_mix(digest, "import-item-has-alias", "{surface.import_item_has_alias[item]}")
+            item = item + 1
+        i = i + 1
+    i = 0
+    while i < surface.export_route_sources.len():
+        digest = module_surface_semantic_mix(digest, "route-source", surface.export_route_sources[i])
+        digest = module_surface_semantic_mix(digest, "route-local", surface.export_route_locals[i])
+        digest = module_surface_semantic_mix(digest, "route-target", surface.export_route_target_names[i])
+        digest = module_surface_semantic_mix(digest, "route-glob", "{surface.export_route_is_glob[i]}")
+        i = i + 1
+    for friend in surface.friends:
+        digest = module_surface_semantic_mix(digest, "friend", friend)
+    for internal_export in surface.internal_exports:
+        digest = module_surface_semantic_mix(digest, "internal-export", internal_export)
+    # Origin discovery can traverse sibling owners in different orders. Sort
+    # only the scalar names, then resolve their aligned row positions.
+    val origin_names = module_surface_resolution_rows_sorted_v1(surface.export_origin_index.names.copy())
+    i = 0
+    while i < origin_names.len():
+        if not surface.export_origin_index.index_by_name.contains_key(origin_names[i]): return ""
+        val row = surface.export_origin_index.index_by_name[origin_names[i]]
+        if row < 0 or row >= surface.export_origin_index.names.len(): return ""
+        digest = module_surface_semantic_mix(digest, "origin-name", origin_names[i])
+        digest = module_surface_semantic_mix(digest, "origin-owner", surface.export_origin_index.owner_modules[row])
+        digest = module_surface_semantic_mix(digest, "origin-source", surface.export_origin_index.source_names[row])
+        digest = module_surface_semantic_mix(digest, "origin-kind", surface.export_origin_index.resolution_kinds[row])
+        i = i + 1
+    module_surface_semantic_finish(digest)
 
 fn module_surface_stable_resolution_generation_v1(registry: ModuleSurfacesByName) -> text:
     var rows: [text] = []
@@ -781,6 +834,16 @@ pub(package) fn module_surfaces_freeze(registry: ModuleSurfacesByName) -> Result
         # The authority index is read only through its frozen lookup and by
         # the export-route projector; an unfrozen one is "malformed" to both.
         surface.declaration_authority_index.frozen = true
+        # Final identity is published only after every declaration, route,
+        # origin, and freeze flag is complete. No consumer can observe the
+        # construction-only declaration limbs as a frozen surface digest.
+        val final_semantic_hex = _module_surface_final_semantic_digest(surface)
+        surface.semantic_cacheable = final_semantic_hex.byte_len() == 64
+        if surface.semantic_cacheable:
+            surface.semantic_hash0 = module_surface_semantic_hex_limb(final_semantic_hex, 0)
+            surface.semantic_hash1 = module_surface_semantic_hex_limb(final_semantic_hex, 1)
+            surface.semantic_hash2 = module_surface_semantic_hex_limb(final_semantic_hex, 2)
+            surface.semantic_hash3 = module_surface_semantic_hex_limb(final_semantic_hex, 3)
         registry.surfaces[surface_index] = surface
         surface_index = surface_index + 1
     # Preferred-identity repair pass, reading the STORED rows. The per-row
