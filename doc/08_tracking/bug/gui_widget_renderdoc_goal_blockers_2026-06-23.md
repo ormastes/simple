@@ -112,3 +112,18 @@ Still blocked:
   `sh scripts/check/check-gui-widget-renderdoc-goal-status.shs --strict` with
   real Simple Vulkan Engine2D and Electron Chromium/Vulkan `.rdc` artifacts
   present, and record the resulting gate report under `doc/09_report/`.
+
+
+---
+
+## 2026-11-13 addendum — P3 gpu lane p3-gpu-20261113 (work/p3-gpu-20261113, base 6f4cb189867)
+
+**Verdict: OPEN, BLOCKED on this host — unchanged from the 2026-11-11 ne11
+addendum.** Every product path referenced still exists in the tree
+(`src/app/test/renderdoc_vulkan_widget_capture.spl`, the generated HTML fixture,
+`scripts/check/check-gui-widget-renderdoc-goal-status.shs`); the Electron
+Chromium-on-Vulkan widget `.rdc` gate remains unproven and requires a Linux host
+with Simple Vulkan Engine2D + Electron Chromium/Vulkan `.rdc` artifacts. This
+Windows lane has no such evidence path. Grant unchanged: run
+`sh scripts/check/check-gui-widget-renderdoc-goal-status.shs --strict` on the
+Linux evidence lane and record the gate report under `doc/09_report/`.

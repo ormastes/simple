@@ -100,3 +100,20 @@ acceptance design documents under
 doc/02_requirements/feature|nfr/vulkan_async_compute_submission_ring.md and
 doc/05_design/runtime/vulkan_async_compute_submission_ring.md remain the
 specification for the runtime owner. Status: open.
+
+
+---
+
+## 2026-11-13 addendum — P3 gpu lane p3-gpu-20261113 (work/p3-gpu-20261113, base 6f4cb189867)
+
+**Verdict: OPEN, unchanged — Rust-runtime-owned; no change possible or
+verifiable in a no-cargo Windows lane.** The defect surface
+(`VulkanState.quarantined_compute` gating in `rt_vulkan_begin_compute`, fence
+retirement not releasing the quarantine entry) lives in the seed Rust runtime,
+and the acceptance evidence is a Vulkan-device test (3 commands in flight,
+retire-one-recycle-one, no device idle) that cannot run on this host. The
+pure-Simple review's conclusion stands: no safe Simple-only ring exists against
+the current API, and `vulkan_resident_2d.spl` honestly stays on
+`vulkan_sffi_submit_and_wait_fence` with `device_scene_nonblocking_submits=0`.
+Grant unchanged: runtime owner implements the state-tagged quarantine +
+retirement release, then runs the device acceptance test.

@@ -59,3 +59,11 @@ declared>=1 executed=1 passed=1 failed=0`, rc=0. `class Element`'s
 `namespace: text` field (node_types.spl:69) no longer trips any diagnostic;
 the unblock condition is met. The file's last touching merge is PR #7597
 (`9e7e7a526edb`); no source change on this branch.
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b bookkeeping)
+
+SUPERSEDED (node_types.spl compiles as-is) per in-file verdict. No contrary evidence found in this pass; header status left as the
+owning lane recorded it.

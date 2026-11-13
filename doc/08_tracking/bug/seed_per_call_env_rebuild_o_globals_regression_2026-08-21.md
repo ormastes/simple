@@ -280,3 +280,10 @@ SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe sh scripts/check/check-lint-cos
 
 Disposition: **BLOCKED** (structural interpreter-core work; cargo grant
 recorded verbatim; gate expected RED until then).
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+Not pursued in this lane: structural src/compiler_rust CowEnv follow-up; confirmed still wall-failing 2026-11-11. Requires cargo/rustc + seed rebuild - not available on this Windows lane (seed-only binary). Owner: seed-fix lane.

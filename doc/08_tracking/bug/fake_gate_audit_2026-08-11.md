@@ -267,3 +267,7 @@ Follow-up state measured at release tip (branch `work/p3-ne8-20261111`, seed 46f
 - **command_dispatch_spec remainder — STILL OPEN:** the ~100 literal-only `it` blocks outside
   section 1 were not redesigned in this lane (the doc itself classifies that as "needs a
   redesign, not a patch").
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**LIVE (confirmed)** — ne8: the requested sixth guard exists (check-vacuous-specs.shs, 22/22 selftest, corpus PASS) but is deliberately tracked unwired — promotion is a governance decision. formatter/depgraph literal-only blocks + command_dispatch_spec redesign remain.

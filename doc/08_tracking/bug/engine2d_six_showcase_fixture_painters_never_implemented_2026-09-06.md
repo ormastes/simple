@@ -139,3 +139,7 @@ fixture HTML and regenerate goldens under review, or delete/replace the
 seven stale exact-color scenarios. A P3 lane changing the colors to current
 output would be oracle-gaming, exactly as the freeze noted ("changing colors
 to current output would not establish a remedy").
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**LIVE (confirmed)** — Marker-dispatch hack deliberately deleted; fixtures reduced to contentless stubs whose asserted colors exist nowhere in the document. Remaining options need an owner (restore fixture HTML + regenerate goldens under review, or delete the seven stale exact-color scenarios); changing colors to current output would be oracle-gaming.

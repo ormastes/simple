@@ -462,6 +462,22 @@ SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_vulkan_readback_u32_checksum(int64_t data
     (void)data; (void)pixel_count; (void)handle; (void)offset;
     return -1;
 }
+
+/*
+ * C twin of the Rust lane's `cfg(not(feature = "vulkan"))` arm of
+ * rt_vulkan_selected_device_identity_v1 (vulkan_graphics_runtime_device.rs):
+ * the core C runtime selects no Vulkan device, so there is no generation token
+ * to match and no physical-device UUID to report. It returns the same empty
+ * string the Rust lane uses for "owner absent". The Simple facade
+ * (vulkan_sffi_selected_device_identity_v1) requires exactly "v1:<hex>:<hex>"
+ * with non-zero UUIDs, so an empty string is rejected fail-closed and can never
+ * be mistaken for a real device. A Vulkan-featured provider overrides this
+ * weak definition.
+ */
+SPL_HOSTED_UNAVAILABLE_WEAK const char* rt_vulkan_selected_device_identity_v1(int64_t expected_token) {
+    (void)expected_token;
+    return "";
+}
 #endif
 
 /*

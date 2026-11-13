@@ -175,3 +175,11 @@ declarations in the tree: `70.backend/backend/common/hardware_codegen.spl`,
 `50.mir/mir_instruction_support.spl`). It was not required by any observed
 Stage-3 diagnostic, so it is held rather than pushed speculatively. The full
 duplicate-terminal-declaration sweep for `VhdlProcessKind` belongs with (A).
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b bookkeeping)
+
+FIXED (Part A, re-verified 2026-11-11 lane boot14) per in-file addendum; Part B tracked by its own record. No contrary evidence found in this pass; header status left as the
+owning lane recorded it.

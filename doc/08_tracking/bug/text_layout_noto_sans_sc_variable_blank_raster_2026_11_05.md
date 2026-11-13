@@ -9,3 +9,21 @@ Round 15 update: spec test/01_unit/lib/nogc_sync_mut/text_layout/noto_sans_sc_at
 - Confirmed adjacent defect: src/runtime/runtime_font.c uses stb_truetype, which has no variable-font instancing — axes=wght=100 is silently ignored (default master rasterized; wrong weight, never transparent).
 - f6dc86d1af5 (2026-11-07) closed the real seed-interpreter glyph-index bridge gap (rt_font_glyph_bitmap_index/rt_font_glyph_advance_index) but per the round-15 note the atlas spec passed even on the stock pre-bridge seed, so that gap is not the proven cause of the 2026-11-05 blank atlas.
 - Conclusion: the original symptom (selected=true ok=true nonwhite=0) is not reproducible at the FontRenderer/runtime-font layer in the interpreter. Remaining suspect: native/GPU atlas-upload lane of the Engine2D draw-ir fast path. Verification requires the pure-Simple self-hosted bin/simple (not built on this host) or the browser_renderer GPU lane. No source fix attempted; bug_db row kept open with diagnosis.
+
+
+---
+
+## 2026-11-13 addendum — P3 gpu lane p3-gpu-20261113 (work/p3-gpu-20261113, base 6f4cb189867)
+
+**Verdict: OPEN — unchanged from the 2026-11-09 p3-scoping disposition; not
+reproducible at the FontRenderer/runtime-font layer on the seed, and the
+remaining suspect (native/GPU atlas-upload lane of the Engine2D draw-ir fast
+path) requires an evidence path this lane does not have.** Per the no-green-rerun
+rule the two 1/1 interpreter repro specs
+(`noto_sans_sc_variable_raster_ink_spec.spl`,
+`noto_sans_sc_atlas_ink_spec.spl`) were not re-executed; their PASS verdicts
+stand on this base. The confirmed adjacent defect (stb_truetype has no
+variable-font instancing, so `wght=100` is silently ignored in
+`src/runtime/runtime_font.c`) remains a seed/runtime-font limitation outside a
+no-cargo lane. Grant unchanged: native run on a pure-Simple self-hosted binary
+or the browser_renderer GPU lane.

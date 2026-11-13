@@ -81,3 +81,7 @@ that `newunit` is compiler-internal (with the docs that imply otherwise
 corrected). Still a seed-only measurement; the self-hosted retest remains
 blocked on this lane (no buildable self-hosted binary). **Grant:** frontend
 lane with a self-hosted binary.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**LIVE (confirmed)** — ne17 re-confirmed: no construction form (7lba parse error; LbaU(7) semantic not-found), identical to the 2026-09-01 measurement; f957a28ace77 is registry bookkeeping only. Two Required items stand (constructible spec + syntax or compiler-internal statement). Frontend-lane grant with a self-hosted binary.

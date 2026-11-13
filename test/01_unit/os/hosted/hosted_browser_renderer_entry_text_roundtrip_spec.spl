@@ -1,0 +1,98 @@
+"""
+## Purpose and audience
+Purpose: Pin that a `text` field of a struct stored in a class-owned array
+still decodes as text after the load / mutate / store-back round trip the
+hosted browser renderer registry performs on teardown
+(`src/os/hosted/hosted_browser_renderer_registry.spl`, the
+`entry.failure_reason.ends_with(";renderer-close-failed")` site).
+It used to decode as an i64 (`method ends_with not found on type i64`).
+Audience: maintainers of the hosted window manager and of the interpreter
+value encoding.
+## Operator workflow
+Run with the test runner; pure value logic, no window and no renderer process.
+## Compatibility and limitations
+Mirrors the registry's field mix (bool, i32, i64, text) and mutation order, not
+its full entry type. The macOS hosted-WM launch itself is not exercised here.
+Bug record: doc/08_tracking/bug/hosted_wm_registry_text_field_boxing_2026-08-04.md
+"""
+# @req: REQ-LIB-GC-ASYNC-MUT-001
+
+use std.spec.*
+use std.spec.step
+
+struct RoundtripEntry:
+    window_id: i64
+    ready: bool
+    renderer_closed: bool
+    close_pending: bool
+    published_frame_width: i32
+    published_frame_backend: text
+    failure_reason: text
+    failure_published: bool
+    bookmark_revision: i64
+
+class RoundtripRegistry:
+    entries: [RoundtripEntry]
+
+    static fn create() -> RoundtripRegistry:
+        RoundtripRegistry(entries: [
+            RoundtripEntry(
+                window_id: 7, ready: true, renderer_closed: false,
+                close_pending: false, published_frame_width: 640,
+                published_frame_backend: "cpu", failure_reason: "",
+                failure_published: false, bookmark_revision: 3),
+            RoundtripEntry(
+                window_id: 8, ready: true, renderer_closed: false,
+                close_pending: false, published_frame_width: 320,
+                published_frame_backend: "cpu", failure_reason: "",
+                failure_published: false, bookmark_revision: 4)
+        ])
+
+    me teardown(index: i64, reason: text):
+        var entry = self.entries[index]
+        entry.ready = false
+        if reason != "":
+            entry.failure_reason = reason
+        if not entry.renderer_closed:
+            entry.close_pending = true
+            if entry.failure_reason == "":
+                entry.failure_reason = "renderer-close-failed"
+            elif not entry.failure_reason.ends_with(
+                ";renderer-close-failed"
+            ):
+                entry.failure_reason = (
+                    entry.failure_reason + ";renderer-close-failed"
+                )
+        self.entries[index] = entry
+
+    fn reason(index: i64) -> text:
+        self.entries[index].failure_reason
+
+describe "hosted renderer entry text field across the array round trip":
+    it "appends the close-failure suffix to a stored reason exactly once":
+        step("teardown twice with a caller reason, then again without one")
+        var registry = RoundtripRegistry.create()
+        registry.teardown(0, "browser teardown failed")
+        expect(registry.reason(0)).to_equal("browser teardown failed;renderer-close-failed")
+        registry.teardown(0, "")
+        expect(registry.reason(0)).to_equal("browser teardown failed;renderer-close-failed")
+        expect(registry.reason(0).ends_with(";renderer-close-failed")).to_equal(true)
+
+    it "sets the bare close-failure reason when none was recorded":
+        step("teardown with an empty reason on an untouched entry")
+        var registry = RoundtripRegistry.create()
+        registry.teardown(1, "")
+        expect(registry.reason(1)).to_equal("renderer-close-failed")
+        expect(registry.reason(1).ends_with("close-failed")).to_equal(true)
+
+    it "leaves the neighbouring entry and the non-text fields intact":
+        step("mutate entry 0 and read entry 1 and entry 0 scalars back")
+        var registry = RoundtripRegistry.create()
+        registry.teardown(0, "x")
+        expect(registry.reason(1)).to_equal("")
+        expect(registry.entries[0].window_id).to_equal(7)
+        expect(registry.entries[0].published_frame_width).to_equal(640)
+        expect(registry.entries[0].published_frame_backend).to_equal("cpu")
+        expect(registry.entries[0].ready).to_equal(false)
+        expect(registry.entries[0].close_pending).to_equal(true)
+        expect(registry.entries[1].bookmark_revision).to_equal(4)

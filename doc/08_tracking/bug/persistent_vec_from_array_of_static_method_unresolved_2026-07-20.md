@@ -153,3 +153,7 @@ either. Root cause not isolated further this pass.
 No Rust seed source fix attempted (out of scope for this triage pass per the
 fix-guide; needs a rebuild). Left as GENUINE-BUG, both specs unmodified.
 
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**FIXED (confirmed)** — ne19: no longer reproduces on this tip; both affected spec clusters green.

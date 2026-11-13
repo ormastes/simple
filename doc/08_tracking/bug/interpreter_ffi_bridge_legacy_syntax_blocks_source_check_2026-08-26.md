@@ -68,3 +68,7 @@ Seed-smoke verification (2026-11-11, lane interp5, refreshed seed
 No further action for this bug. If the single-leaf module-surface limitation
 matters, that is a new check-harness issue, not this one.
 
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**SUPERSEDED (confirmed)** — interp5: bridge.spl fully migrated to canonical syntax (b364745fdbf8); zero unexpected-token errors; registry spec 3/3. Single-leaf check stops later at a module-surface scoping limitation — different matter, not this bug.

@@ -73,3 +73,10 @@ Note `integration:rendering/vulkan_strict_spec.spl` and
 session reviewed; they are listed here as divergence offenders only — no claim is made
 about their content.
 
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+pre-existing divergence red; step-over record, not this lane fix.

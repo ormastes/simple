@@ -58,3 +58,10 @@ absent import must stay visibly absent, not simulated.
   the whole of WP-18 as blocked; this doc narrows that to the corpus-import
   half specifically, since the timing-model/adapter/report pieces do not
   depend on the corpus and have since landed.
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+Not pursued in this lane: environment restriction (curl/wget hard-blocked) stands; not scope-avoidance. No change from this lane.

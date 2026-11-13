@@ -73,3 +73,7 @@ The DEFAULT (pure-Simple) native-build lane OOMs on this host (worker killed at
   link-failure sites route through `driver_native_link_failure_result`, mapping linker output
   back to the `extern fn` declaration site and appending raw linker text verbatim). The
   fix's exported pure halves are what this lane executed green above.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**FIXED (confirmed)** — ne8: spec self-documents Implemented; 11/13 examples green on the seed, both NEGATIVE builds fail closed with the symbol named; 2 reds are a host toolchain gap (windows-gnu clang runtime missing), not the defect. FIX A 8beeb621c70f cited.

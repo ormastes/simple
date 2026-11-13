@@ -42,3 +42,10 @@ Separately, interpreter class aliases still detach through `Arc::make_mut`. The 
 - Static/free first parameter named `self`: defensive copy retained.
 - More than 4.2 million lexer accessor calls: exact token checksum and bounded live registry count.
 - Canonical Stage 2 sanity, Stage 3 admission, full CLI Stage 4 admission, then the retained performance matrix.
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+bootstrap-blocking; two-cycle limit reached with test-fixture defects, changes reverted in-file. Resume requires repairing the focused Rust test fixture + LLVM allocator oracle, then native verification this lane cannot run. Owner: bootstrap/struct-receiver lane.

@@ -166,3 +166,7 @@ evidence on this base.**
   the self-sealing receipt loop the doc described is a 2026-08-16 state.
 
 No change made in this lane.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**STALE (confirmed)** — boot4/boot12: subject deployed binary and the Stage-1 "bounded test ABI probe" gate string no longer exist in-tree; current deployment state tracked by the deployed_bin_simple_* family.

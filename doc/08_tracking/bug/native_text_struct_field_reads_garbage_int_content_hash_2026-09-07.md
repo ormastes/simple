@@ -224,3 +224,7 @@ fresh seed; the corruption, if still live, needs the real `FileFingerprint`
 closure to reproduce. The defect lives in Rust-seed native codegen, which
 this lane may not rebuild. **Grant:** run the doc's exact reproducer on a
 Linux host with the release seed (documented as "a few seconds once cached").
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**blocked (confirmed)** — ne17: both reduced write-side probes (method-chain initializer; if-val extern-optional unwrap + named-field ctor) are byte-identical natively vs interpreted on the fresh seed; the doc's exact full-closure repro exceeded 280s here and was not retried. Defect, if live, needs the FileFingerprint closure on a Linux host; Rust-seed codegen lane may not rebuild the seed.

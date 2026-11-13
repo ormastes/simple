@@ -178,3 +178,10 @@ results do not replace the restart and independent-process proofs. No source is
 admitted or pushed until all nine cases pass together and the review is PASS.
 
 Cross-links: [W5A publisher gates](../../03_plan/sys_test/spipe_knowledge_compiler.md#224-ordered-remediation-gates-blocking-test-execution) and [remediation order](../../03_plan/agent_tasks/spipe_knowledge_compiler.md#wave-5-admission-remediation-execution-order-2026-08-26).
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+OPEN P1 per in-file status; SPKC authority-publication admission work for the owning lane (atomic journal non-admission needs the SPKC broker authority this lane lacks).
