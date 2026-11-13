@@ -93,3 +93,10 @@ binaries and cannot satisfy its own v2 checker. The must-check ledger row remain
 select or author the canonical entry + fixture + v2 producer and land them coherently before
 this row can be re-judged; inventing a synthetic path inside the checker is explicitly
 forbidden by this record.
+
+## Triage 2026-11-13 (P3 tools lane)
+No code change this lane; the 2026-11-11 addendum's grant stands — the
+database/server owner must select the gate's protocol/entry and land producer +
+checker + fixtures coherently. No synthetic path may be invented inside the
+evidence checker, so this lane made no code change.
+

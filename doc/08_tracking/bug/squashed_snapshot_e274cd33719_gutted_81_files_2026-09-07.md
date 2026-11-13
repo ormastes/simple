@@ -147,3 +147,9 @@ byte-identical to an ancestor OLDER than its first parent, unless the commit
 message records the rollback. That is the generalisation of the frame_pacer
 proof and is cheap to compute.
 
+
+## Triage 2026-11-13 (P3 tools lane)
+No code change this lane. Status remains PARTIALLY REPAIRED per the record
+header (one file proven and restored, 14 more needing per-file triage). That
+triage is repo-history repair work outside the P3 tools lane's bounded scope;
+no new evidence this lane.

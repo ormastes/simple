@@ -82,6 +82,29 @@ const ALLOWED_LANE_FAMILIES: &[(&str, &str)] = &[
 /// so that NEW drift fails this test while these are worked off; registering
 /// one (after reading its runtime ABI) requires removing it here. Exact match.
 const ALLOWED_KNOWN_GAPS: &[(&str, &str)] = &[
+    // JIT-native runtime exports registered for the caret splice bug
+    // (doc/08_tracking/bug/jit_caret_392_unregistered_externs_hybrid_splice_2026-11-13.md).
+    // The interpreter never had a handler for any of them: a call failed
+    // closed before they joined the manifest and still does.
+    ("rt_alloc_probe_count_v1", "allocation-observer probe; C provider only, JIT links it natively"),
+    ("rt_alloc_probe_coverage_v1", "see rt_alloc_probe_count_v1"),
+    ("rt_alloc_probe_reset_v1", "see rt_alloc_probe_count_v1"),
+    ("rt_fd_stat_snapshot_v1", "raw out-pointer fstat snapshot; JIT-native only"),
+    ("rt_linux_group_cancel_v1", "Linux process-group owner (runtime_linux_group_owner_impl.h); no interpreter bridge for the family"),
+    ("rt_linux_group_parent_release_v1", "see rt_linux_group_cancel_v1"),
+    ("rt_linux_group_stream_release_inherited_v2", "see rt_linux_group_cancel_v1"),
+    ("rt_path_extension", "file_io/path.rs export; the interpreter registers the other rt_path_* helpers, not these two"),
+    ("rt_path_filename", "see rt_path_extension"),
+    ("rt_process_run_bounded_admitted_tuple_v1", "raw (ptr, len) + tuple-pointer process ABI; JIT-native only"),
+    ("rt_process_run_bounded_environment_tuple_v1", "see rt_process_run_bounded_admitted_tuple_v1"),
+    ("rt_process_run_bounded_observed_tuple_v1", "see rt_process_run_bounded_admitted_tuple_v1"),
+    ("rt_process_run_bounded_tuple", "see rt_process_run_bounded_admitted_tuple_v1"),
+    ("rt_process_run_tuple", "see rt_process_run_bounded_admitted_tuple_v1"),
+    ("rt_process_spawn_async_environment_v1", "see rt_process_run_bounded_admitted_tuple_v1"),
+    ("rt_stdin_read", "byte-array stdin readers; the interpreter registers the text stdin externs only"),
+    ("rt_stdin_read_all", "see rt_stdin_read"),
+    ("rt_term_flush", "raw terminal write/flush pair (io_print.rs); no interpreter handler"),
+    ("rt_term_write", "see rt_term_flush"),
     ("rt_enum_new", "generic `rt_enum_new<T>(id, discriminant, payload) -> T`; the interpreter would need an id->enum map plus a raw-word->Value bridge. Blocks interpreted enum_wire_restore_nil one call after rt_tuple_new/rt_tuple_set"),
     ("rt_atexit_check", "interp registers rt_atexit_install but not the check probe"),
     ("rt_atomic_bool_fetch_and", "atomic.rs registers the AtomicBool core set and compare_exchange, not fetch_and/not/or"),

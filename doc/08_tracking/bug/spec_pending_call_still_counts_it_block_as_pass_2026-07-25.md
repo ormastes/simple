@@ -105,3 +105,7 @@ Verdict: FIXED — absorbed by the std.spec pending-consumption fix; no lane
 code change needed beyond this status flip. (The summary line renders pending
 as `skipped` rather than a separate `M pending` token; the false-green
 mechanism — the subject of this record — is closed either way.)
+
+## Triage 2026-11-13 (P3 tools lane)
+No code change this lane; FIXED 2026-11-11 per the record header (verified on
+release tip). Verdict trusted, not re-run.

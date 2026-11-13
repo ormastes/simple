@@ -1,7 +1,7 @@
 # Caret JIT run splices 392 externs through the interpreter (unregistered JIT symbols)
 
 - **Filed:** 2026-11-13
-- **Status:** OPEN. Out of scope for lane `work/jit-dynamic-dispatch-20261113`; tracked here only.
+- **Status:** OPEN (392 -> 309 after waves 1-3). Out of scope for lane `work/jit-dynamic-dispatch-20261113`; tracked here only.
 - **Related:** `doc/05_design/compiler/jit/jit_trait_dispatch_and_cross_module_link.md` (row 5)
 
 ## Symptom
@@ -259,6 +259,147 @@ Class (a) Rust exports deliberately **left spliced**:
 | `rt_black_box` | `.spl` return is `i64?` |
 | `rt_perf_dump_sdn` | native has no perf-region recorder; only the interpreter records |
 | `rt_linux_container_user_{open,observe,close}_v1` | Rust definitions are `-95` stubs |
-| `rt_tagged_add`, `rt_dyncall_4/5/6` | no single-line `.spl` declaration to check the ABI against |
+| `rt_tagged_add` | declared with `RuntimeValuePtr` parameters; not checked against the JIT value representation |
+| `rt_dyncall_4/5/6` | all-`i64` Rust ABI, but the `.spl` declaration was not located; register once it is read |
 | `rt_process_run_bounded_bytes` | (ptr, len) text ABI; needs the text-expansion path verified |
 | `rt_process_stdout_state`, `rt_process_piped_exit_status_value` | `piped_process_observer.rs` is not compiled into the seed (not class (a); link fails) |
+
+## Wave 2 — 19 scalar-ABI C exports registered (2026-11-13)
+
+rt_alloc_probe_count_v1, rt_alloc_probe_coverage_v1, rt_alloc_probe_reset_v1, rt_file_create_excl, rt_file_sync,
+rt_linux_group_cancel_v1, rt_linux_group_parent_release_v1, rt_linux_group_stream_release_inherited_v2,
+rt_mem_guard_stats, rt_mem_harden_check_native, rt_process_observation_v4_close_cwd_value,
+rt_process_observation_v4_reserve_value, rt_process_observation_v4_reserved_confirm_release_value,
+rt_process_observation_v4_reserved_matches_value, rt_process_observation_v4_reserved_state_value,
+rt_process_owned_v3_release_value, rt_time_now_seconds, rt_time_now_seconds_f64, spl_thread_current_id
+
+Mechanism: `runtime/build.rs` gains `JIT_SCALAR_C_EXPORTS`, an allowlisted scan
+(Linux only, a name registers only if its definition is found) of the TUs that
+are compiled into the seed archive but not scanned wholesale. The TUs stay out
+of `LINKED_C_SOURCES` on purpose: most of their exports take `const char*`
+text or return an owned `SplArray*` that the interpreter handler adapts (nil
+check, free, array -> tuple), so a direct JIT call is not equivalent.
+
+| | splice names | wall (median) | peak RSS (median) | stdout vs interpreter |
+|---|---|---|---|---|
+| wave 1 seed `8532f7b39b025ad2…` | 344 | 7.03 s | 1,588 MB | byte-identical |
+| wave 2 seed `5ff721a25c34d587…` | 325 | 7.07 s | 1,588 MB | byte-identical |
+
+Test: two wave-2 cases in `jit_extern_native_link_tests.rs`, red on the wave 1
+seed, green on the wave 2 seed (6 of 6).
+
+Found while probing: the interpreter handler for the `rt_process_observation_v4_reserved_*`
+family refuses by design (`process observation V4 is unavailable in interpreter
+mode; use the exact native V4 provider`), so a spliced JIT call could never
+succeed. Native linking is the only working lane for them.
+
+## Remaining after wave 2: 325
+
+| Group | Count | What it needs |
+|---|---|---|
+| class (a) C `rt_simd_*` | 55 | handle-based `int64_t` vector ABI in `runtime_simd_dispatch.c`; `build.rs` filters that TU to `rt_opencl_*` deliberately and the Rust runtime carries scalar-argument twins of the same names. Owner decision on which ABI the JIT struct values match |
+| class (a) other C, text/array ABI | ~73 | `const char*` / (ptr, len) text expansion entries in `codegen/instr/calls.rs` plus a native equivalent of the interpreter's `take` adaptation for `SplArray*` returns (`rt_local_unix_*`, `rt_linux_group_*`, `rt_process_observation_v4_*`, `rt_process_owned_v3_*`) |
+| class (a) Rust, non-exact ABI | 16 | listed under wave 1 |
+| class (a) `rt_process_observation_v6_reserved_poll_launch_value` | 1 | scalar ABI, but `c_function_definitions` does not find its definition in `runtime_process_owned.c` |
+| class (b) | 98 | 55 are Win32 or foreign-platform names: cfg-prune the declarations from the host unit. 43 host-applicable ones need a native provider |
+| class (c) | 82 | no implementation in the seed; cfg-prune or implement |
+
+Zero splice for caret `--help` therefore needs cfg-pruning of the platform-foreign
+and unimplemented declarations (about 180 names), not more registration.
+
+## Verification notes and follow-ups (2026-11-13)
+
+- **Interpreter drift ratchet.** `extern_dispatch_covers_declared_runtime_symbols_with_live_callers`
+  (`interpreter_extern/extern_drift_tests.rs`) requires every manifest name with a
+  live `.spl` caller to have an interpreter handler. 19 of the registered names
+  never had one (16 from wave 1, 3 from wave 2), so wave 1 turned that unit test
+  red on `release/1.0.0`; wave 2 adds them to `ALLOWED_KNOWN_GAPS` with reasons.
+  Interpreter behaviour is unchanged (a call failed closed before and still
+  does). Writing real handlers for the cheap ones (`rt_path_extension`,
+  `rt_path_filename`, `rt_term_write`, `rt_term_flush`, `rt_stdin_read*`) would
+  remove them from that list.
+- **Invalid-fd divergence, pre-existing family behaviour.** For `rt_io_file_*`
+  the interpreter handler raises `argument 0 must be a valid file descriptor`,
+  the native export returns `false`/`0`. The already-registered sibling
+  `rt_io_file_flush(-1)` behaves the same way on the base seed, so the newly
+  registered `rt_io_file_set_permissions` / `rt_io_file_meta_*` /
+  `rt_io_file_write*` follow the family, not a new rule.
+- **Probed under JIT and interpreter:** file mtime/mode, byte-array/text
+  round-trip, UTF-8 validation, random int/f64, stderr print, shell exec, memory
+  counters, time (i64 and f64), thread id, `rt_file_sync`, `rt_file_create_excl`,
+  `rt_pty_resize` (i32 parameters), `rt_file_atomic_write_bytes_array`,
+  `rt_pty_read`. **Probed under JIT only** (no interpreter handler, or handler
+  refuses): path extension/filename, term write/flush, stdin readers,
+  `rt_io_file_set_permissions` (bool parameter), V4 reserved scalars, alloc
+  probes, linux-group scalars.
+- **Registered but not probed:** `rt_process_run_tuple`,
+  `rt_process_run_bounded_tuple`, `rt_process_run_bounded_*_tuple_v1`,
+  `rt_process_spawn_async_environment_v1` (raw pointer/tuple ABI),
+  `rt_io_file_write`, `rt_io_file_write_all`, `rt_io_file_meta_created/flags`,
+  `rt_fd_stat_snapshot_v1`, `rt_par_atomic_*`, `spl_dlopen/dlsym/dlclose`,
+  `spl_wffi_call_i64`, `rt_arm_array_*`, `rt_debug_exit_success`,
+  `rt_process_observation_v4_reserve_value`, `rt_linux_group_stream_release_inherited_v2`.
+- **Declarations are unconditional.** The platform-foreign names are declared
+  with no `@cfg` in `src/lib/nogc_sync_mut/io/windows_process_owner_abi.spl`
+  (Win32), `src/lib/nogc_async_mut/io/platform_event.spl` (kqueue/iocp/event
+  ports) and `src/os/kernel/arch/**` (`pmm_*`, `rt_port_*`). `run_file_jit`
+  lists every declared extern without a symbol, whether or not any MIR `Call`
+  targets it, while `apply_hybrid_transform` only rewrites `Call` instructions.
+  The cheapest next step is seed-side: in
+  `src/compiler_rust/driver/src/exec_core.rs` (the `unresolvable_externs`
+  block), keep only names that are a `Call` target or `GlobalLoad` name in the
+  lowered MIR. That removes declared-but-never-called names from the receipt
+  without touching `.spl`.
+- `scripts/check/check-jit-runtime-symbol-manifest.shs` is red on the base and
+  names `rt_file_atomic_write`, `rt_file_atomic_write_mode`, `rt_perf_dump_sdn`
+  and `rt_process_run_bounded_bytes` as codegen-emitted and missing from the
+  manifest. They are the ones left spliced above; settle their ABI questions
+  and that gate's list shrinks with them.
+- `bug_db.sdn` rows for this bug were not updated in waves 1-2; wave 3 adds
+  the `bugs` row (open) and three investigation-log rows.
+
+## Wave 3 — only referenced externs count toward the splice (2026-11-13)
+
+`run_file_jit` (`driver/src/exec_core.rs`) now filters the unresolvable set by
+`mir::referenced_function_names` (`compiler/src/mir/hybrid.rs`): `Call` targets
+(raw, module-prefix-stripped, SFFI alias), `InterpCall`, `GlobalLoad` /
+`GlobalStore` function values, `ClosureCreate`, `MethodCallStatic`, global
+function-pointer initializers and vtable slots. `apply_hybrid_transform` only
+rewrites exact `Call` targets, all of which are in that set, so the transformed
+MIR is identical; a declaration nothing references no longer demotes the run
+or appears in the receipt. A called unresolvable extern still splices and fails
+closed; a function-value use is still named and still rejected module-wide by
+the JIT's `first_named_fn_value_load`.
+
+caret `--help`, aarch64, seeds `19f0d14f1c892d49…` (base) / `4da8af22722e0ed1…`
+(wave 3), 3 serial runs each plus interleaved pairs, host load 9-11:
+
+| | splice names | wall (median, 3 serial) | user CPU (median, 6 interleaved) | peak RSS | stdout vs interpreter |
+|---|---|---|---|---|---|
+| base | 325 | 7.12 s | 7.04 s | 1,593 MB | byte-identical |
+| wave 3 | 309 | 8.38 s | 6.95 s | 1,556 MB | byte-identical |
+
+Wall time on this shared host swings 7.2-11.4 s for BOTH seeds with system time
+(0.5-3.3 s, memory reclaim); interleaved wall medians were 9.26 s base vs
+8.39 s wave 3, and user CPU is flat. No regression; the added work is one MIR
+walk.
+
+Dropped from the splice (16): `GetModuleFileNameW`, `GetSystemTimes`,
+`retained_native_{close,read,write}`, `rt_arm32_dcache_{clean,invalidate}_range`,
+`rt_host_{commit,disk}_headroom_bytes_v1`, `rt_http_{delete,head,patch,post,put}`,
+`rt_http_url_{decode,encode}`.
+
+**Finding:** the reduction is small because the other 309 ARE referenced: the
+seed lowers every imported `src/lib` function body into the module MIR, called
+or not, so a Win32 wrapper in a reachable module references its extern. Driving
+the count further needs either reachability pruning of MIR functions from
+`main` (a larger change: function values, vtables and module init would all
+have to be roots) or the cfg-pruning / native providers listed under
+"Remaining after wave 2".
+
+Tests (`jit_extern_native_link_tests.rs`): 4 wave-3 cases; 2 red on the base
+seed (declared-never-called runs fully JIT; the receipt names only referenced
+externs), 2 pins green on both (called from a helper / a lambda still splices
+and fails closed; function value / function argument still detected). 10/10
+green on the wave 3 seed; `mir::hybrid` unit tests and `extern_drift_tests`
+green.

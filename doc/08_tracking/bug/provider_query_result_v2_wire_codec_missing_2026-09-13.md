@@ -78,3 +78,10 @@ describe block (2 examples) is NOT fixed and needs this record's larger repair.
    `native_provider_v1.spl`'s missing digest-helper imports — a distinct
    defect from the V2 wire gap, found while tracing this one.
 
+
+## Triage 2026-11-13 (P3 tools lane)
+No code change this lane. The lane-local partial fix (self-contained host-side
+ABI admission helper, 5/5 green) stands; the remaining V2 wire codec +
+provider_loader/native_provider_v1 digest-import repair is the larger
+feature-sized direction recorded in this doc, in `src/os/smf` (outside the P3
+tools lane's bounded src/app|src/lib scope).

@@ -320,3 +320,27 @@ per live module and refuses function completion and object/JIT publication.
 Free/reset clear owned failures. Isolated provider evidence is separate from
 new compiler qualification. See
 [refusal propagation](../../../08_tracking/bug/cranelift_rejected_call_publication_2026_10_30.md).
+
+## Pure-Simple JIT callee binding (2026-11-13)
+
+The K1 JIT lane runs `cranelift_jit_run_main` (`cranelift_codegen_adapter.spl`):
+the AOT lane's lowering into a host JIT module (`CL_TARGET_HOST`, `jit: true`
+selects `cranelift_define_function`). `jit_extern_resolution.spl` classifies
+named callees by `MirOperand.call_origin` once per module, before codegen.
+Local Source and Foreign callees link natively. Runtime (`rt_*`), undefined
+Source and unproven-origin callees are refused by name. The refusal exists
+because the provider registers no runtime symbols and binds by process symbol
+lookup: an unbound import aborts the host inside
+`rt_cranelift_finalize_module`, it does not return an error. Do not add an
+`rt_*` name table to lift the refusal; the provider has to register the
+symbols first. See
+[provider gap](../../../08_tracking/bug/pure_simple_jit_provider_registers_no_runtime_symbols_2026-11-13.md).
+Imports the lowering declares on its own, such as `rt_string_new_literal` for
+any string constant, are covered too. Declare every import through
+`cl_declare_import_function` (`cranelift_runtime_imports.spl`). It records the
+import in the JIT module's ledger, and `cranelift_jit_run_main` refuses any
+non-Foreign import (`E-JIT-LOWERING-IMPORT-UNBOUND`) before finalize. A direct
+`cranelift_declare_function(..., IMPORT)` would skip the ledger, and the host
+aborts again. `cranelift_runtime_import_seed_parity_spec.spl` pins the
+signatures of the adapter's runtime-import shims against the seed's
+`RuntimeFuncSpec` table.

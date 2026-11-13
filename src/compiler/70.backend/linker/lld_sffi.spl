@@ -19,6 +19,7 @@ extern fn rt_memset(dest: i64, value: i64, len: i64) -> i64
 extern fn rt_memcpy(dest: i64, src: i64, len: i64)
 @unsafe(reason: "nonnull raw store; linker allocation and relocation bounds are caller-owned", capabilities: [ffi, raw_ptr])
 extern fn rt_ptr_write_i64(addr: i64, offset: i64, value: i64)
+extern fn rt_ptr_read_i64(addr: i64, offset: i64) -> i64
 extern fn rt_cstring_to_text(ptr: i64) -> text
 # `rt_string_data` is the always-linked core-required `(text) -> i64` string
 # data accessor. Do not define a module-local `spl_str_ptr` wrapper here: the
@@ -42,10 +43,15 @@ class LldResult:
 
 fn lld_elf_link(args: [text]) -> LldResult:
     # Resolve the statically linked shim without treating a null provider
-    # handle as an ordinary dynamic-library authority.
-    var fptr: i64 = 0
+    # handle as an ordinary dynamic-library authority. The out slot is a
+    # caller-owned heap cell passed by address: a `&mut local` short borrow
+    # handed to a foreign callee fails the borrow stage.
+    val out_slot = rt_alloc(8)
+    rt_ptr_write_i64(out_slot, 0, 0)
     val symbol_status = unsafe(capabilities: [ffi, raw_ptr]):
-        spl_dlsym_process_checked("simple_lld_elf_link", &mut fptr)
+        spl_dlsym_process_checked("simple_lld_elf_link", out_slot)
+    val fptr = rt_ptr_read_i64(out_slot, 0)
+    rt_free(out_slot)
     if symbol_status != 0 or fptr <= 0:
         return LldResult(
             exit_code: 127,

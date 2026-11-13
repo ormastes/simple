@@ -7,6 +7,9 @@ use app.cli.worker_hir_profile_v1.{worker_hir_argument_error_v1, worker_hir_stag
     worker_hir_pool_skip_without_closure_v1}
 use app.cli.worker_hir_owner_v1.{worker_hir_cleanup_deadline_v1,
     worker_hir_remaining_budget_v1, worker_hir_environment_sort_v1}
+use app.cli.native_build_output_plan.{native_build_entry_and_sources_v1}
+use app.cli.environment_variant_policy_handoff_owner_v1.{
+    ENVIRONMENT_VARIANT_POLICY_HANDOFF_ARG_PREFIX_V1}
 use std.common.process.observation_v4.{ProcessObservationEnvironmentV4,
     PROCESS_OBSERVATION_V4_MAX_WALL_BUDGET_NS}
 
@@ -202,6 +205,60 @@ describe "worker HIR profile admission":
     it "rejects duplicate shard selectors before source admission":
         expect(worker_hir_child_validate_v1(["--entry", "src/main.spl",
             "--hir-shard=0/1", "--hir-shard=0/1"]).is_err()).to_equal(true)
+
+    # bootstrap-fable-21 (2026-11-13): the coordinator admitted the positional
+    # phase C matrix argv (`native-build <entry>.spl --backend=cranelift
+    # --low-memory --entry-closure ... -o OUT`, entry resolved through
+    # native_build_entry_and_sources_v1) and spawned its HIR pool; every worker
+    # then refused itself with `HIR profile requires one shard and entry`
+    # because the child pre-check derived the entry from `--entry` only.
+    # The child must derive the entry exactly as the coordinator did: the
+    # pre-check passes and the unit fixture is refused one step later, at the
+    # missing policy handoff -- the same verdict the `--entry` spelling gets.
+    it "derives the positional phase C entry in the child pre-check":
+        val positional = ["src/app/cli/_CliMain/main_and_help.spl", "--backend=cranelift",
+            "--low-memory", "--entry-closure", "--cache-dir", "/tmp/c", "--timeout", "7200",
+            "--threads", "2", "-o", "/tmp/out", "--hir-shard=0/2"]
+        val explicit = ["--entry", "src/app/cli/_CliMain/main_and_help.spl", "--backend=cranelift",
+            "--low-memory", "--entry-closure", "--cache-dir", "/tmp/c", "--timeout", "7200",
+            "--threads", "2", "-o", "/tmp/out", "--hir-shard=0/2"]
+        val expected = match worker_hir_child_validate_v1(explicit):
+            case Err(reason): reason
+            case Ok(_): "admitted"
+        expect(expected).to_equal("missing-internal-argument")
+        val verdict = match worker_hir_child_validate_v1(positional):
+            case Err(reason): reason
+            case Ok(_): "admitted"
+        expect(verdict).to_equal(expected)
+
+    # One derivation for both halves of the profile contract: what the
+    # coordinator resolves the frozen closure from is what the child checks.
+    it "derives the entry and sources the coordinator admitted the profile from":
+        val positional = native_build_entry_and_sources_v1(["src/app/cli/_CliMain/main_and_help.spl",
+            "--backend=cranelift", "--low-memory", "--entry-closure", "--cache-dir", "/tmp/c",
+            "--timeout", "7200", "--threads", "2", "-o", "/tmp/out", "--source", "src/lib"])
+        expect(positional.len()).to_equal(2)
+        expect(positional[0]).to_equal("src/app/cli/_CliMain/main_and_help.spl")
+        expect(positional[1]).to_equal("src/lib")
+        val explicit = native_build_entry_and_sources_v1(["--entry=src/main.spl", "--source=src"])
+        expect(explicit.len()).to_equal(2)
+        expect(explicit[0]).to_equal("src/main.spl")
+        expect(explicit[1]).to_equal("src")
+        # A value a flag consumes is never the entry; the coordinator's own
+        # policy handoff token (a `--` switch) is skipped, not taken as the entry.
+        expect(native_build_entry_and_sources_v1(["-o", "out.spl", "--backend", "cranelift"]).len()).to_equal(0)
+        val handed = native_build_entry_and_sources_v1([ENVIRONMENT_VARIANT_POLICY_HANDOFF_ARG_PREFIX_V1 + "x",
+            "src/main.spl"])
+        expect(handed.len()).to_equal(1)
+        expect(handed[0]).to_equal("src/main.spl")
+        expect(native_build_entry_and_sources_v1(["--entry"]).len()).to_equal(0)
+
+    it "still refuses a worker argv that names no entry at all":
+        val verdict = match worker_hir_child_validate_v1(["--backend=cranelift", "-o", "out.spl",
+                "--entry-closure", "--hir-shard=0/2"]):
+            case Err(reason): reason
+            case Ok(_): "admitted"
+        expect(verdict).to_equal("HIR profile requires one shard and entry")
 
     it "does not renew retirement budget after refused acknowledgements":
         val first = worker_hir_cleanup_deadline_v1(0, 100)

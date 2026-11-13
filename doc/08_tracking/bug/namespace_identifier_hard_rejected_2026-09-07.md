@@ -99,3 +99,8 @@ three shapes the doc listed as refused.) The module-declaration mistake shape
 `src/lib/common/contracts/orchestration/resource_v1.spl:31-37` (field named
 `ns`) is still in place; renaming it back to `namespace` is contract churn for
 the orchestration owner lane. The workaround comment cites this doc.
+
+## Triage 2026-11-13 (P3 tools lane)
+No code change this lane; FIXED (verified 2026-11-11, lane ne16) per the record
+addendum (contextual gate in both compilers, three repro shapes pass). Verdict
+trusted, not re-run.

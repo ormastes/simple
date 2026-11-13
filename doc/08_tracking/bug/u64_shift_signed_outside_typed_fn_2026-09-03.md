@@ -70,3 +70,14 @@ and into arithmetic/shift/`to_string` on it, the same way a declared `-> u64`
 return type already does. A diagnostic on the silent i64 demotion would be an
 acceptable interim, since the current failure mode is a wrong answer with no
 signal.
+
+## Triage 2026-11-13 (P3 tools lane)
+No code change this lane. Verified the record's analysis still describes the
+fix surface accurately: the u64-ness is carried by declared `-> u64` return
+types, not by `val` annotations, so the defect lives in the compiler
+frontend/interpreter type-propagation path (src/compiler + interpreter,
+outside this lane's bounded src/app|src/lib .spl scope). The in-tree
+workaround (`src/lib/common/simd_lane_pure.spl` typed wrappers +
+`fn u64_text` in the tranche-E spec) remains the standing mitigation; a
+diagnostic on silent i64 demotion would be an acceptable interim per the
+record. Routed to the compiler lane.

@@ -95,3 +95,9 @@ elsewhere and is not addressed here; the offender list captured at landing is
 helper). This change adds `test/01_unit/lib/common/ponytail/` and
 `test/01_unit/lib/common/token_budget_spec.spl` and introduces zero new
 divergence.
+
+## Triage 2026-11-13 (P3 tools lane)
+No code change this lane; the 2026-11-11 (runner9) addendum stands — OPEN /
+LIVE, none of the six gaps absorbed, and the record explicitly says "needs
+owner scope decision; do not implement from this row." Awaiting the search
+owner's scope decision.

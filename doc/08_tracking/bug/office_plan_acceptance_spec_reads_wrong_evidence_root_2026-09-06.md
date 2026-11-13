@@ -74,3 +74,9 @@ Seed-smoke verification on refreshed seed (build-commit 0791c2b7f4a7):
 
 Verdict: SUPERSEDED by 8bc5c33e3bd4.
 
+
+## Triage 2026-11-13 (P3 tools lane)
+No code change this lane; SUPERSEDED by 8bc5c33e3bd4 per the record addendum
+(evidence root aligned and guarded by
+scripts/check/check-office-handoff-evidence-root.py). Verdict trusted, not
+re-run.

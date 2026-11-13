@@ -152,3 +152,11 @@ lookup keys) remain unaudited.
 ## 2026-11-13 triage (live-P3 lane l1, work/live-p3-l1-20261113, base f790f7f266e)
 
 **LIVE (confirmed)** — Language-level decision still unlanded. At this base: C runtime identity-keying UNCHANGED (`rt_core_dict_canon_key`/`rt_core_dict_hash` `src/runtime/runtime_native.c:13350` area, verified by grep); Rust native twin FIXED (`dict.rs` delegates to `value_hash`/`rt_value_eq`). Seed interpreter buckets struct twins separately despite canonical tip source (seed-vs-source build skew — seed-refresh grant). The unaudited shapes (struct field reads/returns/arguments as lookup keys) remain unaudited; the defect cannot be closed by a P3 traverse lane.
+
+## Triage 2026-11-13 (P3 tools lane)
+No code change this lane. The 2026-11-11 addendum (lane ne6) stands: the Rust
+native twin is fixed in source; the live residue is the seed interpreter's
+identity-keying (seed-vs-source discrepancy, flagged for seedfix) and the C
+runtime (`runtime_native.c`, outside the P3 tools lane's src/app|src/lib .spl
+scope). Hazard remains live on those two lanes.
+
