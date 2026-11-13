@@ -283,16 +283,21 @@ fn _driver_substring_is_byte_based_v1() -> bool:
     if _g_substring_policy >= 0:
         return _g_substring_policy == 1
     # "é" is C3 A9 in UTF-8: a byte-offset substring(0, 1) is the single byte
-    # C3; a char-offset substring(0, 1) is the whole two-byte character.
-    # Build the probe texts from bytes so their types are unambiguously text
-    # (the seed types text.substring's result as str, which has no byte_len).
+    # C3 (byte_len 1); a char-offset substring(0, 1) is the whole two-byte
+    # character (byte_len 2). byte_at/byte_len are byte-based on every lane,
+    # so measuring the slice's byte_len distinguishes the policies without a
+    # second probe text. Do NOT compare against rt_bytes_to_text([0xC3]):
+    # UTF-8-validating runtimes replace that lone continuation-less byte with
+    # U+FFFD (3 bytes), so the comparison reported "char-based" on the
+    # byte-based self-hosted runtime, the char-conversion path then desynced
+    # at the first multi-byte source line, and every import after it was
+    # silently dropped from the entry closure (2026-11-13 stage-2 matrix,
+    # ~160 missing-module-surface victims).
     val probe_bytes: [u8] = [0xC3 as u8, 0xA9 as u8]
     var probe_txt: text = ""
-    var first_byte: text = ""
     unsafe(capabilities: [ffi]):
         probe_txt = rt_bytes_to_text(probe_bytes)
-        first_byte = rt_bytes_to_text([0xC3 as u8])
-    _g_substring_policy = if probe_txt.substring(0, 1) == first_byte: 1 else: 0
+    _g_substring_policy = if probe_txt.substring(0, 1).byte_len() == 1: 1 else: 0
     _g_substring_policy == 1
 
 fn _driver_byte_to_char_advance_v1(content: text, from_byte: i64, from_char: i64, to_byte: i64) -> i64:
