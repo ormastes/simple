@@ -348,3 +348,12 @@ Other `b795b3f4a26`/`aba2a5f0a3e` sites, same seed and scope:
   emission (sleds, `.sxray` with ADDR32NB text_base, `.pdata` offsets past the entry sled)
   and touches `observer_build_route_v1.spl`, `driver_xray_policy.spl:85-92`,
   `observer_build_route_v1_spec.spl` and `xray_observer_gate_spec.spl` in one reviewed change.
+
+#### W3: OUT suite, Windows column
+- `test/03_system/xray/xray_backend_differential_out_spec.spl` (still `@tag:in-development`)
+  gains `simple-win64`: the static half (`check-xray-native-win64-objects.shs`) PASSes on this
+  Linux host; the in-process half fails with an explicit BLOCKED message naming the missing
+  lane `scripts/check/check-xray-native-win64-inprocess-e2e.shs` (Windows x64 host + the
+  backend's COFF sled emitter), never a skip. Explicit-path run 2026-11-13 (seed, lanes capped
+  150 s, 8G scope): llvm PASS, simple FAIL (seed `rt_host_dynlib_open` bug), win64 static PASS,
+  win64 in-process BLOCKED -> `passed=2 failed=2`, `IN-DEVELOPMENT EXPLICIT`.
