@@ -7,7 +7,7 @@
 
 use std.nogc_async_mut.sosix.environment.{sosix_env_get_nullable}
 use std.io_runtime.{time_now_monotonic_ms}
-use std.nogc_sync_mut.io.process_ops.{process_wait, process_kill}
+use std.nogc_sync_mut.io.process_ops.{process_wait, process_kill_tree, process_is_running}
 use compiler.driver.driver_build.build_outcome.{
     BuildOutcomeKind, BuildUnitOutcome, BuildOutcomeSet,
     build_outcome_kind_label}
@@ -471,8 +471,16 @@ impl ParallelBuilder:
             while at < live_pid.len() and at < live_start.len():
                 if parallel_unit_budget_expired_v1(live_start[at], time_now_monotonic_ms(), budget_ms):
                     val pid = live_pid[at]
-                    val _killed = process_kill(pid)
-                    val _reaped = process_wait(pid, 5000)
+                    # Kill the whole tree (a compile unit may have shelled out),
+                    # then CHECK the reap: sign-restore the re-wait (an i32
+                    # crosses the wrapper zero-extended) and probe liveness.
+                    val killed = process_kill_tree(pid)
+                    var reaped = process_wait(pid, 5000)
+                    if reaped > 2147483647:
+                        reaped = reaped - 4294967296
+                    val stopped = reaped != -2 and not process_is_running(pid)
+                    if not stopped:
+                        eprint "[PARALLEL] pid={pid} killed at unit_timeout_ms={budget_ms} but NOT confirmed stopped (kill={killed} rewait={reaped}); its outputs are untrusted"
                     return (pid, PARALLEL_UNIT_TIMEOUT_CODE_V1)
                 at = at + 1
 
