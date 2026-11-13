@@ -1797,7 +1797,12 @@ impl MirLowering:
                                     # container annotation
                                     # (mir_unresolved_method_inferred_receiver_2026-10-24).
                                     val declared_override = if let_type_present: self.let_declared_type_override_v1(init_local.id, let_type_value) else: 0
-                                    if declared_override > 0:
+                                    if declared_override == 4:
+                                        self.copy_local_hir_type_metadata(init_local.id, local.id)
+                                        self.remember_local_hir_type(local.id, let_type_value,
+                                            self.local_hir_type_isolation_state(init_local.id),
+                                            self.local_hir_type_resource_state(init_local.id))
+                                    elif declared_override > 0:
                                         self.remember_local_hir_type(local.id, let_type_value, 0, 0)
                                         if declared_override == 2:
                                             self.runtime_array_locals[local.id] = true
@@ -3855,23 +3860,34 @@ impl MirLowering:
         """Whether an annotated `val x: T = init` must record T instead of
         copying the initializer local's HIR type. 0 = copy the initializer
         (unchanged behaviour); 1 = record T; 2 / 3 = record T and mark the
-        binding a runtime array / dict handle.
+        binding a runtime array / dict handle; 4 = copy the initializer's
+        metadata (owners, flags, isolation / resource state) but record T.
 
         Untyped bindings carry the HIR `Infer` marker as their Let type, so
         `val r = s.substring(..)` leaves `r` typed Infer, and the copy rule
         then let that placeholder beat `val t: text = r` -- `t.bytes()` died as
         `unresolved method call: bytes`. Likewise `val args: [MirOperand] =
         raw_args` with `raw_args: i64` (SFFI handle) copied Int over the array
-        annotation and `args.len()` was unresolved. Only those two shapes are
-        overridden; any informative initializer type still wins."""
+        annotation and `args.len()` was unresolved.
+
+        A settled `Result<T, E>` annotation also outranks a Result
+        initializer: the if/match join adopts its typed
+        arm's type, so `val r: Result<i64, text> = if c: mk_u8(x) else:
+        Err("e")` copied `Result<u8, text>` over the annotation and
+        `r.unwrap()` lowered as U8
+        (mir_let_annotated_result_overwritten_by_join_metadata_2026-11-12).
+        Any other informative initializer type still wins."""
         if declared == None:
             return 0
         var declared_container = 0
+        var declared_result = false
         match declared.kind:
             case HirTypeKind.Infer(_, _): return 0
             case HirTypeKind.Error: return 0
             case HirTypeKind.Array(_, _): declared_container = 2
             case HirTypeKind.Dict(_, _): declared_container = 3
+            case HirTypeKind.Result(ok, err):
+                declared_result = not mir_let_type_unsettled(ok) and not mir_let_type_unsettled(err)
             case _: ()
         match self.find_local_hir_type(init_local_id):
             case Some(init_type):
@@ -3884,6 +3900,8 @@ impl MirLowering:
                         if declared_container > 0: return declared_container
                     case HirTypeKind.Int(bits, _):
                         if bits == 64 and declared_container > 0: return declared_container
+                    case HirTypeKind.Result(_, _):
+                        if declared_result: return 4
                     case _: ()
             case None: ()
         0
