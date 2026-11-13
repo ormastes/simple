@@ -1,0 +1,80 @@
+# @cover src/lib/common/ui/rendering_parity 80%
+# @tag: unit, ui, rendering, parity
+# Review P1 regressions: tolerance is bound to the fixture; blank detection is
+# relative to the expected frame; drawing cases prove changed pixels in region.
+
+use std.spec
+use common.ui.rendering_parity.*
+
+fn _solid(w: i64, h: i64, r: u8, g: u8, b: u8, a: u8) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < w * h:
+        out.push(r)
+        out.push(g)
+        out.push(b)
+        out.push(a)
+        i = i + 1
+    out
+
+fn _fixture_with(policy_id: text, ch: i64, px: i64) -> RenderingFixture:
+    val base = rendering_fixture("fx-1", "button", "html", "<b>x</b>", 2, 2).unwrap()
+    rendering_fixture_with_tolerance(base, policy_id, ch, px).unwrap()
+
+describe "fixture-bound tolerance":
+    it "accepts the exact policy the fixture declares":
+        val fx = _fixture_with("fixture:fx-1-aa", 4, 1)
+        val e = [10u8, 10u8, 10u8, 255u8, 90u8, 80u8, 70u8, 255u8, 5u8, 6u8, 7u8, 255u8, 200u8, 100u8, 50u8, 255u8]
+        var a = e
+        a[0] = 13u8
+        val r = compare_rgba8_for_fixture(fx, e, a, 2, 2, "chrome", "cpu", "raster", "fixture:fx-1-aa", 4, 1).unwrap()
+        expect(r.equal).to_equal(true)
+        expect(r.status).to_equal("accepted-with-policy")
+
+    it "rejects an invented policy id or widened bounds":
+        val fx = _fixture_with("fixture:fx-1-aa", 4, 1)
+        val e = [10u8, 10u8, 10u8, 255u8, 90u8, 80u8, 70u8, 255u8, 5u8, 6u8, 7u8, 255u8, 200u8, 100u8, 50u8, 255u8]
+        expect(compare_rgba8_for_fixture(fx, e, e, 2, 2, "chrome", "cpu", "raster", "fixture:generous", 4, 1).is_err()).to_equal(true)
+        expect(compare_rgba8_for_fixture(fx, e, e, 2, 2, "chrome", "cpu", "raster", "fixture:fx-1-aa", 255, 4).is_err()).to_equal(true)
+        expect(rendering_fixture_with_tolerance(fx, "global", 1, 1).is_err()).to_equal(true)
+
+describe "relative blank detection":
+    it "rejects black actual against solid white expected under tolerance":
+        val fx = _fixture_with("fixture:fx-1-flat", 255, 4)
+        val white = _solid(2, 2, 255u8, 255u8, 255u8, 255u8)
+        val black = _solid(2, 2, 0u8, 0u8, 0u8, 255u8)
+        val r = compare_rgba8_for_fixture(fx, white, black, 2, 2, "chrome", "cpu", "raster", "fixture:fx-1-flat", 255, 4).unwrap()
+        expect(r.equal).to_equal(false)
+        expect(r.blank_actual).to_equal(true)
+        val clear = _solid(2, 2, 0u8, 0u8, 0u8, 0u8)
+        expect(compare_rgba8_for_fixture(fx, white, clear, 2, 2, "chrome", "cpu", "raster", "fixture:fx-1-flat", 255, 4).unwrap().equal).to_equal(false)
+
+    it "accepts white against white":
+        val fx = _fixture_with("fixture:fx-1-flat", 0, 0)
+        val white = _solid(2, 2, 255u8, 255u8, 255u8, 255u8)
+        val r = compare_rgba8_for_fixture(fx, white, white, 2, 2, "chrome", "cpu", "raster", "fixture:fx-1-flat", 0, 0).unwrap()
+        expect(r.equal).to_equal(true)
+        expect(r.blank_actual).to_equal(false)
+
+describe "drawing region proof":
+    it "requires changed pixels inside the expected region and none outside":
+        val bg = _solid(4, 4, 255u8, 255u8, 255u8, 255u8)
+        var drawn = bg
+        drawn[(1 * 4 + 1) * 4] = 0u8
+        val ok = rgba8_changed_region_proof(bg, drawn, 4, 4, 1, 1, 2, 2).unwrap()
+        expect(ok.ok).to_equal(true)
+        expect(ok.changed_inside).to_equal(1)
+        val nothing = rgba8_changed_region_proof(bg, bg, 4, 4, 1, 1, 2, 2).unwrap()
+        expect(nothing.ok).to_equal(false)
+        var stray = drawn
+        stray[0] = 0u8
+        val outside = rgba8_changed_region_proof(bg, stray, 4, 4, 1, 1, 2, 2).unwrap()
+        expect(outside.ok).to_equal(false)
+        expect(outside.changed_outside).to_equal(1)
+        expect(rgba8_changed_region_proof(bg, drawn, 4, 4, 3, 3, 2, 2).is_err()).to_equal(true)
+
+describe "backend statuses":
+    it "keeps unsupported and not_run distinct from skip":
+        expect(backend_evidence("c", "gpu", "vulkan", true, "unsupported", "no api").unwrap().status).to_equal("unsupported")
+        expect(backend_evidence("c", "gpu", "vulkan", true, "not_run", "not scheduled").unwrap().status).to_equal("not_run")
+        expect(backend_evidence("c", "gpu", "vulkan", true, "not_run", "").is_err()).to_equal(true)

@@ -27,6 +27,10 @@ val RENDER_COMPARE_CHANNEL_TOLERANCE: text = "channel-tolerance"
 
 val RENDERING_STAGE_POLICY_ID: text = "semantic-stage-exact"
 
+# Distinct from "skip": unsupported = the lane cannot do this case; not_run = never scheduled.
+val RENDER_STATUS_UNSUPPORTED: text = "unsupported"
+val RENDER_STATUS_NOT_RUN: text = "not_run"
+
 # ---------------------------------------------------------------- contracts
 
 struct RenderingFixture:
@@ -50,6 +54,8 @@ struct RenderingFixture:
     required_rows: [text]
     tolerance_policy: text
     frame_count: i64
+    tolerance_max_channel: i64
+    tolerance_max_pixels: i64
 
 fn _nonempty(s: text) -> bool:
     s.len() > 0
@@ -68,7 +74,8 @@ fn rendering_fixture(case_id: text, component: text, input_kind: text, source: t
         input_kind: input_kind, source: source, resource_hash: "", config_hash: "",
         width: width, height: height, dpr_milli: 1000, color_space: PIXEL_COLOR_SPACE_SRGB,
         font_manifest_hash: "", locale: "", timezone: "", seed: 0, state: "",
-        features: [], required_rows: [], tolerance_policy: RENDER_COMPARE_EXACT, frame_count: 1))
+        features: [], required_rows: [], tolerance_policy: RENDER_COMPARE_EXACT, frame_count: 1,
+        tolerance_max_channel: 0, tolerance_max_pixels: 0))
 
 # Deterministic fixture: every environment input that can change pixels is pinned.
 fn rendering_fixture_v1(case_id: text, component: text, input_kind: text, source: text, resource_hash: text, config_hash: text, width: i64, height: i64, dpr_milli: i64, color_space: text, font_manifest_hash: text, locale: text, timezone: text, seed: i64, state: text, features: [text], required_rows: [text], tolerance_policy: text, frame_count: i64) -> Result<RenderingFixture, text>:
@@ -94,7 +101,8 @@ fn rendering_fixture_v1(case_id: text, component: text, input_kind: text, source
         width: width, height: height, dpr_milli: dpr_milli, color_space: color_space,
         font_manifest_hash: font_manifest_hash, locale: locale, timezone: timezone, seed: seed,
         state: state, features: features, required_rows: required_rows,
-        tolerance_policy: tolerance_policy, frame_count: frame_count))
+        tolerance_policy: tolerance_policy, frame_count: frame_count,
+        tolerance_max_channel: 0, tolerance_max_pixels: 0))
 
 struct RenderingStageRecord:
     case_id: text
@@ -190,7 +198,7 @@ struct BackendEvidence:
     reason: text
 
 fn _status_valid(status: text) -> bool:
-    status == "pass" or status == "fail" or status == "skip"
+    status == "pass" or status == "fail" or status == "skip" or status == RENDER_STATUS_UNSUPPORTED or status == RENDER_STATUS_NOT_RUN
 
 fn backend_evidence(case_id: text, backend: text, api: text, required: bool, status: text, reason: text) -> Result<BackendEvidence, text>:
     if not _nonempty(case_id) or not _nonempty(backend) or not _nonempty(api):
@@ -220,6 +228,8 @@ fn backend_evidence_v1(case_id: text, backend: text, api: text, run_id: text, re
     if physical_gpu:
         if software_fallback or cpu_fallback or simulated or fallback_count > 0:
             return Err("backend evidence v1: physical GPU claim contradicts a fallback flag")
+        # Intent: a physical-GPU claim names one graphics API, and the lane (backend)
+        # is that API; a lane reporting a different api is a software or proxy path.
         if api != backend:
             return Err("backend evidence v1: physical GPU claim with api " + api + " on backend " + backend)
         if not _nonempty(driver_id) or not _nonempty(device_id) or not _nonempty(readback_id):
@@ -554,9 +564,25 @@ fn _check_rgba_inputs(expected: [u8], actual: [u8], width: i64, height: i64) -> 
         return "rgba length mismatch: expected " + expected.len().to_string() + " actual " + actual.len().to_string() + " need " + need.to_string()
     ""
 
+fn rgba8_is_uniform(rgba: [u8]) -> bool:
+    var i = 4
+    while i + 3 < rgba.len():  # cpu-lane-loop-ok: one iteration per pixel
+        if rgba[i] != rgba[0] or rgba[i + 1] != rgba[1] or rgba[i + 2] != rgba[2] or rgba[i + 3] != rgba[3]:
+            return false
+        i = i + 4
+    rgba.len() >= 4
+
+# Blank is relative to the expectation: a uniform actual frame that is not
+# identical to expected (white vs black, transparent vs white, flat vs drawn)
+# is never tolerated; a sentinel-blank actual against diverse expected also fails.
+fn _blank_relative(expected: [u8], actual: [u8]) -> bool:
+    if rgba8_is_uniform(actual) and expected != actual:
+        return true
+    rgba8_is_blank(actual) and not rgba8_is_blank(expected)
+
 fn _compare_core(expected: [u8], actual: [u8], width: i64, height: i64, expected_lane: text, actual_lane: text, stage: text, policy: text, policy_id: text, max_channel: i64, max_pixels: i64) -> RenderComparison:
     val diag = _scan_rgba8(expected, actual, width, height)
-    val blank_actual = rgba8_is_blank(actual) and not rgba8_is_blank(expected)
+    val blank_actual = _blank_relative(expected, actual)
     var equal = diag.mismatch_count == 0
     var status = "exact"
     if blank_actual:
@@ -622,3 +648,55 @@ fn compare_rgba8_with_policy_and_diagnostics(expected: [u8], actual: [u8], width
     r.diagnostic.diff_path = diff_path
     r.diagnostic.reproduction_command = reproduction_command
     Ok(r)
+
+# Attach the single tolerance a fixture is allowed to use. Policy ids must be
+# fixture-scoped and bounds sane; this is the only place bounds are declared.
+fn rendering_fixture_with_tolerance(fixture: RenderingFixture, policy_id: text, max_channel_delta: i64, max_differing_pixels: i64) -> Result<RenderingFixture, text>:
+    if not policy_id.starts_with("fixture:") or policy_id.len() <= 8:
+        return Err("tolerance policy id must be fixture-scoped (fixture:<id>), got " + policy_id)
+    if max_channel_delta < 0 or max_channel_delta > 255 or max_differing_pixels < 0 or max_differing_pixels > fixture.width * fixture.height:
+        return Err("tolerance bounds out of range")
+    var f = fixture
+    f.tolerance_policy = policy_id
+    f.tolerance_max_channel = max_channel_delta
+    f.tolerance_max_pixels = max_differing_pixels
+    Ok(f)
+
+# Sanctioned tolerance comparison: the caller's claimed policy id and bounds must
+# equal what the fixture declares, otherwise the call is rejected.
+fn compare_rgba8_for_fixture(fixture: RenderingFixture, expected: [u8], actual: [u8], width: i64, height: i64, expected_lane: text, actual_lane: text, stage: text, policy_id: text, max_channel_delta: i64, max_differing_pixels: i64) -> Result<RenderComparison, text>:
+    if policy_id != fixture.tolerance_policy:
+        return Err("policy " + policy_id + " is not the fixture's declared policy " + fixture.tolerance_policy)
+    if max_channel_delta != fixture.tolerance_max_channel or max_differing_pixels != fixture.tolerance_max_pixels:
+        return Err("policy bounds differ from the fixture's declared bounds")
+    if width != fixture.width or height != fixture.height:
+        return Err("comparison size differs from the fixture viewport")
+    compare_rgba8_with_policy(expected, actual, width, height, expected_lane, actual_lane, stage, RENDER_COMPARE_CHANNEL_TOLERANCE, policy_id, 1, max_channel_delta, max_differing_pixels)
+
+struct RegionProof:
+    changed_inside: i64
+    changed_outside: i64
+    ok: bool
+
+# Plan 5.1 drawing proof: against a baseline (background-only) frame, a drawing
+# case must change pixels inside the expected region and none outside it.
+fn rgba8_changed_region_proof(baseline: [u8], actual: [u8], width: i64, height: i64, rx: i64, ry: i64, rw: i64, rh: i64) -> Result<RegionProof, text>:
+    val err = _check_rgba_inputs(baseline, actual, width, height)
+    if _nonempty(err):
+        return Err(err)
+    if rx < 0 or ry < 0 or rw <= 0 or rh <= 0 or rx + rw > width or ry + rh > height:
+        return Err("expected region is outside the frame")
+    var inside: i64 = 0
+    var outside: i64 = 0
+    var i: i64 = 0
+    while i < width * height:  # cpu-lane-loop-ok: one iteration per pixel
+        val o = i * 4
+        if baseline[o] != actual[o] or baseline[o + 1] != actual[o + 1] or baseline[o + 2] != actual[o + 2] or baseline[o + 3] != actual[o + 3]:
+            val x = i % width
+            val y = i / width
+            if x >= rx and x < rx + rw and y >= ry and y < ry + rh:
+                inside = inside + 1
+            else:
+                outside = outside + 1
+        i = i + 1
+    Ok(RegionProof(changed_inside: inside, changed_outside: outside, ok: inside > 0 and outside == 0))
