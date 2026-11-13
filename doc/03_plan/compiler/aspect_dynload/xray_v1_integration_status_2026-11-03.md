@@ -175,3 +175,19 @@ tagged, never skipped.
   `spl_collection_capture_note_size` / `spl_collection_capture_begin`, `Dict.capacity`.
 - NOT yet wired: no production path calls `set_profiling` from the XRay adapter's runtime
   enable/disable; `data_observation_profiling_from_aspect_v1` has no live caller yet.
+
+#### Step 3b (2026-11-13): the linker and the x86-64 backend consume the shared modules
+
+- `70.backend/linker/elf_inspect.spl` `elf_read_u{16,32,64}_le` delegate to
+  `elf_image_u*_le_v1` (its ELF32 branches stay local; `elf_image_v1` is ELF64-only).
+- `70.backend/linker/reloc_engine.spl` R_AARCH64_CALL26/JUMP26 range + imm26 use
+  `a64_branch26_bytes_in_range_v1` / `a64_imm26_from_bytes_v1` (equivalent after the
+  preceding 4-byte alignment check; the spec pins 2^27-4 accept, 2^27 reject, -2^27 accept).
+- `70.backend/backend/native/encode_x86_64.spl` `emit_i32` delegates to
+  `x64_push_imm32_le_v1` (unrolled, no per-call list).
+- Before/after on 10 linker + backend specs: identical verdicts and identical failure set
+  (pre-existing: elf_parser 1, sym_resolver 1, elf_exec_writer 13). Mutations in the shared
+  modules turn the consumers red: imm26 mask -> reloc_engine 121/122; ELF u16 width ->
+  elf_header_phnum 1/2; imm32 top byte -> x86_negative_imm64 1/9.
+- Remaining duplication (not folded): `linker/elf_parser.spl:426,434` section lookup,
+  `linker/_ElfWriter/encoding.spl`, `encode_aarch64.spl` STP/LDP/ADD encoders, kernel loader.
