@@ -49,3 +49,25 @@ canonical widget composition.
 
 `gui_content_renderer_spec.spl` 3/3 on the cpu backend without weakening its
 assertions.
+
+## 2026-11-13 follow-up: the refused command is the label text
+
+Dump of `session.submit_widget_draw_ir(32, 16, "cpu")` for the spec's tree:
+
+```
+batch=widget-main emb=0,0 32x16 op=1000 surf=widget-root
+  cmd kind=rect at=0,0 32x16
+  cmd kind=rect at=0,0 32x16
+  cmd kind=text at=3,2 36x12 text=ready
+```
+
+The text command spans x=3..39 on a 32-wide target. The batch fills the target,
+so `_engine2d_draw_ir_fresh_device_command_supported` is called with
+`allow_clipped=false` and returns false for a text command that is not wholly
+bounded (`draw_ir_adv.spl:1210`). That is the rejection.
+
+Still not established: whether the 36px text box is new (a text-metric change
+would make the spec's 32x16 fixture too small) or whether the fresh-device
+preflight is meant to admit a clipped text command on a full-target batch. The
+first is a fixture question, the second a product one; do not widen the
+fixture or the preflight without deciding which.

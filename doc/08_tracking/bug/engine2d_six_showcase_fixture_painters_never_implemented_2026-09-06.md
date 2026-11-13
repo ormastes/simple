@@ -143,3 +143,7 @@ to current output would not establish a remedy").
 ## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
 
 **LIVE (confirmed)** — Marker-dispatch hack deliberately deleted; fixtures reduced to contentless stubs whose asserted colors exist nowhere in the document. Remaining options need an owner (restore fixture HTML + regenerate goldens under review, or delete the seven stale exact-color scenarios); changing colors to current output would be oracle-gaming.
+
+## Triage 2026-11-13 (Linux aarch64, lane uia) — row stays OPEN
+
+Needs an owner decision, not attempted. At release/1.0.0 c8c3e7bc4f1, Linux aarch64 (DGX Spark GB10), Rust seed af717f53d6bce3e5 the renderer has no fixture painters or marker dispatch (removed by 0179a0cde03), and the seven stub scenarios in simple_web_engine2d_renderer_spec.spl (:98-175) assert colours that do not occur in their HTML, so they cannot pass against any real layout. Making them pass means replacing seven scenarios with real fixture HTML and arithmetic oracles; that is a rewrite of failing tests and needs approval.

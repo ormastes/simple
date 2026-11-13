@@ -51,3 +51,7 @@ provenance, not software checksums or fallback bitmaps); this Windows lane has
 no GPU evidence path, so the font-offload gate cannot pass or be honestly
 exercised here. Grant unchanged: a Linux GPU lane drives the wrapper with real
 runtime/backend evidence and records the gate report.
+
+## Triage 2026-11-13 (Linux aarch64, lane uia) — row stays OPEN
+
+Blocked on this host: check-production-gui-font-offload-evidence.shs refuses the Rust seed by identity (rust-seed-forbidden) and no self-hosted full-CLI binary is deployed; the pass also needs real accelerator glyph readback. Defect still in source at release/1.0.0 c8c3e7bc4f1, Linux aarch64 (DGX Spark GB10), Rust seed af717f53d6bce3e5: vector_font_offload.spl returns vector-font-gpu-glyph-return-missing.
