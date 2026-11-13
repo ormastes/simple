@@ -140,3 +140,19 @@ enumerate the import lists before claiming a unit is fixed. The seed's
 first-probe miss, not a failure (fatal form: `Cranelift function address missing
 declaration:` panic). Bugs: `export_list_static_visibility_not_lifted_2026-11-06`,
 `cranelift_function_addr_probe_miss_diagnostic_2026-11-06`.
+
+## `[E-OPT-CAST-001]` on an unannotated optional-call local (2026-11-13)
+
+The self-hosted `T? as <numeric>` check (Cast arm, `expression_core.spl`)
+decides "optional" from the operand's HIR type, its declared symbol/return
+type, or the diagnostic-only side table `HirLowering.local_optional_call_init`.
+A generic `T?` call result is never substituted into a local's symbol slot
+(`hir_binding_direct_call_return_kind` bails on generics), so
+`val m = pick(..); m as i64` needs that table: `mark_optional_call_init` runs
+at all four val/var lowering sites in `statements.spl` and skips annotated and
+`if val`/`while val` (`bind_optional_payload`) binders. The table is keyed by
+module-local SymbolId — it MUST be cleared in `begin_module`/`lower_module`
+(ids restart at 0) or a mark leaks into the next module as a false positive.
+Not covered yet: method-call initialisers (`val m = o.get(k)`) and copies
+(`val n = m`). Spec: `test/01_unit/compiler/hir/optional_as_cast_rejected_spec.spl`.
+Bug: `pure_err01_untyped_local_of_optional_call_not_rejected_2026-11-13`.
