@@ -116,7 +116,8 @@ use compiler.driver.driver_hir_cache.{hir_cache_promote_diagnostic_owner_v1, hir
 use compiler.driver.driver_source_receipt_index_v1.{
     driver_source_receipt_pair_key_v1, driver_source_receipt_index_v1}
 use compiler.driver.driver_build.native_file_worker_v1.{native_file_worker_unit_active_v1}
-use compiler.driver.driver_hir_cache.{hir_shard_begin, hir_shard_finish, hir_shard_complete, hir_shard_guard_block, hir_shard_inventory, hir_shard_claim_failure_reason_v1}
+use compiler.driver.driver_hir_cache.{hir_shard_begin, hir_shard_finish, hir_shard_complete, hir_shard_guard_block, hir_shard_inventory, hir_shard_claim_failure_reason_v1,
+    hir_shard_row_terminal_due_v1}
 use compiler.hir.hir_lowering.items.{bootstrap_hir_modules_add_from_module, hir_module_logical_name_from_path}
 use compiler.common.cache.reverse_reference_facts.{
     reverse_reference_owner_register_source_alias_v1, reverse_reference_module_begin_v1
@@ -1081,6 +1082,9 @@ impl CompilerDriver:
         # Per-file unit child (native_file_worker_v1.spl): HIR for its claims,
         # then this same process continues into MIR + object.
         val hir_unit_mode: bool = hir_shard_mode and native_file_worker_unit_active_v1()
+        # Unit fall-through rows never re-publish a terminal (layer 3, see
+        # hir_shard_row_terminal_due_v1).
+        val hir_row_terminal_due: bool = hir_shard_row_terminal_due_v1(hir_shard_mode, hir_unit_mode)
         if hir_shard_active() and not hir_shard_mode:
             hir_shard_guard_block("HIR cache identity unavailable for shard")
             self.ctx.add_error("HIR cache identity unavailable for shard")
@@ -1198,6 +1202,13 @@ impl CompilerDriver:
                     return false
                 hir_loop_pos = hir_loop_pos + 1
                 continue
+            # A per-file unit never loads a row outside its load closure; skip it
+            # before the source-identity check, which a TLDR summary surface
+            # (fingerprinted from its stub, not the source) cannot pass.
+            # Counted once here; the P-A gate below keeps non-unit children.
+            if hir_unit_mode and not worker_hir_load_allowed_v1(source.path):
+                hir_loop_pos = hir_loop_pos + 1
+                continue
             # Keep the retained surface in its canonical owner. ModuleSurface
             # is a large value aggregate; copying it into a local and then
             # passing it through module_surface_source_matches reconstructed a
@@ -1299,7 +1310,7 @@ impl CompilerDriver:
                 # cache (or lowered in-process) below -- never waited on.
             # P-A: a module-scoped MIR child loads HIR only for its targets and
             # their frozen import closure (driver_worker_surface_closure_v1).
-            if not worker_hir_load_allowed_v1(source.path):
+            if not hir_unit_mode and not worker_hir_load_allowed_v1(source.path):
                 hir_loop_pos = hir_loop_pos + 1
                 continue
             val hir_stream_cached: HirModule? = if hir_stream_key != "":
@@ -1383,10 +1394,10 @@ impl CompilerDriver:
                         streaming_error.ends_with("; transient parser scope end failed") or
                         streaming_error.ends_with("; frontend registry promotion failed")):
                         hir_shard_guard_block(streaming_error)
-                        val _terminal = hir_shard_finish(source.path, "BLOCKED", false)
+                        val _terminal = if hir_row_terminal_due: hir_shard_finish(source.path, "BLOCKED", false) else: true
                         self.ctx.add_error(streaming_error)
                         return false
-                    if not hir_shard_finish(source.path, "FAILED", false):
+                    if hir_row_terminal_due and not hir_shard_finish(source.path, "FAILED", false):
                         hir_shard_guard_block("HIR failure receipt publication failed")
                         self.ctx.add_error("HIR failure receipt publication failed")
                         return false
@@ -1443,7 +1454,7 @@ impl CompilerDriver:
                         self.ctx.add_error(module_error_message)
                     module_error_index = module_error_index + 1
                 if module_fatal_error_count > 0:
-                    if not hir_shard_finish(source.path, "FAILED", false):
+                    if hir_row_terminal_due and not hir_shard_finish(source.path, "FAILED", false):
                         hir_shard_guard_block("HIR diagnostic receipt publication failed")
                         self.ctx.add_error("HIR diagnostic receipt publication failed")
                         return false
@@ -1479,7 +1490,7 @@ impl CompilerDriver:
                 source.module_name, hir_module, self.ctx.assurance_policy.strictness)
             publish_module_typecheck_receipt_v1(self.ctx, representation_receipt)
             if representation_receipt.errors.len() > 0:
-                if not hir_shard_finish(source.path, "FAILED", false):
+                if hir_row_terminal_due and not hir_shard_finish(source.path, "FAILED", false):
                     hir_shard_guard_block("representation diagnostic receipt publication failed")
                     self.ctx.add_error("representation diagnostic receipt publication failed")
                 return false
@@ -1492,7 +1503,7 @@ impl CompilerDriver:
                 hir_shard_guard_block("durable memory snapshot or source identity guard failed")
                 mem_snapshot_abort()
                 return false
-            if not hir_shard_finish(source.path, "PASS", hir_cache_stored):
+            if hir_row_terminal_due and not hir_shard_finish(source.path, "PASS", hir_cache_stored):
                 hir_shard_guard_block("HIR completion receipt publication failed")
                 self.ctx.add_error("HIR completion receipt publication failed")
                 return false

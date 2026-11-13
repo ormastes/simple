@@ -1,0 +1,275 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+
+use std.spec.step
+
+use std.spec.{describe, it, expect}
+use app.llm_caret.claude_full.ink.termio.parser.{Parser, TextStyle, parseCSIParams, parsePositiveI64, splitCSIParamText, parseCSI, identifySequence, eraseDisplayRegion, eraseLineRegion, cursorStyle, parseOSCSequence, findSequenceEnd, graphemeWidth, segmentGraphemes}
+
+describe "termio parameter parsing":
+    it "splits CSI parameter text on semicolons and colons":
+        step("splits CSI parameter text on semicolons and colons")
+        val parts = splitCSIParamText("1;2:3")
+        expect(parts.len()).to_equal(3)
+        expect(parts[0]).to_equal("1")
+        expect(parts[1]).to_equal("2")
+        expect(parts[2]).to_equal("3")
+        expect(splitCSIParamText("").len()).to_equal(1)
+        expect(splitCSIParamText("1;").len()).to_equal(2)
+
+    it "parses decimal digits into an integer":
+        step("parses decimal digits into an integer")
+        expect(parsePositiveI64("120")).to_equal(120)
+        expect(parsePositiveI64("")).to_equal(0)
+        expect(parsePositiveI64("905")).to_equal(905)
+
+    it "parses parameter lists treating empty fields as zero":
+        step("parses parameter lists treating empty fields as zero")
+        expect(parseCSIParams("").len()).to_equal(0)
+        val p = parseCSIParams("3;;4")
+        expect(p.len()).to_equal(3)
+        expect(p[0]).to_equal(3)
+        expect(p[1]).to_equal(0)
+        expect(p[2]).to_equal(4)
+
+describe "termio region and style helpers":
+    it "maps erase display codes to regions":
+        step("maps erase display codes to regions")
+        expect(eraseDisplayRegion(0)).to_equal("toEnd")
+        expect(eraseDisplayRegion(1)).to_equal("toStart")
+        expect(eraseDisplayRegion(2)).to_equal("all")
+        expect(eraseDisplayRegion(3)).to_equal("saved")
+
+    it "maps erase line codes to regions":
+        step("maps erase line codes to regions")
+        expect(eraseLineRegion(0)).to_equal("toEnd")
+        expect(eraseLineRegion(1)).to_equal("toStart")
+        expect(eraseLineRegion(2)).to_equal("all")
+        expect(eraseLineRegion(9)).to_equal("toEnd")
+
+    it "maps cursor style codes to shapes":
+        step("maps cursor style codes to shapes")
+        expect(cursorStyle(1)).to_equal("block")
+        expect(cursorStyle(2)).to_equal("block")
+        expect(cursorStyle(3)).to_equal("underline")
+        expect(cursorStyle(4)).to_equal("underline")
+        expect(cursorStyle(5)).to_equal("bar")
+        expect(cursorStyle(6)).to_equal("bar")
+        expect(cursorStyle(0)).to_equal("default")
+
+    it "resets text style on zero or empty params only":
+        step("resets text style on zero or empty params only")
+        var s = TextStyle.default()
+        s = s.apply("1;31")
+        expect(s.params).to_equal("1;31")
+        s = s.apply("0")
+        expect(s.params).to_equal("")
+
+    it "classifies grapheme widths":
+        step("classifies grapheme widths")
+        expect(graphemeWidth("a")).to_equal(1)
+        expect(graphemeWidth("")).to_equal(1)
+        expect(graphemeWidth("ab")).to_equal(2)
+
+    it "segments ascii text into single-width graphemes":
+        step("segments ascii text into single-width graphemes")
+        val g = segmentGraphemes("abc")
+        expect(g.len()).to_equal(3)
+        expect(g[1].value).to_equal("b")
+        expect(g[1].width).to_equal(1)
+
+describe "termio CSI parsing":
+    it "parses cursor moves with explicit and default counts":
+        step("parses cursor moves with explicit and default counts")
+        val up = parseCSI("\u001B[3A")
+        expect(up.type).to_equal("cursor")
+        expect(up.actionType).to_equal("move")
+        expect(up.direction).to_equal("up")
+        expect(up.count).to_equal(3)
+        expect(parseCSI("\u001B[B").count).to_equal(1)
+        expect(parseCSI("\u001B[B").direction).to_equal("down")
+        expect(parseCSI("\u001B[2C").direction).to_equal("forward")
+        expect(parseCSI("\u001B[2D").direction).to_equal("back")
+
+    it "parses line, column, row and position cursor sequences":
+        step("parses line, column, row and position cursor sequences")
+        expect(parseCSI("\u001B[2E").actionType).to_equal("nextLine")
+        expect(parseCSI("\u001B[2F").actionType).to_equal("prevLine")
+        val col = parseCSI("\u001B[10G")
+        expect(col.actionType).to_equal("column")
+        expect(col.col).to_equal(10)
+        val pos = parseCSI("\u001B[2;5H")
+        expect(pos.actionType).to_equal("position")
+        expect(pos.row).to_equal(2)
+        expect(pos.col).to_equal(5)
+        val home = parseCSI("\u001B[H")
+        expect(home.row).to_equal(1)
+        expect(home.col).to_equal(1)
+        expect(parseCSI("\u001B[7;8f").col).to_equal(8)
+        expect(parseCSI("\u001B[4d").actionType).to_equal("row")
+        expect(parseCSI("\u001B[4d").row).to_equal(4)
+        expect(parseCSI("\u001B[s").actionType).to_equal("save")
+        expect(parseCSI("\u001B[u").actionType).to_equal("restore")
+
+    it "parses SGR into the raw style parameters":
+        step("parses SGR into the raw style parameters")
+        val a = parseCSI("\u001B[38;5;196m")
+        expect(a.type).to_equal("sgr")
+        expect(a.styleParams).to_equal("38;5;196")
+        expect(parseCSI("\u001B[m").styleParams).to_equal("")
+
+    it "parses erase and scroll sequences":
+        step("parses erase and scroll sequences")
+        val d = parseCSI("\u001B[2J")
+        expect(d.type).to_equal("erase")
+        expect(d.actionType).to_equal("display")
+        expect(d.region).to_equal("all")
+        expect(parseCSI("\u001B[1K").region).to_equal("toStart")
+        val x = parseCSI("\u001B[4X")
+        expect(x.actionType).to_equal("chars")
+        expect(x.count).to_equal(4)
+        val su = parseCSI("\u001B[2S")
+        expect(su.type).to_equal("scroll")
+        expect(su.actionType).to_equal("up")
+        expect(su.count).to_equal(2)
+        expect(parseCSI("\u001B[3T").actionType).to_equal("down")
+        val r = parseCSI("\u001B[3;20r")
+        expect(r.actionType).to_equal("setRegion")
+        expect(r.row).to_equal(3)
+        expect(r.col).to_equal(20)
+
+    it "parses cursor style with an intermediate space":
+        step("parses cursor style with an intermediate space")
+        val a = parseCSI("\u001B[5 q")
+        expect(a.actionType).to_equal("style")
+        expect(a.direction).to_equal("bar")
+
+    it "parses private mode set and reset sequences":
+        step("parses private mode set and reset sequences")
+        expect(parseCSI("\u001B[?25l").actionType).to_equal("hide")
+        expect(parseCSI("\u001B[?25h").actionType).to_equal("show")
+        val alt = parseCSI("\u001B[?1049h")
+        expect(alt.type).to_equal("mode")
+        expect(alt.actionType).to_equal("alternateScreen")
+        expect(alt.enabled).to_equal(true)
+        expect(parseCSI("\u001B[?47l").enabled).to_equal(false)
+        expect(parseCSI("\u001B[?2004h").actionType).to_equal("bracketedPaste")
+        expect(parseCSI("\u001B[?1000h").actionType).to_equal("mouseTracking:normal")
+        expect(parseCSI("\u001B[?1002h").actionType).to_equal("mouseTracking:button")
+        expect(parseCSI("\u001B[?1003h").actionType).to_equal("mouseTracking:any")
+        expect(parseCSI("\u001B[?1004l").actionType).to_equal("focusEvents")
+
+    it "returns unknown for short or unsupported sequences":
+        step("returns unknown for short or unsupported sequences")
+        expect(parseCSI("\u001B[").type).to_equal("unknown")
+        expect(parseCSI("\u001B[?9999h").type).to_equal("unknown")
+        expect(parseCSI("\u001B[?25m").type).to_equal("unknown")
+        expect(parseCSI("\u001B[5~").sequence).to_equal("\u001B[5~")
+
+describe "termio sequence identification and boundaries":
+    it "identifies sequence kinds by introducer":
+        step("identifies sequence kinds by introducer")
+        expect(identifySequence("\u001B[1A")).to_equal("csi")
+        expect(identifySequence("\u001B]0;t\u0007")).to_equal("osc")
+        expect(identifySequence("\u001BOA")).to_equal("ss3")
+        expect(identifySequence("\u001Bc")).to_equal("esc")
+        expect(identifySequence("x")).to_equal("unknown")
+        expect(identifySequence("ab")).to_equal("unknown")
+
+    it "parses OSC 8 hyperlink start and end":
+        step("parses OSC 8 hyperlink start and end")
+        val s = parseOSCSequence("\u001B]8;;http://a.b\u001B\\")
+        expect(s.type).to_equal("link")
+        expect(s.actionType).to_equal("start")
+        expect(s.url).to_equal("http://a.b")
+        val b = parseOSCSequence("\u001B]8;;http://c.d\u0007")
+        expect(b.url).to_equal("http://c.d")
+        expect(parseOSCSequence("\u001B]8;;\u0007").actionType).to_equal("end")
+        expect(parseOSCSequence("\u001B]0;title\u0007").type).to_equal("unknown")
+
+    it "finds the end offset of complete sequences":
+        step("finds the end offset of complete sequences")
+        expect(findSequenceEnd("ab\u001B[1;2Hc", 2)).to_equal(8)
+        expect(findSequenceEnd("\u001B]0;t\u0007", 0)).to_equal(6)
+        expect(findSequenceEnd("\u001B]0;t\u001B\\", 0)).to_equal(7)
+        expect(findSequenceEnd("\u001BOAx", 0)).to_equal(3)
+        expect(findSequenceEnd("\u001Bcx", 0)).to_equal(2)
+
+    it "reports -1 for incomplete sequences":
+        step("reports -1 for incomplete sequences")
+        expect(findSequenceEnd("\u001B", 0)).to_equal(-1)
+        expect(findSequenceEnd("\u001B[12", 0)).to_equal(-1)
+        expect(findSequenceEnd("\u001B]0;t", 0)).to_equal(-1)
+        expect(findSequenceEnd("\u001BO", 0)).to_equal(-1)
+
+describe "termio Parser feed":
+    it "emits text, bell and text in order":
+        step("emits text, bell and text in order")
+        var p = Parser.new()
+        val out = p.feed("x\u0007y")
+        expect(out.len()).to_equal(3)
+        expect(out[0].type).to_equal("text")
+        expect(out[0].textValue).to_equal("x")
+        expect(out[0].count).to_equal(1)
+        expect(out[1].type).to_equal("bell")
+        expect(out[2].textValue).to_equal("y")
+
+    it "applies SGR to following text without emitting an action":
+        step("applies SGR to following text without emitting an action")
+        var p = Parser.new()
+        val out = p.feed("\u001B[1;31mhi")
+        expect(out.len()).to_equal(1)
+        expect(out[0].styleParams).to_equal("1;31")
+        val reset = p.feed("\u001B[0mz")
+        expect(reset.len()).to_equal(1)
+        expect(reset[0].styleParams).to_equal("")
+
+    it "emits cursor actions found between text":
+        step("emits cursor actions found between text")
+        var p = Parser.new()
+        val out = p.feed("a\u001B[2Ab")
+        expect(out.len()).to_equal(3)
+        expect(out[1].type).to_equal("cursor")
+        expect(out[1].count).to_equal(2)
+        expect(out[2].textValue).to_equal("b")
+
+    it "buffers an incomplete sequence until the rest arrives":
+        step("buffers an incomplete sequence until the rest arrives")
+        var p = Parser.new()
+        val first = p.feed("a\u001B[3")
+        expect(first.len()).to_equal(1)
+        expect(p.pending).to_equal("\u001B[3")
+        val second = p.feed("1A")
+        expect(second.len()).to_equal(1)
+        expect(second[0].count).to_equal(31)
+        expect(p.pending).to_equal("")
+
+    it "tracks hyperlink state across start and end":
+        step("tracks hyperlink state across start and end")
+        var p = Parser.new()
+        val start = p.feed("\u001B]8;;http://x\u0007")
+        expect(start[0].actionType).to_equal("start")
+        expect(p.inLink).to_equal(true)
+        expect(p.linkUrl).to_equal("http://x")
+        val end = p.feed("\u001B]8;;\u0007")
+        expect(end[0].actionType).to_equal("end")
+        expect(p.inLink).to_equal(false)
+        expect(p.linkUrl).to_equal("")
+
+    it "drops non-link OSC and reports bare ESC and SS3 as unknown":
+        step("drops non-link OSC and reports bare ESC and SS3 as unknown")
+        var p = Parser.new()
+        expect(p.feed("\u001B]0;title\u0007").len()).to_equal(0)
+        val esc = p.feed("\u001Bc")
+        expect(esc[0].type).to_equal("unknown")
+        expect(esc[0].sequence).to_equal("\u001Bc")
+        expect(p.feed("\u001BOA")[0].type).to_equal("unknown")
+
+    it "clears style, link and pending state on reset":
+        step("clears style, link and pending state on reset")
+        var p = Parser.new()
+        p.feed("\u001B[1m\u001B]8;;http://x\u0007\u001B[")
+        p.reset()
+        expect(p.style.params).to_equal("")
+        expect(p.inLink).to_equal(false)
+        expect(p.pending).to_equal("")
