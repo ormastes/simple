@@ -40,3 +40,38 @@ robustness gap.
 Make the adapter's accumulator array mutable (`var`) or use a builder, and
 make the declaration accessor fail-closed (return the record or a named error,
 never `nil`). Re-run this spec after the fix; keep the assertions as-is.
+
+## FIXED 2026-11-13 (wave-2 deep-fix lane, work/compiler-seed-deepfix-20261113)
+
+All 15 examples now pass under the tracked seed. Three distinct defects, two
+of them beyond the record's diagnosis:
+
+1. `push` on immutable `previous` — confirmed at
+   `src/compiler/35.semantics/enum_contract/declaration_check.spl:146`
+   (`val previous: [text] = seen_names[value]` then `previous.push(...)`).
+   Fixed: `val` -> `var`. Cleared 4 examples.
+
+2. nil `variants` — bisected with a scratch spec: the nil comes from the SPEC
+   itself, not a product accessor. `parse_full_frontend` returns
+   `ParserModule` whose `enums` field is `Dict<text, ParserEnum>`
+   (`src/compiler/10.frontend/parser_types.spl:41`), and the spec indexed it
+   positionally (`parsed.enums[0]`). Dict-miss-returns-nil is the DEFINED
+   semantics on every engine (`doc/07_guide/language/dict_iteration_order.md`;
+   pure-Simple lowering documents the same in
+   `src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl:4592`), so no
+   product accessor ever returned a record here — `parsed.enums[0]` was nil
+   on every engine since the spec landed (dde012027fc, 2026-10-21). Deviation
+   from "keep the assertions as-is": the receiver expression
+   `parsed.enums[0]` -> `parsed.enums.values()[0]` (insertion-ordered Dict
+   contract, single-enum fixture); every asserted value is unchanged.
+
+3. NOT in the record — "distinguishes available noninteger literals" also
+   failed: a float discriminant (`A = 1.25`) arrived as `HirExprKind.FloatLit`
+   instead of the pinned `FloatLexeme`. Root cause:
+   `src/compiler/10.frontend/_FlatAstBridge/module_assembly.spl` converted the
+   enum discriminant WITHOUT the lexeme-preserving flag
+   (`flat_bridge_lexeme_float_literals`), which only module-level const
+   initializers and float match patterns set. Fixed by wrapping the
+   discriminant conversion in that flag (third documented lexeme context).
+   Without it, `hir_fold_literal_constant_v1` could not classify float
+   discriminants as NonInteger through the lexeme form.
