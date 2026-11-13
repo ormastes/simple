@@ -15,15 +15,22 @@ Audience: SCV storage maintainers.
 use std.spec.step
 use std.spec.{describe, it, expect, step, assert_false}
 use app.io.mod (process_run, cwd)
+use std.nogc_sync_mut.env.platform.{get_temp_dir}
 use std.scv.structural_store_v1.{scv_structural_build_v1, scv_structural_decode_v1}
 use std.scv.structural_pack_v1.{scv_syntax_pack_closure_v1}
 use std.scv.store.{scv_content_id_for_u8}
+
+# Fixture roots must live where BOTH the POSIX fixture shell and the Simple
+# filesystem APIs can address them: the runtime does not translate a POSIX
+# "/tmp" prefix on Windows, so anchor under the host temp dir instead.
+fn _fixture_base() -> text:
+    get_temp_dir().replace("\\", "/")
 
 fn _harness() -> [text]:
     [
         "set -eu",
         "REPO=$(pwd)",
-        "TMP=$(mktemp -d /tmp/scv-struct-pack.XXXXXX)",
+        "TMP=$(mktemp -d {_fixture_base()}/scv-struct-pack.XXXXXX)",
         "scv() { SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" \"$@\"; }",
         "cd \"$TMP\"",
         "scv init >/dev/null",
@@ -70,7 +77,7 @@ describe "scv structural record pack v1":
         val out = _run([
             "set -eu",
             "REPO=$(pwd)",
-            "TMP=$(mktemp -d /tmp/scv-struct-pack-empty.XXXXXX)",
+            "TMP=$(mktemp -d {_fixture_base()}/scv-struct-pack-empty.XXXXXX)",
             "scv() { SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" \"$@\"; }",
             "cd \"$TMP\"",
             "scv init >/dev/null",
@@ -165,7 +172,9 @@ describe "scv structural record pack v1":
         step "build a real nested byte-DAG fixture, pack it, remove loose records, and check all payload IDs"
         val setup = _run(_harness())
         val root = _test_root(setup)
-        expect(root).to_start_with("/tmp/scv-struct-pack.")
+        # Host-portable shape check: the extracted root must be the scv fixture
+        # directory under the host temp dir (not any particular /tmp spelling).
+        expect(root).to_contain("/scv-struct-pack.")
         val source = "abc".bytes()
         val spans = "root|host|0|3|0|0\ninner|body|0|2|0|1\nfirst|item|0|1|1|2\nsecond|item|1|2|1|2\nlast|item|2|3|1|1\n"
         var root_id = ""
