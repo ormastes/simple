@@ -122,3 +122,7 @@ this host) was probed.
     `expected Promise(state: PromiseState::Resolved(100), callbacks: []) to equal 100`) is a
     spec expectation mismatch (a Promise object compared to a bare `100`), not this dispatch
     defect.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**FIXED (confirmed)** — ne10: fixing 2a488e2cf130 via PR #7597; minimal repro passes 1/1; futures_promises 14/15 (1 red is a spec expectation mismatch, not dispatch).

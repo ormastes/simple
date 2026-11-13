@@ -119,3 +119,7 @@ implement the module or retire the spec with the owning lane's sign-off):
 - `io/hal_buffer_dispatch` — io/HAL package owner.
 
 No spec edited, no assertion relaxed, no production change attempted in this lane.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**LIVE (confirmed)** — rt3: landed half still present and green; still-missing half confirmed by fresh directory census (enterprise_{assets,expense,quality,warehouse}, mission_critical/domain_arena_v2, concurrent/server_worker_policy, io/hal_buffer_dispatch) with named per-module owners.

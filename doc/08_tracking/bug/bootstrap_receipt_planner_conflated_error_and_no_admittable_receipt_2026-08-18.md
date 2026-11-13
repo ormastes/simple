@@ -162,3 +162,7 @@ said was needed) is present at `scripts/bootstrap/bootstrap-from-scratch.sh:757-
 distinguishable provenance, and a previously admitted pure-Simple parent
 (`SIMPLE_BUILD_COMPILER` via `admit-stage2-parent.shs`) may refresh the first
 Stage-2 producer. No code change this lane.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**CLOSED/FIXED (confirmed)** — boot10 verified live: three distinct messages at planner :74/:84/:95; genesis path `explicit-full-bootstrap-stage2-trust-root` present at bootstrap-from-scratch.sh:757-776.

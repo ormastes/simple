@@ -78,3 +78,7 @@ build-commit `46fe8f6b6def` (seed-smoke: `SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/
 - **Scope note:** the fix is a nominal argument-type check in the compiler itself — the G7
   critical path named above. That is owner-lane compiler work, not P3-traverse scope; no seed
   or self-hosted change this lane alters it.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**LIVE (confirmed)** — ne10 re-confirmed verbatim on the tracked seed: all three repro forms (text->i64, newtype cross-type, bare int to newtype) still run exit 0. Fix is a nominal argument-type check in the compiler — owner-lane work on the G7 critical path.

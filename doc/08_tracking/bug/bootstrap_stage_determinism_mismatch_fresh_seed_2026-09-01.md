@@ -166,3 +166,7 @@ for i in 1 2 3; do
 done
 sha256sum build/review/determinism-probe-*.bin   # all equal -> this row closes
 ```
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**SUPERSEDED/BLOCKED (confirmed)** — Live root cause owned by `native_codegen_object_nondeterminism_2026-10-25.md` (same-size-different-bytes signature, same-binary two-run probe). Stage-chain re-verification is a host-heavy grant; no POSIX compiler build permitted here.

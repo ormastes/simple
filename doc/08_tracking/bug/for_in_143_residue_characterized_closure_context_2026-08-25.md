@@ -288,3 +288,7 @@ in this doc's failure table now carries real type information. The
 remaining `#143` surface for this module is the unrelated
 array/string-slice lowering feature gap recorded at the bottom of this
 doc — not missing annotations.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**FIXED (confirmed)** — ne9: the last two unannotated functions (multi_replace, most_common_char) annotated via 9e7e7a526edb (PR #7597); all named functions now carry real type info.

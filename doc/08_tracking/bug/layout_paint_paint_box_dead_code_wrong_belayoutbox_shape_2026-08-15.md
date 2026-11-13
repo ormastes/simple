@@ -53,3 +53,7 @@ Backing test (written ahead of the deletion, now the pin):
 "content geometry is exposed as methods computed from box model", the exact
 wrong-shape reads this doc flagged. No module imports `layout_paint` for
 `_paint_box` (grep of the file shows only the tombstone).
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**FIXED (confirmed)** — Deletion fix 36d99cf738d9 verified ancestor first-hand; contract-pin spec 6/6 on the seed; tombstone cites this doc.

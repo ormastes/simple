@@ -124,3 +124,7 @@ still fails closed for caret gates
 implemented) and requires a trusted reviewer signature over committed
 receipts — a separate lane's machinery. This fix lands the adapter and its
 executable evidence that lane consumes.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**FIXED (confirmed)** — Adapter + executable evidence landed (caret2); must-check ledger promotion still rides the external-receipt gate, which fails closed for caret gates by design.

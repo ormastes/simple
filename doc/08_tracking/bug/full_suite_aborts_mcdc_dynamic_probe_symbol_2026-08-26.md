@@ -334,3 +334,7 @@ of how wide the two-registry gap is rather than a single symbol patched in isola
   `variable mcdc_dynamic_probe_controller_load_builtin_current_owner not found`.
 - **Mechanism note:** the "why a single-file run survives both" section is confirmed — single-file
   runs still bypass wrapper generation entirely; directory runs now pass through it cleanly.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**FIXED (confirmed)** — ne10: both stacked blockers landed via 9e7e7a526edb (real top-level import + interpreter_extern handler); the doc's directory-vs-file discriminator re-run green (2/2) on the tracked seed.
