@@ -4,8 +4,9 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** Open (workaround applied in the affected caller)
-**Component:** `src/compiler/70.backend/backend/vulkan/spirv_builder.spl`
+**Status:** FIXED 2026-11-13 (lane p3-misc-b)
+**Component:** `src/plugins/backend_vulkan/vulkan/spirv_builder.spl`
+(moved from `src/compiler/70.backend/backend/vulkan/`)
 **Found by:** lane A1-FINAL, board-Vulkan SPIR-V Khronos-validity boundary,
 2026-08-11.
 
@@ -114,3 +115,32 @@ hand-reproducing the exact instruction sequences against the real installed
 `spirv-as`/`spirv-val` directly, decoupled from the broken compiler tree; the
 committed spec file will execute as soon as those conflicts are resolved.
 
+
+---
+
+## Resolution 2026-11-13 (lane p3-misc-b)
+
+The suggested additive fix had already landed in
+`src/plugins/backend_vulkan/vulkan/spirv_builder.spl:329`
+(`emit_function_with_id(id, result_type_id, func_type_id, control)`); what
+remained was migrating the two raw-`emit()` workaround call sites onto it.
+Done:
+
+- `src/os/drivers/gpu/board_vulkan/boundary_spirv_khronos_provider.spl` —
+  the hand-built `OpFunction` line replaced with
+  `builder.emit_function_with_id(main_id, void_id, fn_type_id, "None")`;
+  the comment now records the API as fixed rather than gapped.
+- `src/os/drivers/gpu/board_vulkan/boundary_spirv_provider.spl` — same
+  replacement for its entry-point function.
+
+The emitted text is byte-identical (the new method formats the same string
+the workaround interpolated), verified by dumping
+`spirv_khronos_candidate_module_text(false)`:
+`OpEntryPoint GLCompute %1 "main"` / `%1 = OpFunction %2 None %3` — the
+pre-allocated entry id is now defined by the builder's own public API.
+
+Verified: `test/01_unit/os/vulkan/spirv_canonicalize_spec.spl` 9/9 GREEN
+(compiles both edited providers). `spirv_khronos_validation_spec.spl` is 1/11
+both before and after this change — its 10 failures are environmental
+(spirv-as/spirv-val pinned at `/usr/bin/...`, absent on this Windows host;
+identical verdict at HEAD without the change). Canary 4/4 GREEN.

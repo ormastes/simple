@@ -99,3 +99,10 @@ Found while writing `test/01_unit/lib/test_runner/test_config_spec.spl`
 hardening). That spec pins the current (broken) contract explicitly rather
 than asserting the intended-but-unreachable behavior.
 
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+language/runtime mut-param defect pinned RED deliberately (spec pins the broken contract explicitly). Owner: language-semantics lane.

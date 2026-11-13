@@ -215,3 +215,10 @@ is a file this work edits — so the transferred verification is clean.
   `Promise` is (b) and a fix is drafted; `SocketHandle` and `JoinSet` are (a).
 - **`error_helpers.spl` (2 blocks).** Unchanged: not a doctest defect, the
   source fails alone.
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+PARTIALLY FIXED per in-file status (net family green); residue is blocked on the same missing-method API gap as spec_test_loader_impl_method_dispatch. Owner: seed/compiler lane.

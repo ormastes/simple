@@ -19,3 +19,10 @@ metadata, version output, or help output must not authorize execution.
 
 ## Round-10 verdict note (2026-11-06)
 Verdict: host-blocked, same class as the process-tool record (grep): needs target-native /usr/bin/grep bytes, digest, loader token and FAT32/DBFS/NVFS evidence. Gate src/os/services/launcher/launcher_text_tool_gate.spl is correctly fail-closed; test/01_unit/os/services/launcher/launcher_text_tool_gate_spec.spl pins it.
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+SimpleOS release/admission/artifact-blocked item per in-file status; requires the SimpleOS target-artifact pipeline and owner lanes this Windows seed lane cannot run. No change from this lane.

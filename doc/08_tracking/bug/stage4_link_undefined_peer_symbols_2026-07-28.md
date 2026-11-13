@@ -58,3 +58,10 @@ investigation: not "all fn-param calls" but something particular to this
 function/callsite (candidates: the `ui.standalone` dotted package-name path, the
 specific fn-type param signature `fn(UIEvent)`, or this module's discovery/export
 into the closure). One symbol from a clean full-CLI link + deploy.
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+link-stage peer-code symbol defects; owner: stage-4 link lane (needs full-CLI link runs this lane cannot perform).
