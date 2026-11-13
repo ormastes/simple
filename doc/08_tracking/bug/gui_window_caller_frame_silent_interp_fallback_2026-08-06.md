@@ -319,3 +319,17 @@ line plus the hard `SIMPLE_JIT_STRICT: ... refusing to fall back` error
 UNCHANGED from the interp8 pass — the visibility item stays refuted and the
 perf-cliff item-2 root cause stays LIVE, owned by the seed JIT/HIR lowering
 lanes (`src/compiler_rust` / `src/compiler`). Header flipped accordingly.
+
+
+---
+
+## 2026-11-13 addendum — P3 gpu lane p3-gpu-20261113 (work/p3-gpu-20261113, base 6f4cb189867)
+
+**Verdict: LIVE, unchanged — perf-cliff root cause remains owned by the seed
+JIT/HIR-lowering lanes; no re-run this lane.** Per the no-green-rerun rule the
+already-thrice-verdicted strict probe (`[jit-fallback] HIR lowering error:
+Unsupported feature: type alias 'JsBrowserError' names a struct/class declared
+with different layouts ...`, loud in both modes) was not re-executed; the
+visibility item stays REFUTED and item 2 (lowering of the `gui_window` ->
+`gui_renderer` import context) stays LIVE in `src/compiler_rust`/`src/compiler`,
+outside this lane's write scope. Routed status unchanged.
