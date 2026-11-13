@@ -26,6 +26,40 @@ pub fn native_build_is_value_consuming_flag(arg: text) -> bool:
         or arg == "--collection-target"
         or arg == "--collection-policy" or arg == "--collection-memory-budget"
 
+# The one entry/source derivation for a native-build argv: `--entry X` /
+# `--entry=X`, `--source` likewise, or the first positional non-flag argument
+# that no value-consuming flag claimed. `[]` when no entry is named; otherwise
+# `[entry, source...]`. The coordinator resolves the HIR profile's frozen
+# closure through this, and the HIR shard child's profile pre-check
+# (worker_hir_child_validate_v1) must see the same entry -- deriving it from
+# `--entry` alone refused every positional phase C tool build
+# (bootstrap-fable-21, 2026-11-13).
+pub fn native_build_entry_and_sources_v1(args: [text]) -> [text]:
+    var entry = ""
+    var sources: [text] = []
+    var index = 0
+    while index < args.len():
+        val arg = args[index]
+        if arg == "--entry" or arg == "--source":
+            if index + 1 >= args.len(): return []
+            index = index + 1
+            if arg == "--entry": entry = args[index]
+            else: sources.push(args[index])
+        elif arg.starts_with("--entry="):
+            entry = arg.substring(8)
+        elif arg.starts_with("--source="):
+            sources.push(arg.substring(9))
+        elif native_build_is_value_consuming_flag(arg):
+            index = index + 1
+        elif not arg.starts_with("-") and entry == "":
+            entry = arg
+        index = index + 1
+    if entry == "": return []
+    var out: [text] = [entry]
+    for source in sources:
+        out.push(source)
+    out
+
 pub fn native_build_apply_failure_policy_v1(args: [text]):
     # Shared by the full CLI and bootstrap_main's direct focused capsule route.
     # Call after option validation. Preserve flag order, and leave ambient

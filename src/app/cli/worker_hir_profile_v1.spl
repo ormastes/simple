@@ -9,6 +9,7 @@ use std.common.crypto.sha256.{sha256_text}
 use app.cli.environment_variant_policy_handoff_owner_v1.{
     environment_variant_policy_handoff_extract_v1,
     environment_variant_policy_handoff_owner_error_label_v1}
+use app.cli.native_build_output_plan.{native_build_entry_and_sources_v1}
 
 pub struct WorkerHirProfileV1:
     argv: [text]
@@ -258,11 +259,7 @@ pub fn worker_hir_profile_for_owner_v1(profile: WorkerHirProfileV1,
 pub fn worker_hir_child_validate_v1(args: [text]) -> Result<bool, text>:
     var forwarded: [text] = []
     var shard_count = 0
-    var entry = ""
-    var sources: [text] = []
-    var index = 0
-    while index < args.len():
-        val arg = args[index]
+    for arg in args:
         if arg.starts_with("--hir-shard="):
             shard_count = shard_count + 1
             val pieces = arg.substring(12).split("/")
@@ -273,17 +270,14 @@ pub fn worker_hir_child_validate_v1(args: [text]) -> Result<bool, text>:
                 return Err("invalid HIR shard bounds")
         else:
             forwarded.push(arg)
-            if arg == "--entry" or arg == "--source":
-                if index + 1 >= args.len(): return Err("missing HIR source option")
-                index = index + 1
-                forwarded.push(args[index])
-                if arg == "--entry": entry = args[index]
-                else: sources.push(args[index])
-            elif arg.starts_with("--entry="): entry = arg.substring(8)
-            elif arg.starts_with("--source="): sources.push(arg.substring(9))
-        index = index + 1
-    if shard_count != 1 or entry == "": return Err("HIR profile requires one shard and entry")
+    # The entry is derived exactly as the coordinator derived it when it
+    # admitted this profile (native_build_hir_ledger_run_in_v1 ->
+    # native_build_entry_and_sources_v1): `--entry X` or the canonical
+    # positional `<entry>.spl` form. The one-shard + named-entry requirement
+    # itself is unchanged.
+    val selection = native_build_entry_and_sources_v1(forwarded)
+    if shard_count != 1 or selection.is_empty(): return Err("HIR profile requires one shard and entry")
     # This validates canonical source/configuration input, not child claims of
     # launch containment. Only the parent's retained pin/lease supplies that.
-    val _profile = worker_hir_profile_admit_v1(forwarded, entry, sources, 1)?
+    val _profile = worker_hir_profile_admit_v1(forwarded, selection[0], selection[1:], 1)?
     Ok(true)
