@@ -6,13 +6,14 @@ use compiler.core.ast.{
     EXPR_STRING_LIT,
     expr_count,
     expr_get_int,
+    expr_get_span,
     expr_get_str,
     expr_get_tag,
     expr_mark_string_processed,
     expr_promote_interpolated_string
 }
 use compiler.core.tokens.{TOK_EOF}
-use compiler.core.types.{flat_span_pool_mark, flat_span_rebase_from}
+use compiler.core.types.{flat_span_pool_mark, flat_span_rebase_from, span_start, span_line, span_col, span_is_valid}
 use compiler.core.parser.{
     par_kind_get,
     parser_advance,
@@ -21,7 +22,8 @@ use compiler.core.parser.{
     parser_has_errors,
     parser_set_had_error
 }
-use compiler.frontend.core.lexer.{lex_init_with_path, lexer_state_take, lexer_state_install}
+use compiler.frontend.core.lexer.{lex_init_with_path, lexer_state_take, lexer_state_install,
+    lex_source_byte_offset, lex_source_char_offset}
 use compiler.frontend.core.parser_expr.{parse_expr}
 use compiler.core.ast_expr.{
     EXPR_CALL,
@@ -218,7 +220,7 @@ fn parse_string_interpolation_parts(value: text) -> [i64]:
     val (_rewritten, parts) = parse_string_interpolation_regions(value)
     parts
 
-pub fn parse_string_interpolation_regions(value: text) -> (text, [i64]):
+pub fn parse_string_interpolation_regions(value: text, literal_span: i64 = -1) -> (text, [i64]):
     """Region-only interpolation (seed parity: parser/src/expressions/primary/
     literals.rs, Rust test a_valid_hole_next_to_css_text_still_interpolates).
 
@@ -229,6 +231,10 @@ pub fn parse_string_interpolation_regions(value: text) -> (text, [i64]):
     Until 2026-09-27 one bad region literalized the WHOLE string, diverging from
     the seed (owner ruling 2026-09-27). An unbalanced string stays wholly
     literal: `(value, [])`.
+
+    `literal_span` (a span-pool id of the literal token, opening quote) rebases
+    each region's spans onto the module source; without it they stay
+    fragment-relative (start 0, line 1, col 1).
     """
     # Fast path (perf, exact): every branch of the scanner below is gated on
     # seeing a `{` or a `}`. A literal with neither cannot produce a part and
@@ -283,7 +289,15 @@ pub fn parse_string_interpolation_regions(value: text) -> (text, [i64]):
                 # the exact same text, including nested braces, so materialize
                 # it once at the completed-region boundary.
                 val inner = value.substring(inner_start, i)
-                val part = parse_interpolation_fragment(inner)
+                var part = -1
+                if literal_span >= 0 and span_is_valid(literal_span):
+                    # Region base: literal byte start + quote + byte index into
+                    # the value, recorded as a CHAR offset like every pool span.
+                    val region_byte = lex_source_byte_offset(span_start(literal_span)) + 1 + inner_start
+                    part = parse_interpolation_fragment_at(inner, lex_source_char_offset(region_byte),
+                        span_line(literal_span), span_col(literal_span) + 1 + inner_start)
+                else:
+                    part = parse_interpolation_fragment(inner)
                 if part < 0:
                     interpolation_note_malformed_region(value.substring(inner_start - 1, i + 1))
                     chunks.push(value.substring(copied_until, inner_start - 1))
@@ -344,7 +358,7 @@ fn expand_interpolated_placeholder_call_args(start_expr: i64):
                     # loop -- the superlinear term measured 2026-08-21 (a 34x
                     # larger file cost 176x more in this phase). See
                     # doc/08_tracking/bug/frontend_parse_per_file_cost_2026-08-21.md
-                    val (rewritten, parts) = parse_string_interpolation_regions(value)
+                    val (rewritten, parts) = parse_string_interpolation_regions(value, expr_get_span(a))
                     if parts.len() > 0:
                         var has_ph = false
                         var p = 0
@@ -371,7 +385,7 @@ fn expand_string_interpolations_with_placeholder_receipt(start_expr: i64) -> boo
         elif tag == EXPR_STRING_LIT and expr_get_int(idx) == 0:
             si_stat_literals_seen = si_stat_literals_seen + 1
             val value = expr_get_str(idx)
-            val (rewritten, parts) = parse_string_interpolation_regions(value)
+            val (rewritten, parts) = parse_string_interpolation_regions(value, expr_get_span(idx))
             if parts.len() > 0:
                 expr_promote_interpolated_string(idx, rewritten, parts)
             else:

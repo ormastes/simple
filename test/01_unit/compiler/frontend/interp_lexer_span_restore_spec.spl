@@ -7,12 +7,41 @@ lexer CHAR offsets to BYTE offsets through the live lexer
 later offset to that fragment's length (bug
 fresh_parse_vs_cache_hit_span_divergence_2026-11-13). A fresh, uncached parse
 of a module with interpolation must report the real source byte offsets.
+Follow-ups: the fragment's own span is rebased onto the literal in both the
+module-parse and the bridge path, its base is converted byte -> char exactly
+once (no double conversion on non-ASCII sources), and releasing the parse
+source globals drops the span offset table.
 """
 
-use compiler.frontend.flat_ast_bridge.{parse_and_build_module_scoped}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module_scoped, flat_bridge_build_string_interps}
 use compiler.frontend.parser_types.{ParserModule}
-use compiler.frontend.parser_types_expr.{Stmt, StmtKind}
+use compiler.frontend.parser_types_expr.{Stmt, StmtKind, Expr, ExprKind}
+use compiler.frontend.core.lexer.{lexer_release_parse_source_globals, lexer_state_take, lexer_state_install}
 use std.spec.step
+
+fn val_init(module: ParserModule, fn_name: text, binding: text) -> Expr?:
+    for stmt in module.functions[fn_name].body.stmts:
+        match stmt.kind:
+            case StmtKind.Val(name, _ty, init):
+                if name == binding:
+                    return Some(init)
+            case _: ()
+    None
+
+# Span of the first interpolation part of `binding`'s string literal initialiser.
+fn first_part(module: ParserModule, fn_name: text, binding: text) -> Expr?:
+    match val_init(module, fn_name, binding):
+        case Some(init):
+            match init.kind:
+                case ExprKind.StringLit(_, interps):
+                    match interps:
+                        case Some(parts):
+                            if parts.len() > 0:
+                                return Some(parts[0].expr)
+                        case None: ()
+                case _: ()
+        case None: ()
+    None
 
 fn val_init_start(module: ParserModule, fn_name: text, binding: text) -> i64:
     for stmt in module.functions[fn_name].body.stmts:
@@ -40,3 +69,42 @@ describe "interpolation fragment leaves the module lexer in place":
         val source = before + "7654321\n    greeting\n"
         val module = parse_and_build_module_scoped(source, "interp_span_probe_utf8.spl", false)
         expect(val_init_start(module, "greet", "marker_value")).to_equal(before.byte_len())
+
+    it "rebases a fragment's own span onto the literal in the module-parse path":
+        val left = "{"
+        val right = "}"
+        # Line 3, col 20 is the opening quote; the fragment starts at col 25.
+        val before = "# café — probe\nfn greet(name: text) -> text:\n    val greeting = \"hi " + left
+        val source = before + "name" + right + "\"\n    greeting\n"
+        val module = parse_and_build_module_scoped(source, "interp_frag_module_path.spl", false)
+        val part = first_part(module, "greet", "greeting").unwrap()
+        expect(part.span.start).to_equal(before.byte_len())
+        expect(part.span.end).to_equal(before.byte_len() + 4)
+        expect(part.span.line).to_equal(3)
+        expect(part.span.col).to_equal(25)
+
+    it "converts a bridge-path fragment base from bytes to chars exactly once (non-ASCII source)":
+        val left = "{"
+        val right = "}"
+        val before = "# café — probe\nfn greet(items: [i64]) -> text:\n    val greeting = \"ab (" + left
+        val source = before + "items.len()" + right + ")\"\n    greeting\n"
+        val module = parse_and_build_module_scoped(source, "interp_frag_bridge_path.spl", false)
+        step("Re-run the bridge's own region scan over the literal with the module lexer live")
+        val literal = val_init(module, "greet", "greeting").unwrap()
+        val interps = flat_bridge_build_string_interps("ab (" + left + "items.len()" + right + ")", literal.span)
+        expect(interps.len()).to_equal(1)
+        expect(interps[0].expr.span.start).to_equal(before.byte_len())
+        expect(interps[0].expr.span.line).to_equal(3)
+
+    it "drops the span offset table when the parse source globals are released":
+        val left = "{"
+        val right = "}"
+        val source = "# café\nfn greet(name: text) -> text:\n    \"hi " + left + "name" + right + "\"\n"
+        val _module = parse_and_build_module_scoped(source, "interp_release_probe.spl", false)
+        lexer_release_parse_source_globals()
+        val taken = lexer_state_take()
+        val prefix_len = taken.lex_span_byte_prefix.len()
+        val ascii_len = taken.lex_span_all_ascii.len()
+        lexer_state_install(taken)
+        expect(prefix_len).to_equal(0)
+        expect(ascii_len).to_equal(0)
