@@ -34,7 +34,7 @@ use std.env.variables.{env_set, env_get}
 use compiler.common.config.{Logger}
 use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.hir.hir_types.*
-use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.types.{HirLowering, LoweringErrorKind}
 use compiler.hir.hir_lowering.items.*
 use compiler.hir.hir_lowering.required_field_init_v1.*
 
@@ -53,6 +53,28 @@ fn codes(report: RequiredInitReportV1) -> text:
     var out = ""
     for row in report.rows:
         out = out + row.code + ":" + row.class_name + "." + row.field + ";"
+    out
+
+# Lowers through HirLowering.lower_module under one SIMPLE_REQUIRED_INIT_CHECK
+# mode and renders only the verifier's own diagnostics as `severity:code;`.
+fn gated(source: text, name: text, mode: text) -> text:
+    val filename = "required_init_gate_" + name + ".spl"
+    val saved_bootstrap = env_get("SIMPLE_BOOTSTRAP")
+    val saved_mode = env_get(REQUIRED_INIT_CHECK_ENV)
+    env_set("SIMPLE_BOOTSTRAP", "0")
+    env_set(REQUIRED_INIT_CHECK_ENV, mode)
+    val module = parse_full_frontend(source, filename, filename, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(filename)
+    val hir = hir_lowering.lower_module(module)
+    env_set(REQUIRED_INIT_CHECK_ENV, saved_mode)
+    env_set("SIMPLE_BOOTSTRAP", saved_bootstrap)
+    var out = ""
+    for e in hir_lowering.errors:
+        if e.message.starts_with(E_ATTR_REQUIRED_UNINIT) or e.message.starts_with("E_ASYNC_INIT"):
+            val severity = match e.kind:
+                case LoweringErrorKind.Recovered: "warning"
+                case _: "error"
+            out = out + severity + ":" + e.message.split(":")[0] + ";"
     out
 
 val NODE_CLASS: text = "class HirNode:\n    id: i64\n    body: text\n    inferred: i64\n"
@@ -141,3 +163,39 @@ describe "Required field initialization":
         val pub_report = check(pub_src, "attr04_pub")
         expect(pub_report.rows[0].public).to_equal(true)
 
+    it "treats a struct-update spread (..base) as initializing every field it does not name":
+        # @req REQ-IMM-ASY-01
+        step("`T(..base, f: v)` inherits the unnamed fields from `base`; a spread is not a positional slot")
+        val src = NODE_CLASS + "fn bump(n: HirNode) -> HirNode:\n    HirNode(..n, inferred: 2)\n"
+        val report = check(src, "spread")
+        # @capture(exec): no rows, one judged site
+        expect(codes(report)).to_equal("")
+        expect(report.sites_judged).to_equal(1)
+        step("A source nil written next to a spread is still reported")
+        val nil_src = NODE_CLASS + "fn bump(n: HirNode) -> HirNode:\n    HirNode(..n, body: nil)\n"
+        expect(codes(check(nil_src, "spread_nil"))).to_equal("E_ATTR_REQUIRED_UNINIT:HirNode.body;")
+
+describe "Required field initialization gate (SIMPLE_REQUIRED_INIT_CHECK)":
+    it "is off by default: an unannotated module lowers with no verifier diagnostic":
+        # @req REQ-IMM-ASY-03
+        step("The bootstrap compiles existing offenders, so the default must not add errors")
+        val src = NODE_CLASS + "fn make() -> HirNode:\n    HirNode(id: 1)\n"
+        expect(required_init_check_mode_v1()).to_equal("off")
+        expect(gated(src, "default", "")).to_equal("")
+        expect(gated(src, "off", "off")).to_equal("")
+
+    it "reports omissions as recovered warnings in warning mode and as errors in error mode":
+        # @req REQ-IMM-ASY-03
+        val src = NODE_CLASS + "fn make() -> HirNode:\n    HirNode(id: 1, inferred: 2)\n"
+        # @capture(exec): migration-only warning mode vs strict mode
+        expect(gated(src, "warning", "warning")).to_equal("warning:E_ATTR_REQUIRED_UNINIT;")
+        expect(gated(src, "error", "error")).to_equal("error:E_ATTR_REQUIRED_UNINIT;")
+        step("An unrecognized mode value falls back to off")
+        expect(gated(src, "bogus", "strict")).to_equal("")
+
+    it "keeps E_ASYNC_INIT_* an error in every mode because the class annotation is the opt-in":
+        # @req REQ-IMM-ASY-04
+        val src = "@support_async_immutable\n" + NODE_CLASS +
+            "fn make() -> HirNode:\n    HirNode(id: 1, body: \"b\")\n"
+        expect(gated(src, "async_off", "off")).to_equal("error:E_ASYNC_INIT_MISSING;")
+        expect(gated(src, "async_warning", "warning")).to_equal("error:E_ASYNC_INIT_MISSING;")

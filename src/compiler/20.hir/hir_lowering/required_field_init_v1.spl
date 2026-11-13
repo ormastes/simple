@@ -143,6 +143,14 @@ fn required_init_contains_v1(names: [text], name: text) -> bool:
             return true
     false
 
+# Paren-form struct update `T(..base, f: v)` arrives as an unlabeled open-start
+# range `Range(None, Some(base))` (_FlatAstBridge/convert_nodes.spl EXPR_SPREAD);
+# same shape test as struct_construct_spread_base in MIR lower_struct_construct.
+fn required_init_is_spread_arg_v1(e: HirExpr) -> bool:
+    match e.kind:
+        case HirExprKind.Range(start, end, _, _): start == None and end != None
+        case _: false
+
 fn required_init_fix_v1(id: text, description: text) -> DiagnosticFix:
     DiagnosticFix.new(id, description, FixConfidence.Uncertain)
 
@@ -185,8 +193,9 @@ class RequiredInitCollectorV1:
         cls.async_enabled and (cls.async_fields.len() == 0 or required_init_contains_v1(cls.async_fields, field))
 
     # One construction site: `supplied` pairs each initialized field with its
-    # expression, in source order.
-    me check_site(cls: RequiredInitClassV1, supplied: [(text, HirExpr)], span: Span):
+    # expression, in source order. `has_spread`: a struct-update `..base`
+    # argument supplies every field the site does not name.
+    me check_site(cls: RequiredInitClassV1, supplied: [(text, HirExpr)], has_spread: bool, span: Span):
         self.sites_judged = self.sites_judged + 1
         var supplied_names: [text] = []
         for entry in supplied:
@@ -208,6 +217,8 @@ class RequiredInitCollectorV1:
                     found = true
                     nil_written = self.is_source_nil(entry.1)
             if found and not nil_written:
+                continue
+            if (not found) and has_spread:
                 continue
             if (not found) and self.async_authorized(cls, f.name):
                 self.report(E_ASYNC_INIT_MISSING, cls, f.name, span,
@@ -237,7 +248,7 @@ class RequiredInitCollectorV1:
                 match type_.kind:
                     case HirTypeKind.Named(symbol, _):
                         if self.class_of_symbol.contains_key(symbol.id):
-                            self.check_site(self.class_of_symbol[symbol.id], fields, node.span)
+                            self.check_site(self.class_of_symbol[symbol.id], fields, false, node.span)
                         else:
                             self.sites_unjudged = self.sites_unjudged + 1
                     case _: ()
@@ -249,13 +260,17 @@ class RequiredInitCollectorV1:
                     val cls = self.class_of_symbol[callee_id]
                     var supplied: [(text, HirExpr)] = []
                     var position = 0
+                    var has_spread = false
                     for arg in args:
                         if arg.has_name:
                             supplied.push((arg.name, arg.value))
+                        elif required_init_is_spread_arg_v1(arg.value):
+                            has_spread = true
+                            continue
                         elif position < cls.fields.len():
                             supplied.push((cls.fields[position].name, arg.value))
                         position = position + 1
-                    self.check_site(cls, supplied, node.span)
+                    self.check_site(cls, supplied, has_spread, node.span)
                 elif val present = self.symbols.get_symbol_raw(callee_id):
                     val sym: HirSymbol = present
                     if sym.kind == SymbolKind.Class or sym.kind == SymbolKind.Struct:
