@@ -221,6 +221,94 @@ contract attribute (e.g. declare the `*mut i64` out slot `mutate-short`), or
 (2) rewrite the three sites to pass a raw address obtained in `unsafe` instead
 of `&mut local`. Not acceptable: weakening `check_short_call`.
 
+
+### Fix (option 2 / review option B) — out slot passed by address
+
+The two externs now take the out slot as an `i64` ADDRESS
+(`src/lib/nogc_sync_mut/sffi/dynamic.spl:37` `spl_dlsym_process_checked(name,
+out_symbol: i64)`, `:51` `spl_wffi_try_call_i64_out(..., out_value: i64)`); the
+C ABI (`int64_t*`, `runtime_dynload.c:2099`, `runtime_native.c:11490/11617`) is
+unchanged. The three callers allocate a caller-owned 8-byte heap cell with the
+in-tree idiom (`ffi/llvm_types.spl:86-94`): `rt_alloc(8)` → `rt_ptr_write_i64(slot,
+0, 0)` → call → `rt_ptr_read_i64(slot, 0)` → `rt_free(slot)`, with no return
+between alloc and free (lld_sffi.spl `lld_elf_link`; dynamic.spl
+`_sffi_i64_out_transport_honoured`, `_sffi_call_i64_checked`). An `i64` carries
+no loan, so `check_short_call` has nothing to escape; the checker is untouched.
+`_sffi_i64_out_transport_honoured` is KEPT (re-purposed to the address form, not
+vacuous): natively the C provider answers `SPL_WFFI_NULL_FUNCTION` (2) → true;
+the seed interpreter (`interpreter_extern/wsffi.rs:747`) recognises only a
+`Value::BorrowMut` out and answers 1 → false, which is exactly the switch that
+keeps `_sffi_call_i64_checked` on the `[status, value]` fallback transport there.
+The comment at the old dynamic.spl:144 already recorded that the Cranelift lane
+passed `&mut handle` as the slot VALUE — the address form also removes that.
+
+Evidence (census stage2 `compile --format=smf`, bootstrap-fable-19, same
+compiler as the census):
+- shape probes, census-identical message: `red.spl` (`&mut value`) →
+  `[first-compile-error] 5:1: short borrow escapes: call argument requires a
+  checked non-retaining short contract`, rc=1; `green.spl` (address) → rc=0,
+  `.smf` emitted; same red→green for the lld shape (`lld_red.spl` 2 hits /
+  `lld_green.spl` 0).
+- module level: `compile src/compiler/70.backend/linker/lld_sffi.spl` (its
+  closure includes `sffi/dynamic.spl`) at the pre-fix source reports exactly the
+  three census sites (`lld_sffi:43:1`, `dynamic:92:1`, `dynamic:105:1`), rc=1;
+  post-fix: 0 `short borrow` lines, borrow stage passed, pipeline ran on to the
+  host llc step (fails with the known unrelated "Metadata id is already used"
+  on whole closures; census is cranelift). `compile
+  src/lib/nogc_sync_mut/sffi/dynamic.spl` alone SIGSEGVs (rc=139, not the
+  MemoryMax) in HIR at `lib.common.crypto.types` reexport-chase before borrow —
+  a separate pre-existing stage2 finding, not addressed here.
+- seed spec `test/01_unit/compiler/borrow/extern_out_slot_address_form_spec.spl`
+  6/6: both census shapes red (`check_mir_module` reports the contract escape)
+  and both address forms green, plus the null-function probe by address
+  (status ∈ {1, 2}, slot reads back 0) and a real-value round-trip through the
+  public `DynLib.call_checked("labs", [-7])` → `Ok(7)` (mutation to `Ok(8)` fails
+  5/6). `sffi_admission_spec` 11/11,
+  `dynamic_loader_spec` 11/11 unchanged. The native out-slot writeback itself is
+  UNEXECUTED by a seed run: the seed answers status 1 without writing, so on the
+  seed `_sffi_call_i64_checked` now ALWAYS takes the `[status, value]` fallback
+  (a consequence of option B, not a defect; the labs round-trip above runs
+  through that fallback).
+- cost (accepted price of option B): one 8-byte `rt_alloc`/`rt_free` per checked
+  call natively, two pairs + the fallback call on the seed. `DynI64FnSlot` is the
+  cached hot path; upgrade path if a measurement ever shows it matters: a
+  per-slot owned out cell allocated once in `resolve`. Not built.
+- `check-no-direct-rt.shs --roots src`: +11 direct `rt_*(` sites from this commit
+  (neither file is allowlisted). The ratchet is already red on
+  `origin/release/1.0.0` (6760 forbidden vs baseline 6290, pre-existing +470);
+  baseline not touched here — coordinator decision.
+
+Residuals (not changed here):
+- seed `interpreter_extern/wsffi.rs:439` `spl_dlsym_process_checked` raises
+  `CompileError::runtime("output must be &mut i64")` for an address out; its
+  only caller `lld_elf_link` is reached only under `is_simpleos_target()`
+  (`native_linking.spl:592`), so a seed-interpreted SimpleOS link would now
+  error instead of returning exit_code 127. Accepting `Value::Int(addr)` there
+  is a seed change (rebuild) — owner decision.
+- seed std copy `src/compiler_rust/lib/std/src/plugin/__init__.spl:24/41` still
+  declares the `*mut i64` form (seed-only stdlib, not read by stage2).
+
+### Follow-up ratchet — other `&mut local` into extern out-slots (NOT fixed here)
+
+Same shape, not flagged by this census (the borrow stage flags per module and
+these modules were not among the 5 `[go-to-end] failed`; why `dynamic.spl:149/176`
+in the SAME module passed while 92/105 failed is not understood — record it, do
+not assume they are safe). Single-line `*mut i64` extern decls (non-exhaustive;
+multi-line decls such as `spl_wffi_call_i64_into_bytes` `out_len`, the
+`rt_torch_*_checked` family, `rt_value_as_string`, `rt_file_stat` appear only in
+the site list below): `spl_dlopen_checked`,
+`spl_dlsym_checked` (`dynamic.spl:31/35`, `plugin_startup.spl:35/37`,
+`wsffi/mod.spl:17/21`). Reproducible census (23 sites, 2026-11-13):
+
+    grep -rn "&mut [a-z_]*)" src --include=*.spl | grep -v vendor | grep -E \
+      "spl_dlopen_checked|spl_dlsym_checked|spl_dlsym_process_checked|spl_wffi_try_call_i64_out|spl_wffi_call_i64_into_bytes|rt_[a-z_0-9]*\("
+
+`wsffi/mod.spl:35/44`, `plugin_startup.spl:310/323/325`, `sffi/dynamic.spl:149/176`,
+`sffi/spl_fonts.spl:81/322`, `gpu/engine2d/backend_metal.spl:86/97`,
+`torch/sffi.spl:297-353` (8 `rt_torch_*_checked`), `ffi_gen.specs/runtime_value_full.spl:606`,
+seed std `plugin/__init__.spl:89/113`, `packaging_build.spl:221`. Suggested ratchet:
+freeze this list in a `scripts/check/` baseline and fail on growth; convert sites
+to the address idiom as they are touched.
 ## Census state at hand-off
 
 MIR phase complete 1619/1619 (progress counter said `failed=1`; the
