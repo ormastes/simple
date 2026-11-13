@@ -587,6 +587,65 @@ C
     fi
     st_n=$((st_n + 2))
 
+    # Internal linkage is not runtime ABI: a `static` rt_* definition must not
+    # be extracted, in any spelling, and the decision is per occurrence — the
+    # same name defined non-static in another file still counts.
+    mkdir -p "$st_dir/stat/src/runtime" "$st_dir/statout"
+    cat > "$st_dir/stat/src/runtime/statics.c" <<'C'
+static int rt_static_plain(void) { return 1; }
+static inline int64_t rt_static_inline(int64_t a) { return a; }
+__attribute__((unused))
+static int
+rt_static_attr_before(void)
+{ return 2; }
+static __attribute__((always_inline)) inline int rt_static_attr_between(void) { return 3; }
+static int rt_static_forward(void);
+int rt_static_forward(void) { return 4; }
+static int rt_static_here_extern_there(void) { return 5; }
+int rt_extern_sibling(void) { return rt_static_plain(); }
+C
+    printf 'int rt_static_here_extern_there(void) { return 6; }\n' \
+        > "$st_dir/stat/src/runtime/other.c"
+    if ! extract_lanes "$st_dir/stat" "$st_dir/statout"; then
+        echo 'selftest: FAILED static C extraction'; rm -rf "$st_dir"; return 1
+    fi
+    printf '%s\n' rt_extern_sibling rt_static_here_extern_there > "$st_dir/statexpected"
+    if ! cmp -s "$st_dir/statexpected" "$st_dir/statout/c_syms.txt"; then
+        echo 'selftest: FAILED static rt_* definitions extracted as runtime ABI'
+        cat "$st_dir/statout/c_syms.txt"; rm -rf "$st_dir"; return 1
+    fi
+    st_n=$((st_n + 1))
+
+    # A definition directly after semicolon-less macro invocations must be
+    # seen: the invocations' `,`/operator tokens are not its declaration.
+    mkdir -p "$st_dir/mac/src/runtime" "$st_dir/macout"
+    cat > "$st_dir/mac/src/runtime/macros.c" <<'C'
+#define RT_BINOP(NAME, EXPR) int64_t NAME(int64_t x, int64_t y) { return (EXPR); }
+RT_BINOP(rt_pasted_add, x + y)
+RT_BINOP(rt_pasted_sub, x - y)
+
+int64_t rt_after_macro(int64_t a, int64_t b) {
+    return a ? b : 0;
+}
+RT_BINOP(rt_pasted_mul, x * y)
+static int64_t rt_static_after_macro(void) { return 0; }
+RT_BINOP(rt_pasted_or, x | y)
+RT_EXPORT(int64_t) rt_macro_return_type(void) { return 1; }
+void caller(void) {
+    if (ready(1, 2)) rt_call_after_group(3);
+    x = wrap(1, 2) + rt_operand_call(4);
+}
+C
+    if ! extract_lanes "$st_dir/mac" "$st_dir/macout"; then
+        echo 'selftest: FAILED macro C extraction'; rm -rf "$st_dir"; return 1
+    fi
+    printf '%s\n' rt_after_macro rt_macro_return_type > "$st_dir/macexpected"
+    if ! cmp -s "$st_dir/macexpected" "$st_dir/macout/c_syms.txt"; then
+        echo 'selftest: FAILED definition after semicolon-less macro invocations'
+        cat "$st_dir/macout/c_syms.txt"; rm -rf "$st_dir"; return 1
+    fi
+    st_n=$((st_n + 1))
+
     # Rust test exclusion belongs to one function occurrence. Keep private
     # runtime functions, adjacent items, and the existing candidate error bar.
     mkfixture rust_attributes
