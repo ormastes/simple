@@ -446,6 +446,44 @@ fn mir_expr_kind_is_place(k: HirExprKind) -> bool:
 # Statement Lowering
 # ============================================================================
 
+fn hir_unsuffixed_int_literal_value(value: HirExpr) -> i64?:
+    """The literal's integer value when `value` is exactly the operand
+    lower_int_literal_for_float_slot coerces: an unsuffixed int literal
+    or its negation. None for suffixed literals and every other expr, so
+    the call-site provenance pin and the coercion share one predicate and
+    can never disagree about which arguments crossed int->float."""
+    match value.kind:
+        case HirExprKind.IntLit(lit_value, lit_suffix):
+            if lit_suffix == None:
+                return Some(lit_value)
+        case HirExprKind.Unary(op, operand):
+            match op:
+                case HirUnaryOp.Neg:
+                    match operand.kind:
+                        case HirExprKind.IntLit(neg_value, neg_suffix):
+                            if neg_suffix == None:
+                                return Some(0 - neg_value)
+                        case _: ()
+                case _: ()
+        case _: ()
+    None
+
+fn hir_type_is_declared_float_slot(declared: HirType) -> bool:
+    """The declared-slot side of lower_int_literal_for_float_slot: a
+    declared f32/f64, or an Optional wrapping one. Everything else (i64
+    slots, untyped/Any slots) never receives the int->float coercion."""
+    match declared.kind:
+        case HirTypeKind.Float(_):
+            return true
+        case HirTypeKind.Optional(optional_inner):
+            match optional_inner.kind:
+                case HirTypeKind.Float(_):
+                    return true
+                case _:
+                    return false
+        case _:
+            return false
+
 impl MirLowering:
     me mir_hir_type_is_resource_direct(t: HirType) -> bool:
         match t:
@@ -2882,31 +2920,14 @@ impl MirLowering:
                         return None
             case _:
                 return None
-        var int_value = 0
-        var matched = false
-        match value.kind:
-            case HirExprKind.IntLit(lit_value, lit_suffix):
-                if lit_suffix == None:
-                    int_value = lit_value
-                    matched = true
-            case HirExprKind.Unary(op, operand):
-                match op:
-                    case HirUnaryOp.Neg:
-                        match operand.kind:
-                            case HirExprKind.IntLit(neg_value, neg_suffix):
-                                if neg_suffix == None:
-                                    int_value = 0 - neg_value
-                                    matched = true
-                            case _: ()
-                    case _: ()
-            case _: ()
-        if not matched:
-            return None
-        var b = self.builder
-        val result = b.new_temp(float_type)
-        b.emit_const(result, MirConstValue.Float(int_value.to_f64()), float_type)
-        self.builder = b
-        Some(result)
+        if val coerced_int_value = hir_unsuffixed_int_literal_value(value):
+            var b = self.builder
+            val result = b.new_temp(float_type)
+            b.emit_const(result, MirConstValue.Float(coerced_int_value.to_f64()), float_type)
+            self.builder = b
+            Some(result)
+        else:
+            None
 
     me lower_expr_for_slot(value: HirExpr, declared: HirType) -> LocalId:
         """Lower `value` for a slot of DECLARED type `declared` (annotated
