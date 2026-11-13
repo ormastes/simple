@@ -2,7 +2,7 @@
 ## Fixed 2026-11-13 — resolution and spec pins below
 
 **Date:** 2026-08-31
-**Status:** fixed (2026-11-11, P3 lane ne2) — both defects verified non-reproducing on release/1.0.0 tip; evidence below
+**Status:** fixed (code verified 2026-11-11, P3 lane ne2; spec pins landed 2026-11-13) — both defects verified non-reproducing on release/1.0.0 tip; evidence below
 **Found by:** Q2 (duplicate-check LSH wiring + real in-process search provider)
 
 ---
@@ -135,14 +135,14 @@ hidden: a token that itself contains byte `0x1F` can still alias; tokenizer
 output never contains that control byte, so length-prefixing (which would change
 every persisted shingle hash) is not warranted.
 
-**Defect 1 — actual root cause identified.** `_validate_prepared_field` in
+**Defect 1 — most likely cause (consistent with the validator contract; not reproduced against the original caller, whose repro `dbg2_spec.spl` no longer exists).** `_validate_prepared_field` in
 `src/lib/common/search/ranking.spl` (~line 445) requires each field's
 `term_keys` to be **strictly ascending in UTF-8 order** — one check that proves
 canonical order and rejects duplicates — and `bm25_fixed_v1_score_checked`
 additionally requires every field to share the identical key list in canonical
 field order. A caller that passes terms in *query order* (e.g.
 `["search","alpha"]`) or with duplicates gets `invalid_parallel_arrays`; that is
-the narrower shape this record's correction anticipated, and it is the intended
+one of the narrower shapes this record's correction anticipated (alongside differing key lists, length mismatch, non-canonical field order), and it is the intended
 contract (already pinned single-field by ranking_spec "scores each distinct
 ordered term once and rejects duplicates"). No validation change.
 New pin in `test/01_unit/lib/common/search/ranking_spec.spl`: "accepts canonical
