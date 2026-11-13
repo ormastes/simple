@@ -66,3 +66,32 @@ Verification pending: `examples/08_gpu/backends/backends_spec.spl` going
 green (4 passed) on a 2x-NVIDIA Vulkan 1.4 host.
 
 Status: OPEN (suspects confirmed in source; fix site out of lane scope).
+
+## 2026-11-13 — fail-loud half landed (lane uia); row stays OPEN
+
+Concrete fail-open matching the filed shape (`ok=true, exit=0, records=[]`):
+`VulkanVmExecutor.run_source_persisting_data` returned `ok: not forced_timeout`
+for a failed `dispatch_once`, so every dispatch error that is not a forced
+timeout (`vulkan-lane-session-unavailable`, `-fenced-submit-unavailable`,
+`-descriptor-create-failed`, `-command-record-failed`) read as a clean exit 0
+with no records. It now returns `ok: false` with the session error
+(`svmg_dispatch_error_outcome`, `src/lib/gc_async_mut/gpu_lane/vulkan_vm_executor.spl`).
+
+Evidence, release/1.0.0 `35144b7f5e9` + this change, Linux aarch64 (DGX Spark
+GB10), Rust seed sha256 prefix `af717f53d6bce3e5`:
+
+- `test/02_integration/gpu_lane/vulkan_vm_executor_dispatch_error_spec.spl`:
+  1/2 before the fix (`expected true to equal false`), 2/2 after.
+- `test/03_system/gpu_lane/vulkan_vm_executor_conformance_spec.spl`: 2/2.
+- `examples/08_gpu/backends/backends_spec.spl`: 4 examples, 1 failure — and it
+  is not this record's shape. The **vulkan** example passes after the cuda
+  example ran in the same process; the **cuda** example fails with
+  `semantic: array index out of bounds: index is 0 but length is 0`
+  (`o.records[0]`, no records from the CUDA lane on this host).
+
+Not established: whether the original Vulkan-after-CUDA interference still
+exists. It did not reproduce here, but the CUDA example did not complete
+cleanly on this host, so the precondition (a clean live CUDA run first) was not
+met. The second fail-open candidate (dispatch succeeds, kernel writes no
+sentinel, `_decode_sentinel` falls through to `ok: true`) was left alone: the
+DBG-1 break/resume path may legitimately return a non-exit sentinel.

@@ -58,12 +58,13 @@ Spec: `test/01_unit/lib/common/fault_detection_spec.spl` (seed `simple-seed-v4`,
   still has no timer thread (`rt_fault_set_timeout` there records `SIMPLE_TIMEOUT_SECONDS`).
 - Expiry is tested through the pure `timeout_deadline_passed` predicate; no spec waits for a
   real deadline, and none runs the module under native codegen.
-- `src/app/interpreter/call/function_exec.spl` itself still does not load on the seed, for a
-  reason outside this bug: importing it fails with `error: semantic: variable `from` not
-  found`, after deprecation warnings on the relative `from ..expr import {...}` lines of the
-  `call/` package (first seen at `call/class_instantiation.spl:7`). Not root-caused. So the
-  explicit `guard.drop()` in `exec_function` is checked by source and by the guard-level
-  spec scenario, not by running `exec_function`. `loops.spl` was not load-tested either.
+- RESOLVED 2026-11-13: `src/app/interpreter/call/function_exec.spl` and
+  `control/control/loops.spl` did not load on the seed (`variable `from` not found`). Root
+  cause and fix: `seed_from_parent_relative_import_parsed_as_expression_2026-11-13.md`. Both
+  now load, pinned by `test/01_unit/app/interpreter/call_function_exec_load_spec.spl` and
+  `control_loops_load_spec.spl`. Still open: no spec calls `exec_function` itself (it needs a
+  constructed `Interpreter` and `FunctionDef`), so the explicit `guard.drop()` there is
+  checked at guard level on a module that loads, not by running a function call.
 - If a runtime ever does call `drop()` at scope exit, the explicit call makes it run twice;
   the decrement saturates at 0 but the count would be one low.
 - `request_interrupt` in `execution_guard.spl` still has no caller wired from
