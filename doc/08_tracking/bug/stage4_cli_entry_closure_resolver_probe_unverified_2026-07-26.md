@@ -146,3 +146,10 @@ record's "Required next experiment" steps 1-4 verbatim (fixtures, order-preservi
 change only, byte-for-byte equality, strictly-later trace receipt at one boundary).
 Until those gates pass, `stage4_full_cli_closure_spin_2026-07-18.md` remains
 authoritative.
+
+## Triage 2026-11-13 (P3 tools lane)
+No code change this lane; status OPEN per the record header — the Stage-4
+CLI entry-closure resolver candidate remains unverified without a
+manifest-attested full CLI, and the full-CLI link is separately blocked
+(see stage4_full_cli_unlinkable_579_unresolved_runtime_symbols_2026-09-01).
+No Windows-side signal can advance it.

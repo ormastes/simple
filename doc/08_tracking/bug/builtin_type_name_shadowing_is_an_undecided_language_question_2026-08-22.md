@@ -124,3 +124,8 @@ Traversed on work/p3-ne3-20261111 (origin/release/1.0.0 tip 93490a99c5d8).
 
 Verdict: nothing has moved. The decision among the three documented positions
 still belongs to a language ruling, not a patch. Status stays OPEN.
+
+## Triage 2026-11-13 (P3 tools lane)
+No code change this lane; per the record header this is an undecided language
+question (shadowing the built-in string type), not a compiler patch. Needs the
+language-owner decision the record calls for.

@@ -492,3 +492,10 @@ Verdicts:
   coverage_wrapper_not_retained_keep_artifacts_2026-08-31.md and remains
   the blocker for census work; its owner is the live runner twin in
   src/lib/nogc_sync_mut, outside this lane.
+
+## Triage 2026-11-13 (P3 tools lane)
+No code change this lane. The 2026-11-10 P3-runner2 triage in this record
+stands: the tracked clusters are SUPERSEDED on this base; the LIVE residue
+(compiler.mir expr_dispatch `undefined identifier: local`, js-engine duplicate
+classes, ~350 long-tail symbols) is owned by the compiler/js lanes per that
+verdict, outside the P3 tools lane.
