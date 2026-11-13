@@ -13,6 +13,59 @@ use super::{InstrContext, InstrResult};
 use crate::hir::TypeId;
 use crate::mir::VReg;
 
+/// Integer `max`/`min`/`clamp`/`abs` on a raw (unboxed) integer receiver,
+/// lowered to native Cranelift `smax`/`smin` (`umax`/`umin` when `unsigned`).
+/// Arguments are coerced to the receiver's width. Returns `None` when the
+/// receiver is not a raw integer or the method/arity does not match, so the
+/// caller falls through to its normal dispatch.
+/// See doc/08_tracking/bug/int_max_min_method_unresolved_in_jit_2026-11-13.md.
+pub(super) fn emit_int_min_max(
+    builder: &mut FunctionBuilder,
+    method: &str,
+    receiver_val: cranelift_codegen::ir::Value,
+    arg_vals: &[cranelift_codegen::ir::Value],
+    unsigned: bool,
+) -> Option<cranelift_codegen::ir::Value> {
+    let recv_ty = builder.func.dfg.value_type(receiver_val);
+    if !recv_ty.is_int() {
+        return None;
+    }
+    let mut fit = |builder: &mut FunctionBuilder, v: cranelift_codegen::ir::Value| {
+        let ty = builder.func.dfg.value_type(v);
+        if ty == recv_ty {
+            Some(v)
+        } else if !ty.is_int() {
+            None
+        } else if ty.bits() > recv_ty.bits() {
+            Some(builder.ins().ireduce(recv_ty, v))
+        } else if unsigned {
+            Some(builder.ins().uextend(recv_ty, v))
+        } else {
+            Some(builder.ins().sextend(recv_ty, v))
+        }
+    };
+    let max = |b: &mut FunctionBuilder, x, y| if unsigned { b.ins().umax(x, y) } else { b.ins().smax(x, y) };
+    let min = |b: &mut FunctionBuilder, x, y| if unsigned { b.ins().umin(x, y) } else { b.ins().smin(x, y) };
+    match (method, arg_vals.len()) {
+        ("abs", 0) => Some(if unsigned { receiver_val } else { builder.ins().iabs(receiver_val) }),
+        ("max", 1) => {
+            let a = fit(builder, arg_vals[0])?;
+            Some(max(builder, receiver_val, a))
+        }
+        ("min", 1) => {
+            let a = fit(builder, arg_vals[0])?;
+            Some(min(builder, receiver_val, a))
+        }
+        ("clamp", 2) => {
+            let lo = fit(builder, arg_vals[0])?;
+            let hi = fit(builder, arg_vals[1])?;
+            let lower_bounded = max(builder, receiver_val, lo);
+            Some(min(builder, lower_bounded, hi))
+        }
+        _ => None,
+    }
+}
+
 /// Pass value through for array/dict operations.
 /// Values that are already RuntimeValue (strings, arrays, objects) should be passed directly.
 /// For .push() on integer-typed arrays, MIR lowering now inserts BoxInt before the
@@ -246,6 +299,27 @@ pub(crate) fn compile_builtin_method<M: Module>(
             ctx.vreg_values.insert(*d, converted);
         }
         return Ok(());
+    }
+    // Integer max/min/clamp/abs (see emit_int_min_max).
+    if matches!(method, "max" | "min" | "clamp" | "abs") {
+        let recv_ty_id = ctx.vreg_types.get(&receiver).copied().unwrap_or(TypeId::I64);
+        if matches!(
+            recv_ty_id,
+            TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64 | TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64
+        ) {
+            let unsigned = matches!(recv_ty_id, TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64);
+            let mut arg_vals = Vec::with_capacity(args.len());
+            for a in args {
+                arg_vals.push(ctx.get_vreg(a)?);
+            }
+            if let Some(result_val) = emit_int_min_max(builder, method, receiver_val, &arg_vals, unsigned) {
+                if let Some(d) = dest {
+                    ctx.vreg_values.insert(*d, result_val);
+                    ctx.vreg_types.insert(*d, recv_ty_id);
+                }
+                return Ok(());
+            }
+        }
     }
     // FR-COMPILER-012: scalar float intrinsics — sqrt, abs, floor, ceil, round
     // These are first-class Cranelift instructions for IEEE 754 floats.
