@@ -41,8 +41,10 @@ whole `persisted_graph.spl` closure (66 modules) MIR-clean after the fix.
 
 **Recorded, not fixed (language-level):** `text.to_i64()` returns nil on failure
 in the interpreter and 0 natively. The idiom `x.to_i64() ?? d` (795 sites under
-`src/`) therefore never applies `d` natively, and `x.to_i64() == nil` is always
-false natively. A `.is_none()` on a non-Optional receiver should be a HIR type
+`src/`) therefore cannot see a failure natively (per the text-special arm's own
+comment, "`"3".to_i64() ?? d` must not test raw 3 as the nil sentinel"; the
+`??` lowering itself was not traced here), and `x.to_i64() == nil` compares a
+raw integer with the nil word. A `.is_none()` on a non-Optional receiver should be a HIR type
 error; today it surfaces only as this MIR fatal. Owner decision needed: make
 `to_i64` a real `i64?` (runtime + MIR representation change) or lint the
 `?? d` / `== nil` / `.is_none()` forms on its result toward `parse_i64()`.
@@ -129,5 +131,28 @@ conflict detector (`module_lowering:3333/3493`, `declaration_inventory_barriers_
 Conditionally unguarded: `lower_struct_construct` (`switch_operators_calls:6620-6771`)
 when the callee symbol is unresolved (`:9166` passes the bare `direct_name`).
 
-A 50.mir change cannot be executed in this lane (the census compiler carries
-its own MIR; no Stage 2 rebuild). Decision recorded below.
+Decision (this lane): fix the two recursion ROOTS, not the 20 reads.
+`copy_struct_value_recursive` (`mir_lowering_stmts.spl`) and
+`lower_struct_structural_eq` (`expr_dispatch.spl`) (a) fail closed with
+`error_fatal` when their layout key is a bare name in
+`struct_field_order_conflict_warned`, and (b) recurse into a nested record
+through the module-qualified layout recorded per field in
+`struct_field_type_ownership_key` (= `composite_layout_key` of the field type,
+`module_lowering.spl:1790`) folded by `declared_struct_layout_key`, keeping the
+bare name only for the symbol lookup. Both re-entry claims of the audit were
+verified by reading the recursion sites (`:772`, `:2112`). Blast radius: only
+names in `conflict_warned` fire -- three in this census -- so the next census
+may trade a silent copy/compare of `JoinPoint`/`TextSpan`/`ElfSymbol` reached
+through bare provenance for a loud per-module fatal naming the layout.
+Spec: `test/01_unit/compiler/mir/same_named_struct_layouts_across_modules_spec.spl`
+(+ `test/fixtures/compiler/same_name_layouts/span_{a,b}.spl`), interpreter-green,
+UNEXECUTED natively: a 50.mir change cannot be executed in this lane (the census
+compiler carries its own MIR; no Stage 2 rebuild). Load/parse evidence: a
+MIR-loading seed spec (`array_projected_receiver_types_spec.spl`) runs 6/7 with
+and without the change (the 1 failure is pre-existing on the base).
+
+Remaining unguarded sites, NOT fixed here (named gaps): `mir_lowering_stmts:1093-1095`
+(array move ctor count), `:1142/1152/1157/1169` (array-move copy skipping),
+`provider_metadata:1382-1383` (method-receiver typing), `module_lowering:4338/4357`
+(prescan), `switch_operators_calls:9166` (bare `direct_name` for an unresolved
+callee), and the bare writers outside the conflict detector listed above.
