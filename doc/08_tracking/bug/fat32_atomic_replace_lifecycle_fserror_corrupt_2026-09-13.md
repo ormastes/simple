@@ -70,3 +70,7 @@ Lane ne9 (batch 2026-11-11) re-ran the owning spec on the fresh seed
   a path orphaned by the test-tree consolidation `4f51a7ee31fc`
   (`test/integration` -> `test/02_integration`). The stale self-scan
   path was corrected in the same commit; the full spec is now 5/5.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**FIXED (confirmed)** — ne9: owning spec 5/5 on the fresh seed, including the stale self-scan path corrected (test/integration -> test/02_integration orphan).

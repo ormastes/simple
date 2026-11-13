@@ -158,3 +158,7 @@ Rust-built `bin/simple` for `native-build` instead of a session-built native CLI
   (this doc's own "Bootstrap bridge" section) and, on this Windows host, by the
   known native-build hang (log completes, no binary, process never exits;
   confirmed with a trivial probe, not retried per lane rules).
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**FIXED in source (confirmed)** — compiler5: fail-closed receiver gate at function_lowering.spl:680-685; class_method_bodies_reachable_spec 4/4 on the seed. Native self-host proof pending on the parse-perf/hang owners.

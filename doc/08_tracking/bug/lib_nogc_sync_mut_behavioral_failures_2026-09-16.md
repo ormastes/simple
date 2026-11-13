@@ -204,3 +204,7 @@ to its owning package lane. Per testing rules no spec was edited and no
 assertion relaxed. No production change attempted in this lane — the 5
 confirmed items are real per-package implementation gaps, and this umbrella
 record stays LIVE until each owning lane fixes or individually retires its item.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**LIVE (confirmed)** — rt3 narrowed twice: 8/13 sampled items green on the fresh seed; 5 confirmed RED (shader_compile WgslEmitter entry points, gpu_queue_usm lowering, thread_pointer_spawn, winit_compat_mapping, raw_memory_owner) — each a real per-package implementation gap with a named owning lane.

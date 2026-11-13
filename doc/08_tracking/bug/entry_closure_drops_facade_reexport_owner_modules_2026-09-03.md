@@ -193,3 +193,7 @@ never-touched-p3 note and the 2026-11-10 p3-boot4 verdict at this base.**
   `# Re-exported from X.spl`) passes on current source.
 
 No change made in this lane.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**SUPERSEDED/FIXED (confirmed)** — boot12: fix commits 7d8820319a2/5334d6c7b3d/4a5b072e594 verified ancestors; generated_facade_origin_closure_spec 6/6 on the tracked seed.

@@ -50,3 +50,7 @@ the same families named above.
   (signed_admitted=0 everywhere), and neither command passes without exclusions or a baseline
   regeneration. The required provider-family review/hardening work is a large audit lane, out of
   scope for P3 traverse.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**LIVE (confirmed)** — ne10 re-ran both guards: raw-sffi ratchet exit 2 (inventory over ceilings; signed_admitted=0 unchanged) and null-signature guard exit 1 in the named families. Unblock needs signed exact-artifact admission + provider-family hardening — a large audit lane.

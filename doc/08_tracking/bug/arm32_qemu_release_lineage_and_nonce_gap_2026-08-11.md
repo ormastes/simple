@@ -89,3 +89,7 @@ sh scripts/check/check-arm32-qemu-real-exec-markers.shs   # expects: SIMPLEOS_FS
 Retain compiler, kernel, image, QEMU, argv, nonce, transcript, and exit
 hashes per this doc's unblock condition. Lane evidence:
 `build/review/p3fix-ne20-20261111.sdn`.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**BLOCKED (confirmed)** — No qemu-system-arm on this Windows lane host (ne1/ne20 both measured `which qemu-system-arm` empty); no newer nonce-correlated ARM32 transcript exists on this tip. Grant to the ARM32 SimpleOS execution lane stands; no change.

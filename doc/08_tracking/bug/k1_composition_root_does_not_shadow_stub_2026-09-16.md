@@ -99,3 +99,7 @@ Fresh re-verification of the 2026-11-10 boot5 disposition (not flipped then):
 The full-CLI binding/receipt contract this record sequenced into is closed by
 the same mechanism plus the content-length-keyed gate. No code change this
 lane; header flipped to match the verified disposition.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**SUPERSEDED (confirmed)** — boot21: composition-shadowing fix 21bbc08f73a verified ancestor; stub lives at 80.driver/bootstrap_k1_selected.spl; precedence spec 13/13 on the tracked seed.

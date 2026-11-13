@@ -117,3 +117,7 @@ exit-0-despite-analyzing-nothing shape are gone. (The sibling "linter must exit
 non-zero on abort" item was separately fixed by the fail-closed work recorded
 in `mcdc_wrapped_copy_undefined_identifier_dir_only_2026-09-02.md`'s runner and
 the 2026-09-12 degrade; not re-litigated here.)
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**FIXED (confirmed)** — ne14: fixing commit eea2a322ac74 (reads CodeLine.trimmed); spec 8/8 + original repro lints clean on the seed.

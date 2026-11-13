@@ -357,3 +357,7 @@ non-conforming wired gates); the specific fail-open defects named at
 filing are all fixed. Next wave (per the established pattern of 8 gates
 per wave with clean-PASS / sabotage-FAIL / missing-input-ERROR fixtures)
 is cache-lane scheduling, not done here.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**OPEN-backlog (confirmed)** — ne4 re-derived: 59/201 directly-wired gates lack an em-dash verdict; the named fail-open defects are fixed (waves 1-5). Next wave is cache-lane scheduling.

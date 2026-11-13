@@ -148,3 +148,7 @@ rewrite, and the drift-check's docstring command was never repointed. Per
 this doc's own scope note ("Needs its own fix; not in scope here") it stays
 with the hardware owner lane; recommended fix is repointing the check at the
 `logic_*_core.spl` constants or deleting it in favor of the L7 extension.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**SUPERSEDED (confirmed)** — ne16: firmware rewrite removed the defective code; zero live _nand_ram_* call sites remain; drift-check map still passes (49 slots, 0 drift). FINDING 3 (const_drift_check.spl import failure) still reproduces — hardware-owner lane (repoint at logic_*_core.spl or delete).
