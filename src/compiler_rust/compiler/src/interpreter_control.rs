@@ -334,6 +334,22 @@ mod optional_let_binding_tests {
     }
 
     #[test]
+    fn while_val_stops_on_none_and_keeps_structural_and_loop_control() {
+        let cases = [
+            // explicit None / Some(nil) stop the loop (previously bound and looped)
+            ("fn main() -> i64:\n    var n = 0\n    while val m = None:\n        n = n + 1\n        if n > 5: return 99\n    n\n", 0),
+            ("fn main() -> i64:\n    var n = 0\n    while val m = Some(nil):\n        n = n + 1\n        if n > 5: return 99\n    n\n", 0),
+            // structural Some(x) still goes through pattern_matches
+            ("fn pk(v: i64, ok: bool) -> i64?:\n    if ok:\n        v\n    else:\n        nil\nfn main() -> i64:\n    var i = 0\n    var t = 0\n    while val Some(m) = pk(i, i < 3):\n        t = t + m + 1\n        i = i + 1\n    t\n", 6),
+            // break / continue inside a while-val body keep the unwrapped binding
+            ("fn pk(v: i64, ok: bool) -> i64?:\n    if ok:\n        v\n    else:\n        nil\nfn main() -> i64:\n    var i = 0\n    var t = 0\n    while val m = pk(i, i < 10):\n        i = i + 1\n        if m == 1: continue\n        if m == 4: break\n        t = t + m\n    t\n", 5),
+        ];
+        for (source, expected) in cases {
+            assert_eq!(interpret_binding(source), Ok(expected), "{source}");
+        }
+    }
+
+    #[test]
     fn result_guard_preserves_existing_optional_presence() {
         let source = "fn make() -> Result<i64, text>: Ok(7)\nfn main() -> i64:\n    if val outer = Some(make()):\n        match outer:\n            case Ok(value): return value - 7\n            case Err(_): return 1\n    2\n";
         assert_eq!(interpret_binding(source), Ok(0));
