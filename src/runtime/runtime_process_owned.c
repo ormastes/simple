@@ -3428,6 +3428,11 @@ static enum Pov4StartOutcome pov4_start_exact(
     pthread_mutex_lock(&rt_owned_lock);
     RtOwnedSlot* slot=&rt_owned_slots[index];
     slot->pid=pid; slot->pgid=pid; slot->pidfd=-1; slot->start_identity=0;
+    /* The child ran setpgid(0,0) above; carry the admitted policy exactly as
+     * pov4_start_exact_darwin does. Without it a ProcessGroup request ran
+     * leader-only and every frozen receipt said tree_control=0 tree_empty=0
+     * (run-26 HIR worker retirement; runtime_process_group_retire_linux_selfcheck). */
+    slot->group_retire = request->descendant_policy == POV4_DESCENDANT_PROCESS_GROUP;
     slot->token_high=minted.high; slot->token_low=minted.low; slot->state=1;
     slot->out_fd=out_pipe[0]; slot->err_fd=err_pipe[0]; slot->out_open=1; slot->err_open=1;
     slot->in_fd=request->atomic_input_bound ? in_pipe[1] : -1;
