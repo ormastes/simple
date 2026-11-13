@@ -399,7 +399,24 @@ impl HirLowering:
                     val glob_local = if imported_mod.import_item_has_alias[glob_it]:
                         imported_mod.import_item_aliases[glob_it]
                     else: glob_name
-                    self.register_imported_symbol(imported_mod.physical_index, imported_mod_name, glob_name, glob_local, import_span, materialize_enums)
+                    # `use std.path as path` is encoded as one aliased item whose
+                    # name IS the import's module. That row binds a module
+                    # namespace in the facade, not a symbol a glob can forward;
+                    # chasing it registered nothing and emitted
+                    # `[hir-reexport-chase-unresolved] item=std.path local=path`
+                    # for every `use app.io.jit_sffi.*` (census r3). Only a row
+                    # whose spelling resolves to a module surface is skipped:
+                    # `use a.b.Item as X` with no module `a.b.Item` keeps its
+                    # member fallback and still chases as before.
+                    var glob_row_is_module_alias = false
+                    if imported_mod.import_item_has_alias[glob_it] and glob_name == glob_imp.module:
+                        if glob_imp_idx < imported_mod.import_target_names.len() and
+                           imported_mod.import_target_names[glob_imp_idx] == glob_name:
+                            glob_row_is_module_alias = true
+                        elif self.surface_index_for_name(glob_name) >= 0:
+                            glob_row_is_module_alias = true
+                    if not glob_row_is_module_alias:
+                        self.register_imported_symbol(imported_mod.physical_index, imported_mod_name, glob_name, glob_local, import_span, materialize_enums)
                     glob_it = glob_it + 1
                 glob_imp_idx = glob_imp_idx + 1
 
