@@ -142,3 +142,73 @@ fn main() -> i64:
         "Option::Some(1.5)\nOption::None\nOption::Some(true)\nOption::None",
     );
 }
+
+#[test]
+fn parse_float_prints_some_and_none() {
+    assert_parity(
+        r#"
+fn main() -> i64:
+    val a = "1.5".parse_float()
+    val b = "abc".parse_float()
+    print "{a}"
+    print "{b}"
+    0
+"#,
+        "Option::Some(1.5)\nOption::None",
+    );
+}
+
+#[test]
+fn parse_float_and_f64_unwrap_to_f64() {
+    assert_parity(
+        r#"
+fn main() -> i64:
+    val a = "1.5".parse_float().unwrap()
+    if a != 1.5: return 1
+    val b = "2.25".parse_f64().unwrap()
+    if b != 2.25: return 2
+    0
+"#,
+        "",
+    );
+}
+
+#[test]
+fn match_binds_parse_result_payload() {
+    // The lane-4 pure_sql reopen manifestation: a `case Some(n)` over a
+    // parse-call subject must bind the payload, not the nil sentinel.
+    assert_parity(
+        r#"
+fn main() -> i64:
+    val parsed = "87".parse_int()
+    match parsed:
+        case Some(length):
+            if length != 87: return 1
+        case None:
+            return 2
+    match "42".parse_int():
+        case Some(n):
+            if n != 42: return 3
+        case None:
+            return 4
+    0
+"#,
+        "",
+    );
+}
+
+#[test]
+fn match_binds_parse_float_payload() {
+    assert_parity(
+        r#"
+fn main() -> i64:
+    match "1.5".parse_float():
+        case Some(x):
+            if x != 1.5: return 1
+        case None:
+            return 2
+    0
+"#,
+        "",
+    );
+}

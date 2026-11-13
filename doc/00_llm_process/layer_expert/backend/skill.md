@@ -350,3 +350,16 @@ boxed `text` versus (ptr, len)). `cranelift_runtime_import_seed_parity_spec.spl`
 pins the adapter's runtime-import shims against the seed's `RuntimeFuncSpec`
 table. `jit_runtime_extern_interpreter_parity_spec.spl` checks that JIT and
 interpreter return the same values.
+
+## Object -> SMF relocation mapping on aarch64 ELF (2026-11-13)
+
+`compile -o x.smf` turns the Cranelift object into SMF relocations in
+`linker/object_parser.rs::map_relocation_type`. `object` 0.36 classifies only
+ABS/PREL/CALL26 for ELF AArch64 (CALL26 as `PltRelative`); everything else is
+`Unknown` + `RelocationFlags::Elf`. Mapping only Mach-O flags left every ELF
+ADRP/LO12/GOT reloc as `None` and CALL26 as x86 `Plt32`, so every SMF on
+aarch64 Linux crashed (unpatched `adrp; ldr; blr` into its own code bytes).
+aarch64 ELF is now mapped by `r_type` first and fails closed on anything the
+loader cannot apply. Trap: ELF `r_type` numbers are per-machine; gate on
+`obj_file.architecture()`. See
+[bug](../../../08_tracking/bug/smf_aarch64_elf_relocations_dropped_2026-11-13.md).

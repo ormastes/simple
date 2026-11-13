@@ -1,0 +1,70 @@
+# @req REQ-SSPEC-UNIT
+"""
+# Claude full frontmatter parser
+
+As a caret user writing skill frontmatter, path lists, brace alternatives,
+numeric limits and shell names must parse to the expected values.
+"""
+
+use std.spec.step
+use std.spec.*
+use app.llm_caret.claude_full.utils.frontmatterParser.*
+
+describe "Claude full frontmatter parser":
+    it "splits comma separated paths and trims whitespace":
+        step("split")
+        expect(splitPathInFrontmatter("a/b, c/d ,e")).to_equal(["a/b", "c/d", "e"])
+
+    it "expands brace alternatives into separate paths":
+        step("braces")
+        expect(splitPathInFrontmatter("src/{a,b}/x.spl")).to_equal(["src/a/x.spl", "src/b/x.spl"])
+
+    it "expands nested brace groups recursively":
+        step("nested")
+        expect(expandFrontmatterBraces("{a,b}/{c,d}")).to_equal(["a/c", "a/d", "b/c", "b/d"])
+
+    it "leaves unbalanced braces alone":
+        step("unbalanced")
+        expect(expandFrontmatterBraces("x{a,b")).to_equal(["x{a,b"])
+        expect(expandFrontmatterBraces("plain")).to_equal(["plain"])
+
+    it "flattens a list of path inputs":
+        step("list")
+        expect(splitPathListInFrontmatter(["a,b", "c"])).to_equal(["a", "b", "c"])
+
+    it "parses positive integers from int and text values":
+        step("positive ints")
+        expect(parsePositiveIntFromFrontmatter(FrontmatterValue.intValue(7))).to_equal(7)
+        expect(parsePositiveIntFromFrontmatter(FrontmatterValue.textValue(" 42 "))).to_equal(42)
+        expect(parsePositiveIntFromFrontmatter(FrontmatterValue.textValue("+5"))).to_equal(5)
+        expect(parsePositiveIntFromFrontmatter(FrontmatterValue.textValue("12abc"))).to_equal(12)
+
+    it "rejects zero, negative, empty and non-numeric limits":
+        step("rejects")
+        expect(parsePositiveIntFromFrontmatter(FrontmatterValue.intValue(0)).?).to_equal(false)
+        expect(parsePositiveIntFromFrontmatter(FrontmatterValue.textValue("-3")).?).to_equal(false)
+        expect(parsePositiveIntFromFrontmatter(FrontmatterValue.textValue("")).?).to_equal(false)
+        expect(parsePositiveIntFromFrontmatter(FrontmatterValue.textValue("abc")).?).to_equal(false)
+        expect(parsePositiveIntFromFrontmatter(FrontmatterValue.nilValue()).?).to_equal(false)
+
+    it "treats only real true as a true boolean":
+        step("bool")
+        expect(parseBooleanFrontmatter(FrontmatterValue.boolValue(true))).to_equal(true)
+        expect(parseBooleanFrontmatter(FrontmatterValue.textValue("true"))).to_equal(true)
+        expect(parseBooleanFrontmatter(FrontmatterValue.textValue("yes"))).to_equal(false)
+        expect(parseBooleanFrontmatter(FrontmatterValue.intValue(1))).to_equal(false)
+
+    it "accepts only bash or powershell as shell names, case-insensitively":
+        step("shell")
+        expect(parseShellFrontmatter(FrontmatterValue.textValue(" PowerShell ")) ?? "none").to_equal("powershell")
+        expect(parseShellFrontmatter(FrontmatterValue.textValue("bash")) ?? "none").to_equal("bash")
+        expect(parseShellFrontmatter(FrontmatterValue.textValue("zsh")) ?? "none").to_equal("none")
+        expect(parseShellFrontmatter(FrontmatterValue.nilValue()) ?? "none").to_equal("none")
+
+    it "renders each value kind as text":
+        step("to text")
+        expect(frontmatterValueToText(FrontmatterValue.intValue(9))).to_equal("9")
+        expect(frontmatterValueToText(FrontmatterValue.boolValue(false))).to_equal("false")
+        expect(frontmatterValueToText(FrontmatterValue.nilValue())).to_equal("")
+        expect(findFrontmatterChar("abc}", "}", 0)).to_equal(3)
+        expect(splitFrontmatterAlternatives("a,,b")).to_equal(["a", "", "b"])

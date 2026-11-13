@@ -1740,7 +1740,7 @@ fn cl_translate_call(
                         if abi_error != "":
                             if cl_jit_refuse_call_abi(cl_module, "E-BACKEND-CRANELIFT-CALL-ABI: {external_name}: {abi_error}"):
                                 return cranelift_iconst(ctx, CL_TYPE_I64, 0)
-                            panic("E-BACKEND-CRANELIFT-CALL-ABI: {external_name}: {abi_error}")
+                            panic("E-BACKEND-CRANELIFT-CALL-ABI: {external_name}: call in {func.name}: {abi_error}")
                         val signature = cl_import_call_signature(type_, args.len())
                         val handle = cl_declare_import_function(cl_module, external_name, signature)
                         if cl_jit_import_refused(cl_module, handle):
@@ -2036,6 +2036,16 @@ fn cl_declared_callee_return(callee_type: MirType) -> MirType:
         case FuncPtr(sig): return sig.return_type
         case _: return MirType.i64()
 
+fn cl_declared_callee_int_literal_coerced_params(callee_type: MirType) -> [bool]:
+    """Per-parameter int-literal -> declared-float-slot coercion provenance
+    recorded by MIR lowering (MirSignature.int_literal_coerced_params). The
+    coercion runs before any module split, so the caller's operand types at
+    an imported call already read f64; only this pin preserves the source
+    int -> float crossing for the no-implicit-coercion import check."""
+    match callee_type.kind:
+        case FuncPtr(sig): return sig.int_literal_coerced_params
+        case _: return []
+
 fn cl_import_call_abi_error(callee_type: MirType, args: [MirOperand], ret_type: MirType, has_ret_dest: bool, func: MirFunction) -> text:
     var arg_types: [MirType] = []
     for arg in args:
@@ -2063,10 +2073,18 @@ fn cl_call_abi_mismatch(callee_type: MirType, arg_types: [MirType], ret_type: Mi
             return "callee signature unknown; result is {cl_abi_class_name(cl_fallback_abi_type(ret_type))} and cannot be read from the all-i64 import"
         return ""
     val params = cl_declared_callee_params(callee_type)
+    val coerced_params = cl_declared_callee_int_literal_coerced_params(callee_type)
     var index = 0
     for arg_type in arg_types:
         val caller_cls = cl_fallback_abi_type(arg_type)
         val callee_cls = cl_abi_class(sig_type_to_cl(params[index]))
+        # The source argument was an unsuffixed int literal that MIR lowering
+        # coerced into this declared float slot. The operand already reads
+        # f64 here (the coercion runs before the module split), but the
+        # crossing is int -> f64: per the cross-module contract there is no
+        # implicit coercion, so reject it instead of admitting it.
+        if index < coerced_params.len() and coerced_params[index]:
+            return "arg {index} is i64 but the callee declares {cl_abi_class_name(callee_cls)}; convert it explicitly at the call site"
         if caller_cls != callee_cls:
             return "arg {index} is {cl_abi_class_name(caller_cls)} but the callee declares {cl_abi_class_name(callee_cls)}; convert it explicitly at the call site"
         index = index + 1

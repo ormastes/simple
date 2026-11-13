@@ -9868,7 +9868,17 @@ pub(crate) fn string_index_checked(string: RuntimeValue, index: i64) -> Option<R
     if data.is_null() {
         return None;
     }
-    let s = unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, len as usize)) };
+    let bytes = unsafe { std::slice::from_raw_parts(data, len as usize) };
+    // ASCII fast path (memoized per string): byte == code point, so `s[i]`
+    // is one byte copy instead of a chars() walk (and two for a negative i).
+    if text_is_ascii_memo(string, bytes) {
+        let want = if index < 0 { len + index } else { index };
+        if want < 0 || want >= len {
+            return None;
+        }
+        return Some(rt_string_new(unsafe { data.add(want as usize) }, 1));
+    }
+    let s = unsafe { std::str::from_utf8_unchecked(bytes) };
     let c = if index >= 0 {
         s.chars().nth(index as usize)?
     } else {

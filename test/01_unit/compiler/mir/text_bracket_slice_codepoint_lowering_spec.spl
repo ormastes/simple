@@ -1,0 +1,134 @@
+"""
+## Purpose and audience
+Purpose: Pin that the pure-Simple lowering cuts `s[a:b]` and `s[i]` on text by
+CODE POINT (rt_slice / rt_index_get, the seed's own lowering of the same
+syntax), while a user-written `.slice(a, b)` / `.substring(a, b)` stays a BYTE
+cut (spl_str_slice). Owner decision 2026-11-13: `len()`, `s[i]`, `s[a:b]` are
+code points; `substring` / `slice` / `index_of` are bytes.
+Audience: compiler engineers keeping seed and self-hosted lowering in parity.
+"""
+# @cover src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl
+# @cover src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl
+# @cover src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl
+# Bug: doc/08_tracking/bug/stage2_text_bracket_slice_cut_by_bytes_2026-11-13.md
+
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.tools.lint.semantic_check.{simple_semantic_check_source}
+
+fn lower_function(src: text, target_name: text) -> text:
+    val filename = "text_bracket_" + target_name + ".spl"
+    val module = parse_full_frontend(src, filename, filename, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(filename)
+    val hir = hir_lowering.lower_module(module)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    var result = ""
+    for error in hir_lowering.errors:
+        result = result + "HIR_ERROR:" + error.message + "\n"
+    for error in mir_lowering.errors:
+        result = result + "MIR_ERROR:" + error.message + "\n"
+    for function in mir.functions.values():
+        if function.name == target_name or function.name.ends_with("." + target_name):
+            result = result + "FN:" + function.name + "\n" + serialize_mir_function(function)
+    result
+
+fn count(haystack: text, needle: text) -> i64:
+    haystack.split(needle).len() - 1
+
+describe "text bracket slice code-point lowering":
+    it "lowers s[a:b] on a text parameter to the code-point rt_slice":
+        step("A bracket slice on text must not reach the byte cutter")
+        val mir = lower_function("fn cut(s: text) -> text:\n    s[1:2]\n", "cut")
+        expect(mir).to_contain("FN:")
+        expect(mir.contains("HIR_ERROR:")).to_equal(false)
+        expect(mir.contains("MIR_ERROR:")).to_equal(false)
+        expect(count(mir, "\"rt_slice\"")).to_equal(1)
+        expect(count(mir, "spl_str_slice")).to_equal(0)
+
+    it "lowers the open-ended s[a:] on text to the code-point rt_slice":
+        step("An open end is clamped by rt_slice itself")
+        val mir = lower_function("fn tail(s: text) -> text:\n    s[1:]\n", "tail")
+        expect(mir).to_contain("FN:")
+        expect(mir.contains("MIR_ERROR:")).to_equal(false)
+        expect(count(mir, "\"rt_slice\"")).to_equal(1)
+        expect(count(mir, "spl_str_slice")).to_equal(0)
+
+    it "keeps a user-written .slice(a, b) and .substring(a, b) on text as byte cuts":
+        step("The method spellings stay byte-offset")
+        val mir = lower_function("fn by(s: text) -> text:\n    s.slice(1, 2) + s.substring(0, 1)\n", "by")
+        expect(mir).to_contain("FN:")
+        expect(mir.contains("MIR_ERROR:")).to_equal(false)
+        expect(count(mir, "spl_str_slice")).to_equal(2)
+        expect(count(mir, "\"rt_slice\"")).to_equal(0)
+
+    it "lowers s[i] on text to the code-point rt_index_get":
+        step("A single index on text must not reach the byte rt_string_char_at")
+        val mir = lower_function("fn at(s: text) -> text:\n    s[1]\n", "at")
+        expect(mir).to_contain("FN:")
+        expect(mir.contains("MIR_ERROR:")).to_equal(false)
+        expect(count(mir, "rt_string_char_at")).to_equal(0)
+        expect(count(mir, "\"rt_index_get\"")).to_equal(1)
+
+    it "lowers the range index s[a..b] on text to the code-point rt_slice":
+        step("A range index is the same code-point cut as the colon slice")
+        val mir = lower_function("fn rng(s: text) -> text:\n    s[1..2]\n", "rng")
+        expect(mir).to_contain("FN:")
+        expect(mir.contains("MIR_ERROR:")).to_equal(false)
+        expect(count(mir, "\"rt_slice\"")).to_equal(1)
+        expect(count(mir, "spl_str_slice")).to_equal(0)
+
+    it "lowers the open-start s[:b] on text to the code-point rt_slice":
+        step("An omitted start is code point 0 on the same owner")
+        val mir = lower_function("fn head(s: text) -> text:\n    s[:2]\n", "head")
+        expect(mir).to_contain("FN:")
+        expect(mir.contains("MIR_ERROR:")).to_equal(false)
+        expect(count(mir, "\"rt_slice\"")).to_equal(1)
+        expect(count(mir, "spl_str_slice")).to_equal(0)
+
+    it "lowers a negative bound s[1:-1] on text to the code-point rt_slice":
+        step("rt_slice counts a negative bound back from the code-point length")
+        val mir = lower_function("fn mid(s: text) -> text:\n    s[1:-1]\n", "mid")
+        expect(mir).to_contain("FN:")
+        expect(mir.contains("MIR_ERROR:")).to_equal(false)
+        expect(count(mir, "\"rt_slice\"")).to_equal(1)
+        expect(count(mir, "spl_str_slice")).to_equal(0)
+
+describe "bracket slice keeps the .slice method identity":
+    it "dispatches v[1:3] to a user class's own slice method":
+        step("The bracket form resolves exactly like .slice on a user class")
+        val src = "class Window:\n    lo: i64\n    fn slice(a: i64, b: i64) -> i64:\n        self.lo + a + b\n\nfn pick(v: Window) -> i64:\n    v[1:3]\n"
+        val mir = lower_function(src, "pick")
+        expect(mir).to_contain("FN:")
+        expect(mir.contains("HIR_ERROR:")).to_equal(false)
+        expect(mir.contains("MIR_ERROR:")).to_equal(false)
+        expect(mir).to_contain("Window.slice")
+        expect(mir.contains("__index_slice")).to_equal(false)
+        expect(count(mir, "\"rt_slice\"")).to_equal(0)
+        expect(count(mir, "spl_str_slice")).to_equal(0)
+
+    it "does not route the bracket form to a method named __index_slice":
+        step("A class that only defines __index_slice gets no bracket dispatch")
+        val src = "class Odd:\n    lo: i64\n    fn __index_slice(a: i64, b: i64) -> i64:\n        self.lo + a + b\n\nfn pick(v: Odd) -> i64:\n    v[1:2]\n"
+        val mir = lower_function(src, "pick")
+        expect(mir.contains("Odd.__index_slice")).to_equal(false)
+
+    it "gives no code-point cut to a written __index_slice call on text":
+        step("Only the bracket form is marked; a written method name is not")
+        val mir = lower_function("fn odd(s: text) -> text:\n    s.__index_slice(1, 2)\n", "odd")
+        expect(count(mir, "\"rt_slice\"")).to_equal(0)
+
+    it "passes the strict method resolver for v[1:3] on a user class with fn slice":
+        step("semantic check must not report a missing bracket-slice method")
+        val src = "class Window:\n    lo: i64\n    fn slice(a: i64, b: i64) -> i64:\n        self.lo + a + b\n\nfn pick(v: Window) -> i64:\n    v[1:3]\n"
+        val result = simple_semantic_check_source(src, "window_bracket.spl")
+        var missing = 0
+        for diagnostic in result.diagnostics:
+            if diagnostic.contains("no method") or diagnostic.contains("__index_slice"):
+                missing = missing + 1
+        expect(missing).to_equal(0)
