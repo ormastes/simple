@@ -107,7 +107,10 @@ CENSUS_PLACEHOLDER
 
 - Untyped (ANY) subjects stay presence-only on the JIT: `fn b(k)` with
   `case Some(I8): 1` / `case Some(F32): 2` answers 1 for `Kind.F32` (interpreter
-  2). With no slot type, `I8` lowers as a binder. Pre-existing, not changed.
+  2). With no slot type, `I8` lowers as a binder. Qualified `Some(Kind.I8)` over an
+  untyped subject is presence-only too (reviewer probe: JIT `1 1 1 1 5`,
+  interpreter `1 2 2 3 5`), because the P1 guard keeps ANY subjects on the old
+  test. Base-identical, not a regression; engines still disagree here.
 - `Opt?` where `Opt` declares its own `Some`, and the untyped `Opt` case above:
   the JIT still matches the first `Some(...)` arm for any value (interpreter is
   name-keyed). Pre-existing.
