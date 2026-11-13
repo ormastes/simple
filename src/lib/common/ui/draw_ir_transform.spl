@@ -24,7 +24,19 @@
 
 use common.ui.draw_ir.{DrawIrCommand, DrawIrRect}
 
-fn _draw_ir_transform_min4(a: i32, b: i32, c: i32, d: i32) -> i32:
+fn _draw_ir_transform_floor_div(a: i64, b: i64) -> i64:
+    val q = a / b
+    if a % b != 0 and a < 0:
+        return q - 1
+    q
+
+fn _draw_ir_transform_ceil_div(a: i64, b: i64) -> i64:
+    val q = a / b
+    if a % b != 0 and a > 0:
+        return q + 1
+    q
+
+fn _draw_ir_transform_min4(a: i64, b: i64, c: i64, d: i64) -> i64:
     var m = a
     if b < m:
         m = b
@@ -34,7 +46,7 @@ fn _draw_ir_transform_min4(a: i32, b: i32, c: i32, d: i32) -> i32:
         m = d
     m
 
-fn _draw_ir_transform_max4(a: i32, b: i32, c: i32, d: i32) -> i32:
+fn _draw_ir_transform_max4(a: i64, b: i64, c: i64, d: i64) -> i64:
     var m = a
     if b > m:
         m = b
@@ -84,18 +96,28 @@ pub fn draw_ir_cpu_transform_paint_rect(command: DrawIrCommand) -> DrawIrRect:
             height: command.height
         )
 
-    val anchor_x = command.x + (command.width * command.transform_origin_x_pct) / 100
-    val anchor_y = command.y + (command.height * command.transform_origin_y_pct) / 100
+    # All edge math is exact integer arithmetic in 1/10000 px units
+    # (position*100 for the origin percent, times pct for the scale) and is
+    # rounded exactly ONCE at the end: the left/top edge floors and the
+    # right/bottom edge ceils, so the paint rect always covers the exact
+    # transformed span (never shrinks by a truncated pixel) and origin and
+    # extent cannot round in opposite directions.
+    val x100 = command.x.to_i64() * 100
+    val y100 = command.y.to_i64() * 100
+    val w100 = command.width.to_i64() * 100
+    val h100 = command.height.to_i64() * 100
+    val anchor_x = x100 + command.width.to_i64() * command.transform_origin_x_pct.to_i64()
+    val anchor_y = y100 + command.height.to_i64() * command.transform_origin_y_pct.to_i64()
+    val sx = command.scale_x_pct.to_i64()
+    val sy = command.scale_y_pct.to_i64()
 
-    val scaled_width = (command.width * command.scale_x_pct) / 100
-    val scaled_height = (command.height * command.scale_y_pct) / 100
-    val p_left = ((command.x - anchor_x) * command.scale_x_pct) / 100
-    val p_top = ((command.y - anchor_y) * command.scale_y_pct) / 100
-    val p_right = p_left + scaled_width
-    val p_bottom = p_top + scaled_height
+    val p_left = (x100 - anchor_x) * sx
+    val p_top = (y100 - anchor_y) * sy
+    val p_right = p_left + w100 * sx
+    val p_bottom = p_top + h100 * sy
 
-    var cos_v = 1
-    var sin_v = 0
+    var cos_v: i64 = 1
+    var sin_v: i64 = 0
     if rotation == 90000:
         cos_v = 0
         sin_v = 1
@@ -120,12 +142,18 @@ pub fn draw_ir_cpu_transform_paint_rect(command: DrawIrCommand) -> DrawIrRect:
     val min_y = _draw_ir_transform_min4(corner1_y, corner2_y, corner3_y, corner4_y)
     val max_y = _draw_ir_transform_max4(corner1_y, corner2_y, corner3_y, corner4_y)
 
+    # anchor is in 1/100 px; extents are in 1/10000 px.
+    val left = _draw_ir_transform_floor_div(anchor_x * 100 + min_x, 10000)
+    val top = _draw_ir_transform_floor_div(anchor_y * 100 + min_y, 10000)
+    val right = _draw_ir_transform_ceil_div(anchor_x * 100 + max_x, 10000)
+    val bottom = _draw_ir_transform_ceil_div(anchor_y * 100 + max_y, 10000)
+
     DrawIrRect(
         present: true,
-        x: anchor_x + min_x,
-        y: anchor_y + min_y,
-        width: max_x - min_x,
-        height: max_y - min_y
+        x: left as i32,
+        y: top as i32,
+        width: (right - left) as i32,
+        height: (bottom - top) as i32
     )
 
 pub fn draw_ir_cpu_rasterize_solid_rect(command: DrawIrCommand) -> [u32]:
