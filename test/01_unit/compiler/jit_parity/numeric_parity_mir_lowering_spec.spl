@@ -1,0 +1,88 @@
+# @req REQ-JIT-PARITY-003
+"""
+# Pure-Simple MIR lowering: numeric predicate / sign / pow parity
+
+`src/compiler/50.mir/_MirLoweringExpr/builtin_method_extras.spl`
+`try_lower_numeric_parity_builtin` lowers integer `is_even` / `is_odd` /
+`is_zero` / `is_positive` / `is_negative` / `sign` / `pow` and float
+`is_nan` / `is_finite` / `is_infinite` inline, matching the seed
+interpreter. Before it, each was a FATAL "unresolved method call" lowering
+error. Each example checks the lowering reports no diagnostic and emits no
+`rt_panic` placeholder; the runtime values are checked end-to-end by
+`primitive_method_parity_spec.spl`.
+
+Bug: doc/08_tracking/bug/jit_primitive_method_parity_gaps_2026-11-13.md
+"""
+
+# @tag: unit, compiler, mir, builtins
+
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+
+struct ExtraLowered:
+    messages: [text]
+    callees: [text]
+    labels: [text]
+
+fn extra_lower(src: text) -> ExtraLowered:
+    val file = "testdata/fixture_builtin_extras.spl"
+    val parsed = parse_full_frontend(src, file, "fixture_builtin_extras", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(file)
+    val hir = hir_lowering.lower_module(parsed)
+    var lowering = MirLowering.new_for_target(hir.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    val mir = lowering.lower_module(hir)
+    var messages: [text] = []
+    for e in hir_lowering.errors:
+        messages = messages.push("hir: " + e.message)
+    for e in lowering.errors:
+        if e.message.starts_with("non-exhaustive enum match on '"):
+            continue
+        messages = messages.push("mir: " + e.message)
+    var callees: [text] = []
+    var labels: [text] = []
+    for function in mir.functions.values():
+        for block in function.blocks:
+            labels = labels.push(block.label ?? "")
+            for instruction in block.instructions:
+                match instruction.kind:
+                    case MirInstKind.Call(_, callee, _):
+                        match callee.kind:
+                            case MirOperandKind.Const(MirConstValue.Str(name), _):
+                                callees = callees.push(name)
+                            case _: pass
+                    case _: pass
+    ExtraLowered(messages: messages, callees: callees, labels: labels)
+
+fn parity_lower(body: text) -> ExtraLowered:
+    extra_lower("fn main():\n    " + body + "\n")
+
+fn lowers_clean(body: text) -> text:
+    val low = parity_lower(body)
+    var panics = 0
+    for c in low.callees:
+        if c == "rt_panic":
+            panics = panics + 1
+    "messages={low.messages.join(" | ")} panics={panics}"
+
+describe "pure MIR lowers numeric parity methods without an unresolved-call error":
+    it "integer predicates lower inline":
+        step("lower is_even / is_odd / is_zero / is_positive / is_negative on an i64 local")
+        for m in ["is_even", "is_odd", "is_zero", "is_positive", "is_negative"]:
+            expect(lowers_clean("val x: i64 = 4\n    print x.{m}()")).to_equal("messages= panics=0")
+
+    it "integer sign and pow lower inline":
+        step("lower sign() and pow(n) on an i64 local")
+        expect(lowers_clean("val x: i64 = -9\n    print x.sign()")).to_equal("messages= panics=0")
+        expect(lowers_clean("val x: i64 = 3\n    print x.pow(4)")).to_equal("messages= panics=0")
+
+    it "float classification lowers inline":
+        step("lower is_nan / is_finite / is_infinite on an f64 local")
+        for m in ["is_nan", "is_finite", "is_infinite"]:
+            expect(lowers_clean("val x: f64 = 1.5\n    print x.{m}()")).to_equal("messages= panics=0")

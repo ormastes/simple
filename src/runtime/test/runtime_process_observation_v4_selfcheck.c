@@ -80,6 +80,8 @@ SplArray* rt_process_pinned_executable_sha256_value(int64_t handle) {
     return a;
 }
 
+/* Local-origin gate of the group stream owners (not exercised here). */
+int simple_local_unix_origin_v1(void) { return 0; }
 #define RT_OWNED_EXTERNAL_PIN 1 /* This harness stubs the executable pin. */
 #include "../runtime_process_owned.c"
 
@@ -124,12 +126,17 @@ static SplArray* ticket_from(const SplArray* words) {
 static void check_unavailable_policies(const char* cwd, int64_t cwd_pin,
                                          const uint8_t cwd_digest[32]) {
     SplArray* capability = rt_process_observation_v4_capabilities_value();
-    /* Current host owns only the leader; no ProcessGroup/Tree capability. */
-    assert(rt_array_get(capability, 3) == POV4_CAPABILITIES);
-    assert((rt_array_get(capability, 3) & ~((1 << 9) - 1)) == 0);
+    /* Linux owns the leader and, when /proc is readable, ProcessGroup
+     * retirement (998622c8624); never a Tree/cgroup capability. */
+    int64_t bits = rt_array_get(capability, 3);
+    int group = owned_linux_group_retire_available();
+    assert(bits == (POV4_CAPABILITIES | (group ? POV4_CAP_PROCESS_GROUP_RETIRE : 0)));
+    assert((bits & ~(int64_t)(POV4_CAPABILITIES | POV4_CAP_PROCESS_GROUP_RETIRE)) == 0);
     for (int policy = 1; policy <= 3; policy++) {
       for (int cgroup = 0; cgroup <= 1; cgroup++) {
-        if (policy == 1 && !cgroup) continue;
+        /* Admitted policies: LeaderOnly, and ProcessGroup when advertised.
+         * runtime_process_group_retire_linux_selfcheck runs those end to end. */
+        if (!cgroup && (policy == 1 || (policy == 2 && group))) continue;
         SplArray* request = request_bytes(cwd, cwd_pin, cwd_digest, "--pov4-child", 1024);
         set_u64_at(request, 80, (uint64_t)policy);
         if (cgroup) {

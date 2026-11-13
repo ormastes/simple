@@ -607,12 +607,20 @@ fn private_top_level_fn_names(items: &[Node]) -> std::collections::HashSet<Strin
         .collect()
 }
 
+/// Tail of every private-fn visibility rejection (import rule and call rule).
+/// The driver keys its "never fall back to the interpreter" decision on it, so
+/// both producers interpolate this constant rather than repeating the text.
+pub const PRIVATE_FN_VISIBILITY_HINT: &str = "mark it `pub` or `export` it";
+
 /// Visibility check (interp_private_names_leak_across_modules_2026-11-05):
 /// a braced `use m.{name}` that names a private `fn` of `m` (not re-exported by
 /// an `export`) from a file outside `m`'s directory is a hard error unless the pair is frozen in
 /// `scripts/check/private_import_baseline.txt` (legacy: warn only). Same-directory
 /// siblings stay in compatibility mode (bare `fn` is private to its file; sibling
 /// access is the documented compatibility exception).
+/// Test importers are exempt (owner decision 2026-11-13: "test is special, can
+/// access"), using the same `is_test_caller` definition as
+/// `check_private_call_visibility` so the import and call rules agree.
 fn check_private_use_names(
     use_stmt: &UseStmt,
     current_file: Option<&Path>,
@@ -623,6 +631,9 @@ fn check_private_use_names(
     let (Some(provided), Some(importer)) = (provided.as_ref(), current_file) else {
         return Ok(());
     };
+    if is_test_caller(&importer.to_string_lossy()) {
+        return Ok(());
+    }
     let dir_of = |p: &Path| p.parent().map(|d| std::fs::canonicalize(d).unwrap_or_else(|_| d.to_path_buf()));
     if dir_of(importer) == dir_of(module_path) {
         return Ok(());
@@ -647,7 +658,7 @@ fn check_private_use_names(
             continue;
         }
         return Err(CompileError::semantic(format!(
-            "private fn `{name}` of module `{module_label}` ({}) is not visible to {}; mark it `pub` or `export` it",
+            "private fn `{name}` of module `{module_label}` ({}) is not visible to {}; {PRIVATE_FN_VISIBILITY_HINT}",
             module_path.display(),
             importer.display()
         )));
@@ -1122,7 +1133,10 @@ pub fn load_and_merge_module(
         // Use-list check on the cache path: the AST is gone, so consult the
         // surface recorded when this module was first loaded.
         if let Some(provided) = lookup_provided_names(&module_path) {
-            check_private_use_names(use_stmt, current_file, &module_path, &parts.join("."), &provided)?;
+            if let Err(e) = check_private_use_names(use_stmt, current_file, &module_path, &parts.join("."), &provided) {
+                decrement_load_depth();
+                return Err(e);
+            }
             warn_unprovided_use_names(use_stmt, current_file, &module_path, &parts.join("."), &provided);
         }
 
@@ -1514,7 +1528,17 @@ pub fn load_and_merge_module(
         &module_enums,
     );
     record_provided_names(&module_path, provided_names.clone());
-    check_private_use_names(use_stmt, current_file, &module_path, &parts.join("."), &provided_names)?;
+    if let Err(e) = check_private_use_names(use_stmt, current_file, &module_path, &parts.join("."), &provided_names) {
+        // Release the loading mark exactly like the evaluation-error arm above.
+        // Leaking it made an in-process retry (the driver's JIT -> interpreter
+        // fallback) see this module as a circular import, return its partial
+        // exports WITHOUT re-running this check, and execute the program with
+        // rc 0 (visibility_error_jit_fallback_fail_open_2026-11-13).
+        clear_partial_module_exports(&module_path);
+        unmark_module_loading(&module_path);
+        decrement_load_depth();
+        return Err(e);
+    }
     warn_unprovided_use_names(use_stmt, current_file, &module_path, &parts.join("."), &provided_names);
 
     // Cache the full module exports for future use
@@ -2772,6 +2796,30 @@ mod private_fn_visibility_tests {
     }
 
     #[test]
+    fn test_importer_is_exempt_but_src_importer_still_errors() {
+        // Owner decision 2026-11-13: tests may import private items. Same test-file
+        // definition as check_private_call_visibility (`is_test_caller`).
+        let u = use_of("use app.sub.lib_mod.{secret_helper}
+");
+        let check = |importer: &str| {
+            super::check_private_use_names(
+                &u,
+                Some(std::path::Path::new(importer)),
+                std::path::Path::new("zz_fx/src/app/sub/lib_mod.spl"),
+                "app.sub.lib_mod",
+                &provided_with_private(&["secret_helper"]),
+            )
+        };
+        assert!(check("test/01_unit/app/lib_mod_spec.spl").is_ok());
+        assert!(check("/repo/test/system/lib_mod_spec.spl").is_ok());
+        assert!(check("test\\01_unit\\app\\lib_mod_spec.spl").is_ok());
+        assert!(check("./test/01_unit/app/lib_mod_spec.spl").is_ok());
+        assert!(check("zz_fx/src/app/other/main.spl").is_err());
+        assert!(check("zz_fx/src/app/contest/main.spl").is_err());
+        assert!(check("scripts/check/tool.spl").is_err());
+    }
+
+    #[test]
     fn same_directory_sibling_and_pub_names_are_allowed() {
         let u = use_of("use app.lib_mod.{secret_helper}
 ");
@@ -2833,7 +2881,7 @@ pub(crate) fn check_private_call_visibility(
         return Ok(());
     }
     Err(CompileError::semantic(format!(
-        "private fn `{name}` of module `{owner}` is not visible to {current}; mark it `pub` or `export` it"
+        "private fn `{name}` of module `{owner}` is not visible to {current}; {PRIVATE_FN_VISIBILITY_HINT}"
     )))
 }
 

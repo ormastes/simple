@@ -273,20 +273,32 @@ fn attributions_from_separate_lowerer_runs_are_all_visible_at_link_time() {
     );
 }
 
-/// A list comprehension has no HIR lowering; lenient mode replaces it with
-/// `nil`, which silently turns `[for x in xs: x]` into `[]` in compiled code.
+/// Lenient mode replaces an expression that has no HIR lowering with `nil`,
+/// which silently turns e.g. a dict comprehension into nil in compiled code.
 /// The drop must be recorded so the JIT entry path can fall back to the
 /// interpreter (`seed_run_comprehension_empty_hybrid_splice_2026-11-04`).
+/// List comprehensions are lowered for real since 5a7b65c59db, so they must
+/// NOT be recorded (recording them would push importers off the JIT).
 #[test]
-fn lenient_lowering_records_dropped_list_comprehension() {
+fn lenient_lowering_records_dropped_comprehension_but_not_lowered_list_comprehension() {
     let _ = crate::hir::lower::take_dropped_unsupported_exprs();
     let _ = lower_lenient_with_file(
-        "fn filt(xs: [i64]) -> [i64]:\n    [for x in xs if x >= 0: x]\n",
-        "dropped_comprehension.spl",
+        "fn pairs(xs: [i64]) -> any:\n    {for x in xs: (x, x)}\n",
+        "dropped_dict_comprehension.spl",
     );
     let dropped = crate::hir::lower::take_dropped_unsupported_exprs();
     assert!(
-        dropped.iter().any(|k| k == "ListComprehension"),
-        "dropped comprehension must be recorded, got {dropped:?}"
+        dropped.iter().any(|k| k == "DictComprehension"),
+        "dropped dict comprehension must be recorded, got {dropped:?}"
+    );
+
+    let _ = lower_lenient_with_file(
+        "fn filt(xs: [i64]) -> [i64]:\n    [for x in xs if x >= 0: x]\n",
+        "lowered_list_comprehension.spl",
+    );
+    let dropped = crate::hir::lower::take_dropped_unsupported_exprs();
+    assert!(
+        !dropped.iter().any(|k| k == "ListComprehension"),
+        "a lowered list comprehension must not be recorded as dropped, got {dropped:?}"
     );
 }
