@@ -296,3 +296,7 @@ applies — most of the landed modules above arrived from such parallel lanes.
 This row's web_contents fix is spec-side only (a referenced-but-never-defined
 helper), verified non-vacuous by the file's sentinel assertions
 (`chunk_count == 2`, `last_end == 7`).
+
+## Triage 2026-11-13 (Linux aarch64, lane uia) — row stays OPEN
+
+Needs an owner decision, not attempted. Re-counted at release/1.0.0 c8c3e7bc4f1, Linux aarch64 (DGX Spark GB10), Rust seed af717f53d6bce3e5: 12 of the 24 listed modules now exist; 12 are still missing (blink.dom.document, blink.feature.paint.paint_controller, blink.layout root, blink.layout.flex, blink.navigation.controller, blink.network.fetch, blink.scroll.manager, cc.entity.layer_base, cc.feature.{raster_source,picture_layer_impl,raster_buffer_provider,tile_manager}), leaving 10 red specs. The modules were never written and have no consumer; some specs are internally inconsistent (scroll_manager_spec: the example titled Hidden returns false asserts true). Implementing library code only to satisfy them, or deleting them, is the owner's call.

@@ -127,3 +127,7 @@ with Simple Vulkan Engine2D + Electron Chromium/Vulkan `.rdc` artifacts. This
 Windows lane has no such evidence path. Grant unchanged: run
 `sh scripts/check/check-gui-widget-renderdoc-goal-status.shs --strict` on the
 Linux evidence lane and record the gate report under `doc/09_report/`.
+
+## Triage 2026-11-13 (Linux aarch64, lane uia) — row stays OPEN
+
+Blocked on this host: needs a live Electron-on-Vulkan RenderDoc capture; neither RenderDoc nor Electron was found on PATH, /usr/bin, /opt or the home directory, and the Simple leg runs the Vulkan backend under simple run (Vulkan-init lane).
