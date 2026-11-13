@@ -1140,6 +1140,24 @@ impl Lowerer {
                         ty: ret_ty,
                     });
                 }
+                // Flattened (JIT) unit: `ns.f(...)` through a whole-module
+                // import. Without this the receiver lowered to Global("ns"),
+                // which codegen rejects and the program left the JIT.
+                // doc/08_tracking/bug/jit_module_namespace_member_access_unresolved_2026-11-13.md
+                if let Some(target) = self.resolve_flatten_namespace_callable(recv_name, method) {
+                    let args_hir = self.lower_call_args(args, ctx)?;
+                    let ret_ty = self.named_callable_return_type(&target).unwrap_or(TypeId::ANY);
+                    return Ok(HirExpr {
+                        kind: HirExprKind::Call {
+                            func: Box::new(HirExpr {
+                                kind: HirExprKind::Global(target),
+                                ty: TypeId::ANY,
+                            }),
+                            args: args_hir,
+                        },
+                        ty: ret_ty,
+                    });
+                }
             }
             // this.* intrinsics
             if recv_name == "this" {

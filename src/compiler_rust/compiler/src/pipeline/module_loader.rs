@@ -17,7 +17,7 @@ use simple_parser::Parser;
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::interpreter::{
     flatten_owner_mangled_name, normalize_path_key, tag_function_module_owner, FLATTEN_GLOBAL_OWNER_MARKER_PREFIX,
-    FLATTEN_IMPORT_BINDING_MARKER_PREFIX, FLATTEN_MODULE_OWNER_ATTR_PREFIX,
+    FLATTEN_IMPORT_BINDING_MARKER_PREFIX, FLATTEN_MODULE_NAMESPACE_MARKER_PREFIX, FLATTEN_MODULE_OWNER_ATTR_PREFIX,
 };
 use crate::stdlib_variant::stdlib_root_candidates_present;
 use crate::CompileError as _;
@@ -748,8 +748,30 @@ fn append_flattened_import_binding_markers(
         // ambiguity check. A whole-module import (`use a.b`) binds no symbol.
         ImportTarget::Single(name) if target_is_symbol => add_marker(name, name),
         ImportTarget::Aliased { name, alias } if target_is_symbol => add_marker(alias, name),
-        ImportTarget::Single(_) | ImportTarget::Aliased { .. } => {}
+        // Whole-module import: no symbol, but HIR lowering needs to know that
+        // `ns` in `ns.f()` / `ns.CONST` names this module (the flattened unit
+        // has no other record of it). See
+        // doc/08_tracking/bug/jit_module_namespace_member_access_unresolved_2026-11-13.md
+        ImportTarget::Single(name) | ImportTarget::Aliased { alias: name, .. } => {
+            items.push(Node::Const(ConstStmt {
+                span: use_stmt.span,
+                name: module_namespace_marker_name(owner_name, name, &source_name),
+                ty: None,
+                value: Expr::Nil,
+                visibility: Visibility::Private,
+                attributes: vec![],
+            }));
+        }
     }
+}
+
+fn module_namespace_marker_name(importer: &str, local: &str, source_owner: &str) -> String {
+    format!(
+        "{FLATTEN_MODULE_NAMESPACE_MARKER_PREFIX}{}:{importer}{}:{local}{}:{source_owner}",
+        importer.len(),
+        local.len(),
+        source_owner.len()
+    )
 }
 
 fn strip_flattened_import_nodes(module: Module, module_path: &Path) -> Module {
@@ -766,7 +788,9 @@ fn strip_flattened_import_nodes(module: Module, module_path: &Path) -> Module {
                 items.push(item);
                 continue;
             }
-            if marker.name.starts_with(FLATTEN_IMPORT_BINDING_MARKER_PREFIX) {
+            if marker.name.starts_with(FLATTEN_IMPORT_BINDING_MARKER_PREFIX)
+                || marker.name.starts_with(FLATTEN_MODULE_NAMESPACE_MARKER_PREFIX)
+            {
                 items.push(item);
                 continue;
             }

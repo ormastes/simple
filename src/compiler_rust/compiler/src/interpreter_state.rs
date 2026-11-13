@@ -183,6 +183,21 @@ pub struct LiteralFunctionInfo {
 pub(crate) const FLATTEN_MODULE_OWNER_ATTR_PREFIX: &str = "__simple_flatten_module_owner__=";
 pub(crate) const FLATTEN_GLOBAL_OWNER_MARKER_PREFIX: &str = "__simple_flatten_global_owner__=";
 pub(crate) const FLATTEN_IMPORT_BINDING_MARKER_PREFIX: &str = "__simple_flatten_import_binding__=";
+/// Whole-module import (`use a.b` / `use a.b as m`): importer, local namespace
+/// name, source owner. Kept apart from the import-binding prefix because a
+/// whole-module import binds no symbol and that prefix has several consumers.
+/// Read only by HIR lowering (`Lowerer::collect_flattened_import_aliases`).
+pub(crate) const FLATTEN_MODULE_NAMESPACE_MARKER_PREFIX: &str = "__simple_flatten_module_namespace__=";
+
+/// Decode a `__simple_flatten_module_namespace__=` marker into
+/// `(importer, local_name, source_owner)`.
+pub(crate) fn decode_module_namespace_marker(marker: &str) -> Option<(&str, &str, &str)> {
+    let mut raw = marker.strip_prefix(FLATTEN_MODULE_NAMESPACE_MARKER_PREFIX)?;
+    let importer = decode_marker_field(&mut raw)?;
+    let local_name = decode_marker_field(&mut raw)?;
+    let source_owner = decode_marker_field(&mut raw)?;
+    raw.is_empty().then_some((importer, local_name, source_owner))
+}
 
 /// Decode one `<len>:<value>` field of a flatten marker name.
 ///

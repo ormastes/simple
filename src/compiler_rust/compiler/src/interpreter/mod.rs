@@ -26,7 +26,7 @@ pub(crate) use crate::interpreter_unit::*;
 #[path = "../interpreter_state.rs"]
 mod interpreter_state;
 pub(crate) use interpreter_state::{
-    decode_import_binding_marker, flatten_owner_mangled_name, FLATTEN_OWNER_SYMBOL_PREFIX, clear_moved_vars, const_trace, const_trace_target,
+    decode_import_binding_marker, decode_module_namespace_marker, flatten_owner_mangled_name, FLATTEN_OWNER_SYMBOL_PREFIX, clear_moved_vars, const_trace, const_trace_target,
     get_aop_config, get_di_config, mark_as_moved, set_aop_config, set_di_config, ExecutionMode,
     debug_call_stack_snapshot, field_access_debug_enabled, note_enum_payload_function, note_enum_payload_function_opt,
 };
@@ -71,7 +71,7 @@ pub(crate) use interpreter_state::{
     MODULE_GLOBALS_INITIAL_BY_OWNER, MOVED_VARS, SI_BASE_UNITS, USER_SI_BASE_UNITS, USER_UNIT_SUFFIX_TO_FAMILY,
     TIMEOUT_EXCEEDED, TRAIT_IMPLS, TRAITS, MIXINS, UNIT_FAMILY_ARITHMETIC, UNIT_FAMILY_CONVERSIONS,
     UNIT_SUFFIX_TO_FAMILY, USER_MACROS, FUNCTION_OVERLOADS, CLASS_OVERLOADS, FUNCTION_MODULE_OWNER,
-    CURRENT_EXEC_MODULE, FLATTEN_GLOBAL_OWNER_MARKER_PREFIX, FLATTEN_IMPORT_BINDING_MARKER_PREFIX,
+    CURRENT_EXEC_MODULE, FLATTEN_GLOBAL_OWNER_MARKER_PREFIX, FLATTEN_IMPORT_BINDING_MARKER_PREFIX, FLATTEN_MODULE_NAMESPACE_MARKER_PREFIX,
     FLATTEN_MODULE_OWNER_ATTR_PREFIX, tag_function_module_owner, report_globals_census, owned_globals_snapshot,
     owned_global, owned_global_present, owner_has_globals, steal_owned_global, set_owned_global, seed_owner_globals,
     reset_owned_globals_from_initial, owner_bindings, record_owner_binding, record_owner_binding_layer,

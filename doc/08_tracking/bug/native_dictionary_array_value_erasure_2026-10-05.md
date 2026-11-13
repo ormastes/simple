@@ -46,3 +46,16 @@ The `[text]` local workaround in reverse_reference_facts.spl may then be removed
 
 ## Lane note 2026-11-03 (wl01 lane)
 Already fix-implemented-verification-pending; remaining step is a native trait-fixture run on a rebuilt producer. Nothing further to land from this lane.
+
+## Fix (2026-11-13) — regression spec oracle
+
+`916be6c2061` is the FAILING producer named above, not a fix; the parser fix is
+`978e606e4a6` (ancestor of origin/release/1.0.0). The one red scenario in
+`dictionary_brace_type_identity_spec.spl` ("retains the optional suffix around
+the whole dictionary") was a wrong oracle: the flat parser bridges `T?` to the
+canonical `Named("Option", [T])` shape (`convert_nodes.spl`
+`is_option_generic_tag`), never `TypeKind.Optional`; HIR lowers both to
+`HirTypeKind.Optional`. The oracle now checks `Option<Dict<text, [bool]>>`
+with the `[bool]` value intact. Seed run: 4/4 passed. Native re-run of
+`test/04_smoke/native_dictionary_array_direct.spl` on a rebuilt producer still
+pending.

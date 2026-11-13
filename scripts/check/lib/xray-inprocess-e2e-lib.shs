@@ -47,6 +47,14 @@ xr_session_ok() {
     [ "$(xr_field "$1" "$2" records_after_stop)" = "0" ] || return 1
     n=$(sed -n "s/^E2E $2 records=\[\([^]]*\)\].*/\1/p" "$1" | tr ',' '\n' | grep -c ':')
     [ "$n" -eq "$4" ] || return 1
+    # container switch (dynamic aspect): off at construction, on only between
+    # start and request_stop (XrayDataProfilingV1)
+    [ "$(xr_field "$1" "$2" initial)" = "false" ] || return 1
+    [ "$(xr_field "$1" "$2" lookups_before)" = "0" ] || return 1
+    [ "$(xr_field "$1" "$2" profiling_on)" = "true" ] || return 1
+    [ "$(xr_field "$1" "$2" lookups_on)" = "2" ] || return 1
+    [ "$(xr_field "$1" "$2" profiling_off)" = "false" ] || return 1
+    [ "$(xr_field "$1" "$2" lookups_after_stop)" = "2" ] || return 1
     return 0
 }
 
@@ -55,12 +63,17 @@ xr_selftest() {
     printf '%s\n' "E2E s1 selected_sites=[1, 2] words_on=NNB" \
         "E2E s1 results_on=1,2, baseline=1,2," \
         "E2E s1 records=[1:1:1, 2:1:2]" "E2E s1 words_off=BBB" \
-        "E2E s1 results_off=1,2, records_after_stop=0 lost=0" > "$t"
+        "E2E s1 results_off=1,2, records_after_stop=0 lost=0" \
+        "E2E s1 container initial=false lookups_before=0 profiling_on=true lookups_on=2 profiling_off=false lookups_after_stop=2" > "$t"
     xr_session_ok "$t" s1 NNB 2 || { rm -f "$t"; return 1; }
     # each mutation must be rejected
     sed 's/words_off=BBB/words_off=BNB/' "$t" > "$t.m"; xr_session_ok "$t.m" s1 NNB 2 && { rm -f "$t" "$t.m"; return 1; }
     sed 's/results_on=1,2,/results_on=1,3,/' "$t" > "$t.m"; xr_session_ok "$t.m" s1 NNB 2 && { rm -f "$t" "$t.m"; return 1; }
     sed 's/records_after_stop=0/records_after_stop=1/' "$t" > "$t.m"; xr_session_ok "$t.m" s1 NNB 2 && { rm -f "$t" "$t.m"; return 1; }
+    sed 's/lookups_after_stop=2/lookups_after_stop=3/' "$t" > "$t.m"; xr_session_ok "$t.m" s1 NNB 2 && { rm -f "$t" "$t.m"; return 1; }
+    sed 's/initial=false/initial=true/' "$t" > "$t.m"; xr_session_ok "$t.m" s1 NNB 2 && { rm -f "$t" "$t.m"; return 1; }
+    sed 's/profiling_on=true/profiling_on=false/' "$t" > "$t.m"; xr_session_ok "$t.m" s1 NNB 2 && { rm -f "$t" "$t.m"; return 1; }
+    grep -v ' container ' "$t" > "$t.m"; xr_session_ok "$t.m" s1 NNB 2 && { rm -f "$t" "$t.m"; return 1; }
     xr_session_ok "$t" s1 NNB 3 && { rm -f "$t" "$t.m"; return 1; }
     xr_session_ok "$t" s1 NNN 2 && { rm -f "$t" "$t.m"; return 1; }
     : > "$t.m"; xr_session_ok "$t.m" s1 NNB 2 && { rm -f "$t" "$t.m"; return 1; }
@@ -179,8 +192,8 @@ xr_main() {
     # return taken).
     xr_session_ok "$WORK/host.e2e" s2 BBNNNBB 6 || { echo "FAIL — session 2 (pointcut scaled): $(grep '^E2E s2' "$WORK/host.e2e" | tr '\n' ' ')"; exit 1; }
     checks=$((checks + 2))
-    s1_ids=$(sed -n 's/^E2E s1 records=\[\(.*\)\]$/\1/p' "$WORK/host.e2e" | tr ',' '\n' | sed 's/ //g' | cut -d: -f2 | sort -u | tr '\n' ' ')
-    s2_ids=$(sed -n 's/^E2E s2 records=\[\(.*\)\]$/\1/p' "$WORK/host.e2e" | tr ',' '\n' | sed 's/ //g' | cut -d: -f2 | sort -u | tr '\n' ' ')
+    s1_ids=$(sed -n 's/^E2E s1 records=\[\([^]]*\)\].*/\1/p' "$WORK/host.e2e" | tr ',' '\n' | sed 's/ //g' | cut -d: -f2 | sort -u | tr '\n' ' ')
+    s2_ids=$(sed -n 's/^E2E s2 records=\[\([^]]*\)\].*/\1/p' "$WORK/host.e2e" | tr ',' '\n' | sed 's/ //g' | cut -d: -f2 | sort -u | tr '\n' ' ')
     [ "$s1_ids" = "3 " ] && [ "$s2_ids" = "2 " ] || { echo "FAIL — records name the wrong functions (s1: $s1_ids, s2: $s2_ids)"; exit 1; }
     checks=$((checks + 1))
     echo "PASS — $checks check(s) (link: 7, twin+handler: 2, in-process: $((checks - 9)); sleds=$XR_SLEDS; $(uname -m))"

@@ -1,0 +1,149 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+"""
+## Purpose and audience
+
+Purpose: pin that `simple run` (Cranelift JIT lane) resolves member access
+through a WHOLE-MODULE import -- `use a.b as m` / `use a.b` followed by
+`m.f(...)` or `m.CONST` -- and keeps the item-alias forms
+(`use a.b.{f as g}`, `use a.b.f as g`) green.
+Audience: compiler engineers maintaining `pipeline::module_loader` and HIR
+lowering of flattened units.
+
+## Operator workflow
+
+1. Run `bin/simple test test/01_unit/compiler/jit_module_namespace_import_spec.spl`
+   (set `SIMPLE_BIN` to the seed under test).
+2. Every scenario must pass.
+
+## Compatibility and limitations
+
+Shells out to the seed binary (`SIMPLE_BIN`, default `bin/simple`) with
+`SIMPLE_EXECUTION_MODE=jit`. The interpreter lane resolves namespaces through
+its own resolver and is always correct here, so an in-process assertion would
+be green on a broken JIT. The fn-call forms failed codegen and were silently
+demoted to the interpreter (exit 0, correct output), so the oracle is the
+absence of the demotion markers that run actually printed. The constant forms
+never demoted -- they printed a garbage value -- so the oracle there is the
+EXACT stdout `42`.
+"""
+
+# doc-path: doc/08_tracking/bug/jit_module_namespace_member_access_unresolved_2026-11-13.md
+# @manual: primary
+
+"""
+# Whole-module namespace member access must stay on the JIT and be correct
+
+Bug: doc/08_tracking/bug/jit_module_namespace_member_access_unresolved_2026-11-13.md
+
+Flattening merges `alib/core.spl` into the JIT unit, but a whole-module
+import binds no symbol, so nothing told HIR lowering that `ac` (or `core`)
+names that module. `ac.alias_add(40)` lowered to `GlobalLoad("ac")`, which
+codegen refused (`GlobalLoad: unresolved identifier 'ac'`) and the whole
+program dropped to the interpreter. `ac.ALIAS_BASE` lowered to a field read
+off an unrelated value and printed a different garbage number every run.
+"""
+use std.spec.step
+
+use std.spipe.*
+use std.io.{process_run, env_get, env_set}
+
+fn simple_binary() -> text:
+    val configured = env_get("SIMPLE_BIN") ?? ""
+    if configured.len() > 0:
+        return configured
+    "bin/simple"
+
+fn fixture_entry(form: text) -> text:
+    "test/fixtures/jit_use_alias/src/{form}.spl"
+
+# The runner exports `SIMPLE_EXECUTION_MODE=interpret`; pin the child to the
+# JIT lane and restore the runner's value afterwards.
+fn run_form(form: text) -> (text, text, i64):
+    val previous = env_get("SIMPLE_EXECUTION_MODE") ?? ""
+    env_set("SIMPLE_EXECUTION_MODE", "jit")
+    val result = process_run(simple_binary(), ["run", fixture_entry(form)])
+    env_set("SIMPLE_EXECUTION_MODE", previous)
+    result
+
+fn stayed_on_jit(stdout: text, stderr: text) -> bool:
+    val combined = stdout + stderr
+    not combined.contains("[engine-demotion]") and not combined.contains("JIT compilation failed") and not combined.contains("[jit-fallback]") and not combined.contains("GlobalLoad: unresolved identifier")
+
+describe "whole-module namespace import under the JIT lane":
+    # @manual scenario evidence
+
+    it "use a.b as m: m.f(...) computes on the JIT":
+        # @req: REQ-SSPEC-UNIT
+        val (stdout, stderr, code) = run_form("module_alias_fn")
+        expect code == 0
+        expect stdout.trim() == "42"
+        expect stayed_on_jit(stdout, stderr)
+
+    it "use a.b as m: m.CONST reads the real constant, not garbage":
+        # @req: REQ-SSPEC-UNIT
+        val (stdout, stderr, code) = run_form("module_alias_const")
+        expect code == 0
+        expect stdout.trim() == "42"
+        expect stayed_on_jit(stdout, stderr)
+
+    it "use a.b: b.f(...) computes on the JIT":
+        # @req: REQ-SSPEC-UNIT
+        val (stdout, stderr, code) = run_form("module_plain_fn")
+        expect code == 0
+        expect stdout.trim() == "42"
+        expect stayed_on_jit(stdout, stderr)
+
+    it "use a.b: b.CONST reads the real constant, not garbage":
+        # @req: REQ-SSPEC-UNIT
+        val (stdout, stderr, code) = run_form("module_plain_const")
+        expect code == 0
+        expect stdout.trim() == "42"
+        expect stayed_on_jit(stdout, stderr)
+
+    it "a namespace import inside a non-entry module resolves too":
+        # @req: REQ-SSPEC-UNIT
+        val (stdout, stderr, code) = run_form("nested_namespace")
+        expect code == 0
+        expect stdout.trim() == "42"
+        expect stayed_on_jit(stdout, stderr)
+
+    it "m.f / m.CONST name the module's declarations, not same-named entry ones":
+        # @req: REQ-SSPEC-UNIT
+        val (stdout, stderr, code) = run_form("module_alias_collision")
+        expect code == 0
+        expect stdout.trim() == "42 140 40 1000"
+        expect stayed_on_jit(stdout, stderr)
+
+describe "item-alias import forms stay green under the JIT lane":
+    # @manual scenario evidence
+
+    it "use a.b.{f as g}":
+        # @req: REQ-SSPEC-UNIT
+        val (stdout, stderr, code) = run_form("item_alias_fn")
+        expect code == 0
+        expect stdout.trim() == "42"
+        expect stayed_on_jit(stdout, stderr)
+
+    it "use a.b.{CONST as C}":
+        # @req: REQ-SSPEC-UNIT
+        val (stdout, stderr, code) = run_form("item_alias_const")
+        expect code == 0
+        expect stdout.trim() == "42"
+        expect stayed_on_jit(stdout, stderr)
+
+    it "use a.b.f as g":
+        # @req: REQ-SSPEC-UNIT
+        val (stdout, stderr, code) = run_form("single_alias_fn")
+        expect code == 0
+        expect stdout.trim() == "42"
+        expect stayed_on_jit(stdout, stderr)
+
+    it "use a.b.CONST as C":
+        # @req: REQ-SSPEC-UNIT
+        val (stdout, stderr, code) = run_form("single_alias_const")
+        expect code == 0
+        expect stdout.trim() == "42"
+        expect stayed_on_jit(stdout, stderr)

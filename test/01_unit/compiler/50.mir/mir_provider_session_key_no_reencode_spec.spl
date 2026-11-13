@@ -1,0 +1,66 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+
+"""
+## Purpose and audience
+`mir_provider_session_content_key_v1` sealed the provider session by
+re-encoding EVERY provider HirModule through the HIR codec and hashing it.
+On the serial Phase 3 bootstrap_main.spl closure (run-21 Stage 2,
+2026-11-13) that was the whole 957 s between `mir_setup:physical_owners`
+and `mir_setup:struct_prescan`: 149 of 150 gdb samples sat under it, 83 in
+`hir_module_encode`. The key only has to make reuse impossible across two
+different provider snapshots; every production site computes it once on a
+fresh MirLowering and nothing persists it. A per-computation session token
+does that by construction (two computations never share a key), with zero
+encodes. Audience: compiler engineers maintaining MIR provider sessions.
+"""
+
+# @tag: unit, compiler, mir
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use std.io_runtime.{env_set, env_remove_process}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{ParserModule}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_codec.{hir_module_encode_calls}
+use compiler.hir.hir_types.{HirModule}
+use compiler.mir.mir.*
+
+fn psk_providers() -> [HirModule]:
+    val log = Logger(level: 0)
+    val a_src = "pub fn one() -> i64:\n    1\n"
+    val b_src = "pub struct Box:\n    v: i64\n"
+    var modules: Dict<text, ParserModule> = {}
+    modules["psk.a"] = parse_full_frontend(a_src, "psk/a.spl", "psk.a", log)
+    modules["psk.b"] = parse_full_frontend(b_src, "psk/b.spl", "psk.b", log)
+    val sources = [SourceFile(path: "psk/a.spl", content: a_src, module_name: "psk.a"),
+        SourceFile(path: "psk/b.spl", content: b_src, module_name: "psk.b")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var a_lowering = hirlowering_for_module("psk/a.spl", surfaces)
+    var b_lowering = hirlowering_for_module("psk/b.spl", surfaces)
+    [a_lowering.lower_module(modules["psk.a"]), b_lowering.lower_module(modules["psk.b"])]
+
+describe "MIR provider session key":
+    it "seals a provider list without re-encoding any provider":
+        val providers = psk_providers()
+        step("Count codec encodes while the key is computed")
+        val _on = env_set("SIMPLE_HIR_ENCODE_COUNT_DIAGNOSTIC", "1")
+        val before = hir_module_encode_calls()
+        val key = mir_provider_session_content_key_v1(providers)
+        val encodes = hir_module_encode_calls() - before
+        val _off = env_remove_process("SIMPLE_HIR_ENCODE_COUNT_DIAGNOSTIC")
+        expect(key != "").to_equal(true)
+        expect(encodes).to_equal(0)
+
+    it "never gives two computations the same key":
+        step("Identical providers, two seals: reuse must not be authorized across them")
+        val providers = psk_providers()
+        val first = mir_provider_session_content_key_v1(providers)
+        val second = mir_provider_session_content_key_v1(providers)
+        expect(first != "" and second != "").to_equal(true)
+        expect(first == second).to_equal(false)

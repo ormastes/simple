@@ -1214,6 +1214,12 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
     var done: i64 = 0
     var all_stopped = true
     var total_claims: i64 = 0
+    # Set when a reaped owner died before claiming anything while the ledger
+    # holds no claims at all: every remaining owner would pay the same
+    # whole-closure prologue (load_sources + parse) for the same queue and die
+    # the same way (run4 2026-11-13: owners 0-4/8@0, each 1800 s claimed=0,
+    # row TIMEOUT at 10800 s). Further dispatch is thrash, not progress.
+    var stop_dispatch = false
     # Live-admitted concurrency actually reached (the start-time cap is only an
     # upper bound: shard_commit_spawn_admit_v1 still gates every spawn).
     var peak_live: i64 = 0
@@ -1235,6 +1241,7 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
             if live_private.len() > 0 and live_private[0] > observed_peak_kib: observed_peak_kib = live_private[0]
             val est_kib = shard_worker_estimate_clamped_kib_v1(shard_commit_estimate_kib_v1(shard_commit_unmeasured_estimate_kib_v1(static_kib, recorded_peak, override_kib), observed_peak_kib), if pool_base_headroom < 0: -1 else: pool_base_headroom - commit_reserve_kib)
             while pids.len() < window_size and next_pending < pending.len() and
+                    not stop_dispatch and
                     not hir_shard_recovery_blocked(queue_dir) and
                     shard_commit_spawn_admit_v1(now_headroom, commit_reserve_kib, est_kib, live_private):
                 val index = pending[next_pending]
@@ -1373,6 +1380,22 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
                     val _blocked = hir_shard_recovery_block(queue_dir, "incomplete worker or ledger publication: owner={owner} exit={code} claimed={progress} sealed={sealed} finished={finished}")
                 elif not finished and not hir_shard_recovery_blocked(queue_dir) and hir_shard_recovery_can_replace(fail_fast, code, progress, hir_shard_recovery_unclaimed_count(queue_dir)):
                     replacements = replacements.push(reaped_index)
+                elif code != 0 and progress == 0 and not finished and total_claims == 0 and pids.len() == 0:
+                    # The dead owner claimed nothing, no reaped owner ever
+                    # claimed (total_claims still 0), and nothing is live, so
+                    # the queue is exactly as it was before the prologue: the
+                    # next pending owner would repeat an already-failed
+                    # whole-closure prologue. Stop the slot pool instead of
+                    # marching the remaining indices one identical death at a
+                    # time (run4 2026-11-13: owners 0-4/8@0, 5 x 1800 s
+                    # claimed=0, row TIMEOUT at 10800 s).
+                    stop_dispatch = true
+                    eprint "[{label}] owner={owner} died before claiming any module and the ledger holds no claims; the remaining {pending.len() - next_pending} pending owner(s) would only re-run the same frontend prologue; not dispatching them"
+                    # Drain the pending tail so the slot-pool while exits into
+                    # the generation-complete path; without this the loop
+                    # spins forever on the reap_at < 0 continue (pids empty,
+                    # next_pending < pending.len(), dispatch stopped).
+                    next_pending = pending.len()
             else:
                 done = done + 1
             if fail_fast and failed_workers > 0:
