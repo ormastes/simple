@@ -830,13 +830,30 @@ impl MirLowering:
                 # pair element): resolve the owner name to its symbol.
                 if opaque_name == struct_type_name:
                     val opaque_symbol = self.symbols.lookup_or_invalid(opaque_name)
-                    if opaque_symbol.is_valid(): opaque_symbol else: None
+                    if opaque_symbol.is_valid(): Some(opaque_symbol) else: self.struct_symbol_for_layout_key(opaque_name)
                 else:
                     None
             case _: None
         if val type_symbol = struct_symbol_id:
             val copied = self.copy_struct_value_recursive(init_local, struct_type_name, type_symbol, [struct_type_name])
             return copied
+        None
+
+    fn struct_symbol_for_layout_key(layout_key: text) -> SymbolId?:
+        """Resolve a module-qualified record layout key (`mod::Name`) back to
+        its HIR struct symbol. Since c269515e62b the for-in element owner is
+        that qualified provenance key, which a bare-name lookup never finds.
+        Accept the symbol only when its own provenance key is exactly
+        `layout_key`, so a same-named struct from another module never
+        resolves; classes are excluded (reference semantics, no copy)."""
+        val parts = layout_key.split("::")
+        if parts.len() < 2: return None
+        val bare: text = parts[parts.len() - 1]
+        val candidate = self.symbols.lookup_or_invalid(bare)
+        if not candidate.is_valid(): return None
+        if val info = self.symbols.get_symbol_raw(candidate.id):
+            if info.kind == SymbolKind.Struct and self.struct_value_provenance_key(info) == layout_key:
+                return Some(candidate)
         None
 
     me maybe_copy_array_value(init_local: LocalId, effective_type: MirType, init_is_place: bool) -> LocalId?:
