@@ -271,3 +271,9 @@ would only be warranted if a seed change ever makes a namespace binding win agai
 ## 2026-11-13 triage (live-P3 lane l1, work/live-p3-l1-20261113, base f790f7f266e)
 
 **FIXED (confirmed)** — Census retained as historical; locals-win resolution covers the confirmed for-form. No re-run of the verdicted prevention specs per the no-green-rerun rule.
+
+## 2026-11-13 resolution (P3 triage sweep, work/p3-triage-20261113) — row closed `fixed`
+
+Seed: scratchpad `vkinit/seed-fix`, runs capped `systemd-run MemoryMax=16G timeout 900`, cwd = this worktree at origin/release/1.0.0 `59caff4fd1b`.
+
+Evidence (live, this lane): re-ran the census's own biting probes with the seed (interpreter lane). Same-file bare `use probe.lib_v` + `for lib_v in [...]: lib_v.show()` -> `CONTROL=b3`, `FOR=b1b2` (was: `method show not found on type dict`). Cross-module `use probe.lib_m as lib_m` with callee `for lib_m in ...` -> `CONTROL=b3`, `FOR=b1b2`. Prevention specs: `test/01_unit/language/match_binding_module_name_shadow_spec.spl` executed=6 passed=6; `test/01_unit/compiler/interpreter/local_shadows_builtin_input_spec.spl` executed=1 passed=1. (Side note: the cross-module probe JIT-demotes with `GlobalLoad: unresolved identifier lib_m` on the `as` alias before the interpreter succeeds — a separate JIT alias-import gap, not this shadowing class.)
