@@ -187,3 +187,7 @@ owner decision (reclassify the source file, relocate the import behind a K0
 interface, or record an explicit manifest exemption). They are NOT the 10
 edges recorded above; this lane routed them here instead of leaving them
 masked behind the unclassified failure.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**PARTIAL (confirmed)** — ne13: the 10 recorded edges FIXED and the manifest repaired (bootstrap_admission row added), but the fail-closed checker then unmasked 19 newer K0/K1->P/app/os edges (KPF-worker/dynsmf/backend_plugin work) — each needs a §3-cited architecture-owner decision. Do not read the guard as green.

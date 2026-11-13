@@ -127,3 +127,7 @@ Third consecutive SUPERSEDED verdict, now on this lane's refreshed seed
 (rc=0)` (fatal selftest silent = pass, then the real sentinel probe saw
 the invoking tree's value). Fixing change family: PR #7597 (merge
 `9e7e7a526edb`), module_loader cwd-first / invoking-tree-wins resolution.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**SUPERSEDED (confirmed)** — Third consecutive SUPERSEDED (lib/lib3): invoking-tree-wins gate PASS on the refreshed tracked seed; PR #7597 lineage.

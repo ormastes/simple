@@ -483,3 +483,7 @@ Native-fixture re-runs are not repeated: no test lane native-builds
 (this doc records why a green suite would be theatre), and the Windows
 native-build success-path hang is a known live defect routed to its
 owner lane.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**FIXED (confirmed)** — ne9 verified the whole fix chain present at tip: 9ca094b44ee/3dc5b8dd8a2/fb7e76c489a ancestors, annotation-preference arms at mir_lowering_stmts.spl:1611-1624, parser payload preservation at parser.spl:706 citing this doc.

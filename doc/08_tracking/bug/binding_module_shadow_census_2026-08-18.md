@@ -260,3 +260,7 @@ has now happened in the direction that keeps local bindings winning, and the
 prevention specs (match-shadow + local-shadows) pin the behavior. A fresh census
 would only be warranted if a seed change ever makes a namespace binding win again
 — the two prevention specs are the durable guard.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**FIXED (confirmed)** — Locals-win resolution change covers the confirmed for-form; prevention specs (match-shadow 6/6, local-shadows 1/1) green per ne2. Census tables retained as historical.

@@ -5,7 +5,8 @@ Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-01
-**Status:** OPEN — measured, not fixed
+**Status:** FIXED 2026-11-13 (lane p3-misc-b) — SEGV gone; `check` now fails
+closed with a named deployment remedy on a seed-only host (see addendum)
 **Severity:** the fast syntax gate is unusable; `run` is unaffected
 
 ## Reproduction
@@ -61,3 +62,27 @@ Unknown — reproduced only on Windows. Worth checking whether `check` crashes
 on Linux/macOS too before assuming it is platform-specific; nothing in the
 symptom suggests a Windows-only cause.
 
+
+---
+
+## Re-verification 2026-11-13 (lane p3-misc-b) — SEGV FIXED; command now fails closed with a named remedy
+
+Reproduced once on the release/1.0.0-tip seed (`bin/simple.exe` copied from
+the primary clone, Windows/MSYS2), exact record repro
+(`fn main():\n    print "ok"\n`):
+
+- `simple check /tmp/ok.spl` — exits **1** (was 139/SIGSEGV) with a single
+  clear error: `ERROR: no admitted cached self-hosted check worker artifact is
+  available ... deploy bin/release/<triple>/simple or set SIMPLE_BINARY`.
+  No segfault on any input.
+- `simple run /tmp/ok.spl` — prints `ok`, exits 0 (unchanged).
+
+The `check` dispatch no longer crashes in the seed; it routes to the
+self-hosted check worker and fails closed when that artifact is not deployed.
+That satisfies this record (the SEGV defect). The residual "check needs a
+deployed self-hosted binary on a seed-only host" limitation is a deployment
+requirement, stated verbatim by the command itself — tracked separately if
+anyone needs check-without-self-host.
+
+Cross-check: `test/01_unit/app/cli/quality_entry_self_hosted_launcher_spec.spl`
+(the launcher pin) — 5/5 GREEN on this seed.

@@ -116,3 +116,52 @@ the self-hosted binary for honest timing
 Lane ne2 did not edit the lib file: normalizing a seed-bug workaround into src/
 without owner sign-off is exactly what the project rules warn against; the
 seed-level defect deserves its own record.
+
+
+---
+
+## 2026-11-13 addendum — P3 gpu lane p3-gpu-20261113 (work/p3-gpu-20261113, base 6f4cb189867) — PARTIAL FIX LANDED
+
+**What this lane changed:** applied the documented intermediate-typed-`val`
+workaround (the 2026-08-15 vulkan-lane convention for this seed limitation) to the
+7 nested `line.slice(...).trim()/to_lower()` chain sites in
+`src/os/hosted/hosted_browser_renderer_policy.spl` (all 8 chained expressions:
+former lines 98, 113, 215, 242, 315, 327-328, 343). Semantics preserved
+(short-circuit `colon > 0` guards restructured to bound-then-test; no behavior
+change). Only that file was edited.
+
+**Measured effect (tracked seed `bin/simple.exe`, `SIMPLE_LIB=src`,
+`--mode=interpreter --no-cache`, this worktree):**
+
+- The 2026-11-11 load blocker
+  (`semantic: hosted_browser_renderer_policy.spl:15:9: method 'trim' not found on
+  value of type enum in nested call context`) is **GONE on all three specs**. All
+  now compile, load, and execute their examples instead of dying at import:
+  - `test/02_integration/rendering/hosted_browser_compositor_revision_cache_spec.spl`
+    → 1 executed, 1 failed (was: 0 executed / import error).
+  - `test/05_perf/browser/hosted_browser_revision_wire_perf_spec.spl`
+    → 1 executed, 1 failed (was: import error).
+  - `test/05_perf/browser/simple_web_browser_engine_production_budget_spec.spl`
+    → 8 executed, 8 failed (was: import error on every example).
+
+**Residual failures — NOT this row's defect, not fixed here:**
+
+1. `hosted_browser_compositor_revision_cache_spec.spl:867` — `class
+   BrowserRendererMessage has no field named root_command_request_id`: stale
+   spec-vs-class API drift, tracked by
+   `browser_ui_specs_stale_or_unlanded_apis_2026-10-31.md` (outside this row's
+   list).
+2. `hosted_browser_revision_wire_perf_spec.spl` — now fails inside the
+   browser-session engine at `method
+   _snapshot_current_history_for_departure not found on type object (receiver
+   value: BrowserSession(...))` — the same nested-call receiver-typing seed
+   limitation, one lane deeper in `src/lib/gc_async_mut/web/` engine code that
+   this doc's own 2026-11-11 addendum says is engine-lane owned ("coordinate
+   with the in-flight JS-engine work before fixing").
+3. Budget/timing assertions in both perf specs still require a Linux-hosted lane
+   with the self-hosted binary for honest timing (the 2026-11-11 `/proc`
+   limitation stands).
+
+**Verdict: the load-blocking tree-side regression in the hosted-worker import
+graph (the exact "Next step" of this record) is FIXED and measured; the row
+stays OPEN on the behavioral residual (2) and the timing contract (3).**

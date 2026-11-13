@@ -248,3 +248,7 @@ build-commit 0791c2b7f4a7):
 
 The "under-reporting" premise therefore stays **unproven**, now with a
 2026-11-11 interpreter-oracle re-confirmation.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**FIXED (confirmed)** — ne6: nil-Option guard hardened at module_lowering.spl:954 (scalar readers, no HirSymbol? across boundary); interpreter differential 6/6 green on refreshed seed. Native half remains deferred to a native lane.

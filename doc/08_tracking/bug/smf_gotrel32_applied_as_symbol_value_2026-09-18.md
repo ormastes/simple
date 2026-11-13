@@ -29,3 +29,10 @@ Either:
 
 Pin whichever rule is chosen with a golden in the relocation-oracle spec (linker plan,
 lane A4a).
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+latent defect, no reproducer run; rule choice needs the linker-plan owner with a golden. Left as recorded.

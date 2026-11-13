@@ -161,3 +161,39 @@ test/fixtures/_accept_run --unstable`, watch the post-summary DB/report
 phase and the +693 s residual spin). The small zombie-reap leak noted in
 the body (`execution.rs:1713-1719` Children dropped unreaped) is cosmetic
 and separate.
+
+## 2026-11-13 — P3 runner priority lane (work/p3-runner-lane-20261113, base 80a8116e5e2): not reproducible on Windows seed; DB-phase exit re-verified
+
+Two bounded checks on the Windows seed-smoke binary (`bin/simple.exe`,
+`Simple v1.0.0-rc.1`), per the verbatim grant "Windows interpreted driver
+>240s (keep to unit-scale specs; abort any spec >10 min and mark BLOCKED
+with the grant instead)":
+
+1. **Exact reproducer, capped:** `timeout 600 bin/simple.exe test
+   test/fixtures/_accept_run --unstable` — outer rc 124 (cap kill) with the
+   run still INSIDE the 5th fixture (`timeout_spec`); 4/5 fixtures had
+   completed (~15 s of test execution: crash PASS 7.7 s, fail FAIL 2.4 s,
+   pass_a/pass_b PASS ~2 s each) and `Session setup: 375 ms` printed at
+   ~590 s. The ~590 s is pre-summary module load, not the post-summary
+   phase — the hang shape (summary printed, then spin) was never reached.
+   BLOCKED past 10 min per the grant, same as the 2026-11-11 runner10 lane.
+2. **Post-summary DB/report phase, bounded:** a 3-file directory run
+   (pass_a + pass_b + fail, DB phase enabled, outer cap 480 s) printed the
+   complete summary (`Results: 3 total, 2 passed, 1 failed` / `Some tests
+   failed.`), then `update_test_database` + `generate_test_result_md` both
+   completed (`doc/08_tracking/test/test_db.sdn` mtime 09:58,
+   `test_result.md` mtime 09:57), and the process EXITED ON ITS OWN with
+   the runner's own rc=1 — total wall 141 s. This reproduces the
+   2026-11-06 round-8 disposition at the newer base: the post-summary
+   non-exit is not reproducible on the Windows seed.
+
+**Zombie-reap leak (recorded as cosmetic): stale.** The current
+`wait_with_timeout` kill helpers (`src/compiler_rust/driver/src/cli/test_runner/execution.rs`,
+timeout branch) use `Command::status()` for the kill/taskkill helpers —
+blocking waits that reap — and the child itself is consumed by
+`wait_with_output()` in the waiter thread. The dropped-unreaped-`Child`
+pattern from the 2026-08-18 body is gone in current source.
+
+Disposition unchanged: OPEN for the Linux-seed re-probe
+(`timeout 1800 bin/simple test test/fixtures/_accept_run --unstable`,
+watch the post-summary DB/report phase and the +693 s residual spin).

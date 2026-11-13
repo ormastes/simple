@@ -117,3 +117,10 @@ so the debt is tracked rather than hidden.
    `src/lib/common/spec/evidence/model.spl`'s selector/oracle API.
 3. Re-run `sh scripts/check/lint-cached.shs src/lib/common/spec/evidence/model.spl`
    and confirm `PASS` before removing this bug's OPEN status.
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+documented-but-unimplemented suppression attribute; implementation + spec is owner-lane work (compiler diagnostics), not a bounded side-fix.

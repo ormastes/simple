@@ -1,5 +1,6 @@
 # scripts/setup/setup.shs fails on a dash /bin/sh host (rc=2, `bin/simple` never created)
 ## Obsolete 2026-09-16 — duplicate of setup_shs_pipefail_dash_abort_before_windows_guard; same dash/pipefail symptom+area
+## Verified FIXED in tree 2026-11-13 (lane p3-misc-b) — see addendum at end
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass. Kept for history;
 the subject is removed, superseded, or duplicated elsewhere in the ledger.
@@ -52,3 +53,21 @@ guard (or drop it — the script's own commentary says it should be a no-op on
 non-Windows by construction, and pipefail is not load-bearing for its actual
 NTFS-junction/hardlink logic).
 
+
+---
+
+## Verification addendum 2026-11-13 (lane p3-misc-b)
+
+Both suggested fixes are already in the tree at release/1.0.0 tip; no code
+change was needed:
+
+- `scripts/setup/setup.shs:40` now invokes the helper with `bash` explicitly
+  (`bash "${repo_root}/scripts/setup/materialize-symlinks-windows.shs"`), not
+  bare `sh`;
+- `scripts/setup/materialize-symlinks-windows.shs:53-54` — `set -u` /
+  `set -o pipefail` now sit AFTER the `uname -s` MINGW*/MSYS*/CYGWIN* host
+  gate (with a comment recording exactly this dash failure), so a dash `/bin/sh`
+  host exits 0 at the gate before reaching the bash-only option.
+
+Status: FIXED in tree (verified by source inspection; the dash-host repro
+itself cannot run on this Windows/MSYS lane's `/bin/sh`, which is bash).

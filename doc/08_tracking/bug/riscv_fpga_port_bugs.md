@@ -104,3 +104,10 @@ Exact grant: physical access to the Kria KV260 and DE10-Nano boards with
 Vivado/Quartus installed, then run the phase 7-verify hardware pass per
 `doc/07_guide/platform/simpleos/riscv_fpga_simpleos_guide.md` and populate the
 Open Bugs table here; the tracker doc itself needs no edit until then.
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+Not pursued in this lane: re-verified 2026-11-05: remaining open items blocked on physical FPGA board access. No software change possible from this lane.

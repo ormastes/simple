@@ -143,3 +143,15 @@ Honest gap: the Linux arm of the C change (wrapper + idempotency) and the
 end-to-end core-C renderer-worker link could not be compiled/run on this
 Windows host; first full compile+run of those arms happens on the Linux CI
 gate (`check-browser-renderer-sandbox-seccomp.shs`).
+
+## 2026-11-13 closure (UI batch B, Linux aarch64, release/1.0.0 @ 35144b7f5e93)
+
+The 2026-11-11 section left one honest gap: the Linux arm of the C change had
+never been compiled or run. It now has, on a Linux aarch64 host with clang 23:
+`CC=clang sh scripts/check/check-browser-renderer-sandbox-seccomp.shs` exited
+0 with `PASS — 10 check(s) verified`. The four selfchecks all passed for real
+(no SKIP): seccomp allow-list, namespace posture (`namespaces=unavailable` on
+this host, partial failure closed), startup failure (non-empty envp exits 126)
+and `rt_browser_renderer_preinit_entry_selfcheck: PASS`. `bug_db.sdn` row
+moved open -> fixed to match the shard. Not covered here: an end-to-end core-C
+renderer-worker link, which needs a deployed self-hosted compiler.

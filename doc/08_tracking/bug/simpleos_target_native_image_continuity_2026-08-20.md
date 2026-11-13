@@ -46,3 +46,10 @@ The canonical RV64 spelling is `riscv64gc-unknown-simpleos`; no alternate
 - A future target row may move from BLOCKED only after the guest-resident
   artifact is admitted, its manifest digest is bound, and an arbitrary
   filesystem source is compiled, linked, loaded, and run with exact output.
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+SimpleOS release/admission/artifact-blocked item per in-file status; requires the SimpleOS target-artifact pipeline and owner lanes this Windows seed lane cannot run. No change from this lane.

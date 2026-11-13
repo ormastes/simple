@@ -11,12 +11,15 @@
 #
 # Timeout: there is no timer thread. `set_timeout_limit_secs` records a
 # deadline on the monotonic clock and `is_timeout_exceeded` compares against
-# it, so an unarmed poll is a flag read and an armed poll is one clock sample.
+# it. An unarmed poll is a flag read; an armed poll is a counter bump, and only
+# every TIMEOUT_POLL_STRIDE-th armed poll samples the clock (the seed's
+# `iterations & 0x3ff` stride), so detection lags by at most 1023 polls.
 
 use std.nogc_sync_mut.io.time_ops.{time_sample_monotonic_nanos_or_failure}
 
 export is_timeout_exceeded, set_timeout_exceeded, reset_timeout
 export set_timeout_limit_secs, timeout_limit_secs, timeout_deadline_passed
+export timeout_poll_stride, timeout_poll_samples_clock
 export increment_recursion_depth, decrement_recursion_depth, current_recursion_depth
 export get_max_recursion_depth, set_max_recursion_depth, reset_recursion_depth
 export set_stack_overflow_detection_enabled, is_stack_overflow_detection_enabled
@@ -28,6 +31,15 @@ export set_stack_overflow_detection_enabled, is_stack_overflow_detection_enabled
 var timeout_exceeded: bool = false
 var timeout_limit: i64 = 0          # seconds; 0 = no deadline armed
 var timeout_start_nanos: i64 = 0    # monotonic sample taken when armed
+var timeout_poll_count: i64 = 0     # armed polls since the last clock sample
+val TIMEOUT_POLL_STRIDE: i64 = 1024
+
+fn timeout_poll_stride() -> i64:
+    TIMEOUT_POLL_STRIDE
+
+fn timeout_poll_samples_clock(poll_count: i64) -> bool:
+    """True when the `poll_count`-th armed poll should read the clock."""
+    poll_count % TIMEOUT_POLL_STRIDE == 0
 
 fn timeout_deadline_passed(now_nanos: i64, start_nanos: i64, limit_secs: i64) -> bool:
     """True when `limit_secs` have elapsed between two monotonic samples.
@@ -45,6 +57,10 @@ fn is_timeout_exceeded() -> bool:
         return true
     if timeout_limit <= 0:
         return false
+    timeout_poll_count = timeout_poll_count + 1
+    if not timeout_poll_samples_clock(timeout_poll_count):
+        return false
+    timeout_poll_count = 0
     if timeout_deadline_passed(time_sample_monotonic_nanos_or_failure(), timeout_start_nanos, timeout_limit):
         timeout_exceeded = true
     timeout_exceeded
@@ -61,6 +77,7 @@ fn set_timeout_limit_secs(secs: i64):
     """Arm a deadline `secs` seconds from now; a value <= 0 disarms it."""
     if secs > 0:
         timeout_limit = secs
+        timeout_poll_count = 0
         timeout_start_nanos = time_sample_monotonic_nanos_or_failure()
     else:
         timeout_limit = 0

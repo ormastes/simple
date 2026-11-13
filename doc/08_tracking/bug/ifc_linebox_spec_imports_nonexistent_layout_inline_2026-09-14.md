@@ -92,3 +92,7 @@ bin/simple lint layout.spl layout_inline.spl: rc 0, 0 errors
 Verdict: FIXED in this lane. Note the sibling `layout_inline.spl` header
 comment referencing a `_build_line_box` implementation remains aspirational;
 no such function exists.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**FIXED (confirmed)** — layout_inline implemented and exported in layout.spl (10/10 + 4/4 + 10/10 regressions on the seed). Sibling layout_inline.spl header still aspirational re _build_line_box.

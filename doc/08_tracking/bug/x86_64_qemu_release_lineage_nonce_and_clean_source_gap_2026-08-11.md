@@ -49,3 +49,10 @@ and program receipt identities.
 - Owner: x86_64 SimpleOS execution lane
 - Final reviewer: independent normal/highest-capability reviewer
 
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+Not pursued in this lane: same lineage/nonce/clean-source family; owner lane is the QEMU release-lineage lane, not a Windows seed lane.

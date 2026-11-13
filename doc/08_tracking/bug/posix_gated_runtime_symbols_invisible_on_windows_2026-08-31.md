@@ -308,3 +308,21 @@ swapped (`_WIN32`… → 0, `__linux__`/`__unix__`/POSIX → 1, other OS macros 
 - Nothing here was validated against `nm` on a built artifact; that needs a
   build, which was out of scope. The stage-2 link log is used instead, and for
   this specific question it is a *stronger* oracle than `nm` on a tolerant ELF.
+
+
+---
+
+## 2026-11-13 addendum — P3 gpu lane p3-gpu-20261113 (work/p3-gpu-20261113, base 6f4cb189867)
+
+**Verdict: OPEN as a guard gap — §2 refutation stands; the Step 1 static guard
+enhancement (`--target <triple>` + `c_source_target_excluded` tier +
+per-target baseline for `extern-backing-census.shs`) was NOT attempted in this
+lane.** Rationale: the ratchet consumes `nm --defined-only` from the deployed
+Linux binary with hardcoded glibc paths and cannot execute on this Windows host
+at all, so any guard change landed here would be unverifiable ("does not run on
+Windows" is not evidence of a fix — the same rule this record applies
+elsewhere). The committed awk evaluator
+(`doc/08_tracking/bug/data/posix_gate_availability_2026-08-31.awk`) remains
+available for whichever lane lands Step 1 with a runnable ratchet. Grant
+unchanged; explicitly rejected path (promoting the §4 census heuristic into a
+guard) still rejected.
