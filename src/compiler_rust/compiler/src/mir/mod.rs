@@ -11,6 +11,7 @@ pub mod hybrid;
 mod instructions;
 mod lower;
 pub mod parallel;
+pub mod reachability;
 mod state_machine_utils;
 pub mod string_accum;
 
@@ -33,6 +34,7 @@ pub use ghost_erasure::{
     erase_ghost_from_module, ghost_variable_count, has_ghost_variables, GhostErasureError, GhostErasureStats,
 };
 pub use hybrid::{apply_hybrid_transform, referenced_function_names, HybridStats};
+pub use reachability::{reachable_function_names, retain_reachable_functions};
 pub use instructions::*;
 pub use lower::*;
 pub use parallel::{
