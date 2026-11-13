@@ -87,9 +87,27 @@ SIMPLE_COMPILER_TRACE=1 bin/simple native-build \
 ```
 
 
+
+## Addendum 2026-11-13 (lane work/live-p3-l3-20261113 (worktree lp3-wt, base f790f7f266e = origin/release/1.0.0 tip, seed binary build-commit 46fe8f6b6def))
+
+Still unmeasurable on this Windows host for the pure-Simple driver path: a
+positional `native-build` without `SIMPLE_NATIVE_BUILD_RUST=1` routes through
+the interpreted worker (the known Windows hang — never retried), and the
+identical-second-build scenario this row names is a property of
+`driver_aot_native_output.spl`, which the Rust engine does not exercise. The
+decline-reason trace lines this row asked for are in tree (verified). Adjacent
+evidence from the 2026-11-13 repair of
+`check-native-object-cache-invalidation.shs` (see
+`native_object_cache_ignores_dependency_interface_change_2026-08-17.md`):
+the Rust engine's per-module `InterfaceSliceIndex` key was verified correct in
+both directions at this base; the pure-Simple driver's identical-second-build
+behaviour remains UNMEASURED. Grant unchanged: Linux host, two positional
+native-builds sharing one HOME.
+
 ## Triage 2026-11-13 (P3 tools lane)
 No code change this lane; the 2026-11-11 (lane ne16) addendum stands — BLOCKED
 on this host: the diagnostic prerequisite landed (per-module decline reason is
 logged), but the two-real-native-builds measurement cannot run on Windows
 (native-build hang class; never retry a hung build). The Linux grant in the
 record is the unblock path.
+

@@ -411,6 +411,7 @@ pub(crate) fn referenced_call_names(functions: &[MirFunction]) -> HashSet<String
                             "rt_array_len",
                             "rt_array_pop",
                             "rt_array_push",
+                            "rt_array_reserve",
                             // Real tagging helpers used by methods.rs
                             // `wrap_value`. The former "rt_box_float"/
                             // "rt_box_int" entries here named symbols that

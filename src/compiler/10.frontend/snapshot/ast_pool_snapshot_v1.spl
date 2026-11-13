@@ -1,0 +1,196 @@
+# Node-storage phase C (AST): compact per-module AST pool snapshot.
+#
+# Design: doc/05_design/compiler/data/node_tree_storage.md section 7.1.
+# A parsed module's flat AST pools are captured once, right after the parse,
+# into the packed position-independent `.spab` form (flat_pool_packed_v1.spl)
+# held IN MEMORY, and a boxed `ParserModule` is materialised from those bytes
+# only when a consumer (HIR lowering) needs it. The snapshot is the module's
+# frozen AST: it is published once through a write-once phase cell
+# (`ast:<module>`, node_lifecycle_contracts.spl) whose value is the blob's
+# sha256 body digest, and never changes afterwards (pseudo-immutable: initable,
+# not changed). Readers only ever materialise private copies.
+#
+# Selection: one `compiler.ast` Layout rule through the W1 resolver
+# (data_attr_storage_resolve_v1 on view `compiler.ast.Module`, attribute
+# `nodes`), so an SPL tag, an SDN `site:` / `type:` / `module: "compiler.ast"`
+# row or a project row all address it with the plan 8.4 precedence. The
+# recommended key is the narrow `site: "compiler.ast.Module.nodes"` row: a
+# `module: "compiler.ast"` row would also drive every per-attribute choice of
+# the generated AST views (node_view_gen) if the same SDN reached it.
+#   direct (the versioned default) -> boxed ParserModule tree (no change)
+#   column                         -> pool snapshot (the flat pools are the
+#                                     AST's column form)
+# Any other token is an error naming it; a storage choice never falls back
+# silently.
+use compiler.frontend.parser_types.{ParserModule}
+use compiler.frontend.flat_ast_bridge.{flat_pool_capture_arm, flat_pool_capture_take,
+    flat_pool_capture_take_trace, flat_pool_capture_take_refs, parse_and_build_module_scoped,
+    build_module_from_packed_view_v1}
+use compiler.frontend.core.flat_pool_packed_v1.{SpabDigestV1, flat_packed_encode_refs_v1, flat_packed_view_v1,
+    SPAB_SUBJECT_SOURCE, SPAB_SUBJECT_COMPILER, SPAB_SUBJECT_BODY}
+use compiler.core.ast.{expr_count, stmt_count}
+use compiler.common.cache_contract.hash_algorithm_registry_v1.{HASH_ALGO_SHA256_V1, HASH_ALGO_XXH3_128_V1}
+use compiler.common.data.data_schema_contracts.{DataPolicyRuleV1, DataPolicyChoiceV1, DataSchemaDiagnosticV1}
+use compiler.common.data.data_schema_resolver.{data_attr_storage_resolve_v1, data_policy_rules_from_sdn_v1}
+use compiler.common.data.node_lifecycle_contracts.{PhaseCellTableV1, PhaseAwaitOutcomeV1,
+    phase_cell_table_new_v1, phase_cell_declare_v1, phase_cell_publish_v1, phase_cell_await_v1,
+    phase_cell_key_v1}
+use std.nogc_sync_mut.sffi.runtime.{xxh3_128_text}
+use std.nogc_sync_mut.io_runtime.{time_now_unix_micros}
+
+fn _now_us() -> i64:
+    time_now_unix_micros()
+
+pub val AST_TREE_NAME_V1: text = "compiler.ast"
+pub val AST_MODULE_VIEW_V1: text = "compiler.ast.Module"
+pub val AST_MODULE_NODES_ATTR_V1: text = "nodes"
+pub val AST_STORAGE_BOXED_TOKEN_V1: text = "direct"
+pub val AST_STORAGE_SNAPSHOT_TOKEN_V1: text = "column"
+pub val AST_SNAPSHOT_PHASE_V1: text = "ast"
+# Compiler-identity digest subject of an in-memory snapshot: it never leaves
+# the process, so the identity is the snapshot format, not a cache scope.
+val _SNAPSHOT_FORMAT_V1: text = "compiler.ast.pool_snapshot.v1"
+
+# ---------------------------------------------------------------------------
+# Resolver rule
+# ---------------------------------------------------------------------------
+pub enum AstTreeStorageV1:
+    Boxed
+    PoolSnapshot
+
+pub fn ast_tree_storage_code_v1(mode: AstTreeStorageV1) -> i64:
+    match mode:
+        case AstTreeStorageV1.Boxed: 1
+        case AstTreeStorageV1.PoolSnapshot: 2
+
+fn _storage_from_choice_v1(choice: DataPolicyChoiceV1) -> Result<AstTreeStorageV1, text>:
+    if choice.choice == AST_STORAGE_BOXED_TOKEN_V1:
+        return Ok(AstTreeStorageV1.Boxed)
+    if choice.choice == AST_STORAGE_SNAPSHOT_TOKEN_V1:
+        return Ok(AstTreeStorageV1.PoolSnapshot)
+    Err("{AST_MODULE_VIEW_V1}.{AST_MODULE_NODES_ATTR_V1} storage '{choice.choice}' is not supported; " +
+        "use '{AST_STORAGE_BOXED_TOKEN_V1}' (boxed tree) or '{AST_STORAGE_SNAPSHOT_TOKEN_V1}' (pool snapshot)")
+
+pub fn ast_tree_storage_resolve_v1(rules: [DataPolicyRuleV1]) -> Result<AstTreeStorageV1, text>:
+    match data_attr_storage_resolve_v1(AST_TREE_NAME_V1, AST_MODULE_VIEW_V1, AST_MODULE_NODES_ATTR_V1,
+            rules, AST_STORAGE_BOXED_TOKEN_V1):
+        case Ok(choice): _storage_from_choice_v1(choice)
+        case Err(d): Err("{d.subject}: {d.message}")
+
+pub fn ast_tree_storage_from_sdn_v1(source: text, path: text) -> Result<AstTreeStorageV1, text>:
+    match data_policy_rules_from_sdn_v1(source, path, AST_TREE_NAME_V1):
+        case Ok(rules): ast_tree_storage_resolve_v1(rules)
+        case Err(diags):
+            var parts: [text] = []
+            for d in diags:
+                parts.push("{d.subject}: {d.message}")
+            Err(parts.join("; "))
+
+# ---------------------------------------------------------------------------
+# Snapshot
+# ---------------------------------------------------------------------------
+pub struct AstPoolSnapshotV1:
+    module: text
+    path: text
+    # The exact parse source; spans and slices are read from it, so a
+    # snapshot is materialised only over the same text (source_key check).
+    source: text
+    source_key: text
+    bytes: [u8]
+    node_count: i64
+    digest: text
+    parse_us: i64
+    encode_us: i64
+
+fn _identity_v1(source_key: text) -> [SpabDigestV1]:
+    [SpabDigestV1(subject: SPAB_SUBJECT_SOURCE, algo: HASH_ALGO_XXH3_128_V1, hex: source_key),
+     SpabDigestV1(subject: SPAB_SUBJECT_COMPILER, algo: HASH_ALGO_XXH3_128_V1, hex: xxh3_128_text(_SNAPSHOT_FORMAT_V1))]
+
+# Parse `source` once and capture its pools. Returns the boxed module of this
+# parse (the caller may drop it) and the snapshot. Refused captures (a parse
+# carrying representation metadata, an encoder refusal) are errors: the caller
+# keeps the boxed tree, it never stores an empty snapshot.
+pub fn ast_pool_snapshot_parse_v1(source: text, path: text, module: text) -> Result<(ParserModule, AstPoolSnapshotV1), text>:
+    val t0 = _now_us()
+    flat_pool_capture_arm()
+    val parsed = parse_and_build_module_scoped(source, path, false)
+    val lines = flat_pool_capture_take()
+    val trace = flat_pool_capture_take_trace()
+    val refs = flat_pool_capture_take_refs()
+    val nodes = expr_count() + stmt_count()
+    val t1 = _now_us()
+    if lines == "" or trace.len() == 0:
+        return Err("ast snapshot '{module}': the pool capture was refused (representation metadata or dead pools)")
+    val key = xxh3_128_text(source)
+    val bytes = flat_packed_encode_refs_v1(lines, trace, refs, _identity_v1(key), xxh3_128_text(path))
+    if bytes.len() == 0:
+        return Err("ast snapshot '{module}': the packed encoder refused the pools")
+    val view = flat_packed_view_v1(bytes)
+    if not view.valid:
+        return Err("ast snapshot '{module}': the packed blob does not validate: {view.reason}")
+    val digest = view.digest(SPAB_SUBJECT_BODY, HASH_ALGO_SHA256_V1)
+    if digest == "":
+        return Err("ast snapshot '{module}': the packed blob carries no body digest")
+    val snap = AstPoolSnapshotV1(module: module, path: path, source: source, source_key: key, bytes: bytes,
+        node_count: nodes, digest: digest, parse_us: t1 - t0, encode_us: _now_us() - t1)
+    Ok((parsed, snap))
+
+# Build a private boxed ParserModule from the snapshot (restores the flat
+# pools from the packed tokens, then runs the bridge). Fails closed: a source
+# mismatch or a blob that no longer validates is an error, never an empty
+# module.
+pub fn ast_pool_snapshot_materialise_v1(snap: AstPoolSnapshotV1) -> Result<ParserModule, text>:
+    if xxh3_128_text(snap.source) != snap.source_key:
+        return Err("ast snapshot '{snap.module}': source text differs from the snapshot's source key")
+    val view = flat_packed_view_v1(snap.bytes)
+    if not view.valid:
+        return Err("ast snapshot '{snap.module}': blob does not validate: {view.reason}")
+    if view.digest(SPAB_SUBJECT_BODY, HASH_ALGO_SHA256_V1) != snap.digest:
+        return Err("ast snapshot '{snap.module}': body digest differs from the published digest")
+    match build_module_from_packed_view_v1(view, snap.source, snap.path):
+        case Some(module): Ok(module)
+        case None: Err("ast snapshot '{snap.module}': pool restore from the snapshot failed")
+
+# ---------------------------------------------------------------------------
+# Write-once store: one phase cell per module plus the frozen bytes
+# ---------------------------------------------------------------------------
+pub struct AstPoolSnapshotStoreV1:
+    cells: PhaseCellTableV1
+    snapshots: Dict<text, AstPoolSnapshotV1>
+
+pub fn ast_snapshot_cell_key_v1(module: text) -> text:
+    phase_cell_key_v1(AST_SNAPSHOT_PHASE_V1, module)
+
+pub fn ast_snapshot_store_new_v1() -> AstPoolSnapshotStoreV1:
+    val snapshots: Dict<text, AstPoolSnapshotV1> = {}
+    AstPoolSnapshotStoreV1(cells: phase_cell_table_new_v1(), snapshots: snapshots)
+
+# Declares the module's cell when needed and publishes the digest; the cell
+# refuses a second publish, so the first snapshot stays the module's AST.
+pub fn ast_snapshot_store_publish_v1(store: AstPoolSnapshotStoreV1, snap: AstPoolSnapshotV1) -> Result<AstPoolSnapshotStoreV1, text>:
+    val key = ast_snapshot_cell_key_v1(snap.module)
+    val declared = if store.cells.cells.contains_key(key):
+        store.cells
+    else:
+        phase_cell_declare_v1(store.cells, AST_SNAPSHOT_PHASE_V1, snap.module)?
+    val published = phase_cell_publish_v1(declared, key, snap.digest)?
+    var snapshots = store.snapshots
+    snapshots[key] = snap
+    Ok(AstPoolSnapshotStoreV1(cells: published.0, snapshots: snapshots))
+
+pub fn ast_snapshot_store_get_v1(store: AstPoolSnapshotStoreV1, module: text) -> Result<AstPoolSnapshotV1, text>:
+    val key = ast_snapshot_cell_key_v1(module)
+    if not store.snapshots.contains_key(key):
+        return Err("ast snapshot '{module}' is not published")
+    Ok(store.snapshots[key])
+
+# A consumer (e.g. `hir:<module>`) awaits the module's AST cell: Ready(digest)
+# once published, Waiting before, ProducerFailed after a failed parse; a wait
+# that would close a cycle is refused (phase_cell_await_v1).
+pub fn ast_snapshot_store_await_v1(store: AstPoolSnapshotStoreV1, consumer: text, module: text) -> Result<(AstPoolSnapshotStoreV1, PhaseAwaitOutcomeV1), text>:
+    val key = ast_snapshot_cell_key_v1(module)
+    var cells = store.cells
+    if not cells.cells.contains_key(key):
+        cells = phase_cell_declare_v1(cells, AST_SNAPSHOT_PHASE_V1, module)?
+    val awaited = phase_cell_await_v1(cells, consumer, key)?
+    Ok((AstPoolSnapshotStoreV1(cells: awaited.0, snapshots: store.snapshots), awaited.1))

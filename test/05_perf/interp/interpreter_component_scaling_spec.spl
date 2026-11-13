@@ -45,6 +45,26 @@
 # `text_substr`, `str_index`/`char_at` are QUADRATIC/SUPERLINEAR too but are
 # owned by a sibling spec (string-mechanism shapes) -- not duplicated here.
 #
+# 2026-11-13 migration (lane live-p3-l3, for
+# doc/08_tracking/bug/perf_wall_clock_ratio_unmeasurable_on_loaded_host_2026-09-13.md):
+# the nine "linear pin" rows below previously pinned the ratio of ONE wall-clock
+# sample pair; on a loaded shared host a single tens-of-milliseconds window can
+# catch a scheduling hiccup and flip the pin. Each linear pin now runs the shape
+# 3x at each n and pins the ratio of the two MINIMA (best_of_3) -- the minimum
+# is the noise-robust estimator (interleaved reps: minima and medians agree to
+# ~10pp where single samples spread 2.2x). The eight KNOWN-RED quadratic rows
+# keep a single run: their ratio (~15) is far above the bound, so noise cannot
+# flip them, and tripling them would multiply the spec's wall time by ~3.
+#
+# State on the 2026-11-13 fresh seed (Windows, this spec run): 7 of the 8
+# "KNOWN RED (quadratic)" rows now PASS -- the receiver-copy bottleneck they
+# name has been fixed since 2026-09-12; only self_index_push scaling stays red.
+# Three "value semantics preserved" rows (self_index_push, field_dict_method,
+# index_obj_mutate_big aliases) FAIL on this seed: a mutated receiver is now
+# observable through a previously-taken alias. That divergence is a live
+# interpreter-semantics defect OUTSIDE this record's ratio-pin scope -- do not
+# read it as ratio-pin flake.
+#
 # Mechanism (src/compiler_rust/compiler/src/interpreter_helpers/patterns.rs,
 # `handle_method_call_with_self_update_inner`): the FieldAccess-object branch
 # and the Index-receiver branch clone an outer container per self-mutating
@@ -59,6 +79,20 @@ extern fn rt_time_now_unix_micros() -> i64
 fn report_ratio(shape: text, n_small: i64, small_us: i64, n_large: i64, large_us: i64):
     val ratio_x10 = (large_us * 10) / small_us
     print "[perf] {shape}: n={n_small}={small_us}us 4n={n_large}={large_us}us ratio={ratio_x10 / 10}.{ratio_x10 % 10}"
+
+fn min_us(a: i64, b: i64) -> i64:
+    if a < b: a else: b
+
+# Best-of-3 minimum wall clock for one (shape, n). On a loaded shared host a
+# single wall-clock window spreads up to 2.2x between identical runs, but the
+# MINIMUM across reps is a coherent, repeatable estimator (measured
+# interleaved: minima and medians agree to ~10pp where single samples do not).
+# The linear pins below time only tens to hundreds of milliseconds, so one
+# scheduling hiccup inside a window could flip a single-sample ratio pin;
+# pinning the ratio of the two minima removes that flake without changing what
+# is measured. See doc/08_tracking/bug/perf_wall_clock_ratio_unmeasurable_on_loaded_host_2026-09-13.md.
+fn best_of_3(run: fn(i64) -> i64, n: i64) -> i64:
+    min_us(min_us(run(n), run(n)), run(n))
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -431,8 +465,8 @@ describe "seed interpreter: component scaling (n vs 4n)":
         step("Measure interpreter scaling across component counts")
         # @req REQ-PERF-INTERP-COMPONENT-SCALING-009
         val n = 20000
-        val small = run_dict_insert_local(n)
-        val large = run_dict_insert_local(n * 4)
+        val small = best_of_3(run_dict_insert_local, n)
+        val large = best_of_3(run_dict_insert_local, n * 4)
         expect(small > 0).to_equal(true)
         report_ratio("dict_insert_local", n, small, n * 4, large)
         expect(large * 10 < small * 70).to_equal(true)
@@ -441,8 +475,8 @@ describe "seed interpreter: component scaling (n vs 4n)":
         step("Measure interpreter scaling across component counts")
         # @req REQ-PERF-INTERP-COMPONENT-SCALING-010
         val n = 20000
-        val small = run_str_concat(n)
-        val large = run_str_concat(n * 4)
+        val small = best_of_3(run_str_concat, n)
+        val large = best_of_3(run_str_concat, n * 4)
         expect(small > 0).to_equal(true)
         report_ratio("str_concat", n, small, n * 4, large)
         expect(large * 10 < small * 70).to_equal(true)
@@ -451,8 +485,8 @@ describe "seed interpreter: component scaling (n vs 4n)":
         step("Measure interpreter scaling across component counts")
         # @req REQ-PERF-INTERP-COMPONENT-SCALING-011
         val n = 20000
-        val small = run_closure_capture(n)
-        val large = run_closure_capture(n * 4)
+        val small = best_of_3(run_closure_capture, n)
+        val large = best_of_3(run_closure_capture, n * 4)
         expect(small > 0).to_equal(true)
         report_ratio("closure_capture", n, small, n * 4, large)
         expect(large * 10 < small * 70).to_equal(true)
@@ -461,8 +495,8 @@ describe "seed interpreter: component scaling (n vs 4n)":
         step("Measure interpreter scaling across component counts")
         # @req REQ-PERF-INTERP-COMPONENT-SCALING-012
         val n = 20000
-        val small = run_fn_call(n)
-        val large = run_fn_call(n * 4)
+        val small = best_of_3(run_fn_call, n)
+        val large = best_of_3(run_fn_call, n * 4)
         expect(small > 0).to_equal(true)
         report_ratio("fn_call", n, small, n * 4, large)
         expect(large * 10 < small * 70).to_equal(true)
@@ -471,8 +505,8 @@ describe "seed interpreter: component scaling (n vs 4n)":
         step("Measure interpreter scaling across component counts")
         # @req REQ-PERF-INTERP-COMPONENT-SCALING-013
         val n = 20000
-        val small = run_struct_in_arr_assign(n)
-        val large = run_struct_in_arr_assign(n * 4)
+        val small = best_of_3(run_struct_in_arr_assign, n)
+        val large = best_of_3(run_struct_in_arr_assign, n * 4)
         expect(small > 0).to_equal(true)
         report_ratio("struct_in_arr_assign", n, small, n * 4, large)
         expect(large * 10 < small * 70).to_equal(true)
@@ -481,8 +515,8 @@ describe "seed interpreter: component scaling (n vs 4n)":
         step("Measure interpreter scaling across component counts")
         # @req REQ-PERF-INTERP-COMPONENT-SCALING-014
         val n = 20000
-        val small = run_text_slice(n)
-        val large = run_text_slice(n * 4)
+        val small = best_of_3(run_text_slice, n)
+        val large = best_of_3(run_text_slice, n * 4)
         expect(small > 0).to_equal(true)
         report_ratio("text_slice", n, small, n * 4, large)
         expect(large * 10 < small * 70).to_equal(true)
@@ -491,8 +525,8 @@ describe "seed interpreter: component scaling (n vs 4n)":
         step("Measure interpreter scaling across component counts")
         # @req REQ-PERF-INTERP-COMPONENT-SCALING-015
         val n = 20000
-        val small = run_char_code_at(n)
-        val large = run_char_code_at(n * 4)
+        val small = best_of_3(run_char_code_at, n)
+        val large = best_of_3(run_char_code_at, n * 4)
         expect(small > 0).to_equal(true)
         report_ratio("char_code_at", n, small, n * 4, large)
         expect(large * 10 < small * 70).to_equal(true)
@@ -501,8 +535,8 @@ describe "seed interpreter: component scaling (n vs 4n)":
         step("Measure interpreter scaling across component counts")
         # @req REQ-PERF-INTERP-COMPONENT-SCALING-016
         val n = 20000
-        val small = run_dict_get_loop(n)
-        val large = run_dict_get_loop(n * 4)
+        val small = best_of_3(run_dict_get_loop, n)
+        val large = best_of_3(run_dict_get_loop, n * 4)
         expect(small > 0).to_equal(true)
         report_ratio("dict_get_loop", n, small, n * 4, large)
         expect(large * 10 < small * 70).to_equal(true)
@@ -511,8 +545,8 @@ describe "seed interpreter: component scaling (n vs 4n)":
         step("Measure interpreter scaling across component counts")
         # @req REQ-PERF-INTERP-COMPONENT-SCALING-017
         val n = 20000
-        val small = run_field_push(n)
-        val large = run_field_push(n * 4)
+        val small = best_of_3(run_field_push, n)
+        val large = best_of_3(run_field_push, n * 4)
         expect(small > 0).to_equal(true)
         report_ratio("field_push", n, small, n * 4, large)
         expect(large * 10 < small * 70).to_equal(true)

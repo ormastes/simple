@@ -2593,6 +2593,20 @@ fn try_compile_builtin_method_call<M: Module>(
             }
             return Ok(None);
         }
+        // `[T].reserve(additional)` — capacity hint; contents and `len` are
+        // untouched and the array header never moves. Compiled as a NO-OP in
+        // this JIT table: reserve is an optimization hint with no observable
+        // effect, so no runtime call is emitted (the real grower
+        // `rt_array_reserve` exists in the runtime for the static-linked
+        // lanes; see codegen/runtime_sffi.rs and elf_utils.rs). Before this
+        // arm, the call fell through to cross-module suffix resolution,
+        // linked the unresolvable name "Array.reserve", and the runtime
+        // aborted with "Function 'Array.reserve' not found" (exit 70) —
+        // doc/08_tracking/bug/compiler_seed_missing_array_reserve_2026-11-12.md.
+        "reserve" => {
+            let _additional = args.first().map(|a| get_vreg_or_default(ctx, builder, a));
+            return Ok(Some(receiver_val));
+        }
         "map" => {
             // Receiver-polymorphic, exactly like `at` and `index_of` below.
             //
@@ -2891,7 +2905,10 @@ fn try_compile_builtin_method_call<M: Module>(
     // `reverse` or `sort` METHOD to them any more — both now route to the
     // copying `rt_reverse` / `rt_sort`, which must yield their RETURN value,
     // not the receiver.
-    let in_place_mutating_no_push = matches!(runtime_func, "rt_array_clear" | "rt_array_reverse" | "rt_array_sort");
+    let in_place_mutating_no_push = matches!(
+        runtime_func,
+        "rt_array_clear" | "rt_array_reserve" | "rt_array_reverse" | "rt_array_sort"
+    );
 
     if runtime_func == "rt_array_push" {
         // rt_array_push returns bool (success/failure), NOT a new array pointer.

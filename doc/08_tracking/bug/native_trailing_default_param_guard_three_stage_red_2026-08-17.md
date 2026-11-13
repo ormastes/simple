@@ -193,3 +193,12 @@ not weaken the guard.
 ## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
 
 **LIVE on Cause 2 (confirmed)** — ne17: harness selftest 8/8; the interpreted pure-Simple driver still cannot finish the small fixture in 240s on this host (Rust engine completes in seconds — the blowup is specific to the interpreted driver path). Grant: Linux lane with the 3000s+ budget or a driver-perf lane; do not weaken the guard.
+
+
+## Addendum 2026-11-13 (lane work/live-p3-l3-20261113 (worktree lp3-wt, base f790f7f266e = origin/release/1.0.0 tip, seed binary build-commit 46fe8f6b6def))
+
+Cause 2 stands at this base: the guard's real blocker is the interpreted
+native-build worker's RSS blowup (the `native_build_interpreted_worker_rss_blowup`
+/ `_fixed_2_4gb_floor` family), which is architectural and owned by the
+bootstrap-redesign / seed-retention lanes. Causes 1 and 3 remain non-reproducing
+per this record's own narrowing. Not attempted here.

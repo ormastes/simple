@@ -36,3 +36,36 @@ Confirm the intended builtin-resolution contract and codec provenance version.
 If the `v6`/`v15` provenance and the current resolution are correct, update the
 spec oracle; if resolution is genuinely missing, implement typed-`Array` map
 classification. Until then leave the example RED (do not weaken it to pass).
+
+## PARTIALLY FIXED 2026-11-13 (wave-2 deep-fix lane, work/compiler-seed-deepfix-20261113)
+
+Codec oracle updated (record-sanctioned): the canonical header legitimately
+moved v4 -> v7 (`HIR_CANONICAL_CODEC_VERSION = "spl-hircodec-canonical-v7-
+imported-layouts"`, src/compiler/20.hir/hir_codec.spl:51; v16 frames are
+correctly rejected because they decode `imported_layouts` empty and raise a
+spurious W-HIR-INFER-001). The spec oracle now pins v7 without a trailing
+space — the version string carries a suffix, so `"spl-hircodec-canonical-v7 "`
+(with space) can never match `"spl-hircodec-canonical-v7-imported-layouts ...
+"`; the original v4 oracle only matched because v4-era version strings had no
+suffix.
+
+The two identity examples stay RED, with a precise diagnosis from a scratch
+probe (since removed): the product admission logic IS present and correct on
+paper — `resolve_builtin_collection_operation`
+(src/compiler/35.semantics/perf_facts/builtin_collection.spl) classifies a
+typed-Array receiver + one positional lambda arg as
+`BuiltinCollection(ArrayMap)`, and the HIR interpreter backend
+(src/compiler/70.backend/backend/interpreter_expr.spl:351) already executes
+that identity. The probe showed, under the seed: the fixture's HIR Let carries
+the declared `[i64]` type (backfill input is correct), the map receiver is
+`NamedVar(sym = 1)` — the SAME symbol id as the Let — yet
+`attach_inferred_type` attaches a NON-Array type ("other-kind") and resolution
+stays Unresolved. So the quiet-mode `local_value_types` backfill
+(resolve.spl:417 / resolve_lookup_helpers.spl:41) either misses the integer-
+keyed Dict entry or the HirType aggregate corrupts when read back — a
+seed-runtime aggregate/Dict transport divergence (the same class the triage
+notes repeatedly flag as "seed aggregate typing not authoritative"), not a
+missing product feature. Fixing it needs a seed-level Dict<i64, aggregate> or
+HirType transport investigation beyond this lane; documented as remainder.
+Spec stays RED per this record's instruction, now failing only the two
+genuine identity assertions.

@@ -287,3 +287,12 @@ seed-fix lane with the Linux gdb/sampler grant). Header flipped to LIVE.
 ## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
 
 Concurs with lanes boot6/int10/int11: LIVE — located, not fixed (interpreted-worker RSS terms recorded there; one fixed ~2.7 GB term, one unbounded creep inside parse). Memory-retention work exceeds the per-bug timebox; disposition stands.
+
+
+## Addendum 2026-11-13 (lane work/live-p3-l3-20261113 (worktree lp3-wt, base f790f7f266e = origin/release/1.0.0 tip, seed binary build-commit 46fe8f6b6def))
+
+Source re-check at this base: unchanged from the 2026-11-10/11 triage —
+term 1 (fixed ~2.7 GB import-closure load intrinsic to the interpreted-worker
+spawn) and term 2 (unbounded creep inside the interpreted `parse` step,
+unattributed) both stand, same owner split (seed-fix lane for term 2 with a
+Linux gdb/sampler grant; bootstrap redesign for term 1). Not attempted here.

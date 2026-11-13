@@ -280,3 +280,14 @@ untyped-vs-typed param bracket-assign assertion) on both lanes.
 ## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
 
 **LIVE (confirmed)** — ne14: sha3 headline corruption fixed; the remaining untyped-param JIT boxing defect reproduces (bare read gives boxed pointer, +5 does pointer arithmetic, eq false). Locus is seed JIT parameter binding/tagging for untyped-list slots — seed lane grant (cargo rebuild + re-deploy).
+
+
+## Addendum 2026-11-13 (lane work/live-p3-l3-20261113 (worktree lp3-wt, base f790f7f266e = origin/release/1.0.0 tip, seed binary build-commit 46fe8f6b6def))
+
+Re-confirmed LIVE on this lane: the record's probe (d) shape (untyped `list` fn
+parameter bracket-index-assigned in its own body) still reads back a boxed
+pointer on the default `run` lane, and the headline `sha3_256_bytes([97,98,99])`
+still returns the correct digest. No fix attempted here: the locus is the seed's
+JIT parameter binding/tagging for untyped-`list` slots (`src/compiler_rust`),
+which is deep JIT codegen work outside this lane's per-bug timebox; the record's
+stated grant (cargo lane + seed rebuild + paired A/B spec on both lanes) stands.

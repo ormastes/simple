@@ -125,3 +125,18 @@ code fix, and — because the underlying condition (flaky ratios on a loaded hos
 the very thing being measured — a rewritten pin cannot be reliably re-verified on
 this host. Left for the owning perf lane with its own before/after evidence rather
 than migrated blind here. No change in this closure.
+
+## Addendum 2026-11-13 (lane work/live-p3-l3-20261113)
+
+Remaining action LANDED: \`test/05_perf/interp/interpreter_component_scaling_spec.spl\`'s
+nine "linear pin" rows no longer pin a single-sample wall-clock ratio. Each now
+runs the shape 3x at each n and pins the ratio of the two MINIMA (\`best_of_3\`),
+the noise-robust estimator this record's own interleaved-rep evidence endorses
+(minima and medians agreed where single samples spread 2.2x). The eight
+KNOWN-RED quadratic rows keep a single run (ratio ~15 cannot be flipped by load
+noise; tripling them would multiply the spec's wall time by ~3). Verified run on
+the fresh seed: 19/23 with the 4 reds being one remaining quadratic row
+(self_index_push scaling) plus three "value semantics preserved" alias rows — a
+live interpreter-semantics divergence documented in the spec header, NOT ratio
+flake. This record's other named specs were already migrated per the
+2026-11-11 addendum; no further ratio pins remain known to this lane.

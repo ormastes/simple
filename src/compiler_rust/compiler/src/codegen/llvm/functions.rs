@@ -3143,6 +3143,7 @@ impl LlvmBackend {
                     "write_span" => Some("rt_array_write_span"),
                     "fill_span" => Some("rt_array_fill_span"),
                     "clear" => Some("rt_array_clear"),
+                    "reserve" => Some("rt_array_reserve"),
                     "enumerate" => Some("rt_array_enumerate"),
                     "join" => Some("rt_string_join"),
                     // "strip"/"trimmed" synonyms for "trim" (this table's own
@@ -3784,6 +3785,7 @@ impl LlvmBackend {
                     ("Array" | "array", "set") => Some("rt_index_set"),
                     ("Array" | "array", "pop") => Some("rt_array_pop"),
                     ("Array" | "array", "clear") => Some("rt_array_clear"),
+                    ("Array" | "array", "reserve") => Some("rt_array_reserve"),
                     ("String" | "string", "len") => Some("rt_string_len"),
                     ("str" | "text" | "String" | "string", "byte_len") => Some("rt_string_len"),
                     ("String" | "string", "concat") => Some("rt_string_concat"),

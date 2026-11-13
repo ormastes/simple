@@ -1711,6 +1711,7 @@ extern int64_t rt_transient_raw_words(
     int64_t value, const uintptr_t** words, uintptr_t* canonical_ptr);
 extern int32_t rt_transient_raw_promote(uintptr_t ptr);
 extern int32_t rt_transient_raw_scope_end(void);
+extern void spl_free_batch_v1(uint8_t** ptrs, size_t count);
 #endif
 static RtCoreMutex** rt_core_mutex_registry = NULL;
 static size_t rt_core_mutex_registry_len = 0;
@@ -2338,7 +2339,9 @@ static void rt_core_transient_raw_clear(void) {
     rt_core_transient_raw_alloc_tombs = 0;
 }
 
-static void rt_struct_alloc_unregister(void* ptr);
+/* Owned raw allocations reclaimed per struct-registry lock acquisition. */
+#define RT_CORE_TRANSIENT_RAW_RECLAIM_BATCH ((size_t)512)
+static void rt_core_transient_raw_reclaim_batch(void** raws, size_t count);
 
 static void rt_core_reclaim_transient_raw(void) {
     /* Empty scopes must not pay for a prior scope's allocation high water.
@@ -2348,31 +2351,23 @@ static void rt_core_reclaim_transient_raw(void) {
         if (rt_core_transient_raw_alloc_tombs != 0) rt_core_transient_raw_clear();
         return;
     }
+    /* Batched so the struct-registry write lock is taken once per batch,
+     * not once per allocation; reclaiming a batch only tombstones entries
+     * already walked and never resizes the table. */
+    void* batch[RT_CORE_TRANSIENT_RAW_RECLAIM_BATCH];
+    size_t batched = 0;
     for (size_t i = 0; i < rt_core_transient_raw_alloc_cap; i++) {
         RtCoreTransientRawAlloc* entry = &rt_core_transient_raw_allocs[i];
         if (entry->ptr == 0 || entry->ptr == RT_CORE_TRANSIENT_RAW_TOMBSTONE) continue;
         if (entry->bytes & RT_CORE_TRANSIENT_RAW_OWNED_BIT) {
-            void* raw = (void*)entry->ptr;
-#if defined(SIMPLE_RUNTIME_MEMORY_OWNER)
-            /* The composed allocator may add hardening headers, quarantine,
-             * or guarded mappings. Reclaim through its canonical ABI; rt_free
-             * also unregisters this entry safely while the table is scanned. */
-            rt_free(raw);
-#else
-            rt_struct_alloc_unregister(raw);
-            /* Now that sampled guard slots are registered here too, reclaim
-             * must not hand one to free(): a slot is a page-aligned mmap
-             * mapping, not a libc chunk. Route it through the guard's own
-             * reclaim, which PROT_NONEs the mapping so a later UAF traps.
-             * This mirrors rt_free's guard-slot branch. */
-            if (rt_mem_guard_is_slot(raw)) {
-                rt_mem_guard_free_sampled(raw);
-            } else {
-                free(raw);
+            batch[batched++] = (void*)entry->ptr;
+            if (batched == RT_CORE_TRANSIENT_RAW_RECLAIM_BATCH) {
+                rt_core_transient_raw_reclaim_batch(batch, batched);
+                batched = 0;
             }
-#endif
         }
     }
+    if (batched != 0) rt_core_transient_raw_reclaim_batch(batch, batched);
     rt_core_transient_raw_clear();
 }
 
@@ -8548,25 +8543,54 @@ static int rt_struct_alloc_register(void* ptr, size_t bytes) {
     return ok;
 }
 
+/* caller holds the struct registry write lock */
+static void rt_struct_alloc_unregister_locked(void* ptr) {
+    if (!ptr || rt_struct_alloc_cap == 0) return;
+    size_t mask = rt_struct_alloc_cap - 1;
+    size_t i = rt_core_immortal_hash_ptr((uintptr_t)ptr) & mask;
+    for (;;) {
+        uintptr_t entry = rt_struct_allocs[i].ptr;
+        if (entry == 0) break;
+        if (entry == (uintptr_t)ptr) {
+            rt_struct_allocs[i] = (RtStructAllocation){RT_STRUCT_ALLOC_TOMBSTONE, 0};
+            rt_struct_alloc_len--;
+            rt_struct_alloc_tombs++;
+            break;
+        }
+        i = (i + 1) & mask;
+    }
+}
+
 static void rt_struct_alloc_unregister(void* ptr) {
     if (!ptr) return;
     rt_struct_alloc_lock_acquire();
-    if (rt_struct_alloc_cap != 0) {
-        size_t mask = rt_struct_alloc_cap - 1;
-        size_t i = rt_core_immortal_hash_ptr((uintptr_t)ptr) & mask;
-        for (;;) {
-            uintptr_t entry = rt_struct_allocs[i].ptr;
-            if (entry == 0) break;
-            if (entry == (uintptr_t)ptr) {
-                rt_struct_allocs[i] = (RtStructAllocation){RT_STRUCT_ALLOC_TOMBSTONE, 0};
-                rt_struct_alloc_len--;
-                rt_struct_alloc_tombs++;
-                break;
-            }
-            i = (i + 1) & mask;
+    rt_struct_alloc_unregister_locked(ptr);
+    rt_struct_alloc_lock_release();
+}
+
+static void rt_core_transient_raw_reclaim_batch(void** raws, size_t count) {
+#if defined(SIMPLE_RUNTIME_MEMORY_OWNER)
+    /* The composed allocator may add hardening headers, quarantine, or
+     * guarded mappings. Reclaim through its canonical ABI; rt_free also
+     * unregisters each entry safely while the table is scanned. */
+    spl_free_batch_v1((uint8_t**)raws, count);
+#else
+    rt_struct_alloc_lock_acquire();
+    for (size_t i = 0; i < count; i++) rt_struct_alloc_unregister_locked(raws[i]);
+    rt_struct_alloc_lock_release();
+    for (size_t i = 0; i < count; i++) {
+        /* Now that sampled guard slots are registered here too, reclaim
+         * must not hand one to free(): a slot is a page-aligned mmap
+         * mapping, not a libc chunk. Route it through the guard's own
+         * reclaim, which PROT_NONEs the mapping so a later UAF traps.
+         * This mirrors rt_free's guard-slot branch. */
+        if (rt_mem_guard_is_slot(raws[i])) {
+            rt_mem_guard_free_sampled(raws[i]);
+        } else {
+            free(raws[i]);
         }
     }
-    rt_struct_alloc_lock_release();
+#endif
 }
 
 static int rt_struct_alloc_lookup_size(void* ptr, size_t* bytes_out) {
@@ -11104,6 +11128,19 @@ int8_t rt_array_clear(SplArray* a) {
     if (!array) return 0;
     array->len = 0;
     return 1;
+}
+
+/* `[T].reserve(additional)` — capacity hint; contents and len are unchanged.
+ * Dual-lane twin of the Rust seed rt_array_reserve
+ * (src/compiler_rust/runtime/src/value/collections.rs): both ensure capacity
+ * for len + additional elements without touching the header address. See
+ * doc/08_tracking/bug/compiler_seed_missing_array_reserve_2026-11-12.md. */
+int8_t rt_array_reserve(SplArray* a, int64_t additional) {
+    RtCoreArray* array = rt_core_array_ptr(a);
+    if (!array) return 0;
+    if (additional <= 0) return 1;
+    if (array->len > INT64_MAX - additional) return 0;
+    return rt_core_array_reserve(a, array->len + additional);
 }
 
 int8_t rt_array_push_i64_raw(SplArray* a, int64_t val) {
