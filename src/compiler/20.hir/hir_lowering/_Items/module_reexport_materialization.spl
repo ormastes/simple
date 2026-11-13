@@ -130,9 +130,19 @@ impl HirLowering:
         if facade_index < 0 or facade_index >= self.module_surfaces.surfaces.len():
             state.valid = false
             return HirReexportSource(found: false, module_index: -1, module_name: "", item_name: "")
-        if not module_surface_route_arrays_aligned(self.module_surfaces.surfaces[facade_index]):
-            state.valid = false
-            return HirReexportSource(found: false, module_index: -1, module_name: "", item_name: "")
+        # find_reexport_source proves every frozen surface's route arrays
+        # aligned once per registry generation (module_surfaces_frozen_alignment).
+        # Under that proof the per-hop rescan is redundant and was the hot
+        # path: it probes every export-origin name linearly, O(origins^2) per
+        # hop (~9% of serial Phase 3 HIR samples, 2026-11-13). An unproven
+        # walk (direct call, or a registry that failed the proof) still checks.
+        val route_alignment_proven = self.reexport_registry_valid and
+            self.reexport_generation == self.module_surfaces.generation
+        if not route_alignment_proven:
+            self.reexport_route_alignment_scans = self.reexport_route_alignment_scans + 1
+            if not module_surface_route_arrays_aligned(self.module_surfaces.surfaces[facade_index]):
+                state.valid = false
+                return HirReexportSource(found: false, module_index: -1, module_name: "", item_name: "")
         val visit_key = "{facade_index} {wanted}"
         if state.visited_depth.contains_key(visit_key):
             val seen_depth: i64 = state.visited_depth[visit_key]

@@ -1,0 +1,111 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+
+"""
+## Purpose and audience
+The one-file-build bug: `hir_cache_closure_digest` folded every surface's raw
+content hash into every module's HIR cache key, so a body-only edit in ONE
+file invalidated all 1622 entries of the bootstrap_main.spl closure
+(2026-11-13: attempt 3 of the serial Phase 3 run went fully cold after a
+2-file edit, cached=0). The closure rows now carry each frozen surface's
+span-free semantic interface digest (`semantic_hash0..3`, which folds
+declarations, trait default bodies, const values, field defaults, imports,
+export routes and origins), so a body-only edit leaves every OTHER module's
+key unchanged; the edited module still misses through its own source digest
+in `hir_cache_key`. Any interface change still moves the digest. A surface
+without a cacheable semantic digest falls back to its content hash (counted).
+`SIMPLE_HIR_CACHE_CLOSURE_KEY=content` keeps the old rows for bisecting.
+Audience: compiler engineers maintaining the HIR cache.
+"""
+
+# @tag: unit, compiler, driver, cache
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use std.io_runtime.{env_set, env_remove_process}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{ParserModule}
+use compiler.driver.driver_hir_cache.{hir_cache_closure_digest, hir_cache_closure_fallback_count_v1}
+use compiler.hir.hir_lowering.module_surface.{ModuleSurface, ModuleSurfacesByName}
+use test.helpers.module_surface_owner_fixture.{module_surfaces_from_test_modules}
+
+val HIK_USER: text = "use rk.leaf.\{Pt, area, K, Shape\}\n\nfn main() -> i64:\n    area(Pt(x: K))\n"
+
+fn hik_leaf(field_type: text, params: text, body: text, const_value: text, default_body: text) -> text:
+    "pub struct Pt:\n    x: {field_type}\n\npub val K: i64 = {const_value}\n\npub trait Shape:\n    fn sides() -> i64:\n        {default_body}\n\npub fn area({params}) -> i64:\n    {body}\n"
+
+fn hik_base_leaf() -> text:
+    hik_leaf("i64", "p: Pt", "p.x * 2", "3", "4")
+
+fn hik_digest(leaf_source: text) -> text:
+    hir_cache_closure_digest(hik_registry(leaf_source, false))
+
+# force_fallback: mark the leaf surface as having no cacheable semantic
+# digest, the shape an encoder refusal produces, so its row must use bytes.
+fn hik_registry(leaf_source: text, force_fallback: bool) -> ModuleSurfacesByName:
+    val log = Logger(level: 0)
+    var modules: Dict<text, ParserModule> = {}
+    modules["rk.leaf"] = parse_full_frontend(leaf_source, "rk/leaf.spl", "rk.leaf", log)
+    modules["rk.user"] = parse_full_frontend(HIK_USER, "rk/user.spl", "rk.user", log)
+    val sources = [
+        SourceFile(path: "rk/leaf.spl", content: leaf_source, module_name: "rk.leaf"),
+        SourceFile(path: "rk/user.spl", content: HIK_USER, module_name: "rk.user")
+    ]
+    val registry = module_surfaces_from_test_modules(modules, sources)
+    expect(registry.is_ok()).to_equal(true)
+    val reg = registry.unwrap()
+    if force_fallback:
+        for raw_surface in reg.surfaces:
+            val surface: ModuleSurface = raw_surface
+            if surface.module_name == "rk.leaf":
+                surface.semantic_cacheable = false
+    reg
+
+describe "HIR cache closure key follows interfaces, not bytes":
+    it "keeps the closure digest across a body-only edit":
+        step("Edit only area's body in the leaf")
+        val before = hik_digest(hik_base_leaf())
+        val fallbacks_before = hir_cache_closure_fallback_count_v1()
+        val after = hik_digest(hik_leaf("i64", "p: Pt", "p.x * 3", "3", "4"))
+        expect(before.len()).to_equal(64)
+        expect(after).to_equal(before)
+        step("Both surfaces were keyed by interface, none fell back")
+        expect(hir_cache_closure_fallback_count_v1()).to_equal(fallbacks_before)
+
+    it "moves the closure digest on a signature edit":
+        expect(hik_digest(hik_leaf("i64", "p: Pt, k: i64", "p.x * k", "3", "4"))).to_not_equal(hik_digest(hik_base_leaf()))
+
+    it "moves the closure digest on a field type edit":
+        expect(hik_digest(hik_leaf("i32", "p: Pt", "p.x * 2", "3", "4"))).to_not_equal(hik_digest(hik_base_leaf()))
+
+    it "moves the closure digest on a const value edit":
+        expect(hik_digest(hik_leaf("i64", "p: Pt", "p.x * 2", "5", "4"))).to_not_equal(hik_digest(hik_base_leaf()))
+
+    it "moves the closure digest on a trait default body edit":
+        expect(hik_digest(hik_leaf("i64", "p: Pt", "p.x * 2", "3", "9"))).to_not_equal(hik_digest(hik_base_leaf()))
+
+    it "keeps the legacy content rows selectable":
+        step("SIMPLE_HIR_CACHE_CLOSURE_KEY=content restores byte keying")
+        val _set = env_set("SIMPLE_HIR_CACHE_CLOSURE_KEY", "content")
+        val before = hik_digest(hik_base_leaf())
+        val after = hik_digest(hik_leaf("i64", "p: Pt", "p.x * 3", "3", "4"))
+        val _cleared = env_remove_process("SIMPLE_HIR_CACHE_CLOSURE_KEY")
+        expect(after).to_not_equal(before)
+
+    it "a body edit in a fallback surface still moves the closure digest":
+        step("Leaf has no cacheable semantic digest; edit only its body")
+        val before = hir_cache_closure_digest(hik_registry(hik_base_leaf(), true))
+        val after = hir_cache_closure_digest(hik_registry(hik_leaf("i64", "p: Pt", "p.x * 3", "3", "4"), true))
+        expect(after).to_not_equal(before)
+
+    it "counts a closure's fallbacks once however often it is re-derived":
+        step("Same closure digested three times, one fallback surface")
+        val registry = hik_registry(hik_leaf("i64", "p: Pt", "p.x * 7", "3", "4"), true)
+        val start = hir_cache_closure_fallback_count_v1()
+        val first = hir_cache_closure_digest(registry)
+        val _second = hir_cache_closure_digest(registry)
+        val _third = hir_cache_closure_digest(registry)
+        expect(first.len()).to_equal(64)
+        expect(hir_cache_closure_fallback_count_v1() - start).to_equal(1)
