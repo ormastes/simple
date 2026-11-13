@@ -550,6 +550,45 @@ fn hir_codec_abi_interface_encoded_v1(module: HirModule) -> Result<text, text>:
                 encoded.push(canon_str(part))
             Ok(canon_field(HIR_ABI_INTERFACE_DOMAIN_V1, canon_seq(encoded)))
 
+# Decoded-HIR text sharing (2026-11-13). Every text field the generated decoder
+# reads is the reader's own line string (flat_pool_unescape returns plain text
+# unchanged), so a blob that names its source path at every Span.file and an
+# imported module at every defining_module decoded to one heap string PER
+# OCCURRENCE, all promoted with the HIR root and resident for the whole build.
+# Measured on the 329-module src/app/lint/main.spl closure: 1.9M decoded text
+# lines, 1.5M of them repeats within their own module. Same stage2 build, warm
+# cache, SIMPLE_HIR_DECODE_INTERN=0 vs 1: HIR-phase RSS growth 1329 -> 1015 MB,
+# HIR wall unchanged, memstat object byte-identical. Repeats now point at the module's first
+# occurrence before decoding. Texts are immutable values, so the decoded
+# module is value-identical (re-encode is byte-identical) and the duplicate
+# line strings die with the caller's decode scope. Lines shorter than three
+# bytes ("0", "1", "N", "\N") are never shared: they are scalars or sentinels.
+# SIMPLE_HIR_DECODE_INTERN=0 keeps the per-line strings (A/B measurement switch).
+var _hir_decode_interned_texts: i64 = 0
+
+fn hir_decode_intern_enabled() -> bool:
+    (env_get("SIMPLE_HIR_DECODE_INTERN") ?? "") != "0"
+
+# Process-lifetime count of decoded text lines that reused an earlier line.
+fn hir_decode_interned_texts() -> i64:
+    _hir_decode_interned_texts
+
+fn hir_decode_intern_lines(lines: [text]) -> [text]:
+    var canon: Dict<text, text> = {}
+    var out: [text] = []
+    var shared: i64 = 0
+    for line in lines:
+        if line.byte_len() < 3:
+            out.push(line)
+        elif canon.contains_key(line):
+            out.push(canon[line])
+            shared = shared + 1
+        else:
+            canon[line] = line
+            out.push(line)
+    _hir_decode_interned_texts = _hir_decode_interned_texts + shared
+    out
+
 fn hir_module_decode(blob: text) -> HirModule?:
     # Preserve the trusted legacy contract and its constructor exactly. The
     # portable verifier below is the only path that selects strict bounds.
@@ -561,6 +600,8 @@ fn hir_module_decode(blob: text) -> HirModule?:
     if blob.substring(0, nl) != hir_codec_header():
         return nil
     var r = FlatPoolReader.new(blob.substring(nl + 1, blob.byte_len()))
+    if hir_decode_intern_enabled():
+        r.lines = hir_decode_intern_lines(r.lines)
     val module = hc_dec_hir_module(r)
     if module.representation_declarations.len() > 0:
         return nil
@@ -742,6 +783,7 @@ export hir_canonical_codec_identity_v1
 export hir_canonical_codec_generated_available_v1
 export HirDecodeLimits, HirDecodeAuditUsage, HirDecodeAuditObserver, HirDecodeError
 export hir_module_encode_calls
+export hir_decode_intern_lines, hir_decode_interned_texts
 export hir_module_encode, hir_module_encode_canonical, hir_module_encode_reason, hir_module_decode_reason
 export hir_module_has_rt_hal
 export hir_fn_scalars_at_v1
