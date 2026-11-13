@@ -7,6 +7,13 @@
 #define REQUIRE(check) do { if (!(check)) { fprintf(stderr, "SDL core check failed at line %d: %s\n", __LINE__, #check); return 1; } } while (0)
 
 int main(void) {
+    /* SDL2 is dlopened at first use. With no SDL2 library installed on this
+     * host there is nothing to exercise: SKIP (77). A library that loads but
+     * fails to bind or init is still a hard failure below. */
+    if (!sdl2_load() && strncmp(g_sdl2_load_error, "SDL2 unavailable: none", 22) == 0) {
+        fprintf(stderr, "SKIP: %s\n", g_sdl2_load_error);
+        return 77;
+    }
     REQUIRE(rt_sdl2_init() == 1);
     int64_t legacy_window = rt_sdl2_create_window("legacy", 2, 1);
     int64_t view_window = rt_sdl2_create_window("view", 2, 1);

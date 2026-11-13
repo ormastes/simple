@@ -97,6 +97,15 @@ int main(void) {
     TestText root_text = text(root), path_text = text("nested/data.bin");
     int64_t handle = rt_file_view_open_beneath_no_follow_v1(
         (int64_t)(uintptr_t)&root_text, (int64_t)(uintptr_t)&path_text);
+#if defined(_WIN32)
+    /* runtime_file_view.c's _WIN32 owner is an explicit unsupported stub
+     * (every open returns -1): beneath/no-follow opening is POSIX-only today.
+     * Pin that refusal, then SKIP rather than assert POSIX-only behaviour. */
+    if (handle == -1) {
+        fprintf(stderr, "SKIP: rt_file_view_* has no Windows owner (open refuses with -1)\n");
+        return 77;
+    }
+#endif
     assert(handle > 0);
     assert(rt_file_view_size_v1(handle) == 6);
     assert(rt_file_view_device_v1(handle) >= 0);
