@@ -108,3 +108,12 @@ Blocked on this host: multicore_green_fanout_spec asserts empty stderr, which ne
 ## 2026-11-13 follow-up (Linux aarch64, lane uia)
 
 Probe regression repaired: cbe6b94a79f re-applied to test/05_perf/stress/multicore_green_fanout_spec.spl (mkdir -p build/tmp; bin/simple fallback). On release/1.0.0 5221a5058a8, Linux aarch64 (DGX Spark GB10), Rust seed af717f53d6bce3e5: before, 3 examples 2 failed with the harness sentinel (expected probe_write_failed, 98); after, with SIMPLE_BIN set to the seed, the probes run and the same 2 examples fail only on the empty-stderr assertion (seed banner). Row stays open on the self-hosted-binary blocker. origin/main still carries the reverted text and needs the same change.
+
+## Addendum 2026-11-13 (lane work/live-p3-l3-20261113)
+
+State unchanged at this base: the font-fixture blocker stays fixed in-tree
+(bytes-API load), and the remaining blocker stays the absence of a deployed
+pure-Simple \`bin/release/<triple>/simple\` (the empty-stderr assertion in
+\`multicore_green_fanout_spec.spl\` is still correct and still cannot pass on the
+seed's mandatory banner). Bootstrap deployment is outside a P3 lane's grant; no
+change attempted.

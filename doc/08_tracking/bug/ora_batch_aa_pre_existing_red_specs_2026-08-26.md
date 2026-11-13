@@ -123,3 +123,14 @@ match the baseline anyway.
 ## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
 
 **LIVE tracking (confirmed)** — ne18 re-ran a representative sample on this tip: every sampled spec still red at the same baseline counts (dma_driver 0/1, mcp_cmdline_handshake 0/3, js_vm_reclamation 0/4; simple_wm_render_provenance now fails one layer earlier with a parse error). Per-spec fixes belong to the owning lanes; the re-baseline sweep belongs to the sspec/ora maintenance lane.
+
+## Addendum 2026-11-13 (lane work/live-p3-l3-20261113)
+
+Adjacent observation while migrating
+\`test/05_perf/interp/interpreter_component_scaling_spec.spl\` ratio pins (see
+\`perf_wall_clock_ratio_unmeasurable_on_loaded_host_2026-09-13.md\`): that spec's
+three failing "value semantics preserved" alias rows (self_index_push,
+field_dict_method, index_obj_mutate_big) observe a mutated receiver through a
+previously-taken alias on the current seed. This live interpreter-semantics
+divergence is NOT one of this record's listed rows; if it is not already owned
+by the nested_array / module_var family it deserves its own record.

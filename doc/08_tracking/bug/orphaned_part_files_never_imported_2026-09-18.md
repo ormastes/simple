@@ -159,3 +159,23 @@ Remaining: `src/app/io/_CliCompile/native_build.spl` — still read as SOURCE by
 `fs_extern_optional_spec`; deleting it needs those three specs retargeted at the live
 `native_build_closure.spl` / `compile_targets.spl` (owner decision on whether their
 assertions still describe live behaviour).
+
+## Addendum 2026-11-13 (lane work/live-p3-l3-20261113)
+
+State at this base: the baseline carries exactly ONE entry,
+\`src/app/io/_CliCompile/native_build.spl\`, matching this record's PARTIAL
+resolution — the other five orphans were deleted by the 2026-11-09 cleanup.
+The remaining file stays baselined DELIBERATELY: nothing \`use\`s it, but ten
+repo files read it as SOURCE TEXT and assert on its content
+(\`stage4_smoke_gate_spec\` checks the CLI closure BFS lives in it,
+\`native_build_cache_plumbing_spec\`, \`fs_extern_optional_spec\`,
+\`cli_native_build_main_contract_spec\`, \`native_build_warm_receipt_spec\',
+\`entry_closure_bucket_count_contract_spec\', \`tier_resolution_order_source_spec\',
+\`driver_entry_import_scan_cost_spec\`, \`path_absolute_optional_spec\', and
+\`check-native-build-focused-entry-scope.shs\`). Deleting it is the same
+dependent-surface surgery this record warns about, now across ten consumers
+instead of three; that work belongs to a dedicated lane with those specs'
+owners. A full ratchet re-run on this Windows worktree exceeded its execution
+window (the script's repo-wide \`use\` scan is slow here); no part-file was
+added, edited or deleted in this lane, so the documented 2026-11-09 PASS state
+is unchanged. No code change.

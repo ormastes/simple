@@ -105,3 +105,14 @@ compile-time type error, not `<value:0xffffffffffffffff>`.
 ## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
 
 **LIVE (confirmed)** — ne15 re-verified verbatim on the fresh seed: still prints <value:0xffffffffffffffff>, no diagnostic. Fix belongs in the seed semantic phase (Result receiver member access must be a fatal error), mirrored self-hosted; seed-rebuild grant recorded.
+
+
+## Addendum 2026-11-13 (lane work/live-p3-l3-20261113 (worktree lp3-wt, base f790f7f266e = origin/release/1.0.0 tip, seed binary build-commit 46fe8f6b6def))
+
+Re-verified LIVE verbatim on this base: the doc's probe
+(`build/nb/fixtures/probe_result_field.spl` shape, `r.len()` on a
+`Result<i64, text>`) compiles with no diagnostic and prints
+`ok_case_len=<value:0xffffffffffffffff>` under `run --mode=interpret` as well
+as the default lane. The unblock condition (fatal compile-time error naming the
+needed match/unwrap) is still unmet. Guard belongs in the seed semantic phase,
+mirrored in the self-hosted compiler; no seed rebuild was performed in this lane.

@@ -85,3 +85,13 @@ lane with a self-hosted binary.
 ## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
 
 **LIVE (confirmed)** — ne17 re-confirmed: no construction form (7lba parse error; LbaU(7) semantic not-found), identical to the 2026-09-01 measurement; f957a28ace77 is registry bookkeeping only. Two Required items stand (constructible spec + syntax or compiler-internal statement). Frontend-lane grant with a self-hosted binary.
+
+
+## Addendum 2026-11-13 (lane work/live-p3-l3-20261113 (worktree lp3-wt, base f790f7f266e = origin/release/1.0.0 tip, seed binary build-commit 46fe8f6b6def))
+
+State unchanged at this base: the declaration parses, no construction form is
+accepted (`7lba` parse error; `LbaU(7)` -> semantic `function 'LbaU' not
+found`), matching the 2026-11-11 (ne17) re-measurement. The two Required items
+stand: a spec constructing a value through the user path, and either a working
+construction syntax or an explicit compiler-internal statement with the docs
+corrected. Frontend feature work in both engines; not attempted in this lane.
