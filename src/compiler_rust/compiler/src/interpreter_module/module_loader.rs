@@ -613,6 +613,9 @@ fn private_top_level_fn_names(items: &[Node]) -> std::collections::HashSet<Strin
 /// `scripts/check/private_import_baseline.txt` (legacy: warn only). Same-directory
 /// siblings stay in compatibility mode (bare `fn` is private to its file; sibling
 /// access is the documented compatibility exception).
+/// Test importers are exempt (owner decision 2026-11-13: "test is special, can
+/// access"), using the same `is_test_caller` definition as
+/// `check_private_call_visibility` so the import and call rules agree.
 fn check_private_use_names(
     use_stmt: &UseStmt,
     current_file: Option<&Path>,
@@ -623,6 +626,9 @@ fn check_private_use_names(
     let (Some(provided), Some(importer)) = (provided.as_ref(), current_file) else {
         return Ok(());
     };
+    if is_test_caller(&importer.to_string_lossy()) {
+        return Ok(());
+    }
     let dir_of = |p: &Path| p.parent().map(|d| std::fs::canonicalize(d).unwrap_or_else(|_| d.to_path_buf()));
     if dir_of(importer) == dir_of(module_path) {
         return Ok(());
@@ -2769,6 +2775,29 @@ mod private_fn_visibility_tests {
             &provided_with_private(&["secret_helper"]),
         );
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn test_importer_is_exempt_but_src_importer_still_errors() {
+        // Owner decision 2026-11-13: tests may import private items. Same test-file
+        // definition as check_private_call_visibility (`is_test_caller`).
+        let u = use_of("use app.sub.lib_mod.{secret_helper}
+");
+        let check = |importer: &str| {
+            super::check_private_use_names(
+                &u,
+                Some(std::path::Path::new(importer)),
+                std::path::Path::new("zz_fx/src/app/sub/lib_mod.spl"),
+                "app.sub.lib_mod",
+                &provided_with_private(&["secret_helper"]),
+            )
+        };
+        assert!(check("test/01_unit/app/lib_mod_spec.spl").is_ok());
+        assert!(check("/repo/test/system/lib_mod_spec.spl").is_ok());
+        assert!(check("test\\01_unit\\app\\lib_mod_spec.spl").is_ok());
+        assert!(check("zz_fx/src/app/other/main.spl").is_err());
+        assert!(check("zz_fx/src/app/contest/main.spl").is_err());
+        assert!(check("scripts/check/tool.spl").is_err());
     }
 
     #[test]

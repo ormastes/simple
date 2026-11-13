@@ -158,6 +158,31 @@ A directory's public API consists only of:
 
 Nothing inside a child `.spl` file can bypass `__init__.spl` visibility controls.
 
+### Private functions across directories
+
+A bare `fn` (no `pub`, not named by an `export`) is private to its file. The
+seed (`check_private_use_names` / `check_private_call_visibility` in
+`src/compiler_rust/compiler/src/interpreter_module/module_loader.rs`) and the
+self-hosted compiler (`private_fn_import_denied` in
+`src/compiler/20.hir/hir_lowering/_Items/module_import_resolution.spl`) apply
+the same rule:
+
+| importer / caller | braced `use m.{name}` of a private fn | call through a glob import |
+|---|---|---|
+| same directory as `m` | allowed (compatibility exception) | allowed |
+| test file | **allowed** (owner decision 2026-11-13: "test is special, can access") | allowed |
+| any other file (`src/**`, `scripts/**`, `examples/**`) | error `private fn ... is not visible to ...`, unless `<path>\|<name>` is frozen in `scripts/check/private_import_baseline.txt` (then a `[visibility-warning]`) | same |
+
+A **test file** is a path that starts with `test/` or contains a `/test/`
+component (after `\` -> `/`, leading `./` stripped) — the seed's
+`is_test_caller`, shared by both rules. Note this also matches
+`src/app/test/**`. A directory whose name merely contains `test` (for example
+`contest/`) is not a test directory. Only the importer is exempt: the
+module's fn stays private, and product code importing it is still rejected.
+In the self-hosted compiler the non-baselined case is the staged warning
+`W-HIR-PRIVATE-IMPORT-001` (error `E-HIR-PRIVATE-IMPORT-001` under
+`SIMPLE_STRICT_PRIVATE_IMPORTS=1`).
+
 ---
 
 ## Access Control Policies
