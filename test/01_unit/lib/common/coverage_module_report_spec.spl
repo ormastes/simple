@@ -13,7 +13,7 @@
 #   line 19 "doubled > 10 and n > 0" has 2 conditions, never evaluated.
 use std.common.coverage_module_report.{coverage_executable_lines, coverage_module_report,
     coverage_module_report_text, coverage_pct_text, CoverageModuleReport, coverage_source_digest,
-    coverage_source_digests, coverage_source_check}
+    coverage_source_digests, coverage_source_check, coverage_source_rows}
 
 extern fn rt_file_read_text(path: text) -> text?
 
@@ -217,3 +217,24 @@ describe "coverage module report":
         expect(merged.message.contains("z.sdn")).to_equal(false)
         val none = coverage_source_check(["lines |file, line, hit_count|\n    /r/z.spl, 1, 1\n"], ["z.sdn"], "m.spl", src)
         expect(none.state).to_equal("unrecorded")
+
+    it "warns when one module's decisions were recorded under two paths":
+        # Decision ids hash the recorded path, so the same source at two
+        # checkouts yields two id sets and a doubled decision denominator.
+        val src = "123456789"
+        val a = "decisions |id, file, line, column, true_count, false_count|\n    1, /ci/m.spl, 1, 5, 1, 1\n\nsources |file, crc32|\n    /ci/m.spl, cbf43926\n"
+        val b = "decisions |id, file, line, column, true_count, false_count|\n    2, /home/m.spl, 1, 5, 1, 1\n\nsources |file, crc32|\n    /home/m.spl, cbf43926\n"
+        val check = coverage_source_check([a, b], ["ci.sdn", "local.sdn"], "m.spl", src)
+        expect(check.ok).to_equal(true)
+        expect(check.state).to_equal("verified")
+        expect(check.message).to_contain("WARNING")
+        expect(check.message).to_contain("/ci/m.spl")
+        expect(check.message).to_contain("/home/m.spl")
+        expect(coverage_source_check([a, a], ["ci.sdn", "ci2.sdn"], "m.spl", src).message).to_equal("")
+
+    it "lists every source digest row of an artifact":
+        val sdn = "lines |file, line, hit_count|\n    /r/a.spl, 1, 1\n\nsources |file, crc32|\n    /r/a.spl, 00000001\n    /r/b.spl, 00000002\n"
+        val rows = coverage_source_rows(sdn)
+        expect(rows.len()).to_equal(2)
+        expect(rows[1].file).to_equal("/r/b.spl")
+        expect(rows[1].crc32).to_equal("00000002")

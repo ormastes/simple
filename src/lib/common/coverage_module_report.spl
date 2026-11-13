@@ -328,39 +328,56 @@ pub fn coverage_source_digest(source: text) -> text:
         shift = shift - 4
     out
 
-# Distinct source digests `sdn` recorded for `path` (several when artifacts
-# were concatenated).
-pub fn coverage_source_digests(sdn: text, path: text) -> [text]:
-    var out: [text] = []
+pub struct CoverageSourceRow:
+    file: text
+    crc32: text
+
+# Every `sources |file, crc32|` row of an artifact, in order.
+pub fn coverage_source_rows(sdn: text) -> [CoverageSourceRow]:
+    var out: [CoverageSourceRow] = []
     var in_section = false
     for raw in sdn.split("\n"):
         if raw.starts_with("    ") or raw.starts_with("\t"):
             if in_section:
                 val c = _cov_split(raw)
-                if c.len() >= 2 and coverage_path_matches(c[0], path) and not out.contains(c[1]):
-                    out.push(c[1])
+                if c.len() >= 2:
+                    out.push(CoverageSourceRow(file: c[0], crc32: c[1]))
         else:
             in_section = raw.trim().starts_with("sources ")
     out
 
-fn _cov_mentions(sdn: text, path: text) -> bool:
+# Distinct source digests `sdn` recorded for `path` (several when artifacts
+# were concatenated).
+pub fn coverage_source_digests(sdn: text, path: text) -> [text]:
+    var out: [text] = []
+    for row in coverage_source_rows(sdn):
+        if coverage_path_matches(row.file, path) and not out.contains(row.crc32):
+            out.push(row.crc32)
+    out
+
+# Distinct recorded path strings of the line and decision rows for `path`.
+fn _cov_recorded_paths(sdn: text, path: text) -> [text]:
     val cov = parse_coverage_sdn(sdn)
+    var out: [text] = []
     for row in cov.lines:
-        if coverage_path_matches(row.file, path):
-            return true
+        if coverage_path_matches(row.file, path) and not out.contains(row.file):
+            out.push(row.file)
     for d in cov.decisions:
-        if coverage_path_matches(d.file, path):
-            return true
-    false
+        if coverage_path_matches(d.file, path) and not out.contains(d.file):
+            out.push(d.file)
+    out
 
 # Whether the artifacts (`names[i]` names `artifacts[i]`) may be scored, and
 # merged, against the current `source` of `path`. Any recorded digest that
 # differs from the source refuses; artifacts without one are `unverified`, and
-# merging more than one artifact while any lacks a digest warns.
+# merging more than one artifact while any lacks a digest warns. Recording the
+# module under several path strings (two checkouts) also warns: decision ids
+# hash the recorded path, so one site would be counted once per path.
 pub fn coverage_source_check(artifacts: [text], names: [text], path: text, source: text) -> CoverageSourceCheck:
     val current = coverage_source_digest(source)
     var stale: [text] = []
     var undigested: [text] = []
+    var paths: [text] = []
     var recorded = 0
     var i = 0
     while i < artifacts.len():
@@ -368,7 +385,11 @@ pub fn coverage_source_check(artifacts: [text], names: [text], path: text, sourc
         for d in digests:
             if d != current:
                 stale.push("{names[i]} (crc32 {d})")
-        if _cov_mentions(artifacts[i], path):
+        val seen = _cov_recorded_paths(artifacts[i], path)
+        for p in seen:
+            if not paths.contains(p):
+                paths.push(p)
+        if seen.len() > 0:
             recorded = recorded + 1
             if digests.len() == 0:
                 undigested.push(names[i])
@@ -380,14 +401,16 @@ pub fn coverage_source_check(artifacts: [text], names: [text], path: text, sourc
                 "; line numbers and decision ids would not line up -- re-record against this source")
     if recorded == 0:
         return CoverageSourceCheck(ok: true, state: "unrecorded", message: "")
-    if undigested.len() == 0:
-        return CoverageSourceCheck(ok: true, state: "verified", message: "")
-    var message = ""
-    if recorded > 1:
-        message = "WARNING: merging {recorded} artifacts for {path}, but " + undigested.join(", ") +
+    var notes: [text] = []
+    if recorded > 1 and undigested.len() > 0:
+        notes.push("WARNING: merging {recorded} artifacts for {path}, but " + undigested.join(", ") +
             " carry no source digest, so a mix of source versions cannot be detected " +
-            "(totals may be wrong); re-record with a collector that writes `sources`"
-    CoverageSourceCheck(ok: true, state: "unverified", message: message)
+            "(totals may be wrong); re-record with a collector that writes `sources`")
+    if paths.len() > 1:
+        notes.push("WARNING: {path} was recorded under {paths.len()} paths (" + paths.join(", ") +
+            "); decision ids hash the recorded path, so decision totals count a site once per path")
+    val state = if undigested.len() == 0: "verified" else: "unverified"
+    CoverageSourceCheck(ok: true, state: state, message: notes.join("\n"))
 
 # ----------------------------------------------------------------------------
 # Report
