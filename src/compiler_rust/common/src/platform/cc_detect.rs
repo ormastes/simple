@@ -137,10 +137,20 @@ const DOCUMENTED_CROSS_GCC_DRIVERS: &[&str] = &[
     "x86_64-w64-mingw32-g++",
 ];
 
+/// A documented cross gcc name is exempt only when it really cross-compiles:
+/// on a Linux host, `<host-arch>-linux-gnu-gcc` is the host's own gcc.
+fn cross_gcc_exempt(base: &str, host_arch: &str, host_os: &str) -> bool {
+    if !DOCUMENTED_CROSS_GCC_DRIVERS.contains(&base) {
+        return false;
+    }
+    let arch = base.split('-').next().unwrap_or("");
+    !(host_os == "linux" && base.contains("-linux-gnu") && arch == host_arch)
+}
+
 pub fn gcc_driver_refusal(tool: &str, version_banner: &str) -> Option<String> {
     let base = tool.rsplit(['/', '\\']).next().unwrap_or(tool).to_ascii_lowercase();
     let base = base.strip_suffix(".exe").unwrap_or(&base);
-    if DOCUMENTED_CROSS_GCC_DRIVERS.contains(&base) {
+    if cross_gcc_exempt(base, std::env::consts::ARCH, std::env::consts::OS) {
         return None;
     }
     let gcc_name = |stem: &str| {
@@ -375,7 +385,7 @@ mod tests {
         assert!(gcc_driver_refusal("cc", "Apple clang version 16.0.0").is_none());
         assert!(gcc_driver_refusal("clang-23", "clang version 23.1.0").is_none());
         assert!(gcc_driver_refusal("clang-cl.exe", "").is_none());
-        assert!(gcc_driver_refusal("aarch64-linux-gnu-gcc", "").is_none(), "documented hosted cross drivers are the cross lane's own gap");
+        assert!(gcc_driver_refusal("arm-linux-gnueabihf-gcc", "").is_none(), "documented hosted cross drivers are the cross lane's own gap");
         assert!(gcc_driver_refusal("/usr/bin/x86_64-linux-gnu-gcc-13", "").is_some(), "a host-triple gcc is still gcc");
         assert!(gcc_driver_refusal("mips-linux-gnu-gcc", "").is_some(), "undocumented cross gcc is refused");
         let message = gcc_driver_refusal("gcc", "").unwrap();
@@ -453,5 +463,14 @@ mod tests {
         assert!(message.contains("`clang-cl`"), "{message}");
         assert!(message.contains("sh scripts/setup/bootstrap-prereqs.shs install"), "{message}");
         assert!(require_compiler("definitely-not-a-compiler-xyz").is_err());
+    }
+
+    #[test]
+    fn cross_gcc_exemption_requires_a_foreign_arch() {
+        assert!(!cross_gcc_exempt("aarch64-linux-gnu-gcc", "aarch64", "linux"));
+        assert!(cross_gcc_exempt("aarch64-linux-gnu-gcc", "x86_64", "linux"));
+        assert!(cross_gcc_exempt("riscv64-linux-gnu-gcc", "aarch64", "linux"));
+        assert!(cross_gcc_exempt("x86_64-w64-mingw32-gcc", "aarch64", "linux"));
+        assert!(!cross_gcc_exempt("gcc", "aarch64", "linux"));
     }
 }
