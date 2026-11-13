@@ -2977,6 +2977,73 @@ pub extern "C" fn rt_array_clear(array: RuntimeValue) -> bool {
     }
 }
 
+/// Ensure the array can hold `len + additional` elements without regrowing.
+///
+/// `[T].reserve(additional)` is a capacity hint, exactly like the pure-Simple
+/// core's `array_reserve` (src/runtime/simple_core/core_array.spl): it never
+/// changes `len` or any element; it only reallocates the backing buffer when
+/// the current capacity is insufficient. The `RuntimeArray` header stays at a
+/// stable address across the grow (only `data` may move), so callers holding
+/// the array handle need no rebind. Returns false only when the grow
+/// allocation fails.
+#[no_mangle]
+pub extern "C" fn rt_array_reserve(array: RuntimeValue, additional: i64) -> bool {
+    let arr = as_typed_ptr_packed!(mut array, HeapObjectType::Array, RuntimeArray, false);
+    unsafe {
+        if additional <= 0 {
+            return true;
+        }
+        let len = (*arr).len;
+        let needed = len.saturating_add(additional as u64);
+        if needed <= (*arr).capacity {
+            return true;
+        }
+        let old_cap = (*arr).capacity;
+        let new_cap = needed.max((old_cap.saturating_mul(2)).max(4));
+        if (*arr).is_byte_packed() {
+            let old_layout = byte_array_data_layout(old_cap);
+            let new_size = byte_array_data_layout(new_cap).size();
+            let new_data = if (*arr).data.is_null() {
+                std::alloc::alloc_zeroed(byte_array_data_layout(new_cap)) as *mut RuntimeValue
+            } else {
+                std::alloc::realloc((*arr).data as *mut u8, old_layout, new_size) as *mut RuntimeValue
+            };
+            if new_data.is_null() {
+                return false;
+            }
+            let new_tail_bytes = new_size - old_cap as usize;
+            if new_tail_bytes > 0 {
+                std::ptr::write_bytes((new_data as *mut u8).add(old_cap as usize), 0, new_tail_bytes);
+            }
+            note_array_data_swap((*arr).data, old_layout.size(), new_size);
+            (*arr).data = new_data;
+            (*arr).capacity = new_cap;
+            return true;
+        }
+        let old_layout = array_data_layout(old_cap);
+        let new_size = array_data_layout(new_cap).size();
+        let new_data = if (*arr).data.is_null() {
+            std::alloc::alloc_zeroed(array_data_layout(new_cap)) as *mut RuntimeValue
+        } else {
+            std::alloc::realloc((*arr).data as *mut u8, old_layout, new_size) as *mut RuntimeValue
+        };
+        if new_data.is_null() {
+            return false;
+        }
+        // Zero-init the newly grown tail so later reads of unwritten slots
+        // return NIL instead of leaked memory.
+        let old_len_bytes = old_cap as usize * std::mem::size_of::<RuntimeValue>();
+        let new_tail_bytes = new_size - old_len_bytes;
+        if new_tail_bytes > 0 {
+            std::ptr::write_bytes((new_data as *mut u8).add(old_len_bytes), 0, new_tail_bytes);
+        }
+        note_array_data_swap((*arr).data, old_layout.size(), new_size);
+        (*arr).data = new_data;
+        (*arr).capacity = new_cap;
+        true
+    }
+}
+
 /// Reclaim flat-parser scratch heap objects after conversion creates owned
 /// frontend values. Each parser thread owns at most one scope.
 extern "C" {

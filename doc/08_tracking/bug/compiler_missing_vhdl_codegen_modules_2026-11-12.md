@@ -57,3 +57,44 @@ Land the missing codegen modules, or repoint the specs at the modules that
 superseded them (and delete specs whose subject was intentionally dropped).
 For `app.spipe.testing` and `std.time.sleep_ms`, fix the import paths or add
 the intended modules. Until then these specs cannot execute.
+
+## PARTIALLY FIXED 2026-11-13 (wave-2 deep-fix lane, work/compiler-seed-deepfix-20261113)
+
+### std.time.sleep_ms — FIXED
+`test/02_integration/compiler/driver/parser_external_inspection_process_v1_spec.spl`
+now imports `std.nogc_sync_mut.src.time.{sleep_ms}` (the live module,
+src/lib/nogc_sync_mut/src/time.spl:86). The spec LOADS AND EXECUTES (was:
+0 examples, hard import error). Its single example then fails deeper with
+"OwnedProcessV3 opaque adapter is unavailable in the interpreter; it requires
+the native runtime provider" -- the spec spawns real processes, which the
+seed-run interpreter cannot provide (the packet-level unit spec
+test/01_unit/lib/common/process_inspection_v1_spec.spl passes 3/3 on the same
+interpreter). That remainder is an infrastructure requirement, not an import
+defect.
+
+### app.spipe.testing — TRIAGE INCOMPLETE, spec unrescuable in this lane
+Removing the dead `use app.spipe.testing.*` wildcard (nothing from it is
+used; describe/it/expect come from std.spec) exposes a SECOND missing module
+the triage did not record: `app.perf.demand_compile_receipt`
+(`demand_compile_receipt_create_v1` / `demand_compile_receipt_validate_v1`
+exist NOWHERE under src/ -- verified by content search). The spec's subject
+(the demand-compile receipt producer) was never landed; the spec cannot load
+without implementing it, which is feature work, not a bug fix. Change
+reverted; this record now tracks both missing modules. Sibling
+`test/02_integration/compiler/cache/reverse_reference_projection_receipt_spec.spl`
+imports the same dead `app.spipe.testing.*` and is unaffected by this lane.
+
+### Missing HWIR -> VHDL codegen modules (19+ GHDL specs) — CONFIRMED, owner decision required
+All 13 missing module families re-verified absent under any path
+(`find src -name <module>.spl` and content search; the only v9 hit is the
+unrelated `src/app/verify/riscv_scalar_runtime_pipeline_v9_formal_bundle.spl`):
+riscv_scalar_decoder_to_vhdl, compiler.mir.hwir.riscv_scalar_decoder,
+riscv_scalar_runtime_alu, riscv_scalar_runtime_alu_pipeline_to_vhdl,
+riscv_scalar_runtime_lsu_composition, riscv_scalar_runtime_lsu_to_vhdl,
+riscv_scalar_runtime_m_provider, riscv_scalar_runtime_mul_low_provider,
+riscv_scalar_runtime_pipeline_v3..v9_rvfi_to_vhdl,
+riscv_scalar_runtime_stateful_v2_to_vhdl. `git log --all` shows no history for
+any of these names and no superseding module exists under src/. Landing 13
+hardware codegen units is a multi-week feature effort for the hwir/backend
+owner; deleting the specs needs an intentional-drop decision from the same
+owner. This lane documents precisely; it does not guess.

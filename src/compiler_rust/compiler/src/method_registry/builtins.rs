@@ -51,6 +51,16 @@ pub static ARRAY_METHODS: &[MethodInfo] = &[
         description: "removes all elements",
     },
     MethodInfo {
+        name: "reserve",
+        runtime_fn: RuntimeFn::Simple("rt_array_reserve"),
+        param_count: 1,
+        // Capacity hint, not an observable mutation: the record's canonical
+        // repro reserves on a `val` array, and the pure-Simple core grows
+        // the buffer in place with the header (the binding's handle) stable.
+        is_mutating: false,
+        description: "ensures capacity for additional elements (capacity hint, contents unchanged)",
+    },
+    MethodInfo {
         name: "contains",
         runtime_fn: RuntimeFn::Simple("rt_contains"),
         param_count: 1,

@@ -279,6 +279,7 @@ impl LlvmEmitter<'_> {
             "push" => Some("rt_array_push"),
             "pop" => Some("rt_array_pop"),
             "clear" => Some("rt_array_clear"),
+            "reserve" => Some("rt_array_reserve"),
             // Receiver-polymorphic. `rt_array_reverse` reverses IN PLACE and
             // returns a bool, and this table applied it to EVERY receiver, so
             // text got the `false` receiver-mismatch answer and an array had
