@@ -116,3 +116,25 @@ fixture the e2e already uses and asserts on drained events. The Rust seed
 honours `@tag:in-development` (explicit-path run prints the honest verdict and
 `IN-DEVELOPMENT EXPLICIT`; the suite neutralises it) — cases red today are
 tagged, never skipped.
+
+#### Step 2 result (2026-11-13): differential harness landed
+
+- Shared harness `test/fixtures/xray/xray_backend_harness_v1.spl` (`XrayBackendHarnessV1`
+  port; LLVM fake leaf, Simple AArch64 and Simple x86-64 sled leaves over a simulated
+  code page; function-level `function_on`/`sites_for_function`, fault injection).
+- IN suite `test/01_unit/lib/xray/xray_backend_differential_in_spec.spl`: 11 scenarios x 3
+  backends = 33 examples, identical bodies. Verdict on the seed:
+  `outcome=OK executed=33 passed=33`. Mutation evidence (red on ALL three, then
+  restored): exclusive-time fold broken -> 3x `expected 30 to equal 20`;
+  `close_admission` skipped on rollback -> 3x `expected false to equal true`.
+- Profile mode is a pure fold of the SAME raw-edge stream:
+  `src/lib/common/trace/observer_profile_v1.spl` (`trace_profile_fold_v1`).
+- OUT suite `test/03_system/xray/xray_backend_differential_out_spec.spl` is
+  `@tag:in-development` on this host: the 2026-11-05 seed's `rt_host_dynlib_open`
+  returns 0 for every library (bug `seed_rt_host_dynlib_open_returns_zero_2026-11-13.md`)
+  and the LLVM lane has no Simple-compiled binary (PR4 link). The host fixture now
+  prints `timestamps_nonzero=` so timing presence is asserted the same way on both.
+- Tail-exit sleds are NOT a gap: the native selectors emit no tail calls
+  (`xray_sled_emit.spl:8-9`), so there is no tail-exit site to instrument.
+- Bug: `use test.fixtures.*` is unresolved from specs deeper than depth 4
+  (`test_fixtures_import_unresolved_below_depth4_2026-11-13.md`); the IN spec sits at depth 4.

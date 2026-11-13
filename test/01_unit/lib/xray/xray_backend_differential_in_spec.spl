@@ -1,0 +1,451 @@
+# @cover src/lib/nogc_sync_mut/trace/xray_llvm_adapter_v1.spl
+# @cover src/lib/nogc_sync_mut/trace/xray_native_sled_leaf_v1.spl
+# @cover src/lib/common/trace/observer_profile_v1.spl
+# @req REQ-XRAY-V1-API-01
+"""
+# XRay ("spy") backend differential — IN (white-box) suite
+
+ONE scenario body, run against every backend through the shared harness
+(`test/fixtures/xray/xray_backend_harness_v1.spl`):
+
+  - `llvm`           LLVM XRay sleds patched through compiler-rt statuses
+  - `simple-aarch64` pure-Simple B/NOP sleds patched on a simulated code page
+  - `simple-x86_64`  pure-Simple EB0B/6690 sleds, 2-byte activation word
+
+Plan §16.2 API-01 ("same client source/ABI and canonical reader across all
+backends"): the expectations below are literally the same functions. A
+backend that needs a different assertion has a contract bug, not a test bug.
+Covered: V1 facade lifecycle (prepare/start/stop, generation-bearing handles,
+stale handles, Busy), runtime enable/disable and reselection, log mode (raw
+edges through the reference collector) and profile mode (fold of the SAME
+stream), aspect-dynload config + pointcut selection, never-list (a function
+outside the map has no site), fail-closed PATCH-02 parity (patch / unpatch /
+install faults, Faulted + recover), and unsupported routes
+(Cranelift/interpreter/JIT/VHDL/GPU/Windows -> UnsupportedTarget).
+
+Not here: real pages, real sleds, a real binary. That is the OUT suite and
+scripts/check/check-xray-*-e2e.shs.
+"""
+use std.spec.*
+use std.common.plugin.aspect_params.{AspectParamsV1, ASPECT_TRACE_OBSERVER_EXT_V1}
+use std.common.plugin.iface_id.{ParamExt}
+use std.common.trace.observer_contract_v1.*
+use std.common.trace.observer_config_v1.{TRACE_CONFIG_SCHEMA_HASH_V1, trace_config_parse_sdn_v1}
+use std.common.trace.observer_build_route_v1.*
+use std.common.trace.observer_collector_v1.*
+use std.common.trace.observer_profile_v1.*
+use std.common.trace.observer_aspect_config_v1.{trace_aspect_config_v1}
+use std.common.trace.xray_native_selection_v1.*
+use std.common.trace.xray_native_map_format_v1.*
+use std.nogc_sync_mut.trace.xray_llvm_adapter_v1.*
+use test.fixtures.xray.xray_backend_harness_v1.*
+
+val ARENA: i64 = 4096
+val ARENA_2: i64 = 8192
+
+fn code(failure: TraceFailureV1) -> u32:
+    trace_failure_code_v1(failure)
+
+fn err_code<T>(result: Result<T, TraceFailureV1>) -> u32:
+    match result:
+        case Ok(_): 0
+        case Err(failure): code(failure)
+
+fn backend_name(backend: TraceBackendV1) -> text:
+    match backend:
+        case Auto: "auto"
+        case Llvm: "llvm"
+        case Simple: "simple"
+        case None: "none"
+
+fn other_backend(backend: TraceBackendV1) -> TraceBackendV1:
+    if backend == TraceBackendV1.Llvm: TraceBackendV1.Simple else: TraceBackendV1.Llvm
+
+fn edge(h: XrayBackendHarnessV1, kind: TraceEventKindV1, function_id: i64, generation: u64,
+        sequence: u64, timestamp: u64) -> TraceEventV1:
+    val sites = h.sites_for_function(function_id)
+    val site = if kind == TraceEventKindV1.Entry: sites[0] else: sites[sites.len() - 1]
+    TraceEventV1(kind: kind, flags: 0, generation: generation, module_instance: XRAY_HARNESS_MODULE_V1,
+        function_id: function_id as u32, site_id: site, context_id: 1, sequence: sequence,
+        timestamp: timestamp, span_token: 0, payload0: 0, payload1: 0, payload2: 0)
+
+# The simulated trampoline: a call of `function_id` records its entry and exit
+# ONLY while the function's sleds are on. `inner` runs between them.
+fn simulate_call(h: XrayBackendHarnessV1, collector: TraceReferenceCollectorV1, generation: u64,
+        function_id: i64, sequence: u64, enter_ts: u64, exit_ts: u64) -> u64:
+    var next = sequence
+    if h.function_on(function_id):
+        collector.record(edge(h, TraceEventKindV1.Entry, function_id, generation, next, enter_ts)).unwrap()
+        next = next + 1u64
+        collector.record(edge(h, TraceEventKindV1.Exit, function_id, generation, next, exit_ts)).unwrap()
+        next = next + 1u64
+    next
+
+# alpha(1) { beta(2) } ; gamma(3)   with timestamps 100..190
+fn simulate_program(h: XrayBackendHarnessV1, collector: TraceReferenceCollectorV1, generation: u64) -> [TraceEventV1]:
+    var seq: u64 = 1
+    if h.function_on(1):
+        collector.record(edge(h, TraceEventKindV1.Entry, 1, generation, seq, 100)).unwrap()
+        seq = seq + 1u64
+    seq = simulate_call(h, collector, generation, 2, seq, 110, 120)
+    if h.function_on(1):
+        collector.record(edge(h, TraceEventKindV1.Exit, 1, generation, seq, 130)).unwrap()
+        seq = seq + 1u64
+    seq = simulate_call(h, collector, generation, 3, seq, 150, 190)
+    collector.poll(64)
+
+fn kinds(events: [TraceEventV1]) -> [text]:
+    var out: [text] = []
+    for event in events:
+        val k = match event.kind:
+            case Entry: "entry"
+            case Exit: "exit"
+            case _: "other"
+        out.push("{k}:{event.function_id}")
+    out
+
+fn start_selected(h: XrayBackendHarnessV1, functions: [i64], arena: i64) -> TraceSessionV1:
+    val prepared = h.prepare(xray_harness_config_v1(h), xray_harness_selection_v1(h, functions)).unwrap()
+    h.start(prepared, arena).unwrap()
+
+# Backend-neutral name map: the same three functions the harness instruments,
+# shaped exactly like the emitter's .simple_xray_map (one site per LLVM
+# function, entry+exit per Simple function).
+fn name_map(h: XrayBackendHarnessV1) -> XrayMapV1:
+    var functions: [XrayMapFunctionV1] = []
+    val names = ["alpha", "beta", "gamma"]
+    for function_id in 1..(h.function_count() + 1):
+        val sites = h.sites_for_function(function_id)
+        functions.push(XrayMapFunctionV1(local_fn_id: function_id as u32, first_site: sites[0],
+            site_count: sites.len() as u32, name: names[function_id - 1]))
+    val isa = if h.backend() == TraceBackendV1.Simple and h.abi_profile().contains("x86_64"): XRAY_MAP_ISA_X86_64_V1 else: XRAY_MAP_ISA_AARCH64_V1
+    XrayMapV1(isa: isa, abi_profile: 1, sled_abi_version: 1, build_id: [], text_base: 0,
+        functions: functions, sites: [])
+
+fn config_payload(h: XrayBackendHarnessV1) -> text:
+    "trace:\n    schema: 1\n    instrumentation: dynamic\n    backend: {backend_name(h.backend())}\n    consistency: raw_edges\n    patch_mode: quiescent\n    abi_profile: {h.abi_profile()}\n    events: [entry, exit, tail_exit]\n"
+
+fn aspect_params(h: XrayBackendHarnessV1, pointcuts: text) -> AspectParamsV1:
+    var params = AspectParamsV1.defaults()
+    params.ext.push(ParamExt(ASPECT_TRACE_OBSERVER_EXT_V1, 1, config_payload(h).bytes(), TRACE_CONFIG_SCHEMA_HASH_V1))
+    params.ext.push(ParamExt(ASPECT_TRACE_POINTCUTS_EXT_V1, 1, pointcuts.bytes(), TRACE_POINTCUTS_SCHEMA_V1))
+    params
+
+# ---------------------------------------------------------------------------
+# Shared scenarios — identical for every backend
+# ---------------------------------------------------------------------------
+fn sc_routes(h: XrayBackendHarnessV1):
+    for target in ["aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu"]:
+        val route = trace_build_route_v1(target, TraceInstrumentationV1.Dynamic, h.backend()).unwrap()
+        expect(route.backend).to_equal(h.backend())
+        expect(route.kind != TraceBuildRouteKindV1.Off).to_equal(true)
+    # Cranelift / interpreter / JIT have no sleds; VHDL, GPU and Windows are not Linux ELF.
+    for target in ["wasm32-unknown-unknown", "x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc",
+            "riscv64-unknown-linux-gnu", "spirv64-unknown-unknown", "vhdl-unknown-unknown", "cranelift-jit", ""]:
+        expect(err_code(trace_build_route_v1(target, TraceInstrumentationV1.Dynamic, h.backend()))).to_equal(code(TraceFailureV1.UnsupportedTarget))
+    val off = trace_build_route_v1("aarch64-unknown-linux-gnu", TraceInstrumentationV1.Off, h.backend()).unwrap()
+    expect(off.kind).to_equal(TraceBuildRouteKindV1.Off)
+    expect(err_code(trace_build_route_v1("aarch64-unknown-linux-gnu", TraceInstrumentationV1.Dynamic, TraceBackendV1.None))).to_equal(code(TraceFailureV1.InvalidArgument))
+
+fn sc_prepare_rejections(h: XrayBackendHarnessV1):
+    val selection = xray_harness_selection_v1(h, [1])
+    var off = xray_harness_config_v1(h)
+    off.instrumentation = TraceInstrumentationV1.Off
+    expect(err_code(h.prepare(off, selection))).to_equal(code(TraceFailureV1.InstrumentationAbsent))
+    var paired = xray_harness_config_v1(h)
+    paired.consistency = TraceConsistencyV1.PairedSpans
+    expect(err_code(h.prepare(paired, selection))).to_equal(code(TraceFailureV1.UnsupportedConsistency))
+    var live = xray_harness_config_v1(h)
+    live.patch_mode = TracePatchModeV1.Live
+    expect(err_code(h.prepare(live, selection))).to_equal(code(TraceFailureV1.UnsupportedConsistency))
+    var foreign = xray_harness_config_v1(h)
+    foreign.backend = other_backend(h.backend())
+    expect(err_code(h.prepare(foreign, selection))).to_equal(code(TraceFailureV1.UnsupportedTarget))
+    expect(err_code(h.prepare(xray_harness_config_v1(h), xray_harness_raw_selection_v1([])))).to_equal(code(TraceFailureV1.InvalidMap))
+    # Never-list: a function outside the map has no site; the id past the map is rejected.
+    val beyond = (h.sites_for_function(h.function_count())[h.sites_for_function(h.function_count()).len() - 1]) + 1u32
+    expect(err_code(h.prepare(xray_harness_config_v1(h), xray_harness_raw_selection_v1([beyond])))).to_equal(code(TraceFailureV1.InvalidMap))
+    expect(err_code(h.prepare(xray_harness_config_v1(h), xray_harness_raw_selection_v1([0u32])))).to_equal(code(TraceFailureV1.InvalidMap))
+    val first = h.sites_for_function(1)[0]
+    expect(err_code(h.prepare(xray_harness_config_v1(h), xray_harness_raw_selection_v1([first, first])))).to_equal(code(TraceFailureV1.InvalidMap))
+    var stale = xray_harness_selection_v1(h, [1])
+    stale.manifest_incarnation = 0
+    expect(err_code(h.prepare(xray_harness_config_v1(h), stale))).to_equal(code(TraceFailureV1.InvalidMap))
+    var other_module = xray_harness_selection_v1(h, [1])
+    other_module.sites[0].module_instance = 2
+    expect(err_code(h.prepare(xray_harness_config_v1(h), other_module))).to_equal(code(TraceFailureV1.InvalidMap))
+    # Nothing above touched a sled or the handler.
+    expect(xray_harness_partially_on_functions_v1(h)).to_equal([])
+    expect(h.install_count()).to_equal(0)
+    expect(h.state_code()).to_equal(XRAY_LLVM_STATE_IDLE_V1)
+    # Auto resolves to this backend.
+    var auto = xray_harness_config_v1(h)
+    auto.backend = TraceBackendV1.Auto
+    expect(err_code(h.prepare(auto, selection))).to_equal(0)
+
+fn sc_lifecycle_and_handles(h: XrayBackendHarnessV1):
+    val config = xray_harness_config_v1(h)
+    val prepared = h.prepare(config, xray_harness_selection_v1(h, [1, 3])).unwrap()
+    expect(prepared.slot).to_equal(1u64)
+    expect(prepared.incarnation).to_equal(1u64)
+    expect(h.state_code()).to_equal(XRAY_LLVM_STATE_PREPARED_V1)
+    expect(err_code(h.prepare(config, xray_harness_selection_v1(h, [2])))).to_equal(code(TraceFailureV1.Busy))
+    # Forged / stale handles never start anything.
+    expect(err_code(h.start(TracePreparedV1(slot: 2, incarnation: 1), ARENA))).to_equal(code(TraceFailureV1.InvalidHandle))
+    expect(err_code(h.start(TracePreparedV1(slot: 1, incarnation: 7), ARENA))).to_equal(code(TraceFailureV1.InvalidHandle))
+    expect(xray_harness_partially_on_functions_v1(h)).to_equal([])
+    # A bad arena drops the preparation (back to Idle) without touching a sled.
+    expect(err_code(h.start(prepared, 4097))).to_equal(code(TraceFailureV1.InvalidArgument))
+    expect(h.state_code()).to_equal(XRAY_LLVM_STATE_IDLE_V1)
+    expect(h.install_count()).to_equal(0)
+    val again = h.prepare(config, xray_harness_selection_v1(h, [1, 3])).unwrap()
+    expect(again.incarnation).to_equal(2u64)
+    val session = h.start(again, ARENA).unwrap()
+    expect(session.generation).to_equal(2u64)
+    expect(session.incarnation).to_equal(2u64)
+    expect(h.install_count()).to_equal(1)
+    expect(h.state_code()).to_equal(XRAY_LLVM_STATE_ACTIVE_V1)
+    expect(xray_harness_on_functions_v1(h)).to_equal([1, 3])
+    expect(h.function_on(2)).to_equal(false)
+    # A stale session handle cannot stop the live one.
+    expect(err_code(h.request_stop(TraceSessionV1(slot: 1, incarnation: 1, generation: 1)))).to_equal(code(TraceFailureV1.InvalidHandle))
+    expect(xray_harness_on_functions_v1(h)).to_equal([1, 3])
+    expect(h.request_stop(session)).to_equal(Ok(TraceSessionStateV1.Drained))
+    expect(xray_harness_partially_on_functions_v1(h)).to_equal([])
+    expect(h.channel_closed(ARENA)).to_equal(true)
+    expect(h.state_code()).to_equal(XRAY_LLVM_STATE_IDLE_V1)
+    # Stopping an already-drained session is idempotent, not an error.
+    expect(h.request_stop(session)).to_equal(Ok(TraceSessionStateV1.Drained))
+
+fn sc_runtime_enable_disable(h: XrayBackendHarnessV1):
+    # enable
+    val first = start_selected(h, [2], ARENA)
+    expect(xray_harness_on_functions_v1(h)).to_equal([2])
+    # disable
+    expect(h.request_stop(first)).to_equal(Ok(TraceSessionStateV1.Drained))
+    expect(xray_harness_partially_on_functions_v1(h)).to_equal([])
+    # re-enable with a different pointcut: only the new selection is live and
+    # the handle carries the next generation.
+    val second = start_selected(h, [1, 3], ARENA_2)
+    expect(second.generation).to_equal(2u64)
+    expect(xray_harness_on_functions_v1(h)).to_equal([1, 3])
+    expect(h.install_count()).to_equal(2)
+    expect(h.request_stop(second)).to_equal(Ok(TraceSessionStateV1.Drained))
+    expect(h.channel_closed(ARENA_2)).to_equal(true)
+    # third generation: everything
+    val third = start_selected(h, [1, 2, 3], ARENA)
+    expect(third.generation).to_equal(3u64)
+    expect(xray_harness_on_functions_v1(h)).to_equal([1, 2, 3])
+    expect(h.request_stop(third)).to_equal(Ok(TraceSessionStateV1.Drained))
+    expect(xray_harness_partially_on_functions_v1(h)).to_equal([])
+
+fn sc_log_mode(h: XrayBackendHarnessV1):
+    val session = start_selected(h, [1, 2], ARENA)
+    var collector = TraceReferenceCollectorV1.create(session.generation, 64, 4).unwrap()
+    val events = simulate_program(h, collector, session.generation)
+    # gamma is not selected: no edge; alpha/beta nest in record order.
+    expect(kinds(events)).to_equal(["entry:1", "entry:2", "exit:2", "exit:1"])
+    var previous: u64 = 0
+    for event in events:
+        expect(event.generation).to_equal(session.generation)
+        expect(event.sequence > previous).to_equal(true)
+        expect(event.timestamp >= 100u64).to_equal(true)
+        expect(event.module_instance).to_equal(XRAY_HARNESS_MODULE_V1)
+        previous = event.sequence
+    expect(collector.stats().recorded).to_equal(4u64)
+    expect(collector.stats().lost).to_equal(0u64)
+    expect(h.request_stop(session)).to_equal(Ok(TraceSessionStateV1.Drained))
+    # disabled: the same program records nothing
+    var quiet = TraceReferenceCollectorV1.create(session.generation, 64, 4).unwrap()
+    expect(simulate_program(h, quiet, session.generation).len()).to_equal(0)
+
+fn sc_profile_mode(h: XrayBackendHarnessV1):
+    val session = start_selected(h, [1, 2, 3], ARENA)
+    var collector = TraceReferenceCollectorV1.create(session.generation, 64, 4).unwrap()
+    val events = simulate_program(h, collector, session.generation)
+    expect(events.len()).to_equal(6)
+    val profile = trace_profile_fold_v1(events)
+    expect(profile.events).to_equal(6u64)
+    expect(profile.unmatched_exits).to_equal(0u64)
+    expect(profile.open_entries).to_equal(0u64)
+    val alpha = trace_profile_function_v1(profile, 1).unwrap()
+    expect(alpha.calls).to_equal(1u64)
+    expect(alpha.inclusive_ns).to_equal(30u64)
+    expect(alpha.exclusive_ns).to_equal(20u64)
+    expect(alpha.max_depth).to_equal(1u64)
+    val beta = trace_profile_function_v1(profile, 2).unwrap()
+    expect(beta.calls).to_equal(1u64)
+    expect(beta.inclusive_ns).to_equal(10u64)
+    expect(beta.exclusive_ns).to_equal(10u64)
+    expect(beta.max_depth).to_equal(2u64)
+    val gamma = trace_profile_function_v1(profile, 3).unwrap()
+    expect(gamma.calls).to_equal(1u64)
+    expect(gamma.inclusive_ns).to_equal(40u64)
+    expect(h.request_stop(session)).to_equal(Ok(TraceSessionStateV1.Drained))
+    # Profile of a partial selection: unselected functions simply have no row.
+    val partial = start_selected(h, [2], ARENA_2)
+    var second = TraceReferenceCollectorV1.create(partial.generation, 64, 4).unwrap()
+    val folded = trace_profile_fold_v1(simulate_program(h, second, partial.generation))
+    expect(folded.functions.len()).to_equal(1)
+    expect(trace_profile_function_v1(folded, 1).is_none()).to_equal(true)
+    expect(trace_profile_function_v1(folded, 2).unwrap().calls).to_equal(1u64)
+    expect(h.request_stop(partial)).to_equal(Ok(TraceSessionStateV1.Drained))
+
+fn sc_aspect_dynload_selection(h: XrayBackendHarnessV1):
+    val params = aspect_params(h, "alpha,gamma")
+    val config = trace_aspect_config_v1(params).unwrap().unwrap()
+    expect(config.backend).to_equal(h.backend())
+    expect(config.instrumentation).to_equal(TraceInstrumentationV1.Dynamic)
+    expect(config.event_mask).to_equal(7u64)
+    val names = trace_aspect_pointcuts_v1(params).unwrap()
+    expect(names).to_equal(["alpha", "gamma"])
+    val selection = xray_native_selection_v1(name_map(h), names, XRAY_HARNESS_MODULE_V1, XRAY_HARNESS_INCARNATION_V1).unwrap()
+    expect(selection.sites.len()).to_equal(h.sites_for_function(1).len() + h.sites_for_function(3).len())
+    val prepared = h.prepare(config, selection).unwrap()
+    val session = h.start(prepared, ARENA).unwrap()
+    expect(xray_harness_on_functions_v1(h)).to_equal([1, 3])
+    expect(h.request_stop(session)).to_equal(Ok(TraceSessionStateV1.Drained))
+    # never-list honoured at the name level: an unknown (never-instrumented)
+    # name cannot be selected, and nothing is patched.
+    val hidden = trace_aspect_pointcuts_v1(aspect_params(h, "alpha,hidden")).unwrap()
+    expect(err_code(xray_native_selection_v1(name_map(h), hidden, XRAY_HARNESS_MODULE_V1, XRAY_HARNESS_INCARNATION_V1))).to_equal(code(TraceFailureV1.InvalidArgument))
+    expect(xray_harness_partially_on_functions_v1(h)).to_equal([])
+    # no observer extension at all -> no config -> nothing to enable
+    expect(trace_aspect_config_v1(AspectParamsV1.defaults()).unwrap().is_none()).to_equal(true)
+
+fn sc_patch_failure_rolls_back(h: XrayBackendHarnessV1):
+    h.inject_patch_failure(2)
+    val prepared = h.prepare(xray_harness_config_v1(h), xray_harness_selection_v1(h, [1, 2, 3])).unwrap()
+    expect(err_code(h.start(prepared, ARENA))).to_equal(code(TraceFailureV1.BackendFailure))
+    # function 1 was patched first and rolled back; nothing stays live.
+    expect(xray_harness_partially_on_functions_v1(h)).to_equal([])
+    expect(h.state_code()).to_equal(XRAY_LLVM_STATE_IDLE_V1)
+    expect(h.channel_closed(ARENA)).to_equal(true)
+    expect(h.patched_ids()).to_equal([])
+    h.clear_faults()
+    val session = start_selected(h, [1, 2, 3], ARENA_2)
+    expect(session.generation).to_equal(2u64)
+    expect(xray_harness_on_functions_v1(h)).to_equal([1, 2, 3])
+    expect(h.request_stop(session)).to_equal(Ok(TraceSessionStateV1.Drained))
+
+fn sc_unpatch_failure_faults_closed(h: XrayBackendHarnessV1):
+    val session = start_selected(h, [1, 2], ARENA)
+    h.inject_unpatch_failure(2)
+    expect(err_code(h.request_stop(session))).to_equal(code(TraceFailureV1.BackendFailure))
+    expect(h.state_code()).to_equal(XRAY_LLVM_STATE_FAULTED_V1)
+    # admission is closed even though a sled is still live; the live one is reported, never hidden
+    expect(h.channel_closed(ARENA)).to_equal(true)
+    expect(xray_harness_partially_on_functions_v1(h)).to_equal([2])
+    expect(h.function_on(1)).to_equal(false)
+    expect(h.patched_ids().len() >= 1).to_equal(true)
+    # Faulted refuses new work and never reports "off"
+    expect(err_code(h.prepare(xray_harness_config_v1(h), xray_harness_selection_v1(h, [1])))).to_equal(code(TraceFailureV1.BackendFailure))
+    expect(err_code(h.request_stop(session))).to_equal(code(TraceFailureV1.BackendFailure))
+    expect(err_code(h.recover())).to_equal(code(TraceFailureV1.BackendFailure))
+    expect(h.state_code()).to_equal(XRAY_LLVM_STATE_FAULTED_V1)
+    h.clear_faults()
+    expect(h.recover()).to_equal(Ok(true))
+    expect(xray_harness_partially_on_functions_v1(h)).to_equal([])
+    expect(h.state_code()).to_equal(XRAY_LLVM_STATE_IDLE_V1)
+    expect(err_code(h.recover())).to_equal(code(TraceFailureV1.InvalidHandle))
+    val next = start_selected(h, [3], ARENA_2)
+    expect(xray_harness_on_functions_v1(h)).to_equal([3])
+    expect(h.request_stop(next)).to_equal(Ok(TraceSessionStateV1.Drained))
+
+fn sc_install_failure_patches_nothing(h: XrayBackendHarnessV1):
+    h.inject_install_failure()
+    val prepared = h.prepare(xray_harness_config_v1(h), xray_harness_selection_v1(h, [1, 2, 3])).unwrap()
+    expect(err_code(h.start(prepared, ARENA))).to_equal(code(TraceFailureV1.BackendFailure))
+    expect(h.install_count()).to_equal(1)
+    expect(xray_harness_partially_on_functions_v1(h)).to_equal([])
+    expect(h.state_code()).to_equal(XRAY_LLVM_STATE_IDLE_V1)
+    h.clear_faults()
+    val session = start_selected(h, [1], ARENA)
+    expect(xray_harness_on_functions_v1(h)).to_equal([1])
+    expect(h.request_stop(session)).to_equal(Ok(TraceSessionStateV1.Drained))
+
+fn sc_config_sdn_round_trip(h: XrayBackendHarnessV1):
+    val parsed = trace_config_parse_sdn_v1(config_payload(h)).unwrap()
+    expect(parsed.backend).to_equal(h.backend())
+    expect(parsed.abi_profile).to_equal(h.abi_profile())
+    expect(parsed.consistency).to_equal(TraceConsistencyV1.RawEdges)
+    expect(parsed.patch_mode).to_equal(TracePatchModeV1.Quiescent)
+    # log-only mask (entry, exit) and profile-capable mask (entry, exit, tail_exit) are both admitted
+    val log_only = trace_config_parse_sdn_v1(config_payload(h).replace("[entry, exit, tail_exit]", "[entry, exit]")).unwrap()
+    expect(log_only.event_mask).to_equal(3u64)
+    expect(err_code(h.prepare(log_only, xray_harness_selection_v1(h, [1])))).to_equal(0)
+
+# ---------------------------------------------------------------------------
+# One describe per backend; the bodies are the same functions.
+# ---------------------------------------------------------------------------
+describe "XRay backend differential IN — llvm":
+    it "resolves build routes and refuses non-Linux-ELF targets":
+        sc_routes(xray_llvm_harness_v1())
+    it "rejects every invalid prepare without touching a sled":
+        sc_prepare_rejections(xray_llvm_harness_v1())
+    it "runs the V1 lifecycle with generation-bearing handles":
+        sc_lifecycle_and_handles(xray_llvm_harness_v1())
+    it "enables, disables and reselects at runtime":
+        sc_runtime_enable_disable(xray_llvm_harness_v1())
+    it "log mode: records raw edges only while enabled, in order":
+        sc_log_mode(xray_llvm_harness_v1())
+    it "profile mode: folds the same edges into calls and timing":
+        sc_profile_mode(xray_llvm_harness_v1())
+    it "aspect dynload: config + pointcuts select functions, never-list honoured":
+        sc_aspect_dynload_selection(xray_llvm_harness_v1())
+    it "PATCH-02: a patch fault rolls back and closes admission":
+        sc_patch_failure_rolls_back(xray_llvm_harness_v1())
+    it "PATCH-02: an unpatch fault leaves Faulted until recover":
+        sc_unpatch_failure_faults_closed(xray_llvm_harness_v1())
+    it "a handler install fault patches nothing":
+        sc_install_failure_patches_nothing(xray_llvm_harness_v1())
+    it "SDN config round-trips for log and profile masks":
+        sc_config_sdn_round_trip(xray_llvm_harness_v1())
+
+describe "XRay backend differential IN — simple-aarch64":
+    it "resolves build routes and refuses non-Linux-ELF targets":
+        sc_routes(xray_simple_aarch64_harness_v1())
+    it "rejects every invalid prepare without touching a sled":
+        sc_prepare_rejections(xray_simple_aarch64_harness_v1())
+    it "runs the V1 lifecycle with generation-bearing handles":
+        sc_lifecycle_and_handles(xray_simple_aarch64_harness_v1())
+    it "enables, disables and reselects at runtime":
+        sc_runtime_enable_disable(xray_simple_aarch64_harness_v1())
+    it "log mode: records raw edges only while enabled, in order":
+        sc_log_mode(xray_simple_aarch64_harness_v1())
+    it "profile mode: folds the same edges into calls and timing":
+        sc_profile_mode(xray_simple_aarch64_harness_v1())
+    it "aspect dynload: config + pointcuts select functions, never-list honoured":
+        sc_aspect_dynload_selection(xray_simple_aarch64_harness_v1())
+    it "PATCH-02: a patch fault rolls back and closes admission":
+        sc_patch_failure_rolls_back(xray_simple_aarch64_harness_v1())
+    it "PATCH-02: an unpatch fault leaves Faulted until recover":
+        sc_unpatch_failure_faults_closed(xray_simple_aarch64_harness_v1())
+    it "a handler install fault patches nothing":
+        sc_install_failure_patches_nothing(xray_simple_aarch64_harness_v1())
+    it "SDN config round-trips for log and profile masks":
+        sc_config_sdn_round_trip(xray_simple_aarch64_harness_v1())
+
+describe "XRay backend differential IN — simple-x86_64":
+    it "resolves build routes and refuses non-Linux-ELF targets":
+        sc_routes(xray_simple_x86_64_harness_v1())
+    it "rejects every invalid prepare without touching a sled":
+        sc_prepare_rejections(xray_simple_x86_64_harness_v1())
+    it "runs the V1 lifecycle with generation-bearing handles":
+        sc_lifecycle_and_handles(xray_simple_x86_64_harness_v1())
+    it "enables, disables and reselects at runtime":
+        sc_runtime_enable_disable(xray_simple_x86_64_harness_v1())
+    it "log mode: records raw edges only while enabled, in order":
+        sc_log_mode(xray_simple_x86_64_harness_v1())
+    it "profile mode: folds the same edges into calls and timing":
+        sc_profile_mode(xray_simple_x86_64_harness_v1())
+    it "aspect dynload: config + pointcuts select functions, never-list honoured":
+        sc_aspect_dynload_selection(xray_simple_x86_64_harness_v1())
+    it "PATCH-02: a patch fault rolls back and closes admission":
+        sc_patch_failure_rolls_back(xray_simple_x86_64_harness_v1())
+    it "PATCH-02: an unpatch fault leaves Faulted until recover":
+        sc_unpatch_failure_faults_closed(xray_simple_x86_64_harness_v1())
+    it "a handler install fault patches nothing":
+        sc_install_failure_patches_nothing(xray_simple_x86_64_harness_v1())
+    it "SDN config round-trips for log and profile masks":
+        sc_config_sdn_round_trip(xray_simple_x86_64_harness_v1())
