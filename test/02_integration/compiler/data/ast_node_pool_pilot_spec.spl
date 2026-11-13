@@ -30,7 +30,7 @@ from a fresh generation: regenerate it, never hand-edit it.
 use std.spec.*
 use std.nogc_sync_mut.io.file_ops.{file_read}
 use std.nogc_sync_mut.tooling.easy_fix.accessor_rewrite.{apply_accessor_fixes}
-use compiler.core.ast.{expr_binary, expr_int_lit, expr_get_int}
+use compiler.core.ast.{expr_binary, expr_int_lit, expr_get_int, expr_get_left}
 use compiler.frontend.generated.binary_expr_view.*
 use compiler.frontend.node_pool_pilot.*
 use app.compiler_schema.node_view_gen.{node_view_generate_text, node_view_generate_with_source_text, NODE_VIEW_SCHEMA_PATH}
@@ -62,8 +62,10 @@ describe "AST node pool pilot":
         val columns = binary_expr_columns_v1(inputs.nodes, inputs.spans, inputs.lefts, inputs.ops).unwrap()
         val rows = binary_expr_rows_v1(inputs.nodes, inputs.spans, inputs.lefts, inputs.ops).unwrap()
         var op_column = BinaryExprOpColumn.create()
+        var left_store = BinaryExprLeftStore.create()
         for i in 0..inputs.nodes.len():
             expect(op_column.set(inputs.nodes[i], inputs.ops[i]).is_ok()).to_equal(true)
+            left_store.set(inputs.nodes[i], inputs.lefts[i])
         # @capture(exec): attribute values per storage
         step("Verify the generated view over the pool, the columns and the rows all return the built values")
         for i in 0..inputs.nodes.len():
@@ -72,19 +74,31 @@ describe "AST node pool pilot":
             expect(view.source_span()).to_equal(inputs.spans[i])
             expect(columns.source_span(i)).to_equal(inputs.spans[i])
             expect(rows.source_span(node).unwrap()).to_equal(inputs.spans[i])
-            expect(view.left()).to_equal(inputs.lefts[i])
+            # `left` is selected as a sparse hash store (non-Option branch) and `op`
+            # as a column by the committed SDN rules: each generated store answers
+            # exactly what the AST pool owner accessor answers.
+            expect(left_store.get(node).unwrap()).to_equal(expr_get_left(node))
+            expect(left_store.get(node).unwrap()).to_equal(inputs.lefts[i])
             expect(columns.left(i)).to_equal(inputs.lefts[i])
             expect(rows.left(node).unwrap()).to_equal(inputs.lefts[i])
-            # `op` is selected as a column by the committed SDN rule: the generated
-            # column answers exactly what the AST pool owner accessor answers.
             expect(op_column.get(node).unwrap()).to_equal(expr_get_int(node))
             expect(op_column.get(node).unwrap()).to_equal(inputs.ops[i])
             expect(columns.op(i)).to_equal(inputs.ops[i])
             expect(rows.op(node).unwrap()).to_equal(inputs.ops[i])
         expect(op_column.len()).to_equal(2)  # oracle: two nodes were stored
-        step("Verify a missing row, an unset column slot and a mismatched column fail instead of reading zero")
+        expect(left_store.len()).to_equal(2)
+        step("Verify overwriting a stored attribute replaces the value without growing the store")
+        expect(op_column.set(inputs.nodes[0], 99).is_ok()).to_equal(true)
+        left_store.set(inputs.nodes[0], 77)
+        expect(op_column.get(inputs.nodes[0]).unwrap()).to_equal(99)
+        expect(left_store.get(inputs.nodes[0]).unwrap()).to_equal(77)
+        expect(op_column.len()).to_equal(2)  # oracle: overwrite, not a new slot
+        expect(left_store.len()).to_equal(2)
+        expect(op_column.get(inputs.nodes[1]).unwrap()).to_equal(inputs.ops[1])  # oracle: the other node is untouched
+        step("Verify a missing row, an unset column slot, an absent hash entry and a mismatched column fail instead of reading zero")
         expect("missing_row_err:{rows.op(999999).is_err()}").to_equal("missing_row_err:true")
         expect("unset_slot_err:{op_column.get(999999).is_err()}").to_equal("unset_slot_err:true")
+        expect("absent_entry_err:{left_store.get(999999).is_err()}").to_equal("absent_entry_err:true")
         expect("negative_node_err:{op_column.set(-1, 7).is_err()}").to_equal("negative_node_err:true")
         expect("short_column_err:{binary_expr_columns_v1(inputs.nodes, [201], inputs.lefts, inputs.ops).is_err()}").to_equal("short_column_err:true")
 
@@ -171,21 +185,31 @@ describe "AST node pool pilot":
         expect(tagged.contains("class BinaryExprLeftStore:")).to_equal(false)
         expect(tagged).to_contain("    fn left() -> i64:\n        expr_get_left(self.node)")
         expect(tagged.contains("fn op() -> i64")).to_equal(false)
-        step("Verify an SDN site row overrides the class tag for one field and the schema digest does not move")
+        step("Verify a more specific SDN site hint refines the class tag (a hint) for one field; the schema digest stays, the physical plan digest moves")
         val sdn_left = bindings + "data_policy:\n    rules:\n        left_sparse:\n            site: \"compiler.ast.BinaryExprView.left\"\n            layout: \"sparse_hash\"\n"
         val switched = node_view_generate_with_source_text(sdn_left, "views.sdn", spl, "src/compiler/10.frontend/pilot_decl.spl").unwrap()
         expect(switched).to_contain("left: i64 required -> sparse_hash BinaryExprLeftStore (sdn:views.sdn:")
         expect(switched).to_contain("class BinaryExprLeftStore:")
+        expect(switched).to_contain("    fn get(node: i64) -> Result<i64, text>:")
         expect(switched.contains("fn left() -> i64")).to_equal(false)
         val digest_tagged = tagged.split("\n")[3]
         expect(digest_tagged).to_contain("schema_digest ")
         expect(switched.split("\n")[3]).to_equal(digest_tagged)
-        step("Verify a field tag and a disagreeing SDN pin are refused with both locations, and an unknown token is refused")
+        expect(tagged.split("\n")[4]).to_contain("physical_plan_digest ")
+        expect(switched.split("\n")[4] == tagged.split("\n")[4]).to_equal(false)
+        step("Verify a field tag and a disagreeing SDN pin, at the field or tree-wide, are refused with both locations, and an unknown token is refused")
         val sdn_pin = bindings + "data_policy:\n    rules:\n        op_hash:\n            site: \"compiler.ast.BinaryExprView.op\"\n            layout: \"sparse_hash\"\n            pin: true\n"
         val conflict = node_view_generate_with_source_text(sdn_pin, "views.sdn", spl, "src/compiler/10.frontend/pilot_decl.spl")
         expect(conflict.is_err()).to_equal(true)
         expect(conflict.unwrap_err()).to_contain("pilot_decl.spl:7")
         expect(conflict.unwrap_err()).to_contain("views.sdn:")
+        val tree_pin = bindings + "data_policy:\n    rules:\n        ast_hash:\n            module: \"compiler.ast\"\n            layout: \"sparse_hash\"\n            pin: true\n"
+        val wide_conflict = node_view_generate_with_source_text(tree_pin, "views.sdn", spl, "src/compiler/10.frontend/pilot_decl.spl")
+        expect(wide_conflict.unwrap_err()).to_contain("pilot_decl.spl:7")  # oracle: the op field pin (column) vs the tree-wide SDN pin
+        val tree_hint = bindings + "data_policy:\n    rules:\n        ast_hash:\n            module: \"compiler.ast\"\n            layout: \"sparse_hash\"\n"
+        val tree_hinted = node_view_generate_with_source_text(tree_hint, "views.sdn", spl, "src/compiler/10.frontend/pilot_decl.spl").unwrap()
+        expect(tree_hinted).to_contain("op: i64 required -> column BinaryExprOpColumn (spl:")  # oracle: a tree-wide hint never outranks a field pin
+        expect(tree_hinted).to_contain("left: i64 required -> direct expr_get_left (spl:")  # oracle: the class hint is more specific than the tree hint
         val unknown = node_view_generate_with_source_text(bindings, "views.sdn", spl.replace("\"column\"", "\"heap\""), "src/compiler/10.frontend/pilot_decl.spl")
         expect(unknown.is_err()).to_equal(true)
         expect(unknown.unwrap_err()).to_contain("heap")

@@ -8,10 +8,13 @@
 # `node_views`, which binds each attribute to an existing owner accessor
 # (`accessors`) and/or a generated store class name (`stores`). The logical
 # view may instead (or additionally) be declared in SPL as a `@node_tree`
-# class; `@attr_storage("...")` on the class or on a field is a source pin.
-# Which binding an attribute uses is decided by the W1 storage resolver
-# (data_attr_storage_resolve_v1): field tag > SDN site row > class tag > SDN
-# type/module/project rows > built-in default `direct`. The mechanism changes
+# class; `@attr_storage("...")` on a field is a non-overridable source pin and
+# on the class a source hint (the default for its fields).
+# Which binding an attribute uses is decided by the one W1 rule resolver
+# (data_attr_storage_resolve_v1 -> data_policy_resolve_rules_v1, plan 8.4): a
+# field pin binds and a disagreeing SDN pin is a diagnostic; otherwise SDN pins,
+# then the most specific hint (SDN refines SPL at equal specificity), then the
+# built-in default `direct`. The mechanism changes
 # only where a value is stored, never the value: every store answers exactly
 # the owner's value or fails closed when the entry is absent.
 #   direct       method on the view calling the owner accessor
@@ -25,6 +28,7 @@
 # Runs with the existing admitted compiler; the output needs no new feature.
 
 use std.common.sdn.parser.{parse}
+use std.common.crypto.sha256.{sha256_text}
 use std.common.sdn.value.{SdnValue}
 use std.nogc_sync_mut.io.file_ops.{file_read, file_write}
 use compiler.common.data.data_schema_contracts.*
@@ -127,8 +131,8 @@ fn nv_storage_known(token: text) -> bool:
 
 # ---------------------------------------------------------------------------
 # SPL tag reader: a `@node_tree("tree")` class is a logical view declaration;
-# `@attr_storage("token")` on the class pins the view's default mechanism and
-# on a field pins that attribute. Both become non-overridable source pins for
+# `@attr_storage("token")` on the class is a source HINT (the default for its
+# fields); on a field it is a non-overridable source PIN. Both feed
 # the W1 storage resolver, with the class/field line as provenance.
 # ---------------------------------------------------------------------------
 struct NodeTreeSourceDeclsV1:
@@ -166,9 +170,9 @@ fn nv_type_ref_of(type_text: text) -> DataTypeRefV1:
         return data_type_ref_v1(t.substring(0, open).trim(), args)
     data_type_ref_v1(t, [])
 
-fn nv_storage_rule(subject: text, specificity: DataRuleSpecificityV1, token: text,
+fn nv_storage_rule(subject: text, specificity: DataRuleSpecificityV1, strength: DataRuleStrengthV1, token: text,
                    at: DataDeclProvenanceV1) -> DataPolicyRuleV1:
-    data_policy_rule_v1(DataPolicyKindV1.Layout, subject, specificity, DataRuleStrengthV1.Pin, token, false, at)
+    data_policy_rule_v1(DataPolicyKindV1.Layout, subject, specificity, strength, token, false, at)
 
 fn node_tree_decls_from_spl_v1(source: text, path: text, owner: text) -> Result<NodeTreeSourceDeclsV1, text>:
     var decls: [DataAttrDeclV1] = []
@@ -206,7 +210,7 @@ fn node_tree_decls_from_spl_v1(source: text, path: text, owner: text) -> Result<
     val class_at = data_decl_provenance_v1(DataDeclOriginV1.Spl, path, nv_line_of(lines, "class " + class_name), owner)
     for ann in record.annotations:
         match nv_annotation_arg(ann, "attr_storage"):
-            case Some(token): rules.push(nv_storage_rule(view, DataRuleSpecificityV1.OwningType, token, class_at))
+            case Some(token): rules.push(nv_storage_rule(view, DataRuleSpecificityV1.OwningType, DataRuleStrengthV1.Hint, token, class_at))
             case None: pass
     for field in record.fields:
         val at = data_decl_provenance_v1(DataDeclOriginV1.Spl, path, nv_line_of(lines, field.name + ":"), owner)
@@ -219,13 +223,24 @@ fn node_tree_decls_from_spl_v1(source: text, path: text, owner: text) -> Result<
         decls.push(data_attr_decl_v1(tree, view, field.name, type_ref, requiredness, field.default_text, at))
         for ann in field.leading_annotations:
             match nv_annotation_arg(ann, "attr_storage"):
-                case Some(token): rules.push(nv_storage_rule(view + "." + field.name, DataRuleSpecificityV1.ExactSite, token, at))
+                case Some(token): rules.push(nv_storage_rule(view + "." + field.name, DataRuleSpecificityV1.ExactSite, DataRuleStrengthV1.Pin, token, at))
                 case None: pass
     Ok(NodeTreeSourceDeclsV1(decls: decls, rules: rules))
 
 # ---------------------------------------------------------------------------
 # Generation
 # ---------------------------------------------------------------------------
+# PhysicalPlanDigest (plan 8.5): the concrete mechanism and target per
+# attribute, kept apart from schema_digest so a storage switch is visible to
+# freshness and caches without changing the logical schema identity.
+val NODE_VIEW_PHYSICAL_PLAN_DOMAIN: text = "simple.data-physical-plan/v1"
+
+fn nv_physical_plan_digest(tree: text, surface: DataSchemaSurfaceV1, mechanisms: [text], targets: [text]) -> text:
+    var canonical = NODE_VIEW_PHYSICAL_PLAN_DOMAIN + "\ntree=" + tree + "\nschema=" + surface.schema_digest + "\n"
+    for i in 0..surface.attrs.len():
+        canonical = canonical + "attr={surface.attrs[i].id.ordinal}|{surface.attrs[i].name}|{mechanisms[i]}|{targets[i]}\n"
+    sha256_text(canonical)
+
 fn nv_why(choice: DataPolicyChoiceV1) -> text:
     if choice.provenances.len() == 0: "default" else: data_decl_provenance_text_v1(choice.provenances[0])
 
@@ -314,6 +329,7 @@ fn node_view_generate_with_source_text(schema_text: text, origin: text, spl_text
     lines.push("# @semantic_artifact node_tree {tree} view {class_name}")
     lines.push("# origin: {origin}")
     lines.push("# schema_digest {surface.schema_digest}")
+    lines.push("# physical_plan_digest {nv_physical_plan_digest(tree, surface, mechanisms, targets)}")
     for i in 0..surface.attrs.len():
         val a = surface.attrs[i]
         lines.push("# AttrId {tree}#{a.id.ordinal} {a.name}: {a.type_canonical} {nv_requiredness(a.requiredness)} -> {mechanisms[i]} {targets[i]} ({whys[i]})")
