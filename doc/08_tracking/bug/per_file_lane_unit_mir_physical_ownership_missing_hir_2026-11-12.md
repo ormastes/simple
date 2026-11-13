@@ -157,3 +157,15 @@ Also observed: under a 12G cgroup the pool refuses ("need >= 2", 9 GB per
 worker). `file_worker_pool_refusal_v1` does not apply the guarded >= 2 floor
 (`shard_threads_guarded_floor_v1`). The probes needed
 `SIMPLE_{HIR,MIR}_SHARD_WORKER_KB=2000000`.
+
+Review follow-ups (LAND-WITH-NITS, both fail closed today):
+- Entry-closure alias rows (`driver_source_pipeline_loading.spl:1253`, which
+  takes `module_name` from the import spelling) are probably the next
+  blocker. In a unit that does not hold the file, the placeholder
+  `canonical(logical)` differs from the path-derived `HirModule.name` that
+  another unit uses. The result is "conflicting owners" or a ledger
+  row-count refusal. Candidate fix: name the placeholder by the path-derived
+  module name.
+- Placeholders are safe only because the only-paths skip runs, and that skip
+  requires an active MIR shard queue. Tie the disposition to the queue being
+  active.
