@@ -25,10 +25,15 @@ fn owner_int(value: i64) -> MirOperand:
     MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(value), MirType.i64()))
 
 fn owner_module(local_definition: bool, caller_name: text, callee_name: text) -> MirModule:
+    owner_module_with_origin(local_definition, caller_name, callee_name, MirCallOrigin.Source)
+
+# Runtime aliasing applies only to Runtime-authority callees (22f021ced66):
+# a Source or Foreign operand keeps its declared symbol.
+fn owner_module_with_origin(local_definition: bool, caller_name: text, callee_name: text, origin: MirCallOrigin) -> MirModule:
     val result = LocalId(id: 0)
     val callee_signature = MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)
     val callee = MirOperand(kind: MirOperandKind.Const(MirConstValue.Str(callee_name),
-        MirType(kind: MirTypeKind.FuncPtr(callee_signature))))
+        MirType(kind: MirTypeKind.FuncPtr(callee_signature))), call_origin: origin)
     val call = MirInst(kind: MirInstKind.Call(Some(result), callee, [owner_int(7)]), span: nil)
     val temp = MirLocal(id: result, name: Some("result"), type_: MirType.i64(), kind: LocalKind.Temp, is_ghost: false)
     val caller = owner_function(2, caller_name, [], [temp], [call], mir_operand_copy(result))
@@ -65,16 +70,24 @@ describe "LLVM env_get source definition ownership":
                     expect(owner_calls(output, "rt_env_get")).to_equal(0)
 
     it "keeps the nonlocal one-word alias on the boxed runtime owner":
-        step("A bare imported alias has no MIR body and must still use rt_env_get_value")
+        step("A bodyless runtime-authority env_get alias must still use rt_env_get_value")
         val output = MirToLlvm.create("test.env_owner", CodegenTarget.X86_64, nil).translate_module_with_entry(
-            owner_module(false, "aaa_caller", "env_get"), true)
+            owner_module_with_origin(false, "aaa_caller", "env_get", MirCallOrigin.Runtime), true)
         expect(owner_calls(output, "rt_env_get_value")).to_equal(1)
         expect(owner_calls(output, "env_get")).to_equal(0)
+        expect(owner_calls(output, "rt_env_get")).to_equal(0)
+
+    it "never rewrites a source-authority env_get onto the runtime owners":
+        step("An importer's Source env_get call keeps its declared callee")
+        val output = MirToLlvm.create("test.env_owner", CodegenTarget.X86_64, nil).translate_module_with_entry(
+            owner_module(false, "aaa_caller", "env_get"), true)
+        expect(owner_calls(output, "env_get")).to_equal(1)
+        expect(owner_calls(output, "rt_env_get_value")).to_equal(0)
         expect(owner_calls(output, "rt_env_get")).to_equal(0)
 
     it "preserves an explicit runtime call even beside a local alias collision":
         step("Local env_get ownership must not intercept explicit rt_env_get calls")
         val output = MirToLlvm.create("test.env_owner", CodegenTarget.X86_64, nil).translate_module_with_entry(
-            owner_module(true, "aaa_caller", "rt_env_get"), true)
+            owner_module_with_origin(true, "aaa_caller", "rt_env_get", MirCallOrigin.Runtime), true)
         expect(owner_calls(output, "rt_env_get_value")).to_equal(1)
         expect(owner_calls(output, "env_get")).to_equal(0)
