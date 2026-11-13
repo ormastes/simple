@@ -445,6 +445,14 @@ pub fn compile_module_with_backend_scoped_v1(
     Err(compileerror_backend_error(BackendKind.Compiler,
         "codegen-scope-promotion-failed (object not written)"))
 
+# Identity with a declared Result parameter. `Codegen.compile_module` is a
+# trait-object method call whose return type does not reach the caller's local
+# under the self-hosted compiler (the local's own annotation is discarded
+# with it -- probe-verified 2026-11-14, stage-3 cluster), so the call is
+# routed through this typed-param boundary.
+fn _as_codegen_compile_result_v1(result: Result<CodegenOutput, CompileError>) -> Result<CodegenOutput, CompileError>:
+    result
+
 pub fn compile_module_with_backend_target_cpu_storage_bindings(
     backend_name: text,
     module: MirModule,
@@ -586,26 +594,28 @@ pub fn compile_module_with_backend_target_cpu_storage_bindings(
             print "[backend-helper] direct llvm"
         if (env_get_opt("SIMPLE_BOOTSTRAP") ?? "") == "1":
             return llvm_compile_module_direct_compiled(options, backend_module, retained_llvm_config)
-        val result = llvm_compile_module_direct(options, backend_module, retained_llvm_config)
+        # @workaround bug=mir_bare_ok_imported_trait_method_return_2026_10_27 reason=typed local plus qualified arms; bare Ok/Err on a call subject is ambiguous in the self-hosted lowering
+        val result: Result<CodegenOutput, CompileError> = llvm_compile_module_direct(options, backend_module, retained_llvm_config)
         match result:
-            case Ok(output):
+            case Result.Ok(output):
                 return Ok(codegen_output_to_compiled_module(output))
-            case Err(err):
+            case Result.Err(err):
                 return Err(err)
 
     if kind == BackendKind.Cranelift:
-        val result = cranelift_compile_module_via_k1_v1(
+        # @workaround bug=mir_bare_ok_imported_trait_method_return_2026_10_27 reason=same typed-local + qualified-arms idiom as the llvm branch above
+        val result: Result<CodegenOutput, CompileError> = cranelift_compile_module_via_k1_v1(
             options, backend_module, retained_cranelift_triple,
             retained_cranelift_cpu_v2, retained_cranelift_features_v2)
         match result:
-            case Ok(output):
+            case Result.Ok(output):
                 return Ok(codegen_output_to_compiled_module(output))
-            case Err(err):
+            case Result.Err(err):
                 return Err(err)
 
     val codegen = CodegenFactory.create(kind, options)
-    # @workaround bug=mir_bare_ok_imported_trait_method_return_2026_10_27 reason=stage2 lacks #4998; typed local disambiguates Ok/Err
-    val compiled: Result<CodegenOutput, CompileError> = codegen.compile_module(backend_module)
+    # @workaround bug=mir_bare_ok_imported_trait_method_return_2026_10_27 reason=trait-object call return does not reach the local (typed local included); route through the typed-param identity above
+    val compiled = _as_codegen_compile_result_v1(codegen.compile_module(backend_module))
     match compiled:
         # @workaround bug=enumowner_mir_2026-10-31 reason=bare Ok/Err arm ambiguous in pinned stage2 over method-call subject; qualify with Result
         case Result.Ok(output):

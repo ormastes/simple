@@ -153,6 +153,15 @@ pub struct Lowerer {
     /// a literal non-bool argument at a `bool` parameter is rejected at
     /// lowering so the JIT lane cannot re-tag it into a corrupt value.
     pub(super) fn_param_bool: HashMap<String, Vec<bool>>,
+    /// Per-parameter declared simple type name (`Kind` or `Kind?` -> "Kind"),
+    /// parallel to `fn_param_names`. Lets the enum-slot admission check
+    /// (`reject_callable_for_enum_slot`) see a callee whose HIR value type is
+    /// not yet a `Function` (declared after the caller).
+    pub(super) fn_param_type_names: HashMap<String, Vec<Option<String>>>,
+    /// Same as `fn_param_type_names` for class/struct methods, keyed
+    /// `Owner.method`, `self` excluded. Consumed only for a receiver whose
+    /// type is declared in the file being lowered.
+    pub(super) method_param_type_names: HashMap<String, Vec<Option<String>>>,
     /// Whole-program map of free-function name -> declared return type,
     /// built by `build_import_map`. Functions reached via the global import map
     /// (called without a `use` import) otherwise have no return-type info, so
@@ -377,6 +386,8 @@ impl Lowerer {
             fn_param_names: HashMap::new(),
             imported_fn_param_names: HashMap::new(),
             fn_param_bool: HashMap::new(),
+            fn_param_type_names: HashMap::new(),
+            method_param_type_names: HashMap::new(),
             global_fn_return_types: None,
             global_method_param_defaults: None,
             qualified_import_functions: None,
@@ -462,6 +473,8 @@ impl Lowerer {
             fn_param_names: HashMap::new(),
             imported_fn_param_names: HashMap::new(),
             fn_param_bool: HashMap::new(),
+            fn_param_type_names: HashMap::new(),
+            method_param_type_names: HashMap::new(),
             global_fn_return_types: None,
             global_method_param_defaults: None,
             qualified_import_functions: None,
@@ -570,6 +583,8 @@ impl Lowerer {
             fn_param_names: HashMap::new(),
             imported_fn_param_names: HashMap::new(),
             fn_param_bool: HashMap::new(),
+            fn_param_type_names: HashMap::new(),
+            method_param_type_names: HashMap::new(),
             global_fn_return_types: None,
             global_method_param_defaults: None,
             qualified_import_functions: None,

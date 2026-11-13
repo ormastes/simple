@@ -515,6 +515,19 @@ pub(crate) fn exec_node(
                 if let Some(message) = crate::impl_duplicate_check::let_literal_mismatch(let_stmt) {
                     return Err(CompileError::semantic(message));
                 }
+                // A function/type value can never be an enum value: twin of
+                // the HIR typed-`val` check (reject_callable_for_enum_slot).
+                // Bug: match_on_callable_scrutinee_silently_takes_first_arm_2026-11-14
+                if let Some(e) =
+                    crate::interpreter::interpreter_call::reject_callable_for_enum_param(&value, type_annotation, enums)
+                {
+                    return Err(CompileError::semantic_with_context(
+                        format!("type mismatch: binding `{}` {}", get_var_name(&let_stmt.pattern), e),
+                        crate::error::ErrorContext::new()
+                            .with_code(crate::error::codes::TYPE_MISMATCH)
+                            .with_help("bind a variant of the enum; a function or type value can never be an enum value"),
+                    ));
+                }
                 // Validate and constrain value based on type annotation
                 let value = match type_annotation {
                     // `bool` locals take `.?` presence (see `coerce_to_declared_type`).

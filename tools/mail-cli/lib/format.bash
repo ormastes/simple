@@ -180,14 +180,21 @@ mail_format_parse_headers() {
   # Unfold multi-line headers (lines starting with whitespace are continuations)
   headers=$(echo "$headers" | sed -E -e ':a' -e 'N' -e '$!ba' -e 's/\n[[:space:]]+/ /g')
 
-  local from to subject date msg_id reply_to references
-  from=$(echo "$headers" | grep -i '^From:' | head -1 | sed 's/^[^:]*:[[:space:]]*//')
-  to=$(echo "$headers" | grep -i '^To:' | head -1 | sed 's/^[^:]*:[[:space:]]*//')
-  subject=$(echo "$headers" | grep -i '^Subject:' | head -1 | sed 's/^[^:]*:[[:space:]]*//')
-  date=$(echo "$headers" | grep -i '^Date:' | head -1 | sed 's/^[^:]*:[[:space:]]*//')
-  msg_id=$(echo "$headers" | grep -i '^Message-ID:' | head -1 | sed 's/^[^:]*:[[:space:]]*//')
-  reply_to=$(echo "$headers" | grep -i '^In-Reply-To:' | head -1 | sed 's/^[^:]*:[[:space:]]*//')
-  references=$(echo "$headers" | grep -i '^References:' | head -1 | sed 's/^[^:]*:[[:space:]]*//')
+  # Single in-shell pass: first occurrence of each header, no subprocesses.
+  local from="" to="" subject="" date="" msg_id="" reply_to="" references=""
+  local _hl _hk _hv _seen=" "
+  while IFS= read -r _hl; do
+    case "$_hl" in *:*) ;; *) continue ;; esac
+    _hk=${_hl%%:*}; _hk=${_hk,,}
+    _hv=${_hl#*:}; _hv=${_hv#"${_hv%%[![:space:]]*}"}
+    case "$_seen" in *" $_hk "*) continue ;; esac
+    case "$_hk" in
+      from) from=$_hv ;; to) to=$_hv ;; subject) subject=$_hv ;; date) date=$_hv ;;
+      message-id) msg_id=$_hv ;; in-reply-to) reply_to=$_hv ;; references) references=$_hv ;;
+      *) continue ;;
+    esac
+    _seen="$_seen$_hk "
+  done <<< "$headers"
 
   jq -n \
     --arg from "$from" \
