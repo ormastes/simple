@@ -936,7 +936,7 @@ impl MirLowering:
         existing method-resolution path, so a user method is never replaced
         by an integer compare on object handles."""
         val unary_shape = args.len() == 0 and (method == "abs" or method == "floor" or method == "ceil" or method == "round" or method == "sqrt")
-        val binary_shape = args.len() == 1 and (method == "min" or method == "max")
+        val binary_shape = (args.len() == 1 and (method == "min" or method == "max")) or (args.len() == 2 and method == "clamp")
         if not unary_shape and not binary_shape:
             return None
         val recv_kind = self.builtin_numeric_receiver_kind(receiver, recv)
@@ -954,6 +954,8 @@ impl MirLowering:
             return None
 
         if recv_kind == 3:
+            if method == "clamp":
+                return None
             var recv_f64 = recv
             var narrow_float = false
             match recv_type.kind:
@@ -1003,36 +1005,54 @@ impl MirLowering:
         # Integer receivers: floor/ceil/round are float-only.
         if method == "floor" or method == "ceil" or method == "round" or method == "sqrt":
             return None
-        if recv_kind == 2:
-            if method == "abs":
-                return Some(recv)
-            # An unsigned compare needs unsigned ordering; MIR Lt/Gt here is
-            # the signed form. Keep the loud failure rather than mis-order.
-            return None
+        val recv_unsigned = recv_kind == 2
+        if recv_unsigned and method == "abs":
+            return Some(recv)
 
-        # Validate the argument BEFORE any block is created, so a rejection
-        # leaves no half-built control flow behind.
-        var other_cast: LocalId = recv
-        if binary_shape:
-            val other_int = self.lower_expr(args[0].value)
-            var other_is_signed_int = false
+        # Validate every argument BEFORE any block is created, so a rejection
+        # leaves no half-built control flow behind. A signed receiver needs a
+        # signed integer argument; an unsigned receiver takes any integer
+        # (`u.max(8)`: the literal is i64). Arguments are cast to the receiver's
+        # MIR type, so unsigned operands make backends pick ult/ugt.
+        var int_args: [LocalId] = []
+        for arg in args:
+            val other_int = self.lower_expr(arg.value)
+            var other_matches = false
             if not self.local_hir_type_is_any(other_int) and not self.builtin_local_has_custom_owner(other_int):
-                if val other_hir = self.option_map_value_hir_type(other_int, args[0].span):
+                if val other_hir = self.option_map_value_hir_type(other_int, arg.span):
                     match other_hir.kind:
-                        case HirTypeKind.Int(_, other_signed): other_is_signed_int = other_signed
+                        case HirTypeKind.Int(_, other_signed): other_matches = recv_unsigned or other_signed
                         case _: ()
-            if not other_is_signed_int:
-                return Some(self.builtin_extra_fail_closed("unsupported in stage2: int.{method}(x) with an argument that is not a signed integer; convert both sides to one type first", Some(args[0].span)))
+            if not other_matches:
+                return Some(self.builtin_extra_fail_closed("unsupported in stage2: int.{method}(x) with an argument that is not a signed integer; convert both sides to one type first", Some(arg.span)))
             var b_cast = self.builder
-            other_cast = b_cast.emit_cast(mir_operand_copy(other_int), recv_type)
+            int_args = int_args.push(b_cast.emit_cast(mir_operand_copy(other_int), recv_type))
             self.builder = b_cast
 
+        var int_result: LocalId = recv
+        if method == "abs":
+            int_result = self.builtin_int_select(method, MirBinOp.Lt, recv, recv, recv_type, true)
+        elif method == "clamp":
+            val lower_bounded = self.builtin_int_select("clamp_lo", MirBinOp.Gt, recv, int_args[0], recv_type, false)
+            int_result = self.builtin_int_select("clamp_hi", MirBinOp.Lt, lower_bounded, int_args[1], recv_type, false)
+        else:
+            val pick_op = if method == "min": MirBinOp.Lt else: MirBinOp.Gt
+            int_result = self.builtin_int_select(method, pick_op, recv, int_args[0], recv_type, false)
+        if val recv_hir_type = self.find_local_hir_type(recv.id):
+            self.remember_local_hir_type(int_result.id, recv_hir_type, 0, 0)
+        else:
+            self.remember_local_hir_type(int_result.id, HirType(kind: HirTypeKind.Int(64, not recv_unsigned), span: receiver.span), 0, 0)
+        Some(int_result)
+
+    me builtin_int_select(label: text, pick_op: MirBinOp, recv: LocalId, other: LocalId, recv_type: MirType, negate: bool) -> LocalId:
+        """`other pick_op recv ? other : recv` as blocks `<label>_pick/_keep/_merge`.
+        With `negate`, computes abs: `recv < 0 ? 0 - recv : recv`."""
         var b_int = self.builder
         val int_result = b_int.new_local(None, recv_type, LocalKind.Var)
-        val pick_block = b_int.new_block(Some("{method}_pick"))
-        val keep_block = b_int.new_block(Some("{method}_keep"))
-        val merge_block = b_int.new_block(Some("{method}_merge"))
-        if method == "abs":
+        val pick_block = b_int.new_block(Some("{label}_pick"))
+        val keep_block = b_int.new_block(Some("{label}_keep"))
+        val merge_block = b_int.new_block(Some("{label}_merge"))
+        if negate:
             val abs_zero = b_int.new_temp(recv_type)
             b_int.emit_const(abs_zero, MirConstValue.Int(0), recv_type)
             val is_negative = b_int.emit_binop(MirBinOp.Lt, mir_operand_copy(recv), mir_operand_copy(abs_zero), MirType.bool())
@@ -1041,22 +1061,17 @@ impl MirLowering:
             val negated = b_int.emit_binop(MirBinOp.Sub, mir_operand_copy(abs_zero), mir_operand_copy(recv), recv_type)
             b_int.emit_copy(int_result, negated)
         else:
-            val pick_op = if method == "min": MirBinOp.Lt else: MirBinOp.Gt
-            val other_wins = b_int.emit_binop(pick_op, mir_operand_copy(other_cast), mir_operand_copy(recv), MirType.bool())
+            val other_wins = b_int.emit_binop(pick_op, mir_operand_copy(other), mir_operand_copy(recv), MirType.bool())
             b_int.terminate_if(mir_operand_copy(other_wins), pick_block, keep_block)
             b_int.switch_to_block(pick_block)
-            b_int.emit_copy(int_result, other_cast)
+            b_int.emit_copy(int_result, other)
         b_int.terminate_goto(merge_block)
         b_int.switch_to_block(keep_block)
         b_int.emit_copy(int_result, recv)
         b_int.terminate_goto(merge_block)
         b_int.switch_to_block(merge_block)
         self.builder = b_int
-        if val recv_hir_type = self.find_local_hir_type(recv.id):
-            self.remember_local_hir_type(int_result.id, recv_hir_type, 0, 0)
-        else:
-            self.remember_local_hir_type(int_result.id, HirType(kind: HirTypeKind.Int(64, true), span: receiver.span), 0, 0)
-        Some(int_result)
+        int_result
 
     me builtin_result_payload_mir(payload_hir: HirType) -> MirType?:
         """Decode proven scalar/text payloads or retain a nominal record's
