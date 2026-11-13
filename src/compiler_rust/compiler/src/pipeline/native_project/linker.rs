@@ -439,7 +439,13 @@ pub(super) const STAGE4_CORE_C_ARGV_PROVIDER_SYMBOLS: &[&str] = &[
 /// The sibling `else if is_msvc` branches keep `-Wl,/WHOLEARCHIVE:`: those run
 /// the GNU-style `clang` driver against an MSVC target, where `-Wl,` is right.
 fn clang_cl_whole_archive_arg(path: &Path) -> String {
-    format!("/WHOLEARCHIVE:{}", path.display())
+    // Plain spelling, never verbatim `\\?\`: verbatim paths survive a direct
+    // command-line spawn but are re-escaped into broken tokens when clang-cl
+    // expands a response file and forwards the arg to lld (measured
+    // 2026-11-13: lld received doubled backslashes and reported "could not
+    // open '\\\\?\\D:\\...'"). Every whole-archive path is a build-tree path
+    // well under MAX_PATH, so plain is safe here.
+    format!("/WHOLEARCHIVE:{}", external_tool_path(path).display())
 }
 
 /// lld-link options for the MSVC stub-fallback lane (SIMPLE_NO_STUB_FALLBACK
@@ -2427,8 +2433,17 @@ int main(int argc, char** argv) {
                                 // MAX_PATH for "\\?\" paths, the @file keeps
                                 // the args off the command line, and @file
                                 // expands inline so link ORDER is unchanged.
+                                // clang-cl's response-file tokenizer does NOT
+                                // split tokens on newlines: an interior '\n'
+                                // is attached to the token (measured
+                                // 2026-11-13 with clang-cl 23.1.1:
+                                // newline-separated `/WHOLEARCHIVE:...`
+                                // lines die with "no such file or
+                                // directory: '/WHOLEARCHIVE:...'", while the
+                                // identical space-separated single line
+                                // links fine). Space-join the whole rsp.
                                 let mut owner_rsp_body = String::new();
-                                for member in &members {
+                                for (index, member) in members.iter().enumerate() {
                                     let obj = extract_dir.join(member);
                                     // llvm-ar cannot materialize a member whose
                                     // baked-in name is not a relative path (the
@@ -2444,9 +2459,25 @@ int main(int argc, char** argv) {
                                     if !obj.is_file() {
                                         return Err(format!("owner member {} was not extracted from {}", member, archive_abs.display()));
                                     }
-                                    owner_rsp_body.push_str(&quote_cl_response_arg(&obj.display().to_string()));
-                                    owner_rsp_body.push('\n');
+                                    // Flat hard link under a short plain name.
+                                    // Verbatim `\\?\` spellings and deep member
+                                    // relpaths both break inside a clang
+                                    // response file: clang re-escapes verbatim
+                                    // paths when forwarding to lld (measured
+                                    // 2026-11-13), and plain member relpaths
+                                    // can exceed MAX_PATH on deep worktrees.
+                                    // owner_NNNN.o under extract_dir is short
+                                    // and plain; hard-linking stays on volume.
+                                    let flat = extract_dir.join(format!("owner_{index:04}.o"));
+                                    std::fs::hard_link(&obj, &flat).map_err(|e| {
+                                        format!("hard link {} -> {}: {e}", obj.display(), flat.display())
+                                    })?;
+                                    owner_rsp_body.push_str(&quote_cl_response_arg(
+                                        &external_tool_path(&flat).display().to_string(),
+                                    ));
+                                    owner_rsp_body.push(' ');
                                 }
+                                owner_rsp_body.push('\n');
                                 let owners_rsp = temp_dir.join("native_all_owner_members.rsp");
                                 std::fs::write(&owners_rsp, owner_rsp_body)
                                     .map_err(|e| format!("write {}: {e}", owners_rsp.display()))?;
@@ -2943,9 +2974,17 @@ int main(int argc, char** argv) {
                 let rsp_path = temp_dir.join("clang_cl_link_full.rsp");
                 let mut body = String::new();
                 for arg in &args {
-                    body.push_str(&quote_cl_response_arg(&arg.to_string_lossy()));
-                    body.push('\n');
+                    // Plain-spell every arg: verbatim `\\?\` paths are
+                    // re-escaped into broken tokens when clang-cl expands a
+                    // response file and forwards to lld (measured
+                    // 2026-11-13). Link inputs and /WHOLEARCHIVE archives
+                    // are build-tree paths well under MAX_PATH once the
+                    // verbatim prefix is stripped.
+                    let plain = external_tool_path(std::path::Path::new(arg));
+                    body.push_str(&quote_cl_response_arg(&plain.to_string_lossy()));
+                    body.push(' ');
                 }
+                body.push('\n');
                 std::fs::write(&rsp_path, body)
                     .map_err(|e| format!("write {}: {e}", rsp_path.display()))?;
                 let mut short_cmd = std::process::Command::new(final_cmd.get_program());
