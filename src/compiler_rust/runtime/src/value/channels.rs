@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use super::core::RuntimeValue;
 use super::heap::{register_heap_ptr, unregister_heap_ptr_checked, with_typed_ptr, HeapHeader, HeapObjectType};
-use super::transfer::{RuntimeTransferPacket, TransferDomain};
+use super::transfer::{RuntimeEncodedCopy, RuntimeTransferPacket, TransferDomain};
 
 const DEFAULT_CHANNEL_CAPACITY: usize = 256;
 
@@ -18,9 +18,42 @@ const DEFAULT_CHANNEL_CAPACITY: usize = 256;
 // Channel Types
 // ============================================================================
 
+/// One admitted channel message.
+///
+/// Inline scalars travel as a 48-byte inline packet; heap leaves (text,
+/// boxed numeric scalars) travel as a schema-checked encoded copy so no
+/// process-local heap address ever crosses the thread boundary. Refused
+/// or malformed packets never enter the queue — send fails closed with 0.
+enum RuntimeChannelPacket {
+    Inline(RuntimeTransferPacket),
+    Encoded(RuntimeEncodedCopy),
+}
+
+impl RuntimeChannelPacket {
+    /// Decode this packet for a receiver in `target` domain.
+    fn into_runtime_value_for_target(self, target: TransferDomain) -> Option<RuntimeValue> {
+        match self {
+            RuntimeChannelPacket::Inline(packet) => packet.runtime_value_for_target(target),
+            RuntimeChannelPacket::Encoded(copy) => copy.materialize_for_target(target),
+        }
+    }
+}
+
+/// Admit one value into a channel packet: inline scalars first, then
+/// encoded heap leaves. Returns `None` for non-transferable values
+/// (mutable containers, unknown heap identity), so the send fails closed.
+fn channel_packet_for_value(value: RuntimeValue) -> Option<RuntimeChannelPacket> {
+    RuntimeTransferPacket::inline_copy(value, TransferDomain::Parent, TransferDomain::Thread)
+        .map(RuntimeChannelPacket::Inline)
+        .or_else(|| {
+            RuntimeEncodedCopy::from_value(value, TransferDomain::Parent, TransferDomain::Thread)
+                .map(RuntimeChannelPacket::Encoded)
+        })
+}
+
 struct RuntimeChannelState {
-    sender: Mutex<Option<SyncSender<RuntimeTransferPacket>>>,
-    receiver: Mutex<Receiver<RuntimeTransferPacket>>,
+    sender: Mutex<Option<SyncSender<RuntimeChannelPacket>>>,
+    receiver: Mutex<Receiver<RuntimeChannelPacket>>,
     closed: AtomicBool,
 }
 
@@ -47,7 +80,7 @@ static NEXT_CHANNEL_ID: AtomicU64 = AtomicU64::new(1);
 /// Create a new channel. Returns a channel pair with sender and receiver.
 #[no_mangle]
 pub extern "C" fn rt_channel_new() -> RuntimeValue {
-    let (tx, rx) = mpsc::sync_channel::<RuntimeTransferPacket>(DEFAULT_CHANNEL_CAPACITY);
+    let (tx, rx) = mpsc::sync_channel::<RuntimeChannelPacket>(DEFAULT_CHANNEL_CAPACITY);
     let channel_id = NEXT_CHANNEL_ID.fetch_add(1, Ordering::SeqCst);
 
     let state = Box::into_raw(Box::new(Arc::new(RuntimeChannelState {
@@ -92,7 +125,10 @@ pub extern "C" fn rt_channel_send(channel: RuntimeValue, value: RuntimeValue) ->
     };
     // The legacy channel API has no endpoint-role metadata. Until typed channel
     // endpoints land, its admitted compatibility route is parent -> thread.
-    let Some(packet) = RuntimeTransferPacket::inline_copy(value, TransferDomain::Parent, TransferDomain::Thread) else {
+    // Text and boxed numeric leaves travel as an encoded copy; every other
+    // non-transferable value is refused (returns 0) rather than silently
+    // dropped, so callers can tell admission from loss.
+    let Some(packet) = channel_packet_for_value(value) else {
         return 0;
     };
 
@@ -123,7 +159,7 @@ pub extern "C" fn rt_channel_recv(channel: RuntimeValue) -> RuntimeValue {
     let result = match state.receiver.lock() {
         Ok(guard) => match guard.recv_timeout(Duration::from_secs(30)) {
             Ok(packet) => packet
-                .runtime_value_for_target(TransferDomain::Thread)
+                .into_runtime_value_for_target(TransferDomain::Thread)
                 .unwrap_or(RuntimeValue::NIL),
             Err(_) => RuntimeValue::NIL,
         },
@@ -146,7 +182,7 @@ pub extern "C" fn rt_channel_try_recv(channel: RuntimeValue) -> RuntimeValue {
     let result = match state.receiver.lock() {
         Ok(guard) => match guard.try_recv() {
             Ok(packet) => packet
-                .runtime_value_for_target(TransferDomain::Thread)
+                .into_runtime_value_for_target(TransferDomain::Thread)
                 .unwrap_or(RuntimeValue::NIL),
             Err(TryRecvError::Empty) => RuntimeValue::NIL,
             Err(TryRecvError::Disconnected) => RuntimeValue::NIL,
@@ -176,7 +212,7 @@ pub extern "C" fn rt_channel_recv_timeout(channel: RuntimeValue, timeout_ms: i64
     let result = match state.receiver.lock() {
         Ok(guard) => match guard.recv_timeout(timeout) {
             Ok(packet) => packet
-                .runtime_value_for_target(TransferDomain::Thread)
+                .into_runtime_value_for_target(TransferDomain::Thread)
                 .unwrap_or(RuntimeValue::NIL),
             Err(_) => RuntimeValue::NIL,
         },
@@ -245,7 +281,8 @@ pub extern "C" fn rt_channel_free(channel: RuntimeValue) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::value::{rt_array_free, rt_array_new};
+    use crate::value::heap::{with_typed_ptr, HeapObjectType};
+    use crate::value::{rt_array_free, rt_array_new, rt_string_new};
     use std::sync::Barrier;
     use std::thread;
 
@@ -383,15 +420,64 @@ mod tests {
             TransferDomain::Thread,
         )
         .unwrap();
-        state.sender.lock().unwrap().as_ref().unwrap().try_send(packet).unwrap();
+        state.sender.lock().unwrap().as_ref().unwrap().try_send(RuntimeChannelPacket::Inline(packet)).unwrap();
         let received = state.receiver.lock().unwrap().try_recv().unwrap();
         assert_eq!(
             received
-                .runtime_value_for_target(TransferDomain::Thread)
+                .into_runtime_value_for_target(TransferDomain::Thread)
                 .unwrap()
                 .as_int(),
             42
         );
+    }
+
+    #[test]
+    fn test_channel_send_recv_text_same_thread() {
+        let ch = rt_channel_new();
+        let text = rt_string_new(b"hello-channel-text".as_ptr(), 18);
+        assert_eq!(rt_channel_send(ch, text), 1);
+
+        let received = rt_channel_try_recv(ch);
+        assert!(received.is_heap());
+        let round_tripped = with_typed_ptr::<crate::value::collections::RuntimeString, _>(
+            received,
+            HeapObjectType::String,
+            |ptr| unsafe { (*ptr).as_bytes().to_vec() },
+        )
+        .expect("received value is a string");
+        assert_eq!(round_tripped, b"hello-channel-text");
+
+        rt_channel_free(ch);
+    }
+
+    #[test]
+    fn test_channel_cross_thread_text_and_i64() {
+        let ch = rt_channel_new();
+
+        let worker = thread::spawn(move || {
+            // Literal-shaped sends from the child: text via the encoded-copy
+            // route, i64 via the inline route.
+            assert_eq!(rt_channel_send(ch, RuntimeValue::from_int(77)), 1);
+            let text = rt_string_new(b"child-text".as_ptr(), 10);
+            assert_eq!(rt_channel_send(ch, text), 1);
+        });
+
+        let first = rt_channel_recv_timeout(ch, 5_000);
+        assert!(first.is_int());
+        assert_eq!(first.as_int(), 77);
+
+        let second = rt_channel_recv_timeout(ch, 5_000);
+        assert!(second.is_heap());
+        let bytes = with_typed_ptr::<crate::value::collections::RuntimeString, _>(
+            second,
+            HeapObjectType::String,
+            |ptr| unsafe { (*ptr).as_bytes().to_vec() },
+        )
+        .expect("received value is a string");
+        assert_eq!(bytes, b"child-text");
+
+        worker.join().unwrap();
+        rt_channel_free(ch);
     }
 
     #[test]
