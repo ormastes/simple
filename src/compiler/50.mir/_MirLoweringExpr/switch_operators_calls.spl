@@ -9517,6 +9517,18 @@ impl MirLowering:
                 arg_operands = arg_operands.push(mir_operand_copy(arg_local))
 
         if is_direct:
+            # A bare, unimported interpreter builtin (`env_get` without a `use`)
+            # reaches here as HIR's module-less fallback symbol: it has no
+            # native owner, so its origin is Unknown and every backend would
+            # abort on it (Phase 3 run-21 SIGABRT, driver_pipeline_lowering).
+            # Reject at the call site instead; never map it to an extern.
+            if self.provider_callable_is_builtin_fallback_v1(direct_symbol):
+                val builtin_name = if direct_name != "": direct_name else: self.bootstrap_resolved_call_name(direct_symbol)
+                self.error_fatal("interpreter-only builtin `{builtin_name}` has no native lowering: it is called without an import (MIR call origin unproven); import its std accessor (e.g. env_get_nullable from std.io_runtime)", Some(callee.span))
+                var rejected_builtin_builder = self.builder
+                val rejected_builtin_local = rejected_builtin_builder.new_temp(MirType.i64())
+                self.builder = rejected_builtin_builder
+                return rejected_builtin_local
             val source_name = if direct_name != "": direct_name else: self.bootstrap_resolved_call_name(direct_symbol)
             val resolved_name = self.provider_callable_symbol_name(direct_symbol, source_name)
             var return_type = self.bootstrap_resolved_call_return_type(direct_symbol, resolved_name)
