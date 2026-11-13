@@ -42,8 +42,18 @@ use std.common.contracts.container.exec_admission_v3.ContainerExecAdmissionV3
 use std.common.contracts.container.exec_control_v3.ContainerExecControlObservationV3
 use std.nogc_async_mut.container.providers.linux.installed_policy_v3.linux_oci_installed_policy_decode_v3
 use std.nogc_async_mut.container.providers.linux.engine_exec_owner_v3.{LinuxOciEngineExecOwnerV3, LinuxOciEngineExecTurnV3}
+use std.nogc_async_mut.container.providers.linux.installed_containment_policy_v1.linux_oci_installed_containment_policy_decode_v1
+use std.nogc_async_mut.container.providers.linux.containment_observer_v1.{LinuxOciContainmentObservationV1,
+    linux_oci_containment_observe_v1}
+use std.nogc_async_mut.container.providers.linux.containment_v1.LinuxOciContainmentOutcomeV1
 
 pub const LINUX_SIMPLE_CONTAINER_BACKEND_V2 = "linux-podman"
+
+pub struct LinuxOciContainmentHostObservationV1:
+    host: ContainerHostObservationV2
+    profile_digest: text
+    runtime_digest: text
+    containment_identity_digest: text
 
 fn _linux_container_native_id_v2(path: text) -> Result<text, text>:
     val raw = file_read_regular_no_follow_bounded(path, 128)?
@@ -93,6 +103,60 @@ pub class LinuxSimpleContainerAdapterV2:
     _duration_cap_ms: i64
 
 impl LinuxSimpleContainerAdapterV2:
+    pub static fn observe_containment_v1(policy_bytes: text) -> Result<LinuxOciContainmentHostObservationV1, text>:
+        val policy = linux_oci_installed_containment_policy_decode_v1(policy_bytes)?
+        val actual = linux_oci_containment_observe_v1(policy, 5000)?
+        val host = _linux_container_observation_v2(actual.cli_observation)?
+        Ok(LinuxOciContainmentHostObservationV1(host: host, profile_digest: actual.profile_digest,
+            runtime_digest: actual.runtime_digest, containment_identity_digest: actual.identity_digest))
+
+    # Internal leaf constructor. The common route first matches the protected
+    # completed installation carrier; caller expected strings alone confer none.
+    pub static fn open_containment_v1(policy_bytes: text, state_root: text, scope: ContainerHostScopeV2,
+            expected_provider_identity_digest: text, expected_containment_identity_digest: text,
+            timeout_ms: i64) -> Result<LinuxSimpleContainerAdapterV2, text>:
+        val scope_error = _linux_container_scope_error_v2(scope)
+        if scope_error != "": return Err(scope_error)
+        if (not builder_digest_valid_v1(expected_provider_identity_digest) or
+                not builder_digest_valid_v1(expected_containment_identity_digest)):
+            return Err("container-adapter-provider-identity-invalid")
+        if timeout_ms <= 0: return Err("container-adapter-timeout-invalid")
+        if not state_root.starts_with("/") or state_root.len() > 4096 or state_root.contains("\0"):
+            return Err("container-adapter-state-root-invalid")
+        val directory = retained_directory_open_trusted_v1(state_root)?
+        if not directory.close(): return Err("container-adapter-state-root-close-failed")
+        val policy = linux_oci_installed_containment_policy_decode_v1(policy_bytes)?
+        val provider = LinuxOciRuntimeProviderV1.new_with_containment_policy_v1(state_root,
+            container_scope_fence_id_v2(scope)?, scope.provider_generation, policy, timeout_ms)?
+        val actual = provider.containment_baseline.unwrap()
+        val host = _linux_container_observation_v2(actual.cli_observation)?
+        if (host.provider_identity_digest != expected_provider_identity_digest or
+                actual.identity_digest != expected_containment_identity_digest):
+            return Err("container-adapter-containment-identity-mismatch")
+        if host.native_boot_id != scope.boot_id: return Err("container-adapter-boot-mismatch")
+        if host.native_machine_id != scope.native_machine_id: return Err("container-adapter-native-machine-mismatch")
+        Ok(LinuxSimpleContainerAdapterV2(scope: scope, provider: provider,
+            _observed_host: host, _duration_cap_ms: timeout_ms))
+
+    pub fn retained_containment_observation_v1() -> Result<LinuxOciContainmentObservationV1, text>:
+        match self.provider.containment_baseline:
+            case Some(value): Ok(value)
+            case None: Err("containment-profile-not-installed")
+
+    pub me capture_containment_v1(request: ContainerExecutionRequestV2,
+            expected: RuntimeIdentityV1) -> LinuxOciContainmentOutcomeV1:
+        val checked = match self._checked_request_v2(request):
+            case Ok(value): value
+            case Err(reason): return LinuxOciContainmentOutcomeV1.Rejected(reason)
+        match self._set_duration_v2(checked.0):
+            case Err(reason): return LinuxOciContainmentOutcomeV1.Rejected(reason)
+            case Ok(_): pass
+        val actual = match self.retained_containment_observation_v1():
+            case Ok(value): value
+            case Err(reason): return LinuxOciContainmentOutcomeV1.Rejected(reason)
+        self.provider.capture_containment_v1(self.scope, checked.0, expected,
+            self._observed_host.provider_identity_digest, actual.identity_digest)
+
     pub static fn observe(policy_bytes: text) -> Result<ContainerHostObservationV2, text>:
         val policy = linux_oci_engine_policy_decode_v1(policy_bytes)?
         val engine = linux_oci_engine_observe_v1(policy, 5000)?
@@ -186,6 +250,7 @@ impl LinuxSimpleContainerAdapterV2:
 
     fn _exec_configuration_v3(parent: ContainerExecutionRequestV2, installed: ContainerExecInstalledV3,
             admission: ContainerExecAdmissionV3) -> Result<bool, text>:
+        if self.provider.containment_policy.?: return Err("containment-exec-control-not-installed")
         if self.provider.scripted: return Err("container-exec-scripted-owner-unsupported")
         val checked = self._checked_request_v2(parent)?
         val matched = container_exec_installed_match_v3(installed, admission)?
