@@ -68,3 +68,37 @@ Until it is resolved, every push from this repo either fails or is forced with
 That is a much worse state than one red gate, and is the reason this record
 exists rather than a silent workaround.
 
+
+
+---
+
+## 2026-11-13 addendum — P3 gpu lane p3-gpu-20261113 (work/p3-gpu-20261113, base 6f4cb189867) — header flip: FIXED at tip
+
+**Verdict: FIXED (resolved 2026-09-06 by the owning lane; this addendum flips the
+stale header with tip evidence).** The record's own three correct options were
+followed — the missing C lane was implemented for the symbols, with the
+reviewed baseline update recorded inline:
+
+- `scripts/check/rt_dual_implementation_baseline.txt` header notes (verbatim at
+  tip): "2026-09-06, reviewed addition of FOUR rows that origin/main already
+  carries single-lane ... rt_vulkan_copy_u32_slots and rt_vulkan_readback_u32_checksum
+  (rust-only, 320e6d99e4b 09-05). Recorded as pre-existing debt, not accepted as
+  new" — followed the same day by "chain-4 landing (merge f5ac48658d2 ...): THREE
+  rows deleted because the merge gives each its missing lane — verified
+  individually in the merged tree": `rt_vulkan_copy_u32_slots` gained a C twin at
+  `src/runtime/runtime_native.c:7239` (now :10912 at this tip) and
+  `rt_vulkan_readback_u32_checksum` at `src/runtime/runtime_native.c:397` (now
+  :461); the Rust lanes remain at
+  `src/compiler_rust/runtime/src/vulkan_graphics_runtime_buffer.rs:571`/`:464`.
+- Source re-verified at this base: both C twins are present and non-static
+  (`grep` confirmed at the lines above); the two symbols are no longer listed as
+  `rust-only` rows in the committed baseline (only the historical header notes
+  mention them). The fourth symbol of the original four-row failure
+  (`rt_to_int_dynamic`, c-only) received its Rust lane in the same chain-4 merge
+  per the same note; `rt_phase_profile_record` was handled with an explicit
+  guard-visibility explanation in the same baseline header.
+- The ratchet itself (`check-rt-dual-implementation-ratchet.shs`) runs `nm`
+  against the deployed Linux binary and cannot execute on this Windows lane, so
+  no fresh gate run was performed; the in-source dual-lane evidence plus the
+  reviewed baseline history above is the flip basis, consistent with this
+  record's "verified individually in the merged tree" standard.

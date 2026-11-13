@@ -94,3 +94,18 @@ Anything short of all four leaves this record OPEN.
   outline->coverage kernel spec), or a macOS Metal host producing an Xcode
   `.gputrace` — owns closure. Until then the `# TODO: [gpu]` markers correctly
   stay TODO per `.claude/rules/code-style.md`.
+
+
+---
+
+## 2026-11-13 addendum — P3 gpu lane p3-gpu-20261113 (work/p3-gpu-20261113, base 6f4cb189867)
+
+**Verdict: DEFERRED re-confirmed — unchanged from the 2026-11-11 ne11 addendum.
+No GPU *vector* (outline -> coverage) glyph rasterizer for Vulkan or Metal
+exists at this tip; CPU raster + device blit remains the architecture, and the
+four-part closing evidence (executed outline->coverage kernel, tool-produced
+`.rdc`/`.gputrace`, `device_readback` provenance, recorded pixel diff vs CPU)
+cannot be manufactured on this device-free Windows lane. The `# TODO: [gpu]`
+markers correctly remain TODOs. Grant unchanged: a real-GPU lane (Linux
+Vulkan under RenderDoc, or macOS Metal producing an Xcode `.gputrace`) owns
+closure.
