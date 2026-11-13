@@ -1052,9 +1052,15 @@ impl ExecCore {
                 }
                 if self.execution_mode.is_jit() {
                     // Try JIT first, fall back to interpreter on failure
-                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.run_file_jit(path))) {
+                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.run_file_jit_outcome(path))) {
                         Ok(Ok(exit_code)) => Ok(exit_code),
-                        Ok(Err(jit_err)) => {
+                        // The program already ran (on the interpreter, in the
+                        // no-main arm) and failed: that is the program's own
+                        // verdict, not a JIT gap. Re-running it would repeat
+                        // its output and side effects.
+                        // See doc/08_tracking/bug/no_main_runtime_error_reruns_on_interpreter_2026-11-13.md.
+                        Ok(Err(JitRunError::AlreadyExecuted(run_err))) => Err(run_err),
+                        Ok(Err(JitRunError::Unsupported(jit_err))) => {
                             // SIMPLE_JIT_STRICT fail-open fix: `first_unresolved_import`
                             // in codegen/jit.rs already tags its error message with a
                             // "SIMPLE_JIT_STRICT:" prefix specifically when the strict
@@ -1131,6 +1137,20 @@ impl ExecCore {
     /// Loads with import resolution → HIR → MIR → JIT compile → execute.
     /// Falls back to interpreter for code without `fn main()`.
     pub fn run_file_jit(&self, path: &Path) -> Result<i32, String> {
+        self.run_file_jit_outcome(path).map_err(JitRunError::into_message)
+    }
+
+    /// `run_file_jit` with the failure classified: `AlreadyExecuted` when the
+    /// program itself ran (no-main interpreter arm) and failed, so the caller
+    /// must not run it again; `Unsupported` for every other failure.
+    fn run_file_jit_outcome(&self, path: &Path) -> Result<i32, JitRunError> {
+        self.run_file_jit_inner(path).map_err(JitRunError::Unsupported)?
+    }
+
+    /// Body of `run_file_jit`. The outer `Err(String)` is a JIT-side failure
+    /// (nothing of the program ran); the inner result is the outcome of a
+    /// program that did run.
+    fn run_file_jit_inner(&self, path: &Path) -> Result<Result<i32, JitRunError>, String> {
         use simple_compiler::codegen::{ExecutionManager, LocalExecutionManager, JitBackend};
         use simple_compiler::hir;
         use simple_compiler::interpreter::{evaluate_module, set_current_file};
@@ -1371,10 +1391,12 @@ impl ExecCore {
                  (set SIMPLE_JIT_SPEC_ENTRY=1 to run a spec's module-level examples on the JIT)",
                 path.display()
             );
-            let exit_code = evaluate_module(&ast.items).map_err(|e| format!("{}", e))?;
+            // From here on the program itself runs: a failure is its verdict,
+            // never a reason to fall back and run it again.
+            let outcome = evaluate_module(&ast.items).map_err(|e| JitRunError::AlreadyExecuted(format!("{}", e)));
             set_current_file(None);
             self.collect_gc();
-            return Ok(exit_code);
+            return Ok(outcome);
         }
 
         // Module-level BDD example blocks are not reachable from the JIT entry
@@ -1480,7 +1502,7 @@ impl ExecCore {
         }
         set_current_file(None);
         self.collect_gc();
-        Ok(exit_code as i32)
+        Ok(Ok(exit_code as i32))
     }
 
     /// Get the build path for a compiled SMF file
@@ -1643,6 +1665,25 @@ fn finish_jit_spec_entry(path: &Path) -> i32 {
         1
     } else {
         0
+    }
+}
+
+/// Why the JIT lane of `run_file_with_args` did not finish with an exit code.
+#[derive(Debug)]
+enum JitRunError {
+    /// The JIT could not compile or run the program; none of it ran, so the
+    /// interpreter fallback is safe.
+    Unsupported(String),
+    /// The program already ran (the no-main arm hands the module to the
+    /// interpreter) and failed. Must propagate: a fallback would run it twice.
+    AlreadyExecuted(String),
+}
+
+impl JitRunError {
+    fn into_message(self) -> String {
+        match self {
+            JitRunError::Unsupported(msg) | JitRunError::AlreadyExecuted(msg) => msg,
+        }
     }
 }
 
@@ -2323,6 +2364,38 @@ mod execution_mode_validation_tests {
                 "interpreted retry #{attempt} must still reject: {again:?}"
             );
         }
+    }
+
+    /// no_main_runtime_error_reruns_on_interpreter_2026-11-13: a main-less
+    /// script already runs on the interpreter inside `run_file_jit`; when it
+    /// fails at runtime the driver must propagate, not run it a second time.
+    /// Red before the fix: the side-effect file held two lines.
+    #[test]
+    fn no_main_runtime_error_runs_once_on_jit_lane() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let side = dir.path().join("side.txt");
+        let entry = dir.path().join("noman.spl");
+        std::fs::write(
+            &entry,
+            format!(
+                "extern fn rt_file_append_text(path: text, content: text) -> bool\n\
+                 val ok = rt_file_append_text(\"{}\", \"A\\n\")\n\
+                 print \"A\"\n\
+                 val xs = [1]\n\
+                 print xs[5]\n",
+                side.display()
+            ),
+        )
+        .unwrap();
+        let core = super::ExecCore::new();
+        if !core.execution_mode.is_jit() {
+            return; // SIMPLE_EXECUTION_MODE overrides the lane under test
+        }
+        let result = core.run_file_with_args(&entry, vec![]);
+        let err = result.expect_err("a runtime error must fail the run");
+        assert!(err.contains("index out of bounds"), "unexpected error: {err}");
+        let written = std::fs::read_to_string(&side).expect("side-effect file");
+        assert_eq!(written.lines().count(), 1, "program ran more than once: {written:?}");
     }
 
     /// Every documented spelling must parse, and must parse to the lane its
