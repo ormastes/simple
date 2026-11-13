@@ -1,6 +1,6 @@
 # eq_ord_where_bound_unresolved_hir_2026_10_19
 
-- Status: open (workaround active)
+- Status: fixed (workaround removed 2026-11-13)
 - Severity: blocks Phase 3 bootstrap (HIR fatal, 2 modules poisoned)
 - Found: 2026-10-19, Phase 3 with producer4
   (`C:/dev/simple-bootstrap-storage/producer4-20261019/strict/simple-producer4-strict.exe`,
@@ -63,3 +63,30 @@ Remove the workaround in a separate linked change after the fixed producer
 passes Phase 3.
 
 DB reconciliation pending (`simple check-dbs` not run on this host).
+
+## Resolution (2026-11-13)
+
+Root fix `b8e3be6a6dc` (PR #3887, `bound_is_undeclared_builtin_trait`) is in the
+deployed HIR source, and PR #8805 made the imported-owner walk skip an undeclared
+ambient bound trait too (`module_reexport_materialization.spl`, owner-parameter
+dependencies). The six `@workaround` tags were removed and the bounds restored
+from `b73c24d606e`: `where K: Ord + Eq` in `src/lib/nogc_sync_mut/sffi/ordered_key_cmp.spl`
+(2 fns) and `where K: Hash + Eq + Ord` in `src/app/optimize/sprof_collection_profile.spl`
+(4 fns).
+
+Proof (seed `target/bootstrap/simple` reading the worktree HIR source, cgroup
+`MemoryMax=4G`):
+- `test/01_unit/compiler/20.hir/builtin_trait_where_bound_spec.spl` — 6/6 (this
+  doc previously recorded it as "not yet executed").
+- `test/01_unit/compiler/hir/census_r3_unresolved_name_negative_spec.spl`
+  "lowers the eq_ord_where_bound_unresolved_hir_2026_10_19 shapes as owner and as
+  import" — lowers the exact restored signatures in the declaring module (the
+  original `unresolved type: Ord` position) and through a cross-module import,
+  with zero errors and zero `W-HIR-UNDECL-IMPORT-001` receipts; a declared
+  `trait Eq` still wins over the ambient skip (sibling case in the same spec).
+- Red half: with the builtin-bound arm in `types.spl`
+  (`bound_is_undeclared_builtin_trait`, `case "Clone" | ... | "Eq" | "Ord": ()`)
+  disabled, that case fails with 6 `unresolved type` errors in owner position
+  (5/6, the other five cases unchanged); re-enabled it passes (6/6). A whole-file
+  pre-#3887 `types.spl` replay is not runnable against today's HIR (HirLowering
+  field drift aborts before the asserts).

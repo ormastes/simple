@@ -128,3 +128,13 @@ this symptom.
 **Green (after):** `SPEC FILE VERDICT: ... outcome=OK executed=14 passed=14 failed=0`.
 Status: fix-implemented-verification-pending (interpreter run on the Windows seed;
 native verification outstanding).
+
+## Fix (2026-11-13)
+
+`acpi_test.spl` did not execute at all on the current seed (`executed=0`, HIR
+error "cannot cast an optional `T?` to `u64` with `as`") because
+`src/os/kernel/acpi/clock_sources.spl` cast the `u64?` results of
+`_resolve_rsdp()` / `acpi_find_table()` with `as u64` after a nil check. Narrowed
+with `?? 0` (the nil case already returned above). Red 0/14 executed -> green
+14/14 (`bin/simple test test/01_unit/os/acpi/acpi_test.spl`). `madt_spec.spl`
+still fails to load with the same error class from another module; not addressed here.
