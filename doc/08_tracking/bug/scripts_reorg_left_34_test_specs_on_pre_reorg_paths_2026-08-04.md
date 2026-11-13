@@ -155,3 +155,9 @@ in the tree** (not a reorg path issue — the wrapper is an un-generated/missing
 fixture), so it cannot be repaired by repointing; needs the wrapper generated or
 the spec's expectation re-scoped. The whole vacuous-spec family (literal ==
 literal, `to_start_with` on a literal) remains a tracked false-green follow-up.
+
+---
+
+## Lane disposition 2026-11-13 (live-p3-l4, work/live-p3-l4-20261113, base f790f7f266e)
+
+Concurs with the p3-io same-day addendum: path repoints across the deferred tiers landed (live_kms 7/7, mold_linker 14/14, http_baremetal's two repointed examples, rtl_mdsoc, dbfs/x86_32 make_os_disk, riscv_network_gate RV32 contract, arm64_wm_qemu, preflight/jtag_unbind with the product-side preflight script fix). The remaining open item — `test/01_unit/hardware/fpga_linux/mlk_s02_100t_generated_linux_wrapper_spec.spl` reads `scripts/mlk_s02_100t_generated_linux.shs`, which does not exist anywhere in the tree (an un-generated/missing fixture, not a reorg path) — cannot be repaired by repointing; needs the wrapper generated or the spec re-scoped by the owner. The vacuous-spec family (literal == literal) remains a tracked false-green follow-up by design. No in-lane change. Owner: fpga/hardware fixture lane for the missing wrapper.

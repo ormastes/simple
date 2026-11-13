@@ -31,3 +31,8 @@ scope model.
 ## Lane disposition 2026-11-13 (p3-misc-b)
 
 source-audited fix design (indentation-indexed callable scope tree + fixtures) is a scoped feature, larger than this lane per-budget; owner: query-lint lane.
+---
+
+## Lane disposition 2026-11-13 (live-p3-l4, work/live-p3-l4-20261113, base f790f7f266e)
+
+Concurs with p3-misc-b: the recorded fix design (indentation-indexed callable scope tree built once, per-scope word tables, nested capture/shadowing/multi-level fixtures) is a scoped feature with its own fixtures and enablement plan — larger than a per-bug P3 box, and the p3-misc-b lane already dispositioned it to the query-lint owner. Re-audited the defect shape today (text fallback attributes every deeper line to the enclosing function; the outer driver's `function_end + 1` jump skips nested-function UNUSED001 analysis): unchanged at this base. No in-lane change. Owner: query-lint lane.

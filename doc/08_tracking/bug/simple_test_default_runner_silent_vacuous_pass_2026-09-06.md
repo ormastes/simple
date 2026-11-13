@@ -187,3 +187,9 @@ the next run RE-EXECUTED the spec (no `Skipped` line, real run); (3) the
 (`src/compiler_rust/driver/src/cli/test_runner/result_cache.rs:208,243`).
 
 No lane code change; this addendum is the change.
+
+---
+
+## Lane disposition 2026-11-13 (live-p3-l4, work/live-p3-l4-20261113, base f790f7f266e)
+
+Concurs with the 2026-11-13 p3-runner-lane re-verification at the release tip (80a8116e5e2, ancestor of this base): Defect 1 (default runner silent vacuous pass) not reproducible — default route emits `SPEC FILE VERDICT ... executed=1 passed=1` with rc=0 on a probe spec; Defect 2 (Rust runner cache keyed on spec mtime only) fixed — the `source_tree_stamp` 8th-column key is present (`result_cache.rs:208,243`) and an mtime-only touch re-executes. Trusting that same-binary, same-tip evidence per the no-identical-rerun rule; no third verification run. Status remains as the runner lane recorded it. No in-lane change.

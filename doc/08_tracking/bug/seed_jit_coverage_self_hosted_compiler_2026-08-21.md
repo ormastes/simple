@@ -515,3 +515,9 @@ verbatim in runner5's addendum above).
 ## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
 
 Concurs with the recorded status: OPEN — the census landed and both blockers were filed as follow-ups (runner5 addendum verbatim). No in-lane change.
+
+---
+
+## Lane disposition 2026-11-13 (live-p3-l4, work/live-p3-l4-20261113, base f790f7f266e)
+
+Concurs with runner5/seedB/p3-comp1: LIVE + BLOCKED, seed-side structural. The pinned gate `check-lint-runs-on-jit.shs` remains red with the named `Future.map` ANY→ANY closure-boundary refusal (monomorphized generic lambda typing), per the seedB 2026-11-11 re-run at this base family. The remaining sequence (generic/undeclared lambda typing at the ANY boundary, BOOL sub-register across closure boundaries, closure-handle scalar boxing) is seed compiler work, explicitly not a `.spl` surface change. One related new data point from this lane: the seed JIT also boxes the tagged results of `rt_string_parse_int`/`rt_string_to_float` into `Some(nil)` on success (see pure_sql_reopen_checkpointed_file_stack_overflow_2026-08-25.md 2026-11-13 addendum, measured differentially interpreter-vs-JIT on this host) — another instance of the JIT value-boxing defect family; worth folding into the same seed-side audit. No in-lane change. Owner: seed/compiler lane with cargo grant + bootstrap replay.

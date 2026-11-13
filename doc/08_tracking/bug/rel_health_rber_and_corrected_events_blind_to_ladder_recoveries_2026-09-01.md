@@ -79,3 +79,44 @@ comment block above the health assertions, not asserted).
 ## Lane disposition 2026-11-13 (p3-misc-b)
 
 open NVMe-emulator modeling gap; owner: rel_health/nvme lane with emulator fixtures.
+---
+
+## Addendum 2026-11-13 (live-p3-l4, work/live-p3-l4-20261113, base f790f7f266e) — FIX LANDED (worst-corrected convention); behavioral emu before/after host-blocked
+
+**Fix landed** in `examples/09_embedded/simpleos_nvme_fw/fw/fil.spl`
+`Fil.read_with_ladder`: a `worst_corrected` bucket now tracks the max coarse
+ECC bucket seen across the whole ladder walk (initialized from the offset-0
+sense, updated on every retry rung) and BOTH success exits
+(`rel_act_accept`, `rel_act_calibrate`) return `rel_read_result_ok(rd,
+st.depth, worst_corrected)` instead of the last/winning sense's `obs.corrected`
+(which decoded cleanly and reported 0). The `RelReadResult.corrected`
+docstring and `rel_health_rber`'s docstring now state the convention
+explicitly (per this record's requirement). The FTL fold
+(`rel_health_note_read`) is untouched: a recovered read now contributes its
+real cost (e.g. uncorrectable-at-offset-0 = 2) to `corrected_sum` and counts
+one `corrected_events` event, so RBER can move off exactly-0 ppm and the FCR
+(age/error) refresh trigger can fire from a Vref recovery. The failure exits
+(`rel_read_result_fail`, corrected hardcoded 2) are unchanged; clean reads
+(depth 0, single sense) are unchanged (worst = the one sense's bucket).
+
+**Verification status (honest):**
+- `fw/rel_health_check.spl` (the sink's assertion script: RBER exact ratios,
+  corrected_events counting, per-block isolation) — `REL HEALTH OK` on the
+  tracked seed with the change.
+- `fw/nvme_emu_recovery_check.spl` compiles and starts under the seed with
+  the change (no regression in the touched path).
+- Behavioral before/after on the Vt-physics NeChip recovery path is
+  HOST-BLOCKED on this Windows lane: a single worn+aged read through the
+  ladder exceeded 270 s wall under the seed interpreter (measured twice with
+  step markers — the offset-0 FAILING sense plus rung retries dominate; the
+  clean-read control is fast). The pre-fix probe did print the expected
+  blind-sink signature is therefore not re-demonstrated end-to-end here; the
+  discriminating assertion (`corrected_events` delta >= 1 on a recovered
+  read) should be added to `nvme_emu_recovery_check.spl`'s section A oracle
+  on a host where that spec completes (it could not complete within 300 s
+  here even before this change — pre-existing host slowness, not caused by
+  the fix).
+
+Residual owner item: the shadow-word seam (prereq 1b) for a true bit-rate
+RBER remains as the record's architecture note describes. No open code debt
+from this lane beyond the spec-strengthening recommendation above.
