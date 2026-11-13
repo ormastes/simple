@@ -1647,11 +1647,11 @@ fn finish_jit_spec_entry(path: &Path) -> i32 {
 }
 
 fn jit_failure_must_propagate(jit_err: &str, strict_all: bool) -> bool {
-    // error[option-pattern-shape] is a TYPE error, not a JIT capability gap:
+    // error[SPL-PAT-001] (Option pattern shape) is a TYPE error, not a JIT capability gap:
     // demoting it to the interpreter would run the ill-typed program silently.
     strict_all
         || jit_err.contains("SIMPLE_JIT_STRICT:")
-        || jit_err.contains("error[option-pattern-shape]")
+        || jit_err.contains("error[SPL-PAT-001]")
 }
 
 /// Shared helper for the JIT-compile failure paths that represent a genuine
