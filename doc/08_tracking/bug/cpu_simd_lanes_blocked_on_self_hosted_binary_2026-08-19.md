@@ -85,3 +85,7 @@ bin/simple.exe 2026-11-11):
 Nothing in this row is a live code defect. Bookkeeping closure: re-run
 `check-cpu-simd-engine2d-evidence.shs` and `check-cpu-simd-engine2d-arch-matrix.shs`
 once a self-hosted `bin/release/<triple>/simple` is deployed.
+
+## Triage 2026-11-13 (P3 tools lane)
+No code change this lane; SUPERSEDED 2026-11-11 (lane ne5) per the record
+header. Disposition accepted as-recorded.

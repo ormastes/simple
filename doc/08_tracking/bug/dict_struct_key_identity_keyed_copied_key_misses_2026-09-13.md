@@ -145,3 +145,10 @@ The "copied key silently misses" hazard is therefore still live on the
 interpreter lane of the current seed and in the C runtime; the unaudited
 shapes called out in this doc (struct field reads, struct returns/arguments as
 lookup keys) remain unaudited.
+
+## Triage 2026-11-13 (P3 tools lane)
+No code change this lane. The 2026-11-11 addendum (lane ne6) stands: the Rust
+native twin is fixed in source; the live residue is the seed interpreter's
+identity-keying (seed-vs-source discrepancy, flagged for seedfix) and the C
+runtime (`runtime_native.c`, outside the P3 tools lane's src/app|src/lib .spl
+scope). Hazard remains live on those two lanes.

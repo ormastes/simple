@@ -31,3 +31,11 @@ The PEB/TEB write-gate path must emit the documented
 token must be reconciled with the gate's actual evidence vocabulary by the
 feature owner).
 
+
+## Triage 2026-11-13 (P3 tools lane)
+No code change this lane; the record stands — pre-existing RED (HEAD baseline
+1 failed of 2 before the only edit, which was comment-only). The unblock
+condition is unchanged: the PEB/TEB write-gate path must emit the documented
+`VMWriteReadback:PEBTEBLayoutBytes*` evidence token, or the feature owner
+reconciles the spec's expected token with the gate's actual evidence
+vocabulary. Owner-lane work.

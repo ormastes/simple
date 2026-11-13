@@ -125,3 +125,9 @@ baseline values only after an exact baseline artifact is available. Run the
 focused policy and verifier authority specs with an admitted test-capable
 self-hosted runtime and the native/QEMU campaign when the phase environment is
 ready.
+
+## Triage 2026-11-13 (P3 tools lane)
+No code change this lane. The 2026-09-23 policy checkpoints stand: the
+immutable performance catalog is intentionally empty until reviewed fixture and
+baseline artifacts are preregistered (TODO(environment)); the cryptographic
+admission gap is owner/policy work, not a bounded P3 tools fix.

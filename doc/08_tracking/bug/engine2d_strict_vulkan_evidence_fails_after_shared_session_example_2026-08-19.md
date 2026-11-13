@@ -100,3 +100,9 @@ Remaining red (different defect, same spec):
 Owner follow-up: confirm the canonical WM chrome change (4px inset, alpha
 0x28) is intended, then update the oracle constants under review; separately
 adjudicate the 126-vs-127 blend rounding oracle.
+
+## Triage 2026-11-13 (P3 tools lane)
+No code change this lane; the 2026-11-11 (lane ne7) addendum stands — the
+recorded fresh-device `cpu_fallback` signature no longer occurs; the remaining
+red is canonical-scene oracle drift (4px inset, alpha 0x28) plus a 126-vs-127
+blend rounding oracle, both of which are owner calls, not P3 fixes.

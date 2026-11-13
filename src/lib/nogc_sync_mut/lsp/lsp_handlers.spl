@@ -10,7 +10,7 @@ use std.nogc_sync_mut.lsp.lsp_call_hierarchy.{lsp_call_hierarchy_request_item_v1
     lsp_call_hierarchy_item_with_data_json_v1, lsp_call_hierarchy_calls_with_note_json_v1}
 use std.nogc_sync_mut.lsp.lsp_symbol_key.{lsp_symbol_key_v1, lsp_symbol_data_json_v1}
 use std.nogc_sync_mut.lsp.lsp_reference_role.{lsp_reference_role_v1, lsp_references_include_declaration_v1}
-use std.nogc_sync_mut.lsp.lsp_query_symbol.{lsp_query_symbol_at_v1}
+use std.nogc_sync_mut.lsp.lsp_query_symbol.{lsp_query_symbol_at_v1, lsp_query_word_span_at_v1}
 use std.nogc_sync_mut.env.platform.{get_temp_dir}
 use std.common.json.value.{JsonValue, json_parse_value_strict, json_value_field, json_value_text_or, json_value_as_bool,
     json_value_items, json_value_keys, json_value_object_from, json_value_object_set, json_value_serialize,
@@ -638,6 +638,27 @@ pub fn lsp_handle_rename(id: text, body: text) -> text:
         entries.push(jp(uris[k], SB_L() + edits_by_uri[k].join(",") + SB_R()))
         k = k + 1
     make_json_result(id=id, result=jo1(jp("changes", LB() + entries.join(",") + RB())))
+
+# --- PrepareRename (identifier range at the cursor) ---
+
+# Answers `textDocument/prepareRename` with the `{range, placeholder}` of the
+# identifier at the cursor, or `null` when the position is not renameable.
+# Before this handler the request fell into the unknown-method -32601 branch,
+# which clients that probe prepareRename (the -32601 surface recorded in
+# lsp_rename_prepare_rename_not_implemented_2026_11_07) surfaced as a hard
+# rename failure even though `textDocument/rename` itself is implemented.
+pub fn lsp_handle_prepare_rename(id: text, body: text) -> text:
+    val file_path = _uri_to_path(_extract_uri(body))
+    val line0 = _extract_line(body).to_int() ?? 0
+    val char0 = _extract_character(body).to_int() ?? 0
+    val (word, start, end) = lsp_query_word_span_at_v1(file_path, line0 + 1, char0 + 1)
+    if word == "":
+        return make_json_result(id=id, result="null")
+    val range = jo2(
+        jp("start", jo2(jp("line", str(line0)), jp("character", str(start)))),
+        jp("end", jo2(jp("line", str(line0)), jp("character", str(end))))
+    )
+    make_json_result(id=id, result=jo2(jp("range", range), jp("placeholder", js(word))))
 
 # --- Formatting (canonical formatter, run as a child like the queries) ---
 

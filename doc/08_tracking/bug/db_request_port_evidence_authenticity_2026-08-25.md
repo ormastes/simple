@@ -74,3 +74,9 @@ database/server owner selects or authors the canonical entry
 query fixture and the v2 producer, records the selection in the must-check
 tiering documentation, and lands producer + checker + fixtures coherently;
 then this row can be re-judged.
+
+## Triage 2026-11-13 (P3 tools lane)
+No code change this lane; the 2026-11-11 addendum's grant stands — the
+database/server owner must select the gate's protocol/entry and land producer +
+checker + fixtures coherently. No synthetic path may be invented inside the
+evidence checker, so this lane made no code change.

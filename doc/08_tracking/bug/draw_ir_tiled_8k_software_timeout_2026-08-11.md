@@ -57,3 +57,9 @@ in interpreter mode on the Windows lane, and the acceptance criteria
 (split-process harness, native runner profile, p95 <= 12.5ms at 8K/80) are a
 perf-infrastructure build, not a P3 fix. No green rerun attempted per
 runaway-guard rules.
+
+## Triage 2026-11-13 (P3 tools lane)
+No code change this lane; the 2026-11-11 (lane ne7) addendum stands — the
+acceptance criteria (split-process harness, native runner profile, p95 <=
+12.5ms at 8K/80) are a perf-infrastructure build, and honest evidence cannot be
+produced in interpreter mode on the Windows lane. Not re-run.

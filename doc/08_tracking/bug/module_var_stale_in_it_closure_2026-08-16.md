@@ -117,3 +117,7 @@ condition asks to drop it and confirm all 56 examples pass; that churn belongs
 to the smux owner lane, not this P3 traverse. The workaround comment cites
 this doc and remains accurate either way.
 
+
+## Triage 2026-11-13 (P3 tools lane)
+No code change this lane; FIXED (verified 2026-11-11, lane ne16) per the record
+header. Verdict trusted, not re-run.

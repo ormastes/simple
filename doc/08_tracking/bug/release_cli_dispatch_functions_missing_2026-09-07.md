@@ -71,3 +71,35 @@ modules and implement the twenty-one `run_*` functions as arg-parse + call +
 render. Add one runnable check that dispatches every advertised subcommand and
 asserts none of them errors with E1002, so the layer cannot silently disappear
 again.
+
+## Triage 2026-11-13 (P3 tools lane, work/p3-tools-20261113, base origin/release/1.0.0)
+
+The missing adapter layer is **restored in tree**: all 21 `run_*` wrappers the
+record lists exist in `src/app/release/main.spl` (verified by grep; the help
+listing at `main.spl:124` advertises every subcommand), so the E1002 dispatch
+defect itself is fixed on this branch.
+
+Verifying the repro end-to-end with the session binary (`bin/simple.exe`, Rust
+seed from the main checkout) surfaced one further blocker in the same entry
+closure, now fixed: `src/app/release/self_review_policy.spl:212` (`_json_int`)
+did `if item == nil: missing else: item as i64` on a `json_to_number` result
+(`any?`), which the current compiler rejects (nil-only-in-unsafe ERR-01 /
+E-OPT-CAST-001, `src/compiler/20.hir/hir_lowering/_Expressions/expression_core.spl:1243`).
+The manual nil guard did not count as narrowing; the whole `release` entry
+closure refused to lower (JIT and interpreter alike), so no subcommand could
+run at all.
+
+Fix: rewrote `_json_int` to `match json_to_number(...): case Some(n): n as i64;
+case nil: missing` — the `match` narrowing form both compilers accept.
+
+Before -> after:
+- before: `bin/simple run src/app/release/main.spl version-check` died in HIR
+  lowering (ERR-01 optional cast); no subcommand reachable.
+- after: the CLI runs end to end; `version-check` reaches the version
+  authority and answers with its verdict (on this branch:
+  `status=rejected, reason="product, semver, line, or channel is invalid"` —
+  `release/version.sdn` declares `semver: 1.0.0-rc.1` with `channel: beta`,
+  which `check_version_channel` (`src/app/release/policy.spl:213`) rejects as
+  an rc/beta mismatch. That mismatch exists identically on origin/main and is
+  release metadata policy, not a dispatch defect, so it was not changed here).
+- canary `test/02_integration/app/context_log_modes_spec.spl`: 4/4 PASS.

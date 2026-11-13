@@ -103,3 +103,10 @@ Additional acceptance:
 `bin/simple native-build --source src --source test/05_perf/graphics_2d --entry test/05_perf/graphics_2d/bench_web_draw_ir_8k_frame_switch.spl --entry-closure --opt-level=aggressive --strip --output build/render_perf/bench_web_draw_ir_8k_frame_switch`
 followed by the artifact's own seed + 200-retained-calls run and the
 `pixels`-copy profile question (identity/receipt vs 132.7 MB per-hit copy).
+
+## Triage 2026-11-13 (P3 tools lane)
+No code change this lane; the P3-boot15 addendum stands — BLOCKED on this
+Windows host (native-build and JIT-heavy closure compilation are in the known
+live hang class; the prior lane's three-cycle cap is exhausted). The
+executable gate now runs JIT-mode under a 180s budget; the native-artifact
+acceptance leg is granted to a Linux host per the record.
