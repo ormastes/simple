@@ -74,3 +74,21 @@ unverified lane.
   per-pixel store loops above (`_emu_scale_image_pixels`, the clipped/blend
   paths under `draw_rect_blend`) sit on that path, so part of their cost is
   that regression rather than the loop shape. Not separated here.
+
+## Unexplained: warm compose 610 ms -> 880-1015 ms for four consecutive runs
+
+Right after merging `release/1.0.0` into the fix branch (no change to any file
+on this pipeline's path except eight `command.? == false` -> `== None` edits in
+`draw_ir_adv.spl`), four consecutive 6-render bench runs measured warm compose
+at 1015 / 922 / 876 / 966 ms instead of 610-622 ms, with cold compose and
+readback unchanged. The sampler put the extra time in `load_selected_font_file`
+(125 samples against 10; it wraps two `rt_file_hash_sha256` calls and one
+read of the 1.7 MB NotoSansMono face per load). A back-to-back run of the
+pre-merge commit in the same worktree measured 619 ms.
+
+Reverting any one of the eight edits, appending a comment to the file, or
+simply re-checking the file out brought it back to 607-627 ms, and the merged
+tree as committed has measured 609-619 ms in every run since (six runs). So
+the slow state was tied to that worktree state rather than to the source text.
+Cause not found; recorded because it is a 50 % swing in the metric this bench
+reports, and because a single post-merge run would have read as a regression.
