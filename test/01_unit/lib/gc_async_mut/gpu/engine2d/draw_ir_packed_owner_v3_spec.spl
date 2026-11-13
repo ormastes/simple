@@ -188,3 +188,65 @@ describe "Engine2D packed DrawIR-v3 owner boundary":
         expect(replayed.0.terminal).to_equal(true)
         expect(replayed.0.slot_states[second.1.submission.generation_ref.slot]).to_equal(
             DRAW_IR_PACKED_SLOT_IN_FLIGHT)
+
+fn _scene_with_extra_command(command: DrawIrV3Command) -> DrawIrV3Scene:
+    var scene = draw_ir_v3_empty_scene(21u32, 3u32)
+    scene.geometry = draw_ir_v3_geometry_append(scene.geometry, 1, 1, 2, 2, 0)
+    scene.paint = draw_ir_v3_paint_append(scene.paint, 0xff102030u32, 0u32, 0, 1000, 0u16)
+    scene.clips = draw_ir_v3_clip_append(scene.clips, 0, 0, 4, 4, 0, DRAW_IR_V3_NO_ID)
+    scene.transforms = draw_ir_v3_transform_append(scene.transforms, 1000, 0, 0, 1000, 1, 1)
+    draw_ir_v3_scene_push_command(scene, command)
+
+fn _assert_refused_unsupported(scene: DrawIrV3Scene, arena: u64):
+    var store = DrawIrPackedGenerationStoreV3.bounded(arena, 1u32, 262144u32, 1u32)
+    store = _publish_scene(store, scene)
+    val engine = Engine2D.create_with_backend(4, 4, "cpu")
+    val pixel_before = engine.read_pixels()[5]
+    val (returned_engine, returned_store, receipt) = engine2d_draw_ir_v3_take_and_render(engine, store, scene)
+    expect(receipt.accepted).to_equal(false)
+    expect(receipt.reason).to_equal(ENGINE2D_PACKED_V3_UNSUPPORTED_COMMAND)
+    expect(receipt.rendered_command_count).to_equal(0u32)
+    expect(receipt.storage_released).to_equal(true)
+    expect(returned_engine.read_pixels()[5]).to_equal(pixel_before)
+    expect(returned_store.slot_states[0]).to_equal(DRAW_IR_PACKED_SLOT_FREE)
+
+describe "Engine2D packed DrawIR-v3 unsupported command refusal":
+    it "refuses a GROUP carrying a transform":
+        var command = draw_ir_v3_empty_command()
+        command.kind = DRAW_IR_V3_KIND_GROUP
+        command.transform_id = 0u32
+        _assert_refused_unsupported(_scene_with_extra_command(command), 201u64)
+
+    it "refuses a GROUP carrying a clip":
+        var command = draw_ir_v3_empty_command()
+        command.kind = DRAW_IR_V3_KIND_GROUP
+        command.clip_id = 0u32
+        _assert_refused_unsupported(_scene_with_extra_command(command), 202u64)
+
+    it "refuses a GROUP carrying opacity through its paint":
+        var command = draw_ir_v3_empty_command()
+        command.kind = DRAW_IR_V3_KIND_GROUP
+        command.paint_id = 0u32
+        _assert_refused_unsupported(_scene_with_extra_command(command), 203u64)
+
+    it "refuses a GROUP with a parent":
+        var command = draw_ir_v3_empty_command()
+        command.kind = DRAW_IR_V3_KIND_GROUP
+        command.parent_id = 0u32
+        _assert_refused_unsupported(_scene_with_extra_command(command), 204u64)
+
+    it "refuses a RECT carrying a clip":
+        var command = draw_ir_v3_empty_command()
+        command.kind = DRAW_IR_V3_KIND_RECT
+        command.geometry_id = 0u32
+        command.paint_id = 0u32
+        command.clip_id = 0u32
+        _assert_refused_unsupported(_scene_with_extra_command(command), 205u64)
+
+    it "refuses a RECT carrying a transform":
+        var command = draw_ir_v3_empty_command()
+        command.kind = DRAW_IR_V3_KIND_RECT
+        command.geometry_id = 0u32
+        command.paint_id = 0u32
+        command.transform_id = 0u32
+        _assert_refused_unsupported(_scene_with_extra_command(command), 206u64)
