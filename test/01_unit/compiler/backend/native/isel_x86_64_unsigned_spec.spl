@@ -1,0 +1,151 @@
+# Purpose and audience: executable specification evidence for the native x86_64
+# backend owners. Integer compare/divide/shift lowering must honour operand
+# signedness, matching the LLVM backend (icmp ult/udiv/lshr) and the Cranelift
+# adapter (CL_CMP_ULT/udiv/ushr): u64 values with the high bit set order above
+# small values, and the u64 max/min/clamp lowering (PR #8935, a Gt/Lt BinOp
+# over unsigned operands) picks the larger/smaller unsigned value.
+# @req REQ-SSPEC-UNIT
+
+use std.spec.step
+
+use std.spec.*
+
+use compiler.mir.mir_data.*
+use compiler.backend.native.isel_x86_64.{isel_module}
+use compiler.backend.native.mach_inst.{MachModule, MachBlock, X86_OP_SETL, X86_OP_SETLE, X86_OP_SETG, X86_OP_SETGE, X86_OP_SETB, X86_OP_SETBE, X86_OP_SETA, X86_OP_SETAE, X86_OP_IDIV, X86_OP_DIV, X86_OP_CQO, X86_OP_SAR, X86_OP_SHR}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{SymbolId}
+
+fn build_binop_module(name: text, kind: MirTypeKind, op: MirBinOp, lhs: i64, rhs: i64) -> MirModule:
+    val ty = MirType(kind: kind)
+    val bool_ty = MirType(kind: MirTypeKind.Bool)
+    val is_cmp = op == MirBinOp.Lt or op == MirBinOp.Le or op == MirBinOp.Gt or op == MirBinOp.Ge
+    val res_ty = if is_cmp: bool_ty else: ty
+    val sig = MirSignature(params: [], return_type: res_ty, is_variadic: false)
+    val locals = [
+        MirLocal(id: LocalId(id: 0), name: Some("_return"), type_: res_ty, kind: LocalKind.Return),
+        MirLocal(id: LocalId(id: 1), name: Some("a"), type_: ty, kind: LocalKind.Temp),
+        MirLocal(id: LocalId(id: 2), name: Some("b"), type_: ty, kind: LocalKind.Temp),
+        MirLocal(id: LocalId(id: 3), name: Some("r"), type_: res_ty, kind: LocalKind.Temp)
+    ]
+    val entry = MirBlock(
+        id: BlockId.new(0),
+        label: Some("entry"),
+        instructions: [
+            MirInst(kind: MirInstKind.Const(LocalId(id: 1), MirConstValue.Int(lhs), ty), span: nil),
+            MirInst(kind: MirInstKind.Const(LocalId(id: 2), MirConstValue.Int(rhs), ty), span: nil),
+            MirInst(kind: MirInstKind.BinOp(LocalId(id: 3), op,
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))),
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2)))), span: nil)
+        ],
+        terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 3)))))
+    )
+    val func = MirFunction(
+        symbol: SymbolId.new(0),
+        name: name,
+        signature: sig,
+        locals: locals,
+        blocks: [entry],
+        entry_block: BlockId.new(0),
+        span: Span(start: 0, end: 0, line: 1, col: 1),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {}
+    )
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[SymbolId.new(0)] = func
+    MirModule(name: name, functions: functions, statics: {}, constants: {}, types: {})
+
+fn selected_opcodes(name: text, kind: MirTypeKind, op: MirBinOp, lhs: i64, rhs: i64) -> [i64]:
+    val mach = isel_module(build_binop_module(name, kind, op, lhs, rhs))
+    var out: [i64] = []
+    for func in mach.functions:
+        for block in func.blocks:
+            for inst in block.insts:
+                out.push(inst.opcode)
+    out
+
+fn has_op(ops: [i64], opcode: i64) -> bool:
+    for o in ops:
+        if o == opcode:
+            return true
+    false
+
+# 0x8000000000000000 as u64 bits: the high bit set; as i64 it is negative.
+val HIGH_BIT: i64 = -9223372036854775807 - 1
+
+describe "x86_64 isel unsigned integer compares":
+    it "u64 less-than with the high bit set selects setb, not setl":
+        # @req REQ-SSPEC-UNIT
+        step("lower u64 0x8000000000000000 < 1")
+        val ops = selected_opcodes("u64_lt", MirTypeKind.U64, MirBinOp.Lt, HIGH_BIT, 1)
+        expect(has_op(ops, X86_OP_SETB)).to_equal(true)
+        expect(has_op(ops, X86_OP_SETL)).to_equal(false)
+
+    it "u64 le/gt/ge select setbe/seta/setae":
+        # @req REQ-SSPEC-UNIT
+        step("lower u64 Le, Gt, Ge")
+        val le = selected_opcodes("u64_le", MirTypeKind.U64, MirBinOp.Le, HIGH_BIT, 1)
+        val gt = selected_opcodes("u64_gt", MirTypeKind.U64, MirBinOp.Gt, HIGH_BIT, 1)
+        val ge = selected_opcodes("u64_ge", MirTypeKind.U64, MirBinOp.Ge, HIGH_BIT, 1)
+        expect([has_op(le, X86_OP_SETBE), has_op(gt, X86_OP_SETA), has_op(ge, X86_OP_SETAE)]).to_equal([true, true, true])
+        expect([has_op(le, X86_OP_SETLE), has_op(gt, X86_OP_SETG), has_op(ge, X86_OP_SETGE)]).to_equal([false, false, false])
+
+    it "u32 less-than selects setb":
+        # @req REQ-SSPEC-UNIT
+        step("lower u32 Lt")
+        val ops = selected_opcodes("u32_lt", MirTypeKind.U32, MirBinOp.Lt, 4294967295, 1)
+        expect(has_op(ops, X86_OP_SETB)).to_equal(true)
+
+    it "u64 max compare (Gt over unsigned operands) selects seta":
+        # @req REQ-SSPEC-UNIT
+        step("lower the Gt compare that u64.max lowering emits")
+        val ops = selected_opcodes("u64_max", MirTypeKind.U64, MirBinOp.Gt, HIGH_BIT, 7)
+        expect(has_op(ops, X86_OP_SETA)).to_equal(true)
+        expect(has_op(ops, X86_OP_SETG)).to_equal(false)
+
+    it "u64 min compare (Lt over unsigned operands) selects setb":
+        # @req REQ-SSPEC-UNIT
+        step("lower the Lt compare that u64.min lowering emits")
+        val ops = selected_opcodes("u64_min", MirTypeKind.U64, MirBinOp.Lt, 7, HIGH_BIT)
+        expect(has_op(ops, X86_OP_SETB)).to_equal(true)
+        expect(has_op(ops, X86_OP_SETL)).to_equal(false)
+
+    it "i64 less-than still selects signed setl":
+        # @req REQ-SSPEC-UNIT
+        step("lower i64 Lt")
+        val ops = selected_opcodes("i64_lt", MirTypeKind.I64, MirBinOp.Lt, -1, 1)
+        expect(has_op(ops, X86_OP_SETL)).to_equal(true)
+        expect(has_op(ops, X86_OP_SETB)).to_equal(false)
+
+describe "x86_64 isel unsigned divide and shift siblings":
+    it "u64 division selects div without cqo sign extension":
+        # @req REQ-SSPEC-UNIT
+        step("lower u64 Div")
+        val ops = selected_opcodes("u64_div", MirTypeKind.U64, MirBinOp.Div, HIGH_BIT, 3)
+        expect([has_op(ops, X86_OP_DIV), has_op(ops, X86_OP_IDIV), has_op(ops, X86_OP_CQO)]).to_equal([true, false, false])
+
+    it "u64 remainder selects div":
+        # @req REQ-SSPEC-UNIT
+        step("lower u64 Rem")
+        val ops = selected_opcodes("u64_rem", MirTypeKind.U64, MirBinOp.Rem, HIGH_BIT, 3)
+        expect([has_op(ops, X86_OP_DIV), has_op(ops, X86_OP_IDIV)]).to_equal([true, false])
+
+    it "i64 division keeps cqo plus idiv":
+        # @req REQ-SSPEC-UNIT
+        step("lower i64 Div")
+        val ops = selected_opcodes("i64_div", MirTypeKind.I64, MirBinOp.Div, -7, 2)
+        expect([has_op(ops, X86_OP_IDIV), has_op(ops, X86_OP_CQO)]).to_equal([true, true])
+
+    it "i64 right shift selects arithmetic sar":
+        # @req REQ-SSPEC-UNIT
+        step("lower i64 Shr")
+        val ops = selected_opcodes("i64_shr", MirTypeKind.I64, MirBinOp.Shr, -8, 1)
+        expect([has_op(ops, X86_OP_SAR), has_op(ops, X86_OP_SHR)]).to_equal([true, false])
+
+    it "u64 right shift selects logical shr":
+        # @req REQ-SSPEC-UNIT
+        step("lower u64 Shr")
+        val ops = selected_opcodes("u64_shr", MirTypeKind.U64, MirBinOp.Shr, HIGH_BIT, 1)
+        expect([has_op(ops, X86_OP_SHR), has_op(ops, X86_OP_SAR)]).to_equal([true, false])
