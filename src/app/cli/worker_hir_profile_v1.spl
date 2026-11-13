@@ -217,6 +217,30 @@ pub fn worker_hir_unsupported_environment_keys_v1(captured: [(text, text)]) -> [
             out.push(pair.0)
     out
 
+# Environment step of profile admission over the coordinator's captured
+# environment, in capture order. Every admitted pair is copied to the worker
+# exactly and later hashed into configuration_digest.
+pub fn worker_hir_environment_admit_v1(
+        captured: [(text, text)]) -> Result<[ProcessObservationEnvironmentV4], text>:
+    if captured.len() > 256: return Err("HIR worker environment exceeds profile bound")
+    # Name EVERY unsupported key in one refusal: reporting only the first one
+    # turned discovery into one Stage 2 rebuild per key (2026-11-12).
+    val unsupported = worker_hir_unsupported_environment_keys_v1(captured)
+    if unsupported.len() > 0:
+        return Err("unsupported HIR worker environment key: " + unsupported.join(", "))
+    var environment: [ProcessObservationEnvironmentV4] = []
+    var seen: {text: bool} = {}
+    var bytes: i64 = 0
+    for pair in captured:
+        if seen.has(pair.0): return Err("duplicate HIR worker environment key")
+        val value_error = worker_hir_environment_value_error_v1(pair.0, pair.1)
+        if value_error != "": return Err(value_error)
+        seen[pair.0] = true
+        bytes = bytes + pair.0.byte_len() + pair.1.byte_len()
+        if bytes > 65536: return Err("HIR worker environment exceeds byte bound")
+        environment.push(ProcessObservationEnvironmentV4(key: pair.0, value: pair.1))
+    Ok(environment)
+
 pub fn worker_hir_profile_admit_v1(args: [text], entry: text,
         sources: [text], deadline_ms: i64) -> Result<WorkerHirProfileV1, text>:
     val opened = match environment_variant_policy_handoff_extract_v1(args):
@@ -235,28 +259,12 @@ pub fn worker_hir_profile_admit_v1(args: [text], entry: text,
     # accepting whichever policy digest the closure request claims for itself.
     val selected = native_entry_closure_request_open_v1(closure, opened.handoff.policy_digest)?
     if selected.identities.is_empty(): return Err("HIR worker frozen closure is empty")
-    var environment: [ProcessObservationEnvironmentV4] = []
-    var seen: {text: bool} = {}
     var parts: [text] = ["worker-hir-profile-v1", closure.receipt_digest,
         closure.binding.policy_digest, closure.binding.producer_digest, "{deadline_ms}"]
-    val captured = env_list_checked()?
-    if captured.len() > 256: return Err("HIR worker environment exceeds profile bound")
-    var bytes: i64 = 0
-    # Name EVERY unsupported key in one refusal: reporting only the first one
-    # turned discovery into one Stage 2 rebuild per key (2026-11-12).
-    val unsupported = worker_hir_unsupported_environment_keys_v1(captured)
-    if unsupported.len() > 0:
-        return Err("unsupported HIR worker environment key: " + unsupported.join(", "))
-    for pair in captured:
-        if seen.has(pair.0): return Err("duplicate HIR worker environment key")
-        val value_error = worker_hir_environment_value_error_v1(pair.0, pair.1)
-        if value_error != "": return Err(value_error)
-        seen[pair.0] = true
-        bytes = bytes + pair.0.byte_len() + pair.1.byte_len()
-        if bytes > 65536: return Err("HIR worker environment exceeds byte bound")
-        environment.push(ProcessObservationEnvironmentV4(key: pair.0, value: pair.1))
-        parts.push(sha256_text(pair.0))
-        parts.push(sha256_text(pair.1))
+    val environment = worker_hir_environment_admit_v1(env_list_checked()?)?
+    for pair in environment:
+        parts.push(sha256_text(pair.key))
+        parts.push(sha256_text(pair.value))
     for arg in args: parts.push(sha256_text(arg))
     Ok(WorkerHirProfileV1(argv: args, environment: environment, closure: closure,
         configuration_digest: sha256_text(parts.join("\n")), deadline_ms: deadline_ms))

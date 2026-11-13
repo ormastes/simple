@@ -4,12 +4,15 @@ use app.cli.worker_hir_profile_v1.{worker_hir_argument_error_v1, worker_hir_stag
     worker_hir_tool_build_environment_keys_v1, worker_hir_base_environment_keys_v1, worker_hir_environment_value_error_v1,
     worker_hir_unsupported_environment_keys_v1,
     worker_hir_environment_key_admitted_v1, worker_hir_child_validate_v1,
-    worker_hir_pool_skip_without_closure_v1}
+    worker_hir_pool_skip_without_closure_v1, worker_hir_environment_admit_v1, worker_hir_profile_admit_v1}
 use app.cli.worker_hir_owner_v1.{worker_hir_cleanup_deadline_v1,
     worker_hir_remaining_budget_v1, worker_hir_environment_sort_v1}
 use app.cli.native_build_output_plan.{native_build_entry_and_sources_v1}
 use app.cli.environment_variant_policy_handoff_owner_v1.{
     ENVIRONMENT_VARIANT_POLICY_HANDOFF_ARG_PREFIX_V1}
+use app.cli.environment_variant_policy_handoff_owner_v1.{
+    environment_variant_policy_handoff_prepare_from_snapshot_v1, environment_variant_policy_handoff_attach_v1}
+use app.cli.environment_variant_policy_sources_v1.{EnvironmentVariantConfigSourceV1}
 use std.common.process.observation_v4.{ProcessObservationEnvironmentV4,
     PROCESS_OBSERVATION_V4_MAX_WALL_BUDGET_NS}
 
@@ -62,6 +65,26 @@ fn stage3_full_launch_env() -> [(text, text)]:
             ("SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT", "/w/c")]:
         env.push(pair)
     env
+
+fn admitted_env_size(env: [(text, text)]) -> text:
+    match worker_hir_environment_admit_v1(env):
+        case Ok(environment): "{environment.len()}"
+        case Err(reason): reason
+
+fn admit_error(env: [(text, text)]) -> text:
+    match worker_hir_environment_admit_v1(env):
+        case Ok(_): ""
+        case Err(reason): reason
+
+fn handed_args(user_args: [text]) -> [text]:
+    val absent = EnvironmentVariantConfigSourceV1(present: false, source_identity: "", content: "")
+    val prepared = environment_variant_policy_handoff_prepare_from_snapshot_v1(user_args, [], absent, absent).unwrap()
+    environment_variant_policy_handoff_attach_v1(user_args, prepared.encoded_payload).unwrap()
+
+fn profile_error(args: [text], deadline_ms: i64) -> text:
+    match worker_hir_profile_admit_v1(args, "src/app/cli/bootstrap_main.spl", [], deadline_ms):
+        case Ok(_): ""
+        case Err(reason): reason
 
 fn launch_env_value_errors(env: [(text, text)]) -> [text]:
     var out: [text] = []
@@ -167,11 +190,40 @@ describe "worker HIR profile admission":
             val env = stage3_resume_launch_env(routes.0, routes.1)
             expect(worker_hir_unsupported_environment_keys_v1(env).join(", ")).to_equal("")
             expect(launch_env_value_errors(env).join("; ")).to_equal("")
+            expect(admitted_env_size(env)).to_equal("{env.len()}")
 
     it "admits the full-bootstrap Stage 3 launch environment":
         val env = stage3_full_launch_env()
         expect(worker_hir_unsupported_environment_keys_v1(env).join(", ")).to_equal("")
         expect(launch_env_value_errors(env).join("; ")).to_equal("")
+        expect(admitted_env_size(env)).to_equal("{env.len()}")
+
+    it "refuses an inadmissible captured environment at the admission step":
+        expect(admit_error(stage3_resume_launch_env("coordinator", "direct"))).to_equal("")
+        var unknown = stage3_full_launch_env()
+        unknown.push(("SIMPLE_SCV_INVENTORY_COLD_INIT", "1"))
+        unknown.push(("LD_PRELOAD", "x.so"))
+        expect(admit_error(unknown)).to_equal(
+            "unsupported HIR worker environment key: SIMPLE_SCV_INVENTORY_COLD_INIT, LD_PRELOAD")
+        var duplicate = stage3_full_launch_env()
+        duplicate.push(("HOME", "/other"))
+        expect(admit_error(duplicate)).to_equal("duplicate HIR worker environment key")
+        expect(admit_error(stage3_resume_launch_env("process", "none"))).to_equal(
+            "HIR profile requires a Stage 3 requested route of direct or coordinator")
+        expect(admit_error([("PATH", "/bin".repeat(17000))])).to_equal("HIR worker environment exceeds byte bound")
+        var many: [(text, text)] = []
+        for _ in 0..257: many.push(("HOME", "/h"))
+        expect(admit_error(many)).to_equal("HIR worker environment exceeds profile bound")
+
+    it "checks profile arguments and deadline before the frozen closure":
+        expect(profile_error(handed_args(["--plugin", "x"]), 1)).to_equal("unsupported HIR worker option: --plugin")
+        var wide = ["--entry-closure"]
+        for _ in 0..256: wide.push("--strip")
+        expect(profile_error(handed_args(wide), 1)).to_equal("HIR worker argv exceeds profile bound")
+        expect(profile_error(handed_args(["--entry-closure", "--log", "x".repeat(262145)]), 1)).to_equal(
+            "HIR worker argv exceeds byte bound")
+        expect(profile_error(handed_args(["--entry-closure"]), 0)).to_equal("HIR worker requires a parent absolute deadline")
+        expect(profile_error(handed_args(["--entry-closure"]), 1)).to_equal("no closure request published")
 
     it "gates the Stage 3 route keys to the bootstrap route policy values":
         # lib/stage3-direct-parallel.shs: route direct|coordinator, fallback none|direct.
