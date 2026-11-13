@@ -11,16 +11,20 @@
 # must come back exactly as found.
 #
 # Windows x64 bounded AVX profile (plan 3.3 / 10.4, PR #5962 remedy):
-#   - pushes rbp, then the volatile GPRs rax rcx rdx r8 r9 r10 r11 (rbx rsi
-#     rdi r12-r15 are callee-saved by the handler under the Microsoft ABI);
-#   - rbp = frame pointer (UWOP_SET_FPREG), 0x238-byte frame: 32 bytes of
-#     shadow space at [rsp], ymm0-15 at +0x20 (all 16: the upper halves are
-#     volatile even for ymm6-15), MXCSR at +0x220, RFLAGS at +0x228;
-#   - RFLAGS is saved in-frame (pushfq; pop [rsp+0x228]) after the prolog and
-#     restored (push [rsp+0x228]; popfq) before a canonical epilog
-#     `lea rsp, [rbp]; pop ...; ret` that writes no flag;
-#   - DF cleared for the handler; rsp is 16-aligned at the CALL (entry rsp is
-#     8 mod 16, 8 pushes keep it 8 mod 16, 0x238 restores 0);
+#   - prolog: push rbp, pushfq (RFLAGS saved before any flag-writing
+#     instruction), then the volatile GPRs rax rcx rdx r8 r9 r10 r11 (rbx
+#     rsi rdi r12-r15 are callee-saved by the handler under the Microsoft
+#     ABI); rbp = frame pointer (UWOP_SET_FPREG); a 0x238-byte frame: 32 bytes
+#     of shadow space at [rsp], ymm0-15 at +0x20 (all 16: the upper halves
+#     are volatile even for ymm6-15), MXCSR at +0x220;
+#   - stack: a sled sits where rsp is 8 mod 16 (function entry before the
+#     prolog, or the final RET), so its CALL enters here with rsp 0 mod 16;
+#     9 pushes (72) and the 0x238 (568) frame make 640, so rsp is 0 mod 16 at
+#     the handler CALL as the Microsoft ABI requires;
+#   - DF cleared for the handler; epilog `lea rsp,[rbp]; pop ...; popfq;
+#     pop rbp; ret`: popfq is not a canonical epilog op, but until `pop rbp`
+#     the unwinder works from rbp (the frame register), which is intact, and
+#     `pop rbp; ret` is a canonical epilog tail, so every IP unwinds exactly;
 #   - handler args (Microsoft x64): ecx = site id (imm32 at [return + 2]),
 #     rdx = sled return address.
 # Requires AVX (vmovdqu ymm); a non-AVX host needs a separately qualified SSE
@@ -33,16 +37,15 @@ use std.common.isa.x64_encode_v1.{x64_rel32_in_range_v1, x64_push_imm32_le_v1}
 use std.common.trace.observer_contract_v1.{TraceFailureV1}
 
 pub const XRAY_NATIVE_TRAMPOLINE_WIN64_FRAME_BYTES_V1 = 0x238
-pub const XRAY_NATIVE_TRAMPOLINE_WIN64_BYTES_V1 = 354
-pub const XRAY_NATIVE_TRAMPOLINE_WIN64_PROLOG_BYTES_V1 = 22
+pub const XRAY_NATIVE_TRAMPOLINE_WIN64_BYTES_V1 = 340
+pub const XRAY_NATIVE_TRAMPOLINE_WIN64_PROLOG_BYTES_V1 = 23
 # Byte offset of the handler CALL's rel32 (the CALL opcode is one byte before).
-pub const XRAY_NATIVE_TRAMPOLINE_WIN64_CALL_REL32_AT_V1 = 182
+pub const XRAY_NATIVE_TRAMPOLINE_WIN64_CALL_REL32_AT_V1 = 175
 pub const XRAY_WIN64_SHADOW_BYTES_V1 = 32
 const XRAY_WIN64_YMM_SLOT_V1 = 0x20
 const XRAY_WIN64_MXCSR_SLOT_V1 = 0x220
-const XRAY_WIN64_RFLAGS_SLOT_V1 = 0x228
-# rbp after the 8 pushes; the sled return address is 8 slots above it.
-const XRAY_WIN64_RETURN_FROM_RBP_V1 = 0x40
+# rbp after the 9 pushes; the sled return address is 9 slots above it.
+const XRAY_WIN64_RETURN_FROM_RBP_V1 = 0x48
 const XRAY_WIN64_RBP_V1 = 5
 
 # Unwind operation codes (UNWIND_CODE.UnwindOp).
@@ -110,14 +113,12 @@ fn xray_win64_rsp_disp32_v1(out: [i64], opcode: [i64], modrm: i64, disp: i64) ->
 pub fn xray_native_trampoline_bytes_win64_v1(handler_rel32: i64) -> [i64]:
     if not x64_rel32_in_range_v1(handler_rel32):
         return []
-    var bytes: [i64] = [0x55]                                   # push rbp
+    var bytes: [i64] = [0x55, 0x9C]                             # push rbp; pushfq
     for reg in xray_win64_saved_gprs_v1():
         bytes = xray_win64_push_pop_v1(bytes, reg, false)
     for byte in [0x48, 0x89, 0xE5, 0x48, 0x81, 0xEC]:          # mov rbp,rsp; sub rsp,
         bytes.push(byte)
     bytes = x64_push_imm32_le_v1(bytes, XRAY_NATIVE_TRAMPOLINE_WIN64_FRAME_BYTES_V1)
-    bytes.push(0x9C)                                            # pushfq
-    bytes = xray_win64_rsp_disp32_v1(bytes, [0x8F], 0x84, XRAY_WIN64_RFLAGS_SLOT_V1)  # pop [rsp+0x228]
     bytes.push(0xFC)                                            # cld
     for ymm in 0..16:
         bytes = xray_win64_vmovdqu_rsp_v1(bytes, ymm, XRAY_WIN64_YMM_SLOT_V1 + ymm * 32, false)
@@ -129,8 +130,6 @@ pub fn xray_native_trampoline_bytes_win64_v1(handler_rel32: i64) -> [i64]:
     bytes = xray_win64_rsp_disp32_v1(bytes, [0x0F, 0xAE], 0x94, XRAY_WIN64_MXCSR_SLOT_V1)  # ldmxcsr
     for ymm in 0..16:
         bytes = xray_win64_vmovdqu_rsp_v1(bytes, ymm, XRAY_WIN64_YMM_SLOT_V1 + ymm * 32, true)
-    bytes = xray_win64_rsp_disp32_v1(bytes, [0xFF], 0xB4, XRAY_WIN64_RFLAGS_SLOT_V1)  # push [rsp+0x228]
-    bytes.push(0x9D)                                            # popfq
     for byte in [0x48, 0x8D, 0x65, 0x00]:                       # lea rsp, [rbp]
         bytes.push(byte)
     val gprs = xray_win64_saved_gprs_v1()
@@ -138,6 +137,7 @@ pub fn xray_native_trampoline_bytes_win64_v1(handler_rel32: i64) -> [i64]:
     while index >= 0:
         bytes = xray_win64_push_pop_v1(bytes, gprs[index], true)
         index = index - 1
+    bytes.push(0x9D)                                            # popfq
     bytes.push(0x5D)                                            # pop rbp
     bytes.push(0xC3)                                            # ret
     bytes
@@ -180,13 +180,15 @@ pub fn xray_native_trampoline_win64_unwind_v1() -> [i64]:
         XrayWin64UnwindCodeV1(code_offset: XRAY_NATIVE_TRAMPOLINE_WIN64_PROLOG_BYTES_V1,
             op: XRAY_WIN64_UWOP_ALLOC_LARGE_V1, info: 0,
             slots: [XRAY_NATIVE_TRAMPOLINE_WIN64_FRAME_BYTES_V1 / 8]),
-        XrayWin64UnwindCodeV1(code_offset: 15, op: XRAY_WIN64_UWOP_SET_FPREG_V1, info: 0, slots: [])]
-    # pushes, latest first: r11 @12 r10 @10 r9 @8 r8 @6 rdx @4 rcx @3 rax @2 rbp @1
-    val ends = [12, 10, 8, 6, 4, 3, 2]
+        XrayWin64UnwindCodeV1(code_offset: 16, op: XRAY_WIN64_UWOP_SET_FPREG_V1, info: 0, slots: [])]
+    # pushes, latest first: r11 @13 r10 @11 r9 @9 r8 @7 rdx @5 rcx @4 rax @3,
+    # pushfq @2 (an 8-byte allocation), rbp @1
+    val ends = [13, 11, 9, 7, 5, 4, 3]
     val regs = [11, 10, 9, 8, 2, 1, 0]
     for index in 0..ends.len():
         codes.push(XrayWin64UnwindCodeV1(code_offset: ends[index], op: XRAY_WIN64_UWOP_PUSH_NONVOL_V1,
             info: regs[index], slots: []))
+    codes.push(XrayWin64UnwindCodeV1(code_offset: 2, op: XRAY_WIN64_UWOP_ALLOC_SMALL_V1, info: 0, slots: []))
     codes.push(XrayWin64UnwindCodeV1(code_offset: 1, op: XRAY_WIN64_UWOP_PUSH_NONVOL_V1,
         info: XRAY_WIN64_RBP_V1, slots: []))
     xray_win64_unwind_info_v1(XRAY_NATIVE_TRAMPOLINE_WIN64_PROLOG_BYTES_V1, XRAY_WIN64_RBP_V1, 0, codes)

@@ -19,10 +19,13 @@
  *     (IMAGE_REL_AMD64_ADDR32NB), resolved against this module's __ImageBase.
  *
  * Windows x64 bounded AVX profile (plan 3.3, the PR #5962 remedy): saves
- * rbp, the volatile GPRs rax rcx rdx r8-r11, ymm0-15 in full (their upper
- * halves are volatile for every register), MXCSR and RFLAGS; 32 bytes of
- * shadow space; DF clear and rsp 16-aligned at the handler CALL; canonical
- * epilog (lea rsp,[rbp]; pops; ret) so the unwinder can recognise it.
+ * rbp, RFLAGS (pushfq second, before any flag-writing instruction), the
+ * volatile GPRs rax rcx rdx r8-r11, ymm0-15 in full (their upper halves are
+ * volatile for every register) and MXCSR; 32 bytes of shadow space. A sled
+ * sits where rsp is 8 mod 16, so its CALL enters here at 0 mod 16; 9 pushes
+ * + 0x238 keep rsp 16-aligned at the handler CALL; DF clear. Epilog: lea
+ * rsp,[rbp]; pops; popfq; pop rbp; ret (rbp, the frame register, stays
+ * intact until the canonical `pop rbp; ret` tail, so the unwinder is exact).
  * Handler args: ecx = site id (imm32 at [return + 2]), rdx = sled return.
  * The host must refuse install on a CPU / OS without AVX state.
  *
@@ -38,7 +41,7 @@
 #define SIMPLE_XRAY_API __declspec(dllexport)
 /* Linker-defined base of the image this TU is linked into (link.exe / lld-link). */
 extern const uint8_t __ImageBase[];
-#define XMAP_TEXT_BASE(field_address, value) ((uintptr_t)__ImageBase + (uintptr_t)(uint32_t)(value))
+#define XMAP_TEXT_BASE(field_address, value) ((void)(field_address), (uintptr_t)__ImageBase + (uintptr_t)(uint32_t)(value))
 #endif
 
 /* x86-64 sled shape, Windows x64 ABI profile (xray_native_map_format_v1.spl). */
@@ -73,7 +76,7 @@ static int xray_isa_sled_calls_trampoline(uintptr_t sled, uint32_t site_id) {
 }
 
 /* Frame (0x238 bytes below rbp-after-pushes): [rsp+0x00..0x20) shadow space,
- * ymm0-15 at +0x20, MXCSR at +0x220, RFLAGS at +0x228. rbp+0x40 = sled return. */
+ * ymm0-15 at +0x20, MXCSR at +0x220. rbp+0x40 = saved RFLAGS, rbp+0x48 = sled return. */
 __asm__(
     ".text\n"
     ".globl __simple_xray_trampoline_win64_v1\n"
@@ -83,6 +86,8 @@ __asm__(
     ".seh_proc __simple_xray_trampoline_win64_v1\n"
     "    pushq %rbp\n"
     "    .seh_pushreg %rbp\n"
+    "    pushfq\n"
+    "    .seh_stackalloc 8\n"
     "    pushq %rax\n"
     "    .seh_pushreg %rax\n"
     "    pushq %rcx\n"
@@ -102,8 +107,6 @@ __asm__(
     "    subq $0x238, %rsp\n"
     "    .seh_stackalloc 0x238\n"
     "    .seh_endprologue\n"
-    "    pushfq\n"
-    "    popq 0x228(%rsp)\n"
     "    cld\n"
     "    vmovdqu %ymm0, 0x20(%rsp)\n"
     "    vmovdqu %ymm1, 0x40(%rsp)\n"
@@ -122,7 +125,7 @@ __asm__(
     "    vmovdqu %ymm14, 0x1e0(%rsp)\n"
     "    vmovdqu %ymm15, 0x200(%rsp)\n"
     "    stmxcsr 0x220(%rsp)\n"
-    "    movq 0x40(%rbp), %rdx\n"
+    "    movq 0x48(%rbp), %rdx\n"
     "    movl 2(%rdx), %ecx\n"
     "    callq simple_xray_native_handler_v1\n"
     "    ldmxcsr 0x220(%rsp)\n"
@@ -142,8 +145,6 @@ __asm__(
     "    vmovdqu 0x1c0(%rsp), %ymm13\n"
     "    vmovdqu 0x1e0(%rsp), %ymm14\n"
     "    vmovdqu 0x200(%rsp), %ymm15\n"
-    "    pushq 0x228(%rsp)\n"
-    "    popfq\n"
     "    leaq 0(%rbp), %rsp\n"
     "    popq %r11\n"
     "    popq %r10\n"
@@ -152,6 +153,7 @@ __asm__(
     "    popq %rdx\n"
     "    popq %rcx\n"
     "    popq %rax\n"
+    "    popfq\n"
     "    popq %rbp\n"
     "    retq\n"
     "    .seh_endproc\n"
