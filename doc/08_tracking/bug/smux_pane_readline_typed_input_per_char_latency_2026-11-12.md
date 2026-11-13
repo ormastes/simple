@@ -74,3 +74,39 @@ until it outputs again. Spec:
 Side observation, not fixed here: a CR sent to a cooked-mode `read -r x`
 (no readline) under ConPTY never completed the read within 40 s. Filed as
 `smux_pane_cooked_read_enter_never_completes_2026-11-13.md` (not reproducible on 2026-11-13).
+
+## Re-measurement 2026-11-13: 6.1-6.8 s, cause is the child, not smux
+
+The spec now reports 6.08-6.8 s against its 5 s budget. Nothing on the smux
+pacing path changed since #8677: `git log src/os/apps/smux` shows only
+`4888189d145` (POSIX hangup batching in `child_lifecycle.spl`), and the spec's
+only later edit is `51835b9d84f` (lighter capture poll), which was part of #8677.
+
+Measured on release/1.0.0 `e1df3719a2d`, phase-1 seed, host CPU load 15 %:
+
+| condition | typed200 seconds |
+|---|---|
+| spec alone | 6.47 |
+| spec while the whole smux directory runs | 6.62 |
+| probe, chunk 1 byte | 7.08 |
+| probe, chunk 4 bytes (shipped) | 6.79-6.84 |
+| probe, chunk 8 bytes | 8.58 |
+| probe, chunk 16 bytes | > 90 (never echoed) |
+
+A per-write trace (temporary `print` in `_flush_input`) shows every 4-byte
+chunk taking 105-130 ms from write to the 4-byte echo, i.e. ~26 ms per key
+inside the MSYS readline child. Our own share is the poll period: with a 30 ms
+poll the per-chunk times quantise to 111/148 ms, so smux adds one poll (~10 ms
+with the spec's 5 ms sleep), not the bulk. The probe loop spent 3.4 s of its
+6.8 s in `smux_capture_history`, running in parallel with the child.
+
+Why pacing cannot reach 3 s here: per-key cost is ~25 ms at a queue depth of
+1, and grows with depth (8 bytes -> ~43 ms/key, 16 -> runaway O(n^2)), so a
+bigger chunk or two chunks in flight makes it worse, and a smaller one only
+adds round trips. 200 keys x ~25 ms is ~5 s before smux does anything. The
+4.0-4.3 s recorded in #8677 implies ~20 ms per key on that day's host state.
+
+Status: open. The 5 s limit was NOT raised. A real fix needs the child to see
+fewer key events (e.g. bracketed paste when the child has enabled DECSET 2004,
+which changes `send_command` semantics and needs an owner decision), or a
+cheaper MSYS console read path.
