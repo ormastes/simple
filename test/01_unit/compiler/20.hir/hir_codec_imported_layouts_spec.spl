@@ -1,0 +1,54 @@
+use std.spec
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.common.config.Logger
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.statements.*
+use compiler.hir.hir_types.{HirModule, SymbolId}
+use compiler.hir.hir_codec.{hir_module_encode, hir_module_decode, hir_codec_header}
+
+# HirModule.imported_layouts (6bf24744e00) was added without regenerating the
+# codec, so a cache hit decoded it empty and raised a spurious W-HIR-INFER-001.
+# The regenerated codec (v17) transports it; a v16 frame is rejected by header.
+fn layout_module() -> HirModule:
+    val source = "struct Point:\n    x: i64\n    y: i64\n\n" +
+        "fn origin() -> Point:\n    Point(x: 0, y: 0)\n"
+    val parsed = parse_full_frontend(source, "layouts.spl", "layouts", Logger(level: 0))
+    var lowering = HirLowering.with_filename("layouts.spl")
+    lowering.lower_module(parsed)
+
+describe "HirModule.imported_layouts survives the HIR codec":
+    it "round-trips an imported struct layout under its importer key":
+        var module = layout_module()
+        val own_keys = module.structs.keys()
+        expect(own_keys.len()).to_equal(1)
+        val layout = module.structs[own_keys[0]]
+        val key = SymbolId(id: 777001)
+        module.imported_layouts[key] = layout
+        val wire = hir_module_encode(module)
+        expect(wire != "").to_equal(true)
+        val decoded = hir_module_decode(wire)
+        expect(decoded.?).to_equal(true)
+        val back = decoded.unwrap()
+        expect(back.imported_layouts.len()).to_equal(1)
+        expect(back.imported_layouts.has(key)).to_equal(true)
+        val restored = back.imported_layouts[key]
+        expect(restored.name).to_equal("Point")
+        expect(restored.fields.len()).to_equal(2)
+        expect(restored.symbol.id).to_equal(layout.symbol.id)
+        # Still non-owning: the module's own declarations are untouched.
+        expect(back.structs.len()).to_equal(1)
+
+    it "re-encodes to the same bytes (store self-check fixed point)":
+        var module = layout_module()
+        module.imported_layouts[SymbolId(id: 777002)] = module.structs[module.structs.keys()[0]]
+        val wire = hir_module_encode(module)
+        expect(hir_module_encode(hir_module_decode(wire).unwrap())).to_equal(wire)
+
+    it "rejects a v16 frame, which cannot carry imported_layouts":
+        val wire = hir_module_encode(layout_module())
+        expect(hir_codec_header()).to_start_with("spl-hircodec-v17-imported-layouts ")
+        val previous = wire.replace("spl-hircodec-v17-imported-layouts",
+            "spl-hircodec-v16-local-annotation-provenance")
+        expect(previous != wire).to_equal(true)
+        expect(hir_module_decode(previous).?).to_equal(false)
