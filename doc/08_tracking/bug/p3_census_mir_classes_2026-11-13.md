@@ -273,10 +273,11 @@ compiler as the census):
   call natively, two pairs + the fallback call on the seed. `DynI64FnSlot` is the
   cached hot path; upgrade path if a measurement ever shows it matters: a
   per-slot owned out cell allocated once in `resolve`. Not built.
-- `check-no-direct-rt.shs --roots src`: +11 direct `rt_*(` sites from this commit
-  (neither file is allowlisted). The ratchet is already red on
-  `origin/release/1.0.0` (6760 forbidden vs baseline 6290, pre-existing +470);
-  baseline not touched here — coordinator decision.
+- `check-no-direct-rt.shs --roots src`: both files are allowlisted
+  (`scripts/check/no_direct_rt_allowlist.txt:9` covers `src/lib/nogc_sync_mut/sffi/`,
+  `:57` covers `suffix:_sffi.spl`); measured forbidden count is 6760 at base and tip
+  (delta 0). The ratchet is already red on `origin/release/1.0.0` (6760 vs baseline
+  6290, pre-existing); baseline not touched here.
 
 Residuals (not changed here):
 - seed `interpreter_extern/wsffi.rs:439` `spl_dlsym_process_checked` raises
@@ -293,7 +294,7 @@ Residuals (not changed here):
 Same shape, not flagged by this census (the borrow stage flags per module and
 these modules were not among the 5 `[go-to-end] failed`; why `dynamic.spl:149/176`
 in the SAME module passed while 92/105 failed is not understood — record it, do
-not assume they are safe). Single-line `*mut i64` extern decls (non-exhaustive;
+not assume they are safe). Review lead: `check_short_call` (`55.borrow/borrow_check/nll_short_calls.spl:166-183`) fires only when the argument conflicts with a loan alias live in `state`; both unflagged sites have an `if … return Err` guard between the `var` and the call while both flagged sites are straight-line — likely loan-state loss across a join (a checker gap, not a safety proof). Single-line `*mut i64` extern decls (non-exhaustive;
 multi-line decls such as `spl_wffi_call_i64_into_bytes` `out_len`, the
 `rt_torch_*_checked` family, `rt_value_as_string`, `rt_file_stat` appear only in
 the site list below): `spl_dlopen_checked`,
