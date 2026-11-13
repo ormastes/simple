@@ -473,7 +473,14 @@ pub extern "C" fn rt_vulkan_init() -> i64 {
             1
         }
         Err(e) => {
-            state.set_error(format!("VulkanDevice::new_default: {e}"));
+            // A failed vkCreateDevice reports the same text as the interpreter
+            // lane, so `runtime-init: {last_error}` reads alike on both paths.
+            let msg = match e {
+                crate::vulkan::VulkanError::DeviceCreationFailed(msg) if msg.starts_with("vkCreateDevice(") => msg,
+                e => format!("VulkanDevice::new_default: {e}"),
+            };
+            eprintln!("[vulkan] rt_vulkan_init failed at {msg}");
+            state.set_error(msg);
             0
         }
     }
