@@ -340,3 +340,8 @@ change, as the 2026-08-26 section already states.
 
 FIXED (2026-11-11 triage, lane boot22) per in-file addendum; bookkeeping concurrence. No contrary evidence found in this pass; header status left as the
 owning lane recorded it.
+---
+
+## Lane disposition 2026-11-13 (live-p3-l4, work/live-p3-l4-20261113, base f790f7f266e)
+
+Bookkeeping concurrence with the 2026-11-11 boot22 header flip: the lz77 hash-chain matcher (`src/lib/nogc_sync_mut/compression/gzip/lz77.spl`, `head`/`prev` tables, `max_search`-bounded walks) and the dense huffman lookup (`huffman.spl:18-24`) are both present at this base, and the tracked-seed `gzip_spec.spl` 6/6 fresh PASS boot22 recorded was on this same binary (no-identical-rerun rule — not re-executed here). Residual optional cleanup unchanged: `scv_pack_v2_gzip_stored` remains a no-longer-necessary workaround; re-enabling real compression on `pack-write-v2r` is a separately measured change. No in-lane change.

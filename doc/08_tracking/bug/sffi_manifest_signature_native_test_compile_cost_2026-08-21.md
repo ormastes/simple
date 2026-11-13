@@ -35,3 +35,8 @@ signature verification into the per-call SFFI hot path.
 ## Lane disposition 2026-11-13 (p3-misc-b)
 
 open compile-cost concern; owner: SFFI manifest lane.
+---
+
+## Lane disposition 2026-11-13 (live-p3-l4, work/live-p3-l4-20261113, base f790f7f266e)
+
+Concurs with p3-misc-b: the required resolution (focused native-build cache preservation/reuse, not compiling unrelated test-runner/compiler modules for the leaf spec, separate setup/compile/link/execution timing, verifier kept on the admission path) is a native-test-infrastructure performance program for the SFFI manifest lane. Attempting to reproduce the 6-minute native compile on this Windows interpreter host would measure this host, not the fix. No in-lane change. Owner: SFFI manifest lane.

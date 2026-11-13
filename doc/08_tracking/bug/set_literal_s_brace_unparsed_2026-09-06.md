@@ -98,3 +98,9 @@ where the lexer is already in string context.
 ## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
 
 Concurs with the recorded status: OPEN feature gap — seed has no s{...} production and the self-hosted frontend has half. Implementing the set-literal grammar end-to-end (lexer + both parsers + literal lowering) exceeds the per-bug timebox and needs grammar-owner sign-off. No in-lane change.
+
+---
+
+## Lane disposition 2026-11-13 (live-p3-l4, work/live-p3-l4-20261113, base f790f7f266e)
+
+Concurs with p3-comp1: still an OPEN feature gap — the Rust seed has no `SetLit` token/AST/production (`grep SetLit src/compiler_rust` = 0), and the pure-Simple frontend still has everything downstream of the parser with the lexer/parser productions missing (no `EXPR_SET_LIT` flat tag anywhere in `src/compiler`). Implementing it end-to-end is the six-plus shared-frontend-file change the record lists, needs grammar-owner sign-off, and is unobservable from any spec until a seed rebuild redeploys — seed-lane work first per the record's own unblock ordering. `Set.from([...])` remains the complete substitute; the type and all five operators stay exercised (13/13 in `test/03_system/feature/usage/set_literal_spec.spl`). No in-lane change. Owner: seed grammar lane, then self-hosted frontend lane.
