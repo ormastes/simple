@@ -165,3 +165,10 @@ JS-engine work, and a sibling lane (browser_composition_revision_counters,
 2026-11-13 addendum) just confirmed the same import graph now fails one lane
 deeper at `_snapshot_current_history_for_departure` — consistent with active
 engine-lane churn. Kept OPEN, handed back with no new action by this lane.
+
+
+---
+
+## 2026-11-13 triage (live-P3 lane l1, work/live-p3-l1-20261113, base f790f7f266e)
+
+**LIVE (confirmed; owner unchanged — JS-engine/browser lane)** — No re-measure this lane (no-green-rerun; the 2026-11-11 runner6 and 2026-11-13 UI-batch verdicts stand on this base class). All remaining mechanisms live in `src/lib/gc_async_mut/web/` / `src/lib/nogc_sync_mut/js/`; the record's own instruction to coordinate with the in-flight JS-engine work stands; group 2 (missing helpers/fields) needs that lane to land definitions; group 1 waits on the seed text-slice reversal (separate tracker).

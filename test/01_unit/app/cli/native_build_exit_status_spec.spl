@@ -1,5 +1,5 @@
 use std.spec.{describe, it, expect}
-use app.cli.native_build_exit_status.{native_build_windows_status_label, native_build_posix_signal}
+use app.cli.native_build_exit_status.{native_build_windows_status_label, native_build_posix_signal, native_build_signal_name, native_build_exit_cause_field_v1}
 
 describe "native worker status diagnostics":
     it "recognizes the observed Windows access violation without a POSIX signal":
@@ -29,3 +29,23 @@ describe "native worker status diagnostics":
     it "keeps the portable encoded signal boundaries":
         expect(native_build_posix_signal(-129)).to_equal(1)
         expect(native_build_posix_signal(-255)).to_equal(127)
+
+    # Phase 3 census: `[mir-shard] owner=1/2@0 status=CRASH exit=-134` was the
+    # only crash evidence; -134 had to be decoded by hand.
+    it "names the portable POSIX signals":
+        expect(native_build_signal_name(6)).to_equal("SIGABRT")
+        expect(native_build_signal_name(11)).to_equal("SIGSEGV")
+        expect(native_build_signal_name(9)).to_equal("SIGKILL")
+        expect(native_build_signal_name(4)).to_equal("SIGILL")
+        expect(native_build_signal_name(8)).to_equal("SIGFPE")
+        expect(native_build_signal_name(15)).to_equal("SIGTERM")
+        # 7 and 10 differ between Linux and the BSDs: number only.
+        expect(native_build_signal_name(7)).to_equal("signal 7")
+        expect(native_build_signal_name(10)).to_equal("signal 10")
+
+    it "adds a crash-cause field to a worker exit row, and nothing for an ordinary exit":
+        expect(native_build_exit_cause_field_v1(-134)).to_equal(" signal=SIGABRT(6)")
+        expect(native_build_exit_cause_field_v1(-139)).to_equal(" signal=SIGSEGV(11)")
+        expect(native_build_exit_cause_field_v1(-1073741819)).to_equal(" ntstatus=0xC0000005 (access violation)")
+        for code in [0, 1, 2, -1, -2]:
+            expect(native_build_exit_cause_field_v1(code)).to_equal("")

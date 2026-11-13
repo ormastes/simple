@@ -148,3 +148,10 @@ the two gates that completed.
 ## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
 
 **LIVE (confirmed)** — ne4 re-measured: UI backend-isolation now PASS; PID/clock-keyed artifact ratchet FAIL with 8 offenders needing per-file owner decisions (de-key vs widen exclusions vs reviewed baseline); guard-wiring re-run exceeded lane budget. Baseline is a reviewed-update control, not mechanically editable.
+
+
+---
+
+## 2026-11-13 triage (live-P3 lane l1, work/live-p3-l1-20261113, base f790f7f266e)
+
+**LIVE (confirmed)** — ne4 re-measured: UI backend-isolation PASS; PID/clock-keyed artifact ratchet FAIL with 8 offenders needing per-file owner decisions (de-key vs widen exclusions vs reviewed baseline); guard-wiring full-tree re-run exceeded lane budget. Baseline is a reviewed-update control, not mechanically editable.

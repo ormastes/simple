@@ -1,0 +1,92 @@
+# The kernel-facing Cranelift JIT lane executes MIR natively and reports an
+# unbindable callee as a compile error.
+#
+# Before this spec the lane drove CodegenPipeline.jit(), which could not
+# create a module on a non-x86_64 host (Native mapped to CL_TARGET_X86_64) and
+# lowered a named callee to `iconst 0` with no import and no diagnostic. The
+# lane now runs cranelift_jit_run_main (the AOT lane's lowering in a host JIT
+# module); see jit_extern_resolution_spec.spl for the binding rules.
+use std.spec.*
+use compositions.kernel_llvm_cranelift.compiler.driver.bootstrap_k1_selected.{install_selected_k1_backend_table_v1}
+use compiler.backend.static_jit_lane.{installed_k1_jit_lane_name_v1, k1_jit_lane_run_modules_v1}
+use compiler.common.driver_core_types.{CompileResult}
+use compiler.common.attributes.{vhdl_hardware_metadata_default}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir.*
+
+extern fn rt_getpid() -> i64
+
+fn lane_main(module_name: text, insts: [MirInst], ret: MirOperand) -> MirModule:
+    val main_fn = MirFunction(
+        symbol: SymbolId(id: 1), name: "main",
+        signature: MirSignature(params: [], return_type: MirType.i64(), is_variadic: false),
+        locals: [MirLocal(id: LocalId(id: 0), name: nil, type_: MirType.i64(), kind: LocalKind.Temp, is_ghost: false)],
+        blocks: [MirBlock(id: BlockId(id: 0), label: nil, instructions: insts, terminator: MirTerminator.Ret(Some(ret)))],
+        entry_block: BlockId(id: 0), span: Span.default(),
+        generic_params: [], is_generic_template: false, specialization_of: nil,
+        type_bindings: {}, layout_phase: nil, is_kernel: false, is_export_c: false,
+        export_name: "", has_driver_manifest_attr: false, driver_manifest_attr: nil,
+        has_vhdl_metadata: false, vhdl_metadata: vhdl_hardware_metadata_default(), has_fast_math: false
+    )
+    MirModule(name: module_name, functions: {SymbolId(id: 1): main_fn}, statics: {}, constants: {}, types: {})
+
+fn lane_int(value: i64) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(value), MirType.i64()))
+
+fn lane_local0() -> MirOperand:
+    MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0)))
+
+fn lane_call(callee: MirOperand, args: [MirOperand]) -> MirInst:
+    MirInst(kind: MirInstKind.Call(Some(LocalId(id: 0)), callee, args), span: nil)
+
+fn lane_verdict(result: CompileResult) -> text:
+    match result:
+        case Success(value): "success:{value ?? "<nil>"}"
+        case CodegenError(message): "codegen-error:{message}"
+        case RuntimeError(message): "runtime-error:{message}"
+        case _: "other"
+
+describe "Cranelift JIT lane executes MIR natively":
+
+    it "is the installed lane":
+        expect(install_selected_k1_backend_table_v1()).to_equal(true)
+        expect(installed_k1_jit_lane_name_v1()).to_equal("cranelift")
+
+    it "returns the value main computed":
+        expect(install_selected_k1_backend_table_v1()).to_equal(true)
+        val verdict = lane_verdict(k1_jit_lane_run_modules_v1([lane_main("lane_const", [], lane_int(42))]))
+        expect(verdict).to_equal("success:42")
+
+    it "links a Foreign extern natively":
+        expect(install_selected_k1_backend_table_v1()).to_equal(true)
+        val module = lane_main("lane_foreign",
+            [lane_call(mir_operand_foreign_function("labs", MirType.i64()), [lane_int(-5)])], lane_local0())
+        expect(lane_verdict(k1_jit_lane_run_modules_v1([module]))).to_equal("success:5")
+
+    it "links a Runtime extern natively through the provider's runtime table":
+        expect(install_selected_k1_backend_table_v1()).to_equal(true)
+        val module = lane_main("lane_runtime_pid",
+            [lane_call(mir_operand_runtime_function("rt_getpid", MirType.i64()), [])], lane_local0())
+        expect(lane_verdict(k1_jit_lane_run_modules_v1([module]))).to_equal("success:{rt_getpid()}")
+
+describe "Cranelift JIT lane fails closed on an unbindable callee":
+
+    it "reports a Runtime extern as a compile error naming module and symbol":
+        expect(install_selected_k1_backend_table_v1()).to_equal(true)
+        val module = lane_main("lane_runtime",
+            [lane_call(mir_operand_runtime_function("rt_zz_no_such_runtime_symbol", MirType.i64()), [])], lane_local0())
+        val verdict = lane_verdict(k1_jit_lane_run_modules_v1([module]))
+        expect(verdict).to_start_with("codegen-error:")
+        expect(verdict).to_contain("lane_runtime")
+        expect(verdict).to_contain("E-JIT-RUNTIME-EXTERN-UNBOUND: rt_zz_no_such_runtime_symbol")
+
+    it "does not run the last module when an earlier one names a callee defined nowhere":
+        expect(install_selected_k1_backend_table_v1()).to_equal(true)
+        val refused = lane_main("lane_first",
+            [lane_call(MirOperand(kind: MirOperandKind.Const(MirConstValue.Str("no_such_fn"), MirType.i64()), call_origin: MirCallOrigin.Source), [])], lane_local0())
+        val runnable = lane_main("lane_last", [], lane_int(9))
+        val verdict = lane_verdict(k1_jit_lane_run_modules_v1([refused, runnable]))
+        expect(verdict).to_start_with("codegen-error:")
+        expect(verdict).to_contain("lane_first")
+        expect(verdict).to_contain("E-JIT-UNRESOLVED-CALLEE: no_such_fn")

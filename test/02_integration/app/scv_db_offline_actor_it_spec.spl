@@ -1,6 +1,6 @@
-use test.fixtures.scv.db_filesystem_fixture.{setup_item2_filesystem_link}
+use test.fixtures.scv.db_filesystem_fixture.{setup_item2_filesystem_link, setup_item2_filesystem_link_supported}
 use std.nogc_sync_mut.io.path_identity.{path_final_existing}
-use std.spec.{describe, it, expect, step}
+use std.spec.{describe, it, expect, step, skip}
 use app.io.mod (cwd, dir_create, file_read, file_write, file_delete, file_exists)
 use app.scv.db.offline_actor.{db_actor_open, db_actor_reserve}
 use std.nogc_sync_mut.io.crypto_sffi.{random_hex}
@@ -67,15 +67,22 @@ describe "Durable offline database actor reservations":
         expect(db_actor_open(root, "00112233445566778899aabbccddeeff")).to_equal(Err("SCVDB_STORE_SCOPE"))
         expect(file_exists("{victim}/local/actors")).to_be(false)
 
-    it "rejects a counter symlink without changing its external target":
-        val root = setup_item2_actor_root()
-        val session = db_actor_open(root, "00112233445566778899aabbccddeeff").unwrap()
-        val path = "{root}/.scv/local/actors/{session.actor.hex}.counter"
-        val original = file_read(path)
-        val victim = setup_item2_actor_root()
-        expect(file_write("{victim}/counter", original)).to_be(true)
-        expect(file_delete(path)).to_be(true)
-        val code = setup_item2_filesystem_link(root, "{victim}/counter", path, false)
-        expect(code).to_equal(0)
-        expect(db_actor_reserve(session, "bug")).to_equal(Err("SCVDB_ACTOR_ROTATION_REQUIRED"))
-        expect(file_read("{victim}/counter")).to_equal(original)
+    val file_links_unsupported = if not setup_item2_filesystem_link_supported():
+        "host capability: SymbolicLink creation requires administrator/developer mode on this Windows host"
+    else:
+        ""
+    if file_links_unsupported != "":
+        skip("rejects a counter symlink without changing its external target", file_links_unsupported)
+    else:
+        it "rejects a counter symlink without changing its external target":
+            val root = setup_item2_actor_root()
+            val session = db_actor_open(root, "00112233445566778899aabbccddeeff").unwrap()
+            val path = "{root}/.scv/local/actors/{session.actor.hex}.counter"
+            val original = file_read(path)
+            val victim = setup_item2_actor_root()
+            expect(file_write("{victim}/counter", original)).to_be(true)
+            expect(file_delete(path)).to_be(true)
+            val code = setup_item2_filesystem_link(root, "{victim}/counter", path, false)
+            expect(code).to_equal(0)
+            expect(db_actor_reserve(session, "bug")).to_equal(Err("SCVDB_ACTOR_ROTATION_REQUIRED"))
+            expect(file_read("{victim}/counter")).to_equal(original)

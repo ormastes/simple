@@ -56,8 +56,18 @@ fn compile_and_run(main_body: &str) -> Result<i64, String> {
         .map_err(|e| format!("flatten: {e}"))?;
     let hir_module = hir::lower(&module).map_err(|e| format!("HIR: {e}"))?;
     let mir_module = mir::lower_to_mir(&hir_module).map_err(|e| format!("MIR: {e}"))?;
+    let full = run_main(&mir_module);
+    // `run_file_jit` prunes unreachable functions first; the dispatch
+    // decisions (vtable, by-name bind, ambiguity) must not change with it.
+    let mut pruned = mir_module;
+    mir::retain_reachable_functions(&mut pruned);
+    assert_eq!(run_main(&pruned), full, "reachability pruning changed the result");
+    full
+}
+
+fn run_main(mir_module: &mir::MirModule) -> Result<i64, String> {
     let mut jit = JitCompiler::new_static().map_err(|e| format!("JIT: {e}"))?;
-    jit.compile_module(&mir_module).map_err(|e| format!("JIT compile: {e}"))?;
+    jit.compile_module(mir_module).map_err(|e| format!("JIT compile: {e}"))?;
     unsafe { jit.call_i64_void("main").map_err(|e| format!("run: {e}")) }
 }
 

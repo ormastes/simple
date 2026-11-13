@@ -2739,6 +2739,18 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "spl_dlopen",
     "spl_dlsym",
     "spl_wffi_call_i64",
+    // Caret JIT extern wave 2: scalar-ABI C exports of TUs linked into the seed archive.
+    "rt_alloc_probe_count_v1",
+    "rt_alloc_probe_coverage_v1",
+    "rt_alloc_probe_reset_v1",
+    "rt_mem_guard_stats",
+    "rt_mem_harden_check_native",
+    "rt_time_now_seconds",
+    "rt_time_now_seconds_f64",
+    "rt_linux_group_cancel_v1",
+    "rt_linux_group_parent_release_v1",
+    "rt_linux_group_stream_release_inherited_v2",
+    "spl_thread_current_id",
     "sys_get_args", // -> rt_get_args
     "sys_exit",     // -> rt_exit
 ];

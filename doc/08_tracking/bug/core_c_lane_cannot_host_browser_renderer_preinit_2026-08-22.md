@@ -155,3 +155,10 @@ this host, partial failure closed), startup failure (non-empty envp exits 126)
 and `rt_browser_renderer_preinit_entry_selfcheck: PASS`. `bug_db.sdn` row
 moved open -> fixed to match the shard. Not covered here: an end-to-end core-C
 renderer-worker link, which needs a deployed self-hosted compiler.
+
+
+---
+
+## 2026-11-13 triage (live-P3 lane l1, work/live-p3-l1-20261113, base f790f7f266e)
+
+**FIXED (confirmed)** — `rt_browser_renderer_preinit_entry_selfcheck.c` + `stage3_fdwalk.c` in-tree; Linux aarch64 gate `check-browser-renderer-sandbox-seccomp.shs` PASS 10/10 recorded 2026-11-13 (four selfchecks all real). Not covered here: end-to-end core-C renderer-worker link, needs a deployed self-hosted compiler.

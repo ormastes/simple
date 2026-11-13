@@ -76,3 +76,17 @@ whoever owns threads can start from a known repro rather than from scratch.
 ## Lane disposition 2026-11-13 (p3-misc-b)
 
 triaged in-file: unimplemented features plus one genuine concurrency defect owned elsewhere.
+## Addendum 2026-11-13 — lane lp5 (worktree lp5-wt): re-run at tip
+
+`test/01_unit/std/perf_optimization_spec.spl` now runs 54 examples (was 51): 51 pass,
+3 fail. The 4 threading failures recorded 2026-09-20 have drifted with the tree; the
+current 3 are "reports done immediately for PureStd" (asserts `is_done()` immediately
+after `spawn_thread` — the spec's own sibling example documents that as a race:
+"Spawn runs on a real OS thread, so is_done() right after spawn is a race"),
+"spawn_isolated2 works in native mode" and "spawns 50 two-arg threads" (both need the
+native concurrent backend under the seed interpreter). These are
+concurrency-runtime/compiler-behavior dependent (the record's own classification: P2,
+owned by the threads lane), not assertion drift this lane can safely edit — changing the
+race-asserting example would un-pin a real behavior. The 7 unimplemented-feature rows
+(mock/before_all/treesitter/codegen) stand as recorded (feature projects, tagging is a
+roadmap-owner call).

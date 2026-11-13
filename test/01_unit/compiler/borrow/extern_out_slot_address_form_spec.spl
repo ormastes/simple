@@ -1,0 +1,149 @@
+# Extern status/out slots: `&mut local` vs caller-owned address.
+#
+# Census 2026-11-13 (stage2 compile, bootstrap-fable-19): three modules failed
+# `stage=borrow` with "short borrow escapes: call argument requires a checked
+# non-retaining short contract" -- every site handed `&mut local` to an extern
+# whose out parameter was declared `*mut i64` (sffi/dynamic.spl:92/105,
+# linker/lld_sffi.spl:43). The fix passes a caller-owned 8-byte heap cell by
+# address (`i64`); the C ABI (`int64_t*`) is unchanged.
+# Record: doc/08_tracking/bug/p3_census_mir_classes_2026-11-13.md
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_symbol_table_methods.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLoweringExpr.method_calls_literals.*
+use compiler.mir._MirLoweringExpr.switch_operators_calls.*
+use compiler.borrow.borrow_check.mod.{check_mir_module}
+use std.sffi.dynamic.{spl_wffi_try_call_i64_out, DynLib}
+
+extern fn rt_alloc(size: i64) -> i64
+extern fn rt_free(ptr: i64)
+extern fn rt_ptr_write_i64(addr: i64, offset: i64, value: i64)
+extern fn rt_ptr_read_i64(addr: i64, offset: i64) -> i64
+
+val SLOT_EXTERNS = [
+    "extern fn rt_alloc(size: i64) -> i64",
+    "extern fn rt_free(ptr: i64)",
+    "extern fn rt_ptr_write_i64(addr: i64, offset: i64, value: i64)",
+    "extern fn rt_ptr_read_i64(addr: i64, offset: i64) -> i64"
+]
+
+fn borrow_messages(lines: [text]) -> [text]:
+    val filename = "extern_out_slot.spl"
+    val parsed = parse_full_frontend(lines.join("\n") + "\n", filename, filename, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(filename)
+    val hir = hir_lowering.lower_module(parsed)
+    expect(hir_lowering.errors.len()).to_equal(0)
+    var lowering = MirLowering.new(hir.symbols)
+    val mir = lowering.lower_module(hir)
+    expect(lowering.errors.len()).to_equal(0)
+    var messages: [text] = []
+    for error in check_mir_module(mir):
+        messages.push(error.message)
+    messages
+
+# dynamic.spl:92 shape (census red): `&mut probe` into a `*mut i64` extern.
+fn try_call_borrow_shape() -> [text]:
+    [
+        "@unsafe(reason: \"status/out ABI\", capabilities: [ffi, raw_ptr])",
+        "extern fn spl_wffi_try_call_i64_out(fptr: i64, args: [i64], nargs: i64, out_value: *mut i64) -> i64",
+        "@unsafe(reason: \"probe\", capabilities: [ffi, raw_ptr])",
+        "fn probe() -> bool:",
+        "    var value: i64 = 0",
+        "    val status = unsafe(capabilities: [ffi, raw_ptr]):",
+        "        spl_wffi_try_call_i64_out(0, [], 0, &mut value)",
+        "    status == 2"
+    ]
+
+# dynamic.spl `_sffi_i64_out_transport_honoured` after the fix.
+fn try_call_address_shape() -> [text]:
+    SLOT_EXTERNS + [
+        "@unsafe(reason: \"status/out ABI\", capabilities: [ffi, raw_ptr])",
+        "extern fn spl_wffi_try_call_i64_out(fptr: i64, args: [i64], nargs: i64, out_value: i64) -> i64",
+        "@unsafe(reason: \"probe\", capabilities: [ffi, raw_ptr])",
+        "fn probe() -> bool:",
+        "    val out_slot = rt_alloc(8)",
+        "    rt_ptr_write_i64(out_slot, 0, 0)",
+        "    val status = unsafe(capabilities: [ffi, raw_ptr]):",
+        "        spl_wffi_try_call_i64_out(0, [], 0, out_slot)",
+        "    rt_free(out_slot)",
+        "    status == 2"
+    ]
+
+# lld_sffi.spl:43 shape (census red): literal name, `&mut fptr`, value read after.
+fn dlsym_borrow_shape() -> [text]:
+    [
+        "@unsafe(reason: \"status/out ABI\", capabilities: [ffi, raw_ptr])",
+        "extern fn spl_dlsym_process_checked(name: text, out_symbol: *mut i64) -> i64",
+        "@unsafe(reason: \"probe\", capabilities: [ffi, raw_ptr])",
+        "fn resolve() -> i64:",
+        "    var fptr: i64 = 0",
+        "    val symbol_status = unsafe(capabilities: [ffi, raw_ptr]):",
+        "        spl_dlsym_process_checked(\"simple_lld_elf_link\", &mut fptr)",
+        "    if symbol_status != 0 or fptr <= 0:",
+        "        return 127",
+        "    fptr"
+    ]
+
+# lld_sffi.spl `lld_elf_link` after the fix.
+fn dlsym_address_shape() -> [text]:
+    SLOT_EXTERNS + [
+        "@unsafe(reason: \"status/out ABI\", capabilities: [ffi, raw_ptr])",
+        "extern fn spl_dlsym_process_checked(name: text, out_symbol: i64) -> i64",
+        "@unsafe(reason: \"probe\", capabilities: [ffi, raw_ptr])",
+        "fn resolve() -> i64:",
+        "    val out_slot = rt_alloc(8)",
+        "    rt_ptr_write_i64(out_slot, 0, 0)",
+        "    val symbol_status = unsafe(capabilities: [ffi, raw_ptr]):",
+        "        spl_dlsym_process_checked(\"simple_lld_elf_link\", out_slot)",
+        "    val fptr = rt_ptr_read_i64(out_slot, 0)",
+        "    rt_free(out_slot)",
+        "    if symbol_status != 0 or fptr <= 0:",
+        "        return 127",
+        "    fptr"
+    ]
+
+describe "extern status/out slot passed by address":
+    it "rejects a &mut local out slot handed to the try-call extern (census dynamic.spl:92 shape)":
+        step("Lower the census-red shape and run the borrow checker over the module")
+        expect(borrow_messages(try_call_borrow_shape()).join("\n")).to_contain("call argument requires a checked non-retaining short contract")
+
+    it "accepts the caller-owned address form for the try-call extern":
+        step("Lower the fixed shape: rt_alloc slot, call by address, read back, free")
+        expect(borrow_messages(try_call_address_shape()).len()).to_equal(0)
+
+    it "rejects a &mut local out slot handed to the process-symbol extern (census lld_sffi.spl:43 shape)":
+        step("Lower the census-red lld shape and run the borrow checker")
+        expect(borrow_messages(dlsym_borrow_shape()).join("\n")).to_contain("call argument requires a checked non-retaining short contract")
+
+    it "accepts the caller-owned address form for the process-symbol extern":
+        step("Lower the fixed lld shape")
+        expect(borrow_messages(dlsym_address_shape()).len()).to_equal(0)
+
+    it "null-function probe by address reports a status and leaves the zeroed slot intact":
+        step("Allocate an 8-byte slot, probe fptr 0 through the address-form extern, read back, free")
+        # Native C provider: SPL_WFFI_NULL_FUNCTION (2). Seed interpreter: only a
+        # `&mut` out is recognised, so SPL_WFFI_INVALID_ARGUMENT (1). Both leave
+        # the slot at 0. The native leg is UNEXECUTED by a seed run of this spec.
+        val out_slot = rt_alloc(8)
+        rt_ptr_write_i64(out_slot, 0, 0)
+        val status = unsafe(capabilities: [ffi, raw_ptr]):
+            spl_wffi_try_call_i64_out(0, [], 0, out_slot)
+        val value = rt_ptr_read_i64(out_slot, 0)
+        rt_free(out_slot)
+        expect(status == 1 or status == 2).to_equal(true)
+        expect(value).to_equal(0)
+
+    it "round-trips a non-zero foreign result through the public checked dispatch":
+        step("Load libm, call labs(-7) through DynLib.call_checked, expect Ok(7)")
+        # Exercises `_sffi_call_i64_checked` end to end: natively via the
+        # address-form out slot, on the seed via the `[status, value]` fallback
+        # that the re-purposed transport probe selects.
+        val lib = DynLib.load("libm.so.6")
+        expect(lib.?).to_equal(true)
+        if val loaded = lib:
+            expect(loaded.call_checked("labs", [-7])).to_equal(Ok(7))

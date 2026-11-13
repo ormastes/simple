@@ -1284,13 +1284,37 @@ impl ExecCore {
             );
         }
 
+        // The module holds every imported `src/lib` body, reachable or not
+        // (caret `--help`: 9,639 lowered functions). Drop the ones no root
+        // reaches before anything below inspects the MIR, so an extern called
+        // only from dead code neither forces the interpreter splice nor costs
+        // codegen. Reachability is conservative (see mir/reachability.rs): a
+        // missed edge would leave a call to a dropped function, so every name
+        // spelling codegen can bind is kept. SIMPLE_JIT_NO_REACH_PRUNE=1
+        // disables the pruning for A/B comparison.
+        if std::env::var_os("SIMPLE_JIT_NO_REACH_PRUNE").map_or(true, |v| v == "0") {
+            let (before, after) = simple_compiler::mir::retain_reachable_functions(&mut mir_module);
+            if trace {
+                eprintln!("[rust-jit] reachability functions={before} reachable={after}");
+            }
+        }
+
         // Extern declarations the JIT cannot resolve (e.g. rt_torch_* in a
         // torch-less build) would link as null pointers and SIGSEGV at call
         // time. Route them through the interpreter bridge, whose extern
         // dispatch has graceful unavailable-backend handlers.
+        //
+        // Only externs the MIR actually references count: src/lib declares
+        // platform-foreign externs unconditionally, and a declaration nothing
+        // calls or loads never reaches a NULL slot. The hybrid transform only
+        // rewrites exact `Call` targets, every one of which is in `referenced`,
+        // so filtering here leaves the transformed MIR unchanged; it only stops
+        // unused declarations from forcing (and being named in) the splice.
+        let referenced = simple_compiler::mir::referenced_function_names(&mir_module);
         let unresolvable_externs: HashSet<String> = mir_module
             .extern_fn_names
             .iter()
+            .filter(|name| referenced.contains(name.as_str()))
             .filter(|name| self.symbol_provider.get_symbol(name.as_str()).is_none())
             // Byte/word accessors are lowered inline by codegen; they never
             // need a runtime symbol, so they must not be spliced through the

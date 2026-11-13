@@ -76,3 +76,10 @@ reduction.
 ## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
 
 **LIVE (confirmed)** — ne7: specs unchanged at 400x300 software raster; the documented @timeout_secs 2400 mitigation is NOT present at the release tip (git log -S empty); JIT capture path not deployed. Owner decision: deploy JIT rendering path or approve capture-size reduction.
+
+
+---
+
+## 2026-11-13 triage — lane live-p3-l2 (work/live-p3-l2-20261113, worktree lp2-wt, base origin/release/1.0.0 tip)
+
+**Verdict: LIVE (deferred).** Not re-run: at 400x300 these specs need hours of interpreter raster time and no honest PASS/FAIL is obtainable in a P3 lane. No JIT/native capture path landed at this base. Owner decision unchanged: deploy a JIT/native capture path or approve a capture-size reduction.

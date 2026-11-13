@@ -110,3 +110,10 @@ is green 5/5 on the same binary.
 Verdict: LIVE — fix surface is the seed's private-import call resolution in
 this syntactic shape (`src/compiler_rust/**`, seed lane). Keep the workaround;
 do not pub the lib fn as a substitute fix.
+
+## Triage 2026-11-13 (P3 tools lane)
+No code change this lane; the 2026-11-11 (lane runner7) addendum stands —
+LIVE, reproduced verbatim on current tip; the fix surface is the seed's
+private-import call resolution in this syntactic shape (`src/compiler_rust/**`,
+seed lane). Per that verdict the lib fn must NOT be made pub as a substitute
+fix; the inlined spec workaround stays green (5/5).

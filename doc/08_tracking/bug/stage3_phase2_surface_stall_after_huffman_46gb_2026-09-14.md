@@ -400,3 +400,10 @@ command stands:
 ```
 sh scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --stop-after-stage3 --mode=dynload --output=build/bootstrap
 ```
+
+## Triage 2026-11-13 (P3 tools lane)
+No code change this lane; the 2026-11-11 addenda (int10/int11/boot23) stand —
+LIVE, root cause confirmed in the seed (gdb backtraces on record), mitigation
+(call-count batching 9788f8341a8) landed. The remaining fix is seed-lane
+work, not a P3 tools patch; per runaway-guard rules the live concurrence is
+not re-measured here.

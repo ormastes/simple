@@ -4083,7 +4083,7 @@ impl Lowerer {
         };
 
         match name {
-            "describe" | "context" => {
+            "describe" | "context" | "feature" | "scenario" => {
                 // describe "name": body
                 // → rt_bdd_describe_start_rv(name), <body>, rt_bdd_describe_end()
                 let mut stmts = Vec::new();

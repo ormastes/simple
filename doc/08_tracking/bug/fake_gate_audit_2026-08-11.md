@@ -271,3 +271,10 @@ Follow-up state measured at release tip (branch `work/p3-ne8-20261111`, seed 46f
 ## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
 
 **LIVE (confirmed)** — ne8: the requested sixth guard exists (check-vacuous-specs.shs, 22/22 selftest, corpus PASS) but is deliberately tracked unwired — promotion is a governance decision. formatter/depgraph literal-only blocks + command_dispatch_spec redesign remain.
+
+
+---
+
+## 2026-11-13 triage — lane live-p3-l2 (work/live-p3-l2-20261113, worktree lp2-wt, base origin/release/1.0.0 tip)
+
+**Verdict: LIVE (deferred).** Prior-lane state stands at this base: `check-vacuous-specs.shs` exists, selftest green, deliberately tracked unwired; formatter/depgraph + literal-only redesign follow-ups remain; `src/app/formatter/main.spl` / `src/app/depgraph/main.spl` still absent. Promoting the guard to a push gate is a governance decision outside a P3 lane.

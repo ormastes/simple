@@ -290,11 +290,159 @@ fn c_compiler_override(windows_gnu: bool, requires_cross: bool, target: text) ->
         return nil
     simple_cc
 
+# --- clang-only C driver policy (CLAUDE.md Critical Rules: "Never use GCC") ---
+#
+# Pure decision layer: `c_driver_classify_v1` + `c_compiler_select_v1` take the
+# results of `command -v` / `readlink -f` / `--version` and decide; the I/O
+# shell (`_c_driver_probe_v1`) only gathers them. A driver that resolves to
+# GCC is REFUSED with a message naming the rule and the fix. Nothing here ever
+# falls back to gcc, g++, bare `cc`/`c++` or collect2. Pinned by
+# test/01_unit/compiler/backend/c_driver_clang_only_spec.spl.
+
+pub struct CDriverProbeV1:
+    name: text            # as requested: a candidate or the SIMPLE_CC/CC value
+    invoked_path: text    # `command -v name` (the PATH entry); "" when not on PATH. What callers run.
+    resolved_path: text   # realpath of invoked_path; used ONLY for classification (gcc basename signal)
+    version_banner: text  # first lines of `<invoked_path> --version`; "" when not run
+    explicit: bool        # from SIMPLE_CC/CC: unresolved or non-clang is a refusal, never a skip
+
+val C_DRIVER_RULE_HINT = "CLAUDE.md Critical Rules: Never use GCC. Toolchain is clang + lld/mold, llvm-ar. Fix: `. scripts/setup/llvm-toolchain-env.shs` (puts clang-23/ld.lld first on PATH) or set SIMPLE_CC=clang-23 (any clang/clang-NN)."
+
+fn _c_driver_basename(path: text) -> text:
+    var base = path
+    val slash = base.rfind("/")
+    if slash >= 0:
+        base = base.substring(slash + 1, base.len())
+    val bslash = base.rfind("\\")
+    if bslash >= 0:
+        base = base.substring(bslash + 1, base.len())
+    base = base.lower()
+    if base.ends_with(".exe"):
+        base = base.substring(0, base.len() - 4)
+    base
+
+pub fn c_driver_classify_v1(resolved_path: text, version_banner: text) -> text:
+    """Classify a hosted C driver as "clang", "gcc" or "unknown".
+
+    Basename first (`gcc`, `gcc-13`, `x86_64-linux-gnu-gcc-13`, `g++`), then the
+    `--version` banner: clang prints `clang version` (also `Apple clang version`);
+    GCC invoked as `cc`/`c++` prints `cc (Ubuntu ...)` and names the FSF only on
+    its second line, so the whole banner is scanned, not line 1."""
+    val base = _c_driver_basename(resolved_path)
+    if base == "gcc" or base.starts_with("gcc-") or base.ends_with("-gcc") or base.contains("-gcc-"):
+        return "gcc"
+    if base == "g++" or base.starts_with("g++-") or base.ends_with("-g++") or base.contains("-g++-"):
+        return "gcc"
+    val banner = version_banner.lower()
+    if banner.contains("clang version"):
+        return "clang"
+    if banner.contains("free software foundation") or banner.contains("gcc version") or banner.contains("(gcc)"):
+        return "gcc"
+    if base == "clang" or base.starts_with("clang-") or base == "clang++" or base.starts_with("clang++-"):
+        return "clang"
+    "unknown"
+
+pub fn c_compiler_candidates_v1() -> [text]:
+    """PATH candidates, bare `clang` first so a sourced llvm-toolchain-env PATH wins, then versioned."""
+    ["clang", "clang-23", "clang-22", "clang-21", "clang-20", "clang-19", "clang-18", "clang-17", "clang-16"]
+
+fn _c_driver_refusal_v1(probe: CDriverProbeV1, kind: text) -> text:
+    "[cc-detect] REFUSED C driver '{probe.name}' -> {probe.resolved_path}: it is {kind}, not clang. {C_DRIVER_RULE_HINT}"
+
+pub fn c_compiler_select_v1(probes: [CDriverProbeV1]) -> Result<text, text>:
+    """Pick the first clang probe; refuse GCC; fail closed when nothing is clang.
+
+    Explicit probes (SIMPLE_CC/CC) are never skipped: unresolved, GCC or
+    unrecognised is an error. Non-explicit candidates that did not resolve or
+    are unrecognisable are skipped; a candidate that IS gcc is refused outright
+    (a `clang` on PATH that is really GCC is a broken environment, not a miss)."""
+    var tried: [text] = []
+    for probe in probes:
+        tried.push(probe.name)
+        if probe.invoked_path == "":
+            if probe.explicit:
+                return Err("[cc-detect] REFUSED: explicit C driver '{probe.name}' is not on PATH. {C_DRIVER_RULE_HINT}")
+            continue
+        val kind = c_driver_classify_v1(probe.resolved_path, probe.version_banner)
+        if kind == "clang":
+            if probe.explicit:
+                return Ok(probe.name)
+            # The PATH entry, never the realpath: a ccache masquerade dir
+            # (/usr/lib64/ccache/clang -> /usr/bin/ccache) must be run as `clang`.
+            return Ok(probe.invoked_path)
+        if kind == "gcc":
+            return Err(_c_driver_refusal_v1(probe, "GCC"))
+        if probe.explicit:
+            return Err(_c_driver_refusal_v1(probe, "not recognisable as clang"))
+    Err("[cc-detect] no clang C driver found on PATH (tried: {tried.join(', ')}); gcc, g++ and bare cc are never used as a fallback. {C_DRIVER_RULE_HINT}")
+
+pub fn cxx_driver_for_c_driver_v1(cc: text) -> text:
+    """clang -> clang++, /x/clang-23 -> /x/clang++-23, clang.exe -> clang++.exe; clang-cl is both."""
+    var dir = ""
+    var base = cc
+    val fslash = cc.rfind("/")
+    val bslash = cc.rfind("\\")
+    val slash = if fslash > bslash: fslash else: bslash
+    if slash >= 0:
+        dir = cc.substring(0, slash + 1)
+        base = cc.substring(slash + 1, cc.len())
+    var ext = ""
+    if base.lower().ends_with(".exe"):
+        ext = base.substring(base.len() - 4, base.len())
+        base = base.substring(0, base.len() - 4)
+    if base == "clang-cl" or base.starts_with("clang++"):
+        return cc
+    if base == "clang":
+        return "{dir}clang++{ext}"
+    if base.starts_with("clang-"):
+        return "{dir}clang++-{base.substring(6, base.len())}{ext}"
+    cc
+
+fn _c_driver_probe_v1(name: text, explicit: bool) -> CDriverProbeV1:
+    """I/O shell: resolve `name` on PATH, follow symlinks, read its banner."""
+    val (out, _err, code) = backend_shell_tuple("command -v {name} 2>/dev/null")
+    var resolved = ""
+    if code == 0:
+        for line in out.split("\n"):
+            if line.trim() != "" and resolved == "":
+                resolved = line.trim()
+    if resolved == "":
+        return CDriverProbeV1(name: name, invoked_path: "", resolved_path: "", version_banner: "", explicit: explicit)
+    # Banner from the path as INVOKED (a ccache/wrapper symlink answers as the
+    # tool it fronts); realpath only supplies the gcc-basename signal.
+    val invoked = resolved
+    val (real_out, _real_err, real_code) = backend_shell_tuple("readlink -f '{resolved}' 2>/dev/null")
+    if real_code == 0 and real_out.trim() != "":
+        resolved = real_out.trim()
+    val (banner_out, _banner_err, _banner_code) = backend_shell_tuple("'{invoked}' --version 2>/dev/null | head -3")
+    CDriverProbeV1(name: name, invoked_path: invoked, resolved_path: resolved, version_banner: banner_out, explicit: explicit)
+
+pub fn c_driver_admit_v1(name: text) -> Result<text, text>:
+    """Admit an explicitly requested C driver (SIMPLE_CC/CC): clang passes verbatim, GCC is refused."""
+    c_compiler_select_v1([_c_driver_probe_v1(name, true)])
+
+fn _find_c_compiler_unix() -> text:
+    var probes: [CDriverProbeV1] = []
+    for candidate in c_compiler_candidates_v1():
+        val probe = _c_driver_probe_v1(candidate, false)
+        probes.push(probe)
+        # Stop at the first candidate that classifies at all (clang wins, gcc is
+        # refused by the selector); an opaque wrapper realpath with no banner is
+        # skipped so the next versioned clang still gets a chance.
+        if probe.invoked_path != "" and c_driver_classify_v1(probe.resolved_path, probe.version_banner) != "unknown":
+            break
+    match c_compiler_select_v1(probes):
+        case Ok(cc): return cc
+        case Err(msg):
+            print msg
+            return ""
+
 pub fn find_c_compiler() -> text:
-    """Find a C compiler on the system.
+    """Find a C compiler on the system (clang only; see c_compiler_select_v1).
 
     Native Windows GNU shares the final linker's CC; other lanes try SIMPLE_CC first.
-    Returns the command name or empty string if none found.
+    Returns the command name or empty string if none found or if the only
+    driver offered is GCC (the refusal is printed with the fix).
     """
     val target = env_get_nullable("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
     val plan = hosted_c_compiler_plan(target, host_os(), host_arch())
@@ -310,7 +458,13 @@ pub fn find_c_compiler() -> text:
     if simple_cc == "":
         return ""
     if simple_cc != nil:
-        return simple_cc
+        if _is_windows() or plan.requires_cross:
+            return simple_cc
+        match c_driver_admit_v1(simple_cc):
+            case Ok(cc): return cc
+            case Err(msg):
+                print msg
+                return ""
 
     if plan.requires_cross:
         val (out, err, code) = backend_shell_tuple("command -v {plan.command} 2>/dev/null")
@@ -324,20 +478,7 @@ pub fn find_c_compiler() -> text:
     if _is_windows():
         return _find_c_compiler_windows()
 
-    # Unix: check well-known paths first
-    if file_exists("/usr/bin/clang"):
-        return "/usr/bin/clang"
-    if file_exists("/usr/bin/gcc"):
-        return "/usr/bin/gcc"
-    if file_exists("/usr/bin/cc"):
-        return "/usr/bin/cc"
-
-    val candidates = ["clang", "clang-18", "clang-17", "clang-16", "gcc", "cc"]
-    for candidate in candidates:
-        val (out, err, code) = backend_shell_tuple("which {candidate} 2>/dev/null")
-        if code == 0:
-            return candidate
-    ""
+    _find_c_compiler_unix()
 
 fn _cc_verify_compiles(cc: text) -> bool:
     """VERIFY a hosted C compiler by compiling a translation unit that requires
@@ -406,7 +547,7 @@ fn _cc_verify_compiles(cc: text) -> bool:
     ok
 
 fn _find_c_compiler_windows() -> text:
-    """Find a C compiler on Windows (MSVC cl.exe or MinGW gcc/clang).
+    """Find a C compiler on Windows (clang-cl / cl.exe on MSVC, llvm-mingw clang on GNU).
 
     Every candidate is verified by actually compiling a trivial file
     (_cc_verify_compiles) — a `where` hit alone selects nothing."""
@@ -435,20 +576,21 @@ fn _find_c_compiler_windows() -> text:
         if resolved != "":
             return resolved
 
-    # Try clang/gcc on PATH (works in both MSVC and MinGW)
-    val candidates = ["clang", "gcc"]
+    # Try clang on PATH (works in both MSVC and MinGW). Never gcc: CLAUDE.md
+    # pins Windows to llvm-mingw clang / clang-cl.
+    val candidates = ["clang"]
     for candidate in candidates:
         val resolved = _first_verified_windows_compiler(candidate)
         if resolved != "":
             return resolved
 
-    # Returning "" here yields the bare message "No C compiler found. Install
-    # clang or gcc." at two DIFFERENT call sites with identical text, and names
-    # neither the candidates tried nor the temp dir the probe used. That cost a
-    # full bootstrap cycle to re-diagnose. Always say what was attempted.
+    # Returning "" here yields the bare message "No C compiler found" at two
+    # DIFFERENT call sites with identical text, and names neither the
+    # candidates tried nor the temp dir the probe used. That cost a full
+    # bootstrap cycle to re-diagnose. Always say what was attempted.
     print "[cc-detect] no C compiler verified on Windows."
     print "[cc-detect] temp dir: {_get_temp_dir()}"
-    print "[cc-detect] tried: clang-cl, cl.exe, clang, gcc (each `where` + a real compile)"
+    print "[cc-detect] tried: clang-cl, cl.exe, clang (each `where` + a real compile; gcc is never used)"
     print "[cc-detect] set SIMPLE_CC to override, or SIMPLE_COMPILER_TRACE=1 for per-candidate exit codes"
     ""
 
@@ -851,7 +993,7 @@ fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: bool 
     if trace:
         print "[RT-COMPILE] cc={cc}"
     if cc == "":
-        return Err("No C compiler found. Install clang or gcc.")
+        return Err("No clang C compiler found (clang-only toolchain, gcc is never used). Source scripts/setup/llvm-toolchain-env.shs or set SIMPLE_CC=clang-23.")
 
     # The nested if-expression form compiled (Stage 2, full closure) with an
     # i64 result: "{rt_dir}/{name}.c" rendered the text handle as a decimal

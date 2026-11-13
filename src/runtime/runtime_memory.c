@@ -58,6 +58,7 @@ static RT_MEMORY_THREAD_LOCAL int rt_transient_raw_paused = 0;
 #define RT_TRANSIENT_RAW_SIZE_MASK (~RT_TRANSIENT_RAW_OWNED_BIT)
 
 void rt_free(uint8_t* ptr);
+void spl_free_batch_v1(uint8_t** ptrs, size_t count);
 static int rt_struct_alloc_lookup_size(void* ptr, size_t* bytes_out);
 
 static size_t rt_transient_raw_hash(uintptr_t ptr) {
@@ -225,6 +226,9 @@ int32_t rt_transient_raw_promote(uintptr_t ptr) {
 }
 
 /* Entries an emptied table may keep between scopes (16 bytes each, 64 KiB). */
+/* Owned allocations reclaimed per struct-registry lock acquisition. Bounds
+ * both the stack buffer and how long other threads' registry reads wait. */
+#define RT_TRANSIENT_RAW_RECLAIM_BATCH ((size_t)512)
 #define RT_TRANSIENT_RAW_RETAIN_CAP ((size_t)1 << 12)
 
 int32_t rt_transient_raw_scope_end(void) {
@@ -240,13 +244,25 @@ int32_t rt_transient_raw_scope_end(void) {
      * scope regrows it in proportion to its own allocations. */
     const size_t used = rt_transient_raw_len + rt_transient_raw_tombs;
     if (used != 0) {
+        /* Reclaim through spl_free_batch_v1: the same per-pointer rt_free
+         * work, but the struct-registry write lock is taken once per batch
+         * instead of once per allocation (that lock pair was ~2/3 of this
+         * loop on aarch64). Freeing a batch only tombstones entries already
+         * walked; the table never resizes here. */
+        uint8_t* batch[RT_TRANSIENT_RAW_RECLAIM_BATCH];
+        size_t batched = 0;
         for (size_t i = 0; i < rt_transient_raw_cap; i++) {
             RtTransientRawAlloc* entry = &rt_transient_raw_allocs[i];
             if (entry->ptr == 0 || entry->ptr == RT_TRANSIENT_RAW_TOMBSTONE) continue;
             if (entry->bytes & RT_TRANSIENT_RAW_OWNED_BIT) {
-                rt_free((uint8_t*)entry->ptr);
+                batch[batched++] = (uint8_t*)entry->ptr;
+                if (batched == RT_TRANSIENT_RAW_RECLAIM_BATCH) {
+                    spl_free_batch_v1(batch, batched);
+                    batched = 0;
+                }
             }
         }
+        if (batched != 0) spl_free_batch_v1(batch, batched);
         if (rt_transient_raw_cap > RT_TRANSIENT_RAW_RETAIN_CAP &&
                 used * 8 < rt_transient_raw_cap) {
             free(rt_transient_raw_allocs);
@@ -404,11 +420,21 @@ static SRWLOCK rt_struct_alloc_lock = SRWLOCK_INIT;
 static pthread_rwlock_t rt_struct_alloc_lock = PTHREAD_RWLOCK_INITIALIZER;
 #endif
 
+#if defined(SIMPLE_RUNTIME_MEMORY_TESTING)
+/* Test-only: exclusive acquisitions of the struct registry lock, so a spec can
+ * pin that scope-end reclaim takes it per batch, not per allocation. */
+static int64_t rt_struct_alloc_write_locks = 0;
+int64_t spl_struct_registry_write_locks_v1(void) { return rt_struct_alloc_write_locks; }
+#endif
+
 static void rt_struct_alloc_lock_acquire(void) {
 #if defined(_WIN32)
     AcquireSRWLockExclusive(&rt_struct_alloc_lock);
 #else
     pthread_rwlock_wrlock(&rt_struct_alloc_lock);
+#endif
+#if defined(SIMPLE_RUNTIME_MEMORY_TESTING)
+    rt_struct_alloc_write_locks++;
 #endif
 }
 
@@ -502,25 +528,29 @@ static int rt_struct_alloc_register(void* ptr, size_t bytes) {
     return ok;
 }
 
+/* caller holds the struct registry write lock */
+static void rt_struct_alloc_unregister_locked(void* ptr) {
+    if (!ptr || rt_struct_alloc_cap == 0) return;
+    size_t mask = rt_struct_alloc_cap - 1;
+    size_t index = rt_transient_raw_hash((uintptr_t)ptr) & mask;
+    for (;;) {
+        uintptr_t entry = rt_struct_allocs[index].ptr;
+        if (entry == 0) break;
+        if (entry == (uintptr_t)ptr) {
+            rt_struct_allocs[index] =
+                (RtStructAllocation){RT_STRUCT_ALLOC_TOMBSTONE, 0};
+            rt_struct_alloc_len--;
+            rt_struct_alloc_tombs++;
+            break;
+        }
+        index = (index + 1) & mask;
+    }
+}
+
 static void rt_struct_alloc_unregister(void* ptr) {
     if (!ptr) return;
     rt_struct_alloc_lock_acquire();
-    if (rt_struct_alloc_cap != 0) {
-        size_t mask = rt_struct_alloc_cap - 1;
-        size_t index = rt_transient_raw_hash((uintptr_t)ptr) & mask;
-        for (;;) {
-            uintptr_t entry = rt_struct_allocs[index].ptr;
-            if (entry == 0) break;
-            if (entry == (uintptr_t)ptr) {
-                rt_struct_allocs[index] =
-                    (RtStructAllocation){RT_STRUCT_ALLOC_TOMBSTONE, 0};
-                rt_struct_alloc_len--;
-                rt_struct_alloc_tombs++;
-                break;
-            }
-            index = (index + 1) & mask;
-        }
-    }
+    rt_struct_alloc_unregister_locked(ptr);
     rt_struct_alloc_lock_release();
 }
 
@@ -673,15 +703,9 @@ void* rt_realloc(void* ptr, int64_t size) {
     return next;
 }
 
-void rt_free(uint8_t* ptr) {
-    if (!ptr) return;
-    /* See rt_realloc: a rejected foreign free is a deliberate no-op, keeping
-     * the allocation live for its scope owner instead of creating a stale TLS
-     * registry entry and a later double free. */
-#if defined(SIMPLE_RUNTIME_MEMORY_OWNER)
-    if (!rt_transient_raw_owner_thread_allows()) return;
-#endif
-    rt_struct_alloc_unregister(ptr);
+/* rt_free after the struct-registry entry is gone: the caller already passed
+ * the owner-thread check and unregistered `ptr`. */
+static void rt_free_struct_unregistered(uint8_t* ptr) {
     if (rt_mem_guard_is_slot(ptr)) {
         /* Guard slots are never transient-scope-owned and never enter the
          * harden quarantine -- guard_free_sampled already PROT_NONEs the
@@ -704,6 +728,35 @@ void rt_free(uint8_t* ptr) {
     }
     rt_transient_raw_erase(ptr);
     free(ptr);
+}
+
+void rt_free(uint8_t* ptr) {
+    if (!ptr) return;
+    /* See rt_realloc: a rejected foreign free is a deliberate no-op, keeping
+     * the allocation live for its scope owner instead of creating a stale TLS
+     * registry entry and a later double free. */
+#if defined(SIMPLE_RUNTIME_MEMORY_OWNER)
+    if (!rt_transient_raw_owner_thread_allows()) return;
+#endif
+    rt_struct_alloc_unregister(ptr);
+    rt_free_struct_unregistered(ptr);
+}
+
+/* rt_free of every non-null pointer in `ptrs`, with the struct-registry write
+ * lock taken once for the whole batch. Each pointer is unregistered before
+ * any of them is freed, so no freed address stays admitted by the registry.
+ * Transient scope ends reclaim through this (runtime_native.c's owner too). */
+void spl_free_batch_v1(uint8_t** ptrs, size_t count) {
+    if (!ptrs || count == 0) return;
+#if defined(SIMPLE_RUNTIME_MEMORY_OWNER)
+    if (!rt_transient_raw_owner_thread_allows()) return;
+#endif
+    rt_struct_alloc_lock_acquire();
+    for (size_t i = 0; i < count; i++) rt_struct_alloc_unregister_locked(ptrs[i]);
+    rt_struct_alloc_lock_release();
+    for (size_t i = 0; i < count; i++) {
+        if (ptrs[i]) rt_free_struct_unregistered(ptrs[i]);
+    }
 }
 
 int64_t rt_ptr_read_i64(int64_t addr, int64_t offset) {

@@ -69,24 +69,45 @@ fn xray_policy_resolve(enabled: bool, compile_mode_text: text, backend: text, re
 
 # The single compile-time gate for the `simple.trace/observer-v1` aspect-param
 # extension, decided once in CompileContext.create. Absent or explicit-Off is
-# admitted; a malformed request is rejected. Every non-Off route is rejected
-# until a backend adapter can honour it (no Feature receipt is fabricated from
-# config, target or map), so this stays static-off scaffolding.
-fn xray_observer_request_check(params: AspectParamsV1, target: text) -> Result<bool, TraceFailureV1>:
+# admitted; a malformed request is rejected. A Dynamic request is admitted
+# ONLY when this build emits the sleds its backend honours (no Feature receipt
+# is fabricated from config, target or map):
+#   - TraceBackendV1.Simple: `--xray` resolved on (sleds_on) with the native
+#     backend — the pure-Simple leaf (PR5/5b/6) patches those sleds at runtime.
+#     Without `--xray` there are no sleds: InstrumentationAbsent, never a silent
+#     no-op. On another backend there are no Simple sleds: UnsupportedTarget.
+#   - TraceBackendV1.Llvm / Auto: UnsupportedProfile until the clang_rt.xray
+#     link and handler shim land (design §F PR4).
+fn xray_observer_request_admit(params: AspectParamsV1, target: text, sleds_on: bool, backend: text
+        ) -> Result<bool, TraceFailureV1>:
     val requested = trace_aspect_config_v1(params)?
     if val config = requested:
         val route = trace_build_route_v1(target, config.instrumentation, config.backend)?
-        if route.kind != TraceBuildRouteKindV1.Off:
-            return Err(TraceFailureV1.UnsupportedProfile)
+        if route.kind == TraceBuildRouteKindV1.Off:
+            return Ok(true)
+        if route.kind == TraceBuildRouteKindV1.LinuxSimpleCandidate:
+            if not sleds_on:
+                return Err(TraceFailureV1.InstrumentationAbsent)
+            if backend.trim().lower() != "native":
+                return Err(TraceFailureV1.UnsupportedTarget)
+            return Ok(true)
+        return Err(TraceFailureV1.UnsupportedProfile)
     Ok(true)
 
+# The no-sleds build (PR2 contract): never admits a Dynamic request.
+fn xray_observer_request_check(params: AspectParamsV1, target: text) -> Result<bool, TraceFailureV1>:
+    xray_observer_request_admit(params, target, false, "")
+
 # "" when admitted, else the stable diagnostic stored as xray_config_error.
-fn xray_observer_request_error(params: AspectParamsV1, target: text) -> text:
-    match xray_observer_request_check(params, target):
+fn xray_observer_request_error_for_build(params: AspectParamsV1, target: text, sleds_on: bool, backend: text) -> text:
+    match xray_observer_request_admit(params, target, sleds_on, backend):
         case Err(failure):
             "TRACE-E-REQUEST: observer V1 request rejected (status={trace_failure_code_v1(failure)})"
         case Ok(_):
             ""
+
+fn xray_observer_request_error(params: AspectParamsV1, target: text) -> text:
+    xray_observer_request_error_for_build(params, target, false, "")
 
 # SDN `trace.instrumentation` (plan §5.3) -> the static switch. `off` keeps
 # the default; `dynamic` means sleds exist and aspect params patch them at
@@ -199,5 +220,5 @@ fn xray_policy_apply(module: MirModule, policy: XrayBuildPolicy) -> MirModule:
 
 export XrayBuildPolicy, XRAY_MODE_NONE, XRAY_MODE_ENTRY_EXIT, XRAY_MODE_ENTRY_EXIT_TAIL
 export xray_policy_resolve, xray_policy_apply, xray_option_identity_suffix, xray_function_never_instrumented
-export xray_observer_request_check, xray_observer_request_error
+export xray_observer_request_check, xray_observer_request_admit, xray_observer_request_error, xray_observer_request_error_for_build
 export xray_trace_instrumentation_enabled, xray_sdn_trace_instrumentation

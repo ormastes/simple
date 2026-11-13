@@ -1,0 +1,112 @@
+# MDSOC: feature dimension, collections layer.
+# Adaptive containers on the trace data pipeline. A container keeps counting
+# into its own fields while profiling is on (one bool, see AdaptiveMap.get);
+# this module turns one AdaptiveSetObservation into DataObservationV1 records
+# (one per lookup window / size / representation, never per operation: the
+# container already aggregates, so a record per op would only move the same
+# integers through the sink N times) and folds drained records back into the
+# AdaptiveSetWorkloadProfile that apply_workload_profile consumes. Pure.
+
+use std.nogc_sync_mut.src.collections.adaptive_text_set.{
+    AdaptiveSetAlgorithm, AdaptiveSetObservation, AdaptiveSetProfile, AdaptiveSetWorkloadProfile
+}
+use std.common.trace.data.data_observation_contracts.{
+    DataObservationV1, DataObservationKindV1, DataCollectionOpV1,
+    data_metric_measured_v1, data_metric_not_measured_v1, data_metric_value_v1
+}
+use std.common.trace.data.data_observation_sink_v1.DataObservationSinkV1
+
+# Numeric identity of one container site in the data-site manifest. A zero
+# site id means that record is not emitted.
+pub struct AdaptiveTraceBindingV1:
+    generation: u64
+    module_instance: u64
+    schema_index: u32
+    lookup_site_id: u32
+    size_site_id: u32
+    transition_site_id: u32
+
+# Representation epoch: the physical view the counts were taken under.
+pub fn adaptive_trace_epoch_v1(algorithm: AdaptiveSetAlgorithm) -> u32:
+    match algorithm:
+        case AdaptiveSetAlgorithm.Linear: 1
+        case AdaptiveSetAlgorithm.Hash: 2
+        case AdaptiveSetAlgorithm.Ordered: 3
+
+fn adaptive_trace_record_v1(binding: AdaptiveTraceBindingV1, site: u32, kind: DataObservationKindV1,
+                            schema_index: u32, op: DataCollectionOpV1, count: i64, aux: i64,
+                            aux_measured: bool, epoch: u32) -> DataObservationV1:
+    DataObservationV1(kind: kind, generation: binding.generation, module_instance: binding.module_instance,
+        site_id: site, schema_index: schema_index, attr_ordinal: 0, op: op,
+        count: data_metric_measured_v1(count as u64),
+        aux: if aux_measured: data_metric_measured_v1(aux as u64) else: data_metric_not_measured_v1(),
+        representation_epoch: epoch)
+
+pub fn adaptive_trace_records_v1(observation: AdaptiveSetObservation,
+                                 binding: AdaptiveTraceBindingV1) -> [DataObservationV1]:
+    val epoch = adaptive_trace_epoch_v1(observation.algorithm)
+    var records: [DataObservationV1] = []
+    if binding.lookup_site_id != 0:
+        records.push(adaptive_trace_record_v1(binding, binding.lookup_site_id, DataObservationKindV1.CollectionOp,
+            0, DataCollectionOpV1.Lookup, observation.lookups, observation.misses, true, epoch))
+    if binding.size_site_id != 0:
+        records.push(adaptive_trace_record_v1(binding, binding.size_site_id, DataObservationKindV1.CollectionOp,
+            0, DataCollectionOpV1.Insert, observation.peak_size, observation.size, true, epoch))
+    if binding.transition_site_id != 0:
+        records.push(adaptive_trace_record_v1(binding, binding.transition_site_id,
+            DataObservationKindV1.RepresentationTransition, binding.schema_index, DataCollectionOpV1.None,
+            epoch as i64, 0, false, epoch))
+    records
+
+# Returns the number of records the sink admitted; 0 without touching the
+# sink when it is disabled.
+pub fn adaptive_trace_publish_v1(observation: AdaptiveSetObservation, binding: AdaptiveTraceBindingV1,
+                                 sink: DataObservationSinkV1) -> i64:
+    if not sink.enabled():
+        return 0
+    var admitted = 0
+    for record in adaptive_trace_records_v1(observation, binding):
+        if sink.record(record):
+            admitted = admitted + 1
+    admitted
+
+fn adaptive_trace_measured_v1(records: [DataObservationV1], site: u32) -> (i64, i64, bool):
+    for record in records:
+        if record.site_id == site:
+            match data_metric_value_v1(record.count):
+                case Ok(count):
+                    val aux = match data_metric_value_v1(record.aux):
+                        case Ok(value): value as i64
+                        case Err(_): 0
+                    return (count as i64, aux, true)
+                case Err(_): return (0, 0, false)
+    (0, 0, false)
+
+# Drained records -> the prior apply_workload_profile consumes. The lookup
+# record carries lookups/misses, the size record the peak; a container that
+# reached ordered storage live reports that in its transition record, which
+# the fold expresses as the probe/collision pair the ordered rule needs.
+pub fn adaptive_workload_profile_from_records_v1(records: [DataObservationV1], binding: AdaptiveTraceBindingV1,
+                                                 site_id: text, target_profile_id: text,
+                                                 profile: AdaptiveSetProfile) -> AdaptiveSetWorkloadProfile?:
+    val (lookups, misses, has_lookups) = adaptive_trace_measured_v1(records, binding.lookup_site_id)
+    val (peak_size, _, has_size) = adaptive_trace_measured_v1(records, binding.size_site_id)
+    if not has_lookups and not has_size:
+        return None
+    val (epoch, _, has_epoch) = adaptive_trace_measured_v1(records, binding.transition_site_id)
+    var probes = -1
+    var collisions = -1
+    if has_epoch and epoch == adaptive_trace_epoch_v1(AdaptiveSetAlgorithm.Ordered) as i64:
+        probes = if lookups > profile.lookup_promotion_count: lookups else: profile.lookup_promotion_count
+        collisions = probes
+    Some(AdaptiveSetWorkloadProfile(
+        site_id: site_id, target_profile_id: target_profile_id, sample_count: 1,
+        size_p95: peak_size, lookup_count_p95: lookups,
+        hit_count_p95: lookups - misses, miss_count_p95: misses,
+        hash_probe_count_p95: probes, hash_collision_count_p95: collisions))
+
+export AdaptiveTraceBindingV1
+export adaptive_trace_epoch_v1
+export adaptive_trace_records_v1
+export adaptive_trace_publish_v1
+export adaptive_workload_profile_from_records_v1

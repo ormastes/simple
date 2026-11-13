@@ -7,7 +7,7 @@ use compiler.hir.hir_operators.{HirBinOp}
 use compiler.hir.hir_codec.{hir_fn_scalars_at_v1, hir_fn_scalars_at_key_v1,
     hir_module_function_keys_in_v1, hir_fn_scalars_with_keys_in_v1,
     hir_module_encode}
-use compiler.hir.return_type_interface_v1.{rti_rows_from_hir_v1}
+use compiler.hir.return_type_interface_v1.{rti_rows_from_hir_v1, ReturnTypeInterfaceTable}
 # Part of src/compiler/50.mir/mir_lowering.spl: module/struct/class type lowering, asm target-spec accessors
 use compiler.mir._MirLowering.bootstrap_globals.*
 use compiler.mir._MirLowering.provider_metadata.*
@@ -2546,6 +2546,8 @@ impl MirLowering:
             return Ok(self.lower_module(module, providers, is_entry_module, scoped_archive_symbols,
                 scoped_archive_globals, scoped_archive_thunks))
         scope_decisions = scope_decisions | 1
+        # Stores into `rti` bump its epoch; read it once the scope is live.
+        val rti_epoch_at_begin = self.rti.mutation_epoch
         # A previous module that aborted after begin never promoted its
         # registry journal; those rows died with its scope.
         bootstrap_fn_registries_discard_delta_v1()
@@ -2655,7 +2657,18 @@ impl MirLowering:
             return Err("MIR module ownership promotion failed for {module.name}")
         scope_decisions = scope_decisions | 4
         mir_section_profile_mark("s2_promote_mir", module.name)
+        # Like trait_impl_provider_modules above, the accumulated RTI table
+        # (every closure module's rows) is detached for the owner promotion:
+        # walking it from the owner roots cost O(modules) per module. When this
+        # module stored nothing into it (epoch unchanged) it holds no value
+        # this scope allocated, so the always-empty spare stands in for the
+        # owner promotion only; it is restored before any exit path. Any store
+        # keeps today's full walk.
+        val borrowed_rti: ReturnTypeInterfaceTable = self.rti
+        if self.rti.mutation_epoch == rti_epoch_at_begin:
+            self.rti = self.rti_promote_spare_v1
         val owner_promoted = self.promote_transient_owner()
+        self.rti = borrowed_rti
         val _owner_share_closed = transient_heap_promote_share_end_v1()
         if not owner_promoted:
             val _ended_owner = mir_abort_reverse_reference_scope_v1(reverse_token)

@@ -130,3 +130,13 @@ Still OPEN, unchanged. The fail-open downgrade lives in the Rust seed
 severity would also red up to ~380 exposed files per the census. Remains a
 documented-RED pin guarded by `scripts/check/check-undefined-import-run-exit-code.shs`.
 No change in this closure.
+
+
+---
+## 2026-11-13 triage — lane live-p3-l6 (Windows host, seed bin/simple.exe, base f790f7f266e)
+
+Concur with the most recent in-record triage; no fresh reproduction attempted
+(record's own grant names another host/lane). No in-lane change; disposition
+and owner unchanged.
+The fail-open downgrade remains seed-Rust (`warn_unprovided_use_names`); the
+guard stays deliberately RED. Routed to the seed-policy lane.

@@ -70,3 +70,10 @@ Concurs with lane ne10's LIVE re-measurement (2026-11-11): the full-compiler
 check still emits no progress for >5 minutes. Root-cause class (interpreted
 frontend cost, not a hang) is recorded in the ne10 addendum. Perf work exceeds
 the per-bug timebox; disposition stands.
+
+
+---
+
+## 2026-11-13 triage — lane live-p3-l2 (work/live-p3-l2-20261113, worktree lp2-wt, base origin/release/1.0.0 tip)
+
+**Verdict: LIVE (deferred).** Not re-measured this lane: the 2026-11-11 lane already measured 16m23s with zero `check_phase` events and 17/2641 files (per runaway-guard rule this red measure is taken once, not looped). Dominant cost (shared-module reload/re-warn per consumer + JIT demotion of the check driver) is a compiler/driver perf project, not a bounded P3 fix.

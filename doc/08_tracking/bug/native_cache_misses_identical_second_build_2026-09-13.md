@@ -103,3 +103,11 @@ the Rust engine's per-module `InterfaceSliceIndex` key was verified correct in
 both directions at this base; the pure-Simple driver's identical-second-build
 behaviour remains UNMEASURED. Grant unchanged: Linux host, two positional
 native-builds sharing one HOME.
+
+## Triage 2026-11-13 (P3 tools lane)
+No code change this lane; the 2026-11-11 (lane ne16) addendum stands — BLOCKED
+on this host: the diagnostic prerequisite landed (per-module decline reason is
+logged), but the two-real-native-builds measurement cannot run on Windows
+(native-build hang class; never retry a hung build). The Linux grant in the
+record is the unblock path.
+

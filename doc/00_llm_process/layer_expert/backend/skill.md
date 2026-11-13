@@ -320,3 +320,33 @@ per live module and refuses function completion and object/JIT publication.
 Free/reset clear owned failures. Isolated provider evidence is separate from
 new compiler qualification. See
 [refusal propagation](../../../08_tracking/bug/cranelift_rejected_call_publication_2026_10_30.md).
+
+## Pure-Simple JIT callee binding (2026-11-13)
+
+The K1 JIT lane runs `cranelift_jit_run_main` (`cranelift_codegen_adapter.spl`):
+the AOT lane's lowering into a host JIT module (`CL_TARGET_HOST`, `jit: true`
+selects `cranelift_define_function`). `jit_extern_resolution.spl` classifies
+named callees by `MirOperand.call_origin` once per module, before codegen.
+Undefined Source and unproven-origin callees are refused there by name.
+Local Source callees link in-module. Foreign and Runtime callees are imports,
+and the provider admits or refuses them at declaration.
+The provider (`cranelift_sffi.rs`) registers the seed JIT's own runtime symbol
+table (`jit::seed_jit_runtime_symbol_table`, one source for both builders). It
+admits a runtime-table import only with exactly its `RuntimeFuncSpec`
+signature. It admits a process symbol only through plain import linkage
+(1), never through linkage 5 (`CRANELIFT_LINKAGE_RUNTIME_IMPORT`). A refused
+declaration returns 0. Do not add an `rt_*` name table in `.spl`: the provider
+is the oracle. See
+[provider fix](../../../08_tracking/bug/pure_simple_jit_provider_registers_no_runtime_symbols_2026-11-13.md).
+Declare every import through `cl_declare_import_function`
+(`cranelift_runtime_imports.spl`). In a JIT module it declares Foreign callees
+with linkage 1 and everything else with linkage 5, and records refused names
+in the ledger. `cranelift_jit_run_main` reports them by name before finalize:
+`E-JIT-RUNTIME-EXTERN-UNBOUND`, `E-JIT-FOREIGN-EXTERN-UNBOUND` or
+`E-JIT-LOWERING-IMPORT-UNBOUND`. A direct `cranelift_declare_function(..., IMPORT)`
+skips the ledger, so the refusal surfaces only as `E-JIT-FINALIZE`.
+Admission checks Cranelift types, not value representation (tagged versus raw,
+boxed `text` versus (ptr, len)). `cranelift_runtime_import_seed_parity_spec.spl`
+pins the adapter's runtime-import shims against the seed's `RuntimeFuncSpec`
+table. `jit_runtime_extern_interpreter_parity_spec.spl` checks that JIT and
+interpreter return the same values.

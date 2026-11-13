@@ -98,3 +98,10 @@ the LLVM lane owner.
 ## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
 
 **FIXED (confirmed)** — ne6 verified all four declared-? shapes on the refreshed seed; Cranelift lane carries rt_expect_or_trap. Residual: legacy LLVM table lacks the expect arm — mechanical completion left for the LLVM lane owner.
+
+
+---
+
+## 2026-11-13 triage (live-P3 lane l1, work/live-p3-l1-20261113, base f790f7f266e)
+
+**FIXED (confirmed)** — All four declared-`?` shapes measured green on the refreshed seed per ne6; Cranelift lane carries `rt_expect_or_trap`. Residual unchanged: the legacy LLVM table (`codegen/llvm/functions.rs`) still lacks the `expect` arm — mechanical completion left for the LLVM lane owner.

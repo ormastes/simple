@@ -590,7 +590,17 @@ struct MirModule:
 # Unproven callable authority census (per-module, before codegen)
 # ============================================================================
 
-fn _mir_unproven_callable_operand_v1(function_name: text, operand: MirOperand, sites: [text]) -> [text]:
+fn _mir_call_site_text_v1(span: Span?) -> text:
+    # `file:line:col`, `line:col` without a file, `?` without a span. Built
+    # only for a reported site: this census walks every instruction.
+    match span:
+        case Some(site):
+            if site.file != "":
+                return "{site.file}:{site.line}:{site.col}"
+            "{site.line}:{site.col}"
+        case None: "?"
+
+fn _mir_unproven_callable_operand_v1(function_name: text, module_name: text, span: Span?, operand: MirOperand, sites: [text]) -> [text]:
     if operand.call_origin == MirCallOrigin.Unknown:
         match operand.kind:
             case MirOperandKind.Const(value, type_):
@@ -598,7 +608,7 @@ fn _mir_unproven_callable_operand_v1(function_name: text, operand: MirOperand, s
                     case MirTypeKind.FuncPtr(_):
                         match value:
                             case MirConstValue.Str(callee):
-                                return sites.push("MIR call target lacks proven source/runtime/foreign origin: callee={callee} fn={function_name}")
+                                return sites.push("MIR call target lacks proven source/runtime/foreign origin: callee={callee} fn={function_name} module={module_name} at={_mir_call_site_text_v1(span)}")
                             case _: ()
                     case _: ()
             case _: ()
@@ -607,7 +617,8 @@ fn _mir_unproven_callable_operand_v1(function_name: text, operand: MirOperand, s
 fn mir_unproven_call_origin_sites_v1(module: MirModule) -> [text]:
     """Every callable `Const(Str, FuncPtr)` operand of `module` whose
     `call_origin` is `MirCallOrigin.Unknown`, one line per site, in the
-    backend panic's own words plus the function name.
+    backend panic's own words plus the function, the module and the call
+    site (`at=file:line:col`; `?` when the instruction has no span).
 
     The backends (`mir_call_origin_uses_local_symbols_named`) PANIC on an
     Unknown origin, and a panic ends the whole native-build worker: the
@@ -624,15 +635,15 @@ fn mir_unproven_call_origin_sites_v1(module: MirModule) -> [text]:
             for inst in block.instructions:
                 match inst.kind:
                     case MirInstKind.Call(_, func, args):
-                        sites = _mir_unproven_callable_operand_v1(function.name, func, sites)
+                        sites = _mir_unproven_callable_operand_v1(function.name, module.name, inst.span, func, sites)
                         for arg in args:
-                            sites = _mir_unproven_callable_operand_v1(function.name, arg, sites)
+                            sites = _mir_unproven_callable_operand_v1(function.name, module.name, inst.span, arg, sites)
                     case MirInstKind.PipeForward(_, value, func):
-                        sites = _mir_unproven_callable_operand_v1(function.name, value, sites)
-                        sites = _mir_unproven_callable_operand_v1(function.name, func, sites)
+                        sites = _mir_unproven_callable_operand_v1(function.name, module.name, inst.span, value, sites)
+                        sites = _mir_unproven_callable_operand_v1(function.name, module.name, inst.span, func, sites)
                     case MirInstKind.Parallel(_, funcs):
                         for func in funcs:
-                            sites = _mir_unproven_callable_operand_v1(function.name, func, sites)
+                            sites = _mir_unproven_callable_operand_v1(function.name, module.name, inst.span, func, sites)
                     case _: ()
     sites
 

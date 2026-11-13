@@ -80,3 +80,8 @@ Residual unchanged and still correct to keep open as a note under this row:
 native RV32 object/hardware evidence for the inline-asm leaves needs a riscv32
 target run (this host is Windows/x86_64; interpreter execution skips inline
 assembly). That is target-hardware evidence, not a source defect.
+
+## Triage 2026-11-13 (P3 tools lane)
+No code change this lane; SUPERSEDED / UNSAFE-TAGGED per the record header
+(declarations and calls now explicitly `unsafe(ffi)`; RV32 provider split
+remains an arch-lane grant). Disposition accepted as-recorded.

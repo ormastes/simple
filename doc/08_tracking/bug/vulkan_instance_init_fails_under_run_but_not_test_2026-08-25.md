@@ -90,3 +90,14 @@ host where `test` live-passes), run the record's two commands against a current
 seed and capture `vulkan_sffi_last_error()` after `init()` — the silent rc=0
 exit after the error probe remains a secondary suspect to settle in the same
 session.
+
+
+---
+## 2026-11-13 triage — lane live-p3-l6 (Windows host, seed bin/simple.exe, base f790f7f266e)
+
+Concur with the most recent in-record triage; no fresh reproduction attempted
+(record's own grant names another host/lane). No in-lane change; disposition
+and owner unchanged.
+Filed repro is Linux dual-NVIDIA specific; this Windows host has no equivalent
+run-vs-test Vulkan entry divergence. Seed-Rust runtime owned
+(`VulkanInstance::get_or_init`).

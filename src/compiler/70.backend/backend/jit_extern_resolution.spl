@@ -1,0 +1,131 @@
+# Pure-Simple JIT callee resolution.
+#
+# The JIT lane lowers MIR through cranelift_codegen_adapter into a host JIT
+# module. That lowering declares every non-local named callee as a Cranelift
+# import. The provider behind rt_cranelift_new_module (the Rust seed's
+# cranelift_sffi) registers the seed JIT's runtime symbol table and admits an
+# import only when finalize can bind it exactly:
+#   - a runtime-table name, with exactly its RuntimeFuncSpec signature;
+#   - for a Foreign callee only, a process symbol.
+# A declaration the provider refuses returns 0, and the JIT entry reports the
+# name (the import ledger in cranelift_runtime_imports records it).
+#
+# So the decision is split:
+#   Source, defined in the module  -> local call
+#   Foreign                        -> provider import (runtime table or process symbol)
+#   Runtime                        -> provider import (runtime table only)
+#   Source, not defined            -> refused by name, before codegen
+#   Unknown origin                 -> refused by name, before codegen
+# The origin comes from MirOperand.call_origin, never from the spelling of the
+# name, and there is no name table here to drift from the seed's: the set of
+# runtime symbols that link natively is whatever the provider registers.
+# Bug: doc/08_tracking/bug/pure_simple_jit_provider_registers_no_runtime_symbols_2026-11-13.md
+use compiler.mir.mir_instruction_support.{MirCallOrigin, mir_call_origin_text}
+use compiler.mir.mir_types.{MirConstValue}
+use compiler.mir.mir_instructions.{MirModule, MirInstKind, MirOperandKind}
+use compiler.mir.mir_instruction_graph.{mir_module_functions_sorted, mir_module_statics_sorted}
+
+pub enum JitCalleeResolution:
+    Local
+    ForeignImport
+    RuntimeImport
+    RuntimeUnbound
+    UnresolvedSource
+    UnknownOrigin
+
+pub fn jit_classify_callee(origin: MirCallOrigin, name: text, defined: Dict<text, bool>) -> JitCalleeResolution:
+    match origin:
+        case MirCallOrigin.Runtime: JitCalleeResolution.RuntimeImport
+        case MirCallOrigin.Foreign: JitCalleeResolution.ForeignImport
+        case MirCallOrigin.Unknown: JitCalleeResolution.UnknownOrigin
+        case MirCallOrigin.Source:
+            if defined.has(name):
+                JitCalleeResolution.Local
+            else:
+                JitCalleeResolution.UnresolvedSource
+
+pub fn jit_callee_refusal(resolution: JitCalleeResolution, name: text, caller: text) -> text:
+    """Empty when the JIT can bind the callee; otherwise the named refusal."""
+    match resolution:
+        case JitCalleeResolution.Local: ""
+        case JitCalleeResolution.ForeignImport: ""
+        case JitCalleeResolution.RuntimeImport: ""
+        case JitCalleeResolution.RuntimeUnbound:
+            "E-JIT-RUNTIME-EXTERN-UNBOUND: {name} ({caller}): the Cranelift JIT provider's runtime symbol table has no such symbol with this exact RuntimeFuncSpec signature"
+        case JitCalleeResolution.UnresolvedSource:
+            "E-JIT-UNRESOLVED-CALLEE: {name} (called from {caller}): not defined in the JIT module"
+        case JitCalleeResolution.UnknownOrigin:
+            "E-JIT-UNKNOWN-CALL-ORIGIN: {name} (called from {caller}): MIR does not prove a source, runtime or foreign origin"
+
+pub fn jit_module_extern_errors(module: MirModule) -> [text]:
+    """Refusals for every named callee of the module, one per callee name."""
+    val functions = mir_module_functions_sorted(module)
+    var defined: Dict<text, bool> = {}
+    for func in functions:
+        defined[func.name] = true
+    var errors: [text] = []
+    var seen: Dict<text, bool> = {}
+    for func in functions:
+        for block in func.blocks:
+            for inst in block.instructions:
+                match inst.kind:
+                    case Call(_, callee, _):
+                        match callee.kind:
+                            case Const(value, _):
+                                match value:
+                                    case Str(name):
+                                        # Keyed by origin too: one name may be a local
+                                        # call at one site and a runtime call at another.
+                                        val site = "{mir_call_origin_text(callee.call_origin)}:{name}"
+                                        if not seen.has(site):
+                                            seen[site] = true
+                                            val refusal = jit_callee_refusal(
+                                                jit_classify_callee(callee.call_origin, name, defined), name, func.name)
+                                            if refusal != "":
+                                                errors = errors.push(refusal)
+                                    case _: pass
+                            case _: pass
+                    case _: pass
+    # An imported static binds through a generated accessor symbol that only
+    # the providing module's object defines; no process lookup can find it.
+    for static_ in mir_module_statics_sorted(module):
+        if static_.is_external:
+            errors = errors.push("E-JIT-EXTERN-STATIC-UNBOUND: {static_.name} (module {module.name}): an imported static has no provider in a JIT module")
+    errors
+
+pub fn jit_callee_names(module: MirModule, origin: MirCallOrigin) -> Dict<text, bool>:
+    """Names of the module's named callees with `origin`."""
+    var names: Dict<text, bool> = {}
+    for func in mir_module_functions_sorted(module):
+        for block in func.blocks:
+            for inst in block.instructions:
+                match inst.kind:
+                    case Call(_, callee, _):
+                        if callee.call_origin == origin:
+                            match callee.kind:
+                                case Const(value, _):
+                                    match value:
+                                        case Str(name): names[name] = true
+                                        case _: pass
+                                case _: pass
+                    case _: pass
+    names
+
+pub fn jit_refused_import_errors(module: MirModule, refused: [text]) -> [text]:
+    """Named errors for the imports whose declaration the provider refused.
+
+    A Runtime callee binds only through the provider's runtime symbol table with
+    its exact RuntimeFuncSpec signature; a Foreign callee also through a process
+    symbol; an import the lowering declares on its own (string boxing, array and
+    aggregate helpers, float libcalls) only through the runtime table."""
+    val runtime = jit_callee_names(module, MirCallOrigin.Runtime)
+    val foreign = jit_callee_names(module, MirCallOrigin.Foreign)
+    var errors: [text] = []
+    for name in refused:
+        if runtime.has(name):
+            errors = errors.push(jit_callee_refusal(JitCalleeResolution.RuntimeUnbound, name, "module {module.name}"))
+        elif foreign.has(name):
+            errors = errors.push("E-JIT-FOREIGN-EXTERN-UNBOUND: {name} (module {module.name}): no process symbol, or a runtime-table symbol whose RuntimeFuncSpec signature differs")
+        else:
+            errors = errors.push("E-JIT-LOWERING-IMPORT-UNBOUND: {name} (module {module.name}): the lowering imports it and the Cranelift JIT provider's runtime symbol table has no such symbol with this exact signature")
+    errors

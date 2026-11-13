@@ -1005,3 +1005,10 @@ capsule symbol strength (link-architecture lane). No code change this lane.
 ## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
 
 **CLOSED/SUPERSEDED (confirmed)** — boot10 verified fixing commits 72b11296929/2cf4bb13366/478f4b1b093 + f6c03cbc837/62f9fed02aa ancestors and the portable-stat/procfs idioms live. End-to-end macOS Stage-3 run remains a macOS-host grant.
+
+
+---
+
+## 2026-11-13 triage (live-P3 lane l1, work/live-p3-l1-20261113, base f790f7f266e)
+
+**CLOSED/SUPERSEDED (confirmed)** — All six cited fix commits verified ancestors of this base (`72b11296929` `2cf4bb13366` `478f4b1b093` `f6c03cbc837` `62f9fed02aa` `2e12cd1f450f`); `src/runtime/tools/stage3_fdwalk.c` present (20031 bytes). End-to-end macOS Stage-3 run remains a macOS-host grant.

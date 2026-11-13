@@ -172,3 +172,10 @@ Verdict: FIXED.
 ## Re-verified 2026-11-13 (Linux aarch64, lane uia)
 
 On release/1.0.0 35144b7f5e9, Linux aarch64 seed af717f53d6bce3e5: test/01_unit/os/vulkan/cross_arch_boundary_substitution_spec.spl 4/4 passed and spipe_docgen reports Generated 1 docs (1 complete, 0 stubs) for it. The committed doc/06_spec manual was not regenerated here: spipe_docgen main emits a different, shorter layout than the committed one (drops the folded Executable SSpec scenario blocks), so swapping it in would lose content.
+
+
+---
+
+## 2026-11-13 triage (live-P3 lane l1, work/live-p3-l1-20261113, base f790f7f266e)
+
+**FIXED (confirmed)** — Squash-merge `b4a784df0640` verified ancestor of this base; Finding 2 required no change per prior lanes.

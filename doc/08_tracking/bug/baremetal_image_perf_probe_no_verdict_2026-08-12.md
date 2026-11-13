@@ -99,3 +99,10 @@ on this lane.**
   bounded-scan vs full-scan probe through the SimpleOS x86_64 QEMU timing
   entrypoint and records p50/p95, checksum, RSS, viewport, backend, binary
   revision, and fallback state.
+
+
+---
+
+## 2026-11-13 triage (live-P3 lane l1, work/live-p3-l1-20261113, base f790f7f266e)
+
+**OPEN-BLOCKED (confirmed)** — Receipt-side fix present at this base (`last_image_source_pixels`/`last_image_examined_pixels`, 9 refs in `backend_baremetal.spl`, grep). No `qemu-system-*` on this Windows lane and native timing entrypoints are lane-forbidden, so the p50/p95 timing verdict half of "Required resolution" stays unproducible here; grant unchanged (Linux-hosted lane with the self-hosted binary).
