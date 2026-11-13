@@ -1,0 +1,192 @@
+# Default-deny route authorization, policy revisions and revocation for the
+# emulated `endpoint-v1` network (design 11.1, 11.7, 11.11).
+# A route is authorized by network + endpoint identity + port + protocol +
+# generation. It needs BOTH an egress allow (source side) and an ingress
+# allow (target side); with no matching rule the answer is deny. Rules name
+# networks explicitly (no network wildcard), so cross-network traffic only
+# flows when policy explicitly names both networks.
+# Decisions consume only broker-bound principals and registry leases, never
+# caller-supplied addresses, source IPs or workload IDs.
+use std.nogc_async_mut.container.network.endpoint_identity_v1.{
+    EndpointPrincipalV1, RouteLeaseV1, ResolvedRouteV1, endpoint_token_valid_v1,
+    endpoint_network_scope_v1, endpoint_principal_validate_v1, endpoint_principal_key_v1,
+    endpoint_port_valid_v1, endpoint_protocol_valid_v1}
+use std.nogc_async_mut.container.network.service_registry_v1.{EndpointServiceRegistryV1}
+
+pub const ENDPOINT_DIRECTION_EGRESS_V1 = "egress"
+pub const ENDPOINT_DIRECTION_INGRESS_V1 = "ingress"
+pub const ENDPOINT_REVOKE_EXISTING_V1 = "revoke-existing"
+pub const ENDPOINT_NEW_CONNECTIONS_ONLY_V1 = "new-connections-only"
+pub const ENDPOINT_POLICY_MAX_RULES_V1: i64 = 4096
+
+# `source_pod` / `target_service` may be "*"; networks never may. Network
+# fields are generation-free scopes ("tenant/namespace/name"); generation is
+# checked against the registry, not encoded in long-lived policy.
+pub struct EndpointAclRuleV1:
+    rule_id: text
+    direction: text
+    source_network: text
+    source_pod: text
+    target_network: text
+    target_service: text
+    port: i64
+    protocol: text
+    on_revoke: text
+
+pub struct EndpointNetworkPolicyV1:
+    revision: i64
+    rules: [EndpointAclRuleV1]
+
+# Outcome of committing a newer policy revision against live routes.
+pub struct EndpointPolicyCommitV1:
+    revision: i64
+    revoke: [ResolvedRouteV1]
+    retained: [ResolvedRouteV1]
+
+fn _endpoint_scope_valid(scope: text) -> bool:
+    val parts = scope.split("/")
+    if parts.len() != 3: return false
+    for part in parts:
+        if not endpoint_token_valid_v1(part): return false
+    true
+
+pub fn endpoint_policy_validate_v1(policy: EndpointNetworkPolicyV1) -> Result<bool, text>:
+    if policy.revision < 1: return Err("endpoint-policy-revision-invalid")
+    if policy.rules.len() > ENDPOINT_POLICY_MAX_RULES_V1: return Err("endpoint-policy-too-many-rules")
+    var seen: Dict<text, bool> = {}
+    for rule in policy.rules:
+        if not endpoint_token_valid_v1(rule.rule_id): return Err("endpoint-policy-rule-id-invalid")
+        if seen.contains_key(rule.rule_id): return Err("endpoint-policy-rule-id-duplicate")
+        seen[rule.rule_id] = true
+        if rule.direction != ENDPOINT_DIRECTION_EGRESS_V1 and rule.direction != ENDPOINT_DIRECTION_INGRESS_V1:
+            return Err("endpoint-policy-direction-invalid")
+        if not _endpoint_scope_valid(rule.source_network) or not _endpoint_scope_valid(rule.target_network):
+            return Err("endpoint-policy-network-invalid")
+        if rule.source_pod != "*" and not endpoint_token_valid_v1(rule.source_pod):
+            return Err("endpoint-policy-source-pod-invalid")
+        if rule.target_service == "": return Err("endpoint-policy-target-service-invalid")
+        if not endpoint_port_valid_v1(rule.port): return Err("endpoint-policy-port-invalid")
+        val _protocol = endpoint_protocol_valid_v1(rule.protocol)?
+        if rule.on_revoke != ENDPOINT_REVOKE_EXISTING_V1 and rule.on_revoke != ENDPOINT_NEW_CONNECTIONS_ONLY_V1:
+            return Err("endpoint-policy-revoke-mode-invalid")
+    Ok(true)
+
+fn _endpoint_rule_matches(rule: EndpointAclRuleV1, direction: text, source: EndpointPrincipalV1,
+        lease: RouteLeaseV1, port: i64, protocol: text) -> bool:
+    rule.direction == direction and
+        rule.source_network == endpoint_network_scope_v1(source.network) and
+        (rule.source_pod == "*" or rule.source_pod == source.pod_uid) and
+        rule.target_network == endpoint_network_scope_v1(lease.endpoint.network) and
+        (rule.target_service == "*" or rule.target_service == lease.service_name) and
+        rule.port == port and rule.protocol == protocol
+
+fn _endpoint_first_rule(policy: EndpointNetworkPolicyV1, direction: text,
+        source: EndpointPrincipalV1, lease: RouteLeaseV1, port: i64, protocol: text) -> Option<EndpointAclRuleV1>:
+    for rule in policy.rules:
+        if _endpoint_rule_matches(rule, direction, source, lease, port, protocol): return Some(rule)
+    None
+
+# Rule-only decision (no liveness/generation facts). Shared by authorize and
+# by revision commits re-evaluating existing routes.
+pub fn endpoint_policy_decide_v1(policy: EndpointNetworkPolicyV1, source: EndpointPrincipalV1,
+        lease: RouteLeaseV1, port: i64, protocol: text) -> Result<ResolvedRouteV1, text>:
+    val cross = endpoint_network_scope_v1(source.network) != endpoint_network_scope_v1(lease.endpoint.network)
+    var egress_id = ""
+    var ingress_id = ""
+    var mode = ENDPOINT_NEW_CONNECTIONS_ONLY_V1
+    match _endpoint_first_rule(policy, ENDPOINT_DIRECTION_EGRESS_V1, source, lease, port, protocol):
+        case Some(rule):
+            egress_id = rule.rule_id
+            if rule.on_revoke == ENDPOINT_REVOKE_EXISTING_V1: mode = ENDPOINT_REVOKE_EXISTING_V1
+        case None:
+            if cross: return Err("endpoint-route-cross-network-denied")
+            return Err("endpoint-route-egress-denied")
+    match _endpoint_first_rule(policy, ENDPOINT_DIRECTION_INGRESS_V1, source, lease, port, protocol):
+        case Some(rule):
+            ingress_id = rule.rule_id
+            if rule.on_revoke == ENDPOINT_REVOKE_EXISTING_V1: mode = ENDPOINT_REVOKE_EXISTING_V1
+        case None:
+            if cross: return Err("endpoint-route-cross-network-denied")
+            return Err("endpoint-route-ingress-denied")
+    Ok(ResolvedRouteV1(source: source, lease: lease, policy_revision: policy.revision,
+        egress_rule_id: egress_id, ingress_rule_id: ingress_id, revoke_mode: mode))
+
+# Committed policy revision plus revoked principals. New opens always use the
+# latest committed revision. Revocation is authority removal, never evidence
+# of process absence or native cleanup.
+pub class EndpointAuthorityV1:
+    policy: EndpointNetworkPolicyV1
+    revoked: Dict<text, bool>
+
+    pub static fn create(policy: EndpointNetworkPolicyV1) -> Result<EndpointAuthorityV1, text>:
+        val _ok = endpoint_policy_validate_v1(policy)?
+        Ok(EndpointAuthorityV1(policy: policy, revoked: {}))
+
+    pub fn revision() -> i64:
+        self.policy.revision
+
+    pub fn principal_revoked(principal: EndpointPrincipalV1) -> bool:
+        self.revoked.contains_key(endpoint_principal_key_v1(principal))
+
+    # Workload stop revokes network authority even if cleanup is incomplete.
+    # Returns the live routes the caller must close (source or target side).
+    pub me revoke_principal(principal: EndpointPrincipalV1,
+            active: [ResolvedRouteV1]) -> [ResolvedRouteV1]:
+        val key = endpoint_principal_key_v1(principal)
+        self.revoked[key] = true
+        var close: [ResolvedRouteV1] = []
+        for route in active:
+            if endpoint_principal_key_v1(route.source) == key or
+                    endpoint_principal_key_v1(route.lease.owner) == key:
+                close.push(route)
+        close
+
+    # Commit a strictly newer revision. A route the new policy no longer
+    # allows is revoked when its granting rules said `revoke-existing`;
+    # otherwise it is retained until it closes (`new-connections-only`).
+    pub me commit_policy(next: EndpointNetworkPolicyV1,
+            active: [ResolvedRouteV1]) -> Result<EndpointPolicyCommitV1, text>:
+        val _ok = endpoint_policy_validate_v1(next)?
+        if next.revision <= self.policy.revision: return Err("endpoint-policy-revision-not-monotonic")
+        var revoke: [ResolvedRouteV1] = []
+        var retained: [ResolvedRouteV1] = []
+        for route in active:
+            val decision = endpoint_policy_decide_v1(next, route.source, route.lease,
+                route.lease.endpoint.port, route.lease.endpoint.protocol)
+            if decision.is_ok():
+                retained.push(route)
+            elif route.revoke_mode == ENDPOINT_REVOKE_EXISTING_V1:
+                revoke.push(route)
+            else:
+                retained.push(route)
+        self.policy = next
+        Ok(EndpointPolicyCommitV1(revision: next.revision, revoke: revoke, retained: retained))
+
+    # Full new-open authorization: liveness, generation and both policy sides.
+    pub fn authorize_route(registry: EndpointServiceRegistryV1, source: EndpointPrincipalV1,
+            lease: RouteLeaseV1, port: i64, protocol: text) -> Result<ResolvedRouteV1, text>:
+        val _source = endpoint_principal_validate_v1(source)?
+        if not endpoint_port_valid_v1(port): return Err("endpoint-route-port-invalid")
+        val _protocol = endpoint_protocol_valid_v1(protocol)?
+        if self.principal_revoked(source): return Err("endpoint-route-source-revoked")
+        match registry.network_generation(source.network):
+            case Some(current):
+                if current != source.network.generation: return Err("endpoint-route-stale-source-generation")
+            case None:
+                return Err("endpoint-route-source-network-unknown")
+        match registry.network_generation(lease.endpoint.network):
+            case Some(current):
+                if current != lease.endpoint.network.generation:
+                    return Err("endpoint-route-stale-target-generation")
+            case None:
+                return Err("endpoint-route-target-network-unknown")
+        if not registry.lease_active(lease): return Err("endpoint-route-target-not-active")
+        if self.principal_revoked(lease.owner): return Err("endpoint-route-target-revoked")
+        if lease.endpoint.port != port or lease.endpoint.protocol != protocol:
+            return Err("endpoint-route-port-mismatch")
+        endpoint_policy_decide_v1(self.policy, source, lease, port, protocol)
+
+export EndpointAclRuleV1, EndpointNetworkPolicyV1, EndpointPolicyCommitV1, EndpointAuthorityV1
+export endpoint_policy_validate_v1, endpoint_policy_decide_v1
+export ENDPOINT_DIRECTION_EGRESS_V1, ENDPOINT_DIRECTION_INGRESS_V1
+export ENDPOINT_REVOKE_EXISTING_V1, ENDPOINT_NEW_CONNECTIONS_ONLY_V1, ENDPOINT_POLICY_MAX_RULES_V1
