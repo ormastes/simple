@@ -1,0 +1,106 @@
+# @cover src/compiler/80.driver/driver_hir_recovery.spl 20%
+"""
+## Purpose and audience
+Purpose: the shard ledger's BLOCKED record is published by every participant
+(HIR worker, MIR fork child, coordinator) without coordination. Its contract
+(driver_hir_recovery.spl: "the first BLOCKED reason wins") requires one whole
+reason to be visible from the moment the file exists: a reader that sees the
+file (hir_shard_recovery_blocked) reads its content as the root cause
+(native_build_main.spl, native_mir_shard_link_inputs_v1). A check-then-write
+with an in-place truncating write lets two participants both pass the
+existence check and then overwrite each other, leaving a torn record.
+Audience: engineers maintaining the native-build shard worker pools.
+"""
+
+use std.spec
+use compiler.driver.driver_hir_recovery.{hir_shard_recovery_block, hir_shard_recovery_blocked}
+use std.io_runtime.{dir_create_all, dir_exists, dir_list, file_exists, file_read, getpid}
+use std.nogc_sync_mut.io_runtime.{env_get_nullable, env_set}
+
+extern fn rt_process_spawn_async_value(cmd: text, args: [text]) -> i64
+extern fn rt_process_wait(pid: i64, timeout_ms: i64) -> i64
+
+# Three writers (A, B, C) and one reader (R).
+val RACERS: i64 = 3
+val PEERS: text = "A,B,C,R"
+val ROUNDS: i64 = 96
+
+fn race_fixture(label: text) -> text:
+    val dir = "build/tmp/hir_shard_block_race/{getpid()}-{label}"
+    expect(dir_exists(dir)).to_equal(false)
+    expect(dir_create_all(dir)).to_equal(true)
+    dir
+
+fn simple_binary() -> text:
+    val configured = env_get_nullable("SIMPLE_BINARY") ?? ""
+    if configured != "": configured else: "bin/simple"
+
+# One whole reason: a single repeated owner letter of that owner's length
+# (hir_shard_block_racer.spl block_race_reason_v1).
+fn whole_reason(content: text) -> bool:
+    if content.len() == 0:
+        return false
+    val letter = content.substring(0, 1)
+    val units = if letter == "A": 1 elif letter == "B": 2 elif letter == "C": 3 else: 0
+    if units < 1 or units > RACERS:
+        return false
+    if content.len() != units * 20000:
+        return false
+    var i = 0
+    while i < content.len():
+        if content.substring(i, i + 1) != letter:
+            return false
+        i = i + 1000
+    content.substring(content.len() - 1, content.len()) == letter
+
+describe "HIR shard ledger BLOCKED publication":
+    it "keeps exactly one whole reason when racing participants block one ledger":
+        step("Spawn three writers and one reader over {ROUNDS} fresh round ledgers")
+        val queue = race_fixture("blocked")
+        var round = 0
+        while round < ROUNDS:
+            expect(dir_create_all("{queue}/r{round}")).to_equal(true)
+            round = round + 1
+        var pids: [i64] = []
+        for owner in PEERS.split(","):
+            env_set("SIMPLE_BLOCK_RACE_QUEUE", queue)
+            env_set("SIMPLE_BLOCK_RACE_OWNER", owner)
+            env_set("SIMPLE_BLOCK_RACE_PEERS", PEERS)
+            env_set("SIMPLE_BLOCK_RACE_ROUNDS", "{ROUNDS}")
+            var pid: i64 = -1
+            unsafe(capabilities: [ffi]):
+                pid = rt_process_spawn_async_value(simple_binary(),
+                    ["run", "test/01_unit/compiler/driver/fixtures/hir_shard_block_racer.spl"])
+            expect(pid).to_be_greater_than(0)
+            pids.push(pid)
+
+        step("Every racer exits 0 (block() reported success to every participant)")
+        for pid in pids:
+            var code: i64 = -1
+            unsafe(capabilities: [ffi]):
+                code = rt_process_wait(pid, 600000)
+            expect(code).to_equal(0)
+
+        step("Every round holds one whole reason, the reader saw one, and no staging residue remains")
+        var torn: [text] = []
+        round = 0
+        while round < ROUNDS:
+            val dir = "{queue}/r{round}"
+            expect(hir_shard_recovery_blocked(dir)).to_equal(true)
+            val content = file_read("{dir}/BLOCKED")
+            if not whole_reason(content):
+                torn = torn.push("r{round} final: len={content.len()}")
+            val observed = file_read("{dir}/observed-R")
+            if not whole_reason(observed):
+                torn = torn.push("r{round} reader saw: len={observed.len()}")
+            for name in dir_list(dir) ?? []:
+                expect(name.ends_with(".tmp")).to_equal(false)
+            round = round + 1
+        expect(torn).to_equal([])
+
+    it "preserves the first reason against a later observer":
+        val dir = race_fixture("first-wins")
+        expect(hir_shard_recovery_block(dir, "root cause")).to_equal(true)
+        expect(hir_shard_recovery_block(dir, "merely observed the block")).to_equal(true)
+        expect(file_read("{dir}/BLOCKED")).to_equal("root cause")
+        expect(file_exists("{dir}/BLOCKED.{getpid()}.tmp")).to_equal(false)
