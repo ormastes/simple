@@ -53,7 +53,7 @@ use compiler.core.ast.{decl_val_binding, decl_lazy_val_binding, decl_var_binding
 use compiler.core.ast.{decl_use_import, decl_export_names, decl_enum_def, decl_set_lazy}
 use compiler.core.ast.{decl_impl_block, decl_set_trait, decl_set_impl_with_trait}
 use compiler.core.ast.{decl_set_comptime}
-use compiler.core.ast.{decl_set_visibility_text, decl_set_field_visibility}
+use compiler.core.ast.{decl_set_visibility_text, decl_set_field_visibility, decl_set_field_array_sizes}
 use compiler.core.ast.{decl_get_name, decl_get_fields, decl_get_derives, decl_set_derives}
 use compiler.core.ast.{module_set_path, module_get_path, module_add_decl}
 use compiler.frontend.core.lexer.{lex_token_start_get, lex_token_end_get, lex_live_line_get, lex_live_col_get, lex_force_set_pos}
@@ -72,6 +72,7 @@ use compiler.core.parser.{parser_advance, parser_expect, parser_error}
 use compiler.core.parser.{parser_tok_save, parser_tok_restore}
 use compiler.core.parser.{parser_skip_newlines, parser_skip_newlines_and_semicolons}
 use compiler.core.parser.{parser_parse_type, parser_parse_type_with_union}
+use compiler.core.parser.{parser_fixed_array_elem, parser_fixed_array_size, parser_fixed_array_reset, parser_array_tag_for_elem}
 
 # Import from sibling split modules
 use compiler.frontend.core.parser_expr.{parse_expr, parse_int_text}
@@ -1051,6 +1052,7 @@ fn parse_struct_or_trait_decl(is_class: bool, is_trait: bool) -> i64:
     var field_types: [i64] = []
     var field_defaults: [i64] = []
     var field_bits: [i64] = []
+    var field_array_sizes: [i64] = []
     var class_method_ids: [i64] = []
     # C1 (@layer_field): one slot per FIELD, in declaration order -- "" means
     # "infer by same name", otherwise the `@layer_field(NAME)` target. Published
@@ -1278,11 +1280,19 @@ fn parse_struct_or_trait_decl(is_class: bool, is_trait: bool) -> i64:
         # boxing and the array read decodes a raw type tag with `>> 3`.
         var ftype: i64 = TYPE_ANY
         var declared_collection_family = ""
+        var fsize: i64 = -1
         if par_kind_get() == TOK_COLON:
             parser_advance()
             if par_kind_get() == TOK_IDENT:
                 declared_collection_family = par_text_get()
+            # The `[T; N]` tag drops N; keep a literal N for the field when the
+            # field's own top-level type is that sized array (not a nested one),
+            # so `[i64; 2]` and `[i64; 3]` fields keep distinct identities.
+            parser_fixed_array_reset()
             ftype = parser_parse_type()
+            if parser_fixed_array_size() >= 0 and ftype == parser_array_tag_for_elem(parser_fixed_array_elem()):
+                fsize = parser_fixed_array_size()
+        field_array_sizes.push(fsize)
         field_names.push(fname)
         field_visibilities.push(class_member_visibility)
         field_types.push(ftype)
@@ -1363,6 +1373,7 @@ fn parse_struct_or_trait_decl(is_class: bool, is_trait: bool) -> i64:
     layer_field_pending_set(layer_field_renames, layer_field_saw_any)
     val struct_d = decl_struct_def(struct_name, field_names, field_types, field_defaults, field_bits, 0)
     decl_set_field_visibility(struct_d, field_visibilities)
+    decl_set_field_array_sizes(struct_d, field_array_sizes)
     if is_class:
         decl_set_is_value_type(struct_d, 0)
     # `type_params` (parsed above, e.g. `struct Box<T>:` / `class Node<T>:`)

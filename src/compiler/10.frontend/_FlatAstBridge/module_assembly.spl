@@ -24,7 +24,7 @@ use compiler.core.parser_decls.{parser_extend_ctor_providers, parser_extend_ctor
 use compiler.core.parser_decls.{parser_extend_ctor_type_counts, parser_extend_ctor_type_ids}
 use compiler.common.dynamic_identity.closure.{Closure}
 use compiler.core.ast.*
-use compiler.core.ast.{decl_get_body, decl_get_field_bits, decl_get_field_defaults, decl_get_field_types, decl_get_fields, decl_get_field_visibility}
+use compiler.core.ast.{decl_get_body, decl_get_field_bits, decl_get_field_defaults, decl_get_field_types, decl_get_fields, decl_get_field_visibility, decl_get_field_array_sizes}
 use compiler.core.ast.{decl_enum_payload_unnamed_marker, decl_get_imports, decl_get_is_comptime, decl_get_is_lazy, decl_get_name, decl_get_param_names}
 use compiler.core.ast.{decl_get_param_types, decl_get_ret_type, decl_get_visibility_text, module_decl_at, module_decl_count_get}
 use compiler.core.ast.{decl_is_packed_at, decl_is_packed_len, decl_get_is_value_type}
@@ -234,13 +234,24 @@ fn field_vis_text_at(codes: [text], fi: i64) -> text:
         return codes[fi]
     "private"
 
+fn flat_field_sized_type(declared: Type, array_size: i64) -> Type:
+    """Re-attach a struct field's literal `[T; N]` size (parser side pool
+    decl_field_array_sizes); the flat type tag alone drops N. HIR lowering
+    still lowers the array as dynamic, so only AST identity changes."""
+    if array_size < 0 or not parser_type_kind_is_array(declared.kind):
+        return declared
+    val element = parser_type_kind_array_element(declared.kind, declared)
+    val size_expr: Expr? = Some(Expr(kind: ExprKind.IntLit(array_size), span: declared.span))
+    Type(kind: TypeKind.Array(element, size_expr), span: declared.span)
+
 fn flat_parser_field_from_nodes(
     name: text,
     has_type_node: bool,
     type_node: i64,
     default_node: i64,
     raw_bits: i64,
-    vis_text: text
+    vis_text: text,
+    array_size: i64
 ) -> ParserField:
     val has_default = default_node >= 0
     val has_bits = raw_bits > 0
@@ -251,7 +262,7 @@ fn flat_parser_field_from_nodes(
     if has_type_node:
         if has_default:
             val default_expr = convert_flat_expr(default_node)
-            val declared_type = convert_flat_type(type_node)
+            val declared_type = flat_field_sized_type(convert_flat_type(type_node), array_size)
             return ParserField(
                 name: name, type_: declared_type,
                 has_default: true, default: default_expr,
@@ -259,7 +270,7 @@ fn flat_parser_field_from_nodes(
                 is_volatile: false, has_bits: has_bits, bits: bits,
                 has_fixed_address: false, fixed_address: 0,
                 span: make_span())
-        val declared_type = convert_flat_type(type_node)
+        val declared_type = flat_field_sized_type(convert_flat_type(type_node), array_size)
         return ParserField(
             name: name, type_: declared_type,
             has_default: false,
@@ -430,6 +441,7 @@ fn flat_ast_to_module(path: text) -> ParserModule:
             val f_bits = decl_get_field_bits(idx)
             val f_defaults = decl_get_field_defaults(idx)
             val f_vis = decl_get_field_visibility(idx)
+            val f_sizes = decl_get_field_array_sizes(idx)
             val s_visibility = convert_decl_visibility(idx)
             var is_packed = false
             if idx < decl_is_packed_len():
@@ -512,7 +524,7 @@ fn flat_ast_to_module(path: text) -> ParserModule:
                         field_type_node = f_types[fi]
                     fields.push(flat_parser_field_from_nodes(
                         f_names[fi], fi < f_types.len(), field_type_node,
-                        fd_id, fb, field_vis_text_at(f_vis, fi)))
+                        fd_id, fb, field_vis_text_at(f_vis, fi), if fi < f_sizes.len(): f_sizes[fi] else: -1))
                     fi = fi + 1
                 # decl_get_type_params returns the struct/class's own `<T, U,
                 # ...>` names (threaded through by parse_struct_decl via
