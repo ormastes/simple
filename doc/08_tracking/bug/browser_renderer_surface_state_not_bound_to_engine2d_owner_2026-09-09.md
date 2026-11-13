@@ -186,3 +186,14 @@ is fixed with executed evidence. The wider production-boundary acceptance list
 in this doc (three frames in flight with bounded backpressure, zero
 steady-state CPU waits, SPipe generation) remains open under the O1+B/N2
 requirement and plan docs. Status flipped accordingly.
+
+## 2026-11-13 closure (UI batch B, Linux aarch64, release/1.0.0 @ 35144b7f5e93)
+
+Focused owner spec re-run on this host: `simple test
+test/01_unit/os/compositor/compositor_gpu_surface_owner_spec.spl` (Rust seed,
+16G cgroup cap) reported `SPEC FILE VERDICT ... outcome=OK declared>=20
+executed=20 passed=20 failed=0`, rc=0. That matches the 2026-11-11 Windows
+result, so the owner-bound slice is green on two hosts. `bug_db.sdn` row moved
+open -> fixed. The B/N2 submission session, asynchronous present release and
+device-lifecycle evidence stay open under the requirement and plan docs named
+in the 2026-11-11 addendum; this record does not cover them.
