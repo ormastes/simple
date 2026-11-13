@@ -1,0 +1,278 @@
+# @req REQ-XRAY-V1-API-01
+"""
+# XRay ("spy") OUT — a compiled Simple program runs the pure-Simple spy
+
+## Purpose and audience
+Black-box proof, for the reviewer of the XRay V1 lanes, that a compiled Simple
+program (`xray_inprocess_prog.spl`, built `--native --backend=native --xray`)
+is spied on by the pure-Simple spy in ONE real run: its controller loads it
+through aspect dynload and drives every V1 feature on its real code: runtime log
+on/off, profile mode, the exclusive-time fold, re-enable with a new pointcut,
+the container profiling switch, and rollback + close_admission after a patch
+fault. The features were proven first on the LLVM / in-process path
+(`test/01_unit/lib/xray/xray_backend_differential_in_spec.spl`, all three
+columns) and, for the edges a real LLVM binary can show today, by the
+compiler-rt C harness (`llvm` describe below). The `simple` describe states
+the same expectations against the real run.
+
+## Operator workflow
+    XRAY_OUT_SIMPLE_BINARY=<seed> bin/simple test test/03_system/xray/xray_spy_program_out_spec.spl
+The controller (`test/fixtures/xray/xray_native_program_host.spl`) runs under
+that binary. `XRAY_OUT_BUILDER=<bootstrap simple>` builds it into a native
+executable instead (`native-build`; BLOCKED on the run-21 Stage 2, see the
+status doc), `XRAY_OUT_PROGRAM_HOST=<exe>` runs a prebuilt one, and
+`XRAY_OUT_PROGRAM_MODULE=<libon.so>` reuses a built `--xray` module.
+
+## Compatibility and limitations
+Linux only (aarch64 runs the AArch64 sleds, x86_64 the SysV sleds; the lane
+ERRORs elsewhere). The LLVM column covers log/enable/rollback through the C
+harness; its profile, exclusive fold, container and aspect-dynload rows need
+a Simple-compiled `--xray` LLVM binary and are BLOCKED (status doc, "spy-3"
+section: the pure-Simple LLVM backend emits an object with zero functions).
+
+## Verification guidance and troubleshooting
+The lane is `scripts/check/check-xray-native-program-e2e.shs`; its verdict is
+the last stdout line and its kept transcript is the evidence each `it` reads.
+One lane run per spec process (cached under /tmp by pid).
+"""
+# doc-path: doc/03_plan/compiler/aspect_dynload/xray_v1_integration_status_2026-11-03.md
+# Lifecycle: doc/03_plan/compiler/aspect_dynload/simple_xray_staged_implementation_plan_2026-11-03.md ;
+# doc/04_architecture/compiler/xray/xray_compiler_structural_change_2026-11-06.md ;
+# doc/04_architecture/compiler/mdsoc_architecture_tobe.md
+use std.spec.*
+use std.nogc_sync_mut.io_runtime.{process_run_timeout, env_get, read_file_text, file_write, file_exists, getpid}
+
+fn lane_timeout_ms() -> i64:
+    val knob = env_get("XRAY_OUT_LANE_TIMEOUT_MS")
+    if knob != "": knob.to_i64() else: 7200000
+
+fn simple_binary() -> text:
+    val lane = env_get("XRAY_OUT_SIMPLE_BINARY")
+    if lane != "": return lane
+    val explicit = env_get("SIMPLE_BINARY")
+    if explicit != "": explicit else: "bin/simple"
+
+fn kept_dir(stderr: text) -> text:
+    for line in stderr.split("\n"):
+        if line.starts_with("kept: "): return line.substring(6, line.len()).trim()
+    ""
+
+# One lane run per spec process: "<verdict line>\n<transcript>".
+fn program_run() -> text:
+    val cache = "/tmp/xray-spy-program-out-{getpid()}.log"
+    if file_exists(cache): return read_file_text(cache)
+    var args: [text] = ["scripts/check/check-xray-native-program-e2e.shs", "--simple", simple_binary(), "--keep"]
+    val knobs = ["XRAY_OUT_BUILDER", "XRAY_OUT_PROGRAM_HOST", "XRAY_OUT_PROGRAM_MODULE"]
+    val flags = ["--builder", "--host-bin", "--module"]
+    for index in 0..3:
+        val value = env_get(knobs[index])
+        if value != "":
+            args.push(flags[index])
+            args.push(value)
+    val (stdout, stderr, _) = process_run_timeout("sh", args, lane_timeout_ms())
+    val lines = stdout.trim().split("\n")
+    val verdict = lines[lines.len() - 1]
+    val dir = kept_dir(stderr)
+    val transcript = if dir != "" and file_exists("{dir}/transcript.log"): read_file_text("{dir}/transcript.log") else: ""
+    if dir.starts_with("/tmp/xray-program-e2e."):
+        process_run_timeout("rm", ["-rf", dir], 60000)
+    val combined = "{verdict}\n{transcript}"
+    file_write(cache, combined)
+    combined
+
+# "key=value" of the first "SPY <scenario> ... key=value" line ("" when absent).
+fn spy(transcript: text, scenario: text, key: text) -> text:
+    val head = "SPY {scenario} "
+    val marker = " {key}="
+    for line in transcript.split("\n"):
+        if not line.starts_with(head): continue
+        val padded = " " + line.substring(head.len() - 1, line.len())
+        val at = padded.index_of(marker)
+        if at < 0: continue
+        val rest = padded.substring(at + marker.len(), padded.len())
+        val stop = rest.index_of(" ")
+        return if stop < 0: rest else: rest.substring(0, stop)
+    ""
+
+fn num(value: text) -> i64:
+    if value == "": -1 else: value.to_i64()
+
+fn id_of(transcript: text, function: text) -> text:
+    for pair in spy(transcript, "dynload", "ids").split(","):
+        val parts = pair.split(":")
+        if parts.len() == 2 and parts[0] == function: return parts[1]
+    ""
+
+# ---------------------------------------------------------------------------
+# The shared expectations: the same function for every backend column.
+# ---------------------------------------------------------------------------
+
+# Raw-edge log: balanced entries/exits > 0, no foreign edge, nothing after stop.
+fn expect_edges(entries: i64, exits: i64, others: i64, after_stop: i64):
+    expect(entries > 0).to_equal(true)
+    expect(entries).to_equal(exits)
+    expect(others).to_equal(0)
+    expect(after_stop).to_equal(0)
+
+# Exclusive time of a caller = its inclusive time minus its callee's.
+fn expect_exclusive_fold(caller_inclusive: i64, caller_exclusive: i64, callee_inclusive: i64, callee_depth: i64):
+    expect(caller_exclusive + callee_inclusive).to_equal(caller_inclusive)
+    expect(caller_exclusive <= caller_inclusive).to_equal(true)
+    expect(callee_depth).to_equal(2)
+
+# Rollback: start refused (BackendFailure = 9), controller Idle (0), nothing
+# patched, admission closed, nothing recorded.
+fn expect_rollback(status: i64, state: i64, patched: i64, gate_closed: bool, records: i64):
+    expect(status).to_equal(9)
+    expect(state).to_equal(0)
+    expect(patched).to_equal(0)
+    expect(gate_closed).to_equal(true)
+    expect(records).to_equal(0)
+
+# Container switch: off before start, on while Active, off after stop;
+# counters move only while on.
+fn expect_container(before: bool, during: bool, after: bool, lookups: text):
+    expect(before).to_equal(false)
+    expect(during).to_equal(true)
+    expect(after).to_equal(false)
+    expect(lookups).to_equal("0,2,2")
+
+fn edges_of(t: text, scenario: text):
+    expect_edges(num(spy(t, scenario, "entries")), num(spy(t, scenario, "exits")),
+        num(spy(t, scenario, "events")) - num(spy(t, scenario, "entries")) - num(spy(t, scenario, "exits")),
+        num(spy(t, scenario, "records_after_stop")))
+
+describe "XRay spy OUT — simple (compiled program, native Simple sleds)":
+    it "loads the spy through aspect dynload and selects by pointcut":
+        step("Build the --xray module and the host executable, then run the host once")
+        val t = program_run()
+        # @capture(log): the lane verdict line and the SPY transcript -> xray_spy_program_out_spec.evidence.sdn
+        step("Verify the lane passed and the module registered with every sled off")
+        expect(t.split("\n")[0].starts_with("PASS")).to_equal(true)
+        expect(num(spy(t, "dynload", "slot")) > 0).to_equal(true)
+        expect(spy(t, "dynload", "sites")).to_equal("7")
+        expect(spy(t, "dynload", "words")).to_equal("BBBBBBB")
+        step("Verify the pointcut turned on only the selected function's sleds")
+        expect(spy(t, "log", "words_on")).to_equal("BBBBBNN")
+        expect(spy(t, "log", "functions")).to_equal(id_of(t, "traced"))
+
+    it "logs raw edges only while enabled and returns untraced results":
+        step("Read the log cycle of the compiled run")
+        val t = program_run()
+        # @capture(log): SPY log lines -> xray_spy_program_out_spec.evidence.sdn
+        step("Verify balanced edges while on and none after the runtime stop")
+        edges_of(t, "log")
+        expect(spy(t, "log", "words_off")).to_equal("BBBBBBB")
+        expect(spy(t, "log", "same_generation")).to_equal("true")
+        expect(spy(t, "log", "stamped")).to_equal(spy(t, "log", "events"))
+        step("Verify traced and untraced results equal the baseline")
+        expect(spy(t, "log", "results_on")).to_equal(spy(t, "log", "baseline"))
+        expect(spy(t, "log", "results_off")).to_equal(spy(t, "log", "baseline"))
+
+    it "re-enables with a new pointcut in the next generation":
+        step("Read the re-enable cycle of the compiled run")
+        val t = program_run()
+        # @capture(log): SPY reenable lines -> xray_spy_program_out_spec.evidence.sdn
+        step("Verify generation 3 turned on only the scaled sleds and recorded only scaled")
+        expect(spy(t, "reenable", "generation")).to_equal("3")
+        expect(spy(t, "reenable", "words_on")).to_equal("BBNNNBB")
+        expect(spy(t, "reenable", "functions")).to_equal(id_of(t, "scaled"))
+        edges_of(t, "reenable")
+
+    it "folds the same raw-edge stream into a profile":
+        step("Read the profile fold of the compiled run")
+        val t = program_run()
+        # @capture(log): SPY fold line -> xray_spy_program_out_spec.evidence.sdn
+        step("Verify every edge folded and both selected functions have three calls")
+        edges_of(t, "profile")
+        expect(spy(t, "fold", "events")).to_equal(spy(t, "profile", "events"))
+        expect(spy(t, "fold", "unmatched")).to_equal("0")
+        expect(spy(t, "fold", "open")).to_equal("0")
+        expect(spy(t, "fold", "traced").split(":")[0]).to_equal("3")
+        expect(spy(t, "fold", "add1").split(":")[0]).to_equal("3")
+
+    it "computes exclusive time over a real nested call":
+        step("Read the traced and add1 profile rows (calls:inclusive:exclusive:depth)")
+        val t = program_run()
+        val traced = spy(t, "fold", "traced").split(":")
+        val add1 = spy(t, "fold", "add1").split(":")
+        # @capture(log): SPY fold rows -> xray_spy_program_out_spec.evidence.sdn
+        step("Verify exclusive(traced) is inclusive(traced) minus inclusive(add1)")
+        expect(traced.len()).to_equal(4)
+        expect(add1.len()).to_equal(4)
+        expect_exclusive_fold(traced[1].to_i64(), traced[2].to_i64(), add1[1].to_i64(), add1[3].to_i64())
+        expect(spy(t, "profile", "exclusive_identity")).to_equal("true")
+
+    it "switches container profiling with the spy's runtime state":
+        step("Read the container line of every enable/disable cycle")
+        val t = program_run()
+        # @capture(log): SPY <cycle> container lines -> xray_spy_program_out_spec.evidence.sdn
+        step("Verify off before start, on while Active, off after stop in each cycle")
+        for scenario in ["log", "profile", "reenable", "recover"]:
+            expect_container(spy(t, scenario, "before") == "true", spy(t, scenario, "during") == "true",
+                spy(t, scenario, "after") == "true", spy(t, scenario, "lookups"))
+
+    it "rolls back and closes admission on a patch fault, then recovers":
+        step("Read the injected-fault start and the recovery cycle")
+        val t = program_run()
+        # @capture(log): SPY rollback and recover lines -> xray_spy_program_out_spec.evidence.sdn
+        step("Verify the faulted start left every sled off and admission closed")
+        expect_rollback(num(spy(t, "rollback", "start")), num(spy(t, "rollback", "state")),
+            num(spy(t, "rollback", "patched")), spy(t, "rollback", "gate_closed") == "true",
+            num(spy(t, "rollback", "records")))
+        expect(spy(t, "rollback", "words")).to_equal("BBBBBBB")
+        step("Verify the next generation starts cleanly on the real port")
+        expect(spy(t, "recover", "generation")).to_equal("5")
+        edges_of(t, "recover")
+
+# The LLVM column on a real binary today: the compiler-rt C harness
+# (check-xray-llvm-adapter-e2e.shs). Same expectation functions.
+fn llvm_run() -> text:
+    val cache = "/tmp/xray-spy-llvm-out-{getpid()}.log"
+    if file_exists(cache): return read_file_text(cache)
+    val (stdout, _, _) = process_run_timeout("sh", ["scripts/check/check-xray-llvm-adapter-e2e.shs"], lane_timeout_ms())
+    file_write(cache, stdout)
+    stdout
+
+fn info(output: text, label: text, key: text) -> i64:
+    for line in output.split("\n"):
+        if line.starts_with("INFO {label}"):
+            val marker = " {key}="
+            val at = line.index_of(marker)
+            if at < 0: continue
+            val rest = line.substring(at + marker.len(), line.len())
+            val stop = rest.index_of(" ")
+            return (if stop < 0: rest else: rest.substring(0, stop)).to_i64()
+    -1
+
+fn passed(output: text, line: text) -> bool:
+    output.contains("\nPASS {line}\n") or output.starts_with("PASS {line}\n")
+
+describe "XRay spy OUT — llvm (compiler-rt sleds, C harness)":
+    it "logs raw edges only while enabled":
+        step("Run the compiler-rt harness lane")
+        val out = llvm_run()
+        # @capture(log): lane stdout INFO/PASS lines -> xray_spy_program_out_spec.evidence.sdn
+        step("Verify balanced edges for the selected function and silence after unpatch")
+        val verdict = out.trim().split("\n")
+        expect(verdict[verdict.len() - 1].starts_with("PASS")).to_equal(true)
+        expect(passed(out, "after unpatch nothing fires")).to_equal(true)
+        expect_edges(info(out, "patched-A:", "entry"), info(out, "patched-A:", "exit"),
+            info(out, "patched-A:", "other") + info(out, "patched-A:", "bad"), 0)
+
+    it "re-enables and reselects at runtime":
+        step("Run the compiler-rt harness lane")
+        val out = llvm_run()
+        # @capture(log): lane stdout PASS lines -> xray_spy_program_out_spec.evidence.sdn
+        step("Verify re-patch fires again and generation 2 selects only B")
+        expect(passed(out, "re-patched A fires again")).to_equal(true)
+        expect(passed(out, "generation 2 selection: B fires, A silent")).to_equal(true)
+
+    it "a patch fault leaves the function untraced and correct":
+        step("Run the compiler-rt harness lane")
+        val out = llvm_run()
+        # @capture(log): lane stdout injected-fault lines -> xray_spy_program_out_spec.evidence.sdn
+        step("Verify the failed patch does not fire, computes correctly, and admission closes")
+        expect(passed(out, "function whose patch failed does not fire")).to_equal(true)
+        expect(passed(out, "function whose patch failed still computes correctly")).to_equal(true)
+        expect(passed(out, "closed channel admits nothing, no loss")).to_equal(true)

@@ -79,6 +79,9 @@ the LLVM stage 1, which inverts the earlier sequencing assumption.
    `backend = Simple` on a `--xray` native build (`driver_xray_policy.spl:79-80`
    -> `UnsupportedProfile`). Aspect-param selection therefore only works through
    the in-process host, never through a compiled request.
+   Resolved by `a507c7db98b` (Linux only: Simple route admitted when `--xray` resolved
+   on with `--backend=native`; Windows/non-Linux stay UnsupportedTarget). Re-verified on
+   the pinned seed 2026-11-13: `xray_observer_admit_spec` 8/8, `xray_observer_gate_spec` 13/13.
 3. `xray_llvm_host_leaf_v1.spl` and `observer_aspect_config_v1.spl` have no spec.
 4. Linker/trace duplication (fold into shared `src/lib/common/` modules; the
    trace common lib imports `std.common.*` only, the compiler may import std):
@@ -383,3 +386,64 @@ Other `b795b3f4a26`/`aba2a5f0a3e` sites, same seed and scope:
   epilog `lea; pops; popfq; pop rbp; ret`. New spec example decodes the prolog bytes and asserts
   the alignment (old twin: 6/10, new: 10/10); clang byte/unwind parity check PASS. Windows
   `-Wall -Wextra` build has no warnings (unused `field` fixed in the Windows XMAP_TEXT_BASE).
+
+## spy-3 lane (2026-11-13, branch `work/spy-3-e2e-20261113`): the pure-Simple spy in one real run
+
+Seed: pinned `554460a6b85a` bootstrap seed (sha256 `1ef9af2577a0…`), aarch64 Linux.
+
+### What runs
+- Traced program: `test/fixtures/xray/xray_inprocess_prog.spl` built by the pure-Simple CLI
+  entry `compile --native --backend=native --xray` (shared library, sha256 `9591d21aee45…`,
+  byte-stable across builds).
+- Controller: `test/fixtures/xray/xray_native_program_host.spl`, one process: aspect dynload
+  (dlopen, `.simple_xray_map` admission, registration, observer config + pointcuts from aspect
+  params) -> log on/off -> profile (V1 codec decode + `trace_profile_fold_v1` of the same raw
+  edges, `traced` calls `add1` so the exclusive fold is checked on a real nested call) ->
+  re-enable with another pointcut -> `AdaptiveMap.set_profiling` following
+  `data_observation_profiling_while_v1` -> an injected `begin` fault mid-start (rollback,
+  `close_admission`, Idle) -> recovery in the next generation.
+- Lane `scripts/check/check-xray-native-program-e2e.shs` (selftest: 1 accepted transcript,
+  14 rejected mutations); spec `test/03_system/xray/xray_spy_program_out_spec.spl` (untagged,
+  Linux) 10/10 on the seed: 7 `simple` rows + 3 `llvm` rows (compiler-rt C harness).
+  Real numbers from the run: `traced=3:496:320:1 add1=3:176:176:2` (calls:incl:excl:depth,
+  cntvct ticks), 320 + 176 = 496.
+- Mutation: `SosixCodePatchAdapterV1.store_u32` made a no-op -> lane `FAIL — ... log: start
+  rejected: 9` while `check-xray-llvm-adapter-e2e.shs` stays `PASS — 43 check(s)`; restored.
+
+### Matrix (feature x column)
+
+| feature | LLVM | Simple-aarch64 | Simple-x86_64 |
+| --- | --- | --- | --- |
+| runtime log on/off | PASS (C harness, real compiler-rt sleds) | PASS (real run) | IN PASS; objects PASS (`check-xray-native-x86-64-objects.shs`, 14 checks); execution BLOCKED (no x86-64 host; the program lane selects SysV sleds on one) |
+| re-enable / reselect | PASS (C harness) | PASS | as above |
+| profile fold | IN PASS (fake leaf); real binary BLOCKED (1) | PASS | as above |
+| exclusive-time fold | IN PASS; real binary BLOCKED (1) | PASS (real nested call) | as above |
+| aspect dynload | IN PASS; real binary BLOCKED (1) | PASS | as above |
+| container switch | IN PASS; real binary BLOCKED (1) | PASS | as above |
+| rollback / close_admission | PASS (C harness: failed mprotect, closed channel) | PASS (injected port fault) | as above |
+| compile-time gate | UnsupportedProfile by design until (1) | PASS (`a507c7db98b`) | PASS (same gate) |
+
+IN = `test/01_unit/lib/xray/xray_backend_differential_in_spec.spl`, 36/36 on the pinned seed.
+(1) `doc/08_tracking/bug/xray_llvm_simple_compiled_module_emits_zero_functions_2026-11-13.md`:
+the pure-Simple `--backend=llvm --xray` build emits an object with zero functions, and the
+clang_rt.xray + adapter link (PR4) is not wired.
+
+### Fixes this lane needed (all on the module-build path)
+- Seed private-import check (`6d15331f91e`): 26 cross-directory fns of the native backend and
+  `binary_io` made `pub` (no baseline rows added).
+- `elf_writer_serialize` built `ElfSymbol` through the `elf_writer` <-> serializer re-export
+  cycle and became ambiguous with `linker/elf_parser.spl`'s; `elf_section_symbol()` now builds
+  it in the declaring module.
+- `native_compile_to_object` (imported by the three native XRay e2e drivers) is `pub` too; the
+  x86-64 object lane was red on the pinned seed for that reason alone.
+- The spec runner exports `SIMPLE_MCDC_MODE=on`; it leaked into the module build and the
+  library referenced undefined `mcdc_static_probe_*` (dlopen refused). The lane unsets it;
+  bug `native_shared_mcdc_probes_undefined_2026-11-13.md`.
+
+### Still open
+- Compiled controller: the run-21 Stage 2 `native-build` fails on the controller (MIR #143 for
+  generic `AdaptiveMap` iterables, invalid LLVM IR in 8 std modules, a Cranelift ICE) —
+  `stage2_run21_native_build_cannot_build_xray_controller_2026-11-13.md`. The lane takes
+  `--builder <stage2>` / `--host-bin <exe>` and states the controller mode in its verdict.
+- The older OUT file `xray_backend_differential_out_spec.spl` stays tagged; its `simple` row's
+  dlopen blocker is gone on this seed. Move/untag after spy-2 lands (spy-2 edits that file).
