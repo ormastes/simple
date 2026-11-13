@@ -248,6 +248,26 @@ pub const SHARD_HIR_WORKER_KB_V1: i64 = 9000000
 # that predate this value; native_build_pool_refusal_spec pins the two equal.
 pub const SHARD_MIR_WORKER_KB_V1: i64 = 26424115
 
+# Closure-scaled MIR price: SHARD_MIR_WORKER_KB_V1 above is the CEILING (run 11,
+# ~1650-module Stage 3 closure; the ~3134-module full CLI stays there). A MIR
+# shard worker holds the whole program HIR, which grows with the closure, so a
+# flat ceiling would need 88 GB free for two workers on a 50-module program.
+# price = clamp(PER_MODULE x modules, FLOOR, CEILING): the held HIR is priced
+# at the run-11 peak per module (26424115 / 1650 = 16015 kB, so 1650 modules
+# reach the ceiling and 1649 stay below it); closures up to ~561 modules keep
+# the FLOOR, the old 9.0 GB small-closure pool default measured above. Unknown
+# size (< 0) is the ceiling: fail closed. Callers wrap it in
+# shard_worker_budget_kb so an explicit SIMPLE_MIR_SHARD_WORKER_KB still wins.
+pub const SHARD_MIR_WORKER_FLOOR_KB_V1: i64 = 9000000
+pub const SHARD_MIR_WORKER_PER_MODULE_KB_V1: i64 = 16015
+
+pub fn shard_mir_worker_price_kb_v1(modules: i64) -> i64:
+    if modules < 0: return SHARD_MIR_WORKER_KB_V1
+    val scaled = SHARD_MIR_WORKER_PER_MODULE_KB_V1 * modules
+    if scaled > SHARD_MIR_WORKER_KB_V1: SHARD_MIR_WORKER_KB_V1
+    elif scaled < SHARD_MIR_WORKER_FLOOR_KB_V1: SHARD_MIR_WORKER_FLOOR_KB_V1
+    else: scaled
+
 # Per-worker memory budget in kB. Parse shards run the slim parse-lane entry;
 # HIR shards spawn the full worker closure, so they carry a larger budget and
 # are clamped harder (measured defaults: SHARD_PARSE/HIR_WORKER_KB_V1 above). Precedence: the per-phase

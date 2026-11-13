@@ -1,6 +1,6 @@
 use std.spec
 use app.cli.file_worker_pool_refusal.{file_worker_pool_refusal_v1}
-use app.cli.shard_mem_clamp.{SHARD_HIR_WORKER_KB_V1, SHARD_MIR_WORKER_KB_V1, SHARD_FLOOR_UNKNOWN_PARENT_KB_V1, shard_threads_cap_for, shard_threads_guarded_floor_v1}
+use app.cli.shard_mem_clamp.{SHARD_HIR_WORKER_KB_V1, SHARD_MIR_WORKER_KB_V1, SHARD_FLOOR_UNKNOWN_PARENT_KB_V1, shard_threads_cap_for, shard_threads_guarded_floor_v1, shard_mir_worker_price_kb_v1}
 
 describe "native-build per-file pool refusal is fail-closed":
     val hir_kb = 9000000
@@ -89,3 +89,35 @@ describe "per-file pool MIR admission is priced at the measured worker peak":
     it "the bootstrap shell mirror of the price equals the compiler default":
         val policy = file_read("scripts/bootstrap/lib/tree-rss-policy.shs")
         expect(policy.contains("\nBOOTSTRAP_TREE_RSS_FLOOR_MIR_WORKER_KB={mir_kb}\n")).to_be_true()
+
+# Closure-scaled MIR price (coordinator decision on 5159e54d554): a MIR shard
+# worker holds the full program HIR, which grows with the closure, so a flat
+# 25.2 GiB price would need 88 GB free for two workers on a 50-module program.
+# price = clamp(per_module x modules, 9 GB floor, 26424115 kB ceiling),
+# calibrated so the run-11 Stage 3 closure (~1650 modules) prices to the
+# ceiling and the ~3134-module full CLI stays there; unknown size (-1) is the
+# ceiling (fail closed). An explicit SIMPLE_MIR_SHARD_WORKER_KB still wins
+# (shard_worker_budget_kb precedence, unchanged).
+describe "MIR worker price scales with the closure a worker holds":
+    val ceiling = SHARD_MIR_WORKER_KB_V1
+
+    it "a 50-module closure keeps the 9 GB floor and admits 2 workers on 40 GB free":
+        expect(shard_mir_worker_price_kb_v1(50)).to_equal(9000000)
+        expect(shard_threads_cap_for(2, shard_mir_worker_price_kb_v1(50), 41943040)).to_equal(2)
+
+    it "the run-11 Stage 3 closure (1650 modules) prices to the honest 25.2 GiB figure":
+        expect(shard_mir_worker_price_kb_v1(1650)).to_equal(26424115)
+        expect(shard_threads_cap_for(2, shard_mir_worker_price_kb_v1(1650), 32505856) <= 1).to_be_true()
+
+    it "ceiling boundary: 1649 modules is below it, the 3134-module full CLI stays at it":
+        expect(shard_mir_worker_price_kb_v1(1649) < ceiling).to_be_true()
+        expect(shard_mir_worker_price_kb_v1(1649) > 9000000).to_be_true()
+        expect(shard_mir_worker_price_kb_v1(3134)).to_equal(ceiling)
+
+    it "unknown closure size is priced at the ceiling, an empty one at the floor":
+        expect(shard_mir_worker_price_kb_v1(-1)).to_equal(ceiling)
+        expect(shard_mir_worker_price_kb_v1(0)).to_equal(9000000)
+
+    it "price grows monotonically between floor and ceiling":
+        expect(shard_mir_worker_price_kb_v1(400) < shard_mir_worker_price_kb_v1(1000)).to_be_true()
+        expect(shard_mir_worker_price_kb_v1(1000) < shard_mir_worker_price_kb_v1(1650)).to_be_true()
