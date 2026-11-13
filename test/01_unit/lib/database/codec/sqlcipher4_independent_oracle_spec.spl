@@ -1,0 +1,235 @@
+# SQLCipher 4 reader — independent byte-level oracle.
+#
+# Proves every algorithm step of the locked sqlcipher4_4k_sha512 profile on
+# the COMMITTED fixture bytes (test/fixtures/database/sqlcipher4/
+# messenger.sqlcipher4), recomputed with ONLY stdlib crypto primitives
+# (std.common.crypto.pbkdf2 / hmac, std.common.aes.modes) — never through
+# codec/sqlcipher4_*.spl — and compared against:
+#   * the plaintext image messenger_plain.sqlite that the python generator
+#     (gen_sqlcipher4_fixture.py: hashlib PBKDF2/HMAC + NIST-checked AES)
+#     encrypted, and which python's own sqlite3 opened (ORACLE A); and
+#   * ground_truth.json (salt, passphrase, rows).
+# Then the codec's own decode is checked to equal the independent decrypt,
+# and rows read through the storage port equal ground truth.
+#
+# Independence: two implementations (python generator vs Simple stdlib)
+# agree. NOT a real-SQLCipher-produced fixture — the repo has none; tracked
+# in doc/08_tracking/todo/sqlcipher4_real_sqlcipher_cross_fixture_2026-11-13.md.
+
+"""
+## Purpose and audience
+Purpose: independent verification of the SQLCipher 4 page algorithms on real fixture bytes.
+Audience: devhub secured-storage maintainers; crypto reviewers.
+"""
+
+# @timeout_secs 2400
+
+use std.spec.*
+use std.io_runtime.{file_read_bytes_result}
+use std.env.{env_set}
+use std.common.crypto.pbkdf2.{pbkdf2_sha512_bytes_fast}
+use std.common.crypto.hmac.{hmac_sha512_bytes}
+use std.common.aes.modes.{aes_cbc_decrypt_blocks_no_padding}
+use nogc_sync_mut.database.codec.sqlcipher4.{Sqlcipher4Error, sqlcipher4_error_code}
+use nogc_sync_mut.database.codec.sqlcipher4_page.{sqlcipher4_decode_page}
+use std.nogc_sync_mut.database.server.storage_port.{
+    storage_backend_sqlcipher4_open, StorageOpenResult
+}
+use std.nogc_sync_mut.database.sqlite_format.reader.{sqlite_format_read_table_bytes}
+
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+
+val ENC: text = "test/fixtures/database/sqlcipher4/messenger.sqlcipher4"
+val PLAIN: text = "test/fixtures/database/sqlcipher4/messenger_plain.sqlite"
+val PASSPHRASE: text = "messenger-fixture-passphrase"
+val SECRET_ENV: text = "SIMPLE_SECRET_MESSENGER_FIXTURE"
+val SECRET_REF: text = "secret://messenger/fixture"
+val PAGE: i64 = 4096
+val IV_OFF: i64 = 4016
+val MAC_OFF: i64 = 4032
+
+fn _bytes(path: text) -> [u8]:
+    match file_read_bytes_result(path):
+        case Ok(b):
+            b
+        case Err(e):
+            fail("read {path}: {e}")
+            []
+
+fn _slice(arr: [u8], start: i64, n: i64) -> [i64]:
+    var out: [i64] = []
+    var i = 0
+    while i < n:
+        out.push(rt_bytes_u8_at(arr, start + i) & 0xFF)
+        i = i + 1
+    out
+
+fn _slice_u8(arr: [u8], start: i64, n: i64) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < n:
+        out.push((rt_bytes_u8_at(arr, start + i) & 0xFF).to_u8())
+        i = i + 1
+    out
+
+fn _to_u8(arr: [i64]) -> [u8]:
+    var out: [u8] = []
+    for v in arr:
+        out.push((v & 0xFF).to_u8())
+    out
+
+fn _text_bytes(s: text) -> [i64]:
+    var out: [i64] = []
+    for b in s.bytes():
+        out.push(b.to_i64() & 0xFF)
+    out
+
+fn _hex(arr: [i64]) -> text:
+    val digits = "0123456789abcdef"
+    var s = ""
+    for v in arr:
+        s = s + digits[(v >> 4) & 0xF] + digits[v & 0xF]
+    s
+
+fn _first_diff(a: [i64], b: [i64]) -> i64:
+    if a.len() != b.len():
+        return -2
+    var i = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            return i
+        i = i + 1
+    -1
+
+# Independent key schedule (SQLCipher 4 defaults), stdlib only.
+fn _page_key(salt: [i64]) -> [i64]:
+    pbkdf2_sha512_bytes_fast(_text_bytes(PASSPHRASE), salt, 256000, 32)
+
+fn _hmac_key(page_key: [i64], salt: [i64]) -> [i64]:
+    var masked: [i64] = []
+    for v in salt:
+        masked.push(v ^ 0x3a)
+    pbkdf2_sha512_bytes_fast(page_key, masked, 2, 32)
+
+fn _mac_input(enc: [u8], pg: i64) -> [i64]:
+    val base = (pg - 1) * PAGE
+    val off = if pg == 1: 16 else: 0
+    var input = _slice(enc, base + off, IV_OFF - off)
+    for v in _slice(enc, base + IV_OFF, 16):
+        input.push(v)
+    input.push(pg & 0xFF)
+    input.push((pg >> 8) & 0xFF)
+    input.push((pg >> 16) & 0xFF)
+    input.push((pg >> 24) & 0xFF)
+    input
+
+fn _independent_decrypt(enc: [u8], pg: i64, page_key: [i64]) -> [i64]:
+    val base = (pg - 1) * PAGE
+    val off = if pg == 1: 16 else: 0
+    val ct = _slice(enc, base + off, IV_OFF - off)
+    val iv = _slice(enc, base + IV_OFF, 16)
+    match aes_cbc_decrypt_blocks_no_padding(page_key, ct, iv):
+        case Ok(body):
+            body
+        case Err(_):
+            fail("page {pg}: no-padding CBC rejected the ciphertext")
+            []
+
+describe "SQLCipher 4 fixture: independent stdlib oracle":
+
+    it "verifies salt, PBKDF2 keys, per-page HMAC and AES-CBC on all 5 pages against the python plaintext image":
+        step "load fixture bytes and pin geometry"
+        val enc = _bytes(ENC)
+        val plain = _bytes(PLAIN)
+        expect(enc.len()).to_equal(5 * PAGE)
+        expect(plain.len()).to_equal(5 * PAGE)
+        # Plaintext image header: page size 4096 big-endian, reserve 80.
+        expect(rt_bytes_u8_at(plain, 16)).to_equal(0x10)
+        expect(rt_bytes_u8_at(plain, 17)).to_equal(0x00)
+        expect(rt_bytes_u8_at(plain, 20)).to_equal(80)
+
+        step "first 16 file bytes are the plaintext salt from ground_truth.json"
+        val salt = _slice(enc, 0, 16)
+        expect(_hex(salt)).to_equal("303132333435363738393a3b3c3d3e3f")
+
+        step "derive page key (PBKDF2-HMAC-SHA512 x256000) and HMAC key (x2 over salt^0x3a)"
+        val page_key = _page_key(salt)
+        val hmac_key = _hmac_key(page_key, salt)
+        expect(page_key.len()).to_equal(32)
+        expect(hmac_key.len()).to_equal(32)
+
+        var pg = 1
+        while pg <= 5:
+            step "page {pg}: HMAC-SHA512(ct||iv||pgno_le32) equals the stored 64-byte tag"
+            val base = (pg - 1) * PAGE
+            val stored = _slice(enc, base + MAC_OFF, 64)
+            val mac = hmac_sha512_bytes(hmac_key, _mac_input(enc, pg))
+            expect(_first_diff(mac, stored)).to_equal(-1)
+
+            step "page {pg}: AES-256-CBC decrypt equals the python plaintext page"
+            val off = if pg == 1: 16 else: 0
+            val body = _independent_decrypt(enc, pg, page_key)
+            val want = _slice(plain, base + off, IV_OFF - off)
+            expect(_first_diff(body, want)).to_equal(-1)
+            pg = pg + 1
+
+    it "the oracle discriminates: a big-endian page number or a wrong HMAC key does not match the stored tag":
+        val enc = _bytes(ENC)
+        val salt = _slice(enc, 0, 16)
+        val page_key = _page_key(salt)
+        val hmac_key = _hmac_key(page_key, salt)
+        val stored = _slice(enc, PAGE + MAC_OFF, 64)
+        var be = _mac_input(enc, 2)
+        val n = be.len()
+        be[n - 4] = 0
+        be[n - 1] = 2
+        expect(_first_diff(hmac_sha512_bytes(hmac_key, be), stored) >= 0).to_equal(true)
+        var bad_key = hmac_key
+        bad_key[0] = bad_key[0] ^ 0x01
+        expect(_first_diff(hmac_sha512_bytes(bad_key, _mac_input(enc, 2)), stored) >= 0).to_equal(true)
+        # The page key must not double as the HMAC key (salt^0x3a matters).
+        expect(_first_diff(hmac_sha512_bytes(page_key, _mac_input(enc, 2)), stored) >= 0).to_equal(true)
+
+    it "the codec's page decode equals the independent decrypt on every page; a flipped byte is AuthenticationFailed":
+        val enc = _bytes(ENC)
+        val salt = _slice(enc, 0, 16)
+        val page_key = _page_key(salt)
+        val hmac_key = _hmac_key(page_key, salt)
+        var pg = 1
+        while pg <= 5:
+            val page = _slice_u8(enc, (pg - 1) * PAGE, PAGE)
+            val off = if pg == 1: 16 else: 0
+            match sqlcipher4_decode_page(pg, page, _to_u8(page_key), _to_u8(hmac_key)):
+                case Ok(virt):
+                    expect(virt.len()).to_equal(IV_OFF)
+                    expect(_first_diff(_slice(virt, off, IV_OFF - off), _independent_decrypt(enc, pg, page_key))).to_equal(-1)
+                    if pg == 1:
+                        expect(_hex(_slice(virt, 0, 16))).to_equal(_hex(salt))
+                case Err(e):
+                    fail("page {pg} decode: {sqlcipher4_error_code(e)}")
+            pg = pg + 1
+        var tampered = _slice_u8(enc, 2 * PAGE, PAGE)
+        tampered[100] = ((rt_bytes_u8_at(tampered, 100) ^ 0x80) & 0xFF).to_u8()
+        match sqlcipher4_decode_page(3, tampered, _to_u8(page_key), _to_u8(hmac_key)):
+            case Err(Sqlcipher4Error.AuthenticationFailed(_)):
+                pass
+            case other:
+                fail("tampered page 3 must fail authentication, got {other}")
+
+    it "rows read through the storage port after decryption equal ground_truth.json":
+        val _s = env_set(SECRET_ENV, PASSPHRASE)
+        match storage_backend_sqlcipher4_open(ENC, SECRET_REF):
+            case Ok(StorageOpenResult.SqliteView(view)):
+                match sqlite_format_read_table_bytes(view.image, "room"):
+                    case Ok(rows):
+                        expect(rows.len()).to_equal(2)
+                        expect(rows[0].get_text("title") ?? "").to_equal("general")
+                        expect(rows[0].get_int("created_at") ?? -1).to_equal(1700000000)
+                        expect(rows[1].get_text("title") ?? "").to_equal("random")
+                        expect(rows[1].get_int("created_at") ?? -1).to_equal(1700000100)
+                    case Err(e):
+                        fail("room read: {e}")
+            case Ok(_):
+                fail("expected a SqliteView")
+            case Err(e):
+                fail("open: {e}")
