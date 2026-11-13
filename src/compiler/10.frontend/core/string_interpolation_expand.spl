@@ -21,7 +21,7 @@ use compiler.core.parser.{
     parser_has_errors,
     parser_set_had_error
 }
-use compiler.frontend.core.lexer.{lex_init_with_path}
+use compiler.frontend.core.lexer.{lex_init_with_path, lexer_state_take, lexer_state_install}
 use compiler.frontend.core.parser_expr.{parse_expr}
 use compiler.core.ast_expr.{
     EXPR_CALL,
@@ -111,6 +111,13 @@ fn parse_interpolation_fragment(inner: text) -> i64:
     val diagnostics_before = parser_diagnostics_suppressed_get()
     val placeholder_before = set_placeholder_transform_suppressed(true)
     parser_diagnostics_suppressed_set(true)
+    # Lend the module's lexer out for the fragment and take it back: the bridge
+    # converts every expression span from char to byte offsets through the live
+    # lexer (lex_source_byte_offset), so leaving it on the fragment clamped all
+    # later offsets of a fresh parse to the fragment's length
+    # (doc/08_tracking/bug/fresh_parse_vs_cache_hit_span_divergence_2026-11-13.md).
+    # take/install move the owner arrays; nothing is copied.
+    val module_lexer = lexer_state_take()
     lex_init_with_path(inner.trim(), "")
     parser_advance()
     val idx = parse_expr()
@@ -119,6 +126,7 @@ fn parse_interpolation_fragment(inner: text) -> i64:
         par_kind_get() == TOK_EOF and
         not parser_has_errors()
     )
+    lexer_state_install(module_lexer)
     parser_set_had_error(had_error_before)
     parser_diagnostics_suppressed_set(diagnostics_before)
     set_placeholder_transform_suppressed(placeholder_before)

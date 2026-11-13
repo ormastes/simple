@@ -14,7 +14,8 @@ use compiler.frontend.trace_policy.{frontend_compiler_trace_enabled}
 # frontend path when the newer parser surface is unavailable.
 
 use compiler.core.parser.{parser_error, parser_error_at, parser_parse_type, parser_advance, par_kind_get}
-use compiler.frontend.core.lexer.{lex_init_with_path, lex_source_byte_offset}
+use compiler.frontend.core.lexer.{lex_init_with_path, lex_source_byte_offset, lexer_state_take,
+    lexer_state_install}
 use compiler.core.tokens.{TOK_EOF}
 use compiler.core.parser_decls.{parse_module_body, parser_unsafe_annotation_present, parser_unsafe_annotation_caps, parser_unsafe_annotation_reason}
 use compiler.frontend.core.string_interpolation_expand.{
@@ -2663,12 +2664,16 @@ fn convert_decl_function_type_params(idx: i64, span: Span) -> [ParserTypeParam]:
                 val type_text = if is_default: bound[1:] else: bound
                 # The enclosing parse is finished (as for interpolation fragments).
                 # Reuse its type grammar and arena; never flatten Named arguments.
+                # Lend the module lexer out and take it back: later expression
+                # spans of this module convert to byte offsets through it.
+                val module_lexer = lexer_state_take()
                 lex_init_with_path(type_text, "")
                 parser_advance()
                 val bound_tag = parser_parse_type()
                 if par_kind_get() != TOK_EOF:
                     parser_error_at(span.line, span.col, "invalid generic trait bound: " + type_text)
                 var converted_bound = convert_flat_type(bound_tag)
+                lexer_state_install(module_lexer)
                 converted_bound.span = span
                 if is_default:
                     has_default = true
