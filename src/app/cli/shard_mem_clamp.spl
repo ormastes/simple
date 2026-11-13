@@ -622,6 +622,25 @@ pub fn shard_effective_tree_budget_kb_v1(declared_kb: i64, cap_kb: i64, free_kb:
     val capped = if cap_kb > 0 and cap_kb < clamped: cap_kb else: clamped
     if declared_kb > 0 and declared_kb < capped: declared_kb else: capped
 
+# Enforced tree RSS cap: the tighter of SIMPLE_PROCESS_TREE_RSS_CAP_KIB and the
+# cgroup memory.max; <= 0 on either side is "no cap" there.
+pub fn shard_pool_cap_kb_for_v1(rss_cap_kb: i64, cgroup_kb: i64) -> i64:
+    if rss_cap_kb > 0 and (cgroup_kb <= 0 or rss_cap_kb < cgroup_kb): return rss_cap_kb
+    return cgroup_kb
+
+# The tree-budget clamp's effective budget from its raw inputs -- the ONE
+# formula shared by HIR admission (shard_threads_mem_cap), its refusal
+# diagnosis (shard_pool_clamp_workers) and the per-file pool's scale-to-host
+# pricing (file_worker_pool_admission_usable_kb_v1), so the price can never
+# assume memory the admission does not grant. -1 when no budget, cap or
+# free-memory figure is known (no clamp applies).
+pub fn shard_pool_effective_budget_for_v1(avail_kb: i64, declared_kb: i64, cgroup_kb: i64,
+        rss_cap_kb: i64, headroom_kb: i64) -> i64:
+    val tree_kb = shard_tree_budget_kb_for(declared_kb, cgroup_kb)
+    val cap_kb = shard_pool_cap_kb_for_v1(rss_cap_kb, cgroup_kb)
+    if cap_kb <= 0 and avail_kb <= 0 and tree_kb <= 0: return -1
+    return shard_effective_tree_budget_kb_v1(tree_kb, cap_kb, avail_kb, headroom_kb)
+
 pub fn shard_pool_workers_v1(effective_kb: i64, estimate_kb: i64) -> i64:
     if effective_kb <= 0 or estimate_kb <= 0: return 0
     effective_kb / estimate_kb
@@ -871,13 +890,13 @@ pub fn shard_threads_mem_cap(requested: i64, budget_kb: i64, parent_peak_kb: i64
     var cap = cap0
     if parent_peak_kb >= 0:
         val rss_cap = shard_mem_available_kb_from_field(env_get("SIMPLE_PROCESS_TREE_RSS_CAP_KIB") ?? "")
-        val cap_kb = if rss_cap > 0 and (cgroup_kb <= 0 or rss_cap < cgroup_kb): rss_cap else: cgroup_kb
+        val cap_kb = shard_pool_cap_kb_for_v1(rss_cap, cgroup_kb)
         val headroom_kb = shard_tree_headroom_kib_v1()
-        val effective = shard_effective_tree_budget_kb_v1(tree_kb, cap_kb, avail_kb, headroom_kb)
-        val clamp_workers = shard_pool_workers_v1(effective, budget_kb)
-        if effective != tree_kb:
-            print "[hir-shard] tree budget clamped: declared {tree_kb} kB, cap {cap_kb} kB, free {avail_kb} kB, headroom {headroom_kb} kB -> effective {effective} kB"
-        if cap_kb > 0 or avail_kb > 0 or tree_kb > 0:
+        val effective = shard_pool_effective_budget_for_v1(avail_kb, declared_kb, cgroup_kb, rss_cap, headroom_kb)
+        if effective >= 0:
+            if effective != tree_kb:
+                print "[hir-shard] tree budget clamped: declared {tree_kb} kB, cap {cap_kb} kB, free {avail_kb} kB, headroom {headroom_kb} kB -> effective {effective} kB"
+            val clamp_workers = shard_pool_workers_v1(effective, budget_kb)
             if clamp_workers < cap: cap = clamp_workers
         print "[hir-shard] admission worker estimate={budget_kb} kB (coordinator peak {parent_peak_kb} kB reserved for the coordinator only); warmup pool only, RSS guard authoritative"
     # The floor needs measured host free memory even when the host clamp is off.
@@ -897,12 +916,10 @@ pub fn shard_threads_mem_cap(requested: i64, budget_kb: i64, parent_peak_kb: i64
 pub fn shard_pool_clamp_workers(estimate_kb: i64) -> i64:
     val avail_kb = if (env_get("SIMPLE_SHARD_MEM_CLAMP") ?? "") != "0": shard_mem_available_kb() else: 0
     val declared_kb = shard_mem_available_kb_from_field(env_get("SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB") ?? "")
-    val cgroup_kb = shard_cgroup_memory_max_kb()
-    val tree_kb = shard_tree_budget_kb_for(declared_kb, cgroup_kb)
     val rss_cap = shard_mem_available_kb_from_field(env_get("SIMPLE_PROCESS_TREE_RSS_CAP_KIB") ?? "")
-    val cap_kb = if rss_cap > 0 and (cgroup_kb <= 0 or rss_cap < cgroup_kb): rss_cap else: cgroup_kb
-    if cap_kb <= 0 and avail_kb <= 0 and tree_kb <= 0: return -1
-    shard_pool_workers_v1(shard_effective_tree_budget_kb_v1(tree_kb, cap_kb, avail_kb, shard_tree_headroom_kib_v1()), estimate_kb)
+    val effective = shard_pool_effective_budget_for_v1(avail_kb, declared_kb, shard_cgroup_memory_max_kb(), rss_cap, shard_tree_headroom_kib_v1())
+    if effective < 0: return -1
+    return shard_pool_workers_v1(effective, estimate_kb)
 
 # Host memory reserve a build must leave free (RAM and commit, whichever is
 # smaller on Windows): SIMPLE_BUILD_MEMORY_RESERVE_BYTES, else host config
