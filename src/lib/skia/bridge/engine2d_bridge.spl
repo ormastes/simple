@@ -66,6 +66,14 @@ fn sk_color_to_u32(c: i64) -> u32:
 fn _bridge_exact_i32(value: f64) -> bool:
     value >= -2147483648.0 and value <= 2147483647.0 and value == value.to_i64().to_f64()
 
+fn _bridge_floor_i32(v: f64) -> i32:
+    val iv = v.to_i64()
+    (if iv.to_f64() > v: iv - 1 else: iv) as i32
+
+fn _bridge_ceil_i32(v: f64) -> i32:
+    val iv = v.to_i64()
+    (if iv.to_f64() < v: iv + 1 else: iv) as i32
+
 fn _bridge_image_shape_valid(image: SkImage) -> bool:
     val width = image.info.width
     val height = image.info.height
@@ -221,10 +229,11 @@ fn skia_render_picture_on_engine2d_reported(picture: SkPicture, width: i32, heig
     for op in picture.ops:
         if op.kind == SkPictureOpKind.DrawRect:
             val rect = op.rect
-            val x = rect.left.to_i64() as i32
-            val y = rect.top.to_i64() as i32
-            val w = (rect.right - rect.left).to_i64() as i32
-            val h = (rect.bottom - rect.top).to_i64() as i32
+            # floor origin, ceil far edge (same convention as the Skia CPU backend).
+            val x = _bridge_floor_i32(rect.left)
+            val y = _bridge_floor_i32(rect.top)
+            val w = _bridge_ceil_i32(rect.right) - x
+            val h = _bridge_ceil_i32(rect.bottom) - y
             val color = sk_color_to_u32(op.paint.color)
             if op.paint.style == SkPaintStyle.Fill:
                 eng.draw_rect_filled(x, y, w, h, color)
@@ -237,10 +246,11 @@ fn skia_render_picture_on_engine2d_reported(picture: SkPicture, width: i32, heig
             eng.draw_rect_filled(0, 0, width, height, sk_color_to_u32(op.paint.color))
         elif op.kind == SkPictureOpKind.DrawRRect:
             val rect = op.rect
-            val x = rect.left.to_i64() as i32
-            val y = rect.top.to_i64() as i32
-            val w = (rect.right - rect.left).to_i64() as i32
-            val h = (rect.bottom - rect.top).to_i64() as i32
+            # floor origin, ceil far edge (same convention as the Skia CPU backend).
+            val x = _bridge_floor_i32(rect.left)
+            val y = _bridge_floor_i32(rect.top)
+            val w = _bridge_ceil_i32(rect.right) - x
+            val h = _bridge_ceil_i32(rect.bottom) - y
             # Engine2D takes a single corner radius; skia carries rx/ry, so the
             # larger of the two is used.
             var radius = op.rx
@@ -249,10 +259,14 @@ fn skia_render_picture_on_engine2d_reported(picture: SkPicture, width: i32, heig
             eng.draw_rounded_rect(x, y, w, h, radius.to_i64() as i32, sk_color_to_u32(op.paint.color))
         elif op.kind == SkPictureOpKind.DrawOval:
             val rect = op.rect
-            val cx = ((rect.left + rect.right) / 2.0).to_i64() as i32
-            val cy = ((rect.top + rect.bottom) / 2.0).to_i64() as i32
-            val rx = ((rect.right - rect.left) / 2.0).to_i64() as i32
-            val ry = ((rect.bottom - rect.top) / 2.0).to_i64() as i32
+            val ox = _bridge_floor_i32(rect.left)
+            val oy = _bridge_floor_i32(rect.top)
+            val ow = _bridge_ceil_i32(rect.right) - ox
+            val oh = _bridge_ceil_i32(rect.bottom) - oy
+            val cx = ox + ow / 2
+            val cy = oy + oh / 2
+            val rx = ow / 2
+            val ry = oh / 2
             val color = sk_color_to_u32(op.paint.color)
             if op.paint.style == SkPaintStyle.Fill:
                 eng.draw_ellipse_filled(cx, cy, rx, ry, color)
@@ -262,8 +276,8 @@ fn skia_render_picture_on_engine2d_reported(picture: SkPicture, width: i32, heig
             if val img = op.image:
                 if _bridge_image_shape_valid(img):
                     val pixels = sk_image_to_u32_pixels(img)
-                    val x = op.x.to_i64() as i32
-                    val y = op.y.to_i64() as i32
+                    val x = _bridge_floor_i32(op.x)
+                    val y = _bridge_floor_i32(op.y)
                     val w = img.info.width as i32
                     val h = img.info.height as i32
                     eng.draw_image(x, y, w, h, pixels)
