@@ -1,0 +1,143 @@
+# @cover src/compiler/20.hir/hir_lowering/required_field_init_v1.spl 80%
+"""
+## Purpose and audience
+Every construction `T(f: v, ...)` of a class or struct declared in the same
+module must initialize each required field: a field with no declared default
+whose type is not optional. Today an omitted field is silently zero/nil-filled
+(`lower_struct_construct`), so a reader observes a sibling's value. This spec
+pins the definite-initialization verifier of the immutable-views sub-plan
+(P1): `E_ATTR_REQUIRED_UNINIT` for an omitted or nil-initialized required
+field, `E_ASYNC_INIT_MISSING` for a field the class authorizes for async
+initialization (`@support_async_immutable`) but binds no producer to, and
+`E_ASYNC_INIT_UNSUPPORTED` for an async binding on a class without that
+authorization. Readers are compiler authors and the lane reviewer.
+Plan: doc/03_plan/compiler/data/immutable_views_async_init_revisions_2026-11-13.md
+(sections 3.1-3.2, 10: ASY-03/04/05, ATTR-01/04). Category: Language.
+## Operator workflow
+bin/simple test test/01_unit/compiler/hir/required_field_init_v1_spec.spl
+## Compatibility and limitations
+The verifier judges constructions of types declared in the same module only;
+imported layouts carry `has_default: false` for every field
+(module_import_registration.spl:61), so cross-module sites are counted as
+unjudged rather than reported. The async producer is recognized by the
+library-level binding name `async_init(...)` (plan section 3.1 fallback) until
+P3 ships the typed `AsyncInit<T>`. `__init__.spl` layer exports need a
+`DirManifest`; this single-file spec covers `pub` and the filename rule only.
+## Verification guidance and troubleshooting
+A RED on "all fields supplied" means the verifier produces false positives,
+which would break the compiler's own bootstrap; fix before anything else.
+"""
+# Lifecycle: doc/03_plan/compiler/data/immutable_views_async_init_revisions_2026-11-13.md
+# @manual_section: Required field initialization
+use std.spec.*
+use std.env.variables.{env_set, env_get}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.required_field_init_v1.*
+
+fn check(source: text, name: text) -> RequiredInitReportV1:
+    val filename = "required_init_" + name + ".spl"
+    val saved_bootstrap = env_get("SIMPLE_BOOTSTRAP")
+    env_set("SIMPLE_BOOTSTRAP", "0")
+    val module = parse_full_frontend(source, filename, filename, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(filename)
+    val hir = hir_lowering.lower_module(module)
+    env_set("SIMPLE_BOOTSTRAP", saved_bootstrap)
+    hir_required_field_init_check_v1(hir.name, hir.path, hir.symbols, module.classes,
+        hir.classes, hir.structs, hir.functions)
+
+fn codes(report: RequiredInitReportV1) -> text:
+    var out = ""
+    for row in report.rows:
+        out = out + row.code + ":" + row.class_name + "." + row.field + ";"
+    out
+
+val NODE_CLASS: text = "class HirNode:\n    id: i64\n    body: text\n    inferred: i64\n"
+val ASYNC_STAND_IN: text = "fn async_init(x: i64) -> i64:\n    x\n"
+
+describe "Required field initialization":
+    it "accepts a construction that supplies every required field and ignores defaulted or optional ones":
+        # @req REQ-IMM-ASY-01
+        step("Lower a module whose constructions are complete")
+        val src = "class Node:\n    id: i64\n    kind: i64 = 0\n    note: text?\n" +
+            "fn make() -> Node:\n    Node(id: 1)\nfn full() -> Node:\n    Node(id: 1, kind: 2, note: \"n\")\n"
+        val report = check(src, "complete")
+        # @capture(exec): no diagnostic rows, two judged sites
+        expect(codes(report)).to_equal("")
+        expect(report.sites_judged).to_equal(2)
+
+    it "reports E_ATTR_REQUIRED_UNINIT for an omitted required field, named or positional":
+        # @req REQ-IMM-ASY-03
+        step("Omit `body` by name and by position")
+        val src = NODE_CLASS + "fn named() -> HirNode:\n    HirNode(id: 1, inferred: 2)\n" +
+            "fn positional() -> HirNode:\n    HirNode(1)\n"
+        val report = check(src, "omitted")
+        # @capture(exec): one row per omitted field per site
+        expect(codes(report)).to_equal("E_ATTR_REQUIRED_UNINIT:HirNode.body;" +
+            "E_ATTR_REQUIRED_UNINIT:HirNode.body;E_ATTR_REQUIRED_UNINIT:HirNode.inferred;")
+        step("Every row carries a fix suggestion and none of them inserts nil")
+        for row in report.rows:
+            expect(row.diagnostic.fixes.len() > 0).to_equal(true)
+            for fix in row.diagnostic.fixes:
+                expect(fix.description.contains("nil")).to_equal(false)
+                expect(fix.description.contains("None")).to_equal(false)
+
+    it "does not let a source-written nil discharge a required non-optional field":
+        # @req REQ-IMM-ASY-03
+        val src = NODE_CLASS + "fn make() -> HirNode:\n    HirNode(id: 1, body: nil, inferred: 2)\n"
+        val report = check(src, "nil")
+        expect(codes(report)).to_equal("E_ATTR_REQUIRED_UNINIT:HirNode.body;")
+
+    it "reports E_ATTR_REQUIRED_UNINIT on an annotated class for a field not authorized for async init (ASY-03)":
+        # @req REQ-IMM-ASY-03
+        step("Authorize only `inferred`; omit `body`")
+        val src = "@support_async_immutable(\"inferred\")\n" + NODE_CLASS + ASYNC_STAND_IN +
+            "fn make() -> HirNode:\n    HirNode(id: 1, inferred: async_init(7))\n"
+        val report = check(src, "asy03")
+        expect(codes(report)).to_equal("E_ATTR_REQUIRED_UNINIT:HirNode.body;")
+
+    it "reports E_ASYNC_INIT_MISSING when an async-authorized field has no producer bound (ASY-04)":
+        # @req REQ-IMM-ASY-04
+        step("Bare annotation authorizes every field; omit `inferred` with no binding")
+        val src = "@support_async_immutable\n" + NODE_CLASS +
+            "fn make() -> HirNode:\n    HirNode(id: 1, body: \"b\")\n"
+        val report = check(src, "asy04")
+        expect(codes(report)).to_equal("E_ASYNC_INIT_MISSING:HirNode.inferred;")
+        expect(report.rows[0].diagnostic.fixes.len() >= 2).to_equal(true)
+
+    it "reports E_ASYNC_INIT_UNSUPPORTED for an async binding on a class without the capability (ASY-05)":
+        # @req REQ-IMM-ASY-05
+        val src = NODE_CLASS + ASYNC_STAND_IN +
+            "fn make() -> HirNode:\n    HirNode(id: 1, body: \"b\", inferred: async_init(7))\n"
+        val report = check(src, "asy05")
+        expect(codes(report)).to_equal("E_ASYNC_INIT_UNSUPPORTED:HirNode.inferred;")
+        step("A valid binding on an authorized field is accepted (ASY-02 static half)")
+        val ok = "@support_async_immutable\n" + NODE_CLASS + ASYNC_STAND_IN +
+            "fn make() -> HirNode:\n    HirNode(id: 1, body: \"b\", inferred: async_init(7))\n"
+        expect(codes(check(ok, "asy02"))).to_equal("")
+
+    it "reports E_ATTR_TYPE_CONFLICT when one tree declares the same attribute with two types (ATTR-01)":
+        # @req REQ-IMM-ATTR-01
+        val src = "@node_tree(\"t\")\nclass A:\n    value: i64\n" +
+            "@node_tree(\"t\")\nclass B:\n    value: text\n" +
+            "@node_tree(\"other\")\nclass C:\n    value: text\n"
+        val report = check(src, "attr01")
+        expect(codes(report)).to_equal("E_ATTR_TYPE_CONFLICT:B.value;")
+        step("The message names both definitions")
+        expect(report.rows[0].message.contains("A")).to_equal(true)
+        expect(report.rows[0].message.contains("B")).to_equal(true)
+        expect(report.rows[0].diagnostic.labels.len() >= 1).to_equal(true)
+
+    it "records effective visibility of the offending field: pub or filename rule makes it public (ATTR-04)":
+        # @req REQ-IMM-ATTR-04
+        val private_src = "class Hidden:\n    id: i64\n    body: text\nfn make() -> Hidden:\n    Hidden(id: 1)\n"
+        val private_report = check(private_src, "attr04_private")
+        expect(codes(private_report)).to_equal("E_ATTR_REQUIRED_UNINIT:Hidden.body;")
+        expect(private_report.rows[0].public).to_equal(false)
+        val pub_src = "pub class Shown:\n    id: i64\n    body: text\nfn make() -> Shown:\n    Shown(id: 1)\n"
+        val pub_report = check(pub_src, "attr04_pub")
+        expect(pub_report.rows[0].public).to_equal(true)
+

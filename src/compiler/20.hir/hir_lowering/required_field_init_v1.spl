@@ -1,0 +1,350 @@
+# Required-field definite-initialization verifier (immutable-views sub-plan P1,
+# doc/03_plan/compiler/data/immutable_views_async_init_revisions_2026-11-13.md
+# sections 3.1-3.2; data program W2b enforcement half).
+#
+# A post-pass over lowered HIR, shaped like attr_access_sites.spl. For every
+# construction `T(f: v, ...)` / struct literal of a class or struct declared in
+# the SAME module it checks each required field (no declared default, type not
+# optional):
+#   omitted, or written as a source `nil`             -> E_ATTR_REQUIRED_UNINIT
+#   omitted, class authorizes it for async init       -> E_ASYNC_INIT_MISSING
+#   bound to `async_init(...)` without authorization  -> E_ASYNC_INIT_UNSUPPORTED
+# and, across the classes of one `@node_tree("t")`, one attribute name with two
+# declared types                                      -> E_ATTR_TYPE_CONFLICT.
+#
+# `@support_async_immutable` (bare = every field; with string arguments = those
+# fields) is the per-class opt-in to async initialization. It never excuses an
+# omission: an authorized field still needs a bound producer.
+#
+# Imported layouts carry `has_default: false` for every field
+# (_Items/module_import_registration.spl:61), so a construction of an imported
+# type cannot be judged without false positives; it is counted in
+# `sites_unjudged` instead of reported. Every diagnostic is a DiagnosticV1 with
+# fix suggestions; no suggestion ever inserts nil/None.
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.hir.generated.hir_visit.{hir_visit_block}
+use compiler.hir.hir_lowering.attr_access_sites.{hir_node_tree_attr_v1}
+use compiler.frontend.parser_types.*
+use compiler.common.attributes.{extract_string_arg}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.diagnostics.diagnostic_v1.{DiagnosticV1, DiagnosticFix, FixConfidence}
+use compiler.common.diagnostics.severity.{Severity}
+use compiler.common.visibility.{effective_visibility}
+use std.nogc_sync_mut.io.env_ops.{env_get}
+
+pub val E_ATTR_REQUIRED_UNINIT = "E_ATTR_REQUIRED_UNINIT"
+pub val E_ASYNC_INIT_MISSING = "E_ASYNC_INIT_MISSING"
+pub val E_ASYNC_INIT_UNSUPPORTED = "E_ASYNC_INIT_UNSUPPORTED"
+pub val E_ATTR_TYPE_CONFLICT = "E_ATTR_TYPE_CONFLICT"
+
+# Library-level async producer binding (plan section 3.1 fallback): the
+# construction argument is a call to this name. P3 replaces the name with the
+# typed `AsyncInit<T>` once it exists.
+pub val REQUIRED_INIT_ASYNC_BINDING_NAME = "async_init"
+pub val REQUIRED_INIT_CHECK_ENV = "SIMPLE_REQUIRED_INIT_CHECK"
+
+# Gate: "off" (default) | "warning" | "error". The ASY codes are errors in
+# every mode because the annotation itself is the opt-in.
+pub fn required_init_check_mode_v1() -> text:
+    val raw = env_get(REQUIRED_INIT_CHECK_ENV)
+    if raw == "warning" or raw == "error": raw else: "off"
+
+pub struct RequiredInitFieldV1:
+    name: text
+    required: bool
+    type_key: text
+    span: Span
+
+pub struct RequiredInitClassV1:
+    name: text
+    symbol_id: i64
+    public: bool
+    async_enabled: bool
+    async_fields: [text]        # empty + async_enabled = every field
+    tree: text
+    fields: [RequiredInitFieldV1]
+    span: Span
+
+pub struct RequiredInitDiagnosticV1:
+    code: text
+    class_name: text
+    field: text
+    public: bool
+    span: Span
+    message: text
+    diagnostic: DiagnosticV1
+
+pub struct RequiredInitReportV1:
+    rows: [RequiredInitDiagnosticV1]
+    sites_judged: i64
+    sites_unjudged: i64
+
+# `@support_async_immutable` / `@support_async_immutable("f", ...)` on a parsed
+# class: (present, authorized field names; empty means every field).
+pub fn hir_async_immutable_attr_v1(attributes: [Attribute]) -> (bool, [text]):
+    for attr in attributes:
+        if attr.name == "support_async_immutable":
+            var names: [text] = []
+            for arg in attr.args:
+                val name = extract_string_arg(arg)
+                if name.len() > 0:
+                    names.push(name)
+            return (true, names)
+    (false, [])
+
+# Canonical key of a declared field type, for the same-name/same-type rule.
+fn required_init_type_key_v1(symbols: SymbolTable, ty: HirType) -> text:
+    match ty.kind:
+        case HirTypeKind.Int(bits, signed):
+            if signed: "i{bits}" else: "u{bits}"
+        case HirTypeKind.Float(bits): "f{bits}"
+        case HirTypeKind.Bool: "bool"
+        case HirTypeKind.Char: "char"
+        case HirTypeKind.Str: "text"
+        case HirTypeKind.Unit: "()"
+        case HirTypeKind.Optional(inner): required_init_type_key_v1(symbols, inner) + "?"
+        case HirTypeKind.Array(element, _): "[" + required_init_type_key_v1(symbols, element) + "]"
+        case HirTypeKind.Dict(key, value):
+            "\{" + required_init_type_key_v1(symbols, key) + ":" + required_init_type_key_v1(symbols, value) + "\}"
+        case HirTypeKind.Named(symbol, args):
+            var name = "#{symbol.id}"
+            if val present = symbols.get_symbol_raw(symbol.id):
+                val sym: HirSymbol = present
+                name = sym.name
+            if args.len() == 0:
+                return name
+            var rendered = name + "<"
+            var i = 0
+            for arg in args:
+                if i > 0:
+                    rendered = rendered + ","
+                rendered = rendered + required_init_type_key_v1(symbols, arg)
+                i = i + 1
+            rendered + ">"
+        case _: hir_type_kind_ownership_name(ty.kind)
+
+fn required_init_is_optional_v1(ty: HirType) -> bool:
+    match ty.kind:
+        case HirTypeKind.Optional(_): true
+        case _: false
+
+fn required_init_fields_v1(symbols: SymbolTable, fields: [HirField]) -> [RequiredInitFieldV1]:
+    var out: [RequiredInitFieldV1] = []
+    for f in fields:
+        out.push(RequiredInitFieldV1(name: f.name,
+            required: (not f.has_default) and (not required_init_is_optional_v1(f.type_)),
+            type_key: required_init_type_key_v1(symbols, f.type_), span: f.type_.span))
+    out
+
+fn required_init_contains_v1(names: [text], name: text) -> bool:
+    for n in names:
+        if n == name:
+            return true
+    false
+
+fn required_init_fix_v1(id: text, description: text) -> DiagnosticFix:
+    DiagnosticFix.new(id, description, FixConfidence.Uncertain)
+
+class RequiredInitCollectorV1:
+    module_path: text
+    symbols: SymbolTable
+    class_of_symbol: Dict<i64, RequiredInitClassV1>
+    rows: [RequiredInitDiagnosticV1]
+    sites_judged: i64
+    sites_unjudged: i64
+
+    fn is_async_binding(e: HirExpr) -> bool:
+        match e.kind:
+            case HirExprKind.Call(callee, _, _):
+                val id = match callee.kind:
+                    case HirExprKind.Var(symbol): symbol.id
+                    case HirExprKind.NamedVar(symbol, _): symbol.id
+                    case _: -1
+                if id < 0:
+                    return false
+                if val present = self.symbols.get_symbol_raw(id):
+                    val sym: HirSymbol = present
+                    return sym.name == REQUIRED_INIT_ASYNC_BINDING_NAME
+                false
+            case _: false
+
+    fn is_source_nil(e: HirExpr) -> bool:
+        match e.kind:
+            case HirExprKind.NilLit: not e.is_uninit_marker
+            case _: false
+
+    me report(code: text, cls: RequiredInitClassV1, field: text, span: Span, message: text,
+              fixes: [DiagnosticFix]):
+        val diag = DiagnosticV1.new(Severity.Error, code, message)
+            .with_file(self.module_path).with_span(span).with_fixes(fixes)
+        self.rows.push(RequiredInitDiagnosticV1(code: code, class_name: cls.name, field: field,
+            public: cls.public, span: span, message: message, diagnostic: diag))
+
+    fn async_authorized(cls: RequiredInitClassV1, field: text) -> bool:
+        cls.async_enabled and (cls.async_fields.len() == 0 or required_init_contains_v1(cls.async_fields, field))
+
+    # One construction site: `supplied` pairs each initialized field with its
+    # expression, in source order.
+    me check_site(cls: RequiredInitClassV1, supplied: [(text, HirExpr)], span: Span):
+        self.sites_judged = self.sites_judged + 1
+        var supplied_names: [text] = []
+        for entry in supplied:
+            supplied_names.push(entry.0)
+            if self.is_async_binding(entry.1) and not self.async_authorized(cls, entry.0):
+                self.report(E_ASYNC_INIT_UNSUPPORTED, cls, entry.0, entry.1.span,
+                    "`{cls.name}.{entry.0}` is bound to an async producer but `{cls.name}` does not declare @support_async_immutable for it",
+                    [required_init_fix_v1("required_init:authorize:{entry.0}",
+                        "declare `@support_async_immutable(\"{entry.0}\")` on `{cls.name}` to authorize deferred initialization"),
+                     required_init_fix_v1("required_init:sync:{entry.0}",
+                        "initialize `{entry.0}` synchronously with a value of its declared type")])
+        for f in cls.fields:
+            if not f.required:
+                continue
+            var found = false
+            var nil_written = false
+            for entry in supplied:
+                if entry.0 == f.name:
+                    found = true
+                    nil_written = self.is_source_nil(entry.1)
+            if found and not nil_written:
+                continue
+            if (not found) and self.async_authorized(cls, f.name):
+                self.report(E_ASYNC_INIT_MISSING, cls, f.name, span,
+                    "`{cls.name}.{f.name}` may be initialized asynchronously (@support_async_immutable) but no producer is bound at this construction",
+                    [required_init_fix_v1("required_init:bind:{f.name}",
+                        "bind `{f.name}: {REQUIRED_INIT_ASYNC_BINDING_NAME}(<producer>)` at this construction"),
+                     required_init_fix_v1("required_init:supply:{f.name}",
+                        "supply `{f.name}: <expression of type {f.type_key}>` at this construction")])
+                continue
+            val why = if nil_written: "is written as nil, which does not initialize a non-optional field" else: "is not initialized at this construction"
+            self.report(E_ATTR_REQUIRED_UNINIT, cls, f.name, span,
+                "required field `{cls.name}.{f.name}` {why}; it declares no default",
+                [required_init_fix_v1("required_init:supply:{f.name}",
+                    "supply `{f.name}: <expression of type {f.type_key}>` at this construction"),
+                 required_init_fix_v1("required_init:default:{f.name}",
+                    "declare a default on the field: `{f.name}: {f.type_key} = <value>`")])
+
+    fn class_for_callee(callee: HirExpr) -> i64:
+        match callee.kind:
+            case HirExprKind.Var(symbol): symbol.id
+            case HirExprKind.NamedVar(symbol, _): symbol.id
+            case _: -1
+
+    me on_expr(node: HirExpr):
+        match node.kind:
+            case HirExprKind.StructLit(type_, fields):
+                match type_.kind:
+                    case HirTypeKind.Named(symbol, _):
+                        if self.class_of_symbol.contains_key(symbol.id):
+                            self.check_site(self.class_of_symbol[symbol.id], fields, node.span)
+                        else:
+                            self.sites_unjudged = self.sites_unjudged + 1
+                    case _: ()
+            case HirExprKind.Call(callee, args, _):
+                val callee_id = self.class_for_callee(callee)
+                if callee_id < 0:
+                    return
+                if self.class_of_symbol.contains_key(callee_id):
+                    val cls = self.class_of_symbol[callee_id]
+                    var supplied: [(text, HirExpr)] = []
+                    var position = 0
+                    for arg in args:
+                        if arg.has_name:
+                            supplied.push((arg.name, arg.value))
+                        elif position < cls.fields.len():
+                            supplied.push((cls.fields[position].name, arg.value))
+                        position = position + 1
+                    self.check_site(cls, supplied, node.span)
+                elif val present = self.symbols.get_symbol_raw(callee_id):
+                    val sym: HirSymbol = present
+                    if sym.kind == SymbolKind.Class or sym.kind == SymbolKind.Struct:
+                        self.sites_unjudged = self.sites_unjudged + 1
+            case _: ()
+
+    me on_stmt(node: HirStmt):
+        ()
+
+    me on_type(node: HirType):
+        ()
+
+    me on_pattern(node: HirPattern):
+        ()
+
+# Same attribute name with two declared types inside one `@node_tree` tree.
+fn required_init_tree_conflicts_v1(module_path: text, classes: [RequiredInitClassV1],
+                                   collector: RequiredInitCollectorV1):
+    var seen_type: Dict<text, text> = {}
+    var seen_class: Dict<text, RequiredInitClassV1> = {}
+    var seen_span: Dict<text, Span> = {}
+    for cls in classes:
+        if cls.tree.len() == 0:
+            continue
+        for f in cls.fields:
+            val key = cls.tree + "|" + f.name
+            if seen_type.contains_key(key):
+                if seen_type[key] != f.type_key:
+                    val first = seen_class[key]
+                    val message = "attribute `{f.name}` is declared as `{seen_type[key]}` in `{first.name}` and as `{f.type_key}` in `{cls.name}` within tree `{cls.tree}`; one tree gives one name one type"
+                    val diag = DiagnosticV1.new(Severity.Error, E_ATTR_TYPE_CONFLICT, message)
+                        .with_file(module_path).with_span(f.span)
+                        .with_secondary_label(module_path, seen_span[key], "first declaration of `{f.name}` as `{seen_type[key]}`")
+                        .with_fixes([required_init_fix_v1("required_init:unify:{f.name}",
+                            "give `{f.name}` the same type in every class of tree `{cls.tree}`, or rename one attribute")])
+                    collector.rows.push(RequiredInitDiagnosticV1(code: E_ATTR_TYPE_CONFLICT,
+                        class_name: cls.name, field: f.name, public: cls.public, span: f.span,
+                        message: message, diagnostic: diag))
+            else:
+                seen_type[key] = f.type_key
+                seen_class[key] = cls
+                seen_span[key] = f.span
+
+# Verifier entry: classes and structs declared in this module, every function
+# body, deterministic function order (name, symbol id) like attr_access_sites.
+pub fn hir_required_field_init_check_v1(module_name: text, module_path: text, symbols: SymbolTable,
+                                        parser_classes: Dict<text, ParserClass>,
+                                        classes: Dict<SymbolId, HirClass>,
+                                        structs: Dict<SymbolId, HirStruct>,
+                                        functions: Dict<SymbolId, HirFunction>) -> RequiredInitReportV1:
+    var class_of_symbol: Dict<i64, RequiredInitClassV1> = {}
+    var declared: [RequiredInitClassV1] = []
+    for cls in classes.values():
+        var async_enabled = false
+        var async_fields: [text] = []
+        var tree = ""
+        if parser_classes.contains_key(cls.name):
+            val attrs = parser_classes[cls.name].attributes
+            val marked = hir_async_immutable_attr_v1(attrs)
+            async_enabled = marked.0
+            async_fields = marked.1
+            tree = hir_node_tree_attr_v1(attrs)
+        val meta = RequiredInitClassV1(name: cls.name, symbol_id: cls.symbol.id,
+            public: effective_visibility(cls.name, module_path, cls.is_public),
+            async_enabled: async_enabled, async_fields: async_fields, tree: tree,
+            fields: required_init_fields_v1(symbols, cls.fields), span: cls.span)
+        class_of_symbol[cls.symbol.id] = meta
+        declared.push(meta)
+    for st in structs.values():
+        val meta = RequiredInitClassV1(name: st.name, symbol_id: st.symbol.id,
+            public: effective_visibility(st.name, module_path, st.is_public),
+            async_enabled: false, async_fields: [], tree: "",
+            fields: required_init_fields_v1(symbols, st.fields), span: st.span)
+        class_of_symbol[st.symbol.id] = meta
+        declared.push(meta)
+    var collector = RequiredInitCollectorV1(module_path: module_path, symbols: symbols,
+        class_of_symbol: class_of_symbol, rows: [], sites_judged: 0, sites_unjudged: 0)
+    required_init_tree_conflicts_v1(module_path, declared, collector)
+    var order: [HirFunction] = []
+    for f in functions.values():
+        var i = order.len()
+        order.push(f)
+        while i > 0 and (order[i].name < order[i - 1].name or
+                (order[i].name == order[i - 1].name and order[i].symbol.id < order[i - 1].symbol.id)):
+            val t = order[i - 1]
+            order[i - 1] = order[i]
+            order[i] = t
+            i = i - 1
+    for f in order:
+        hir_visit_block(f.body, collector)
+    RequiredInitReportV1(rows: collector.rows, sites_judged: collector.sites_judged,
+        sites_unjudged: collector.sites_unjudged)
