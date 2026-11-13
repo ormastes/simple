@@ -14,7 +14,7 @@ Audience: engineers maintaining the native-build shard worker pools.
 
 use std.spec
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_block, hir_shard_recovery_blocked}
-use std.io_runtime.{dir_create_all, dir_exists, dir_list, file_exists, file_read, getpid}
+use std.io_runtime.{dir_create_all, dir_exists, dir_list, dir_remove_all, file_exists, file_read, getpid}
 use std.nogc_sync_mut.io_runtime.{env_get_nullable, env_set}
 
 extern fn rt_process_spawn_async_value(cmd: text, args: [text]) -> i64
@@ -81,8 +81,9 @@ describe "HIR shard ledger BLOCKED publication":
                 code = rt_process_wait(pid, 600000)
             expect(code).to_equal(0)
 
-        step("Every round holds one whole reason, the reader saw one, and no staging residue remains")
+        step("Every round holds one whole reason, the reader saw exactly that reason, and no staging residue remains")
         var torn: [text] = []
+        var overwritten: [text] = []
         round = 0
         while round < ROUNDS:
             val dir = "{queue}/r{round}"
@@ -93,10 +94,16 @@ describe "HIR shard ledger BLOCKED publication":
             val observed = file_read("{dir}/observed-R")
             if not whole_reason(observed):
                 torn = torn.push("r{round} reader saw: len={observed.len()}")
+            # First reason wins under concurrency: what the reader saw the moment
+            # the record existed is what the record still says.
+            if observed != content:
+                overwritten = overwritten.push("r{round}: reader len={observed.len()} final len={content.len()}")
             for name in dir_list(dir) ?? []:
                 expect(name.ends_with(".tmp")).to_equal(false)
             round = round + 1
         expect(torn).to_equal([])
+        expect(overwritten).to_equal([])
+        expect(dir_remove_all(queue)).to_equal(true)
 
     it "preserves the first reason against a later observer":
         val dir = race_fixture("first-wins")
@@ -104,3 +111,4 @@ describe "HIR shard ledger BLOCKED publication":
         expect(hir_shard_recovery_block(dir, "merely observed the block")).to_equal(true)
         expect(file_read("{dir}/BLOCKED")).to_equal("root cause")
         expect(file_exists("{dir}/BLOCKED.{getpid()}.tmp")).to_equal(false)
+        expect(dir_remove_all(dir)).to_equal(true)
