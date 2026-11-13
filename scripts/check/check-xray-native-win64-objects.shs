@@ -1,0 +1,153 @@
+#!/bin/sh
+# check-xray-native-win64-objects.shs — XRay stage 3 (Windows x64, Simple-owned):
+# the resident Windows trampoline and the unwind data the assembler derives
+# from its .seh_* directives match their Simple twins byte for byte.
+#
+# Plan: doc/03_plan/compiler/aspect_dynload/simple_xray_staged_implementation_plan_2026-11-03.md
+# section 9 (Windows x64) and 13 (SEH and unwind).
+#
+# What it does (any host; cross-compiles for x86_64-pc-windows-msvc with clang,
+# never GCC):
+#   1. Compiles src/runtime/xray/xray_native_runtime_win64.c to a COFF object.
+#   2. Reads __simple_xray_trampoline_win64_v1 (.text offset 0, 354 bytes) and
+#      requires its handler CALL to be one REL32 relocation at +0xb6.
+#   3. Finds the .pdata row whose BeginAddress is the trampoline, checks its
+#      length, and reads its UNWIND_INFO from .xdata.
+#   4. Runs test/fixtures/xray/xray_win64_twin_dump.spl under the given Simple
+#      binary and requires TWIN-TEXT == the object bytes and TWIN-XDATA == the
+#      assembler's UNWIND_INFO.
+#
+# NOT done here: executing anything on Windows. The in-process Windows lane is
+# blocked on a Windows x64 host (OUT suite: test/03_system/xray/
+# xray_backend_differential_out_spec.spl, describe "simple-win64").
+#
+# Verdict (last stdout line):
+#   PASS — <n> check(s) (...)              exit 0
+#   FAIL — <reason>                        exit 1
+#   ERROR — nothing was checked (<reason>) exit 2
+# --selftest runs before every scan and is fatal.
+#
+# Usage
+#   sh scripts/check/check-xray-native-win64-objects.shs --simple <bin> [--keep]
+#   sh scripts/check/check-xray-native-win64-objects.shs --selftest
+# Env: CLANG, LLVM_OBJDUMP.
+
+set -u
+
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+SIMPLE_BIN=${SIMPLE_BIN:-}
+KEEP=0
+SELFTEST_ONLY=0
+CC=${CLANG:-clang}
+OBJDUMP=${LLVM_OBJDUMP:-llvm-objdump}
+TRAMPOLINE_BYTES=354
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --simple) SIMPLE_BIN=${2:-}; shift 2 ;;
+        --keep) KEEP=1; shift ;;
+        --selftest) SELFTEST_ONLY=1; shift ;;
+        -h|--help) sed -n '2,33p' "$0"; exit 0 ;;
+        *) echo "ERROR — nothing was checked (unknown argument: $1)"; exit 2 ;;
+    esac
+done
+
+# Section hex from `llvm-objdump -s --section=<name>` output on stdin.
+section_hex() {
+    awk '/^ [0-9a-f][0-9a-f][0-9a-f][0-9a-f]+ /{for(i=2;i<=5;i++) if ($i ~ /^[0-9a-f]+$/ && length($i)<=8) printf "%s",$i}'
+}
+
+# Little-endian u32 at byte offset $2 of hex string $1 (decimal out).
+hex_u32_le() {
+    b=$(printf '%s' "$1" | cut -c$(( $2 * 2 + 1 ))-$(( $2 * 2 + 8 )))
+    [ ${#b} -eq 8 ] || { echo -1; return; }
+    printf '%d\n' "0x$(printf '%s' "$b" | cut -c7-8)$(printf '%s' "$b" | cut -c5-6)$(printf '%s' "$b" | cut -c3-4)$(printf '%s' "$b" | cut -c1-2)"
+}
+
+# The .pdata row (12 bytes) whose BeginAddress is $2: prints "end unwind", or nothing.
+pdata_row_for() {
+    n=$(( ${#1} / 24 ))
+    i=0
+    while [ "$i" -lt "$n" ]; do
+        begin=$(hex_u32_le "$1" $(( i * 12 )))
+        if [ "$begin" -eq "$2" ]; then
+            echo "$(hex_u32_le "$1" $(( i * 12 + 4 ))) $(hex_u32_le "$1" $(( i * 12 + 8 )))"
+            return
+        fi
+        i=$((i + 1))
+    done
+}
+
+selftest() {
+    [ "$(hex_u32_le "62010000" 0)" = "354" ] || return 1
+    [ "$(hex_u32_le "62" 0)" = "-1" ] || return 1
+    row=$(pdata_row_for "100000002000000000000000000000006201000010000000" 0)
+    [ "$row" = "354 16" ] || return 1
+    [ -z "$(pdata_row_for "000000006201000010000000" 4)" ] || return 1
+    [ "$(printf ' 0000 01160b05 16014700  ......\n 0010 0f03      ..\n' | section_hex)" = "01160b05160147000f03" ] || return 1
+    return 0
+}
+
+if ! selftest; then
+    echo "ERROR — nothing was checked (selftest failed: a fixture was misjudged)"
+    exit 2
+fi
+if [ "$SELFTEST_ONLY" -eq 1 ]; then
+    echo "PASS — 5 check(s) (selftest: u32, pdata-row and section-hex fixtures)"
+    exit 0
+fi
+
+[ -n "$SIMPLE_BIN" ] || { echo "ERROR — nothing was checked (no --simple binary)"; exit 2; }
+case "$SIMPLE_BIN" in /*) ;; */*) SIMPLE_BIN=$(cd "$(dirname "$SIMPLE_BIN")" && pwd)/$(basename "$SIMPLE_BIN") ;; esac
+for tool in "$SIMPLE_BIN" "$CC" "$OBJDUMP"; do
+    command -v "$tool" >/dev/null 2>&1 || { echo "ERROR — nothing was checked (missing tool: $tool)"; exit 2; }
+done
+case "$("$CC" --version 2>&1 | head -1)" in
+    *clang*) ;;
+    *) echo "ERROR — nothing was checked ($CC is not clang)"; exit 2 ;;
+esac
+
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/xray-win64-objects.XXXXXX") || {
+    echo "ERROR — nothing was checked (cannot create temp dir)"; exit 2; }
+cleanup() { [ "$KEEP" -eq 1 ] && echo "kept: $WORK" >&2 || rm -rf "$WORK"; }
+trap cleanup EXIT
+cd "$ROOT" || { echo "ERROR — nothing was checked (cannot cd to $ROOT)"; exit 2; }
+
+"$CC" --target=x86_64-pc-windows-msvc -O2 -c src/runtime/xray/xray_native_runtime_win64.c -o "$WORK/rt.obj" 2> "$WORK/cc.log"
+cc_rc=$?
+[ "$cc_rc" -eq 0 ] || { echo "FAIL — clang could not build the Windows runtime TU: $(head -1 "$WORK/cc.log")"; exit 1; }
+
+"$OBJDUMP" -t "$WORK/rt.obj" > "$WORK/syms.txt" 2>&1
+tramp_at=$(awk '/ __simple_xray_trampoline_win64_v1$/{print $(NF-1)}' "$WORK/syms.txt")
+[ "$tramp_at" = "0x00000000" ] || { echo "FAIL — trampoline is not at .text+0 (got '$tramp_at')"; exit 1; }
+# The handler CALL stays a relocation in the object (rel32 field 0): exactly
+# one IMAGE_REL_AMD64_REL32 at .text+0xb6 naming the handler.
+"$OBJDUMP" -r "$WORK/rt.obj" > "$WORK/relocs.txt" 2>&1
+call_relocs=$(grep -c '^00000000000000b6 IMAGE_REL_AMD64_REL32 *simple_xray_native_handler_v1$' "$WORK/relocs.txt")
+[ "$call_relocs" -eq 1 ] || { echo "FAIL — handler CALL at .text+0xb6 is not one REL32 to simple_xray_native_handler_v1"; exit 1; }
+rel32=0
+
+text_hex=$("$OBJDUMP" -s --section=.text "$WORK/rt.obj" | section_hex)
+object_tramp=$(printf '%s' "$text_hex" | cut -c1-$(( TRAMPOLINE_BYTES * 2 )))
+pdata_hex=$("$OBJDUMP" -s --section=.pdata "$WORK/rt.obj" | section_hex)
+xdata_hex=$("$OBJDUMP" -s --section=.xdata "$WORK/rt.obj" | section_hex)
+row=$(pdata_row_for "$pdata_hex" 0)
+[ -n "$row" ] || { echo "FAIL — no .pdata row for the trampoline"; exit 1; }
+end=$(printf '%s' "$row" | cut -d' ' -f1)
+unwind=$(printf '%s' "$row" | cut -d' ' -f2)
+[ "$end" -eq "$TRAMPOLINE_BYTES" ] || { echo "FAIL — .pdata EndAddress $end != $TRAMPOLINE_BYTES"; exit 1; }
+
+XRAY_WIN64_REL32=$rel32 timeout 600 "$SIMPLE_BIN" run test/fixtures/xray/xray_win64_twin_dump.spl > "$WORK/twin.log" 2>&1
+twin_rc=$?
+[ "$twin_rc" -eq 0 ] || { echo "FAIL — twin dump exited $twin_rc: $(grep -v '^$' "$WORK/twin.log" | tail -1)"; exit 1; }
+twin_text=$(sed -n 's/^TWIN-TEXT //p' "$WORK/twin.log" | head -1)
+twin_xdata=$(sed -n 's/^TWIN-XDATA //p' "$WORK/twin.log" | head -1)
+object_xdata=$(printf '%s' "$xdata_hex" | cut -c$(( unwind * 2 + 1 ))-$(( unwind * 2 + ${#twin_xdata} )))
+
+[ -n "$twin_text" ] && [ "$twin_text" = "$object_tramp" ] || {
+    echo "FAIL — trampoline bytes differ from the Simple twin (rel32=$rel32)"; exit 1; }
+[ -n "$twin_xdata" ] && [ "$twin_xdata" = "$object_xdata" ] || {
+    echo "FAIL — UNWIND_INFO differs: object=$object_xdata twin=$twin_xdata"; exit 1; }
+
+echo "PASS — 5 check(s) (trampoline @.text+0, one handler REL32 @+0xb6, .pdata row length $TRAMPOLINE_BYTES, $TRAMPOLINE_BYTES trampoline bytes == twin, UNWIND_INFO ${#twin_xdata} hex == twin)"
+exit 0

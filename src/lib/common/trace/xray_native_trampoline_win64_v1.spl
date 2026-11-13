@@ -1,0 +1,229 @@
+# MDSOC: feature dimension (XRay stage 3, Windows x64, Simple-owned).
+# Simple twin of `__simple_xray_trampoline_win64_v1`, the resident trampoline
+# in src/runtime/xray/xray_native_runtime_win64.c, plus the Windows x64 unwind
+# records (.xdata UNWIND_INFO, .pdata RUNTIME_FUNCTION) that keep SEH unwinding
+# and stack walking valid through it, and the admission check that a function's
+# entry sled sits before its prolog.
+#
+# Same 13-byte X64Rel32 sled as the SysV profile (plan 10.2: the encoding is
+# ABI-neutral; only the trampoline and its unwind data differ). On entry
+# [rsp] = sled + 7 and every register, RFLAGS, MXCSR and the full YMM state
+# must come back exactly as found.
+#
+# Windows x64 bounded AVX profile (plan 3.3 / 10.4, PR #5962 remedy):
+#   - pushes rbp, then the volatile GPRs rax rcx rdx r8 r9 r10 r11 (rbx rsi
+#     rdi r12-r15 are callee-saved by the handler under the Microsoft ABI);
+#   - rbp = frame pointer (UWOP_SET_FPREG), 0x238-byte frame: 32 bytes of
+#     shadow space at [rsp], ymm0-15 at +0x20 (all 16: the upper halves are
+#     volatile even for ymm6-15), MXCSR at +0x220, RFLAGS at +0x228;
+#   - RFLAGS is saved in-frame (pushfq; pop [rsp+0x228]) after the prolog and
+#     restored (push [rsp+0x228]; popfq) before a canonical epilog
+#     `lea rsp, [rbp]; pop ...; ret` that writes no flag;
+#   - DF cleared for the handler; rsp is 16-aligned at the CALL (entry rsp is
+#     8 mod 16, 8 pushes keep it 8 mod 16, 0x238 restores 0);
+#   - handler args (Microsoft x64): ecx = site id (imm32 at [return + 2]),
+#     rdx = sled return address.
+# Requires AVX (vmovdqu ymm); a non-AVX host needs a separately qualified SSE
+# profile and is refused by the host before install. Not preserved: AVX-512
+# zmm upper / opmask, x87/MMX, AMX/APX state.
+#
+# Golden: clang 23 `--target=x86_64-pc-windows-msvc` assembly of the same
+# source, including the .seh_* directives (spec + scripts/check lane).
+use std.common.isa.x64_encode_v1.{x64_rel32_in_range_v1, x64_push_imm32_le_v1}
+use std.common.trace.observer_contract_v1.{TraceFailureV1}
+
+pub const XRAY_NATIVE_TRAMPOLINE_WIN64_FRAME_BYTES_V1 = 0x238
+pub const XRAY_NATIVE_TRAMPOLINE_WIN64_BYTES_V1 = 354
+pub const XRAY_NATIVE_TRAMPOLINE_WIN64_PROLOG_BYTES_V1 = 22
+# Byte offset of the handler CALL's rel32 (the CALL opcode is one byte before).
+pub const XRAY_NATIVE_TRAMPOLINE_WIN64_CALL_REL32_AT_V1 = 182
+pub const XRAY_WIN64_SHADOW_BYTES_V1 = 32
+const XRAY_WIN64_YMM_SLOT_V1 = 0x20
+const XRAY_WIN64_MXCSR_SLOT_V1 = 0x220
+const XRAY_WIN64_RFLAGS_SLOT_V1 = 0x228
+# rbp after the 8 pushes; the sled return address is 8 slots above it.
+const XRAY_WIN64_RETURN_FROM_RBP_V1 = 0x40
+const XRAY_WIN64_RBP_V1 = 5
+
+# Unwind operation codes (UNWIND_CODE.UnwindOp).
+pub const XRAY_WIN64_UWOP_PUSH_NONVOL_V1 = 0
+pub const XRAY_WIN64_UWOP_ALLOC_LARGE_V1 = 1
+pub const XRAY_WIN64_UWOP_ALLOC_SMALL_V1 = 2
+pub const XRAY_WIN64_UWOP_SET_FPREG_V1 = 3
+const XRAY_WIN64_UNW_FLAG_CHAININFO_V1 = 4
+
+# Volatile GPRs in push order (register numbers): rax rcx rdx r8 r9 r10 r11.
+fn xray_win64_saved_gprs_v1() -> [i64]:
+    [0, 1, 2, 8, 9, 10, 11]
+
+fn xray_win64_gpr_name_v1(reg: i64) -> text:
+    val names = ["rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi"]
+    if reg < 8: names[reg] else: "r{reg}"
+
+# Every register / state word the trampoline itself preserves.
+pub fn xray_native_trampoline_win64_saved_state_v1() -> [text]:
+    var names: [text] = ["rflags", "rbp"]
+    for reg in xray_win64_saved_gprs_v1():
+        names.push(xray_win64_gpr_name_v1(reg))
+    for reg in 0..16:
+        names.push("ymm{reg}")
+    names.push("mxcsr")
+    names
+
+fn xray_win64_push_pop_v1(out: [i64], reg: i64, pop: bool) -> [i64]:
+    var bytes = out
+    if reg >= 8:
+        bytes.push(0x41)
+    val base = if pop: 0x58 else: 0x50
+    bytes.push(base + (reg & 7))
+    bytes
+
+# vmovdqu ymm<->[rsp+disp] (VEX.256.F3.0F 7F store / 6F load), 2-byte VEX:
+# C5, then R-bar|vvvv=1111|L=1|pp=F3 (0xFE, or 0x7E for ymm8-15).
+fn xray_win64_vmovdqu_rsp_v1(out: [i64], ymm: i64, disp: i64, load: bool) -> [i64]:
+    var bytes = out
+    bytes.push(0xC5)
+    bytes.push(if ymm >= 8: 0x7E else: 0xFE)
+    bytes.push(if load: 0x6F else: 0x7F)
+    val reg = (ymm & 7) << 3
+    if disp <= 127:
+        bytes.push(0x44 | reg)
+        bytes.push(0x24)
+        bytes.push(disp)
+    else:
+        bytes.push(0x84 | reg)
+        bytes.push(0x24)
+        bytes = x64_push_imm32_le_v1(bytes, disp)
+    bytes
+
+# opcode bytes then [rsp + disp32] with a ModRM of `modrm` (SIB base rsp).
+fn xray_win64_rsp_disp32_v1(out: [i64], opcode: [i64], modrm: i64, disp: i64) -> [i64]:
+    var bytes = out
+    for byte in opcode:
+        bytes.push(byte)
+    bytes.push(modrm)
+    bytes.push(0x24)
+    x64_push_imm32_le_v1(bytes, disp)
+
+# The trampoline bytes (no trailing alignment padding). `handler_rel32` is the
+# CALL displacement (handler - end of the CALL); [] when it does not fit.
+pub fn xray_native_trampoline_bytes_win64_v1(handler_rel32: i64) -> [i64]:
+    if not x64_rel32_in_range_v1(handler_rel32):
+        return []
+    var bytes: [i64] = [0x55]                                   # push rbp
+    for reg in xray_win64_saved_gprs_v1():
+        bytes = xray_win64_push_pop_v1(bytes, reg, false)
+    for byte in [0x48, 0x89, 0xE5, 0x48, 0x81, 0xEC]:          # mov rbp,rsp; sub rsp,
+        bytes.push(byte)
+    bytes = x64_push_imm32_le_v1(bytes, XRAY_NATIVE_TRAMPOLINE_WIN64_FRAME_BYTES_V1)
+    bytes.push(0x9C)                                            # pushfq
+    bytes = xray_win64_rsp_disp32_v1(bytes, [0x8F], 0x84, XRAY_WIN64_RFLAGS_SLOT_V1)  # pop [rsp+0x228]
+    bytes.push(0xFC)                                            # cld
+    for ymm in 0..16:
+        bytes = xray_win64_vmovdqu_rsp_v1(bytes, ymm, XRAY_WIN64_YMM_SLOT_V1 + ymm * 32, false)
+    bytes = xray_win64_rsp_disp32_v1(bytes, [0x0F, 0xAE], 0x9C, XRAY_WIN64_MXCSR_SLOT_V1)  # stmxcsr
+    for byte in [0x48, 0x8B, 0x55, XRAY_WIN64_RETURN_FROM_RBP_V1, 0x8B, 0x4A, 0x02]:  # mov rdx,[rbp+0x40]; mov ecx,[rdx+2]
+        bytes.push(byte)
+    bytes.push(0xE8)                                            # call handler
+    bytes = x64_push_imm32_le_v1(bytes, handler_rel32)
+    bytes = xray_win64_rsp_disp32_v1(bytes, [0x0F, 0xAE], 0x94, XRAY_WIN64_MXCSR_SLOT_V1)  # ldmxcsr
+    for ymm in 0..16:
+        bytes = xray_win64_vmovdqu_rsp_v1(bytes, ymm, XRAY_WIN64_YMM_SLOT_V1 + ymm * 32, true)
+    bytes = xray_win64_rsp_disp32_v1(bytes, [0xFF], 0xB4, XRAY_WIN64_RFLAGS_SLOT_V1)  # push [rsp+0x228]
+    bytes.push(0x9D)                                            # popfq
+    for byte in [0x48, 0x8D, 0x65, 0x00]:                       # lea rsp, [rbp]
+        bytes.push(byte)
+    val gprs = xray_win64_saved_gprs_v1()
+    var index = gprs.len() - 1
+    while index >= 0:
+        bytes = xray_win64_push_pop_v1(bytes, gprs[index], true)
+        index = index - 1
+    bytes.push(0x5D)                                            # pop rbp
+    bytes.push(0xC3)                                            # ret
+    bytes
+
+# One UNWIND_CODE: CodeOffset is the prolog offset just past the instruction;
+# `slots` are the extra 16-bit slots the op takes (ALLOC_LARGE size / 8).
+pub struct XrayWin64UnwindCodeV1:
+    code_offset: i64
+    op: i64
+    info: i64
+    slots: [i64]
+
+# UNWIND_INFO version 1: header, codes in reverse prolog order, padded to an
+# even slot count. Empty when a field does not fit its bit width.
+pub fn xray_win64_unwind_info_v1(prolog_bytes: i64, frame_register: i64, frame_offset: i64,
+                                 codes: [XrayWin64UnwindCodeV1]) -> [i64]:
+    if prolog_bytes < 0 or prolog_bytes > 255 or frame_register < 0 or frame_register > 15:
+        return []
+    if frame_offset < 0 or frame_offset > 240 or frame_offset % 16 != 0:
+        return []
+    var slots = 0
+    for code in codes:
+        slots = slots + 1 + code.slots.len()
+    if slots > 255: return []
+    var out: [i64] = [1, prolog_bytes, slots, frame_register | ((frame_offset / 16) << 4)]
+    for code in codes:
+        out.push(code.code_offset)
+        out.push(code.op | (code.info << 4))
+        for slot in code.slots:
+            out.push(slot & 255)
+            out.push((slot >> 8) & 255)
+    if slots % 2 == 1:
+        out.push(0)
+        out.push(0)
+    out
+
+# The trampoline's own UNWIND_INFO (frame register rbp, offset 0).
+pub fn xray_native_trampoline_win64_unwind_v1() -> [i64]:
+    var codes: [XrayWin64UnwindCodeV1] = [
+        XrayWin64UnwindCodeV1(code_offset: XRAY_NATIVE_TRAMPOLINE_WIN64_PROLOG_BYTES_V1,
+            op: XRAY_WIN64_UWOP_ALLOC_LARGE_V1, info: 0,
+            slots: [XRAY_NATIVE_TRAMPOLINE_WIN64_FRAME_BYTES_V1 / 8]),
+        XrayWin64UnwindCodeV1(code_offset: 15, op: XRAY_WIN64_UWOP_SET_FPREG_V1, info: 0, slots: [])]
+    # pushes, latest first: r11 @12 r10 @10 r9 @8 r8 @6 rdx @4 rcx @3 rax @2 rbp @1
+    val ends = [12, 10, 8, 6, 4, 3, 2]
+    val regs = [11, 10, 9, 8, 2, 1, 0]
+    for index in 0..ends.len():
+        codes.push(XrayWin64UnwindCodeV1(code_offset: ends[index], op: XRAY_WIN64_UWOP_PUSH_NONVOL_V1,
+            info: regs[index], slots: []))
+    codes.push(XrayWin64UnwindCodeV1(code_offset: 1, op: XRAY_WIN64_UWOP_PUSH_NONVOL_V1,
+        info: XRAY_WIN64_RBP_V1, slots: []))
+    xray_win64_unwind_info_v1(XRAY_NATIVE_TRAMPOLINE_WIN64_PROLOG_BYTES_V1, XRAY_WIN64_RBP_V1, 0, codes)
+
+# RUNTIME_FUNCTION (.pdata row): BeginAddress, EndAddress, UnwindInfoAddress
+# as image RVAs (IMAGE_REL_AMD64_ADDR32NB in an object).
+pub fn xray_win64_runtime_function_v1(begin_rva: i64, end_rva: i64, unwind_rva: i64) -> [i64]:
+    var out: [i64] = []
+    out = x64_push_imm32_le_v1(out, begin_rva)
+    out = x64_push_imm32_le_v1(out, end_rva)
+    x64_push_imm32_le_v1(out, unwind_rva)
+
+# Map admission for a Windows function with an entry sled at offset 0: its
+# UNWIND_INFO must describe no prolog instruction inside [0, sled_bytes).
+# Patching flips only the sled's first 16 bits and the sled has no stack
+# effect, so an unwind table whose codes all lie past the sled stays exact in
+# both states. Chained / unknown-version info is refused (not decoded here).
+pub fn xray_win64_entry_sled_unwind_admissible_v1(unwind_info: [i64], sled_bytes: i64
+        ) -> Result<bool, TraceFailureV1>:
+    if unwind_info.len() < 4 or sled_bytes <= 0: return Err(TraceFailureV1.InvalidMap)
+    val version = unwind_info[0] & 7
+    val flags = (unwind_info[0] >> 3) & 31
+    if version != 1: return Err(TraceFailureV1.UnsupportedProfile)
+    if (flags & XRAY_WIN64_UNW_FLAG_CHAININFO_V1) != 0: return Err(TraceFailureV1.UnsupportedProfile)
+    val slots = unwind_info[2]
+    if unwind_info.len() < 4 + slots * 2: return Err(TraceFailureV1.InvalidMap)
+    var at = 0
+    while at < slots:
+        val code_offset = unwind_info[4 + at * 2]
+        val op = unwind_info[5 + at * 2] & 15
+        if code_offset <= sled_bytes: return Err(TraceFailureV1.InvalidMap)
+        # ops with extra slots: ALLOC_LARGE (1 or 2), SAVE_NONVOL (1),
+        # SAVE_NONVOL_FAR (2), SAVE_XMM128 (1), SAVE_XMM128_FAR (2)
+        var extra = 0
+        if op == XRAY_WIN64_UWOP_ALLOC_LARGE_V1:
+            extra = if ((unwind_info[5 + at * 2] >> 4) & 15) == 0: 1 else: 2
+        elif op == 4 or op == 8: extra = 1
+        elif op == 5 or op == 9: extra = 2
+        at = at + 1 + extra
+    Ok(true)

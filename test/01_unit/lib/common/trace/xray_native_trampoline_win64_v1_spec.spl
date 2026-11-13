@@ -1,0 +1,99 @@
+# @cover src/lib/common/trace/xray_native_trampoline_win64_v1.spl
+# @req REQ-XRAY-STAGE3-WIN64-TRAMPOLINE
+"""
+# XRay stage 3 — Simple twin of the Windows x64 resident trampoline
+
+`__simple_xray_trampoline_win64_v1` is asm in
+src/runtime/xray/xray_native_runtime_win64.c. The goldens below are clang 23
+`--target=x86_64-pc-windows-msvc` assembly of the same source with its
+.seh_* directives: the .text bytes (handler CALL rel32 = 0) and the .xdata
+UNWIND_INFO clang derived from those directives. The twin must reproduce
+both byte for byte; scripts/check/check-xray-native-win64-objects.shs
+re-derives them from the runtime TU on every run.
+"""
+use std.spec.*
+use std.common.trace.observer_contract_v1.{TraceFailureV1}
+use std.common.trace.xray_native_trampoline_win64_v1.*
+
+val GOLDEN_TEXT_HEX: text = "5550515241504151415241534889e54881ec380200009c8f842428020000fcc5fe7f442420c5fe7f4c2440c5fe7f542460c5fe7f9c2480000000c5fe7fa424a0000000c5fe7fac24c0000000c5fe7fb424e0000000c5fe7fbc2400010000c57e7f842420010000c57e7f8c2440010000c57e7f942460010000c57e7f9c2480010000c57e7fa424a0010000c57e7fac24c0010000c57e7fb424e0010000c57e7fbc24000200000fae9c2420020000488b55408b4a02e8000000000fae942420020000c5fe6f442420c5fe6f4c2440c5fe6f542460c5fe6f9c2480000000c5fe6fa424a0000000c5fe6fac24c0000000c5fe6fb424e0000000c5fe6fbc2400010000c57e6f842420010000c57e6f8c2440010000c57e6f942460010000c57e6f9c2480010000c57e6fa424a0010000c57e6fac24c0010000c57e6fb424e0010000c57e6fbc2400020000ffb424280200009d488d6500415b415a415941585a59585dc3"
+val GOLDEN_XDATA_HEX: text = "01160b05160147000f030cb00aa00890068004200310020001500000"
+
+fn hex_of(bytes: [i64]) -> text:
+    val digits = "0123456789abcdef"
+    var out = ""
+    for byte in bytes:
+        out = out + digits[(byte >> 4) & 15] + digits[byte & 15]
+    out
+
+describe "XRay Windows x64 trampoline twin":
+    it "preserves RFLAGS, the Microsoft-volatile GPRs, all of ymm0-15 and MXCSR":
+        val saved = xray_native_trampoline_win64_saved_state_v1()
+        for name in ["rflags", "rbp", "rax", "rcx", "rdx", "r8", "r9", "r10", "r11", "ymm0", "ymm6", "ymm15", "mxcsr"]:
+            expect(saved.contains(name)).to_equal(true)
+        # callee-saved by the handler under the Microsoft ABI; never touched here
+        for name in ["rbx", "rsi", "rdi", "r12", "r15"]:
+            expect(saved.contains(name)).to_equal(false)
+        # entry rsp is 8 mod 16; 8 pushes keep it, the frame restores 0 at the CALL
+        expect((8 + 8 * 8 + XRAY_NATIVE_TRAMPOLINE_WIN64_FRAME_BYTES_V1) % 16).to_equal(0)
+        expect(XRAY_NATIVE_TRAMPOLINE_WIN64_FRAME_BYTES_V1 >= XRAY_WIN64_SHADOW_BYTES_V1 + 16 * 32 + 16).to_equal(true)
+
+    it "matches the assembled trampoline byte for byte":
+        val bytes = xray_native_trampoline_bytes_win64_v1(0)
+        expect(bytes.len()).to_equal(XRAY_NATIVE_TRAMPOLINE_WIN64_BYTES_V1)
+        expect(hex_of(bytes)).to_equal(GOLDEN_TEXT_HEX)
+        expect(bytes[XRAY_NATIVE_TRAMPOLINE_WIN64_CALL_REL32_AT_V1 - 1]).to_equal(0xE8)
+        expect(bytes[bytes.len() - 1]).to_equal(0xC3)
+
+    it "encodes a backward handler displacement and rejects one that does not fit rel32":
+        val back = xray_native_trampoline_bytes_win64_v1(-2)
+        expect(back[XRAY_NATIVE_TRAMPOLINE_WIN64_CALL_REL32_AT_V1]).to_equal(0xFE)
+        expect(back[XRAY_NATIVE_TRAMPOLINE_WIN64_CALL_REL32_AT_V1 + 3]).to_equal(0xFF)
+        expect(xray_native_trampoline_bytes_win64_v1(-2147483649).len()).to_equal(0)
+
+describe "XRay Windows x64 unwind records":
+    it "emits the same UNWIND_INFO clang derives from the .seh directives":
+        val info = xray_native_trampoline_win64_unwind_v1()
+        expect(hex_of(info)).to_equal(GOLDEN_XDATA_HEX)
+        expect(info[1]).to_equal(XRAY_NATIVE_TRAMPOLINE_WIN64_PROLOG_BYTES_V1)
+        expect(info[2]).to_equal(11)
+        expect(info.len() % 4).to_equal(0)
+
+    it "encodes a RUNTIME_FUNCTION row of image RVAs":
+        val row = xray_win64_runtime_function_v1(0x1000, 0x1000 + XRAY_NATIVE_TRAMPOLINE_WIN64_BYTES_V1, 0x3010)
+        expect(hex_of(row)).to_equal("00100000621100001030" + "0000")
+
+    it "refuses unwind fields that do not fit their bit widths":
+        expect(xray_win64_unwind_info_v1(256, 5, 0, []).len()).to_equal(0)
+        expect(xray_win64_unwind_info_v1(4, 16, 0, []).len()).to_equal(0)
+        expect(xray_win64_unwind_info_v1(4, 5, 8, []).len()).to_equal(0)
+        expect(hex_of(xray_win64_unwind_info_v1(4, 5, 32, []))).to_equal("01040025")
+
+describe "Windows entry-sled unwind admission":
+    it "admits a function whose prolog starts after the 13-byte sled":
+        # push rbp @14, sub rsp,0x28 @18 (ALLOC_SMALL info 4)
+        val codes = [
+            XrayWin64UnwindCodeV1(code_offset: 18, op: XRAY_WIN64_UWOP_ALLOC_SMALL_V1, info: 4, slots: []),
+            XrayWin64UnwindCodeV1(code_offset: 14, op: XRAY_WIN64_UWOP_PUSH_NONVOL_V1, info: 5, slots: [])]
+        val info = xray_win64_unwind_info_v1(18, 0, 0, codes)
+        expect(xray_win64_entry_sled_unwind_admissible_v1(info, 13)).to_equal(Ok(true))
+        # a leaf with no unwind codes is admissible too
+        expect(xray_win64_entry_sled_unwind_admissible_v1(xray_win64_unwind_info_v1(0, 0, 0, []), 13)).to_equal(Ok(true))
+
+    it "refuses a prolog instruction inside the sled":
+        val codes = [XrayWin64UnwindCodeV1(code_offset: 1, op: XRAY_WIN64_UWOP_PUSH_NONVOL_V1, info: 5, slots: [])]
+        val info = xray_win64_unwind_info_v1(1, 0, 0, codes)
+        expect(xray_win64_entry_sled_unwind_admissible_v1(info, 13)).to_equal(Err(TraceFailureV1.InvalidMap))
+        val edge = [XrayWin64UnwindCodeV1(code_offset: 13, op: XRAY_WIN64_UWOP_PUSH_NONVOL_V1, info: 5, slots: [])]
+        expect(xray_win64_entry_sled_unwind_admissible_v1(xray_win64_unwind_info_v1(13, 0, 0, edge), 13)).to_equal(Err(TraceFailureV1.InvalidMap))
+        # the trampoline's own info has a push at offset 1: never a sled function
+        expect(xray_win64_entry_sled_unwind_admissible_v1(xray_native_trampoline_win64_unwind_v1(), 13)).to_equal(Err(TraceFailureV1.InvalidMap))
+
+    it "refuses chained, unknown-version or truncated unwind info":
+        var chained = xray_win64_unwind_info_v1(0, 0, 0, [])
+        chained[0] = 1 | (4 << 3)
+        expect(xray_win64_entry_sled_unwind_admissible_v1(chained, 13)).to_equal(Err(TraceFailureV1.UnsupportedProfile))
+        var v2 = xray_win64_unwind_info_v1(0, 0, 0, [])
+        v2[0] = 2
+        expect(xray_win64_entry_sled_unwind_admissible_v1(v2, 13)).to_equal(Err(TraceFailureV1.UnsupportedProfile))
+        expect(xray_win64_entry_sled_unwind_admissible_v1([1, 18, 4, 0, 18, 0x42], 13)).to_equal(Err(TraceFailureV1.InvalidMap))
+        expect(xray_win64_entry_sled_unwind_admissible_v1([1], 13)).to_equal(Err(TraceFailureV1.InvalidMap))

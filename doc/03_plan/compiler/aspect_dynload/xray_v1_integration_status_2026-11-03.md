@@ -308,3 +308,24 @@ Other `b795b3f4a26`/`aba2a5f0a3e` sites, same seed and scope:
   Filed `doc/08_tracking/bug/seed_cross_module_call_overhead_2026-11-13.md`.
 - Not folded (remaining PE duplication): `linker/pe_inspect.spl`, `linker/pe_parser.spl`,
   `std.common.pe_coff_header` (image gates), `src/lib/pe_coff_header.spl` (stub).
+
+### Stage 3 (Windows x64, Simple-owned) — 2026-11-13
+
+#### W1: trampoline, unwind records, resident runtime TU
+- `src/lib/common/trace/xray_native_trampoline_win64_v1.spl`: Simple twin of
+  `__simple_xray_trampoline_win64_v1` (354 bytes; bounded AVX profile: rbp + rax rcx rdx
+  r8-r11, ymm0-15 in full, MXCSR, RFLAGS in-frame; 32-byte shadow space; rsp 16-aligned
+  and DF clear at the CALL; ecx = id, rdx = sled return; canonical `lea rsp,[rbp]` epilog),
+  UNWIND_INFO / RUNTIME_FUNCTION encoders, and the entry-sled admission rule (no prolog
+  unwind code inside the 13-byte sled; chained / non-v1 info refused).
+- `src/runtime/xray/xray_native_runtime_win64.c`: the resident TU (same .seh-annotated asm,
+  sled leaf, registry with `__ImageBase` + RVA text_base and `__declspec(dllexport)` entry
+  points). `xray_native_registry_v1.h` gained two overridable macros (`SIMPLE_XRAY_API`,
+  `XMAP_TEXT_BASE`); the Linux expansions are unchanged.
+- Evidence: spec 9/9 with goldens from clang 23 `x86_64-pc-windows-msvc` (text and .xdata);
+  `scripts/check/check-xray-native-win64-objects.shs --simple <seed>` PASS (trampoline
+  bytes and assembler UNWIND_INFO == twin); mutating the twin (cld -> nop) -> script FAIL and
+  spec 8/9. Wired as `local-xray-native-win64-objects` in `config/check/must_check_gates.sdn`.
+- Patching on Windows reuses the existing leaf and SOSIX port: `rt_mprotect` is
+  VirtualProtect + FlushInstructionCache with rollback (`platform_win.h:504-520`), one
+  aligned u16 activation-word store, quiescent only.
