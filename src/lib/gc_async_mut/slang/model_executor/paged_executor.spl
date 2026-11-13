@@ -76,7 +76,7 @@ var PAGED_BACKEND: GgmlBackend? = nil
 var PAGED_PENDING_BACKEND: GgmlBackend? = nil
 # A direct mutable receiver is required here. Calling `me` methods through an
 # optional unwrap mutates a temporary and loses the page/reference transition.
-var PAGED_MANAGER = KvPageManager.create(1u64, 1, 1, 1, 1, 1, 1, 1).unwrap()
+var PAGED_MANAGER: KvPageManager = KvPageManager.create(1u64, 1, 1, 1, 1, 1, 1, 1).unwrap()
 var PAGED_MANAGER_ACTIVE = false
 var PAGED_POOL = 0
 var PAGED_NAMESPACE = 0
@@ -87,7 +87,19 @@ var PAGED_REQUEST_CAPACITY = 0
 var PAGED_PREFIX_CAPACITY = 0
 var PAGED_BYTE_LIMIT = 0
 fn _current_request_active() -> bool:
-    PAGED_MANAGER_ACTIVE and PAGED_MANAGER.sole_active_request().is_ok()
+    if not PAGED_MANAGER_ACTIVE:
+        return false
+    match PAGED_MANAGER.sole_active_request():
+        Ok(_): true
+        Err(_): false
+
+# Result predicates on a KvPageManager method-call result are not typed by the
+# pure-Simple MIR lowering (unresolved `is_ok`/`is_err`); a match on a declared
+# Result is.
+fn _kv_unit_failed(result: Result<(), KvPageError>) -> bool:
+    match result:
+        Ok(_): false
+        Err(_): true
 
 fn paged_executor_bind_backend(backend: GgmlBackend) -> bool:
     if PAGED_MANAGER_ACTIVE or PAGED_PENDING_BACKEND != nil:
@@ -209,7 +221,10 @@ fn _cold_prefill(native_request: GgmlRequest,
                 PAGED_MANAGER.close_request(logical_request)
                 return Err(PagedExecutorError.CapacityExceeded)
             Ok(value): value
-        if PAGED_MANAGER.page_provider_handle(page).is_err():
+        val provider_handle_missing = match PAGED_MANAGER.page_provider_handle(page):
+            Ok(_): false
+            Err(_): true
+        if provider_handle_missing:
             # No page was pushed for this iteration; explicitly abort the live
             # provider transaction and reclaim every prior staged page.
             physical_page_table_abort(PAGED_BACKEND!, transaction)
@@ -247,16 +262,19 @@ fn _cold_prefill(native_request: GgmlRequest,
         if rows > PAGED_PAGE_TOKENS:
             rows = PAGED_PAGE_TOKENS
         val checksum = _token_hash(tokens, index * PAGED_PAGE_TOKENS, rows)
-        if PAGED_MANAGER.update_writable(staged[index], rows, checksum).is_err():
+        if _kv_unit_failed(PAGED_MANAGER.update_writable(staged[index], rows, checksum)):
             return Err(PagedExecutorError.LogicalUpdateFailed)
-        if PAGED_MANAGER.seal_page(staged[index]).is_err():
+        if _kv_unit_failed(PAGED_MANAGER.seal_page(staged[index])):
             return Err(PagedExecutorError.LogicalSealFailed)
-        if PAGED_MANAGER.attach_sealed(logical_request, staged[index]).is_err():
+        if _kv_unit_failed(PAGED_MANAGER.attach_sealed(logical_request, staged[index])):
             return Err(PagedExecutorError.LogicalAttachFailed)
         index = index + 1
-    if PAGED_MANAGER.request_page_count(logical_request).is_err():
+    val page_count_invalid = match PAGED_MANAGER.request_page_count(logical_request):
+        Ok(_): false
+        Err(_): true
+    if page_count_invalid:
         return Err(PagedExecutorError.ColdRequestInvalid)
-    if PAGED_MANAGER.record_committed_prefill(tokens.len()).is_err():
+    if _kv_unit_failed(PAGED_MANAGER.record_committed_prefill(tokens.len())):
         return Err(PagedExecutorError.LogicalStateFailed)
     Ok(())
 
@@ -321,7 +339,7 @@ fn _restore_exact_prefix(native_request: GgmlRequest, prefix: KvPrefixId,
             PAGED_MANAGER.close_request(logical_request)
             _drain_reclaimed_pages()
             return Err(PagedExecutorError.ProviderOperationFailed)
-        if PAGED_MANAGER.record_copied_tail_rows(retained).is_err():
+        if _kv_unit_failed(PAGED_MANAGER.record_copied_tail_rows(retained)):
             PAGED_MANAGER.abort_cow(reservation)
             PAGED_MANAGER.close_request(logical_request)
             _drain_reclaimed_pages()
@@ -367,7 +385,7 @@ fn _restore_exact_prefix(native_request: GgmlRequest, prefix: KvPrefixId,
         reservation, retained_checksum, 1, full_checksum):
         Err(_): return Err(PagedExecutorError.LogicalStateFailed)
         Ok(_): ()
-    if PAGED_MANAGER.record_committed_restore(tokens.len(), 0, 1, 0).is_err():
+    if _kv_unit_failed(PAGED_MANAGER.record_committed_restore(tokens.len(), 0, 1, 0)):
         return Err(PagedExecutorError.LogicalStateFailed)
     _drain_reclaimed_pages()
     Ok(())
@@ -391,8 +409,8 @@ fn _restore_prefix_with_suffix(native_request: GgmlRequest, prefix: KvPrefixId,
                 return Err(error)
             Ok(_): ()
         index = index + 1
-    if PAGED_MANAGER.record_committed_restore(
-        prefix_tokens, tokens.len() - prefix_tokens, 0, 0).is_err():
+    if _kv_unit_failed(PAGED_MANAGER.record_committed_restore(
+        prefix_tokens, tokens.len() - prefix_tokens, 0, 0)):
         return Err(PagedExecutorError.LogicalStateFailed)
     Ok(())
 
@@ -429,7 +447,7 @@ fn _decode_one(native_request: GgmlRequest, token: i64,
             PAGED_MANAGER.abort_cow(reservation)
             _drain_reclaimed_pages()
             return Err(PagedExecutorError.ProviderOperationFailed)
-        if PAGED_MANAGER.record_copied_tail_rows(occupied).is_err():
+        if _kv_unit_failed(PAGED_MANAGER.record_copied_tail_rows(occupied)):
             PAGED_MANAGER.abort_cow(reservation)
             _drain_reclaimed_pages()
             return Err(PagedExecutorError.LogicalStateFailed)
@@ -507,11 +525,11 @@ fn _decode_one(native_request: GgmlRequest, token: i64,
         _drain_reclaimed_pages()
         return Err(PagedExecutorError.ProviderOperationFailed)
     val checksum = _token_hash([token], 0, 1)
-    if PAGED_MANAGER.update_writable(new_page, 1, checksum).is_err():
+    if _kv_unit_failed(PAGED_MANAGER.update_writable(new_page, 1, checksum)):
         return Err(PagedExecutorError.LogicalUpdateFailed)
-    if PAGED_MANAGER.seal_page(new_page).is_err():
+    if _kv_unit_failed(PAGED_MANAGER.seal_page(new_page)):
         return Err(PagedExecutorError.LogicalSealFailed)
-    if PAGED_MANAGER.attach_sealed(logical_request, new_page).is_err():
+    if _kv_unit_failed(PAGED_MANAGER.attach_sealed(logical_request, new_page)):
         return Err(PagedExecutorError.LogicalAttachFailed)
     Ok(())
 
@@ -525,7 +543,7 @@ fn _close_generation(native_request: GgmlRequest,
         val current = match PAGED_MANAGER.sole_active_request():
             Err(_): return Err(PagedExecutorError.CleanupFailed)
             Ok(value): value
-        if PAGED_MANAGER.close_request(current).is_err():
+        if _kv_unit_failed(PAGED_MANAGER.close_request(current)):
             return Err(PagedExecutorError.CleanupFailed)
     if _drain_reclaimed_pages().is_err():
         return Err(PagedExecutorError.CleanupFailed)
@@ -540,7 +558,7 @@ fn _cancel_generation(native_request: GgmlRequest,
         val current = match PAGED_MANAGER.sole_active_request():
             Err(_): return Err(PagedExecutorError.CleanupFailed)
             Ok(value): value
-        if PAGED_MANAGER.close_request(current).is_err():
+        if _kv_unit_failed(PAGED_MANAGER.close_request(current)):
             return Err(PagedExecutorError.CleanupFailed)
     if _drain_reclaimed_pages().is_err():
         return Err(PagedExecutorError.CleanupFailed)
@@ -603,7 +621,10 @@ fn _paged_executor_generate_impl(input: PagedGenerationRequest) -> Result<PagedG
             _cancel_generation(native_request, true)
             return Err(PagedExecutorError.LogicalRequestInvalid)
         Ok(value): value
-    if PAGED_MANAGER.request_page_count(logical_request).is_err():
+    val page_count_invalid = match PAGED_MANAGER.request_page_count(logical_request):
+        Ok(_): false
+        Err(_): true
+    if page_count_invalid:
             _cancel_generation(native_request, true)
             return Err(PagedExecutorError.LogicalRequestInvalid)
     # Cache admission is opportunistic. The active request remains the owner of
