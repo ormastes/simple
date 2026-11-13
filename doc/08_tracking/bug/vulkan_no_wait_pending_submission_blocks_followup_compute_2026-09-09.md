@@ -153,7 +153,13 @@ spec step:
    file before/after: `nm -D` `rt_vulkan_*` 0 -> 132 (all symbols 0 -> 20527);
    `test/01_unit/gpu/vulkan_async_session_backed_spec.spl` 2 examples, 2
    failures (`... is not linked into this binary`) -> 2 examples, 0 failures.
-   Size 53.6 MB -> 65.8 MB; 20x `--version` 231-249 ms vs 252-253 ms.
+   Size 53.6 MB -> 65.8 MB; 20x `--version` 226-255 ms vs 247-251 ms (same
+   commit, two rounds each). A strict-JIT program that really JITs (70-76 ms
+   against 3772 ms interpreted; array push, text concat, join, upper, recursion)
+   prints the same output on both seeds with no fallback line. The sanctioned
+   bootstrap sets no RUSTFLAGS on Linux, so the config reaches its seed; it
+   fingerprints this file, so the next bootstrap rebuilds the seed. A caller
+   that exports RUSTFLAGS replaces the config flags and is unaffected.
    `draw_ir_adv_spec` 69/70, `vulkan_lane_session_spec` 2/2,
    `gui_content_renderer_spec` 5/5, `vulkan_async_submission_contract_spec` 3/3
    are identical with and without the flag.
