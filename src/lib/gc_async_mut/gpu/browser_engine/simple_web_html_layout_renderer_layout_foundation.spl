@@ -819,6 +819,8 @@ fn style_with_height(st: Style, height_px: i32) -> Style:
     out.grid_area = st.grid_area
     out.grid_auto_flow_column = st.grid_auto_flow_column
     out.height_auto = false
+    out.left_auto = st.left_auto
+    out.top_auto = st.top_auto
     out.align_items_authored = st.align_items_authored
     out.scrollbar_width_none = st.scrollbar_width_none
     out.contain_size = st.contain_size
@@ -834,6 +836,8 @@ fn style_with_width_without_height_metadata(
 fn style_with_width(st: Style, width_px: i32) -> Style:
     val out = style_with_width_without_height_metadata(st, width_px)
     out.height_auto = st.height_auto
+    out.left_auto = st.left_auto
+    out.top_auto = st.top_auto
     out.align_items_authored = st.align_items_authored
     out.scrollbar_width_none = st.scrollbar_width_none
     out.contain_size = st.contain_size
@@ -1810,17 +1814,37 @@ fn absolute_child_x(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex
         if child.right_px >= 0:
             return viewport_w - absolute_outer_width(nodes, styles, child_index, child_i, parent, child_node, child, containing_w) - child.right_px
         return child.left_px
+    # CSS 2.2 10.1: with no positioned ancestor the containing block is the
+    # initial containing block at the layout origin, so an authored `left`
+    # is not measured from the (static) parent. `left: auto` keeps the
+    # parent-relative static-position approximation below.
+    if not child.left_auto and not absolute_has_positioned_ancestor(nodes, styles, child_i):
+        return child.left_px
     if child.right_px >= 0:
         val padding_box_w = containing_w + parent.pad_l + parent.pad_r
         return parent_x + parent.border_l + padding_box_w - absolute_outer_width(nodes, styles, child_index, child_i, parent, child_node, child, containing_w) - child.right_px
     parent_x + parent.border_l + child.left_px
 
-fn absolute_child_y(parent_y: i32, parent: Style, child_node: HNode, child: Style, containing_h: i32, viewport_h: i32) -> i32:
+# True when some ancestor of `node_i` establishes an absolute containing block
+# (any non-static position). Transforms/containment are not modelled here.
+fn absolute_has_positioned_ancestor(nodes: [HNode], styles: [Style], node_i: i32) -> bool:
+    var a = nodes[node_i].parent
+    while a >= 0:
+        val ast = styles[a]
+        if ast.position_relative or ast.position_absolute or ast.position_sticky or ast.position_fixed:
+            return true
+        a = nodes[a].parent
+    false
+
+fn absolute_child_y(nodes: [HNode], styles: [Style], child_i: i32, parent_y: i32, parent: Style, child_node: HNode, child: Style, containing_h: i32, viewport_h: i32) -> i32:
     # Mirror of absolute_child_x: a fixed box's bottom inset resolves against
     # the viewport height, not the nearest ancestor's content height.
     if child.position_fixed:
         if child.bottom_px >= 0:
             return viewport_h - absolute_outer_height(child_node, child, containing_h) - child.bottom_px
+        return child.top_px
+    # Same initial-containing-block rule as absolute_child_x for `top`.
+    if not child.top_auto and not absolute_has_positioned_ancestor(nodes, styles, child_i):
         return child.top_px
     if child.bottom_px >= 0:
         return parent_y + parent.border_t + containing_h - absolute_outer_height(child_node, child, containing_h) - child.bottom_px

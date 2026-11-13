@@ -1,0 +1,79 @@
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_foundation.spl
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_decl_apply.spl
+# @req REQ-SSPEC-SYSTEM
+# @gui: headless
+"""
+# Absolute boxes with no positioned ancestor
+
+CSS 2.2 10.1: an absolutely positioned box whose ancestors are all
+`position: static` uses the initial containing block, so `left`/`top`
+resolve against the viewport origin, not the static `<body>` (which sits at
+the default 8px body margin). Bug:
+`doc/08_tracking/bug/hosted_worker_absolute_main_renders_white_perf_pixels_2026-11-13.md`.
+
+Guards keep the cases that were already right: an absolute box with `left`/
+`top` left `auto` stays at its static position, and a `position: relative`
+parent stays the containing block.
+"""
+
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_draw_ir}
+use common.ui.draw_ir.{DrawIrCommand}
+use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
+
+fn _abs_icb_command(commands: [DrawIrCommand], prefix: text) -> DrawIrCommand:
+    var idx = 0
+    while idx < commands.len():
+        if commands[idx].component_id.starts_with(prefix):
+            return commands[idx]
+        idx = idx + 1
+    commands[0]
+
+fn _abs_icb_main_html(style: text) -> text:
+    "<main style='position:absolute;" + style + "width:64px;height:64px;background:#dc2626'></main>"
+
+describe "absolute box with no positioned ancestor":
+    it "anchors left:0;top:0 to the viewport origin, not the static body":
+        val composition = simple_web_layout_render_html_draw_ir(
+            _abs_icb_main_html("left:0;top:0;"), 64, 64)
+        val main_box = _abs_icb_command(composition.batches[0].commands, "main")
+        expect(main_box.x).to_equal(0)
+        expect(main_box.y).to_equal(0)
+        expect(main_box.width).to_equal(64)
+        expect(main_box.height).to_equal(64)
+
+    it "paints the full-viewport main colour at pixel (0,0)":
+        val composition = simple_web_layout_render_html_draw_ir(
+            _abs_icb_main_html("left:0;top:0;"), 64, 64)
+        var raster = Engine2dCompositorBackend.create_named(64, 64, "software")
+        val rendered = raster.render_draw_ir_composition_resources_revision(
+            composition, [], 7, 1)
+        expect(rendered.pixels[0]).to_equal(0xFFDC2626u32)
+        expect(rendered.pixels[4095]).to_equal(0xFFDC2626u32)
+        raster.shutdown()
+
+    it "resolves non-zero insets against the viewport":
+        val composition = simple_web_layout_render_html_draw_ir(
+            _abs_icb_main_html("left:5px;top:5px;"), 64, 64)
+        val main_box = _abs_icb_command(composition.batches[0].commands, "main")
+        expect(main_box.x).to_equal(5)
+        expect(main_box.y).to_equal(5)
+
+    it "keeps an auto-inset absolute box at its static position":
+        val composition = simple_web_layout_render_html_draw_ir(
+            _abs_icb_main_html(""), 64, 64)
+        val main_box = _abs_icb_command(composition.batches[0].commands, "main")
+        expect(main_box.x).to_equal(8)
+        expect(main_box.y).to_equal(8)
+
+    it "keeps a position:relative parent as the containing block":
+        val composition = simple_web_layout_render_html_draw_ir(
+            "<div style='position:relative;margin:4px;width:40px;height:40px'>" +
+            "<main style='position:absolute;left:2px;top:3px;width:10px;height:10px;background:#dc2626'></main></div>",
+            64, 64)
+        val main_box = _abs_icb_command(composition.batches[0].commands, "main")
+        # div: x = 8 body margin + 4; y = 8 (its 4px top margin collapses
+        # into body's 8px). The absolute child adds its own insets.
+        expect(main_box.x).to_equal(14)
+        expect(main_box.y).to_equal(11)
