@@ -156,3 +156,9 @@ self-hosted compiler plus a Vulkan host; run-vs-test parity re-measurement
 is the acceptance check.
 
 Status: OPEN (fix site out of lane scope; precisely identified).
+
+---
+
+## Lane disposition 2026-11-13 (live-p3-l4, work/live-p3-l4-20261113, base f790f7f266e)
+
+Concurs with the 2026-11-12 fix-runpath-gpu lane: the defect is the pure-Simple codegen `text`-extern ABI collapse (one machine word for a `text` operand in all three backends), with the confirmed collapse sites and fix design in `doc/05_design/compiler/codegen/pure_simple_text_extern_abi_fix_plan.md` — MIR-lowering + all-backend scope requiring the admitted self-hosted compiler and a Vulkan host to verify run-vs-test parity. Out of a P3 lane's touch list and unverifiable here (no working self-hosted compiler on this host). The spec-idiom half (`assert_true(probe_result.starts_with("skip:"))` in 8+ files) is the same story — runner/spec-lane scope. Additional note for the owner: this lane measured the seed JIT Option-returning parse family returning `Some(nil)` (pure_sql record addendum 2026-11-13), the same "consumer sees a corrupt value on the run/JIT path" failure family; worth auditing together. No in-lane change. Owner: compiler-core codegen lane.

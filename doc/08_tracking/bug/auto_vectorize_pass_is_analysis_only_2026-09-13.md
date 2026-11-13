@@ -134,3 +134,9 @@ evidence: `build/review/p3fix-ne20-20261111.sdn`.
 ## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
 
 **FIXED (confirmed)** — Source-checked fresh: `src/compiler/60.mir_opt/mir_opt/mod.spl:390` returns `PassStatus.Active` for AutoVectorize; alias oracle (`compiler.mir_opt.auto_vectorize_alias`) present. Absorber: lane ne2 addendum.
+
+## 2026-11-13 resolution (P3 triage sweep, work/p3-triage-20261113) — row closed `fixed`
+
+Seed: scratchpad `vkinit/seed-fix`, runs capped `systemd-run MemoryMax=16G timeout 900`, cwd = this worktree at origin/release/1.0.0 `59caff4fd1b`.
+
+Evidence: merge `9e7e7a526edb` (PR #7597) is an ancestor of origin/release/1.0.0. `src/compiler/60.mir_opt/mir_opt/mod.spl:390` returns `PassStatus.Active` for AutoVectorize; the pass is in the pipeline descriptor list (`mod.spl:933`) and dispatched at `mod.spl:1914` (`run_auto_vectorize`). Live: `test/01_unit/compiler/mir_opt/auto_vectorize_alias_spec.spl` executed=15 passed=15 failed=0 (alias oracle gate).

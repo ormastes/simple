@@ -187,3 +187,8 @@ review of the admitted revision before any mission-critical claim.
 ## Lane disposition 2026-11-13 (p3-misc-b)
 
 architectural qualification-provenance boundary; re-verified unchanged 2026-11-05. Owner: RISC-V qualification lane.
+---
+
+## Lane disposition 2026-11-13 (live-p3-l4, work/live-p3-l4-20261113, base f790f7f266e)
+
+Concurs with riscv-sweep/boot13: architectural provenance boundary, unchanged at this base — the receipt remains controlled-run provenance, not an adversarial boundary; the coverage-inventory design (compiler-emitted zero-count decision manifest, `MirCoverage*V1` lowering) and the descriptor-relative runtime snapshot transaction remain unimplemented. The boot13 addendum records that the building blocks (probe admission kinds, retained/no-follow file primitives) have started landing, but the closure items are multi-owner compiler+runtime work plus an admitted Stage-4 RV32/RV64 run — not a P3 bug-box fix. This lane has no `ghdl` and no admitted Stage-4 CLI. No in-lane change. Owner: RISC-V qualification lane with the exact grant in the boot13 addendum.

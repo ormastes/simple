@@ -49,3 +49,8 @@ Separately, interpreter class aliases still detach through `Arc::make_mut`. The 
 ## Lane disposition 2026-11-13 (p3-misc-b)
 
 bootstrap-blocking; two-cycle limit reached with test-fixture defects, changes reverted in-file. Resume requires repairing the focused Rust test fixture + LLVM allocator oracle, then native verification this lane cannot run. Owner: bootstrap/struct-receiver lane.
+---
+
+## Lane disposition 2026-11-13 (live-p3-l4, work/live-p3-l4-20261113, base f790f7f266e)
+
+Concurs with p3-misc-b: bootstrap-blocking; two prior lanes hit their cycle limits with changes reverted in-file (the runtime-only scoped-copy ABI is implemented and provider-tested, but compiler integration was reverted for over-promotion / missing return copy-out / non-CFG provenance; the narrower `me`-receiver capability correction was reverted over test-fixture defects). The record's required fix (explicit receiver kind + fail-closed escape/effect proof, or function-scoped copy lifetime ownership) is architecture work for the bootstrap/struct-receiver lane; the acceptance list (4.2M accessor calls, Stage 2/3/4 admission) needs native verification this lane cannot run. No in-lane change. Owner: bootstrap/struct-receiver lane.

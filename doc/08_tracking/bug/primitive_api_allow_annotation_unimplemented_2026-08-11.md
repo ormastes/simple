@@ -124,3 +124,8 @@ so the debt is tracked rather than hidden.
 ## Lane disposition 2026-11-13 (p3-misc-b)
 
 documented-but-unimplemented suppression attribute; implementation + spec is owner-lane work (compiler diagnostics), not a bounded side-fix.
+---
+
+## Addendum 2026-11-13 (live-p3-l4, work/live-p3-l4-20261113, base f790f7f266e) — verified FIXED on release tip
+
+The 2026-08-17 fix is present and green on this branch: the shared suppression machinery exists at `src/compiler/90.tools/fix/rules/impl_/lint_allow.spl` (file-scope `#![allow(RULE)]` header block + item-scope `@allow(RULE)` contiguous-comment-run), reached from `lint_checks.spl:23`. Ran the pinning spec once on the tracked seed: `test/01_unit/compiler/lint_allow_attribute_spec.spl` — 6/6 PASS, rc=0. The resume-plan step 2 (per-file decision on `src/lib/common/spec/evidence/model.spl` typed wrappers vs kept annotations) and the pre-existing primitive_api debt in that file remain open as the record states. No in-lane change.

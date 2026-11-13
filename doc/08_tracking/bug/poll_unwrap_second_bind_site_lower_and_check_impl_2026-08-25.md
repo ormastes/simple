@@ -200,3 +200,9 @@ every text-option `??`, 2026-07-25)". A narrower predicate is required.
 ## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
 
 Concurs with the recorded status: OPEN — the second, independent .unwrap() bind site in lower_and_check_impl is isolated by measurement but its mechanism is not yet located. Bounded fix attempt within the per-bug timebox did not converge in this lane; the recorded workaround stands. No in-lane change.
+
+---
+
+## Lane disposition 2026-11-13 (live-p3-l4, work/live-p3-l4-20261113, base f790f7f266e)
+
+Concurs with p3-comp1 (same-day addendum): OPEN — the second, independent `.unwrap()` bind site in `lower_and_check_impl` is isolated by measurement (4 surviving `Poll_dot_unwrap` sites, zero `rt_unwrap_or_trap` gains) but the mechanism is not located; the 2026-08-31 mangle.rs `resolve_method_call_static` hypothesis (guard in the `else` branch only) remains the strongest lead but is not instrumented. Any fix also requires a Stage-2 rebuild + replayed bootstrap argv (~10 min per iteration) to verify, plus the recorded warning not to hoist the enum-helper list (tried and reverted 2026-07-25). Not convergable inside a per-bug P3 timebox. No in-lane change. Owner: Stage-2/seed compiler lane with the bootstrap replay harness.

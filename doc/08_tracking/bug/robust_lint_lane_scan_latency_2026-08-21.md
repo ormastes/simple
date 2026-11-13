@@ -23,3 +23,8 @@ latency/RSS release gate. Do not weaken or skip AST lints to meet the target.
 ## Lane disposition 2026-11-13 (p3-misc-b)
 
 open scan-latency item per in-file status (no terminal verdict produced); owner: robust-lint lane.
+---
+
+## Lane disposition 2026-11-13 (live-p3-l4, work/live-p3-l4-20261113, base f790f7f266e)
+
+Concurs with p3-misc-b: the recorded required fix (phase timings, cross-file compiler-state reuse, avoiding repeated module loading, warm latency/RSS release gate) is a lint-lane performance program, and the migration workaround (source-only SFFI call-authority census, 24.21 s / 7.4 MiB over the whole tree) remains the honest fallback. Profiling directory-scale lint on this Windows interpreter host would produce numbers no one can gate on. No in-lane change. Owner: robust-lint lane.
