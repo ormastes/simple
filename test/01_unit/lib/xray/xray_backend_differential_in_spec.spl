@@ -1,6 +1,7 @@
 # @cover src/lib/nogc_sync_mut/trace/xray_llvm_adapter_v1.spl
 # @cover src/lib/nogc_sync_mut/trace/xray_native_sled_leaf_v1.spl
 # @cover src/lib/common/trace/observer_profile_v1.spl
+# @cover src/lib/common/trace/data/data_observation_sink_v1.spl
 # @req REQ-XRAY-V1-API-01
 """
 # XRay ("spy") backend differential — IN (white-box) suite
@@ -21,7 +22,8 @@ edges through the reference collector) and profile mode (fold of the SAME
 stream), aspect-dynload config + pointcut selection, never-list (a function
 outside the map has no site), fail-closed PATCH-02 parity (patch / unpatch /
 install faults, Faulted + recover), and unsupported routes
-(Cranelift/interpreter/JIT/VHDL/GPU/Windows -> UnsupportedTarget).
+(Cranelift/interpreter/JIT/VHDL/GPU/Windows -> UnsupportedTarget), and adaptive
+container switching following the same runtime enable/disable.
 
 Not here: real pages, real sleds, a real binary. That is the OUT suite and
 scripts/check/check-xray-*-e2e.shs.
@@ -38,6 +40,11 @@ use std.common.trace.observer_aspect_config_v1.{trace_aspect_config_v1}
 use std.common.trace.xray_native_selection_v1.*
 use std.common.trace.xray_native_map_format_v1.*
 use std.nogc_sync_mut.trace.xray_llvm_adapter_v1.*
+use std.common.trace.data.data_observation_sink_v1.{data_observation_profiling_while_v1}
+use std.nogc_sync_mut.src.collections.adaptive_map.AdaptiveMap
+use std.nogc_sync_mut.src.collections.ordered_map.OrderedMapEntry
+use std.nogc_sync_mut.src.collections.adaptive_text_set.{AdaptiveSetAlgorithm, AdaptiveSetProfile}
+use std.nogc_sync_mut.src.collections.adaptive_trace_observation.{AdaptiveTraceBindingV1, adaptive_trace_records_v1}
 use test.fixtures.xray.xray_backend_harness_v1.*
 
 val ARENA: i64 = 4096
@@ -375,6 +382,67 @@ fn sc_config_sdn_round_trip(h: XrayBackendHarnessV1):
     expect(log_only.event_mask).to_equal(3u64)
     expect(err_code(h.prepare(log_only, xray_harness_selection_v1(h, [1])))).to_equal(0)
 
+# Container runtime switching rides the SAME enable/disable: the switch is on
+# only while the controller is Active under a non-Off aspect config. Two
+# linear entries are seeded directly (no put: the seed in this lane lacks the
+# ordered-key / capture externs a put reaches) and lookups stay below the
+# promotion count, so every count below is a pure observation count.
+fn spied_container() -> AdaptiveMap<i64, i64>:
+    var map: AdaptiveMap<i64, i64> = AdaptiveMap.with_profile(
+        AdaptiveSetProfile(linear_size_limit: 2, lookup_promotion_count: 4, allow_hash: true))
+    map.linear_entries = [OrderedMapEntry(key: 0, value: 10), OrderedMapEntry(key: 1, value: 11)]
+    map.size = 2
+    map.observed_peak_size = 2
+    map
+
+fn container_switch(h: XrayBackendHarnessV1, config: TraceConfigV1?) -> bool:
+    data_observation_profiling_while_v1(config, h.state_code() == XRAY_LLVM_STATE_ACTIVE_V1)
+
+fn sc_container_switch_follows_enable_disable(h: XrayBackendHarnessV1):
+    val config = trace_aspect_config_v1(aspect_params(h, "alpha")).unwrap()
+    var map = spied_container()
+    # before enable: off, and a lookup moves no counter
+    map.set_profiling(container_switch(h, config))
+    expect(map.profiling_enabled()).to_equal(false)
+    expect(map.get(0) == Some(10)).to_equal(true)
+    expect(map.observed_lookups).to_equal(0)
+    # enable: on, counters move and become generation-stamped records
+    val session = start_selected(h, [1], ARENA)
+    map.set_profiling(container_switch(h, config))
+    expect(map.profiling_enabled()).to_equal(true)
+    expect(map.get(0) == Some(10)).to_equal(true)
+    expect(map.get(7).is_none()).to_equal(true)
+    expect(map.observed_lookups).to_equal(2)
+    expect(map.observed_hits).to_equal(1)
+    expect(map.observed_misses).to_equal(1)
+    val binding = AdaptiveTraceBindingV1(generation: session.generation, module_instance: XRAY_HARNESS_MODULE_V1,
+        schema_index: 1, lookup_site_id: 21, size_site_id: 22, transition_site_id: 23)
+    val records = adaptive_trace_records_v1(map.observation(), binding)
+    expect(records.len()).to_equal(3)
+    for record in records:
+        expect(record.generation).to_equal(session.generation)
+    # disable: off again; the same lookups leave the counters where they were
+    expect(h.request_stop(session)).to_equal(Ok(TraceSessionStateV1.Drained))
+    map.set_profiling(container_switch(h, config))
+    expect(map.profiling_enabled()).to_equal(false)
+    expect(map.get(1) == Some(11)).to_equal(true)
+    expect(map.get(9).is_none()).to_equal(true)
+    expect(map.observed_lookups).to_equal(2)
+    expect(map.observed_misses).to_equal(1)
+    expect(map.selected_algorithm() == AdaptiveSetAlgorithm.Linear).to_equal(true)
+    # an Off aspect config never turns a container on, even while Active
+    var params = AspectParamsV1.defaults()
+    params.ext.push(ParamExt(ASPECT_TRACE_OBSERVER_EXT_V1, 1,
+        config_payload(h).replace("instrumentation: dynamic", "instrumentation: off").bytes(), TRACE_CONFIG_SCHEMA_HASH_V1))
+    val off_config = trace_aspect_config_v1(params).unwrap()
+    val again = start_selected(h, [1], ARENA_2)
+    expect(container_switch(h, off_config)).to_equal(false)
+    expect(container_switch(h, config)).to_equal(true)
+    # an absent extension is no profiling
+    expect(container_switch(h, None)).to_equal(false)
+    expect(h.request_stop(again)).to_equal(Ok(TraceSessionStateV1.Drained))
+    expect(container_switch(h, config)).to_equal(false)
+
 # ---------------------------------------------------------------------------
 # One describe per backend; the bodies are the same functions.
 # ---------------------------------------------------------------------------
@@ -401,6 +469,8 @@ describe "XRay backend differential IN — llvm":
         sc_install_failure_patches_nothing(xray_llvm_harness_v1())
     it "SDN config round-trips for log and profile masks":
         sc_config_sdn_round_trip(xray_llvm_harness_v1())
+    it "container switching follows runtime enable/disable":
+        sc_container_switch_follows_enable_disable(xray_llvm_harness_v1())
 
 describe "XRay backend differential IN — simple-aarch64":
     it "resolves build routes and refuses non-Linux-ELF targets":
@@ -425,6 +495,8 @@ describe "XRay backend differential IN — simple-aarch64":
         sc_install_failure_patches_nothing(xray_simple_aarch64_harness_v1())
     it "SDN config round-trips for log and profile masks":
         sc_config_sdn_round_trip(xray_simple_aarch64_harness_v1())
+    it "container switching follows runtime enable/disable":
+        sc_container_switch_follows_enable_disable(xray_simple_aarch64_harness_v1())
 
 describe "XRay backend differential IN — simple-x86_64":
     it "resolves build routes and refuses non-Linux-ELF targets":
@@ -449,3 +521,5 @@ describe "XRay backend differential IN — simple-x86_64":
         sc_install_failure_patches_nothing(xray_simple_x86_64_harness_v1())
     it "SDN config round-trips for log and profile masks":
         sc_config_sdn_round_trip(xray_simple_x86_64_harness_v1())
+    it "container switching follows runtime enable/disable":
+        sc_container_switch_follows_enable_disable(xray_simple_x86_64_harness_v1())

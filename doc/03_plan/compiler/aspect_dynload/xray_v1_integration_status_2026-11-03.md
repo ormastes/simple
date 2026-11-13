@@ -191,3 +191,15 @@ tagged, never skipped.
   elf_header_phnum 1/2; imm32 top byte -> x86_negative_imm64 1/9.
 - Remaining duplication (not folded): `linker/elf_parser.spl:426,434` section lookup,
   `linker/_ElfWriter/encoding.spl`, `encode_aarch64.spl` STP/LDP/ADD encoders, kernel loader.
+
+#### Step 4b (2026-11-13): container switch follows the XRay enable/disable
+
+- `data_observation_profiling_while_v1(config, controller_active)`: on only between
+  `start` and `request_stop` (adapter state Active) under a non-Off aspect config.
+- IN differential suite gains "container switching follows runtime enable/disable" for all
+  three backends (36 examples, was 33): off before start, counters + generation-stamped
+  records while Active, frozen after stop, Off aspect / absent extension never turn it on.
+  Red (function missing) 33/36 -> green 36/36; mutation dropping `controller_active` -> 33/36.
+- Still open: no compiled program calls `set_profiling` from its in-process XRay host yet
+  (the harness and specs do); the OUT lane for containers waits on a backed binary
+  (`spl_ordered_key_cmp`, `spl_collection_capture_*` are not in the seed).
