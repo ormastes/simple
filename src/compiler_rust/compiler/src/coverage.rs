@@ -316,6 +316,15 @@ pub fn crc32_ieee(bytes: &[u8]) -> u32 {
     !crc
 }
 
+/// The digest `sources |file, crc32|` records: CRC-32 of `bytes` with every
+/// CR dropped. `spl-coverage module` hashes the text `read_to_string` returns,
+/// and that drops every CR, so hashing raw bytes here refused every CRLF
+/// checkout as a different source version.
+pub fn source_digest(bytes: &[u8]) -> u32 {
+    let lf: Vec<u8> = bytes.iter().copied().filter(|&b| b != b'\r').collect();
+    crc32_ieee(&lf)
+}
+
 /// Append `sources |file, crc32|` naming the source digest of every file a
 /// `lines`/`decisions`/`conditions` row of `sdn` refers to.
 ///
@@ -354,7 +363,7 @@ pub fn append_source_digests(sdn: &mut String) {
     let mut rows = String::new();
     for file in &files {
         if let Ok(bytes) = std::fs::read(file) {
-            rows.push_str(&format!("    {}, {:08x}\n", file, crc32_ieee(&bytes)));
+            rows.push_str(&format!("    {}, {:08x}\n", file, source_digest(&bytes)));
         }
     }
     if rows.is_empty() {
@@ -462,6 +471,12 @@ mod tests {
     fn crc32_ieee_matches_the_standard_check_value() {
         assert_eq!(crc32_ieee(b"123456789"), 0xCBF4_3926);
         assert_eq!(crc32_ieee(b""), 0);
+    }
+
+    #[test]
+    fn source_digest_drops_every_cr() {
+        assert_eq!(source_digest(b"a\nb\n"), 0x1857_2A97);
+        assert_eq!(source_digest(b"a\r\nb\r\n"), 0x1857_2A97);
     }
 
     #[test]
