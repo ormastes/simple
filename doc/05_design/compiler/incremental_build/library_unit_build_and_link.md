@@ -28,7 +28,9 @@ to `compiler_rust`, no manifest there — the manifest is at
 `src/compiler_rust`), and `src/app`/`src/compiler` depend on `../../rust`,
 which does not exist at all. An unresolvable edge makes the plan `Err`; fixing
 those four lines is a prerequisite for turning the flag on, not something the
-planner guesses.
+planner guesses. Measured 2026-11-13 with `library_unit_decl_parse_v1` over all seven
+real manifests (the `src/lib` one parses, giant `mc_exceptions:` string included):
+`plan-error unit 'simple-app' depends on 'rust' but no manifest declares a unit there`.
 
 Current units/targets: `simple-std` (src/lib, library), `simple-compiler-common`
 (src/compiler/00.common, library → ../../lib), `simple.runtime` (src/runtime,
