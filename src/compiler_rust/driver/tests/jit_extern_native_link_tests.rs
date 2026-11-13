@@ -294,3 +294,139 @@ fn wave2_native_only_c_externs_link_natively() {
         assert!(stdout.contains(line), "missing `{line}` in:\n{stdout}");
     }
 }
+
+// Wave 3: only externs the lowered MIR actually references count toward the
+// hybrid splice. `src/lib` declares platform-foreign externs unconditionally;
+// a declaration nothing calls must not demote the run.
+
+const W3_DECLARED_NEVER_CALLED: &str = r#"
+extern fn rt_caret_w3_gate_never_called(x: i64) -> i64
+
+fn main():
+    print "w3 ok"
+"#;
+
+const W3_MIXED: &str = r#"
+extern fn rt_caret_w3_gate_idle_decl(x: i64) -> i64
+extern fn rt_caret_w3_gate_live_call(x: i64) -> i64
+
+fn main():
+    print "before"
+    val v = rt_caret_w3_gate_live_call(1)
+    print "after={v}"
+"#;
+
+const W3_CALLED_FROM_HELPER: &str = r#"
+extern fn rt_caret_w3_gate_helper_call(x: i64) -> i64
+
+fn helper(x: i64) -> i64:
+    rt_caret_w3_gate_helper_call(x)
+
+fn main():
+    print "before"
+    val v = helper(1)
+    print "after={v}"
+"#;
+
+const W3_CALLED_FROM_LAMBDA: &str = r#"
+extern fn rt_caret_w3_gate_lambda_call(x: i64) -> i64
+
+fn main():
+    print "before"
+    val g = \x: rt_caret_w3_gate_lambda_call(x)
+    val v = g(1)
+    print "after={v}"
+"#;
+
+const W3_FUNCTION_VALUE: &str = r#"
+extern fn rt_caret_w3_gate_fn_value(x: i64) -> i64
+
+fn main():
+    print "before"
+    val f = rt_caret_w3_gate_fn_value
+    val v = f(1)
+    print "after={v}"
+"#;
+
+const W3_FUNCTION_ARGUMENT: &str = r#"
+extern fn rt_caret_w3_gate_fn_argument(x: i64) -> i64
+
+fn apply(f: fn(i64) -> i64, x: i64) -> i64:
+    f(x)
+
+fn main():
+    print "before"
+    val v = apply(rt_caret_w3_gate_fn_argument, 1)
+    print "after={v}"
+"#;
+
+fn splice_receipt(stderr: &str) -> Option<&str> {
+    stderr.lines().find(|line| line.contains("reason=hybrid-interp-splice"))
+}
+
+#[test]
+fn w3_declared_but_never_called_extern_runs_fully_jit() {
+    let out = run(&write_source("w3_idle", W3_DECLARED_NEVER_CALLED), false, b"");
+    let stderr = text(&out.stderr);
+    assert!(out.status.success(), "JIT run failed:\n{stderr}");
+    assert_eq!(text(&out.stdout), "w3 ok\n");
+    assert!(
+        !stderr.contains("[engine-demotion]"),
+        "an extern nothing references demoted the run:\n{stderr}"
+    );
+}
+
+#[test]
+fn w3_splice_receipt_names_only_referenced_externs() {
+    let out = run(&write_source("w3_mixed", W3_MIXED), false, b"");
+    let stderr = text(&out.stderr);
+    let stdout = text(&out.stdout);
+    assert!(!out.status.success(), "an unbacked extern must not succeed:\n{stdout}\n{stderr}");
+    let receipt = splice_receipt(&stderr).unwrap_or_else(|| panic!("no splice receipt:\n{stderr}"));
+    assert!(receipt.contains("rt_caret_w3_gate_live_call"), "{receipt}");
+    assert!(
+        !receipt.contains("rt_caret_w3_gate_idle_decl"),
+        "receipt names an extern nothing references: {receipt}"
+    );
+    assert!(stderr.contains("backed by no implementation"), "{stderr}");
+    assert!(!stdout.contains("after="), "{stdout}");
+}
+
+/// Pins (green before and after): a referenced unresolvable extern still
+/// splices and fails closed, wherever the reference sits.
+#[test]
+fn w3_called_unresolvable_extern_still_splices_and_fails_closed() {
+    for (tag, source, name) in [
+        ("w3_helper", W3_CALLED_FROM_HELPER, "rt_caret_w3_gate_helper_call"),
+        ("w3_lambda", W3_CALLED_FROM_LAMBDA, "rt_caret_w3_gate_lambda_call"),
+    ] {
+        let out = run(&write_source(tag, source), false, b"");
+        let stderr = text(&out.stderr);
+        let stdout = text(&out.stdout);
+        assert!(!out.status.success(), "{tag}: must not succeed:\n{stdout}\n{stderr}");
+        let receipt = splice_receipt(&stderr).unwrap_or_else(|| panic!("{tag}: no splice receipt:\n{stderr}"));
+        assert!(receipt.contains(name), "{tag}: {receipt}");
+        assert!(stderr.contains("backed by no implementation"), "{tag}: {stderr}");
+        assert!(stdout.contains("before"), "{tag}: {stdout}");
+        assert!(!stdout.contains("after="), "{tag}: {stdout}");
+    }
+}
+
+/// Pins (green before and after): an extern used as a function value is a
+/// `GlobalLoad`, not a `Call`. It must still be counted as referenced.
+#[test]
+fn w3_indirect_extern_reference_is_still_detected() {
+    for (tag, source, name) in [
+        ("w3_fn_value", W3_FUNCTION_VALUE, "rt_caret_w3_gate_fn_value"),
+        ("w3_fn_arg", W3_FUNCTION_ARGUMENT, "rt_caret_w3_gate_fn_argument"),
+    ] {
+        let out = run(&write_source(tag, source), false, b"");
+        let stderr = text(&out.stderr);
+        let stdout = text(&out.stdout);
+        assert!(!out.status.success(), "{tag}: must not succeed:\n{stdout}\n{stderr}");
+        let receipt = splice_receipt(&stderr).unwrap_or_else(|| panic!("{tag}: no splice receipt:\n{stderr}"));
+        assert!(receipt.contains(name), "{tag}: {receipt}");
+        assert!(stderr.contains("unknown extern function"), "{tag}: {stderr}");
+        assert!(!stdout.contains("after="), "{tag}: {stdout}");
+    }
+}
