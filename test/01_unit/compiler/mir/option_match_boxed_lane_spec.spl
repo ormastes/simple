@@ -1,0 +1,48 @@
+# Pure-Simple MIR twin of the seed fix for nested `Some(Evt.Key(code))`.
+#
+# A `T?` whose payload is a user enum has a flat form that IS that enum. The
+# Option match normalization in lower_enum_match_flat treated any enum
+# (`rt_enum_discriminant != -1`) as the boxed Option, so a bare `Evt.Key`
+# (discriminant 1) normalized to Option.None and skipped the Some arm. The
+# boxed test must be the canonical Option box id (`rt_enum_id == 1`), the
+# rule classify_option_word and the runtime's rt_unwrap_or_self use. The seed
+# half is payload_slot_expr in src/compiler_rust/compiler/src/hir/lower/expr/control.rs.
+use std.spec
+use std.spec.step
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir.mir_json.{serialize_mir_function}
+
+fn lowered_function_json(source: text, name: text) -> text:
+    val filename = "option_match_boxed_lane.spl"
+    val parsed = parse_full_frontend(source, filename, filename, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(filename)
+    val hir = hir_lowering.lower_module(parsed)
+    var lowering = MirLowering.new(hir.symbols)
+    val mir = lowering.lower_module(hir)
+    var errors: [text] = []
+    for error in hir_lowering.errors:
+        errors = errors.push("HIR: " + error.message)
+    for error in lowering.errors:
+        errors = errors.push("MIR: " + error.message)
+    if errors.len() > 0:
+        return "ERRORS: " + errors.join("\n")
+    for func in mir.functions.values():
+        if func.name == name or func.name.ends_with("." + name):
+            return serialize_mir_function(func)
+    "MISSING FUNCTION " + name
+
+val NESTED_SOURCE: text = "enum Evt:\n    Click(x: i64)\n    Key(code: i64)\nfn pick(v: Evt?) -> i64:\n    match v:\n        case Some(Evt.Key(code)): code\n        case Some(Evt.Click(x)): x\n        case _: 0\n"
+
+describe "Option match boxed-lane test":
+    it "tests the canonical Option box id before reading a discriminant as Some/None":
+        # @req REQ-SSPEC-COMPILER
+        step("Lower a match over Evt? with nested user-variant Some patterns")
+        val json = lowered_function_json(NESTED_SOURCE, "pick")
+        expect(json).to_start_with("{")
+        step("The boxed/flat split asks rt_enum_id, so a bare Evt.Key is never Option.None")
+        expect(json).to_contain("rt_enum_id")

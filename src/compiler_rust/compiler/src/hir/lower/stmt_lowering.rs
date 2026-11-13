@@ -4649,6 +4649,32 @@ mod user_enum_some_variant_payload_binding_tests {
             ),
         }
     }
+
+    // `case Some(Evt.Click(x))` over an `Evt?`: a `T?` may hold the bare
+    // user enum (implicit wrap), and that IS an enum, so the generic
+    // `rt_enum_id >= 0` dual-form guard took `rt_enum_payload` and handed
+    // Click's payload (8) to the inner Click binder, which then read nil.
+    // The Some slot guard must be `rt_enum_id == OPTION_ENUM_ID`, the rule the
+    // identifier binder and `rt_unwrap_or_self` already use.
+    #[test]
+    fn nested_user_variant_under_some_unwraps_only_the_option_box() {
+        let module = lower_source(
+            "enum Evt:\n    Click(x: i64)\n    Key(code: i64)\n\nfn opt_evt(v: Evt) -> Evt?:\n    v\n\nfn main() -> i64:\n    val c = opt_evt(Evt.Click(x: 8))\n    match c:\n        case Some(Evt.Click(x)): return x\n        case _: return 0\n    return 0\n",
+        )
+        .expect("source should lower");
+        let func = module.functions.iter().find(|f| f.name == "main").expect("main function should lower");
+        let x_value = find_let_value(&func.body, &func.locals, "x").expect("nested payload must bind x");
+        let shape = format!("{:?}", x_value);
+        assert!(
+            shape.contains("op: Eq, left: HirExpr { kind: BuiltinCall { name: \"rt_enum_id\"")
+                && shape.contains("Integer(1)"),
+            "Some slot must test rt_enum_id == OPTION_ENUM_ID, got {shape}"
+        );
+        assert!(
+            !shape.contains("op: GtEq"),
+            "an `rt_enum_id >= 0` guard misreads a bare user enum as a Some box, got {shape}"
+        );
+    }
 }
 
 #[cfg(test)]
