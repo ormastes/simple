@@ -115,3 +115,7 @@ this exact import), wired into JIT import resolution at
 present at :455. No synthetic bare provider added. Host-limit unchanged:
 cargo execution of compiler_rust belongs to the compiler_rust owner lane;
 this lane is not that owner and made no change.
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with the recorded triage: the strict-JIT sffi_env_get_i64 alias path is implemented in the seed with the demanded regression test present (jit_tests.rs), and no synthetic bare provider was added; cargo execution of compiler_rust belongs to the owner lane. No in-lane change.

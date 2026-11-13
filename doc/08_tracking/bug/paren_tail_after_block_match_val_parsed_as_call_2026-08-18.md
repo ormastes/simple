@@ -115,3 +115,7 @@ Residual (out of scope here): the deployed seed binary keeps the defect until
 the next seed rebuild (`src/compiler_rust` parser-side fix + rebuild is the
 bootstrap lane's); the x25519 spec's unambiguous rewrite from 2026-08-18 stays
 (it asserts the identical conjunction and remains valid on both parsers).
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with lane ne18: FIXED in the pure-Simple front end (postfix-stop guard on completed EXPR_MATCH; pinning parity spec 4/4 on this lane binary class per the ne18 record). No in-lane change.

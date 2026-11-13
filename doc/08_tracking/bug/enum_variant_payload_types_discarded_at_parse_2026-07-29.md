@@ -69,3 +69,12 @@ owner and acceptance scope required).**
   standalone library not yet wired into the live lint pipeline — an unreviewed P3 lane wiring
   it would pre-empt that decision. Deferring; the owner lane should now need only the
   `EnumDef` flat lists above.
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with lane ne8's verdict: LIVE, kept OPEN per the record's own
+disposition (separately reviewed owner + acceptance scope required for the
+lint wiring). Technical bar has lowered — the flat AST now carries
+variant_payload_counts/kinds/type_names/field_names, so the remaining
+check_type_text routing is mechanical. Process blocker, not data. No in-lane
+change (pre-empting the owner decision is explicitly out of scope).

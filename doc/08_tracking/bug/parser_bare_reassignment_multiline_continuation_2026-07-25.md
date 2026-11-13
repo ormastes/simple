@@ -100,3 +100,11 @@ The declaration-vs-reassignment asymmetry is gone. Verified on the fresh seed
   declarations (`src/compiler_rust/parser/src/stmt_parsing/var_decl.rs:416`).
   Landed via merge `9e7e7a526edb` (PR #7597, 2026-11-07), which is an ancestor of
   the seed build commit 46fe8f6b6def.
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt)
+
+Concurs with lane compiler5's FIXED verdict; independently reproduced the
+extended probe on the tracked seed (@ 46fe8f6b6def): `x =\n y + 1` bare
+reassignment continuation, `x +=\n 5` compound continuation, and an
+unparenthesized multi-line `and` condition all parse and execute (probe prints
+`z=15 x=8`, matching compiler5's recorded 15). No in-lane change.

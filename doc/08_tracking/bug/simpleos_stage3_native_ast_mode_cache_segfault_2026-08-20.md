@@ -778,3 +778,7 @@ Not fixed here, recorded instead:
   `executed=0`/`outcome=ERROR` before any example runs. The complexity claim
   above is therefore analytic plus the RSS slopes already recorded; a measured
   number should be taken from the next bounded Stage-3 cycle's phase-5 log.
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with the recorded triage: the stage-3 AST-mode cache corruption remains tracked with the stage-3 cluster (BLOCKED on the sanctioned bootstrap path; reproduction requires native stages this lane cannot build). No in-lane change.

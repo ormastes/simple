@@ -96,3 +96,7 @@ Fresh re-verification on `origin/release/1.0.0` tip `dacccfc78fd10`
 Disposition: SUPERSEDED with named absorber and named gap — port of
 `21e7eac04165` to `release/1.0.0` + tracked-seed rebuild belong to the
 seed-fix lane. Header flipped OPEN → SUPERSEDED.
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with lane p3-comp8: SUPERSEDED at tip (disposition first recorded by the boot6 addendum). No independent re-verification in this lane; disposition stands.

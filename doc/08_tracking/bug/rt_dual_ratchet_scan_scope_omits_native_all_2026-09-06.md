@@ -100,3 +100,7 @@ grep -rhoE '\bfn[[:space:]]+rt_[A-Za-z0-9_]+' \
 Note the census script reads DEFINED symbols out of real link artifacts via
 `nm` and is the authority on the population; the divergence between it and the
 gate's text globs is exactly the error bar this hole widens.
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with the recorded status: fix-implemented-verification-pending (2026-11-09); the census script over real link artifacts remains the authority. No in-lane change.

@@ -204,3 +204,7 @@ compiler/test-runner lanes.
 BLOCKED-needs-grant: `SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe bin/simple.exe test test/01_unit/compiler/driver/driver_entry_import_scan_cost_spec.spl --no-cache` on a quiet host with a > 930 s budget (the spec's own internal budget is 930 s; on this loaded host it was SIGTERMed at 897.5 s by a 900 s wrapper — inconclusive, not a failure).
 Residue items (path-keyed memo, ~14 s BFS body) remain owned by the
 front-end-cache and compiler lanes as this record already states.
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with the recorded triage: BLOCKED-needs-grant for the driver_entry_import_scan_cost_spec rerun (930 s spec budget, was SIGTERMed at 897.5 s on a loaded host — inconclusive, not a failure). Residue items (path-keyed memo, ~14 s BFS body) remain owned by the front-end-cache/compiler lanes as the record states. No in-lane change.

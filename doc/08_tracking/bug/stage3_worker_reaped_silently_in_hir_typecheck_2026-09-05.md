@@ -605,3 +605,7 @@ loop-done / ctx_publish / validate:census / ast_reset / lexer_release / reclaim;
 module before reading that trace — UPDATE 3 supersedes the bisect.
 
 Disposition: BLOCKED. Header flipped OPEN → BLOCKED 2026-11-11 (lane p3-comp9).
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with the recorded status: OPEN — sole remaining stage-3 blocker after the ZeroKind and import fixes; the verbatim grant (sanctioned native-build/bootstrap run) is re-recorded intact in the boot15 addendum. No in-lane change.

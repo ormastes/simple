@@ -125,3 +125,7 @@ tip — its third scenario pins the pre-reorg file `80.driver/pipeline_fn.spl`
 (since split into `driver_pipeline*.spl`) and the pre-split import path
 (`mir_lowering` -> `mir_lowering_types`). Stale spec pins from the driver
 reorganization, not a behavior regression; left as test churn per lane rules.
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with lane p3-compiler4: SUPERSEDED — the silent-unresolved-import defect is mitigated at tip. No independent re-verification in this lane; disposition stands.

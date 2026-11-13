@@ -84,3 +84,13 @@ happen; the glob-imported private name resolves permissively on the current seed
 - **The call-site workaround in this doc remains in place** (`method_calls_literals.spl` defines
   `_sffi_enum_discriminant` locally), so the original Stage-2 link is not blocked by this row
   today; the seed behavior this record is about is unchanged.
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with lane ne10: LIVE, kept OPEN. The 6d15331f91eb call-time gate
+covers the bare-name leak leg (its spec passes 3/3 on this lane's binary too),
+but the glob-binding resolution leg still resolves private names permissively
+(same-directory and cross-directory globs both run, exit 0, warning only).
+Remaining fix is in the seed frontend's import-binding path; the native
+unmangled-extern leg is unprovable on this host (native-build hang). No
+in-lane change.

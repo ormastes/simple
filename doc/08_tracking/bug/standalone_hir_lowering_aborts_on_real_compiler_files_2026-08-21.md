@@ -97,3 +97,7 @@ text recorded in this doc, so they could not be re-probed here. They were filed 
 explain; if they reproduce, file them as their own rows.
 
 Disposition: FIXED. Header flipped OPEN → FIXED 2026-11-11 (lane p3-comp9).
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with the comp9 lane triage recorded in the addendum (split on i64 abort disposition stands as recorded there). No in-lane change.
