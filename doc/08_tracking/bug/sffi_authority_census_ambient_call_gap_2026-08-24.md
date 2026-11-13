@@ -58,3 +58,10 @@ HIR identity.
 ## Lane disposition 2026-11-13 (p3-misc-b)
 
 open census gap; owner: SFFI authority lane.
+---
+
+## Addendum 2026-11-13 (live-p3-l4, work/live-p3-l4-20261113, base f790f7f266e) — named defect eliminated; architectural gap remains
+
+The ambient call this record names is GONE at this base: `src/compiler/70.backend/backend/common/mir_text_codegen.spl` contains no `rt_*` call — the `SIMPLE_ALLOW_UNLOWERED_MIR` escape hatch now routes through `std.nogc_async_mut.sosix.environment.sosix_env_get_nullable` (:15,:305), i.e. the `std.nogc_sync_mut.io_runtime.env_get_nullable` facade, with raw ownership in the sffi env modules. Ran `scripts/audit/sffi-call-authority-census.shs` over the whole tree: `mir_text_codegen.spl` produces NO census row (verified by grep over the 20,704-line report) — acceptance criterion 1 is satisfied vacuously because there is no ambient call left to classify, and no duplicate extern was added to game the scanner (the rejected path stayed rejected).
+
+What remains open is the architectural half of "Required fix": the authoritative inventory from resolved HIR symbol identity (criteria 2-5), owned by the SFFI authority lane. The census still reports 15,339 `missing` rows repo-wide (many inside the canonical `_sffi.spl` owner files themselves, e.g. `src/app/io/compress_sffi.spl`), which is precisely the partial-coverage labeling this record says the scanner must carry. No in-lane change beyond this verification. Owner: SFFI authority lane.

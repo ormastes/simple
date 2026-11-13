@@ -83,3 +83,8 @@ step. Track as a feature request alongside this bug.
 ## Lane disposition 2026-11-13 (p3-misc-b)
 
 open lib-friction gap (no importable .spl candidate-verify API); owner: regex lib lane.
+---
+
+## Lane disposition 2026-11-13 (live-p3-l4, work/live-p3-l4-20261113, base f790f7f266e)
+
+Concurs with p3-misc-b: still a feature request, not a defect — `src/lib/common/regex_engine/` and `src/lib/common/regex/` remain `.smf`-only (no `.spl` source to `use`), and the literal/trigram verify path the prefilter actually uses (`Haystack.matches_at`) is confirmed correct for the patterns it screens. Building the requested `compile`/`matches_at`/`is_match` `.spl` surface would mean implementing (or decompiling) a regex engine API against the compiled artifacts — real feature work for the regex lib lane, not a bounded P3 fix. No in-lane change. Owner: regex lib lane.

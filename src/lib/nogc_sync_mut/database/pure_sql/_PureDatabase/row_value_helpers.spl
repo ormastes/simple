@@ -211,22 +211,42 @@ fn _serialize_row_v2(values: [DbValue]) -> text:
         result = result + kind + payload.len().to_text() + ":" + payload
     result
 
-fn _pdb_v2_decimal_length(value: text) -> i32?:
+# Strict, fallible decimal parse over char_code_at only. This deliberately does
+# NOT route through `text.parse_int`: the seed JIT lowers that method to
+# rt_string_parse_int and boxes the tagged result into Option incorrectly
+# (`"87".parse_int()` is Some(nil) under JIT, Some(87) under the interpreter —
+# measured 2026-11-13, see
+# doc/08_tracking/bug/pure_sql_reopen_checkpointed_file_stack_overflow_2026-08-25.md
+# addendum). Every op here is total with identical interpreter/JIT behavior, so
+# checkpoint reload is engine-independent. Accepts exactly what the persisted
+# `to_text` spelling of an i32 can be: optional '-', then 1..=10 digits, in
+# [-2147483648, 2147483647]; leading zeros rejected (canonicality).
+fn _pdb_decimal_parse_strict(value: text) -> i32?:
     if value == "": return nil
-    if value.len() > 1 and value.starts_with("0"): return nil
-    var i: i32 = 0
+    var start: i32 = 0
+    var negative = false
+    if value.starts_with("-"):
+        negative = true
+        start = 1
+    val digits: i32 = value.len() as i32 - start
+    if digits < 1 or digits > 10: return nil
+    if digits > 1 and value.char_code_at(start) == 48: return nil
+    var magnitude: i64 = 0
+    var i: i32 = start
     while i < value.len() as i32:
         val code = value.char_code_at(i)
         if code < 48 or code > 57: return nil
+        magnitude = magnitude * 10 + (code - 48) as i64
         i = i + 1
-    # bug=pure_database_total_conversion_as_optional_2026_10_11
-    # Lengths require a strict, fallible parse before the i32 bounds check.
-    val parsed = value.parse_int()
-    match parsed:
-        case Some(length):
-            if length < 0 or length > 2147483647: nil
-            else: Some(length as i32)
-        case None: nil
+    if negative:
+        if magnitude > 2147483648: return nil
+        Some((-magnitude) as i32)
+    else:
+        if magnitude > 2147483647: return nil
+        Some(magnitude as i32)
+
+fn _pdb_v2_decimal_length(value: text) -> i32?:
+    _pdb_decimal_parse_strict(value)
 
 fn _deserialize_row_v2(data: text) -> [DbValue]?:
     var result: [DbValue] = []
@@ -291,12 +311,16 @@ fn _pdb_v3_row_encoding_is_canonical(data: text) -> bool:
         val payload = data.slice(cursor, cursor + payload_length)
         cursor = cursor + payload_length
         if kind == "I":
-            val parsed = payload.parse_int()
+            # Canonicality via the engine-independent strict parser (the JIT
+            # `.parse_int()` boxing is broken — see _pdb_decimal_parse_strict).
+            val parsed = _pdb_decimal_parse_strict(payload)
             if parsed.is_none() or parsed.unwrap().to_text() != payload:
                 return false
         elif kind == "R":
-            val parsed = payload.parse_f64()
-            if parsed.is_none() or parsed.unwrap().to_text() != payload:
+            # Same engine-independence reason; `to_f64` is total (0.0 on
+            # failure) and JIT-correct, so the round-trip text check rejects
+            # non-canonical payloads exactly like parse_float+to_text did.
+            if payload.to_f64().to_text() != payload:
                 return false
         elif kind == "T":
             pass

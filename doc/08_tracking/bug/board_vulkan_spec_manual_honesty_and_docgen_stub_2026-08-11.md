@@ -179,3 +179,9 @@ On release/1.0.0 35144b7f5e9, Linux aarch64 seed af717f53d6bce3e5: test/01_unit/
 ## 2026-11-13 triage (live-P3 lane l1, work/live-p3-l1-20261113, base f790f7f266e)
 
 **FIXED (confirmed)** — Squash-merge `b4a784df0640` verified ancestor of this base; Finding 2 required no change per prior lanes.
+
+## 2026-11-13 resolution (P3 triage sweep, work/p3-triage-20261113) — row closed `fixed`
+
+Seed: scratchpad `vkinit/seed-fix`, runs capped `systemd-run MemoryMax=16G timeout 900`, cwd = this worktree at origin/release/1.0.0 `59caff4fd1b`.
+
+Evidence: `b4a784df064` ("real docstring literal in cross_arch vulkan spec (docgen stub fix)") is an ancestor of origin/release/1.0.0. `test/01_unit/os/vulkan/cross_arch_boundary_substitution_spec.spl:18` opens a real top-level `"""` docstring. Independent reviewer re-ran `spipe_docgen` on that spec into scratch: `Generated 1 docs (1 complete, 0 stubs)` with the narrative present. Note: the committed `doc/06_spec/01_unit/os/vulkan/cross_arch_boundary_substitution_spec.md` predates the fix (last touched by `88aac2ffe28`) and has not been regenerated; regeneration is bookkeeping, not this defect. Finding 2 needed no change.

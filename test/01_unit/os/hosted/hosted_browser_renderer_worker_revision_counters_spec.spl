@@ -1,0 +1,57 @@
+use std.spec.*
+use std.common.web.browser_renderer_protocol.{
+    BrowserRendererCapabilityMessage
+}
+use os.hosted.hosted_browser_renderer_worker.{
+    HostedBrowserRendererWorkerSession
+}
+
+# Regression for doc/08_tracking/bug/
+# browser_composition_revision_counters_never_increment_2026-08-19.md:
+# the hosted worker's render-session counters stayed at 0 for a whole run.
+
+fn revision_counters_capability(request_id: i64) -> text:
+    var capability = str(request_id)
+    while capability.len() < 32:
+        capability = "0" + capability
+    capability
+
+fn revision_counters_message(
+    kind: text, request_id: i64, payload: text
+) -> BrowserRendererCapabilityMessage:
+    BrowserRendererCapabilityMessage(
+        kind: kind,
+        generation: 7,
+        request_id: request_id,
+        root_command_request_id: request_id,
+        command_capability: revision_counters_capability(request_id),
+        payload: payload
+    )
+
+describe "hosted browser worker render-session revision counters":
+    it "bumps composition_revision on changes and reuse_count on repeats":
+        var worker = HostedBrowserRendererWorkerSession.create(16, 16)
+        val initial = worker.handle(revision_counters_message(
+            "init", 2,
+            "<main style='width:16px;height:16px;background:#2563eb'></main>"
+        ))
+        expect(initial.ok).to_equal(true)
+        expect(worker.render_session.counters.composition_revision).to_equal(1)
+
+        val unchanged = worker.handle(revision_counters_message(
+            "advance", 3, "A1\t16"
+        ))
+        expect(unchanged.ok).to_equal(true)
+        expect(worker.render_session.counters.composition_revision).to_equal(1)
+        expect(worker.render_session.counters.reuse_count).to_equal(1)
+
+        expect(worker.browser.eval_script(
+            "document.body.innerHTML = '<main style=\"width:16px;height:16px;background:#dc2626\"></main>'"
+        ).is_ok()).to_equal(true)
+        val changed = worker.handle(revision_counters_message(
+            "advance", 4, "A1\t32"
+        ))
+        expect(changed.ok).to_equal(true)
+        expect(worker.render_session.counters.composition_revision).to_equal(2)
+        expect(worker.render_session.counters.reuse_count).to_equal(1)
+        worker.close()
