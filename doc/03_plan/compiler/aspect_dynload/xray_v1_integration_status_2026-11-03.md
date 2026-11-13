@@ -43,3 +43,76 @@ The earlier visibility/AOP, LSP/MCP, profile and cache/RR requirements remain in
 ## Bootstrap coordination
 
 Attempt 7 built Phase 2 and passed its executable sanity but the full verification was stopped by the 20-GiB disk floor. Its outer receipt confirms quiescence; no Phase 3 pass is claimed. The fix-rr branch was rebased to current release with conflict reconciliation; source-dependent checks must use the new source identity. Fetch uses an explicit release refspec because this checkout's configured fetch only tracks release_phase3.
+
+## State on 2026-11-13 (lane `work/spy-xray-20261113`)
+
+Inventory at `3b9e121ecf9` (release/1.0.0). "spy" in the user request is read as
+this XRay program (runtime enable/disable of log/profile tracing via aspect
+dynload, LLVM-backed and Simple-owned backends); the only other `spy` in `src/`
+is the test-double `testing/mock/spy.spl`, unrelated. New code keeps the `xray_*`
+naming. The 2026-11-03 "ordered remaining work" above is superseded by the
+table below: the Simple-owned Linux backend (plan stage 2) is further along than
+the LLVM stage 1, which inverts the earlier sequencing assumption.
+
+### Work packages (plan §16.1) and landing rows (design §F)
+
+| Package / PR | Status | Evidence (file:line, spec) |
+| --- | --- | --- |
+| W0 freeze V1 facade, statuses, codecs, SDN keys | done (contract not yet declared frozen) | `src/lib/common/trace/observer_contract_v1.spl:27,64,110,155`; `observer_config_v1.spl:29,130`; `observer_event_codec_v1.spl:35,56`; specs `test/01_unit/lib/common/trace/observer_{contract,config,event_codec}_v1_spec.spl` (3+9+6 examples) |
+| W1 bounded collector + lifecycle core | done (serial model + lockless ring) | `observer_session_v1.spl:22`, `observer_collector_v1.spl:18`, `src/lib/nogc_sync_mut/trace/observer_native_channel_v1.spl:51,144,157,186`; specs session(2) collector(5) channel(9) |
+| W2 / PR4 Linux LLVM adapter + handler shim | partial | control plane `xray_llvm_adapter_v1.spl:82-256` (spec 16 ex., fake leaf); host leaf `xray_llvm_host_leaf_v1.spl:14-47` has NO spec; C shim `src/runtime/xray/xray_llvm_adapter_linux.c:91-155`; **missing:** `clang_rt.xray` link (`80.driver/driver_xray_link.spl:11` declares it out of scope), no `.spl` passes `-fxray-instrument`; no real-binary OUT evidence |
+| W3 Windows tracing-off isolation | partial | `core_codegen.spl:559-562` Linux-only attrs; `trace_build_route_v1` refuses non-Linux (`observer_build_route_v1.spl:25`); no command/dependency diff gate |
+| W4 / PR5, PR5b native map, emitter, POSIX patch leaves | done (AArch64) | `70.backend/backend/native/xray_sled_emit.spl:142,175,219` (wired `native/mod.spl:84-92,133-138`); `.simple_xray_map` `elf_writer.spl:428`, `elf_writer_serialize.spl:123-198,363`; map codec `xray_native_map_format_v1.spl:154,204` (8 ex.); patch port `src/os/sosix/host/code_patch_adapter.spl:58` (rt_mprotect 60/86); leaf `xray_native_sled_leaf_v1.spl:82,158` (15 ex. + PATCH-02 fault injection); module locate/registration `xray_native_module_v1.spl:134,215,322` (5 ex.); resident runtime `src/runtime/xray/xray_native_runtime_aarch64.c`, registry `xray_native_registry_v1.h:110,163`; e2e `scripts/check/check-xray-native-inprocess-e2e.shs` |
+| W4 / PR6 x86-64 SysV | done (object + leaf), execution only on an x86-64 host | `xray_sled_emit.spl:145,178`; `xray_native_trampoline_x86_64_v1.spl:91`; u16 patch `xray_native_sled_leaf_v1.spl:132`; spec `xray_native_sled_leaf_v1_spec.spl:298-322`; `check-xray-native-x86-64-objects.shs`, `check-xray-native-x86-64-inprocess-e2e.shs` |
+| W5 native Linux qualification + stage-1 differential | partial | in-process e2e exists for aarch64/x86-64; **missing:** one backend-parameterized suite with identical expectations (this lane, step 2); no LTO subset evidence |
+| W6 Windows profiles (PR 8+) | not started in Simple | only native probes under `test/02_integration/xray/*.{S,cpp,ll}`; no COFF map / Win32 leaf |
+| W7 live patch (PR7), exact spans, wider ISA | not started | adapter is quiescent-only (`xray_llvm_adapter_v1.spl:40-44`); `TraceConsistencyV1.PairedSpans` rejected (`observer_session_v1_spec.spl`) |
+| PR1 `xray-structure` | done | `--xray` `src/app/io/_CliCompile/compile_opt_and_driver.spl:564`; `MirFunction.xray_mode` `50.mir/mir_instruction_graph.spl:313`; policy `driver_xray_policy.spl:49,179`; specs `xray_policy_spec`(17) `xray_mode_transport_spec`(3) `cli_xray_flag_spec`(5) |
+| PR2 `xray-v1-contract` | done | see W0/W1; gate `driver_xray_policy.spl:75` (`xray_observer_gate_spec` 13 ex.) |
+| PR3 `xray-llvm-attrs` | done | `core_codegen.spl:405,1085`; `xray_llvm_attrs_spec`(17) |
+| Data side W5 (sprof data observation) | done, not yet fed by a live hook | `src/lib/common/trace/data/data_observation_aggregator_v1.spl:100,216,251` (its header :23-26 says no compiled hook calls `record()`); `data_sprof_v1.spl:185`; `AdaptiveMap` counters `src/lib/nogc_sync_mut/src/collections/adaptive_map.spl:268-346` never consult a runtime switch and never reach the aggregator |
+
+### Open gaps in the Simple-owned backend (step 3 of this lane)
+
+1. Tail-exit sleds: none (`xray_sled_emit.spl:8-9`); EMIT-01 tail-call row is unmet.
+2. The compile-time observer gate rejects EVERY non-Off route, including
+   `backend = Simple` on a `--xray` native build (`driver_xray_policy.spl:79-80`
+   -> `UnsupportedProfile`). Aspect-param selection therefore only works through
+   the in-process host, never through a compiled request.
+3. `xray_llvm_host_leaf_v1.spl` and `observer_aspect_config_v1.spl` have no spec.
+4. Linker/trace duplication (fold into shared `src/lib/common/` modules; the
+   trace common lib imports `std.common.*` only, the compiler may import std):
+   - LE byte read/write: `xray_native_map_format_v1.spl:101,107`,
+     `xray_native_module_v1.spl:127`, `xray_sled_emit.spl:260`,
+     `observer_native_map_v1.spl:110` vs `linker/elf_inspect.spl:80-94`,
+     `linker/_ElfWriter/encoding.spl:94-110`, `linker/reloc_engine.spl:231-312`;
+     the intended owner is `src/lib/common/binary_io.spl:701-736`.
+   - ELF section-by-name / first PT_LOAD: `xray_native_module_v1.spl:134-166`,
+     `xray_sled_emit.spl:271` vs `linker/elf_parser.spl:426,434`,
+     `linker/elf_inspect.spl:110,161`, `os/kernel/loader/elf64.spl:138`.
+   - AArch64 encoders (STP/LDP/LDR/STR/ADD/SUB): `xray_native_trampoline_aarch64_v1.spl:46-68`
+     vs `backend/native/encode_aarch64.spl:296-365`; x86 LE32 `xray_native_trampoline_x86_64_v1.spl:49`
+     vs `encode_x86_64.spl:116`.
+   - Branch displacement range checks: `observer_native_map_v1.spl:80,91` vs
+     `linker/reloc_engine.spl:338,564`; BL/CALL target decode `xray_native_module_v1.spl:168,176`.
+   Decision: new `src/lib/common/elf/elf_image_v1.spl` (header + section table +
+   section-by-name + first PT_LOAD over an in-memory image, LE via `binary_io`)
+   consumed by `xray_native_module_v1`, `xray_sled_emit` and `linker/elf_inspect`
+   (names kept, delegating); new `src/lib/common/isa/a64_encode_v1.spl` +
+   `x64_encode_v1.spl` (the encoders and displacement checks) consumed by both
+   trampoline twins, `observer_native_map_v1` and the backend encoders. The
+   other ~680 byte-helper copies in the tree are out of scope.
+5. Container switching (step 4): no `AdaptiveMap`/`ContainerPolicy` path consumes
+   trace observations; there is no profiling-off early return before counters.
+
+### Test harness (step 2)
+
+The seam both backends share is the `XrayLlvmLeafV1` port
+(`xray_llvm_adapter_v1.spl:50`): the LLVM host leaf and `XrayNativeBoundLeafV1`
+(`xray_native_sled_leaf_v1.spl:163`) implement it and the same
+`XrayLlvmAdapterV1.create_for_backend` drives either. One parameterized spec
+runs identical scenarios over both leaves (IN); OUT builds the shared-library
+fixture the e2e already uses and asserts on drained events. The Rust seed
+honours `@tag:in-development` (explicit-path run prints the honest verdict and
+`IN-DEVELOPMENT EXPLICIT`; the suite neutralises it) — cases red today are
+tagged, never skipped.
