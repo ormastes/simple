@@ -196,6 +196,10 @@ pub struct Lowerer {
     /// not name bindings, so `flatten_owner_import_bindings` cannot hold them;
     /// `flatten_reexport_definer` follows these edges through glob facades.
     pub(super) flatten_owner_glob_sources: HashMap<String, Vec<String>>,
+    /// Flattened unit only: importer owner -> local namespace name -> source
+    /// owner, decoded from every `__simple_flatten_module_namespace__` marker
+    /// (`use a.b` / `use a.b as m`). Consumed by `resolve_flatten_namespace_*`.
+    pub(super) flatten_owner_module_namespaces: HashMap<String, HashMap<String, String>>,
     /// Flatten owner of the function whose body is being lowered.
     pub(super) current_function_owner: Option<String>,
     /// Flattened unit only: module-global name declared by two or more
@@ -352,6 +356,7 @@ impl Lowerer {
             flatten_fn_owners: HashMap::new(),
             flatten_owner_import_bindings: HashMap::new(),
             flatten_owner_glob_sources: HashMap::new(),
+            flatten_owner_module_namespaces: HashMap::new(),
             current_function_owner: None,
             flatten_global_owners: HashMap::new(),
             flatten_struct_owners: HashMap::new(),
@@ -436,6 +441,7 @@ impl Lowerer {
             flatten_fn_owners: HashMap::new(),
             flatten_owner_import_bindings: HashMap::new(),
             flatten_owner_glob_sources: HashMap::new(),
+            flatten_owner_module_namespaces: HashMap::new(),
             current_function_owner: None,
             flatten_global_owners: HashMap::new(),
             flatten_struct_owners: HashMap::new(),
@@ -543,6 +549,7 @@ impl Lowerer {
             flatten_fn_owners: HashMap::new(),
             flatten_owner_import_bindings: HashMap::new(),
             flatten_owner_glob_sources: HashMap::new(),
+            flatten_owner_module_namespaces: HashMap::new(),
             current_function_owner: None,
             flatten_global_owners: HashMap::new(),
             flatten_struct_owners: HashMap::new(),
@@ -953,6 +960,7 @@ impl Lowerer {
         self.flatten_fn_owners.clear();
         self.flatten_owner_import_bindings.clear();
         self.flatten_owner_glob_sources.clear();
+        self.flatten_owner_module_namespaces.clear();
         let mut definition_counts: HashMap<&str, usize> = HashMap::new();
         // Every name the flattened unit really DECLARES, function or value. The
         // alias branch in `lower_identifier` now runs ahead of the
@@ -991,6 +999,18 @@ impl Lowerer {
             let simple_parser::Node::Const(marker) = item else {
                 continue;
             };
+            if let Some((importer, local_name, source_owner)) =
+                crate::interpreter::decode_module_namespace_marker(&marker.name)
+            {
+                // A real declaration of the namespace name wins, as for aliases.
+                if !declared_names.contains(local_name) {
+                    self.flatten_owner_module_namespaces
+                        .entry(importer.to_string())
+                        .or_default()
+                        .insert(local_name.to_string(), source_owner.to_string());
+                }
+                continue;
+            }
             let Some((importer, local_name, source_owner, source_name)) = decode_import_binding_marker(&marker.name)
             else {
                 continue;
@@ -1300,6 +1320,45 @@ impl Lowerer {
             flattened_global_symbol(owners, Some(source_owner), source_name)
         };
         (resolved != name).then_some(resolved)
+    }
+
+    /// Source owner of namespace `ns` (`use a.b` / `use a.b as ns`) as imported
+    /// by the module whose function is being lowered. Flattened unit only.
+    fn flatten_namespace_owner(&self, ns: &str) -> Option<&str> {
+        let importer = self.current_function_owner.as_deref().unwrap_or("<entry>");
+        self.flatten_owner_module_namespaces
+            .get(importer)?
+            .get(ns)
+            .map(String::as_str)
+    }
+
+    /// Owner-exact symbol of free function `member` reached as `ns.member(...)`
+    /// through a whole-module import, following re-export facades; `None` when
+    /// `ns` is not such a namespace or its module does not provide `member`.
+    /// See doc/08_tracking/bug/jit_module_namespace_member_access_unresolved_2026-11-13.md
+    pub(super) fn resolve_flatten_namespace_callable(&self, ns: &str, member: &str) -> Option<String> {
+        let source_owner = self.flatten_namespace_owner(ns)?;
+        let importer = self.current_function_owner.as_deref().unwrap_or("<entry>");
+        let (owner, name) = self.flatten_reexport_definer(importer, source_owner, member)?;
+        Some(self.flatten_emitted_symbol(Some(&owner), &name))
+    }
+
+    /// Owner-exact symbol of module global `member` reached as `ns.member`
+    /// through a whole-module import; `None` unless the namespace's module
+    /// itself declares `member`.
+    pub(super) fn resolve_flatten_namespace_global(&self, ns: &str, member: &str) -> Option<String> {
+        use super::module_lowering::flattened_global_symbol;
+        let source_owner = self.flatten_namespace_owner(ns)?;
+        if !self
+            .flatten_const_literals
+            .contains_key(&(Some(source_owner.to_string()), member.to_string()))
+        {
+            return None;
+        }
+        Some(match self.flatten_global_owners.get(member) {
+            Some(owners) => flattened_global_symbol(owners, Some(source_owner), member),
+            None => member.to_string(),
+        })
     }
 
     /// Install the type-name scope of `current_function_owner` as the type

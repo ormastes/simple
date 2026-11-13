@@ -167,3 +167,9 @@ declares `enum TaskState` and the file carries the landed registry-based
 `_async_states` state model (lines 53-63) from e8cfbc4d5e5. The 46/46
 full/interpreter/native evidence in the resolution section stands per the
 no-rerun rule. No source change.
+
+## 2026-11-13 resolution (P3 triage sweep, work/p3-triage-20261113) — row closed `fixed`
+
+Seed: scratchpad `vkinit/seed-fix`, runs capped `systemd-run MemoryMax=16G timeout 900`, cwd = this worktree at origin/release/1.0.0 `59caff4fd1b`.
+
+Evidence: fix `e8cfbc4d5e5` is an ancestor of origin/release/1.0.0 (`git merge-base --is-ancestor`). `test/01_unit/lib/std/async_spec.spl:136` reads `enum TaskState:`. Live: the spec no longer hangs — executed=48 passed=47 failed=1 in a few seconds. The one failure, `should reject unwrap of pending value` (Poll section, `unwrap_checked(Poll.pending())`), is not the TaskState declaration/hang defect this record tracks; it should be filed separately if it persists.

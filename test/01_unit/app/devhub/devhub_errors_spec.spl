@@ -1,0 +1,77 @@
+# @cover src/app/devhub/errors.spl
+# devhub — ItfError constructors, exit-code mapping and display text.
+use std.spec.*
+use std.spec.step
+use app.devhub.errors.{ItfError, itf_error_from_http, ITF_ERR_AUTH, ITF_ERR_NOT_FOUND, ITF_ERR_API, ITF_ERR_NETWORK, ITF_ERR_CONFLICT}
+
+describe "devhub error values":
+    it "should tell the caller authentication is required with exit code 4":
+        step("Build an auth error")
+        val e = ItfError.auth("token expired")
+        expect(e.kind).to_equal(ITF_ERR_AUTH)
+        expect(e.message).to_equal("token expired")
+        expect(e.exit_code()).to_equal(4)
+
+    it "should name the missing resource and carry a 404 status":
+        val e = ItfError.not_found("PR #12")
+        expect(e.kind).to_equal(ITF_ERR_NOT_FOUND)
+        expect(e.message).to_equal("not found: PR #12")
+        expect(e.status_code).to_equal(404)
+        expect(e.exit_code()).to_equal(1)
+
+    it "should keep the provider body and status of an API failure":
+        val e = ItfError.api(422, "bad field")
+        expect(e.kind).to_equal(ITF_ERR_API)
+        expect(e.status_code).to_equal(422)
+        expect(e.message).to_equal("bad field")
+
+    it "should map a cancelled operation to exit code 2":
+        val e = ItfError.cancelled()
+        expect(e.message).to_equal("operation cancelled")
+        expect(e.exit_code()).to_equal(2)
+
+    it "should map config and network errors to the general failure code":
+        expect(ItfError.config("no site").exit_code()).to_equal(1)
+        val n = ItfError.network("dns down")
+        expect(n.kind).to_equal(ITF_ERR_NETWORK)
+        expect(n.exit_code()).to_equal(1)
+
+    it "should describe both sides of a version conflict with status 409":
+        val e = ItfError.conflict(3, 5)
+        expect(e.kind).to_equal(ITF_ERR_CONFLICT)
+        expect(e.message).to_equal("version conflict: expected 3, found 5")
+        expect(e.status_code).to_equal(409)
+
+describe "devhub error display":
+    it "should render a plain message without a trace":
+        expect(ItfError.config("no site").display()).to_equal("error: no site")
+
+    it "should append the HTTP status for server errors":
+        expect(ItfError.api(503, "down").display()).to_equal("error: down (HTTP 503)")
+
+    it "should not repeat an HTTP status already in the message":
+        expect(ItfError.api(500, "boom (HTTP 500)").display()).to_equal("error: boom (HTTP 500)")
+
+    it "should not add a status suffix for client errors":
+        expect(ItfError.api(400, "bad").display()).to_equal("error: bad")
+
+    it "should include the trace id when one is set":
+        val e = ItfError(kind: ITF_ERR_API, message: "x", status_code: 502, trace_id: "t-9")
+        expect(e.display()).to_equal("error: x (HTTP 502) (trace: t-9)")
+
+describe "devhub HTTP status mapping":
+    it "should treat 401 and 403 as authentication required":
+        expect(itf_error_from_http(401, "").kind).to_equal(ITF_ERR_AUTH)
+        val e = itf_error_from_http(403, "")
+        expect(e.kind).to_equal(ITF_ERR_AUTH)
+        expect(e.message).to_equal("authentication required (HTTP 403)")
+
+    it "should treat 404 as not found and 409 as a conflict":
+        expect(itf_error_from_http(404, "").message).to_equal("not found: HTTP 404")
+        expect(itf_error_from_http(409, "").kind).to_equal(ITF_ERR_CONFLICT)
+
+    it "should keep the body for any other status":
+        val e = itf_error_from_http(500, "oops")
+        expect(e.kind).to_equal(ITF_ERR_API)
+        expect(e.message).to_equal("oops")
+        expect(e.status_code).to_equal(500)

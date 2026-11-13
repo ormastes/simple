@@ -81,7 +81,14 @@ native RV32 object/hardware evidence for the inline-asm leaves needs a riscv32
 target run (this host is Windows/x86_64; interpreter execution skips inline
 assembly). That is target-hardware evidence, not a source defect.
 
+---
+
+## Addendum 2026-11-13 (live-p3-l4, work/live-p3-l4-20261113, base f790f7f266e) — SUPERSEDED re-confirmed
+
+Fix commit eb763ab5295 ("fix(riscv32): use XLEN-sized native CMO leaves") is an ancestor of this base. Re-ran the regression spec once on the tracked seed (`SIMPLE_LIB=src bin/simple.exe test test/01_unit/os/riscv32_cmo_provider_spec.spl --mode=interpreter --no-cache`): 2/2 PASS, matching the 2026-11-05 and boot7 2026-11-11 verifications. The residual is unchanged and correct to keep open as a note: native RV32 object/hardware evidence for the inline-asm leaves needs a riscv32 target run — target-hardware evidence, not a source defect. No in-lane change.
+
 ## Triage 2026-11-13 (P3 tools lane)
 No code change this lane; SUPERSEDED / UNSAFE-TAGGED per the record header
 (declarations and calls now explicitly `unsafe(ffi)`; RV32 provider split
 remains an arch-lane grant). Disposition accepted as-recorded.
+

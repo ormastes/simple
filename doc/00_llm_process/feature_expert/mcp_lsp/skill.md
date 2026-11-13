@@ -18,6 +18,7 @@ Maintain feature-specific process knowledge for MCP and LSP. Use this skill when
 - [MCP package](../../../tools/mcp-registry/)
 - [Tooling source](../../../src/tooling/)
 - [MCP notes](../../04_architecture/kairos_like_simple_mcp_llm_dashboard.md)
+- [MDSOC+ session view](../../05_design/app/source_view/public_view_by_feature_layer.md) — `simple_set_visibility`, auto-revert after 3 requests
 
 ## Update Rule
 

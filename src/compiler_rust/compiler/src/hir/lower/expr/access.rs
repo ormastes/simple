@@ -64,6 +64,22 @@ impl Lowerer {
                 return self.lower_thread_group_field(field);
             }
 
+            // Flattened (JIT) unit: `ns.CONST` through a whole-module import.
+            // The receiver used to lower to an unrelated value and the dynamic
+            // field read returned garbage with no diagnostic.
+            // doc/08_tracking/bug/jit_module_namespace_member_access_unresolved_2026-11-13.md
+            if ctx.lookup(recv_name).is_none() {
+                if let Some((symbol, ty)) = self
+                    .resolve_flatten_namespace_global(recv_name, field)
+                    .and_then(|symbol| Some((symbol.clone(), self.globals.get(&symbol).copied()?)))
+                {
+                    return Ok(HirExpr {
+                        kind: HirExprKind::Global(symbol),
+                        ty,
+                    });
+                }
+            }
+
             // Same-named flattened enum: name the declaration the current
             // owner sees (flatten_struct_owner.rs). `lookup` below is already
             // owner-scoped; the emitted `Enum::Variant` global must carry the
@@ -202,6 +218,12 @@ impl Lowerer {
         // binding annotation recorded by statement lowering before asking the
         // generic field resolver, which would otherwise diagnose `i64.ok`.
         if let Some(projected) = self.try_lower_annotated_result_projection(receiver, &lowered_receiver, field, ctx) {
+            return Ok(projected);
+        }
+        // `.ok` / `.err` on a typed Result projects the Result itself. It must
+        // run before the Ok-payload projection below, which would otherwise
+        // look `.ok` up on the payload (`i64.ok` for `Result<i64, text>`).
+        if let Some(projected) = self.try_lower_result_projection(&lowered_receiver, field) {
             return Ok(projected);
         }
         // Flow analysis may permit `.0` on Option<Tuple>/Result<Tuple>, but

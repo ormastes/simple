@@ -1,0 +1,50 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/08_tracking/bug/pure_sql_reopen_checkpointed_file_stack_overflow_2026-08-25.md
+
+# @req REQ-LIB-DATABASE-002
+"""
+# Pure-Simple SQL: re-opening a checkpointed file reloads it on every engine
+
+Embedded tier (`std.database.pure_sql`). Reproduces
+doc/08_tracking/bug/pure_sql_reopen_checkpointed_file_stack_overflow_2026-08-25.md:
+`open_deferred` -> `CREATE TABLE IF NOT EXISTS mm (id TEXT PRIMARY KEY, value
+TEXT NOT NULL)` -> INSERT -> `checkpoint()`, then a second open of the SAME
+path. The `NOT NULL` column constraint is the trigger from the bug record.
+
+Root cause of the live failure (measured 2026-11-13): the seed JIT lowers
+`text.parse_int()` to `rt_string_parse_int` and boxes the tagged result into
+`Option` incorrectly — `"87".parse_int()` is `Some(nil)` under JIT but
+`Some(87)` under the interpreter — so the v3 envelope length parse produced
+nil and `_load_from_disk` rejected the intact image as "truncated or corrupt
+pure database payload". The reload path now parses through
+`_pdb_decimal_parse_strict` (manual digit accumulation over `char_code_at`
+only), which behaves identically under both engines.
+"""
+
+use std.spec.step
+
+use std.spec.*
+use std.database.pure_sql.{PureDatabase}
+use std.io_runtime.{file_delete}
+
+fn main() -> ():
+    describe("pure_sql reopen of a checkpointed NOT NULL schema", fn() -> ():
+        it("loads the checkpointed image on a second open, on the running engine", fn() -> ():
+            # @req REQ-SSPEC-UNIT
+            # @req REQ-LIB-DATABASE-002
+            val path = "/tmp/pure_sql_reopen_checkpointed_spec.db"
+            file_delete(path)
+            val db1 = PureDatabase.open_deferred(path).unwrap()
+            expect(db1.exec_sql("CREATE TABLE IF NOT EXISTS mm (id TEXT PRIMARY KEY, value TEXT NOT NULL)").is_ok()).to_equal(true)
+            expect(db1.exec_sql("INSERT INTO mm (id, value) VALUES ('a', 'b')").is_ok()).to_equal(true)
+            db1.checkpoint()
+
+            match PureDatabase.open_deferred(path):
+                case Ok(db2):
+                    val rows = db2.query("SELECT value FROM mm WHERE id = 'a'", []).unwrap()
+                    expect(rows.len()).to_equal(1)
+                case Err(e):
+                    expect(e.message()).to_equal("")
+        )
+    )

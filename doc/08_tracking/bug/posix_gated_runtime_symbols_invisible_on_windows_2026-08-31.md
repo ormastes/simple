@@ -326,3 +326,9 @@ elsewhere). The committed awk evaluator
 available for whichever lane lands Step 1 with a runnable ratchet. Grant
 unchanged; explicitly rejected path (promoting the §4 census heuristic into a
 guard) still rejected.
+
+---
+
+## Lane disposition 2026-11-13 (live-p3-l4, work/live-p3-l4-20261113, base f790f7f266e)
+
+Concurs with the 2026-11-13 gpu-lane addendum: the §2 refutation stands (0 referenced POSIX-gated-only symbols; the 90 was the census counting POSIX halves of if/else pairs), and the Step 1 static guard enhancement (`--target` + `c_source_target_excluded` tier + per-target baseline for `extern-backing-census.shs`) was NOT attempted here for the same reason the gpu lane gave — the ratchet's oracle today is `nm --defined-only` on the deployed Linux binary with hardcoded glibc paths, so on this Windows host any guard change would be unverifiable end-to-end ("does not run on Windows" is not evidence of a fix). The committed awk evaluator remains available. No in-lane change. Owner: guard lane with a Linux artifact to validate against; explicitly-rejected path (§4 census heuristic as guard) still rejected.

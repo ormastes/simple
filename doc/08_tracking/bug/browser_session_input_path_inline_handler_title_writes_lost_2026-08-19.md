@@ -105,3 +105,9 @@ already-tracked seed defect** `text_len_codepoint_switch_2026-11-03.md` (seed re
 in `browser_session_rendering_spec_residual_failures_2026-08-19.md`). It is not the
 title-writes defect. Grant to close the spec fully: land the text-slice seed reversal, then
 re-run this spec (expect the encoding assertion to be re-judged against the byte-slicing seed).
+
+## 2026-11-13 resolution (P3 triage sweep, work/p3-triage-20261113) — row closed `fixed`
+
+Seed: scratchpad `vkinit/seed-fix`, runs capped `systemd-run MemoryMax=16G timeout 900`, cwd = this worktree at origin/release/1.0.0 `59caff4fd1b`.
+
+Evidence (live, this lane): `test/02_integration/rendering/browser_session_textarea_lifecycle_spec.spl` executed=1 passed=1 failed=0 — its title-accumulation assertions (`:85` `events:focus>`, `:93` `...beforeinput>input>` after `set_dom_text_input_route`, `:100` `...change>blur>focusout>` after `blur_dom_text_input_route`) all pass, and the form-encoding residual noted on 2026-11-13 (l1) no longer fails either.

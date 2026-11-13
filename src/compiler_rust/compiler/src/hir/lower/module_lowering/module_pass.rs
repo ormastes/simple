@@ -694,6 +694,17 @@ impl Lowerer {
                 self.local_globals.insert(e.name.clone());
                 // Track as extern function for codegen (BSS slot initialization)
                 self.extern_fn_names.insert(e.name.clone());
+                // Record the declared parameter types so MIR call lowering can
+                // coerce arguments into the extern's slots (raw scalar -> Any
+                // boxing). Without this the coercion pass sees an empty
+                // signature and raw literals cross the extern boundary
+                // untagged. See `HirModule::extern_param_types`.
+                let param_types = e
+                    .params
+                    .iter()
+                    .map(|p| self.resolve_type_opt(&p.ty))
+                    .collect::<Result<Vec<_>, _>>()?;
+                self.module.extern_param_types.insert(e.name.clone(), param_types);
             }
             Node::ExternClass(ec) => {
                 // Register extern class type

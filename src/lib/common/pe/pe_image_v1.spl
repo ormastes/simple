@@ -1,0 +1,177 @@
+# MDSOC: feature dimension
+# Pure PE/COFF little-endian in-memory reader shared by the Windows linker
+# (linker/coff/coff_object.spl) and the XRay Windows (stage 3) native map
+# locator. Bytes in, records out; no I/O.
+#
+# Field readers keep the linker's established contract (its own copies stay
+# module-local for interpreter call cost, see coff_object.spl): an
+# out-of-range read answers -1. Every field read through them is unsigned (u16 / u32), so -1 is
+# never a valid value and callers test `< 0` for truncation.
+#
+# Two layouts:
+#   - a compiler-produced COFF object (`.obj`): classic 20-byte header, or the
+#     56-byte anonymous "bigobj" header;
+#   - a linked PE image (`.exe` / `.dll`): DOS header, `PE\0\0`, the 20-byte
+#     COFF header, a PE32+ optional header with data directories, then the
+#     section table. Image section names are the 8-byte inline field.
+use std.common.text_bytes.{bytes_to_text}
+
+pub const PE_COFF_HEADER_BYTES_V1 = 20
+pub const PE_BIGOBJ_HEADER_BYTES_V1 = 56
+pub const PE_SECTION_HEADER_BYTES_V1 = 40
+pub const PE_COFF_SYMBOL_BYTES_V1 = 18
+pub const PE_BIGOBJ_SYMBOL_BYTES_V1 = 20
+pub const PE_MACHINE_AMD64_V1 = 0x8664
+pub const PE_MACHINE_ARM64_V1 = 0xaa64
+pub const PE_OPTIONAL_MAGIC_PE32_PLUS_V1 = 0x20b
+# Data-directory index of the exception table (.pdata RUNTIME_FUNCTION rows).
+pub const PE_DIRECTORY_EXCEPTION_V1 = 3
+
+pub fn pe_u16_le_v1(data: [u8], offset: i64) -> i64:
+    if offset < 0 or offset + 2 > data.len(): return -1
+    (data[offset] as i64) | ((data[offset + 1] as i64) << 8)
+
+pub fn pe_u32_le_v1(data: [u8], offset: i64) -> i64:
+    if offset < 0 or offset + 4 > data.len(): return -1
+    (data[offset] as i64) | ((data[offset + 1] as i64) << 8) |
+        ((data[offset + 2] as i64) << 16) | ((data[offset + 3] as i64) << 24)
+
+pub fn pe_u64_le_v1(data: [u8], offset: i64) -> i64:
+    if offset < 0 or offset + 8 > data.len(): return -1
+    pe_u32_le_v1(data, offset) | (pe_u32_le_v1(data, offset + 4) << 32)
+
+# NUL-terminated (or `count`-bounded) name, decoded as one byte slice.
+pub fn pe_fixed_name_v1(data: [u8], offset: i64, count: i64) -> text:
+    if offset < 0 or offset >= data.len(): return ""
+    val limit = if offset + count < data.len(): offset + count else: data.len()
+    var end = offset
+    while end < limit and data[end] != 0:
+        end = end + 1
+    if end <= offset: return ""
+    bytes_to_text(data[offset:end])
+
+# The anonymous bigobj header: Sig1 = 0, Sig2 = 0xFFFF and the fixed class id.
+pub fn pe_coff_is_bigobj_v1(data: [u8]) -> bool:
+    if data.len() < PE_BIGOBJ_HEADER_BYTES_V1: return false
+    if pe_u16_le_v1(data, 0) != 0 or pe_u16_le_v1(data, 2) != 0xffff: return false
+    val magic: [i64] = [
+        0xc7, 0xa1, 0xba, 0xd1, 0xee, 0xba, 0xa9, 0x4b,
+        0xaf, 0x20, 0xfa, 0xf6, 0x6a, 0xa4, 0xdc, 0xb8]
+    var i: i64 = 0
+    while i < magic.len():
+        if data[12 + i] as i64 != magic[i]: return false
+        i = i + 1
+    true
+
+# COFF object file header, classic or bigobj, with layout sizes resolved.
+pub struct PeCoffHeaderV1:
+    bigobj: bool
+    machine: i64
+    section_count: i64
+    timestamp: i64
+    symbol_table_offset: i64
+    symbol_count: i64
+    optional_header_size: i64
+    characteristics: i64
+    header_size: i64
+    symbol_size: i64
+
+# Raw header fields; -1 marks a truncated field. Policy (accepted machines,
+# bigobj version, optional-header rules) stays with the caller.
+pub fn pe_coff_header_v1(data: [u8]) -> PeCoffHeaderV1:
+    val bigobj = pe_coff_is_bigobj_v1(data)
+    PeCoffHeaderV1(
+        bigobj: bigobj,
+        machine: if bigobj: pe_u16_le_v1(data, 6) else: pe_u16_le_v1(data, 0),
+        section_count: if bigobj: pe_u32_le_v1(data, 44) else: pe_u16_le_v1(data, 2),
+        timestamp: if bigobj: pe_u32_le_v1(data, 8) else: pe_u32_le_v1(data, 4),
+        symbol_table_offset: if bigobj: pe_u32_le_v1(data, 48) else: pe_u32_le_v1(data, 8),
+        symbol_count: if bigobj: pe_u32_le_v1(data, 52) else: pe_u32_le_v1(data, 12),
+        optional_header_size: if bigobj: 0 else: pe_u16_le_v1(data, 16),
+        characteristics: if bigobj: 0 else: pe_u16_le_v1(data, 18),
+        header_size: if bigobj: PE_BIGOBJ_HEADER_BYTES_V1 else: PE_COFF_HEADER_BYTES_V1,
+        symbol_size: if bigobj: PE_BIGOBJ_SYMBOL_BYTES_V1 else: PE_COFF_SYMBOL_BYTES_V1)
+
+# One 40-byte section header. `raw_name` is the inline 8-byte field (an
+# object's "/<n>" long-name reference is resolved by the caller).
+pub struct PeSectionHeaderV1:
+    raw_name: text
+    virtual_size: i64
+    virtual_address: i64
+    raw_size: i64
+    raw_pointer: i64
+    relocation_pointer: i64
+    relocation_count: i64
+    characteristics: i64
+
+pub fn pe_section_header_v1(data: [u8], base: i64) -> PeSectionHeaderV1:
+    PeSectionHeaderV1(
+        raw_name: pe_fixed_name_v1(data, base, 8),
+        virtual_size: pe_u32_le_v1(data, base + 8),
+        virtual_address: pe_u32_le_v1(data, base + 12),
+        raw_size: pe_u32_le_v1(data, base + 16),
+        raw_pointer: pe_u32_le_v1(data, base + 20),
+        relocation_pointer: pe_u32_le_v1(data, base + 24),
+        relocation_count: pe_u16_le_v1(data, base + 32),
+        characteristics: pe_u32_le_v1(data, base + 36))
+
+# A linked PE32+ image: the fields a loader / trace locator needs.
+pub struct PeImageV1:
+    machine: i64
+    image_base: i64
+    size_of_image: i64
+    section_alignment: i64
+    exception_rva: i64
+    exception_size: i64
+    sections: [PeSectionHeaderV1]
+
+pub fn pe_image_v1(data: [u8]) -> Result<PeImageV1, text>:
+    if data.len() < 64 or data[0] != 77u8 or data[1] != 90u8:
+        return Err("not a PE image (missing MZ)")
+    val nt = pe_u32_le_v1(data, 0x3c)
+    if nt < 64 or pe_u32_le_v1(data, nt) != 0x00004550:
+        return Err("missing PE signature")
+    val coff = nt + 4
+    val machine = pe_u16_le_v1(data, coff)
+    val section_count = pe_u16_le_v1(data, coff + 2)
+    val optional_size = pe_u16_le_v1(data, coff + 16)
+    val optional = coff + PE_COFF_HEADER_BYTES_V1
+    if machine < 0 or section_count < 0 or optional_size < 0:
+        return Err("truncated COFF header")
+    if pe_u16_le_v1(data, optional) != PE_OPTIONAL_MAGIC_PE32_PLUS_V1:
+        return Err("not a PE32+ optional header")
+    # PE32+: ImageBase +24, SectionAlignment +32, SizeOfImage +56,
+    # NumberOfRvaAndSizes +108, data directories from +112 (8 bytes each).
+    val directory_count = pe_u32_le_v1(data, optional + 108)
+    if directory_count < 0 or optional_size < 112 + directory_count * 8:
+        return Err("truncated optional header")
+    var exception_rva = 0
+    var exception_size = 0
+    if directory_count > PE_DIRECTORY_EXCEPTION_V1:
+        exception_rva = pe_u32_le_v1(data, optional + 112 + PE_DIRECTORY_EXCEPTION_V1 * 8)
+        exception_size = pe_u32_le_v1(data, optional + 116 + PE_DIRECTORY_EXCEPTION_V1 * 8)
+    val table = optional + optional_size
+    if table + section_count * PE_SECTION_HEADER_BYTES_V1 > data.len():
+        return Err("section table out of bounds")
+    var sections: [PeSectionHeaderV1] = []
+    for index in 0..section_count:
+        sections.push(pe_section_header_v1(data, table + index * PE_SECTION_HEADER_BYTES_V1))
+    Ok(PeImageV1(machine: machine, image_base: pe_u64_le_v1(data, optional + 24),
+        size_of_image: pe_u32_le_v1(data, optional + 56),
+        section_alignment: pe_u32_le_v1(data, optional + 32),
+        exception_rva: exception_rva, exception_size: exception_size, sections: sections))
+
+pub fn pe_image_section_by_name_v1(image: PeImageV1, name: text) -> PeSectionHeaderV1?:
+    for section in image.sections:
+        if section.raw_name == name: return Some(section)
+    None
+
+# File offset of an image RVA, through the section that maps it.
+pub fn pe_image_rva_to_offset_v1(image: PeImageV1, rva: i64) -> i64?:
+    for section in image.sections:
+        val span = if section.virtual_size > section.raw_size: section.virtual_size else: section.raw_size
+        if rva >= section.virtual_address and rva < section.virtual_address + span:
+            val delta = rva - section.virtual_address
+            if delta >= section.raw_size: return None
+            return Some(section.raw_pointer + delta)
+    None

@@ -144,3 +144,89 @@ worker's writes "don't deliver in the interpreter"; scenario (1) shows they
 do on this seed. The synchronous handling there is a separate design choice
 and was left alone.
 
+
+## 2026-11-13 seed fix (lane work/thread-channel-transport-20261113, Windows x64, release/1.0.0 @ 9cfee77c614)
+
+The triage section's two seed-level fix surfaces are fixed in the Rust seed.
+Root causes, all reproduced on the unmodified seed `bin/simple.exe`
+(`bin/simple run`, hybrid JIT lane, plus `--mode=interpreter` where noted):
+
+1. `thread_spawn_with_args` with non-scalar args: the spawn returned handle 0
+   and the child never executed (marker-file verified). Root cause:
+   `RuntimeValue::clone_for_isolated_thread`
+   (`src/compiler_rust/runtime/src/value/core.rs:658`) admitted only inline
+   scalars and shared channel handles; every other heap value (text, class
+   instances, enums, boxed numeric leaves) made
+   `spawn_isolated_with_args_kind`
+   (`src/compiler_rust/runtime/src/executor.rs:947`) fail closed to 0. Fix:
+   `clone_for_isolated_thread` now deep-copies immutable heap leaves (strings,
+   boxed int/uint/float) and object/enum graphs (recursively, depth-bounded at
+   64, fail-closed past it) so the child owns an independent copy. Mutable
+   containers (arrays, dicts, ...) still fail closed by design.
+   After: text args reach the child in the JIT lane (marker-verified
+   `(text, i64)` / `(i64, text)`), and all five matrix shapes including class
+   objects work in the interpreter lane. REMAINDER (JIT lane only): a
+   `class`/`struct` instance lowers to a C-allocated aggregate buffer
+   (`rt_struct_alloc`, layout-private to codegen: optional vtable header +
+   field block, no registry entry the runtime can validate), so
+   `clone_for_isolated_thread` cannot copy it and the spawn still fails
+   closed. A faithful JIT class-arg transport needs compiler-emitted
+   aggregate clone support (or a registered aggregate header) — deeper ABI
+   work, deliberately not folded into this patch.
+2. Runtime `Channel` dropped text: `rt_channel_send`
+   (`src/compiler_rust/runtime/src/value/channels.rs:89`) admitted only
+   `RuntimeTransferPacket::inline_copy` (inline scalars); a text value
+   classified as `HeapGraphRequiresCodec`, so `inline_copy` returned `None`,
+   send returned 0, and the stdlib `Channel.send` silently dropped it —
+   same-thread and cross-thread. Fix: the channel queue now carries a
+   `RuntimeChannelPacket` (`Inline` | `Encoded`); send falls back to the frozen
+   `RuntimeEncodedCopy` leaf route (UTF-8 / f64 / u64, checksum + target-domain
+   verified), and all recv paths materialize either form via
+   `materialize_for_target` (`src/compiler_rust/runtime/src/value/transfer.rs`).
+3. Cross-thread "accepted-then-lost" scalars: direct extern calls with `Any`
+   parameters passed raw i64 literals UNTAGGED — `rt_value_is_int(41)` returned
+   0 while `rt_value_is_int(rt_value_int(41))` returned 1; raw 41 misreads as
+   TAG_HEAP (rejected), 42 as TAG_FLOAT, 43 as TAG_SPECIAL(5). Root cause:
+   extern declarations were never recorded in `function_param_types`
+   (`hir/lower/module_lowering/module_pass.rs:686`,
+   `hir/lower/import_loader.rs:681`,
+   `hir/lower/stmt_lowering.rs:1868` only registered name/return type), so the
+   MIR coercion pass (`coerce_args_for_param_slots`) saw an empty signature and
+   skipped raw-scalar -> Any boxing. Fix: declared extern parameter types are
+   recorded in `HirModule::extern_param_types` at all three registration sites
+   and merged into `function_param_types` at MIR setup
+   (`compiler/src/mir/lower/lowering_core.rs`), so direct extern calls box raw
+   scalars exactly like ordinary-function calls and like the interpreter
+   always has.
+
+Interpreter lane: already transported args/channels correctly (Value-based);
+unchanged and verified consistent after the fix.
+
+Before/after probe evidence (recreate from `build/p3-probe/` shapes described
+in the triage section): arg matrix — before: only `(i64,i64)` spawned (JIT);
+after: `(i64,i64)`, `(text,i64)`, `(i64,text)` spawn in the JIT lane with
+every child marker file carrying the exact args, and all five shapes
+(including both class positions) spawn in the interpreter lane. Channel:
+same-thread text `sent_status=0 recv=DROPPED(nil)` before, `sent_status=1
+recv=<text>` after; cross-thread child sends `text=0 i64=0` before (values
+lost), `text=1 i64=1` after with faithful ordered recv (`77`,
+`child-text`). Raw scalar extern args: `rt_value_is_int(41)` before 0 /
+after 1; channel send of literal `41` before status 0 / after status 1 with
+`recv=41`. Runtime unit tests: 13/13 channel tests including new
+`test_channel_send_recv_text_same_thread` and
+`test_channel_cross_thread_text_and_i64` (cross-thread, real OS thread).
+Seed-level specs after the fix: canary
+`test/02_integration/app/context_log_modes_spec.spl` 4/4; consumer pin
+`test/01_unit/lib/nogc_async_mut/thread_tcp_stream_worker_spec.spl` 2/2;
+`isolated_thread_barrier_spec` 3/3; `isolated_thread_spawn_barrier_spec` 2/2;
+`green_channel_spec` 4/4. Known remaining warts (pre-existing, not caused by
+this fix, smaller than the fixed surfaces): a child closure's `i64` result
+arrives tagged at the parent (`join()` on a literal-`1` child prints
+`Some(8)`, = `1 << 3`), and `rt_channel_send`'s status read inside a child
+thread shows the tagged form — both are child-thread return-marshalling
+quirks in the hybrid splice, cosmetic for channel admission/recv.
+
+Seed-refresh note: the tracked `bin/simple.exe` artifacts under `bin/release/`
+embed the old runtime; rebuild the seed driver (`cargo +nightly-2026-09-15-
+x86_64-pc-windows-gnu build --profile bootstrap -p simple-driver`) and redeploy
+before re-running any thread/channel consumer spec.

@@ -1,5 +1,6 @@
 // Builtin method compilation for codegen.
 
+use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_codegen::ir::{types, AbiParam, InstBuilder, Signature};
 use cranelift_frontend::FunctionBuilder;
 use cranelift_module::{Linkage, Module};
@@ -12,6 +13,59 @@ use super::helpers::{
 use super::{InstrContext, InstrResult};
 use crate::hir::TypeId;
 use crate::mir::VReg;
+
+/// Integer `max`/`min`/`clamp`/`abs` on a raw (unboxed) integer receiver,
+/// lowered to native Cranelift `smax`/`smin` (`umax`/`umin` when `unsigned`).
+/// Arguments are coerced to the receiver's width. Returns `None` when the
+/// receiver is not a raw integer or the method/arity does not match, so the
+/// caller falls through to its normal dispatch.
+/// See doc/08_tracking/bug/int_max_min_method_unresolved_in_jit_2026-11-13.md.
+pub(super) fn emit_int_min_max(
+    builder: &mut FunctionBuilder,
+    method: &str,
+    receiver_val: cranelift_codegen::ir::Value,
+    arg_vals: &[cranelift_codegen::ir::Value],
+    unsigned: bool,
+) -> Option<cranelift_codegen::ir::Value> {
+    let recv_ty = builder.func.dfg.value_type(receiver_val);
+    if !recv_ty.is_int() {
+        return None;
+    }
+    let mut fit = |builder: &mut FunctionBuilder, v: cranelift_codegen::ir::Value| {
+        let ty = builder.func.dfg.value_type(v);
+        if ty == recv_ty {
+            Some(v)
+        } else if !ty.is_int() {
+            None
+        } else if ty.bits() > recv_ty.bits() {
+            Some(builder.ins().ireduce(recv_ty, v))
+        } else if unsigned {
+            Some(builder.ins().uextend(recv_ty, v))
+        } else {
+            Some(builder.ins().sextend(recv_ty, v))
+        }
+    };
+    let max = |b: &mut FunctionBuilder, x, y| if unsigned { b.ins().umax(x, y) } else { b.ins().smax(x, y) };
+    let min = |b: &mut FunctionBuilder, x, y| if unsigned { b.ins().umin(x, y) } else { b.ins().smin(x, y) };
+    match (method, arg_vals.len()) {
+        ("abs", 0) => Some(if unsigned { receiver_val } else { builder.ins().iabs(receiver_val) }),
+        ("max", 1) => {
+            let a = fit(builder, arg_vals[0])?;
+            Some(max(builder, receiver_val, a))
+        }
+        ("min", 1) => {
+            let a = fit(builder, arg_vals[0])?;
+            Some(min(builder, receiver_val, a))
+        }
+        ("clamp", 2) => {
+            let lo = fit(builder, arg_vals[0])?;
+            let hi = fit(builder, arg_vals[1])?;
+            let lower_bounded = max(builder, receiver_val, lo);
+            Some(min(builder, lower_bounded, hi))
+        }
+        _ => None,
+    }
+}
 
 /// Pass value through for array/dict operations.
 /// Values that are already RuntimeValue (strings, arrays, objects) should be passed directly.
@@ -247,6 +301,29 @@ pub(crate) fn compile_builtin_method<M: Module>(
         }
         return Ok(());
     }
+    // Integer max/min/clamp/abs (see emit_int_min_max).
+    // Only a receiver PROVEN to be an integer: an untyped vreg may be a tagged
+    // handle whose own `max` must not be replaced by an integer compare.
+    if matches!(method, "max" | "min" | "clamp" | "abs") && ctx.vreg_types.contains_key(&receiver) {
+        let recv_ty_id = ctx.vreg_types.get(&receiver).copied().unwrap_or(TypeId::I64);
+        if matches!(
+            recv_ty_id,
+            TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64 | TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64
+        ) {
+            let unsigned = matches!(recv_ty_id, TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64);
+            let mut arg_vals = Vec::with_capacity(args.len());
+            for a in args {
+                arg_vals.push(ctx.get_vreg(a)?);
+            }
+            if let Some(result_val) = emit_int_min_max(builder, method, receiver_val, &arg_vals, unsigned) {
+                if let Some(d) = dest {
+                    ctx.vreg_values.insert(*d, result_val);
+                    ctx.vreg_types.insert(*d, recv_ty_id);
+                }
+                return Ok(());
+            }
+        }
+    }
     // FR-COMPILER-012: scalar float intrinsics — sqrt, abs, floor, ceil, round
     // These are first-class Cranelift instructions for IEEE 754 floats.
     if crate::codegen::scalar_float_methods::is_native_unary(method) && !matches!(method, "trunc" | "round") {
@@ -348,6 +425,20 @@ pub(crate) fn compile_builtin_method<M: Module>(
                 }
                 return Ok(());
             }
+        }
+    }
+    // Integer predicates / sign / pow and float classification — inline
+    // Cranelift, matching the interpreter's `handle_int_methods` and float
+    // handlers. doc/08_tracking/bug/jit_primitive_method_parity_gaps_2026-11-13.md
+    {
+        if let Some((val, ty)) = compile_scalar_parity_method(ctx, builder, receiver_type, method, receiver_val, args)? {
+            if let Some(d) = dest {
+                ctx.vreg_values.insert(*d, val);
+                if ty == TypeId::BOOL {
+                    ctx.vreg_types.insert(*d, TypeId::BOOL);
+                }
+            }
+            return Ok(());
         }
     }
     let result = match (receiver_type, method) {
@@ -608,4 +699,120 @@ pub(crate) fn compile_builtin_method<M: Module>(
         ctx.vreg_values.insert(*d, val);
     }
     Ok(())
+}
+
+/// Integer predicates (`is_even`/`is_odd`/`is_zero`/`is_positive`/
+/// `is_negative`), integer `sign`/`signum`/`pow`, and float
+/// `is_nan`/`is_finite`/`is_infinite`, lowered inline. Mirrors the
+/// interpreter's `handle_int_methods` / float handlers
+/// (`interpreter_method/primitives.rs`). Returns the value and its type
+/// (`BOOL` for predicates), or `None` when `method` is not one of these.
+/// Shared by `compile_builtin_method` and the static method-call path in
+/// `closures_structs.rs` so the two JIT routes cannot drift.
+/// doc/08_tracking/bug/jit_primitive_method_parity_gaps_2026-11-13.md
+pub(crate) fn compile_scalar_parity_method<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    receiver_type: &str,
+    method: &str,
+    receiver_val: cranelift_codegen::ir::Value,
+    args: &[VReg],
+) -> InstrResult<Option<(cranelift_codegen::ir::Value, TypeId)>> {
+    let src_ty = builder.func.dfg.value_type(receiver_val);
+    let is_float = src_ty == types::F32 || src_ty == types::F64;
+    let unsigned = receiver_type.starts_with('u') || receiver_type.starts_with('U');
+    Ok(if src_ty.is_int() && crate::codegen::scalar_float_methods::is_int_predicate(method) {
+        let zero = builder.ins().iconst(src_ty, 0);
+        let flag = match method {
+            "is_even" | "is_odd" => {
+                let bit = builder.ins().band_imm(receiver_val, 1);
+                let cc = if method == "is_even" { IntCC::Equal } else { IntCC::NotEqual };
+                builder.ins().icmp(cc, bit, zero)
+            }
+            "is_zero" => builder.ins().icmp(IntCC::Equal, receiver_val, zero),
+            "is_positive" => {
+                let cc = if unsigned { IntCC::UnsignedGreaterThan } else { IntCC::SignedGreaterThan };
+                builder.ins().icmp(cc, receiver_val, zero)
+            }
+            _ => {
+                if unsigned {
+                    builder.ins().iconst(types::I8, 0)
+                } else {
+                    builder.ins().icmp(IntCC::SignedLessThan, receiver_val, zero)
+                }
+            }
+        };
+        Some((flag, TypeId::BOOL))
+    } else if src_ty.is_int() && matches!(method, "sign" | "signum") {
+        let zero = builder.ins().iconst(src_ty, 0);
+        let gt_cc = if unsigned { IntCC::UnsignedGreaterThan } else { IntCC::SignedGreaterThan };
+        let gt = builder.ins().icmp(gt_cc, receiver_val, zero);
+        let gt_w = builder.ins().uextend(src_ty, gt);
+        let lt_w = if unsigned {
+            builder.ins().iconst(src_ty, 0)
+        } else {
+            let lt = builder.ins().icmp(IntCC::SignedLessThan, receiver_val, zero);
+            builder.ins().uextend(src_ty, lt)
+        };
+        Some((builder.ins().isub(gt_w, lt_w), TypeId::ANY))
+    } else if src_ty.is_int() && method == "pow" && args.len() == 1 {
+        // Square-and-multiply; a negative exponent yields 1 (empty loop).
+        let exp_raw = ctx.get_vreg(&args[0])?;
+        let exp_ty = builder.func.dfg.value_type(exp_raw);
+        let exp = if exp_ty == src_ty {
+            exp_raw
+        } else if exp_ty.bits() < src_ty.bits() {
+            builder.ins().sextend(src_ty, exp_raw)
+        } else {
+            builder.ins().ireduce(src_ty, exp_raw)
+        };
+        let header = builder.create_block();
+        let body = builder.create_block();
+        let exit = builder.create_block();
+        for _ in 0..3 {
+            builder.append_block_param(header, src_ty);
+        }
+        builder.append_block_param(exit, src_ty);
+        let one = builder.ins().iconst(src_ty, 1);
+        builder.ins().jump(header, &[one, receiver_val, exp]);
+        builder.switch_to_block(header);
+        let acc = builder.block_params(header)[0];
+        let base = builder.block_params(header)[1];
+        let e = builder.block_params(header)[2];
+        let zero = builder.ins().iconst(src_ty, 0);
+        let more = builder.ins().icmp(IntCC::SignedGreaterThan, e, zero);
+        builder.ins().brif(more, body, &[], exit, &[acc]);
+        builder.switch_to_block(body);
+        let bit = builder.ins().band_imm(e, 1);
+        let prod = builder.ins().imul(acc, base);
+        let next_acc = builder.ins().select(bit, prod, acc);
+        let next_base = builder.ins().imul(base, base);
+        let next_e = builder.ins().sshr_imm(e, 1);
+        builder.ins().jump(header, &[next_acc, next_base, next_e]);
+        builder.seal_block(body);
+        builder.seal_block(header);
+        builder.switch_to_block(exit);
+        builder.seal_block(exit);
+        Some((builder.block_params(exit)[0], TypeId::ANY))
+    } else if is_float && matches!(method, "is_nan" | "is_finite" | "is_infinite") {
+        let flag = match method {
+            "is_nan" => builder.ins().fcmp(FloatCC::Unordered, receiver_val, receiver_val),
+            _ => {
+                let abs = builder.ins().fabs(receiver_val);
+                let inf = if src_ty == types::F32 {
+                    builder.ins().f32const(f32::INFINITY)
+                } else {
+                    builder.ins().f64const(f64::INFINITY)
+                };
+                if method == "is_finite" {
+                    builder.ins().fcmp(FloatCC::LessThan, abs, inf)
+                } else {
+                    builder.ins().fcmp(FloatCC::Equal, abs, inf)
+                }
+            }
+        };
+        Some((flag, TypeId::BOOL))
+    } else {
+        None
+    })
 }

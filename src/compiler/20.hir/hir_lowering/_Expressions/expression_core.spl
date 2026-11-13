@@ -108,6 +108,34 @@ impl HirLowering:
                     case _: nil
             case _: nil
 
+    me mark_optional_call_init(symbol_id: i64, init: Expr, has_annotation: bool, bind_optional_payload: bool, sym_type: HirType?):
+        """Record an unannotated local whose initialiser is a direct call of a
+        function declared to return `T?` and whose symbol type stayed
+        unknown, so `[E-OPT-CAST-001]` sees it as optional (bug
+        pure_err01_untyped_local_of_optional_call_not_rejected_2026-11-13).
+        An `if val`/`while val` binder (bind_optional_payload) binds the
+        payload and is never marked."""
+        if has_annotation or bind_optional_payload or sym_type != nil:
+            return
+        match init.kind:
+            case ExprKind.Call(_, _): ()
+            case _: return
+        if val declared = self.cast_operand_declared_type(init):
+            match declared.kind:
+                case HirTypeKind.Optional(_):
+                    self.local_optional_call_init[symbol_id] = true
+                case _: ()
+
+    fn cast_operand_is_optional_call_local(operand: Expr) -> bool:
+        match operand.kind:
+            case ExprKind.Ident(name):
+                val ident_t: text = name
+                val raw: i64 = self.symbols.lookup_or_invalid(ident_t).id
+                if raw < 0:
+                    return false
+                self.local_optional_call_init.contains_key(raw)
+            case _: false
+
     fn attributed_factory_return_type(source: HirExpr) -> HirType?:
         if source.has_type_:
             return source.type_
@@ -212,7 +240,7 @@ impl HirLowering:
                         declared_type = HirType(kind: HirTypeKind.Named(declared_owner, declared_args), span: receiver.span)
                     case _: return initializer
                 val typed_receiver = HirExpr(kind: receiver.kind, has_type_: true,
-                    type_: declared_type, span: receiver.span)
+                    type_: declared_type, span: receiver.span, bracket_slice: receiver.bracket_slice)
                 # The ordinary expression path already checks family errors.
                 # Recheck only matching/unknown families for generic arguments.
                 if args.len() >= 3:
@@ -509,6 +537,12 @@ impl HirLowering:
                 type_: HirType(kind: HirTypeKind.Unit, span: missing_span),
                 span: missing_span
             )
+        if e.bracket_slice:
+            # Lower the bracket slice exactly as its `.slice` call, then carry
+            # the marker on the HIR node for MIR's text code-point cut.
+            var marked = self.lower_hir_expr(Expr(kind: e.kind, span: e.span, explicit_call_types: e.explicit_call_types))
+            marked.bracket_slice = true
+            return marked
         # Probes UNGATED: Trap D (iteration 17) — env-gated probes are mute in
         # hir_lowering modules. Remove before deploy.
         # DIRECT typed field read, NOT `match e: case Expr(k, _): k`: the struct
@@ -1245,8 +1279,10 @@ impl HirLowering:
                 # value (nil-only-in-unsafe, ERR-01). The seed produced a
                 # silent 0 / garbage for it; the seed's HIR lowerer now
                 # rejects it (LowerError::OptionalCast) and this is the
-                # self-hosted twin. Only fires when the operand's HIR type is
-                # KNOWN to be Optional; an untyped operand is not guessed at.
+                # self-hosted twin. Only fires when the operand is KNOWN to be
+                # Optional: its HIR type, its declared symbol/return type, or
+                # an unannotated local initialised from a call declared to
+                # return `T?`. Any other untyped operand is not guessed at.
                 # Bug: optional_as_cast_yields_zero_2026_11_09.
                 if self.unsafe_block_depth == 0:
                     var operand_is_optional = false
@@ -1262,6 +1298,11 @@ impl HirLowering:
                             operand_is_optional = match declared.kind:
                                 case HirTypeKind.Optional(_): true
                                 case _: false
+                    if not operand_is_optional:
+                        # An unannotated local of a `T?`-returning call whose
+                        # symbol type stayed unknown (generic `T?`), marked at
+                        # its `val`/`var` (mark_optional_call_init).
+                        operand_is_optional = self.cast_operand_is_optional_call_local(operand)
                     val target_is_numeric = match cast_target.kind:
                         case HirTypeKind.Int(_, _): true
                         case HirTypeKind.Float(_): true

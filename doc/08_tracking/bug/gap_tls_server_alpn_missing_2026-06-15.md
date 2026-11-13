@@ -20,3 +20,29 @@ Unblock when a Pure-Simple server handshake consumes the peer ALPN extension,
 selects only a configured protocol, rejects no-overlap according to policy, and
 the production listener dispatches HTTP/1.1 or HTTP/2 from that negotiated
 result with a live-socket SSpec oracle.
+
+## Ground truth 2026-11-13 (lane http-20261113, tree at 6a5f8e708f2)
+
+The ALPN feed this record called missing is now VERIFIED PRESENT:
+
+- `src/lib/nogc_sync_mut/http_server/tls_server.spl`: `alpn_negotiate`
+  (server-preference select, first-match), `alpn_from_extension_hex`
+  (RFC 7301 ProtocolNameList parse), and the production dispatch surface
+  `tls_server_accept` / `tls_conn_is_h2` / `tls_conn_is_http1`.
+- `src/lib/nogc_async_mut/io/tls_handshake.spl`: `find_alpn_extension_data`
+  (locates the ALPN ext in the ClientHello extensions block), `negotiate_alpn`
+  (consumes parsed extensions during the server handshake, echoes the selection
+  via `build_server_hello_bytes(..., alpn)`).
+- Unit oracles: `test/01_unit/lib/nogc_async_mut/io/tls_alpn_negotiation_spec.spl`
+  (h2 selected; spdy no-overlap -> ""; absent extension -> "") and
+  `test/01_unit/lib/nogc_async_mut/http_server/protocol_handler_spec.spl`
+  (h2 vs http/1.1 dispatch from ClientHello extensions).
+
+STILL OPEN under this record's own unblock condition: no live-socket SSpec
+oracle exists — the only system consumer
+(`test/03_system/web/server/secure_pure_simple_web_server_spec.spl`) drives
+`tls_server_accept` with `TcpStream.from_accepted_fd(-1)` (fake fd, fail-closed
+policy checks only), and TLS 1.3 remains absent (separate GAP-TLS-2). The
+2026-09-13 triage line "tls_server.spl is the only TLS surface" is outdated
+(ALPN feed lives in tls_server.spl + nogc_async_mut/io/tls_handshake.spl), but
+"not closable by triage" still holds. DB must stay OPEN, not closed.

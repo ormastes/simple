@@ -25,3 +25,16 @@ it in the sibling `if i + 3 < clean_len:` branch. Same defect and same fix as
 8/8 on the seed. Still residual in this umbrella: `process_observation_v4_spec.spl`
 15/16 ("allows a pre-spawn rejection to retain absent process times"), and
 `zstd_sequence_fse_execution` (not re-run).
+
+## Fix (2026-11-13) — process_observation_v4 (lane n3)
+
+"allows a pre-spawn rejection to retain absent process times" failed because
+its fixture kept the golden packet's child ticket (words 6/7 = 3, 4). The
+decoder (`observation_v4.spl`) rejects a Rejected receipt that keeps child
+authority, and the runtime producer (`pov4_rejected` -> `pov4_words_base` memset,
+`runtime_process_owned.c`) always writes a zero ticket. So the fixture was wrong
+on every host, not only Windows. It now zeroes words 6/7: 16/16 on the seed.
+Still residual: `zstd_sequence_fse_execution_spec.spl`, 6/15 on the seed
+(2026-11-13). Its failures are TruncatedInput "zstd sequence bitstream bits"
+and invalid offset/length/content-size, and all of them involve the predefined
+OF/ML tables. Not diagnosed.

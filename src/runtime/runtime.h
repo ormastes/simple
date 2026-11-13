@@ -1293,6 +1293,7 @@ char*    spl_shell_output(const char* cmd);  /* capture stdout */
 /* Existing Windows PTY/Job registry is confined to one pinned native thread.
  * A successful guard grants no process launch or cross-thread transfer. */
 int64_t   rt_windows_pty_owner_thread_guard_v1(void);
+int64_t   rt_windows_pipe_file_mode_v1(int64_t handle, int64_t storage, int64_t mode_out, int32_t operation);
 int64_t   rt_process_run(const char* cmd, uint64_t cmd_len, SplArray* args);
 int64_t   rt_process_run_inherit(const char* cmd, uint64_t cmd_len, SplArray* args);
 int64_t   rt_process_run_inherit_value(int64_t cmd, SplArray* args);
@@ -1372,6 +1373,7 @@ bool     rt_process_kill(int64_t pid);
    handle and answers false. See runtime_process.c for the full contract. */
 bool     rt_pty_is_running(int64_t handle);
 bool     rt_pty_resize(int64_t handle, int32_t rows, int32_t cols);
+bool     rt_pty_hangup(int64_t handle);
 bool     rt_process_owned_cancel(uint64_t slot, uint64_t generation,
                                  int64_t pid, uint64_t start_identity,
                                  RtOwnedProcessCancelReceipt* receipt);

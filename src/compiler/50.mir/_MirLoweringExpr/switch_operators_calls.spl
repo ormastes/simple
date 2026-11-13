@@ -10,7 +10,7 @@ use compiler.mir.mir_instruction_support.{MirBinOp}
 use compiler.mir.mir_instruction_support.{MirOperand, MirOperandKind}
 use compiler.mir.mir_instruction_graph.{MirInst}
 use compiler.mir.mir_types.{LocalId, MirType, MirConstValue}
-use compiler.mir.mir_lowering_stmts.{mir_merge_arm_types}
+use compiler.mir.mir_lowering_stmts.{hir_type_is_declared_float_slot, hir_unsuffixed_int_literal_value, mir_merge_arm_types}
 use compiler.mir._MirLowering.declaration_enum_metadata_v1.*
 use compiler.mir._MirLoweringExpr.optional_record_owner.*
 use compiler.mir._MirLowering.declaration_providers_v1.*
@@ -1318,7 +1318,8 @@ impl MirLowering:
                                 is_variadic: signature.is_variadic,
                                 params_known: signature.params_known,
                                 declared_params: signature.declared_params,
-                                declared_params_known: signature.declared_params_known
+                                declared_params_known: signature.declared_params_known,
+                                int_literal_coerced_params: signature.int_literal_coerced_params
                             )))
                         ), call_origin: func.call_origin)
                     case _: ()
@@ -9275,6 +9276,14 @@ impl MirLowering:
             direct_pair_text_indices = in_range_pair_indices
             direct_text_pointer_bridge = true
         var direct_arg_index = 0
+        # Indices of args this call coerced from an unsuffixed int literal
+        # into a declared float slot (lower_int_literal_for_float_slot, via
+        # lower_expr_for_slot above). Recorded on the emitted call's
+        # MirSignature.int_literal_coerced_params so the Cranelift import
+        # check can honor the no-implicit-coercion cross-module contract even
+        # though the coercion runs before any module split (the operand types
+        # alone read f64 == f64 afterwards).
+        var int_literal_coerced_arg_indices: [i64] = []
         for arg in args:
             val current_arg_index = direct_arg_index
             direct_arg_index = direct_arg_index + 1
@@ -9353,6 +9362,9 @@ impl MirLowering:
                 self.lower_int_literal_for_float_slot(arg_value, call_param_types[current_arg_index]) ?? self.lower_expr(arg_value)
             else:
                 self.lower_expr(arg_value)
+            if current_arg_index < call_param_types.len():
+                if hir_unsuffixed_int_literal_value(arg_value) != None and hir_type_is_declared_float_slot(call_param_types[current_arg_index]):
+                    int_literal_coerced_arg_indices = int_literal_coerced_arg_indices.push(current_arg_index)
             arg_source_locals[arg_operands.len()] = arg_local.id
             var boundary_transfer_mode = MirTransferMode.Copy
             var boundary_transfer_payload = MirTransferPayload.InlineCopy
@@ -9517,6 +9529,18 @@ impl MirLowering:
                 arg_operands = arg_operands.push(mir_operand_copy(arg_local))
 
         if is_direct:
+            # A bare, unimported interpreter builtin (`env_get` without a `use`)
+            # reaches here as HIR's module-less fallback symbol: it has no
+            # native owner, so its origin is Unknown and every backend would
+            # abort on it (Phase 3 run-21 SIGABRT, driver_pipeline_lowering).
+            # Reject at the call site instead; never map it to an extern.
+            if self.provider_callable_is_builtin_fallback_v1(direct_symbol):
+                val builtin_name = if direct_name != "": direct_name else: self.bootstrap_resolved_call_name(direct_symbol)
+                self.error_fatal("interpreter-only builtin `{builtin_name}` has no native lowering: it is called without an import (MIR call origin unproven); import its std accessor (e.g. env_get_nullable from std.io_runtime)", Some(callee.span))
+                var rejected_builtin_builder = self.builder
+                val rejected_builtin_local = rejected_builtin_builder.new_temp(MirType.i64())
+                self.builder = rejected_builtin_builder
+                return rejected_builtin_local
             val source_name = if direct_name != "": direct_name else: self.bootstrap_resolved_call_name(direct_symbol)
             val resolved_name = self.provider_callable_symbol_name(direct_symbol, source_name)
             var return_type = self.bootstrap_resolved_call_return_type(direct_symbol, resolved_name)
@@ -9562,8 +9586,14 @@ impl MirLowering:
                 var declared_param_mir: [MirType] = []
                 for declared_param_hir in call_param_types:
                     declared_param_mir = declared_param_mir.push(self.lower_type(declared_param_hir))
+                var coerced_param_marks: [bool] = []
+                var coerced_mark_i = 0
+                while coerced_mark_i < declared_param_mir.len():
+                    coerced_param_marks = coerced_param_marks.push(int_list_contains(int_literal_coerced_arg_indices, coerced_mark_i))
+                    coerced_mark_i = coerced_mark_i + 1
                 direct_signature = MirSignature(params: [], return_type: return_type, is_variadic: false,
-                    declared_params: declared_param_mir, declared_params_known: true)
+                    declared_params: declared_param_mir, declared_params_known: true,
+                    int_literal_coerced_params: coerced_param_marks)
             if val declared_signature = self.exact_extern_signatures.get(mir_expr_symbol_id_value(direct_symbol)):
                 if declared_signature.params.len() != arg_operands.len():
                     self.error_fatal("fixed extern call argument count differs from its declaration", None)

@@ -29,7 +29,7 @@ struct SdnPartOffset:
     offset: i64
 
 # Parse SDN source text. Returns Ok(SdnValue) or Err(error message).
-fn parse(source: text) -> Result<SdnValue, text>:
+pub fn parse(source: text) -> Result<SdnValue, text>:
     # @workaround bug=mir_text_bytes_unresolved_inferred_trim_receiver_2026-10-23 reason=stage2 MIR rejects trimmed.bytes() when trimmed type is inferred from trim(); explicit text annotation
     val trimmed: text = _sdn_strip_leading_comment_lines(source).trim()
     if trimmed == "" or trimmed == "null":
@@ -46,7 +46,7 @@ fn parse(source: text) -> Result<SdnValue, text>:
     # Validate delimiters before the inline readers remove their outer pair.
     # Otherwise a missing nested closer can make the reader discard a scalar's
     # final byte and silently turn e.g. 10000 into 1000.
-    if trimmed.starts_with("[") or trimmed.starts_with("{"):
+    if trimmed.starts_with("[") or trimmed.starts_with("{{"):
         match _sdn_collection_depth(trimmed, complete: true):
             case Err(reason): return Err(reason)
             case Ok(depth):
@@ -56,7 +56,7 @@ fn parse(source: text) -> Result<SdnValue, text>:
     if trimmed.starts_with("["):
         return Ok(_sdn_parse_inline_array(trimmed))
     # Inline dict: {key: value, ...}
-    if trimmed.starts_with("{"):
+    if trimmed.starts_with("{{"):
         return Ok(_sdn_parse_inline_dict(trimmed))
     # Table: first line `|h1, h2|`, following lines are comma-separated rows.
     # Falls through to bare-string handling when the header is malformed.
@@ -306,7 +306,7 @@ fn _sdn_parse_block(lines: [text], start: i64, indent: i64) -> Result<(SdnValue,
                                     return Err(e)
                     else:
                         var value_source = valstr
-                        if valstr.starts_with("[") or valstr.starts_with("{"):
+                        if valstr.starts_with("[") or valstr.starts_with("{{"):
                             match _sdn_collection_depth(value_source):
                                 case Err(e):
                                     return Err(e)
@@ -696,7 +696,7 @@ fn _sdn_list_has(xs: [text], k: text) -> bool:
 fn _sdn_value_span_lines(lines: [text], start: i64, first: text, key: text) -> Result<(text, i64), text>:
     var value_source = first
     var i = start
-    if first.starts_with("[") or first.starts_with("{"):
+    if first.starts_with("[") or first.starts_with("{{"):
         match _sdn_collection_depth(value_source):
             case Err(e):
                 return Err(e)
@@ -772,7 +772,7 @@ fn _sdn_inline_spans(s: text, prefix: text, line: i64, colbase: i64) -> [SdnSpan
     var out: [SdnSpanEntry] = []
     if s.byte_len() < 2:
         return out
-    val is_dict = s.starts_with("{")
+    val is_dict = s.starts_with("{{")
     val inner = s.slice(1, s.byte_len() - 1)
     var idx = 0
     for p in _sdn_split_top_commas_offsets(inner):
@@ -784,7 +784,7 @@ fn _sdn_inline_spans(s: text, prefix: text, line: i64, colbase: i64) -> [SdnSpan
                 val path = _sdn_join_path(prefix, key)
                 out.push(SdnSpanEntry(path: path, line: line, col: pcol))
                 val vs = p.part.slice(ci + 1, p.part.byte_len()).trim()
-                if vs.starts_with("[") or vs.starts_with("{"):
+                if vs.starts_with("[") or vs.starts_with("{{"):
                     var j = ci + 1
                     while j < p.part.byte_len() and p.part.substring(j, j + 1) == " ":
                         j = j + 1
@@ -793,7 +793,7 @@ fn _sdn_inline_spans(s: text, prefix: text, line: i64, colbase: i64) -> [SdnSpan
         else:
             val path = _sdn_join_path(prefix, idx.to_text())
             out.push(SdnSpanEntry(path: path, line: line, col: pcol))
-            if p.part.starts_with("[") or p.part.starts_with("{"):
+            if p.part.starts_with("[") or p.part.starts_with("{{"):
                 for e in _sdn_inline_spans(p.part, path, line, pcol):
                     out.push(e)
         idx = idx + 1
@@ -844,7 +844,7 @@ fn _sdn_span_seq(lines: [text], start: i64, indent: i64, prefix: text, line_base
                             out.push(SdnSpanEntry(path: entry.path, line: entry.line, col: entry.col + content_start - (ind + 2)))
                         else:
                             out.push(entry)
-                elif rest.starts_with("[") or rest.starts_with("{"):
+                elif rest.starts_with("[") or rest.starts_with("{{"):
                     for entry in _sdn_inline_spans(rest, path, line_base + i + 1, content_start + 1):
                         out.push(entry)
                 index = index + 1
@@ -891,7 +891,7 @@ fn _sdn_span_block(lines: [text], start: i64, indent: i64, prefix: text, line_ba
                             case Err(_):
                                 i = i + 1
                             case Ok(consumed):
-                                if consumed.1 == i and (valstr.starts_with("[") or valstr.starts_with("{")):
+                                if consumed.1 == i and (valstr.starts_with("[") or valstr.starts_with("{{")):
                                     for e in _sdn_inline_spans(valstr, path, line_base + i + 1, _sdn_value_col(line, ind, ci)):
                                         out.push(e)
                                 i = consumed.1 + 1
@@ -903,7 +903,7 @@ fn _sdn_collect_span_entries(source: text) -> [SdnSpanEntry]:
         return []
     if trimmed.starts_with("\"") or trimmed.starts_with("|"):
         return []
-    if trimmed.starts_with("[") or trimmed.starts_with("{"):
+    if trimmed.starts_with("[") or trimmed.starts_with("{{"):
         if not trimmed.contains("\n"):
             return _sdn_inline_spans(trimmed, "", 1, _sdn_indent(source) + 1)
         return []
@@ -917,7 +917,7 @@ fn _sdn_inline_dup_issues(s: text, prefix: text, line: i64, colbase: i64) -> [Sd
     var out: [SdnIssue] = []
     if s.byte_len() < 2:
         return out
-    val is_dict = s.starts_with("{")
+    val is_dict = s.starts_with("{{")
     val inner = s.slice(1, s.byte_len() - 1)
     var seen: [text] = []
     var idx = 0
@@ -933,14 +933,14 @@ fn _sdn_inline_dup_issues(s: text, prefix: text, line: i64, colbase: i64) -> [Sd
                 else:
                     seen.push(key)
                 val vs = p.part.slice(ci + 1, p.part.byte_len()).trim()
-                if vs.starts_with("[") or vs.starts_with("{"):
+                if vs.starts_with("[") or vs.starts_with("{{"):
                     var j = ci + 1
                     while j < p.part.byte_len() and p.part.substring(j, j + 1) == " ":
                         j = j + 1
                     for e in _sdn_inline_dup_issues(vs, path, line, pcol + j):
                         out.push(e)
         else:
-            if p.part.starts_with("[") or p.part.starts_with("{"):
+            if p.part.starts_with("[") or p.part.starts_with("{{"):
                 for e in _sdn_inline_dup_issues(p.part, _sdn_join_path(prefix, idx.to_text()), line, pcol):
                     out.push(e)
         idx = idx + 1
@@ -990,7 +990,7 @@ fn _sdn_issue_seq(lines: [text], start: i64, indent: i64, prefix: text, line_bas
                             out.push(SdnIssue(kind: entry.kind, path: entry.path, message: entry.message, line: entry.line, col: entry.col + content_start - (ind + 2)))
                         else:
                             out.push(entry)
-                elif rest.starts_with("[") or rest.starts_with("{"):
+                elif rest.starts_with("[") or rest.starts_with("{{"):
                     for entry in _sdn_inline_dup_issues(rest, path, line_base + i + 1, content_start + 1):
                         out.push(entry)
                 index = index + 1
@@ -1041,7 +1041,7 @@ fn _sdn_issue_block(lines: [text], start: i64, indent: i64, prefix: text, line_b
                             case Err(_):
                                 i = i + 1
                             case Ok(consumed):
-                                if consumed.1 == i and (valstr.starts_with("[") or valstr.starts_with("{")):
+                                if consumed.1 == i and (valstr.starts_with("[") or valstr.starts_with("{{")):
                                     for e in _sdn_inline_dup_issues(valstr, path, line_base + i + 1, _sdn_value_col(line, ind, ci)):
                                         out.push(e)
                                 i = consumed.1 + 1
@@ -1053,7 +1053,7 @@ fn _sdn_collect_issues(source: text) -> [SdnIssue]:
         return []
     if trimmed.starts_with("\"") or trimmed.starts_with("|"):
         return []
-    if trimmed.starts_with("[") or trimmed.starts_with("{"):
+    if trimmed.starts_with("[") or trimmed.starts_with("{{"):
         if not trimmed.contains("\n"):
             return _sdn_inline_dup_issues(trimmed, "", 1, _sdn_indent(source) + 1)
         return []
@@ -1178,7 +1178,7 @@ fn _sdn_check_limits(v: SdnValue, depth: i64) -> Result<bool, text>:
 
 # Parse untrusted input with structural limits: 1 MiB total size, max nesting
 # depth 64, max 65536 entries per collection. Violations are errors.
-fn parse_untrusted(source: text) -> Result<SdnValue, text>:
+pub fn parse_untrusted(source: text) -> Result<SdnValue, text>:
     if source.len() > 1048576:
         return Err("input exceeds size limit")
     # Pre-parse guards reject structural bombs before the parser runs.

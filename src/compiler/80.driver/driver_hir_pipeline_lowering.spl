@@ -114,6 +114,7 @@ use compiler.driver.driver_hir_cache.{hir_cache_interface_only_bodies_dropped_v1
 use compiler.driver.driver_mir_shard_hir_residency_v1.{mir_shard_hir_residency_refusal_v1,
     mir_shard_hir_residency_arm_v1, mir_shard_hir_residency_armed_v1,
     mir_shard_hir_residency_note_v1, mir_shard_hir_residency_counters_v1,
+    mir_shard_hir_residency_retained_route_line_v1, hir_residency_any_nogc_strict_v1,
     MIR_SHARD_INTERFACE_HIR_ENV_V1}
 use compiler.driver.driver_parse_diagnostic.{driver_parse_error_message}
 use compiler.driver.driver_hir_cache.{hir_cache_load_in_owned_scope, hir_cache_store_encoded_in_owned_scope, hir_cache_clear_last_warnings}
@@ -186,6 +187,7 @@ fn driver_hir_source_body_actual_lowerer_v1(driver: CompilerDriver,
     if driver_hir_explicit_semantic_policy(driver.ctx): actual.use_explicit_semantic_policy()
     actual.library_mode = driver.ctx.options.library_mode
     actual.forbid_written_any = driver_hir_forbids_written_any(driver.ctx)
+    actual.forbid_interp_builtin_fallback = driver_hir_forbids_interp_builtin_fallback(driver.ctx)
     actual.require_declared_return_type = driver_hir_requires_declared_return_type(driver.ctx)
     _driver_source_body_serial_v1 = _driver_source_body_serial_v1 + 1
     _driver_source_body_lowerers_v1[driver_word] = DriverHirSourceLoweringOwnerV1(
@@ -269,6 +271,15 @@ fn driver_hir_forbids_written_any(ctx: CompileContext) -> bool:
     """Robust/critical compiled code may write `Any` only inside `unsafe:`."""
     ctx.options.mode != CompileMode.Interpret and
         ctx.assurance_policy.strictness.at_least(AssuranceStrictness.Robust)
+
+fn driver_hir_forbids_interp_builtin_fallback(ctx: CompileContext) -> bool:
+    """Lanes that lower through MIR have no native owner for an unimported
+    interpreter-only builtin (`env_get`, `file_exists`, ...): HIR names the
+    missing import instead of letting MIR stamp MirCallOrigin.Unknown.
+    Interpret/Check/Sdn keep the HIR-interpreter fallback."""
+    match ctx.options.mode:
+        case CompileMode.Aot | CompileMode.Jit | CompileMode.SmfExec: true
+        case _: false
 
 fn driver_hir_requires_declared_return_type(ctx: CompileContext) -> bool:
     """Robust/critical code must write `-> T` on value-returning functions
@@ -1048,6 +1059,7 @@ impl CompilerDriver:
             lowering.use_explicit_semantic_policy()
         lowering.library_mode = self.ctx.options.library_mode
         lowering.forbid_written_any = driver_hir_forbids_written_any(self.ctx)
+        lowering.forbid_interp_builtin_fallback = driver_hir_forbids_interp_builtin_fallback(self.ctx)
         lowering.require_declared_return_type = driver_hir_requires_declared_return_type(self.ctx)
         var lowered_by_surface: Dict<i64, HirModule> = {}
         var shard_completed_surfaces: Dict<i64, bool> = {}
@@ -1096,7 +1108,9 @@ impl CompilerDriver:
                 native_mir_shard_export_write_dir_v1(), env_get("SIMPLE_MIR_FORK_WORKERS") ?? "",
                 env_get("SIMPLE_FILE_WORKER_HIR_QUEUE") ?? "", worker_hir_loads_restricted_v1(),
                 env_get("SIMPLE_BOOTSTRAP") == "1" and env_get("SIMPLE_BOOTSTRAP_STAGE4") != "1",
-                env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") == "1")
+                env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") == "1",
+                self.ctx.options.mode == CompileMode.Aot,
+                hir_residency_any_nogc_strict_v1(surfaces.surfaces))
             if mir_shard_hir_residency_arm_v1(hir_residency_refusal):
                 print "[mir-shard] hir-residency armed: non-entry HIR cache loads are interface-only; a claimed module's body reloads from the cache"
             else:
@@ -1764,6 +1778,10 @@ impl CompilerDriver:
         if streaming_ready_flag or streaming_config_gate:
             val streamed_ok = self.lower_and_check_streaming_surfaces_impl()
             return streamed_ok
+        val retained_residency_line = mir_shard_hir_residency_retained_route_line_v1(
+            env_get(MIR_SHARD_INTERFACE_HIR_ENV_V1) ?? "")
+        if retained_residency_line != "":
+            print retained_residency_line
         if self.ctx.sources.len() > 0 and driver_dict_entry_count(self.ctx.modules) == 0:
             self.ctx.add_error("E-DRV-PHASE3-EMPTY]: phase 3 legacy path received zero HIR modules from {self.ctx.sources.len()} non-zero sources (the phase-2 module set was lost before phase 3); refusing to type-check an empty program")
             return false
@@ -1841,6 +1859,7 @@ impl CompilerDriver:
                 bootstrap_lowering.use_explicit_semantic_policy()
             bootstrap_lowering.library_mode = self.ctx.options.library_mode
             bootstrap_lowering.forbid_written_any = driver_hir_forbids_written_any(self.ctx)
+            bootstrap_lowering.forbid_interp_builtin_fallback = driver_hir_forbids_interp_builtin_fallback(self.ctx)
             bootstrap_lowering.require_declared_return_type = driver_hir_requires_declared_return_type(self.ctx)
             for module in self.ctx.modules.values():
                 val name = module.name
@@ -1908,6 +1927,7 @@ impl CompilerDriver:
             lowering.use_explicit_semantic_policy()
         lowering.library_mode = self.ctx.options.library_mode
         lowering.forbid_written_any = driver_hir_forbids_written_any(self.ctx)
+        lowering.forbid_interp_builtin_fallback = driver_hir_forbids_interp_builtin_fallback(self.ctx)
         lowering.require_declared_return_type = driver_hir_requires_declared_return_type(self.ctx)
         val hir_bootstrap_mode_gate = driver_hir_ambient_bootstrap_enabled(self.ctx)
         if hir_bootstrap_mode_gate:
@@ -2728,6 +2748,7 @@ impl CompilerDriver:
             compatibility_lowering.use_explicit_semantic_policy()
         compatibility_lowering.library_mode = ctx.options.library_mode
         compatibility_lowering.forbid_written_any = driver_hir_forbids_written_any(ctx)
+        compatibility_lowering.forbid_interp_builtin_fallback = driver_hir_forbids_interp_builtin_fallback(ctx)
         compatibility_lowering.require_declared_return_type = driver_hir_requires_declared_return_type(ctx)
         for src2 in ctx.sources:
             val name = src2.module_name

@@ -1052,9 +1052,15 @@ impl ExecCore {
                 }
                 if self.execution_mode.is_jit() {
                     // Try JIT first, fall back to interpreter on failure
-                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.run_file_jit(path))) {
+                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.run_file_jit_outcome(path))) {
                         Ok(Ok(exit_code)) => Ok(exit_code),
-                        Ok(Err(jit_err)) => {
+                        // The program already ran (on the interpreter, in the
+                        // no-main arm) and failed: that is the program's own
+                        // verdict, not a JIT gap. Re-running it would repeat
+                        // its output and side effects.
+                        // See doc/08_tracking/bug/no_main_runtime_error_reruns_on_interpreter_2026-11-13.md.
+                        Ok(Err(JitRunError::AlreadyExecuted(run_err))) => Err(run_err),
+                        Ok(Err(JitRunError::Unsupported(jit_err))) => {
                             // SIMPLE_JIT_STRICT fail-open fix: `first_unresolved_import`
                             // in codegen/jit.rs already tags its error message with a
                             // "SIMPLE_JIT_STRICT:" prefix specifically when the strict
@@ -1131,6 +1137,20 @@ impl ExecCore {
     /// Loads with import resolution → HIR → MIR → JIT compile → execute.
     /// Falls back to interpreter for code without `fn main()`.
     pub fn run_file_jit(&self, path: &Path) -> Result<i32, String> {
+        self.run_file_jit_outcome(path).map_err(JitRunError::into_message)
+    }
+
+    /// `run_file_jit` with the failure classified: `AlreadyExecuted` when the
+    /// program itself ran (no-main interpreter arm) and failed, so the caller
+    /// must not run it again; `Unsupported` for every other failure.
+    fn run_file_jit_outcome(&self, path: &Path) -> Result<i32, JitRunError> {
+        self.run_file_jit_inner(path).map_err(JitRunError::Unsupported)?
+    }
+
+    /// Body of `run_file_jit`. The outer `Err(String)` is a JIT-side failure
+    /// (nothing of the program ran); the inner result is the outcome of a
+    /// program that did run.
+    fn run_file_jit_inner(&self, path: &Path) -> Result<Result<i32, JitRunError>, String> {
         use simple_compiler::codegen::{ExecutionManager, LocalExecutionManager, JitBackend};
         use simple_compiler::hir;
         use simple_compiler::interpreter::{evaluate_module, set_current_file};
@@ -1371,10 +1391,12 @@ impl ExecCore {
                  (set SIMPLE_JIT_SPEC_ENTRY=1 to run a spec's module-level examples on the JIT)",
                 path.display()
             );
-            let exit_code = evaluate_module(&ast.items).map_err(|e| format!("{}", e))?;
+            // From here on the program itself runs: a failure is its verdict,
+            // never a reason to fall back and run it again.
+            let outcome = evaluate_module(&ast.items).map_err(|e| JitRunError::AlreadyExecuted(format!("{}", e)));
             set_current_file(None);
             self.collect_gc();
-            return Ok(exit_code);
+            return Ok(outcome);
         }
 
         // Module-level BDD example blocks are not reachable from the JIT entry
@@ -1480,7 +1502,7 @@ impl ExecCore {
         }
         set_current_file(None);
         self.collect_gc();
-        Ok(exit_code as i32)
+        Ok(Ok(exit_code as i32))
     }
 
     /// Get the build path for a compiled SMF file
@@ -1646,12 +1668,44 @@ fn finish_jit_spec_entry(path: &Path) -> i32 {
     }
 }
 
+/// Why the JIT lane of `run_file_with_args` did not finish with an exit code.
+#[derive(Debug)]
+enum JitRunError {
+    /// The JIT could not compile or run the program; none of it ran, so the
+    /// interpreter fallback is safe.
+    Unsupported(String),
+    /// The program already ran (the no-main arm hands the module to the
+    /// interpreter) and failed. Must propagate: a fallback would run it twice.
+    AlreadyExecuted(String),
+}
+
+impl JitRunError {
+    fn into_message(self) -> String {
+        match self {
+            JitRunError::Unsupported(msg) | JitRunError::AlreadyExecuted(msg) => msg,
+        }
+    }
+}
+
 fn jit_failure_must_propagate(jit_err: &str, strict_all: bool) -> bool {
     // error[SPL-PAT-001] (Option pattern shape) is a TYPE error, not a JIT capability gap:
     // demoting it to the interpreter would run the ill-typed program silently.
     strict_all
         || jit_err.contains("SIMPLE_JIT_STRICT:")
         || jit_err.contains("error[SPL-PAT-001]")
+        || is_private_fn_visibility_error(jit_err)
+}
+
+/// A private-fn visibility rejection (import rule or call rule) is a
+/// compile-time verdict, not a JIT capability gap: re-running the program on
+/// the interpreter would execute code the language rejects. It used to do
+/// exactly that -- the retry reused the leaked "loading" mark, took the
+/// circular-import path, skipped the check, and exited 0.
+/// See doc/08_tracking/bug/visibility_error_jit_fallback_fail_open_2026-11-13.md.
+fn is_private_fn_visibility_error(jit_err: &str) -> bool {
+    jit_err.contains("private fn `")
+        && jit_err.contains("is not visible to")
+        && jit_err.contains(simple_compiler::interpreter::PRIVATE_FN_VISIBILITY_HINT)
 }
 
 /// Shared helper for the JIT-compile failure paths that represent a genuine
@@ -2261,6 +2315,87 @@ mod execution_mode_validation_tests {
             false
         ));
         assert!(jit_failure_must_propagate(raw_codegen_error, true));
+    }
+
+    /// visibility_error_jit_fallback_fail_open_2026-11-13: both producers of a
+    /// private-fn visibility rejection (import rule, call rule) must stop the
+    /// JIT -> interpreter fallback; an unrelated semantic error must not.
+    #[test]
+    fn private_fn_visibility_errors_never_fall_back() {
+        let import_rule = "semantic: private fn `secret_helper` of module `app.sub.lib_mod` (/r/app/sub/lib_mod.spl) \
+                           is not visible to /r/app/main.spl; mark it `pub` or `export` it";
+        let call_rule = "semantic: private fn `secret_helper` of module `/r/a/m.spl` is not visible to /r/b/c.spl; \
+                         mark it `pub` or `export` it";
+        assert!(jit_failure_must_propagate(import_rule, false));
+        assert!(jit_failure_must_propagate(call_rule, false));
+        assert!(!jit_failure_must_propagate("semantic: function secret_helper not found", false));
+    }
+
+    /// End to end on the default (JIT) lane: a main-less product file that
+    /// imports a private fn from another directory must be rejected, not run on
+    /// the interpreter fallback. Red before the fix: Ok(0) after printing 42.
+    #[test]
+    fn private_import_from_other_dir_fails_closed_on_jit_lane() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sub = dir.path().join("app").join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(
+            sub.join("lib_mod.spl"),
+            "fn secret_helper() -> i64:\n    42\npub fn open_api() -> i64:\n    secret_helper()\n",
+        )
+        .unwrap();
+        let entry = dir.path().join("app").join("main.spl");
+        std::fs::write(&entry, "use app.sub.lib_mod.{secret_helper}\nprint secret_helper()\n").unwrap();
+        let core = super::ExecCore::new();
+        if !core.execution_mode.is_jit() {
+            return; // SIMPLE_EXECUTION_MODE overrides the lane under test
+        }
+        let result = core.run_file_with_args(&entry, vec![]);
+        let err = result.expect_err("private import must be rejected, not executed by the interpreter fallback");
+        assert!(err.contains("is not visible to"), "unexpected error: {err}");
+        // The loader half of the fix: a rejected import must not leave the
+        // module marked "loading", or any later in-process load of it takes
+        // the circular-import path, skips the check, and runs. Red before the
+        // fix: the second interpreted run returned Ok(0).
+        for attempt in 0..2 {
+            let again = core.run_file_interpreted(&entry);
+            assert!(
+                again.as_ref().is_err_and(|e| e.contains("is not visible to")),
+                "interpreted retry #{attempt} must still reject: {again:?}"
+            );
+        }
+    }
+
+    /// no_main_runtime_error_reruns_on_interpreter_2026-11-13: a main-less
+    /// script already runs on the interpreter inside `run_file_jit`; when it
+    /// fails at runtime the driver must propagate, not run it a second time.
+    /// Red before the fix: the side-effect file held two lines.
+    #[test]
+    fn no_main_runtime_error_runs_once_on_jit_lane() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let side = dir.path().join("side.txt");
+        let entry = dir.path().join("noman.spl");
+        std::fs::write(
+            &entry,
+            format!(
+                "extern fn rt_file_append_text(path: text, content: text) -> bool\n\
+                 val ok = rt_file_append_text(\"{}\", \"A\\n\")\n\
+                 print \"A\"\n\
+                 val xs = [1]\n\
+                 print xs[5]\n",
+                side.display()
+            ),
+        )
+        .unwrap();
+        let core = super::ExecCore::new();
+        if !core.execution_mode.is_jit() {
+            return; // SIMPLE_EXECUTION_MODE overrides the lane under test
+        }
+        let result = core.run_file_with_args(&entry, vec![]);
+        let err = result.expect_err("a runtime error must fail the run");
+        assert!(err.contains("index out of bounds"), "unexpected error: {err}");
+        let written = std::fs::read_to_string(&side).expect("side-effect file");
+        assert_eq!(written.lines().count(), 1, "program ran more than once: {written:?}");
     }
 
     /// Every documented spelling must parse, and must parse to the lane its

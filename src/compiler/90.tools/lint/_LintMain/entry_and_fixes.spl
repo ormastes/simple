@@ -381,9 +381,19 @@ fn lint_cli_append_parsed_results(
                 config, warning.code, LintLevel.Warn, LintEvidenceTier.ParsedStructural)
             if not policy.keep: continue
             val level = policy.level
-            val lint = LintDiag.new(warning.code, level, LintCategory.Warning, warning.message)
+            # REQC warnings carry the AST span line when the span pool is
+            # populated. When it is not (empty-pool paths), recover the site
+            # textually from the enclosing function and say so in the message:
+            # a 0:0 locator names no statement, which was the reported defect.
+            var req_line = warning.line
+            var req_message = warning.message
+            if req_line <= 0:
+                req_line = lint_source_req_comment_line(
+                    source_locations, content.split("\n"), warning.code, warning.site_name)
+                req_message = "{warning.message} in `{warning.site_name}`"
+            val lint = LintDiag.new(warning.code, level, LintCategory.Warning, req_message)
                 .with_fix(warning.hint)
-            results.push(LintRunResult.new(path, warning.line, 0, lint))
+            results.push(LintRunResult.new(path, req_line, 0, lint))
     # W0406 already comes from the text EasyFix owner. Add only the parsed
     # export sibling here so wildcard imports are not reported twice.
     for warning in check_star_export_file(decls, path):
@@ -510,6 +520,36 @@ fn lint_source_collection_fix_line(index: LintSourceLocationIndex, code: text) -
 fn lint_source_export_star_line(index: LintSourceLocationIndex, module_path: text) -> i64:
     index.export_star_lines[module_path] ?? 1
 
+# Textual last-resort locator for REQC00x warnings whose AST span pool was
+# empty: anchor on the enclosing function declaration line, then scan forward
+# for the construct the code flags. Returns 0 when nothing matches (the
+# diagnostic then keeps the function name the message carries).
+fn lint_source_req_comment_line(
+    index: LintSourceLocationIndex, lines: [text], code: text, site_name: text
+) -> i64:
+    val fn_line = lint_source_function_line(index, site_name)
+    if fn_line <= 0:
+        return 0
+    if code == "REQC002":
+        # The dangerous-keyword name lives only in the AST message; a bare
+        # textual call scan is too fuzzy. The function line is the honest
+        # fallback and the message names the function.
+        return fn_line
+    var i = fn_line - 1
+    while i < lines.len():
+        val t = lines[i].trim()
+        if code == "REQC004":
+            if t.starts_with("case _"):
+                return i + 1
+        elif code == "REQC003":
+            if t.contains("todo("):
+                return i + 1
+        else:
+            if t.starts_with("pass_todo") or t.starts_with("pass_do_nothing") or t.starts_with("pass_dn"):
+                return i + 1
+        i = i + 1
+    0
+
 # ---------------------------------------------------------------------------
 # Source-location recovery for collection-efficiency lints (COLL0xx).
 #
@@ -600,7 +640,7 @@ fn lint_main() -> i64:
 
     if args.len() < 2:
         if json_output:
-            print("{\"type\":\"lint-error\",\"message\":\"no input files\"}")
+            print("{{\"type\":\"lint-error\",\"message\":\"no input files\"}")
             return 2
         print("Usage: simple_lint <file.spl> [options]")
         print("")
@@ -629,7 +669,7 @@ fn lint_main() -> i64:
     # Verify file exists
     if not file_exists(file_path):
         if json_output:
-            print("{\"type\":\"lint-error\",\"file\":\"{escape_json(file_path)}\",\"message\":\"file not found\"}")
+            print("{{\"type\":\"lint-error\",\"file\":\"{escape_json(file_path)}\",\"message\":\"file not found\"}")
         else:
             error("lint", "File not found: " + file_path)
         return 1
@@ -709,14 +749,14 @@ fn _run_lint_with_linter_source(
     linter.prepared_config_path = file_path
     if linter.config.error != "":
         if json_output:
-            print("{\"type\":\"lint-error\",\"message\":\"{escape_json(linter.config.error)}\"}")
+            print("{{\"type\":\"lint-error\",\"message\":\"{escape_json(linter.config.error)}\"}")
         else:
             error("lint", linter.config.error)
         return 2
 
     if policy.error != "":
         if json_output:
-            print("{\"type\":\"lint-error\",\"message\":\"{escape_json(policy.error)}\"}")
+            print("{{\"type\":\"lint-error\",\"message\":\"{escape_json(policy.error)}\"}")
         else:
             error("lint", policy.error)
         return 2
@@ -742,7 +782,7 @@ fn _run_lint_with_linter_source(
             case None: false
         if at_critical:
             if json_output:
-                print("{\"type\":\"lint-mc-exception\",\"file\":\"{escape_json(file_path)}\",\"reason\":\"{escape_json(mc_reason)}\"}")
+                print("{{\"type\":\"lint-mc-exception\",\"file\":\"{escape_json(file_path)}\",\"reason\":\"{escape_json(mc_reason)}\"}")
             else:
                 info("lint", mc_exception_report_line(file_path, mc_reason))
             linter.config.set_profile(LintProfile.Strict)
@@ -794,7 +834,7 @@ fn _run_lint_with_linter_source(
         case LintFileResult.LintFileOk(results):
             if results.is_empty():
                 if json_output:
-                    print("{\"type\":\"lint-file-summary\",\"file\":\"{escape_json(file_path)}\",\"errors\":0,\"warnings\":0,\"fixes\":0}")
+                    print("{{\"type\":\"lint-file-summary\",\"file\":\"{escape_json(file_path)}\",\"errors\":0,\"warnings\":0,\"fixes\":0}")
                 else:
                     info("lint", "No issues found in " + file_path)
                 return 0
@@ -803,11 +843,20 @@ fn _run_lint_with_linter_source(
                 var warning_count = 0
                 var fix_count = 0
                 var not_linted = false
+                # Several producers can flag the same site (AST pass plus
+                # per-importing-module relays), which re-emitted one warning
+                # multiple times per run. Emit each (file, line, code) once,
+                # attributed to the owning file, in both human and JSON modes.
+                var emitted_keys: {text: bool} = {}
 
                 for lint_item in results:
                     if lint_item.lint.code == "PARSE001":
                         not_linted = true
                     val effective_item = lint_run_result_apply_cli_policy(lint_item, deny_all)
+                    val diag_key = "{effective_item.file_path}|{effective_item.line}|{effective_item.lint.code}"
+                    if emitted_keys.contains_key(diag_key):
+                        continue
+                    emitted_keys[diag_key] = true
                     if json_output:
                         var level_text = "allow"
                         match effective_item.lint.level:
@@ -817,7 +866,7 @@ fn _run_lint_with_linter_source(
                         val evidence_json = lint_evidence_json(effective_item.lint.evidence)
                         val uncertainty_json = lint_uncertainty_json(effective_item.lint.uncertainty)
                         val confidence = lint_evidence_tier_name(effective_item.lint.evidence_tier)
-                        print("{\"type\":\"lint-diagnostic\",\"file\":\"{escape_json(effective_item.file_path)}\",\"line\":{effective_item.line},\"column\":{effective_item.column},\"level\":\"{level_text}\",\"code\":\"{escape_json(effective_item.lint.code)}\",\"message\":\"{escape_json(effective_item.lint.message)}\",\"confidence\":\"{confidence}\",\"evidence\":{evidence_json},\"uncertainty\":{uncertainty_json}}")
+                        print("{{\"type\":\"lint-diagnostic\",\"file\":\"{escape_json(effective_item.file_path)}\",\"line\":{effective_item.line},\"column\":{effective_item.column},\"level\":\"{level_text}\",\"code\":\"{escape_json(effective_item.lint.code)}\",\"message\":\"{escape_json(effective_item.lint.message)}\",\"confidence\":\"{confidence}\",\"evidence\":{evidence_json},\"uncertainty\":{uncertainty_json}}")
                     else:
                         print(effective_item.format())
 
@@ -843,8 +892,8 @@ fn _run_lint_with_linter_source(
                 linter.last_not_analyzed = not_linted
                 if json_output:
                     if not_linted:
-                        print("{\"type\":\"lint-not-linted\",\"file\":\"{escape_json(file_path)}\",\"reason\":\"parse failure\"}")
-                    print("{\"type\":\"lint-file-summary\",\"file\":\"{escape_json(file_path)}\",\"errors\":{error_count},\"warnings\":{warning_count},\"fixes\":{fix_count},\"not_linted\":{not_linted_json}}")
+                        print("{{\"type\":\"lint-not-linted\",\"file\":\"{escape_json(file_path)}\",\"reason\":\"parse failure\"}")
+                    print("{{\"type\":\"lint-file-summary\",\"file\":\"{escape_json(file_path)}\",\"errors\":{error_count},\"warnings\":{warning_count},\"fixes\":{fix_count},\"not_linted\":{not_linted_json}}")
                 else:
                     print("")
                     if not_linted:
@@ -893,7 +942,7 @@ fn _run_lint_with_linter_source(
 
         case LintFileResult.LintFileErr(lint_file_error):
             if json_output:
-                print("{\"type\":\"lint-error\",\"file\":\"{escape_json(file_path)}\",\"message\":\"{escape_json(lint_file_error)}\"}")
+                print("{{\"type\":\"lint-error\",\"file\":\"{escape_json(file_path)}\",\"message\":\"{escape_json(lint_file_error)}\"}")
             else:
                 error("lint", lint_file_error)
             return 1
@@ -914,7 +963,7 @@ fn collect_easy_fixes(results: [LintRunResult], include_all: bool) -> [EasyFix]:
 
 fn lint_fix_refused(file_path: String, message: String, json_output: bool) -> bool:
     if json_output:
-        print("{\"type\":\"lint-error\",\"file\":\"{escape_json(file_path)}\",\"message\":\"{escape_json(message)}\"}")
+        print("{{\"type\":\"lint-error\",\"file\":\"{escape_json(file_path)}\",\"message\":\"{escape_json(message)}\"}")
     else:
         error("lint", message)
     false
@@ -935,7 +984,7 @@ fn apply_collected_fixes(file_path: String, fixes: [EasyFix], dry_run: bool, jso
 
     if dry_run:
         if json_output:
-            print("{\"type\":\"lint-fix-summary\",\"file\":\"{escape_json(file_path)}\",\"mode\":\"dry-run\",\"fixes\":{fixes.len()}}")
+            print("{{\"type\":\"lint-fix-summary\",\"file\":\"{escape_json(file_path)}\",\"mode\":\"dry-run\",\"fixes\":{fixes.len()}}")
         else:
             print("\nDry run - would apply {fixes.len()} fix(es):")
             for fix in fixes:
@@ -945,12 +994,12 @@ fn apply_collected_fixes(file_path: String, fixes: [EasyFix], dry_run: bool, jso
             return lint_fix_refused(file_path, "{file_path}:1:1: source changed before fix write; rerun lint", json_output)
         if not file_atomic_write(file_path, new_source):
             if json_output:
-                print("{\"type\":\"lint-error\",\"file\":\"{escape_json(file_path)}\",\"message\":\"atomic fix write failed\"}")
+                print("{{\"type\":\"lint-error\",\"file\":\"{escape_json(file_path)}\",\"message\":\"atomic fix write failed\"}")
             else:
                 error("lint", "atomic fix write failed: {file_path}")
             return false
         if json_output:
-            print("{\"type\":\"lint-fix-summary\",\"file\":\"{escape_json(file_path)}\",\"mode\":\"applied\",\"fixes\":{fixes.len()}}")
+            print("{{\"type\":\"lint-fix-summary\",\"file\":\"{escape_json(file_path)}\",\"mode\":\"applied\",\"fixes\":{fixes.len()}}")
         else:
             print("\nApplied {fixes.len()} fix(es):")
             for fix in fixes:

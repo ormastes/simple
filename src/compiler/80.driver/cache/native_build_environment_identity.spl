@@ -268,6 +268,8 @@ fn native_build_module_environment_snapshot_fingerprint_v1(
         if pair.0 == "SIMPLE_MIR_SHARDING" or pair.0 == "SIMPLE_MIR_SHARD" or
                 pair.0 == "SIMPLE_MIR_SHARD_QUEUE" or pair.0 == "SIMPLE_MIR_SHARD_OWNER" or
                 pair.0 == "SIMPLE_MIR_SHARD_LINK" or pair.0 == "SIMPLE_MIR_SHARD_WORKER_KB" or
+                pair.0 == "SIMPLE_PARSE_SHARD_WORKER_KB" or
+                pair.0 == "SIMPLE_HIR_SHARD_WORKER_KB" or
                 pair.0 == "SIMPLE_MIR_SHARD_COUNT" or pair.0 == "SIMPLE_MIR_SHARD_ONLY_PATHS" or
                 pair.0 == "SIMPLE_MIR_FORK_WORKERS" or
                 pair.0 == "SIMPLE_SHARD_MEM_CLAMP" or
@@ -315,6 +317,14 @@ fn native_build_module_environment_snapshot_fingerprint_v1(
         # and read by no compiler/runtime source. None reaches a compiler
         # decision, so object bytes cannot depend on them. The complete
         # capture above still records them for admission/no-op evidence.
+        # The tree-RSS watchdog coordinates (scope group, declared job count,
+        # per-run receipt path, cap, enforce mode, observer budget) are the
+        # same class: shard_mem_clamp.spl consumes the cap/mode to size the
+        # worker pool and no compiler/runtime source reads the rest, so they
+        # only choose how many processes run, never what any of them emits.
+        # The product frontend policy exports campaign-varying values for
+        # these on every phase-C row; folding them gave every retuned
+        # campaign run a private object scope and 0 module reuse.
         if pair.0 == "SIMPLE_COMPILER_PHASE_PROFILE" or
                 pair.0 == "SIMPLE_COMPILER_PHASE_PROFILE_FILE" or
                 pair.0 == "SIMPLE_MEM_SNAPSHOT_FILE" or
@@ -322,7 +332,28 @@ fn native_build_module_environment_snapshot_fingerprint_v1(
                 pair.0 == "SIMPLE_BUILD_PROGRESS_EVENTS" or
                 pair.0 == "SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB" or
                 pair.0 == "SIMPLE_ICE_DIR" or
-                pair.0 == "SIMPLE_NATIVE_BUILD_WARM_CLOSURE_CANDIDATE":
+                pair.0 == "SIMPLE_NATIVE_BUILD_WARM_CLOSURE_CANDIDATE" or
+                pair.0 == "SIMPLE_PROCESS_TREE_RSS_SCOPE_GROUP" or
+                pair.0 == "SIMPLE_PROCESS_TREE_RSS_DECLARED_JOBS" or
+                pair.0 == "SIMPLE_PROCESS_TREE_RSS_RECEIPT" or
+                pair.0 == "SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB" or
+                pair.0 == "SIMPLE_PROCESS_TREE_RSS_CAP_KIB" or
+                pair.0 == "SIMPLE_BOOTSTRAP_RSS_CAP_MODE" or
+                pair.0 == "SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS":
+            continue
+        # Build-start admission sizing. SIMPLE_BUILD_MEMORY_RESERVE_BYTES is
+        # read only by build_memory_reserve_kib (shard_mem_clamp.spl) to size
+        # the start guard's free-RAM/commit reserve, and SIMPLE_HOST_CONFIG
+        # only selects which host-config file host_limits reads those knobs
+        # from; neither reaches a compiler decision about emitted bytes.
+        # Both are pre-admitted into the HIR worker profile and the phase-C
+        # row key list, so folding them gives every retuned reserve / every
+        # config-path spelling a private object scope and 0 module reuse
+        # (same class as the watchdog coordinates above; seen live on the
+        # Windows MSVC stage-2 lane, 2026-11-13, when a 1 GiB reserve knob
+        # voided the whole 1654-module stage-2 scope between campaign runs).
+        if pair.0 == "SIMPLE_BUILD_MEMORY_RESERVE_BYTES" or
+                pair.0 == "SIMPLE_HOST_CONFIG":
             continue
         projected = projected.push(pair)
     val module_capture = native_build_environment_snapshot_fingerprint_v1(projected)

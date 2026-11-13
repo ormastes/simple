@@ -760,6 +760,13 @@ impl Lowerer {
                 );
                 let local_index = ctx.add_local(name, ty, let_stmt.mutability);
                 ctx.locals[local_index].trait_dispatch_owner = trait_dispatch_owner;
+                if let Some(HirExprKind::Lambda { params, body, .. }) = value.as_ref().map(|v| &v.kind) {
+                    let fn_ty = self.module.types.register(HirType::Function {
+                        params: params.iter().map(|(_, ty)| *ty).collect(),
+                        ret: body.ty,
+                    });
+                    ctx.lambda_local_fn_types.insert(local_index, fn_ty);
+                }
                 self.record_optional_trait_payload(let_stmt.ty.as_ref().or(pattern_type), local_index, ctx);
                 if let Some(result_payload_types) = result_projection_type {
                     ctx.result_projection_types.insert(local_index, result_payload_types);
@@ -1870,6 +1877,14 @@ impl Lowerer {
                 self.globals.insert(e.name.clone(), ret_ty);
                 self.method_return_types.insert(e.name.clone(), ret_ty);
                 self.extern_fn_names.insert(e.name.clone());
+                // Same param-type recording as the module-level pass — see
+                // `HirModule::extern_param_types`.
+                let param_types = e
+                    .params
+                    .iter()
+                    .map(|p| self.resolve_type_opt(&p.ty))
+                    .collect::<Result<Vec<_>, _>>()?;
+                self.module.extern_param_types.insert(e.name.clone(), param_types);
                 Ok(vec![])
             }
 
@@ -2074,6 +2089,18 @@ impl Lowerer {
                             inner,
                             ..
                         }) if matches!(*inner, TypeId::BOOL | TypeId::U64 | TypeId::F32 | TypeId::F64) => *inner,
+                        // An erased `any?` (the type of a generic `T?` return
+                        // whose `T` is uninferred, e.g. `Channel.try_recv()`)
+                        // binds plain `any`, as `lower_coalesce` types
+                        // `any? ?? d`: the payload word IS the tagged
+                        // RuntimeValue an `any` slot holds and MIR does not
+                        // unbox an `any`-typed `rt_unwrap_or_self`, so no
+                        // representation changes. Left as `any?`, the binding
+                        // was still an optional source for `lower_cast`, so
+                        // `if val m = ch.try_recv(): m as i64` — the narrowing
+                        // ERR-01 itself recommends — was rejected.
+                        // Bug: doc/08_tracking/bug/if_val_binding_from_generic_optional_stays_optional_err01_2026-11-13.md
+                        _ if self.module.types.optional_inner(subject_ty) == Some(TypeId::ANY) => TypeId::ANY,
                         _ => self
                             .optional_reference_payload_inner(subject_ty)
                             .or_else(|| self.optional_enum_payload_inner(subject_ty))
@@ -2549,6 +2576,38 @@ impl Lowerer {
                                             },
                                             ty: payload_expr_ty,
                                         })),
+                                    },
+                                    ty: payload_expr_ty,
+                                }
+                            } else if subject_is_optional && enum_variant != "Some" && enum_variant != "None" {
+                                // User-enum variant pattern over an optional
+                                // subject (`match <Evt?>: case Evt.Click(x)`).
+                                // The arm test already looks through the Some
+                                // box, but the payload read did not: for a
+                                // boxed `Some(Evt.Click(5))`, `rt_enum_payload`
+                                // returned the inner Evt and bound its pointer
+                                // as `x`. Peel exactly one Option layer first
+                                // (`rt_unwrap_or_self` leaves the raw form and
+                                // user enums untouched). The peeled value is
+                                // typed as the optional's payload so no
+                                // scalar unbox fires on the enum pointer.
+                                let inner_ty = self
+                                    .optional_enum_payload_inner(subject_ty)
+                                    .or_else(|| self.module.types.optional_inner(subject_ty))
+                                    .unwrap_or(TypeId::ANY);
+                                HirExpr {
+                                    kind: HirExprKind::BuiltinCall {
+                                        name: "rt_enum_payload".to_string(),
+                                        args: vec![HirExpr {
+                                            kind: HirExprKind::BuiltinCall {
+                                                name: "rt_unwrap_or_self".to_string(),
+                                                args: vec![HirExpr {
+                                                    kind: HirExprKind::Local(subject_idx),
+                                                    ty: subject_ty,
+                                                }],
+                                            },
+                                            ty: inner_ty,
+                                        }],
                                     },
                                     ty: payload_expr_ty,
                                 }

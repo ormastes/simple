@@ -205,3 +205,35 @@ packed-store RSS growth and verified the mutable helper avoids per-append array
 allocation. Production format tests pass under seed diagnostics; full native
 encoder qualification remains pending. See
 `doc/08_tracking/bug/packed_encoder_repeated_buffer_copy_2026_10_30.md`.
+
+## Staged codegen eager MIR fingerprint (2026-11-13)
+
+Staged native codegen (`phase=native_staged`) grew ~0.5 GiB per 8-module batch
+on the Phase 3 build. Lowering is not the holder: per-module transient scopes
+retain ~0 bytes across a batch. The batch flush runs outside any scope, so
+everything it allocates is permanent. The largest flush allocation was
+`mir_module_canonical_fingerprint_v1`, the whole module serialized to canonical
+JSON. It was an eager argument to `driver_native_prelower_record_v1` at three
+per-module sites in `_compile_to_native_with_backend_session`, and the record
+discards it unless a pre-lowering key is pending. Only an admitted
+`SIMPLE_NATIVE_PRELOWER_CACHE=1` build has a pending key, never a staged,
+emit-object or bootstrap build. Now gated by
+`driver_native_prelower_mir_fingerprint_v1`.
+
+Trap: an argument the callee might ignore is still built and kept. In flush
+code (no transient scope), gate anything expensive before the call.
+
+Method, since `ptrace_scope=1` blocks gdb attach: LD_PRELOAD a sampling malloc
+profiler that walks frame pointers (Cranelift and clang aarch64 code both keep
+them), and dump live bytes by stack at each `staged_codegen:batch:start/done`
+log line. Then symbolize with `llvm-symbolizer --obj=<stage2>`. Do not trust
+`heap_live_bytes`: it missed about two-thirds of the in-use malloc that
+`mallinfo2` reports. A further check: patch the suspect function's entry to
+`mov x0,#0; ret` in a copy of the stage2. On an 86-module closure, growth dropped from
+~104 to ~43 MB/batch with 84/84 objects byte-identical. On a 329-module closure
+(lint) it dropped from ~204 to ~100 MB/batch (10.2 to 5.9 GB at batch 41), with
+318/320 objects identical. The other two differ only in `rt_enum_new` id
+immediates. Object bytes from the unmodified binary also vary with process
+state: 43/84 changed when one diagnostic env var was added.
+What remains is runtime registry side tables, `mir_verify` scratch and backend
+session byte copies.

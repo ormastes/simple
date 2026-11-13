@@ -65,3 +65,20 @@ matching result. No VM path is a Simple Container backend.
 Sources and code map:
 [domain research](../01_research/domain/native_macos_simple_container_2026-09-27.md),
 [local research](../01_research/local/native_macos_simple_container_2026-09-27.md).
+
+## Endpoint network core (`endpoint-v1`, pure layer)
+
+The emulated private network of the Seatbelt design
+(`doc/05_design/simple_container_macos_seatbelt.md` 11, 12.2) has a pure
+Simple decision core with no sockets and no host I/O:
+`src/lib/common/contracts/container/endpoint_frame_v1.spl` (bounded binary
+`endpoint-frame-v1` codec) and `src/lib/nogc_async_mut/container/network/`
+(identities, bounded logical IPAM, network-scoped service registry,
+default-deny `authorize_route`, policy revisions/revocation, per-session frame
+flow control, external-address policy). `endpoint-v1` is an application-visible
+endpoint fabric, not a kernel network namespace: logical addresses are never
+assigned to a process stack, and routes are keyed by network + endpoint
+identity + port + protocol + generation. `pod-ip-v1` is always rejected.
+The broker transport (open/connect/accept/poll/close) is unqualified and fails
+closed, so `endpoint-v1` admission stays blocked until a real macOS data plane
+records native evidence.

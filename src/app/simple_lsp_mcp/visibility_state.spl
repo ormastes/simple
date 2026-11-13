@@ -1,0 +1,63 @@
+# Simple LSP MCP - per-server-session MDSOC+ view (REQ-PUBVIEW-010..012)
+#
+# Holds ONE immutable SourceVisibilitySessionV1 for this server session; each
+# request replaces it with the value the pure transition returns. The MCP
+# stdio loop serves requests one at a time, so replacement needs no lock.
+# Auto-revert limit knob: SIMPLE_VISIBILITY_AUTO_REVERT (default 3).
+use app.io.minimal_runtime_ops.{env_get, file_exists}
+use std.nogc_sync_mut.source.visibility_view.{source_visibility_level_valid_v1}
+use std.nogc_sync_mut.source.visibility_session.{SourceVisibilitySessionV1, SourceVisibilityServedV1,
+    source_visibility_session_default_v1, source_visibility_session_set_v1, source_visibility_session_serve_v1,
+    source_visibility_auto_revert_limit_v1, source_visibility_scope_label_v1}
+
+var _LSP_MCP_VIEW_READY: bool = false
+var _LSP_MCP_VIEW: SourceVisibilitySessionV1 = SourceVisibilitySessionV1("public", "", "", 0, 3, "")
+
+pub fn lsp_mcp_view_current() -> SourceVisibilitySessionV1:
+    if not _LSP_MCP_VIEW_READY:
+        _LSP_MCP_VIEW = source_visibility_session_default_v1(
+            source_visibility_auto_revert_limit_v1(env_get("SIMPLE_VISIBILITY_AUTO_REVERT")))
+        _LSP_MCP_VIEW_READY = true
+    _LSP_MCP_VIEW
+
+pub fn lsp_mcp_view_reset():
+    _LSP_MCP_VIEW_READY = false
+
+# Serve one symbol request: returns the effective (level, feature, layer) plus
+# the view line, and replaces the session value (countdown / revert).
+pub fn lsp_mcp_view_serve(override_level: text, feature: text, layer: text) -> SourceVisibilityServedV1:
+    val served = source_visibility_session_serve_v1(lsp_mcp_view_current(), override_level, feature, layer)
+    _LSP_MCP_VIEW = served.session
+    served
+
+# simple_set_visibility: ("", status line) on success, (error, "") otherwise.
+pub fn lsp_mcp_view_set(level: text, feature: text, layer: text) -> (text, text):
+    if not source_visibility_level_valid_v1(level):
+        return ("simple_set_visibility: visibility must be one of public, feature_private, layer_private, all", "")
+    val next = source_visibility_session_set_v1(lsp_mcp_view_current(), level, feature, layer)
+    _LSP_MCP_VIEW = next
+    if next.level == "public":
+        return ("", "view: public" + source_visibility_scope_label_v1(next.feature, next.layer) + " (session)")
+    ("", "view: " + next.level + source_visibility_scope_label_v1(next.feature, next.layer) +
+        " (session), auto-revert after " + str(next.limit) + " requests; set visibility=public to return")
+
+
+# True when `file` sits under an MDSOC `__init__.spl` boundary (same walk as
+# query_visibility's nearest_boundary_dir).
+fn lsp_mcp_view_has_boundary(file: text) -> bool:
+    var current = file.replace("\\", "/")
+    var remaining = 64
+    while remaining > 0:
+        val idx = current.last_index_of("/")
+        if idx <= 0: return false
+        current = current.substring(0, idx)
+        if file_exists(current + "/__init__.spl"): return true
+        remaining = remaining - 1
+    false
+
+# The view line for one file: a public view on a module with no boundary lists
+# every symbol, so the line says so instead of a bare `view: public`.
+pub fn lsp_mcp_view_line_for_file(served: SourceVisibilityServedV1, file: text) -> text:
+    if served.level != "public" or lsp_mcp_view_has_boundary(file): return served.view
+    served.view + " (module has no __init__ boundary: all symbols are public)"
+

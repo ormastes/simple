@@ -37,6 +37,14 @@ use compiler.hir.hir_types.*
 use compiler.hir.hir_lowering.types.{HirLowering, LoweringErrorKind}
 use compiler.hir.hir_lowering.items.*
 use compiler.hir.hir_lowering.required_field_init_v1.*
+use compiler.core.parser.{parser_has_errors}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_create_exclusive}
+use std.common.crypto.sha256.{sha256_text}
+use compiler.driver.driver_hir_cache.{hir_cache_key}
+use compiler.driver.managed_parse_group.{managed_parse_group_feature_identity_v1}
+use compiler.driver.parse_result_provider_seam_v1.{parse_result_normalize_module_v1, parse_result_normalized_output_same_v1}
+use compiler.frontend.parser_types.{ParserModule}
+use compiler.hir.hir_lowering.module_surface_declarations.{ModuleSurfaceParserOwner, module_surface_owner_value}
 
 fn check(source: text, name: text) -> RequiredInitReportV1:
     val filename = "required_init_" + name + ".spl"
@@ -63,10 +71,12 @@ fn gated(source: text, name: text, mode: text) -> text:
     val saved_mode = env_get(REQUIRED_INIT_CHECK_ENV)
     env_set("SIMPLE_BOOTSTRAP", "0")
     env_set(REQUIRED_INIT_CHECK_ENV, mode)
+    required_init_check_mode_reload_v1()
     val module = parse_full_frontend(source, filename, filename, Logger(level: 0))
     var hir_lowering = HirLowering.with_filename(filename)
     val hir = hir_lowering.lower_module(module)
     env_set(REQUIRED_INIT_CHECK_ENV, saved_mode)
+    required_init_check_mode_reload_v1()
     env_set("SIMPLE_BOOTSTRAP", saved_bootstrap)
     var out = ""
     for e in hir_lowering.errors:
@@ -76,6 +86,35 @@ fn gated(source: text, name: text, mode: text) -> text:
                 case _: "error"
             out = out + severity + ":" + e.message.split(":")[0] + ";"
     out
+
+fn module_of(source: text, name: text) -> ParserModule:
+    val filename = "required_init_module_" + name + ".spl"
+    parse_full_frontend(source, filename, filename, Logger(level: 0))
+
+fn parses(source: text, name: text) -> bool:
+    val filename = "required_init_parse_" + name + ".spl"
+    parse_full_frontend(source, filename, filename, Logger(level: 0))
+    not parser_has_errors()
+
+# HIR cache key of one fixture file under one gate value (item 3: the gate is
+# a HIR identity, folded by driver_hir_cache._hir_cache_env_switches).
+fn key_under(path: text, mode: text) -> text:
+    val saved_mode = env_get(REQUIRED_INIT_CHECK_ENV)
+    env_set(REQUIRED_INIT_CHECK_ENV, mode)
+    required_init_check_mode_reload_v1()
+    val key = hir_cache_key(path, sha256_text("closure"), false)
+    env_set(REQUIRED_INIT_CHECK_ENV, saved_mode)
+    required_init_check_mode_reload_v1()
+    key
+
+fn parse_identity_under(mode: text) -> text:
+    val saved_mode = env_get(REQUIRED_INIT_CHECK_ENV)
+    env_set(REQUIRED_INIT_CHECK_ENV, mode)
+    required_init_check_mode_reload_v1()
+    val identity = managed_parse_group_feature_identity_v1()
+    env_set(REQUIRED_INIT_CHECK_ENV, saved_mode)
+    required_init_check_mode_reload_v1()
+    identity
 
 val NODE_CLASS: text = "class HirNode:\n    id: i64\n    body: text\n    inferred: i64\n"
 val ASYNC_STAND_IN: text = "fn async_init(x: i64) -> i64:\n    x\n"
@@ -175,6 +214,61 @@ describe "Required field initialization":
         val nil_src = NODE_CLASS + "fn bump(n: HirNode) -> HirNode:\n    HirNode(..n, body: nil)\n"
         expect(codes(check(nil_src, "spread_nil"))).to_equal("E_ATTR_REQUIRED_UNINIT:HirNode.body;")
 
+    it "maps positional arguments to the fields no named argument claims, as MIR lower_struct_construct does":
+        # @req REQ-IMM-ASY-01
+        step("`HirNode(\"b\", 2, id: 5)`: id is named, so body takes \"b\" and inferred takes 2")
+        val src = NODE_CLASS + "fn make() -> HirNode:\n    HirNode(\"b\", 2, id: 5)\n"
+        # @capture(exec): complete under MIR's mapping, no rows
+        expect(codes(check(src, "mixed"))).to_equal("")
+        step("`HirNode(\"b\", id: 5)` still omits inferred")
+        val short_src = NODE_CLASS + "fn make() -> HirNode:\n    HirNode(\"b\", id: 5)\n"
+        expect(codes(check(short_src, "mixed_short"))).to_equal("E_ATTR_REQUIRED_UNINIT:HirNode.inferred;")
+        step("The parser accepts a positional argument after a named one; MIR maps it the same way")
+        val named_first = NODE_CLASS + "fn make() -> HirNode:\n    HirNode(id: 5, \"b\", 2)\n"
+        expect(parses(named_first, "named_first")).to_equal(true)
+        expect(codes(check(named_first, "named_first"))).to_equal("")
+
+    it "keeps MIR's mapping at the edges: surplus positionals, unknown names, and defaulted fields":
+        # @req REQ-IMM-ASY-01
+        step("All positional, and more positionals than fields: the surplus is dropped, no row")
+        val all_pos = NODE_CLASS + "fn make() -> HirNode:\n    HirNode(1, \"b\", 2)\n"
+        expect(codes(check(all_pos, "all_pos"))).to_equal("")
+        val surplus = NODE_CLASS + "fn make() -> HirNode:\n    HirNode(1, \"b\", 2, 3)\n"
+        expect(codes(check(surplus, "surplus"))).to_equal("")
+        step("A name that matches no field claims no slot, so the positionals still fill id and body")
+        val unknown = NODE_CLASS + "fn make() -> HirNode:\n    HirNode(1, \"b\", nope: 4)\n"
+        expect(codes(check(unknown, "unknown_name"))).to_equal("E_ATTR_REQUIRED_UNINIT:HirNode.inferred;")
+        step("A positional fills the next unclaimed field in declared order even when it has a default")
+        val dflt = "class Dflt:\n    id: i64\n    note: text = \"n\"\n    count: i64\n"
+        val named_count = dflt + "fn make() -> Dflt:\n    Dflt(1, count: 2)\n"
+        expect(codes(check(named_count, "dflt_named"))).to_equal("")
+        val shifted = dflt + "fn make() -> Dflt:\n    Dflt(1, \"m\")\n"
+        expect(codes(check(shifted, "dflt_shifted"))).to_equal("E_ATTR_REQUIRED_UNINIT:Dflt.count;")
+
+    it "judges struct declarations and struct-literal constructions like class calls":
+        # @req REQ-IMM-ASY-03
+        step("A struct constructed by call omits `y`")
+        val st = "struct P:\n    x: i64\n    y: i64\nfn make() -> P:\n    P(x: 1)\n"
+        expect(codes(check(st, "struct_call"))).to_equal("E_ATTR_REQUIRED_UNINIT:P.y;")
+        step("A struct literal `T { f: v }` omits `inferred`")
+        val lit = NODE_CLASS + "fn make() -> HirNode:\n    HirNode { id: 1, body: \"b\" }\n"
+        expect(codes(check(lit, "struct_lit"))).to_equal("E_ATTR_REQUIRED_UNINIT:HirNode.inferred;")
+
+    it "renders each field type into the ATTR-01 conflict message":
+        # @req REQ-IMM-ATTR-01
+        val src = "class Holder:\n    n: i64\nclass Box<T>:\n    v: T\n" +
+            "@node_tree(\"k\")\nclass A:\n    a: [i64]\n    b: Dict<text, i64>\n    c: f64\n    d: bool\n    e: Holder\n    f: u8\n    g: Box<i64>\n    h: char\n" +
+            "@node_tree(\"k\")\nclass B:\n    a: i64\n    b: i64\n    c: i64\n    d: i64\n    e: i64\n    f: i64\n    g: i64\n    h: i64\n"
+        val report = check(src, "attr01_keys")
+        expect(codes(report)).to_equal("E_ATTR_TYPE_CONFLICT:B.a;E_ATTR_TYPE_CONFLICT:B.b;E_ATTR_TYPE_CONFLICT:B.c;" +
+            "E_ATTR_TYPE_CONFLICT:B.d;E_ATTR_TYPE_CONFLICT:B.e;E_ATTR_TYPE_CONFLICT:B.f;" +
+            "E_ATTR_TYPE_CONFLICT:B.g;E_ATTR_TYPE_CONFLICT:B.h;")
+        var messages = ""
+        for row in report.rows:
+            messages = messages + row.message + "\n"
+        for key in ["`[i64]`", "`\{text:i64\}`", "`f64`", "`bool`", "`Holder`", "`u8`", "`Box<i64>`", "`char`"]:
+            expect(messages.contains(key)).to_equal(true)
+
 describe "Required field initialization gate (SIMPLE_REQUIRED_INIT_CHECK)":
     it "is off by default: an unannotated module lowers with no verifier diagnostic":
         # @req REQ-IMM-ASY-03
@@ -199,3 +293,86 @@ describe "Required field initialization gate (SIMPLE_REQUIRED_INIT_CHECK)":
             "fn make() -> HirNode:\n    HirNode(id: 1, body: \"b\")\n"
         expect(gated(src, "async_off", "off")).to_equal("error:E_ASYNC_INIT_MISSING;")
         expect(gated(src, "async_warning", "warning")).to_equal("error:E_ASYNC_INIT_MISSING;")
+    it "reads the gate once per process; required_init_check_mode_reload_v1 re-reads it":
+        # @req REQ-IMM-ASY-03
+        step("A HIR post-pass runs per module, so the env read must not repeat per module")
+        val saved_mode = env_get(REQUIRED_INIT_CHECK_ENV)
+        env_set(REQUIRED_INIT_CHECK_ENV, "warning")
+        required_init_check_mode_reload_v1()
+        expect(required_init_check_mode_v1()).to_equal("warning")
+        env_set(REQUIRED_INIT_CHECK_ENV, "error")
+        # @capture(exec): the cached value survives an env change
+        expect(required_init_check_mode_v1()).to_equal("warning")
+        required_init_check_mode_reload_v1()
+        expect(required_init_check_mode_v1()).to_equal("error")
+        env_set(REQUIRED_INIT_CHECK_ENV, saved_mode)
+        required_init_check_mode_reload_v1()
+
+    it "lets a module opt in with @required_init(error|warning); the stricter of module and env wins":
+        # @req REQ-IMM-ASY-03
+        val body = NODE_CLASS + "fn make() -> HirNode:\n    HirNode(id: 1)\n"
+        step("Module error under env off")
+        expect(gated("@required_init(error)\n" + body, "mod_error", "off")).to_equal("error:E_ATTR_REQUIRED_UNINIT;error:E_ATTR_REQUIRED_UNINIT;")
+        step("Module warning under env off")
+        expect(gated("@required_init(warning)\n" + body, "mod_warning", "off")).to_equal("warning:E_ATTR_REQUIRED_UNINIT;warning:E_ATTR_REQUIRED_UNINIT;")
+        step("Env error is stricter than module warning")
+        expect(gated("@required_init(warning)\n" + body, "mod_env_error", "error")).to_equal("error:E_ATTR_REQUIRED_UNINIT;error:E_ATTR_REQUIRED_UNINIT;")
+        step("No marker under env off stays silent")
+        expect(gated(body, "mod_none", "off")).to_equal("")
+
+    it "keeps the module opt-in through the async desugar rebuild":
+        # @req REQ-IMM-ASY-03
+        step("A module with an async fn is rebuilt by desugar_async; the mode must survive it")
+        val async_src = "@required_init(error)\n" + NODE_CLASS + "fn make() -> HirNode:\n    HirNode(id: 1)\n" +
+            "async fn later() -> i64:\n    1\n"
+        expect(gated(async_src, "mod_async", "off")).to_equal("error:E_ATTR_REQUIRED_UNINIT;error:E_ATTR_REQUIRED_UNINIT;")
+
+    it "ignores a module mode other than error or warning":
+        # @req REQ-IMM-ASY-03
+        val body = NODE_CLASS + "fn make() -> HirNode:\n    HirNode(id: 1)\n"
+        expect(module_of("@required_init(off)\n" + body, "mod_bad_off").required_init_mode).to_equal("")
+        expect(gated("@required_init(strict)\n" + body, "mod_bad_strict", "off")).to_equal("")
+
+describe "Required field initialization gate identity":
+    it "folds the gate into the HIR cache key only when it is not off, and not into the parse identity":
+        # @req REQ-IMM-ASY-03
+        val tmp = env_get("TMPDIR")
+        val parent = if tmp == "": "/tmp" else: tmp
+        val root = secure_temp_dir(parent, "required_init_key").unwrap()
+        val path = root + "/fixture.spl"
+        expect(file_create_exclusive(path, "fn main():\n    0\n")).to_equal(true)
+        step("Unset and off share one key, so default users keep their HIR cache")
+        val unset_key = key_under(path, "")
+        expect(unset_key.len() > 0).to_equal(true)
+        expect(key_under(path, "off")).to_equal(unset_key)
+        step("warning and error each get their own key")
+        val warning_key = key_under(path, "warning")
+        expect(warning_key == unset_key).to_equal(false)
+        expect(key_under(path, "error") == warning_key).to_equal(false)
+        step("The managed-parse feature identity does not move with the gate")
+        expect(parse_identity_under("warning")).to_equal(parse_identity_under(""))
+
+    it "adds the module opt-in to the parse node digest only when set, and keeps it through the module-surface owner":
+        # @req REQ-IMM-ASY-03
+        val src = NODE_CLASS
+        val plain = module_of(src, "digest")
+        expect(plain.required_init_mode).to_equal("")
+        var as_error = module_of(src, "digest")
+        as_error.required_init_mode = "error"
+        var as_warning = module_of(src, "digest")
+        as_warning.required_init_mode = "warning"
+        val path = "required_init_digest.spl"
+        val plain_out = parse_result_normalize_module_v1(plain, src, path, [])
+        step("An unset mode adds no material: two unmarked parses normalize identically")
+        expect(parse_result_normalized_output_same_v1(plain_out,
+            parse_result_normalize_module_v1(module_of(src, "digest"), src, path, []))).to_equal(true)
+        step("error and warning each move the node digest")
+        val error_out = parse_result_normalize_module_v1(as_error, src, path, [])
+        val warning_out = parse_result_normalize_module_v1(as_warning, src, path, [])
+        expect(parse_result_normalized_output_same_v1(plain_out, error_out)).to_equal(false)
+        expect(parse_result_normalized_output_same_v1(error_out, warning_out)).to_equal(false)
+        step("The module-surface owner round trip keeps the mode")
+        val marked = module_of("@required_init(error)\n" + src, "owner_marked")
+        expect(marked.required_init_mode).to_equal("error")
+        expect(module_surface_owner_value(ModuleSurfaceParserOwner.new(marked)).required_init_mode).to_equal("error")
+        expect(module_surface_owner_value(ModuleSurfaceParserOwner.new(plain)).required_init_mode).to_equal("")

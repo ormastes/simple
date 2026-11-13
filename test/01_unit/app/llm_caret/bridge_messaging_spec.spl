@@ -1,0 +1,142 @@
+# @req REQ-SSPEC-UNIT
+"""
+# Claude full bridge messaging
+
+As a caret user with a remote-control bridge, inbound user messages must be
+routed once, echoes and replays dropped, and server control requests answered
+with the right success or error response.
+"""
+
+use std.spec.step
+use std.spec.*
+use app.llm_caret.claude_full.bridge.bridgeMessaging.*
+
+describe "Claude full bridge messaging":
+    it "evicts the oldest uuid when the ring is full":
+        step("ring")
+        var set = BoundedUUIDSet.new(2)
+        set.add("a")
+        set.add("b")
+        set.add("c")
+        expect(set.size()).to_equal(2)
+        expect(set.has("a")).to_equal(false)
+        expect(set.has("b")).to_equal(true)
+        expect(set.has("c")).to_equal(true)
+
+    it "ignores duplicate adds and zero capacity":
+        step("dup")
+        var set = BoundedUUIDSet.new(2)
+        set.add("a")
+        set.add("a")
+        expect(set.size()).to_equal(1)
+        var none = BoundedUUIDSet.new(0)
+        none.add("x")
+        expect(none.size()).to_equal(0)
+        set.clear()
+        expect(set.size()).to_equal(0)
+        expect(replaceAt(["a", "b"], 1, "z")).to_equal(["a", "z"])
+
+    it "only forwards real user and assistant messages and local commands":
+        step("eligible")
+        expect(isEligibleBridgeMessage(BridgeMessage.new("user", "", "hi"))).to_equal(true)
+        expect(isEligibleBridgeMessage(BridgeMessage.new("assistant", "", "hi").virtual())).to_equal(false)
+        expect(isEligibleBridgeMessage(BridgeMessage.new("system", "local_command", ""))).to_equal(true)
+        expect(isEligibleBridgeMessage(BridgeMessage.new("system", "init", ""))).to_equal(false)
+        expect(isEligibleBridgeMessage(BridgeMessage.new("progress", "", ""))).to_equal(false)
+
+    it "extracts a title only from human user messages":
+        step("title")
+        expect(extractTitleText(BridgeMessage.new("user", "", "  Fix the bug  "))).to_equal("Fix the bug")
+        expect(extractTitleText(BridgeMessage.new("assistant", "", "x"))).to_equal("")
+        expect(extractTitleText(BridgeMessage.new("user", "", "x").meta())).to_equal("")
+        expect(extractTitleText(BridgeMessage.new("user", "", "x").toolResult())).to_equal("")
+        expect(extractTitleText(BridgeMessage.new("user", "", "x").compactSummary())).to_equal("")
+        expect(extractTitleText(BridgeMessage.new("user", "", "x").fromOrigin("hook"))).to_equal("")
+        expect(extractTitleText(BridgeMessage.new("user", "", "<ide_opened_file>f</ide_opened_file>"))).to_equal("")
+
+    it "routes a new user message inbound and remembers its uuid":
+        step("inbound")
+        val posted = BoundedUUIDSet.new(4)
+        val inbound = BoundedUUIDSet.new(4)
+        val r = handleIngressMessage("user|u1|hello", posted, inbound)
+        expect(r.route).to_equal("inbound")
+        expect(r.message.content).to_equal("hello")
+        expect(r.analytics).to_equal("tengu_bridge_message_received")
+        expect(r.log).to_equal("[bridge:repl] Ingress message type=user uuid=u1")
+        expect(inbound.has("u1")).to_equal(true)
+
+    it "drops echoes of our own posts and re-delivered inbound messages":
+        step("dedup")
+        val posted = BoundedUUIDSet.new(4)
+        val inbound = BoundedUUIDSet.new(4)
+        posted.add("p1")
+        val echo = handleIngressMessage("user|p1|x", posted, inbound)
+        expect(echo.route).to_equal("ignored")
+        expect(echo.log).to_equal("[bridge:repl] Ignoring echo: type=user uuid=p1")
+        handleIngressMessage("user|u9|x", posted, inbound)
+        val again = handleIngressMessage("user|u9|x", posted, inbound)
+        expect(again.log).to_equal("[bridge:repl] Ignoring re-delivered inbound: type=user uuid=u9")
+
+    it "ignores non-user messages and unparsable data":
+        step("ignored")
+        val posted = BoundedUUIDSet.new(4)
+        val inbound = BoundedUUIDSet.new(4)
+        expect(handleIngressMessage("assistant|a1|x", posted, inbound).log).to_equal("[bridge:repl] Ignoring non-user inbound message: type=assistant")
+        expect(handleIngressMessage("nopipes", posted, inbound).route).to_equal("ignored")
+        expect(handleIngressMessage("|u|x", posted, inbound).route).to_equal("ignored")
+
+    it "routes control responses and requests":
+        step("control routes")
+        val posted = BoundedUUIDSet.new(4)
+        val inbound = BoundedUUIDSet.new(4)
+        val resp = handleIngressMessage("control_response|r7", posted, inbound)
+        expect(resp.route).to_equal("permission_response")
+        expect(resp.response.requestId).to_equal("r7")
+        val req = handleIngressMessage("control_request|r8|interrupt", posted, inbound)
+        expect(req.route).to_equal("control_request")
+        expect(req.log).to_equal("[bridge:repl] Inbound control_request subtype=interrupt")
+
+    it "answers each control subtype with the matching action":
+        step("control success")
+        val h = ControlHandlers.new("sess")
+        expect(handleServerControlRequest(SDKControlRequest.new("1", "initialize"), h).action).to_equal("initialize")
+        expect(handleServerControlRequest(SDKControlRequest.setModel("2", "opus"), h).action).to_equal("set_model:opus")
+        expect(handleServerControlRequest(SDKControlRequest.setMaxThinkingTokens("3", 500), h).action).to_equal("set_max_thinking_tokens:500")
+        expect(handleServerControlRequest(SDKControlRequest.setPermissionMode("4", "plan"), h).action).to_equal("set_permission_mode:plan")
+        val intr = handleServerControlRequest(SDKControlRequest.new("5", "interrupt"), h)
+        expect(intr.response.encode()).to_equal("control_response|success|5|sess")
+        expect(intr.log).to_equal("[bridge:repl] Sent control_response for interrupt request_id=5 result=success")
+
+    it "answers failures for permission errors and unknown subtypes":
+        step("control errors")
+        val bad = ControlHandlers.new("sess").permissionError("nope")
+        val r = handleServerControlRequest(SDKControlRequest.setPermissionMode("4", "plan"), bad)
+        expect(r.action).to_equal("set_permission_mode_error")
+        expect(r.response.encode()).to_equal("control_response|error|4|sess|nope")
+        val unk = handleServerControlRequest(SDKControlRequest.new("6", "mystery"), ControlHandlers.new("sess"))
+        expect(unk.action).to_equal("unknown")
+        expect(unk.response.error).to_equal("REPL bridge does not handle control_request subtype: mystery")
+
+    it "rejects mutations on outbound-only sessions but still initializes":
+        step("outbound only")
+        val h = ControlHandlers.new("sess").outbound()
+        val rej = handleServerControlRequest(SDKControlRequest.setModel("2", "opus"), h)
+        expect(rej.action).to_equal("outbound_only")
+        expect(rej.response.error).to_equal(outboundOnlyError())
+        expect(rej.log).to_equal("[bridge:repl] Rejected set_model (outbound-only) request_id=2")
+        expect(handleServerControlRequest(SDKControlRequest.new("1", "initialize"), h).action).to_equal("initialize")
+
+    it "does not write when no transport is configured":
+        step("no transport")
+        val r = handleServerControlRequest(SDKControlRequest.new("1", "initialize"), ControlHandlers.new("s").withoutTransport())
+        expect(r.wrote).to_equal(false)
+        expect(r.log).to_equal("[bridge:repl] Cannot respond to control_request: transport not configured")
+
+    it "builds a deterministic result message":
+        step("result")
+        val m = makeResultMessage("s1")
+        expect(m.uuid).to_equal("uuid-s1")
+        expect(m.sessionId).to_equal("s1")
+        expect(m.subtype).to_equal("success")
+        expect(normalizeControlMessageKeys("requestId=1")).to_equal("request_id=1")
+        expect(partOrEmpty(["a"], 3)).to_equal("")

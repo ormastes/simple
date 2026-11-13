@@ -804,7 +804,23 @@ impl<'a> MirLowerer<'a> {
                 })?;
                 (decoded, TypeId::F64)
             } else {
-                (self.unbox_scalar_for_raw_slot(TypeId::I64, TypeId::ANY, source_reg)?, TypeId::I64)
+                // Integer target: decode through `rt_any_to_int`, not
+                // `UnboxInt`. `rt_value_unbox_int` passes a heap value through
+                // verbatim, so an `any` holding a heap-boxed FLOAT cast to the
+                // box address (`41.75 as i64` == 4244870612817). `rt_any_to_int`
+                // truncates a float and is otherwise the same tag-aware decode
+                // (tagged int, true/false -> 1/0, wide int); text parses.
+                // doc/08_tracking/bug/jit_any_float_cast_to_int_reads_heap_word_2026-11-13.md
+                let decoded = self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    func.block_mut(current_block).unwrap().instructions.push(MirInst::Call {
+                        dest: Some(dest),
+                        target: crate::mir::CallTarget::from_name("rt_any_to_int"),
+                        args: vec![source_reg],
+                    });
+                    dest
+                })?;
+                (decoded, TypeId::I64)
             }
         } else {
             (source_reg, from_ty)

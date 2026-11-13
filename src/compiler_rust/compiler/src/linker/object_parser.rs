@@ -327,7 +327,7 @@ impl ParsedObject {
                 let reloc_type = if targets_refptr_stub {
                     RelocationType::GotPcRel
                 } else {
-                    map_relocation_type(reloc.kind(), reloc.encoding(), reloc.flags())?
+                    map_relocation_type(obj_file.architecture(), reloc.kind(), reloc.encoding(), reloc.flags())?
                 };
 
                 let smf_reloc = SmfRelocation {
@@ -370,6 +370,7 @@ impl Default for ParsedObject {
 
 /// Map object relocation type to SMF relocation type
 fn map_relocation_type(
+    arch: object::Architecture,
     kind: object::RelocationKind,
     encoding: object::RelocationEncoding,
     flags: object::RelocationFlags,
@@ -377,6 +378,15 @@ fn map_relocation_type(
     use object::RelocationEncoding::*;
     use object::RelocationFlags::*;
     use object::RelocationKind::*;
+
+    // ELF r_type numbers are per-machine, and `object` classifies only a few
+    // AArch64 ones (CALL26 even as PltRelative, which the generic arm below
+    // would turn into x86 Plt32). Map aarch64 ELF by r_type first and fail
+    // closed on anything the SMF loader cannot apply (bug
+    // smf_aarch64_elf_relocations_dropped_2026-11-13).
+    if let (object::Architecture::Aarch64, Elf { r_type }) = (arch, flags) {
+        return map_aarch64_elf_relocation(r_type);
+    }
 
     // Map based on relocation kind and encoding
     match (kind, encoding) {
@@ -402,6 +412,28 @@ fn map_relocation_type(
     }
 }
 
+/// Map an aarch64 ELF relocation to the SMF type the loader applies.
+/// `LDST128_ABS_LO12_NC` is deliberately unsupported: the PageOff12 applier
+/// scales by instruction bits 31:30, which is wrong for 128-bit accesses.
+fn map_aarch64_elf_relocation(r_type: u32) -> ParseResult<RelocationType> {
+    use object::elf::*;
+    match r_type {
+        R_AARCH64_NONE => Ok(RelocationType::None),
+        R_AARCH64_ABS64 => Ok(RelocationType::Abs64),
+        R_AARCH64_PREL32 => Ok(RelocationType::Pc32),
+        R_AARCH64_CALL26 | R_AARCH64_JUMP26 => Ok(RelocationType::Arm64Branch26),
+        R_AARCH64_ADR_PREL_PG_HI21 | R_AARCH64_ADR_PREL_PG_HI21_NC => Ok(RelocationType::Arm64Page21),
+        R_AARCH64_ADD_ABS_LO12_NC
+        | R_AARCH64_LDST8_ABS_LO12_NC
+        | R_AARCH64_LDST16_ABS_LO12_NC
+        | R_AARCH64_LDST32_ABS_LO12_NC
+        | R_AARCH64_LDST64_ABS_LO12_NC => Ok(RelocationType::Arm64PageOff12),
+        R_AARCH64_ADR_GOT_PAGE => Ok(RelocationType::Arm64GotLoadPage21),
+        R_AARCH64_LD64_GOT_LO12_NC => Ok(RelocationType::Arm64GotLoadPageOff12),
+        _ => Err(ObjectParseError::UnsupportedRelocation(r_type)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -422,6 +454,7 @@ mod tests {
 
         assert_eq!(
             map_relocation_type(
+                object::Architecture::X86_64,
                 Absolute,
                 Generic,
                 RelocationFlags::Generic {
@@ -435,6 +468,7 @@ mod tests {
         );
         assert_eq!(
             map_relocation_type(
+                object::Architecture::X86_64,
                 Relative,
                 Generic,
                 RelocationFlags::Generic {
@@ -448,6 +482,7 @@ mod tests {
         );
         assert_eq!(
             map_relocation_type(
+                object::Architecture::Aarch64,
                 object::RelocationKind::Unknown,
                 object::RelocationEncoding::Generic,
                 RelocationFlags::MachO {
@@ -459,6 +494,85 @@ mod tests {
             .unwrap(),
             RelocationType::Arm64Branch26
         );
+    }
+
+    /// Build an aarch64 ELF object whose `.text` carries one relocation per
+    /// `r_type`, each against an undefined external symbol.
+    fn aarch64_elf_object_with_relocs(r_types: &[u32]) -> Vec<u8> {
+        use object::write::{Object as WriteObject, Relocation, Symbol, SymbolSection};
+        use object::{Architecture, BinaryFormat, Endianness, RelocationFlags, SymbolFlags, SymbolKind, SymbolScope};
+
+        let mut object = WriteObject::new(BinaryFormat::Elf, Architecture::Aarch64, Endianness::Little);
+        let text = object.add_section(Vec::new(), b".text".to_vec(), SectionKind::Text);
+        // One 4-byte instruction slot per relocation, then `ret`.
+        let mut code = vec![0u8; r_types.len() * 4];
+        code.extend_from_slice(&0xd65f_03c0u32.to_le_bytes());
+        object.append_section_data(text, &code, 4);
+        let ext = object.add_symbol(Symbol {
+            name: b"rt_print_value".to_vec(),
+            value: 0,
+            size: 0,
+            kind: SymbolKind::Text,
+            scope: SymbolScope::Linkage,
+            weak: false,
+            section: SymbolSection::Undefined,
+            flags: SymbolFlags::None,
+        });
+        for (i, r_type) in r_types.iter().enumerate() {
+            object
+                .add_relocation(
+                    text,
+                    Relocation {
+                        offset: (i * 4) as u64,
+                        symbol: ext,
+                        addend: 0,
+                        flags: RelocationFlags::Elf { r_type: *r_type },
+                    },
+                )
+                .unwrap();
+        }
+        object.write().unwrap()
+    }
+
+    /// bug smf_aarch64_elf_relocations_dropped_2026-11-13: on aarch64 ELF
+    /// (Linux/FreeBSD arm64) every ADRP/LO12/GOT relocation fell through to
+    /// `RelocationType::None` and CALL26 became x86 `Plt32`, so every
+    /// compiled `.smf` loaded through an unpatched `adrp; ldr; blr` and
+    /// jumped to its own instruction bytes (SIGBUS on `print("hi")`).
+    #[test]
+    fn aarch64_elf_relocations_map_to_arm64_smf_types() {
+        use object::elf::*;
+        let cases = [
+            (R_AARCH64_CALL26, RelocationType::Arm64Branch26),
+            (R_AARCH64_JUMP26, RelocationType::Arm64Branch26),
+            (R_AARCH64_ADR_PREL_PG_HI21, RelocationType::Arm64Page21),
+            (R_AARCH64_ADR_PREL_PG_HI21_NC, RelocationType::Arm64Page21),
+            (R_AARCH64_ADD_ABS_LO12_NC, RelocationType::Arm64PageOff12),
+            (R_AARCH64_LDST8_ABS_LO12_NC, RelocationType::Arm64PageOff12),
+            (R_AARCH64_LDST16_ABS_LO12_NC, RelocationType::Arm64PageOff12),
+            (R_AARCH64_LDST32_ABS_LO12_NC, RelocationType::Arm64PageOff12),
+            (R_AARCH64_LDST64_ABS_LO12_NC, RelocationType::Arm64PageOff12),
+            (R_AARCH64_ADR_GOT_PAGE, RelocationType::Arm64GotLoadPage21),
+            (R_AARCH64_LD64_GOT_LO12_NC, RelocationType::Arm64GotLoadPageOff12),
+            (R_AARCH64_ABS64, RelocationType::Abs64),
+        ];
+        let r_types: Vec<u32> = cases.iter().map(|(r, _)| *r).collect();
+        let parsed = ParsedObject::parse(&aarch64_elf_object_with_relocs(&r_types)).unwrap();
+        assert_eq!(parsed.relocations.len(), cases.len());
+        for (i, (r_type, expected)) in cases.iter().enumerate() {
+            let reloc = &parsed.relocations[i];
+            assert_eq!(reloc.offset, (i * 4) as u64);
+            assert_eq!(reloc.reloc_type, *expected, "ELF aarch64 r_type {r_type}");
+        }
+    }
+
+    /// An aarch64 ELF relocation the SMF loader cannot apply must fail the
+    /// compile instead of being silently dropped as `None`.
+    #[test]
+    fn aarch64_elf_unsupported_relocation_fails_closed() {
+        let err = ParsedObject::parse(&aarch64_elf_object_with_relocs(&[object::elf::R_AARCH64_LDST128_ABS_LO12_NC]))
+            .expect_err("unsupported aarch64 relocation must not be dropped");
+        assert!(format!("{err}").contains("299"), "{err}");
     }
 
     #[test]

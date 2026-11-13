@@ -31,7 +31,7 @@ use compiler.common.diagnostics.span.{Span}
 use compiler.common.diagnostics.diagnostic_v1.{DiagnosticV1, DiagnosticFix, FixConfidence}
 use compiler.common.diagnostics.severity.{Severity}
 use compiler.common.visibility.{effective_visibility}
-use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.nogc_sync_mut.io_runtime.{env_get_opt}
 
 pub val E_ATTR_REQUIRED_UNINIT = "E_ATTR_REQUIRED_UNINIT"
 pub val E_ASYNC_INIT_MISSING = "E_ASYNC_INIT_MISSING"
@@ -45,10 +45,41 @@ pub val REQUIRED_INIT_ASYNC_BINDING_NAME = "async_init"
 pub val REQUIRED_INIT_CHECK_ENV = "SIMPLE_REQUIRED_INIT_CHECK"
 
 # Gate: "off" (default) | "warning" | "error". The ASY codes are errors in
-# every mode because the annotation itself is the opt-in.
+# every mode because the annotation itself is the opt-in. The env is read once
+# per process (cached-state pattern of hir_phase_profile.spl): 0 = unread,
+# 1 = off, 2 = warning, 3 = error.
+var _required_init_mode_state: i64 = 0
+
+fn required_init_mode_rank_v1(mode: text) -> i64:
+    if mode == "error":
+        return 3
+    if mode == "warning":
+        return 2
+    1
+
+fn required_init_mode_name_v1(rank: i64) -> text:
+    if rank == 3:
+        return "error"
+    if rank == 2:
+        return "warning"
+    "off"
+
+# Re-reads SIMPLE_REQUIRED_INIT_CHECK. Only a caller that changes the env in
+# process (specs) needs it.
+pub fn required_init_check_mode_reload_v1():
+    _required_init_mode_state = required_init_mode_rank_v1(env_get_opt(REQUIRED_INIT_CHECK_ENV) ?? "")
+
 pub fn required_init_check_mode_v1() -> text:
-    val raw = env_get(REQUIRED_INIT_CHECK_ENV)
-    if raw == "warning" or raw == "error": raw else: "off"
+    if _required_init_mode_state == 0:
+        required_init_check_mode_reload_v1()
+    required_init_mode_name_v1(_required_init_mode_state)
+
+# Effective mode for one module: the stricter of the process gate and the
+# module's `@required_init(error|warning)` opt-in ("" when absent).
+pub fn required_init_effective_mode_v1(module_mode: text) -> text:
+    val process_rank = required_init_mode_rank_v1(required_init_check_mode_v1())
+    val module_rank = required_init_mode_rank_v1(module_mode)
+    required_init_mode_name_v1(if module_rank > process_rank: module_rank else: process_rank)
 
 pub struct RequiredInitFieldV1:
     name: text
@@ -258,18 +289,35 @@ class RequiredInitCollectorV1:
                     return
                 if self.class_of_symbol.contains_key(callee_id):
                     val cls = self.class_of_symbol[callee_id]
-                    var supplied: [(text, HirExpr)] = []
-                    var position = 0
+                    # Same mapping as MIR lower_struct_construct: walk the
+                    # fields in order; a named argument wins, otherwise the
+                    # next positional one. A spread is not a positional slot.
+                    var named_names: [text] = []
+                    var named_values: [HirExpr] = []
+                    var positionals: [HirExpr] = []
                     var has_spread = false
                     for arg in args:
                         if arg.has_name:
-                            supplied.push((arg.name, arg.value))
+                            named_names.push(arg.name)
+                            named_values.push(arg.value)
                         elif required_init_is_spread_arg_v1(arg.value):
                             has_spread = true
-                            continue
-                        elif position < cls.fields.len():
-                            supplied.push((cls.fields[position].name, arg.value))
-                        position = position + 1
+                        else:
+                            positionals.push(arg.value)
+                    var supplied: [(text, HirExpr)] = []
+                    var pos_i = 0
+                    for f in cls.fields:
+                        var named_at = -1
+                        var ni = 0
+                        while ni < named_names.len():
+                            if named_names[ni] == f.name:
+                                named_at = ni
+                            ni = ni + 1
+                        if named_at >= 0:
+                            supplied.push((f.name, named_values[named_at]))
+                        elif pos_i < positionals.len():
+                            supplied.push((f.name, positionals[pos_i]))
+                            pos_i = pos_i + 1
                     self.check_site(cls, supplied, has_spread, node.span)
                 elif val present = self.symbols.get_symbol_raw(callee_id):
                     val sym: HirSymbol = present

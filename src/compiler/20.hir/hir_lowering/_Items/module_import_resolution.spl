@@ -62,6 +62,16 @@ fn private_import_dir_of(path: text) -> text:
     val parts = path.split("/")
     parts[0:parts.len() - 1].join("/")
 
+fn private_import_is_test_importer(importer_path: text) -> bool:
+    """Mirror of the seed's `is_test_caller` (interpreter_module/module_loader.rs),
+    shared by its import and call visibility rules: a path that starts with
+    `test/` or has a `/test/` component, after `\\` -> `/` and a leading `./`
+    is stripped."""
+    var norm = importer_path.replace("\\", "/")
+    while norm.starts_with("./"):
+        norm = norm.substring(2)
+    norm.starts_with("test/") or norm.contains("/test/")
+
 fn private_import_repo_root(module_path: text) -> text:
     """First ancestor directory of `module_path` holding a `.git` entry (a
     directory, or the file a worktree carries), or "" when there is none."""
@@ -769,7 +779,12 @@ impl HirLowering:
         real-resolver full-CLI build then failed HIR on 78+ more non-baselined
         importers the textual census missed, so the default is a warning again
         until the real-resolver census is promoted.
+        Test importers are exempt (owner decision 2026-11-13: "test is
+        special, can access"), with the seed's `is_test_caller` definition
+        (`private_import_is_test_importer`).
         Returns true only when the import was rejected (nothing registered)."""
+        if private_import_is_test_importer(importer_path):
+            return false
         if not importer_path.contains("/"):
             return false
         if private_import_dir_of(importer_path) == private_import_dir_of(imported.canonical_path):

@@ -14,7 +14,8 @@ use compiler.frontend.trace_policy.{frontend_compiler_trace_enabled}
 # frontend path when the newer parser surface is unavailable.
 
 use compiler.core.parser.{parser_error, parser_error_at, parser_parse_type, parser_advance, par_kind_get}
-use compiler.frontend.core.lexer.{lex_init_with_path, lex_source_byte_offset}
+use compiler.frontend.core.lexer.{lex_init_with_path, lex_source_byte_offset, lex_source_char_offset, lexer_state_take,
+    lexer_state_install}
 use compiler.core.tokens.{TOK_EOF}
 use compiler.core.parser_decls.{parse_module_body, parser_unsafe_annotation_present, parser_unsafe_annotation_caps, parser_unsafe_annotation_reason}
 use compiler.frontend.core.string_interpolation_expand.{
@@ -864,7 +865,11 @@ fn flat_bridge_build_string_regions(value: text, span: Span) -> (text, [Interpol
         elif depth == 0 and ch == "{":
             depth = 1
             region_start = i
-            region_offset = span.start + 1 + i + 1
+            # span.start is a BYTE offset (a converted Span) and i a code-point
+            # index into the value; the span pool records CHAR offsets, which
+            # flat_expr_span converts to bytes once. Convert only the byte
+            # base, then add the code-point distance.
+            region_offset = lex_source_char_offset(span.start + 1) + i + 1
             if span.line > 0:
                 region_line = span.line
                 region_col = span.col + 1 + i + 1
@@ -875,12 +880,15 @@ fn flat_bridge_build_string_regions(value: text, span: Span) -> (text, [Interpol
             if depth == 0:
                 # Slice the region from its source bounds instead of retaining
                 # one text and array slot per character; nested braces stay in.
-                val part_idx = parse_interpolation_fragment_at(value.substring(region_start + 1, i), region_offset, region_line, region_col)
+                # Code-point indices, so code-point `[a:b]` cuts: byte-offset
+                # `substring` split a preceding multibyte character
+                # (nonascii_interpolation_byte_char_slice_cache_store_2026-11-13).
+                val part_idx = parse_interpolation_fragment_at(value[region_start + 1:i], region_offset, region_line, region_col)
                 if part_idx < 0:
-                    interpolation_note_malformed_region(value.substring(region_start, i + 1))
-                    chunks.push(value.substring(copied_until, region_start))
+                    interpolation_note_malformed_region(value[region_start:i + 1])
+                    chunks.push(value[copied_until:region_start])
                     chunks.push(interpolation_literalize_region(
-                        value.substring(region_start, i + 1)))
+                        value[region_start:i + 1]))
                     copied_until = i + 1
                 else:
                     interps.push(Interpolation(
@@ -891,11 +899,11 @@ fn flat_bridge_build_string_regions(value: text, span: Span) -> (text, [Interpol
                     ))
         i = i + 1
     if depth != 0:
-        interpolation_note_malformed_region(value.substring(region_start, n))
+        interpolation_note_malformed_region(value[region_start:n])
         return (value, [])
     if copied_until == 0:
         return (value, interps)
-    chunks.push(value.substring(copied_until, n))
+    chunks.push(value[copied_until:n])
     (chunks.join(""), interps)
 
 fn flat_bridge_decode_brace_escapes(value: text) -> text:
@@ -1106,7 +1114,11 @@ fn convert_flat_expr(idx: i64) -> Expr:
         if expr_get_tag(end_idx) != EXPR_INT_LIT or expr_get_int(end_idx) != -1:
             val slice_end = convert_flat_expr(end_idx)
             slice_call_args.push(CallArg(has_name: false, name: "", value: slice_end, span: span))
-        return Expr(kind: ExprKind.MethodCall(slice_obj, "slice", slice_call_args), span: span)
+        # bracket_slice marks the bracket form: it resolves and types exactly
+        # as `.slice`, but MIR cuts a TEXT receiver by code point (s[a:b] is
+        # code points, .slice/.substring are bytes -- owner decision
+        # 2026-11-13; seed: lower_slice -> rt_slice).
+        return Expr(kind: ExprKind.MethodCall(slice_obj, "slice", slice_call_args), span: span, bracket_slice: true)
     if tag == EXPR_ARRAY_LIT:
         val elem_indices = expr_get_args(idx)
         var elems: [Expr] = []
@@ -2663,12 +2675,16 @@ fn convert_decl_function_type_params(idx: i64, span: Span) -> [ParserTypeParam]:
                 val type_text = if is_default: bound[1:] else: bound
                 # The enclosing parse is finished (as for interpolation fragments).
                 # Reuse its type grammar and arena; never flatten Named arguments.
+                # Lend the module lexer out and take it back: later expression
+                # spans of this module convert to byte offsets through it.
+                val module_lexer = lexer_state_take()
                 lex_init_with_path(type_text, "")
                 parser_advance()
                 val bound_tag = parser_parse_type()
                 if par_kind_get() != TOK_EOF:
                     parser_error_at(span.line, span.col, "invalid generic trait bound: " + type_text)
                 var converted_bound = convert_flat_type(bound_tag)
+                lexer_state_install(module_lexer)
                 converted_bound.span = span
                 if is_default:
                     has_default = true

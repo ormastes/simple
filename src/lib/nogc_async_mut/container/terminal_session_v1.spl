@@ -6,7 +6,10 @@ use std.common.build_manager.group_process_stream_protocol_v2.{GroupProcessStrea
 use std.common.build_manager.grouped_execution_contract.{GroupedActionLeaseV1, GroupedReapReceiptV1}
 use std.nogc_sync_mut.io.group_process_owner.{group_process_stream_owner_validate_v2,
     group_process_stream_cleanup_proof_v2, group_process_stream_collect_reap_v2}
-use std.common.build_manager.contracts.builder_identifier_valid_v1
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
 use std.common.contracts.mux.request_validation_v1.mux_validate_name_v1
 use std.common.contracts.mux.session_runtime_control_v1.session_runtime_control_incarnation_valid_v1
 use std.nogc_sync_mut.io.process_ops.{PipedProcessOwnedTransferV2, PipedProcessRefV1,
@@ -30,6 +33,7 @@ pub struct ContainerPrimaryAttachAdoptionV1:
 pub class ContainerPrimaryAttachSessionV1:
     plan: ContainerPrimaryAttachPlanV1
     transfer: PipedProcessOwnedTransferV2
+    identity_fingerprint: text
     adoption: ContainerPrimaryAttachAdoptionV1? = None
     native_cleaned: bool = false
 
@@ -105,6 +109,19 @@ fn terminal_primary_helper_match_v1(plan: ContainerPrimaryAttachPlanV1,
         return Err("container-terminal-helper-expiry-mismatch")
     Ok(true)
 
+# Computed once, after actual owner/transfer validation. The native owner digest
+# already binds the complete profiled launch, including its assigned generation
+# and absolute deadline. No mutable adoption or control progress enters identity.
+fn terminal_primary_fingerprint_v1(plan: ContainerPrimaryAttachPlanV1,
+        transfer: PipedProcessOwnedTransferV2) -> Result<text, text>:
+    val reference = transfer.reference
+    val fields: Dict<text, SdnValue> = {"kind": SdnValue.String("container-primary-session-identity-v1"),
+        "plan": SdnValue.String(container_primary_attach_plan_encode_v1(plan)?),
+        "nativeOwner": SdnValue.String(transfer.owner.identity_digest),
+        "pid": SdnValue.Int(reference.pid), "generation": SdnValue.Int(reference.generation),
+        "groupRoot": SdnValue.String(reference.group_root), "groupIdentity": SdnValue.String(reference.group_identity)}
+    Ok(sha256_text(sdn_encode_canonical(SdnValue.Dict(fields))))
+
 # Exactly one retained owner: a session on success, the original transfer on any
 # failure, including native enable success followed by a failed state query.
 pub fn container_primary_attach_session_v1(plan: ContainerPrimaryAttachPlanV1,
@@ -115,6 +132,9 @@ pub fn container_primary_attach_session_v1(plan: ContainerPrimaryAttachPlanV1,
     val matched = terminal_primary_transfer_match_v1(plan, transfer)
     if matched.is_err():
         return ContainerPrimaryAttachSessionTurnV1(session: None, cleanup_transfer: Some(transfer), error: matched.unwrap_err())
+    val fingerprint = terminal_primary_fingerprint_v1(plan, transfer)
+    if fingerprint.is_err():
+        return ContainerPrimaryAttachSessionTurnV1(session: None, cleanup_transfer: Some(transfer), error: fingerprint.unwrap_err())
     val enabled = process_input_control_enable_ref_v1(transfer.reference)
     if enabled.is_err():
         return ContainerPrimaryAttachSessionTurnV1(session: None, cleanup_transfer: Some(transfer), error: enabled.unwrap_err())
@@ -125,7 +145,8 @@ pub fn container_primary_attach_session_v1(plan: ContainerPrimaryAttachPlanV1,
     val virgin = container_primary_attach_input_state_validate_v1(state)
     if virgin.is_err():
         return ContainerPrimaryAttachSessionTurnV1(session: None, cleanup_transfer: Some(transfer), error: virgin.unwrap_err())
-    ContainerPrimaryAttachSessionTurnV1(session: Some(ContainerPrimaryAttachSessionV1(plan: plan, transfer: transfer)),
+    ContainerPrimaryAttachSessionTurnV1(session: Some(ContainerPrimaryAttachSessionV1(plan: plan, transfer: transfer,
+        identity_fingerprint: fingerprint.unwrap())),
         cleanup_transfer: None, error: "")
 
 pub fn container_terminal_validate_v1(session: ContainerOwnedTerminalSessionV1) -> Result<(), text>:
@@ -161,10 +182,10 @@ pub fn container_terminal_identity_equal_v1(left: ContainerOwnedTerminalSessionV
         case ContainerOwnedTerminalSessionV1.PrimaryAttach(a):
             match right:
                 case ContainerOwnedTerminalSessionV1.PrimaryAttach(b):
-                    val first = container_primary_attach_plan_encode_v1(a.plan)
-                    val second = container_primary_attach_plan_encode_v1(b.plan)
-                    (first.is_ok() and second.is_ok() and first.unwrap() == second.unwrap() and
-                        process_piped_owned_transfer_equal_v2(a.transfer, b.transfer))
+                    # Pane publication calls this for every output update.
+                    # Private immutable fingerprints avoid re-encoding templates.
+                    (builder_digest_valid_v1(a.identity_fingerprint) and
+                        a.identity_fingerprint == b.identity_fingerprint)
                 case _: false
 
 pub fn container_terminal_output_matches_v1(session: ContainerOwnedTerminalSessionV1,
