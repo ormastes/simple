@@ -835,6 +835,31 @@ impl<'a> MirLowerer<'a> {
                 // fixed here (full tagging was scoped out as a 7-site,
                 // hot-path, bootstrap-only-engine change). See
                 // doc/08_tracking/bug/interp_index_of_digit_leading_literal_2026-07-22.md.
+                // Exception: `parse_int`/`parse_i32`/`parse_i64` are typed as the
+                // flat `i64?` (hir/lower/expr/mod.rs) but `rt_string_parse_int`
+                // returns a TAGGED int or NIL, so the raw renderer printed
+                // `Option::Some(984)` for `"123".parse_int()`. Render that
+                // producer with the tagged renderer, as interpolation already
+                // does. doc/08_tracking/bug/jit_primitive_method_parity_gaps_2026-11-13.md
+                let tagged_flat_opt = matches!(
+                    &arg.kind,
+                    crate::hir::HirExprKind::MethodCall { method, .. }
+                        if matches!(method.as_str(), "parse_int" | "parse_i32" | "parse_i64")
+                );
+                if tagged_flat_opt && self.flat_opt_to_string_fn(arg.ty).is_some() {
+                    let stringified = self.with_func(|func, current_block| {
+                        let stringified = func.new_vreg();
+                        let block = func.block_mut(current_block).unwrap();
+                        block.instructions.push(MirInst::Call {
+                            dest: Some(stringified),
+                            target: CallTarget::from_name("rt_opt_value_to_string"),
+                            args: vec![arg_reg],
+                        });
+                        stringified
+                    })?;
+                    boxed_arg_regs.push(stringified);
+                    continue;
+                }
                 if let Some(registry) = self.type_registry {
                     if let Some(HirType::Pointer { .. }) = registry.get(arg.ty) {
                         if let Some(fn_name) = self.flat_opt_to_string_fn(arg.ty) {

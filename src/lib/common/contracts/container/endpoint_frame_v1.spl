@@ -1,0 +1,231 @@
+# `endpoint-frame-v1`: bounded binary data-plane framing for the emulated
+# endpoint network (design doc/05_design/simple_container_macos_seatbelt.md
+# 11.9). Pure codec: no sockets, no session state, no authentication. The
+# channel carrying these frames is created and peer-bound by the supervisor;
+# HELLO never selects a principal, it only references the admission.
+# SDN stays the control/config representation; per-packet data is binary.
+#
+# Wire (little endian): version:u8, kind:u8, channel:u32, sequence:u32,
+# length:u32, payload:length bytes. Exact length; no trailing bytes.
+# Channel 0 is the session control channel (HELLO, REGISTER, UNREGISTER,
+# PING); stream frames use channel >= 1.
+use std.common.text_bytes.{text_to_utf8_bytes, bytes_to_text}
+
+pub const ENDPOINT_FRAME_VERSION_V1: i64 = 1
+pub const ENDPOINT_FRAME_HEADER_V1: i64 = 14
+pub const ENDPOINT_FRAME_MAX_PAYLOAD_V1: i64 = 16384
+pub const ENDPOINT_FRAME_MAX_CHANNEL_V1: i64 = 65535
+pub const ENDPOINT_FRAME_MAX_SEQUENCE_V1: i64 = 4294967295
+pub const ENDPOINT_FRAME_MAX_TARGET_V1: i64 = 253
+pub const ENDPOINT_FRAME_NONCE_V1: i64 = 32
+
+pub const ENDPOINT_FRAME_HELLO_V1: i64 = 1
+pub const ENDPOINT_FRAME_OPEN_V1: i64 = 2
+pub const ENDPOINT_FRAME_OPENED_V1: i64 = 3
+pub const ENDPOINT_FRAME_REJECTED_V1: i64 = 4
+pub const ENDPOINT_FRAME_DATA_V1: i64 = 5
+pub const ENDPOINT_FRAME_WINDOW_V1: i64 = 6
+pub const ENDPOINT_FRAME_HALF_CLOSE_V1: i64 = 7
+pub const ENDPOINT_FRAME_CLOSE_V1: i64 = 8
+pub const ENDPOINT_FRAME_RESET_V1: i64 = 9
+pub const ENDPOINT_FRAME_REGISTER_V1: i64 = 10
+pub const ENDPOINT_FRAME_UNREGISTER_V1: i64 = 11
+pub const ENDPOINT_FRAME_PING_V1: i64 = 12
+
+pub const ENDPOINT_FRAME_PROTOCOL_TCP_V1: i64 = 1
+
+pub struct EndpointFrameV1:
+    kind: i64
+    channel: i64
+    sequence: i64
+    payload: [u8]
+
+# OPEN and REGISTER payload: protocol:u8, port:u16, target bytes.
+pub struct EndpointFrameTargetV1:
+    protocol: i64
+    port: i64
+    target: text
+
+# HELLO payload: protocol version:u8, nonce:32 bytes, admission reference.
+pub struct EndpointFrameHelloV1:
+    protocol_version: i64
+    nonce: [u8]
+    admission_ref: text
+
+pub fn endpoint_frame_control_kind_v1(kind: i64) -> bool:
+    kind == ENDPOINT_FRAME_HELLO_V1 or kind == ENDPOINT_FRAME_REGISTER_V1 or
+        kind == ENDPOINT_FRAME_UNREGISTER_V1 or kind == ENDPOINT_FRAME_PING_V1
+
+fn _endpoint_frame_ascii_token(bytes: [u8], max: i64) -> bool:
+    if bytes.len() == 0 or bytes.len() > max: return false
+    for byte in bytes:
+        val b = byte as i64
+        if not ((b >= 97 and b <= 122) or (b >= 65 and b <= 90) or (b >= 48 and b <= 57) or
+                b == 45 or b == 46 or b == 95):
+            return false
+    true
+
+fn _endpoint_frame_u16(payload: [u8], offset: i64) -> i64:
+    (payload[offset] as i64) | ((payload[offset + 1] as i64) << 8)
+
+fn _endpoint_frame_u32(frame: [u8], offset: i64) -> i64:
+    (frame[offset] as i64) | ((frame[offset + 1] as i64) << 8) |
+        ((frame[offset + 2] as i64) << 16) | ((frame[offset + 3] as i64) << 24)
+
+fn _endpoint_frame_push_u16(out: [u8], value: i64) -> [u8]:
+    var result = out
+    result.push((value & 255) as u8)
+    result.push(((value >> 8) & 255) as u8)
+    result
+
+fn _endpoint_frame_push_u32(out: [u8], value: i64) -> [u8]:
+    var result = out
+    for shift in 0..4:
+        result.push(((value >> (shift * 8)) & 255) as u8)
+    result
+
+# Per-kind shape check shared by encode and decode.
+pub fn endpoint_frame_validate_v1(frame: EndpointFrameV1) -> Result<bool, text>:
+    if frame.kind < ENDPOINT_FRAME_HELLO_V1 or frame.kind > ENDPOINT_FRAME_PING_V1:
+        return Err("endpoint-frame-kind-unknown")
+    if frame.channel < 0 or frame.channel > ENDPOINT_FRAME_MAX_CHANNEL_V1:
+        return Err("endpoint-frame-channel-out-of-range")
+    if frame.sequence < 1 or frame.sequence > ENDPOINT_FRAME_MAX_SEQUENCE_V1:
+        return Err("endpoint-frame-sequence-out-of-range")
+    val length = frame.payload.len()
+    if length > ENDPOINT_FRAME_MAX_PAYLOAD_V1: return Err("endpoint-frame-payload-too-large")
+    if endpoint_frame_control_kind_v1(frame.kind):
+        if frame.channel != 0: return Err("endpoint-frame-control-channel-required")
+    elif frame.channel == 0:
+        return Err("endpoint-frame-stream-channel-required")
+    val kind = frame.kind
+    if kind == ENDPOINT_FRAME_HELLO_V1:
+        val _hello = endpoint_frame_hello_fields_v1(frame)?
+    elif kind == ENDPOINT_FRAME_OPEN_V1 or kind == ENDPOINT_FRAME_REGISTER_V1:
+        val _target = endpoint_frame_target_fields_v1(frame)?
+    elif kind == ENDPOINT_FRAME_OPENED_V1 or kind == ENDPOINT_FRAME_UNREGISTER_V1:
+        if not _endpoint_frame_ascii_token(frame.payload, 128): return Err("endpoint-frame-lease-invalid")
+    elif kind == ENDPOINT_FRAME_REJECTED_V1 or kind == ENDPOINT_FRAME_CLOSE_V1 or kind == ENDPOINT_FRAME_RESET_V1:
+        if length != 2: return Err("endpoint-frame-reason-invalid")
+    elif kind == ENDPOINT_FRAME_DATA_V1:
+        if length == 0: return Err("endpoint-frame-data-empty")
+    elif kind == ENDPOINT_FRAME_WINDOW_V1:
+        if length != 4: return Err("endpoint-frame-window-invalid")
+        if _endpoint_frame_u32(frame.payload, 0) == 0: return Err("endpoint-frame-window-zero")
+    elif kind == ENDPOINT_FRAME_HALF_CLOSE_V1:
+        if length != 1 or (frame.payload[0] != 1 and frame.payload[0] != 2):
+            return Err("endpoint-frame-half-close-invalid")
+    elif kind == ENDPOINT_FRAME_PING_V1:
+        if length != 0: return Err("endpoint-frame-ping-payload-forbidden")
+    Ok(true)
+
+pub fn endpoint_frame_encode_v1(frame: EndpointFrameV1) -> Result<[u8], text>:
+    val _ok = endpoint_frame_validate_v1(frame)?
+    var out: [u8] = [ENDPOINT_FRAME_VERSION_V1 as u8, frame.kind as u8]
+    out = _endpoint_frame_push_u32(out, frame.channel)
+    out = _endpoint_frame_push_u32(out, frame.sequence)
+    out = _endpoint_frame_push_u32(out, frame.payload.len())
+    for byte in frame.payload:
+        out.push(byte)
+    Ok(out)
+
+# Caller caps transport reads at ENDPOINT_FRAME_HEADER_V1 +
+# ENDPOINT_FRAME_MAX_PAYLOAD_V1 before allocating.
+pub fn endpoint_frame_decode_v1(bytes: [u8]) -> Result<EndpointFrameV1, text>:
+    if bytes.len() < ENDPOINT_FRAME_HEADER_V1: return Err("endpoint-frame-truncated")
+    if bytes.len() > ENDPOINT_FRAME_HEADER_V1 + ENDPOINT_FRAME_MAX_PAYLOAD_V1:
+        return Err("endpoint-frame-too-large")
+    if (bytes[0] as i64) != ENDPOINT_FRAME_VERSION_V1: return Err("endpoint-frame-version-unsupported")
+    val length = _endpoint_frame_u32(bytes, 10)
+    if length > ENDPOINT_FRAME_MAX_PAYLOAD_V1: return Err("endpoint-frame-payload-too-large")
+    if bytes.len() != ENDPOINT_FRAME_HEADER_V1 + length: return Err("endpoint-frame-length-mismatch")
+    var payload: [u8] = []
+    for index in 0..length:
+        payload.push(bytes[ENDPOINT_FRAME_HEADER_V1 + index])
+    val frame = EndpointFrameV1(kind: bytes[1] as i64, channel: _endpoint_frame_u32(bytes, 2),
+        sequence: _endpoint_frame_u32(bytes, 6), payload: payload)
+    val _ok = endpoint_frame_validate_v1(frame)?
+    Ok(frame)
+
+pub fn endpoint_frame_target_payload_v1(protocol: i64, port: i64, target: text) -> Result<[u8], text>:
+    if protocol != ENDPOINT_FRAME_PROTOCOL_TCP_V1: return Err("endpoint-frame-protocol-unsupported")
+    if port < 1 or port > 65535: return Err("endpoint-frame-port-invalid")
+    val target_bytes = text_to_utf8_bytes(target)
+    if not _endpoint_frame_ascii_token(target_bytes, ENDPOINT_FRAME_MAX_TARGET_V1):
+        return Err("endpoint-frame-target-invalid")
+    var out: [u8] = [protocol as u8]
+    out = _endpoint_frame_push_u16(out, port)
+    for byte in target_bytes:
+        out.push(byte)
+    Ok(out)
+
+pub fn endpoint_frame_target_fields_v1(frame: EndpointFrameV1) -> Result<EndpointFrameTargetV1, text>:
+    if frame.kind != ENDPOINT_FRAME_OPEN_V1 and frame.kind != ENDPOINT_FRAME_REGISTER_V1:
+        return Err("endpoint-frame-kind-mismatch")
+    if frame.payload.len() < 4: return Err("endpoint-frame-target-invalid")
+    val protocol = frame.payload[0] as i64
+    if protocol != ENDPOINT_FRAME_PROTOCOL_TCP_V1: return Err("endpoint-frame-protocol-unsupported")
+    val port = _endpoint_frame_u16(frame.payload, 1)
+    if port < 1: return Err("endpoint-frame-port-invalid")
+    var target_bytes: [u8] = []
+    for index in 3..frame.payload.len():
+        target_bytes.push(frame.payload[index])
+    if not _endpoint_frame_ascii_token(target_bytes, ENDPOINT_FRAME_MAX_TARGET_V1):
+        return Err("endpoint-frame-target-invalid")
+    Ok(EndpointFrameTargetV1(protocol: protocol, port: port, target: bytes_to_text(target_bytes)))
+
+pub fn endpoint_frame_hello_payload_v1(nonce: [u8], admission_ref: text) -> Result<[u8], text>:
+    if nonce.len() != ENDPOINT_FRAME_NONCE_V1: return Err("endpoint-frame-hello-nonce-invalid")
+    val reference = text_to_utf8_bytes(admission_ref)
+    if not _endpoint_frame_ascii_token(reference, 128): return Err("endpoint-frame-hello-admission-invalid")
+    var out: [u8] = [ENDPOINT_FRAME_VERSION_V1 as u8]
+    for byte in nonce:
+        out.push(byte)
+    for byte in reference:
+        out.push(byte)
+    Ok(out)
+
+pub fn endpoint_frame_hello_fields_v1(frame: EndpointFrameV1) -> Result<EndpointFrameHelloV1, text>:
+    if frame.kind != ENDPOINT_FRAME_HELLO_V1: return Err("endpoint-frame-kind-mismatch")
+    if frame.payload.len() < 1 + ENDPOINT_FRAME_NONCE_V1 + 1: return Err("endpoint-frame-hello-invalid")
+    if (frame.payload[0] as i64) != ENDPOINT_FRAME_VERSION_V1: return Err("endpoint-frame-hello-version-unsupported")
+    var nonce: [u8] = []
+    for index in 1..(1 + ENDPOINT_FRAME_NONCE_V1):
+        nonce.push(frame.payload[index])
+    var reference: [u8] = []
+    for index in (1 + ENDPOINT_FRAME_NONCE_V1)..frame.payload.len():
+        reference.push(frame.payload[index])
+    if not _endpoint_frame_ascii_token(reference, 128): return Err("endpoint-frame-hello-admission-invalid")
+    Ok(EndpointFrameHelloV1(protocol_version: 1, nonce: nonce, admission_ref: bytes_to_text(reference)))
+
+pub fn endpoint_frame_u16_payload_v1(value: i64) -> [u8]:
+    _endpoint_frame_push_u16([], value & 65535)
+
+pub fn endpoint_frame_u32_payload_v1(value: i64) -> [u8]:
+    _endpoint_frame_push_u32([], value & 4294967295)
+
+# WINDOW credit increment, or CLOSE/RESET/REJECTED reason code.
+pub fn endpoint_frame_window_credit_v1(frame: EndpointFrameV1) -> Result<i64, text>:
+    if frame.kind != ENDPOINT_FRAME_WINDOW_V1 or frame.payload.len() != 4:
+        return Err("endpoint-frame-kind-mismatch")
+    Ok(_endpoint_frame_u32(frame.payload, 0))
+
+pub fn endpoint_frame_reason_v1(frame: EndpointFrameV1) -> Result<i64, text>:
+    if frame.payload.len() != 2 or (frame.kind != ENDPOINT_FRAME_CLOSE_V1 and
+            frame.kind != ENDPOINT_FRAME_RESET_V1 and frame.kind != ENDPOINT_FRAME_REJECTED_V1):
+        return Err("endpoint-frame-kind-mismatch")
+    Ok(_endpoint_frame_u16(frame.payload, 0))
+
+export EndpointFrameV1, EndpointFrameTargetV1, EndpointFrameHelloV1
+export endpoint_frame_control_kind_v1, endpoint_frame_validate_v1, endpoint_frame_encode_v1, endpoint_frame_decode_v1
+export endpoint_frame_target_payload_v1, endpoint_frame_target_fields_v1
+export endpoint_frame_hello_payload_v1, endpoint_frame_hello_fields_v1
+export endpoint_frame_u16_payload_v1, endpoint_frame_u32_payload_v1
+export endpoint_frame_window_credit_v1, endpoint_frame_reason_v1
+export ENDPOINT_FRAME_VERSION_V1, ENDPOINT_FRAME_HEADER_V1, ENDPOINT_FRAME_MAX_PAYLOAD_V1
+export ENDPOINT_FRAME_MAX_CHANNEL_V1, ENDPOINT_FRAME_MAX_SEQUENCE_V1, ENDPOINT_FRAME_MAX_TARGET_V1
+export ENDPOINT_FRAME_NONCE_V1, ENDPOINT_FRAME_PROTOCOL_TCP_V1
+export ENDPOINT_FRAME_HELLO_V1, ENDPOINT_FRAME_OPEN_V1, ENDPOINT_FRAME_OPENED_V1, ENDPOINT_FRAME_REJECTED_V1
+export ENDPOINT_FRAME_DATA_V1, ENDPOINT_FRAME_WINDOW_V1, ENDPOINT_FRAME_HALF_CLOSE_V1
+export ENDPOINT_FRAME_CLOSE_V1, ENDPOINT_FRAME_RESET_V1, ENDPOINT_FRAME_REGISTER_V1
+export ENDPOINT_FRAME_UNREGISTER_V1, ENDPOINT_FRAME_PING_V1

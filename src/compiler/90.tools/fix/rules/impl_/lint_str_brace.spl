@@ -1,0 +1,455 @@
+# EasyFix Rules - W-STR-BRACE-001 string-literal brace escapes (Text-Scanning)
+#
+# Text-based producer for the W-STR-BRACE-001 lint class: a `{` / `}` inside a
+# double-quoted string literal that is not a valid interpolation is kept as
+# literal text by the frontend (seed parity: parser/src/lexer/strings.rs
+# warn_brace; pure-Simple parity: 10.frontend/core/string_interpolation_expand.spl
+# interpolation_note_malformed_region). The fix doubles the flagged braces to
+# the explicit `{{` / `}}` escape form, which the evaluator decodes back to the
+# same literal text, so the rewrite is behavior-preserving.
+#
+# Variants handled (seed warn_brace shapes):
+#   1. `{` followed by an escape or a quote  ("{\"key\"}", "expected '{' after")
+#   2. empty `{}` / `{   }`                   ("m{} block"; the runtime value
+#                                              collapses `{   }` to `{}`, so
+#                                              the fix emits the collapsed {{}})
+#   3. unmatched or malformed `{`             ("{print $1" run off the line,
+#                                              `{= 1}` — invalid expression
+#                                              start, `{x (" + v` — nested-quote
+#                                              backtrack per nested_string_may_open)
+#
+# Deliberately NOT flagged (conservative — a miss stays for a human, a false
+# positive would corrupt a valid interpolation):
+#   - valid `{name}` / `{x:>10}` interpolations
+#   - already-escaped `{{` / `}}` (idempotency guard)
+#   - `\{` / `\}` escaped braces
+#   - single `}` (the lexer treats it leniently and never warns)
+#   - raw strings (r"...", '...'), triple-quoted strings (""", f""", r""" —
+#     a multi-line f-string region is skipped wholesale), comments, and
+#     custom-block payloads (m{...}, sh{...}, ...) which never warn
+#   - closed regions whose text merely *might* not parse (CSS `{ color: red }`,
+#     `{k: 1, d: 2}`, `{|x| x + 1}` lambdas): only regions that cannot start
+#     an expression, or with `$` right after a complete operand (`{print $1}`),
+#     are literalized
+
+use std.tooling.easy_fix.types.{FixConfidence, Replacement, EasyFix}
+use std.tooling.easy_fix.*
+use compiler.tools.fix.rules.helpers.*
+
+# Identifiers that open a custom block `kind{...}` whose payload is raw text
+# (never emits W-STR-BRACE-001; quotes inside must not start phantom strings).
+val STR_BRACE_BLOCK_KINDS: [text] = [
+    "m", "sh", "sql", "schema", "style", "re", "rtl", "md", "music",
+    "html", "graph", "img", "ui", "pc"
+]
+
+# Characters that can never begin a Simple expression (primary starters are
+# identifiers, digits, `( [ { " ' - ! @ $ \\ |`; everything in this set is a
+# binary/terminator token that requires a left operand). `|` stays OUT: it
+# opens a `|x| body` lambda, which is a valid interpolation. Used to flag a
+# closed `{region}` without ever touching a region that could parse.
+val STR_BRACE_INVALID_START: text = ";=<>?,)]#"
+
+# One flagged brace site: replace source[start:end] with new_text.
+struct StrBraceSite:
+    start: i64
+    end: i64
+    new_text: text
+
+pub fn check_str_brace001(source: text, file: text) -> [EasyFix]:
+    check_str_brace001_with_lines(file, source.split("\n"))
+
+pub fn check_str_brace001_with_lines(file: text, lines: [text]) -> [EasyFix]:
+    var fixes: [EasyFix] = []
+    var line_num = 0
+    var byte_offset = 0
+    var in_triple = false
+    for line in lines:
+        line_num = line_num + 1
+        if in_triple:
+            # Inside """ / f""" / r""": no interpolation warnings are possible
+            # (plain triple never warns; f-triple regions may span lines, so
+            # skip conservatively). Resume scanning after the closing triple.
+            val close = _str_brace_find_triple_end(line, 0)
+            if close >= 0:
+                in_triple = false
+                for fix in _str_brace_scan_code(file, line, line_num, byte_offset, close + 3):
+                    fixes.push(fix)
+        else:
+            for fix in _str_brace_scan_code(file, line, line_num, byte_offset, 0):
+                fixes.push(fix)
+            # A trailing unterminated triple on this line latches the state.
+            in_triple = _str_brace_line_opens_triple(line)
+        byte_offset = byte_offset + line.len() + 1
+    fixes
+
+# Scan code (from `start`, just after a closing triple when resuming) for
+# string literals and flag W-STR-BRACE-001 sites inside them.
+fn _str_brace_scan_code(file: text, line: text, line_num: i64, byte_offset: i64, start: i64) -> [EasyFix]:
+    var fixes: [EasyFix] = []
+    val n = line.len()
+    var i = start
+    while i < n:
+        val ch = line[i:i + 1]
+        if ch == "#":
+            # Comment to end of line: no string literals past this point.
+            break
+        if ch == "\\":
+            i = i + 2
+            continue
+        if ch == "'":
+            i = _str_brace_skip_single_quoted(line, i)
+            continue
+        if ch == "\"":
+            if i + 3 <= n and line[i:i + 3] == "\"\"\"":
+                # Opening triple: everything after it is skipped (latched by
+                # the caller's in_triple state).
+                break
+            val scanned = _str_brace_scan_interp_string(line, i + 1)
+            for site in scanned.0:
+                fixes.push(_str_brace_fix(file, line_num, byte_offset, site.start, site.end, site.new_text))
+            i = scanned.1
+            continue
+        if (ch == "f" or ch == "r") and _str_brace_prefix_position(line, i):
+            val next = if i + 1 < n: line[i + 1:i + 2] else: ""
+            if next == "\"":
+                if i + 4 <= n and line[i + 1:i + 4] == "\"\"\"":
+                    break
+                if ch == "r":
+                    # Raw string: no interpolation, no warnings; skip to close.
+                    i = _str_brace_skip_raw_string(line, i + 2)
+                else:
+                    val scanned_f = _str_brace_scan_interp_string(line, i + 2)
+                    for site in scanned_f.0:
+                        fixes.push(_str_brace_fix(file, line_num, byte_offset, site.start, site.end, site.new_text))
+                    i = scanned_f.1
+                continue
+        if _str_brace_is_ident_start(ch):
+            i = _str_brace_skip_identifier_or_block(line, i)
+            continue
+        i = i + 1
+    fixes
+
+# True when the char before `i` is not an identifier char, so a letter at `i`
+# begins its own token (an `f"` / `r"` string-prefix position).
+fn _str_brace_prefix_position(line: text, i: i64) -> bool:
+    if i == 0:
+        return true
+    not _str_brace_is_ident_char(line[i - 1:i])
+
+# Read an identifier starting at `i`; when it directly names a custom block
+# (`kind{`), skip the raw payload so quotes/braces inside never phantom-match.
+fn _str_brace_skip_identifier_or_block(line: text, start: i64) -> i64:
+    val n = line.len()
+    var j = start
+    while j < n and _str_brace_is_ident_char(line[j:j + 1]):
+        j = j + 1
+    if j < n and line[j:j + 1] == "{":
+        for kind in STR_BRACE_BLOCK_KINDS:
+            if line[start:j] == kind:
+                return _str_brace_skip_block_payload(line, j)
+    j
+
+# Scan an interpolated string's content starting just after the opening quote.
+# Returns (flagged sites, index after the closing quote or end of line).
+fn _str_brace_scan_interp_string(line: text, content_start: i64) -> ([StrBraceSite], i64):
+    var sites: [StrBraceSite] = []
+    val n = line.len()
+    var j = content_start
+    while j < n:
+        val ch = line[j:j + 1]
+        if ch == "\\":
+            j = j + 2
+            continue
+        if ch == "\"":
+            return (sites, j + 1)
+        if ch == "{":
+            val next = if j + 1 < n: line[j + 1:j + 2] else: ""
+            if next == "{":
+                # Already escaped — idempotency guard.
+                j = j + 2
+                continue
+            if next == "" or next == "\\" or next == "'" or next == "\"":
+                # `{` at end of line, or followed by an escape/quote: the
+                # lexer warns and keeps the brace literal.
+                sites.push(StrBraceSite(start: j, end: j + 1, new_text: "{{{{"))
+                j = j + 1
+                continue
+            if next == "}":
+                # Empty `{}` region: the lexer warns and keeps it literal.
+                sites.push(StrBraceSite(start: j, end: j + 2, new_text: "{{{{}}}}"))
+                j = j + 2
+                continue
+            val region = _str_brace_scan_region(line, j)
+            for site in region.0:
+                sites.push(site)
+            if region.2:
+                # The region scan consumed text past the string's real closing
+                # quote (or off the line) — stop scanning this string.
+                return (sites, region.1)
+            j = region.1
+            continue
+        if ch == "}":
+            val next = if j + 1 < n: line[j + 1:j + 2] else: ""
+            if next == "}":
+                j = j + 2
+                continue
+            # Single `}` is leniently literal and never warned.
+            j = j + 1
+            continue
+        j = j + 1
+    (sites, n)
+
+# Scan a `{` region whose first character is known not to be `{`, `}`, an
+# escape, or a quote. Returns (sites, resume_index, stop_string).
+fn _str_brace_scan_region(line: text, open_idx: i64) -> ([StrBraceSite], i64, bool):
+    val n = line.len()
+    var depth = 1
+    var k = open_idx + 1
+    var in_str = ""
+    while k < n:
+        val ch = line[k:k + 1]
+        if ch == "\\":
+            k = k + 2
+            continue
+        if in_str != "":
+            if ch == in_str:
+                in_str = ""
+            k = k + 1
+            continue
+        if ch == "\"":
+            # An unescaped quote where an operand cannot follow is the OUTER
+            # string's closing quote (seed nested_string_may_open parity): the
+            # `{` was literal, so flag it and stop this string at the quote.
+            if not _str_brace_operand_expected(line[open_idx + 1:k]):
+                return ([StrBraceSite(start: open_idx, end: open_idx + 1, new_text: "{{{{")], k, true)
+            in_str = "\""
+            k = k + 1
+            continue
+        if ch == "'":
+            val prev = line[k - 1:k]
+            if _str_brace_is_ident_char(prev) or prev == ")":
+                # Transpose operator, not a string start (seed parity).
+                k = k + 1
+                continue
+            in_str = "'"
+            k = k + 1
+            continue
+        if ch == "{":
+            depth = depth + 1
+        elif ch == "}":
+            depth = depth - 1
+            if depth == 0:
+                break
+        k = k + 1
+    if depth != 0:
+        # Unmatched `{`: ran off the line — the lexer warns "unmatched or
+        # malformed" and keeps the brace literal.
+        return ([StrBraceSite(start: open_idx, end: open_idx + 1, new_text: "{{{{")], k, true)
+    # Closed region [open_idx, k]. Flag only shapes that cannot parse.
+    val expr = line[open_idx + 1:k]
+    if expr.trim() == "":
+        # Whitespace-only region: both engines collapse the VALUE to "{}" (seed
+        # scan_fstring pushes "{}" for an empty expr; the pure-Simple runtime
+        # collapses `{   }` the same way), so the behavior-preserving fix is
+        # the collapsed escape `{{}}`, not `{{   }}`.
+        return ([StrBraceSite(start: open_idx, end: k + 1, new_text: "{{{{}}}}")], k + 1, false)
+    if _str_brace_region_definitely_malformed(expr):
+        return ([StrBraceSite(start: open_idx, end: k + 1, new_text: _str_brace_literalize_region(line, open_idx, k + 1))], k + 1, false)
+    ([], k + 1, false)
+
+# A closed region is literalized only when it cannot be a valid interpolation:
+# an invalid expression start (`{= 1}`), or a `$` directly after a complete
+# operand (`{print $1}` — `$` may only start an expression or follow an
+# operator/opener). Regions that merely might not parse (CSS `{ color: red }`,
+# dict-like `{k: 1, d: 2}`) are left for a human.
+fn _str_brace_region_definitely_malformed(expr: text) -> bool:
+    val trimmed = expr.trim()
+    if STR_BRACE_INVALID_START.contains(trimmed[0:1]):
+        return true
+    var prev_nonws = ""
+    var i = 0
+    val n = expr.len()
+    while i < n:
+        val ch = expr[i:i + 1]
+        if ch == "$":
+            if _str_brace_is_ident_char(prev_nonws) or prev_nonws == ")" or prev_nonws == "]" or prev_nonws == "}" or prev_nonws == "\"" or prev_nonws == "'":
+                return true
+        if ch != " " and ch != "\t":
+            prev_nonws = ch
+        i = i + 1
+    false
+
+# Seed nested_string_may_open parity: may an unescaped quote open a nested
+# string here, given the region text scanned so far?
+fn _str_brace_operand_expected(expr_so_far: text) -> bool:
+    val trimmed = expr_so_far.trim()
+    if trimmed == "":
+        return false
+    if _str_brace_has_word(trimmed, "if") or _str_brace_has_word(trimmed, "else") or _str_brace_has_word(trimmed, "match"):
+        return true
+    for op in ["==", "!=", "<=", ">=", "??"]:
+        if trimmed.ends_with(op):
+            return true
+    val last = trimmed[trimmed.len() - 1:]
+    if last == "<" or last == ">" or last == "+" or last == "-" or last == "*" or last == "/" or last == "%" or last == "," or last == "(" or last == "[":
+        return true
+    for kw in ["and", "or", "not", "in"]:
+        if trimmed.ends_with(kw):
+            val head = trimmed.slice(0, trimmed.len() - kw.len())
+            if head == "" or not _str_brace_is_ident_char(head[head.len() - 1:]):
+                return true
+    false
+
+fn _str_brace_has_word(text: text, word: text) -> bool:
+    val n = text.len()
+    var from = 0
+    while from + word.len() <= n:
+        val rel = text.slice(from).find(word)
+        if rel < 0:
+            return false
+        val start = from + rel
+        val end = start + word.len()
+        val before_ok = start == 0 or not _str_brace_is_ident_char(text[start - 1:start])
+        val after_ok = end == n or not _str_brace_is_ident_char(text[end:end + 1])
+        if before_ok and after_ok:
+            return true
+        from = start + 1
+    false
+
+# Double every `{` / `}` of a source slice so the evaluator reads it back as
+# exactly the original literal text (seed literalize_braced parity).
+fn _str_brace_literalize_region(line: text, start: i64, end: i64) -> text:
+    var out = ""
+    var i = start
+    while i < end:
+        val ch = line[i:i + 1]
+        if ch == "{" or ch == "}":
+            out = out + ch + ch
+        else:
+            out = out + ch
+        i = i + 1
+    out
+
+# --- character / token scanners -------------------------------------------
+
+fn _str_brace_is_ident_char(ch: text) -> bool:
+    if ch == "":
+        return false
+    _str_brace_is_ident_start(ch) or ("0123456789".contains(ch))
+
+fn _str_brace_is_ident_start(ch: text) -> bool:
+    if ch == "":
+        return false
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_".contains(ch)
+
+fn _str_brace_skip_raw_string(line: text, start: i64) -> i64:
+    # r"...": the raw scanner does not process escapes, so the first `"`
+    # closes the literal.
+    val n = line.len()
+    var j = start
+    while j < n:
+        if line[j:j + 1] == "\"":
+            return j + 1
+        j = j + 1
+    n
+
+fn _str_brace_skip_single_quoted(line: text, start: i64) -> i64:
+    # '...' raw/char literal (or a 'label when no closing tick exists on the
+    # line — the lexer disambiguates the same way).
+    val n = line.len()
+    var j = start + 1
+    while j < n:
+        val ch = line[j:j + 1]
+        if ch == "\\":
+            j = j + 2
+            continue
+        if ch == "'":
+            return j + 1
+        j = j + 1
+    start + 1
+
+fn _str_brace_skip_block_payload(line: text, open_idx: i64) -> i64:
+    # kind{...}: skip to the matching close brace; quotes and escapes inside
+    # the raw payload do not start string literals.
+    val n = line.len()
+    var depth = 1
+    var k = open_idx + 1
+    while k < n:
+        val ch = line[k:k + 1]
+        if ch == "\\":
+            k = k + 2
+            continue
+        if ch == "\"":
+            k = _str_brace_skip_raw_string(line, k)
+            continue
+        if ch == "{":
+            depth = depth + 1
+        elif ch == "}":
+            depth = depth - 1
+            if depth == 0:
+                return k + 1
+        k = k + 1
+    n
+
+fn _str_brace_find_triple_end(line: text, start: i64) -> i64:
+    val n = line.len()
+    var j = start
+    while j + 3 <= n:
+        if line[j:j + 3] == "\"\"\"":
+            return j
+        j = j + 1
+    -1
+
+fn _str_brace_line_opens_triple(line: text) -> bool:
+    # True when a non-string `"""` opens and does not close on this line. The
+    # code scanner breaks at the first `"` of a triple, so a line whose first
+    # quote begins an unterminated triple latches the in_triple state.
+    val n = line.len()
+    var j = 0
+    var in_str = false
+    while j < n:
+        val ch = line[j:j + 1]
+        if not in_str and ch == "#":
+            return false
+        if in_str:
+            if ch == "\\":
+                j = j + 2
+                continue
+            if ch == "\"":
+                in_str = false
+            j = j + 1
+            continue
+        if ch == "\"":
+            if j + 3 <= n and line[j:j + 3] == "\"\"\"":
+                val rest_close = _str_brace_find_triple_end(line, j + 3)
+                if rest_close < 0:
+                    return true
+                j = rest_close + 3
+                continue
+            in_str = true
+            j = j + 1
+            continue
+        if ch == "'":
+            j = _str_brace_skip_single_quoted(line, j)
+            continue
+        j = j + 1
+    false
+
+# --- fix construction -------------------------------------------------------
+
+fn _str_brace_fix(file: text, line_num: i64, byte_offset: i64, start: i64, end: i64, new_text: text) -> EasyFix:
+    var fix = EasyFix.create(
+        id: "W-STR-BRACE-001:{line_num}:{start + 1}",
+        description: "escape literal brace in string literal with an explicit doubled-brace escape (W-STR-BRACE-001)",
+        confidence: FixConfidence.Safe
+    )
+    fix.add_replacement(Replacement.create(
+        file: file,
+        start: byte_offset + start,
+        end: byte_offset + end,
+        line: line_num,
+        column: start + 1,
+        new_text: new_text
+    ))
+    fix

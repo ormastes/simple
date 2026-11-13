@@ -782,6 +782,14 @@ pub(crate) fn resolve_runtime_symbol(name: &str) -> Option<usize> {
         "rt_eprintln_value" => value::rt_eprintln_value as *const () as usize,
         "rt_raw_u64_to_string" => value::rt_raw_u64_to_string as *const () as usize,
         "rt_raw_i64_to_string" => value::rt_raw_i64_to_string as *const () as usize,
+        // Flat-optional print helpers: emitted for `print opt` (e.g.
+        // `print s.parse_int()`). Without an explicit address here a Windows
+        // JIT cannot reach them (no dlsym fallback for exe symbols) and strict
+        // mode refuses the module. doc/08_tracking/bug/jit_primitive_method_parity_gaps_2026-11-13.md
+        "rt_opt_i64_to_string" => simple_runtime::rt_opt_i64_to_string as *const () as usize,
+        "rt_opt_value_to_string" => simple_runtime::rt_opt_value_to_string as *const () as usize,
+        "rt_opt_bool_to_string" => simple_runtime::rt_opt_bool_to_string as *const () as usize,
+        "rt_opt_f64_to_string" => simple_runtime::rt_opt_f64_to_string as *const () as usize,
         "rt_capture_stdout_start" => value::rt_capture_stdout_start as *const () as usize,
         "rt_capture_stderr_start" => value::rt_capture_stderr_start as *const () as usize,
         "rt_file_mmap_len" => value::rt_file_mmap_len as *const () as usize,

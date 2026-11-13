@@ -1967,6 +1967,12 @@ fn builtin_method_result_type(method: &str, receiver_ty: Option<TypeId>) -> Opti
         "len" | "length" | "char_code_at" | "index_of" | "find_index" => Some(TypeId::I64),
         // Predicates are bool on every receiver.
         "is_empty" | "contains" | "starts_with" | "ends_with" => Some(TypeId::BOOL),
+        // Numeric predicates (`compile_scalar_parity_method`) yield an i8 flag.
+        m if crate::codegen::scalar_float_methods::is_int_predicate(m)
+            || matches!(m, "is_nan" | "is_finite" | "is_infinite") =>
+        {
+            Some(TypeId::BOOL)
+        }
         // Text-in/text-out on a TEXT RECEIVER AND ON NO OTHER RECEIVER. There
         // is no array/dict `trim` or `to_upper`, so classifying these without
         // knowing the receiver type cannot mis-type any other receiver — and
@@ -2016,6 +2022,23 @@ fn try_compile_builtin_method_call<M: Module>(
             "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "f32" | "f64" | "bool"
         ) {
             return Ok(None);
+        }
+    }
+    // Integer predicates / sign / pow and float classification on a typed
+    // (qualified) numeric receiver: same inline lowering as
+    // `compile_builtin_method`. An erased (bare) receiver is a tagged
+    // RuntimeValue and keeps the dynamic route.
+    // doc/08_tracking/bug/jit_primitive_method_parity_gaps_2026-11-13.md
+    if let Some((qual, plain)) = method.rsplit_once('.') {
+        if matches!(
+            qual,
+            "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "f32" | "f64"
+        ) {
+            if let Some((val, _ty)) =
+                super::methods::compile_scalar_parity_method(ctx, builder, qual, plain, receiver_val, args)?
+            {
+                return Ok(Some(val));
+            }
         }
     }
     // Integer max/min/clamp/abs on a QUALIFIED integer receiver (`i64.max`,
@@ -2462,6 +2485,35 @@ fn try_compile_builtin_method_call<M: Module>(
         // below already threads through unmodified.
         // See doc/08_tracking/bug/native_unwrap_returns_enum_wrapper_instead_of_payload_2026-08-11.md.
         "unwrap_or" => "rt_unwrap_or_value",
+        // `opt.or(other)` / `opt.ok_or(err)` (interpreter_method/special/
+        // types.rs): `Some` keeps the receiver / wraps its payload in `Ok`,
+        // `None` yields `other` / `Err(err)`. Both sides are built eagerly and
+        // chosen with `select` on `rt_is_some`. Before these arms the JIT
+        // raised "Function 'Option.or' not found".
+        // doc/08_tracking/bug/jit_primitive_method_parity_gaps_2026-11-13.md
+        "or" | "ok_or" if args.len() == 1 => {
+            let needed: &[&str] = if method == "or" {
+                &["rt_is_some"]
+            } else {
+                &["rt_is_some", "rt_enum_payload", "rt_enum_new"]
+            };
+            if needed.iter().any(|name| !ctx.runtime_funcs.contains_key(*name)) {
+                return Ok(None);
+            }
+            let other = get_vreg_or_default(ctx, builder, &args[0]);
+            let present = call_runtime_1(ctx, builder, "rt_is_some", receiver_val);
+            if method == "or" {
+                return Ok(Some(builder.ins().select(present, receiver_val, other)));
+            }
+            let disc = |name: &str| simple_runtime::value::hash_variant_discriminant(name) as i64;
+            let payload = call_runtime_1(ctx, builder, "rt_enum_payload", receiver_val);
+            let enum_id = builder.ins().iconst(types::I32, 0);
+            let ok_disc = builder.ins().iconst(types::I32, disc("Ok"));
+            let err_disc = builder.ins().iconst(types::I32, disc("Err"));
+            let ok_val = call_runtime_3(ctx, builder, "rt_enum_new", enum_id, ok_disc, payload);
+            let err_val = call_runtime_3(ctx, builder, "rt_enum_new", enum_id, err_disc, other);
+            return Ok(Some(builder.ins().select(present, ok_val, err_val)));
+        }
         // `.expect(msg)` — same Ok/Some-payload-or-trap semantics as
         // `.unwrap()` (see the comment above), but traps with the CALLER'S
         // message via the dedicated `rt_expect_or_trap(receiver, msg)`
@@ -2664,6 +2716,11 @@ fn try_compile_builtin_method_call<M: Module>(
         "find" => "rt_find",
         "any" => "rt_array_any",
         "all" => "rt_array_all",
+        // `arr.reduce(init, f)` / `arr.fold(init, f)`: `(init, func)` order,
+        // combiner called as `(acc, item)` -- pinned to the interpreter by
+        // `rt_array_reduce` (runtime/src/value/collections.rs). Previously
+        // only the LLVM backend dispatched it ("Function 'Array.reduce' not found").
+        "reduce" | "fold" if args.len() == 2 => "rt_array_reduce",
         // `rt_array_enumerate` has always existed in the runtime but had no
         // dispatch arm, so `arr.enumerate()` raised "Function 'Array.enumerate'
         // not found" and still exited 0. It returns (index, item) tuples,

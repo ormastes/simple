@@ -513,7 +513,6 @@ pub extern "C" fn rt_raw_i64_to_string(raw: i64) -> RuntimeValue {
 /// indistinguishable from real nil at this representation -- documented
 /// limitation, not fixed here; see
 /// doc/08_tracking/bug/interp_index_of_digit_leading_literal_2026-07-22.md.
-#[no_mangle]
 /// Render a TAGGED flat-optional RuntimeValue (`i64?`/`f64?`/`bool?` reaching
 /// string interpolation) as `Option::None` / `Option::Some(v)`, matching the
 /// interpreter (seed optional semantics = pure Simple). Bug:
@@ -528,6 +527,10 @@ pub extern "C" fn rt_opt_value_to_string(v: RuntimeValue) -> RuntimeValue {
     unsafe { crate::value::collections::rt_string_new(s.as_ptr(), s.len() as u64) }
 }
 
+/// Flat (raw, non-tagged) `i64?` payload renderer; see the doc block above
+/// `rt_opt_value_to_string`. Its `#[no_mangle]` had been detached onto the
+/// wrong item, so the symbol was mangled and the JIT could not resolve it.
+#[no_mangle]
 pub extern "C" fn rt_opt_i64_to_string(raw: i64) -> RuntimeValue {
     if raw == RuntimeValue::NIL.0 as i64 {
         let s = "Option::None";
