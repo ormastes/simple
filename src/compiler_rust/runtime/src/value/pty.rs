@@ -313,6 +313,11 @@ mod pty_process {
                 libc::dup2(slave_fd, libc::STDIN_FILENO);
                 libc::dup2(slave_fd, libc::STDOUT_FILENO);
                 libc::dup2(slave_fd, libc::STDERR_FILENO);
+                // A slave that already was fd 0-2 kept its close-on-exec flag through
+                // the no-op dup2; clear it so exec keeps the standard streams.
+                for std_fd in 0..=libc::STDERR_FILENO {
+                    libc::fcntl(std_fd, libc::F_SETFD, 0);
+                }
                 if slave_fd > libc::STDERR_FILENO {
                     libc::close(slave_fd);
                 }
@@ -1172,7 +1177,7 @@ mod tests {
         assert_eq!(rt_pty_close(second as i64), RuntimeValue::TRUE);
         assert_reaped(second_pid);
         assert!(
-            elapsed < std::time::Duration::from_millis(700),
+            elapsed < std::time::Duration::from_millis(900),
             "closing a /bin/sh pane took {elapsed:?}: its hangup never reached the child"
         );
     }

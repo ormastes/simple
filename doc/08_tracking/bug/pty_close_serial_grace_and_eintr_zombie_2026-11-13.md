@@ -48,7 +48,8 @@
 ## Resolution 2026-11-13 (work/smux-reap-20261113)
 
 1. **FD_CLOEXEC on the PTY pair** (both lanes' `open`, shared
-   `set_pty_fd_cloexec`). `dup2` onto 0/1/2 clears the flag, so the child's
+   `set_pty_fd_cloexec`). The child clears the flag on fds 0-2 after its
+   `dup2`s (a slave already at 0-2 would otherwise close on exec). `dup2` onto 0/1/2 clears the flag, so the child's
    own stdio is unaffected; later panes' children no longer inherit earlier
    masters, so closing a master hangs up its own child at once.
 2. **`rt_pty_hangup(handle) -> bool`**, Rust runtime + interpreter + C lane
@@ -97,5 +98,11 @@ smux_sosix_boundary 2/3.
 - Batch trade-off: a child that ignores SIGHUP but exits on master EOF loses
   its own grace in batch mode — its master closes only after the shared 1 s
   deadline, immediately followed by SIGKILL.
+- The shared grace starts at the hangup pre-pass, so slow non-PTY cleanups
+  earlier in the same `close_owned_children` loop (piped / owned-helper panes)
+  also spend it; a PTY child that exits on EOF rather than SIGHUP can then be
+  SIGKILLed after a single check. Close-on-exec is set with `fcntl` after
+  `openpty`, not atomically, so a concurrent fork+exec on another thread can
+  still briefly inherit a master.
 - The out-of-band reap hazard recorded by PR #8885 (a generic
   `native_process_wait(pid)` on a PTY pid) is unchanged.
