@@ -96,3 +96,22 @@ device open/execute-readback only. Building the text lane remains the deferred
 work, and a device-verified text frame remains the unmet closing condition.
 No scope decision ("DirectX text is out of scope") has been written down, so
 the record stays open per its own rule.
+
+
+---
+
+## 2026-11-13 addendum — P3 gpu lane p3-gpu-20261113 (work/p3-gpu-20261113, base 6f4cb189867)
+
+**Verdict: DEFERRED stands — source re-verified unchanged at this tip.**
+
+- `src/lib/gc_async_mut/gpu/engine2d/backend_directx.spl` still hands
+  `draw_text_bg` and `draw_text` to the software mirror followed by
+  `_poison_native_receipt()` (grep: 4 poison call sites, including the two text
+  paths) — the honest-poison shape is intact; no GPU text lane exists.
+- No HLSL twin in `font_atlas_composite.spl`; `runtime_directx_core.c` still
+  exports no text compute/present entries; the `# TODO: [gpu]` markers correctly
+  remain TODOs.
+- This Windows host satisfies the letter of "a Windows host" but still provides
+  no real D3D11 text path to compile/run, and the record's own rule forbids
+  closing from device-free evidence. No "out of scope" decision has been written
+  down. Deferral stands per the 2026-11-11 ne6 addendum.

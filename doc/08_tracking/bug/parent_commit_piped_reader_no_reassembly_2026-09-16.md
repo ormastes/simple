@@ -54,3 +54,7 @@ delivered exactly once to the parent commit inbox.
 Fix pending-buffer carry-over in
 `src/lib/nogc_async_mut/parent_commit_piped_process.spl`
 (`parent_commit_piped_result_reader_v1.receive_stdout_chunk`). Re-run the spec.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**FIXED (confirmed)** — ne19 verified by execution: pending-buffer carry-over present in receive_stdout_chunk (input = pending + chunk; partial trailing line re-saved); the 707/245-byte split repro now reassembles.

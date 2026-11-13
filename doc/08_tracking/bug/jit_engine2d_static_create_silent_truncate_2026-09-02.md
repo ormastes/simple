@@ -111,3 +111,8 @@ trait/vtable dispatch).
 ## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
 
 Concurs with lane ne12: FIXED at tip (root trait-dispatch cause resolved; verification-limited note recorded there stands). No independent re-verification in this lane.
+
+## 2026-11-13 follow-up (Linux aarch64, lane uia)
+
+Not re-verifiable on the JIT here. On release/1.0.0 5221a5058a8, Linux aarch64 (DGX Spark GB10), Rust seed af717f53d6bce3e5 the record's program (Engine2D.create_with_backend_fast 320x240 cpu, clear, shutdown) prints all four lines and exits 0 both by default and with SIMPLE_EXECUTION_MODE=interpret, but the default run is not a JIT run: the module is demoted to the interpreter (ambiguous call to env_get from engine2d sffi_vulkan.spl / backend_vulkan, see jit_co_compiled_definition_ambiguity_debt_2026-09-15), and SIMPLE_JIT_STRICT=1 exits 1 on that lowering error. So the JIT static-create path this record is about was not exercised.
+

@@ -1,0 +1,97 @@
+# Shard worker reap policy shared by the parse-shard fan-out and the ledger
+# shard pools (src/app/cli/native_build_main.spl spawn_parse_shards and
+# run_ledger_shards).
+use app.io.process_ops.{process_wait, process_kill, process_is_running}
+use app.cli.parse_shard_queue.{parse_shard_exit_label}
+use std.io_runtime.{time_now_monotonic_ms}
+use std.nogc_sync_mut.io.process_ops.{eprint}
+
+# Poll quantum for a child that may still be running.
+pub const SHARD_REAP_POLL_MS_V1: i64 = 200
+
+# After a timed-out worker was handed to process_kill (`killed`), the pool
+# re-waits it (`reaped`) and probes liveness (`running`). -2 means it is still
+# running. -1 is a wait error, not proof of exit -- EXCEPT right after a
+# successful kill: both host runtimes reap inside the kill primitive (seed
+# rt_process_kill: SIGKILL + wait, pid forgotten; hosted C unix_common.h:
+# SIGKILL + reap after the 100 ms grace), so the re-wait answers -1 for a
+# child that is dead, and the liveness probe is the deciding evidence.
+# Measured 2026-11-13: kill=true rewait=-1 running=false on every timed-out
+# worker; the old reading BLOCKED the ledger "worker could not be reaped".
+pub fn shard_worker_kill_stopped_v1(killed: bool, reaped: i64, running: bool) -> bool:
+    if running or reaped == -2:
+        return false
+    if reaped == -1:
+        return killed
+    true
+
+# The pool's confirmation sequence after process_kill(pid) returned `killed`.
+# Probe first: a child the kill primitive already reaped is not waitable, and
+# waiting on it only prints the hosted runtime's "waitpid failed: errno=10"
+# (ECHILD) for the expected case. A child still dying gets the 5 s re-wait.
+pub fn shard_worker_confirm_kill_v1(pid: i64, killed: bool) -> bool:
+    if pid <= 0:
+        return true
+    if not process_is_running(pid):
+        return shard_worker_kill_stopped_v1(killed, -1, false)
+    var reaped = process_wait(pid, 5000)
+    # Sign-restore an i32 that crossed the wrapper boundary zero-extended
+    # (native_build_main.spl native_build_normalize_exit_code).
+    if reaped > 2147483647:
+        reaped = reaped - 4294967296
+    shard_worker_kill_stopped_v1(killed, reaped, process_is_running(pid))
+
+# Wait for every parse shard child under ONE shared deadline (`timeout_ms`
+# from now; 0 = no deadline), kill the ones that outlive it, and ALWAYS print
+# each child's exit status. run11 (2026-08-21): shard 6/8 was killed by the
+# kill_simple_monitor CPU guard and the only trace was "7/8 completed" -- the
+# non-zero wait result was counted and dropped. Until 2026-11-13 the children
+# were waited one after another, each with the full budget, so the Nth child
+# could run N x timeout_ms. Returns (failed, unconfirmed) shard indices in
+# `indices` order: `unconfirmed` names killed children whose death could not
+# be confirmed, so the caller must not reclaim or remove the queue they may
+# still write into.
+pub fn parse_shard_reap_v1(pids: [i64], indices: [i64], count: i64, timeout_ms: i64) -> ([i64], [i64]):
+    val deadline = if timeout_ms > 0: time_now_monotonic_ms() + timeout_ms else: 0
+    var codes: [i64] = []
+    var pending = 0
+    for pid in pids:
+        codes = codes.push(if pid > 0: -2 else: -1)
+        if pid > 0: pending = pending + 1
+    while pending > 0:
+        val expired = deadline > 0 and time_now_monotonic_ms() >= deadline
+        var k = 0
+        while k < pids.len():
+            if codes[k] == -2:
+                val code = if expired: -2 else: process_wait(pids[k], SHARD_REAP_POLL_MS_V1)
+                if code != -2 or expired:
+                    codes[k] = code
+                    pending = pending - 1
+            k = k + 1
+    var failed: [i64] = []
+    var unconfirmed: [i64] = []
+    var k = 0
+    while k < pids.len():
+        val i = indices[k]
+        val pid = pids[k]
+        val code = codes[k]
+        if code != 0:
+            eprint("[parse-shard] shard={i}/{count} pid={pid} FAILED {parse_shard_exit_label(code)}")
+            failed = failed.push(i)
+            # A timed-out (-2) child is STILL RUNNING and holds its multi-GiB
+            # interpreter heap. If it stays alive it competes with the HIR
+            # shards and the real worker for the runner's memory and can push
+            # the worker into alloc-failure (beta.9 windows leg: leaked shard
+            # + worker OOM, "memory allocation of 65520 bytes failed"), and it
+            # keeps writing claims into a queue the caller is about to reclaim
+            # and remove. Kill, confirm, and report an unconfirmed death.
+            if pid > 0 and code == -2:
+                val killed = process_kill(pid)
+                val stopped = shard_worker_confirm_kill_v1(pid, killed)
+                if not stopped:
+                    unconfirmed = unconfirmed.push(i)
+                eprint("[parse-shard] shard={i}/{count} pid={pid} dead-child cleanup: kill={killed} stopped={stopped}")
+        else:
+            print "[parse-shard] shard={i}/{count} pid={pid} exit=0"
+        k = k + 1
+    (failed, unconfirmed)

@@ -235,3 +235,7 @@ configured budget rather than a measured elapsed time; the `[TIMEOUT:` marker
 gate closes the misattribution trap regardless. The separate question of why
 the worker died during module load is tracked elsewhere. No code change this
 lane; header flipped to match the verified disposition.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**SUPERSEDED (confirmed)** — boot21: PR #7545 (820631c6e5c7) verified ancestor; all three suggested fixes live in native_build_worker_failure_lines_v1 (:2302-2346) incl. the -1-without-[TIMEOUT: arm citing this record. Residual nit: timeout arm prints configured budget, not elapsed.

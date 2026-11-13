@@ -1609,10 +1609,31 @@ impl Lowerer {
                     move_mode: ast::MoveMode::Copy,
                     capture_all: false,
                 };
+                // Bind the closure at its DECLARED signature when the fn is
+                // fully annotated. HIR types a lambda as its BODY type, so an
+                // unannotated binding is not a function type, and a call to it
+                // from INSIDE another nested fn (where it is a capture, out of
+                // reach of the intraprocedural `propagate_closure_call_types`)
+                // got an `ANY` call boundary that the JIT closure ABI refuses --
+                // dropping the whole module to the interpreter. Partially
+                // annotated, generic or variadic fns keep the untyped binding.
+                // Bug: doc/08_tracking/bug/jit_lowering_clamp_f_engine_color_2026-07-02.md
+                let declared_fn_ty = match &f.return_type {
+                    Some(ret)
+                        if f.generic_params.is_empty()
+                            && f.params.iter().all(|p| p.ty.is_some() && !p.variadic) =>
+                    {
+                        Some(ast::Type::Function {
+                            params: f.params.iter().filter_map(|p| p.ty.clone()).collect(),
+                            ret: Some(Box::new(ret.clone())),
+                        })
+                    }
+                    _ => None,
+                };
                 let binding = ast::LetStmt {
                     span: f.span,
                     pattern: Pattern::Identifier(f.name.clone()),
-                    ty: None,
+                    ty: declared_fn_ty,
                     value: Some(lambda),
                     mutability: Mutability::Immutable,
                     storage_class: ast::StorageClass::Auto,

@@ -110,3 +110,8 @@ lane. No code change in this lane.
 Concurs with lane p3-interp7's SUPERSEDED verdict: marshalling mechanism fixed
 and re-measured 2026-11-11. No independent re-measurement in this lane
 (perf-harness rerun exceeds the per-bug timebox).
+
+## Re-verified 2026-11-13 (Linux aarch64, lane uia)
+
+On release/1.0.0 35144b7f5e9, Linux aarch64 seed af717f53d6bce3e5 the tracked rig test/perf/graphics_2d/bench_span_kernels.spl died with semantic: unknown extern function: rt_println (rc=1); rig now uses print and runs (rc=0). One run, arch=aarch64 native_rows=true width=640 iters=400: fill 298 ms, copy 10 ms, blend 18 ms, blit 6 ms (about 1164 / 39 / 70 / 23 ns per px including per-call overhead; single ms-resolution sample, not comparable with the x86_64 table). Bulk write_span path confirmed in source; fill remains the outlier tracked by interp_indexed_array_store_regression_2026-11-11.
+

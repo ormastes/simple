@@ -169,3 +169,13 @@ imports now resolves. Their seed-smoke evidence (`async_core_spec.spl` 7/7 on
 the tracked seed) is same-day and same-branch; per the no-rerun rule it is not
 re-executed. Absorber: P3 lane ne2 verdict addendum above (FIXED
 2026-11-11). Lane evidence: `build/review/p3fix-ne20-20261111.sdn`.
+
+
+## Triage 2026-11-13 (lane p3-async-20261113, base 80a8116e5e2) — confirms FIXED
+
+Same-base structural re-verification: `src/lib/nogc_async_mut/async_core.spl`
+is present on disk (1808 bytes) on origin/release/1.0.0, so the
+`use std.async_core.{AsyncError, CancellationToken, Poll, Priority, TaskState}`
+surface the async_host family imports resolves on this base. The 2026-11-11
+lane-ne2 seed-smoke evidence (`async_core_spec.spl` 7/7) is same-branch and
+stands per the no-rerun rule. No source change.

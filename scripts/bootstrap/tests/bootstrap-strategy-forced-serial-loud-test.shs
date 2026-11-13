@@ -1,0 +1,48 @@
+#!/bin/sh
+# bootstrap-strategy.shs forces --jobs=1 at two sites (Stage 3 resume, Stage 4
+# continuation). A forced serial build must be LOUD at run time: every site
+# that pins jobs to 1 carries a `bootstrap-strategy: serial:` stderr line that
+# names the reason and the count it replaces. A comment is not a reason line
+# (concurrency rule: a silent serial fallback is a defect).
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+# BOOTSTRAP_STRATEGY_SCRIPT overrides the target (used to prove this test red
+# against a committed revision: `git show <rev>:scripts/bootstrap/bootstrap-strategy.shs`).
+script=${BOOTSTRAP_STRATEGY_SCRIPT:-$root/scripts/bootstrap/bootstrap-strategy.shs}
+fail() { echo "FAIL: $*" >&2; exit 1; }
+
+sh -n "$script" || fail "bootstrap-strategy.shs does not parse"
+
+# Every forced-serial site: an assignment `forced_jobs=1` or a literal
+# `--jobs=1` argument. Comments and the reason lines themselves do not count.
+sites=$(grep -nE '(forced_jobs=1|--jobs=1)([^0-9]|$)' "$script" \
+  | grep -vE '^[0-9]+:[[:space:]]*#' \
+  | grep -vE 'bootstrap-strategy: serial:' \
+  | cut -d: -f1)
+[ -n "$sites" ] || fail "no forced jobs=1 site found; this test no longer matches the script"
+
+checked=0
+for line in $sites; do
+  checked=$((checked + 1))
+  from=$((line - 5)); [ "$from" -ge 1 ] || from=1
+  window=$(sed -n "${from},$((line + 1))p" "$script")
+  printf '%s\n' "$window" | grep -qE 'echo "bootstrap-strategy: serial: .*--jobs=1.*" >&2' \
+    || fail "forced jobs=1 at line $line has no 'bootstrap-strategy: serial:' stderr reason within 5 lines"
+done
+
+# The Stage 3 site must still only fire on a resume with a non-1 computed count.
+block=$(awk '/Stage 3 resume job count other than 1/{p=1} p{print} /^    fi$/{if(p){exit}}' "$script")
+[ -n "$block" ] || fail "Stage 3 forced-serial block not found"
+for case in '1 4 forces' '1 1 silent' '0 4 silent' '1  silent'; do
+  set -- $case
+  resume_stage3=$1
+  if [ $# -eq 3 ]; then forced_jobs=$2; want=$3; else forced_jobs=; want=$2; fi
+  err=$( (eval "$block") 2>&1 >/dev/null ) || fail "Stage 3 block exited non-zero for resume=$resume_stage3 jobs=$forced_jobs"
+  case "$want" in
+    forces) printf '%s\n' "$err" | grep -q 'serial: Stage 3 resume forces --jobs=1 .*--jobs=4' \
+              || fail "resume=1 jobs=4 did not print the forced-serial reason: $err" ;;
+    silent) [ -z "$err" ] || fail "resume=$resume_stage3 jobs=$forced_jobs must stay silent, got: $err" ;;
+  esac
+done
+
+echo "PASS — $checked forced jobs=1 site(s) each carry a runtime stderr reason; Stage 3 block fires only on resume with jobs!=1"

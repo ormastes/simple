@@ -139,3 +139,10 @@ takes a raw pointer. Adding a raw-pointer fixture now would introduce an
 unrelated lifetime/unsafe dependency and would not isolate returned aggregate
 provenance. Track completion in this OPEN bug and do not close it from the
 array fixture alone.
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+reduced but lowering site not located per in-file status; owner: stage-2 codegen lane.

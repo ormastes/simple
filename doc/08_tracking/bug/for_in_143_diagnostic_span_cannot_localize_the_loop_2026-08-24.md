@@ -75,3 +75,7 @@ is a failing native-build (rc=1), and the Windows native-build
 success-path hang is a known live defect routed to its owner lane. The
 fix is verified by code inspection at the raise site and both of its
 formatting consumers.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**FIXED (confirmed)** — ne9 verified at the raise site: #143 now prefers source_span (the for-statement's own span), message names collection MIR type + module; landed 820631c6e5c7 (PR #7545).

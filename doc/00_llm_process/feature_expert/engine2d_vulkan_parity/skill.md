@@ -62,6 +62,20 @@ compared byte for byte. This is a measurement harness, not a renderer.
   loop and REPORT the attempt count; never smooth it away silently.
 - Machine swing is ~36%, wider than the ±20% the NFR used to claim. Report
   ranges from same-run pairs, not a best run.
+- `runtime-init` on NVIDIA GB10 is `vkCreateDevice` returning
+  `VK_ERROR_INITIALIZATION_FAILED` under GPU contention (4 concurrent spec
+  processes: 11 of 32 fail; 2 concurrent or serial: 0; llvmpipe: 0). The seed
+  retries it with a 750 ms bound and logs each attempt; `init_error` now
+  carries the step + VkResult. Run device-backed specs serially. Needs a seed
+  built after 2026-11-13. The compiled runtime (ash,
+  `runtime/src/vulkan/device.rs`) has the same retry and text through the ONE
+  shared helper `runtime/src/vulkan_create_device_retry.rs` (probe under spec
+  contention: 11 and 25 of 32 failed before, 2 and 0 of 32 after). Trap: the
+  Linux seed links the runtime WITHOUT the `vulkan` feature, so a plain
+  `simple file.spl` calling `rt_vulkan_init` gets the feature-disabled stub -
+  measure that lane with a `--features vulkan` runtime binary. There is no C
+  device-creation lane (`runtime_dynload.c` only forwards). See
+  `doc/08_tracking/bug/vulkan_runtime_init_nvidia_create_device_contention_2026-11-13.md`.
 
 ## Cross-reference — 2026-09-06 GPU/2D honesty sweep
 

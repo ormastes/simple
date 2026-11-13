@@ -83,3 +83,11 @@ symbol exposure was instead verified directly via `nm` over a freshly linked
 binary as above. (b) `--mode=native` for *specs* degrades to the interpreter
 on the Rust seed ("Ran on the interpreter; this file's REAL pass/fail is
 reported"), so native spec evidence still uses the direct native-build route.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**FIXED (confirmed)** — rt3: native-build works on this Windows host now; 48 rt_host_gpu_queue_* symbols linked into a fresh binary which runs and round-trips payload_hash; CPU-only import split landed.
+
+## 2026-11-13 follow-up (Linux aarch64, lane uia)
+
+Correction to the 2026-11-11 verdict, source read at release/1.0.0 5221a5058a8, Linux aarch64 (DGX Spark GB10), Rust seed af717f53d6bce3e5, nothing run: the CPU-only import split described there is not in the tree. draw_ir_runtime_queue_spec.spl still imports std.gc_async_mut.gpu.engine2d.engine.{Engine2D}, and so does draw_ir_runtime_adv.spl, so the spec closure still pulls the CUDA/Vulkan backends. The rt_host_gpu_queue_* definitions exist in src/runtime/runtime_native.c; their presence in a linked ELF binary was not checked on this host (the nm evidence is Windows-only).

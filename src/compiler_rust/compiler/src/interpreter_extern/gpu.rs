@@ -3814,6 +3814,16 @@ mod vulkan_dlopen {
     unsafe impl Sync for VulkanState {}
 
     pub static VK_STATE: Mutex<Option<VulkanState>> = Mutex::new(None);
+
+    /// Why the last `rt_vulkan_init` failed (step + VkResult). `VK_STATE` is
+    /// `None` after a failed init, so its `last_error` cannot carry this;
+    /// `rt_vulkan_get_last_error` falls back to it. Empty after a success.
+    pub static VK_INIT_ERROR: Mutex<String> = Mutex::new(String::new());
+
+    // Shared with the compiled runtime's ash lane (one retry + text helper).
+    pub use simple_runtime::vulkan_create_device_retry::{
+        vk_create_device_error, vk_create_device_with_retry, vk_result_name, vk_retry_sleep_ms,
+    };
 }
 
 static VULKAN_DL_AVAILABLE: OnceLock<bool> = OnceLock::new();
@@ -3926,9 +3936,21 @@ pub fn rt_vulkan_init_fn(_args: &[Value]) -> Result<Value, CompileError> {
             return Ok(Value::Bool(true));
         }
     }
+    let fail = |step: &str, r: Option<VkResult>| -> Result<Value, CompileError> {
+        let msg = match r {
+            Some(r) => format!("{step}: {} ({r})", vk_result_name(r)),
+            None => step.to_string(),
+        };
+        eprintln!("[vulkan] rt_vulkan_init failed at {msg}");
+        *VK_INIT_ERROR.lock().unwrap() = msg;
+        Ok(Value::Bool(false))
+    };
     let fns = match vulkan_dlopen::load_vulkan() {
         Some(f) => f,
-        None => return Ok(Value::Bool(false)),
+        None => {
+            *VK_INIT_ERROR.lock().unwrap() = "load_vulkan: loader library or symbols unavailable".to_string();
+            return Ok(Value::Bool(false));
+        }
     };
     unsafe {
         let app_name = std::ffi::CString::new("simple").unwrap();
@@ -3959,19 +3981,25 @@ pub fn rt_vulkan_init_fn(_args: &[Value]) -> Result<Value, CompileError> {
             pp_enabled_extension_names: instance_extension_ptr,
         };
         let mut instance: VkInstance = ptr::null_mut();
-        if (fns.create_instance)(&create_info, ptr::null(), &mut instance) != VK_SUCCESS {
-            return Ok(Value::Bool(false));
+        let r = (fns.create_instance)(&create_info, ptr::null(), &mut instance);
+        if r != VK_SUCCESS {
+            return fail("vkCreateInstance", Some(r));
         }
 
         // Enumerate physical devices
         let mut count: u32 = 0;
-        (fns.enumerate_physical_devices)(instance, &mut count, ptr::null_mut());
+        let r = (fns.enumerate_physical_devices)(instance, &mut count, ptr::null_mut());
         if count == 0 {
             (fns.destroy_instance)(instance, ptr::null());
-            return Ok(Value::Bool(false));
+            return fail("vkEnumeratePhysicalDevices(count=0)", Some(r));
         }
         let mut phys_devs: Vec<VkPhysicalDevice> = vec![ptr::null_mut(); count as usize];
-        (fns.enumerate_physical_devices)(instance, &mut count, phys_devs.as_mut_ptr());
+        let r = (fns.enumerate_physical_devices)(instance, &mut count, phys_devs.as_mut_ptr());
+        if r < 0 {
+            (fns.destroy_instance)(instance, ptr::null());
+            return fail("vkEnumeratePhysicalDevices", Some(r));
+        }
+        phys_devs.truncate(count as usize);
 
         // Pick first device with a compute queue
         let mut chosen_phys: VkPhysicalDevice = ptr::null_mut();
@@ -3992,7 +4020,7 @@ pub fn rt_vulkan_init_fn(_args: &[Value]) -> Result<Value, CompileError> {
         }
         if chosen_phys.is_null() {
             (fns.destroy_instance)(instance, ptr::null());
-            return Ok(Value::Bool(false));
+            return fail(&format!("no compute queue family on any of {count} device(s)"), None);
         }
 
         let priority: f32 = 1.0;
@@ -4018,9 +4046,20 @@ pub fn rt_vulkan_init_fn(_args: &[Value]) -> Result<Value, CompileError> {
             p_enabled_features: &features,
         };
         let mut device: VkDevice = ptr::null_mut();
-        if (fns.create_device)(chosen_phys, &dev_ci, ptr::null(), &mut device) != VK_SUCCESS {
+        let (created, attempts) = vk_create_device_with_retry(
+            || match (fns.create_device)(chosen_phys, &dev_ci, ptr::null(), &mut device) {
+                VK_SUCCESS => Ok(()),
+                r => Err(r),
+            },
+            vk_retry_sleep_ms,
+        );
+        if let Err(r) = created {
             (fns.destroy_instance)(instance, ptr::null());
-            return Ok(Value::Bool(false));
+            let idx = phys_devs.iter().position(|pd| *pd == chosen_phys).unwrap_or(0);
+            return fail(
+                &vk_create_device_error(idx, count as usize, chosen_qf, attempts, r),
+                None,
+            );
         }
 
         let mut queue: VkQueue = ptr::null_mut();
@@ -4046,10 +4085,11 @@ pub fn rt_vulkan_init_fn(_args: &[Value]) -> Result<Value, CompileError> {
             queue_family_index: chosen_qf,
         };
         let mut cmd_pool: VkCommandPool = 0;
-        if (fns.create_command_pool)(device, &pool_ci, ptr::null(), &mut cmd_pool) != VK_SUCCESS {
+        let r = (fns.create_command_pool)(device, &pool_ci, ptr::null(), &mut cmd_pool);
+        if r != VK_SUCCESS {
             (fns.destroy_device)(device, ptr::null());
             (fns.destroy_instance)(instance, ptr::null());
-            return Ok(Value::Bool(false));
+            return fail("vkCreateCommandPool", Some(r));
         }
 
         let state = VulkanState {
@@ -4077,6 +4117,7 @@ pub fn rt_vulkan_init_fn(_args: &[Value]) -> Result<Value, CompileError> {
         };
         *VK_STATE.lock().unwrap() = Some(state);
     }
+    VK_INIT_ERROR.lock().unwrap().clear();
     Ok(Value::Bool(true))
 }
 
@@ -5668,7 +5709,10 @@ pub fn rt_vulkan_wait_idle_fn(_args: &[Value]) -> Result<Value, CompileError> {
 pub fn rt_vulkan_get_last_error_fn(_args: &[Value]) -> Result<Value, CompileError> {
     use vulkan_dlopen::VK_STATE;
     let guard = VK_STATE.lock().unwrap();
-    let err = guard.as_ref().map(|s| s.last_error.clone()).unwrap_or_default();
+    let err = match guard.as_ref() {
+        Some(s) => s.last_error.clone(),
+        None => vulkan_dlopen::VK_INIT_ERROR.lock().unwrap().clone(),
+    };
     Ok(Value::text(err))
 }
 

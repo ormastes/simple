@@ -100,3 +100,7 @@ lane: an OS-owner decision renaming/merging two of the three
     test/01_unit/os/kernel/ipc/capability_mint_spec.spl \
     test/01_unit/os/kernel/ipc/net_listen_broker_spec.spl \
     --mode=interpreter --no-cache
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**PARTIAL/BLOCKED (confirmed)** — Mechanism fixed + statically verified (ne4): exact-endpoint shims landed, specs pinned. Live confinement execution BLOCKED on the VirtMemManager tri-def (OS-owner decision 2026-11-09); grant names the three specs to re-run.

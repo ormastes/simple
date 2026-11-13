@@ -1,6 +1,6 @@
 # Test mode-filter specs are vacuous self-tests, and the skip marker they assert on is corrupted
 
-Status: OPEN
+Status: FIXED 2026-11-13 (lane p3-misc-b)
 Found: 2026-08-21
 Area: `test/01_unit/test_runner/`, `test/feature/mode_filter/`
 
@@ -77,3 +77,32 @@ decision.
 - `doc/09_report/skipped_flaky_test_census_2026-08-21.md` §3a, §3b
 - The adjacent, separately-fixed unanchored `# @skip` substring bug:
   `doc/08_tracking/bug/test_runner_unanchored_skip_substring_2026-08-21.md`
+
+---
+
+## Resolution 2026-11-13 (lane p3-misc-b)
+
+The "product decision" this record waited on has since been made:
+`src/lib/nogc_sync_mut/test_runner/mode_filter.spl` implements the real
+`# @mode:` / `# @skip_mode:` directives and the manifest scanner consumes them.
+The unit specs were also already rewritten to import
+`std.test_runner.mode_filter.{extract_mode_tags, file_mode_matches,
+file_get_mode_tags, content_mode_matches}` (0 occurrences of the corrupted
+string remain in either unit spec). What remained was the inert marker in the
+two skip_native fixtures.
+
+Fix applied:
+- `test/feature/mode_filter/skip_native_spec.spl` and
+  `test/03_system/feature/mode_filter/skip_native_spec.spl`: replaced the inert
+  `# skip-marker-removed_mode: native` with the production directive
+  `# @skip_mode: native`, and updated the docstring mention accordingly. The
+  files now genuinely skip native and run under interpreter/smf, as documented.
+
+Verified (seed `bin/simple.exe`, release/1.0.0 tip):
+- `test/feature/mode_filter/skip_native_spec.spl` — 1/1 GREEN
+- `test/03_system/feature/mode_filter/skip_native_spec.spl` — 1/1 GREEN
+- `test/01_unit/test_runner/mode_filter_spec.spl` — 20/20 GREEN
+- `test/01_unit/test_runner/tag_parsing_spec.spl` — 18/18 GREEN
+- Canary `test/02_integration/app/context_log_modes_spec.spl` — 4/4 GREEN
+
+`grep -rl skip-marker-removed test/ --include=*.spl` now returns zero files.

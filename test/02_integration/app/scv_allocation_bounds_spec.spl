@@ -8,6 +8,7 @@ Audience: Maintainers of SCV and of the mission-critical hardening v2 lanes.
 # @tag: integration, scv, mission_critical, memory
 use std.spec.{describe, it, expect, step}
 use app.io.mod (process_run, file_write)
+use std.nogc_sync_mut.env.platform.{get_temp_dir}
 use std.scv.alloc_bounds.{SCV_MAX_OBJECT_BYTES, SCV_MAX_TREE_ENTRIES, SCV_MAX_DELTA_TARGET_BYTES, SCV_MAX_PARSER_INPUT_BYTES}
 use std.scv.alloc_bounds.{scv_bound_object_bytes, scv_bound_tree_entries, scv_bound_delta_target_bytes, scv_bound_parser_input_bytes}
 use std.scv.delta.{scv_delta_decode, SCV_DELTA_MAX_DEPTH}
@@ -19,6 +20,12 @@ use std.scv.integrity.{scv_fsck}
 
 val BOUND_ERROR = "ERROR scv allocation bound exceeded:"
 
+# Fixture roots must live where BOTH the POSIX fixture shell and the Simple
+# filesystem APIs can address them: the runtime does not translate a POSIX
+# "/tmp" prefix on Windows, so anchor under the host temp dir instead.
+fn _fixture_base() -> text:
+    get_temp_dir().replace("\\", "/")
+
 fn _sh(script: text) -> text:
     val (out, err, code) = process_run("/bin/sh", ["-c", script])
     expect(code).to_equal(0)
@@ -27,7 +34,7 @@ fn _sh(script: text) -> text:
 
 # A fresh initialised repository with one snapshotted file.
 fn _fresh_repo(label: text) -> text:
-    val root = _sh("mktemp -d /tmp/scv-alloc-bounds-{label}.XXXXXX")
+    val root = _sh("mktemp -d {_fixture_base()}/scv-alloc-bounds-{label}.XXXXXX")
     file_write("{root}/a.txt", "payload\n")
     expect(scv_init_repo(root)).to_not_contain("ERROR")
     expect(scv_snapshot(root)).to_not_contain("ERROR")

@@ -214,3 +214,7 @@ Expected per the doc's table: the four `any_local_*` fixtures print their
 exact lines; `any_param_two_classes` and `any_local_missing_method` fail
 closed loudly. Any 137/143/144 verdict is UNVERIFIED (exit 2), never a pass.
 
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**OPEN/design (confirmed)** — Improved unresolved-method diagnostic landed (route/key/owner detail + receiver span); step 1 (Any-annotated local propagation) UNCONFIRMED without native runs; step 3 (type-id/vtable object model) absent by design. Grant: Linux native lane; any 137/143/144 verdict is UNVERIFIED (exit 2), never a pass.

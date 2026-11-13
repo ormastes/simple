@@ -39,3 +39,10 @@ run in a working tree that already has the file.
 A preserved branch containing the restoration commit exists locally:
 `session-2026-08-18-pickup` (tip `518dfa6adf8`); the push itself is blocked on
 `committed_tree_unbuildable_only_dirty_worktree_compiles_2026-08-18.md`.
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+hook-vs-history mismatch; the push-hook owner must either land the gate or drop the requirement. Record only.

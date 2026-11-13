@@ -124,3 +124,7 @@ from entry-closure native builds), and the formal-verification gates
 require the FV 2.0 integration lane. The status line correctly stays
 open; this addendum records that the 2026-08-12 blocker list was
 re-confirmed, not silently stale.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**LIVE (confirmed)** — ne9: unblock conditions unmet — seed still prints the bootstrap-only warning, no bin/release self-hosted binary, no lean4export/nanoda provisioning visible; FV gates require the FV 2.0 integration lane.

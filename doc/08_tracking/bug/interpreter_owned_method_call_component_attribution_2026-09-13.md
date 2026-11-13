@@ -263,3 +263,7 @@ Residuals carried forward unchanged:
 - Residual B (MECALL perf-counter family reads 0 on the seed): routed to
   the campaign's known-live owner-decision item "MECALL counters read 0";
   not re-diagnosed here per directive.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**SUPERSEDED (confirmed)** — int9: PERF-7/PERF-9 landed via 9e7e7a526edb (PR #7597); PERF-9 pin re-run 3/3 on the tracked seed. Deferred optimisations stay deferred by design; MECALL-counter residual routed to its owner-decision item.

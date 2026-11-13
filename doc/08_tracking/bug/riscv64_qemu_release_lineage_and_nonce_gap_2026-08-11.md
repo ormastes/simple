@@ -77,3 +77,10 @@ plus a riscv64 nonce-slot guard landed analogously to
 `scripts/check/check-arm64-qemu-nonce-slot.shs`, and one canonical
 `test/03_system` RV64 spec run through the deployed pure-Simple CLI with the
 runner-supplied nonce correlated into the retained receipt.
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+Not pursued in this lane: re-verified 2026-11-05: both blockers stand (seed cross-compile, no per-run nonce). Needs the QEMU/release-lineage lane on a Linux host with cargo.

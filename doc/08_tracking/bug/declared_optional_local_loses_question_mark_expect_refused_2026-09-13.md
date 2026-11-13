@@ -94,3 +94,7 @@ the annotation-drop regression is not indicated, but the LLVM lane cannot be
 scored here). If `--backend llvm` is still user-selectable, a one-line table
 add + `expect` in the :3105 leaf list is the mechanical completion; left for
 the LLVM lane owner.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**FIXED (confirmed)** — ne6 verified all four declared-? shapes on the refreshed seed; Cranelift lane carries rt_expect_or_trap. Residual: legacy LLVM table lacks the expect arm — mechanical completion left for the LLVM lane owner.

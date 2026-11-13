@@ -54,7 +54,8 @@ use std.nogc_sync_mut.io.file_ops.{file_atomic_write}
 use std.io_runtime.{getpid}
 use std.io_runtime.{time_now_monotonic_ms}
 use std.io_runtime.{dir_create_all, dir_remove_all, dir_exists}
-use app.cli.parse_shard_queue.{parse_shard_release_claims, parse_shard_exit_label}
+use app.cli.parse_shard_queue.{parse_shard_release_claims}
+use app.cli.shard_worker_reap_v1.{shard_worker_confirm_kill_v1, parse_shard_reap_v1}
 use app.cli.native_build_exit_status.{native_build_windows_status_label, native_build_posix_signal}
 use app.cli.file_worker_pool_refusal.{file_worker_pool_refusal_v1}
 use app.cli.shard_mem_clamp.{shard_default_threads}
@@ -63,7 +64,7 @@ use app.cli.shard_mem_clamp.{build_memory_reserve_kib, build_memory_start_refusa
 use app.cli.shard_mem_clamp.{shard_threads_mem_cap, shard_worker_budget_kb,
     shard_mem_available_kb, shard_mem_available_kb_from_field,
     shard_host_threads_cap, shard_cgroup_memory_max_kb, shard_tree_budget_kb_for,
-    SHARD_PARSE_WORKER_KB_V1, SHARD_HIR_WORKER_KB_V1, SHARD_MIR_WORKER_KB_V1,
+    SHARD_PARSE_WORKER_KB_V1, SHARD_HIR_WORKER_KB_V1, shard_mir_worker_price_kb_v1,
     shard_commit_estimate_kib_v1, shard_commit_spawn_admit_v1, shard_commit_live_footprint_v1,
     shard_commit_unmeasured_estimate_kib_v1, shard_worker_exit_hint_v1,
     shard_worker_estimate_kib_v1, shard_pool_clamp_workers,
@@ -88,7 +89,8 @@ use compiler.driver.driver_build.native_file_worker_v1.{NATIVE_FILE_WORKERS_ENV_
     native_file_worker_spec_valid_v1, native_file_worker_child_args_v1, native_file_worker_batch_from_env_v1,
     native_file_worker_mir_count_v1, native_file_worker_receipt_publish_v1, native_file_worker_receipts_in_v1,
     native_file_worker_owner_claims_v1, native_file_worker_terminal_state_v1, native_file_worker_inventory_rows_v1,
-    native_file_worker_hir_ledger_state_v1, native_file_worker_object_path_v1, file_worker_overlap_proven_v1,
+    native_file_worker_hir_ledger_state_v1, native_file_worker_hir_gate_verdict_v1, NATIVE_FILE_WORKER_HIR_GATE_BUDGET_MS_V1,
+    native_file_worker_object_path_v1, file_worker_overlap_proven_v1,
     NATIVE_BOOTSTRAP_WHOLE_PROGRAM_ENV_V1, file_worker_module_scoped_selected_v1,
     NativeFileUnitInvokerV1, NATIVE_FILE_WORKER_UNIT_ENV_V1}
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_complete, HIR_SHARD_FORK_OWNER_MARK_V1}
@@ -823,40 +825,16 @@ fn parse_shard_queue_dir() -> text:
     dir
 
 fn spawn_parse_shards(base: [text], indices: [i64], count: i64, simple_bin: text, timeout_ms: i64,
-        split_flag: text) -> [i64]:
-    # Spawn one child per index, wait for all, and ALWAYS print each child's
-    # exit status. run11 (2026-08-21): shard 6/8 was killed by the
-    # kill_simple_monitor CPU guard and the only trace was "7/8 completed" --
-    # the non-zero wait result was counted and dropped. Returns the failed
-    # shard indices.
+        split_flag: text) -> ([i64], [i64]):
+    # Spawn one child per index, then reap them all under one shared deadline
+    # (shard_worker_reap_v1.spl). Returns (failed, unconfirmed) shard indices.
     var pids: [i64] = []
     for i in indices:
         var shard_args = base
         shard_args = shard_args.push("{split_flag}={i}/{count}")
         val pid = process_spawn_async(simple_bin, shard_args)
         pids = pids.push(pid)
-    var failed: [i64] = []
-    var k = 0
-    while k < pids.len():
-        val i = indices[k]
-        val pid = pids[k]
-        val code = if pid > 0: process_wait(pid, timeout_ms) else: -1
-        if code != 0:
-            eprint "[parse-shard] shard={i}/{count} pid={pid} FAILED {parse_shard_exit_label(code)}"
-            failed = failed.push(i)
-            # A timed-out (-2) child is STILL RUNNING and holds its multi-GiB
-            # interpreter heap. If it stays alive it competes with the HIR
-            # shards and the real worker for the runner's memory and can push
-            # the worker into alloc-failure (beta.9 windows leg: leaked shard
-            # + worker OOM, "memory allocation of 65520 bytes failed").
-            # Best-effort kill; an already-exited child makes this a no-op.
-            if pid > 0:
-                val killed = process_kill(pid)
-                eprint "[parse-shard] shard={i}/{count} pid={pid} dead-child cleanup: kill={killed}"
-        else:
-            print "[parse-shard] shard={i}/{count} pid={pid} exit=0"
-        k = k + 1
-    failed
+    parse_shard_reap_v1(pids, indices, count, timeout_ms)
 
 fn run_parse_shards(args: [text], count: i64, simple_bin: text, timeout_ms: i64):
     # Parse warming only needs source discovery and the front-end parser.  Do
@@ -910,23 +888,30 @@ fn run_parse_shards_with_base(base: [text], count: i64, simple_bin: text, timeou
     while i < count:
         indices = indices.push(i)
         i = i + 1
-    var failed = spawn_parse_shards(base, indices, count, simple_bin, timeout_ms, split_flag)
+    val (failed, unconfirmed) = spawn_parse_shards(base, indices, count, simple_bin, timeout_ms, split_flag)
     var done = count - failed.len()
+    var live = unconfirmed
     # Orphan reclaim: a dead shard's claims are released and the same indices
     # are run once more. Every other module is already claimed (and cached),
     # so the retry claims exactly the orphans. One round only -- a second
     # death degrades to the real build parsing the remainder, as before.
-    if queue_dir != "" and failed.len() > 0:
+    # Fail closed on an unconfirmed kill: a child that may still be alive is
+    # still writing claims, so its rows are not released and the queue stays.
+    if queue_dir != "" and failed.len() > 0 and live.len() == 0:
         var dead_specs: [text] = []
         for d in failed:
             dead_specs = dead_specs.push("{d}/{count}")
         val released = parse_shard_release_claims(queue_dir, dead_specs)
         print "[parse-shard] reclaim: {failed.len()} dead shard(s), {released} orphaned claim(s) released, retrying"
-        val failed_again = spawn_parse_shards(base, failed, count, simple_bin, timeout_ms, split_flag)
+        val (failed_again, unconfirmed_again) = spawn_parse_shards(base, failed, count, simple_bin, timeout_ms, split_flag)
         done = count - failed_again.len()
+        live = unconfirmed_again
     if queue_dir != "":
         native_build_env_restore_v1("SIMPLE_PARSE_SHARD_QUEUE", old_queue)
-        val _removed = dir_remove_all(queue_dir)
+        if live.len() > 0:
+            eprint "[parse-shard] {live.len()} killed shard(s) not confirmed stopped ({live}); queue retained, no reclaim: {queue_dir}"
+        else:
+            val _removed = dir_remove_all(queue_dir)
     val mode = if queue_dir != "": "queue" else: "static"
     print "[parse-shard] {done}/{count} shard(s) completed split={mode}"
 
@@ -1155,7 +1140,7 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
     val peak_record = "{native_build_path_parent_v1(queue_dir)}/{label}.{producer_key}.peak_kib"
     val old_dataset_cap = native_build_env_saved_v1("SIMPLE_GLOBAL_DATASET_MAX_BYTES")
     val budget_knob = if label == "mir-shard": "SIMPLE_MIR_SHARD_WORKER_KB" else: "SIMPLE_HIR_SHARD_WORKER_KB"
-    val static_kib = if label == "mir-shard": shard_worker_budget_kb(budget_knob, SHARD_MIR_WORKER_KB_V1) else: shard_worker_budget_kb(budget_knob, SHARD_HIR_WORKER_KB_V1)
+    val static_kib = if label == "mir-shard": native_build_mir_worker_budget_kb_v1() else: shard_worker_budget_kb(budget_knob, SHARD_HIR_WORKER_KB_V1)
     val override_kib = shard_mem_available_kb_from_field(env_get(budget_knob) ?? "")
     val recorded_peak = if file_exists(peak_record): (file_read(peak_record).trim().to_i64() ?? 0) else: 0
     var observed_peak_kib: i64 = 0
@@ -1297,9 +1282,7 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
             # probe also means invalid handle; require a real reap result.
             var owner_stopped = if label == "hir-shard": hir_stopped else: pid <= 0 or (code != -2 and code != -1 and not process_is_running(pid))
             if label != "hir-shard" and not owner_stopped and pid > 0:
-                val _killed = process_kill(pid)
-                val reaped = native_build_normalize_exit_code(process_wait(pid, 5000))
-                owner_stopped = reaped != -2 and reaped != -1 and not process_is_running(pid)
+                owner_stopped = shard_worker_confirm_kill_v1(pid, process_kill(pid))
                 if not owner_stopped:
                     all_stopped = false
                     val _blocked = hir_shard_recovery_block(queue_dir, "worker could not be reaped")
@@ -1353,9 +1336,7 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
                             all_stopped = false
                             val _blocked = hir_shard_recovery_block(queue_dir, hir_owner.reason)
                     elif pids[remaining] > 0:
-                        val _killed = process_kill(pids[remaining])
-                        val reaped = native_build_normalize_exit_code(process_wait(pids[remaining], 5000))
-                        if reaped != -2 and reaped != -1 and not process_is_running(pids[remaining]):
+                        if shard_worker_confirm_kill_v1(pids[remaining], process_kill(pids[remaining])):
                             val _sealed = hir_shard_recovery_seal(queue_dir, owners[remaining], "BLOCKED")
                         else:
                             all_stopped = false
@@ -1408,6 +1389,13 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
 # worker count). Concurrency is the memory-clamped --threads value under the
 # SIMPLE_MIR_SHARD_WORKER_KB per-worker budget; more shards than concurrent
 # workers queue for a free slot, so each worker's MIR share shrinks with the count.
+# Per-worker MIR budget: an explicit SIMPLE_MIR_SHARD_WORKER_KB (then host
+# worker_mem_mib) wins; the default is the closure-scaled price of the
+# published closure (shard_mir_worker_price_kb_v1; unknown size = ceiling).
+fn native_build_mir_worker_budget_kb_v1() -> i64:
+    shard_worker_budget_kb("SIMPLE_MIR_SHARD_WORKER_KB",
+        shard_mir_worker_price_kb_v1(native_build_closure_selected_count_v1()))
+
 fn native_build_mir_shard_parallel(args: [text]) -> i64:
     if (env_get("SIMPLE_MIR_SHARD") ?? "") != "" or (env_get("SIMPLE_HIR_SHARD") ?? "") != "" or
             (env_get("SIMPLE_PARSE_SHARD") ?? "") != "":
@@ -1444,7 +1432,7 @@ fn native_build_mir_shard_parallel(args: [text]) -> i64:
             (env_get("SIMPLE_NATIVE_GROUP_MANIFEST") ?? "") != ""):
         eprint "[mir-shard] disabled: output format re-reads MIR set"
         return 0
-    val requested = native_build_shard_threads(args, shard_worker_budget_kb("SIMPLE_MIR_SHARD_WORKER_KB", SHARD_MIR_WORKER_KB_V1))
+    val requested = native_build_shard_threads(args, native_build_mir_worker_budget_kb_v1())
     if requested > 0: requested else: 1
 
 fn native_build_mir_shard_count(parallel: i64) -> i64:
@@ -1619,7 +1607,7 @@ pub fn native_build_focused_capsule_shards_v1(base: [text], args: [text], allow_
     var result = ""
     val mir_flag = env_get("SIMPLE_MIR_SHARDING") ?? ""
     if allow_mir and hir_ok and mir_flag != "0":
-        val parallel = native_build_shard_threads(args, shard_worker_budget_kb("SIMPLE_MIR_SHARD_WORKER_KB", SHARD_MIR_WORKER_KB_V1))
+        val parallel = native_build_shard_threads(args, native_build_mir_worker_budget_kb_v1())
         if parallel > 1:
             val mir_queue = shard_ledger_queue_dir(args, "mir-queue", "mir-shard")
             if mir_queue != "":
@@ -1662,7 +1650,7 @@ fn run_file_worker_pool_v1(base: [text], args: [text], simple_bin: text, timeout
     if requested <= 0 and pool_request > 1:
         admit_args = admit_args.push("--threads={pool_request}")
     val hir_count = native_build_hir_shard_count(admit_args)
-    val mir_parallel = native_build_shard_threads(admit_args, shard_worker_budget_kb("SIMPLE_MIR_SHARD_WORKER_KB", SHARD_MIR_WORKER_KB_V1))
+    val mir_parallel = native_build_shard_threads(admit_args, native_build_mir_worker_budget_kb_v1())
     val parallel = if hir_count < mir_parallel: hir_count else: mir_parallel
     val hir_disabled_by = if (env_get("SIMPLE_HIR_CACHE") ?? "") == "0": "SIMPLE_HIR_CACHE=0"
         elif native_build_hir_shard_policy_v1(env_get("SIMPLE_PARSE_SHARDING") ?? "", env_get("SIMPLE_HIR_SHARDING") ?? "") == 0: "SIMPLE_PARSE_SHARDING/SIMPLE_HIR_SHARDING"
@@ -1670,7 +1658,7 @@ fn run_file_worker_pool_v1(base: [text], args: [text], simple_bin: text, timeout
     # Fail closed: a refused pool is an error, never a two-pass or in-process fallback.
     val refusal = file_worker_pool_refusal_v1(hir_count, mir_parallel, shard_mem_available_kb(),
         shard_worker_budget_kb("SIMPLE_HIR_SHARD_WORKER_KB", SHARD_HIR_WORKER_KB_V1),
-        shard_worker_budget_kb("SIMPLE_MIR_SHARD_WORKER_KB", SHARD_MIR_WORKER_KB_V1),
+        native_build_mir_worker_budget_kb_v1(),
         native_build_requested_shard_threads(admit_args), hir_disabled_by,
         hir_disabled_by == "" and hir_count < 2 and shard_pool_clamp_workers(shard_worker_estimate_kib_v1(shard_worker_budget_kb("SIMPLE_HIR_SHARD_WORKER_KB", SHARD_HIR_WORKER_KB_V1), native_build_recorded_worker_peaks_v1(args), shard_mem_available_kb_from_field(env_get("SIMPLE_HIR_SHARD_WORKER_KB") ?? ""))) in [0, 1])
     if refusal != "":
@@ -1788,10 +1776,21 @@ pub fn run_native_file_worker_v1(args: [text]) -> i64:
             native_file_worker_note_error_v1(mir_queue, owner, "HIR child claimed nothing with rows unclaimed")
             return 1
     # HIR gate: whole-program HIR needs every module's HIR (P4 removes this wait).
-    var state = native_file_worker_hir_ledger_state_v1(hir_queue)
+    # Bounded: the poll expires at NATIVE_FILE_WORKER_HIR_GATE_BUDGET_MS_V1 and
+    # names the ledger count, so a sibling that died mid-claim without a seal
+    # cannot park this worker until the parent's reap timeout.
+    val gate_started_ms = time_now_monotonic_ms()
+    var state = native_file_worker_hir_gate_verdict_v1(
+        native_file_worker_hir_ledger_state_v1(hir_queue), 0, NATIVE_FILE_WORKER_HIR_GATE_BUDGET_MS_V1)
     while state == 0:
         thread_sleep(SHARD_POOL_POLL_MS)
-        state = native_file_worker_hir_ledger_state_v1(hir_queue)
+        state = native_file_worker_hir_gate_verdict_v1(native_file_worker_hir_ledger_state_v1(hir_queue),
+            time_now_monotonic_ms() - gate_started_ms, NATIVE_FILE_WORKER_HIR_GATE_BUDGET_MS_V1)
+    if state == -2:
+        val waited_ms = time_now_monotonic_ms() - gate_started_ms
+        native_file_worker_note_error_v1(mir_queue, owner,
+            "HIR gate deadline: ledger incomplete after {waited_ms}ms (budget {NATIVE_FILE_WORKER_HIR_GATE_BUDGET_MS_V1}ms) unclaimed={hir_shard_recovery_unclaimed_count(hir_queue)}; MIR not admitted")
+        return 1
     if state < 0:
         native_file_worker_note_error_v1(mir_queue, owner, "HIR ledger has a non-PASS module; MIR not admitted")
         return 1
@@ -1851,9 +1850,7 @@ fn run_mir_shard_export_summaries(base: [text], queue_dir: text, simple_bin: tex
     val code = if pid > 0: native_build_normalize_exit_code(process_wait(pid, timeout_ms)) else: -1
     var stopped = pid <= 0 or (code != -1 and code != -2 and not process_is_running(pid))
     if pid > 0 and process_is_running(pid):
-        val _killed = process_kill(pid)
-        val reaped = native_build_normalize_exit_code(process_wait(pid, 5000))
-        stopped = reaped != -1 and reaped != -2 and not process_is_running(pid)
+        stopped = shard_worker_confirm_kill_v1(pid, process_kill(pid))
     val manifest = "{export_dir}/manifest"
     if code != 0 or not stopped or not file_exists(manifest):
         eprint "[mir-shard-export] summary step exit={code}; workers use full HIR"

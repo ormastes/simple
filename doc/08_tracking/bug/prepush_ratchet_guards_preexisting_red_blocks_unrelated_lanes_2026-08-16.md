@@ -98,3 +98,10 @@ offender list at BASE and at NEW and fail only on newly introduced entries,
 while still requiring the pre-existing list to be recorded. A full-scan guard
 with no delta mode converts one lane's red into a repository-wide push freeze.
 
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+step-over recorded in-file; guard debt belongs to the ratchet/guard owners.

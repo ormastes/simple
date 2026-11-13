@@ -99,3 +99,69 @@ browser-session engine code (`src/lib/gc_async_mut/web/`,
 and this doc itself says to coordinate with the in-flight JS-engine work
 before fixing. Handed back with the measured verdicts above. Verdict: LIVE —
 OPEN, owner: JS-engine/browser lane.
+
+## 2026-11-13 triage (UI batch B, Linux aarch64, release/1.0.0 @ 35144b7f5e93): LIVE, measured, not fixed here
+
+Fresh run on the Rust seed (`simple-seed-v4`, 16G cgroup cap, one spec at a
+time):
+
+- `browser_session_dom_input_spec.spl`: **19/25, 6 failures**.
+- `browser_session_script_css_animation_spec.spl`: **16/25, 9 failures**
+  (6/25 on 2026-11-11, 18/25 at filing).
+
+The failures fall into three groups, and only the third is the engine work
+this record describes.
+
+**1. Seed text-slice units, not engine code (1 failure).** dom_input
+"should parse mixed-case document tags..." now fails earlier than the wrap
+assertion, at the title: `expected Case İ< to equal Case İ`. One extra
+character after a two-byte code point is the signature of a byte end offset
+applied by a seed that slices by code point (the #7877 switch; see
+`text_len_codepoint_switch_2026-11-03.md`; seed reversal `a3dfd43c52e` is not
+on release/1.0.0 yet). Re-measure this example on a byte-slicing seed before
+touching `compute_wrap_ranges`.
+
+**2. The spec references symbols that do not exist in the tree (4 failures,
+css_animation).** These are compile-time lookups, not behaviour:
+
+- `_duplicate_offset_animation_html` not found;
+- `_open_raf_promise_microtask_frame` not found (spec line 395);
+- `BrowserRuntimeState` has no field `dom_mutation_generation` (line 294);
+- `BrowserRuntimeState` has no field `dom_bridge_generation` (line 363).
+
+The spec was landed ahead of (or without) the helper functions and runtime
+state fields it uses. That is the same "caller landed, definition never did"
+shape found today in the 8K frame-switch lane
+(`web_draw_ir_8k_frame_switch_native_build_timeout_2026-08-11.md`).
+
+**3. Engine behaviour (10 failures).** dom_input: inline click handler
+(`expected 0 to be greater than 0`), sandbox-blocked form navigation x2
+(`data-submitted="true"` stamped into the live DOM), reset default action,
+blur-before-focus paint. css_animation: SimpleScript animation-frame CSS
+through Draw IR, copied callbacks after body replacement, body replacement
+published to selectors in the same callback, retained DOM bridge aliasing
+(`expected aliased to equal distinct`), script-added animation restart from
+local time zero. These match the mechanisms diagnosed above.
+
+Not fixed in this lane: group 3 is the scripted-DOM flush and default-action
+work in `src/lib/gc_async_mut/web/` and `src/lib/nogc_sync_mut/js/` that this
+record assigns to the JS-engine/browser lane, group 2 needs that lane to
+supply the missing helpers and state fields, and group 1 waits on the seed.
+No assertion was changed and no example was skipped. Row stays open.
+
+
+---
+
+## 2026-11-13 addendum — P3 gpu lane p3-gpu-20261113 (work/p3-gpu-20261113, base 6f4cb189867)
+
+**Verdict: LIVE, owner unchanged (JS-engine/browser lane) — no re-measure this
+lane.** Per the no-green-rerun rule this lane did not re-execute the two
+25-example specs; the 2026-11-11 runner6 verdicts (dom_input 19/25 with the
+six residuals enumerated in this doc; script_css_animation 6/25 in the scripted
+DOM-mutation flush path) stand on this base class. Disposition unchanged: every
+remaining mechanism lives in `src/lib/gc_async_mut/web/` /
+`src/lib/nogc_sync_mut/js/`, this doc says to coordinate with the in-flight
+JS-engine work, and a sibling lane (browser_composition_revision_counters,
+2026-11-13 addendum) just confirmed the same import graph now fails one lane
+deeper at `_snapshot_current_history_for_departure` — consistent with active
+engine-lane churn. Kept OPEN, handed back with no new action by this lane.
