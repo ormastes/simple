@@ -146,3 +146,158 @@ pub fn node_construction_scope_exit_error_v1(facts: NodeConstructionFactsV1) -> 
     if node_construction_state_code_v1(facts.state) == 0:
         return "pending node must be finished or explicitly discarded"
     ""
+
+# ---------------------------------------------------------------------------
+# Per-module phase cells (data plan 4.4 later-phase results; node-storage
+# design doc/05_design/compiler/data/node_tree_storage.md section 5).
+#
+# The PUBLIC surface of a phase result (AST, HIR, MIR of one module) is a
+# write-once cell: one producer publishes it exactly once, after which it is
+# frozen; every reader `await`s the cell and then reads the frozen value. A
+# read never fails with "not initialized" -- it waits. The construction
+# obligation above (NotInit, single owner, zero synchronization) stays inside
+# the producer and never escapes to readers. Granularity is the module per
+# phase; per-attribute cells exist only for rare lazily computed attributes in
+# sparse side tables, never per hot node attribute.
+#
+# These functions are the deterministic state machine the runtime binding
+# (CAS publish, parked waiters) must agree with: outcomes depend only on cell
+# state, never on completion order. A wait is registered only after the cycle
+# check passes, so a cycle is a diagnostic naming its path and never a hang; a
+# failed producer releases its waiters with the failure so dependents are
+# excluded, not blocked. `value` is the frozen value's identity (for example
+# the digest of its position-independent blob), never the value itself.
+# ---------------------------------------------------------------------------
+pub enum PhaseCellStateV1:
+    Pending
+    Published
+    Failed
+
+pub struct PhaseCellV1:
+    phase: text
+    module: text
+    state: PhaseCellStateV1
+    value: text
+    failure: text
+    waiters: [text]
+
+pub struct PhaseCellTableV1:
+    cells: Dict<text, PhaseCellV1>
+    # consumer key -> the producer key it currently awaits (one outstanding
+    # await per consumer; the edges of the wait graph the cycle check walks).
+    awaiting: Dict<text, text>
+
+pub enum PhaseAwaitOutcomeV1:
+    Waiting
+    Ready(text)
+    ProducerFailed(text)
+
+pub fn phase_await_outcome_code_v1(outcome: PhaseAwaitOutcomeV1) -> i64:
+    match outcome:
+        case PhaseAwaitOutcomeV1.Waiting: 1
+        case PhaseAwaitOutcomeV1.Ready(_): 2
+        case PhaseAwaitOutcomeV1.ProducerFailed(_): 3
+
+pub fn phase_await_value_v1(outcome: PhaseAwaitOutcomeV1) -> text:
+    match outcome:
+        case PhaseAwaitOutcomeV1.Waiting: ""
+        case PhaseAwaitOutcomeV1.Ready(v): v
+        case PhaseAwaitOutcomeV1.ProducerFailed(r): r
+
+pub fn phase_cell_state_code_v1(state: PhaseCellStateV1) -> i64:
+    match state:
+        case PhaseCellStateV1.Pending: 0
+        case PhaseCellStateV1.Published: 1
+        case PhaseCellStateV1.Failed: 2
+
+pub fn phase_cell_key_v1(phase: text, module: text) -> text:
+    phase + ":" + module
+
+pub fn phase_cell_table_new_v1() -> PhaseCellTableV1:
+    val cells: Dict<text, PhaseCellV1> = {}
+    val awaiting: Dict<text, text> = {}
+    PhaseCellTableV1(cells: cells, awaiting: awaiting)
+
+pub fn phase_cell_declare_v1(table: PhaseCellTableV1, phase: text, module: text) -> Result<PhaseCellTableV1, text>:
+    if phase.len() == 0 or module.len() == 0:
+        return Err("phase cell needs a phase and a module name")
+    val key = phase_cell_key_v1(phase, module)
+    if table.cells.contains_key(key):
+        return Err("phase cell '{key}' is already declared")
+    var cells = table.cells
+    cells[key] = PhaseCellV1(phase: phase, module: module, state: PhaseCellStateV1.Pending,
+                             value: "", failure: "", waiters: [])
+    Ok(PhaseCellTableV1(cells: cells, awaiting: table.awaiting))
+
+pub fn phase_cell_value_v1(table: PhaseCellTableV1, key: text) -> text:
+    if not table.cells.contains_key(key):
+        return ""
+    table.cells[key].value
+
+pub fn phase_cell_awaiting_v1(table: PhaseCellTableV1, consumer: text) -> text:
+    if not table.awaiting.contains_key(consumer):
+        return ""
+    table.awaiting[consumer]
+
+# Move a pending cell to a terminal state and release its waiters in
+# registration order. Any terminal state refuses a second transition.
+fn phase_cell_settle_v1(table: PhaseCellTableV1, key: text, state: PhaseCellStateV1, value: text,
+                        failure: text) -> Result<(PhaseCellTableV1, [text]), text>:
+    if not table.cells.contains_key(key):
+        return Err("phase cell '{key}' is not declared")
+    val cell = table.cells[key]
+    if phase_cell_state_code_v1(cell.state) != 0:
+        val what = if phase_cell_state_code_v1(cell.state) == 1: "already published" else: "already failed"
+        return Err("phase cell '{key}' is {what}; a frozen cell cannot change")
+    var cells = table.cells
+    var awaiting = table.awaiting
+    val released = cell.waiters
+    for waiter in released:
+        if awaiting.contains_key(waiter) and awaiting[waiter] == key:
+            awaiting.remove(waiter)
+    cells[key] = PhaseCellV1(phase: cell.phase, module: cell.module, state: state,
+                             value: value, failure: failure, waiters: [])
+    Ok((PhaseCellTableV1(cells: cells, awaiting: awaiting), released))
+
+pub fn phase_cell_publish_v1(table: PhaseCellTableV1, key: text, value: text) -> Result<(PhaseCellTableV1, [text]), text>:
+    if value.len() == 0:
+        return Err("phase cell '{key}': a published value needs an identity")
+    phase_cell_settle_v1(table, key, PhaseCellStateV1.Published, value, "")
+
+pub fn phase_cell_fail_v1(table: PhaseCellTableV1, key: text, reason: text) -> Result<(PhaseCellTableV1, [text]), text>:
+    val why = if reason.len() == 0: "producer failed" else: reason
+    phase_cell_settle_v1(table, key, PhaseCellStateV1.Failed, "", why)
+
+pub fn phase_cell_await_v1(table: PhaseCellTableV1, consumer: text, producer: text) -> Result<(PhaseCellTableV1, PhaseAwaitOutcomeV1), text>:
+    if not table.cells.contains_key(producer):
+        return Err("phase cell '{producer}' is not declared; '{consumer}' cannot wait for it")
+    val cell = table.cells[producer]
+    if phase_cell_state_code_v1(cell.state) == 1:
+        return Ok((table, PhaseAwaitOutcomeV1.Ready(cell.value)))
+    if phase_cell_state_code_v1(cell.state) == 2:
+        return Ok((table, PhaseAwaitOutcomeV1.ProducerFailed(cell.failure)))
+    # Pending: refuse a wait that would close a cycle before registering it.
+    var path: [text] = [consumer, producer]
+    var current = producer
+    var steps = 0
+    while current != consumer and steps <= table.awaiting.len():
+        if not table.awaiting.contains_key(current):
+            break
+        current = table.awaiting[current]
+        path.push(current)
+        steps = steps + 1
+    if current == consumer:
+        return Err("await cycle: " + path.join(" -> "))
+    var cells = table.cells
+    var awaiting = table.awaiting
+    var waiters = cell.waiters
+    var registered = false
+    for w in waiters:
+        if w == consumer:
+            registered = true
+    if not registered:
+        waiters.push(consumer)
+    cells[producer] = PhaseCellV1(phase: cell.phase, module: cell.module, state: cell.state,
+                                  value: cell.value, failure: cell.failure, waiters: waiters)
+    awaiting[consumer] = producer
+    Ok((PhaseCellTableV1(cells: cells, awaiting: awaiting), PhaseAwaitOutcomeV1.Waiting))

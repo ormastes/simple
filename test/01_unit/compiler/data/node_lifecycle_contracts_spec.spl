@@ -137,3 +137,65 @@ describe "Whole-node construction facts":
         val truncated = node_construction_record_initialized_v1(schema, pending, 1)
         expect(truncated.ok).to_equal(false)
         expect(truncated.reason).to_equal("construction schema mismatch")
+
+describe "Per-module phase cells (write-once, awaitable, cycle-checked)":
+    it "publishes a frozen module exactly once and serves waiters regardless of order":
+        # @req REQ-ATTR-28
+        step("Declare the HIR cells of two modules and await B's HIR from A before B is published")
+        var table = phase_cell_table_new_v1()
+        table = phase_cell_declare_v1(table, "hir", "a").unwrap()
+        table = phase_cell_declare_v1(table, "hir", "b").unwrap()
+        val before = phase_cell_await_v1(table, phase_cell_key_v1("mir", "a"), phase_cell_key_v1("hir", "b")).unwrap()
+        table = before.0
+        expect(phase_await_outcome_code_v1(before.1)).to_equal(1)  # oracle: 1 = Waiting (never "not initialized")
+        step("Publish B once, then verify the waiter is released and a later await reads the same frozen value")
+        val published = phase_cell_publish_v1(table, phase_cell_key_v1("hir", "b"), "blob:b1").unwrap()
+        table = published.0
+        expect(published.1).to_equal([phase_cell_key_v1("mir", "a")])  # oracle: the registered waiter, in registration order
+        val after = phase_cell_await_v1(table, phase_cell_key_v1("mir", "a"), phase_cell_key_v1("hir", "b")).unwrap()
+        expect(phase_await_outcome_code_v1(after.1)).to_equal(2)  # oracle: 2 = Ready
+        expect(phase_await_value_v1(after.1)).to_equal("blob:b1")
+        val late = phase_cell_await_v1(after.0, phase_cell_key_v1("mir", "c"), phase_cell_key_v1("hir", "b")).unwrap()
+        expect(phase_await_value_v1(late.1)).to_equal("blob:b1")  # oracle: completion order does not change what a reader sees
+        step("Verify a second publish and a late failure are refused, and the cell keeps its first value")
+        val twice = phase_cell_publish_v1(after.0, phase_cell_key_v1("hir", "b"), "blob:b2")
+        expect(twice.is_err()).to_equal(true)
+        expect(twice.unwrap_err()).to_contain("already published")
+        expect(phase_cell_fail_v1(after.0, phase_cell_key_v1("hir", "b"), "late").is_err()).to_equal(true)
+        expect(phase_cell_value_v1(after.0, phase_cell_key_v1("hir", "b"))).to_equal("blob:b1")
+        expect(phase_cell_declare_v1(after.0, "hir", "b").is_err()).to_equal(true)  # oracle: one cell per (phase, module)
+
+    it "reports an await cycle as a diagnostic with its path and never registers the wait":
+        # @req REQ-ATTR-28
+        step("Make module A's HIR wait on B's HIR, B's on C's, then let C wait on A")
+        var table = phase_cell_table_new_v1()
+        for m in ["a", "b", "c"]:
+            table = phase_cell_declare_v1(table, "hir", m).unwrap()
+        table = phase_cell_await_v1(table, phase_cell_key_v1("hir", "a"), phase_cell_key_v1("hir", "b")).unwrap().0
+        table = phase_cell_await_v1(table, phase_cell_key_v1("hir", "b"), phase_cell_key_v1("hir", "c")).unwrap().0
+        val cycle = phase_cell_await_v1(table, phase_cell_key_v1("hir", "c"), phase_cell_key_v1("hir", "a"))
+        # @capture(exec): cycle diagnostic
+        step("Verify the cycle names every cell on the path and leaves C without an outstanding wait")
+        expect(cycle.is_err()).to_equal(true)
+        expect(cycle.unwrap_err()).to_equal("await cycle: hir:c -> hir:a -> hir:b -> hir:c")
+        expect(phase_cell_awaiting_v1(table, phase_cell_key_v1("hir", "c"))).to_equal("")
+        step("Verify a self-await is the shortest cycle")
+        val selfish = phase_cell_await_v1(table, phase_cell_key_v1("hir", "c"), phase_cell_key_v1("hir", "c"))
+        expect(selfish.unwrap_err()).to_equal("await cycle: hir:c -> hir:c")
+
+    it "publishes a producer failure so waiters are excluded instead of blocked":
+        # @req REQ-ATTR-28
+        step("Register two waiters on module B, then fail B's HIR")
+        var table = phase_cell_table_new_v1()
+        table = phase_cell_declare_v1(table, "hir", "b").unwrap()
+        table = phase_cell_await_v1(table, phase_cell_key_v1("mir", "a"), phase_cell_key_v1("hir", "b")).unwrap().0
+        table = phase_cell_await_v1(table, phase_cell_key_v1("mir", "d"), phase_cell_key_v1("hir", "b")).unwrap().0
+        val failed = phase_cell_fail_v1(table, phase_cell_key_v1("hir", "b"), "type error in b").unwrap()
+        # @capture(exec): failure propagation
+        step("Verify both waiters are released with the failure and a publish after failure is refused")
+        expect(failed.1).to_equal([phase_cell_key_v1("mir", "a"), phase_cell_key_v1("mir", "d")])
+        val seen = phase_cell_await_v1(failed.0, phase_cell_key_v1("mir", "a"), phase_cell_key_v1("hir", "b")).unwrap()
+        expect(phase_await_outcome_code_v1(seen.1)).to_equal(3)  # oracle: 3 = ProducerFailed
+        expect(phase_await_value_v1(seen.1)).to_equal("type error in b")
+        expect(phase_cell_publish_v1(failed.0, phase_cell_key_v1("hir", "b"), "blob:late").is_err()).to_equal(true)
+        expect(phase_cell_await_v1(failed.0, phase_cell_key_v1("mir", "a"), phase_cell_key_v1("hir", "zzz")).is_err()).to_equal(true)  # oracle: an undeclared cell is a diagnostic, not a silent wait
