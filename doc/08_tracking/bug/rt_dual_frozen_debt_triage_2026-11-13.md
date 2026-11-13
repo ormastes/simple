@@ -12,6 +12,7 @@ Gate: `sh scripts/check/check-rt-dual-implementation-ratchet.shs` (frozen mode).
 | PR #8777 (other lane: C twin for `rt_vulkan_selected_device_identity_v1`) | 2778 checked, 2370 baselined, 408 new, 0 stale |
 | wave 2, PR #8787 (this document) | unchanged |
 | wave 3, PR #8788 (C twin for `rt_string_to_digit`) | 2777 checked, 2370 baselined, 407 new, 0 stale |
+| wave 5 (231 class c and d rows baselined with reasons) | 2777 checked, 2601 baselined, 176 new, 0 stale |
 
 The push tier and the required CI job compare against the base commit, so this
 debt fails only the non-required extended job.
@@ -31,11 +32,12 @@ functions and selfcheck sources.
 
 The Rust lane does not include `src/compiler_rust/compiler/src/interpreter_extern`,
 where the seed interpreter implements its externs. 86 of the C-only symbols
-below are named there (the `interp` column), and for the ones checked
-(`rt_page_size` and its mmap siblings) that is a real registered handler. For
-those, the seed already has a second implementation; the guard just cannot see
-it. Writing another `rt_*` in `runtime/src` for them would be a duplicate, not a
-twin.
+below are named there (the `interp` column). For the nine thin syscalls and
+pure computations listed under class b, each name has a handler definition or
+registration there. For those, the seed already has a second implementation;
+the guard just cannot see it. The only twin that would move the count is a
+further `rt_*` in `runtime/src`, which is neither of the two twin kinds the
+directive allows (pure Simple, or C at the boundary), so none was written.
 
 ## Classes
 
@@ -51,8 +53,12 @@ twin.
 
 ### a: none
 
-Every candidate with no `.spl` caller was checked with unfiltered
-`/usr/bin/grep -rnw`. Each one is either called from other C code, or is
+Candidates were symbols with no `.spl` call site: either no `.spl` mention at
+all, or only `extern fn` declarations and comments (none of the non-static
+symbols is in the second group). References were collected with
+`/usr/bin/grep -rnwF` over `src test examples tools scripts doc config
+bootstrap`, limited to source, script, config and doc file types. Each
+candidate is either called from other C code, or is
 registered public API (`rt_aes_gcm_encrypt_hex`, `rt_aes_gcm_decrypt_hex` in
 `config/api/api_registry.sdn`). One symbol has a prototype and a definition and
 no caller at all, `rt_gpu_provider_device_identity_raw`
@@ -98,8 +104,10 @@ be new seed code that nothing calls.
   or allowlist.
 - 16: Simple-facing C primitives with no Rust runtime twin (`rt_http_request`,
   `rt_value_println`, `rt_packed_span_v1_*`, ...).
-- 3: Rust-only stateful families (`rt_bdd_skipped_count`,
-  `rt_browser_http_job_free`, `rt_browser_http_job_poll`).
+- 3: Rust-only stateful symbols. `rt_bdd_skipped_count` is a plain Rust
+  accessor called by the seed driver (`driver/src/exec_core.rs`); the C runtime
+  has no skip counter to read. `rt_browser_http_job_free` and
+  `rt_browser_http_job_poll` belong to a Rust-only job registry.
 - 1: `rt_unix_socket_connect_timeout`. The Rust lane is a fail-closed stub
   taking `(ptr, len, timeout)`; `runtime.h` declares `(const char*, timeout)`
   with no body; `src/app/build/scheduler/docker_unix_byte_transport.spl` calls
