@@ -233,6 +233,8 @@ open.
   artifacts or one module recorded under two paths (decision ids hash the
   path, so two checkouts double the decision denominator -- not fixed).
   `rollup` carries `sources` through and refuses one file at two digests.
+  The digest is CRC-32 with every CR dropped on BOTH sides (`read_to_string`
+  drops CR; hashing raw bytes refused every CRLF checkout -- fixed 2026-11-14).
 - **`foreign_excluded=N`** replaces `inactive_platform=N`: `@when` bodies not
   selected for `--os`/`--arch` (default host) leave the line denominator.
 - Trap: the seed enables collection whenever `SIMPLE_COVERAGE` is PRESENT,
