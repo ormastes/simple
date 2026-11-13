@@ -15,6 +15,8 @@ Requirements: ORCH-02 / HOST-02 owner retention and exact helper/plan associatio
 
 Primary fields are module-private in a public class. Metadata accessors expose plan/adoption/cleaned state, never the transfer or raw native owner. This prevents external construction/relabeling; copying a class is not noncopyability. Callers retain the canonical returned session. Identity equality excludes adoption/progress and grants no control or adoption rights.
 
+Primary identity is fingerprinted once at construction from the bounded canonical plan archive, validated full native-owner identity and exact reference fields. Pane publication compares the private 64-character fingerprint without re-encoding the plan/template on each output update. Explicit boundary validation is unchanged; no measured latency or throughput qualification is claimed.
+
 The real collect/reap port requires exact lease/plan/helper/template correlation, then actual nonempty group cleanup proof before proof-bound reference-free retirement. It retains the historical actual `native_cleaned=true` fact if subsequent reap collection fails. Only canonical successful cleanup/reap sets that private fact. It neither cancels the group nor accepts a caller receipt. Cleaned primary owners remain retained pending actual Host ACK.
 
 Native qualification remains required: real spawn transfer; exact positive generation/deadline/template; actual enable/state receipt with virgin controlled state; failure after enable retaining cleanup transfer; adoption and rebinding on a real owner; actual native cleanup/reap and error retention; Host settlement ACK. These paths are source-reviewed only and not simulated. No workload completion or write/resize right follows from cleanup or identity equality.

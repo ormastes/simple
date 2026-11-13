@@ -10,7 +10,9 @@ Status: open, P1. Owner: SimpleOS container / macOS host integration.
 The pure attempt and observation boundary is in
 `src/lib/common/contracts/container/guest_v1.spl`. A source-only guest
 dispatcher is now in `src/os/services/container/macos_simpleos_guest_dispatch_v1.spl`;
-its focused spec has not run on a source-matched Simple runtime. To complete
+its focused spec ran on the release seed 2026-11-13 (seed-diagnostic): 2/3,
+the live-launch case blocked on bug 355's `-13` (details in the native TODO's
+2026-11-13 section). This route remains superseded. To complete
 the user's macOS request, implement the private host/guest channel, verified
 QEMU image boot, real kernel
 exit receipt, and explicit VM Pod/Job placement in the order listed in
