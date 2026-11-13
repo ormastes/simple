@@ -1058,6 +1058,110 @@ impl MirLowering:
             self.remember_local_hir_type(int_result.id, HirType(kind: HirTypeKind.Int(64, true), span: receiver.span), 0, 0)
         Some(int_result)
 
+    me try_lower_numeric_parity_builtin(receiver: HirExpr, recv: LocalId, method: text, args: [HirCallArg]) -> LocalId?:
+        """Integer `is_even` / `is_odd` / `is_zero` / `is_positive` /
+        `is_negative` / `sign` / `pow(n)` and float `is_nan` / `is_finite` /
+        `is_infinite`. Seed interpreter oracle (`interpreter_method/
+        primitives.rs`): `4.is_even()==true`, `(-9).sign()==-1`,
+        `3.pow(4)==81`, `1.5.is_nan()==false`. Same proof gate as
+        `try_lower_numeric_builtin`: only a receiver that is positively a
+        builtin number whose MIR type agrees; anything else returns nil and
+        keeps the loud unresolved-method failure.
+        doc/08_tracking/bug/jit_primitive_method_parity_gaps_2026-11-13.md"""
+        val int_predicate = args.len() == 0 and (method == "is_even" or method == "is_odd" or method == "is_zero" or method == "is_positive" or method == "is_negative")
+        val int_sign = args.len() == 0 and (method == "sign" or method == "signum")
+        val int_pow = args.len() == 1 and method == "pow"
+        val float_class = args.len() == 0 and (method == "is_nan" or method == "is_finite" or method == "is_infinite")
+        if not int_predicate and not int_sign and not int_pow and not float_class:
+            return None
+        val recv_kind = self.builtin_numeric_receiver_kind(receiver, recv)
+        if recv_kind == 0:
+            return None
+        var recv_type = MirType.i64()
+        var recv_class = 0
+        if val recv_mir = self.local_mir_type_of(recv):
+            recv_type = recv_mir
+            recv_class = self.builtin_mir_value_class(recv_mir)
+        val bool_hir = HirType(kind: HirTypeKind.Bool, span: receiver.span)
+        if float_class:
+            if recv_kind != 3 or recv_class != 3:
+                return None
+            var bf = self.builder
+            var flag = recv
+            if method == "is_nan":
+                # Ordered `==` is false only for NaN; `!=` may lower to an ordered
+                # not-equal that is ALSO false for NaN, so negate `x == x`.
+                val self_eq = bf.emit_binop(MirBinOp.Eq, mir_operand_copy(recv), mir_operand_copy(recv), MirType.bool())
+                val nan_false = bf.new_temp(MirType.bool())
+                bf.emit_const(nan_false, MirConstValue.Bool(false), MirType.bool())
+                flag = bf.emit_binop(MirBinOp.Eq, mir_operand_copy(self_eq), mir_operand_copy(nan_false), MirType.bool())
+            else:
+                val zero_f = bf.new_temp(recv_type)
+                bf.emit_const(zero_f, MirConstValue.Float(0.0), recv_type)
+                # x - x is 0.0 for every finite x and NaN for +/-inf and NaN.
+                val diff = bf.emit_binop(MirBinOp.Sub, mir_operand_copy(recv), mir_operand_copy(recv), recv_type)
+                val finite = bf.emit_binop(MirBinOp.Eq, mir_operand_copy(diff), mir_operand_copy(zero_f), MirType.bool())
+                if method == "is_finite":
+                    flag = finite
+                else:
+                    val same = bf.emit_binop(MirBinOp.Eq, mir_operand_copy(recv), mir_operand_copy(recv), MirType.bool())
+                    val false_c = bf.new_temp(MirType.bool())
+                    bf.emit_const(false_c, MirConstValue.Bool(false), MirType.bool())
+                    val is_not_finite = bf.emit_binop(MirBinOp.Eq, mir_operand_copy(finite), mir_operand_copy(false_c), MirType.bool())
+                    flag = bf.emit_binop(MirBinOp.BitAnd, mir_operand_copy(same), mir_operand_copy(is_not_finite), MirType.bool())
+            self.builder = bf
+            self.remember_local_hir_type(flag.id, bool_hir, 0, 0)
+            return Some(flag)
+        if recv_kind == 3 or recv_class != 1:
+            return None
+        val unsigned = recv_kind == 2
+        var b = self.builder
+        val zero = b.new_temp(recv_type)
+        b.emit_const(zero, MirConstValue.Int(0), recv_type)
+        if int_predicate:
+            var flag = recv
+            if method == "is_even" or method == "is_odd":
+                val two = b.new_temp(recv_type)
+                b.emit_const(two, MirConstValue.Int(2), recv_type)
+                val rem = b.emit_binop(MirBinOp.Rem, mir_operand_copy(recv), mir_operand_copy(two), recv_type)
+                val op = if method == "is_even": MirBinOp.Eq else: MirBinOp.Ne
+                flag = b.emit_binop(op, mir_operand_copy(rem), mir_operand_copy(zero), MirType.bool())
+            elif method == "is_zero":
+                flag = b.emit_binop(MirBinOp.Eq, mir_operand_copy(recv), mir_operand_copy(zero), MirType.bool())
+            elif method == "is_positive":
+                val op = if unsigned: MirBinOp.Ne else: MirBinOp.Gt
+                flag = b.emit_binop(op, mir_operand_copy(recv), mir_operand_copy(zero), MirType.bool())
+            elif unsigned:
+                flag = b.new_temp(MirType.bool())
+                b.emit_const(flag, MirConstValue.Bool(false), MirType.bool())
+            else:
+                flag = b.emit_binop(MirBinOp.Lt, mir_operand_copy(recv), mir_operand_copy(zero), MirType.bool())
+            self.builder = b
+            self.remember_local_hir_type(flag.id, bool_hir, 0, 0)
+            return Some(flag)
+        var result = recv
+        if int_sign:
+            val gt_op = if unsigned: MirBinOp.Ne else: MirBinOp.Gt
+            val gt = b.emit_binop(gt_op, mir_operand_copy(recv), mir_operand_copy(zero), MirType.bool())
+            val gt_int = b.emit_cast(mir_operand_copy(gt), recv_type)
+            if unsigned:
+                result = gt_int
+            else:
+                val lt = b.emit_binop(MirBinOp.Lt, mir_operand_copy(recv), mir_operand_copy(zero), MirType.bool())
+                val lt_int = b.emit_cast(mir_operand_copy(lt), recv_type)
+                result = b.emit_binop(MirBinOp.Sub, mir_operand_copy(gt_int), mir_operand_copy(lt_int), recv_type)
+        else:
+            self.builder = b
+            val exp_raw = self.lower_expr(args[0].value)
+            var b_pow = self.builder
+            val exp = b_pow.emit_cast(mir_operand_copy(exp_raw), recv_type)
+            result = b_pow.emit_binop(MirBinOp.Pow, mir_operand_copy(recv), mir_operand_copy(exp), recv_type)
+            b = b_pow
+        self.builder = b
+        if val recv_hir_type = self.find_local_hir_type(recv.id):
+            self.remember_local_hir_type(result.id, recv_hir_type, 0, 0)
+        Some(result)
+
     me builtin_result_payload_mir(payload_hir: HirType) -> MirType?:
         """Decode proven scalar/text payloads or retain a nominal record's
         runtime handle. A raw I64 is never proof of a nominal payload."""

@@ -1680,6 +1680,24 @@ impl Lowerer {
         {
             return recv_ty;
         }
+        // Integer/float predicates, `sign` and integer `pow` have real
+        // lowerings in `codegen/instr/methods.rs` (JIT/interpreter parity);
+        // stamp them so they take the static path instead of by-name dispatch
+        // (`Function 'i64.is_even' not found`).
+        // doc/08_tracking/bug/jit_primitive_method_parity_gaps_2026-11-13.md
+        let is_int_recv = matches!(
+            recv_ty,
+            TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64 | TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64
+        );
+        if is_int_recv && crate::codegen::scalar_float_methods::is_int_predicate(method) {
+            return TypeId::BOOL;
+        }
+        if is_int_recv && matches!(method, "sign" | "signum" | "pow") {
+            return recv_ty;
+        }
+        if matches!(recv_ty, TypeId::F32 | TypeId::F64) && matches!(method, "is_nan" | "is_finite" | "is_infinite") {
+            return TypeId::BOOL;
+        }
         TypeId::ANY
     }
 
