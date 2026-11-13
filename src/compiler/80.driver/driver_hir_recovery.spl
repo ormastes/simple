@@ -163,6 +163,23 @@ pub fn hir_shard_recovery_failed_rows_v1(queue: text) -> [text]:
                 rows = rows.push("{fields[0]} {fields[2]}")
     rows.sort()
 
+# Source paths of every CRASH / TIMEOUT terminal, sorted: rows whose worker
+# died or hung inside them. Under go-to-end the coordinator exports them as
+# `hir_lower:<path>` on SIMPLE_ICE_SKIP_MODULES, so no downstream worker
+# re-lowers a module that already killed one (driver_ice_boundary.spl
+# ice_boundary_module_start). FAILED rows are not listed: a diagnostic failure
+# is deterministic and cheap to redo, and recording it is what names it.
+pub fn hir_shard_recovery_crashed_rows_v1(queue: text) -> [text]:
+    var rows: [text] = []
+    val listing = dir_list_optional(queue)
+    if listing == nil: return rows
+    for name in listing.unwrap():
+        if name.ends_with(".terminal"):
+            val fields = file_read("{queue}/{name}").split("\n")
+            if fields.len() == 6 and (fields[0] == "CRASH" or fields[0] == "TIMEOUT") and fields[2] != "":
+                rows = rows.push(fields[2])
+    rows.sort()
+
 pub fn hir_shard_recovery_complete(queue: text, owner: text) -> bool:
     hir_shard_record_publish("{queue}/{sha256_text(owner)}.done", owner)
 
