@@ -1,6 +1,8 @@
 # Stage 2 SIGSEGV in the surface projection on a fixed-size array field `[T; <int literal>]` (2026-11-13)
 
-Status: open. This kills every run-26 HIR shard worker at `claimed=0` in
+Status: root-caused and fixed in source (2026-11-13, work/segv-arrlit-20261113). A new
+Stage 2 is the final proof; see "Root cause (resolved)" below. Original text:
+open. This kills every run-26 HIR shard worker at `claimed=0` in
 `compiler_cli_build`. It also kills the final native-build worker in process
 (`exited with code -139`). This crash is the run-26 `signal=11`. The skeleton
 parse error printed before it (`feature_caps_arch32.spl: 146:44`) is a separate
@@ -66,3 +68,31 @@ The worker change on the same day (`driver_hir_worker_parse_verdict_v1`)
 handles the parse-error half. A surface-pass parse error now becomes a FAILED
 row for that module, and the worker keeps going. It does not address this
 SIGSEGV.
+
+## Root cause (resolved 2026-11-13)
+
+Not the `IntLit` arm, and not `Some(...)` alone. The generated encoder passes
+a nil-guarded optional enum-payload binder straight into a typed callee:
+`ast_semantic_value.spl` (old :610 / :2460)
+`if b_Array_f1 == nil: ... else: ast_semantic_encode_expr(b_Array_f1, state)`.
+MIR has no flow typing, so call arguments handed the callee the Option box.
+The faulting load (`ldr x10, [x1, x14, lsl #3]`) is
+`node.explicit_call_types[i]` read through the box. A literal-size field is
+the only producer of a non-nil `TypeKind.Array` size: `flat_field_sized_type`,
+`_FlatAstBridge/module_assembly.spl:237`, from af589940249. That is why
+`[u8; N]` and `[u8]` built fine.
+
+Miscompile, not a source bug: the seed interpreter gives the right answer for
+the same shape, the seed JIT reads garbage for a Some-built payload, and the
+candidate SIGSEGVs for both bare and Some. Record:
+optional_struct_payload_narrowing_native_2026_11_13.md.
+
+Fix:
+- MIR call-argument unwrap (`option_record_argument_payload_v1`).
+- Generator workaround: fold_gen projects every optional with `!`.
+- Regenerated encoder.
+
+Closure check: the Phase 2/3 bootstrap_main closure has no `[T; <int>]`
+struct, class or trait field. Its source roots exclude src/os, and the only
+src/lib hit, game3d/math.spl, is never imported. The full-CLI closure, which
+includes `--source src/os`, reaches src/os/kernel/arch/arch_context.spl.

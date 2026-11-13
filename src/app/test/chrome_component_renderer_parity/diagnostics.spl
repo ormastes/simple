@@ -1,0 +1,163 @@
+# Retained mismatch diagnostics for the Chrome component renderer parity lane.
+#
+# A failed comparison keeps the expected and actual RGBA8 bytes, the absolute
+# per-channel difference and an SDN receipt that names the first-mismatch box,
+# the converter and the command that reproduces the row pair. The comparison
+# itself (and its tolerance) always comes from common.ui.rendering_parity; this
+# module never decides what counts as a mismatch.
+use app.io.mod.{file_write, file_read_text, file_read_bytes, file_write_bytes, dir_create_all}
+use common.ui.rendering_parity.{CanonicalRenderOutput, RenderComparison, stable_bytes_checksum}
+
+pub struct ParityDiagnosticPlan:
+    artifact_root: text
+    fixture_id: text
+    expected_row: text
+    actual_row: text
+    converter_id: text
+    converter_version: i64
+
+pub struct ParityMismatchArtifacts:
+    directory: text
+    expected_path: text
+    actual_path: text
+    diff_path: text
+    summary_path: text
+    mismatch_count: i64
+    min_x: i64
+    min_y: i64
+    max_x: i64
+    max_y: i64
+    max_channel_delta: i64
+    converter_metadata: text
+    reproduction_command: text
+
+fn _safe_component(s: text) -> bool:
+    if s.len() == 0 or s == "." or s == "..":
+        return false
+    var i = 0
+    while i < s.len():  # cpu-lane-loop-ok: one iteration per identifier char
+        val c = s.substring(i, i + 1)
+        val ok = (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or (c >= "0" and c <= "9") or c == "-" or c == "_" or c == "."
+        if not ok:
+            return false
+        i = i + 1
+    true
+
+fn _check_plan(plan: ParityDiagnosticPlan) -> text:
+    if plan.artifact_root.len() == 0:
+        return "parity diagnostics: artifact root is empty"
+    if not _safe_component(plan.fixture_id):
+        return "parity diagnostics: unsafe fixture id '" + plan.fixture_id + "'"
+    if not _safe_component(plan.expected_row) or not _safe_component(plan.actual_row):
+        return "parity diagnostics: unsafe row name"
+    if not _safe_component(plan.converter_id) or plan.converter_version <= 0:
+        return "parity diagnostics: converter id or version invalid"
+    ""
+
+fn _abs_diff_rgba8(expected: [u8], actual: [u8]) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < expected.len():  # cpu-lane-loop-ok: one iteration per channel byte
+        val e = expected[i] as i64
+        val a = actual[i] as i64
+        val d = if e > a: e - a else: a - e
+        out = out + [d as u8]
+        i = i + 1
+    out
+
+fn _converter_metadata(plan: ParityDiagnosticPlan) -> text:
+    plan.converter_id + "@" + plan.converter_version.to_string()
+
+fn _reproduction_command(plan: ParityDiagnosticPlan) -> text:
+    "bin/simple run src/app/test/chrome_component_renderer_parity/main.spl --run" +
+        " --fixture " + plan.fixture_id + " --expected-row " + plan.expected_row +
+        " --actual-row " + plan.actual_row
+
+fn _dir_of(plan: ParityDiagnosticPlan) -> text:
+    plan.artifact_root + "/" + plan.fixture_id
+
+fn _summary_text(plan: ParityDiagnosticPlan, comparison: RenderComparison, expected: CanonicalRenderOutput, actual: CanonicalRenderOutput, diff: [u8]) -> text:
+    val d = comparison.diagnostic
+    "(parity_mismatch\n" +
+        "  (fixture \"" + plan.fixture_id + "\")\n" +
+        "  (expected_row \"" + plan.expected_row + "\")\n" +
+        "  (actual_row \"" + plan.actual_row + "\")\n" +
+        "  (policy_id \"" + comparison.policy_id + "\")\n" +
+        "  (compare_policy \"" + comparison.compare_policy + "\")\n" +
+        "  (width " + expected.width.to_string() + ")\n" +
+        "  (height " + expected.height.to_string() + ")\n" +
+        "  (mismatch_count " + d.mismatch_count.to_string() + ")\n" +
+        "  (min_x " + d.min_x.to_string() + ")\n" +
+        "  (min_y " + d.min_y.to_string() + ")\n" +
+        "  (max_x " + d.max_x.to_string() + ")\n" +
+        "  (max_y " + d.max_y.to_string() + ")\n" +
+        "  (max_channel_delta " + d.max_channel_delta.to_string() + ")\n" +
+        "  (converter \"" + _converter_metadata(plan) + "\")\n" +
+        "  (expected_checksum " + stable_bytes_checksum(expected.rgba8).to_string() + ")\n" +
+        "  (actual_checksum " + stable_bytes_checksum(actual.rgba8).to_string() + ")\n" +
+        "  (diff_checksum " + stable_bytes_checksum(diff).to_string() + ")\n" +
+        "  (expected_source \"" + expected.source_artifact + "\")\n" +
+        "  (actual_source \"" + actual.source_artifact + "\")\n" +
+        "  (reproduction \"" + _reproduction_command(plan) + "\"))\n"
+
+fn _check_inputs(plan: ParityDiagnosticPlan, comparison: RenderComparison, expected: CanonicalRenderOutput, actual: CanonicalRenderOutput) -> text:
+    val plan_err = _check_plan(plan)
+    if plan_err.len() > 0:
+        return plan_err
+    if comparison.equal or comparison.diagnostic.mismatch_count <= 0:
+        return "parity diagnostics: comparison has no mismatch to retain"
+    if expected.case_id != plan.fixture_id or actual.case_id != plan.fixture_id:
+        return "parity diagnostics: output case id does not match the plan fixture"
+    if expected.width != actual.width or expected.height != actual.height:
+        return "parity diagnostics: expected and actual sizes differ"
+    if expected.rgba8.len() != actual.rgba8.len():
+        return "parity diagnostics: expected and actual byte lengths differ"
+    ""
+
+pub fn write_parity_mismatch_artifacts(plan: ParityDiagnosticPlan, comparison: RenderComparison, expected: CanonicalRenderOutput, actual: CanonicalRenderOutput) -> Result<ParityMismatchArtifacts, text>:
+    val err = _check_inputs(plan, comparison, expected, actual)
+    if err.len() > 0:
+        return Err(err)
+    val dir = _dir_of(plan)
+    if not dir_create_all(dir):
+        return Err("parity diagnostics: cannot create " + dir)
+    val diff = _abs_diff_rgba8(expected.rgba8, actual.rgba8)
+    val artifacts = _artifacts_for(plan, comparison)
+    if not file_write_bytes(artifacts.expected_path, expected.rgba8):
+        return Err("parity diagnostics: cannot write " + artifacts.expected_path)
+    if not file_write_bytes(artifacts.actual_path, actual.rgba8):
+        return Err("parity diagnostics: cannot write " + artifacts.actual_path)
+    if not file_write_bytes(artifacts.diff_path, diff):
+        return Err("parity diagnostics: cannot write " + artifacts.diff_path)
+    if not file_write(artifacts.summary_path, _summary_text(plan, comparison, expected, actual, diff)):
+        return Err("parity diagnostics: cannot write " + artifacts.summary_path)
+    Ok(artifacts)
+
+fn _artifacts_for(plan: ParityDiagnosticPlan, comparison: RenderComparison) -> ParityMismatchArtifacts:
+    val dir = _dir_of(plan)
+    val d = comparison.diagnostic
+    ParityMismatchArtifacts(directory: dir, expected_path: dir + "/expected.rgba8",
+        actual_path: dir + "/actual.rgba8", diff_path: dir + "/diff.rgba8",
+        summary_path: dir + "/summary.sdn", mismatch_count: d.mismatch_count,
+        min_x: d.min_x, min_y: d.min_y, max_x: d.max_x, max_y: d.max_y,
+        max_channel_delta: d.max_channel_delta,
+        converter_metadata: _converter_metadata(plan),
+        reproduction_command: _reproduction_command(plan))
+
+pub fn validate_parity_mismatch_artifacts(plan: ParityDiagnosticPlan, comparison: RenderComparison, expected: CanonicalRenderOutput, actual: CanonicalRenderOutput, artifacts: ParityMismatchArtifacts) -> Result<bool, text>:
+    val err = _check_inputs(plan, comparison, expected, actual)
+    if err.len() > 0:
+        return Err(err)
+    val want = _artifacts_for(plan, comparison)
+    if artifacts != want:
+        return Err("parity diagnostics: artifact metadata does not match the comparison")
+    val diff = _abs_diff_rgba8(expected.rgba8, actual.rgba8)
+    if file_read_bytes(artifacts.expected_path) != expected.rgba8:
+        return Err("parity diagnostics: retained expected bytes changed")
+    if file_read_bytes(artifacts.actual_path) != actual.rgba8:
+        return Err("parity diagnostics: retained actual bytes changed")
+    if file_read_bytes(artifacts.diff_path) != diff:
+        return Err("parity diagnostics: retained difference bytes changed")
+    if file_read_text(artifacts.summary_path) != _summary_text(plan, comparison, expected, actual, diff):
+        return Err("parity diagnostics: SDN receipt changed")
+    Ok(true)

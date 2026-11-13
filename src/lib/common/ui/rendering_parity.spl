@@ -466,10 +466,17 @@ struct CanonicalRenderOutput:
     backend: text
     width: i64
     height: i64
-    rgba: [u8]
+    rgba8: [u8]
     checksum: u64
+    stages: [RenderingStageRecord]
+    evidence: BackendEvidence
+    source_artifact: text
 
 fn canonical_render_output(case_id: text, backend: text, width: i64, height: i64, rgba: [u8], checksum: u64) -> Result<CanonicalRenderOutput, text>:
+    val evidence = backend_evidence(case_id, backend, "not-applicable", false, RENDER_STATUS_NOT_RUN, "no backend evidence supplied")?
+    _canonical_output_core(case_id, backend, width, height, rgba, checksum, [], evidence, "")
+
+fn _canonical_output_core(case_id: text, backend: text, width: i64, height: i64, rgba: [u8], checksum: u64, stages: [RenderingStageRecord], evidence: BackendEvidence, source_artifact: text) -> Result<CanonicalRenderOutput, text>:
     if not _nonempty(case_id) or not _nonempty(backend):
         return Err("canonical output: case_id or backend is empty")
     if width <= 0 or height <= 0:
@@ -478,7 +485,25 @@ fn canonical_render_output(case_id: text, backend: text, width: i64, height: i64
         return Err("canonical output: expected " + (width * height * 4).to_string() + " bytes, got " + rgba.len().to_string())
     if stable_bytes_checksum(rgba) != checksum:
         return Err("canonical output: checksum does not match pixel data")
-    Ok(CanonicalRenderOutput(case_id: case_id, backend: backend, width: width, height: height, rgba: rgba, checksum: checksum))
+    Ok(CanonicalRenderOutput(case_id: case_id, backend: backend, width: width, height: height, rgba8: rgba, checksum: checksum, stages: stages, evidence: evidence, source_artifact: source_artifact))
+
+# Canonical output that retains its stage records, backend evidence and the
+# source artifact it was read from; all three must agree with the output.
+fn canonical_render_output_v1(case_id: text, backend: text, width: i64, height: i64, rgba: [u8], checksum: u64, stages: [RenderingStageRecord], evidence: BackendEvidence, source_artifact: text) -> Result<CanonicalRenderOutput, text>:
+    if not _nonempty(source_artifact):
+        return Err("canonical output: source artifact is empty")
+    if stages.len() == 0:
+        return Err("canonical output: no stage records")
+    if not rendering_stage_records_valid_order(stages):
+        return Err("canonical output: stage records out of order")
+    if evidence.case_id != case_id or evidence.backend != backend:
+        return Err("canonical output: evidence does not match case or backend")
+    if evidence.width != width or evidence.height != height:
+        return Err("canonical output: evidence size does not match output")
+    for s in stages:
+        if s.case_id != case_id or s.backend != backend:
+            return Err("canonical output: stage record does not match case or backend")
+    _canonical_output_core(case_id, backend, width, height, rgba, checksum, stages, evidence, source_artifact)
 
 fn _is_sentinel_color(r: u8, g: u8, b: u8) -> bool:
     val lo = r == 0u8 and g == 0u8 and b == 0u8
