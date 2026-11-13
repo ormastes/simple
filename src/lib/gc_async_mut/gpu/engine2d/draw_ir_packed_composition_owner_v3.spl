@@ -1,0 +1,184 @@
+# codex-impl: canonical DrawIrComposition -> bounded packed generation owner.
+#
+# Reuses the single DrawIR-v3 scene (draw_ir_v2_to_v3), the fixed generation
+# store and the Engine2D consumer; adds no second IR. Unsupported commands are
+# reported by the consumer receipt, never dropped.
+
+use common.mission_critical.draw_ir_packed_generation_store_v3.*
+use common.ui.draw_ir.{DrawIrComposition}
+use common.ui.draw_ir_sdn.{draw_ir_to_sdn}
+use common.ui.draw_ir_v2_to_v3.{draw_ir_v2_to_v3}
+use common.crypto.sha256.{sha256_text}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.draw_ir_packed_owner_v3.{
+    ENGINE2D_PACKED_V3_INVALID_SCENE,
+    Engine2dPackedGenerationReceiptV3,
+    engine2d_draw_ir_v3_identity_rows,
+    engine2d_draw_ir_v3_take_and_render
+}
+
+const ENGINE2D_PACKED_V3_SCHEMA: text = "draw-ir-packed-identity-v3"
+const ENGINE2D_PACKED_V3_ROWS_PER_SLOT: u32 = 262144u32
+
+struct DrawIrPackedIdentitySnapshotV3:
+    arena_id: u64
+    generation: u64
+    row_count: u32
+    rows: [u64]
+    composition_sdn: text
+    composition_hash: text
+    packed_hash: text
+
+struct Engine2dPackedIdentityHandoffV3:
+    ok: bool
+    reason: u16
+    submission: DrawIrPackedSubmissionV3
+    snapshot: DrawIrPackedIdentitySnapshotV3
+
+fn engine2d_packed_v3_store(arena_id: u64) -> DrawIrPackedGenerationStoreV3:
+    DrawIrPackedGenerationStoreV3.bounded(arena_id, 1u32, ENGINE2D_PACKED_V3_ROWS_PER_SLOT, 1u32)
+
+fn _empty_submission() -> DrawIrPackedSubmissionV3:
+    DrawIrPackedSubmissionV3(
+        generation_ref: DrawIrPackedGenerationRefV3(arena_id: 0u64, generation: 0u64, slot: 0u32),
+        row_count: 0u32, content_hash: "")
+
+fn _empty_snapshot() -> DrawIrPackedIdentitySnapshotV3:
+    DrawIrPackedIdentitySnapshotV3(
+        arena_id: 0u64, generation: 0u64, row_count: 0u32, rows: [],
+        composition_sdn: "", composition_hash: "", packed_hash: "")
+
+fn _refused_handoff(reason: u16) -> Engine2dPackedIdentityHandoffV3:
+    Engine2dPackedIdentityHandoffV3(
+        ok: false, reason: reason, submission: _empty_submission(), snapshot: _empty_snapshot())
+
+# Admit, write, seal and publish the identity rows. On any refusal the
+# unpublished slot is aborted. Returns (ok, reason, submission).
+fn _publish_rows(
+    store: DrawIrPackedGenerationStoreV3, rows: [u64]
+) -> (bool, u16, DrawIrPackedSubmissionV3):
+    var owned = store
+    if owned.queue_len != 0u32:
+        return (false, DRAW_IR_PACKED_REASON_QUEUE_FULL, _empty_submission())
+    var generation_ref = DrawIrPackedGenerationRefV3(arena_id: 0u64, generation: 0u64, slot: 0u32)
+    match owned.admit(rows.len() as u32):
+        DrawIrPackedAdmissionV3.Admitted(value): generation_ref = value
+        DrawIrPackedAdmissionV3.Refused(reason):
+            return (false, reason, _empty_submission())
+    for row in rows:
+        val written = owned.write(generation_ref, row)
+        if written != DRAW_IR_PACKED_REASON_OK:
+            owned.abort(generation_ref)
+            return (false, written, _empty_submission())
+    var submission = _empty_submission()
+    match owned.seal(generation_ref):
+        DrawIrPackedSealV3.Sealed(value): submission = value
+        DrawIrPackedSealV3.Refused(reason):
+            owned.abort(generation_ref)
+            return (false, reason, _empty_submission())
+    val published = owned.publish(submission)
+    if published != DRAW_IR_PACKED_REASON_OK:
+        owned.abort(generation_ref)
+        return (false, published, _empty_submission())
+    (true, DRAW_IR_PACKED_REASON_OK, submission)
+
+fn engine2d_packed_v3_prepare_identity(
+    store: DrawIrPackedGenerationStoreV3, composition: DrawIrComposition
+) -> (DrawIrPackedGenerationStoreV3, Engine2dPackedIdentityHandoffV3):
+    var owned = store
+    val composition_sdn = draw_ir_to_sdn(composition)
+    val rows = engine2d_draw_ir_v3_identity_rows(draw_ir_v2_to_v3(composition))
+    val published = _publish_rows(owned, rows)
+    if not published.0:
+        return (owned, _refused_handoff(published.1))
+    var submission = published.2
+    match owned.take():
+        DrawIrPackedHandoffV3.Ready(value): submission = value
+        DrawIrPackedHandoffV3.Refused(reason):
+            owned.recover_queued(submission.generation_ref)
+            return (owned, _refused_handoff(reason))
+    val snapshot = DrawIrPackedIdentitySnapshotV3(
+        arena_id: submission.generation_ref.arena_id,
+        generation: submission.generation_ref.generation,
+        row_count: rows.len() as u32, rows: rows,
+        composition_sdn: composition_sdn,
+        composition_hash: sha256_text(composition_sdn),
+        packed_hash: submission.content_hash)
+    (owned, Engine2dPackedIdentityHandoffV3(
+        ok: true, reason: DRAW_IR_PACKED_REASON_OK, submission: submission, snapshot: snapshot))
+
+# Independently recompute every bound value from the composition and compare.
+fn engine2d_packed_v3_verify_identity_snapshot(
+    snapshot: DrawIrPackedIdentitySnapshotV3, submission: DrawIrPackedSubmissionV3,
+    composition: DrawIrComposition
+) -> bool:
+    val generation_ref = submission.generation_ref
+    if (snapshot.arena_id != generation_ref.arena_id or
+        snapshot.generation != generation_ref.generation or
+        snapshot.row_count != submission.row_count or
+        snapshot.row_count != snapshot.rows.len() as u32 or
+        snapshot.packed_hash != submission.content_hash):
+        return false
+    val current_sdn = draw_ir_to_sdn(composition)
+    if snapshot.composition_sdn != current_sdn or snapshot.composition_hash != sha256_text(current_sdn):
+        return false
+    val expected = engine2d_draw_ir_v3_identity_rows(draw_ir_v2_to_v3(composition))
+    if expected.len() != snapshot.rows.len():
+        return false
+    var i = 0
+    while i < expected.len():
+        if expected[i] != snapshot.rows[i]:
+            return false
+        i = i + 1
+    draw_ir_packed_hash_v3(generation_ref.arena_id, generation_ref.generation, snapshot.rows) == submission.content_hash
+
+# Complete the IN_FLIGHT generation only when the renderer accepted and every
+# identity check still holds; otherwise poison the owner (fail closed).
+fn engine2d_packed_v3_finalize_identity(
+    store: DrawIrPackedGenerationStoreV3, handoff: Engine2dPackedIdentityHandoffV3,
+    composition: DrawIrComposition, render_accepted: bool
+) -> (DrawIrPackedGenerationStoreV3, bool):
+    var owned = store
+    val generation_ref = handoff.submission.generation_ref
+    var authentic = handoff.ok and render_accepted
+    if authentic:
+        authentic = engine2d_packed_v3_verify_identity_snapshot(
+            handoff.snapshot, handoff.submission, composition)
+    if authentic:
+        authentic = owned.matches(handoff.submission, handoff.snapshot.rows)
+    if authentic:
+        authentic = owned.complete(generation_ref) == DRAW_IR_PACKED_REASON_OK
+        return (owned, authentic)
+    owned.terminal = true
+    owned.reject_in_flight(generation_ref)
+    (owned, false)
+
+fn engine2d_packed_v3_identity_artifact(snapshot: DrawIrPackedIdentitySnapshotV3) -> text:
+    var out = "packed_identity_schema={ENGINE2D_PACKED_V3_SCHEMA}\n"
+    out = "{out}arena={snapshot.arena_id}\ngeneration={snapshot.generation}\n"
+    out = "{out}row_count={snapshot.row_count}\n"
+    out = "{out}composition_hash={sha256_text(snapshot.composition_sdn)}\n"
+    out = "{out}packed_hash={draw_ir_packed_hash_v3(snapshot.arena_id, snapshot.generation, snapshot.rows)}\n"
+    var i = 0
+    while i < snapshot.rows.len():
+        out = "{out}row={i}:{snapshot.rows[i]}\n"
+        i = i + 1
+    out
+
+fn engine2d_draw_ir_v3_render_composition(
+    engine: Engine2D, store: DrawIrPackedGenerationStoreV3, composition: DrawIrComposition
+) -> (Engine2D, DrawIrPackedGenerationStoreV3, Engine2dPackedGenerationReceiptV3):
+    val scene = draw_ir_v2_to_v3(composition)
+    val published = _publish_rows(store, engine2d_draw_ir_v3_identity_rows(scene))
+    if not published.0:
+        return (engine, store, Engine2dPackedGenerationReceiptV3(
+            accepted: false, reason: ENGINE2D_PACKED_V3_INVALID_SCENE,
+            arena_id: store.arena_id, generation: 0u64, content_hash: "",
+            rendered_command_count: 0u32, storage_released: false,
+            backend_name: engine.backend_name()))
+    engine2d_draw_ir_v3_take_and_render(engine, store, scene)
+
+export DrawIrPackedIdentitySnapshotV3, Engine2dPackedIdentityHandoffV3,
+    engine2d_packed_v3_store, engine2d_packed_v3_prepare_identity,
+    engine2d_packed_v3_verify_identity_snapshot, engine2d_packed_v3_finalize_identity,
+    engine2d_packed_v3_identity_artifact, engine2d_draw_ir_v3_render_composition

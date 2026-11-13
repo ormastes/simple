@@ -2,7 +2,11 @@
 
 use common.mission_critical.draw_ir_packed_generation_store_v3.*
 use common.ui.draw_ir_v3.{
+    DRAW_IR_V3_KIND_GROUP,
     DRAW_IR_V3_KIND_RECT,
+    DRAW_IR_V3_NO_ID,
+    DRAW_IR_V3_FLAG_NONE,
+    DrawIrV3Command,
     DRAW_IR_V3_SCHEMA_ID,
     DrawIrV3Scene,
     draw_ir_v3_geometry_at,
@@ -73,6 +77,14 @@ fn _engine2d_packed_receipt(
         backend_name: backend_name
     )
 
+# The v2->v3 adapter wraps every batch in one GROUP. With no transform, clip
+# or opacity it is a pure container and draws nothing; any group carrying real
+# state stays an unsupported command and is reported, never flattened away.
+fn _engine2d_packed_v3_is_neutral_group(command: DrawIrV3Command) -> bool:
+    command.kind == DRAW_IR_V3_KIND_GROUP and command.flags == DRAW_IR_V3_FLAG_NONE and
+        command.transform_id == DRAW_IR_V3_NO_ID and command.clip_id == DRAW_IR_V3_NO_ID and
+        command.paint_id == DRAW_IR_V3_NO_ID and command.parent_id == DRAW_IR_V3_NO_ID
+
 fn engine2d_draw_ir_v3_take_and_render(
     engine: Engine2D, store: DrawIrPackedGenerationStoreV3, scene: DrawIrV3Scene
 ) -> (Engine2D, DrawIrPackedGenerationStoreV3, Engine2dPackedGenerationReceiptV3):
@@ -107,7 +119,10 @@ fn engine2d_draw_ir_v3_take_and_render(
     # Text remains on Engine2D's transient FontRenderer/FontRenderBatch path;
     # no atlas or cache material is copied into Draw IR.
     for command in scene.commands:
-        if command.kind != DRAW_IR_V3_KIND_RECT:
+        if _engine2d_packed_v3_is_neutral_group(command):
+            continue
+        if (command.kind != DRAW_IR_V3_KIND_RECT or command.clip_id != DRAW_IR_V3_NO_ID or
+            command.transform_id != DRAW_IR_V3_NO_ID):
             val released = owned_store.complete(submission.generation_ref) == DRAW_IR_PACKED_REASON_OK
             return (eng, owned_store, _engine2d_packed_receipt(
                 false, ENGINE2D_PACKED_V3_UNSUPPORTED_COMMAND, submission, 0u32,
@@ -123,6 +138,8 @@ fn engine2d_draw_ir_v3_take_and_render(
 
     var rendered = 0u32
     for command in scene.commands:
+        if _engine2d_packed_v3_is_neutral_group(command):
+            continue
         val geometry = draw_ir_v3_geometry_at(scene.geometry, command.geometry_id)
         val paint = draw_ir_v3_paint_at(scene.paint, command.paint_id)
         eng.draw_rect_filled(geometry.x, geometry.y, geometry.width, geometry.height, paint.fill_color)
