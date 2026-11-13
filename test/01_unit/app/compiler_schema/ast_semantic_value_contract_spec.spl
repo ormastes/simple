@@ -1,12 +1,13 @@
 """Generated parser semantic-value encoder contracts."""
 
 use compiler.common.diagnostics.span.{Span}
-use compiler.frontend.parser_types_expr.{Expr, ExprKind}
+use compiler.frontend.parser_types_expr.{Expr, ExprKind, Type, TypeKind}
 use compiler.blocks.value.{BlockValue}
 use compiler.frontend.generated.ast_semantic_value.{
-    ast_semantic_hash_seed, ast_semantic_hash_finish, ast_semantic_encode_expr
+    ast_semantic_hash_seed, ast_semantic_hash_finish, ast_semantic_encode_expr, ast_semantic_encode_type
 }
 use std.io_runtime.{read_file_text}
+use app.compiler_schema.fold_gen.{load_ast_semantic_universe, emit_one_ast_semantic_encoder}
 use std.spec.step
 
 fn semantic_digest(expr: Expr) -> text:
@@ -16,6 +17,22 @@ fn semantic_digest(expr: Expr) -> text:
 
 fn no_span() -> Span:
     Span(0, 0, 0, 0, "", 0)
+
+fn type_digest(value: Type) -> text:
+    ast_semantic_hash_finish(ast_semantic_encode_type(value, ast_semantic_hash_seed()))
+
+fn u8_array(size: Expr?) -> Type:
+    val element = Type(kind: TypeKind.Named("u8", []), span: no_span())
+    Type(kind: TypeKind.Array(element, size), span: no_span())
+
+fn some_size(n: i64) -> Expr?:
+    # Same construction as the flat-AST bridge (flat_field_sized_type).
+    val size: Expr? = Some(Expr(kind: ExprKind.IntLit(n), span: no_span()))
+    size
+
+fn bare_size(n: i64) -> Expr?:
+    val size: Expr? = Expr(kind: ExprKind.IntLit(n), span: no_span())
+    size
 
 describe "generated AST semantic fingerprint contracts":
     it "does not collapse integers separated by the former modulus":
@@ -36,7 +53,7 @@ describe "generated AST semantic fingerprint contracts":
     it "hoists UTF-8 byte length out of semantic hashing traversal":
         step("Verify each text hash computes byte length once before its hot loop")
         val generated = read_file_text("src/compiler/10.frontend/generated/ast_semantic_value.spl")
-        expect(generated.contains("val byte_len = value.len()\n    var result = _ast_semantic_mix_i64(state, byte_len)")).to_equal(true)
+        expect(generated.contains("val byte_len = value.byte_len()\n    var result = _ast_semantic_mix_i64(state, byte_len)")).to_equal(true)
         expect(generated.contains("while i < byte_len:")).to_equal(true)
         expect(generated.contains("while i < value.len():")).to_equal(false)
 
@@ -52,10 +69,29 @@ describe "generated AST semantic fingerprint contracts":
         for arm in ["Expr", "LossBlock", "NogradBlock", "Raw", "Shell", "Sql",
                     "Regex", "Json", "Markdown", "Graph", "Custom", "Error"]:
             expect(generated.contains("case " + arm)).to_equal(true)
-        expect(generated.contains("_ast_semantic_mark_uncacheable(state, \"Any\")")).to_equal(true)
+        # BlockValue.Expr/LossBlock/NogradBlock carry flat AST handles (i64), so
+        # they are the type-erased payloads now (fb05765b78b), not `Any`.
+        expect(generated.contains("_ast_semantic_mark_uncacheable(state, \"opaque AST handle\")")).to_equal(true)
 
     it "keeps the generated package re-export inside the freshness ownership set":
         step("Verify freshness compares both the semantic artifact and its package initializer")
         val gate = read_file_text("scripts/check/check-generated-visitors-fresh.shs")
         expect(gate.contains("src/compiler/10.frontend/generated/ast_semantic_value.spl")).to_equal(true)
         expect(gate.contains("src/compiler/10.frontend/generated/__init__.spl")).to_equal(true)
+
+    it "encodes a literal-sized array type through an explicit presence projection":
+        step("Verify the generator projects an optional node payload with `!` after its nil guard")
+        val encoder = emit_one_ast_semantic_encoder(load_ast_semantic_universe("."), "Type")
+        expect(encoder.contains(": Expr = b_Array_f1!")).to_equal(true)
+        expect(encoder.contains("ast_semantic_encode_expr(b_Array_f1, state)")).to_equal(false)
+        step("Verify the checked-in encoder was regenerated with the projection")
+        val generated = read_file_text("src/compiler/10.frontend/generated/ast_semantic_value.spl")
+        expect(generated.contains(": Expr = b_Array_f1!")).to_equal(true)
+        expect(generated.contains("ast_semantic_encode_expr(b_Array_f1, state)")).to_equal(false)
+        expect(generated.contains("ast_semantic_encode_expr(b_Return_f0, state)")).to_equal(false)
+
+    it "gives `[u8; N]` one digest per N whether the size was built bare or with Some":
+        step("Verify a Some-wrapped size (the bridge's shape) hashes like a bare one")
+        expect(type_digest(u8_array(some_size(4096)))).to_equal(type_digest(u8_array(bare_size(4096))))
+        expect(type_digest(u8_array(some_size(4096))) != type_digest(u8_array(some_size(4095)))).to_equal(true)
+        expect(type_digest(u8_array(some_size(4096))) != type_digest(u8_array(nil))).to_equal(true)
