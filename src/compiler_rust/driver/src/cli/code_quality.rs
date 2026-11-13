@@ -97,29 +97,41 @@ fn file_allows_lint(source: &str, lint_name: &str) -> bool {
 }
 
 fn line_span(source: &str, line_index: usize) -> Span {
-    let mut start = 0usize;
-    for (idx, line) in source.lines().enumerate() {
-        if idx == line_index {
-            let line_no = idx + 1;
-            return Span::new(start, start + line.len(), line_no, 1);
-        }
-        start += line.len() + 1;
-    }
-    Span::new(0, 0, 1, 1)
+    LineSpanIndex::build(source).span(line_index)
 }
 
-fn make_quality_diag(
-    file: &Path,
-    code: &str,
-    line_index: usize,
-    message: impl Into<String>,
-    help: impl Into<String>,
-) -> Diagnostic {
-    Diagnostic::error(message.into())
-        .with_code(code.to_string())
-        .with_file(file.display().to_string())
-        .with_label(line_span(&fs::read_to_string(file).unwrap_or_default(), line_index), "")
-        .with_help(help.into())
+/// Precomputed byte offset of every source line. Building this once per file
+/// makes each diagnostic label lookup O(1); the previous `line_span` rescanned
+/// the whole source from byte 0 for every diagnostic, which is O(file) per
+/// diagnostic and quadratic for a file with many findings.
+struct LineSpanIndex {
+    starts: Vec<usize>,
+    lens: Vec<usize>,
+}
+
+impl LineSpanIndex {
+    fn build(source: &str) -> Self {
+        let mut starts = Vec::with_capacity(source.len() / 16 + 1);
+        let mut lens = Vec::with_capacity(source.len() / 16 + 1);
+        let mut start = 0usize;
+        for line in source.lines() {
+            starts.push(start);
+            lens.push(line.len());
+            start += line.len() + 1;
+        }
+        if starts.is_empty() {
+            starts.push(0);
+            lens.push(0);
+        }
+        LineSpanIndex { starts, lens }
+    }
+
+    fn span(&self, line_index: usize) -> Span {
+        match self.starts.get(line_index) {
+            Some(&start) => Span::new(start, start + self.lens[line_index], line_index + 1, 1),
+            None => Span::new(0, 0, 1, 1),
+        }
+    }
 }
 
 fn collect_spipe_quality_diagnostics(path: &Path, source: &str) -> Vec<Diagnostic> {
@@ -134,6 +146,7 @@ fn collect_spipe_quality_diagnostics(path: &Path, source: &str) -> Vec<Diagnosti
     let allow_false_boolean_wrapper = file_allows_lint(source, "spipe_false_boolean_wrapper_assertions");
 
     let lines: Vec<&str> = source.lines().collect();
+    let spans = LineSpanIndex::build(source);
     let mut diagnostics = Vec::new();
 
     for (idx, line) in lines.iter().enumerate() {
@@ -152,7 +165,7 @@ fn collect_spipe_quality_diagnostics(path: &Path, source: &str) -> Vec<Diagnosti
                 Diagnostic::error("Tautological assertion in spec/example")
                     .with_code("SPIPE001")
                     .with_file(path.display().to_string())
-                    .with_label(line_span(source, idx), "")
+                    .with_label(spans.span(idx), "")
                     .with_help("Assert returned data, state, or capability outcome instead of a literal boolean"),
             );
         }
@@ -168,7 +181,7 @@ fn collect_spipe_quality_diagnostics(path: &Path, source: &str) -> Vec<Diagnosti
                 Diagnostic::error("Placeholder pass helper in spec/example")
                     .with_code("SPIPE002")
                     .with_file(path.display().to_string())
-                    .with_label(line_span(source, idx), "")
+                    .with_label(spans.span(idx), "")
                     .with_help("Use skip: for unsupported environments, or assert a real result"),
             );
         }
@@ -186,7 +199,7 @@ fn collect_spipe_quality_diagnostics(path: &Path, source: &str) -> Vec<Diagnosti
                 Diagnostic::error("Placeholder success/failure arm in match-based spec assertion")
                     .with_code("SPIPE003")
                     .with_file(path.display().to_string())
-                    .with_label(line_span(source, idx), "")
+                    .with_label(spans.span(idx), "")
                     .with_help("Assert concrete fields from Ok/Err, or use skip: before the match"),
             );
         }
@@ -200,7 +213,7 @@ fn collect_spipe_quality_diagnostics(path: &Path, source: &str) -> Vec<Diagnosti
                 Diagnostic::error("Print-based skip placeholder in spec/example")
                     .with_code("SPIPE004")
                     .with_file(path.display().to_string())
-                    .with_label(line_span(source, idx), "")
+                    .with_label(spans.span(idx), "")
                     .with_help("Use skip: for sanctioned environment skips instead of print-and-return"),
             );
         }
@@ -210,7 +223,7 @@ fn collect_spipe_quality_diagnostics(path: &Path, source: &str) -> Vec<Diagnosti
                 Diagnostic::error("False boolean matcher wrapper in spec/example")
                     .with_code("SPIPE007")
                     .with_file(path.display().to_string())
-                    .with_label(line_span(source, idx), "")
+                    .with_label(spans.span(idx), "")
                     .with_help(
                         "Use expect_not(condition) instead of expect(condition).to_equal(false) or .to_be(false)",
                     ),
@@ -220,7 +233,7 @@ fn collect_spipe_quality_diagnostics(path: &Path, source: &str) -> Vec<Diagnosti
                 Diagnostic::warning("Verbose true boolean assertion in spec/example")
                     .with_code("SPIPE006")
                     .with_file(path.display().to_string())
-                    .with_label(line_span(source, idx), "")
+                    .with_label(spans.span(idx), "")
                     .with_help(
                         "Use assert_true(condition) instead of expect(condition).to_equal(true) or .to_be(true)",
                     ),
@@ -283,7 +296,7 @@ fn collect_spipe_quality_diagnostics(path: &Path, source: &str) -> Vec<Diagnosti
                 Diagnostic::error("SPipe example has no body")
                     .with_code("SPIPE005")
                     .with_file(path.display().to_string())
-                    .with_label(line_span(source, i), "")
+                    .with_label(spans.span(i), "")
                     .with_help("Add a real assertion or use skip: for a sanctioned skip"),
             );
         } else if !has_real_assertion && !has_skip && !allow_empty {
@@ -291,7 +304,7 @@ fn collect_spipe_quality_diagnostics(path: &Path, source: &str) -> Vec<Diagnosti
                 Diagnostic::error("SPipe example has no real assertion or sanctioned skip")
                     .with_code("SPIPE005")
                     .with_file(path.display().to_string())
-                    .with_label(line_span(source, i), "")
+                    .with_label(spans.span(i), "")
                     .with_help("Assert a concrete result, or use skip: when the environment legitimately cannot run the example"),
             );
         }
@@ -536,11 +549,12 @@ fn make_quality_warn_diag(
     line_index: usize,
     message: impl Into<String>,
     help: impl Into<String>,
+    spans: &LineSpanIndex,
 ) -> Diagnostic {
     Diagnostic::warning(message.into())
         .with_code(code.to_string())
         .with_file(file.display().to_string())
-        .with_label(line_span(&fs::read_to_string(file).unwrap_or_default(), line_index), "")
+        .with_label(spans.span(line_index), "")
         .with_help(help.into())
 }
 
@@ -589,6 +603,7 @@ fn collect_ui_typed_api_diagnostics(path: &Path, source: &str) -> Vec<Diagnostic
     ];
 
     let mut diagnostics = Vec::new();
+    let spans = LineSpanIndex::build(source);
 
     for (idx, line) in source.lines().enumerate() {
         let trimmed = line.trim();
@@ -609,6 +624,7 @@ fn collect_ui_typed_api_diagnostics(path: &Path, source: &str) -> Vec<Diagnostic
                             idx,
                             "Raw string literal as WidgetNode kind — use WidgetKind.X.to_wire()",
                             "Replace the string literal with WidgetKind.<Variant>.to_wire(), e.g. WidgetKind.Panel.to_wire()",
+                            &spans,
                         ));
                     }
                 }
@@ -628,6 +644,7 @@ fn collect_ui_typed_api_diagnostics(path: &Path, source: &str) -> Vec<Diagnostic
                             idx,
                             "Raw string literal in action position — use Action or CommonAction",
                             "Replace the string literal with CommonAction.Save.into_action() or Action.Custom(name: \"...\")",
+                            &spans,
                         ));
                     }
                 }
@@ -652,6 +669,7 @@ fn collect_ui_typed_api_diagnostics(path: &Path, source: &str) -> Vec<Diagnostic
                                     idx,
                                     "Raw string literal as toast variant — use a typed constant when StatusVariant is available",
                                     "Replace the string literal variant with a typed constant once StatusVariant lands",
+                                    &spans,
                                 ));
                             }
                         }
@@ -674,6 +692,7 @@ fn collect_ui_typed_api_diagnostics(path: &Path, source: &str) -> Vec<Diagnostic
                             "Replace \"{}\" with the ThemeId variant, e.g. ThemeId.IOSLight",
                             theme_name
                         ),
+                        &spans,
                     ));
                     break; // one diagnostic per line
                 }
