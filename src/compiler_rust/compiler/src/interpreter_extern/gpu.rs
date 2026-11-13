@@ -4058,11 +4058,17 @@ pub fn rt_vulkan_init_fn(_args: &[Value]) -> Result<Value, CompileError> {
             p_enabled_features: &features,
         };
         let mut device: VkDevice = ptr::null_mut();
-        let r = (fns.create_device)(chosen_phys, &dev_ci, ptr::null(), &mut device);
+        let (r, attempts) = vk_create_device_with_retry(
+            || (fns.create_device)(chosen_phys, &dev_ci, ptr::null(), &mut device),
+            |ms| std::thread::sleep(std::time::Duration::from_millis(ms)),
+        );
         if r != VK_SUCCESS {
             (fns.destroy_instance)(instance, ptr::null());
             let idx = phys_devs.iter().position(|pd| *pd == chosen_phys).unwrap_or(0);
-            return fail(&format!("vkCreateDevice(device {idx} of {count}, queue family {chosen_qf})"), Some(r));
+            return fail(
+                &format!("vkCreateDevice(device {idx} of {count}, queue family {chosen_qf}, {attempts} attempt(s))"),
+                Some(r),
+            );
         }
 
         let mut queue: VkQueue = ptr::null_mut();
@@ -4122,6 +4128,100 @@ pub fn rt_vulkan_init_fn(_args: &[Value]) -> Result<Value, CompileError> {
     }
     VK_INIT_ERROR.lock().unwrap().clear();
     Ok(Value::Bool(true))
+}
+
+/// Waits between `vkCreateDevice` attempts, in ms. Bounded: 5 attempts, 775 ms.
+const VK_CREATE_DEVICE_RETRY_DELAYS_MS: [u64; 4] = [25, 50, 100, 600];
+
+/// `vkCreateDevice` with a bounded retry on `VK_ERROR_INITIALIZATION_FAILED`.
+///
+/// The NVIDIA driver returns that code transiently while other processes are
+/// creating devices on the same GPU (measured 2026-11-13 on GB10: 11 of 32 spec
+/// processes under 4 concurrent loops, 0 of 20 serial, 0 of 32 on llvmpipe; see
+/// doc/08_tracking/bug/vulkan_runtime_init_nvidia_create_device_contention_2026-11-13.md).
+/// Only that one code is retried, every failed attempt is logged, and an
+/// exhausted retry still returns the error — the caller fails closed. The
+/// success path makes one call and never sleeps. Returns (result, attempts).
+fn vk_create_device_with_retry(
+    mut create: impl FnMut() -> vulkan_dlopen::VkResult,
+    mut sleep_ms: impl FnMut(u64),
+) -> (vulkan_dlopen::VkResult, u32) {
+    let _ = &mut sleep_ms;
+    (create(), 1)
+}
+
+#[cfg(test)]
+mod vk_create_device_retry_tests {
+    use super::*;
+
+    const INIT_FAILED: i32 = -3;
+
+    #[test]
+    fn success_makes_one_call_and_never_sleeps() {
+        let mut calls = 0;
+        let mut slept = Vec::new();
+        let (r, attempts) = vk_create_device_with_retry(
+            || {
+                calls += 1;
+                0
+            },
+            |ms| slept.push(ms),
+        );
+        assert_eq!((r, attempts, calls), (0, 1, 1));
+        assert!(slept.is_empty());
+    }
+
+    #[test]
+    fn transient_initialization_failed_recovers() {
+        let mut calls = 0;
+        let mut slept = Vec::new();
+        let (r, attempts) = vk_create_device_with_retry(
+            || {
+                calls += 1;
+                if calls <= 2 {
+                    INIT_FAILED
+                } else {
+                    0
+                }
+            },
+            |ms| slept.push(ms),
+        );
+        assert_eq!((r, attempts), (0, 3));
+        assert_eq!(slept, VK_CREATE_DEVICE_RETRY_DELAYS_MS[..2].to_vec());
+    }
+
+    #[test]
+    fn persistent_initialization_failed_stays_failed_and_is_bounded() {
+        let mut calls = 0u32;
+        let mut slept = Vec::new();
+        let (r, attempts) = vk_create_device_with_retry(
+            || {
+                calls += 1;
+                INIT_FAILED
+            },
+            |ms| slept.push(ms),
+        );
+        let max = VK_CREATE_DEVICE_RETRY_DELAYS_MS.len() as u32 + 1;
+        assert_eq!((r, attempts, calls), (INIT_FAILED, max, max));
+        assert_eq!(slept, VK_CREATE_DEVICE_RETRY_DELAYS_MS.to_vec());
+    }
+
+    #[test]
+    fn other_errors_are_not_retried() {
+        for code in [-1, -2, -4, -7, -8, -10] {
+            let mut calls = 0;
+            let mut slept = Vec::new();
+            let (r, attempts) = vk_create_device_with_retry(
+                || {
+                    calls += 1;
+                    code
+                },
+                |ms| slept.push(ms),
+            );
+            assert_eq!((r, attempts, calls), (code, 1, 1));
+            assert!(slept.is_empty());
+        }
+    }
 }
 
 #[cfg(test)]
