@@ -1,7 +1,7 @@
 # Interpreted Engine2D full-resolution render is ~9s/frame, pushing 640x480 capture specs near the 120s test cap
 
 Date: 2026-07-02
-Status: open
+Status: fixed 2026-11-13 (headline resolved; residual costs filed as engine2d_interp_cold_glyph_and_image_scale_cost_2026-11-13)
 Severity: P3 (test-throughput / DX; correctness unaffected)
 Found by: fable, W1d GUI-enhancement lane (G1.2/G1.5/G1.6)
 
@@ -111,3 +111,99 @@ the clear/fill cost this report suspected. What is left is listed below.
 The run is on the tree-walk interpreter because the JIT refuses the module:
 `backend_vulkan.spl` calls `env_get` with no import, three definitions are
 co-compiled, and the whole module is demoted (`[jit-fallback]`).
+
+## Fix (2026-11-13)
+
+Four pure-Simple changes, no new extern, no change to any drawn pixel:
+
+1. **Readback checksum** (`engine2d_readback_with_identity`, `backend.spl`).
+   The indexed loop paid a bounds-checked index, a `.to_i64()` method call and
+   a modulo per pixel. It now sums through the element iterator with one cast
+   and reduces once. Same value: every pixel is below 2^32, so the i64 sum
+   cannot overflow below 2^31 pixels. No backed bulk-sum channel exists to use
+   instead — `[u32].sum()` returns 0 on the interpreter lane (see Remaining),
+   and the only `rt_*` checksum externs are Vulkan buffer downloads.
+2. **Surface fill at create** (`SoftwareBackend.init_with_initial_color`).
+   `[0; total]` plus a per-pixel store loop became `[initial_color; total]`.
+3. **Cold glyph render** (`FontRenderer.get_glyph`). The render pass is called
+   with the glyph id the measure pass just resolved rather than the codepoint,
+   which made `sfnt_render_glyph_into` re-parse the whole cmap subtable to
+   reach the same id.
+4. **Fallback baseline** (`FontRenderer._stage_text_active`). The face
+   ascender for a run's first codepoint was re-measured for every text command
+   on every frame (table directory, cmap and outline parse each time). It is
+   now memoized per rasterizer identity + codepoint + size, the same key the
+   glyph-raster cache already uses.
+
+### Before / after
+
+Same binary (sha256 `af717f53...b9ba4d`), same host, same caps, three runs
+each, load 8-13.
+
+| 6 renders | before | after |
+|-----------|--------|-------|
+| wall (s) | 17.05 / 16.27 / 16.51 | 10.11 / 10.15 / 9.97 |
+| user (s) | 16.18 / 16.14 / 16.37 | 9.93 / 9.87 / 9.82 |
+| peak RSS (kB) | 661,456 / 670,540 / 650,308 | 649,100 / 646,776 / 671,624 |
+
+| phase (ms) | before | after |
+|------------|--------|-------|
+| engine create, 6x | 1086-1094 | 2-3 |
+| compose, render 0 (cold glyphs) | 4616-4646 | 3830-3848 |
+| compose, mean of renders 1-5 | 1090-1117 | 610-622 |
+| isolated readback, per render | 425-427 | 94 |
+
+Capture spec `ui_draw_ir_pipeline_spec.spl`: 25.10 s -> 15.43 s wall,
+20.61 s -> 15.11 s user, 669,096 -> 679,796 kB peak RSS.
+
+RSS is unchanged within run-to-run spread (the ascender memo holds at most 512
+short keys).
+
+JIT lane, checksum fold alone at 8,294,401 pixels (4K), three warm passes:
+33.9 ms before, 25.6 ms after, identical value.
+
+### Pixel identity
+
+- Bench frame: PPM byte-identical in all three before/after pairs (`cmp`),
+  `frame_fnv=6981179665638654671` and `readback_checksum=298222436` unchanged.
+- Capture spec: all six `build/gui_draw_ir/frame_*.ppm` byte-identical before
+  and after (6 of 6, 0 differing pixels), and the spec's expectation output is
+  identical line for line.
+- The checksum fold is additionally compared against the original per-pixel
+  definition on high-bit and all-ones pixels, in the budget spec and on the
+  JIT lane.
+
+### Regression check
+
+`test/05_perf/gui/engine2d_interp_full_res_render_budget_spec.spl`: create
+<= 60 ms (was 177, now 0), readback <= 200 ms (was 447, now 94), checksum equal
+to the per-pixel definition. Committed red first (2 of 3 failing), green after
+the fix.
+
+## Remaining (not fixed here)
+
+Filed as `engine2d_interp_cold_glyph_and_image_scale_cost_2026-11-13`:
+
+- **Cold glyphs, ~3.2 s once per process.** `_glyf_edge_coverage` (~2.0 s for
+  the 24 glyphs of this tree) and two whole-cmap parses per cold glyph
+  (`has_glyph`, then the measure pass; ~21 ms each, ~1.0 s).
+  `sfnt_cmap_glyph_id` re-validates every format-12 group on every call.
+- **`_emu_scale_image_pixels`**, ~150 ms per frame for the 638x60 image: a
+  per-pixel nearest-neighbour loop with no row reuse.
+- **`draw_rect_blend` at 640x480 takes ~29 s** on this lane (one call). Not on
+  this pipeline's path (its commands are rect, text and image only).
+- **`[u32].sum()` returns 0 under `SIMPLE_EXECUTION_MODE=interpret`** and the
+  correct value under the JIT.
+
+Also observed, not filed separately:
+
+- The capture spec fails 5 of 6 examples on `release/1.0.0` before and after
+  this change, on palette constants (for example button fill `4281102319`
+  rendered against `4282085029` expected). Colour drift between the spec and
+  the widget theme, unrelated to speed.
+- The pipeline only runs interpreted because `backend_vulkan.spl` calls
+  `env_get` unimported (same class as
+  `sffi_vulkan_env_get_unimported_jit_demotion_2026-11-13`). With the import
+  added locally the module JIT-compiles — 36 s wall for one render, the render
+  itself 434 ms — and then the process dies with SIGSEGV (rc 139) before the
+  frame hash prints. That import was not landed.
