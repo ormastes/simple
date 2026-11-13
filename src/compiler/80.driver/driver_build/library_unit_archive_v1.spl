@@ -17,7 +17,7 @@
 use std.common.sdn.parser (parse)
 use std.common.sdn.value.{SdnValue}
 use std.common.sdn.encode.{sdn_encode_canonical}
-use std.io_runtime.{file_exists, file_read, file_write, file_delete, process_run}
+use std.io_runtime.{file_exists, file_read, file_write, file_delete, file_rename, process_run, env_get, getpid}
 use std.nogc_sync_mut.io.file_ops.{file_atomic_write}
 use std.platform.{get_host_os}
 use compiler.backend.llvm_capability.{find_archive_portable}
@@ -140,10 +140,37 @@ pub fn library_unit_receipt_decode_v1(content: text) -> Result<LibraryUnitReceip
         deps: deps, objects: _library_unit_sdn_texts(root, "objects"), verdict: verdict,
         failed_modules: failed_modules))
 
-# Archive `<dir>/objects/<name>` for every name into `<dir>/lib<unit>.a` with the
-# portable archiver (SIMPLE_AR, llvm-ar, ar, lib.exe) through the existing
-# response-file command builder. Fails closed on no archiver, no objects or a
-# missing object; never leaves a partial archive behind.
+# Toolchain rule: LLVM only. Unit archives are written by llvm-ar; the shared
+# `find_archive_portable` fallback to binutils `ar` / `lib.exe` is refused here
+# (a separate lane removes GCC/binutils fallbacks repo-wide).
+pub fn library_unit_archiver_accepts_v1(path: text) -> bool:
+    if path == "":
+        return false
+    var base = path
+    val slash = base.last_index_of("/")
+    if slash >= 0:
+        base = base[slash + 1:]
+    val backslash = base.last_index_of("\\")
+    if backslash >= 0:
+        base = base[backslash + 1:]
+    if base.ends_with(".exe"):
+        base = base[0:base.len() - 4]
+    base.starts_with("llvm-ar")
+
+# SIMPLE_AR when set, else the portable lookup — accepted only if it is llvm-ar.
+pub fn library_unit_archiver_v1() -> Result<text, text>:
+    val configured = env_get("SIMPLE_AR")
+    val candidate = if configured != "": configured else: find_archive_portable()
+    if library_unit_archiver_accepts_v1(candidate):
+        return Ok(candidate)
+    val found = if candidate == "": "none" else: "'{candidate}'"
+    Err("unit archives require llvm-ar (found {found}); install LLVM or set SIMPLE_AR to an llvm-ar")
+
+# Archive `<dir>/objects/<name>` for every name into `<dir>/lib<unit>.a` through
+# the existing response-file command builder. Write-once and lockless: the
+# archive is built at a temp path and renamed into place, so a reader never
+# sees a partial file and a lane that lost the race keeps the existing archive.
+# Fails closed on no llvm-ar, no objects or a missing object.
 pub fn library_unit_archive_write_v1(dir: text, unit: text, objects: [text]) -> Result<text, text>:
     if objects.len() == 0:
         return Err("unit '{unit}': no objects to archive")
@@ -153,12 +180,15 @@ pub fn library_unit_archive_write_v1(dir: text, unit: text, objects: [text]) -> 
         if not file_exists(path):
             return Err("unit '{unit}': object '{path}' does not exist")
         paths.push(path)
-    val archiver = find_archive_portable()
-    if archiver == "":
-        return Err("unit '{unit}': no archiver found (SIMPLE_AR, llvm-ar, ar, lib.exe)")
+    val archiver = match library_unit_archiver_v1():
+        case Ok(a): a
+        case Err(e): return Err("unit '{unit}': {e}")
     val archive = library_unit_archive_path_v1(dir: dir, unit: unit)
-    val _stale = file_delete(archive)
-    val cmd: ArchiveCommand = archive_command_build(archiver, get_host_os(), archive, paths)
+    if file_exists(archive):
+        return Ok(archive)
+    val tmp = "{archive}.tmp.{getpid()}"
+    val _stale_tmp = file_delete(tmp)
+    val cmd: ArchiveCommand = archive_command_build(archiver, get_host_os(), tmp, paths)
     if cmd.response_path != "":
         if not file_write(cmd.response_path, cmd.response_body):
             return Err("unit '{unit}': cannot write archiver response file {cmd.response_path}")
@@ -166,10 +196,17 @@ pub fn library_unit_archive_write_v1(dir: text, unit: text, objects: [text]) -> 
     if cmd.response_path != "":
         val _rsp = file_delete(cmd.response_path)
     if code != 0:
-        val _partial = file_delete(archive)
+        val _partial = file_delete(tmp)
         return Err("unit '{unit}': archiver {archiver} exited {code}: {stderr}")
-    if not file_exists(archive):
-        return Err("unit '{unit}': archiver {archiver} exited 0 but wrote no {archive}")
+    if not file_exists(tmp):
+        return Err("unit '{unit}': archiver {archiver} exited 0 but wrote no {tmp}")
+    if file_exists(archive):
+        # another lane published the same unit_key first: keep theirs
+        val _lost = file_delete(tmp)
+        return Ok(archive)
+    if not file_rename(tmp, archive):
+        val _unrenamed = file_delete(tmp)
+        return Err("unit '{unit}': cannot rename {tmp} to {archive}")
     Ok(archive)
 
 # Write-once: Err when a receipt already exists under this unit_key dir (the

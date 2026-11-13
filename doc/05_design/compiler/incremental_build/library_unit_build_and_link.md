@@ -69,8 +69,12 @@ method signatures with defaults, const lines) and only fn/method bodies are
 dropped. Over-inclusion (more rebuilds) is accepted; under-inclusion is not.
 **Proved by spec** (`library_unit_iface_v1_spec.spl` "covers every cross-unit
 leak"): struct field reorder, enum variant insert, public `val` value change
-and method-default change each CHANGE the digest; fn and method body changes
-do NOT. (`driver_native_source_interface_text`, `driver_aot_native_output.spl:1346`,
+and method-default change each CHANGE the digest, as do enum variant REORDER
+and the body of a multi-line `"""` string constant (review M1: the carrier
+previously skipped in-string continuation lines, so `val HELP = """…"""`
+digested only its header while private string constants are inlined by value
+into importers — fixed in `native_interface_decls_v1`, over-inclusive only for
+its other users); fn and method body changes and a module docstring do NOT. (`driver_native_source_interface_text`, `driver_aot_native_output.spl:1346`,
 is the same class of extractor; the slice carrier was chosen because it already
 digests per declaration and feeds the native module witness.)
 
@@ -100,7 +104,8 @@ Objects land under the existing lane scope, never a new tree:
 
 ```
 build/bootstrap/native_cache/<lane>/<scope_key>/units/<unit-name>/<unit_key>/
-    objects/<module>.o      lib<unit>.a (archive_command_build: rcsD / lib.exe; thin `T` later)
+    objects/<module>.o      lib<unit>.a (llvm-ar ONLY via archive_command_build; built at a temp
+                            path and renamed into place, write-once; thin `T` later)
     iface.sdn               unit interface digest + per-module digests
     receipt.sdn             producer identity, scope_key, source digest, dep keys, verdict
 ```

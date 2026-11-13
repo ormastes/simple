@@ -45,5 +45,8 @@ byte-identical.
 
 Specs under `test/01_unit/compiler/80.driver/library_unit_*_spec.spl` (plan 18,
 iface 14, archive 8, graph 6, link 7) on the Rust bootstrap seed; the iface spec
-proves struct field reorder, enum variant insert, `val` value and method default
-changes each change the unit interface digest while fn/method bodies do not.
+proves struct field reorder, enum variant insert AND reorder, `val` value,
+multi-line `"""` string-constant body (review M1 fix in `native_interface_decls_v1`)
+and method default changes each change the unit interface digest while
+fn/method bodies and module docstrings do not. Unit archives require llvm-ar
+(`library_unit_archiver_v1`), never binutils `ar`.

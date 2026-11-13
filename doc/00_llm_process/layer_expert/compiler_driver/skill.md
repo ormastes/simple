@@ -352,3 +352,10 @@ age-based. Do not reintroduce `file_lock` in `src/app/compiler_entrypoint/`,
   type") and runs it interpreted; the archive spec's real-archiver branch depends
   on `find_archive_portable()` and asserts the Err text when none exists.
 - Blockers before wiring: `doc/08_tracking/bug/library_unit_build_slice5_prerequisites_2026-11-13.md`.
+- Review M1 (2026-11-13): `native_interface_decls_v1` now keeps the in-string
+  continuation lines of an open NON-fn declaration (`val HELP = """…"""`), since
+  private string constants are inlined by value into importers; fn/me bodies and
+  module docstrings stay out. Over-inclusive only for its other users
+  (native_module_witness_facts, native_source_interface_index). Unit archives
+  require llvm-ar (`library_unit_archiver_v1`; binutils `ar`/`lib.exe` refused)
+  and are built at `<archive>.tmp.<pid>` then renamed — write-once, lockless.

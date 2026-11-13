@@ -1,13 +1,13 @@
 use std.spec
-use std.io_runtime.{file_exists, file_write, file_delete, mkdir_p, process_run}
-use compiler.backend.llvm_capability.{find_archive_portable}
+use std.io_runtime.{file_exists, file_write, file_delete, mkdir_p, process_run, list_dir}
 use compiler.driver.driver_build.library_unit_plan_v1.{library_unit_cache_key_v1}
 use compiler.driver.driver_build.library_unit_archive_v1.{
     LibraryUnitReceiptV1, library_unit_archive_dir_v1, library_unit_archive_path_v1,
     library_unit_receipt_path_v1, library_unit_iface_path_v1,
     library_unit_receipt_encode_v1, library_unit_receipt_decode_v1,
     library_unit_archive_write_v1, library_unit_receipt_publish_v1,
-    library_unit_receipt_read_v1, library_unit_archive_complete_v1}
+    library_unit_receipt_read_v1, library_unit_archive_complete_v1,
+    library_unit_archiver_accepts_v1, library_unit_archiver_v1}
 
 # Design: doc/05_design/compiler/incremental_build/library_unit_build_and_link.md §3-4
 # Slice 3: archive writer (reuses archive_command_build) + write-once receipt.sdn.
@@ -64,6 +64,24 @@ describe "library_unit_receipt encode/decode":
         val r = receipt("simple-std", "failed")
         expect(library_unit_receipt_decode_v1(library_unit_receipt_encode_v1(r)).is_err()).to_equal(true)
 
+describe "library_unit_archiver_v1":
+    it "accepts only llvm-ar, never binutils ar or lib.exe (toolchain rule: LLVM, no GCC/binutils)":
+        expect(library_unit_archiver_accepts_v1("llvm-ar")).to_equal(true)
+        expect(library_unit_archiver_accepts_v1("/usr/bin/llvm-ar-23")).to_equal(true)
+        expect(library_unit_archiver_accepts_v1("/opt/homebrew/opt/llvm/bin/llvm-ar")).to_equal(true)
+        expect(library_unit_archiver_accepts_v1("C:/llvm/bin/llvm-ar.exe")).to_equal(true)
+        expect(library_unit_archiver_accepts_v1("ar")).to_equal(false)
+        expect(library_unit_archiver_accepts_v1("/usr/bin/ar")).to_equal(false)
+        expect(library_unit_archiver_accepts_v1("lib.exe")).to_equal(false)
+        expect(library_unit_archiver_accepts_v1("")).to_equal(false)
+
+    it "resolves to an llvm-ar or fails closed naming the requirement":
+        match library_unit_archiver_v1():
+            case Ok(path):
+                expect(library_unit_archiver_accepts_v1(path)).to_equal(true)
+            case Err(e):
+                expect(e.contains("llvm-ar")).to_equal(true)
+
 describe "library_unit_archive_write_v1 + receipt publish":
     val ROOT = "build/spec_library_unit_archive_v1"
 
@@ -74,20 +92,34 @@ describe "library_unit_archive_write_v1 + receipt publish":
         expect(file_write("{dir}/objects/sub_b.o", "object b\n")).to_equal(true)
         val archive = library_unit_archive_path_v1(dir, "unit-a")
         val _removed = file_delete(archive)
-        val archiver = find_archive_portable()
+        val archiver = match library_unit_archiver_v1():
+            case Ok(p): p
+            case Err(_): ""
         match library_unit_archive_write_v1(dir, "unit-a", ["a.o", "sub_b.o"]):
             case Ok(path):
                 expect(archiver == "").to_equal(false)
                 expect(path).to_equal(archive)
                 expect(file_exists(archive)).to_equal(true)
+                # built at a temp path and renamed into place: no temp file survives
+                var leftovers = 0
+                for name in list_dir(dir):
+                    if name.contains(".tmp"):
+                        leftovers = leftovers + 1
+                expect(leftovers).to_equal(0)
                 val (listing, _err, code) = process_run(archiver, ["t", archive])
                 expect(code).to_equal(0)
                 expect(listing.contains("a.o")).to_equal(true)
                 expect(listing.contains("sub_b.o")).to_equal(true)
+                # write-once: a second write under the same key keeps the existing archive
+                match library_unit_archive_write_v1(dir, "unit-a", ["a.o", "sub_b.o"]):
+                    case Ok(again):
+                        expect(again).to_equal(archive)
+                    case Err(e):
+                        expect(e).to_equal("")
             case Err(e):
-                # No archiver on this host: the writer must say so, never pass silently.
+                # No llvm-ar on this host: the writer must say so, never pass silently.
                 expect(archiver).to_equal("")
-                expect(e.contains("archiver")).to_equal(true)
+                expect(e.contains("llvm-ar")).to_equal(true)
 
     it "refuses an empty object list and a missing object":
         val dir = library_unit_archive_dir_v1(ROOT, "unit-a", "key-empty")
