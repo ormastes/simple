@@ -1330,6 +1330,11 @@ pub struct CowEnv {
     /// clear.
     /// Bug: doc/08_tracking/bug/primitive_receiver_trait_impl_dispatch_2026-08-07.md
     declared_int_widths: Option<Box<DeclaredWidths>>,
+    /// Set only on the captured env of a lambda / block closure written in a
+    /// test file (`closure_created_in_test`); read when the closure body runs
+    /// so the private-fn call rule treats the test, not the invoking frame,
+    /// as the caller. Bug: test_private_access_closure_attribution_2026-11-14.
+    closure_in_test: bool,
 }
 
 /// Payload of [`CowEnv::declared_int_widths`]: the live `name -> width` map
@@ -1398,6 +1403,7 @@ impl CowEnv {
             uninit_names: FrameSet::default(),
             field_prebinds: FrameSet::default(),
             declared_int_widths: None,
+            closure_in_test: false,
         }
     }
 
@@ -1655,6 +1661,15 @@ impl CowEnv {
 
     pub fn scope(&self) -> Option<&GlobalScope> {
         self.scope.as_ref()
+    }
+
+    /// See [`CowEnv::closure_in_test`] (the field).
+    pub fn closure_in_test(&self) -> bool {
+        self.closure_in_test
+    }
+
+    pub fn set_closure_in_test(&mut self, in_test: bool) {
+        self.closure_in_test = in_test;
     }
 
     /// Re-point the scope at the current live stores. O(1): the frame keeps
@@ -2209,6 +2224,7 @@ impl CowEnv {
             uninit_names: FrameSet::default(),
             field_prebinds: FrameSet::default(),
             declared_int_widths: None,
+            closure_in_test: false,
         }
     }
 
@@ -2229,6 +2245,7 @@ impl CowEnv {
             uninit_names: FrameSet::default(),
             field_prebinds: FrameSet::default(),
             declared_int_widths: None,
+            closure_in_test: false,
         }
     }
 
@@ -2342,6 +2359,7 @@ impl Clone for CowEnv {
             uninit_names: self.uninit_names.clone(),
             field_prebinds: self.field_prebinds.clone(),
             declared_int_widths: self.declared_int_widths.clone(),
+            closure_in_test: self.closure_in_test,
         }
     }
 }

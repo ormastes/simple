@@ -746,6 +746,11 @@ pub(crate) fn execute_function_body(
         }
         saved
     });
+    // An owned named function is its own lexical caller: drop any enclosing
+    // closure's origin for the call-visibility rule until this frame returns.
+    let _closure_origin = func_owner_module
+        .as_ref()
+        .map(|_| crate::interpreter::interpreter_module::ClosureOriginGuard::enter(None));
     // COVERAGE: expression-level decision sites (if-expressions, standalone
     // `and`/`or`) anchor on the function that owns them; follows the same
     // owner rule as CURRENT_EXEC_MODULE (lambdas inherit). Off: no work.

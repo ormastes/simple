@@ -28,6 +28,11 @@ pub(crate) fn exec_lambda(
         mark_nodes_locals, publish_and_repoint, refresh_live_bound_globals, sync_live_bound_globals,
     };
 
+    // The body's lexical caller for the private-fn call rule is where the
+    // lambda was written, not the frame invoking it.
+    let _closure_origin =
+        crate::interpreter::interpreter_module::ClosureOriginGuard::enter(Some(captured_env.closure_in_test()));
+
     // Diagram tracing for lambda execution
     if diagram_sffi::is_diagram_enabled() {
         diagram_sffi::trace_call("<lambda>");

@@ -58,6 +58,7 @@ pub fn evaluate_module_exports_with_preloaded(
     global_enums: &mut Enums,
     preloaded_env: Option<&HashMap<String, Value>>,
 ) -> Result<ModuleExports, CompileError> {
+    let _module_eval = super::ModuleEvalGuard::enter();
     let mut env: Env = Env::new();
     let mut exports = ExportTable::new();
     let mut local_functions: HashMap<String, Arc<FunctionDef>> = HashMap::new();
