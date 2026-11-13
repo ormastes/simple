@@ -15,6 +15,50 @@ type ImplMethods = HashMap<String, Vec<Arc<FunctionDef>>>;
 
 const METHOD_SELF: &str = "self";
 
+/// Interpreter twin of the HIR `reject_callable_for_enum_slot` check: a
+/// function or type (constructor) value bound to a parameter declared as a
+/// user enum (`Kind` or `Kind?`) can never be an enum value. Without this the
+/// interpreter (and every non-strict JIT run that falls back to it) bound
+/// `kind_name(Vec4f)` and a later `case Some(I8):` matched it silently.
+/// Bug: doc/08_tracking/bug/match_on_callable_scrutinee_silently_takes_first_arm_2026-11-14.md
+///
+/// `EnumVariantConstructor` is not refused: `mod X:` dicts store unit variants
+/// in that encoding (see that bug doc's residuals), so it can be a real
+/// variant value here.
+pub(crate) fn reject_callable_for_enum_param(value: &Value, ty: Option<&Type>, enums: &Enums) -> Option<String> {
+    // Value shape first: it is a plain discriminant test, so the hot binding
+    // path never pays the enum-table lookup for ordinary data arguments.
+    let callable = matches!(
+        value,
+        Value::Constructor { .. }
+            | Value::Function { .. }
+            | Value::Lambda { .. }
+            | Value::BlockClosure { .. }
+            | Value::NativeFunction(_)
+            | Value::EnumType { .. }
+            | Value::TraitType { .. }
+    );
+    if !callable {
+        return None;
+    }
+    let enum_name = match ty? {
+        Type::Simple(name) => name,
+        Type::Optional(inner) => match inner.as_ref() {
+            Type::Simple(name) => name,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    if matches!(enum_name.as_str(), "Option" | "Result") || !enums.contains_key(enum_name) {
+        return None;
+    }
+    Some(format!(
+        "is declared as enum `{enum_name}` but receives a {} value {}",
+        value.type_name(),
+        value.to_display_string()
+    ))
+}
+
 /// BUG-ADMISSION (doc/08_tracking/bug/bool_typed_parameter_accepts_non_bool_and_jit_corrupts_it_2026-08-04):
 /// does this argument expression statically prove a non-`bool` value at a
 /// `bool`-typed parameter? Only literal shapes qualify: an integer/float/text
@@ -427,7 +471,7 @@ pub(crate) fn bind_args_with_injected(
                         // Regular parameter before variadic
                         let param = params_to_bind[positional_idx];
                         let val = coerce_param(wrap_trait_object!(spread_item, param.ty.as_ref()), param.ty.as_ref());
-                        validate_unit!(&val, param.ty.as_ref(), format!("parameter '{}'", param.name));
+                        validate_unit!(&val, param.ty.as_ref(), format!("parameter '{}'", param.name), enums);
                         bound.insert(param.name.clone(), val);
                     } else {
                         let ctx = ErrorContext::new()
@@ -462,7 +506,7 @@ pub(crate) fn bind_args_with_injected(
                     }
                     let param = params_to_bind[positional_idx];
                     let val = coerce_param(wrap_trait_object!(spread_item, param.ty.as_ref()), param.ty.as_ref());
-                    validate_unit!(&val, param.ty.as_ref(), format!("parameter '{}'", param.name));
+                    validate_unit!(&val, param.ty.as_ref(), format!("parameter '{}'", param.name), enums);
                     bound.insert(param.name.clone(), val);
                 }
                 positional_idx += 1;
@@ -514,7 +558,7 @@ pub(crate) fn bind_args_with_injected(
                     wrap_trait_object!(val, param.and_then(|p| p.ty.as_ref())),
                     param.and_then(|p| p.ty.as_ref()),
                 );
-                validate_unit!(&val, param.and_then(|p| p.ty.as_ref()), format!("parameter '{}'", name));
+                validate_unit!(&val, param.and_then(|p| p.ty.as_ref()), format!("parameter '{}'", name), enums);
                 bound.insert(name.clone(), val);
             } else {
                 // Positional argument
@@ -526,7 +570,7 @@ pub(crate) fn bind_args_with_injected(
                         // Regular positional parameter before variadic
                         let param = params_to_bind[positional_idx];
                         let val = coerce_param(wrap_trait_object!(val, param.ty.as_ref()), param.ty.as_ref());
-                        validate_unit!(&val, param.ty.as_ref(), format!("parameter '{}'", param.name));
+                        validate_unit!(&val, param.ty.as_ref(), format!("parameter '{}'", param.name), enums);
                         bound.insert(param.name.clone(), val);
                     }
                 } else {
@@ -585,7 +629,7 @@ pub(crate) fn bind_args_with_injected(
                         }
                     }
                     let val = coerce_param(wrap_trait_object!(val, param.ty.as_ref()), param.ty.as_ref());
-                    validate_unit!(&val, param.ty.as_ref(), format!("parameter '{}'", param.name));
+                    validate_unit!(&val, param.ty.as_ref(), format!("parameter '{}'", param.name), enums);
                     bound.insert(param.name.clone(), val);
                 }
                 positional_idx += 1;
@@ -801,7 +845,7 @@ pub(crate) fn bind_args_with_values_named(
         for (param, value) in params.iter().filter(is_bindable).zip(args.iter()) {
             let value = await_value(value.clone())?;
             let value = coerce_param(wrap_trait_object!(value, param.ty.as_ref()), param.ty.as_ref());
-            validate_unit!(&value, param.ty.as_ref(), format!("parameter '{}'", param.name));
+            validate_unit!(&value, param.ty.as_ref(), format!("parameter '{}'", param.name), enums);
             crate::perf_counters::bump(&crate::perf_counters::MECALL_STRING_ALLOCS, 1);
             bound.insert(param.name.clone(), value);
         }
@@ -907,7 +951,7 @@ pub(crate) fn bind_args_with_values_named(
         };
 
         let value = coerce_param(wrap_trait_object!(value, param.ty.as_ref()), param.ty.as_ref());
-        validate_unit!(&value, param.ty.as_ref(), format!("parameter '{}'", param.name));
+        validate_unit!(&value, param.ty.as_ref(), format!("parameter '{}'", param.name), enums);
         crate::perf_counters::bump(&crate::perf_counters::MECALL_STRING_ALLOCS, 1);
         bound.insert(param.name.clone(), value);
     }

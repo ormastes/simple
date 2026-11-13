@@ -417,6 +417,8 @@ impl Lowerer {
         // cross-module contract table). A default that cannot be materialised
         // at the call site is a compile error (`fill_omitted_default_args`):
         // codegen would otherwise pad the slot with tagged nil.
+        // True once `args_hir` is known to be in declared slot order.
+        let mut args_in_slot_order = args.iter().all(|a| a.name.is_none());
         if let (Expr::Identifier(name), HirExprKind::Global(symbol)) = (callee, &func_hir.kind) {
             let own = self.own_declared_function_names.contains(name);
             let params = self.fn_param_defaults.get(symbol).or_else(|| {
@@ -454,6 +456,43 @@ impl Lowerer {
                 // Empty names = variadic callee: keep the legacy path.
                 if !names.is_empty() {
                     args_hir = self.bind_named_call_args(symbol, &names, &params, args, args_hir, ctx)?;
+                    args_in_slot_order = true;
+                }
+            }
+        }
+
+        // A function or type (constructor) value can never inhabit an
+        // enum-typed parameter. Checked on the FINAL slot-ordered arguments
+        // (after named binding and default fill); a named-argument call that
+        // was not re-ordered above is skipped rather than checked against the
+        // wrong slot. See `reject_callable_for_enum_slot`.
+        if args_in_slot_order && !args.iter().any(|a| matches!(a.value, Expr::Spread(_))) {
+            // The callee's HIR value type when it is already a `Function`;
+            // otherwise (callee declared after the caller) the declared
+            // parameter type names recorded for the resolved symbol.
+            let slot_types: Vec<Option<TypeId>> = match self.module.types.get(func_hir.ty) {
+                Some(HirType::Function { params, .. }) => params.iter().map(|p| Some(*p)).collect(),
+                _ => match (callee, &func_hir.kind) {
+                    (Expr::Identifier(_), HirExprKind::Global(symbol)) => self
+                        .fn_param_type_names
+                        .get(symbol)
+                        .map(|names| {
+                            names
+                                .iter()
+                                .map(|n| n.as_deref().and_then(|n| self.module.types.lookup(n)))
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    _ => Vec::new(),
+                },
+            };
+            let callee_name = match callee {
+                Expr::Identifier(n) => n.as_str(),
+                _ => "?",
+            };
+            for (i, (arg, pty)) in args_hir.iter().zip(slot_types.iter()).enumerate() {
+                if let Some(pty) = pty {
+                    self.reject_callable_for_enum_slot(*pty, arg, &format!("argument {} of `{callee_name}`", i + 1))?;
                 }
             }
         }
@@ -468,6 +507,63 @@ impl Lowerer {
             },
             ty: ret_ty,
         })
+    }
+
+    /// Reject a function or type (constructor) value bound to an enum-typed
+    /// slot: a free-function parameter, a typed `val`/`var`, or a field of a
+    /// class declared in the same file (method arguments are not covered: no
+    /// resolved parameter list at that HIR site). Such a value can never be an enum value, but the JIT used to
+    /// accept it and then `match` silently fell to `case _:` (or a
+    /// `case Some(V):` arm over `T?` matched it outright). Bug:
+    /// doc/08_tracking/bug/match_on_callable_scrutinee_silently_takes_first_arm_2026-11-14.md
+    ///
+    /// Deliberately narrow, because the seed's aggregate typing is not
+    /// authoritative (see `validate_declared_return_type`): it fires only when
+    /// the slot is a user enum (also through `T?`; never `Option`/`Result`)
+    /// and the value is either typed `Function` or is a bare reference to a
+    /// type name (`Global("Vec4f")` typed as struct/enum `Vec4f`, which is how
+    /// a class name used as a value lowers). Struct-typed locals and every
+    /// erased slot keep the existing contract.
+    pub(crate) fn reject_callable_for_enum_slot(
+        &self,
+        expected: TypeId,
+        value: &HirExpr,
+        slot: &str,
+    ) -> LowerResult<()> {
+        let slot_ty = self.module.types.optional_inner(expected).unwrap_or(expected);
+        let enum_name = match self.module.types.get(slot_ty) {
+            Some(HirType::Enum { name, .. }) if name != "Option" && name != "Result" => name.clone(),
+            _ => return Ok(()),
+        };
+        let found = match (&value.kind, self.module.types.get(value.ty)) {
+            (_, Some(HirType::Function { .. })) => match &value.kind {
+                HirExprKind::Global(symbol) => format!("the function `{symbol}`"),
+                _ => "a function value".to_string(),
+            },
+            (HirExprKind::Global(symbol), Some(HirType::Struct { name, .. })) if Self::names_type(symbol, name) => {
+                format!("the type `{name}` (a constructor value, not an instance)")
+            }
+            (HirExprKind::Global(symbol), Some(HirType::Enum { name, .. })) if Self::names_type(symbol, name) => {
+                format!("the enum type `{name}` itself, not one of its variants")
+            }
+            _ => return Ok(()),
+        };
+        Err(LowerError::Unsupported(format!(
+            "type mismatch: {slot} is declared as enum `{enum_name}` but receives {found}; \
+             a function or type value can never be an enum value"
+        )))
+    }
+
+    /// `symbol` is a bare reference to the type `type_name` (possibly
+    /// module-qualified with `.` on either side), not a variable that holds
+    /// one. A `::` path is an enum variant (`Kind::I8`, and `Token::Token` for
+    /// a variant spelled like its enum), never a type reference.
+    fn names_type(symbol: &str, type_name: &str) -> bool {
+        if symbol.contains("::") {
+            return false;
+        }
+        let tail = |s: &str| s.rsplit('.').next().unwrap_or(s).to_string();
+        symbol == type_name || tail(symbol) == tail(type_name)
     }
 
     /// Map a call that uses named arguments onto the callee's declared slots.

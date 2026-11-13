@@ -618,6 +618,20 @@ impl Lowerer {
             })
         };
 
+        // Field TypeIds trusted for the enum-slot admission check: only a
+        // struct declared in this same file whose registry layout is exactly
+        // `declared` (same soundness gate as the unknown-field check above).
+        let trusted_field_types: Option<Vec<TypeId>> = match &registry_fields {
+            Some(rf)
+                if declared_here
+                    && rf.len() == declared.len()
+                    && rf.iter().zip(declared.iter()).all(|((f, _), d)| f == d) =>
+            {
+                Some(rf.iter().map(|(_, t)| *t).collect())
+            }
+            _ => None,
+        };
+
         let mut pos_iter = positional.into_iter();
         let mut out = Vec::with_capacity(declared.len());
         for (field_index, field_name) in declared.iter().enumerate() {
@@ -629,10 +643,16 @@ impl Lowerer {
                 .get(bare_name)
                 .and_then(|m| m.get(field_name.as_str()))
                 .cloned();
-            if let Some(expr) = named.get(field_name.as_str()) {
-                out.push(self.lower_expr(expr, ctx)?);
-            } else if let Some(expr) = pos_iter.next() {
-                out.push(self.lower_expr(expr, ctx)?);
+            let provided_expr = match named.get(field_name.as_str()) {
+                Some(expr) => Some(*expr),
+                None => pos_iter.next(),
+            };
+            if let Some(expr) = provided_expr {
+                let value = self.lower_expr(expr, ctx)?;
+                if let Some(field_ty) = trusted_field_types.as_ref().and_then(|t| t.get(field_index)) {
+                    self.reject_callable_for_enum_slot(*field_ty, &value, &format!("field `{name}.{field_name}`"))?;
+                }
+                out.push(value);
             } else if let Some(binding) = &spread_binding {
                 // Unlisted slot, spread present: copy field `field_index` out
                 // of the once-evaluated base. Deliberately ABOVE the declared

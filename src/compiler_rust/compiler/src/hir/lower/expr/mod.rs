@@ -1327,6 +1327,36 @@ impl Lowerer {
             }
         }
 
+        // Enum-slot admission for a user method (see
+        // `reject_callable_for_enum_slot`): only positional calls on a
+        // receiver whose class/struct is declared in this file, so the
+        // recorded `Owner.method` row is the one the author wrote.
+        if args.iter().all(|a| a.name.is_none() && !matches!(a.value, Expr::Spread(_))) {
+            if let Some(HirType::Struct { name: owner, .. }) = self.module.types.get(receiver_hir.ty) {
+                let bare_owner = owner.rsplit('.').next().unwrap_or(owner).to_string();
+                let declared_here = self
+                    .struct_decl_files
+                    .get(&bare_owner)
+                    .is_some_and(|decl_file| *decl_file == self.current_file);
+                if declared_here {
+                    let slot_types: Vec<Option<TypeId>> = self
+                        .method_param_type_names
+                        .get(&format!("{bare_owner}.{method}"))
+                        .map(|names| names.iter().map(|n| n.as_deref().and_then(|n| self.module.types.lookup(n))).collect())
+                        .unwrap_or_default();
+                    for (i, (arg, pty)) in hir_args.iter().zip(slot_types.iter()).enumerate() {
+                        if let Some(pty) = pty {
+                            self.reject_callable_for_enum_slot(
+                                *pty,
+                                arg,
+                                &format!("argument {} of `{bare_owner}.{method}`", i + 1),
+                            )?;
+                        }
+                    }
+                }
+            }
+        }
+
         // Look up return type from module functions
         let recv_ty = receiver_hir.ty;
         let return_ty = tuple_get_return_ty.unwrap_or_else(|| self.lookup_method_return_type(recv_ty, method));

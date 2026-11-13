@@ -2021,6 +2021,11 @@ main = classify(0) + 10 * classify(5) + 100 * classify(42) + 1000 * classify(100
     // an enum value) used to bind the first variant-spelled arm (`case I8:`)
     // as an irrefutable binding, so the match silently answered with arm 1.
     // It must fail loudly and name the value's runtime kind instead.
+    //
+    // The fixtures pass the value through an UNTYPED `code(k)` parameter: a
+    // `k: Kind` parameter now refuses a callable at the call boundary
+    // (`reject_callable_for_enum_param`), before the match is reached, and
+    // this suite pins the match-arm check itself.
 
     fn run_err(src: &str) -> String {
         let mut parser = Parser::new(src);
@@ -2033,7 +2038,7 @@ main = classify(0) + 10 * classify(5) + 100 * classify(42) + 1000 * classify(100
 
     #[test]
     fn match_on_constructor_value_errors_instead_of_taking_first_arm() {
-        let src = "class Vec4f:\n    x: i64\nenum Kind:\n    I8\n    F32\nfn code(k: Kind) -> i64:\n    match k:\n        case I8: 1\n        case F32: 2\n        case _: 3\nmain = code(Vec4f)\n";
+        let src = "class Vec4f:\n    x: i64\nenum Kind:\n    I8\n    F32\nfn code(k) -> i64:\n    match k:\n        case I8: 1\n        case F32: 2\n        case _: 3\nmain = code(Vec4f)\n";
         let err = run_err(src);
         assert!(err.contains("can never match it"), "wrong error: {err}");
         assert!(err.contains("constructor value"), "error must name the value kind: {err}");
@@ -2043,10 +2048,10 @@ main = classify(0) + 10 * classify(5) + 100 * classify(42) + 1000 * classify(100
     #[test]
     fn statement_and_val_match_on_constructor_value_error_too() {
         // Statement form (`exec_match_core`) and `val r = match` form.
-        let stmt = "class Vec4f:\n    x: i64\nenum Kind:\n    I8\n    F32\nfn code(k: Kind) -> i64:\n    var r = 0\n    match k:\n        case I8:\n            r = 1\n        case F32:\n            r = 2\n    r\nmain = code(Vec4f)\n";
+        let stmt = "class Vec4f:\n    x: i64\nenum Kind:\n    I8\n    F32\nfn code(k) -> i64:\n    var r = 0\n    match k:\n        case I8:\n            r = 1\n        case F32:\n            r = 2\n    r\nmain = code(Vec4f)\n";
         let err = run_err(stmt);
         assert!(err.contains("can never match it") && err.contains("constructor value"), "wrong error: {err}");
-        let val_form = "class Vec4f:\n    x: i64\nenum Kind:\n    I8\n    F32\nfn code(k: Kind) -> i64:\n    val r = match k:\n        case Kind.I8: 1\n        case _: 3\n    r\nmain = code(Vec4f)\n";
+        let val_form = "class Vec4f:\n    x: i64\nenum Kind:\n    I8\n    F32\nfn code(k) -> i64:\n    val r = match k:\n        case Kind.I8: 1\n        case _: 3\n    r\nmain = code(Vec4f)\n";
         let err = run_err(val_form);
         // The parser may lower `Kind.I8` to an unqualified variant pattern, so
         // only the variant name is asserted.
@@ -2055,13 +2060,13 @@ main = classify(0) + 10 * classify(5) + 100 * classify(42) + 1000 * classify(100
 
     #[test]
     fn earlier_binder_or_wildcard_arm_still_wins_over_callable() {
-        let src = "enum Kind:\n    I8\n    F32\nfn helper() -> i64:\n    7\nfn code(k: Kind) -> i64:\n    match k:\n        case _: 5\n        case I8: 1\nmain = code(helper)\n";
+        let src = "enum Kind:\n    I8\n    F32\nfn helper() -> i64:\n    7\nfn code(k) -> i64:\n    match k:\n        case _: 5\n        case I8: 1\nmain = code(helper)\n";
         assert_eq!(run(src), 5);
     }
 
     #[test]
     fn match_on_function_value_errors_instead_of_taking_first_arm() {
-        let src = "enum Kind:\n    I8\n    F32\nfn helper() -> i64:\n    1\nfn code(k: Kind) -> i64:\n    match k:\n        case I8: 1\n        case F32: 2\nmain = code(helper)\n";
+        let src = "enum Kind:\n    I8\n    F32\nfn helper() -> i64:\n    1\nfn code(k) -> i64:\n    match k:\n        case I8: 1\n        case F32: 2\nmain = code(helper)\n";
         let err = run_err(src);
         assert!(err.contains("can never match it"), "wrong error: {err}");
         assert!(err.contains("function value"), "error must name the value kind: {err}");
@@ -2112,5 +2117,46 @@ main = classify(0) + 10 * classify(5) + 100 * classify(42) + 1000 * classify(100
         assert!(match_arm_matches(&some_f, &ctor, &mut bindings, &enums, &classes).unwrap());
         assert!(match_arm_matches(&pattern, &Value::Int(2), &mut bindings, &enums, &classes).unwrap());
         assert!(pattern_matches(&Pattern::Identifier("Handler".to_string()), &ctor, &mut bindings, &enums, &classes).unwrap());
+    }
+
+    // JIT residual of the same bug, interpreter twin: a callable bound to a
+    // `Kind` / `Kind?` parameter is refused at the call boundary. Without it,
+    // `case Some(I8):` over a `Kind?` parameter matched a constructor silently
+    // (printed "i8", rc 0), and every non-strict JIT run that falls back to
+    // the interpreter inherited that.
+    #[test]
+    fn callable_bound_to_enum_parameter_is_refused_at_the_call() {
+        let decls = "class Vec4f:\n    x: i64\nenum Kind:\n    I8\n    F32\nfn helper() -> i64:\n    1\n";
+        for (callee, call, kind) in [
+            ("fn code(k: Kind) -> i64:\n    match k:\n        case _: 3\n", "code(Vec4f)", "constructor value"),
+            ("fn code(k: Kind) -> i64:\n    match k:\n        case _: 3\n", "code(helper)", "function value"),
+            ("fn code(k: Kind?) -> i64:\n    match k:\n        case Some(I8): 1\n        case _: 3\n", "code(Vec4f)", "constructor value"),
+            ("fn code(k: Kind) -> i64:\n    match k:\n        case _: 3\n", "code(k: Vec4f)", "constructor value"),
+        ] {
+            let err = run_err(&format!("{decls}{callee}main = {call}\n"));
+            assert!(
+                err.contains("is declared as enum `Kind`") && err.contains(kind) && err.contains("parameter 'k'"),
+                "wrong error for {call}: {err}"
+            );
+        }
+        // Typed `val` twin: `val k: Kind? = Vec4f` then `case Some(I8):`
+        // answered 1 silently.
+        let err = run_err(&format!(
+            "{decls}fn code() -> i64:\n    val k: Kind? = Vec4f\n    match k:\n        case Some(I8): 1\n        case _: 3\nmain = code()\n"
+        ));
+        assert!(
+            err.contains("binding `k`") && err.contains("is declared as enum `Kind`") && err.contains("constructor value"),
+            "wrong error for typed val: {err}"
+        );
+        // Controls: a real variant into `Kind` and `Kind?`, and a function
+        // into a fn-typed parameter, still bind.
+        let fns = "fn code(k: Kind) -> i64:\n    match k:\n        case I8: 1\n        case _: 3\nfn opt(k: Kind?) -> i64:\n    match k:\n        case _: 30\nfn apply(f: fn() -> i64) -> i64:\n    f()\n";
+        // Only "binds without error" is asserted for `code`: under this
+        // `main = expr` harness a real `Kind.I8` takes `case _:` even through
+        // an untyped parameter (pre-existing harness divergence from the CLI,
+        // recorded in the bug doc); the CLI spec pins the variant answer.
+        assert_eq!(run(&format!("{decls}{fns}main = code(Kind.F32)\n")), 3);
+        assert_eq!(run(&format!("{decls}{fns}main = opt(Kind.F32)\n")), 30);
+        assert_eq!(run(&format!("{decls}{fns}main = 100 * apply(helper)\n")), 100);
     }
 }
