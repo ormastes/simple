@@ -36,3 +36,11 @@ reproducibility fix (e.g. pinned `SOURCE_DATE_EPOCH`, deterministic
 pending to green. Impact statement stands: the native-build object cache keys
 on the compiler binary, so a rebuilt seed with unchanged source rebuilds all
 ~1540 stage2 objects (~20 min) when it could reuse them.
+
+
+---
+## 2026-11-13 triage — lane live-p3-l6 (Windows host, seed bin/simple.exe, base f790f7f266e)
+
+Concur: cargo/seed build-reproducibility is routed to the seed-fix lane (cargo
+fixes are outside P3 bug lanes); a two-build digest comparison is not a cheap
+probe for this lane. No in-lane change.

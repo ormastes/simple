@@ -115,3 +115,11 @@ DBG-1 break/resume path may legitimately return a non-exit sentinel.
 
 After the ok=false change landed (PR 8782), test/03_system/acceptance/gpu_backend_portability_acceptance_spec.spl on release/1.0.0 5221a5058a8, Linux aarch64 (DGX Spark GB10), Rust seed af717f53d6bce3e5: 5 examples, 4 passed, 1 failed, 1 skipped (metal). The Vulkan example passes; the CUDA example fails with array index out of bounds: index is 0 but length is 0, the same shape as in backends_spec (its o.records[0] read after a live CudaVmExecutor run returned no records). No consumer of VulkanVmExecutor went red from the change.
 
+
+
+---
+## 2026-11-13 triage — lane live-p3-l6 (Windows host, seed bin/simple.exe, base f790f7f266e)
+
+Concur with the 2026-11-13 fail-loud landing; row stays OPEN. The
+Linux-2x-NVIDIA same-process interference has no reproduction path on this
+Windows host. No in-lane change.

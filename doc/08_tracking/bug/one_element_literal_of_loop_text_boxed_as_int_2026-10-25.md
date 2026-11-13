@@ -30,3 +30,14 @@ Only sources ending in top-level `@attr` lines (non-empty `pending_attrs` at EOF
 
 ## Spec
 `test/01_unit/compiler/driver/native_interface_slice_trailing_attr_spec.spl` (natural shape).
+
+
+---
+## 2026-11-13 triage — lane live-p3-l6 (Windows host, seed bin/simple.exe, base f790f7f266e)
+
+Workaround confirmed present at tip
+(`src/compiler/80.driver/cache/native_interface_slice.spl:379`) and its pinning
+spec `test/01_unit/compiler/driver/native_interface_slice_trailing_attr_spec.spl`
+runs 1/1 on the seed. The compiler root fix (one-element `[attr]` literal
+int-boxing a loop text var under the Stage-2 producer) remains OPEN; verifying
+it needs the rebuilt producer. No in-lane change.

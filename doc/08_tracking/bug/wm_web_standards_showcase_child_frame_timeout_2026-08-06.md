@@ -383,3 +383,14 @@ needs the Linux display harness.**
   (Docker+Xvfb or macos-gui-run) with a current seed; expected-if-fixed per the
   2026-08-15 note. Until then the row stays OPEN with a understood-but-unverified
   state, not a hang and not a fix.
+
+
+---
+## 2026-11-13 triage — lane live-p3-l6 (Windows host, seed bin/simple.exe, base f790f7f266e)
+
+Concur with the p3-gpu-20261113 addendum: on this Windows host the example
+exits rc=2 fast at `no-gui-requested` (the headless-capture entry is
+host-gated), so the child-frame-timeout verdict can be neither reproduced nor
+cleared here. The `resolved_backend: text` structural fix is present in source,
+and the remaining interpreted-lane blocker is the separately-tracked
+`sffi_vulkan_env_get_unimported_jit_demotion_2026-11-13.md`. No in-lane change.
