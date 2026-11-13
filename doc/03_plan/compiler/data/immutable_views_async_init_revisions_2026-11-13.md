@@ -50,57 +50,85 @@ the compiler) would break, so the check lands behind a per-module opt-in /
 warning gate with the census recorded, exactly the "explicit and temporary
 migration-only warning mode" of W-plan §4.3. New-code semantics remain errors.
 
-### P1 census and gate (recorded 2026-11-13, census still running)
+### P1 census and gate (recorded 2026-11-13)
 
-**Gate as landed** (`12bce06467a`, specified in `d9faba71fd8`):
+**Gate.** It landed in #8860 (verifier `988f8ff6755`, spread fix and gate
+specs `265b8f42fb3`). The P2 review follow-ups landed in #8881 (`eb66cc8e5ed`).
 `SIMPLE_REQUIRED_INIT_CHECK` = `off` (default) | `warning` | `error`; any
-other value is `off`. `off` adds nothing, so Stage 2/3 still compile the
-existing offenders below; `warning` records `LoweringErrorKind.Recovered` rows
-(the §4.3 migration mode); `error` is the target semantics. The per-class
-opt-in is `@support_async_immutable`: on an annotated class the
-`E_ASYNC_INIT_*` codes are errors in every mode. There is no per-module
-pragma: the env is a per-invocation ratchet. If reviewers want module-scoped
-`error` before the default flip, the existing model is the
-`__module_nogc_strict` marker (`core/_ParserDecls/enum_module_body.spl:1782`
-→ `ParserModule.nogc_strict` → `HirModule.nogc_strict`).
+other value is `off`. It is read once per process; specs re-read it with
+`required_init_check_mode_reload_v1()`. `off` adds nothing, so Stage 2/3
+still compile the offenders below. `warning` records
+`LoweringErrorKind.Recovered` rows, the §4.3 migration mode. `error` is the
+target semantics. A module can opt in with `@required_init(error|warning)`:
+the marker `__module_required_init_<mode>` sets
+`ParserModule.required_init_mode`, on the `@no_gc(strict)` model, and the
+stricter of module and process mode wins. Per class,
+`@support_async_immutable` makes `E_ASYNC_INIT_*` an error in every mode. The
+gate is part of the HIR cache identity (`_hir_cache_env_switches`, only when
+not `off`), not the managed-parse identity.
 
-**Census method.** `scripts/check/census_required_field_init_spec.spl` (a
-report-only harness, committed with P1) runs the verifier standalone per file
-(`parse_full_frontend` + `HirLowering.lower_module`) under the seed runner, 4G
-cgroup, one process at a time. A textual prefilter keeps only files that
-declare a `struct`/`class` and name one of those types in a construction
-(`Name(`, `Name<`, `Name {`, `Self(`): 6,499 of 15,546 `.spl` files under
-`src/compiler`+`src/lib`+`src/app` (compiler 1,291, lib 3,509, app 1,699). It
-missed 0 of the 109 judged files in the first 200 files run unfiltered. Cost
-is ~10–22 s per candidate file. The runner kills a spec at 900 s, so chunks
-are 25 files.
+**Census method.** `scripts/check/census_required_field_init_spec.spl` is a
+report-only harness. It runs the verifier standalone on each file
+(`parse_full_frontend` + `HirLowering.lower_module`) under the seed runner,
+with a 4G cgroup and one process at a time. A textual prefilter keeps the
+files that both declare a `struct`/`class` and name one of those types in a
+construction (`Name(`, `Name<`, `Name {`, `Self(`). That leaves 6,499 of
+15,546 `.spl` files: compiler 1,291, lib 3,509, app 1,699. The prefilter
+missed 0 of the 109 judged files among the first 200 files, which were run
+unfiltered. Cost is ~5–20 s per file. The runner kills a spec after 900 s,
+so chunks hold 25 files. The verifier was pinned at `2ad3be3f250` (the lane
+tip before #8860; same verifier as `265b8f42fb3`), so P2 item 2's
+named/positional mapping fix is not reflected. A site that mixes positional
+and named arguments may be over-counted.
 
-**Figures at 14:30 KST** (366 `src/compiler` files, about 28% of compiler
-candidates; `src/lib` and `src/app` not reached yet): 13 rows, 6 sites,
-4 classes, all `E_ATTR_REQUIRED_UNINIT`. Every site omits a `bool` field and
-relies on the zero-fill `false`. In three classes it is the `has_<f>` flag
-of a `# DESUGARED` optional pair (`has_<f>: bool` + `<f>: T`). In the
-fourth, `AwaitChecker`, it is a plain accumulator built as `AwaitChecker()`.
-`MatchContext` (`00.common/predicate.spl:90`, 6 rows),
-`PromiseTypeInfo` (`30.types/type_system/effects.spl:89,93`, 4),
-`StateVariant` (`10.frontend/desugar/state_enum.spl:96,109`, 2),
-`AwaitChecker` (`10.frontend/desugar/suspension_analysis.spl:521`, 1). The
-census is non-zero, so the default stays `off`. Order of the rest:
-remaining compiler files, then a seeded 200-file sample each from lib and
-app, then the rest of lib and app.
+**Figures (final for these scopes, 19:19 KST).**
 
-**Verifier false positive found and fixed.** Chunk 000 reported 6 rows at
-`00.common/cache_contract/aspect_match_shard_v1.spl:190`. That site is a
+| Scope | Files censused | Rows | Sites | Classes |
+|---|---|---|---|---|
+| `src/compiler`, every prefiltered candidate | 1,291 of 1,291 (4 parse-failed) | 146 | 58 | 26 |
+| `src/lib`, seeded random 200 of 3,509 candidates | 200 | 1 | 1 | 1 |
+| `src/app`, seeded random 200 of 1,699 candidates | 200 | 0 | 0 | 0 |
+| everything censused (incl. 35 extra lib files) | 1,816 | 149 | 61 | 29 |
+
+All 149 rows are `E_ATTR_REQUIRED_UNINIT`. No `@support_async_immutable`
+class exists yet, so there are no `E_ASYNC_INIT_*` rows. 130 rows come from
+one pattern: a `# DESUGARED` optional pair (`has_<f>: bool` + `<f>: T`) left
+out of the construction, so the run relies on zero-fill. Largest are
+`TypeInfo` (`99.loader/loader/compiler_sffi.spl`, 31), `BorrowError`
+(`55.borrow/borrow_check/borrow_graph.spl`, 18), `LifetimeConstraint`
+(`55.borrow/borrow_check/lifetime.spl`, 12), `HygieneScope` (9) and
+`MacroContractResult` (8). The other 19 rows are 9 classes that omit plain
+fields:
+- `LlvmBackend` (8)
+- `BlockBuilder` private `_completer`/`_highlighter`/`_hover` (3)
+- `TensorSuffix` (2)
+- `MaybeUninit.value` (`src/lib/nogc_sync_mut/unsafe/maybe_uninit.spl`)
+- the two `DataLoaderIterator.done` rows (`src/lib/gc_async_mut/pure/data/dataloader.spl`)
+- `JitExecutionEngine`
+- `LoaderInstantiationRecord`
+- `ThreePayloadObjectReadEvidenceV1`
+
+The lib/app rate is about 1 row per 400 candidate files, against 146 in the
+1,291 compiler files: the debt is concentrated in compiler `# DESUGARED`
+code. The census is non-zero, so the default stays `off`. Migration
+candidates are the DESUGARED optional pairs, which want a real `T?` or field
+defaults, and `@required_init(warning)` per module.
+
+**Verifier false positive found and fixed.** The first chunk reported 6 rows
+at `00.common/cache_contract/aspect_match_shard_v1.spl:190`. That site is a
 struct update `T(..f, facts_key: …)`. The spread arrives as
 `Range(None, Some(base))` and was being counted as a positional argument.
-Fixed in `d9faba71fd8` using MIR's `struct_construct_spread_base` shape, and
-those rows are excluded from the figures above.
+The fix (`265b8f42fb3`) uses MIR's `struct_construct_spread_base` shape, and
+those rows are excluded above.
 
-**Limits.** Standalone lowering does not resolve imports. A construction of
-an imported type therefore has no symbol: it is neither judged nor counted,
-so `sites_unjudged = 0` under-states cross-module sites. Imported layouts
-also carry `has_default = false`. The census covers same-module
-constructions only.
+**Limits.**
+- Standalone lowering does not resolve imports. A construction of an
+  imported type therefore has no symbol: it is neither judged nor counted, so
+  `sites_unjudged = 0` under-states cross-module sites.
+- Imported layouts also carry `has_default = false`.
+- The census covers same-module constructions only.
+- lib and app are sampled, not exhaustive. The runner continues over the
+  rest serially.
 
 ### Grammar status
 
