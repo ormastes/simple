@@ -66,7 +66,11 @@ fn provider_refuses_an_import_no_table_or_process_symbol_backs() {
             0,
             "an unresolvable import must be refused at declaration, not abort the host at finalize"
         );
-        assert_eq!(rt_cranelift_finalize_module(module), 0, "the refusal latches the module");
+        assert_eq!(
+            rt_cranelift_finalize_module(module),
+            0,
+            "the refusal latches the module"
+        );
         rt_cranelift_free_module(module);
     }
 }
@@ -93,7 +97,10 @@ fn provider_links_and_calls_registered_runtime_symbols() {
     unsafe {
         // finalize is only safe to reach once the provider fails closed on a miss.
         let guard = jit_module("jit_rt_guard");
-        assert_eq!(declare_import(guard, MISSING_SYMBOL, signature(&[], Some(CL_TYPE_I64))), 0);
+        assert_eq!(
+            declare_import(guard, MISSING_SYMBOL, signature(&[], Some(CL_TYPE_I64))),
+            0
+        );
         rt_cranelift_free_module(guard);
 
         let module = jit_module("jit_rt_link");
@@ -117,7 +124,10 @@ fn provider_links_and_calls_registered_runtime_symbols() {
             .unwrap()
             .as_micros() as i64;
         let jit_now = function();
-        assert!(jit_now >= before && jit_now - before < 60_000_000, "jit={jit_now} host={before}");
+        assert!(
+            jit_now >= before && jit_now - before < 60_000_000,
+            "jit={jit_now} host={before}"
+        );
         rt_cranelift_free_module(module);
     }
 }
@@ -139,10 +149,22 @@ fn provider_registers_the_seed_jit_runtime_symbol_table() {
         .iter()
         .filter(|(name, _)| super::super::runtime_sffi::spec_for_target(&host, name).is_some())
         .count();
-    eprintln!("jit provider runtime symbols: registered={} linkable_with_spec={linkable}", registered.len());
+    eprintln!(
+        "jit provider runtime symbols: registered={} linkable_with_spec={linkable}",
+        registered.len()
+    );
     assert!(linkable > 0);
-    for name in ["rt_getpid", "rt_time_now_unix_micros", "rt_string_new_literal", "rt_string_len", "rt_file_size"] {
-        assert!(matches!(jit_runtime_import_spec(name), Some(Some(_))), "{name} must be registered with a spec");
+    for name in [
+        "rt_getpid",
+        "rt_time_now_unix_micros",
+        "rt_string_new_literal",
+        "rt_string_len",
+        "rt_file_size",
+    ] {
+        assert!(
+            matches!(jit_runtime_import_spec(name), Some(Some(_))),
+            "{name} must be registered with a spec"
+        );
     }
     assert!(jit_runtime_import_spec(MISSING_SYMBOL).is_none());
 }
@@ -155,7 +177,13 @@ fn runtime_table_import_linkage_never_binds_a_process_symbol() {
         let sig = signature(&[], Some(CL_TYPE_I32));
         let name = "getpid";
         assert_eq!(
-            rt_cranelift_declare_function(module, name.as_ptr() as i64, name.len() as i64, sig, CRANELIFT_LINKAGE_RUNTIME_IMPORT),
+            rt_cranelift_declare_function(
+                module,
+                name.as_ptr() as i64,
+                name.len() as i64,
+                sig,
+                CRANELIFT_LINKAGE_RUNTIME_IMPORT
+            ),
             0
         );
         rt_cranelift_free_module(module);
@@ -163,12 +191,29 @@ fn runtime_table_import_linkage_never_binds_a_process_symbol() {
         let module = jit_module("jit_rt_only_ok");
         let sig = signature(&[], Some(CL_TYPE_I64));
         let name = "rt_getpid";
-        assert!(rt_cranelift_declare_function(module, name.as_ptr() as i64, name.len() as i64, sig, CRANELIFT_LINKAGE_RUNTIME_IMPORT) > 0);
+        assert!(
+            rt_cranelift_declare_function(
+                module,
+                name.as_ptr() as i64,
+                name.len() as i64,
+                sig,
+                CRANELIFT_LINKAGE_RUNTIME_IMPORT
+            ) > 0
+        );
         rt_cranelift_free_module(module);
 
         let aot = rt_cranelift_new_aot_module(b"aot_rt_only".as_ptr() as i64, 11, HOST_TARGET);
         let sig = signature(&[], Some(CL_TYPE_I64));
-        assert_eq!(rt_cranelift_declare_function(aot, name.as_ptr() as i64, name.len() as i64, sig, CRANELIFT_LINKAGE_RUNTIME_IMPORT), 0);
+        assert_eq!(
+            rt_cranelift_declare_function(
+                aot,
+                name.as_ptr() as i64,
+                name.len() as i64,
+                sig,
+                CRANELIFT_LINKAGE_RUNTIME_IMPORT
+            ),
+            0
+        );
         rt_cranelift_free_module(aot);
     }
 }

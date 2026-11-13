@@ -200,3 +200,21 @@ Results:
 - A native pure-Simple binary has no JIT at all: `rt_cranelift_*` is a trapping
   stub (`src/runtime/runtime_cranelift_bridge_stub.c`). Everything here was
   verified hosted by the Rust seed (tier T0, aarch64 Linux).
+- Review limits (Opus, P2, recorded rather than fixed):
+  - On macOS arm64, `rt_cranelift_new_signature(-1)` is SystemV while the JIT
+    ISA default is AppleAarch64. Every runtime-table import is therefore
+    refused there, which is fail-safe. The seed test
+    `provider_links_and_calls_registered_runtime_symbols` would fail on that host.
+  - `RuntimeFuncSpec::build_signature` emits `I8` parameters without `uext`,
+    so a Rust `bool` parameter is admitted under-extended. The seed JIT has the
+    same gap. The pure-Simple lowering mostly declares all-`i64`.
+  - Finalize's pre-check covers imports only. A declared Export/Local
+    function that is never defined still panics in `finalize_definitions`.
+    `cranelift_jit_run_main` stops before finalize on a function failure.
+    Other callers (`CodegenPipeline.jit`, SMF) do not.
+  - With `SIMPLE_RUNTIME_LOAD=dynamic`/`SIMPLE_RUNTIME_PATH`, JIT code calls a
+    separately loaded runtime copy whose global state differs from the
+    interpreter's. This is the same as the seed JIT. The default is static.
+  - The I/O parity case passes (ptr, len) by hand. Real MIR for an
+    `extern fn rt_file_size(path: text)` call passes one boxed text, which the
+    provider refuses on arity.
