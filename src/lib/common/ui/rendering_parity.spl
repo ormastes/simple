@@ -1,0 +1,624 @@
+# Unified rendering parity contracts, pixel normalization and comparator.
+#
+# Plan: doc/03_plan/ui/rendering/unified_rendering_qualification_plan_2026-11-13.md section 5.
+# Pure data and arithmetic only: no I/O, no backend calls. Adapters (Simple Web,
+# Engine2D, Chromium, Skia) produce RenderingStageRecord / BackendEvidence /
+# straight RGBA8 buffers and hand them to the functions here.
+#
+# Comparator rules (plan 5.1): never translates, resizes or aligns images; a
+# blank actual frame never passes against a non-blank expectation; tolerance
+# policies are only legal when scoped to a fixture ("fixture:<id>").
+
+use common.ui.pixel_diff_core.{argb_channel_max_delta, argb_alpha_delta}
+
+val RENDERING_PARITY_SCHEMA_VERSION: text = "rendering-parity-v1"
+
+val PIXEL_FORMAT_ARGB_U32: text = "argb-u32"
+val PIXEL_FORMAT_RGBA8: text = "rgba8"
+val PIXEL_FORMAT_BGRA8: text = "bgra8"
+val PIXEL_ALPHA_STRAIGHT: text = "straight"
+val PIXEL_ALPHA_PREMULTIPLIED: text = "premultiplied"
+val PIXEL_ORIGIN_TOP_LEFT: text = "top-left"
+val PIXEL_ORIGIN_BOTTOM_LEFT: text = "bottom-left"
+val PIXEL_COLOR_SPACE_SRGB: text = "srgb"
+
+val RENDER_COMPARE_EXACT: text = "exact"
+val RENDER_COMPARE_CHANNEL_TOLERANCE: text = "channel-tolerance"
+
+val RENDERING_STAGE_POLICY_ID: text = "semantic-stage-exact"
+
+# ---------------------------------------------------------------- contracts
+
+struct RenderingFixture:
+    schema_version: text
+    case_id: text
+    component: text
+    input_kind: text
+    source: text
+    resource_hash: text
+    config_hash: text
+    width: i64
+    height: i64
+    dpr_milli: i64
+    color_space: text
+    font_manifest_hash: text
+    locale: text
+    timezone: text
+    seed: i64
+    state: text
+    features: [text]
+    required_rows: [text]
+    tolerance_policy: text
+    frame_count: i64
+
+fn _nonempty(s: text) -> bool:
+    s.len() > 0
+
+fn rendering_fixture(case_id: text, component: text, input_kind: text, source: text, width: i64, height: i64) -> Result<RenderingFixture, text>:
+    if not _nonempty(case_id):
+        return Err("rendering fixture: case_id is empty")
+    if not _nonempty(component):
+        return Err("rendering fixture: component is empty")
+    if not _nonempty(input_kind):
+        return Err("rendering fixture: input_kind is empty")
+    if width <= 0 or height <= 0:
+        return Err("rendering fixture: non-positive viewport")
+    Ok(RenderingFixture(
+        schema_version: RENDERING_PARITY_SCHEMA_VERSION, case_id: case_id, component: component,
+        input_kind: input_kind, source: source, resource_hash: "", config_hash: "",
+        width: width, height: height, dpr_milli: 1000, color_space: PIXEL_COLOR_SPACE_SRGB,
+        font_manifest_hash: "", locale: "", timezone: "", seed: 0, state: "",
+        features: [], required_rows: [], tolerance_policy: RENDER_COMPARE_EXACT, frame_count: 1))
+
+# Deterministic fixture: every environment input that can change pixels is pinned.
+fn rendering_fixture_v1(case_id: text, component: text, input_kind: text, source: text, resource_hash: text, config_hash: text, width: i64, height: i64, dpr_milli: i64, color_space: text, font_manifest_hash: text, locale: text, timezone: text, seed: i64, state: text, features: [text], required_rows: [text], tolerance_policy: text, frame_count: i64) -> Result<RenderingFixture, text>:
+    if not _nonempty(case_id) or not _nonempty(component) or not _nonempty(input_kind):
+        return Err("rendering fixture v1: identity field is empty")
+    if not _nonempty(source):
+        return Err("rendering fixture v1: source is empty")
+    if not _nonempty(resource_hash) or not _nonempty(config_hash) or not _nonempty(font_manifest_hash):
+        return Err("rendering fixture v1: resource/config/font hash is empty")
+    if width <= 0 or height <= 0 or dpr_milli <= 0 or frame_count <= 0:
+        return Err("rendering fixture v1: non-positive viewport, dpr or frame count")
+    if color_space != PIXEL_COLOR_SPACE_SRGB:
+        return Err("rendering fixture v1: unsupported color space " + color_space)
+    if not _nonempty(locale) or not _nonempty(timezone) or not _nonempty(state):
+        return Err("rendering fixture v1: locale, timezone or state is empty")
+    if required_rows.len() == 0:
+        return Err("rendering fixture v1: no required rows")
+    if not _nonempty(tolerance_policy):
+        return Err("rendering fixture v1: tolerance policy is empty")
+    Ok(RenderingFixture(
+        schema_version: RENDERING_PARITY_SCHEMA_VERSION, case_id: case_id, component: component,
+        input_kind: input_kind, source: source, resource_hash: resource_hash, config_hash: config_hash,
+        width: width, height: height, dpr_milli: dpr_milli, color_space: color_space,
+        font_manifest_hash: font_manifest_hash, locale: locale, timezone: timezone, seed: seed,
+        state: state, features: features, required_rows: required_rows,
+        tolerance_policy: tolerance_policy, frame_count: frame_count))
+
+struct RenderingStageRecord:
+    case_id: text
+    backend: text
+    stage: text
+    ordinal: i64
+    root: text
+    payload: text
+    input_checksum: u64
+    output_checksum: u64
+    converter: text
+    converter_version: i64
+    degraded: bool
+    fallback_used: bool
+
+fn rendering_stage_record(case_id: text, stage: text, backend: text, input_checksum: u64, output_checksum: u64) -> Result<RenderingStageRecord, text>:
+    if not _nonempty(case_id) or not _nonempty(stage) or not _nonempty(backend):
+        return Err("stage record: case_id, stage or backend is empty")
+    Ok(RenderingStageRecord(
+        case_id: case_id, backend: backend, stage: stage, ordinal: 0, root: "", payload: "",
+        input_checksum: input_checksum, output_checksum: output_checksum,
+        converter: "", converter_version: 0, degraded: false, fallback_used: false))
+
+fn rendering_stage_record_v1(case_id: text, backend: text, stage: text, ordinal: i64, root: text, payload: text, input_checksum: u64, output_checksum: u64, converter: text, converter_version: i64, degraded: bool, fallback_used: bool) -> Result<RenderingStageRecord, text>:
+    if not _nonempty(case_id) or not _nonempty(stage) or not _nonempty(backend):
+        return Err("stage record v1: case_id, stage or backend is empty")
+    if ordinal < 0:
+        return Err("stage record v1: negative ordinal")
+    if not _nonempty(converter) or converter_version <= 0:
+        return Err("stage record v1: converter identity is missing")
+    Ok(RenderingStageRecord(
+        case_id: case_id, backend: backend, stage: stage, ordinal: ordinal, root: root, payload: payload,
+        input_checksum: input_checksum, output_checksum: output_checksum,
+        converter: converter, converter_version: converter_version,
+        degraded: degraded, fallback_used: fallback_used))
+
+fn _stage_rank(stage: text) -> i64:
+    if stage == "dom":
+        return 0
+    if stage == "style":
+        return 1
+    if stage == "layout":
+        return 2
+    if stage == "paint":
+        return 3
+    if stage == "raster":
+        return 4
+    if stage == "composite":
+        return 5
+    if stage == "present":
+        return 6
+    -1
+
+# Stages must be contiguous from ordinal 0, in canonical pipeline order, and each
+# stage must consume the previous stage's output checksum.
+fn rendering_stage_records_valid_order(records: [RenderingStageRecord]) -> bool:
+    var i = 0
+    var prev_rank = -1
+    while i < records.len():  # cpu-lane-loop-ok: one iteration per stage record
+        val r = records[i]
+        val rank = _stage_rank(r.stage)
+        if rank < 0 or rank <= prev_rank or r.ordinal != i:
+            return false
+        if i > 0 and r.input_checksum != records[i - 1].output_checksum:
+            return false
+        prev_rank = rank
+        i = i + 1
+    records.len() > 0
+
+struct BackendEvidence:
+    case_id: text
+    backend: text
+    api: text
+    required: bool
+    run_id: text
+    revision_id: text
+    driver_id: text
+    device_id: text
+    readback_id: text
+    width: i64
+    height: i64
+    pixel_format: text
+    generation: i64
+    fallback_count: i64
+    physical_gpu: bool
+    software_fallback: bool
+    cpu_fallback: bool
+    simulated: bool
+    fallback_reason: text
+    started_at: i64
+    finished_at: i64
+    status: text
+    reason: text
+
+fn _status_valid(status: text) -> bool:
+    status == "pass" or status == "fail" or status == "skip"
+
+fn backend_evidence(case_id: text, backend: text, api: text, required: bool, status: text, reason: text) -> Result<BackendEvidence, text>:
+    if not _nonempty(case_id) or not _nonempty(backend) or not _nonempty(api):
+        return Err("backend evidence: case_id, backend or api is empty")
+    if not _status_valid(status):
+        return Err("backend evidence: unknown status " + status)
+    if status != "pass" and not _nonempty(reason):
+        return Err("backend evidence: " + status + " requires a reason")
+    Ok(BackendEvidence(
+        case_id: case_id, backend: backend, api: api, required: required, run_id: "", revision_id: "",
+        driver_id: "", device_id: "", readback_id: "", width: 0, height: 0, pixel_format: "",
+        generation: 0, fallback_count: 0, physical_gpu: false, software_fallback: false,
+        cpu_fallback: false, simulated: false, fallback_reason: "", started_at: 0, finished_at: 0,
+        status: status, reason: reason))
+
+fn backend_evidence_v1(case_id: text, backend: text, api: text, run_id: text, revision_id: text, driver_id: text, device_id: text, readback_id: text, width: i64, height: i64, pixel_format: text, generation: i64, fallback_count: i64, physical_gpu: bool, software_fallback: bool, cpu_fallback: bool, simulated: bool, fallback_reason: text, started_at: i64, finished_at: i64, status: text, reason: text) -> Result<BackendEvidence, text>:
+    if not _nonempty(case_id) or not _nonempty(backend) or not _nonempty(api):
+        return Err("backend evidence v1: case_id, backend or api is empty")
+    if not _status_valid(status):
+        return Err("backend evidence v1: unknown status " + status)
+    if status != "pass" and not _nonempty(reason):
+        return Err("backend evidence v1: " + status + " requires a reason")
+    if not _nonempty(run_id) or not _nonempty(revision_id):
+        return Err("backend evidence v1: run or revision identity is empty")
+    if width <= 0 or height <= 0 or finished_at < started_at:
+        return Err("backend evidence v1: invalid size or timestamps")
+    if physical_gpu:
+        if software_fallback or cpu_fallback or simulated or fallback_count > 0:
+            return Err("backend evidence v1: physical GPU claim contradicts a fallback flag")
+        if api != backend:
+            return Err("backend evidence v1: physical GPU claim with api " + api + " on backend " + backend)
+        if not _nonempty(driver_id) or not _nonempty(device_id) or not _nonempty(readback_id):
+            return Err("backend evidence v1: physical GPU claim lacks driver/device/readback identity")
+    Ok(BackendEvidence(
+        case_id: case_id, backend: backend, api: api, required: true, run_id: run_id,
+        revision_id: revision_id, driver_id: driver_id, device_id: device_id, readback_id: readback_id,
+        width: width, height: height, pixel_format: pixel_format, generation: generation,
+        fallback_count: fallback_count, physical_gpu: physical_gpu, software_fallback: software_fallback,
+        cpu_fallback: cpu_fallback, simulated: simulated, fallback_reason: fallback_reason,
+        started_at: started_at, finished_at: finished_at, status: status, reason: reason))
+
+# A pass counts as real GPU execution only when nothing fell back and the
+# device readback is identified.
+fn backend_evidence_truthful_physical_gpu(e: BackendEvidence) -> bool:
+    e.status == "pass" and e.physical_gpu and not e.software_fallback and not e.cpu_fallback and not e.simulated and e.fallback_count == 0 and not _nonempty(e.fallback_reason) and _nonempty(e.device_id) and _nonempty(e.readback_id)
+
+# Two receipts are independent executions only with different runs and readbacks.
+fn backend_evidence_distinct_execution(a: BackendEvidence, b: BackendEvidence) -> bool:
+    _nonempty(a.run_id) and _nonempty(b.run_id) and a.run_id != b.run_id and _nonempty(a.readback_id) and _nonempty(b.readback_id) and a.readback_id != b.readback_id
+
+# ------------------------------------------------------------- diagnostics
+
+struct RenderDiagnostic:
+    mismatch_count: i64
+    min_x: i64
+    min_y: i64
+    max_x: i64
+    max_y: i64
+    max_channel_delta: i64
+    expected_summary: text
+    actual_summary: text
+    expected_evidence_path: text
+    actual_evidence_path: text
+    diff_path: text
+    reproduction_command: text
+
+fn _empty_diagnostic() -> RenderDiagnostic:
+    RenderDiagnostic(
+        mismatch_count: 0, min_x: -1, min_y: -1, max_x: -1, max_y: -1, max_channel_delta: 0,
+        expected_summary: "", actual_summary: "", expected_evidence_path: "", actual_evidence_path: "",
+        diff_path: "", reproduction_command: "")
+
+struct RenderComparison:
+    equal: bool
+    status: text
+    policy_id: text
+    compare_policy: text
+    expected_lane: text
+    actual_lane: text
+    first_divergent_stage: text
+    max_differing_pixels: i64
+    max_channel_delta_allowed: i64
+    blank_actual: bool
+    diagnostic: RenderDiagnostic
+
+fn _stage_summary(r: RenderingStageRecord) -> text:
+    r.stage + "[" + r.ordinal.to_string() + "]:" + r.root + ":" + r.payload
+
+# Exact semantic comparison; reports the first stage whose payload diverges.
+fn compare_rendering_stages(expected: [RenderingStageRecord], actual: [RenderingStageRecord], expected_lane: text, actual_lane: text) -> Result<RenderComparison, text>:
+    if expected.len() == 0 or actual.len() == 0:
+        return Err("stage comparison: empty stage list")
+    var n = expected.len()
+    if actual.len() > n:
+        n = actual.len()
+    var i = 0
+    while i < n:  # cpu-lane-loop-ok: one iteration per stage
+        var diverged = false
+        var stage = ""
+        var exp_sum = "<missing>"
+        var act_sum = "<missing>"
+        if i >= expected.len():
+            diverged = true
+            stage = actual[i].stage
+            act_sum = _stage_summary(actual[i])
+        else if i >= actual.len():
+            diverged = true
+            stage = expected[i].stage
+            exp_sum = _stage_summary(expected[i])
+        else:
+            val e = expected[i]
+            val a = actual[i]
+            exp_sum = _stage_summary(e)
+            act_sum = _stage_summary(a)
+            if e.stage != a.stage or e.ordinal != a.ordinal or e.root != a.root or e.payload != a.payload:
+                diverged = true
+                stage = e.stage
+        if diverged:
+            var diag = _empty_diagnostic()
+            diag.expected_summary = exp_sum
+            diag.actual_summary = act_sum
+            return Ok(RenderComparison(
+                equal: false, status: "divergent", policy_id: RENDERING_STAGE_POLICY_ID,
+                compare_policy: RENDER_COMPARE_EXACT, expected_lane: expected_lane, actual_lane: actual_lane,
+                first_divergent_stage: stage, max_differing_pixels: 0, max_channel_delta_allowed: 0,
+                blank_actual: false, diagnostic: diag))
+        i = i + 1
+    Ok(RenderComparison(
+        equal: true, status: "exact", policy_id: RENDERING_STAGE_POLICY_ID,
+        compare_policy: RENDER_COMPARE_EXACT, expected_lane: expected_lane, actual_lane: actual_lane,
+        first_divergent_stage: "", max_differing_pixels: 0, max_channel_delta_allowed: 0,
+        blank_actual: false, diagnostic: _empty_diagnostic()))
+
+# ------------------------------------------------------------ pixel formats
+
+struct PixelFormatDescriptor:
+    format: text
+    alpha_mode: text
+    origin: text
+    color_space: text
+    stride_bytes: i64
+
+fn _descriptor_error(d: PixelFormatDescriptor, width: i64) -> text:
+    if d.format != PIXEL_FORMAT_ARGB_U32 and d.format != PIXEL_FORMAT_RGBA8 and d.format != PIXEL_FORMAT_BGRA8:
+        return "unsupported pixel format " + d.format
+    if d.alpha_mode != PIXEL_ALPHA_STRAIGHT and d.alpha_mode != PIXEL_ALPHA_PREMULTIPLIED:
+        return "unsupported alpha mode " + d.alpha_mode
+    if d.origin != PIXEL_ORIGIN_TOP_LEFT and d.origin != PIXEL_ORIGIN_BOTTOM_LEFT:
+        return "unsupported origin " + d.origin
+    if d.color_space != PIXEL_COLOR_SPACE_SRGB:
+        return "unsupported color space " + d.color_space
+    if width <= 0:
+        return "non-positive width"
+    if d.stride_bytes % 4 != 0 or d.stride_bytes < width * 4:
+        return "stride " + d.stride_bytes.to_string() + " is not a 4-byte multiple covering width " + width.to_string()
+    ""
+
+fn pixel_format_descriptor(format: text, alpha_mode: text, origin: text, color_space: text, stride_bytes: i64, width: i64) -> Result<PixelFormatDescriptor, text>:
+    val d = PixelFormatDescriptor(format: format, alpha_mode: alpha_mode, origin: origin, color_space: color_space, stride_bytes: stride_bytes)
+    val err = _descriptor_error(d, width)
+    if _nonempty(err):
+        return Err(err)
+    Ok(d)
+
+fn _unpremultiply(c: i64, a: i64) -> i64:
+    if a == 0:
+        return 0
+    if a == 255:
+        return c
+    val v = (c * 255 + a / 2) / a
+    if v > 255: 255 else: v
+
+fn _push_straight(out: [u8], r: i64, g: i64, b: i64, a: i64, premultiplied: bool) -> [u8]:
+    var o = out
+    if premultiplied:
+        o.push(_unpremultiply(r, a) as u8)
+        o.push(_unpremultiply(g, a) as u8)
+        o.push(_unpremultiply(b, a) as u8)
+    else:
+        o.push(r as u8)
+        o.push(g as u8)
+        o.push(b as u8)
+    o.push(a as u8)
+    o
+
+fn _source_row(y: i64, height: i64, d: PixelFormatDescriptor) -> i64:
+    if d.origin == PIXEL_ORIGIN_BOTTOM_LEFT: height - 1 - y else: y
+
+# ARGB u32 words (row stride from the descriptor) to top-left straight RGBA8.
+fn argb_u32_to_straight_rgba8(words: [u32], width: i64, height: i64, d: PixelFormatDescriptor) -> Result<[u8], text>:
+    val err = _descriptor_error(d, width)
+    if _nonempty(err):
+        return Err(err)
+    if d.format != PIXEL_FORMAT_ARGB_U32:
+        return Err("argb conversion requires format argb-u32, got " + d.format)
+    if height <= 0:
+        return Err("non-positive height")
+    val row_words = d.stride_bytes / 4
+    if words.len() < row_words * (height - 1) + width:
+        return Err("argb buffer too short: " + words.len().to_string() + " words")
+    val premul = d.alpha_mode == PIXEL_ALPHA_PREMULTIPLIED
+    var out: [u8] = []
+    var y: i64 = 0
+    while y < height:  # cpu-lane-loop-ok: one iteration per row
+        val base = _source_row(y, height, d) * row_words
+        var x: i64 = 0
+        while x < width:  # cpu-lane-loop-ok: one iteration per pixel
+            val w = words[base + x]
+            out = _push_straight(out, ((w >> 16u32) & 0xFFu32) as i64, ((w >> 8u32) & 0xFFu32) as i64, (w & 0xFFu32) as i64, ((w >> 24u32) & 0xFFu32) as i64, premul)
+            x = x + 1
+        y = y + 1
+    Ok(out)
+
+# RGBA8 / BGRA8 bytes (row padding, origin, alpha mode) to top-left straight RGBA8.
+fn byte_pixels_to_straight_rgba8(bytes: [u8], width: i64, height: i64, d: PixelFormatDescriptor) -> Result<[u8], text>:
+    val err = _descriptor_error(d, width)
+    if _nonempty(err):
+        return Err(err)
+    if d.format != PIXEL_FORMAT_RGBA8 and d.format != PIXEL_FORMAT_BGRA8:
+        return Err("byte conversion requires rgba8 or bgra8, got " + d.format)
+    if height <= 0:
+        return Err("non-positive height")
+    if bytes.len() < d.stride_bytes * (height - 1) + width * 4:
+        return Err("pixel buffer too short: " + bytes.len().to_string() + " bytes")
+    val premul = d.alpha_mode == PIXEL_ALPHA_PREMULTIPLIED
+    val bgra = d.format == PIXEL_FORMAT_BGRA8
+    var out: [u8] = []
+    var y: i64 = 0
+    while y < height:  # cpu-lane-loop-ok: one iteration per row
+        val base = _source_row(y, height, d) * d.stride_bytes
+        var x: i64 = 0
+        while x < width:  # cpu-lane-loop-ok: one iteration per pixel
+            val o = base + x * 4
+            val c0 = bytes[o] as i64
+            val c1 = bytes[o + 1] as i64
+            val c2 = bytes[o + 2] as i64
+            val a = bytes[o + 3] as i64
+            if bgra:
+                out = _push_straight(out, c2, c1, c0, a, premul)
+            else:
+                out = _push_straight(out, c0, c1, c2, a, premul)
+            x = x + 1
+        y = y + 1
+    Ok(out)
+
+# --------------------------------------------------------------- checksums
+
+# Two independent 32-bit modular lanes combined into a u64; stays inside u64
+# (no wraparound) so interpreter and native agree.
+fn stable_bytes_checksum(bytes: [u8]) -> u64:
+    var h1: u64 = 2166136261u64
+    var h2: u64 = 5381u64
+    var i = 0
+    while i < bytes.len():  # cpu-lane-loop-ok: one iteration per byte
+        val b = (bytes[i] as u64) + 1u64
+        h1 = ((h1 + b) * 16777619u64) % 4294967291u64
+        h2 = ((h2 + b) * 40503u64) % 4294967279u64
+        i = i + 1
+    (h1 << 32u64) | h2
+
+struct CanonicalRenderOutput:
+    case_id: text
+    backend: text
+    width: i64
+    height: i64
+    rgba: [u8]
+    checksum: u64
+
+fn canonical_render_output(case_id: text, backend: text, width: i64, height: i64, rgba: [u8], checksum: u64) -> Result<CanonicalRenderOutput, text>:
+    if not _nonempty(case_id) or not _nonempty(backend):
+        return Err("canonical output: case_id or backend is empty")
+    if width <= 0 or height <= 0:
+        return Err("canonical output: non-positive size")
+    if rgba.len() != width * height * 4:
+        return Err("canonical output: expected " + (width * height * 4).to_string() + " bytes, got " + rgba.len().to_string())
+    if stable_bytes_checksum(rgba) != checksum:
+        return Err("canonical output: checksum does not match pixel data")
+    Ok(CanonicalRenderOutput(case_id: case_id, backend: backend, width: width, height: height, rgba: rgba, checksum: checksum))
+
+fn _is_sentinel_color(r: u8, g: u8, b: u8) -> bool:
+    val lo = r == 0u8 and g == 0u8 and b == 0u8
+    val hi = r == 255u8 and g == 255u8 and b == 255u8
+    val magenta = r == 255u8 and g == 0u8 and b == 255u8
+    lo or hi or magenta
+
+# True when at least one visible pixel is not a sentinel fill color, or when
+# visible pixels use more than one distinct color.
+fn rgba8_has_visible_diversity(rgba: [u8]) -> bool:
+    var first_r = 0u8
+    var first_g = 0u8
+    var first_b = 0u8
+    var seen = false
+    var i = 0
+    while i + 3 < rgba.len():  # cpu-lane-loop-ok: one iteration per pixel
+        if rgba[i + 3] != 0u8:
+            val r = rgba[i]
+            val g = rgba[i + 1]
+            val b = rgba[i + 2]
+            if not _is_sentinel_color(r, g, b):
+                return true
+            if not seen:
+                seen = true
+                first_r = r
+                first_g = g
+                first_b = b
+            else if r != first_r or g != first_g or b != first_b:
+                return true
+        i = i + 4
+    false
+
+# Blank: fully transparent, or a single flat black/white/magenta fill.
+fn rgba8_is_blank(rgba: [u8]) -> bool:
+    not rgba8_has_visible_diversity(rgba)
+
+# ------------------------------------------------------------ RGBA comparator
+
+fn _pack_argb(rgba: [u8], i: i64) -> u32:
+    ((rgba[i + 3] as u32) << 24u32) | ((rgba[i] as u32) << 16u32) | ((rgba[i + 1] as u32) << 8u32) | (rgba[i + 2] as u32)
+
+# Scan every pixel; returns the diagnostic (counts pixels with any channel
+# difference, their bounding box and the maximum per-channel delta).
+fn _scan_rgba8(expected: [u8], actual: [u8], width: i64, height: i64) -> RenderDiagnostic:
+    var diag = _empty_diagnostic()
+    val n = width * height
+    var i: i64 = 0
+    while i < n:  # cpu-lane-loop-ok: one iteration per compared pixel
+        val a = _pack_argb(expected, i * 4)
+        val b = _pack_argb(actual, i * 4)
+        var d = argb_channel_max_delta(a, b)
+        val ad = argb_alpha_delta(a, b)
+        if ad > d:
+            d = ad
+        if d > 0:
+            val x = i % width
+            val y = i / width
+            if diag.mismatch_count == 0:
+                diag.min_x = x
+                diag.max_x = x
+                diag.min_y = y
+                diag.max_y = y
+            else:
+                if x < diag.min_x:
+                    diag.min_x = x
+                if x > diag.max_x:
+                    diag.max_x = x
+                if y < diag.min_y:
+                    diag.min_y = y
+                if y > diag.max_y:
+                    diag.max_y = y
+            diag.mismatch_count = diag.mismatch_count + 1
+            if (d as i64) > diag.max_channel_delta:
+                diag.max_channel_delta = d as i64
+        i = i + 1
+    diag
+
+fn _check_rgba_inputs(expected: [u8], actual: [u8], width: i64, height: i64) -> text:
+    if width <= 0 or height <= 0:
+        return "non-positive comparison size"
+    val need = width * height * 4
+    if expected.len() != need or actual.len() != need:
+        return "rgba length mismatch: expected " + expected.len().to_string() + " actual " + actual.len().to_string() + " need " + need.to_string()
+    ""
+
+fn _compare_core(expected: [u8], actual: [u8], width: i64, height: i64, expected_lane: text, actual_lane: text, stage: text, policy: text, policy_id: text, max_channel: i64, max_pixels: i64) -> RenderComparison:
+    val diag = _scan_rgba8(expected, actual, width, height)
+    val blank_actual = rgba8_is_blank(actual) and not rgba8_is_blank(expected)
+    var equal = diag.mismatch_count == 0
+    var status = "exact"
+    if blank_actual:
+        equal = false
+        status = "divergent"
+    else if not equal:
+        if diag.max_channel_delta <= max_channel and diag.mismatch_count <= max_pixels:
+            equal = true
+            status = "accepted-with-policy"
+        else:
+            status = "divergent"
+    var first = ""
+    if not equal:
+        first = stage
+    RenderComparison(
+        equal: equal, status: status, policy_id: policy_id, compare_policy: policy,
+        expected_lane: expected_lane, actual_lane: actual_lane, first_divergent_stage: first,
+        max_differing_pixels: max_pixels, max_channel_delta_allowed: max_channel,
+        blank_actual: blank_actual, diagnostic: diag)
+
+# Context-free comparison. Tolerance is rejected here: it is only legal through
+# compare_rgba8_with_policy with a fixture-scoped policy id.
+fn compare_rgba8(expected: [u8], actual: [u8], width: i64, height: i64, policy: text, max_channel_delta: i64) -> Result<RenderComparison, text>:
+    val err = _check_rgba_inputs(expected, actual, width, height)
+    if _nonempty(err):
+        return Err(err)
+    if policy != RENDER_COMPARE_EXACT:
+        if policy == RENDER_COMPARE_CHANNEL_TOLERANCE:
+            return Err("channel tolerance requires a fixture-scoped policy (compare_rgba8_with_policy)")
+        return Err("unknown compare policy " + policy)
+    if max_channel_delta != 0:
+        return Err("exact policy takes no tolerance")
+    Ok(_compare_core(expected, actual, width, height, "expected", "actual", "raster", policy, "exact", 0, 0))
+
+fn compare_rgba8_with_policy(expected: [u8], actual: [u8], width: i64, height: i64, expected_lane: text, actual_lane: text, stage: text, policy: text, policy_id: text, policy_version: i64, max_channel_delta: i64, max_differing_pixels: i64) -> Result<RenderComparison, text>:
+    val err = _check_rgba_inputs(expected, actual, width, height)
+    if _nonempty(err):
+        return Err(err)
+    if not _nonempty(expected_lane) or not _nonempty(actual_lane) or not _nonempty(stage):
+        return Err("comparison lanes and stage must be named")
+    if policy_version <= 0:
+        return Err("policy version must be positive")
+    if max_channel_delta < 0 or max_channel_delta > 255 or max_differing_pixels < 0 or max_differing_pixels > width * height:
+        return Err("policy bounds out of range")
+    if policy == RENDER_COMPARE_EXACT:
+        if max_channel_delta != 0 or max_differing_pixels != 0:
+            return Err("exact policy takes no tolerance")
+    else if policy == RENDER_COMPARE_CHANNEL_TOLERANCE:
+        if not policy_id.starts_with("fixture:") or policy_id.len() <= 8:
+            return Err("tolerance policy id must be fixture-scoped (fixture:<id>), got " + policy_id)
+    else:
+        return Err("unknown compare policy " + policy)
+    Ok(_compare_core(expected, actual, width, height, expected_lane, actual_lane, stage, policy, policy_id, max_channel_delta, max_differing_pixels))
+
+# Same comparison, with the evidence paths and repro command a failing case must retain.
+fn compare_rgba8_with_policy_and_diagnostics(expected: [u8], actual: [u8], width: i64, height: i64, expected_lane: text, actual_lane: text, stage: text, policy: text, policy_id: text, policy_version: i64, max_channel_delta: i64, max_differing_pixels: i64, expected_evidence_path: text, actual_evidence_path: text, diff_path: text, reproduction_command: text) -> Result<RenderComparison, text>:
+    if not _nonempty(expected_evidence_path) or not _nonempty(actual_evidence_path) or not _nonempty(diff_path) or not _nonempty(reproduction_command):
+        return Err("diagnostics: evidence paths and reproduction command are required")
+    val base = compare_rgba8_with_policy(expected, actual, width, height, expected_lane, actual_lane, stage, policy, policy_id, policy_version, max_channel_delta, max_differing_pixels)?
+    var r = base
+    r.diagnostic.expected_evidence_path = expected_evidence_path
+    r.diagnostic.actual_evidence_path = actual_evidence_path
+    r.diagnostic.diff_path = diff_path
+    r.diagnostic.reproduction_command = reproduction_command
+    Ok(r)
