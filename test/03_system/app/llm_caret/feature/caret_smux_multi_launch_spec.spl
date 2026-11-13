@@ -8,11 +8,12 @@ set launches through the os.apps.smux service surface with one real
 pseudo-terminal per child, and the full launch/capture/resize/cancel/stop
 lifecycle leaves zero surviving processes.
 ## Host and evidence boundary
-PTY evidence host: native Windows with ConPTY-backed children (cmd.exe). A
-POSIX branch follows the same contract on a POSIX PTY host; this spec run is
-the Windows evidence. Interactive children are plain shells (no startup
-command), standing in for injected provider executables the way the existing
-manager specs do; the manager-path test uses real plan-derived argv.
+PTY evidence hosts: native Windows with ConPTY-backed children (cmd.exe) and
+Linux with POSIX PTY children (/bin/sh through the pane backend's private
+launcher script, which carries argv the POSIX PTY provider cannot). Interactive
+children are plain shells (no startup command), standing in for injected
+provider executables the way the existing manager specs do; the manager-path
+tests use real plan-derived argv with an argv-tolerant provider stand-in.
 Liveness and termination truth for PTY children on this engine: the smux
 pane's own PTY state. The plain pid facade cannot signal a process the
 interpreter did not spawn, and its Windows liveness probe refuses unknown
@@ -37,6 +38,9 @@ use app.llm_caret.caret_smux_multi_launch.{CaretSmuxTeamBinding,
     caret_smux_send_command, caret_smux_capture_child, caret_smux_resize_child,
     caret_smux_child_alive}
 use os.apps.smux.api.{smux_list_sessions}
+use app.io.mod.{file_write, file_remove, dir_remove}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir}
+use std.nogc_sync_mut.package_sffi.{set_permissions}
 
 fn _is_windows() -> bool:
     platform_name().lower().contains("windows")
@@ -45,6 +49,29 @@ fn _shell() -> text:
     if _is_windows():
         return "cmd.exe"
     "/bin/sh"
+
+# Provider stand-in for the manager-path scenarios, which pass real
+# plan-derived argv (e.g. `-p "Agent: ..."`). cmd.exe ignores stray argv;
+# POSIX sh does not (it reads the first operand as a script file and exits),
+# so POSIX uses a private executable that discards argv and stays an
+# interactive shell on its PTY.
+fn _provider_stand_in() -> text:
+    if _is_windows():
+        return "cmd.exe"
+    val made = secure_temp_dir("/tmp", "caret-smux-spec-")
+    if made.is_err():
+        return ""
+    val path = made.unwrap() + "/provider"
+    if not file_write(path, "#!/bin/sh\nexec /bin/sh\n") or
+            not set_permissions(path, 0o700):
+        return ""
+    path
+
+fn _remove_stand_in(path: text):
+    if _is_windows() or path == "":
+        return
+    val _file = file_remove(path)
+    val _dir = dir_remove(path.replace("/provider", ""), false)
 
 fn _request(provider: text, agent_id: text) -> AgentLaunchRequest:
     AgentLaunchRequest(provider: provider, agent_md_path: agent_id,
@@ -173,9 +200,11 @@ describe "caret smux multi-launch adapter binds the manager's children to real p
 
     it "drives a bounded manager launch through smux with the parent-owned team":
         step("Launch a two-request manager through the smux adapter")
+        val provider = _provider_stand_in()
+        expect(provider).to_not_equal("")
         val manager = launch_multi_caret_manager_via_smux("smux-spec-manager",
             [_request("claude_cli", "alpha"), _request("codex", "beta")], 2,
-            _shell(), _shell(), "", "", "", 100, 28)
+            provider, provider, "", "", "", 100, 28)
         expect(manager.status).to_equal("running")
         expect(manager.team.processes.len()).to_equal(2)
         expect(manager.team.processes[0].pid).to_be_greater_than(0)
@@ -212,6 +241,7 @@ describe "caret smux multi-launch adapter binds the manager's children to real p
         _expect_session_gone("smux-spec-manager")
         for child in stopped_binding.children:
             _expect_pid_dead_on_posix(child.pid)
+        _remove_stand_in(provider)
 
     it "resizes one child's real PTY and the child observes the new viewport":
         step("Launch two interactive children; the split shares the canvas")
@@ -280,9 +310,11 @@ describe "caret smux multi-launch adapter binds the manager's children to real p
     it "rolls a partial batch back with no leaked child or session":
         step("Pair one executable child with a provider the legacy plan " +
             "cannot run")
+        val provider = _provider_stand_in()
+        expect(provider).to_not_equal("")
         val manager = launch_multi_caret_manager_via_smux("smux-spec-rollback",
             [_request("claude_cli", "alpha"), _request("gemini", "beta")], 2,
-            _shell(), _shell(), _shell(), "", "", 100, 28)
+            provider, provider, provider, "", "", 100, 28)
         expect(manager.status).to_equal("not_started")
         expect(manager.reason).to_equal("launch_rolled_back")
 
@@ -292,3 +324,4 @@ describe "caret smux multi-launch adapter binds the manager's children to real p
         expect(binding.children[0].pid).to_be_greater_than(0)
         _expect_pid_dead_on_posix(binding.children[0].pid)
         _expect_session_gone("smux-spec-rollback")
+        _remove_stand_in(provider)

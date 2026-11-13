@@ -55,6 +55,58 @@ pub fn forget_pty_utf8(fd: i64) {
     carry.retain(|(f, _)| *f != fd);
 }
 
+/// Terminates and reaps a PTY child after its master fd was closed.
+///
+/// The close ABI reclaims synchronously (std.sys.pty `cleanup_pending` is 0),
+/// but the POSIX close used to drop the child record without `waitpid`: the
+/// hung-up child stayed a zombie forever and `kill(pid, 0)` kept reporting it
+/// alive. `pid` must still be an unreaped child of this process (its zombie
+/// pins the pid, so signalling it cannot hit a reused pid). The master close
+/// already hung up the session; give it a bounded grace period, then SIGKILL
+/// the child's session group and reap. Returns true once the child is reaped
+/// (or was already reaped elsewhere: ECHILD).
+#[cfg(unix)]
+pub fn reap_pty_child(pid: libc::pid_t) -> bool {
+    if pid <= 1 {
+        return false;
+    }
+    let reaped = |flags: libc::c_int| -> Option<bool> {
+        let mut status = 0;
+        let result = unsafe { libc::waitpid(pid, &mut status, flags) };
+        if result == pid {
+            return Some(true);
+        }
+        if result < 0 {
+            let err = std::io::Error::last_os_error().raw_os_error();
+            if err == Some(libc::EINTR) {
+                return None;
+            }
+            return Some(err == Some(libc::ECHILD));
+        }
+        None
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1000);
+    while std::time::Instant::now() < deadline {
+        if let Some(done) = reaped(libc::WNOHANG) {
+            return done;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    unsafe {
+        // The child is a session leader (setsid), so its pgid is its pid.
+        libc::kill(-pid, libc::SIGKILL);
+        libc::kill(pid, libc::SIGKILL);
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(5000);
+    while std::time::Instant::now() < deadline {
+        if let Some(done) = reaped(libc::WNOHANG) {
+            return done;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    false
+}
+
 #[cfg(unix)]
 mod pty_process {
     use std::collections::HashMap;
@@ -210,10 +262,13 @@ mod pty_process {
         true
     }
 
-    pub(super) fn forget(master_fd: i64) {
-        if let Ok(mut table) = CHILD_TABLE.lock() {
-            table.remove(&(master_fd as i32));
-        }
+    /// Drops the fd's records and returns the still-unreaped child pid, if any,
+    /// so the caller can reap it after closing the master.
+    pub(super) fn forget(master_fd: i64) -> Option<libc::pid_t> {
+        let child = CHILD_TABLE
+            .lock()
+            .ok()
+            .and_then(|mut table| table.remove(&(master_fd as i32)));
         if let Some(slave_fd) = SLAVE_TABLE
             .lock()
             .ok()
@@ -223,6 +278,7 @@ mod pty_process {
                 libc::close(slave_fd);
             }
         }
+        child
     }
 }
 
@@ -773,16 +829,22 @@ pub extern "C" fn native_pty_close(fd: i64) -> RuntimeValue {
     #[cfg(unix)]
     {
         let fd = fd as RawFd;
-        pty_process::forget(fd as i64);
+        let child = pty_process::forget(fd as i64);
         forget_pty_utf8(fd as i64);
-        unsafe {
-            if libc::close(fd) == 0 {
-                RuntimeValue::from_bool(true)
-            } else {
-                eprintln!("PTY close error: {}", std::io::Error::last_os_error());
-                RuntimeValue::from_bool(false)
+        let closed = unsafe { libc::close(fd) == 0 };
+        if !closed {
+            eprintln!("PTY close error: {}", std::io::Error::last_os_error());
+        }
+        // Closing the master hangs up the child; reap it so no zombie (or
+        // survivor) outlives the close. The fd is gone either way, so a reap
+        // failure is reported but not turned into a retryable close (a retry
+        // would close a possibly reused fd number); pid liveness stays truthful.
+        if let Some(pid) = child {
+            if !reap_pty_child(pid) {
+                eprintln!("PTY close: child {pid} could not be reaped");
             }
         }
+        RuntimeValue::from_bool(closed)
     }
 
     #[cfg(not(unix))]
@@ -832,6 +894,24 @@ mod tests {
         assert_eq!(decode_pty_utf8(fd, b"\x94\x80c"), "\u{2500}c");
         assert_eq!(decode_pty_utf8(fd, b"\xFF"), "\u{FFFD}");
         forget_pty_utf8(fd);
+    }
+
+    /// Closing the master must reap the hung-up child: before the fix the
+    /// child stayed a zombie and `kill(pid, 0)` kept reporting it alive.
+    #[test]
+    #[cfg(unix)]
+    fn rt_pty_close_reaps_the_child() {
+        let handle = pty_process::open(24, 80);
+        assert!(handle >= 0);
+        let pid = pty_process::spawn(handle, "/bin/sh");
+        assert!(pid > 0);
+        assert!(pty_process::is_running(handle as i64));
+        assert_eq!(rt_pty_close(handle as i64), RuntimeValue::TRUE);
+        let mut status = 0;
+        let result = unsafe { libc::waitpid(pid as libc::pid_t, &mut status, libc::WNOHANG) };
+        let err = std::io::Error::last_os_error().raw_os_error();
+        assert!(result == -1 && err == Some(libc::ECHILD), "child {pid} not reaped by close");
+        assert_eq!(unsafe { libc::kill(pid as libc::pid_t, 0) }, -1);
     }
 
     #[test]
