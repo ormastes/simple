@@ -1,0 +1,111 @@
+"""
+The per-module MIR transient scope used to re-walk the WHOLE accumulated RTI
+table (every module's rows) in promote_transient_owner, even when the module
+stored nothing into it: O(modules) per module, O(modules^2) per build.
+`mutation_epoch` counts every store into the table, so the scope can prove the
+table holds no value it allocated and skip that walk.
+"""
+# @cover src/compiler/20.hir/return_type_interface_v1.spl
+
+use std.spec.*
+use compiler.hir.hir_types.*
+use compiler.hir.return_type_interface_v1.*
+
+extern fn rt_file_read_text(path: text) -> text?
+
+fn epoch_row(module_id: text, decl_name: text) -> ReturnTypeRow:
+    ReturnTypeRow(decl: rti_fn_ref(module_id, decl_name),
+        key: CalleeKey(module_id: module_id, owner: nil, name: decl_name, is_static: false),
+        type_param_count: 0, entry: ReturnTypeEntry.Decided(RtType.Builtin("i64")))
+
+fn epoch_module_rows(module_id: text, count: i64) -> [ReturnTypeRow]:
+    var rows: [ReturnTypeRow] = []
+    for i in 0..count:
+        rows = rows.push(epoch_row(module_id, "f{i}"))
+    rows
+
+fn epoch_fill(modules: i64) -> ReturnTypeInterfaceTable:
+    var table = ReturnTypeInterfaceTable.new()
+    for m in 0..modules:
+        val module_id = "m{m}"
+        val _added = table.register_rows(epoch_module_rows(module_id, 3))
+    table
+
+fn epoch_reregister_all(modules: i64) -> bool:
+    """Re-register every module's rows (what each consumer's prologue does)
+    and report whether the epoch stayed put, i.e. the scope may skip the walk."""
+    var table = epoch_fill(modules)
+    val before = table.mutation_epoch
+    for m in 0..modules:
+        val module_id = "m{m}"
+        val _again = table.register_rows(epoch_module_rows(module_id, 3))
+    table.mutation_epoch == before
+
+fn lower_module_transient_scoped_body(source: text) -> text:
+    var out = ""
+    var inside = false
+    for line in source.split("\n"):
+        if line.starts_with("    me lower_module_transient_scoped("):
+            inside = true
+            continue
+        if inside and line.starts_with("    me "):
+            break
+        if inside:
+            out = out + line + "\n"
+    out
+
+describe "RTI table mutation epoch":
+    it "starts at zero and counts each stored row":
+        var table = ReturnTypeInterfaceTable.new()
+        expect(table.mutation_epoch).to_equal(0)
+        expect(table.register_row("m.a", epoch_row("m.a", "f")).unwrap()).to_equal(1)
+        expect(table.mutation_epoch).to_equal(1)
+        expect(table.register_row("m.a", epoch_row("m.a", "g")).unwrap()).to_equal(1)
+        expect(table.mutation_epoch).to_equal(2)
+
+    it "does not move on an identical re-registration":
+        var table = ReturnTypeInterfaceTable.new()
+        val row = epoch_row("m.a", "f")
+        val _first = table.register_row("m.a", row)
+        val before = table.mutation_epoch
+        expect(table.register_row("m.a", row).unwrap()).to_equal(0)
+        expect(table.mutation_epoch).to_equal(before)
+
+    it "does not move on a refused conflicting registration":
+        var table = ReturnTypeInterfaceTable.new()
+        val _first = table.register_row("m.a", epoch_row("m.a", "f"))
+        val before = table.mutation_epoch
+        val conflicting = ReturnTypeRow(decl: rti_fn_ref("m.a", "f"),
+            key: CalleeKey(module_id: "m.a", owner: nil, name: "f", is_static: false),
+            type_param_count: 0, entry: ReturnTypeEntry.Decided(RtType.Builtin("text")))
+        expect(table.register_row("m.a", conflicting).is_err()).to_equal(true)
+        expect(table.mutation_epoch).to_equal(before)
+
+    it "counts alias stores, including the conflict marker":
+        var table = ReturnTypeInterfaceTable.new()
+        table.record_alias("m.a#b", "f")
+        expect(table.mutation_epoch).to_equal(1)
+        table.record_alias("m.a#b", "g")
+        expect(table.mutation_epoch).to_equal(2)
+
+    it "proves the skip for N and 4N accumulated modules alike":
+        # The per-module promote walk this replaces cost O(table); the epoch
+        # comparison is O(1) and its verdict does not depend on table size.
+        expect(epoch_reregister_all(8)).to_equal(true)
+        expect(epoch_reregister_all(32)).to_equal(true)
+
+describe "MIR transient scope skips the unchanged RTI table":
+    val source = rt_file_read_text("src/compiler/50.mir/_MirLowering/module_lowering.spl") ?? ""
+    val body = lower_module_transient_scoped_body(source)
+
+    it "detaches rti only when its epoch is unchanged and restores it after owner promotion":
+        expect(body.contains("val rti_epoch_at_begin = self.rti.mutation_epoch")).to_equal(true)
+        expect(body.contains("if self.rti.mutation_epoch == rti_epoch_at_begin:")).to_equal(true)
+        expect(body.contains("self.rti = self.rti_promote_spare_v1")).to_equal(true)
+        val promote_at = body.index_of("val owner_promoted = self.promote_transient_owner()")
+        val restore_at = body.index_of("self.rti = borrowed_rti")
+        val check_at = body.index_of("if not owner_promoted:")
+        expect(promote_at >= 0).to_equal(true)
+        # Restored before the failure branch, so no exit leaves it detached.
+        expect(restore_at > promote_at).to_equal(true)
+        expect(restore_at < check_at).to_equal(true)
