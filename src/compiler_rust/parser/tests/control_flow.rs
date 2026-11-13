@@ -1,6 +1,30 @@
 use simple_parser::ast::{Expr, Node};
 use simple_parser::Parser;
 
+/// Statement-form inline `if c: a else: b` parses to a spanned `Node::If`
+/// whose then block is the one then-expression (coverage needs the span).
+/// Returns that expression and the else block's statements: the else body's
+/// statements for a block / `return` else, or one `Node::Expression` (an
+/// `Expr::If` for an elif chain) otherwise.
+fn inline_if_stmt(node: &Node) -> (&Expr, &[Node]) {
+    let Node::If(stmt) = node else {
+        panic!("expected inline if statement, got {node:?}")
+    };
+    assert!(stmt.span.line > 0, "inline if must keep its line: {:?}", stmt.span);
+    let [Node::Expression(then_expr)] = stmt.then_block.statements.as_slice() else {
+        panic!("expected one then expression, got {:?}", stmt.then_block.statements)
+    };
+    let else_stmts = stmt.else_block.as_ref().map(|b| b.statements.as_slice()).unwrap_or(&[]);
+    (then_expr, else_stmts)
+}
+
+fn single_expr(stmts: &[Node]) -> &Expr {
+    let [Node::Expression(e)] = stmts else {
+        panic!("expected one expression statement, got {stmts:?}")
+    };
+    e
+}
+
 fn parse(src: &str) -> Vec<Node> {
     let mut parser = Parser::new(src);
     let module = parser.parse().expect("parse ok");
@@ -73,17 +97,10 @@ fn assert_inline_if_with_block_elif_keeps_following_sibling(source: &str, expect
     let chain_index = function.body.statements.len() - 2;
     let sibling_index = function.body.statements.len() - 1;
 
-    let Node::Expression(Expr::If {
-        then_branch,
-        else_branch: Some(elif_branch),
-        ..
-    }) = &function.body.statements[chain_index]
-    else {
-        panic!("expected inline if expression with elif branch");
-    };
-    assert!(matches!(then_branch.as_ref(), Expr::MethodCall { .. }));
+    let (then_branch, else_stmts) = inline_if_stmt(&function.body.statements[chain_index]);
+    assert!(matches!(then_branch, Expr::MethodCall { .. }));
 
-    let mut branch = elif_branch.as_ref();
+    let mut branch = single_expr(else_stmts);
     let mut saw_block_elif = false;
     loop {
         match branch {
@@ -153,21 +170,14 @@ fn parse_inline_if_with_block_else_if_inline_else_and_following_sibling() {
     };
     assert_eq!(function.body.statements.len(), 3);
 
-    let Node::Expression(Expr::If {
-        then_branch,
-        else_branch: Some(else_if_branch),
-        ..
-    }) = &function.body.statements[1]
-    else {
-        panic!("expected outer inline if expression");
-    };
-    assert!(matches!(then_branch.as_ref(), Expr::MethodCall { .. }));
+    let (then_branch, else_stmts) = inline_if_stmt(&function.body.statements[1]);
+    assert!(matches!(then_branch, Expr::MethodCall { .. }));
 
     let Expr::If {
         then_branch: else_if_then,
         else_branch: Some(final_else),
         ..
-    } = else_if_branch.as_ref()
+    } = single_expr(else_stmts)
     else {
         panic!("expected nested else-if expression");
     };
@@ -659,12 +669,9 @@ fn parse_inline_expression_then_inline_else_return_statement() {
     // `g()` then-branch takes the expression-if path in `parse_if`.
     let items = parse("fn f(flag: bool) -> bool:\n    if flag: g()\n    else: return false\n    true\n");
     let Node::Function(f) = &items[0] else { panic!("expected fn") };
-    let Node::Expression(Expr::If { else_branch: Some(else_expr), .. }) = &f.body.statements[0] else {
-        panic!("expected if expression, got {:?}", f.body.statements[0])
-    };
-    let Expr::DoBlock(else_stmts) = else_expr.as_ref() else {
-        panic!("inline else `return` must wrap a DoBlock, got {:?}", else_expr)
-    };
+    // The DoBlock the expression parser builds for `else: return false`
+    // becomes the else block itself.
+    let (_, else_stmts) = inline_if_stmt(&f.body.statements[0]);
     assert!(
         matches!(else_stmts[0], Node::Return(_)),
         "inline else `return` must be a Return statement, got {:?}",
@@ -695,10 +702,9 @@ fn parse_inline_elif_return_body_statement() {
     let items = parse("fn f(a: bool, b: bool) -> i64:\n    if a: g()\n    elif b: return 2\n    else: return 3\n");
     let Node::Function(f) = &items[0] else { panic!("expected fn") };
     // Expression then-branch: the elif/else chain nests as Expr::If.
-    let Node::Expression(Expr::If { else_branch: Some(elif_expr), .. }) = &f.body.statements[0] else {
-        panic!("expected if expression, got {:?}", f.body.statements[0])
-    };
-    let Expr::If { then_branch, else_branch: Some(else_expr), .. } = elif_expr.as_ref() else {
+    let (_, outer_else) = inline_if_stmt(&f.body.statements[0]);
+    let elif_expr = single_expr(outer_else);
+    let Expr::If { then_branch, else_branch: Some(else_expr), .. } = elif_expr else {
         panic!("expected nested elif if-expression, got {:?}", elif_expr)
     };
     let Expr::DoBlock(elif_stmts) = then_branch.as_ref() else {

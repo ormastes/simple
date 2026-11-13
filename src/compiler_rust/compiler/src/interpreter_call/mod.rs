@@ -2062,6 +2062,8 @@ pub(crate) fn evaluate_call(
         }
         Value::BlockClosure { nodes, env: captured } => {
             let captured_clone = Env::clone(&captured);
+            let _closure_origin =
+                crate::interpreter::interpreter_module::ClosureOriginGuard::enter(Some(captured.closure_in_test()));
             block_execution::exec_block_closure(&nodes, &captured_clone, functions, classes, enums, impl_methods)
         }
         Value::Function { def, captured_env, .. } => {

@@ -1,0 +1,40 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# design: doc/05_design/language/text/text_len_counts_characters_2026-11-07.md
+# bug: doc/08_tracking/bug/len_bounded_byte_scanners_non_ascii_2026_11_14.md
+
+# Pins the documented text units on non-ASCII input: len()/s[i] count code
+# points; byte_len/substring/index_of/byte_at are byte offsets. A byte scan
+# bounded by len() truncates non-ASCII text — the lsp_json reader did that.
+
+use std.spec.step
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.lsp.lsp_json.{extract_nested_raw, Q}
+
+describe "text unit parity on non-ASCII text":
+    it "len and indexing count code points while the named family counts bytes":
+        step("given h-e-acute-llo, 5 code points and 6 UTF-8 bytes")
+        val s = "h\u{e9}llo"
+        step("then len and byte_len disagree by the extra byte of e-acute")
+        expect(s.len()).to_equal(5)
+        expect(s.byte_len()).to_equal(6)
+        step("and s[i] is a code point while index_of is a byte offset")
+        expect(s[2].to_text()).to_equal("l")
+        expect(s.index_of("l")).to_equal(3)
+        step("and substring cuts on byte offsets")
+        expect(s.substring(3, 6)).to_equal("llo")
+
+    it "a byte scan bounded by byte_len reassembles the whole text":
+        val s = "a\u{20ac}b"
+        var out: [text] = []
+        var i = 0
+        while i < s.byte_len():
+            out.push(s.substring(i, i + 1))
+            i = i + 1
+        expect(out.join("")).to_equal(s)
+
+    it "lsp_json reads a non-ASCII string field without truncation":
+        step("given params whose string value holds e-acute and the euro sign")
+        val params = "{" + Q() + "params" + Q() + ":{" + Q() + "name" + Q() + ":" + Q() + "caf\u{e9} \u{20ac}5" + Q() + "}}"
+        step("then the raw field keeps every character and its closing quote")
+        expect(extract_nested_raw(json=params, key="name")).to_equal(Q() + "caf\u{e9} \u{20ac}5" + Q())

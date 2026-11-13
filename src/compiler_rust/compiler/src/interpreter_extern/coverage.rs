@@ -575,6 +575,7 @@ pub fn rt_coverage_dump_sdn(_args: &[Value]) -> Result<Value, CompileError> {
         sdn.push_str("\n# Runtime decision/condition coverage\n");
         sdn.push_str(&runtime_sdn);
     }
+    crate::coverage::append_source_digests(&mut sdn);
 
     if sdn.trim().is_empty() {
         return Ok(Value::text(String::new()));

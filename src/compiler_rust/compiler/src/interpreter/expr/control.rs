@@ -54,12 +54,12 @@ pub(super) fn eval_control_expr(
             // For move closures, we capture by value (clone the environment)
             // For regular closures, we share the environment reference
             // In the interpreter, both behave the same since we clone env anyway
-            let captured_env = if *capture_all {
+            let mut captured = if *capture_all {
                 let mut captured = env.clone();
                 // A capture must not pin the store version at capture time;
                 // exec_lambda re-points the scope before running the body.
                 captured.release_scope();
-                Arc::new(captured)
+                captured
             } else {
                 // Selective capture: only copy variables referenced in the lambda
                 // body. Must preserve global-binding metadata — a plain
@@ -68,8 +68,10 @@ pub(super) fn eval_control_expr(
                 // stale-arena-index class of bug on lambda global writes.
                 let used = collect_lambda_free_vars(body, params);
                 let used: HashSet<String> = used.iter().map(|s| s.to_string()).collect();
-                Arc::new(env.project_preserving_bindings(&used))
+                env.project_preserving_bindings(&used)
             };
+            captured.set_closure_in_test(crate::interpreter::interpreter_module::closure_created_in_test());
+            let captured_env = Arc::new(captured);
             Ok(Some(Value::Lambda {
                 params: names,
                 body: body.clone(),
@@ -457,10 +459,14 @@ pub(super) fn eval_control_expr(
                 ctx,
             ))
         }
-        Expr::DoBlock(nodes) => Ok(Some(Value::BlockClosure {
-            nodes: nodes.clone(),
-            env: Arc::new(env.clone()),
-        })),
+        Expr::DoBlock(nodes) => {
+            let mut captured = env.clone();
+            captured.set_closure_in_test(crate::interpreter::interpreter_module::closure_created_in_test());
+            Ok(Some(Value::BlockClosure {
+                nodes: nodes.clone(),
+                env: Arc::new(captured),
+            }))
+        }
         Expr::UnsafeBlock(nodes, _) => {
             let (flow, last_value) =
                 super::super::exec_unsafe_block(nodes, env, functions, classes, enums, impl_methods)?;
