@@ -240,3 +240,19 @@ Other `b795b3f4a26`/`aba2a5f0a3e` sites, same seed and scope:
   calls with a branch + division each): 1,000,000 calls, 5 alternating pairs at load ~20,
   old 3.02 / 3.61 / 2.53 / 3.63 / 4.25 s vs new 2.07 / 4.13 / 4.62 / 2.11 / 2.11 s (median
   3.61 vs 2.11). No regression signal; kept.
+
+#### Step 4c (2026-11-13, branch `work/spy-xray-2-20261113`): host policy + construction value
+
+- `src/lib/nogc_sync_mut/trace/xray_data_profiling_v1.spl` `XrayDataProfilingV1.from_aspect`:
+  absent observer extension -> containers profile as before (initial and after = true);
+  malformed or `off` -> false; `always_on` -> true; `dynamic` -> false at construction, then
+  `after(adapter.state_code())` is true only while Active. Spec 6/6 (red: module missing);
+  mutation absent -> Never: 4/6 and IN 33/36.
+- `AdaptiveMap.with_profiling(profile, enabled)` / `AdaptiveSet.with_profiling` construct with
+  the policy's `initial()`; the per-instance bool stays the only per-operation cost.
+- The in-process host fixture (`test/fixtures/xray/xray_native_inprocess_host.spl`) now builds a
+  container per session with `initial()`, flips it right after `start` and right after
+  `request_stop`, and prints `E2E <s> container ...`; `xr_session_ok` checks it (selftest has
+  four new rejecting mutations). The lane remains OUT-blocked by the seed dynlib bug, so
+  "a compiled program flips set_profiling" is wired but not yet observed on a real module.
+- IN suite scenario now goes through the policy (36/36).
