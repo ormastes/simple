@@ -66,3 +66,27 @@ describe "optional `as` numeric cast policy":
         assert_equal(opt_cast_error_count(lowering_errors(returned)), 1)
         step("the unsafe depth does not leak past the block")
         assert_equal(opt_cast_error_count(lowering_errors(after_unsafe)), 1)
+
+    it "admits the cast of an `if val` binding narrowed from a generic T? and still rejects the un-narrowed one":
+        # Bug: if_val_binding_from_generic_optional_stays_optional_err01_2026-11-13
+        # (a seed-only defect). This lowerer reads the DECLARED type of a named
+        # local, and an `if val` binder has none, so the generic `if val` steps
+        # pin the absence of a false positive rather than a payload type; the
+        # `typed_*` pair pins the narrowing against the declared optional `r`.
+        val pick = "fn pick<T>(v: T, ok: bool) -> T?:\n    if ok:\n        v\n    else:\n        nil\n\n"
+        val narrowed = pick + "fn f() -> i64:\n    if val m = pick(41, true):\n        return (m as i64) + 1\n    0\n"
+        val elif_narrowed = pick + "fn f(b: bool) -> i64:\n    if b:\n        return 1\n    elif val m = pick(41, true):\n        return m as i64\n    0\n"
+        val direct = pick + "fn f() -> i64:\n    pick(41, true) as i64\n"
+        val typed_narrowed = "fn f() -> u32:\n    val r: u32? = 7\n    if val m = r:\n        return m as u32\n    0\n"
+        val typed_direct = "fn f() -> u32:\n    val r: u32? = 7\n    if val m = r:\n        return m as u32\n    r as u32\n"
+
+        step("`if val` over a generic optional binds the payload")
+        assert_equal(opt_cast_error_count(lowering_errors(narrowed)), 0)
+        step("`elif val` over a generic optional binds the payload")
+        assert_equal(opt_cast_error_count(lowering_errors(elif_narrowed)), 0)
+        step("the un-narrowed generic optional cast is still an error")
+        assert_equal(opt_cast_error_count(lowering_errors(direct)), 1)
+        step("`if val` over a declared optional binds the payload")
+        assert_equal(opt_cast_error_count(lowering_errors(typed_narrowed)), 0)
+        step("the same optional cast outside the `if val` is still an error")
+        assert_equal(opt_cast_error_count(lowering_errors(typed_direct)), 1)
