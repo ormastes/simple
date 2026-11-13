@@ -4652,8 +4652,18 @@ impl MirLowering:
                 if looked_up_none >= 0: none_disc_v = looked_up_none
             var b_norm = self.builder
             val norm_disc = b_norm.new_temp(MirType.i64())
-            val not_enum_key2 = b_norm.emit_const_int(-1)
-            val is_boxed2 = b_norm.emit_binop(MirBinOp.Ne, mir_operand_copy(disc_local), mir_operand_copy(not_enum_key2), MirType.bool())
+            # Boxed means the canonical Option box (enum id 1), NOT "any enum"
+            # (disc != -1): the flat form of an `Evt?` IS a user enum, so a bare
+            # `Evt.Key` (disc 1) read as Option.None. Same rule as
+            # classify_option_word and the runtime's rt_unwrap_or_self.
+            val norm_enum_id_fn = MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Str("rt_enum_id"),
+                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+            ), call_origin: MirCallOrigin.Runtime)
+            val norm_id_res = b_norm.emit_call(norm_enum_id_fn, [mir_operand_copy(scrut_local)], MirType.i64())
+            val norm_id_local = norm_id_res ?? LocalId(id: 0)
+            val option_box_id = b_norm.emit_const_int(1)
+            val is_boxed2 = b_norm.emit_binop(MirBinOp.Eq, mir_operand_copy(norm_id_local), mir_operand_copy(option_box_id), MirType.bool())
             val opt_boxed_blk = b_norm.new_block(Some("ematch_opt_boxed"))
             val opt_flat_blk = b_norm.new_block(Some("ematch_opt_flat"))
             val opt_flat_some_blk = b_norm.new_block(Some("ematch_opt_flat_some"))

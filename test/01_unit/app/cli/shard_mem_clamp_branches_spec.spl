@@ -1,0 +1,113 @@
+use std.spec
+use app.io.env_ops.{env_get, env_set}
+use app.cli.shard_mem_clamp.{shard_macos_available_kb_from_vm_stat, shard_rctl_memory_cap_kb_from_rules, shard_tree_headroom_kib_for_v1, shard_tree_headroom_kib_v1, shard_effective_tree_budget_kb_v1}
+use app.cli.shard_mem_clamp.{shard_cgroup_memory_max_paths, shard_cgroup_v1_limit_paths, shard_cgroup_memory_max_kb_from_fields, shard_cgroup_v1_limit_kb_from_fields, shard_cgroup_probe_paths_v1, shard_cgroup_memory_max_kb_from_probe_v1}
+use app.cli.shard_mem_clamp.{shard_threads_mem_cap, shard_pool_clamp_workers, build_memory_reserve_kib}
+
+# Branch pins for shard_mem_clamp: edge inputs of the per-OS decoders, the
+# cgroup chain decoders, and the env-driven thread cap. Expectations hold both
+# inside a systemd MemoryMax scope (cgroup cap present) and outside one.
+# Host precondition for the env-driven examples: real MemAvailable >= ~4 GB
+# (the guarded floor probes host free memory even with the clamp off), and no
+# host.sdn max_threads below 4.
+
+fn clear_shard_env():
+    env_set("SIMPLE_SHARD_MEM_CLAMP", "")
+    env_set("SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB", "")
+    env_set("SIMPLE_PROCESS_TREE_RSS_CAP_KIB", "")
+    env_set("SIMPLE_BUILD_MEMORY_RESERVE_BYTES", "")
+    env_set("SIMPLE_BOOTSTRAP_RSS_CAP_MODE", "")
+
+describe "shard memory clamp branch pins":
+
+    it "accepts dotless vm_stat counts and a page size that ends the line":
+        val out = "Mach Virtual Memory Statistics: (page size of 4096\nPages free: 10\nPages inactive: 0\n"
+        expect(shard_macos_available_kb_from_vm_stat(out)).to_equal(40)
+
+    it "treats an empty count, zero pages or an overflowing product as unknown":
+        expect(shard_macos_available_kb_from_vm_stat("(page size of 4096 bytes)\nPages free: .\nPages inactive: 1.\n")).to_equal(0)
+        expect(shard_macos_available_kb_from_vm_stat("(page size of 4096 bytes)\nPages free: 0.\nPages inactive: 0.\n")).to_equal(0)
+        expect(shard_macos_available_kb_from_vm_stat("(page size of 9223372036854775807 bytes)\nPages free: 1.\nPages inactive: 1.\n")).to_equal(0)
+
+    it "skips an rctl rule with an empty action":
+        expect(shard_rctl_memory_cap_kb_from_rules("user:1:memoryuse:=5\n")).to_equal(0)
+
+    it "orders the tree headroom: explicit bytes, then host key, then half the total":
+        expect(shard_tree_headroom_kib_for_v1("2097152", 777, 8000000)).to_equal(2048)
+        expect(shard_tree_headroom_kib_for_v1("", 777, 8000000)).to_equal(777)
+        expect(shard_tree_headroom_kib_for_v1("", 0, 8000000)).to_equal(4000000)
+        env_set("SIMPLE_BUILD_MEMORY_RESERVE_BYTES", "1048576")
+        expect(shard_tree_headroom_kib_v1()).to_equal(1024)
+        expect(build_memory_reserve_kib()).to_equal(1024)
+        env_set("SIMPLE_BUILD_MEMORY_RESERVE_BYTES", "")
+        expect(shard_tree_headroom_kib_v1() > 0).to_be_true()
+
+    it "keeps the declared budget when neither free memory nor a cap is known":
+        expect(shard_effective_tree_budget_kb_v1(5, 0, 0, 10)).to_equal(5)
+
+    it "walks a trailing-slash cgroup path up to the root":
+        expect(shard_cgroup_memory_max_paths("/a/b/")).to_equal(["/sys/fs/cgroup/a/b/memory.max", "/sys/fs/cgroup/a/memory.max", "/sys/fs/cgroup/memory.max"])
+        expect(shard_cgroup_memory_max_paths("/")).to_equal(["/sys/fs/cgroup/memory.max"])
+        expect(shard_cgroup_v1_limit_paths("/d/")).to_equal(["/sys/fs/cgroup/memory/d/memory.limit_in_bytes", "/sys/fs/cgroup/memory/memory.limit_in_bytes"])
+
+    it "skips sub-KiB limits and keeps the tightest level":
+        expect(shard_cgroup_memory_max_kb_from_fields(["512", "max", "2097152", "4194304"])).to_equal(2048)
+        expect(shard_cgroup_v1_limit_kb_from_fields(["512", "2097152", "4194304", "9223372036854771712"])).to_equal(2048)
+
+    it "decodes a probed cgroup table: v2 chain, v1 chain and the tighter of both":
+        val v2 = "0::/user.slice/x.scope\n"
+        expect(shard_cgroup_probe_paths_v1(v2)).to_equal(["/sys/fs/cgroup/user.slice/x.scope/memory.max", "/sys/fs/cgroup/user.slice/memory.max", "/sys/fs/cgroup/memory.max"])
+        var files: {text: text} = {}
+        files["/sys/fs/cgroup/user.slice/x.scope/memory.max"] = "4294967296"
+        files["/sys/fs/cgroup/memory.max"] = "max"
+        expect(shard_cgroup_memory_max_kb_from_probe_v1(v2, files)).to_equal(4194304)
+        val hybrid = "9:memory:/docker/c\n0::/docker/c\n"
+        expect(shard_cgroup_probe_paths_v1(hybrid).len()).to_equal(6)
+        var looser: {text: text} = {}
+        looser["/sys/fs/cgroup/docker/c/memory.max"] = "1073741824"
+        looser["/sys/fs/cgroup/memory/docker/c/memory.limit_in_bytes"] = "2147483648"
+        expect(shard_cgroup_memory_max_kb_from_probe_v1(hybrid, looser)).to_equal(1048576)
+        var tighter: {text: text} = {}
+        tighter["/sys/fs/cgroup/docker/c/memory.max"] = "2147483648"
+        tighter["/sys/fs/cgroup/memory/docker/c/memory.limit_in_bytes"] = "1073741824"
+        expect(shard_cgroup_memory_max_kb_from_probe_v1(hybrid, tighter)).to_equal(1048576)
+        var v1_only: {text: text} = {}
+        v1_only["/sys/fs/cgroup/memory/docker/c/memory.limit_in_bytes"] = "1073741824"
+        expect(shard_cgroup_memory_max_kb_from_probe_v1("9:memory:/docker/c\n", v1_only)).to_equal(1048576)
+        expect(shard_cgroup_memory_max_kb_from_probe_v1("", files)).to_equal(0)
+
+    it "returns a serial request unchanged and keeps a fitting request":
+        clear_shard_env()
+        expect(shard_threads_mem_cap(1, 1000)).to_equal(1)
+        env_set("SIMPLE_SHARD_MEM_CLAMP", "0")
+        expect(shard_threads_mem_cap(2, 1000)).to_equal(2)
+        clear_shard_env()
+
+    it "clamps to one worker when the per-worker budget exceeds host memory":
+        clear_shard_env()
+        expect(shard_threads_mem_cap(4, 50000000000)).to_equal(1)
+
+    it "clamps a coordinator-peaked pool to an explicit tree RSS cap":
+        clear_shard_env()
+        env_set("SIMPLE_BUILD_MEMORY_RESERVE_BYTES", "1048576")
+        env_set("SIMPLE_PROCESS_TREE_RSS_CAP_KIB", "1000000")
+        expect(shard_threads_mem_cap(4, 500000, 500000)).to_equal(2)
+        clear_shard_env()
+
+    it "raises a one-worker cap to the guarded two-worker floor only under enforce":
+        clear_shard_env()
+        env_set("SIMPLE_BUILD_MEMORY_RESERVE_BYTES", "1048576")
+        env_set("SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB", "3000000")
+        expect(shard_threads_mem_cap(2, 1000000, 500000)).to_equal(1)
+        env_set("SIMPLE_BOOTSTRAP_RSS_CAP_MODE", "enforce")
+        expect(shard_threads_mem_cap(2, 1000000, 500000)).to_equal(2)
+        clear_shard_env()
+
+    it "diagnoses clamp-only worker counts with and without the host estimate":
+        clear_shard_env()
+        expect(shard_pool_clamp_workers(1000000) >= 0).to_be_true()
+        env_set("SIMPLE_SHARD_MEM_CLAMP", "0")
+        env_set("SIMPLE_PROCESS_TREE_RSS_CAP_KIB", "3000000")
+        env_set("SIMPLE_BUILD_MEMORY_RESERVE_BYTES", "1048576")
+        expect(shard_pool_clamp_workers(1000000)).to_equal(2)
+        clear_shard_env()

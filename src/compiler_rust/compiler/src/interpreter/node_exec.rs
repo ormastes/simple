@@ -2035,6 +2035,42 @@ pub(crate) fn exec_assignment(
                 }
             }
 
+            // An owner-bound module-global array written from a function
+            // (`val_ints[idx] = n` in value.spl) is not `is_module_global`
+            // (it has a `global_binding`), so it took the generic path below,
+            // whose `env.get(..).cloned()` + `Arc::make_mut` deep-copied the
+            // WHOLE array on every element write: the live owner store and the
+            // flat MODULE_GLOBALS mirror both pin the same Arc. That made
+            // arena-style interpreters (`core_interpret`) quadratic in their
+            // value count. Park the store copies exactly as the `g.push(x)`
+            // path does (`release_global_aliases`), mutate the now-unique Arc
+            // in place, then re-publish it to both stores. Only for a binding
+            // the executing module owns under the same name; any other
+            // binding keeps the generic copy-and-publish path.
+            // doc/08_tracking/bug/seed_interp_global_array_index_store_cow_quadratic_2026-11-13.md
+            if !is_module_global
+                && matches!(env.get(container_name), Some(Value::Array(_)))
+                && super::interpreter_helpers::owns_global_binding(container_name, env)
+            {
+                let idx = index_val.as_int()? as usize;
+                if super::interpreter_helpers::release_global_aliases(container_name, env) {
+                    if let Some(Value::Array(arc)) = env.get_mut(container_name) {
+                        crate::perf_counters::bump(&crate::perf_counters::INDEX_STORE_GLOBAL_IN_PLACE, 1);
+                        Arc::make_mut(arc).assign_index(idx, value);
+                        let current = Value::Array(Arc::clone(arc));
+                        super::interpreter_helpers::sync_flat_global(container_name, &current);
+                        env.refresh_scope(crate::interpreter::owned_globals_snapshot());
+                        return Ok(Control::Next);
+                    }
+                    // Unreachable (release promoted the binding), but never
+                    // leave the stores parked.
+                    if let Some(current) = env.get(container_name).cloned() {
+                        super::interpreter_helpers::sync_flat_global(container_name, &current);
+                    }
+                    env.refresh_scope(crate::interpreter::owned_globals_snapshot());
+                }
+            }
+
             // Fast in-place path for a local array/dict that is PROVABLY
             // unaliased (Arc strong_count == 1, no weak refs): mutate in place,
             // avoiding the O(n) copy-on-write clone the `.cloned()` path below
@@ -2093,6 +2129,14 @@ pub(crate) fn exec_assignment(
             if let Some(container) = container {
                 let new_container = match container {
                     Value::Array(mut arc) => {
+                        if crate::perf_counters::enabled() && Arc::strong_count(&arc) > 1 {
+                            crate::perf_counters::bump(&crate::perf_counters::INDEX_STORE_COW_CLONES, 1);
+                            crate::perf_counters::bump(
+                                &crate::perf_counters::INDEX_STORE_COW_ELEMS_CLONED,
+                                arc.len() as u64,
+                            );
+                            crate::perf_counters::trace_array("index_store_cow", container_name, arc.len());
+                        }
                         let arr = Arc::make_mut(&mut arc);
                         let idx = index_val.as_int()? as usize;
                         arr.assign_index(idx, value);

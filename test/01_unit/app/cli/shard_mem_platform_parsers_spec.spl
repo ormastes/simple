@@ -1,0 +1,67 @@
+use std.spec
+use app.cli.shard_mem_clamp.{shard_freebsd_available_kb_from_sysctl, shard_rctl_memory_cap_kb_from_rules, shard_rctl_probe_note_v1, shard_windows_headroom_kb_v1, shard_mem_available_kb, shard_cgroup_memory_max_kb, build_host_memory_total_kib, build_host_memory_total_kib_bounded, build_host_memory_total_kib_from_bytes_field}
+use app.cli.shard_mem_clamp.{shard_threads_cap_for}
+
+# Every OS memory source is decoded by a pure function that every platform
+# compiles, so a Linux host covers the FreeBSD / Windows / macOS decisions.
+# P0 (FreeBSD, 2026-11-13): the FreeBSD arm read /proc/meminfo, which is absent
+# without linprocfs, so free memory read as 0, threads clamped to 1 and the
+# per-file worker pool refused every parallel build.
+describe "shard memory platform decoders":
+
+    it "turns FreeBSD sysctl page counts into free kB that admit two workers":
+        val out = "hw.pagesize: 4096\nvm.stats.vm.v_free_count: 1500000\nvm.stats.vm.v_inactive_count: 250000\n"
+        val kb = shard_freebsd_available_kb_from_sysctl(out)
+        expect(kb).to_equal(7000000)
+        # 7 GB free, 1 GB per-worker override: the clamp admits more than one.
+        expect(shard_threads_cap_for(2, 1000000, kb)).to_equal(2)
+
+    it "maps unknown FreeBSD sysctl output to 0 (sequential), not a negative count":
+        expect(shard_freebsd_available_kb_from_sysctl("")).to_equal(0)
+        expect(shard_freebsd_available_kb_from_sysctl("hw.pagesize: 4096\n")).to_equal(0)
+
+    it "takes the tightest user, login-class or jail memoryuse rctl rule as the tree cap":
+        val rules = "user:1001:memoryuse:deny=8589934592\n"
+            + "jail:build:memoryuse:sigkill=4294967296/jail\n"
+            + "loginclass:daemon:memoryuse:deny=6442450944\n"
+            + "user:1001:maxproc:deny=100\n"
+        expect(shard_rctl_memory_cap_kb_from_rules(rules)).to_equal(4194304)
+
+    it "ignores per-process, log-only, throttle and unrelated rctl rules":
+        # A process-subject rule caps ONE process (inherited per child), not the tree.
+        expect(shard_rctl_memory_cap_kb_from_rules("process:4242:memoryuse:deny=1048576\n")).to_equal(0)
+        expect(shard_rctl_memory_cap_kb_from_rules("user:1001:memoryuse:log=1048576\n")).to_equal(0)
+        expect(shard_rctl_memory_cap_kb_from_rules("user:1001:memoryuse:devctl=1048576\n")).to_equal(0)
+        expect(shard_rctl_memory_cap_kb_from_rules("user:1001:vmemoryuse:deny=1048576\n")).to_equal(0)
+        expect(shard_rctl_memory_cap_kb_from_rules("user:1001:memoryuse:deny=8G\n")).to_equal(0)
+        expect(shard_rctl_memory_cap_kb_from_rules("user:1001:memoryuse\n")).to_equal(0)
+        expect(shard_rctl_memory_cap_kb_from_rules("garbage\n\n")).to_equal(0)
+        expect(shard_rctl_memory_cap_kb_from_rules("")).to_equal(0)
+
+    it "logs an absent or disabled racct instead of silently reporting no cap":
+        expect(shard_rctl_probe_note_v1(0, "")).to_equal("")
+        val note = shard_rctl_probe_note_v1(1, "rctl: RACCT/RCTL present, but disabled; enable using kern.racct.enable=1 tunable\n")
+        expect(note.contains("no enclosing memory cap")).to_be_true()
+        expect(note.contains("kern.racct.enable=1 tunable")).to_be_true()
+        expect(shard_rctl_probe_note_v1(127, "").contains("exit 127")).to_be_true()
+
+    it "decodes Windows headroom bytes to kB and treats non-positive as unknown":
+        expect(shard_windows_headroom_kb_v1(8589934592)).to_equal(8388608)
+        expect(shard_windows_headroom_kb_v1(0)).to_equal(0)
+        expect(shard_windows_headroom_kb_v1(-1)).to_equal(0)
+
+    it "decodes a sysctl hw.physmem / hw.memsize byte count into kB":
+        # FreeBSD 8 GiB guest hw.physmem, with sysctl's trailing newline.
+        expect(build_host_memory_total_kib_from_bytes_field("8589934592\n")).to_equal(8388608)
+        expect(build_host_memory_total_kib_from_bytes_field("junk")).to_equal(0)
+
+    it "bounds the host total by a known enclosing cap only":
+        expect(build_host_memory_total_kib_bounded(8000000, 4194304)).to_equal(4194304)
+        expect(build_host_memory_total_kib_bounded(8000000, 0)).to_equal(8000000)
+        expect(build_host_memory_total_kib_bounded(0, 4194304)).to_equal(4194304)
+        expect(build_host_memory_total_kib_bounded(0, 0)).to_equal(0)
+
+    it "reads a real host memory total and headroom on this host":
+        expect(shard_mem_available_kb() > 0).to_be_true()
+        expect(build_host_memory_total_kib() > 0).to_be_true()
+        expect(shard_cgroup_memory_max_kb() >= 0).to_be_true()

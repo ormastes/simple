@@ -58,14 +58,15 @@ use app.cli.parse_shard_queue.{parse_shard_release_claims}
 use app.cli.shard_worker_reap_v1.{shard_worker_confirm_kill_v1, parse_shard_reap_v1, PARSE_SHARD_DEATH_GRACE_MS_V1,
     shard_pool_poll_quantum_v1, shard_child_wait_bounded_v1}
 use app.cli.native_build_exit_status.{native_build_windows_status_label, native_build_posix_signal, native_build_signal_name, native_build_exit_cause_field_v1}
-use app.cli.file_worker_pool_refusal.{file_worker_pool_refusal_v1}
+use app.cli.file_worker_pool_refusal.{file_worker_pool_refusal_v1, file_worker_pool_addressable_budget_kb_v1,
+    file_worker_pool_hir_budget_kb_v1, file_worker_pool_mir_budget_kb_v1, file_worker_pool_host_pointer_bits_v1}
 use app.cli.shard_mem_clamp.{shard_default_threads}
 use std.nogc_sync_mut.host_limits.{host_limit_value}
 use app.cli.shard_mem_clamp.{build_memory_reserve_kib, build_memory_start_refusal_v1}
 use app.cli.shard_mem_clamp.{shard_threads_mem_cap, shard_worker_budget_kb,
     shard_mem_available_kb, shard_mem_available_kb_from_field,
     shard_host_threads_cap, shard_cgroup_memory_max_kb, shard_tree_budget_kb_for,
-    SHARD_PARSE_WORKER_KB_V1, SHARD_HIR_WORKER_KB_V1, shard_mir_worker_price_kb_v1,
+    SHARD_PARSE_WORKER_KB_V1, SHARD_HIR_WORKER_KB_V1,
     shard_commit_estimate_kib_v1, shard_commit_spawn_admit_v1, shard_commit_live_footprint_v1,
     shard_commit_unmeasured_estimate_kib_v1, shard_worker_exit_hint_v1,
     shard_worker_estimate_kib_v1, shard_pool_clamp_workers,
@@ -977,9 +978,11 @@ fn native_build_hir_shard_count(args: [text]) -> i64:
         eprint "[hir-shard] parent peak unavailable; using unqualified phase estimate"
     # The estimate prices a WORKER: override, else max recorded worker peak,
     # else the default. The coordinator's parent_peak is never a worker figure.
-    val hir_default = shard_worker_budget_kb("SIMPLE_HIR_SHARD_WORKER_KB", SHARD_HIR_WORKER_KB_V1)
+    val hir_default = native_build_hir_worker_budget_kb_v1()
     val hir_override = shard_mem_available_kb_from_field(env_get("SIMPLE_HIR_SHARD_WORKER_KB") ?? "")
-    val worker_budget = shard_worker_estimate_kib_v1(hir_default, native_build_recorded_worker_peaks_v1(args), hir_override)
+    val worker_budget = file_worker_pool_addressable_budget_kb_v1(
+        shard_worker_estimate_kib_v1(hir_default, native_build_recorded_worker_peaks_v1(args), hir_override),
+        file_worker_pool_host_pointer_bits_v1())
     val requested = native_build_requested_shard_threads(args)
     # Serial isolation is admitted too: never revive a rejected child as N=1.
     val isolation_request = if requested > 0: requested else: 1
@@ -1195,7 +1198,7 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
     val peak_record = "{native_build_path_parent_v1(queue_dir)}/{label}.{producer_key}.peak_kib"
     val old_dataset_cap = native_build_env_saved_v1("SIMPLE_GLOBAL_DATASET_MAX_BYTES")
     val budget_knob = if label == "mir-shard": "SIMPLE_MIR_SHARD_WORKER_KB" else: "SIMPLE_HIR_SHARD_WORKER_KB"
-    val static_kib = if label == "mir-shard": native_build_mir_worker_budget_kb_v1() else: shard_worker_budget_kb(budget_knob, SHARD_HIR_WORKER_KB_V1)
+    val static_kib = if label == "mir-shard": native_build_mir_worker_budget_kb_v1() else: native_build_hir_worker_budget_kb_v1()
     val override_kib = shard_mem_available_kb_from_field(env_get(budget_knob) ?? "")
     val recorded_peak = if file_exists(peak_record): (file_read(peak_record).trim().to_i64() ?? 0) else: 0
     var observed_peak_kib: i64 = 0
@@ -1491,10 +1494,18 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
 # workers queue for a free slot, so each worker's MIR share shrinks with the count.
 # Per-worker MIR budget: an explicit SIMPLE_MIR_SHARD_WORKER_KB (then host
 # worker_mem_mib) wins; the default is the closure-scaled price of the
-# published closure (shard_mir_worker_price_kb_v1; unknown size = ceiling).
+# published closure (file_worker_pool_mir_price_kb_v1; unknown size = ceiling).
+# Both phase budgets are clamped to what a worker of this binary can address
+# (32-bit hosts: 4 GiB); 64-bit budgets pass through unchanged. The per-file
+# pool's defaults also scale to the host (file_worker_pool_refusal.spl).
 fn native_build_mir_worker_budget_kb_v1() -> i64:
-    shard_worker_budget_kb("SIMPLE_MIR_SHARD_WORKER_KB",
-        shard_mir_worker_price_kb_v1(native_build_closure_selected_count_v1()))
+    file_worker_pool_mir_budget_kb_v1(native_build_closure_selected_count_v1(), false)
+
+fn native_build_pool_mir_worker_budget_kb_v1() -> i64:
+    file_worker_pool_mir_budget_kb_v1(native_build_closure_selected_count_v1(), true)
+
+fn native_build_hir_worker_budget_kb_v1() -> i64:
+    file_worker_pool_hir_budget_kb_v1()
 
 fn native_build_mir_shard_parallel(args: [text]) -> i64:
     if (env_get("SIMPLE_MIR_SHARD") ?? "") != "" or (env_get("SIMPLE_HIR_SHARD") ?? "") != "" or
@@ -1752,17 +1763,17 @@ fn run_file_worker_pool_v1(base: [text], args: [text], simple_bin: text, timeout
     if requested <= 0 and pool_request > 1:
         admit_args = admit_args.push("--threads={pool_request}")
     val hir_count = native_build_hir_shard_count(admit_args)
-    val mir_parallel = native_build_shard_threads(admit_args, native_build_mir_worker_budget_kb_v1())
+    val mir_parallel = native_build_shard_threads(admit_args, native_build_pool_mir_worker_budget_kb_v1())
     val parallel = if hir_count < mir_parallel: hir_count else: mir_parallel
     val hir_disabled_by = if (env_get("SIMPLE_HIR_CACHE") ?? "") == "0": "SIMPLE_HIR_CACHE=0"
         elif native_build_hir_shard_policy_v1(env_get("SIMPLE_PARSE_SHARDING") ?? "", env_get("SIMPLE_HIR_SHARDING") ?? "") == 0: "SIMPLE_PARSE_SHARDING/SIMPLE_HIR_SHARDING"
         else: ""
     # Fail closed: a refused pool is an error, never a two-pass or in-process fallback.
     val refusal = file_worker_pool_refusal_v1(hir_count, mir_parallel, shard_mem_available_kb(),
-        shard_worker_budget_kb("SIMPLE_HIR_SHARD_WORKER_KB", SHARD_HIR_WORKER_KB_V1),
-        native_build_mir_worker_budget_kb_v1(),
+        native_build_hir_worker_budget_kb_v1(),
+        native_build_pool_mir_worker_budget_kb_v1(),
         native_build_requested_shard_threads(admit_args), hir_disabled_by,
-        hir_disabled_by == "" and hir_count < 2 and shard_pool_clamp_workers(shard_worker_estimate_kib_v1(shard_worker_budget_kb("SIMPLE_HIR_SHARD_WORKER_KB", SHARD_HIR_WORKER_KB_V1), native_build_recorded_worker_peaks_v1(args), shard_mem_available_kb_from_field(env_get("SIMPLE_HIR_SHARD_WORKER_KB") ?? ""))) in [0, 1])
+        hir_disabled_by == "" and hir_count < 2 and shard_pool_clamp_workers(file_worker_pool_addressable_budget_kb_v1(shard_worker_estimate_kib_v1(native_build_hir_worker_budget_kb_v1(), native_build_recorded_worker_peaks_v1(args), shard_mem_available_kb_from_field(env_get("SIMPLE_HIR_SHARD_WORKER_KB") ?? "")), file_worker_pool_host_pointer_bits_v1())) in [0, 1], file_worker_pool_host_pointer_bits_v1())
     if refusal != "":
         # @workaround bug=eprint-noparen-stage2-20261031 reason=pinned-stage2-predates-#5567
         eprint(refusal)

@@ -2,10 +2,11 @@
 
 - **Ids:** `private_import_visibility_sweep_backend_gpu_2026-11-13` (P3, fixed),
   `private_import_visibility_remainder_1312_pairs_2026-11-13` (P3, open; the id
-  keeps the wave-1 figure, the live count is in "Wave 2" below),
+  keeps the wave-1 figure, the live count is in "Wave 3" below),
   closes `hip_backend_contract_spec_private_hip_backend_fns_2026-11-13`.
 - **Branch:** `work/private-import-visibility-sweep-20261113` on `release/1.0.0` (base `33755dd5270`);
-  wave 2: `work/private-import-wave2-20261113` (base `3538a1adca8`).
+  wave 2: `work/private-import-wave2-20261113` (base `3538a1adca8`);
+  wave 3: `work/private-import-wave3-20261113` (base `50a4f7d79b9`).
 - **Model:** Opus (Fable unavailable).
 
 ## Class
@@ -24,8 +25,8 @@ Earlier instances: #8930 (`gpu_portable_compute.spl`, 23 fns), #8947
 
 ## Exact seed rule (src/compiler_rust/compiler/src/interpreter_module/module_loader.rs)
 
-Rule 1 - `check_private_use_names` (:614, called from both the fresh-load and
-the cache-hit path, :1125 and :1517):
+Rule 1 - `check_private_use_names` (:624, called from both the fresh-load and
+the cache-hit path, :1136 and :1531):
 - only braced group imports (`use m.{a, b as c}`), `export use m.{...}` included;
 - `name` is a top-level `Node::Function` with `Visibility::Private` that no
   `export` statement of `m` re-exposes (`private_top_level_fn_names`);
@@ -34,7 +35,7 @@ the cache-hit path, :1125 and :1517):
 - **no test exemption** - `test/**` importers are rejected like `src/**`.
   *(Superseded 2026-11-13, see "Test importers exempt" below.)*
 
-Rule 2 - `check_private_call_visibility` (:2818): a call that reaches a private
+Rule 2 - `check_private_call_visibility` (:2864): a call that reaches a private
 fn of another directory's module without a braced import (glob import, or no
 import) is rejected; `test/**` callers are exempt; same baseline.
 
@@ -275,7 +276,149 @@ private), 9 were red before and after with no `is not visible` line in either
 No "after" log carries an `is not visible` line naming a wave-2 module except
 the facade `_EvalOps/call_method_eval.spl` one.
 
-## Remaining (open P3) - per module (after wave 2, base `3538a1adca8`)
+## Wave 3 - remaining non-test pairs + re-export facades (base `50a4f7d79b9`)
+
+**Census gap closed.** Appendix A now follows re-export chains: when the module a
+braced `use m.{name}` resolves to does not define `name`, the scan follows that
+module's `export use x.*` globs and braced `export use x.{name}` lines (depth <= 8,
+cycle-guarded) to the module that defines it, and emits the row against the
+DEFINING module with kind `via:<facade>`. This matches what the seed actually
+rejects for the facade case: the error is the call-time rule 2
+(`check_private_call_visibility`, :2864 - message has no parenthesised path),
+whose owner is the defining file and whose directory test is
+`owner.parent() == caller.parent()`. The `eval_calls.spl` -> `eval_ops.spl` ->
+`_EvalOps/call_method_eval.spl` `eval_struct_constructor` case is the one
+oracle-confirmed instance. **The via rows are a static superset, not an
+oracle-validated set:** rule 2 fires only when the call actually reaches the
+interpreter's global function table, and e.g. `eval_calls.spl` reaches `decl_get`
+through `core/ast.spl` in the same shape without being rejected. Plain braced
+`use` hops inside a facade (no `export`) are NOT followed (`HOPS=export`, the
+default); `HOPS=all` follows them too (610 instead of 484 pairs below).
+
+**Counts at the base** (seed-def non-test = importer not under `test/` and with no
+`/test/` component, the `is_test_caller` predicate; doc-def = importer not under
+`test/` and not a `*_spec.spl`, the wave-2 definition):
+
+| census at `50a4f7d79b9` | pairs | non-test |
+|---|---|---|
+| rule 1 direct (braced import of a private fn), all importers | 9,190 (13,192 rows) | **374** doc-def / 323 seed-def |
+| rule 1 via `export use` facade (new) | 1,029 | **484** |
+| fixed here (`fn` -> `pub fn`) | **843** fns, 190 files | |
+| after: rule 1 direct | 8,818 (12,359 rows, 2,051 modules) | **3** (`parser_warn`, `random_hex`: spec-pinned; `tokenize`: false positive) |
+| after: via | 543 (all test-only) | **0** |
+
+374 = the wave-2 figure 331 + 43: the 43 pairs were in the baseline at
+`3538a1adca8` and #8961 pruned them as test-only, but their importers are product
+files with a `/test/` component (47 rows: `src/app/test/**` 41, `src/os/test/desktop_e2e_test.spl` 2,
+`src/lib/nogc_async_mut/debug/remote/test/qemu_runner.spl` 4), exempt only under
+the current broad `is_test_caller`; they are made `pub` so they stay fixed if the
+predicate is narrowed. 843 = 371 direct (374 minus the 3 residual pairs below)
++ 484 via - 14 in both sets + 2 via pairs whose only importer is under a `/test/`
+product dir (`text_advance`, `wm_notify_app_launched`). 188 files are under
+`src/`; 2 are `test/` helpers imported by product files under `src/app/test/`
+(`test/system/qemu/os/common/qemu_os_harness.spl` 6 fns,
+`test/fixtures/crypto/x25519mlkem768/canonical_fixture.spl` 2 fns). No spec or
+assertion changed.
+
+**Residual non-test pairs after: 3.**
+(1) `core/parser.spl` `parser_warn` (4 importers): `parser_guarded_int_single_scan_spec`
+anchors on the source text `"\nfn parser_warn(msg: text):"` (see Wave 2).
+(2) `src/app/io/crypto_sffi.spl` `random_hex`: `env_extern_optional_spec`'s
+`_declares` helper compares whole trimmed source lines to
+`"fn random_hex(length: i64) -> text?:"`; measured 12/12 -> 11/12 with `pub`,
+12/12 again once reverted.
+(3) `test/fixtures/arch_check/src/core/lexer.spl` `tokenize`: a resolver false
+positive (independent review) - the one-segment `use lexer.{tokenize}` in
+`src/compiler_rust/lib/std/src/sdn/parser.spl:20` matches every `*/lexer.spl`
+because `resolve()` applies the two-segment floor only to paths of >= 2
+segments; left unchanged.
+The remainder row stays open on (1) and (2) plus the test-only pairs; fixing
+them needs the spec anchors changed, which this sweep does not do.
+
+**Needle check.** Every string literal starting `"fn NAME` / containing
+`fn NAME(` in `test/`, `src/`, `scripts/` was matched against the changed names.
+Substring needles (`to_contain`, `index_of`, `split`, `find`, `contains`, forbid
+lists) still match `pub fn NAME(`; line-start anchors (`\nfn`, `starts_with("fn`)
+and whole-line equality (`_declares`, `.trim() == decl` in the
+`test/01_unit/lib/contract/*_optional_spec.spl` family) name only `parser_warn`
+and `random_hex`, both left private. The independent review also checked the
+body-slicing specs that cut at the next `\nfn ` (`ast_native_arena_spec`,
+`bootstrap_decl_count_slot_spec`, `layout_selected_viewport_w_spec`,
+`pending_defers_transient_scope_spec`, `transient_parse_array_scope_spec`): no cut
+point moves. `evalops_export_and_text_at_spec`'s `unexported_public_fns` scans
+`\nfn ` lines only, so `eval_struct_constructor` (now `pub`, still exported)
+drops out of a check whose result is unchanged.
+
+**Clash check.** (a) No glob importer (`use m.*` / `export use m.*`) of a changed
+module or of a facade re-exporting one defines a same-named top-level fn; the 60
+glob importers that also brace-import a changed name import the same definition
+through a second path (e.g. `mir_data.spl` facade and `mir_instruction_support.spl`).
+(b) 78 names become `pub` in several variant files (`tools_git_core`/`tools_git_misc`
+sync/async, `lazy_val` x3, `ptr/types` x2, ...): signatures identical in every
+case. (c) 34 changed names already had a `pub` definition elsewhere; the ones with
+a differing signature are in unrelated modules (`src/compiler_rust/lib/std/src`
+legacy `io/fs.spl` `read_text`/`write_text`/`create_dir*`, `sys/env.spl` `get`,
+`sys/args.spl` `args`; `_ElfWriter/encoding.spl` `write_u*_le`/`write_bytes`/`align_up`
+vs `common/compress/utilities.spl`/`30.types`; `duplicate_check` `load_config`/`run_benchmark`;
+`spec/mock.spl` `mock_policy_init`; `tooling/config_env.spl` `get_env_vars`); none of
+their glob importers sees both. Visibility does not enter the co-compiled ambiguity
+check (`flatten_owned_callable` / MIR `lowering_expr_call.rs:1023` count definitions
+regardless of `pub`).
+Known over-count, inherited from waves 1-2: multi-variant `std.X` paths count every
+equally-matching variant, so some `pub`s (notably in `src/compiler_rust/lib/std/src`)
+are unneeded but harmless.
+
+**Baseline.** The scan skips baselined pairs, so no changed fn was baselined:
+`check-private-import-baseline.shs --prune` = `PASS - 11565 baseline entries checked,
+0 stale, nothing pruned`.
+
+**Out of scope, still open:** rule-2 glob-call sites (Appendix B, 353 non-`/test/`
+pairs at this base, unvalidated) and glob imports of a facade (`use eval_ops.*` ->
+`eval_method_call`, seen in wave-2 logs only as fallout of an earlier failed import).
+
+**Red -> green** (seed `seedhead` = release head `517f20ae777`, predates #8961 so
+test importers are still rejected; `systemd-run MemoryMax=16G timeout 900`,
+serial; "before" = base `50a4f7d79b9`, "nv" = `is not visible` lines):
+
+| spec | before | after |
+|---|---|---|
+| test/01_unit/compiler/interpreter/module_namespace_alias_runtime_spec.spl | 8/10, nv 2 | **10/10**, nv 0 |
+| test/01_unit/compiler/interpreter/static_class_method_dispatch_spec.spl | 2/3, nv 1 | **3/3**, nv 0 |
+| test/01_unit/compiler/interpreter/core_interpret_mut_struct_param_alias_spec.spl | 0/6, nv 6 | **6/6**, nv 0 |
+| test/01_unit/lib/aspect_pack_forbidden_io_temporal_spec.spl | 7/7 via JIT demotion, nv 2 | 7/7, nv 0 |
+| test/01_unit/lib/aspect_pack_registry_scaling_spec.spl | 4/4 via JIT demotion, nv 2 | 4/4, nv 0 |
+| test/01_unit/lib/common/crypto/x25519_rfc7748_kat_spec.spl | 6/6 via JIT demotion, nv 2 | 6/6, nv 0 |
+| test/01_unit/lib/daemon_sdk/daemon_sdk_exact_lock_owner_spec.spl | 5/6, nv 2 | 5/6, nv 0 (other failure) |
+| test/01_unit/lib/facet_runtime_spec.spl | 0/2, nv 2 | 0/2, nv 0 (other failure) |
+
+The first three are the re-export-gap specs: the only `is not visible` line before
+was rule 2 naming `eval_struct_constructor` of `_EvalOps/call_method_eval.spl`
+for `src/.../interpreter/eval_calls.spl`; making `eval_struct_constructor` and
+`eval_enum_variant_call` `pub` alone already turned all three green (measured
+before applying the rest). The other five lines named `apk_build_pack_v1`
+(`common/aspect_pack.spl`), `try_acquire_daemon_lock_owned`
+(`daemon_sdk/lock.spl`) and `x25519` (`tls/x25519.spl`), each a pair with a
+non-test importer, reached from the spec itself on this pre-#8961 seed.
+
+Needle and control specs, identical before and after: `parser_guarded_int_single_scan` 7/7,
+`process_spawn_argv_contract` 7/7, `syscall_process_exec_artifact_grant_static` 3/3,
+`raw_high_level_duplicate_signature` 4/4, `placeholder_presence_scan_fusion_contract` 3/3,
+`module_assembly_runtime_facade` 5/5, `layout_selected_viewport_w` 4/4,
+`logging_basics` 2/2, `mcp_log_store` 3/3, `caret_command_route` 2/2,
+`sanitizer` 4/4, `semver_mini` 2/2, `i18n_context` 2/2, `text_formatter` 2/2,
+`doc_coverage_single_scan` 3/3 (nv 2 both, a test-only pair),
+`env_extern_optional` 12/12 (after `random_hex` reverted); red before and after
+with the same counts: `generic_syntax` 1/5, `ce_block` 0/3,
+`newunit_pool_reset_contract` 2/5, `cli_parser` 1/2,
+`persistent_parse_owner_contract` 4/5, `bootstrap_context_mir_source` 1/16.
+The `co-compiled definitions` warning set is identical before/after in every
+spec log.
+
+**Parse/compile check.** Seed `compile` of all 190 touched files: no `parse`
+error (65 compile, 125 fail in `semantic`/`codegen`/`lint`, which a standalone
+library-file compile commonly does); the same compile of every one of those files on the base `50a4f7d79b9` gives the identical exit code and the identical `compile failed` line for all 190, so none of the failures is caused here.
+
+## Remaining (open P3) - per module (after wave 2, base `3538a1adca8`; historical - wave 3 fixed every non-test row except `parser_warn`)
 
 1,148 pairs in 324 modules. `non-test` = pairs with at least one importer outside
 `test/**` that is not a `*_spec.spl`; the other 817 are test-only (see Wave 2).
@@ -607,7 +750,7 @@ the facade `_EvalOps/call_method_eval.spl` one.
 | `src/app/devhub/cmd_api.spl` | 1 | 0 | handle_api |
 | `src/app/cli/query_outline.spl` | 1 | 0 | parse_outline_source |
 
-## Appendix A - rule 1 scan
+## Appendix A - rule 1 scan (follows `export use` re-export chains since wave 3)
 
 ```sh
 #!/bin/sh
@@ -619,7 +762,9 @@ the facade `_EvalOps/call_method_eval.spl` one.
 #   - (definer-relpath|name) not frozen in scripts/check/private_import_baseline.txt
 # Resolution is name+path-suffix based (last two module segments, NN. layer
 # prefixes stripped, __init__/mod as package files). Output TSV:
-#   importer<TAB>definer<TAB>name
+#   importer<TAB>definer<TAB>name<TAB>kind   (kind: use | export | via:<facade>)
+# Env: HOPS=export (default: follow `export use` globs + braced `export use`)
+#      HOPS=all (also follow plain braced `use` inside a facade)
 # Usage: sh scan-private-cross-dir-imports.shs <repo_root> [roots...]
 set -eu
 root=${1:?repo root}
@@ -654,6 +799,7 @@ FNR == 1 { if (inuse) flushuse(); if (inexp) flushexp(); print "F\t" FILENAME }
   line = $0; sub(/#.*/, "", line)
   if (inuse) { acc = acc " " line; if (line ~ /\}/) flushuse(); next }
   if (inexp) { eacc = eacc " " line; if (line ~ /\}/) flushexp(); next }
+  if (line ~ /^export[ \t]+use[ \t]+[A-Za-z_][A-Za-z0-9_.]*\.\*/) { mp = line; sub(/^export[ \t]+use[ \t]+/, "", mp); sub(/\.\*.*/, "", mp); print "R\t" FILENAME "\t" mp; next }
   if (line ~ /^[ \t]*use[ \t]+[A-Za-z_]/ || line ~ /^export[ \t]+use[ \t]+[A-Za-z_][A-Za-z0-9_.]*\.?\{/) { if (line ~ /^export/) { ukind = "export"; eacc = line; sub(/^[^{]*\{/, "", eacc); eraw = 1 } else { ukind = "use"; eraw = 0 }; acc = line; inuse = 1; if (line !~ /\{/ || line ~ /\}/) flushuse(); next }
   if (line ~ /^export[ \t]/ && line !~ /^export[ \t]+(fn|struct|class|enum|trait|val|var|type|impl|extern|async)[ \t]/) {
     eacc = line; sub(/^export[ \t]+(use[ \t]+)?/, "", eacc)
@@ -671,44 +817,75 @@ FNR == 1 { if (inuse) flushuse(); if (inexp) flushexp(); print "F\t" FILENAME }
 }
 END { if (inuse) flushuse(); if (inexp) flushexp() }
 ' < "$tmp/files" > "$tmp/facts"
-# Pass 2: resolve.
 # Pass 2: resolve each module path to the file(s) the loader picks: longest
 # trailing segment match (NN. layer prefixes stripped); `x.spl` beats
 # `x/mod.spl` / `x/__init__.spl` at equal match length.
-awk -F'\t' -v BL="scripts/check/private_import_baseline.txt" '
+# Re-export chains: when the resolved module does not define `name`, follow its
+# `export use m.*` globs and braced `export use m.{name}` lines (HOPS=all: also
+# plain braced `use m.{name}`) to the
+# module that does (depth <= 8, cycle-guarded). The seed rejects such an import
+# at the call (module_loader.rs check_private_call_visibility: owner = defining
+# file, compared by parent directory with the caller), so the row is emitted
+# against the DEFINING module with kind `via`.
+awk -F"\t" -v BL="scripts/check/private_import_baseline.txt" -v HOPS="${HOPS:-export}" '
 function key(f,   k) { k = f; sub(/\.spl$/, "", k); sub(/\/(__init__|mod)$/, "", k); gsub(/\/[0-9][0-9]\./, "/", k); return k }
 function dir(f) { sub(/\/[^\/]*$/, "", f); return f }
 function pkgfile(f) { return f ~ /\/(__init__|mod)\.spl$/ }
+function resolve(ms,   n, s, m, c, i, kn, kp, j, bestn, out, bestspl, isspl) {
+  if (ms in res) return res[ms]
+  n = split(ms, s, "."); m = split(bylast[s[n]], c, "\034"); bestn = 0; out = ""; bestspl = 0
+  for (i = 2; i <= m; i++) {
+    kn = split(key(c[i]), kp, "/"); j = 0
+    while (j < n && j < kn && kp[kn - j] == s[n - j]) j++
+    if (j < n && j < 2 && n >= 2) continue
+    isspl = !pkgfile(c[i])
+    if (j > bestn || (j == bestn && isspl && !bestspl)) { bestn = j; out = "\034" c[i]; bestspl = isspl }
+    else if (j == bestn && isspl == bestspl) out = out "\034" c[i]
+  }
+  res[ms] = out
+  return out
+}
+# definers(f, nm): "\034"-joined files defining nm reached from facade f.
+function definers(f, nm, depth, seen,   out, mods, nmods, mp, i, files, nf, k, g) {
+  if (depth > 8 || index(seen, "\034" f "\034")) return ""
+  seen = seen "\034" f "\034"
+  if ((f SUBSEP nm) in vis) return "\034" f
+  out = ""
+  mods = useby[f SUBSEP nm] globexp[f]
+  nmods = split(mods, mp, "\034")
+  for (i = 2; i <= nmods; i++) {
+    nf = split(resolve(mp[i]), files, "\034")
+    for (k = 2; k <= nf; k++) { g = definers(files[k], nm, depth + 1, seen); if (g != "") out = out g }
+  }
+  return out
+}
 BEGIN { while ((getline l < BL) > 0) { gsub(/^[ \t]+|[ \t]+$/, "", l); if (l != "") bl[l] = 1 } }
 NR == FNR {
   if ($1 == "F") { k = key($2); n = split(k, p, "/"); bylast[p[n]] = bylast[p[n]] "\034" $2 }
   else if ($1 == "D") vis[$2 SUBSEP $4] = $3
   else if ($1 == "E") exp_[$2 SUBSEP $3] = 1
+  else if ($1 == "R") globexp[$2] = globexp[$2] "\034" $3
+  else if ($1 == "U" && (HOPS == "all" || (HOPS == "export" && $5 == "export"))) useby[$2 SUBSEP $4] = useby[$2 SUBSEP $4] "\034" $3
   next
 }
 $1 == "U" {
-  ms = $3
-  if (!(ms in res)) {
-    n = split(ms, s, "."); m = split(bylast[s[n]], c, "\034"); bestn = 0; out = ""; bestspl = 0
-    for (i = 2; i <= m; i++) {
-      kn = split(key(c[i]), kp, "/"); j = 0
-      while (j < n && j < kn && kp[kn - j] == s[n - j]) j++
-      if (j < n && j < 2 && n >= 2) continue
-      isspl = !pkgfile(c[i])
-      if (j > bestn || (j == bestn && isspl && !bestspl)) { bestn = j; out = "\034" c[i]; bestspl = isspl }
-      else if (j == bestn && isspl == bestspl) out = out "\034" c[i]
-    }
-    res[ms] = out
-  }
-  m = split(res[ms], c, "\034")
+  m = split(resolve($3), c, "\034")
   for (i = 2; i <= m; i++) {
-    f = c[i]
-    if (vis[f SUBSEP $4] != "priv") continue
-    if ((f SUBSEP $4) in exp_) continue
-    if (dir(f) == dir($2)) continue
-    if ((f "|" $4) in bl) continue
-    print $2 "\t" f "\t" $4 "\t" $5
+    f = c[i]; kind = $5
+    if (!((f SUBSEP $4) in vis)) {
+      nd = split(definers(f, $4, 0, ""), dd, "\034")
+      for (q = 2; q <= nd; q++) emit($2, dd[q], $4, "via:" f)
+      continue
+    }
+    emit($2, f, $4, kind)
   }
+}
+function emit(imp, f, nm, kind) {
+  if (vis[f SUBSEP nm] != "priv") return
+  if ((f SUBSEP nm) in exp_) return
+  if (dir(f) == dir(imp)) return
+  if ((f "|" nm) in bl) return
+  print imp "\t" f "\t" nm "\t" kind
 }
 ' "$tmp/facts" "$tmp/facts" | sort -u
 ```

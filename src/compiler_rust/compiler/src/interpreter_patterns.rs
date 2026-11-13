@@ -398,14 +398,14 @@ pub(crate) fn pattern_matches(
                     == crate::hir::lower::option_pattern_shape_diag::ShapeGate::Error
                 {
                     return Err(CompileError::Semantic(format!(
-                        "error[option-pattern-shape]: `case {}(...)` tested against a \
+                        "error[SPL-PAT-001]: `case {}(...)` tested against a \
                          non-Option/non-Result value of runtime kind `{}`",
                         variant,
                         value.type_name()
                     )));
                 }
                 eprintln!(
-                    "warning[option-pattern-shape]: `case {}(...)` tested against a \
+                    "warning[SPL-PAT-001]: `case {}(...)` tested against a \
                      non-Option/non-Result value of runtime kind `{}`; this pattern can \
                      never legitimately match and the compiler answers it silently \
                      (the default engine binds a corrupt value)",

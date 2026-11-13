@@ -1,6 +1,6 @@
 use std.common.crypto.sha256.{sha256_text}
 use std.io.{file_lock, file_unlock}
-use std.nogc_sync_mut.io_runtime.{dir_list}
+use std.nogc_sync_mut.io_runtime.{dir_list_or_empty}
 use std.nogc_sync_mut.sffi.fs.{file_create_excl}
 
 extern fn rt_file_exists(path: text) -> bool
@@ -132,12 +132,12 @@ fn shared_generation_publish_bounded_v1(
 
 fn shared_generation_reclaim_orphan_stages_v1(root: text) -> bool:
     var changed = false
-    for name in dir_list(root) ?? []:
+    for name in dir_list_or_empty(root) ?? []:
         if name.starts_with("CURRENT.tmp."):
             if not rt_file_delete("{root}/{name}"):
                 return false
             changed = true
-    for name in dir_list("{root}/generations") ?? []:
+    for name in dir_list_or_empty("{root}/generations") ?? []:
         if name.contains(".generation.tmp."):
             if not rt_file_delete("{root}/generations/{name}"):
                 return false
@@ -148,7 +148,7 @@ fn shared_generation_reclaim_orphan_stages_v1(root: text) -> bool:
 
 fn shared_generation_store_bytes_v1(root: text) -> i64:
     var total: i64 = 0
-    for name in dir_list(root) ?? []:
+    for name in dir_list_or_empty(root) ?? []:
         val path = "{root}/{name}"
         if rt_file_is_regular_no_follow(path):
             val size = rt_file_size(path)
@@ -156,7 +156,7 @@ fn shared_generation_store_bytes_v1(root: text) -> i64:
                 return -1
             total = total + size
     for directory in ["generations", "leases"]:
-        val names = dir_list("{root}/{directory}") ?? []
+        val names = dir_list_or_empty("{root}/{directory}") ?? []
         if names.len() > SHARED_GENERATION_MAX_ENTRIES_V1:
             return -1
         for name in names:
@@ -304,7 +304,7 @@ fn shared_generation_lease_decode_v1(content: text) -> SharedGenerationLeaseV1?:
 
 fn shared_generation_active_pins_v1(root: text) -> Result<[text], text>:
     var pins: [text] = []
-    val names = dir_list("{root}/leases") ?? []
+    val names = dir_list_or_empty("{root}/leases") ?? []
     if not shared_generation_lease_count_admitted_v1(names.len()):
         return Err("lease-count-unbounded")
     for name in names.sorted():
@@ -327,7 +327,7 @@ fn shared_generation_reclaim_dead_leases_v1(
     val lock = file_lock("{root}/authority.lock", 10)
     if lock < 0:
         return Err("authority-lock-unavailable")
-    val names = dir_list("{root}/leases") ?? []
+    val names = dir_list_or_empty("{root}/leases") ?? []
     if not shared_generation_lease_count_admitted_v1(names.len()):
         val _ = file_unlock(lock)
         return Err("lease-count-unbounded")
@@ -414,7 +414,7 @@ fn shared_generation_gc_v1(
         return SharedGenerationGcV1(
             false, pins_result.unwrap_err(), [], [], 0)
     val pins = pins_result.unwrap()
-    val names = dir_list("{root}/generations") ?? []
+    val names = dir_list_or_empty("{root}/generations") ?? []
     if names.len() > SHARED_GENERATION_MAX_ENTRIES_V1:
         val _ = file_unlock(lock)
         return SharedGenerationGcV1(false, "generation-count-unbounded", [], [], 0)

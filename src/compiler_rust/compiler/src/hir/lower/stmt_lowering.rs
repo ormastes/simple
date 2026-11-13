@@ -2579,28 +2579,6 @@ impl Lowerer {
                                     },
                                     ty: payload_expr_ty,
                                 }
-                            } else if enum_variant == "Some"
-                                && payload_patterns.len() == 1
-                                && self
-                                    .module
-                                    .types
-                                    .get(subject_ty)
-                                    .and_then(crate::hir::lower::option_pattern_shape_diag::never_option_type_name)
-                                    .is_some()
-                            {
-                                // Flat Option encoding over a bare scalar/text
-                                // subject (`match <i64>: Some(j)`): the subject
-                                // word IS the payload, exactly as the interpreter
-                                // binds it. `rt_enum_payload` asked a non-enum for
-                                // a payload and bound the nil sentinel (j = 3).
-                                // Bug: doc/08_tracking/bug/seed_match_some_on_plain_i64_binds_wrong_value_2026_11_12.md
-                                if let Some(local) = ctx.locals.get_mut(local_idx) {
-                                    local.ty = subject_ty;
-                                }
-                                HirExpr {
-                                    kind: HirExprKind::Local(subject_idx),
-                                    ty: subject_ty,
-                                }
                             } else if subject_is_optional && enum_variant != "Some" && enum_variant != "None" {
                                 // User-enum variant pattern over an optional
                                 // subject (`match <Evt?>: case Evt.Click(x)`).
@@ -2654,14 +2632,9 @@ impl Lowerer {
                             }
                         };
 
-                        let let_ty = if matches!(value.kind, HirExprKind::Local(s) if s == subject_idx) {
-                            subject_ty
-                        } else {
-                            binding_ty
-                        };
                         binding_stmts.push(HirStmt::Let {
                             local_index: local_idx,
-                            ty: let_ty,
+                            ty: binding_ty,
                             value: Some(value),
                         });
                     }
@@ -4648,6 +4621,32 @@ mod user_enum_some_variant_payload_binding_tests {
                 other
             ),
         }
+    }
+
+    // `case Some(Evt.Click(x))` over an `Evt?`: a `T?` may hold the bare
+    // user enum (implicit wrap), and that IS an enum, so the generic
+    // `rt_enum_id >= 0` dual-form guard took `rt_enum_payload` and handed
+    // Click's payload (8) to the inner Click binder, which then read nil.
+    // The Some slot guard must be `rt_enum_id == OPTION_ENUM_ID`, the rule the
+    // identifier binder and `rt_unwrap_or_self` already use.
+    #[test]
+    fn nested_user_variant_under_some_unwraps_only_the_option_box() {
+        let module = lower_source(
+            "enum Evt:\n    Click(x: i64)\n    Key(code: i64)\n\nfn opt_evt(v: Evt) -> Evt?:\n    v\n\nfn main() -> i64:\n    val c = opt_evt(Evt.Click(x: 8))\n    match c:\n        case Some(Evt.Click(x)): return x\n        case _: return 0\n    return 0\n",
+        )
+        .expect("source should lower");
+        let func = module.functions.iter().find(|f| f.name == "main").expect("main function should lower");
+        let x_value = find_let_value(&func.body, &func.locals, "x").expect("nested payload must bind x");
+        let shape = format!("{:?}", x_value);
+        assert!(
+            shape.contains("op: Eq, left: HirExpr { kind: BuiltinCall { name: \"rt_enum_id\"")
+                && shape.contains("Integer(1)"),
+            "Some slot must test rt_enum_id == OPTION_ENUM_ID, got {shape}"
+        );
+        assert!(
+            !shape.contains("op: GtEq"),
+            "an `rt_enum_id >= 0` guard misreads a bare user enum as a Some box, got {shape}"
+        );
     }
 }
 
