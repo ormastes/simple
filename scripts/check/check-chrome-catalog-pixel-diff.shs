@@ -70,6 +70,8 @@ find_simple() {
     for candidate in \
         "$repo_root/build/cargo-r2/release/simple" \
         "$repo_root/bin/simple" \
+        "$repo_root/bin/simple.exe" \
+        "$repo_root/build/cargo-r2/release/simple.exe" \
         "$repo_root/src/compiler_rust/target/bootstrap/simple"
     do
         [ -x "$candidate" ] && { echo "$candidate"; return 0; }
@@ -83,7 +85,11 @@ find_chrome() {
         "/Applications/Chromium.app/Contents/MacOS/Chromium" \
         "/usr/bin/google-chrome" \
         "/usr/bin/chromium" \
-        "/usr/bin/chromium-browser"
+        "/usr/bin/chromium-browser" \
+        "/c/Program Files/Google/Chrome/Application/chrome.exe" \
+        "/c/Program Files (x86)/Google/Chrome/Application/chrome.exe" \
+        "C:/Program Files/Google/Chrome/Application/chrome.exe" \
+        "C:/Program Files (x86)/Google/Chrome/Application/chrome.exe"
     do
         [ -x "$candidate" ] && { echo "$candidate"; return 0; }
     done
@@ -213,14 +219,22 @@ for page in $PAGES; do
     if [ "$DIFF_ONLY" -eq 0 ] && [ "$SIMPLE_ONLY" -eq 0 ]; then
         profile="$OUT/.chrome-profile-$page"
         rm -rf "$profile"
+        # Windows Chrome needs native (C:/...) paths, not MSYS /c/... ones.
+        if command -v cygpath >/dev/null 2>&1; then
+            c_profile=$(cygpath -m "$repo_root/$profile")
+            c_shot=$(cygpath -m "$repo_root/$OUT/$page.chrome.png")
+            c_url="file:///$(cygpath -m "$repo_root/$html")"
+        else
+            c_profile="$profile"; c_shot="$OUT/$page.chrome.png"; c_url="file://$repo_root/$html"
+        fi
         t0=$(now_ms)
         perl -e 'alarm shift; exec @ARGV' "$CHROME_TIMEOUT" \
             "$CHROME_BIN" --headless=new --disable-gpu --hide-scrollbars \
             --no-first-run --no-default-browser-check --disable-extensions \
             --force-device-scale-factor=1 --virtual-time-budget=3000 \
-            --user-data-dir="$profile" \
+            --user-data-dir="$c_profile" \
             --window-size="$WIDTH,$HEIGHT" \
-            --screenshot="$OUT/$page.chrome.png" "file://$repo_root/$html" >/dev/null 2>&1
+            --screenshot="$c_shot" "$c_url" >/dev/null 2>&1
         chrome_rc=$?
         if [ ! -s "$OUT/$page.chrome.png" ]; then
             echo "page=$page status=error reason=chrome-timeout-or-no-screenshot rc=$chrome_rc"
