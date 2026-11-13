@@ -1,0 +1,67 @@
+# Hosted internal-ELF target admission (SIMPLE_LINKER=internal): which
+# (os, arch) pairs reach the internal:elf engine, the RelocArch they map to,
+# and the default system library directories. Pure, so riscv64 is checked on
+# any host by injecting the host pair.
+#
+# riscv64 is admitted at this gate; the engine then refuses every hosted
+# (dynamic) RV64 link with a named "unsupported" error because RV64
+# PLT/GOT/dynamic relocations are not implemented -- pinned below so the
+# receipt classifies it as UnsupportedFeature, not ResourceFailure.
+use compiler.backend.linker.internal_elf_hosted_target.{internal_elf_hosted_target_v1}
+use compiler.backend.linker.reloc_engine.{RelocArch}
+use compiler.backend.linker.elf.elf_static_link.{elf_link, ElfLinkRequest, ELF_LINK_DYNAMIC_EXEC,
+    ELF_LINK_DYNAMIC_PIE}
+use compiler.backend.linker.link_engine_external.{classify_internal_error}
+use std.common.linker.link_receipt_v1.{LinkOutcomeV1}
+
+fn target_err(os: text, arch: text, host_os: text, host_arch: text) -> text:
+    val r = internal_elf_hosted_target_v1(os, arch, host_os, host_arch)
+    if r.is_ok():
+        return ""
+    r.unwrap_err()
+
+fn rv64_dynamic_err(mode: i64) -> text:
+    val req = ElfLinkRequest(objects: [], archives: [], shared: [], entry: "_start",
+        target: RelocArch.Riscv64, mode: mode, interp: "/lib/ld-linux-riscv64-lp64d.so.1")
+    val r = elf_link(req)
+    if r.is_ok():
+        return ""
+    r.unwrap_err()
+
+describe "internal ELF hosted target admission":
+    it "admits riscv64 Linux on a riscv64 host with the RV64 relocation target":
+        val t = internal_elf_hosted_target_v1("linux", "riscv64", "linux", "riscv64").unwrap()
+        expect(t.arch).to_equal("riscv64")
+        expect(t.reloc == RelocArch.Riscv64).to_equal(true)
+        expect(t.lib_dirs.contains("/lib/riscv64-linux-gnu")).to_equal(true)
+        expect(t.lib_dirs.contains("/usr/lib/riscv64-linux-gnu")).to_equal(true)
+        expect(t.lib_dirs.contains("/usr/lib/aarch64-linux-gnu")).to_equal(false)
+
+    it "normalizes the rv64 spelling and admits FreeBSD riscv64":
+        expect(internal_elf_hosted_target_v1("linux", "rv64", "linux", "riscv64").unwrap().arch).to_equal("riscv64")
+        expect(internal_elf_hosted_target_v1("freebsd", "riscv64", "freebsd", "riscv64").unwrap().reloc == RelocArch.Riscv64).to_equal(true)
+
+    it "keeps x86_64 and aarch64 mappings and directories unchanged":
+        val x = internal_elf_hosted_target_v1("linux", "amd64", "linux", "x86_64").unwrap()
+        expect(x.arch).to_equal("x86_64")
+        expect(x.reloc == RelocArch.X86_64).to_equal(true)
+        expect(x.lib_dirs).to_equal(["/lib/x86_64-linux-gnu", "/usr/lib/x86_64-linux-gnu", "/lib64", "/usr/lib64"])
+        val a = internal_elf_hosted_target_v1("linux", "arm64", "linux", "aarch64").unwrap()
+        expect(a.arch).to_equal("aarch64")
+        expect(a.reloc == RelocArch.AArch64).to_equal(true)
+        expect(a.lib_dirs).to_equal(["/lib/aarch64-linux-gnu", "/usr/lib/aarch64-linux-gnu", "/lib", "/usr/lib"])
+
+    it "refuses 32-bit and unknown architectures by name":
+        expect(target_err("linux", "riscv32", "linux", "riscv32")).to_contain("unsupported architecture 'riscv32'")
+        expect(target_err("linux", "i686", "linux", "i686")).to_contain("x86_64, aarch64 and riscv64 only")
+
+    it "refuses cross-host and non-ELF-hosted operating systems":
+        expect(target_err("linux", "riscv64", "linux", "aarch64")).to_contain("unsupported cross-host link (target linux/riscv64")
+        expect(target_err("freebsd", "riscv64", "linux", "riscv64")).to_contain("unsupported cross-host link")
+        expect(target_err("windows", "x86_64", "windows", "x86_64")).to_contain("unsupported hosted ELF OS 'windows'")
+
+    it "has the engine refuse a hosted RV64 link as an unsupported feature":
+        val exec_err = rv64_dynamic_err(ELF_LINK_DYNAMIC_EXEC)
+        expect(exec_err).to_contain("unsupported RISC-V output mode")
+        expect(rv64_dynamic_err(ELF_LINK_DYNAMIC_PIE)).to_contain("unsupported RISC-V output mode")
+        expect(classify_internal_error(exec_err) == LinkOutcomeV1.UnsupportedFeature).to_equal(true)

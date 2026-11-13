@@ -1,0 +1,110 @@
+# `simple spl-coverage module` end to end: per-module line, decision, outcome
+# and condition coverage from a SIMPLE_COVERAGE artifact, and the --min gate.
+#
+# The artifact below is the seed collector's real output for
+# test/fixtures/coverage/covreport_fixture.spl (covrep_classify(5),
+# covrep_classify(0), covrep_sum([1, 2])); the hand-counted figures are pinned
+# in test/01_unit/lib/common/coverage_module_report_spec.spl.
+#
+# Coverage of src/app/spl_coverage/main.spl itself: set
+# SPL_COVERAGE_MODULE_CHILD_COV_DIR=<dir> and every CLI child runs with
+# SIMPLE_COVERAGE=1 and writes <dir>/child_<tag>.sdn; report them with
+# `spl-coverage module --file <dir>/child_<tag>.sdn ... src/app/spl_coverage/main.spl`.
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+use std.nogc_sync_mut.env.platform.{is_windows, get_temp_dir}
+use std.env.variables.{env_get}
+use std.nogc_sync_mut.io.env_ops.{cwd}
+use std.fs.{file_write_text}
+
+val CLI_RUN_TIMEOUT_MS: i64 = 120000
+val CLI_RUN_MAX_OUT: i64 = 16777216
+val FIXTURE: text = "test/fixtures/coverage/covreport_fixture.spl"
+val FIXTURE_LINE: text = "coverage-module: test/fixtures/coverage/covreport_fixture.spl lines=58.3% (7/12) decisions=33.3% (1/3 both outcomes) outcomes=50.0% (3/6) conditions=0.0% (0/2) toplevel_excluded=0 inactive_platform=0 recorded=yes"
+
+fn _child_cov_env(tag: text) -> [(text, text)]:
+    val dir = env_get("SPL_COVERAGE_MODULE_CHILD_COV_DIR") ?? ""
+    if dir == "":
+        return [("SIMPLE_COVERAGE", "")]
+    [("SIMPLE_COVERAGE", "1"), ("SIMPLE_COVERAGE_OUTPUT", "{dir}/child_{tag}.sdn")]
+
+# `tag` names the child's coverage artifact; each call site uses its own.
+fn _run_spl_coverage(tag: text, args: [text]) -> (text, text, i64):
+    val repo = cwd().replace("\\", "/")
+    val program = if is_windows(): repo + "/bin/simple.exe" else: repo + "/bin/simple"
+    val joined = (["src/app/spl_coverage/main.spl"] + args).join(" ")
+    if is_windows():
+        var cmd = ""
+        for (key, value) in _child_cov_env(tag):
+            cmd = cmd + "set \"" + key + "=" + value + "\" && "
+        cmd = cmd + "set \"SIMPLE_LIB=" + repo + "/src\" && " + program + " run " + joined
+        return process_run_bounded(env_get("ComSpec") ?? "cmd.exe", ["/d", "/c", cmd], CLI_RUN_TIMEOUT_MS, CLI_RUN_MAX_OUT)
+    var prefix = ""
+    for (key, value) in _child_cov_env(tag):
+        prefix = prefix + key + "=\"" + value + "\" "
+    process_run_bounded("/bin/sh", ["-c", prefix + "SIMPLE_LIB=\"" + repo + "/src\" \"" + program + "\" run " + joined],
+        CLI_RUN_TIMEOUT_MS, CLI_RUN_MAX_OUT)
+
+fn _artifact() -> text:
+    val abs = "/repo/" + FIXTURE
+    val sdn = "# Coverage Report\nversion: 1.0\n\nlines |file, line, hit_count|\n" +
+        "    {abs}, 4, 1\n    {abs}, 5, 1\n    {abs}, 6, 1\n" +
+        "    {abs}, 12, 1\n    {abs}, 13, 1\n    {abs}, 14, 1\n    {abs}, 15, 1\n\n" +
+        "functions |name, call_count|\n    covrep_classify, 2\n    covrep_sum, 1\n\n" +
+        "# Runtime decision/condition coverage\n" +
+        "decisions |id, file, line, column, true_count, false_count|\n" +
+        "    3185411318, {abs}, 5, 5, 1, 1\n" +
+        "    2579957545, {abs}, 19, 5, 0, 0\n" +
+        "    3022333900, {abs}, 7, 5, 0, 1\n\n" +
+        "conditions |decision_id, condition_id, file, line, column, true_count, false_count|\n" +
+        "    2579957545, 0, {abs}, 19, 5, 0, 0\n" +
+        "    2579957545, 1, {abs}, 19, 5, 0, 0\n"
+    val path = get_temp_dir().replace("\\", "/") + "/spl_coverage_module_spec_artifact.sdn"
+    expect(file_write_text(path, sdn)).to_equal(true)
+    path
+
+describe "spl-coverage module":
+    # @manual scenario evidence
+    it "lists the module command in help":
+        val (out, err, code) = _run_spl_coverage("help", ["--help"])
+        expect(code).to_equal(0)
+        expect(out).to_contain("module    Per-module line %")
+
+    it "prints one coverage-module line per module from an artifact":
+        val (out, err, code) = _run_spl_coverage("report", ["module", "--file", _artifact(), FIXTURE])
+        expect(code).to_equal(0)
+        expect(out).to_contain(FIXTURE_LINE)
+
+    it "passes --min when line and decision coverage reach it and fails when they do not":
+        val artifact = _artifact()
+        val (low_out, low_err, low_code) = _run_spl_coverage("min_low", ["module", "--file", artifact, "--min", "30", FIXTURE])
+        expect(low_code).to_equal(0)
+        expect(low_out).to_contain("lines=58.3%")
+        val (high_out, high_err, high_code) = _run_spl_coverage("min_high", ["module", "--file", artifact, "--min", "90", FIXTURE])
+        expect(high_code).to_equal(1)
+        expect(high_out).to_contain("lines=58.3%")
+
+    it "fails --min for a module the artifact never recorded":
+        val (out, err, code) = _run_spl_coverage("unrecorded", ["module", "--file", _artifact(), "--min", "0", "src/app/spl_coverage/main.spl"])
+        expect(code).to_equal(1)
+        expect(out).to_contain("recorded=no")
+
+    it "applies --os and --arch to @when platform blocks":
+        val (out, err, code) = _run_spl_coverage("platform", ["module", "--file", _artifact(), "--os", "freebsd", "--arch", "riscv64", FIXTURE])
+        expect(code).to_equal(0)
+        expect(out).to_contain("inactive_platform=0")
+
+    it "rejects missing arguments, a non-numeric --min and unreadable inputs":
+        val artifact = _artifact()
+        val (no_file_out, no_file_err, no_file_code) = _run_spl_coverage("no_file", ["module", FIXTURE])
+        expect(no_file_code).to_equal(1)
+        expect(no_file_out).to_contain("module requires at least one --file")
+        val (bad_min_out, bad_min_err, bad_min_code) = _run_spl_coverage("bad_min", ["module", "--file", artifact, "--min", "9x", FIXTURE])
+        expect(bad_min_code).to_equal(1)
+        expect(bad_min_out).to_contain("--min needs a whole percentage, got: 9x")
+        val (no_src_out, no_src_err, no_src_code) = _run_spl_coverage("no_src", ["module", "--file", artifact, "test/fixtures/coverage/no_such_module.spl"])
+        expect(no_src_code).to_equal(1)
+        expect(no_src_out).to_contain("module source not found")
+        val (no_art_out, no_art_err, no_art_code) = _run_spl_coverage("no_art", ["module", "--file", "/nonexistent/spl_cov_module.sdn", FIXTURE])
+        expect(no_art_code).to_equal(1)
+        expect(no_art_out).to_contain("Error:")
