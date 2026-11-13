@@ -79,6 +79,18 @@ SIMPLE_RUNTIME_PATH="path/to/seed/target" bin/simple native-build ...
 Hosted link backfills `rt_*` externs from `libsimple_native_all.a` only if the env var
 points to correct seed target.
 
+**Clang-only C driver (2026-11-13).** The hosted link used to fall back to bare `cc`
+(`native_linking.spl`) and `find_c_compiler()` to `/usr/bin/gcc` / `/usr/bin/cc`; on a
+Debian-family host that is gcc-13 and the link output shows `collect2` — the tell that
+GCC drove the link. Both are gone: `runtime_compiler.spl` selects `clang`, `clang-23`..
+`clang-16` only, probes `SIMPLE_CC` (`command -v`, `readlink -f`, `--version` via the
+invoked name) and REFUSES a GCC driver with `[cc-detect] REFUSED ...` naming the rule
+and the fix (`. scripts/setup/llvm-toolchain-env.shs` or `SIMPLE_CC=clang-23`). The
+pure-Simple finder honours `SIMPLE_CC` + PATH, the seed honours `CC`; the bootstrap
+exports `SIMPLE_CC=$CC` so both agree there. The Linux hosted cross lane
+(`aarch64-linux-gnu-gcc`, `riscv64-linux-gnu-gcc`) is the one remaining GCC use —
+`doc/08_tracking/bug/hosted_native_link_gcc_fallback_clang_only_policy_2026-11-13.md`.
+
 ## Trait receivers and unresolved method calls (2026-10-20)
 - `class X with Trait:` is a trait implementation (HirImpl + vtable +
   `trait_impls`), recorded only when the class defines every abstract method;

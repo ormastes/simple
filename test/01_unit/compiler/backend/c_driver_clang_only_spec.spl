@@ -1,0 +1,119 @@
+use std.spec.*
+use compiler.backend.runtime_compiler.{CDriverProbeV1, c_driver_classify_v1, c_compiler_select_v1, c_compiler_candidates_v1, cxx_driver_for_c_driver_v1}
+
+# CLAUDE.md Critical Rule: "Never use GCC. Toolchain is clang + lld (mold ...)".
+# The hosted native link path used to fall back to `/usr/bin/gcc` and bare `cc`
+# (gcc-13 + collect2 on Ubuntu). These are the pure decision functions behind
+# find_c_compiler(); the I/O shell only feeds them `command -v` / `readlink -f`
+# / `--version` results.
+
+val GCC_BANNER = "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0\nCopyright (C) 2023 Free Software Foundation, Inc."
+val CLANG_BANNER = "clang version 23.1.0 (https://github.com/llvm/llvm-project.git ea7d852a70e8)"
+val APPLE_BANNER = "Apple clang version 16.0.0 (clang-1600.0.26.3)"
+
+describe "clang-only C driver selection":
+    it "classifies drivers by resolved path and banner":
+        # @req REQ-SSPEC-COMPILER
+        step("classifies drivers by resolved path and banner")
+        expect(c_driver_classify_v1("/usr/bin/x86_64-linux-gnu-gcc-13", GCC_BANNER)).to_equal("gcc")
+        expect(c_driver_classify_v1("/usr/bin/gcc", "")).to_equal("gcc")
+        expect(c_driver_classify_v1("/usr/bin/g++-13", "")).to_equal("gcc")
+        # `cc` symlinked to gcc: path alone says nothing, the FSF banner does
+        expect(c_driver_classify_v1("/usr/bin/cc", GCC_BANNER)).to_equal("gcc")
+        expect(c_driver_classify_v1("/home/yoon/dev/llvm/install/bin/clang-23", CLANG_BANNER)).to_equal("clang")
+        expect(c_driver_classify_v1("/usr/bin/cc", APPLE_BANNER)).to_equal("clang")
+        expect(c_driver_classify_v1("C:/llvm-mingw/bin/clang-cl.exe", "")).to_equal("clang")
+        expect(c_driver_classify_v1("/usr/bin/cc", "")).to_equal("unknown")
+
+    it "refuses a PATH that only offers gcc":
+        # @req REQ-SSPEC-COMPILER
+        step("refuses a PATH that only offers gcc")
+        # No clang candidate resolved; gcc/cc are not probed at all.
+        val probes: [CDriverProbeV1] = []
+        val result = c_compiler_select_v1(probes)
+        expect(result.is_err()).to_be(true)
+        val msg = result.unwrap_err()
+        expect(msg.contains("Never use GCC")).to_be(true)
+        expect(msg.contains("llvm-toolchain-env.shs")).to_be(true)
+
+    it "selects clang when present and honours the versioned clang-23 convention":
+        # @req REQ-SSPEC-COMPILER
+        step("selects clang when present")
+        val probes = [
+            CDriverProbeV1(name: "clang", invoked_path: "", resolved_path: "", version_banner: "", explicit: false),
+            CDriverProbeV1(name: "clang-23", invoked_path: "/home/yoon/dev/llvm/install/bin/clang-23", resolved_path: "/home/yoon/dev/llvm/install/bin/clang-23", version_banner: CLANG_BANNER, explicit: false)
+        ]
+        val result = c_compiler_select_v1(probes)
+        expect(result.is_ok()).to_be(true)
+        expect(result.unwrap()).to_equal("/home/yoon/dev/llvm/install/bin/clang-23")
+        expect(c_compiler_candidates_v1()[0]).to_equal("clang")
+        expect(c_compiler_candidates_v1().contains("clang-23")).to_be(true)
+        expect(c_compiler_candidates_v1().contains("gcc")).to_be(false)
+        expect(c_compiler_candidates_v1().contains("cc")).to_be(false)
+
+    it "refuses SIMPLE_CC=gcc instead of falling back":
+        # @req REQ-SSPEC-COMPILER
+        step("refuses SIMPLE_CC=gcc")
+        val probes = [
+            CDriverProbeV1(name: "gcc", invoked_path: "/usr/bin/gcc", resolved_path: "/usr/bin/gcc", version_banner: GCC_BANNER, explicit: true),
+            CDriverProbeV1(name: "clang", invoked_path: "/usr/bin/clang", resolved_path: "/usr/bin/clang", version_banner: CLANG_BANNER, explicit: false)
+        ]
+        val result = c_compiler_select_v1(probes)
+        expect(result.is_err()).to_be(true)
+        val msg = result.unwrap_err()
+        expect(msg.contains("'gcc'")).to_be(true)
+        expect(msg.contains("Never use GCC")).to_be(true)
+        expect(msg.contains("SIMPLE_CC=clang")).to_be(true)
+
+    it "refuses cc that resolves to gcc even when clang would have been next":
+        # @req REQ-SSPEC-COMPILER
+        step("refuses cc symlinked to gcc")
+        val probes = [
+            CDriverProbeV1(name: "cc", invoked_path: "/usr/bin/x86_64-linux-gnu-gcc-13", resolved_path: "/usr/bin/x86_64-linux-gnu-gcc-13", version_banner: GCC_BANNER, explicit: true),
+            CDriverProbeV1(name: "clang", invoked_path: "/usr/bin/clang", resolved_path: "/usr/bin/clang", version_banner: CLANG_BANNER, explicit: false)
+        ]
+        val result = c_compiler_select_v1(probes)
+        expect(result.is_err()).to_be(true)
+        expect(result.unwrap_err().contains("x86_64-linux-gnu-gcc-13")).to_be(true)
+
+    it "refuses an explicit driver that is not on PATH or not recognisably clang":
+        # @req REQ-SSPEC-COMPILER
+        step("refuses explicit unresolved or unknown driver")
+        val missing = [CDriverProbeV1(name: "clang-99", invoked_path: "", resolved_path: "", version_banner: "", explicit: true)]
+        expect(c_compiler_select_v1(missing).is_err()).to_be(true)
+        val unknown = [CDriverProbeV1(name: "tcc", invoked_path: "/usr/bin/tcc", resolved_path: "/usr/bin/tcc", version_banner: "tcc 0.9", explicit: true)]
+        expect(c_compiler_select_v1(unknown).is_err()).to_be(true)
+
+    it "keeps an explicit clang spelling and skips an unknown non-explicit probe":
+        # @req REQ-SSPEC-COMPILER
+        step("explicit clang spelling is returned verbatim")
+        val probes = [
+            CDriverProbeV1(name: "clang-23", invoked_path: "/home/yoon/dev/llvm/install/bin/clang-23", resolved_path: "/home/yoon/dev/llvm/install/bin/clang-23", version_banner: CLANG_BANNER, explicit: true)
+        ]
+        expect(c_compiler_select_v1(probes).unwrap()).to_equal("clang-23")
+        val skipped = [
+            CDriverProbeV1(name: "clang", invoked_path: "/opt/odd/clang", resolved_path: "/opt/odd/clang", version_banner: "", explicit: false),
+            CDriverProbeV1(name: "clang-20", invoked_path: "/usr/bin/clang-20", resolved_path: "/usr/bin/clang-20", version_banner: CLANG_BANNER, explicit: false)
+        ]
+        # basename `clang` with no banner still classifies as clang (no exec needed)
+        expect(c_compiler_select_v1(skipped).unwrap()).to_equal("/opt/odd/clang")
+        # ccache masquerade dir first on PATH (/usr/lib64/ccache/clang -> /usr/bin/ccache):
+        # realpath is opaque, the banner (read via the invoked name) says clang ->
+        # admitted, and the PATH entry is returned, never the ccache realpath
+        val wrapped = [CDriverProbeV1(name: "clang", invoked_path: "/usr/lib64/ccache/clang", resolved_path: "/usr/bin/ccache", version_banner: CLANG_BANNER, explicit: false)]
+        expect(c_compiler_select_v1(wrapped).unwrap()).to_equal("/usr/lib64/ccache/clang")
+        val wrapped_explicit = [CDriverProbeV1(name: "clang", invoked_path: "/usr/lib64/ccache/clang", resolved_path: "/usr/bin/ccache", version_banner: CLANG_BANNER, explicit: true)]
+        expect(c_compiler_select_v1(wrapped_explicit).unwrap()).to_equal("clang")
+        # a masquerade whose realpath is GCC is still refused (realpath classifies)
+        val masked_gcc = [CDriverProbeV1(name: "cc", invoked_path: "/usr/lib64/ccache/cc", resolved_path: "/usr/bin/x86_64-linux-gnu-gcc-13", version_banner: "", explicit: false)]
+        expect(c_compiler_select_v1(masked_gcc).is_err()).to_be(true)
+
+    it "derives the C++ driver from the selected C driver":
+        # @req REQ-SSPEC-COMPILER
+        step("derives clang++ from clang")
+        expect(cxx_driver_for_c_driver_v1("clang")).to_equal("clang++")
+        expect(cxx_driver_for_c_driver_v1("/usr/bin/clang-23")).to_equal("/usr/bin/clang++-23")
+        expect(cxx_driver_for_c_driver_v1("clang-cl")).to_equal("clang-cl")
+        expect(cxx_driver_for_c_driver_v1("C:/llvm/bin/clang.exe")).to_equal("C:/llvm/bin/clang++.exe")
+        expect(cxx_driver_for_c_driver_v1("C:\\LLVM\\bin\\clang.exe")).to_equal("C:\\LLVM\\bin\\clang++.exe")
+        expect(cxx_driver_for_c_driver_v1("C:\\LLVM\\bin\\clang-cl.exe")).to_equal("C:\\LLVM\\bin\\clang-cl.exe")

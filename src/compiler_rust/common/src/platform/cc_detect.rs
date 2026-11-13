@@ -114,13 +114,73 @@ pub fn missing_compiler_error(tool: &str) -> String {
     )
 }
 
-/// Fail fast when the selected compiler cannot be run.
-pub fn require_compiler(tool: &str) -> Result<(), String> {
-    if command_exists(tool) {
-        Ok(())
-    } else {
-        Err(missing_compiler_error(tool))
+/// Clang-only policy (CLAUDE.md Critical Rules: "Never use GCC"). The `CC`
+/// override is honoured verbatim by `detect_c_compiler_for_target`, so a
+/// `CC=gcc` or a bare `cc` that is really gcc-13 would otherwise reach
+/// `Command::new` and link through collect2. Returns the refusal text, or
+/// `None` when the driver is acceptable. Only the documented hosted cross
+/// drivers (`DOCUMENTED_CROSS_GCC_DRIVERS`, the names `hosted_linux_cross_compiler`
+/// and `WINDOWS_GNU_CROSS_*` emit) are exempt — the QEMU cross lane's own,
+/// still-open gap. Any other `*gcc*` basename, including a host-triple
+/// `x86_64-linux-gnu-gcc-13`, is refused, matching the Simple side's
+/// `c_driver_classify_v1`.
+const DOCUMENTED_CROSS_GCC_DRIVERS: &[&str] = &[
+    "aarch64-linux-gnu-gcc",
+    "aarch64-linux-gnu-g++",
+    "riscv64-linux-gnu-gcc",
+    "riscv64-linux-gnu-g++",
+    "arm-linux-gnueabihf-gcc",
+    "arm-linux-gnueabihf-g++",
+    "i686-linux-gnu-gcc",
+    "i686-linux-gnu-g++",
+    "x86_64-w64-mingw32-gcc",
+    "x86_64-w64-mingw32-g++",
+];
+
+pub fn gcc_driver_refusal(tool: &str, version_banner: &str) -> Option<String> {
+    let base = tool.rsplit(['/', '\\']).next().unwrap_or(tool).to_ascii_lowercase();
+    let base = base.strip_suffix(".exe").unwrap_or(&base);
+    if DOCUMENTED_CROSS_GCC_DRIVERS.contains(&base) {
+        return None;
     }
+    let gcc_name = |stem: &str| {
+        base == stem || base.starts_with(&format!("{stem}-")) || base.ends_with(&format!("-{stem}")) || base.contains(&format!("-{stem}-"))
+    };
+    let bare_gcc = gcc_name("gcc") || gcc_name("g++");
+    let banner = version_banner.to_ascii_lowercase();
+    let banner_is_gcc = !banner.contains("clang version")
+        && (banner.contains("free software foundation") || banner.contains("gcc version") || banner.contains("(gcc)"));
+    let generic_name = base == "cc" || base == "c++";
+    if bare_gcc || (generic_name && banner_is_gcc) {
+        return Some(format!(
+            "clang-only policy (CLAUDE.md: Never use GCC): C driver `{tool}` is GCC. \
+             gcc, g++ and a `cc` that resolves to gcc are never used as a fallback. \
+             Fix: `. scripts/setup/llvm-toolchain-env.shs` (clang-23, ld.lld/mold on PATH) or set CC=clang"
+        ));
+    }
+    None
+}
+
+fn version_banner(tool: &str) -> String {
+    std::process::Command::new(tool)
+        .arg("--version")
+        .output()
+        .map(|out| String::from_utf8_lossy(&out.stdout).lines().take(3).collect::<Vec<_>>().join("\n"))
+        .unwrap_or_default()
+}
+
+/// Fail fast when the selected compiler cannot be run, or is GCC.
+pub fn require_compiler(tool: &str) -> Result<(), String> {
+    if let Some(refusal) = gcc_driver_refusal(tool, "") {
+        return Err(refusal);
+    }
+    if !command_exists(tool) {
+        return Err(missing_compiler_error(tool));
+    }
+    if let Some(refusal) = gcc_driver_refusal(tool, &version_banner(tool)) {
+        return Err(refusal);
+    }
+    Ok(())
 }
 
 /// Find a C++ compiler.
@@ -304,6 +364,23 @@ pub fn command_exists(name: &str) -> bool {
 mod tests {
     use super::*;
     use crate::target::TargetArch;
+
+    #[test]
+    fn gcc_drivers_are_refused_and_clang_is_not() {
+        let fsf = "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0\nCopyright (C) 2023 Free Software Foundation, Inc.";
+        assert!(gcc_driver_refusal("gcc", "").is_some());
+        assert!(gcc_driver_refusal("/usr/bin/g++-13", "").is_some());
+        assert!(gcc_driver_refusal("cc", fsf).is_some());
+        assert!(gcc_driver_refusal("cc", "").is_none(), "an unprobed `cc` is only refused once its banner says GCC");
+        assert!(gcc_driver_refusal("cc", "Apple clang version 16.0.0").is_none());
+        assert!(gcc_driver_refusal("clang-23", "clang version 23.1.0").is_none());
+        assert!(gcc_driver_refusal("clang-cl.exe", "").is_none());
+        assert!(gcc_driver_refusal("aarch64-linux-gnu-gcc", "").is_none(), "documented hosted cross drivers are the cross lane's own gap");
+        assert!(gcc_driver_refusal("/usr/bin/x86_64-linux-gnu-gcc-13", "").is_some(), "a host-triple gcc is still gcc");
+        assert!(gcc_driver_refusal("mips-linux-gnu-gcc", "").is_some(), "undocumented cross gcc is refused");
+        let message = gcc_driver_refusal("gcc", "").unwrap();
+        assert!(message.contains("Never use GCC") && message.contains("llvm-toolchain-env.shs"), "{message}");
+    }
 
     #[test]
     fn blank_tool_overrides_use_target_detection() {
