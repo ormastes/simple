@@ -293,3 +293,43 @@ describe "Shared SPL and SDN data schema resolver":
         expect(injected.kind == DataSchemaErrorKindV1.UnauthorizedInjection).to_equal(true)
         expect(injected.message.contains("vendor/pkg/policy.sdn:4")).to_equal(true)
         expect(other_tree.kind == DataSchemaErrorKindV1.UnauthorizedInjection).to_equal(true)
+
+    it "resolves a node attribute's storage mechanism along the subject chain and refuses conflicting pins":
+        # @req REQ-ATTR-07
+        step("Write storage rules at every level of the chain: field tag, SDN field row, view tag, SDN tree row")
+        val view = "compiler.ast.BinaryExprView"
+        val field_tag = layout_rule(view + ".op", DataRuleSpecificityV1.ExactSite, DataRuleStrengthV1.Pin, "sparse_hash", false, spl_at(12))
+        val sdn_field_hint = layout_rule(view + ".op", DataRuleSpecificityV1.ExactSite, DataRuleStrengthV1.Hint, "column", false, sdn_at(30))
+        val sdn_field_pin = layout_rule(view + ".op", DataRuleSpecificityV1.ExactSite, DataRuleStrengthV1.Pin, "column", false, sdn_at(31))
+        val view_tag = layout_rule(view, DataRuleSpecificityV1.OwningType, DataRuleStrengthV1.Pin, "direct", false, spl_at(10))
+        val sdn_tree = layout_rule("compiler.ast", DataRuleSpecificityV1.Module, DataRuleStrengthV1.Pin, "column", false, sdn_at(40))
+        val other_field = layout_rule(view + ".left", DataRuleSpecificityV1.ExactSite, DataRuleStrengthV1.Pin, "sparse_hash", false, sdn_at(50))
+        # @capture(exec): resolved storage choices
+        step("Verify the most specific level decides and a less specific rule is a default, not a conflict")
+        val tagged = data_attr_storage_resolve_v1("compiler.ast", view, "op", [sdn_tree, view_tag, sdn_field_hint, field_tag], "direct").unwrap()
+        expect(tagged.choice).to_equal("sparse_hash")  # oracle: the field tag outranks the SDN field hint and every wider rule
+        expect(tagged.from_default).to_equal(false)
+        expect(data_decl_provenance_text_v1(tagged.provenances[0])).to_equal("spl:src/compiler/10.frontend/core/ast_nodes.spl:12")
+        expect(data_attr_storage_resolve_v1("compiler.ast", view, "op", [sdn_tree, view_tag, sdn_field_pin], "direct").unwrap().choice).to_equal("column")  # oracle: SDN field row over the view tag
+        expect(data_attr_storage_resolve_v1("compiler.ast", view, "op", [sdn_tree, view_tag], "direct").unwrap().choice).to_equal("direct")  # oracle: view tag over the SDN tree row
+        expect(data_attr_storage_resolve_v1("compiler.ast", view, "op", [sdn_tree, other_field], "direct").unwrap().choice).to_equal("column")  # oracle: a rule for another field does not apply
+        val fallback = data_attr_storage_resolve_v1("compiler.ast", view, "op", [other_field], "direct").unwrap()
+        expect(fallback.choice).to_equal("direct")
+        expect(fallback.from_default).to_equal(true)
+        step("Verify a tag and an SDN pin that disagree at one level are a diagnostic in either order")
+        val forward = data_attr_storage_resolve_v1("compiler.ast", view, "op", [field_tag, sdn_field_pin], "direct")
+        val backward = data_attr_storage_resolve_v1("compiler.ast", view, "op", [sdn_field_pin, field_tag], "direct")
+        expect(forward.is_err()).to_equal(true)
+        expect(forward.unwrap_err().kind == DataSchemaErrorKindV1.PinConflict).to_equal(true)
+        expect(forward.unwrap_err().message).to_equal(backward.unwrap_err().message)
+        expect(forward.unwrap_err().message.contains("ast_nodes.spl:12")).to_equal(true)
+        expect(forward.unwrap_err().message.contains("data_policy.sdn:31")).to_equal(true)
+        val ambiguous = data_attr_storage_resolve_v1("compiler.ast", view, "op", [sdn_field_hint,
+            layout_rule(view + ".op", DataRuleSpecificityV1.ExactSite, DataRuleStrengthV1.Hint, "direct", false, sdn_at(32))], "direct")
+        expect(ambiguous.unwrap_err().kind == DataSchemaErrorKindV1.AmbiguousRule).to_equal(true)
+        step("Verify SDN site and module rows feed the same resolver")
+        val sdn = "data_policy:\n    rules:\n        op_column:\n            site: \"compiler.ast.BinaryExprView.op\"\n            layout: \"column\"\n            pin: true\n        ast_direct:\n            module: \"compiler.ast\"\n            layout: \"direct\"\n"
+        val rows = data_policy_rules_from_sdn_v1(sdn, "config/data_policy.sdn", "compiler.ast").unwrap()
+        expect(data_attr_storage_resolve_v1("compiler.ast", view, "op", rows, "direct").unwrap().choice).to_equal("column")
+        expect(data_attr_storage_resolve_v1("compiler.ast", view, "left", rows, "direct").unwrap().choice).to_equal("direct")
+        expect(data_attr_storage_resolve_v1("compiler.ast", view, "left", rows, "direct").unwrap().from_default).to_equal(false)

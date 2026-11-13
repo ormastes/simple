@@ -476,3 +476,46 @@ pub fn data_policy_rules_from_sdn_v1(source: text, path: text, owner: text) -> R
     if diags.len() > 0:
         return Err(diags)
     Ok(rules)
+
+# ---------------------------------------------------------------------------
+# Node-attribute storage mechanism (plan 3.1 "stored implementation", 6.2,
+# 8.4). The mechanism is a Layout-kind choice whose tokens the node-view
+# generator owns (direct | column | sparse_hash); this resolver only orders
+# the rules. It walks the subject chain most-specific first and resolves each
+# level on its own through data_policy_resolve_rules_v1:
+#   <view>.<attr>  ExactSite      field tag / SDN `site:` row
+#   <view>         OwningType     class tag / SDN `type:` row
+#   <tree>         Module         SDN `module:` row
+#   any            ProjectDefault SDN `project:` row
+# The first level that yields a non-default choice decides, so a per-attribute
+# rule overrides a tree default instead of conflicting with it. Within one
+# level the plan 8.4 rules hold: a source tag is a non-overridable pin, a
+# disagreeing build pin is a PinConflict naming both provenances, and a build
+# hint under a tag is outranked. No level has a last-writer-wins path.
+# ---------------------------------------------------------------------------
+fn data_storage_level_rules_v1(rules: [DataPolicyRuleV1], subject: text,
+                               specificity: DataRuleSpecificityV1) -> [DataPolicyRuleV1]:
+    val rank = data_rule_specificity_rank_v1(specificity)
+    var out: [DataPolicyRuleV1] = []
+    for rule in rules:
+        if data_policy_kind_code_v1(rule.kind) != data_policy_kind_code_v1(DataPolicyKindV1.Layout):
+            continue
+        if data_rule_specificity_rank_v1(rule.specificity) != rank:
+            continue
+        if rank == 0 or rule.subject == subject:
+            out.push(rule)
+    out
+
+pub fn data_attr_storage_resolve_v1(tree: text, view: text, attr: text, rules: [DataPolicyRuleV1],
+                                    default_choice: text) -> Result<DataPolicyChoiceV1, DataSchemaDiagnosticV1>:
+    val subjects = [view + "." + attr, view, tree, ""]
+    val levels = [DataRuleSpecificityV1.ExactSite, DataRuleSpecificityV1.OwningType,
+                  DataRuleSpecificityV1.Module, DataRuleSpecificityV1.ProjectDefault]
+    for i in 0..subjects.len():
+        val level = data_storage_level_rules_v1(rules, subjects[i], levels[i])
+        if level.len() == 0:
+            continue
+        val choice = data_policy_resolve_rules_v1(DataPolicyKindV1.Layout, level, default_choice)?
+        if not choice.from_default:
+            return Ok(choice)
+    Ok(DataPolicyChoiceV1(kind: DataPolicyKindV1.Layout, choice: default_choice, from_default: true, provenances: []))
