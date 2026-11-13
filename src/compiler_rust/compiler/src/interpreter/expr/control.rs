@@ -274,7 +274,7 @@ pub(super) fn eval_control_expr(
 
             for arm in arms {
                 let mut arm_bindings = HashMap::new();
-                if pattern_matches(&arm.pattern, &subject_val, &mut arm_bindings, enums, classes)? {
+                if crate::interpreter::interpreter_patterns::match_arm_matches(&arm.pattern, &subject_val, &mut arm_bindings, enums, classes)? {
                     if let Some(guard) = &arm.guard {
                         let mut guard_env = env.clone();
                         for (name, value) in &arm_bindings {

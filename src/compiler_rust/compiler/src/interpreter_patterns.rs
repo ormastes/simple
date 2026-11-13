@@ -174,6 +174,87 @@ pub(super) fn match_sequence_pattern(
     }
 }
 
+/// A callable or type value: a scrutinee no enum-variant arm can ever match.
+fn is_callable_or_type_value(value: &Value) -> bool {
+    matches!(
+        value,
+        Value::Constructor { .. }
+            | Value::Function { .. }
+            | Value::Lambda { .. }
+            | Value::BlockClosure { .. }
+            | Value::NativeFunction(_)
+            | Value::EnumType { .. }
+            | Value::EnumVariantConstructor { .. }
+            | Value::TraitType { .. }
+    )
+}
+
+/// The arm text of a variant-shaped pattern that cannot match a callable or
+/// type scrutinee, if `pattern` (seen through `|` and `: T`) contains one.
+/// `Some`/`None`/`Ok`/`Err` are excluded: a nullable callable (`fn_opt: (fn)?`)
+/// legitimately matches `case Some(f):` through the flat Option encoding.
+fn variant_arm_over_callable(pattern: &Pattern) -> Option<String> {
+    match pattern {
+        Pattern::Identifier(name) if crate::pattern_case_naming::case_name_is_spelled_like_a_variant(name) => {
+            Some(name.clone())
+        }
+        Pattern::Enum { name, variant, .. } if !matches!(variant.as_str(), "Some" | "None" | "Ok" | "Err") => {
+            Some(if name == "_" { variant.clone() } else { format!("{name}.{variant}") })
+        }
+        Pattern::Or(alternatives) => alternatives.iter().find_map(variant_arm_over_callable),
+        Pattern::Typed { pattern, .. } => variant_arm_over_callable(pattern),
+        _ => None,
+    }
+}
+
+/// `_`, or a binder NOT spelled like a variant, at the top of `pattern` or in
+/// one of its `|` alternatives. Unlike [`is_catch_all_pattern`], `I8` does not
+/// count: over a callable it is exactly the silent first-arm binding.
+fn has_binder_or_wildcard_alternative(pattern: &Pattern) -> bool {
+    match pattern {
+        Pattern::Wildcard | Pattern::MutIdentifier(_) | Pattern::MoveIdentifier(_) => true,
+        Pattern::Identifier(name) => !crate::pattern_case_naming::case_name_is_spelled_like_a_variant(name),
+        Pattern::Or(alternatives) => alternatives.iter().any(has_binder_or_wildcard_alternative),
+        Pattern::Typed { pattern, .. } => has_binder_or_wildcard_alternative(pattern),
+        _ => false,
+    }
+}
+
+/// Match one `match` arm. Identical to [`pattern_matches`] except that a
+/// variant-shaped arm reached with a constructor/function/type scrutinee is a
+/// runtime error instead of a silent answer: `case I8:` used to bind such a
+/// value irrefutably, so the match took its first arm with exit 0
+/// (match_on_callable_scrutinee_silently_takes_first_arm_2026-11-14). Only the
+/// match-arm loops call this; `val`/`if val`/`for` binding keeps
+/// [`pattern_matches`], where `val Handler = some_fn` is a legitimate binding.
+pub(crate) fn match_arm_matches(
+    pattern: &Pattern,
+    value: &Value,
+    bindings: &mut HashMap<String, Value>,
+    enums: &Enums,
+    classes: &Classes,
+) -> Result<bool, CompileError> {
+    // An arm with a real catch-all alternative (`case _ | I8:`, `case f | I8:`)
+    // still matches anything.
+    if is_callable_or_type_value(value) && !has_binder_or_wildcard_alternative(pattern) {
+        if let Some(arm) = variant_arm_over_callable(pattern) {
+            let ctx = crate::error::ErrorContext::new()
+                .with_code(crate::error::codes::INVALID_PATTERN)
+                .with_help("the scrutinee should be an enum value; check that the enum variant expression did not resolve to a same-named class, function or type");
+            return Err(CompileError::semantic_with_context(
+                format!(
+                    "invalid pattern: match scrutinee is a {} value {}, not an enum value; arm `case {}:` can never match it",
+                    value.type_name(),
+                    value.to_display_string(),
+                    arm
+                ),
+                ctx,
+            ));
+        }
+    }
+    pattern_matches(pattern, value, bindings, enums, classes)
+}
+
 /// Check if a pattern matches a value, populating bindings.
 pub(crate) fn pattern_matches(
     pattern: &Pattern,
@@ -1043,7 +1124,7 @@ mod tests {
     use crate::interpreter::evaluate_module;
     use crate::value::Value;
 
-    use super::{pattern_matches, OPTION_PATTERN_OVER_RESULT_HITS};
+    use super::{match_arm_matches, pattern_matches, OPTION_PATTERN_OVER_RESULT_HITS};
 
     /// Run a Simple snippet and return the exit code.
     /// Use `main = <expr>` to set a numeric exit code (0 = ok, non-zero = error).
@@ -1932,5 +2013,104 @@ main = construct()
 main = classify(0) + 10 * classify(5) + 100 * classify(42) + 1000 * classify(1000)
 ";
         assert_eq!(run(src), 1 + 20 + 300 + 4000);
+    }
+
+    // --- match_on_callable_scrutinee_silently_takes_first_arm_2026-11-14 ---
+    //
+    // A `match` whose scrutinee is a constructor / function / type value (not
+    // an enum value) used to bind the first variant-spelled arm (`case I8:`)
+    // as an irrefutable binding, so the match silently answered with arm 1.
+    // It must fail loudly and name the value's runtime kind instead.
+
+    fn run_err(src: &str) -> String {
+        let mut parser = Parser::new(src);
+        let module = parser.parse().expect("parse");
+        match evaluate_module(&module.items) {
+            Ok(code) => panic!("expected a runtime error, program exited with {code}"),
+            Err(e) => format!("{e:?}"),
+        }
+    }
+
+    #[test]
+    fn match_on_constructor_value_errors_instead_of_taking_first_arm() {
+        let src = "class Vec4f:\n    x: i64\nenum Kind:\n    I8\n    F32\nfn code(k: Kind) -> i64:\n    match k:\n        case I8: 1\n        case F32: 2\n        case _: 3\nmain = code(Vec4f)\n";
+        let err = run_err(src);
+        assert!(err.contains("can never match it"), "wrong error: {err}");
+        assert!(err.contains("constructor value"), "error must name the value kind: {err}");
+        assert!(err.contains("case I8"), "error must name the arm: {err}");
+    }
+
+    #[test]
+    fn statement_and_val_match_on_constructor_value_error_too() {
+        // Statement form (`exec_match_core`) and `val r = match` form.
+        let stmt = "class Vec4f:\n    x: i64\nenum Kind:\n    I8\n    F32\nfn code(k: Kind) -> i64:\n    var r = 0\n    match k:\n        case I8:\n            r = 1\n        case F32:\n            r = 2\n    r\nmain = code(Vec4f)\n";
+        let err = run_err(stmt);
+        assert!(err.contains("can never match it") && err.contains("constructor value"), "wrong error: {err}");
+        let val_form = "class Vec4f:\n    x: i64\nenum Kind:\n    I8\n    F32\nfn code(k: Kind) -> i64:\n    val r = match k:\n        case Kind.I8: 1\n        case _: 3\n    r\nmain = code(Vec4f)\n";
+        let err = run_err(val_form);
+        // The parser may lower `Kind.I8` to an unqualified variant pattern, so
+        // only the variant name is asserted.
+        assert!(err.contains("can never match it") && err.contains("I8:"), "wrong error: {err}");
+    }
+
+    #[test]
+    fn earlier_binder_or_wildcard_arm_still_wins_over_callable() {
+        let src = "enum Kind:\n    I8\n    F32\nfn helper() -> i64:\n    7\nfn code(k: Kind) -> i64:\n    match k:\n        case _: 5\n        case I8: 1\nmain = code(helper)\n";
+        assert_eq!(run(src), 5);
+    }
+
+    #[test]
+    fn match_on_function_value_errors_instead_of_taking_first_arm() {
+        let src = "enum Kind:\n    I8\n    F32\nfn helper() -> i64:\n    1\nfn code(k: Kind) -> i64:\n    match k:\n        case I8: 1\n        case F32: 2\nmain = code(helper)\n";
+        let err = run_err(src);
+        assert!(err.contains("can never match it"), "wrong error: {err}");
+        assert!(err.contains("function value"), "error must name the value kind: {err}");
+    }
+
+    #[test]
+    fn variant_spelled_arms_against_callables_refuse_directly() {
+        let enums = HashMap::new();
+        let classes = HashMap::new();
+        let pattern = Pattern::Identifier("I8".to_string());
+        for value in [
+            Value::Constructor { class_name: "Vec4f".to_string() },
+            Value::EnumType { enum_name: "Kind".to_string() },
+            Value::EnumVariantConstructor {
+                enum_name: "Kind".to_string(),
+                variant_name: "Wrap".to_string(),
+            },
+        ] {
+            let mut bindings = HashMap::new();
+            let got = match_arm_matches(&pattern, &value, &mut bindings, &enums, &classes);
+            assert!(got.is_err(), "`case I8:` over {} must be refused", value.type_name());
+            assert!(bindings.is_empty());
+        }
+        let ctor = Value::Constructor { class_name: "Vec4f".to_string() };
+        // `case I8 | F32:` and a qualified `case Kind.I8:` are refused too.
+        let or_pat = Pattern::Or(vec![Pattern::Identifier("I8".to_string()), Pattern::Identifier("F32".to_string())]);
+        let qualified = Pattern::Enum { name: "Kind".to_string(), variant: "I8".to_string(), payload: None };
+        for p in [&or_pat, &qualified] {
+            let mut bindings = HashMap::new();
+            assert!(match_arm_matches(p, &ctor, &mut bindings, &enums, &classes).is_err());
+        }
+        // Controls: lowercase binders and `_` still match a callable, `case
+        // Some(f):` keeps the flat-Option binding, a capitalized arm over plain
+        // data (`case WS_OPCODE_TEXT:` on an i64) still binds, and the shared
+        // binder `pattern_matches` (`val Handler = some_fn`) is unchanged.
+        let mut bindings = HashMap::new();
+        assert!(match_arm_matches(&Pattern::Identifier("f".to_string()), &ctor, &mut bindings, &enums, &classes).unwrap());
+        assert!(match_arm_matches(&Pattern::Wildcard, &ctor, &mut bindings, &enums, &classes).unwrap());
+        let or_catch_all = Pattern::Or(vec![Pattern::Wildcard, Pattern::Identifier("I8".to_string())]);
+        assert!(match_arm_matches(&or_catch_all, &ctor, &mut bindings, &enums, &classes).unwrap());
+        let or_binder = Pattern::Or(vec![Pattern::Identifier("I8".to_string()), Pattern::Identifier("f".to_string())]);
+        assert!(match_arm_matches(&or_binder, &ctor, &mut bindings, &enums, &classes).unwrap());
+        let some_f = Pattern::Enum {
+            name: "Option".to_string(),
+            variant: "Some".to_string(),
+            payload: Some(vec![Pattern::Identifier("f".to_string())]),
+        };
+        assert!(match_arm_matches(&some_f, &ctor, &mut bindings, &enums, &classes).unwrap());
+        assert!(match_arm_matches(&pattern, &Value::Int(2), &mut bindings, &enums, &classes).unwrap());
+        assert!(pattern_matches(&Pattern::Identifier("Handler".to_string()), &ctor, &mut bindings, &enums, &classes).unwrap());
     }
 }

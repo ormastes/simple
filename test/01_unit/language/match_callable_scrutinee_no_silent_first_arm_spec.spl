@@ -1,0 +1,99 @@
+# @tag: unit, language, interpreter, enum
+# Bug: match_on_callable_scrutinee_silently_takes_first_arm_2026-11-14
+#
+# A `match` whose scrutinee is a constructor or function value (not an enum
+# value) silently took its first variant-spelled arm: `case I8:` was treated as
+# an irrefutable binding, so `kind_name(Vec4f)` answered "i8" with exit 0. That
+# is what turned the OpenCL backend's `MirTypeKind.Vec4f` -> `<constructor:Vec4f>`
+# misresolution (PR #9002) into wrong output instead of an error. The match must
+# fail loudly, naming the value's runtime kind.
+#
+# Each case runs a fixture through the compiler binary (`SIMPLE_BINARY` or
+# `bin/simple`) in interpreter mode, because the failure is a process exit.
+use std.spec
+use std.io_runtime.{process_run, file_write, dir_create_all, env_get, env_set}
+
+fn work_dir() -> text:
+    val tmp = env_get("TMPDIR")
+    val root = if tmp != "": tmp else: "/tmp"
+    val dir = root + "/simple-spec-match-callable-scrutinee"
+    dir_create_all(dir)
+    dir
+
+fn run_interp(name: text, source: text) -> (text, text, i64):
+    val path = work_dir() + "/" + name + ".spl"
+    assert_true(file_write(path, source))
+    env_set("SIMPLE_EXECUTION_MODE", "interpret")
+    env_set("SIMPLE_RUST_SEED_WARNING", "0")
+    env_set("SIMPLE_TIMEOUT_SECONDS", "0")
+    val configured = env_get("SIMPLE_BINARY")
+    val bin = if configured == "": "bin/simple" else: configured
+    val ran = process_run(bin, ["run", path])
+    (ran[0].trim(), ran[1], ran[2])
+
+describe "match on a constructor/function scrutinee":
+    it "refuses a constructor value instead of taking the first arm":
+        val (out, err, rc) = run_interp("ctor", """class Vec4f:
+    x: i64
+
+enum Kind:
+    I8
+    F32
+
+fn kind_name(k: Kind) -> text:
+    match k:
+        case I8: "i8"
+        case F32: "f32"
+        case _: "other"
+
+fn main():
+    print(kind_name(Vec4f))
+""")
+        assert_true(rc != 0)
+        assert_true(out != "i8")
+        assert_true(err.contains("constructor value"))
+        assert_true(err.contains("can never match it"))
+
+    it "refuses a function value instead of taking the first arm":
+        val (out, err, rc) = run_interp("func", """enum Kind:
+    I8
+    F32
+
+fn helper() -> i64:
+    1
+
+fn kind_name(k: Kind) -> text:
+    match k:
+        case I8: "i8"
+        case F32: "f32"
+        case _: "other"
+
+fn main():
+    print(kind_name(helper))
+""")
+        assert_true(rc != 0)
+        assert_true(out != "i8")
+        assert_true(err.contains("function value"))
+        assert_true(err.contains("can never match it"))
+
+    it "still matches a real enum value and binds a capitalized arm over data":
+        val (out, err, rc) = run_interp("control", """enum Kind:
+    I8
+    F32
+
+fn kind_name(k: Kind) -> text:
+    match k:
+        case I8: "i8"
+        case F32: "f32"
+        case _: "other"
+
+fn label(v: i64) -> text:
+    match v:
+        case N: "bound {N}"
+
+fn main():
+    print(kind_name(Kind.F32))
+    print(label(7))
+""")
+        assert_equal(rc, 0)
+        assert_equal(out, "f32\nbound 7")

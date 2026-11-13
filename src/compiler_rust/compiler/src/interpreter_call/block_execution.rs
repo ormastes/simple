@@ -901,7 +901,7 @@ pub(super) fn exec_block_closure_into(
                 let mut matched = false;
                 for arm in &match_stmt.arms {
                     let mut bindings = std::collections::HashMap::new();
-                    if pattern_matches(&arm.pattern, &subject, &mut bindings, enums, classes)? {
+                    if crate::interpreter::interpreter_patterns::match_arm_matches(&arm.pattern, &subject, &mut bindings, enums, classes)? {
                         if let Some(guard) = &arm.guard {
                             let mut guard_env = local_env.clone();
                             for (name, value) in &bindings {
@@ -1874,7 +1874,7 @@ fn exec_block_closure_mut_inner(
                 let mut matched = false;
                 for arm in &match_stmt.arms {
                     let mut bindings = std::collections::HashMap::new();
-                    if pattern_matches(&arm.pattern, &subject, &mut bindings, enums, classes)? {
+                    if crate::interpreter::interpreter_patterns::match_arm_matches(&arm.pattern, &subject, &mut bindings, enums, classes)? {
                         if let Some(guard) = &arm.guard {
                             let mut guard_env = local_env.clone();
                             for (name, value) in &bindings {
