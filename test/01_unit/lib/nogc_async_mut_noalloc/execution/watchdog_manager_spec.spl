@@ -39,6 +39,7 @@ above, and re-run this file.
 
 use std.spec.{describe, it, expect}
 use std.io_runtime.{read_file, file_exists}
+use std.nogc_async_mut_noalloc.execution.watchdog_manager.{WatchdogManager}
 
 
 describe "backend-isolation Gap D: WatchdogManager facade owns rt_watchdog_* externs":
@@ -49,9 +50,9 @@ describe "backend-isolation Gap D: WatchdogManager facade owns rt_watchdog_* ext
         val facade_module_exists = file_exists("src/lib/nogc_async_mut_noalloc/execution/watchdog_manager.spl")
         step("Read the WatchdogManager facade module source")
         val facade_module_source = read_file("src/lib/nogc_async_mut_noalloc/execution/watchdog_manager.spl")
-        step("Confirm the facade declares both watchdog externs")
-        val facade_declares_start_extern = facade_module_source.contains("extern fn rt_watchdog_start")
-        val facade_declares_stop_extern = facade_module_source.contains("extern fn rt_watchdog_stop")
+        step("Confirm the facade drives the backed fault-timeout extern, not the unbacked rt_watchdog_*")
+        val facade_declares_start_extern = facade_module_source.contains("extern fn rt_fault_set_timeout")
+        val facade_declares_stop_extern = not facade_module_source.contains("rt_watchdog_")
         step("Confirm the facade exposes the WatchdogManager class and its start/stop API")
         val facade_declares_class = facade_module_source.contains("class WatchdogManager")
         val facade_declares_start_method = facade_module_source.contains("fn start(timeout_secs: i64)")
@@ -114,3 +115,15 @@ describe "backend-isolation Gap D: WatchdogManager facade owns rt_watchdog_* ext
         expect(keeps_start_watchdog_signature).to_equal(true)
         expect(keeps_stop_watchdog_signature).to_equal(true)
         expect(keeps_check_timeout_signature).to_equal(true)
+
+describe "WatchdogManager arms and disarms the runtime watchdog":
+    it "starts and stops the watchdog without aborting the process":
+        # @req REQ-WATCHDOG-004
+        # Before 2026-11-13 the facade called the unbacked rt_watchdog_start, so this
+        # aborted the whole process with `unknown extern function: rt_watchdog_start`.
+        step("Arm the watchdog with a deadline far beyond this example")
+        WatchdogManager.start(300)
+        step("Disarm it before the deadline")
+        WatchdogManager.stop()
+        step("Confirm execution continued past both calls")
+        expect(true).to_equal(true)
