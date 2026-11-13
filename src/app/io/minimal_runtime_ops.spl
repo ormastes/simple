@@ -3,6 +3,9 @@
 # Importing std.io_runtime materializes its complete extern declaration module.
 # Keep this app.io owner limited to operations used by reduced startup servers.
 
+use std.nogc_sync_mut.sffi.process_capture.{process_capture_bounded_native}
+use std.nogc_sync_mut.fs.host_path.{host_path_native}
+
 extern fn rt_cli_get_args() -> [text]
 extern fn sys_get_args() -> [text]
 extern fn rt_exit(code: i64)
@@ -16,6 +19,10 @@ extern fn rt_file_append_text(path: text, content: text) -> bool
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
 extern fn rt_process_run_bounded(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> (text, text, i64)
+@unsafe(reason: "select boxed interpreter capture or native pointer-and-length capture ABI", capabilities: [ffi])
+extern fn rt_is_interpreter_runtime() -> bool
+@unsafe(reason: "seed JIT retains the boxed process adapter even when native AOT uses the pointer-and-length ABI", capabilities: [ffi])
+extern fn rt_is_jit_runtime() -> bool
 
 fn get_args() -> [text]:
     val runtime_args = rt_cli_get_args() ?? []
@@ -53,5 +60,13 @@ fn process_run(cmd: text, args: [text]) -> (text, text, i64):
 fn process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32):
     rt_process_run_timeout(cmd, args, timeout_ms)
 
+# @workaround bug=phase2_bounded_process_text_abi_2026_10_27 reason=Native AOT code from the deployed P2 marshals the legacy tuple call without the command byte length, so every bounded spawn returned exit 4 with invalid text (LSP-MCP lsp_symbols); use the explicit pointer-and-length capture owner like std process_ops
 fn process_run_bounded(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> (text, text, i64):
+    val interpreted = unsafe(capabilities: [ffi]): rt_is_interpreter_runtime()
+    val jit = unsafe(capabilities: [ffi]): rt_is_jit_runtime()
+    if not interpreted and not jit:
+        # CreateProcessW rejects a relative forward-slash command such as
+        # `bin/simple.exe` ("process spawn failed"); std process_ops applies the
+        # same host-native conversion (identity off Windows).
+        return process_capture_bounded_native(host_path_native(cmd), args, timeout_ms, max_output_bytes)
     rt_process_run_bounded(cmd, args, timeout_ms, max_output_bytes)
