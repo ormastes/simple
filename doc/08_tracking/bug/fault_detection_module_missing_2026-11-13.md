@@ -26,6 +26,13 @@ no extern.
   next to the existing `WatchdogManager` call. A failed clock sample fails closed.
 - **Recursion depth.** `increment_recursion_depth` refuses at the limit and leaves the depth
   unchanged, as the seed's `push_call_depth` does; `decrement_recursion_depth` saturates at 0.
+  With detection disabled the seed does not count depth at all; this port keeps counting
+  and only stops refusing, so increments and decrements stay balanced across a toggle.
+- **Guard release.** `exec_function` (`call/function_exec.spl`) relied on `ExecutionGuard`
+  being dropped at scope exit. It is not: measured on the seed, a function that binds the
+  guard and returns leaves the depth at 1, which would report a false stack overflow after
+  1000 calls. `exec_function` now calls `guard.drop()` explicitly, also when argument
+  binding fails.
 - `execution_guard.spl` imported `check_faults` and `FaultKind` but never used them, and
   neither exists in the Rust original; the import was dropped. `push_call_depth`, which
   `function_exec.spl` imports, was missing from its `export` list and was added.
@@ -35,7 +42,7 @@ no extern.
 Spec: `test/01_unit/lib/common/fault_detection_spec.spl` (seed `simple-seed-v4`, aarch64).
 
 - Red (commit `d41cdafebeb`): `outcome=ERROR declared>=10 executed=0 passed=0 failed=0`.
-- Green: `outcome=OK declared>=10 executed=10 passed=10 failed=0`.
+- Green: `outcome=OK declared>=11 executed=11 passed=11 failed=0`.
 - `watchdog_manager_spec.spl` unchanged at 4/4.
 
 ## Left over
@@ -51,5 +58,13 @@ Spec: `test/01_unit/lib/common/fault_detection_spec.spl` (seed `simple-seed-v4`,
   still has no timer thread (`rt_fault_set_timeout` there records `SIMPLE_TIMEOUT_SECONDS`).
 - Expiry is tested through the pure `timeout_deadline_passed` predicate; no spec waits for a
   real deadline, and none runs the module under native codegen.
+- `src/app/interpreter/call/function_exec.spl` itself still does not load on the seed, for a
+  reason outside this bug: importing it fails with `error: semantic: variable `from` not
+  found`, after deprecation warnings on the relative `from ..expr import {...}` lines of the
+  `call/` package (first seen at `call/class_instantiation.spl:7`). Not root-caused. So the
+  explicit `guard.drop()` in `exec_function` is checked by source and by the guard-level
+  spec scenario, not by running `exec_function`. `loops.spl` was not load-tested either.
+- If a runtime ever does call `drop()` at scope exit, the explicit call makes it run twice;
+  the decrement saturates at 0 but the count would be one low.
 - `request_interrupt` in `execution_guard.spl` still has no caller wired from
   `rt_init_signal_handlers`; not part of this bug.
