@@ -1,7 +1,7 @@
 # Caret JIT run splices 392 externs through the interpreter (unregistered JIT symbols)
 
 - **Filed:** 2026-11-13
-- **Status:** OPEN (392 -> 309 after waves 1-3). Out of scope for lane `work/jit-dynamic-dispatch-20261113`; tracked here only.
+- **Status:** OPEN (392 -> 309 after waves 1-3; 309 -> 53 after wave 4). Out of scope for lane `work/jit-dynamic-dispatch-20261113`; tracked here only.
 - **Related:** `doc/05_design/compiler/jit/jit_trait_dispatch_and_cross_module_link.md` (row 5)
 
 ## Symptom
@@ -403,3 +403,156 @@ externs), 2 pins green on both (called from a helper / a lambda still splices
 and fails closed; function value / function argument still detected). 10/10
 green on the wave 3 seed; `mir::hybrid` unit tests and `extern_drift_tests`
 green.
+
+## Wave 4 — prune MIR functions unreachable from `main` (2026-11-13)
+
+**Trace.** `run_file_jit` lowers the whole flattened import closure, and
+`compile_all_functions` (`codegen/common_backend.rs`) compiles every MIR
+function with no reachability filter. For caret `--help` that is 9,639
+functions. Only 4,054 of them (42%) are reachable from the roots below, so 58%
+of the codegen work went into bodies that can never run, and so did most of
+the splice.
+
+**Fix.** `mir::retain_reachable_functions` (`compiler/src/mir/reachability.rs`)
+runs in `run_file_jit` right after MIR lowering and before the extern filter.
+Option (a) was chosen over (b) for two reasons. First, (b) cannot work: an
+unreachable body that still calls an unresolved extern makes
+`unresolved_imports_called` (`codegen/jit.rs`) drop the whole module to the
+interpreter. Second, (a) also saves the codegen time.
+
+- Roots:
+  - `main`;
+  - every `__module_init*` function;
+  - function-valued global initialisers and the strings in struct-valued
+    global initialisers;
+  - every vtable slot, because vtables are emitted for every impl;
+  - functions carrying `export`, `no_mangle`, `entry`, `init`, `constructor`
+    or `used`. Every flattened function carries the bookkeeping attributes
+    `actor` and `__simple_flatten_module_owner__=`, so rooting on "has any
+    attribute" kept all 9,639;
+  - every local body whose name has a `RUNTIME_FUNCS` spec. Codegen emits
+    runtime calls of its own (`rt_native_eq` for `BinOp`, ...), and
+    `resolve_runtime_func` prefers a same-named MIR body. Rooting every
+    `rt_*` instead kept 197 more functions and 5 more splices.
+- Edges: names are taken from `Call` (raw, module-prefix-stripped and SFFI
+  alias), `InterpCall`, `ClosureCreate`, `MethodCallStatic`,
+  `GlobalLoad`/`GlobalStore`, `BuiltinMethod` (receiver type and method),
+  `ExternMethodCall`, outlined-body names, and every quoted string in the
+  `Debug` text of every other non-trivial instruction. A new instruction kind
+  is therefore covered by default.
+- Matching is by key, not by exact name. A name's keys are the name itself,
+  its `::` / `.` / `_dot_` -> `__` normal form, and every suffix after a `__`.
+  Every function that shares a key with any referenced name is kept, so
+  `FuncIdTable::resolve_unique_module_qualified` sees exactly the candidates
+  it saw before; pruning can never make an ambiguous tail unique. A method
+  name alone keeps every `T.method` / `T__method`.
+- A missed direct-call edge fails closed: the call becomes an undefined import,
+  and the JIT refuses the module so the driver falls back to the interpreter.
+  This is pinned by `compiler/tests/jit_reachability_prune.rs`. A missed
+  `ClosureCreate`, `GlobalLoad` or method edge would NOT fail closed (it would
+  become a NULL function pointer), which is why those names are collected
+  explicitly.
+- Known limits (independent Opus review, no P0/P1):
+  - The lowercase `type_method` renames in `closures_structs.rs` and
+    `calls.rs` have no key. They are safe only because the JIT lane never
+    calls `set_use_map` / `set_import_map`.
+  - Names in `global_init_strings` are not scanned.
+- Behaviour change: the whole-module guards (`has_generator`,
+  `first_unsupported_lambda`, `first_named_fn_value_load`) now see only
+  reachable functions. A lambda or generator in dead code no longer demotes
+  the module.
+- `SIMPLE_JIT_NO_REACH_PRUNE=1` disables pruning for A/B comparison.
+
+**caret `--help`**, aarch64, base seed `ef64403c4884153f`. Each set is 3
+interleaved serial runs. Set A used the pre-review wave 4 seed
+`da908b3232e4bda4`. Set B used the final seed `5f2ad9ad12d5915c`, which has the
+same 4,054 reachable functions and the same 53 splices.
+
+| | splice names | wall (median) | user CPU (median) | peak RSS (median) | stdout vs interpreter |
+|---|---|---|---|---|---|
+| base, A (load 6.2-6.8) | 309 | 7.06 s | 6.88 s | 1,591 MB | byte-identical |
+| wave 4, A | 53 | 4.28 s | 4.08 s | 1,170 MB | byte-identical |
+| base, B (load 7.2-8.5, sys 3-5.6 s) | 309 | 10.23 s | 6.93 s | 1,518 MB | byte-identical |
+| wave 4 final, B (sys 1.8-2.5 s) | 53 | 6.58 s | 4.24 s | 1,102 MB | byte-identical |
+
+User CPU falls about 40% because 58% of the bodies are no longer compiled.
+Wall time in set B is dominated by system time (memory reclaim on the shared
+host).
+
+The 53 that remain are referenced from reachable code:
+
+- `pmm_alloc_page{,_raw}`, `serial_println`;
+- `rt_{kqueue,iocp,event_ports}_{create,close}`;
+- the `rt_process_*` text/array ABI family;
+- `rt_local_unix_*`;
+- `rt_pty_{close,is_running,write}`;
+- `rt_file_atomic_write{,_mode}`;
+- `rt_http_request{,_v2}`;
+- `rt_secure_temp_dir_*`.
+
+The next step for each is the per-family work listed under "Remaining after
+wave 2" (a native provider, an ABI fix, or a cfg-prune), now against 53 names
+instead of 309.
+
+**Tests.**
+
+- `jit_extern_native_link_tests.rs`: 4 wave 4 cases.
+  - Red on the base seed (3 of 4):
+    - an extern called only from dead code does not splice;
+    - the receipt names the live extern and not the dead one;
+    - pruned JIT output equals the interpreter's, with no demotion, under
+      `SIMPLE_JIT_STRICT_ALL=1`, covering trait dispatch, closure, function
+      value and static init.
+  - Pin, green on both: an extern reached only through trait or vtable
+    dispatch, a closure, a function value or a static initialiser still
+    splices and fails closed.
+  - Result: 14/14 green on the wave 4 seed.
+- `jit_reachability_prune.rs` (new, 2 cases) and the `mir::reachability`
+  unit tests (7).
+- `jit_trait_local_vtable_dispatch.rs` now asserts that pruned and unpruned
+  modules give identical results (5/5).
+- `mir::hybrid` (5) and `extern_drift` (3) are green.
+- Compiler `*jit*` integration targets: 41 green. The 7 failures in 6
+  targets do not touch pruning and are pre-existing: they call `JitCompiler`
+  directly, and the compiler crate's only change is the new, unused-by-them
+  module.
+  - `bool_parameter_presence_jit`
+  - `conversion_call_text_parse_jit` (2)
+  - `erased_scalar_boundary_jit`
+  - `list_optional_accessors_jit`
+  - `optional_aggregate_copy_jit`
+  - `text_static_builtins_jit`
+- Driver `interpreter_jit` SIGILLs in `jit_function_call_interpreter` /
+  `jit_gcd_interpreter`. These are interpreter mode and never reach
+  `run_file_jit`, so this is pre-existing.
+
+**Corpus A/B** (same seed, pruning on vs off, 79 `fn main` programs from
+`examples/` and `test/02_integration/`):
+
+- 77 same stdout and exit code.
+- 2 differed once and were identical on re-run: a 10 s harness timeout under
+  load, and an exit code that flipped under load.
+- Pruning lowered the whole-module fallback count on 2 programs (7 -> 2,
+  10 -> 4). Fewer unresolved imports were reached from dead code; the output
+  did not change.
+
+**Raw-pointer probe** (the wave 1 "registered but not probed" list, JIT vs
+interpreter, wave 4 seed): agree.
+
+- `rt_io_file_meta_{flags,created}`
+- `rt_io_file_write` (fd, 0, 0) = -1
+- `rt_io_file_write_all` (fd, 0, 0) = true
+- `rt_par_atomic_{load_i64,i64_is_lock_free}` after an xchg = 41 / 1
+- `spl_dlopen` (missing = 0; `libc.so.6` != 0)
+- `spl_dlsym` (`strlen` != 0)
+- `spl_dlclose` = 0
+
+`rt_fd_stat_snapshot_v1` is JIT-only (no interpreter handler) and returns 0,
+kind = regular, with the 80-byte buffer. Still not probed:
+
+- `rt_process_run{,_bounded}_tuple` and its variants
+- `rt_process_spawn_async_environment_v1`
+- `spl_wffi_call_i64`
+- `rt_arm_array_*`
+- `rt_debug_exit_success`
+- the V4 reserve / linux-group stream scalars

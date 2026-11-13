@@ -33,9 +33,13 @@
 //! Roots: `main`, every `__module_init*` function (static/global
 //! initialisers, run before `main`), function-valued global initialisers,
 //! every vtable slot (vtables are emitted for every impl, so trait dispatch
-//! can reach any slot), every function carrying an attribute (exports,
-//! entry points and other externally-named symbols), and the strings carried
-//! by struct-valued global initialisers.
+//! can reach any slot), functions carrying one of [`ROOT_ATTRIBUTES`],
+//! every local body named like a `RUNTIME_FUNCS` entry (codegen-emitted runtime calls bind to it by
+//! name), and the strings carried by struct-valued global initialisers.
+//!
+//! A missed direct-`Call` edge fails closed (undefined import -> the JIT
+//! refuses the module). A missed `ClosureCreate`/`GlobalLoad`/method edge
+//! would not, which is why those names are collected explicitly.
 
 use std::collections::{HashMap, HashSet};
 
@@ -160,6 +164,12 @@ const ROOT_ATTRIBUTES: &[&str] = &["export", "no_mangle", "entry", "init", "cons
 fn is_root(func: &MirFunction) -> bool {
     func.name == "main"
         || func.name.starts_with("__module_init")
+        // Codegen emits runtime calls of its own (`rt_native_eq` for `BinOp`,
+        // `rt_index_get`, ...) and `resolve_runtime_func` prefers a same-named
+        // MIR body; no instruction names them, so keep every local body that
+        // shadows a codegen runtime function (`call_runtime_*` only emits
+        // names from `RUNTIME_FUNCS`).
+        || crate::codegen::runtime_sffi::spec_for(&func.name).is_some()
         || func.attributes.iter().any(|a| ROOT_ATTRIBUTES.contains(&a.as_str()))
 }
 
@@ -374,6 +384,7 @@ mod tests {
             func("draw_helper", vec![]),
             func("global_fn", vec![]),
             exported,
+            func("rt_native_eq", vec![]),
             bookkeeping,
             func("dead", vec![]),
         ]);
@@ -394,6 +405,7 @@ mod tests {
             "draw_helper",
             "global_fn",
             "exported_cb",
+            "rt_native_eq",
         ] {
             assert!(keep.contains(name), "{name} dropped: {keep:?}");
         }
