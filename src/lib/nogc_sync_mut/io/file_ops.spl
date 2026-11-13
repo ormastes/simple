@@ -15,7 +15,7 @@ use std.io_runtime.{read_file_text, read_file_text_result, file_delete, file_cop
 # name-keyed registry silently misdispatches duplicate bodies across a closure
 # (doc/08_tracking/bug/file_read_has_23_definitions_with_two_return_types_2026-08-16.md).
 use std.io_runtime.{file_read}
-use std.nogc_sync_mut.fs.host_path.{host_path_native}
+use std.nogc_sync_mut.fs.host_path.{host_path_native, host_path_canonical}
 use std.nogc_sync_mut.sffi.file_bytes.{file_write_bytes_tagged_native, file_atomic_write_bytes_tagged_native}
 use std.nogc_sync_mut.io.dir_ops.{dir_is_real_no_follow}
 # Cycle-170 split crossing (parent slot, prefix slot, make) is a SOSIX
@@ -223,7 +223,17 @@ fn secure_temp_dir_raw(parent: text, prefix: text) -> text:
         val prefix_set: i64 = sosix_secure_temp_dir_set_prefix(host_path_native(prefix + ""))
         if prefix_set != 1:
             return ""
-        sosix_secure_temp_dir_make()
+        val made = sosix_secure_temp_dir_make()
+        # Canonical forward-slash spelling on Windows, matching
+        # path_final_existing/dir_walk output, so callers that textually
+        # compare against canonical paths (scv scope validators, fixture
+        # oracles) see one spelling. host_path_native re-adds native
+        # separators at every extern boundary. Identity off Windows.
+        # The nil/empty failure signal is preserved untouched: len() on the
+        # returned value is what callers gate on (nil measures -1).
+        if made.len() <= 0:
+            return made
+        host_path_canonical(made)
 
 fn file_publish_noreplace_raw(staged_path: text, destination: text) -> i64:
     unsafe(capabilities: [ffi]):

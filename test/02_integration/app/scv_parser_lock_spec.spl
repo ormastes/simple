@@ -10,21 +10,27 @@ Audience: Maintainers of the SCV parser trust layer.
 """
 # @req: REQ-SCV-PARSER-LOCK-001
 use std.spec.{describe, it, expect, step}
-use app.io.mod (file_exists, file_read, dir_create, process_run)
+use app.io.mod (file_exists, file_read, dir_create, file_write_bytes, cwd)
 use std.scv.store.{scv_init_repo}
 use std.scv.parser_lock.{scv_parser_lock2_path, scv_parser_lock2_install, scv_parser_lock2_resolve, scv_parser_lock2_verify, scv_parser_index_generation, scv_parser_index_gen_path}
 use std.nogc_sync_mut.io.time_ops.{current_time_ms}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir}
+use std.nogc_sync_mut.sffi.io.{path_absolute}
 
 fn _repo(tag: text) -> text:
-    val root = "/tmp/scv-plock-{tag}-{current_time_ms()}"
-    dir_create(root, true)
+    # Host-portable: POSIX /tmp is not resolvable on Windows; anchor at the
+    # host temp area with the canonical spelling.
+    val root = secure_temp_dir(path_absolute(cwd()), "scv-plock-{tag}-").unwrap()
     scv_init_repo(root)
     root
 
 fn _write_wasm(path: text):
-    # Minimal artifact carrying the real wasm magic (\0asm + version).
-    val (_o, _e, code) = process_run("/bin/sh", ["-c", "printf '\\000asm\\001\\000\\000\\000' > '{path}'"])
-    assert_equal(code, 0)
+    # Minimal artifact carrying the real wasm magic (\0asm + version), written
+    # host-portably (the original /bin/sh printf escape form is POSIX-only).
+    file_write_bytes(path, [0u8, 97u8, 115u8, 109u8, 1u8, 0u8, 0u8, 0u8])
+
+fn _write_wasm_trailer(path: text, trailer: u8):
+    file_write_bytes(path, [0u8, 97u8, 115u8, 109u8, 1u8, 0u8, 0u8, 0u8, trailer])
 
 describe "scv parser trust/lock hardening (v2 registry)":
     it "pins grammar id, source, sha256, TS ABI, protocol, runtime kind and signature on install":
@@ -83,8 +89,7 @@ describe "scv parser trust/lock hardening (v2 registry)":
         expect(again).to_contain("generation=1")
         assert_equal(scv_parser_index_generation(root), 1)
         step "upgrading the version opens generation 2 with a distinct index path"
-        val (_o, _e, code) = process_run("/bin/sh", ["-c", "printf '\\000asm\\001\\000\\000\\000\\001' > '{root}/g2.wasm'"])
-        assert_equal(code, 0)
+        _write_wasm_trailer("{root}/g2.wasm", 1u8)
         val upgraded = scv_parser_lock2_install(root, "foo", "tree-sitter-foo", "src", "1.1.0", "wasm", "abi14", "scv/parser/v1", "{root}/g2.wasm", "sig-b")
         expect(upgraded).to_contain("generation=2")
         assert_equal(scv_parser_index_generation(root), 2)
@@ -105,7 +110,6 @@ describe "scv parser trust/lock hardening (v2 registry)":
         step "tamper with the stored artifact"
         val lock = file_read(scv_parser_lock2_path(root))
         val hash = lock.trim().split("|")[8]
-        val (_o, _e, code) = process_run("/bin/sh", ["-c", "printf '\\000asm\\001\\000\\000\\000\\377' > '{root}/.scv/parsers/{hash}.wasm'"])
-        assert_equal(code, 0)
+        _write_wasm_trailer("{root}/.scv/parsers/{hash}.wasm", 255u8)
         val verify = scv_parser_lock2_verify(root)
         expect(verify).to_contain("ERROR parser artifact hash mismatch")

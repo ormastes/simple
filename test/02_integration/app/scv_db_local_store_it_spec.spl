@@ -1,9 +1,9 @@
-use test.fixtures.scv.db_filesystem_fixture.{setup_item2_filesystem_link}
+use test.fixtures.scv.db_filesystem_fixture.{setup_item2_filesystem_link, setup_item2_filesystem_link_supported}
 use std.nogc_sync_mut.io.path_identity.{path_final_existing}
 # codex-impl
 # Real filesystem/lease assertions. Execution and crash-injection evidence are
 # separate gates; source presence alone is not a durability acceptance receipt.
-use std.spec.{describe, it, expect, step}
+use std.spec.{describe, it, expect, step, skip}
 use app.io.mod (cwd, dir_create, file_read, file_write, file_exists, file_delete)
 use app.scv.db.local_store.{db_store_read, db_store_read_accounted, db_store_commit, db_store_commit_held, db_local_path_scope}
 use std.common.crypto.sha256.{sha256_text}
@@ -130,22 +130,29 @@ describe "SJ-owned distributed database local generation store":
         expect(file_exists("{victim}/db/HEAD")).to_be(false)
         expect(scv_sj_lease_is_held(root)).to_be(false)
 
-    it "rejects pointer and object symlinks even when their bytes are otherwise valid":
-        val root = setup_item2_store()
-        val first = db_store_commit(root, "", sha256_text("symlink-fixture"), "state")
-        expect(first.code).to_equal("ok")
-        val object_path = "{root}/.scv/db/objects/{first.head}.scvg"
-        val victim = setup_item2_store()
-        expect(file_write("{victim}/object", file_read(object_path))).to_be(true)
-        expect(file_delete(object_path)).to_be(true)
-        val code = setup_item2_filesystem_link(root, "{victim}/object", object_path, false)
-        expect(code).to_equal(0)
-        expect(db_store_read(root).code).to_equal("SCVDB_STORE_OBJECT_CORRUPT")
-        expect(file_write("{victim}/HEAD", "{first.head}\n")).to_be(true)
-        expect(file_delete("{root}/.scv/db/HEAD")).to_be(true)
-        val head_code = setup_item2_filesystem_link(root, "{victim}/HEAD", "{root}/.scv/db/HEAD", false)
-        expect(head_code).to_equal(0)
-        expect(db_store_read(root).code).to_equal("SCVDB_STORE_HEAD_CORRUPT")
+    val file_links_unsupported = if not setup_item2_filesystem_link_supported():
+        "host capability: SymbolicLink creation requires administrator/developer mode on this Windows host"
+    else:
+        ""
+    if file_links_unsupported != "":
+        skip("rejects pointer and object symlinks even when their bytes are otherwise valid", file_links_unsupported)
+    else:
+        it "rejects pointer and object symlinks even when their bytes are otherwise valid":
+            val root = setup_item2_store()
+            val first = db_store_commit(root, "", sha256_text("symlink-fixture"), "state")
+            expect(first.code).to_equal("ok")
+            val object_path = "{root}/.scv/db/objects/{first.head}.scvg"
+            val victim = setup_item2_store()
+            expect(file_write("{victim}/object", file_read(object_path))).to_be(true)
+            expect(file_delete(object_path)).to_be(true)
+            val code = setup_item2_filesystem_link(root, "{victim}/object", object_path, false)
+            expect(code).to_equal(0)
+            expect(db_store_read(root).code).to_equal("SCVDB_STORE_OBJECT_CORRUPT")
+            expect(file_write("{victim}/HEAD", "{first.head}\n")).to_be(true)
+            expect(file_delete("{root}/.scv/db/HEAD")).to_be(true)
+            val head_code = setup_item2_filesystem_link(root, "{victim}/HEAD", "{root}/.scv/db/HEAD", false)
+            expect(head_code).to_equal(0)
+            expect(db_store_read(root).code).to_equal("SCVDB_STORE_HEAD_CORRUPT")
 
     it "bounds pointer and object reads before loading their bytes":
         val root = setup_item2_store()
