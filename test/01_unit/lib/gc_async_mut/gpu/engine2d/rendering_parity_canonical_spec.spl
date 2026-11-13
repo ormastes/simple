@@ -1,0 +1,82 @@
+# Engine2D parity adapter: readback canonicalization and truthful evidence.
+# @req REQ-SSPEC-LIB
+use std.spec.*
+use std.gc_async_mut.gpu.engine2d.backend.{engine2d_readback, engine2d_readback_with_identity, RenderBackend}
+use std.gc_async_mut.gpu.engine2d.backend_cpu.{CpuBackend}
+use std.gc_async_mut.gpu.engine2d.rendering_parity_adapter.{
+    ENGINE2D_PARITY_CONVERTER, ENGINE2D_CPU_ALPHA_MODE, engine2d_rendering_parity_canonicalize,
+    engine2d_rendering_parity_evidence, engine2d_rendering_parity_not_run
+}
+
+describe "Engine2D rendering parity adapter (CPU path)":
+    it "renders a half-alpha shape through the real CPU pipeline into straight bytes":
+        var cpu = CpuBackend.create()
+        expect(cpu.init(2, 1)).to_be(true)
+        cpu.clear(0x00000000u32)
+        cpu.draw_rect_filled(0, 0, 1, 1, 0x80FFFFFFu32)
+        val readback = cpu.read_pixels_with_source()
+        val output = engine2d_rendering_parity_canonicalize(readback, 2, 1, "cpu", "cpu", ENGINE2D_CPU_ALPHA_MODE)
+        expect(output.valid).to_be(true)
+        expect(output.rgba).to_equal([0xFFu8, 0xFFu8, 0xFFu8, 0x80u8, 0u8, 0u8, 0u8, 0u8])
+
+    it "converts ARGB words to tightly packed straight RGBA bytes":
+        val readback = engine2d_readback([0x80123456u32, 0xFFABCDEFu32], "cpu_mirror")
+        val output = engine2d_rendering_parity_canonicalize(readback, 2, 1, "cpu", "cpu", ENGINE2D_CPU_ALPHA_MODE)
+        expect(ENGINE2D_PARITY_CONVERTER).to_equal("engine2d-argb32-to-rgba8-v1")
+        expect(output.valid).to_be(true)
+        expect(output.rgba).to_equal([0x12u8, 0x34u8, 0x56u8, 0x80u8, 0xABu8, 0xCDu8, 0xEFu8, 0xFFu8])
+
+    it "keeps top-left row order for a multi-row frame":
+        val readback = engine2d_readback([0xFF010203u32, 0xFF040506u32, 0xFF070809u32, 0xFF0A0B0Cu32], "cpu_mirror")
+        val output = engine2d_rendering_parity_canonicalize(readback, 2, 2, "cpu", "cpu", ENGINE2D_CPU_ALPHA_MODE)
+        expect(output.rgba).to_equal([1u8, 2u8, 3u8, 255u8, 4u8, 5u8, 6u8, 255u8, 7u8, 8u8, 9u8, 255u8, 10u8, 11u8, 12u8, 255u8])
+
+    it "un-premultiplies when the lane declares premultiplied alpha":
+        val readback = engine2d_readback([0x80404040u32], "cpu_mirror")
+        val output = engine2d_rendering_parity_canonicalize(readback, 1, 1, "cpu", "cpu", "premultiplied")
+        expect(output.valid).to_be(true)
+        expect(output.rgba[0]).to_be_greater_than(0x40u8)
+
+    it "rejects fallback and forged GPU provenance":
+        val cpu = engine2d_readback([0xFFFFFFFFu32], "cpu_mirror")
+        val fallback = engine2d_rendering_parity_canonicalize(cpu, 1, 1, "vulkan", "cpu", ENGINE2D_CPU_ALPHA_MODE)
+        expect(fallback.reason).to_equal("backend-fallback")
+        val zero_identity = engine2d_readback_with_identity([0xFFFFFFFFu32], "device_readback", 41, 0)
+        val forged = engine2d_rendering_parity_canonicalize(zero_identity, 1, 1, "vulkan", "vulkan", ENGINE2D_CPU_ALPHA_MODE)
+        expect(forged.reason).to_equal("device-identity-required")
+        val evidence = engine2d_rendering_parity_evidence("forged", zero_identity, 1, 1, "vulkan", "vulkan", "run-forged", "revision", 1, 0, false, "", 1, 1, ENGINE2D_CPU_ALPHA_MODE).unwrap()
+        expect(evidence.status).to_equal("fail")
+        expect(evidence.physical_backend).to_be(true)
+        expect(evidence.evidence.physical_gpu).to_be(false)
+
+    it "records cpu_fallback when a GPU request ran on the CPU":
+        val cpu = engine2d_readback([0xFFFFFFFFu32], "cpu_mirror")
+        val ev = engine2d_rendering_parity_evidence("fb", cpu, 1, 1, "vulkan", "cpu", "run-fb", "rev", 1, 1, false, "", 1, 1, ENGINE2D_CPU_ALPHA_MODE).unwrap()
+        expect(ev.status).to_equal("fail")
+        expect(ev.evidence.cpu_fallback).to_be(true)
+        expect(ev.evidence.physical_gpu).to_be(false)
+
+    it "passes a CPU lane and records its execution identity":
+        val cpu = engine2d_readback([0xFF102030u32], "cpu_mirror")
+        val ev = engine2d_rendering_parity_evidence("cpu-one", cpu, 1, 1, "cpu", "cpu", "run-cpu", "rev", 1, 0, false, "", 1, 1, ENGINE2D_CPU_ALPHA_MODE).unwrap()
+        expect(ev.status).to_equal("pass")
+        expect(ev.execution_id).to_equal("run-cpu")
+
+    it "fails a degraded run or a nonzero fallback count even with valid pixels":
+        val cpu = engine2d_readback([0xFF102030u32], "cpu_mirror")
+        val degraded = engine2d_rendering_parity_evidence("deg", cpu, 1, 1, "cpu", "cpu", "run-d", "rev", 1, 0, true, "", 1, 1, ENGINE2D_CPU_ALPHA_MODE).unwrap()
+        expect(degraded.status).to_equal("fail")
+        expect(degraded.reason).to_equal("degraded-run")
+        val counted = engine2d_rendering_parity_evidence("fc", cpu, 1, 1, "cpu", "cpu", "run-f", "rev", 1, 2, false, "", 1, 1, ENGINE2D_CPU_ALPHA_MODE).unwrap()
+        expect(counted.status).to_equal("fail")
+        expect(counted.reason).to_equal("fallback-count-nonzero")
+
+    it "rejects malformed length":
+        val short = engine2d_readback([0xFFFFFFFFu32], "cpu_mirror")
+        val bad = engine2d_rendering_parity_canonicalize(short, 2, 1, "cpu_simd", "cpu_simd", ENGINE2D_CPU_ALPHA_MODE)
+        expect(bad.reason).to_equal("invalid-pixel-count")
+
+    it "reports a lane with no device as not_run with a reason, never pass":
+        val ev = engine2d_rendering_parity_not_run("vk", "vulkan", "BLOCKED: no Vulkan device").unwrap()
+        expect(ev.status).to_equal("not_run")
+        expect(ev.reason).to_contain("no Vulkan device")
