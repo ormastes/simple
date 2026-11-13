@@ -1,0 +1,88 @@
+# Reproducer: native Phase 2 E-BACKEND-LLVM-CONST-TYPE "integer constant cannot
+# define void" on unit functions with an if/elif/else join
+# (bug native_const_type_void_unit_tail_if_join_2026-11-13).
+# Each variant is its own function so the backend error names the failing shape.
+
+use test.fixtures.native_const_void_join.unit_decl.*
+
+fn reg_a(name: text) -> i64:
+    name.len()
+
+fn reg_b(name: text, n: i64) -> i64:
+    name.len() + n
+
+fn reset():
+    print "reset"
+
+# A: print_command_help shape (unit fn, tail if/elif/else of prints).
+fn v_a_help(command: text):
+    if command == "lint":
+        print "a1"
+        print ""
+    elif command == "fmt":
+        print "a2"
+        print ""
+    elif command == "fix":
+        print "a3"
+    else:
+        print "a4"
+
+# B: parser_lower_unit_decl shape (non-tail if/else of i64 calls).
+fn v_b_decl(name: text, origin: text):
+    reg_a(name)
+    if origin == "newunit":
+        reg_a(name)
+    else:
+        reg_b(name, 1)
+    reset()
+
+# C: A rewritten as else-less ifs with early return.
+fn v_c_help_early(command: text):
+    if command == "lint":
+        print "c1"
+        return
+    if command == "fmt":
+        print "c2"
+        return
+    print "c4"
+
+# D: B rewritten with assignment arms (unit-valued arms).
+fn v_d_decl_assign(name: text, origin: text):
+    var registered = 0
+    if origin == "newunit":
+        registered = reg_a(name)
+    else:
+        registered = reg_b(name, 1)
+    reset()
+
+# E: A with an explicit unit tail after the chain.
+fn v_e_help_tail(command: text):
+    if command == "lint":
+        print "e1"
+    elif command == "fmt":
+        print "e2"
+    else:
+        print "e4"
+    ()
+
+# F: two-arm tail if/else of prints.
+fn v_f_two(command: text):
+    if command == "lint":
+        print "f1"
+    else:
+        print "f2"
+
+fn main() -> i64:
+    p1_exact("u", 1, "s", "newunit")
+    p2_no_if("u", 1, "s", "x")
+    p3_arrays("u", 1)
+    p4_lead("u", 1)
+    p5_typed_tail("u", 1, "s", "x")
+    p6_neg("u")
+    v_a_help("lint")
+    v_b_decl("m", "newunit")
+    v_c_help_early("fmt")
+    v_d_decl_assign("m", "x")
+    v_e_help_tail("zz")
+    v_f_two("lint")
+    0
