@@ -107,6 +107,42 @@ pub fn reap_pty_child(pid: libc::pid_t) -> bool {
     false
 }
 
+/// What a WNOHANG probe says about a PTY child whose record is still held.
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PtyChildProbe {
+    /// Not reaped: keep the record (close still owns the reap).
+    Running,
+    /// Reaped by this probe (or already reaped elsewhere): drop the record.
+    Gone,
+}
+
+/// One `waitpid(pid, WNOHANG)`: the result and, when it failed, its errno.
+#[cfg(unix)]
+pub fn waitpid_nohang(pid: libc::pid_t) -> (libc::pid_t, Option<i32>) {
+    let mut status = 0;
+    let result = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+    if result < 0 {
+        (result, std::io::Error::last_os_error().raw_os_error())
+    } else {
+        (result, None)
+    }
+}
+
+/// Classifies a WNOHANG probe of a PTY child.
+#[cfg(unix)]
+pub fn probe_pty_child_with(
+    pid: libc::pid_t,
+    mut wait: impl FnMut(libc::pid_t) -> (libc::pid_t, Option<i32>),
+) -> PtyChildProbe {
+    let (result, _err) = wait(pid);
+    if result == 0 {
+        PtyChildProbe::Running
+    } else {
+        PtyChildProbe::Gone
+    }
+}
+
 #[cfg(unix)]
 mod pty_process {
     use std::collections::HashMap;
@@ -223,20 +259,33 @@ mod pty_process {
     }
 
     pub(super) fn is_running(master_fd: i64) -> bool {
+        is_running_with(master_fd, super::waitpid_nohang)
+    }
+
+    /// `is_running` with an injectable WNOHANG wait, so an interrupted wait
+    /// (EINTR) can be exercised deterministically.
+    pub(super) fn is_running_with(
+        master_fd: i64,
+        wait: impl FnMut(libc::pid_t) -> (libc::pid_t, Option<i32>),
+    ) -> bool {
         let Ok(mut table) = CHILD_TABLE.lock() else {
             return false;
         };
         let Some(&pid) = table.get(&(master_fd as i32)) else {
             return false;
         };
-        let mut status = 0;
-        let result = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
-        if result == 0 {
-            true
-        } else {
-            table.remove(&(master_fd as i32));
-            false
+        match super::probe_pty_child_with(pid, wait) {
+            super::PtyChildProbe::Running => true,
+            super::PtyChildProbe::Gone => {
+                table.remove(&(master_fd as i32));
+                false
+            }
         }
+    }
+
+    /// Hangs up the child of `master_fd` ahead of its close (not yet wired).
+    pub(super) fn hangup(_master_fd: i64) -> bool {
+        false
     }
 
     /// TIOCSWINSZ makes the kernel signal the foreground group; the direct
@@ -912,6 +961,132 @@ mod tests {
         let err = std::io::Error::last_os_error().raw_os_error();
         assert!(result == -1 && err == Some(libc::ECHILD), "child {pid} not reaped by close");
         assert_eq!(unsafe { libc::kill(pid as libc::pid_t, 0) }, -1);
+    }
+
+    /// True once `needle` appeared on the master within `timeout_ms`.
+    #[cfg(unix)]
+    fn wait_for_output(handle: i32, needle: &str, timeout_ms: u64) -> bool {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+        let mut seen = String::new();
+        let mut buf = [0u8; 4096];
+        while std::time::Instant::now() < deadline {
+            let n = unsafe { libc::read(handle, buf.as_mut_ptr().cast(), buf.len()) };
+            if n > 0 {
+                seen.push_str(&String::from_utf8_lossy(&buf[..n as usize]));
+                if seen.contains(needle) {
+                    return true;
+                }
+            } else {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+        false
+    }
+
+    /// A provider stand-in that ignores SIGHUP (spawn resets SIGHUP to the
+    /// default before exec, so the ignore must be installed by the child).
+    #[cfg(unix)]
+    fn sighup_ignoring_child() -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("simple_pty_hup_ignore_{}_{}.sh", std::process::id(), n));
+        std::fs::write(&path, "#!/bin/sh\ntrap '' HUP\necho READY\nwhile :; do sleep 1; done\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        path
+    }
+
+    #[cfg(unix)]
+    fn assert_reaped(pid: i64) {
+        let mut status = 0;
+        let result = unsafe { libc::waitpid(pid as libc::pid_t, &mut status, libc::WNOHANG) };
+        let err = std::io::Error::last_os_error().raw_os_error();
+        assert!(result == -1 && err == Some(libc::ECHILD), "child {pid} left unreaped");
+    }
+
+    /// Batch teardown: hanging every pane up first and then closing them all
+    /// costs one grace period in total, not one per SIGHUP-ignoring child.
+    #[test]
+    #[cfg(unix)]
+    fn hangup_then_close_of_n_sighup_ignoring_children_costs_one_grace() {
+        let script = sighup_ignoring_child();
+        let mut panes = Vec::new();
+        for _ in 0..4 {
+            let handle = pty_process::open(24, 80);
+            assert!(handle >= 0);
+            let pid = pty_process::spawn(handle, script.to_str().unwrap());
+            assert!(pid > 0);
+            assert!(wait_for_output(handle, "READY", 5000), "child {pid} never armed its HUP trap");
+            panes.push((handle, pid));
+        }
+        let started = std::time::Instant::now();
+        for &(handle, _) in &panes {
+            pty_process::hangup(handle as i64);
+        }
+        for &(handle, _) in &panes {
+            assert_eq!(rt_pty_close(handle as i64), RuntimeValue::TRUE);
+        }
+        let elapsed = started.elapsed();
+        for &(_, pid) in &panes {
+            assert_reaped(pid);
+        }
+        let _ = std::fs::remove_file(&script);
+        assert!(
+            elapsed < std::time::Duration::from_millis(2500),
+            "4 SIGHUP-ignoring panes took {elapsed:?} to close; expected one ~1 s grace in total"
+        );
+    }
+
+    /// Closing a pane must hang up its own child even while a sibling pane's
+    /// child is alive: a sibling that inherited this master fd kept the
+    /// session from hanging up, so every close paid the full grace period.
+    #[test]
+    #[cfg(unix)]
+    fn close_hangs_up_its_child_while_a_sibling_pane_is_alive() {
+        let first = pty_process::open(24, 80);
+        assert!(first >= 0);
+        let first_pid = pty_process::spawn(first, "/bin/sh");
+        assert!(first_pid > 0);
+        let second = pty_process::open(24, 80);
+        assert!(second >= 0);
+        let second_pid = pty_process::spawn(second, "/bin/sh");
+        assert!(second_pid > 0);
+        assert!(pty_process::is_running(second as i64));
+
+        let started = std::time::Instant::now();
+        assert_eq!(rt_pty_close(first as i64), RuntimeValue::TRUE);
+        let elapsed = started.elapsed();
+        assert_reaped(first_pid);
+        assert_eq!(rt_pty_close(second as i64), RuntimeValue::TRUE);
+        assert_reaped(second_pid);
+        assert!(
+            elapsed < std::time::Duration::from_millis(700),
+            "closing a /bin/sh pane took {elapsed:?}: its hangup never reached the child"
+        );
+    }
+
+    /// An interrupted probe (EINTR) is not an exit: the record must survive so
+    /// the child is still reported running and close still reaps it.
+    #[test]
+    #[cfg(unix)]
+    fn is_running_keeps_the_child_record_when_the_wait_is_interrupted() {
+        let handle = pty_process::open(24, 80);
+        assert!(handle >= 0);
+        let pid = pty_process::spawn(handle, "/bin/sh");
+        assert!(pid > 0);
+        let mut interrupted = false;
+        let alive = pty_process::is_running_with(handle as i64, |p| {
+            if !interrupted {
+                interrupted = true;
+                return (-1, Some(libc::EINTR));
+            }
+            waitpid_nohang(p)
+        });
+        assert!(interrupted);
+        assert!(alive, "an interrupted wait reported a live child as gone");
+        assert!(pty_process::is_running(handle as i64), "the child record was dropped on EINTR");
+        assert_eq!(rt_pty_close(handle as i64), RuntimeValue::TRUE);
+        assert_reaped(pid);
     }
 
     #[test]
