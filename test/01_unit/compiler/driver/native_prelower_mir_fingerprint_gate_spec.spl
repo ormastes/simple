@@ -1,0 +1,56 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+
+"""
+## Purpose and audience
+
+Purpose: pin that native codegen builds the record-only pre-lowering MIR
+fingerprint (`mir_module_canonical_fingerprint_v1`, the whole module serialized
+to canonical JSON text) only for a module that has a pending pre-lowering key.
+Audience: engineers changing native codegen memory or the pre-lowering cache.
+
+The fingerprint used to be an eager argument of `driver_native_prelower_record_v1`
+at three per-module sites in `_compile_to_native_with_backend_session`. That
+record returns at its first line without a pending key, which is every staged,
+emit-object and bootstrap build, and the native runtime never reclaims the
+discarded text. A heap profile of a staged `native-build` (86 modules, 8-module
+batches) put 336 of the 595 MB retained across six batch flushes under that
+serialization.
+
+## Operator workflow
+
+1. Run `bin/simple test test/01_unit/compiler/driver/native_prelower_mir_fingerprint_gate_spec.spl`.
+2. Both scenarios must pass.
+
+## Compatibility and limitations
+
+Gate contract only. RSS is a property of the native compiler binary and is
+not observable from this interpreted spec.
+"""
+
+use std.spec.step
+use std.spec.*
+use compiler.driver.driver_types.{CompileContext}
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_native_prelower_cache.{driver_native_prelower_mir_fingerprint_v1}
+use compiler.mir.mir_canonical_fingerprint.{mir_module_canonical_fingerprint_v1}
+use compiler.mir.mir_data.{MirModule}
+
+describe("native pre-lowering MIR fingerprint gate"):
+    it("builds no fingerprint for a module without a pending pre-lowering key"):
+        step("context with one lowered module and no pending keys")
+        var ctx = CompileContext.create(driver_core_compile_options_default())
+        ctx.mir_modules["app.gate"] = MirModule(name: "app.gate", functions: {}, statics: {}, constants: {}, types: {})
+        step("the record-only fingerprint is empty")
+        expect(driver_native_prelower_mir_fingerprint_v1(ctx, "app.gate")).to_equal("")
+
+    it("returns the canonical fingerprint for a module with a pending key"):
+        step("context with one lowered module and its pending key")
+        var ctx = CompileContext.create(driver_core_compile_options_default())
+        val module = MirModule(name: "app.gate", functions: {}, statics: {}, constants: {}, types: {})
+        ctx.mir_modules["app.gate"] = module
+        ctx.native_prelower_pending_keys["app.gate"] = "pending-key"
+        step("the fingerprint equals the canonical module fingerprint")
+        val expected = mir_module_canonical_fingerprint_v1(module)
+        expect(expected.starts_with("simple/mir-fp/v1:")).to_equal(true)
+        expect(driver_native_prelower_mir_fingerprint_v1(ctx, "app.gate")).to_equal(expected)
