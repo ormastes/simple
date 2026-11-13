@@ -182,6 +182,13 @@ describe "Per-module phase cells (write-once, awaitable, cycle-checked)":
         step("Verify a self-await is the shortest cycle")
         val selfish = phase_cell_await_v1(table, phase_cell_key_v1("hir", "c"), phase_cell_key_v1("hir", "c"))
         expect(selfish.unwrap_err()).to_equal("await cycle: hir:c -> hir:c")
+        step("Verify a consumer with an outstanding wait cannot open a second one until it is released")
+        val second = phase_cell_await_v1(table, phase_cell_key_v1("hir", "a"), phase_cell_key_v1("hir", "c"))
+        expect(second.unwrap_err()).to_equal("'hir:a' already awaits 'hir:b'; a consumer awaits one cell at a time")
+        expect(phase_cell_awaiting_v1(table, phase_cell_key_v1("hir", "a"))).to_equal("hir:b")
+        val released = phase_cell_publish_v1(table, phase_cell_key_v1("hir", "b"), "blob-b").unwrap().0
+        expect(phase_cell_awaiting_v1(released, phase_cell_key_v1("hir", "a"))).to_equal("")
+        expect(phase_cell_await_v1(released, phase_cell_key_v1("hir", "a"), phase_cell_key_v1("hir", "c")).is_ok()).to_equal(true)
 
     it "publishes a producer failure so waiters are excluded instead of blocked":
         # @req REQ-ATTR-28

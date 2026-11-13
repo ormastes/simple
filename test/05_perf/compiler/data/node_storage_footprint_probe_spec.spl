@@ -1,4 +1,5 @@
 # @cover src/compiler/10.frontend/flat_ast_bridge.spl 10%
+# @timeout_secs 900 (opt-in perf probe: ~8 min interpreted; whole-tree sweeps skip it unless SIMPLE_PERF_PROBES=1)
 """
 ## Purpose and audience
 Node-storage footprint probe (node-tree storage design, phase B): for a fixed
@@ -9,7 +10,8 @@ line) as the allocator-independent per-node metric. Readers are the storage
 owners deciding the default mechanism per node family.
 Design: doc/05_design/compiler/data/node_tree_storage.md section 1. Category: Infrastructure.
 ## Operator workflow
-systemd-run --user --scope -p MemoryMax=8G <simple> test test/05_perf/compiler/data/node_storage_footprint_probe_spec.spl
+SIMPLE_PERF_PROBES=1 systemd-run --user --scope -p MemoryMax=8G <simple> test test/05_perf/compiler/data/node_storage_footprint_probe_spec.spl
+Without SIMPLE_PERF_PROBES=1 the example prints "skipped: perf lane" and passes, so whole-tree sweeps do not pay for it.
 Record the executing binary (`readlink -f`, `stat -c '%s %y'`) with every table.
 ## Compatibility and limitations
 Interpreter lane. RSS (`memory_usage()`, OS truth) on a non-shrinking
@@ -25,6 +27,7 @@ The example never fails on numbers; it fails only when a phase does not run.
 
 use std.spec.*
 use std.nogc_sync_mut.io.file_ops.{file_read}
+use std.nogc_sync_mut.io_runtime.{env_get_opt}
 use compiler.core.types.{reset_all_pools}
 use compiler.core.parser.{parser_init_with_path}
 use compiler.core.parser_decls.{parse_module_body}
@@ -82,6 +85,10 @@ fn probe(path: text) -> bool:
 
 describe "Node storage footprint probe":
     it "reports pool, bridge, HIR and MIR footprint per module":
+        if (env_get_opt("SIMPLE_PERF_PROBES") ?? "") != "1":
+            print "skipped: perf lane (set SIMPLE_PERF_PROBES=1 to run the footprint probe)"
+            expect(true).to_equal(true)
+            return
         step("Parse, bridge, lower to HIR and MIR every probe module and print one PROBE block each")
         var all_ran = true
         for path in PROBE_MODULES:

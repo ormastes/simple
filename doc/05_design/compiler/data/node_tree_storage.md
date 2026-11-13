@@ -18,13 +18,13 @@ otherwise. A switch is an SDN rule row, not a code edit.
 ## 1. Measurements (interpreter lane, Rust seed)
 
 Executing binary (the `simple test` wrapper execs a generation binary):
-`/home/yoon/dev/simple/src/compiler_rust/target/bootstrap.generations/8ea37491fb8e95ca0467aefd707ed0189260b724f6d9dc8dcee4b9092875b511-d59cc6238831a991b5a02de7640089dede84ccdb40166c1e3f65667640e467bc/simple`
+`src/compiler_rust/target/bootstrap.generations/8ea37491fb8e95ca0467aefd707ed0189260b724f6d9dc8dcee4b9092875b511-d59cc6238831a991b5a02de7640089dede84ccdb40166c1e3f65667640e467bc/simple`
 (119,570,696 bytes, 2026-11-05 18:12:30), worktree at `f78d0d7bc9b`, box
 shared with a 20-40 GiB census. Probe (committed, perf lane):
 
 ```
-cd <worktree> && systemd-run --user --scope -q -p MemoryMax=8G \
-  /home/yoon/dev/simple/src/compiler_rust/target/bootstrap/simple test \
+SIMPLE_PERF_PROBES=1 systemd-run --user --scope -q -p MemoryMax=8G \
+  src/compiler_rust/target/bootstrap/simple test \
   test/05_perf/compiler/data/node_storage_footprint_probe_spec.spl      # ~8 min
 ```
 
@@ -208,7 +208,7 @@ waiter list appended by CAS, the blob published to the session heap
 
 Today each MIR shard worker (`driver_build/native_mir_shard.spl`) re-runs the
 front half, decodes every HIR module from the cache and promotes it; the
-hirres lane (`/home/yoon/dev/simple-hirres-20261113`,
+hirres lane (landed in #8808,
 `driver_mir_shard_hir_residency_v1.spl`) cuts that to an interface-only
 projection per non-owned module at `hir_cache_load_in_owned_scope(key, ...,
 interface_only)` and reloads a claimed module's body after the claim. The
