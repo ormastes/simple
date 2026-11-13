@@ -71,10 +71,14 @@ val FIXTURE_DIR = get_temp_dir().replace("\\", "/") + "/simple_check_log_mode_fi
 
 fn _setup_fixture():
     val _removed = dir_remove_all(FIXTURE_DIR)
-    if not dir_create_all(FIXTURE_DIR):
-        fail("could not create fixture dir " + FIXTURE_DIR)
+    if not dir_create_all(FIXTURE_DIR + "/directory"):
+        fail("could not create fixture dir " + FIXTURE_DIR + "/directory")
+    if not file_create_exclusive(FIXTURE_DIR + "/directory/inner.spl", "fn inner() -> i64:\n    7\n"):
+        fail("could not write fixture file " + FIXTURE_DIR + "/directory/inner.spl")
     if not file_create_exclusive(FIXTURE_DIR + "/sample.spl", "fn answer() -> i64:\n    42\n"):
         fail("could not write fixture file " + FIXTURE_DIR + "/sample.spl")
+    if not file_create_exclusive(FIXTURE_DIR + "/sample_spec.spl", "use std.spec\ndescribe \"sample\":\n    it \"works\":\n        expect(1).to_equal(1)\n"):
+        fail("could not write fixture file " + FIXTURE_DIR + "/sample_spec.spl")
 
 fn _run_check(args: [text]) -> (text, text, i64):
     _spawn_cli(["src/app/check/main.spl"] + args, FIXTURE_DIR, [])
@@ -109,7 +113,7 @@ describe "check log mode CLI options":
         val (out, err, code) = _run_check(["--progress=dot", "missing.spl"])
         expect(code).to_equal(1)  # oracle: 1 is the CLI failure exit code for a missing target file
         expect(out).to_contain(".")
-        expect(out).to_contain("ERROR: file not found: missing.spl")
+        expect(out).to_contain("cannot read file: missing.spl")
 
     it "discovers source files when the target is a directory":
         # @req REQ-CHECK-LOGMODE-001
@@ -118,7 +122,7 @@ describe "check log mode CLI options":
         _setup_fixture()
         val (out, err, code) = _run_check([FIXTURE_DIR + "/directory"])
         expect(code).to_equal(0)  # oracle: 0 is the CLI success exit code when the discovered file checks clean
-        expect(out).to_contain("All checks passed (1 file(s))")
+        expect(out).to_contain("Semantic check passed with complete syntax and semantic coverage (1 file(s))")
 
     it "directs SSpec command blocks to the test runner before parsing":
         # @req REQ-CHECK-LOGMODE-001
@@ -138,8 +142,11 @@ describe "check log mode CLI options":
         _setup_fixture()
         val (out, err, code) = _run_check(["--json", "sample.spl", "sample_spec.spl"])
         expect(code).to_equal(1)  # oracle: 1 is the CLI failure exit code when one of two checked files errors
-        expect((out + err).contains("E-SSPEC-CHECK")).to_equal(false)
-        expect(out.trim()).to_equal("{\"command\":\"check\",\"status\":\"error\",\"checked\":2,\"files\":2,\"errors\":1,\"files_with_errors\":1}")
+        # The SSpec guidance (which legitimately names E-SSPEC-CHECK, pinned by
+        # test/01_unit/app/check/check_sspec_guidance_shared_lexer_spec.spl) is
+        # routed to stderr so stdout stays a single clean JSON summary object.
+        expect(out.contains("E-SSPEC-CHECK")).to_equal(false)
+        expect(out.trim()).to_equal("{\"command\":\"check\",\"status\":\"error\",\"coverage\":\"semantic\",\"semantic_complete\":false,\"checked\":2,\"files\":2,\"errors\":1,\"files_with_errors\":1}")
 
     it "does not classify prefixes, strings, or indented text as SSpec":
         # @req REQ-CHECK-LOGMODE-001
