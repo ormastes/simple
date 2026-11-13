@@ -2114,6 +2114,11 @@ fn callable_or_type_value_never_lowers_into_an_enum_slot() {
         (format!("{decls}{kind_opt}fn main():\n    print(kind_opt(Vec4f))\n"), "argument 1 of `kind_opt`", "the type `Vec4f`"),
         (format!("{decls}fn main():\n    val k: Kind = Vec4f\n"), "binding `k`", "the type `Vec4f`"),
         (format!("{decls}fn main():\n    val b = Box(k: helper)\n"), "field `Box.k`", "the function `helper`"),
+        (
+            format!("{decls}class Namer:\n    tag: i64\n    fn name(k: Kind) -> i64:\n        1\n\nfn main():\n    val n = Namer(tag: 1)\n    print(n.name(Vec4f))\n"),
+            "argument 1 of `Namer.name`",
+            "the type `Vec4f`",
+        ),
     ];
     for (source, slot, found) in &rejected {
         let err = parse_and_lower(source).expect_err(&format!("must not lower:\n{source}"));

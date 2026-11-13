@@ -111,51 +111,71 @@ Re-measured on the base seed (`7423d7d5bdb`, aarch64), strict JIT
 "function scrutinee, no wildcard: abort rc 134" did not reproduce: it printed
 `0` with rc 0, which is worse.
 
-| fixture | strict JIT before | strict JIT after | interpreter after |
-|---|---|---|---|
-| `kind_name(Vec4f)` (local class), `case _` | `other`, rc 0 | HIR error, rc 1 | call-boundary error |
-| `kind_name(Vec4f)` (`use std.simd.{Vec4f}`, the real struct) | `other`, rc 0 | HIR error | call-boundary error |
-| `kind_name(helper)` (fn), no wildcard | `0`, rc 0 | HIR error | call-boundary error |
-| `kind_name(Kind)` (the enum type itself) | `other`, rc 0 | HIR error | call-boundary error |
-| `kind_name(k: Vec4f)` (named arg) | `other`, rc 0 | HIR error | call-boundary error |
-| callee declared after caller | `other`, rc 0 | HIR error | call-boundary error |
-| callee imported from another module | `other`, rc 0 | HIR error | call-boundary error |
-| `kind_opt(Vec4f)`, `k: Kind?`, `case Some(I8):` | **`i8`, rc 0** (interp also `i8`) | HIR error | call-boundary error |
-| `val k: Kind = Vec4f` | `other`, rc 0 | HIR error | match-arm error (no let check in interp) |
-| `Box(k: Vec4f)`, field `k: Kind` (same file) | `other`, rc 0 | HIR error | match-arm error |
-| `n.name(Vec4f)`, method param `k: Kind` | `other`, rc 0 | **`other`, rc 0 (open)** | call-boundary error |
-| real enum values (control) | correct | unchanged | unchanged |
+"After" columns are from the final binary of this change. Every refused row
+exits 1 on all three lanes: strict JIT, non-strict JIT, and interpreter.
 
-Non-strict JIT: a HIR lowering error demotes the module to the interpreter,
-which now refuses the same calls at the call boundary, so no lane runs the
-match with a callable typed as an enum (method arguments excepted).
+| fixture | strict JIT before | after: strict JIT / non-strict JIT / interp |
+|---|---|---|
+| `kind_name(Vec4f)` (local class), `case _` | `other`, rc 0 | refused (HIR) / refused / refused (call boundary) |
+| `kind_name(Vec4f)` (`use std.simd.{Vec4f}`, the real struct) | `other`, rc 0 | refused on all three |
+| `kind_name(helper)` (fn), no wildcard | `0`, rc 0 | refused on all three |
+| `kind_name(Kind)` (the enum type itself) | `other`, rc 0 | refused on all three |
+| `kind_name(k: Vec4f)` (named arg) | `other`, rc 0 | refused on all three |
+| callee declared after caller | `other`, rc 0 | refused on all three |
+| callee imported from another module | `other`, rc 0 | refused on all three |
+| `kind_opt(Vec4f)`, `k: Kind?`, `case Some(I8):` | **`i8`, rc 0** (interp also `i8`) | refused on all three |
+| `val k: Kind = Vec4f` | `other`, rc 0 | refused on all three (interp: typed-binding check) |
+| `val k: Kind? = Vec4f`, `case Some(I8):` | `i8`, rc 0 (interp `i8`) | refused on all three |
+| `Box(k: Vec4f)`, field `k: Kind` (same file) | `other`, rc 0 | refused (HIR) / refused / match-arm error (interp has no field check) |
+| `n.name(Vec4f)`, method param `k: Kind` (same-file class) | `other`, rc 0 | refused on all three |
+| real enum values (control) | correct | unchanged on all three |
+
+On a HIR lowering error, non-strict JIT demotes the module to the
+interpreter, which refuses the same value at the call or binding boundary.
 
 Fix:
 
-- HIR (`hir/lower/expr/calls.rs` `reject_callable_for_enum_slot`): a slot whose
-  type is a user enum (also through `T?`; never `Option`/`Result`) refuses a
-  value typed `Function`, or a bare type-name reference (`Global("Vec4f")`
-  typed as struct/enum `Vec4f`, which is how a class name used as a value
-  lowers). Called on the final slot-ordered call arguments (callee type, or a
-  new `fn_param_type_names` table for a callee declared after its caller),
-  typed `val`/`var`, and same-file class field initialisers (same soundness
-  gate as the unknown-field check). Struct-typed locals and erased slots keep
-  the old contract: the seed's aggregate typing is not authoritative.
+- HIR (`hir/lower/expr/calls.rs` `reject_callable_for_enum_slot`):
+  - Fires when the slot type is a user enum (also through `T?`; never
+    `Option`/`Result`) and the value is either typed `Function` or is a bare
+    type-name reference. A class name used as a value lowers to
+    `Global("Vec4f")` typed as struct `Vec4f`, which is what this matches.
+  - A `::` variant path is never treated as a type reference.
+  - Called on:
+    - the final slot-ordered call arguments, using the callee's type, or the
+      new `fn_param_type_names` table when the callee is declared after its
+      caller;
+    - typed `val`/`var`;
+    - field initialisers of a class declared in the same file, under the same
+      soundness gate as the unknown-field check;
+    - positional method arguments on a receiver class/struct declared in the
+      same file, via the new `method_param_type_names` table. A row that
+      same-named owners disagree on is left unchecked.
+  - Struct-typed locals and erased slots keep the old contract, because the
+    seed's aggregate typing is not authoritative.
 - Interpreter (`interpreter_call/core/arg_binding.rs`
-  `reject_callable_for_enum_param`, via the 4-argument `validate_unit!`): a
-  `Constructor`/`Function`/`Lambda`/`BlockClosure`/`NativeFunction`/
-  `EnumType`/`TraitType` value bound to a `Kind`/`Kind?` parameter whose name
-  is a known enum is a type mismatch. `EnumVariantConstructor` is not refused
-  (module dicts store unit variants that way, residual above). The value
-  shape is tested first so data arguments never pay the enum-table lookup.
+  `reject_callable_for_enum_param`):
+  - Called through the 4-argument `validate_unit!` at parameter binding, and
+    at typed `val`/`var` (`interpreter/node_exec.rs`).
+  - Refuses a `Constructor`/`Function`/`Lambda`/`BlockClosure`/
+    `NativeFunction`/`EnumType`/`TraitType` value whose declared `Kind`/`Kind?`
+    names a known enum.
+  - `EnumVariantConstructor` is not refused, because module dicts store unit
+    variants that way (residual above).
+  - The value's shape is tested first, so data arguments never pay the
+    enum-table lookup.
 
 Open after this fix:
 
-- JIT method-call arguments (`n.name(Vec4f)`): method calls lower through
-  dynamic dispatch with no resolved parameter list at the HIR site, and
-  same-bare-name receiver types make a guess unsafe.
-- Imported-struct field initialisers (`Box` declared in another module) are
-  not checked, for the same reason the unknown-field check skips them.
+- Method arguments that are named, or whose receiver class is declared in
+  another module, are not checked in HIR. The JIT still runs those silently.
+  The interpreter refuses them only when it actually runs the call, that is in
+  interpret mode or after a demotion caused by something else.
+- Field initialisers:
+  - HIR: imported-struct field initialisers are not checked, for the same
+    reason the unknown-field check skips them.
+  - Interpreter: no field-init check at all, so only the match-arm error
+    fires.
 - Narrower gaps the review listed (P2, not fixed): a slot written as
   `Option<Kind>` (only `Kind?` is unwrapped); parameter default values and
   injected values in the interpreter (3-argument `validate_unit!`); a
@@ -167,8 +187,8 @@ Open after this fix:
 - Interpreter false-positive risk (P2): the interpreter's enum table is keyed
   by bare name and the tree has names that are both a trait and an enum
   (`Backend`, `DebugTarget`, `Display`, `EventBackend`, `Transport`). A lambda
-  passed to such a trait-typed parameter would now be refused. None was found
-  by the census below.
+  passed to such a trait-typed parameter would now be refused. The census
+  below found none.
 - Self-hosted compiler: `infer_function_call`
   (`src/compiler/30.types/type_infer/inference_expr_calls.spl`) already checks
   each argument with `InferMode.Check(expected_param)` and unifies the call.
@@ -183,6 +203,29 @@ Open after this fix:
   - The Rust unit harness (`evaluate_module`, `main = code(Kind.I8)`) takes
     `case _:` for a real `Kind.I8`, even through an untyped parameter, while the
     CLI answers the `I8` arm. Harness-only divergence; not investigated.
+
+## Census (false-positive sweep)
+
+The census used a binary in which both checks logged and passed instead of
+erroring. It ran each file once with `SIMPLE_EXECUTION_MODE=jit run`:
+
+- **Scope:** every `*_spec.spl` whose path names enum/match/pattern/variant
+  (413 files), plus a sample of every 180th other spec (120 files).
+- **Both checks were exercised.** Every file demoted at least once to the
+  interpreter (`fallback>=1` on all rows), so the census covered the HIR check
+  during lowering and the interpreter parameter check during execution.
+- **App entries:** also lowered under the JIT were `src/app/cli/main.spl`
+  (lowering stopped early on an unrelated `struct 'ANY' field 'route'` error),
+  `src/app/mcp/main.spl` (per-module JIT, many modules) and
+  `src/app/lsp/main.spl`.
+- **Result: 0 hits** (exact counts are in the PR).
+- **Not covered by that binary:** the method-argument check and the
+  interpreter typed-`val` check were added after the census binary was built.
+  For typed `val`, a static sweep of every
+  `val/var x: <Enum>[?] = <Capitalized identifier>` in src/test/examples
+  (2,979 enum names, 2,483 typed single-identifier lets) found 0 sites other
+  than `= None`. The method-argument check is gated to positional calls on
+  same-file classes.
 
 ## Regression
 

@@ -158,6 +158,10 @@ pub struct Lowerer {
     /// (`reject_callable_for_enum_slot`) see a callee whose HIR value type is
     /// not yet a `Function` (declared after the caller).
     pub(super) fn_param_type_names: HashMap<String, Vec<Option<String>>>,
+    /// Same as `fn_param_type_names` for class/struct methods, keyed
+    /// `Owner.method`, `self` excluded. Consumed only for a receiver whose
+    /// type is declared in the file being lowered.
+    pub(super) method_param_type_names: HashMap<String, Vec<Option<String>>>,
     /// Whole-program map of free-function name -> declared return type,
     /// built by `build_import_map`. Functions reached via the global import map
     /// (called without a `use` import) otherwise have no return-type info, so
@@ -383,6 +387,7 @@ impl Lowerer {
             imported_fn_param_names: HashMap::new(),
             fn_param_bool: HashMap::new(),
             fn_param_type_names: HashMap::new(),
+            method_param_type_names: HashMap::new(),
             global_fn_return_types: None,
             global_method_param_defaults: None,
             qualified_import_functions: None,
@@ -469,6 +474,7 @@ impl Lowerer {
             imported_fn_param_names: HashMap::new(),
             fn_param_bool: HashMap::new(),
             fn_param_type_names: HashMap::new(),
+            method_param_type_names: HashMap::new(),
             global_fn_return_types: None,
             global_method_param_defaults: None,
             qualified_import_functions: None,
@@ -578,6 +584,7 @@ impl Lowerer {
             imported_fn_param_names: HashMap::new(),
             fn_param_bool: HashMap::new(),
             fn_param_type_names: HashMap::new(),
+            method_param_type_names: HashMap::new(),
             global_fn_return_types: None,
             global_method_param_defaults: None,
             qualified_import_functions: None,

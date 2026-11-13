@@ -1584,6 +1584,25 @@ impl Lowerer {
         }
     }
 
+    /// Record `Owner.method` declared parameter type names (`self` already
+    /// excluded by the caller); variadic methods get an empty row.
+    fn record_method_param_type_names(&mut self, owner: &str, method: &str, user_params: &[simple_parser::ast::Parameter]) {
+        let row = if user_params.iter().any(|p| p.variadic) {
+            Vec::new()
+        } else {
+            user_params.iter().map(|p| Self::simple_param_type_name(p.ty.as_ref())).collect()
+        };
+        // Same-named owners from different modules can meet in a flattened
+        // unit: a disagreeing second row makes the entry empty (unchecked)
+        // instead of last-write-wins.
+        let key = format!("{owner}.{method}");
+        let row = match self.method_param_type_names.get(&key) {
+            Some(existing) if *existing != row => Vec::new(),
+            _ => row,
+        };
+        self.method_param_type_names.insert(key, row);
+    }
+
     fn collect_fn_param_defaults(&mut self, ast_module: &Module) {
         for item in &ast_module.items {
             if let Node::Function(f) = item {
@@ -1654,6 +1673,7 @@ impl Lowerer {
                     let user_params = if method.params.first().is_some_and(|p| p.name == "self") {
                         &method.params[1..]
                     } else { &method.params[..] };
+                    self.record_method_param_type_names(&class.name, &method.name, user_params);
                     if user_params.iter().any(|p| p.default.is_some()) {
                         self.fn_param_defaults.insert(
                             format!("{}.{}", class.name, method.name),
@@ -1669,6 +1689,7 @@ impl Lowerer {
                     let user_params = if method.params.first().is_some_and(|p| p.name == "self") {
                         &method.params[1..]
                     } else { &method.params[..] };
+                    self.record_method_param_type_names(&struct_.name, &method.name, user_params);
                     if user_params.iter().any(|p| p.default.is_some()) {
                         self.fn_param_defaults.insert(
                             format!("{}.{}", struct_.name, method.name),

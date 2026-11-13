@@ -2139,6 +2139,15 @@ main = classify(0) + 10 * classify(5) + 100 * classify(42) + 1000 * classify(100
                 "wrong error for {call}: {err}"
             );
         }
+        // Typed `val` twin: `val k: Kind? = Vec4f` then `case Some(I8):`
+        // answered 1 silently.
+        let err = run_err(&format!(
+            "{decls}fn code() -> i64:\n    val k: Kind? = Vec4f\n    match k:\n        case Some(I8): 1\n        case _: 3\nmain = code()\n"
+        ));
+        assert!(
+            err.contains("binding `k`") && err.contains("is declared as enum `Kind`") && err.contains("constructor value"),
+            "wrong error for typed val: {err}"
+        );
         // Controls: a real variant into `Kind` and `Kind?`, and a function
         // into a fn-typed parameter, still bind.
         let fns = "fn code(k: Kind) -> i64:\n    match k:\n        case I8: 1\n        case _: 3\nfn opt(k: Kind?) -> i64:\n    match k:\n        case _: 30\nfn apply(f: fn() -> i64) -> i64:\n    f()\n";
