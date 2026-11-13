@@ -652,14 +652,45 @@ pub(super) fn eval_call_expr(
                         // Similar issue - Result variants need arguments, so field access doesn't work
                     }
 
-                    if let Some(func) = functions.get(field).cloned() {
-                        return Ok(Some(Value::Function {
-                            name: field.clone(),
-                            def: func,
-                            captured_env: Arc::new(Env::new()),
-                        }));
-                    }
-                    if classes.contains_key(field) {
+                    let shortcut_func = functions.get(field).cloned();
+                    if shortcut_func.is_some() || classes.contains_key(field) {
+                        // `Enum.Variant` is never a module path: when the
+                        // receiver names an enum that declares `field` as a
+                        // variant, build that variant here (same rules as the
+                        // Value::EnumType arm below). Without this, a variant
+                        // whose name is also a loaded class or function
+                        // (`MirTypeKind.Vec4f` vs the std SIMD `struct Vec4f`)
+                        // evaluated to `<constructor:Vec4f>` inside fn bodies,
+                        // and a `match` on it took the first arm. Only paid when
+                        // the shortcut would otherwise fire.
+                        let receiver_enum = crate::interpreter::owner_module_enum(module_name)
+                            .or_else(|| enums.get(module_name).cloned())
+                            .or_else(|| BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow().get(module_name).cloned()))
+                            .or_else(|| GLOBAL_ENUMS.with(|cell| cell.borrow().get(module_name).cloned()));
+                        if let Some(enum_def) = receiver_enum {
+                            if let Some(variant) = enum_def.variants.iter().find(|v| v.name == *field) {
+                                let has_fields = variant.fields.as_ref().is_some_and(|f| !f.is_empty());
+                                return Ok(Some(if has_fields {
+                                    Value::EnumVariantConstructor {
+                                        enum_name: module_name.clone(),
+                                        variant_name: field.clone(),
+                                    }
+                                } else {
+                                    Value::Enum {
+                                        enum_name: module_name.clone(),
+                                        variant: field.clone(),
+                                        payload: None,
+                                    }
+                                }));
+                            }
+                        }
+                        if let Some(func) = shortcut_func {
+                            return Ok(Some(Value::Function {
+                                name: field.clone(),
+                                def: func,
+                                captured_env: Arc::new(Env::new()),
+                            }));
+                        }
                         return Ok(Some(Value::Constructor {
                             class_name: field.clone(),
                         }));

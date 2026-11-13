@@ -1,0 +1,39 @@
+# @tag: unit, language, interpreter, enum
+#
+# Regression: inside a named fn body, `Enum.Variant` whose variant name is
+# also a loaded class (`MirTypeKind.Vec4f` vs the std SIMD `struct Vec4f`)
+# evaluated to `<constructor:Vec4f>` instead of the enum value, and a `match`
+# on it silently took the first arm (I8 -> "char" in the OpenCL backend).
+# The cross-module import is load-bearing: the enum must not be in the fn's
+# local env for the module-style field-access shortcut to fire.
+
+use compiler.mir.mir_types.{MirType, MirTypeKind}
+
+fn vec4f_kind() -> MirTypeKind:
+    MirTypeKind.Vec4f
+
+fn vec4i_kind_via_local() -> MirTypeKind:
+    val kind = MirTypeKind.Vec4i
+    kind
+
+fn vec4f_type() -> MirType:
+    MirType(kind: MirTypeKind.Vec4f)
+
+fn kind_name(kind: MirTypeKind) -> text:
+    match kind:
+        case I8: "i8"
+        case F32: "f32"
+        case Vec4f: "vec4f"
+        case Vec4i: "vec4i"
+        case _: "other"
+
+describe "enum variant named like a loaded class":
+    it "evaluates to the enum variant inside a fn body":
+        expect(kind_name(vec4f_kind())).to_equal("vec4f")
+        expect(kind_name(vec4i_kind_via_local())).to_equal("vec4i")
+        expect(kind_name(vec4f_type().kind)).to_equal("vec4f")
+        expect("{vec4f_kind()}").to_equal("MirTypeKind::Vec4f")
+
+    it "keeps unshadowed variants unchanged":
+        expect(kind_name(MirTypeKind.F32)).to_equal("f32")
+        expect(kind_name(MirTypeKind.Vec4f)).to_equal("vec4f")
