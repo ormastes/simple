@@ -1062,7 +1062,11 @@ impl Lowerer {
     /// path in `build_pattern_binding_stmts` already carried this guard; this
     /// is the same runtime branch, hoisted into the slot owner so the
     /// CONDITION side and every sub-pattern binder get it too:
-    ///     if rt_enum_id(subj) >= 0: rt_enum_payload(subj) else: subj
+    ///     if rt_enum_id(subj) == OPTION_ENUM_ID: rt_enum_payload(subj) else: subj
+    /// `== OPTION_ENUM_ID`, not `>= 0`: the raw form of an `Evt?` IS a user
+    /// enum, so `>= 0` unwrapped `Evt.Click(8)` one level too far and the
+    /// nested `Some(Evt.Click(x))` binder read nil (same rule as the
+    /// identifier binder and `rt_unwrap_or_self`).
     /// See §22 of
     /// doc/08_tracking/bug/option_pattern_accepted_on_non_option_scrutinee_2026-07-27.md.
     pub(crate) fn payload_slot_expr(outer_variant: &str, subject_ref: &HirExpr, i: usize, arity: usize) -> HirExpr {
@@ -1078,7 +1082,7 @@ impl Lowerer {
                 kind: HirExprKind::If {
                     condition: Box::new(HirExpr {
                         kind: HirExprKind::Binary {
-                            op: BinOp::GtEq,
+                            op: BinOp::Eq,
                             left: Box::new(HirExpr {
                                 kind: HirExprKind::BuiltinCall {
                                     name: "rt_enum_id".to_string(),
@@ -1087,7 +1091,8 @@ impl Lowerer {
                                 ty: TypeId::I64,
                             }),
                             right: Box::new(HirExpr {
-                                kind: HirExprKind::Integer(0),
+                                // OPTION_ENUM_ID (runtime value/objects.rs).
+                                kind: HirExprKind::Integer(1),
                                 ty: TypeId::I64,
                             }),
                         },
