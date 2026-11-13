@@ -54,7 +54,8 @@ use std.nogc_sync_mut.io.file_ops.{file_atomic_write}
 use std.io_runtime.{getpid}
 use std.io_runtime.{time_now_monotonic_ms}
 use std.io_runtime.{dir_create_all, dir_remove_all, dir_exists}
-use app.cli.parse_shard_queue.{parse_shard_release_claims, parse_shard_exit_label}
+use app.cli.parse_shard_queue.{parse_shard_release_claims}
+use app.cli.shard_worker_reap_v1.{shard_worker_kill_stopped_v1, parse_shard_reap_v1}
 use app.cli.native_build_exit_status.{native_build_windows_status_label, native_build_posix_signal}
 use app.cli.file_worker_pool_refusal.{file_worker_pool_refusal_v1}
 use app.cli.shard_mem_clamp.{shard_default_threads}
@@ -824,39 +825,15 @@ fn parse_shard_queue_dir() -> text:
 
 fn spawn_parse_shards(base: [text], indices: [i64], count: i64, simple_bin: text, timeout_ms: i64,
         split_flag: text) -> [i64]:
-    # Spawn one child per index, wait for all, and ALWAYS print each child's
-    # exit status. run11 (2026-08-21): shard 6/8 was killed by the
-    # kill_simple_monitor CPU guard and the only trace was "7/8 completed" --
-    # the non-zero wait result was counted and dropped. Returns the failed
-    # shard indices.
+    # Spawn one child per index, then reap them all under one shared deadline
+    # (shard_worker_reap_v1.spl). Returns the failed shard indices.
     var pids: [i64] = []
     for i in indices:
         var shard_args = base
         shard_args = shard_args.push("{split_flag}={i}/{count}")
         val pid = process_spawn_async(simple_bin, shard_args)
         pids = pids.push(pid)
-    var failed: [i64] = []
-    var k = 0
-    while k < pids.len():
-        val i = indices[k]
-        val pid = pids[k]
-        val code = if pid > 0: process_wait(pid, timeout_ms) else: -1
-        if code != 0:
-            eprint "[parse-shard] shard={i}/{count} pid={pid} FAILED {parse_shard_exit_label(code)}"
-            failed = failed.push(i)
-            # A timed-out (-2) child is STILL RUNNING and holds its multi-GiB
-            # interpreter heap. If it stays alive it competes with the HIR
-            # shards and the real worker for the runner's memory and can push
-            # the worker into alloc-failure (beta.9 windows leg: leaked shard
-            # + worker OOM, "memory allocation of 65520 bytes failed").
-            # Best-effort kill; an already-exited child makes this a no-op.
-            if pid > 0:
-                val killed = process_kill(pid)
-                eprint "[parse-shard] shard={i}/{count} pid={pid} dead-child cleanup: kill={killed}"
-        else:
-            print "[parse-shard] shard={i}/{count} pid={pid} exit=0"
-        k = k + 1
-    failed
+    parse_shard_reap_v1(pids, indices, count, timeout_ms)
 
 fn run_parse_shards(args: [text], count: i64, simple_bin: text, timeout_ms: i64):
     # Parse warming only needs source discovery and the front-end parser.  Do
@@ -1297,9 +1274,9 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
             # probe also means invalid handle; require a real reap result.
             var owner_stopped = if label == "hir-shard": hir_stopped else: pid <= 0 or (code != -2 and code != -1 and not process_is_running(pid))
             if label != "hir-shard" and not owner_stopped and pid > 0:
-                val _killed = process_kill(pid)
+                val killed = process_kill(pid)
                 val reaped = native_build_normalize_exit_code(process_wait(pid, 5000))
-                owner_stopped = reaped != -2 and reaped != -1 and not process_is_running(pid)
+                owner_stopped = shard_worker_kill_stopped_v1(killed, reaped, process_is_running(pid))
                 if not owner_stopped:
                     all_stopped = false
                     val _blocked = hir_shard_recovery_block(queue_dir, "worker could not be reaped")
@@ -1353,9 +1330,9 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
                             all_stopped = false
                             val _blocked = hir_shard_recovery_block(queue_dir, hir_owner.reason)
                     elif pids[remaining] > 0:
-                        val _killed = process_kill(pids[remaining])
+                        val killed = process_kill(pids[remaining])
                         val reaped = native_build_normalize_exit_code(process_wait(pids[remaining], 5000))
-                        if reaped != -2 and reaped != -1 and not process_is_running(pids[remaining]):
+                        if shard_worker_kill_stopped_v1(killed, reaped, process_is_running(pids[remaining])):
                             val _sealed = hir_shard_recovery_seal(queue_dir, owners[remaining], "BLOCKED")
                         else:
                             all_stopped = false
