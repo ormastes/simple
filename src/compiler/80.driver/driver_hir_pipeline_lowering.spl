@@ -120,7 +120,8 @@ use compiler.driver.driver_parse_diagnostic.{driver_parse_error_message}
 use compiler.driver.driver_hir_cache.{hir_cache_load_in_owned_scope, hir_cache_store_encoded_in_owned_scope, hir_cache_clear_last_warnings}
 use compiler.driver.driver_hir_cache.{HirEncodedBodyV1, hir_encoded_body_v1}
 use compiler.driver.driver_hir_cache.{hir_cache_misses, hir_cache_adoption_receipt_v1}
-use compiler.driver.driver_hir_worker_surface_v1.{driver_hir_worker_skeleton_selected_v1}
+use compiler.driver.driver_hir_worker_surface_v1.{driver_hir_worker_skeleton_selected_v1,
+    driver_hir_worker_parse_failed_row_v1}
 use compiler.driver.driver_hir_cache.{hir_cache_promote_diagnostic_owner_v1, hir_module_encode_retained_v1}
 use compiler.driver.driver_source_receipt_index_v1.{
     driver_source_receipt_pair_key_v1, driver_source_receipt_index_v1}
@@ -1167,6 +1168,28 @@ impl CompilerDriver:
                 content: self.ctx.source_contents_owner[source_index],
                 module_name: self.ctx.source_module_names_owner[source_index])
             if not surfaces.index_by_name.contains_key(source.module_name):
+                if driver_hir_worker_parse_failed_row_v1(hir_shard_mode,
+                        self.ctx.poisoned_modules.contains(source.module_name)):
+                    # Phase 2 poisoned this module (surface-pass parse error)
+                    # and recorded its diagnostic. Seal its row FAILED so the
+                    # ledger stays complete, then lower every other module.
+                    val failed_key = hir_cache_key(source.path, hir_closure_digest,
+                        source_index == entry_source_index, self.ctx.options.library_mode,
+                        self.ctx.native_target, None)
+                    val failed_claim = hir_shard_begin(source.path, failed_key)
+                    if failed_claim < 0:
+                        val failed_claim_reason = hir_shard_claim_failure_reason_v1(failed_claim, source.path)
+                        hir_shard_guard_block(failed_claim_reason)
+                        self.ctx.add_error("HIR shard ledger claim failed: {failed_claim_reason}")
+                        return false
+                    if failed_claim == 1:
+                        if not hir_shard_finish(source.path, "FAILED", false):
+                            hir_shard_guard_block("HIR shard terminal receipt publication failed")
+                            self.ctx.add_error("HIR shard terminal receipt publication failed")
+                            return false
+                        eprint("[hir-shard] FAILED {source.path}: phase-2 parse error, module poisoned")
+                    hir_loop_pos = hir_loop_pos + 1
+                    continue
                 self.ctx.add_error("Missing module surface alias for {source.module_name}")
                 hir_shard_guard_block("durable memory snapshot or source identity guard failed")
                 mem_snapshot_abort()
