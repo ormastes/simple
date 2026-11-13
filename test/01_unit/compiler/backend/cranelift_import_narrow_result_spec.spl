@@ -1,0 +1,47 @@
+# @req: REQ-CRANELIFT-VERIFIER-TYPES-001
+# Regression (bug cranelift_lsp_mcp_stdout_write_failed_2026-11-13): imported
+# calls are declared with an I64 result, but a C callee returning `bool` /
+# `int8_t` / `int32_t` only defines the low bits of RAX. The Cranelift lane
+# must re-extend such results from their declared width; full-word returns
+# are left untouched.
+use std.spec
+use std.spec.step
+use compiler.mir.mir.*
+use compiler.backend.cranelift_codegen_adapter.{cl_import_result_narrow_plan}
+
+describe "Cranelift imported-call narrow result plan":
+    it "zero-extends a declared bool from its low byte":
+        step("Bool -> (I8, unsigned)")
+        val (ty, signed) = cl_import_result_narrow_plan(MirType.bool())
+        expect(ty).to_equal(1)
+        expect(signed).to_equal(false)
+
+    it "sign-extends declared signed sub-word integers":
+        step("I8/I16/I32 -> signed reduce widths")
+        val (t8, s8) = cl_import_result_narrow_plan(MirType(kind: MirTypeKind.I8))
+        expect(t8).to_equal(1)
+        expect(s8).to_equal(true)
+        val (t16, s16) = cl_import_result_narrow_plan(MirType(kind: MirTypeKind.I16))
+        expect(t16).to_equal(2)
+        expect(s16).to_equal(true)
+        val (t32, s32) = cl_import_result_narrow_plan(MirType(kind: MirTypeKind.I32))
+        expect(t32).to_equal(3)
+        expect(s32).to_equal(true)
+
+    it "zero-extends declared unsigned sub-word integers":
+        step("U8/U32 -> unsigned reduce widths")
+        val (t8, s8) = cl_import_result_narrow_plan(MirType(kind: MirTypeKind.U8))
+        expect(t8).to_equal(1)
+        expect(s8).to_equal(false)
+        val (t32, s32) = cl_import_result_narrow_plan(MirType(kind: MirTypeKind.U32))
+        expect(t32).to_equal(3)
+        expect(s32).to_equal(false)
+
+    it "leaves full-word results untouched":
+        step("I64/F64/Unit -> no reduce")
+        val (ti, _) = cl_import_result_narrow_plan(MirType.i64())
+        expect(ti).to_equal(0)
+        val (tf, _) = cl_import_result_narrow_plan(MirType.f64())
+        expect(tf).to_equal(0)
+        val (tu, _) = cl_import_result_narrow_plan(MirType.unit())
+        expect(tu).to_equal(0)
