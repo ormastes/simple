@@ -33,6 +33,7 @@
 use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind, SymbolId, SymbolKind}
 use compiler.hir.hir_definitions.{HirFunction, HirBlock, HirExpr, HirExprKind, HirClass, HirImpl}
 use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface}
 
 pub const MIR_SHARD_INTERFACE_HIR_ENV_V1: text = "SIMPLE_MIR_SHARD_INTERFACE_HIR"
 
@@ -44,12 +45,21 @@ pub const MIR_SHARD_INTERFACE_HIR_ENV_V1: text = "SIMPLE_MIR_SHARD_INTERFACE_HIR
 # `shard_spec` SIMPLE_MIR_SHARD ("<i>/<n>"), `link_ledger` SIMPLE_MIR_SHARD_LINK,
 # `export_dir` SIMPLE_MIR_SHARD_EXPORT_WRITE, `fork_workers`
 # SIMPLE_MIR_FORK_WORKERS, `file_worker_queue` SIMPLE_FILE_WORKER_HIR_QUEUE,
-# `loads_restricted` worker_hir_loads_restricted_v1().
+# `loads_restricted` worker_hir_loads_restricted_v1(), `aot_mode` the compile
+# mode is AOT (check / interpret never shard MIR), `any_nogc_strict` some
+# module surface is @no_gc(strict).
 pub fn mir_shard_hir_residency_refusal_v1(flag: text, shard_spec: text, link_ledger: text,
         export_dir: text, fork_workers: text, file_worker_queue: text,
-        loads_restricted: bool, bootstrap_flat_rows: bool, entry_closure_flat: bool) -> text:
+        loads_restricted: bool, bootstrap_flat_rows: bool, entry_closure_flat: bool,
+        aot_mode: bool, any_nogc_strict: bool) -> text:
     if flag != "1": return "flag-off"
     if shard_spec == "": return "not-mir-shard-worker"
+    if not aot_mode: return "not-aot-compile"
+    # NoGC admission (driver_admit_nogc_param_effects_v1) runs over ctx.hir_modules
+    # after the HIR cache was written, so a claimed @no_gc(strict) module reloaded
+    # from the cache would lose its effect rows (NOGC-POLICY-002). Refuse until
+    # the reload carries them.
+    if any_nogc_strict: return "nogc-strict-module"
     if link_ledger != "": return "link-worker"
     if export_dir != "": return "export-writer"
     if (fork_workers.to_i64() ?? 0) > 1: return "fork-workers"
@@ -62,6 +72,19 @@ pub fn mir_shard_hir_residency_refusal_v1(flag: text, shard_spec: text, link_led
     # SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE=1, so refuse exactly that combination.
     if bootstrap_flat_rows and entry_closure_flat: return "bootstrap-flat-rows"
     ""
+
+# True when any module surface of the build is @no_gc(strict).
+pub fn hir_residency_any_nogc_strict_v1(surfaces: [ModuleSurface]) -> bool:
+    for surface in surfaces:
+        if surface.nogc_strict: return true
+    false
+
+# The retained-owner HIR route (SIMPLE_STAGE3_STREAMING_SURFACES unset/0) has
+# no interface-only load: "" when the flag is unset, else the one refusal line
+# that route prints so the flag is never silently ignored.
+pub fn mir_shard_hir_residency_retained_route_line_v1(flag: text) -> text:
+    if flag == "": return ""
+    "[mir-shard] hir-residency refused reason=retained-route: only the streaming-surfaces HIR route (SIMPLE_STAGE3_STREAMING_SURFACES=1) loads interface-only HIR"
 
 # ===== interface-only projection (pure) =====================================
 
@@ -76,7 +99,7 @@ pub fn hir_function_keeps_body_v1(function: HirFunction) -> bool:
 # True when a type parameter occurs anywhere in `ty`, spelled either as
 # TypeParam or as Named of a symbol the module declares as a type parameter.
 # Kinds not walked here (Projection, Tensor, Layer) report true: fail closed.
-fn hir_type_mentions_type_param_v1(ty: HirType, module: HirModule) -> bool:
+pub fn hir_type_mentions_type_param_v1(ty: HirType, module: HirModule) -> bool:
     match ty.kind:
         case HirTypeKind.TypeParam(_, _): true
         case HirTypeKind.Named(symbol, args):
@@ -92,9 +115,9 @@ fn hir_type_mentions_type_param_v1(ty: HirType, module: HirModule) -> bool:
         case HirTypeKind.Never: false
         case HirTypeKind.Error: false
         case HirTypeKind.DynTrait(_): false
-        # An unresolved inference variable or the erased top type is not a
-        # type parameter: neither makes the body a template.
-        case HirTypeKind.Infer(_, _): false
+        # The erased top type is not a type parameter. An unresolved inference
+        # variable may still stand for one: fail closed and keep the body.
+        case HirTypeKind.Infer(_, _): true
         case HirTypeKind.Any: false
         case HirTypeKind.Tuple(elements): hir_types_mention_type_param_v1(elements, module)
         case HirTypeKind.Array(element, _): hir_type_mentions_type_param_v1(element, module)

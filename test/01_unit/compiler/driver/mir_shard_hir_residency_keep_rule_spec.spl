@@ -21,6 +21,7 @@ use compiler.common.driver_core_types.{SourceFile}
 use compiler.hir.hir_lowering.types.{hirlowering_for_module}
 use compiler.hir.hir_lowering.items.*
 use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface}
 use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
 use compiler.hir.hir_codec.{hir_module_encode}
@@ -32,9 +33,12 @@ use compiler.mir._MirLoweringExpr.expr_dispatch.*
 use compiler.mir._MirLowering.asm_and_targets.*
 use compiler.mir.mir_lowering_stmts.*
 use test.helpers.lowering_harness.{mir_module_text, first_text_difference}
+use compiler.common.diagnostics.span.{Span}
 use compiler.driver.driver_mir_shard_hir_residency_v1.{hir_module_interface_only_v1,
     hir_function_keeps_body_v1, hir_function_keeps_body_in_module_v1,
-    hir_module_generic_owner_methods_v1}
+    hir_module_generic_owner_methods_v1, hir_type_mentions_type_param_v1,
+    mir_shard_hir_residency_refusal_v1, mir_shard_hir_residency_retained_route_line_v1,
+    hir_residency_any_nogc_strict_v1}
 
 val KEEP_PROVIDER_SOURCE = "pub trait Describe:\n    fn tag() -> i64\n    fn described() -> i64:\n        self.tag() + 100\n\npub struct Bag<T>:\n    item: T\n    count: i64\n\nimpl<T> Bag<T>:\n    fn first() -> T:\n        self.item\n\nimpl<T> Describe for Bag<T>:\n    fn tag() -> i64:\n        self.count\n\npub class Cell<T>:\n    value: T\n    fn peek() -> T:\n        self.value\n\n@inline\npub fn fast(x: i64) -> i64:\n    x + 1\n\npub fn plain(x: i64) -> i64:\n    val twice = \\v: v * 2\n    twice(x)\n"
 val KEEP_CONSUMER_SOURCE = "use app.probe.generics.\{Describe, Bag, Cell, fast, plain\}\n\nfn run() -> i64:\n    val bag = Bag<i64>(item: 7, count: 3)\n    val cell = Cell<i64>(value: 9)\n    bag.first() + bag.described() + cell.peek() + fast(1) + plain(2)\n"
@@ -212,3 +216,39 @@ describe "interface-only HIR saves bytes on real modules":
         print "[residency-bytes] modules={paths.len()} stripped_bodies={stripped_total} full_bytes={full_bytes} interface_bytes={interface_bytes} saved_bytes={full_bytes - interface_bytes}"
         expect(stripped_total > 0).to_equal(true)
         expect(interface_bytes < full_bytes).to_equal(true)
+
+fn surfaces_of(source: text, path: text, module_name: text) -> [ModuleSurface]:
+    val log = Logger(level: 0)
+    val ast = parse_full_frontend(source, path, module_name, log)
+    var modules: Dict<text, Module> = {}
+    modules[module_name] = ast
+    match module_surfaces_from_modules(modules, [SourceFile(path: path, content: source, module_name: module_name)]):
+        case Err(reason): fail("module surface construction failed for {path}: {reason}")
+        case Ok(surfaces): return surfaces.surfaces
+
+describe "MIR shard HIR residency arming refuses unsafe lanes":
+    it "refuses when any module surface is @no_gc(strict) (reload would drop its effect rows)":
+        expect(mir_shard_hir_residency_refusal_v1("1", "0/2", "", "", "", "", false, false, false, true, true)).to_equal("nogc-strict-module")
+        expect(mir_shard_hir_residency_refusal_v1("1", "0/2", "", "", "", "", false, false, false, true, false)).to_equal("")
+
+    it "detects a @no_gc(strict) surface and ignores an ordinary one":
+        val strict = surfaces_of("@no_gc(strict)\npub fn one() -> i64:\n    1\n", "app/probe/strict.spl", "app.probe.strict")
+        val plain = surfaces_of("pub fn one() -> i64:\n    1\n", "app/probe/plain.spl", "app.probe.plain")
+        expect(hir_residency_any_nogc_strict_v1(strict)).to_equal(true)
+        expect(hir_residency_any_nogc_strict_v1(plain)).to_equal(false)
+
+    it "arms only in AOT compile mode":
+        expect(mir_shard_hir_residency_refusal_v1("1", "0/2", "", "", "", "", false, false, false, false, false)).to_equal("not-aot-compile")
+
+    it "names the retained route instead of ignoring the flag silently":
+        expect(mir_shard_hir_residency_retained_route_line_v1("")).to_equal("")
+        expect(mir_shard_hir_residency_retained_route_line_v1("1").contains("reason=retained-route")).to_equal(true)
+        expect(mir_shard_hir_residency_retained_route_line_v1("1").contains("SIMPLE_STAGE3_STREAMING_SURFACES=1")).to_equal(true)
+
+describe "type-parameter walker fails closed":
+    it "counts an unresolved inference variable as generic and the erased top type as not":
+        val fixture = keep_fixture()
+        val span = Span(start: 0, end: 0, line: 0, col: 0, file: "", length: 0)
+        expect(hir_type_mentions_type_param_v1(HirType(kind: HirTypeKind.Infer(1, 0), span: span), fixture.provider)).to_equal(true)
+        expect(hir_type_mentions_type_param_v1(HirType(kind: HirTypeKind.Any, span: span), fixture.provider)).to_equal(false)
+        expect(hir_type_mentions_type_param_v1(HirType(kind: HirTypeKind.Int(64, true), span: span), fixture.provider)).to_equal(false)
