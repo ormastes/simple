@@ -10,7 +10,6 @@ use app.io.minimal_runtime_ops.{cwd, env_get, process_run_bounded}
 # doc/08_tracking/bug/mcp_source_mode_large_import_graph_2026-06-23.md
 use .session_state.{lsp_record_location, lsp_resolve_requester}
 use .visibility_state.{lsp_mcp_view_serve, lsp_mcp_view_set}
-use std.nogc_sync_mut.source.visibility_view.{source_visibility_level_valid_v1}
 use .lsp_command_metrics.{lsp_note_command_start}
 use .lsp_query_inproc.{lsp_query_inproc_dispatch_v1, lsp_query_inproc_command_text_v1}
 use compiler.common.cache_contract.virtual_source_read_registry_v1.{VirtualSourceRegistrationStatusV1, lsp_virtual_source_read_registered_v1}
@@ -476,10 +475,11 @@ fn command_result(id: text, out: text) -> text:
 
 # Public session view keeps the per-file default (public inside an
 # __init__.spl boundary); any private or overridden view is passed through.
-fn view_cli_level(level: text, view: text, requested: text) -> text:
-    # An unknown requested level reaches the CLI, which rejects it in-band.
-    if requested != "" and not source_visibility_level_valid_v1(requested): return requested
-    if level == "public" and not view.contains("per-request override"): return ""
+fn view_cli_level(level: text, requested: text) -> text:
+    # A requested level (valid override, or unknown: the CLI rejects it in-band)
+    # is passed as given.
+    if requested != "": return requested
+    if level == "public": return ""
     level
 
 # Symbol results: content[0] is the listing (unchanged shape for every view),
@@ -565,12 +565,12 @@ fn handle_tool_call(id: text, body: text) -> text:
         if tool_name == "lsp_symbols":
             val (requester, _source) = lsp_resolve_requester(arg_field(args: args_body, key: "requester"))
             val served = lsp_mcp_view_serve(arg_field(args: args_body, key: "visibility"), arg_field(args: args_body, key: "feature"), arg_field(args: args_body, key: "layer"))
-            return view_result(id, run_visibility_symbols(file, requester, view_cli_level(served.level, served.view, arg_field(args: args_body, key: "visibility")), served.feature, served.layer), served.view)
+            return view_result(id, run_visibility_symbols(file, requester, view_cli_level(served.level, arg_field(args: args_body, key: "visibility")), served.feature, served.layer), served.view)
         return diagnostics_result(id, file, run_lsp_diagnostics(file))
 
     if tool_name == "lsp_workspace_symbols":
         val served = lsp_mcp_view_serve(arg_field(args: args_body, key: "visibility"), arg_field(args: args_body, key: "feature"), arg_field(args: args_body, key: "layer"))
-        return view_result(id, run_visibility_workspace_symbols(arg_field(args: args_body, key: "query"), view_cli_level(served.level, served.view, arg_field(args: args_body, key: "visibility")), served.feature, served.layer, arg_field(args: args_body, key: "root")), served.view)
+        return view_result(id, run_visibility_workspace_symbols(arg_field(args: args_body, key: "query"), view_cli_level(served.level, arg_field(args: args_body, key: "visibility")), served.feature, served.layer, arg_field(args: args_body, key: "root")), served.view)
 
     # Session view switch; a per-request `visibility` on a symbol tool never
     # changes it. Returns the same two-block shape as the symbol tools.
