@@ -336,3 +336,19 @@ age-based. Do not reintroduce `file_lock` in `src/app/compiler_entrypoint/`,
 - Trap: `bin/simple lint` on the seed reports `error[W-ANY-NOTRUN]` ("no check
   worker? set SIMPLE_BINARY") unless `SIMPLE_BINARY=<binary>` is exported; two-arm
   `Option` matches draw `non_exhaustive_match` (same as `project.spl`), left as is.
+- Slices 2-5 (2026-11-13, same lane, all unwired): `library_unit_iface_v1.spl`
+  (unit source digest; per-module digest = `native_interface_decls_v1` +
+  `native_interface_whole_digest_v1`, the body-free carrier — spec proves field
+  reorder / variant insert / `val` value / method default change it, bodies do
+  not; `iface.sdn` decode fails closed), `library_unit_archive_v1.spl`
+  (archive via `find_archive_portable` + `archive_command_build`; write-once
+  `receipt.sdn` re-verifies unit_key and records scope_key),
+  `library_unit_graph_v1.spl` (plan → `ParallelBuilder`; poison/buildable),
+  `library_unit_link_v1.spl` (flag predicate, link set keyed from CURRENT iface
+  digests, application-in-closure = Err). Manifest drift fixed in `5703f224213`.
+- Traps: `ParallelBuilder.build` puts only DIRECT failures in `errors`
+  (dependents are `Failed("Dependency failed")` in `stats.failed`); the seed JIT
+  demotes a module touching `ArchiveCommand.response_path` ("Cannot infer field
+  type") and runs it interpreted; the archive spec's real-archiver branch depends
+  on `find_archive_portable()` and asserts the Err text when none exists.
+- Blockers before wiring: `doc/08_tracking/bug/library_unit_build_slice5_prerequisites_2026-11-13.md`.

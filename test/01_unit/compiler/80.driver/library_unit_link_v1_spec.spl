@@ -1,0 +1,114 @@
+use std.spec
+use compiler.driver.driver_build.library_unit_plan_v1.{LibraryUnitDeclV1, LibraryUnitPlanEntryV1, library_unit_plan_v1, library_unit_cache_key_v1}
+use compiler.driver.driver_build.library_unit_link_v1.{
+    LIBRARY_UNITS_ENV_V1, LIBRARY_UNITS_FLAG_V1, library_unit_mode_enabled_v1,
+    LibraryUnitLinkEntryV1, library_unit_link_set_v1, library_unit_link_key_inputs_v1}
+
+# Design: doc/05_design/compiler/incremental_build/library_unit_build_and_link.md §5-6
+# Slice 5 (pure part): flag predicate + link-set derivation. No driver wiring.
+
+fn decl(name: text, kind: text, dir: text, deps: [text]) -> LibraryUnitDeclV1:
+    LibraryUnitDeclV1(name: name, kind: kind, dir: dir, deps: deps)
+
+fn repo_plan() -> [LibraryUnitPlanEntryV1]:
+    val decls = [
+        decl("simple-app", "application", "src/app", ["src/compiler", "src/lib", "src/compiler_rust"]),
+        decl("simple-compiler", "application", "src/compiler", ["src/lib", "src/compiler_rust"]),
+        decl("simple-compiler-common", "library", "src/compiler/00.common", ["src/lib"]),
+        decl("simple-std", "library", "src/lib", ["src/compiler_rust"]),
+        decl("simple-rust-runtime", "runtime", "src/compiler_rust", []),
+        decl("simple.runtime", "library", "src/runtime", [])]
+    match library_unit_plan_v1(decls):
+        case Ok(plan): plan
+        case Err(_): []
+
+val PRODUCER = "exe=4:abcd"
+
+fn sources() -> {text: text}:
+    var m: {text: text} = {}
+    m["simple-rust-runtime"] = "src-rt"
+    m["simple-std"] = "src-std"
+    m["simple-compiler-common"] = "src-common"
+    m["simple.runtime"] = "src-runtime"
+    m
+
+fn ifaces(rt_iface: text) -> {text: text}:
+    var m: {text: text} = {}
+    m["simple-rust-runtime"] = rt_iface
+    m["simple-std"] = "iface-std"
+    m["simple-compiler-common"] = "iface-common"
+    m["simple.runtime"] = "iface-runtime"
+    m
+
+describe "library_unit_mode_enabled_v1":
+    it "is on with --library-units or SIMPLE_NATIVE_LIBRARY_UNITS=1 and off otherwise":
+        expect(LIBRARY_UNITS_ENV_V1).to_equal("SIMPLE_NATIVE_LIBRARY_UNITS")
+        expect(LIBRARY_UNITS_FLAG_V1).to_equal("--library-units")
+        expect(library_unit_mode_enabled_v1(["native-build", "--library-units", "x.spl"], "")).to_equal(true)
+        expect(library_unit_mode_enabled_v1(["native-build", "x.spl"], "1")).to_equal(true)
+        expect(library_unit_mode_enabled_v1(["native-build", "x.spl"], "")).to_equal(false)
+        expect(library_unit_mode_enabled_v1(["native-build", "x.spl"], "0")).to_equal(false)
+        expect(library_unit_mode_enabled_v1(["native-build", "--library-units-later"], "")).to_equal(false)
+
+describe "library_unit_link_set_v1":
+    it "derives the target's unit closure with keys from CURRENT iface digests, dependents first":
+        match library_unit_link_set_v1(repo_plan(), "simple-compiler-common", PRODUCER, sources(), ifaces("iface-rt")):
+            case Ok(entries):
+                expect(entries.len()).to_equal(2)
+                expect(entries[0].unit).to_equal("simple-std")
+                expect(entries[1].unit).to_equal("simple-rust-runtime")
+                expect(entries[1].unit_key).to_equal(library_unit_cache_key_v1(PRODUCER, "src-rt", []))
+                expect(entries[0].unit_key).to_equal(library_unit_cache_key_v1(PRODUCER, "src-std", [("simple-rust-runtime", "iface-rt")]))
+                expect(entries[0].deps.len()).to_equal(1)
+                expect(entries[0].deps[0]).to_equal("simple-rust-runtime")
+            case Err(e):
+                expect(e).to_equal("")
+
+    it "re-keys every dependent when a leaf interface changes, and only them":
+        val before = library_unit_link_set_v1(repo_plan(), "simple-compiler-common", PRODUCER, sources(), ifaces("iface-rt"))
+        val after = library_unit_link_set_v1(repo_plan(), "simple-compiler-common", PRODUCER, sources(), ifaces("iface-rt-v2"))
+        match before:
+            case Ok(b):
+                match after:
+                    case Ok(a):
+                        expect(a[1].unit_key).to_equal(b[1].unit_key)          # the leaf itself: same source
+                        expect(a[0].unit_key == b[0].unit_key).to_equal(false)  # its dependent: re-keyed
+                    case Err(e):
+                        expect(e).to_equal("")
+            case Err(e):
+                expect(e).to_equal("")
+
+    it "refuses an application inside the closure instead of skipping it":
+        match library_unit_link_set_v1(repo_plan(), "simple-app", PRODUCER, sources(), ifaces("iface-rt")):
+            case Ok(_):
+                expect("link set").to_equal("Err expected")
+            case Err(e):
+                expect(e.contains("simple-compiler")).to_equal(true)
+                expect(e.contains("application")).to_equal(true)
+
+    it "fails closed on an unknown target or a unit without a digest":
+        expect(library_unit_link_set_v1(repo_plan(), "ghost", PRODUCER, sources(), ifaces("i")).is_err()).to_equal(true)
+        # simple-std's key needs simple-rust-runtime's iface; the target's own iface is never consulted
+        var no_rt_iface = ifaces("iface-rt")
+        no_rt_iface["simple-rust-runtime"] = ""
+        expect(library_unit_link_set_v1(repo_plan(), "simple-compiler-common", PRODUCER, sources(), no_rt_iface).is_err()).to_equal(true)
+        var no_rt_source: {text: text} = {}
+        no_rt_source["simple-std"] = "src-std"
+        expect(library_unit_link_set_v1(repo_plan(), "simple-compiler-common", PRODUCER, no_rt_source, ifaces("iface-rt")).is_err()).to_equal(true)
+
+    it "a target with no library dependencies has an empty link set":
+        match library_unit_link_set_v1(repo_plan(), "simple.runtime", PRODUCER, sources(), ifaces("iface-rt")):
+            case Ok(entries):
+                expect(entries.len()).to_equal(0)
+            case Err(e):
+                expect(e).to_equal("")
+
+describe "library_unit_link_key_inputs_v1":
+    it "folds unit name and key into deterministic link-key parts":
+        val entries = [
+            LibraryUnitLinkEntryV1(unit: "simple-std", unit_key: "k-std", deps: ["simple-rust-runtime"]),
+            LibraryUnitLinkEntryV1(unit: "simple-rust-runtime", unit_key: "k-rt", deps: [])]
+        val parts = library_unit_link_key_inputs_v1(entries)
+        expect(parts.len()).to_equal(2)
+        expect(parts[0]).to_equal("unit=10:simple-std:5:k-std")
+        expect(parts[1]).to_equal("unit=19:simple-rust-runtime:4:k-rt")

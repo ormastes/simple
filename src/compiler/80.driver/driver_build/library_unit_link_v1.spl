@@ -1,0 +1,91 @@
+# Library unit link set + mode flag (pure part of slice 5,
+# library_unit_build_and_link.md §5-6). No driver wiring lives here.
+#
+# `library_unit_link_set_v1` derives, for one link target, the transitive
+# library-unit closure with each unit's EXPECTED `unit_key` computed bottom-up
+# from the caller's CURRENT source and interface digests. Archive paths are
+# never an input: a stale archive published under an old key is unreachable by
+# construction, which is what makes "reuse unchanged libraries" safe. The
+# caller then checks `library_unit_archive_complete_v1` at the derived dir.
+#
+# Link order is dependents first, leaves last (`lib<leaf>.a` last). An
+# `application` inside a closure is refused — it produces no archive — rather
+# than skipped; the compiler becomes a `library` unit when Stage 3 adopts this.
+#
+# Design: doc/05_design/compiler/incremental_build/library_unit_build_and_link.md
+
+use compiler.driver.driver_build.incremental.{cache_key_frame}
+use compiler.driver.driver_build.library_unit_plan_v1.{LibraryUnitPlanEntryV1, library_unit_cache_key_v1}
+
+pub const LIBRARY_UNITS_ENV_V1: text = "SIMPLE_NATIVE_LIBRARY_UNITS"
+pub const LIBRARY_UNITS_FLAG_V1: text = "--library-units"
+
+# `env_value` is the raw value of SIMPLE_NATIVE_LIBRARY_UNITS ("" when unset).
+pub fn library_unit_mode_enabled_v1(args: [text], env_value: text) -> bool:
+    if env_value == "1":
+        return true
+    for arg in args:
+        if arg == LIBRARY_UNITS_FLAG_V1:
+            return true
+    false
+
+pub struct LibraryUnitLinkEntryV1:
+    unit: text
+    unit_key: text      # expected key under the current digests
+    deps: [text]        # dependency unit names (from the plan)
+
+pub fn library_unit_link_set_v1(plan: [LibraryUnitPlanEntryV1], target: text, producer_identity: text,
+        source_digest_by_unit: {text: text}, iface_digest_by_unit: {text: text}) -> Result<[LibraryUnitLinkEntryV1], text>:
+    var by_name: {text: LibraryUnitPlanEntryV1} = {}
+    for entry in plan:
+        by_name[entry.name] = entry
+    if not by_name.contains_key(target):
+        return Err("link target '{target}' is not in the plan")
+
+    # Transitive closure of the target's dependencies (target itself excluded).
+    var in_closure: {text: bool} = {}
+    var frontier: [text] = by_name[target].deps
+    while frontier.len() > 0:
+        var next: [text] = []
+        for name in frontier:
+            if in_closure.contains_key(name):
+                continue
+            if not by_name.contains_key(name):
+                return Err("unit '{name}' in the closure of '{target}' is not in the plan")
+            in_closure[name] = true
+            for dep in by_name[name].deps:
+                next.push(dep)
+        frontier = next
+
+    # Keys bottom-up in plan order (dependency-first), then reversed for linking.
+    var key_by_unit: {text: text} = {}
+    var forward: [LibraryUnitLinkEntryV1] = []
+    for entry in plan:
+        if not in_closure.contains_key(entry.name):
+            continue
+        if entry.kind == "application":
+            return Err("unit '{entry.name}' in the closure of '{target}' is an application and produces no archive")
+        if not source_digest_by_unit.contains_key(entry.name) or source_digest_by_unit[entry.name] == "":
+            return Err("unit '{entry.name}' has no source digest")
+        var dep_ifaces: [(text, text)] = []
+        for dep in entry.deps:
+            if not iface_digest_by_unit.contains_key(dep) or iface_digest_by_unit[dep] == "":
+                return Err("unit '{dep}' (dependency of '{entry.name}') has no interface digest")
+            dep_ifaces.push((dep, iface_digest_by_unit[dep]))
+        val key = library_unit_cache_key_v1(producer_identity, source_digest_by_unit[entry.name], dep_ifaces)
+        key_by_unit[entry.name] = key
+        forward.push(LibraryUnitLinkEntryV1(unit: entry.name, unit_key: key, deps: entry.deps))
+    var out: [LibraryUnitLinkEntryV1] = []
+    var i = forward.len() - 1
+    while i >= 0:
+        out.push(forward[i])
+        i = i - 1
+    Ok(out)
+
+# Parts to fold into native_link_key_v1's digest slot so a relink is skipped
+# when the unit set and every unit_key are unchanged.
+pub fn library_unit_link_key_inputs_v1(entries: [LibraryUnitLinkEntryV1]) -> [text]:
+    var parts: [text] = []
+    for e in entries:
+        parts.push("unit={cache_key_frame(e.unit)}:{cache_key_frame(e.unit_key)}")
+    parts

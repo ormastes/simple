@@ -130,12 +130,20 @@ complete receipt reuses it. No new locks — the repo is lockless by default.
 
 ## 5. Link
 
-A link target resolves its unit closure, requires every unit's `receipt.sdn`
-verdict `ok`, and links the entry's own objects plus the archives in reverse
-topological order (`lib<leaf>.a` last). The link step is the existing
-`native_link_receipt_v1` path with an archive list instead of a flat object
-list; the link receipt records each `unit_key` so a relink is skipped when the
-set is unchanged.
+`library_unit_link_set_v1` (`library_unit_link_v1.spl`) derives a link target's
+transitive unit closure and each unit's EXPECTED `unit_key` bottom-up from the
+CURRENT source and interface digests; archive paths are never an input, so a
+stale archive under an old key is unreachable by construction. An `application`
+inside a closure is `Err` (it has no archive) — the compiler is retyped to
+`library` when Stage 3 adopts this. The caller requires
+`library_unit_archive_complete_v1` (verified ok receipt + archive) at every
+derived dir and links the entry's own objects plus the units dependents-first,
+`lib<leaf>.a` last. **Static archives dead-strip unreferenced members**
+(registration tables, extern registries, static initialisers), so Stage 3 links
+the receipts' `objects` lists (or `--whole-archive`) until a unit is proven safe
+for selective linking. `library_unit_link_key_inputs_v1` folds every
+`(unit, unit_key)` into `native_link_key_v1`'s digest slot so a relink is
+skipped when the set is unchanged.
 
 **Go-to-end** (`go_to_end.spl`): a unit with any failed module produces **no**
 archive; its receipt verdict is `failed` with the per-module manifest, every
@@ -148,14 +156,20 @@ building the independent units.
 only sealed when the gate admits all of its files. Cross-unit MIR reads go
 through the dependency's sealed interface, never its shards.
 
-## 6. Adoption behind a flag
+## 6. Adoption behind a flag — and what still blocks it
 
-`SIMPLE_NATIVE_LIBRARY_UNITS=1` (and `native-build --library-units`) switches
-the driver from whole-closure to plan → build units → link; unset keeps today's
-path byte-for-byte. Stage 3 adopts first (`simple-std`, `simple.runtime`, then
-the compiler as a unit); the bootstrap script's **Stage 4** full-CLI relink
-reuses the Stage 3 unit archives and only builds the CLI-only units, which is
-the user-visible win. Receipt-gate and per-lane cache scope rules are unchanged.
+`SIMPLE_NATIVE_LIBRARY_UNITS=1` or `native-build --library-units`
+(`library_unit_mode_enabled_v1`, `LIBRARY_UNITS_ENV_V1`) selects plan → build
+units → link; unset keeps today's path byte-for-byte. Stage 3 adopts first
+(`simple-std`, `simple.runtime`, then the compiler as a unit); the bootstrap
+script's **Stage 4** full-CLI relink reuses the Stage 3 unit archives and builds
+only CLI-only units. Receipt-gate and per-lane cache scope rules are unchanged.
+
+**Not wired yet, deliberately.** Two compiler-side prerequisites are recorded in
+`doc/08_tracking/bug/library_unit_build_slice5_prerequisites_2026-11-13.md`:
+(1) unit-scoped lowering against dependency interface artifacts instead of
+provider HIR does not exist — without it a unit build reuses nothing; (2) row 22
+order-dependent counters. Both need native-build verification.
 
 ## 7. Slices
 
@@ -172,4 +186,6 @@ the user-visible win. Receipt-gate and per-lane cache scope rules are unchanged.
    / `library_unit_buildable_v1`. Note: `ParallelBuilder.build` records only DIRECT
    failures in `errors` and counts dependents as `Failed("Dependency failed")` in
    `stats.failed`; the poison function is what names them for the manifest.
-5. Link from archives; Stage 3 behind the flag; Stage 4 reuse; manifest drift fix.
+5. (pure half done) `library_unit_link_v1.spl`: flag predicate, link-set derivation,
+   link-key fold. Manifest drift fixed (`5703f224213`). Remaining: unit-scoped
+   lowering + row 22 (bug record above), then driver wiring, Stage 3, Stage 4.
