@@ -11106,6 +11106,19 @@ int8_t rt_array_clear(SplArray* a) {
     return 1;
 }
 
+/* `[T].reserve(additional)` — capacity hint; contents and len are unchanged.
+ * Dual-lane twin of the Rust seed rt_array_reserve
+ * (src/compiler_rust/runtime/src/value/collections.rs): both ensure capacity
+ * for len + additional elements without touching the header address. See
+ * doc/08_tracking/bug/compiler_seed_missing_array_reserve_2026-11-12.md. */
+int8_t rt_array_reserve(SplArray* a, int64_t additional) {
+    RtCoreArray* array = rt_core_array_ptr(a);
+    if (!array) return 0;
+    if (additional <= 0) return 1;
+    if (array->len > INT64_MAX - additional) return 0;
+    return rt_core_array_reserve(a, array->len + additional);
+}
+
 int8_t rt_array_push_i64_raw(SplArray* a, int64_t val) {
     return rt_array_push(a, val);
 }
