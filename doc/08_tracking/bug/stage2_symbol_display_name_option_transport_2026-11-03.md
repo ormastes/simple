@@ -110,3 +110,10 @@ Specs:
 Unverified: native. The seed interpreter cannot show the miscompile; proof is a stage2-closure rebuild of the six
 touched objects and the stage3 variable / static-method smokes (`test/04_smoke/fable_variable.spl`,
 `test/fixtures/compiler/native_unresolved_owner_method/`).
+
+## Fix (2026-11-13) — declared_static_method_resolution_spec root cause
+The "pre-existing 2/4" was a stale spec: `87aaaa999c7` changed
+`declared_static_method_resolution(receiver: HirExpr, ...)` to take `receiver_kind: HirExprKind` (callers
+pass `lowered.kind`), but the spec still passed a whole `HirExpr`. `_hir_expr_symbol_or_invalid` then saw no
+`NamedVar` kind, returned an invalid owner, and both positive cases resolved `Unresolved` (the two negative
+cases passed vacuously). The spec helper now builds `HirExprKind.NamedVar(symbol, name)`; no compiler change.
