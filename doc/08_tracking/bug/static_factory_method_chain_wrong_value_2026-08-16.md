@@ -5,7 +5,7 @@ Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-16
-**Status:** OPEN
+**Status:** FIXED 2026-11-13 (lane p3-misc-b) — non-repro at release/1.0.0 tip
 **Component:** compiler — type inference / method resolution in nested call context
 
 ## Symptom
@@ -72,3 +72,15 @@ Preserve the declared return type of a `static fn` through nested call
 contexts so method resolution sees `Box`, not `object`. Re-run the
 reproduction above; both examples must pass.
 
+
+
+---
+
+## Verification addendum 2026-11-13 (lane p3-misc-b)
+
+Re-ran the record's minimal reproduction verbatim (class Box + static
+`create`, `expect(Box.create(21).double()).to_equal(42)`) on the
+release/1.0.0-tip seed: BOTH examples pass, spec verdict 2/2 GREEN. The
+receiver type is no longer erased to `object` in nested call context —
+presumably fixed with the nested-call/method-resolution work now at HEAD.
+Closing as verified non-repro.

@@ -6,11 +6,42 @@ use nogc_sync_mut.ui.access_store.{UiAccessStore}
 use std.database.sql.connection.{Database}
 use std.database.sql.stmt_cache.{StatementCache}
 use std.database.sql.types.{DbValue}
+use std.nogc_sync_mut.spec.{skip}
+use std.io_runtime.{env_get_opt}
+use app.io.cli_ops.{cli_current_exe_path}
+use app.io.process_ops.{process_run_timeout}
 
 extern fn spl_sqlite_demand_state() -> i64
 
+# spl_sqlite_demand_state is implemented by the self-hosted C runtime
+# (src/runtime/runtime_sqlite_demand.c:144) but is not registered in the
+# Rust bootstrap seed's interpreter dispatch table, so calling it under the
+# seed dies with "unknown extern function". Skip (never fail) when the
+# RUNNING runtime is the seed. The `--version` identity check mirrors the
+# test runner's MC/DC degrade decision.
+fn rust_seed_runtime(binary: text) -> bool:
+    val (out, err, code) = process_run_timeout(binary, ["--version"], 10000)
+    if code != 0:
+        return false
+    val identity = out + "\n" + err
+    identity.contains("bootstrap seed only") or identity.contains("Simple Language v")
+
+fn running_runtime_unsupported_reason() -> text:
+    var binary = cli_current_exe_path()
+    if binary == "":
+        binary = env_get_opt("SIMPLE_BINARY") ?? ""
+    if binary == "":
+        return "cannot establish the running runtime path; spl_sqlite_demand_state is a C-runtime extern that the Rust bootstrap seed does not register"
+    if rust_seed_runtime(binary):
+        return "the running runtime is the Rust bootstrap seed, which does not register spl_sqlite_demand_state; it exists only in the self-hosted C runtime"
+    ""
+
 describe "UI access SQLite provider":
     it "persists and reads an event through a separate native provider":
+        val unsupported = running_runtime_unsupported_reason()
+        if unsupported != "":
+            skip("persists and reads an event through a separate native provider", unsupported)
+            return
         expect(spl_sqlite_demand_state()).to_equal(0)
         step("Open an in-memory UI access store")
         var store = UiAccessStore.memory()?
@@ -46,6 +77,10 @@ describe "UI access SQLite provider":
         store.close()?
 
     it "finalizes uncached statements on success and bind failure":
+        val unsupported = running_runtime_unsupported_reason()
+        if unsupported != "":
+            skip("finalizes uncached statements on success and bind failure", unsupported)
+            return
         var db = Database.memory()?
         db.cache = StatementCache.new(0)
         db.exec_sql("CREATE TABLE t (v TEXT)")?

@@ -125,3 +125,10 @@ lanes and were not touched.
 
 **Do not add a fifth spacing record** — nest `common.layout.box_model.BoxModel`.
 
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+partially resolved (name collision removed); spacing-record duplication remainder is design-lane work.

@@ -1001,3 +1001,7 @@ lane per this doc's own re-triage ("a separate lane owns it"). Residuals
 unchanged and owned elsewhere: `serialize_mir_function` Stage-2 SEGV and
 native f64 correctness (compiler/runtime lanes), Stage-4 gate 6 Mach-O
 capsule symbol strength (link-architecture lane). No code change this lane.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**CLOSED/SUPERSEDED (confirmed)** — boot10 verified fixing commits 72b11296929/2cf4bb13366/478f4b1b093 + f6c03cbc837/62f9fed02aa ancestors and the portable-stat/procfs idioms live. End-to-end macOS Stage-3 run remains a macOS-host grant.

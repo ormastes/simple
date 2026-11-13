@@ -40,3 +40,22 @@ lexical gate it was meant to replace is still the wired gate.**
   downstream Electron/bitmap evidence lanes do not run on this host), and
   landing an unverifiable gate replacement would repeat the false-evidence
   pattern this doc condemns.
+
+
+---
+
+## 2026-11-13 addendum — P3 gpu lane p3-gpu-20261113 (work/p3-gpu-20261113, base 6f4cb189867)
+
+**Verdict: LIVE, unchanged from the 2026-11-11 ne11 triage.** Fresh source check
+at this tip: `scripts/check/check-html-css-rendering-manifest-traceability.shs`
+still promotes tags/properties by lexical occurrence (`has_html_tag` /
+`has_css_property` regex scans), and the lexical checker is still invoked by the
+same three aggregate gates: `check-gui-renderdoc-feature-coverage-status.shs`,
+`check-html-css-full-rendering-goal-status.shs`, and
+`check-html-css-renderdoc-goal-status.shs` (grep-confirmed all three still
+reference the lexical gate; `guard_wiring_optout.txt` also names it). The
+`WebRenderableFeatureInventory` landed earlier (per ne11) but the rewiring of
+these three consumers to inventory rows is still not done. Not attempted here:
+the downstream Electron/bitmap evidence lanes cannot run on this Windows host,
+so a rewired gate could not be honestly exercised; owner remains the web
+renderer inventory lane.

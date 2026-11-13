@@ -127,3 +127,7 @@ ERRORs on further private-helper drift (`func_import_binding_lookup`,
 `module_loader_core` names) — out of this row's scope, not baselined, left for
 the test-repair lane. The ".spl frame chain for arity mismatch" tooling wish
 remains an enhancement, not this defect.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**FIXED + extended this lane** — boot21 fixed the pin (10e216d19f8c + 11 pub markers, spec 5/5). THIS LANE repaired the recorded sibling drift: pubbed 4 more eval_tables helpers (func_module_namespace_lookup, func_resolve_module_member_for_caller, func_import_binding_route, func_import_binding_lookup) and 7 module_loader_core helpers (module_loader_init, module_mark_loaded, module_bind_exports_for_caller, record_module_surface, load_module_selective_with_unbraced_alias, register_deferred_module, try_force_any_deferred_for) so cross_module_owned_fn_resolution_spec.spl loads. Before: ERROR at semantic load (private-helper rejection). After: 17/17 PASS on the tracked seed. Canary context_log_modes stays 4/4.

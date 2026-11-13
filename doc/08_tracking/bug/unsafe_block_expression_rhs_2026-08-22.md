@@ -30,3 +30,13 @@ continue. Fix the parser and HIR lowering so an unsafe block is a normal block
 expression whose value is its tail expression; retain the same lexical
 capability metadata and erase it only after safety checking.
 
+
+---
+
+## Triage 2026-11-13 (lane p3-misc-b) — seed parser lane; not chaseable here
+
+Fix surface is the Rust seed parser/HIR (`bin/simple check` rejecting
+`val x = unsafe(...): ...` with `unexpected token in expression: ':'`).
+This lane runs the prebuilt seed only (no cargo/rustc), so the parser cannot
+be repaired or re-verified here. The accepted statement-form workaround in
+`rt_time` hardening remains valid. Recorded for the seed parser lane.

@@ -122,3 +122,7 @@ DDC edges). These are feature-lane items, not the defect this row named.
 
 Verdict: FIXED for the named "Remaining typed dependency-input blocker";
 receipt/graph increments remain open under their own lanes.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**FIXED (confirmed)** — ne16: typed dependency-input blocker resolved (DependencyArtifactInputV1 manifest, --input-manifest consumed, fail-closed path grep-gone); 5/5 on the fresh seed. Receipt/reuse increments remain open by design under their own lanes.
