@@ -59,3 +59,7 @@ HIR/JIT/native `while val` lowering is untouched.
   (red on the parent: `type mismatch: cannot convert enum to int`; green after).
 - spec: `test/01_unit/language/if_val_generic_optional_cast_spec.spl`
   "narrows while val on the interpreter lane (generic and concrete optional)".
+- also turns green: the two `while val` examples of
+  `test/03_system/language/policy/option_if_while_bind_staged_spec.spl`
+  (0/2 -> 2/2); that file keeps `@tag:in-development` for its unrelated
+  semantic-checker example (`analyze_condition` private-fn visibility).
