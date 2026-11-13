@@ -78,3 +78,10 @@ lint wiring). Technical bar has lowered — the flat AST now carries
 variant_payload_counts/kinds/type_names/field_names, so the remaining
 check_type_text routing is mechanical. Process blocker, not data. No in-lane
 change (pre-empting the owner decision is explicitly out of scope).
+
+
+---
+
+## 2026-11-13 triage — lane live-p3-l2 (work/live-p3-l2-20261113, worktree lp2-wt, base origin/release/1.0.0 tip)
+
+**Verdict: LIVE (deferred).** Source re-check at this base: the semantic API checker still has `case Enum(_): pass` and no wired walk of the now-available flat `variant_payload_*` lists. Per this record's disposition the lint integration requires a separately reviewed owner and acceptance scope; a P3 batch lane wiring it would pre-empt that decision. The remaining routing (payload types through `check_type_text` with MC-API-002 semantics) is mechanical for the owner lane.

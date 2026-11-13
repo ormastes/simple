@@ -326,7 +326,7 @@ impl LintChecker {
     pub(super) fn check_spipe_print_based_tests(&mut self, items: &[Node]) {
         use simple_parser::ast::Expr;
 
-        const BDD_KEYWORDS: &[&str] = &["describe", "context", "it ", "[PASS]", "[FAIL]"];
+        const BDD_KEYWORDS: &[&str] = &["describe", "context", "feature", "scenario", "it ", "[PASS]", "[FAIL]"];
 
         fn check_expr(checker: &mut LintChecker, expr: &Expr) {
             match expr {

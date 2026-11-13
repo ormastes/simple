@@ -182,3 +182,53 @@ from this doc's root-cause section):
 ## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
 
 **LIVE/out-of-lane (confirmed)** — runner3 re-verified with the worktree seed: graph_utils_spec still errors E1002 with executed=0; 8 files still open `feature "`. Fix surface is the Rust seed (bdd.rs / stmt_lowering.rs / checker_spipe.rs BDD_KEYWORDS) — seed-fix lane active; turning 300+ dormant its on may surface new red, so spec triage must ride the same change.
+
+
+---
+
+## 2026-11-13 triage — lane live-p3-l2 (work/live-p3-l2-20261113, worktree lp2-wt, base origin/release/1.0.0 tip)
+
+**Verdict: FIXED (seed source, this lane) — seed refresh required before the fix is live.**
+Reproduced once on the tracked seed (`bin/simple.exe` build `46fe8f6b6def`):
+`test/03_system/compiler/graph_utils_spec.spl` → `error[E1002]: function 'feature' not found`,
+`declared>=6 executed=0` — unchanged from this record's 2026-11-10 triage.
+
+**Fix (this lane, seed source only — rebuilt binary NOT committed):**
+1. `src/compiler_rust/compiler/src/interpreter_call/bdd.rs` — group-function match arm
+   extended to `"describe" | "context" | "feature" | "scenario"`; `feature` is treated as
+   top-level (like `describe`), `scenario` nests (like `context`).
+2. `src/compiler_rust/compiler/src/hir/lower/stmt_lowering.rs` — same arm extension on the
+   HIR/JIT lane (lowers to the existing `rt_bdd_describe_start_rv`/`end` pair).
+3. `src/compiler_rust/compiler/src/lint/checker_spipe.rs` — `BDD_KEYWORDS` gains
+   `"feature"` and `"scenario"`.
+
+This matches the pure-Simple analyzer, which already declares
+`GROUP_FUNCTIONS = ["describe", "context", "feature", "scenario"]`
+(`src/compiler/10.frontend/parser/test_analyzer.spl:132`) — the divergence was
+seed-vs-pure-Simple, not a missing feature.
+
+**Verification (locally rebuilt seed, bootstrap profile,
+`cargo +nightly-2026-09-15-x86_64-pc-windows-gnu build --profile bootstrap -p simple-driver`
+with the pinned clang; build 9m45s, warnings only):**
+
+| spec (all `--mode=interpreter`) | tracked seed | rebuilt seed |
+|---|---|---|
+| `test/01_unit/compiler/bdd_feature_group_keyword_spec.spl` (this defect's regression spec) | 0 executed, E1002 | **5/5 PASS** |
+| `test/03_system/compiler/graph_utils_spec.spl` | 0 executed, E1002 | **6/6 PASS** |
+| `test/03_system/compiler/symbol_hash_spec.spl` | 0 executed, E1002 | **19/19 PASS** |
+| `test/03_system/compiler/mir_types_spec.spl` | 0 executed, E1002 | **44/44 PASS** |
+| `test/03_system/stdlib/math/tensor_broadcast_spec.spl` | 0 executed, E1002 | **39/39 PASS** |
+| `test/system/math/tensor_broadcast_spec.spl` | 0 executed, E1002 | **39/39 PASS** |
+| `test/05_perf/compiler/runtime_optional_provider_binary_size_spec.spl` | 0 executed, E1002 | 2 executed, 1/2 (the 1 failure is a stage4 native-link cohort test, unavailable in this lane) |
+| `test/01_unit/lib/std/parser/error_recovery_spec.spl` | 0 executed, E1002 | 44 executed, **2 passed / 42 failed** |
+
+The error_recovery result is the warned-about dormant-red surfacing, not a defect in
+the keyword fix: 40 of the 42 failures are `function 'ContextualSyntaxError' not found`
+and `variable 'CommonMistake' not found` — the spec contracts a
+`std.parser` error-recovery/suggestion API that does not exist in `src/lib` (latent
+spec-vs-implementation drift hidden while the file was a dead entry point). Owner:
+stdlib parser lane; per testing rules the spec was left RED, not weakened.
+
+**Seed refresh note (for the PR):** `bin/simple.exe` is the tracked seed and was NOT
+rebuilt/committed in this change. Until the seed is refreshed from this source, seven `feature`-rooted specs keep reporting the synthetic `E1002` failure on the
+deployed binary; after refresh, six of seven go green per the table above.
