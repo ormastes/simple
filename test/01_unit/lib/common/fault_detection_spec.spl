@@ -1,0 +1,204 @@
+# @cover src/lib/common/fault_detection.spl
+# @cover src/app/interpreter/core/watchdog.spl
+# @cover src/app/interpreter/core/execution_guard.spl
+# @tag: unit, execution, fault_detection
+"""
+## Purpose and audience
+For interpreter-core maintainers. `std.common.fault_detection` is the
+pure-Simple port of the seed's `simple_common::fault_detection`: the timeout
+flag and the recursion-depth counter that the pure-Simple interpreter's
+watchdog (`src/app/interpreter/core/watchdog.spl`) and execution guard
+(`src/app/interpreter/core/execution_guard.spl`) poll. The module was imported
+by both but did not exist
+(`doc/08_tracking/bug/fault_detection_module_missing_2026-11-13.md`).
+
+## Operator workflow
+Run after touching the module or either importer: `bin/simple test
+test/01_unit/lib/common/fault_detection_spec.spl`.
+
+## Compatibility and limitations
+The timeout is a deadline on the monotonic clock, polled by
+`is_timeout_exceeded()`; there is no timer thread in Simple. The spec never
+arms the host runtime's watchdog (`start_watchdog`), because the spec itself
+runs inside that runtime: it arms only the module's own deadline and tests
+expiry through the pure `timeout_deadline_passed` helper, without sleeping.
+
+## Verification guidance and troubleshooting
+A load failure of either interpreter module fails the whole file at import.
+State is module-global, so every scenario resets what it changes.
+"""
+# @manual_section: fault_detection_module
+
+use std.spec.{describe, it, expect}
+use std.io_runtime.{read_file}
+use std.common.fault_detection.{
+    is_timeout_exceeded, set_timeout_exceeded, reset_timeout,
+    set_timeout_limit_secs, timeout_limit_secs, timeout_deadline_passed,
+    increment_recursion_depth, decrement_recursion_depth, current_recursion_depth,
+    get_max_recursion_depth, set_max_recursion_depth, reset_recursion_depth,
+    set_stack_overflow_detection_enabled, is_stack_overflow_detection_enabled
+}
+use app.interpreter.core.watchdog.{check_timeout}
+use app.interpreter.core.execution_guard.{check_loop_safety, check_safety, push_call_depth}
+
+describe "std.common.fault_detection timeout flag":
+    it "starts clear, sets, and resets":
+        # @req REQ-FAULT-DETECT-001
+        step("Reset, then read the flag")
+        reset_timeout()
+        val clear_before = is_timeout_exceeded()
+        step("Set the flag and read it back")
+        set_timeout_exceeded()
+        val set_after = is_timeout_exceeded()
+        step("Reset and read again")
+        reset_timeout()
+        val clear_after = is_timeout_exceeded()
+        expect(clear_before).to_equal(false)
+        expect(set_after).to_equal(true)
+        expect(clear_after).to_equal(false)
+
+    it "records the timeout limit and stays clear before the deadline":
+        # @req REQ-FAULT-DETECT-002
+        step("Arm a one-hour deadline")
+        reset_timeout()
+        set_timeout_limit_secs(3600)
+        val armed_limit = timeout_limit_secs()
+        val exceeded_while_armed = is_timeout_exceeded()
+        step("Disarm")
+        set_timeout_limit_secs(0)
+        val disarmed_limit = timeout_limit_secs()
+        expect(armed_limit).to_equal(3600)
+        expect(exceeded_while_armed).to_equal(false)
+        expect(disarmed_limit).to_equal(0)
+        expect(is_timeout_exceeded()).to_equal(false)
+
+    it "decides expiry from the monotonic clock without sleeping":
+        # @req REQ-FAULT-DETECT-003
+        step("Evaluate the pure deadline predicate at fixed clock samples")
+        val second: i64 = 1000000000
+        expect(timeout_deadline_passed(5 * second, 0, 10)).to_equal(false)
+        expect(timeout_deadline_passed(10 * second, 0, 10)).to_equal(true)
+        expect(timeout_deadline_passed(11 * second, 0, 10)).to_equal(true)
+        step("An unarmed limit never expires")
+        expect(timeout_deadline_passed(11 * second, 0, 0)).to_equal(false)
+        step("A failed clock sample (negative) fails closed while armed")
+        expect(timeout_deadline_passed(-1, 0, 10)).to_equal(true)
+
+describe "std.common.fault_detection recursion depth":
+    it "counts depth up and down and never goes below zero":
+        # @req REQ-FAULT-DETECT-004
+        step("Reset and nest two calls")
+        reset_recursion_depth()
+        val first = increment_recursion_depth()
+        val second = increment_recursion_depth()
+        val depth_two = current_recursion_depth()
+        step("Unwind three times: one more than was pushed")
+        decrement_recursion_depth()
+        decrement_recursion_depth()
+        decrement_recursion_depth()
+        expect(first).to_equal(true)
+        expect(second).to_equal(true)
+        expect(depth_two).to_equal(2)
+        expect(current_recursion_depth()).to_equal(0)
+
+    it "refuses the call past the limit and leaves the depth unchanged":
+        # @req REQ-FAULT-DETECT-005
+        step("Limit the depth to two and push three calls")
+        reset_recursion_depth()
+        set_max_recursion_depth(2)
+        val ok_one = increment_recursion_depth()
+        val ok_two = increment_recursion_depth()
+        val refused = increment_recursion_depth()
+        val depth_after_refusal = current_recursion_depth()
+        val limit = get_max_recursion_depth()
+        step("Restore defaults")
+        set_max_recursion_depth(1000)
+        reset_recursion_depth()
+        expect(ok_one).to_equal(true)
+        expect(ok_two).to_equal(true)
+        expect(refused).to_equal(false)
+        expect(depth_after_refusal).to_equal(2)
+        expect(limit).to_equal(2)
+        expect(get_max_recursion_depth()).to_equal(1000)
+
+    it "does not refuse when stack overflow detection is disabled":
+        # @req REQ-FAULT-DETECT-006
+        step("Disable detection with a limit of one and push two calls")
+        reset_recursion_depth()
+        set_max_recursion_depth(1)
+        set_stack_overflow_detection_enabled(false)
+        val disabled = is_stack_overflow_detection_enabled()
+        val ok_one = increment_recursion_depth()
+        val ok_two = increment_recursion_depth()
+        step("Restore defaults")
+        set_stack_overflow_detection_enabled(true)
+        set_max_recursion_depth(1000)
+        reset_recursion_depth()
+        expect(disabled).to_equal(false)
+        expect(ok_one).to_equal(true)
+        expect(ok_two).to_equal(true)
+        expect(is_stack_overflow_detection_enabled()).to_equal(true)
+
+describe "pure-Simple interpreter guards load and read the shared flag":
+    it "watchdog.check_timeout reads the flag set through fault_detection":
+        # @req REQ-FAULT-DETECT-007
+        step("Clear the flag and poll through the watchdog module")
+        reset_timeout()
+        val ok_when_clear = check_timeout().is_ok()
+        step("Set the flag in fault_detection and poll through the watchdog module")
+        set_timeout_exceeded()
+        val err_when_set = check_timeout().is_err()
+        reset_timeout()
+        expect(ok_when_clear).to_equal(true)
+        expect(err_when_set).to_equal(true)
+
+    it "execution_guard loop and call checks stop on timeout":
+        # @req REQ-FAULT-DETECT-008
+        step("Poll the loop and general safety checks with the flag clear, then set")
+        reset_timeout()
+        val loop_ok = check_loop_safety().is_ok()
+        val safety_ok = check_safety().is_ok()
+        set_timeout_exceeded()
+        val loop_err = check_loop_safety().is_err()
+        val safety_err = check_safety().is_err()
+        reset_timeout()
+        expect(loop_ok).to_equal(true)
+        expect(safety_ok).to_equal(true)
+        expect(loop_err).to_equal(true)
+        expect(safety_err).to_equal(true)
+
+    it "execution_guard.push_call_depth reports stack overflow at the limit":
+        # @req REQ-FAULT-DETECT-009
+        step("Limit the depth to one and push two calls")
+        reset_recursion_depth()
+        set_max_recursion_depth(1)
+        val first_ok = push_call_depth("f").is_ok()
+        val second_err = push_call_depth("f").is_err()
+        val depth_after = current_recursion_depth()
+        step("Restore defaults")
+        set_max_recursion_depth(1000)
+        reset_recursion_depth()
+        expect(first_ok).to_equal(true)
+        expect(second_err).to_equal(true)
+        expect(depth_after).to_equal(1)
+
+    it "an ExecutionGuard releases its depth only on an explicit drop":
+        # @req REQ-FAULT-DETECT-011
+        step("Push one call and hold its guard")
+        reset_recursion_depth()
+        val guard = push_call_depth("f").unwrap()
+        val depth_held = current_recursion_depth()
+        step("Drop the guard explicitly, as exec_function does")
+        guard.drop()
+        val depth_released = current_recursion_depth()
+        val source = read_file("src/app/interpreter/call/function_exec.spl")
+        expect(depth_held).to_equal(1)
+        expect(depth_released).to_equal(0)
+        expect(source.contains("guard.drop()")).to_equal(true)
+
+    it "the watchdog arms and disarms the module deadline":
+        # @req REQ-FAULT-DETECT-010
+        step("Read the shipped watchdog source")
+        val source = read_file("src/app/interpreter/core/watchdog.spl")
+        expect(source.contains("set_timeout_limit_secs(timeout_secs)")).to_equal(true)
+        expect(source.contains("set_timeout_limit_secs(0)")).to_equal(true)
