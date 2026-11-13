@@ -1,6 +1,7 @@
 use std.spec.*
 use compiler.driver.driver_mir_physical_owners.{driver_mir_physical_source_indices_v1, driver_mir_feed_is_identity_v1,
-    driver_mir_owner_disposition_v1, driver_mir_schedule_name_v1}
+    driver_mir_owner_disposition_v1, driver_mir_schedule_name_v1, driver_mir_placeholder_owner_v1,
+    driver_mir_unit_scoped_v1}
 
 val MIR_ALIAS_DIGEST = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 val MIR_OTHER_DIGEST = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
@@ -122,24 +123,40 @@ describe "MIR physical ownership in a module-scoped per-file unit":
         expect(driver_mir_owner_disposition_v1(false, true, false)).to_equal("missing")
 
     it "publishes the same ledger schedule from units holding different HIR":
-        # Unit A holds only the leaf; unit B holds the entry and the alias
-        # provider. Every unit must publish the identical inventory.
-        val logical = ["app.p3rp.aa", "std.common.provider", "app.p3rp.main"]
-        val hir_names = ["app.p3rp.aa", "lib.common.provider", "app.p3rp.main"]
+        # HirModule.name is the parsed file path. Unit A holds only the leaf;
+        # unit B holds the entry and the provider. Row 1 is an entry-closure
+        # alias row whose logical name is an import spelling ("provider"),
+        # which never canonicalises to the path-derived owner.
+        val paths = ["src/app/p3rp/aa.spl", "src/lib/common/provider.spl", "src/app/p3rp/main.spl"]
+        val logical = ["app.p3rp.aa", "provider", "app.p3rp.main"]
         val held_a = [true, false, false]
         val held_b = [false, true, true]
         var schedule_a: [text] = []
         var schedule_b: [text] = []
         var index = 0
-        while index < logical.len():
+        while index < paths.len():
             schedule_a = schedule_a.push(driver_mir_schedule_name_v1(true, held_a[index],
-                if held_a[index]: hir_names[index] else: "", logical[index]))
+                if held_a[index]: paths[index] else: "", logical[index], paths[index]))
             schedule_b = schedule_b.push(driver_mir_schedule_name_v1(true, held_b[index],
-                if held_b[index]: hir_names[index] else: "", logical[index]))
+                if held_b[index]: paths[index] else: "", logical[index], paths[index]))
             index = index + 1
         expect(schedule_a.join("|")).to_equal(schedule_b.join("|"))
         expect(schedule_a[1]).to_equal("lib.common.provider")
+        expect(schedule_a[0]).to_equal("app.p3rp.aa")
 
     it "leaves the unscoped unheld schedule name unchanged":
-        expect(driver_mir_schedule_name_v1(false, false, "", "std.common.provider")).to_equal("std.common.provider")
-        expect(driver_mir_schedule_name_v1(false, true, "std.common.provider", "x")).to_equal("lib.common.provider")
+        expect(driver_mir_schedule_name_v1(false, false, "", "std.common.provider", "src/lib/common/provider.spl")).to_equal("std.common.provider")
+        expect(driver_mir_schedule_name_v1(false, true, "std.common.provider", "x", "src/x.spl")).to_equal("lib.common.provider")
+
+    it "names a placeholder owner by its row path so alias rows dedup with the held row":
+        val result = driver_mir_physical_source_indices_v1(
+            ["src/lib/common/provider.spl", "src/lib/common/provider.spl"],
+            [MIR_ALIAS_DIGEST, MIR_ALIAS_DIGEST],
+            ["src/lib/common/provider.spl", driver_mir_placeholder_owner_v1("src/lib/common/provider.spl")])
+        expect(result.is_ok()).to_equal(true)
+        expect(result.unwrap().len()).to_equal(1)
+
+    it "only stands rows in while the unit's MIR shard queue is active":
+        expect(driver_mir_unit_scoped_v1(true, "/q")).to_equal(true)
+        expect(driver_mir_unit_scoped_v1(true, "")).to_equal(false)
+        expect(driver_mir_unit_scoped_v1(false, "/q")).to_equal(false)
