@@ -1,5 +1,6 @@
 use std.spec
 use app.cli.file_worker_pool_refusal.{file_worker_pool_refusal_v1}
+use app.cli.shard_mem_clamp.{SHARD_HIR_WORKER_KB_V1, SHARD_MIR_WORKER_KB_V1, SHARD_FLOOR_UNKNOWN_PARENT_KB_V1, shard_threads_cap_for, shard_threads_guarded_floor_v1}
 
 describe "native-build per-file pool refusal is fail-closed":
     val hir_kb = 9000000
@@ -46,3 +47,45 @@ describe "native-build per-file pool refusal is fail-closed":
         val plain = file_worker_pool_refusal_v1(1, 1, 1048576, hir_kb, mir_kb, 8, "", false)
         expect(plain.contains("tree-budget clamp")).to_be_false()
         expect(plain.contains("not enough free memory")).to_be_true()
+
+# Honest MIR price (2026-11-13). Run 11 (tree-rss-policy.shs, 121 GiB aarch64,
+# compiler_cli_build) sampled two MIR shard workers at 24.0 and 25.2 GiB each:
+# a MIR shard worker holds the full HIR, so the old 9 GB default admitted a
+# second worker the host could not hold. SHARD_MIR_WORKER_KB_V1 is the single
+# owner of the price; for a floored plan the bootstrap shell publishes the same
+# figure to pinned stage binaries that predate it (BOOTSTRAP_TREE_RSS_FLOOR_MIR_WORKER_KB).
+describe "per-file pool MIR admission is priced at the measured worker peak":
+    val mir_kb = SHARD_MIR_WORKER_KB_V1
+    val floor_kb = 2 * SHARD_MIR_WORKER_KB_V1 + SHARD_FLOOR_UNKNOWN_PARENT_KB_V1
+    val avail_70_gb = 73400320
+    val headroom_4_gb = 4194304
+
+    it "MIR default carries the run-11 measured 25.2 GiB peak":
+        expect(mir_kb).to_equal(26424115)
+
+    it "the old underpriced default no longer admits 2 MIR workers on ~31 GiB free":
+        expect(shard_threads_cap_for(2, mir_kb, 32505856) <= 1).to_be_true()
+
+    it "enough memory for 2 at the honest price admits 2":
+        # 60% rule: 2 x price / 0.6 free.
+        expect(shard_threads_cap_for(2, mir_kb, 88080384)).to_equal(2)
+        # Guarded floor: 2 x price + coordinator base inside an enforcing tree cap.
+        expect(shard_threads_guarded_floor_v1(2, 1, floor_kb, avail_70_gb, headroom_4_gb, mir_kb, -1, "enforce")).to_equal(2)
+        expect(file_worker_pool_refusal_v1(2, 2, 88080384, SHARD_HIR_WORKER_KB_V1, mir_kb)).to_equal("")
+
+    it "enough for 1 only refuses and names the honest numbers":
+        # 36 GiB tree cap: the 9 GB price floored this to 2; two 25.2 GiB workers do not fit.
+        expect(shard_threads_guarded_floor_v1(2, 1, 37748736, avail_70_gb, headroom_4_gb, mir_kb, -1, "enforce")).to_equal(1)
+        val msg = file_worker_pool_refusal_v1(1, 1, 32505856, SHARD_HIR_WORKER_KB_V1, mir_kb, 8, "")
+        expect(msg.starts_with("error:")).to_be_true()
+        expect(msg.contains("per-worker budget=26424115 kB")).to_be_true()
+        expect(msg.contains("need >= 88080384 kB free")).to_be_true()
+        expect(msg.contains("2 x 26424115 kB + 4194304 kB coordinator = 57042534 kB")).to_be_true()
+
+    it "guarded floor boundary: one kB below two honest workers + coordinator stays at 1":
+        expect(shard_threads_guarded_floor_v1(2, 1, floor_kb - 1, avail_70_gb, headroom_4_gb, mir_kb, -1, "enforce")).to_equal(1)
+        expect(shard_threads_guarded_floor_v1(2, 1, floor_kb, avail_70_gb, headroom_4_gb, mir_kb, -1, "enforce")).to_equal(2)
+
+    it "the bootstrap shell mirror of the price equals the compiler default":
+        val policy = file_read("scripts/bootstrap/lib/tree-rss-policy.shs")
+        expect(policy.contains("\nBOOTSTRAP_TREE_RSS_FLOOR_MIR_WORKER_KB={mir_kb}\n")).to_be_true()
