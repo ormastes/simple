@@ -22,6 +22,7 @@ pub mod mir_interpreter;
 mod mir_inline;
 #[cfg(not(doctest))]
 pub mod jit;
+pub(crate) mod jit_dlsym;
 pub mod lean;
 pub mod llvm;
 pub mod parallel;
