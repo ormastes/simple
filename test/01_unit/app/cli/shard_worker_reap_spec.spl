@@ -15,7 +15,7 @@ Audience: engineers maintaining the native-build worker pools.
 
 use std.spec
 use app.cli.shard_worker_reap_v1.{shard_worker_kill_stopped_v1, shard_worker_confirm_kill_v1, parse_shard_reap_v1,
-    shard_pool_poll_quantum_v1, shard_child_wait_bounded_v1}
+    shard_pool_poll_quantum_v1, shard_child_wait_bounded_v1, shard_child_wait_verdict_v1, shard_exit_code_sign_restored_v1}
 use app.io.process_ops.{process_spawn_async, process_wait, process_kill, process_is_running}
 use std.io_runtime.{time_now_monotonic_ms}
 
@@ -119,3 +119,17 @@ describe "bounded shard child wait":
     it "refuses a non-positive pid without waiting":
         expect(shard_child_wait_bounded_v1("spec", -1, 300)).to_equal(-1)
         expect(shard_child_wait_bounded_v1("spec", 0, 300)).to_equal(-1)
+
+describe "bounded wait verdict on the RAW process_wait return":
+    it "sign-restores a zero-extended status before deciding (a live child must trigger the kill)":
+        # -2 ("still running") zero-extended across the wrapper boundary.
+        expect(shard_exit_code_sign_restored_v1(4294967294)).to_equal(-2)
+        expect(shard_child_wait_verdict_v1(4294967294, 300)).to_equal(-2)
+        # -1 zero-extended is a wait error, not a timeout.
+        expect(shard_child_wait_verdict_v1(4294967295, 300)).to_equal(-1)
+
+    it "passes genuine exit statuses through unchanged":
+        expect(shard_exit_code_sign_restored_v1(7)).to_equal(7)
+        expect(shard_child_wait_verdict_v1(3, 300)).to_equal(3)
+        expect(shard_child_wait_verdict_v1(0, 300)).to_equal(0)
+        expect(shard_child_wait_verdict_v1(-137, 300)).to_equal(-137)
