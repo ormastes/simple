@@ -82,9 +82,9 @@ Pin: `origin/release/1.0.0` @ `9100f50e680`. Lane: `work/immutable-views-async-i
 | Step | Deliverable | State |
 |---|---|---|
 | P0 inventory | [symbol-to-requirement map + parser probes](../05_design/compiler/data/immutable_views_async_init_p0_inventory_2026-11-13.md) (`doc/08_tracking/` root is over the fan-out limit, so the map lives under `doc/05_design/compiler/data/`) | done 2026-11-13: no contract implemented; `async <expr>` ctor argument does not parse; `Immutable<T>`/`@support_async_immutable` accepted only by lenience; missing required field is nil/0-filled (`lower_struct_construct`), E1007 unused |
-| P1 verifier | SSpec ASY-03/04/05, ATTR-01/04 RED → GREEN; verifier as report over `src/compiler`+`src/lib`+`src/app`; offender count decides gate (warning / opt-in vs error) | pending |
+| P1 verifier | SSpec ASY-03/04/05, ATTR-01/04 RED → GREEN; verifier as report over `src/compiler`+`src/lib`+`src/app`; offender count decides gate (warning / opt-in vs error) | landed on lane, under review: verifier `12bce06467a`; struct-update-spread false positive fixed and gate modes specified in `d9faba71fd8` (spec 12/12; RED 11/12 before the fix). Gate `SIMPLE_REQUIRED_INIT_CHECK` defaults to `off` because the census is non-zero. Partial census at 14:30 KST: 366 compiler files, 13 rows, 6 sites, 4 classes, all the omitted `has_<f>` flag of a `# DESUGARED` optional pair. lib/app still running. Detail in plan §0a "P1 census and gate" |
 | P2 `Immutable<T>` | IMM-01/02; then revision/frozen handles | pending, after P1 review |
-| P3 async-init gate | ASY-01/02/06/07/08 on `phase_cell_*_v1`; blocked until the node-storage lane lands `f8db9920671` | pending |
+| P3 async-init gate | ASY-01/02/06/07/08 on `phase_cell_*_v1`; reference API `f8db9920671` landed on `release/1.0.0` via #8829 (`04f02062860`), so no longer blocked | pending, after P1 review |
 
 Authored plan text, reviewed source and executed runtime evidence remain
 different states; nothing above is complete because the plan exists.

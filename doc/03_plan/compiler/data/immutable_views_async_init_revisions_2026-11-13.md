@@ -25,7 +25,7 @@ rather than scheduled beside them.
 | P1 shared attribute semantics + public initialization checks | **W2b enforcement half** (tracker: "V1 facts landed; no compiler/runtime enforcement proof") + W1b effective-visibility binding | W-plan §4.1–4.3 already specify "compile-time error when known … a migration-only warning mode must be explicit and temporary" — that *is* P1's feature gate; §4.2 "no implicit numeric-zero, empty-string, nil … default" is the nil/None rule of §3.2 here | this lane. New verifier module *consumes* `node_construction_*_v1` facts; it does **not** edit `node_lifecycle_contracts.spl` (nodestore lane owns that file) |
 | P2 `Immutable<T>` live read-only projection | **new W2c — read-only capability projection** (only item with no prior home) | ownership/borrow rules of the existing type checker; W-plan §5.4 ownership and transfer | this lane |
 | P2 `RevisionImmutable<T>` / `FrozenImmutable<T>` | W8 (frozen plans, semantic/physical invalidation, LSP adoption) + W-plan §13.1/§13.3 (pointer-free persistence) | `FileAstV1` pointer-free codec (§2.1 R03); HIR codec v17 (#8808/#8827, interface-only HIR) | this lane for the handle semantics; W8 owners for cache identity |
-| P3 async registered initialization | W2b §4.4 ("versioned write-once result sidecar … existing async resource/result mechanisms") | **`phase_cell_*_v1` write-once cells** in the nodestore lane's `node_lifecycle_contracts.spl` @ `f8db9920671` (unlanded): `PhaseCellStateV1`, `PhaseCellTableV1`, `PhaseAwaitOutcomeV1`, `phase_cell_table_new_v1`, `phase_cell_declare_v1`, `phase_cell_publish_v1`, `phase_cell_fail_v1`, `phase_cell_await_v1` (cycle diagnostic + failure propagation). P3 builds its per-`(arena, generation, node, attr)` gate on this API by name; it must not add a second once-only state machine | this lane, **depends on nodestore lane landing** |
+| P3 async registered initialization | W2b §4.4 ("versioned write-once result sidecar … existing async resource/result mechanisms") | **`phase_cell_*_v1` write-once cells** in the nodestore lane's `node_lifecycle_contracts.spl` @ `f8db9920671` (landed on `release/1.0.0` via #8829, `04f02062860`): `PhaseCellStateV1`, `PhaseCellTableV1`, `PhaseAwaitOutcomeV1`, `phase_cell_table_new_v1`, `phase_cell_declare_v1`, `phase_cell_publish_v1`, `phase_cell_fail_v1`, `phase_cell_await_v1` (cycle diagnostic + failure propagation). P3 builds its per-`(arena, generation, node, attr)` gate on this API by name; it must not add a second once-only state machine | this lane, **depends on nodestore lane landing** |
 | P4 storage backend unification | W3b | W3 pilot (`9b27558ef06`), `@attr_storage direct\|column\|sparse_hash` + `data_policy_resolve_rules_v1` + `physical_plan_digest` in the nodestore lane (`bb9cba2d6b4`, `fa0971c8594`, unlanded) | **nodestore lane** |
 | P5 static profile-guided selection | W5b / W6 / W7 | `.sprof` v2 envelope, `sprof_collection_profile.spl`, `TraceObserverV1`; W4 `collection_policy_adapter` / `AdaptiveMap` | **nodestore lane** (selection) + W5 owners (observation) |
 | P6 opt-in runtime container switching | W9 (deferred behind W6 evidence) | `AdaptiveMap`/`AdaptiveSet` conversion code (§2.1 R09); §11.3 transactional migration | W9 owner; not scheduled by this plan |
@@ -49,6 +49,57 @@ non-zero census of existing offenders means the bootstrap (Stage 2/3 compiles
 the compiler) would break, so the check lands behind a per-module opt-in /
 warning gate with the census recorded, exactly the "explicit and temporary
 migration-only warning mode" of W-plan §4.3. New-code semantics remain errors.
+
+### P1 census and gate (recorded 2026-11-13, census still running)
+
+**Gate as landed** (`12bce06467a`, specified in `d9faba71fd8`):
+`SIMPLE_REQUIRED_INIT_CHECK` = `off` (default) | `warning` | `error`; any
+other value is `off`. `off` adds nothing, so Stage 2/3 still compile the
+existing offenders below; `warning` records `LoweringErrorKind.Recovered` rows
+(the §4.3 migration mode); `error` is the target semantics. The per-class
+opt-in is `@support_async_immutable`: on an annotated class the
+`E_ASYNC_INIT_*` codes are errors in every mode. There is no per-module
+pragma: the env is a per-invocation ratchet. If reviewers want module-scoped
+`error` before the default flip, the existing model is the
+`__module_nogc_strict` marker (`core/_ParserDecls/enum_module_body.spl:1782`
+→ `ParserModule.nogc_strict` → `HirModule.nogc_strict`).
+
+**Census method.** `scripts/check/census_required_field_init_spec.spl` (a
+report-only harness, committed with P1) runs the verifier standalone per file
+(`parse_full_frontend` + `HirLowering.lower_module`) under the seed runner, 4G
+cgroup, one process at a time. A textual prefilter keeps only files that
+declare a `struct`/`class` and name one of those types in a construction
+(`Name(`, `Name<`, `Name {`, `Self(`): 6,499 of 15,546 `.spl` files under
+`src/compiler`+`src/lib`+`src/app` (compiler 1,291, lib 3,509, app 1,699). It
+missed 0 of the 109 judged files in the first 200 files run unfiltered. Cost
+is ~10–22 s per candidate file. The runner kills a spec at 900 s, so chunks
+are 25 files.
+
+**Figures at 14:30 KST** (366 `src/compiler` files, about 28% of compiler
+candidates; `src/lib` and `src/app` not reached yet): 13 rows, 6 sites,
+4 classes, all `E_ATTR_REQUIRED_UNINIT`. Every one is the same pattern: a
+`# DESUGARED` optional pair (`has_<f>: bool` + `<f>: T`) whose `has_<f>` flag
+is omitted at construction, so the run relies on the zero-fill `false`.
+`MatchContext` (`00.common/predicate.spl:90`, 6 rows),
+`PromiseTypeInfo` (`30.types/type_system/effects.spl:89,93`, 4),
+`StateVariant` (`10.frontend/desugar/state_enum.spl:96,109`, 2),
+`AwaitChecker` (`10.frontend/desugar/suspension_analysis.spl:521`, 1). The
+census is non-zero, so the default stays `off`. Order of the rest:
+remaining compiler files, then a seeded 200-file sample each from lib and
+app, then the rest of lib and app.
+
+**Verifier false positive found and fixed.** Chunk 000 reported 6 rows at
+`00.common/cache_contract/aspect_match_shard_v1.spl:190`. That site is a
+struct update `T(..f, facts_key: …)`. The spread arrives as
+`Range(None, Some(base))` and was being counted as a positional argument.
+Fixed in `d9faba71fd8` using MIR's `struct_construct_spread_base` shape, and
+those rows are excluded from the figures above.
+
+**Limits.** Standalone lowering does not resolve imports. A construction of
+an imported type therefore has no symbol: it is neither judged nor counted,
+so `sites_unjudged = 0` under-states cross-module sites. Imported layouts
+also carry `has_default = false`. The census covers same-module
+constructions only.
 
 ### Grammar status
 
