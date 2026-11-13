@@ -169,7 +169,7 @@ SIMPLE_COVERAGE=1 bin/simple test <path> --no-cache --no-cover-check --timeout 1
   seed source** (`interpreter_extern/coverage.rs`, `runtime/src/coverage.rs`)
   not yet landed on `origin/main` as of this session — re-verify the gate
   after that Rust work lands, don't cite PASS as durable until then.
-- **Known collector gaps, confirmed real (not yet fixed):** function
+- **Known collector gaps, confirmed real (tail `match`/`if` part fixed 2026-11-13; bare tail expressions are still not statements, see below):** function
   **signature lines and tail-expression lines are invisible** to the line
   collector (only statement-body lines register a hit); **`elif`/`else`
   header lines** don't register independently of their branch body;
@@ -215,6 +215,32 @@ registered at all (a second, distinct root cause, not fixed this pass). See
 The rollup-tautology, signature/tail-expr/elif-line blindness, and 90%
 line-target-unreachable caveats above are unaffected by this fix and remain
 open.
+
+## 2026-11-13: tail lines, foreign `@when`, source digests (`spl-coverage module`)
+
+- **Tail `match`/`if` now recorded.** `exec_block_fn` (block_exec.rs) ran a
+  function's last `match`/`if` through `exec_match_core`/`exec_if_core`,
+  skipping `exec_node`'s line hit; it now records the tail statement.
+- **One-line `if c: a else: b` now recorded.** At statement position it parsed
+  to `Node::Expression(Expr::If)` (no span, so never attributable); the seed
+  parser now builds the spanned `IfStmt` the block form already produces.
+  Its decision row moves from the function anchor to its own line.
+  Pin: `test/fixtures/coverage/covtail_fixture.spl` (old seed 5/9, fixed 9/9).
+- **`sources |file, crc32|`** ends every artifact. `spl-coverage module`
+  refuses a module whose artifact digest differs from the current source
+  (`Error: refusing to score ...`, exit 1), prints `source=verified|
+  unverified|mismatch|unrecorded`, and WARNs when merging digest-less
+  artifacts or one module recorded under two paths (decision ids hash the
+  path, so two checkouts double the decision denominator -- not fixed).
+  `rollup` carries `sources` through and refuses one file at two digests.
+  The digest is CRC-32 with every CR dropped on BOTH sides (`read_to_string`
+  drops CR; hashing raw bytes refused every CRLF checkout -- fixed 2026-11-14).
+- **`foreign_excluded=N`** replaces `inactive_platform=N`: `@when` bodies not
+  selected for `--os`/`--arch` (default host) leave the line denominator.
+- Trap: the seed enables collection whenever `SIMPLE_COVERAGE` is PRESENT,
+  even empty (`init_coverage_from_env`); unset it to turn coverage off.
+- Still open: closures/lambda bodies (`exec_block_closure_into`) record no
+  line hits.
 
 ## Update Rule
 

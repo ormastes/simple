@@ -18,8 +18,14 @@ mod inline_if_as_cast_else {
             !dbg.contains("CastElse"),
             "cast swallowed the if's else in {src:?}: {dbg}"
         );
-        assert!(!dbg.contains("else_branch: None"), "else arm dropped in {src:?}: {dbg}");
-        assert!(dbg.contains("else_branch: Some"), "no if-else parsed in {src:?}: {dbg}");
+        assert!(
+            !dbg.contains("else_branch: None") && !dbg.contains("else_block: None"),
+            "else arm dropped in {src:?}: {dbg}"
+        );
+        assert!(
+            dbg.contains("else_branch: Some") || dbg.contains("else_block: Some"),
+            "no if-else parsed in {src:?}: {dbg}"
+        );
     }
 
     #[test]

@@ -100,3 +100,18 @@ deployed seed binary, as expected — that binary predates the 2026-11-03 fix
 (seed binary dated Oct 31; lowering_stmt.rs fix committed Nov 3-4), while the
 SIMPLE_EXECUTION_MODE=interpret oracle prints MIX_NEG=1.5 / MIX_POS=2.
 Remaining acceptance: re-run the JIT repro after the next seed redeploy.
+
+## Residue observed 2026-11-14 (seed built at c89479c9d7b, Cranelift JIT, `SIMPLE_JIT_STRICT=1`)
+
+The original two-arm repro above is FIXED on this seed (`MIX_NEG=1.5`,
+`MIX_POS=2.0`). Two neighbouring shapes still return wrong values on the JIT
+(the interpreter is correct for both), block form and one-line form alike:
+
+| shape (`-> f64`, tail position) | JIT | interpreter |
+|---|---|---|
+| `if c: 3 else: 4` / block form with the same arms (both arms int) | `0.0 0.0` | `3 4` |
+| `if x == 0: 0 elif x == 1: 1.5 else: 2` (block form) | `0.0 0.0 0.0` | `0 1.5 2` |
+
+Found while reviewing work/covfix-20261113 (fixtures `tail_if3.spl` /
+`tail_if4.spl` in that review); not introduced by it. The same shapes give the
+same wrong values with and without that branch's parser change.
