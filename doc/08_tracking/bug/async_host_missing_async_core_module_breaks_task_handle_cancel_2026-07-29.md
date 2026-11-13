@@ -179,3 +179,9 @@ is present on disk (1808 bytes) on origin/release/1.0.0, so the
 surface the async_host family imports resolves on this base. The 2026-11-11
 lane-ne2 seed-smoke evidence (`async_core_spec.spl` 7/7) is same-branch and
 stands per the no-rerun rule. No source change.
+
+## 2026-11-13 resolution (P3 triage sweep, work/p3-triage-20261113) — row closed `fixed`
+
+Seed: scratchpad `vkinit/seed-fix`, runs capped `systemd-run MemoryMax=16G timeout 900`, cwd = this worktree at origin/release/1.0.0 `59caff4fd1b`.
+
+Evidence: `git cat-file -s origin/release/1.0.0:src/lib/nogc_async_mut/async_core.spl` = 1808 (module exists, defines AsyncError/Priority, re-exports Poll/TaskState/CancellationToken). Live: `test/01_unit/lib/async_core_spec.spl` executed=7 passed=7 failed=0; `test/01_unit/lib/async_core_importers_prevention_spec.spl` executed=1 passed=1. The async_mutex/handle_cleanup/host_promise reds stay with the separate seed stale-snapshot record.

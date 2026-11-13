@@ -51,3 +51,8 @@ It cannot be marked signed or verified.
 ## Lane disposition 2026-11-13 (p3-misc-b)
 
 open lexical-ownership gap; owner: SFFI/torch facade lane.
+---
+
+## Lane disposition 2026-11-13 (live-p3-l4, work/live-p3-l4-20261113, base f790f7f266e)
+
+Concurs with p3-misc-b: introducing private always-inline lexical raw owners across the ~129 dynamic-facade wrapper paths (one per distinct ABI contract family), plus the static audit, Result-outcome matrix, cross-engine registration parity, and the no-overhead benchmark evidence this record's acceptance list demands, is SFFI/torch-facade lane work — not a bounded P3 fix; a partial wrap would be worse than none (it would look audited while leaving gaps). No in-lane change. Owner: SFFI/torch facade lane (unsafe-only label stands until sealed-complete admission).

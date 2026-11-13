@@ -149,3 +149,9 @@ exists, run the typed owner regressions and the RFC 8032 signer vectors in QEMU,
 then retain elapsed time and maximum RSS for repeated signing versus the
 pre-change artifact. Reject the candidate if cleanup adds per-round allocation
 or materially regresses signing latency/RSS.
+
+---
+
+## Lane disposition 2026-11-13 (live-p3-l4, work/live-p3-l4-20261113, base f790f7f266e)
+
+Concurs with the record: still OPEN — the safe-I/O provider draft (`hosted_safe_artifact_io_v1.spl`, Linux openat2/O_TMPFILE/linkat-based) exists but has had only static review, and the signing secret-workspace zeroization prerequisite remains open (the 2026-09-23 typed `[u32]`/`[u64]` wipe owners landed, but SHA-512/scalar/point paths still allocate growing or unregistered arrays, so an "all secrets erased" receipt would still be false). Both halves are new canonical host-provider/security-architecture work; not convergable in a P3 bug box, and this Windows lane cannot run the Linux provider. No in-lane change. Owner: SimpleOS installer/security lane per the record's prerequisite list.
