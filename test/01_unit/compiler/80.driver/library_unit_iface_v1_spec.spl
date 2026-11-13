@@ -51,6 +51,34 @@ describe "library_unit_module_iface_digest_v1":
         expect(base == field).to_equal(false)
         expect(base == dflt).to_equal(false)
 
+describe "library_unit_module_iface_digest_v1 covers every cross-unit leak":
+    # Review of slice 1: struct layouts, enum discriminants (declaration order)
+    # and imported constant VALUES reach an importer's objects; a private fn
+    # body does not. Under-inclusion here = stale archive reused silently.
+    val BASE = "val LIMIT = 5\n\nstruct Pt:\n    x: i64\n    y: i64\n\nenum Mode:\n    Fast\n    Slow\n\nclass Box:\n    size: i64\n    me grow(by: i64 = 1):\n        self.size = self.size + by\n\nfn secret() -> i64:\n    1\n"
+
+    it "changes when struct fields are reordered":
+        val reordered = BASE.replace("    x: i64\n    y: i64", "    y: i64\n    x: i64")
+        expect(reordered == BASE).to_equal(false)
+        expect(library_unit_module_iface_digest_v1(reordered) == library_unit_module_iface_digest_v1(BASE)).to_equal(false)
+
+    it "changes when an enum variant is inserted before existing ones":
+        val inserted = BASE.replace("enum Mode:\n    Fast", "enum Mode:\n    Idle\n    Fast")
+        expect(library_unit_module_iface_digest_v1(inserted) == library_unit_module_iface_digest_v1(BASE)).to_equal(false)
+
+    it "changes when a public val value changes":
+        val bumped = BASE.replace("val LIMIT = 5", "val LIMIT = 6")
+        expect(library_unit_module_iface_digest_v1(bumped) == library_unit_module_iface_digest_v1(BASE)).to_equal(false)
+
+    it "changes when a method default changes, not when fn or method bodies change":
+        val dflt = BASE.replace("by: i64 = 1", "by: i64 = 2")
+        expect(library_unit_module_iface_digest_v1(dflt) == library_unit_module_iface_digest_v1(BASE)).to_equal(false)
+        val fn_body = BASE.replace("fn secret() -> i64:\n    1\n", "fn secret() -> i64:\n    2\n")
+        val me_body = BASE.replace("self.size = self.size + by", "self.size = self.size + by + by")
+        expect(fn_body == BASE).to_equal(false)
+        expect(library_unit_module_iface_digest_v1(fn_body)).to_equal(library_unit_module_iface_digest_v1(BASE))
+        expect(library_unit_module_iface_digest_v1(me_body)).to_equal(library_unit_module_iface_digest_v1(BASE))
+
 describe "library_unit_iface_digest_v1":
     it "folds module digests order-independently":
         val a = library_unit_iface_digest_v1([mod_iface("a.spl", "d1"), mod_iface("b.spl", "d2")])

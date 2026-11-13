@@ -52,6 +52,16 @@ describe "library_unit_decl_parse_v1":
         expect(no_name.is_err()).to_equal(true)
         expect(no_type.is_err()).to_equal(true)
 
+    it "refuses an absolute dependency path instead of re-rooting it":
+        val posix = library_unit_decl_parse_v1("src/lib", "project:\n  name: a\n  type: library\n  dependencies:\n    - project: /src/lib/x\n")
+        val win = library_unit_decl_parse_v1("src/lib", "project:\n  name: a\n  type: library\n  dependencies:\n    - project: \"C:/x\"\n")
+        expect(posix.is_err()).to_equal(true)
+        expect(win.is_err()).to_equal(true)
+
+    it "refuses a dependency declared twice in one manifest":
+        val r = library_unit_decl_parse_v1("src/app", "project:\n  name: a\n  type: application\n  dependencies:\n    - project: ../lib\n    - project: ../lib/\n")
+        expect(r.is_err()).to_equal(true)
+
 describe "library_unit_plan_v1":
     it "orders units dependency-first with levels and keeps applications as link targets":
         val decls = [
@@ -109,6 +119,18 @@ describe "library_unit_plan_v1":
                 expect(e.contains("a")).to_equal(true)
                 expect(e.contains("b")).to_equal(true)
                 expect(e.contains("c")).to_equal(true)
+
+    it "reports a self-dependency as a cycle":
+        match library_unit_plan_v1([decl("self", "library", "self", ["self"])]):
+            case Ok(_):
+                expect("plan").to_equal("Err expected")
+            case Err(e):
+                expect(e.contains("cycle")).to_equal(true)
+                expect(e.contains("self")).to_equal(true)
+
+    it "rejects the same dependency unit listed twice":
+        val decls = [decl("a", "library", "a", []), decl("b", "library", "b", ["a", "a"])]
+        expect(library_unit_plan_v1(decls).is_err()).to_equal(true)
 
     it "fails closed on a dependency directory no manifest declares":
         val decls = [

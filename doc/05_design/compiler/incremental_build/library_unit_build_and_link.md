@@ -20,7 +20,8 @@ ignored. Units are named by `project.name`; their source set is
 `root`/`source_dir` relative to the manifest directory. Edges come from
 `project.dependencies[].project`, a path relative to the manifest directory,
 normalised as pure text (no filesystem) to a repo-relative directory and then
-matched against the other manifests' directories.
+matched against the other manifests' directories. Absolute `project:` paths
+and a dependency listed twice are refused (`Err`), never re-rooted or collapsed.
 
 Measured drift (2026-11-13), which the planner must **fail closed** on, not
 normalise away: `src/lib/simple.sdn` depends on `../../compiler_rust` (resolves
@@ -41,39 +42,57 @@ compiler, lib). The compiler proper becomes a library unit by changing its
 
 ## 2. Interface artifact — what a dependency leaks into a unit's objects
 
-MIR lowering of a module reads far more than its importers' `fn` headers
-(`mir_shard_export_summaries.md` rows 1-22): struct/class field order and
-types, layout digests, enum discriminants and payload shapes, callee signatures
-AND parameter defaults, methods/extensions, trait implementors and vtable
-shapes, imported globals/constants and externs (rows 2-19). So the per-module
-digest is **`native_interface_whole_digest_v1`** over the body-free declaration
-carrier (`cache/native_interface_slice.spl`: every declaration keeps its header
-and nested non-body lines — fields, variants, signatures with defaults — and
-drops only bodies). It is explicitly NOT `interface_digest_of_source`, whose
-`source_interface_parts` heuristic keeps only header lines and misses a field
-change. Per unit: `interface_digest_of(["simple/library-unit-iface/v1",
+Review of slice 1 (HOLD, 2026-11-13) named three things that reach an
+importer's OBJECTS and are invisible to `interface_digest_of_source`
+(`cache/action_key.spl:227`, extractor `source_interface_parts`, whose own
+header says field lines are not captured — LIVE bug
+`doc/08_tracking/bug/hir_closure_digest_rekey_blocked_by_incomplete_interface_digest_2026-08-23.md`):
+
+1. **struct/class layouts** — `compute_struct_layout`
+   (`_MirLowering/asm_and_targets.spl:34`, `bootstrap_globals.spl:57`): field
+   order and types;
+2. **enum discriminants** by declaration order
+   (`enum_semantic_declarations_v1.spl:301`): only the `enum X:` header is a
+   "part";
+3. **imported constant VALUES** inlined into importer MIR
+   (`provider_globals.spl:241-250`): `val X = 3` is not a header line.
+
+Under-inclusion = a std field reorder / variant insert / `val LIMIT` change
+leaves the digest unchanged, a stale archive is reused, and Stage 3 is silently
+wrong with every receipt green. So the per-module digest is the COMPLETE,
+body-dropping extractor **`native_interface_decls_v1` +
+`native_interface_whole_digest_v1`** (`cache/native_interface_slice.spl`): the
+source is split into top-level declarations (`fn/me/struct/class/enum/trait/
+type/union/bitfield/mixin/actor/val/var/const/macro/impl/extend/use`), each
+keeps its header and every nested non-body line IN ORDER (fields, variants,
+method signatures with defaults, const lines) and only fn/method bodies are
+dropped. Over-inclusion (more rebuilds) is accepted; under-inclusion is not.
+**Proved by spec** (`library_unit_iface_v1_spec.spl` "covers every cross-unit
+leak"): struct field reorder, enum variant insert, public `val` value change
+and method-default change each CHANGE the digest; fn and method body changes
+do NOT. (`driver_native_source_interface_text`, `driver_aot_native_output.spl:1346`,
+is the same class of extractor; the slice carrier was chosen because it already
+digests per declaration and feeds the native module witness.)
+
+Per unit: `interface_digest_of(["simple/library-unit-iface/v1",
 "<module>:<module digest>", …])`, stored as `iface.sdn`
-(`library_unit_iface_v1.spl`, decode fails closed on format/digest mismatch).
+(`library_unit_iface_v1.spl`; decode fails closed on format or digest mismatch).
 A body-only edit inside a unit leaves every dependent's key intact.
 
-Two rows are NOT covered by any interface digest and are handled separately:
+**Generics are NOT a leak** in the default lane: a generic is ONE erased body
+(`module_lowering.spl:3276-3281`, `hir_definitions.spl:103
+is_generic_template`) and the inliner is module-scoped. Row 20 of
+`mir_shard_export_summaries.md` (specialisations inserted into the template
+owner) applies only when the `40.mono` archive lane is active; there the
+existing generic-instance pre-link lane (`generic_instance_prelink_v1.md`, key
+includes the template owner's body digest, COMDAT objects) supplies cross-unit
+instances beside the archives — never from a unit archive.
 
-- **Row 20, generic monomorphization.** `40.mono` inserts each specialization
-  into its *template owner's* HIR, so a dependency's objects would otherwise
-  vary with its users' instantiations. Rule: a unit archive contains only
-  instances whose template AND arguments are both inside the unit. Cross-unit
-  instances are produced by the existing generic-instance pre-link lane
-  (`generic_instance_prelink_v1.md`: `needed = ∪ generic-spec(all modules)`,
-  key `generic_instance_body_key_v1(concrete_key, template body digest) +
-  producer`, COMDAT/linkonce_odr) and added to the link set beside the
-  archives. Their key already includes the template owner's **body** digest,
-  which is correct — an instance body is the dependency's body.
-- **Row 22, order-dependent counters** (`canonical_type_symbols`,
-  `mcdc_next_runtime_id`): values depend on lowering order across the whole
-  closure. Separate compilation needs them unit-deterministic (derived from
-  symbol identity, not visit order) or recorded in the receipt and rejected on
-  mismatch. **Blocker for slice 5; not solved by any digest.** Rows 12/14
-  (process-global tables) are per build process and so per unit build.
+**Still open (blocker for slice 5):** row 22 order-dependent counters
+(`canonical_type_symbols`, `mcdc_next_runtime_id`) depend on whole-closure
+lowering order; they must become unit-deterministic or be recorded in the
+receipt and rejected on mismatch. Symlinked sources are unaddressed (planning
+and digests are pure text over the listed tree).
 
 ## 3. Archive layout and cache key
 
@@ -83,7 +102,7 @@ Objects land under the existing lane scope, never a new tree:
 build/bootstrap/native_cache/<lane>/<scope_key>/units/<unit-name>/<unit_key>/
     objects/<module>.o      lib<unit>.a (thin archive over objects/)
     iface.sdn               unit interface digest + per-module digests
-    receipt.sdn             producer identity, source digest, dep keys, verdict
+    receipt.sdn             producer identity, scope_key, source digest, dep keys, verdict
 ```
 
 `unit_key = sha256("simple/library-unit/v1" ; frame(producer_identity) ;
