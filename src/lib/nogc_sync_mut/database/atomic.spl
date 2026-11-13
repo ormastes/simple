@@ -37,6 +37,7 @@ use std.io_runtime.{getpid}
 use std.io_runtime.{time_now_unix_micros}
 use std.io_runtime.{thread_sleep}
 use std.io_runtime.{process_is_running}
+use std.io_runtime.{dir_exists}
 # Canonical text read: std.io_runtime's single blessed `pub fn file_read`; absent
 # or unreadable still yields "" for this module's callers. Not redefined here
 # (doc/08_tracking/bug/file_read_has_23_definitions_with_two_return_types_2026-08-16.md).
@@ -105,6 +106,15 @@ class FileLock:
                 self.acquired = true
                 return true
 
+            # Fail fast when the lock file's parent directory does not exist:
+            # create_lock_file cannot ever succeed there, and polling until
+            # the timeout (or forever, for the no-timeout acquire) turns a
+            # missing-directory publisher bug into a hang. Measured 2026-11-12:
+            # scv structural publish into a missing .scv/objects/syntax dir
+            # hung the spec child for its full budget.
+            if not dir_exists(dirname(self.lock_path)):
+                return false
+
             # Check timeout
             val elapsed = get_timestamp() - start_time
             if elapsed > timeout_us:
@@ -123,6 +133,9 @@ class FileLock:
         val judged = file_read(self.lock_path)
         if not self.is_stale_content(judged):
             return false
+        # The break outcome IS the acquire outcome: break_stale recreates the
+        # lock under the .break kernel lock, so returning anything else drops
+        # a successful acquisition and sends the caller back into the poll.
         self.break_stale(judged)
 
     fn create_lock_file() -> bool:
