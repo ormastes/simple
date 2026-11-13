@@ -13,6 +13,8 @@
 # for the handler. The site id is the imm32 at [return address + 2]; the
 # handler gets edi = id, rsi = return address (sled + 7).
 
+use std.common.isa.x64_encode_v1.{x64_rel32_in_range_v1, x64_push_imm32_le_v1}
+
 pub const XRAY_NATIVE_TRAMPOLINE_X86_FRAME_BYTES_V1 = 272
 pub const XRAY_NATIVE_TRAMPOLINE_X86_BYTES_V1 = 332
 # Byte offset of the handler CALL's rel32 (the CALL opcode is one byte before).
@@ -46,12 +48,6 @@ fn xray_x86_push_pop_v1(out: [i64], reg: i64, pop: bool) -> [i64]:
     bytes.push(base + (reg & 7))
     bytes
 
-fn xray_x86_le32_v1(out: [i64], value: i64) -> [i64]:
-    var bytes = out
-    for shift in [0, 8, 16, 24]:
-        bytes.push((value >> shift) & 255)
-    bytes
-
 # movdqu xmm<->[rsp+disp]: F3 [REX.R] 0F 7F (store) / 6F (load), SIB base rsp.
 fn xray_x86_movdqu_rsp_v1(out: [i64], xmm: i64, disp: i64, load: bool) -> [i64]:
     var bytes = out
@@ -72,7 +68,7 @@ fn xray_x86_movdqu_rsp_v1(out: [i64], xmm: i64, disp: i64, load: bool) -> [i64]:
     else:
         bytes.push(0x84 | reg)
         bytes.push(0x24)
-        bytes = xray_x86_le32_v1(bytes, disp)
+        bytes = x64_push_imm32_le_v1(bytes, disp)
     bytes
 
 # stmxcsr / ldmxcsr [rsp+256]: 0F AE /3 (store) or /2 (load), disp32.
@@ -83,13 +79,13 @@ fn xray_x86_mxcsr_v1(out: [i64], load: bool) -> [i64]:
     val modrm = if load: 0x94 else: 0x9C
     bytes.push(modrm)
     bytes.push(0x24)
-    xray_x86_le32_v1(bytes, XRAY_X86_MXCSR_SLOT_V1)
+    x64_push_imm32_le_v1(bytes, XRAY_X86_MXCSR_SLOT_V1)
 
 # The trampoline bytes, without the assembler's trailing alignment padding.
 # `handler_rel32` is the CALL displacement (handler - end of the CALL); []
 # when it does not fit a signed 32-bit displacement.
 pub fn xray_native_trampoline_bytes_x86_64_v1(handler_rel32: i64) -> [i64]:
-    if handler_rel32 < -2147483648 or handler_rel32 > 2147483647:
+    if not x64_rel32_in_range_v1(handler_rel32):
         return []
     var bytes: [i64] = [0x9C, 0x55, 0x48, 0x89, 0xE5, 0xFC]  # pushfq; push rbp; mov rbp,rsp; cld
     for reg in xray_x86_saved_gprs_v1():
@@ -98,15 +94,14 @@ pub fn xray_native_trampoline_bytes_x86_64_v1(handler_rel32: i64) -> [i64]:
         bytes.push(byte)
     for byte in [0x48, 0x81, 0xEC]:                          # sub rsp, 272
         bytes.push(byte)
-    bytes = xray_x86_le32_v1(bytes, XRAY_NATIVE_TRAMPOLINE_X86_FRAME_BYTES_V1)
+    bytes = x64_push_imm32_le_v1(bytes, XRAY_NATIVE_TRAMPOLINE_X86_FRAME_BYTES_V1)
     for xmm in 0..16:
         bytes = xray_x86_movdqu_rsp_v1(bytes, xmm, xmm * 16, false)
     bytes = xray_x86_mxcsr_v1(bytes, false)
     for byte in [0x48, 0x8B, 0x75, 0x10, 0x8B, 0x7E, 0x02]: # mov rsi,[rbp+16]; mov edi,[rsi+2]
         bytes.push(byte)
     bytes.push(0xE8)                                         # call handler
-    val encoded = if handler_rel32 < 0: handler_rel32 + 4294967296 else: handler_rel32
-    bytes = xray_x86_le32_v1(bytes, encoded)
+    bytes = x64_push_imm32_le_v1(bytes, handler_rel32)
     bytes = xray_x86_mxcsr_v1(bytes, true)
     for xmm in 0..16:
         bytes = xray_x86_movdqu_rsp_v1(bytes, xmm, xmm * 16, true)

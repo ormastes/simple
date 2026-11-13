@@ -138,3 +138,18 @@ tagged, never skipped.
   (`xray_sled_emit.spl:8-9`), so there is no tail-exit site to instrument.
 - Bug: `use test.fixtures.*` is unresolved from specs deeper than depth 4
   (`test_fixtures_import_unresolved_below_depth4_2026-11-13.md`); the IN spec sits at depth 4.
+
+#### Step 3 result (2026-11-13): shared ELF / ISA / LE modules
+
+- `src/lib/common/binary_io.spl` gains `bytes_read_le_at` / `bytes_push_le` (width 1..8,
+  direct indexing, no 0 sentinel); `src/lib/common/elf/elf_image_v1.spl` (ELF64 LE header,
+  section table, section-by-name, section bytes, first PT_LOAD vaddr; None on malformed);
+  `src/lib/common/isa/a64_encode_v1.spl` (NOP, B/BL imm26 + word/byte range, STP/LDP X/Q,
+  STR/LDR X, ADD/SUB imm12, linker imm26) and `x64_encode_v1.spl` (imm32 LE, rel32 range).
+- Trace / XRay consumers now delegate instead of carrying private copies:
+  `xray_native_map_format_v1` (LE put/get), `observer_native_map_v1` (word append, branch
+  ranges, BL), both trampoline twins (all encoders except MRS/MSR), `xray_native_module_v1`
+  (section lookup, first PT_LOAD, u32 read), `xray_sled_emit` (object section lookup).
+  Golden bytes unchanged: every existing xray spec is green with identical counts.
+- Mutation: `a64_bl_v1` opcode 0x94 -> 0x95 turns both the AArch64 trampoline twin spec and
+  `observer_native_map_v1_spec` red (1 failure each) — the twins really share one encoder.

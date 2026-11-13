@@ -1,0 +1,130 @@
+# MDSOC: feature dimension
+# Pure ELF64 little-endian in-memory reader shared by the XRay trace library
+# (std.common / std.nogc_sync_mut trace), the XRay sled emitter and the linker
+# inspector. Bytes in, header / section records and Options out; no I/O, no
+# sentinels: a malformed image answers None or an empty table.
+use std.common.binary_io.{bytes_read_le_at}
+
+pub const ELF_IMAGE_HEADER_BYTES_V1 = 64
+pub const ELF_IMAGE_PHDR_BYTES_V1 = 56
+pub const ELF_IMAGE_SHDR_BYTES_V1 = 64
+const ELF_IMAGE_PT_LOAD_V1 = 1
+
+pub struct ElfImageHeaderV1:
+    e_type: i64
+    e_machine: i64
+    e_entry: i64
+    e_phoff: i64
+    e_phnum: i64
+    e_phentsize: i64
+    e_shoff: i64
+    e_shnum: i64
+    e_shentsize: i64
+    e_shstrndx: i64
+
+pub struct ElfImageSectionV1:
+    sh_name: i64
+    sh_type: i64
+    sh_flags: i64
+    sh_addr: i64
+    sh_offset: i64
+    sh_size: i64
+    sh_link: i64
+    sh_info: i64
+    sh_addralign: i64
+    sh_entsize: i64
+
+# Fixed-width little-endian readers (ELF field widths), as i64.
+pub fn elf_image_u16_le_v1(bytes: [u8], offset: i64) -> i64:
+    bytes_read_le_at(bytes, offset, 2) as i64
+
+pub fn elf_image_u32_le_v1(bytes: [u8], offset: i64) -> i64:
+    bytes_read_le_at(bytes, offset, 4) as i64
+
+pub fn elf_image_u64_le_v1(bytes: [u8], offset: i64) -> i64:
+    bytes_read_le_at(bytes, offset, 8) as i64
+
+# "\x7fELF", ELFCLASS64, ELFDATA2LSB, and room for the whole header.
+pub fn elf_image_is_elf64_le_v1(bytes: [u8]) -> bool:
+    bytes.len() >= ELF_IMAGE_HEADER_BYTES_V1 and bytes[0] == 127u8 and bytes[1] == 69u8 and
+        bytes[2] == 76u8 and bytes[3] == 70u8 and bytes[4] == 2u8 and bytes[5] == 1u8
+
+pub fn elf_image_header_v1(bytes: [u8]) -> ElfImageHeaderV1?:
+    if not elf_image_is_elf64_le_v1(bytes): return None
+    Some(ElfImageHeaderV1(
+        e_type: elf_image_u16_le_v1(bytes, 16),
+        e_machine: elf_image_u16_le_v1(bytes, 18),
+        e_entry: elf_image_u64_le_v1(bytes, 24),
+        e_phoff: elf_image_u64_le_v1(bytes, 32),
+        e_phnum: elf_image_u16_le_v1(bytes, 56),
+        e_phentsize: elf_image_u16_le_v1(bytes, 54),
+        e_shoff: elf_image_u64_le_v1(bytes, 40),
+        e_shnum: elf_image_u16_le_v1(bytes, 60),
+        e_shentsize: elf_image_u16_le_v1(bytes, 58),
+        e_shstrndx: elf_image_u16_le_v1(bytes, 62)))
+
+# Every 64-byte section header, in table order; empty when the table is
+# absent or runs past the image.
+pub fn elf_image_sections_v1(bytes: [u8], header: ElfImageHeaderV1) -> [ElfImageSectionV1]:
+    var sections: [ElfImageSectionV1] = []
+    if header.e_shnum == 0: return sections
+    val shoff = header.e_shoff
+    if shoff < 0 or shoff + header.e_shnum * ELF_IMAGE_SHDR_BYTES_V1 > bytes.len(): return sections
+    for index in 0..header.e_shnum:
+        val base = shoff + index * ELF_IMAGE_SHDR_BYTES_V1
+        sections.push(ElfImageSectionV1(
+            sh_name: elf_image_u32_le_v1(bytes, base),
+            sh_type: elf_image_u32_le_v1(bytes, base + 4),
+            sh_flags: elf_image_u64_le_v1(bytes, base + 8),
+            sh_addr: elf_image_u64_le_v1(bytes, base + 16),
+            sh_offset: elf_image_u64_le_v1(bytes, base + 24),
+            sh_size: elf_image_u64_le_v1(bytes, base + 32),
+            sh_link: elf_image_u32_le_v1(bytes, base + 40),
+            sh_info: elf_image_u32_le_v1(bytes, base + 44),
+            sh_addralign: elf_image_u64_le_v1(bytes, base + 48),
+            sh_entsize: elf_image_u64_le_v1(bytes, base + 56)))
+    sections
+
+# The section whose .shstrtab name is exactly `name` (NUL-terminated in the
+# string table and fully inside the image).
+pub fn elf_image_section_by_name_v1(bytes: [u8], name: text) -> ElfImageSectionV1?:
+    val header = match elf_image_header_v1(bytes):
+        case Some(found): found
+        case None: return None
+    if header.e_shentsize != ELF_IMAGE_SHDR_BYTES_V1 or header.e_shoff <= 0 or header.e_shstrndx >= header.e_shnum:
+        return None
+    val sections = elf_image_sections_v1(bytes, header)
+    if sections.len() == 0: return None
+    val strtab = sections[header.e_shstrndx].sh_offset
+    val wanted = name.bytes()
+    for section in sections:
+        val at = strtab + section.sh_name
+        if at + wanted.len() >= bytes.len(): continue
+        var same = bytes[at + wanted.len()] == 0u8
+        for k in 0..wanted.len():
+            if bytes[at + k] != wanted[k]: same = false
+        if same: return Some(section)
+    None
+
+# The section's file bytes; None when [sh_offset, sh_offset + sh_size) runs
+# past the image.
+pub fn elf_image_section_bytes_v1(bytes: [u8], section: ElfImageSectionV1) -> [u8]?:
+    if section.sh_offset < 0 or section.sh_offset + section.sh_size > bytes.len(): return None
+    var out: [u8] = []
+    for k in 0..section.sh_size:
+        out.push(bytes[section.sh_offset + k])
+    Some(out)
+
+# p_vaddr of the PT_LOAD segment that maps file offset 0 (the image base).
+pub fn elf_image_first_load_vaddr_v1(bytes: [u8]) -> i64?:
+    val header = match elf_image_header_v1(bytes):
+        case Some(found): found
+        case None: return None
+    val phoff = header.e_phoff
+    if header.e_phentsize != ELF_IMAGE_PHDR_BYTES_V1 or phoff <= 0 or phoff + header.e_phnum * ELF_IMAGE_PHDR_BYTES_V1 > bytes.len():
+        return None
+    for index in 0..header.e_phnum:
+        val base = phoff + index * ELF_IMAGE_PHDR_BYTES_V1
+        if elf_image_u32_le_v1(bytes, base) == ELF_IMAGE_PT_LOAD_V1 and elf_image_u64_le_v1(bytes, base + 8) == 0:
+            return Some(elf_image_u64_le_v1(bytes, base + 16))
+    None
