@@ -60,3 +60,13 @@ nil, so the old `nil:` arm could not catch a miss).
 
 Spec: `test/01_unit/compiler/hir/match_some_on_plain_i64_binds_subject_spec.spl`
 (old seed 5/6, fixed seed 6/6).
+
+## Superseded 2026-11-13 (owner decision)
+
+The PR #8675 "flat bind" fix is reverted. A `Some(..)`/`None` pattern against a
+subject whose static type is a bare scalar/text is now a compile error,
+`error[SPL-PAT-001]: pattern `Some(_)` expects Option<T>, found i64`, in the seed
+HIR lowering (`hir/lower/option_pattern_shape_diag.rs`, default on) and in the
+pure-Simple type checker (`infer_option_pattern`). Rule registered in
+`config/policy/diagnostic_policy.sdn` (deny in every profile, no exception).
+Spec: `test/01_unit/compiler/hir/match_some_on_plain_i64_is_compile_error_spec.spl`.
