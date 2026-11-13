@@ -586,5 +586,55 @@ struct MirModule:
     # Attribute access sites carried unchanged from HIR (data plan W2b).
     attr_sites: [HirAttrAccessV1] = []
 
-export MirInst, MirBlock, MirFunction, MirBody, MirModule, mir_fold_binop
+# ============================================================================
+# Unproven callable authority census (per-module, before codegen)
+# ============================================================================
+
+fn _mir_unproven_callable_operand_v1(function_name: text, operand: MirOperand, sites: [text]) -> [text]:
+    if operand.call_origin == MirCallOrigin.Unknown:
+        match operand.kind:
+            case MirOperandKind.Const(value, type_):
+                match type_.kind:
+                    case MirTypeKind.FuncPtr(_):
+                        match value:
+                            case MirConstValue.Str(callee):
+                                return sites.push("MIR call target lacks proven source/runtime/foreign origin: callee={callee} fn={function_name}")
+                            case _: ()
+                    case _: ()
+            case _: ()
+    sites
+
+fn mir_unproven_call_origin_sites_v1(module: MirModule) -> [text]:
+    """Every callable `Const(Str, FuncPtr)` operand of `module` whose
+    `call_origin` is `MirCallOrigin.Unknown`, one line per site, in the
+    backend panic's own words plus the function name.
+
+    The backends (`mir_call_origin_uses_local_symbols_named`) PANIC on an
+    Unknown origin, and a panic ends the whole native-build worker: the
+    run-19 Phase-3 census lost codegen of all 1619 modules to one `env_get`
+    call (p3_census_mir_classes_2026-11-13, class 5). The driver runs this
+    census first and fails the MODULE (the ICE boundary's caught tier) so
+    staged codegen keeps going. Covered positions: `Call.func`, `Call.args`,
+    `PipeForward.func`, `Parallel.funcs`. Other FuncPtr-value positions keep
+    the backend panic as their backstop. Unknown is never mapped to Source."""
+    var sites: [text] = []
+    for key in module.functions.keys():
+        val function: MirFunction = module.functions[key]
+        for block in function.blocks:
+            for inst in block.instructions:
+                match inst.kind:
+                    case MirInstKind.Call(_, func, args):
+                        sites = _mir_unproven_callable_operand_v1(function.name, func, sites)
+                        for arg in args:
+                            sites = _mir_unproven_callable_operand_v1(function.name, arg, sites)
+                    case MirInstKind.PipeForward(_, value, func):
+                        sites = _mir_unproven_callable_operand_v1(function.name, value, sites)
+                        sites = _mir_unproven_callable_operand_v1(function.name, func, sites)
+                    case MirInstKind.Parallel(_, funcs):
+                        for func in funcs:
+                            sites = _mir_unproven_callable_operand_v1(function.name, func, sites)
+                    case _: ()
+    sites
+
+export MirInst, MirBlock, MirFunction, MirBody, MirModule, mir_fold_binop, mir_unproven_call_origin_sites_v1
 export mir_module_functions_sorted, mir_module_statics_sorted
