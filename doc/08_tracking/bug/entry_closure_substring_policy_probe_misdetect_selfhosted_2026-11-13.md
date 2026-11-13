@@ -1,7 +1,8 @@
 # Entry-closure scanner drops every import after a multi-byte UTF-8 line on self-hosted runtimes (substring-policy probe misdetection)
 
-- **Status:** ROOT-CAUSED + SOURCE FIX LANDED 2026-11-13 (PR pending at write
-  time; commit `8c4c44c4cc0` on `work/closure-scan-substring-policy-probe-20261113`)
+- **Status:** ROOT-CAUSED + SOURCE FIX LANDED 2026-11-13 (PR #8780, commits
+  `8c4c44c4cc0` fix + `9e30cee6dcc` tracking on
+  `work/closure-scan-substring-policy-probe-20261113`)
 - **Severity:** P1 — silently wrong entry closures; poisoned stage-2 matrix rows
 - **Component:** `src/compiler/80.driver/driver_entry_closure_core.spl`
   (`_driver_substring_is_byte_based_v1`, 2026-11-11 byte/char defense block)
@@ -101,12 +102,30 @@ every documented lane (both 2026-11-11/11-12 records agree), so:
 
 ## Verification
 
-- Probe A (control, unfixed `47e28950755`, pinned stage-2 binary builds the
-  probe importing the real `_driver_entry_import_module_paths`):
-  case1 (em-dash before imports) returns 0 specs — SCANNER-FAIL reproduces.
-- Probe B (fixed `8c4c44c4cc0`, same pinned binary, same probe): case1
-  returns all 3 imports, ASCII and trailing-multibyte controls pass —
-  SCANNER-OK.
+- Minimal closure-walk repro (stage-2 binary, `SIMPLE_SCV_FREEZE_FALLBACK=1`,
+  `SIMPLE_NATIVE_BUILD_TRACE_CLOSURE=1`, 15-sibling import block copied from
+  `src/app/devhub/main.spl`, whose line 1 carries an em-dash): em-dash header
+  `[parse-closure] selected=2` (only the first import bound, 14 skipped);
+  same file ASCII `selected=16` (all 15 bind); 2-byte (`é`) header reproduces,
+  multi-byte after the import block does not affect it.
+- Byte-level runtime probes on the pinned binary: `rt_bytes_to_text([0xC3])`
+  → bytes 239 191 189 (U+FFFD); `e.substring(0,1).byte_len()` → 1 (substring
+  IS byte-based here); `byte_at`/`byte_len`/byte-slices exact.
+- Decisive A/B: a verbatim extraction of the scanner pipeline
+  (`_driver_entry_import_module_paths_text_fallback` and its helpers, copied
+  mechanically from each tree; `_pp_preprocess_conditionals` → identity,
+  valid because probe contents carry no directives) compiled by the FROZEN
+  stage2 binary and run on the stage2 runtime, identical except for the probe
+  function:
+  - base (`47e28950755`): case1 em-dash-before-imports → 0 imports (all
+    dropped); case3 multi-byte between imports → first import only;
+    ASCII control → 2. SCANNER-FAIL (exit 1).
+  - fix (`8c4c44c4cc0`): 3 / 2 / 2 on the same three cases. SCANNER-OK
+    (exit 0).
+  (Importing the whole real module for the A/B is impossible on the frozen
+  binary: its own buggy walk shrinks the probe build's closure and both trees
+  die with the same 4286-error missing-surface cascade — the matrix failure
+  in miniature.)
 - End-to-end matrix verification is pending the next stage-2 admission (the
   admitted binary predates the fix; only a compiler built FROM these sources
   scans correctly on self-hosted runtimes). Exact command:
