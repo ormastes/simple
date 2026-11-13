@@ -1,7 +1,7 @@
 # @cover src/lib/nogc_sync_mut/database/core.spl
 # Regression: bug_database_roundtrip_drops_overwide_legacy_rows_2026_10_27
 use std.spec.*
-use std.nogc_sync_mut.database.core.{SdnTable}
+use std.nogc_sync_mut.database.core.{SdnTable, SdnRow}
 
 describe "SdnTable overwide legacy rows":
     it "parses a row with more fields than columns instead of failing the table":
@@ -22,3 +22,16 @@ describe "SdnTable overwide legacy rows":
     it "still rejects underwide rows":
         val table = SdnTable.parse("t |id, v|\n    a\n")
         expect(table == nil).to_equal(true)
+
+    it "keeps the opaque tail when the row is updated in place from typed fields":
+        # BugDatabase.update_bug rebuilds the row from the declared columns
+        # only; the legacy tail must survive the update and the next save.
+        val src = "t |id, v|\n    a, 1\n    b, 2, EXTRA_one, EXTRA_two\n"
+        var table = SdnTable.parse(src)!
+        val replacement = SdnRow.empty()
+        replacement.set("id", "b")
+        replacement.set("v", "3")
+        expect(table.update_row("b", replacement)).to_equal(true)
+        val out = table.to_sdn()
+        expect(out).to_contain("    b, 3, EXTRA_one, EXTRA_two\n")
+        expect(out).to_contain("    a, 1\n")
