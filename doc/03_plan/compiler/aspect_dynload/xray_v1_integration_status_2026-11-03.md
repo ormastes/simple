@@ -271,3 +271,20 @@ Other `b795b3f4a26`/`aba2a5f0a3e` sites, same seed and scope:
   walk carries ELF32 support that `elf_image_v1` deliberately lacks; routing its ELF64 half
   through `elf_image_sections_v1` would add an intermediate list per parse on the path
   Step 3c measured.
+- `backend/native/encode_aarch64.spl`: `emit_u32_le` is the shared `bytes_i64_push_u32_le`
+  (aliased import; the local mod/div body is gone); ADD/SUB imm12, LDR/STR unsigned offset
+  and the offset (non-writeback) STP/LDP forms call `std.common.isa.a64_encode_v1`. Kept
+  local: the pre/post-indexed writeback pairs (no shared form) and the ADD relocation
+  placeholder (its literal text is pinned by `global_addr_aarch64_riscv64_contract_spec`).
+  New `aarch64_shared_encoder_parity_spec` (3/3 on old and new encoder; mutations of the
+  shared ADD/SUB/LDR/STR encoders -> 1/3, LDP -> 2/3). 7 instructions x 20,000 through
+  `encode_inst_aarch64`: old 12.07 / 12.16 / 12.28 s vs new 12.07 / 12.23 / 12.28 s, RSS
+  ~142 MB both. Same verdicts on the 9 AArch64 encoder specs (incl. the pre-existing 3
+  failures of `global_addr_aarch64_riscv64_contract_spec`).
+- `a64_b_v1` / `a64_nop_v1` deleted: the backend emits B/BL/NOP as constant placeholders
+  that relocations patch, so a call buys nothing and they had no other consumer.
+- Kernel loader (`src/os/kernel/loader/elf64.spl`) keeps its ELF64 readers. It could import
+  `std.common` (sibling loader files do), but its readers come from the kernel-owned
+  `os.kernel.loader.byte_utils` shared by the whole loader, and any loader change needs the
+  real-firmware QEMU/board boot evidence of `.claude/rules/board-runnable.md`, which this
+  lane does not produce. Recorded as remaining duplication, not folded.
