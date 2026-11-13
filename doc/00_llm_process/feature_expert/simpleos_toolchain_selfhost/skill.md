@@ -500,3 +500,23 @@ the current post-HIR Stage 3 crash; the log now reaches MIR method-call
 lowering with a corrupt receiver local, so the earlier `error_count_value`
 change is an avoidance, not a proved root fix. Resume through WP-A in the
 canonical RV64 plan and require the fresh Stage 4 essential-tools smoke.
+
+## In-guest worker-pool memory admission (2026-11-13)
+
+- **Trap:** before this date a SimpleOS build of the compiler took the Linux arm
+  of `src/app/cli/shard_mem_clamp.spl` (awk over `/proc/meminfo`). The guest has
+  no awk, its procfs serves a fixed placeholder (`procfs_filesystem.spl`
+  `_meminfo_text`, 40 MB), and `_handle_sysinfo(kind=0)` answered status 0
+  without writing `MemInfoBuf`. Free memory read 0, threads clamped to 1 and the
+  per-file worker pool refused. Check: `grep -n 'os="simpleos"' src/app/cli/shard_mem_clamp.spl`
+  must show the memory arm and the cgroup arm.
+- **Now:** the kernel copies PMM page frames out (`src/os/kernel/ipc/sysinfo_memory_v1.spl`,
+  32-byte `@repr("C")` layout); the compiler arm only gathers
+  `[total_pages, free_pages, page_size]` via `os.userlib.system.mem_info` and the
+  pure `shard_simpleos_kb_from_probe_v1` decides. A zeroed buffer is an `Err`
+  with a reason that is logged, never "0 kB free".
+- **Still open (do not claim in-guest parallel builds):** no process groups
+  (`posix_server_contract.spl` process_groups unsupported), libc `execve` drops
+  argv/envp although kernel SYS_EXEC accepts them, aarch64 has no EL0 user tasks,
+  SysInfo CpuCount returns 1, procfs meminfo is still the placeholder. Evidence for
+  the memory fix is host specs + static resolution only; no QEMU run yet.
