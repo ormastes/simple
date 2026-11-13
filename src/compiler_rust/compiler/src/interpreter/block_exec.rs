@@ -328,6 +328,12 @@ pub(crate) fn exec_block_fn(
         // For the last statement, if it's an expression, capture its value
         let is_last = i == len - 1;
         if is_last {
+            // COVERAGE: the tail `match`/`if` below run through
+            // exec_match_core / exec_if_core, not exec_node, so the line hit
+            // exec_node records was never taken for a function's last
+            // statement. Recording here again for a tail that does fall
+            // through to exec_node is harmless: line hits are a set.
+            super::coverage_helpers::record_node_coverage(stmt);
             if let Node::Expression(Expr::UnsafeBlock(nodes, _)) = stmt {
                 let (flow, value) = exec_unsafe_block(nodes, env, functions, classes, enums, impl_methods)?;
                 match flow {

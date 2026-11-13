@@ -381,11 +381,36 @@ impl<'a> Parser<'a> {
                 None
             };
 
-            return Ok(Node::Expression(Expr::If {
+            // Statement position: build the same `IfStmt` the block form and
+            // the assignment-bodied inline form (`finish_inline_statement_if`)
+            // produce, so the statement keeps its span. `Expr` carries no
+            // span, and a `Node::Expression(Expr::If)` here was invisible to
+            // the line-coverage collector (extract_node_location) and to
+            // error positions — `if c: a else: b` lines ran but were scored
+            // missed (pinned by test/02_integration/app/coverage/
+            // spl_coverage_module_spec.spl and covtail_fixture.spl).
+            let branch_span = self.previous.span;
+            let else_block = else_branch.map(|else_expr| match *else_expr {
+                Expr::DoBlock(statements) => Block {
+                    span: branch_span,
+                    statements,
+                },
+                other => Block {
+                    span: branch_span,
+                    statements: vec![Node::Expression(other)],
+                },
+            });
+            return Ok(Node::If(IfStmt {
+                span: Span::new(start_span.start, branch_span.end, start_span.line, start_span.column),
                 let_pattern,
-                condition: Box::new(condition),
-                then_branch: Box::new(then_expr),
-                else_branch,
+                condition,
+                then_block: Block {
+                    span: branch_span,
+                    statements: vec![Node::Expression(then_expr)],
+                },
+                elif_branches: Vec::new(),
+                else_block,
+                is_suspend: false,
             }));
         }
 
