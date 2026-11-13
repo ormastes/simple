@@ -1087,7 +1087,8 @@ impl MirLowering:
         val int_sign = args.len() == 0 and (method == "sign" or method == "signum")
         val int_pow = args.len() == 1 and method == "pow"
         val float_class = args.len() == 0 and (method == "is_nan" or method == "is_finite" or method == "is_infinite")
-        if not int_predicate and not int_sign and not int_pow and not float_class:
+        val int_hex = args.len() == 0 and method == "to_hex"
+        if not int_predicate and not int_sign and not int_pow and not float_class and not int_hex:
             return None
         val recv_kind = self.builtin_numeric_receiver_kind(receiver, recv)
         if recv_kind == 0:
@@ -1130,6 +1131,17 @@ impl MirLowering:
         if recv_kind == 3 or recv_class != 1:
             return None
         val unsigned = recv_kind == 2
+        if int_hex:
+            # Seed interpreter oracle: `format!("{:x}", n)` -> 255.to_hex()=="ff",
+            # (-1).to_hex()=="ffffffffffffffff" (two's complement, no prefix).
+            var b_hex = self.builder
+            val hex_arg = b_hex.emit_cast(mir_operand_copy(recv), MirType.i64())
+            val hex_text = b_hex.emit_call_value(
+                builtin_extra_rt_operand("rt_i64_to_hex", [MirType.i64()], self.bootstrap_text_type()),
+                [mir_operand_copy(hex_arg)], self.bootstrap_text_type())
+            self.builder = b_hex
+            self.remember_local_hir_type(hex_text.id, HirType(kind: HirTypeKind.Str, span: receiver.span), 0, 0)
+            return Some(hex_text)
         var b = self.builder
         val zero = b.new_temp(recv_type)
         b.emit_const(zero, MirConstValue.Int(0), recv_type)
@@ -1705,3 +1717,74 @@ impl MirLowering:
         val for_result = b_end.new_temp(MirType.unit())
         self.builder = b_end
         for_result
+
+    me lower_option_or_builtin(receiver: HirExpr, recv: LocalId, method: text, args: [HirCallArg]) -> LocalId:
+        """Option.or(other) / Option.ok_or(err) on a receiver already proven
+        Option-shaped by method_receiver_is_option_for_v1. Seed interpreter
+        oracle: `None.or(Some(2)) == Some(2)`, `Some(1).or(x) == Some(1)`,
+        `Some(4).ok_or(e) == Ok(4)`, `None.ok_or(e) == Err(e)`. Branches on
+        rt_is_some (never truthiness, so `Some(0)` stays present); the
+        fallback argument is lowered lazily inside the none branch, merged
+        through a shared result slot as unwrap_or does.
+        doc/08_tracking/bug/jit_primitive_method_parity_gaps_2026-11-13.md"""
+        val inner_opt = self.option_inner_hir_type_for_local(receiver, recv)
+        val inner_hir = inner_opt ?? HirType(kind: HirTypeKind.Error, span: receiver.span)
+        var b = self.builder
+        val is_some = b.emit_call_value(
+            builtin_extra_rt_operand("rt_is_some", [MirType.i64()], MirType.bool()),
+            [mir_operand_copy(recv)], MirType.bool())
+        val some_block = b.new_block(Some("option_{method}_some"))
+        val none_block = b.new_block(Some("option_{method}_none"))
+        val merge_block = b.new_block(Some("option_{method}_merge"))
+        val result_local = b.new_local(None, MirType.i64(), LocalKind.Var)
+        b.terminate_if(mir_operand_copy(is_some), some_block, none_block)
+        b.switch_to_block(some_block)
+        self.builder = b
+        if method == "or":
+            var b_some = self.builder
+            b_some.emit_copy(result_local, recv)
+            b_some.terminate_goto(merge_block)
+            b_some.switch_to_block(none_block)
+            self.builder = b_some
+            val other = self.lower_expr(args[0].value)
+            var b_none = self.builder
+            b_none.emit_copy(result_local, other)
+            if not b_none.current_block_has_explicit_terminator():
+                b_none.terminate_goto(merge_block)
+            b_none.switch_to_block(merge_block)
+            self.builder = b_none
+            self.mark_runtime_value_local(result_local.id)
+            self.option_value_locals[result_local.id] = true
+            self.remember_local_hir_type(result_local.id, HirType(kind: HirTypeKind.Optional(inner_hir), span: receiver.span), 2, 0)
+            return result_local
+        # ok_or: the Some payload word is already the runtime enum payload
+        # word, so it is reused verbatim as the Ok payload.
+        val payload = self.option_payload_or_self(recv)
+        var b_ok = self.builder
+        val result_id = self.enum_runtime_id("Result")
+        val ok_handle = b_ok.emit_call_value(
+            builtin_extra_rt_operand("rt_enum_new", [MirType(kind: MirTypeKind.I32), MirType(kind: MirTypeKind.I32), MirType.i64()], MirType.i64()),
+            [MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(result_id), MirType(kind: MirTypeKind.I32))),
+             MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(0), MirType(kind: MirTypeKind.I32))),
+             mir_operand_copy(payload)], MirType.i64())
+        b_ok.emit_copy(result_local, ok_handle)
+        b_ok.terminate_goto(merge_block)
+        b_ok.switch_to_block(none_block)
+        self.builder = b_ok
+        val err_raw = self.lower_expr(args[0].value)
+        val err_hir = self.builtin_result_mapper_hir_type(err_raw, receiver.span) ?? HirType(kind: HirTypeKind.Error, span: receiver.span)
+        val err_word = self.bitcast_float_enum_payload(err_raw)
+        var b_err = self.builder
+        val err_handle = b_err.emit_call_value(
+            builtin_extra_rt_operand("rt_enum_new", [MirType(kind: MirTypeKind.I32), MirType(kind: MirTypeKind.I32), MirType.i64()], MirType.i64()),
+            [MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(result_id), MirType(kind: MirTypeKind.I32))),
+             MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(1), MirType(kind: MirTypeKind.I32))),
+             mir_operand_copy(err_word)], MirType.i64())
+        b_err.emit_copy(result_local, err_handle)
+        if not b_err.current_block_has_explicit_terminator():
+            b_err.terminate_goto(merge_block)
+        b_err.switch_to_block(merge_block)
+        self.builder = b_err
+        self.mark_runtime_value_local(result_local.id)
+        self.remember_local_hir_type(result_local.id, HirType(kind: HirTypeKind.Result(inner_hir, err_hir), span: receiver.span), 2, 0)
+        result_local

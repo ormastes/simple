@@ -30,17 +30,40 @@ engines, so it is not a parity gap).
 | `Option.or(other)` | 2 | `Option.or` not found | unresolved | cranelift: `select(rt_is_some, recv, other)` |
 | `Option.ok_or(e)` | `Ok`/`Err` | `Option.ok_or` not found | unresolved | cranelift: `rt_enum_new` Ok/Err + select |
 
-## Still OPEN (explicit `pending` rows in the spec)
+## Closed by work/jit-parity2-20261113
 
-1. **`i64.to_hex` (and `to_bin`/`to_oct`)** — JIT has no int->radix-text runtime
-   helper; fixing needs a new `rt_*` symbol with a C twin (rt dual-implementation
-   ratchet). Pure MIR: unresolved.
-2. **`print d.get(k)`** — interpreter prints the bare value (`1`); JIT prints
-   `Option::Some(<undecoded payload>)`. The Dict.get optional representation differs
-   between engines (flat raw vs tagged); needs an owner decision on which shape
-   `Dict.get` returns before either engine changes.
-3. **Pure MIR `Option.or` / `Option.ok_or`** — still "unresolved method call" when the
-   receiver is an `Option<i64>` local; not fixed in this lane.
+- **`i64.to_hex`** (all integer widths): new `rt_i64_to_hex` (Rust `io_print.rs` +
+  C twin `runtime_native.c`, registered in `runtime_symbols.rs`, `runtime_sffi.rs`,
+  `elf_utils.rs`); seed JIT arm in `compile_scalar_parity_method` + HIR STRING stamp;
+  pure MIR lowers it to the same helper in `try_lower_numeric_parity_builtin`. The
+  interpreter already had it (`format!("{:x}", n)`). `to_bin`/`to_oct` are not
+  covered and were not audited rows.
+- **Pure MIR `Option.or` / `Option.ok_or`**: `lower_option_or_builtin`
+  (`builtin_method_extras.spl`), dispatched from the Option-receiver probe in
+  `method_calls_literals.spl`; `ok_or` results are typed `Result<T, E>` so a chained
+  `.is_ok()` resolves. Rows in `numeric_parity_mir_lowering_spec.spl`.
+
+## Still OPEN (explicit `pending` row in the spec): `print d.get(k)`
+
+The interpreter prints the bare value (`1`); the JIT prints
+`Option::Some(<undecoded payload>)`. The engines disagree on what `Dict.get` returns.
+**This needs an owner decision.** Neither engine was changed.
+
+- **Option A: `Dict.get` returns a real tagged `Option<V>` everywhere.** The
+  interpreter prints `Option::Some(1)` / `Option::None`, the same as
+  `text.parse_int()` already does (see the audit row above). The JIT keeps its tagged
+  shape and only fixes the payload decode in its print path. Cost: every interpreter
+  caller that relied on the bare value (`print d.get(k)`, `if d.get(k) == 1`) changes
+  output or needs `?? / unwrap`.
+- **Option B: `Dict.get` returns flat `V`-or-nil.** The JIT unwraps to the raw payload
+  and prints the bare value, matching today's interpreter. Cost: `get` stays the one
+  `V?` method whose value is not an Option. That conflicts with the
+  nil-only-in-unsafe / `None`-in-safe-code rule (ADR-006 panic-free safe code).
+
+**Recommendation: Option A.** The signature is `V?`. `parse_int` already settled
+that an Option prints as `Option::Some(..)`. Safe code is meant to see `None`, not
+nil. Fix the JIT payload decode first, which is a pure bug either way, then move the
+interpreter in a separate change with a census of `d.get(` print/compare sites.
 
 No pure-Simple full-CLI binary is deployed on this host, so pure-MIR fixes are
 verified at the lowering level only (no diagnostic, no `rt_panic` placeholder).

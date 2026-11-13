@@ -1714,6 +1714,9 @@ impl Lowerer {
         if is_int_recv && matches!(method, "sign" | "signum" | "pow") {
             return recv_ty;
         }
+        if is_int_recv && method == "to_hex" {
+            return TypeId::STRING;
+        }
         if matches!(recv_ty, TypeId::F32 | TypeId::F64) && matches!(method, "is_nan" | "is_finite" | "is_infinite") {
             return TypeId::BOOL;
         }
