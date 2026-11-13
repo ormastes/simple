@@ -159,8 +159,17 @@ engine before any edit:
    `simple_runtime::value::pty::reap_pty_child` — after closing the master, a
    bounded 1 s WNOHANG wait for the hangup exit, then SIGKILL to the child's
    session group and reap (pid > 1 guard; the unreaped zombie pins the pid, so
-   no reuse hazard). Both close paths call it. Rust unit test
+   there is no reuse hazard *provided nothing reaps a PTY pid out of band* —
+   the generic `native_process_wait(pid)` facade would, leaving a stale
+   CHILD_TABLE entry; no runtime code does that today, and there is no
+   `waitpid(-1)`/SIGCHLD reaper). Both close paths call it. Rust unit test
    `value::pty::tests::rt_pty_close_reaps_the_child` passes.
+   Perf note (recorded per the perf-regression rule): close now blocks up to
+   ~1 s per pane for a child that ignores SIGHUP (worst case ~6 s if SIGKILL
+   cannot be reaped), serially per pane in smux session teardown
+   (`child_lifecycle.spl` close loops). Interactive shells exit on the hangup
+   immediately. Follow-up if a provider ignores SIGHUP: signal all panes first,
+   then reap once.
 
 Spec change (evidence-backed, assertions unchanged): the two manager-path
 examples now use an argv-tolerant provider stand-in on POSIX (`exec /bin/sh`

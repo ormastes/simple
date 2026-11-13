@@ -250,7 +250,7 @@ mod unix_impl {
         // the compiled lane: simple_runtime::value::pty::reap_pty_child.
         if let Some(pid) = child {
             if !simple_runtime::value::pty::reap_pty_child(pid) {
-                eprintln!("PTY close: child {pid} not reaped after SIGKILL");
+                eprintln!("PTY close: child {pid} could not be reaped");
             }
         }
         closed

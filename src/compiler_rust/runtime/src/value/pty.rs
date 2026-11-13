@@ -841,7 +841,7 @@ pub extern "C" fn native_pty_close(fd: i64) -> RuntimeValue {
         // would close a possibly reused fd number); pid liveness stays truthful.
         if let Some(pid) = child {
             if !reap_pty_child(pid) {
-                eprintln!("PTY close: child {pid} not reaped after SIGKILL");
+                eprintln!("PTY close: child {pid} could not be reaped");
             }
         }
         RuntimeValue::from_bool(closed)
