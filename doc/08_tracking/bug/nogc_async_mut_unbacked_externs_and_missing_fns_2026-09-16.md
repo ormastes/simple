@@ -129,3 +129,10 @@ Remaining open item: the ArcBox atomic weak-acquisition provider follow-up
 pair with a verified layout/allocator contract (`try_inc_strong` CAS with
 acquire ordering, single-owner handoff, implicit-weak lifetime), i.e.
 `src/compiler_rust/**` work outside a pure-Simple lane. No source change.
+
+
+## Addendum 2026-11-13 (lane work/live-p3-l3-20261113 (worktree lp3-wt, base f790f7f266e = origin/release/1.0.0 tip, seed binary build-commit 46fe8f6b6def))
+
+Re-verified at this base: the sosix and multicore bullets now PASS on the
+current seed — `test/01_unit/lib/nogc_async_mut/sosix/posix_spec.spl` 3/3 and
+`tes

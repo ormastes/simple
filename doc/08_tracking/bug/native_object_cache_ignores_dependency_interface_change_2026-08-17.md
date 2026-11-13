@@ -170,3 +170,38 @@ on Windows, so before/after evidence is cheap).
 ## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
 
 **LIVE (confirmed)** — ne17 re-ran the four-scenario gate on the fresh seed: safety direction still violated (after leaf arity change, 4 dependents served stale from cache); the gate now completes in seconds on Windows with llvm-mingw on PATH. Fix lives in the Rust engine per-module cache key — seed-lane grant (cargo).
+
+## Addendum 2026-11-13 (lane work/live-p3-l3-20261113) — GATE REPAIRED, engine verified correct, PASS
+
+The live defect at this base was NOT the engine — it was the gate's fixture.
+\`check-native-object-cache-invalidation.shs\` declared its fixture functions
+with the \`fun\` keyword, which is not a function keyword in the current language:
+the fixture compiled to unresolved bare symbols (\`Unresolved symbol preview:
+dep1, fun, leaf_val\`), so NO real cross-module dependency edges existed and
+there was nothing for an interface edit to invalidate — the measured
+"under-invalidation" was an artifact. The engine's per-module
+\`InterfaceSliceIndex\` key (own source + interface slice of named rows, incl.
+\`fn_arities\` and \`interface_param_defaults\`) is present and CORRECT at this
+base: with a corrected \`fn\` fixture, a leaf arity edit rebuilds the leaf, all
+dependents and the entry while the unrelated module is reused (1 reused /
+6 rebuilt over a 7-module closure), and a body edit rebuilds only the leaf and
+the always-recompiled entry (5/2).
+
+Fix landed in this lane, all four scenarios PASS on the current seed (Windows,
+Rust engine, cranelift, ~176s for the full gate):
+
+| scenario | before (broken fixture) | after (correct fixture) |
+|---|---|---|
+| cold build | 0/6 "OK" (fake) | 0/7 OK |
+| no change | 5/1 MISMATCH | 6/1 OK (entry recompiles by design) |
+| leaf BODY edit | 4/2 MISMATCH | 5/2 OK |
+| leaf INTERFACE edit (arity) | 4/2 MISMATCH (fake safety pass) | 1/6 OK (only unrelated reused) |
+
+Gate changes: \`fun\` -> \`fn\`; added an \`unrelated.spl\` module so the SAFETY
+scenario proves dependents rebuild AND the unrelated module is reused;
+expectations corrected for the entry file, which the engine deliberately always
+recompiles (its main->spl_main renaming depends on \`is_entry\`; the key already
+folds \`is_entry\`, but the conservative exclusion is intentional upstream).
+Cross-worktree warm-hit measurement: still owed (needs a Linux host or a
+non-hung pure-Simple native lane); this record's acceptance gate is now green
+in all four scenarios on the Rust engine.

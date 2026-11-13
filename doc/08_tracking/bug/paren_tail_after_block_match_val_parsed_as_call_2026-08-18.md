@@ -119,3 +119,12 @@ bootstrap lane's); the x25519 spec's unambiguous rewrite from 2026-08-18 stays
 ## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
 
 Concurs with lane ne18: FIXED in the pure-Simple front end (postfix-stop guard on completed EXPR_MATCH; pinning parity spec 4/4 on this lane binary class per the ne18 record). No in-lane change.
+
+## Addendum 2026-11-13 (lane work/live-p3-l3-20261113)
+
+Verified at this base: the pure-Simple fix and its parity guard
+(\`test/01_unit/compiler/parser/paren_tail_after_block_match_val_parity_spec.spl\')
+are in tree. The deployed Rust seed still carries the defect until its next
+rebuild; a seed-parser port was NOT attempted in this lane (the seed
+\`parse_postfix\` twin needs its own careful guard, and no seed rebuild was
+performed here). Grant unchanged: seed lane with cargo access.

@@ -81,3 +81,14 @@ Not fixed in this lane: implementing the three http_server modules is
 substantive feature work owned by the http_server package lane (per this
 record's unblock condition); the 20-minute P3 timebox cannot absorb it and no
 spec was weakened. No source change.
+
+
+## Addendum 2026-11-13 (lane work/live-p3-l3-20261113 (worktree lp3-wt, base f790f7f266e = origin/release/1.0.0 tip, seed binary build-commit 46fe8f6b6def))
+
+Fresh census at this base: `src/lib/http_server/` still does not exist — the
+three modules `async_handler_lifecycle`, `h2_async_dispatch\',
+`tls13_record_adapter` are still absent, so the three http_server specs still
+cannot execute. The two debug-adapter modules remain landed and green
+(coordinator_service_adapter_v1 3/3, legacy_service_adapter_v1 5/5 re-verified
+2026-11-11). Remaining work is substantive http_server package feature work
+under the named owner lane; not attempted here.
