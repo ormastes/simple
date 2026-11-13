@@ -203,3 +203,30 @@ tagged, never skipped.
 - Still open: no compiled program calls `set_profiling` from its in-process XRay host yet
   (the harness and specs do); the OUT lane for containers waits on a backed binary
   (`spl_ordered_key_cmp`, `spl_collection_capture_*` are not in the seed).
+
+#### Step 3c (2026-11-13): ELF read-path timing — correction and fix
+
+Correction: `linker/elf_inspect.spl` is NOT diagnostic-only. Its `elf_read_u{16,32,64}_le`
+are imported by the production object parser `linker/elf_parser.spl:7-10` (symbols,
+relocations, ARM REL addends, section lookup) and by `linker/elf/shared_object.spl:8-10`;
+`elf_parse_header`/`elf_parse_sections` feed every `elf_parse_object` caller
+(`elf_static_link`, `section_gc`, `archive_closure`, `tls_relax`, `smf_group_object_adapter`, ...).
+
+Workload: `test/05_perf/compiler_perf_baseline/elf_inspect_read_probe.spl` over a 1,889,856-byte
+clang `-O1 -g` object of `src/runtime/runtime_native.c`; `parse` = 5 x `elf_parse_object`,
+`read` = one u16+u32+u64 sweep at every 8th offset. Binary: Rust seed
+`bootstrap.generations/8ea37491…/simple` (sha256 `df9dfb057afb7b8f…`, 119,570,696 B,
+2026-11-05 18:12), interpreter lane (the probe's JIT attempt falls back on
+`Cannot infer field type: ElfObject.symbols`), 4G scope, 3 alternating runs each, load 7-20.
+
+| variant | parse wall s | read wall s | max RSS KiB |
+| --- | --- | --- | --- |
+| old (`b795b3f4a26~1`, unrolled local readers) | 10.14 / 10.09 / 9.83 ; 11.60 / 11.32 / 10.59 | 8.90 / 8.92 / 8.90 ; 9.67 / 9.37 / 10.39 | 255,688-271,968 |
+| `b795b3f4a26` (delegate -> `bytes_read_le_at` loop) | 14.97 / 15.33 / 15.02 | 19.12 / 19.38 / 19.61 | 273,724-274,064 |
+| fixed (shared readers unrolled) | 9.03 / 9.31 / 9.34 | 9.79 / 9.48 / 9.64 | 256,544-262,316 |
+
+`b795b3f4a26` regressed parse 1.5x and raw reads 2.2x (+2 MB RSS). Fixed by unrolling
+`elf_image_u{16,32,64}_le_v1` in the shared module (the linker keeps delegating; one extra
+call layer, no loop): parse and reads back at the old level, RSS within run noise.
+Pinned by a new `elf_image_v1_spec` example with 8 distinct byte lanes (a `<< 56` -> `<< 48`
+mutation of the u64 top lane survived the old spec and now fails 12/13).

@@ -3,7 +3,6 @@
 # (std.common / std.nogc_sync_mut trace), the XRay sled emitter and the linker
 # inspector. Bytes in, header / section records and Options out; no I/O, no
 # sentinels: a malformed image answers None or an empty table.
-use std.common.binary_io.{bytes_read_le_at}
 
 pub const ELF_IMAGE_HEADER_BYTES_V1 = 64
 pub const ELF_IMAGE_PHDR_BYTES_V1 = 56
@@ -34,15 +33,23 @@ pub struct ElfImageSectionV1:
     sh_addralign: i64
     sh_entsize: i64
 
-# Fixed-width little-endian readers (ELF field widths), as i64.
+# Fixed-width little-endian readers (ELF field widths), as i64. Unrolled on
+# purpose: the linker's object parser (linker/elf_parser via elf_inspect)
+# reads every symbol / relocation field through these, and the generic
+# bytes_read_le_at loop measured 1.5x (parse) to 2.2x (raw reads) slower on a
+# 1.9 MB object (xray_v1_integration_status, "Step 3c").
 pub fn elf_image_u16_le_v1(bytes: [u8], offset: i64) -> i64:
-    bytes_read_le_at(bytes, offset, 2) as i64
+    (bytes[offset] as i64) | ((bytes[offset + 1] as i64) << 8)
 
 pub fn elf_image_u32_le_v1(bytes: [u8], offset: i64) -> i64:
-    bytes_read_le_at(bytes, offset, 4) as i64
+    (bytes[offset] as i64) | ((bytes[offset + 1] as i64) << 8) |
+        ((bytes[offset + 2] as i64) << 16) | ((bytes[offset + 3] as i64) << 24)
 
 pub fn elf_image_u64_le_v1(bytes: [u8], offset: i64) -> i64:
-    bytes_read_le_at(bytes, offset, 8) as i64
+    (bytes[offset] as i64) | ((bytes[offset + 1] as i64) << 8) |
+        ((bytes[offset + 2] as i64) << 16) | ((bytes[offset + 3] as i64) << 24) |
+        ((bytes[offset + 4] as i64) << 32) | ((bytes[offset + 5] as i64) << 40) |
+        ((bytes[offset + 6] as i64) << 48) | ((bytes[offset + 7] as i64) << 56)
 
 # "\x7fELF", ELFCLASS64, ELFDATA2LSB, and room for the whole header.
 pub fn elf_image_is_elf64_le_v1(bytes: [u8]) -> bool:
