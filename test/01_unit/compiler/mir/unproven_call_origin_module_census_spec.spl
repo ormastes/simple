@@ -1,0 +1,68 @@
+# @req REQ-SSPEC-UNIT
+# @cover src/compiler/50.mir/mir_instruction_graph.spl
+#
+# Phase-3 census (run-19 Stage 2, 2026-11-13) class 5: both MIR shard workers
+# died with SIGABRT in native codegen right after
+# `MIR call target lacks proven source/runtime/foreign origin: callee=env_get`
+# (`mir_call_origin_uses_local_symbols_named`, mir_instruction_support.spl),
+# so 0 of 808 codegen units got a verdict. `mir_unproven_call_origin_sites_v1`
+# names every Unknown-origin callable operand of a module so the driver
+# (`_compile_selected_module`) can fail that MODULE, not the process.
+# Records: unknown_call_origin_panics_codegen_worker_2026-11-12.md,
+# p3_census_mir_classes_2026-11-13.md.
+use std.spec.{describe, it, expect}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common._Attributes.decl_attrs.{DriverManifestAttr, DriverManifestAttrKind, vhdl_hardware_metadata_default}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir_types.{MirType, MirTypeKind, MirConstValue, MirSignature}
+use compiler.mir.mir_instruction_support.{BlockId, MirOperand, MirOperandKind, MirCallOrigin, MirTerminator}
+use compiler.mir.mir_instruction_kinds.{MirInstKind}
+use compiler.mir.mir_instruction_graph.{MirInst, MirBlock, MirFunction, MirModule, mir_unproven_call_origin_sites_v1}
+
+fn _callee(name: text, origin: MirCallOrigin) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Const(
+        MirConstValue.Str(name),
+        MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+    ), call_origin: origin)
+
+fn _call(callee: MirOperand) -> MirInst:
+    MirInst(kind: MirInstKind.Call(None, callee, []), span: None)
+
+fn _function(name: text, instructions: [MirInst]) -> MirFunction:
+    MirFunction(
+        symbol: SymbolId(id: 7), name: name,
+        signature: MirSignature(params: [], return_type: MirType.unit(), is_variadic: false),
+        locals: [],
+        blocks: [MirBlock(id: BlockId(id: 0), label: nil, instructions: instructions, terminator: MirTerminator.Ret(None))],
+        entry_block: BlockId(id: 0), span: Span.empty(),
+        generic_params: [], is_generic_template: false, specialization_of: nil,
+        type_bindings: {}, layout_phase: nil, is_kernel: false, gpu_target: "",
+        gpu_backend_order: "", is_export_c: false, export_name: "",
+        has_driver_manifest_attr: false,
+        driver_manifest_attr: DriverManifestAttr(kind: DriverManifestAttrKind.Driver, driver_class: 0, vendor: 0, device_ids: [], version: "", abi: ""),
+        has_vhdl_metadata: false, vhdl_metadata: vhdl_hardware_metadata_default(),
+        has_fast_math: false, unroll_factor: 0, pipeline_ii: 0, memory_banks: 0,
+        verification_contract: nil)
+
+fn _module(function: MirFunction) -> MirModule:
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[SymbolId(id: 7)] = function
+    MirModule(name: "probe", functions: functions, statics: {}, constants: {}, types: {})
+
+describe "unproven call origin module census":
+    it "names an Unknown-origin call target with its function":
+        val sites = mir_unproven_call_origin_sites_v1(_module(_function("read_home", [_call(_callee("env_get", MirCallOrigin.Unknown))])))
+        expect(sites.len()).to_equal(1)
+        expect(sites[0]).to_equal("MIR call target lacks proven source/runtime/foreign origin: callee=env_get fn=read_home")
+
+    it "accepts proven source, runtime and foreign call targets":
+        val proven = [
+            _call(_callee("local_fn", MirCallOrigin.Source)),
+            _call(_callee("rt_string_len", MirCallOrigin.Runtime)),
+            _call(_callee("dlsym", MirCallOrigin.Foreign)),
+        ]
+        expect(mir_unproven_call_origin_sites_v1(_module(_function("ok", proven))).len()).to_equal(0)
+
+    it "reports an Unknown callable passed as a call argument":
+        val with_arg = MirInst(kind: MirInstKind.Call(None, _callee("apply", MirCallOrigin.Runtime), [_callee("callback", MirCallOrigin.Unknown)]), span: None)
+        expect(mir_unproven_call_origin_sites_v1(_module(_function("hof", [with_arg]))).len()).to_equal(1)
