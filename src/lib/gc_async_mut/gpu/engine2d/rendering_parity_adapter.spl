@@ -6,17 +6,17 @@
 # output), so its framebuffer words are straight ARGB. The caller passes the
 # alpha mode of the lane it read; ENGINE2D_CPU_ALPHA_MODE is that value for CPU.
 #
-# TODO(rendering-parity-gap): pre-existing rendering_parity_adapter_spec.spl
-# (engine2d and browser_engine) still needs engine2d_rendering_parity_execute_composition,
-# simple_web_rendering_parity_observe, simple_web_rendering_parity_paint_payload,
-# simple_web_rendering_parity_stage_records(_from_observation) and
-# SIMPLE_WEB_PARITY_CONVERTER. Not implemented here.
-use std.gc_async_mut.gpu.engine2d.backend.{Engine2DReadback}
+use std.gc_async_mut.gpu.engine2d.backend.{Engine2DReadback, engine2d_readback_with_identity}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{engine2d_draw_ir_adv_composition}
+use common.ui.draw_ir.{DrawIrComposition}
 use common.ui.rendering_parity.{
     BackendEvidence, backend_evidence, backend_evidence_v1,
     pixel_format_descriptor, argb_u32_to_straight_rgba8,
     PIXEL_FORMAT_ARGB_U32, PIXEL_ALPHA_STRAIGHT, PIXEL_ORIGIN_TOP_LEFT,
-    PIXEL_COLOR_SPACE_SRGB, RENDER_STATUS_NOT_RUN
+    PIXEL_COLOR_SPACE_SRGB, RENDER_STATUS_NOT_RUN,
+    RenderingStageRecord, rendering_stage_record_v1, rendering_stage_records_valid_order,
+    stable_bytes_checksum
 }
 
 val ENGINE2D_PARITY_CONVERTER: text = "engine2d-argb32-to-rgba8-v1"
@@ -58,7 +58,7 @@ pub fn engine2d_rendering_parity_backend_name(row: text, api: text) -> Result<te
 fn _invalid_output(reason: text) -> Engine2dParityOutput:
     Engine2dParityOutput(valid: false, reason: reason, rgba: [])
 
-pub fn engine2d_rendering_parity_canonicalize(readback: Engine2DReadback, width: i64, height: i64, requested_backend: text, actual_backend: text, alpha_mode: text) -> Engine2dParityOutput:
+pub fn engine2d_rendering_parity_canonicalize(readback: Engine2DReadback, width: i64, height: i64, requested_backend: text, actual_backend: text, alpha_mode: text = ENGINE2D_CPU_ALPHA_MODE) -> Engine2dParityOutput:
     if requested_backend != actual_backend:
         return _invalid_output("backend-fallback")
     if width <= 0 or height <= 0 or readback.pixel_count != width * height or readback.pixels.len() != width * height:
@@ -77,7 +77,7 @@ pub fn engine2d_rendering_parity_canonicalize(readback: Engine2DReadback, width:
 
 # Evidence for one executed lane. A rejected output, a degraded run or any
 # recorded fallback is a "fail", never a pass.
-pub fn engine2d_rendering_parity_evidence(case_id: text, readback: Engine2DReadback, width: i64, height: i64, requested_backend: text, actual_backend: text, execution_id: text, revision_id: text, generation: i64, fallback_count: i64, degraded: bool, simd_receipt: text, started_at: i64, finished_at: i64, alpha_mode: text) -> Result<Engine2dParityEvidence, text>:
+pub fn engine2d_rendering_parity_evidence(case_id: text, readback: Engine2DReadback, width: i64, height: i64, requested_backend: text, actual_backend: text, execution_id: text, revision_id: text, generation: i64, fallback_count: i64, degraded: bool, simd_receipt: text, started_at: i64, finished_at: i64, alpha_mode: text = ENGINE2D_CPU_ALPHA_MODE) -> Result<Engine2dParityEvidence, text>:
     val out = engine2d_rendering_parity_canonicalize(readback, width, height, requested_backend, actual_backend, alpha_mode)
     val physical = _physical_backend(requested_backend)
     val fell_back = requested_backend != actual_backend
@@ -106,3 +106,48 @@ pub fn engine2d_rendering_parity_evidence(case_id: text, readback: Engine2DReadb
 # Lane that could not run (e.g. no Vulkan device): never a pass.
 pub fn engine2d_rendering_parity_not_run(case_id: text, backend: text, reason: text) -> Result<BackendEvidence, text>:
     backend_evidence(case_id, backend, backend, true, RENDER_STATUS_NOT_RUN, reason)
+
+# Canonical RGBA8 plus the full chained stage list (source stages followed by
+# this lane's raster stage) for one executed composition.
+pub struct Engine2dParityStagedOutput:
+    rgba8: [u8]
+    checksum: u64
+    stages: [RenderingStageRecord]
+    artifact_id: text
+
+pub struct Engine2dParityComposition:
+    evidence: Engine2dParityEvidence
+    output: Engine2dParityStagedOutput
+
+# Execute one already-observed Draw IR composition on exactly the requested
+# backend. The HTML is never re-rendered, and an unavailable backend (for
+# example Vulkan without a device) is an Err for the caller to record as
+# not_run -- never a silent fallback and never a pass.
+pub fn engine2d_rendering_parity_execute_composition(case_id: text, composition: DrawIrComposition, stages: [RenderingStageRecord], width: i64, height: i64, backend: text, execution_id: text, revision_id: text, artifact_id: text, degraded: bool, simd_receipt: text, started_at: i64, finished_at: i64) -> Result<Engine2dParityComposition, text>:
+    if width <= 0 or height <= 0:
+        return Err("engine2d parity: non-positive viewport")
+    if stages.len() == 0:
+        return Err("engine2d parity: no source stage records")
+    if not rendering_stage_records_valid_order(stages):
+        return Err("engine2d parity: source stage records are not a contiguous chain")
+    val created = Engine2D.create_requested_backend(width as i32, height as i32, backend)
+    if created.is_err():
+        return Err("backend unavailable: " + backend + ": " + created.unwrap_err())
+    var engine = created.unwrap()
+    engine.clear(0u32)
+    val result = engine2d_draw_ir_adv_composition(engine, composition, false)
+    val actual = engine.backend_name()
+    engine.shutdown()
+    val readback = engine2d_readback_with_identity(result.pixels, result.readback_source, result.backend_handle, result.device_identity)
+    val fallback_count = if result.fallback_required: 1 else: 0
+    val evidence = engine2d_rendering_parity_evidence(
+        case_id, readback, width, height, backend, actual, execution_id, revision_id,
+        composition.generation, fallback_count, degraded, simd_receipt, started_at, finished_at)?
+    val out = engine2d_rendering_parity_canonicalize(readback, width, height, backend, actual)
+    if not out.valid:
+        return Ok(Engine2dParityComposition(evidence: evidence, output: Engine2dParityStagedOutput(rgba8: [], checksum: 0u64, stages: stages, artifact_id: artifact_id)))
+    val sum = stable_bytes_checksum(out.rgba)
+    val raster = rendering_stage_record_v1(
+        case_id, backend, "raster", stages.len(), "framebuffer", "", stages[stages.len() - 1].output_checksum, sum,
+        ENGINE2D_PARITY_CONVERTER, 1, degraded, false)?
+    Ok(Engine2dParityComposition(evidence: evidence, output: Engine2dParityStagedOutput(rgba8: out.rgba, checksum: sum, stages: stages + [raster], artifact_id: artifact_id)))
