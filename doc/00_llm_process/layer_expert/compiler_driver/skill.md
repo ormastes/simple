@@ -319,3 +319,20 @@ age-based. Do not reintroduce `file_lock` in `src/app/compiler_entrypoint/`,
 `src/lib/scv/compile_*.spl` or the workaround store: the guard
 `scripts/check/check-no-refresh-file-lock.shs` fails closed on it. See
 `doc/05_design/compiler/scv/lockless_refresh.md`.
+
+## Library unit plan v1 (2026-11-13, slice 1 of library unit build + link)
+
+- Design: `doc/05_design/compiler/incremental_build/library_unit_build_and_link.md`.
+  Module: `src/compiler/80.driver/driver_build/library_unit_plan_v1.spl`
+  (`library_unit_decl_parse_v1`, `library_unit_path_normalize_v1`,
+  `library_unit_plan_v1`, `library_unit_cache_key_v1`); spec
+  `test/01_unit/compiler/80.driver/library_unit_plan_v1_spec.spl`. Pure
+  functions, NOT wired into native-build; imported directly, not via `__init__`.
+- Planner is Kahn-by-levels with explicit cycle `Err`; `BuildGraph.topological_order`
+  (parallel.spl) tolerates cycles silently, so it is not reused for planning.
+- Measured manifest drift the planner fails closed on: `src/lib` → `../../compiler_rust`
+  (manifest lives at `src/compiler_rust`), `src/app` and `src/compiler` → `../../rust`
+  (nonexistent). Fix those lines before any flag turns the unit path on.
+- Trap: `bin/simple lint` on the seed reports `error[W-ANY-NOTRUN]` ("no check
+  worker? set SIMPLE_BINARY") unless `SIMPLE_BINARY=<binary>` is exported; two-arm
+  `Option` matches draw `non_exhaustive_match` (same as `project.spl`), left as is.
