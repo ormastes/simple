@@ -5,7 +5,7 @@
   (two Vulkan devices: 0 = NVIDIA GB10, 1 = llvmpipe LLVM 20.1.2)
 - Found by: PR #8765 (`engine2d_vulkan_software_showcase_frame_divergence_2026-07-02.md`,
   "3 of 10 NVIDIA spec processes" fail with a bare `runtime-init`)
-- Status: see § Fix
+- Status: error surfaced and bounded retry landed; residual documented in § Evidence (after)
 
 ## Symptom
 
@@ -75,3 +75,48 @@ Ruled out by the table above:
 `test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_vulkan_rect_list_spec.spl`
 is red on this host serially (`expected 0 to equal 1`, 0 of 1 passed) with no
 init failure in its log. It does not share this cause.
+
+## Fix
+
+1. **Error surfaced** (`gpu.rs`, `vulkan_session.spl`): every failure point of
+   `rt_vulkan_init_fn` records step + `VkResult` in `VK_INIT_ERROR`, prints it
+   to stderr, and `rt_vulkan_get_last_error` returns it when `VK_STATE` is
+   `None`. `VulkanSession.init_error` is now `runtime-init: <step>: <VkResult>`.
+   The second `vkEnumeratePhysicalDevices` result is also checked now.
+2. **Bounded retry** (`vk_create_device_with_retry`, `gpu.rs`): `vkCreateDevice`
+   is retried only on `VK_ERROR_INITIALIZATION_FAILED`, at most 4 more times
+   after 50/100/200/400 ms (750 ms total). Every failed attempt and a late
+   success are logged. Exhaustion returns the error: no CPU fallback, no skip,
+   specs stay fail-closed. The success path makes one call and never sleeps.
+
+Red -> green for the helper (`cargo test --release -p simple-compiler --lib
+vk_create_device_retry`): 2 passed / 2 failed on the single-attempt stub
+(commit "red tests"), 4 passed / 0 failed with the retry.
+
+## Evidence (after), same spec and command
+
+| condition | spec processes failed | retries |
+|---|---|---|
+| 4 concurrent loops x 8, NVIDIA (the red condition) | **2 of 32** (was 11 of 32 and 20 of 32) | 28 inits hit -3 on attempt 1; 26 recovered (8 on attempt 2, 8 on 3, 6 on 4, 4 on 5); 2 exhausted all 5 |
+| 2 concurrent loops x 10, NVIDIA | 0 of 20 | 0 |
+| serial, unit spec | 0 of 20 | 0 |
+| serial, system spec | 0 of 10 | 1 init needed 2 retries (succeeded on attempt 3) while another lane used the GPU |
+
+Residual, stated rather than hidden: under four concurrent device-creating
+processes 2 of 32 still fail after 750 ms, with the full error text. The bound
+was deliberately not raised. Zero first-attempt failures at 2-way concurrency
+and persistent ones at 4-way, with a 21 GB CUDA server process resident on the
+same GPU throughout, point at a driver-side limit on concurrent clients rather
+than a pure create/create race; a longer wait would only trade a clear failure
+for a slow one. Running GPU specs serially (the documented rule for this host)
+is unaffected.
+
+Not changed: the compiled runtime's `rt_vulkan_init`
+(`src/compiler_rust/runtime/src/vulkan_graphics_runtime_core.rs`, ash-based
+`VulkanDevice::new_default`). It already records its error text via
+`state.set_error`, has no retry, and was not exercised by these specs (they run
+through the interpreter extern), so its behaviour under the same contention is
+unmeasured.
+
+`backend_vulkan_rect_list_spec.spl` is unchanged by this fix: still
+`expected 0 to equal 1` (0 of 1), no init failure and no retry in its log.

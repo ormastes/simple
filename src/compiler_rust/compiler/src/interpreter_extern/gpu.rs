@@ -4130,8 +4130,8 @@ pub fn rt_vulkan_init_fn(_args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Bool(true))
 }
 
-/// Waits between `vkCreateDevice` attempts, in ms. Bounded: 5 attempts, 775 ms.
-const VK_CREATE_DEVICE_RETRY_DELAYS_MS: [u64; 4] = [25, 50, 100, 600];
+/// Waits between `vkCreateDevice` attempts, in ms. Bounded: 5 attempts, 750 ms.
+const VK_CREATE_DEVICE_RETRY_DELAYS_MS: [u64; 4] = [50, 100, 200, 400];
 
 /// `vkCreateDevice` with a bounded retry on `VK_ERROR_INITIALIZATION_FAILED`.
 ///
@@ -4146,8 +4146,24 @@ fn vk_create_device_with_retry(
     mut create: impl FnMut() -> vulkan_dlopen::VkResult,
     mut sleep_ms: impl FnMut(u64),
 ) -> (vulkan_dlopen::VkResult, u32) {
-    let _ = &mut sleep_ms;
-    (create(), 1)
+    const VK_ERROR_INITIALIZATION_FAILED: vulkan_dlopen::VkResult = -3;
+    let mut attempts = 1u32;
+    let mut r = create();
+    for delay in VK_CREATE_DEVICE_RETRY_DELAYS_MS {
+        if r != VK_ERROR_INITIALIZATION_FAILED {
+            break;
+        }
+        eprintln!(
+            "[vulkan] vkCreateDevice attempt {attempts} failed: VK_ERROR_INITIALIZATION_FAILED (-3); retrying in {delay} ms"
+        );
+        sleep_ms(delay);
+        attempts += 1;
+        r = create();
+    }
+    if attempts > 1 && r == 0 {
+        eprintln!("[vulkan] vkCreateDevice succeeded on attempt {attempts}");
+    }
+    (r, attempts)
 }
 
 #[cfg(test)]
