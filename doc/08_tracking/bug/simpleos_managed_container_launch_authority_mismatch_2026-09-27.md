@@ -55,3 +55,12 @@ authenticated FS-exec handoff, and rejects wrong/replayed tokens, mismatched
 image or policy, missing task, and stale exit. Run the live macOS QEMU guest
 fixture with the pinned image and preserve boot, task-exit, and teardown
 receipts. The current Mac host lacks that image, so this issue remains open.
+
+2026-11-13 (Linux aarch64, Rust seed at release `517f20ae777`,
+seed-diagnostic): `managed_workload_launch_spec.spl` 2/5 — the three live
+launches return `-13`; the bytes-mismatch and changed-binding rejections pass.
+The same `-13` is now the only failure left in `container_runtime_spec.spl`
+and `macos_simpleos_guest_dispatch_v1_spec.spl` after two unrelated defects
+were fixed (missing `ContainerWorld.image_digest_of`; non-congruent PT_LOAD
+fixtures). See the 2026-11-13 section of
+`doc/08_tracking/todo/native_macos_simple_container_2026-09-27.md`.
