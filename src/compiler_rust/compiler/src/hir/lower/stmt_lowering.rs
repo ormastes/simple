@@ -2163,7 +2163,7 @@ impl Lowerer {
     /// tagged word by name + type); anything else (an unresolved
     /// `Option<ANY>`) keeps the subject type so the value is not retyped on a
     /// guess. `None` for any subject that is not this Option form.
-    fn optional_enum_payload_inner(&self, subject_ty: TypeId) -> Option<TypeId> {
+    pub(crate) fn optional_enum_payload_inner(&self, subject_ty: TypeId) -> Option<TypeId> {
         let Some(HirType::Enum { name, variants, .. }) = self.module.types.get(subject_ty) else {
             return None;
         };

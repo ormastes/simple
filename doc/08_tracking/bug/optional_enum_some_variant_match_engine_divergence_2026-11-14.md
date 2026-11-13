@@ -87,7 +87,32 @@ an irrefutable presence test before this change.
 
 CENSUS_PLACEHOLDER
 
+## Review (independent Opus reviewer)
+
+- **P1, fixed before landing:** the first HIR version emitted the payload test
+  for every subject. For an UNTYPED subject holding a user enum that declares its
+  own `Some` (`enum Opt: Some(i64) | None | Missing`, `fn u(o)`), the raw slot is
+  `Opt.Some(5)` itself, so `case Some(5):` became `Opt.Some(5) == 5` and the JIT
+  answered `1 1 1` for `u(Opt.Some(5)) u(Opt.Some(6)) u(Opt.Missing)` (base JIT
+  `55 55 55`, interpreter `55 1 99`). `optional_some_condition` now emits the
+  payload test only for a statically optional subject whose payload type is not
+  an enum declaring `Some`/`None`; the rest keep the old presence-only test. The
+  spec pins `u(Opt.Some(5)) == 55` on both engines.
+- **P3, intended:** the interpreter now matches `case Some(x):` against a bare
+  enum in a NON-optional slot too (`fn n(k: Kind)`, `case Some(x): 7` before
+  `case I8: 1` answers 7, was 1). The JIT already answered 7, and this is the
+  same flat-Option rule the interpreter applies to bare scalars.
+
 ## Residuals (open)
+
+- Untyped (ANY) subjects stay presence-only on the JIT: `fn b(k)` with
+  `case Some(I8): 1` / `case Some(F32): 2` answers 1 for `Kind.F32` (interpreter
+  2). With no slot type, `I8` lowers as a binder. Pre-existing, not changed.
+- `Opt?` where `Opt` declares its own `Some`, and the untyped `Opt` case above:
+  the JIT still matches the first `Some(...)` arm for any value (interpreter is
+  name-keyed). Pre-existing.
+- `case Some(x)` over `Ok`/`Err` values still matches on the JIT (interpreter
+  refuses). Pre-existing.
 
 - `evaluate_module` does not reset thread-local interpreter state itself; every
   in-process caller must clear it (the integration tests do; the

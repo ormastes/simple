@@ -987,6 +987,13 @@ impl Lowerer {
     /// `subpattern_condition_typed`. Presence alone made the first
     /// `Some(I8)` arm match `Kind.F32` / `Kind.Wrap(7)` in a `Kind?` slot.
     /// Shared by the statement and expression forms.
+    ///
+    /// The payload test is emitted only when the subject is statically a
+    /// `T?` / `Option<T>` whose payload type is not itself an enum declaring
+    /// `Some`/`None`. For an untyped (ANY) subject, or an `Opt?` where `Opt`
+    /// owns `Some`, the raw slot would be the user enum itself (e.g.
+    /// `Opt.Some(5)`, not `5`) while the binder reads its payload, so those
+    /// keep the presence-only test they had before.
     /// optional_enum_some_variant_match_engine_divergence_2026-11-14
     pub(crate) fn optional_some_condition(
         &mut self,
@@ -995,12 +1002,21 @@ impl Lowerer {
         subject_ref: HirExpr,
         ctx: &mut FunctionContext,
     ) -> HirExpr {
+        let inner_ty = self
+            .optional_enum_payload_inner(subject_ty)
+            .or_else(|| self.module.types.optional_inner(subject_ty));
+        let inner_owns_option_variant = inner_ty.is_some_and(|t| {
+            matches!(self.module.types.get(t), Some(HirType::Enum { variants, .. })
+                if variants.iter().any(|(n, _)| n == "Some" || n == "None"))
+        });
         let deeper = match pattern {
             Pattern::Enum {
                 name,
                 payload: Some(inner),
                 ..
-            } => self.nested_payload_condition(name, "Some", subject_ty, &subject_ref, inner, ctx),
+            } if inner_ty.is_some() && !inner_owns_option_variant => {
+                self.nested_payload_condition(name, "Some", subject_ty, &subject_ref, inner, ctx)
+            }
             _ => None,
         };
         let presence = HirExpr {

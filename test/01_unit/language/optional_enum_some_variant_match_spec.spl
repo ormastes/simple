@@ -128,6 +128,25 @@ fn main():
     print(ob(true) + " " + ob(false) + " " + ob(nil))
 """
 
+# Review guard: an UNTYPED subject holding a user enum that declares its own
+# `Some` keeps matching `case Some(5):` on `Opt.Some(5)`. A payload test over the
+# raw slot compared the whole `Opt.Some(5)` with 5 and lost the match on the JIT.
+val OWN_SOME = r"""enum Opt:
+    Some(i64)
+    None
+    Missing
+
+fn u(o) -> i64:
+    match o:
+        case Some(5): return 55
+        case Some(x): return 1
+        case _: return 99
+    return 0
+
+fn main():
+    print(u(Opt.Some(5)))
+"""
+
 fn expect_both(name: text, body: text, want: text):
     val (iout, ierr, irc) = run_in("interpret", name + "_interp", DECLS + body)
     assert_equal(irc, 0)
@@ -151,3 +170,11 @@ describe "case Some(<variant>) over a Kind? holding a bare enum value":
 
     it "tests scalar literal payloads instead of taking the first Some arm":
         expect_both("lits", LITS, "zero seven n9 none seven\nhi s:yo none\nT F none")
+
+    it "keeps Some(5) matching an untyped enum that declares its own Some":
+        val (iout, ierr, irc) = run_in("interpret", "own_interp", OWN_SOME)
+        assert_equal(irc, 0)
+        assert_equal(iout, "55")
+        val (jout, jerr, jrc) = run_in("jit", "own_jit", OWN_SOME)
+        assert_equal(jrc, 0)
+        assert_equal(jout, "55")
