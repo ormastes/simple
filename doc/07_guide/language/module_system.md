@@ -171,12 +171,16 @@ the same rule:
 |---|---|---|
 | same directory as `m` | allowed (compatibility exception) | allowed |
 | test file | **allowed** (owner decision 2026-11-13: "test is special, can access") | allowed |
-| any other file (`src/**`, `scripts/**`, `examples/**`) | error `private fn ... is not visible to ...`, unless `<path>\|<name>` is frozen in `scripts/check/private_import_baseline.txt` (then a `[visibility-warning]`) | same |
+| any other file (`src/**`, `scripts/**`, `examples/**`, outside a `/test/` component) | error `private fn ... is not visible to ...`, unless `<path>\|<name>` is frozen in `scripts/check/private_import_baseline.txt` (then a `[visibility-warning]`) | same |
 
 A **test file** is a path that starts with `test/` or contains a `/test/`
 component (after `\` -> `/`, leading `./` stripped) — the seed's
-`is_test_caller`, shared by both rules. Note this also matches
-`src/app/test/**`. A directory whose name merely contains `test` (for example
+`is_test_caller`, shared by both rules. Note this also matches any product
+path with a `/test/` component (`src/app/test/**`, `src/**/test/**`,
+`examples/**/test/**`; ~325 tracked files on 2026-11-13), and - because the
+seed sees absolute paths - every file of a checkout that itself lives under a
+`/test/` directory. Narrowing it to a repo-relative `test/` prefix (in both
+rules and the HIR mirror) is an open owner question. A directory whose name merely contains `test` (for example
 `contest/`) is not a test directory. Only the importer is exempt: the
 module's fn stays private, and product code importing it is still rejected.
 In the self-hosted compiler the non-baselined case is the staged warning

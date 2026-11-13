@@ -45,13 +45,22 @@ Branch `work/test-private-import-access-20261113` on `release/1.0.0` (base
 - **Seed:** `check_private_use_names` returns early when
   `is_test_caller(importer)` - the exact predicate rule 2 already used (path
   starts with `test/` or contains `/test/`, after `\`->`/` and leading `./`
-  stripped). Rules 1 and 2 now agree. It also matches `src/app/test/**`
-  (inherited from rule 2, unchanged here).
+  stripped). Rules 1 and 2 now agree. **Open owner question (review P1):**
+  the shared predicate also exempts ~325 tracked product `.spl` files with a
+  `/test/` component (102 in `src/app/test/`, `src/**/debug/formats/test/`,
+  `src/compiler/70.backend/linker/test/`, `src/os/kernel/fs/test/`,
+  `examples/**/test/`), and - since the seed passes absolute paths - every
+  file of a checkout located under a `/test/` directory. Kept as-is because
+  the brief required the exact rule-2 definition; narrowing both rules to a
+  repo-relative `test/` prefix is the follow-up.
 - **Self-hosted:** `private_fn_import_denied` (HIR,
   `module_import_resolution.spl`) returns early on
   `private_import_is_test_importer`, a line-for-line mirror of `is_test_caller`.
 - Only the importer side is exempt; no fn was made `pub`; product importers
-  (`src/`, `scripts/`, `examples/`, a `contest/` dir) are still rejected.
+  (`src/`, `scripts/`, `examples/` outside a `/test/` component, a `contest/`
+  dir, and a `src/` importer of a private fn defined under `test/`) are still
+  rejected. The seed fixtures live under `get_temp_dir()`; a `TMPDIR` with a
+  `/test/` component would exempt the negative examples.
 - Of the 2,697 remaining rule-1 rows above, the 1,924 with a `test/**`
   importer stop failing.
 
@@ -80,7 +89,7 @@ loads; `contest/` and `app/` importers still get the diagnostic) and
 `private_fn_import_cross_module_visibility_spec.spl` (HIR, strict mode:
 `test/...` and `/repo/test/...` importers silent, `src/contest/...` still
 `E-HIR-PRIVATE-IMPORT-001`) - 8/11 -> 9/11 (the test-importer example
-red -> green) and 8/10 -> 10/10. Rust unit test
+red -> green) and 8/10 -> 10/10 (12/12 after the review added `./`, backslash and test-defined-provider probes). Rust unit test
 `test_importer_is_exempt_but_src_importer_still_errors` fails without the
 early return and passes with it. Neighbouring loader specs unchanged:
 `private_fn_call_visibility_spec` 3/3, `module_qualified_type_registry_spec`

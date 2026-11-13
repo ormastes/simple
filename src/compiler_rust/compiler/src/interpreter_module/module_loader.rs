@@ -2795,6 +2795,7 @@ mod private_fn_visibility_tests {
         assert!(check("test/01_unit/app/lib_mod_spec.spl").is_ok());
         assert!(check("/repo/test/system/lib_mod_spec.spl").is_ok());
         assert!(check("test\\01_unit\\app\\lib_mod_spec.spl").is_ok());
+        assert!(check("./test/01_unit/app/lib_mod_spec.spl").is_ok());
         assert!(check("zz_fx/src/app/other/main.spl").is_err());
         assert!(check("zz_fx/src/app/contest/main.spl").is_err());
         assert!(check("scripts/check/tool.spl").is_err());
