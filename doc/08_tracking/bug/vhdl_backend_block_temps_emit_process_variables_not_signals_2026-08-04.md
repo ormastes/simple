@@ -217,3 +217,42 @@ requiring a human to confirm the shrink is benign rather than auto-passing —
 which this note does. The remaining 3079 unbaselined + 965 baselined
 offenders are pre-existing and untouched by this lane.
 
+
+## Re-verification 2026-11-13 (lane vhdl-20261113, base 6a5f8e708f2, worktree /c/dev/vhdl-wt)
+
+Ran the exact spec once on the refreshed in-worktree seed (`bin/simple.exe`,
+37,622,272 B, `</dev/null`):
+
+```
+SPEC FILE VERDICT: test/02_integration/compiler/vhdl_backend_e2e_spec.spl
+  outcome=ERROR declared>=33 executed=41 passed=28 failed=13 skipped=0
+```
+
+Current failing 13 (all the same `:=`-vs-`<=` contract-divergence family this
+doc identifies, plus struct/array aggregate expectations):
+
+1. compiles simple adder to valid VHDL entity
+2. compiles local copies to signal assignments
+3. compiles branch-local computations inside combinational process
+4. compiles branch-local VHDL resize slice and concat inside combinational process
+5. compiles branch-local VHDL signal and variable assignments inside combinational process
+6. compiles a checked binary op and integer casts
+7. compiles typed bool casts and shift counts
+8. compiles remainder and bitwise not operations
+9. compiles switch targets with computations inside combinational process
+10. compiles struct aggregate to named record assignment
+11. compiles branch-local struct aggregates inside combinational process
+12. compiles struct field get and set
+13. compiles array aggregate assignment
+
+**Evidence against the "resolved-disappeared" bug_db row (row 5647):** that
+status does not match observed reality at this tip — 13/41 examples still fail
+on exactly the contract divergence this doc documents. Trend is improving
+(18/33 pass on 2026-08-17 → 11/41 on 2026-09-13 → 28/41 now), but the backend
+still hoists block-level MIR temps into `comb: process(all)` as `variable` with
+`:=` where the spec expects architecture-level signals with `<=`. **The
+divergence remains OPEN** and still requires the backend-owner design decision
+this doc's "Why not fixed now" section describes; it was not made in this lane
+(flip + full GHDL revalidation of 41 examples is out of a 25-minute lane's
+authority and timebox). DB-lane note: row 5647's "resolved-disappeared" status
+should be re-examined against this evidence.
