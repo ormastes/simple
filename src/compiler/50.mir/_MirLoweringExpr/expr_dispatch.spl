@@ -4198,7 +4198,12 @@ impl MirLowering:
         # the flag-aware, tagged-in/tagged-out rt_index_get. The result stays a
         # tagged runtime value; unsafe code owns decoding it. Typed arrays,
         # tuples, raw pointers and GPU paths are untouched.
-        if self.is_any_runtime_index_base(base_local, runtime_array, is_tuple_base, raw_pointer_base):
+        # A positional `t.N` read is a native tuple word read even when the
+        # receiver is erased to `Any` (json values are `(tag, payload)`
+        # tuples passed as `value: any`): rt_index_get only knows registered
+        # arrays/strings/dicts and answered nil for the raw tuple block.
+        val tuple_positional_read = self.index_is_tuple_positional(base, index)
+        if not tuple_positional_read and self.is_any_runtime_index_base(base_local, runtime_array, is_tuple_base, raw_pointer_base):
             return self.lower_any_runtime_index_get(base_local, index_local)
         if not gpu_raw_pointer and not typed_u8_runtime_read:
             self.emit_bounds_check_for_index(base.type_, base_local, index_local)
@@ -4427,6 +4432,18 @@ impl MirLowering:
         if val base_hir_type = self.find_local_hir_type(base_local.id):
             return base_hir_type.kind == HirTypeKind.Any
         false
+
+    fn index_is_tuple_positional(base: HirExpr, index: HirExpr) -> bool:
+        """True for the HIR desugar of positional `t.N` (expression_core.spl
+        numeric-field branch): its synthesized IntLit index carries the base's
+        own span. A source subscript `x[N]` literal has its own token span, so
+        it never matches. Synthesized nodes often carry `Span.empty()` on both
+        base and index, so an empty base span never counts as positional."""
+        if self.tuple_index_literal(index) < 0:
+            return false
+        if base.span.end <= base.span.start:
+            return false
+        index.span.start == base.span.start and index.span.end == base.span.end
 
     me lower_any_runtime_index_get(base_local: LocalId, index_local: LocalId) -> LocalId:
         val tagged_index = self.box_runtime_value(index_local)
