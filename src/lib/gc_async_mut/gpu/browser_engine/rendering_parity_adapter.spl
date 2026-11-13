@@ -1,17 +1,129 @@
 # Simple Web rendering-parity adapter: software (CPU) raster of an HTML fixture
 # -> straight RGBA8, compared against an expected frame with the exact comparator.
 use std.gc_async_mut.gpu.browser_engine.browser_engine2d_bridge.{create_software_browser_renderer}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{simple_web_layout_render_html_draw_ir_result}
+use common.ui.draw_ir.{DrawIrComposition, DrawIrRect}
 use common.ui.rendering_parity.{
     RenderComparison, compare_rgba8, pixel_format_descriptor, argb_u32_to_straight_rgba8,
     PIXEL_FORMAT_ARGB_U32, PIXEL_ALPHA_STRAIGHT, PIXEL_ORIGIN_TOP_LEFT,
-    PIXEL_COLOR_SPACE_SRGB, RENDER_COMPARE_EXACT
+    PIXEL_COLOR_SPACE_SRGB, RENDER_COMPARE_EXACT,
+    RenderingStageRecord, rendering_stage_record_v1, stable_bytes_checksum
 }
 
 val SIMPLE_WEB_PARITY_RASTER_LANE: text = "simple_web_software"
 # The software raster is the Engine2D CPU path, which composites in straight alpha.
 val SIMPLE_WEB_SOFTWARE_ALPHA_MODE: text = PIXEL_ALPHA_STRAIGHT
-# TODO(rendering-parity-gap): observe, paint_payload, stage_records(_from_observation) and
-# SIMPLE_WEB_PARITY_CONVERTER (used by the pre-existing rendering_parity_adapter_spec.spl) are not implemented.
+val SIMPLE_WEB_PARITY_CONVERTER: text = "simple-web-stage-v1"
+
+# One production render observed at every semantic stage. The payloads are
+# deterministic length-prefixed text dumps of the real DOM arena, computed
+# styles, layout boxes and Draw IR composition; `composition` is the exact
+# value a backend executes, so no lane re-renders the HTML.
+pub struct SimpleWebParityObservation:
+    node_count: i64
+    command_count: i64
+    dom_payload: text
+    style_payload: text
+    layout_payload: text
+    paint_payload: text
+    degraded: bool
+    composition: DrawIrComposition
+
+fn _lp(s: text) -> text:
+    s.len().to_string() + ":" + s
+
+fn _rect_payload(label: text, r: DrawIrRect) -> text:
+    if not r.present:
+        return ";" + label + "=none"
+    ";" + label + "=" + r.x.to_string() + "," + r.y.to_string() + "," + r.width.to_string() + "," + r.height.to_string()
+
+# Canonical paint-stage text for a Draw IR composition: every field that changes
+# what a backend draws, including the semantic clip geometry.
+pub fn simple_web_rendering_parity_paint_payload(composition: DrawIrComposition) -> text:
+    var out = "schema=paint-v1;backend=" + composition.backend_target
+    for batch in composition.batches:  # cpu-lane-loop-ok: one pass over an already-built composition to serialize it
+        out = out + "\nbatch(" + _lp(batch.batch_id) + ")"
+        for c in batch.commands:  # cpu-lane-loop-ok: one pass over an already-built composition to serialize it
+            out = out + "\n" + c.kind + "(" + _lp(c.component_id) + ")"
+            out = out + ";x=" + c.x.to_string() + ";y=" + c.y.to_string()
+            out = out + ";w=" + c.width.to_string() + ";h=" + c.height.to_string()
+            out = out + ";color=" + c.color.to_string()
+            out = out + ";text(" + _lp(c.text_value) + ")"
+            out = out + _rect_payload("border", c.border_rect)
+            out = out + _rect_payload("content", c.content_rect)
+            out = out + _rect_payload("hit", c.hit_rect)
+            if c.clip_rect.present:
+                out = out + ";clip_x=" + c.clip_rect.x.to_string() + ";clip_y=" + c.clip_rect.y.to_string()
+                out = out + ";clip_width=" + c.clip_rect.width.to_string() + ";clip_height=" + c.clip_rect.height.to_string()
+            else:
+                out = out + ";clip=none"
+            out = out + ";parent(" + _lp(c.parent_id) + ");image(" + _lp(c.image_uri) + ")"
+            for p in c.computed_style:  # cpu-lane-loop-ok: per-command style props, bounded by the command
+                out = out + ";style(" + _lp(p.key) + "=" + _lp(p.value) + ")"
+            if c.has_transform:
+                out = out + ";transform=" + c.rotation_deg_milli.to_string() + "," + c.scale_x_pct.to_string() + "," + c.scale_y_pct.to_string()
+    out
+
+# Observe the production Simple Web pipeline once: parse -> cascade -> layout -> Draw IR.
+pub fn simple_web_rendering_parity_observe(html: text, width: i64, height: i64) -> SimpleWebParityObservation:
+    val result = simple_web_layout_render_html_draw_ir_result(html, width as i32, height as i32)
+    val index = result.hit_index
+    var dom = "schema=dom-v1"
+    var style = "schema=style-v1"
+    var layout = "schema=layout-v1"
+    var i = 0
+    while i < index.nodes.len():  # cpu-lane-loop-ok: one iteration per DOM node to serialize the observed arena
+        val n = index.nodes[i]
+        dom = dom + "\n" + i.to_string() + ";parent=" + n.parent.to_string() + ";tag(" + _lp(n.tag) + ")"
+        if n.id_attr != "":
+            dom = dom + ";id(" + _lp(n.id_attr) + ")"
+        if n.class_attr != "":
+            dom = dom + ";class(" + _lp(n.class_attr) + ")"
+        if n.tag == "#text":
+            dom = dom + ";text(" + _lp(n.text_data) + ")"
+        if i < index.styles.len():
+            val s = index.styles[i]
+            style = style + "\n" + i.to_string() + ";bg=" + s.bg.to_string() + ";fg=" + s.fg.to_string()
+            style = style + ";font=" + s.font_size.to_string() + ";w=" + s.width_px.to_string() + ";h=" + s.height_px.to_string()
+            style = style + ";pad=" + s.pad_l.to_string() + "," + s.pad_t.to_string() + "," + s.pad_r.to_string() + "," + s.pad_b.to_string()
+            style = style + ";border=" + s.border_w.to_string()
+        if i < index.boxes.bx.len() and i < index.boxes.by.len() and i < index.boxes.bw.len() and i < index.boxes.bh.len():
+            layout = layout + "\n" + i.to_string() + ";box=" + index.boxes.bx[i].to_string() + "," + index.boxes.by[i].to_string() + "," + index.boxes.bw[i].to_string() + "," + index.boxes.bh[i].to_string()
+        i = i + 1
+    var commands = 0
+    for batch in result.composition.batches:  # cpu-lane-loop-ok: counts commands of one built composition
+        commands = commands + batch.commands.len()
+    SimpleWebParityObservation(
+        node_count: index.nodes.len(), command_count: commands,
+        dom_payload: dom, style_payload: style, layout_payload: layout,
+        paint_payload: simple_web_rendering_parity_paint_payload(result.composition),
+        degraded: result.render_degraded, composition: result.composition)
+
+fn _payload_checksum(payload: text) -> u64:
+    stable_bytes_checksum(payload.bytes())
+
+# Four chained stage records (dom, style, layout, paint) for one observation.
+# Each stage consumes the previous stage's output checksum; the first consumes the source HTML.
+pub fn simple_web_rendering_parity_stage_records_from_observation(case_id: text, backend: text, html: text, observed: SimpleWebParityObservation) -> Result<[RenderingStageRecord], text>:
+    val names = ["dom", "style", "layout", "paint"]
+    val payloads = [observed.dom_payload, observed.style_payload, observed.layout_payload, observed.paint_payload]
+    var records: [RenderingStageRecord] = []
+    var prev = stable_bytes_checksum(html.bytes())
+    var i = 0
+    while i < 4:  # cpu-lane-loop-ok: fixed four semantic stages
+        val out = _payload_checksum(payloads[i])
+        val rec = rendering_stage_record_v1(
+            case_id, backend, names[i], i, "document", payloads[i], prev, out,
+            SIMPLE_WEB_PARITY_CONVERTER, 1, observed.degraded, false)?
+        records = records + [rec]
+        prev = out
+        i = i + 1
+    Ok(records)
+
+pub fn simple_web_rendering_parity_stage_records(case_id: text, backend: text, html: text, width: i64, height: i64) -> Result<[RenderingStageRecord], text>:
+    if width <= 0 or height <= 0:
+        return Err("simple web parity: non-positive viewport")
+    simple_web_rendering_parity_stage_records_from_observation(case_id, backend, html, simple_web_rendering_parity_observe(html, width, height))
 
 # Render through the software raster path only; a failed render is an Err, never blank pixels.
 pub fn simple_web_rendering_parity_render_rgba8(html: text, width: i64, height: i64, alpha_mode: text) -> Result<[u8], text>:
