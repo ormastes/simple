@@ -28,6 +28,7 @@ use compiler.common.driver_core_types.{SourceFile}
 use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.frontend.parser_types.{ParserModule}
 use compiler.driver.driver_hir_cache.{hir_cache_closure_digest, hir_cache_closure_fallback_count_v1}
+use compiler.hir.hir_lowering.module_surface.{ModuleSurface, ModuleSurfacesByName}
 use test.helpers.module_surface_owner_fixture.{module_surfaces_from_test_modules}
 
 val HIK_USER: text = "use rk.leaf.\{Pt, area, K, Shape\}\n\nfn main() -> i64:\n    area(Pt(x: K))\n"
@@ -39,6 +40,11 @@ fn hik_base_leaf() -> text:
     hik_leaf("i64", "p: Pt", "p.x * 2", "3", "4")
 
 fn hik_digest(leaf_source: text) -> text:
+    hir_cache_closure_digest(hik_registry(leaf_source, false))
+
+# force_fallback: mark the leaf surface as having no cacheable semantic
+# digest, the shape an encoder refusal produces, so its row must use bytes.
+fn hik_registry(leaf_source: text, force_fallback: bool) -> ModuleSurfacesByName:
     val log = Logger(level: 0)
     var modules: Dict<text, ParserModule> = {}
     modules["rk.leaf"] = parse_full_frontend(leaf_source, "rk/leaf.spl", "rk.leaf", log)
@@ -49,7 +55,13 @@ fn hik_digest(leaf_source: text) -> text:
     ]
     val registry = module_surfaces_from_test_modules(modules, sources)
     expect(registry.is_ok()).to_equal(true)
-    hir_cache_closure_digest(registry.unwrap())
+    val reg = registry.unwrap()
+    if force_fallback:
+        for raw_surface in reg.surfaces:
+            val surface: ModuleSurface = raw_surface
+            if surface.module_name == "rk.leaf":
+                surface.semantic_cacheable = false
+    reg
 
 describe "HIR cache closure key follows interfaces, not bytes":
     it "keeps the closure digest across a body-only edit":
@@ -81,3 +93,19 @@ describe "HIR cache closure key follows interfaces, not bytes":
         val after = hik_digest(hik_leaf("i64", "p: Pt", "p.x * 3", "3", "4"))
         val _cleared = env_remove_process("SIMPLE_HIR_CACHE_CLOSURE_KEY")
         expect(after).to_not_equal(before)
+
+    it "a body edit in a fallback surface still moves the closure digest":
+        step("Leaf has no cacheable semantic digest; edit only its body")
+        val before = hir_cache_closure_digest(hik_registry(hik_base_leaf(), true))
+        val after = hir_cache_closure_digest(hik_registry(hik_leaf("i64", "p: Pt", "p.x * 3", "3", "4"), true))
+        expect(after).to_not_equal(before)
+
+    it "counts a closure's fallbacks once however often it is re-derived":
+        step("Same closure digested three times, one fallback surface")
+        val registry = hik_registry(hik_leaf("i64", "p: Pt", "p.x * 7", "3", "4"), true)
+        val start = hir_cache_closure_fallback_count_v1()
+        val first = hir_cache_closure_digest(registry)
+        val _second = hir_cache_closure_digest(registry)
+        val _third = hir_cache_closure_digest(registry)
+        expect(first.len()).to_equal(64)
+        expect(hir_cache_closure_fallback_count_v1() - start).to_equal(1)

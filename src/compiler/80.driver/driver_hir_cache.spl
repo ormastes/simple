@@ -201,6 +201,7 @@ fn hir_cache_closure_digest_from_rows(rows: [text], tokens: [text]) -> text:
 # Surfaces whose closure row fell back to the raw content hash because no
 # cacheable frozen semantic digest was available (see hir_cache_closure_digest).
 var _hir_cache_closure_fallbacks: i64 = 0
+var _hir_cache_closure_reported_digest: text = ""
 
 fn hir_cache_closure_fallback_count_v1() -> i64:
     _hir_cache_closure_fallbacks
@@ -240,10 +241,16 @@ fn hir_cache_closure_digest(surfaces: ModuleSurfacesByName) -> text:
             rows = rows.push(rel + "|C:{s.content_hash}:{s.content_length}|" + s.module_name + "|" + s.logical_name)
         tokens = tokens.push(hir_cache_surface_neutral_token(s.content_hash))
         i = i + 1
-    _hir_cache_closure_fallbacks = _hir_cache_closure_fallbacks + fallbacks
-    if not content_rows:
-        eprint("[hir-cache] closure-key=interface surfaces={surfaces.surfaces.len()} content_fallbacks={fallbacks}")
-    hir_cache_closure_digest_from_rows(rows, tokens)
+    val digest = hir_cache_closure_digest_from_rows(rows, tokens)
+    # Several build stages re-derive the same closure digest (archive schedule,
+    # managed-runtime selection per source, body surfaces): count and print
+    # once per distinct closure, i.e. once per build.
+    if digest != _hir_cache_closure_reported_digest:
+        _hir_cache_closure_reported_digest = digest
+        _hir_cache_closure_fallbacks = _hir_cache_closure_fallbacks + fallbacks
+        if not content_rows:
+            eprint("[hir-cache] closure-key=interface surfaces={surfaces.surfaces.len()} content_fallbacks={fallbacks}")
+    digest
 
 fn _hir_cache_env_switches() -> text:
     # Every environment switch module_build.spl / the driver consult when

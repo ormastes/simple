@@ -385,3 +385,16 @@ Spec: `test/01_unit/compiler/80.driver/hir_cache_interface_closure_key_spec.spl`
 — red 5/6 (body-only edit moved the digest), green 6/6 (body edit keeps it;
 signature, field type, const value and trait default body edits move it;
 the legacy switch still byte-keys).
+
+Review note (2026-11-13): `optional_chain_desugar`
+(`20.hir/hir_lowering/_Expressions/expression_core.spl`, ~line 1737) names its
+temporary `__optchain_{span.line}_{span.col}_{depth}` from the importer's OWN
+expression span. That span comes from the importer's source, which is in its
+own key (source sha256), so a cached entry and a fresh lowering always agree on
+these names within the module. It does not read a dependency's span, so the
+span-free interface key cannot make it disagree: not a miscompile.
+
+Review follow-up: `hir_cache_closure_digest` is re-derived by several stages
+(archive schedule, managed-runtime selection per source, body surfaces); the
+fallback count and the `closure-key=interface` line are now emitted once per
+distinct closure digest, i.e. once per build.
