@@ -1,0 +1,99 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-LIB
+#
+# No-alloc TLS AES-128-GCM (std.nogc_async_mut_noalloc.tls.aes128_gcm) — the copy
+# tls/record.spl calls. The guards must precede the rt_tls13 fast-path
+# extern, which receives key, nonce and tag. Pins the fail-closed decrypt length
+# profile mirrored from the canonical src/os/crypto/aes128_gcm.spl (PR #8878):
+# key 16 bytes, nonce 12 bytes, tag 16 bytes, checked before any input byte is
+# read (NIST SP 800-38D 7.2 step 1). A positive NIST vector guards against a
+# wrong constant in a guard.
+#
+# Source: NIST SP 800-38D (Nov 2007), Appendix B TC1/TC2.
+
+use std.spec.step
+
+use std.nogc_async_mut_noalloc.tls.aes128_gcm.{aes128_gcm_encrypt, aes128_gcm_decrypt, Aes128GcmResult}
+
+fn _zero16() -> [u8]:
+    [0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8,
+     0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8]
+
+fn _zero12() -> [u8]:
+    [0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8,
+     0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8]
+
+fn _tc1_tag() -> [u8]:
+    [0x58u8, 0xe2u8, 0xfcu8, 0xceu8, 0xfau8, 0x7eu8, 0x30u8, 0x61u8,
+     0x36u8, 0x7fu8, 0x1du8, 0x57u8, 0xa4u8, 0xe7u8, 0x45u8, 0x5au8]
+
+fn _tc2_ct() -> [u8]:
+    [0x03u8, 0x88u8, 0xdau8, 0xceu8, 0x60u8, 0xb6u8, 0xa3u8, 0x92u8,
+     0xf3u8, 0x28u8, 0xc2u8, 0xb9u8, 0x71u8, 0xb2u8, 0xfeu8, 0x78u8]
+
+fn _tc2_tag() -> [u8]:
+    [0xabu8, 0x6eu8, 0x47u8, 0xd4u8, 0x2cu8, 0xecu8, 0x13u8, 0xbdu8,
+     0xf5u8, 0x3au8, 0x67u8, 0xb2u8, 0x12u8, 0x57u8, 0xbdu8, 0xdfu8]
+
+fn _tc2_sealed() -> [u8]:
+    var out: [u8] = []
+    for b in _tc2_ct():
+        out.push(b)
+    for b in _tc2_tag():
+        out.push(b)
+    out
+
+describe "No-alloc TLS AES-128-GCM copy: fail-closed decrypt length profile":
+    it "TC2 encrypt matches NIST SP 800-38D B.2":
+        step("TC2 encrypt matches NIST SP 800-38D B.2")
+        val empty: [u8] = []
+        expect(aes128_gcm_encrypt(_zero16(), _zero12(), _zero16(), empty)).to_equal(_tc2_sealed())
+
+    it "TC2 decrypt recovers the zero plaintext":
+        step("TC2 decrypt recovers the zero plaintext")
+        val empty: [u8] = []
+        match aes128_gcm_decrypt(_zero16(), _zero12(), _tc2_ct(), empty, _tc2_tag()):
+            Aes128GcmResult.Ok(data):
+                expect(data).to_equal(_zero16())
+            Aes128GcmResult.Err(msg):
+                fail("valid TC2 must decrypt: {msg}")
+
+    it "decrypt rejects a short tag before constant-time comparison":
+        step("decrypt rejects a short tag before constant-time comparison")
+        val empty: [u8] = []
+        match aes128_gcm_decrypt(_zero16(), _zero12(), empty, empty, empty):
+            Aes128GcmResult.Ok(data):
+                fail("short tag must not decrypt")
+            Aes128GcmResult.Err(msg):
+                expect(msg).to_equal("GCM tag must be 16 bytes")
+
+    it "decrypt rejects a short nonce before foreign byte access":
+        step("decrypt rejects a short nonce before foreign byte access")
+        val empty: [u8] = []
+        match aes128_gcm_decrypt(_zero16(), empty, empty, empty, _tc1_tag()):
+            Aes128GcmResult.Ok(data):
+                fail("short nonce must not decrypt")
+            Aes128GcmResult.Err(msg):
+                expect(msg).to_equal("GCM nonce must be 12 bytes")
+
+    it "decrypt rejects a short key before foreign byte access":
+        step("decrypt rejects a short key before foreign byte access")
+        val empty: [u8] = []
+        match aes128_gcm_decrypt(empty, _zero12(), empty, empty, _tc1_tag()):
+            Aes128GcmResult.Ok(data):
+                fail("short key must not decrypt")
+            Aes128GcmResult.Err(msg):
+                expect(msg).to_equal("AES-128 key must be 16 bytes")
+
+    it "decrypt rejects a corrupted tag (authentication failure is never Ok)":
+        step("decrypt rejects a corrupted tag (authentication failure is never Ok)")
+        val empty: [u8] = []
+        var bad_tag: [u8] = []
+        for b in _tc2_tag():
+            bad_tag.push(b)
+        bad_tag[15] = bad_tag[15] ^ 0x01u8
+        match aes128_gcm_decrypt(_zero16(), _zero12(), _tc2_ct(), empty, bad_tag):
+            Aes128GcmResult.Ok(data):
+                fail("corrupted tag must not decrypt")
+            Aes128GcmResult.Err(msg):
+                expect(msg).to_equal("authentication tag mismatch")
