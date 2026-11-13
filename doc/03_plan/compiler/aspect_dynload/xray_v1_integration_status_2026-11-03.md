@@ -288,3 +288,23 @@ Other `b795b3f4a26`/`aba2a5f0a3e` sites, same seed and scope:
   `os.kernel.loader.byte_utils` shared by the whole loader, and any loader change needs the
   real-firmware QEMU/board boot evidence of `.claude/rules/board-runnable.md`, which this
   lane does not produce. Recorded as remaining duplication, not folded.
+
+#### Step 3e (2026-11-13): shared PE/COFF reader (stage-3 groundwork)
+
+- New `src/lib/common/pe/pe_image_v1.spl`: bounds-checked LE readers (-1 when truncated, the
+  linker's contract), name decoder, bigobj probe, classic/bigobj COFF header record, 40-byte
+  section header record, and a linked PE32+ image (machine, image base, section alignment,
+  size, exception directory, section table, section-by-name, RVA -> file offset). Spec
+  `test/01_unit/lib/pe/pe_image_v1_spec.spl` 7/7; its image fixture is written by the
+  linker's own `pe_write_amd64_console`.
+- `linker/coff/coff_object.spl` takes header layout (`pe_coff_header_v1`), section headers
+  (`pe_section_header_v1`) and `coff_is_bigobj` (aliased re-export) from it; 3 private size
+  constants deleted. Mutating the shared section-header / header readers -> `coff_object_spec`
+  15/21 and 11/21. 15 COFF/PE linker specs: identical failure set before/after.
+- Timing (626,353-byte clang `x86_64-pc-windows-msvc` object, 12 x `coff_parse_object`):
+  old 15.89 / 15.90 / 15.47 / 15.40 / 15.90 s; first fold with a record per relocation
+  ~1.3x and imported readers +8% (17.1-17.3 s) -> reverted both: the relocation loop reads
+  fields directly and the five field readers stay module-local. Final: 15.72 / 16.28 s.
+  Filed `doc/08_tracking/bug/seed_cross_module_call_overhead_2026-11-13.md`.
+- Not folded (remaining PE duplication): `linker/pe_inspect.spl`, `linker/pe_parser.spl`,
+  `std.common.pe_coff_header` (image gates), `src/lib/pe_coff_header.spl` (stub).
