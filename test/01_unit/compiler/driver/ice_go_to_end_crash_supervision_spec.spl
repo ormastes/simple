@@ -94,11 +94,14 @@ describe "hir_lower skip list":
         g2e_reset()
 
     it "does not re-launch when the dead module is already on the skip list":
-        # The breadcrumb is appended before the skip check, so a worker that
-        # died again inside an already-skipped module leaves it open. Stepping
-        # past it changes nothing: re-launching would only burn the budget.
-        g2e_env("no_growth", "1", "hir_lower:mod.bad")
-        expect(ice_boundary_module_start("mod.bad", "fixture/mod.bad.spl", "hir_lower", "")).to_contain("skipped")
+        # A worker died inside mod.bad (open crumb) while the parent already
+        # had it on the skip list (e.g. exported from the HIR pool's CRASH
+        # rows). Stepping past it changes nothing: re-launching would only burn
+        # the budget. (A skipped module itself never opens a crumb, so the
+        # open crumb is written by the un-skipped start here.)
+        g2e_env("no_growth", "1", "")
+        expect(ice_boundary_module_start("mod.bad", "fixture/mod.bad.spl", "hir_lower", "")).to_equal("")
+        env_set("SIMPLE_ICE_SKIP_MODULES", "hir_lower:mod.bad")
         expect(ice_boundary_dead_worker_modules().len()).to_equal(1)
         val (kept_out, kept_err, kept_code) = native_build_relaunch_past_ice_crashes(
             "no-such-worker-binary", [], 1000, 5, "first out", "first err", 134)
@@ -195,3 +198,32 @@ describe "a real worker death inside HIR under go-to-end":
         expect(records[0].kind).to_equal("attributed")
         expect(ice_boundary_dead_worker_modules().len()).to_equal(0)
         g2e_reset()
+
+describe "a skipped module leaves no open breadcrumb":
+    it "attributes a later crash in the same worker to the crashing module, not the skipped one":
+        # Review 2026-11-13: the `start` crumb used to be appended BEFORE the
+        # skip check and no site wrote `done` on skip, so a skipped module
+        # stayed open and the next crash in that worker was attributed to it.
+        g2e_env("skip_then_crash", "1", "codegen:mod.alpha")
+        env_set("SIMPLE_ICE_INJECT_MODULE", "mod.bad")
+        env_set("SIMPLE_ICE_INJECT_KIND", "abort")
+        val worker_bin = resolve_simple_binary()
+        val (out, _err, code) = process_run_timeout_live(worker_bin,
+            ["run", "test/fixtures/ice_boundary/ice_worker_fixture.spl"], 300000)
+        expect(code == 0).to_equal(false)
+        expect(out).to_contain("skipped on retry")
+        expect(out.contains("compiled mod.alpha")).to_equal(false)
+        val dead = ice_boundary_dead_worker_modules()
+        var dead_names: [text] = []
+        for crumb in dead:
+            dead_names = dead_names.push(crumb.module_name)
+        expect(dead_names).to_equal(["mod.bad"])
+        # Stricter than the open set: a skipped module never opens a crumb, so
+        # no later site has to remember to close it.
+        var crumbs = ""
+        for crumb_file in ice_boundary_breadcrumb_files_v1():
+            crumbs = crumbs + file_read(crumb_file)
+        expect(crumbs.contains("start\tcodegen\tmod.alpha")).to_equal(false)
+        expect(crumbs.contains("start\tcodegen\tmod.bad")).to_equal(true)
+        g2e_reset()
+

@@ -27,6 +27,7 @@ the trial, and the manifest without a trial still says `attempted: false`.
 use std.spec.*
 use std.io_runtime.{file_read, file_write, file_exists, dir_create_all, getpid}
 use app.io.process_ops.{process_run}
+use compiler.backend.io_compat.{backend_tool_on_path}
 use std.common.crypto.sha256.{sha256_text}
 use compiler.driver.driver_build.go_to_end.{GoToEndLedgerV1, go_to_end_manifest_text_v1,
     go_to_end_manifest_text_with_trial_v1}
@@ -34,8 +35,19 @@ use compiler.driver.driver_build.go_to_end_trial_link_v1.*
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_claim, hir_shard_recovery_inventory,
     hir_shard_recovery_terminal}
 
-val LLD_V1 = "/home/yoon/dev/llvm/install/bin/ld.lld"
-val CLANG_V1 = "/home/yoon/dev/llvm/install/bin/clang"
+# clang + ld.lld from PATH (the linker authority's own lookup; never gcc).
+# Absent tools fail the case with a message, never skip it.
+fn spec_tool_v1(candidates: [text]) -> text:
+    val found = backend_tool_on_path(candidates)
+    if found == "":
+        fail("go_to_end_trial_link_spec: none of {candidates} on PATH; install LLVM (clang + lld) or extend PATH")
+    found
+
+fn lld_v1() -> text:
+    spec_tool_v1(["ld.lld", "ld.lld-23", "ld.lld-20", "ld.lld-19", "ld.lld-18"])
+
+fn clang_v1() -> text:
+    spec_tool_v1(["clang", "clang-23", "clang-20", "clang-19", "clang-18"])
 
 # Spec-local linker: bare lld over the fixture objects, entry at module a.
 struct FixtureLldLinkerV1:
@@ -63,7 +75,7 @@ fn build_fixture_objects_v1(dir: text) -> [text]:
     file_write("{dir}/b.c", "void run_b(void) __asm__(\"fixture.mod_b.run\");\nvoid run_b(void){}\n")
     file_write("{dir}/c.c", "void run_c(void) __asm__(\"fixture.mod_c.helper\");\nvoid run_c(void){}\n")
     for name in ["a", "b", "c"]:
-        val (_o, err, code) = process_run(CLANG_V1, ["-c", "-fPIC", "{dir}/{name}.c", "-o", "{dir}/{name}.o"])
+        val (_o, err, code) = process_run(clang_v1(), ["-c", "-fPIC", "{dir}/{name}.c", "-o", "{dir}/{name}.o"])
         if code != 0:
             fail("clang failed on {name}.c: {err}")
     ["{dir}/a.o", "{dir}/b.o", "{dir}/c.o"]
@@ -114,6 +126,7 @@ describe "go-to-end trial link: pure parts":
         val block = go_to_end_trial_manifest_block_v1(go_to_end_trial_link_classify_v1(LLD_UNRESOLVED_TEXT_V1, ["a.o", "b.o"], ["fixture.mod_c"]))
         expect(block.contains("    verdict: \"unresolved\"\n")).to_equal(true)
         expect(block.contains("    admitted: false\n")).to_equal(true)
+        expect(block.contains("    runnable: false\n")).to_equal(true)
         expect(block.contains("trial_undefined |symbol, module|\n  \"fixture.mod_c.helper\", \"fixture.mod_c\"\n")).to_equal(true)
         val manifest = go_to_end_manifest_text_with_trial_v1("out", GoToEndLedgerV1.empty(), 2, ["a", "b"], block)
         expect(manifest.contains("  linked: false\n")).to_equal(true)
@@ -156,7 +169,7 @@ describe "go-to-end trial link: real lld over a 3-module fixture":
         val dir = fixture_dir_v1("lld")
         val objects = build_fixture_objects_v1(dir)
         val output = "{dir}/simple"
-        val trial = go_to_end_trial_link_run_v1(FixtureLldLinkerV1(lld: LLD_V1),
+        val trial = go_to_end_trial_link_run_v1(FixtureLldLinkerV1(lld: lld_v1()),
             [objects[0], objects[1]], output, ["fixture.mod_c"])
         expect(trial.attempted).to_equal(true)
         expect(trial.verdict).to_equal("unresolved")
@@ -172,9 +185,14 @@ describe "go-to-end trial link: real lld over a 3-module fixture":
         step("is clean once the failed module's object is present too")
         val dir = fixture_dir_v1("lld_clean")
         val objects = build_fixture_objects_v1(dir)
-        val trial = go_to_end_trial_link_run_v1(FixtureLldLinkerV1(lld: LLD_V1), objects, "{dir}/simple", [])
+        val trial = go_to_end_trial_link_run_v1(FixtureLldLinkerV1(lld: lld_v1()), objects, "{dir}/simple", [])
         expect(trial.verdict).to_equal("clean")
         expect(trial.undefined_symbols).to_equal([])
+        # A clean report pass IS a full link: the file is a runnable binary,
+        # stated in the manifest, still never admitted as the output.
+        expect(trial.artifact).to_equal("{dir}/simple.go-to-end-trial")
+        expect(trial.note).to_contain("fully linked, runnable binary")
+        expect(go_to_end_trial_manifest_block_v1(trial).contains("    runnable: true\n")).to_equal(true)
         expect(trial.summary().starts_with("trial link verdict=clean objects=3 undefined=0")).to_equal(true)
 
     it "reports the failed module's symbol through the real hosted link line (cc -fuse-ld=lld, runtime, --gc-sections)":
@@ -195,7 +213,7 @@ describe "go-to-end trial link: real lld over a 3-module fixture":
     it "skips without objects":
         # @req REQ-SSPEC-COMPILER
         step("skips without objects")
-        val trial = go_to_end_trial_link_run_v1(FixtureLldLinkerV1(lld: LLD_V1), [], "/tmp/none", ["x"])
+        val trial = go_to_end_trial_link_run_v1(FixtureLldLinkerV1(lld: lld_v1()), [], "/tmp/none", ["x"])
         expect(trial.attempted).to_equal(false)
         expect(trial.verdict).to_equal("skipped")
 
