@@ -10,7 +10,7 @@ use compiler.mir.mir_instruction_support.{MirBinOp}
 use compiler.mir.mir_instruction_support.{MirOperand, MirOperandKind}
 use compiler.mir.mir_instruction_graph.{MirInst}
 use compiler.mir.mir_types.{LocalId, MirType, MirConstValue}
-use compiler.mir.mir_lowering_stmts.{mir_merge_arm_types}
+use compiler.mir.mir_lowering_stmts.{hir_type_is_declared_float_slot, hir_unsuffixed_int_literal_value, mir_merge_arm_types}
 use compiler.mir._MirLowering.declaration_enum_metadata_v1.*
 use compiler.mir._MirLoweringExpr.optional_record_owner.*
 use compiler.mir._MirLowering.declaration_providers_v1.*
@@ -1318,7 +1318,8 @@ impl MirLowering:
                                 is_variadic: signature.is_variadic,
                                 params_known: signature.params_known,
                                 declared_params: signature.declared_params,
-                                declared_params_known: signature.declared_params_known
+                                declared_params_known: signature.declared_params_known,
+                                int_literal_coerced_params: signature.int_literal_coerced_params
                             )))
                         ), call_origin: func.call_origin)
                     case _: ()
@@ -9275,6 +9276,14 @@ impl MirLowering:
             direct_pair_text_indices = in_range_pair_indices
             direct_text_pointer_bridge = true
         var direct_arg_index = 0
+        # Indices of args this call coerced from an unsuffixed int literal
+        # into a declared float slot (lower_int_literal_for_float_slot, via
+        # lower_expr_for_slot above). Recorded on the emitted call's
+        # MirSignature.int_literal_coerced_params so the Cranelift import
+        # check can honor the no-implicit-coercion cross-module contract even
+        # though the coercion runs before any module split (the operand types
+        # alone read f64 == f64 afterwards).
+        var int_literal_coerced_arg_indices: [i64] = []
         for arg in args:
             val current_arg_index = direct_arg_index
             direct_arg_index = direct_arg_index + 1
@@ -9353,6 +9362,9 @@ impl MirLowering:
                 self.lower_int_literal_for_float_slot(arg_value, call_param_types[current_arg_index]) ?? self.lower_expr(arg_value)
             else:
                 self.lower_expr(arg_value)
+            if current_arg_index < call_param_types.len():
+                if hir_unsuffixed_int_literal_value(arg_value) != None and hir_type_is_declared_float_slot(call_param_types[current_arg_index]):
+                    int_literal_coerced_arg_indices = int_literal_coerced_arg_indices.push(current_arg_index)
             arg_source_locals[arg_operands.len()] = arg_local.id
             var boundary_transfer_mode = MirTransferMode.Copy
             var boundary_transfer_payload = MirTransferPayload.InlineCopy
@@ -9562,8 +9574,14 @@ impl MirLowering:
                 var declared_param_mir: [MirType] = []
                 for declared_param_hir in call_param_types:
                     declared_param_mir = declared_param_mir.push(self.lower_type(declared_param_hir))
+                var coerced_param_marks: [bool] = []
+                var coerced_mark_i = 0
+                while coerced_mark_i < declared_param_mir.len():
+                    coerced_param_marks = coerced_param_marks.push(int_list_contains(int_literal_coerced_arg_indices, coerced_mark_i))
+                    coerced_mark_i = coerced_mark_i + 1
                 direct_signature = MirSignature(params: [], return_type: return_type, is_variadic: false,
-                    declared_params: declared_param_mir, declared_params_known: true)
+                    declared_params: declared_param_mir, declared_params_known: true,
+                    int_literal_coerced_params: coerced_param_marks)
             if val declared_signature = self.exact_extern_signatures.get(mir_expr_symbol_id_value(direct_symbol)):
                 if declared_signature.params.len() != arg_operands.len():
                     self.error_fatal("fixed extern call argument count differs from its declaration", None)
