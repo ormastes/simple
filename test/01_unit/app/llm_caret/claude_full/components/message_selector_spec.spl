@@ -1,0 +1,395 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+"""
+As a user rewinding a conversation, I want the message picker to list only the
+prompts I actually typed, window them around my selection, and compute the
+restore plan and code-diff summary, so that rewinding does what the screen says.
+"""
+use std.spec.step
+
+use std.spec.*
+use app.llm_caret.claude_full.components.MessageSelector.*
+
+fn tool_edit(uuid: text, path: text, lines: [text]) -> MessageSelectorMessage:
+    MessageSelectorMessage.toolResult(uuid, MessageSelectorToolResult.edit(path, [MessageSelectorPatchHunk.new(lines)]))
+
+fn main() -> ():
+    describe("MessageSelector option list", fn() -> ():
+        it("keeps only user-authored prompts and appends the current option", fn() -> ():
+            step("keeps only user-authored prompts and appends the current option")
+            val msgs = [
+                MessageSelectorMessage.user("u1", "hello"),
+                MessageSelectorMessage.assistant("a1", [MessageSelectorTextBlock.text("hi")]),
+                MessageSelectorMessage.user("u2", "<bash-stdout>x</bash-stdout>"),
+                MessageSelectorMessage.user("u3", "meta").withMeta(),
+                MessageSelectorMessage.user("u4", "syn").withSynthetic(),
+                MessageSelectorMessage.user("u5", "sum").withCompactSummary(),
+                MessageSelectorMessage.user("u6", "tr").withTranscriptOnly(),
+                MessageSelectorMessage.userBlocks("u7", [MessageSelectorTextBlock.toolResult("r")]),
+                MessageSelectorMessage.user("u8", "second")
+            ]
+            val opts = messageSelectorOptions(msgs, "__current__")
+            expect(opts.len()).to_equal(3)
+            expect(opts[0].uuid).to_equal("u1")
+            expect(opts[1].uuid).to_equal("u8")
+            expect(opts[2].uuid).to_equal("__current__")
+        )
+
+        it("rejects every non-user-authored tag kind", fn() -> ():
+            step("rejects every non-user-authored tag kind")
+            val tags = ["local-command-stdout", "local-command-stderr", "bash-stdout", "bash-stderr", "task-notification", "tick", "teammate-message"]
+            for t in tags:
+                val m = MessageSelectorMessage.user("x", "<" + t + ">body</" + t + ">")
+                expect(selectableUserMessagesFilter(m)).to_equal(false)
+            expect(selectableUserMessagesFilter(MessageSelectorMessage.user("x", "plain"))).to_equal(true)
+        )
+
+        it("reads blocks messages from the last text block only", fn() -> ():
+            step("reads blocks messages from the last text block only")
+            val m = MessageSelectorMessage.userBlocks("b", [MessageSelectorTextBlock.text("first"), MessageSelectorTextBlock.text("  last  ")])
+            expect(messageSelectorContentText(m)).to_equal("last")
+            val tail = MessageSelectorMessage.userBlocks("b", [MessageSelectorTextBlock.text("first"), MessageSelectorTextBlock.toolUse("t")])
+            expect(messageSelectorContentText(tail)).to_equal("")
+        )
+
+        it("only has something to select when a real prompt exists", fn() -> ():
+            step("only has something to select when a real prompt exists")
+            expect(messageSelectorHasMessagesToSelect([], "__current__")).to_equal(false)
+            expect(messageSelectorHasMessagesToSelect([MessageSelectorMessage.user("u", "hi")], "__current__")).to_equal(true)
+        )
+    )
+
+    describe("MessageSelector window and state", fn() -> ():
+        it("clamps indexes into the option range", fn() -> ():
+            step("clamps indexes into the option range")
+            expect(clampMessageSelectorIndex(-3, 5)).to_equal(0)
+            expect(clampMessageSelectorIndex(9, 5)).to_equal(4)
+            expect(clampMessageSelectorIndex(2, 5)).to_equal(2)
+            expect(clampMessageSelectorIndex(2, 0)).to_equal(0)
+        )
+
+        it("centres the visible window on the selection", fn() -> ():
+            step("centres the visible window on the selection")
+            val w = messageSelectorWindow(20, 10)
+            expect(w.firstVisibleIndex).to_equal(7)
+            expect(w.visibleCount).to_equal(7)
+            expect(w.lastVisibleIndex()).to_equal(13)
+            expect(w.hasMessagesToSelect).to_equal(true)
+        )
+
+        it("pins the window to the ends of the list", fn() -> ():
+            step("pins the window to the ends of the list")
+            expect(messageSelectorWindow(20, 0).firstVisibleIndex).to_equal(0)
+            expect(messageSelectorWindow(20, 19).firstVisibleIndex).to_equal(13)
+            val small = messageSelectorWindow(3, 1)
+            expect(small.visibleCount).to_equal(3)
+            expect(small.firstVisibleIndex).to_equal(0)
+            expect(messageSelectorWindow(1, 0).hasMessagesToSelect).to_equal(false)
+        )
+
+        it("moves, jumps and clamps the selection", fn() -> ():
+            step("moves, jumps and clamps the selection")
+            var s = MessageSelectorState.new(1, true)
+            s.moveUp(4)
+            expect(s.selectedIndex).to_equal(0)
+            s.moveUp(4)
+            expect(s.selectedIndex).to_equal(0)
+            s.moveDown(4)
+            s.moveDown(4)
+            expect(s.selectedIndex).to_equal(2)
+            s.jumpToBottom(4)
+            expect(s.selectedIndex).to_equal(3)
+            s.moveDown(4)
+            expect(s.selectedIndex).to_equal(3)
+            s.jumpToTop(4)
+            expect(s.selectedIndex).to_equal(0)
+            s.selectIndex(99, 4)
+            expect(s.selectedIndex).to_equal(3)
+        )
+
+        it("remembers and clears the message chosen for restore", fn() -> ():
+            step("remembers and clears the message chosen for restore")
+            var s = MessageSelectorState.new(0, true)
+            s.selectRestoreMessage("u1", MessageSelectorDiffStats.new(["a.spl"], 2, 1))
+            expect(s.messageToRestoreUuid).to_equal("u1")
+            expect(s.hasDiffStatsForRestore).to_equal(true)
+            expect(s.diffStatsForRestore.deltaText()).to_equal("+2 -1")
+            s.clearRestoreMessage()
+            expect(s.messageToRestoreUuid).to_equal("")
+            expect(s.hasDiffStatsForRestore).to_equal(false)
+            expect(s.diffStatsForRestore.filesChanged.len()).to_equal(0)
+            s.setError("boom")
+            expect(s.error).to_equal("boom")
+            s.clearError()
+            expect(s.error).to_equal("")
+        )
+
+        it("normalizes an out-of-range selection when a model is built", fn() -> ():
+            step("normalizes an out-of-range selection when a model is built")
+            val msgs = [MessageSelectorMessage.user("u1", "a"), MessageSelectorMessage.user("u2", "b")]
+            val model = MessageSelectorModel.new(msgs, MessageSelectorState.new(50, false), 80)
+            expect(model.state.selectedIndex).to_equal(2)
+            expect(model.window().selectedIndex).to_equal(2)
+            val picked = messageSelectorSelectedOption(msgs, model.state) ?? MessageSelectorMessage.user("none", "")
+            expect(picked.uuid).to_equal("__current__")
+        )
+
+        it("reports code restore only for the both and code options", fn() -> ():
+            step("reports code restore only for the both and code options")
+            var s = MessageSelectorState.new(0, true)
+            val stats = MessageSelectorDiffStats.new(["a"], 1, 0)
+            expect(s.selectedRestoreHasCode(stats)).to_equal(true)
+            s.selectedRestoreOption = "conversation"
+            expect(s.selectedRestoreHasCode(stats)).to_equal(false)
+            s.selectedRestoreOption = "code"
+            expect(s.selectedRestoreHasCode(MessageSelectorDiffStats.empty())).to_equal(false)
+        )
+    )
+
+    describe("MessageSelector restore planning", fn() -> ():
+        it("offers code options only when code can be restored", fn() -> ():
+            step("offers code options only when code can be restored")
+            val withCode = getRestoreOptions(true, true)
+            expect(withCode.len()).to_equal(6)
+            expect(withCode[0].value).to_equal("both")
+            expect(withCode[0].defaultFocus).to_equal(true)
+            expect(withCode[4].value).to_equal("summarize_up_to")
+            expect(withCode[5].value).to_equal("nevermind")
+            val noCode = getRestoreOptions(false, false)
+            expect(noCode.len()).to_equal(3)
+            expect(noCode[0].value).to_equal("conversation")
+            expect(noCode[1].acceptsFeedback).to_equal(true)
+            expect(messageSelectorDefaultRestoreFocus(true)).to_equal("both")
+            expect(messageSelectorDefaultRestoreFocus(false)).to_equal("conversation")
+        )
+
+        it("maps restore options to direction and explanatory text", fn() -> ():
+            step("maps restore options to direction and explanatory text")
+            expect(messageSelectorRestoreDirection("summarize")).to_equal("from")
+            expect(messageSelectorRestoreDirection("summarize_up_to")).to_equal("up_to")
+            expect(messageSelectorRestoreDirection("both")).to_equal("")
+            expect(getRestoreOptionConversationText("both")).to_equal("The conversation will be forked.")
+            expect(getRestoreOptionConversationText("code")).to_equal("The conversation will be unchanged.")
+            expect(getRestoreOptionConversationText("summarize")).to_equal("Messages after this point will be summarized.")
+            expect(isSummarizeOption("summarize_up_to")).to_equal(true)
+            expect(isSummarizeOption("code")).to_equal(false)
+        )
+
+        it("restores immediately without file history and asks for confirmation with it", fn() -> ():
+            step("restores immediately without file history and asks for confirmation with it")
+            val msgs = [MessageSelectorMessage.user("u1", "a")]
+            val s = MessageSelectorState.new(0, false)
+            val quick = selectMessageForRestore(msgs, s, "u1", false)
+            expect(quick.option).to_equal("conversation")
+            expect(quick.shouldClose).to_equal(true)
+            expect(quick.restoreConversation).to_equal(true)
+            expect(quick.restoreCode).to_equal(false)
+            val confirm = selectMessageForRestore(msgs, s, "u1", true)
+            expect(confirm.option).to_equal("confirm")
+            expect(confirm.shouldClose).to_equal(false)
+            val missing = selectMessageForRestore(msgs, s, "zzz", true)
+            expect(missing.option).to_equal("missing")
+            expect(missing.shouldClose).to_equal(true)
+        )
+
+        it("turns each restore option into the matching request", fn() -> ():
+            step("turns each restore option into the matching request")
+            val both = selectRestoreOption("u1", "both", "", "", false)
+            expect(both.restoreCode).to_equal(true)
+            expect(both.restoreConversation).to_equal(true)
+            expect(both.shouldPreRestore).to_equal(true)
+            val code = selectRestoreOption("u1", "code", "", "", false)
+            expect(code.restoreCode).to_equal(true)
+            expect(code.restoreConversation).to_equal(false)
+            val sum = selectRestoreOption("u1", "summarize", "  from fb  ", "up fb", false)
+            expect(sum.summarize).to_equal(true)
+            expect(sum.direction).to_equal("from")
+            expect(sum.feedback).to_equal("from fb")
+            val upTo = selectRestoreOption("u1", "summarize_up_to", "from fb", " up fb ", false)
+            expect(upTo.direction).to_equal("up_to")
+            expect(upTo.feedback).to_equal("up fb")
+            val never = selectRestoreOption("u1", "nevermind", "", "", true)
+            expect(never.shouldClose).to_equal(true)
+            expect(never.shouldPreRestore).to_equal(false)
+            expect(selectRestoreOption("u1", "nevermind", "", "", false).shouldClose).to_equal(false)
+            expect(selectRestoreOption("", "both", "", "", false).error).to_equal("Message not found.")
+        )
+
+        it("chooses escape behaviour by where the user is", fn() -> ():
+            step("chooses escape behaviour by where the user is")
+            expect(messageSelectorEscapeAction(true, false)).to_equal("back_to_list")
+            expect(messageSelectorEscapeAction(true, true)).to_equal("close")
+            expect(messageSelectorEscapeAction(false, false)).to_equal("close")
+            expect(messageSelectorConfirmationCancelAction(true)).to_equal("close")
+            expect(messageSelectorConfirmationCancelAction(false)).to_equal("back_to_list")
+            expect(messageSelectorCanGoBackFromConfirm("")).to_equal(true)
+            expect(messageSelectorCanGoBackFromConfirm("u")).to_equal(false)
+        )
+    )
+
+    describe("MessageSelector diff stats", fn() -> ():
+        it("sums patch insertions and deletions between two messages", fn() -> ():
+            step("sums patch insertions and deletions between two messages")
+            val msgs = [
+                MessageSelectorMessage.user("u1", "a"),
+                tool_edit("t1", "src/a.spl", ["+x", "+y", "-z", " ctx"]),
+                tool_edit("t2", "src/a.spl", ["+w"]),
+                MessageSelectorMessage.toolResult("t3", MessageSelectorToolResult.create("src/b.spl", "l1\nl2\nl3")),
+                MessageSelectorMessage.user("u2", "b"),
+                tool_edit("t4", "src/c.spl", ["+late"])
+            ]
+            val st = computeDiffStatsBetweenMessages(msgs, "u1", "u2") ?? MessageSelectorDiffStats.empty()
+            expect(st.filesChanged.len()).to_equal(2)
+            expect(st.insertions).to_equal(6)
+            expect(st.deletions).to_equal(1)
+            val open = computeDiffStatsBetweenMessages(msgs, "u2", "") ?? MessageSelectorDiffStats.empty()
+            expect(open.filesChanged[0]).to_equal("src/c.spl")
+            val none = computeDiffStatsBetweenMessages(msgs, "nope", "u2") ?? MessageSelectorDiffStats.new(["sentinel"], 0, 0)
+            expect(none.filesChanged[0]).to_equal("sentinel")
+        )
+
+        it("builds one stats entry per option with an empty one for current", fn() -> ():
+            step("builds one stats entry per option with an empty one for current")
+            val msgs = [
+                MessageSelectorMessage.user("u1", "a"),
+                tool_edit("t1", "src/a.spl", ["+x"]),
+                MessageSelectorMessage.user("u2", "b")
+            ]
+            val meta = buildMessageSelectorHistoryMetadata(msgs, "__current__")
+            expect(meta.len()).to_equal(3)
+            expect(meta[0].insertions).to_equal(1)
+            expect(meta[1].filesChanged.len()).to_equal(0)
+            expect(meta[2].filesChanged.len()).to_equal(0)
+        )
+
+        it("labels changed files by name and count", fn() -> ():
+            step("labels changed files by name and count")
+            expect(messageSelectorFileLabel([])).to_equal("")
+            expect(messageSelectorFileLabel(["a/b/c.spl"])).to_equal("c.spl")
+            expect(messageSelectorFileLabel(["a/x.spl", "b/y.spl"])).to_equal("x.spl and y.spl")
+            expect(messageSelectorFileLabel(["x", "y", "z"])).to_equal("x and 2 other files")
+            expect(messageSelectorOtherFilesLabel(3)).to_equal("2 other files")
+            expect(messageSelectorOtherFilesLabel(2)).to_equal("1 other file")
+            expect(messageSelectorOtherFilesLabel(1)).to_equal("")
+        )
+
+        it("describes the code restore in confirmation text", fn() -> ():
+            step("describes the code restore in confirmation text")
+            val stats = MessageSelectorDiffStats.new(["d/a.spl"], 3, 2)
+            expect(restoreCodeConfirmationText(stats)).to_equal("The code will be restored +3 -2 in a.spl.")
+            expect(restoreCodeConfirmationText(MessageSelectorDiffStats.empty())).to_equal("The code has not changed (nothing will be restored).")
+            expect(restoreOptionCodeText("summarize", true, stats)).to_equal("")
+            expect(restoreOptionCodeText("conversation", true, stats)).to_equal("The code will be unchanged.")
+            expect(restoreOptionCodeText("both", false, stats)).to_equal("The code will be unchanged.")
+        )
+    )
+
+    describe("MessageSelector labels and rendering", fn() -> ():
+        it("labels special prompt shapes", fn() -> ():
+            step("labels special prompt shapes")
+            val cur = MessageSelectorMessage.user("c", "")
+            expect(userMessageOptionLabel(cur, true, 80, 10)).to_equal("(current)")
+            expect(userMessageOptionLabel(MessageSelectorMessage.user("a", "   "), false, 80, 10)).to_equal("((empty message))")
+            expect(userMessageOptionLabel(MessageSelectorMessage.user("a", "<bash-input>ls -la</bash-input>"), false, 80, 10)).to_equal("! ls -la")
+            expect(userMessageOptionLabel(MessageSelectorMessage.user("a", "<command-message>review</command-message><command-args>x y</command-args>"), false, 80, 10)).to_equal("/review x y")
+            expect(userMessageOptionLabel(MessageSelectorMessage.user("a", "<command-message>pdf</command-message><skill-format>true</skill-format>"), false, 80, 10)).to_equal("Skill(pdf)")
+        )
+
+        it("hides thinking and system-reminder blocks from prompt labels", fn() -> ():
+            step("hides thinking and system-reminder blocks from prompt labels")
+            expect(userMessageOptionLabel(MessageSelectorMessage.user("a", "<thinking>secret</thinking>visible"), false, 80, 10)).to_equal("visible")
+            expect(userMessageOptionLabel(MessageSelectorMessage.user("a", "<system-reminder>r</system-reminder>\nhello"), false, 80, 10)).to_equal("hello")
+            expect(userMessageOptionLabel(MessageSelectorMessage.user("a", "<thinking>only</thinking>"), false, 80, 10)).to_equal("<thinking>only</thinking>")
+        )
+
+        it("truncates long prompts to the available width", fn() -> ():
+            step("truncates long prompts to the available width")
+            expect(messageSelectorTruncate("abcdefghij", 5)).to_equal("abcd…")
+            expect(messageSelectorTruncate("abc", 5)).to_equal("abc")
+            expect(messageSelectorTruncate("abc", 0)).to_equal("")
+            expect(messageSelectorTruncate("abcdef", 1)).to_equal("…")
+            val label = userMessageOptionLabel(MessageSelectorMessage.user("a", "0123456789012345"), false, 20, 10)
+            expect(label).to_equal("012345678…")
+            expect(messageSelectorFirstLines("l1\nl2\nl3\nl4\nl5", 4, 500)).to_equal("l1\nl2\nl3\nl4")
+        )
+
+        it("extracts tag bodies and finds substrings", fn() -> ():
+            step("extracts tag bodies and finds substrings")
+            expect(messageSelectorExtractTag("<a x=\"1\">val</a>", "a")).to_equal("val")
+            expect(messageSelectorExtractTag("<a>  v  </a>", "a")).to_equal("v")
+            expect(messageSelectorExtractTag("no tags", "a")).to_equal("")
+            expect(messageSelectorFindIndex("hello", "ll")).to_equal(2)
+            expect(messageSelectorFindIndex("hello", "zz")).to_equal(-1)
+        )
+
+        it("renders the empty, error, list and confirm modes", fn() -> ():
+            step("renders the empty, error, list and confirm modes")
+            val empty = MessageSelectorModel.new([], MessageSelectorState.new(0, true), 80).render()
+            expect(empty.mode).to_equal("empty")
+            expect(empty.lead).to_equal("Nothing to rewind to yet.")
+            expect(empty.footer).to_equal("Esc to exit")
+            val msgs = [MessageSelectorMessage.user("u1", "first"), tool_edit("t", "src/a.spl", ["+x"]), MessageSelectorMessage.user("u2", "second")]
+            val list = MessageSelectorModel.new(msgs, MessageSelectorState.new(0, true), 80).render()
+            expect(list.mode).to_equal("list")
+            expect(list.options.len()).to_equal(3)
+            expect(list.options[0].selected).to_equal(true)
+            expect(list.options[0].label).to_equal("first")
+            expect(list.options[0].detail).to_equal("a.spl +1 -0")
+            expect(list.options[1].detail).to_equal("No code changes")
+            expect(list.options[1].warning).to_equal("No code restore")
+            expect(list.options[2].current).to_equal(true)
+            expect(list.footer).to_equal("Enter to continue · Esc to exit")
+            expect(list.lead).to_equal("Restore the code and/or conversation to the point before…")
+            var es = MessageSelectorState.new(0, true)
+            es.setError("bad")
+            val err = MessageSelectorModel.new(msgs, es, 80).render()
+            expect(err.mode).to_equal("error")
+            expect(err.error).to_equal("bad")
+            var cs = MessageSelectorState.new(0, true)
+            cs.selectRestoreMessage("u1", MessageSelectorDiffStats.new(["src/a.spl"], 1, 0))
+            val conf = MessageSelectorModel.new(msgs, cs, 80).render()
+            expect(conf.mode).to_equal("confirm")
+            expect(conf.restoreOptions.len()).to_equal(5)
+            expect(conf.codeText).to_equal("The code will be restored +1 -0 in a.spl.")
+            expect(conf.footer).to_equal("")
+        )
+
+        it("shows the exit-pending footer", fn() -> ():
+            step("shows the exit-pending footer")
+            var s = MessageSelectorState.new(0, true)
+            s.exitPending = true
+            expect(messageSelectorFooter(s, true)).to_equal("Press Ctrl-C again to exit")
+        )
+
+        it("detects when only synthetic content follows a selection", fn() -> ():
+            step("detects when only synthetic content follows a selection")
+            val quiet = [
+                MessageSelectorMessage.user("u1", "a"),
+                MessageSelectorMessage.progress("p"),
+                MessageSelectorMessage.assistant("a", [MessageSelectorTextBlock.text("   ")])
+            ]
+            expect(messagesAfterAreOnlySynthetic(quiet, 0)).to_equal(true)
+            val busy = [MessageSelectorMessage.user("u1", "a"), MessageSelectorMessage.assistant("a", [MessageSelectorTextBlock.toolUse("t")])]
+            expect(messagesAfterAreOnlySynthetic(busy, 0)).to_equal(false)
+            val next = [MessageSelectorMessage.user("u1", "a"), MessageSelectorMessage.user("u2", "b")]
+            expect(messagesAfterAreOnlySynthetic(next, 0)).to_equal(false)
+        )
+
+        it("formats restore errors and analytics payloads", fn() -> ():
+            step("formats restore errors and analytics payloads")
+            expect(messageSelectorRestoreErrorText("c", "d")).to_equal("Failed to restore the conversation and code:\nc\nd")
+            expect(messageSelectorRestoreErrorText("c", "")).to_equal("Failed to restore the conversation:\nc")
+            expect(messageSelectorRestoreErrorText("", "d")).to_equal("Failed to restore the code:\nd")
+            expect(messageSelectorRestoreErrorText("", "")).to_equal("")
+            expect(messageSelectorSummarizeErrorText("e")).to_equal("Failed to summarize:\ne")
+            val msgs = [MessageSelectorMessage.user("u1", "a"), MessageSelectorMessage.user("u2", "b")]
+            expect(messageSelectorSelectedAnalyticsPayload(msgs, msgs[0], "__current__")).to_equal("index_from_end=1;message_type=user;is_current_prompt=false")
+            expect(messageSelectorSpinnerText("summarize")).to_equal("Summarizing…")
+            expect(messageSelectorSpinnerText("both")).to_equal("Restoring…")
+            expect(messageSelectorRestoringOptionLabel("code")).to_equal("Restore code")
+            expect(messageSelectorPointer(true)).to_equal("› ")
+        )
+    )
+    return ()

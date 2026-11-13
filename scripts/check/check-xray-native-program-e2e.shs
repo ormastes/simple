@@ -1,0 +1,251 @@
+#!/bin/sh
+# check-xray-native-program-e2e.shs — the pure-Simple XRay ("spy") traced by a
+# COMPILED Simple program in one real run (Linux, native Simple sleds).
+#
+# Roles (stated, not implied):
+#   - the traced module: test/fixtures/xray/xray_inprocess_prog.spl built by the
+#     pure-Simple CLI entry `compile --native --backend=native --xray`
+#     (shared-library intent), run under --simple <bin> (no deployed full-CLI
+#     pure-Simple binary exists; the bootstrap CLI has no --xray);
+#   - the controller: test/fixtures/xray/xray_native_program_host.spl, either
+#     run by --simple (`run`, interpreted controller; the default), or built into
+#     a native EXECUTABLE by --builder <bin> `native-build` (bootstrap Stage 2
+#     CLI) and run directly, or a prebuilt --host-bin. The verdict names the mode.
+# One process, in order: aspect dynload (dlopen + map admission + registration,
+# config + pointcuts from aspect params), log on/off, profile fold of the same
+# raw-edge stream (exclusive time over a real nested call), re-enable with a
+# new pointcut, container profiling switch following the spy state, an
+# injected patch fault (rollback + close_admission), recovery.
+#
+# Verdict (last stdout line):
+#   PASS — <n> check(s) (...)              exit 0
+#   FAIL — <reason>                        exit 1
+#   ERROR — nothing was checked (<reason>) exit 2
+# --selftest runs before every scan and is fatal.
+#
+# Usage
+#   sh scripts/check/check-xray-native-program-e2e.shs --simple <bin> [--builder <bin> | --host-bin <exe>] [--module <lib.so>] [--keep]
+#   sh scripts/check/check-xray-native-program-e2e.shs --selftest
+# Env: CLANG, XRAY_E2E_TIMEOUT (s per build, 3000), XRAY_E2E_MEMORY_MAX (8G).
+
+set -u
+
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+PROG=test/fixtures/xray/xray_inprocess_prog.spl
+HOST_SRC=test/fixtures/xray/xray_native_program_host.spl
+BASELINE="42,60,32,7,27,-15,"
+ALL_OFF=BBBBBBB
+
+# sp_field <log> <scenario> <key>: value of the first "SPY <scenario> ... key=value".
+sp_field() {
+    sed -nE "s/^SPY $2 (.* )?$3=([^ ]*).*/\2/p" "$1" | head -1
+}
+
+# One enable/disable cycle. sp_cycle_ok <log> <label> <generation> <words_on>
+#   <entries> <functions>: 0 ok, 1 wrong (reason on stdout).
+sp_cycle_ok() {
+    l=$1; s=$2
+    [ "$(sp_field "$l" "$s" generation)" = "$3" ] || { echo "$s: generation $(sp_field "$l" "$s" generation) != $3"; return 1; }
+    [ "$(sp_field "$l" "$s" words_on)" = "$4" ] || { echo "$s: words_on $(sp_field "$l" "$s" words_on) != $4"; return 1; }
+    [ "$(sp_field "$l" "$s" entries)" = "$5" ] && [ "$(sp_field "$l" "$s" exits)" = "$5" ] || { echo "$s: entries/exits $(sp_field "$l" "$s" entries)/$(sp_field "$l" "$s" exits) != $5"; return 1; }
+    [ "$(sp_field "$l" "$s" events)" = "$(( $5 * 2 ))" ] || { echo "$s: foreign events (events=$(sp_field "$l" "$s" events))"; return 1; }
+    [ "$(sp_field "$l" "$s" stamped)" = "$(( $5 * 2 ))" ] || { echo "$s: unstamped records"; return 1; }
+    [ "$(sp_field "$l" "$s" functions)" = "$6" ] || { echo "$s: functions $(sp_field "$l" "$s" functions) != $6"; return 1; }
+    [ "$(sp_field "$l" "$s" same_generation)" = "true" ] || { echo "$s: record from another generation"; return 1; }
+    [ "$(sp_field "$l" "$s" words_off)" = "$ALL_OFF" ] || { echo "$s: words_off $(sp_field "$l" "$s" words_off)"; return 1; }
+    [ "$(sp_field "$l" "$s" records_after_stop)" = "0" ] || { echo "$s: records after stop"; return 1; }
+    [ "$(sp_field "$l" "$s" gate_closed)" = "true" ] || { echo "$s: admission still open after stop"; return 1; }
+    [ "$(sp_field "$l" "$s" results_on)" = "$BASELINE" ] && [ "$(sp_field "$l" "$s" results_off)" = "$BASELINE" ] || { echo "$s: results differ from baseline"; return 1; }
+    [ "$(sp_field "$l" "$s" before)" = "false" ] && [ "$(sp_field "$l" "$s" during)" = "true" ] && [ "$(sp_field "$l" "$s" after)" = "false" ] || { echo "$s: container switch $(sp_field "$l" "$s" before)/$(sp_field "$l" "$s" during)/$(sp_field "$l" "$s" after)"; return 1; }
+    [ "$(sp_field "$l" "$s" lookups)" = "0,2,2" ] || { echo "$s: container counters $(sp_field "$l" "$s" lookups) != 0,2,2"; return 1; }
+    return 0
+}
+
+# Whole transcript. Prints the failing reason, or the check count on success.
+sp_transcript_ok() {
+    l=$1
+    grep -q '^SPY-HOST-OK$' "$l" || { echo "host did not complete: $(grep -m1 'SPY-HOST-ERROR' "$l")"; return 1; }
+    slot=$(sp_field "$l" dynload slot)
+    [ -n "$slot" ] && [ "$slot" -gt 0 ] 2>/dev/null || { echo "dynload: no registration slot"; return 1; }
+    [ "$(sp_field "$l" dynload sites)" = "7" ] && [ "$(sp_field "$l" dynload words)" = "$ALL_OFF" ] || { echo "dynload: map/sled state"; return 1; }
+    ids=$(sp_field "$l" dynload ids)
+    add1=$(echo "$ids" | sed -n 's/.*add1:\([0-9]*\).*/\1/p')
+    scaled=$(echo "$ids" | sed -n 's/.*scaled:\([0-9]*\).*/\1/p')
+    traced=$(echo "$ids" | sed -n 's/.*traced:\([0-9]*\).*/\1/p')
+    [ -n "$add1" ] && [ -n "$scaled" ] && [ -n "$traced" ] || { echo "dynload: function ids missing ($ids)"; return 1; }
+    [ "$(sed -n 's/^SPY baseline=\(.*\)/\1/p' "$l")" = "$BASELINE" ] || { echo "baseline results wrong"; return 1; }
+    # Map order is by name: add1 (2 sites), scaled (3), traced (2).
+    sp_cycle_ok "$l" log 1 BBBBBNN 3 "$traced" || return 1
+    sp_cycle_ok "$l" profile 2 NNBBBNN 6 "$traced,$add1" || return 1
+    [ "$(sp_field "$l" fold unmatched)" = "0" ] && [ "$(sp_field "$l" fold open)" = "0" ] && [ "$(sp_field "$l" fold events)" = "12" ] || { echo "profile: fold not balanced"; return 1; }
+    [ "$(sp_field "$l" fold traced | cut -d: -f1)" = "3" ] && [ "$(sp_field "$l" fold add1 | cut -d: -f1)" = "3" ] || { echo "profile: call counts $(sp_field "$l" fold traced) $(sp_field "$l" fold add1)"; return 1; }
+    [ "$(sp_field "$l" profile exclusive_identity)" = "true" ] && [ "$(sp_field "$l" profile add1_depth)" = "2" ] || { echo "profile: exclusive-time fold"; return 1; }
+    sp_cycle_ok "$l" reenable 3 BBNNNBB 3 "$scaled" || return 1
+    [ "$(sp_field "$l" rollback start)" = "9" ] && [ "$(sp_field "$l" rollback state)" = "0" ] || { echo "rollback: start=$(sp_field "$l" rollback start) state=$(sp_field "$l" rollback state)"; return 1; }
+    [ "$(sp_field "$l" rollback words)" = "$ALL_OFF" ] && [ "$(sp_field "$l" rollback patched)" = "0" ] || { echo "rollback: sleds left on"; return 1; }
+    [ "$(sp_field "$l" rollback gate_closed)" = "true" ] && [ "$(sp_field "$l" rollback records)" = "0" ] || { echo "rollback: admission not closed"; return 1; }
+    sp_cycle_ok "$l" recover 5 BBBBBNN 3 "$traced" || return 1
+    echo 7
+    return 0
+}
+
+sp_selftest() {
+    t=$(mktemp "${TMPDIR:-/tmp}/xray-program-selftest.XXXXXX") || return 1
+    cyc() { # label generation words entries functions
+        printf '%s\n' "SPY $1 generation=$2 words_on=$3" \
+            "SPY $1 entries=$4 exits=$4 events=$(( $4 * 2 )) functions=$5 stamped=$(( $4 * 2 )) same_generation=true" \
+            "SPY $1 words_off=BBBBBBB records_after_stop=0 gate_closed=true lost=0" \
+            "SPY $1 results_on=$BASELINE results_off=$BASELINE baseline=$BASELINE" \
+            "SPY $1 container before=false during=true after=false lookups=0,2,2"
+    }
+    {
+        echo "SPY dynload slot=1 functions=[a.add1, a.scaled, a.traced] sites=7 words=BBBBBBB ids=add1:1,scaled:2,traced:3"
+        echo "SPY baseline=$BASELINE"
+        cyc log 1 BBBBBNN 3 3
+        cyc profile 2 NNBBBNN 6 3,1
+        echo "SPY fold events=12 unmatched=0 open=0 traced=3:90:60:1 add1=3:30:30:2"
+        echo "SPY profile exclusive_identity=true add1_depth=2"
+        cyc reenable 3 BBNNNBB 3 2
+        echo "SPY rollback start=9 state=0 words=BBBBBBB gate_closed=true records=0 patched=0"
+        cyc recover 5 BBBBBNN 3 3
+        echo "SPY-HOST-OK"
+    } > "$t"
+    sp_transcript_ok "$t" >/dev/null || { rm -f "$t"; return 1; }
+    # every mutation must be rejected
+    for m in 's/^SPY-HOST-OK$/SPY-HOST-ERROR: x/' \
+             's/^\(SPY log .*\)words_off=BBBBBBB/\1words_off=BBBBBNB/' \
+             's/^\(SPY log .*\)records_after_stop=0/\1records_after_stop=2/' \
+             's/^\(SPY profile .*\)exclusive_identity=true/\1exclusive_identity=false/' \
+             's/^\(SPY profile .*\)functions=3,1/\1functions=3/' \
+             's/^\(SPY reenable .*\)during=true/\1during=false/' \
+             's/^\(SPY reenable .*\)lookups=0,2,2/\1lookups=1,3,4/' \
+             's/^\(SPY rollback .*\)state=0/\1state=2/' \
+             's/^\(SPY rollback .*\)gate_closed=true/\1gate_closed=false/' \
+             's/^\(SPY rollback .*\)words=BBBBBBB/\1words=NBBBBBB/' \
+             's/^\(SPY recover .*\)generation=5/\1generation=4/' \
+             's/^\(SPY log .*\)stamped=6/\1stamped=5/' \
+             's/^\(SPY fold .*\)unmatched=0/\1unmatched=1/' \
+             's/^\(SPY dynload .*\)sites=7/\1sites=6/' \
+             's/^\(SPY log .*\)same_generation=true/\1same_generation=false/' \
+             's/^\(SPY log .*\)exits=3/\1exits=2/' \
+             's/^\(SPY reenable .*\)results_on=[^ ]*/\1results_on=1,/' \
+             's/^\(SPY fold .*\)traced=3:/\1traced=2:/' \
+             's/^SPY baseline=.*/SPY baseline=1,/'; do
+        sed "$m" "$t" > "$t.m"
+        if sp_transcript_ok "$t.m" >/dev/null; then echo "selftest mutation accepted: $m"; rm -f "$t" "$t.m"; return 1; fi
+    done
+    : > "$t.m"; sp_transcript_ok "$t.m" >/dev/null && { rm -f "$t" "$t.m"; return 1; }
+    rm -f "$t" "$t.m"
+    return 0
+}
+
+SIMPLE_BIN=""; BUILDER=""; HOST_BIN=""; MODULE=""; KEEP=0; SELFTEST_ONLY=0
+STEP_TIMEOUT=${XRAY_E2E_TIMEOUT:-3000}
+MEMORY_MAX=${XRAY_E2E_MEMORY_MAX:-8G}
+CC=${CLANG:-clang}
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --simple) SIMPLE_BIN=${2:-}; shift 2 ;;
+        --builder) BUILDER=${2:-}; shift 2 ;;
+        --host-bin) HOST_BIN=${2:-}; shift 2 ;;
+        --module) MODULE=${2:-}; shift 2 ;;
+        --keep) KEEP=1; shift ;;
+        --selftest) SELFTEST_ONLY=1; shift ;;
+        -h|--help) sed -n '2,/^set -u/p' "$0" | sed '$d'; exit 0 ;;
+        *) echo "ERROR — nothing was checked (unknown argument: $1)"; exit 2 ;;
+    esac
+done
+
+if ! sp_selftest; then
+    echo "ERROR — nothing was checked (selftest failed: transcript verdict misjudged a fixture)"
+    exit 2
+fi
+if [ "$SELFTEST_ONLY" -eq 1 ]; then
+    echo "PASS — 21 check(s) (selftest: 1 accepted transcript, 20 rejected mutations)"
+    exit 0
+fi
+if [ "$(uname -s)" != "Linux" ]; then
+    echo "ERROR — nothing was checked (needs a Linux host, this is $(uname -s))"
+    exit 2
+fi
+case "$(uname -m)" in
+    aarch64) TRIPLE=aarch64-unknown-linux-gnu ;;
+    x86_64) TRIPLE=x86_64-unknown-linux-gnu ;;
+    *) echo "ERROR — nothing was checked (no Simple sled emitter for $(uname -m))"; exit 2 ;;
+esac
+
+abs() { case "$1" in /*) echo "$1" ;; *) echo "$(cd "$(dirname "$1")" && pwd)/$(basename "$1")" ;; esac; }
+capped() { # run under a memory cap when systemd-run is usable
+    if command -v systemd-run >/dev/null 2>&1 && systemd-run --user --scope -q -p MemoryMax=64M true >/dev/null 2>&1; then
+        systemd-run --user --scope -q -p MemoryMax="$MEMORY_MAX" "$@"
+    else
+        "$@"
+    fi
+}
+
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/xray-program-e2e.XXXXXX") || { echo "ERROR — nothing was checked (cannot create temp dir)"; exit 2; }
+cleanup() { if [ "$KEEP" -eq 1 ]; then echo "kept: $WORK" >&2; else rm -rf "$WORK"; fi; }
+trap cleanup EXIT
+cd "$ROOT" || { echo "ERROR — nothing was checked (cannot cd to $ROOT)"; exit 2; }
+
+# ---- the --xray module (unless a prebuilt one is given)
+if [ -z "$MODULE" ]; then
+    [ -n "$SIMPLE_BIN" ] || { echo "ERROR — nothing was checked (need --simple to build the --xray module, or --module)"; exit 2; }
+    SIMPLE_BIN=$(abs "$SIMPLE_BIN")
+    for tool in "$SIMPLE_BIN" "$CC"; do
+        command -v "$tool" >/dev/null 2>&1 || { echo "ERROR — nothing was checked (missing tool: $tool)"; exit 2; }
+    done
+    # Never GCC: the shared link invokes `cc`; shadow it with clang + lld.
+    mkdir -p "$WORK/ccshim" && printf '#!/bin/sh\nexec %s -fuse-ld=lld "$@"\n' "$(command -v "$CC")" > "$WORK/ccshim/cc" && chmod +x "$WORK/ccshim/cc"
+    MODULE=$WORK/libon.so
+    # The spec runner exports SIMPLE_MCDC_MODE=on; it must not reach the traced
+    # module: a native --xray shared library built with it references the
+    # undefined mcdc_static_probe_* symbols and dlopen(RTLD_NOW) refuses it
+    # (doc/08_tracking/bug/native_shared_mcdc_probes_undefined_2026-11-13.md).
+    (
+        unset SIMPLE_MCDC_MODE SIMPLE_MCDC_MODE_ERROR
+        export PATH="$WORK/ccshim:$PATH" XR_SRC=$PROG XR_OUT=$MODULE XR_XRAY=1 SIMPLE_NATIVE_BUILD_EMIT_OBJECT=shared
+        capped timeout "$STEP_TIMEOUT" "$SIMPLE_BIN" run test/fixtures/xray/xray_native_cli_compile_driver.spl > "$WORK/module.log" 2>&1
+    )
+    grep -q '^CLI-COMPILE rc=0' "$WORK/module.log" && [ -s "$MODULE" ] || {
+        echo "FAIL — --xray module build failed: $(grep -m1 -E '^error|CLI-COMPILE' "$WORK/module.log" | cut -c1-240)"; exit 1; }
+fi
+MODULE=$(abs "$MODULE")
+[ -s "$MODULE" ] || { echo "ERROR — nothing was checked (module $MODULE missing)"; exit 2; }
+
+# ---- the controller: compiled (--builder / --host-bin) or the host source
+# run by --simple (`run`). The verdict names which one ran.
+if [ -n "$BUILDER" ] && [ -z "$HOST_BIN" ]; then
+    BUILDER=$(abs "$BUILDER")
+    HOST_BIN=$WORK/spy_host
+    SIMPLE_BOOTSTRAP=1 SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1 \
+        capped timeout "$STEP_TIMEOUT" "$BUILDER" native-build "$HOST_SRC" --refresh-source-authority -o "$HOST_BIN" > "$WORK/host-build.log" 2>&1
+    [ -x "$HOST_BIN" ] || { echo "FAIL — controller executable build failed: $(grep -m1 -E 'error' "$WORK/host-build.log" | cut -c1-240)"; exit 1; }
+fi
+if [ -n "$HOST_BIN" ]; then
+    HOST_BIN=$(abs "$HOST_BIN")
+    file "$HOST_BIN" 2>/dev/null | grep -q 'ELF' || { echo "ERROR — nothing was checked (controller $HOST_BIN is not a native ELF executable)"; exit 2; }
+    MODE="compiled controller $(sha256sum "$HOST_BIN" | cut -c1-12)"
+    (export XRAY_E2E_LIB=$MODULE; capped timeout 300 "$HOST_BIN" > "$WORK/host.log" 2>&1)
+else
+    [ -n "$SIMPLE_BIN" ] || { echo "ERROR — nothing was checked (need --simple, --builder or --host-bin for the controller)"; exit 2; }
+    SIMPLE_BIN=$(abs "$SIMPLE_BIN")
+    MODE="interpreted controller (simple run)"
+    (export XRAY_E2E_LIB=$MODULE; capped timeout 900 "$SIMPLE_BIN" run "$HOST_SRC" > "$WORK/host.log" 2>&1)
+fi
+host_rc=$?
+cp "$WORK/host.log" "$WORK/transcript.log"
+# A controller that printed SPY-HOST-OK but then crashed or timed out is a FAIL.
+if [ "$host_rc" -ne 0 ]; then
+    echo "FAIL — controller exited rc=$host_rc ($MODE): $(grep -m1 -E "SPY-HOST-ERROR|error" "$WORK/host.log" | cut -c1-200)"
+    exit 1
+fi
+reason=$(sp_transcript_ok "$WORK/host.log")
+if [ $? -ne 0 ]; then
+    echo "FAIL — $reason ($MODE, rc=$host_rc)"
+    exit 1
+fi
+ids="module=$(sha256sum "$MODULE" | cut -c1-12)"
+[ -n "$SIMPLE_BIN" ] && ids="$ids simple=$(sha256sum "$SIMPLE_BIN" | cut -c1-12)"
+echo "PASS — $reason check(s) (dynload, log, profile+exclusive fold, reenable, container, rollback, recover; $TRIPLE; $MODE; $ids)"
+exit 0

@@ -1,0 +1,263 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+"""
+As a user managing Claude hooks, I want the hooks menu to list, group, filter,
+toggle and re-prompt hooks and to flag invalid ones, so that I can see and change
+what runs around my tools without editing config files by hand.
+"""
+use std.spec.step
+
+use std.spec.*
+use app.llm_caret.claude_full.components.hooks.HooksConfigMenu.*
+
+fn ids_of(rows: [HookConfigRow]) -> [text]:
+    var out: [text] = []
+    for r in rows:
+        out.push(r.hook.id)
+    out
+
+fn main() -> ():
+    describe("HookConfig normalization and validation", fn() -> ():
+        it("normalizes id, event, matcher, mode and source aliases", fn() -> ():
+            step("normalizes id, event, matcher, mode and source aliases")
+            val h = HookConfig.new(" ID ", "  n ", "pre-tool-use", "any", "workspace", " p ", true, "global")
+            expect(h.id).to_equal("id")
+            expect(h.name).to_equal("n")
+            expect(h.event).to_equal("PreToolUse")
+            expect(h.matcher).to_equal("*")
+            expect(h.mode).to_equal("project")
+            expect(h.prompt).to_equal("p")
+            expect(h.source).to_equal("user")
+            expect(normalizeHookEvent("post tool use")).to_equal("PostToolUse")
+            expect(normalizeHookEvent("subagent-stop")).to_equal("SubagentStop")
+            expect(normalizeHookEvent("session start")).to_equal("SessionStart")
+            expect(normalizeHookEvent("nonsense")).to_equal("Unknown")
+            expect(normalizeHookMode("GLOBAL")).to_equal("user")
+            expect(normalizeHookMode("zzz")).to_equal("unknown")
+            expect(normalizeHookSource("")).to_equal("project")
+        )
+
+        it("titles unnamed hooks by event and matcher", fn() -> ():
+            step("titles unnamed hooks by event and matcher")
+            val h = HookConfig.new("a", "  ", "Stop", "Bash", "local", "p", false, "")
+            expect(h.title()).to_equal("Stop Bash")
+            expect(h.statusLabel()).to_equal("disabled")
+            expect(HookConfig.new("a", "Named", "Stop", "Bash", "local", "p", true, "").title()).to_equal("Named")
+        )
+
+        it("reports the first validation problem in order", fn() -> ():
+            step("reports the first validation problem in order")
+            expect(validateHookConfig(HookConfig.new("", "n", "Stop", "x", "local", "p", true, ""))).to_equal("Hook id is required")
+            expect(validateHookConfig(HookConfig.new("a", "n", "bogus", "x", "local", "p", true, ""))).to_equal("Unsupported hook event")
+            expect(validateHookConfig(HookConfig.new("a", "n", "Stop", "", "local", "p", true, ""))).to_equal("Matcher is required")
+            expect(validateHookConfig(HookConfig.new("a", "n", "Stop", "x", "weird", "p", true, ""))).to_equal("Unsupported hook mode")
+            expect(validateHookConfig(HookConfig.new("a", "n", "Stop", "x", "local", "  ", true, ""))).to_equal("Prompt is required")
+            val ok = HookConfig.new("a", "n", "Stop", "x", "local", "p", true, "")
+            expect(ok.valid()).to_equal(true)
+            expect(ok.validationMessage()).to_equal("")
+        )
+
+        it("matches queries across id, title, prompt and source and honours filters", fn() -> ():
+            step("matches queries across id, title, prompt and source and honours filters")
+            val h = sampleHookConfigs()[0]
+            expect(h.matches("SHELLCHECK", "all", "all", "all")).to_equal(true)
+            expect(h.matches("format", "all", "all", "all")).to_equal(true)
+            expect(h.matches("zzz", "all", "all", "all")).to_equal(false)
+            expect(h.matches("", "pre tool use", "bash", "project")).to_equal(true)
+            expect(h.matches("", "Stop", "all", "all")).to_equal(false)
+            expect(h.matches("", "all", "Edit", "all")).to_equal(false)
+            expect(h.matches("", "all", "all", "user")).to_equal(false)
+        )
+    )
+
+    describe("HooksConfigMenu rows and groups", fn() -> ():
+        it("sorts rows by event, matcher, title then id", fn() -> ():
+            step("sorts rows by event, matcher, title then id")
+            val m = openHooksConfigMenu(sampleHookConfigs())
+            expect(ids_of(m.rows())).to_equal(["post-edit-tests", "pre-bash-format", "notify-stop", "submit-summary"])
+            expect(m.rows()[0].selected).to_equal(true)
+            expect(m.rows()[0].marker()).to_equal(">")
+            expect(m.rows()[1].marker()).to_equal(" ")
+        )
+
+        it("groups rows by event in canonical order with counts", fn() -> ():
+            step("groups rows by event in canonical order with counts")
+            val groups = openHooksConfigMenu(sampleHookConfigs()).groups()
+            expect(groups.len()).to_equal(4)
+            expect(groups[0].event).to_equal("PreToolUse")
+            expect(groups[0].summary()).to_equal("Pre tool use 1 enabled, 0 disabled, 0 invalid")
+            expect(groups[2].summary()).to_equal("Stop 0 enabled, 1 disabled, 0 invalid")
+            expect(groups[3].event).to_equal("Submit")
+        )
+
+        it("counts invalid rows in a group", fn() -> ():
+            step("counts invalid rows in a group")
+            val bad = HookConfig.new("bad", "Bad", "Stop", "x", "local", "", true, "")
+            val rows = hookConfigRows([bad], HooksConfigMenuState.closed())
+            expect(rows[0].validation).to_equal("Prompt is required")
+            expect(HookConfigGroup.new("Stop", rows).summary()).to_equal("Stop 1 enabled, 0 disabled, 1 invalid")
+            expect(countInvalidHookConfigs([bad])).to_equal(1)
+        )
+
+        it("filters by query, event, matcher and mode", fn() -> ():
+            step("filters by query, event, matcher and mode")
+            val m = openHooksConfigMenu(sampleHookConfigs())
+            expect(ids_of(m.query("shellcheck").rows())).to_equal(["pre-bash-format"])
+            expect(ids_of(m.eventFilter("post tool use").rows())).to_equal(["post-edit-tests"])
+            expect(ids_of(m.matcherFilter("EDIT").rows())).to_equal(["post-edit-tests"])
+            expect(ids_of(m.modeFilter("global").rows())).to_equal(["post-edit-tests"])
+            expect(m.query("zzz").rows().len()).to_equal(0)
+            expect(m.query("shellcheck").state.lastAction).to_equal("query")
+        )
+
+        it("treats a * matcher filter as the wildcard matcher, not as all", fn() -> ():
+            step("treats a * matcher filter as the wildcard matcher, not as all")
+            val m = openHooksConfigMenu(sampleHookConfigs())
+            expect(ids_of(m.matcherFilter("*").rows())).to_equal(["notify-stop"])
+            expect(ids_of(m.matcherFilter("any").rows())).to_equal(["notify-stop"])
+            expect(m.eventFilter("*").rows().len()).to_equal(4)
+        )
+
+        it("resets the selection when a filter changes", fn() -> ():
+            step("resets the selection when a filter changes")
+            val moved = openHooksConfigMenu(sampleHookConfigs()).handleKey("end")
+            expect(moved.state.selectedIndex).to_equal(3)
+            expect(moved.query("a").state.selectedIndex).to_equal(0)
+        )
+    )
+
+    describe("HooksConfigMenu keyboard and actions", fn() -> ():
+        it("moves selection with wraparound", fn() -> ():
+            step("moves selection with wraparound")
+            val m = openHooksConfigMenu(sampleHookConfigs())
+            expect(m.handleKey("down").state.selectedIndex).to_equal(1)
+            expect(m.handleKey("j").state.selectedIndex).to_equal(1)
+            expect(m.handleKey("up").state.selectedIndex).to_equal(3)
+            expect(m.handleKey("end").state.selectedIndex).to_equal(3)
+            expect(m.handleKey("end").handleKey("down").state.selectedIndex).to_equal(0)
+            expect(m.handleKey("end").handleKey("home").state.selectedIndex).to_equal(0)
+            expect(m.handleKey("zzz").state.selectedIndex).to_equal(0)
+        )
+
+        it("closes on escape", fn() -> ():
+            step("closes on escape")
+            val closed = openHooksConfigMenu(sampleHookConfigs()).handleKey("escape")
+            expect(closed.state.isOpen).to_equal(false)
+            expect(closed.state.lastAction).to_equal("close")
+            expect(closed.render()).to_equal("Hooks config menu closed")
+        )
+
+        it("tracks open and close actions and the selected hook", fn() -> ():
+            step("tracks open and close actions and the selected hook")
+            val m = openHooksConfigMenu(sampleHookConfigs())
+            expect(m.state.lastAction).to_equal("open")
+            val sel = m.selectedHook() ?? HookConfig.new("none", "", "Stop", "x", "local", "p", true, "")
+            expect(sel.id).to_equal("post-edit-tests")
+            val none = createHooksConfigMenu([]).selectedHook() ?? HookConfig.new("none", "", "Stop", "x", "local", "p", true, "")
+            expect(none.id).to_equal("none")
+            expect(m.close().state.isOpen).to_equal(false)
+        )
+
+        it("toggles the selected hook and leaves the others alone", fn() -> ():
+            step("toggles the selected hook and leaves the others alone")
+            val m = openHooksConfigMenu(sampleHookConfigs()).toggleSelected()
+            expect(m.state.lastAction).to_equal("toggle")
+            val rows = m.rows()
+            expect(rows[0].hook.enabled).to_equal(false)
+            expect(rows[1].hook.enabled).to_equal(true)
+            expect(toggleHookConfig(sampleHookConfigs(), "NOTIFY-STOP")[2].enabled).to_equal(true)
+            expect(createHooksConfigMenu([]).toggleSelected().hooks.len()).to_equal(0)
+        )
+
+        it("edits the selected hook prompt through the dialog", fn() -> ():
+            step("edits the selected hook prompt through the dialog")
+            val opened = openHooksConfigMenu(sampleHookConfigs()).openPromptForSelected()
+            expect(opened.state.promptDialog.isOpen).to_equal(true)
+            expect(opened.state.promptDialog.title).to_equal("Edit prompt for Run focused tests")
+            expect(opened.state.promptDialog.value).to_equal("Run the focused test for edited files.")
+            expect(opened.state.lastAction).to_equal("prompt-open")
+            val typed = opened.updatePrompt("  new prompt  ")
+            expect(typed.state.lastAction).to_equal("prompt-input")
+            val saved = typed.applyPrompt()
+            expect(saved.state.promptDialog.isOpen).to_equal(false)
+            expect(saved.state.lastAction).to_equal("prompt-save")
+            expect(saved.rows()[0].hook.prompt).to_equal("new prompt")
+            expect(saved.rows()[1].hook.prompt).to_equal("Run shellcheck before executing the tool.")
+        )
+
+        it("rejects an empty prompt and a missing hook", fn() -> ():
+            step("rejects an empty prompt and a missing hook")
+            val empty = openHooksConfigMenu(sampleHookConfigs()).openPromptForSelected().updatePrompt("   ").applyPrompt()
+            expect(empty.state.promptDialog.error).to_equal("Prompt cannot be empty")
+            expect(empty.state.lastAction).to_equal("prompt-error")
+            expect(empty.render().contains("Edit prompt for Run focused tests - Prompt cannot be empty")).to_equal(true)
+            val orphan = openHooksConfigMenu([]).openPromptForSelected()
+            expect(orphan.state.promptDialog.error).to_equal("Select a hook first")
+            expect(orphan.applyPrompt().state.promptDialog.error).to_equal("Select a hook first")
+            val untouched = openHooksConfigMenu(sampleHookConfigs()).applyPrompt()
+            expect(untouched.state.promptDialog.isOpen).to_equal(false)
+        )
+    )
+
+    describe("HooksConfigMenu rendering", fn() -> ():
+        it("renders the summary, groups and rows with markers", fn() -> ():
+            step("renders the summary, groups and rows with markers")
+            val lines = openHooksConfigMenu(sampleHookConfigs()).render().split("\n")
+            expect(lines.len()).to_equal(9)
+            expect(lines[0]).to_equal("Hooks config 4/4 | 3 enabled | 0 invalid | event All | matcher All | mode All")
+            expect(lines[1]).to_equal("Pre tool use 1 enabled, 0 disabled, 0 invalid")
+            expect(lines[2]).to_equal("  Format Bash command [Pre tool use / Bash / Project] enabled")
+            expect(lines[4]).to_equal("> Run focused tests [Post tool use / Edit / User] enabled")
+            expect(lines[6]).to_equal("  Notify on stop [Stop / * / Local] disabled")
+            expect(lines[8]).to_equal("  Submit transcript summary [Submit / prompt / Project] enabled")
+        )
+
+        it("appends validation messages to invalid rows", fn() -> ():
+            step("appends validation messages to invalid rows")
+            val bad = HookConfig.new("bad", "Bad", "Stop", "x", "local", "", true, "")
+            val row = hookConfigRows([bad], HooksConfigMenuState.closed())[0]
+            expect(renderHookConfigRow(row)).to_equal("> Bad [Stop / x / Local] enabled - Prompt is required")
+            expect(row.summary()).to_equal("> Bad [Stop / x / Local] enabled - Prompt is required")
+        )
+
+        it("renders loading, error, empty and no-match states", fn() -> ():
+            step("renders loading, error, empty and no-match states")
+            val m = openHooksConfigMenu(sampleHookConfigs())
+            expect(m.loading().render()).to_equal("Loading hooks configuration...")
+            expect(m.fail(" boom ").render()).to_equal("Hooks config error: boom")
+            expect(openHooksConfigMenu([]).render()).to_equal("No hooks configured")
+            expect(m.query("zzz").render()).to_equal("No hooks match search \"zzz\"")
+            expect(m.eventFilter("Stop").matcherFilter("x").render()).to_equal("No hooks match event Stop and matcher x")
+            expect(m.modeFilter("local").eventFilter("Submit").render()).to_equal("No hooks match event Submit and mode Local")
+            expect(hookConfigEmptyMessage(HooksConfigMenuState.closed())).to_equal("No hooks match")
+        )
+
+        it("reflects filters in the summary line", fn() -> ():
+            step("reflects filters in the summary line")
+            val m = openHooksConfigMenu(sampleHookConfigs()).eventFilter("Stop").modeFilter("local")
+            expect(m.summary()).to_equal("Hooks config 1/4 | 0 enabled | 0 invalid | event Stop | matcher All | mode Local")
+        )
+
+        it("normalizes filters and labels", fn() -> ():
+            step("normalizes filters and labels")
+            expect(normalizeHookEventFilter("*")).to_equal("all")
+            expect(normalizeHookEventFilter("stop")).to_equal("Stop")
+            expect(normalizeHookMatcherFilter("ALL")).to_equal("all")
+            expect(normalizeHookMatcherFilter("any")).to_equal("*")
+            expect(normalizeHookMatcherFilter("*")).to_equal("*")
+            expect(normalizeHookModeFilter("*")).to_equal("all")
+            expect(normalizeHookModeFilter("")).to_equal("all")
+            expect(hookEventFilterLabel("all")).to_equal("All")
+            expect(hookEventLabel("precompact")).to_equal("Pre compact")
+            expect(hookModeFilterLabel("workspace")).to_equal("Project")
+            expect(hookMatcherFilterLabel("any")).to_equal("*")
+            expect(hookEventOptions().len()).to_equal(9)
+            expect(nextHookConfigIndex(2, 0)).to_equal(0)
+            expect(previousHookConfigIndex(0, 3)).to_equal(2)
+            expect(clampHookConfigIndex(9, 3)).to_equal(2)
+            expect(clampHookConfigIndex(-1, 3)).to_equal(0)
+        )
+    )
+    return ()

@@ -1,0 +1,276 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+"""
+As a user running `claude plugin ...` and `claude plugin marketplace ...`, I want
+validate, list, add, install, enable, disable and update to report the right text,
+scope and exit code, so that I can trust what the CLI says it did.
+"""
+use std.spec.step
+
+use std.spec.*
+use app.llm_caret.claude_full.cli.handlers.plugins.*
+
+fn main() -> ():
+    describe("plugin validate", fn() -> ():
+        it("passes with warnings when the manifest has only warnings", fn() -> ():
+            step("passes with warnings when the manifest has only warnings")
+            val m = PluginValidationResult.new("plugin", "/p/plugin.json", true, [], ["w1"])
+            val r = pluginValidateHandler(m, [], false)
+            expect(r.exitCode).to_equal(0)
+            expect(r.stdout.contains("Validating plugin manifest: /p/plugin.json")).to_equal(true)
+            expect(r.stdout.contains("⚠ Found 1 warning:")).to_equal(true)
+            expect(r.stdout.ends_with("✓ Validation passed with warnings")).to_equal(true)
+        )
+
+        it("fails when any content file fails and reports plural errors", fn() -> ():
+            step("fails when any content file fails and reports plural errors")
+            val m = PluginValidationResult.new("plugin", "/p/plugin.json", true, [], [])
+            val c = PluginValidationResult.new("skill", "/p/s.md", false, ["e1", "e2"], [])
+            val r = pluginValidateHandler(m, [c], true)
+            expect(r.exitCode).to_equal(1)
+            expect(r.coworkEnabled).to_equal(true)
+            expect(r.stderr.contains("✖ Found 2 errors:")).to_equal(true)
+            expect(r.stderr.contains("  ‣ e2")).to_equal(true)
+            expect(r.stderr.ends_with("✖ Validation failed")).to_equal(true)
+        )
+
+        it("passes cleanly with no warnings", fn() -> ():
+            step("passes cleanly with no warnings")
+            val m = PluginValidationResult.new("marketplace", "/m.json", true, [], [])
+            val r = pluginValidateHandler(m, [], false)
+            expect(r.stdout.ends_with("✓ Validation passed")).to_equal(true)
+            expect(pluginValidateUnexpectedError("boom").exitCode).to_equal(2)
+            expect(pluginValidateUnexpectedError("boom").stderr).to_equal("✖ Unexpected error during validation: boom")
+        )
+    )
+
+    describe("plugin list", fn() -> ():
+        it("tells the user when nothing is installed", fn() -> ():
+            step("tells the user when nothing is installed")
+            val r = pluginListHandler([], [], [], [], [], false, false, false)
+            expect(r.stdout).to_equal("No plugins installed. Use `claude plugin install` to install a plugin.")
+            expect(r.events[0]).to_equal("tengu_plugin_list_command")
+        )
+
+        it("shows enabled, disabled and failed status per installed plugin", fn() -> ():
+            step("shows enabled, disabled and failed status per installed plugin")
+            val installed = [
+                PluginInstallRecord.new("a@mk", "1.0", "user", "/a"),
+                PluginInstallRecord.new("b@mk", "", "project", "/b"),
+                PluginInstallRecord.new("c@mk", "2.0", "local", "/c")
+            ]
+            val errs = [PluginLoadError.new("c@mk", "c", "/c", "bad manifest")]
+            val out = pluginListHuman(installed, [], errs, ["a@mk"])
+            expect(out.contains("  ‣ a@mk\n    Version: 1.0\n    Scope: user\n    Status: ✓ enabled")).to_equal(true)
+            expect(out.contains("    Version: unknown\n    Scope: project\n    Status: ✖ disabled")).to_equal(true)
+            expect(out.contains("Status: ✖ failed to load\n    Error: bad manifest")).to_equal(true)
+        )
+
+        it("lists session-only inline plugins and their load errors", fn() -> ():
+            step("lists session-only inline plugins and their load errors")
+            val loaded = [LoadedPluginRecord.new("dev@inline", "dev", "0.1", "/dev", true)]
+            val errs = [PluginLoadError.new("inline[1]", "", "/x", "no manifest")]
+            val out = pluginListHuman([], loaded, errs, [])
+            expect(out.contains("Session-only plugins (--plugin-dir):")).to_equal(true)
+            expect(out.contains("  ‣ dev@inline\n    Version: 0.1\n    Path: /dev\n    Status: ✓ loaded")).to_equal(true)
+            expect(out.contains("  ‣ inline[1]: ✖ no manifest")).to_equal(true)
+            expect(out.contains("Installed plugins:")).to_equal(false)
+        )
+
+        it("emits JSON with enabled flags, errors and mcp servers", fn() -> ():
+            step("emits JSON with enabled flags, errors and mcp servers")
+            val installed = [PluginInstallRecord.new("a@mk", "1.0", "user", "/a")]
+            var rec = LoadedPluginRecord.new("a@mk", "a", "1.0", "/a", true)
+            rec.mcpServers = ["srv1", "srv2"]
+            val errs = [PluginLoadError.new("a@mk", "a", "/a", "warn")]
+            val json = pluginListJson(installed, [rec], errs, ["a@mk"], [], false)
+            expect(json).to_equal("{\n  \"installed\": [\n    {\"id\":\"a@mk\",\"version\":\"1.0\",\"scope\":\"user\",\"enabled\":true,\"installPath\":\"/a\",\"errors\":[\"warn\"],\"mcpServers\":[\"srv1\",\"srv2\"]}\n  ]\n}")
+        )
+
+        it("appends the available marketplace plugins that are not installed", fn() -> ():
+            step("appends the available marketplace plugins that are not installed")
+            val installed = [PluginInstallRecord.new("a@mk", "1", "user", "/a")]
+            var mk = MarketplaceRecord.new("mk", "github", "o/mk")
+            mk.pluginNames = ["a", "b"]
+            expect(availablePluginsJson(installed, [mk])).to_equal("[{\"pluginId\":\"b@mk\",\"name\":\"b\",\"marketplaceName\":\"mk\",\"source\":\"github\"}]")
+            val json = pluginListJson(installed, [], [], [], [mk], true)
+            expect(json.contains(",\n  \"available\": [{\"pluginId\":\"b@mk\"")).to_equal(true)
+        )
+
+        it("includes inline plugins and inline errors in JSON as session scope", fn() -> ():
+            step("includes inline plugins and inline errors in JSON as session scope")
+            val loaded = [LoadedPluginRecord.new("d@inline", "d", "", "/d", false)]
+            val errs = [PluginLoadError.new("inline[0]", "", "/e", "oops")]
+            val json = pluginListJson([], loaded, errs, [], [], false)
+            expect(json.contains("{\"id\":\"d@inline\",\"version\":\"unknown\",\"scope\":\"session\",\"enabled\":false,\"installPath\":\"/d\"}")).to_equal(true)
+            expect(json.contains("{\"id\":\"inline[0]\",\"version\":\"unknown\",\"scope\":\"session\",\"enabled\":false,\"installPath\":\"/e\",\"errors\":[\"oops\"]}")).to_equal(true)
+        )
+    )
+
+    describe("marketplace commands", fn() -> ():
+        it("adds a github marketplace in the default user scope", fn() -> ():
+            step("adds a github marketplace in the default user scope")
+            val r = marketplaceAddHandler("acme/tools", "github", "", [], false, false)
+            expect(r.exitCode).to_equal(0)
+            expect(r.stdout).to_equal("Adding marketplace...\n✓ Successfully added marketplace: tools (declared in user settings)")
+            expect(r.scope).to_equal("user")
+            expect(r.cacheCleared).to_equal(true)
+            expect(r.events[0]).to_equal("tengu_marketplace_added:github")
+        )
+
+        it("names a git marketplace without its .git suffix and notes a materialized one", fn() -> ():
+            step("names a git marketplace without its .git suffix and notes a materialized one")
+            val r = marketplaceAddHandler("https://h/x/repo.git", "git", "project", [], true, true)
+            expect(r.stdout.contains("✓ Marketplace 'repo' already on disk - declared in project settings")).to_equal(true)
+            expect(r.coworkEnabled).to_equal(true)
+            expect(marketplaceNameFromSource("./local/dir", "directory")).to_equal("dir")
+            expect(basenameWithoutSuffix("plain")).to_equal("plain")
+        )
+
+        it("rejects a bad scope, a bad kind and sparse on a directory source", fn() -> ():
+            step("rejects a bad scope, a bad kind and sparse on a directory source")
+            expect(marketplaceAddHandler("x", "github", "galaxy", [], false, false).stderr).to_equal("✖ Invalid scope 'galaxy'. Use: user, project, or local")
+            expect(marketplaceAddHandler("x", "ftp", "", [], false, false).stderr).to_equal("✖ Invalid marketplace source format. Try: owner/repo, https://..., or ./path")
+            expect(marketplaceAddHandler("x", "directory", "", ["a"], false, false).stderr).to_equal("✖ --sparse is only supported for github and git marketplace sources (got: directory)")
+            expect(marketplaceAddHandler("x", "directory", "", ["a"], false, false).exitCode).to_equal(1)
+        )
+
+        it("lists marketplaces as text and JSON", fn() -> ():
+            step("lists marketplaces as text and JSON")
+            expect(marketplaceListHuman([])).to_equal("No marketplaces configured")
+            var a = MarketplaceRecord.new("a", "github", "o/a")
+            a.installLocation = "/i/a"
+            val b = MarketplaceRecord.new("b", "url", "https://b")
+            expect(marketplaceListHuman([a, b])).to_equal("Configured marketplaces:\n\n  ‣ a\n    Source: GitHub (o/a)\n\n  ‣ b\n    Source: URL (https://b)\n\n")
+            expect(marketplaceListJson([a, b])).to_equal("[{\"name\":\"a\",\"source\":\"github\",\"location\":\"o/a\",\"installLocation\":\"/i/a\"},{\"name\":\"b\",\"source\":\"url\",\"location\":\"https://b\",\"installLocation\":\"\"}]")
+            expect(marketplaceListHandler([a], true, true).coworkEnabled).to_equal(true)
+        )
+
+        it("labels each marketplace source kind", fn() -> ():
+            step("labels each marketplace source kind")
+            expect(marketplaceSourceLabel("git", "g")).to_equal("Git (g)")
+            expect(marketplaceSourceLabel("directory", "d")).to_equal("Directory (d)")
+            expect(marketplaceSourceLabel("file", "f")).to_equal("File (f)")
+            expect(marketplaceSourceLabel("weird", "w")).to_equal("weird (w)")
+        )
+
+        it("removes and updates marketplaces with cache invalidation", fn() -> ():
+            step("removes and updates marketplaces with cache invalidation")
+            val rm = marketplaceRemoveHandler("old", false)
+            expect(rm.stdout).to_equal("✓ Successfully removed marketplace: old")
+            expect(rm.events[0]).to_equal("tengu_marketplace_removed:old")
+            val one = marketplaceUpdateHandler("mk", 3, false)
+            expect(one.stdout).to_equal("Updating marketplace: mk...\n✓ Successfully updated marketplace: mk")
+            expect(one.cacheCleared).to_equal(true)
+            val none = marketplaceUpdateHandler("", 0, false)
+            expect(none.stdout).to_equal("No marketplaces configured")
+            expect(none.cacheCleared).to_equal(false)
+            val all = marketplaceUpdateHandler("", 2, false)
+            expect(all.stdout).to_equal("Updating 2 marketplace(s)...\n✓ Successfully updated 2 marketplace(s)")
+            expect(all.events[0]).to_equal("tengu_marketplace_updated_all:2")
+            expect(handleMarketplaceError("net down", "add marketplace").stderr).to_equal("✖ Failed to add marketplace: net down")
+        )
+    )
+
+    describe("plugin install, enable, disable, update", fn() -> ():
+        it("splits name@marketplace identifiers", fn() -> ():
+            step("splits name@marketplace identifiers")
+            val id = parsePluginIdentifier("tool@acme")
+            expect(id.name).to_equal("tool")
+            expect(id.marketplace).to_equal("acme")
+            expect(parsePluginIdentifier("solo").marketplace).to_equal("")
+            expect(parsePluginName("tool@acme")).to_equal("tool")
+        )
+
+        it("installs and uninstalls with scope validation", fn() -> ():
+            step("installs and uninstalls with scope validation")
+            val ok = pluginInstallHandler("t@m", "", false)
+            expect(ok.scope).to_equal("user")
+            expect(ok.events[0]).to_equal("tengu_plugin_install_command:t:m:user")
+            expect(pluginInstallHandler("t@m", "project", true).stderr).to_equal("--cowork can only be used with user scope")
+            expect(pluginInstallHandler("t@m", "galaxy", false).stderr).to_equal("Invalid scope: galaxy. Must be one of: user, project, local.")
+            val un = pluginUninstallHandler("t@m", "local", false, true)
+            expect(un.keepData).to_equal(true)
+            expect(un.events[0]).to_equal("tengu_plugin_uninstall_command:t:m:local")
+        )
+
+        it("enables with an auto scope or the forced cowork scope", fn() -> ():
+            step("enables with an auto scope or the forced cowork scope")
+            val auto = pluginEnableHandler("t@m", "", false)
+            expect(auto.scope).to_equal("")
+            expect(auto.events[0]).to_equal("tengu_plugin_enable_command:t:m:auto")
+            val cow = pluginEnableHandler("t", "", true)
+            expect(cow.scope).to_equal("user")
+            expect(cow.events[0]).to_equal("tengu_plugin_enable_command:t::user")
+            expect(pluginEnableHandler("t", "bogus", false).stderr).to_equal("Invalid scope \"bogus\". Valid scopes: user, project, local")
+            expect(pluginEnableHandler("t", "project", true).stderr).to_equal("--cowork can only be used with user scope")
+        )
+
+        it("enforces the all-versus-name rules when disabling", fn() -> ():
+            step("enforces the all-versus-name rules when disabling")
+            expect(pluginDisableHandler("t", "", false, true).stderr).to_equal("Cannot use --all with a specific plugin")
+            expect(pluginDisableHandler("", "", false, false).stderr).to_equal("Please specify a plugin name or use --all to disable all plugins")
+            expect(pluginDisableHandler("", "user", false, true).stderr).to_equal("Cannot use --scope with --all")
+            expect(pluginDisableHandler("", "", true, true).events[0]).to_equal("tengu_plugin_disable_command:all")
+            expect(pluginDisableHandler("t@m", "local", false, false).events[0]).to_equal("tengu_plugin_disable_command:t:m:local")
+            expect(pluginDisableHandler("t", "bogus", false, false).exitCode).to_equal(1)
+        )
+
+        it("updates only in user or project scope", fn() -> ():
+            step("updates only in user or project scope")
+            expect(pluginUpdateHandler("t@m", "", false).scope).to_equal("user")
+            expect(pluginUpdateHandler("t@m", "project", false).events[0]).to_equal("tengu_plugin_update_command:t:m:project")
+            expect(pluginUpdateHandler("t@m", "local", false).stderr).to_equal("Invalid scope \"local\". Valid scopes: user, project")
+            expect(pluginUpdateHandler("t@m", "project", true).stderr).to_equal("--cowork can only be used with user scope")
+        )
+    )
+
+    describe("plugin text helpers", fn() -> ():
+        it("finds first and last occurrences", fn() -> ():
+            step("finds first and last occurrences")
+            expect(indexOf("a/b/c", "/")).to_equal(1)
+            expect(lastIndexOf("a/b/c", "/")).to_equal(3)
+            expect(indexOf("abc", "z")).to_equal(-1)
+            expect(lastIndexOf("abc", "z")).to_equal(-1)
+        )
+
+        it("joins, quotes and pluralizes", fn() -> ():
+            step("joins, quotes and pluralizes")
+            expect(joinText(["a", "b", "c"], ", ")).to_equal("a, b, c")
+            expect(joinText([], ", ")).to_equal("")
+            expect(textArrayJson(["x", "y"])).to_equal("[\"x\",\"y\"]")
+            expect(textArrayJson([])).to_equal("[]")
+            expect(plural(1, "error")).to_equal("error")
+            expect(plural(2, "error")).to_equal("errors")
+            expect(boolText(true)).to_equal("true")
+            expect(defaultUnknown("")).to_equal("unknown")
+            expect(defaultUnknown("v")).to_equal("v")
+        )
+
+        it("matches load errors by source or plugin name", fn() -> ():
+            step("matches load errors by source or plugin name")
+            val errs = [PluginLoadError.new("a@m", "a", "/", "e1"), PluginLoadError.new("zzz", "a", "/", "e2"), PluginLoadError.new("q", "", "/", "e3")]
+            val got = errorsForPlugin("a@m", "a", errs)
+            expect(got.len()).to_equal(2)
+            expect(got[1]).to_equal("e2")
+            expect(errorsForPlugin("nope", "", errs).len()).to_equal(0)
+            expect(countInlinePlugins([LoadedPluginRecord.new("x@inline", "x", "", "", true), LoadedPluginRecord.new("y@m", "y", "", "", true)])).to_equal(1)
+            expect(serversForLoaded("none", [])).to_equal([])
+        )
+
+        it("escapes quotes and backslashes in every JSON string field", fn() -> ():
+            step("escapes quotes and backslashes in every JSON string field")
+            val installed = [PluginInstallRecord.new("a\"b@mk", "1.0", "user", "C:\\p\\a")]
+            val errs = [PluginLoadError.new("a\"b@mk", "a\"b", "C:\\p\\a", "bad \"name\"")]
+            val json = pluginListJson(installed, [], errs, [], [], false)
+            expect(json.contains("\"id\":\"a\\\"b@mk\"")).to_equal(true)
+            expect(json.contains("\"installPath\":\"C:\\\\p\\\\a\"")).to_equal(true)
+            expect(json.contains("\"errors\":[\"bad \\\"name\\\"\"]")).to_equal(true)
+            expect(textArrayJson(["q\"", "b\\"])).to_equal("[\"q\\\"\",\"b\\\\\"]")
+            val mk = MarketplaceRecord.new("m\"k", "directory", "C:\\mk")
+            expect(marketplaceListJson([mk])).to_equal("[{\"name\":\"m\\\"k\",\"source\":\"directory\",\"location\":\"C:\\\\mk\",\"installLocation\":\"\"}]")
+        )
+    )
+    return ()

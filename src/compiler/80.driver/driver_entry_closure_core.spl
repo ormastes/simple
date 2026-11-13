@@ -587,6 +587,16 @@ fn _driver_module_name_from_repo_rel(rel: text) -> text:
         segs = segs.push(part)
     segs.join(".")
 
+fn _driver_windows_slash_path(path: text) -> text:
+    """`\` -> `/`, minus a `\\?\` verbatim prefix and trailing separators.
+    Case is kept: the relative remainder becomes the module name."""
+    var value = path.replace("\\", "/")
+    if value.starts_with("//?/"):
+        value = value.substring(4)
+    while value.ends_with("/") and value.len() > 1:
+        value = value[0:value.len() - 1]
+    value
+
 fn _driver_physical_module_identity(path: text, fallback: text) -> (text, bool):
     """Module name derived from the SYMLINK-RESOLVED path.
     `_driver_module_name_from_path` is lexical, so a file reached through
@@ -616,9 +626,18 @@ fn _driver_physical_module_identity(path: text, fallback: text) -> (text, bool):
         if root_abs == nil:
             return (fallback, false)
         root = root_abs.unwrap()
+        # Windows `realpath` answers `C:\dev\x\src\...`: compare on `/`
+        # separators (and a case-insensitive drive/root) or no repository
+        # source is ever proven a member and tier aliases are never folded.
+        if host_is_windows_host():
+            root = _driver_windows_slash_path(root)
+            resolved = _driver_windows_slash_path(resolved)
     if root == "":
         return (fallback, false)
-    if not resolved.starts_with(root + "/"):
+    var under_root = resolved.starts_with(root + "/")
+    if not under_root and host_is_windows_host() and resolved.len() > root.len():
+        under_root = resolved.lower().starts_with(root.lower() + "/")
+    if not under_root:
         return (fallback, false)
     val rel = resolved.substring(root.len() + 1)
     if not rel.starts_with("src/") and not rel.starts_with("examples/"):

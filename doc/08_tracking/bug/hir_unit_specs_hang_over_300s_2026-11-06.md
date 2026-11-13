@@ -72,3 +72,19 @@ on the `par_fixed_array_*` side channel used by `val/var` declarations; struct
 field types are bare tags, so `[i64; 2]` and `[i64; 3]` bridge to the same
 `TypeKind.Array(i64, nil)`. Retaining it needs a per-field size in the flat decl
 nodes and the bridge. That is a parser/AST change, left open on this row.
+
+## Fix (2026-11-13, n2) — struct field `[T; N]` size carried to the AST
+
+The struct-field parser (`_ParserDecls/fn_struct_decls.spl`) now resets the
+`par_fixed_array_*` side channel before each field type. When the field's own
+top-level type is the sized array, it records the literal N in a new per-decl pool,
+`decl_field_array_sizes` (`_Ast/decl_nodes.spl`). That pool is mirrored at every
+touchpoint of the `decl_field_bits` pool, and `FLAT_POOL_CODEC_VERSION` is bumped
+to v16. The bridge (`module_assembly.spl` `flat_field_sized_type`) re-attaches N as
+`TypeKind.Array(elem, Some(IntLit(N)))`. HIR still lowers the array as dynamic
+(`types.spl` `HirTypeKind.Array(_, None)`), so the change affects only AST/surface
+identity, not codegen.
+`module_surface_semantic_projection_spec` passes 12/12 on the seed (about 105 s). Neighbour results:
+`flat_pool_codec_roundtrip_spec` 18/18 and `bitfield_bare_width_spec` 4/4 pass.
+`decl_metadata_lifetime_spec` (1 failure) and `facet_flat_decl_codec_spec`
+(2 failures) fail identically with and without this change.
