@@ -30,7 +30,13 @@ pub fn vk_result_name(r: i32) -> &'static str {
 
 /// The one error text for a failed `vkCreateDevice`, e.g.
 /// `vkCreateDevice(device 0 of 2, queue family 0, 5 attempt(s)): VK_ERROR_INITIALIZATION_FAILED (-3)`.
-pub fn vk_create_device_error(device_index: usize, device_count: usize, queue_family: u32, attempts: u32, r: i32) -> String {
+pub fn vk_create_device_error(
+    device_index: usize,
+    device_count: usize,
+    queue_family: u32,
+    attempts: u32,
+    r: i32,
+) -> String {
     format!(
         "vkCreateDevice(device {device_index} of {device_count}, queue family {queue_family}, {attempts} attempt(s)): {} ({r})",
         vk_result_name(r)
@@ -53,9 +59,23 @@ pub fn vk_create_device_with_retry<T>(
     mut create: impl FnMut() -> Result<T, i32>,
     mut sleep_ms: impl FnMut(u64),
 ) -> (Result<T, i32>, u32) {
-    // RED: single attempt, no retry.
-    let _ = &mut sleep_ms;
-    (create(), 1)
+    let mut attempts = 1u32;
+    let mut r = create();
+    for delay in VK_CREATE_DEVICE_RETRY_DELAYS_MS {
+        if !matches!(r, Err(VK_ERROR_INITIALIZATION_FAILED)) {
+            break;
+        }
+        eprintln!(
+            "[vulkan] vkCreateDevice attempt {attempts} failed: VK_ERROR_INITIALIZATION_FAILED (-3); retrying in {delay} ms"
+        );
+        sleep_ms(delay);
+        attempts += 1;
+        r = create();
+    }
+    if attempts > 1 && r.is_ok() {
+        eprintln!("[vulkan] vkCreateDevice succeeded on attempt {attempts}");
+    }
+    (r, attempts)
 }
 
 #[cfg(test)]
