@@ -80,6 +80,8 @@ use app.cli.native_build_streaming_request_owner.{native_build_streaming_surface
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_can_replace, hir_shard_recovery_unclaimed_count, hir_shard_aggregate_exit, hir_shard_recovery_seal, hir_shard_reap_state_v1, hir_shard_reap_deadline_hit_v1, hir_shard_recovery_owner_tree_progress_v1, hir_shard_recovery_failure_count, hir_shard_recovery_finished, hir_shard_recovery_block, hir_shard_recovery_blocked, hir_shard_recovery_reap_blocks_ledger_v1}
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_close_inventory,
     hir_shard_recovery_failed_rows_v1, hir_shard_recovery_replacements_dispatchable}
+use compiler.driver.driver_build.go_to_end_trial_link_v1.{go_to_end_trial_from_inputs_v1,
+    go_to_end_trial_inputs_from_ledger_v1, go_to_end_trial_link_options_v1}
 use compiler.driver.driver_build.native_mir_shard.{native_mir_shard_outcome_v1,
     native_mir_shard_outcome_after_hir_errors_v1, native_mir_shard_hir_compile_errors_recorded_v1,
     native_mir_shard_hir_compile_errors_path_v1}
@@ -371,6 +373,28 @@ fn native_build_should_use_worker(args: [text]) -> bool:
 # args, so the parent can verify the worker actually produced a binary instead
 # of trusting a bare exit code of 0 (see
 # doc/08_tracking/bug/native_build_worker_zombie_parent_hang_2026-07-03.md).
+# Value of a value-consuming flag (`--backend X` / `--backend=X`), or "".
+fn native_build_flag_value_arg_v1(args: [text], flag: text) -> text:
+    var i = 0
+    while i < args.len():
+        if args[i] == flag and i + 1 < args.len(): return args[i + 1]
+        if args[i].starts_with(flag + "="): return args[i].substring(flag.byte_len() + 1)
+        i += 1
+    ""
+
+# go-to-end after a failed MIR shard pool: the pool itself ran to the end
+# (fail-fast off), so every PASS row holds an object. Trial-link them with
+# the hosted link line and write `<out>.go-to-end.sdn` naming the failed rows
+# and every undefined symbol; the caller still exits 1.
+fn native_build_go_to_end_trial_after_mir_pool_v1(mir_ledger: text, args: [text]):
+    val output = output_path_arg(args)
+    if output == "":
+        eprint "[go-to-end] no -o/--output in args; trial link skipped"
+        return
+    val opts = go_to_end_trial_link_options_v1(native_build_flag_value_arg_v1(args, "--backend"),
+        native_build_flag_value_arg_v1(args, "--target"), native_build_flag_value_arg_v1(args, "--runtime-path"))
+    eprint go_to_end_trial_from_inputs_v1(go_to_end_trial_inputs_from_ledger_v1(mir_ledger), output, opts)
+
 fn output_path_arg(args: [text]) -> text:
     var i = 0
     while i < args.len():
@@ -1497,7 +1521,9 @@ fn run_mir_shards(args: [text], parallel: i64, simple_bin: text, timeout_ms: i64
         eprint "[mir-shard] HIR compile errors recorded by the shard frontend ({file_read(native_mir_shard_hir_compile_errors_path_v1(queue_dir)).trim()}); deterministic, no in-process MIR retry"
     if outcome != "link":
         eprint "[mir-shard] outcome={outcome} exit={run.code} failed_modules={run.failed_modules} claims={run.total_claims} all_stopped={run.all_stopped} blocked={run.blocked_reason}"
-    if outcome == "link": (outcome, queue_dir) else: (outcome, "")
+    # The ledger is also returned on "fail": go-to-end runs its trial link
+    # over the PASS objects it holds (the caller links only on "link").
+    if outcome == "link" or outcome == "fail": (outcome, queue_dir) else: (outcome, "")
 
 # ===== Focused-capsule shard pre-pass (exact Stage3/Stage4) =================
 #
@@ -2287,6 +2313,10 @@ fn run_native_build_worker_inner(raw_args: [text]) -> i64:
         else:
             native_build_env_restore_v1("SIMPLE_NATIVE_BUILD_WORKER", old_worker_marker)
             native_build_env_restore_v1(NATIVE_BUILD_WARM_CANDIDATE_ENV, old_warm_candidate)
+            # go-to-end: the pool ran to the end; trial-link its PASS objects
+            # and write the manifest this route never had. Still exit 1.
+            if mir_ledger != "" and (args.contains("--go-to-end") or (env_get("SIMPLE_NATIVE_GO_TO_END") ?? "") == "1"):
+                native_build_go_to_end_trial_after_mir_pool_v1(mir_ledger, args)
             eprint "error: MIR shard aggregate failure; link and artifact publication blocked"
             return 1
     # Publish the candidate path only for the real worker. Parse-shard_main
