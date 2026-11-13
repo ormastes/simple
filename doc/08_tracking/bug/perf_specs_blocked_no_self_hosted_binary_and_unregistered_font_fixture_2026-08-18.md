@@ -104,3 +104,7 @@ pinned host, run both named specs.
 ## Triage 2026-11-13 (Linux aarch64, lane uia) — row stays OPEN
 
 Blocked on this host: multicore_green_fanout_spec asserts empty stderr, which needs a self-hosted binary (the seed banner cannot be suppressed through its env -i probe), and the vector-font spec needs host-pinned baselines. The font-fixture half is fixed (1fc1852855a). Regression found, not repaired here: transplant 88aac2ffe28 undid cbe6b94a79f in multicore_green_fanout_spec.spl (mkdir -p build/tmp in unique_probe_path; bin/simple fallback in simple_binary), so probes now fail with 98/127 before reaching the stderr assertion; origin/main carries the same reverted text.
+
+## 2026-11-13 follow-up (Linux aarch64, lane uia)
+
+Probe regression repaired: cbe6b94a79f re-applied to test/05_perf/stress/multicore_green_fanout_spec.spl (mkdir -p build/tmp; bin/simple fallback). On release/1.0.0 5221a5058a8, Linux aarch64 (DGX Spark GB10), Rust seed af717f53d6bce3e5: before, 3 examples 2 failed with the harness sentinel (expected probe_write_failed, 98); after, with SIMPLE_BIN set to the seed, the probes run and the same 2 examples fail only on the empty-stderr assertion (seed banner). Row stays open on the self-hosted-binary blocker. origin/main still carries the reverted text and needs the same change.
