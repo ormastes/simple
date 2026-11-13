@@ -72,3 +72,6 @@ Residuals filed: `interp_while_val_binds_option_not_payload_2026-11-13`,
 `pure_err01_untyped_local_of_optional_call_not_rejected_2026-11-13`.
 The `worker_owner.spl` typed-binding workaround can be reverted to the direct
 `if val` once a seed carrying this fix is deployed.
+Not covered (deliberately unchanged): an explicitly annotated `Option<any>`
+subject (`optional_enum_payload_inner` returns `None` for an `any` payload),
+so `if val m = x` with `x: Option<any>` still keeps `m` as the Option enum.
