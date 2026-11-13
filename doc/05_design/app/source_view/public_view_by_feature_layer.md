@@ -126,3 +126,28 @@ synthetic summary entry is the ledger row of the symbol list.
 two layers (`10.core`, `20.app`), each layer with its own `__init__.spl`, and
 each file holding one symbol of every class so every reveal step adds exactly
 one known symbol.
+
+## Session view state (REQ-PUBVIEW-010..012, 2026-11-13)
+
+Pure transition: `src/lib/nogc_sync_mut/source/visibility_session.spl`
+(`SourceVisibilitySessionV1 {level, feature, layer, served, limit, notice}`).
+Each server keeps exactly one current value and replaces it with what
+`source_visibility_session_set_v1` / `source_visibility_session_serve_v1`
+return — no mutation of shared state, no locks.
+
+- **set**: an explicit level (+ scopes) starts a fresh countdown; `public` from a
+  private view is a revert with reason `explicit visibility=public`.
+- **serve**: a valid per-request level serves once and returns the session
+  unchanged; a private session view counts one request and, on the `limit`th
+  (default 3, `SIMPLE_VISIBILITY_AUTO_REVERT`), still serves privately then
+  reverts. The next public response carries the one-shot revert notice.
+- **view line**: `view: <level>[ (feature=…, layer=…)]` + countdown /
+  override / revert suffix, stated beside an unchanged listing shape.
+
+Wiring: `src/app/simple_lsp_mcp/visibility_state.spl` (MCP `simple_set_visibility`,
+`content[1]` view line) and `src/lib/nogc_sync_mut/lsp/lsp_handlers.spl`
+(raw LSP `simple.setVisibility`, documentSymbol/workspace symbol countdown).
+MCP `source_open` (simple-mcp) still takes a per-request `visibility` only.
+Specs: `test/01_unit/lib/source/visibility_session_spec.spl`,
+`test/02_integration/app/lsp/lsp_mcp_visibility_session_spec.spl`,
+`test/02_integration/app/lsp/lsp_public_view_handlers_spec.spl`.

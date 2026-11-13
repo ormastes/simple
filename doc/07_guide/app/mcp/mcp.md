@@ -426,6 +426,34 @@ For the operator workflow and HTTP route equivalents, see
 | `simple_implementation` | Trait impls | file, line |
 | `simple_folding_range` | Folding ranges | file |
 
+### MDSOC+ session view (`simple-lsp-mcp`)
+
+The `simple-lsp-mcp` server keeps one **session view**: `public` (default),
+`feature_private`, `layer_private` or `all`, plus optional `feature=` /
+`layer=` scopes. It is an immutable value replaced on every request (no locks).
+
+| Action | How |
+|---|---|
+| Switch the session view | `simple_set_visibility {visibility, feature?, layer?}` |
+| Return to public by hand | `simple_set_visibility {visibility: "public"}` |
+| One request at another level | `lsp_symbols` / `lsp_workspace_symbols` with `visibility=` (session unchanged, countdown not consumed) |
+| Raw LSP equivalent | `workspace/executeCommand simple.setVisibility ["<level>", {feature?, layer?}]`; per request `simpleVisibility` |
+
+Every `lsp_symbols` / `lsp_workspace_symbols` / `simple_set_visibility` result
+has the same shape for every view: `content[0]` is the listing (with the
+in-band `⋯ N hidden` summary entry on public responses), `content[1]` is the
+view line, for example
+`view: layer_private (layer=50.mir), auto-revert in 2 requests; set visibility=public to return`.
+
+A private view auto-reverts to public after **3** served requests
+(`SIMPLE_VISIBILITY_AUTO_REVERT=<n>` changes the count) or on an explicit
+`visibility=public`. The next public response says so once, e.g.
+`view: public (reverted from layer_private: auto-revert after 3 private requests)`.
+Raw LSP `documentSymbol` keeps its array result; the view line of the last
+request is in the server (`lsp_visibility_last_view`) and in the
+`simple.setVisibility` reply (`{visibility, view}`).
+Design: `doc/05_design/app/source_view/public_view_by_feature_layer.md` § Session view state.
+
 ### Context (9 tools)
 
 Repo-native replacement for the user-level "context-mode" plugin. Handlers:
