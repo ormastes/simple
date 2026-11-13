@@ -112,7 +112,17 @@ Specs:
    `rt_aes128_encrypt_block_pure` is defined only in the Rust interpreter and
    the Rust runtime. A C-runtime native NVFS lane needs a backing, or the
    import of the canonical copy that FR-NVFS-N6a-002 describes.
-5. **`check-raw-sffi-unsafe-ratchet.shs` cannot check anything.** Its
+5. **Callers of the restored `@unsafe` canonical helpers are not in `unsafe`
+   blocks.** `aes128_key_expansion` and `aes128_encrypt_block` are `@unsafe`
+   again, matching `db9fa3350a4`.
+   - Six importers call them from safe code: `aes_cmac`, `aes_xts`,
+     `aes128_ccm`, `aes_gcm_siv` (+`aes_gcm_siv_polyval`), `ocb3` and
+     `aes_modes`.
+   - The seed does not enforce this today. Their KAT results are unchanged by
+     this restore.
+   - If call-site enforcement lands, these callers need `unsafe(capabilities: [ffi])`
+     blocks, or a safe wrapper that checks the lengths.
+6. **`check-raw-sffi-unsafe-ratchet.shs` cannot check anything.** Its
    inventory fails the whole-tree ceiling (`source_variants=400/399`,
    `migration=3857/3546`) on base and after this change.
    - Reproducing the comparison by hand shows the baseline has drifted by
