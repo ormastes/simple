@@ -20,3 +20,28 @@ secure server now fails closed instead of passing cleartext through.
 Unblock when an owned `TlsStream`-equivalent over the existing TCP facade is
 implemented and a live production-listener scenario proves encrypted request
 and response bytes, invalid-record rejection, timeout handling, and clean close.
+
+## Ground truth 2026-11-13 (lane http-20261113, tree at 6a5f8e708f2)
+
+The owned encrypted-stream overlay this record called missing is now VERIFIED
+PRESENT:
+
+- `src/lib/nogc_async_mut/io/tls.spl`: `class AsyncTlsStream` and
+  `class AsyncTlsListener` with `accept() -> Result<AsyncTlsStream, IoError>` —
+  an owned TLS stream/listener pair over the TCP facade (TLS 1.2 path).
+- `src/lib/common/net/tls_application_record_stream_v1.spl`:
+  `class TlsApplicationRecordStreamV1` + `tls_application_record_stream_new_v1`
+  (record-layer ingest/deframing with sequence/overflow/malformed states,
+  unit-oracled by `test/01_unit/lib/common/net/tls_application_record_stream_spec.spl`).
+- `src/lib/nogc_sync_mut/http_server/tls_server.spl`: `TlsServerConn` wraps a
+  `TcpStream`; `tls_server_accept` never falls through to plaintext.
+
+STILL OPEN under this record's own unblock condition: no live
+production-listener scenario proves encrypted request/response bytes,
+invalid-record rejection, timeout handling, and clean close — no live TLS
+listener spec exists under `test/02_integration` or `test/03_system` (only
+fail-closed policy and record-unit specs; the secure web server system spec
+uses `TcpStream.from_accepted_fd(-1)`). The literal 2026-09-13 observation
+("no tls_stream.spl alongside tls_server.spl") still holds for that directory,
+but the capability now exists in the tree. DB must stay OPEN pending the
+live-scenario evidence.

@@ -39,3 +39,36 @@ cd src/runtime && $B/x86_64-w64-mingw32-clang -O1 -I. -ffunction-sections -fdata
 ```
 
 Verification pending: DevHub HTTP text/binary/SigV4 acceptance with a redeployed Windows compiler (runtime archive rebuilt). The subprocess workaround fixture and its tags stay until that run passes.
+
+## Verification 2026-11-13 (lane http-20261113, host: Windows, worktree 6a5f8e708f2)
+
+Re-ran the C regression on this host against the current tree
+(`src/runtime/test/rt_http_winhttp_loopback_selfcheck.c`, includes
+`../runtime_native.c`, so it drives the real `rt_http_perform` WinHTTP
+branch; llvm-mingw-20260922 toolchain, `-lwinhttp`):
+
+```
+rt_http_winhttp_loopback_selfcheck: PASS   (exit 0)
+```
+
+Covers: binary GET (NUL/0xFF bytes) status 200 + exact body + reason +
+header block, 302 not followed, binary POST echo 201, text 404 body,
+500 ms overall timeout bound (watchdog), refused-connect error,
+non-http scheme rejected. The 2026-11-03 source fix is still present and
+functional at 6a5f8e708f2.
+
+Interpreter-path caveat (new evidence): on the refreshed bootstrap seed,
+spec-level `rt_http_get` does NOT reach this C provider — the seed
+interpreter resolves it to a Rust `ureq` shim
+(`src/compiler_rust/compiler/src/interpreter_extern/network/mod.rs:47`),
+which also gives 4xx/5xx as `(-1, "", "…status code N…")` instead of the
+provider's `(404, body, "")`. A loopback spec run on the seed
+(`/tmp/http_winhttp_native_loopback_spec.spl`, in-process
+SimpleHttpServer + `http_get_raw`) passed a real 200 text GET but through
+ureq, so interpreter spec runs are NOT WinHTTP acceptance evidence.
+
+Verdict: fix-implemented-verification-pending stands. C-provider
+regression: PASS on this host. Still open: DevHub text/binary/SigV4
+acceptance on a redeployed Windows native runtime archive (SigV4 needs
+live AWS credentials — not runnable in this lane). Subprocess curl
+workaround fixture and tags stay.
