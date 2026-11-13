@@ -213,3 +213,52 @@ rt_http_client_set_header, rt_http_delete, rt_http_head, rt_http_patch, rt_http_
 rt_http_server_create, rt_http_server_destroy, rt_http_server_route, rt_http_server_start, 
 rt_http_server_static, rt_http_server_stop, rt_http_upload, rt_http_url_decode, rt_http_url_encode, 
 rt_ws_close, rt_ws_connect, rt_ws_receive, rt_ws_send
+
+## Wave 1 — 48 Rust exports registered (2026-11-13)
+
+Manifest entry + exact `RuntimeFuncSpec` each; signatures transcribed from the
+`#[no_mangle] extern "C"` definitions and checked against every `.spl`
+declaration.
+
+rt_arm_array_get_byte_u32, rt_arm_array_len_u32, rt_debug_exit_success, rt_fd_stat_snapshot_v1, 
+rt_file_atomic_write_bytes_array, rt_file_mode, rt_file_modified, rt_file_modified_time, 
+rt_heap_array_capacity_bytes, rt_heap_aux_live_bytes, rt_io_file_meta_created, rt_io_file_meta_flags, 
+rt_io_file_meta_modified, rt_io_file_set_permissions, rt_io_file_write, rt_io_file_write_all, 
+rt_mem_attr_enabled, rt_par_atomic_i64_is_lock_free, rt_par_atomic_load_i64, rt_path_extension, 
+rt_path_filename, rt_print_err, rt_process_hwm_kib, rt_process_last_child_peak_rss_kib, 
+rt_process_run_bounded_admitted_tuple_v1, rt_process_run_bounded_environment_tuple_v1, 
+rt_process_run_bounded_observed_tuple_v1, rt_process_run_bounded_tuple, rt_process_run_tuple, 
+rt_process_spawn_async_environment_v1, rt_pty_read, rt_pty_resize, rt_random_randint, rt_random_uniform, 
+rt_shell_exec, rt_stdin_read, rt_stdin_read_all, rt_string_from_byte_array, rt_string_to_byte_array, 
+rt_term_flush, rt_term_write, rt_text_validate_utf8, rt_transient_array_scope_identity_v1, 
+rt_transient_array_scope_state_v1, spl_dlclose, spl_dlopen, spl_dlsym, spl_wffi_call_i64
+
+Measured with the seed built from this change (sha256 `8532f7b39b025ad2…`) against
+the base seed (`0ddf581b68c2f6cf…`), caret `--help`, 3 serial runs each:
+
+| | splice names | wall (median) | peak RSS (median) | stdout vs interpreter |
+|---|---|---|---|---|
+| base | 392 | 7.05 s | 1,588 MB | byte-identical |
+| wave 1 | 344 | 6.86 s | 1,589 MB | byte-identical |
+
+Pinned by `src/compiler_rust/driver/tests/jit_extern_native_link_tests.rs` (3 of 4
+red on the base seed, 4 of 4 green; the unknown-extern fail-closed test is green
+on both).
+
+Found while probing: the spliced path returned a wrong value for an `f64`
+extern (`rt_random_uniform(2.5, 2.5)` printed a denormal under the JIT, `2.5`
+under the interpreter). Native linking with the `F64` spec fixes it.
+
+Class (a) Rust exports deliberately **left spliced**:
+
+| Name | Reason |
+|---|---|
+| `rt_host_disk_headroom_bytes_v1` | native `statvfs` and the interpreter's `platform::disk_headroom` disagree (`/tmp`: native > 0, interpreter <= 0); owner must pick one |
+| `rt_pty_close`, `rt_pty_is_running`, `rt_pty_write` | Rust returns a tagged `RuntimeValue`, `.spl` declares `-> bool` (raw) |
+| `rt_file_atomic_write`, `rt_file_atomic_write_mode` | Rust returns `i64`, `.spl` declares `-> bool` |
+| `rt_black_box` | `.spl` return is `i64?` |
+| `rt_perf_dump_sdn` | native has no perf-region recorder; only the interpreter records |
+| `rt_linux_container_user_{open,observe,close}_v1` | Rust definitions are `-95` stubs |
+| `rt_tagged_add`, `rt_dyncall_4/5/6` | no single-line `.spl` declaration to check the ABI against |
+| `rt_process_run_bounded_bytes` | (ptr, len) text ABI; needs the text-expansion path verified |
+| `rt_process_stdout_state`, `rt_process_piped_exit_status_value` | `piped_process_observer.rs` is not compiled into the seed (not class (a); link fails) |
