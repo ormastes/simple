@@ -381,9 +381,19 @@ fn lint_cli_append_parsed_results(
                 config, warning.code, LintLevel.Warn, LintEvidenceTier.ParsedStructural)
             if not policy.keep: continue
             val level = policy.level
-            val lint = LintDiag.new(warning.code, level, LintCategory.Warning, warning.message)
+            # REQC warnings carry the AST span line when the span pool is
+            # populated. When it is not (empty-pool paths), recover the site
+            # textually from the enclosing function and say so in the message:
+            # a 0:0 locator names no statement, which was the reported defect.
+            var req_line = warning.line
+            var req_message = warning.message
+            if req_line <= 0:
+                req_line = lint_source_req_comment_line(
+                    source_locations, content.split("\n"), warning.code, warning.site_name)
+                req_message = "{warning.message} in `{warning.site_name}`"
+            val lint = LintDiag.new(warning.code, level, LintCategory.Warning, req_message)
                 .with_fix(warning.hint)
-            results.push(LintRunResult.new(path, warning.line, 0, lint))
+            results.push(LintRunResult.new(path, req_line, 0, lint))
     # W0406 already comes from the text EasyFix owner. Add only the parsed
     # export sibling here so wildcard imports are not reported twice.
     for warning in check_star_export_file(decls, path):
@@ -509,6 +519,36 @@ fn lint_source_collection_fix_line(index: LintSourceLocationIndex, code: text) -
 
 fn lint_source_export_star_line(index: LintSourceLocationIndex, module_path: text) -> i64:
     index.export_star_lines[module_path] ?? 1
+
+# Textual last-resort locator for REQC00x warnings whose AST span pool was
+# empty: anchor on the enclosing function declaration line, then scan forward
+# for the construct the code flags. Returns 0 when nothing matches (the
+# diagnostic then keeps the function name the message carries).
+fn lint_source_req_comment_line(
+    index: LintSourceLocationIndex, lines: [text], code: text, site_name: text
+) -> i64:
+    val fn_line = lint_source_function_line(index, site_name)
+    if fn_line <= 0:
+        return 0
+    if code == "REQC002":
+        # The dangerous-keyword name lives only in the AST message; a bare
+        # textual call scan is too fuzzy. The function line is the honest
+        # fallback and the message names the function.
+        return fn_line
+    var i = fn_line - 1
+    while i < lines.len():
+        val t = lines[i].trim()
+        if code == "REQC004":
+            if t.starts_with("case _"):
+                return i + 1
+        elif code == "REQC003":
+            if t.contains("todo("):
+                return i + 1
+        else:
+            if t.starts_with("pass_todo") or t.starts_with("pass_do_nothing") or t.starts_with("pass_dn"):
+                return i + 1
+        i = i + 1
+    0
 
 # ---------------------------------------------------------------------------
 # Source-location recovery for collection-efficiency lints (COLL0xx).
@@ -803,11 +843,20 @@ fn _run_lint_with_linter_source(
                 var warning_count = 0
                 var fix_count = 0
                 var not_linted = false
+                # Several producers can flag the same site (AST pass plus
+                # per-importing-module relays), which re-emitted one warning
+                # multiple times per run. Emit each (file, line, code) once,
+                # attributed to the owning file, in both human and JSON modes.
+                var emitted_keys: {text: bool} = {}
 
                 for lint_item in results:
                     if lint_item.lint.code == "PARSE001":
                         not_linted = true
                     val effective_item = lint_run_result_apply_cli_policy(lint_item, deny_all)
+                    val diag_key = "{effective_item.file_path}|{effective_item.line}|{effective_item.lint.code}"
+                    if emitted_keys.contains_key(diag_key):
+                        continue
+                    emitted_keys[diag_key] = true
                     if json_output:
                         var level_text = "allow"
                         match effective_item.lint.level:
