@@ -445,5 +445,13 @@ clang_rt.xray + adapter link (PR4) is not wired.
   generic `AdaptiveMap` iterables, invalid LLVM IR in 8 std modules, a Cranelift ICE) —
   `stage2_run21_native_build_cannot_build_xray_controller_2026-11-13.md`. The lane takes
   `--builder <stage2>` / `--host-bin <exe>` and states the controller mode in its verdict.
-- The older OUT file `xray_backend_differential_out_spec.spl` stays tagged; its `simple` row's
-  dlopen blocker is gone on this seed. Move/untag after spy-2 lands (spy-2 edits that file).
+- The older OUT file `xray_backend_differential_out_spec.spl` stays tagged and the IN suite is
+  unchanged: spy-2 (unlanded) edits both. Its `simple` row's dlopen blocker is gone on this
+  seed, but under `simple test` `check-xray-native-inprocess-e2e.shs` still builds its modules
+  with the runner's `SIMPLE_MCDC_MODE=on` (same undefined-probe failure), so that lane needs the
+  same unset before the row is untagged. Its records-id parse also expected `records=[...]` at
+  line end and broke when the host gained `timestamps_nonzero=`; fixed in
+  `scripts/check/lib/xray-inprocess-e2e-lib.shs`; from a shell that lane is now `PASS — 14 check(s)`
+  on the pinned seed.
+- ELF writer change checked: `elf_writer_spec` 18/18 and `xray_native_map_format_v1_spec` 8/8
+  on the pinned seed both before (base `30382bc764e`) and after.
