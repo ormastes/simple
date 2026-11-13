@@ -86,3 +86,23 @@ canonicalized (digit-tier dropping), so external `dot.1` paths keep their
 identity. Verification pending: native-build of the repro under `<tmp>/dot.1/`
 with a rebuilt stage3; then remove the two `@workaround` tags in
 `check-stage-binaries-runnable.shs`.
+
+## Fix (2026-11-13) — Windows membership + neighbour-safe entry predicate
+
+On Windows, `dotted_source_entry_identity_spec` passed only 5 of 9 scenarios on the seed. There were two causes:
+
+1. `_driver_physical_module_identity` (`driver_entry_closure_core.spl`) tested
+   `resolved.starts_with(root + "/")` on raw `rt_path_absolute` output, which
+   uses `\` separators on Windows. No repository source was ever proven a member,
+   so `compiler.10.frontend...` was never folded. Paths are now compared on `/`
+   separators: the `\?\` prefix is stripped, the root is matched
+   case-insensitively, and the case of the relative remainder is kept.
+2. `llvm_module_is_native_entry` folded BOTH sides, so `dot.1/hello.spl` and
+   `dot.2/hello.spl` became the same native entry. This was not specific to
+   Windows. It now matches when the names are equal or when one side is the
+   canonical fold of the other.
+
+Seed: 9/9 passed. Neighbour specs `driver_source_loading_spec` (5 failures) and
+`entry_closure_authored_path_spec` (1 failure) fail identically with and without
+this change. `module_path_naming_scv_root_snapshot_spec` passed 7/7. The native-build
+repro under `<tmp>/dot.1/` still needs a rebuilt producer.
