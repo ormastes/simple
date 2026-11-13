@@ -24,3 +24,10 @@ Reuse the existing per-scope word table and original-source declaration spans;
 do not rescan descendant function bodies for every ancestor. Add nested capture,
 shadowing, unused nested local, and multi-level fixtures before enabling the new
 scope model.
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+source-audited fix design (indentation-indexed callable scope tree + fixtures) is a scoped feature, larger than this lane per-budget; owner: query-lint lane.

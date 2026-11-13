@@ -108,3 +108,7 @@ gdb -batch -ex run -ex bt --args \
 Preserve core, executable sha256, environment transcript, last surface
 identity, and backtrace; treat `driver.spl` as first observed victim until the
 stack says otherwise.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**BLOCKED-needs-grant (confirmed)** — boot3/boot11 posture stands: crash owner is the self-hosted streaming-surface parse; no artifact/stack link to the 2026-10-27 ordering fix. Repro needs a full bootstrap + retained-core gdb run (heavy grant, Linux host).

@@ -116,3 +116,7 @@ workaround, which is suboptimal but not defective. The doc's own correction
 ("the defect is in how that caller constructs its parallel arrays, or in a
 narrower shape the validation rejects") resolves to: valid shapes are accepted;
 no validation change warranted.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**FIXED (confirmed)** — Source-checked fresh: `shingles_of_tokens` joins windows with a raw 0x1F unit-separator byte (ne2 verified byte content with od). Missing spec pin in fingerprint_spec recorded as follow-up by ne2.

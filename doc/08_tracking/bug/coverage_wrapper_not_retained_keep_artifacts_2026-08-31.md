@@ -169,3 +169,7 @@ SIMPLE_BUILD_MEMORY_RESERVE_BYTES admission gate before a real compile
 failure path completes, and the SCV cold-init blocks the instrumented lane);
 the behaviour is covered by the direct cleanup test above, and the abort
 message contract is unit-pinned. Per-run isolation remains OPEN as stated.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**FIXED (confirmed)** — runner6: asks #1 (retain on failure) + #2a (name artifact) implemented with paired spec evidence 16/16 on the fresh seed. Per-run subdirectory isolation (#2b) remains open hygiene.

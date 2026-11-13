@@ -168,3 +168,7 @@ a silent-nil vacuous pass, exactly as designed.
 
 **Cycles:** 0 (no live defect; no fix attempted). Evidence: this addendum +
 seed-smoke transcript in `build/review/p3fix-seed2-20261111.sdn`.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**STALE/SUPERSEDED (confirmed)** — seed2: not a code gap — handler + fork bridge exist in src/runtime by platform design; macOS SIGSEGV/fork contract proven natively 2026-11-04. Residual (admitted self-hosted macOS binary) belongs to the macOS bootstrap admission lane.

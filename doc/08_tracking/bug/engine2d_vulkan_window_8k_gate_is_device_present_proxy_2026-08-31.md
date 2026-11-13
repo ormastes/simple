@@ -77,3 +77,25 @@ verification. Kept OPEN.**
   swapchain-image readback + checksum vs the source damage buffer in the
   `vulkan_graphics_runtime` test), which is outside a no-cargo interpreter-seed lane and
   un-runnable on this host. The "until strengthened" reporting rule below remains in force.
+
+
+---
+
+## 2026-11-13 addendum — P3 gpu lane p3-gpu-20261113 (work/p3-gpu-20261113, base 6f4cb189867)
+
+**Verdict: LIVE, unchanged — default gate lane still emits
+`scope=xvfb-device-present-proxy` at this tip (source re-verified).**
+
+- `scripts/check/check-engine2d-vulkan-window-8k.shs:243` still prints
+  `engine2d_vulkan_window_8k_evidence_status=pass scope=xvfb-device-present-proxy`
+  on the default disposable Xvfb lane; no presented-frame capture or pixel oracle
+  runs there. The PHYSICAL lane (`ENGINE2D_VULKAN_PHYSICAL=1`) remains
+  Xvfb/EDID-gated and cannot run on this Windows host.
+- Strengthening (frame capture / swapchain-image readback + checksum vs the
+  source damage buffer in the `vulkan_graphics_runtime` Rust test) is a Rust
+  runtime change outside a no-cargo lane. The "until strengthened" reporting
+  rule remains in force.
+
+## Triage 2026-11-13 (Linux aarch64, lane uia) — row stays OPEN
+
+Blocked on this host: no Xvfb. Static confirmation at release/1.0.0 c8c3e7bc4f1, Linux aarch64 (DGX Spark GB10), Rust seed af717f53d6bce3e5: in bench_window_swapchain_present_8k_one_percent_damage the checksum folds the host source vector, not the presented frame (vulkan_graphics_runtime_swapchain.rs), so the gate still proves device present only. The fix is in that ignored Rust test plus the gate script and needs cargo --features vulkan with a display.

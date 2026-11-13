@@ -48,3 +48,10 @@ against the same string prefixed with an ASCII byte; the ratio must stay bounded
 Fix lives in C runtime `rt_string_char_code_at` (runtime_native.c) and needs a runtime
 rebuild to verify; deferred while C: has < 15 GB free and the ADR-005 char lane
 (#6269) is changing runtime text values. Suggested fix above (resume cache) stands.
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+recorded perf characteristic (O(i) fallback), not fixed at filing; owner: text-runtime perf lane with a regression budget.

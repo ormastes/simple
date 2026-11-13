@@ -158,3 +158,7 @@ spot-check re-confirms their evidence rather than relying on them:
   is unchanged: no runtime-source change can close this row.
 - Bookkeeping flag carried forward unchanged (Stage 3/4 admission tracked by
   the three named rows).
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**LIVE (confirmed)** — rt2 corroborated twice: no admitted stage2/3/4 binary or receipts in-tree; unblock condition unmet. Honest correction recorded: single-file seed check of mcdc/model.spl fails on a module-surface gap (djb2), noted as seed-side, not a runtime-source defect.

@@ -189,3 +189,7 @@ Record stays OPEN on Cause 2 only. **Grant:** a Linux lane
 (`kill_simple_monitor`, 3000s+ budget) to run the guard verbatim, or a
 pure-Simple driver performance lane; do not raise `KILL_SIMPLE_MEM_MB`, do
 not weaken the guard.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**LIVE on Cause 2 (confirmed)** — ne17: harness selftest 8/8; the interpreted pure-Simple driver still cannot finish the small fixture in 240s on this host (Rust engine completes in seconds — the blowup is specific to the interpreted driver path). Grant: Linux lane with the 3000s+ budget or a driver-perf lane; do not weaken the guard.

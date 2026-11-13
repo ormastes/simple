@@ -74,3 +74,10 @@ correct, so the cause is a composition of element-specific defaults that needs
 the per-element-type sweep above before a line can be attributed. Guessing a
 line would be worse than filing.
 
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+cause still NOT isolated per in-file status (four candidates excluded by fixture); owner: web layout lane.

@@ -178,3 +178,7 @@ execute on the interpreter with real verdicts
 runs would have diverted to `run_test_file_native` and died with
 `Error: Compilation failed:`. Fault 2 (`find_simple_binary` reading
 `SIMPLE_BINARY`, fixed 2026-09-05) is unchanged.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**FIXED (confirmed)** — interp10: diversion gone — interpreter_run_diverts_to_native returns only the explicit-coverage flag; explicit not-instrumented notice added; three specs execute on the interpreter under the formerly-diverting default.

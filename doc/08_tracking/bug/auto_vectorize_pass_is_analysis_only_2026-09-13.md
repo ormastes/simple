@@ -130,3 +130,7 @@ ne2 recorded. Their `auto_vectorize_alias_spec.spl` 15/15 seed-smoke is
 same-day and same-branch; per the no-rerun rule it is not re-executed.
 Absorber: P3 lane ne2 verdict addendum above (FIXED 2026-11-11). Lane
 evidence: `build/review/p3fix-ne20-20261111.sdn`.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**FIXED (confirmed)** — Source-checked fresh: `src/compiler/60.mir_opt/mir_opt/mod.spl:390` returns `PassStatus.Active` for AutoVectorize; alias oracle (`compiler.mir_opt.auto_vectorize_alias`) present. Absorber: lane ne2 addendum.

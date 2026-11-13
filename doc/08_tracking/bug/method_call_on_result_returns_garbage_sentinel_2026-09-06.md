@@ -101,3 +101,7 @@ attempted. Grant for the fixing lane: rebuild the seed after the semantic
 guard lands (`cd src/compiler_rust && cargo build --release`, or the repo's
 seed-rebuild script), then re-run the repro above; expected output is a
 compile-time type error, not `<value:0xffffffffffffffff>`.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**LIVE (confirmed)** — ne15 re-verified verbatim on the fresh seed: still prints <value:0xffffffffffffffff>, no diagnostic. Fix belongs in the seed semantic phase (Result receiver member access must be a fatal error), mirrored self-hosted; seed-rebuild grant recorded.

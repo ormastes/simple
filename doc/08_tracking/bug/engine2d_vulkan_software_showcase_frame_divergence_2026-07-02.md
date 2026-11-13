@@ -101,5 +101,9 @@ Separate defects observed while verifying (not fixed here):
   same process succeeding; 0 of 3 on llvmpipe. Through `Engine2D` this shows as
   a silent demotion (`requested backend vulkan but got cpu`). The specs fail
   closed on it rather than passing vacuously.
+  **Root-caused 2026-11-13:** NVIDIA `vkCreateDevice` returns
+  `VK_ERROR_INITIALIZATION_FAILED` under concurrent GPU clients; error now
+  surfaced and retried with a bound - see
+  `vulkan_runtime_init_nvidia_create_device_contention_2026-11-13.md`.
 - `backend_vulkan_rect_list_spec.spl` is red on this host
   (`rect_list_device_dispatch_count` 0, expected 1).

@@ -120,3 +120,7 @@ feature.
   statements.spl:73). That is spec-vs-language drift from a reviewed language
   decision, not this binding defect; it belongs to the spec owner to rewrite
   the example with an explicit presence projection.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**FIXED (confirmed)** — ne11: both symptoms gone on the fresh seed (test-path 2/2, run-path prints 7); named guard example passes; 1 red in the same spec is a deliberate reviewed language rejection (bare if-val on Result), spec-owner drift.

@@ -67,3 +67,7 @@ syscall_shim_*_spec) and remain the kernel lane's host-side evidence base.
 
 Handed back to the OS-kernel lane with the AC table above as the
 checklist.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**LIVE/out-of-lane (confirmed)** — runner2: none of the four required-resolution items shows completion evidence; item 4 (target QEMU trap-route proof) is un-provable from a Windows host interpreter lane. Handed back to the OS-kernel lane.

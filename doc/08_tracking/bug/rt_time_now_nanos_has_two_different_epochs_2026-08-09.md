@@ -4,7 +4,9 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass. Kept for history;
 the subject is removed, superseded, or duplicated elsewhere in the ledger.
 
-**Status:** OPEN
+**Status:** FIXED 2026-11-13 (lane p3-misc-b) — duplicate of primary
+`rt_time_now_nanos_interpreter_uses_wall_clock_epoch_2026-08-09.md` (itself
+FIXED 2026-08-17); re-verified at release/1.0.0 tip below
 **Found:** 2026-08-09, during P4 (host `ProfileTarget`)
 **Severity:** latent — harmless for current callers, wrong for any absolute use
 **Component:** `src/runtime/runtime_time.c:62` and
@@ -71,3 +73,21 @@ per the explicit "owned by another lane, do not fix as a side effect"
 in-tree note. See the primary doc for the suggested fix (name split into
 `rt_time_monotonic_nanos` / `rt_time_unix_nanos`).
 
+
+---
+
+## Verification 2026-11-13 (lane p3-misc-b)
+
+Primary doc
+(`rt_time_now_nanos_interpreter_uses_wall_clock_epoch_2026-08-09.md`) reads
+FIXED 2026-08-17; source re-check at release/1.0.0 tip confirms both
+implementations now share one monotonic contract:
+
+- native `src/runtime/runtime_time.c:91` — `CLOCK_MONOTONIC` (Win:
+  `win_monotonic_nanos`);
+- interpreter `src/compiler_rust/compiler/src/interpreter_extern/time.rs:368`
+  — `Instant`-elapsed since a process baseline (+1s offset), doc-comment
+  explicitly pinning the MONOTONIC contract and naming the convergence spec.
+
+Ran the pinned oracle once: `test/01_unit/runtime/time_epoch_convergence_spec.spl`
+— 6/6 GREEN (seed `bin/simple.exe`, exit 0). Closing this duplicate.

@@ -314,3 +314,40 @@ line; child styles 149 nodes within the 180s frame budget and the host prints
 a non-timeout verdict. If the fallback line still fires, the residual gap is
 in the seed's HIR lowering, not the .spl sources.
 
+
+
+---
+
+## 2026-11-13 addendum — P3 gpu lane p3-gpu-20261113 (work/p3-gpu-20261113, base 6f4cb189867)
+
+**Verdict: cannot be re-verified end-to-end on this host — the Linux headless
+repro path is gated off here; the record's own "verification pending" run still
+needs the Linux display harness.**
+
+- Source state at this tip: the 2026-08-15 triage's structural fix IS present —
+  `resolved_backend: text` is explicitly declared
+  (`src/lib/gc_async_mut/gpu/browser_engine/simple_web_layout_engine2d_fast.spl:95`)
+  and passed at all constructor sites (`:1479`, `:1496`, `:1516`), so the
+  original `SimpleWebLayoutEngine2DReadbackResult.resolved_backend` HIR
+  inference gap is closed in source.
+- Repro attempted on this Windows host (tracked seed, `SIMPLE_WM_HEADLESS_CAPTURE=1
+  SIMPLE_TIMEOUT_SECONDS=1750 bin/simple.exe run examples/06_io/ui/wm_web_standards_showcase_gui.spl`):
+  exits rc=2 in ~30s WITHOUT any `wm_web_standards_showcase_host_headless_*`
+  verdict line — the example now fails fast at
+  `examples/06_io/ui/wm_web_standards_showcase_gui.spl:578`
+  `[wm-web-standards] error=no-gui-requested (launch via macos-gui-run.shs)`.
+  The headless-capture entry used by every Linux repro in this doc is host-gated
+  on Windows, so the child-frame-timeout verdict can be neither reproduced nor
+  cleared here.
+- New observation recorded for the seed/compiler lane: the example compile now
+  also hits `[jit-fallback] HIR lowering error: ambiguous call to env_get: 4
+  co-compiled definitions (gc_async_mut/env/variables.spl,
+  nogc_sync_mut/env/variables.spl, nogc_sync_mut/io/env_ops.spl,
+  nogc_sync_mut/io_runtime.spl) ... [compiler_cross_module_private_symbol_collision]
+  [in examples/06_io/ui/wm_web_standards_showcase_gui.spl]: whole module dropped
+  to the interpreter` — the same whole-module interpreted-fallback family this
+  doc tracks, on a new trigger name.
+- Grant: run the record's Reproduction command on the Linux display lane
+  (Docker+Xvfb or macos-gui-run) with a current seed; expected-if-fixed per the
+  2026-08-15 note. Until then the row stays OPEN with a understood-but-unverified
+  state, not a hang and not a fix.

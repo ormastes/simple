@@ -178,3 +178,7 @@ from this doc's root-cause section):
    change (per this doc's warning: turning 300+ dormant `it` blocks on may
    surface new red — triage in the same PR, and keep
    `bdd_feature_group_keyword_spec.spl` honest).
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**LIVE/out-of-lane (confirmed)** — runner3 re-verified with the worktree seed: graph_utils_spec still errors E1002 with executed=0; 8 files still open `feature "`. Fix surface is the Rust seed (bdd.rs / stmt_lowering.rs / checker_spipe.rs BDD_KEYWORDS) — seed-fix lane active; turning 300+ dormant its on may surface new red, so spec triage must ride the same change.
