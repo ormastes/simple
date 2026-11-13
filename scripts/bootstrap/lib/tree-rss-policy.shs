@@ -651,8 +651,8 @@ bootstrap_tree_rss_phase_pricing_resolve() {
 # Precedence: SIMPLE_BUILD_MEMORY_RESERVE_BYTES, then host config
 # mem_reserve_free_mib (SIMPLE_HOST_MEM_RESERVE_FREE_MIB > host config file),
 # then min(24 GiB, total / 2); an unknown total keeps 24 GiB (unknown never
-# shrinks the reserve). A malformed explicit bytes value yields empty: the
-# two-worker floor then fails closed instead of guessing a reserve.
+# shrinks the reserve). A malformed explicit bytes value (or one below 1 KiB)
+# yields empty: the two-worker floor then fails closed instead of guessing.
 bootstrap_tree_rss_host_reserve_kib() {
   btr_hr_total=${1:-}
   btr_hr_root=${2:-}
@@ -660,7 +660,8 @@ bootstrap_tree_rss_host_reserve_kib() {
   case ${SIMPLE_BUILD_MEMORY_RESERVE_BYTES:-} in
     "") ;;
     *[!0-9]*|0*) printf '\n'; return 0 ;;
-    *) bootstrap_tree_rss_is_uint "$SIMPLE_BUILD_MEMORY_RESERVE_BYTES" 18 || { printf '\n'; return 0; }
+    *) bootstrap_tree_rss_is_uint "$SIMPLE_BUILD_MEMORY_RESERVE_BYTES" 18 &&
+         [ "$SIMPLE_BUILD_MEMORY_RESERVE_BYTES" -ge 1024 ] || { printf '\n'; return 0; }
        printf '%s\n' $((SIMPLE_BUILD_MEMORY_RESERVE_BYTES / 1024)); return 0 ;;
   esac
   btr_hr_mib=${SIMPLE_HOST_MEM_RESERVE_FREE_MIB:-}
@@ -698,15 +699,25 @@ bootstrap_tree_rss_host_reserve_kib() {
 #   - cap2 <= CEILING_KIB, the DEFAULT hard ceiling for two workers: the
 #     floor never asks for an elevated ceiling (whose 3/4-of-available
 #     admission would refuse it later).
+# Deliberately overrides the tree_rss_host_pct share and the 3/4-of-available
+# budget term (as the shard floor overrides its 60%/40% reserve): the binding
+# bounds are the enforced cap and MemAvailable - reserve above.
 # This is a REQUEST like the bootstrap-build-jobs-policy floor: the compiler's
 # shard pools re-admit it against the exported tree budget (their own guarded
 # floor needs 2 x worker estimate + coordinator inside the cap) and the live
-# commit admission gates every spawn, so MIR shards measured at ~25 GiB
-# (run 11) stay at one worker under this cap.
+# commit admission gates every spawn. MIR is pinned separately: the pool
+# prices MIR workers at a 9 GB static default, but run 10/11 measured
+# compiler_cli_build MIR shard workers at 19-25 GiB each, which two of cannot
+# share cap2. bootstrap_tree_rss_whole_build_export therefore publishes
+# SIMPLE_MIR_SHARD_WORKER_KB=BOOTSTRAP_TREE_RSS_FLOOR_MIR_WORKER_KB for a
+# floored plan, so the MIR pool re-admits exactly one worker (the same MIR
+# parallelism as the unfloored one-thread plan).
 # Sets bootstrap_tree_rss_floor_workers (FIT or 2), bootstrap_tree_rss_floor_cap_kib
 # (cap2 when applied, else 0) and bootstrap_tree_rss_floor_note: empty when
 # there was nothing to lift, else a greppable "build-threads floor applied: ..."
 # or "build-threads floor not applied: <reason>" line -- never silent.
+# Run 11 measured MIR shard worker peak (25.2 GiB), KiB; see the floor above.
+BOOTSTRAP_TREE_RSS_FLOOR_MIR_WORKER_KB=26424115
 bootstrap_tree_rss_two_worker_floor() {
   btr_tf_requested=$1 btr_tf_fit=$2 btr_tf_small=$3 btr_tf_mode=$4
   btr_tf_avail=$5 btr_tf_reserve=$6 btr_tf_ceiling=$7
@@ -724,7 +735,7 @@ bootstrap_tree_rss_two_worker_floor() {
   elif ! bootstrap_tree_rss_is_uint "$btr_tf_avail" 15 || [ "$btr_tf_avail" -le 0 ]; then
     bootstrap_tree_rss_floor_note="$btr_tf_no host available memory unknown"
   elif ! bootstrap_tree_rss_is_uint "$btr_tf_reserve" 15; then
-    bootstrap_tree_rss_floor_note="$btr_tf_no host memory reserve unknown (malformed SIMPLE_BUILD_MEMORY_RESERVE_BYTES?)"
+    bootstrap_tree_rss_floor_note="$btr_tf_no host memory reserve unknown (SIMPLE_BUILD_MEMORY_RESERVE_BYTES malformed or below 1 KiB)"
   elif [ "$btr_tf_avail" -le "$btr_tf_reserve" ] || [ "$btr_tf_cap" -gt $((btr_tf_avail - btr_tf_reserve)) ]; then
     bootstrap_tree_rss_floor_note="$btr_tf_no two-worker cap ${btr_tf_cap} KiB (${btr_tf_price}) exceeds available ${btr_tf_avail} KiB - reserve ${btr_tf_reserve} KiB"
   elif ! bootstrap_tree_rss_is_uint "$btr_tf_ceiling" 15 || [ "$btr_tf_cap" -gt "$btr_tf_ceiling" ]; then
@@ -732,7 +743,7 @@ bootstrap_tree_rss_two_worker_floor() {
   else
     bootstrap_tree_rss_floor_workers=2
     bootstrap_tree_rss_floor_cap_kib=$btr_tf_cap
-    bootstrap_tree_rss_floor_note="build-threads floor applied: 2 workers (host budget fits 1) under the enforcing RSS guard, cap ${btr_tf_cap} KiB = ${btr_tf_price} (no runaway margin) <= available ${btr_tf_avail} KiB - reserve ${btr_tf_reserve} KiB; compiler pools re-admit each worker"
+    bootstrap_tree_rss_floor_note="build-threads floor applied: 2 workers (host budget fits 1) under the enforcing RSS guard, cap ${btr_tf_cap} KiB = ${btr_tf_price} (no runaway margin) <= available ${btr_tf_avail} KiB - reserve ${btr_tf_reserve} KiB; compiler pools re-admit each worker, MIR priced at ${BOOTSTRAP_TREE_RSS_FLOOR_MIR_WORKER_KB} kB per worker (run 11) so it stays at one"
   fi
 }
 
@@ -970,6 +981,23 @@ bootstrap_tree_rss_whole_build_export() {
     fi
   fi
   BOOTSTRAP_VERIFY_BUILD_THREADS=$bootstrap_tree_rss_plan_workers
+  # Guarded two-worker floor: pin MIR to one worker (see
+  # bootstrap_tree_rss_two_worker_floor). A caller-set value wins; a value
+  # this function published for an earlier floored plan is withdrawn when
+  # the new plan is not floored.
+  if [ "${bootstrap_tree_rss_floor_mir_published:-0}" = 1 ]; then
+    unset SIMPLE_MIR_SHARD_WORKER_KB
+    bootstrap_tree_rss_floor_mir_published=0
+  fi
+  if [ "$bootstrap_tree_rss_plan_bound" = two-worker-guarded-floor ]; then
+    if [ -n "${SIMPLE_MIR_SHARD_WORKER_KB:-}" ]; then
+      bootstrap_tree_rss_plan_summary="${bootstrap_tree_rss_plan_summary}; caller SIMPLE_MIR_SHARD_WORKER_KB=${SIMPLE_MIR_SHARD_WORKER_KB} kept"
+    else
+      SIMPLE_MIR_SHARD_WORKER_KB=$BOOTSTRAP_TREE_RSS_FLOOR_MIR_WORKER_KB
+      export SIMPLE_MIR_SHARD_WORKER_KB
+      bootstrap_tree_rss_floor_mir_published=1
+    fi
+  fi
   SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_SOURCE=phase-policy
   SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND=$bootstrap_tree_rss_plan_bound
   export SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB BOOTSTRAP_VERIFY_BUILD_THREADS \

@@ -24,7 +24,7 @@ unset SIMPLE_BOOTSTRAP_RSS_CAP_MODE SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB \
     SIMPLE_HOST_TREE_RSS_HOST_PCT SIMPLE_HOST_CONFIG SIMPLE_HOST_ENV_FILE \
     SIMPLE_BUILD_MEMORY_RESERVE_BYTES SIMPLE_HOST_MEM_RESERVE_FREE_MIB \
     SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_KIB SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_WORKER_MARGIN_PCT \
-    SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_BASE_KIB BOOTSTRAP_TREE_RSS_MEMINFO_PATH \
+    SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_BASE_KIB BOOTSTRAP_TREE_RSS_MEMINFO_PATH SIMPLE_MIR_SHARD_WORKER_KB \
     BOOTSTRAP_TREE_RSS_TEST_FIXTURE || :
 BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY=1
 export BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY
@@ -94,6 +94,9 @@ expect 'reserve unknown total keeps 24 GiB' 25165824 "$(bootstrap_tree_rss_host_
 expect 'reserve bytes env' 12582912 "$(SIMPLE_BUILD_MEMORY_RESERVE_BYTES=12884901888 bootstrap_tree_rss_host_reserve_kib 127600812 '')"
 expect 'reserve host mib env' 8388608 "$(SIMPLE_HOST_MEM_RESERVE_FREE_MIB=8192 bootstrap_tree_rss_host_reserve_kib 127600812 '')"
 expect 'reserve junk bytes is unknown' '' "$(SIMPLE_BUILD_MEMORY_RESERVE_BYTES=12x bootstrap_tree_rss_host_reserve_kib 127600812 '')"
+expect 'reserve leading-zero bytes is unknown' '' "$(SIMPLE_BUILD_MEMORY_RESERVE_BYTES=0812 bootstrap_tree_rss_host_reserve_kib 127600812 '')"
+expect 'reserve sub-KiB bytes is unknown' '' "$(SIMPLE_BUILD_MEMORY_RESERVE_BYTES=512 bootstrap_tree_rss_host_reserve_kib 127600812 '')"
+expect 'reserve leading-zero host mib not octal' 8388608 "$(SIMPLE_HOST_MEM_RESERVE_FREE_MIB=08192 bootstrap_tree_rss_host_reserve_kib 127600812 '')"
 
 # 10. Wiring through the real plan. The production probe refuses meminfo
 #     fixtures while enforcing, so the enforce-mode cases replace the probe
@@ -128,20 +131,45 @@ expect_has 'plan run-20 reason line' 'build-threads floor not applied:' "$out"
 out=$(plan_enforce 127600812 112044352 8)
 expect 'plan enforce fits 2 unchanged' '2:54525952:54525952:worker-floor-elevated:62914560' "${out%%|*}"
 expect_lacks 'plan fits 2 has no floor text' 'build-threads floor' "$out"
-# Export publishes the 2 workers and the floor cap, no elevated ceiling.
-out=$(
+# Export: 2 workers, the floor cap, no elevated ceiling, no 60 GiB row, and
+# MIR pinned to one worker at the run-11 measured peak (reviewer finding:
+# the pool's 9 GB static MIR estimate would admit 2 x 19-25 GiB under cap2).
+# export_enforce AVAIL [SETUP] -> threads:cap:ceiling:bound:cli_row:mir_kb
+export_enforce() (
+    ee_avail=$1
     bootstrap_tree_rss_probe_host() {
         bootstrap_tree_rss_host_total_kib=127600812
-        bootstrap_tree_rss_host_available_kib=70000000
+        bootstrap_tree_rss_host_available_kib=$ee_avail
         bootstrap_tree_rss_host_total_source=proc-meminfo
     }
     SIMPLE_BOOTSTRAP_RSS_CAP_MODE=enforce
+    [ -z "${2:-}" ] || eval "$2"
     bootstrap_tree_rss_whole_build_export 8 '' || { printf 'REFUSED=%s' "$bootstrap_tree_rss_refusal"; exit 0; }
-    printf '%s:%s:%s:%s:%s' "$BOOTSTRAP_VERIFY_BUILD_THREADS" "$SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB" \
+    printf '%s:%s:%s:%s:%s:%s' "$BOOTSTRAP_VERIFY_BUILD_THREADS" "$SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB" \
         "${SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB:-none}" "$SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND" \
-        "${SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CAP_KIB:-none}"
+        "${SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CAP_KIB:-none}" "${SIMPLE_MIR_SHARD_WORKER_KB:-unset}"
 )
-expect 'export floor admitted' "2:$cap2:none:two-worker-guarded-floor:none" "$out"
+expect 'export floor admitted, MIR pinned' "2:$cap2:none:two-worker-guarded-floor:none:26424115" "$(export_enforce 70000000)"
+expect 'export floor keeps a caller MIR estimate' "2:$cap2:none:two-worker-guarded-floor:none:30000000" \
+    "$(export_enforce 70000000 'SIMPLE_MIR_SHARD_WORKER_KB=30000000; export SIMPLE_MIR_SHARD_WORKER_KB')"
+# (Budget fits 2 is pinned at the plan level above: its export re-admits an
+# elevated ceiling against the REAL /proc/meminfo, so it is not deterministic.)
+# Run 20: one worker as before, MIR untouched.
+expect 'export run-20 unchanged' '1:29360128:none:worker-floor:none:unset' "$(export_enforce 41569324)"
+# A floored export followed by an unfloored one withdraws its own MIR pin.
+out=$(
+    bootstrap_tree_rss_probe_host() {
+        bootstrap_tree_rss_host_total_kib=127600812
+        bootstrap_tree_rss_host_available_kib=$ee_avail
+        bootstrap_tree_rss_host_total_source=proc-meminfo
+    }
+    SIMPLE_BOOTSTRAP_RSS_CAP_MODE=enforce
+    ee_avail=70000000; bootstrap_tree_rss_whole_build_export 8 '' || exit 1
+    unset SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB
+    ee_avail=41569324; bootstrap_tree_rss_whole_build_export 8 '' || exit 1
+    printf '%s:%s' "$BOOTSTRAP_VERIFY_BUILD_THREADS" "${SIMPLE_MIR_SHARD_WORKER_KB:-unset}"
+)
+expect 'export withdraws its own MIR pin' '1:unset' "$out"
 # Monitor-mode fixture (the ordinary selftest path): 40 GB available fits 1,
 # floor not applied and said so.
 printf 'MemTotal:       127600812 kB\nMemFree:        30000000 kB\nMemAvailable:    40000000 kB\n' >"$scratch/busy"
