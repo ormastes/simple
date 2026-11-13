@@ -8,9 +8,21 @@ use app.io.cli_ops.{cli_kernel_executable_path}
 use app.io._CliCompile.native_build_snapshot_roots.{native_build_selected_snapshot_source_roots_v1}
 use app.cli.native_build_closure_roots.{native_build_closure_roots_v1}
 use std.nogc_sync_mut.io.file_ops.{file_hash_sha256}
+use std.io_runtime.{file_exists}
+use std.nogc_sync_mut.io_runtime.{host_os}
 use std.scv.compile_source_inventory.{compile_source_inventory_plain_checkout_v1}
 use compiler.driver.driver_build.native_entry_closure_owner.{
     NativeEntryClosureRequestV1, native_entry_closure_request_read_v1}
+
+# Path whose bytes are the running compiler image. A HIR pool worker is
+# launched from a sealed memfd pin (OwnedExecutablePin: memfd + fexecve), so its
+# /proc/self/exe names "/memfd:... (deleted)" and cli_kernel_executable_path()
+# resolves to ""; /proc/self/exe itself still opens exactly the executing bytes.
+# "" when no image is reachable (the caller then refuses admission).
+pub fn native_build_kernel_image_hash_path_v1(resolved: text, os: text, proc_self_exe_present: bool) -> text:
+    if resolved != "": return resolved
+    if os != "windows" and proc_self_exe_present: return "/proc/self/exe"
+    ""
 
 # True when the parent left a request for this process. An absent path is the
 # only "no request" signal; a present path must then admit or the caller fails.
@@ -35,7 +47,9 @@ pub fn native_build_closure_request_admit_v1(entry_point: text,
         env_get("SIMPLE_SCV_SNAPSHOT_ROOT") ?? "", roots)
     if canonical.is_err():
         return Err("closure request roots rejected: " + canonical.unwrap_err())
-    val kernel_digest = file_hash_sha256(cli_kernel_executable_path())
+    val kernel_image = native_build_kernel_image_hash_path_v1(cli_kernel_executable_path(), host_os(),
+        file_exists("/proc/self/exe"))
+    val kernel_digest = file_hash_sha256(kernel_image)
     if kernel_digest == nil:
         return Err("closure request rejected: compiler executable could not be hashed")
     val request = native_entry_closure_request_read_v1(request_path,
