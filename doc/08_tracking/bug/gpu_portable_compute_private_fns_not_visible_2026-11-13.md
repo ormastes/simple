@@ -121,3 +121,31 @@ u32 overflow guards. It computes `count=qw*qh`, `aw*ah != ac` and
 relies on the host packer in `backend_vulkan_font.spl` for bounds. This has
 been the case since `63687490087`. Confirming the packer bounds belongs to the
 Vulkan font lane.
+
+## Resolution: `gpu_font_emission_spec_private_contract_and_drift_2026-11-13` (fixed 2026-11-13)
+
+`test/03_system/app/simple_2d/feature/gpu_font_emission_spec.spl` ran 5 of 8
+on the #8936 merge (`6f3a8c2d118`). The verdict for each red:
+
+| example | verdict | evidence |
+|---|---|---|
+| Vulkan GLSL 15-input ABI (`vulkan_font_atlas_compile_plan not found`) | visibility (same class as above) | `gpu_generated_2d_contract.spl` declared bare `fn`s that are imported from outside `src/compiler/70.backend/backend/`. A scan of every `use compiler.backend.gpu_generated_2d_contract` in `src/`, `test/`, `scripts/` (and `src/plugins/backend_{hip,opencl}`) gave six: `vulkan_font_atlas_compile_plan`, `vulkan_font_atlas_artifact_evidence`, `{cuda,hip,opencl,metal}_generated_2d_compile_contract`. They are now `pub fn`. `vulkan_spirv_generated_2d_compile_contract` stays private because its only importer is in the same directory. Classes are unchanged, as in the 23-fn fix. |
+| same example, after it unmasked | spec stale | Once the import resolved, the 13-field `set = 0` needles failed against the production source. `63687490087` made production the packed multi-glyph shader and kept the 13-field one as `font_atlas_composite_vulkan_legacy_glsl_source()`. The exact 13-field needles now target the legacy source, verbatim. The production source is pinned by sha256 `8a5c5422...4444` (`PINNED_VULKAN_FONT_SOURCE_SHA256`) plus its packed-ABI and bounds needles. |
+| atlas and destination bindings (CUDA `dx`/`dy`) | spec stale | `f119f8b7120` made the CUDA source the HIP source minus the include. It carries `si < 0 \|\| si >= atlas_count` and `di < 0 \|\| di >= dst_count`, a strict superset of the old `if (si >= atlas_count)` / `if (di >= dst_count)` checks. Every old guard (sx/sy, si, dx/dy, di) still has a counterpart, so no bounds check was removed. The spec now pins the signed forms and the sx/sy and dx/dy guards. It also restores the four assertions `88aac2ffe28` dropped: `cuda.source == font_atlas_composite_cuda_source()` and the three WebGPU `params[n] > 2147483647` guards. |
+| stable pure-Simple source-emitter handoff | 1 stale, 1 code gap | (a) `run "$program" vulkan` became `run_portable_compute_emitter "$program" vulkan` in `7fd629f8ac1`. The helper still runs `run "$program" "$target"`, which the spec already pins, so the pair is equivalent. (b) `check-bootstrap-portability.shs` never invoked `check-portable-compute-toolchains.shs --vulkan-provenance-self-test`: `git log -S` on that path is empty. The spec asserted the wiring from the start, so the gate is fixed, not the spec. The self-test (0.14 s, synthetic fixtures) now runs in the gate's non-Windows branch, because it builds `ln -s` fixtures. |
+
+Red to green on `seed-whileval`, one run at a time under MemoryMax=16G:
+
+| spec | before | after |
+|---|---|---|
+| 03_system gpu_font_emission_spec | 5/8 | 8/8 |
+| 01_unit gpu_portable_compute_spec | 33/33 | 33/33 |
+| 01_unit chrome_webgpu_compute_evidence_spec | 13/13 | 13/13 |
+| 01_unit chrome_webgpu_draw_evidence_spec | 9/9 | 9/9 |
+| 01_unit backend_vulkan_font_spec | 17/22 | 17/22 (unchanged; 5 reds are `variable target not found`, unrelated) |
+| 01_unit gpu_generated_2d_contract_spec | 0/2 | 2/2 |
+| 01_unit hip_backend_contract_spec | 0/1 (import error) | 0/5 (now blocked on private `hip_backend_2d_compile_contract` in `hip_backend.spl` and `emit_portable_2d_fill_u32_kernel`; separate module, not fixed here) |
+
+`check-bootstrap-portability.shs` prints `Vulkan provenance self-test passed`.
+It later fails on `linux_phase23_llvm23_archive_test.shs`, which also fails
+standalone and is not touched here.
