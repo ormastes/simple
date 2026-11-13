@@ -5,10 +5,11 @@
 # (cranelift_codegen_adapter) into a host JIT module. A callee is one of:
 #   - Source, defined in the module       -> local call
 #   - Foreign                             -> import bound by the provider
-#   - Runtime (`rt_*`)                    -> REFUSED, named, before codegen
+#   - Runtime (`rt_*`)                    -> import bound through the provider's
+#                                            runtime symbol table, with its
+#                                            RuntimeFuncSpec signature; any other
+#                                            name or shape is REFUSED, named
 #   - Source, not defined in the module   -> REFUSED, named, before codegen
-# Runtime externs are refused because the provider behind rt_cranelift_new_module
-# registers no runtime symbols: an `rt_*` import aborts the host at finalize
 # (doc/08_tracking/bug/pure_simple_jit_provider_registers_no_runtime_symbols_2026-11-13.md).
 # A refusal is an error value naming the symbol. It is never a nil result, a
 # call through address 0, or an interpreter demotion.
@@ -76,17 +77,20 @@ describe "pure-Simple JIT callee classification":
         expect(resolution == JitCalleeResolution.ForeignImport).to_equal(true)
         expect(jit_callee_refusal(resolution, "labs", "main")).to_equal("")
 
-    it "refuses every Runtime callee by name, whatever its family":
+    it "hands every Runtime callee to the provider's runtime table, whatever its family":
         for name in ["rt_file_exists", "rt_file_read_text", "rt_process_run", "rt_getpid", "rt_time_now_unix_micros", "rt_string_len"]:
             val resolution = jit_classify_callee(MirCallOrigin.Runtime, name, {})
-            expect(resolution == JitCalleeResolution.RuntimeUnbound).to_equal(true)
-            val refusal = jit_callee_refusal(resolution, name, "main")
-            expect(refusal).to_contain("E-JIT-RUNTIME-EXTERN-UNBOUND")
-            expect(refusal).to_contain(name)
+            expect(resolution == JitCalleeResolution.RuntimeImport).to_equal(true)
+            expect(jit_callee_refusal(resolution, name, "main")).to_equal("")
+
+    it "names a Runtime callee the provider's table does not back":
+        val refusal = jit_callee_refusal(JitCalleeResolution.RuntimeUnbound, "rt_zz_no_such_runtime_symbol", "main")
+        expect(refusal).to_contain("E-JIT-RUNTIME-EXTERN-UNBOUND")
+        expect(refusal).to_contain("rt_zz_no_such_runtime_symbol")
 
     it "does not let a same-named local definition capture a Runtime callee":
         val resolution = jit_classify_callee(MirCallOrigin.Runtime, "rt_getpid", {"rt_getpid": true})
-        expect(resolution == JitCalleeResolution.RuntimeUnbound).to_equal(true)
+        expect(resolution == JitCalleeResolution.RuntimeImport).to_equal(true)
 
     it "refuses a Source callee the module does not define":
         val resolution = jit_classify_callee(MirCallOrigin.Source, "no_such_fn", {"main": true})
@@ -102,15 +106,16 @@ describe "pure-Simple JIT callee classification":
 
     it "reports each refused callee of a module once":
         val module = main_module([
-            call0(mir_operand_runtime_function("rt_getpid", MirType.i64()), []),
+            call0(source_callee("no_such_fn"), []),
+            call0(source_callee("no_such_fn"), []),
             call0(mir_operand_runtime_function("rt_getpid", MirType.i64()), []),
             call0(mir_operand_foreign_function("labs", MirType.i64()), [int_op(-5)]),
-            call0(source_callee("no_such_fn"), [])
+            call0(MirOperand(kind: MirOperandKind.Const(MirConstValue.Str("mystery"), MirType.i64()), call_origin: MirCallOrigin.Unknown), [])
         ], local0())
         val errors = jit_module_extern_errors(module)
         expect(errors.len()).to_equal(2)
-        expect(errors[0]).to_contain("rt_getpid")
-        expect(errors[1]).to_contain("no_such_fn")
+        expect(errors[0]).to_contain("no_such_fn")
+        expect(errors[1]).to_contain("mystery")
 
 describe "pure-Simple JIT executes natively through the provider":
 
@@ -140,11 +145,27 @@ describe "pure-Simple JIT executes natively through the provider":
 
 describe "pure-Simple JIT fails closed on a callee it cannot bind":
 
-    it "returns a named error for file, process, time and text runtime externs":
+    it "returns a named error for a runtime extern the provider's table does not back":
+        expect(run_error(runtime_call_module("rt_zz_no_such_runtime_symbol", []))).to_contain("E-JIT-RUNTIME-EXTERN-UNBOUND: rt_zz_no_such_runtime_symbol")
+
+    it "returns a named error when a runtime import's shape differs from its RuntimeFuncSpec":
+        # rt_file_exists returns an i8 bool; an unknown-signature call reads i64.
         expect(run_error(runtime_call_module("rt_file_exists", [int_op(0), int_op(0)]))).to_contain("E-JIT-RUNTIME-EXTERN-UNBOUND: rt_file_exists")
-        expect(run_error(runtime_call_module("rt_process_run", [int_op(0), int_op(0), int_op(0)]))).to_contain("E-JIT-RUNTIME-EXTERN-UNBOUND: rt_process_run")
-        expect(run_error(runtime_call_module("rt_time_now_unix_micros", []))).to_contain("E-JIT-RUNTIME-EXTERN-UNBOUND: rt_time_now_unix_micros")
-        expect(run_error(runtime_call_module("rt_string_len", [int_op(0)]))).to_contain("E-JIT-RUNTIME-EXTERN-UNBOUND: rt_string_len")
+        # rt_string_len takes one word; two are passed.
+        expect(run_error(runtime_call_module("rt_string_len", [int_op(0), int_op(0)]))).to_contain("E-JIT-RUNTIME-EXTERN-UNBOUND: rt_string_len")
+        # The lowering rewrites rt_process_spawn_guarded to
+        # rt_process_spawn_guarded_value, which has no seed RuntimeFuncSpec row.
+        expect(run_error(runtime_call_module("rt_process_spawn_guarded", [int_op(0), int_op(0)]))).to_contain("E-JIT-LOWERING-IMPORT-UNBOUND: rt_process_spawn_guarded_value")
+
+    it "returns a named error for a Foreign extern the process cannot resolve":
+        val module = main_module([call0(mir_operand_foreign_function("simple_zz_jit_foreign_defined_nowhere", MirType.i64()), [])], local0())
+        expect(run_error(module)).to_contain("E-JIT-FOREIGN-EXTERN-UNBOUND: simple_zz_jit_foreign_defined_nowhere")
+
+    it "returns a named error for a Foreign call whose ABI cannot be proven":
+        # A float argument crossing a callee with no declared signature.
+        val float_arg = MirOperand(kind: MirOperandKind.Const(MirConstValue.Float(1.5), MirType.f64()))
+        val module = main_module([call0(mir_operand_foreign_function("labs", MirType.i64()), [float_arg])], local0())
+        expect(run_error(module)).to_contain("E-BACKEND-CRANELIFT-CALL-ABI: labs")
 
     it "returns a named error for a callee defined nowhere":
         val message = run_error(main_module([call0(source_callee("no_such_fn"), [])], local0()))
@@ -156,6 +177,6 @@ describe "pure-Simple JIT fails closed on a callee it cannot bind":
         expect(run_error(module)).to_contain("E-JIT-ENTRY")
 
     it "keeps the host alive after a refusal":
-        val refused = run_error(runtime_call_module("rt_getpid", []))
+        val refused = run_error(runtime_call_module("rt_zz_no_such_runtime_symbol", []))
         expect(refused).to_contain("E-JIT-RUNTIME-EXTERN-UNBOUND")
         expect(run_value(main_module([], int_op(3)))).to_equal(3)

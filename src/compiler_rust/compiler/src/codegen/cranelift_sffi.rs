@@ -320,6 +320,78 @@ fn float_cc_from_code(code: i64) -> cranelift_codegen::ir::condcodes::FloatCC {
 /// the cranelift analogue of LLVM `linkonce_odr` + `comdat any`.
 const CRANELIFT_LINKAGE_COMDAT: i64 = 4;
 
+/// Function linkage code for an import that may bind ONLY through the JIT
+/// runtime symbol table (never a process symbol), with exactly its
+/// `RuntimeFuncSpec` signature. JIT modules only; an AOT module refuses it.
+pub const CRANELIFT_LINKAGE_RUNTIME_IMPORT: i64 = 5;
+
+/// The seed JIT's runtime symbol table (`jit::seed_jit_runtime_symbol_table`),
+/// resolved once with the seed JIT's own default provider. The provider is
+/// kept alive here: a dynamic provider's addresses die with it.
+struct JitRuntimeSymbolTable {
+    _provider: std::sync::Arc<dyn super::jit::RuntimeSymbolProvider>,
+    symbols: Vec<(&'static str, *const u8)>,
+    by_name: HashMap<&'static str, *const u8>,
+}
+
+// SAFETY: the addresses are immutable code addresses of runtime functions that
+// live as long as the process (or as `_provider`, held here forever); the
+// table is built once and never mutated.
+unsafe impl Send for JitRuntimeSymbolTable {}
+unsafe impl Sync for JitRuntimeSymbolTable {}
+
+lazy_static! {
+    static ref JIT_RUNTIME_SYMBOLS: JitRuntimeSymbolTable = {
+        let provider = super::jit::default_runtime_provider();
+        let symbols = super::jit::seed_jit_runtime_symbol_table(provider.as_ref());
+        let by_name = symbols.iter().copied().collect();
+        JitRuntimeSymbolTable { _provider: provider, symbols, by_name }
+    };
+}
+
+/// Every `(name, address)` the provider registers on a JIT module: the seed
+/// JIT's runtime symbol table.
+pub fn jit_provider_runtime_symbols() -> &'static [(&'static str, *const u8)] {
+    &JIT_RUNTIME_SYMBOLS.symbols
+}
+
+/// The signature a JIT import of `name` must have to bind through the runtime
+/// table: `None` when `name` is not registered, `Some(None)` when it is
+/// registered but has no `RuntimeFuncSpec` (its ABI cannot be proven).
+fn jit_runtime_import_spec(name: &str) -> Option<Option<&'static super::runtime_sffi::RuntimeFuncSpec>> {
+    JIT_RUNTIME_SYMBOLS.by_name.get(name)?;
+    Some(super::runtime_sffi::spec_for_target(&simple_common::target::Target::host(), name))
+}
+
+/// Admission for a function import into a JIT module, decided at declaration
+/// so that finalize never meets a symbol it cannot resolve (cranelift-jit
+/// panics there, and a panic cannot cross this `extern "C"` surface).
+///   - a runtime-table name binds only with its exact RuntimeFuncSpec signature;
+///   - any other name binds only as a plain import (`runtime_only == false`)
+///     that the process can resolve.
+fn admit_jit_import(name: &str, signature: &Signature, call_conv: CallConv, runtime_only: bool) -> Result<(), String> {
+    match jit_runtime_import_spec(name) {
+        Some(Some(spec)) => {
+            let expected = spec.build_signature(call_conv);
+            if *signature == expected {
+                Ok(())
+            } else {
+                Err(format!("runtime symbol signature differs from its RuntimeFuncSpec {expected}"))
+            }
+        }
+        Some(None) => Err("runtime symbol has no RuntimeFuncSpec, so its ABI cannot be proven".to_string()),
+        None if runtime_only => Err("not in the JIT runtime symbol table".to_string()),
+        None if super::jit::dlsym_resolves(name) => Ok(()),
+        None => Err("resolves to no runtime symbol and no process symbol".to_string()),
+    }
+}
+
+/// True when finalize can resolve an import named `name`: a registered runtime
+/// symbol, or a process symbol (cranelift-jit's own lookup order).
+fn jit_import_resolvable(name: &str) -> bool {
+    JIT_RUNTIME_SYMBOLS.by_name.contains_key(name) || super::jit::dlsym_resolves(name)
+}
+
 /// Linkage a COMDAT instance is declared with for `format`. ELF: weak inside
 /// a COMDAT group (what clang emits for C++ inline). COFF: external inside an
 /// IMAGE_COMDAT_SELECT_ANY section -- object 0.36 writes a *defined* weak COFF
@@ -583,7 +655,8 @@ unsafe fn rt_cranelift_new_module_impl(name: &str, target: i64) -> i64 {
         None => return 0,
     };
 
-    let builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+    let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+    super::jit::register_seed_jit_runtime_symbols(&mut builder, jit_provider_runtime_symbols());
     let module = JITModule::new(builder);
     let handle = next_handle();
 
@@ -602,12 +675,41 @@ unsafe fn rt_cranelift_new_module_impl(name: &str, target: i64) -> i64 {
 #[no_mangle]
 pub unsafe extern "C" fn rt_cranelift_finalize_module(module: i64) -> i64 {
     if module_has_failure(module) { return 0; }
-    {
+    let refusal = {
         let mut modules = JIT_MODULES.lock().unwrap();
         if let Some(ctx) = modules.get_mut(&module) {
-            ctx.module.finalize_definitions().unwrap();
-            return module;
+            // cranelift-jit panics on an import it cannot resolve, and a panic
+            // cannot cross this extern "C" surface. Declaration admission
+            // already refuses such function imports; this is the backstop for
+            // every import, function or data, before finalize can meet one.
+            let declarations = ctx.module.declarations();
+            let unresolved = declarations
+                .get_functions()
+                .filter(|(_, decl)| decl.linkage == Linkage::Import)
+                .filter_map(|(_, decl)| decl.name.as_deref())
+                .chain(
+                    declarations
+                        .get_data_objects()
+                        .filter(|(_, decl)| decl.linkage == Linkage::Import)
+                        .filter_map(|(_, decl)| decl.name.as_deref()),
+                )
+                .find(|name| !jit_import_resolvable(name))
+                .map(str::to_owned);
+            match unresolved {
+                Some(name) => format!("module={module}: import {name:?} resolves to no runtime or process symbol"),
+                None => match ctx.module.finalize_definitions() {
+                    Ok(()) => return module,
+                    Err(error) => format!("module={module}: finalize failed: {}", describe_module_error(&error)),
+                },
+            }
+        } else {
+            String::new()
         }
+    };
+    if !refusal.is_empty() {
+        eprintln!("cranelift: finalize_module refused: {refusal}");
+        record_module_failure(module, refusal);
+        return 0;
     }
     {
         let modules = AOT_MODULES.lock().unwrap();
@@ -688,8 +790,10 @@ pub unsafe extern "C" fn rt_cranelift_sig_set_return(sig: i64, type_: i64) {
 // ============================================================================
 
 /// Declare a function in a module (for forward references and imports).
-/// linkage: 0=Export, 1=Import, 2=Local, 4=COMDAT instance (see comdat_instance_linkage)
-/// Returns a function handle, or 0 on failure.
+/// linkage: 0=Export, 1=Import, 2=Local, 4=COMDAT instance (see comdat_instance_linkage),
+/// 5=runtime-table import (JIT only, see CRANELIFT_LINKAGE_RUNTIME_IMPORT)
+/// Returns a function handle, or 0 on failure. A JIT import is admitted only
+/// when finalize can bind it exactly (see admit_jit_import).
 #[no_mangle]
 pub unsafe extern "C" fn rt_cranelift_declare_function(
     module: i64,
@@ -724,6 +828,11 @@ fn declare_function_checked(module: i64, name: &str, sig: i64, linkage: i64) -> 
     let func_id = {
         let mut jit = JIT_MODULES.lock().unwrap();
         if let Some(mod_ctx) = jit.get_mut(&module) {
+            if link == Linkage::Import {
+                let call_conv = mod_ctx.module.isa().default_call_conv();
+                admit_jit_import(name, &signature, call_conv, linkage == CRANELIFT_LINKAGE_RUNTIME_IMPORT)
+                    .map_err(|reason| format!("{}: JIT import refused: {reason}", detailed_identity()))?;
+            }
             let id = mod_ctx.module.declare_function(name, link, &signature)
                 .map_err(|error| format!("{}: {}", detailed_identity(), describe_module_error(&error)))?;
             mod_ctx.func_ids.insert(name.to_owned(), id);
@@ -733,6 +842,9 @@ fn declare_function_checked(module: i64, name: &str, sig: i64, linkage: i64) -> 
             let mut aot = AOT_MODULES.lock().unwrap();
             let mod_ctx = aot.get_mut(&module)
                 .ok_or_else(|| format!("{}: missing JIT/AOT module", detailed_identity()))?;
+            if linkage == CRANELIFT_LINKAGE_RUNTIME_IMPORT {
+                return Err(format!("{}: runtime-table import linkage is JIT-only", detailed_identity()));
+            }
             let mut needs_group = false;
             if linkage == CRANELIFT_LINKAGE_COMDAT {
                 let (comdat_link, group) =
@@ -3258,3 +3370,7 @@ mod abort_tests;
 #[cfg(test)]
 #[path = "cranelift_error_latch_tests.rs"]
 mod error_latch_tests;
+
+#[cfg(all(test, any(target_arch = "x86_64", target_arch = "aarch64")))]
+#[path = "cranelift_jit_runtime_symbols_tests.rs"]
+mod jit_runtime_symbols_tests;
