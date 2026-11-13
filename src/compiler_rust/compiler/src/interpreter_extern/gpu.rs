@@ -3814,6 +3814,28 @@ mod vulkan_dlopen {
     unsafe impl Sync for VulkanState {}
 
     pub static VK_STATE: Mutex<Option<VulkanState>> = Mutex::new(None);
+
+    /// Why the last `rt_vulkan_init` failed (step + VkResult). `VK_STATE` is
+    /// `None` after a failed init, so its `last_error` cannot carry this;
+    /// `rt_vulkan_get_last_error` falls back to it. Empty after a success.
+    pub static VK_INIT_ERROR: Mutex<String> = Mutex::new(String::new());
+
+    pub fn vk_result_name(r: VkResult) -> &'static str {
+        match r {
+            0 => "VK_SUCCESS",
+            -1 => "VK_ERROR_OUT_OF_HOST_MEMORY",
+            -2 => "VK_ERROR_OUT_OF_DEVICE_MEMORY",
+            -3 => "VK_ERROR_INITIALIZATION_FAILED",
+            -4 => "VK_ERROR_DEVICE_LOST",
+            -6 => "VK_ERROR_LAYER_NOT_PRESENT",
+            -7 => "VK_ERROR_EXTENSION_NOT_PRESENT",
+            -8 => "VK_ERROR_FEATURE_NOT_PRESENT",
+            -9 => "VK_ERROR_INCOMPATIBLE_DRIVER",
+            -10 => "VK_ERROR_TOO_MANY_OBJECTS",
+            5 => "VK_INCOMPLETE",
+            _ => "VkResult",
+        }
+    }
 }
 
 static VULKAN_DL_AVAILABLE: OnceLock<bool> = OnceLock::new();
@@ -3926,9 +3948,21 @@ pub fn rt_vulkan_init_fn(_args: &[Value]) -> Result<Value, CompileError> {
             return Ok(Value::Bool(true));
         }
     }
+    let fail = |step: &str, r: Option<VkResult>| -> Result<Value, CompileError> {
+        let msg = match r {
+            Some(r) => format!("{step}: {} ({r})", vk_result_name(r)),
+            None => step.to_string(),
+        };
+        eprintln!("[vulkan] rt_vulkan_init failed at {msg}");
+        *VK_INIT_ERROR.lock().unwrap() = msg;
+        Ok(Value::Bool(false))
+    };
     let fns = match vulkan_dlopen::load_vulkan() {
         Some(f) => f,
-        None => return Ok(Value::Bool(false)),
+        None => {
+            *VK_INIT_ERROR.lock().unwrap() = "load_vulkan: loader library or symbols unavailable".to_string();
+            return Ok(Value::Bool(false));
+        }
     };
     unsafe {
         let app_name = std::ffi::CString::new("simple").unwrap();
@@ -3959,19 +3993,25 @@ pub fn rt_vulkan_init_fn(_args: &[Value]) -> Result<Value, CompileError> {
             pp_enabled_extension_names: instance_extension_ptr,
         };
         let mut instance: VkInstance = ptr::null_mut();
-        if (fns.create_instance)(&create_info, ptr::null(), &mut instance) != VK_SUCCESS {
-            return Ok(Value::Bool(false));
+        let r = (fns.create_instance)(&create_info, ptr::null(), &mut instance);
+        if r != VK_SUCCESS {
+            return fail("vkCreateInstance", Some(r));
         }
 
         // Enumerate physical devices
         let mut count: u32 = 0;
-        (fns.enumerate_physical_devices)(instance, &mut count, ptr::null_mut());
+        let r = (fns.enumerate_physical_devices)(instance, &mut count, ptr::null_mut());
         if count == 0 {
             (fns.destroy_instance)(instance, ptr::null());
-            return Ok(Value::Bool(false));
+            return fail("vkEnumeratePhysicalDevices(count=0)", Some(r));
         }
         let mut phys_devs: Vec<VkPhysicalDevice> = vec![ptr::null_mut(); count as usize];
-        (fns.enumerate_physical_devices)(instance, &mut count, phys_devs.as_mut_ptr());
+        let r = (fns.enumerate_physical_devices)(instance, &mut count, phys_devs.as_mut_ptr());
+        if r < 0 {
+            (fns.destroy_instance)(instance, ptr::null());
+            return fail("vkEnumeratePhysicalDevices", Some(r));
+        }
+        phys_devs.truncate(count as usize);
 
         // Pick first device with a compute queue
         let mut chosen_phys: VkPhysicalDevice = ptr::null_mut();
@@ -3992,7 +4032,7 @@ pub fn rt_vulkan_init_fn(_args: &[Value]) -> Result<Value, CompileError> {
         }
         if chosen_phys.is_null() {
             (fns.destroy_instance)(instance, ptr::null());
-            return Ok(Value::Bool(false));
+            return fail(&format!("no compute queue family on any of {count} device(s)"), None);
         }
 
         let priority: f32 = 1.0;
@@ -4018,9 +4058,17 @@ pub fn rt_vulkan_init_fn(_args: &[Value]) -> Result<Value, CompileError> {
             p_enabled_features: &features,
         };
         let mut device: VkDevice = ptr::null_mut();
-        if (fns.create_device)(chosen_phys, &dev_ci, ptr::null(), &mut device) != VK_SUCCESS {
+        let (r, attempts) = vk_create_device_with_retry(
+            || (fns.create_device)(chosen_phys, &dev_ci, ptr::null(), &mut device),
+            |ms| std::thread::sleep(std::time::Duration::from_millis(ms)),
+        );
+        if r != VK_SUCCESS {
             (fns.destroy_instance)(instance, ptr::null());
-            return Ok(Value::Bool(false));
+            let idx = phys_devs.iter().position(|pd| *pd == chosen_phys).unwrap_or(0);
+            return fail(
+                &format!("vkCreateDevice(device {idx} of {count}, queue family {chosen_qf}, {attempts} attempt(s))"),
+                Some(r),
+            );
         }
 
         let mut queue: VkQueue = ptr::null_mut();
@@ -4046,10 +4094,11 @@ pub fn rt_vulkan_init_fn(_args: &[Value]) -> Result<Value, CompileError> {
             queue_family_index: chosen_qf,
         };
         let mut cmd_pool: VkCommandPool = 0;
-        if (fns.create_command_pool)(device, &pool_ci, ptr::null(), &mut cmd_pool) != VK_SUCCESS {
+        let r = (fns.create_command_pool)(device, &pool_ci, ptr::null(), &mut cmd_pool);
+        if r != VK_SUCCESS {
             (fns.destroy_device)(device, ptr::null());
             (fns.destroy_instance)(instance, ptr::null());
-            return Ok(Value::Bool(false));
+            return fail("vkCreateCommandPool", Some(r));
         }
 
         let state = VulkanState {
@@ -4077,7 +4126,118 @@ pub fn rt_vulkan_init_fn(_args: &[Value]) -> Result<Value, CompileError> {
         };
         *VK_STATE.lock().unwrap() = Some(state);
     }
+    VK_INIT_ERROR.lock().unwrap().clear();
     Ok(Value::Bool(true))
+}
+
+/// Waits between `vkCreateDevice` attempts, in ms. Bounded: 5 attempts, 750 ms.
+const VK_CREATE_DEVICE_RETRY_DELAYS_MS: [u64; 4] = [50, 100, 200, 400];
+
+/// `vkCreateDevice` with a bounded retry on `VK_ERROR_INITIALIZATION_FAILED`.
+///
+/// The NVIDIA driver returns that code transiently while other processes are
+/// creating devices on the same GPU (measured 2026-11-13 on GB10: 11 of 32 spec
+/// processes under 4 concurrent loops, 0 of 20 serial, 0 of 32 on llvmpipe; see
+/// doc/08_tracking/bug/vulkan_runtime_init_nvidia_create_device_contention_2026-11-13.md).
+/// Only that one code is retried, every failed attempt is logged, and an
+/// exhausted retry still returns the error — the caller fails closed. The
+/// success path makes one call and never sleeps. Returns (result, attempts).
+fn vk_create_device_with_retry(
+    mut create: impl FnMut() -> vulkan_dlopen::VkResult,
+    mut sleep_ms: impl FnMut(u64),
+) -> (vulkan_dlopen::VkResult, u32) {
+    const VK_ERROR_INITIALIZATION_FAILED: vulkan_dlopen::VkResult = -3;
+    let mut attempts = 1u32;
+    let mut r = create();
+    for delay in VK_CREATE_DEVICE_RETRY_DELAYS_MS {
+        if r != VK_ERROR_INITIALIZATION_FAILED {
+            break;
+        }
+        eprintln!(
+            "[vulkan] vkCreateDevice attempt {attempts} failed: VK_ERROR_INITIALIZATION_FAILED (-3); retrying in {delay} ms"
+        );
+        sleep_ms(delay);
+        attempts += 1;
+        r = create();
+    }
+    if attempts > 1 && r == 0 {
+        eprintln!("[vulkan] vkCreateDevice succeeded on attempt {attempts}");
+    }
+    (r, attempts)
+}
+
+#[cfg(test)]
+mod vk_create_device_retry_tests {
+    use super::*;
+
+    const INIT_FAILED: i32 = -3;
+
+    #[test]
+    fn success_makes_one_call_and_never_sleeps() {
+        let mut calls = 0;
+        let mut slept = Vec::new();
+        let (r, attempts) = vk_create_device_with_retry(
+            || {
+                calls += 1;
+                0
+            },
+            |ms| slept.push(ms),
+        );
+        assert_eq!((r, attempts, calls), (0, 1, 1));
+        assert!(slept.is_empty());
+    }
+
+    #[test]
+    fn transient_initialization_failed_recovers() {
+        let mut calls = 0;
+        let mut slept = Vec::new();
+        let (r, attempts) = vk_create_device_with_retry(
+            || {
+                calls += 1;
+                if calls <= 2 {
+                    INIT_FAILED
+                } else {
+                    0
+                }
+            },
+            |ms| slept.push(ms),
+        );
+        assert_eq!((r, attempts), (0, 3));
+        assert_eq!(slept, VK_CREATE_DEVICE_RETRY_DELAYS_MS[..2].to_vec());
+    }
+
+    #[test]
+    fn persistent_initialization_failed_stays_failed_and_is_bounded() {
+        let mut calls = 0u32;
+        let mut slept = Vec::new();
+        let (r, attempts) = vk_create_device_with_retry(
+            || {
+                calls += 1;
+                INIT_FAILED
+            },
+            |ms| slept.push(ms),
+        );
+        let max = VK_CREATE_DEVICE_RETRY_DELAYS_MS.len() as u32 + 1;
+        assert_eq!((r, attempts, calls), (INIT_FAILED, max, max));
+        assert_eq!(slept, VK_CREATE_DEVICE_RETRY_DELAYS_MS.to_vec());
+    }
+
+    #[test]
+    fn other_errors_are_not_retried() {
+        for code in [-1, -2, -4, -7, -8, -10] {
+            let mut calls = 0;
+            let mut slept = Vec::new();
+            let (r, attempts) = vk_create_device_with_retry(
+                || {
+                    calls += 1;
+                    code
+                },
+                |ms| slept.push(ms),
+            );
+            assert_eq!((r, attempts, calls), (code, 1, 1));
+            assert!(slept.is_empty());
+        }
+    }
 }
 
 #[cfg(test)]
@@ -5668,7 +5828,10 @@ pub fn rt_vulkan_wait_idle_fn(_args: &[Value]) -> Result<Value, CompileError> {
 pub fn rt_vulkan_get_last_error_fn(_args: &[Value]) -> Result<Value, CompileError> {
     use vulkan_dlopen::VK_STATE;
     let guard = VK_STATE.lock().unwrap();
-    let err = guard.as_ref().map(|s| s.last_error.clone()).unwrap_or_default();
+    let err = match guard.as_ref() {
+        Some(s) => s.last_error.clone(),
+        None => vulkan_dlopen::VK_INIT_ERROR.lock().unwrap().clone(),
+    };
     Ok(Value::text(err))
 }
 

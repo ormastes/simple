@@ -95,3 +95,7 @@ verification. Kept OPEN.**
   source damage buffer in the `vulkan_graphics_runtime` Rust test) is a Rust
   runtime change outside a no-cargo lane. The "until strengthened" reporting
   rule remains in force.
+
+## Triage 2026-11-13 (Linux aarch64, lane uia) — row stays OPEN
+
+Blocked on this host: no Xvfb. Static confirmation at release/1.0.0 c8c3e7bc4f1, Linux aarch64 (DGX Spark GB10), Rust seed af717f53d6bce3e5: in bench_window_swapchain_present_8k_one_percent_damage the checksum folds the host source vector, not the presented frame (vulkan_graphics_runtime_swapchain.rs), so the gate still proves device present only. The fix is in that ignored Rust test plus the gate script and needs cargo --features vulkan with a display.

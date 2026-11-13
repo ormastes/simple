@@ -50,9 +50,11 @@
 # bootstrap_tree_rss_refusal.
 #
 # Result attribution: bootstrap_tree_rss_source says which layer chose the
-# numbers (explicit-env | env-knobs | host-config | default) and
+# numbers (explicit-env | env-knobs | host-config | default, plus the published
+# phase-policy and memory-admission labels, the latter being the Stage 3 resume
+# cap derived from the admitted MemoryHigh) and
 # bootstrap_tree_rss_bound which rule produced the final value (explicit |
-# budget | floor | host-fraction | hard-ceiling). Callers pass both to the
+# budget | floor | host-fraction | hard-ceiling | memory-high). Callers pass both to the
 # watchdog (--cap-source / --cap-bound) so the receipt records them.
 #
 # Test hook: BOOTSTRAP_TREE_RSS_MEMINFO_PATH substitutes host RAM, which can
@@ -297,6 +299,38 @@ bootstrap_tree_rss_ceiling_kib() {
     [ "$btr_c_scaled" -le "$btr_c" ] || btr_c=$btr_c_scaled
   fi
   printf '%s\n' "$btr_c"
+}
+
+# bootstrap_tree_rss_stage3_default_cap_kib MEMORY_HIGH_MIB CEILING_KIB -> KiB
+# Default process-tree cap of the Stage 3 resume compiler when the caller set
+# no SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB pair: the cgroup MemoryHigh the
+# Stage 3 memory admission already reserved (SIMPLE_BOOTSTRAP_STAGE3_MEMORY_HIGH_MIB,
+# default 48 GiB of verified free host memory), clamped to the default hard
+# ceiling, so it never needs an elevated-ceiling ratchet. Without it the
+# serial resume took the compile-worker budget (3 GiB + 1 x 5 GiB = 8 GiB) and
+# was killed after HIR: measured Stage 3 self-builds peak at 16.8 GB (phase
+# route) to 36.5 GiB (doc/08_tracking/bug/stage3_selfbuild_memory_curve_cap_ratchet_2026-11-12.md).
+bootstrap_tree_rss_stage3_default_cap_kib() {
+  case "${1:-}:${2:-}" in 0*|*:0*) return 1 ;; esac
+  bootstrap_tree_rss_is_uint "${1:-}" 9 && bootstrap_tree_rss_is_uint "${2:-}" 15 || return 1
+  btr_s3_cap=$(($1 * 1024))
+  [ "$btr_s3_cap" -le "$2" ] || btr_s3_cap=$2
+  printf '%s\n' "$btr_s3_cap"
+}
+
+# bootstrap_tree_rss_stage3_default_cap_attributed MEMORY_HIGH_MIB CEILING_KIB
+#   -> CAP_KIB:memory-admission:(memory-high|hard-ceiling)
+# The transport form of the derived cap. The launcher hands it to the Stage 3
+# worker, which publishes SOURCE/BOUND as SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_SOURCE/_BOUND
+# beside the cap, so bootstrap_tree_rss_published_attribution records the
+# receipt as this code default rather than an explicit-env pair the operator
+# hand-set (the mislabel a post-mortem would otherwise read as a 48 GiB
+# operator override). A bare CAP stays explicit-env/explicit.
+bootstrap_tree_rss_stage3_default_cap_attributed() {
+  btr_s3a_cap=$(bootstrap_tree_rss_stage3_default_cap_kib "$@") || return 1
+  btr_s3a_bound=memory-high
+  [ "$btr_s3a_cap" = "$(($1 * 1024))" ] || btr_s3a_bound=hard-ceiling
+  printf '%s:memory-admission:%s\n' "$btr_s3a_cap" "$btr_s3a_bound"
 }
 
 # Strict facts for an explicit elevated budget. This parser is also exercised
