@@ -1,7 +1,7 @@
 # Async-handler registry APIs removed; contract specs still pin them
 
 Date: 2026-09-16
-Status: SUPERSEDED 2026-11-11 (lane p3-ne20) — fixed 2026-11-05 (work/libbug-async-registry-20261105), verified green by lane p3-subj7 2026-11-09; this header flip only
+Status: FIXED 2026-11-13 (lane p3-asyncreg-20261113) — APIs restored 2026-11-05 (work/libbug-async-registry-20261105, `8dcf70e1ffd`); restored drain loop made ERR-01-clean 2026-11-13; bug_db row flipped to `fixed`
 
 ## Observed
 
@@ -110,3 +110,54 @@ rule): `src/lib/nogc_async_mut/http_server/worker.spl:17` defines
 `self.async_job_by_fd[fd] = job_id`; the per-fd registry both contract specs
 pin is present in-tree on this base. The 2026-11-09 verification evidence
 (2/2 + 3/3, seed interpreter, same branch) stands. No source change.
+
+## Resolution 2026-11-13 (lane p3-asyncreg-20261113, base f7cb252dce1) — FIXED
+
+**Decision: accidental removal → restore (not "update specs to a new API").**
+Evidence from history:
+- PR #6804 (merged into release/1.0.0 on 2026-11-05, merge `d4798635325`, title
+  "fix(http_server): restore per-fd async handler registry extension on Worker")
+  and its commit `8dcf70e1ffd` ("restore per-fd async handler registry with
+  exactly-once cancellation") put the APIs back. `git log -S'async_job_by_fd[fd] = job_id' -- src/lib`
+  shows only that commit. No ADR, design doc or commit message retires the
+  registry. The loss happened as a side-effect of the worker.spl facade split
+  (`worker_spl_facade_split_breaks_source_contract_specs_2026-09-15.md`), not as
+  a stated design change. The 2026-11-05 section above records the owner's
+  decision to re-implement. The spec docstrings (`worker_async_fd_registry_spec.spl`)
+  pin PR #6804 as the contract. No spec was rewritten or skipped.
+
+**Remaining defect found and fixed in this lane.** The restored code did not
+lower under the current seed. Seed fix `349cd121b82` (2026-11-09, ERR-01
+nil-only-in-unsafe) now rejects `T? as <numeric>` outside `unsafe`. The
+registry's completion drain in `worker_owner.spl` did `async_msg as i64` on
+`Channel.try_recv() -> T?`. `embedded.spl` did `fd_opt as i64` on
+`Dict<i64,i64>.get`. Both made the whole `std.http_server` package fail HIR
+lowering, so every spec that constructs a live `Worker` executed 0 examples.
+Fix (narrowing, no default/sentinel, no nil widening):
+- `worker_owner.spl`: `val async_msg: i64? = self.async_inbox.try_recv()` then
+  `if val async_job_id = async_msg:` … `else: break`.
+- `embedded.spl`: `if val fd = op_to_fd.get(op_id):`.
+
+Compiler gap noted (not fixed here; filed as `if_val_binding_from_generic_optional_stays_optional_err01_2026-11-13`): `if val m = ch.try_recv()` followed by
+`m as i64` still trips ERR-01. The `if val` binding from a generic `T?` return
+stays optional, even though the ERR-01 diagnostic recommends `if val`. A typed
+`i64?` binding first works.
+
+**Counts** (seed `seed-fix`, default mode, `MemoryMax=16G timeout 900`):
+
+| spec | before (base f7cb252dce1) | after |
+|---|---|---|
+| async_handler_registry_spec | 2/2 | 2/2 |
+| async_ssr_disconnect_safety_contract_spec | 3/3 | 3/3 |
+| worker_async_fd_registry_spec | 0 executed (ERR-01) | 1/1 |
+| async_dynamic_dispatch_spec | 0 executed (ERR-01) | 6/6 |
+| worker_wire_shutdown_spec | 0 executed (ERR-01) | 10/10 |
+
+Whole `test/01_unit/lib/nogc_async_mut/http_server/` (31 files): base 20 files
+green / 175 passed. After: 23 files green / 192 passed. 0 regressions.
+Still red on both sides, out of scope, with their own rows or causes:
+async_handler_lifecycle (module absent), async_ssr_peer_probe_contract and
+worker_registry_route_contract (facade-split bug), h2_async_dispatch
+(`std.http_server.h2_async_dispatch` does not resolve), h2_live_socket_acceptance,
+static_file_compression_cache (7/8), static_file_handler_compression (9/11),
+tls13_record_adapter.
