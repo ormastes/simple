@@ -416,7 +416,7 @@ fn source_structure_payload_v1(path: text, snapshot: SourceSnapshotV1,
     if help == "adv": fields.push(("advanced_help", source_advanced_help_v1()))
     source_safe_json_v1(json_value_serialize(json_value_object_from(fields)))
 
-fn source_open_context_v1(body: text, numbers: bool, workspace_root: text) -> SourceOpenResultV1:
+fn source_open_context_v1(body: text, numbers: bool, workspace_root: text, session_level: text) -> SourceOpenResultV1:
     if str_len(body) > 4096: return source_result_error_v1("error", "request_too_large")
     val arguments = match json_parse_value_strict(body):
         Ok(value): value
@@ -467,7 +467,8 @@ fn source_open_context_v1(body: text, numbers: bool, workspace_root: text) -> So
         # for an open module; hidden top-level nodes leave the outline and
         # get an omission-ledger row each (REQ-PUBVIEW-001/006).
         val has_boundary = nearest_boundary_dir(file) != ""
-        val level = match visibility_level_or_error(json_value_text_or(json_value_field(arguments, "visibility"), ""), has_boundary):
+        val requested_level = if session_level != "": session_level else: json_value_text_or(json_value_field(arguments, "visibility"), "")
+        val level = match visibility_level_or_error(requested_level, has_boundary):
             Ok(value): value
             Err(reason): return source_result_error_v1("unsupported", reason)
         val symbols = source_visible_symbols_v1(full_outline, file)
@@ -516,4 +517,9 @@ fn source_open_context_v1(body: text, numbers: bool, workspace_root: text) -> So
     source_bounded_payload_v1(payload)
 
 pub fn source_open_result_v1(body: text) -> SourceOpenResultV1:
-    source_open_context_v1(body, false, path_absolute(cwd()))
+    source_open_context_v1(body, false, path_absolute(cwd()), "")
+
+# source_open under a session view: `level` is the effective session or
+# per-request level ("" = the boundary default); it replaces `visibility`.
+pub fn source_open_level_result_v1(body: text, level: text) -> SourceOpenResultV1:
+    source_open_context_v1(body, false, path_absolute(cwd()), level)
