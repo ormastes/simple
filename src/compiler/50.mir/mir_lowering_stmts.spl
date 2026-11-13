@@ -374,6 +374,11 @@ fn mir_let_type_unsettled(t: HirType) -> bool:
         case HirTypeKind.Infer(_, _) | HirTypeKind.Error: true
         case _: false
 
+fn mir_let_type_is_any(t: HirType) -> bool:
+    match t.kind:
+        case HirTypeKind.Any: true
+        case _: false
+
 fn mir_hir_let_type(k: HirStmtKind, fallback: HirType) -> HirType:
     match k:
         case HirStmtKind.Let(_, type_, _): type_ ?? fallback
@@ -825,13 +830,30 @@ impl MirLowering:
                 # pair element): resolve the owner name to its symbol.
                 if opaque_name == struct_type_name:
                     val opaque_symbol = self.symbols.lookup_or_invalid(opaque_name)
-                    if opaque_symbol.is_valid(): opaque_symbol else: None
+                    if opaque_symbol.is_valid(): Some(opaque_symbol) else: self.struct_symbol_for_layout_key(opaque_name)
                 else:
                     None
             case _: None
         if val type_symbol = struct_symbol_id:
             val copied = self.copy_struct_value_recursive(init_local, struct_type_name, type_symbol, [struct_type_name])
             return copied
+        None
+
+    fn struct_symbol_for_layout_key(layout_key: text) -> SymbolId?:
+        """Resolve a module-qualified record layout key (`mod::Name`) back to
+        its HIR struct symbol. Since c269515e62b the for-in element owner is
+        that qualified provenance key, which a bare-name lookup never finds.
+        Accept the symbol only when its own provenance key is exactly
+        `layout_key`, so a same-named struct from another module never
+        resolves; classes are excluded (reference semantics, no copy)."""
+        val parts = layout_key.split("::")
+        if parts.len() < 2: return None
+        val bare: text = parts[parts.len() - 1]
+        val candidate = self.symbols.lookup_or_invalid(bare)
+        if not candidate.is_valid(): return None
+        if val info = self.symbols.get_symbol_raw(candidate.id):
+            if info.kind == SymbolKind.Struct and self.struct_value_provenance_key(info) == layout_key:
+                return Some(candidate)
         None
 
     me maybe_copy_array_value(init_local: LocalId, effective_type: MirType, init_is_place: bool) -> LocalId?:
@@ -1797,7 +1819,12 @@ impl MirLowering:
                                     # container annotation
                                     # (mir_unresolved_method_inferred_receiver_2026-10-24).
                                     val declared_override = if let_type_present: self.let_declared_type_override_v1(init_local.id, let_type_value) else: 0
-                                    if declared_override > 0:
+                                    if declared_override == 4:
+                                        self.copy_local_hir_type_metadata(init_local.id, local.id)
+                                        self.remember_local_hir_type(local.id, let_type_value,
+                                            self.local_hir_type_isolation_state(init_local.id),
+                                            self.local_hir_type_resource_state(init_local.id))
+                                    elif declared_override > 0:
                                         self.remember_local_hir_type(local.id, let_type_value, 0, 0)
                                         if declared_override == 2:
                                             self.runtime_array_locals[local.id] = true
@@ -3855,23 +3882,36 @@ impl MirLowering:
         """Whether an annotated `val x: T = init` must record T instead of
         copying the initializer local's HIR type. 0 = copy the initializer
         (unchanged behaviour); 1 = record T; 2 / 3 = record T and mark the
-        binding a runtime array / dict handle.
+        binding a runtime array / dict handle; 4 = copy the initializer's
+        metadata (owners, flags, isolation / resource state) but record T.
 
         Untyped bindings carry the HIR `Infer` marker as their Let type, so
         `val r = s.substring(..)` leaves `r` typed Infer, and the copy rule
         then let that placeholder beat `val t: text = r` -- `t.bytes()` died as
         `unresolved method call: bytes`. Likewise `val args: [MirOperand] =
         raw_args` with `raw_args: i64` (SFFI handle) copied Int over the array
-        annotation and `args.len()` was unresolved. Only those two shapes are
-        overridden; any informative initializer type still wins."""
+        annotation and `args.len()` was unresolved.
+
+        A settled `Result<T, E>` annotation also outranks a Result
+        initializer: the if/match join adopts its typed
+        arm's type, so `val r: Result<i64, text> = if c: mk_u8(x) else:
+        Err("e")` copied `Result<u8, text>` over the annotation and
+        `r.unwrap()` lowered as U8
+        (mir_let_annotated_result_overwritten_by_join_metadata_2026-11-12).
+        Any other informative initializer type still wins."""
         if declared == None:
             return 0
         var declared_container = 0
+        var declared_result = false
         match declared.kind:
             case HirTypeKind.Infer(_, _): return 0
             case HirTypeKind.Error: return 0
             case HirTypeKind.Array(_, _): declared_container = 2
             case HirTypeKind.Dict(_, _): declared_container = 3
+            case HirTypeKind.Result(ok, err):
+                # An `any` payload is not a stronger claim than the
+                # initializer's type; leave that case unchanged.
+                declared_result = not mir_let_type_unsettled(ok) and not mir_let_type_unsettled(err) and not mir_let_type_is_any(ok) and not mir_let_type_is_any(err)
             case _: ()
         match self.find_local_hir_type(init_local_id):
             case Some(init_type):
@@ -3884,6 +3924,8 @@ impl MirLowering:
                         if declared_container > 0: return declared_container
                     case HirTypeKind.Int(bits, _):
                         if bits == 64 and declared_container > 0: return declared_container
+                    case HirTypeKind.Result(_, _):
+                        if declared_result: return 4
                     case _: ()
             case None: ()
         0

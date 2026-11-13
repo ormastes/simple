@@ -47,3 +47,10 @@ Native button events contain no coordinates; resetting to zero between wait
 batches could direct a click at the page origin when movement arrived in the
 preceding batch. Existing callers retain the previous default behavior; the
 showcase explicitly carries cursor state between waits.
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+open for generic JS DOM parity per in-file status; owner: web/native bridge lane.

@@ -120,3 +120,11 @@ cold-init route and that the pin check guarding it is green again.
 - Standing caution (from the 2026-11-09 note): the fix changes the Stage-3 args hash
   that admission receipts bind; lanes holding pre-existing receipts must re-admit.
   This closure certifies caller consistency and the green pin check only.
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b bookkeeping)
+
+FIXED (2026-11-09 closure, pin check re-verified 2026-11-11 lane boot15) per in-file addendum. No contrary evidence found in this pass; header status left as the
+owning lane recorded it.

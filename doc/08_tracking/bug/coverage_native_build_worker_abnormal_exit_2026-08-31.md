@@ -144,3 +144,7 @@ p3-boot12 verdicts; first-hand citation check on this base.**
   native-compile root cause remains with the compiler/native-build lane.
 
 No change made in this lane.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**STALE (confirmed)** — boot12/runner6: subject 2026-08-31 Linux binary absent from tree; runner-side fail-closed contract and the worker-failure-lines reporter verified live in source. Host-side worker reaping root cause stays with the compiler/native-build lane.

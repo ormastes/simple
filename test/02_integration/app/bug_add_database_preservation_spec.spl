@@ -6,22 +6,45 @@ Audience: engineers maintaining the bug tracking CLI and its SDN writer.
 ## Operator workflow
 Run this focused spec with the Phase 1 interpreter command used by the
 qualification lane. Each scenario starts a real `src/app/bug_add/main.spl`
-process with its working directory set to a PID-scoped `/tmp` project.
+process with its working directory set to a PID-scoped host-temp project.
 ## Compatibility and limitations
 The scenarios use host process and symlink operations and target the current
-host. They never read or write the repository's canonical bug database.
+host. They never read or write the repository's canonical bug database. The
+scenarios need the qualification harness to name the binary under test via
+SIMPLE_BINARY and to provide SIMPLE_BUGDB_CAPTURE_ROOT for scenario evidence
+captures; without either contract the examples skip instead of failing.
 """
 # Lifecycle: doc/01_research/local/pure_simple_cli_completeness.md ; doc/03_plan/agent_tasks/pure_simple_cli_completeness.md
 # @manual_section: bug-add-database-preservation
 
 use std.spec.{describe, it, expect}
+use std.spec.{skip}
 use std.spec.step
 use app.io.process_ops.{shell}
 use std.io_runtime.{env_get}
+use std.env.platform.{get_temp_dir}
 
 extern fn rt_getpid() -> i64
 extern fn rt_file_read_text(path: text) -> text?
 extern fn rt_file_write_text(path: text, content: text) -> bool
+
+# Fixture roots must live where BOTH the POSIX fixture shell and the Simple
+# filesystem APIs can address them: the runtime does not translate a POSIX
+# "/tmp" prefix on Windows, so anchor under the host temp dir instead.
+fn fixture_root() -> text:
+    get_temp_dir().replace("\\", "/") + "/bug_add_db_preservation_{rt_getpid()}"
+
+fn harness_env_available() -> bool:
+    env_get("SIMPLE_BINARY") != "" and env_get("SIMPLE_BUGDB_CAPTURE_ROOT") != ""
+
+# Gate every fixture-backed example: without the qualification-harness env
+# contract the spawned bug-add process cannot run, and a missing fixture
+# would otherwise surface as a false product RED, not an infrastructure miss.
+fn it_env(name: text, block: fn()):
+    if not harness_env_available():
+        skip(name, "harness env SIMPLE_BINARY/SIMPLE_BUGDB_CAPTURE_ROOT not provided")
+    else:
+        it(name, block)
 
 fn fixture_read(path: text) -> text:
     val result = rt_file_read_text(path)
@@ -29,9 +52,6 @@ fn fixture_read(path: text) -> text:
 
 fn fixture_write(path: text, content: text) -> bool:
     rt_file_write_text(path, content)
-
-fn fixture_root() -> text:
-    "/tmp/bug_add_db_preservation_{rt_getpid()}"
 
 fn fixture_db_path(root: text) -> text:
     "{root}/doc/08_tracking/bug/bug_db.sdn"
@@ -59,7 +79,7 @@ fn remove_project(root: text):
 
 describe "bug-add database preservation":
     # @manual scenario evidence
-    it "creates a missing database and preserves unrelated rows on later writes":
+    it_env("creates a missing database and preserves unrelated rows on later writes", fn():
         # @req REQ-SSPEC-INTEGRATION
         step("Verify: a successful add keeps existing unrelated database rows")
         val root = fixture_root() + "/valid"
@@ -84,9 +104,10 @@ describe "bug-add database preservation":
         expect(duplicate_output.contains("failed to add bug (id may already exist)")).to_equal(true)
         expect(fixture_read(fixture_db_path(root))).to_equal(after_second)
         remove_project(root)
+    )
 
     # @manual scenario evidence
-    it "rejects an unreadable existing database without changing its bytes":
+    it_env("rejects an unreadable existing database without changing its bytes", fn():
         # @req REQ-SSPEC-INTEGRATION
         step("Verify: an invalid existing database is preserved on rejection")
         val root = fixture_root() + "/malformed"
@@ -101,9 +122,10 @@ describe "bug-add database preservation":
         expect(malformed_output.contains("failed to create bug database without replacing an existing path")).to_equal(true)
         expect(fixture_read(db_path)).to_equal(before)
         remove_project(root)
+    )
 
     # @manual scenario evidence
-    it "treats a dangling database symlink as an existing path entry":
+    it_env("treats a dangling database symlink as an existing path entry", fn():
         # @req REQ-SSPEC-INTEGRATION
         step("Verify: bug-add does not replace a dangling database symlink")
         val root = fixture_root() + "/dangling"
@@ -119,9 +141,10 @@ describe "bug-add database preservation":
         val remains_link = shell("test -L {db_path}")
         expect(remains_link.exit_code).to_equal(0)
         remove_project(root)
+    )
 
     # @manual scenario evidence
-    it "fails closed when the database parent cannot be created":
+    it_env("fails closed when the database parent cannot be created", fn():
         # @req REQ-SSPEC-INTEGRATION
         step("Verify: an exclusive initial publish does not create a missing parent")
         val root = fixture_root() + "/missing-parent"
@@ -132,3 +155,4 @@ describe "bug-add database preservation":
         val still_missing = shell("test ! -e {fixture_db_path(root)} && test ! -L {fixture_db_path(root)}")
         expect(still_missing.exit_code).to_equal(0)
         remove_project(root)
+    )

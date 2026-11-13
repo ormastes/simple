@@ -97,3 +97,7 @@ with a fence in `check-aot-lane-fences.shs`.
 granted on this lane; the native-build Windows hang is a separately routed
 live defect). The explicit `-1` at the `module_lowering.spl` call site remains
 correct either way.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**FIXED (confirmed)** — ne15: pad_trailing_default_args at the emit_resolved_direct_call choke point (mir lowering :1328-1383); acceptance 2/2 on the seed. Native leg not re-run (native hang is a separately routed live defect).

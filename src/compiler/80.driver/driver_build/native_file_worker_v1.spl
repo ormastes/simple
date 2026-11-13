@@ -117,7 +117,7 @@ pub fn native_file_worker_spec_valid_v1(spec: text) -> bool:
     if slash <= 0:
         return false
     val index = spec.substring(0, slash).to_i64() ?? -1
-    val count = spec.substring(slash + 1, spec.len()).to_i64() ?? 0
+    val count = spec.substring(slash + 1, spec.byte_len()).to_i64() ?? 0
     count > 0 and index >= 0 and index < count
 
 # argv for the HIR/MIR children: the worker's own argv minus its role flag, starting
@@ -161,7 +161,7 @@ pub fn native_file_worker_receipt_parse_v1(content: text) -> Result<NativeFileWo
             val eq = line.index_of("=")
             if eq <= 0:
                 return Err("malformed receipt line: {line}")
-            fields[line.substring(0, eq)] = line.substring(eq + 1, line.len())
+            fields[line.substring(0, eq)] = line.substring(eq + 1, line.byte_len())
     for key in ["module", "hir_start_ms", "hir_done_ms", "mir_done_ms", "obj_done_ms", "status", "object"]:
         if not fields.contains_key(key):
             return Err("receipt missing field: {key}")
@@ -260,6 +260,21 @@ pub fn native_file_worker_inventory_rows_v1(queue: text) -> i64:
             count = count + 1
         index = index + 1
     count
+
+# Wall budget of the whole-program HIR gate poll below. Mirrors the worker
+# observation ceiling (process_ops PROCESS_OBSERVATION_MAX_DEADLINE_MS_V1, 1 h):
+# a gate that has not completed in an hour is a dead sibling, not slow HIR.
+pub const NATIVE_FILE_WORKER_HIR_GATE_BUDGET_MS_V1: i64 = 3600000
+
+# Verdict of one HIR-gate poll (pure; the caller sleeps between polls and
+# publishes the reason): 1 = admit MIR, -1 = ledger blocked/non-PASS, -2 =
+# incomplete past `budget_ms` (fail closed, never an unbounded wait; a
+# non-positive budget expires on the first poll), 0 = keep polling.
+pub fn native_file_worker_hir_gate_verdict_v1(state: i64, waited_ms: i64, budget_ms: i64) -> i64:
+    if state > 0: return 1
+    if state < 0: return -1
+    if budget_ms <= 0 or waited_ms >= budget_ms: return -2
+    0
 
 # HIR gate over the HIR ledger: 1 = every inventory row is a PASS terminal
 # (whole-program inputs complete), 0 = not yet, -1 = blocked or a non-PASS

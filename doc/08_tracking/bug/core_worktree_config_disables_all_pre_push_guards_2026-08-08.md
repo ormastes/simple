@@ -184,3 +184,7 @@ Paired tests, all run 2026-11-11 (shell-only, no seed):
 The doc's "worth adding to the guards themselves as a named, self-explaining
 failure" recommendation is now implemented; the one-command detector is
 subsumed by the guards' step-0 check.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**FIXED (confirmed)** — ne5 added an identical step-0 core.worktree poison detector to all three push guards with paired shell-only selftest fixtures (5/5, 1/1, 27/27).

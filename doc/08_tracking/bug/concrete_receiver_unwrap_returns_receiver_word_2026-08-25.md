@@ -149,3 +149,7 @@ Exact grant to close this row:
 Expected if the fixes hold: `case hijack_probe (probe) ... verdict=OK` and
 `PASS — 9 case(s) checked`. If it instead reports THEFT for hijack_probe, the
 defect is LIVE and row 1 reopens with a two-line reproducer as before.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**BLOCKED (confirmed)** — ne5: fixing commits are compiled into the refreshed seed but the oracle gate cannot produce a verdict on this host — cranelift fixture builds hang past 280s (host-level seed defect, noted not chased). Grant: Linux host oracle run expecting hijack_probe verdict=OK.

@@ -9,8 +9,13 @@ extern fn rt_enum_discriminant<T>(value: T) -> i64
 @unsafe(reason: "selected runtime enum payload word; identity must be validated first", capabilities: [ffi])
 extern fn rt_enum_payload<T>(value: T) -> i64
 @unsafe(reason: "reconstruct only the validated prototype type with its exact identity and owned payload", capabilities: [ffi])
-# @workaround bug=rti007_any_return_rows_2026-11-01 reason=frozen-stage2-RTI-lowers-this-declared-return-to-Any-(E-RTI-007); see doc/08_tracking/bug/rti007_any_return_rows_2026-11-01.md
-extern fn rt_enum_new(enum_id: i32, discriminant: i32, payload: i64) -> i64
+# Generic T return, not `-> i64` bound to T at the call site: the frozen stage2
+# RTI lowers a concrete i64 declared return through Any (bug rti007), and the
+# i64-to-T coercion in a generic caller then boxes the tagged word, so the
+# identity validation below reads a boxed integer and fails with
+# "enum wire enum allocation failed". Returning T keeps the tagged word in
+# representation end to end; see doc/08_tracking/bug/rti007_any_return_rows_2026-11-01.md
+extern fn rt_enum_new<T>(enum_id: i32, discriminant: i32, payload: i64) -> T
 @unsafe(reason: "selected runtime nil word, not an assumed numeric sentinel", capabilities: [ffi])
 extern fn rt_value_nil() -> i64
 @unsafe(reason: "private runtime tuple allocation; invalid result is checked by length", capabilities: [ffi])
@@ -104,7 +109,9 @@ fn enum_wire_restore_nil<T>(prototype: T, arity: i64, nil_slots: [i64]) -> Resul
                 if written == 0:
                     return Err("enum wire tuple write failed")
         # The casts preserve the validated uint32 bit patterns required by C.
-        val restored: T = rt_enum_new(owner as i32, variant as i32, payload)
+        # Explicit <T>: the generic return keeps the runtime's tagged word in
+        # T's representation; do not route this through an i64 binding.
+        val restored: T = rt_enum_new<T>(owner as i32, variant as i32, payload)
         if rt_enum_id(restored) != owner or rt_enum_discriminant(restored) != variant:
             return Err("enum wire enum allocation failed")
         Ok(restored)

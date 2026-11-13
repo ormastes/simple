@@ -304,3 +304,10 @@ unchanged — `src/compiler_rust/compiler/src/codegen/llvm/emitter.rs`
 `self.set(dest, self.get(value) << 3)`. Criteria 3-4 therefore remain LIVE,
 owned by the seed-fix lane with the cargo grant interp11 recorded verbatim
 above. Header flipped to LIVE.
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+Not pursued in this lane: LIVE as of 2026-11-11 triage (source-confirmed); fix is seed Rust (RuntimeValue::from_int) plus re-landing its readers. Owner: seed lane.

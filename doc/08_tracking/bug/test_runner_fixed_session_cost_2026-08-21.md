@@ -111,3 +111,16 @@ lane, re-confirmed present at this base; the 2026-11-06 observation stands
 that the seed's fixed session setup still dominates Windows wall time
 (~190-200 s), consistent with the residual interpreter-fallback chain owned
 by the compiler items above.
+
+## 2026-11-13 — P3 runner priority lane (work/p3-runner-lane-20261113, base 80a8116e5e2): FIXED re-confirmed at base, no code change
+
+All three deliverable artifacts confirmed tracked at this base: the
+`src/compiler/99.loader/compiler_sffi.spl` re-export shim (21 shadow
+declarations gone; only the 4 no-counterpart helpers remain defined there);
+the mechanism pins in `scripts/check/check-perf-regression-tests.shs:310-323`
+(`loader compat does not shadow TypeInfo/CompilerContext` +
+`shadow-type mechanism spec present`); and
+`test/01_unit/compiler/loader/compiler_sffi_no_shadow_types_spec.spl`.
+Residual session-setup wall time on the Windows seed is loader/interpreter
+territory owned by the compiler items the 2026-11-11 runner10 note already
+redirected; nothing new for the test-runner scope.

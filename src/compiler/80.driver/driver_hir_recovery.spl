@@ -93,7 +93,7 @@ pub fn hir_shard_recovery_seal(queue: text, owner: text, state: text) -> i64:
             if not hir_shard_claim_valid(claim): return -1
             val fields = claim.split("\n")
             if fields.len() >= 3 and fields[0] == owner:
-                val terminal_path = "{queue}/{name.substring(0, name.len() - 6)}.terminal"
+                val terminal_path = "{queue}/{name.substring(0, name.byte_len() - 6)}.terminal"
                 if not file_exists(terminal_path):
                     if not hir_shard_recovery_terminal(queue, owner, fields[1], state, false):
                         return -1
@@ -143,7 +143,7 @@ pub fn hir_shard_recovery_failure_count(queue: text) -> i64:
             if fields.len() != 6 or fields[1] == "" or fields[2] == "" or fields[3] == "" or fields[5] != "":
                 return -1
             if fields[4] != "CACHE_STORED" and fields[4] != "UNCACHED": return -1
-            val claim_path = "{queue}/{name.substring(0, name.len() - 9)}.claim"
+            val claim_path = "{queue}/{name.substring(0, name.byte_len() - 9)}.claim"
             if file_read(claim_path) != fields[1] + "\n" + fields[2] + "\n" + fields[3] + "\n": return -1
             if not record.starts_with("PASS\n"):
                 failures = failures + 1
@@ -177,10 +177,15 @@ pub fn hir_shard_recovery_reap_blocks_ledger_v1(code: i64, progress: i64, sealed
     sealed < 0 or progress < 0 or (not finished and progress == 0) or code == 0 or (code > 0 and sealed > 0)
 
 # The first BLOCKED reason wins: later participants that merely observed the
-# block must not overwrite the root cause.
+# block must not overwrite the root cause. Workers, MIR fork children and the
+# coordinator all block without coordination, so the record is staged whole
+# and linked in without replacement (same primitive as claims/terminals): a
+# reader that sees the file sees one whole reason, and a concurrent second
+# blocker observes the first instead of truncating over it (a check-then-write
+# let the coordinator read an empty reason 8 of 96 rounds, 2026-11-13).
 pub fn hir_shard_recovery_block(queue: text, reason: text) -> bool:
     if file_exists("{queue}/BLOCKED"): return true
-    file_write("{queue}/BLOCKED", reason)
+    hir_shard_record_publish_new("{queue}/BLOCKED", reason) >= 0
 
 pub fn hir_shard_recovery_blocked(queue: text) -> bool:
     file_exists("{queue}/BLOCKED")

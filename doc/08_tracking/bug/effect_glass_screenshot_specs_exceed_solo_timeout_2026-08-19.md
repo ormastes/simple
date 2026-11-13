@@ -72,3 +72,7 @@ Not re-run here: at 400x300 the spec needs hours of interpreter raster time;
 no honest PASS/FAIL is obtainable in a P3 lane. Remaining owner decision is
 unchanged: deploy a JIT/native capture path or approve a capture-size
 reduction.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**LIVE (confirmed)** — ne7: specs unchanged at 400x300 software raster; the documented @timeout_secs 2400 mitigation is NOT present at the release tip (git log -S empty); JIT capture path not deployed. Owner decision: deploy JIT rendering path or approve capture-size reduction.

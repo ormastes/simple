@@ -44,7 +44,7 @@ fn codec_decl_sources() -> [text]:
         "src/compiler/20.hir/hir_types.spl",
         "src/compiler/20.hir/hir_definitions.spl",
         "src/compiler/20.hir/hir_operators.spl",
-        "src/compiler/00.common/diagnostics/span.spl",
+        "src/lib/common/diagnostics/span.spl",
         "src/compiler/00.common/dependency/visibility.spl",
         "src/compiler/00.common/dynamic_identity/closure.spl",
         "src/compiler/00.common/_Attributes/decl_attrs.spl",
@@ -133,7 +133,7 @@ fn _split_top_colon(s: text) -> [text]:
         elif ch == ")" or ch == "]" or ch == "}" or ch == ">":
             depth = depth - 1
         elif ch == ":" and depth == 0:
-            return [s.substring(0, i).trim(), s.substring(i + 1, s.len()).trim()]
+            return [s.substring(0, i).trim(), s.substring(i + 1, s.byte_len()).trim()]
         i = i + 1
     [s.trim()]
 
@@ -180,19 +180,19 @@ class CodecUniverse:
                 val t = _codec_no_comment(line).trim()
                 if (t.starts_with("struct ") or t.starts_with("class ")) and t.ends_with(":"):
                     val start = if t.starts_with("struct "): 7 else: 6
-                    val nm = t.substring(start, t.len() - 1).trim()
+                    val nm = t.substring(start, t.byte_len() - 1).trim()
                     if nm.find("<") < 0:
                         snames.push(nm)
                         owners.push(rel)
                 if t.starts_with("enum ") and t.ends_with(":"):
-                    val nm = t.substring(5, t.len() - 1).trim()
+                    val nm = t.substring(5, t.byte_len() - 1).trim()
                     if nm.find("<") < 0:
                         enames.push(nm)
                         owners.push(rel)
                 if t.starts_with("type ") and t.find("=") > 0:
                     val eq = t.find("=")
                     anames.push(t.substring(5, eq).trim())
-                    atargets.push(t.substring(eq + 1, t.len()).trim())
+                    atargets.push(t.substring(eq + 1, t.byte_len()).trim())
         CodecUniverse(sources: texts, source_names: names, struct_names: snames,
             enum_names: enames, alias_names: anames, alias_targets: atargets,
             decl_owner: owners, opaques: codec_opaque_types())
@@ -245,7 +245,7 @@ class CodecUniverse:
         if t == "":
             _codec_fail("hir codec generator: empty type text")
         if t.ends_with("?"):
-            return TypeShape(cat: "opt", a: t.substring(0, t.len() - 1).trim(), b: "", name: "")
+            return TypeShape(cat: "opt", a: t.substring(0, t.byte_len() - 1).trim(), b: "", name: "")
         val alias = self.alias_of(t)
         if alias != "":
             return self.classify(alias)
@@ -260,20 +260,20 @@ class CodecUniverse:
         if t == "f64":
             return TypeShape(cat: "prim_f64", a: "", b: "", name: "")
         if t.starts_with("[") and t.ends_with("]"):
-            val inner = t.substring(1, t.len() - 1).trim()
+            val inner = t.substring(1, t.byte_len() - 1).trim()
             if inner.starts_with("(") and inner.ends_with(")"):
-                val sides = _split_top(inner.substring(1, inner.len() - 1))
+                val sides = _split_top(inner.substring(1, inner.byte_len() - 1))
                 if sides.len() != 2:
                     _codec_fail("hir codec generator: unsupported tuple element `{t}`")
                 return TypeShape(cat: "pair", a: sides[0].trim(), b: sides[1].trim(), name: "")
             return TypeShape(cat: "list", a: inner, b: "", name: "")
         if t.starts_with("{") and t.ends_with("}"):
-            val kv = _split_top_colon(t.substring(1, t.len() - 1).trim())
+            val kv = _split_top_colon(t.substring(1, t.byte_len() - 1).trim())
             if kv.len() != 2:
                 _codec_fail("hir codec generator: unsupported dict type `{t}`")
             return TypeShape(cat: "dict", a: kv[0], b: kv[1], name: "")
         if t.starts_with("Dict<") and t.ends_with(">"):
-            val kv = _split_top(t.substring(5, t.len() - 1))
+            val kv = _split_top(t.substring(5, t.byte_len() - 1))
             if kv.len() != 2:
                 _codec_fail("hir codec generator: unsupported dict type `{t}`")
             return TypeShape(cat: "dict", a: kv[0].trim(), b: kv[1].trim(), name: "")
@@ -317,9 +317,9 @@ fn extract_codec_struct_fields(source: text, name: text) -> [FieldDecl]:
         if trimmed.starts_with("fn ") or trimmed.starts_with("me ") or trimmed.starts_with("static ") or trimmed.starts_with("@") or trimmed.starts_with("pub "):
             continue
         if trimmed.starts_with("var "):
-            trimmed = trimmed.substring(4, trimmed.len()).trim()
+            trimmed = trimmed.substring(4, trimmed.byte_len()).trim()
         elif trimmed.starts_with("val "):
-            trimmed = trimmed.substring(4, trimmed.len()).trim()
+            trimmed = trimmed.substring(4, trimmed.byte_len()).trim()
         val kv = _split_top_colon(trimmed)
         if kv.len() != 2:
             continue
@@ -755,7 +755,14 @@ fn _emit_dec(u: CodecUniverse, type_text: text, target: text, indent: text, c: E
         # as the bare type (see bare_node_placeholder_v1), so the store into
         # the non-optional field never carries an Option transport word. The
         # presence flag is still read; an absent node leaves the placeholder.
-        val placeholder = if bare_field: _bare_field_placeholder_expr(u, decl_type) else: ""
+        #
+        # 2026-11-13: the opaque payload field HirExprKind.CustomBlock.value is
+        # a non-optional `BlockValue`; a `BlockValue? = nil` local stored into
+        # it is rejected by the pure-Simple MIR enum payload check ("payload
+        # type mismatch at 1"). Struct components keep the "" fallback.
+        var placeholder = if bare_field: _bare_field_placeholder_expr(u, decl_type) else: ""
+        if placeholder == "" and bare_field and s.cat == "opaque" and decl_type == "BlockValue":
+            placeholder = "BlockValue.Raw(\"\")"
         var out = if placeholder != "":
             indent + "var " + target + ": " + decl_type + " = " + placeholder + "\n"
         else:
@@ -979,7 +986,7 @@ fn _emit_dec_decl(u: CodecUniverse, decl: CodecDecl) -> text:
                 while ni < nil_flags.len():
                     parts.push("            if " + nil_flags[ni] + ": wire_nil_slots.push(" + "{nil_indices[ni]}" + ")\n")
                     ni = ni + 1
-                parts.push("            return hc_restore_enum_nil(r, wire_prototype, " + "{fields.len()}" + ", wire_nil_slots)\n")
+                parts.push("            return hc_restore_enum_nil(r, wire_prototype, " + "{fields.len()}" + ", wire_nil_slots, \"" + decl.name + "." + row.variant + "\")\n")
                 parts.push("        return wire_prototype\n")
             else:
                 parts.push("        return " + decl.name + "." + row.variant + "(" + _join(names, ", ") + ")\n")

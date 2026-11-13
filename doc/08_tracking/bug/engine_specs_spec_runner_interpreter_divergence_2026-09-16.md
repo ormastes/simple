@@ -109,3 +109,90 @@ Fix surface, all out of this lane's scope:
   3-field vs `physics/config.spl` with `backend`).
 
 Per the unblock condition, no spec-side weakening was done.
+
+## 2026-11-13 — P3 runner priority lane (work/p3-runner-lane-20261113, base 80a8116e5e2): lib/spec standardisation landed; shapes 1/2 residuals closed; shape 4 root-caused with minimal repro (seed lane)
+
+Windows seed-smoke binary (`bin/simple.exe`, `Simple v1.0.0-rc.1`,
+`--mode=interpreter` route). Shape 3 stays fixed (#7498 effective in this
+binary). Landed in this lane (all bounded lib/spec changes, no spec-side
+weakening — assertions unchanged):
+
+1. **`Transform3D.up()` lib gap closed** —
+   `src/lib/common/engine/math3d.spl`: instance `fn up() -> Vec3` alongside
+   `forward()` (`rotation.rotate_vector(Vec3.up()).normalize()`), matching
+   the existing call in `component/camera3d.spl:57 view_matrix`.
+2. **PhysicsConfig3D factory/world standardisation** — the record's
+   "owner decision" resolved to the repo's own convention (see
+   `game.rollball/game.spl` and `physics/__init__.spl`): pair the factory
+   with the world implementation you import. `physics.world3d` (full) needs
+   `physics.config.default_physics_config_3d`; `physics.simple.world3d`
+   needs `physics.simple.types3d.default_physics_config_3d`.
+   - `test/01_unit/lib/engine/engine3d_spec.spl` and
+     `test/01_unit/lib/engine/physics3d_spec.spl` use the simple-world API
+     (`step(Seconds)`, 4-arg `add_dynamic_body`) — their
+     `PhysicsWorld3D` import now comes from `physics.simple.world3d`
+     (was `physics.world3d`, whose `create` reads `config.backend`).
+   - `src/lib/nogc_sync_mut/engine/core/engine3d.spl` (Engine3D facade) had
+     the same latent mix (full world + simple factory, so `Engine3D.create`
+     would die in `PhysicsWorld3D.create`) — its factory import now comes
+     from `physics.config`. No external `create_with_config` callers exist.
+3. **Serializer text→number parse repaired** —
+   `src/lib/nogc_sync_mut/engine/scene/serializer.spl` `_parse_f64`/
+   `_parse_i64` relied on `val result: i64 = s` (text→int annotation
+   coercion), which the spec-runner interpreter does not honour (see shape-4
+   root cause below). Rewritten to the canonical
+   `std.common.text.parse_i64` / `s.trim().parse_f64() ?? 0.0`, which also
+   actually implements the documented "returns -1/0.0 on invalid" contract.
+4. **Impossible render fixtures repaired** — three specs built a scene with
+   the camera at z=5/10 in identity rotation (looking along +Z) and the
+   mesh at the origin, i.e. BEHIND the camera, then asserted
+   `draw_calls > 0`. Proven unsatisfiable under `bin/simple run` too
+   (identical program: DRAW_CALLS=0; with the mesh at z=10: DRAW_CALLS=1).
+   Mesh placed in front of the camera in `engine3d_spec`,
+   `renderer3d_spec`, `renderer3d_bugfix_spec` (assertions unchanged).
+
+**Per-file before → after (this lane, same binary):**
+
+| spec | before | after |
+|---|---|---|
+| scene_node | shape 1, 9 failing | 12/12 OK |
+| serializer | shape 1, 4 failing | 4/4 OK |
+| scene_manager | shape 1, 2 failing | 11/11 OK |
+| prefab | shape 1, 1 failing | 11/11 OK |
+| physics3d | shape 2, ~10 failing | 10/10 OK |
+| engine3d | 0/5 | 4/5 |
+| renderer3d | 1 failing | 15/16 |
+| renderer3d_bugfix | 1 failing | 2/3 |
+
+**Shape 4 root cause — minimal repro (seed lane owns the fix).** The
+spec-runner interpreter ignores explicit local type annotations; the RHS
+type wins:
+
+```simple
+describe "Annot":
+    it "annotated local from f64 literal":
+        var arr: [i64] = [10, 20, 30]
+        var i: i64 = 0.0
+        expect(arr[i]).to_equal(10)
+```
+
+- `bin/simple test` → `semantic: cannot index array with type 'f64'` (both
+  `var i: i64 = 0.0` and `val j: i64 = w - 3.0` mistype as f64).
+- `bin/simple run` (same code as a `fn main`) → prints fine; annotation is
+  honoured and converts.
+
+This is the same defect that kills the renderer rasterizer
+(`renderer3d.spl _rasterize_triangle_3d`, `val idx = py * self.width + px`
+→ `self.depth[idx]` at fused :269:21): `py/px` derive from
+`var ix0: i64 = min_x` (f64 RHS), so the interpreter types the index f64.
+A lib-side `val idx: i64 = ...` pin was tried and rejected by the same
+semantic pass (still f64) — the fix belongs in the seed interpreter's
+local binding typing, not in renderer hot-loop workarounds. The three
+remaining RED examples (engine3d render, renderer3d, renderer3d_bugfix)
+all bottom out here; they previously failed EARLIER (behind-camera
+assertion) which masked the semantic defect until the fixture was repaired.
+
+Verification: canary `test/02_integration/app/context_log_modes_spec.spl`
+4/4 after the changes. Non-record engine-dir rows untouched by this lane
+(`signal_spec` unresolved-module and `units_spec` Seconds-method gaps are
+pre-existing, separate subjects).

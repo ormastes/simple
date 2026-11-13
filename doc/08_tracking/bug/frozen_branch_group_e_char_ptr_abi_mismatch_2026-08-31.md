@@ -97,3 +97,7 @@ Fresh re-verification of the 2026-11-10 boot5 disposition (not flipped then):
 The "blocked on the running bootstrap" unblock condition was host-state on the
 out-of-tree `simple-rebase` branch and no longer applies to this tree. No
 code change this lane; header flipped to match the verified disposition.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**SUPERSEDED (confirmed)** — boot5/boot21: tagged-ABI fix 88aac2ffe28 verified ancestor; runtime_core_exports.c defines all four Group E symbols with the tagged int64 ABI; behaviour selfcheck present. Defect only ever existed on the out-of-tree simple-rebase branch.

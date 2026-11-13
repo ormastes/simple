@@ -659,6 +659,7 @@ pub(crate) fn resolve_runtime_symbol(name: &str) -> Option<usize> {
         "rt_index_set" => simple_runtime::rt_index_set as *const () as usize,
         "rt_collection_set" => simple_runtime::rt_collection_set as *const () as usize,
         "rt_slice" => simple_runtime::rt_slice as *const () as usize,
+        "rt_slice_text_bytes" => simple_runtime::rt_slice_text_bytes as *const () as usize,
         "rt_contains" => value::rt_contains as *const () as usize,
 
         // String operations

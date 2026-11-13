@@ -85,3 +85,7 @@ and it is green.
   documented decode defect itself is proven resolved at the exact ABI boundary
   it was filed against. `SIMPLE_HOSTED_WM_NO_BROWSER=1` remains a valid bypass
   but is no longer required to avoid this defect.
+
+## Re-verified 2026-11-13 (Linux aarch64, lane uia)
+
+Re-probed on release/1.0.0 35144b7f5e9, Linux aarch64 seed af717f53d6bce3e5 with the registry teardown shape (load entry from class-owned array, mutate text field, ends_with, concatenate, store back): 3/3 passed. Landed as tracked spec test/01_unit/os/hosted/hosted_browser_renderer_entry_text_roundtrip_spec.spl so the closure no longer rests on untracked probes. The macOS hosted-WM launch itself was not run here.

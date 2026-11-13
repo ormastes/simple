@@ -25,3 +25,24 @@ fn trait_typed_field_receiver_lowers_to_vtable_dispatch() {
         "bare ambiguous `read` must not be emitted: {insts:?}"
     );
 }
+
+/// `val s = self.store` (unannotated local initialised from a trait-typed
+/// field) must carry the field's trait owner, exactly like `val s: Store = ...`.
+/// doc/05_design/compiler/jit/jit_trait_dispatch_and_cross_module_link.md (row 1)
+const LOCAL_SRC: &str = "trait Store:\n    fn read(key: i64) -> i64\n\nclass Disk:\n    var n: i64\n    fn read(key: i64) -> i64:\n        key\n\nclass Net:\n    var n: i64\n    fn read(key: i64) -> i64:\n        key + 1\n\nclass Adapter:\n    var store: Store\n\nfn get(a: Adapter, key: i64) -> i64:\n    val s = a.store\n    s.read(key)\n";
+
+#[test]
+fn trait_typed_field_initialised_local_lowers_to_vtable_dispatch() {
+    let module = parse_and_lower(LOCAL_SRC).unwrap();
+    let mir = crate::mir::lower_to_mir(&module).expect("lower to mir");
+    let get = mir.functions.iter().find(|f| f.name == "get").expect("get");
+    let insts: Vec<_> = get.blocks.iter().flat_map(|b| &b.instructions).collect();
+    assert!(
+        insts.iter().any(|i| matches!(i, MirInst::MethodCallVirtual { vtable_slot: 0, .. })),
+        "field-initialised trait local must dispatch through the Store vtable: {insts:?}"
+    );
+    assert!(
+        !insts.iter().any(|i| matches!(i, MirInst::MethodCallStatic { func_name, .. } if func_name == "read")),
+        "bare ambiguous `read` must not be emitted: {insts:?}"
+    );
+}

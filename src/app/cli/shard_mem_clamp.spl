@@ -238,7 +238,39 @@ pub const SHARD_PARSE_WORKER_KB_V1: i64 = 3800000
 # (shard_commit_estimate_kib_v1); fewer than 2 admitted workers skips the
 # pool and falls through to the capsule-shard two-pass path (pre-existing). Old 6700000 (HIR) / 16000000 (MIR).
 pub const SHARD_HIR_WORKER_KB_V1: i64 = 9000000
-pub const SHARD_MIR_WORKER_KB_V1: i64 = 9000000
+# MIR re-measure, run 11 (2026-11-06, release/1.0.0 e4c8830efc7, 121 GiB
+# aarch64, compiler_cli_build, scripts/bootstrap/lib/tree-rss-policy.shs): two
+# MIR shard workers sampled at 24.0 and 25.2 GiB each -- a MIR shard worker
+# holds the full HIR, so the 9.0 GB figure above admitted a second worker the
+# cap could not hold (row killed at 54525952 KiB). Priced at the 25.2 GiB peak.
+# Single owner of the MIR price: the bootstrap shell mirrors it
+# (BOOTSTRAP_TREE_RSS_FLOOR_MIR_WORKER_KB) only to reach pinned stage binaries
+# that predate this value; native_build_pool_refusal_spec pins the two equal.
+pub const SHARD_MIR_WORKER_KB_V1: i64 = 26424115
+
+# Closure-scaled MIR price: SHARD_MIR_WORKER_KB_V1 above is the CEILING (run 11
+# compiler_cli_build row, ~3031-3049-module closure, shards=8 parallel=2; the
+# 25.2 GiB worker had claimed ~382 modules -- see
+# doc/08_tracking/bug/stage2_compiler_cli_build_mir_shard_share_unbounded_2026-11-06.md).
+# Anchoring the ceiling at 1650 modules is therefore ~1.85x conservative for
+# mid-size closures (Stage 3 is priced at the ceiling): safe, fewer workers.
+# A MIR shard worker holds the whole program HIR, which grows with the closure, so a
+# flat ceiling would need 88 GB free for two workers on a 50-module program.
+# price = clamp(PER_MODULE x modules, FLOOR, CEILING): the held HIR is priced
+# at the run-11 peak per module (26424115 / 1650 = 16015 kB, so 1650 modules
+# reach the ceiling and 1649 stay below it); closures up to ~561 modules keep
+# the FLOOR, the old 9.0 GB small-closure pool default measured above. Unknown
+# size (< 0) is the ceiling: fail closed. Callers wrap it in
+# shard_worker_budget_kb so an explicit SIMPLE_MIR_SHARD_WORKER_KB still wins.
+pub const SHARD_MIR_WORKER_FLOOR_KB_V1: i64 = 9000000
+pub const SHARD_MIR_WORKER_PER_MODULE_KB_V1: i64 = 16015
+
+pub fn shard_mir_worker_price_kb_v1(modules: i64) -> i64:
+    if modules < 0: return SHARD_MIR_WORKER_KB_V1
+    val scaled = SHARD_MIR_WORKER_PER_MODULE_KB_V1 * modules
+    if scaled > SHARD_MIR_WORKER_KB_V1: SHARD_MIR_WORKER_KB_V1
+    elif scaled < SHARD_MIR_WORKER_FLOOR_KB_V1: SHARD_MIR_WORKER_FLOOR_KB_V1
+    else: scaled
 
 # Per-worker memory budget in kB. Parse shards run the slim parse-lane entry;
 # HIR shards spawn the full worker closure, so they carry a larger budget and
@@ -530,7 +562,7 @@ pub fn shard_cgroup_memory_max_paths(cgroup_path: text) -> [text]:
     var paths: [text] = []
     var current = cgroup_path
     while current.len() > 1 and current.ends_with("/"):
-        current = current.substring(0, current.len() - 1)
+        current = current.substring(0, current.byte_len() - 1)
     while true:
         val prefix = if current == "/": "" else: current
         paths = paths.push("/sys/fs/cgroup" + prefix + "/memory.max")
@@ -582,7 +614,7 @@ pub fn shard_cgroup_v1_limit_paths(cgroup_path: text) -> [text]:
     var paths: [text] = []
     var current = cgroup_path
     while current.len() > 1 and current.ends_with("/"):
-        current = current.substring(0, current.len() - 1)
+        current = current.substring(0, current.byte_len() - 1)
     while true:
         val prefix = if current == "/": "" else: current
         paths = paths.push("/sys/fs/cgroup/memory" + prefix + "/memory.limit_in_bytes")

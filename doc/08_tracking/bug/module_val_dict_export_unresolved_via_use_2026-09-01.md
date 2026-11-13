@@ -113,3 +113,7 @@ gap. An isolated `use std.shell.{dir}` probe also surfaced a separate
 `dir_exist` resolution error inside the shell module graph on the seed.
 Lead for a new row (stdlib fs / seed), not fixed in this pass; out of scope
 for this doc.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**FIXED (confirmed)** — ne15: 8/9 on the fresh seed (was 0/9); all file.* namespace calls through use patterns resolve. Residual 1/9 is a separate dir.create/dir.exist Windows fs-layer issue (lead for a new stdlib-fs row; not chased in this doc).

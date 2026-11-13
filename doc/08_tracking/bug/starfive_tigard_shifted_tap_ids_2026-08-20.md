@@ -30,3 +30,10 @@ No Tigard probe or VisionFive 2 board access in this lane, so the physical
 action (inspect/reseat VTref, ground, TCK/TMS/TDI/TDO, connector orientation,
 then one conservative read-only scan) cannot be performed. Remains blocked on
 physical hardware.
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+Not pursued in this lane: re-verified 2026-11-05: remains blocked on physical wiring/reseat action. No software change possible from this lane.

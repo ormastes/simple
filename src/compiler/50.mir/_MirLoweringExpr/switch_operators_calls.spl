@@ -3112,6 +3112,16 @@ impl MirLowering:
                             val retained_proof = self.function_signature_ownership_proof(retained, self.symbols)
                             if expression_type == None and not retained_proof.contains("!unknown"):
                                 return Some(retained)
+                            # A generic-self method call retains the callee's DECLARED
+                            # return (`Result<Op?, RErr>`, remember_call_hir_return)
+                            # while the expression answer is that signature already
+                            # substituted from the receiver (`Result<i64?, RErr>`,
+                            # de667f5662e). Accept the expression only when it is an
+                            # exact, concrete instantiation of the retained type and
+                            # its own ownership proof is complete.
+                            if val instantiated = expression_type:
+                                if instantiated != None and hir_type_instantiates_to(retained, instantiated) and not self.function_signature_ownership_proof(instantiated, self.symbols).contains("!unknown"):
+                                    return expression_type
                             self.error_fatal("enum match retained Result/Optional has no complete declaration ownership", Some(scrutinee.span))
                             return None
                         if val declared = expression_type:
@@ -9834,3 +9844,90 @@ fn hir_payload_type_is_structural(payload: HirType?) -> bool:
             case HirTypeKind.Int(_, _) | HirTypeKind.Float(_) | HirTypeKind.Bool | HirTypeKind.Char | HirTypeKind.Str | HirTypeKind.Unit: return true
             case _: return false
     false
+
+fn hir_type_is_concrete(type_: HirType) -> bool:
+    """No type parameter, inference variable, error or `Any` anywhere inside.
+    A kind the signature walker cannot descend is not proven concrete."""
+    match type_.kind:
+        case HirTypeKind.TypeParam(_, _) | HirTypeKind.Infer(_, _) | HirTypeKind.Error | HirTypeKind.Any: return false
+        case _: ()
+    val children = function_signature_children(type_)
+    if children == None: return false
+    for child in children.unwrap():
+        if not hir_type_is_concrete(child): return false
+    true
+
+fn hir_type_param_binds_only(generic: HirType, concrete: HirType, name: text, bound: HirType) -> bool:
+    """Every position where `generic` names type parameter `name` holds a
+    type equal to `bound` in `concrete`. Shape is checked by the caller."""
+    match generic.kind:
+        case HirTypeKind.TypeParam(param_name, _):
+            if param_name == name: return hir_types_equal(concrete, bound)
+            return true
+        case _: ()
+    match (generic.kind, concrete.kind):
+        case (HirTypeKind.Result(ok_g, err_g), HirTypeKind.Result(ok_c, err_c)):
+            hir_type_param_binds_only(ok_g, ok_c, name, bound) and hir_type_param_binds_only(err_g, err_c, name, bound)
+        case (HirTypeKind.Dict(key_g, value_g), HirTypeKind.Dict(key_c, value_c)):
+            hir_type_param_binds_only(key_g, key_c, name, bound) and hir_type_param_binds_only(value_g, value_c, name, bound)
+        case (HirTypeKind.Optional(inner_g), HirTypeKind.Optional(inner_c)):
+            hir_type_param_binds_only(inner_g, inner_c, name, bound)
+        case (HirTypeKind.Slice(inner_g), HirTypeKind.Slice(inner_c)):
+            hir_type_param_binds_only(inner_g, inner_c, name, bound)
+        case (HirTypeKind.Array(inner_g, _), HirTypeKind.Array(inner_c, _)):
+            hir_type_param_binds_only(inner_g, inner_c, name, bound)
+        case (HirTypeKind.Tuple(items_g), HirTypeKind.Tuple(items_c)):
+            hir_type_param_binds_only_list(items_g, items_c, name, bound)
+        case (HirTypeKind.Named(_, items_g), HirTypeKind.Named(_, items_c)):
+            hir_type_param_binds_only_list(items_g, items_c, name, bound)
+        case _: true
+
+fn hir_type_param_binds_only_list(generics: [HirType], concretes: [HirType], name: text, bound: HirType) -> bool:
+    if generics.len() != concretes.len(): return true
+    var i = 0
+    while i < generics.len():
+        if not hir_type_param_binds_only(generics[i], concretes[i], name, bound): return false
+        i = i + 1
+    true
+
+fn hir_type_instantiation_walk(generic: HirType, concrete: HirType, root_generic: HirType, root_concrete: HirType) -> bool:
+    match generic.kind:
+        case HirTypeKind.TypeParam(name, _):
+            return hir_type_is_concrete(concrete) and hir_type_param_binds_only(root_generic, root_concrete, name, concrete)
+        case _: ()
+    match (generic.kind, concrete.kind):
+        case (HirTypeKind.Result(ok_g, err_g), HirTypeKind.Result(ok_c, err_c)):
+            hir_type_instantiation_walk(ok_g, ok_c, root_generic, root_concrete) and hir_type_instantiation_walk(err_g, err_c, root_generic, root_concrete)
+        case (HirTypeKind.Dict(key_g, value_g), HirTypeKind.Dict(key_c, value_c)):
+            hir_type_instantiation_walk(key_g, key_c, root_generic, root_concrete) and hir_type_instantiation_walk(value_g, value_c, root_generic, root_concrete)
+        case (HirTypeKind.Optional(inner_g), HirTypeKind.Optional(inner_c)):
+            hir_type_instantiation_walk(inner_g, inner_c, root_generic, root_concrete)
+        case (HirTypeKind.Slice(inner_g), HirTypeKind.Slice(inner_c)):
+            hir_type_instantiation_walk(inner_g, inner_c, root_generic, root_concrete)
+        case (HirTypeKind.Array(inner_g, size_g), HirTypeKind.Array(inner_c, size_c)):
+            size_g == size_c and hir_type_instantiation_walk(inner_g, inner_c, root_generic, root_concrete)
+        case (HirTypeKind.Named(symbol_g, items_g), HirTypeKind.Named(symbol_c, items_c)):
+            val owner_g: SymbolId = symbol_g
+            val owner_c: SymbolId = symbol_c
+            owner_g.id == owner_c.id and hir_type_instantiation_walk_list(items_g, items_c, root_generic, root_concrete)
+        case (HirTypeKind.Tuple(items_g), HirTypeKind.Tuple(items_c)):
+            hir_type_instantiation_walk_list(items_g, items_c, root_generic, root_concrete)
+        case _: hir_types_equal(generic, concrete)
+
+fn hir_type_instantiation_walk_list(generics: [HirType], concretes: [HirType], root_generic: HirType, root_concrete: HirType) -> bool:
+    if generics.len() != concretes.len(): return false
+    var i = 0
+    while i < generics.len():
+        if not hir_type_instantiation_walk(generics[i], concretes[i], root_generic, root_concrete): return false
+        i = i + 1
+    true
+
+fn hir_type_instantiates_to(generic: HirType, concrete: HirType) -> bool:
+    """True when `concrete` is `generic` with each type parameter replaced by
+    one consistent, fully concrete type (no parameter, inference variable,
+    error or `Any` anywhere inside a binding). Every other leaf must be
+    structurally equal. Used where a retained call-result type is the
+    callee's DECLARED signature and the expression answer is the same
+    signature already substituted from the receiver's type arguments.
+    Bool-only recursion: no aggregate is returned by value."""
+    hir_type_instantiation_walk(generic, concrete, generic, concrete)

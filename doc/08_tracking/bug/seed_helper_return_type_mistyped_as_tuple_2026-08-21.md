@@ -93,3 +93,11 @@ commit identified). No re-fix needed. The inline workaround in
 `any_escape_census.spl` may be reverted to the helper form at the owning
 lane's discretion — that source shape is no longer load-bearing for the
 seed.
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b bookkeeping)
+
+FIXED 2026-11-11 (lane seedB, verified non-repro at 79d5af6723f6) per in-file addendum. No contrary evidence found in this pass; header status left as the
+owning lane recorded it.

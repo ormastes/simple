@@ -361,7 +361,7 @@ impl LlvmEmitter<'_> {
             "index_of" => Some("rt_index_of"),
             "find_str" => Some("rt_string_find"),
             "rfind" | "last_index_of" => Some("rt_string_rfind"),
-            "slice" | "substring" => Some("rt_slice"),
+            "slice" | "substring" => Some("rt_slice_text_bytes"),
             "get" => Some("rt_get"),
             "keys" => Some("rt_dict_keys"),
             "values" => Some("rt_dict_values"),

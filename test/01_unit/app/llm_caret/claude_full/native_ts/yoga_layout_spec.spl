@@ -1,0 +1,331 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+
+use std.spec.step
+
+use std.spec.{describe, it, expect}
+use app.llm_caret.claude_full.native_ts.yoga_layout.index.{Node, Config, Value, layoutNode, resolveValue, parseDimension, pointValue, percentValue, autoValue, undefinedValue, resolveEdge, resolveGap, boundAxis, isRow, isReverse, crossAxis, leadingEdge, trailingEdge, physicalEdge, computeFlexBasis, resolveFlexibleLengths, resolveChildAlign, hasMeasureFuncInSubtree, collectLayoutChildren, calculateBaseline, loadYoga, defaultEdges, hasAnyAutoEdge, hasAnyDefinedEdge}
+
+fn sized(w: i64, h: i64) -> Node:
+    var n = Node.create()
+    n.setWidth(w)
+    n.setHeight(h)
+    n
+
+describe "yoga value helpers":
+    it "resolves point, percent and non-numeric values":
+        step("resolves point, percent and non-numeric values")
+        expect(resolveValue(pointValue(12), 100)).to_equal(12)
+        expect(resolveValue(percentValue(25), 200)).to_equal(50)
+        expect(resolveValue(autoValue(), 100)).to_equal(-1)
+        expect(resolveValue(undefinedValue(), 100)).to_equal(-1)
+
+    it "parses dimension strings into values":
+        step("parses dimension strings into values")
+        expect(parseDimension("auto").unit).to_equal("auto")
+        val pct = parseDimension("50%")
+        expect(pct.unit).to_equal("percent")
+        expect(pct.value).to_equal(50)
+        val pt = parseDimension("12")
+        expect(pt.unit).to_equal("point")
+        expect(pt.value).to_equal(12)
+
+    it "clamps an axis size between min and max":
+        step("clamps an axis size between min and max")
+        expect(boundAxis(10, pointValue(30), undefinedValue(), 100)).to_equal(30)
+        expect(boundAxis(50, undefinedValue(), pointValue(40), 100)).to_equal(40)
+        expect(boundAxis(20, undefinedValue(), undefinedValue(), 100)).to_equal(20)
+
+    it "falls back from a specific edge to axis then all":
+        step("falls back from a specific edge to axis then all")
+        var edges = defaultEdges()
+        expect(resolveEdge(edges, 0, 100, false)).to_equal(0)
+        edges[8] = pointValue(2)
+        expect(resolveEdge(edges, 0, 100, false)).to_equal(2)
+        edges[6] = pointValue(5)
+        expect(resolveEdge(edges, 0, 100, false)).to_equal(5)
+        expect(resolveEdge(edges, 1, 100, false)).to_equal(2)
+        edges[0] = pointValue(9)
+        expect(resolveEdge(edges, 0, 100, false)).to_equal(9)
+        expect(hasAnyDefinedEdge(edges)).to_equal(true)
+        expect(hasAnyAutoEdge(edges)).to_equal(false)
+        edges[2] = autoValue()
+        expect(resolveEdge(edges, 2, 100, true)).to_equal(-2)
+        expect(hasAnyAutoEdge(edges)).to_equal(true)
+
+    it "maps flex direction to axis helpers":
+        step("maps flex direction to axis helpers")
+        expect(isRow("row")).to_equal(true)
+        expect(isRow("row-reverse")).to_equal(true)
+        expect(isRow("column")).to_equal(false)
+        expect(isReverse("column-reverse")).to_equal(true)
+        expect(isReverse("row")).to_equal(false)
+        expect(crossAxis("row")).to_equal("column")
+        expect(crossAxis("column")).to_equal("row")
+        expect(leadingEdge("row")).to_equal(0)
+        expect(leadingEdge("column")).to_equal(1)
+        expect(trailingEdge("row")).to_equal(2)
+        expect(trailingEdge("column")).to_equal(3)
+
+    it "maps logical edges to physical edges":
+        step("maps logical edges to physical edges")
+        expect(physicalEdge(6)).to_equal(0)
+        expect(physicalEdge(7)).to_equal(1)
+        expect(physicalEdge(8)).to_equal(0)
+        expect(physicalEdge(3)).to_equal(3)
+        expect(physicalEdge(42)).to_equal(0)
+
+    it "loads a yoga facade with node and config support":
+        step("loads a yoga facade with node and config support")
+        val y = loadYoga()
+        expect(y.hasNode).to_equal(true)
+        expect(y.hasConfig).to_equal(true)
+
+describe "yoga config and node state":
+    it "stores config settings":
+        step("stores config settings")
+        var c = Config.new()
+        expect(c.pointScaleFactor).to_equal(1)
+        c.setPointScaleFactor(2)
+        c.setErrata("classic")
+        c.setUseWebDefaults(true)
+        expect(c.pointScaleFactor).to_equal(2)
+        expect(c.getErrata()).to_equal("classic")
+        expect(c.useWebDefaults).to_equal(true)
+
+    it "starts with flexbox defaults":
+        step("starts with flexbox defaults")
+        val n = Node.create()
+        expect(n.getFlexDirection()).to_equal("column")
+        expect(n.getJustifyContent()).to_equal("flex-start")
+        expect(n.getAlignItems()).to_equal("stretch")
+        expect(n.getAlignSelf()).to_equal("auto")
+        expect(n.getFlexWrap()).to_equal("no-wrap")
+        expect(n.getOverflow()).to_equal("visible")
+        expect(n.getPositionType()).to_equal("relative")
+        expect(n.getDisplay()).to_equal("flex")
+        expect(n.getFlexGrow()).to_equal(0)
+        expect(n.getWidth().unit).to_equal("auto")
+        expect(n.isDirty()).to_equal(true)
+
+    it "stores style setters and exposes them through getters":
+        step("stores style setters and exposes them through getters")
+        var n = Node.create()
+        n.setFlexDirection("row")
+        n.setJustifyContent("center")
+        n.setAlignItems("flex-end")
+        n.setAlignSelf("center")
+        n.setAlignContent("stretch")
+        n.setFlexWrap("wrap")
+        n.setOverflow("hidden")
+        n.setPositionType("absolute")
+        n.setWidthPercent(40)
+        n.setHeightAuto()
+        n.setFlexBasisPercent(10)
+        n.setFlexGrow(3)
+        n.setFlexShrink(2)
+        expect(n.getFlexDirection()).to_equal("row")
+        expect(n.getJustifyContent()).to_equal("center")
+        expect(n.getAlignItems()).to_equal("flex-end")
+        expect(n.getAlignSelf()).to_equal("center")
+        expect(n.getAlignContent()).to_equal("stretch")
+        expect(n.getFlexWrap()).to_equal("wrap")
+        expect(n.getOverflow()).to_equal("hidden")
+        expect(n.getPositionType()).to_equal("absolute")
+        expect(n.getWidth().value).to_equal(40)
+        expect(n.getHeight().unit).to_equal("auto")
+        expect(n.getFlexBasis().unit).to_equal("percent")
+        expect(n.getFlexGrow()).to_equal(3)
+        expect(n.getFlexShrink()).to_equal(2)
+
+    it "expands the flex shorthand by sign":
+        step("expands the flex shorthand by sign")
+        var n = Node.create()
+        n.setFlex(2)
+        expect(n.getFlexGrow()).to_equal(2)
+        expect(n.getFlexShrink()).to_equal(1)
+        expect(n.getFlexBasis().value).to_equal(0)
+        n.setFlex(-3)
+        expect(n.getFlexGrow()).to_equal(0)
+        expect(n.getFlexShrink()).to_equal(3)
+        n.setFlex(0)
+        expect(n.getFlexShrink()).to_equal(0)
+
+    it "tracks dirty state across layout and edits":
+        step("tracks dirty state across layout and edits")
+        var n = Node.create()
+        n.calculateLayout(80, 24, "ltr")
+        expect(n.isDirty()).to_equal(false)
+        n.setWidth(10)
+        expect(n.isDirty()).to_equal(true)
+        n.markLayoutSeen()
+        expect(n.isDirty()).to_equal(false)
+        n.markDirty()
+        expect(n.isDirty()).to_equal(true)
+        expect(n.hasNewLayout()).to_equal(true)
+
+    it "adds and removes children":
+        step("adds and removes children")
+        var root = Node.create()
+        val a = sized(1, 1)
+        val b = sized(2, 2)
+        root.insertChild(a, 0)
+        root.insertChild(b, 1)
+        expect(root.getChildCount()).to_equal(2)
+        expect(root.getChild(1).getWidth().value).to_equal(2)
+        root.removeChild(a)
+        expect(root.getChildCount()).to_equal(1)
+        expect(root.getChild(0).getWidth().value).to_equal(2)
+        root.freeRecursive()
+        expect(root.getChildCount()).to_equal(0)
+
+    it "resets style and children":
+        step("resets style and children")
+        var root = Node.create()
+        root.insertChild(sized(1, 1), 0)
+        root.setFlexDirection("row")
+        root.setMeasureFunc(3, 4)
+        root.reset()
+        expect(root.getChildCount()).to_equal(0)
+        expect(root.getFlexDirection()).to_equal("column")
+        expect(root.hasMeasureFunc).to_equal(false)
+        expect(root.isDirty()).to_equal(true)
+
+    it "detects measure functions anywhere in a subtree":
+        step("detects measure functions anywhere in a subtree")
+        var root = Node.create()
+        var child = Node.create()
+        root.insertChild(child, 0)
+        expect(hasMeasureFuncInSubtree(root)).to_equal(false)
+        child.setMeasureFunc(5, 2)
+        expect(hasMeasureFuncInSubtree(root)).to_equal(true)
+        child.unsetMeasureFunc()
+        expect(hasMeasureFuncInSubtree(root)).to_equal(false)
+
+describe "yoga layout computation":
+    it "sizes a root from its explicit dimensions":
+        step("sizes a root from its explicit dimensions")
+        var root = sized(60, 20)
+        root.calculateLayout(100, 50, "ltr")
+        expect(root.getComputedWidth()).to_equal(60)
+        expect(root.getComputedHeight()).to_equal(20)
+        expect(root.getComputedLayout()).to_equal("0,0,60,20")
+
+    it "fills the owner size when dimensions are auto and honours percent":
+        step("fills the owner size when dimensions are auto and honours percent")
+        var a = Node.create()
+        a.calculateLayout(80, 24, "ltr")
+        expect(a.getComputedWidth()).to_equal(80)
+        expect(a.getComputedHeight()).to_equal(24)
+        var b = Node.create()
+        b.setWidthPercent(50)
+        b.setHeightPercent(25)
+        b.calculateLayout(80, 40, "ltr")
+        expect(b.getComputedWidth()).to_equal(40)
+        expect(b.getComputedHeight()).to_equal(10)
+
+    it "zeroes display none nodes":
+        step("zeroes display none nodes")
+        var n = sized(10, 10)
+        n.setDisplay("none")
+        n.calculateLayout(80, 24, "ltr")
+        expect(n.getComputedWidth()).to_equal(0)
+        expect(n.getComputedHeight()).to_equal(0)
+        expect(n.isDirty()).to_equal(false)
+
+    it "clamps sizes with min and max constraints":
+        step("clamps sizes with min and max constraints")
+        var small = sized(10, 10)
+        small.setMinWidth(30)
+        small.setMaxHeight(5)
+        small.calculateLayout(100, 100, "ltr")
+        expect(small.getComputedWidth()).to_equal(30)
+        expect(small.getComputedHeight()).to_equal(5)
+
+    it "resolves padding, border and percent margin on a node":
+        step("resolves padding, border and percent margin on a node")
+        var n = sized(50, 50)
+        n.setPadding(0, 3)
+        n.setPaddingPercent(1, 10)
+        n.setBorder(2, 1)
+        n.setMarginPercent(3, 20)
+        layoutNode(n, 100, 100)
+        expect(n.getComputedPadding(0)).to_equal(3)
+        expect(n.getComputedPadding(1)).to_equal(10)
+        expect(n.getComputedBorder(2)).to_equal(1)
+        expect(n.getComputedMargin(3)).to_equal(20)
+
+    it "uses measured size when the owner size is undefined":
+        step("uses measured size when the owner size is undefined")
+        var n = Node.create()
+        n.setMeasureFunc(7, 3)
+        layoutNode(n, -1, -1)
+        expect(n.getComputedWidth()).to_equal(7)
+        expect(n.getComputedHeight()).to_equal(3)
+
+    it "zeroes a display none node and its subtree":
+        step("zeroes a display none node and its subtree")
+        var hidden = sized(10, 10)
+        hidden.setDisplay("none")
+        var inner = sized(5, 5)
+        hidden.insertChild(inner, 0)
+        layoutNode(hidden, 200, 200)
+        expect(hidden.getComputedWidth()).to_equal(0)
+        expect(inner.getComputedWidth()).to_equal(0)
+        expect(collectLayoutChildren(hidden).len()).to_equal(1)
+        var root = Node.create()
+        root.insertChild(hidden, 0)
+        expect(collectLayoutChildren(root).len()).to_equal(0)
+
+    it "computes right and bottom offsets relative to the parent":
+        step("computes right and bottom offsets relative to the parent")
+        var root = sized(100, 50)
+        var c = sized(20, 10)
+        layoutNode(root, 200, 200)
+        layoutNode(c, 100, 50)
+        c.layout.left = 10
+        expect(c.getComputedRight()).to_equal(0)
+        c.hasParent = true
+        c.parent = root
+        expect(c.getComputedRight()).to_equal(70)
+        expect(c.getComputedBottom()).to_equal(40)
+
+describe "yoga flex resolution helpers":
+    it "uses explicit flex basis or the laid out main size":
+        step("uses explicit flex basis or the laid out main size")
+        var c = sized(20, 10)
+        # Without a basis the laid-out size is used; nothing is laid out yet.
+        expect(computeFlexBasis(c, 100, 100)).to_equal(0)
+        c.setFlexDirection("row")
+        expect(computeFlexBasis(c, 100, 100)).to_equal(0)
+        c.setFlexBasis(15)
+        expect(computeFlexBasis(c, 100, 100)).to_equal(15)
+        c.setFlexBasisPercent(50)
+        expect(computeFlexBasis(c, 80, 100)).to_equal(40)
+
+    it "sums child flex grow factors":
+        step("sums child flex grow factors")
+        var root = Node.create()
+        var a = Node.create()
+        a.setFlexGrow(1)
+        var b = Node.create()
+        b.setFlexGrow(2)
+        root.insertChild(a, 0)
+        root.insertChild(b, 1)
+        expect(resolveFlexibleLengths(root)).to_equal(3)
+
+    it "resolves child alignment from align-self then parent align-items":
+        step("resolves child alignment from align-self then parent align-items")
+        var parent = Node.create()
+        parent.setAlignItems("center")
+        var child = Node.create()
+        expect(resolveChildAlign(parent, child)).to_equal("center")
+        child.setAlignSelf("flex-end")
+        expect(resolveChildAlign(parent, child)).to_equal("flex-end")
+
+    it "computes the baseline as top plus height":
+        step("computes the baseline as top plus height")
+        var n = sized(10, 8)
+        layoutNode(n, 100, 100)
+        n.layout.top = 3
+        expect(calculateBaseline(n)).to_equal(11)

@@ -179,3 +179,7 @@ runtime winner was inferred from old probes").
 The remaining two `enum Effect` definitions (`30.types/type_system/effects.spl`,
 `50.mir/mir_effects.spl`) are now the only pair; no third body and no
 method-pair hazard was observed through the `compiler.common` facade.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**FIXED (confirmed)** — ne7: retained-module hazards dissolved (solver deleted, FunctionEffectInfo rename, free-function effects API); facade probe 1/1 PASS.

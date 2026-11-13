@@ -96,6 +96,16 @@ byte-offset callers move to `byte_len()` first, then `len()` and `s[a..b]`
 flip to code points in the interpreter and JIT together; `substring`/`slice(a, b)`
 stay byte-offset. Phase 3 remains the self-hosted verification step, not a gate.
 
+**2026-11-13 (owner decision, confirms 2026-11-07):** `substring(a, b)`,
+`slice(a, b)` and `index_of` (with `find`/`rfind`/`last_index_of`) take and
+return BYTE offsets, bounded by `byte_len()`. Only `len()`, `s[i]` and
+`s[a:b]` count code points. This reverses the seed's code-point switch of
+PR #7877 (`04969955c75`, `db56bd08e19`) for those methods in the
+interpreter, the Rust runtime, the C runtime and the `simple_core` twin. A
+same-receiver bound `X.substring(a, X.len())` is a byte cut sized by a
+code-point count, so stdlib/app/compiler sources use `X.byte_len()` there.
+Record: `doc/08_tracking/bug/text_len_codepoint_switch_2026-11-03.md`.
+
 | item | now | after phase 3 passes once |
 |---|---|---|
 | `s[i]` used where an i64/int is expected | **warning** `W-CHAR-INT-CONTEXT` (HIR lowering; `E-CHAR-INT-CONTEXT` fatal under env `SIMPLE_CHAR_INT_CONTEXT=error` or `SIMPLE_SAFETY_PROFILE=critical\|verified`; switch point `ci_default_mode()` in `src/compiler/20.hir/exhaustiveness/char_int_context.spl`) | error (bug row `text_index_char_int_context_warning_to_error_2026-11-03`) |
