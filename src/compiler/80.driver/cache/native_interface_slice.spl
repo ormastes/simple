@@ -315,14 +315,26 @@ fn native_interface_decls_v1(source: text) -> [NativeInterfaceDeclV1]:
     var cur_lines: [text] = []
     var pending_attrs: [text] = []
     val in_string = native_slice_string_continuations_v1(lines)
+    # True while the most recent KEPT non-fn declaration line opened a
+    # triple-quoted string: its continuation lines are part of that
+    # declaration's value (`val HELP = """…"""`), and private string constants
+    # are inlined by value into importers (provider_globals.spl), so they must
+    # reach the digest. fn/me bodies are consumed below and never captured;
+    # a top-level docstring resets capture so its lines stay out.
+    var capture_string = false
     var i: i64 = 0
     while i < lines.len():
         val line = lines[i].trim_end()
         val t = line.trim()
         val indent = native_slice_indent_v1(line)
         # Lines inside a triple-quoted string and top-level docstrings carry
-        # no declaration of their own.
+        # no declaration of their own — except the value lines of an open
+        # non-fn declaration (see capture_string).
         if in_string[i] or (indent == 0 and t.starts_with("\"\"\"")):
+            if in_string[i] and capture_string and cur_header != "":
+                cur_lines.push("{indent}|{t}")
+            else:
+                capture_string = false
             i = i + 1
             continue
         if t == "" or t.starts_with("#"):
@@ -351,7 +363,9 @@ fn native_interface_decls_v1(source: text) -> [NativeInterfaceDeclV1]:
             pending_attrs = []
         cur_lines.push("{indent}|{logical}")
         i = j
-        if native_slice_is_fn_header_v1(native_slice_strip_modifiers_v1(logical)) and logical.ends_with(":"):
+        val is_fn = native_slice_is_fn_header_v1(native_slice_strip_modifiers_v1(logical)) and logical.ends_with(":")
+        capture_string = (not is_fn) and i < lines.len() and in_string[i]
+        if is_fn:
             while i < lines.len():
                 # Body lines are only measured, never kept: test the raw line
                 # (a non-blank line's indent is unchanged by trim_end).
