@@ -1,0 +1,247 @@
+# Child protocol IO capsule. One lifetime lease; no process registry or HANDLE API.
+use std.common.process.windows_broker_stdio_v1.*
+use std.nogc_sync_mut.io.windows_console_abi.GetStdHandle
+use std.nogc_sync_mut.io.retained_file_abi.GetFileType
+use std.nogc_sync_mut.io.windows_broker_stdio_abi_v1.{GetNamedPipeInfo, rt_windows_pipe_file_mode_v1}
+use std.nogc_sync_mut.io.windows_job_stream_abi_v2.rt_windows_pty_owner_thread_guard_v1
+use std.nogc_sync_mut.io.windows_process_owner_abi.{GetProcessHeap, HeapAlloc, HeapFree,
+    CloseHandle, GetLastError, ReadFile}
+use std.nogc_sync_mut.io.windows_pty_abi.{PeekNamedPipe, WriteFile, GetOverlappedResult,
+    CancelIoEx, CreateEventW, ResetEvent}
+use std.nogc_sync_mut.io.volatile_ops.{volatile_read_u8, volatile_read_u32, volatile_write_u8,
+    volatile_write_u32, volatile_write_u64}
+
+# OVERLAPPED0/event24, counts32/36/40, flags44/48, opaque SDK query64/128,
+# actual modes192/196. Read512..66047 and write66048..131583 are disjoint.
+struct StdioState:
+    heap: i64
+    arena: i64
+    input: i64 = 0
+    output: i64 = 0
+    error: i64 = 0
+    event: i64 = 0
+    query_handle: i64 = 0
+    query_offset: i64 = 0
+    query_pending: bool = false
+    pending: bool = false
+    requested: i64 = 0
+    ready: bool = false
+    closing: bool = false
+    closed: bool = false
+    failed: bool = false
+    read_end: bool = false
+
+var attempted: bool = false
+var retained: StdioState? = None
+
+fn entry() -> Result<bool, text>:
+    val status = unsafe(capabilities: [ffi]): rt_windows_pty_owner_thread_guard_v1()
+    if status == 1: return Ok(true)
+    Err("broker-stdio-owner-thread-unavailable-transfer-refused")
+
+fn load(lease: WindowsBrokerStdioLeaseV1) -> Result<StdioState, text>:
+    if lease.generation != 1 or not retained.?: return Err("broker-stdio-lease-invalid")
+    Ok(retained.unwrap())
+
+fn value(state: StdioState) -> WindowsBrokerStdioPollV1:
+    WindowsBrokerStdioPollV1(write_pending: state.pending or state.query_pending,
+        closing: state.closing, closed: state.closed, failed: state.failed)
+
+fn failed(state: StdioState, reason: text) -> WindowsBrokerStdioAdmissionV1:
+    var next = state
+    next.failed = true
+    retained = Some(next)
+    WindowsBrokerStdioAdmissionV1.CleanupRequired(WindowsBrokerStdioLeaseV1(generation: 1), reason)
+
+@unsafe(reason: "retains an SDK-defined query until actual IOSB completion", capabilities: [ffi, raw_ptr])
+fn query_mode(state: StdioState, handle: i64, offset: i64, mode: i64) -> (StdioState, i64):
+    var next = state
+    next.query_handle = handle
+    next.query_offset = offset
+    val result = rt_windows_pipe_file_mode_v1(handle, next.arena + offset, next.arena + mode, 0)
+    next.query_pending = result == 259
+    (next, result)
+
+@unsafe(reason: "nonblocking observations alone discharge pending storage", capabilities: [ffi, raw_ptr])
+fn advance(state: StdioState) -> StdioState:
+    var next = state
+    if next.query_pending:
+        val mode = if next.query_offset == 64: 192 else: 196
+        val result = rt_windows_pipe_file_mode_v1(next.query_handle, next.arena + next.query_offset,
+            next.arena + mode, 1)
+        if result != 259:
+            next.query_pending = false
+            if result != 0: next.failed = true
+    if next.pending:
+        if GetOverlappedResult(next.output, next.arena, next.arena + 32, 0) != 0:
+            next.pending = false
+            if volatile_read_u32(next.arena + 32) as i64 != next.requested: next.failed = true
+        else:
+            val error = GetLastError() as i64
+            if error == 995 or error == 109 or error == 233 or error == 232 or error == 64:
+                next.pending = false
+                if error != 995 or not next.closing: next.failed = true
+            elif error != 996:
+                next.failed = true # unknown query failure retains OVERLAPPED/buffer
+    next
+
+@unsafe(reason: "takes sole ownership of exact inherited protocol pipes after native mode checks", capabilities: [ffi, raw_ptr])
+pub fn windows_broker_stdio_open_v1() -> WindowsBrokerStdioAdmissionV1:
+    val owner = entry()
+    if owner.is_err(): return WindowsBrokerStdioAdmissionV1.Rejected(owner.unwrap_err())
+    if attempted: return WindowsBrokerStdioAdmissionV1.Rejected("broker-stdio-lifetime-reopen-forbidden")
+    attempted = true
+    val heap = GetProcessHeap()
+    if heap == 0: return WindowsBrokerStdioAdmissionV1.Rejected("broker-stdio-heap-unavailable")
+    val arena = HeapAlloc(heap, 8u32, 131584u64)
+    if arena == 0: return WindowsBrokerStdioAdmissionV1.Rejected("broker-stdio-arena-unavailable")
+    var state = StdioState(heap: heap, arena: arena)
+    retained = Some(state)
+    state.input = GetStdHandle(4294967286u32)
+    state.output = GetStdHandle(4294967285u32)
+    state.error = GetStdHandle(4294967284u32)
+    if state.input == -1: state.input = 0
+    if state.output == -1: state.output = 0
+    if state.error == -1: state.error = 0
+    retained = Some(state)
+    if state.input == 0 or state.output == 0 or state.output != state.error or state.input == state.output:
+        return failed(state, "broker-stdio-exact-standard-endpoints-required")
+    val input_type = GetFileType(state.input) as i64
+    val output_type = GetFileType(state.output) as i64
+    if input_type != 3 or output_type != 3: return failed(state, "broker-stdio-pipe-endpoints-required")
+    if GetNamedPipeInfo(state.input, arena + 44, 0, 0, 0) == 0 or
+            GetNamedPipeInfo(state.output, arena + 48, 0, 0, 0) == 0:
+        return failed(state, "broker-stdio-pipe-profile-query-failed")
+    val input_query = query_mode(state, state.input, 64, 192)
+    state = input_query.0
+    if input_query.1 != 0: return failed(state, "broker-stdio-input-mode-query-incomplete-or-failed")
+    val output_query = query_mode(state, state.output, 128, 196)
+    state = output_query.0
+    if output_query.1 != 0: return failed(state, "broker-stdio-output-mode-query-incomplete-or-failed")
+    val reason = windows_broker_stdio_profile_reason_v1(input_type, output_type, true, true,
+        volatile_read_u32(arena + 44) as i64, volatile_read_u32(arena + 48) as i64,
+        volatile_read_u32(arena + 192) as i64, volatile_read_u32(arena + 196) as i64)
+    if reason != "": return failed(state, reason)
+    state.event = CreateEventW(0, 1, 0, 0)
+    if state.event == 0: return failed(state, "broker-stdio-event-unavailable")
+    volatile_write_u64(arena + 24, state.event)
+    state.ready = true
+    retained = Some(state)
+    WindowsBrokerStdioAdmissionV1.Ready(WindowsBrokerStdioLeaseV1(generation: 1))
+
+pub fn windows_broker_stdio_poll_v1(lease: WindowsBrokerStdioLeaseV1) -> Result<WindowsBrokerStdioPollV1, text>:
+    val owner = entry()?
+    var state = load(lease)?
+    if not state.closed: state = advance(state)
+    retained = Some(state)
+    Ok(value(state))
+
+# Sole reader is mandatory: no CRT/stdin reader may consume Peek's counted
+# bytes before this bounded synchronous ReadFile. Byte mode prevents messages.
+@unsafe(reason: "reads only already available bytes from the sole-reader synchronous input", capabilities: [ffi, raw_ptr])
+pub fn windows_broker_stdio_read_some_v1(lease: WindowsBrokerStdioLeaseV1, max_bytes: i64) -> WindowsBrokerStdioReadV1:
+    val owner = entry()
+    if owner.is_err(): return WindowsBrokerStdioReadV1.Failed(owner.unwrap_err())
+    var state = match load(lease):
+        case Ok(found): found
+        case Err(reason): return WindowsBrokerStdioReadV1.Failed(reason)
+    if state.closed or state.closing or state.failed or not state.ready:
+        return WindowsBrokerStdioReadV1.Failed("broker-stdio-read-owner-unavailable")
+    if max_bytes <= 0 or max_bytes > WINDOWS_BROKER_STDIO_MAX_BYTES_V1:
+        return WindowsBrokerStdioReadV1.Failed("broker-stdio-read-bound-invalid")
+    if state.read_end: return WindowsBrokerStdioReadV1.End
+    if PeekNamedPipe(state.input, 0, 0u32, 0, state.arena + 36, 0) == 0:
+        val error = GetLastError() as i64
+        if error == 109 or error == 233: state.read_end = true
+        else: state.failed = true
+    else:
+        val available = volatile_read_u32(state.arena + 36) as i64
+        val count = windows_broker_stdio_read_count_v1(available, max_bytes).unwrap()
+        if count == 0: return WindowsBrokerStdioReadV1.Pending
+        if ReadFile(state.input, state.arena + 512, count as u32, state.arena + 40, 0) != 0:
+            val actual = volatile_read_u32(state.arena + 40) as i64
+            if actual > count: state.failed = true
+            elif actual > 0:
+                var bytes = [0u8; actual]
+                for index in 0..actual: bytes[index] = volatile_read_u8(state.arena + 512 + index) as u8
+                return WindowsBrokerStdioReadV1.Data(bytes)
+        else:
+            val error = GetLastError() as i64
+            if error == 109 or error == 233: state.read_end = true
+            else: state.failed = true
+    retained = Some(state)
+    if state.failed: return WindowsBrokerStdioReadV1.Failed("broker-stdio-input-failed")
+    if state.read_end: return WindowsBrokerStdioReadV1.End
+    WindowsBrokerStdioReadV1.Pending
+
+@unsafe(reason: "one bounded accepted prefix is retained through actual overlapped completion", capabilities: [ffi, raw_ptr])
+pub fn windows_broker_stdio_write_some_v1(lease: WindowsBrokerStdioLeaseV1, bytes: [u8]) -> Result<i64, text>:
+    val owner = entry()?
+    var state = load(lease)?
+    if state.closed or state.closing or state.failed or not state.ready: return Err("broker-stdio-write-owner-unavailable")
+    state = advance(state)
+    retained = Some(state)
+    if state.failed: return Err("broker-stdio-prior-operation-failed-owner-retained")
+    if state.pending: return Ok(0)
+    val count = if bytes.len() > WINDOWS_BROKER_STDIO_MAX_BYTES_V1: WINDOWS_BROKER_STDIO_MAX_BYTES_V1 else: bytes.len()
+    if count == 0: return Ok(0)
+    for index in 0..count: volatile_write_u8(state.arena + 66048 + index, bytes[index])
+    for offset in [0, 8, 16]: volatile_write_u64(state.arena + offset, 0)
+    volatile_write_u32(state.arena + 32, 0)
+    if ResetEvent(state.event) == 0: return Err("broker-stdio-output-event-reset-failed")
+    state.requested = count
+    state.pending = true
+    retained = Some(state)
+    val submitted = WriteFile(state.output, state.arena + 66048, count as u32, state.arena + 32, state.arena)
+    if submitted != 0:
+        val actual = volatile_read_u32(state.arena + 32) as i64
+        state.pending = false
+        if actual > count: state.failed = true
+        retained = Some(state)
+        if state.failed: return Err("broker-stdio-output-count-invalid-owner-retained")
+        return Ok(actual)
+    val error = GetLastError() as i64
+    if error == 997: return Ok(count)
+    state.failed = true
+    if error == 109 or error == 233 or error == 232 or error == 64: state.pending = false
+    retained = Some(state)
+    Err("broker-stdio-output-uncertain-do-not-replay-owner-retained")
+
+@unsafe(reason: "requests exact-handle cancellation without discharging uncompleted storage", capabilities: [ffi, raw_ptr])
+pub fn windows_broker_stdio_cancel_v1(lease: WindowsBrokerStdioLeaseV1) -> Result<bool, text>:
+    val owner = entry()?
+    var state = load(lease)?
+    if state.closed: return Ok(true)
+    state.closing = true
+    retained = Some(state)
+    var refused = false
+    val query_cancel = if state.query_pending: state.query_handle else: 0
+    val write_cancel = if state.pending: state.output else: 0
+    for handle in [query_cancel, write_cancel]:
+        if handle != 0 and CancelIoEx(handle, 0) == 0 and GetLastError() != 1168u32: refused = true
+    state = advance(state)
+    retained = Some(state)
+    if refused: return Err("broker-stdio-cancellation-uncertain-owner-retained")
+    Ok(not state.pending and not state.query_pending)
+
+@unsafe(reason: "completion-before-free and checked unique standard-HANDLE release", capabilities: [ffi, raw_ptr])
+pub fn windows_broker_stdio_collect_v1(lease: WindowsBrokerStdioLeaseV1) -> Result<bool, text>:
+    val owner = entry()?
+    val requested = windows_broker_stdio_cancel_v1(lease)
+    var state = load(lease)?
+    if state.closed: return Ok(true)
+    if requested.is_err(): return Err(requested.unwrap_err())
+    if state.pending or state.query_pending: return Ok(false)
+    for handle in [state.input, state.output, state.error]:
+        if handle != 0 and (state.input == handle or state.output == handle or state.error == handle):
+            if CloseHandle(handle) != 0:
+                if state.input == handle: state.input = 0
+                if state.output == handle: state.output = 0
+                if state.error == handle: state.error = 0
+    if state.event != 0 and CloseHandle(state.event) != 0: state.event = 0
+    if state.input == 0 and state.output == 0 and state.error == 0 and state.event == 0 and state.arena != 0:
+        if HeapFree(state.heap, 0u32, state.arena) != 0: state.arena = 0
+    state.closed = state.input == 0 and state.output == 0 and state.error == 0 and state.event == 0 and state.arena == 0
+    retained = Some(state)
+    if not state.closed: return Err("broker-stdio-native-release-failed-owner-retained")
+    Ok(true)
