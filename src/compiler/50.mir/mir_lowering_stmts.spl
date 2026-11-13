@@ -260,6 +260,13 @@ fn mir_struct_name_bare(name: text) -> text:
     val parts = name.split("::")
     parts[parts.len() - 1]
 
+fn mir_join_slot_is_payloadless(slot_type: MirType) -> bool:
+    """True when an if/if-chain merge slot of this MIR type has no runtime
+    payload (Unit / Never): it must never receive a `Const 0` default def."""
+    match slot_type.kind:
+        case MirTypeKind.Unit | MirTypeKind.Never: true
+        case _: false
+
 fn mir_merge_arm_types(first: MirType, second: MirType) -> MirType:
     """Pick the more specific of two branch result types at a merge block.
 
@@ -4340,7 +4347,14 @@ impl MirLowering:
         # retypes at the merge (same fix as the match dispatches: an i64
         # default made print decimal-render text results of value-position
         # ifs).
-        val result = b.new_temp(self.match_result_mir_type(expected_type))
+        val result_slot_type = self.match_result_mir_type(expected_type)
+        val result = b.new_temp(result_slot_type)
+        # bug=native_const_type_void_unit_tail_if_join_2026-11-13: a Unit slot
+        # (unit fn tail, expected Some(Unit)) never takes a `Const 0` def; read
+        # that from the slot type value, not from `expected_type == None` or a
+        # `local_mir_type_of ?? i64` re-lookup (native Phase 2 miscompiled one
+        # of them and emitted E-BACKEND-LLVM-CONST-TYPE "cannot define void").
+        val result_slot_payloadless = mir_join_slot_is_payloadless(result_slot_type)
         var inferred_known = false
         var inferred_ty = MirType.i64()
         var merged_arm_locals: [LocalId] = []
@@ -4351,7 +4365,7 @@ impl MirLowering:
         # (`out.push(item)`), leaving `result` defined on one edge of the merge
         # only; native backends then read an undefined operand there. A
         # dominating default def makes every edge define it; arms overwrite it.
-        if expected_type == None:
+        if expected_type == None and not result_slot_payloadless:
             b.emit_const(result, MirConstValue.Int(0), MirType.i64())
         b.terminate_if(mir_operand_copy(cond_local), then_block, else_block)
         self.builder = b
@@ -4445,7 +4459,7 @@ impl MirLowering:
         # if no arm defined result, the returned LocalId would be read while
         # undefined downstream (NULL llvm::Value* -> ICmp SIGSEGV in llvm-lib).
         # Define it in the merge block so every returned id has a def.
-        if not result_defined and not self.merge_result_is_payloadless(result):
+        if not result_defined and not result_slot_payloadless:
             self.builder.emit_const(result, MirConstValue.Int(0), MirType.i64())
         if inferred_known:
             self.builder.set_local_type(result, inferred_ty)
@@ -4492,11 +4506,18 @@ impl MirLowering:
         val chain_has_else: bool = else_ != None
         val result_type = if chain_has_else: self.match_result_mir_type(expected_type) else: MirType.unit()
         val result = b.new_temp(result_type)
+        # bug=native_const_type_void_unit_tail_if_join_2026-11-13: decide every
+        # default `Const 0` def from the slot's own MIR type value. The frozen
+        # native Phase 2 put Const 0 into the Unit join of a unit fn's tail
+        # if/else even though `expected_type` was Some(Unit) here -- the
+        # Option compare / `local_mir_type_of ?? i64` re-lookup is the
+        # miscompile-prone path; a non-optional MirType match is not.
+        val result_slot_payloadless = mir_join_slot_is_payloadless(result_type)
         # bug=mir_lower_child_tasks_append_access_violation_2026-10-19: same as
         # lower_if -- a statement-position chain with an else whose arms mix a
         # unit statement and a value-yielding one defines `result` on one merge
         # edge only. Dominating default def; arms overwrite it.
-        if chain_has_else and expected_type == None:
+        if chain_has_else and expected_type == None and not result_slot_payloadless:
             b.emit_const(result, MirConstValue.Int(0), MirType.i64())
         self.builder = b
         var result_defined = false
@@ -4628,7 +4649,7 @@ impl MirLowering:
         if not merge_has_incoming and self.builder.current_block_has_explicit_terminator():
             return result
         self.builder.switch_to_block(merge_block)
-        if not result_defined and not self.merge_result_is_payloadless(result):
+        if not result_defined and not result_slot_payloadless:
             self.builder.emit_const(result, MirConstValue.Int(0), MirType.i64())
         if inferred_known and chain_has_else:
             self.builder.set_local_type(result, inferred_ty)

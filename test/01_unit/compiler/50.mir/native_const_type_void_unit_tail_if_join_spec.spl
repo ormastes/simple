@@ -1,0 +1,98 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# A unit function's tail if/else join never takes a word def
+
+Bug native_const_type_void_unit_tail_if_join_2026-11-13 (P1). The frozen
+Windows Phase 2 compiler failed native-build of `app.cli.lint_entry` with
+E-BACKEND-LLVM-CONST-TYPE "integer constant cannot define void" in
+`print_command_help`: an unannotated unit fn whose TAIL is an if/elif/else of
+print arms. The tail join is lowered with expected Some(Unit), so its slot is
+Unit; every default `Const 0` def is now decided from that slot type value.
+Each case lowers `fn a` and counts Const/Copy defs into a Unit-typed MIR local
+(must be 0).
+"""
+
+# @tag: unit, compiler, mir
+
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+val data_source = "pub fn spawn(s: text) -> i64:\n    s.len()\n"
+
+var last_void_word_defs = 0
+
+fn lower_errors(body: text) -> text:
+    val consumer_source = "use lib.data.*\n\n" + body
+    val log = Logger(level: 0)
+    val data_ast = parse_full_frontend(data_source, "lib/data.spl", "lib.data", log)
+    val consumer_ast = parse_full_frontend(consumer_source, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["lib.data"] = data_ast
+    val sources = [SourceFile(path: "lib/data.spl", content: data_source, module_name: "lib.data")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var data_lowering = hirlowering_for_module("lib.data", surfaces)
+    var consumer_lowering = hirlowering_for_module("app.main", surfaces)
+    val data_hir = data_lowering.lower_module(data_ast)
+    val consumer_hir = consumer_lowering.lower_module(consumer_ast)
+    var mir_lowering = MirLowering.new(consumer_hir.symbols)
+    var prescan_mods: Dict<text, HirModule> = {}
+    prescan_mods["data_hir"] = data_hir
+    prescan_mods["consumer_hir"] = consumer_hir
+    mir_lowering.prescan_module_struct_names(prescan_mods, "data_hir")
+    mir_lowering.prescan_module_struct_names(prescan_mods, "consumer_hir")
+    val _mir = mir_lowering.lower_module(consumer_hir, [data_hir, consumer_hir])
+    last_void_word_defs = 0
+    for function in _mir.functions.values():
+        if function.name == "a" or function.name.ends_with(".a"):
+            var unit_ids: Dict<i64, bool> = {}
+            for local in function.locals:
+                match local.type_.kind:
+                    case MirTypeKind.Unit: unit_ids[local.id.id] = true
+                    case _: pass
+            for block in function.blocks:
+                for instruction in block.instructions:
+                    match instruction.kind:
+                        case MirInstKind.Const(dest, _, _):
+                            if unit_ids.contains(dest.id): last_void_word_defs = last_void_word_defs + 1
+                        case MirInstKind.Copy(dest, _):
+                            if unit_ids.contains(dest.id): last_void_word_defs = last_void_word_defs + 1
+                        case _: pass
+    var out = ""
+    for e in consumer_lowering.errors:
+        out = out + "hir: " + e.message + "\n"
+    for e in mir_lowering.errors:
+        out = out + "mir: " + e.message + "\n"
+    out
+
+fn void_word_defs(body: text) -> i64:
+    val errors = lower_errors(body)
+    if errors != "":
+        print("lower errors: " + errors)
+        return -1
+    last_void_word_defs
+
+describe "unit fn tail if join: no word defined into a void slot":
+    it "tail if/elif/else of print arms (print_command_help shape)":
+        expect(void_word_defs("fn a(c: text):\n    if c == \"lint\":\n        print \"l\"\n        print \"\"\n    elif c == \"fmt\":\n        print \"f\"\n    elif c == \"fix\":\n        print \"x\"\n    else:\n        print \"u\"\n")).to_equal(0)
+
+    it "tail if/else of print arms":
+        expect(void_word_defs("fn a(c: text):\n    if c == \"lint\":\n        print \"l\"\n    else:\n        print \"u\"\n")).to_equal(0)
+
+    it "tail else-less if of a print arm":
+        expect(void_word_defs("fn a(c: text):\n    if c == \"lint\":\n        print \"l\"\n")).to_equal(0)
+
+    it "tail if/else of discarded i64 call arms":
+        expect(void_word_defs("fn a(c: text):\n    if c == \"newunit\":\n        spawn(c)\n    else:\n        spawn(c + c)\n")).to_equal(0)
+
+    it "unit fn with a mid-body if/else of discarded i64 calls (parser_lower_unit_decl shape)":
+        expect(void_word_defs("fn u():\n    print \"r\"\n\nfn a(c: text, t: i64):\n    spawn(c)\n    if c == \"newunit\":\n        spawn(c)\n    else:\n        spawn(c + c)\n    val xs: [i64] = [-1]\n    spawn(c)\n    u()\n")).to_equal(0)
