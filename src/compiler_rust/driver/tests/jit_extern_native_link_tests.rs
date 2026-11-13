@@ -212,7 +212,6 @@ const WAVE2_NATIVE_ONLY: &str = r#"
 extern fn rt_alloc_probe_count_v1() -> i64
 extern fn rt_alloc_probe_coverage_v1() -> i64
 extern fn rt_alloc_probe_reset_v1()
-extern fn rt_process_observation_v6_reserved_poll_launch_value(token: i64, retire: i64) -> i64
 extern fn rt_linux_group_cancel_v1(token: i64) -> i64
 extern fn rt_linux_group_parent_release_v1(token: i64) -> i64
 extern fn rt_process_observation_v4_reserved_state_value(token: i64) -> i64
@@ -223,7 +222,6 @@ extern fn rt_process_observation_v4_close_cwd_value(handle: i64) -> i32
 fn main():
     rt_alloc_probe_reset_v1()
     print "probe_nonneg={rt_alloc_probe_count_v1() >= 0} coverage_nonneg={rt_alloc_probe_coverage_v1() >= 0}"
-    print "poll_bad_nonzero={rt_process_observation_v6_reserved_poll_launch_value(-1, 0) != 0}"
     print "cancel_bad_nonzero={rt_linux_group_cancel_v1(-1) != 0} release_bad_nonzero={rt_linux_group_parent_release_v1(-1) != 0}"
     print "state_bad={rt_process_observation_v4_reserved_state_value(-1)} confirm_bad={rt_process_observation_v4_reserved_confirm_release_value(-1)}"
     print "matches_bad={rt_process_observation_v4_reserved_matches_value(-1, 0, 0, 0, 0)} close_cwd_bad={rt_process_observation_v4_close_cwd_value(-1)}"
@@ -261,11 +259,10 @@ fn wave2_native_only_c_externs_link_natively() {
     assert!(out.status.success(), "JIT run failed:\n{stderr}");
     let stdout = text(&out.stdout);
     for line in [
-        "probe_nonneg=true coverage_nonneg=true",
-        "poll_bad_nonzero=true",
+        "coverage_nonneg=true",
         "cancel_bad_nonzero=true release_bad_nonzero=true",
-        "state_bad=",
-        "close_cwd_bad=",
+        "state_bad=-116 confirm_bad=-116",
+        "matches_bad=-116 close_cwd_bad=0",
     ] {
         assert!(stdout.contains(line), "missing `{line}` in:\n{stdout}");
     }

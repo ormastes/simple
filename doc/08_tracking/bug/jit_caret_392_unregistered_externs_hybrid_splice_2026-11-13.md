@@ -262,3 +262,46 @@ Class (a) Rust exports deliberately **left spliced**:
 | `rt_tagged_add`, `rt_dyncall_4/5/6` | no single-line `.spl` declaration to check the ABI against |
 | `rt_process_run_bounded_bytes` | (ptr, len) text ABI; needs the text-expansion path verified |
 | `rt_process_stdout_state`, `rt_process_piped_exit_status_value` | `piped_process_observer.rs` is not compiled into the seed (not class (a); link fails) |
+
+## Wave 2 — 19 scalar-ABI C exports registered (2026-11-13)
+
+rt_alloc_probe_count_v1, rt_alloc_probe_coverage_v1, rt_alloc_probe_reset_v1, rt_file_create_excl, rt_file_sync,
+rt_linux_group_cancel_v1, rt_linux_group_parent_release_v1, rt_linux_group_stream_release_inherited_v2,
+rt_mem_guard_stats, rt_mem_harden_check_native, rt_process_observation_v4_close_cwd_value,
+rt_process_observation_v4_reserve_value, rt_process_observation_v4_reserved_confirm_release_value,
+rt_process_observation_v4_reserved_matches_value, rt_process_observation_v4_reserved_state_value,
+rt_process_owned_v3_release_value, rt_time_now_seconds, rt_time_now_seconds_f64, spl_thread_current_id
+
+Mechanism: `runtime/build.rs` gains `JIT_SCALAR_C_EXPORTS`, an allowlisted scan
+(Linux only, a name registers only if its definition is found) of the TUs that
+are compiled into the seed archive but not scanned wholesale. The TUs stay out
+of `LINKED_C_SOURCES` on purpose: most of their exports take `const char*`
+text or return an owned `SplArray*` that the interpreter handler adapts (nil
+check, free, array -> tuple), so a direct JIT call is not equivalent.
+
+| | splice names | wall (median) | peak RSS (median) | stdout vs interpreter |
+|---|---|---|---|---|
+| wave 1 seed `8532f7b39b025ad2…` | 344 | 7.03 s | 1,588 MB | byte-identical |
+| wave 2 seed `5ff721a25c34d587…` | 325 | 7.07 s | 1,588 MB | byte-identical |
+
+Test: two wave-2 cases in `jit_extern_native_link_tests.rs`, red on the wave 1
+seed, green on the wave 2 seed (6 of 6).
+
+Found while probing: the interpreter handler for the `rt_process_observation_v4_reserved_*`
+family refuses by design (`process observation V4 is unavailable in interpreter
+mode; use the exact native V4 provider`), so a spliced JIT call could never
+succeed. Native linking is the only working lane for them.
+
+## Remaining after wave 2: 325
+
+| Group | Count | What it needs |
+|---|---|---|
+| class (a) C `rt_simd_*` | 55 | handle-based `int64_t` vector ABI in `runtime_simd_dispatch.c`; `build.rs` filters that TU to `rt_opencl_*` deliberately and the Rust runtime carries scalar-argument twins of the same names. Owner decision on which ABI the JIT struct values match |
+| class (a) other C, text/array ABI | ~73 | `const char*` / (ptr, len) text expansion entries in `codegen/instr/calls.rs` plus a native equivalent of the interpreter's `take` adaptation for `SplArray*` returns (`rt_local_unix_*`, `rt_linux_group_*`, `rt_process_observation_v4_*`, `rt_process_owned_v3_*`) |
+| class (a) Rust, non-exact ABI | 16 | listed under wave 1 |
+| class (a) `rt_process_observation_v6_reserved_poll_launch_value` | 1 | scalar ABI, but `c_function_definitions` does not find its definition in `runtime_process_owned.c` |
+| class (b) | 98 | 55 are Win32 or foreign-platform names: cfg-prune the declarations from the host unit. 43 host-applicable ones need a native provider |
+| class (c) | 82 | no implementation in the seed; cfg-prune or implement |
+
+Zero splice for caret `--help` therefore needs cfg-pruning of the platform-foreign
+and unimplemented declarations (about 180 names), not more registration.
