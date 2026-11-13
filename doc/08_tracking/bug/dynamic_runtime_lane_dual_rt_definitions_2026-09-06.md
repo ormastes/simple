@@ -151,3 +151,10 @@ hello under interpret/AOT). No change made in this lane.
 ## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
 
 **LIVE (confirmed)** — rt3 corroborated rt2 fresh: supplement-archive call signature unchanged, dynamic lane still appends full core-C after the shared runtime, ratchet has zero `dynamic` mentions. Owner: compiler/native_project dynamic-runtime linker lane (projection archive).
+
+
+---
+
+## 2026-11-13 triage — lane live-p3-l2 (work/live-p3-l2-20261113, worktree lp2-wt, base origin/release/1.0.0 tip)
+
+**Verdict: LIVE (deferred).** Windows lane: reproduction impossible here (no Linux ELF `libsimple_runtime.so`; producing one plus the Stage4 driver link is a heavy entry-closure build this lane does not run). Prior-lane structural facts not re-derived: full core-C archive still appended after the shared runtime in the dynamic lane, no projection/localization parameter in `build_c_runtime_library`, ratchet has no dynamic-lane coverage. Owner remains compiler/native_project dynamic-runtime linker lane.

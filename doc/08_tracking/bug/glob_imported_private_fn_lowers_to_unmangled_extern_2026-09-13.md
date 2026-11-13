@@ -94,3 +94,43 @@ but the glob-binding resolution leg still resolves private names permissively
 Remaining fix is in the seed frontend's import-binding path; the native
 unmangled-extern leg is unprovable on this host (native-build hang). No
 in-lane change.
+
+
+---
+
+## 2026-11-13 triage — lane live-p3-l2 (work/live-p3-l2-20261113, worktree lp2-wt, base origin/release/1.0.0 tip)
+
+**Verdict: LIVE (deferred) — interpreter leg analyzed, not changed; rationale below.**
+
+Source analysis at this base (seed `bdd.rs`/`module_loader.rs`/`interpreter_call/mod.rs`):
+
+- The 2026-11-09 call-time gate `6d15331f91eb`
+  (`check_private_call_visibility` in
+  `src/compiler_rust/compiler/src/interpreter_module/module_loader.rs`)
+  deliberately keeps a **same-directory compatibility exception**
+  (`owner_path.parent() == cur_path.parent()` → allow), documented in two
+  places as the compatibility mode for sibling-file private access. This
+  bug's same-directory glob repro (`use app.ma.*` + `use app.mb.*` calling a
+  private `_helper`) resolves through exactly that exception — the gate fires
+  only for cross-directory callers, which is why the repro still prints
+  `R=2` with only a `compiler_cross_module_private_symbol_collision`
+  warning.
+- The other half of the mechanism is by design in
+  `interpreter_module/module_loader.rs` ("Use-list name checking" section):
+  `load_and_merge_module` deliberately registers the WHOLE module surface
+  for every import form, including glob — the comment states that narrowing
+  the registered surface "would change symbol resolution repo-wide and must
+  be staged separately". A glob import therefore binds private names into
+  the flat registry, and the private-use-name check
+  (`check_private_use_names`) only covers braced `use m.{name}` lists, not
+  glob.
+- **Not fixed in this lane:** closing the gap means either (a) removing or
+  re-scoping the documented same-directory exception, or (b) staging a
+  registration-surface narrowing for glob imports. Both change symbol
+  resolution repo-wide; the same-directory private-access pattern is used
+  across the tree and only the cross-directory half is baselined
+  (`scripts/check/private_import_baseline.txt`). A batch lane flipping this
+  would surface an unbounded quantity of new errors in unrelated packages.
+  The native-lowering leg (unmangled extern at link) additionally remains
+  unprovable on this Windows lane (known native-build hang).
+  Owner: seed name-resolution lane, staged with a baseline extension.

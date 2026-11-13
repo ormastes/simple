@@ -871,7 +871,7 @@ pub(super) fn eval_bdd_builtin(
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
     match name {
-        "describe" | "context" => {
+        "describe" | "context" | "feature" | "scenario" => {
             // Use extract_desc_str for string/fstring literals to avoid FString interpolation
             // errors on description text.  For non-literal first args (e.g. Symbol for
             // `with_context`), fall back to eval_arg.
@@ -921,9 +921,9 @@ pub(super) fn eval_bdd_builtin(
             println!("{}{}", indent_str, name_str);
 
             // Create ExampleGroup object
-            // - `describe` always creates a top-level group (no parent)
-            // - `context` creates a child of the current group (if there is one)
-            let is_describe = name == "describe";
+            // - `describe` and `feature` always create a top-level group (no parent)
+            // - `context` and `scenario` create a child of the current group (if there is one)
+            let is_describe = name == "describe" || name == "feature";
             let parent = if is_describe {
                 None // describe always creates top-level group
             } else {

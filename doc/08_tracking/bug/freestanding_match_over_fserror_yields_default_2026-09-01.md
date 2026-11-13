@@ -117,3 +117,10 @@ on this lane.
 Concurs with lane ne10: LIVE, not re-verifiable in a no-cargo Windows lane
 (repro needs a cargo-built seed plus the OVMF freestanding gate). Grant
 command recorded in the ne10 addendum stands. No in-lane change.
+
+
+---
+
+## 2026-11-13 triage — lane live-p3-l2 (work/live-p3-l2-20261113, worktree lp2-wt, base origin/release/1.0.0 tip)
+
+**Verdict: LIVE (deferred).** Not re-verifiable on this Windows lane: reproduction needs a cargo-built seed plus the OVMF x86_64 freestanding gate (Linux). Grant command and the H1/H2 one-run discriminator stand in this record; no commit touching the freestanding/cranelift enum-match or FsError payload path was observed in release history since filing.

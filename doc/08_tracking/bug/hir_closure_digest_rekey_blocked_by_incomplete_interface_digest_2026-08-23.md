@@ -320,3 +320,10 @@ lane. Status line flipped from OPEN.
 
 Concurs with lane p3fix-comp7: LIVE by deliberate owner deferral (dedicated
 owner lane required for the interface-digest re-key). No in-lane change.
+
+
+---
+
+## 2026-11-13 triage — lane live-p3-l2 (work/live-p3-l2-20261113, worktree lp2-wt, base origin/release/1.0.0 tip)
+
+**Verdict: LIVE (deferred).** Source re-check at this base: `hir_cache_closure_digest` still folds each surface's raw `content_hash`/`content_length`; `surface_type_encode.spl` still absent; the guard row `interface-digest-differential` still absent from `check-perf-regression-tests.shs`. The correct re-key (lossless ModuleSurface encoder over every field with per-surface fail-closed fallback) remains a dedicated owner compiler/cache lane; a partially-validated re-key would produce a silently stale compiler binary.

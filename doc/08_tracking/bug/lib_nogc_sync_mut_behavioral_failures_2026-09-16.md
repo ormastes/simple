@@ -208,3 +208,41 @@ record stays LIVE until each owning lane fixes or individually retires its item.
 ## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
 
 **LIVE (confirmed)** — rt3 narrowed twice: 8/13 sampled items green on the fresh seed; 5 confirmed RED (shader_compile WgslEmitter entry points, gpu_queue_usm lowering, thread_pointer_spawn, winit_compat_mapping, raw_memory_owner) — each a real per-package implementation gap with a named owning lane.
+
+
+---
+
+## 2026-11-13 triage — lane live-p3-l2 (work/live-p3-l2-20261113, worktree lp2-wt, base origin/release/1.0.0 tip)
+
+**Verdict: partially discharged this lane — `window_winit_compat_mapping_spec` FIXED (2/2 PASS);
+`raw_memory_owner_spec` drift measured and deferred; remaining items unchanged.**
+
+- **`io/window_winit_compat_mapping_spec.spl` — FIXED (2/2 PASS, seed-smoke
+  `--mode=interpreter --no-cache`).** Root cause: the `winit_compat_*` SDL→winit
+  event-mapping family existed in a pre-merge tree (visible at `fcbec1c3b62^`) but a
+  later merge restored `src/lib/nogc_sync_mut/io/window_sffi.spl` to a revision
+  carrying only the `rt_winit_*` twin names, so the spec's contracted exports
+  vanished. Fix (this lane, `src/lib/nogc_sync_mut/io/window_sffi.spl`): added
+  `winit_compat_event_get_type` / `winit_compat_event_window_close_requested`
+  delegating to the existing `rt_winit_event_get_type` /
+  `rt_winit_event_window_close_requested` (the mapping itself was already
+  correct and matches the spec's expectations 1→3, 2/3→10, 4→21, 5/6→20,
+  7→22, else 0), and exported both. No assertion relaxed.
+- **`linalg/raw_memory_owner_spec.spl` — drift measured, deferred to linalg
+  owner.** Spec now executes 4/4 (module resolution succeeds) but all four
+  examples fail: (1) `raw_f64_to_bits`/`raw_bits_to_f64` do not exist — the
+  owner module exports `spl_f64_to_bits`/`spl_bits_to_f64` instead;
+  (2) the spec pins an exact inline-owner source shape (`@inline` decorators,
+  `# @tag(addr=...)` comments, single-arity `raw_release(ptr)` calling
+  `rt_free(ptr)`) while the current `ptr/raw.spl` has `@inline`-free wrappers
+  and `raw_free(ptr, size)`; (3/4) both linalg leaves
+  (`nogc_async_mut/linalg/backend_ops.spl`, `nogc_sync_mut/linalg/blas_openblas.spl`)
+  currently import and call the raw `rt_*` externs directly (zero `raw_*`
+  wrapper usage) and their topology no longer matches the pinned counts
+  (backend 35/91/44/7, openblas 20/50/25/4). Reconciling means reshaping
+  production staging loops to literal text pins — owner-lane work; the
+  testing rules forbid weakening the spec.
+- **Remaining rt3-named items** (shader_compile WgslEmitter entry points,
+  gpu_queue_usm lowering path, thread_pointer_spawn, plus the unsampled
+  render/gpu/ui items) were not re-run this lane; prior-lane dispositions
+  stand.

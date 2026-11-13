@@ -142,3 +142,10 @@ the compiler-frontend owner as a feature request.
 ## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
 
 **LIVE (confirmed)** — ne13: interim API + `_ex` runtime symbol landed; only the grammar slot remains — AST variant still KernelLaunch(Expr,Expr,Expr,[CallArg]) and probes show `<<<` is not even recognized in expression position, so it is a compiler-frontend feature (visitor/encoder/HIR ripple), routed to that owner. cuda_launch_on covers the use case.
+
+
+---
+
+## 2026-11-13 triage — lane live-p3-l2 (work/live-p3-l2-20261113, worktree lp2-wt, base origin/release/1.0.0 tip)
+
+**Verdict: LIVE (deferred).** Layer state unchanged at this base: runtime + SFFI (`rt_cuda_launch_kernel_ex`, `cuda_launch_on`) landed; the grammar slot is still absent (positional `KernelLaunch(Expr, Expr, Expr, [CallArg])` AST variant, no labelled-slot loop in `postfix.rs`). The slot ripples through generated AST files, HIR lowering, and every match site — a compiler-frontend feature, with the supported `cuda_launch_on` path already covering the use case.

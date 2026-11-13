@@ -180,3 +180,10 @@ from contention. Routed to the test-runner/runtime owner.
 ## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
 
 Concurs with lane ne13: still LIVE. The 2026-11-05 wakeup protocol is in-tree unchanged (light_daemon.spl idle-loop LIGHT_WAKE stat); the recorded ~0.58 s residual gap stands as current truth. Daemon-lane perf work exceeds the per-bug timebox; disposition stands.
+
+
+---
+
+## 2026-11-13 triage — lane live-p3-l2 (work/live-p3-l2-20261113, worktree lp2-wt, base origin/release/1.0.0 tip)
+
+**Verdict: LIVE (deferred).** The 2026-11-05 wakeup protocol is confirmed present in source at this base; the dominant remaining term is the per-request re-compile of the full runner module graph in a fresh child (amortization 1.0). The documented fixes (in-process serving needing runtime stdout-capture/structured verdict transport, or unloaded-Linux measurement) are runtime/test-runner owner work, not P3 scope.
