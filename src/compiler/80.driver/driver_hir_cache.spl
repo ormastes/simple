@@ -72,6 +72,7 @@ use compiler.driver.cache.gc.disk_cache_bound_v1.{disk_cache_admit_v1, disk_cach
 use compiler.driver.cache.metadata.cache_limits.{cache_retention_limits_load_v1}
 use compiler.driver.driver_worker_surface_closure_v1.{worker_surface_claim_allowed_v1, worker_surface_counters_v1}
 use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause, transient_scope_end, transient_promote}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
 use compiler.driver.driver_parse_shard_hash.{driver_parse_shard_hash}
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_claim, hir_shard_recovery_terminal, hir_shard_recovery_complete, hir_shard_recovery_block, hir_shard_recovery_blocked, hir_shard_claim_reason_v1, HIR_SHARD_CLAIM_LEDGER_BLOCKED_V1}
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_inventory, hir_shard_recovery_inventory_mismatch_v1}
@@ -407,6 +408,18 @@ fn hir_cache_snapshot_root_rebind_v1(blob: text, source_path: text) -> [text]:
     if new_root != "" and not _hir_cache_rebase_root_ok_v1(new_root): return []
     if new_root + rel != source_path: return []
     [old_root, new_root]
+
+# Body reload of a module first loaded interface-only (MIR shard residency
+# claim, driver_pipeline_lowering.spl). That first load already replayed the
+# entry's warnings, so the retained root is drained instead of re-armed: lease
+# consumers (hir_body_*_lease_v1, collection_archive_analysis_v1) refuse on a
+# non-empty root. Same guard as the HIR stage drain: only outside a transient
+# scope, where the root is persistent.
+fn hir_cache_reload_body_v1(key: text, parser_binding: text, source_path: text, library_mode: text) -> HirModule?:
+    val loaded = hir_cache_load_parsed_v1(key, parser_binding, source_path, library_mode, false)
+    if transient_array_scope_state_v1() == 0:
+        hir_cache_clear_last_warnings()
+    loaded
 
 fn hir_cache_load_parsed_v1(key: text, parser_binding: text, source_path: text = "", library_mode: text = "", interface_only: bool = false) -> HirModule?:
     if parser_binding.len() != 64: return None

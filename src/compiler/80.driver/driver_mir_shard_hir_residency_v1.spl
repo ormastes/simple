@@ -41,7 +41,7 @@ pub const MIR_SHARD_INTERFACE_HIR_ENV_V1: text = "SIMPLE_MIR_SHARD_INTERFACE_HIR
 # `loads_restricted` worker_hir_loads_restricted_v1().
 pub fn mir_shard_hir_residency_refusal_v1(flag: text, shard_spec: text, link_ledger: text,
         export_dir: text, fork_workers: text, file_worker_queue: text,
-        loads_restricted: bool) -> text:
+        loads_restricted: bool, bootstrap_flat_rows: bool, entry_closure_flat: bool) -> text:
     if flag != "1": return "flag-off"
     if shard_spec == "": return "not-mir-shard-worker"
     if link_ledger != "": return "link-worker"
@@ -49,13 +49,22 @@ pub fn mir_shard_hir_residency_refusal_v1(flag: text, shard_spec: text, link_led
     if (fork_workers.to_i64() ?? 0) > 1: return "fork-workers"
     if file_worker_queue != "": return "file-worker-unit"
     if loads_restricted: return "module-scoped-unit"
+    # The bootstrap flat-row store (_bootstrap_hir_store, adopted when
+    # SIMPLE_BOOTSTRAP=1 and not STAGE4) copies rows from the HIR module at load
+    # time; a body reload at claim does not refresh them. Its rows' bodies are only
+    # read by the flat lowering path (bootstrap_globals.spl) behind
+    # SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE=1, so refuse exactly that combination.
+    if bootstrap_flat_rows and entry_closure_flat: return "bootstrap-flat-rows"
     ""
 
 # ===== interface-only projection (pure) =====================================
 
-# Functions whose body stays resident in an interface-only module.
+# Functions whose body stays resident in an interface-only module. Generic
+# class/impl methods carry no fn-level type_params; they are flagged
+# is_generic_template instead (class_declaration_lowering.spl, trait_impl_lowering.spl).
 pub fn hir_function_keeps_body_v1(function: HirFunction) -> bool:
-    function.is_extern or function.type_params.len() > 0 or function.is_const
+    function.is_extern or function.type_params.len() > 0 or function.is_const or
+        function.is_generic_template
 
 fn hir_interface_placeholder_block_v1() -> HirBlock:
     val span = Span(start: 0, end: 0, line: 0, col: 0, file: "", length: 0)
