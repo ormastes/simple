@@ -1288,9 +1288,18 @@ impl ExecCore {
         // torch-less build) would link as null pointers and SIGSEGV at call
         // time. Route them through the interpreter bridge, whose extern
         // dispatch has graceful unavailable-backend handlers.
+        //
+        // Only externs the MIR actually references count: src/lib declares
+        // platform-foreign externs unconditionally, and a declaration nothing
+        // calls or loads never reaches a NULL slot. The hybrid transform only
+        // rewrites exact `Call` targets, every one of which is in `referenced`,
+        // so filtering here leaves the transformed MIR unchanged; it only stops
+        // unused declarations from forcing (and being named in) the splice.
+        let referenced = simple_compiler::mir::referenced_function_names(&mir_module);
         let unresolvable_externs: HashSet<String> = mir_module
             .extern_fn_names
             .iter()
+            .filter(|name| referenced.contains(name.as_str()))
             .filter(|name| self.symbol_provider.get_symbol(name.as_str()).is_none())
             // Byte/word accessors are lowered inline by codegen; they never
             // need a runtime symbol, so they must not be spliced through the
