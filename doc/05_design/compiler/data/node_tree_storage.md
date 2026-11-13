@@ -1,6 +1,7 @@
 # Node-tree storage for AST / HIR / MIR: measure, then choose per attribute
 
-Status: design (phase B of the node-storage lane, 2026-11-13). Plan:
+Status: design (phase B of the node-storage lane, 2026-11-13); phase C library landed
+(§7.1), driver adoption C.2 open (§7.2). Plan:
 `doc/03_plan/compiler/data/data_attributes_layout_containers_xray_2026-11-06.md`
 (§3, §5, §6, §8.4, §12.3). Phase A landed the selection surface: the storage
 mechanism of every `@node_tree` attribute is chosen by a source tag or an SDN
@@ -233,7 +234,7 @@ frozen-blob design plugs into exactly that seam and composes with it:
 
 | Phase | Change | Evidence before the default flips |
 |---|---|---|
-| C (AST) | HIR lowering reads `FlatPoolState`/expr pools through the generated view instead of `flat_ast_to_module`'s boxed `ParserModule`; the bridge shrinks to the pieces lowering still needs | bytes/node and parse+HIR RSS on the §1 module set; identical HIR codec blobs for the fixture set; wall time within 2% |
+| C (AST) | per-module compact pool snapshot (packed `.spab` bytes in memory) behind a write-once `ast:<module>` cell; `ParserModule` materialised from it right before lowering; selected by the `compiler.ast` rule (§7.1); driver adoption is C.2 (§7.2) | bytes/node and parse+HIR RSS on the §1 module set; HIR codec blobs identical to the cache-hit restore (not the fresh parse, see §7.1); wall time within 2% |
 | D (HIR) | module blob arena + phase cells + mapped read-only sharing at the hirres seam | per-worker and total RSS with K shard workers; identical MIR dumps |
 | E (MIR) | `MirInst` columns + `extra` array; same cells | object-file identity on a fixture set; lowering wall time |
 
@@ -241,6 +242,96 @@ Each phase lands behind a resolver rule with the current layout as default,
 runs the compiler unit specs of the touched layer, and never requires a
 native build on the census box; native measurements are scheduled by the
 coordinator with the commands in §1.3.
+
+### 7.1 Phase C as landed (2026-11-13): AST pool snapshot
+
+Relation to §1.2: §1.2 proposed a per-function bridge. Phase C instead keeps the
+whole module's AST in its compact column form between parse and lowering and
+materialises the boxed tree once, at the lowering seam; the per-function bridge
+remains a later refinement inside materialisation and is not contradicted.
+
+Code: `src/compiler/10.frontend/snapshot/ast_pool_snapshot_v1.spl`. Spec:
+`test/02_integration/compiler/data/ast_pool_snapshot_spec.spl` (5/5).
+
+- **Snapshot** = the packed position-independent `.spab` blob
+  (`flat_pool_packed_v1.spl`) of the module's flat pools, captured right after
+  the parse (`flat_pool_capture_*`), held in memory (`AstPoolSnapshotV1.bytes`),
+  plus the exact parse source and its xxh3-128 key. No new encoding.
+- **Materialise** = validate the view, check the published body digest and the
+  source key, restore the pools from the typed tokens and run the bridge
+  (`build_module_from_packed_view_v1`). Every doubt is an `Err`, never an empty
+  module. A materialised module stays valid after another module is
+  materialised (spec: self-contained example).
+- **Write-once** = `ast_snapshot_store_publish_v1` declares/publishes the cell
+  `ast:<module>` (`phase_cell_*_v1`) with the sha256 body digest as value; a
+  second publish is refused and the first snapshot stays; a consumer
+  (`hir:<module>`) awaits the cell and reads `Ready(digest)`.
+- **Selection** = `data_attr_storage_resolve_v1("compiler.ast",
+  "compiler.ast.Module", "nodes", rules, "direct")`: `direct` (the versioned
+  default) = boxed tree, `column` = pool snapshot, any other token is an error
+  naming it. Recommended key: `site: "compiler.ast.Module.nodes"` (a
+  `module: "compiler.ast"` row would also drive every per-attribute choice of
+  the generated AST views). **Default stays `direct`; no flip is proposed.**
+- **Equality oracle**: the materialised module lowers to a HIR codec blob
+  byte-identical to the production cache-hit restore of the same parse
+  (`build_module_from_flat_pool_blob`, and the packed hit is identical to that).
+  It is NOT identical to the fresh in-process boxed tree: on
+  `attr_access_sites.spl` 2,706 of 25,718 codec lines differ, all span offsets
+  that the fresh bridge gets wrong and every cache hit gets right — a
+  pre-existing cold/warm divergence filed as
+  `doc/08_tracking/bug/fresh_parse_vs_cache_hit_span_divergence_2026-11-13.md`.
+
+Measurements (same seed binary as §1:
+`.../bootstrap.generations/8ea37491...e467bc/simple`, 119,570,696 bytes,
+2026-11-05 18:12:30; `simple test` lane under `MemoryMax=8G`, shared box,
+load ~8; one run of the spec, `SNAPSHOT` lines):
+
+| module | AST nodes | snapshot bytes | B/node | parse+bridge µs | encode µs | materialise µs |
+|---|---|---|---|---|---|---|
+| `20.hir/hir_lowering/attr_access_sites.spl` | 638 | 125,200 | 196 | 2,345,106 | 5,521,531 | 3,726,909 |
+| `lib/common/text_bytes.spl` | 198 | 51,664 | 260 | 3,631,250 | 2,213,935 | 3,833,567 |
+| `00.common/data/data_schema_resolver.spl` | 1,973 | 342,736 | 173 | 10,594,790 | 15,187,931 | 103,769,537 |
+
+Before/after, like for like on `data_schema_resolver.spl`: boxed bridge 236 B
+per node on a reused heap (§1.1 row) and 1.3-1.5 KB per node on a cold heap
+(§1.1 large-module row) versus 173 B per node packed — about 27 % smaller warm,
+7-8x smaller cold. The brief's "about 76 B per node" figure does not appear in
+this note's measurements; the measured packed snapshot is 173-260 B per node
+(small modules pay the fixed header and string table).
+
+Time: on this interpreter lane materialising costs ~10x the parse it replaces
+on the 514-line module (104 s vs 10.6 s); the cost is the pre-existing pool
+restore + bridge (the `.fpc` line-cache hit costs the same, 95 s; view
+validation is 2.7 s), filed as
+`doc/08_tracking/bug/flat_pool_restore_10x_slower_than_parse_interpreter_2026-11-13.md`.
+**The interpreter lane shows a time regression, not a win**; the native lane
+(where `.spab` is the default hit format) must be measured before any default
+changes.
+
+### 7.2 Phase C.2 (open): driver adoption
+
+Blocked on the restore-cost bug above and a native-lane RSS measurement
+(§1.3). The exact seam, so the change is mechanical once unblocked:
+
+- **Producer**: `parse_full_frontend_preprocessed_with_scope`
+  (`src/compiler/10.frontend/frontend.spl`) miss path, where the pool capture
+  already happens for the cache store: encode once, share the bytes between the
+  `.spab` store and `ast_snapshot_store_publish_v1`; on a `.spab` hit the bytes
+  are the file already mapped. A `.fpc` line hit carries no trace and keeps the
+  boxed tree (counted, logged).
+- **Retention**: under `column`, `ctx.modules[name]` keeps a body-less module
+  (headers/surfaces only) and the snapshot holds the bodies.
+- **Consumer**: a branch ahead of `unstub_cached` in
+  `driver_hir_pipeline_lowering.spl` materialises from the snapshot, lowers and
+  drops the boxed tree. It must sit BEFORE the `ctx.modules[name] != nil`
+  check, or a missing module silently falls through to `unstub_reparse` (a
+  green build that reparses everything).
+- **Reader audit** (must work on a body-less module or route through one
+  materialising accessor, with the materialisation count asserted):
+  `module_surfaces_from_modules` (`20.hir/hir_lowering/module_surface_registry.spl`),
+  `driver_orchestration.spl:110`, the export-facade check in
+  `driver_aot_native_output.spl`, and the three `Dict` copies in
+  `driver_source_parse_retained.spl`.
 
 ## 8. Non-goals and risks
 

@@ -30,6 +30,7 @@
   stable allocation identity and lowered to `rt_alloc` only after admission.
 - Per-(phase, module) write-once awaitable cells (`phase_cell_declare/publish/fail/await_v1`): double publish refused, waiters released in order, await cycle is a diagnostic with the path, failed producer excluded not blocked.
 - Node-tree storage design note with measured bytes per node per phase and the exact probe command: `doc/05_design/compiler/data/node_tree_storage.md`, probe `test/05_perf/compiler/data/node_storage_footprint_probe_spec.spl` (perf lane, ~8 min, MemoryMax=8G).
+- Phase C AST pool snapshot: `src/compiler/10.frontend/snapshot/ast_pool_snapshot_v1.spl` (packed `.spab` bytes in memory, `ast:<module>` write-once cell, `compiler.ast` rule `site: "compiler.ast.Module.nodes"` -> `column`; default `direct` = boxed). Spec `test/02_integration/compiler/data/ast_pool_snapshot_spec.spl` (~6 min). Traps: the oracle is the cache-hit restore, not the fresh parse (fresh boxed tree has wrong span offsets, bug `fresh_parse_vs_cache_hit_span_divergence_2026-11-13.md`); on the seed interpreter any pool restore costs ~10x a parse (bug `flat_pool_restore_10x_slower_than_parse_interpreter_2026-11-13.md`).
 
 ## Still proposed or incomplete
 
