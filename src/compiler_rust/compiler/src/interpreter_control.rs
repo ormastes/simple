@@ -569,13 +569,27 @@ pub(super) fn exec_while(
             check_execution_limit!();
             check_timeout!();
             let value = evaluate_expr(&while_stmt.condition, env, functions, classes, enums, impl_methods)?;
-            ensure_optional_binding_condition(pattern, &value, &while_stmt.condition)?;
-            let mut bindings = HashMap::new();
-            let matched = pattern_matches(pattern, &value, &mut bindings, enums, classes)?;
-            record_decision_site(while_stmt.span.line, while_stmt.span.column, SUB_STMT, matched);
-            if !matched {
+            // `while val IDENT = <T?>` unwraps exactly like `if val` (exec_if) and
+            // the block-closure executor (`evaluate_block_while_condition`): bind
+            // the payload, stop on nil/None. Running the bare identifier through
+            // `pattern_matches` bound the whole `Option::Some(x)` wrapper
+            // (interp_while_val_binds_option_not_payload_2026-11-13).
+            let bindings = match optional_let_binding_condition(pattern, &value, &while_stmt.condition)? {
+                LetBind::Skip => None,
+                LetBind::Bind(name, inner) => Some(HashMap::from([(name, inner)])),
+                LetBind::NotApplicable => {
+                    let mut bindings = HashMap::new();
+                    if pattern_matches(pattern, &value, &mut bindings, enums, classes)? {
+                        Some(bindings)
+                    } else {
+                        None
+                    }
+                }
+            };
+            record_decision_site(while_stmt.span.line, while_stmt.span.column, SUB_STMT, bindings.is_some());
+            let Some(bindings) = bindings else {
                 break;
-            }
+            };
             // Pattern matched - add bindings and execute body
             let saved = crate::interpreter::bind_block_scope_shadows(bindings, env);
             let ctrl = exec_block(&while_stmt.body, env, functions, classes, enums, impl_methods);
