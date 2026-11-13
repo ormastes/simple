@@ -1,0 +1,178 @@
+# std.container.oci pure codec: golden decode, malformed/oversized rejection,
+# and backend projection that refuses Linux-only runtime fields for
+# macos-seatbelt. Pure data only; no registry, engine or filesystem access.
+# Design: doc/05_design/simple_container_macos_seatbelt.md §16.5.4-16.5.5.
+use std.spec.*
+use std.container.oci.{OciLimitsV1, OciPlatformV1, OCI_MEDIA_TYPE_LAYER_GZIP_V1,
+    oci_limits_default_v1, oci_digest_valid_v1, oci_layer_path_valid_v1, oci_layer_whiteout_target_v1,
+    oci_image_reference_parse_v1, oci_image_index_decode_v1, oci_image_index_select_v1,
+    oci_image_manifest_decode_v1, oci_image_config_decode_v1, oci_image_config_matches_manifest_v1,
+    oci_blob_verify_text_v1, oci_runtime_config_decode_v1, oci_bundle_import_v1,
+    oci_bundle_check_policy_default_v1, oci_bundle_to_workload_v1, oci_image_to_workload_v1,
+    oci_export_v1, oci_backend_platform_os_v1}
+
+fn d64(c: text) -> text:
+    var out = "sha256:"
+    var i = 0
+    while i < 64:
+        out = out + c
+        i = i + 1
+    out
+
+fn manifest_golden() -> text:
+    '{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json",' +
+    '"config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"' + d64("a") + '","size":512},' +
+    '"layers":[{"mediaType":"application/vnd.oci.image.layer.v1.tar+gzip","digest":"' + d64("b") + '","size":1024},' +
+    '{"mediaType":"application/vnd.oci.image.layer.v1.tar+gzip","digest":"' + d64("c") + '","size":2048}]}'
+
+fn index_golden() -> text:
+    '{"schemaVersion":2,"manifests":[' +
+    '{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"' + d64("1") + '","size":700,' +
+    '"platform":{"os":"linux","architecture":"amd64"}},' +
+    '{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"' + d64("2") + '","size":701,' +
+    '"platform":{"os":"linux","architecture":"arm64","variant":"v8"}},' +
+    '{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"' + d64("3") + '","size":702,' +
+    '"platform":{"os":"darwin","architecture":"arm64"}}]}'
+
+fn config_golden(os: text) -> text:
+    '{"architecture":"arm64","os":"' + os + '","config":{"User":"1000:1000","Env":["PATH=/usr/bin"],' +
+    '"Entrypoint":["/bin/tool"],"Cmd":["--check"],"WorkingDir":"/work"},' +
+    '"rootfs":{"type":"layers","diff_ids":["' + d64("d") + '","' + d64("e") + '"]}}'
+
+fn runtime_portable() -> text:
+    '{"ociVersion":"1.0.2","process":{"terminal":false,"user":{"uid":501,"gid":20},' +
+    '"args":["/bin/tool","--check"],"env":["PATH=/usr/bin"],"cwd":"/"},' +
+    '"root":{"path":"rootfs","readonly":true}}'
+
+fn runtime_linux() -> text:
+    '{"ociVersion":"1.0.2","process":{"user":{"uid":0,"gid":0},"args":["/bin/sh"],"cwd":"/",' +
+    '"capabilities":{"bounding":["CAP_CHOWN"]}},"root":{"path":"rootfs"},"hostname":"pod",' +
+    '"linux":{"namespaces":[{"type":"pid"},{"type":"network"}],"cgroupsPath":"/simple/x"}}'
+
+fn limits_small() -> OciLimitsV1:
+    OciLimitsV1(max_document_bytes: 4096, max_descriptors: 2, max_blob_bytes: 4096, max_total_bytes: 3000)
+
+describe "std.container.oci golden decode":
+    it "decodes a manifest with config and layers and totals the declared sizes":
+        val manifest = oci_image_manifest_decode_v1(manifest_golden(), oci_limits_default_v1()).unwrap()
+        expect(manifest.config.digest).to_equal(d64("a"))
+        expect(manifest.layers.len()).to_equal(2)
+        expect(manifest.layers[1].media_type).to_equal(OCI_MEDIA_TYPE_LAYER_GZIP_V1)
+        expect(manifest.total_bytes).to_equal(3584)
+
+    it "selects exactly one manifest for the requested platform":
+        val index = oci_image_index_decode_v1(index_golden(), oci_limits_default_v1()).unwrap()
+        val darwin = oci_image_index_select_v1(index, OciPlatformV1(os: "darwin", architecture: "arm64", variant: "")).unwrap()
+        expect(darwin.digest).to_equal(d64("3"))
+        val arm = oci_image_index_select_v1(index, OciPlatformV1(os: "linux", architecture: "arm64", variant: "v8")).unwrap()
+        expect(arm.digest).to_equal(d64("2"))
+        val absent = oci_image_index_select_v1(index, OciPlatformV1(os: "freebsd", architecture: "amd64", variant: ""))
+        expect(absent.is_err()).to_equal(true)
+
+    it "decodes an image config and pairs diff_ids with manifest layers":
+        val config = oci_image_config_decode_v1(config_golden("linux"), oci_limits_default_v1()).unwrap()
+        expect(config.entrypoint[0]).to_equal("/bin/tool")
+        expect(config.user).to_equal("1000:1000")
+        val manifest = oci_image_manifest_decode_v1(manifest_golden(), oci_limits_default_v1()).unwrap()
+        expect(oci_image_config_matches_manifest_v1(manifest, config)).to_equal("")
+
+    it "verifies blob size and sha256 digest":
+        val manifest = oci_image_manifest_decode_v1(manifest_golden(), oci_limits_default_v1()).unwrap()
+        var descriptor = manifest.config
+        descriptor.digest = "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        descriptor.size = 3
+        expect(oci_blob_verify_text_v1(descriptor, "abc")).to_equal("")
+        expect(oci_blob_verify_text_v1(descriptor, "abd")).to_equal("oci-blob-digest-mismatch")
+        expect(oci_blob_verify_text_v1(descriptor, "abcd")).to_equal("oci-blob-size-mismatch")
+
+    it "requires digest-pinned references":
+        expect(oci_image_reference_parse_v1("registry.example/team/tool@" + d64("f")).unwrap().name).to_equal("registry.example/team/tool")
+        expect(oci_image_reference_parse_v1("registry.example/team/tool:latest").is_err()).to_equal(true)
+
+describe "std.container.oci malformed and oversized rejection":
+    it "rejects malformed digests and documents":
+        expect(oci_digest_valid_v1(d64("a"))).to_equal(true)
+        expect(oci_digest_valid_v1("sha256:ABC")).to_equal(false)
+        expect(oci_digest_valid_v1("md5:" + d64("a").substring(7, 39))).to_equal(false)
+        expect(oci_image_manifest_decode_v1("not json", oci_limits_default_v1()).is_err()).to_equal(true)
+        expect(oci_image_manifest_decode_v1('{"schemaVersion":1}', oci_limits_default_v1()).is_err()).to_equal(true)
+
+    it "rejects duplicate keys, foreign urls and negative sizes":
+        val dup = '{"schemaVersion":2,"schemaVersion":2}'
+        expect(oci_image_manifest_decode_v1(dup, oci_limits_default_v1()).unwrap_err()).to_equal("oci-manifest-json-invalid")
+        val foreign = manifest_golden().replace('"size":1024}', '"size":1024,"urls":["http://x"]}')
+        expect(oci_image_manifest_decode_v1(foreign, oci_limits_default_v1()).unwrap_err()).to_equal("oci-descriptor-urls-unsupported")
+        val negative = manifest_golden().replace('"size":1024', '"size":-1')
+        expect(oci_image_manifest_decode_v1(negative, oci_limits_default_v1()).unwrap_err()).to_equal("oci-descriptor-size-negative")
+
+    it "rejects oversized documents, layers, layer counts and totals":
+        val small = limits_small()
+        var tiny = small
+        tiny.max_document_bytes = 64
+        expect(oci_image_manifest_decode_v1(manifest_golden(), tiny).unwrap_err()).to_equal("oci-manifest-exceeds-document-limit")
+        var one = small
+        one.max_descriptors = 1
+        expect(oci_image_manifest_decode_v1(manifest_golden(), one).unwrap_err()).to_equal("oci-manifest-too-many-layers")
+        var blob = small
+        blob.max_blob_bytes = 1500
+        expect(oci_image_manifest_decode_v1(manifest_golden(), blob).unwrap_err()).to_equal("oci-descriptor-size-exceeds-limit")
+        expect(oci_image_manifest_decode_v1(manifest_golden(), small).unwrap_err()).to_equal("oci-manifest-total-size-exceeds-limit")
+
+    it "rejects escaping layer paths and malformed whiteouts":
+        expect(oci_layer_path_valid_v1("usr/bin/tool")).to_equal(true)
+        expect(oci_layer_path_valid_v1("../etc/passwd")).to_equal(false)
+        expect(oci_layer_path_valid_v1("/etc/passwd")).to_equal(false)
+        expect(oci_layer_whiteout_target_v1("usr/.wh.old").unwrap()).to_equal("usr/old")
+        expect(oci_layer_whiteout_target_v1("usr/.wh..wh..opq").unwrap()).to_equal("usr/")
+        expect(oci_layer_whiteout_target_v1("usr/.wh.").is_err()).to_equal(true)
+
+    it "rejects unknown runtime fields instead of ignoring them":
+        val unknown = runtime_portable().replace('"root":', '"futureEnforcement":true,"root":')
+        expect(oci_runtime_config_decode_v1(unknown, oci_limits_default_v1()).unwrap_err()).to_equal("oci-runtime-field-unknown: futureEnforcement")
+
+    it "applies the shared bundle safety checks on import":
+        val policy = oci_bundle_check_policy_default_v1()
+        val hooked = runtime_portable().replace('"root":', '"hooks":{"prestart":[{"path":"/x"}]},"root":')
+        val result = oci_bundle_import_v1(hooked, "rootfs", d64("9"), 1u64, 1u64, policy, oci_limits_default_v1())
+        expect(result.unwrap_err()).to_equal("oci reject: lifecycle hooks present but not authorized (allow_hooks=false)")
+        val unpinned = oci_bundle_import_v1(runtime_portable(), "rootfs", "", 1u64, 1u64, policy, oci_limits_default_v1())
+        expect(unpinned.unwrap_err()).to_equal("oci reject: missing or empty content digest but require_digest=true")
+        val big = oci_bundle_import_v1(runtime_portable(), "rootfs", d64("9"), 200000u64, 1u64, policy, oci_limits_default_v1())
+        expect(big.unwrap_err()).to_equal("oci reject: unpack size/count exceeds policy bound")
+
+describe "std.container.oci backend projection":
+    it "projects a portable bundle onto macos-seatbelt and linux-podman":
+        val policy = oci_bundle_check_policy_default_v1()
+        val bundle = oci_bundle_import_v1(runtime_portable(), "rootfs", d64("9"), 1u64, 1u64, policy, oci_limits_default_v1()).unwrap()
+        val mac = oci_bundle_to_workload_v1(bundle, "macos-seatbelt").unwrap()
+        expect(mac.execution_os).to_equal("darwin")
+        expect(mac.argv[1]).to_equal("--check")
+        expect(mac.user).to_equal("501:20")
+        expect(oci_bundle_to_workload_v1(bundle, "linux-podman").unwrap().execution_os).to_equal("linux")
+
+    it "rejects Linux-namespace runtime fields for macos-seatbelt but keeps them for Linux":
+        val policy = oci_bundle_check_policy_default_v1()
+        val bundle = oci_bundle_import_v1(runtime_linux(), "rootfs", d64("9"), 1u64, 1u64, policy, oci_limits_default_v1()).unwrap()
+        val refused = oci_bundle_to_workload_v1(bundle, "macos-seatbelt")
+        expect(refused.unwrap_err()).to_equal("oci-linux-runtime-field-unsupported: macos-seatbelt: process.capabilities")
+        expect(oci_bundle_to_workload_v1(bundle, "freebsd-jail").is_err()).to_equal(true)
+        expect(oci_bundle_to_workload_v1(bundle, "linux-podman").is_ok()).to_equal(true)
+
+    it "rejects unknown backends and image platform mismatches":
+        expect(oci_backend_platform_os_v1("docker").is_err()).to_equal(true)
+        val linux_image = oci_image_config_decode_v1(config_golden("linux"), oci_limits_default_v1()).unwrap()
+        expect(oci_image_to_workload_v1(linux_image, d64("7"), "macos-seatbelt", "/art").is_err()).to_equal(true)
+        val darwin_image = oci_image_config_decode_v1(config_golden("darwin"), oci_limits_default_v1()).unwrap()
+        val workload = oci_image_to_workload_v1(darwin_image, d64("7"), "macos-seatbelt", "/art").unwrap()
+        expect(workload.argv.len()).to_equal(2)
+        expect(workload.working_dir).to_equal("/work")
+
+    it "exports only representable data and names lost semantics":
+        val darwin_image = oci_image_config_decode_v1(config_golden("darwin"), oci_limits_default_v1()).unwrap()
+        val workload = oci_image_to_workload_v1(darwin_image, d64("7"), "macos-seatbelt", "/art").unwrap()
+        val exported = oci_export_v1(workload).unwrap()
+        val round = oci_runtime_config_decode_v1(exported.config_json, oci_limits_default_v1()).unwrap()
+        expect(round.args[0]).to_equal("/bin/tool")
+        expect(round.uid).to_equal(1000)
+        expect(exported.lost_semantics.contains("backend-selection: macos-seatbelt")).to_equal(true)
+        expect(exported.lost_semantics.contains("native-sandbox-enforcement: macos-seatbelt")).to_equal(true)

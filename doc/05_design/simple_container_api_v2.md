@@ -32,6 +32,22 @@ All lifecycle entrypoints validate common scope and actual leaf projection befor
 calling a mutating platform method. Backend semantic request digest/identity
 validation remains in the actual leaf, not duplicated in common.
 
+## Public entry points (2026-11-13)
+
+Applications import `std.container` (`container/__init__.spl`, a re-export of
+the api_v2 owner, turns and functions above — no second facade),
+`std.container.oci` (re-export of the pure `std.common.oci` codec: index/
+manifest/config/descriptor decode, digest/size/path/platform validation,
+bundle import, explicit-backend workload projection that rejects Linux-only
+runtime fields for non-Linux backends, export with reported lost semantics)
+and `std.container.policy` (existing capability/qualification contracts).
+`container.providers.**` is internal: `scripts/check/check-container-provider-imports.shs`
+fails on new imports from `src/app/**`, orchestration and runner libraries;
+five pre-existing app imports are baselined and tracked in
+`doc/08_tracking/bug/container_app_provider_import_bypass_2026-11-13.md`.
+SimpleOS `oci_import.spl` delegates its generic checks to
+`std.common.oci.bundle_check_v1` and keeps only kernel `ContainerSpec` lowering.
+
 ## Identity, aliases and honest continuity
 
 ContainerHostScopeV2 binds physical_host_id (authorized ALIAS), native_machine_id

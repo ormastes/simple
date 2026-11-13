@@ -1,0 +1,109 @@
+# Shared OCI bundle safety checks (pure, no IO, no imports).
+#
+# Extracted from src/os/services/container/oci_import.spl so the SimpleOS
+# kernel adapter and the hosted std.container.oci codec share ONE validator.
+# Every check fails CLOSED and names its exact reason; the reason strings are
+# part of the contract (SimpleOS specs assert them verbatim).
+#
+# Kernel-safe on purpose: this file imports nothing, so the SimpleOS build can
+# use it without pulling hosted libraries.
+
+pub struct OciBundleMountV1:
+    """One runtime-spec mount. mount_type is the OCI type token
+    ("bind", "tmpfs", "proc", "device", ...)."""
+    source: text
+    destination: text
+    mount_type: text
+
+pub struct OciBundleCheckInputV1:
+    """Provider-neutral facts the safety checks need. unpack_count/size are the
+    DECLARED layer totals (bounded without unpacking)."""
+    root_path: text
+    mounts: [OciBundleMountV1]
+    hooks_present: bool
+    digest: text
+    unpack_count: u64
+    unpack_size: u64
+
+pub struct OciBundleCheckPolicyV1:
+    """Import ceilings. Permissive flags default FALSE (fail-closed)."""
+    allow_host_mounts: bool
+    allow_devices: bool
+    allow_hooks: bool
+    max_unpack_count: u64
+    max_unpack_size: u64
+    require_digest: bool
+
+pub val OCI_BUNDLE_ERR_TRAVERSAL_V1: text = "oci reject: mount destination escapes container root (.. traversal / above-root)"
+pub val OCI_BUNDLE_ERR_HOST_MOUNT_V1: text = "oci reject: raw host bind mount denied by policy (allow_host_mounts=false)"
+pub val OCI_BUNDLE_ERR_DEVICE_V1: text = "oci reject: uncontrolled device node mount denied by policy (allow_devices=false)"
+pub val OCI_BUNDLE_ERR_HOOKS_V1: text = "oci reject: lifecycle hooks present but not authorized (allow_hooks=false)"
+pub val OCI_BUNDLE_ERR_UNPACK_V1: text = "oci reject: unpack size/count exceeds policy bound"
+pub val OCI_BUNDLE_ERR_DIGEST_V1: text = "oci reject: missing or empty content digest but require_digest=true"
+pub val OCI_BUNDLE_ERR_SRC_TRAVERSAL_V1: text = "oci reject: mount source escapes the bundle (.. traversal)"
+pub val OCI_BUNDLE_ERR_ROOT_V1: text = "oci reject: container root_path is empty, the host root, or contains .. traversal"
+
+# Default fail-closed policy: no host mounts, no devices, no hooks, digest
+# required, 1 GiB / 100k-entry unpack bound.
+pub fn oci_bundle_check_policy_default_v1() -> OciBundleCheckPolicyV1:
+    OciBundleCheckPolicyV1(allow_host_mounts: false, allow_devices: false, allow_hooks: false,
+        max_unpack_count: 100000u64, max_unpack_size: 1073741824u64, require_digest: true)
+
+# A bind SOURCE naming an absolute host path is the raw-host-mount vector.
+pub fn oci_bundle_is_host_path_v1(p: text) -> bool:
+    p.starts_with("/")
+
+# Pure textual model: any ".." component in a destination or source escapes.
+# A RELATIVE source such as "../../../etc" resolves above the bundle (bug
+# oci_import_unchecked_mount_src_and_root_2026-07-27), so sources are checked
+# as well as destinations.
+# No legitimate OCI source/destination (bind path, volume name, pseudo-fs
+# token) contains "..".
+pub fn oci_bundle_path_escapes_v1(p: text) -> bool:
+    p.contains("..")
+
+# "" is the ROOTLESS sentinel and "/" is the HOST root; neither may come from
+# an untrusted bundle, and ".." resolves above it.
+pub fn oci_bundle_root_path_invalid_v1(root: text) -> bool:
+    if root.len() == 0:
+        return true
+    if root == "/":
+        return true
+    root.contains("..")
+
+# Device-node mount types, including pseudo-device variants.
+pub fn oci_bundle_is_device_family_v1(t: text) -> bool:
+    (t == "device") or (t == "devtmpfs") or (t == "mknod")
+
+# "" when every check passes, else the exact rejection reason.
+# `check_traversal` exists ONLY so specs can prove the traversal checks are
+# load-bearing; production callers pass true.
+pub fn oci_bundle_check_v1(input: OciBundleCheckInputV1, policy: OciBundleCheckPolicyV1,
+        check_traversal: bool) -> text:
+    if policy.require_digest and input.digest.len() == 0:
+        return OCI_BUNDLE_ERR_DIGEST_V1
+    if input.hooks_present and not policy.allow_hooks:
+        return OCI_BUNDLE_ERR_HOOKS_V1
+    if input.unpack_count > policy.max_unpack_count:
+        return OCI_BUNDLE_ERR_UNPACK_V1
+    if input.unpack_size > policy.max_unpack_size:
+        return OCI_BUNDLE_ERR_UNPACK_V1
+    if check_traversal and oci_bundle_root_path_invalid_v1(input.root_path):
+        return OCI_BUNDLE_ERR_ROOT_V1
+    var m = 0
+    while m < input.mounts.len():
+        val mnt = input.mounts[m]
+        if check_traversal:
+            if oci_bundle_path_escapes_v1(mnt.destination):
+                return OCI_BUNDLE_ERR_TRAVERSAL_V1
+            if oci_bundle_path_escapes_v1(mnt.source):
+                return OCI_BUNDLE_ERR_SRC_TRAVERSAL_V1
+        # Device check precedes the generic host rule so a device node still
+        # reports the precise device reason.
+        if oci_bundle_is_device_family_v1(mnt.mount_type) and not policy.allow_devices:
+            return OCI_BUNDLE_ERR_DEVICE_V1
+        # Type-independent: ANY absolute host source is a raw host mount.
+        if oci_bundle_is_host_path_v1(mnt.source) and not policy.allow_host_mounts:
+            return OCI_BUNDLE_ERR_HOST_MOUNT_V1
+        m = m + 1
+    ""
