@@ -45,6 +45,20 @@ pub struct RingReservation:
     owner_id: u64
     task_key: u64
 
+# Identities with declared Result parameters. Calls to this generic class's
+# methods lose their declared return type in the self-hosted compiler's
+# specialization path (the caller's local annotation is discarded with it --
+# probe-verified 2026-11-14, stage-3 cluster), so call sites route through
+# these typed-param boundaries.
+fn _as_reservation_result_v1(result: Result<RingReservation, SimpleRingError>) -> Result<RingReservation, SimpleRingError>:
+    result
+
+fn _as_token_result_v1(result: Result<RingToken, SimpleRingError>) -> Result<RingToken, SimpleRingError>:
+    result
+
+fn _as_unit_result_v1(result: Result<(), SimpleRingError>) -> Result<(), SimpleRingError>:
+    result
+
 pub struct RingSubmission<Op>:
     token: RingToken
     task_key: u64
@@ -238,12 +252,16 @@ impl SimpleRing<Op, Cpl>:
                 return Err(SimpleRingError.InvalidReservation)
         var index = 0
         while index < task_keys.len():
-            val reservation = match self.reserve(owner_id, task_keys[index]):
-                case Ok(value): value
-                case Err(error): return Err(error)
-            match self.commit(owner_id, reservation, operations[index]):
-                case Ok(_): ()
-                case Err(error): return Err(error)
+            val reservation_result = _as_reservation_result_v1(self.reserve(owner_id, task_keys[index]))
+            val reservation = match reservation_result:
+                case Result.Ok(value):
+                    # @workaround bug=simple_ring_result_payload_provenance_2026-11-06 reason=bind the declared record type; the closure-global Result::Ok payload record is unreliable in this lane
+                    val typed_value: RingReservation = value
+                    typed_value
+                case Result.Err(error): return Err(error)
+            match _as_token_result_v1(self.commit(owner_id, reservation, operations[index])):
+                case Result.Ok(_): ()
+                case Result.Err(error): return Err(error)
             index = index + 1
         self.telemetry_value.batches = _ring_next_counter(self.telemetry_value.batches)
         self.telemetry_value.batch_items = _ring_add_counter(
@@ -337,9 +355,9 @@ impl SimpleRing<Op, Cpl>:
                 if val completion = maybe:
                     # @workaround bug=simple_ring_result_payload_provenance_2026-11-06 reason=bind a declared record type; the untyped `if val` binder of a Result<RingCompletion<Cpl>?, E> Ok payload in this generic method intermittently took the closure-global Result::Ok record (a *Receipt), failing `completion.token` in MIR
                     val typed_completion: RingCompletion<Cpl> = completion
-                    match self.release_retained_completion(owner_id, typed_completion.token):
-                        case Ok(_): Ok(typed_completion)
-                        case Err(error): Err(error)
+                    match _as_unit_result_v1(self.release_retained_completion(owner_id, typed_completion.token)):
+                        case Result.Ok(_): Ok(typed_completion)
+                        case Result.Err(error): Err(error)
                 else:
                     Ok(nil)
 
@@ -382,7 +400,7 @@ impl SimpleRing<Op, Cpl>:
                 match self.states[slot]:
                     case RingSlotState.Reserved:
                         # @workaround bug=rti004_mono_specialization_match_subject_2026-11-01 reason=annotate the binder; inside the stage2 mono specialization of cancel the untyped local stays unresolved, so the Ok arm is ambiguous and the Err payload cannot type CancelRejected
-                        val release_result: Result<(), SimpleRingError> = self._release_slot(slot)
+                        val release_result: Result<(), SimpleRingError> = _as_unit_result_v1(self._release_slot(slot))
                         match release_result:
                             case Result.Ok(_):
                                 self.telemetry_value.cancellations = _ring_next_counter(self.telemetry_value.cancellations)
