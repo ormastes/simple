@@ -293,8 +293,13 @@ Findings:
   `SIMPLE_STAGE3_STREAMING_SURFACES=0` (what `stage3-native-build-worker.sh`
   sets) the retained-owner route (`driver_hir_pipeline_lowering.spl`
   `lower_and_check_retained_owner_impl`, load at `:2085`) never reads the flag:
-  no `armed`/`refused` line, no effect. The Stage 3 parallel lane needs either
-  `STREAMING_SURFACES=1` or residency wired into the retained route.
+  no effect (it now prints `hir-residency refused reason=retained-route`). The
+  Stage 3 parallel lane needs either `STREAMING_SURFACES=1` or residency wired
+  into the retained route.
+- Review follow-ups (`51646a4eab1`): arming also refuses `not-aot-compile` and
+  `nogc-strict-module` (NoGC admission runs on `ctx.hir_modules` after the cache
+  write, so a reloaded `@no_gc(strict)` module would lose its effect rows); the
+  walker counts `Infer` as generic.
 - **Object identity NOT established.** Per module (matched by queue key), 255 of
   332 objects are byte-identical between A2 and B2, 77 differ (e.g.
   `compiler.frontend.core.ast_stmt`, `lib.common.io.types`). No A2-vs-A2
