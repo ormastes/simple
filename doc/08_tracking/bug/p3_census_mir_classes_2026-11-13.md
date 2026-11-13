@@ -156,3 +156,73 @@ Remaining unguarded sites, NOT fixed here (named gaps): `mir_lowering_stmts:1093
 `provider_metadata:1382-1383` (method-receiver typing), `module_lowering:4338/4357`
 (prescan), `switch_operators_calls:9166` (bare `direct_name` for an unresolved
 callee), and the bare writers outside the conflict detector listed above.
+
+## Class 5 — Unknown call origin aborts BOTH codegen workers (`callee=env_get`)
+
+After MIR 1619/1619, native_compile reached 31/808 and both MIR shard workers
+died with SIGABRT right after `MIR call target lacks proven source/runtime/
+foreign origin: callee=env_get` (log ~26519/26521): every remaining codegen
+unit was lost (`failed_modules=1619`). Same fail-stop shape as the two OPEN
+records `unknown_call_origin_panics_codegen_worker_2026-11-12.md` and
+`unknown_call_origin_driver_hir_archive_stage3_2026-11-13.md`; the #8815 ICE
+boundary (`driver_ice_boundary.spl`) only ATTRIBUTES a panic to a module, it
+cannot continue past it.
+
+(b) Fixed here (fail closed, per module): `mir_unproven_call_origin_sites_v1`
+(`50.mir/mir_instruction_graph.spl`) names every `Const(Str, FuncPtr)` operand
+with `call_origin == Unknown` in `Call.func`, `Call.args`, `PipeForward.func`,
+`Parallel.funcs`; `_compile_selected_module` (`driver_aot_native_output.spl`)
+returns `_aot_compile_failure(name, "unproven-call-origin: ...")` before any
+backend runs, so the module is recorded failed in the ICE boundary's CAUGHT
+tier and staged codegen continues. The detail keeps the panic's own stem so
+existing greps still match. Unknown is never mapped to Source; other
+FuncPtr-value positions keep the backend panic as a backstop.
+Spec: `test/01_unit/compiler/mir/unproven_call_origin_module_census_spec.spl`
+(seed-executed, 3/3).
+
+(a) Producer NOT identified in this lane. `provider_callable_call_origin_v1`
+(`provider_metadata.spl:214-227`) answers Unknown when the callee symbol is
+absent from the table, is not a Function/Method, or has no
+`callable_text_value_abi` row under `{defining_module}::{name}`. `env_get` has
+FOUR definitions (`lib/nogc_sync_mut/io_runtime.spl:426`,
+`lib/nogc_sync_mut/env/variables.spl:28`, `lib/nogc_sync_mut/io/env_ops.spl:52`
+re-exported as `std.io.env_get`, `lib/gc_async_mut/env/variables.spl:8`).
+Stage 2 `compile --format=smf` probes of `use std.nogc_sync_mut.io.env_ops.{env_get}`
+and `use std.io.{env_get}` both reached codegen without the panic, so the
+single-module `compile` path does not reproduce the entry-closure registration;
+the only closure module importing `env_get` among the first-listed crashed
+units is `src/app/cli/bootstrap_focused_native_build.spl:11`
+(`use std.nogc_sync_mut.io.env_ops.{env_get, env_set}`). With (b) landed the
+next census names the module and function directly.
+
+## Borrow class — `short borrow escapes` on `&mut local` into an extern out-slot
+
+Stage borrow, 3 sites (coordinator listed 2; the log has 3):
+`compiler.backend.linker.lld_sffi:43:1` (`lld_elf_link`:
+`spl_dlsym_process_checked("simple_lld_elf_link", &mut fptr)`),
+`lib.nogc_sync_mut.sffi.dynamic:92:1` (`_sffi_i64_out_transport_honoured`:
+`spl_wffi_try_call_i64_out(0, [], 0, &mut probe)`) and `:105:1`
+(`_sffi_call_i64_checked`, same extern, `&mut value`). All three externs take
+`*mut i64` and are called inside `unsafe(capabilities: [ffi, raw_ptr])`.
+
+Mechanism: `_param_effect` (`35.semantics/param_effects/infer.spl:575-577`)
+gives EVERY extern pointer/class parameter the effect `foreign-unknown`; the
+borrow checker routes Foreign/Unknown callees through
+`record_short_call_contract` (`55.borrow/borrow_check/mod.spl:690`) and
+`check_short_call` (`nll_short_calls.spl:182`) records the escape for any
+argument whose place carries a loan under a mode that is not
+`read-short`/`mutate-short`. There is NO way today for an `extern fn` to declare
+a non-retaining out-slot contract: `FunctionAttr` has no such field, and adding
+one means a HirFunction field plus a HIR codec wire-format bump (see
+`c79be829a86`). Not changed in this lane; nothing on `release/1.0.0` since the
+pinned source touches this (`git log 3197fda..HEAD -- 35.semantics/param_effects
+55.borrow` = import repairs only). Owner decision: (1) an extern parameter
+contract attribute (e.g. declare the `*mut i64` out slot `mutate-short`), or
+(2) rewrite the three sites to pass a raw address obtained in `unsafe` instead
+of `&mut local`. Not acceptable: weakening `check_short_call`.
+
+## Census state at hand-off
+
+MIR phase complete 1619/1619 (progress counter said `failed=1`; the
+`[go-to-end] failed` lines name 5 modules: the 3 MIR classes above + 2 borrow
+modules). Codegen: 31/808 then both workers aborted (class 5), exit 1.
