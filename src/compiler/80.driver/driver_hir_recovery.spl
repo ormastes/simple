@@ -83,6 +83,15 @@ pub fn hir_shard_recovery_terminal(queue: text, owner: text, path: text, state: 
 
 # Called only after the coordinator has reaped this owner. No other owner's
 # claim can be released or terminalized, and the offender is never requeued.
+# The owner's fork tree ("<owner>+fork..." -- MIR fork children and the
+# per-file unit loop's MIR child, see HIR_SHARD_FORK_OWNER_MARK_V1) is sealed
+# with it, exactly as hir_shard_recovery_owner_tree_progress_v1 counts it:
+# PR_SET_PDEATHSIG takes every fork child down with a killed root, so no child
+# ever seals its own claims, and until 2026-11-13 those rows stayed unsealed
+# (close_inventory -1, crash attribution lost). Each row is terminalized under
+# ITS OWN claim owner (the terminal must repeat the claim); rows a surviving
+# child already sealed are skipped. Coordinator owners "<i>/<n>@<g>" never
+# contain the mark, so a sibling root's tree is never matched.
 pub fn hir_shard_recovery_seal(queue: text, owner: text, state: text) -> i64:
     var sealed: i64 = 0
     val listing = dir_list_optional(queue)
@@ -92,10 +101,11 @@ pub fn hir_shard_recovery_seal(queue: text, owner: text, state: text) -> i64:
             val claim = file_read("{queue}/{name}")
             if not hir_shard_claim_valid(claim): return -1
             val fields = claim.split("\n")
-            if fields.len() >= 3 and fields[0] == owner:
+            if fields.len() >= 3 and (fields[0] == owner or
+                    fields[0].starts_with(owner + HIR_SHARD_FORK_OWNER_MARK_V1)):
                 val terminal_path = "{queue}/{name.substring(0, name.byte_len() - 6)}.terminal"
                 if not file_exists(terminal_path):
-                    if not hir_shard_recovery_terminal(queue, owner, fields[1], state, false):
+                    if not hir_shard_recovery_terminal(queue, fields[0], fields[1], state, false):
                         return -1
                     sealed = sealed + 1
     sealed
