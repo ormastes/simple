@@ -507,6 +507,16 @@ impl MirToLlvm:
             self.builder.emit("  {dest_name} = inttoptr {src_ty} {operand_val} to ptr")
         elif src_ty == "ptr" and (is_integer_type(target_ty) or target_ty == "i1"):
             self.builder.emit("  {dest_name} = ptrtoint ptr {operand_val} to {target_ty}")
+        elif src_ty == "i1" and is_integer_type(target_ty):
+            # LLVM `bitcast` needs equal bit widths: `bitcast i1 to i64` is
+            # rejected by llc ("invalid cast opcode"). A bool widens by zext.
+            self.builder.emit("  {dest_name} = zext i1 {operand_val} to {target_ty}")
+        elif is_integer_type(src_ty) and target_ty == "i1":
+            # Integer -> bool is truthiness, matching the ptr -> i1 rule.
+            self.builder.emit("  {dest_name} = icmp ne {src_ty} {operand_val}, 0")
+        elif is_integer_type(src_ty) and is_integer_type(target_ty):
+            # Mismatched integer widths: sext / trunc, never a width-changing bitcast.
+            self.builder.emit("  {dest_name} = {self.select_cast_instruction(src_ty, target_ty)} {src_ty} {operand_val} to {target_ty}")
         else:
             self.builder.emit("  {dest_name} = bitcast {src_ty} {operand_val} to {target_ty}")
 
