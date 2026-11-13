@@ -55,7 +55,7 @@ static int path_missing(const char *path) {
     return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
 }
 int main(int argc, char **argv) {
-    if (argc != 2) return 2;
+    if (argc != 2) return 64; /* EX_USAGE: the harness supplies a scratch directory */
     char dir[4096], current[4096], relative_dir[4096] = "", staged[4096], destination[4096];
     wchar_t wide[4096], previous[4096];
     GetCurrentDirectoryW(4096, previous);

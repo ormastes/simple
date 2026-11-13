@@ -133,10 +133,14 @@ int main(void) {
     eq_i("L1 rt_len(empty) == 0", rt_len(str("")), 0);
     eq_i("L2 rt_len(abcdefghij) == 10", rt_len(str("abcdefghij")), 10);
 
-    /* L3 byte length, not codepoint count: \xc3\xa9 is one U+00E9, two bytes.
-     * Discriminating between a byte-length and a UTF-8-aware implementation. */
-    eq_i("L3 rt_len(2-byte UTF-8 codepoint) == 2 (bytes, not codepoints)",
-         rt_len(str("\xc3\xa9")), 2);
+    /* L3 codepoint count, not byte length: \xc3\xa9 is one U+00E9, two bytes.
+     * User-facing `.len()` on text counts code points (ADR-005 item 5) in both
+     * twins (runtime_native.c rt_len, collections.rs rt_len); the byte length
+     * is rt_string_len. Discriminating between the two implementations. */
+    eq_i("L3 rt_len(2-byte UTF-8 codepoint) == 1 (codepoints, not bytes)",
+         rt_len(str("\xc3\xa9")), 1);
+    eq_i("L3b rt_string_len(2-byte UTF-8 codepoint) == 2 (bytes)",
+         rt_string_len(str("\xc3\xa9")), 2);
 
     /* L4 a non-string, non-array value answers 0 rather than trapping.
      * NOT strongly discriminating -- a stub returning 0 also passes. Recorded

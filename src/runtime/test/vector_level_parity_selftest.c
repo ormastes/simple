@@ -259,7 +259,7 @@ static void max_span_suite(void) {
 }
 
 int main(int argc, char **argv) {
-    if (argc < 2) { fprintf(stderr, "usage: %s provider [quick]\n", argv[0]); return 2; }
+    if (argc < 2) { fprintf(stderr, "usage: %s provider [quick]\n", argv[0]); return 64; /* EX_USAGE: harness-driven */ }
     const int quick = argc > 2 && strcmp(argv[2], "quick") == 0;
     void *lib = LOAD(argv[1]);
     if (!lib) FAIL("load %s", argv[1]);

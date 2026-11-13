@@ -1,3 +1,8 @@
+#if defined(_WIN32)
+/* POSIX-only (/bin/sh exit-127 witness): not applicable on Windows -> exit 77 (SKIP). */
+#include <stdio.h>
+int main(void) { puts("SKIP: POSIX-only /bin/sh exit-127 witness"); return 77; }
+#else
 #include "runtime.h"
 #include <stdio.h>
 #include <string.h>
@@ -18,3 +23,4 @@ int main(void) {
     printf("POSIX raw exit127 cap0/cap3: %d failures\n", failures);
     return failures;
 }
+#endif /* !_WIN32 */

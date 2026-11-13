@@ -1,3 +1,8 @@
+#if defined(_WIN32)
+/* POSIX-only (Darwin dyld constraint fixture): not applicable on Windows -> exit 77 (SKIP). */
+#include <stdio.h>
+int main(void) { puts("SKIP: POSIX-only Darwin dyld constraint fixture"); return 77; }
+#else
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <stdlib.h>
@@ -42,3 +47,4 @@ int main(int argc, char **argv) {
     return sosix_signed_payload[0] == 'S' ? 0 : 44;
 }
 #endif
+#endif /* !_WIN32 */

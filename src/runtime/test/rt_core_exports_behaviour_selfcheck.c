@@ -560,7 +560,16 @@ static void hex_dump_array(int64_t arr) {
 int main(int argc, char** argv) {
     const char* cmd = argc > 1 ? argv[1] : "core";
     if (strcmp(cmd, "core") == 0) {
-        const char* sandbox = argc > 2 ? argv[2] : "build/rt_core_selfcheck_sandbox";
+        /* Default sandbox is per process: the mkdir.* cases create fixed
+         * names and fail EEXIST on a rerun over a leftover sandbox. */
+        char fresh[256];
+#ifdef _WIN32
+        unsigned long pid = (unsigned long)GetCurrentProcessId();
+#else
+        unsigned long pid = (unsigned long)getpid();
+#endif
+        snprintf(fresh, sizeof(fresh), "build/rt_core_selfcheck_sandbox_%lu", pid);
+        const char* sandbox = argc > 2 ? argv[2] : fresh;
         return run_core(sandbox);
     }
     if (strcmp(cmd, "stdin_read") == 0) {

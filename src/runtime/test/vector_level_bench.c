@@ -62,7 +62,7 @@ static int64_t ref_find(const uint8_t *p, size_t n, int crlf, uint8_t needle) {
 }
 
 int main(int argc, char **argv) {
-    if (argc < 3) FAIL("usage: %s provider expect_level [reps]", argv[0]);
+    if (argc < 3) { fprintf(stderr, "usage: %s provider expect_level [reps]\n", argv[0]); return 64; /* EX_USAGE: harness-driven */ }
     int expect = atoi(argv[2]);
     int reps = argc > 3 ? atoi(argv[3]) : 200;
     void *lib = LOAD(argv[1]);

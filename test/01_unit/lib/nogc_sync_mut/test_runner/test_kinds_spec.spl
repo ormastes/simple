@@ -2,7 +2,8 @@
 # repo. In-runner kinds translate to existing lane flags; external kinds
 # (rust, shs-selftest, c-runtime) are enumerated from the tree.
 use std.spec
-use std.nogc_sync_mut.test_runner.test_kinds.{test_kind_names, test_kind_strip_args, test_kind_validation_error, test_kind_enumerate, test_kind_c_compiler_from}
+use std.nogc_sync_mut.test_runner.test_kinds.{test_kind_names, test_kind_strip_args, test_kind_validation_error, test_kind_enumerate, test_kind_c_compiler_from, test_kind_c_core_sources, test_kind_c_unity_owners, test_kind_c_has_main, test_kind_c_is_fixture, test_kind_c_self_gate}
+use std.nogc_sync_mut.io.file_ops.{file_read}
 use std.nogc_sync_mut.fs.host_path.{host_is_windows_host}
 use std.nogc_sync_mut.io.env_ops.{env_get}
 
@@ -37,3 +38,30 @@ describe "test kind selector":
             val cc = test_kind_c_compiler_from("", "", home)
             expect(cc).to_end_with("clang.exe")
             expect(cc).to_contain("llvm-mingw")
+
+    it "links c-runtime selfchecks against the shipped core-C roster, never a copied list":
+        """
+        The core-C source roster is read from runtime_compiler.spl (the list the
+        native build ships); a unity-included owner is dropped from the per-test
+        archive; a unit without main is a fixture; a selfcheck's own #error is a
+        compile-time host gate (SKIP), any other build error stays UNBUILT.
+        """
+        val roster = file_read("src/compiler/70.backend/backend/runtime_compiler.spl") ?? ""
+        val posix = test_kind_c_core_sources(roster, false)
+        expect(posix).to_contain("runtime_native")
+        expect(posix).to_contain("runtime_memory")
+        expect(posix).to_not_contain("platform/async_windows")
+        expect(test_kind_c_core_sources(roster, true)).to_contain("platform/async_windows")
+        expect(test_kind_c_core_sources("no roster here", true).len()).to_equal(0)
+        val owners = ["runtime_native", "runtime_thread"]
+        expect(test_kind_c_unity_owners("#include \"../runtime_native.c\" /* owner */\n#include \"runtime.h\"\n", owners)).to_equal(["runtime_native"])
+        expect(test_kind_c_unity_owners("#include \"sibling_selfcheck.c\"\n", owners).len()).to_equal(0)
+        expect(test_kind_c_has_main("int helper(void) { return 0; }\n", [])).to_equal(false)
+        expect(test_kind_c_has_main("#include \"x.c\"\n", ["int main(void) { return 0; }\n"])).to_equal(true)
+        expect(test_kind_c_is_fixture("ld.lld: error: undefined symbol: WinMain\n")).to_equal(true)
+        expect(test_kind_c_is_fixture("ld.lld: error: undefined symbol: rt_array_new\n")).to_equal(false)
+        val item = "src/runtime/test/x_selfcheck.c"
+        val gated = "int a;\n#error \"requires a Linux native test slot\"\n"
+        expect(test_kind_c_self_gate(item, gated, "src/runtime/test/x_selfcheck.c:2:2: error: \"requires a Linux native test slot\"\n")).to_start_with("#error")
+        expect(test_kind_c_self_gate(item, gated, "src/runtime/test/x_selfcheck.c:1:5: error: unknown type name 'Foo'\n")).to_equal("")
+        expect(test_kind_c_self_gate(item, gated, "src/runtime/runtime.h:9:2: error: \"other\"\n")).to_equal("")
