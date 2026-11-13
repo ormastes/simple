@@ -1,12 +1,45 @@
 /* Canonical local Unix byte connection owner. Included by the existing native
- * socket leaf; no raw descriptors cross the public ABI. Linux only. */
+ * socket leaf; no raw descriptors cross the public ABI. Linux and Darwin; every
+ * other host returns unsupported (-4).
+ *
+ * Darwin (C7, design §2.3/§15.2) is NOT a mechanical Linux translation:
+ *  - origin is the actual PID only. Darwin has no PID namespace; a fork copy
+ *    still observes a different PID and is quarantined exactly as on Linux.
+ *  - there is no /proc/self/fd path anchoring. connect/bind name the validated
+ *    absolute path (sun_path <= 103 bytes) and the retained no-follow parent is
+ *    re-walked and compared by device/inode AFTER the effect; ancestors are
+ *    still non-writable by other UIDs. Detection-after-effect is weaker than
+ *    Linux anchoring and is reported as such (local_unix_peer_identity_class_v1).
+ *  - no SOCK_CLOEXEC/SOCK_NONBLOCK/accept4/MSG_CMSG_CLOEXEC/MSG_NOSIGNAL: flags
+ *    are applied immediately after creation/receipt (a concurrent fork+exec in
+ *    that window can inherit the descriptor unless the spawner uses
+ *    POSIX_SPAWN_CLOEXEC_DEFAULT); SIGPIPE is suppressed by SO_NOSIGPIPE.
+ *  - peer identity is getpeereid() uid/gid (connect-time credential) cross-
+ *    checked against the kernel LOCAL_PEERTOKEN audit token euid/egid, with the
+ *    PID taken from that token and required to equal LOCAL_PEERPID. XNU derives
+ *    both from the peer socket's last operating process, so the PID can name a
+ *    process the peer handed its socket to. That is WEAKER than Linux
+ *    SO_PEERCRED's connect-time PID and is never a process-incarnation
+ *    credential (pidversion is not exported). Callers read the class through
+ *    local_unix_peer_identity_class_v1(); no SDK token/PID => refusal (-3).
+ *  - POLLRDHUP does not exist; hangup is POLLHUP only (peer half-close is
+ *    observed as read EOF, not as hangup).
+ *  - SCM_RIGHTS receive/send and their one-FD-per-connection policy are
+ *    shared; the process-pipe bridge behind stage_stdout/adopt_byte_endpoint
+ *    stays Linux-only and answers unsupported (-4) on Darwin. */
 #include "runtime.h"
 #include <errno.h>
 #include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
+#define LUV1_POSIX 1
+#else
+#define LUV1_POSIX 0
+#endif
+#if LUV1_POSIX
+#include <fcntl.h>
 #include <unistd.h>
 #include <pthread.h>
 #include <poll.h>
@@ -15,11 +48,23 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <stdatomic.h>
+#endif
+#if defined(__linux__)
 #include <sys/vfs.h>
 #include <sys/ioctl.h>
 #include <linux/nsfs.h>
 #include <linux/magic.h>
 #include <sched.h>
+#define LUV1_SEND_FLAGS MSG_NOSIGNAL
+#define LUV1_RECV_FLAGS MSG_CMSG_CLOEXEC
+#define LUV1_POLLRDHUP POLLRDHUP
+#elif defined(__APPLE__)
+#include <mach/message.h> /* audit_token_t for LOCAL_PEERTOKEN */
+#define LUV1_SEND_FLAGS 0
+#define LUV1_RECV_FLAGS 0
+#define LUV1_POLLRDHUP 0
+#endif
+#if LUV1_POSIX
 
 _Static_assert(ATOMIC_INT_LOCK_FREE == 2, "local Unix origin guard requires lock-free unsigned int atomics");
 _Static_assert(sizeof(pid_t) <= sizeof(unsigned int), "local Unix origin PID must fit unsigned int");
@@ -29,6 +74,7 @@ static atomic_uint lu_process_quarantined_v1;
 /* Immutable after release publication; ready acquire protects both plain fields. */
 static dev_t lu_origin_namespace_device_v1;
 static ino_t lu_origin_namespace_inode_v1;
+#if defined(__linux__)
 static int lu_namespace_v1(struct stat* observed) {
     return stat("/proc/self/ns/pid",observed)==0;
 }
@@ -44,6 +90,14 @@ static int lu_initial_namespace_v1(struct stat* observed) {
     int closed=close(fd);
     return valid&&closed==0;
 }
+#else
+/* Darwin has one host PID space and no namespace handle to observe. The pair is
+ * a fixed zero identity; the PID comparison alone detects a fork copy. */
+static int lu_namespace_v1(struct stat* observed) {
+    memset(observed,0,sizeof(*observed));return 1;
+}
+static int lu_initial_namespace_v1(struct stat* observed) { return lu_namespace_v1(observed); }
+#endif
 /* Observe real PID+namespace before any owner lock/allocation. A virgin winner
  * publishes an immutable pair. Other threads/processes never wait for an
  * incomplete publication and never reset/reconstruct inherited registry state.
@@ -209,6 +263,98 @@ static int lu_parent_v1(const char* input,int64_t bytes,uid_t expected,char leaf
     }
 bad: close(fd);return -1;
 }
+/* Kernel peer credential of a connected stream. Both lanes are CONNECT-TIME
+ * (Linux) or kernel-observed (Darwin) identity, never an incarnation proof. */
+typedef struct LuPeerV1 { uid_t uid; gid_t gid; pid_t pid; } LuPeerV1;
+static int lu_peer_credentials_v1(int fd,LuPeerV1* peer) {
+    memset(peer,0,sizeof(*peer));
+#if defined(__linux__)
+    struct ucred c;socklen_t n=sizeof(c);memset(&c,0,sizeof(c));
+    if(getsockopt(fd,SOL_SOCKET,SO_PEERCRED,&c,&n)||n!=sizeof(c)||c.pid<=0)return 0;
+    peer->uid=c.uid;peer->gid=c.gid;peer->pid=c.pid;return 1;
+#elif defined(LOCAL_PEERTOKEN) || defined(LOCAL_PEERPID)
+    uid_t uid;gid_t gid;pid_t pid=0;socklen_t n;
+    if(getpeereid(fd,&uid,&gid))return 0;
+#if defined(LOCAL_PEERTOKEN)
+    /* Same audit-token words the SOSIX Darwin broker transport reads:
+     * val[1] euid, val[2] egid, val[5] pid. Any disagreement fails closed. */
+    audit_token_t token;n=sizeof(token);memset(&token,0,sizeof(token));
+    if(getsockopt(fd,SOL_LOCAL,LOCAL_PEERTOKEN,&token,&n)||n!=sizeof(token)||
+       token.val[1]!=(unsigned int)uid||token.val[2]!=(unsigned int)gid||
+       token.val[5]==0||token.val[5]>(unsigned int)INT_MAX)return 0;
+    pid=(pid_t)token.val[5];
+#endif
+#if defined(LOCAL_PEERPID)
+    pid_t direct=0;n=sizeof(direct);
+    if(getsockopt(fd,SOL_LOCAL,LOCAL_PEERPID,&direct,&n)||n!=sizeof(direct)||direct<=0||(pid&&direct!=pid))return 0;
+    pid=direct;
+#endif
+    if(pid<=0)return 0;
+    peer->uid=uid;peer->gid=gid;peer->pid=pid;return 1;
+#else
+    (void)fd;return 0; /* no kernel peer PID: refuse rather than fabricate one */
+#endif
+}
+/* Darwin has no creation-time descriptor flags; apply them before the
+ * descriptor is published to any owner slot. */
+static int lu_descriptor_flags_v1(int fd) {
+#if defined(__APPLE__)
+    int on=1,status=fcntl(fd,F_GETFL);
+    return status>=0&&fcntl(fd,F_SETFD,FD_CLOEXEC)==0&&fcntl(fd,F_SETFL,status|O_NONBLOCK)==0&&
+        setsockopt(fd,SOL_SOCKET,SO_NOSIGPIPE,&on,sizeof(on))==0;
+#else
+    (void)fd;return 1;
+#endif
+}
+static int lu_stream_socket_v1(void) {
+#if defined(__linux__)
+    return socket(AF_UNIX,SOCK_STREAM|SOCK_CLOEXEC|SOCK_NONBLOCK,0);
+#else
+    int fd=socket(AF_UNIX,SOCK_STREAM,0);
+    if(fd>=0&&!lu_descriptor_flags_v1(fd)){(void)close(fd);errno=EIO;return -1;}
+    return fd;
+#endif
+}
+static int lu_accept_socket_v1(int listener) {
+#if defined(__linux__)
+    return accept4(listener,NULL,NULL,SOCK_CLOEXEC|SOCK_NONBLOCK);
+#else
+    int fd=accept(listener,NULL,NULL);
+    if(fd>=0&&!lu_descriptor_flags_v1(fd)){(void)close(fd);errno=EIO;return -1;}
+    return fd;
+#endif
+}
+/* Linux: anchored /proc/self/fd/<parent>/<leaf>. Darwin: the validated
+ * absolute path itself; caller MUST lu_parent_same_v1() after the effect. */
+static int lu_address_v1(int directory,const char* path,int64_t bytes,const char* leaf,
+        struct sockaddr_un* address,socklen_t* length) {
+    memset(address,0,sizeof(*address));address->sun_family=AF_UNIX;
+#if defined(__linux__)
+    (void)path;(void)bytes;
+    int n=snprintf(address->sun_path,sizeof(address->sun_path),"/proc/self/fd/%d/%s",directory,leaf);
+    if(n<0||(size_t)n>=sizeof(address->sun_path))return 0;
+    *length=sizeof(*address);return 1;
+#else
+    (void)directory;(void)leaf;
+    if(!path||bytes<2||(size_t)bytes>=sizeof(address->sun_path))return 0;
+    memcpy(address->sun_path,path,(size_t)bytes);
+    *length=(socklen_t)SUN_LEN(address);address->sun_len=(unsigned char)*length;return 1;
+#endif
+}
+/* Darwin post-effect check: the path still resolves, through the same policy
+ * walk, to the retained parent. Detects (does not prevent) an ancestor swap. */
+static int lu_parent_same_v1(int directory,const char* path,int64_t bytes,uid_t expected) {
+#if defined(__linux__)
+    (void)directory;(void)path;(void)bytes;(void)expected;return 1;
+#else
+    char leaf[108];int again=lu_parent_v1(path,bytes,expected,leaf);
+    if(again<0)return 0;
+    struct stat retained,observed;
+    int same=fstat(directory,&retained)==0&&fstat(again,&observed)==0&&
+        retained.st_dev==observed.st_dev&&retained.st_ino==observed.st_ino;
+    return close(again)==0&&same;
+#endif
+}
 #endif
 
 static SplArray* lu_receipt_v1(int64_t count) {
@@ -224,11 +370,11 @@ static void lu_word_v1(SplArray* a,int64_t index,int64_t value) {
  * receipt decoding or owner gate. Caller must use a nullable-array ABI. */
 #include "runtime_local_unix_transfer_v1.h"
 static SplArray* lu_connect_impl_v1(const char* path,int64_t bytes,int64_t expected_uid,int64_t deadline) {
-#if defined(__linux__)
+#if LUV1_POSIX
     if(!lu_origin_v1())return NULL;
 #endif
     SplArray* answer=lu_receipt_v1(7);if(!answer)return NULL;
-#if defined(__linux__)
+#if LUV1_POSIX
     int status=expected_uid<0||expected_uid>UINT32_MAX?-1:lu_deadline_v1(deadline);
     int directory=-1,fd=-1;char leaf[108];struct stat before,after;
     if(status)goto done;
@@ -236,14 +382,13 @@ static SplArray* lu_connect_impl_v1(const char* path,int64_t bytes,int64_t expec
     if(directory<0){status=-1;goto done;}
     if(fstatat(directory,leaf,&before,AT_SYMLINK_NOFOLLOW)||!S_ISSOCK(before.st_mode)||
        before.st_uid!=(uid_t)expected_uid||(uint64_t)before.st_dev>LUV1_INTEGER_MAX||(uint64_t)before.st_ino>LUV1_INTEGER_MAX){status=-1;goto done;}
-    struct sockaddr_un address;memset(&address,0,sizeof(address));address.sun_family=AF_UNIX;
-    int n=snprintf(address.sun_path,sizeof(address.sun_path),"/proc/self/fd/%d/%s",directory,leaf);
-    if(n<0||(size_t)n>=sizeof(address.sun_path)){status=-1;goto done;}
-    fd=socket(AF_UNIX,SOCK_STREAM|SOCK_CLOEXEC|SOCK_NONBLOCK,0);
+    struct sockaddr_un address;socklen_t address_size=0;
+    if(!lu_address_v1(directory,path,bytes,leaf,&address,&address_size)){status=-1;goto done;}
+    fd=lu_stream_socket_v1();
     if(fd<0){status=-3;goto done;}
     for(;;) {
         status=lu_deadline_v1(deadline);if(status)goto done;
-        int rc=connect(fd,(struct sockaddr*)&address,sizeof(address));
+        int rc=connect(fd,(struct sockaddr*)&address,address_size);
         if(rc==0)break;
         if(errno==EISCONN)break;
         if(errno==EINTR)continue;
@@ -256,10 +401,11 @@ static SplArray* lu_connect_impl_v1(const char* path,int64_t bytes,int64_t expec
         if(getsockopt(fd,SOL_SOCKET,SO_ERROR,&error,&size)||size!=sizeof(error)||error){status=-3;goto done;}
         break;
     }
-    struct ucred peer;socklen_t peer_size=sizeof(peer);memset(&peer,0,sizeof(peer));
-    if(getsockopt(fd,SOL_SOCKET,SO_PEERCRED,&peer,&peer_size)||peer_size!=sizeof(peer)||peer.uid!=(uid_t)expected_uid||peer.pid<=0||
+    LuPeerV1 peer;
+    if(!lu_peer_credentials_v1(fd,&peer)||peer.uid!=(uid_t)expected_uid||
        fstatat(directory,leaf,&after,AT_SYMLINK_NOFOLLOW)||!S_ISSOCK(after.st_mode)||after.st_uid!=(uid_t)expected_uid||
-       before.st_dev!=after.st_dev||before.st_ino!=after.st_ino){status=-3;goto done;}
+       before.st_dev!=after.st_dev||before.st_ino!=after.st_ino||
+       !lu_parent_same_v1(directory,path,bytes,(uid_t)expected_uid)){status=-3;goto done;}
     int64_t token=lu_install_connection_v1(fd,before.st_dev,before.st_ino,0);
     if(token<=0){status=(int)token;goto done;}
     fd=-1;lu_word_v1(answer,1,token);lu_word_v1(answer,2,peer.uid);lu_word_v1(answer,3,peer.gid);
@@ -274,12 +420,12 @@ done:
     return answer;
 }
 static SplArray* lu_read_impl_v1(int64_t token,int64_t maximum,int64_t deadline,int now,int handoff) {
-#if defined(__linux__)
+#if LUV1_POSIX
     if(!lu_origin_v1())return NULL;
 #endif
     int valid=maximum>0&&maximum<=65536;
     SplArray* answer=lu_receipt_v1(valid?maximum+3:3);if(!answer)return NULL;
-#if defined(__linux__)
+#if LUV1_POSIX
     int status=valid?(now?0:lu_deadline_v1(deadline)):-1;LuSlotV1* slot=NULL;unsigned char* data=NULL;
     if(status)goto done;
     data=malloc((size_t)maximum);if(!data){status=-6;goto done;}
@@ -292,7 +438,7 @@ static SplArray* lu_read_impl_v1(int64_t token,int64_t maximum,int64_t deadline,
         struct msghdr message;memset(&message,0,sizeof(message));
         memset(&control,0,sizeof(control));message.msg_iov=&io;message.msg_iovlen=1;
         message.msg_control=control.bytes;message.msg_controllen=sizeof(control.bytes);
-        ssize_t n=recvmsg(slot->fd,&message,MSG_CMSG_CLOEXEC);
+        ssize_t n=recvmsg(slot->fd,&message,LUV1_RECV_FLAGS);
         if(n>=0) {
             int ancillary_status=lu_receive_control_v1(slot,&message,handoff);
             lu_word_v1(answer,1,n==0);lu_word_v1(answer,2,n);
@@ -316,11 +462,11 @@ done:
 }
 static SplArray* lu_write_v1(int64_t token,SplArray* bytes,int64_t offset,int64_t maximum,
         int64_t deadline,int admitted,int64_t expiry,int now) {
-#if defined(__linux__)
+#if LUV1_POSIX
     if(!lu_origin_v1())return NULL;
 #endif
     SplArray* answer=lu_receipt_v1(2);if(!answer)return NULL;
-#if defined(__linux__)
+#if LUV1_POSIX
     int64_t length=bytes?rt_array_len(bytes):-1;
     int status=length<0||offset<0||offset>length||maximum<=0||maximum>LUV1_BYTES||maximum>length-offset||
         (admitted&&expiry<=0)?-1:(now?0:lu_deadline_v1(deadline));
@@ -359,11 +505,11 @@ done:
     return answer;
 }
 static SplArray* lu_close_impl_v1(int64_t token) {
-#if defined(__linux__)
+#if LUV1_POSIX
     if(!lu_origin_v1())return NULL;
 #endif
     SplArray* answer=lu_receipt_v1(2);if(!answer)return NULL;
-#if defined(__linux__)
+#if LUV1_POSIX
     int status;LuSlotV1* slot=lu_connection_lock_v1(token,&status);
     if(slot) {
         int pending=slot->pending_fd;slot->pending_fd=-1;
@@ -386,11 +532,11 @@ static SplArray* lu_close_impl_v1(int64_t token) {
 
 /* Listener and zero-wait gateway ports share the SAME generation/role slots. */
 static SplArray* lu_listen_impl_v1(const char* path,int64_t bytes,int64_t uid,int64_t backlog) {
-#if defined(__linux__)
+#if LUV1_POSIX
     if(!lu_origin_v1())return NULL;
 #endif
     SplArray* answer=lu_receipt_v1(2);if(!answer)return NULL;
-#if defined(__linux__)
+#if LUV1_POSIX
     int status=-1,parent=-1;char leaf[108];LuSlotV1* slot=NULL;
     if(uid<0||uid>UINT32_MAX||(uid_t)uid!=geteuid()||backlog<1||backlog>128)goto done;
     parent=lu_parent_v1(path,bytes,(uid_t)uid,leaf);if(parent<0)goto done;
@@ -401,15 +547,15 @@ static SplArray* lu_listen_impl_v1(const char* path,int64_t bytes,int64_t uid,in
     struct stat existing;
     if(fstatat(slot->parent_fd,leaf,&existing,AT_SYMLINK_NOFOLLOW)==0){status=-1;goto done;}
     if(errno!=ENOENT){status=-3;goto done;}
-    struct sockaddr_un address={0};address.sun_family=AF_UNIX;
-    int n=snprintf(address.sun_path,sizeof(address.sun_path),"/proc/self/fd/%d/%s",slot->parent_fd,leaf);
-    if(n<0||(size_t)n>=sizeof(address.sun_path)){status=-1;goto done;}
-    slot->fd=socket(AF_UNIX,SOCK_STREAM|SOCK_CLOEXEC|SOCK_NONBLOCK,0);
+    struct sockaddr_un address;socklen_t address_size=0;
+    if(!lu_address_v1(slot->parent_fd,path,bytes,leaf,&address,&address_size)){status=-1;goto done;}
+    slot->fd=lu_stream_socket_v1();
     if(slot->fd<0){status=-3;goto done;}
-    if(bind(slot->fd,(struct sockaddr*)&address,sizeof(address))){status=-3;goto done;}
+    if(bind(slot->fd,(struct sockaddr*)&address,address_size)){status=-3;goto done;}
     slot->bound=1;
     struct stat node;
-    if(fstatat(slot->parent_fd,leaf,&node,AT_SYMLINK_NOFOLLOW)||!S_ISSOCK(node.st_mode)||
+    if(!lu_parent_same_v1(slot->parent_fd,path,bytes,(uid_t)uid)||
+       fstatat(slot->parent_fd,leaf,&node,AT_SYMLINK_NOFOLLOW)||!S_ISSOCK(node.st_mode)||
        node.st_uid!=(uid_t)uid||(uint64_t)node.st_dev>LUV1_INTEGER_MAX||(uint64_t)node.st_ino>LUV1_INTEGER_MAX){status=-3;goto done;}
     slot->node_device=node.st_dev;slot->node_inode=node.st_ino;slot->node_known=1;
     /* Parent is non-writable by other UIDs. Same-UID admin namespace remains
@@ -428,20 +574,20 @@ done:
     return answer;
 }
 static SplArray* lu_accept_impl_v1(int64_t token,int64_t expected_uid) {
-#if defined(__linux__)
+#if LUV1_POSIX
     if(!lu_origin_v1())return NULL;
 #endif
     SplArray* answer=lu_receipt_v1(7);if(!answer)return NULL;
-#if defined(__linux__)
+#if LUV1_POSIX
     int status=-1,fd=-1;LuSlotV1* slot=NULL;
     if(expected_uid<0||expected_uid>UINT32_MAX)goto done;
     slot=lu_lock_v1(token,&status);if(!slot)goto done;
     if(slot->role!=2||slot->fd<0||!slot->bound||!slot->node_known||slot->service_uid!=geteuid()||
        (uid_t)expected_uid==slot->service_uid){status=-1;goto done;}
-    fd=accept4(slot->fd,NULL,NULL,SOCK_CLOEXEC|SOCK_NONBLOCK);
+    fd=lu_accept_socket_v1(slot->fd);
     if(fd<0){status=(errno==EAGAIN||errno==EWOULDBLOCK||errno==EINTR)?-11:-3;goto done;}
-    struct ucred peer;socklen_t length=sizeof(peer);memset(&peer,0,sizeof(peer));
-    if(getsockopt(fd,SOL_SOCKET,SO_PEERCRED,&peer,&length)||length!=sizeof(peer)||peer.uid!=(uid_t)expected_uid||peer.pid<=0){status=-3;goto done;}
+    LuPeerV1 peer;
+    if(!lu_peer_credentials_v1(fd,&peer)||peer.uid!=(uid_t)expected_uid){status=-3;goto done;}
     int64_t connection=lu_install_connection_v1(fd,slot->node_device,slot->node_inode,1);
     if(connection<=0){status=(int)connection;goto done;}
     fd=-1;lu_word_v1(answer,1,connection);lu_word_v1(answer,2,peer.uid);lu_word_v1(answer,3,peer.gid);
@@ -456,20 +602,20 @@ done:
     return answer;
 }
 static SplArray* lu_poll_impl_v1(int64_t token,int64_t want_read,int64_t want_write) {
-#if defined(__linux__)
+#if LUV1_POSIX
     if(!lu_origin_v1())return NULL;
 #endif
     SplArray* answer=lu_receipt_v1(4);if(!answer)return NULL;
-#if defined(__linux__)
+#if LUV1_POSIX
     int status=-1;LuSlotV1* slot=NULL;
     if((want_read!=0&&want_read!=1)||(want_write!=0&&want_write!=1)||(!want_read&&!want_write))goto done;
     slot=lu_connection_lock_v1(token,&status);if(!slot)goto done;
-    struct pollfd p={.fd=slot->fd,.events=(short)((want_read?POLLIN:0)|(want_write?POLLOUT:0)|POLLRDHUP)};
+    struct pollfd p={.fd=slot->fd,.events=(short)((want_read?POLLIN:0)|(want_write?POLLOUT:0)|LUV1_POLLRDHUP)};
     int rc=poll(&p,1,0);
     if(rc<0){status=errno==EINTR?-11:-3;goto done;}
     if(p.revents&POLLNVAL){status=-3;goto done;}
     lu_word_v1(answer,1,(p.revents&POLLIN)!=0);lu_word_v1(answer,2,(p.revents&POLLOUT)!=0);
-    lu_word_v1(answer,3,(p.revents&(POLLHUP|POLLRDHUP))!=0);status=(p.revents&POLLERR)?-3:0;
+    lu_word_v1(answer,3,(p.revents&(POLLHUP|LUV1_POLLRDHUP))!=0);status=(p.revents&POLLERR)?-3:0;
 done:
     if(slot)pthread_mutex_unlock(&slot->operation);
     lu_word_v1(answer,0,status);
@@ -479,11 +625,11 @@ done:
     return answer;
 }
 static SplArray* lu_listener_close_impl_v1(int64_t token) {
-#if defined(__linux__)
+#if LUV1_POSIX
     if(!lu_origin_v1())return NULL;
 #endif
     SplArray* answer=lu_receipt_v1(2);if(!answer)return NULL;
-#if defined(__linux__)
+#if LUV1_POSIX
     int status;LuSlotV1* slot=lu_lock_v1(token,&status);
     if(!slot)goto done;
     if(slot->role!=2){status=-1;goto done;}
@@ -514,15 +660,15 @@ done:
 }
 
 static SplArray* lu_peer_impl_v1(int64_t token) {
-#if defined(__linux__)
+#if LUV1_POSIX
     if(!lu_origin_v1())return NULL;
 #endif
     SplArray* answer=lu_receipt_v1(6);if(!answer)return NULL;
-#if defined(__linux__)
+#if LUV1_POSIX
     int status;LuSlotV1* slot=lu_connection_lock_v1(token,&status);
     if(slot) {
-        struct ucred peer;socklen_t length=sizeof(peer);memset(&peer,0,sizeof(peer));
-        if(getsockopt(slot->fd,SOL_SOCKET,SO_PEERCRED,&peer,&length)||length!=sizeof(peer)||peer.pid<=0)status=-3;
+        LuPeerV1 peer;
+        if(!lu_peer_credentials_v1(slot->fd,&peer))status=-3;
         else {
             lu_word_v1(answer,1,peer.uid);lu_word_v1(answer,2,peer.gid);lu_word_v1(answer,3,peer.pid);
             lu_word_v1(answer,4,slot->node_device);lu_word_v1(answer,5,slot->node_inode);status=0;
@@ -537,11 +683,11 @@ static SplArray* lu_peer_impl_v1(int64_t token) {
 }
 
 static SplArray* lu_shutdown_write_impl_v1(int64_t token) {
-#if defined(__linux__)
+#if LUV1_POSIX
     if(!lu_origin_v1())return NULL;
 #endif
     SplArray* answer=lu_receipt_v1(2);if(!answer)return NULL;
-#if defined(__linux__)
+#if LUV1_POSIX
     int status;LuSlotV1* slot=lu_connection_lock_v1(token,&status);
     if(slot) {
         if(slot->write_shutdown){status=0;lu_word_v1(answer,1,1);}
@@ -557,11 +703,11 @@ static SplArray* lu_shutdown_write_impl_v1(int64_t token) {
 }
 
 static SplArray* lu_claim_request_impl_v1(int64_t token,const char* request,int64_t bytes) {
-#if defined(__linux__)
+#if LUV1_POSIX
     if(!lu_origin_v1())return NULL;
 #endif
     SplArray* answer=lu_receipt_v1(2);if(!answer)return NULL;
-#if defined(__linux__)
+#if LUV1_POSIX
     int status=-1;LuSlotV1* slot=NULL;
     if(!request||bytes!=64)goto done;
     for(int i=0;i<64;i++)if(!((request[i]>='0'&&request[i]<='9')||(request[i]>='a'&&request[i]<='f')))goto done;

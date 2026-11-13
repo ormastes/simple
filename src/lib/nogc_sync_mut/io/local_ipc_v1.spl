@@ -1,7 +1,10 @@
 # Canonical owned Unix byte connections. Tokens are process-local capabilities,
 # not raw file descriptors, serialized leases or hostile-same-UID isolation.
-# Origin includes actual process PID and /proc/self/ns/pid device/inode,
+# Linux origin includes actual process PID and /proc/self/ns/pid device/inode,
 # initially proven by an actual NSFS PID-namespace handle before publication.
+# Darwin has no PID namespace: origin is the actual PID only. Every other host
+# answers local_unix_unsupported. Peer identity strength differs per host and
+# is reported by local_unix_peer_identity_class_v1, never assumed equal.
 # After first use, fork children must exec before entering this owner: inherited
 # tokens/locks/FDs are rejected before owner gates, never reset or reconstructed.
 # Native absence is checked through the nullable-array ABI before any len/index;
@@ -20,6 +23,29 @@ pub struct LocalUnixPeerV1:
     pid: i64
     socket_device: i64
     socket_inode: i64
+
+# What the native owner on THIS build actually observes for a peer. Neither
+# class is a process-incarnation credential; callers needing one (design
+# §11.4) must bind the channel to supervisor-created admission evidence.
+pub enum LocalUnixPeerIdentityClassV1:
+    # Host has no local Unix owner; every operation answers unsupported.
+    Unsupported
+    # SO_PEERCRED uid/gid/pid captured at connect; path anchored through the
+    # retained parent via /proc/self/fd.
+    LinuxConnectTimePeerCred
+    # getpeereid uid/gid plus the kernel audit-token PID of the peer socket's
+    # last operating process (may differ from the connector after a socket
+    # handoff); path re-walked and compared after the effect, not anchored.
+    DarwinKernelObservedPeer
+
+pub fn local_unix_peer_identity_class_v1() -> LocalUnixPeerIdentityClassV1:
+    @when(os="linux"):
+    return LocalUnixPeerIdentityClassV1.LinuxConnectTimePeerCred
+    @elif(os="macos"):
+    return LocalUnixPeerIdentityClassV1.DarwinKernelObservedPeer
+    @else:
+    return LocalUnixPeerIdentityClassV1.Unsupported
+    @end
 
 pub struct LocalUnixConnectTurnV1:
     owner: LocalUnixConnectionV1?
@@ -75,8 +101,9 @@ fn local_unix_status_v1(status: i64) -> text:
         case -16: "local_unix_handoff_already_used"
         case _: "local_unix_native_receipt_invalid"
 
-# Path identity is anchored through a retained no-follow directory. Peer UID is
-# the actual connected SO_PEERCRED identity, not an assertion in payload bytes.
+# Path identity is checked through a retained no-follow directory (anchored on
+# Linux, re-walked after connect on Darwin). Peer UID is the kernel's connected
+# peer credential (SO_PEERCRED / getpeereid), not an assertion in payload bytes.
 pub fn local_unix_connect_v1(path: text, expected_peer_uid: i64,
         deadline_monotonic_ms: i64) -> LocalUnixConnectTurnV1:
     if (not path.starts_with("/") or path.contains("\0") or str_len(path) > 4095 or
