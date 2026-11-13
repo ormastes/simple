@@ -23,22 +23,13 @@ use std::sync::Arc;
 #[cfg(feature = "vulkan")]
 use std::time::Instant;
 
-/// A completed slot has been proven signaled but remains reserved until the
-/// owner explicitly calls retire.  `UNKNOWN` is terminal for admission and
-/// keeps the runtime owners quarantined until device recovery/teardown.
-pub const ASYNC_RETIRED: i64 = 1;
-pub const ASYNC_PENDING: i64 = 0;
-pub const ASYNC_INVALID: i64 = -1;
-pub const ASYNC_UNKNOWN: i64 = -2;
-pub const ASYNC_WOULD_BLOCK: i64 = -3;
-pub const ASYNC_CLOSED: i64 = -4;
-/// Device generation detached into bounded quarantine; this is NOT completion.
-pub const ASYNC_QUARANTINED: i64 = 2;
-
-#[path = "vulkan_async_protocol.rs"]
-mod protocol;
+// Status values and the slot protocol are shared with the interpreter bridge's
+// ring owner; see `crate::vulkan_async_protocol`.
+pub use crate::vulkan_async_protocol::{
+    ASYNC_CLOSED, ASYNC_INVALID, ASYNC_PENDING, ASYNC_QUARANTINED, ASYNC_RETIRED, ASYNC_UNKNOWN, ASYNC_WOULD_BLOCK,
+};
 #[cfg(feature = "vulkan")]
-use protocol::*;
+use crate::vulkan_async_protocol::*;
 
 // Included files share this private owner module and do not expose mutable
 // runtime internals to other subsystems.
