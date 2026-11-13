@@ -403,7 +403,7 @@ Seed: pinned `554460a6b85a` bootstrap seed (sha256 `1ef9af2577a0…`), aarch64 L
   `data_observation_profiling_while_v1` -> an injected `begin` fault mid-start (rollback,
   `close_admission`, Idle) -> recovery in the next generation.
 - Lane `scripts/check/check-xray-native-program-e2e.shs` (selftest: 1 accepted transcript,
-  14 rejected mutations); spec `test/03_system/xray/xray_spy_program_out_spec.spl` (untagged,
+  20 rejected mutations); spec `test/03_system/xray/xray_spy_program_out_spec.spl` (untagged,
   Linux) 10/10 on the seed: 7 `simple` rows + 3 `llvm` rows (compiler-rt C harness).
   Real numbers from the run: `traced=3:496:320:1 add1=3:176:176:2` (calls:incl:excl:depth,
   cntvct ticks), 320 + 176 = 496.
@@ -453,5 +453,9 @@ clang_rt.xray + adapter link (PR4) is not wired.
   line end and broke when the host gained `timestamps_nonzero=`; fixed in
   `scripts/check/lib/xray-inprocess-e2e-lib.shs`; from a shell that lane is now `PASS — 14 check(s)`
   on the pinned seed.
-- ELF writer change checked: `elf_writer_spec` 18/18 and `xray_native_map_format_v1_spec` 8/8
-  on the pinned seed both before (base `30382bc764e`) and after.
+- ELF writer change (`elf_section_symbol`): the evidence is the lane itself — every `--xray`
+  module is written through `native/elf_writer_serialize.write_elf64` and then loads with
+  dlopen (byte-stable sha256 `9591d21aee45…`). `elf_writer_spec` does NOT cover it (it imports
+  `compiler.backend.linker.elf_writer`). The two specs that do reach the native writer fail
+  identically on base `30382bc764e` and on this branch: `native_compile_elf_spec` 1/2,
+  `comdat_instance_dedup_spec` 3/5 (bug `seed_reexport_cycle_loses_owner_bindings_2026-11-13.md`).

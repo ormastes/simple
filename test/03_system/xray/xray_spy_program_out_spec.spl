@@ -58,8 +58,18 @@ fn kept_dir(stderr: text) -> text:
     ""
 
 # One lane run per spec process: "<verdict line>\n<transcript>".
+# Per-process caches (one lane run per spec process); after_all removes them.
+fn program_cache() -> text:
+    "/tmp/xray-spy-program-out-{getpid()}.log"
+
+fn llvm_cache() -> text:
+    "/tmp/xray-spy-llvm-out-{getpid()}.log"
+
+fn drop_cache(path: text):
+    process_run_timeout("rm", ["-f", path], 60000)
+
 fn program_run() -> text:
-    val cache = "/tmp/xray-spy-program-out-{getpid()}.log"
+    val cache = program_cache()
     if file_exists(cache): return read_file_text(cache)
     var args: [text] = ["scripts/check/check-xray-native-program-e2e.shs", "--simple", simple_binary(), "--keep"]
     val knobs = ["XRAY_OUT_BUILDER", "XRAY_OUT_PROGRAM_HOST", "XRAY_OUT_PROGRAM_MODULE"]
@@ -143,8 +153,11 @@ fn edges_of(t: text, scenario: text):
         num(spy(t, scenario, "records_after_stop")))
 
 describe "XRay spy OUT — simple (compiled program, native Simple sleds)":
+    after_all:
+        drop_cache(program_cache())
+
     it "loads the spy through aspect dynload and selects by pointcut":
-        step("Build the --xray module and the host executable, then run the host once")
+        step("Build the --xray module, then run the controller against it once")
         val t = program_run()
         # @capture(log): the lane verdict line and the SPY transcript -> xray_spy_program_out_spec.evidence.sdn
         step("Verify the lane passed and the module registered with every sled off")
@@ -228,7 +241,7 @@ describe "XRay spy OUT — simple (compiled program, native Simple sleds)":
 # The LLVM column on a real binary today: the compiler-rt C harness
 # (check-xray-llvm-adapter-e2e.shs). Same expectation functions.
 fn llvm_run() -> text:
-    val cache = "/tmp/xray-spy-llvm-out-{getpid()}.log"
+    val cache = llvm_cache()
     if file_exists(cache): return read_file_text(cache)
     val (stdout, _, _) = process_run_timeout("sh", ["scripts/check/check-xray-llvm-adapter-e2e.shs"], lane_timeout_ms())
     file_write(cache, stdout)
@@ -249,6 +262,9 @@ fn passed(output: text, line: text) -> bool:
     output.contains("\nPASS {line}\n") or output.starts_with("PASS {line}\n")
 
 describe "XRay spy OUT — llvm (compiler-rt sleds, C harness)":
+    after_all:
+        drop_cache(llvm_cache())
+
     it "logs raw edges only while enabled":
         step("Run the compiler-rt harness lane")
         val out = llvm_run()

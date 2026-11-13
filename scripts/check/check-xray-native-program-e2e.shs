@@ -124,6 +124,12 @@ sp_selftest() {
              's/^\(SPY rollback .*\)words=BBBBBBB/\1words=NBBBBBB/' \
              's/^\(SPY recover .*\)generation=5/\1generation=4/' \
              's/^\(SPY log .*\)stamped=6/\1stamped=5/' \
+             's/^\(SPY fold .*\)unmatched=0/\1unmatched=1/' \
+             's/^\(SPY dynload .*\)sites=7/\1sites=6/' \
+             's/^\(SPY log .*\)same_generation=true/\1same_generation=false/' \
+             's/^\(SPY log .*\)exits=3/\1exits=2/' \
+             's/^\(SPY reenable .*\)results_on=[^ ]*/\1results_on=1,/' \
+             's/^\(SPY fold .*\)traced=3:/\1traced=2:/' \
              's/^SPY baseline=.*/SPY baseline=1,/'; do
         sed "$m" "$t" > "$t.m"
         if sp_transcript_ok "$t.m" >/dev/null; then echo "selftest mutation accepted: $m"; rm -f "$t" "$t.m"; return 1; fi
@@ -155,7 +161,7 @@ if ! sp_selftest; then
     exit 2
 fi
 if [ "$SELFTEST_ONLY" -eq 1 ]; then
-    echo "PASS — 15 check(s) (selftest: 1 accepted transcript, 14 rejected mutations)"
+    echo "PASS — 21 check(s) (selftest: 1 accepted transcript, 20 rejected mutations)"
     exit 0
 fi
 if [ "$(uname -s)" != "Linux" ]; then
@@ -220,7 +226,7 @@ if [ -n "$HOST_BIN" ]; then
     HOST_BIN=$(abs "$HOST_BIN")
     file "$HOST_BIN" 2>/dev/null | grep -q 'ELF' || { echo "ERROR — nothing was checked (controller $HOST_BIN is not a native ELF executable)"; exit 2; }
     MODE="compiled controller $(sha256sum "$HOST_BIN" | cut -c1-12)"
-    XRAY_E2E_LIB=$MODULE timeout 300 "$HOST_BIN" > "$WORK/host.log" 2>&1
+    (export XRAY_E2E_LIB=$MODULE; capped timeout 300 "$HOST_BIN" > "$WORK/host.log" 2>&1)
 else
     [ -n "$SIMPLE_BIN" ] || { echo "ERROR — nothing was checked (need --simple, --builder or --host-bin for the controller)"; exit 2; }
     SIMPLE_BIN=$(abs "$SIMPLE_BIN")
@@ -229,6 +235,11 @@ else
 fi
 host_rc=$?
 cp "$WORK/host.log" "$WORK/transcript.log"
+# A controller that printed SPY-HOST-OK but then crashed or timed out is a FAIL.
+if [ "$host_rc" -ne 0 ]; then
+    echo "FAIL — controller exited rc=$host_rc ($MODE): $(grep -m1 -E "SPY-HOST-ERROR|error" "$WORK/host.log" | cut -c1-200)"
+    exit 1
+fi
 reason=$(sp_transcript_ok "$WORK/host.log")
 if [ $? -ne 0 ]; then
     echo "FAIL — $reason ($MODE, rc=$host_rc)"
