@@ -51,7 +51,7 @@ pin_archive() {
         # materializer. The recorded .spipe/spipe gitlink is populated the same
         # way bootstrap-windows.sh does for the live tree.
         rm -rf "$pa_dir"; git -C "$pa_repo" worktree prune
-        git -C "$pa_repo" worktree add --detach "$pa_dir" "$pa_sha" >/dev/null 2>&1 || {
+        GIT_LFS_SKIP_SMUDGE=1 git -C "$pa_repo" worktree add --detach "$pa_dir" "$pa_sha" >/dev/null 2>&1 || {
             rm -rf "$pa_dir"; git -C "$pa_repo" worktree prune
             echo "ERROR — git worktree add failed for ${pa_sha}" >&2; return 2; }
         case "$(git -C "$pa_repo" ls-files -s -- .spipe/spipe 2>/dev/null)" in
@@ -71,7 +71,7 @@ pin_archive() {
     # (the archive form also shipped pointer files). stderr is NOT silenced: an
     # opaque "failed" is the class this script's header exists to prevent.
     GIT_LFS_SKIP_SMUDGE=1 git clone -q --shared --no-checkout "$pa_repo" "$pa_dir.tmp" &&
-        git -C "$pa_dir.tmp" checkout -q --detach "$pa_sha" || {
+        GIT_LFS_SKIP_SMUDGE=1 git -C "$pa_dir.tmp" checkout -q --detach "$pa_sha" || {
         rm -rf "$pa_dir.tmp"; echo "ERROR — pinned clone/checkout of ${pa_sha} failed" >&2; return 2; }
     pa_n=$(git -C "$pa_dir.tmp" ls-files | wc -l)
     [ "$pa_n" -gt 0 ] || { rm -rf "$pa_dir.tmp"; echo "ERROR — empty checkout for ${pa_sha}" >&2; return 2; }
@@ -83,26 +83,36 @@ pin_archive() {
 }
 selftest() {
     st=$(mktemp -d) || return 2; fail=0
+    mkdir -p "$st/bin"
+    printf '#!/bin/sh\nif [ "${GIT_LFS_SKIP_SMUDGE:-0}" = 1 ]; then cat; else echo "simulated missing LFS object" >&2; exit 1; fi\n' > "$st/bin/lfs-smudge"
+    chmod +x "$st/bin/lfs-smudge"
+    printf '[filter "lfs"]\n\tclean = cat\n\tsmudge = %s/bin/lfs-smudge\n\trequired = true\n' "$st" > "$st/gitconfig"
     git init -q "$st/r" && ( cd "$st/r" && git config user.email t@t && git config user.name t \
-        && mkdir -p src && printf 'committed\n' > src/a.spl && git add -A && git commit -qm c1 )
+        && mkdir -p src && printf 'committed\n' > src/a.spl \
+        && printf '*.png filter=lfs diff=lfs merge=lfs -text\n' > .gitattributes \
+        && printf 'version https://git-lfs.github.com/spec/v1\noid sha256:0123456789abcdef\nsize 3\n' > asset.png \
+        && git add -A && git commit -qm c1 )
     src_sha=$(git -C "$st/r" rev-parse HEAD)
-    d=$(pin_archive "$st/r" HEAD "$st/out" 2>/dev/null) || { echo "selftest FAIL: pin failed"; fail=1; }
+    expected_inventory=$(git -C "$st/r" ls-files)
+    asset_pointer=$(cat "$st/r/asset.png")
+    d=$(GIT_CONFIG_GLOBAL="$st/gitconfig" pin_archive "$st/r" HEAD "$st/out" 2>/dev/null) || { echo "selftest FAIL: pin failed"; fail=1; }
     # Mutate the live tree AFTER pinning: torn content + new file + new commit.
     printf '<<<<<<< HEAD\n' > "$st/r/src/a.spl"; printf x > "$st/r/src/new.spl"
     ( cd "$st/r" && git add -A && git commit -qm c2 )
     [ "$(cat "$d/src/a.spl" 2>/dev/null)" = committed ] || { echo "selftest FAIL: live edit visible"; fail=1; }
     [ -e "$d/src/new.spl" ] && { echo "selftest FAIL: new file visible"; fail=1; }
+    [ "$(cat "$d/asset.png" 2>/dev/null)" = "$asset_pointer" ] || { echo "selftest FAIL: LFS pointer was not preserved"; fail=1; }
     # The snapshot must be a git repository of its own (a `.git` DIRECTORY for
     # the Unix clone, a `.git` FILE for the Windows detached worktree) whose
     # HEAD is the pinned sha: SCV admission runs `git ls-files` in it. A copied
     # source repo would carry the live branch tip instead.
     [ -e "$d/.git" ] || { echo "selftest FAIL: snapshot is not a git repository (SCV admission needs git ls-files)"; fail=1; }
     [ "$(git -C "$d" rev-parse HEAD 2>/dev/null)" = "$src_sha" ] || { echo "selftest FAIL: snapshot HEAD is not the pinned sha"; fail=1; }
-    [ "$(git -C "$d" ls-files 2>/dev/null)" = "src/a.spl" ] || { echo "selftest FAIL: git ls-files inventory"; fail=1; }
+    [ "$(git -C "$d" ls-files 2>/dev/null)" = "$expected_inventory" ] || { echo "selftest FAIL: git ls-files inventory"; fail=1; }
     [ "$(cat "$d/.bootstrap-pinned-sha" 2>/dev/null)" = "$src_sha" ] || { echo "selftest FAIL: sha marker"; fail=1; }
     pin_archive "$st/r" no-such-rev "$st/out" >/dev/null 2>&1; [ $? -eq 2 ] || { echo "selftest FAIL: bad rev not exit 2"; fail=1; }
     rm -rf "$st"
-    [ "$fail" -eq 0 ] && { echo "PASS — 7 selftest assertion(s) checked, pinned snapshot is a git checkout isolated from live edits"; return 0; }
+    [ "$fail" -eq 0 ] && { echo "PASS — 8 selftest assertion(s) checked, pinned snapshot is a git checkout isolated from live edits"; return 0; }
     echo "FAIL — selftest"; return 1
 }
 
