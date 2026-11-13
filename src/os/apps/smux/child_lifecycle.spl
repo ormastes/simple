@@ -1,8 +1,8 @@
 # Checked native teardown. This owner never reads or writes the API registry;
 # the single caller commits the returned snapshot once. False-close authority
 # is retained verbatim for retry, including deferred PTY cleanup.
-use os.apps.smux.service.{ServiceState}
-use std.sosix.pty.{sosix_pty_close}
+use os.apps.smux.service.{ServiceState, PaneRecord}
+use std.sosix.pty.{sosix_pty_close, sosix_pty_hangup}
 use std.sosix.process.{sosix_process_close_piped}
 use std.sosix.process.sosix_process_close_piped_ref_v1
 use std.sosix.process.sosix_process_cleanup_piped_owned_v2
@@ -41,8 +41,36 @@ pub fn prepare_pane_reset_v2(before: ServiceState) -> PaneResetPreparationV2:
         index = index + 1
     PaneResetPreparationV2(state: released, may_reset: true)
 
+fn _pane_in_scope(pane: PaneRecord, session_id: text, window_id: text, pane_id: text) -> bool:
+    pane.pane.session_id == session_id and (window_id == "" or pane.pane.window_id == window_id) and (pane_id == "" or pane.pane.id == pane_id)
+
+# Exactly the panes close_owned_children below ends with sosix_pty_close.
+fn _plain_pty_close(pane: PaneRecord) -> bool:
+    pane.owned_terminal_transfer == nil and not pane.helper_cleaned_awaiting_release and pane.terminal_ref == nil and pane.pty_fd >= 0
+
+# Hangs every plain PTY child in scope up before any is closed, so children
+# that ignore SIGHUP share one ~1 s close grace period instead of paying one
+# per pane. Only for two or more closes: a single close gains nothing.
+fn _hang_up_plain_ptys(st: ServiceState, session_id: text, window_id: text, pane_id: text):
+    var count = 0
+    var i = 0
+    while i < st.pane_count:
+        val pane = st.get_pane(i)
+        if _pane_in_scope(pane, session_id, window_id, pane_id) and _plain_pty_close(pane):
+            count = count + 1
+        i = i + 1
+    if count < 2:
+        return
+    i = 0
+    while i < st.pane_count:
+        val pane = st.get_pane(i)
+        if _pane_in_scope(pane, session_id, window_id, pane_id) and _plain_pty_close(pane):
+            val _signalled = sosix_pty_hangup(pane.pty_fd as i32)
+        i = i + 1
+
 pub fn close_owned_children(st0: ServiceState, session_id: text, window_id: text = "", pane_id: text = "") -> ServiceState:
     var st = st0
+    _hang_up_plain_ptys(st, session_id, window_id, pane_id)
     var i = 0
     while i < st.pane_count:
         val pane = st.get_pane(i)
