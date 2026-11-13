@@ -58,12 +58,15 @@ describe "module surfaces":
         expect(surfaces.surfaces[1].physical_index).to_equal(1)
 
     it "collapses repository symlink spellings to one physical surface":
+        # The repository symlink src/std -> src/lib was removed in 88aac2ffe28, so the
+        # fixture uses the tracked symlink src/app/t32_cli -> examples/10_tooling/
+        # trace32_tools/t32_cli (also used by symlinked_facade_relative_sibling_spec).
         val body = "fn shared() -> i64:\n    1\n"
         val module = parse_and_build_module(body, "shared.spl")
         val modules = {"lib_alias": module, "std_alias": module}
         val sources = [
-            SourceFile(path: "src/lib/nogc_async_mut/io.spl", content: body, module_name: "lib_alias"),
-            SourceFile(path: "src/std/nogc_async_mut/io.spl", content: body, module_name: "std_alias")
+            SourceFile(path: "examples/10_tooling/trace32_tools/t32_cli/mod.spl", content: body, module_name: "lib_alias"),
+            SourceFile(path: "src/app/t32_cli/mod.spl", content: body, module_name: "std_alias")
         ]
 
         val result = module_surfaces_from_test_modules(modules, sources)
@@ -72,23 +75,27 @@ describe "module surfaces":
         expect(surfaces.surfaces.len()).to_equal(1)
         expect(surfaces.index_by_name["lib_alias"]).to_equal(0)
         expect(surfaces.index_by_name["std_alias"]).to_equal(0)
-        expect(surfaces.ordered_names).to_equal(["lib_alias", "std_alias"])
-        expect(surfaces.ordered_indices).to_equal([0, 0])
+        # Each alias also publishes the surface's path-derived physical name
+        # (add_indexed_canonical_identity, d2827173e66).
+        expect(surfaces.ordered_names).to_equal(["lib_alias", "examples.10_tooling.trace32_tools.t32_cli.mod", "std_alias"])
+        expect(surfaces.ordered_indices).to_equal([0, 0, 0])
 
     it "coalesces physical aliases before resolving one plain facade owner":
+        # An owner's package is its PATH-derived package (module_surface_package_name),
+        # so the facade sits in the same physical directory as the two spellings.
         val body = "pub fn shared_tick() -> i64:\n    1\n"
-        val provider = parse_and_build_module(body, "src/lib/nogc_async_mut/io.spl")
+        val provider = parse_and_build_module(body, "examples/10_tooling/trace32_tools/t32_cli/mod.spl")
         val facade_body = "export shared_tick\n"
-        val facade = parse_and_build_module(facade_body, "pkg/__init__.spl")
+        val facade = parse_and_build_module(facade_body, "examples/10_tooling/trace32_tools/t32_cli/__init__.spl")
         val modules = {
             "pkg.lib_owner": provider,
             "pkg.std_owner": provider,
             "pkg.__init__": facade
         }
         val sources = [
-            SourceFile(path: "src/lib/nogc_async_mut/io.spl", content: body, module_name: "pkg.lib_owner"),
-            SourceFile(path: "src/std/nogc_async_mut/io.spl", content: body, module_name: "pkg.std_owner"),
-            SourceFile(path: "pkg/__init__.spl", content: facade_body, module_name: "pkg.__init__")
+            SourceFile(path: "examples/10_tooling/trace32_tools/t32_cli/mod.spl", content: body, module_name: "pkg.lib_owner"),
+            SourceFile(path: "src/app/t32_cli/mod.spl", content: body, module_name: "pkg.std_owner"),
+            SourceFile(path: "examples/10_tooling/trace32_tools/t32_cli/__init__.spl", content: facade_body, module_name: "pkg.__init__")
         ]
 
         val result = module_surfaces_from_test_modules(modules, sources)
