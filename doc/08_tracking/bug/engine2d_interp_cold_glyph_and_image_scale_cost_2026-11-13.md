@@ -41,3 +41,36 @@ Shares are from `SIMPLE_INTERP_SAMPLE=1`.
   that skips that validation changes behaviour for malformed fonts.
 - No cheap blob identity exists at the `sfnt_cmap` level; the callers in
   `font_renderer.spl` do have one (the rasterizer cache identity).
+
+## Lane hazard: this pipeline is one import away from the JIT, where the bench crashes
+
+The widget -> Draw-IR -> `cpu` Engine2D pipeline runs interpreted only because
+the JIT refuses the module: `src/lib/gc_async_mut/gpu/engine2d/backend_vulkan.spl`
+calls `env_get` (lines 2401, 3398, 3544, 3580, 3602, 3620) with no import, and
+three definitions are co-compiled. Same class as
+`sffi_vulkan_env_get_unimported_jit_demotion_2026-11-13`, which was fixed for
+its own file on 2026-11-13.
+
+With `use std.nogc_sync_mut.io.env_ops.{env_get}` added to `backend_vulkan.spl`
+locally (not landed), the bench with `E2D_RENDERS=1`:
+
+- JIT-compiles: 36.2 s wall against 6.8 s interpreted, 1,108,272 kB peak RSS
+  against 660,064 kB;
+- renders in 434 ms (compose 410 ms) against 4,967 ms;
+- then exits with SIGSEGV (rc 139) before the frame-hash line prints.
+
+The phase line printed, so the render loop itself completed; the fault is
+between it and the frame-hash line, i.e. in the bench's own `frame_fnv` loop
+over the result pixels or in formatting its value. Not narrowed further, nor
+was it checked that the frame is pixel-identical on that lane. Until it is, adding
+that import moves this pipeline and
+`test/05_perf/gui/engine2d_interp_full_res_render_budget_spec.spl` onto an
+unverified lane.
+
+## Related
+
+- `interp_indexed_array_store_regression_2026-11-11` (open): interpreted
+  `[u32]` indexed stores are 75-130x slower than on the 2026-08-14 seed. The
+  per-pixel store loops above (`_emu_scale_image_pixels`, the clipped/blend
+  paths under `draw_rect_blend`) sit on that path, so part of their cost is
+  that regression rather than the loop shape. Not separated here.

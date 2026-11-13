@@ -90,9 +90,11 @@ The capture spec itself, `test/03_system/gui/ui_draw_ir_pipeline_spec.spl`:
 **The headline of this bug no longer reproduces at its original size.** A
 render now costs ~1.3 s steady state plus a one-time ~3.5 s of cold glyph work,
 not ~9.3 s, and the capture spec runs in 25 s against the 120 s cap, not ~101 s.
-The span-kernel work recorded in
-`engine2d_interpreter_span_kernel_marshalling_perf_gap_2026-08-14.md` removed
-the clear/fill cost this report suspected. What is left is listed below.
+Which change between 2026-07-02 and this base removed the rest was not
+bisected; the span-kernel lane in
+`engine2d_interpreter_span_kernel_marshalling_perf_gap_2026-08-14.md` is the
+likely one, since clear and rect fills now go through `sw_fill_raw_span`. What
+is left is listed below.
 
 ### Where the time goes now
 
@@ -180,6 +182,26 @@ JIT lane, checksum fold alone at 8,294,401 pixels (4K), three warm passes:
 to the per-pixel definition. Committed red first (2 of 3 failing), green after
 the fix.
 
+### Neighbouring specs, fixed tree against base sources
+
+Same seed, `timeout 900` each, serial.
+
+| spec | fixed tree | base sources |
+|------|-----------|--------------|
+| `font_renderer_codepoint_measure_spec` | 6 of 6 | not rerun |
+| `glyph_raster_cache_spec` | 4 of 4 | not rerun |
+| `font_renderer_placement_spec` | 5 of 5 | not rerun |
+| `engine2d_read_pixels_region_equivalence_spec` | 3 of 3 | not rerun |
+| `backend_software_primitives_spec` | 11 of 11 | not rerun |
+| `backend_software_damage_spec` | 22 of 22 | not rerun |
+| `engine2d_readback_metadata_spec` | 2 of 2 | not rerun |
+| `engine2d_readback_present_parity_spec` | 3 of 3 | not rerun |
+| `backend_software_simd_spec` | 10 of 14 | 10 of 14, identical output |
+| `backend_software_damage_checksum_spec` | 0 of 1 | 0 of 1, same missing method `read_pixels_damaged_with_checksum` |
+| `font_renderer_spec` | timeout at 900 s, no example reported | timeout at 900 s, no example reported, same last output line |
+
+The last three fail the same way with and without this change.
+
 ## Remaining (not fixed here)
 
 Filed as `engine2d_interp_cold_glyph_and_image_scale_cost_2026-11-13`:
@@ -195,15 +217,11 @@ Filed as `engine2d_interp_cold_glyph_and_image_scale_cost_2026-11-13`:
 - **`[u32].sum()` returns 0 under `SIMPLE_EXECUTION_MODE=interpret`** and the
   correct value under the JIT.
 
-Also observed, not filed separately:
+Also observed:
 
 - The capture spec fails 5 of 6 examples on `release/1.0.0` before and after
   this change, on palette constants (for example button fill `4281102319`
   rendered against `4282085029` expected). Colour drift between the spec and
   the widget theme, unrelated to speed.
-- The pipeline only runs interpreted because `backend_vulkan.spl` calls
-  `env_get` unimported (same class as
-  `sffi_vulkan_env_get_unimported_jit_demotion_2026-11-13`). With the import
-  added locally the module JIT-compiles — 36 s wall for one render, the render
-  itself 434 ms — and then the process dies with SIGSEGV (rc 139) before the
-  frame hash prints. That import was not landed.
+- The JIT demotion and the SIGSEGV that follows once it is lifted are recorded
+  in the follow-up bug, since they decide which lane this pipeline runs on.
