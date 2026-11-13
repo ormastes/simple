@@ -209,6 +209,7 @@ pub(crate) use module_cache::{
 #[path = "../interpreter_module/mod.rs"]
 pub(crate) mod interpreter_module;
 pub use interpreter_module::print_resolve_stats;
+pub use interpreter_module::PRIVATE_FN_VISIBILITY_HINT;
 use interpreter_module::{
     evaluate_module_exports, get_import_alias, load_and_merge_module, merge_module_definitions, resolve_module_path,
 };

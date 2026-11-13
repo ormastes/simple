@@ -607,6 +607,11 @@ fn private_top_level_fn_names(items: &[Node]) -> std::collections::HashSet<Strin
         .collect()
 }
 
+/// Tail of every private-fn visibility rejection (import rule and call rule).
+/// The driver keys its "never fall back to the interpreter" decision on it, so
+/// both producers interpolate this constant rather than repeating the text.
+pub const PRIVATE_FN_VISIBILITY_HINT: &str = "mark it `pub` or `export` it";
+
 /// Visibility check (interp_private_names_leak_across_modules_2026-11-05):
 /// a braced `use m.{name}` that names a private `fn` of `m` (not re-exported by
 /// an `export`) from a file outside `m`'s directory is a hard error unless the pair is frozen in
@@ -653,7 +658,7 @@ fn check_private_use_names(
             continue;
         }
         return Err(CompileError::semantic(format!(
-            "private fn `{name}` of module `{module_label}` ({}) is not visible to {}; mark it `pub` or `export` it",
+            "private fn `{name}` of module `{module_label}` ({}) is not visible to {}; {PRIVATE_FN_VISIBILITY_HINT}",
             module_path.display(),
             importer.display()
         )));
@@ -1128,7 +1133,10 @@ pub fn load_and_merge_module(
         // Use-list check on the cache path: the AST is gone, so consult the
         // surface recorded when this module was first loaded.
         if let Some(provided) = lookup_provided_names(&module_path) {
-            check_private_use_names(use_stmt, current_file, &module_path, &parts.join("."), &provided)?;
+            if let Err(e) = check_private_use_names(use_stmt, current_file, &module_path, &parts.join("."), &provided) {
+                decrement_load_depth();
+                return Err(e);
+            }
             warn_unprovided_use_names(use_stmt, current_file, &module_path, &parts.join("."), &provided);
         }
 
@@ -1520,7 +1528,17 @@ pub fn load_and_merge_module(
         &module_enums,
     );
     record_provided_names(&module_path, provided_names.clone());
-    check_private_use_names(use_stmt, current_file, &module_path, &parts.join("."), &provided_names)?;
+    if let Err(e) = check_private_use_names(use_stmt, current_file, &module_path, &parts.join("."), &provided_names) {
+        // Release the loading mark exactly like the evaluation-error arm above.
+        // Leaking it made an in-process retry (the driver's JIT -> interpreter
+        // fallback) see this module as a circular import, return its partial
+        // exports WITHOUT re-running this check, and execute the program with
+        // rc 0 (visibility_error_jit_fallback_fail_open_2026-11-13).
+        clear_partial_module_exports(&module_path);
+        unmark_module_loading(&module_path);
+        decrement_load_depth();
+        return Err(e);
+    }
     warn_unprovided_use_names(use_stmt, current_file, &module_path, &parts.join("."), &provided_names);
 
     // Cache the full module exports for future use
@@ -2863,7 +2881,7 @@ pub(crate) fn check_private_call_visibility(
         return Ok(());
     }
     Err(CompileError::semantic(format!(
-        "private fn `{name}` of module `{owner}` is not visible to {current}; mark it `pub` or `export` it"
+        "private fn `{name}` of module `{owner}` is not visible to {current}; {PRIVATE_FN_VISIBILITY_HINT}"
     )))
 }
 
