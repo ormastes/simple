@@ -170,16 +170,56 @@ find({ no_chdir => 1, wanted => sub {
         @tokens <= 1_000_000 or die "C extractor token limit: $path\n";
     }
     my $statement = 0;
+    # Names this file declares `static` (prototype or definition): internal
+    # linkage is sticky, so a later definition without the keyword is still
+    # file-private. Per file, never global — the same name defined non-static
+    # in another file is a real runtime symbol and still counts.
+    my %file_static;
     for (my $i = 0; $i < @tokens; ++$i) {
         my $t = $tokens[$i];
         if ($t =~ /^rt_[A-Za-z0-9_]+$/ && $i > $statement
                 && ($tokens[$i + 1] // '') eq '(') {
             my @prefix = @tokens[$statement .. $i - 1];
+            # Semicolon-less macro invocations (`RT_BINOP(name, x + y)`) end no
+            # statement, so they pile up in front of the next declaration and
+            # their `,`/operator tokens would reject it. Drop leading
+            # `IDENT ( balanced )` groups while declaration tokens remain
+            # after them. Attribute groups and control keywords stay: the
+            # first is declaration syntax, the second must keep rejecting
+            # `if (x) rt_call(y)`. A group with nothing after it stays too, so
+            # a macro-spelled return type still qualifies.
+            for (;;) {
+                last unless @prefix >= 3 && ($prefix[1] // '') eq '('
+                    && $prefix[0] =~ /^[A-Za-z_][A-Za-z0-9_]*$/
+                    && $prefix[0] !~ /^(?:__attribute__|__declspec|_Alignas|alignas|return|if|else|while|for|switch|case|sizeof|do)$/;
+                my $k = 1;
+                my $depth = 0;
+                do {
+                    $depth++ if $prefix[$k] eq '(';
+                    $depth-- if $prefix[$k] eq ')';
+                    ++$k;
+                } while ($k < @prefix && $depth > 0);
+                last if $depth != 0 || $k >= @prefix;
+                splice(@prefix, 0, $k);
+            }
+            # File-private helpers are not cross-lane runtime ABI, whatever
+            # their prefix: `static`, `static inline`, attributes before or
+            # between. Only depth-0 tokens count, so an attribute argument
+            # cannot spell the keyword.
             # A function needs a declaration prefix. Calls/prototypes cannot
             # qualify merely because they occur near a brace. Do not track
             # global brace depth: mutually exclusive #if openings need not
             # balance until preprocessing, which this census does not do.
-            if (!grep { /^(?:=|,|return|if|else|while|for|switch|case|sizeof|\?|:|\+|-|\.|->)$/ } @prefix) {
+            my $declaration = !grep { /^(?:=|,|return|if|else|while|for|switch|case|sizeof|\?|:|\+|-|\.|->)$/ } @prefix;
+            if ($declaration) {
+                my $depth0 = 0;
+                for my $p (@prefix) {
+                    $depth0++ if $p eq '(';
+                    $depth0-- if $p eq ')';
+                    $file_static{$t} = 1 if $p eq 'static' && $depth0 == 0;
+                }
+            }
+            if ($declaration && !$file_static{$t}) {
                 my $j = $i + 1;
                 my $parens = 0;
                 do {
