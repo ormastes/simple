@@ -389,8 +389,24 @@ fn aes128_gcm_decrypt(key: [u8], nonce: [u8], ciphertext: [u8], aad: [u8], tag: 
         tag: 16-byte authentication tag to verify.
 
     Returns: Aes128GcmResult.Ok with plaintext on success,
-             Aes128GcmResult.Err on tag mismatch.
+             Aes128GcmResult.Err on invalid input lengths or tag mismatch.
+
+    Length profile (fail closed, checked before any byte of an input is read):
+    this module implements a restricted NIST SP 800-38D profile — 96-bit IVs
+    only (SP 800-38D 5.2.1.1 recommends restricting IV support to 96 bits;
+    _aes128_gcm_make_j0 implements only the 96-bit J0 = IV || 0^31 || 1 path)
+    and tag length t = 128 only (one of the 5.2.1.2 permitted lengths). Per
+    SP 800-38D 7.2 step 1, an unsupported IV length or len(T) != t returns FAIL.
+    Lengths are public, so the early return does not weaken the constant-time
+    tag comparison below.
     """
+    if key.len() != 16:
+        return Aes128GcmResult.Err("AES-128 key must be 16 bytes")
+    if nonce.len() != 12:
+        return Aes128GcmResult.Err("GCM nonce must be 12 bytes")
+    if tag.len() != 16:
+        return Aes128GcmResult.Err("GCM tag must be 16 bytes")
+
     val round_keys = aes128_key_expansion(key)
 
     # Compute hash subkey H = AES_K(0^128)
