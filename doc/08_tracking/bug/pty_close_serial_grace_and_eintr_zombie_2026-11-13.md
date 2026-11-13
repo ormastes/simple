@@ -2,7 +2,7 @@
 
 - **ID:** pty_close_serial_grace_and_eintr_zombie_2026-11-13
 - **Severity:** P3
-- **Status:** open
+- **Status:** fixed (work/smux-reap-20261113)
 - **Found by:** follow-up to PR #8885 (`2fbfd3498a2`, resolution section of
   `caret_smux_multi_launch_adapter_missing_2026-08-21.md`), which recorded both
   residuals.
@@ -44,3 +44,58 @@
   dropped. EINTR is injected through an `is_running_with` wait seam: a real
   `waitpid(WNOHANG)` practically never returns EINTR, so a signal-driven test
   would not be deterministic.
+
+## Resolution 2026-11-13 (work/smux-reap-20261113)
+
+1. **FD_CLOEXEC on the PTY pair** (both lanes' `open`, shared
+   `set_pty_fd_cloexec`). `dup2` onto 0/1/2 clears the flag, so the child's
+   own stdio is unaffected; later panes' children no longer inherit earlier
+   masters, so closing a master hangs up its own child at once.
+2. **`rt_pty_hangup(handle) -> bool`**, Rust runtime + interpreter + C lane
+   (`std.sys.pty.hangup`, `sosix_pty_hangup`; windows_native provider answers
+   false). Under the child-table lock it sends SIGHUP to the child's session
+   group and stamps `PtyChildRecord.hung_up_at`. `rt_pty_close` stays the only
+   closer and reaper: `reap_pty_child_record` runs the 1 s grace from the stamp
+   (from now when never hung up, i.e. single close unchanged), checks the child
+   at least once even after the shared deadline, then SIGKILLs the group and
+   reaps. The signal is sent while the record is still in the table, and only
+   the table owner reaps, so the unreaped child pins the pid.
+3. **smux `close_owned_children`** hangs up every pane that will end in
+   `sosix_pty_close` (no owned transfer, not awaiting release, no
+   `terminal_ref`, `pty_fd >= 0`) before closing any, but only when two or more
+   such panes are in scope. Rollback and stop-all of the caret multi-launch
+   adapter both reach it through `smux_kill_session`.
+4. **EINTR**: `probe_pty_child_with` (shared by both lanes' `is_running`)
+   retries EINTR (bounded, 64), drops the record only on a reap or ECHILD, and
+   keeps it on any other failure so close still reaps.
+
+Green: the three red tests pass (`cargo test -p simple-runtime --lib
+value::pty`, 8/8).
+
+Close time, 4 panes, `caret_smux_launch_team` + `caret_smux_stop_all`,
+interpreter lane, Linux aarch64:
+
+| children | base seed, base source | branch seed, branch source |
+|---|---|---|
+| 4 x `/bin/sh` | 3073 ms | 23 ms |
+| 4 x SIGHUP-ignoring script | 4077 ms | 1059 ms |
+
+Specs (`test --mode=interpreter --no-cache`), base seed on base source vs
+branch seed on branch source — identical, pre-existing reds have the same
+failing examples: caret_smux_multi_launch 6/6 -> 6/6, multi_caret_manager
+13/13, pane_backend 15/15, cs_smux_launcher 2/2, smux_client_input 17/17,
+smux_system 56/56, smux_pane_lifecycle 10/12, smux_live_multi_pane 1/4,
+smux_sosix_boundary 2/3.
+
+### Remaining
+
+- **Runtime redeploy required.** A runtime without `rt_pty_hangup` stops with
+  `unknown extern function: rt_pty_hangup` when a smux session with two or
+  more PTY panes is torn down (unresolved externs are a hard error, so no
+  capability probe can guard it). Measured: base seed on branch source runs
+  caret_smux_multi_launch 3/6. Single-pane teardown never reaches the extern.
+- Batch trade-off: a child that ignores SIGHUP but exits on master EOF loses
+  its own grace in batch mode — its master closes only after the shared 1 s
+  deadline, immediately followed by SIGKILL.
+- The out-of-band reap hazard recorded by PR #8885 (a generic
+  `native_process_wait(pid)` on a PTY pid) is unchanged.
