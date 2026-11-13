@@ -1,0 +1,153 @@
+# @tag: unit, language, interpreter, jit, enum
+# Bug: optional_enum_some_variant_match_engine_divergence_2026-11-14
+#
+# A `Kind?` parameter, typed `val` or class field that holds a bare `Kind`
+# value must select the `case Some(<variant>):` arm of THAT variant. Measured on
+# the base seed (fdd57145ebe): the interpreter matched no `Some(...)` arm at all
+# (every case answered `case _:`), and the strict JIT matched the FIRST
+# `Some(...)` arm for every non-nil value (`Kind.F32` answered "i8").
+#
+# Each fixture puts a wrong `Some(...)` arm ahead of the right one, and each
+# engine is checked against the literal expected text, not against the other.
+# Runs through the compiler binary (`SIMPLE_BINARY` or `bin/simple`).
+use std.spec
+use std.io_runtime.{process_run, file_write, dir_create_all, env_get, env_set}
+
+fn work_dir() -> text:
+    val tmp = env_get("TMPDIR")
+    val root = if tmp != "": tmp else: "/tmp"
+    val dir = root + "/simple-spec-optional-enum-some-variant"
+    dir_create_all(dir)
+    dir
+
+fn run_in(engine: text, name: text, source: text) -> (text, text, i64):
+    val path = work_dir() + "/" + name + ".spl"
+    assert_true(file_write(path, source))
+    env_set("SIMPLE_EXECUTION_MODE", engine)
+    env_set("SIMPLE_JIT_STRICT", "1")
+    env_set("SIMPLE_RUST_SEED_WARNING", "0")
+    env_set("SIMPLE_TIMEOUT_SECONDS", "0")
+    val configured = env_get("SIMPLE_BINARY")
+    val bin = if configured == "": "bin/simple" else: configured
+    val ran = process_run(bin, ["run", path])
+    env_set("SIMPLE_EXECUTION_MODE", "interpret")
+    env_set("SIMPLE_JIT_STRICT", "0")
+    (ran[0].trim(), ran[1], ran[2])
+
+val DECLS = r"""enum Kind:
+    I8
+    F32
+    Wrap(i64)
+
+class Holder:
+    k: Kind?
+
+fn unq(k: Kind?) -> text:
+    match k:
+        case Some(I8): "i8"
+        case Some(F32): "f32"
+        case Some(Wrap(n)): "wrap{n}"
+        case None: "none"
+        case _: "other"
+
+fn qual(k: Kind?) -> text:
+    match k:
+        case Some(Kind.I8): "i8"
+        case Some(Kind.F32): "f32"
+        case Some(Kind.Wrap(n)): "wrap{n}"
+        case None: "none"
+        case _: "other"
+
+"""
+
+val PARAMS = "fn main():\n    print(unq(Kind.F32) + \" \" + unq(Kind.I8) + \" \" + unq(Kind.Wrap(7)) + \" \" + unq(nil))\n    print(qual(Kind.F32) + \" \" + qual(Kind.I8) + \" \" + qual(Kind.Wrap(7)) + \" \" + qual(nil))\n"
+
+val LETS = r"""fn main():
+    val a: Kind? = Kind.I8
+    match a:
+        case Some(F32): print("f32")
+        case Some(I8): print("i8")
+        case _: print("other")
+    val b: Kind? = Kind.Wrap(5)
+    match b:
+        case Some(Kind.I8): print("i8")
+        case Some(Kind.Wrap(n)): print("wrap{n}")
+        case _: print("other")
+"""
+
+val FIELDS = "fn main():\n    val h = Holder(k: Kind.F32)\n    match h.k:\n        case Some(I8): print(\"i8\")\n        case Some(F32): print(\"f32\")\n        case _: print(\"other\")\n    val h2 = Holder(k: Kind.Wrap(9))\n    print(unq(h.k) + \" \" + qual(h2.k))\n"
+
+val NESTED = r"""fn tup(k: Kind?, n: i64) -> text:
+    match (k, n):
+        case (Some(I8), 1): "t-i8"
+        case (Some(F32), 1): "t-f32"
+        case (Some(Wrap(m)), _): "t-wrap{m}"
+        case _: "t-other"
+
+fn bind(k: Kind?) -> text:
+    var r = "b-none"
+    match k:
+        case Some(x):
+            match x:
+                case F32: r = "b-f32"
+                case _: r = "b-other"
+        case None: r = "b-none"
+    r
+
+fn main():
+    print(tup(Kind.F32, 1) + " " + tup(Kind.Wrap(3), 0) + " " + tup(Kind.I8, 2))
+    print(bind(Kind.F32) + " " + bind(Kind.I8) + " " + bind(nil))
+"""
+
+# Same JIT defect, scalar payloads: `case Some(0):` matched every non-nil i64?.
+val LITS = r"""fn oi(x: i64?) -> text:
+    match x:
+        case Some(0): "zero"
+        case Some(7): "seven"
+        case Some(n): "n{n}"
+        case None: "none"
+
+fn ot(x: text?) -> text:
+    match x:
+        case Some("hi"): "hi"
+        case Some(s): "s:{s}"
+        case None: "none"
+
+fn ob(x: bool?) -> text:
+    match x:
+        case Some(true): "T"
+        case Some(false): "F"
+        case None: "none"
+
+fn boxed_i() -> i64?:
+    Some(7)
+
+fn main():
+    print(oi(0) + " " + oi(7) + " " + oi(9) + " " + oi(nil) + " " + oi(boxed_i()))
+    print(ot("hi") + " " + ot("yo") + " " + ot(nil))
+    print(ob(true) + " " + ob(false) + " " + ob(nil))
+"""
+
+fn expect_both(name: text, body: text, want: text):
+    val (iout, ierr, irc) = run_in("interpret", name + "_interp", DECLS + body)
+    assert_equal(irc, 0)
+    assert_equal(iout, want)
+    val (jout, jerr, jrc) = run_in("jit", name + "_jit", DECLS + body)
+    assert_equal(jrc, 0)
+    assert_equal(jout, want)
+
+describe "case Some(<variant>) over a Kind? holding a bare enum value":
+    it "selects the variant's arm for parameters on both engines":
+        expect_both("params", PARAMS, "f32 i8 wrap7 none\nf32 i8 wrap7 none")
+
+    it "selects the variant's arm for typed lets on both engines":
+        expect_both("lets", LETS, "i8\nwrap5")
+
+    it "selects the variant's arm for class fields on both engines":
+        expect_both("fields", FIELDS, "f32\nf32 wrap9")
+
+    it "keeps nested tuple patterns and Some(x) binders right on both engines":
+        expect_both("nested", NESTED, "t-f32 t-wrap3 t-other\nb-f32 b-other b-none")
+
+    it "tests scalar literal payloads instead of taking the first Some arm":
+        expect_both("lits", LITS, "zero seven n9 none seven\nhi s:yo none\nT F none")

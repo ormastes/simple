@@ -825,15 +825,10 @@ impl Lowerer {
                         ty: TypeId::BOOL,
                     });
                 }
-                // Special handling for Some - check not-none
+                // Special handling for Some - presence AND payload sub-patterns
+                // (see `optional_some_condition`).
                 if variant == "Some" && !subject_enum_owns_variant {
-                    return Ok(HirExpr {
-                        kind: HirExprKind::BuiltinCall {
-                            name: "rt_is_some".to_string(),
-                            args: vec![subject_ref],
-                        },
-                        ty: TypeId::BOOL,
-                    });
+                    return Ok(self.optional_some_condition(pattern, subject_ty, subject_ref, ctx));
                 }
 
                 // Positional class/struct pattern: `case ClassName(a, b, c)` where the
@@ -984,6 +979,48 @@ impl Lowerer {
                 if variants.iter().any(|(v, _)| v == variant)
                     && !(name == "Option" && !generic_params.is_empty()))
         })
+    }
+
+    /// Arm test for a top-level builtin-optional `case Some(p):`: presence
+    /// (`rt_is_some`) AND the refutable payload sub-patterns, read through the
+    /// same dual-representation slot as the nested `Ok(Some(..))` path in
+    /// `subpattern_condition_typed`. Presence alone made the first
+    /// `Some(I8)` arm match `Kind.F32` / `Kind.Wrap(7)` in a `Kind?` slot.
+    /// Shared by the statement and expression forms.
+    /// optional_enum_some_variant_match_engine_divergence_2026-11-14
+    pub(crate) fn optional_some_condition(
+        &mut self,
+        pattern: &Pattern,
+        subject_ty: TypeId,
+        subject_ref: HirExpr,
+        ctx: &mut FunctionContext,
+    ) -> HirExpr {
+        let deeper = match pattern {
+            Pattern::Enum {
+                name,
+                payload: Some(inner),
+                ..
+            } => self.nested_payload_condition(name, "Some", subject_ty, &subject_ref, inner, ctx),
+            _ => None,
+        };
+        let presence = HirExpr {
+            kind: HirExprKind::BuiltinCall {
+                name: "rt_is_some".to_string(),
+                args: vec![subject_ref],
+            },
+            ty: TypeId::BOOL,
+        };
+        match deeper {
+            None => presence,
+            Some(inner_test) => HirExpr {
+                kind: HirExprKind::Binary {
+                    op: BinOp::And,
+                    left: Box::new(presence),
+                    right: Box::new(inner_test),
+                },
+                ty: TypeId::BOOL,
+            },
+        }
     }
 
     /// Build the refutability test for an enum variant pattern's payload

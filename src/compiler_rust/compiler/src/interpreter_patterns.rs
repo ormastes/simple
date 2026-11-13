@@ -25,6 +25,16 @@ fn pattern_enum_name_matches(pattern_name: &str, value_name: &str) -> bool {
     })
 }
 
+/// Does the user enum `enum_name` declare its own `Some` or `None` variant?
+/// Such an enum is matched by variant name, never through the flat-Option
+/// look-through in `pattern_matches`.
+fn enum_declares_option_variant(enum_name: &str, enums: &Enums) -> bool {
+    let declares = |def: &simple_parser::ast::EnumDef| def.variants.iter().any(|v| v.name == "Some" || v.name == "None");
+    if let Some(def) = enums.get(enum_name) {
+        return declares(def);
+    }
+    BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow().get(enum_name).is_some_and(|def| declares(def)))
+}
 
 /// Number of times an Option pattern (`Some(..)` / `None` / `nil`) was tested
 /// against a `Result` value. Counted on every detection; the stderr warning is
@@ -597,6 +607,32 @@ pub(crate) fn pattern_matches(
                         }
                     }
                 }
+                // The converse: a `Kind?` slot holding a BARE `Kind` value (no
+                // Option wrapper -- parameter binding, typed `val` and field
+                // init never Some-wrap) is its own `Some` payload, exactly like
+                // the bare scalar handled by the flat-Option arm above. Without
+                // this no `case Some(...)` arm matched it at all (`Some(F32)`,
+                // `Some(Wrap(n))`, even `Some(x)` fell to `case _:`). Excluded:
+                // Option/Result values, and an enum that declares its own
+                // `Some`/`None` variants (`enum Opt: Some(i64) | None`), which
+                // keeps the name-keyed match above. When the definition is not
+                // visible here, a value whose variant is itself spelled
+                // `Some`/`None` is left alone for the same reason.
+                // optional_enum_some_variant_match_engine_divergence_2026-11-14
+                if variant == "Some"
+                    && matches!(enum_name.as_str(), "Option" | "_")
+                    && !matches!(ve.as_str(), "Option" | "Result")
+                    && !matches!(vv.as_str(), "Some" | "None")
+                    && !enum_declares_option_variant(ve, enums)
+                {
+                    return match payload {
+                        None => Ok(true),
+                        Some(patterns) if patterns.len() == 1 => {
+                            pattern_matches(&patterns[0], value, bindings, enums, classes)
+                        }
+                        _ => Ok(false),
+                    };
+                }
             }
 
             // Positional class/struct pattern: `case ClassName(a, b, c)` where the value is
@@ -1126,9 +1162,18 @@ mod tests {
 
     use super::{match_arm_matches, pattern_matches, OPTION_PATTERN_OVER_RESULT_HITS};
 
+    /// Start each snippet from a fresh interpreter, like one `simple run`
+    /// process. Without it a previous snippet's module globals (functions
+    /// included) on the same test thread answered calls in the next one.
+    fn fresh_interpreter() {
+        crate::interpreter::clear_module_cache();
+        crate::interpreter::clear_interpreter_state();
+    }
+
     /// Run a Simple snippet and return the exit code.
     /// Use `main = <expr>` to set a numeric exit code (0 = ok, non-zero = error).
     fn run(src: &str) -> i32 {
+        fresh_interpreter();
         let mut parser = Parser::new(src);
         let module = parser.parse().expect("parse");
         evaluate_module(&module.items).expect("evaluate")
@@ -2028,6 +2073,7 @@ main = classify(0) + 10 * classify(5) + 100 * classify(42) + 1000 * classify(100
     // this suite pins the match-arm check itself.
 
     fn run_err(src: &str) -> String {
+        fresh_interpreter();
         let mut parser = Parser::new(src);
         let module = parser.parse().expect("parse");
         match evaluate_module(&module.items) {
@@ -2151,12 +2197,58 @@ main = classify(0) + 10 * classify(5) + 100 * classify(42) + 1000 * classify(100
         // Controls: a real variant into `Kind` and `Kind?`, and a function
         // into a fn-typed parameter, still bind.
         let fns = "fn code(k: Kind) -> i64:\n    match k:\n        case I8: 1\n        case _: 3\nfn opt(k: Kind?) -> i64:\n    match k:\n        case _: 30\nfn apply(f: fn() -> i64) -> i64:\n    f()\n";
-        // Only "binds without error" is asserted for `code`: under this
-        // `main = expr` harness a real `Kind.I8` takes `case _:` even through
-        // an untyped parameter (pre-existing harness divergence from the CLI,
-        // recorded in the bug doc); the CLI spec pins the variant answer.
+        assert_eq!(run(&format!("{decls}{fns}main = code(Kind.I8)\n")), 1);
         assert_eq!(run(&format!("{decls}{fns}main = code(Kind.F32)\n")), 3);
         assert_eq!(run(&format!("{decls}{fns}main = opt(Kind.F32)\n")), 30);
         assert_eq!(run(&format!("{decls}{fns}main = 100 * apply(helper)\n")), 100);
+    }
+
+    // --- optional_enum_some_variant_match_engine_divergence_2026-11-14 ---
+
+    // The `main = expr` harness used to take `case _:` for a real `Kind.I8`
+    // while `simple run` of the same source answered the `I8` arm. Cause: `run`
+    // reused the thread's interpreter state, so an earlier snippet's
+    // `fn code(...)` (here: one with only `case _: 3`) answered the call. The
+    // CLI evaluates one module per process and never saw it.
+    #[test]
+    fn harness_real_enum_value_takes_its_variant_arm() {
+        let decls = "enum Kind:\n    I8\n    F32\n";
+        let stale = "fn code(k: Kind) -> i64:\n    match k:\n        case _: 3\n";
+        assert_eq!(run(&format!("{decls}{stale}main = code(Kind.I8)\n")), 3);
+        let untyped = "fn code(k) -> i64:\n    match k:\n        case I8: 1\n        case F32: 2\n        case _: 3\n";
+        let typed = "fn code(k: Kind) -> i64:\n    match k:\n        case I8: 1\n        case F32: 2\n        case _: 3\n";
+        for callee in [untyped, typed] {
+            assert_eq!(run(&format!("{decls}{callee}main = code(Kind.I8)\n")), 1, "{callee}");
+            assert_eq!(run(&format!("{decls}{callee}main = code(Kind.F32)\n")), 2, "{callee}");
+        }
+    }
+
+    // A `Kind?` slot holding a bare `Kind` value is its own `Some` payload,
+    // exactly like a bare scalar in a `T?` slot.
+    #[test]
+    fn some_variant_pattern_looks_through_a_bare_enum_in_an_optional_slot() {
+        let decls = "enum Kind:\n    I8\n    F32\n    Wrap(i64)\n";
+        let opt = "fn opt(k: Kind?) -> i64:\n    match k:\n        case Some(I8): 1\n        case Some(F32): 2\n        case Some(Wrap(n)): 10 + n\n        case None: 4\n        case _: 5\n";
+        for (call, want) in [("opt(Kind.F32)", 2), ("opt(Kind.I8)", 1), ("opt(Kind.Wrap(7))", 17), ("opt(nil)", 4), ("opt(Some(Kind.F32))", 2)] {
+            assert_eq!(run(&format!("{decls}{opt}main = {call}\n")), want, "{call}");
+        }
+        let binder = "fn b(k: Kind?) -> i64:\n    match k:\n        case Some(x): 1\n        case _: 5\n";
+        assert_eq!(run(&format!("{decls}{binder}main = b(Kind.F32)\n")), 1);
+        assert_eq!(run(&format!("{decls}{binder}main = b(nil)\n")), 5);
+    }
+
+    // Guards: a user enum that declares its own `Some` keeps name-keyed
+    // matching (its other variants never match `case Some(x):`), and Result /
+    // None / nil never match `Some`.
+    #[test]
+    fn some_pattern_look_through_keeps_its_guards() {
+        let own_some = "enum Opt:\n    Some(i64)\n    None\nfn f(o: Opt) -> i64:\n    match o:\n        case Some(x): x\n        case _: 99\n";
+        assert_eq!(run(&format!("{own_some}main = f(Opt.None)\n")), 99);
+        assert_eq!(run(&format!("{own_some}main = f(Opt.Some(7))\n")), 7);
+        let none_some = "fn f(o) -> i64:\n    match o:\n        case Some(x): 1\n        case _: 5\n";
+        assert_eq!(run(&format!("{none_some}main = f(None)\n")), 5);
+        assert_eq!(run(&format!("{none_some}main = f(nil)\n")), 5);
+        assert_eq!(run(&format!("{none_some}main = f(Ok(1))\n")), 5);
+        assert_eq!(run(&format!("{none_some}main = f(Err(1))\n")), 5);
     }
 }
