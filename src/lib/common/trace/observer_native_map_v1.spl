@@ -4,6 +4,9 @@
 # The loader must supply bounded bytes from its resident image and retain code,
 # map and provider until process exit. Never read arbitrary pointers here.
 use std.common.trace.observer_contract_v1.*
+use std.common.binary_io.{bytes_push_le}
+use std.common.isa.a64_encode_v1.{A64_BRANCH26_MAX_FORWARD_BYTES_V1, A64_BRANCH26_MAX_BACKWARD_BYTES_V1, a64_bl_v1}
+use std.common.isa.x64_encode_v1.{X64_REL32_MAX_FORWARD_V1, X64_REL32_MAX_BACKWARD_V1}
 
 pub const TRACE_NATIVE_MAP_SCHEMA_V1 = 1
 
@@ -99,19 +102,13 @@ pub fn trace_native_branch_displacement_v1(site: TraceNativeSiteV1, image_size: 
             # CALL starts at +2, its return address is +7.
             if site.offset % 2 != 0:
                 return Err(TraceFailureV1.InvalidMap)
-            trace_native_displacement_v1(site.offset + 7, site.target_offset, 2147483647, 2147483648)
+            trace_native_displacement_v1(site.offset + 7, site.target_offset, X64_REL32_MAX_FORWARD_V1 as u64, X64_REL32_MAX_BACKWARD_V1 as u64)
         case Arm64Branch26:
             if site.offset % 4 != 0 or site.target_offset % 4 != 0:
                 return Err(TraceFailureV1.InvalidMap)
             # BL is at +20; the encoded signed immediate is in instructions.
-            val distance = trace_native_displacement_v1(site.offset + 20, site.target_offset, 134217724, 134217728)?
+            val distance = trace_native_displacement_v1(site.offset + 20, site.target_offset, A64_BRANCH26_MAX_FORWARD_BYTES_V1 as u64, A64_BRANCH26_MAX_BACKWARD_BYTES_V1 as u64)?
             Ok(distance / 4)
-
-fn trace_native_append_word_v1(bytes: [u8], word: u64) -> [u8]:
-    var result = bytes
-    for shift in [0, 8, 16, 24]:
-        result.push(((word >> shift) & 255) as u8)
-    result
 
 # Candidate template emitter and validator share one exact private encoding.
 # This does not schedule a hook in machine code or qualify either trampoline.
@@ -123,24 +120,21 @@ pub fn trace_native_off_template_v1(site: TraceNativeSiteV1, image_size: u64) ->
             if encoded < 0:
                 encoded = encoded + 4294967296
             var bytes: [u8] = [235, 11, 232]
-            bytes = trace_native_append_word_v1(bytes, encoded as u64)
+            bytes = bytes_push_le(bytes, encoded as u64, 4)
             bytes.push(235)
             bytes.push(4)
-            bytes = trace_native_append_word_v1(bytes, site.site_id as u64)
+            bytes = bytes_push_le(bytes, site.site_id as u64, 4)
             Ok(bytes)
         case Arm64Branch26:
-            var encoded = displacement
-            if encoded < 0:
-                encoded = encoded + 67108864
             var bytes: [u8] = []
-            bytes = trace_native_append_word_v1(bytes, 335544328) # B +32
-            bytes = trace_native_append_word_v1(bytes, 2847885296) # STP x16,x17,[sp,#-16]!
-            bytes = trace_native_append_word_v1(bytes, 2847898592) # STP x0,x30,[sp,#-16]!
-            bytes = trace_native_append_word_v1(bytes, 1384120320 | (((site.site_id as u64) & 65535) << 5))
-            bytes = trace_native_append_word_v1(bytes, 1923088384 | ((((site.site_id as u64) >> 16) & 65535) << 5))
-            bytes = trace_native_append_word_v1(bytes, 2483027968 | (encoded as u64))
-            bytes = trace_native_append_word_v1(bytes, 2831252448) # LDP x0,x30,[sp],#16
-            bytes = trace_native_append_word_v1(bytes, 2831239152) # LDP x16,x17,[sp],#16
+            bytes = bytes_push_le(bytes, 335544328, 4) # B +32
+            bytes = bytes_push_le(bytes, 2847885296, 4) # STP x16,x17,[sp,#-16]!
+            bytes = bytes_push_le(bytes, 2847898592, 4) # STP x0,x30,[sp,#-16]!
+            bytes = bytes_push_le(bytes, 1384120320 | (((site.site_id as u64) & 65535) << 5), 4)
+            bytes = bytes_push_le(bytes, 1923088384 | ((((site.site_id as u64) >> 16) & 65535) << 5), 4)
+            bytes = bytes_push_le(bytes, a64_bl_v1(displacement) as u64, 4)
+            bytes = bytes_push_le(bytes, 2831252448, 4) # LDP x0,x30,[sp],#16
+            bytes = bytes_push_le(bytes, 2831239152, 4) # LDP x16,x17,[sp],#16
             Ok(bytes)
 
 pub fn trace_native_map_validate_v1(manifest: TraceNativeMapV1, image: [u8]) -> Result<bool, TraceFailureV1>:

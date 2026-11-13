@@ -25,6 +25,7 @@
 # residency or patch permission (that is trace_native_map_validate_v1's job).
 use std.common.trace.observer_contract_v1.{TraceFailureV1}
 use std.common.text_bytes.{bytes_to_text, utf8_bytes_valid}
+use std.common.binary_io.{bytes_read_le_at, bytes_push_le}
 
 pub const XRAY_MAP_HEADER_BYTES_V1 = 48
 # Byte offset of the PREL64-relocated u64 text_base field in the header.
@@ -98,18 +99,6 @@ fn xray_map_site_shape_v1(isa: i64) -> (i64, i64, i64, i64):
 pub fn xray_map_runtime_text_base_v1(map_address: i64, text_base_field: u64) -> i64:
     map_address + XRAY_MAP_TEXT_BASE_OFFSET_V1 + (text_base_field as i64)
 
-fn xray_map_put_v1(bytes: [u8], value: u64, width: i64) -> [u8]:
-    var output = bytes
-    for index in 0..width:
-        output.push(((value >> (index * 8)) & 255) as u8)
-    output
-
-fn xray_map_get_v1(bytes: [u8], offset: i64, width: i64) -> u64:
-    var value: u64 = 0
-    for index in 0..width:
-        value = value | ((bytes[offset + index] as u64) << (index * 8))
-    value
-
 fn xray_map_kind_valid_v1(kind: i64) -> bool:
     kind == XRAY_MAP_KIND_ENTRY_V1 or kind == XRAY_MAP_KIND_EXIT_V1 or kind == XRAY_MAP_KIND_TAIL_EXIT_V1
 
@@ -160,30 +149,30 @@ pub fn xray_map_encode_v1(map: XrayMapV1) -> Result<[u8], TraceFailureV1>:
         for byte in function.name.bytes(): strings.push(byte)
         strings.push(0u8)
     var bytes: [u8] = [83u8, 88u8, 82u8, 77u8]
-    bytes = xray_map_put_v1(bytes, XRAY_MAP_FORMAT_V1 as u64, 2)
-    bytes = xray_map_put_v1(bytes, map.isa as u64, 2)
-    bytes = xray_map_put_v1(bytes, map.abi_profile as u64, 2)
-    bytes = xray_map_put_v1(bytes, map.sled_abi_version as u64, 2)
-    bytes = xray_map_put_v1(bytes, map.functions.len() as u64, 4)
-    bytes = xray_map_put_v1(bytes, map.sites.len() as u64, 4)
+    bytes = bytes_push_le(bytes, XRAY_MAP_FORMAT_V1 as u64, 2)
+    bytes = bytes_push_le(bytes, map.isa as u64, 2)
+    bytes = bytes_push_le(bytes, map.abi_profile as u64, 2)
+    bytes = bytes_push_le(bytes, map.sled_abi_version as u64, 2)
+    bytes = bytes_push_le(bytes, map.functions.len() as u64, 4)
+    bytes = bytes_push_le(bytes, map.sites.len() as u64, 4)
     for byte in map.build_id: bytes.push(byte)
-    bytes = xray_map_put_v1(bytes, map.text_base, 8)
-    bytes = xray_map_put_v1(bytes, strings.len() as u64, 4)
+    bytes = bytes_push_le(bytes, map.text_base, 8)
+    bytes = bytes_push_le(bytes, strings.len() as u64, 4)
     for index in 0..map.functions.len():
         val function = map.functions[index]
-        bytes = xray_map_put_v1(bytes, function.local_fn_id as u64, 4)
-        bytes = xray_map_put_v1(bytes, function.first_site as u64, 4)
-        bytes = xray_map_put_v1(bytes, function.site_count as u64, 4)
-        bytes = xray_map_put_v1(bytes, name_offsets[index] as u64, 4)
+        bytes = bytes_push_le(bytes, function.local_fn_id as u64, 4)
+        bytes = bytes_push_le(bytes, function.first_site as u64, 4)
+        bytes = bytes_push_le(bytes, function.site_count as u64, 4)
+        bytes = bytes_push_le(bytes, name_offsets[index] as u64, 4)
     for site in map.sites:
-        bytes = xray_map_put_v1(bytes, site.text_offset, 8)
-        bytes = xray_map_put_v1(bytes, site.local_fn_id as u64, 4)
+        bytes = bytes_push_le(bytes, site.text_offset, 8)
+        bytes = bytes_push_le(bytes, site.local_fn_id as u64, 4)
         bytes.push(site.kind as u8)
         bytes.push(site.len as u8)
         bytes.push(site.align as u8)
         bytes.push(0u8)
-        bytes = xray_map_put_v1(bytes, site.off_word as u64, 4)
-        bytes = xray_map_put_v1(bytes, site.on_word as u64, 4)
+        bytes = bytes_push_le(bytes, site.off_word as u64, 4)
+        bytes = bytes_push_le(bytes, site.on_word as u64, 4)
     for byte in strings: bytes.push(byte)
     Ok(bytes)
 
@@ -205,10 +194,10 @@ pub fn xray_map_decode_v1(bytes: [u8]) -> Result<XrayMapV1, TraceFailureV1>:
     if bytes.len() < XRAY_MAP_HEADER_BYTES_V1: return Err(TraceFailureV1.InvalidMap)
     if bytes[0] != 83u8 or bytes[1] != 88u8 or bytes[2] != 82u8 or bytes[3] != 77u8:
         return Err(TraceFailureV1.InvalidMap)
-    if xray_map_get_v1(bytes, 4, 2) != (XRAY_MAP_FORMAT_V1 as u64): return Err(TraceFailureV1.InvalidMap)
-    val fn_count = xray_map_get_v1(bytes, 12, 4) as i64
-    val site_count = xray_map_get_v1(bytes, 16, 4) as i64
-    val string_bytes = xray_map_get_v1(bytes, 44, 4) as i64
+    if bytes_read_le_at(bytes, 4, 2) != (XRAY_MAP_FORMAT_V1 as u64): return Err(TraceFailureV1.InvalidMap)
+    val fn_count = bytes_read_le_at(bytes, 12, 4) as i64
+    val site_count = bytes_read_le_at(bytes, 16, 4) as i64
+    val string_bytes = bytes_read_le_at(bytes, 44, 4) as i64
     if fn_count > XRAY_MAP_MAX_ROWS_V1 or site_count > XRAY_MAP_MAX_ROWS_V1:
         return Err(TraceFailureV1.InvalidMap)
     val sites_start = XRAY_MAP_HEADER_BYTES_V1 + fn_count * XRAY_MAP_FUNCTION_ROW_BYTES_V1
@@ -219,25 +208,25 @@ pub fn xray_map_decode_v1(bytes: [u8]) -> Result<XrayMapV1, TraceFailureV1>:
     var functions: [XrayMapFunctionV1] = []
     for row in 0..fn_count:
         val at = XRAY_MAP_HEADER_BYTES_V1 + row * XRAY_MAP_FUNCTION_ROW_BYTES_V1
-        val name_off = xray_map_get_v1(bytes, at + 12, 4) as i64
+        val name_off = bytes_read_le_at(bytes, at + 12, 4) as i64
         if name_off >= string_bytes: return Err(TraceFailureV1.InvalidMap)
         val name = xray_map_name_at_v1(bytes, strings_start + name_off, bytes.len())?
-        functions.push(XrayMapFunctionV1(local_fn_id: xray_map_get_v1(bytes, at, 4) as u32,
-            first_site: xray_map_get_v1(bytes, at + 4, 4) as u32,
-            site_count: xray_map_get_v1(bytes, at + 8, 4) as u32, name: name))
+        functions.push(XrayMapFunctionV1(local_fn_id: bytes_read_le_at(bytes, at, 4) as u32,
+            first_site: bytes_read_le_at(bytes, at + 4, 4) as u32,
+            site_count: bytes_read_le_at(bytes, at + 8, 4) as u32, name: name))
     var sites: [XrayMapSiteV1] = []
     for row in 0..site_count:
         val at = sites_start + row * XRAY_MAP_SITE_ROW_BYTES_V1
         if bytes[at + 15] != 0u8: return Err(TraceFailureV1.InvalidMap)
-        sites.push(XrayMapSiteV1(text_offset: xray_map_get_v1(bytes, at, 8),
-            local_fn_id: xray_map_get_v1(bytes, at + 8, 4) as u32,
+        sites.push(XrayMapSiteV1(text_offset: bytes_read_le_at(bytes, at, 8),
+            local_fn_id: bytes_read_le_at(bytes, at + 8, 4) as u32,
             kind: bytes[at + 12] as i64, len: bytes[at + 13] as i64, align: bytes[at + 14] as i64,
-            off_word: xray_map_get_v1(bytes, at + 16, 4) as i64,
-            on_word: xray_map_get_v1(bytes, at + 20, 4) as i64))
-    val map = XrayMapV1(isa: xray_map_get_v1(bytes, 6, 2) as i64,
-        abi_profile: xray_map_get_v1(bytes, 8, 2) as i64,
-        sled_abi_version: xray_map_get_v1(bytes, 10, 2) as i64,
-        build_id: build_id, text_base: xray_map_get_v1(bytes, 36, 8),
+            off_word: bytes_read_le_at(bytes, at + 16, 4) as i64,
+            on_word: bytes_read_le_at(bytes, at + 20, 4) as i64))
+    val map = XrayMapV1(isa: bytes_read_le_at(bytes, 6, 2) as i64,
+        abi_profile: bytes_read_le_at(bytes, 8, 2) as i64,
+        sled_abi_version: bytes_read_le_at(bytes, 10, 2) as i64,
+        build_id: build_id, text_base: bytes_read_le_at(bytes, 36, 8),
         functions: functions, sites: sites)
     xray_map_rows_valid_v1(map)?
     Ok(map)
