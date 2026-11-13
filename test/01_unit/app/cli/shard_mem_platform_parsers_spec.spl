@@ -1,6 +1,6 @@
 use std.spec
 use app.cli.shard_mem_clamp.{shard_freebsd_available_kb_from_sysctl, shard_rctl_memory_cap_kb_from_rules, shard_rctl_probe_note_v1, shard_windows_headroom_kb_v1, shard_mem_available_kb, shard_cgroup_memory_max_kb, build_host_memory_total_kib, build_host_memory_total_kib_bounded, build_host_memory_total_kib_from_bytes_field}
-use app.cli.shard_mem_clamp.{shard_threads_cap_for}
+use app.cli.shard_mem_clamp.{shard_threads_cap_for, shard_simpleos_meminfo_kb_v1, shard_simpleos_meminfo_note_v1, shard_simpleos_kb_from_probe_v1}
 
 # Every OS memory source is decoded by a pure function that every platform
 # compiles, so a Linux host covers the FreeBSD / Windows / macOS decisions.
@@ -65,3 +65,50 @@ describe "shard memory platform decoders":
         expect(shard_mem_available_kb() > 0).to_be_true()
         expect(build_host_memory_total_kib() > 0).to_be_true()
         expect(shard_cgroup_memory_max_kb() >= 0).to_be_true()
+
+    # P0 (SimpleOS, 2026-11-13): a SimpleOS build fell into the Linux arm (awk
+    # over /proc/meminfo). The guest has no awk and its procfs serves a fixed
+    # 40 MB string, and the kernel's SysInfo(Memory) answered status 0 without
+    # writing the buffer, so free memory read 0, threads clamped to 1 and the
+    # per-file worker pool refused. The kernel now copies the PMM page-frame
+    # counts out; this decoder turns them into kB.
+    it "turns SimpleOS PMM page frames into free and total kB that admit two workers":
+        # 8 GiB guest, 4 KiB pages, 6 GiB free.
+        val free = shard_simpleos_meminfo_kb_v1(2097152, 1572864, 4096, false)
+        expect(free.is_ok()).to_be_true()
+        expect(free.unwrap()).to_equal(6291456)
+        expect(shard_simpleos_meminfo_kb_v1(2097152, 1572864, 4096, true).unwrap()).to_equal(8388608)
+        # 6 GiB free, 1 GB per-worker override: the clamp admits two workers.
+        expect(shard_threads_cap_for(2, 1000000, free.unwrap())).to_equal(2)
+
+    it "reports a genuinely exhausted SimpleOS guest as 0 kB free, not as unknown":
+        expect(shard_simpleos_meminfo_kb_v1(2097152, 0, 4096, false).unwrap()).to_equal(0)
+
+    it "classifies an unfilled SimpleOS SysInfo(Memory) buffer as unknown with a reason":
+        # The pre-fix kernel answered status 0 and left the buffer zeroed.
+        val unfilled = shard_simpleos_meminfo_kb_v1(0, 0, 0, false)
+        expect(unfilled.is_err()).to_be_true()
+        expect(unfilled.unwrap_err().contains("page size 0")).to_be_true()
+        expect(shard_simpleos_meminfo_kb_v1(0, 0, 4096, false).unwrap_err().contains("0 total pages")).to_be_true()
+        expect(shard_simpleos_meminfo_kb_v1(100, 101, 4096, false).unwrap_err().contains("exceed")).to_be_true()
+        expect(shard_simpleos_meminfo_kb_v1(100, -1, 4096, false).unwrap_err().contains("exceed")).to_be_true()
+        # A u64 count past i64 arrives negative; a byte size past i64 overflows.
+        expect(shard_simpleos_meminfo_kb_v1(-5, 0, 4096, true).unwrap_err().contains("total pages")).to_be_true()
+        expect(shard_simpleos_meminfo_kb_v1(4611686018427387904, 1, 4096, true).unwrap_err().contains("overflow")).to_be_true()
+
+    it "says unknown SimpleOS memory out loud instead of reading it as 0 free":
+        val note = shard_simpleos_meminfo_note_v1("kernel reported page size 0")
+        expect(note.contains("simpleos")).to_be_true()
+        expect(note.contains("page size 0")).to_be_true()
+        expect(note.contains("sequential")).to_be_true()
+
+    it "decodes the SimpleOS arm's raw probe and turns every unknown into the logged sequential sentinel":
+        # [total_pages, free_pages, page_size] as the arm gathers them from mem_info().
+        expect(shard_simpleos_kb_from_probe_v1(Ok([2097152, 1572864, 4096]), false)).to_equal(6291456)
+        expect(shard_simpleos_kb_from_probe_v1(Ok([2097152, 1572864, 4096]), true)).to_equal(8388608)
+        # Pre-fix kernel: status 0, zeroed buffer.
+        expect(shard_simpleos_kb_from_probe_v1(Ok([0, 0, 0]), false)).to_equal(0)
+        # Syscall failure surfaced by mem_info().
+        expect(shard_simpleos_kb_from_probe_v1(Err("mem_info failed with code -38"), false)).to_equal(0)
+        # A malformed probe is unknown, not a partial read.
+        expect(shard_simpleos_kb_from_probe_v1(Ok([2097152, 4096]), false)).to_equal(0)

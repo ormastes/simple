@@ -34,6 +34,47 @@ use std.nogc_sync_mut.sffi.process_memory.{freebsd_vm_available_kib_from_sysctl}
 pub fn shard_windows_headroom_kb_v1(bytes: i64) -> i64:
     if bytes > 0: bytes / 1024 else: 0
 
+# SimpleOS: SysInfo(Memory) (syscall 95 kind 0, os.userlib.system.mem_info)
+# copies the kernel PMM page-frame counts out (os.kernel.ipc.sysinfo_memory_v1).
+# Free or total frames times the page size, in kB. Unknown is an Err with the
+# reason, never Ok(0): the pre-fix kernel answered status 0 with a zeroed
+# buffer, which a plain multiply reads as "0 kB free". A u64 count past i64
+# arrives negative and is unknown too. Ok(0) is a real, exhausted guest.
+pub fn shard_simpleos_meminfo_kb_v1(total_pages: i64, free_pages: i64, page_size: i64, want_total: bool) -> Result<i64, text>:
+    if page_size <= 0:
+        return Err("kernel reported page size {page_size} (MemInfoBuf not filled)")
+    if total_pages <= 0:
+        return Err("kernel reported {total_pages} total pages (MemInfoBuf not filled)")
+    if free_pages < 0 or free_pages > total_pages:
+        return Err("free pages {free_pages} exceed the 0..{total_pages} range")
+    if total_pages > 9223372036854775807 / page_size:
+        return Err("{total_pages} pages of {page_size} bytes overflow i64")
+    val pages = if want_total: total_pages else: free_pages
+    Ok((pages * page_size) / 1024)
+
+# The SimpleOS arm logs an unknown reading before it falls back to the
+# sequential clamp, so unknown memory is never silently read as 0 free.
+pub fn shard_simpleos_meminfo_note_v1(reason: text) -> text:
+    "[shard] simpleos SysInfo(Memory) unusable ({reason}); host memory is unknown, worker admission stays sequential"
+
+# The SimpleOS arm only gathers [total_pages, free_pages, page_size] (or the
+# syscall's error); this decides. An unknown reading is logged, then returns
+# the shard API's unknown sentinel 0 (sequential clamp) -- never silently.
+pub fn shard_simpleos_kb_from_probe_v1(probe: Result<[i64], text>, want_total: bool) -> i64:
+    val decoded = match probe:
+        case Ok(fields): shard_simpleos_meminfo_fields_kb_v1(fields, want_total)
+        case Err(e): Err(e)
+    # Statement form: the line recorder never counts a tail-expression match.
+    if decoded.is_ok():
+        return decoded.unwrap()
+    eprint(shard_simpleos_meminfo_note_v1(decoded.unwrap_err()))
+    0
+
+fn shard_simpleos_meminfo_fields_kb_v1(fields: [i64], want_total: bool) -> Result<i64, text>:
+    if fields.len() != 3:
+        return Err("SysInfo(Memory) probe returned {fields.len()} fields, expected 3")
+    shard_simpleos_meminfo_kb_v1(fields[0], fields[1], fields[2], want_total)
+
 # FreeBSD: `sysctl hw.pagesize vm.stats.vm.v_free_count
 # vm.stats.vm.v_inactive_count` to free + inactive kB (decoder owned by
 # std.nogc_sync_mut.sffi.process_memory, shared with host_commit_avail_kib).
@@ -207,6 +248,25 @@ pub fn build_host_memory_total_kib() -> i64:
         return 0
     build_host_memory_total_kib_from_bytes_field(out)
 @else:
+@when(os="simpleos"):
+# SimpleOS has no awk and its procfs meminfo is a fixed placeholder, so the
+# Linux probe read 0 and refused every per-file worker pool. Ask the kernel
+# PMM directly; the decoder above owns every decision.
+use os.userlib.system.{mem_info}
+
+fn shard_simpleos_mem_probe_v1() -> Result<[i64], text>:
+    match mem_info():
+        case Ok(buf): Ok([buf.total_pages as i64, buf.free_pages as i64, buf.page_size as i64])
+        case Err(e): Err(e)
+
+pub fn shard_mem_available_kb() -> i64:
+    shard_simpleos_kb_from_probe_v1(shard_simpleos_mem_probe_v1(), false)
+
+# Installed RAM: the PMM's tracked frames. SimpleOS has no enclosing memory
+# cap (shard_cgroup_memory_max_kb is 0 there).
+pub fn build_host_memory_total_kib() -> i64:
+    shard_simpleos_kb_from_probe_v1(shard_simpleos_mem_probe_v1(), true)
+@else:
 # MemAvailable (kB) from /proc/meminfo; 0 when unavailable. Unknown memory
 # permits only the existing sequential path, never CPU-count fanout.
 # NOTE: deliberately NOT std.io_runtime.file_read. In the run20-class seed
@@ -230,6 +290,7 @@ pub fn build_host_memory_total_kib() -> i64:
     val (out, _err, code) = process_run_timeout("awk", ["/^MemTotal:/ {print $2}", "/proc/meminfo"], 2000)
     val meminfo_kib = if code != 0: 0 else: shard_mem_available_kb_from_field(out.trim())
     build_host_memory_total_kib_bounded(meminfo_kib, shard_cgroup_memory_max_kb())
+@end
 @end
 @end
 @end
@@ -706,6 +767,12 @@ pub fn shard_cgroup_memory_max_kb() -> i64:
         return 0
     shard_rctl_memory_cap_kb_from_rules(out)
 @else:
+@when(os="simpleos"):
+# SimpleOS has no cgroup or rctl analogue: no enclosing memory cap exists, and
+# probing /proc/self/cgroup would spawn a process per admission for nothing.
+pub fn shard_cgroup_memory_max_kb() -> i64:
+    0
+@else:
 # Same subprocess mechanism as shard_mem_available_kb (see the NOTE there); a
 # child inherits this process's cgroup, so its /proc/self/cgroup is ours. v2
 # unified rows and the v1 memory controller row are both probed; when a hybrid
@@ -720,6 +787,7 @@ pub fn shard_cgroup_memory_max_kb() -> i64:
         if rc == 0:
             files[candidate] = out.trim()
     shard_cgroup_memory_max_kb_from_probe_v1(table, files)
+@end
 @end
 @end
 

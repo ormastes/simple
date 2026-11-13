@@ -8,7 +8,9 @@ use os.kernel.scheduler.scheduler.{Scheduler}
 use os.kernel.log.klog.{KernelLog, klog_write}
 use os.kernel.types.task_types.{BlockReason}
 use os.kernel.memory.vmm.{vmm_verify_user_write}
-use os.kernel.boot.mmio.{mmio_write64}
+use os.kernel.boot.mmio.{mmio_write64, mmio_write32}
+use os.kernel.memory.pmm.{pmm_total_pages, pmm_free_pages, pmm_total_memory}
+use os.kernel.ipc.sysinfo_memory_v1.{SYSINFO_MEMORY_BUF_BYTES_V1, sysinfo_memory_words_v1}
 use os.drivers.rtc.rtc.{rtc_read_utc_epoch_seconds_v1}
 use std.common.contracts.sosix.time_v1.{
     sosix_time_ceil_div_u64, sosix_time_ticks_to_ns,
@@ -122,10 +124,11 @@ fn _handle_sysinfo(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
 
     Args:
       arg0: SysInfoKind (0=Memory, 1=CpuCount, 2=Uptime, 3=TickCount)
+      arg1: Memory only -- pointer to the caller's MemInfoBuf (32 bytes)
     """
     match args.arg0:
-        case 0:     # Memory
-            SyscallResult(value: 0)
+        case 0:     # Memory: PMM page frames, copied out (layout: sysinfo_memory_v1)
+            _sysinfo_write_memory(args.arg1)
         case 1:     # CpuCount
             SyscallResult(value: 1)
         case 2:     # Uptime (placeholder)
@@ -135,6 +138,19 @@ fn _handle_sysinfo(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
             SyscallResult(value: count.to_i64())
         case _:
             SyscallResult(value: -22)
+
+fn _sysinfo_write_memory(out_ptr: u64) -> SyscallResult:
+    """Copy the PMM page-frame counts into the caller's MemInfoBuf.
+    Returns 0, or -14 (EFAULT) for a pointer the caller cannot write."""
+    if not vmm_verify_user_write(out_ptr, SYSINFO_MEMORY_BUF_BYTES_V1):
+        return SyscallResult(value: -14)
+    val words = sysinfo_memory_words_v1(pmm_total_pages(), pmm_free_pages(), pmm_total_memory())
+    mmio_write64(out_ptr, words[0])
+    mmio_write64(out_ptr + 8, words[1])
+    mmio_write64(out_ptr + 16, words[2])
+    mmio_write32(out_ptr + 24, words[3] as u32)
+    mmio_write32(out_ptr + 28, 0u32)
+    SyscallResult(value: 0)
 
 fn _handle_get_hostname() -> SyscallResult:
     """Return the hostname length. Hostname copied to userspace buffer."""
