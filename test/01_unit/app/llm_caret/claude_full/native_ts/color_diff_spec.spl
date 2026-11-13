@@ -1,0 +1,224 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+
+use std.spec.step
+
+use std.spec.{describe, it, expect}
+use app.llm_caret.claude_full.native_ts.color_diff.index.{Hunk, ColorDiff, ColorFile, Block, Style, Color, rgb, ansiIdx, detectColorMode, ansi256FromRgb, colorToEscape, asTerminalEscaped, lineBackground, wordBackground, decorationColor, detectLanguage, flattenHljs, highlightLine, tokenize, findAdjacentPairs, wordDiffStrings, wrapText, leftPad, maxLineNumber, splitLinesDropTrailing, applyBackground, dimContent, getSyntaxTheme, getNativeModule, defaultSyntaxThemeName, parseMarker, charWidth}
+
+describe "color_diff color model":
+    it "builds rgb colors opaque and palette colors transparent":
+        step("builds rgb colors opaque and palette colors transparent")
+        val c = rgb(1, 2, 3)
+        expect(c.r).to_equal(1)
+        expect(c.b).to_equal(3)
+        expect(c.a).to_equal(255)
+        val p = ansiIdx(9)
+        expect(p.r).to_equal(9)
+        expect(p.a).to_equal(0)
+
+    it "detects the color mode from theme and COLORTERM":
+        step("detects the color mode from theme and COLORTERM")
+        expect(detectColorMode("dark-ansi", "truecolor")).to_equal("ansi")
+        expect(detectColorMode("dark", "truecolor")).to_equal("truecolor")
+        expect(detectColorMode("dark", "24bit")).to_equal("truecolor")
+        expect(detectColorMode("dark", "")).to_equal("color256")
+
+    it "quantizes rgb to the xterm 256 palette":
+        step("quantizes rgb to the xterm 256 palette")
+        expect(ansi256FromRgb(255, 0, 0)).to_equal(196)
+        expect(ansi256FromRgb(0, 255, 0)).to_equal(46)
+        expect(ansi256FromRgb(0, 0, 255)).to_equal(21)
+        expect(ansi256FromRgb(0, 0, 0)).to_equal(16)
+        expect(ansi256FromRgb(255, 255, 255)).to_equal(231)
+
+    it "prefers the grey ramp for mid greys":
+        step("prefers the grey ramp for mid greys")
+        expect(ansi256FromRgb(128, 128, 128)).to_equal(244)
+
+describe "color_diff escape generation":
+    it "emits SGR 30-37 and 40-47 for low palette indexes":
+        step("emits SGR 30-37 and 40-47 for low palette indexes")
+        expect(colorToEscape(ansiIdx(1), true, "ansi")).to_equal("\u001B[31m")
+        expect(colorToEscape(ansiIdx(1), false, "ansi")).to_equal("\u001B[41m")
+
+    it "emits bright SGR for palette indexes 8-15":
+        step("emits bright SGR for palette indexes 8-15")
+        expect(colorToEscape(ansiIdx(9), true, "ansi")).to_equal("\u001B[91m")
+        expect(colorToEscape(ansiIdx(9), false, "ansi")).to_equal("\u001B[101m")
+
+    it "emits 38;5 and 48;5 for high palette indexes":
+        step("emits 38;5 and 48;5 for high palette indexes")
+        expect(colorToEscape(ansiIdx(200), true, "ansi")).to_equal("\u001B[38;5;200m")
+        expect(colorToEscape(ansiIdx(200), false, "ansi")).to_equal("\u001B[48;5;200m")
+
+    it "emits default fg and bg resets for the default color":
+        step("emits default fg and bg resets for the default color")
+        val d = Color.defaultBg()
+        expect(colorToEscape(d, true, "truecolor")).to_equal("\u001B[39m")
+        expect(colorToEscape(d, false, "truecolor")).to_equal("\u001B[49m")
+
+    it "emits 24-bit escapes in truecolor mode":
+        step("emits 24-bit escapes in truecolor mode")
+        val c = rgb(10, 20, 30)
+        expect(colorToEscape(c, true, "truecolor")).to_equal("\u001B[38;2;10;20;30m")
+        expect(colorToEscape(c, false, "truecolor")).to_equal("\u001B[48;2;10;20;30m")
+
+    it "quantizes rgb to the 256 palette in color256 mode":
+        step("quantizes rgb to the 256 palette in color256 mode")
+        val c = rgb(255, 0, 0)
+        expect(colorToEscape(c, true, "color256")).to_equal("\u001B[38;5;196m")
+        expect(colorToEscape(c, false, "color256")).to_equal("\u001B[48;5;196m")
+
+    it "wraps blocks with resets and optional dim and background":
+        step("wraps blocks with resets and optional dim and background")
+        val blocks = [Block.new(Style.new(ansiIdx(2), Color.defaultBg()), "hi")]
+        expect(asTerminalEscaped(blocks, "ansi", false, false)).to_equal("\u001B[0m\u001B[32m\u001B[49mhi\u001B[0m")
+        expect(asTerminalEscaped(blocks, "ansi", true, false)).to_equal("\u001B[0m\u001B[32mhi\u001B[0m")
+        expect(asTerminalEscaped(blocks, "ansi", true, true)).to_equal("\u001B[0m\u001B[2m\u001B[32mhi\u001B[0m")
+
+describe "color_diff markers and language":
+    it "maps diff markers to background and decoration names":
+        step("maps diff markers to background and decoration names")
+        expect(lineBackground("+")).to_equal("addLine")
+        expect(lineBackground("-")).to_equal("deleteLine")
+        expect(lineBackground(" ")).to_equal("background")
+        expect(wordBackground("+")).to_equal("addWord")
+        expect(wordBackground("-")).to_equal("deleteWord")
+        expect(wordBackground(" ")).to_equal("background")
+        expect(decorationColor("+")).to_equal("addDecoration")
+        expect(decorationColor("-")).to_equal("deleteDecoration")
+        expect(decorationColor(" ")).to_equal("foreground")
+
+    it "normalizes unknown markers to a space":
+        step("normalizes unknown markers to a space")
+        expect(parseMarker("+")).to_equal("+")
+        expect(parseMarker("-")).to_equal("-")
+        expect(parseMarker("x")).to_equal(" ")
+
+    it "detects language by shebang then extension":
+        step("detects language by shebang then extension")
+        expect(detectLanguage("a.py", "#!/bin/sh")).to_equal("shell")
+        expect(detectLanguage("a.ts", "")).to_equal("typescript")
+        expect(detectLanguage("a.tsx", "")).to_equal("typescript")
+        expect(detectLanguage("a.js", "")).to_equal("javascript")
+        expect(detectLanguage("a.jsx", "")).to_equal("javascript")
+        expect(detectLanguage("a.py", "")).to_equal("python")
+        expect(detectLanguage("a.md", "")).to_equal("markdown")
+        expect(detectLanguage("a.txt", "")).to_equal("plaintext")
+
+    it "selects syntax theme names from the theme string":
+        step("selects syntax theme names from the theme string")
+        expect(defaultSyntaxThemeName("ansi-dark")).to_equal("ansi")
+        expect(defaultSyntaxThemeName("dark")).to_equal("Monokai Extended")
+        expect(defaultSyntaxThemeName("light")).to_equal("GitHub")
+        expect(getSyntaxTheme("dark").theme).to_equal("Monokai Extended")
+
+    it "reports the native module as fully available":
+        step("reports the native module as fully available")
+        val m = getNativeModule()
+        expect(m.hasColorDiff).to_equal(true)
+        expect(m.hasColorFile).to_equal(true)
+        expect(m.hasSyntaxTheme).to_equal(true)
+
+describe "color_diff highlighting and text helpers":
+    it "flattens code into one block with the default foreground":
+        step("flattens code into one block with the default foreground")
+        val blocks = flattenHljs("let x", "ts")
+        expect(blocks.len()).to_equal(1)
+        expect(blocks[0].textValue).to_equal("let x")
+        expect(blocks[0].style.foreground.r).to_equal(248)
+        expect(blocks[0].style.background.a).to_equal(1)
+        expect(highlightLine("py", "pass", "t")[0].textValue).to_equal("pass")
+
+    it "tokenizes on spaces keeping separators":
+        step("tokenizes on spaces keeping separators")
+        val t = tokenize("ab cd")
+        expect(t.len()).to_equal(3)
+        expect(t[0]).to_equal("ab")
+        expect(t[1]).to_equal(" ")
+        expect(t[2]).to_equal("cd")
+
+    it "finds adjacent minus-plus marker pairs":
+        step("finds adjacent minus-plus marker pairs")
+        val r = findAdjacentPairs([" ", "-", "+", "+"])
+        expect(r.len()).to_equal(1)
+        expect(r[0].start).to_equal(1)
+        expect(r[0].end).to_equal(2)
+
+    it "returns no word ranges for equal strings and full ranges otherwise":
+        step("returns no word ranges for equal strings and full ranges otherwise")
+        expect(wordDiffStrings("same", "same").len()).to_equal(0)
+        val r = wordDiffStrings("abc", "de")
+        expect(r.len()).to_equal(2)
+        expect(r[0].end).to_equal(3)
+        expect(r[1].end).to_equal(2)
+
+    it "wraps long lines at the given width":
+        step("wraps long lines at the given width")
+        val w = wrapText("abcdef", 4)
+        expect(w.len()).to_equal(2)
+        expect(w[0]).to_equal("abcd")
+        expect(w[1]).to_equal("ef")
+        expect(wrapText("abc", 0).len()).to_equal(1)
+        expect(wrapText("abc", 10)[0]).to_equal("abc")
+
+    it "pads, dims and backgrounds lines":
+        step("pads, dims and backgrounds lines")
+        expect(leftPad("7", 3)).to_equal("  7")
+        expect(leftPad("1234", 2)).to_equal("1234")
+        expect(dimContent("x")).to_equal("\u001B[2mx\u001B[22m")
+        expect(applyBackground("x", "+")).to_equal("addLine:x")
+        expect(charWidth("a")).to_equal(1)
+
+    it "splits lines dropping an empty trailing line":
+        step("splits lines dropping an empty trailing line")
+        expect(splitLinesDropTrailing("a\n\nb").len()).to_equal(3)
+        expect(splitLinesDropTrailing("a\nb\n").len()).to_equal(2)
+        expect(splitLinesDropTrailing("").len()).to_equal(0)
+
+    it "computes the largest line number covered by a hunk":
+        step("computes the largest line number covered by a hunk")
+        expect(maxLineNumber(Hunk.new(10, 1, 10, 2, []))).to_equal(11)
+        expect(maxLineNumber(Hunk.new(0, 0, 0, 0, []))).to_equal(0)
+
+describe "color_diff rendering":
+    it "renders context and added lines with numbers, markers, language and theme":
+        step("renders context and added lines with numbers, markers, language and theme")
+        val h = Hunk.new(10, 1, 10, 2, [" ctx", "+new"])
+        var d = ColorDiff.new(h, "", "a.py", "")
+        val out = d.render("dark", 80, false)
+        expect(out.len()).to_equal(2)
+        expect(out[0]).to_equal("10  ctx:python:Monokai Extended:color256")
+        expect(out[1]).to_equal("11 +new:python:Monokai Extended:color256")
+
+    it "dims removed lines when dim is requested":
+        step("dims removed lines when dim is requested")
+        val h = Hunk.new(5, 1, 5, 0, ["-old"])
+        var d = ColorDiff.new(h, "", "x.txt", "")
+        val out = d.render("light", 80, true)
+        expect(out.len()).to_equal(1)
+        expect(out[0]).to_equal("\u001B[2m5 -old\u001B[22m:plaintext:GitHub:color256")
+
+    it "wraps diff lines wider than the content width":
+        step("wraps diff lines wider than the content width")
+        val h = Hunk.new(1, 0, 1, 1, ["+abcdef"])
+        var d = ColorDiff.new(h, "", "x.txt", "")
+        val out = d.render("light", 7, false)
+        expect(out.len()).to_equal(2)
+        expect(out[0]).to_equal("1 +abc:plaintext:GitHub:color256")
+
+    it "renders file lines with numbers and detected language":
+        step("renders file lines with numbers and detected language")
+        var f = ColorFile.new("a\nb\n", "f.js")
+        val out = f.render("light", 80, false)
+        expect(out.len()).to_equal(2)
+        expect(out[0]).to_equal("1 a:javascript:GitHub:color256")
+        expect(out[1]).to_equal("2 b:javascript:GitHub:color256")
+
+    it "detects shell from the first file line":
+        step("detects shell from the first file line")
+        var f = ColorFile.new("#!/bin/sh\nls", "run")
+        val out = f.render("ansi", 80, false)
+        expect(out.len()).to_equal(2)
+        expect(out[1]).to_equal("2 ls:shell:ansi:ansi")

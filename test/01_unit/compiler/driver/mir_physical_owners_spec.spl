@@ -1,5 +1,6 @@
 use std.spec.*
-use compiler.driver.driver_mir_physical_owners.{driver_mir_physical_source_indices_v1, driver_mir_feed_is_identity_v1}
+use compiler.driver.driver_mir_physical_owners.{driver_mir_physical_source_indices_v1, driver_mir_feed_is_identity_v1,
+    driver_mir_owner_disposition_v1, driver_mir_schedule_name_v1}
 
 val MIR_ALIAS_DIGEST = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 val MIR_OTHER_DIGEST = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
@@ -100,3 +101,45 @@ describe "MIR work owns admitted physical surfaces":
         val malformed = driver_mir_physical_source_indices_v1(["provider.spl"],
             ["gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg"], ["provider"])
         expect(malformed.is_err()).to_equal(true)
+
+# bug per_file_lane_unit_mir_physical_ownership_missing_hir_2026-11-12: a
+# per-file unit (module-scoped MIR) holds HIR only for its targets and their
+# load closure, so the ownership gate must not demand HIR for every row.
+describe "MIR physical ownership in a module-scoped per-file unit":
+    it "uses held HIR whether or not the unit is scoped":
+        expect(driver_mir_owner_disposition_v1(false, false, true)).to_equal("hir")
+        expect(driver_mir_owner_disposition_v1(true, false, true)).to_equal("hir")
+        expect(driver_mir_owner_disposition_v1(true, true, true)).to_equal("hir")
+
+    it "stands in an unheld non-target row of a scoped unit":
+        expect(driver_mir_owner_disposition_v1(true, false, false)).to_equal("placeholder")
+
+    it "still fails closed on an unheld target of a scoped unit":
+        expect(driver_mir_owner_disposition_v1(true, true, false)).to_equal("missing")
+
+    it "keeps the whole-inventory demand outside a scoped unit":
+        expect(driver_mir_owner_disposition_v1(false, false, false)).to_equal("missing")
+        expect(driver_mir_owner_disposition_v1(false, true, false)).to_equal("missing")
+
+    it "publishes the same ledger schedule from units holding different HIR":
+        # Unit A holds only the leaf; unit B holds the entry and the alias
+        # provider. Every unit must publish the identical inventory.
+        val logical = ["app.p3rp.aa", "std.common.provider", "app.p3rp.main"]
+        val hir_names = ["app.p3rp.aa", "lib.common.provider", "app.p3rp.main"]
+        val held_a = [true, false, false]
+        val held_b = [false, true, true]
+        var schedule_a: [text] = []
+        var schedule_b: [text] = []
+        var index = 0
+        while index < logical.len():
+            schedule_a = schedule_a.push(driver_mir_schedule_name_v1(true, held_a[index],
+                if held_a[index]: hir_names[index] else: "", logical[index]))
+            schedule_b = schedule_b.push(driver_mir_schedule_name_v1(true, held_b[index],
+                if held_b[index]: hir_names[index] else: "", logical[index]))
+            index = index + 1
+        expect(schedule_a.join("|")).to_equal(schedule_b.join("|"))
+        expect(schedule_a[1]).to_equal("lib.common.provider")
+
+    it "leaves the unscoped unheld schedule name unchanged":
+        expect(driver_mir_schedule_name_v1(false, false, "", "std.common.provider")).to_equal("std.common.provider")
+        expect(driver_mir_schedule_name_v1(false, true, "std.common.provider", "x")).to_equal("lib.common.provider")
