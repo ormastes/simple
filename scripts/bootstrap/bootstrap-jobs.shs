@@ -31,15 +31,18 @@ bootstrap_detect_host_cpus() {
   printf '%s\n' "$detected"
 }
 
-bootstrap_jobs_config_value() {
-  jobs_config=$1
-  [ -f "$jobs_config" ] || return 0
-  awk '
+# bootstrap_config_value CONFIG KEY_REGEX -> the value of the one matching
+# `key: value` line (trailing `# comment` stripped), empty when absent, or
+# __MULTIPLE__ when more than one line matches.
+bootstrap_config_value() {
+  bcv_config=$1
+  [ -f "$bcv_config" ] || return 0
+  awk -v key="$2" '
     /^[[:space:]]*#/ { next }
     {
       line=$0
       sub(/[[:space:]]*#.*/, "", line)
-      if (line ~ /^[[:space:]]*(jobs|native_build_threads)[[:space:]]*:/) {
+      if (line ~ ("^[[:space:]]*(" key ")[[:space:]]*:")) {
         sub(/^[[:space:]]*[^:]+:[[:space:]]*/, "", line)
         sub(/[[:space:]]*$/, "", line)
         count++
@@ -50,7 +53,38 @@ bootstrap_jobs_config_value() {
       if (count > 1) print "__MULTIPLE__"
       else if (count == 1) print value
     }
-  ' "$jobs_config"
+  ' "$bcv_config"
+}
+
+bootstrap_jobs_config_value() {
+  bootstrap_config_value "$1" 'jobs|native_build_threads'
+}
+
+# Stage 3 lowering route: SIMPLE_FILE_WORKERS (non-empty env) > config key
+# stage3_file_workers > unset (compiler default NATIVE_PER_FILE_PIPELINE_DEFAULT_V1).
+#   bootstrap_select_stage3_file_workers [config/bootstrap.sdn]
+# Sets stage3_file_workers ('' | 0 | 1) and stage3_file_workers_source
+# (env | config | default). An invalid value at either layer is an error,
+# never a silent fallback to another route.
+bootstrap_select_stage3_file_workers() {
+  bsfw_config=${1:-config/bootstrap.sdn}
+  if [ -n "${SIMPLE_FILE_WORKERS:-}" ]; then
+    stage3_file_workers=$SIMPLE_FILE_WORKERS
+    stage3_file_workers_source=env
+  else
+    stage3_file_workers=$(bootstrap_config_value "$bsfw_config" stage3_file_workers) || stage3_file_workers=__INVALID__
+    stage3_file_workers_source=config
+    [ -n "$stage3_file_workers" ] || stage3_file_workers_source=default
+  fi
+  case "$stage3_file_workers" in
+    ''|0|1) return 0 ;;
+  esac
+  if [ "$stage3_file_workers_source" = env ]; then
+    printf 'error: SIMPLE_FILE_WORKERS must be unset, 0 or 1\n' >&2
+  else
+    printf 'error: stage3_file_workers in %s must be 0 or 1 (got %s)\n' "$bsfw_config" "$stage3_file_workers" >&2
+  fi
+  return 1
 }
 
 bootstrap_select_jobs() {

@@ -26,6 +26,14 @@ See "Default build mode" below.
   non-default mode passes the option at its own call site with a comment
   saying why (e.g. `scripts/bootstrap/p3-entry-groups.shs` sets
   `SIMPLE_FILE_WORKERS=0` for its generated launcher only).
+- **Exception (2026-11-13, owner request): Stage 3 route in tracked config.**
+  While the per-file route still fails on importing units (bug #8504 layers
+  2-3; layer 1 fixed by #8746), `config/bootstrap.sdn` sets
+  `stage3_file_workers: 0`. Precedence: non-empty `SIMPLE_FILE_WORKERS` env >
+  that key > compiler default. Read by `resume-stage3-from-admitted.sh` and
+  the `bootstrap-from-scratch.sh` Stage 3 (`bootstrap_select_stage3_file_workers`,
+  `scripts/bootstrap/bootstrap-jobs.shs`). It is in git so a clean clone
+  behaves like the owner's runs; delete the key once per-file builds Stage 3.
 - **Gap (not yet default):** per-package/per-layer library archives
   (`.a`) linked into the binary. Today the pool's per-module objects are
   linked from the sealed ledger in one link; package archives exist only on
@@ -166,6 +174,40 @@ Policy lives in `scripts/bootstrap/lib/product-frontend-policy.shs` and
 | `SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB` | Positive, enforced process-tree limit |
 | `SIMPLE_HIR_SHARDING` / `SIMPLE_PARSE_SHARDING` | Switch HIR / parse sharding (`0` disables) |
 | `SIMPLE_HIR_WORKER_SKELETON` | Opt-in (`=1`): HIR workers build surfaces from the module skeleton (#4473) |
+
+### Repo-tracked bootstrap settings (`config/bootstrap.sdn`)
+
+Precedence for every key: CLI flag (where one exists) > env > config > built-in default.
+
+| Key | Env override | Meaning |
+|---|---|---|
+| `jobs` | `--jobs`, `SIMPLE_NATIVE_BUILD_THREADS` | Build parallelism (`bootstrap-jobs.shs`) |
+| `compiler`, `compiler_release` | `SIMPLE_BOOTSTRAP_COMPILER` | Next-phase compiler (`resolve-bootstrap-compiler.shs`) |
+| `stage3_file_workers` | `SIMPLE_FILE_WORKERS` | Stage 3 route: `0` two-pass phase route (pinned, bug #8504), `1` per-file; absent = compiler default |
+
+Defaults fixed in code, not config (2026-11-13):
+
+- **Stage 3 resume tree RSS cap.** With no
+  `SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB` pair, the resume compiler's
+  process-tree cap is the cgroup MemoryHigh the Stage 3 memory admission
+  reserved (`SIMPLE_BOOTSTRAP_STAGE3_MEMORY_HIGH_MIB`, default = the 48 GiB
+  headroom), clamped to the default hard ceiling
+  (`bootstrap_tree_rss_stage3_default_cap_kib`, Linux). It used to fall to the
+  8 GiB compile-worker budget, which killed every serial Stage 3 after HIR.
+  The receipt records it as `source: memory-admission, bound: memory-high`
+  (`hard-ceiling` when clamped): the worker publishes
+  `SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_SOURCE/_BOUND` beside the transported
+  cap, so a post-mortem never reads this code default as an operator
+  `explicit-env` pair. `SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB` alone
+  overrides it (attributed `explicit-env`), up to that ceiling. An elevated ceiling must exceed the default 48 GiB ceiling
+  (strict ratchet), so a pair such as ceiling 32 GiB / cap 26 GiB is
+  always refused.
+- **Stage 3 resume go-to-end.** `SIMPLE_BOOTSTRAP_GO_TO_END` (default 1) now
+  reaches the resume compiler as `SIMPLE_NATIVE_GO_TO_END` (per-file lane item
+  `gte=`), like the in-script Stage 3. Before, the env -i worker dropped any
+  ambient `SIMPLE_NATIVE_GO_TO_END`. `SIMPLE_COMPILE_FAIL_FAST` already
+  defaults to off (`compile_failure_policy.spl`).
+- `SIMPLE_CACHE_SCOPE` stays per-lane env identity, never config.
 
 Stage 3 bisect (2026-10-25): turning skeleton and HIR sharding on or off did
 not change the MIR error set, so they are not the cause of those errors.
