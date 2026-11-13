@@ -38,6 +38,12 @@ struct AdaptiveMap<K, V> where K: Hash + Eq + Ord:
     ordered_key_rejected: bool
     live_hash_lookups: i64
     live_high_collision_lookups: i64
+    # The trace observer switch (data_observation_profiling_enabled_v1). Off:
+    # get/contains_key/put/remove run no counter, no lookup- or collision-
+    # driven switch and no capture note; the representation is the pinned
+    # (attribute) or plan-applied (apply_workload_profile) one, with the size
+    # limit still honoured because size is state, not an observation.
+    profiling: bool
 
     static fn new() -> AdaptiveMap<K, V>:
         AdaptiveMap.with_profile(adaptive_set_default_profile())
@@ -62,7 +68,8 @@ struct AdaptiveMap<K, V> where K: Hash + Eq + Ord:
             prefer_ordered_from_profile: false,
             prefer_ordered_from_live: false,
             ordered_key_rejected: false,
-            live_hash_lookups: 0, live_high_collision_lookups: 0
+            live_hash_lookups: 0, live_high_collision_lookups: 0,
+            profiling: true
         )
         if site_id != "":
             collection_capture_note_size(site_id, target_profile_id, 0)
@@ -140,6 +147,13 @@ struct AdaptiveMap<K, V> where K: Hash + Eq + Ord:
     fn linear_lookup_comparisons() -> i64:
         """Equality checks in the most recent lookup when it used linear storage."""
         self.last_linear_lookup_comparisons
+
+    fn profiling_enabled() -> bool:
+        self.profiling
+
+    me set_profiling(enabled: bool):
+        """Runtime switch shared with the trace observer; see the field note."""
+        self.profiling = enabled
 
     fn observation() -> AdaptiveSetObservation:
         AdaptiveSetObservation(
@@ -265,6 +279,11 @@ struct AdaptiveMap<K, V> where K: Hash + Eq + Ord:
         AdaptiveMapFrozenLookup(source: self)
 
     me get(key: K) -> V?:
+        if not self.profiling:
+            # Zero-overhead path: one bool, the ordered-key soundness guard,
+            # and the lookup in the selected representation. No counter.
+            self.guard_ordered_key(key)
+            return self.storage_get(key)
         self.observed_lookups = self.observed_lookups + 1
         self.lookups_since_switch = self.lookups_since_switch + 1
         self.promote_if_useful()
@@ -303,6 +322,9 @@ struct AdaptiveMap<K, V> where K: Hash + Eq + Ord:
         found
 
     me contains_key(key: K) -> bool:
+        if not self.profiling:
+            self.guard_ordered_key(key)
+            return self.storage_has_key(key)
         self.observed_lookups = self.observed_lookups + 1
         self.lookups_since_switch = self.lookups_since_switch + 1
         self.promote_if_useful()
@@ -404,10 +426,10 @@ struct AdaptiveMap<K, V> where K: Hash + Eq + Ord:
             if self.fallback_order_entries.len() > 0 or not key_has_native_order:
                 self.fallback_order_entries.push(OrderedMapEntry(key: key, value: value))
             self.size = self.size + 1
-            if self.size > self.observed_peak_size:
+            if self.profiling and self.size > self.observed_peak_size:
                 self.observed_peak_size = self.size
             self.promote_if_useful()
-            if self.site_id != "":
+            if self.profiling and self.site_id != "":
                 collection_capture_note_size(self.site_id, self.target_profile_id, self.size)
         inserted
 
@@ -468,7 +490,7 @@ struct AdaptiveMap<K, V> where K: Hash + Eq + Ord:
         if not self.ordered_key_rejected and self.attribute == AdaptiveSetAttribute.Auto and
                 (self.prefer_ordered_from_profile or self.prefer_ordered_from_live):
             self.promote_if_useful()
-        if self.site_id != "":
+        if self.profiling and self.site_id != "":
             collection_capture_note_size(self.site_id, self.target_profile_id, self.size)
         previous
 

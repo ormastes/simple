@@ -1,0 +1,55 @@
+# MDSOC: feature dimension, common (pure) layer.
+# ============================================================================
+# common/trace/data/data_observation_sink_v1.spl — the sink port that data
+# observers (adaptive containers first) publish DataObservationV1 records into,
+# and the ONE runtime switch for that profiling: the trace observer switch.
+#
+# The switch is derived from the `simple.trace/observer-v1` aspect extension
+# (trace_aspect_config_v1): instrumentation Off or an absent extension means
+# no profiling; Dynamic (and AlwaysOn, which is instrumentation that is never
+# switched off) means profiling. A malformed extension fails closed to off.
+# Pure values, no I/O; the only impl here bridges to the per-worker
+# DataObservationAggregatorV1 (a class, so the bridge is a reference).
+# ============================================================================
+
+use std.common.plugin.aspect_params.AspectParamsV1
+use std.common.trace.observer_contract_v1.{TraceConfigV1, TraceInstrumentationV1}
+use std.common.trace.observer_aspect_config_v1.trace_aspect_config_v1
+use std.common.trace.data.data_observation_contracts.{DataObservationV1, DataMetricStateV1}
+use std.common.trace.data.data_observation_aggregator_v1.DataObservationAggregatorV1
+
+pub trait DataObservationSinkV1:
+    # true when the record was admitted; false means nothing was kept.
+    me record(observation: DataObservationV1) -> bool
+    # Publishers check this first: a disabled sink costs the caller one bool.
+    fn enabled() -> bool
+
+pub fn data_observation_profiling_enabled_v1(config: TraceConfigV1?) -> bool:
+    match config:
+        case Some(present):
+            match present.instrumentation:
+                case TraceInstrumentationV1.Off: false
+                case _: true
+        case None: false
+
+pub fn data_observation_profiling_from_aspect_v1(params: AspectParamsV1) -> bool:
+    match trace_aspect_config_v1(params):
+        case Ok(config): data_observation_profiling_enabled_v1(config)
+        case Err(_): false
+
+# Bridge: a record's measured count and aux feed the aggregator's site table.
+pub class DataObservationAggregatorSinkV1:
+    aggregator: DataObservationAggregatorV1
+
+impl DataObservationSinkV1 for DataObservationAggregatorSinkV1:
+    me record(observation: DataObservationV1) -> bool:
+        if observation.count.state != DataMetricStateV1.Measured:
+            return false
+        var agg = self.aggregator
+        if not agg.record(observation.site_id, observation.count.value):
+            return false
+        if observation.aux.state == DataMetricStateV1.Measured:
+            agg.record_aux(observation.site_id, observation.aux.value)
+        true
+    fn enabled() -> bool:
+        self.aggregator.active

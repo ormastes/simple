@@ -153,3 +153,25 @@ tagged, never skipped.
   Golden bytes unchanged: every existing xray spec is green with identical counts.
 - Mutation: `a64_bl_v1` opcode 0x94 -> 0x95 turns both the AArch64 trampoline twin spec and
   `observer_native_map_v1_spec` red (1 failure each) — the twins really share one encoder.
+
+#### Step 4 result (2026-11-13): container profiling switch + trace data port
+
+- `AdaptiveMap` / `AdaptiveSet` carry a `profiling` bool (`set_profiling`,
+  `profiling_enabled`). Off: `get` / `contains_key` do one bool test, the ordered-key
+  guard and the storage lookup; `put` / `remove` skip the peak-size counter and the capture
+  note. Default stays `true` (unchanged behaviour for every existing caller).
+- `src/lib/common/trace/data/data_observation_sink_v1.spl`: `DataObservationSinkV1` port,
+  `data_observation_profiling_enabled_v1(TraceConfigV1?)` (Off/absent -> false) and
+  `data_observation_profiling_from_aspect_v1(AspectParamsV1)` (the `simple.trace/observer-v1`
+  extension; malformed fails closed to off); `DataObservationAggregatorSinkV1` bridge.
+- `src/lib/nogc_sync_mut/src/collections/adaptive_trace_observation.spl`: one observation ->
+  lookup / size / representation-transition records, publish through the sink (0 records and
+  no sink call when disabled), and drained records -> `AdaptiveSetWorkloadProfile` that
+  `apply_workload_profile` consumes.
+- Spec `test/01_unit/lib/collections/adaptive_trace_observation_v1_spec.spl` 6/6; 1/6 with the
+  `adaptive_map`/`adaptive_set` change reverted (red -> green).
+- Pre-existing, unrelated reds in sibling adaptive specs on the Rust seed (identical with and
+  without this change): `unknown extern function: spl_ordered_key_cmp` /
+  `spl_collection_capture_note_size` / `spl_collection_capture_begin`, `Dict.capacity`.
+- NOT yet wired: no production path calls `set_profiling` from the XRay adapter's runtime
+  enable/disable; `data_observation_profiling_from_aspect_v1` has no live caller yet.
