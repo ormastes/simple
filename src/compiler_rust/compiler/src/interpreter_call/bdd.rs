@@ -654,7 +654,12 @@ fn exec_bdd_block_into(
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
     use super::block_execution::exec_block_closure_into;
+    use crate::interpreter::interpreter_module::ClosureOriginGuard;
 
+    // These fast paths run the block against the example env, not through
+    // exec_lambda / exec_block_value, so the body's lexical origin is entered
+    // here (test_private_access_closure_attribution_2026-11-14): a test block
+    // handed to `it` by a src helper is still the test's code.
     match block {
         Value::Lambda {
             params,
@@ -663,6 +668,7 @@ fn exec_bdd_block_into(
         } => {
             if params.is_empty() {
                 if let Expr::DoBlock(nodes) = body.as_ref() {
+                    let _closure_origin = ClosureOriginGuard::enter(Some(captured.closure_in_test()));
                     return localize_bdd_return(exec_block_closure_into(
                         nodes,
                         env,
@@ -686,14 +692,17 @@ fn exec_bdd_block_into(
                 impl_methods,
             )
         }
-        Value::BlockClosure { nodes, .. } => localize_bdd_return(exec_block_closure_into(
-            &nodes,
-            env,
-            functions,
-            classes,
-            enums,
-            impl_methods,
-        )),
+        Value::BlockClosure { nodes, env: captured } => {
+            let _closure_origin = ClosureOriginGuard::enter(Some(captured.closure_in_test()));
+            localize_bdd_return(exec_block_closure_into(
+                &nodes,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            ))
+        }
         other => exec_block_value(other, env, functions, classes, enums, impl_methods),
     }
 }

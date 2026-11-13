@@ -136,6 +136,9 @@ One known edge goes the other way:
 - **Why it is left:** it applies only when advice fires inside a test closure
   body.
 
+*All three were closed by `test_private_access_closure_guard_paths_2026-11-14`;
+see "Follow-up: remaining guard paths" below.*
+
 ### Real-spec sweep
 
 The sweep ran `seed test <spec>` from the worktree, serially. It covered every
@@ -180,3 +183,63 @@ fail-open, not test refusals, so this change leaves them alone:
   - a product entry calling one through a glob import, a facade, or a qualified
     name (rule 1 sees only braced names of the defining module, and the call
     rule exempts `<entry>`).
+
+## Follow-up: remaining guard paths (`test_private_access_closure_guard_paths_2026-11-14`)
+
+Status: fixed (seed). Same rule, three more places where a closure body ran
+without its lexical origin:
+
+| path | before | fix |
+|---|---|---|
+| `exec_bdd_block_into` (`bdd.rs`): the `Lambda{DoBlock}` fast path and the `BlockClosure` arm run an example/hook body against the example env | judged by the invoking frame: a test block handed to `it` by a src helper was refused | enter `ClosureOriginGuard::enter(Some(captured.closure_in_test()))` |
+| `call_value_with_args` (`interpreter_eval.rs`), the decorator arms | `Value::Lambda` / `Value::Function` bodies inherited the applying frame | Lambda: its captured stamp. Function: its owner (`owner_written_in_test`, `<entry>` = entry file), else its captured stamp |
+| owner-less `on pc{}` advice (`aop_runtime.rs`) | the advice body ran on a clone of the join point's env and took ITS stamp, so src advice fired inside a test closure body was exempt (fail-open), and test advice fired inside a src frame was refused | `AdviceRule` records `closure_created_in_test()` and the resolved `Arc<FunctionDef>` at `register_advice`; the join point applies that origin only when the advice it finds by name is the same definition (`Arc::ptr_eq`), otherwise `false` |
+
+`owner_written_in_test` is factored out of `closure_created_in_test` (same
+verdicts). Known limit, unchanged: `check_private_call_visibility` returns on
+`is_test_caller(current)` before reading the origin, so a src-written body run
+from a test frame is still exempt (the same-directory rule needs the writer's
+path, which the boolean origin does not carry). Owned decorator fns still run
+without switching `CURRENT_EXEC_MODULE` to their owner (unchanged).
+
+**Red -> green** (seed base `549b28a2777` sha256 `0af63c942838`, fixed
+`17bfddbd24c9`; `systemd-run MemoryMax=16G timeout 900`, serial).
+`test_private_access_matrix_spec.spl`: **14/19 -> 19/19**. The five new rows
+are exactly the five base failures:
+- test block handed to `it` by a src helper: refused -> runs;
+- test fn applied as a decorator inside a src helper: refused -> runs;
+- test lambda applied as a decorator inside a src helper: refused -> runs;
+- owner-less test advice fired inside a src function: refused -> runs (the
+  row asserts the advice's own output, so it cannot pass without firing);
+- **product:** owner-less src advice fired inside a test closure body: ran
+  (fail-open) -> refused.
+
+Each row was also run by hand on the default and interpret lanes, base vs fixed.
+Seed unit tests `private_call_visibility_tests`: 8/8 (new:
+`owner_origin_resolves_entry_to_the_entry_file`).
+
+**No-regression sweep** (base vs fixed, 34 specs, serial): every pair is
+identical in rc, pass/fail counts and `is not visible` lines (0 everywhere).
+Covered: the 14 specs named above, the private-import specs (fail_closed 2/2,
+parity 2/2, `private_fn_call_visibility` 3/3), AOP (`aop_spec` x2 21/21,
+`aop_pointcut_spec` 12/12 and the `03_system` copy 11/12 on both),
+decorators (`decorators_spec` x4, `decorators_comprehensive_spec` x2 30/30,
+`parser_inlining_hint_decorators` 3/3, `noalloc_decorator_module_load` 1/1),
+hooks (`hooks_and_siblings` 3/3, `before_hook_failure` 0/1 by design,
+`llm_caret_messaging_hook_bridge` 2/2, `llm_diag_hook_log_modes` 0/6 on both)
+and `spec/dsl_spec` 11/14 on both. The independent Opus review's P1 (advice
+origin keyed by name only) is the `Arc::ptr_eq` pin above.
+
+Found while writing the decorator row: `decorator_fn_arm_drops_implicit_return_2026-11-14`
+(a named-fn decorator returning by implicit last expression decorates to nil;
+the row uses an explicit `return`).
+
+The product fail-open (`private_call_gate_skips_import_bound_and_entry_calls_2026-11-14`)
+is not changed here. Its static census (Appendix B of
+`private_import_visibility_sweep_2026-11-13.md` at this base) is **506 rows /
+345 (module, fn) pairs** from non-test callers. The traced fixtures show that a
+single-definition private fn also takes the import-bound path, so the whole set
+is exposed, not only duplicate names. It also found one more ungated path: a
+module-qualified call `m.f()` from a **src function** (the module-Dict method
+path never gates), not only from an entry. That is over the ~100-site
+threshold, so it lands in its own PR.

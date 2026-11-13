@@ -191,12 +191,19 @@ pub(crate) fn call_value_with_args(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
+    use crate::interpreter::interpreter_module::{owner_written_in_test, ClosureOriginGuard};
+    // Both arms run the body here rather than through exec_lambda /
+    // execute_function_body, so they enter the body's lexical origin for the
+    // private-fn call rule themselves: a decorator body is judged where it was
+    // written, not by the frame applying it
+    // (test_private_access_closure_attribution_2026-11-14).
     match callee {
         Value::Lambda {
             params,
             body,
             env: captured,
         } => {
+            let _closure_origin = ClosureOriginGuard::enter(Some(captured.closure_in_test()));
             // Execute lambda with given args
             let mut local_env = Env::clone(captured);
             for (i, param) in params.iter().enumerate() {
@@ -207,6 +214,13 @@ pub(crate) fn call_value_with_args(
             evaluate_expr(body, &mut local_env, functions, classes, enums, impl_methods)
         }
         Value::Function { def, captured_env, .. } => {
+            // An owned fn is written in its owner module; an owner-less one
+            // (a nested `fn` value) where its captured env was stamped.
+            let origin = match super::interpreter_call::function_module_owner(def) {
+                Some(owner) => owner_written_in_test(Some(&owner)),
+                None => captured_env.closure_in_test(),
+            };
+            let _closure_origin = ClosureOriginGuard::enter(Some(origin));
             // Execute function with given args, using the captured environment for closure
             let mut local_env = Env::clone(captured_env);
             for (i, param) in def.params.iter().enumerate() {
