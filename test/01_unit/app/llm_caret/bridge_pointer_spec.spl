@@ -1,0 +1,115 @@
+# @req REQ-SSPEC-UNIT
+"""
+# Claude full bridge pointer
+
+As a caret user resuming a remote-control session, a stored pointer must be
+found when fresh, cleared when corrupt or stale, and located across worktrees.
+"""
+
+use std.spec.step
+use std.spec.*
+use app.llm_caret.claude_full.bridge.bridgePointer.*
+
+fn ptr() -> BridgePointer:
+    BridgePointer.new("s1", "e1", "repl")
+
+describe "Claude full bridge pointer":
+    it "validates pointer fields and source":
+        step("valid")
+        expect(ptr().valid()).to_equal(true)
+        expect(BridgePointer.new("", "e", "repl").valid()).to_equal(false)
+        expect(BridgePointer.new("s", "e", "other").valid()).to_equal(false)
+        expect(BridgePointer.new("s", "e", "standalone").sourceStandalone()).to_equal(true)
+        expect(ptr().sourceRepl()).to_equal(true)
+
+    it "reports missing when nothing was written":
+        step("missing")
+        var store = BridgePointerStore.new("/p")
+        val r = store.read("/work", 1000)
+        expect(r.found).to_equal(false)
+        expect(r.reason).to_equal("missing")
+
+    it "returns a fresh pointer with its age":
+        step("fresh")
+        var store = BridgePointerStore.new("/p")
+        store.write("/work", ptr(), 1000)
+        val r = store.read("/work", 6000)
+        expect(r.found).to_equal(true)
+        expect(r.ageMs).to_equal(5000)
+        expect(r.pointer.sessionId).to_equal("s1")
+
+    it "treats a clock behind the write as age zero":
+        step("negative age")
+        var store = BridgePointerStore.new("/p")
+        store.write("/work", ptr(), 5000)
+        expect(store.read("/work", 1000).ageMs).to_equal(0)
+        expect(nonNegativeAge(10, 3)).to_equal(7)
+
+    it "clears a pointer older than the four hour TTL":
+        step("stale")
+        var store = BridgePointerStore.new("/p")
+        store.write("/work", ptr(), 0)
+        expect(store.read("/work", bridgePointerTtlMs()).found).to_equal(true)
+        val r = store.read("/work", bridgePointerTtlMs() + 1)
+        expect(r.cleared).to_equal(true)
+        expect(r.reason).to_equal("stale")
+        expect(store.count()).to_equal(0)
+
+    it "clears corrupt and invalid-schema pointers":
+        step("invalid")
+        var store = BridgePointerStore.new("/p")
+        store.writeCorrupt("/a", 0)
+        expect(store.read("/a", 1).reason).to_equal("invalid-json")
+        store.writeInvalidSchema("/b", BridgePointer.new("", "", "x"), 0)
+        expect(store.read("/b", 1).reason).to_equal("invalid-schema")
+        expect(store.count()).to_equal(0)
+
+    it "replaces an entry when the same directory is written twice":
+        step("upsert")
+        var store = BridgePointerStore.new("/p")
+        store.write("/a/b", ptr(), 0)
+        store.write("/a b", BridgePointer.new("s2", "e2", "standalone"), 0)
+        expect(store.count()).to_equal(1)
+        expect(store.read("/a-b", 1).pointer.sessionId).to_equal("s2")
+
+    it "finds the freshest pointer in a sibling worktree":
+        step("worktrees")
+        var store = BridgePointerStore.new("/p")
+        store.write("/w1", BridgePointer.new("old", "e", "repl"), 1000)
+        store.write("/w2", BridgePointer.new("new", "e", "repl"), 5000)
+        val r = store.readAcrossWorktrees("/main", ["/main", "/w1", "/w2"], 6000)
+        expect(r.found).to_equal(true)
+        expect(r.pointer.sessionId).to_equal("new")
+        expect(r.dir).to_equal("/w2")
+        expect(r.ageMs).to_equal(1000)
+
+    it "prefers the local pointer over worktrees":
+        step("local first")
+        var store = BridgePointerStore.new("/p")
+        store.write("/main", ptr(), 100)
+        val r = store.readAcrossWorktrees("/main", ["/main", "/w1"], 200)
+        expect(r.dir).to_equal("/main")
+        expect(r.ageMs).to_equal(100)
+
+    it "reports why no worktree pointer was returned":
+        step("worktree reasons")
+        var store = BridgePointerStore.new("/p")
+        expect(store.readAcrossWorktrees("/main", ["/main"], 0).reason).to_equal("no-worktrees")
+        var many: [text] = []
+        var i = 0
+        while i < 51:
+            many = many + ["/w" + i.to_text()]
+            i = i + 1
+        val capped = store.readAcrossWorktrees("/main", many, 0)
+        expect(capped.skippedFanout).to_equal(true)
+        expect(capped.reason).to_equal("fanout-cap")
+        expect(store.readAcrossWorktrees("/main", ["/main", "/w1"], 0).reason).to_equal("not-found")
+
+    it "builds a sanitized pointer path":
+        step("paths")
+        expect(sanitizeBridgePointerPath("/a//b c")).to_equal("-a-b-c")
+        expect(sanitizeBridgePointerPath("C:\\x")).to_equal("C-x")
+        expect(getBridgePointerPath("/p/", "/a/b")).to_equal("/p/-a-b/bridge-pointer.json")
+        expect(BridgePointerStore.new("/q").pathFor("/z")).to_equal("/q/-z/bridge-pointer.json")
+        expect(maxWorktreeFanout()).to_equal(50)
+        expect(bridgePointerFileName()).to_equal("bridge-pointer.json")

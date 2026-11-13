@@ -247,7 +247,19 @@ impl MethodResolver:
         # that could contain a resolvable method call still takes the rebuild
         # path.)
         var resolved_functions: Dict<SymbolId, HirFunction> = module.functions
-        if module.impls.len() > 0 or module.classes.len() > 0:
+        # Quiet mode is never a field-identical copy: its whole purpose is
+        # side effects on modules with no method candidates — the Let
+        # local_value_types backfill, receiver attach_inferred_type, and the
+        # candidate-free builtin collection admission
+        # (resolve_builtin_collection_operation, resolve_strategies.spl:102).
+        # A bare `val items: [i64] = ...; items.map(\x: ...)` module has no
+        # impls and no classes, so gating the walk on those alone silently
+        # skipped every one of them and the map call never reached builtin
+        # admission (collection_builtin_typed_array_resolution_2026-11-12).
+        # The cycle-132 corruption that motivated the reuse path was the
+        # staged-native rebuild transport; the quiet walk is needed on every
+        # lane, so it opts back in here.
+        if module.impls.len() > 0 or module.classes.len() > 0 or self.quiet:
             resolved_functions = {}
             for func in module.functions.values():
                 val resolved_func = self.resolve_function(func)
@@ -394,10 +406,19 @@ impl MethodResolver:
             case None:
                 nil
 
+        # `has` must survive the rebuild: eval_block gates the trailing
+        # expression on it (interpreter.spl:438), and an omitted bool field
+        # rebuilds as false, so every resolved block silently lost its tail
+        # value (a quiet-resolved `fn main(): ... expr` then returned Nil
+        # instead of the expr's value; collection builtin execution probe,
+        # 2026-11-13). `unsafe_caps` rides along for the same faithfulness
+        # (mirrors aspect_weave.spl / param_effects/infer.spl rebuilds).
         HirBlock(
             stmts: resolved_stmts,
+            has: block.has,
             value: resolved_value,
-            span: block.span
+            span: block.span,
+            unsafe_caps: block.unsafe_caps
         )
 
     me resolve_stmt(stmt: HirStmt) -> HirStmt:
@@ -864,7 +885,8 @@ impl MethodResolver:
             # Error
             case Error: expr.kind
 
-        HirExpr(kind: kind, has_type_: resolved_has_type, type_: resolved_type, span: expr.span)
+        HirExpr(kind: kind, has_type_: resolved_has_type, type_: resolved_type, span: expr.span,
+            bracket_slice: expr.bracket_slice)
 
     # ========================================================================
     # Method Resolution Logic (UFCS)
