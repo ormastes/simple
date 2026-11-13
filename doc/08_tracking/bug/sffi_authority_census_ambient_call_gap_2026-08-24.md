@@ -51,3 +51,10 @@ HIR identity.
 5. The generator remains linear in resolved calls plus declarations and adds no
    per-call runtime lookup or allocation.
 
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+open census gap; owner: SFFI authority lane.

@@ -71,3 +71,11 @@ Lane compiler6 re-verified the 2026-11-09 fix on the tracked fresh seed
   llvm-feature simple binary and binutils —
   `SIMPLE_HAL_SEED=<llvm-feature simple> sh scripts/check/check-naked-no-prologue.shs`
   (plus `--twins` for the full start.S twin sweep).
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b bookkeeping)
+
+FIXED 2026-11-11 (lane compiler6) per in-file addendum; this pass concurs with the recorded verdict, no re-run. No contrary evidence found in this pass; header status left as the
+owning lane recorded it.

@@ -327,3 +327,7 @@ now-passes is tracked by the ora/sspec red-spec batches, not re-swept here.
 The unprocessed 50 legacy-mirror follow-up from this doc is moot for
 correctness (mirrors now execute their bodies too) but the mirrors still
 carry the inert tag.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**SUPERSEDED/FIXED (confirmed)** — Root cause was the tag: named-arg body deletion, fixed 3305df7e1508 (verified ancestor); gate PASS on the tag-drop fixture; tagged examples now execute (cold_full_index_retention 2/2). Semantics note: only-compiled remains an inert (unimplemented) filter, so tagged blocks now run in ALL modes — ora/sspec batches track the resulting reds.

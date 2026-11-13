@@ -192,3 +192,28 @@ NET SimpleOS WM 4K: advanced from boot-crash → boots through pmm/vmm/vfs/frame
 4K-scanout/engine2d/input/compositor/shell-init (via `1fe2653d` O(n^2) + `3e5ef0c9`
 compositor + this font guard); remaining blocker is the systemic null-deref on any
 Fat32Core read against the failed NVMe mount — deep VFS/NVMe-driver work.
+
+
+---
+
+## 2026-11-13 addendum — P3 gpu lane p3-gpu-20261113 (work/p3-gpu-20261113, base 6f4cb189867)
+
+**Verdict: OPEN — residual blocker unchanged at this tip; fix and verification
+remain with the VFS/NVMe owner on the QEMU harness.**
+
+- Source state at this base: `Fat32Core._device_read_sector`
+  (`src/lib/nogc_async_mut/fs_driver/fat32_core.spl:191-195`) still forwards
+  unconditionally to `dev.read_sector(lba)` with no not-initialized guard at the
+  Fat32 layer; the NVMe path is `src/os/drivers/nvme/nvme_block_device.spl:26`.
+  None of the three clean fixes this doc names (null-safe `read_sector`,
+  leave `g_root_fat32 = nil` on mount failure, or fix the NVMe/FAT32 mount) can
+  be confirmed landed at the layer where the 2026-07-14 cr2=0x0 storm fired.
+- Not attempted in this lane: any VFS/NVMe source edit would be unverifiable
+  here — the reproduction/verification path is the QEMU harness with
+  `SIMPLE_BIN=build/bootstrap/stage3/<triple>/simple`, and this lane is
+  forbidden the bootstrap/native build that produces it (same grant family as
+  the baremetal image perf probe row). No QEMU binary is on PATH on this host.
+- The landed O(n^2) heap fix (`1fe2653d`) and compositor/font-guard advances
+  recorded above stand as prior verified evidence. Grant: VFS/NVMe owner runs
+  the harness, lands one of the three clean fixes, and records the 4K PASS
+  evidence this doc's Verification method demands.

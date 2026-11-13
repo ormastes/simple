@@ -69,3 +69,10 @@ whoever owns threads can start from a known repro rather than from scratch.
 
 - `doctest_surfaces_registered_but_not_executed_2026-09-19` — same theme from the
   same sweep: a surface that looks maintained and is not.
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+triaged in-file: unimplemented features plus one genuine concurrency defect owned elsewhere.

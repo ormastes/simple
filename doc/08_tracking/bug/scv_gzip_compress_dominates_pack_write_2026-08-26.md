@@ -332,3 +332,11 @@ Residual (optional cleanup, not this defect): `scv_pack_v2_gzip_stored` in
 `pack_v2.spl` remains as a no-longer-necessary performance workaround;
 re-enabling real compression on `pack-write-v2r` is a separately measured
 change, as the 2026-08-26 section already states.
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b bookkeeping)
+
+FIXED (2026-11-11 triage, lane boot22) per in-file addendum; bookkeeping concurrence. No contrary evidence found in this pass; header status left as the
+owning lane recorded it.

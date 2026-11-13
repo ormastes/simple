@@ -268,3 +268,7 @@ native re-probe (one-binary build of Probe B) remains owed on a host where
 native-build completes — impossible on this Windows host (known live hang).
 The spec header still says "EXPECTED RED ... under native codegen"; the
 native owner lane should flip that note when running the probe.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**FIXED in source (confirmed)** — ne16: get() routed through lower_dict_runtime_read with value-type resolution + struct registration; spec 6/6 (incl. the deliberately-RED-at-writing scenario). Native one-binary re-probe owed on a completing host.

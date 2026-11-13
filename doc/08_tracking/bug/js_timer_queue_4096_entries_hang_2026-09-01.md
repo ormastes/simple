@@ -125,3 +125,7 @@ is the known `seed_enum_variant_bare_name_last_registration_wins_2026_10_19`
 hazard surfacing on the refreshed seed; routed to the seed lane via this
 lane's evidence file (`build/review/p3fix-lib3-20261111.sdn`) — do not
 re-dispatch as a timer-queue regression.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**SUPERSEDED (confirmed)** — lib3: fix bbae0fd2296d ancestor; doc's exact command now terminates ~8s on the refreshed seed (hang symptom objectively gone); 2026-11-10 before/after fill probe stands as executed evidence. Host-gap note: JsValue duplicate-registration hazard on the refreshed seed routed to the seed lane (NOT a timer regression).

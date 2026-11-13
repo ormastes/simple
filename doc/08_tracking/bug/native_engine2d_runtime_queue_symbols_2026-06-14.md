@@ -83,3 +83,7 @@ symbol exposure was instead verified directly via `nm` over a freshly linked
 binary as above. (b) `--mode=native` for *specs* degrades to the interpreter
 on the Rust seed ("Ran on the interpreter; this file's REAL pass/fail is
 reported"), so native spec evidence still uses the direct native-build route.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**FIXED (confirmed)** — rt3: native-build works on this Windows host now; 48 rt_host_gpu_queue_* symbols linked into a fresh binary which runs and round-trips payload_hash; CPU-only import split landed.

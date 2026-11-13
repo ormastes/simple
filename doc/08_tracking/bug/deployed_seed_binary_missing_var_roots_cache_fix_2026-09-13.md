@@ -148,3 +148,7 @@ not edited by this lane.
 
 **Cycles:** 0 (no live defect; the row's premise was the old stale deployed
 seed). Evidence: `build/review/p3fix-seed2-20261111.sdn`.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**SUPERSEDED (confirmed)** — seed2: VAR_ROOTS_CACHE compiled into the refreshed seed (nm-verified); fix commits ancestors of the tracked build.

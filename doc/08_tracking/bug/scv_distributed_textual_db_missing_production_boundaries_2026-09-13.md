@@ -61,3 +61,10 @@ L0–L10 implementation program in
 REQ-001..REQ-036 / NFR-001..NFR-015 verification — feature-program work owned
 by scv-database-team, not a root-cause bug fix. No workaround applied, no
 fail-fast checker weakened.
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+Not pursued in this lane: LIVE design-only gap confirmed 2026-11-11 (lane boot22); not fixable in a P3 bug-fix lane. Owner: design + SCV lane.

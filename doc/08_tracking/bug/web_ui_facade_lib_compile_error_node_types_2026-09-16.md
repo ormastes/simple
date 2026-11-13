@@ -68,3 +68,11 @@ test/01_unit/lib/nogc_async_mut/web_ui/web_ui_facade_spec.spl` (Rust seed,
 executed=1 passed=1 failed=0`, rc=0. The `namespace: text` field in
 `class Element` compiles; the unblock condition is met on Windows and Linux.
 `bug_db.sdn` row moved open -> closed to match the shard.
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b bookkeeping)
+
+SUPERSEDED (node_types.spl compiles as-is) per in-file verdict. No contrary evidence found in this pass; header status left as the
+owning lane recorded it.

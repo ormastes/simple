@@ -78,3 +78,7 @@ The unblock condition has been met. Current tree (tip c8b6d0ebe90e):
   (was 0/4 blocked with `no field named content_x` +
   `layout_text_has_break_opportunity not found`).
 
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**FIXED (confirmed)** — ne13: layout_core ported; break-opportunity helper exists and is used; spec 4/4 on the release seed.

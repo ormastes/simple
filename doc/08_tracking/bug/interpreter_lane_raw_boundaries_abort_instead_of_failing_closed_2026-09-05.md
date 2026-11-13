@@ -88,3 +88,7 @@ Seed-smoke spot-check (2026-11-11, lane interp5, refreshed seed
 --no-cache`): `test/01_unit/compiler/95.interp/interpreter/raw_boundary_failure_sentinels_spec.spl`
 → 4 total / 4 passed. No further action; caller-side existence-probe removal
 remains the separate cleanup recorded by the prior lane.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**SUPERSEDED (confirmed)** — interp5: raw_boundary_failure_sentinels_spec 4/4 on the refreshed seed; retained Rust unit tests carry the fix.

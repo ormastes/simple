@@ -28,3 +28,10 @@ the dominant cost occurs before Ed25519 test execution.
 This performance gap blocks a native PASS claim for the new verifier. It does
 not permit falling back to caller-supplied verification booleans or moving
 signature verification into the per-call SFFI hot path.
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+open compile-cost concern; owner: SFFI manifest lane.
