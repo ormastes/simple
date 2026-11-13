@@ -201,7 +201,8 @@ had flagged (`cuda_session_contract_spec` 10/10, `graph_ir3d_spec` 6/6,
 ## Wave 2 - `src/compiler/10.frontend` + `src/compiler/60.mir_opt` (base `3538a1adca8`)
 
 Scope rule (owner, 2026-11-13): **tests may access private fns**; the seed's
-`check_private_use_names` test exemption lands in a separate lane. So only a
+`check_private_use_names` test exemption landed separately (`9cbce419747`,
+merged into this branch before landing; the before/after runs below predate it). So only a
 pair with at least one non-test importer (outside `test/**` and not a
 `*_spec.spl`) is made `pub`; test-only pairs stay private.
 
