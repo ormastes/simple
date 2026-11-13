@@ -38,17 +38,28 @@ instructions + terminators.
 
 ### 1.1 Results
 
-| module | src lines | AST nodes | HIR fns | HIR blob bytes / lines | MIR insts | RSS Δ pools | RSS Δ bridge | RSS Δ HIR | RSS Δ MIR |
-|---|---|---|---|---|---|---|---|---|---|
-| `data_schema_resolver.spl` | 514 | 1,973 | 27 | 349,431 / 74,042 | 3,223 | (reuse) | +1.56 MB | +3.94 MB | +8.93 MB |
-| `data_schema_resolver.spl` (repeat) | 514 | 1,973 | 27 | same | 3,223 | (reuse) | +1.39 MB | +4.00 MB | — |
-| `hir_lowering/attr_access_sites.spl` | 188 | 638 | 12 | 117,314 / 25,717 | 934 | (reuse) | — | 0 | (reuse) |
-| `mir_lowering_stmts.spl` (cold) | 5,513 | 15,235 | 99 | 2,390,144 / 511,708 | 21,073 | +63.07 MB | +20.52 MB | +28.77 MB | +41.75 MB |
-| `mir_lowering_stmts.spl` (repeat ×2) | 5,513 | 15,235 | 99 | same | 21,073 | +19.0 MB / (reuse) | +22.66 / +23.25 MB | +44.54 / +46.40 MB | +45.72 MB |
+Output of the committed probe (one process, rows in run order; RSS deltas in
+bytes between the phase boundaries; `(reuse)` = negative delta, the allocator
+recycled memory freed by `reset_all_pools()`):
 
-Per AST node (large module, repeats): bridge **1.35-1.53 KB**, HIR
-**1.9-3.0 KB**, HIR blob **156 B (~33 scalars)**; per MIR instruction (the committed probe, which keeps the bridge alive through MIR, read 3.1-5.6 KB)
-2.0-2.2 KB. Bridge share of the bridge+HIR peak: 26-42% (33% median).
+| module | src lines | AST nodes | HIR fns | HIR blob bytes | MIR insts | Δ pools | Δ bridge | Δ HIR | Δ MIR | bridge B/node | HIR B/node | blob B/node | MIR B/inst |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| `00.common/data/data_schema_resolver.spl` | 514 | 1,973 | 27 | 349,431 | 3,223 | (reuse) | 466,944 | 3,575,808 | 18,112,512 | 236 | 1,812 | 177 | 5,619 |
+| `20.hir/hir_lowering/attr_access_sites.spl` | 188 | 638 | 12 | 117,314 | 934 | (reuse) | 12,288 | (reuse) | (reuse) | 19 | — | 183 | — |
+| `50.mir/mir_lowering_stmts.spl` (cold) | 5,513 | 15,235 | 99 | 2,391,922 | 21,077 | 52,772,864 | 20,008,960 | 23,564,288 | 113,127,424 | 1,313 | 1,546 | 157 | 5,367 |
+| `50.mir/mir_lowering_stmts.spl` (repeat) | 5,513 | 15,235 | 99 | 2,391,922 | 21,077 | (reuse) | 1,060,864 | 40,259,584 | 64,720,896 | 69 | 2,642 | 157 | 3,070 |
+
+Supplementary: a scratch split probe (same binary, `reset_all_pools -> parse ->
+bridge -> HIR` only, no MIR; three runs of the large module) read bridge
+20.5 / 22.7 / 23.2 MB (1,346 / 1,487 / 1,526 B per node) against HIR
+28.8 / 44.5 / 46.4 MB, i.e. a bridge share of 42 / 34 / 33 % of bridge+HIR; an
+earlier scratch run of the same pipeline read MIR at 2.0-2.2 KB per
+instruction, so the MIR figure is allocator-state dependent (2.0-5.6 KB).
+
+Per AST node on the large module: **bridge 1.3-1.5 KB on a cold heap**
+(hidden by reuse on repeats: 69 B), **HIR 1.5-2.6 KB of RSS**, **HIR blob
+157 B (~33 scalars)**. Cold-row bridge share of the bridge+HIR peak: 46 %
+(split probe: 33-42 %).
 
 ### 1.2 Reading the numbers
 
@@ -61,7 +72,7 @@ Per AST node (large module, repeats): bridge **1.35-1.53 KB**, HIR
   i.e. under half the text blob and an order of magnitude under the boxed tree
   (~2-3 KB/node). HIR is what a MIR worker must hold per module — the hirres
   lane's 20-25 GiB of promoted HIR across workers is this number times fan-out.
-- **The bridge is a peak cost, not a resident one.** The streaming driver calls
+- **The bridge is a peak cost, not a resident one** (cold heap: 20 MB, 1.3 KB per AST node on the 5.5k-line module; invisible on a warm heap). The streaming driver calls
   `ast_reset()` and `self.ctx.modules = {}` right after HIR lowering
   (`src/compiler/80.driver/driver_hir_pipeline_lowering.spl:1641-1643`); the
   non-streaming path keeps `ctx.modules: Dict<text, ParserModule>`
@@ -76,7 +87,7 @@ Per AST node (large module, repeats): bridge **1.35-1.53 KB**, HIR
   (`flat_bootstrap_function_at` already converts on demand via
   `convert_decl_fn(decl_idx)`; `flat_bootstrap_body_at` is still a stub
   returning an empty Block), lower it, release it. Expected peak saving ≈ the
-  bridge column minus one function (~20 MB on a 5.5k-line module, 1.3-1.5 KB
+  cold-row bridge delta minus one function (~20 MB on a 5.5k-line module, 1.3-1.5 KB
   per AST node), behind a resolver rule with the whole-module bridge as the
   default until the native lane measures it.
 
