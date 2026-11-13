@@ -529,18 +529,22 @@ pub fn run_native_build_bootstrap(args: [text]) -> i64:
                     env_get(NATIVE_BOOTSTRAP_WHOLE_PROGRAM_ENV_V1) ?? "")
                 if stage3_allow_mir:
                     print "[stage3-route] per-file worker pool + per-module link"
-                # go-to-end on the two-pass route (SIMPLE_FILE_WORKERS=0): admit
-                # the MIR shard pool so a codegen panic costs one module, not the
-                # build. Authority + closure are NOT published here: Stage 3's five
-                # --source roots omit src/plugins, so an SCV snapshot of them cannot
-                # resolve the closure's plugins.* imports (bug record
-                # stage3_two_pass_hir_pool_scv_roots_omit_plugins_2026-11-13.md);
-                # the HIR pool stays refused and SIMPLE_HIR_SHARDING=0 skips it.
+                # go-to-end on the two-pass route (SIMPLE_FILE_WORKERS=0): HIR and
+                # MIR shard pools, so HIR runs on >= 2 workers and a codegen panic
+                # costs one module, not the build. The HIR profile admits a worker
+                # only against a published closure request, so publish authority
+                # and closure first, exactly as the coordinator route does; the
+                # SCV cut adds src/plugins beside src/app
+                # (native_build_selected_snapshot_source_roots_v1).
                 val stage3_two_pass = native_build_stage3_capsule_mir_route_v1(stage3_allow_mir,
                     args.contains("--go-to-end") or (env_get("SIMPLE_NATIVE_GO_TO_END") ?? "") == "1",
                     env_get(NATIVE_BOOTSTRAP_WHOLE_PROGRAM_ENV_V1) ?? "") == "two-pass"
                 if stage3_two_pass and not bootstrap_shard_child_active():
-                    print "[stage3-route] go-to-end MIR shard pool"
+                    print "[stage3-route] go-to-end HIR shard pool + MIR shard pool"
+                    if not bootstrap_coordinator_publish_authority_v1(worker_args):
+                        return 1
+                    if not native_build_coordinator_prepublish_closure_v1(worker_args):
+                        return 1
                 if not bootstrap_capsule_shard_prepass_routed(args, stage3_allow_mir or stage3_two_pass, stage3_allow_mir):
                     return 1
             return run_exact_stage3_focused_capsule(args)

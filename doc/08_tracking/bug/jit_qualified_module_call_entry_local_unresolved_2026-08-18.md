@@ -77,3 +77,7 @@ Note: the AOT sibling `check-import-alias-aot.shs` was not re-run in this lane
 a known live defect); if it is wired into a lane that can AOT-build, re-run it
 there before citing AOT coverage.
 
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with lane ne13: FIXED — the named gate is GREEN. No independent re-verification in this lane; disposition stands.

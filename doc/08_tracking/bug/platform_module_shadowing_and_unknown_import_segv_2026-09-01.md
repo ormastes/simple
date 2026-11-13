@@ -140,3 +140,41 @@ stay `"a\b"` there, and a blanket change would silently corrupt POSIX paths to
 `path_pure` (or a documented Windows-only variant), which is a real design
 decision with a cross-platform blast radius, not a drive-by edit. Filed here
 with the tradeoff stated so the next person does not "simplify" it wrongly.
+
+---
+
+## Triage 2026-11-13 (lane p3-misc-b) — Defect 1 NOT merged; measured resolution behavior + hazard map recorded
+
+Probe on the release/1.0.0-tip seed (single import line):
+
+```
+use std.platform.{get_host_os, host_os, host_arch, dir_sep}
+```
+
+resolved ALL FOUR names (get_host_os=windows host_os=windows host_arch=x86_64
+dir_sep=\). `get_host_os` exists only in `platform/__init__.spl`; `host_os`
+exists only in `platform.spl`. So the seed's name-list import resolution
+reaches BOTH modules' exports — the file module is NOT dead the way this
+record's Defect-1 framing claims; the two modules behave as an unguarded
+per-name merge. Consequences measured from the tree:
+
+1. `test/01_unit/compiler/backend/llvm_host_toolchain_spec.spl:5` already
+   imports `{get_host_os, host_arch}` — one name from each module — and runs.
+2. `to_native_path` is still duplicated (identical bodies, both aliasing
+   `host_path_native`) — benign but rot-prone.
+3. `exe_ext`/`lib_ext` DIFFER between the modules (file delegates to the
+   `target_ext` seam; directory hardcodes). Which body wins per name is not
+   observable from the interpreter lane and cannot be verified here — so
+   deleting `platform.spl` (the obvious de-collision) risks silently swapping
+   the target-ext-aware bodies for cross-compile lanes. NOT done in this lane.
+4. The load-bearing consumers that needed a trustworthy host_os on the
+   stage-2 native lane already migrated off `std.platform` entirely
+   (`native_linking.spl`, `mir_target_context_provider.spl`, `llvm_target.spl`
+   — see their "Was: std.platform…" comments citing the detect_os
+   misdetection trace).
+
+Residual work for a dedicated lane with stage-2 verification authority:
+de-collide by merging `host_os`/`host_arch`/`resolve_command` into
+`platform/__init__.spl`, pick ONE `exe_ext`/`lib_ext` owner (the `target_ext`
+seam looks load-bearing for cross-target baking), and only then delete
+`platform.spl`. Until then the shadowing pair is latent, not active.

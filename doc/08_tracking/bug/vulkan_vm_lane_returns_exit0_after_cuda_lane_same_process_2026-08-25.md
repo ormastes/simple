@@ -66,3 +66,60 @@ Verification pending: `examples/08_gpu/backends/backends_spec.spl` going
 green (4 passed) on a 2x-NVIDIA Vulkan 1.4 host.
 
 Status: OPEN (suspects confirmed in source; fix site out of lane scope).
+
+
+## Triage 2026-11-13 (lane p3-async-20261113, base 80a8116e5e2) — not reproducible on this lane (host-bound)
+
+This lane runs a Windows host with the tracked seed; the recorded
+interference requires a Linux host with 2x NVIDIA, live Vulkan 1.4.312 and a
+live CUDA lane in one process — none of which this lane can construct, and
+`backends_spec.spl` cannot run meaningfully here. No fresh reproduction was
+attempted; the evidence and suspects in the record body stand (shared
+per-process GMB-1 mailbox arena / sentinel-reader cursor consumed by the
+first lane; Vulkan/CUDA teardown ordering). The unblock condition is
+unchanged: fix the shared state so both lanes run in one process, or make the
+second lane fail loudly (never `ok=true exit=0`), keeping
+`backends_spec.spl` strict. Routed to the GPU-lane owner. No source change.
+
+## 2026-11-13 — fail-loud half landed (lane uia); row stays OPEN
+
+Concrete fail-open matching the filed shape (`ok=true, exit=0, records=[]`):
+`VulkanVmExecutor.run_source_persisting_data` returned `ok: not forced_timeout`
+for a failed `dispatch_once`, so every dispatch error that is not a forced
+timeout (`vulkan-lane-session-unavailable`, `-fenced-submit-unavailable`,
+`-descriptor-create-failed`, `-command-record-failed`) read as a clean exit 0
+with no records. It now returns `ok: false` with the session error
+(`svmg_dispatch_error_outcome`, `src/lib/gc_async_mut/gpu_lane/vulkan_vm_executor.spl`).
+
+Evidence, release/1.0.0 `35144b7f5e9` + this change, Linux aarch64 (DGX Spark
+GB10), Rust seed sha256 prefix `af717f53d6bce3e5`:
+
+- `test/02_integration/gpu_lane/vulkan_vm_executor_dispatch_error_spec.spl`:
+  1/2 before the fix (`expected true to equal false`), 2/2 after.
+- `test/03_system/gpu_lane/vulkan_vm_executor_conformance_spec.spl`: 2/2.
+- `examples/08_gpu/backends/backends_spec.spl`: 4 examples, 1 failure — and it
+  is not this record's shape. The **vulkan** example passes after the cuda
+  example ran in the same process; the **cuda** example fails with
+  `semantic: array index out of bounds: index is 0 but length is 0`
+  (`o.records[0]`, no records from the CUDA lane on this host).
+
+Not established: whether the original Vulkan-after-CUDA interference still
+exists. It did not reproduce here, but the CUDA example did not complete
+cleanly on this host, so the precondition (a clean live CUDA run first) was not
+met. The second fail-open candidate (dispatch succeeds, kernel writes no
+sentinel, `_decode_sentinel` falls through to `ok: true`) was left alone: the
+DBG-1 break/resume path may legitimately return a non-exit sentinel.
+
+
+## 2026-11-13 follow-up (Linux aarch64, lane uia)
+
+After the ok=false change landed (PR 8782), test/03_system/acceptance/gpu_backend_portability_acceptance_spec.spl on release/1.0.0 5221a5058a8, Linux aarch64 (DGX Spark GB10), Rust seed af717f53d6bce3e5: 5 examples, 4 passed, 1 failed, 1 skipped (metal). The Vulkan example passes; the CUDA example fails with array index out of bounds: index is 0 but length is 0, the same shape as in backends_spec (its o.records[0] read after a live CudaVmExecutor run returned no records). No consumer of VulkanVmExecutor went red from the change.
+
+
+
+---
+## 2026-11-13 triage — lane live-p3-l6 (Windows host, seed bin/simple.exe, base f790f7f266e)
+
+Concur with the 2026-11-13 fail-loud landing; row stays OPEN. The
+Linux-2x-NVIDIA same-process interference has no reproduction path on this
+Windows host. No in-lane change.

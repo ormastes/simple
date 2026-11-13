@@ -94,3 +94,7 @@ lane: seed rebuild after the inference fix (`cd src/compiler_rust && cargo
 build --release`, or the repo's seed-rebuild script), then re-run the two
 shapes above (chained must pass, control must stay green), then remove the
 four spec workarounds as this doc's unblock condition requires.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**LIVE (confirmed)** — ne15 re-verified: chained form still fails, bound-intermediate control still passes. Chain-result type leaks into the receiver slot in seed/self-hosted inference; seed-rebuild grant recorded. The four workaround specs must keep their binds.

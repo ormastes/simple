@@ -75,3 +75,29 @@ Verification pending: re-run of `examples/08_gpu/backends/svmg_hello.spl`
 under `simple run` on a Vulkan host once the admitted compiler exists.
 
 Status: OPEN (root cause identified; fix site out of lane scope).
+
+
+---
+
+## 2026-11-13 addendum — P3 gpu lane p3-gpu-20261113 (work/p3-gpu-20261113, base 6f4cb189867)
+
+**Verdict: OPEN, unchanged — host-class mismatch: the filed repro is a Linux
++ dual-NVIDIA observation; this Windows lane has no equivalent Vulkan-device
+`run`-vs-`test` entry path to reproduce it, and the failure surface
+(`VulkanInstance::get_or_init` in `src/compiler_rust/runtime`) is seed-Rust
+owned.** Not re-run here. Grant unchanged: on the Linux NVIDIA host (or any
+host where `test` live-passes), run the record's two commands against a current
+seed and capture `vulkan_sffi_last_error()` after `init()` — the silent rc=0
+exit after the error probe remains a secondary suspect to settle in the same
+session.
+
+
+---
+## 2026-11-13 triage — lane live-p3-l6 (Windows host, seed bin/simple.exe, base f790f7f266e)
+
+Concur with the most recent in-record triage; no fresh reproduction attempted
+(record's own grant names another host/lane). No in-lane change; disposition
+and owner unchanged.
+Filed repro is Linux dual-NVIDIA specific; this Windows host has no equivalent
+run-vs-test Vulkan entry divergence. Seed-Rust runtime owned
+(`VulkanInstance::get_or_init`).

@@ -259,3 +259,7 @@ separate, still-open native-build prerequisite bugs (cross-module
 `scripts/check/check-rt-io-file-native-jit-stub.shs`), and `native-build` on
 this Windows host is a known-live hang lane. The fence script continues to
 gate AOT via `RUN_AOT_LEG=1`; this row's interpreter+JIT scope is resolved.
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with the 2026-11-11 addendum: interpreter engine verified end-to-end; JIT engine unchanged and confirmed still stubbed (expected per stubs.rs ordering hazard); AOT presumed-still-broken, not re-confirmed. No in-lane change.

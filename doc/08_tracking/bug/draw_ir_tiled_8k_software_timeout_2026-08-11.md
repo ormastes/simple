@@ -63,3 +63,8 @@ No code change this lane; the 2026-11-11 (lane ne7) addendum stands — the
 acceptance criteria (split-process harness, native runner profile, p95 <=
 12.5ms at 8K/80) are a perf-infrastructure build, and honest evidence cannot be
 produced in interpreter mode on the Windows lane. Not re-run.
+
+## Triage 2026-11-13 (Linux aarch64, lane uia) — row stays OPEN
+
+Blocked on this host for closure: acceptance is p95 <= 12.5 ms at 8K, which needs a native self-hosted binary; only the Rust seed is available. The bench still runs both lanes in one process.
+

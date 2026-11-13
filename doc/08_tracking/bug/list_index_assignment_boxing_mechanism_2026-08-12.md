@@ -276,3 +276,7 @@ wrapper) in `src/compiler_rust`, patch the untyped-list-param JIT binding to
 the flat encoding the typed and interpreter lanes already use, rebuild the
 tracked seed, and re-run the probe above plus a paired spec (e.g. an A/B
 untyped-vs-typed param bracket-assign assertion) on both lanes.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**LIVE (confirmed)** — ne14: sha3 headline corruption fixed; the remaining untyped-param JIT boxing defect reproduces (bare read gives boxed pointer, +5 does pointer arithmetic, eq false). Locus is seed JIT parameter binding/tagging for untyped-list slots — seed lane grant (cargo rebuild + re-deploy).

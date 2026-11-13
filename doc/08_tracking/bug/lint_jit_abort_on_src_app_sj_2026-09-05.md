@@ -103,3 +103,7 @@ the landed mitigation. `integrate_plan.spl`'s 3 lint errors are ordinary rule
 findings for that file's authors, not this defect. The `.claude/rules/
 commands.md` `bin/simple lint <changed files>` step is again satisfiable for
 both files.
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with lane ne14: FIXED, verified on release/1.0.0. No independent re-verification in this lane; disposition stands.

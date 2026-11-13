@@ -448,3 +448,11 @@ stub; >3h to reach the wedge under TCG).
    bracket-read corruption) and the stage3 driver.spl HIR wedge documented
    above remain LIVE and owned by the codegen lane; this doc's five
    hardening slices are all merged, so main stays strictly better.
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b bookkeeping)
+
+FIXED 2026-11-11 (lane boot17) per in-file addendum; bookkeeping concurrence. No contrary evidence found in this pass; header status left as the
+owning lane recorded it.

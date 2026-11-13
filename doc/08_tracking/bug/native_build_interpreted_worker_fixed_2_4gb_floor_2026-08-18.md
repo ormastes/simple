@@ -257,3 +257,7 @@ process-lifetime `thread_local` retention maps (8 `thread_local` hits,
 cleared only by the test runner). Both remedy directions remain outside this
 lane: compiled worker = bootstrap redesign; retention census = seed-fix lane
 (cargo rebuild grant). Header flipped to LIVE.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**LIVE (confirmed)** — boot6/int10/int11: measured, not fixed; worker spawn shape (interpreted run of native_build_worker.spl) and process-lifetime module-cache retention unchanged at this base. Owners: seed-fix lane (retention census + cargo rebuild grant) / bootstrap redesign (compiled worker).

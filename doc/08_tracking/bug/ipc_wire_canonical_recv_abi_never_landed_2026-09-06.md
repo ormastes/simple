@@ -206,3 +206,7 @@ resolves that row.
 
 Not carried by seedfix A (fa6939eb4b9e is JIT tuple unbox; this row is
 kernel ABI/design debt, not codegen).
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**LIVE (confirmed)** — ne12: codec still has zero importers; syscall 21 still returns a materialized kernel pointer. Unblock conditions 1-2 now met (symbols defined); guard spec load-blocked by the routed VirtMemManager tri-def — re-run after the OS owner resolves it.

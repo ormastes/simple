@@ -319,3 +319,43 @@ age-based. Do not reintroduce `file_lock` in `src/app/compiler_entrypoint/`,
 `src/lib/scv/compile_*.spl` or the workaround store: the guard
 `scripts/check/check-no-refresh-file-lock.shs` fails closed on it. See
 `doc/05_design/compiler/scv/lockless_refresh.md`.
+
+## Library unit plan v1 (2026-11-13, slice 1 of library unit build + link)
+
+- Design: `doc/05_design/compiler/incremental_build/library_unit_build_and_link.md`.
+  Module: `src/compiler/80.driver/driver_build/library_unit_plan_v1.spl`
+  (`library_unit_decl_parse_v1`, `library_unit_path_normalize_v1`,
+  `library_unit_plan_v1`, `library_unit_cache_key_v1`); spec
+  `test/01_unit/compiler/80.driver/library_unit_plan_v1_spec.spl`. Pure
+  functions, NOT wired into native-build; imported directly, not via `__init__`.
+- Planner is Kahn-by-levels with explicit cycle `Err`; `BuildGraph.topological_order`
+  (parallel.spl) tolerates cycles silently, so it is not reused for planning.
+- Measured manifest drift the planner fails closed on: `src/lib` → `../../compiler_rust`
+  (manifest lives at `src/compiler_rust`), `src/app` and `src/compiler` → `../../rust`
+  (nonexistent). Fix those lines before any flag turns the unit path on.
+- Trap: `bin/simple lint` on the seed reports `error[W-ANY-NOTRUN]` ("no check
+  worker? set SIMPLE_BINARY") unless `SIMPLE_BINARY=<binary>` is exported; two-arm
+  `Option` matches draw `non_exhaustive_match` (same as `project.spl`), left as is.
+- Slices 2-5 (2026-11-13, same lane, all unwired): `library_unit_iface_v1.spl`
+  (unit source digest; per-module digest = `native_interface_decls_v1` +
+  `native_interface_whole_digest_v1`, the body-free carrier — spec proves field
+  reorder / variant insert / `val` value / method default change it, bodies do
+  not; `iface.sdn` decode fails closed), `library_unit_archive_v1.spl`
+  (archive via `find_archive_portable` + `archive_command_build`; write-once
+  `receipt.sdn` re-verifies unit_key and records scope_key),
+  `library_unit_graph_v1.spl` (plan → `ParallelBuilder`; poison/buildable),
+  `library_unit_link_v1.spl` (flag predicate, link set keyed from CURRENT iface
+  digests, application-in-closure = Err). Manifest drift fixed in `5703f224213`.
+- Traps: `ParallelBuilder.build` puts only DIRECT failures in `errors`
+  (dependents are `Failed("Dependency failed")` in `stats.failed`); the seed JIT
+  demotes a module touching `ArchiveCommand.response_path` ("Cannot infer field
+  type") and runs it interpreted; the archive spec's real-archiver branch depends
+  on `find_archive_portable()` and asserts the Err text when none exists.
+- Blockers before wiring: `doc/08_tracking/bug/library_unit_build_slice5_prerequisites_2026-11-13.md`.
+- Review M1 (2026-11-13): `native_interface_decls_v1` now keeps the in-string
+  continuation lines of an open NON-fn declaration (`val HELP = """…"""`), since
+  private string constants are inlined by value into importers; fn/me bodies and
+  module docstrings stay out. Over-inclusive only for its other users
+  (native_module_witness_facts, native_source_interface_index). Unit archives
+  require llvm-ar (`library_unit_archiver_v1`; binutils `ar`/`lib.exe` refused)
+  and are built at `<archive>.tmp.<pid>` then renamed — write-once, lockless.

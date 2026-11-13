@@ -41,3 +41,12 @@ on the compiler binary, so a rebuilt seed with unchanged source rebuilds all
 No code change this lane; the 2026-11-11 (lane boot23) triage stands — LIVE
 cargo/seed build-reproducibility defect routed to the seedfix lanes (seed-Rust
 only, per the method's do-not-chase rule).
+
+
+---
+## 2026-11-13 triage — lane live-p3-l6 (Windows host, seed bin/simple.exe, base f790f7f266e)
+
+Concur: cargo/seed build-reproducibility is routed to the seed-fix lane (cargo
+fixes are outside P3 bug lanes); a two-build digest comparison is not a cheap
+probe for this lane. No in-lane change.
+

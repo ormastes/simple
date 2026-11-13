@@ -66,6 +66,7 @@ use compiler.frontend.parser_types.*
 use compiler.driver.driver_source_pipeline_impl.{dtrace, driver_end_transient_parse_scope, driver_promote_frontend_registry_owners, driver_promote_retained_frontend_owners_v1}
 use compiler.driver.driver_phase_gates.{bootstrap_entry_module_name, bootstrap_entry_source_index}
 use compiler.driver.driver_phase_gates.{driver_streaming_surface_enabled}
+use compiler.driver.driver_ice_boundary.{ice_boundary_module_start, ice_boundary_module_done, ice_boundary_fail}
 use compiler.driver.driver_log_helpers.{log_debug, log_trace, log_warn, log_error, log_phase, log_build_progress, driver_phase_trace_enabled}
 use compiler.driver.driver_mem_snapshot.{mem_snapshot_begin, mem_snapshot_finish, mem_snapshot_finish_with_outcome, mem_snapshot_abort, mem_snapshot_owner_v1}
 use compiler.driver.driver_hir_pipeline_support.{
@@ -106,7 +107,14 @@ use compiler.hir.hir_codec.{hir_codec_roundtrip_selfcheck, hir_codec_roundtrip_l
 use compiler.hir.hir_codec.{hir_module_first_fn_name_p_v1, hir_module_first_fn_name_wi_v1, hir_module_first_fn_name_via_decode_v1, hir_module_decode}
 use compiler.hir.hir_codec.{hir_module_functions_at_v1, hir_fn_scalars_at_v1, hir_module_first_fn_name_v1, hir_module_first_fn_name_in_v1, hir_module_first_fn_name_ordered_in_v1, hir_module_blob_in_v1}
 use compiler.driver.driver_hir_cache.{hir_cache_enabled, hir_cache_closure_digest, hir_cache_key, hir_cache_has, hir_cache_load, hir_cache_store, hir_cache_summary, hir_cache_hits, hir_cache_last_warnings, hir_cache_parser_binding_v1, hir_cache_last_parser_objectless, hir_cache_load_parsed_v1, hir_cache_last_refusal_is_io_v1, hir_shard_active, hir_shard_owns, hir_shard_levels, hir_shard_level_count, hir_shard_visit_order, hir_shard_summary, hir_shard_deps_wanted_v1, hir_shard_publish_records_v1, hir_shard_dep_source_indices_v1}
-use compiler.driver.driver_worker_surface_closure_v1.{worker_hir_load_allowed_v1}
+use compiler.driver.driver_worker_surface_closure_v1.{worker_hir_load_allowed_v1, worker_hir_loads_restricted_v1}
+use compiler.driver.driver_build.native_mir_shard.{native_mir_shard_link_ledger_v1}
+use compiler.driver.driver_build.native_mir_shard_export_v1.{native_mir_shard_export_write_dir_v1}
+use compiler.driver.driver_hir_cache.{hir_cache_interface_only_bodies_dropped_v1}
+use compiler.driver.driver_mir_shard_hir_residency_v1.{mir_shard_hir_residency_refusal_v1,
+    mir_shard_hir_residency_arm_v1, mir_shard_hir_residency_armed_v1,
+    mir_shard_hir_residency_note_v1, mir_shard_hir_residency_counters_v1,
+    MIR_SHARD_INTERFACE_HIR_ENV_V1}
 use compiler.driver.driver_parse_diagnostic.{driver_parse_error_message}
 use compiler.driver.driver_hir_cache.{hir_cache_load_in_owned_scope, hir_cache_store_encoded_in_owned_scope, hir_cache_clear_last_warnings}
 use compiler.driver.driver_hir_cache.{HirEncodedBodyV1, hir_encoded_body_v1}
@@ -116,7 +124,8 @@ use compiler.driver.driver_hir_cache.{hir_cache_promote_diagnostic_owner_v1, hir
 use compiler.driver.driver_source_receipt_index_v1.{
     driver_source_receipt_pair_key_v1, driver_source_receipt_index_v1}
 use compiler.driver.driver_build.native_file_worker_v1.{native_file_worker_unit_active_v1}
-use compiler.driver.driver_hir_cache.{hir_shard_begin, hir_shard_finish, hir_shard_complete, hir_shard_guard_block, hir_shard_inventory, hir_shard_claim_failure_reason_v1}
+use compiler.driver.driver_hir_cache.{hir_shard_begin, hir_shard_finish, hir_shard_complete, hir_shard_guard_block, hir_shard_inventory, hir_shard_claim_failure_reason_v1,
+    hir_shard_row_terminal_due_v1}
 use compiler.hir.hir_lowering.items.{bootstrap_hir_modules_add_from_module, hir_module_logical_name_from_path}
 use compiler.common.cache.reverse_reference_facts.{
     reverse_reference_owner_register_source_alias_v1, reverse_reference_module_begin_v1
@@ -1078,9 +1087,26 @@ impl CompilerDriver:
         else:
             ""
         val hir_shard_mode: bool = hir_shard_active() and hir_closure_digest != ""
+        # MIR shard HIR residency (driver_mir_shard_hir_residency_v1.spl): decided
+        # once before the first HIR load. Opt-in; a refusal is named, never silent.
+        val hir_residency_flag = env_get(MIR_SHARD_INTERFACE_HIR_ENV_V1) ?? ""
+        if hir_residency_flag != "":
+            val hir_residency_refusal = mir_shard_hir_residency_refusal_v1(hir_residency_flag,
+                native_mir_shard_spec_v1(), native_mir_shard_link_ledger_v1(),
+                native_mir_shard_export_write_dir_v1(), env_get("SIMPLE_MIR_FORK_WORKERS") ?? "",
+                env_get("SIMPLE_FILE_WORKER_HIR_QUEUE") ?? "", worker_hir_loads_restricted_v1(),
+                env_get("SIMPLE_BOOTSTRAP") == "1" and env_get("SIMPLE_BOOTSTRAP_STAGE4") != "1",
+                env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") == "1")
+            if mir_shard_hir_residency_arm_v1(hir_residency_refusal):
+                print "[mir-shard] hir-residency armed: non-entry HIR cache loads are interface-only; a claimed module's body reloads from the cache"
+            else:
+                print "[mir-shard] hir-residency refused reason={hir_residency_refusal}"
         # Per-file unit child (native_file_worker_v1.spl): HIR for its claims,
         # then this same process continues into MIR + object.
         val hir_unit_mode: bool = hir_shard_mode and native_file_worker_unit_active_v1()
+        # Unit fall-through rows never re-publish a terminal (layer 3, see
+        # hir_shard_row_terminal_due_v1).
+        val hir_row_terminal_due: bool = hir_shard_row_terminal_due_v1(hir_shard_mode, hir_unit_mode)
         if hir_shard_active() and not hir_shard_mode:
             hir_shard_guard_block("HIR cache identity unavailable for shard")
             self.ctx.add_error("HIR cache identity unavailable for shard")
@@ -1198,6 +1224,13 @@ impl CompilerDriver:
                     return false
                 hir_loop_pos = hir_loop_pos + 1
                 continue
+            # A per-file unit never loads a row outside its load closure; skip it
+            # before the source-identity check, which a TLDR summary surface
+            # (fingerprinted from its stub, not the source) cannot pass.
+            # Counted once here; the P-A gate below keeps non-unit children.
+            if hir_unit_mode and not worker_hir_load_allowed_v1(source.path):
+                hir_loop_pos = hir_loop_pos + 1
+                continue
             # Keep the retained surface in its canonical owner. ModuleSurface
             # is a large value aggregate; copying it into a local and then
             # passing it through module_surface_source_matches reconstructed a
@@ -1262,8 +1295,27 @@ impl CompilerDriver:
                             hir_shard_guard_block(shard_records_err)
                             self.ctx.add_error(shard_records_err)
                             return false
+                    # ICE boundary (driver_ice_boundary.spl): the breadcrumb
+                    # names this module if the worker dies inside it, and a
+                    # module on the crash skip list (a worker already died in
+                    # it) is recorded FAILED and poisoned, never re-lowered.
+                    val hir_ice_gate = ice_boundary_module_start(source.module_name, source.path, "hir_lower", "")
+                    if hir_ice_gate != "":
+                        if not hir_shard_finish(source.path, "FAILED", false):
+                            hir_shard_guard_block("HIR shard terminal receipt publication failed")
+                            self.ctx.add_error("HIR shard terminal receipt publication failed")
+                            return false
+                        self.ctx.add_error(ice_boundary_fail(source.module_name, source.path, "hir_lower", "", hir_ice_gate) + " ({source.path})")
+                        poisoned_by_surface[surface_index] = true
+                        var skip_ctx = self.ctx
+                        skip_ctx.mark_module_poisoned(source.module_name)
+                        self.ctx = skip_ctx
+                        if skip_ctx.poison_budget_exhausted(): return false
+                        hir_loop_pos = hir_loop_pos + 1
+                        continue
                     val shard_status = self.lower_streaming_hir_shard_transaction_v1(
                         lowering, source, is_requested_bootstrap_entry, hir_stream_key)
+                    ice_boundary_module_done(source.module_name, "hir_lower")
                     if shard_status < 0 or shard_status > 3:
                         hir_shard_guard_block("HIR shard transaction failed before safe completion")
                         return false
@@ -1299,11 +1351,18 @@ impl CompilerDriver:
                 # cache (or lowered in-process) below -- never waited on.
             # P-A: a module-scoped MIR child loads HIR only for its targets and
             # their frozen import closure (driver_worker_surface_closure_v1).
-            if not worker_hir_load_allowed_v1(source.path):
+            if not hir_unit_mode and not worker_hir_load_allowed_v1(source.path):
                 hir_loop_pos = hir_loop_pos + 1
                 continue
+            val hir_stream_binding: text = if hir_stream_key != "":
+                hir_cache_parser_binding_v1(hir_stream_key, source.module_name, source.path, self.ctx.source_identities_owner[source_index], self.ctx.options.library_mode)
+            else:
+                ""
+            # MIR shard HIR residency: every non-entry module loads interface-only
+            # when armed; the claim loop reloads a claimed module's body.
+            val hir_stream_interface_only = mir_shard_hir_residency_armed_v1() and not is_requested_bootstrap_entry
             val hir_stream_cached: HirModule? = if hir_stream_key != "":
-                hir_cache_load_parsed_v1(hir_stream_key, hir_cache_parser_binding_v1(hir_stream_key, source.module_name, source.path, self.ctx.source_identities_owner[source_index], self.ctx.options.library_mode), source.path, self.ctx.options.library_mode)
+                hir_cache_load_parsed_v1(hir_stream_key, hir_stream_binding, source.path, self.ctx.options.library_mode, hir_stream_interface_only)
             else:
                 nil
             if (env_get("SIMPLE_M4_WORK_RECEIPT") ?? "") == "1":
@@ -1338,6 +1397,10 @@ impl CompilerDriver:
                 # without opening an otherwise unused parse scope.
                 lowering.begin_module(source.path)
                 hir_module = hir_stream_cached.unwrap()
+                if mir_shard_hir_residency_armed_v1():
+                    mir_shard_hir_residency_note_v1(source.path, source.module_name, hir_stream_key,
+                        hir_stream_binding, self.ctx.options.library_mode,
+                        if hir_stream_interface_only: "interface" else: "full")
                 val hir_registry_name = if is_requested_bootstrap_entry:
                     hir_module_logical_name_from_path(source.path)
                 else:
@@ -1364,7 +1427,16 @@ impl CompilerDriver:
                     mem_snapshot_abort()
                     return false
             else:
-                val lower_result = self.lower_streaming_surface_source(lowering, source, is_requested_bootstrap_entry)
+                # ICE boundary, in-process route: same bracket and skip-list
+                # rule as the shard transaction above; a skipped module takes
+                # the streaming-error path below (FAILED terminal, poisoned).
+                val hir_ice_gate = ice_boundary_module_start(source.module_name, source.path, "hir_lower", "")
+                val lower_result: Result<HirModule, text> = if hir_ice_gate != "":
+                    Err(ice_boundary_fail(source.module_name, source.path, "hir_lower", "", hir_ice_gate) + " ({source.path})")
+                else:
+                    self.lower_streaming_surface_source(lowering, source, is_requested_bootstrap_entry)
+                if hir_ice_gate == "":
+                    ice_boundary_module_done(source.module_name, "hir_lower")
                 if lower_result.is_err():
                     # No HIR aggregate exists for this unit (parse/ownership
                     # failure), so it is poisoned by definition -- but the other
@@ -1383,10 +1455,10 @@ impl CompilerDriver:
                         streaming_error.ends_with("; transient parser scope end failed") or
                         streaming_error.ends_with("; frontend registry promotion failed")):
                         hir_shard_guard_block(streaming_error)
-                        val _terminal = hir_shard_finish(source.path, "BLOCKED", false)
+                        val _terminal = if hir_row_terminal_due: hir_shard_finish(source.path, "BLOCKED", false) else: true
                         self.ctx.add_error(streaming_error)
                         return false
-                    if not hir_shard_finish(source.path, "FAILED", false):
+                    if hir_row_terminal_due and not hir_shard_finish(source.path, "FAILED", false):
                         hir_shard_guard_block("HIR failure receipt publication failed")
                         self.ctx.add_error("HIR failure receipt publication failed")
                         return false
@@ -1443,7 +1515,7 @@ impl CompilerDriver:
                         self.ctx.add_error(module_error_message)
                     module_error_index = module_error_index + 1
                 if module_fatal_error_count > 0:
-                    if not hir_shard_finish(source.path, "FAILED", false):
+                    if hir_row_terminal_due and not hir_shard_finish(source.path, "FAILED", false):
                         hir_shard_guard_block("HIR diagnostic receipt publication failed")
                         self.ctx.add_error("HIR diagnostic receipt publication failed")
                         return false
@@ -1479,7 +1551,7 @@ impl CompilerDriver:
                 source.module_name, hir_module, self.ctx.assurance_policy.strictness)
             publish_module_typecheck_receipt_v1(self.ctx, representation_receipt)
             if representation_receipt.errors.len() > 0:
-                if not hir_shard_finish(source.path, "FAILED", false):
+                if hir_row_terminal_due and not hir_shard_finish(source.path, "FAILED", false):
                     hir_shard_guard_block("representation diagnostic receipt publication failed")
                     self.ctx.add_error("representation diagnostic receipt publication failed")
                 return false
@@ -1492,7 +1564,7 @@ impl CompilerDriver:
                 hir_shard_guard_block("durable memory snapshot or source identity guard failed")
                 mem_snapshot_abort()
                 return false
-            if not hir_shard_finish(source.path, "PASS", hir_cache_stored):
+            if hir_row_terminal_due and not hir_shard_finish(source.path, "PASS", hir_cache_stored):
                 hir_shard_guard_block("HIR completion receipt publication failed")
                 self.ctx.add_error("HIR completion receipt publication failed")
                 return false
@@ -1607,6 +1679,8 @@ impl CompilerDriver:
         # driver_orchestration.spl.
         if (self.ctx.error_count_value > 0):
             return false
+        if mir_shard_hir_residency_armed_v1():
+            print "[mir-shard] hir-residency loaded {mir_shard_hir_residency_counters_v1()} bodies_dropped={hir_cache_interface_only_bodies_dropped_v1()}"
         log_phase("phase3:hir:validate:start keys={validation_module_keys.len()} values={validation_module_values.len()} array={self.ctx.validation_module_array.len()}")
         var validation_error_count: i64 = 0
         driver_admit_nogc_param_effects_v1(self.ctx, surfaces.surfaces)

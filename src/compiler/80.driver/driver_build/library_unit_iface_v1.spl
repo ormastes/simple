@@ -1,0 +1,149 @@
+# Library unit interface artifact + unit source digest (slice 2 of
+# library_unit_build_and_link.md §2-3).
+#
+# Per module the interface digest is `native_interface_whole_digest_v1` over
+# the body-free declaration carrier (native_interface_slice.spl): struct/class
+# fields, enum variants, signatures WITH defaults — everything MIR lowering of
+# an importer reads (mir_shard_export_summaries.md rows 2-19) — and NOT the
+# `source_interface_parts` text heuristic, which drops field lines. The unit
+# digest is one more `simple/interface/v1` fold over `<module>:<digest>`.
+#
+# The unit source digest is over the unit's own files `(path, sha256(content))`
+# sorted by path and length-framed; it is the `unit_source_digest` input of
+# `library_unit_cache_key_v1`.
+#
+# Design: doc/05_design/compiler/incremental_build/library_unit_build_and_link.md
+
+use std.common.crypto.sha256.{sha256_text}
+use std.common.sdn.parser (parse)
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.encode.{sdn_encode_canonical}
+use std.io_runtime.{file_exists, file_read, list_dir, is_dir}
+use std.nogc_sync_mut.io.file_ops.{file_atomic_write}
+use compiler.common.cache.canonical_identity.{canonical_identity_sort_texts}
+use compiler.driver.cache.action_key.{interface_digest_of}
+use compiler.driver.cache.native_interface_slice.{native_interface_decls_v1, native_interface_whole_digest_v1}
+use compiler.driver.driver_build.incremental.{cache_key_frame}
+
+val LIBRARY_UNIT_SOURCE_DIGEST_DOMAIN_V1 = "simple/library-unit-source/v1"
+val LIBRARY_UNIT_IFACE_FORMAT_V1 = "simple/library-unit-iface/v1"
+
+struct LibraryUnitModuleIfaceV1:
+    module: text    # unit-relative source path
+    digest: text    # body-free interface digest of that module
+
+struct LibraryUnitIfaceV1:
+    unit: text
+    modules: [LibraryUnitModuleIfaceV1]
+    digest: text    # library_unit_iface_digest_v1(modules)
+
+fn _library_unit_collect_sources(root: text, rel_dir: text, mut out: [text]):
+    val dir = if rel_dir == "": root else: "{root}/{rel_dir}"
+    for name in canonical_identity_sort_texts(list_dir(dir)):
+        if name == "" or name.starts_with("."):
+            continue
+        val rel = if rel_dir == "": name else: "{rel_dir}/{name}"
+        if is_dir("{root}/{rel}"):
+            _library_unit_collect_sources(root: root, rel_dir: rel, out: out)
+        elif name.ends_with(".spl"):
+            out.push(rel)
+
+# Every `.spl` under `root`, unit-relative, sorted; dot-directories skipped.
+pub fn library_unit_source_files_v1(root: text) -> [text]:
+    var out: [text] = []
+    if not is_dir(root):
+        return out
+    _library_unit_collect_sources(root, "", out)
+    canonical_identity_sort_texts(out)
+
+# `entries` are `(unit-relative path, source text)`.
+pub fn library_unit_source_digest_v1(entries: [(text, text)]) -> text:
+    var paths: [text] = []
+    var content_by_path: {text: text} = {}
+    for (path, content) in entries:
+        paths.push(path)
+        content_by_path[path] = content
+    var serial = LIBRARY_UNIT_SOURCE_DIGEST_DOMAIN_V1 + ";"
+    for path in canonical_identity_sort_texts(paths):
+        serial = serial + cache_key_frame(path) + cache_key_frame(sha256_text(content_by_path[path]))
+    sha256_text(serial)
+
+pub fn library_unit_module_iface_digest_v1(source: text) -> text:
+    native_interface_whole_digest_v1(native_interface_decls_v1(source))
+
+pub fn library_unit_iface_digest_v1(modules: [LibraryUnitModuleIfaceV1]) -> text:
+    var parts: [text] = [LIBRARY_UNIT_IFACE_FORMAT_V1]
+    for m in modules:
+        parts.push("{m.module}:{m.digest}")
+    interface_digest_of(parts)
+
+pub fn library_unit_iface_encode_v1(iface: LibraryUnitIfaceV1) -> text:
+    var modules: [SdnValue] = []
+    for m in iface.modules:
+        var row: Dict<text, SdnValue> = {}
+        row["module"] = SdnValue.String(m.module)
+        row["digest"] = SdnValue.String(m.digest)
+        modules.push(SdnValue.Dict(row))
+    var root: Dict<text, SdnValue> = {}
+    root["format"] = SdnValue.String(LIBRARY_UNIT_IFACE_FORMAT_V1)
+    root["unit"] = SdnValue.String(iface.unit)
+    root["digest"] = SdnValue.String(iface.digest)
+    root["modules"] = SdnValue.Array(modules)
+    sdn_encode_canonical(SdnValue.Dict(root)) + "\n"
+
+fn _library_unit_sdn_text(root: SdnValue, key: text) -> text:
+    match root.get(key):
+        case Some(v): v.as_str() ?? ""
+        case None: ""
+
+# Fail closed: wrong format, missing fields, or a recorded unit digest that
+# does not match the recomputed fold over the module rows.
+pub fn library_unit_iface_decode_v1(content: text) -> Result<LibraryUnitIfaceV1, text>:
+    if content.trim() == "":
+        return Err("iface.sdn: empty")
+    val root = match parse(content):
+        case Ok(v): v
+        case Err(e): return Err("iface.sdn: {e}")
+    val format = _library_unit_sdn_text(root, "format")
+    if format != LIBRARY_UNIT_IFACE_FORMAT_V1:
+        return Err("iface.sdn: format '{format}' is not {LIBRARY_UNIT_IFACE_FORMAT_V1}")
+    val unit = _library_unit_sdn_text(root, "unit")
+    if unit == "":
+        return Err("iface.sdn: unit is missing")
+    val rows = match root.get("modules"):
+        case Some(v): v.as_array() ?? []
+        case None: return Err("iface.sdn: modules is missing")
+    var modules: [LibraryUnitModuleIfaceV1] = []
+    for row in rows:
+        val module = _library_unit_sdn_text(row, "module")
+        val digest = _library_unit_sdn_text(row, "digest")
+        if module == "" or digest == "":
+            return Err("iface.sdn: module row without module/digest")
+        modules.push(LibraryUnitModuleIfaceV1(module: module, digest: digest))
+    val recorded = _library_unit_sdn_text(root, "digest")
+    val recomputed = library_unit_iface_digest_v1(modules)
+    if recorded != recomputed:
+        return Err("iface.sdn: recorded digest {recorded} does not match module rows ({recomputed})")
+    Ok(LibraryUnitIfaceV1(unit: unit, modules: modules, digest: recorded))
+
+# Read the unit's sources once; return (interface artifact, unit source digest).
+pub fn library_unit_iface_build_v1(unit: text, root: text) -> (LibraryUnitIfaceV1, text):
+    var modules: [LibraryUnitModuleIfaceV1] = []
+    var entries: [(text, text)] = []
+    for rel in library_unit_source_files_v1(root):
+        val source = file_read("{root}/{rel}")
+        entries.push((rel, source))
+        modules.push(LibraryUnitModuleIfaceV1(module: rel, digest: library_unit_module_iface_digest_v1(source)))
+    val iface = LibraryUnitIfaceV1(unit: unit, modules: modules, digest: library_unit_iface_digest_v1(modules))
+    (iface, library_unit_source_digest_v1(entries))
+
+pub fn library_unit_iface_write_v1(path: text, iface: LibraryUnitIfaceV1) -> Result<text, text>:
+    if file_atomic_write(path, library_unit_iface_encode_v1(iface)):
+        Ok(path)
+    else:
+        Err("iface.sdn: cannot write {path}")
+
+pub fn library_unit_iface_read_v1(path: text) -> Result<LibraryUnitIfaceV1, text>:
+    if not file_exists(path):
+        return Err("iface.sdn: {path} does not exist")
+    library_unit_iface_decode_v1(file_read(path))

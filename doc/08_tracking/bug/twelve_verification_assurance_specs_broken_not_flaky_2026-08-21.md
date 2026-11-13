@@ -107,3 +107,7 @@ on stdout, and piping through `tail` showed only stderr warnings and no
 
 - `doc/09_report/skipped_flaky_test_census_2026-08-21.md` §5
 - Daemon head-of-line blocking fix: `7a6f6459a81`
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Partial re-verification this lane: the record's named parser defect (multi-line if condition on trailing or at src/compiler/00.common/assurance/formal_delivery_gates.spl:127-131) now PARSES — this lane ran "check" on that file with the tracked seed and it passed the frontend (residual blocker is only the missing admitted check-worker artifact, an infra message, not a parse error). The other 11 stably-broken specs were not re-run in full (timebox). The parser-defect leg is FIXED at tip; the remaining 11 stand as recorded.

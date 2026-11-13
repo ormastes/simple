@@ -1,0 +1,33 @@
+# Whole-program HIR gate in the per-file worker (native_build_main.spl,
+# run_native_file_worker_v1): the worker polls the HIR ledger until every
+# module is PASS. The poll used to be `while state == 0: sleep` -- no deadline,
+# so a sibling that died mid-claim without a seal parked every waiting worker
+# forever and the only exit was the parent's reap timeout, which names nothing.
+# The verdict is now a pure function: bounded by a wall budget, loud on expiry
+# (the caller publishes the reason), fail closed.
+use std.spec
+use compiler.driver.driver_build.native_file_worker_v1.{
+    native_file_worker_hir_gate_verdict_v1, NATIVE_FILE_WORKER_HIR_GATE_BUDGET_MS_V1}
+
+describe "per-file worker HIR gate verdict":
+    it "admits MIR as soon as the ledger is complete, whatever the wait":
+        expect(native_file_worker_hir_gate_verdict_v1(1, 0, 1000)).to_equal(1)
+        expect(native_file_worker_hir_gate_verdict_v1(1, 5000, 1000)).to_equal(1)
+
+    it "fails closed on a blocked or non-PASS ledger, whatever the wait":
+        expect(native_file_worker_hir_gate_verdict_v1(-1, 0, 1000)).to_equal(-1)
+        expect(native_file_worker_hir_gate_verdict_v1(-1, 5000, 1000)).to_equal(-1)
+
+    it "keeps polling an incomplete ledger inside the budget":
+        expect(native_file_worker_hir_gate_verdict_v1(0, 0, 1000)).to_equal(0)
+        expect(native_file_worker_hir_gate_verdict_v1(0, 999, 1000)).to_equal(0)
+
+    it "expires an incomplete ledger at the budget and never waits unbounded":
+        expect(native_file_worker_hir_gate_verdict_v1(0, 1000, 1000)).to_equal(-2)
+        expect(native_file_worker_hir_gate_verdict_v1(0, 1001, 1000)).to_equal(-2)
+        # A non-positive budget is not "forever": it expires on the first poll.
+        expect(native_file_worker_hir_gate_verdict_v1(0, 0, 0)).to_equal(-2)
+        expect(native_file_worker_hir_gate_verdict_v1(0, 0, -5)).to_equal(-2)
+
+    it "pins the default budget to the one-hour worker observation ceiling":
+        expect(NATIVE_FILE_WORKER_HIR_GATE_BUDGET_MS_V1).to_equal(3600000)

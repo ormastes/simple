@@ -239,6 +239,49 @@ impl HirLowering:
                     if canonical_fields.has(field_name): return canonical_fields[field_name]
         unknown
 
+    # Settled element type `T` of an array/slice receiver `xs` (a typed
+    # binding or a declared field such as `self.items`), Error otherwise.
+    # Types the binders of `for (i, x) in xs.enumerate()` and the parameter
+    # of `xs.filter(\x: ...)` (enumerate_tuple_element_typed_unit_native_2026-11-13):
+    # untyped, they lowered as unit slots and llc rejected `rt_native_eq(void ...)`.
+    # Kind in (frozen-stage2 by-value HirExpr hazard, see binding_kind_type).
+    fn binding_receiver_element_type(receiver_kind: HirExprKind, span: Span) -> HirType:
+        val unknown = HirType(kind: HirTypeKind.Error, span: span)
+        var receiver_type: HirType = self.binding_kind_type(receiver_kind, span)
+        if binding_type_is_unknown(receiver_type):
+            match receiver_kind:
+                case HirExprKind.Field(field_base, field_name, _):
+                    receiver_type = self.binding_field_type(field_base.kind, field_name, span)
+                case _: ()
+        match receiver_type.kind:
+            case HirTypeKind.Array(element, _) | HirTypeKind.Slice(element):
+                val array_element: HirType = element
+                if hir_const_type_settled(array_element): return array_element
+            case _: ()
+        unknown
+
+    # Element hint for a one-parameter lambda passed to an element-wise
+    # builtin array method (`xs.filter(\x: ...)`); Error when the method is
+    # not element-wise or the receiver element is unknown.
+    fn lambda_element_hint_for_method(receiver_kind: HirExprKind, method: text, span: Span) -> HirType:
+        if method == "filter" or method == "map" or method == "any" or method == "all" or
+                method == "find" or method == "find_index" or method == "position" or
+                method == "each" or method == "for_each" or method == "flat_map" or
+                method == "filter_map" or method == "take_while" or method == "skip_while" or
+                method == "drop_while" or method == "count" or method == "partition":
+            return self.binding_receiver_element_type(receiver_kind, span)
+        HirType(kind: HirTypeKind.Error, span: span)
+
+    # Stage the hint for an argument that is a lambda literal; any other
+    # argument clears it so a nested lambda never inherits it.
+    me stage_lambda_param_hint(arg_value: Expr, hint: HirType):
+        val arg_kind_t: ExprKind = arg_value.kind
+        match arg_kind_t:
+            case ExprKind.Lambda(_, _):
+                self.lambda_param_hint = hint
+            case _:
+                self.lambda_param_hint = HirType(kind: HirTypeKind.Error, span: arg_value.span)
+
     # Join of every branch tail of an `if` / `if-elif` with an else branch
     # (unknown when there is no else or a branch has no value).
     fn binding_branch_join(if_kind: HirExprKind, span: Span) -> HirType:
@@ -1036,8 +1079,14 @@ impl HirLowering:
             # Decide from the AST kind, not the lowered nullable HirType slot.
             val vr_ast_type: Type = vr_type ?? Type(kind: TypeKind.Infer, span: s.span)
             val vr_has_annotation = hir_type_kind_disc(vr_ast_type.kind) != hir_type_kind_disc(TypeKind.Infer)
-            val vr_hir_type = if vr_has_annotation:
+            # Same split as the `val` path above: the bare copy feeds the
+            # non-optional Let.type_ payload (MIR enum payload check).
+            val vr_annotated_hir_type: HirType = if vr_has_annotation:
                 self.lower_type(vr_ast_type)
+            else:
+                HirType(kind: HirTypeKind.Error, span: s.span)
+            val vr_hir_type = if vr_has_annotation:
+                vr_annotated_hir_type
             else:
                 nil
             # Same field migration as the `val` path above; see the note there.
@@ -1061,7 +1110,7 @@ impl HirLowering:
                 self.try_register_local_struct_type(vr_symbol, vr_init_present)
                 self.try_register_local_tuple_type(vr_symbol, vr_init_present)
             val vr_binding_type: HirType = if vr_has_annotation:
-                vr_hir_type
+                vr_annotated_hir_type
             else:
                 self.binding_payload_type(vr_hir_init, s.bind_optional_payload)
             return HirStmt(kind: HirStmtKind.Let(vr_symbol, vr_binding_type, vr_hir_init), span: s.span)
@@ -1184,8 +1233,8 @@ impl HirLowering:
                         case _: sym_type = inferred
                 val symbol = self.symbols.define(name, SymbolKind.Variable, sym_type, s.span, Visibility.Private, false, nil)
                 self.local_annotation_provenance[symbol.id] = has_annotation
-                val binding_type: HirType = if has_annotation:
-                    hir_type
+                val binding_type: HirType = if val annotated_type = hir_type:
+                    annotated_type
                 else:
                     self.binding_payload_type(hir_init, s.bind_optional_payload)
                 HirStmtKind.Let(symbol, binding_type, hir_init)
@@ -1224,8 +1273,8 @@ impl HirLowering:
                         case _: sym_type = inferred
                 val symbol = self.symbols.define(name, SymbolKind.Variable, sym_type, s.span, Visibility.Private, true, nil)
                 self.local_annotation_provenance[symbol.id] = has_annotation
-                val binding_type: HirType = if has_annotation:
-                    hir_type
+                val binding_type: HirType = if val annotated_type = hir_type:
+                    annotated_type
                 else:
                     self.binding_payload_type(hir_init, s.bind_optional_payload)
                 HirStmtKind.Let(symbol, binding_type, hir_init)
@@ -1268,6 +1317,16 @@ impl HirLowering:
                             case HirTypeKind.Dict(dict_key_t, dict_val_t):
                                 for_dict_key = dict_key_t
                                 for_dict_val = dict_val_t
+                            case _: ()
+                        # `xs.enumerate()` over a settled `[T]` yields
+                        # `(i64, T)` (enumerate_tuple_element_typed_unit_native_2026-11-13).
+                        match hir_iter.kind:
+                            case HirExprKind.MethodCall(enum_receiver, enum_method, enum_args, _):
+                                if enum_method == "enumerate" and enum_args.len() == 0:
+                                    val enum_element: HirType = self.binding_receiver_element_type(enum_receiver.kind, s.span)
+                                    if not binding_type_is_unknown(enum_element):
+                                        for_dict_key = HirType(kind: HirTypeKind.Int(64, true), span: s.span)
+                                        for_dict_val = enum_element
                             case _: ()
                     var for_prefix: [HirStmt] = []
                     var for_pi = 0

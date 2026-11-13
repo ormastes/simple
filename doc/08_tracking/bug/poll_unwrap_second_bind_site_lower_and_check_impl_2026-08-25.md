@@ -196,3 +196,7 @@ reproducer above — seconds per iteration.
 hoisting it was tried and reverted: it "broke legitimate resolution-success
 rebinds (the compiled interpreter's own Option helpers printed `<unknown>` for
 every text-option `??`, 2026-07-25)". A narrower predicate is required.
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with the recorded status: OPEN — the second, independent .unwrap() bind site in lower_and_check_impl is isolated by measurement but its mechanism is not yet located. Bounded fix attempt within the per-bug timebox did not converge in this lane; the recorded workaround stands. No in-lane change.

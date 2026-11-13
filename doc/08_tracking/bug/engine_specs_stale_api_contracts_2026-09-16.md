@@ -76,3 +76,23 @@ Aggregate: 38 failing examples on 2026-09-16 -> **28 failing examples** across 3
 decision on which side is canonical (restore/port the API vs rewrite the spec); per
 `.claude/rules/testing.md` the three files stay RED rather than softened. ids/gpu_bridge going
 green confirms the pattern — these close when an owner picks a side and lands it.
+
+
+---
+
+## 2026-11-13 addendum — P3 gpu lane p3-gpu-20261113 (work/p3-gpu-20261113, base 6f4cb189867)
+
+**Verdict: LIVE — re-measured 2026-11-13 (tracked seed `bin/simple.exe`,
+`SIMPLE_LIB=src`, `--mode=interpreter --no-cache`): `font_ffi_spec.spl` = 14
+executed, 12 passed, 2 failed — identical failure count to the 2026-11-11 ne8
+measurement.** The two owned-byte-handoff examples still pin exact multi-line
+source text of `spl_fonts.spl` / `font_registry.spl` /
+`engine2d/engine.spl` / `font_sffi.spl`; the failure output shows ~17 stale
+pins in the first example plus ordering/index pins, i.e. the SFFI provider
+sources were restructured since the pins were written. This is a spec rewrite
+against the current API (an owner-decision item per this doc's Expectation),
+not a bounded re-pin: with ~20 drifted assertions per example, blind
+re-pinning would risk pinning shape without semantics. ids/gpu_bridge stay
+green (ne8-verified, not re-run); units (25 fails) and rect (1 fail) remain
+the two other owner-decision items. Aggregate unchanged at 28 failing examples
+across 3 files.

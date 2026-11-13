@@ -66,3 +66,10 @@ either (a) admit `Ret(Some(..))` into the alloca lane and update the two specs
 above with evidence that the staged-native payload read is safe, or (b) keep the
 rejection and retire the four reproducers with a written rationale. Do not do
 half of either.
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+deliberately left RED per .claude/rules/testing.md (spec conflict pinned, net-zero trade documented). Left as recorded.

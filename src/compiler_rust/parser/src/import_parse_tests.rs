@@ -155,6 +155,44 @@ mod tests {
     }
 
     #[test]
+    fn test_parent_relative_from_import_is_one_use_statement() {
+        // `from ..pkg import {A}` used to fall through the statement gate: `..`
+        // lexes as DoubleDot, the gate only admitted Dot, so `from` became an
+        // expression identifier (load error: variable `from` not found) and
+        // `import {A}` a second statement.
+        for src in [
+            "from ..core import {Interpreter, Value}\n",
+            "from ..core.execution_guard import {push_call_depth}\n",
+            "from ...core import {Interpreter}\n",
+            "from .sibling import {helper}\n",
+        ] {
+            let mut parser = Parser::new(src);
+            let module = parser.parse().unwrap_or_else(|e| panic!("{:?}: {}", src, e));
+            assert_eq!(module.items.len(), 1, "{:?} must be one statement", src);
+            assert!(
+                matches!(module.items[0], crate::ast::Node::UseStmt(_)),
+                "{:?} must parse as a use statement, got {:?}",
+                src,
+                module.items[0]
+            );
+        }
+    }
+
+    #[test]
+    fn test_from_stays_an_identifier_when_not_an_import() {
+        // `from` is a soft keyword: these are expressions/assignments, not imports.
+        for src in ["from = 3\n", "val from = 1\nval to = from + 2\n", "from(1)\n"] {
+            let mut parser = Parser::new(src);
+            let module = parser.parse().unwrap_or_else(|e| panic!("{:?}: {}", src, e));
+            assert!(
+                !module.items.iter().any(|n| matches!(n, crate::ast::Node::UseStmt(_))),
+                "{:?} must not parse as an import",
+                src
+            );
+        }
+    }
+
+    #[test]
     fn test_relative_use_with_brace_member_list() {
         // relative_use_with_brace_member_list_fails_to_parse_2026-08-17
         for src in [

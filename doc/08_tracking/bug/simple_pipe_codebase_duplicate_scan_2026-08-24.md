@@ -78,3 +78,10 @@ branch identity and preserves independent caps; it cannot wrap today's scans.
 MCP JSON escaping and bounded first-line rendering no longer copy growing text
 prefixes. This reduces parent allocation traffic but does not close this bug.
 
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+compatibility design complete, implementation blocked per in-file status; owner: simple_pipe lane.

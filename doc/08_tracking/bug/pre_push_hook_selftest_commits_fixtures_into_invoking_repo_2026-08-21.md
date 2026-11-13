@@ -1,7 +1,7 @@
 # Pre-push hook: a WIP guard's selftest commits fixtures into the invoking repo, hijacking HEAD
 
 **Date:** 2026-08-21
-**Status:** OPEN (P1 — makes the pre-push hook unusable; forced a `--no-verify` landing)
+**Status:** RESOLVED 2026-08-21 (fixes landed; re-checked 2026-11-13 lane p3-misc-b — hook re-architected 2026-09-24, isolation guard in tree)
 **Found by:** landing lane for `4b88aebf00b` (cherry-pick of `c089809a253` onto `origin/main`)
 
 ## Symptom
@@ -83,3 +83,27 @@ that reads as a failing verdict from a script that never ran.
 - `check-ghdl-gate-rc-swallow.shs`, untracked at the time of the incident, is
   now git-tracked, so the landing worktree that triggered this no longer
   reproduces.
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b) — RESOLVED stands; hook since re-architected
+
+Re-checked the three named artifacts at release/1.0.0 tip:
+
+- `scripts/check/check-guard-selftests-isolated.shs` — present and wired (static
+  census for repo-mutating git verbs in guard selftests; 7 temp-repo/isolation
+  references in-file).
+- `scripts/check/check-ghdl-gate-rc-swallow.shs` and
+  `scripts/check/check-unbacked-extern-ratchet.shs` — both git-tracked now.
+- The incident's per-guard HEAD-snapshot dispatcher code no longer exists in
+  `scripts/check/pre-push-conflict-tree-guard.shs`: the hook was re-architected
+  2026-09-24 (WP2 push_hook_plan.md O3=a) into the `check-push-must-pass.shs`
+  driver + signed-receipt model. The hijack invariant is now covered by the
+  static isolation guard plus the new architecture's fail-closed wiring check.
+
+Caveat recorded: the static scan could not complete within this lane's timebox
+on Git Bash (exceeded 10 minutes; the in-file "sub-second" figure was a Linux
+measurement over 737 scripts). If that matters, file a follow-up on the scan's
+Windows cost — the fixes themselves are in-tree and tracked.
+
+No code change this lane; status header corrected to reflect the RESOLVED body.

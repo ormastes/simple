@@ -81,3 +81,23 @@ binary parity) is Linux-only and was not executed on this Windows lane; the
 historical live-lane SIGSEGV baseline and exit criterion 6 for flipping
 `BROWSER_RENDER_LANE_DEFAULT` remain separate gates (per the 2026-10-27 v3
 freeze: "qualify explicit lanes with a working admitted baseline").
+
+## 2026-11-13 closure (UI batch B, Linux aarch64, release/1.0.0 @ 35144b7f5e93)
+
+Re-checked on Linux:
+
+- Gate source: the generated fixture imports
+  `app.browser.render_lane.{browser_render_html_to_pixel_array,
+  browser_render_lane_selected}` (script line 228), prints the selected lane
+  (line 376), reads `SIMPLE_BROWSER_RENDER_LANE` (line 78) and fails closed on
+  an unknown or mismatched lane (lines 425-431). No direct
+  `simple_web_render_html_to_pixels` import remains.
+- Lane probe (Rust seed, 8x6 red page through
+  `browser_render_html_to_pixel_array`): unset env printed `lane=vulkan len=48
+  px0=4294901760`; `SIMPLE_BROWSER_RENDER_LANE=live` printed `lane=live len=48
+  px0=4294901760`. The env var changes the lane that renders.
+
+Not run: the full gate. This host has no Electron, Chrome or Xvfb, so the
+Electron-side capture and exit criterion 6 are not covered by this closure;
+they are separate gates, as the 2026-11-11 addendum says. `bug_db.sdn` row
+moved open -> fixed to match the shard.

@@ -139,3 +139,23 @@ even when every file verdict is PASS — a runner reporting quirk, observed
 but not chased here. The pre-existing `jit-fallback` of
 doc_coverage_command.spl (struct 'Nil' field 'items') remains: the module
 runs on the interpreter, ~100-1000x slowdown, but the run completes.
+
+## 2026-11-13 — P3 runner priority lane (work/p3-runner-lane-20261113, base 80a8116e5e2): FIXED re-verified at base, no code change
+
+The 2026-11-10 p3-runner2 lane fix (shared `types.doc_item.DocItem`
+migration) is landed in this base: `src/app/doc_coverage/scanner/mod.spl:8`
+imports `types.doc_item.{DocItem, DocKind}` and builds it via
+`_scanned_doc_item` (the duplicate local struct is gone).
+
+Filed-repro re-run on the Windows seed-smoke binary (`bin/simple.exe`,
+`Simple v1.0.0-rc.1`): `bin/simple doc-coverage` exits **0** in 3m32s with a
+complete report — Total Items 75435, Documented 31732 (42%), SDoctest
+Coverage 8850 (11%) — instead of the filed exit-1-before-any-report. The
+command is functional.
+
+Supplementary `bin/simple test test/01_unit/app/doc_coverage/` (the
+triaging lane's 17/17 evidence) was attempted but cap-blocked on this host:
+after 600 s the run had printed zero spec verdicts — the entire budget went
+to seed module load (the verbatim grant: Windows interpreted driver >240 s,
+abort >10 min). No failure evidence; the command-level repro above is the
+verification.

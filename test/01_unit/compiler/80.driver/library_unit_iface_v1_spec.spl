@@ -1,0 +1,159 @@
+use std.spec
+use std.io_runtime.{file_exists, mkdir_p}
+use compiler.driver.driver_build.library_unit_iface_v1.{
+    LibraryUnitModuleIfaceV1, LibraryUnitIfaceV1,
+    library_unit_source_files_v1, library_unit_source_digest_v1,
+    library_unit_module_iface_digest_v1, library_unit_iface_digest_v1,
+    library_unit_iface_encode_v1, library_unit_iface_decode_v1,
+    library_unit_iface_build_v1, library_unit_iface_write_v1, library_unit_iface_read_v1}
+
+# Design: doc/05_design/compiler/incremental_build/library_unit_build_and_link.md §2-3
+# Slice 2: unit source digest over the real file set + iface.sdn writer/reader.
+
+val FIXTURE_ROOT = "test/fixtures/compiler/library_unit/unit_a/src"
+
+fn mod_iface(module: text, digest: text) -> LibraryUnitModuleIfaceV1:
+    LibraryUnitModuleIfaceV1(module: module, digest: digest)
+
+describe "library_unit_source_files_v1":
+    it "lists .spl files recursively, unit-relative, sorted, skipping dot-directories":
+        val files = library_unit_source_files_v1(FIXTURE_ROOT)
+        expect(files.len()).to_equal(2)
+        expect(files[0]).to_equal("a.spl")
+        expect(files[1]).to_equal("sub/b.spl")
+
+    it "returns an empty list for a missing root":
+        expect(library_unit_source_files_v1("test/fixtures/compiler/library_unit/does_not_exist").len()).to_equal(0)
+
+describe "library_unit_source_digest_v1":
+    it "is deterministic and independent of entry order":
+        val a = library_unit_source_digest_v1([("a.spl", "fn a()"), ("sub/b.spl", "fn b()")])
+        val b = library_unit_source_digest_v1([("sub/b.spl", "fn b()"), ("a.spl", "fn a()")])
+        expect(a).to_equal(b)
+        expect(a.len()).to_equal(64)
+
+    it "changes on content, path or membership change and frames path/content":
+        val base = library_unit_source_digest_v1([("a.spl", "fn a()")])
+        expect(library_unit_source_digest_v1([("a.spl", "fn a2()")]) == base).to_equal(false)
+        expect(library_unit_source_digest_v1([("b.spl", "fn a()")]) == base).to_equal(false)
+        expect(library_unit_source_digest_v1([("a.spl", "fn a()"), ("c.spl", "")]) == base).to_equal(false)
+        val x = library_unit_source_digest_v1([("ab", "c")])
+        val y = library_unit_source_digest_v1([("a", "bc")])
+        expect(x == y).to_equal(false)
+
+describe "library_unit_module_iface_digest_v1":
+    it "ignores function bodies but sees field, signature and default changes":
+        val base = library_unit_module_iface_digest_v1("struct P:\n    x: i64\n\nfn f(a: i64 = 1) -> i64:\n    a + 1\n")
+        val body = library_unit_module_iface_digest_v1("struct P:\n    x: i64\n\nfn f(a: i64 = 1) -> i64:\n    a + 2\n")
+        val field = library_unit_module_iface_digest_v1("struct P:\n    x: i64\n    y: i64\n\nfn f(a: i64 = 1) -> i64:\n    a + 1\n")
+        val dflt = library_unit_module_iface_digest_v1("struct P:\n    x: i64\n\nfn f(a: i64 = 2) -> i64:\n    a + 1\n")
+        expect(base).to_equal(body)
+        expect(base == field).to_equal(false)
+        expect(base == dflt).to_equal(false)
+
+describe "library_unit_module_iface_digest_v1 covers every cross-unit leak":
+    # Review of slice 1: struct layouts, enum discriminants (declaration order)
+    # and imported constant VALUES reach an importer's objects; a private fn
+    # body does not. Under-inclusion here = stale archive reused silently.
+    val BASE = "val LIMIT = 5\n\nstruct Pt:\n    x: i64\n    y: i64\n\nenum Mode:\n    Fast\n    Slow\n\nclass Box:\n    size: i64\n    me grow(by: i64 = 1):\n        self.size = self.size + by\n\nfn secret() -> i64:\n    1\n"
+
+    it "changes when struct fields are reordered":
+        val reordered = BASE.replace("    x: i64\n    y: i64", "    y: i64\n    x: i64")
+        expect(reordered == BASE).to_equal(false)
+        expect(library_unit_module_iface_digest_v1(reordered) == library_unit_module_iface_digest_v1(BASE)).to_equal(false)
+
+    it "changes when an enum variant is inserted before existing ones":
+        val inserted = BASE.replace("enum Mode:\n    Fast", "enum Mode:\n    Idle\n    Fast")
+        expect(library_unit_module_iface_digest_v1(inserted) == library_unit_module_iface_digest_v1(BASE)).to_equal(false)
+
+    it "changes when a public val value changes":
+        val bumped = BASE.replace("val LIMIT = 5", "val LIMIT = 6")
+        expect(library_unit_module_iface_digest_v1(bumped) == library_unit_module_iface_digest_v1(BASE)).to_equal(false)
+
+    it "changes when enum variants are REORDERED (discriminants follow declaration order)":
+        val swapped = BASE.replace("    Fast\n    Slow", "    Slow\n    Fast")
+        expect(swapped == BASE).to_equal(false)
+        expect(library_unit_module_iface_digest_v1(swapped) == library_unit_module_iface_digest_v1(BASE)).to_equal(false)
+
+    it "sees the body of a multi-line string constant, not a multi-line string inside a fn body":
+        # Review M1: private StringLit consts are inlined by value into importers.
+        val const_a = "val HELP = \"\"\"\nusage: a\n  --flag\n\"\"\"\n\nfn run() -> i64:\n    val msg = \"\"\"\n    body text a\n    \"\"\"\n    1\n"
+        val const_b = const_a.replace("usage: a", "usage: b")
+        val body_b = const_a.replace("body text a", "body text b")
+        expect(const_b == const_a).to_equal(false)
+        expect(library_unit_module_iface_digest_v1(const_b) == library_unit_module_iface_digest_v1(const_a)).to_equal(false)
+        expect(library_unit_module_iface_digest_v1(body_b)).to_equal(library_unit_module_iface_digest_v1(const_a))
+        # a module docstring is not a declaration: editing it changes nothing
+        val doc_a = "\"\"\"\nmodule doc a\n\"\"\"\n\nval LIMIT = 5\n"
+        val doc_b = doc_a.replace("module doc a", "module doc b")
+        expect(library_unit_module_iface_digest_v1(doc_b)).to_equal(library_unit_module_iface_digest_v1(doc_a))
+
+    it "changes when a method default changes, not when fn or method bodies change":
+        val dflt = BASE.replace("by: i64 = 1", "by: i64 = 2")
+        expect(library_unit_module_iface_digest_v1(dflt) == library_unit_module_iface_digest_v1(BASE)).to_equal(false)
+        val fn_body = BASE.replace("fn secret() -> i64:\n    1\n", "fn secret() -> i64:\n    2\n")
+        val me_body = BASE.replace("self.size = self.size + by", "self.size = self.size + by + by")
+        expect(fn_body == BASE).to_equal(false)
+        expect(library_unit_module_iface_digest_v1(fn_body)).to_equal(library_unit_module_iface_digest_v1(BASE))
+        expect(library_unit_module_iface_digest_v1(me_body)).to_equal(library_unit_module_iface_digest_v1(BASE))
+
+describe "library_unit_iface_digest_v1":
+    it "folds module digests order-independently":
+        val a = library_unit_iface_digest_v1([mod_iface("a.spl", "d1"), mod_iface("b.spl", "d2")])
+        val b = library_unit_iface_digest_v1([mod_iface("b.spl", "d2"), mod_iface("a.spl", "d1")])
+        expect(a).to_equal(b)
+        expect(library_unit_iface_digest_v1([mod_iface("a.spl", "d9"), mod_iface("b.spl", "d2")]) == a).to_equal(false)
+        expect(library_unit_iface_digest_v1([mod_iface("a.spl", "d1")]) == a).to_equal(false)
+
+describe "library_unit_iface encode/decode":
+    it "round-trips through SDN text":
+        val modules = [mod_iface("a.spl", "d1"), mod_iface("sub/b.spl", "d2")]
+        val iface = LibraryUnitIfaceV1(unit: "unit-a", modules: modules, digest: library_unit_iface_digest_v1(modules))
+        match library_unit_iface_decode_v1(library_unit_iface_encode_v1(iface)):
+            case Ok(back):
+                expect(back.unit).to_equal("unit-a")
+                expect(back.digest).to_equal(iface.digest)
+                expect(back.modules.len()).to_equal(2)
+                expect(back.modules[0].module).to_equal("a.spl")
+                expect(back.modules[1].digest).to_equal("d2")
+            case Err(e):
+                expect(e).to_equal("")
+
+    it "fails closed on a tampered digest, a foreign format or garbage":
+        val modules = [mod_iface("a.spl", "d1")]
+        val good = LibraryUnitIfaceV1(unit: "u", modules: modules, digest: library_unit_iface_digest_v1(modules))
+        val tampered = LibraryUnitIfaceV1(unit: "u", modules: modules, digest: "0000")
+        expect(library_unit_iface_decode_v1(library_unit_iface_encode_v1(tampered)).is_err()).to_equal(true)
+        val foreign = library_unit_iface_encode_v1(good).replace("simple/library-unit-iface/v1", "simple/other/v9")
+        expect(library_unit_iface_decode_v1(foreign).is_err()).to_equal(true)
+        expect(library_unit_iface_decode_v1("not: [sdn").is_err()).to_equal(true)
+        expect(library_unit_iface_decode_v1("").is_err()).to_equal(true)
+
+describe "library_unit_iface_build_v1":
+    it "builds the interface and source digest over the fixture unit":
+        val (iface, source_digest) = library_unit_iface_build_v1("unit-a", FIXTURE_ROOT)
+        expect(iface.unit).to_equal("unit-a")
+        expect(iface.modules.len()).to_equal(2)
+        expect(iface.modules[0].module).to_equal("a.spl")
+        expect(iface.modules[0].digest.len()).to_equal(64)
+        expect(iface.digest).to_equal(library_unit_iface_digest_v1(iface.modules))
+        expect(source_digest.len()).to_equal(64)
+        # the same tree twice gives the same answer
+        val (again, source_again) = library_unit_iface_build_v1("unit-a", FIXTURE_ROOT)
+        expect(again.digest).to_equal(iface.digest)
+        expect(source_again).to_equal(source_digest)
+
+    it "writes iface.sdn and reads it back verified":
+        val dir = "build/spec_library_unit_iface_v1"
+        expect(mkdir_p(dir)).to_equal(true)
+        val path = "{dir}/iface.sdn"
+        val (iface, _source_digest) = library_unit_iface_build_v1("unit-a", FIXTURE_ROOT)
+        expect(library_unit_iface_write_v1(path, iface).is_ok()).to_equal(true)
+        expect(file_exists(path)).to_equal(true)
+        match library_unit_iface_read_v1(path):
+            case Ok(back):
+                expect(back.digest).to_equal(iface.digest)
+                expect(back.modules.len()).to_equal(2)
+            case Err(e):
+                expect(e).to_equal("")
+        expect(library_unit_iface_read_v1("{dir}/missing.sdn").is_err()).to_equal(true)

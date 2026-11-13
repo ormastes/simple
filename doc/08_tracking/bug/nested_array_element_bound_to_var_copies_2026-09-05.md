@@ -114,3 +114,7 @@ self-hosted binary, which this lane cannot build. The flat-array workaround
 in `src/app/llm_caret/workbench/tui_view.spl` remains the mitigation.
 **Grant:** semantics-owner ruling plus a lane with a buildable self-hosted
 binary.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**LIVE (confirmed)** — ne17 re-confirmed verbatim on the fresh seed: via_var write still hits the copy, no error/warning. Both offered resolutions (alias semantics vs compile-time copy diagnostic) are language-semantics owner decisions needing a buildable self-hosted binary. Flat-array workaround in tui_view.spl remains the mitigation.

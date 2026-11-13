@@ -39,3 +39,17 @@ condition is unchanged: the PEB/TEB write-gate path must emit the documented
 `VMWriteReadback:PEBTEBLayoutBytes*` evidence token, or the feature owner
 reconciles the spec's expected token with the gate's actual evidence
 vocabulary. Owner-lane work.
+
+
+---
+## 2026-11-13 triage — lane live-p3-l6 (Windows host, seed bin/simple.exe, base f790f7f266e)
+
+Verified FIXED at tip. The gate now emits the documented token: the success
+path of `wine_peb_teb_apply_layout_byte_writes`
+(`src/lib/common/wine_peb_teb.spl:261`) appends
+`VMWriteReadback:PEBTEBLayoutBytes` to the operations evidence, which flows
+through `_wine_process_full_image_peb_teb_vm_write_evidence` into the dispatch
+record. The spec runs green: `declared>=2 executed=2 passed=2 failed=0`, both
+scenarios including "should require PEB/TEB VM byte-write readback before TLS
+callback dispatch record". Unblock condition met; no in-lane change.
+

@@ -1,0 +1,41 @@
+# @cover src/app/interpreter/control/control/loops.spl
+# @cover src/app/interpreter/core/execution_guard.spl
+# @tag: unit, interpreter, module_load
+"""
+## Purpose and audience
+For interpreter-core maintainers. `src/app/interpreter/control/control/loops.spl`
+polls `check_loop_safety` at the top of every loop body, but the module could not
+be imported (`variable 'from' not found`), so that wiring was never load-tested.
+This spec imports the module, uses the `ControlFlow` enum it defines, and checks
+the safety poll it calls.
+
+State is module-global, so every scenario resets what it changes.
+"""
+
+use std.spec.{describe, it, expect}
+use std.common.fault_detection.{set_timeout_exceeded, reset_timeout}
+use app.interpreter.core.execution_guard.{check_loop_safety, reset_execution_count}
+use app.interpreter.control.control.loops.{ControlFlow, eval_while, eval_for, eval_loop}
+
+fn flow_name(flow: ControlFlow) -> text:
+    match flow:
+        case ControlFlow.Continue: "continue"
+        case ControlFlow.Break(_): "break"
+        case ControlFlow.Return(_): "return"
+
+describe "app.interpreter.control.control.loops module load":
+    it "imports and exposes the ControlFlow enum":
+        expect(flow_name(ControlFlow.Continue)).to_equal("continue")
+
+    it "has a loop safety poll that passes when nothing is pending":
+        reset_timeout()
+        reset_execution_count()
+        expect(check_loop_safety().is_ok()).to_equal(true)
+
+    it "has a loop safety poll that stops the loop once the timeout flag is set":
+        reset_timeout()
+        set_timeout_exceeded()
+        val stopped = check_loop_safety().is_err()
+        reset_timeout()
+        expect(stopped).to_equal(true)
+        expect(check_loop_safety().is_ok()).to_equal(true)

@@ -202,3 +202,7 @@ Windows host (known live hang; never retry). Recommended re-measurement on a
 Linux host with the pure-Simple release binary: repeat the table at the top
 of this doc against the current driver; expected now is unchanged=3/3,
 body-edit>=2/3, interface-edit=dependents-only (main, not leaf_b).
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**FIXED (confirmed)** — ne16: coarse partition removed; reverse-reference-receipt invalidation at incremental.spl:1313-1340; projection spec 14/14 on the fresh seed. Four-scenario native re-measurement (cache-hit counting) owed on a Linux host — native build cannot complete here.

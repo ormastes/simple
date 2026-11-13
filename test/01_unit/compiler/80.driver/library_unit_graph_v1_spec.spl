@@ -1,0 +1,117 @@
+use std.spec
+use compiler.driver.driver_build.parallel.{ParallelBuildConfig}
+use compiler.driver.driver_build.library_unit_plan_v1.{LibraryUnitDeclV1, LibraryUnitPlanEntryV1, library_unit_plan_v1}
+use compiler.driver.driver_build.library_unit_graph_v1.{
+    LibraryUnitGraphV1, library_unit_graph_build_v1, library_unit_poison_v1, library_unit_buildable_v1}
+
+# Design: doc/05_design/compiler/incremental_build/library_unit_build_and_link.md §4-5
+# Slice 4: plan -> BuildGraph adapter (ParallelBuilder) + go-to-end poison propagation.
+
+fn decl(name: text, kind: text, dir: text, deps: [text]) -> LibraryUnitDeclV1:
+    LibraryUnitDeclV1(name: name, kind: kind, dir: dir, deps: deps)
+
+fn repo_plan() -> [LibraryUnitPlanEntryV1]:
+    val decls = [
+        decl("simple-app", "application", "src/app", ["src/compiler", "src/lib", "src/compiler_rust"]),
+        decl("simple-compiler", "application", "src/compiler", ["src/lib", "src/compiler_rust"]),
+        decl("simple-compiler-common", "library", "src/compiler/00.common", ["src/lib"]),
+        decl("simple-std", "library", "src/lib", ["src/compiler_rust"]),
+        decl("simple-rust-runtime", "runtime", "src/compiler_rust", []),
+        decl("simple.runtime", "library", "src/runtime", [])]
+    match library_unit_plan_v1(decls):
+        case Ok(plan): plan
+        case Err(_): []
+
+# In-process stand-in for a unit build: simple-std fails, everything else "links".
+fn fake_unit_build(unit: text) -> Result<text, text>:
+    if unit == "simple-std":
+        Err("mir lowering failed in src/lib/x.spl")
+    else:
+        Ok("lib{unit}.a")
+
+describe "library_unit_graph_build_v1":
+    it "adds one BuildUnit per plan entry in plan order and wires dependents":
+        val plan = repo_plan()
+        expect(plan.len()).to_equal(6)
+        match library_unit_graph_build_v1(plan, ParallelBuildConfig.single_threaded()):
+            case Ok(g):
+                expect(g.id_by_unit.len()).to_equal(6)
+                expect(g.unit_by_id[0]).to_equal("simple-rust-runtime")
+                expect(g.unit_by_id[1]).to_equal("simple.runtime")
+                expect(g.unit_by_id[2]).to_equal("simple-std")
+                val std_id = g.id_by_unit["simple-std"]
+                val rt_id = g.id_by_unit["simple-rust-runtime"]
+                val std_unit = g.builder.graph.units[std_id]
+                expect(std_unit.path).to_equal("simple-std")
+                expect(std_unit.dependencies.len()).to_equal(1)
+                expect(std_unit.dependencies[0]).to_equal(rt_id)
+                val rt_unit = g.builder.graph.units[rt_id]
+                expect(rt_unit.dependents.contains(std_id)).to_equal(true)
+            case Err(e):
+                expect(e).to_equal("")
+
+    it "runs ParallelBuilder.build in dependency order and fails dependents of a failed unit":
+        match library_unit_graph_build_v1(repo_plan(), ParallelBuildConfig.single_threaded()):
+            case Ok(g):
+                val result = g.builder.build(fake_unit_build)
+                expect(result.success).to_equal(false)
+                # the two roots and the independent unit still produced archives (go-to-end)
+                expect(result.outputs.contains("libsimple-rust-runtime.a")).to_equal(true)
+                expect(result.outputs.contains("libsimple.runtime.a")).to_equal(true)
+                expect(result.outputs.contains("libsimple-std.a")).to_equal(false)
+                expect(result.outputs.contains("libsimple-app.a")).to_equal(false)
+                # ParallelBuilder records only the DIRECT failure in `errors`; the
+                # three dependents are marked Failed("Dependency failed") and counted
+                # in stats.failed. library_unit_poison_v1 names them (next describe).
+                expect(result.errors.len()).to_equal(1)
+                val (failed_unit, failed_msg) = result.errors[0]
+                expect(failed_unit).to_equal("simple-std")
+                expect(failed_msg.contains("mir lowering failed")).to_equal(true)
+                expect(result.stats.completed).to_equal(2)
+                expect(result.stats.failed).to_equal(4)
+            case Err(e):
+                expect(e).to_equal("")
+
+    it "fails closed on a plan whose dependency precedes nothing":
+        val broken = [LibraryUnitPlanEntryV1(name: "b", kind: "library", dir: "b", deps: ["a"], level: 1)]
+        expect(library_unit_graph_build_v1(broken, ParallelBuildConfig.single_threaded()).is_err()).to_equal(true)
+
+describe "library_unit_poison_v1":
+    it "poisons every transitive dependent of a failed unit, sorted, and nothing else":
+        match library_unit_poison_v1(repo_plan(), ["simple-std"]):
+            case Ok(poisoned):
+                expect(poisoned.len()).to_equal(3)
+                expect(poisoned[0]).to_equal("simple-app")
+                expect(poisoned[1]).to_equal("simple-compiler")
+                expect(poisoned[2]).to_equal("simple-compiler-common")
+            case Err(e):
+                expect(e).to_equal("")
+        match library_unit_poison_v1(repo_plan(), ["simple.runtime"]):
+            case Ok(poisoned):
+                expect(poisoned.len()).to_equal(0)
+            case Err(e):
+                expect(e).to_equal("")
+
+    it "refuses a plan that is not dependency-first instead of under-poisoning":
+        val misordered = [
+            LibraryUnitPlanEntryV1(name: "b", kind: "library", dir: "b", deps: ["a"], level: 1),
+            LibraryUnitPlanEntryV1(name: "a", kind: "library", dir: "a", deps: [], level: 0)]
+        expect(library_unit_poison_v1(misordered, ["a"]).is_err()).to_equal(true)
+
+    it "refuses a failed unit the plan does not know":
+        expect(library_unit_poison_v1(repo_plan(), ["ghost"]).is_err()).to_equal(true)
+
+describe "library_unit_buildable_v1":
+    it "is the plan order minus failed and poisoned units":
+        match library_unit_buildable_v1(repo_plan(), ["simple-std"]):
+            case Ok(buildable):
+                expect(buildable.len()).to_equal(2)
+                expect(buildable[0]).to_equal("simple-rust-runtime")
+                expect(buildable[1]).to_equal("simple.runtime")
+            case Err(e):
+                expect(e).to_equal("")
+        match library_unit_buildable_v1(repo_plan(), []):
+            case Ok(buildable):
+                expect(buildable.len()).to_equal(6)
+            case Err(e):
+                expect(e).to_equal("")

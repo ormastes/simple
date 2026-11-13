@@ -352,3 +352,7 @@ taken on this same release line (Windows seed at `release/1.0.0` tip); this
 lane's seed is build-commit `46fe8f6b6def` at `origin/release/1.0.0` tip. No
 new mem-trace run was started — the ledger's questions are already answered
 by those measurements and a re-run would add no new signal.
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with lane interp10: RESOLVED for this ledger (measured survey closed; surviving items tracked elsewhere). No in-lane change.

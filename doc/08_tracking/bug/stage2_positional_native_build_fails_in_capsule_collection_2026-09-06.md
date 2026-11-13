@@ -164,3 +164,11 @@ The diagnostic improvements this doc landed are also present in
 `driver_aot_native_output.spl` (`driver_native_capsule_result_reason_v1` naming
 the invariant, `_collect_failure` printing module/tag/detail bare, single
 evaluation of the receipt invariant per unit).
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b bookkeeping)
+
+FIXED 2026-11-11 (lane boot18; producer fingerprint defect) per in-file addendum. No contrary evidence found in this pass; header status left as the
+owning lane recorded it.

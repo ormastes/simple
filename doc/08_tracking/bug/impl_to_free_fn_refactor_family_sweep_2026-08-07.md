@@ -221,3 +221,7 @@ this lane.**
   per the fix commits cited (all on-branch ancestors) plus targeted greps.
   A future lane rebuilding the detector must still run the inject/restore
   vacuity check this doc mandates.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**FIXED (confirmed)** — ne11: every enumerated cluster restored by cited commits (all ancestors) or its file deleted; re-greps clean. Wholesale oracle re-run attempted once, timed out at 280s with zero unresolved in the partial log.

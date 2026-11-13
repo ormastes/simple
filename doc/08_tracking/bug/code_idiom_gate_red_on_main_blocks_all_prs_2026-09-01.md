@@ -144,3 +144,7 @@ Verdict: LIVE. The "red on main blocks every PR" thesis holds for the
 ratchet family on this tree: one offender fixed, one grown (8 rows),
 one re-run pending. All red is real debt, no guard-text defect found in
 the two gates that completed.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**LIVE (confirmed)** — ne4 re-measured: UI backend-isolation now PASS; PID/clock-keyed artifact ratchet FAIL with 8 offenders needing per-file owner decisions (de-key vs widen exclusions vs reviewed baseline); guard-wiring re-run exceeded lane budget. Baseline is a reviewed-update control, not mechanically editable.

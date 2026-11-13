@@ -122,3 +122,20 @@ Triage verdict: **FIXED** (all three residual items). The renderer also moved:
   ("keeps native backend aliases…", expected metal/cuda/rocm) is an
   unrelated host-capability probe: this GPU-less Windows lane resolves
   preferred backends to `software`; it is not a residual of this bug.
+
+## 2026-11-13 closure (UI batch B, Linux aarch64, release/1.0.0 @ 35144b7f5e93)
+
+Both cited specs re-run on this host (Rust seed, 16G cgroup cap):
+
+- `test/01_unit/browser_engine/first_child_top_margin_collapse_spec.spl`:
+  `outcome=OK declared>=10 executed=10 passed=10 failed=0`, rc=0 (OPEN 1).
+- `test/01_unit/app/ui/browser_backend_pixel_paths_spec.spl`: 7 executed, 6
+  passed. The heuristic-fake replacement case "lays out a styled page without
+  text-document tags for real" and both pixel-fake regression cases pass
+  (OPEN 3). The one failure is the same host-capability case the 2026-11-11
+  addendum names ("keeps native backend aliases available for preferred
+  graphical lanes": `expected software to equal metal` / `rocm`); this host
+  has neither Metal nor ROCm. It is not a residual of this bug and is left
+  failing, not skipped.
+
+`bug_db.sdn` row moved open -> fixed to match the shard.

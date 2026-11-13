@@ -108,3 +108,10 @@ bodies — this was not measured.
 ## Related
 
 - `doc/08_tracking/bug/simpleos_riscv64_defsym_unknown_symbol_aliasing_2026-07-28.md`
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+guard is UNCOMMITTED and must not land as written per in-file status; owner: SimpleOS link-guard lane.

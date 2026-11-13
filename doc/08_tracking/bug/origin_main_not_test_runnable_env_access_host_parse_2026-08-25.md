@@ -103,3 +103,7 @@ seed completes the doctest). Original defect fixed in `a8a32ebccad`
 remains the class gate. Env-facade lens: the failure class was
 parse-level, not a raw env read; the guarded invariant is the committed
 tree staying test-runnable.
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs: SUPERSEDED (the env_access_host parse failure was reproduced on a pre-hardening base — not caused by the GPU hardening landing; the file parses at this lane base). No in-lane change.
