@@ -1,0 +1,182 @@
+# W-STR-BRACE-001 auto-fix rule proofs.
+#
+# Covers the three warn_brace variants the lint flags inside double-quoted
+# string literals, the idempotency guard, and the negative cases that must
+# never be touched (valid interpolations, already-escaped braces, raw
+# strings, comments, custom-block payloads, string concatenation patterns).
+#
+# Every fixture and expectation is built with char_from_code: a `{` / `}`
+# written literally in this spec's own string literals would be processed by
+# the spec compiler's interpolation machinery (valid holes interpolate;
+# malformed holes collapse), so fixtures would not reach the rule intact.
+use std.spec.*
+use std.tooling.easy_fix.*
+use std.common.string_core.{char_from_code}
+use compiler.tools.fix.rules.impl_.lint_str_brace.{check_str_brace001}
+
+val CASE_FILE = "/tmp/str_brace_case.spl"
+val OB = char_from_code(123)   # {
+val CB = char_from_code(125)   # }
+val BSL = char_from_code(92)   # backslash
+val QUO = char_from_code(34)   # "
+val SQUO = char_from_code(39)  # '
+
+fn replacement_texts(source: text) -> [text]:
+    var out: [text] = []
+    for fix in check_str_brace001(source, CASE_FILE):
+        for rep in easyfix_replacements(fix):
+            out.push(rep.new_text)
+    out
+
+fn replacement_spans(source: text) -> [(i64, i64)]:
+    var out: [(i64, i64)] = []
+    for fix in check_str_brace001(source, CASE_FILE):
+        for rep in easyfix_replacements(fix):
+            out.push((rep.start, rep.end))
+    out
+
+describe "W-STR-BRACE-001 auto-fix":
+    it "escapes a brace followed by a quote (expected brace after loss)":
+        step("Scan a string holding a literal brace before a quote")
+        """Variant: `{` followed by a quote is kept literal by the lexer and
+        warned; the fix doubles the brace."""
+        step("Expect one replacement turning the brace into an open escape")
+        val texts = replacement_texts(
+            "val s = " + QUO + "expected " + SQUO + OB + SQUO + " after " + SQUO + "loss" + SQUO + QUO + "\n")
+        assert_equal(texts.len(), 1)
+        assert_equal(texts[0], OB + OB)
+
+    it "escapes a brace followed by an escape (JSON body)":
+        step("Scan a string holding a literal brace before a backslash escape")
+        step("Expect one replacement doubling only the brace")
+        val texts = replacement_texts(
+            "val s = " + QUO + "json: " + OB + BSL + QUO + "key" + BSL + QUO + ": 1" + QUO + "\n")
+        assert_equal(texts.len(), 1)
+        assert_equal(texts[0], OB + OB)
+
+    it "escapes an empty brace region":
+        step("Scan a string holding an empty region")
+        step("Expect one replacement turning the region into both escapes")
+        val texts = replacement_texts("val s = " + QUO + "m" + OB + CB + " block" + QUO + "\n")
+        assert_equal(texts.len(), 1)
+        assert_equal(texts[0], OB + OB + CB + CB)
+
+    it "escapes a whitespace-only region as the collapsed empty region":
+        step("Scan a string holding a whitespace-only region")
+        """Both engines collapse the runtime value of a whitespace-only region
+        to `{}`, so the behavior-preserving fix is the collapsed escape form,
+        covering the whole region including its interior spaces."""
+        step("Expect one replacement of the whole region with both escapes")
+        val texts = replacement_texts("val s = " + QUO + "m" + OB + "   " + CB + " block" + QUO + "\n")
+        assert_equal(texts.len(), 1)
+        assert_equal(texts[0], OB + OB + CB + CB)
+        val spans = replacement_spans("val s = " + QUO + "m" + OB + "   " + CB + " block" + QUO + "\n")
+        assert_equal(spans.len(), 1)
+        assert_equal(spans[0].1 - spans[0].0, 5)
+
+    it "literalizes a region with an invalid expression start":
+        step("Scan a string holding `{= 1}`, which cannot start an expression")
+        step("Expect one replacement doubling both braces of the region")
+        val texts = replacement_texts("val s = " + QUO + "sum " + OB + "= 1" + CB + " end" + QUO + "\n")
+        assert_equal(texts.len(), 1)
+        assert_equal(texts[0], OB + OB + "= 1" + CB + CB)
+
+    it "literalizes a malformed interpolation with a dollar after an operand":
+        step("Scan a string holding `{print $1}`, where `$` follows a complete operand")
+        step("Expect one replacement doubling both braces of the region")
+        val texts = replacement_texts("val s = " + QUO + "awk " + OB + "print $1" + CB + " end" + QUO + "\n")
+        assert_equal(texts.len(), 1)
+        assert_equal(texts[0], OB + OB + "print $1" + CB + CB)
+
+    it "escapes an unmatched brace at the end of the string":
+        step("Scan a string whose brace never closes on the line")
+        step("Expect one replacement doubling the brace")
+        val texts = replacement_texts("val s = " + QUO + "prefix " + OB + QUO + "\n")
+        assert_equal(texts.len(), 1)
+        assert_equal(texts[0], OB + OB)
+
+    it "escapes the concat-pattern brace whose quote closes the string":
+        step("Scan a brace-quote-plus concatenation shape")
+        """The brace in the first literal is followed by that string's own
+        closing quote; the lexer warns and keeps it literal, so the fix
+        doubles it. The later single close-brace literal is lenient and
+        never warned."""
+        step("Expect exactly one proposal for the first literal's brace")
+        val texts = replacement_texts(
+            "val s = " + QUO + OB + QUO + " + name + " + QUO + CB + QUO + "\n")
+        assert_equal(texts.len(), 1)
+        assert_equal(texts[0], OB + OB)
+
+    it "never touches a valid interpolation":
+        step("Scan strings with valid name and format-spec interpolations")
+        step("Expect no proposals")
+        val texts = replacement_texts(
+            "fn f(name: text, x: i64) -> text:\n" +
+            "    val a = " + QUO + "pre " + OB + "name" + CB + " post" + QUO + "\n" +
+            "    val b = " + QUO + "pad " + OB + "x:>10" + CB + " end" + QUO + "\n" +
+            "    val c = " + QUO + OB + "name" + CB + OB + "x" + CB + QUO + "\n" +
+            "    a + b + c\n")
+        assert_equal(texts.len(), 0)
+
+    it "never touches already-escaped braces (idempotency)":
+        step("Scan a string already using doubled-brace escapes")
+        step("Expect no proposals")
+        val texts = replacement_texts(
+            "val s = " + QUO + "literal " + OB + OB + "brace" + CB + CB + " and " + OB + "name" + CB + QUO + "\n")
+        assert_equal(texts.len(), 0)
+
+    it "never touches backslash-escaped brace sequences":
+        step("Scan a string using the backslash-brace escape form")
+        step("Expect no proposals")
+        val texts = replacement_texts(
+            "val s = " + QUO + "sed " + BSL + OB + "0,1" + BSL + CB + " here" + QUO + "\n")
+        assert_equal(texts.len(), 0)
+
+    it "never flags raw strings, comments, or custom-block payloads":
+        step("Scan an r-string, a comment, and a custom-block payload holding braces")
+        step("Expect no proposals")
+        val texts = replacement_texts(
+            "# a comment with " + QUO + OB + " brace\n" +
+            "val a = r" + QUO + "raw " + OB + " brace" + QUO + "\n" +
+            "val b = m" + OB + " print(" + QUO + OB + QUO + ") " + CB + "\n")
+        assert_equal(texts.len(), 0)
+
+    it "skips triple-quoted strings":
+        step("Scan a docstring holding braces across lines")
+        step("Expect no proposals")
+        val texts = replacement_texts(
+            "fn doc() -> i64:\n" +
+            "    " + QUO + QUO + QUO + "doc with " + OB + " brace\n" +
+            "    and " + CB + " more" + QUO + QUO + QUO + "\n" +
+            "    0\n")
+        assert_equal(texts.len(), 0)
+
+    it "reports spans that locate the flagged region in the whole source":
+        step("Scan a two-line source and check the second line's span")
+        """The replacement span is relative to the whole source, so the
+        applicator can rewrite without re-deriving positions."""
+        step("Expect the span to cover the flagged empty region on line 2")
+        val line1 = "val a = " + QUO + "ok " + OB + "name" + CB + QUO
+        val line2 = "val b = " + QUO + "m" + OB + CB + " x" + QUO
+        val spans = replacement_spans(line1 + "\n" + line2 + "\n")
+        assert_equal(spans.len(), 1)
+        val brace_pos = ("val b = " + QUO + "m").len()
+        assert_equal(spans[0].0, line1.len() + 1 + brace_pos)
+        assert_equal(spans[0].1, line1.len() + 1 + brace_pos + 2)
+
+    it "is idempotent when applied and rescanned":
+        step("Apply the proposed fixes in descending span order, then rescan")
+        step("Expect no further proposals on the second pass")
+        val source = (
+            "val s = " + QUO + "m" + OB + CB + " and " + OB + BSL + QUO + "k" + BSL + QUO + " and " + OB + "name" + CB + QUO + "\n")
+        var reps: [(i64, i64, text)] = []
+        for fix in check_str_brace001(source, CASE_FILE):
+            for rep in easyfix_replacements(fix):
+                reps.push((rep.start, rep.end, rep.new_text))
+        assert_equal(reps.len(), 2)
+        var rewritten = source
+        var idx = reps.len()
+        while idx > 0:
+            idx = idx - 1
+            rewritten = rewritten.slice(0, reps[idx].0) + reps[idx].2 + rewritten.slice(reps[idx].1)
+        assert_equal(replacement_texts(rewritten).len(), 0)
