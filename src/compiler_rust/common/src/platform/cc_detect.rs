@@ -11,8 +11,10 @@ use crate::target::{LinkerFlavor, Target, TargetOS};
 // install hint instead of silently switching to another toolchain.
 const WINDOWS_GNU_C_COMPILERS: &[&str] = &["clang"];
 const WINDOWS_GNU_CXX_COMPILERS: &[&str] = &["clang++"];
-const WINDOWS_GNU_CROSS_C_COMPILERS: &[&str] = &["x86_64-w64-mingw32-gcc"];
-const WINDOWS_GNU_CROSS_CXX_COMPILERS: &[&str] = &["x86_64-w64-mingw32-g++"];
+// Cross (non-native-GNU-host) Windows GNU drivers: llvm-mingw's triple-prefixed
+// clang wrappers, never the `x86_64-w64-mingw32-gcc`/`g++` GCC names.
+const WINDOWS_GNU_CROSS_C_COMPILERS: &[&str] = &["x86_64-w64-mingw32-clang"];
+const WINDOWS_GNU_CROSS_CXX_COMPILERS: &[&str] = &["x86_64-w64-mingw32-clang++"];
 const MSVC_C_COMPILERS: &[&str] = &["clang-cl", "clang"];
 const MSVC_CXX_COMPILERS: &[&str] = &["clang-cl", "clang++", "clang"];
 
@@ -407,8 +409,29 @@ mod tests {
         assert!(!compiler_matches_flavor("clang-cl", LinkerFlavor::Gnu));
         assert_eq!(target.linker_flavor(), LinkerFlavor::Gnu);
         assert_eq!(target.triple_str(), "x86_64-pc-windows-gnu");
-        assert_eq!(detect_c_compiler_for_target(&target), "x86_64-w64-mingw32-gcc");
-        assert_eq!(detect_cxx_compiler_for_target(&target), "x86_64-w64-mingw32-g++");
+        // Native GNU Windows host (llvm-mingw): plain clang. Any other host:
+        // llvm-mingw's triple-prefixed clang. Never a GCC driver.
+        let (cc, cxx) = if is_native_gnu_windows_host(&target) {
+            ("clang", "clang++")
+        } else {
+            ("x86_64-w64-mingw32-clang", "x86_64-w64-mingw32-clang++")
+        };
+        // The native lane may resolve a full `...\bin\clang++.exe` path; compare the driver stem.
+        let stem = |path: String| {
+            let base = path.rsplit(['/', '\\']).next().unwrap_or("").to_ascii_lowercase();
+            base.strip_suffix(".exe").map(str::to_string).unwrap_or(base)
+        };
+        if std::env::var("CC").map_or(true, |v| v.trim().is_empty()) {
+            assert_eq!(stem(detect_c_compiler_for_target(&target)), cc);
+        }
+        if std::env::var("CXX").map_or(true, |v| v.trim().is_empty()) {
+            assert_eq!(stem(detect_cxx_compiler_for_target(&target)), cxx);
+        }
+        for list in [WINDOWS_GNU_CROSS_C_COMPILERS, WINDOWS_GNU_CROSS_CXX_COMPILERS] {
+            for driver in list {
+                assert!(gcc_driver_refusal(driver, "").is_none(), "{driver}");
+            }
+        }
     }
 
     #[test]
