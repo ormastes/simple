@@ -1,4 +1,4 @@
-# @req REQ-PUBVIEW-001 REQ-PUBVIEW-004 REQ-PUBVIEW-008
+# @req REQ-PUBVIEW-001 REQ-PUBVIEW-004 REQ-PUBVIEW-008 REQ-PUBVIEW-010 REQ-PUBVIEW-011 REQ-PUBVIEW-012
 # Raw LSP surface: documentSymbol defaults to the public view with the in-band
 # synthetic summary symbol; the level is set through initializationOptions or
 # workspace/executeCommand simple.setVisibility; hover on a non-symbol line and
@@ -7,7 +7,8 @@
 use std.spec
 use std.spec.step
 use std.nogc_sync_mut.lsp.lsp_handlers.{lsp_handle_initialize_with_body, lsp_handle_execute_command,
-    lsp_handle_document_symbol, lsp_handle_hidden_summary, lsp_handle_hover, lsp_visibility_level}
+    lsp_handle_document_symbol, lsp_handle_hidden_summary, lsp_handle_hover, lsp_visibility_level,
+    lsp_visibility_last_view}
 use std.common.json.value.{JsonValue, json_parse_value_strict, json_value_field, json_value_text_or, json_value_items}
 
 val X_CORE = "test/fixtures/mdsoc_pubview/feature_x/10.core/core.spl"
@@ -88,3 +89,30 @@ describe "hidden summary on hover and simple/hiddenSummary":
         expect(json_value_field(summary, "hidden")).to_equal(JsonValue.Int(3))
         expect(json_value_text_or(json_value_field(summary, "next_level"), "")).to_equal("feature_private")
         expect(json_value_text_or(json_value_field(json_value_field(json_value_field(summary, "reveal"), "lsp"), "command"), "")).to_equal("simple.setVisibility")
+
+describe "session view auto-revert over raw LSP":
+    it "executeCommand states the view; 3 documentSymbols later the session is public again":
+        # @capture(view): view lines across the countdown
+        set_level("public")
+        step("switch to layer_private")
+        val reply = lsp_handle_execute_command("20", "{\"params\":{\"command\":\"simple.setVisibility\",\"arguments\":[\"layer_private\"]}}")
+        expect(json_value_text_or(json_value_field(result_of(reply), "view"), "")).to_start_with("view: layer_private (session)")
+        step("request 1 reveals the layer-private type")
+        val one = json_value_items(result_of(lsp_handle_document_symbol("21", doc_body(""))))
+        expect(names(one)).to_contain("XCoreType")
+        expect(lsp_visibility_last_view()).to_contain("auto-revert in 2 requests")
+        step("requests 2 and 3")
+        lsp_handle_document_symbol("22", doc_body(""))
+        lsp_handle_document_symbol("23", doc_body(""))
+        expect(lsp_visibility_last_view()).to_contain("auto-reverts to public after this request")
+        expect(lsp_visibility_level()).to_equal("public")
+        step("request 4 is public and notes the revert")
+        val four = json_value_items(result_of(lsp_handle_document_symbol("24", doc_body(""))))
+        expect(names(four)).to_equal(["x_core_api"])
+        expect(lsp_visibility_last_view()).to_equal("view: public (reverted from layer_private: auto-revert after 3 private requests)")
+
+    it "a per-request simpleVisibility leaves the session level unchanged":
+        set_level("public")
+        lsp_handle_document_symbol("25", doc_body(",\"simpleVisibility\":\"all\""))
+        expect(lsp_visibility_last_view()).to_equal("view: all (per-request override; session view: public)")
+        expect(lsp_visibility_level()).to_equal("public")

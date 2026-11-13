@@ -143,3 +143,15 @@ Full audit: `doc/09_report/caret_smux_slang_agent_manager_gap_audit_2026-08-24.m
 ## Handoff 2026-10-31
 
 Windows seed-only sweep and remaining RED list, by cause: `.spipe/caret_suite_harden/state.md`. On Windows, the interpreter's descriptors 0..2 are the standard streams, shebang scripts spawn through the POSIX shell, and smux terminal input is `[u8]` until a complete scalar reaches the wire.
+
+## Known trap: PTY teardown timing and the runtime it needs — 2026-11-13
+
+- POSIX PTY masters/slaves are `FD_CLOEXEC` and smux `close_owned_children`
+  hangs every plain-PTY pane up (`sosix_pty_hangup`) before closing any when it
+  closes two or more. 4-pane stop-all: `/bin/sh` ~20 ms, SIGHUP-ignoring
+  children ~1.05 s total. A spec that sees ~1 s per pane is running a stale
+  runtime or inherited fds again.
+- `rt_pty_hangup` is a new extern: a seed built before it stops with
+  `unknown extern function: rt_pty_hangup` on multi-pane teardown (measured
+  caret_smux_multi_launch 3/6). Run smux specs on a seed built from the branch.
+- Bug: `doc/08_tracking/bug/pty_close_serial_grace_and_eintr_zombie_2026-11-13.md`.

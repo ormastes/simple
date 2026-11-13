@@ -1,0 +1,118 @@
+# @req REQ-PUBVIEW-010 REQ-PUBVIEW-011 REQ-PUBVIEW-012
+# Toggleable session view state for the MDSOC+ public view: an immutable
+# per-session value replaced on every request. Private views auto-revert to
+# public after N served requests (default 3) or on an explicit public request,
+# and the next response says the view reverted and why.
+use std.spec
+use std.spec.step
+use std.nogc_sync_mut.source.visibility_session.{SourceVisibilitySessionV1, SourceVisibilityServedV1,
+    source_visibility_session_default_v1, source_visibility_session_set_v1, source_visibility_session_serve_v1,
+    source_visibility_auto_revert_limit_v1, source_visibility_scope_label_v1}
+
+fn serve(session: SourceVisibilitySessionV1) -> SourceVisibilityServedV1:
+    source_visibility_session_serve_v1(session, "", "", "")
+
+describe "session view default":
+    it "a fresh session serves public with a public view line":
+        val served = serve(source_visibility_session_default_v1(3))
+        expect(served.level).to_equal("public")
+        expect(served.view).to_equal("view: public")
+        expect(served.session.level).to_equal("public")
+
+    it "the auto-revert limit knob defaults to 3 and rejects non-positive values":
+        expect(source_visibility_auto_revert_limit_v1("")).to_equal(3)
+        expect(source_visibility_auto_revert_limit_v1("5")).to_equal(5)
+        expect(source_visibility_auto_revert_limit_v1("0")).to_equal(3)
+        expect(source_visibility_auto_revert_limit_v1("junk")).to_equal(3)
+
+describe "switching to a private view":
+    it "layer_private with a layer scope states view, scope and countdown":
+        # @capture(view): view line of the first private request
+        step("switch")
+        val session = source_visibility_session_set_v1(source_visibility_session_default_v1(3), "layer_private", "", "50.mir")
+        expect(session.level).to_equal("layer_private")
+        step("first served request")
+        val first = serve(session)
+        expect(first.level).to_equal("layer_private")
+        expect(first.layer).to_equal("50.mir")
+        expect(first.view).to_equal("view: layer_private (layer=50.mir), auto-revert in 2 requests; set visibility=public to return")
+
+    it "an unknown level leaves the session unchanged":
+        val base = source_visibility_session_default_v1(3)
+        val session = source_visibility_session_set_v1(base, "module_private", "", "")
+        expect(session.level).to_equal("public")
+
+describe "auto-revert":
+    it "reverts to public after 3 private requests and notes it on the next response":
+        var session = source_visibility_session_set_v1(source_visibility_session_default_v1(3), "feature_private", "feature_x", "")
+        step("request 1")
+        val one = serve(session)
+        session = one.session
+        expect(one.view).to_contain("auto-revert in 2 requests")
+        step("request 2")
+        val two = serve(session)
+        session = two.session
+        expect(two.view).to_contain("auto-revert in 1 request;")
+        step("request 3 is still private, then the session reverts")
+        val three = serve(session)
+        session = three.session
+        expect(three.level).to_equal("feature_private")
+        expect(three.view).to_contain("auto-reverts to public after this request")
+        expect(session.level).to_equal("public")
+        step("request 4 is public and explains the revert once")
+        val four = serve(session)
+        expect(four.level).to_equal("public")
+        expect(four.feature).to_equal("")
+        expect(four.view).to_equal("view: public (reverted from feature_private: auto-revert after 3 private requests)")
+        step("request 5 no longer repeats the notice")
+        expect(serve(four.session).view).to_equal("view: public")
+
+    it "honours a configured limit":
+        val session = source_visibility_session_set_v1(source_visibility_session_default_v1(1), "all", "", "")
+        val only = serve(session)
+        expect(only.level).to_equal("all")
+        expect(only.session.level).to_equal("public")
+
+describe "explicit revert":
+    it "setting public from a private view reverts and notes the explicit request":
+        val private = source_visibility_session_set_v1(source_visibility_session_default_v1(3), "layer_private", "", "50.mir")
+        val after_one = serve(private).session
+        val reverted = source_visibility_session_set_v1(after_one, "public", "", "")
+        expect(reverted.level).to_equal("public")
+        val next = serve(reverted)
+        expect(next.view).to_equal("view: public (reverted from layer_private: explicit visibility=public)")
+
+describe "per-request override":
+    it "serves the override once and leaves session state unchanged":
+        val base = source_visibility_session_default_v1(3)
+        val served = source_visibility_session_serve_v1(base, "all", "", "")
+        expect(served.level).to_equal("all")
+        expect(served.view).to_equal("view: all (per-request override; session view: public)")
+        expect(served.session.level).to_equal("public")
+        expect(served.session.served).to_equal(0)
+
+    it "an override does not consume a private view's countdown":
+        val private = source_visibility_session_set_v1(source_visibility_session_default_v1(3), "layer_private", "", "")
+        val overridden = source_visibility_session_serve_v1(private, "public", "", "")
+        expect(overridden.level).to_equal("public")
+        expect(overridden.session.served).to_equal(0)
+        expect(serve(overridden.session).view).to_contain("auto-revert in 2 requests")
+
+describe "feature and layer scoping":
+    it "session scopes apply to served requests and appear in the view line":
+        val session = source_visibility_session_set_v1(source_visibility_session_default_v1(3), "feature_private", "feature_x", "10.core")
+        val served = serve(session)
+        expect(served.feature).to_equal("feature_x")
+        expect(served.layer).to_equal("10.core")
+        expect(served.view).to_start_with("view: feature_private (feature=feature_x, layer=10.core)")
+
+    it "a per-request scope narrows the session view without changing it":
+        val session = source_visibility_session_set_v1(source_visibility_session_default_v1(3), "layer_private", "", "")
+        val served = source_visibility_session_serve_v1(session, "", "feature_y", "")
+        expect(served.level).to_equal("layer_private")
+        expect(served.feature).to_equal("feature_y")
+        expect(served.session.feature).to_equal("")
+
+    it "scope labels are empty without scopes":
+        expect(source_visibility_scope_label_v1("", "")).to_equal("")
+        expect(source_visibility_scope_label_v1("", "50.mir")).to_equal(" (layer=50.mir)")

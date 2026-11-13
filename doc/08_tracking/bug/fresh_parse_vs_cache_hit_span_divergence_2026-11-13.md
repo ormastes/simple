@@ -81,3 +81,32 @@ since the fragment sub-parse was introduced: wrong expression byte offsets (star
 line:col were right) for every expression converted after the last fragment, i.e. LSP ranges,
 span-keyed cache identity, offset-based source slicing and diagnostics byte ranges; cold and warm
 builds produced different HIR for the same source. Cache hits were correct.
+
+## Follow-ups (review of PR #8879, branch `work/lexer-span-followups-20261113`)
+
+All test-first in `test/01_unit/compiler/frontend/interp_lexer_span_restore_spec.spl` (RED 2/5 ->
+GREEN 5/5, non-ASCII sources, no padding):
+
+1. **Release kept the span table.** `lexer_release_parse_source_globals` now also clears
+   `lex_span_byte_prefix` and `lex_span_all_ascii` (RED: 54 entries left after release). On
+   `data_schema_resolver.spl` the released table held 26,284 entries; process RSS read the same
+   before and after release (509,710,336 B both; the interpreter heap does not return pages), so
+   the gain is reachability, not an RSS drop on this lane.
+2. **Bridge fragment base converted twice.** `flat_bridge_build_string_regions` fed a BYTE base
+   (`span.start + 1 + i + 1`) into the span pool, whose offsets `flat_expr_span` converts char ->
+   byte, so non-ASCII modules overshot (RED: 78 vs 75; before #8879 it clamped instead). The base
+   is now converted back with the new `lex_source_char_offset` (binary search over the same
+   prefix table; identity on ASCII sources).
+3. **Module-parse fragments were never rebased.** `parse_string_interpolation_regions` called
+   `parse_interpolation_fragment` without a base, so a fragment's own span was `start=0, line 1,
+   col 1` (RED: 0 vs 72). It now takes the literal's span id from both module-parse callers and
+   rebases through `parse_interpolation_fragment_at`. Reviewer probe: `start=107/139, line 3,
+   col 25` for the ASCII/UTF-8 cases (want 107/139).
+4. `lexer_byte_spans_spec` dedent case compares against `source.byte_len()`.
+
+Known approximation kept from the bridge path: a region base counts bytes of the DECODED literal
+value, so an escape before the `{` (e.g. `\n`) shifts the base by the escape's width.
+Parse time, interleaved base/fix runs (3 reps each, same seed binary): `attr_access_sites`
+2.09-2.12 s vs 2.07-2.13 s, `data_schema_resolver` 6.14-6.47 s vs 6.25-6.42 s (no change).
+`ast_pool_snapshot_spec` 5/5; `lexer_snapshot_spec` (import `core.ast` unresolved) and one
+`persistent_parse_owner_contract_spec` example fail identically on the base (pre-existing).

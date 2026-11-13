@@ -128,3 +128,69 @@ executable evidence that lane consumes.
 ## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
 
 **FIXED (confirmed)** — Adapter + executable evidence landed (caret2); must-check ledger promotion still rides the external-receipt gate, which fails closed for caret gates by design.
+
+## Resolution 2026-11-13 — POSIX PTY path repaired (work/p3-smux-20261113)
+
+The caret2 evidence was Windows-only. On Linux (aarch64, `test --mode=interpreter`)
+`caret_smux_multi_launch_spec.spl` was **1/6** at origin/release/1.0.0
+`f9411a43849`. Two independent root causes, both reproduced in the spec's own
+engine before any edit:
+
+1. **Adapter handed the POSIX PTY provider a quoted command line.**
+   `caret_smux_command_line` produced `'/bin/sh'` (posix_command_line quoting),
+   but the POSIX `rt_pty_spawn` execs its argument as ONE program path with no
+   argv (`execvp(shell, [argv0])`). `execvp("'/bin/sh'")` fails, the child
+   `_exit(127)`s immediately, `pty_is_running` is false, `_free_pane` hands the
+   same pane to the next child ("pane already owns a child or pending PTY"), and
+   the batch rolls back. Probe: quoted path -> `pty_running=false`, `/proc` gone;
+   bare `/bin/sh` -> `pty_running=true`.
+   Fix (`src/app/llm_caret/caret_smux_multi_launch.spl`): on POSIX spawn through
+   the pane backend's existing private launcher script (now exported as
+   `posix_pane_launcher_create/remove` from `pane_backend.spl`), which preserves
+   argv exactly; the launcher dir is tracked per child and removed on
+   cancel/stop/rollback/spawn failure. Windows still passes the CreateProcess
+   command line.
+2. **POSIX `rt_pty_close` never reaped the child.** Both lanes
+   (`interpreter_extern/pty.rs` and `runtime/src/value/pty.rs`) dropped the
+   `CHILD_TABLE` entry and closed the master without `waitpid`; the hung-up
+   child stayed a zombie (`/proc/<pid>/stat` state `Z`), so `kill(pid,0)` /
+   `process_is_running` reported it alive and the manager's rollback survivor
+   check returned `launch_rollback_incomplete:1`. Fix: shared
+   `simple_runtime::value::pty::reap_pty_child` — after closing the master, a
+   bounded 1 s WNOHANG wait for the hangup exit, then SIGKILL to the child's
+   session group and reap (pid > 1 guard; the unreaped zombie pins the pid, so
+   there is no reuse hazard *provided nothing reaps a PTY pid out of band* —
+   the generic `native_process_wait(pid)` facade would, leaving a stale
+   CHILD_TABLE entry; no runtime code does that today, and there is no
+   `waitpid(-1)`/SIGCHLD reaper). Both close paths call it. Rust unit test
+   `value::pty::tests::rt_pty_close_reaps_the_child` passes.
+   Perf note (recorded per the perf-regression rule): close now blocks up to
+   ~1 s per pane for a child that ignores SIGHUP (worst case ~6 s if SIGKILL
+   cannot be reaped), serially per pane in smux session teardown
+   (`child_lifecycle.spl` close loops). Interactive shells exit on the hangup
+   immediately. Follow-up if a provider ignores SIGHUP: signal all panes first,
+   then reap once.
+
+Spec change (evidence-backed, assertions unchanged): the two manager-path
+examples now use an argv-tolerant provider stand-in on POSIX (`exec /bin/sh`
+script). Real plan argv (`-p "Agent: ..."`) makes POSIX `sh` treat the operand as
+a script file and exit; `cmd.exe` ignores stray argv, which is why the
+Windows run passed with `_shell()`.
+
+Red -> green (`--mode=interpreter --no-cache`, Linux aarch64):
+
+| binary | source | caret_smux_multi_launch_spec |
+|---|---|---|
+| pinned seed `seed-fix` | base | 1/6 |
+| pinned seed `seed-fix` | fixed | 1/6 (only pid-dead / poll-exited / rollback-survivor checks left = cause 2) |
+| seed built from this branch | fixed | **6/6** |
+
+Neighbour specs, base vs fixed, identical on both binaries:
+multi_caret_manager 13/13, pane_backend 15/15, cs_smux_launcher 2/2,
+smux_client_input 17/17, smux_system 56/56; pre-existing reds unchanged
+(smux_pane_lifecycle 10/12, smux_live_multi_pane 1/4, smux_sosix_boundary 2/3).
+
+Remains: the deployed seed must be rebuilt from a tree carrying the
+`rt_pty_close` reap before cause 2 is fixed in routine runs; the
+`caret-smux-multi-launch, todo, never` ledger row still rides the
+external-receipt gate (unchanged).
