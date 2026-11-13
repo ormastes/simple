@@ -1,0 +1,149 @@
+# Pure frame-session state tests (design 11.9). No transport or native evidence.
+use std.spec.{describe, it, expect}
+use std.common.contracts.container.endpoint_frame_v1.{
+    EndpointFrameV1, endpoint_frame_target_payload_v1, endpoint_frame_hello_payload_v1,
+    endpoint_frame_u32_payload_v1, endpoint_frame_u16_payload_v1,
+    ENDPOINT_FRAME_HELLO_V1, ENDPOINT_FRAME_OPEN_V1, ENDPOINT_FRAME_OPENED_V1,
+    ENDPOINT_FRAME_DATA_V1, ENDPOINT_FRAME_WINDOW_V1, ENDPOINT_FRAME_HALF_CLOSE_V1,
+    ENDPOINT_FRAME_CLOSE_V1, ENDPOINT_FRAME_RESET_V1, ENDPOINT_FRAME_PING_V1,
+    ENDPOINT_FRAME_REGISTER_V1, ENDPOINT_FRAME_PROTOCOL_TCP_V1}
+use std.nogc_async_mut.container.network.frame_session_v1.{
+    EndpointFrameSessionV1, EndpointFrameLimitsV1, endpoint_frame_limits_v1}
+
+fn _fs_bytes(count: i64) -> [u8]:
+    var result: [u8] = []
+    for _index in 0..count:
+        result.push(5)
+    result
+
+fn _fs_session(max_channels: i64, window: i64, queue: i64) -> EndpointFrameSessionV1:
+    var session = EndpointFrameSessionV1.create(EndpointFrameLimitsV1(max_channels: max_channels,
+        initial_window: window, max_window: window * 2, max_queued_bytes: queue)).unwrap()
+    val nonce: [u8] = [3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
+        3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3]
+    val hello = EndpointFrameV1(kind: ENDPOINT_FRAME_HELLO_V1, channel: 0, sequence: 1,
+        payload: endpoint_frame_hello_payload_v1(nonce, "adm-1").unwrap())
+    val _ok = session.receive(hello).unwrap()
+    session
+
+fn _fs_open(channel: i64) -> EndpointFrameV1:
+    EndpointFrameV1(kind: ENDPOINT_FRAME_OPEN_V1, channel: channel, sequence: 1,
+        payload: endpoint_frame_target_payload_v1(ENDPOINT_FRAME_PROTOCOL_TCP_V1, 8080,
+            "api.tools.test").unwrap())
+
+fn _fs_data(channel: i64, sequence: i64, count: i64) -> EndpointFrameV1:
+    EndpointFrameV1(kind: ENDPOINT_FRAME_DATA_V1, channel: channel, sequence: sequence, payload: _fs_bytes(count))
+
+fn _fs_close(kind: i64, channel: i64, sequence: i64) -> EndpointFrameV1:
+    EndpointFrameV1(kind: kind, channel: channel, sequence: sequence, payload: endpoint_frame_u16_payload_v1(1))
+
+describe "endpoint frame session":
+    it "requires exactly one HELLO before any other frame":
+        var session = EndpointFrameSessionV1.create(endpoint_frame_limits_v1(4, 1024, 2048,
+            16384).unwrap()).unwrap()
+        expect(session.receive(EndpointFrameV1(kind: ENDPOINT_FRAME_PING_V1, channel: 0, sequence: 1,
+            payload: [])).unwrap_err()).to_equal("endpoint-session-hello-required")
+        expect(session.receive(_fs_open(1)).unwrap_err()).to_equal("endpoint-session-hello-required")
+        var ready = _fs_session(4, 1024, 16384)
+        val nonce = _fs_bytes(32)
+        expect(ready.receive(EndpointFrameV1(kind: ENDPOINT_FRAME_HELLO_V1, channel: 0, sequence: 2,
+            payload: endpoint_frame_hello_payload_v1(nonce, "adm-2").unwrap())).unwrap_err()).to_equal(
+            "endpoint-session-hello-repeated")
+        expect(ready.receive(EndpointFrameV1(kind: ENDPOINT_FRAME_OPENED_V1, channel: 1, sequence: 1,
+            payload: [108])).unwrap_err()).to_equal("endpoint-session-broker-only-frame")
+
+    it "rejects replayed and gapped sequences without consuming state":
+        var session = _fs_session(4, 1024, 16384)
+        val _open = session.receive(_fs_open(1)).unwrap()
+        val _accepted = session.accept_open(1).unwrap()
+        expect(session.receive(_fs_data(1, 2, 10)).is_ok()).to_equal(true)
+        expect(session.receive(_fs_data(1, 2, 10)).unwrap_err()).to_equal("endpoint-session-replay-or-sequence-gap")
+        expect(session.receive(_fs_data(1, 4, 10)).unwrap_err()).to_equal("endpoint-session-replay-or-sequence-gap")
+        expect(session.receive(_fs_data(1, 3, 10)).is_ok()).to_equal(true)
+        expect(session.channel(1).unwrap().queued_bytes).to_equal(20)
+        expect(session.receive(EndpointFrameV1(kind: ENDPOINT_FRAME_PING_V1, channel: 0, sequence: 1,
+            payload: [])).unwrap_err()).to_equal("endpoint-session-replay-or-sequence-gap")
+        expect(session.receive(_fs_open(1)).unwrap_err()).to_equal("endpoint-channel-reused")
+
+    it "rejects receive-window overflow and over-limit WINDOW credit":
+        var session = _fs_session(4, 100, 16384)
+        val _open = session.receive(_fs_open(1)).unwrap()
+        val _accepted = session.accept_open(1).unwrap()
+        expect(session.receive(_fs_data(1, 2, 101)).unwrap_err()).to_equal("endpoint-window-overflow")
+        expect(session.receive(_fs_data(1, 2, 100)).is_ok()).to_equal(true)
+        expect(session.receive(_fs_data(1, 3, 1)).unwrap_err()).to_equal("endpoint-window-overflow")
+        expect(session.consume(1, 40).unwrap()).to_equal(40)
+        expect(session.receive(_fs_data(1, 3, 40)).is_ok()).to_equal(true)
+        val too_much = EndpointFrameV1(kind: ENDPOINT_FRAME_WINDOW_V1, channel: 1, sequence: 4,
+            payload: endpoint_frame_u32_payload_v1(101))
+        expect(session.receive(too_much).unwrap_err()).to_equal("endpoint-window-credit-overflow")
+        val ok_credit = EndpointFrameV1(kind: ENDPOINT_FRAME_WINDOW_V1, channel: 1, sequence: 4,
+            payload: endpoint_frame_u32_payload_v1(100))
+        expect(session.receive(ok_credit).is_ok()).to_equal(true)
+        expect(session.reserve_send(1, 200).is_ok()).to_equal(true)
+        expect(session.reserve_send(1, 1).unwrap_err()).to_equal("endpoint-window-exhausted")
+
+    it "keeps control capacity when the data queue is full":
+        var session = _fs_session(4, 16384, 16384)
+        for channel in [1, 2]:
+            val _open = session.receive(_fs_open(channel)).unwrap()
+            val _accepted = session.accept_open(channel).unwrap()
+        expect(session.receive(_fs_data(1, 2, 16384)).is_ok()).to_equal(true)
+        expect(session.receive(_fs_data(2, 2, 1)).unwrap_err()).to_equal("endpoint-session-queue-full")
+        val window = EndpointFrameV1(kind: ENDPOINT_FRAME_WINDOW_V1, channel: 2, sequence: 2,
+            payload: endpoint_frame_u32_payload_v1(1))
+        expect(session.receive(window).is_ok()).to_equal(true)
+        expect(session.receive(EndpointFrameV1(kind: ENDPOINT_FRAME_PING_V1, channel: 0, sequence: 2,
+            payload: [])).is_ok()).to_equal(true)
+        expect(session.receive(_fs_close(ENDPOINT_FRAME_RESET_V1, 1, 3)).is_ok()).to_equal(true)
+        expect(session.channel(1).unwrap().phase).to_equal("reset")
+        expect(session.receive(_fs_data(2, 3, 1)).is_ok()).to_equal(true)
+
+    it "caps concurrent channels and retires ids idempotently":
+        var session = _fs_session(1, 1024, 16384)
+        val _open = session.receive(_fs_open(1)).unwrap()
+        expect(session.receive(_fs_open(2)).unwrap_err()).to_equal("endpoint-channel-limit")
+        expect(session.reject_open(1).is_ok()).to_equal(true)
+        expect(session.receive(_fs_data(1, 2, 1)).unwrap_err()).to_equal("endpoint-channel-retired")
+        expect(session.receive(_fs_open(2)).is_ok()).to_equal(true)
+        val _accepted = session.accept_open(2).unwrap()
+        expect(session.receive(_fs_close(ENDPOINT_FRAME_CLOSE_V1, 2, 2)).is_ok()).to_equal(true)
+        expect(session.receive(_fs_close(ENDPOINT_FRAME_CLOSE_V1, 2, 3)).is_ok()).to_equal(true)
+        expect(session.channel(2).unwrap().phase).to_equal("closed")
+        expect(session.receive(_fs_close(ENDPOINT_FRAME_CLOSE_V1, 9, 1)).unwrap_err()).to_equal("endpoint-channel-unknown")
+
+    it "preserves TCP half-close per direction":
+        var session = _fs_session(4, 1024, 16384)
+        val _open = session.receive(_fs_open(1)).unwrap()
+        val _accepted = session.accept_open(1).unwrap()
+        val half = EndpointFrameV1(kind: ENDPOINT_FRAME_HALF_CLOSE_V1, channel: 1, sequence: 2, payload: [1])
+        expect(session.receive(half).is_ok()).to_equal(true)
+        expect(session.receive(_fs_data(1, 3, 1)).unwrap_err()).to_equal("endpoint-channel-peer-write-closed")
+        expect(session.reserve_send(1, 10).is_ok()).to_equal(true)
+        val other = EndpointFrameV1(kind: ENDPOINT_FRAME_HALF_CLOSE_V1, channel: 1, sequence: 3, payload: [2])
+        expect(session.receive(other).is_ok()).to_equal(true)
+        expect(session.reserve_send(1, 10).unwrap_err()).to_equal("endpoint-channel-not-writable")
+        expect(session.channel(1).unwrap().phase).to_equal("open")
+
+    it "revocation stops new authority but admits retirement and PING":
+        var session = _fs_session(4, 1024, 16384)
+        val _open = session.receive(_fs_open(1)).unwrap()
+        val _accepted = session.accept_open(1).unwrap()
+        val _pending = session.receive(_fs_open(2)).unwrap()
+        val live = session.revoke()
+        expect(live).to_equal([1, 2])
+        expect(session.accept_open(2).unwrap_err()).to_equal("endpoint-session-revoked")
+        expect(session.receive(_fs_open(3)).unwrap_err()).to_equal("endpoint-session-revoked")
+        expect(session.receive(_fs_data(1, 2, 1)).unwrap_err()).to_equal("endpoint-session-revoked")
+        val register = EndpointFrameV1(kind: ENDPOINT_FRAME_REGISTER_V1, channel: 0, sequence: 2,
+            payload: endpoint_frame_target_payload_v1(ENDPOINT_FRAME_PROTOCOL_TCP_V1, 8080,
+                "api.tools.test").unwrap())
+        expect(session.receive(register).unwrap_err()).to_equal("endpoint-session-revoked")
+        expect(session.receive(EndpointFrameV1(kind: ENDPOINT_FRAME_PING_V1, channel: 0, sequence: 2,
+            payload: [])).is_ok()).to_equal(true)
+        expect(session.receive(_fs_close(ENDPOINT_FRAME_RESET_V1, 1, 2)).is_ok()).to_equal(true)
+
+    it "rejects unsafe limits":
+        expect(endpoint_frame_limits_v1(0, 1024, 2048, 16384).is_err()).to_equal(true)
+        expect(endpoint_frame_limits_v1(4, 4096, 2048, 16384).is_err()).to_equal(true)
+        expect(endpoint_frame_limits_v1(4, 1024, 2048, 100).is_err()).to_equal(true)

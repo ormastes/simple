@@ -1,0 +1,96 @@
+# Bounded logical IPAM for one endpoint network generation (design 11.7).
+# Works on logical addresses only: no host routing or interface calls. Each
+# allocation is O(1): it pops a retired address or advances a cursor, and
+# never scans the address range. Released addresses are quarantined until the
+# caller confirms retirement/token revocation, so an address cannot be handed
+# to a new attempt while old authority may still be live.
+# This is an in-memory model. Durable truth stays with the existing journal
+# writer; this owner must be rebuilt from it, not persisted in parallel.
+use std.nogc_async_mut.container.network.endpoint_identity_v1.{
+    EndpointNetworkIdV1, EndpointPrincipalV1, endpoint_network_validate_v1,
+    endpoint_network_key_v1, endpoint_network_scope_v1, endpoint_principal_validate_v1,
+    endpoint_principal_key_v1, endpoint_logical_address_parse_v1, endpoint_logical_address_text_v1}
+
+pub const ENDPOINT_IPAM_MIN_PREFIX_V1: i64 = 16
+pub const ENDPOINT_IPAM_MAX_PREFIX_V1: i64 = 30
+
+pub class EndpointIpamV1:
+    network: EndpointNetworkIdV1
+    base: i64
+    usable: i64
+    next_unused: i64
+    free: [i64]
+    quarantined: Dict<text, bool>
+    owner_by_address: Dict<text, text>
+    address_by_owner: Dict<text, i64>
+    allocated: i64
+
+    # `base_text/prefix` is a logical range; offset 0 and the last offset are
+    # reserved (network/broadcast-shaped values are never handed out).
+    pub static fn create(network: EndpointNetworkIdV1, base_text: text,
+            prefix: i64) -> Result<EndpointIpamV1, text>:
+        val _network = endpoint_network_validate_v1(network)?
+        if prefix < ENDPOINT_IPAM_MIN_PREFIX_V1 or prefix > ENDPOINT_IPAM_MAX_PREFIX_V1:
+            return Err("endpoint-ipam-prefix-out-of-bounds")
+        val base = endpoint_logical_address_parse_v1(base_text)?
+        val size = 1 << (32 - prefix)
+        if (base & (size - 1)) != 0: return Err("endpoint-ipam-base-unaligned")
+        Ok(EndpointIpamV1(network: network, base: base, usable: size - 2, next_unused: 1,
+            free: [], quarantined: {}, owner_by_address: {}, address_by_owner: {}, allocated: 0))
+
+    pub fn allocation_count() -> i64:
+        self.allocated
+
+    pub fn owner_of(address: i64) -> Option<text>:
+        val key = address.to_text()
+        if self.owner_by_address.contains_key(key): return Some(self.owner_by_address[key])
+        None
+
+    # Idempotent per principal: a retried allocation returns the same address.
+    pub me allocate(principal: EndpointPrincipalV1) -> Result<i64, text>:
+        val _principal = endpoint_principal_validate_v1(principal)?
+        if endpoint_network_scope_v1(principal.network) != endpoint_network_scope_v1(self.network):
+            return Err("endpoint-ipam-network-mismatch")
+        if principal.network.generation != self.network.generation:
+            return Err("endpoint-ipam-network-generation-mismatch")
+        val owner = endpoint_principal_key_v1(principal)
+        if self.address_by_owner.contains_key(owner): return Ok(self.address_by_owner[owner])
+        var address: i64 = 0
+        if self.free.len() > 0:
+            address = self.free[self.free.len() - 1]
+            self.free = self.free[0:self.free.len() - 1]
+        elif self.next_unused <= self.usable:
+            address = self.base + self.next_unused
+            self.next_unused = self.next_unused + 1
+        else:
+            return Err("endpoint-ipam-exhausted: network=" + endpoint_network_key_v1(self.network) +
+                " range=" + endpoint_logical_address_text_v1(self.base) + " usable=" +
+                self.usable.to_text() + " allocated=" + self.allocated.to_text() +
+                " quarantined=" + self.quarantined.len().to_text())
+        self.owner_by_address[address.to_text()] = owner
+        self.address_by_owner[owner] = address
+        self.allocated = self.allocated + 1
+        Ok(address)
+
+    # Ownership-checked release into quarantine; not yet reusable.
+    pub me release(principal: EndpointPrincipalV1, address: i64) -> Result<bool, text>:
+        val key = address.to_text()
+        val owner = endpoint_principal_key_v1(principal)
+        if not self.owner_by_address.contains_key(key): return Err("endpoint-ipam-address-not-allocated")
+        if self.owner_by_address[key] != owner: return Err("endpoint-ipam-release-not-owner")
+        self.owner_by_address = self.owner_by_address.remove(key)
+        self.address_by_owner = self.address_by_owner.remove(owner)
+        self.quarantined[key] = true
+        self.allocated = self.allocated - 1
+        Ok(true)
+
+    # Called only after the caller has proven route retirement and token
+    # revocation for this address (design 11.7: reuse follows retirement).
+    pub me confirm_retired(address: i64) -> Result<bool, text>:
+        val key = address.to_text()
+        if not self.quarantined.contains_key(key): return Err("endpoint-ipam-address-not-quarantined")
+        self.quarantined = self.quarantined.remove(key)
+        self.free.push(address)
+        Ok(true)
+
+export EndpointIpamV1, ENDPOINT_IPAM_MIN_PREFIX_V1, ENDPOINT_IPAM_MAX_PREFIX_V1
