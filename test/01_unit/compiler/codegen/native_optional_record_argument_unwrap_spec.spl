@@ -1,0 +1,122 @@
+"""
+# Native `--entry-closure`: a nil-checked `T?` record passed as a `T` argument hands over the record
+
+**Category:** Codegen / MIR optional call arguments
+**Bug:** doc/08_tracking/bug/optional_struct_payload_narrowing_native_2026_11_13.md
+
+MIR has no flow typing. After `if v == nil: return`, `v` still has type
+`Optional(T)`. On the pure-Simple native lane its value is the canonical
+Option box, whether it was built bare or with `Some(...)`. A free-function or
+method argument whose parameter is declared `T` received that box, and the
+callee read the box header as the record. This is the call-argument twin of
+mir_optional_record_receiver_reads_option_box_2026-10-25.md (field reads).
+On the run-26 Stage 2 candidate (2f9dedc191f9) it SIGSEGVs inside the callee.
+The same shape inside the generated AST semantic encoder
+(`ast_semantic_encode_expr(b_Array_f1, state)`) killed every HIR worker that
+reached a `[T; <int literal>]` struct field.
+"""
+use std.spec.*
+use std.io_runtime.{file_write, process_run, env_get}
+
+# No `{...}` interpolation in the embedded source: the spec's own lexer would
+# resolve it.
+val OPT_ARGUMENT_SOURCE: text = ("struct Sp:\n" +
+    "    a: i64\n" +
+    "\n" +
+    "enum EK:\n" +
+    "    Lit(i64)\n" +
+    "    Name(text)\n" +
+    "\n" +
+    "struct E:\n" +
+    "    kind: EK\n" +
+    "    span: Sp\n" +
+    "    extras: [i64] = []\n" +
+    "\n" +
+    "enum TK:\n" +
+    "    Named(text)\n" +
+    "    Arr(text, E?)\n" +
+    "\n" +
+    "class Enc:\n" +
+    "    base: i64\n" +
+    "    fn score(node: E) -> i64:\n" +
+    "        self.base + enc(node)\n" +
+    "\n" +
+    "fn enc(node: E) -> i64:\n" +
+    "    var acc = node.extras.len() * 1000\n" +
+    "    match node.kind:\n" +
+    "        case Lit(v): acc = acc + v\n" +
+    "        case Name(n): acc = acc + n.len()\n" +
+    "    acc\n" +
+    "\n" +
+    "fn payload_arg(t: TK) -> i64:\n" +
+    "    match t:\n" +
+    "        case Named(_): return -2\n" +
+    "        case Arr(_, sz):\n" +
+    "            if sz == nil:\n" +
+    "                return -1\n" +
+    "            return enc(sz)\n" +
+    "    -3\n" +
+    "\n" +
+    "fn method_arg(t: TK) -> i64:\n" +
+    "    val e = Enc(base: 100000)\n" +
+    "    match t:\n" +
+    "        case Named(_): return -2\n" +
+    "        case Arr(_, sz):\n" +
+    "            if sz == nil:\n" +
+    "                return -1\n" +
+    "            return e.score(sz)\n" +
+    "    -3\n" +
+    "\n" +
+    "fn param_arg(sz: E?) -> i64:\n" +
+    "    if sz == nil:\n" +
+    "        return -1\n" +
+    "    enc(sz)\n" +
+    "\n" +
+    "fn some_size(n: i64) -> E?:\n" +
+    "    val size: E? = Some(E(kind: EK.Lit(n), span: Sp(a: 1)))\n" +
+    "    size\n" +
+    "\n" +
+    "fn bare_size(n: i64) -> E?:\n" +
+    "    val size: E? = E(kind: EK.Lit(n), span: Sp(a: 1))\n" +
+    "    size\n" +
+    "\n" +
+    "fn main() -> i64:\n" +
+    "    print(\"BEGIN\")\n" +
+    "    print(payload_arg(TK.Arr(\"u8\", some_size(4096))))\n" +
+    "    print(payload_arg(TK.Arr(\"u8\", bare_size(4095))))\n" +
+    "    print(payload_arg(TK.Arr(\"u8\", None)))\n" +
+    "    print(method_arg(TK.Arr(\"u8\", some_size(7))))\n" +
+    "    print(param_arg(some_size(9)))\n" +
+    "    print(param_arg(None))\n" +
+    "    print(\"END\")\n" +
+    "    0\n")
+
+fn native_build_and_run_opt_argument() -> text:
+    val dir = "build/test-artifacts/native_optional_record_argument_unwrap"
+    val src = dir + "/opt_argument_repro.spl"
+    val bin_out = dir + "/opt_argument_repro.bin"
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    process_run("sh", ["-c", "mkdir -p " + dir + " && rm -f " + bin_out])
+    file_write(src, OPT_ARGUMENT_SOURCE)
+    val build_cmd = ("SIMPLE_BOOTSTRAP=1 nice -n 19 " + bin +
+        " native-build --source " + dir + " --entry " + src +
+        " --entry-closure -o " + bin_out + " >/dev/null 2>&1; " +
+        "test -x " + bin_out + " && ./" + bin_out + " 2>&1 || echo BUILD-FAILED")
+    val out = process_run("sh", ["-c", build_cmd])
+    out.0
+
+describe "a nil-checked T? record passed as a T argument (native)":
+    it "hands the callee the record, not the Option box":
+        # One example = one native-build; spec globals do not persist.
+        step("Build the fixture once and run it")
+        val out = native_build_and_run_opt_argument()
+        step("Refuse to pass on a build or run that produced nothing")
+        expect(out.contains("BUILD-FAILED")).to_equal(false)
+        expect(out).to_contain("BEGIN")
+        expect(out).to_contain("END")
+        step("enum-payload binder into a free function: Some 4096, bare 4095, nil -1")
+        step("enum-payload binder into a method: 100000 + 7")
+        step("`T?` parameter into a free function: 9, nil -1")
+        expect(out).to_contain("BEGIN\n4096\n4095\n-1\n100007\n9\n-1\nEND")
