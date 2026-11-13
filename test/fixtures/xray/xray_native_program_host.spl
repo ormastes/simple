@@ -1,0 +1,359 @@
+# XRay ("spy") compiled-program host: one real run of the pure-Simple spy.
+#
+# Built into a native EXECUTABLE (bootstrap `native-build`) and run directly by
+# scripts/check/check-xray-native-program-e2e.shs; it can also run under
+# `simple run`. It traces the `--xray` native shared module XRAY_E2E_LIB
+# (test/fixtures/xray/xray_inprocess_prog.spl, built with
+# `compile --native --backend=native --xray`) inside its own process:
+#   dynload  aspect dynload: dlopen the module (its resident spy runtime comes
+#            with it), locate + admit its `.simple_xray_map`, register it, then
+#            aspect params (observer config + pointcuts) select functions.
+#   log      enable -> calls record raw entry/exit edges -> disable -> the same
+#            calls record nothing.
+#   profile  the SAME drained raw-edge stream, decoded with the V1 codec and
+#            folded by trace_profile_fold_v1: calls, inclusive and exclusive
+#            time (traced calls add1, so exclusive(traced) is inclusive(traced)
+#            minus inclusive(add1), exactly).
+#   reenable a third generation with another pointcut: only its sleds go live.
+#   container an AdaptiveMap's profiling switch follows the spy's runtime state
+#            (data_observation_profiling_while_v1): off before start, on while
+#            Active, off (counters frozen) after stop.
+#   rollback a patch fault mid-start (injected through the code-patch port)
+#            rolls back every sled, closes the channel's admission and leaves
+#            the controller Idle; the next generation starts cleanly.
+# Output: `SPY <scenario> key=value ...` lines, then SPY-HOST-OK or
+# SPY-HOST-ERROR: <reason>.
+use std.common.plugin.aspect_params.{AspectParamsV1, ASPECT_TRACE_OBSERVER_EXT_V1}
+use std.common.plugin.iface_id.{ParamExt}
+use std.common.trace.observer_contract_v1.*
+use std.common.trace.observer_aspect_config_v1.{trace_aspect_config_v1}
+use std.common.trace.observer_config_v1.{TRACE_CONFIG_SCHEMA_HASH_V1}
+use std.common.trace.observer_event_codec_v1.{trace_event_decode_v1}
+use std.common.trace.observer_profile_v1.*
+use std.common.trace.xray_native_map_format_v1.*
+use std.common.trace.xray_native_selection_v1.*
+use std.common.trace.data.data_observation_sink_v1.{data_observation_profiling_while_v1}
+use std.nogc_sync_mut.trace.observer_native_channel_v1.*
+use std.nogc_sync_mut.trace.xray_llvm_adapter_v1.*
+use std.nogc_sync_mut.trace.xray_native_sled_leaf_v1.*
+use std.nogc_sync_mut.trace.xray_native_module_v1.*
+use std.nogc_sync_mut.src.collections.adaptive_map.AdaptiveMap
+use std.nogc_sync_mut.src.collections.adaptive_text_set.{AdaptiveSetProfile}
+use os.sosix.host.code_patch_adapter.{SosixCodePatchAdapterV1}
+
+extern fn rt_env_get(key: text) -> text?
+extern fn rt_alloc(size: i64) -> i64
+extern fn rt_ptr_read_i64(addr: i64, offset: i64) -> i64
+extern fn rt_ptr_read_i32(addr: i64, offset: i64) -> i32
+extern fn rt_ptr_read_u8(addr: i64, offset: i64) -> i64
+extern fn rt_call_ptr_1(addr: i64, arg1: i64) -> i64
+
+val PAGE: i64 = 4096
+val CAPACITY: i64 = 256
+
+# The real SOSIX port with ONE injected `begin` failure (the Nth call fails,
+# writing nothing). Every other call reaches the real page-protection path.
+class FaultingPatchPort:
+    inner: SosixCodePatchAdapterV1
+    fail_begin_at: i64
+    begins: i64
+
+impl XrayCodePatchPortV1 for FaultingPatchPort:
+    me begin(page: i64, length: i64) -> i64:
+        self.begins = self.begins + 1
+        if self.begins == self.fail_begin_at: return 1
+        self.inner.begin(page, length)
+    me store_u32(addr: i64, value: i64) -> i64:
+        self.inner.store_u32(addr, value)
+    fn load_u32(addr: i64) -> i64:
+        self.inner.load_u32(addr)
+    me store_u16(addr: i64, value: i64) -> i64:
+        self.inner.store_u16(addr, value)
+    fn load_u16(addr: i64) -> i64:
+        self.inner.load_u16(addr)
+    me end(page: i64, length: i64) -> i64:
+        self.inner.end(page, length)
+    me close_channel(arena: i64) -> i64:
+        self.inner.close_channel(arena)
+
+fn fail(message: text):
+    print "SPY-HOST-ERROR: {message}"
+
+fn env(name: text) -> text:
+    rt_env_get(name) ?? ""
+
+fn config_payload(abi_profile: text) -> text:
+    "trace:\n    schema: 1\n    instrumentation: dynamic\n    backend: simple\n    consistency: raw_edges\n    patch_mode: quiescent\n    abi_profile: {abi_profile}\n    events: [entry, exit, tail_exit]\n"
+
+fn aspect_params(abi_profile: text, pointcuts: text) -> AspectParamsV1:
+    var params = AspectParamsV1.defaults()
+    params.ext.push(ParamExt(ASPECT_TRACE_OBSERVER_EXT_V1, 1, config_payload(abi_profile).bytes(), TRACE_CONFIG_SCHEMA_HASH_V1))
+    params.ext.push(ParamExt(ASPECT_TRACE_POINTCUTS_EXT_V1, 1, pointcuts.bytes(), TRACE_POINTCUTS_SCHEMA_V1))
+    params
+
+# The canonical map name ending in ".<suffix>", "" unless exactly one matches.
+fn canonical(module: XrayNativeLoadedModuleV1, suffix: text) -> text:
+    var found = ""
+    for function in module.map.functions:
+        if function.name.ends_with(".{suffix}"):
+            if found != "": return ""
+            found = function.name
+    found
+
+fn canonical_list(module: XrayNativeLoadedModuleV1, suffixes: [text]) -> text:
+    var out = ""
+    for suffix in suffixes:
+        val name = canonical(module, suffix)
+        if out != "": out = out + ","
+        out = out + (if name == "": suffix else: name)
+    out
+
+# Map function id of the function ending in ".<suffix>" (0 when absent).
+fn function_id(module: XrayNativeLoadedModuleV1, suffix: text) -> i64:
+    val name = canonical(module, suffix)
+    for function in module.map.functions:
+        if function.name == name: return function.local_fn_id as i64
+    0
+
+fn word_at(address: i64, width: i64) -> i64:
+    val word = (rt_ptr_read_i32(address, 0) as i64) & 4294967295
+    if width == 2: word & 65535 else: word
+
+# One letter per site in map order: N = ON word, B = OFF word, ? = neither.
+fn sled_words(module: XrayNativeLoadedModuleV1) -> text:
+    var out = ""
+    for row in module.map.sites:
+        val word = word_at(module.text_address + (row.text_offset as i64), row.align)
+        out = out + (if word == row.on_word: "N" else: (if word == row.off_word: "B" else: "?"))
+    out
+
+fn new_arena(generation: u64) -> i64:
+    val bytes = trace_native_channel_bytes_v1(CAPACITY)
+    val arena = rt_alloc(bytes + 8)
+    val aligned = arena + ((8 - (arena % 8)) % 8)
+    if trace_native_channel_initialize_v1(aligned, bytes, CAPACITY, generation, 1) != TRACE_NATIVE_CHANNEL_OK_V1:
+        return 0
+    aligned
+
+# Gate word bit 1 = admission closed (observer_native_channel_v1 layout).
+fn gate_closed(arena: i64) -> bool:
+    (rt_ptr_read_i64(arena, 0) & 2) != 0
+
+# Drain the channel and decode every 96-byte record with the V1 codec.
+fn drain(arena: i64) -> [TraceEventV1]:
+    val out_buf = rt_alloc(96 + 8)
+    val output = out_buf + ((8 - (out_buf % 8)) % 8)
+    var events: [TraceEventV1] = []
+    while trace_native_channel_poll_into_v1(arena, output, 96) == TRACE_NATIVE_CHANNEL_OK_V1:
+        var bytes: [u8] = []
+        for offset in 0..96:
+            bytes.push((rt_ptr_read_u8(output, offset) & 255) as u8)
+        match trace_event_decode_v1(bytes):
+            case Ok(event): events.push(event)
+            case Err(_): return []
+    events
+
+fn count_kind(events: [TraceEventV1], kind: TraceEventKindV1) -> i64:
+    var count = 0
+    for event in events:
+        if event.kind == kind: count = count + 1
+    count
+
+# First-appearance order, comma-joined (no spaces: one transcript token).
+fn functions_seen(events: [TraceEventV1]) -> text:
+    var seen: [i64] = []
+    var out = ""
+    for event in events:
+        val id = event.function_id as i64
+        if not seen.contains(id):
+            seen.push(id)
+            out = out + (if out == "": "{id}" else: ",{id}")
+    out
+
+fn stamped(events: [TraceEventV1]) -> i64:
+    var count = 0
+    for event in events:
+        if event.timestamp != 0u64: count = count + 1
+    count
+
+fn same_generation(events: [TraceEventV1], generation: u64) -> bool:
+    for event in events:
+        if event.generation != generation: return false
+    true
+
+fn call_all(entries: [i64], args: [i64]) -> text:
+    var out = ""
+    for entry in entries:
+        for arg in args:
+            out = out + "{rt_call_ptr_1(entry, arg)},"
+    out
+
+fn profile_row(profile: TraceProfileV1, id: i64) -> text:
+    match trace_profile_function_v1(profile, id as u32):
+        case Some(row): "{row.calls}:{row.inclusive_ns}:{row.exclusive_ns}:{row.max_depth}"
+        case None: "none"
+
+class SpyRun:
+    module: XrayNativeLoadedModuleV1
+    leaf: XrayNativeSledLeafV1
+    dl: XrayNativeDlModuleV1
+    adapter: XrayLlvmAdapterV1
+    entries: [i64]
+    args: [i64]
+    baseline: text
+
+impl SpyRun:
+    # aspect params -> config + selection -> prepare. Err text on refusal.
+    me prepare(label: text, pointcuts: [text]) -> Result<(TraceConfigV1, TracePreparedV1), text>:
+        val params = aspect_params(self.module.manifest.abi_profile, canonical_list(self.module, pointcuts))
+        val config = match trace_aspect_config_v1(params):
+            case Ok(Some(found)): found
+            case _: return Err("{label}: aspect params carry no valid observer config")
+        val names = match trace_aspect_pointcuts_v1(params):
+            case Ok(found): found
+            case Err(_): return Err("{label}: malformed pointcuts")
+        val selection = match xray_native_selection_v1(self.module.map, names, 1, 1):
+            case Ok(found): found
+            case Err(failure): return Err("{label}: selection rejected: {trace_failure_code_v1(failure)}")
+        var bound = XrayNativeBoundLeafV1(leaf: self.leaf, port: SosixCodePatchAdapterV1(), dispatch: self.dl)
+        match self.adapter.prepare(bound, config, selection):
+            case Ok(prepared): Ok((config, prepared))
+            case Err(failure): Err("{label}: prepare rejected: {trace_failure_code_v1(failure)}")
+
+    # One enable -> calls -> drain -> disable -> calls -> drain cycle on the
+    # real SOSIX port. Returns the drained events of the enabled window.
+    me cycle(label: text, pointcuts: [text]) -> [TraceEventV1]?:
+        val (config, prepared) = match self.prepare(label, pointcuts):
+            case Ok(found): found
+            case Err(message):
+                fail(message)
+                return None
+        val arena = new_arena(prepared.incarnation)
+        if arena == 0:
+            fail("{label}: channel init failed")
+            return None
+        var map: AdaptiveMap<i64, i64> = AdaptiveMap.with_profile(
+            AdaptiveSetProfile(linear_size_limit: 8, lookup_promotion_count: 1000, allow_hash: false))
+        map.put(1, 10)
+        map.put(2, 20)
+        map.set_profiling(data_observation_profiling_while_v1(Some(config), self.adapter.state_code() == XRAY_LLVM_STATE_ACTIVE_V1))
+        val before_on = map.profiling_enabled()
+        map.get(1)
+        val lookups_before = map.observed_lookups
+        var bound = XrayNativeBoundLeafV1(leaf: self.leaf, port: SosixCodePatchAdapterV1(), dispatch: self.dl)
+        val started = match self.adapter.start(bound, prepared, arena):
+            case Ok(found): found
+            case Err(failure):
+                fail("{label}: start rejected: {trace_failure_code_v1(failure)}")
+                return None
+        map.set_profiling(data_observation_profiling_while_v1(Some(config), self.adapter.state_code() == XRAY_LLVM_STATE_ACTIVE_V1))
+        val during_on = map.profiling_enabled()
+        map.get(1)
+        map.get(9)
+        val lookups_during = map.observed_lookups
+        print "SPY {label} generation={started.generation} words_on={sled_words(self.module)}"
+        val traced_results = call_all(self.entries, self.args)
+        val events = drain(arena)
+        match self.adapter.request_stop(bound, started):
+            case Ok(_): ()
+            case Err(failure):
+                fail("{label}: request_stop rejected: {trace_failure_code_v1(failure)}")
+                return None
+        map.set_profiling(data_observation_profiling_while_v1(Some(config), self.adapter.state_code() == XRAY_LLVM_STATE_ACTIVE_V1))
+        val after_on = map.profiling_enabled()
+        map.get(2)
+        val lookups_after = map.observed_lookups
+        val words_off = sled_words(self.module)
+        val after = call_all(self.entries, self.args)
+        val late = drain(arena)
+        print "SPY {label} entries={count_kind(events, TraceEventKindV1.Entry)} exits={count_kind(events, TraceEventKindV1.Exit)} events={events.len()} functions={functions_seen(events)} stamped={stamped(events)} same_generation={same_generation(events, started.generation)}"
+        print "SPY {label} words_off={words_off} records_after_stop={late.len()} gate_closed={gate_closed(arena)} lost={trace_native_channel_lost_v1(arena)}"
+        print "SPY {label} results_on={traced_results} results_off={after} baseline={self.baseline}"
+        print "SPY {label} container before={before_on} during={during_on} after={after_on} lookups={lookups_before},{lookups_during},{lookups_after}"
+        if traced_results != self.baseline or after != self.baseline:
+            fail("{label}: traced results differ from baseline")
+            return None
+        Some(events)
+
+    # Inject a fault at the Nth `begin`: start must fail, roll every sled back,
+    # close the channel's admission and return the controller to Idle.
+    me rollback(label: text, pointcuts: [text], fail_begin_at: i64) -> bool:
+        val (_, prepared) = match self.prepare(label, pointcuts):
+            case Ok(found): found
+            case Err(message):
+                fail(message)
+                return false
+        val arena = new_arena(prepared.incarnation)
+        if arena == 0:
+            fail("{label}: channel init failed")
+            return false
+        val port = FaultingPatchPort(inner: SosixCodePatchAdapterV1(), fail_begin_at: fail_begin_at, begins: 0)
+        var bound = XrayNativeBoundLeafV1(leaf: self.leaf, port: port, dispatch: self.dl)
+        val status = match self.adapter.start(bound, prepared, arena):
+            case Ok(_): "started"
+            case Err(failure): "{trace_failure_code_v1(failure)}"
+        val after = call_all(self.entries, self.args)
+        val late = drain(arena)
+        print "SPY {label} start={status} state={self.adapter.state_code()} words={sled_words(self.module)} gate_closed={gate_closed(arena)} records={late.len()} patched={self.adapter.patched_ids().len()}"
+        if after != self.baseline:
+            fail("{label}: results differ from baseline after rollback")
+            return false
+        true
+
+fn main():
+    val lib = env("XRAY_E2E_LIB")
+    if lib == "":
+        return fail("XRAY_E2E_LIB not set")
+    val dl = match XrayNativeDlModuleV1.open(lib):
+        case Ok(found): found
+        case Err(failure): return fail("dlopen/runtime symbols: {trace_failure_code_v1(failure)}")
+    val module = match xray_native_locate_module_v1(lib, 1, PAGE):
+        case Ok(found): found
+        case Err(failure): return fail("locate .simple_xray_map: {trace_failure_code_v1(failure)}")
+    val leaf = match XrayNativeSledLeafV1.create(module.manifest, module.image, module.image_base, PAGE):
+        case Ok(found): found
+        case Err(failure): return fail("leaf admission: {trace_failure_code_v1(failure)}")
+    var registered = dl
+    val slot = registered.register(module)
+    if slot <= 0: return fail("resident runtime rejected the map")
+    var names: [text] = []
+    for function in module.map.functions: names.push(function.name)
+    print "SPY dynload slot={slot} functions={names} sites={module.map.sites.len()} words={sled_words(module)} ids=add1:{function_id(module, "add1")},scaled:{function_id(module, "scaled")},traced:{function_id(module, "traced")}"
+    var entries: [i64] = []
+    for suffix in ["traced", "scaled"]:
+        val name = canonical(module, suffix)
+        if name == "": return fail("no unique map function ending in .{suffix}")
+        val entry = registered.symbol(name)
+        if entry == 0: return fail("no symbol {name}")
+        entries.push(entry)
+    val args: [i64] = [0, 9, -5]
+    val baseline = call_all(entries, args)
+    print "SPY baseline={baseline}"
+    var run = SpyRun(module: module, leaf: leaf, dl: registered,
+        adapter: XrayLlvmAdapterV1.create_for_backend(1, TraceBackendV1.Simple),
+        entries: entries, args: args, baseline: baseline)
+    # log: traced only
+    if run.cycle("log", ["traced"]).is_none(): return
+    # profile: traced + add1 (nested), folded from the same raw edges
+    val profiled = match run.cycle("profile", ["traced", "add1"]):
+        case Some(found): found
+        case None: return
+    val profile = trace_profile_fold_v1(profiled)
+    val traced_id = function_id(module, "traced")
+    val add1_id = function_id(module, "add1")
+    print "SPY fold events={profile.events} unmatched={profile.unmatched_exits} open={profile.open_entries} traced={profile_row(profile, traced_id)} add1={profile_row(profile, add1_id)}"
+    match trace_profile_function_v1(profile, traced_id as u32):
+        case Some(traced):
+            match trace_profile_function_v1(profile, add1_id as u32):
+                case Some(add1):
+                    print "SPY profile exclusive_identity={traced.exclusive_ns + add1.inclusive_ns == traced.inclusive_ns} add1_depth={add1.max_depth}"
+                case None: return fail("profile: add1 has no row")
+        case None: return fail("profile: traced has no row")
+    # reenable: a third generation, scaled only
+    if run.cycle("reenable", ["scaled"]).is_none(): return
+    # rollback: the 2nd page switch fails mid-start (traced + scaled = 5 sites)
+    if not run.rollback("rollback", ["traced", "scaled"], 2): return
+    # recover: the next generation starts on the real port
+    if run.cycle("recover", ["traced"]).is_none(): return
+    print "SPY-HOST-OK"
+

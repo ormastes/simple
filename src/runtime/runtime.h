@@ -1293,6 +1293,7 @@ char*    spl_shell_output(const char* cmd);  /* capture stdout */
 /* Existing Windows PTY/Job registry is confined to one pinned native thread.
  * A successful guard grants no process launch or cross-thread transfer. */
 int64_t   rt_windows_pty_owner_thread_guard_v1(void);
+int64_t   rt_windows_pipe_file_mode_v1(int64_t handle, int64_t storage, int64_t mode_out, int32_t operation);
 int64_t   rt_process_run(const char* cmd, uint64_t cmd_len, SplArray* args);
 int64_t   rt_process_run_inherit(const char* cmd, uint64_t cmd_len, SplArray* args);
 int64_t   rt_process_run_inherit_value(int64_t cmd, SplArray* args);

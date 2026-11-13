@@ -42,6 +42,37 @@ describe "private fn import visibility (legal forms)":
         expect(rc).to_equal(0)
         expect(out.contains("9")).to_equal(true)
 
+describe "test-file importers (owner decision 2026-11-13: tests may import private items)":
+    # Same definition of a test file as check_private_call_visibility's
+    # is_test_caller: a path that starts with `test/` or has a `/test/` component.
+    it "lets a file under test/ import a private fn from another directory":
+        # Module paths resolve from the entry's directory, so the provider sits
+        # in a sub-directory of it: a different directory, as the rule requires.
+        val root = fixture_root("testimp")
+        val _t = mkdir_p(root + "/test/sub")
+        val _a = write_file(root + "/test/sub/lib_mod.spl", "fn secret_helper() -> i64:\n    42\n")
+        val _m = write_file(root + "/test/main_spec.spl", "use sub.lib_mod.{{secret_helper}}\nprint secret_helper()\n")
+        val (out, err, rc) = process_run_timeout(binary(), [root + "/test/main_spec.spl"], 300000)
+        expect(rc).to_equal(0)
+        expect(out.contains("42")).to_equal(true)
+        expect((out + err).contains("is not visible")).to_equal(false)
+    it "still rejects a non-test importer whose directory merely contains `test`":
+        val root = fixture_root("contest")
+        val _t = mkdir_p(root + "/contest/sub")
+        val _a = write_file(root + "/contest/sub/lib_mod.spl", "fn secret_helper() -> i64:\n    42\n")
+        val _m = write_file(root + "/contest/main.spl", "use sub.lib_mod.{{secret_helper}}\nprint secret_helper()\n")
+        # Asserts the diagnostic, not rc: the seed's JIT->interpreter fallback
+        # currently runs the module anyway after the JIT reports the error
+        # (pre-existing, see the bug doc's 2026-11-13 test-access section).
+        val (out, err, rc) = process_run_timeout(binary(), [root + "/contest/main.spl"], 300000)
+        expect((out + err).contains("private fn `secret_helper`")).to_equal(true)
+        expect((out + err).contains("is not visible")).to_equal(true)
+    it "still rejects a product-code importer outside test/":
+        val root = fixture_root("srcimp")
+        val _a = write_file(root + "/app/sub/lib_mod.spl", "fn secret_helper() -> i64:\n    42\n")
+        val (out, err, rc) = run_main(root, "use app.sub.lib_mod.{{secret_helper}}\nprint secret_helper()\n")
+        expect((out + err).contains("is not visible")).to_equal(true)
+
 describe "baseline ratchet":
     it "a baselined private import only warns":
         val root = fixture_root("baselined")

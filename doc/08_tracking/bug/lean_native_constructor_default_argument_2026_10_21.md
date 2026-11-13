@@ -96,3 +96,27 @@ Tests: `imported_constructor_default_lowers_in_caller` and
 `imported_default_metadata_tests.rs` (14/14 green). Status
 fix-implemented-verification-pending: native verification of the original
 omitted `lean_plan_type_declarations` form against a rebuilt producer remains.
+
+## Re-check (2026-11-13) — the seed fix does not fire on the `run`/JIT path
+
+Seed `bin/simple.exe` is the pinned seed from `163943c5a77`, which is a descendant
+of the fix `6bbc33cf2c4`. It still rejects both forms with the same diagnostic.
+The repro is a private copy of `policy.spl` with `pub` added, since the committed
+fixture's `policy_signature` is private and now fails visibility first:
+
+- `use policy.{Limits, policy_signature}`, then `policy_signature()`, run with `SIMPLE_JIT_STRICT=1 run`
+  -> `call to policy_signature omits argument 1 whose default is not a call-site constant`.
+- `use policy.{policy_signature}` (type not imported) -> same diagnostic.
+
+So the gate `is_fillable_default` (`calls.rs:594`) is not admitting even the
+imported case on this path. Either `own_imported_names` or `imported_type_owners` /
+`imported_fn_owners` (`ctor_type_matches_callee`, `calls.rs:582`) is unpopulated
+for the JIT module lowering, or `resolve_constructor_type` misses an imported
+struct. The not-imported form is out of scope by design.
+Repairing this means changing the Rust seed and running its unit tests with cargo,
+which was not possible on this host (no cargo builds allowed). The pure-Simple MIR path
+(`switch_operators_calls.spl` `pad_trailing_default_args`) lowers any default
+expression via `lower_expr`. Its cross-module behaviour needs a native run
+(`native-build` of the fixture on a rebuilt producer). The `lean_backend.spl:804`
+workaround must stay. Separately, the committed `omitted.spl`/`policy.spl` fixture needs
+`pub` on `Limits` and `policy_signature` to pass current visibility rules.

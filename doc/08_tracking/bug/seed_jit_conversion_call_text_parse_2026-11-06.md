@@ -94,3 +94,23 @@ with the bug's values (`got 54 48 57`, `got 52 51`, `got -5 42 0 45`):
 
 Follow-up: the post-fix run and removing the tag wait for the next seed deploy.
 Un-tag the spec on the first seed deploy that contains `173e92fe8e3`.
+
+## Fix (2026-11-13) — `int(text)` regressed to the code point again; now lowered to the lenient parse
+
+`bdcbec5bd33` (2026-11-09) gave `rt_string_to_int` a single-character code-point
+fallback so `ch.to_i32()` checksums match the interpreter. The `int(text)` call
+form had been lowered to `text.to_int()` (this record's 2026-11-06 fix), so it
+inherited that fallback: `int("-")` was 45 and `int("x")` 120, failing
+`test/01_unit/language/jit_int_call_single_char_text_parse_spec.spl` case 3 and
+the Rust repro's `int("x") != 0` check.
+
+`hir/lower/expr/calls.rs` now lowers an integer-target conversion call of text to
+`BuiltinCall rt_string_to_int_lenient` (raw i64, then the narrowing Cast), the
+total leading-digit parse the codegen `int`/`i64` builtin arm already uses. It
+exists in all three runtimes (Rust `value/collections.rs`, C `runtime_native.c`,
+pure-Simple `simple_core/core_string.spl`; the C and Simple twins never had the
+code-point fallback, so they needed no change). `.to_int()` / `.to_i32()` keep
+the code-point fallback, so no char-code caller changes. `f64(text)` is unchanged.
+Side effect, matching the interpreter's `parse_int_lenient`: `int("12x")` is now 12
+(was 0 under the strict `to_int`). Needs a seed rebuild to verify (no cargo build
+on this host): `cargo test --test conversion_call_text_parse_jit`, then the spec.

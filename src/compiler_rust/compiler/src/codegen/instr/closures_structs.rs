@@ -2018,6 +2018,18 @@ fn try_compile_builtin_method_call<M: Module>(
             return Ok(None);
         }
     }
+    // Integer max/min/clamp/abs on a QUALIFIED integer receiver (`i64.max`,
+    // `u32.clamp`, ...). A bare name means an erased tagged receiver — skip.
+    if let Some((qual, m @ ("max" | "min" | "clamp" | "abs"))) = method.rsplit_once('.') {
+        if matches!(qual, "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64") {
+            let arg_vals: Vec<_> = args.iter().map(|a| get_vreg_or_default(ctx, builder, a)).collect();
+            if let Some(v) =
+                super::methods::emit_int_min_max(builder, m, receiver_val, &arg_vals, qual.starts_with('u'))
+            {
+                return Ok(Some(v));
+            }
+        }
+    }
     // Extract plain method name from qualified name (e.g., "text.len" -> "len")
     let method = method.rsplit('.').next().unwrap_or(method);
 

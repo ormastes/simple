@@ -2000,6 +2000,17 @@ impl<'a> MirLowerer<'a> {
             }
         }
 
+        // Extern declarations are not `hir.functions`, so their parameter
+        // types would be invisible to the call-coercion pass below (raw
+        // scalar -> Any boxing skipped, raw words crossing the extern ABI).
+        // Merge them in, preferring a real function's signature on the rare
+        // name collision. See `HirModule::extern_param_types`.
+        for (name, params) in &hir.extern_param_types {
+            self.function_param_types
+                .entry(name.clone())
+                .or_insert_with(|| params.clone());
+        }
+
         self.local_trait_impls.clear();
         for hir_impl in &hir.impls {
             if let Some(trait_name) = &hir_impl.trait_name {

@@ -12,10 +12,15 @@
 # diagnostics from a surface built on the skeleton point at the real file.
 # Equality rule: parse(skeleton) and parse(source) must have the same
 # module_surface_canonical_digest_v1 (spec: module_surface_skeleton_v1_spec).
+#
+# Units: every scanner cursor is a UTF-8 BYTE offset, because `substring`
+# indexes bytes. Bound it with `byte_len()`, never `len()` (code points): a
+# `len()` bound stopped short of a closing quote on any multibyte line and
+# blanked later declarations (module_surface_skeleton_multibyte_spec).
 
 fn _skel_indent_v1(line: text) -> i64:
     var i = 0
-    while i < line.len() and (line.substring(i, i + 1) == " " or line.substring(i, i + 1) == "\t"):
+    while i < line.byte_len() and (line.substring(i, i + 1) == " " or line.substring(i, i + 1) == "\t"):
         i = i + 1
     i
 
@@ -26,14 +31,14 @@ fn _skel_strip_modifiers_v1(stripped: text) -> text:
         changed = false
         for prefix in ["pub(package) ", "pub(crate) ", "pub ", "static ", "async ", "kernel ", "extern "]:
             if s.starts_with(prefix):
-                s = s.substring(prefix.len())
+                s = s.substring(prefix.byte_len())
                 changed = true
     s
 
 fn _skel_paren_delta_v1(line: text) -> i64:
     var depth = 0
     var i = 0
-    while i < line.len():
+    while i < line.byte_len():
         val c = line.substring(i, i + 1)
         if c == "(" or c == "[" or c == "{": depth = depth + 1
         elif c == ")" or c == "]" or c == "}": depth = depth - 1
@@ -76,27 +81,27 @@ fn _skel_ident_char_v1(c: text) -> bool:
 
 fn _skel_expr_has_word_v1(line: text, start: i64, end: i64, word: text) -> bool:
     var i = start
-    while i + word.len() <= end:
-        if line.substring(i, i + word.len()) == word:
+    while i + word.byte_len() <= end:
+        if line.substring(i, i + word.byte_len()) == word:
             var left_ok = i == start
             if not left_ok:
                 left_ok = not _skel_ident_char_v1(line.substring(i - 1, i))
-            var right_ok = i + word.len() == end
+            var right_ok = i + word.byte_len() == end
             if not right_ok:
-                right_ok = not _skel_ident_char_v1(line.substring(i + word.len(), i + word.len() + 1))
+                right_ok = not _skel_ident_char_v1(line.substring(i + word.byte_len(), i + word.byte_len() + 1))
             if left_ok and right_ok:
                 return true
         i = i + 1
     false
 
 fn _skel_expr_ends_with_word_v1(line: text, start: i64, end: i64, word: text) -> bool:
-    if end - start < word.len():
+    if end - start < word.byte_len():
         return false
-    if line.substring(end - word.len(), end) != word:
+    if line.substring(end - word.byte_len(), end) != word:
         return false
-    var left_ok = end - word.len() <= start
+    var left_ok = end - word.byte_len() <= start
     if not left_ok:
-        left_ok = not _skel_ident_char_v1(line.substring(end - word.len() - 1, end - word.len()))
+        left_ok = not _skel_ident_char_v1(line.substring(end - word.byte_len() - 1, end - word.byte_len()))
     left_ok
 
 # Match lexer_struct.fs_nested_string_may_open for the small question the
@@ -138,7 +143,7 @@ fn _skel_interpolation_end_v1(line: text, start: i64) -> i64:
     var nested_quote = ""
     var escaped = false
     var i = start + 1
-    while i < line.len():
+    while i < line.byte_len():
         val c = line.substring(i, i + 1)
         if nested_quote != "":
             if escaped:
@@ -186,9 +191,9 @@ fn _skel_string_continuations_v1(lines: [text]) -> [bool]:
         out.push(triple != "" or continued_quote != "")
         var continued_next_line = false
         var i = 0
-        while i < line.len():
+        while i < line.byte_len():
             if triple != "":
-                if i + 3 <= line.len() and line.substring(i, i + 3) == triple:
+                if i + 3 <= line.byte_len() and line.substring(i, i + 3) == triple:
                     triple = ""
                     i = i + 3
                 else:
@@ -196,15 +201,15 @@ fn _skel_string_continuations_v1(lines: [text]) -> [bool]:
             elif continued_quote != "":
                 val c = line.substring(i, i + 1)
                 if c == "\\":
-                    if i + 1 == line.len():
+                    if i + 1 == line.byte_len():
                         continued_next_line = true
-                        i = line.len()
+                        i = line.byte_len()
                     else:
                         i = i + 2
                 elif c == continued_quote:
                     continued_quote = ""
                     i = i + 1
-                elif (continued_quote == "\"" or continued_quote == "'") and c == "{" and i + 1 < line.len() and
+                elif (continued_quote == "\"" or continued_quote == "'") and c == "{" and i + 1 < line.byte_len() and
                         line.substring(i + 1, i + 2) != "\"" and
                         line.substring(i + 1, i + 2) != "'":
                     val close_brace = _skel_interpolation_end_v1(line, i)
@@ -217,29 +222,29 @@ fn _skel_string_continuations_v1(lines: [text]) -> [bool]:
             else:
                 val c = line.substring(i, i + 1)
                 if c == "#":
-                    i = line.len()
+                    i = line.byte_len()
                 elif c == "\"" or c == "'":
                     val delim = c + c + c
-                    if i + 3 <= line.len() and line.substring(i, i + 3) == delim:
+                    if i + 3 <= line.byte_len() and line.substring(i, i + 3) == delim:
                         triple = delim
                         i = i + 3
                     else:
                         val raw = c == "\"" and _skel_raw_string_prefix_v1(line, i)
                         var closed = false
                         i = i + 1
-                        while i < line.len() and not closed:
+                        while i < line.byte_len() and not closed:
                             val body_char = line.substring(i, i + 1)
                             if body_char == c:
                                 closed = true
                                 i = i + 1
                             elif body_char == "\\" and not raw:
-                                if i + 1 == line.len():
+                                if i + 1 == line.byte_len():
                                     continued_quote = c
                                     continued_next_line = true
-                                    i = line.len()
+                                    i = line.byte_len()
                                 else:
                                     i = i + 2
-                            elif body_char == "{" and i + 1 < line.len() and
+                            elif body_char == "{" and i + 1 < line.byte_len() and
                                     line.substring(i + 1, i + 2) != "\"" and
                                     line.substring(i + 1, i + 2) != "'" and not raw:
                                 val close_brace = _skel_interpolation_end_v1(line, i)

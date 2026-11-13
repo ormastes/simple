@@ -45,6 +45,7 @@ const volatile int rt_alloc_observer_native_owner_v1 = 1;
 #include "runtime_utf8_lossy_private.h"
 #include "platform/runtime_windows_private_atomic.h"
 #include "platform/runtime_windows_pty_owner_thread_private.h"
+#include "platform/runtime_windows_pipe_file_mode_private.h"
 #include "simple_gui_html_provider_abi_v1.h"
 #include "simple_gui_event_provider_abi_v1.h"
 
@@ -13281,9 +13282,13 @@ static int64_t rt_string_index_checked(int64_t string, int64_t index) {
     RtCoreString* s = rt_core_as_string(string);
     const uint8_t* p = s ? (const uint8_t*)s->data : NULL;
     uint64_t n = s ? s->len : 0;
-    int64_t count = 0;
-    for (uint64_t i = 0; i < n; i++) if ((p[i] & 0xC0) != 0x80) count++;
+    /* ASCII fast path (memoized per string): byte == code point, so `s[i]`
+     * stays one byte copy -- the cost rt_string_char_at had. Otherwise the
+     * cached code-point count replaces the old full counting pass. */
+    int ascii = s ? spl_core_string_is_ascii(s) : 1;
+    int64_t count = s ? (ascii ? (int64_t)n : spl_core_string_cp_len(s)) : 0;
     int64_t want = index < 0 ? count + index : index;
+    if (ascii && want >= 0 && want < count) return rt_string_new(p + want, 1);
     if (want >= 0 && want < count) {
         int64_t cp = -1;
         for (uint64_t i = 0; i < n; i++) {

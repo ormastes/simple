@@ -3861,6 +3861,14 @@ fn string_index_checked_matches_interpreter_policy() {
     assert!(string_index_checked(s, -4).is_none());
     let empty = rt_string_new("".as_ptr(), 0);
     assert!(string_index_checked(empty, 0).is_none());
+    // ASCII fast path (memoized flag): same answers as the code-point walk.
+    let ascii = rt_string_new("abc".as_ptr(), 3);
+    assert_eq!(text_of(string_index_checked(ascii, 0).unwrap()), "a");
+    assert_eq!(text_of(string_index_checked(ascii, 2).unwrap()), "c");
+    assert_eq!(text_of(string_index_checked(ascii, -1).unwrap()), "c");
+    assert_eq!(text_of(string_index_checked(ascii, -3).unwrap()), "a");
+    assert!(string_index_checked(ascii, 3).is_none());
+    assert!(string_index_checked(ascii, -4).is_none());
 }
 
 // ADR-005: `to_digit` on a one-char text is Some(digit) or None, never 0.

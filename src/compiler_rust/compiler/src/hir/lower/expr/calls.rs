@@ -936,19 +936,36 @@ impl Lowerer {
                             | TypeId::U64
                     );
                     if is_float || is_int {
-                        let (method, parsed_ty) = if is_float {
-                            ("to_f64", TypeId::F64)
+                        // The int target must NOT reuse `text.to_int()`: since
+                        // bdcbec5bd33 `rt_string_to_int` answers a failed parse
+                        // of a ONE-character text with its code point (the
+                        // `ch.to_i32()` checksum contract), so `int("-")` was
+                        // 45 and `int("x")` 120. `int(text)` is the total
+                        // leading-digit parse (0 on failure), which is
+                        // `rt_string_to_int_lenient` — the same entry the
+                        // codegen `int`/`i64` builtin arm calls, defined in the
+                        // Rust runtime, the C runtime and simple_core. It returns
+                        // a raw i64, like `rt_string_to_int`.
+                        // doc/08_tracking/bug/seed_jit_conversion_call_text_parse_2026-11-06.md
+                        let parsed_ty = if is_float { TypeId::F64 } else { TypeId::I64 };
+                        let parsed = if is_float {
+                            HirExpr {
+                                kind: HirExprKind::MethodCall {
+                                    receiver: Box::new(inner),
+                                    method: "to_f64".to_string(),
+                                    args: Vec::new(),
+                                    dispatch: DispatchMode::Static,
+                                },
+                                ty: parsed_ty,
+                            }
                         } else {
-                            ("to_int", TypeId::I64)
-                        };
-                        let parsed = HirExpr {
-                            kind: HirExprKind::MethodCall {
-                                receiver: Box::new(inner),
-                                method: method.to_string(),
-                                args: Vec::new(),
-                                dispatch: DispatchMode::Static,
-                            },
-                            ty: parsed_ty,
+                            HirExpr {
+                                kind: HirExprKind::BuiltinCall {
+                                    name: "rt_string_to_int_lenient".to_string(),
+                                    args: vec![inner],
+                                },
+                                ty: parsed_ty,
+                            }
                         };
                         if target == parsed_ty {
                             return Ok(Some(parsed));

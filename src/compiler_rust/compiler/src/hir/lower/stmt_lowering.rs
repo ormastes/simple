@@ -1877,6 +1877,14 @@ impl Lowerer {
                 self.globals.insert(e.name.clone(), ret_ty);
                 self.method_return_types.insert(e.name.clone(), ret_ty);
                 self.extern_fn_names.insert(e.name.clone());
+                // Same param-type recording as the module-level pass — see
+                // `HirModule::extern_param_types`.
+                let param_types = e
+                    .params
+                    .iter()
+                    .map(|p| self.resolve_type_opt(&p.ty))
+                    .collect::<Result<Vec<_>, _>>()?;
+                self.module.extern_param_types.insert(e.name.clone(), param_types);
                 Ok(vec![])
             }
 

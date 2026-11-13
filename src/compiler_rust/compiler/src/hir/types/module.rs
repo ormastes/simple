@@ -257,6 +257,16 @@ pub struct HirModule {
     /// These are globals that hold function pointers and need special handling
     /// in the codegen to initialize with the function's import address.
     pub extern_fn_names: HashSet<String>,
+    /// Declared parameter types of extern function declarations, keyed by
+    /// extern name. Externs are not `HirFunction`s, so without this table the
+    /// MIR call lowering cannot see their parameter types and skips argument
+    /// coercion: a raw i64 literal at an `Any` parameter reached the runtime
+    /// untagged, where its low bits were misread as a value tag (rejected,
+    /// re-floated, or re-specced). Registering the declared types lets the
+    /// normal param-slot coercion box raw scalars exactly as it does for
+    /// ordinary functions, matching the interpreter, which always hands
+    /// externs tagged `Value`s.
+    pub extern_param_types: HashMap<String, Vec<TypeId>>,
     /// Function names imported via `use` statements.
     /// These should NOT become global variables in MIR — they are only used
     /// for type resolution during HIR lowering.
@@ -321,6 +331,7 @@ impl HirModule {
             domain_blocks: Vec::new(),
             impls: Vec::new(),
             extern_fn_names: HashSet::new(),
+            extern_param_types: HashMap::new(),
             imported_function_names: HashSet::new(),
             type_bindings_log: Vec::new(),
             type_value_kinds: HashMap::new(),

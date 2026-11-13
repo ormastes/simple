@@ -652,14 +652,106 @@ impl RuntimeValue {
     /// Prepare one input for an isolated OS thread.
     ///
     /// Inline values are copied. Explicit synchronized channel handles may be
-    /// shared. Every other heap graph fails closed until a real typed graph
-    /// clone, frozen handle, or owned-region move is available. `Option`
-    /// preserves the distinction between a valid NIL input and rejection.
+    /// shared. Immutable heap leaves (strings, boxed numeric scalars) and
+    /// acyclic object/enum graphs are deep-copied so the child owns an
+    /// independent copy — the parent may free or mutate its original without
+    /// affecting the child. Mutable containers (arrays, dicts, ...) and other
+    /// heap graphs still fail closed until a real typed graph clone, frozen
+    /// handle, or owned-region move is available. `Option` preserves the
+    /// distinction between a valid NIL input and rejection.
     pub fn clone_for_isolated_thread(self) -> Option<Self> {
+        self.clone_for_isolated_thread_depth(0)
+    }
+
+    /// Depth-bounded worker for [`Self::clone_for_isolated_thread`]: object
+    /// graphs may contain reference cycles, and an unbounded recursive copy
+    /// would overflow the stack. The bound is generous for real configs and
+    /// far below any stack danger; exceeding it fails the spawn closed.
+    fn clone_for_isolated_thread_depth(self, depth: u32) -> Option<Self> {
+        const MAX_ISOLATED_CLONE_DEPTH: u32 = 64;
+        if depth > MAX_ISOLATED_CLONE_DEPTH {
+            return None;
+        }
         match self.tag() {
             tags::TAG_INT | tags::TAG_FLOAT | tags::TAG_SPECIAL => Some(self),
             tags::TAG_HEAP => match super::heap::registered_heap_type(self) {
                 Some(HeapObjectType::Channel) => Some(self),
+                // Immutable leaves: copy the bytes/value into a fresh heap
+                // object so the child's copy outlives the parent's original.
+                Some(HeapObjectType::String) => {
+                    super::heap::with_typed_ptr::<super::collections::RuntimeString, _>(
+                        self,
+                        HeapObjectType::String,
+                        |ptr| unsafe {
+                            let bytes = (*ptr).as_bytes();
+                            super::collections::rt_string_new(bytes.as_ptr(), bytes.len() as u64)
+                        },
+                    )
+                }
+                Some(HeapObjectType::Float) => super::heap::with_typed_ptr::<super::heap::HeapFloat, _>(
+                    self,
+                    HeapObjectType::Float,
+                    |ptr| unsafe { RuntimeValue::from_float((*ptr).value) },
+                ),
+                Some(HeapObjectType::UInt) => super::heap::with_typed_ptr::<super::heap::HeapUInt, _>(
+                    self,
+                    HeapObjectType::UInt,
+                    |ptr| unsafe { RuntimeValue::from_u64((*ptr).value) },
+                ),
+                Some(HeapObjectType::Int) => super::heap::with_typed_ptr::<super::heap::HeapInt, _>(
+                    self,
+                    HeapObjectType::Int,
+                    |ptr| unsafe { RuntimeValue::from_int((*ptr).value) },
+                ),
+                // Class/struct instances: a fresh object with the same class
+                // identity and every field independently cloned. A field that
+                // cannot be cloned (mutable container, cycle past the depth
+                // bound) rejects the whole spawn, exactly like before.
+                Some(HeapObjectType::Object) => {
+                    let (class_id, field_count, fields) =
+                        super::heap::with_typed_ptr::<super::objects::RuntimeObject, _>(
+                            self,
+                            HeapObjectType::Object,
+                            |ptr| unsafe {
+                                (
+                                    (*ptr).class_id,
+                                    (*ptr).field_count,
+                                    (*ptr).fields().to_vec(),
+                                )
+                            },
+                        )?;
+                    let copy = super::objects::rt_object_new(class_id, field_count);
+                    if !copy.is_heap() {
+                        return None;
+                    }
+                    for (index, field) in fields.into_iter().enumerate() {
+                        let Some(cloned_field) = field.clone_for_isolated_thread_depth(depth + 1)
+                        else {
+                            return None;
+                        };
+                        if !super::objects::rt_object_field_set(copy, index as u32, cloned_field) {
+                            return None;
+                        }
+                    }
+                    Some(copy)
+                }
+                // Enum values: same enum identity, payload cloned recursively.
+                Some(HeapObjectType::Enum) => {
+                    let (enum_id, discriminant, payload) =
+                        super::heap::with_typed_ptr::<super::objects::RuntimeEnum, _>(
+                            self,
+                            HeapObjectType::Enum,
+                            |ptr| unsafe {
+                                ((*ptr).enum_id, (*ptr).discriminant, (*ptr).payload)
+                            },
+                        )?;
+                    let cloned_payload = payload.clone_for_isolated_thread_depth(depth + 1)?;
+                    Some(super::objects::rt_enum_new(
+                        enum_id,
+                        discriminant,
+                        cloned_payload,
+                    ))
+                }
                 _ => None,
             },
             _ => None,
