@@ -81,3 +81,43 @@ calls -- a MIR-provenance/adapter redesign, not a lane-sized change. The spec
 stays RED per this record's own instruction, now with a precise diagnosis:
 revert-reason 085f1872947 vs contract bf56b71044f on cross-module int->float
 literal arguments.
+
+## FIXED 2026-11-13 (work/compiler-seed-remainders-20261113)
+
+The lane-sized ABI-visible pin wave-2 asked for: the coercion stays at MIR
+lowering (same-module native builds still need it), and the lowering now
+records the crossing on the emitted call's signature so the adapter's
+import check can still see it after the operand types read f64.
+
+- `MirSignature.int_literal_coerced_params: [bool]` (mir_types.spl),
+  index-aligned with `declared_params`: true when the call argument at that
+  index was an unsuffixed int literal (or its negation) coerced into a
+  declared f32/f64 (or Optional float) slot.
+- The coercion predicate was split out of
+  `lower_int_literal_for_float_slot` into the shared free fns
+  `hir_unsuffixed_int_literal_value` / `hir_type_is_declared_float_slot`
+  (mir_lowering_stmts.spl) so the pin and the coercion cannot disagree
+  about which argument crossed.
+- The direct-call lowering (switch_operators_calls.spl) marks the emitted
+  `MirSignature`; `direct_call_operand_with_return_type` carries the pin
+  through its field-by-field signature rebuild (the one transport point
+  that would otherwise drop it).
+- `cl_call_abi_mismatch` (cranelift_codegen_adapter.spl) consults the pin
+  in the known-signature arm and rejects with the pinned wording:
+  `arg {index} is i64 but the callee declares f64; convert it explicitly
+  at the call site`. Same-module paths never read the pin (byte-identical
+  behavior); the LLVM lane is untouched.
+
+Evidence (seed binary, fixture run.shs, before -> after):
+- before: `int_to_f64 value=cv=1.500 rc=0` (admitted silently)
+- after:  `int_to_f64 compile-error=rc1 E-BACKEND-CRANELIFT-CALL-ABI:
+  ... arg 0 is i64 but the callee declares f64; ...`
+- after, all five case lines match the spec oracle exactly: untyped/i64/
+  int_to_f64 rejected, `match value=cv=1.500 rc=0`,
+  `match_i64 value=cv=42 rc=0`.
+
+Known gaps (documented remainders, out of scope here): the pin is recorded
+only for direct-call lowering; method-call and `exact_extern_signatures`
+int-literal float-slot crossings keep today's admit-behavior. The pin is a
+call-site provenance record, not a general MIR int->float provenance
+redesign.
