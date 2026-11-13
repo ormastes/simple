@@ -132,3 +132,10 @@ measured 2026-11-09: `10.frontend/parser_types_expr.spl` 48,
 `50.mir/_MirLoweringExpr/switch_operators_calls.spl` 2. Routing them through
 the owner is the same mechanical change as this lane's; each file should be
 added to the spec's example 3 as it is routed.
+
+## Fix (2026-11-13)
+
+`value_access_ownership_spec.spl` ran but its facade example failed: it still
+asserted `@inline\nfn compiler_value_*` and `not contains "pub fn compiler_value_"`,
+while `addc8abfc63` deliberately exported the wrappers as `pub fn`. Spec updated to
+pin `@inline\npub fn compiler_value_*`. Result 3/3 pass on the seed.
