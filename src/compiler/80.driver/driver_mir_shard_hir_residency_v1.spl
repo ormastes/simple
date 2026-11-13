@@ -1,0 +1,181 @@
+# MIR shard worker HIR residency: hold bodies only for the modules this worker
+# lowers (design: doc/05_design/compiler/perf/mir_shard_hir_residency_v1.md).
+#
+# A spawned MIR shard worker (driver_build/native_mir_shard.spl) re-runs the
+# front half, so the HIR stage loads every module from the cache and
+# hir_cache_load promotes each decoded module to the persistent heap, bodies
+# included. There is no collector: a promoted module is never freed, so the
+# only residency lever is to promote less. Ownership is decided later, inside
+# lower_to_mir's claim loop, so at load time every module is a candidate.
+#
+# Mechanism (opt-in, SIMPLE_MIR_SHARD_INTERFACE_HIR=1, default off):
+#   1. arm once per process when the predicate below admits this worker;
+#   2. the HIR stage asks hir_cache_load_parsed_v1 for an interface-only
+#      projection (hir_module_interface_only_v1, applied INSIDE the decode
+#      scope, before promotion) of every non-entry module and records the
+#      cache key it would need to get the body back;
+#   3. the claim loop reloads a claimed module in full from the cache with the
+#      recorded key and replaces the ctx.hir_modules entry; a refused reload
+#      fails that one module closed (the ICE boundary records it).
+#
+# The feed (ctx.mir_feed_modules) keeps the interface copies: MIR lowering
+# reads only declarations from `providers` (symbols, signatures and parameter
+# defaults, constants, structs/classes/enums, traits incl. default bodies,
+# impls, extern declarations). Bodies kept whole regardless: extern functions
+# (no body), generic templates and `const fn` (compile-time evaluated).
+
+use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind, SymbolId}
+use compiler.hir.hir_definitions.{HirFunction, HirBlock, HirExpr, HirExprKind}
+use compiler.common.diagnostics.span.{Span}
+
+pub const MIR_SHARD_INTERFACE_HIR_ENV_V1: text = "SIMPLE_MIR_SHARD_INTERFACE_HIR"
+
+# ===== arming predicate (pure) ==============================================
+
+# "" when this process may hold interface-only HIR for unclaimed modules;
+# otherwise the named refusal. Inputs are the raw env values so the rule is
+# testable without a process: `flag` SIMPLE_MIR_SHARD_INTERFACE_HIR,
+# `shard_spec` SIMPLE_MIR_SHARD ("<i>/<n>"), `link_ledger` SIMPLE_MIR_SHARD_LINK,
+# `export_dir` SIMPLE_MIR_SHARD_EXPORT_WRITE, `fork_workers`
+# SIMPLE_MIR_FORK_WORKERS, `file_worker_queue` SIMPLE_FILE_WORKER_HIR_QUEUE,
+# `loads_restricted` worker_hir_loads_restricted_v1().
+pub fn mir_shard_hir_residency_refusal_v1(flag: text, shard_spec: text, link_ledger: text,
+        export_dir: text, fork_workers: text, file_worker_queue: text,
+        loads_restricted: bool) -> text:
+    if flag != "1": return "flag-off"
+    if shard_spec == "": return "not-mir-shard-worker"
+    if link_ledger != "": return "link-worker"
+    if export_dir != "": return "export-writer"
+    if (fork_workers.to_i64() ?? 0) > 1: return "fork-workers"
+    if file_worker_queue != "": return "file-worker-unit"
+    if loads_restricted: return "module-scoped-unit"
+    ""
+
+# ===== interface-only projection (pure) =====================================
+
+# Functions whose body stays resident in an interface-only module.
+pub fn hir_function_keeps_body_v1(function: HirFunction) -> bool:
+    function.is_extern or function.type_params.len() > 0 or function.is_const
+
+fn hir_interface_placeholder_block_v1() -> HirBlock:
+    val span = Span(start: 0, end: 0, line: 0, col: 0, file: "", length: 0)
+    HirBlock(stmts: [], has: false,
+        value: HirExpr(kind: HirExprKind.UnitLit, has_type_: false,
+            type_: HirType(kind: HirTypeKind.Error, span: span), span: span,
+            is_uninit_marker: false),
+        span: span, unsafe_caps: [])
+
+fn hir_function_body_present_v1(function: HirFunction) -> bool:
+    function.body.stmts.len() > 0 or function.body.has
+
+# The module with every ordinary function body replaced by the placeholder
+# block; returns the projection and the number of bodies it dropped. Every
+# other field is carried by value, so declarations, parameter defaults,
+# constants, trait default bodies and AOP advices are untouched. Idempotent.
+pub fn hir_module_interface_only_v1(module: HirModule) -> (HirModule, i64):
+    var functions: Dict<SymbolId, HirFunction> = {}
+    var stripped = 0
+    for key in module.functions.keys():
+        val function: HirFunction = module.functions[key]
+        if hir_function_keeps_body_v1(function) or not hir_function_body_present_v1(function):
+            functions[key] = function
+        else:
+            var projected = function
+            projected.body = hir_interface_placeholder_block_v1()
+            functions[key] = projected
+            stripped = stripped + 1
+    var out = module
+    out.functions = functions
+    (out, stripped)
+
+# ===== residency plan (pure) ================================================
+
+# Partition of the schedule into (full, interface-only) for a worker that
+# claimed `owned`: the entry module and every claimed module hold bodies.
+pub fn mir_shard_hir_residency_plan_v1(all_modules: [text], owned: [text], entry: text) -> ([text], [text]):
+    var full: [text] = []
+    var iface_only: [text] = []
+    for name in all_modules:
+        if name == entry or owned.contains(name):
+            full.push(name)
+        else:
+            iface_only.push(name)
+    (full, iface_only)
+
+# ===== per-process registry =================================================
+
+var _res_armed: bool = false
+var _res_decided: bool = false
+var _res_kind: Dict<text, text> = {}          # source path -> "interface" | "full"
+var _res_module: Dict<text, text> = {}        # source path -> module name
+var _res_key: Dict<text, text> = {}           # source path -> HIR cache key
+var _res_binding: Dict<text, text> = {}       # source path -> parser binding
+var _res_library_mode: Dict<text, text> = {}  # source path -> library mode
+var _res_reloaded: i64 = 0
+
+# Set-once: the first decision wins so a later refusal cannot disarm a worker
+# whose modules are already interface-only. Returns the armed state.
+pub fn mir_shard_hir_residency_arm_v1(refusal: text) -> bool:
+    if not _res_decided:
+        _res_decided = true
+        _res_armed = refusal == ""
+    _res_armed
+
+pub fn mir_shard_hir_residency_armed_v1() -> bool:
+    _res_armed
+
+# Tests only: a fresh process state.
+pub fn mir_shard_hir_residency_reset_v1():
+    _res_armed = false
+    _res_decided = false
+    _res_kind = {}
+    _res_module = {}
+    _res_key = {}
+    _res_binding = {}
+    _res_library_mode = {}
+    _res_reloaded = 0
+
+# Record how one module was loaded and what a body reload needs.
+pub fn mir_shard_hir_residency_note_v1(path: text, module_name: text, key: text,
+        binding: text, library_mode: text, kind: text):
+    _res_kind[path] = kind
+    _res_module[path] = module_name
+    _res_key[path] = key
+    _res_binding[path] = binding
+    _res_library_mode[path] = library_mode
+
+# "interface", "full", or "" for a path this process never loaded.
+pub fn mir_shard_hir_residency_kind_v1(path: text) -> text:
+    if _res_kind.contains_key(path): _res_kind[path] else: ""
+
+# [key, parser binding, library mode] for a recorded path; [] otherwise.
+pub fn mir_shard_hir_residency_reload_key_v1(path: text) -> [text]:
+    if not _res_key.contains_key(path): return []
+    [_res_key[path], _res_binding[path], _res_library_mode[path]]
+
+# The claimed module's body is resident again.
+pub fn mir_shard_hir_residency_mark_full_v1(path: text):
+    if _res_kind.contains_key(path) and _res_kind[path] != "full":
+        _res_reloaded = _res_reloaded + 1
+    _res_kind[path] = "full"
+
+fn _res_modules_of_kind(kind: text) -> [text]:
+    var names: [text] = []
+    for path in _res_kind.keys():
+        if _res_kind[path] == kind and _res_module.contains_key(path):
+            names.push(_res_module[path])
+    names.sort()
+    names
+
+# Module names whose bodies this worker holds (sorted).
+pub fn mir_shard_hir_residency_held_v1() -> [text]:
+    _res_modules_of_kind("full")
+
+# Module names held interface-only (sorted).
+pub fn mir_shard_hir_residency_interface_v1() -> [text]:
+    _res_modules_of_kind("interface")
+
+pub fn mir_shard_hir_residency_counters_v1() -> text:
+    val iface_count = _res_modules_of_kind("interface").len()
+    val full_count = _res_modules_of_kind("full").len()
+    "hir_interface_only={iface_count} hir_full={full_count} hir_reloaded={_res_reloaded}"
