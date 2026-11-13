@@ -102,3 +102,37 @@ order; defining_module then points at a module whose registry row was never
 populated for this compilation, or at a non-Function/Method symbol), yielding
 MirCallOrigin.Unknown only in the self-hosted build. Fix direction depends on
 the callee name the J lane's #8703 named panic will print.
+
+## Root cause (2026-11-13 ~15:40 KST): unimported `env_get` -> HIR interpreter-builtin fallback
+
+The duplicate-extern hypothesis above is wrong. The live serial Phase 3 run
+(`simple-mp3-4-20261113`, run-21 Stage 2, source 4028c047eea) named the module:
+`codegen:compiler.driver.driver_pipeline_lowering rc=134 ... callee=env_get`.
+
+- `src/compiler/80.driver/driver_pipeline_lowering.spl:177,751,1264,1374` call
+  `env_get(...) ?? ""` with NO import of `env_get` (introduced by 3f44a21a3dd;
+  the file imports only `sosix_env_get_nullable`). Same defect in
+  `src/compiler/70.backend/backend/runtime_compiler.spl:652,1006` (e05dbf566db),
+  also in the bootstrap_main closure.
+- HIR's unresolved-name fallback admits it because `env_get` is in
+  `is_interp_builtin_fn` (`20.hir/hir_lowering/_Expressions/expression_support.spl:63,552`):
+  it defines an untyped, module-less `Function` symbol with no HirFunction.
+- MIR has no name intercept for `env_get`/`env_set`/`file_*`, so the call reaches
+  the generic direct-call path; `provider_callable_call_origin_v1`
+  (`50.mir/_MirLowering/provider_metadata.spl:214-227`) finds no
+  `callable_text_value_abi` row and stamps `MirCallOrigin.Unknown`; every backend
+  then panics (`mir_instruction_support.spl:288/300`).
+- Repro (run-21 Stage 2, ~1 s, rc=134): a 3-line file
+  `fn read_home() -> text:\n    env_get("HOME") ?? ""`; all imported forms
+  (`std.nogc_sync_mut.io.env_ops`, `app.io.env_ops`, `std.env.variables`,
+  `std.io_runtime`) compile clean (rc=0).
+
+Fix: MIR lowering now rejects a direct call whose callee is that untyped,
+module-less builtin-fallback symbol with a call-site diagnostic
+(`interpreter-only builtin `env_get` has no native lowering ...`) instead of
+emitting an Unknown-origin call (`provider_callable_is_builtin_fallback_v1`,
+`switch_operators_calls.spl` `if is_direct:`). Never mapped to an extern.
+Spec: `test/01_unit/compiler/mir/interp_builtin_fallback_call_origin_spec.spl`
+(seed: 1/2 red -> 2/2 green). Source workaround for run-21 (separate commit):
+both producer modules call the already-imported nullable accessors, tagged
+`@workaround bug=unknown_call_origin_driver_hir_archive_stage3_2026-11-13`.
