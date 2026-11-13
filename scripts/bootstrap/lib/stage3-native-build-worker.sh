@@ -30,8 +30,9 @@ observation_budget_ms=${13}
 # identity and cross-module import resolution do not serve the per-module
 # lane. "whole-program" restores SIMPLE_BOOTSTRAP=1 plus
 # SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1.
-# A per-file lane may carry a ":fw=0|1" suffix, forwarded as
-# SIMPLE_FILE_WORKERS (systemd does not inherit).
+# A per-file lane may carry ":fw=0|1" and ":gte=0|1" items, forwarded in that
+# order as SIMPLE_FILE_WORKERS and SIMPLE_NATIVE_GO_TO_END (systemd does not
+# inherit, and the compiler runs under env -i).
 bootstrap_flag=1 whole_program_env= per_file_env=
 if [ "$worker_arg_count" -ge 34 ]; then
   case "${14}" in
@@ -42,6 +43,7 @@ if [ "$worker_arg_count" -ge 34 ]; then
         lane_rest=${lane_rest#"$lane_item"}
         case "$lane_item" in
           fw=0|fw=1) per_file_env="$per_file_env SIMPLE_FILE_WORKERS=${lane_item#fw=}" ;;
+          gte=0|gte=1) per_file_env="$per_file_env SIMPLE_NATIVE_GO_TO_END=${lane_item#gte=}" ;;
           *) echo "stage3 worker: invalid lowering lane" >&2; exit 64 ;;
         esac
       done ;;
@@ -86,12 +88,56 @@ export BOOTSTRAP_STAGE3_FACADE_PATH BOOTSTRAP_STAGE3_VERSION_ROOT
 
 # This optional transport is separate from the admitted parent's historical
 # transcript. It belongs only to this newly hashed compiler invocation.
+# Without a ceiling the launcher may still transport a cap within the default
+# hard ceiling (derived from the Stage 3 memory admission); the transcript
+# owner re-validates it against that ceiling before the watchdog starts.
+# A derived cap arrives as CAP:SOURCE:BOUND; the attribution is published to
+# the owner (SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_SOURCE/_BOUND) so the receipt
+# does not record a code default as an explicit-env pair the operator hand-set.
+# A bare CAP is the operator's own pair and keeps that attribution.
+compiler_cap_source= compiler_cap_bound=
+case "$compiler_cap" in
+  *:*:*)
+    compiler_cap_source=${compiler_cap#*:}
+    compiler_cap_bound=${compiler_cap_source#*:}
+    compiler_cap_source=${compiler_cap_source%%:*}
+    compiler_cap=${compiler_cap%%:*}
+    for compiler_cap_label in "$compiler_cap_source" "$compiler_cap_bound"; do
+      case "$compiler_cap_label" in ''|[!a-z]*|*[!a-z-]*|*:*) compiler_cap_label=invalid ;; esac
+      [ "$compiler_cap_label" != invalid ] && [ "${#compiler_cap_label}" -le 32 ] || {
+        echo 'stage3 worker: invalid transported compiler RSS cap attribution' >&2; exit 64;
+      }
+    done ;;
+  *:*) echo 'stage3 worker: invalid transported compiler RSS cap attribution' >&2; exit 64 ;;
+esac
 case "$compiler_ceiling_env" in
   '')
-    [ -z "$compiler_cap" ] && [ "${SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB+x}" != x ] || {
+    [ "${SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB+x}" != x ] || {
       echo 'stage3 worker: unrecorded ambient compiler RSS ceiling' >&2; exit 64;
-    } ;;
+    }
+    if [ -n "$compiler_cap" ]; then
+      bootstrap_stage3_compiler_ceiling_valid "$compiler_cap" || {
+        echo 'stage3 worker: invalid transported compiler RSS cap' >&2; exit 64;
+      }
+      [ "${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB-$compiler_cap}" = "$compiler_cap" ] || {
+        echo 'stage3 worker: conflicting compiler RSS cap' >&2; exit 64;
+      }
+      SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=$compiler_cap
+      export SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB
+      if [ -n "$compiler_cap_source" ]; then
+        [ "${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_SOURCE-$compiler_cap_source}" = "$compiler_cap_source" ] &&
+          [ "${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND-$compiler_cap_bound}" = "$compiler_cap_bound" ] || {
+          echo 'stage3 worker: conflicting compiler RSS cap attribution' >&2; exit 64;
+        }
+        SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_SOURCE=$compiler_cap_source
+        SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND=$compiler_cap_bound
+        export SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_SOURCE SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND
+      fi
+    fi ;;
   SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB=*)
+    [ -z "$compiler_cap_source" ] || {
+      echo 'stage3 worker: attributed cap under an explicit compiler RSS ceiling' >&2; exit 64;
+    }
     compiler_ceiling=${compiler_ceiling_env#*=}
     bootstrap_stage3_compiler_ceiling_valid "$compiler_ceiling" &&
       bootstrap_stage3_compiler_ceiling_valid "$compiler_cap" &&

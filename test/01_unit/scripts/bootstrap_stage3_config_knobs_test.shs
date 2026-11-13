@@ -1,0 +1,175 @@
+#!/bin/sh
+# Contract: Stage 3 resume settings come from git-tracked config/bootstrap.sdn
+# (env > config > compiler default), never from private launch scripts.
+#   1. stage3_file_workers config key -> SIMPLE_FILE_WORKERS (env overrides).
+#   2. Stage 3 resume tree RSS cap derived from the admitted MemoryHigh budget
+#      (no elevated ceiling, no private env pair), transported with its
+#      attribution so the receipt never labels it an operator explicit-env pair.
+#   3. go-to-end and SIMPLE_FILE_WORKERS cross the env -i worker as lane items.
+# Transport/selection only: no compiler, admission or memory evidence.
+set -eu
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+work=$(mktemp -d "${TMPDIR:-/tmp}/stage3-config-knobs.XXXXXX")
+trap 'rm -rf -- "$work"' EXIT HUP INT TERM
+checks=0
+fail() { printf 'FAIL stage3 config knobs: %s\n' "$*" >&2; exit 1; }
+expect() { checks=$((checks + 1)); [ "$2" = "$3" ] || fail "$1: expected '$2' got '$3'"; }
+
+# --- 1. stage3_file_workers selection (bootstrap-jobs.shs) -------------------
+. "$repo/scripts/bootstrap/bootstrap-jobs.shs"
+printf 'bootstrap:\n  jobs: 4\n  # stage3_file_workers: 1\n  stage3_file_workers: 0  # bug\n' > "$work/zero.sdn"
+printf 'bootstrap:\n  stage3_file_workers: yes\n' > "$work/bad.sdn"
+select_fw() (
+  bootstrap_select_stage3_file_workers "$1" || exit 1
+  printf '%s:%s' "$stage3_file_workers" "$stage3_file_workers_source"
+)
+unset SIMPLE_FILE_WORKERS
+expect 'config value honoured' 0:config "$(select_fw "$work/zero.sdn")"
+expect 'env overrides config' 1:env "$(SIMPLE_FILE_WORKERS=1 select_fw "$work/zero.sdn")"
+expect 'env 0 with no config' 0:env "$(SIMPLE_FILE_WORKERS=0 select_fw "$work/missing.sdn")"
+expect 'unset env and no key keeps the compiler default' :default "$(select_fw "$work/missing.sdn")"
+expect 'empty env is unset' 0:config "$(SIMPLE_FILE_WORKERS= select_fw "$work/zero.sdn")"
+if SIMPLE_FILE_WORKERS=2 select_fw "$work/zero.sdn" > /dev/null 2>&1; then fail 'invalid env accepted'; fi
+if select_fw "$work/bad.sdn" > /dev/null 2>&1; then fail 'invalid config value accepted'; fi
+checks=$((checks + 2))
+expect 'tracked repo config pins the phase route' 0:config "$(select_fw "$repo/config/bootstrap.sdn")"
+host_cpus_fixture() { bootstrap_detect_host_cpus() { printf '8\n'; }; bootstrap_select_jobs "" "$work/zero.sdn"; printf '%s:%s' "$jobs" "$job_source"; }
+expect 'jobs key still read beside the new key' 4:config "$(unset SIMPLE_NATIVE_BUILD_THREADS; host_cpus_fixture)"
+
+# --- 2. derived Stage 3 tree RSS cap (tree-rss-policy.shs) ------------------
+. "$repo/scripts/bootstrap/lib/tree-rss-policy.shs"
+expect 'cap = MemoryHigh when below the ceiling' 33554432 "$(bootstrap_tree_rss_stage3_default_cap_kib 32768 50331648)"
+expect 'cap = default 48 GiB MemoryHigh' 50331648 "$(bootstrap_tree_rss_stage3_default_cap_kib 49152 50331648)"
+expect 'cap clamped to the hard ceiling' 50331648 "$(bootstrap_tree_rss_stage3_default_cap_kib 65536 50331648)"
+for bad in '' 0 012 x '49152 1'; do
+  if bootstrap_tree_rss_stage3_default_cap_kib "$bad" 50331648 > /dev/null 2>&1; then fail "invalid MemoryHigh '$bad' accepted"; fi
+  checks=$((checks + 1))
+done
+if bootstrap_tree_rss_stage3_default_cap_kib 49152 '' > /dev/null 2>&1; then fail 'missing ceiling accepted'; fi
+checks=$((checks + 1))
+expect 'attributed transport form, bound by MemoryHigh' 33554432:memory-admission:memory-high \
+  "$(bootstrap_tree_rss_stage3_default_cap_attributed 32768 50331648)"
+expect 'attributed transport form, clamped to the hard ceiling' 50331648:memory-admission:hard-ceiling \
+  "$(bootstrap_tree_rss_stage3_default_cap_attributed 65536 50331648)"
+if bootstrap_tree_rss_stage3_default_cap_attributed 0 50331648 > /dev/null 2>&1; then fail 'attributed form accepted an invalid MemoryHigh'; fi
+checks=$((checks + 1))
+
+# --- 3. env -i worker transport (actual stage3-native-build-worker.sh) ------
+. "$repo/scripts/bootstrap/bootstrap-cache-lineage.shs"
+. "$repo/scripts/check/lib/bootstrap-stage3/authority.shs"
+fake_root="$work/fixture-root"
+mkdir -p "$fake_root/scripts/check/lib" "$fake_root/scripts/resource" "$fake_root/scripts/bootstrap/lib" \
+  "$work/home" "$work/tmp" "$work/cache"
+cp "$repo/scripts/bootstrap/lib/stage3-source-policy.shs" "$repo/scripts/bootstrap/lib/tree-rss-policy.shs" \
+  "$fake_root/scripts/bootstrap/lib/"
+BOOTSTRAP_CACHE_FIXTURE_REPO=$repo
+export BOOTSTRAP_CACHE_FIXTURE_REPO
+# Real authority + transcript owner; the commit requalification is a separate
+# contract, stubbed here because the fixture has no commit to requalify.
+cat > "$fake_root/scripts/check/lib/bootstrap-stage3-provenance.shs" <<'FACADE'
+. "$BOOTSTRAP_CACHE_FIXTURE_REPO/scripts/check/lib/bootstrap-stage3/authority.shs"
+. "$BOOTSTRAP_CACHE_FIXTURE_REPO/scripts/check/lib/bootstrap-stage3/command-snapshot.shs"
+bootstrap_stage3_verify_requalification_commit() { return 0; }
+FACADE
+cat > "$fake_root/scripts/resource/process-tree-rss-watchdog.pl" <<'WATCHDOG'
+use strict; use warnings;
+shift @ARGV while @ARGV && $ARGV[0] ne '--';
+@ARGV && shift @ARGV;
+exec @ARGV or die "fixture watchdog: exec failed: $!\n";
+WATCHDOG
+cat > "$work/producer.shs" <<'PRODUCER'
+#!/bin/sh
+printf 'fw=%s gte=%s\n' "${SIMPLE_FILE_WORKERS-unset}" "${SIMPLE_NATIVE_GO_TO_END-unset}"
+PRODUCER
+chmod +x "$work/producer.shs"
+producer_sha=$(bootstrap_cache_hash_file "$work/producer.shs")
+printf 'schema=simple-bootstrap-stage2-admission-v2\nstatus=admitted\nsimple_abi_policy=v1\ncandidate_sha256=%s\n' "$producer_sha" > "$work/receipt.env"
+receipt_sha=$(bootstrap_cache_hash_file "$work/receipt.env")
+# run_worker NAME CEILING_ENV CAP LANE
+run_worker() {
+  sh "$repo/scripts/bootstrap/lib/stage3-native-build-worker.sh" \
+    "$work/$1.transcript" "$fake_root" "$work/$1.log" "$work/home" "$work/tmp" "$PATH" \
+    "$work/producer.shs" fixture-apple-darwin cranelift 1 '' "$work/cache" "$work/runtime" \
+    "$work/candidate" "$work/progress" "$work/profile" "$work/memory" fixture direct none 1 \
+    '' '' '' 1 v1 "$work/receipt.env" "$receipt_sha" "$2" "$3" 1000 "$4" enforce \
+    --stage3-source-policy-v1 --source src/compiler --source src/app --source src/lib --entry-closure \
+    2> "$work/$1.err"
+}
+unset SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB \
+  SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_SOURCE SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND
+# The derived cap travels as CAP:SOURCE:BOUND (bootstrap_tree_rss_stage3_default_cap_attributed)
+# and the owner's receipt records that attribution, not an operator pair.
+run_worker lane '' 27262976:memory-admission:memory-high per-file:fw=0:gte=1 ||
+  fail "worker refused derived cap + lane items: $(tail -n 3 "$work/lane.err")"
+checks=$((checks + 1))
+expect 'compiler sees both lane items' 'fw=0 gte=1' "$(grep '^fw=' "$work/lane.log")"
+grep -Fq 'cap 27262976 KiB (source: memory-admission, bound: memory-high' "$work/lane.err" ||
+  fail "derived cap not attributed in the owner receipt: $(grep -o 'cap 27262976 KiB ([^,]*, [^,]*' "$work/lane.err")"
+grep -q '^explicit-env:[0-9]*:SIMPLE_NATIVE_GO_TO_END=1$' "$work/lane.transcript" || fail 'go-to-end missing from transcript'
+checks=$((checks + 2))
+# A bare cap is the operator's own pair and keeps the explicit-env attribution.
+run_worker bare '' 27262976 per-file || fail "worker refused a bare operator cap: $(tail -n 3 "$work/bare.err")"
+grep -Fq 'cap 27262976 KiB (source: explicit-env, bound: explicit' "$work/bare.err" || fail 'bare operator cap lost its explicit-env attribution'
+checks=$((checks + 2))
+for bad_attr in 27262976:memory-admission 27262976::memory-high 27262976:Stage3:memory-high 27262976:memory-admission:memory-high:x; do
+  if run_worker bad-attr '' "$bad_attr" per-file; then fail "malformed cap attribution '$bad_attr' accepted"; fi
+  checks=$((checks + 1))
+done
+if SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_SOURCE=phase-policy run_worker ambient-attr '' 27262976:memory-admission:memory-high per-file; then
+  fail 'conflicting ambient cap attribution accepted'
+fi
+# Under an explicit elevated ceiling the cap is the operator's pair by contract.
+if run_worker ceiling-attr SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB=58720256 27262976:memory-admission:memory-high per-file; then
+  fail 'attributed cap accepted under an explicit compiler RSS ceiling'
+fi
+checks=$((checks + 2))
+run_worker gte-only '' '' per-file:gte=0 || fail "worker refused go-to-end-only lane: $(tail -n 3 "$work/gte-only.err")"
+expect 'go-to-end alone, compiler-default file workers' 'fw=unset gte=0' "$(grep '^fw=' "$work/gte-only.log")"
+if run_worker bad-gte '' '' per-file:gte=2; then fail 'invalid go-to-end lane item accepted'; fi
+if run_worker bad-cap '' 0123 per-file; then fail 'non-canonical transported cap accepted'; fi
+if SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB=58720256 run_worker ambient '' 27262976 per-file; then
+  fail 'ambient ceiling accepted beside a transported cap'
+fi
+# Same refusal the ceiling branch already has: an ambient cap that disagrees
+# with the transported one is a conflict, never silently overwritten.
+if SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=1 run_worker ambient-cap '' 27262976 per-file; then
+  fail 'conflicting ambient cap overwritten by the transported cap'
+fi
+grep -Fq 'conflicting compiler RSS cap' "$work/ambient-cap.err" || fail 'ambient cap conflict not named'
+checks=$((checks + 5))
+# Parent hash order equals the actual worker transcript vector.
+resume="$repo/scripts/bootstrap/resume-stage3-from-admitted.sh"
+awk '/^stage3_args=\$\(bootstrap_stage3_args_sha256/{on=1} on{print} on && /src\/app\/cli\/bootstrap_main.spl\)$/{exit}' \
+  "$resume" > "$work/parent-vector.shs"
+[ -s "$work/parent-vector.shs" ] || fail 'parent Stage 3 vector missing'
+parent_hash() (
+  resume_abi_policy=v1 stage2_admission="$work/receipt.env"
+  stage3_requested_route=direct stage3_fallback_route=none stage3_cache="$work/cache"
+  progress="$work/progress" phase_profile="$work/profile" memory_snapshot="$work/memory"
+  evidence_run_id=fixture stage3_bootstrap_flag= stage3_whole_program_env= stage3_per_file_env=$1
+  stage3_mc_env= stage3_cold_init_env= stage3_diagnostic_env= stage3_compiler_ceiling_env=
+  platform=fixture-apple-darwin stage3_threads=1 stage2_backend=cranelift runtime="$work/runtime"
+  admitted="$work/producer.shs" candidate="$work/candidate" stage3_timeout_args=
+  set -- --source src/compiler --source src/app --source src/lib --entry-closure
+  . "$work/parent-vector.shs"
+  printf '%s' "$stage3_args"
+)
+worker_hash() {
+  awk '/^explicit-env:|^argv:/ {
+      rest=substr($0,index($0,":")+1); value=substr(rest,index(rest,":")+1)
+      if (index(value,"SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB=")==1) next
+      print value }' "$1" > "$work/vector.args"
+  set --
+  while IFS= read -r vector_arg; do set -- "$@" "$vector_arg"; done < "$work/vector.args"
+  bootstrap_stage3_args_sha256 "$@"
+}
+expect 'parent hash == worker vector (fw=0 gte=1)' "$(worker_hash "$work/lane.transcript")" \
+  "$(parent_hash 'SIMPLE_FILE_WORKERS=0 SIMPLE_NATIVE_GO_TO_END=1')"
+
+# --- 4. wiring + single source of truth ------------------------------------
+grep -q 'bootstrap_select_stage3_file_workers "\$root/config/bootstrap.sdn"' "$resume" || fail 'resume ignores config'
+grep -q 'bootstrap_select_stage3_file_workers "\${bootstrap_early_repo_root}/config/bootstrap.sdn"' \
+  "$repo/scripts/bootstrap/bootstrap-from-scratch.sh" || fail 'in-script Stage 3 ignores config'
+grep -q 'stage3_compiler_cap=$(bootstrap_tree_rss_stage3_default_cap_attributed' "$resume" || fail 'resume does not derive the attributed cap'
+checks=$((checks + 3))
+echo "PASS — $checks check(s): stage3 config knobs (file workers, derived + attributed RSS cap, lane transport)"
