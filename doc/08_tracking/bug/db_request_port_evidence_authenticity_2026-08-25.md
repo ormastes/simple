@@ -74,3 +74,22 @@ database/server owner selects or authors the canonical entry
 query fixture and the v2 producer, records the selection in the must-check
 tiering documentation, and lands producer + checker + fixtures coherently;
 then this row can be re-judged.
+
+
+---
+
+## 2026-11-13 triage (live-P3 lane l1, work/live-p3-l1-20261113, base f790f7f266e)
+
+**LIVE — owner gap confirmed first-hand this lane; no code change (per this doc's own
+no-synthetic-path rule).**
+
+Verified at this base: the v2 checker `scripts/check/check-db-server-request-port-evidence.shs`
+encodes the full authenticity contract, but the pinned canonical entry
+`src/app/database_server/main.spl` does **not** exist (`ls` rc=2, this lane) and the pinned
+query fixture `test/fixtures/database/server/request_port_query.bin` does **not** exist
+(`ls` rc=2, this lane); the in-tree producer still emits `session/v1` with caller-supplied
+binaries and cannot satisfy its own v2 checker. The must-check ledger row remains
+`todo, never` with owner `server-performance-team`. The database/server owner must still
+select or author the canonical entry + fixture + v2 producer and land them coherently before
+this row can be re-judged; inventing a synthetic path inside the checker is explicitly
+forbidden by this record.

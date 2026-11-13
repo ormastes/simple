@@ -182,3 +182,10 @@ allow-list in the same change as the audited provider, then run
 host with qemu-system-x86_64 + OVMF pflash. The secondary freestanding
 `FsError`-rendering defect (empty string from a total match) remains a valid,
 cheaper independent fix per this doc's own note.
+
+
+---
+
+## 2026-11-13 triage (live-P3 lane l1, work/live-p3-l1-20261113, base f790f7f266e)
+
+**SUPERSEDED (confirmed)** — The audited SimpleOS critical-section provider now exists (`src/os/kernel/net/thread_shim.spl`, 9433 bytes, verified at this base) with the behavioural double-unlock probe; the live blocker moved to `naked_asm_lowering_miscompiles_simpleos_mutex_2026-09-01.md` (@naked ignored by the cranelift freestanding backend). Close-the-chain grant recorded in body (fix @naked lowering, then allow-list "simpleos", then the OVMF roundtrip gate on a Linux host).

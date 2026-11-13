@@ -85,3 +85,10 @@ bin/simple.exe 2026-11-11):
 Nothing in this row is a live code defect. Bookkeeping closure: re-run
 `check-cpu-simd-engine2d-evidence.shs` and `check-cpu-simd-engine2d-arch-matrix.shs`
 once a self-hosted `bin/release/<triple>/simple` is deployed.
+
+
+---
+
+## 2026-11-13 triage (live-P3 lane l1, work/live-p3-l1-20261113, base f790f7f266e)
+
+**SUPERSEDED (confirmed)** — Nothing here is a live code defect: the remaining red is the designed fail-closed `simple-bin-forbidden` seed refusal, and the stage-binary SEGV premise is closed per the 2026-08-31 update of the premise bug. Bookkeeping closure: re-run the evidence gates once a self-hosted `bin/release/<triple>/simple` is deployed (a deployment step, not a code fix).

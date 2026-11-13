@@ -165,3 +165,10 @@ change). Only that file was edited.
 **Verdict: the load-blocking tree-side regression in the hosted-worker import
 graph (the exact "Next step" of this record) is FIXED and measured; the row
 stays OPEN on the behavioral residual (2) and the timing contract (3).**
+
+
+---
+
+## 2026-11-13 triage (live-P3 lane l1, work/live-p3-l1-20261113, base f790f7f266e)
+
+**Load-blocker FIXED at this base; row stays OPEN on residuals** — The intermediate-typed-`val` workaround pattern is present in `src/os/hosted/hosted_browser_renderer_policy.spl` (verified by direct read: `val line = raw_line.trim()`, `val name_part = line.slice(...)` + `val name = name_part.trim()`), and the formerly import-blocked specs now compile and execute (this lane's run of the sibling `browser_session_textarea_lifecycle_spec.spl` reaches execution). Residuals unchanged and out of this row's scope: engine-lane nested-call receiver typing one lane deeper, and the Linux-hosted timing contract.

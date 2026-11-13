@@ -124,3 +124,10 @@ Traversed on work/p3-ne3-20261111 (origin/release/1.0.0 tip 93490a99c5d8).
 
 Verdict: nothing has moved. The decision among the three documented positions
 still belongs to a language ruling, not a patch. Status stays OPEN.
+
+
+---
+
+## 2026-11-13 triage (live-P3 lane l1, work/live-p3-l1-20261113, base f790f7f266e)
+
+**OPEN (confirmed)** — Language ruling still undecided; the three deliberately-red contract tests remain in `src/compiler_rust/compiler/src/hir/lower/tests/expression_tests.rs` (position-3 fixture intact, verified by record read at this base). No E-code for built-in redeclaration exists. Not closeable by a patch lane; decision among the three documented positions belongs to a language ruling.
