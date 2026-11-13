@@ -1,0 +1,50 @@
+use std.spec
+use std.nogc_sync_mut.sffi.process_memory.{proc_status_kib, host_commit_avail_kib, host_commit_avail_kib_from_meminfo, host_commit_avail_kib_from_bytes, freebsd_vm_available_kib_from_sysctl}
+
+# Pure decoders behind host_commit_avail_kib, compiled on every platform so a
+# Linux host covers the FreeBSD and Windows branches. Unknown is -1: the shard
+# pool then keeps its static admission cap (never "0 KiB free").
+describe "process memory commit headroom decoders":
+
+    it "reads a kB row of a /proc table and reports a missing or junk row as unknown":
+        val table = "MemTotal:       131072000 kB\nMemAvailable:    52000000 kB\nSwapFree:  0 kB\n"
+        expect(proc_status_kib(table, "MemAvailable:")).to_equal(52000000)
+        expect(proc_status_kib(table, "MemTotal:")).to_equal(131072000)
+        expect(proc_status_kib(table, "Cached:")).to_equal(-1)
+        expect(proc_status_kib("MemAvailable: junk kB\n", "MemAvailable:")).to_equal(-1)
+        expect(proc_status_kib("MemAvailable: 77\n", "MemAvailable:")).to_equal(77)
+
+    it "adds free swap to MemAvailable and reports a missing MemAvailable as unknown":
+        expect(host_commit_avail_kib_from_meminfo("MemAvailable: 1000 kB\nSwapFree: 24 kB\n")).to_equal(1024)
+        expect(host_commit_avail_kib_from_meminfo("MemAvailable: 1000 kB\nSwapFree: 0 kB\n")).to_equal(1000)
+        expect(host_commit_avail_kib_from_meminfo("MemAvailable: 1000 kB\n")).to_equal(1000)
+        expect(host_commit_avail_kib_from_meminfo("MemTotal: 1000 kB\n")).to_equal(-1)
+        expect(host_commit_avail_kib_from_meminfo("")).to_equal(-1)
+
+    it "decodes the Windows commit headroom in bytes and treats non-positive as unknown":
+        expect(host_commit_avail_kib_from_bytes(8589934592)).to_equal(8388608)
+        expect(host_commit_avail_kib_from_bytes(0)).to_equal(-1)
+        expect(host_commit_avail_kib_from_bytes(-5)).to_equal(-1)
+
+    it "decodes FreeBSD sysctl free plus inactive pages times the page size":
+        # FreeBSD 14.4 arm64 shape, 8 GiB guest: 4 KiB pages.
+        val out = "hw.pagesize: 4096\nvm.stats.vm.v_free_count: 1500000\nvm.stats.vm.v_inactive_count: 250000\n"
+        expect(freebsd_vm_available_kib_from_sysctl(out)).to_equal(7000000)
+        # Order-independent and tolerant of surrounding blanks / other rows.
+        val shuffled = "\nvm.stats.vm.v_inactive_count: 10\nvm.stats.vm.v_laundry_count: 99\nhw.pagesize: 16384\nvm.stats.vm.v_free_count: 20\n"
+        expect(freebsd_vm_available_kib_from_sysctl(shuffled)).to_equal(480)
+
+    it "reports malformed FreeBSD sysctl output as unknown, never as zero free":
+        expect(freebsd_vm_available_kib_from_sysctl("")).to_equal(-1)
+        expect(freebsd_vm_available_kib_from_sysctl("hw.pagesize: 4096\nvm.stats.vm.v_free_count: 10\n")).to_equal(-1)
+        expect(freebsd_vm_available_kib_from_sysctl("hw.pagesize: 4096\nvm.stats.vm.v_inactive_count: 10\n")).to_equal(-1)
+        expect(freebsd_vm_available_kib_from_sysctl("vm.stats.vm.v_free_count: 10\nvm.stats.vm.v_inactive_count: 10\n")).to_equal(-1)
+        expect(freebsd_vm_available_kib_from_sysctl("hw.pagesize: 0\nvm.stats.vm.v_free_count: 10\nvm.stats.vm.v_inactive_count: 10\n")).to_equal(-1)
+        expect(freebsd_vm_available_kib_from_sysctl("hw.pagesize: 4096\nvm.stats.vm.v_free_count: x1\nvm.stats.vm.v_inactive_count: 10\n")).to_equal(-1)
+        expect(freebsd_vm_available_kib_from_sysctl("hw.pagesize: 4096\nvm.stats.vm.v_free_count: 0\nvm.stats.vm.v_inactive_count: 0\n")).to_equal(-1)
+        expect(freebsd_vm_available_kib_from_sysctl("hw.pagesize 4096\nvm.stats.vm.v_free_count: 1\nvm.stats.vm.v_inactive_count: 1\n")).to_equal(-1)
+        # pages * page_size would overflow i64.
+        expect(freebsd_vm_available_kib_from_sysctl("hw.pagesize: 4611686018427387904\nvm.stats.vm.v_free_count: 4\nvm.stats.vm.v_inactive_count: 0\n")).to_equal(-1)
+
+    it "reads real commit headroom on this host":
+        expect(host_commit_avail_kib() > 0).to_be_true()
