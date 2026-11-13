@@ -293,3 +293,9 @@ row (R8) — all explicitly "not papered over", none test-runner owned.
   was papered over here.
 
 Verdict: SUPERSEDED (runner-owned part landed and verified; rest routed).
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with the recorded weekly-sweep verdicts: R2 fixed in-doc (SimpleAbiDigest256V1);
+R3-R8 stand as tracked residuals owned by the coverage-wrapper lane; no new
+wrapper-lowering change landed 2026-11-05..13. No in-lane change.

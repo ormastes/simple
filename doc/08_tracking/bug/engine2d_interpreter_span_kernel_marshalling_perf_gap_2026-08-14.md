@@ -104,3 +104,9 @@ NOT present as a marshalling cost and is cross-filed as
 lane; needs a seed rebuild this lane cannot perform). Residual pinned-data-
 pointer ABI work from the 2026-11-10 note stays routed to the compiler-seed
 lane. No code change in this lane.
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with lane p3-interp7's SUPERSEDED verdict: marshalling mechanism fixed
+and re-measured 2026-11-11. No independent re-measurement in this lane
+(perf-harness rerun exceeds the per-bug timebox).

@@ -107,3 +107,7 @@ lane's runs.
 
 Not carried by seedfix A (fa6939eb4b9e is JIT tuple unbox; unrelated to
 trait/vtable dispatch).
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with lane ne12: FIXED at tip (root trait-dispatch cause resolved; verification-limited note recorded there stands). No independent re-verification in this lane.

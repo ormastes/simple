@@ -131,3 +131,8 @@ seed private-fn-import visibility divergence around private
 `compiler_value_discriminant` (`src/compiler/00.common/value_access.spl:29`)
 — an owner-decision row; per campaign routing the wrappers must NOT be pub'd
 (`value_access_ownership_spec` pins non-pub).
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with lane p3fix-comp7: SUPERSEDED — HIR gate removed at tip, mono
+machinery landed. No in-lane change.

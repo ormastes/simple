@@ -95,3 +95,9 @@ retained Vulkan production frames device resident", "fails closed before
 strict Vulkan primitive execution without a Vulkan engine"). That staging
 count belongs in a separate row; this row's disposition stands SUPERSEDED.
 No source change taken.
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with the recorded disposition: SUPERSEDED — the surviving failure is
+a retained-Vulkan-damage staging count on the host, not the parser defect.
+No in-lane change.

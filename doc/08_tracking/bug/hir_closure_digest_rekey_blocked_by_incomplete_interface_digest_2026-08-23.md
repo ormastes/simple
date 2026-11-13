@@ -315,3 +315,8 @@ projections, sorted `impl.methods` keys, trait-default-body and
 enum-variant-default fallbacks, folded through `action_key.interface_digest_of`)
 is a large, high-risk compiler change for a dedicated owner compiler/cache
 lane. Status line flipped from OPEN.
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with lane p3fix-comp7: LIVE by deliberate owner deferral (dedicated
+owner lane required for the interface-digest re-key). No in-lane change.

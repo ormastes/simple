@@ -104,3 +104,7 @@ compiler internals, and the seed visibility divergence on
 as a runtime fence again. The code-level fix this doc asked for is present at
 HEAD; no seed-side equivalent was inspected beyond noting the spec cannot
 compile the compiler graph under the seed's stricter visibility pass.
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with lane ne15: FIXED — global-slot demote landed with pinning spec. No independent re-verification in this lane; disposition stands.
