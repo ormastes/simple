@@ -329,3 +329,22 @@ Other `b795b3f4a26`/`aba2a5f0a3e` sites, same seed and scope:
 - Patching on Windows reuses the existing leaf and SOSIX port: `rt_mprotect` is
   VirtualProtect + FlushInstructionCache with rollback (`platform_win.h:504-520`), one
   aligned u16 activation-word store, quiescent only.
+
+#### W2: Windows map profile, PE locator, 4th IN column
+- `xray_native_map_format_v1`: `XRAY_MAP_ABI_X86_64_WIN64_V1 = 3` admitted on x86-64 rows (text_base
+  = .text RVA), refused under AArch64; `.sxray` is the PE section name. Map spec 10/10 (red
+  9/10 with the old validator).
+- `src/lib/common/trace/xray_native_pe_locate_v1.spl` (pure): PE file bytes + HMODULE base ->
+  RVA manifest (`x86_64-pc-windows-msvc`, `simple-x86_64-win64-sled-v1`), reconstructed image,
+  CALL targets decoded per sled; refuses missing `.sxray` (InstrumentationAbsent), writable /
+  executable map section, non-Windows profile, 64-bit text_base, tampered CALL, unaligned base.
+  Spec 5/5; mutation of the CALL decode -> 4/5.
+- IN differential suite: 4th column `simple-win64` built from a PE image written by the
+  linker's own PE writer (`test/fixtures/xray/xray_win64_pe_fixture_v1.spl`) -> locator ->
+  validator -> `XrayNativeSledLeafV1` over the simulated page: 12/12 identical scenarios,
+  48/48 total. Mutating the locator's CALL target -> 36/48 (the whole win64 column red).
+- NOT changed (coordinator decision): the W3 build route still refuses every Windows target.
+  Admitting `x86_64-pc-windows-msvc` + backend Simple needs the native backend's COFF sled
+  emission (sleds, `.sxray` with ADDR32NB text_base, `.pdata` offsets past the entry sled)
+  and touches `observer_build_route_v1.spl`, `driver_xray_policy.spl:85-92`,
+  `observer_build_route_v1_spec.spl` and `xray_observer_gate_spec.spl` in one reviewed change.
