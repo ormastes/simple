@@ -1030,7 +1030,12 @@ impl ExecCore {
         // through the hosted runtime, rather than the interpreter argument
         // store. Initialize that runtime boundary before choosing a lane so
         // every execution mode observes the same supplied argv.
-        simple_runtime::value::rt_set_args_vec(&args);
+        // `set_interpreter_args` also fills the interpreter's thread-local
+        // store read by `rt_cli_get_args`/`rt_cli_arg_count`/`rt_cli_arg_at`:
+        // the JIT lane's no-main arm runs the module on the interpreter, which
+        // otherwise saw an empty argv there. See
+        // doc/08_tracking/bug/no_main_runtime_error_reruns_on_interpreter_2026-11-13.md.
+        simple_compiler::set_interpreter_args(args.clone());
 
         // The wasm lane is checked before the extension match so that it cannot
         // be reached by only one of the two run entry points. `run_file_with_args`
@@ -1896,9 +1901,10 @@ fn interpreter_preference_reason(path: &Path, extension: &str, cli_args_backed: 
     // 2026-08-21 on src/compiler/80.driver/driver_types.spl).
     //
     // The gate existed because the JIT lane had no argv hook. It does now:
-    // `run_file_with_args` calls `simple_runtime::value::rt_set_args_vec(&args)`
-    // for EVERY lane before choosing one, so the hosted runtime's argv store is
-    // populated identically for JIT and interpreter. `cli_args_backed` is the
+    // `run_file_with_args` calls `simple_compiler::set_interpreter_args(args)`
+    // (which also calls `rt_set_args_vec`) for EVERY lane before choosing one,
+    // so the hosted runtime's argv store is populated identically for JIT and
+    // interpreter. `cli_args_backed` is the
     // real capability check -- the caller asks the symbol provider whether that
     // store's accessor is actually linked into THIS build -- so the gate now
     // fires only when the capability is genuinely absent, instead of whenever a
@@ -2350,6 +2356,7 @@ mod execution_mode_validation_tests {
         if !core.execution_mode.is_jit() {
             return; // SIMPLE_EXECUTION_MODE overrides the lane under test
         }
+        let _env = jit_env_lock();
         let result = core.run_file_with_args(&entry, vec![]);
         let err = result.expect_err("private import must be rejected, not executed by the interpreter fallback");
         assert!(err.contains("is not visible to"), "unexpected error: {err}");
@@ -2391,11 +2398,55 @@ mod execution_mode_validation_tests {
         if !core.execution_mode.is_jit() {
             return; // SIMPLE_EXECUTION_MODE overrides the lane under test
         }
+        let _env = jit_env_lock();
         let result = core.run_file_with_args(&entry, vec![]);
         let err = result.expect_err("a runtime error must fail the run");
         assert!(err.contains("index out of bounds"), "unexpected error: {err}");
         let written = std::fs::read_to_string(&side).expect("side-effect file");
         assert_eq!(written.lines().count(), 1, "program ran more than once: {written:?}");
+    }
+
+    /// The JIT lane's no-main arm runs the module on the interpreter; the
+    /// interpreter's `rt_cli_*` argv store must hold the supplied args there,
+    /// as it does on the interpreted lane. Red before the fix: "0|".
+    #[test]
+    fn no_main_script_sees_cli_args_on_jit_lane() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let side = dir.path().join("side.txt");
+        let entry = dir.path().join("noman_args.spl");
+        std::fs::write(
+            &entry,
+            format!(
+                "extern fn rt_file_append_text(path: text, content: text) -> bool\n\
+                 extern fn rt_cli_arg_count() -> i64\n\
+                 extern fn rt_cli_get_args() -> [text]\n\
+                 val n = rt_cli_arg_count()\n\
+                 val joined = rt_cli_get_args().join(\",\")\n\
+                 val ok = rt_file_append_text(\"{}\", \"{{n}}|{{joined}}\")\n",
+                side.display().to_string().replace('\\', "/")
+            ),
+        )
+        .unwrap();
+        let core = super::ExecCore::new();
+        if !core.execution_mode.is_jit() {
+            return; // SIMPLE_EXECUTION_MODE overrides the lane under test
+        }
+        let args = vec!["noman_args.spl".to_string(), "x".to_string(), "y".to_string()];
+        let _env = jit_env_lock();
+        let result = core.run_file_with_args(&entry, args);
+        assert_eq!(result, Ok(0), "main-less script must run");
+        let written = std::fs::read_to_string(&side).expect("side-effect file");
+        assert_eq!(written, "3|noman_args.spl,x,y");
+    }
+
+    /// Serialises the tests that run the JIT lane against the one that sets
+    /// `SIMPLE_JIT_STRICT`: under strict mode the no-main arm and the
+    /// interpreter fallback refuse to run, so a concurrent setter flakes them.
+    /// Every test that sets `SIMPLE_JIT_STRICT` or runs a fallback-capable
+    /// JIT lane must hold this guard.
+    pub(super) fn jit_env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// Every documented spelling must parse, and must parse to the lane its
@@ -2519,9 +2570,13 @@ mod jit_top_level_statement_tests {
         std::fs::write(dir.path().join("modb.spl"), "pub fn helper(x: i64) -> i64:\n    x + 41\n").unwrap();
         let entry = dir.path().join("main.spl");
         std::fs::write(&entry, "use modb.{helper}\n\nfn main() -> i64:\n    helper(1)\n").unwrap();
-        std::env::set_var("SIMPLE_JIT_STRICT", "1");
-        let rc = ExecCore::new().run_file_jit(&entry);
-        std::env::remove_var("SIMPLE_JIT_STRICT");
+        let rc = {
+            let _env = super::execution_mode_validation_tests::jit_env_lock();
+            std::env::set_var("SIMPLE_JIT_STRICT", "1");
+            let rc = ExecCore::new().run_file_jit(&entry);
+            std::env::remove_var("SIMPLE_JIT_STRICT");
+            rc
+        };
         assert_eq!(rc, Ok(42), "imported helper must run on the JIT");
     }
 

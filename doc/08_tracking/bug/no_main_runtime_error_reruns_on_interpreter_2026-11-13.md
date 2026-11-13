@@ -47,26 +47,38 @@ The public `run_file_jit -> Result<i32, String>` is a thin wrapper. The
 no-main error path now also clears the current file and collects GC, which
 the `?` used to skip (masked by the rerun).
 
+## Follow-up: no-main arm saw empty `rt_cli_*` argv (fixed)
+
+The no-main arm never called `set_interpreter_args`, so `rt_cli_get_args` /
+`rt_cli_arg_count` / `rt_cli_arg_at` (thread-local `INTERPRETER_ARGS`) read
+empty there (`sys_get_args`/`rt_get_args` were fine). Before the fix above,
+a failure caused by that was hidden by the rerun, which had the args. Red on
+the #8972 seed: `simple a.spl x y` printed `count=0` / `args=[]` (a script
+with `fn main` printed `count=3`). Fix: `run_file_with_args` now calls
+`set_interpreter_args(args.clone())` (which also sets the runtime store that
+`rt_set_args_vec` used to set alone) before choosing a lane.
+
+The #8972 Rust test shared the process with
+`imported_simple_function_links_under_strict_jit`, which sets
+`SIMPLE_JIT_STRICT`, and could flake. The JIT-lane tests and the strict
+setter now serialise on `execution_mode_validation_tests::jit_env_lock()`.
+
 ## Not changed here (same class, still open)
 
 - `em.execute("main")` failing after JIT'd `main` started, and the
   `catch_unwind` panic arm (a panic raised while the no-main interpreter run
   was executing): both still fall back and can re-run side effects.
-- The no-main arm never calls `set_interpreter_args`, so `rt_cli_get_args` /
-  `rt_cli_arg_count` / `rt_cli_arg_at` (thread-local `INTERPRETER_ARGS`) read
-  empty there (`sys_get_args`/`rt_get_args` are fine). Before this fix a
-  runtime failure caused by that was hidden by the rerun, which had the args.
-  Pre-existing; candidate fix: `set_interpreter_args(args.clone())` before the
-  JIT attempt in `run_file_with_args`.
-- The Rust test shares the process with
-  `imported_simple_function_links_under_strict_jit`, which sets
-  `SIMPLE_JIT_STRICT`; run it name-filtered or `--test-threads=1` (same
-  exposure as `private_import_from_other_dir_fails_closed_on_jit_lane`).
 - `run_source_in_memory_native` has the same no-main interpreter arm but its
-  callers propagate with `?` and never rerun, so it is not affected.
+  callers propagate with `?` and never rerun, so it is not affected. It also
+  never sets interpreter args; its callers have no argv to pass, so its
+  no-main arm sees whatever argv the thread last set; not changed.
 
 ## Evidence
 
 - Rust: `exec_core::execution_mode_validation_tests::no_main_runtime_error_runs_once_on_jit_lane`
   (side-effect file must hold exactly one line, result must be `Err`).
-- Spec: `test/01_unit/compiler/95.interp/interpreter/no_main_runtime_error_no_rerun_spec.spl`.
+- Rust: `exec_core::execution_mode_validation_tests::no_main_script_sees_cli_args_on_jit_lane`
+  (side-effect file must hold `3|noman_args.spl,x,y`).
+- Spec: `test/01_unit/compiler/95.interp/interpreter/no_main_runtime_error_no_rerun_spec.spl`
+  (third example, "sees its CLI args through rt_cli_get_args": red on the
+  #8972 seed with `rc=1`, index out of bounds on the empty argv).
