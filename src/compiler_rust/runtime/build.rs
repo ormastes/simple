@@ -776,6 +776,55 @@ fn collect_c_runtime_exports(root: &Path, target_os: &str, native_all_provider: 
             exported.extend(runtime_export_scan::c_function_definitions(&file));
         }
     }
+
+    // TUs that are compiled into this archive but deliberately NOT scanned
+    // wholesale: most of their exports take `const char*` text or return an
+    // owned `SplArray*` the interpreter handler adapts (nil check, free,
+    // array -> tuple), so a direct JIT call would not be equivalent. The names
+    // below have a scalar-only ABI (or a (ptr, len) text ABI the codegen
+    // already expands) and an exact `RuntimeFuncSpec`, so the JIT may link them
+    // natively. A name is registered only when its definition is found, and
+    // only on Linux, where every listed definition is compiled.
+    // doc/08_tracking/bug/jit_caret_392_unregistered_externs_hybrid_splice_2026-11-13.md
+    const JIT_SCALAR_C_EXPORTS: &[(&str, &[&str])] = &[
+        (
+            "runtime_process_owned.c",
+            &[
+                "rt_process_owned_v3_release_value",
+            ],
+        ),
+        (
+            "runtime_process_observation_reserved_v4_impl.h",
+            &[
+                "rt_process_observation_v4_reserve_value",
+                "rt_process_observation_v4_reserved_confirm_release_value",
+                "rt_process_observation_v4_reserved_matches_value",
+                "rt_process_observation_v4_reserved_state_value",
+            ],
+        ),
+        (
+            "runtime_linux_group_owner_impl.h",
+            &[
+                "rt_linux_group_cancel_v1",
+                "rt_linux_group_parent_release_v1",
+                "rt_linux_group_stream_release_inherited_v2",
+            ],
+        ),
+        ("runtime_process_owned_cwd_private.h", &["rt_process_observation_v4_close_cwd_value"]),
+        ("runtime_secure_staging.c", &["rt_file_create_excl", "rt_file_sync"]),
+    ];
+    if target_os == "linux" {
+        for (source, names) in JIT_SCALAR_C_EXPORTS {
+            let Ok(file) = fs::read_to_string(root.join(source)) else {
+                continue;
+            };
+            exported.extend(
+                runtime_export_scan::c_function_definitions(&file)
+                    .into_iter()
+                    .filter(|symbol| names.contains(&symbol.as_str())),
+            );
+        }
+    }
 }
 
 fn collect_rust_file_exports(file: &str, exported: &mut HashSet<String>) {
