@@ -1,0 +1,106 @@
+# @cover src/lib/common/ui/rendering_parity 80%
+# @tag: unit, ui, rendering, parity
+# Plan 5.1 comparator self-tests: injected one-pixel error, offset, missing
+# glyph, wrong alpha, stale frame and blank output must all be detected.
+
+use std.spec
+use common.ui.rendering_parity.*
+
+fn _frame(w: i64, h: i64) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < w * h:
+        out.push(((i * 7) % 200 + 20) as u8)
+        out.push(((i * 13) % 200 + 20) as u8)
+        out.push(((i * 29) % 200 + 20) as u8)
+        out.push(255u8)
+        i = i + 1
+    out
+
+fn _exact(expected: [u8], actual: [u8], w: i64, h: i64) -> RenderComparison:
+    compare_rgba8(expected, actual, w, h, RENDER_COMPARE_EXACT, 0).unwrap()
+
+describe "rendering parity comparator self-test":
+    it "accepts identical frames":
+        val f = _frame(4, 4)
+        val r = _exact(f, f, 4, 4)
+        expect(r.equal).to_equal(true)
+        expect(r.status).to_equal("exact")
+        expect(r.diagnostic.mismatch_count).to_equal(0)
+
+    it "detects an injected one-pixel one-level error and locates it":
+        val f = _frame(4, 4)
+        var g = f
+        g[(2 * 4 + 1) * 4 + 1] = g[(2 * 4 + 1) * 4 + 1] + 1u8
+        val r = _exact(f, g, 4, 4)
+        expect(r.equal).to_equal(false)
+        expect(r.diagnostic.mismatch_count).to_equal(1)
+        expect(r.diagnostic.min_x).to_equal(1)
+        expect(r.diagnostic.max_x).to_equal(1)
+        expect(r.diagnostic.min_y).to_equal(2)
+        expect(r.diagnostic.max_y).to_equal(2)
+        expect(r.diagnostic.max_channel_delta).to_equal(1)
+
+    it "detects a one-pixel horizontal offset":
+        val f = _frame(4, 2)
+        var g: [u8] = []
+        var y = 0
+        while y < 2:
+            var x = 0
+            while x < 4:
+                val sx = if x == 0: 0 else: x - 1
+                var c = 0
+                while c < 4:
+                    g.push(f[(y * 4 + sx) * 4 + c])
+                    c = c + 1
+                x = x + 1
+            y = y + 1
+        val r = _exact(f, g, 4, 2)
+        expect(r.equal).to_equal(false)
+        expect(r.diagnostic.mismatch_count).to_be_greater_than(0)
+
+    it "detects wrong alpha even when color channels match":
+        val f = _frame(2, 2)
+        var g = f
+        g[3] = 128u8
+        val r = _exact(f, g, 2, 2)
+        expect(r.equal).to_equal(false)
+        expect(r.diagnostic.max_channel_delta).to_equal(127)
+
+    it "detects a missing glyph region and a stale frame":
+        val f = _frame(4, 4)
+        var glyphless = f
+        var i = 5
+        while i < 7:
+            glyphless[i * 4] = 255u8
+            glyphless[i * 4 + 1] = 255u8
+            glyphless[i * 4 + 2] = 255u8
+            i = i + 1
+        val missing = _exact(f, glyphless, 4, 4)
+        expect(missing.equal).to_equal(false)
+        expect(missing.diagnostic.min_x).to_equal(1)
+        expect(missing.diagnostic.max_x).to_equal(2)
+        var stale_frame = f
+        stale_frame[0] = stale_frame[0] + 90u8
+        val stale = _exact(f, stale_frame, 4, 4)
+        expect(stale.equal).to_equal(false)
+
+    it "rejects blank output even under a generous tolerance policy":
+        val f = _frame(4, 4)
+        var blank: [u8] = []
+        var i = 0
+        while i < 16:
+            blank.push(0u8)
+            blank.push(0u8)
+            blank.push(0u8)
+            blank.push(0u8)
+            i = i + 1
+        val fx = rendering_fixture_with_tolerance(rendering_fixture("gen", "button", "html", "x", 4, 4).unwrap(), "fixture:generous", 255, 16).unwrap()
+        val r = compare_rgba8_for_fixture(fx, f, blank, 4, 4, "chrome", "cpu", "raster", "fixture:generous", 255, 16).unwrap()
+        expect(r.equal).to_equal(false)
+        expect(r.blank_actual).to_equal(true)
+        expect(r.first_divergent_stage).to_equal("raster")
+
+    it "never resizes or aligns mismatched dimensions":
+        val f = _frame(4, 4)
+        expect(compare_rgba8(f, _frame(3, 5), 4, 4, RENDER_COMPARE_EXACT, 0).is_err()).to_equal(true)
