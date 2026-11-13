@@ -113,3 +113,18 @@ tracked seed bin/simple.exe (build 46fe8f6b6def, 2026-11-10):
   outcome=OK executed=1 passed=1 failed=0 rc=0. The commit records the same spec
   as red (timeout) on the old seed and green on the fixed seed — a live-socket
   green cannot be faked by the self-binding class.
+
+## Verification 2026-11-13 (lane http-20261113)
+
+Verified on refreshed seed #8654 worktree, 2026-11-13. Worktree
+`/c/dev/http-wt` @ 6a5f8e708f2, seed binary `bin/simple.exe` (37,622,272 bytes,
+mtime 2026-11-13 15:52). Command:
+
+```
+./bin/simple.exe test test/03_system/web/server/http_serve_loop_live_socket_spec.spl
+```
+
+Verdict: `outcome=OK declared>=1 executed=1 passed=1 failed=0` — the server
+survives the first accepted request and serves the response through the
+production `serve_loop` accept path. The 2026-11-11 FIXED status holds on this
+seed; no source change required.
