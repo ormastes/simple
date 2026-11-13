@@ -64,6 +64,11 @@ pub fn simple_web_rendering_parity_paint_payload(composition: DrawIrComposition)
                 out = out + ";transform=" + c.rotation_deg_milli.to_string() + "," + c.scale_x_pct.to_string() + "," + c.scale_y_pct.to_string()
     out
 
+# True when style and layout rows exist for every DOM node; a shorter array
+# would silently drop rows from the payloads, so observe marks it degraded.
+pub fn simple_web_rendering_parity_rows_complete(node_count: i64, style_count: i64, box_count: i64) -> bool:
+    style_count >= node_count and box_count >= node_count
+
 # Observe the production Simple Web pipeline once: parse -> cascade -> layout -> Draw IR.
 pub fn simple_web_rendering_parity_observe(html: text, width: i64, height: i64) -> SimpleWebParityObservation:
     val result = simple_web_layout_render_html_draw_ir_result(html, width as i32, height as i32)
@@ -90,6 +95,7 @@ pub fn simple_web_rendering_parity_observe(html: text, width: i64, height: i64) 
         if i < index.boxes.bx.len() and i < index.boxes.by.len() and i < index.boxes.bw.len() and i < index.boxes.bh.len():
             layout = layout + "\n" + i.to_string() + ";box=" + index.boxes.bx[i].to_string() + "," + index.boxes.by[i].to_string() + "," + index.boxes.bw[i].to_string() + "," + index.boxes.bh[i].to_string()
         i = i + 1
+    val box_rows = _min4(index.boxes.bx.len(), index.boxes.by.len(), index.boxes.bw.len(), index.boxes.bh.len())
     var commands = 0
     for batch in result.composition.batches:  # cpu-lane-loop-ok: counts commands of one built composition
         commands = commands + batch.commands.len()
@@ -97,7 +103,17 @@ pub fn simple_web_rendering_parity_observe(html: text, width: i64, height: i64) 
         node_count: index.nodes.len(), command_count: commands,
         dom_payload: dom, style_payload: style, layout_payload: layout,
         paint_payload: simple_web_rendering_parity_paint_payload(result.composition),
-        degraded: result.render_degraded, composition: result.composition)
+        degraded: result.render_degraded or not simple_web_rendering_parity_rows_complete(index.nodes.len(), index.styles.len(), box_rows), composition: result.composition)
+
+fn _min4(a: i64, b: i64, c: i64, d: i64) -> i64:
+    var m = a
+    if b < m:
+        m = b
+    if c < m:
+        m = c
+    if d < m:
+        m = d
+    m
 
 fn _payload_checksum(payload: text) -> u64:
     stable_bytes_checksum(payload.bytes())
