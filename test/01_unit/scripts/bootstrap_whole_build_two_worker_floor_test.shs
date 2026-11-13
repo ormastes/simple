@@ -1,0 +1,197 @@
+#!/bin/sh
+# Stage 2 whole-build phase: guarded two-worker build-threads floor.
+#
+# Run 20 (2026-11-13, release/1.0.0 10223749f6c, 121 GiB aarch64, busy host):
+#   whole-build phase: workers 1 (requested 8, host budget fits 1, ...),
+#   cap 29360128 KiB = base 4194304 KiB + worker floor 16777216 KiB x 150% x 1,
+#   host budget 31176993 KiB (3/4 of available 41569324 KiB)
+# One build thread ran compiler_cli_build HIR serially in-process (~28
+# modules/min, ~2 h). Owner rule: bootstrap builds use >= 2 workers even under
+# resource limits, guarded by the enforcing RSS watchdog. Mirrors
+# shard_threads_guarded_floor_v1 (src/app/cli/shard_mem_clamp.spl, #8522 with
+# the #8596 headroom precondition):
+#   - budget fits 1 + enforcing guard + cap2 <= available - reserve -> 2;
+#   - any precondition failing -> 1 plus a greppable
+#     "build-threads floor not applied: <reason>";
+#   - budget already fits >= 2 -> unchanged, no floor text.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+policy="$root/scripts/bootstrap/lib/tree-rss-policy.shs"
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/two-worker-floor.XXXXXX")
+trap 'rm -rf "$scratch"' EXIT INT TERM
+unset SIMPLE_BOOTSTRAP_RSS_CAP_MODE SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB \
+    SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB SIMPLE_BOOTSTRAP_TREE_RSS_HOST_PCT \
+    SIMPLE_HOST_TREE_RSS_HOST_PCT SIMPLE_HOST_CONFIG SIMPLE_HOST_ENV_FILE \
+    SIMPLE_BUILD_MEMORY_RESERVE_BYTES SIMPLE_HOST_MEM_RESERVE_FREE_MIB \
+    SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_KIB SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_WORKER_MARGIN_PCT \
+    SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_BASE_KIB BOOTSTRAP_TREE_RSS_MEMINFO_PATH SIMPLE_MIR_SHARD_WORKER_KB \
+    BOOTSTRAP_TREE_RSS_TEST_FIXTURE || :
+BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY=1
+export BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY
+checks=0
+fail() { echo "FAIL: $*" >&2; exit 1; }
+expect() { checks=$((checks + 1)); [ "$2" = "$3" ] || fail "$1: want '$2' got '$3'"; }
+expect_has() { checks=$((checks + 1)); case "$3" in *"$2"*) ;; *) fail "$1: want text '$2' in '$3'" ;; esac; }
+expect_lacks() { checks=$((checks + 1)); case "$3" in *"$2"*) fail "$1: unexpected text '$2' in '$3'" ;; esac; }
+
+# shellcheck disable=SC1090
+. "$policy"
+command -v bootstrap_tree_rss_two_worker_floor >/dev/null 2>&1 ||
+    fail "bootstrap_tree_rss_two_worker_floor is not defined by $policy"
+
+# floor REQUESTED FIT SMALL MODE AVAIL RESERVE CEILING -> workers:cap|note
+floor() {
+    bootstrap_tree_rss_two_worker_floor "$@"
+    printf '%s:%s|%s' "$bootstrap_tree_rss_floor_workers" "$bootstrap_tree_rss_floor_cap_kib" \
+        "$bootstrap_tree_rss_floor_note"
+}
+cap2=$((4194304 + 2 * 16777216))   # base + 2 x worker floor (no runaway margin)
+
+# 1. Budget fits 1, guard enforcing, cap2 37748736 <= 70000000 - 25165824.
+out=$(floor 8 1 0 enforce 70000000 25165824 50331648)
+expect 'fits-1 enforcing headroom -> 2 workers' "2:$cap2" "${out%%|*}"
+expect_has 'applied note' 'build-threads floor applied:' "$out"
+
+# 2. Run 20's host: 41569324 - 25165824 = 16403500 < cap2 -> keep 1, say why.
+out=$(floor 8 1 0 enforce 41569324 25165824 50331648)
+expect 'run-20 headroom fails -> 1 worker' '1:0' "${out%%|*}"
+expect_has 'run-20 reason line' 'build-threads floor not applied:' "$out"
+expect_has 'run-20 reason names headroom' 'available 41569324 KiB - reserve 25165824 KiB' "$out"
+
+# 3. Monitor mode: nothing enforces the two-worker cap.
+out=$(floor 8 1 0 monitor 70000000 25165824 50331648)
+expect 'monitor -> 1 worker' '1:0' "${out%%|*}"
+expect_has 'monitor reason' 'build-threads floor not applied: RSS cap mode monitor' "$out"
+
+# 4. Unknown host available memory / reserve is no evidence.
+out=$(floor 8 1 0 enforce '' 25165824 50331648)
+expect 'unknown available -> 1 worker' '1:0' "${out%%|*}"
+expect_has 'unknown available reason' 'build-threads floor not applied: host available memory unknown' "$out"
+out=$(floor 8 1 0 enforce 70000000 '' 50331648)
+expect 'unknown reserve -> 1 worker' '1:0' "${out%%|*}"
+expect_has 'unknown reserve reason' 'build-threads floor not applied: host memory reserve unknown' "$out"
+
+# 5. cap2 above the default hard ceiling: never request an elevated ceiling.
+out=$(floor 8 1 0 enforce 90000000 25165824 30000000)
+expect 'over ceiling -> 1 worker' '1:0' "${out%%|*}"
+expect_has 'over ceiling reason' 'exceeds the default hard ceiling 30000000 KiB' "$out"
+
+# 6. Small-host single-worker mode: one worker does not even fit the price.
+out=$(floor 8 1 1 enforce 70000000 25165824 50331648)
+expect 'small host -> 1 worker' '1:0' "${out%%|*}"
+expect_has 'small host reason' 'build-threads floor not applied: small-host' "$out"
+
+# 7. Budget already fits >= 2: unchanged, no floor text.
+expect 'fits 8 unchanged' '8:0|' "$(floor 8 8 0 enforce 70000000 25165824 50331648)"
+expect 'fits 2 unchanged' '2:0|' "$(floor 8 2 0 enforce 70000000 25165824 50331648)"
+# 8. A serial request stays serial (nothing to lift, nothing to explain).
+expect 'serial request stays serial' '1:0|' "$(floor 1 1 0 enforce 70000000 25165824 50331648)"
+
+# 9. Reserve twin of shard_tree_headroom_kib_v1: bytes env > host mib > min(24 GiB, total/2).
+expect 'reserve default big host' 25165824 "$(bootstrap_tree_rss_host_reserve_kib 127600812 '')"
+expect 'reserve default 32 GiB host' 16777216 "$(bootstrap_tree_rss_host_reserve_kib 33554432 '')"
+expect 'reserve unknown total keeps 24 GiB' 25165824 "$(bootstrap_tree_rss_host_reserve_kib '' '')"
+expect 'reserve bytes env' 12582912 "$(SIMPLE_BUILD_MEMORY_RESERVE_BYTES=12884901888 bootstrap_tree_rss_host_reserve_kib 127600812 '')"
+expect 'reserve host mib env' 8388608 "$(SIMPLE_HOST_MEM_RESERVE_FREE_MIB=8192 bootstrap_tree_rss_host_reserve_kib 127600812 '')"
+expect 'reserve junk bytes is unknown' '' "$(SIMPLE_BUILD_MEMORY_RESERVE_BYTES=12x bootstrap_tree_rss_host_reserve_kib 127600812 '')"
+expect 'reserve leading-zero bytes is unknown' '' "$(SIMPLE_BUILD_MEMORY_RESERVE_BYTES=0812 bootstrap_tree_rss_host_reserve_kib 127600812 '')"
+expect 'reserve sub-KiB bytes is unknown' '' "$(SIMPLE_BUILD_MEMORY_RESERVE_BYTES=512 bootstrap_tree_rss_host_reserve_kib 127600812 '')"
+expect 'reserve leading-zero host mib not octal' 8388608 "$(SIMPLE_HOST_MEM_RESERVE_FREE_MIB=08192 bootstrap_tree_rss_host_reserve_kib 127600812 '')"
+
+# 10. Wiring through the real plan. The production probe refuses meminfo
+#     fixtures while enforcing, so the enforce-mode cases replace the probe
+#     function in this subshell only (the production fixture guard is not
+#     touched); the monitor-mode case uses the ordinary fixture path.
+# plan_enforce TOTAL AVAIL REQUESTED -> workers:cap:ceiling:bound:cli_row_cap|summary
+plan_enforce() (
+    pe_total=$1 pe_avail=$2
+    bootstrap_tree_rss_probe_host() {
+        bootstrap_tree_rss_host_total_kib=$pe_total
+        bootstrap_tree_rss_host_available_kib=$pe_avail
+        bootstrap_tree_rss_host_total_source=proc-meminfo
+    }
+    SIMPLE_BOOTSTRAP_RSS_CAP_MODE=enforce
+    bootstrap_tree_rss_whole_build_plan "$3" '' || { printf 'REFUSED=%s' "$bootstrap_tree_rss_refusal"; exit 0; }
+    printf '%s:%s:%s:%s:%s|%s' "$bootstrap_tree_rss_plan_workers" "$bootstrap_tree_rss_plan_cap_kib" \
+        "$bootstrap_tree_rss_plan_ceiling_kib" "$bootstrap_tree_rss_plan_bound" \
+        "$bootstrap_tree_rss_plan_cli_row_cap_kib" "$bootstrap_tree_rss_plan_summary"
+)
+# 121 GiB host with 66 GiB available: budget 3/4 x 70000000 = 52500000 fits 1
+# at 25165824; 70000000 - 25165824 holds cap2 -> 2 workers at cap2, ADMITTED
+# (no compiler_cli_build 60 GiB row elevation, no elevated ceiling).
+out=$(plan_enforce 127600812 70000000 8)
+expect 'plan enforce floor applied' "2:$cap2:0:two-worker-guarded-floor:$cap2" "${out%%|*}"
+expect_has 'plan summary keeps the fit' 'workers 2 (requested 8, host budget fits 1' "$out"
+expect_has 'plan summary applied line' 'build-threads floor applied:' "$out"
+# Run 20 numbers: floor not applied, one worker exactly as before, reason logged.
+out=$(plan_enforce 127600812 41569324 8)
+expect 'plan enforce run-20 unchanged' '1:29360128:0:worker-floor:29360128' "${out%%|*}"
+expect_has 'plan run-20 reason line' 'build-threads floor not applied:' "$out"
+# Idle host, budget fits 2: unchanged plan, no floor text.
+out=$(plan_enforce 127600812 112044352 8)
+expect 'plan enforce fits 2 unchanged' '2:54525952:54525952:worker-floor-elevated:62914560' "${out%%|*}"
+expect_lacks 'plan fits 2 has no floor text' 'build-threads floor' "$out"
+# Export: 2 workers, the floor cap, no elevated ceiling, no 60 GiB row, and
+# MIR pinned to one worker at the run-11 measured peak (reviewer finding:
+# the pool's 9 GB static MIR estimate would admit 2 x 19-25 GiB under cap2).
+# export_enforce AVAIL [SETUP] -> threads:cap:ceiling:bound:cli_row:mir_kb
+export_enforce() (
+    ee_avail=$1
+    bootstrap_tree_rss_probe_host() {
+        bootstrap_tree_rss_host_total_kib=127600812
+        bootstrap_tree_rss_host_available_kib=$ee_avail
+        bootstrap_tree_rss_host_total_source=proc-meminfo
+    }
+    SIMPLE_BOOTSTRAP_RSS_CAP_MODE=enforce
+    [ -z "${2:-}" ] || eval "$2"
+    bootstrap_tree_rss_whole_build_export 8 '' || { printf 'REFUSED=%s' "$bootstrap_tree_rss_refusal"; exit 0; }
+    printf '%s:%s:%s:%s:%s:%s' "$BOOTSTRAP_VERIFY_BUILD_THREADS" "$SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB" \
+        "${SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB:-none}" "$SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND" \
+        "${SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CAP_KIB:-none}" "${SIMPLE_MIR_SHARD_WORKER_KB:-unset}"
+)
+expect 'export floor admitted, MIR pinned' "2:$cap2:none:two-worker-guarded-floor:none:26424115" "$(export_enforce 70000000)"
+expect 'export floor keeps a caller MIR estimate' "2:$cap2:none:two-worker-guarded-floor:none:30000000" \
+    "$(export_enforce 70000000 'SIMPLE_MIR_SHARD_WORKER_KB=30000000; export SIMPLE_MIR_SHARD_WORKER_KB')"
+# (Budget fits 2 is pinned at the plan level above: its export re-admits an
+# elevated ceiling against the REAL /proc/meminfo, so it is not deterministic.)
+# Run 20: one worker as before, MIR untouched.
+expect 'export run-20 unchanged' '1:29360128:none:worker-floor:none:unset' "$(export_enforce 41569324)"
+# A floored export followed by an unfloored one withdraws its own MIR pin.
+out=$(
+    bootstrap_tree_rss_probe_host() {
+        bootstrap_tree_rss_host_total_kib=127600812
+        bootstrap_tree_rss_host_available_kib=$ee_avail
+        bootstrap_tree_rss_host_total_source=proc-meminfo
+    }
+    SIMPLE_BOOTSTRAP_RSS_CAP_MODE=enforce
+    ee_avail=70000000; bootstrap_tree_rss_whole_build_export 8 '' || exit 1
+    unset SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB
+    ee_avail=41569324; bootstrap_tree_rss_whole_build_export 8 '' || exit 1
+    printf '%s:%s' "$BOOTSTRAP_VERIFY_BUILD_THREADS" "${SIMPLE_MIR_SHARD_WORKER_KB:-unset}"
+)
+expect 'export withdraws its own MIR pin' '1:unset' "$out"
+# The pin must reach the compiler: compiler_cli_build launches through
+# phase-c-tool-row-exec.shs (`env -i` plus bootstrap_phase_c_tool_row_environment_keys),
+# so a floored export run through that real wrapper must hand the child the
+# MIR estimate (reviewer finding: the parent-only check passed while it was dropped).
+out=$(
+    bootstrap_tree_rss_probe_host() {
+        bootstrap_tree_rss_host_total_kib=127600812
+        bootstrap_tree_rss_host_available_kib=70000000
+        bootstrap_tree_rss_host_total_source=proc-meminfo
+    }
+    SIMPLE_BOOTSTRAP_RSS_CAP_MODE=enforce
+    bootstrap_tree_rss_whole_build_export 8 '' || exit 1
+    unset SIMPLE_BOOTSTRAP_SESSION_ID SIMPLE_BOOTSTRAP_SESSION_EXEC
+    sh "$root/scripts/bootstrap/phase-c-tool-row-exec.shs" sh -c 'printf "%s" "${SIMPLE_MIR_SHARD_WORKER_KB:-dropped}"'
+)
+expect 'tool row child sees the MIR pin' 26424115 "$out"
+# Monitor-mode fixture (the ordinary selftest path): 40 GB available fits 1,
+# floor not applied and said so.
+printf 'MemTotal:       127600812 kB\nMemFree:        30000000 kB\nMemAvailable:    40000000 kB\n' >"$scratch/busy"
+out=$(SIMPLE_BOOTSTRAP_RSS_CAP_MODE=monitor BOOTSTRAP_TREE_RSS_MEMINFO_PATH="$scratch/busy" \
+    BOOTSTRAP_TREE_RSS_TEST_FIXTURE=1 sh "$policy" --whole-build-plan 8 '')
+expect_has 'monitor plan one worker' 'workers=1' "$out"
+expect_has 'monitor plan reason line' 'build-threads floor not applied: RSS cap mode monitor' "$out"
+
+echo "PASS — $checks check(s): guarded two-worker build-threads floor"
