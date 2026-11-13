@@ -114,3 +114,14 @@ and resolves no binary, so no fallback can explain it. Every failing example in 
 is a ratio pin (`stays within 3x`, `linear pin`); **no semantics example failed on either
 seed in any run.**
 
+
+
+## 2026-11-13 triage (lane p3-io, work/p3-io-20261113)
+
+Still OPEN, confirmed minor; no status change. `interpreter_component_scaling_spec.spl`
+still pins within-process wall-clock ratios (`report_ratio`, `ratio_x10`, < 7 bound).
+Migrating it to counts / loose ceilings / child-CPU-time is spec authoring, not a
+code fix, and — because the underlying condition (flaky ratios on a loaded host) is
+the very thing being measured — a rewritten pin cannot be reliably re-verified on
+this host. Left for the owning perf lane with its own before/after evidence rather
+than migrated blind here. No change in this closure.

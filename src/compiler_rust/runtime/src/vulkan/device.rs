@@ -494,12 +494,31 @@ impl VulkanDevice {
             .enabled_features(&features)
             .enabled_extension_names(&extension_names);
 
-        let device = unsafe {
-            instance
-                .instance()
-                .create_device(physical_device.handle, &create_info, None)
-                .map_err(|e| VulkanError::DeviceCreationFailed(format!("{:?}", e)))?
-        };
+        // Bounded retry on VK_ERROR_INITIALIZATION_FAILED only (NVIDIA under
+        // concurrent device creation); one call and no sleep on success.
+        let (created, attempts) = crate::vulkan_create_device_retry::vk_create_device_with_retry(
+            || unsafe {
+                instance
+                    .instance()
+                    .create_device(physical_device.handle, &create_info, None)
+                    .map_err(|e| e.as_raw())
+            },
+            crate::vulkan_create_device_retry::vk_retry_sleep_ms,
+        );
+        let device = created.map_err(|r| {
+            let devices = instance.enumerate_devices().unwrap_or_default();
+            let index = devices
+                .iter()
+                .position(|d| d.handle == physical_device.handle)
+                .unwrap_or(0);
+            VulkanError::DeviceCreationFailed(crate::vulkan_create_device_retry::vk_create_device_error(
+                index,
+                devices.len(),
+                compute_family,
+                attempts,
+                r,
+            ))
+        })?;
         let mut build = VulkanDeviceBuildGuard::new(device);
         let device = build.handle().clone();
 

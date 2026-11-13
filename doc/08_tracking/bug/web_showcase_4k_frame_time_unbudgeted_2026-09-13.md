@@ -55,6 +55,20 @@ recorded somewhere the gate reads; the non-monotonicity above should be
 investigated first, since it suggests the dominant cost is not where a
 frame-time budget would assume it is.
 
+## 2026-11-13 triage (UI batch B, Linux aarch64, release/1.0.0 @ 35144b7f5e93): blocked on an owner decision
+
+No change in the tree: `scripts/check/check-web-showcase-4k-receipt.shs`
+still pins geometry and schema only. This record asks for two things this lane
+cannot supply:
+
+- an owner decision on whether 4K frame time is a gated property;
+- per-size measurements on a known reference host. The numbers above are from
+  an Apple M-series host; this lane runs on a shared Linux aarch64 box with
+  other agents' load, so a number measured here would not be a budget.
+
+Pinning a threshold from this host would invent the budget this record says
+must not be invented. Row stays open; no timing assertion was added.
+
 
 ---
 

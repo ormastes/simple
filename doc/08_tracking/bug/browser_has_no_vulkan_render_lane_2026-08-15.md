@@ -175,6 +175,19 @@ seed-owned. Grant: run the rspirv 0.12 re-vendor
 `dr/build/` module tree and `.cargo-checksum.json` intact), then add the driver
 feature forwarding `simple-runtime/vulkan` + `simple-compiler/vulkan`.
 
+## 2026-11-13 triage (UI batch B, Linux aarch64, release/1.0.0 @ 35144b7f5e93): open, out of this lane
+
+Unchanged since the 2026-11-11 addendum. Both remaining items are outside what
+this lane may edit:
+
+- Gap 1 (browser draw IR painted through engine2d GPU primitives) is a
+  design-level feature inside the engine2d Vulkan backend, which belongs to
+  the Vulkan/engine2d batch and the vk-init lane.
+- Compiler-side SPIR-V needs the `rspirv 0.12` re-vendor under
+  `src/compiler_rust/vendor/`, a seed-owner job.
+
+Row stays open. No source change.
+
 
 ---
 
