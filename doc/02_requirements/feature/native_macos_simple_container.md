@@ -15,3 +15,24 @@ providers share common identity, lifecycle, admission, and receipt values.
 Mac App Sandbox is a `native-sandbox` capability, not a claim of Linux/Windows
 kernel container isolation. Do not admit unrelated concurrent tenants through
 one shared App Sandbox identity without separate isolation evidence.
+
+## Seatbelt lane: portable policy profile (SC-MAC, 2026-11-13)
+
+The direct-Seatbelt lane (`macos-seatbelt-process`, design
+`doc/05_design/simple_container_macos_seatbelt.md`) is separate from the
+signed-App-Sandbox requirements above, which are unchanged. Its portable
+policy layer is implemented in pure Simple and runs on any host:
+
+- Schemas `simple-container-seatbelt-policy-v1` and `simple-endpoint-network-v1`
+  (`src/lib/common/container_policy/*_schema.sdn`), strict-decoded with the
+  canonical SDN parser and source spans (SC-MAC-017).
+- Separate read-data / read-metadata / write / execute / IPC grants with
+  explicit recursive scope, and deterministic grant/deny overlap refusal over
+  resolved host facts (SC-MAC-005, SC-MAC-006).
+- Evidence profiles `strict-owned-attempt-v1` and `finite-parent-owned-v1`;
+  admission refuses `pod-ip-v1`, unenforceable hard limits and unobserved
+  strict descendant absence before any effect (SC-MAC-011, -014, -018).
+
+Every host without recorded native evidence reports `Unqualified`, so
+admission is blocked (SCMAC-PLATFORM-001). Real macOS qualification of
+enforcement remains open; no requirement here is satisfied by these models.

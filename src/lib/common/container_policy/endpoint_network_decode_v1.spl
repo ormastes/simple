@@ -1,0 +1,166 @@
+# Strict decoder for `simple-endpoint-network-v1` (design §11.1, §13.4, §13.5).
+#
+# Same parser and strict profile as the seatbelt policy decoder. The CIDR
+# allocates broker addresses only. Default ingress/egress are fixed `deny`
+# (SC-MAC-007): reachability comes only from explicit rules. An allow rule and
+# a deny rule that can match the same flow are refused deterministically
+# (SCMAC-NET-004) instead of depending on rule order.
+
+use std.common.sdn.value.{SdnValue, SdnSpan}
+use std.common.diagnostics.diagnostic_v1.{DiagnosticV1}
+use std.common.contracts.orchestration.resource_v1.{
+    RejectionV1, reject, as_dict, as_array, as_text, as_int, only_known, require}
+use std.common.contracts.container.sandbox_capability_v1.{SCMAC_NET_004}
+use std.common.contracts.container.endpoint_policy_v1.*
+use std.common.container_policy.diagnostics_v1.{scmac_schema_diagnostic_v1, scmac_diagnostic_v1}
+use std.common.container_policy.sandbox_policy_decode_v1.{
+    policy_parse_bounded_v1, policy_schema_v1, policy_ident_v1, policy_ident_ok_v1, policy_choice_v1,
+    policy_section_v1, policy_bounded_int_v1}
+
+pub const ENDPOINT_NETWORK_SCHEMA_V1 = "simple-endpoint-network-v1"
+pub const ENDPOINT_NETWORK_MAX_BYTES_V1 = 131072
+pub const ENDPOINT_NETWORK_MAX_RULES_V1 = 256
+
+# DNS-like name: dot-separated labels of [a-z0-9-], no leading/trailing '-',
+# label 1..63, total 1..253. Lowercase only so the spelling is canonical.
+pub fn endpoint_dns_name_ok_v1(s: text) -> bool:
+    if s.byte_len() < 1 or s.byte_len() > 253:
+        return false
+    for label in s.split("."):
+        val n = label.byte_len()
+        if n < 1 or n > 63:
+            return false
+        for i in 0..n:
+            val c = label.byte_at(i) as i64
+            val ok = (c >= 97 and c <= 122) or (c >= 48 and c <= 57) or c == 45
+            if not ok:
+                return false
+        if label.byte_at(0) as i64 == 45 or label.byte_at(n - 1) as i64 == 45:
+            return false
+    true
+
+fn dns_or_any(v: SdnValue, path: text, spans: Dict<text, SdnSpan>) -> Result<text, RejectionV1>:
+    val s = as_text(v, path, spans)?
+    if s == "*" or endpoint_dns_name_ok_v1(s):
+        return Ok(s)
+    Err(reject("dns_name", path, path + " must be a lowercase DNS name or '*'", spans))
+
+fn decode_rule(v: SdnValue, path: text, spans: Dict<text, SdnSpan>) -> Result<EndpointRuleV1, RejectionV1>:
+    val f = as_dict(v, path, spans)?
+    only_known(f, ["sourceRole", "destinationService", "destinationHost", "protocol", "port", "action"], path, spans)?
+    val role = as_text(require(f, "sourceRole", path, spans)?, path + ".sourceRole", spans)?
+    if role != "*" and not policy_ident_ok_v1(role):
+        return Err(reject("identifier", path + ".sourceRole", path + ".sourceRole must be an identifier or '*'", spans))
+    val has_svc = f.contains_key("destinationService")
+    val has_host = f.contains_key("destinationHost")
+    if has_svc == has_host:
+        return Err(reject("destination", path,
+            path + " must set exactly one of destinationService or destinationHost", spans))
+    var dest = EndpointDestinationV1.Service("")
+    if has_svc:
+        dest = EndpointDestinationV1.Service(dns_or_any(f["destinationService"], path + ".destinationService", spans)?)
+    else:
+        dest = EndpointDestinationV1.Host(dns_or_any(f["destinationHost"], path + ".destinationHost", spans)?)
+    # UDP/raw/ICMP are not v1 protocols (§3.2, §11.10): refused, never proxied.
+    val proto = policy_choice_v1(f, "protocol", path, ["tcp"], spans)?
+    val port = policy_bounded_int_v1(f, "port", path, 1, 65535, spans)?
+    val action_s = policy_choice_v1(f, "action", path, ["allow", "deny"], spans)?
+    var action = EndpointPermissionV1.Deny
+    if action_s == "allow":
+        action = EndpointPermissionV1.Allow
+    Ok(EndpointRuleV1(source_role: role, destination: dest, protocol: proto, port: port, action: action))
+
+fn decode_network_strict(source: text) -> Result<(EndpointNetworkV1, Dict<text, SdnSpan>), RejectionV1>:
+    val parsed = policy_parse_bounded_v1(source, ENDPOINT_NETWORK_MAX_BYTES_V1)?
+    val spans = parsed.1
+    val top = as_dict(parsed.0, "", spans)?
+    only_known(top, ["schema", "name", "namespace", "generation", "addressing", "discovery", "policy"], "document", spans)?
+    policy_schema_v1(top, ENDPOINT_NETWORK_SCHEMA_V1, spans)?
+    val name = policy_ident_v1(top, "name", "", spans)?
+    val ns = policy_ident_v1(top, "namespace", "", spans)?
+    val generation = policy_bounded_int_v1(top, "generation", "", 1, 9007199254740991, spans)?
+    val addr = policy_section_v1(top, "addressing", ["mode", "cidr"], spans)?
+    policy_choice_v1(addr, "mode", "addressing", ["logical-ipv4"], spans)?
+    val cidr_s = as_text(require(addr, "cidr", "addressing", spans)?, "addressing.cidr", spans)?
+    var cidr = LogicalCidrV1(base: 0, prefix_len: 0)
+    match logical_cidr_parse_v1(cidr_s):
+        case Ok(c): cidr = c
+        case Err(e): return Err(reject("cidr", "addressing.cidr", "addressing.cidr '" + cidr_s + "': " + e, spans))
+    val disc = policy_section_v1(top, "discovery", ["suffix", "mode"], spans)?
+    val suffix = as_text(require(disc, "suffix", "discovery", spans)?, "discovery.suffix", spans)?
+    if not endpoint_dns_name_ok_v1(suffix):
+        return Err(reject("dns_name", "discovery.suffix", "discovery.suffix must be a lowercase DNS name", spans))
+    policy_choice_v1(disc, "mode", "discovery", ["broker"], spans)?
+    val pol = policy_section_v1(top, "policy", ["defaultIngress", "defaultEgress", "rules"], spans)?
+    policy_choice_v1(pol, "defaultIngress", "policy", ["deny"], spans)?
+    policy_choice_v1(pol, "defaultEgress", "policy", ["deny"], spans)?
+    var rules: [EndpointRuleV1] = []
+    if pol.contains_key("rules"):
+        val items = as_array(pol["rules"], "policy.rules", spans)?
+        if items.len() > ENDPOINT_NETWORK_MAX_RULES_V1:
+            return Err(reject("size", "policy.rules",
+                "policy.rules exceeds " + ENDPOINT_NETWORK_MAX_RULES_V1.to_text() + " entries", spans))
+        for i in 0..items.len():
+            rules.push(decode_rule(items[i], "policy.rules." + i.to_text(), spans)?)
+    Ok((EndpointNetworkV1(name: name, ns: ns, generation: generation, cidr: cidr, discovery_suffix: suffix,
+        default_ingress: EndpointPermissionV1.Deny, default_egress: EndpointPermissionV1.Deny, rules: rules), spans))
+
+fn match_any(a: text, b: text) -> bool:
+    a == "*" or b == "*" or a == b
+
+fn destinations_overlap(a: EndpointDestinationV1, b: EndpointDestinationV1) -> bool:
+    val an = endpoint_destination_name_v1(a)
+    val bn = endpoint_destination_name_v1(b)
+    var same_kind = false
+    match a:
+        case EndpointDestinationV1.Service(_):
+            match b:
+                case EndpointDestinationV1.Service(_): same_kind = true
+                case _: same_kind = false
+        case EndpointDestinationV1.Host(_):
+            match b:
+                case EndpointDestinationV1.Host(_): same_kind = true
+                case _: same_kind = false
+    same_kind and match_any(an, bn)
+
+# True when some flow can match both rules.
+pub fn endpoint_rules_overlap_v1(a: EndpointRuleV1, b: EndpointRuleV1) -> bool:
+    match_any(a.source_role, b.source_role) and destinations_overlap(a.destination, b.destination) and
+        a.protocol == b.protocol and a.port == b.port
+
+# §13.5: allow/deny pairs that overlap are refused in a deterministic order
+# (first by allow-rule index, then deny-rule index), independent of how a
+# matcher would iterate.
+pub fn endpoint_rule_conflicts_v1(net: EndpointNetworkV1, spans: Dict<text, SdnSpan>, source_ref: text) -> [DiagnosticV1]:
+    var out: [DiagnosticV1] = []
+    for i in 0..net.rules.len():
+        val a = net.rules[i]
+        if not endpoint_permission_allows_v1(a.action):
+            continue
+        for j in 0..net.rules.len():
+            val d = net.rules[j]
+            if endpoint_permission_allows_v1(d.action):
+                continue
+            if endpoint_rules_overlap_v1(a, d):
+                val rpath = "policy.rules." + i.to_text()
+                var line = 0
+                var col = 0
+                if spans.contains_key(rpath):
+                    line = spans[rpath].line
+                    col = spans[rpath].column
+                out.push(scmac_diagnostic_v1(SCMAC_NET_004,
+                    "allow rule policy.rules." + i.to_text() + " overlaps deny rule policy.rules." + j.to_text() +
+                    " (" + endpoint_destination_text_v1(a.destination) + " tcp/" + a.port.to_text() +
+                    "); narrow one rule instead of relying on rule order",
+                    source_ref, rpath, line, col))
+    out
+
+pub fn endpoint_network_decode_v1(sdn_bytes: text, source_ref: text) -> Result<EndpointNetworkV1, [DiagnosticV1]>:
+    match decode_network_strict(sdn_bytes):
+        case Err(r): return Err([scmac_schema_diagnostic_v1(r, source_ref)])
+        case Ok(parsed):
+            val net = parsed.0
+            val conflicts = endpoint_rule_conflicts_v1(net, parsed.1, source_ref)
+            if conflicts.len() > 0:
+                return Err(conflicts)
+            return Ok(net)
