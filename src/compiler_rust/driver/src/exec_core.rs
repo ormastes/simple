@@ -1652,6 +1652,19 @@ fn jit_failure_must_propagate(jit_err: &str, strict_all: bool) -> bool {
     strict_all
         || jit_err.contains("SIMPLE_JIT_STRICT:")
         || jit_err.contains("error[option-pattern-shape]")
+        || is_private_fn_visibility_error(jit_err)
+}
+
+/// A private-fn visibility rejection (import rule or call rule) is a
+/// compile-time verdict, not a JIT capability gap: re-running the program on
+/// the interpreter would execute code the language rejects. It used to do
+/// exactly that -- the retry reused the leaked "loading" mark, took the
+/// circular-import path, skipped the check, and exited 0.
+/// See doc/08_tracking/bug/visibility_error_jit_fallback_fail_open_2026-11-13.md.
+fn is_private_fn_visibility_error(jit_err: &str) -> bool {
+    jit_err.contains("private fn `")
+        && jit_err.contains("is not visible to")
+        && jit_err.contains(simple_compiler::interpreter::PRIVATE_FN_VISIBILITY_HINT)
 }
 
 /// Shared helper for the JIT-compile failure paths that represent a genuine
@@ -2261,6 +2274,55 @@ mod execution_mode_validation_tests {
             false
         ));
         assert!(jit_failure_must_propagate(raw_codegen_error, true));
+    }
+
+    /// visibility_error_jit_fallback_fail_open_2026-11-13: both producers of a
+    /// private-fn visibility rejection (import rule, call rule) must stop the
+    /// JIT -> interpreter fallback; an unrelated semantic error must not.
+    #[test]
+    fn private_fn_visibility_errors_never_fall_back() {
+        let import_rule = "semantic: private fn `secret_helper` of module `app.sub.lib_mod` (/r/app/sub/lib_mod.spl) \
+                           is not visible to /r/app/main.spl; mark it `pub` or `export` it";
+        let call_rule = "semantic: private fn `secret_helper` of module `/r/a/m.spl` is not visible to /r/b/c.spl; \
+                         mark it `pub` or `export` it";
+        assert!(jit_failure_must_propagate(import_rule, false));
+        assert!(jit_failure_must_propagate(call_rule, false));
+        assert!(!jit_failure_must_propagate("semantic: function secret_helper not found", false));
+    }
+
+    /// End to end on the default (JIT) lane: a main-less product file that
+    /// imports a private fn from another directory must be rejected, not run on
+    /// the interpreter fallback. Red before the fix: Ok(0) after printing 42.
+    #[test]
+    fn private_import_from_other_dir_fails_closed_on_jit_lane() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sub = dir.path().join("app").join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(
+            sub.join("lib_mod.spl"),
+            "fn secret_helper() -> i64:\n    42\npub fn open_api() -> i64:\n    secret_helper()\n",
+        )
+        .unwrap();
+        let entry = dir.path().join("app").join("main.spl");
+        std::fs::write(&entry, "use app.sub.lib_mod.{secret_helper}\nprint secret_helper()\n").unwrap();
+        let core = super::ExecCore::new();
+        if !core.execution_mode.is_jit() {
+            return; // SIMPLE_EXECUTION_MODE overrides the lane under test
+        }
+        let result = core.run_file_with_args(&entry, vec![]);
+        let err = result.expect_err("private import must be rejected, not executed by the interpreter fallback");
+        assert!(err.contains("is not visible to"), "unexpected error: {err}");
+        // The loader half of the fix: a rejected import must not leave the
+        // module marked "loading", or any later in-process load of it takes
+        // the circular-import path, skips the check, and runs. Red before the
+        // fix: the second interpreted run returned Ok(0).
+        for attempt in 0..2 {
+            let again = core.run_file_interpreted(&entry);
+            assert!(
+                again.as_ref().is_err_and(|e| e.contains("is not visible to")),
+                "interpreted retry #{attempt} must still reject: {again:?}"
+            );
+        }
     }
 
     /// Every documented spelling must parse, and must parse to the lane its
