@@ -93,6 +93,7 @@ use compiler.driver.driver_build.native_file_worker_v1.{NATIVE_FILE_WORKERS_ENV_
     native_file_worker_owner_claims_v1, native_file_worker_terminal_state_v1, native_file_worker_inventory_rows_v1,
     native_file_worker_hir_ledger_state_v1, native_file_worker_hir_gate_verdict_v1, NATIVE_FILE_WORKER_HIR_GATE_BUDGET_MS_V1,
     native_file_worker_object_path_v1, file_worker_overlap_proven_v1,
+    native_file_worker_hir_ledger_progress_v1,
     NATIVE_BOOTSTRAP_WHOLE_PROGRAM_ENV_V1, file_worker_module_scoped_selected_v1,
     NativeFileUnitInvokerV1, NATIVE_FILE_WORKER_UNIT_ENV_V1}
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_complete, HIR_SHARD_FORK_OWNER_MARK_V1,
@@ -1832,8 +1833,12 @@ pub fn run_native_file_worker_v1(args: [text]) -> i64:
             time_now_monotonic_ms() - gate_started_ms, NATIVE_FILE_WORKER_HIR_GATE_BUDGET_MS_V1)
     if state == -2:
         val waited_ms = time_now_monotonic_ms() - gate_started_ms
-        native_file_worker_note_error_v1(mir_queue, owner,
-            "HIR gate deadline: ledger incomplete after {waited_ms}ms (budget {NATIVE_FILE_WORKER_HIR_GATE_BUDGET_MS_V1}ms) unclaimed={hir_shard_recovery_unclaimed_count(hir_queue)}; MIR not admitted")
+        val (ledger_rows, ledger_passed) = native_file_worker_hir_ledger_progress_v1(hir_queue)
+        val gate_reason = "HIR gate deadline: ledger incomplete after {waited_ms}ms (budget {NATIVE_FILE_WORKER_HIR_GATE_BUDGET_MS_V1}ms) passed={ledger_passed}/{ledger_rows}; MIR not admitted"
+        # Cascade: BLOCKED makes every sibling still polling this gate see -1
+        # on its next poll instead of each waiting out its own budget.
+        val _blocked = hir_shard_recovery_block(hir_queue, gate_reason)
+        native_file_worker_note_error_v1(mir_queue, owner, gate_reason)
         return 1
     if state < 0:
         native_file_worker_note_error_v1(mir_queue, owner, "HIR ledger has a non-PASS module; MIR not admitted")
