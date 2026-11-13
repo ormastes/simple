@@ -3258,3 +3258,7 @@ mod abort_tests;
 #[cfg(test)]
 #[path = "cranelift_error_latch_tests.rs"]
 mod error_latch_tests;
+
+#[cfg(all(test, any(target_arch = "x86_64", target_arch = "aarch64")))]
+#[path = "cranelift_jit_runtime_symbols_tests.rs"]
+mod jit_runtime_symbols_tests;
