@@ -72,3 +72,10 @@ bin/simple run examples/09_embedded/simpleos_nvme_fw/fw/nvme_emu_recovery_check.
 (verdict line `NVME EMU RECOVERY OK`; the RBER finding is recorded in the
 comment block above the health assertions, not asserted).
 
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+open NVMe-emulator modeling gap; owner: rel_health/nvme lane with emulator fixtures.

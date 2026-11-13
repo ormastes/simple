@@ -1,52 +1,58 @@
-"""Modeled SEH frame-chain planning for Wine fault dispatch."""
+"""Modeled Wine SEH frame-chain dispatch planner.
 
-use common.wine_vm_adapter.{WineVmFault, wine_vm_fault_evidence}
-use common.wine_vm_gate.{wine_vm_fault_gate}
+Given a fault, the candidate thread stack frames, and the mapped executable
+image bounds, decide whether a Windows SEH handler dispatch can be PLANNED.
+This module never executes a handler: it validates the dispatch preconditions
+(policy is `deliver-seh`, at least one in-bounds thread frame belongs to the
+faulting thread, the frame's handler address falls inside the mapped image)
+and returns an evidence-tagged plan or a blocked verdict.
+"""
+
+use common.wine_vm_adapter.{WineVmFault}
 
 class WineSehFrame:
     process_id: i64
     thread_id: i64
-    frame_address: i64
-    handler_address: i64
-    stack_limit: i64
-    stack_base: i64
-    active: bool
+    frame_addr: i64
+    handler_addr: i64
+    stack_low: i64
+    stack_high: i64
 
 class WineSehDispatchResult:
     ok: bool
-    error: text
-    process_id: i64
-    thread_id: i64
-    fault_address: i64
+    status: text
     handler_address: i64
     frame_count: i64
-    evidence: text
-    status: text
+    evidence: [text]
+    error: text
 
-fn _wine_seh_frame_result(ok: bool, error: text, process_id: i64, thread_id: i64, fault_address: i64, handler_address: i64, frame_count: i64, evidence: text, status: text) -> WineSehDispatchResult:
-    WineSehDispatchResult(ok: ok, error: error, process_id: process_id, thread_id: thread_id, fault_address: fault_address, handler_address: handler_address, frame_count: frame_count, evidence: evidence, status: status)
+pub fn wine_seh_frame_new(process_id: i64, thread_id: i64, frame_addr: i64, handler_addr: i64, stack_low: i64, stack_high: i64) -> WineSehFrame:
+    WineSehFrame(process_id: process_id, thread_id: thread_id, frame_addr: frame_addr, handler_addr: handler_addr, stack_low: stack_low, stack_high: stack_high)
 
-pub fn wine_seh_frame_new(process_id: i64, thread_id: i64, frame_address: i64, handler_address: i64, stack_limit: i64, stack_base: i64) -> WineSehFrame:
-    WineSehFrame(process_id: process_id, thread_id: thread_id, frame_address: frame_address, handler_address: handler_address, stack_limit: stack_limit, stack_base: stack_base, active: true)
+fn _seh_result(ok: bool, status: text, handler_address: i64, frame_count: i64, evidence: [text], error: text) -> WineSehDispatchResult:
+    WineSehDispatchResult(ok: ok, status: status, handler_address: handler_address, frame_count: frame_count, evidence: evidence, error: error)
+
+fn _image_contains(image_base: i64, image_size: i64, address: i64) -> bool:
+    address >= image_base and address < image_base + image_size
+
+fn _frame_belongs_to_fault(frame: WineSehFrame, fault: WineVmFault) -> bool:
+    frame.process_id == fault.process_id and frame.thread_id == fault.thread_id
+
+fn _frame_in_stack_bounds(frame: WineSehFrame) -> bool:
+    frame.frame_addr >= frame.stack_low and frame.frame_addr < frame.stack_high
 
 pub fn wine_seh_dispatch_fault(fault: WineVmFault, frames: [WineSehFrame], image_base: i64, image_size: i64) -> WineSehDispatchResult:
-    val fault_state = wine_vm_fault_gate(wine_vm_fault_evidence(fault))
-    if fault_state != "ready":
-        return _wine_seh_frame_result(false, "fault:" + fault_state, fault.process_id, fault.thread_id, fault.address, 0, 0, wine_vm_fault_evidence(fault) + " seh-dispatch-blocked", "rejected")
     if fault.policy != "deliver-seh":
-        return _wine_seh_frame_result(false, "seh-policy:" + fault.policy, fault.process_id, fault.thread_id, fault.address, 0, 0, wine_vm_fault_evidence(fault) + " seh-dispatch-blocked", "blocked")
-    if image_base <= 0 or image_size <= 0:
-        return _wine_seh_frame_result(false, "invalid-image-range", fault.process_id, fault.thread_id, fault.address, 0, 0, wine_vm_fault_evidence(fault) + " seh-dispatch-blocked", "rejected")
-
-    var count = 0
+        return _seh_result(false, "seh-dispatch-blocked", 0, 0, ["seh-dispatch-blocked", "no-seh-handler-executed"], "seh-policy:" + fault.policy)
+    if frames.len() == 0:
+        return _seh_result(false, "seh-dispatch-blocked", 0, 0, ["seh-dispatch-blocked", "no-seh-handler-executed"], "seh-frame-chain-missing")
+    var matching: [WineSehFrame] = []
     for frame in frames:
-        if frame.process_id == fault.process_id and frame.thread_id == fault.thread_id and frame.active:
-            count = count + 1
-            if frame.frame_address < frame.stack_limit or frame.frame_address >= frame.stack_base:
-                return _wine_seh_frame_result(false, "seh-frame-outside-stack", fault.process_id, fault.thread_id, fault.address, frame.handler_address, count, wine_vm_fault_evidence(fault) + " seh-frame-chain-present seh-dispatch-blocked", "rejected")
-            if frame.handler_address < image_base or frame.handler_address >= image_base + image_size:
-                return _wine_seh_frame_result(false, "seh-handler-unmapped", fault.process_id, fault.thread_id, fault.address, frame.handler_address, count, wine_vm_fault_evidence(fault) + " seh-frame-chain-present seh-dispatch-blocked", "rejected")
-            val evidence = wine_vm_fault_evidence(fault) + " seh-frame-chain-present seh-frame-stack-valid seh-handler-mapped seh-dispatch-planned no-seh-handler-executed no-arbitrary-execution"
-            return _wine_seh_frame_result(true, "", fault.process_id, fault.thread_id, fault.address, frame.handler_address, count, evidence, "seh-dispatch-planned")
-
-    _wine_seh_frame_result(false, "seh-frame-not-found", fault.process_id, fault.thread_id, fault.address, 0, count, wine_vm_fault_evidence(fault) + " seh-dispatch-blocked", "rejected")
+        if _frame_belongs_to_fault(frame, fault) and _frame_in_stack_bounds(frame):
+            matching.push(frame)
+    if matching.len() == 0:
+        return _seh_result(false, "seh-dispatch-blocked", 0, 0, ["seh-dispatch-blocked", "no-seh-handler-executed"], "seh-frame-chain-invalid")
+    val handler = matching[0].handler_addr
+    if not _image_contains(image_base, image_size, handler):
+        return _seh_result(false, "seh-dispatch-blocked", handler, matching.len(), ["seh-frame-chain-present", "seh-dispatch-blocked", "no-seh-handler-executed"], "seh-handler-unmapped")
+    _seh_result(true, "seh-dispatch-planned", handler, matching.len(), ["seh-frame-chain-present", "seh-handler-mapped", "no-seh-handler-executed"], "")

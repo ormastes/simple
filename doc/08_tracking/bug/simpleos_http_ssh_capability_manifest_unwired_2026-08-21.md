@@ -17,3 +17,10 @@ derived from the configured production owners; bind their probe fields to
 fresh live H1/H2/WebSocket and SSH auth/channel/SFTP evidence; and prove that
 H3/WebTransport and SFTP filesystem operations cannot be advertised while
 their owners remain unavailable.
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+SimpleOS release/admission/artifact-blocked item per in-file status; requires the SimpleOS target-artifact pipeline and owner lanes this Windows seed lane cannot run. No change from this lane.

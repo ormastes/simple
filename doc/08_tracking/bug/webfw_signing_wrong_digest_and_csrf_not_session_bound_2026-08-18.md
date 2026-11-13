@@ -90,3 +90,10 @@ not skipped without approval.
 
 **Do not "fix" this by changing the expected values to the observed ones.** The
 expected values are openssl's and are correct.
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+partially fixed; 3 spec examples RED deliberately per in-file status. Owner: webfw security lane.
