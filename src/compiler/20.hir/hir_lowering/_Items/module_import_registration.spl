@@ -20,10 +20,10 @@ use std.io_runtime.{hash_text}
 use std.nogc_sync_mut.io_runtime.{env_get_opt}
 use compiler.hir.hir_lowering.types.HirLowering
 use compiler.hir.hir_lowering.type_aliases.*
-use compiler.hir.hir_lowering._Items.module_reexport_materialization.{hir_dependency_is_builtin_type, hir_dependency_type_name}
+use compiler.hir.hir_lowering._Items.module_reexport_materialization.{hir_dependency_is_builtin_type, hir_dependency_type_name, hir_dependency_is_qualified_path}
 use compiler.hir.hir_lowering.context_helpers.*
 use compiler.hir.hir_lowering.module_surface.*
-use compiler.hir.hir_lowering.module_surface_types.{module_surface_export_origin_index_lookup, module_surface_name_position, ModuleSurfaceEnum, ModuleSurfaceTrait}
+use compiler.hir.hir_lowering.module_surface_types.{module_surface_export_origin_index_lookup, module_surface_name_position, ModuleSurfaceEnum, ModuleSurfaceTrait, ModuleSurfaceComposite}
 use compiler.hir.hir_lowering._Items.module_reexport_materialization.{hir_dependency_is_builtin_container, hir_compilation_declares_nominal}
 use compiler.hir.hir_lowering.module_surface_registry_index.{module_surfaces_frozen_alignment}
 use compiler.hir.hir_lowering.expressions.*
@@ -189,6 +189,10 @@ impl HirLowering:
         # dependency policy, including optional sugar, before the owner chase.
         # Capitalized user types and container names still require resolution.
         if hir_dependency_is_builtin_type(hir_dependency_type_name(dependency)):
+            return
+        # A fully-qualified field spelling resolves through
+        # resolve_qualified_named_type (types.spl); see hir_dependency_is_qualified_path.
+        if hir_dependency_is_qualified_path(hir_dependency_type_name(dependency)):
             return
         # `i64?` / `Option<T>` fields name `Option`, which lower_named_kind
         # resolves without a declaration; chase it only if some module declares it.
@@ -994,7 +998,16 @@ impl HirLowering:
                                 is_parameter = true
                         if not is_parameter and not hir_dependency_is_builtin_type(dependency):
                             self.materialize_imported_callable_declared_dependency(imported_mod, imported_mod_name, dependency, import_span, materialize_enum)
-                            self.materialize_imported_callable_explicit_dependency(imported_mod, dependency, import_span, materialize_enum)
+                            # Same three-step order as the field and callable
+                            # twins: the explicit sweep runs only when the
+                            # owner's OWN declaration did not bind the name.
+                            # Unconditional, this reported `[hir-callable-dep-
+                            # origin-unresolved] dependency=Value` for every
+                            # importer of compiler.common.runtime_value_v1,
+                            # whose `type ValueCaptureMap = {text: Value}` names
+                            # the enum declared ten lines above it (census r3).
+                            if self.symbols.lookup_qualified_type_raw(imported_mod.module_name, dependency) < 0:
+                                self.materialize_imported_callable_explicit_dependency(imported_mod, dependency, import_span, materialize_enum)
                             if self.symbols.lookup_qualified_type_raw(imported_mod.module_name, dependency) < 0:
                                 self.materialize_imported_field_package_dependency(imported_index, dependency, import_span, materialize_enum)
         elif callable_position >= 0:

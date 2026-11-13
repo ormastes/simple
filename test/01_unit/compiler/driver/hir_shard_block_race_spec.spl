@@ -75,19 +75,25 @@ describe "HIR shard ledger BLOCKED publication":
             pids.push(pid)
 
         step("Every racer exits 0 (block() reported success to every participant)")
+        var exits: [i64] = []
         for pid in pids:
             var code: i64 = -1
             unsafe(capabilities: [ffi]):
                 code = rt_process_wait(pid, 600000)
-            expect(code).to_equal(0)
+            exits = exits.push(code)
 
         step("Every round holds one whole reason, the reader saw exactly that reason, and no staging residue remains")
+        # Collect every finding first, remove the fixture, then assert: the
+        # residue is cleaned on the failure path too.
         var torn: [text] = []
         var overwritten: [text] = []
+        var residue: [text] = []
+        var missing: [text] = []
         round = 0
         while round < ROUNDS:
             val dir = "{queue}/r{round}"
-            expect(hir_shard_recovery_blocked(dir)).to_equal(true)
+            if not hir_shard_recovery_blocked(dir):
+                missing = missing.push("r{round}")
             val content = file_read("{dir}/BLOCKED")
             if not whole_reason(content):
                 torn = torn.push("r{round} final: len={content.len()}")
@@ -99,16 +105,27 @@ describe "HIR shard ledger BLOCKED publication":
             if observed != content:
                 overwritten = overwritten.push("r{round}: reader len={observed.len()} final len={content.len()}")
             for name in dir_list(dir) ?? []:
-                expect(name.ends_with(".tmp")).to_equal(false)
+                if name.ends_with(".tmp"):
+                    residue = residue.push("r{round}/{name}")
             round = round + 1
+        val removed = dir_remove_all(queue)
+        for code in exits:
+            expect(code).to_equal(0)
+        expect(missing).to_equal([])
         expect(torn).to_equal([])
         expect(overwritten).to_equal([])
-        expect(dir_remove_all(queue)).to_equal(true)
+        expect(residue).to_equal([])
+        expect(removed).to_equal(true)
 
     it "preserves the first reason against a later observer":
         val dir = race_fixture("first-wins")
-        expect(hir_shard_recovery_block(dir, "root cause")).to_equal(true)
-        expect(hir_shard_recovery_block(dir, "merely observed the block")).to_equal(true)
-        expect(file_read("{dir}/BLOCKED")).to_equal("root cause")
-        expect(file_exists("{dir}/BLOCKED.{getpid()}.tmp")).to_equal(false)
-        expect(dir_remove_all(dir)).to_equal(true)
+        val first = hir_shard_recovery_block(dir, "root cause")
+        val second = hir_shard_recovery_block(dir, "merely observed the block")
+        val content = file_read("{dir}/BLOCKED")
+        val residue = file_exists("{dir}/BLOCKED.{getpid()}.tmp")
+        val removed = dir_remove_all(dir)
+        expect(first).to_equal(true)
+        expect(second).to_equal(true)
+        expect(content).to_equal("root cause")
+        expect(residue).to_equal(false)
+        expect(removed).to_equal(true)
