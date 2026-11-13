@@ -178,3 +178,95 @@ fn unknown_extern_still_fails_closed() {
     assert!(stderr.contains("backed by no implementation"), "{stderr}");
     assert!(!stdout.contains("after="), "{stdout}");
 }
+
+/// Wave 2: scalar-ABI C exports that also have an interpreter handler.
+const WAVE2_INTERP_BACKED: &str = r#"
+extern fn rt_time_now_seconds() -> i64
+extern fn rt_time_now_seconds_f64() -> f64
+extern fn rt_mem_guard_stats() -> i64
+extern fn rt_mem_harden_check_native() -> i64
+extern fn spl_thread_current_id() -> i64
+extern fn rt_process_owned_v3_release_value(handle: i64) -> bool
+extern fn rt_file_sync(path: text) -> bool
+extern fn rt_file_create_excl(path: text, content: text) -> bool
+
+fn flag(b: bool) -> text:
+    if b:
+        return "true"
+    "false"
+
+fn main():
+    val s = rt_time_now_seconds()
+    val f = rt_time_now_seconds_f64()
+    print "seconds_sane={s > 1700000000} f64_sane={f > 1700000000.0} close={f - 5.0 < s + 5}"
+    print "guard={rt_mem_guard_stats()} harden={rt_mem_harden_check_native()}"
+    print "thread_pos={spl_thread_current_id() != 0}"
+    print "release_bad={flag(rt_process_owned_v3_release_value(-1))}"
+    print "sync_ok={flag(rt_file_sync("__P__"))} sync_missing={flag(rt_file_sync("__P__.missing"))}"
+    print "excl_new={flag(rt_file_create_excl("__P__.excl__ENGINE__", "x"))} excl_again={flag(rt_file_create_excl("__P__.excl__ENGINE__", "x"))}"
+"#;
+
+/// Wave 2: scalar-ABI C exports with no interpreter handler, or whose handler
+/// refuses ("process observation V4 is unavailable in interpreter mode").
+const WAVE2_NATIVE_ONLY: &str = r#"
+extern fn rt_alloc_probe_count_v1() -> i64
+extern fn rt_alloc_probe_coverage_v1() -> i64
+extern fn rt_alloc_probe_reset_v1()
+extern fn rt_process_observation_v6_reserved_poll_launch_value(token: i64, retire: i64) -> i64
+extern fn rt_linux_group_cancel_v1(token: i64) -> i64
+extern fn rt_linux_group_parent_release_v1(token: i64) -> i64
+extern fn rt_process_observation_v4_reserved_state_value(token: i64) -> i64
+extern fn rt_process_observation_v4_reserved_confirm_release_value(token: i64) -> i64
+extern fn rt_process_observation_v4_reserved_matches_value(token: i64, rh: i64, rl: i64, th: i64, tl: i64) -> i64
+extern fn rt_process_observation_v4_close_cwd_value(handle: i64) -> i32
+
+fn main():
+    rt_alloc_probe_reset_v1()
+    print "probe_nonneg={rt_alloc_probe_count_v1() >= 0} coverage_nonneg={rt_alloc_probe_coverage_v1() >= 0}"
+    print "poll_bad_nonzero={rt_process_observation_v6_reserved_poll_launch_value(-1, 0) != 0}"
+    print "cancel_bad_nonzero={rt_linux_group_cancel_v1(-1) != 0} release_bad_nonzero={rt_linux_group_parent_release_v1(-1) != 0}"
+    print "state_bad={rt_process_observation_v4_reserved_state_value(-1)} confirm_bad={rt_process_observation_v4_reserved_confirm_release_value(-1)}"
+    print "matches_bad={rt_process_observation_v4_reserved_matches_value(-1, 0, 0, 0, 0)} close_cwd_bad={rt_process_observation_v4_close_cwd_value(-1)}"
+"#;
+
+#[cfg(target_os = "linux")]
+#[test]
+fn wave2_scalar_c_externs_link_natively_and_match_the_interpreter() {
+    let jit_path = write_source("w2jit", &WAVE2_INTERP_BACKED.replace("__ENGINE__", "jit"));
+    let interp_path = write_source("w2int", &WAVE2_INTERP_BACKED.replace("__ENGINE__", "int"));
+    let jit = run(&jit_path, false, b"");
+    let interp = run(&interp_path, true, b"");
+    let stderr = text(&jit.stderr);
+    assert!(!stderr.contains("hybrid-interp-splice"), "spliced:\n{stderr}");
+    assert!(jit.status.success(), "JIT run failed:\n{stderr}");
+    assert!(interp.status.success(), "interpreter run failed:\n{}", text(&interp.stderr));
+    assert_eq!(text(&jit.stdout), text(&interp.stdout));
+    let stdout = text(&jit.stdout);
+    for line in [
+        "seconds_sane=true f64_sane=true close=true",
+        "sync_ok=true sync_missing=false",
+        "excl_new=true excl_again=false",
+        "release_bad=false",
+    ] {
+        assert!(stdout.contains(line), "missing `{line}` in:\n{stdout}");
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn wave2_native_only_c_externs_link_natively() {
+    let out = run(&write_source("w2native", WAVE2_NATIVE_ONLY), false, b"");
+    let stderr = text(&out.stderr);
+    assert!(!stderr.contains("hybrid-interp-splice"), "spliced:\n{stderr}");
+    assert!(out.status.success(), "JIT run failed:\n{stderr}");
+    let stdout = text(&out.stdout);
+    for line in [
+        "probe_nonneg=true coverage_nonneg=true",
+        "poll_bad_nonzero=true",
+        "cancel_bad_nonzero=true release_bad_nonzero=true",
+        "state_bad=",
+        "close_cwd_bad=",
+    ] {
+        assert!(stdout.contains(line), "missing `{line}` in:\n{stdout}");
+    }
+}
