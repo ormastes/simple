@@ -20,7 +20,7 @@ use compiler.backend.codegen_types.{Codegen, CodegenOutput, CodegenOutputKind}
 use compiler.backend.runtime_compiler.{_get_temp_dir}
 use compiler.backend.cranelift_gemm_fusion.{GemmAddFusion, detect_gemm_add_pair}
 use compiler.backend.cranelift_global_address.*
-use compiler.backend.cranelift_runtime_imports.{translate_runtime_import_call_f64_i64, translate_runtime_import_call_i64_f64, translate_runtime_import_call_i64_i64_f64_i64, translate_runtime_import_call_i64, translate_runtime_import_call_void}
+use compiler.backend.cranelift_runtime_imports.{translate_runtime_import_call_f64_i64, translate_runtime_import_call_i64_f64, translate_runtime_import_call_i64_i64_f64_i64, translate_runtime_import_call_i64, translate_runtime_import_call_void, cl_declare_import_function, cl_import_ledger_begin, cl_import_ledger_end}
 use compiler.backend.mir_target_context_provider.{backend_requested_aot_target_triple}
 use compiler.mir.mir_instruction_graph.{mir_module_functions_sorted, mir_module_statics_sorted}
 use compiler.mir.mir_call_ownership.{mir_runtime_owned_call_name, mir_runtime_owned_local_symbol}
@@ -28,7 +28,7 @@ use compiler.common.dependency.visibility.{Visibility}
 use std.nogc_sync_mut.sffi.codegen.*
 use compiler.mir.mir_instruction_support.{mir_operand_const_int}
 use compiler.backend.common.mir_inst_variant_name.{mir_instkind_variant_name}
-use compiler.backend.jit_extern_resolution.{jit_module_extern_errors}
+use compiler.backend.jit_extern_resolution.{jit_module_extern_errors, jit_foreign_callee_names, jit_lowering_import_errors}
 
 extern fn rt_file_read_bytes(path: text) -> [u8]?
 @unsafe(reason: "raw backend-policy environment read; empty text conflates unset input with provider failure", capabilities: [ffi])
@@ -199,11 +199,16 @@ pub fn cranelift_jit_run_main(module: MirModule) -> Result<i64, text>:
     if refusals.len() > 0:
         return Err(refusals.join("; "))
     var has_main = false
+    var main_params = 0
     for func in mir_module_functions_sorted(module):
         if func.name == "main":
             has_main = true
+            main_params = func.signature.params.len()
     if not has_main:
         return Err("E-JIT-ENTRY: module {module.name} defines no main")
+    # The entry is called with no arguments and read as one i64 result.
+    if main_params != 0:
+        return Err("E-JIT-ENTRY: main of {module.name} takes {main_params} parameter(s); the JIT entry passes none")
 
     val cl_module = cranelift_new_module(module.name, CL_TARGET_HOST)
     if cl_module == 0:
@@ -212,10 +217,18 @@ pub fn cranelift_jit_run_main(module: MirModule) -> Result<i64, text>:
     if global_handles.has(STATICS_FAILED_KEY):
         cranelift_free_module(cl_module)
         return Err("E-JIT-STATICS: failed to declare statics of {module.name}")
+    cl_import_ledger_begin(cl_module)
     val failed_function = cranelift_declare_and_compile_functions(cl_module, module, global_handles, true)
+    val imports = cl_import_ledger_end()
     if failed_function != "":
         cranelift_free_module(cl_module)
         return Err("E-JIT-COMPILE: failed to compile function {failed_function}")
+    # The lowering declares runtime helpers no MIR callee names; refuse any
+    # import that is not a Foreign callee before finalize can abort the host.
+    val unbound = jit_lowering_import_errors(module.name, imports, jit_foreign_callee_names(module))
+    if unbound.len() > 0:
+        cranelift_free_module(cl_module)
+        return Err(unbound.join("; "))
     if cranelift_finalize_module(cl_module) == 0:
         cranelift_free_module(cl_module)
         return Err("E-JIT-FINALIZE: the Cranelift provider rejected {module.name}")
@@ -1321,7 +1334,7 @@ fn cl_translate_const_value(ctx: i64, cl_module: i64, value: MirConstValue, type
                         # declare the import from the declared FuncPtr
                         # signature, as cl_translate_call does for calls.
                         val import_sig = cl_import_call_signature(type_, cl_declared_callee_params(type_).len())
-                        cranelift_declare_function(cl_module, symbol, import_sig, CL_LINKAGE_IMPORT)
+                        cl_declare_import_function(cl_module, symbol, import_sig)
                         address = cranelift_function_addr_in_func(ctx, symbol)
                     if address == 0:
                         panic("Cranelift function address missing declaration: {v}")
@@ -1517,7 +1530,7 @@ fn cl_translate_float_binary_import(ctx: i64, cl_module: i64, name: text, left: 
     cranelift_sig_add_param(sig, CL_TYPE_F64)
     cranelift_sig_add_param(sig, CL_TYPE_F64)
     cranelift_sig_set_return(sig, CL_TYPE_F64)
-    val handle = cranelift_declare_function(cl_module, name, sig, CL_LINKAGE_IMPORT)
+    val handle = cl_declare_import_function(cl_module, name, sig)
     val func_ref = cranelift_import_function(ctx, handle)
     val result = cranelift_call(ctx, func_ref, [a, b])
     if narrow: cranelift_fdemote(ctx, CL_TYPE_F32, result) else: result
@@ -1720,7 +1733,7 @@ fn cl_translate_call(
                         if abi_error != "":
                             panic("E-BACKEND-CRANELIFT-CALL-ABI: {external_name}: {abi_error}")
                         val signature = cl_import_call_signature(type_, args.len())
-                        val handle = cranelift_declare_function(cl_module, external_name, signature, CL_LINKAGE_IMPORT)
+                        val handle = cl_declare_import_function(cl_module, external_name, signature)
                         val reference = cranelift_import_function(ctx, handle)
                         return cranelift_call(ctx, reference, arg_vals)
                     if name == "rt_array_new" or name == "rt_array_push" or name == "rt_bytes_u8_at":
@@ -1819,7 +1832,7 @@ fn cl_translate_call(
                             eprint("[cranelift] E-BACKEND-CRANELIFT-CALL-ABI: call to {name} in {func.name}: {abi_error}")
                             panic("compile error: E-BACKEND-CRANELIFT-CALL-ABI: call to {name} in {func.name}: {abi_error}")
                         val sig = cl_import_call_signature(type_, args.len())
-                        val handle = cranelift_declare_function(cl_module, name, sig, CL_LINKAGE_IMPORT)
+                        val handle = cl_declare_import_function(cl_module, name, sig)
                         val func_ref = cranelift_import_function(ctx, handle)
                         return cranelift_call(ctx, func_ref, arg_vals)
                 case _:

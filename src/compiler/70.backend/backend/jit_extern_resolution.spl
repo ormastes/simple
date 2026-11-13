@@ -20,7 +20,7 @@
 use compiler.mir.mir_instruction_support.{MirCallOrigin, mir_call_origin_text}
 use compiler.mir.mir_types.{MirConstValue}
 use compiler.mir.mir_instructions.{MirModule, MirInstKind, MirOperandKind}
-use compiler.mir.mir_instruction_graph.{mir_module_functions_sorted}
+use compiler.mir.mir_instruction_graph.{mir_module_functions_sorted, mir_module_statics_sorted}
 
 pub enum JitCalleeResolution:
     Local
@@ -81,4 +81,39 @@ pub fn jit_module_extern_errors(module: MirModule) -> [text]:
                                     case _: pass
                             case _: pass
                     case _: pass
+    # An imported static binds through a generated accessor symbol that only
+    # the providing module's object defines; no process lookup can find it.
+    for static_ in mir_module_statics_sorted(module):
+        if static_.is_external:
+            errors = errors.push("E-JIT-EXTERN-STATIC-UNBOUND: {static_.name} (module {module.name}): an imported static has no provider in a JIT module")
+    errors
+
+pub fn jit_foreign_callee_names(module: MirModule) -> Dict<text, bool>:
+    """Names of the module's Foreign callees: the only imports the JIT may bind."""
+    var names: Dict<text, bool> = {}
+    for func in mir_module_functions_sorted(module):
+        for block in func.blocks:
+            for inst in block.instructions:
+                match inst.kind:
+                    case Call(_, callee, _):
+                        if callee.call_origin == MirCallOrigin.Foreign:
+                            match callee.kind:
+                                case Const(value, _):
+                                    match value:
+                                        case Str(name): names[name] = true
+                                        case _: pass
+                                case _: pass
+                    case _: pass
+    names
+
+pub fn jit_lowering_import_errors(module_name: text, imports: [text], foreign: Dict<text, bool>) -> [text]:
+    """Refusals for imports the lowering declared that no Foreign callee names.
+
+    The lowering declares runtime helpers on its own (string boxing, array and
+    aggregate helpers, float libcalls); the provider cannot bind them and would
+    abort the host at finalize, so they are refused here instead."""
+    var errors: [text] = []
+    for name in imports:
+        if not foreign.has(name):
+            errors = errors.push("E-JIT-LOWERING-IMPORT-UNBOUND: {name} (module {module_name}): the lowering imports it and the Cranelift JIT provider registers no runtime symbols")
     errors
