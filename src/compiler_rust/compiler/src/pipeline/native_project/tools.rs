@@ -239,8 +239,8 @@ pub(crate) fn target_c_compiler(target: simple_common::target::Target) -> String
     {
         // Bootstrap publishes its admitted target-specific C driver as CC.
         // Preserve that authority instead of resolving another clang on PATH.
-        // Keep the Clang-only fallback: the general detector can select a GCC
-        // cross driver when the host and target ABI differ.
+        // Keep the plain-clang fallback: the general detector selects the
+        // triple-prefixed llvm-mingw cross driver when host and target ABI differ.
         if let Ok(cc) = std::env::var("CC") {
             if !cc.trim().is_empty() {
                 return simple_common::platform::path::to_native_owned(cc);

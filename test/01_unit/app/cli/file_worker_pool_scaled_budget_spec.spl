@@ -10,9 +10,13 @@ use app.cli.file_worker_pool_refusal.{file_worker_pool_refusal_v1,
     file_worker_pool_pointer_bits_from_windows_arch_v1,
     file_worker_pool_host_pointer_bits_for_v1,
     file_worker_pool_probe_pointer_bits_v1, file_worker_pool_host_pointer_bits_v1,
-    file_worker_pool_live_usable_kb_v1}
+    file_worker_pool_live_usable_kb_v1, file_worker_pool_admission_usable_kb_v1,
+    file_worker_pool_live_admission_usable_kb_v1}
 use app.cli.shard_mem_clamp.{SHARD_HIR_WORKER_KB_V1, SHARD_MIR_WORKER_KB_V1,
-    shard_threads_cap_for, shard_worker_budget_kb, shard_tree_budget_kb_for, shard_cgroup_memory_max_kb}
+    shard_threads_cap_for, shard_worker_budget_kb, shard_tree_budget_kb_for, shard_cgroup_memory_max_kb,
+    shard_threads_parent_cap_for, shard_effective_tree_budget_kb_v1, shard_pool_workers_v1,
+    shard_pool_effective_budget_for_v1, shard_pool_cap_kb_for_v1, shard_tree_headroom_kib_v1}
+use std.nogc_sync_mut.host_limits.{host_limit_value}
 
 # "Scale to host" default per-worker budget (user decision 2026-11-13): hosts
 # that fit 2 workers at 9 GB keep every budget unchanged; smaller hosts lower
@@ -46,11 +50,11 @@ describe "file worker pool: scale-to-host per-worker budget":
 
     it "the fit test is exact at 2 x 9 GB usable":
         expect(file_worker_pool_scaled_budget_kb_v1(9000000, 18000000, false)).to_equal(9000000)
-        expect(file_worker_pool_scaled_budget_kb_v1(9000000, 17999998, false)).to_equal(8999999)
+        expect(file_worker_pool_scaled_budget_kb_v1(9000000, 17999998, false)).to_equal(8475711)
 
-    it "medium host: lowers the budget to usable / 2, and 2 workers are admitted":
-        expect(file_worker_pool_scaled_budget_kb_v1(SHARD_HIR_WORKER_KB_V1, 15000000, false)).to_equal(7500000)
-        expect(file_worker_pool_scaled_budget_kb_v1(SHARD_MIR_WORKER_KB_V1, 15000000, false)).to_equal(7500000)
+    it "medium host: lowers the budget to (usable - 1 GiB drift) / 2, and 2 workers are admitted":
+        expect(file_worker_pool_scaled_budget_kb_v1(SHARD_HIR_WORKER_KB_V1, 15000000, false)).to_equal(6975712)
+        expect(file_worker_pool_scaled_budget_kb_v1(SHARD_MIR_WORKER_KB_V1, 15000000, false)).to_equal(6975712)
         val avail = 25000000
         expect(shard_threads_cap_for(2, SHARD_HIR_WORKER_KB_V1, avail)).to_equal(1)
         val scaled = file_worker_pool_scaled_budget_kb_v1(SHARD_HIR_WORKER_KB_V1, file_worker_pool_usable_kb_v1(avail, 0), false)
@@ -87,7 +91,7 @@ describe "file worker pool: scale-to-host per-worker budget":
         expect(file_worker_pool_phase_budget_kb_v1(9000000, false, 2516582, 32)).to_equal(4194304)
         expect(file_worker_pool_phase_budget_kb_v1(2000000, true, 0, 32)).to_equal(2000000)
         expect(file_worker_pool_phase_budget_kb_v1(9000000, false, 31200000, 64)).to_equal(9000000)
-        expect(file_worker_pool_phase_budget_kb_v1(9000000, false, 15000000, 64)).to_equal(7500000)
+        expect(file_worker_pool_phase_budget_kb_v1(9000000, false, 15000000, 64)).to_equal(6975712)
 
     it "live HIR budget: an env override wins exactly":
         val _set = env_set("SIMPLE_HIR_SHARD_WORKER_KB", "1234567")
@@ -119,6 +123,98 @@ describe "file worker pool: scale-to-host per-worker budget":
         val _ut = env_unset("SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB")
         expect(got).to_equal(file_worker_pool_usable_kb_v1(0, shard_tree_budget_kb_for(10000000, shard_cgroup_memory_max_kb())))
         expect(got > 0).to_be_true()
+
+# Run 28 (2026-11-14) Stage 2 sanity: declared tree 48 GiB, RSS cap 48 GiB,
+# 24 GiB reserve. Pricing said 60% x 40 GB = 24 GB fits 2 x 9 GB and kept
+# 9 GB, but admission granted effective = free - reserve = 14.9 GB = 1 worker,
+# so the pool refused -- and free 30-42 GB refused while less memory admitted.
+val RUN28_TREE_KB: i64 = 50331648
+val RUN28_RESERVE_KB: i64 = 25165824
+
+# HIR workers the live admission (shard_threads_mem_cap, parent-peak branch)
+# grants on the run-28 host at `admit_free_kb` for a budget priced at `price_free_kb`.
+fn run28_admitted_workers(price_free_kb: i64, admit_free_kb: i64) -> i64:
+    val usable = file_worker_pool_admission_usable_kb_v1(price_free_kb, RUN28_TREE_KB, 0, RUN28_TREE_KB, RUN28_RESERVE_KB)
+    val budget = file_worker_pool_phase_budget_kb_v1(SHARD_HIR_WORKER_KB_V1, false, usable, 64)
+    val host = shard_threads_parent_cap_for(16, budget, admit_free_kb, RUN28_TREE_KB, true, 0)
+    val effective = shard_pool_effective_budget_for_v1(admit_free_kb, RUN28_TREE_KB, 0, RUN28_TREE_KB, RUN28_RESERVE_KB)
+    val clamp = shard_pool_workers_v1(effective, budget)
+    if clamp < host: clamp else: host
+
+describe "file worker pool: scale-to-host pricing uses the admission's effective budget":
+    val floor = FILE_WORKER_POOL_SCALED_FLOOR_KB_V1
+
+    it "the enforced cap is the tighter of the RSS cap and cgroup memory.max":
+        expect(shard_pool_cap_kb_for_v1(0, 0)).to_equal(0)
+        expect(shard_pool_cap_kb_for_v1(5, 0)).to_equal(5)
+        expect(shard_pool_cap_kb_for_v1(5, 3)).to_equal(3)
+        expect(shard_pool_cap_kb_for_v1(3, 5)).to_equal(3)
+        expect(shard_pool_cap_kb_for_v1(-1, 7)).to_equal(7)
+
+    it "the shared effective budget reproduces the run-28 tree clamp line":
+        expect(shard_pool_effective_budget_for_v1(40059100, RUN28_TREE_KB, 0, RUN28_TREE_KB, RUN28_RESERVE_KB)).to_equal(14893276)
+        expect(shard_pool_effective_budget_for_v1(0, 0, 0, 0, RUN28_RESERVE_KB)).to_equal(-1)
+
+    it "admission usable = min(60% of the tighter of free and tree, effective)":
+        expect(file_worker_pool_admission_usable_kb_v1(39848416, RUN28_TREE_KB, 0, RUN28_TREE_KB, RUN28_RESERVE_KB)).to_equal(14682592)
+        expect(file_worker_pool_admission_usable_kb_v1(100000000, 0, 0, 0, RUN28_RESERVE_KB)).to_equal(60000000)
+        expect(file_worker_pool_admission_usable_kb_v1(0, 0, 0, 30000000, RUN28_RESERVE_KB)).to_equal(4834176)
+        expect(file_worker_pool_admission_usable_kb_v1(20000000, 0, 0, 0, RUN28_RESERVE_KB)).to_equal(0)
+        expect(file_worker_pool_admission_usable_kb_v1(0, 0, 0, 0, RUN28_RESERVE_KB)).to_equal(0)
+
+    it "run 28 (free 39848416 kB, 24 GiB reserve, 48 GiB cap) prices into [floor, 9 GB) and admits 2 HIR workers":
+        val usable = file_worker_pool_admission_usable_kb_v1(39848416, RUN28_TREE_KB, 0, RUN28_TREE_KB, RUN28_RESERVE_KB)
+        val budget = file_worker_pool_phase_budget_kb_v1(SHARD_HIR_WORKER_KB_V1, false, usable, 64)
+        expect(budget >= floor).to_be_true()
+        expect(budget < SHARD_HIR_WORKER_KB_V1).to_be_true()
+        expect(run28_admitted_workers(39848416, 39848416)).to_equal(2)
+
+    it "a budget priced at the clamp-line free still admits 2 after free drops to the refusal-line free":
+        expect(run28_admitted_workers(40059100, 39848416)).to_equal(2)
+
+    it "keeps 9 GB per worker whenever effective >= 18 GB":
+        val at = RUN28_RESERVE_KB + 18000000
+        val usable_at = file_worker_pool_admission_usable_kb_v1(at, RUN28_TREE_KB, 0, RUN28_TREE_KB, RUN28_RESERVE_KB)
+        expect(file_worker_pool_phase_budget_kb_v1(SHARD_HIR_WORKER_KB_V1, false, usable_at, 64)).to_equal(9000000)
+        val usable_big = file_worker_pool_admission_usable_kb_v1(121000000, RUN28_TREE_KB, 0, RUN28_TREE_KB, RUN28_RESERVE_KB)
+        expect(file_worker_pool_phase_budget_kb_v1(SHARD_HIR_WORKER_KB_V1, false, usable_big, 64)).to_equal(9000000)
+        val usable_below = file_worker_pool_admission_usable_kb_v1(at - 2, RUN28_TREE_KB, 0, RUN28_TREE_KB, RUN28_RESERVE_KB)
+        expect(file_worker_pool_phase_budget_kb_v1(SHARD_HIR_WORKER_KB_V1, false, usable_below, 64) < 9000000).to_be_true()
+
+    it "admitted HIR workers never decrease as free memory grows (20..60 GiB, 1 GiB steps)":
+        var prev: i64 = 0
+        var gib: i64 = 20
+        var decreased = false
+        while gib <= 60:
+            val w = run28_admitted_workers(gib * 1048576, gib * 1048576)
+            if w < prev: decreased = true
+            if gib >= 37 and w < 2: decreased = true
+            prev = w
+            gib = gib + 1
+        expect(decreased).to_be_false()
+        expect(prev >= 2).to_be_true()
+
+    it "32-bit: the address-space clamp still binds after admission-parity scaling":
+        val usable = file_worker_pool_admission_usable_kb_v1(39848416, RUN28_TREE_KB, 0, RUN28_TREE_KB, RUN28_RESERVE_KB)
+        expect(file_worker_pool_phase_budget_kb_v1(SHARD_HIR_WORKER_KB_V1, false, usable, 32)).to_equal(4194304)
+
+    it "live HIR budget prices with the live admission usable":
+        val _c = env_set("SIMPLE_SHARD_MEM_CLAMP", "0")
+        val _t = env_set("SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB", "20000000")
+        val _r = env_set("SIMPLE_PROCESS_TREE_RSS_CAP_KIB", "16000000")
+        val _b = env_set("SIMPLE_BUILD_MEMORY_RESERVE_BYTES", "1073741824")
+        val live = file_worker_pool_live_admission_usable_kb_v1()
+        val got = file_worker_pool_hir_budget_kb_v1()
+        val headroom = shard_tree_headroom_kib_v1()
+        val _uc = env_unset("SIMPLE_SHARD_MEM_CLAMP")
+        val _ut = env_unset("SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB")
+        val _ur = env_unset("SIMPLE_PROCESS_TREE_RSS_CAP_KIB")
+        val _ub = env_unset("SIMPLE_BUILD_MEMORY_RESERVE_BYTES")
+        expect(headroom).to_equal(1048576)
+        expect(live).to_equal(file_worker_pool_admission_usable_kb_v1(0, 20000000, shard_cgroup_memory_max_kb(), 16000000, 1048576))
+        val explicit = file_worker_pool_budget_explicit_v1("", host_limit_value("worker_mem_mib"))
+        if not explicit:
+            expect(got).to_equal(file_worker_pool_phase_budget_kb_v1(SHARD_HIR_WORKER_KB_V1, false, live, file_worker_pool_host_pointer_bits_v1()))
 
 # The width must be the running binary's own, never the cross-build target:
 # under source/interpreted execution `@when(arch=...)` follows

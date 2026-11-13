@@ -221,7 +221,7 @@ fn gate_private_call(name: &str, func: &Arc<FunctionDef>) -> Result<(), CompileE
 /// Identity-keyed lookup into `FUNCTION_MODULE_OWNER` (see its doc comment):
 /// `None` when this candidate's owning module was never recorded (e.g. a
 /// struct's mangled static-method overload registration doesn't tag one).
-fn function_module_owner(func: &Arc<FunctionDef>) -> Option<Arc<str>> {
+pub(crate) fn function_module_owner(func: &Arc<FunctionDef>) -> Option<Arc<str>> {
     let key = Arc::as_ptr(func) as usize;
     FUNCTION_MODULE_OWNER
         .with(|cell| cell.borrow().get(&key).cloned())

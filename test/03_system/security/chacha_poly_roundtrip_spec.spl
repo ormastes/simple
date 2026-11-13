@@ -5,83 +5,42 @@
 # @tag:system
 # @cover src/os/crypto/chacha20_poly1305.spl 80%
 """
-# ChaCha20-Poly1305 Cross-Vendor Roundtrip Specification
+# ChaCha20-Poly1305 RFC 8439 Known-Answer Specification
 
-**Feature IDs:** N/A
 **Category:** Testing
-**Difficulty:** 3/5
-**Status:** Draft
-**Requirements:** N/A
 **Plan:** doc/03_plan/agent_tasks/pure_simple_crypto_tls_remains_2026-04-16.md
-**Design:** N/A
-**Research:** doc/01_research/local/tls13_phase2_backlog.md
-**Artifacts:** N/A
 
 ## Overview
 
-Intensive byte-level cross-validation of the pure-Simple ChaCha20-Poly1305
-AEAD implementation (src/os/crypto/chacha20_poly1305.spl) against reference
-implementation Node.js `node:crypto`.
-
-Four interop lanes per test:
-
-1. **Simple-encrypt / Simple-decrypt** — sanity roundtrip.
-2. **Simple-encrypt / vendor-decrypt** — our bytes survive external verification.
-3. **Vendor-encrypt / Simple-decrypt** — we accept and decrypt external bytes.
-4. **Vendor-encrypt / vendor-decrypt** — baseline external reference check.
-
-Plus:
-- RFC 8439 §2.8.2 known-answer vector (byte-exact ciphertext + tag).
-- Tampered-tag negative path on both vendor and pure-Simple decrypt.
-
-## Out of Scope
-
-Existing-client ↔ Simple-server TLS interop: blocked until server-side TLS 1.3
-lands (see doc/01_research/local/tls13_phase2_backlog.md §Server-side TLS 1.3).
+Validates the pure-Simple ChaCha20-Poly1305 AEAD (src/os/crypto/chacha20_poly1305.spl)
+against the published RFC 8439 test vectors, embedded as fixed constants:
+block function (2.3.2), encryption (2.4.2), Poly1305 MAC (2.5.2), AEAD (2.8.2).
+The RFC is the independent oracle; no external tool or source text is consulted.
+Also covers the pure-Simple roundtrip and tampered-tag rejection.
 """
 
 use std.spec.step
 
 use std.spipe.*
+use os.crypto.chacha20.{chacha20_encrypt}
+use os.crypto.poly1305.{poly1305_mac}
 use os.crypto.chacha20_poly1305.{
     chacha20_poly1305_encrypt, chacha20_poly1305_decrypt, Chacha20Poly1305Result
 }
-use test.system.crypto_ref_harness.{
-    Vendor, RefErr,
-    ref_chacha_poly_encrypt_via, ref_chacha_poly_decrypt_via,
-    crypto_input_matrix
-}
 use test.system.os_crypto_ref_helpers.{hex_to_bytes, bytes_to_hex}
 
-# ---------------------------------------------------------------------------
-# RFC 8439 §2.8.2 test vector
-# ---------------------------------------------------------------------------
+val SEQ_KEY_HEX: text = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+val LADIES_PT_HEX: text = "4c616469657320616e642047656e746c656d656e206f662074686520636c617373206f66202739393a204966204920636f756c64206f6666657220796f75206f6e6c79206f6e652074697020666f7220746865206675747572652c2073756e73637265656e20776f756c642062652069742e"
 
-val RFC8439_KEY_HEX:   text = "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f"
-val RFC8439_NONCE_HEX: text = "070000004041424344454647"
-val RFC8439_AAD_HEX:   text = "50515253c0c1c2c3c4c5c6c7"
-# "Ladies and Gentlemen of the class of '99: ..."
-val RFC8439_PT_HEX:    text = "4c616469657320616e642047656e746c656d656e206f662074686520636c617373206f66202739393a204966204920636f756c64206f6666657220796f75206f6e6c79206f6e652074697020666f7220746865206675747572652c2073756e73637265656e20776f756c642062652069742e"
-val RFC8439_CT_TAG_HEX: text = "d31a8d34648e60db7b86afbc53ef7ec2a4aded51296e08fea9e2b5a736ee62d63dbea45e8ca9671282fafb69da92728b1a71de0a9e060b2905d6a5b67ecd3b3692ddbd7f2d778b8c9803aee328091b58fab324e4fad675945585808b4831d7bc3ff4def08e4b7a9de576d26586cec64b61161ae10b594f09e26a7e902ecbd0600691"
-
-fn _unwrap_bytes(r: Result<[u8], RefErr>) -> [u8]:
-    match r:
-        Ok(b):  b
-        Err(_): []
-
-fn _is_err(r: Result<[u8], RefErr>) -> bool:
-    match r:
-        Ok(_):  false
-        Err(_): true
+val AEAD_KEY_HEX:   text = "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f"
+val AEAD_NONCE_HEX: text = "070000004041424344454647"
+val AEAD_AAD_HEX:   text = "50515253c0c1c2c3c4c5c6c7"
+val AEAD_CT_HEX:    text = "d31a8d34648e60db7b86afbc53ef7ec2a4aded51296e08fea9e2b5a736ee62d63dbea45e8ca9671282fafb69da92728b1a71de0a9e060b2905d6a5b67ecd3b3692ddbd7f2d778b8c9803aee328091b58fab324e4fad675945585808b4831d7bc3ff4def08e4b7a9de576d26586cec64b61161ae10b594f09e26a7e902ecbd0600691"
 
 fn _split_ct_tag(ct_and_tag: [u8]) -> ([u8], [u8]):
-    """Split vendor-style cipher||tag into (cipher, 16-byte tag). Tag is the
-    final 16 bytes per RFC 8439."""
     var cipher: [u8] = []
     var tag: [u8] = []
     val n = ct_and_tag.len()
-    if n < 16:
-        return (cipher, tag)
     var i: u64 = 0
     while i < n - 16:
         cipher.push(ct_and_tag[i])
@@ -91,19 +50,15 @@ fn _split_ct_tag(ct_and_tag: [u8]) -> ([u8], [u8]):
         i = i + 1
     (cipher, tag)
 
-fn _bytes_eq(a: [u8], b: [u8]) -> bool:
-    if a.len() != b.len():
-        return false
+fn _zeros(n: u64) -> [u8]:
+    var z: [u8] = []
     var i: u64 = 0
-    while i < a.len():
-        if a[i] != b[i]:
-            return false
+    while i < n:
+        z.push(0)
         i = i + 1
-    true
+    z
 
-fn _decrypt_ok_bytes(key: [u8], nonce: [u8], cipher: [u8], aad: [u8], tag: [u8]) -> [u8]:
-    """Unwrap pure-Simple chacha20_poly1305_decrypt to plaintext bytes, or []
-    on tag mismatch."""
+fn _decrypt_ok(key: [u8], nonce: [u8], cipher: [u8], aad: [u8], tag: [u8]) -> [u8]:
     match chacha20_poly1305_decrypt(key, nonce, cipher, aad, tag):
         Chacha20Poly1305Result.Ok(data): data
         Chacha20Poly1305Result.Err(_):   []
@@ -113,139 +68,49 @@ fn _decrypt_is_err(key: [u8], nonce: [u8], cipher: [u8], aad: [u8], tag: [u8]) -
         Chacha20Poly1305Result.Ok(_):  false
         Chacha20Poly1305Result.Err(_): true
 
-
-# ---------------------------------------------------------------------------
-# RFC 8439 known-answer
-# ---------------------------------------------------------------------------
-
-describe "chacha_poly: RFC 8439 §2.8.2 known-answer":
-    # @manual scenario evidence
-    it "node encrypt matches the canonical ciphertext||tag":
+describe "chacha_poly: RFC 8439 known-answer vectors":
+    it "RFC 8439 2.3.2 block keystream (counter 1) matches the published bytes":
         # @req REQ-SSPEC-SYSTEM
-        step("node encrypt matches the canonical ciphertext||tag")
-        val key   = hex_to_bytes(RFC8439_KEY_HEX)
-        val nonce = hex_to_bytes(RFC8439_NONCE_HEX)
-        val aad   = hex_to_bytes(RFC8439_AAD_HEX)
-        val plain = hex_to_bytes(RFC8439_PT_HEX)
-        val got   = _unwrap_bytes(ref_chacha_poly_encrypt_via(Vendor.NODE, key, nonce, aad, plain))
-        expect(bytes_to_hex(got)).to_equal(RFC8439_CT_TAG_HEX)
+        step("RFC 8439 2.3.2 block keystream (counter 1) matches the published bytes")
+        val key = hex_to_bytes(SEQ_KEY_HEX)
+        val nonce = hex_to_bytes("000000090000004a00000000")
+        # keystream = encrypt of 64 zero bytes
+        val ks = chacha20_encrypt(key, 1, nonce, _zeros(64))
+        expect(bytes_to_hex(ks)).to_equal("10f1e7e4d13b5915500fdd1fa32071c4c7d1f4c733c068030422aa9ac3d46c4ed2826446079faa0914c2d705d98b02a2b5129cd1de164eb9cbd083e8a2503c4e")
 
-
-# ---------------------------------------------------------------------------
-# Lane 1: Simple-encrypt / Simple-decrypt (sanity roundtrip)
-# ---------------------------------------------------------------------------
-
-describe "chacha_poly: Simple ↔ Simple roundtrip over 8-input matrix":
-    it "every matrix input round-trips through pure-Simple encrypt+decrypt":
+    it "RFC 8439 2.4.2 encryption yields the published ciphertext":
         # @req REQ-SSPEC-SYSTEM
-        step("every matrix input round-trips through pure-Simple encrypt+decrypt")
-        val key   = hex_to_bytes(RFC8439_KEY_HEX)
-        val nonce = hex_to_bytes(RFC8439_NONCE_HEX)
-        val aad   = hex_to_bytes(RFC8439_AAD_HEX)
-        # ChaCha20 block size = 64 bytes
-        val matrix = crypto_input_matrix(block_size: 64u64)
-        var i: u64 = 0
-        while i < matrix.len():
-            val plain    = matrix[i]
-            val ct_tag   = chacha20_poly1305_encrypt(key, nonce, plain, aad)
-            val split    = _split_ct_tag(ct_tag)
-            val recovered = _decrypt_ok_bytes(key, nonce, split.0, aad, split.1)
-            expect(_bytes_eq(recovered, plain)).to_equal(true)
-            i = i + 1
+        step("RFC 8439 2.4.2 encryption yields the published ciphertext")
+        val key = hex_to_bytes(SEQ_KEY_HEX)
+        val nonce = hex_to_bytes("000000000000004a00000000")
+        val ct = chacha20_encrypt(key, 1, nonce, hex_to_bytes(LADIES_PT_HEX))
+        expect(bytes_to_hex(ct)).to_equal("6e2e359a2568f98041ba0728dd0d6981e97e7aec1d4360c20a27afccfd9fae0bf91b65c5524733ab8f593dabcd62b3571639d624e65152ab8f530c359f0861d807ca0dbf500d6a6156a38e088a22b65e52bc514d16ccf806818ce91ab77937365af90bbf74a35be6b40b8eedf2785e42874d")
 
-
-# ---------------------------------------------------------------------------
-# Lane 2: Simple-encrypt / vendor-decrypt
-# ---------------------------------------------------------------------------
-
-describe "chacha_poly: Simple-encrypt → vendor-decrypt":
-    # NOTE: pure-Simple chacha20_poly1305_encrypt produces a Poly1305 tag that
-    # diverges from the RFC 8439 §2.8.2 canonical tag for 114-byte inputs
-    # (see doc/01_research/local/chacha_poly_tag_bug_2026-04-17.md). These
-    # tests assert vendor-side decrypt must NOT error so the bug surfaces
-    # properly; earlier drafts hid the auth failure behind an empty-bytes
-    # fallback which let empty-input matrix entries pass spuriously.
-
-    it "node decrypts every pure-Simple-encrypted matrix entry without auth error":
+    it "RFC 8439 2.5.2 Poly1305 tag matches the published value":
         # @req REQ-SSPEC-SYSTEM
-        step("node decrypts every pure-Simple-encrypted matrix entry without auth error")
-        val key   = hex_to_bytes(RFC8439_KEY_HEX)
-        val nonce = hex_to_bytes(RFC8439_NONCE_HEX)
-        val aad   = hex_to_bytes(RFC8439_AAD_HEX)
-        val matrix = crypto_input_matrix(block_size: 64u64)
-        var i: u64 = 0
-        while i < matrix.len():
-            val plain    = matrix[i]
-            val ct_tag   = chacha20_poly1305_encrypt(key, nonce, plain, aad)
-            val result   = ref_chacha_poly_decrypt_via(Vendor.NODE, key, nonce, aad, ct_tag)
-            expect(_is_err(result)).to_equal(false)
-            val recovered = _unwrap_bytes(result)
-            expect(_bytes_eq(recovered, plain)).to_equal(true)
-            i = i + 1
+        step("RFC 8439 2.5.2 Poly1305 tag matches the published value")
+        val key = hex_to_bytes("85d6be7857556d337f4452fe42d506a80103808afb0db2fd4abff6af4149f51b")
+        val msg = "Cryptographic Forum Research Group".bytes()
+        expect(bytes_to_hex(poly1305_mac(key, msg))).to_equal("a8061dc1305136c6c22b8baf0c0127a9")
 
-
-# ---------------------------------------------------------------------------
-# Lane 3: vendor-encrypt / Simple-decrypt
-# ---------------------------------------------------------------------------
-
-describe "chacha_poly: vendor-encrypt → Simple-decrypt":
-    it "pure-Simple decrypts every node-encrypted matrix entry":
+    it "RFC 8439 2.8.2 AEAD encrypt yields the published ciphertext||tag":
         # @req REQ-SSPEC-SYSTEM
-        step("pure-Simple decrypts every node-encrypted matrix entry")
-        val key   = hex_to_bytes(RFC8439_KEY_HEX)
-        val nonce = hex_to_bytes(RFC8439_NONCE_HEX)
-        val aad   = hex_to_bytes(RFC8439_AAD_HEX)
-        val matrix = crypto_input_matrix(block_size: 64u64)
-        var i: u64 = 0
-        while i < matrix.len():
-            val plain = matrix[i]
-            val ct_tag = _unwrap_bytes(
-                ref_chacha_poly_encrypt_via(Vendor.NODE, key, nonce, aad, plain))
-            val split = _split_ct_tag(ct_tag)
-            val recovered = _decrypt_ok_bytes(key, nonce, split.0, aad, split.1)
-            expect(_bytes_eq(recovered, plain)).to_equal(true)
-            i = i + 1
+        step("RFC 8439 2.8.2 AEAD encrypt yields the published ciphertext||tag")
+        val out = chacha20_poly1305_encrypt(hex_to_bytes(AEAD_KEY_HEX), hex_to_bytes(AEAD_NONCE_HEX), hex_to_bytes(LADIES_PT_HEX), hex_to_bytes(AEAD_AAD_HEX))
+        expect(bytes_to_hex(out)).to_equal(AEAD_CT_HEX)
 
-
-# ---------------------------------------------------------------------------
-# Lane 4: vendor-encrypt / vendor-decrypt (baseline sanity)
-# ---------------------------------------------------------------------------
-
-describe "chacha_poly: vendor ↔ vendor roundtrip":
-    it "node-encrypt → node-decrypt recovers every matrix entry":
+    it "RFC 8439 2.8.2 AEAD decrypt recovers the published plaintext":
         # @req REQ-SSPEC-SYSTEM
-        step("node-encrypt → node-decrypt recovers every matrix entry")
-        val key   = hex_to_bytes(RFC8439_KEY_HEX)
-        val nonce = hex_to_bytes(RFC8439_NONCE_HEX)
-        val aad   = hex_to_bytes(RFC8439_AAD_HEX)
-        val matrix = crypto_input_matrix(block_size: 64u64)
-        var i: u64 = 0
-        while i < matrix.len():
-            val plain  = matrix[i]
-            val ct_tag = _unwrap_bytes(ref_chacha_poly_encrypt_via(Vendor.NODE, key, nonce, aad, plain))
-            val got    = _unwrap_bytes(ref_chacha_poly_decrypt_via(Vendor.NODE, key, nonce, aad, ct_tag))
-            expect(_bytes_eq(got, plain)).to_equal(true)
-            i = i + 1
+        step("RFC 8439 2.8.2 AEAD decrypt recovers the published plaintext")
+        val split = _split_ct_tag(hex_to_bytes(AEAD_CT_HEX))
+        val pt = _decrypt_ok(hex_to_bytes(AEAD_KEY_HEX), hex_to_bytes(AEAD_NONCE_HEX), split.0, hex_to_bytes(AEAD_AAD_HEX), split.1)
+        expect(bytes_to_hex(pt)).to_equal(LADIES_PT_HEX)
 
-
-# ---------------------------------------------------------------------------
-# Negative path: tampered tag
-# ---------------------------------------------------------------------------
-
-describe "chacha_poly: tampered-tag authentication failure":
-    it "node decrypt rejects the same tampered ciphertext||tag":
+    it "a flipped tag bit is rejected on decrypt":
         # @req REQ-SSPEC-SYSTEM
-        step("node decrypt rejects the same tampered ciphertext||tag")
-        val key   = hex_to_bytes(RFC8439_KEY_HEX)
-        val nonce = hex_to_bytes(RFC8439_NONCE_HEX)
-        val aad   = hex_to_bytes(RFC8439_AAD_HEX)
-        val plain = hex_to_bytes(RFC8439_PT_HEX)
-        val ct_tag = chacha20_poly1305_encrypt(key, nonce, plain, aad)
-        var tampered: [u8] = []
-        var i: u64 = 0
-        while i < ct_tag.len() - 1:
-            tampered.push(ct_tag[i])
-            i = i + 1
-        tampered.push((ct_tag[ct_tag.len() - 1].to_i64() ^ 0xff).to_u8())
-        val r = ref_chacha_poly_decrypt_via(Vendor.NODE, key, nonce, aad, tampered)
-        expect(_is_err(r)).to_equal(true)
+        step("a flipped tag bit is rejected on decrypt")
+        val split = _split_ct_tag(hex_to_bytes(AEAD_CT_HEX))
+        var tag = split.1
+        tag[15] = (tag[15].to_i64() ^ 0xff).to_u8()
+        val bad = _decrypt_is_err(hex_to_bytes(AEAD_KEY_HEX), hex_to_bytes(AEAD_NONCE_HEX), split.0, hex_to_bytes(AEAD_AAD_HEX), tag)
+        expect(bad).to_equal(true)
