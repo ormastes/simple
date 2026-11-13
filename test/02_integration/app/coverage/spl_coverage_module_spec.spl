@@ -15,12 +15,13 @@ use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
 use std.nogc_sync_mut.env.platform.{is_windows, get_temp_dir}
 use std.env.variables.{env_get}
 use std.nogc_sync_mut.io.env_ops.{cwd}
-use std.fs.{file_write_text}
+use std.fs.{file_write_text, read_to_string}
+use std.common.coverage_module_report.{coverage_source_digest}
 
 val CLI_RUN_TIMEOUT_MS: i64 = 120000
 val CLI_RUN_MAX_OUT: i64 = 16777216
 val FIXTURE: text = "test/fixtures/coverage/covreport_fixture.spl"
-val FIXTURE_LINE: text = "coverage-module: test/fixtures/coverage/covreport_fixture.spl lines=58.3% (7/12) decisions=33.3% (1/3 both outcomes) outcomes=50.0% (3/6) conditions=0.0% (0/2) toplevel_excluded=0 inactive_platform=0 recorded=yes"
+val FIXTURE_LINE: text = "coverage-module: test/fixtures/coverage/covreport_fixture.spl lines=58.3% (7/12) decisions=33.3% (1/3 both outcomes) outcomes=50.0% (3/6) conditions=0.0% (0/2) toplevel_excluded=0 foreign_excluded=0 recorded=yes source=unverified"
 
 fn _child_cov_env(tag: text) -> [(text, text)]:
     val dir = env_get("SPL_COVERAGE_MODULE_CHILD_COV_DIR") ?? ""
@@ -63,6 +64,44 @@ fn _artifact() -> text:
     expect(file_write_text(path, sdn)).to_equal(true)
     path
 
+
+val TAIL_FIXTURE: text = "test/fixtures/coverage/covtail_fixture.spl"
+
+fn _tmp_path(name: text) -> text:
+    get_temp_dir().replace("\\", "/") + "/" + name
+
+# `_artifact()` rows plus a `sources` digest for FIXTURE, as a current
+# collector writes them.
+fn _digested_artifact(name: text, digest: text) -> text:
+    val src = read_to_string(_artifact()) ?? ""
+    val path = _tmp_path(name)
+    expect(file_write_text(path, src + "\nsources |file, crc32|\n    /repo/{FIXTURE}, {digest}\n")).to_equal(true)
+    path
+
+# Runs TAIL_FIXTURE under the interpreter collector; returns the artifact path.
+fn _collect_tail_artifact() -> text:
+    val repo = cwd().replace("\\", "/")
+    val out_path = _tmp_path("spl_coverage_module_spec_tail.sdn")
+    val env: [(text, text)] = [("SIMPLE_COVERAGE", "1"), ("SIMPLE_COVERAGE_OUTPUT", out_path),
+        ("SIMPLE_RUNTIME_MODE", "interpreter"), ("SIMPLE_EXECUTION_MODE", "interpret"), ("SIMPLE_LIB", repo + "/src")]
+    var result = ("", "", 1)
+    if is_windows():
+        var cmd = ""
+        for (key, value) in env:
+            cmd = cmd + "set \"" + key + "=" + value + "\" && "
+        cmd = cmd + repo + "/bin/simple.exe run " + TAIL_FIXTURE
+        result = process_run_bounded(env_get("ComSpec") ?? "cmd.exe", ["/d", "/c", cmd], CLI_RUN_TIMEOUT_MS, CLI_RUN_MAX_OUT)
+    else:
+        var prefix = ""
+        for (key, value) in env:
+            prefix = prefix + key + "=\"" + value + "\" "
+        result = process_run_bounded("/bin/sh", ["-c", prefix + "\"" + repo + "/bin/simple\" run " + TAIL_FIXTURE],
+            CLI_RUN_TIMEOUT_MS, CLI_RUN_MAX_OUT)
+    val (out, err, code) = result
+    expect(code).to_equal(0)
+    expect(out).to_contain("one\n2\n2\n2")
+    out_path
+
 describe "spl-coverage module":
     # @manual scenario evidence
     it "lists the module command in help":
@@ -92,7 +131,7 @@ describe "spl-coverage module":
     it "applies --os and --arch to @when platform blocks":
         val (out, err, code) = _run_spl_coverage("platform", ["module", "--file", _artifact(), "--os", "freebsd", "--arch", "riscv64", FIXTURE])
         expect(code).to_equal(0)
-        expect(out).to_contain("inactive_platform=0")
+        expect(out).to_contain("foreign_excluded=0")
 
     it "rejects missing arguments, a non-numeric --min and unreadable inputs":
         val artifact = _artifact()
@@ -108,3 +147,34 @@ describe "spl-coverage module":
         val (no_art_out, no_art_err, no_art_code) = _run_spl_coverage("no_art", ["module", "--file", "/nonexistent/spl_cov_module.sdn", FIXTURE])
         expect(no_art_code).to_equal(1)
         expect(no_art_out).to_contain("Error:")
+
+    # Defects 1+2 (collector): a function's tail `match`, tail one-line and
+    # block `if`, and a mid-body one-line `if c: a else: b` all run here, so a
+    # collector that records them scores 100%; one that drops them read 5/9.
+    # Defect 3 end to end: the collector's `sources` digest matches the file.
+    it "scores every tail match and one-line if the collector ran as hit":
+        val artifact = _collect_tail_artifact()
+        val (out, err, code) = _run_spl_coverage("tail", ["module", "--file", artifact, TAIL_FIXTURE])
+        expect(code).to_equal(0)
+        expect(out).to_contain("lines=100.0% (9/9)")
+        expect(out).to_contain("source=verified")
+
+    it "refuses to merge artifacts recorded against different source versions":
+        val current = coverage_source_digest(read_to_string(FIXTURE) ?? "")
+        val fresh = _digested_artifact("spl_cov_module_fresh.sdn", current)
+        val stale = _digested_artifact("spl_cov_module_stale.sdn", "0badf00d")
+        val (out, err, code) = _run_spl_coverage("mixed", ["module", "--file", fresh, "--file", stale, FIXTURE])
+        expect(code).to_equal(1)
+        expect(out).to_contain("refusing to score")
+        expect(out).to_contain("spl_cov_module_stale.sdn (crc32 0badf00d)")
+        expect(out.contains("lines=")).to_equal(false)
+        val (ok_out, ok_err, ok_code) = _run_spl_coverage("fresh", ["module", "--file", fresh, "--file", fresh, FIXTURE])
+        expect(ok_code).to_equal(0)
+        expect(ok_out).to_contain("source=verified")
+
+    it "warns loudly when merging artifacts that carry no source digest":
+        val artifact = _artifact()
+        val (out, err, code) = _run_spl_coverage("legacy", ["module", "--file", artifact, "--file", artifact, FIXTURE])
+        expect(code).to_equal(0)
+        expect(out).to_contain("WARNING: merging 2 artifacts")
+        expect(out).to_contain("source=unverified")

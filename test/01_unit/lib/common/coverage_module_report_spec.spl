@@ -12,7 +12,8 @@
 #   both outcomes    1 of 3; outcomes hit 3 of 6
 #   line 19 "doubled > 10 and n > 0" has 2 conditions, never evaluated.
 use std.common.coverage_module_report.{coverage_executable_lines, coverage_module_report,
-    coverage_module_report_text, coverage_pct_text, CoverageModuleReport}
+    coverage_module_report_text, coverage_pct_text, CoverageModuleReport, coverage_source_digest,
+    coverage_source_digests, coverage_source_check}
 
 extern fn rt_file_read_text(path: text) -> text?
 
@@ -67,7 +68,7 @@ describe "coverage module report":
 
     it "renders one greppable line per module":
         val text_out = coverage_module_report_text(fixture_report())
-        expect(text_out).to_equal("coverage-module: test/fixtures/coverage/covreport_fixture.spl lines=58.3% (7/12) decisions=33.3% (1/3 both outcomes) outcomes=50.0% (3/6) conditions=0.0% (0/2) toplevel_excluded=0 inactive_platform=0 recorded=yes")
+        expect(text_out).to_equal("coverage-module: test/fixtures/coverage/covreport_fixture.spl lines=58.3% (7/12) decisions=33.3% (1/3 both outcomes) outcomes=50.0% (3/6) conditions=0.0% (0/2) toplevel_excluded=0 foreign_excluded=0 recorded=yes source=unverified")
 
     it "does not credit a hit line inside a function the run never called":
         val sdn = "lines |file, line, hit_count|\n    {ABS}, 18, 1\n    {ABS}, 4, 1\n\nfunctions |name, call_count|\n    covrep_classify, 1\n"
@@ -95,16 +96,31 @@ describe "coverage module report":
         val r = coverage_module_report("m.spl", src, "", "linux", "riscv64")
         expect(r.toplevel_excluded).to_equal(2)
 
-    it "keeps lines of inactive @when platform blocks in the denominator and counts them":
+    it "excludes foreign @when platform bodies from the denominator and reports the count":
+        # Only the selected branch (line 6 on linux/riscv64) can run on the
+        # host the artifact came from; lines 3 and 9 are foreign_excluded.
         val src = "@when(os=\"windows\"):\nfn w() -> i64:\n    return 1\n@elif(arch=\"riscv64\"):\nfn w() -> i64:\n    return 2\n@else:\nfn w() -> i64:\n    return 3\n@end\n"
         val r = coverage_module_report("m.spl", src, "", "linux", "riscv64")
-        expect(r.exec_lines).to_equal(3)
-        expect(r.inactive_platform_lines).to_equal(2)
+        expect(r.exec_lines).to_equal(1)
+        expect(r.foreign_excluded).to_equal(2)
+        expect(coverage_executable_lines(src, "linux", "riscv64")).to_equal([6])
         val on_windows = coverage_module_report("m.spl", src, "", "windows", "x86_64")
-        expect(on_windows.inactive_platform_lines).to_equal(2)
+        expect(on_windows.exec_lines).to_equal(1)
+        expect(on_windows.foreign_excluded).to_equal(2)
+        expect(coverage_executable_lines(src, "windows", "x86_64")).to_equal([3])
+        expect(coverage_module_report_text(on_windows)).to_contain("foreign_excluded=2")
         val nested = "@when(os=\"macos\" or feature=\"macho\"):\nfn m() -> i64:\n    return 1\n@end\n"
-        expect(coverage_module_report("m.spl", nested, "", "linux", "x86_64").inactive_platform_lines).to_equal(0)
-        expect(coverage_module_report("m.spl", nested, "", "macos", "aarch64").inactive_platform_lines).to_equal(0)
+        expect(coverage_module_report("m.spl", nested, "", "linux", "x86_64").foreign_excluded).to_equal(0)
+        expect(coverage_module_report("m.spl", nested, "", "macos", "aarch64").foreign_excluded).to_equal(0)
+
+    it "scores a foreign-platform module 100% on its own --os once the selected branch ran":
+        val src = "fn shared() -> i64:\n    return 0\n@when(os=\"freebsd\"):\nfn probe() -> i64:\n    val k = 1\n    return k\n@else:\nfn probe() -> i64:\n    return 2\n@end\n"
+        val sdn = "lines |file, line, hit_count|\n    m.spl, 2, 1\n    m.spl, 5, 1\n    m.spl, 6, 1\n\nfunctions |name, call_count|\n    shared, 1\n    probe, 1\n"
+        val r = coverage_module_report("m.spl", src, sdn, "freebsd", "x86_64")
+        expect(r.exec_lines).to_equal(3)
+        expect(r.hit_lines).to_equal(3)
+        expect(r.foreign_excluded).to_equal(1)
+        expect(coverage_module_report("m.spl", src, sdn, "linux", "x86_64").foreign_excluded).to_equal(2)
 
     it "formats percentages by truncation so 89.99 never reads as 90.0":
         expect(coverage_pct_text(8999, 10000)).to_equal("89.9")
@@ -127,8 +143,8 @@ describe "coverage module report":
     it "treats unknown or malformed @when conditions as selected and ignores stray markers":
         val src = "@end\n@else:\n@elif(os=\"linux\"):\n@when(debug):\nfn a() -> i64:\n    return 1\n@end\n@when(os=\"windows\"\nfn b() -> i64:\n    return 2\n@end\n@when(arch=\"aarch64\"):\nfn c() -> i64:\n    return 3\n@elif(os=\"windows\"):\nfn c() -> i64:\n    return 4\n@else:\nfn c() -> i64:\n    return 5\n@end\n"
         val r = coverage_module_report("m.spl", src, "", "linux", "x86_64")
-        expect(r.exec_lines).to_equal(5)
-        expect(r.inactive_platform_lines).to_equal(2)
+        expect(r.exec_lines).to_equal(3)
+        expect(r.foreign_excluded).to_equal(2)
 
     it "unions repeated decision and condition rows and ignores other files":
         val sdn = "decisions |id, file, line, column, true_count, false_count|\n" +
@@ -149,3 +165,55 @@ describe "coverage module report":
         val lines = coverage_executable_lines(src, "linux", "x86_64")
         expect(lines.len()).to_equal(2)
         expect(lines[1]).to_equal(3)
+
+    # Decision ids and line numbers are positions in ONE version of a source
+    # file. The collector writes `sources |file, crc32|`; artifacts from two
+    # source versions must never be merged silently (it read 94.0% for an
+    # honest 95.9%).
+    it "digests source with crc32 as eight lowercase hex digits":
+        expect(coverage_source_digest("123456789")).to_equal("cbf43926")
+        expect(coverage_source_digest("")).to_equal("00000000")
+
+    it "reads the source digests an artifact recorded for one module":
+        val sdn = "lines |file, line, hit_count|\n    /r/m.spl, 2, 1\n\nsources |file, crc32|\n    /r/m.spl, cbf43926\n    /r/other.spl, 00000001\n\nsummary:\n    total_files: 2\n"
+        expect(coverage_source_digests(sdn, "m.spl")).to_equal(["cbf43926"])
+        expect(coverage_source_digests(sdn, "x.spl").len()).to_equal(0)
+
+    it "verifies artifacts whose digest matches the current source":
+        val src = "123456789"
+        val a = "lines |file, line, hit_count|\n    /r/m.spl, 1, 1\n\nsources |file, crc32|\n    /r/m.spl, cbf43926\n"
+        val check = coverage_source_check([a, a], ["a.sdn", "b.sdn"], "m.spl", src)
+        expect(check.ok).to_equal(true)
+        expect(check.state).to_equal("verified")
+        expect(check.message).to_equal("")
+        expect(coverage_module_report_text(coverage_module_report("m.spl", src, a, "linux", "x86_64"))).to_contain("source=verified")
+
+    it "refuses an artifact recorded against a different source version":
+        val src = "123456789"
+        val current = "lines |file, line, hit_count|\n    /r/m.spl, 1, 1\n\nsources |file, crc32|\n    /r/m.spl, cbf43926\n"
+        val stale = "decisions |id, file, line, column, true_count, false_count|\n    9, /r/m.spl, 1, 5, 1, 1\n\nsources |file, crc32|\n    /r/m.spl, 0badf00d\n"
+        val check = coverage_source_check([current, stale], ["new.sdn", "old.sdn"], "m.spl", src)
+        expect(check.ok).to_equal(false)
+        expect(check.state).to_equal("mismatch")
+        expect(check.message).to_contain("old.sdn")
+        expect(check.message).to_contain("0badf00d")
+        expect(check.message).to_contain("cbf43926")
+        expect(check.message.contains("new.sdn")).to_equal(false)
+        expect(coverage_module_report_text(coverage_module_report("m.spl", src, stale, "linux", "x86_64"))).to_contain("source=mismatch")
+
+    it "warns loudly when artifacts without a source digest are merged":
+        val src = "123456789"
+        val legacy = "lines |file, line, hit_count|\n    /r/m.spl, 1, 1\n"
+        val digested = "lines |file, line, hit_count|\n    /r/m.spl, 1, 1\n\nsources |file, crc32|\n    /r/m.spl, cbf43926\n"
+        val single = coverage_source_check([legacy], ["a.sdn"], "m.spl", src)
+        expect(single.ok).to_equal(true)
+        expect(single.state).to_equal("unverified")
+        expect(single.message).to_equal("")
+        val merged = coverage_source_check([digested, legacy, "lines |file, line, hit_count|\n    /r/z.spl, 1, 1\n"], ["d.sdn", "a.sdn", "z.sdn"], "m.spl", src)
+        expect(merged.ok).to_equal(true)
+        expect(merged.state).to_equal("unverified")
+        expect(merged.message).to_contain("WARNING")
+        expect(merged.message).to_contain("a.sdn")
+        expect(merged.message.contains("z.sdn")).to_equal(false)
+        val none = coverage_source_check(["lines |file, line, hit_count|\n    /r/z.spl, 1, 1\n"], ["z.sdn"], "m.spl", src)
+        expect(none.state).to_equal("unrecorded")

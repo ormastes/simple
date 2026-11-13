@@ -1,0 +1,161 @@
+# `simple spl-coverage` dump / status / clear / rollup and dispatch, end to end
+# (the `module` command is in spl_coverage_module_spec.spl).
+#
+# Coverage of src/app/spl_coverage/main.spl: set
+# SPL_COVERAGE_MODULE_CHILD_COV_DIR=<dir> (the same knob as the module spec);
+# every child that does not need coverage DISABLED then runs with
+# SIMPLE_COVERAGE=1 and writes <dir>/child_cli_<tag>.sdn. The disabled-state
+# branches (`status`/`clear`/`dump` with SIMPLE_COVERAGE unset) cannot be
+# recorded by construction -- the collector is off there.
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+use std.nogc_sync_mut.env.platform.{is_windows, get_temp_dir}
+use std.env.variables.{env_get}
+use std.nogc_sync_mut.io.env_ops.{cwd}
+use std.fs.{file_write_text, read_to_string}
+
+val CLI_RUN_TIMEOUT_MS: i64 = 120000
+val CLI_RUN_MAX_OUT: i64 = 16777216
+
+fn _tmp(name: text) -> text:
+    get_temp_dir().replace("\\", "/") + "/" + name
+
+# coverage: "collect" (on only while measuring), "on" (always), "off" (never).
+# Off UNSETS the variable: the seed enables collection whenever
+# SIMPLE_COVERAGE is present, even empty (coverage.rs init_coverage_from_env).
+fn _cov_on(coverage: text) -> bool:
+    val dir = env_get("SPL_COVERAGE_MODULE_CHILD_COV_DIR") ?? ""
+    coverage == "on" or (coverage == "collect" and dir != "")
+
+fn _cov_out(tag: text) -> text:
+    val dir = env_get("SPL_COVERAGE_MODULE_CHILD_COV_DIR") ?? ""
+    if dir != "": "{dir}/child_cli_{tag}.sdn" else: _tmp("spl_cov_cli_{tag}.sdn")
+
+fn _cli(tag: text, args: [text], coverage: text) -> (text, text, i64):
+    val repo = cwd().replace("\\", "/")
+    val program = if is_windows(): repo + "/bin/simple.exe" else: repo + "/bin/simple"
+    val joined = (["src/app/spl_coverage/main.spl"] + args).join(" ")
+    val on = _cov_on(coverage)
+    if is_windows():
+        var cmd = "set \"SIMPLE_COVERAGE=\" && set \"SIMPLE_COVERAGE_OUTPUT=\" && "
+        if on:
+            cmd = "set \"SIMPLE_COVERAGE=1\" && set \"SIMPLE_COVERAGE_OUTPUT=" + _cov_out(tag) + "\" && "
+        cmd = cmd + "set \"SIMPLE_LIB=" + repo + "/src\" && " + program + " run " + joined
+        return process_run_bounded(env_get("ComSpec") ?? "cmd.exe", ["/d", "/c", cmd], CLI_RUN_TIMEOUT_MS, CLI_RUN_MAX_OUT)
+    var prefix = "unset SIMPLE_COVERAGE SIMPLE_COVERAGE_OUTPUT; "
+    if on:
+        prefix = "SIMPLE_COVERAGE=1 SIMPLE_COVERAGE_OUTPUT=\"" + _cov_out(tag) + "\" "
+    process_run_bounded("/bin/sh", ["-c", prefix + "SIMPLE_LIB=\"" + repo + "/src\" \"" + program + "\" run " + joined],
+        CLI_RUN_TIMEOUT_MS, CLI_RUN_MAX_OUT)
+
+fn _artifact(name: text, line: i64) -> text:
+    val path = _tmp(name)
+    val sdn = "# Coverage Report\nversion: 1.0\n\nlines |file, line, hit_count|\n    /repo/a.spl, {line}, 1\n\n" +
+        "functions |name, call_count|\n    f, 1\n"
+    expect(file_write_text(path, sdn)).to_equal(true)
+    path
+
+describe "spl-coverage dump and status":
+    it "dumps and loads a persisted artifact and rejects a missing one":
+        val a = _artifact("spl_cov_cli_a.sdn", 3)
+        val (out, err, code) = _cli("dump_file", ["dump", "--file", a], "collect")
+        expect(code).to_equal(0)
+        expect(out).to_contain("/repo/a.spl, 3, 1")
+        val (st_out, st_err, st_code) = _cli("status_file", ["status", "--file", a], "collect")
+        expect(st_code).to_equal(0)
+        expect(st_out).to_contain("Loaded persisted coverage data from: {a}")
+        val (m_out, m_err, m_code) = _cli("dump_missing", ["dump", "--file", "/nonexistent/spl_cov_cli.sdn"], "collect")
+        expect(m_code).to_equal(1)
+        expect(m_out).to_contain("coverage file not found")
+        val (sm_out, sm_err, sm_code) = _cli("status_missing", ["status", "--file", "/nonexistent/spl_cov_cli.sdn"], "collect")
+        expect(sm_code).to_equal(1)
+        expect(sm_out).to_contain("coverage file not found")
+
+    it "reports the live collector as enabled or disabled":
+        val (on_out, on_err, on_code) = _cli("status_live", ["status"], "on")
+        expect(on_code).to_equal(0)
+        expect(on_out).to_contain("Coverage tracking is ENABLED")
+        val (d_out, d_err, d_code) = _cli("dump_live", ["dump"], "on")
+        expect(d_code).to_equal(0)
+        expect(d_out).to_contain("# Coverage Report")
+        val (off_out, off_err, off_code) = _cli("status_off", ["status"], "off")
+        expect(off_code).to_equal(1)
+        expect(off_out).to_contain("Coverage tracking is DISABLED")
+
+    it "clears the live collector and refuses when coverage is off":
+        val (out, err, code) = _cli("clear_live", ["clear"], "on")
+        expect(code).to_equal(0)
+        expect(out).to_contain("Coverage data cleared")
+        val (off_out, off_err, off_code) = _cli("clear_off", ["clear"], "off")
+        expect(off_code).to_equal(1)
+        expect(off_out).to_contain("Coverage not enabled")
+
+describe "spl-coverage rollup":
+    it "unions artifacts and writes the combined report":
+        val a = _artifact("spl_cov_cli_ra.sdn", 3)
+        val b = _artifact("spl_cov_cli_rb.sdn", 4)
+        val out_path = _tmp("spl_cov_cli_rollup_out.sdn")
+        val (out, err, code) = _cli("rollup", ["rollup", "--file", a, "--file", b, "--out", out_path], "collect")
+        expect(code).to_equal(0)
+        expect(out).to_contain("Rolled up 2 artifact(s): 2 line row(s)")
+        expect(out).to_contain("written to: {out_path}")
+        expect(read_to_string(out_path) ?? "").to_contain("/repo/a.spl, 4, 1")
+
+    it "rejects no artifact, a missing artifact and an unwritable --out":
+        val a = _artifact("spl_cov_cli_rc.sdn", 3)
+        val (n_out, n_err, n_code) = _cli("rollup_none", ["rollup"], "collect")
+        expect(n_code).to_equal(1)
+        expect(n_out).to_contain("rollup requires at least one --file")
+        val (m_out, m_err, m_code) = _cli("rollup_missing", ["rollup", "--file", "/nonexistent/spl_cov_cli.sdn"], "collect")
+        expect(m_code).to_equal(1)
+        expect(m_out).to_contain("Error: rollup: coverage file not found")
+        val (w_out, w_err, w_code) = _cli("rollup_out", ["rollup", "--file", a, "--out", a + "/sub/x.sdn"], "collect")
+        expect(w_code).to_equal(1)
+        expect(w_out).to_contain("could not write combined report")
+
+describe "spl-coverage dispatch":
+    it "renders json status and progress for every command":
+        val a = _artifact("spl_cov_cli_j.sdn", 3)
+        val (j_out, j_err, j_code) = _cli("json_status_file", ["--log-mode=json", "status", "--file", a], "collect")
+        expect(j_code).to_equal(0)
+        expect(j_out).to_contain("\"status\":\"ok\"")
+        val (jm_out, jm_err, jm_code) = _cli("json_status_missing", ["--log-mode=json", "status", "--file", "/nonexistent/x.sdn"], "collect")
+        expect(jm_code).to_equal(1)
+        expect(jm_out).to_contain("\"status\":\"error\"")
+        val (jl_out, jl_err, jl_code) = _cli("json_status_live", ["--log-mode=json", "status"], "on")
+        expect(jl_code).to_equal(0)
+        expect(jl_out).to_contain("\"enabled\":true")
+        val (jc_out, jc_err, jc_code) = _cli("json_clear_off", ["--log-mode=json", "clear"], "off")
+        expect(jc_code).to_equal(1)
+        expect(jc_out).to_contain("\"enabled\":false")
+        val (p_out, p_err, p_code) = _cli("progress_status", ["--progress=dot", "status", "--file", a], "collect")
+        expect(p_code).to_equal(0)
+        expect(p_out).to_contain("Loaded persisted coverage data")
+        val (pc_out, pc_err, pc_code) = _cli("progress_clear", ["--progress=dot", "clear"], "on")
+        expect(pc_code).to_equal(0)
+        val (pr_out, pr_err, pr_code) = _cli("progress_rollup", ["--progress=dot", "rollup", "--file", a], "collect")
+        expect(pr_code).to_equal(0)
+        expect(pr_out).to_contain("Rolled up 1 artifact(s)")
+
+    it "rejects an unknown command, an invalid log mode and an unreadable module source":
+        val (u_out, u_err, u_code) = _cli("unknown", ["bogus"], "collect")
+        expect(u_code).to_equal(1)
+        expect(u_out).to_contain("Unknown command: bogus")
+        val (ju_out, ju_err, ju_code) = _cli("json_unknown", ["--log-mode=json", "bogus"], "collect")
+        expect(ju_code).to_equal(1)
+        expect(ju_out).to_contain("\"command\":\"spl-coverage\"")
+        val (jn_out, jn_err, jn_code) = _cli("json_none", ["--log-mode=json"], "collect")
+        expect(jn_code).to_equal(1)
+        expect(jn_out).to_contain("\"status\":\"error\"")
+        val (pn_out, pn_err, pn_code) = _cli("progress_none", ["--progress=dot"], "collect")
+        expect(pn_code).to_equal(0)
+        expect(pn_out).to_contain("Usage: simple spl-coverage")
+        val (h_out, h_err, h_code) = _cli("help_word", ["help"], "collect")
+        expect(h_code).to_equal(0)
+        expect(h_out).to_contain("Commands:")
+        val (lm_out, lm_err, lm_code) = _cli("bad_log_mode", ["--log-mode=noisy", "status"], "collect")
+        expect(lm_code).to_equal(1)
+        val a = _artifact("spl_cov_cli_d.sdn", 3)
+        val (d_out, d_err, d_code) = _cli("module_dir", ["module", "--file", a, "test/fixtures/coverage"], "collect")
+        expect(d_code).to_equal(1)
+        expect(d_out).to_contain("could not read module source: test/fixtures/coverage")

@@ -11,7 +11,7 @@ use std.log.{error}
 use std.sffi.coverage.{coverage_dump_sdn, coverage_enabled, coverage_clear}
 use std.fs.{file_exists, read_to_string, file_write_text}
 use std.common.coverage_sdn.{parse_coverage_sdn, merge_many, render_coverage_sdn, ParsedCoverage}
-use std.common.coverage_module_report.{coverage_module_report, coverage_module_report_text}
+use std.common.coverage_module_report.{coverage_module_report, coverage_module_report_text, coverage_source_check}
 use std.platform.{host_os, host_arch}
 
 fn print_help():
@@ -33,8 +33,11 @@ fn print_help():
     print "  module    Per-module line % (executable-line denominator), decision,"
     print "            outcome and condition coverage from one or more artifacts."
     print "            Example: simple spl-coverage module --file a.sdn src/app/x.spl"
-    print "            --os/--arch override the host used for @when branches;"
+    print "            --os/--arch select the platform for @when branches (default: this host);"
     print "            --min <pct> exits 1 when any module's line or decision % is below it."
+    print "            Lines of @when bodies for another platform are excluded (foreign_excluded=N)."
+    print "            Artifacts recorded against another version of a module are refused;"
+    print "            ones without a source digest are scored as source=unverified."
     print ""
     print "Options:"
     print "  --file <path>   Read a persisted SDN coverage artifact from a prior"
@@ -241,11 +244,13 @@ fn cmd_module(args: [text]) -> i64:
         print "Error: module requires at least one --file <artifact.sdn> and one <module.spl>"
         return 1
     var sdn = ""
+    var artifacts: [text] = []
     for f in files:
         val loaded = _load_coverage_file(f)
         if not loaded.ok:
             print "Error: {loaded.error}"
             return 1
+        artifacts.push(loaded.sdn)
         sdn = sdn + loaded.sdn + "\n"
     val os = get_arg(args, "--os", host_os())
     val arch = get_arg(args, "--arch", host_arch())
@@ -272,7 +277,17 @@ fn cmd_module(args: [text]) -> i64:
             case None:
                 print "Error: could not read module source: {p}"
                 return 1
-        val r = coverage_module_report(p, src, sdn, os, arch)
+        # Never merge artifacts recorded against another version of the
+        # source: their line numbers and decision ids do not line up.
+        val check = coverage_source_check(artifacts, files, p, src)
+        if not check.ok:
+            print "Error: {check.message}"
+            status = 1
+            continue
+        if check.message != "":
+            print check.message
+        var r = coverage_module_report(p, src, sdn, os, arch)
+        r.source_state = check.state
         print coverage_module_report_text(r)
         if min_pct >= 0:
             val line_ok = r.exec_lines > 0 and r.hit_lines * 100 >= min_pct * r.exec_lines

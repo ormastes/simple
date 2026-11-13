@@ -19,15 +19,26 @@
 #    those hits under the entry spec, so they can never be credited to their
 #    module (RESIDUAL note in test_runner_single.spl). Counting them would cap
 #    a const-heavy module below 90% for a collector defect, not a test gap.
-#  * inactive_platform: lines inside an `@when`/`@elif`/`@else` branch that is
-#    not selected for (host_os, host_arch). They stay IN the denominator --
-#    platform branches count -- and the count tells the lane how much of the
-#    module this host cannot execute.
+#  * foreign_excluded: lines inside an `@when`/`@elif`/`@else` branch that is
+#    not selected for (host_os, host_arch) -- the `--os`/`--arch` of the
+#    report. Such a body is not compiled on that platform, so no run there can
+#    record it; keeping it in the denominator capped a platform lane below
+#    90% for code it cannot execute. Unknown conditions (`feature=`, bare
+#    names) count as selected, so they are never excluded.
+#
+# Source version (`source=`): decision ids and line numbers are positions in
+# ONE version of a file, so artifacts recorded against different versions
+# cannot be unioned -- the decision sets of both versions would be counted
+# (measured 94.0% for an honest 95.9%). The collector writes
+# `sources |file, crc32|`; `coverage_source_check` compares every artifact's
+# digest with the current source: a mismatch refuses, an artifact with no
+# digest (older collector) is `unverified` and a merge including one warns.
 #
 # Decisions and conditions come from the runtime store, which registers every
 # site statically at module load (coverage_sites.rs), so never-run sites are in
 # the denominator with 0/0 counts.
 use std.common.coverage_sdn.{parse_coverage_sdn, ParsedCoverage}
+use std.common.crypto.crc32.{crc32}
 
 pub struct CoverageModuleReport:
     path: text
@@ -35,21 +46,23 @@ pub struct CoverageModuleReport:
     exec_lines: i64
     hit_lines: i64
     toplevel_excluded: i64
-    inactive_platform_lines: i64
+    foreign_excluded: i64
     decisions: i64
     decisions_both: i64
     outcomes_hit: i64
     conditions: i64
     conditions_both: i64
+    # verified | unverified | mismatch | unrecorded (see coverage_source_check)
+    source_state: text
 
 struct _CovExecLine:
     line: i64
     fn_name: text
-    inactive: bool
 
 struct _CovScan:
     lines: [_CovExecLine]
     toplevel: i64
+    foreign: i64
 
 # ----------------------------------------------------------------------------
 # Source scan
@@ -186,6 +199,7 @@ fn _cov_directive(t: text, host_os: text, host_arch: text, frames: _CovFrames) -
 fn _cov_scan(source: text, host_os: text, host_arch: text) -> _CovScan:
     var out: [_CovExecLine] = []
     var toplevel = 0
+    var foreign = 0
     # @when frames: [taken_any, current_state] per level.
     var frames = _CovFrames(taken: [], state: [])
     var current_fn = ""
@@ -223,12 +237,15 @@ fn _cov_scan(source: text, host_os: text, host_arch: text) -> _CovScan:
         if not _cov_is_indented(raw):
             toplevel = toplevel + 1
             continue
-        var inactive = false
+        var selected = true
         for st in frames.state:
             if st == 0:
-                inactive = true
-        out.push(_CovExecLine(line: line_no, fn_name: current_fn, inactive: inactive))
-    _CovScan(lines: out, toplevel: toplevel)
+                selected = false
+        if selected:
+            out.push(_CovExecLine(line: line_no, fn_name: current_fn))
+        else:
+            foreign = foreign + 1
+    _CovScan(lines: out, toplevel: toplevel, foreign: foreign)
 
 # Executable (denominator) line numbers of `source`, ascending.
 pub fn coverage_executable_lines(source: text, host_os: text, host_arch: text) -> [i64]:
@@ -287,6 +304,92 @@ fn _cov_conditions(sdn: text, path: text) -> [bool]:
     out
 
 # ----------------------------------------------------------------------------
+# Source version
+# ----------------------------------------------------------------------------
+
+pub struct CoverageSourceCheck:
+    # false = the artifacts must not be scored against this source
+    ok: bool
+    # verified | unverified | mismatch | unrecorded
+    state: text
+    # refusal reason (mismatch) or a loud warning (unverified merge); "" else
+    message: text
+
+# CRC-32 (IEEE) of `source` as eight lowercase hex digits -- the value the
+# collector writes in `sources |file, crc32|` (coverage.rs crc32_ieee).
+pub fn coverage_source_digest(source: text) -> text:
+    val v = crc32(source.bytes()).to_i64() & 4294967295
+    val digits = "0123456789abcdef"
+    var out = ""
+    var shift = 28
+    while shift >= 0:
+        val nibble = (v >> shift) & 15
+        out = out + digits.substring(nibble, nibble + 1)
+        shift = shift - 4
+    out
+
+# Distinct source digests `sdn` recorded for `path` (several when artifacts
+# were concatenated).
+pub fn coverage_source_digests(sdn: text, path: text) -> [text]:
+    var out: [text] = []
+    var in_section = false
+    for raw in sdn.split("\n"):
+        if raw.starts_with("    ") or raw.starts_with("\t"):
+            if in_section:
+                val c = _cov_split(raw)
+                if c.len() >= 2 and coverage_path_matches(c[0], path) and not out.contains(c[1]):
+                    out.push(c[1])
+        else:
+            in_section = raw.trim().starts_with("sources ")
+    out
+
+fn _cov_mentions(sdn: text, path: text) -> bool:
+    val cov = parse_coverage_sdn(sdn)
+    for row in cov.lines:
+        if coverage_path_matches(row.file, path):
+            return true
+    for d in cov.decisions:
+        if coverage_path_matches(d.file, path):
+            return true
+    false
+
+# Whether the artifacts (`names[i]` names `artifacts[i]`) may be scored, and
+# merged, against the current `source` of `path`. Any recorded digest that
+# differs from the source refuses; artifacts without one are `unverified`, and
+# merging more than one artifact while any lacks a digest warns.
+pub fn coverage_source_check(artifacts: [text], names: [text], path: text, source: text) -> CoverageSourceCheck:
+    val current = coverage_source_digest(source)
+    var stale: [text] = []
+    var undigested: [text] = []
+    var recorded = 0
+    var i = 0
+    while i < artifacts.len():
+        val digests = coverage_source_digests(artifacts[i], path)
+        for d in digests:
+            if d != current:
+                stale.push("{names[i]} (crc32 {d})")
+        if _cov_mentions(artifacts[i], path):
+            recorded = recorded + 1
+            if digests.len() == 0:
+                undigested.push(names[i])
+        i = i + 1
+    if stale.len() > 0:
+        return CoverageSourceCheck(ok: false, state: "mismatch",
+            message: "refusing to score {path}: artifact recorded against a different source version " +
+                "than the current file (crc32 {current}): " + stale.join(", ") +
+                "; line numbers and decision ids would not line up -- re-record against this source")
+    if recorded == 0:
+        return CoverageSourceCheck(ok: true, state: "unrecorded", message: "")
+    if undigested.len() == 0:
+        return CoverageSourceCheck(ok: true, state: "verified", message: "")
+    var message = ""
+    if recorded > 1:
+        message = "WARNING: merging {recorded} artifacts for {path}, but " + undigested.join(", ") +
+            " carry no source digest, so a mix of source versions cannot be detected " +
+            "(totals may be wrong); re-record with a collector that writes `sources`"
+    CoverageSourceCheck(ok: true, state: "unverified", message: message)
+
+# ----------------------------------------------------------------------------
 # Report
 # ----------------------------------------------------------------------------
 
@@ -305,10 +408,7 @@ pub fn coverage_module_report(path: text, source: text, sdn: text, host_os: text
             called[f.name] = true
     val scan = _cov_scan(source, host_os, host_arch)
     var hit_lines = 0
-    var inactive = 0
     for l in scan.lines:
-        if l.inactive:
-            inactive = inactive + 1
         if hits.contains_key("{l.line}") and (l.fn_name == "" or called.contains_key(l.fn_name)):
             hit_lines = hit_lines + 1
     # Decisions: dedupe by id (the runtime block can repeat a row).
@@ -337,9 +437,10 @@ pub fn coverage_module_report(path: text, source: text, sdn: text, host_os: text
     for c in conds:
         if c: conds_both = conds_both + 1
     CoverageModuleReport(path: path, recorded: recorded, exec_lines: scan.lines.len(),
-        hit_lines: hit_lines, toplevel_excluded: scan.toplevel, inactive_platform_lines: inactive,
+        hit_lines: hit_lines, toplevel_excluded: scan.toplevel, foreign_excluded: scan.foreign,
         decisions: dec_ids.len(), decisions_both: both, outcomes_hit: outcomes,
-        conditions: conds.len(), conditions_both: conds_both)
+        conditions: conds.len(), conditions_both: conds_both,
+        source_state: coverage_source_check([sdn], ["artifact"], path, source).state)
 
 # Percentage with one decimal, truncated (never rounded up across a gate).
 pub fn coverage_pct_text(hit: i64, total: i64) -> text:
@@ -354,4 +455,5 @@ pub fn coverage_module_report_text(r: CoverageModuleReport) -> text:
         "decisions={coverage_pct_text(r.decisions_both, r.decisions)}% ({r.decisions_both}/{r.decisions} both outcomes) " +
         "outcomes={coverage_pct_text(r.outcomes_hit, r.decisions * 2)}% ({r.outcomes_hit}/{r.decisions * 2}) " +
         "conditions={coverage_pct_text(r.conditions_both, r.conditions)}% ({r.conditions_both}/{r.conditions}) " +
-        "toplevel_excluded={r.toplevel_excluded} inactive_platform={r.inactive_platform_lines} recorded={rec}"
+        "toplevel_excluded={r.toplevel_excluded} foreign_excluded={r.foreign_excluded} recorded={rec} " +
+        "source={r.source_state}"
