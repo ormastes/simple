@@ -2976,6 +2976,9 @@ pub(crate) fn compile_method_call_virtual<M: Module>(
     // as `self` below; methods untag internally on field access.
     let tag_mask = builder.ins().iconst(types::I64, !0x7i64);
     let recv_obj = builder.ins().band(recv_ptr, tag_mask);
+    if std::any::type_name::<M>().contains("JITModule") {
+        emit_jit_vtable_receiver_guard(ctx, builder, recv_obj, vtable_slot);
+    }
     let vtable_ptr = builder.ins().load(types::I64, MemFlags::new(), recv_obj, 0);
     let slot_offset = (vtable_slot as i32) * 8;
     let method_ptr = builder.ins().load(types::I64, MemFlags::new(), vtable_ptr, slot_offset);
@@ -2997,6 +3000,74 @@ pub(crate) fn compile_method_call_virtual<M: Module>(
     }
 
     indirect_call_with_result(ctx, builder, sig_ref, method_ptr, &call_args, dest);
+}
+
+/// JIT-only receiver guard for `MethodCallVirtual`.
+///
+/// Only a class that declares a trait carries a vtable word at offset 0
+/// (`compile_struct_init`). A duck-conforming class (same methods, no `with`)
+/// starts with field 0, and a NIL receiver masks to address 0. Jumping through
+/// either one SIGSEGVs (bug
+/// jit_vtable_call_on_structural_conformer_sigsegv_2026-11-13). Under
+/// `JITModule` the unit is the whole program, so every vtable an object can
+/// carry is a local data object in `vtable_data_ids`. Compare the receiver's
+/// word against that set, and on a miss abort through `rt_method_not_found`
+/// (exit 70) instead of calling field data. The guard is not emitted for AOT:
+/// there, vtables can live in other objects and the local set is incomplete.
+/// On a hit the builder is left in the continuation block.
+fn emit_jit_vtable_receiver_guard<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    recv_obj: cranelift_codegen::ir::Value,
+    vtable_slot: usize,
+) {
+    let mut vtables: Vec<cranelift_module::DataId> = ctx.vtable_data_ids.values().copied().collect();
+    vtables.sort_unstable();
+    vtables.dedup();
+
+    let ok = builder.create_block();
+    let miss = builder.create_block();
+    let probe = builder.create_block();
+    let nonnull = builder.ins().icmp_imm(IntCC::NotEqual, recv_obj, 0);
+    builder.ins().brif(nonnull, probe, &[], miss, &[]);
+
+    builder.switch_to_block(probe);
+    builder.seal_block(probe);
+    let word = builder.ins().load(types::I64, MemFlags::new(), recv_obj, 0);
+    for data_id in vtables {
+        let global = ctx.module.declare_data_in_func(data_id, builder.func);
+        let expected = builder.ins().global_value(types::I64, global);
+        let hit = builder.ins().icmp(IntCC::Equal, word, expected);
+        let next = builder.create_block();
+        builder.ins().brif(hit, ok, &[], next, &[]);
+        builder.switch_to_block(next);
+        builder.seal_block(next);
+    }
+    builder.ins().jump(miss, &[]);
+
+    builder.switch_to_block(miss);
+    builder.seal_block(miss);
+    let type_bytes: &[u8] = b"<receiver without a trait vtable>";
+    let method_text = format!("vtable slot {} in {}", vtable_slot, ctx.func.name);
+    let not_found = ctx.runtime_funcs.get("rt_method_not_found").copied();
+    let type_data = super::helpers::declare_named_bytes(ctx, type_bytes);
+    let method_data = super::helpers::declare_named_bytes(ctx, method_text.as_bytes());
+    if let (Some(not_found_id), Ok(type_data), Ok(method_data)) = (not_found, type_data, method_data) {
+        let type_global = ctx.module.declare_data_in_func(type_data, builder.func);
+        let type_ptr = builder.ins().global_value(types::I64, type_global);
+        let type_len = builder.ins().iconst(types::I64, type_bytes.len() as i64);
+        let method_global = ctx.module.declare_data_in_func(method_data, builder.func);
+        let method_ptr = builder.ins().global_value(types::I64, method_global);
+        let method_len = builder.ins().iconst(types::I64, method_text.len() as i64);
+        let not_found_ref = ctx.module.declare_func_in_func(not_found_id, builder.func);
+        adapted_call(builder, not_found_ref, &[type_ptr, type_len, method_ptr, method_len]);
+    }
+    // rt_method_not_found exits; without it, a trap is still a clean stop
+    // compared with jumping through field data.
+    builder.ins().trap(cranelift_codegen::ir::TrapCode::unwrap_user(13));
+
+    builder.switch_to_block(ok);
+    builder.seal_block(ok);
 }
 
 /// Owner struct name of a `Type_dot_method` / `Type.method` candidate key

@@ -458,6 +458,12 @@ pub(crate) fn referenced_call_names(functions: &[MirFunction]) -> HashSet<String
                     // `BuiltinMethod` above. Gate on the func_name's method
                     // suffix so this family is only pulled in for programs
                     // that actually use one of these methods.
+                    // compile_method_call_virtual's JIT receiver guard
+                    // (closures_structs.rs) aborts through rt_method_not_found
+                    // when the receiver carries no known vtable.
+                    MirInst::MethodCallVirtual { .. } => {
+                        names.insert("rt_method_not_found".to_string());
+                    }
                     MirInst::MethodCallStatic { func_name, .. } => {
                         // try_emit_vtable_type_switch (closures_structs.rs)
                         // falls back to rt_method_not_found on a vtable miss.

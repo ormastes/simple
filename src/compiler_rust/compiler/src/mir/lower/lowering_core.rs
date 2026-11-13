@@ -1298,6 +1298,50 @@ impl<'a> MirLowerer<'a> {
     /// trap, so DEAD duck-typed sites cost nothing (unit stays JIT) and LIVE
     /// ones fail loudly instead of silently (bug
     /// jit_game2d_backend_method_dispatch_sigsegv_2026-07-02).
+    /// Bare (undotted) owners in the unit that declare `method`, minus `exclude`.
+    pub(super) fn method_owners(&self, method: &str, exclude: Option<&str>) -> Vec<&str> {
+        let suffix = format!(".{method}");
+        let mut owners: Vec<&str> = self
+            .available_functions
+            .iter()
+            .filter_map(|name| name.strip_suffix(suffix.as_str()))
+            .filter(|owner| !owner.contains('.') && Some(*owner) != exclude)
+            .collect();
+        owners.sort_unstable();
+        owners.dedup();
+        owners
+    }
+
+    /// Classes that provide EVERY method `trait_info` declares, whether or not
+    /// they declare the trait. One that merely shares a method name is not one.
+    pub(super) fn structural_trait_conformers(
+        &self,
+        trait_info: &crate::hir::HirTraitInfo,
+        exclude: Option<&str>,
+    ) -> Vec<String> {
+        let Some(first) = trait_info.methods.keys().min() else {
+            return Vec::new();
+        };
+        self.method_owners(first, exclude)
+            .into_iter()
+            .filter(|owner| {
+                trait_info
+                    .methods
+                    .keys()
+                    .all(|required| self.available_functions.contains(&format!("{owner}.{required}")))
+            })
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// Whether any type in the unit implements `trait_name` (and so carries
+    /// its vtable).
+    pub(super) fn trait_has_implementation(&self, trait_name: &str) -> bool {
+        self.dependency_graph
+            .get_implementations(trait_name)
+            .is_some_and(|impls| !impls.is_empty())
+    }
+
     pub(super) fn find_trait_for_method_on_receiver(
         &self,
         method_name: &str,

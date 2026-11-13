@@ -1036,7 +1036,7 @@ impl Lowerer {
 
     /// Declared trait dispatch of `base.field`, when `base` is a local of a
     /// class/struct whose `field` was authored with a trait type name.
-    fn trait_field_dispatch(&self, base: &Expr, field: &str, ctx: &FunctionContext) -> Option<crate::hir::HirTraitDispatch> {
+    pub(super) fn trait_field_dispatch(&self, base: &Expr, field: &str, ctx: &FunctionContext) -> Option<crate::hir::HirTraitDispatch> {
         let Expr::Identifier(name) = base else { return None };
         let idx = ctx.lookup(name)?;
         let mut ty = ctx.locals.get(idx)?.ty;

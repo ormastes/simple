@@ -2498,15 +2498,27 @@ impl<'a> MirLowerer<'a> {
                 // get static dispatch instead of a bogus vtable load.
                 let recv_type_name: Option<&str> = func_name.rsplit_once('.').map(|(ty, _)| ty);
                 let declared_dispatch = match &receiver.kind {
-                    crate::hir::HirExprKind::Local(index) => self.local_trait_dispatch.get(index),
+                    crate::hir::HirExprKind::Local(index) => self.local_trait_dispatch.get(index).cloned(),
                     _ => None,
                 };
-                let trait_lookup = if let Some(dispatch) = declared_dispatch {
+                let trait_lookup = if let Some(dispatch) = declared_dispatch.as_ref() {
                     let info = &dispatch.info;
                     // This signature was captured from the exact declaration
                     // owner, not re-resolved through a colliding bare name.
-                    info.get_method(method).filter(|sig| sig.param_types.len() == args.len())
-                        .map(|sig| (sig.vtable_slot, sig.param_types.clone(), sig.return_type))
+                    // A trait nothing in the unit implements puts no vtable on
+                    // any object. If exactly ONE class conforms to it
+                    // structurally (no `with`), the by-name bind below names
+                    // the only possible receiver class; take it instead of a
+                    // vtable load that such an object cannot satisfy. With
+                    // several such classes the vtable call stays (a bare name
+                    // would be refused as ambiguous), and the JIT guards it
+                    // (compile_method_call_virtual).
+                    let duck_conformed = !self.trait_has_implementation(&info.name)
+                        && self.structural_trait_conformers(info, recv_type_name).len() == 1;
+                    info.get_method(method).filter(|sig| sig.param_types.len() == args.len()).map(|sig| {
+                        let slot = if duck_conformed { crate::mir::DUCK_DISPATCH_UNSUPPORTED_SLOT } else { sig.vtable_slot };
+                        (slot, sig.param_types.clone(), sig.return_type)
+                    })
                 } else {
                     self.find_trait_for_method_on_receiver(method, recv_type_name, args.len())
                 };
@@ -2559,7 +2571,7 @@ impl<'a> MirLowerer<'a> {
                     // The trait is the receiver's static type when that is
                     // known; a trait-typed FIELD erases to ANY, and then it is
                     // the one trait in the unit declaring this method.
-                    let receiver_trait = self.trait_infos.and_then(|infos| {
+                    let receiver_trait = declared_dispatch.as_ref().map(|dispatch| &dispatch.info).or_else(|| self.trait_infos.and_then(|infos| {
                         recv_type_name.and_then(|name| infos.get(name)).or_else(|| {
                             let mut declaring = infos.values().filter(|info| {
                                 info.get_method(method)
@@ -2570,29 +2582,10 @@ impl<'a> MirLowerer<'a> {
                                 _ => None,
                             }
                         })
-                    });
+                    }));
                     if let Some(trait_info) = receiver_trait {
-                        let suffix = format!(".{}", method);
-                        let mut owners: Vec<&str> = self
-                            .available_functions
-                            .iter()
-                            .filter_map(|name| name.strip_suffix(suffix.as_str()))
-                            .filter(|owner| !owner.contains('.') && Some(*owner) != recv_type_name)
-                            .collect();
-                        owners.sort_unstable();
-                        owners.dedup();
-                        if owners.len() > 1 {
-                            let conforming: Vec<&str> = owners
-                                .iter()
-                                .copied()
-                                .filter(|owner| {
-                                    trait_info
-                                        .methods
-                                        .keys()
-                                        .all(|required| self.available_functions.contains(&format!("{owner}.{required}")))
-                                })
-                                .collect();
-                            if let [only] = conforming.as_slice() {
+                        if self.method_owners(method, recv_type_name).len() > 1 {
+                            if let [only] = self.structural_trait_conformers(trait_info, recv_type_name).as_slice() {
                                 bare = format!("{only}.{method}");
                             }
                         }
