@@ -63,3 +63,10 @@ half is re-measured and still red.
   contractually unbounded.
 - **Not retried:** per the runaway-guard rule this red measure was taken once;
   the lane did not loop it.
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with lane ne10's LIVE re-measurement (2026-11-11): the full-compiler
+check still emits no progress for >5 minutes. Root-cause class (interpreted
+frontend cost, not a hang) is recorded in the ne10 addendum. Perf work exceeds
+the per-bug timebox; disposition stands.

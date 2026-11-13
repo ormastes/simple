@@ -104,6 +104,7 @@ pub mod monoio_waker;
 #[cfg(feature = "vulkan")]
 pub mod vulkan;
 pub mod vulkan_create_device_retry;
+pub mod vulkan_async_protocol;
 pub mod vulkan_graphics_runtime;
 pub mod metal_graphics_runtime;
 pub mod x86_simd_probe;

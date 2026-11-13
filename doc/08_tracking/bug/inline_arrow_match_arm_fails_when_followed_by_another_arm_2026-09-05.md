@@ -200,3 +200,9 @@ Not seedfix A (fa6939eb4b9e is JIT tuple-destructure unbox; unrelated to the
 parser). Usage census caveat from this lane: the guide recommendation issue
 this doc raises is moot once both halves land; the `=>` half still steers
 readers at `doc/07_guide/quick_reference/syntax_quick_reference.md`.
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with lane ne12: FIXED at tip (seed parser 8702b3c3826d + self-hosted
+parity 13fd96fd4f9f). No independent re-verification in this lane; disposition
+stands.

@@ -1,0 +1,89 @@
+# Plan -> BuildGraph adapter + go-to-end poison propagation (slice 4 of
+# library_unit_build_and_link.md §4-5).
+#
+# Execution reuses `ParallelBuilder` (parallel.spl): one `BuildUnit` per planned
+# unit, `path` = unit name, dependencies = the ids of units planned earlier. The
+# plan is dependency-first, so every dependency already has an id; a plan that
+# violates that is refused rather than silently wired to nothing.
+#
+# `ParallelBuilder.build` already marks a unit "Dependency failed" when any
+# dependency failed. The pure `library_unit_poison_v1` / `library_unit_buildable_v1`
+# give the same closure ahead of execution, for the go-to-end manifest and for
+# deciding which units a link target may still consume.
+#
+# Design: doc/05_design/compiler/incremental_build/library_unit_build_and_link.md
+
+use compiler.common.cache.canonical_identity.{canonical_identity_sort_texts}
+use compiler.driver.driver_build.parallel.{ParallelBuilder, ParallelBuildConfig}
+use compiler.driver.driver_build.library_unit_plan_v1.{LibraryUnitPlanEntryV1}
+
+pub struct LibraryUnitGraphV1:
+    builder: ParallelBuilder
+    id_by_unit: {text: i64}
+    unit_by_id: {i64: text}
+
+pub fn library_unit_graph_build_v1(plan: [LibraryUnitPlanEntryV1], config: ParallelBuildConfig) -> Result<LibraryUnitGraphV1, text>:
+    val builder = ParallelBuilder.create(config)
+    var id_by_unit: {text: i64} = {}
+    var unit_by_id: {i64: text} = {}
+    for entry in plan:
+        if id_by_unit.contains_key(entry.name):
+            return Err("plan lists unit '{entry.name}' twice")
+        var dep_ids: [i64] = []
+        for dep in entry.deps:
+            if not id_by_unit.contains_key(dep):
+                return Err("plan is not dependency-first: '{entry.name}' depends on '{dep}' which was not planned before it")
+            dep_ids.push(id_by_unit[dep])
+        val id = builder.add_unit(entry.name, dep_ids)
+        id_by_unit[entry.name] = id
+        unit_by_id[id] = entry.name
+    Ok(LibraryUnitGraphV1(builder: builder, id_by_unit: id_by_unit, unit_by_id: unit_by_id))
+
+fn _library_unit_plan_names(plan: [LibraryUnitPlanEntryV1]) -> {text: bool}:
+    var known: {text: bool} = {}
+    for entry in plan:
+        known[entry.name] = true
+    known
+
+# Every unit that transitively depends on a failed unit (sorted; the failed
+# units themselves are not included). Unknown names are refused.
+pub fn library_unit_poison_v1(plan: [LibraryUnitPlanEntryV1], failed: [text]) -> Result<[text], text>:
+    val known = _library_unit_plan_names(plan)
+    var tainted: {text: bool} = {}
+    for name in failed:
+        if not known.contains_key(name):
+            return Err("failed unit '{name}' is not in the plan")
+        tainted[name] = true
+    var poisoned: [text] = []
+    # One pass sees every dependency's taint before its dependents only if the
+    # plan is dependency-first; a mis-ordered plan would under-poison silently.
+    var placed: {text: bool} = {}
+    for entry in plan:
+        for dep in entry.deps:
+            if not placed.contains_key(dep):
+                return Err("plan is not dependency-first: '{entry.name}' precedes its dependency '{dep}'")
+        placed[entry.name] = true
+        if tainted.contains_key(entry.name):
+            continue
+        for dep in entry.deps:
+            if tainted.contains_key(dep):
+                tainted[entry.name] = true
+                poisoned.push(entry.name)
+                break
+    Ok(canonical_identity_sort_texts(poisoned))
+
+# Plan order minus failed and poisoned units: what go-to-end still builds.
+pub fn library_unit_buildable_v1(plan: [LibraryUnitPlanEntryV1], failed: [text]) -> Result<[text], text>:
+    val poisoned = match library_unit_poison_v1(plan, failed):
+        case Ok(p): p
+        case Err(e): return Err(e)
+    var excluded: {text: bool} = {}
+    for name in failed:
+        excluded[name] = true
+    for name in poisoned:
+        excluded[name] = true
+    var out: [text] = []
+    for entry in plan:
+        if not excluded.contains_key(entry.name):
+            out.push(entry.name)
+    Ok(out)

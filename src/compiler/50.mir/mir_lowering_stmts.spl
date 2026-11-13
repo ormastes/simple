@@ -692,6 +692,14 @@ impl MirLowering:
 
     me copy_struct_value_recursive(init_local: LocalId, struct_type_name: text, type_symbol: SymbolId, copy_chain: [text]) -> LocalId:
         """Rebuild a value struct, recursively copying nested value structs."""
+        # Fail closed on an ambiguous BARE layout: the name is declared with
+        # different field lists in several modules and the bare tier keeps
+        # only the first registration, so its field COUNT would size this copy
+        # (p3_census_mir_classes_2026-11-13, class 2). Qualified keys and
+        # unambiguous bare names are unaffected.
+        if not struct_type_name.contains("::") and self.struct_field_order_conflict_warned.contains(struct_type_name):
+            self.error_fatal("struct copy of ambiguous bare layout '{struct_type_name}': declared with different field lists in several modules and no module-qualified provenance reached this value", None)
+            return init_local
         val canonical_type_symbol = self.canonical_mir_type_symbol(type_symbol)
         val record_type = MirType(kind: MirTypeKind.Struct(canonical_type_symbol))
         # A typed place may still carry the runtime nil word or native null.
@@ -747,9 +755,19 @@ impl MirLowering:
                 else:
                     self.class_type_names.contains(nested_name)
             )
-            if nested_name != "" and not nested_is_class and not copy_chain.contains(nested_name):
+            # Recurse on the module-qualified layout the field declaration
+            # recorded (composite_layout_key of the field type) when it is
+            # registered; the bare `nested_name` stays only for the symbol
+            # lookup. Two modules may declare the same bare name with different
+            # field lists and the bare tier keeps only the first.
+            var nested_layout = nested_name
+            if nested_ownership_key != "" and not nested_is_class:
+                val qualified_nested = self.declared_struct_layout_key(nested_ownership_key)
+                if self.struct_field_order.contains(qualified_nested):
+                    nested_layout = qualified_nested
+            if nested_name != "" and not nested_is_class and not copy_chain.contains(nested_layout):
                 nested_symbol = self.symbols.lookup_or_invalid(nested_name)
-                if nested_symbol.is_valid() and self.struct_field_order.contains(nested_name):
+                if nested_symbol.is_valid() and self.struct_field_order.contains(nested_layout):
                     nested_symbol = self.canonical_mir_type_symbol(nested_symbol)
                     field_type = MirType(kind: MirTypeKind.Struct(nested_symbol))
                     copy_nested = true
@@ -768,8 +786,8 @@ impl MirLowering:
                 var nested_chain: [text] = []
                 for seen_name in copy_chain:
                     nested_chain.push(seen_name)
-                nested_chain.push(nested_name)
-                copied_field = self.copy_struct_value_recursive(field_val, nested_name, nested_symbol, nested_chain)
+                nested_chain.push(nested_layout)
+                copied_field = self.copy_struct_value_recursive(field_val, nested_layout, nested_symbol, nested_chain)
 
             copy_ops.push(mir_operand_copy(copied_field))
             cfi = cfi + 1

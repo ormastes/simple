@@ -75,3 +75,12 @@ must not be invented. Row stays open; no timing assertion was added.
 ## Lane disposition 2026-11-13 (p3-misc-b)
 
 no frame-time budget pinned and cost non-monotonic per in-file status; owner: web showcase lane.
+
+
+---
+## 2026-11-13 triage — lane live-p3-l6 (Windows host, seed bin/simple.exe, base f790f7f266e)
+
+Concur: pinning a frame-time budget requires an owner decision and per-size
+measurements on a known reference host; a number from this shared Windows lane
+would invent the budget this record says must not be invented. No in-lane
+change.

@@ -97,3 +97,17 @@ expected values are openssl's and are correct.
 ## Lane disposition 2026-11-13 (p3-misc-b)
 
 partially fixed; 3 spec examples RED deliberately per in-file status. Owner: webfw security lane.
+
+---
+## 2026-11-13 triage — lane live-p3-l6 (Windows host, seed bin/simple.exe, base f790f7f266e)
+
+Verified FIXED at tip. The three deliberately-RED oracle examples now pass:
+`test/01_unit/lib/nogc_sync_mut/web_framework/session_csrf_signing_spec.spl`
+runs `declared>=11 executed=11 passed=11 failed=0` — including "compute_signature
+matches the openssl HMAC-SHA256 oracle", "csrf_token_for_session matches the
+openssl HMAC-SHA256 oracle", and "binds a CSRF token to its session id". The
+same-name `hmac_sha256`/`bytes_to_hex` mis-dispatch and the "comparing string
+with integer" module-load error this record filed are both gone at this base
+(the uniquely-named `_webfw_digest_to_hex` path now executes and dispatches
+correctly). Suggest the webfw security owner re-review and close; no in-lane
+change needed.

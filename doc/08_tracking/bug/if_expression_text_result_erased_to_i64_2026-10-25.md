@@ -34,3 +34,14 @@ contains `?`.
 
 ## Bug DB
 DB reconciliation pending: no `bug_db.sdn` row was added for this ID in this change.
+
+
+---
+## 2026-11-13 triage — lane live-p3-l6 (Windows host, seed bin/simple.exe, base f790f7f266e)
+
+Workaround confirmed present at tip: `runtime_compiler.spl:866-871` assigns
+`rt_dir` in statement form (strict `native_runtime_strict_source_dir_v1()?`
+once, then `find_runtime_source_dir()`), exactly the review-fixed port this
+record describes. The compiler fix (nested if-expression with `?` keeping its
+declared text type) remains OPEN; reproducing it needs a Stage-2-compiled
+producer, which this lane cannot build. No in-lane change.

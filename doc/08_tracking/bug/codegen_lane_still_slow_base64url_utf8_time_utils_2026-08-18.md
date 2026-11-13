@@ -519,3 +519,10 @@ lineage) merged on release/1.0.0. The record's remaining named items
 `char_from_code` census, `rt_array_join` quadratic) are lib/runtime-lane
 scope, not compiler; C-MIG-0019 time_utils was debunked in-record as a
 measurement artifact. Status line flipped from OPEN.
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with lane p3fix-comp6-20261111's SUPERSEDED verdict (codegen lane
+cleared of the >2x C-oracle residuals; method correction recorded there). No
+independent re-measurement in this lane (perf-harness rerun exceeds the
+per-bug timebox).

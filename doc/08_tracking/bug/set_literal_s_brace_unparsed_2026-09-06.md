@@ -94,3 +94,7 @@ where the lexer is already in string context.
   Membership is now an O(n) scan of `items`. Restoring a hash index depends on
   fixing `Map` for primitive keys, which is a separate open item.
 
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with the recorded status: OPEN feature gap — seed has no s{...} production and the self-hosted frontend has half. Implementing the set-literal grammar end-to-end (lexer + both parsers + literal lowering) exceeds the per-bug timebox and needs grammar-owner sign-off. No in-lane change.

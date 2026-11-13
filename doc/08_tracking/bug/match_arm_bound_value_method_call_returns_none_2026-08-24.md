@@ -116,3 +116,7 @@ bin/simple run` now agree on all three shapes. The un-hoisted parser no longer
 diverges, so the "Done when" clause is met. The two product-code hoists
 (`package_pins._parse_waivers`, `completeness_seal/manifest.parse_manifest_text`)
 are semantics-preserving and may stay, but are no longer load-bearing.
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with lane ne14: FIXED (seed flat-Option/flat-Some fixes fcb661fe957c, 90f9d6b7c15e), verified on the same binary this lane uses. No independent re-verification; disposition stands.

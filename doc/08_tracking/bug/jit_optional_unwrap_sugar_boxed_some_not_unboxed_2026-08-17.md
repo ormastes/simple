@@ -170,3 +170,7 @@ Not carried by seedfix A (fa6939eb4b9e, 2026-11-10, is JIT TUPLE-destructure
 unbox in MIR stmt lowering; this row's fix is the earlier Option/enum
 payload-decode cluster in HIR/MIR if-val + `??` lowering — honest attribution
 is the 2026-11-06 cluster, predating today's seed).
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with lane ne12: FIXED at tip (seed-jit Option if-val/?? payload-decode cluster 2026-11-06). No independent re-verification in this lane; disposition stands.

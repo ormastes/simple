@@ -152,6 +152,58 @@ instead of bodies for all. Each claimed module costs one extra cache decode.
   `cache/native_build_environment_identity.spl:268` does not list the flag; a
   run with the flag set gets its own object scope, which is harmless for an A/B.
 
+### ON-mode risks closed (`work/hir-residency-on-20261113`)
+
+Each is pinned by a red→green example in
+`test/01_unit/compiler/driver/mir_shard_hir_residency_spec.spl`.
+
+1. **Stale warnings root.** `hir_cache_load_in_owned_scope` re-sets
+   `_hir_cache_last_warnings` on every hit (`driver_hir_cache.spl` `:529`); the
+   HIR stage drains it only after its own load. The claim reload now goes through
+   `hir_cache_reload_body_v1` (`driver_hir_cache.spl`), which loads full and drains
+   the root under the same `transient_array_scope_state_v1() == 0` guard, so the
+   lease consumers (`hir_body_semantic_lease_v1.spl:102`,
+   `hir_body_typecheck_lease_v1.spl:189/210`, `collection_archive_analysis_v1.spl:100`)
+   never see the claimed module's warnings as pending. Example: "restores bodies
+   and drains the retained warnings root" (red on the old reload path).
+   The guard cannot no-op on a successful reload: `hir_cache_load` returns
+   `None` when `transient_scope_begin()` refuses (a scope already open), so a
+   non-`None` reload implies the scope state is 0 and the drain ran.
+2. **Generic class/impl methods.** Methods of a generic class or impl carry no
+   fn-level `type_params`; HIR lowering flags them `is_generic_template`
+   (`class_declaration_lowering.spl:190-194`, `trait_impl_lowering.spl:146/352`;
+   matched at `module_lowering.spl:2735`). `hir_function_keeps_body_v1` keeps
+   those bodies too. Example: "keeps generic class method bodies" (red before:
+   `Box<T>.get` was emptied).
+3. **Cross-module struct prescan.** `prescan_module_struct_names` →
+   `prescan_module_functions_v1` (`module_lowering.spl:1960-2068`) consumes only
+   `module.structs` and the signature scalars of `hir_fn_scalars_with_keys_in_v1`;
+   the body walk `prescan_block_for_struct_types` runs inside
+   `lower_module_guarded_v1` (`:3656`) over the module being lowered. Pinned, not
+   assumed: the "cross-module struct prescan reads declarations only" examples
+   compare `struct_field_type_name` / `struct_field_order` dumps after prescanning
+   (and after lowering the consumer against) a full vs interface-only provider.
+4. **Bootstrap flat-row store.** `_bootstrap_hir_store` rows are copied from the
+   HIR module at load (`bootstrap_hir_modules_add_from_module`, under
+   `SIMPLE_BOOTSTRAP=1` and not `STAGE4`); a claim reload does not refresh them.
+   Their bodies are read only by the flat lowering path
+   (`bootstrap_globals.spl:455/546` ← `bootstrap_lower_flat_hir_modules_to_mir_for_target`
+   ← `driver_bootstrap.spl:180`, `closure_mode = SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE == "1"`;
+   managed stages set it to `0`). The arming predicate gains
+   `bootstrap_flat_rows` + `entry_closure_flat` and refuses `bootstrap-flat-rows`
+   for exactly that combination. Swapping rows on reload stays a follow-up should
+   the flat path ever need arming; refusing all of `SIMPLE_BOOTSTRAP=1` would kill
+   the Stage 3 measurement lane, so it is not done.
+
+The value-semantics fixture now covers a generic class method (`Box<T>.get`),
+impl static dispatch (`impl Area for Point`), a trait default (`doubled`),
+closures in both modules and a module-level `val BASE: Point = make(5)`. The
+comparison neutralizes `_mir_lambda_lift_counter`
+(`switch_operators_calls.spl:96`): it is process-global and never reset, so the
+second lowering in one spec process names the consumer's own closure
+`__lambda_lift_<n+1>` with symbol id `1073741824+n+1` — a test-process artifact,
+not a residency effect (a shard worker lowers only claimed modules in both modes).
+
 ## Qualification + measurement (coordinator, run 21, quiet box)
 
 Two Stage 3 runs that differ only in the flag, same source sha, pinned cache

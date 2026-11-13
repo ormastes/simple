@@ -158,3 +158,10 @@ daemon authority, compiler cutover wiring, trustworthy path identity)
 are still unmet — but ~half of its cited evidence is stale and should
 be re-based before the next admission-order review. This lane updated
 the tracker only; the remaining work is cache-lane scope.
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with lane ne4's 2026-11-11 addendum: several evidence rows are STALE
+at tip (zero "unimplemented oracle" helpers remain), and the surviving cache
+weaknesses are design/owner-level items, not bounded defects. No independent
+re-verification in this lane; disposition stands.

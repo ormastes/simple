@@ -5,6 +5,7 @@ use app.io.process_ops.{process_wait, process_kill, process_is_running}
 use app.cli.parse_shard_queue.{parse_shard_exit_label}
 use std.io_runtime.{time_now_monotonic_ms}
 use std.nogc_sync_mut.io.process_ops.{eprint}
+use compiler.driver.driver_build.native_file_worker_v1.{NATIVE_FILE_WORKER_TIMEOUT_CODE_V1}
 
 # Poll quantum for a child that may still be running.
 pub const SHARD_REAP_POLL_MS_V1: i64 = 200
@@ -95,3 +96,50 @@ pub fn parse_shard_reap_v1(pids: [i64], indices: [i64], count: i64, timeout_ms: 
             print "[parse-shard] shard={i}/{count} pid={pid} exit=0"
         k = k + 1
     (failed, unconfirmed)
+
+# Per-child poll quantum for a pool that waits its live children one after
+# another (run_ledger_shards): a full round costs at most `poll_ms` however
+# many are live. Before this every live worker got the full quantum, so with
+# 16 workers a finished worker's slot waited up to 16 x 200 ms = 3.2 s to be
+# refilled. A liveness pre-probe is NOT the alternative: both host runtimes
+# implement rt_process_is_running by reaping (seed try_wait, hosted
+# waitpid(WNOHANG)), so a probe before the wait loses the exit status.
+pub fn shard_pool_poll_quantum_v1(live: i64, poll_ms: i64) -> i64:
+    if poll_ms <= 0:
+        return 1
+    if live <= 1:
+        return poll_ms
+    val quantum = poll_ms / live
+    if quantum < 1: 1 else: quantum
+
+# Sign-restore an i32 exit status that crossed the wrapper boundary
+# zero-extended (native_build_main.spl native_build_normalize_exit_code): a
+# -2 "still running" presents as 4294967294, a -1 as 4294967295.
+pub fn shard_exit_code_sign_restored_v1(raw: i64) -> i64:
+    if raw > 2147483647: raw - 4294967296 else: raw
+
+# Verdict of one bounded wait on the RAW process_wait return: the sign-restored
+# status, which is NATIVE_FILE_WORKER_TIMEOUT_CODE_V1 (-2) exactly when the
+# child is still running past a positive budget and must be killed. Comparing
+# the raw value would miss a zero-extended -2 on that lane: the kill would
+# never fire and a live child would be sealed as if it had exited.
+pub fn shard_child_wait_verdict_v1(raw: i64, timeout_ms: i64) -> i64:
+    val code = shard_exit_code_sign_restored_v1(raw)
+    if code == -2 and timeout_ms > 0: NATIVE_FILE_WORKER_TIMEOUT_CODE_V1 else: code
+
+# Wait for ONE shard child under `timeout_ms` (<= 0 = no deadline: the user's
+# explicit `--timeout 0`). A child that outlives the budget is killed and its
+# stop confirmed through shard_worker_confirm_kill_v1 (probe first, then the
+# sign-restored re-wait), the reason is printed, and
+# NATIVE_FILE_WORKER_TIMEOUT_CODE_V1 is returned so the caller seals TIMEOUT.
+# Replaces the file-worker's process_wait(pid, 0) forever-waits.
+pub fn shard_child_wait_bounded_v1(label: text, pid: i64, timeout_ms: i64) -> i64:
+    if pid <= 0:
+        return -1
+    val code = shard_child_wait_verdict_v1(process_wait(pid, if timeout_ms > 0: timeout_ms else: 0), timeout_ms)
+    if code != NATIVE_FILE_WORKER_TIMEOUT_CODE_V1 or timeout_ms <= 0:
+        return code
+    val killed = process_kill(pid)
+    val stopped = shard_worker_confirm_kill_v1(pid, killed)
+    eprint("[{label}] pid={pid} exceeded timeout_ms={timeout_ms}; kill={killed} stopped={stopped}")
+    NATIVE_FILE_WORKER_TIMEOUT_CODE_V1

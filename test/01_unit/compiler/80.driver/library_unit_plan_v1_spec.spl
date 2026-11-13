@@ -1,0 +1,174 @@
+use std.spec
+use compiler.driver.driver_build.library_unit_plan_v1.{
+    LibraryUnitDeclV1, library_unit_decl_parse_v1, library_unit_path_normalize_v1,
+    library_unit_plan_v1, library_unit_cache_key_v1}
+
+# Design: doc/05_design/compiler/incremental_build/library_unit_build_and_link.md
+# First slice: pure planner over simple.sdn declarations + unit cache key.
+# Nothing here touches the filesystem or the default build path.
+
+fn decl(name: text, kind: text, dir: text, deps: [text]) -> LibraryUnitDeclV1:
+    LibraryUnitDeclV1(name: name, kind: kind, dir: dir, deps: deps)
+
+describe "library_unit_path_normalize_v1":
+    it "resolves ../ against the manifest directory as pure text":
+        expect(library_unit_path_normalize_v1("src/lib", "../../compiler_rust")).to_equal("compiler_rust")
+        expect(library_unit_path_normalize_v1("src/app", "../compiler")).to_equal("src/compiler")
+        expect(library_unit_path_normalize_v1("src/compiler/00.common", "../../lib")).to_equal("src/lib")
+        expect(library_unit_path_normalize_v1("src/lib", ".")).to_equal("src/lib")
+        expect(library_unit_path_normalize_v1("src/lib", "./sub/")).to_equal("src/lib/sub")
+
+    it "keeps an escape above the root visible instead of swallowing it":
+        expect(library_unit_path_normalize_v1("src/app", "../../rust")).to_equal("rust")
+        expect(library_unit_path_normalize_v1("src", "../../rust")).to_equal("../rust")
+
+describe "library_unit_decl_parse_v1":
+    it "reads name, type and dependency directories from a simple.sdn":
+        val content = "# header comment\n\nproject:\n  name: simple-compiler-common\n  version: 1.0.0-rc.1\n  type: library\n  root: .\n\n  dependencies:\n    - project: ../../lib\n    - project: ../../runtime\n\nlints:\n  profile: critical\n"
+        val r = library_unit_decl_parse_v1("src/compiler/00.common", content)
+        match r:
+            case Ok(d):
+                expect(d.name).to_equal("simple-compiler-common")
+                expect(d.kind).to_equal("library")
+                expect(d.dir).to_equal("src/compiler/00.common")
+                expect(d.deps.len()).to_equal(2)
+                expect(d.deps[0]).to_equal("src/lib")
+                expect(d.deps[1]).to_equal("src/runtime")
+            case Err(e):
+                expect(e).to_equal("")
+
+    it "accepts a manifest with no dependencies block":
+        val r = library_unit_decl_parse_v1("src/runtime", "project:\n  name: simple.runtime\n  version: 1\n  type: library\n")
+        match r:
+            case Ok(d):
+                expect(d.name).to_equal("simple.runtime")
+                expect(d.deps.len()).to_equal(0)
+            case Err(e):
+                expect(e).to_equal("")
+
+    it "fails closed on a manifest without project.name or project.type":
+        val no_name = library_unit_decl_parse_v1("x", "project:\n  type: library\n")
+        val no_type = library_unit_decl_parse_v1("x", "project:\n  name: a\n")
+        expect(no_name.is_err()).to_equal(true)
+        expect(no_type.is_err()).to_equal(true)
+
+    it "refuses an absolute dependency path instead of re-rooting it":
+        val posix = library_unit_decl_parse_v1("src/lib", "project:\n  name: a\n  type: library\n  dependencies:\n    - project: /src/lib/x\n")
+        val win = library_unit_decl_parse_v1("src/lib", "project:\n  name: a\n  type: library\n  dependencies:\n    - project: \"C:/x\"\n")
+        expect(posix.is_err()).to_equal(true)
+        expect(win.is_err()).to_equal(true)
+
+    it "refuses a dependency declared twice in one manifest":
+        val r = library_unit_decl_parse_v1("src/app", "project:\n  name: a\n  type: application\n  dependencies:\n    - project: ../lib\n    - project: ../lib/\n")
+        expect(r.is_err()).to_equal(true)
+
+describe "library_unit_plan_v1":
+    it "orders units dependency-first with levels and keeps applications as link targets":
+        val decls = [
+            decl("simple-app", "application", "src/app", ["src/compiler", "src/lib"]),
+            decl("simple-compiler", "application", "src/compiler", ["src/lib"]),
+            decl("simple-compiler-common", "library", "src/compiler/00.common", ["src/lib"]),
+            decl("simple-std", "library", "src/lib", ["src/compiler_rust"]),
+            decl("simple-rust-runtime", "runtime", "src/compiler_rust", []),
+            decl("ownership-policy", "metadata", "src/package_ownership", [])]
+        match library_unit_plan_v1(decls):
+            case Ok(plan):
+                expect(plan.len()).to_equal(5)
+                expect(plan[0].name).to_equal("simple-rust-runtime")
+                expect(plan[0].level).to_equal(0)
+                expect(plan[1].name).to_equal("simple-std")
+                expect(plan[1].level).to_equal(1)
+                expect(plan[1].deps[0]).to_equal("simple-rust-runtime")
+                # level 2 is independent work: sorted by name for determinism
+                expect(plan[2].name).to_equal("simple-compiler")
+                expect(plan[2].level).to_equal(2)
+                expect(plan[3].name).to_equal("simple-compiler-common")
+                expect(plan[3].level).to_equal(2)
+                expect(plan[4].name).to_equal("simple-app")
+                expect(plan[4].level).to_equal(3)
+                expect(plan[4].kind).to_equal("application")
+            case Err(e):
+                expect(e).to_equal("")
+
+    it "is a pure function of the declaration set, not of its order":
+        val a = library_unit_plan_v1([decl("b", "library", "b", ["a"]), decl("a", "library", "a", [])])
+        val b = library_unit_plan_v1([decl("a", "library", "a", []), decl("b", "library", "b", ["a"])])
+        match a:
+            case Ok(pa):
+                match b:
+                    case Ok(pb):
+                        expect(pa.len()).to_equal(pb.len())
+                        expect(pa[0].name).to_equal(pb[0].name)
+                        expect(pa[1].name).to_equal(pb[1].name)
+                    case Err(e):
+                        expect(e).to_equal("")
+            case Err(e):
+                expect(e).to_equal("")
+
+    it "names the cycle instead of returning a partial order":
+        val decls = [
+            decl("a", "library", "a", ["b"]),
+            decl("b", "library", "b", ["c"]),
+            decl("c", "library", "c", ["a"]),
+            decl("leaf", "library", "leaf", [])]
+        match library_unit_plan_v1(decls):
+            case Ok(_):
+                expect("plan").to_equal("Err expected")
+            case Err(e):
+                expect(e.contains("cycle")).to_equal(true)
+                expect(e.contains("a")).to_equal(true)
+                expect(e.contains("b")).to_equal(true)
+                expect(e.contains("c")).to_equal(true)
+
+    it "reports a self-dependency as a cycle":
+        match library_unit_plan_v1([decl("self", "library", "self", ["self"])]):
+            case Ok(_):
+                expect("plan").to_equal("Err expected")
+            case Err(e):
+                expect(e.contains("cycle")).to_equal(true)
+                expect(e.contains("self")).to_equal(true)
+
+    it "rejects the same dependency unit listed twice":
+        val decls = [decl("a", "library", "a", []), decl("b", "library", "b", ["a", "a"])]
+        expect(library_unit_plan_v1(decls).is_err()).to_equal(true)
+
+    it "fails closed on a dependency directory no manifest declares":
+        val decls = [
+            decl("simple-std", "library", "src/lib", ["compiler_rust"]),
+            decl("simple-rust-runtime", "runtime", "src/compiler_rust", [])]
+        match library_unit_plan_v1(decls):
+            case Ok(_):
+                expect("plan").to_equal("Err expected")
+            case Err(e):
+                expect(e.contains("compiler_rust")).to_equal(true)
+                expect(e.contains("simple-std")).to_equal(true)
+
+    it "rejects two manifests claiming the same unit name":
+        val decls = [decl("dup", "library", "x", []), decl("dup", "library", "y", [])]
+        expect(library_unit_plan_v1(decls).is_err()).to_equal(true)
+
+    it "rejects two unit names declared from the same directory":
+        val decls = [decl("a", "library", "same", []), decl("b", "library", "same", [])]
+        expect(library_unit_plan_v1(decls).is_err()).to_equal(true)
+
+describe "library_unit_cache_key_v1":
+    it "is deterministic and independent of dependency order":
+        val k1 = library_unit_cache_key_v1("exe=1", "src-a", [("std", "i1"), ("rt", "i2")])
+        val k2 = library_unit_cache_key_v1("exe=1", "src-a", [("rt", "i2"), ("std", "i1")])
+        expect(k1).to_equal(k2)
+        expect(k1.len()).to_equal(64)
+
+    it "changes when any component changes":
+        val base = library_unit_cache_key_v1("exe=1", "src-a", [("std", "i1")])
+        expect(library_unit_cache_key_v1("exe=2", "src-a", [("std", "i1")]) == base).to_equal(false)
+        expect(library_unit_cache_key_v1("exe=1", "src-b", [("std", "i1")]) == base).to_equal(false)
+        expect(library_unit_cache_key_v1("exe=1", "src-a", [("std", "i9")]) == base).to_equal(false)
+        expect(library_unit_cache_key_v1("exe=1", "src-a", []) == base).to_equal(false)
+
+    it "frames components so adjacent texts cannot collide":
+        val a = library_unit_cache_key_v1("ab", "c", [])
+        val b = library_unit_cache_key_v1("a", "bc", [])
+        expect(a == b).to_equal(false)
+        val c = library_unit_cache_key_v1("p", "s", [("ab", "c")])
+        val d = library_unit_cache_key_v1("p", "s", [("a", "bc")])
+        expect(c == d).to_equal(false)

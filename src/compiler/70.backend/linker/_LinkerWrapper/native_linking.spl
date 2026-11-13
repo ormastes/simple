@@ -69,7 +69,7 @@ use compiler.backend.linker.smf_enums.{Platform, Arch}
 use compiler.backend.linker.obj_taker.{ObjTaker, ObjTakeResult, objtaker_with_defaults, objtaker_take_object}
 use compiler.backend.linker.platform_defaults.{elf_emulation}
 use compiler.backend.linker._LinkerWrapper.link_command_record.{record_link_command, link_command_record_path}
-use compiler.backend.runtime_compiler.{find_c_compiler, hosted_c_compiler_plan, hosted_cross_c_target_args, windows_link_flavor_for_target}
+use compiler.backend.runtime_compiler.{find_c_compiler, c_driver_admit_v1, hosted_c_compiler_plan, hosted_cross_c_target_args, windows_link_flavor_for_target}
 
 # Internal ELF engine (lane A7/B3): SIMPLE_LINKER=internal routes here instead
 # of an external linker. Same imports link_engine_external.spl uses for its
@@ -2338,6 +2338,12 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
             case Err(e): return Err(e)
     else:
         cc = env_get("SIMPLE_CC") ?? ""
+        # Clang-only policy (CLAUDE.md: Never use GCC). An explicit SIMPLE_CC
+        # that resolves to GCC is refused, never linked through collect2.
+        if cc != "" and not hosted_cross and os_name != "windows":
+            cc = match c_driver_admit_v1(cc):
+                case Ok(v): v
+                case Err(e): return Err(link_error_detail("cc-clang-only", e))
     if native_tool_strict_requested_v1() and not cc.lower().contains("clang"):
         return Err("managed C-driver linking requires admitted clang with an absolute linker path")
     if cc == "":
@@ -2346,7 +2352,11 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
             if cc == "":
                 return Err("required cross C compiler '" + compiler_plan.command + "' was not found")
         else:
-            cc = "cc"
+            # Never bare `cc`: on Ubuntu it is gcc-13 and the link runs through
+            # collect2. find_c_compiler() yields clang or "" with the refusal printed.
+            cc = find_c_compiler()
+            if cc == "":
+                return Err(link_error_detail("cc-clang-only", "no clang C driver for the hosted native link (clang-only toolchain; gcc and bare cc are never used). Source scripts/setup/llvm-toolchain-env.shs or set SIMPLE_CC=clang-23"))
     if link_os == "windows-mingw" and not cc.lower().contains("clang"):
         return Err("Windows GNU native links require clang or clang-cl; selected compiler was '" + cc + "'")
     if os_name == "macos" or os_name == "darwin":
@@ -2481,7 +2491,15 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         # doc/08_tracking/bug/linux_native_link_unconditional_lsdl2_2026-09-06.md
         if config.allow_duplicate_definitions:
             args.push("-Wl,--allow-multiple-definition")
-        args.push("-Wl,--gc-sections")
+        # An explicit `-Wl,--no-gc-sections` in extra_flags must not be undone
+        # by this later default (last flag wins in lld). This also applies to a
+        # USER `--linker-flags -Wl,--no-gc-sections` on a normal cc link, which
+        # was silently overridden before (behaviour change, deliberate: the
+        # user asked for it). First consumer: the go-to-end trial link
+        # (driver_build/go_to_end_trial_link_v1.spl), which needs every
+        # undefined reference reported, including in sections GC would drop.
+        if not config.extra_flags.contains("-Wl,--no-gc-sections"):
+            args.push("-Wl,--gc-sections")
         if config.strip_output:
             args.push("-Wl,--strip-all")
         # --icf is an lld/mold/gold extension; GNU bfd rejects it outright.

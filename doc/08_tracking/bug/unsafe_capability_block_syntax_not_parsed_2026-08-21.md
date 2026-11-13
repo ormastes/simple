@@ -66,3 +66,19 @@ statement-position `unsafe` parser needs the same argument-list branch, and the
 parsed capability list needs to reach `HirExprKind.UnsafeBlock` — see the sibling
 record `unsafe_capabilities_not_carried_into_hir_2026-08-21.md`, which is the
 other half of the same gap.
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt)
+
+Verdict: **FIXED at tip** (absorbed by the 2026-11-11 comp9 lane's
+`parse_unsafe_block_expr_if_present` work; this lane re-verified both halves of
+the gap on the tracked seed @ 46fe8f6b6def):
+
+- Statement-position `unsafe(reason: "...", capabilities: [...]):` now parses to
+  `EXPR_UNSAFE_BLOCK` (tag 56, probed through `compiler.core.parser.parse_module`
+  in the pure-Simple frontend) and runs under the seed binary (`fn g()` with the
+  caps block executes, returns 4). The record's bare `unsafe:` control is also
+  tag 56.
+- Capability-set transport into HIR is pinned by
+  `test/01_unit/compiler/hir/unsafe_block_binding_type_spec.spl` — **3/3 PASS**
+  this lane (plus `unsafe_call_argument_parser_spec` 8/8 and
+  `unsafe_block_expression_spec` 5/5).
