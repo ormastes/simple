@@ -77,3 +77,13 @@ capability generation remains kernel-owned. Focused leaf checks and pure tests
 pass, while the aggregate syscall owners exceed the current bootstrap check
 timeout and therefore still need rebuilt pure-Simple compile/runtime evidence.
 VirtIO-GPU callers have not yet migrated, so this bug remains open.
+
+
+---
+## 2026-11-13 triage — lane live-p3-l6 (Windows host, seed bin/simple.exe, base f790f7f266e)
+
+Concur with the most recent in-record triage; no fresh reproduction attempted
+(record's own grant names another host/lane). No in-lane change; disposition
+and owner unchanged.
+Syscall 88/89 migration + VirtIO-GPU caller migration remain open feature work
+in the OS lane; not chaseable in a P3 bug lane.

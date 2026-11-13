@@ -184,3 +184,13 @@ Related specs measured in the same session:
   now exists and its decision helper works, but the hosted registry does not
   consume it yet. That wiring is a fourth open item for this record; it was
   not attempted here and the spec is left failing.
+
+
+---
+## 2026-11-13 triage — lane live-p3-l6 (Windows host, seed bin/simple.exe, base f790f7f266e)
+
+Concur with the 2026-11-13 UI-batch-B disposition: receipt implementation is in
+tree, native/JIT 8K evidence remains open, and both `native-build` and
+JIT-heavy closure compilation sit in the known-live Windows native-build hang
+class — not retried. The `sffi_vulkan.spl` env_get JIT-demotion blocker is
+tracked separately. No in-lane change.
