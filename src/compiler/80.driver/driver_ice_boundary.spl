@@ -120,6 +120,10 @@ fn _ice_files_in(dir: text, name_prefix: text, name_suffix: text) -> [text]:
 fn _ice_breadcrumb_files() -> [text]:
     _ice_files_in(ice_boundary_dir(), "ice_breadcrumbs.", ".log")
 
+fn ice_boundary_breadcrumb_files_v1() -> [text]:
+    """Every writer's breadcrumb log in this run directory (spec evidence)."""
+    _ice_breadcrumb_files()
+
 fn _ice_receipt_parts() -> [text]:
     _ice_files_in(ice_boundary_dir(), "ice_receipt.", ".part")
 
@@ -240,13 +244,23 @@ fn ice_boundary_module_start(module_name: text, source_path: text, phase: text, 
     the failure message when this module must not be compiled: it is on the
     crash skip list (`SIMPLE_ICE_SKIP_MODULES`, set by the parent after a
     worker died inside it) or a test asked for a deliberate failure
-    (`SIMPLE_ICE_INJECT_MODULE`, kind `err`, `arena` or `abort`)."""
+    (`SIMPLE_ICE_INJECT_MODULE`, kind `err`, `arena` or `abort`).
+    The skip list is honoured by module name or source path and needs no run
+    directory: the coordinator exports the HIR pool's CRASH rows (paths) to
+    MIR shard workers, which have none (the final worker claims it later).
+    `off` stays release behaviour."""
+    if ice_boundary_mode() == "off":
+        return ""
+    # Skip check BEFORE the crumb: a skipped module is never "in flight", so
+    # it can never be the open crumb a later death in this worker is
+    # attributed to, whether or not the caller closes it via ice_boundary_fail.
+    val skip_list = env_get_opt("SIMPLE_ICE_SKIP_MODULES") ?? ""
+    if _ice_list_has(skip_list, phase, module_name) or (source_path != "" and _ice_list_has(skip_list, phase, source_path)):
+        return ice_attributed_prefix() + " in an earlier attempt; skipped on retry"
     if not ice_boundary_enabled():
         return ""
     _ice_append(ice_breadcrumb_path(),
         "start\t{phase}\t{_ice_field(module_name)}\t{_ice_field(source_path)}\t{_ice_field(backend)}")
-    if _ice_list_has(env_get_opt("SIMPLE_ICE_SKIP_MODULES") ?? "", phase, module_name):
-        return ice_attributed_prefix() + " in an earlier attempt; skipped on retry"
     if _ice_list_has(env_get_opt("SIMPLE_ICE_INJECT_MODULE") ?? "", phase, module_name):
         val kind = env_get_opt("SIMPLE_ICE_INJECT_KIND") ?? ""
         if kind == "abort":
@@ -473,13 +487,26 @@ fn ice_skip_list_extend(current: text, dead: [IceBreadcrumb]) -> text:
             list_text = list_text + crumb.phase + ":" + crumb.module_name
     list_text
 
+# Bounded default under go-to-end (driver_build/go_to_end.spl, knob read by
+# name here to keep this module std-only). Each re-launch steps past at least
+# one more module (native_build_relaunch_past_ice_crashes never re-launches
+# when the skip list would not grow), so this is also the most modules a
+# serial run can lose to crashes before the parent stops.
+fn ice_go_to_end_crash_retries_default_v1() -> i64:
+    16
+
 fn ice_crash_retry_budget() -> i64:
     """How many times the parent may re-launch the worker past a module it
-    died in. Opt-in: 0 unless `SIMPLE_ICE_CRASH_RETRIES` is set, and always 0
-    under fail-fast or off."""
+    died in. `SIMPLE_ICE_CRASH_RETRIES` when set (0 disables); otherwise
+    `ice_go_to_end_crash_retries_default_v1` under go-to-end
+    (`SIMPLE_NATIVE_GO_TO_END=1`, "go HIR and MIR to the end even on a crash")
+    and 0 elsewhere. Always 0 under fail-fast or off."""
     if not ice_boundary_keep_going():
         return 0
-    val parsed = (env_get_opt("SIMPLE_ICE_CRASH_RETRIES") ?? "").to_i64() ?? 0
+    val requested = env_get_opt("SIMPLE_ICE_CRASH_RETRIES") ?? ""
+    if requested == "":
+        return if (env_get_opt("SIMPLE_NATIVE_GO_TO_END") ?? "") == "1": ice_go_to_end_crash_retries_default_v1() else: 0
+    val parsed = requested.to_i64() ?? 0
     if parsed < 0:
         return 0
     parsed
@@ -502,6 +529,7 @@ export ice_boundary_begin_run, ice_boundary_claim_run, ice_boundary_release_run
 export ice_boundary_merge_receipt, ice_boundary_prune_dead_runs, ice_owner_marker_stale
 export ice_boundary_module_start, ice_boundary_module_done, ice_boundary_fail, ice_message_arena_aborted
 export ice_record_line, ice_record_parse_lines, ice_records_read, ice_summary_text, ice_boundary_finalize
-export ice_breadcrumbs_open, ice_boundary_dead_worker_modules
+export ice_breadcrumbs_open, ice_boundary_dead_worker_modules, ice_boundary_breadcrumb_files_v1
 export ice_runtime_trap_symbol, ice_runtime_trap_detail, ice_boundary_attribute_dead_worker_with_stderr
 export ice_boundary_attribute_dead_worker, ice_skip_list_extend, ice_crash_retry_budget, ice_crash_retry_allowed
+export ice_go_to_end_crash_retries_default_v1

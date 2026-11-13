@@ -1,0 +1,229 @@
+"""go-to-end crash supervision: "go hir and mir to the end as possible even
+crash in the middle" (Stage 3 census directive 2026-11-13).
+
+A worker that dies inside a module (SIGSEGV, abort, fast-fail) must not end
+the phase. Three routes share one mechanism, the per-module ICE boundary
+(driver_ice_boundary.spl):
+
+- HIR/MIR shard pools already seal the dead owner's open claim CRASH and
+  re-queue its unclaimed rows (run_ledger_shards). What was missing is the
+  hand-off: a module whose HIR CRASHed in the pool was re-lowered by every
+  MIR worker and by the final worker, which died the same way.
+- The serial final worker already runs under
+  `native_build_relaunch_past_ice_crashes`, but with a retry budget of 0 unless
+  SIMPLE_ICE_CRASH_RETRIES was set, and HIR wrote no breadcrumb at all, so a
+  HIR crash was unattributable and never re-launched.
+
+Under go-to-end the budget now defaults on (bounded), HIR lowering is
+bracketed as phase `hir_lower`, a skip-listed module is poisoned (its
+importers are dropped by go_to_end_recover_hir_v1) and the pool's CRASH rows
+are exported to the downstream workers as `hir_lower:<source path>`.
+"""
+# @req REQ-ROBUST-10A
+# @cover src/compiler/80.driver/driver_ice_boundary.spl
+# @cover src/compiler/80.driver/driver_hir_recovery.spl
+# @cover src/compiler/80.driver/driver_hir_pipeline_lowering.spl
+# @cover src/app/cli/native_build_main.spl
+use std.spec.*
+use std.io_runtime.{env_set, env_get_opt, file_read, dir_create_all, dir_exists, getpid}
+use compiler.driver.driver_ice_boundary.*
+use compiler.driver.driver_hir_recovery.{hir_shard_recovery_claim, hir_shard_recovery_terminal,
+    hir_shard_recovery_crashed_rows_v1}
+use compiler.driver.cache.native_build_environment_identity.{
+    native_build_module_environment_snapshot_fingerprint_v1}
+use app.cli.native_build_main.{native_build_relaunch_past_ice_crashes, resolve_simple_binary}
+use app.io.process_ops.{process_run_timeout_live}
+
+fn g2e_env(case_name: text, go_to_end: text, skip_list: text):
+    env_set("SIMPLE_ICE_DIR", "build/test_ice_go_to_end/" + case_name)
+    env_set("SIMPLE_ICE_BOUNDARY", "")
+    env_set("SIMPLE_ICE_INJECT_MODULE", "")
+    env_set("SIMPLE_ICE_INJECT_KIND", "")
+    env_set("SIMPLE_ICE_FIXTURE_PHASE", "")
+    env_set("SIMPLE_ICE_SKIP_MODULES", skip_list)
+    env_set("SIMPLE_COMPILE_FAIL_FAST", "")
+    env_set("SIMPLE_ICE_CRASH_RETRIES", "")
+    env_set("SIMPLE_NATIVE_GO_TO_END", go_to_end)
+    ice_boundary_begin_run()
+
+fn g2e_reset():
+    env_set("SIMPLE_ICE_SKIP_MODULES", "")
+    env_set("SIMPLE_NATIVE_GO_TO_END", "")
+    env_set("SIMPLE_ICE_INJECT_MODULE", "")
+    env_set("SIMPLE_ICE_INJECT_KIND", "")
+    env_set("SIMPLE_ICE_FIXTURE_PHASE", "")
+    env_set("SIMPLE_ICE_CRASH_RETRIES", "")
+
+fn g2e_queue(label: text) -> text:
+    val queue = "build/test_output/ice_go_to_end/{getpid()}-{label}"
+    expect(dir_exists(queue)).to_equal(false)
+    expect(dir_create_all(queue)).to_equal(true)
+    queue
+
+describe "go-to-end crash retry budget":
+    it "defaults on under go-to-end, stays bounded, and yields to an explicit value":
+        g2e_env("budget", "1", "")
+        expect(ice_go_to_end_crash_retries_default_v1() > 0).to_equal(true)
+        expect(ice_crash_retry_budget()).to_equal(ice_go_to_end_crash_retries_default_v1())
+        env_set("SIMPLE_ICE_CRASH_RETRIES", "0")
+        expect(ice_crash_retry_budget()).to_equal(0)
+        env_set("SIMPLE_ICE_CRASH_RETRIES", "3")
+        expect(ice_crash_retry_budget()).to_equal(3)
+        env_set("SIMPLE_ICE_CRASH_RETRIES", "")
+        env_set("SIMPLE_COMPILE_FAIL_FAST", "1")
+        expect(ice_crash_retry_budget()).to_equal(0)
+        env_set("SIMPLE_COMPILE_FAIL_FAST", "")
+        env_set("SIMPLE_NATIVE_GO_TO_END", "")
+        expect(ice_crash_retry_budget()).to_equal(0)
+        g2e_reset()
+
+describe "hir_lower skip list":
+    it "gates a module by source path, with or without a run directory, never when off":
+        g2e_env("skip_path", "1", "hir_lower:fixture/mod.bad.spl")
+        expect(ice_boundary_module_start("mod.bad", "fixture/mod.bad.spl", "hir_lower", "")).to_contain("skipped")
+        expect(ice_boundary_module_start("mod.alpha", "fixture/mod.alpha.spl", "hir_lower", "")).to_equal("")
+        # Phase-tagged: the same path is not skipped at MIR.
+        expect(ice_boundary_module_start("mod.bad", "fixture/mod.bad.spl", "mir_lower", "")).to_equal("")
+        # A MIR pool worker has no run directory (the final worker claims it
+        # later); the coordinator's export must still reach it.
+        env_set("SIMPLE_ICE_DIR", "")
+        expect(ice_boundary_module_start("mod.bad", "fixture/mod.bad.spl", "hir_lower", "")).to_contain("skipped")
+        env_set("SIMPLE_ICE_BOUNDARY", "off")
+        expect(ice_boundary_module_start("mod.bad", "fixture/mod.bad.spl", "hir_lower", "")).to_equal("")
+        env_set("SIMPLE_ICE_BOUNDARY", "")
+        g2e_reset()
+
+    it "does not re-launch when the dead module is already on the skip list":
+        # A worker died inside mod.bad (open crumb) while the parent already
+        # had it on the skip list (e.g. exported from the HIR pool's CRASH
+        # rows). Stepping past it changes nothing: re-launching would only burn
+        # the budget. (A skipped module itself never opens a crumb, so the
+        # open crumb is written by the un-skipped start here.)
+        g2e_env("no_growth", "1", "")
+        expect(ice_boundary_module_start("mod.bad", "fixture/mod.bad.spl", "hir_lower", "")).to_equal("")
+        env_set("SIMPLE_ICE_SKIP_MODULES", "hir_lower:mod.bad")
+        expect(ice_boundary_dead_worker_modules().len()).to_equal(1)
+        val (kept_out, kept_err, kept_code) = native_build_relaunch_past_ice_crashes(
+            "no-such-worker-binary", [], 1000, 5, "first out", "first err", 134)
+        expect(kept_out).to_equal("first out")
+        expect(kept_err).to_equal("first err")
+        expect(kept_code == 134).to_equal(true)
+        expect(env_get_opt("SIMPLE_ICE_SKIP_MODULES") ?? "").to_equal("hir_lower:mod.bad")
+        g2e_reset()
+
+    it "does not change the native cache identity (a re-launch keeps every object hit)":
+        val with_skip: [(text, text)] = [("PATH", "/usr/bin"),
+            ("SIMPLE_ICE_SKIP_MODULES", "hir_lower:fixture/mod.bad.spl")]
+        val bare: [(text, text)] = [("PATH", "/usr/bin")]
+        val a = native_build_module_environment_snapshot_fingerprint_v1(with_skip)
+        expect(a.valid).to_equal(true)
+        expect(a.digest).to_equal(native_build_module_environment_snapshot_fingerprint_v1(bare).digest)
+
+describe "HIR ledger CRASH rows feed the downstream skip list":
+    it "names every CRASH and TIMEOUT row by source path, sorted, and nothing else":
+        val queue = g2e_queue("crashed_rows")
+        val owner = "0/1@0"
+        for path in ["fixture/a.spl", "fixture/b.spl", "fixture/c.spl", "fixture/d.spl"]:
+            expect(hir_shard_recovery_claim(queue, owner, path, "key")).to_equal(1)
+        expect(hir_shard_recovery_terminal(queue, owner, "fixture/a.spl", "PASS", true)).to_equal(true)
+        expect(hir_shard_recovery_terminal(queue, owner, "fixture/c.spl", "CRASH", false)).to_equal(true)
+        expect(hir_shard_recovery_terminal(queue, owner, "fixture/b.spl", "TIMEOUT", false)).to_equal(true)
+        expect(hir_shard_recovery_terminal(queue, owner, "fixture/d.spl", "FAILED", false)).to_equal(true)
+        val crashed = hir_shard_recovery_crashed_rows_v1(queue)
+        expect(crashed).to_equal(["fixture/b.spl", "fixture/c.spl"])
+        var crumbs: [IceBreadcrumb] = []
+        for path in crashed:
+            crumbs = crumbs.push(IceBreadcrumb(phase: "hir_lower", module_name: path, source_path: path, backend: ""))
+        expect(ice_skip_list_extend("", crumbs)).to_equal("hir_lower:fixture/b.spl,hir_lower:fixture/c.spl")
+        expect(hir_shard_recovery_crashed_rows_v1("build/test_output/ice_go_to_end/does-not-exist").len()).to_equal(0)
+
+    it "the coordinator exports them after the HIR pool under go-to-end":
+        val main = file_read("src/app/cli/native_build_main.spl")
+        val start = main.index_of("pub fn native_build_hir_ledger_run_v1(")
+        val stop = main.index_of("fn native_build_hir_ledger_run_in_v1(", start)
+        expect(start > 0).to_equal(true)
+        expect(stop > start).to_equal(true)
+        val body = main.substring(start, stop)
+        expect(body).to_contain("hir_shard_recovery_crashed_rows_v1(queue_dir)")
+        expect(body).to_contain("\"hir_lower\"")
+        expect(body).to_contain("SIMPLE_ICE_SKIP_MODULES")
+
+describe "streaming HIR loop under the boundary":
+    it "brackets every lowering with the hir_lower breadcrumb and poisons a skipped module":
+        val src = file_read("src/compiler/80.driver/driver_hir_pipeline_lowering.spl")
+        val start = src.index_of("me lower_and_check_streaming_surfaces_impl")
+        val stop = src.index_of("me lower_and_check_retained_owner_impl", start)
+        expect(start > 0).to_equal(true)
+        expect(stop > start).to_equal(true)
+        val body = src.substring(start, stop)
+        # Both lowering sites: the shard transaction and the in-process lower.
+        val gate = "ice_boundary_module_start(source.module_name, source.path, \"hir_lower\", \"\")"
+        val first = body.index_of(gate)
+        expect(first > 0).to_equal(true)
+        expect(body.index_of(gate, first + 1) > first).to_equal(true)
+        val done = "ice_boundary_module_done(source.module_name, \"hir_lower\")"
+        val first_done = body.index_of(done)
+        expect(first_done > 0).to_equal(true)
+        expect(body.index_of(done, first_done + 1) > first_done).to_equal(true)
+        expect(body).to_contain("ice_boundary_fail(source.module_name, source.path, \"hir_lower\", \"\"")
+
+describe "a real worker death inside HIR under go-to-end":
+    it "is re-launched past the module with the default budget and still reaches the rest":
+        g2e_env("hir_death", "1", "")
+        env_set("SIMPLE_ICE_INJECT_MODULE", "mod.bad")
+        env_set("SIMPLE_ICE_INJECT_KIND", "abort")
+        env_set("SIMPLE_ICE_FIXTURE_PHASE", "hir_lower")
+        val worker_bin = resolve_simple_binary()
+        val worker_args = ["run", "test/fixtures/ice_boundary/ice_worker_fixture.spl"]
+        val (first_out, first_err, first_code) = process_run_timeout_live(worker_bin, worker_args, 300000)
+        expect(first_code == 0).to_equal(false)
+        expect(first_out).to_contain("compiled mod.alpha")
+        expect(first_out.contains("compiled mod.gamma")).to_equal(false)
+        # No SIMPLE_ICE_CRASH_RETRIES: go-to-end alone supplies the budget.
+        val (worker_out, worker_err, worker_code) = native_build_relaunch_past_ice_crashes(
+            worker_bin, worker_args, 300000, ice_crash_retry_budget(), first_out, first_err, first_code)
+        env_set("SIMPLE_ICE_INJECT_KIND", "")
+        env_set("SIMPLE_ICE_INJECT_MODULE", "")
+        # Never masked as success ...
+        expect(worker_code == 0).to_equal(false)
+        # ... the module after the dead one was compiled by the re-launch ...
+        expect(worker_out).to_contain("compiled mod.gamma")
+        expect(worker_out).to_contain("1 module(s) failed with ICE: mod.bad (hir_lower, attributed)")
+        expect(env_get_opt("SIMPLE_ICE_SKIP_MODULES") ?? "").to_equal("hir_lower:mod.bad")
+        # ... and the receipt names where the first worker died.
+        val records = ice_records_read()
+        expect(records.len()).to_equal(1)
+        expect(records[0].module_name).to_equal("mod.bad")
+        expect(records[0].phase).to_equal("hir_lower")
+        expect(records[0].kind).to_equal("attributed")
+        expect(ice_boundary_dead_worker_modules().len()).to_equal(0)
+        g2e_reset()
+
+describe "a skipped module leaves no open breadcrumb":
+    it "attributes a later crash in the same worker to the crashing module, not the skipped one":
+        # Review 2026-11-13: the `start` crumb used to be appended BEFORE the
+        # skip check and no site wrote `done` on skip, so a skipped module
+        # stayed open and the next crash in that worker was attributed to it.
+        g2e_env("skip_then_crash", "1", "codegen:mod.alpha")
+        env_set("SIMPLE_ICE_INJECT_MODULE", "mod.bad")
+        env_set("SIMPLE_ICE_INJECT_KIND", "abort")
+        val worker_bin = resolve_simple_binary()
+        val (out, _err, code) = process_run_timeout_live(worker_bin,
+            ["run", "test/fixtures/ice_boundary/ice_worker_fixture.spl"], 300000)
+        expect(code == 0).to_equal(false)
+        expect(out).to_contain("skipped on retry")
+        expect(out.contains("compiled mod.alpha")).to_equal(false)
+        val dead = ice_boundary_dead_worker_modules()
+        var dead_names: [text] = []
+        for crumb in dead:
+            dead_names = dead_names.push(crumb.module_name)
+        expect(dead_names).to_equal(["mod.bad"])
+        # Stricter than the open set: a skipped module never opens a crumb, so
+        # no later site has to remember to close it.
+        var crumbs = ""
+        for crumb_file in ice_boundary_breadcrumb_files_v1():
+            crumbs = crumbs + file_read(crumb_file)
+        expect(crumbs.contains("start\tcodegen\tmod.alpha")).to_equal(false)
+        expect(crumbs.contains("start\tcodegen\tmod.bad")).to_equal(true)
+        g2e_reset()
+

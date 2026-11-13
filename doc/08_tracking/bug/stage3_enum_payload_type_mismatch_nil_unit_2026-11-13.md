@@ -217,3 +217,82 @@ present `T` into `T?` only for text/class/struct/enum, so a present array into
 `[T]?` (sites 2, 6) is rejected although an array is also a heap handle; and a
 bare `case None:` over a typed Optional subject lowering to a Binding is a HIR
 pattern-lowering hazard worth its own record.
+
+
+## Parallel-lane overlap + residual sites (2026-11-13, PR #8774 follow-up)
+
+7458f79f30d (same day, parallel lane) type-corrected 11 of the same
+construction sites and 14ab345965a + c79be829a86 fixed codec regeneration
+(canonical-Span source for the generator, named nil-slot refusal sites,
+wire v17) -- so #8774 was rebased down to the two sites that lane did NOT
+cover, plus this knowledge:
+
+1. `src/compiler/50.mir/synthetic_driver_codegen.spl` (NOT in 7458f79f30d's
+   list): `MirConstValue.Str(manifest.driver_class)` / `.vendor` --
+   `DriverManifestAttr.driver_class`/`vendor` are `i64` ordinals
+   (decl_attrs.spl:138-139), so the `Str(text)` payload check rejects them.
+   Fixed to `MirConstValue.Int`. Verified with the pinned strict stage2
+   binary (single-module compile, zero payload errors; the module's 3
+   remaining errors are the MirCallOrigin lane artifact below).
+2. `src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl` (NOT in
+   7458f79f30d's list): three bare-`None:` match arms (two `match dbg_id:`
+   at the function-opening emission, one nested `match value:` in the
+   @naked terminator check) degraded to catch-alls in the pinned strict
+   single-file lane and tripped `B5b: match has multiple wildcard arms (arm
+   1)` in translate_function_with_ir_handle_impl. The on-disk upgrade-miss
+   receipt (`SIMPLE_ENUM_REG_TRACE=1`): `bname='None' subject_owner=''
+   candidates=4` -- four enums carry a `None` variant, so a bare-None arm
+   cannot be proven a unit-variant pattern and the arm stays a default.
+   Rewritten to `if val did = dbg_id:` / `if value.?:` presence forms.
+   Verified: v2_corecodegen single-module compile, zero payload/B5b errors
+   (RC=1 only from pre-existing lane artifacts in OTHER modules).
+
+Strict-check facts measured on the pinned-819e3d7d4d92 stage2 binary
+(single-module compiles, `SIMPLE_ENUM_PAYLOAD_TRACE=1` /
+`SIMPLE_ENUM_REG_TRACE=1`):
+- Bare `nil` into an optional enum PAYLOAD slot is rejected OUTSIDE unsafe:
+  "nil outside unsafe into optional payload slot (declared 'LocalId?'); use
+  None". `None` is the accepted spelling for optional payload slots --
+  EXCEPT where a bare `None` PATTERN in an enclosing match shadows the
+  identifier (outline.spl:487: `case None:` bound over a `BlockId?`
+  subject made `Ret(None)` remember `named#29?` instead of `named#40?`).
+- A `for x in list` loop variable carries NO remembered MIR type into the
+  payload slot check (`remembered=''`), even copied through an annotated
+  local. Annotating the LIST literal (`val candidates: [text] = [...]`)
+  fixes the element type (15-line repros: unannotated list fails, annotated
+  list passes). Interpolation (`"{candidate}"`) also works.
+- An annotated val binding does NOT strip optionality for the payload check
+  when the bound if-expression has an optional arm
+  (`val t: HirType = if c: hir_type /* HirExpr? */ else: ...` remembers
+  `HirType?`); unwrap the arm explicitly.
+- `missing runtime identity for 'MirCallOrigin'` (synthetic_driver_codegen,
+  3 unlocated errors): the `MirOperand.call_origin` struct-field DEFAULT
+  (`= MirCallOrigin.Source`, mir_instruction_support.spl:260) materializes
+  at `MirOperand(kind: ...)` constructions; the single-file compile lane
+  does not register MirCallOrigin's identity for that module (same class as
+  module_lowering.spl:2386's lane-dependent registration note). Present in
+  pre-fix baselines too; NOT a payload-type error. Left for the K-lane
+  stage3 run to confirm whether the real build route registers it.
+- Pre-existing single-file lane artifacts (NOT payload-class, seen in every
+  closure compile): return_type_interface_v1 "unresolved method call: get",
+  persisted_graph "unresolved method call: is_none", llvm_support_matrix +
+  hwir.frontend "tagged Any addition requires the admitted core-c-bootstrap
+  runtime owner", and llc "Metadata id is already used" killing compiles
+  after MIR in whichever module hits it first (_AstExpr.nodes, hir_codec,
+  compiler.frontend.core.types).
+- Codec regeneration was broken at the pin (span.spl re-export facade ->
+  classify 'Span' fails); 14ab345965a pointed codec_gen at the canonical
+  Span source -- regen works again (verified via a synthetic-root run of
+  the pinned seed).
+
+Verification matrix (pinned strict stage2 binary, per-module compiles, all
+payload-clean for the changed modules): regenerated hir_codec (hc2),
+convert_nodes (fb2), hir_lowering family statements/expression_core/
+expression_components/accessor_forwarding (v_statements, v2_statements),
+declaration_default_rewrite_v1 (v_mirstring), outline (v2_mirstring),
+core_codegen (v2_corecodegen), cranelift jit lane (v_cranelift), vhdl
+driver (v_vhdl), synthetic_driver_codegen (v2_mirstring). Codec unit specs
+hir_codec_optional_enum_decoder (3/3) + hir_codec_nil_scalar_reject (12/12)
+pass under the pinned seed against the regenerated codec; the two
+bare-node/struct-field codec specs fail identically on the pristine pin
+(zero-examples from the pre-14ab345965a classify breakage).
