@@ -70,3 +70,16 @@ unwrap). Spec `test/01_unit/compiler/50.mir/optional_record_into_field_unwrap_sp
 2/2 green, 1/2 with the fix reverted. Workaround tags stay until a rebuilt producer
 re-runs the native repro. Not covered: field ASSIGNMENT `h.attr = parsed`
 (lower_assign has no HirExpr for the value); the workaround uses the safe form.
+
+
+---
+## 2026-11-13 triage — lane live-p3-l6 (Windows host, seed bin/simple.exe, base f790f7f266e)
+
+Verified at tip: both workaround tags remain
+(`src/compiler/20.hir/hir_lowering/_Items/declaration_lowering.spl:655`,
+`class_declaration_lowering.spl:229`) and the 2026-11-09 compiler fix
+(`lower_struct_construct` Optional-operand unwrap) is in tree — the pinning
+spec `test/01_unit/compiler/50.mir/optional_record_into_field_unwrap_spec.spl`
+runs 2/2 on the seed. Stays OPEN only pending the rebuilt stage3 producer
+native repro (field-ASSIGNMENT form `h.attr = parsed` is still not covered).
+No in-lane change.

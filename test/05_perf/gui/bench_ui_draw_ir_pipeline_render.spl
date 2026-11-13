@@ -1,0 +1,146 @@
+# Interpreted Engine2D full-resolution render bench.
+#
+# Reproduces doc/08_tracking/bug/interpreted_engine2d_full_res_render_slow_2026-07-02.md:
+# the widget-tree -> Draw-IR -> Engine2D "cpu" pipeline of
+# test/03_system/gui/ui_draw_ir_pipeline_spec.spl at 640x480, with phase timers.
+#
+# Usage (from the repo root):
+#   E2D_RENDERS=6 E2D_PPM=/tmp/frame.ppm bin/simple run test/05_perf/gui/bench_ui_draw_ir_pipeline_render.spl
+#
+# Output (one line per phase, machine-readable):
+#   E2D_BENCH renders=<n> create_ms=.. clear_ms=.. convert_ms=.. compose_cold_ms=.. compose_warm_per_ms=.. readback_per_ms=.. total_ms=..
+#   E2D_BENCH frame_fnv=<hash of the last frame> pixels=<count> readback_checksum=<Engine2DReadback.checksum>
+# compose_cold_ms is render 0 (includes one-time glyph rasterization); the warm
+# figure is the mean of renders 1..n-1. Budgets: bench_ui_draw_ir_pipeline_render_spec.spl.
+
+use common.ui.widget.{WidgetNode}
+use common.ui.builder.{column, label, button, checkbox, text_input, image, progress, scroll}
+use common.ui.widget_draw_ir.{widget_tree_to_draw_ir_cpu}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{
+    engine2d_draw_ir_adv_composition_with_images,
+    engine2d_resolved_draw_ir_image
+}
+use std.nogc_sync_mut.ffi.io.{file_write_bytes}
+
+extern fn rt_time_now_nanos() -> i64
+extern fn rt_env_get(key: text) -> text?
+
+val W: i32 = 640
+val H: i32 = 480
+val BG: u32 = 0xff000000u32
+val GREEN: u32 = 0xff00ff00u32
+
+fn fixed_h(node: WidgetNode, h: i32) -> WidgetNode:
+    node.set_prop("height", "{h}")
+    node
+
+fn make_rows(p: text) -> [WidgetNode]:
+    var rows: [WidgetNode] = []
+    var i = 0
+    while i < 6:
+        if i % 2 == 0:
+            rows.push(fixed_h(progress("{p}_row_{i}", 100), 30))
+        else:
+            rows.push(fixed_h(button("{p}_row_{i}", "R{i}", "a"), 30))
+        i = i + 1
+    rows
+
+fn build_demo(p: text) -> WidgetNode:
+    val lbl = fixed_h(label("{p}_label", "Hello Widgets"), 30)
+    val btn = fixed_h(button("{p}_btn", "Click", "act"), 40)
+    val chk = fixed_h(checkbox("{p}_chk", "Enable", false), 30)
+    val inp = fixed_h(text_input("{p}_inp", "type"), 30)
+    val img = fixed_h(image("{p}_img", "test://img", "alt"), 60)
+    val prog = fixed_h(progress("{p}_prog", 40), 30)
+    val scr = scroll("{p}_scroll", 80, make_rows(p))
+    column("{p}_root", [lbl, btn, chk, inp, img, prog, scr])
+
+fn write_ppm(px: [u32], path: text):
+    val header = "P6\n{W} {H}\n255\n"
+    val hlen = header.len()
+    val n = px.len()
+    var data: [u8] = [0u8; hlen + n * 3]
+    var hi = 0
+    for ch in header:
+        data[hi] = ch as u8
+        hi = hi + 1
+    var i = 0
+    while i < n:
+        val p = px[i]
+        val base = hlen + i * 3
+        data[base] = ((p >> 16) & 0xFF) as u8
+        data[base + 1] = ((p >> 8) & 0xFF) as u8
+        data[base + 2] = (p & 0xFF) as u8
+        i = i + 1
+    file_write_bytes(path, data)
+
+fn frame_fnv(px: [u32]) -> i64:
+    var h: i64 = 1469598103934665603
+    var i = 0
+    val n = px.len()
+    while i < n:
+        h = ((h xor (px[i] as i64)) * 1099511628211) & 0x7fffffffffffffff
+        i = i + 1
+    h
+
+fn ms(ns: i64) -> i64:
+    ns / 1000000
+
+fn main():
+    var renders = 1
+    val env_n = rt_env_get("E2D_RENDERS")
+    if env_n.?:
+        renders = env_n.unwrap().to_int()
+    var create_ns: i64 = 0
+    var clear_ns: i64 = 0
+    var convert_ns: i64 = 0
+    var compose_cold_ns: i64 = 0
+    var compose_warm_ns: i64 = 0
+    var readback_ns: i64 = 0
+    var checksum: i64 = 0
+    var last: [u32] = []
+    val t_all = rt_time_now_nanos()
+    var r = 0
+    while r < renders:
+        val root = build_demo("b{r}")
+        val t0 = rt_time_now_nanos()
+        var engine = Engine2D.create_with_backend(W, H, "cpu")
+        val t1 = rt_time_now_nanos()
+        engine.clear(BG)
+        val t2 = rt_time_now_nanos()
+        val comp = widget_tree_to_draw_ir_cpu(root, W, H)
+        val t3 = rt_time_now_nanos()
+        val img = engine2d_resolved_draw_ir_image("test://img", 2, 2, [GREEN, GREEN, GREEN, GREEN])
+        val result = engine2d_draw_ir_adv_composition_with_images(engine, comp, false, [img])
+        val t4 = rt_time_now_nanos()
+        # Isolated full-frame readback (snapshot + provenance checksum): the
+        # per-frame cost every capture pays on top of the draw itself.
+        val readback = engine.read_pixels_with_source()
+        val t5 = rt_time_now_nanos()
+        last = result.pixels
+        checksum = readback.checksum
+        engine.shutdown()
+        create_ns = create_ns + (t1 - t0)
+        clear_ns = clear_ns + (t2 - t1)
+        convert_ns = convert_ns + (t3 - t2)
+        if r == 0:
+            compose_cold_ns = t4 - t3
+        else:
+            compose_warm_ns = compose_warm_ns + (t4 - t3)
+        readback_ns = readback_ns + (t5 - t4)
+        r = r + 1
+    val total_ns = rt_time_now_nanos() - t_all
+    var warm_per = 0
+    var readback_per = 0
+    if renders > 1:
+        warm_per = ms(compose_warm_ns) / (renders - 1)
+    if renders > 0:
+        readback_per = ms(readback_ns) / renders
+        val ppm = rt_env_get("E2D_PPM")
+        if ppm.?:
+            write_ppm(last, ppm.unwrap())
+    print "E2D_BENCH renders={renders} create_ms={ms(create_ns)} clear_ms={ms(clear_ns)} convert_ms={ms(convert_ns)} compose_cold_ms={ms(compose_cold_ns)} compose_warm_per_ms={warm_per} readback_per_ms={readback_per} total_ms={ms(total_ns)}"
+    print "E2D_BENCH frame_fnv={frame_fnv(last)} pixels={last.len()} readback_checksum={checksum}"
+
+main()
