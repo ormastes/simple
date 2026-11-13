@@ -1,0 +1,140 @@
+# The one exhaustive Simple Container backend/engine identity mapping. Pure
+# data: no provider, host or engine call. Every codec and facade that needs a
+# backend's engine, execution OS or effect admission asks this module; no
+# caller may default an unrecognised backend to Docker, Podman, generic POSIX
+# or unrestricted native execution.
+#
+# Effect admission is a separate property from identity. A backend may be a
+# well-formed plan/intent/evidence identity while its effects stay refused
+# until a real host qualification lands (the Seatbelt backend, design
+# doc/05_design/simple_container_macos_seatbelt.md §1.2, §2.4, §6.4).
+#
+# Refusal reasons are unprefixed tokens; callers prefix their own domain
+# ("container-api-" + reason, "container-execution-" + reason).
+
+pub const CONTAINER_BACKEND_LINUX_PODMAN_V1 = "linux-podman"
+pub const CONTAINER_BACKEND_WINDOWS_DOCKER_PROCESS_V1 = "windows-docker-process"
+pub const CONTAINER_BACKEND_MACOS_SEATBELT_PROCESS_V1 = "macos-seatbelt-process"
+
+pub const CONTAINER_ENGINE_PODMAN_V1 = "podman"
+pub const CONTAINER_ENGINE_DOCKER_V1 = "docker"
+pub const CONTAINER_ENGINE_MACOS_SEATBELT_PROCESS_V1 = "macos-seatbelt-process-v1"
+# Signed-App-Sandbox engine (providers/macos/native_admission_v1). It is a
+# distinct security contract with no facade backend; never an alias of the
+# Seatbelt engine.
+pub const CONTAINER_ENGINE_MACOS_NATIVE_SANDBOX_V1 = "macos-native-sandbox-v1"
+
+pub const CONTAINER_BACKEND_UNSUPPORTED_V1 = "backend-unsupported"
+pub const CONTAINER_BACKEND_UNQUALIFIED_SEATBELT_V1 = "backend-unqualified:macos-seatbelt-process"
+
+pub enum ContainerBackendIdentityV1:
+    LinuxPodman
+    WindowsDockerProcess
+    MacOsSeatbeltProcess
+
+pub enum ContainerEngineIdentityV1:
+    Podman
+    Docker
+    MacOsSeatbeltProcess
+    MacOsNativeSandbox
+
+pub fn container_backend_identity_v1(backend: text) -> Result<ContainerBackendIdentityV1, text>:
+    match backend:
+        case "linux-podman": Ok(ContainerBackendIdentityV1.LinuxPodman)
+        case "windows-docker-process": Ok(ContainerBackendIdentityV1.WindowsDockerProcess)
+        case "macos-seatbelt-process": Ok(ContainerBackendIdentityV1.MacOsSeatbeltProcess)
+        case _: Err(CONTAINER_BACKEND_UNSUPPORTED_V1)
+
+pub fn container_engine_identity_v1(engine: text) -> Result<ContainerEngineIdentityV1, text>:
+    match engine:
+        case "podman": Ok(ContainerEngineIdentityV1.Podman)
+        case "docker": Ok(ContainerEngineIdentityV1.Docker)
+        case "macos-seatbelt-process-v1": Ok(ContainerEngineIdentityV1.MacOsSeatbeltProcess)
+        case "macos-native-sandbox-v1": Ok(ContainerEngineIdentityV1.MacOsNativeSandbox)
+        case _: Err("engine-unsupported")
+
+pub fn container_backend_name_v1(identity: ContainerBackendIdentityV1) -> text:
+    match identity:
+        case ContainerBackendIdentityV1.LinuxPodman: CONTAINER_BACKEND_LINUX_PODMAN_V1
+        case ContainerBackendIdentityV1.WindowsDockerProcess: CONTAINER_BACKEND_WINDOWS_DOCKER_PROCESS_V1
+        case ContainerBackendIdentityV1.MacOsSeatbeltProcess: CONTAINER_BACKEND_MACOS_SEATBELT_PROCESS_V1
+
+pub fn container_engine_name_v1(identity: ContainerEngineIdentityV1) -> text:
+    match identity:
+        case ContainerEngineIdentityV1.Podman: CONTAINER_ENGINE_PODMAN_V1
+        case ContainerEngineIdentityV1.Docker: CONTAINER_ENGINE_DOCKER_V1
+        case ContainerEngineIdentityV1.MacOsSeatbeltProcess: CONTAINER_ENGINE_MACOS_SEATBELT_PROCESS_V1
+        case ContainerEngineIdentityV1.MacOsNativeSandbox: CONTAINER_ENGINE_MACOS_NATIVE_SANDBOX_V1
+
+# Exhaustive: each backend has exactly one engine domain.
+pub fn container_backend_engine_identity_v1(identity: ContainerBackendIdentityV1) -> ContainerEngineIdentityV1:
+    match identity:
+        case ContainerBackendIdentityV1.LinuxPodman: ContainerEngineIdentityV1.Podman
+        case ContainerBackendIdentityV1.WindowsDockerProcess: ContainerEngineIdentityV1.Docker
+        case ContainerBackendIdentityV1.MacOsSeatbeltProcess: ContainerEngineIdentityV1.MacOsSeatbeltProcess
+
+pub fn container_backend_execution_os_v1(identity: ContainerBackendIdentityV1) -> text:
+    match identity:
+        case ContainerBackendIdentityV1.LinuxPodman: "linux"
+        case ContainerBackendIdentityV1.WindowsDockerProcess: "windows"
+        case ContainerBackendIdentityV1.MacOsSeatbeltProcess: "macos"
+
+# The single effect-admission switch. Seatbelt stays false until native macOS
+# qualification evidence exists; never flip it ahead of that evidence.
+pub fn container_backend_effects_admitted_v1(identity: ContainerBackendIdentityV1) -> bool:
+    match identity:
+        case ContainerBackendIdentityV1.LinuxPodman: true
+        case ContainerBackendIdentityV1.WindowsDockerProcess: true
+        case ContainerBackendIdentityV1.MacOsSeatbeltProcess: false
+
+pub fn container_backend_known_v1(backend: text) -> bool:
+    container_backend_identity_v1(backend).is_ok()
+
+# Engine of a known backend as text; unknown backends are rejected.
+pub fn container_backend_engine_v1(backend: text) -> Result<text, text>:
+    val identity = container_backend_identity_v1(backend)?
+    Ok(container_engine_name_v1(container_backend_engine_identity_v1(identity)))
+
+pub fn container_backend_engine_matches_v1(backend: text, engine: text) -> bool:
+    match container_backend_engine_v1(backend):
+        case Ok(expected): expected == engine
+        case Err(_): false
+
+# Known AND effect-admitted backend, or an explicit refusal. Unknown names
+# return CONTAINER_BACKEND_UNSUPPORTED_V1; a known but unqualified backend
+# returns its own unqualified reason, never a substitute engine.
+pub fn container_backend_admit_effects_v1(backend: text) -> Result<ContainerBackendIdentityV1, text>:
+    val identity = container_backend_identity_v1(backend)?
+    if container_backend_effects_admitted_v1(identity): return Ok(identity)
+    match identity:
+        case ContainerBackendIdentityV1.LinuxPodman: Err(CONTAINER_BACKEND_UNSUPPORTED_V1)
+        case ContainerBackendIdentityV1.WindowsDockerProcess: Err(CONTAINER_BACKEND_UNSUPPORTED_V1)
+        case ContainerBackendIdentityV1.MacOsSeatbeltProcess: Err(CONTAINER_BACKEND_UNQUALIFIED_SEATBELT_V1)
+
+pub fn container_backend_admitted_engine_v1(backend: text) -> Result<text, text>:
+    val identity = container_backend_admit_effects_v1(backend)?
+    Ok(container_engine_name_v1(container_backend_engine_identity_v1(identity)))
+
+# Engine owned by some facade backend (podman, docker, Seatbelt). The
+# signed-App-Sandbox engine has no facade backend and is excluded.
+pub fn container_engine_backed_v1(engine: text) -> bool:
+    for backend in [CONTAINER_BACKEND_LINUX_PODMAN_V1, CONTAINER_BACKEND_WINDOWS_DOCKER_PROCESS_V1,
+            CONTAINER_BACKEND_MACOS_SEATBELT_PROCESS_V1]:
+        if container_backend_engine_matches_v1(backend, engine): return true
+    false
+
+# Engine of an effect-admitted backend (podman, docker today).
+pub fn container_engine_effects_admitted_v1(engine: text) -> bool:
+    for backend in [CONTAINER_BACKEND_LINUX_PODMAN_V1, CONTAINER_BACKEND_WINDOWS_DOCKER_PROCESS_V1,
+            CONTAINER_BACKEND_MACOS_SEATBELT_PROCESS_V1]:
+        match container_backend_admitted_engine_v1(backend):
+            case Ok(admitted):
+                if admitted == engine: return true
+            case Err(_): pass
+    false
+
+# True only for an effect-admitted backend paired with its own engine.
+pub fn container_backend_admitted_engine_matches_v1(backend: text, engine: text) -> bool:
+    match container_backend_admitted_engine_v1(backend):
+        case Ok(expected): expected == engine
+        case Err(_): false

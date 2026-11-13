@@ -1,0 +1,47 @@
+# @req SC-MAC-002 SC-MAC-012 SC-MAC-022 SC-MAC-024
+# Pure identity-mapping contract. No host, engine or provider call; macOS
+# Seatbelt qualification NOT_RUN, so its effects must stay refused here.
+use std.common.contracts.container.backend_identity_v1.*
+
+describe "exhaustive Simple Container backend/engine identity mapping":
+    it "keeps the existing Linux and Windows mappings unchanged and admitted":
+        expect(container_backend_engine_v1("linux-podman").unwrap()).to_equal("podman")
+        expect(container_backend_engine_v1("windows-docker-process").unwrap()).to_equal("docker")
+        expect(container_backend_admitted_engine_v1("linux-podman").unwrap()).to_equal("podman")
+        expect(container_backend_admitted_engine_v1("windows-docker-process").unwrap()).to_equal("docker")
+        expect(container_backend_execution_os_v1(container_backend_identity_v1("linux-podman").unwrap())).to_equal("linux")
+        expect(container_backend_execution_os_v1(container_backend_identity_v1("windows-docker-process").unwrap())).to_equal("windows")
+        expect(container_engine_effects_admitted_v1("podman")).to_equal(true)
+        expect(container_engine_effects_admitted_v1("docker")).to_equal(true)
+
+    it "maps Seatbelt to its own engine and macOS, with effects refused":
+        val identity = container_backend_identity_v1("macos-seatbelt-process").unwrap()
+        expect(container_backend_name_v1(identity)).to_equal("macos-seatbelt-process")
+        expect(container_backend_engine_v1("macos-seatbelt-process").unwrap()).to_equal("macos-seatbelt-process-v1")
+        expect(container_backend_execution_os_v1(identity)).to_equal("macos")
+        expect(container_backend_effects_admitted_v1(identity)).to_equal(false)
+        expect(container_backend_admit_effects_v1("macos-seatbelt-process").unwrap_err()).to_equal("backend-unqualified:macos-seatbelt-process")
+        expect(container_backend_admitted_engine_v1("macos-seatbelt-process").unwrap_err()).to_equal("backend-unqualified:macos-seatbelt-process")
+        expect(container_engine_backed_v1("macos-seatbelt-process-v1")).to_equal(true)
+        expect(container_engine_effects_admitted_v1("macos-seatbelt-process-v1")).to_equal(false)
+        for engine in ["docker", "podman", "macos-native-sandbox-v1"]:
+            expect(container_backend_engine_matches_v1("macos-seatbelt-process", engine)).to_equal(false)
+
+    it "keeps the signed-App-Sandbox engine distinct and without a facade backend":
+        val engine = container_engine_identity_v1("macos-native-sandbox-v1").unwrap()
+        expect(container_engine_name_v1(engine)).to_equal("macos-native-sandbox-v1")
+        expect(container_engine_backed_v1("macos-native-sandbox-v1")).to_equal(false)
+        expect(container_engine_effects_admitted_v1("macos-native-sandbox-v1")).to_equal(false)
+        expect(container_backend_known_v1("macos-native-sandbox-v1")).to_equal(false)
+
+    it "rejects unknown backends and engines with no Docker default":
+        for backend in ["", "docker", "podman", "windows-hyperv", "macos", "macos-native-sandbox", "Linux-Podman", "linux-podman "]:
+            expect(container_backend_known_v1(backend)).to_equal(false)
+            expect(container_backend_engine_v1(backend).unwrap_err()).to_equal("backend-unsupported")
+            expect(container_backend_admit_effects_v1(backend).unwrap_err()).to_equal("backend-unsupported")
+            expect(container_backend_engine_matches_v1(backend, "docker")).to_equal(false)
+            expect(container_backend_engine_matches_v1(backend, "podman")).to_equal(false)
+        for engine in ["", "Docker", "containerd", "macos-seatbelt-process"]:
+            expect(container_engine_identity_v1(engine).is_err()).to_equal(true)
+            expect(container_engine_backed_v1(engine)).to_equal(false)
+            expect(container_engine_effects_admitted_v1(engine)).to_equal(false)

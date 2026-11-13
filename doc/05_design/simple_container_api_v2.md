@@ -7,6 +7,16 @@ contains the tagged owner routing actual LinuxSimpleContainerAdapterV2 and
 WindowsSimpleContainerAdapterV2 classes. No trait-probe-only implementation,
 duplicate scheduler/journal, raw runtime call or automatic fake provider exists.
 Exact backends are linux-podman and windows-docker-process; no backend guessing.
+Backend/engine identity has ONE exhaustive owner,
+common/contracts/container/backend_identity_v1.spl: linux-podman->podman,
+windows-docker-process->docker, macos-seatbelt-process->macos-seatbelt-process-v1.
+The signed-App-Sandbox engine macos-native-sandbox-v1 stays a distinct identity
+with no facade backend. Plan codecs accept any known backend; observe/open,
+intent, evidence, exec, exec-control and stream accept only effect-admitted
+backends. Seatbelt effects are NOT admitted until native macOS qualification
+(observe/open return container-api-backend-unqualified:macos-seatbelt-process);
+unknown names return container-api-backend-unsupported. No else-Docker default
+exists at any site (design simple_container_macos_seatbelt.md §2.4, §6.4).
 
 SimpleContainerOwnerV2 has Linux(scope,adapter) and Windows(scope,adapter) tags.
 ContainerOperationTurnV2 always returns owner plus RuntimeOperationV1, including

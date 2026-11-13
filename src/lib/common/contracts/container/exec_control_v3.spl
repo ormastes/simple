@@ -2,6 +2,7 @@
 # exec birth or permission to replace parent/provider/control owners is implied.
 use std.common.contracts.container.execution_v2.*
 use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
+use std.common.contracts.container.backend_identity_v1.container_backend_admitted_engine_matches_v1
 use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
 use std.common.crypto.sha256.sha256_text
 use std.common.sdn.value.SdnValue
@@ -27,9 +28,8 @@ pub fn container_exec_control_parent_match_v3(request: ContainerExecutionRequest
     val scope = ContainerHostScopeV2(physical_host_id: plan.physical_host_id, service_scope_id: plan.service_scope_id,
         boot_id: plan.boot_id, provider_generation: plan.provider_generation, native_machine_id: plan.native_machine_id,
         continuity_mode: plan.continuity_mode, continuity_id: plan.continuity_id)
-    val engine = if plan.backend == "linux-podman": "podman" else: "docker"
     if (expected.pod_uid != plan.workload_uid or expected.attempt != plan.attempt or expected.operation_id != plan.operation_id or
-            expected.provider_generation != plan.provider_generation or expected.engine != engine or
+            expected.provider_generation != plan.provider_generation or not container_backend_admitted_engine_matches_v1(plan.backend, expected.engine) or
             not builder_digest_valid_v1(expected.native_id) or expected.node_boot_id != container_scope_fence_id_v2(scope)?):
         return Err("container-exec-control-parent-mismatch")
     Ok(true)
@@ -70,9 +70,8 @@ pub fn container_exec_control_observation_digest_v3(value: ContainerExecControlO
     if not profile or value.observed_unix_ms <= 0: return Err("container-exec-control-profile-clock-invalid")
     val scope = container_host_scope_bytes_v2(value.scope)?
     val runtime = value.parent_runtime
-    val engine = if value.backend == "linux-podman": "podman" else: "docker"
     if (not builder_identifier_valid_v1(runtime.pod_uid) or not builder_identifier_valid_v1(runtime.operation_id) or
-            runtime.attempt <= 0 or runtime.provider_generation != value.scope.provider_generation or runtime.engine != engine or
+            runtime.attempt <= 0 or runtime.provider_generation != value.scope.provider_generation or not container_backend_admitted_engine_matches_v1(value.backend, runtime.engine) or
             not builder_digest_valid_v1(runtime.native_id) or runtime.node_boot_id != container_scope_fence_id_v2(value.scope)?):
         return Err("container-exec-control-parent-mismatch")
     for digest in [value.parent_request_digest, value.parent_provider_identity_digest, value.exec_control_identity_digest,

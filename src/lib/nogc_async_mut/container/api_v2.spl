@@ -5,6 +5,7 @@ use std.common.contracts.container.execution_evidence_v2.*
 use std.common.contracts.container.effect_deadline_v1.ContainerEffectDeadlineV1
 use std.common.contracts.container.control_deadline_v1.ContainerControlDeadlineV1
 use std.common.contracts.container.runtime_v1.{RuntimeIdentityV1, RuntimeOperationV1, RuntimeIntentV1, runtime_operation_empty}
+use std.common.contracts.container.backend_identity_v1.*
 use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
 use std.common.string_core.str_len
 use std.nogc_async_mut.container.providers.linux.simple_container_adapter_v2.LinuxSimpleContainerAdapterV2
@@ -56,8 +57,8 @@ fn container_api_observation_v2(backend: text, value: ContainerHostObservationV2
             not builder_digest_valid_v1(value.provider_identity_digest) or
             not builder_identifier_valid_v1(value.architecture):
         return Err("container-api-host-observation-invalid")
-    if (backend == "linux-podman" and value.execution_os != "linux") or
-            (backend == "windows-docker-process" and value.execution_os != "windows"):
+    val identity = container_api_backend_v2(backend)?
+    if value.execution_os != container_backend_execution_os_v1(identity):
         return Err("container-api-host-os-mismatch")
     if value.continuity_assurance == "native-boot-incarnation-v1":
         if not container_api_text_v2(value.native_boot_id): return Err("container-api-native-boot-required")
@@ -82,30 +83,47 @@ fn container_api_open_observation_v2(backend: text, scope: ContainerHostScopeV2,
         return Err("container-api-open-observation-mismatch")
     Ok(true)
 
+# Exhaustive backend admission for the facade. Unknown names are refused as
+# unsupported; a known backend without qualified effects is refused with its
+# own unqualified reason. Neither ever falls through to Docker or Podman.
+fn container_api_backend_v2(backend: text) -> Result<ContainerBackendIdentityV1, text>:
+    match container_backend_admit_effects_v1(backend):
+        case Ok(identity): Ok(identity)
+        case Err(reason): Err("container-api-" + reason)
+
 pub fn simple_container_observe_v2(backend: text, policy_bytes: text) -> Result<ContainerHostObservationV2, text>:
-    if backend != "linux-podman" and backend != "windows-docker-process": return Err("container-api-backend-unsupported")
+    val identity = container_api_backend_v2(backend)?
     if str_len(policy_bytes) == 0 or str_len(policy_bytes) > 1048576: return Err("container-api-policy-size")
-    if backend == "linux-podman":
-        val observed = LinuxSimpleContainerAdapterV2.observe(policy_bytes)?
-        return container_api_observation_v2(backend, observed)
-    val observed = WindowsSimpleContainerAdapterV2.observe(policy_bytes)?
-    container_api_observation_v2(backend, observed)
+    match identity:
+        case ContainerBackendIdentityV1.LinuxPodman:
+            val observed = LinuxSimpleContainerAdapterV2.observe(policy_bytes)?
+            container_api_observation_v2(backend, observed)
+        case ContainerBackendIdentityV1.WindowsDockerProcess:
+            val observed = WindowsSimpleContainerAdapterV2.observe(policy_bytes)?
+            container_api_observation_v2(backend, observed)
+        case ContainerBackendIdentityV1.MacOsSeatbeltProcess:
+            Err("container-api-" + CONTAINER_BACKEND_UNQUALIFIED_SEATBELT_V1)
 
 pub fn simple_container_open_v2(backend: text, policy_bytes: text, state_root: text,
         scope: ContainerHostScopeV2, expected_provider_identity_digest: text, timeout_ms: i64) -> Result<SimpleContainerOwnerV2, text>:
-    if backend != "linux-podman" and backend != "windows-docker-process": return Err("container-api-backend-unsupported")
+    val identity = container_api_backend_v2(backend)?
     if str_len(policy_bytes) == 0 or str_len(policy_bytes) > 1048576: return Err("container-api-policy-size")
     if not container_api_text_v2(state_root) or not container_api_scope_v2(scope) or
             not builder_digest_valid_v1(expected_provider_identity_digest) or timeout_ms <= 0:
         return Err("container-api-open-invalid")
     if scope.continuity_mode != "native-boot-incarnation-v1": return Err("container-api-continuity-unproven")
-    if backend == "linux-podman":
-        val adapter = LinuxSimpleContainerAdapterV2.open(policy_bytes, state_root, scope, expected_provider_identity_digest, timeout_ms)?
-        val observed = container_api_open_observation_v2(backend, scope, expected_provider_identity_digest, adapter.observation())?
-        return Ok(SimpleContainerOwnerV2.Linux(scope, adapter))
-    val adapter = WindowsSimpleContainerAdapterV2.open(policy_bytes, state_root, scope, expected_provider_identity_digest, timeout_ms)?
-    val observed = container_api_open_observation_v2(backend, scope, expected_provider_identity_digest, adapter.observation())?
-    Ok(SimpleContainerOwnerV2.Windows(scope, adapter))
+    match identity:
+        case ContainerBackendIdentityV1.LinuxPodman:
+            val adapter = LinuxSimpleContainerAdapterV2.open(policy_bytes, state_root, scope, expected_provider_identity_digest, timeout_ms)?
+            val observed = container_api_open_observation_v2(backend, scope, expected_provider_identity_digest, adapter.observation())?
+            Ok(SimpleContainerOwnerV2.Linux(scope, adapter))
+        case ContainerBackendIdentityV1.WindowsDockerProcess:
+            val adapter = WindowsSimpleContainerAdapterV2.open(policy_bytes, state_root, scope, expected_provider_identity_digest, timeout_ms)?
+            val observed = container_api_open_observation_v2(backend, scope, expected_provider_identity_digest, adapter.observation())?
+            Ok(SimpleContainerOwnerV2.Windows(scope, adapter))
+        case ContainerBackendIdentityV1.MacOsSeatbeltProcess:
+            # Pre-effect refusal: no owner, handle or directory exists yet.
+            Err("container-api-" + CONTAINER_BACKEND_UNQUALIFIED_SEATBELT_V1)
 
 fn container_api_request_scope_v2(backend: text, scope: ContainerHostScopeV2,
         request: ContainerExecutionRequestV2) -> Result<bool, text>:
@@ -272,8 +290,7 @@ fn container_api_runtime_identity_v2(owner: SimpleContainerOwnerV2,
         request: ContainerExecutionRequestV2, expected: RuntimeIdentityV1) -> Result<bool, text>:
     val plan = request.plan
     val scope = simple_container_scope_v2(owner)
-    val engine = if plan.backend == "linux-podman": "podman" else: "docker"
-    if expected.engine != engine or expected.pod_uid != plan.workload_uid or expected.attempt != plan.attempt or
+    if not container_backend_admitted_engine_matches_v1(plan.backend, expected.engine) or expected.pod_uid != plan.workload_uid or expected.attempt != plan.attempt or
             expected.operation_id != plan.operation_id or expected.provider_generation != scope.provider_generation or
             expected.node_boot_id != container_scope_fence_id_v2(scope)? or not builder_digest_valid_v1(expected.native_id):
         return Err("container-api-absence-identity-mismatch")

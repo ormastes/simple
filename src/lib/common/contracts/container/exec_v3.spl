@@ -2,6 +2,7 @@
 # resolution, live handle, create retry or parent resource retirement is granted.
 use std.common.contracts.container.execution_v2.*
 use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
+use std.common.contracts.container.backend_identity_v1.{container_backend_admitted_engine_matches_v1, container_engine_effects_admitted_v1}
 use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
 use std.common.crypto.sha256.sha256_text
 use std.common.string_core.str_len
@@ -121,7 +122,7 @@ fn exec_environment_bytes_v3(entries: [ContainerExecEnvironmentEntryV3], windows
 # Canonical identity metadata; encoding alone never conveys control authority.
 pub fn exec_runtime_bytes_v3(identity: RuntimeIdentityV1) -> Result<text, text>:
     if (not builder_identifier_valid_v1(identity.pod_uid) or not builder_identifier_valid_v1(identity.operation_id) or
-            identity.attempt <= 0 or identity.provider_generation <= 0 or not ["podman", "docker"].contains(identity.engine) or
+            identity.attempt <= 0 or identity.provider_generation <= 0 or not container_engine_effects_admitted_v1(identity.engine) or
             not builder_digest_valid_v1(identity.native_id) or not builder_digest_valid_v1(identity.node_boot_id)):
         return Err("container-exec-parent-runtime-invalid")
     val fields: Dict<text, SdnValue> = {"podUid": SdnValue.String(identity.pod_uid), "attempt": SdnValue.Int(identity.attempt),
@@ -143,9 +144,8 @@ fn exec_runtime_plan_v3(identity: RuntimeIdentityV1, plan: ContainerExecutionPla
     val scope = ContainerHostScopeV2(physical_host_id: plan.physical_host_id, service_scope_id: plan.service_scope_id,
         boot_id: plan.boot_id, provider_generation: plan.provider_generation, native_machine_id: plan.native_machine_id,
         continuity_mode: plan.continuity_mode, continuity_id: plan.continuity_id)
-    val engine = if plan.backend == "linux-podman": "podman" else: "docker"
     if (identity.pod_uid != plan.workload_uid or identity.attempt != plan.attempt or identity.operation_id != plan.operation_id or
-            identity.provider_generation != plan.provider_generation or identity.engine != engine or identity.node_boot_id != container_scope_fence_id_v2(scope)?):
+            identity.provider_generation != plan.provider_generation or not container_backend_admitted_engine_matches_v1(plan.backend, identity.engine) or identity.node_boot_id != container_scope_fence_id_v2(scope)?):
         return Err("container-exec-parent-runtime-plan-mismatch")
     Ok(true)
 
@@ -230,7 +230,7 @@ pub fn container_exec_birth_encode_v3(receipt: ContainerExecBirthReceiptV3) -> R
     val identity = receipt.parent_runtime
     if (receipt.proof_kind != "exact-native-exec-birth-v3" or receipt.created_unix_ms <= 0 or identity.attempt <= 0 or
             identity.provider_generation <= 0 or not builder_identifier_valid_v1(identity.pod_uid) or
-            not builder_identifier_valid_v1(identity.operation_id) or not ["podman", "docker"].contains(identity.engine)):
+            not builder_identifier_valid_v1(identity.operation_id) or not container_engine_effects_admitted_v1(identity.engine)):
         return Err("container-exec-birth-identity")
     for digest in [receipt.request_digest, identity.native_id, identity.node_boot_id, receipt.native_exec_id,
             receipt.provider_identity_digest, receipt.query_digest, receipt.evidence_digest]:
@@ -275,10 +275,9 @@ pub fn container_exec_birth_match_v3(receipt: ContainerExecBirthReceiptV3, reque
         boot_id: plan.boot_id, provider_generation: plan.provider_generation, native_machine_id: plan.native_machine_id,
         continuity_mode: plan.continuity_mode, continuity_id: plan.continuity_id)
     val identity = receipt.parent_runtime
-    val engine = if plan.backend == "linux-podman": "podman" else: "docker"
     if (receipt.request_digest != container_exec_request_digest_v3(request)? or identity.pod_uid != plan.workload_uid or
             identity.attempt != plan.attempt or identity.operation_id != plan.operation_id or
-            identity.provider_generation != plan.provider_generation or identity.engine != engine or
+            identity.provider_generation != plan.provider_generation or not container_backend_admitted_engine_matches_v1(plan.backend, identity.engine) or
             identity.node_boot_id != container_scope_fence_id_v2(scope)?):
         return Err("container-exec-birth-parent-mismatch")
     Ok(true)
