@@ -1,0 +1,79 @@
+# @cover src/lib/gc_async_mut/gpu/engine2d/draw_ir_packed_composition_owner_v3.spl 80%
+
+use spec
+use common.mission_critical.draw_ir_packed_generation_store_v3.*
+use common.ui.draw_ir.*
+use std.gc_async_mut.gpu.engine2d.draw_ir_packed_composition_owner_v3.*
+use std.gc_async_mut.gpu.engine2d.draw_ir_packed_owner_v3.*
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+
+fn _composition(identity: text, color: u32) -> DrawIrComposition:
+    val command = draw_ir_box_with_style(
+        "{identity}-rect", 1, 1, 2, 2, color,
+        draw_ir_rect_bounds(1, 1, 2, 2), draw_ir_rect_bounds(1, 1, 2, 2),
+        draw_ir_rect_bounds(1, 1, 2, 2), draw_ir_no_rect(), []
+    )
+    val batch = draw_ir_batch(
+        "{identity}-batch", "cpu",
+        draw_ir_embedding_config("", "", 0, 0, 4, 4, 0, 1000, false),
+        [command]
+    )
+    draw_ir_composition(identity, "scene", "cpu", [batch])
+
+fn _queued_generation(arena: u64) -> (DrawIrPackedGenerationStoreV3, DrawIrPackedSubmissionV3):
+    var store = DrawIrPackedGenerationStoreV3.bounded(arena, 1u32, 4u32, 1u32)
+    var admitted = DrawIrPackedGenerationRefV3(arena_id: 0u64, generation: 0u64, slot: 0u32)
+    match store.admit(1u32):
+        DrawIrPackedAdmissionV3.Admitted(value): admitted = value
+        DrawIrPackedAdmissionV3.Refused(reason): expect(false).to_equal(true)
+    expect(store.write(admitted, 7u64)).to_equal(DRAW_IR_PACKED_REASON_OK)
+    var sealed = DrawIrPackedSubmissionV3(generation_ref: admitted, row_count: 0u32, content_hash: "")
+    match store.seal(admitted):
+        DrawIrPackedSealV3.Sealed(value): sealed = value
+        DrawIrPackedSealV3.Refused(reason): expect(false).to_equal(true)
+    expect(store.publish(sealed)).to_equal(DRAW_IR_PACKED_REASON_OK)
+    (store, sealed)
+
+describe "Engine2D packed DrawIR-v3 composition owner failure reporting":
+    it "recovers the queued generation when take is refused and reports the take reason":
+        val queued = _queued_generation(301u64)
+        val refused = engine2d_packed_v3_refuse_unclaimed(
+            queued.0, queued.1, DRAW_IR_PACKED_REASON_QUEUE_EMPTY)
+        expect(refused.1.ok).to_equal(false)
+        expect(refused.1.reason).to_equal(DRAW_IR_PACKED_REASON_QUEUE_EMPTY)
+        expect(refused.0.queue_len).to_equal(0u32)
+        expect(refused.0.slot_states[0]).to_equal(DRAW_IR_PACKED_SLOT_FREE)
+
+    it "reports the recovery failure instead of discarding it":
+        val queued = _queued_generation(302u64)
+        var bogus = queued.1
+        bogus.generation_ref = DrawIrPackedGenerationRefV3(
+            arena_id: queued.1.generation_ref.arena_id,
+            generation: queued.1.generation_ref.generation + 5u64,
+            slot: queued.1.generation_ref.slot)
+        val refused = engine2d_packed_v3_refuse_unclaimed(
+            queued.0, bogus, DRAW_IR_PACKED_REASON_QUEUE_EMPTY)
+        expect(refused.1.ok).to_equal(false)
+        expect(refused.1.reason).to_equal(DRAW_IR_PACKED_REASON_STATE)
+        expect(refused.0.slot_states[0]).to_equal(DRAW_IR_PACKED_SLOT_QUEUED)
+
+    it "reports a capacity refusal as its own publish reason, not INVALID_SCENE":
+        val engine = Engine2D.create_with_backend(4, 4, "cpu")
+        val tiny = DrawIrPackedGenerationStoreV3.bounded(303u64, 1u32, 3u32, 1u32)
+        val (returned_engine, returned_store, receipt) = engine2d_draw_ir_v3_render_composition(
+            engine, tiny, _composition("capacity", 0xff224466u32))
+        expect(receipt.accepted).to_equal(false)
+        expect(receipt.reason).to_equal(
+            ENGINE2D_PACKED_V3_PUBLISH_REASON_BASE + DRAW_IR_PACKED_REASON_CAPACITY)
+        expect(receipt.reason).to_not_equal(ENGINE2D_PACKED_V3_INVALID_SCENE)
+        expect(returned_store.slot_states[0]).to_equal(DRAW_IR_PACKED_SLOT_FREE)
+
+    it "reports a full queue as its own publish reason":
+        val engine = Engine2D.create_with_backend(4, 4, "cpu")
+        val queued = _queued_generation(304u64)
+        val (returned_engine, returned_store, receipt) = engine2d_draw_ir_v3_render_composition(
+            engine, queued.0, _composition("queue-full", 0xff224466u32))
+        expect(receipt.accepted).to_equal(false)
+        expect(receipt.reason).to_equal(
+            ENGINE2D_PACKED_V3_PUBLISH_REASON_BASE + DRAW_IR_PACKED_REASON_QUEUE_FULL)
+        expect(returned_store.slot_states[0]).to_equal(DRAW_IR_PACKED_SLOT_QUEUED)
