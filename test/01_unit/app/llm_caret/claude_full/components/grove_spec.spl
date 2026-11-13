@@ -1,0 +1,291 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+"""
+As a user browsing the project tree in Grove, I want keys to move, expand and
+collapse nodes, filters and search to narrow the tree, and the header and rows
+to describe what is shown, so that I can navigate a large workspace quickly.
+"""
+use std.spec.step
+
+use std.spec.*
+use app.llm_caret.claude_full.components.grove.Grove.*
+
+fn tree() -> [GroveNode]:
+    sampleGroveNodes()
+
+fn ids_of(rows: [GroveRow]) -> [text]:
+    var out: [text] = []
+    for r in rows:
+        out.push(r.node.id)
+    out
+
+fn main() -> ():
+    describe("Grove node normalization", fn() -> ():
+        it("derives id and label from the path when they are blank", fn() -> ():
+            step("derives id and label from the path when they are blank")
+            val n = GroveNode.new("  ", "", "DIR", " /a/b/c.spl ", "  d  ", "bogus", " b ", -5, [])
+            expect(n.id).to_equal("/a/b/c.spl")
+            expect(n.label).to_equal("c.spl")
+            expect(n.kind).to_equal("folder")
+            expect(n.status).to_equal("ready")
+            expect(n.detail).to_equal("d")
+            expect(n.badge).to_equal("b")
+            expect(n.tokens).to_equal(0)
+        )
+
+        it("falls back to untitled when id, label and path are all blank", fn() -> ():
+            step("falls back to untitled when id, label and path are all blank")
+            val n = GroveNode.new("", "", "weird", "", "", "", "", 3, [])
+            expect(n.id).to_equal("(untitled)")
+            expect(n.label).to_equal("(untitled)")
+            expect(n.kind).to_equal("node")
+            expect(n.tokens).to_equal(3)
+        )
+
+        it("treats branch-like kinds and parents as branches", fn() -> ():
+            step("treats branch-like kinds and parents as branches")
+            val leaf = GroveNode.leaf("l", "L", "/l", "d")
+            expect(leaf.isBranch()).to_equal(false)
+            expect(leaf.isLeaf()).to_equal(true)
+            val b = GroveNode.branch("b", "B", "/b", [])
+            expect(b.isBranch()).to_equal(true)
+            val withKid = GroveNode.new("f", "F", "file", "/f", "", "ready", "", 0, [leaf])
+            expect(withKid.isBranch()).to_equal(true)
+        )
+
+        it("normalizes kind and status names and filters", fn() -> ():
+            step("normalizes kind and status names and filters")
+            expect(normalizeGroveKind("Directory")).to_equal("folder")
+            expect(normalizeGroveKind("SYMBOL")).to_equal("symbol")
+            expect(normalizeGroveKindFilter("")).to_equal("all")
+            expect(normalizeGroveKindFilter("dir")).to_equal("folder")
+            expect(normalizeGroveStatus("STALE")).to_equal("stale")
+            expect(normalizeGroveStatusFilter("all")).to_equal("all")
+            expect(normalizeGroveStatusFilter("nonsense")).to_equal("ready")
+            expect(groveKindLabel("leaf")).to_equal("Leaf")
+            expect(groveKindLabel("zzz")).to_equal("Node")
+            expect(groveStatusLabel("error")).to_equal("error")
+        )
+
+        it("matches text across label, path, badge and status case-insensitively", fn() -> ():
+            step("matches text across label, path, badge and status case-insensitively")
+            val n = GroveNode.new("n", "Alpha", "file", "/x/Beta.spl", "Gamma", "stale", "Delta", 0, [])
+            expect(groveNodeTextMatches(n, "ALPHA")).to_equal(true)
+            expect(groveNodeTextMatches(n, "beta")).to_equal(true)
+            expect(groveNodeTextMatches(n, "gamma")).to_equal(true)
+            expect(groveNodeTextMatches(n, "delta")).to_equal(true)
+            expect(groveNodeTextMatches(n, "stale")).to_equal(true)
+            expect(groveNodeTextMatches(n, "omega")).to_equal(false)
+            expect(n.matches("alpha", "file", "stale")).to_equal(true)
+            expect(n.matches("alpha", "folder", "all")).to_equal(false)
+            expect(n.matches("alpha", "all", "ready")).to_equal(false)
+        )
+    )
+
+    describe("Grove state", fn() -> ():
+        it("starts empty with all filters open", fn() -> ():
+            step("starts empty with all filters open")
+            val s = GroveState.empty()
+            expect(s.activeId).to_equal("")
+            expect(s.kindFilter).to_equal("all")
+            expect(s.statusFilter).to_equal("all")
+            expect(s.showBreadcrumbs).to_equal(true)
+            expect(s.showDetails).to_equal(true)
+        )
+
+        it("returns updated copies and leaves the original untouched", fn() -> ():
+            step("returns updated copies and leaves the original untouched")
+            val s = GroveState.empty()
+            val t = s.withQuery("  q ").withKindFilter("file").withStatusFilter("error").withLoading(true).withError(" e ").withBreadcrumbs(false).withDetails(false).withExpandedIds(["a", " a ", "", "b"])
+            expect(t.query).to_equal("q")
+            expect(t.kindFilter).to_equal("file")
+            expect(t.statusFilter).to_equal("error")
+            expect(t.loading).to_equal(true)
+            expect(t.error).to_equal("e")
+            expect(t.showBreadcrumbs).to_equal(false)
+            expect(t.showDetails).to_equal(false)
+            expect(t.expandedIds).to_equal(["a", "b"])
+            expect(s.query).to_equal("")
+            expect(s.loading).to_equal(false)
+        )
+
+        it("adds, removes and de-duplicates expanded ids", fn() -> ():
+            step("adds, removes and de-duplicates expanded ids")
+            expect(addGroveId(["a"], "b")).to_equal(["a", "b"])
+            expect(addGroveId(["a"], "a")).to_equal(["a"])
+            expect(addGroveId(["a"], "  ")).to_equal(["a"])
+            expect(removeGroveId(["a", "b", "a"], "a")).to_equal(["b"])
+            expect(containsGroveId(["a"], " a ")).to_equal(true)
+            expect(normalizeGroveIds(["x", "x", " ", "y"])).to_equal(["x", "y"])
+        )
+    )
+
+    describe("Grove tree rows", fn() -> ():
+        it("shows only the collapsed root and activates it on creation", fn() -> ():
+            step("shows only the collapsed root and activates it on creation")
+            val m = createGrove(tree())
+            expect(ids_of(m.visibleRows())).to_equal(["workspace"])
+            expect(m.state.activeId).to_equal("workspace")
+            expect(m.visibleRows()[0].visibleChildCount).to_equal(2)
+            expect(m.visibleRows()[0].active).to_equal(true)
+        )
+
+        it("expands every branch to reveal nested rows with depth", fn() -> ():
+            step("expands every branch to reveal nested rows with depth")
+            val s = expandAllGroveNodes(tree(), GroveState.empty())
+            expect(s.expandedIds).to_equal(["workspace", "src", "app", "lib", "docs"])
+            val rows = visibleGroveRows(tree(), s)
+            expect(ids_of(rows)).to_equal(["workspace", "src", "app", "grove", "lib", "docs"])
+            expect(rows[3].depth).to_equal(3)
+            expect(rows[3].expanded).to_equal(false)
+            expect(rows[1].expanded).to_equal(true)
+            expect(collapseAllGroveNodes(s).expandedIds.len()).to_equal(0)
+        )
+
+        it("filters by query, keeping ancestors of matches and auto-expanding", fn() -> ():
+            step("filters by query, keeping ancestors of matches and auto-expanding")
+            val s = GroveState.empty().withQuery("Grove.spl")
+            val rows = visibleGroveRows(tree(), s)
+            expect(ids_of(rows)).to_equal(["workspace", "src", "app", "grove"])
+            val none = GroveState.empty().withQuery("zzzz")
+            expect(visibleGroveRows(tree(), none).len()).to_equal(0)
+        )
+
+        it("filters by kind and status", fn() -> ():
+            step("filters by kind and status")
+            val files = GroveState.empty().withExpandedIds(["workspace", "src", "app"]).withKindFilter("file")
+            expect(ids_of(visibleGroveRows(tree(), files))).to_equal(["workspace", "src", "app", "grove"])
+            val active = expandAllGroveNodes(tree(), GroveState.empty()).withStatusFilter("active")
+            expect(ids_of(visibleGroveRows(tree(), active)).len()).to_equal(4)
+        )
+
+        it("finds nodes by id and builds the breadcrumb path", fn() -> ():
+            step("finds nodes by id and builds the breadcrumb path")
+            val found = findGroveNodeById(tree(), " grove ") ?? GroveNode.leaf("x", "x", "", "")
+            expect(found.label).to_equal("Grove.spl")
+            val missing = findGroveNodeById(tree(), "nope") ?? GroveNode.leaf("sentinel", "", "", "")
+            expect(missing.id).to_equal("sentinel")
+            val crumbs = groveBreadcrumbs(tree(), "app")
+            expect(crumbs.len()).to_equal(3)
+            expect(crumbs[0].id).to_equal("workspace")
+            expect(crumbs[2].id).to_equal("app")
+            expect(groveBreadcrumbs(tree(), "nope").len()).to_equal(0)
+        )
+
+        it("counts nodes, branches and leaves", fn() -> ():
+            step("counts nodes, branches and leaves")
+            expect(countGroveNodes(tree())).to_equal(6)
+            expect(countGroveBranches(tree())).to_equal(5)
+            expect(countGroveLeaves(tree())).to_equal(1)
+            expect(allGroveBranchIds(tree()).len()).to_equal(5)
+        )
+    )
+
+    describe("Grove keyboard navigation", fn() -> ():
+        it("moves down and up with wraparound", fn() -> ():
+            step("moves down and up with wraparound")
+            val open = expandAllGroveNodes(tree(), GroveState.empty()).withActiveId("workspace")
+            val down = handleGroveKey(tree(), open, "down")
+            expect(down.activeId).to_equal("src")
+            expect(handleGroveKey(tree(), down, "k").activeId).to_equal("workspace")
+            expect(handleGroveKey(tree(), open, "up").activeId).to_equal("docs")
+            val last = selectLastGroveNode(tree(), open)
+            expect(handleGroveKey(tree(), last, "J").activeId).to_equal("workspace")
+        )
+
+        it("jumps to first and last rows", fn() -> ():
+            step("jumps to first and last rows")
+            val open = expandAllGroveNodes(tree(), GroveState.empty()).withActiveId("app")
+            expect(handleGroveKey(tree(), open, "home").activeId).to_equal("workspace")
+            expect(handleGroveKey(tree(), open, "end").activeId).to_equal("docs")
+            expect(handleGroveKey(tree(), open, "shift+g").activeId).to_equal("docs")
+            expect(selectFirstGroveNode(tree(), open).activeId).to_equal("workspace")
+        )
+
+        it("toggles, expands and collapses the active branch", fn() -> ():
+            step("toggles, expands and collapses the active branch")
+            val s = GroveState.empty().withActiveId("src")
+            val opened = handleGroveKey(tree(), s, "enter")
+            expect(opened.expandedIds).to_equal(["src"])
+            expect(handleGroveKey(tree(), opened, "space").expandedIds.len()).to_equal(0)
+            expect(handleGroveKey(tree(), s, "right").expandedIds).to_equal(["src"])
+            expect(handleGroveKey(tree(), opened, "h").expandedIds.len()).to_equal(0)
+        )
+
+        it("ignores toggle on leaves and unknown keys", fn() -> ():
+            step("ignores toggle on leaves and unknown keys")
+            val s = expandAllGroveNodes(tree(), GroveState.empty()).withActiveId("grove")
+            expect(toggleGroveNode(tree(), s).expandedIds).to_equal(s.expandedIds)
+            expect(handleGroveKey(tree(), s, "zzz").activeId).to_equal("grove")
+            expect(selectNextGroveNode([], GroveState.empty()).activeId).to_equal("")
+        )
+
+        it("clears the active id when nothing is visible", fn() -> ():
+            step("clears the active id when nothing is visible")
+            val m = GroveModel.new(tree(), GroveState.empty().withActiveId("src").withQuery("zzzz"))
+            expect(m.state.activeId).to_equal("")
+            expect(m.activeNode().?).to_equal(false)
+        )
+
+        it("keeps the active id while loading or on error", fn() -> ():
+            step("keeps the active id while loading or on error")
+            val m = GroveModel.new(tree(), GroveState.empty().withActiveId("src").withLoading(true))
+            expect(m.state.activeId).to_equal("src")
+            val e = GroveModel.new(tree(), GroveState.empty().withActiveId("zzz").withError("x"))
+            expect(e.state.activeId).to_equal("zzz")
+        )
+    )
+
+    describe("Grove rendering", fn() -> ():
+        it("renders header, breadcrumbs and rows with details", fn() -> ():
+            step("renders header, breadcrumbs and rows with details")
+            val s = expandAllGroveNodes(tree(), GroveState.empty()).withActiveId("grove")
+            val lines = renderGrove(tree(), s).split("\n")
+            expect(lines.len()).to_equal(8)
+            expect(lines[0]).to_equal("Grove 6/6 · 5 branches · 1 leaves · active Grove.spl")
+            expect(lines[1]).to_equal("Breadcrumbs: Workspace / src / app / Grove.spl")
+            expect(lines[2]).to_equal("  v # Workspace [root] · Project context · / · ready · 2 children")
+            expect(lines[5]).to_equal(">       - file Grove.spl [spl] · Claude full grove model · /src/app/llm_caret/claude_full/components/grove/Grove.spl · active · 462 tokens")
+        )
+
+        it("can hide breadcrumbs and details", fn() -> ():
+            step("can hide breadcrumbs and details")
+            val s = GroveState.empty().withBreadcrumbs(false).withDetails(false)
+            val lines = renderGrove(tree(), s).split("\n")
+            expect(lines.len()).to_equal(2)
+            expect(lines[1]).to_equal("> > # Workspace [root]")
+        )
+
+        it("shows filters in the header", fn() -> ():
+            step("shows filters in the header")
+            val s = GroveState.empty().withQuery("grove").withKindFilter("file").withStatusFilter("active")
+            val head = renderGrove(tree(), s).split("\n")[0]
+            expect(head.ends_with("search:grove · kind File · status active")).to_equal(true)
+        )
+
+        it("renders loading, error and empty states", fn() -> ():
+            step("renders loading, error and empty states")
+            expect(renderGrove(tree(), GroveState.empty().withLoading(true))).to_equal("Loading grove")
+            expect(renderGrove(tree(), GroveState.empty().withLoading(true).withQuery("zz").withKindFilter("file"))).to_equal("Loading grove for zz · search \"zz\" and kind File")
+            expect(renderGrove(tree(), GroveState.empty().withError("disk"))).to_equal("Grove error: disk")
+            expect(renderGrove([], GroveState.empty())).to_equal("Grove is empty")
+            expect(renderGrove(tree(), GroveState.empty().withQuery("zzzz"))).to_equal("No grove nodes match search \"zzzz\"")
+        )
+
+        it("picks icons, glyphs and indentation", fn() -> ():
+            step("picks icons, glyphs and indentation")
+            expect(groveKindIcon("root")).to_equal("#")
+            expect(groveKindIcon("branch")).to_equal("dir")
+            expect(groveKindIcon("symbol")).to_equal("sym")
+            expect(groveKindIcon("leaf")).to_equal("node")
+            expect(groveIndent(3)).to_equal("      ")
+            expect(groveBasename("/a/b/")).to_equal("/a/b/")
+            expect(groveBasename("noslash")).to_equal("noslash")
+            expect(clampGroveCount(-1)).to_equal(0)
+            expect(joinGroveText(["a", "b"], "+")).to_equal("a+b")
+            expect(renderGroveBadge(GroveNode.leaf("l", "l", "", ""))).to_equal("")
+        )
+    )
+    return ()
