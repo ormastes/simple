@@ -301,8 +301,9 @@ fn c_compiler_override(windows_gnu: bool, requires_cross: bool, target: text) ->
 
 pub struct CDriverProbeV1:
     name: text            # as requested: a candidate or the SIMPLE_CC/CC value
-    resolved_path: text   # realpath of `command -v name`; "" when not on PATH
-    version_banner: text  # first lines of `<path> --version`; "" when not run
+    invoked_path: text    # `command -v name` (the PATH entry); "" when not on PATH. What callers run.
+    resolved_path: text   # realpath of invoked_path; used ONLY for classification (gcc basename signal)
+    version_banner: text  # first lines of `<invoked_path> --version`; "" when not run
     explicit: bool        # from SIMPLE_CC/CC: unresolved or non-clang is a refusal, never a skip
 
 val C_DRIVER_RULE_HINT = "CLAUDE.md Critical Rules: Never use GCC. Toolchain is clang + lld/mold, llvm-ar. Fix: `. scripts/setup/llvm-toolchain-env.shs` (puts clang-23/ld.lld first on PATH) or set SIMPLE_CC=clang-23 (any clang/clang-NN)."
@@ -358,7 +359,7 @@ pub fn c_compiler_select_v1(probes: [CDriverProbeV1]) -> Result<text, text>:
     var tried: [text] = []
     for probe in probes:
         tried.push(probe.name)
-        if probe.resolved_path == "":
+        if probe.invoked_path == "":
             if probe.explicit:
                 return Err("[cc-detect] REFUSED: explicit C driver '{probe.name}' is not on PATH. {C_DRIVER_RULE_HINT}")
             continue
@@ -366,7 +367,9 @@ pub fn c_compiler_select_v1(probes: [CDriverProbeV1]) -> Result<text, text>:
         if kind == "clang":
             if probe.explicit:
                 return Ok(probe.name)
-            return Ok(probe.resolved_path)
+            # The PATH entry, never the realpath: a ccache masquerade dir
+            # (/usr/lib64/ccache/clang -> /usr/bin/ccache) must be run as `clang`.
+            return Ok(probe.invoked_path)
         if kind == "gcc":
             return Err(_c_driver_refusal_v1(probe, "GCC"))
         if probe.explicit:
@@ -377,7 +380,9 @@ pub fn cxx_driver_for_c_driver_v1(cc: text) -> text:
     """clang -> clang++, /x/clang-23 -> /x/clang++-23, clang.exe -> clang++.exe; clang-cl is both."""
     var dir = ""
     var base = cc
-    val slash = cc.rfind("/")
+    val fslash = cc.rfind("/")
+    val bslash = cc.rfind("\\")
+    val slash = if fslash > bslash: fslash else: bslash
     if slash >= 0:
         dir = cc.substring(0, slash + 1)
         base = cc.substring(slash + 1, cc.len())
@@ -402,7 +407,7 @@ fn _c_driver_probe_v1(name: text, explicit: bool) -> CDriverProbeV1:
             if line.trim() != "" and resolved == "":
                 resolved = line.trim()
     if resolved == "":
-        return CDriverProbeV1(name: name, resolved_path: "", version_banner: "", explicit: explicit)
+        return CDriverProbeV1(name: name, invoked_path: "", resolved_path: "", version_banner: "", explicit: explicit)
     # Banner from the path as INVOKED (a ccache/wrapper symlink answers as the
     # tool it fronts); realpath only supplies the gcc-basename signal.
     val invoked = resolved
@@ -410,7 +415,7 @@ fn _c_driver_probe_v1(name: text, explicit: bool) -> CDriverProbeV1:
     if real_code == 0 and real_out.trim() != "":
         resolved = real_out.trim()
     val (banner_out, _banner_err, _banner_code) = backend_shell_tuple("'{invoked}' --version 2>/dev/null | head -3")
-    CDriverProbeV1(name: name, resolved_path: resolved, version_banner: banner_out, explicit: explicit)
+    CDriverProbeV1(name: name, invoked_path: invoked, resolved_path: resolved, version_banner: banner_out, explicit: explicit)
 
 pub fn c_driver_admit_v1(name: text) -> Result<text, text>:
     """Admit an explicitly requested C driver (SIMPLE_CC/CC): clang passes verbatim, GCC is refused."""
@@ -424,7 +429,7 @@ fn _find_c_compiler_unix() -> text:
         # Stop at the first candidate that classifies at all (clang wins, gcc is
         # refused by the selector); an opaque wrapper realpath with no banner is
         # skipped so the next versioned clang still gets a chance.
-        if probe.resolved_path != "" and c_driver_classify_v1(probe.resolved_path, probe.version_banner) != "unknown":
+        if probe.invoked_path != "" and c_driver_classify_v1(probe.resolved_path, probe.version_banner) != "unknown":
             break
     match c_compiler_select_v1(probes):
         case Ok(cc): return cc

@@ -1,7 +1,22 @@
 # Hosted native link fell back to gcc / bare `cc` (collect2) against the clang-only rule
 
 - Date: 2026-11-13
-- Status: FIXED on `work/no-gcc-link-20261113` (base `98b6adbd217`, release/1.0.0); cross-lane gaps listed below remain OPEN
+- Status: FIX LANDED LOCALLY on `work/no-gcc-link-20261113` (base `98b6adbd217`, release/1.0.0), awaiting coordinator review/landing; cross-lane gaps listed below remain OPEN
+- Review 2026-11-13 (HOLD on `fcae111a9b9`, fixed by follow-up commits on the same branch):
+  1. BLOCKER — `crt_discovery.spl` no longer parsed: removing the `cc -print-file-name` method orphaned a
+     16-space `if trace:` block (`PARSE001 unexpected token in expression: Indent`), and every importer
+     (`native_linking.spl`, `shared_linking.spl`, `native_link_receipt_v1.spl`) would have failed to load.
+     Fixed; `test/01_unit/compiler/backend/linker/crt_discovery_clang_probe_spec.spl` now imports the module
+     (`use ... crt_discovery.*`, as native_linking does) — verified red (1/1 fail, PARSE001) with the orphan
+     re-injected and green (2/2) without it. Every touched `.spl` is now parse-gated with the seed (`fmt --check`
+     + `lint`), verdicts recorded in the lane report.
+  2. `c_compiler_select_v1` returned the `readlink -f` realpath for a discovered hit; under a ccache masquerade
+     dir (`/usr/lib64/ccache/clang -> /usr/bin/ccache`) that would run ccache bare. `CDriverProbeV1` now carries
+     `invoked_path` (the PATH entry, returned) separately from `resolved_path` (realpath, classification only);
+     spec case pins `/usr/lib64/ccache/clang` is returned and a masquerade whose realpath is gcc is refused.
+  3. Seed `gcc_driver_refusal` exempted every triple-prefixed gcc; now only the documented hosted cross drivers
+     (`DOCUMENTED_CROSS_GCC_DRIVERS`) are exempt and a host-triple `x86_64-linux-gnu-gcc-13` is refused, matching
+     `c_driver_classify_v1`. `cxx_driver_for_c_driver_v1` handles `\` paths (`C:\LLVM\bin\clang.exe` -> `clang++.exe`).
 - Rule: CLAUDE.md Critical Rules — "Never use GCC. Toolchain is clang + lld (mold where the target format supports it ...)"
 - Spec: `test/01_unit/compiler/backend/c_driver_clang_only_spec.spl` (8/8 green after the fix, 8/8 red before)
 
@@ -19,7 +34,7 @@ showed the hosted native link running through `collect2`. Two silent fallbacks c
 
 | Site | Role | Before | After |
 |---|---|---|---|
-| `src/compiler/70.backend/backend/runtime_compiler.spl` `find_c_compiler` | hosted CC | `/usr/bin/gcc`, `/usr/bin/cc`, PATH `gcc`,`cc` fallbacks; `SIMPLE_CC` verbatim | clang-only candidates (`clang`, `clang-23`..`clang-16`); `SIMPLE_CC` probed (`command -v`, `readlink -f`, `--version`) and REFUSED when GCC; pure `c_driver_classify_v1` / `c_compiler_select_v1` |
+| `src/compiler/70.backend/backend/runtime_compiler.spl` `find_c_compiler` | hosted CC | `/usr/bin/gcc`, `/usr/bin/cc`, PATH `gcc`,`cc` fallbacks; `SIMPLE_CC` verbatim | clang-only candidates (`clang`, `clang-23`..`clang-16`); `SIMPLE_CC` probed (`command -v`, `readlink -f`, `--version` via the invoked path) and REFUSED when GCC; pure `c_driver_classify_v1` / `c_compiler_select_v1`; discovered hit returns the PATH entry (`invoked_path`), realpath classifies only |
 | same file, `_find_c_compiler_windows` | Windows CC | last-resort `["clang","gcc"]` | `["clang"]` (llvm-mingw / clang-cl per CLAUDE.md) |
 | `src/compiler/70.backend/linker/_LinkerWrapper/native_linking.spl:~2343` | hosted link driver | `cc = "cc"` bare; `SIMPLE_CC` unverified | `find_c_compiler()` + `c_driver_admit_v1(SIMPLE_CC)`; Err with rule + fix |
 | `src/compiler/70.backend/linker/crt_discovery.spl` `find_gcc_lib_dirs` | crtbegin.o probe | executes `gcc -print-file-name`, then `cc -print-file-name` | executes the selected clang; `cc` method removed. `/usr/lib/gcc/<triplet>/<ver>` dir scan kept (filesystem artifact clang itself uses on glibc) |
