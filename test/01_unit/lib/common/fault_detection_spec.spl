@@ -34,6 +34,7 @@ use std.io_runtime.{read_file}
 use std.common.fault_detection.{
     is_timeout_exceeded, set_timeout_exceeded, reset_timeout,
     set_timeout_limit_secs, timeout_limit_secs, timeout_deadline_passed,
+    timeout_poll_stride, timeout_poll_samples_clock,
     increment_recursion_depth, decrement_recursion_depth, current_recursion_depth,
     get_max_recursion_depth, set_max_recursion_depth, reset_recursion_depth,
     set_stack_overflow_detection_enabled, is_stack_overflow_detection_enabled
@@ -83,6 +84,27 @@ describe "std.common.fault_detection timeout flag":
         expect(timeout_deadline_passed(11 * second, 0, 0)).to_equal(false)
         step("A failed clock sample (negative) fails closed while armed")
         expect(timeout_deadline_passed(-1, 0, 10)).to_equal(true)
+
+    it "samples the clock only on every 1024th armed poll":
+        # @req REQ-FAULT-DETECT-004
+        # Loop bodies poll on every iteration; one clock read per poll made an
+        # armed loop pay a syscall-class cost each time. The seed checks every
+        # 1024 iterations (`iterations & 0x3ff`); this mirrors that stride.
+        step("Read the stride")
+        expect(timeout_poll_stride()).to_equal(1024)
+        step("Only every stride-th poll samples the clock")
+        expect(timeout_poll_samples_clock(1)).to_equal(false)
+        expect(timeout_poll_samples_clock(1023)).to_equal(false)
+        expect(timeout_poll_samples_clock(1024)).to_equal(true)
+        expect(timeout_poll_samples_clock(2048)).to_equal(true)
+        step("The latched flag still reports immediately while armed")
+        reset_timeout()
+        set_timeout_limit_secs(3600)
+        set_timeout_exceeded()
+        val latched = is_timeout_exceeded()
+        set_timeout_limit_secs(0)
+        reset_timeout()
+        expect(latched).to_equal(true)
 
 describe "std.common.fault_detection recursion depth":
     it "counts depth up and down and never goes below zero":
