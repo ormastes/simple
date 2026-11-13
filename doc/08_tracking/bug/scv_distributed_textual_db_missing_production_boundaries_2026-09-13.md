@@ -68,3 +68,8 @@ fail-fast checker weakened.
 ## Lane disposition 2026-11-13 (p3-misc-b)
 
 Not pursued in this lane: LIVE design-only gap confirmed 2026-11-11 (lane boot22); not fixable in a P3 bug-fix lane. Owner: design + SCV lane.
+---
+
+## Lane disposition 2026-11-13 (live-p3-l4, work/live-p3-l4-20261113, base f790f7f266e)
+
+Concurs with boot22 (2026-11-11 header flip): still LIVE — `src/lib/scv/metadata_db.spl` insert still carries the read-modify-write-whole-`SdnDatabase` TODO(perf) comment, and `src/lib/scv/network_remote.spl:7-13` still describes Token/OAuth2/SigV4 auth and resumable transfer as stubs/future work. The unblock condition is the full L0-L10 implementation program plus REQ-001..REQ-036 / NFR-001..NFR-015 verification with production-owner fixtures — a feature program for scv-database-team, not a root-cause P3 fix; the lane deliberately left every fail-fast checker intact. No in-lane change. Owner: scv-database-team.

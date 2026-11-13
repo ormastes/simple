@@ -51,7 +51,9 @@ fn fil_corrected_of(code: i64) -> i64:
 # the last sensed payload either way, so a caller that ignores `ok` sees exactly the
 # offset-0 read the pre-L8 firmware returned (behaviour-preserving on backends without
 # a Vref actuator, where every retry re-senses identically). `depth` is the retry
-# rung count (0 = clean) and `corrected` the coarse ECC bucket at the winning sense —
+# rung count (0 = clean) and `corrected` the WORST coarse ECC bucket seen at any rung
+# of the walk (0 = clean, 1 = corrected, 2 = uncorrectable) — the winning sense alone
+# would report 0 and leave RBER blind to recoveries —
 # both fold into the durable RelFtlMount.health at the FTL read site (design §1.4).
 struct RelReadResult:
     page:      PageData  # the REAL recovered main area; words[0] == data
@@ -249,10 +251,17 @@ impl Fil:
     # landed FilRead.corrected but not retry_depth, so the ladder's own depth counter
     # is the needed_retry source threaded up to the FTL rel_refresh feed (per the
     # coordinator cross-review resolution — no FilRead field added).
+    #
+    # `corrected` reports the WORST bucket seen across the whole ladder walk, not the
+    # winning sense's: the offset-0 read that forced recovery reported the real ECC
+    # cost (e.g. uncorrectable=2) before any rung decoded cleanly, and the reliability
+    # sink must see that cost or RBER/corrected_events stay blind to every recovery
+    # (doc/08_tracking/bug/rel_health_rber_and_corrected_events_blind_to_ladder_recoveries_2026-09-01.md).
     me read_with_ladder(ppn: i64, blk: NdBlock) -> RelReadResult:
         var rd: FilRead = me.read(ppn)                       # hard read at offset 0 (seam #1: rd.corrected)
         var st: RelLadderState = rel_ladder_state_new(blk)
         var obs: RelReadObs = rel_read_obs(rd.code, rd.corrected, 0, 0)
+        var worst_corrected: i64 = obs.corrected
         var guard: i64 = 0
         # Bounded: the ladder is 1 seed + 7 table rungs; 16 is a defensive cap so a
         # future state-machine bug can never spin the firmware read path.
@@ -263,15 +272,17 @@ impl Fil:
             val a: RelAction = stp.action
             if a.kind == rel_act_accept():
                 me.emu_set_vref_offset(0)                     # restore the global knob
-                return rel_read_result_ok(rd, st.depth, obs.corrected)
+                return rel_read_result_ok(rd, st.depth, worst_corrected)
             if a.kind == rel_act_calibrate():
                 me.rel_vref = rel_vref_calibrate(me.rel_vref, blk, st.best_offset)   # persist winner (ROR)
                 me.emu_set_vref_offset(0)
-                return rel_read_result_ok(rd, st.depth, obs.corrected)
+                return rel_read_result_ok(rd, st.depth, worst_corrected)
             if a.kind == rel_act_retry():
                 me.emu_set_vref_offset(a.arg)                 # chip-global vref = 128 + a.arg
                 rd  = me.read_at_vref(ppn, a.arg)             # seam #2: non-terminal shifted sense
                 obs = rel_read_obs(rd.code, rd.corrected, a.arg, st.depth)
+                if obs.corrected > worst_corrected:
+                    worst_corrected = obs.corrected
             else:
                 # rel_act_uncorrectable: table exhausted. Carry the last payload so a
                 # caller ignoring `ok` matches the pre-L8 offset-0 return exactly.

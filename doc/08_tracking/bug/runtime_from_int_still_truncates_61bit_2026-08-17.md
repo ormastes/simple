@@ -311,3 +311,8 @@ above. Header flipped to LIVE.
 ## Lane disposition 2026-11-13 (p3-misc-b)
 
 Not pursued in this lane: LIVE as of 2026-11-11 triage (source-confirmed); fix is seed Rust (RuntimeValue::from_int) plus re-landing its readers. Owner: seed lane.
+---
+
+## Lane disposition 2026-11-13 (live-p3-l4, work/live-p3-l4-20261113, base f790f7f266e)
+
+Concurs with interp11/int10/int11: criteria 1-2 (runtime choke point `fits_inline_int`/`from_wide_int` + Cranelift JIT delegation) stand verified green on the tracked seed; criteria 3-4 remain LIVE at this base by source re-check — `src/compiler_rust/compiler/src/codegen/llvm/emitter.rs` still emits `build_left_shift(int_v, three, "box_shl")` (~line 2030) and never calls `rt_value_int`/`rt_value_int_wide`, and `src/compiler_rust/compiler/src/codegen/mir_interpreter.rs:774` still does `self.set(dest, self.get(value) << 3)` in `emit_box_int`. This lane holds the cargo grant, but the exit criteria demand an LLVM AOT verification pass, and `native-build` on this Windows host is a documented live-hang lane — landing an unverifiable value-representation change plus a MIR-interpreter heap, with this fix's own revert history (criterion 5), exceeds a safe P3 box. Recorded for the seed lane with the precise remaining sites. No in-lane change. Owner: seed-fix lane with an LLVM-AOT-capable host.

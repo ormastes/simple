@@ -405,3 +405,9 @@ during the third, which is how this was found.
 ## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
 
 Concurs with the recorded status: OPEN — root cause localised (symbol-table HirType garbage at rest; three reader fixes treated a symptom), fix not landed. A bounded fix attempt did not converge inside the per-bug timebox in this lane. No in-lane change.
+
+---
+
+## Lane disposition 2026-11-13 (live-p3-l4, work/live-p3-l4-20261113, base f790f7f266e)
+
+Concurs with p3-comp1: OPEN — the title's frame was already refuted in-record (the HirType graph is intact at rest on both sides; the corruption happens DURING lowering — a use-after-free/reuse in the self-hosted binary only; the Rust seed measures 0 across N=10). Every reader-side fix landed against it treated a symptom, and the next designed probe (two-sided tag re-read after each `lower_function` returns) requires a ~22-min cold stage-2 rebuild per iteration plus the bimodal-count N>=10 protocol — not convergable inside a per-bug P3 box. The `rt_core_transient_add` classify==0 fail-open remains the priority mechanism to instrument. No in-lane change. Owner: stage-2 codegen lane with the preserved rejected-binary harness.

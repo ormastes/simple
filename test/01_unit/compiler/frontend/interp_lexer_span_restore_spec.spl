@@ -1,0 +1,42 @@
+"""
+## Purpose
+An interpolation fragment `{...}` is sub-parsed by re-initialising the global
+lexer on the fragment text. The bridge then converts expression spans from
+lexer CHAR offsets to BYTE offsets through the live lexer
+(`lex_source_byte_offset`), so a lexer left on the last fragment clamps every
+later offset to that fragment's length (bug
+fresh_parse_vs_cache_hit_span_divergence_2026-11-13). A fresh, uncached parse
+of a module with interpolation must report the real source byte offsets.
+"""
+
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module_scoped}
+use compiler.frontend.parser_types.{ParserModule}
+use compiler.frontend.parser_types_expr.{Stmt, StmtKind}
+use std.spec.step
+
+fn val_init_start(module: ParserModule, fn_name: text, binding: text) -> i64:
+    for stmt in module.functions[fn_name].body.stmts:
+        match stmt.kind:
+            case StmtKind.Val(name, _ty, init):
+                if name == binding:
+                    return init.span.start
+            case _: ()
+    -1
+
+describe "interpolation fragment leaves the module lexer in place":
+    it "reports real byte offsets after an interpolated string (ASCII source)":
+        val left = "{"
+        val right = "}"
+        val before = "fn greet(name: text) -> text:\n    val greeting = \"hi " + left + "name" + right + "\"\n    val marker_value = "
+        val source = before + "7654321\n    greeting\n"
+        val module = parse_and_build_module_scoped(source, "interp_span_probe.spl", false)
+        step("The literal after the fragment starts at its byte offset, not at len(\"name\")")
+        expect(val_init_start(module, "greet", "marker_value")).to_equal(before.byte_len())
+
+    it "reports real byte offsets after an interpolated string (multi-byte source)":
+        val left = "{"
+        val right = "}"
+        val before = "# café — probe\nfn greet(name: text) -> text:\n    val greeting = \"hi " + left + "name.len()" + right + "\"\n    val marker_value = "
+        val source = before + "7654321\n    greeting\n"
+        val module = parse_and_build_module_scoped(source, "interp_span_probe_utf8.spl", false)
+        expect(val_init_start(module, "greet", "marker_value")).to_equal(before.byte_len())

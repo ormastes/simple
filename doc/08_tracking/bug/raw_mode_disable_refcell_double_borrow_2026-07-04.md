@@ -103,3 +103,25 @@ is quiet).
 ## Lane disposition 2026-11-13 (p3-misc-b)
 
 diagnosed with a one-line fix identified, but the fix is in the Rust seed runtime (rt_terminal_disable_raw_mode) and requires a seed rebuild - not available on this Windows lane. Owner: seed lane.
+---
+
+## Addendum 2026-11-13 — lane live-p3-l4 (work/live-p3-l4-20261113, base f790f7f266e) — VERIFIED FIXED in source and in the deployed build; no code change
+
+The one-line fix this record specifies is present verbatim at
+`src/compiler_rust/compiler/src/interpreter_native_io.rs:448-464`
+(`let saved = *orig.borrow();` copied out before the `borrow_mut()`, with a
+comment naming this record's abort) on the `#[cfg(unix)]` arm of
+`native_disable_raw_mode`. `git log -S "round-8 raw-mode-quit abort"` dates
+it to ae55a746719 (2026-08-11 tree restore), and
+`git merge-base --is-ancestor` confirms that commit IS an ancestor of the
+deployed Windows seed's build-commit 0791c2b7f4a7 (refresh #8184) — so the
+deployed binary carries the fix. The header Status line was never flipped;
+that bookkeeping is the only open part.
+
+Runtime re-verification is not possible on this Windows lane: both raw-mode
+entry points are `#[cfg(unix)]` (on Windows `native_enable_raw_mode`
+returns -2 and `native_disable_raw_mode` returns 0 without touching
+termios), and the repro requires a real Unix pty. Source review of the
+enable path (`:395-421`) shows no analogous held-borrow shape. If the
+symptom recurs on a Unix host, re-open with a fresh dated pty repro per the
+header instruction.

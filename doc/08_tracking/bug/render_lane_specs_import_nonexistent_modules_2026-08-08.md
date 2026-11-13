@@ -300,3 +300,9 @@ helper), verified non-vacuous by the file's sentinel assertions
 ## Triage 2026-11-13 (Linux aarch64, lane uia) — row stays OPEN
 
 Needs an owner decision, not attempted. Re-counted at release/1.0.0 c8c3e7bc4f1, Linux aarch64 (DGX Spark GB10), Rust seed af717f53d6bce3e5: 12 of the 24 listed modules now exist; 12 are still missing (blink.dom.document, blink.feature.paint.paint_controller, blink.layout root, blink.layout.flex, blink.navigation.controller, blink.network.fetch, blink.scroll.manager, cc.entity.layer_base, cc.feature.{raster_source,picture_layer_impl,raster_buffer_provider,tile_manager}), leaving 10 red specs. The modules were never written and have no consumer; some specs are internally inconsistent (scroll_manager_spec: the example titled Hidden returns false asserts true). Implementing library code only to satisfy them, or deleting them, is the owner's call.
+
+---
+
+## Lane disposition 2026-11-13 (live-p3-l4, work/live-p3-l4-20261113, base f790f7f266e)
+
+Concurs with the same-day p3-gpu measurement: 14 of the 24 specs PASS (modules landed); 10 remain import-RED on 9 unimplemented modules (`blink.dom.document`, `blink.layout` root, `blink.layout.flex`, `blink.navigation.controller`, `blink.network.fetch`, `blink.feature.paint.paint_controller`, `blink.scroll.manager`, `cc.entity.layer_base`, `cc.feature.{raster_source,picture_layer_impl,raster_buffer_provider,tile_manager}`). Implementing even one module against the pinned spec API + verifying across the three mirrored test trees exceeds a per-bug P3 box, and the record notes some specs are internally inconsistent (scroll_manager "Hidden returns false asserts true"), which needs an owner decision, not a lane guess. No in-lane change. Owner: render-lane feature work (module-by-module, starting with the ranked table's `blink.url`-chain/`paint_artifact` style landed examples).

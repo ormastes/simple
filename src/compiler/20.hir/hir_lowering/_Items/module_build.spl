@@ -1,7 +1,7 @@
 # HIR item lowering - module, import, and bootstrap-flat lowering.
 use compiler.hir.binding_annotation_provenance.{hir_local_annotation_copy}
 use compiler.hir.hir_lowering.attr_access_sites.{hir_collect_attr_sites_v1}
-use compiler.hir.hir_lowering.required_field_init_v1.{hir_required_field_init_check_v1, required_init_check_mode_v1,
+use compiler.hir.hir_lowering.required_field_init_v1.{hir_required_field_init_check_v1, required_init_effective_mode_v1,
     hir_async_immutable_attr_v1, RequiredInitReportV1}
 use compiler.hir.hir_lowering._Items.module_lowering.*
 # HIR Lowering - Item Lowering
@@ -81,12 +81,13 @@ fn hir_const_with_export_visibility(hir_const: HirConst, exported: Dict<text, bo
 impl HirLowering:
     # Sub-plan P1 wiring (immutable_views_async_init_revisions_2026-11-13.md
     # section 3.2). Gate SIMPLE_REQUIRED_INIT_CHECK: off (default) | warning |
-    # error. The E_ASYNC_INIT_* rows are errors in every mode because the class
-    # annotation is the opt-in; in off mode the walk runs only for modules that
-    # declare an @support_async_immutable class, so an unannotated module pays
-    # nothing.
-    me hir_required_init_apply_v1(built: HirModule, parser_classes: Dict<text, ParserClass>):
-        val mode = required_init_check_mode_v1()
+    # error, read once per process; a module raises it with
+    # `@required_init(warning|error)` (the stricter wins). The E_ASYNC_INIT_*
+    # rows are errors in every mode because the class annotation is the opt-in;
+    # in off mode the walk runs only for modules that declare an
+    # @support_async_immutable class, so an unannotated module pays nothing.
+    me hir_required_init_apply_v1(built: HirModule, parser_classes: Dict<text, ParserClass>, module_mode: text):
+        val mode = required_init_effective_mode_v1(module_mode)
         if mode == "off":
             var any_async = false
             for name in parser_classes.keys():
@@ -780,7 +781,7 @@ impl HirLowering:
                 nogc_strict: module_local.nogc_strict,
                 attr_sites: hir_collect_attr_sites_v1(module.name, self.symbols, module.classes, classes, functions)
             )
-            self.hir_required_init_apply_v1(built_bootstrap, module.classes)
+            self.hir_required_init_apply_v1(built_bootstrap, module.classes, module.required_init_mode)
             return built_bootstrap
 
         val lower_module_classes = module.classes
@@ -940,5 +941,5 @@ impl HirLowering:
             nogc_strict: module_local.nogc_strict,
             attr_sites: hir_collect_attr_sites_v1(module.name, self.symbols, module.classes, classes, functions)
         )
-        self.hir_required_init_apply_v1(built, module.classes)
+        self.hir_required_init_apply_v1(built, module.classes, module.required_init_mode)
         built

@@ -65,3 +65,31 @@ go-to-end two-pass route. Pinned by
 `test/01_unit/app/io/_CliCompile/native_build_positional_snapshot_spec.spl`
 ("selected snapshot roots of a Stage 3 explicit-root build"). The
 `SIMPLE_HIR_SHARDING=0` workaround is no longer needed.
+
+## 2026-11-13: next gate — every HIR pool worker refuses its own closure admission (Linux)
+
+Measured with the run-21 Stage 2 (`stage2-admitted/simple`, sha256 `4b0796c7…`)
+on the non-capsule two-pass coordinator (`SIMPLE_FILE_WORKERS=0`, `--entry-closure
+--go-to-end --threads 2`, 565-module closure of `src/compiler/50.mir/mir_lowering.spl`):
+
+```
+HIR worker profile rejected: closure request rejected: compiler executable could not be hashed   (x3)
+[hir-shard] completed_workers=0 failed_workers=3 failed_modules=0 unfinished=-1 peak_live_workers=2/2
+```
+
+The HIR pool launches each worker from a sealed memfd pin (`OwnedExecutablePin`,
+`runtime_process_owned.c`: memfd + `fexecve`). Its `/proc/self/exe` names
+`/memfd:<name> (deleted)`, so `cli_kernel_executable_path()` is `""` and the
+child-side `native_build_closure_request_admit_v1` cannot hash its image. Parse
+and MIR shard children are spawned by path and are unaffected. Without
+`--go-to-end` this is `error: HIR aggregate failure` (fatal); with it the HIR
+pass silently falls back to serial lowering inside every MIR worker.
+
+Fix `48d6ecf0885` (branch `work/parallel-p3-build-20261113`): hash
+`/proc/self/exe` when the image has no path. Needs a Stage 2 rebuild; until then
+a run-21 parallel build must set `SIMPLE_HIR_SHARDING=0` (census shape).
+Two env-admission gaps found on the same run are fixed in `6751002fc89`
+(`SIMPLE_MIR_SHARD_INTERFACE_HIR`) and `a33324c7ed1`
+(`SIMPLE_BUILD_MEMORY_RESERVE_BYTES`); the HIR profile still refuses the serial
+stopgap's `SIMPLE_NATIVE_INCREMENTAL` and `SIMPLE_ICE_CRASH_RETRIES`, so drop them
+from a parallel launch.
