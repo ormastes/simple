@@ -14,5 +14,8 @@ mod shared {
     }
 }
 
+#[path = "../../compiler/src/codegen/jit_dlsym.rs"]
+mod jit_dlsym;
+
 #[path = "../../compiler/src/codegen/cranelift_sffi.rs"]
 mod cranelift_sffi;

@@ -27,7 +27,8 @@ use compiler.hir.hir_lowering.types.HirLowering
 use compiler.hir.hir_lowering.items.*
 use compiler.hir.hir_lowering.statements.*
 use compiler.hir.hir_types.{HirModule}
-use compiler.hir.hir_codec.{hir_module_encode, hir_module_decode, hir_codec_header}
+use compiler.hir.hir_codec.{hir_module_encode, hir_module_decode, hir_codec_header,
+    hir_decode_intern_lines, hir_decode_interned_texts}
 
 extern fn rt_file_read_text(path: text) -> text?
 
@@ -98,3 +99,27 @@ describe "HirModule codec round trip":
         val cut = blob.substring(0, blob.len() / 2)
         expect(hir_module_decode(cut)).to_equal(nil)
         expect(hir_module_decode(blob + "7\n")).to_equal(nil)
+
+    it "shares repeated decoded text lines without changing the decoded module":
+        # @req REQ-SSPEC-COMPILER
+        # Resident-HIR RSS (2026-11-13): every Span.file / defining_module line
+        # used to decode to its own heap string. Repeats now point at the
+        # module's first occurrence; values and re-encode bytes are unchanged.
+        step("shares repeated decoded text lines without changing the decoded module")
+        val lines = hir_decode_intern_lines(["spec.spl", "spec.spl", "N", "7", "\\N", "spec.spl", "other"])
+        expect(lines.len()).to_equal(7)
+        expect(lines[0]).to_equal("spec.spl")
+        expect(lines[1]).to_equal("spec.spl")
+        expect(lines[2]).to_equal("N")
+        expect(lines[3]).to_equal("7")
+        expect(lines[4]).to_equal("\\N")
+        expect(lines[5]).to_equal("spec.spl")
+        expect(lines[6]).to_equal("other")
+        val hm = lower(SRC)
+        val blob = hir_module_encode(hm)
+        val before = hir_decode_interned_texts()
+        val decoded = hir_module_decode(blob)
+        expect(decoded != nil).to_equal(true)
+        # "spec.spl" is the Span.file of every node: the blob repeats it.
+        expect(hir_decode_interned_texts() > before).to_equal(true)
+        expect(hir_module_encode(decoded.unwrap()) == blob).to_equal(true)

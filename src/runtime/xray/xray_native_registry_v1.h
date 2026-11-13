@@ -11,7 +11,8 @@
  * runtime archive, so an OFF build is unchanged.
  *
  * The including TU defines, before including this header:
- *   SIMPLE_XRAY_NATIVE_SUPPORTED  when compiled for its own Linux target
+ *   SIMPLE_XRAY_NATIVE_SUPPORTED  when compiled for its own target (Linux, or
+ *                                 Windows x64 for xray_native_runtime_win64.c)
  *   XMAP_ISA, XMAP_ABI            .simple_xray_map header isa / abi_profile
  *   XMAP_SLED_BYTES, XMAP_SLED_ALIGN, XMAP_OFF_WORD, XMAP_ON_WORD
  *                                 the site-row shape (len, align, words)
@@ -39,7 +40,18 @@
 
 #include "xray_channel_producer_v1.h"
 
+/* ELF default; the Windows x64 TU defines its own (__declspec(dllexport)). */
+#ifndef SIMPLE_XRAY_API
 #define SIMPLE_XRAY_API __attribute__((visibility("protected"), used))
+#endif
+
+/* text_base from the map header field: ELF default is a PC-relative 64-bit
+ * relocation resolved by the static linker (field address + value); the
+ * Windows x64 TU (no 64-bit PC-relative COFF relocation) stores the .text
+ * RVA instead and defines this as image base + RVA. */
+#ifndef XMAP_TEXT_BASE
+#define XMAP_TEXT_BASE(field_address, value) ((field_address) + (uintptr_t)(int64_t)(value))
+#endif
 
 /* .simple_xray_map format v1 (src/lib/common/trace/xray_native_map_format_v1.spl). */
 #define XMAP_HEADER_BYTES 48
@@ -119,10 +131,9 @@ static inline int64_t simple_xray_native_register_module_impl_v1(int64_t map_add
     uint32_t site_count = xmap_u32(map + 16);
     if (fn_count == 0 || site_count == 0 || fn_count > XMAP_MAX_ROWS || site_count > XMAP_MAX_ROWS)
         return 0;
-    /* text_base: PC-relative 64-bit relocation resolved by the static linker
-     * -> field address + value. */
+    /* text_base: see XMAP_TEXT_BASE (ELF PREL64 or Windows image RVA). */
     uintptr_t field = (uintptr_t)map_address + XMAP_TEXT_BASE_OFFSET;
-    uintptr_t text_base = field + (uintptr_t)(int64_t)xmap_u64(map + XMAP_TEXT_BASE_OFFSET);
+    uintptr_t text_base = XMAP_TEXT_BASE(field, xmap_u64(map + XMAP_TEXT_BASE_OFFSET));
     const uint8_t *sites = map + XMAP_HEADER_BYTES + (size_t)fn_count * XMAP_FN_ROW_BYTES;
     uintptr_t lo = UINTPTR_MAX, hi = 0;
     for (uint32_t index = 0; index < site_count; index++) {

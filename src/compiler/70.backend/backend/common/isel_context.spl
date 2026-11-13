@@ -30,8 +30,9 @@ struct ISelContext:
     global_signed: Dict<i64, bool> = {} # narrow integer load extension policy
     global_mutable: Dict<i64, bool> = {} # reject stores through immutable statics
     function_names: Dict<text, text> = {} # source definition -> emitted symbol
+    unsigned_locals: Dict<i64, bool> = {} # local id -> U8..U64 (x86_64 picks unsigned cc/div/shr)
 
-fn isel_definition_symbol(func: MirFunction) -> text:
+pub fn isel_definition_symbol(func: MirFunction) -> text:
     # Explicit C exports provide an ABI. Ordinary source definitions, including
     # globally visible ones, must not capture compiler-owned runtime symbols.
     if func.is_export_c:
@@ -49,12 +50,12 @@ fn isel_source_symbol(ctx: ISelContext, name: text) -> text:
         return mir_runtime_owned_local_symbol(name)
     name
 
-fn isel_call_symbol(ctx: ISelContext, name: text, origin: MirCallOrigin) -> text:
+pub fn isel_call_symbol(ctx: ISelContext, name: text, origin: MirCallOrigin) -> text:
     if mir_call_origin_uses_local_symbols_named(origin, name):
         return isel_source_symbol(ctx, name)
     name
 
-fn isel_module_context(module: MirModule) -> ISelContext:
+pub fn isel_module_context(module: MirModule) -> ISelContext:
     var names: Dict<text, text> = {}
     for func in mir_module_functions_sorted(module):
         names[func.name] = isel_definition_symbol(func)
@@ -62,7 +63,7 @@ fn isel_module_context(module: MirModule) -> ISelContext:
         extern_symbols: [], data_entries: [], string_counter: 0,
         function_names: names)
 
-fn new_isel_context() -> ISelContext:
+pub fn new_isel_context() -> ISelContext:
     """Create a new empty ISel context."""
     ISelContext(
         next_vreg: 0,
@@ -77,7 +78,7 @@ fn new_isel_context() -> ISelContext:
         global_mutable: {}
     )
 
-fn isel_alloc_vreg(ctx: ISelContext) -> ISelContext:
+pub fn isel_alloc_vreg(ctx: ISelContext) -> ISelContext:
     """
     Allocate a new virtual register and return updated context.
 
@@ -94,14 +95,15 @@ fn isel_alloc_vreg(ctx: ISelContext) -> ISelContext:
         global_sizes: ctx.global_sizes,
         global_signed: ctx.global_signed,
         global_mutable: ctx.global_mutable,
-        function_names: ctx.function_names
+        function_names: ctx.function_names,
+        unsigned_locals: ctx.unsigned_locals
     )
 
-fn isel_get_vreg(ctx: ISelContext) -> i64:
+pub fn isel_get_vreg(ctx: ISelContext) -> i64:
     """Get the most recently allocated virtual register ID."""
     ctx.next_vreg - 1
 
-fn isel_alloc_frame_slot_aligned(ctx: ISelContext, local_id: i64, size: i64, min_align: i64) -> ISelContext:
+pub fn isel_alloc_frame_slot_aligned(ctx: ISelContext, local_id: i64, size: i64, min_align: i64) -> ISelContext:
     """
     Allocate a stack frame slot for a local variable with custom alignment.
 
@@ -127,10 +129,11 @@ fn isel_alloc_frame_slot_aligned(ctx: ISelContext, local_id: i64, size: i64, min
         global_sizes: ctx.global_sizes,
         global_signed: ctx.global_signed,
         global_mutable: ctx.global_mutable,
-        function_names: ctx.function_names
+        function_names: ctx.function_names,
+        unsigned_locals: ctx.unsigned_locals
     )
 
-fn isel_alloc_frame_slot(ctx: ISelContext, local_id: i64, size: i64) -> ISelContext:
+pub fn isel_alloc_frame_slot(ctx: ISelContext, local_id: i64, size: i64) -> ISelContext:
     """
     Allocate a stack frame slot for a local variable.
 
@@ -142,13 +145,13 @@ fn isel_alloc_frame_slot(ctx: ISelContext, local_id: i64, size: i64) -> ISelCont
     """
     isel_alloc_frame_slot_aligned(ctx, local_id, size, 8)
 
-fn isel_frame_offset(ctx: ISelContext, local_id: i64) -> i64:
+pub fn isel_frame_offset(ctx: ISelContext, local_id: i64) -> i64:
     """Get frame offset for a local variable (0 if not allocated)."""
     if ctx.frame_slots.contains(local_id):
         return ctx.frame_slots[local_id]
     0
 
-fn isel_add_extern(ctx: ISelContext, name: text) -> ISelContext:
+pub fn isel_add_extern(ctx: ISelContext, name: text) -> ISelContext:
     """
     Add an extern symbol to the module's symbol table.
 
@@ -174,10 +177,11 @@ fn isel_add_extern(ctx: ISelContext, name: text) -> ISelContext:
         global_sizes: ctx.global_sizes,
         global_signed: ctx.global_signed,
         global_mutable: ctx.global_mutable,
-        function_names: ctx.function_names
+        function_names: ctx.function_names,
+        unsigned_locals: ctx.unsigned_locals
     )
 
-fn isel_add_string_data(ctx: ISelContext, s: text, char_to_ascii_fn: fn(text) -> i64) -> ISelContext:
+pub fn isel_add_string_data(ctx: ISelContext, s: text, char_to_ascii_fn: fn(text) -> i64) -> ISelContext:
     """
     Add a string constant to the data section.
 
@@ -209,9 +213,10 @@ fn isel_add_string_data(ctx: ISelContext, s: text, char_to_ascii_fn: fn(text) ->
         global_sizes: ctx.global_sizes,
         global_signed: ctx.global_signed,
         global_mutable: ctx.global_mutable,
-        function_names: ctx.function_names
+        function_names: ctx.function_names,
+        unsigned_locals: ctx.unsigned_locals
     )
 
-fn isel_last_string_label(ctx: ISelContext) -> text:
+pub fn isel_last_string_label(ctx: ISelContext) -> text:
     """Get the label of the most recently added string constant."""
     ".LC{ctx.string_counter - 1}"

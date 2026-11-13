@@ -17,6 +17,9 @@
 #   4. call again: results unchanged, the resident trampoline + handler record
 #      entry/exit into the channel, the Simple consumer polls them;
 #   5. request_stop unpatches: sled words are OFF again, calls record nothing.
+#   6. an adaptive container built with the aspect policy's initial value is
+#      flipped right after start and right after request_stop
+#      (XrayDataProfilingV1): it counts lookups only while the session runs.
 # Two sessions with different pointcuts prove per-function runtime selection.
 # XRAY_E2E_FUNCTIONS and XRAY_E2E_POINTCUTS_{1,2} name functions by suffix
 # (`traced`); they are resolved to canonical map names before the aspect
@@ -33,6 +36,10 @@ use std.nogc_sync_mut.trace.observer_native_channel_v1.*
 use std.nogc_sync_mut.trace.xray_llvm_adapter_v1.*
 use std.nogc_sync_mut.trace.xray_native_sled_leaf_v1.*
 use std.nogc_sync_mut.trace.xray_native_module_v1.*
+use std.nogc_sync_mut.trace.xray_data_profiling_v1.{XrayDataProfilingV1}
+use std.nogc_sync_mut.src.collections.adaptive_map.AdaptiveMap
+use std.nogc_sync_mut.src.collections.ordered_map.OrderedMapEntry
+use std.nogc_sync_mut.src.collections.adaptive_text_set.{AdaptiveSetProfile}
 use os.sosix.host.code_patch_adapter.{SosixCodePatchAdapterV1}
 
 extern fn rt_env_get(key: text) -> text?
@@ -128,10 +135,25 @@ fn call_all(entries: [i64], args: [i64]) -> text:
 
 # XrayLlvmAdapterV1 is a struct (value): the updated control plane is returned
 # so the next session continues its incarnation sequence; None on failure.
+# Two seeded linear entries, lookups below the promotion count: every count
+# printed is a pure observation count (no representation switch).
+fn spied_container(enabled: bool) -> AdaptiveMap<i64, i64>:
+    var map: AdaptiveMap<i64, i64> = AdaptiveMap.with_profiling(
+        AdaptiveSetProfile(linear_size_limit: 2, lookup_promotion_count: 4, allow_hash: true), enabled)
+    map.linear_entries = [OrderedMapEntry(key: 0, value: 10), OrderedMapEntry(key: 1, value: 11)]
+    map.size = 2
+    map.observed_peak_size = 2
+    map
+
 fn session(adapter_in: XrayLlvmAdapterV1, bound: XrayNativeBoundLeafV1, module: XrayNativeLoadedModuleV1,
         label: text, pointcuts: text, entries: [i64], args: [i64], baseline: text) -> XrayLlvmAdapterV1?:
     var adapter = adapter_in
     val params = aspect_params(module.manifest.abi_profile, pointcuts)
+    val policy = XrayDataProfilingV1.from_aspect(params)
+    var container = spied_container(policy.initial())
+    val initial = container.profiling_enabled()
+    container.get(0)
+    val lookups_before = container.observed_lookups
     val config = match trace_aspect_config_v1(params):
         case Ok(Some(found)): found
         case _:
@@ -164,6 +186,11 @@ fn session(adapter_in: XrayLlvmAdapterV1, bound: XrayNativeBoundLeafV1, module: 
         case Err(failure):
             fail("{label}: start rejected: {trace_failure_code_v1(failure)}")
             return None
+    container.set_profiling(policy.after(adapter.state_code()))
+    val profiling_on = container.profiling_enabled()
+    container.get(0)
+    container.get(7)
+    val lookups_on = container.observed_lookups
     print "E2E {label} selected_sites={selected} words_on={sled_words(module)}"
     val traced_results = call_all(entries, args)
     print "E2E {label} results_on={traced_results} baseline={baseline}"
@@ -175,6 +202,9 @@ fn session(adapter_in: XrayLlvmAdapterV1, bound: XrayNativeBoundLeafV1, module: 
             fail("{label}: request_stop rejected: {trace_failure_code_v1(failure)}")
             return None
     print "E2E {label} words_off={sled_words(module)}"
+    container.set_profiling(policy.after(adapter.state_code()))
+    container.get(1)
+    print "E2E {label} container initial={initial} lookups_before={lookups_before} profiling_on={profiling_on} lookups_on={lookups_on} profiling_off={container.profiling_enabled()} lookups_after_stop={container.observed_lookups}"
     val after = call_all(entries, args)
     val (late, _) = drain(arena)
     print "E2E {label} results_off={after} records_after_stop={late.len()} lost={trace_native_channel_lost_v1(arena)}"

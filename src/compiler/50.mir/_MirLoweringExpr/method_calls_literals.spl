@@ -2255,6 +2255,41 @@ impl MirLowering:
             self.builder = b
             return self.emit_runtime_array_slice_bounds(receiver_local, zero, bounded)
 
+    me lower_text_codepoint_slice_v1(receiver_local: LocalId, args: [HirCallArg], span: Span) -> LocalId:
+        # `s[a:b]` / `s[a:]` on proven text: one rt_slice over the tagged
+        # handle with CODE-POINT bounds (negative counts from the end, bounds
+        # clamped by the runtime), exactly the seed's lower_slice. An open end
+        # is i64::MAX, which rt_slice clamps to the code-point length. ASCII
+        # text keeps byte == code point behind the runtime's memoized ASCII bit.
+        val tagged = self.ensure_tagged_str(receiver_local)
+        val start_local = self.lower_text_index_operand(args[0].value)
+        var end_local: LocalId = 0
+        if args.len() == 2:
+            end_local = self.lower_text_index_operand(args[1].value)
+        else:
+            var b_end = self.builder
+            end_local = b_end.emit_const_int(9223372036854775807)
+            self.builder = b_end
+        var b_slice = self.builder
+        val handle = b_slice.emit_cast(mir_operand_copy(tagged), MirType.i64())
+        val start = b_slice.emit_cast(mir_operand_copy(start_local), MirType.i64())
+        val finish = b_slice.emit_cast(mir_operand_copy(end_local), MirType.i64())
+        val step = b_slice.emit_const_int(1)
+        val callee = MirOperand(kind: MirOperandKind.Const(MirConstValue.Str("rt_slice"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                params: [MirType.i64(), MirType.i64(), MirType.i64(), MirType.i64()],
+                return_type: MirType.i64(), is_variadic: false)))), call_origin: MirCallOrigin.Runtime)
+        var operands: [MirOperand] = []
+        operands.push(mir_operand_copy(handle))
+        operands.push(mir_operand_copy(start))
+        operands.push(mir_operand_copy(finish))
+        operands.push(mir_operand_copy(step))
+        val result = b_slice.emit_call_value(callee, operands, MirType.i64())
+        self.builder = b_slice
+        self.mark_tagged_text_local(result.id)
+        self.remember_local_hir_type(result.id, HirType(kind: HirTypeKind.Str, span: span), 2, 0)
+        result
+
     me lower_erased_receiver_slice_v1(receiver_local: LocalId, args: [HirCallArg]) -> LocalId:
         # Erased receiver (no text/array proof): one rt_slice call, which
         # inspects the tagged value at runtime. The open end of a 1-arg form
@@ -2551,7 +2586,7 @@ impl MirLowering:
         self.builder = b
         temp
 
-    me lower_method_call(receiver: HirExpr, method: text, args: [HirCallArg], resolution: MethodResolution, static_receiver_name_hint: text, static_receiver_symbol_hint: i64) -> LocalId:
+    me lower_method_call(receiver: HirExpr, method: text, args: [HirCallArg], resolution: MethodResolution, static_receiver_name_hint: text, static_receiver_symbol_hint: i64, bracket_slice: bool = false) -> LocalId:
         """Lower method call based on resolution.
 
         UFCS: For FreeFunction resolution, receiver becomes first argument.
@@ -2565,6 +2600,10 @@ impl MirLowering:
         mutation because the receiver is loaded as a value copy into a
         temporary (pure-Simple equivalent of Rust seed bug #28).
         """
+        # bracket_slice (HirExpr flag, set only for the bracket form `x[a:b]`)
+        # lowers exactly like `.slice` except that a TEXT receiver is cut by
+        # code point (ADR-005; owner decision 2026-11-13; the seed lowers the
+        # same syntax to rt_slice). Written `.slice`/`.substring` stay bytes.
         if val text_static = self.try_lower_text_static_builtin(receiver, method, args):
             return text_static
         # A declared native trait value carries its own runtime implementation
@@ -2592,7 +2631,7 @@ impl MirLowering:
                 if admitted == None or admitted.unwrap() != resolution:
                     panic("invalid builtin collection identity at MIR lowering")
                 return self.lower_method_call(receiver, method, args,
-                    MethodResolution.Unresolved, static_receiver_name_hint, static_receiver_symbol_hint)
+                    MethodResolution.Unresolved, static_receiver_name_hint, static_receiver_symbol_hint, bracket_slice)
             case _: ()
         # Level-gated: these ~38 receipts were unconditional and fired on every
         # method call lowered. Retained (not deleted) per the log-retention
@@ -3703,6 +3742,8 @@ impl MirLowering:
                 sub_recv_tagged = prelowered_method_receiver
             else:
                 sub_recv_tagged = self.lower_expr(receiver)
+            if bracket_slice:
+                return self.lower_text_codepoint_slice_v1(sub_recv_tagged, args, receiver.span)
             val strdata_op = MirOperand(kind: MirOperandKind.Const(
                 MirConstValue.Str("rt_interp_cstr"),
                 MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType(kind: MirTypeKind.Opaque("str")), is_variadic: false)))
@@ -3804,6 +3845,8 @@ impl MirLowering:
             if slice_receiver_is_text:
                 if args.len() == 1 or args.len() == 2:
                     val receiver_local = if has_prelowered_method_receiver: prelowered_method_receiver else: self.lower_expr(receiver)
+                    if bracket_slice:
+                        return self.lower_text_codepoint_slice_v1(receiver_local, args, receiver.span)
                     var arg_operands: [MirOperand] = []
                     arg_operands = arg_operands.push(mir_operand_copy(receiver_local))
                     for arg in args:

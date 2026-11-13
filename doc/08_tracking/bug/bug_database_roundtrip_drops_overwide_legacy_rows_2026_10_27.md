@@ -13,3 +13,16 @@ Read-only baseline audit found eleven versus ten fields at lines2452,2453,2463 a
 Retire the legacy append compatibility path only after all legacy rows are repaired by their owners or the canonical serializer losslessly retains opaque fields, and a complete scratch round trip preserves every original payload byte and record. Never normalize or truncate records merely to enable registration.
 
 **Revalidated 2026-11-02: still plausible because Canonical ID: bug_database_roundtrip_drops_overwide_legacy_rows_2026_10_27. Status: open. Owner: canonical BugDatabase. Created: 2026-10-27; no merged fix commit with a passing regression is cited in this doc.**
+
+## Fix (2026-11-13) — in-place updates keep the opaque tail
+
+`e50b9de79e2` (on release/1.0.0) already keeps an overwide row's extra raw fields
+as a hidden `__opaque_tail` on parse and writes them back in `SdnTable.to_sdn`, so
+untouched rows round-trip. Remaining loss: `BugDatabase.update_bug` rebuilds the
+row from typed fields (`bug_to_row_for_table`) and `SdnTable.update_row_checked` /
+`update_row_if` replaced the row wholesale, dropping the tail of every updated
+legacy row. Both now go through `sdn_row_keep_opaque_tail` (core.spl), which keeps
+the current tail unless the replacement sets one. Not covered (by design): a status
+move to a different table (`mark_deleted` + new row) — the tail is positional to the
+old table's schema. Spec: `test/01_unit/lib/database/sdn_overwide_row_roundtrip_spec.spl`
+case 4. `bug_db.sdn` data untouched.

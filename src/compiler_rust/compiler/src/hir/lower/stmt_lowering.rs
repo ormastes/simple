@@ -1870,6 +1870,14 @@ impl Lowerer {
                 self.globals.insert(e.name.clone(), ret_ty);
                 self.method_return_types.insert(e.name.clone(), ret_ty);
                 self.extern_fn_names.insert(e.name.clone());
+                // Same param-type recording as the module-level pass — see
+                // `HirModule::extern_param_types`.
+                let param_types = e
+                    .params
+                    .iter()
+                    .map(|p| self.resolve_type_opt(&p.ty))
+                    .collect::<Result<Vec<_>, _>>()?;
+                self.module.extern_param_types.insert(e.name.clone(), param_types);
                 Ok(vec![])
             }
 
@@ -2585,6 +2593,38 @@ impl Lowerer {
                                 HirExpr {
                                     kind: HirExprKind::Local(subject_idx),
                                     ty: subject_ty,
+                                }
+                            } else if subject_is_optional && enum_variant != "Some" && enum_variant != "None" {
+                                // User-enum variant pattern over an optional
+                                // subject (`match <Evt?>: case Evt.Click(x)`).
+                                // The arm test already looks through the Some
+                                // box, but the payload read did not: for a
+                                // boxed `Some(Evt.Click(5))`, `rt_enum_payload`
+                                // returned the inner Evt and bound its pointer
+                                // as `x`. Peel exactly one Option layer first
+                                // (`rt_unwrap_or_self` leaves the raw form and
+                                // user enums untouched). The peeled value is
+                                // typed as the optional's payload so no
+                                // scalar unbox fires on the enum pointer.
+                                let inner_ty = self
+                                    .optional_enum_payload_inner(subject_ty)
+                                    .or_else(|| self.module.types.optional_inner(subject_ty))
+                                    .unwrap_or(TypeId::ANY);
+                                HirExpr {
+                                    kind: HirExprKind::BuiltinCall {
+                                        name: "rt_enum_payload".to_string(),
+                                        args: vec![HirExpr {
+                                            kind: HirExprKind::BuiltinCall {
+                                                name: "rt_unwrap_or_self".to_string(),
+                                                args: vec![HirExpr {
+                                                    kind: HirExprKind::Local(subject_idx),
+                                                    ty: subject_ty,
+                                                }],
+                                            },
+                                            ty: inner_ty,
+                                        }],
+                                    },
+                                    ty: payload_expr_ty,
                                 }
                             } else {
                                 legacy_payload_expr

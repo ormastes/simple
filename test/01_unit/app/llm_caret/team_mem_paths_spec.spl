@@ -1,0 +1,93 @@
+# @req REQ-SSPEC-UNIT
+"""
+# Claude full team memory paths
+
+As a caret user sharing team memory, keys and paths that try to escape the team
+directory must be rejected, and ordinary ones must resolve under it.
+"""
+
+use std.spec.step
+use std.spec.*
+use app.llm_caret.claude_full.memdir.teamMemPaths.*
+
+describe "Claude full team memory paths":
+    it "accepts a plain relative key":
+        step("ok key")
+        val r = sanitizePathKey("notes/a.md")
+        expect(r.ok).to_equal(true)
+        expect(r.path).to_equal("notes/a.md")
+
+    it "rejects URL-encoded traversal":
+        step("encoded")
+        val r = sanitizePathKey("%2e%2e%2fsecret")
+        expect(r.ok).to_equal(false)
+        expect((r.error?.message) ?? "").to_equal("URL-encoded traversal in path key: \"%2e%2e%2fsecret\"")
+
+    it "rejects full-width lookalike separators":
+        step("unicode")
+        val r = sanitizePathKey("．．／x")
+        expect(r.ok).to_equal(false)
+        expect((r.error?.message) ?? "").to_equal("Unicode-normalized traversal in path key: \"．．／x\"")
+
+    it "rejects backslash and absolute keys":
+        step("backslash absolute")
+        expect(sanitizePathKey("a\\b").ok).to_equal(false)
+        expect((sanitizePathKey("/etc/passwd").error?.message) ?? "").to_equal("Absolute path key: \"/etc/passwd\"")
+
+    it "builds the team directory and entrypoint paths":
+        step("paths")
+        expect(getTeamMemPath("/m")).to_equal("/m/team/")
+        expect(getTeamMemPath("/m/")).to_equal("/m/team/")
+        expect(getTeamMemEntrypoint("/m")).to_equal("/m/team/MEMORY.md")
+
+    it "requires both flags for team memory":
+        step("enabled")
+        expect(isTeamMemoryEnabled(true, true)).to_equal(true)
+        expect(isTeamMemoryEnabled(true, false)).to_equal(false)
+        expect(isTeamMemoryEnabled(false, true)).to_equal(false)
+        expect(isTeamMemFile("/m/team/x.md", "/m/team", true, true)).to_equal(true)
+        expect(isTeamMemFile("/m/team/x.md", "/m/team", false, true)).to_equal(false)
+        expect(isTeamMemFile("/m/other/x.md", "/m/team", true, true)).to_equal(false)
+
+    it "treats dot segments when deciding team membership":
+        step("isTeamMemPath")
+        expect(isTeamMemPath("/m/team/../secret", "/m/team")).to_equal(false)
+        expect(isTeamMemPath("/m/team/./a/../b.md", "/m/team")).to_equal(true)
+
+    it "resolves a valid write path and rejects escapes":
+        step("write path")
+        val ok = validateTeamMemWritePath("/m/team/./a/../b.md", "/m/team", true)
+        expect(ok.ok).to_equal(true)
+        expect(ok.path).to_equal("/m/team/b.md")
+        val esc = validateTeamMemWritePath("/m/team/../x", "/m/team", true)
+        expect((esc.error?.message) ?? "").to_equal("Path escapes team memory directory: \"/m/team/../x\"")
+        val sym = validateTeamMemWritePath("/m/team/x", "/m/team", false)
+        expect((sym.error?.message) ?? "").to_equal("Path escapes team memory directory via symlink: \"/m/team/x\"")
+        expect(validateTeamMemWritePath("/m/team/a\u0000b", "/m/team", true).ok).to_equal(false)
+
+    it "resolves keys under the team directory":
+        step("key")
+        val ok = validateTeamMemKey("sub/x.md", "/m/team", true)
+        expect(ok.path).to_equal("/m/team/sub/x.md")
+        val esc = validateTeamMemKey("../x", "/m/team", true)
+        expect((esc.error?.message) ?? "").to_equal("Key escapes team memory directory: \"../x\"")
+        val bad = validateTeamMemKey("/abs", "/m/team", true)
+        expect((bad.error?.message) ?? "").to_equal("Absolute path key: \"/abs\"")
+        val sym = validateTeamMemKey("a", "/m/team", false)
+        expect((sym.error?.message) ?? "").to_equal("Key escapes team memory directory via symlink: \"a\"")
+
+    it "maps realpath failures to fail-closed results":
+        step("realpath")
+        expect((realpathDeepestExistingStatus("", true).error?.message) ?? "").to_equal("Dangling symlink detected (target does not exist)")
+        expect((realpathDeepestExistingStatus("ELOOP", false).error?.message) ?? "").to_equal("Symlink loop detected in path")
+        expect((realpathDeepestExistingStatus("EACCES", false).error?.message) ?? "").to_equal("Cannot verify path containment (EACCES)")
+        expect(realpathDeepestExistingStatus("ENOENT", false).ok).to_equal(true)
+        expect(realpathDeepestExistingStatus("", false).path).to_equal("ancestor")
+
+    it "normalizes paths and decodes keys":
+        step("normalize")
+        expect(normalizePath("a//b/./c/../d")).to_equal("/a/b/d")
+        expect(normalizePath("/../..")).to_equal("/")
+        expect(decodePathKey("%2E%5C%2f")).to_equal(".\\/")
+        expect(normalizeDangerousUnicode("．／＼")).to_equal("./\\")
+        expect(joinPathParts(["a", "b"])).to_equal("a/b")

@@ -1,7 +1,7 @@
 # Observes a trusted-admin mutable path. The retained hash handle is NOT the
 # executed handle: replacement after observation remains an explicit TOCTOU.
 use std.nogc_async_mut.container.providers.linux.engine_policy_v1.*
-use std.nogc_sync_mut.sffi.fs.file_canonicalize
+use std.nogc_async_mut.sffi.fs.file_canonicalize
 use std.nogc_sync_mut.io.retained_file.{RetainedFile, retained_file_open,
     retained_file_read_at, retained_file_identity_unchanged, retained_directory_open_trusted_v1}
 use std.common.crypto.sha256.sha256_stream_v1_new
@@ -43,9 +43,15 @@ pub fn linux_oci_engine_executable_digest_v1(policy: LinuxOciEnginePolicyV1) -> 
             not _engine_canonical_path_v1(policy.expected_graph_root) or
             not _engine_canonical_path_v1(policy.expected_run_root):
         return Err("engine-policy-path-not-canonical")
+    linux_oci_trusted_executable_digest_v1(policy.executable_path, policy.expected_uid)
+
+# Mutable-path observation only; consumed close errors refuse publication.
+pub fn linux_oci_trusted_executable_digest_v1(path: text, expected_uid: i64) -> Result<text, text>:
+    if expected_uid <= 0 or expected_uid > 4294967295: return Err("engine-executable-uid-invalid")
+    if not _engine_canonical_path_v1(path): return Err("engine-policy-path-not-canonical")
     # Existing owner validates every parent component's uid/mode. It does not
     # protect against a trusted administrator renaming the tree afterward.
-    val pieces = policy.executable_path.split("/")
+    val pieces = path.split("/")
     var parent = ""
     var index = 1
     while index < pieces.len() - 1:
@@ -53,12 +59,12 @@ pub fn linux_oci_engine_executable_digest_v1(policy: LinuxOciEnginePolicyV1) -> 
         index = index + 1
     if parent == "": parent = "/"
     val directory = retained_directory_open_trusted_v1(parent)?
-    val file = match retained_file_open(policy.executable_path, LINUX_OCI_ENGINE_EXECUTABLE_MAX_BYTES_V1):
+    val file = match retained_file_open(path, LINUX_OCI_ENGINE_EXECUTABLE_MAX_BYTES_V1):
         case Ok(owner): owner
         case Err(reason):
             directory.close()
             return Err(reason)
-    val result = _engine_hash_owner_v1(file, policy.expected_uid)
+    val result = _engine_hash_owner_v1(file, expected_uid)
     val file_closed = file.close()
     val directory_closed = directory.close()
     if not file_closed or not directory_closed: return Err("engine-observation-owner-close-failed")

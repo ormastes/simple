@@ -107,3 +107,68 @@ Remaining (not in scope here, recorded as open gaps):
 - Sibling copies without the guards: `src/os/services/nvfs/core/crypto/aes128_gcm.spl`
   (the copy nvfs actually calls) and `src/lib/nogc_async_mut_noalloc/tls/aes128_gcm.spl`;
   `src/os/crypto/aes256_gcm.spl` also has no length checks.
+
+## Resolution 2026-11-13 (follow-up) — sibling copies (lane work/aesgcm-copies-20261113)
+
+Correction to "Remaining" above: the NVFS copy and the canonical copy were
+**not** missing the guards from the start. `db9fa3350a4` (2026-08-25) gave
+both full length checks (encrypt included). The stale-snapshot merge
+`e274cd33719` (2026-08-27) reverted both. In NVFS the reverted copy was even
+worse: its helper call sites were never renamed (`_pad_to_16`,
+`_ghash_block`, `_inc32`, `gf128_mul`), so every call nvfs made failed with a
+semantic error.
+
+Red -> green, seed-fix aarch64 interpreter, base `9192096fe3b`:
+
+| Copy | Spec | Red | Green |
+|---|---|---|---|
+| NVFS `src/os/services/nvfs/core/crypto/aes128_gcm.spl` | `test/01_unit/os/services/nvfs/core/aes128_gcm_length_guard_spec.spl` | 0/6 (semantic errors) | 6/6 |
+| noalloc TLS `src/lib/nogc_async_mut_noalloc/tls/aes128_gcm.spl` | `test/01_unit/lib/nogc_async_mut_noalloc/tls/aes128_gcm_length_guard_spec.spl` | 1/6 | 6/6 |
+| os AES-256 `src/os/crypto/aes256_gcm.spl` | `test/01_unit/lib/crypto/aes256_gcm_nist_vectors_spec.spl` | 12/15 | 15/15 |
+
+NVFS:
+- With only the four call-site renames applied, the spec went to 1/6.
+  - TC2 encrypt produced all zeros, because the `rt_aes128_encrypt_block_into`
+    out-param provider does not work on the interpreter.
+  - An empty tag decrypted to `Ok`.
+  - The guard examples failed on their assertions.
+- Fix: restore `db9fa3350a4`'s blob byte-for-byte (`git diff db9fa3350a4^
+  9192096fe3b` for this file differs only in those four un-renamed helpers).
+  The restore also brings back the encrypt `panic` on a wrong-length key or
+  nonce.
+- The NVFS half of `scripts/audit/aes128-gcm-sffi-authority.shs` passes again.
+
+noalloc TLS:
+- Second defect: the `rt_tls13_aes128_gcm_decrypt` fast path accepted a
+  **corrupted tag as `Ok`**. On the Rust backings that extern returns `[0x00]`
+  for a tag mismatch, and the copy only checked `len() > 0`. A valid decrypt
+  came back with a 0x01 status byte in front of the plaintext.
+- How the red failed: TC2 decrypt and corrupted-tag failed on their
+  assertions. The three length examples failed when the interpreter's
+  extern raised `rt_tls13_aes128_gcm_decrypt rejected its inputs`.
+- Fix: remove the fast path and its extern, so only the pure path runs.
+- Add the key 16 / nonce 12 / tag 16 guards before any input is read.
+
+os AES-256:
+- On base, a 16-byte key and an empty nonce both decrypted TC13 to `Ok`.
+- Fix: key 32 / nonce 12 / tag 16 guards in the wrapper, before it delegates.
+
+The constant-time tag compare loops are unchanged in all three copies.
+
+Regression run, before -> after, identical:
+aead 12/12, aes128_ccm 12/12, aes128_gcm_nist 15/15, aes192_gcm 5/5,
+aes256_gcm_no_seed_extern 2/2, aes_gcm_common_kat 5/5, aes_gcm_rfc 11/11,
+os_crypto_native_kat_fixture 1/1, tls_smoke 9/9 (2s -> 2s),
+ssh_cipher_packet_assembly 1/1, ssh_gcm_sffi_empty_plaintext 8/8,
+aes256_gcm_sha384_cipher_suite 10/10, record13_checked_seal 17/17.
+Pre-existing and unchanged: tls12_record 0/2 and nvfs_durable_roundtrip 2/3
+(fsync durability).
+
+Still open, filed as
+`aes_gcm_encrypt_length_unchecked_and_rewound_hardening_2026-11-13.md`:
+- encrypt in the canonical, TLS, AES-256 and `std.common` copies;
+- the canonical copy is still the rewound blob;
+- `std.common.crypto.aes_gcm` decrypt has no length checks;
+- `rt_tls13_aes128_gcm_decrypt` returns different encodings on different
+  backings, and `record13` still uses it;
+- the NVFS block provider has no C-runtime backing.

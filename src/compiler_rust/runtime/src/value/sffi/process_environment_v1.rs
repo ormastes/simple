@@ -220,6 +220,12 @@ pub unsafe extern "C" fn rt_process_run_bounded_observed_tuple_v1(
 #[no_mangle]
 pub unsafe extern "C" fn rt_windows_pty_owner_thread_guard_v1() -> i64 { 0 }
 
+// The Rust bootstrap path cannot qualify the Windows owned pipe mode query.
+#[no_mangle]
+pub unsafe extern "C" fn rt_windows_pipe_file_mode_v1(
+    _handle: i64, _storage: i64, _mode_out: i64, _operation: i32,
+) -> i64 { -1 }
+
 /// Uses the same Rust Child registry consumed by wait, kill and liveness.
 #[no_mangle]
 pub unsafe extern "C" fn rt_process_spawn_async_environment_v1(ptr:*const u8,len:u64,args:RuntimeValue,env:RuntimeValue,mode:i64)->i64 {

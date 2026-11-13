@@ -209,6 +209,23 @@ struct SdnRow:
     fn has_column(column: text) -> bool:
         self.fields.contains_key(column)
 
+
+# An in-place update replaces the declared columns only. An overwide legacy
+# row's opaque tail (its extra raw fields) is not part of any typed record, so
+# a writer that rebuilds the row from typed fields (BugDatabase.update_bug)
+# would silently drop it; keep the current tail unless the new row sets one.
+# bug_database_roundtrip_drops_overwide_legacy_rows_2026_10_27
+fn sdn_row_keep_opaque_tail(current: SdnRow, row: SdnRow) -> SdnRow:
+    val key = sdn_opaque_tail_key()
+    val tail = current.get(key) ?? ""
+    if tail == "" or row.has_column(key):
+        return row
+    val kept = SdnRow(fields: {}, _version: row._version)
+    for (column, value) in row.fields:
+        kept.set(column, value)
+    kept.set(key, tail)
+    kept
+
 # ============================================================================
 # SdnTable - In-memory representation of SDN table
 # ============================================================================
@@ -375,7 +392,7 @@ class SdnTable:
             val current = self.rows[i]
             val current_row: SdnRow = current
             if current_row.get(pk) == Some(key):
-                self.rows[i] = row
+                self.rows[i] = sdn_row_keep_opaque_tail(current_row, row)
                 self.index[key] = i
                 return Ok(())
             i = i + 1
@@ -402,7 +419,7 @@ class SdnTable:
             if current_row.get(pk) == Some(key):
                 if current_row._version != expected_version:
                     return Err("version mismatch: expected {expected_version}, got {current_row._version}")
-                val new_row = SdnRow(fields: row.fields, _version: expected_version + 1)
+                val new_row = SdnRow(fields: sdn_row_keep_opaque_tail(current_row, row).fields, _version: expected_version + 1)
                 self.rows[i] = new_row
                 self.index[key] = i
                 return Ok(true)

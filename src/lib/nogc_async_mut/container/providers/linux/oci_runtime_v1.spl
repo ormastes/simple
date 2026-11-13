@@ -11,6 +11,18 @@ pub use std.nogc_async_mut.container.providers.linux.engine_policy_v1.{LinuxOciE
 use std.nogc_async_mut.container.providers.linux.engine_policy_v1.{linux_oci_engine_policy_error_v1,
     linux_oci_engine_observation_match_v1, linux_oci_engine_route_v1}
 use std.nogc_async_mut.container.providers.linux.engine_observer_v1.linux_oci_engine_observe_v1
+use std.nogc_async_mut.container.providers.linux.containment_profile_v1.{LinuxOciContainmentProfileV1,
+    linux_oci_containment_profile_match_v1}
+use std.nogc_async_mut.container.providers.linux.installed_containment_policy_v1.{LinuxOciInstalledContainmentPolicyV1,
+    linux_oci_installed_containment_policy_encode_v1, linux_oci_containment_route_v1}
+use std.nogc_async_mut.container.providers.linux.containment_observer_v1.{LinuxOciContainmentObservationV1,
+    linux_oci_containment_observe_v1, linux_oci_containment_observation_match_v1}
+use std.nogc_async_mut.container.providers.linux.containment_v1.*
+use std.nogc_async_mut.container.providers.linux.containment_inspect_v1.{linux_oci_containment_inspect_command_v1,
+    linux_oci_containment_inspect_v1}
+use std.nogc_sync_mut.io.linux_container_containment_v1.{linux_container_containment_capture_v1,
+    linux_container_containment_observe_v1}
+use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, container_scope_fence_id_v2}
 use std.common.contracts.container.effect_deadline_v1.{ContainerEffectDeadlineV1,
     container_effect_deadline_v1, container_effect_remaining_ms_v1}
 use std.common.contracts.container.control_deadline_v1.{ContainerControlDeadlineV1,
@@ -123,6 +135,9 @@ pub class LinuxOciRuntimeProviderV1:
     engine_policy: LinuxOciEnginePolicyV1?
     engine_baseline: LinuxOciEngineObservationV1?
     scripted_engine_observation: LinuxOciEngineObservationV1?
+    containment_policy: LinuxOciInstalledContainmentPolicyV1? = None
+    containment_baseline: LinuxOciContainmentObservationV1? = None
+    scripted_containment_observation: LinuxOciContainmentObservationV1? = None
     effect_deadline: ContainerEffectDeadlineV1?
     scripted_effect_clock_ms: [i64]
     var scripted_effect_clock_cursor: i64
@@ -191,6 +206,9 @@ impl LinuxOciRuntimeProviderV1:
         Ok(provider)
 
     pub fn engine_observation_v1() -> Result<LinuxOciEngineObservationV1, text>:
+        if self.containment_policy.?:
+            val observed = self.containment_observation_v1()?
+            return Ok(observed.cli_observation)
         val policy = match self.engine_policy:
             case Some(value): value
             case nil: return Err("engine-policy-required")
@@ -206,6 +224,66 @@ impl LinuxOciRuntimeProviderV1:
         val valid = linux_oci_engine_observation_match_v1(policy, observed)?
         if observed.identity_digest != baseline.identity_digest: return Err("engine-observation-identity-changed")
         Ok(observed)
+
+    # The common configured factory supplies a protected installation. This
+    # constructor observes actual runtime/store facts; decoding is not authority.
+    pub static fn new_with_containment_policy_v1(state_dir: text, node_boot_id: text,
+            provider_generation: i64, policy: LinuxOciInstalledContainmentPolicyV1,
+            timeout_ms: i64) -> Result<LinuxOciRuntimeProviderV1, text>:
+        val canonical = linux_oci_installed_containment_policy_encode_v1(policy)?
+        if timeout_ms <= 0: return Err("containment-observation-timeout-invalid")
+        val provider = LinuxOciRuntimeProviderV1.new("linux", OCI_ENGINE_PODMAN, state_dir,
+            node_boot_id, provider_generation, true, timeout_ms)
+        val config = provider.validate_probe_config()
+        if not config.accepted: return Err(config.reason)
+        val observed = linux_oci_containment_observe_v1(policy, if timeout_ms > 5000: 5000 else: timeout_ms)?
+        provider.engine_policy = Some(policy.cli_policy)
+        provider.engine_baseline = Some(observed.cli_observation)
+        provider.containment_policy = Some(policy)
+        provider.containment_baseline = Some(observed)
+        Ok(provider)
+
+    pub fn containment_observation_v1() -> Result<LinuxOciContainmentObservationV1, text>:
+        val policy = match self.containment_policy:
+            case Some(value): value
+            case None: return Err("containment-profile-not-installed")
+        val baseline = match self.containment_baseline:
+            case Some(value): value
+            case None: return Err("containment-observation-baseline-required")
+        val observed = if self.scripted:
+            match self.scripted_containment_observation:
+                case Some(value): value
+                case None: return Err("containment-scripted-observation-required")
+        else:
+            linux_oci_containment_observe_v1(policy, if self.timeout_ms > 5000: 5000 else: self.timeout_ms)?
+        val valid = linux_oci_containment_observation_match_v1(policy, observed)?
+        if (observed.identity_digest != baseline.identity_digest or
+                not self.engine_baseline.? or observed.cli_observation.identity_digest != self.engine_baseline.unwrap().identity_digest):
+            return Err("containment-observation-identity-changed")
+        Ok(observed)
+
+    # Explicit scripted fixture seam. Never selected by an installed policy or
+    # a production factory, and it cannot produce a native containment owner.
+    pub static fn scripted_with_containment_policy_v1(state_dir: text, node_boot_id: text,
+            provider_generation: i64, policy: LinuxOciInstalledContainmentPolicyV1,
+            baseline: LinuxOciContainmentObservationV1, current: LinuxOciContainmentObservationV1,
+            results: [ScriptedCommandResultV1],
+            timeout_ms: i64 = OCI_DEFAULT_TIMEOUT_MS) -> Result<LinuxOciRuntimeProviderV1, text>:
+        val baseline_valid = linux_oci_containment_observation_match_v1(policy, baseline)?
+        val current_valid = linux_oci_containment_observation_match_v1(policy, current)?
+        val provider = LinuxOciRuntimeProviderV1.scripted_with_engine_policy("linux", OCI_ENGINE_PODMAN,
+            state_dir, node_boot_id, provider_generation, policy.cli_policy,
+            baseline.cli_observation, current.cli_observation, results, timeout_ms)?
+        provider.containment_policy = Some(policy)
+        provider.containment_baseline = Some(baseline)
+        provider.scripted_containment_observation = Some(current)
+        Ok(provider)
+
+    fn _configured_arguments_v1(arguments: [text]) -> Result<[text], text>:
+        if self.containment_policy.?:
+            return linux_oci_containment_route_v1(self.containment_policy.unwrap(), arguments)
+        if self.engine_policy.?: return linux_oci_engine_route_v1(self.engine_policy.unwrap(), arguments)
+        Ok(arguments)
 
     # Trusted Host/common-API composition installs this only after verifying its
     # grant/approval. This setter validates data; it does not verify signatures.
@@ -370,6 +448,8 @@ impl LinuxOciRuntimeProviderV1:
 
     pub fn output_engine_observation_v2(request: LinuxOciRequestV1,
             expected: RuntimeIdentityV1, pin: text) -> Result<LinuxOciEngineObservationV1, text>:
+        if self.containment_policy.? or request.containment_profile_digest != "":
+            return Err("containment-output-profile-not-admitted")
         val valid = self.validate(request)
         if not valid.accepted: return Err(valid.reason)
         if self.engine != OCI_ENGINE_PODMAN or not self.engine_policy.?:
@@ -447,6 +527,82 @@ impl LinuxOciRuntimeProviderV1:
         if self.scripted:
             return PipedProcessOwnedSpawnV2.Rejected("primary-attach-scripted-native-spawn-forbidden")
         process_spawn_piped_owned_v2(launch)
+
+    pub me capture_containment_v1(scope: ContainerHostScopeV2, request: LinuxOciRequestV1,
+            expected: RuntimeIdentityV1, cli_pin: text, containment_pin: text) -> LinuxOciContainmentOutcomeV1:
+        val valid = self.validate(request)
+        if not valid.accepted: return LinuxOciContainmentOutcomeV1.Rejected(valid.reason)
+        if not self.containment_policy.? or request.containment_profile_digest == "":
+            return LinuxOciContainmentOutcomeV1.Rejected("containment-profile-not-installed")
+        val fence = match container_scope_fence_id_v2(scope):
+            case Ok(value): value
+            case Err(reason): return LinuxOciContainmentOutcomeV1.Rejected(reason)
+        if (fence != self.node_boot_id or scope.provider_generation != self.provider_generation or
+                self.engine != OCI_ENGINE_PODMAN or not self.live_enabled):
+            return LinuxOciContainmentOutcomeV1.Rejected("containment-provider-scope-mismatch")
+        val retained = match self.retained_intent_v1(request):
+            case Ok(value): value
+            case Err(reason): return LinuxOciContainmentOutcomeV1.Rejected(reason)
+        if (not builder_digest_valid_v1(expected.native_id) or
+                not linux_oci_mapping_identity_equal_v3(retained, expected) or retained.phase == RUNTIME_PHASE_DESTROYED):
+            return LinuxOciContainmentOutcomeV1.Rejected("containment-retained-identity-mismatch")
+        val current = match self.containment_observation_v1():
+            case Ok(value): value
+            case Err(reason): return LinuxOciContainmentOutcomeV1.Rejected(reason)
+        if current.cli_observation.identity_digest != cli_pin or current.identity_digest != containment_pin:
+            return LinuxOciContainmentOutcomeV1.Rejected("containment-provider-identity-mismatch")
+        val command = match linux_oci_containment_inspect_command_v1(expected.native_id):
+            case Ok(value): value
+            case Err(reason): return LinuxOciContainmentOutcomeV1.Rejected(reason)
+        val pre = self._execute(command, request)
+        if not pre.matched or pre.exit_code != 0 or pre.stderr != "":
+            return LinuxOciContainmentOutcomeV1.Rejected(self._execution_failure_reason_v1(pre, "containment-prequery-failed"))
+        val profile = self.containment_policy.unwrap().profile
+        val before = match linux_oci_containment_inspect_v1(pre.stdout, expected, request, profile):
+            case Ok(value): value
+            case Err(reason): return LinuxOciContainmentOutcomeV1.Rejected(reason)
+        val state = _state_from_intent(retained, RUNTIME_PHASE_RUNNING, "containment-capture-observation")
+        val pre_operation = RuntimeOperationV1(status: RUNTIME_STATUS_OK, operation: "containment-inspect",
+            command: self._receipt_command_v1(command), state: state, exit_code: pre.exit_code,
+            stdout: pre.stdout, stderr: pre.stderr, reason: "containment-before")
+        val binding = match linux_oci_containment_binding_v1(scope, request, expected, cli_pin,
+                containment_pin, pre_operation, before.pid, before.cgroup_path):
+            case Ok(value): value
+            case Err(reason): return LinuxOciContainmentOutcomeV1.Rejected(reason)
+        if self.scripted: return LinuxOciContainmentOutcomeV1.Rejected("containment-scripted-native-capture-forbidden")
+        val captured = linux_container_containment_capture_v1(before.pid, before.cgroup_path, binding)
+        if not captured.owner.?: return LinuxOciContainmentOutcomeV1.Rejected(captured.error)
+        val native = captured.owner.unwrap()
+        if captured.error != "" or not captured.snapshot.?:
+            return linux_oci_containment_reject_owned_v1(native, "containment-native-capture-unavailable: " + captured.error)
+        val first = captured.snapshot.unwrap()
+        if first.binding_digest != binding or first.capture_pid != before.pid or first.cgroup_path != before.cgroup_path:
+            return linux_oci_containment_reject_owned_v1(native, "containment-native-association-mismatch")
+        val post = self._execute(command, request)
+        if not post.matched or post.exit_code != 0 or post.stderr != "":
+            return linux_oci_containment_reject_owned_v1(native, self._execution_failure_reason_v1(post, "containment-postquery-failed"))
+        val after = match linux_oci_containment_inspect_v1(post.stdout, expected, request, profile):
+            case Ok(value): value
+            case Err(reason): return linux_oci_containment_reject_owned_v1(native, reason)
+        if before.pid != after.pid or before.cgroup_path != after.cgroup_path:
+            return linux_oci_containment_reject_owned_v1(native, "containment-inspect-incarnation-changed")
+        val refreshed = linux_container_containment_observe_v1(native)
+        val active = if refreshed.owner.?: refreshed.owner.unwrap() else: native
+        if refreshed.error != "" or not refreshed.owner.? or not refreshed.snapshot.?:
+            return linux_oci_containment_reject_owned_v1(active, "containment-native-refresh-unavailable: " + refreshed.error)
+        val snapshot = refreshed.snapshot.unwrap()
+        if not linux_oci_containment_same_subject_v1(first, snapshot):
+            return linux_oci_containment_reject_owned_v1(active, "containment-native-subject-changed")
+        val digest = match linux_oci_request_digest_v1(request):
+            case Ok(value): value
+            case Err(reason): return linux_oci_containment_reject_owned_v1(active, reason)
+        val post_operation = RuntimeOperationV1(status: RUNTIME_STATUS_OK, operation: "containment-inspect",
+            command: self._receipt_command_v1(command), state: state, exit_code: post.exit_code,
+            stdout: post.stdout, stderr: post.stderr, reason: "containment-after")
+        LinuxOciContainmentOutcomeV1.Associated(LinuxOciContainmentFactsV1(scope: scope, runtime: expected,
+            request_digest: digest, provider_identity_digest: cli_pin, profile_digest: request.containment_profile_digest,
+            containment_identity_digest: containment_pin, binding_digest: binding,
+            before: pre_operation, after: post_operation), active, snapshot)
 
     pub me observe_execution_user_mapping_v3(request: LinuxOciRequestV1, expected: RuntimeIdentityV1,
             pin: text) -> LinuxOciUserMappingOutcomeV3:
@@ -640,10 +796,16 @@ impl LinuxOciRuntimeProviderV1:
         RuntimeValidationV1(accepted: true, reason: "")
 
     pub fn validate(request: LinuxOciRequestV1) -> RuntimeValidationV1:
-        # A selected profile needs the separately installed containment route.
-        # Historical constructors cannot silently execute the V4 request as V1.
         if request.containment_profile_digest != "":
-            return RuntimeValidationV1(accepted: false, reason: "containment-profile-not-installed")
+            val policy = match self.containment_policy:
+                case Some(value): value
+                case None: return RuntimeValidationV1(accepted: false, reason: "containment-profile-not-installed")
+            match linux_oci_containment_profile_match_v1(policy.profile, policy.profile.cli_policy_digest,
+                    request.containment_profile_digest):
+                case Err(reason): return RuntimeValidationV1(accepted: false, reason: reason)
+                case Ok(_): pass
+        elif self.containment_policy.?:
+            return RuntimeValidationV1(accepted: false, reason: "containment-profile-selection-required")
         if linux_oci_user_selection_v3(request) and self.engine != OCI_ENGINE_PODMAN:
             return RuntimeValidationV1(accepted: false, reason: "user-selection-podman-only")
         match linux_oci_request_bounds_v1(request):
@@ -834,8 +996,9 @@ impl LinuxOciRuntimeProviderV1:
         val operation_id = if request.operation_id != "": request.operation_id
             elif saved_intent.operation_id != "": saved_intent.operation_id
             else: current.identity.operation_id
-        val command = build_create_command(self.engine, self.state_dir, request,
-            operation_id, self.provider_generation, self.node_boot_id)
+        val profile = if self.containment_policy.?: Some(self.containment_policy.unwrap().profile) else: None
+        val command = _build_create_command_profile_v1(self.engine, self.state_dir, request,
+            operation_id, self.provider_generation, self.node_boot_id, profile)
         if command.0 != "":
             return self._rejected("create", command.0, runtime_command_empty())
         if not self.live_enabled:
@@ -1704,7 +1867,7 @@ impl LinuxOciRuntimeProviderV1:
         if command.program == "" or command.program != self.engine: return command
         if not self.engine_policy.?: return command
         val policy = self.engine_policy.unwrap()
-        match linux_oci_engine_route_v1(policy, command.args):
+        match self._configured_arguments_v1(command.args):
             case Ok(arguments): RuntimeCommandV1(operation: command.operation,
                 program: policy.executable_path, args: arguments)
             case Err(_): runtime_command_empty()
@@ -1719,7 +1882,7 @@ impl LinuxOciRuntimeProviderV1:
                 case Err(reason): return RuntimeExecResultV1(stdout: "", stderr: reason, exit_code: -1, matched: false)
             val policy = self.engine_policy.unwrap()
             routed.program = policy.executable_path
-            routed.args = match linux_oci_engine_route_v1(policy, command.args):
+            routed.args = match self._configured_arguments_v1(command.args):
                 case Ok(value): value
                 case Err(reason): return RuntimeExecResultV1(stdout: "", stderr: reason, exit_code: -1, matched: false)
         # Managed launch authority is checked after the final policy observation
@@ -2089,8 +2252,21 @@ fn _base_command(engine: text, operation: text, state_dir: text,
 pub fn build_create_command(engine: text, state_dir: text,
         request: LinuxOciRequestV1, operation_id: text,
         provider_generation: i64, node_boot_id: text) -> (text, RuntimeCommandV1):
+    _build_create_command_profile_v1(engine, state_dir, request, operation_id,
+        provider_generation, node_boot_id, None)
+
+fn _build_create_command_profile_v1(engine: text, state_dir: text,
+        request: LinuxOciRequestV1, operation_id: text,
+        provider_generation: i64, node_boot_id: text,
+        profile: LinuxOciContainmentProfileV1?) -> (text, RuntimeCommandV1):
     if request.containment_profile_digest != "":
-        return ("containment-profile-not-installed", runtime_command_empty())
+        if not profile.?: return ("containment-profile-not-installed", runtime_command_empty())
+        if engine != OCI_ENGINE_PODMAN: return ("containment-podman-required", runtime_command_empty())
+        val selected = profile.unwrap()
+        match linux_oci_containment_profile_match_v1(selected, selected.cli_policy_digest, request.containment_profile_digest):
+            case Err(reason): return (reason, runtime_command_empty())
+            case Ok(_): pass
+    elif profile.?: return ("containment-profile-selection-required", runtime_command_empty())
     if linux_oci_user_selection_v3(request) and engine != OCI_ENGINE_PODMAN:
         return ("user-selection-podman-only", runtime_command_empty())
     match linux_oci_request_bounds_v1(request):
@@ -2146,6 +2322,9 @@ pub fn build_create_command(engine: text, state_dir: text,
             if engine == OCI_ENGINE_PODMAN: args.push("--http-proxy=false")
             if request.terminal_mode != "none": args.push("--interactive")
             if request.terminal_mode == "tty": args.push("--tty")
+            if profile.?:
+                for option in ["--cgroups=enabled", "--cgroupns=private", "--pid=private", "--privileged=false"]:
+                    args.push(option)
             if linux_oci_user_selection_v3(request):
                 args.push("--user")
                 args.push(request.user_uid.to_text() + ":" + request.user_gid.to_text())

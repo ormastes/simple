@@ -1,0 +1,71 @@
+# MDSOC: feature dimension (test fixture)
+# A Windows x64 `--xray` PE image built in-memory by the linker's own PE
+# writer, for the stage-3 locator spec and the IN differential suite's
+# "simple-win64" column. Layout (RVAs):
+#   .text  0x1000, 0x400 bytes, r-x: functions f = 1..3 at text offset
+#          64*(f-1): entry sled +0, NOP fill, exit sled +34, RET +47;
+#          the Windows trampoline twin at +0x200 calling a RET stub at +0x370.
+#   .sxray 0x2000, r--: the x86-64 map, Windows x64 ABI profile, text_base =
+#          0x1000 (the .text RVA, as IMAGE_REL_AMD64_ADDR32NB would leave it).
+# Sleds are OFF (EB 0B), exactly as a linked image carries them.
+use std.common.trace.observer_contract_v1.*
+use std.common.trace.observer_native_map_v1.{TraceNativeSiteV1, TraceNativeEncodingV1, trace_native_off_template_v1}
+use std.common.trace.xray_native_map_format_v1.*
+use std.common.trace.xray_native_trampoline_win64_v1.{xray_native_trampoline_bytes_win64_v1, XRAY_NATIVE_TRAMPOLINE_WIN64_CALL_REL32_AT_V1}
+use compiler.backend.linker.coff.pe_image_writer.{PeImageSection, pe_write_amd64_console}
+
+pub const XRAY_WIN64_FIXTURE_TEXT_RVA_V1: i64 = 0x1000
+pub const XRAY_WIN64_FIXTURE_TEXT_BYTES_V1: i64 = 0x400
+pub const XRAY_WIN64_FIXTURE_MAP_RVA_V1: i64 = 0x2000
+pub const XRAY_WIN64_FIXTURE_TRAMPOLINE_AT_V1: i64 = 0x200
+pub const XRAY_WIN64_FIXTURE_HANDLER_AT_V1: i64 = 0x370
+pub const XRAY_WIN64_FIXTURE_EXIT_DELTA_V1: i64 = 34
+
+pub fn xray_win64_fixture_map_v1() -> XrayMapV1:
+    var functions: [XrayMapFunctionV1] = []
+    var sites: [XrayMapSiteV1] = []
+    val names = ["alpha", "beta", "gamma"]
+    for f in 1..4:
+        val start = 64 * (f - 1)
+        functions.push(XrayMapFunctionV1(local_fn_id: f as u32, first_site: (2 * f - 1) as u32,
+            site_count: 2, name: names[f - 1]))
+        sites.push(xray_map_x86_64_site_v1(start as u64, f as u32, XRAY_MAP_KIND_ENTRY_V1))
+        sites.push(xray_map_x86_64_site_v1((start + XRAY_WIN64_FIXTURE_EXIT_DELTA_V1) as u64, f as u32, XRAY_MAP_KIND_EXIT_V1))
+    var build_id: [u8] = []
+    for i in 0..16: build_id.push((0xa0 + i) as u8)
+    XrayMapV1(isa: XRAY_MAP_ISA_X86_64_V1, abi_profile: XRAY_MAP_ABI_X86_64_WIN64_V1,
+        sled_abi_version: XRAY_MAP_SLED_ABI_V1, build_id: build_id,
+        text_base: XRAY_WIN64_FIXTURE_TEXT_RVA_V1 as u64, functions: functions, sites: sites)
+
+pub fn xray_win64_fixture_text_v1() -> [u8]:
+    var text: [u8] = []
+    for i in 0..XRAY_WIN64_FIXTURE_TEXT_BYTES_V1: text.push(0x90u8)
+    val trampoline_rva = XRAY_WIN64_FIXTURE_TEXT_RVA_V1 + XRAY_WIN64_FIXTURE_TRAMPOLINE_AT_V1
+    val map = xray_win64_fixture_map_v1()
+    for index in 0..map.sites.len():
+        val row = map.sites[index]
+        val sled_rva = XRAY_WIN64_FIXTURE_TEXT_RVA_V1 + (row.text_offset as i64)
+        val site = TraceNativeSiteV1(site_id: (index + 1) as u32, function_id: row.local_fn_id,
+            kind: TraceEventKindV1.Entry, offset: sled_rva as u64, target_offset: trampoline_rva as u64,
+            encoding: TraceNativeEncodingV1.X64Rel32)
+        val sled = trace_native_off_template_v1(site, 0x3000).unwrap()
+        for k in 0..sled.len(): text[(row.text_offset as i64) + k] = sled[k]
+    for f in 1..4:
+        text[64 * (f - 1) + XRAY_WIN64_FIXTURE_EXIT_DELTA_V1 + 13] = 0xC3u8
+    val call_end = XRAY_WIN64_FIXTURE_TRAMPOLINE_AT_V1 + XRAY_NATIVE_TRAMPOLINE_WIN64_CALL_REL32_AT_V1 + 4
+    val trampoline = xray_native_trampoline_bytes_win64_v1(XRAY_WIN64_FIXTURE_HANDLER_AT_V1 - call_end)
+    for k in 0..trampoline.len(): text[XRAY_WIN64_FIXTURE_TRAMPOLINE_AT_V1 + k] = trampoline[k] as u8
+    text[XRAY_WIN64_FIXTURE_HANDLER_AT_V1] = 0xC3u8
+    text
+
+# A full PE32+ image whose `.sxray` holds `map_bytes` with `map_characteristics`.
+pub fn xray_win64_fixture_image_with_v1(map_bytes: [u8], map_characteristics: i64) -> [u8]:
+    val text = PeImageSection(name: ".text", virtual_address: XRAY_WIN64_FIXTURE_TEXT_RVA_V1,
+        virtual_size: XRAY_WIN64_FIXTURE_TEXT_BYTES_V1, data: xray_win64_fixture_text_v1(),
+        characteristics: 0x60000020)
+    val map = PeImageSection(name: XRAY_MAP_PE_SECTION_NAME_V1, virtual_address: XRAY_WIN64_FIXTURE_MAP_RVA_V1,
+        virtual_size: map_bytes.len(), data: map_bytes, characteristics: map_characteristics)
+    pe_write_amd64_console([text, map], XRAY_WIN64_FIXTURE_TEXT_RVA_V1).unwrap()
+
+pub fn xray_win64_fixture_image_v1() -> [u8]:
+    xray_win64_fixture_image_with_v1(xray_map_encode_v1(xray_win64_fixture_map_v1()).unwrap(), 0x40000040)

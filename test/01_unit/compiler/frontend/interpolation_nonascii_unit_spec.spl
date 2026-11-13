@@ -1,0 +1,93 @@
+"""
+## Purpose
+Pin the string-interpolation scanners against a multibyte character BEFORE a
+`{...}` region. The scanners index the value by code point (`len()`,
+`value[i:i+1]`); slicing those indices with byte-offset `substring` cut the
+em dash of `"— {n}"` mid-sequence, literalized the valid `{n}` region and wrote
+invalid UTF-8 into the flat AST. Both the frontend and HIR cache stores then
+refused the module (io_failed=1) on every build.
+Bug: doc/08_tracking/bug/nonascii_interpolation_byte_char_slice_cache_store_2026-11-13.md
+"""
+
+use std.spec.step
+use std.string_core.{char_from_code}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.frontend.flat_ast_bridge.{flat_bridge_build_string_regions, parse_and_build_module}
+use compiler.frontend.core.string_interpolation_expand.{parse_string_interpolation_regions, decode_interpolation_brace_escapes}
+
+val LB = "{"
+val RB = "}"
+val LL = LB + LB
+val RR = RB + RB
+
+fn em_dash() -> text:
+    char_from_code(8212)
+
+fn warm(tag: text):
+    val module = parse_and_build_module("fn " + tag + "() -> i64:\n    1\n", tag + ".spl")
+    expect(module.functions.contains(tag)).to_equal(true)
+
+describe "interpolation scanners with non-ASCII before a region":
+    it "keeps a valid region after a multibyte character as an interpolation":
+        step("Scan an em dash followed by a valid region")
+        warm("warm_na_regions")
+        val value = em_dash() + " " + LB + "n" + RB
+        val (rewritten, parts) = parse_string_interpolation_regions(value)
+        expect(parts.len()).to_equal(1)
+        expect(rewritten).to_equal(value)
+
+    it "literalizes only an invalid region after a multibyte character":
+        step("Double the braces of an invalid region and keep the em dash intact")
+        warm("warm_na_bad_region")
+        val value = em_dash() + " " + LB + "a b" + RB + " tail"
+        val (rewritten, parts) = parse_string_interpolation_regions(value)
+        expect(parts.len()).to_equal(0)
+        expect(rewritten).to_equal(em_dash() + " " + LL + "a b" + RR + " tail")
+
+    it "decodes doubled braces after a multibyte character":
+        step("Decode escapes without cutting the em dash")
+        expect(decode_interpolation_brace_escapes(em_dash() + " " + LL + "n" + RR)).to_equal(
+            em_dash() + " " + LB + "n" + RB)
+        expect(decode_interpolation_brace_escapes(em_dash() + LL + em_dash() + RR + em_dash())).to_equal(
+            em_dash() + LB + em_dash() + RB + em_dash())
+
+    it "keeps the flat bridge region scan aligned after a multibyte character":
+        step("Bridge a valid and an invalid region behind an em dash")
+        warm("warm_na_bridge")
+        val span = Span.empty()
+        val valid = em_dash() + " " + LB + "n" + RB
+        val (valid_text, valid_interps) = flat_bridge_build_string_regions(valid, span)
+        expect(valid_interps.len()).to_equal(1)
+        expect(valid_text).to_equal(valid)
+        val mixed = em_dash() + " " + LB + "n" + RB + " " + em_dash() + " " + LB + " color: red; " + RB
+        val (mixed_text, mixed_interps) = flat_bridge_build_string_regions(mixed, span)
+        expect(mixed_interps.len()).to_equal(1)
+        expect(mixed_text).to_equal(
+            em_dash() + " " + LB + "n" + RB + " " + em_dash() + " " + LL + " color: red; " + RR)
+
+describe "interpolation segment byte length":
+    it "counts each literal segment in UTF-8 bytes, not code points":
+        step("Lower an em dash segment before a region: rt_string_new gets 4 bytes, not 2 code points")
+        val src = "fn seg(n: i64) -> text:\n    \"" + em_dash() + " " + LB + "n" + RB + "\"\n"
+        val module = parse_full_frontend(src, "seg.spl", "seg.spl", Logger(level: 0))
+        var hir_lowering = HirLowering.with_filename("seg.spl")
+        val hir = hir_lowering.lower_module(module)
+        var mir_lowering = MirLowering.new(hir.symbols)
+        val mir_module = mir_lowering.lower_module(hir)
+        var mir = ""
+        for function in mir_module.functions.values():
+            if function.name.ends_with("seg"):
+                mir = serialize_mir_function(function)
+        val segment_at = mir.index_of("\"value\":\"" + em_dash() + " \"")
+        expect(segment_at >= 0).to_equal(true)
+        val after = mir.substring(segment_at)
+        val length_at = after.index_of("{\"Const\":{\"dest\":")
+        val length_const = after.substring(length_at, after.index_of("}", length_at) + 1)
+        expect(length_const).to_contain("\"value\":4,")
+        expect(after).to_contain("rt_string_new")

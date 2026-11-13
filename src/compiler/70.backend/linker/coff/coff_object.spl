@@ -5,6 +5,7 @@
 # anonymous bigobj header.
 
 use std.common.text_bytes.{bytes_to_text}
+use std.common.pe.pe_image_v1.{pe_coff_header_v1, pe_section_header_v1, pe_coff_is_bigobj_v1}
 
 # IMAGE_FILE_MACHINE_UNKNOWN: machine-neutral library members such as the
 # symbol-only alias objects in oldnames.lib.
@@ -12,10 +13,7 @@ pub val COFF_MACHINE_UNKNOWN: i64 = 0
 pub val COFF_MACHINE_AMD64: i64 = 0x8664
 pub val COFF_MACHINE_ARM64: i64 = 0xaa64
 val COFF_HEADER_SIZE: i64 = 20
-val COFF_BIGOBJ_HEADER_SIZE: i64 = 56
 val COFF_SECTION_HEADER_SIZE: i64 = 40
-val COFF_SYMBOL_SIZE: i64 = 18
-val COFF_BIGOBJ_SYMBOL_SIZE: i64 = 20
 val COFF_RELOCATION_SIZE: i64 = 10
 
 val COFF_STORAGE_CLASS_EXTERNAL: i64 = 2
@@ -117,6 +115,18 @@ struct CoffRelocationValue:
     width: i64
     error: text
 
+# Header and section-header layout and the bigobj probe come from the shared
+# std.common.pe.pe_image_v1 (the XRay Windows map locator reads PE images
+# through it too). The per-field readers below stay module-local on purpose:
+# the same readers imported from pe_image_v1 measured 8% slower over a whole
+# object parse under the seed interpreter (cross-module call cost, see
+# doc/08_tracking/bug/seed_cross_module_call_overhead_2026-11-13.md).
+
+# TODO(seed_cross_module_call_overhead_2026-11-13): add a parity spec that runs
+# these local readers (_coff_u16/_coff_u32/_coff_i16/_coff_i32/_coff_fixed_name)
+# and std.common.pe.pe_image_v1's pe_u16_le_v1/pe_u32_le_v1/pe_fixed_name_v1 over
+# the same in-range, edge and out-of-range offsets, so the two copies cannot drift
+# until the readers are folded.
 fn _coff_u16(data: [u8], offset: i64) -> i64:
     if offset < 0 or offset + 2 > data.len(): return -1
     (data[offset] as i64) | ((data[offset + 1] as i64) << 8)
@@ -135,18 +145,6 @@ fn _coff_i32(data: [u8], offset: i64) -> i64:
     val value = _coff_u32(data, offset)
     if value >= 2147483648: value - 4294967296 else: value
 
-fn coff_is_bigobj(data: [u8]) -> bool:
-    if data.len() < COFF_BIGOBJ_HEADER_SIZE: return false
-    if _coff_u16(data, 0) != 0 or _coff_u16(data, 2) != 0xffff: return false
-    val magic: [i64] = [
-        0xc7, 0xa1, 0xba, 0xd1, 0xee, 0xba, 0xa9, 0x4b,
-        0xaf, 0x20, 0xfa, 0xf6, 0x6a, 0xa4, 0xdc, 0xb8]
-    var i: i64 = 0
-    while i < magic.len():
-        if data[12 + i] as i64 != magic[i]: return false
-        i = i + 1
-    true
-
 fn _coff_fixed_name(data: [u8], offset: i64, count: i64) -> text:
     # NUL-terminated (or `count`-bounded) name, decoded as one byte slice.
     # The old per-byte `text.from_char_code(b)` concat was O(n^2) and, in the
@@ -158,6 +156,9 @@ fn _coff_fixed_name(data: [u8], offset: i64, count: i64) -> text:
         end = end + 1
     if end <= offset: return ""
     bytes_to_text(data[offset:end])
+
+fn coff_is_bigobj(data: [u8]) -> bool:
+    pe_coff_is_bigobj_v1(data)
 
 fn _coff_string(data: [u8], string_table: i64, offset: i64) -> Result<text, text>:
     val table_size = _coff_u32(data, string_table)
@@ -195,6 +196,8 @@ fn _coff_relocations(data: [u8], offset: i64, count: i64, symbol_count: i64) -> 
     var i: i64 = 0
     while i < count:
         val base = offset + i * COFF_RELOCATION_SIZE
+        # Direct field reads, not a record per relocation: this loop is the
+        # hot part of the parse (a record per row measured 1.3x).
         val virtual_address = _coff_u32(data, base)
         val symbol_index = _coff_u32(data, base + 4)
         val relocation_type = _coff_u16(data, base + 8)
@@ -212,23 +215,24 @@ fn _coff_relocations(data: [u8], offset: i64, count: i64, symbol_count: i64) -> 
 fn coff_parse_object(data: [u8]) -> Result<CoffObject, text>:
     """Parse one raw compiler-produced COFF object and reject malformed ranges."""
     if data.len() < COFF_HEADER_SIZE: return Err("COFF object is shorter than its 20-byte header")
-    val bigobj = coff_is_bigobj(data)
+    val header = pe_coff_header_v1(data)
+    val bigobj = header.bigobj
     if _coff_u16(data, 0) == 0 and _coff_u16(data, 2) == 0xffff and not bigobj:
         return Err("invalid COFF bigobj signature, version, or class identifier")
-    val machine = if bigobj: _coff_u16(data, 6) else: _coff_u16(data, 0)
+    val machine = header.machine
     if machine != COFF_MACHINE_AMD64 and machine != COFF_MACHINE_ARM64 and
             machine != COFF_MACHINE_UNKNOWN:
         return Err("unsupported COFF machine {machine}")
     if bigobj and _coff_u16(data, 4) < 2:
         return Err("COFF bigobj version must be at least 2")
-    val header_size = if bigobj: COFF_BIGOBJ_HEADER_SIZE else: COFF_HEADER_SIZE
-    val symbol_size = if bigobj: COFF_BIGOBJ_SYMBOL_SIZE else: COFF_SYMBOL_SIZE
-    val section_count = if bigobj: _coff_u32(data, 44) else: _coff_u16(data, 2)
-    val timestamp = if bigobj: _coff_u32(data, 8) else: _coff_u32(data, 4)
-    val symbol_table_offset = if bigobj: _coff_u32(data, 48) else: _coff_u32(data, 8)
-    val symbol_count = if bigobj: _coff_u32(data, 52) else: _coff_u32(data, 12)
-    val optional_header_size = if bigobj: 0 else: _coff_u16(data, 16)
-    val characteristics = if bigobj: 0 else: _coff_u16(data, 18)
+    val header_size = header.header_size
+    val symbol_size = header.symbol_size
+    val section_count = header.section_count
+    val timestamp = header.timestamp
+    val symbol_table_offset = header.symbol_table_offset
+    val symbol_count = header.symbol_count
+    val optional_header_size = header.optional_header_size
+    val characteristics = header.characteristics
     if section_count < 0 or symbol_table_offset < 0 or symbol_count < 0:
         return Err("truncated COFF header")
     if symbol_count == 0 and symbol_table_offset != 0:
@@ -303,12 +307,13 @@ fn coff_parse_object(data: [u8]) -> Result<CoffObject, text>:
         val base = header_size + section_index * COFF_SECTION_HEADER_SIZE
         val name_result = _coff_section_name(data, base, string_table)
         if name_result.is_err(): return Err(name_result.unwrap_err())
-        var virtual_size = _coff_u32(data, base + 8)
-        val raw_size = _coff_u32(data, base + 16)
-        val raw_pointer = _coff_u32(data, base + 20)
-        var relocation_pointer = _coff_u32(data, base + 24)
-        var relocation_count = _coff_u16(data, base + 32)
-        val section_characteristics = _coff_u32(data, base + 36)
+        val shdr = pe_section_header_v1(data, base)
+        var virtual_size = shdr.virtual_size
+        val raw_size = shdr.raw_size
+        val raw_pointer = shdr.raw_pointer
+        var relocation_pointer = shdr.relocation_pointer
+        var relocation_count = shdr.relocation_count
+        val section_characteristics = shdr.characteristics
         val extended_relocations =
             (section_characteristics & COFF_SECTION_LNK_NRELOC_OVFL) != 0
         if extended_relocations and relocation_count != 65535:

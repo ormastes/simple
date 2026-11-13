@@ -5,40 +5,33 @@ use compiler.mir._MirLoweringExpr.function_signature_owner.*
 # @workaround bug=phase3_compiler_unit_or_workaround_2026-10-10 reason= preserve explicit enum owners until bare-pattern inference is repaired.
 use compiler.hir.hir_operators.{HirBinOp}
 use compiler.hir.hir_codec.{hir_fn_scalars_at_v1, hir_fn_scalars_at_key_v1,
-    hir_module_function_keys_in_v1, hir_fn_scalars_with_keys_in_v1,
-    hir_module_encode}
+    hir_module_function_keys_in_v1, hir_fn_scalars_with_keys_in_v1}
 use compiler.hir.return_type_interface_v1.{rti_rows_from_hir_v1, ReturnTypeInterfaceTable}
 # Part of src/compiler/50.mir/mir_lowering.spl: module/struct/class type lowering, asm target-spec accessors
 use compiler.mir._MirLowering.bootstrap_globals.*
 use compiler.mir._MirLowering.provider_metadata.*
 
-# Hash one provider in a disposable ownership scope. Only its digest escapes;
-# the potentially large codec body and encoder scratch are reclaimed.
-fn mir_provider_module_content_digest_v1(provider: HirModule) -> text:
-    if not transient_array_scope_begin_v1(): return ""
-    val body = hir_module_encode(provider)
-    val digest = if body == "": "" else: sha256_text(body)
-    if not transient_array_scope_pause_v1():
-        val _ended_pause = transient_array_scope_end_v1()
-        return ""
-    if not transient_heap_promote_v1(digest):
-        val _ended_promote = transient_array_scope_end_v1()
-        return ""
-    if not transient_array_scope_end_v1(): return ""
-    digest
+# Seal the ordered provider graph once at closure-session setup. The returned
+# key is the immutable authority for provider-index reuse
+# (ensure_provider_session_v1 reuses only when requested == installed key).
+# It used to be a content digest: every provider re-encoded through the HIR
+# codec and hashed -- 957 s on the 1622-module serial bootstrap closure
+# (2026-11-13, 149/150 gdb samples). Content equality is never needed:
+# each production site seals once on a fresh MirLowering and nothing
+# persists the key, and a lifted child copies its parent's key verbatim.
+# So the key is a per-computation session token: two seals never compare
+# equal, which forbids reuse across snapshots by construction, including
+# changed content under identical names. Names/paths stay in the hashed
+# frame for diagnosis only.
+var _mir_provider_session_seals: i64 = 0
 
-# Seal the exact ordered provider graph once at closure-session setup. The
-# returned key is immutable authority for provider-index reuse; callers retain
-# no encoded bodies. A codec refusal returns "", which makes reuse fail closed.
 fn mir_provider_session_content_key_v1(providers: [HirModule]) -> text:
-    var framed = "mir-provider-session-content-v1\n"
+    _mir_provider_session_seals = _mir_provider_session_seals + 1
+    var parts: [text] = ["mir-provider-session-token-v2\n{_mir_provider_session_seals}\n{providers.len()}\n"]
     for raw_provider in providers:
         val provider: HirModule = raw_provider
-        val digest = mir_provider_module_content_digest_v1(provider)
-        if digest == "": return ""
-        framed = framed + "{provider.name.len()}:{provider.name}" +
-            "{provider.path.len()}:{provider.path}{digest.len()}:{digest}"
-    sha256_text(framed)
+        parts.push("{provider.name.len()}:{provider.name}{provider.path.len()}:{provider.path}")
+    sha256_text(parts.join(""))
 use compiler.mir._MirLowering.declaration_providers_v1.*
 use compiler.mir._MirLowering.exact_extern_provenance.*
 use compiler.mir._MirLowering.provider_globals.*

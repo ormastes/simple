@@ -1,0 +1,151 @@
+# MDSOC: feature dimension (XRay stage 3, Windows x64, Simple-owned).
+# Pure locator for a Windows x64 `--xray` PE image: from the image FILE bytes
+# and the module's load address it builds the V1 manifest and the bounded
+# image copy that XrayNativeSledLeafV1.create admits — the PE counterpart of
+# xray_native_locate_module_v1 (ELF + /proc/self/maps). No I/O here: the
+# Windows host reads the file and supplies the HMODULE base.
+#
+# The loaded image is the file's sections placed at their RVAs (the loader
+# copies raw data, zero-fills the rest), so the image copy is reconstructed
+# from the file, not read from process memory. Sleds are OFF in the file;
+# the validator re-checks every OFF template byte against this copy before a
+# single word is patched.
+#
+#   1. pe_image_v1: PE32+, machine AMD64, section `.sxray` (read-only data).
+#   2. Its bytes decode as an x86-64 map with the Windows x64 ABI profile;
+#      text_base is the .text RVA (high 32 bits must be zero, matching the
+#      resident runtime's uint32 truncation).
+#   3. Every sled lies in ONE executable, non-writable section; its CALL
+#      rel32 target (the resident trampoline) is decoded from the file bytes.
+#   4. Manifest offsets are image RVAs; ranges are the map section (r--) and
+#      the code section (r-x); image_size = SizeOfImage.
+use std.common.pe.pe_image_v1.{PeImageV1, PeSectionHeaderV1, pe_image_v1, pe_image_section_by_name_v1}
+use std.common.trace.observer_contract_v1.*
+use std.common.trace.observer_native_map_v1.*
+use std.common.trace.xray_native_map_format_v1.*
+
+pub const XRAY_NATIVE_TARGET_WIN64_V1 = "x86_64-pc-windows-msvc"
+pub const XRAY_NATIVE_ABI_PROFILE_WIN64_V1 = "simple-x86_64-win64-sled-v1"
+pub const XRAY_NATIVE_RUNTIME_IDENTITY_WIN64_V1 = "simple-xray-native-runtime-x86_64-win64-v1"
+const XRAY_PE_MACHINE_AMD64_V1 = 0x8664
+const XRAY_PE_SCN_MEM_EXECUTE_V1 = 0x20000000
+const XRAY_PE_SCN_MEM_READ_V1 = 0x40000000
+const XRAY_PE_SCN_MEM_WRITE_V1 = 0x80000000
+
+pub struct XrayNativePeModuleV1:
+    module_base: i64
+    map: XrayMapV1
+    text_rva: i64
+    manifest: TraceNativeMapV1
+    image: [u8]
+
+fn xray_pe_section_span_v1(section: PeSectionHeaderV1) -> i64:
+    if section.virtual_size > section.raw_size: section.virtual_size else: section.raw_size
+
+fn xray_pe_section_containing_v1(image: PeImageV1, rva: i64, length: i64) -> PeSectionHeaderV1?:
+    for section in image.sections:
+        if rva >= section.virtual_address and rva + length <= section.virtual_address + xray_pe_section_span_v1(section):
+            return Some(section)
+    None
+
+fn xray_pe_kind_v1(code: i64) -> TraceEventKindV1:
+    if code == XRAY_MAP_KIND_ENTRY_V1: return TraceEventKindV1.Entry
+    if code == XRAY_MAP_KIND_EXIT_V1: return TraceEventKindV1.Exit
+    TraceEventKindV1.TailExit
+
+fn xray_pe_build_identity_v1(build_id: [u8]) -> text:
+    val digits = "0123456789abcdef"
+    var out = ""
+    for byte in build_id:
+        out = out + digits[((byte as i64) >> 4) & 15] + digits[(byte as i64) & 15]
+    out
+
+pub fn xray_native_pe_locate_v1(file: [u8], module_base: i64, module_instance: u64, page_size: i64,
+                                source_identity: text) -> Result<XrayNativePeModuleV1, TraceFailureV1>:
+    if module_instance == 0 or page_size < 4096 or (page_size & (page_size - 1)) != 0:
+        return Err(TraceFailureV1.InvalidArgument)
+    if module_base <= 0 or module_base % page_size != 0 or source_identity.len() == 0:
+        return Err(TraceFailureV1.InvalidArgument)
+    val image = match pe_image_v1(file):
+        case Ok(found): found
+        case Err(_): return Err(TraceFailureV1.InvalidMap)
+    if image.machine != XRAY_PE_MACHINE_AMD64_V1: return Err(TraceFailureV1.UnsupportedTarget)
+    if image.size_of_image <= 0: return Err(TraceFailureV1.InvalidMap)
+    val map_section = match pe_image_section_by_name_v1(image, XRAY_MAP_PE_SECTION_NAME_V1):
+        case Some(found): found
+        case None: return Err(TraceFailureV1.InstrumentationAbsent)
+    if (map_section.characteristics & XRAY_PE_SCN_MEM_WRITE_V1) != 0 or
+            (map_section.characteristics & XRAY_PE_SCN_MEM_EXECUTE_V1) != 0 or
+            (map_section.characteristics & XRAY_PE_SCN_MEM_READ_V1) == 0:
+        return Err(TraceFailureV1.InvalidMap)
+    if map_section.virtual_size < XRAY_MAP_HEADER_BYTES_V1 or map_section.virtual_size > map_section.raw_size:
+        return Err(TraceFailureV1.InvalidMap)
+    if map_section.raw_pointer < 0 or map_section.raw_pointer + map_section.virtual_size > file.len():
+        return Err(TraceFailureV1.InvalidMap)
+    val map_bytes: [u8] = file[map_section.raw_pointer:map_section.raw_pointer + map_section.virtual_size]
+    val map = xray_map_decode_v1(map_bytes)?
+    if map.isa != XRAY_MAP_ISA_X86_64_V1 or map.abi_profile != XRAY_MAP_ABI_X86_64_WIN64_V1:
+        return Err(TraceFailureV1.UnsupportedProfile)
+    if (map.text_base >> 32) != 0u64: return Err(TraceFailureV1.InvalidMap)
+    val text_rva = map.text_base as i64
+
+    # Reconstruct the loaded image: zero-filled SizeOfImage, each section's
+    # raw bytes at its RVA.
+    var copy: [u8] = []
+    for index in 0..image.size_of_image: copy.push(0u8)
+    for section in image.sections:
+        val count = if section.raw_size < section.virtual_size or section.virtual_size == 0: section.raw_size else: section.virtual_size
+        if section.virtual_address < 0 or section.virtual_address + count > image.size_of_image:
+            return Err(TraceFailureV1.InvalidMap)
+        if section.raw_pointer < 0 or section.raw_pointer + count > file.len():
+            return Err(TraceFailureV1.InvalidMap)
+        for k in 0..count:
+            copy[section.virtual_address + k] = file[section.raw_pointer + k]
+
+    if map.sites.len() == 0 or map.functions.len() == 0: return Err(TraceFailureV1.InvalidMap)
+    val first_sled = text_rva + (map.sites[0].text_offset as i64)
+    val code = match xray_pe_section_containing_v1(image, first_sled, XRAY_MAP_X86_64_SLED_BYTES_V1):
+        case Some(found): found
+        case None: return Err(TraceFailureV1.InvalidMap)
+    if (code.characteristics & XRAY_PE_SCN_MEM_EXECUTE_V1) == 0 or (code.characteristics & XRAY_PE_SCN_MEM_WRITE_V1) != 0:
+        return Err(TraceFailureV1.InvalidMap)
+    val code_end = code.virtual_address + xray_pe_section_span_v1(code)
+
+    var sites: [TraceNativeSiteV1] = []
+    for index in 0..map.sites.len():
+        val row = map.sites[index]
+        val sled = text_rva + (row.text_offset as i64)
+        if sled < code.virtual_address or sled + XRAY_MAP_X86_64_SLED_BYTES_V1 > code_end:
+            return Err(TraceFailureV1.InvalidMap)
+        # CALL rel32 at sled + 2 (E8), returning to sled + 7.
+        if copy[sled + 2] != 0xE8u8: return Err(TraceFailureV1.InvalidMap)
+        var rel = (copy[sled + 3] as i64) | ((copy[sled + 4] as i64) << 8) |
+            ((copy[sled + 5] as i64) << 16) | ((copy[sled + 6] as i64) << 24)
+        if rel >= 2147483648: rel = rel - 4294967296
+        val target = sled + 7 + rel
+        if target < 0 or target >= image.size_of_image: return Err(TraceFailureV1.InvalidMap)
+        sites.push(TraceNativeSiteV1(site_id: (index + 1) as u32, function_id: row.local_fn_id,
+            kind: xray_pe_kind_v1(row.kind), offset: sled as u64, target_offset: target as u64,
+            encoding: TraceNativeEncodingV1.X64Rel32))
+    var functions: [TraceNativeFunctionV1] = []
+    for function in map.functions:
+        val first_site = map.sites[(function.first_site as i64) - 1]
+        val last_site = map.sites[(function.first_site as i64) + (function.site_count as i64) - 2]
+        val start = text_rva + (first_site.text_offset as i64)
+        val end = text_rva + (last_site.text_offset as i64) + XRAY_MAP_X86_64_SLED_BYTES_V1
+        functions.push(TraceNativeFunctionV1(function_id: function.local_fn_id,
+            offset: start as u64, size: (end - start) as u64))
+    val manifest = TraceNativeMapV1(schema: 1, module_instance: module_instance, manifest_incarnation: 1,
+        build_identity: xray_pe_build_identity_v1(map.build_id), source_identity: source_identity,
+        runtime_identity: XRAY_NATIVE_RUNTIME_IDENTITY_WIN64_V1, target: XRAY_NATIVE_TARGET_WIN64_V1,
+        abi_profile: XRAY_NATIVE_ABI_PROFILE_WIN64_V1, image_size: image.size_of_image as u64,
+        map_offset: map_section.virtual_address as u64, map_size: map_section.virtual_size as u64,
+        ranges: [
+            TraceImageRangeV1(offset: map_section.virtual_address as u64, size: xray_pe_section_span_v1(map_section) as u64,
+                readable: true, writable: false, executable: false),
+            TraceImageRangeV1(offset: code.virtual_address as u64, size: xray_pe_section_span_v1(code) as u64,
+                readable: true, writable: false, executable: true)
+        ],
+        functions: functions, sites: sites)
+    Ok(XrayNativePeModuleV1(module_base: module_base, map: map, text_rva: text_rva,
+        manifest: manifest, image: copy))

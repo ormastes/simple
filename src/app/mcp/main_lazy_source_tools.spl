@@ -1,9 +1,10 @@
 # Thin unbound MCP envelope adapter; loaded at the source request boundary.
-use .main_lazy_json.{make_tool_result_status, make_error_response}
+use .main_lazy_json.{make_tool_result_status, make_error_response, jp, js, jo2, jo3}
 use std.common.string_core.{str_len}
-use std.common.json.value.{JsonValue, json_parse_value_strict, json_value_object_from, json_value_serialize}
+use std.common.json.value.{JsonValue, json_parse_value_strict, json_value_object_from, json_value_serialize, json_value_field, json_value_text_or}
 use std.common.source.service_contracts.{SourceOpenResultV1}
-use app.source_view.service.{source_open_result_v1}
+use app.source_view.service.{source_open_level_result_v1}
+use app.simple_lsp_mcp.visibility_state.{lsp_mcp_view_serve, lsp_mcp_view_line_for_file, lsp_mcp_view_set}
 export use app.source_view.service.{source_relative_path_valid_v1, source_projection_payload_v1}
 
 pub fn source_rpc_id_valid_v1(id: text) -> bool:
@@ -36,6 +37,50 @@ fn mcp_source_wrap_result_v1(id: text, result: SourceOpenResultV1) -> text:
 pub fn source_bounded_response_v1(id: text, payload: text) -> text:
     mcp_source_wrap_result_v1(id, SourceOpenResultV1(payload, false))
 
+# Structured modes are served under the per-session MDSOC+ view shared with
+# simple-lsp-mcp (countdown, auto-revert, per-request override); content[1]
+# carries the `view:` line. Raw pages carry no visibility, so no view line.
 pub fn handle_source_open(id: text, body: text) -> text:
     if not source_rpc_id_valid_v1(id): return source_rpc_id_error_v1()
-    mcp_source_wrap_result_v1(id, source_open_result_v1(body))
+    val arguments = match json_parse_value_strict(body):
+        Ok(value): value
+        Err(_): JsonValue.Null
+    val requested = json_value_text_or(json_value_field(arguments, "visibility"), "")
+    if json_value_text_or(json_value_field(arguments, "mode"), "outline") == "raw":
+        return mcp_source_wrap_result_v1(id, source_open_level_result_v1(body, ""))
+    val served = lsp_mcp_view_serve(requested, "", "")
+    val level = if requested == "" and served.level == "public": "" else: served.level
+    val response = mcp_source_wrap_result_v1(id, source_open_level_result_v1(body, level))
+    mcp_source_with_view_v1(id, response, lsp_mcp_view_line_for_file(served, json_value_text_or(json_value_field(arguments, "path"), "")))
+
+# Re-emit a wrapped tool result with the view line as a second content block.
+fn mcp_source_with_view_v1(id: text, response: text, view: text) -> text:
+    val wire = match json_parse_value_strict(response):
+        Ok(value): value
+        Err(_): return response
+    val result = json_value_field(wire, "result")
+    val blocks = json_value_field(result, "content")
+    match blocks:
+        JsonValue.Array(items):
+            if items.len() != 1: return response
+            val view_block = jo2(p1: jp(key: "type", value: js("text")), p2: jp(key: "text", value: js(view)))
+            val content = "[" + json_value_serialize(items[0]) + "," + view_block + "]"
+            val error_flag = json_value_serialize(json_value_field(result, "isError"))
+            val wrapped = jo2(p1: jp(key: "content", value: content), p2: jp(key: "isError", value: error_flag))
+            jo3(p1: jp(key: "jsonrpc", value: js("2.0")), p2: jp(key: "id", value: id), p3: jp(key: "result", value: wrapped))
+        _: response
+
+# simple_set_visibility: switch the session view shared with simple-lsp-mcp.
+# Same two-block shape as the lsp-mcp tool: JSON status, then the `view:` line.
+pub fn handle_set_visibility(id: text, body: text) -> text:
+    if not source_rpc_id_valid_v1(id): return source_rpc_id_error_v1()
+    val arguments = match json_parse_value_strict(body):
+        Ok(value): value
+        Err(_): JsonValue.Null
+    val (error, status) = lsp_mcp_view_set(
+        json_value_text_or(json_value_field(arguments, "visibility"), ""),
+        json_value_text_or(json_value_field(arguments, "feature"), ""),
+        json_value_text_or(json_value_field(arguments, "layer"), ""))
+    if error != "": return make_tool_result_status(id, error, true)
+    val payload = json_value_serialize(json_value_object_from([("view", JsonValue.Str(status))]))
+    mcp_source_with_view_v1(id, make_tool_result_status(id, payload, false), status)

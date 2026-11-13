@@ -92,3 +92,83 @@ them on an authorized unrestricted Mac. Supplied executables must be
 self-contained; the generator does not bundle non-system dynamic libraries or
 resources. This generator alone does not complete
 the native container provider.
+
+## 2026-11-13 verification on Linux aarch64 (no Mac available)
+
+Host: Linux aarch64 (`Linux 6.17.0-1032-nvidia`), release/1.0.0 at
+`517f20ae777`. Binary: Rust seed built from that head. Per
+`.claude/rules/bootstrap.md` seed verdicts are **seed-diagnostic**, not
+self-hosted qualification; the sys_test plan still requires the self-hosted
+runtime. Every run was capped (`systemd-run --user --scope -p MemoryMax=16G
+timeout 900`) and run serially. This section supersedes the "unrun" notes
+above for the specs listed.
+
+### (a) Host-independent: ran here
+
+| Item | Spec | Result |
+|---|---|---|
+| Mach-O format preflight (REQ-NMC-001 part) | `test/01_unit/lib/nogc_async_mut/container/providers/macos/executable_preflight_v1_spec.spl` | 15/15 pass |
+| Authenticated worker ingress (HMAC, replay, size) | `.../providers/macos/worker_protocol_v1_spec.spl` | 10/10 pass |
+| Provider admission/provision/framing, fail-closed lifecycle | `.../providers/macos/native_sandbox_provider_v1_spec.spl` | 9/9 pass |
+| XPC `.app` bundle generator (staging, plist, sign order, as spec mocks it) | `test/01_unit/app/macos_xpc_bundle/generator_spec.spl` | 8/8 pass |
+| Host capability contract incl. `native-sandbox` (REQ-NMC-005 part) | `test/01_unit/lib/common/contracts/container/host_capability_v1_spec.spl` | 14/14 pass |
+| Host capability SDN source | `test/01_unit/lib/common/contracts/container/host_capability_sdn_v1_spec.spl` | 6/6 pass |
+| Superseded VM-route host preflight, faked `uname`/QEMU | `test/00_unit/scripts/macos_simpleos_container_host_spec.shs` | PASS (contract only) |
+| Superseded VM-route guest dispatcher rejection paths | `test/01_unit/os/services/container/macos_simpleos_guest_dispatch_v1_spec.spl` | 2/3 pass; 3rd blocked (see toolchain row) |
+
+### Bugs found and fixed here (red -> green on the seed)
+
+1. **`ContainerWorld.image_digest_of` never existed.**
+   `src/os/services/container/container_runtime.spl:79` calls it on every
+   `start_into_scheduler`, but `container_manager.spl` never defined it
+   (`git log -S'fn image_digest_of' --all` is empty). Every SimpleOS container
+   launch, including the Mac guest dispatcher's, failed with
+   `method image_digest_of not found`. Fixed by adding the accessor over the
+   create-time RO base digest (`images[idx].base_digest`, which GC keeps).
+   Red: `container_runtime_spec` 2/5, guest dispatch 2/3, both on that error.
+   Green: `container_runtime_spec` 4/5, and the error is gone in both.
+2. **Spec ELF fixtures violated PT_LOAD congruence.** The fixtures in
+   `container_runtime_spec.spl` and `macos_simpleos_guest_dispatch_v1_spec.spl`
+   placed `p_offset=0x80` at `p_vaddr=0x400000` with `p_align=0x1000`. The
+   loader (`elf_loader.spl:355`, hardened in `c6cd52b5574`) correctly rejects
+   this (`ELF PT_LOAD alignment is invalid` -> `-8`). Fixed in the fixtures
+   (`p_vaddr`/`e_entry` = `0x400080`); the loader is unchanged.
+
+### Toolchain-blocked (neither PASS nor Mac-blocked)
+
+The remaining live-launch cases (`container_runtime_spec` "marks running only
+after a hash-bound policy creates a live task", guest dispatch "publishes only
+the matching scheduler-observed task exit") now fail with `-13` from the
+managed launch seam. `test/01_unit/os/kernel/loader/managed_workload_launch_spec.spl`
+fails the same way on the same seed (3/5, `expected -13 to be greater than 0`),
+so this is the seed defect already tracked by bug 355
+(`simpleos_managed_container_launch_authority_mismatch_2026-09-27.md` and its
+two seed blockers), not a container defect. Re-run on the self-hosted binary.
+
+### (b) Needs a real Mac: still BLOCKED (not PASS, not skipped)
+
+| Item | Why |
+|---|---|
+| REQ-NMC-002 signed helper launches pinned program; changed signature fails | `codesign`, App Sandbox entitlements |
+| REQ-NMC-003 live nonzero exit, host sentinel denied, cancel/timeout, detaching child | App Sandbox, launchd/XPC |
+| XPC client + `xpc_main` service connect | XPC / `launchd` |
+| Audit-token / code-signing peer validation; OS-authenticated key provisioning | Security.framework, XPC |
+| Process Observation V4 native capability on macOS | returns unavailable outside Linux |
+| Generator output actually signs and verifies (`codesign --verify --strict`) | `codesign` |
+
+Missing host: an unrestricted macOS login (Apple Silicon, ad-hoc signing is
+enough for local qualification; zero distribution identities was the last
+recorded state). Resume, from the repo root on that Mac:
+
+```bash
+printf 'host-secret\n' > /tmp/simple-host-sentinel
+sh scripts/check/check-native-macos-simple-container-sandbox.shs /tmp/simple-host-sentinel
+bin/simple test test/01_unit/lib/nogc_async_mut/container/providers/macos/
+bin/simple test test/01_unit/app/macos_xpc_bundle/generator_spec.spl
+```
+
+Expected artifacts: the script's `signed CLI status:` and signed `.app`
+status lines showing the probe reached `main` with the App Sandbox active and
+the sentinel read **denied** (exit 0 from the script); the three provider
+specs and the generator spec green on the self-hosted `bin/simple`; then the
+first real REQ-NMC-002/003 receipts once the XPC client/service exist.
