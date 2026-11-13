@@ -74,7 +74,7 @@ the LLVM stage 1, which inverts the earlier sequencing assumption.
 
 ### Open gaps in the Simple-owned backend (step 3 of this lane)
 
-1. Tail-exit sleds: none (`xray_sled_emit.spl:8-9`); EMIT-01 tail-call row is unmet.
+1. Tail-exit sleds: none (`xray_sled_emit.spl:8-9`). Superseded — not a gap, see "Step 2 result": the native selectors emit no tail calls; the shared profile fold already consumes `TailExit` (`observer_profile_v1.spl:58`) for the LLVM lane.
 2. The compile-time observer gate rejects EVERY non-Off route, including
    `backend = Simple` on a `--xray` native build (`driver_xray_policy.spl:79-80`
    -> `UnsupportedProfile`). Aspect-param selection therefore only works through
