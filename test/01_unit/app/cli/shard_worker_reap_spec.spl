@@ -15,6 +15,7 @@ Audience: engineers maintaining the native-build worker pools.
 
 use std.spec
 use app.cli.shard_worker_reap_v1.{shard_worker_kill_stopped_v1, shard_worker_confirm_kill_v1, parse_shard_reap_v1,
+    parse_shard_abnormal_exit_v1, parse_shard_death_deadline_v1,
     shard_pool_poll_quantum_v1, shard_child_wait_bounded_v1, shard_child_wait_verdict_v1, shard_exit_code_sign_restored_v1}
 use app.io.process_ops.{process_spawn_async, process_wait, process_kill, process_is_running}
 use std.io_runtime.{time_now_monotonic_ms}
@@ -75,7 +76,7 @@ describe "parse shard reap deadline":
         expect(slow).to_be_greater_than(0)
         expect(late).to_be_greater_than(0)
         val started = time_now_monotonic_ms()
-        val (failed, unconfirmed) = parse_shard_reap_v1([slow, late], [0, 1], 2, 1500)
+        val (failed, unconfirmed) = parse_shard_reap_v1([slow, late], [0, 1], 2, 1500, 0)
         val elapsed = time_now_monotonic_ms() - started
         print "[spec] failed={failed} unconfirmed={unconfirmed} elapsed_ms={elapsed}"
         expect(failed).to_equal([0, 1])
@@ -87,7 +88,40 @@ describe "parse shard reap deadline":
     it "reports a child that exits non-zero and keeps a passing one":
         val bad = process_spawn_async("sh", ["-c", "exit 3"])
         val good = process_spawn_async("sh", ["-c", "exit 0"])
-        expect(parse_shard_reap_v1([bad, good], [4, 5], 8, 10000)).to_equal(([4], []))
+        expect(parse_shard_reap_v1([bad, good], [4, 5], 8, 10000, 0)).to_equal(([4], []))
+
+describe "parse shard death bounds live siblings":
+    it "classifies a finished abnormal status, not success or still-running":
+        expect(parse_shard_abnormal_exit_v1(-1073741819)).to_equal(true)
+        expect(parse_shard_abnormal_exit_v1(3)).to_equal(true)
+        expect(parse_shard_abnormal_exit_v1(-1)).to_equal(true)
+        expect(parse_shard_abnormal_exit_v1(0)).to_equal(false)
+        expect(parse_shard_abnormal_exit_v1(-2)).to_equal(false)
+
+    it "pulls the deadline to now + grace, never later than an existing one":
+        # 6 h default build timeout: a death at t=1000 caps siblings at 1000 + grace.
+        expect(parse_shard_death_deadline_v1(21601000, 1000, 300000)).to_equal(301000)
+        # no deadline at all (--timeout 0): the death still bounds the siblings.
+        expect(parse_shard_death_deadline_v1(0, 1000, 300000)).to_equal(301000)
+        # an earlier existing deadline is kept.
+        expect(parse_shard_death_deadline_v1(5000, 1000, 300000)).to_equal(5000)
+        # grace <= 0 opts out.
+        expect(parse_shard_death_deadline_v1(21601000, 1000, 0)).to_equal(21601000)
+        expect(parse_shard_death_deadline_v1(0, 1000, -1)).to_equal(0)
+
+    it "kills a live sibling soon after a peer crashes instead of waiting the full timeout":
+        val crashed = process_spawn_async("sh", ["-c", "exit 3"])
+        val live = process_spawn_async("sh", ["-c", "sleep 30"])
+        expect(crashed).to_be_greater_than(0)
+        expect(live).to_be_greater_than(0)
+        val started = time_now_monotonic_ms()
+        val (failed, unconfirmed) = parse_shard_reap_v1([crashed, live], [0, 1], 2, 60000, 500)
+        val elapsed = time_now_monotonic_ms() - started
+        print "[spec] failed={failed} unconfirmed={unconfirmed} elapsed_ms={elapsed}"
+        expect(failed).to_equal([0, 1])
+        expect(unconfirmed).to_equal([])
+        expect(process_is_running(live)).to_equal(false)
+        expect(elapsed < 15000).to_equal(true)
 
 describe "ledger pool poll quantum":
     it "spends at most one poll quantum per round however many workers are live":
