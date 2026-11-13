@@ -42,6 +42,21 @@ pub fn shard_worker_confirm_kill_v1(pid: i64, killed: bool) -> bool:
         reaped = reaped - 4294967296
     shard_worker_kill_stopped_v1(killed, reaped, process_is_running(pid))
 
+# Live-sibling bound after a parse shard dies (see parse_shard_reap_v1).
+pub const PARSE_SHARD_DEATH_GRACE_MS_V1: i64 = 300000
+
+# A finished child whose status is neither success (0) nor "still running" (-2).
+pub fn parse_shard_abnormal_exit_v1(code: i64) -> bool:
+    code != 0 and code != -2
+
+# The reap deadline after a sibling died at `now`: the earlier of the current
+# deadline (0 = none) and now + grace; grace <= 0 leaves it unchanged.
+pub fn parse_shard_death_deadline_v1(deadline: i64, now: i64, grace_ms: i64) -> i64:
+    if grace_ms <= 0:
+        return deadline
+    val bounded = now + grace_ms
+    if deadline > 0 and deadline < bounded: deadline else: bounded
+
 # Wait for every parse shard child under ONE shared deadline (`timeout_ms`
 # from now; 0 = no deadline), kill the ones that outlive it, and ALWAYS print
 # each child's exit status. run11 (2026-08-21): shard 6/8 was killed by the
@@ -52,8 +67,17 @@ pub fn shard_worker_confirm_kill_v1(pid: i64, killed: bool) -> bool:
 # `indices` order: `unconfirmed` names killed children whose death could not
 # be confirmed, so the caller must not reclaim or remove the queue they may
 # still write into.
-pub fn parse_shard_reap_v1(pids: [i64], indices: [i64], count: i64, timeout_ms: i64) -> ([i64], [i64]):
-    val deadline = if timeout_ms > 0: time_now_monotonic_ms() + timeout_ms else: 0
+#
+# A shard that dies (crash/abnormal exit) bounds its live siblings by
+# `death_grace_ms` (<= 0 = no bound). Windows diag-phase4 lint_entry
+# (2026-11-13): shard 0/2 exited 0xC0000005, shard 1/2 stayed alive, and the
+# parent sat silent for 85 minutes under the 6 h default build timeout until
+# killed by hand (same shape as the 2026-11-07 c56 run, shard 2/4 live to the
+# deadline). Shards only warm per-module cache entries, so killing a sibling
+# loses no finished work: the real build parses the remainder in process.
+pub fn parse_shard_reap_v1(pids: [i64], indices: [i64], count: i64, timeout_ms: i64,
+        death_grace_ms: i64) -> ([i64], [i64]):
+    var deadline = if timeout_ms > 0: time_now_monotonic_ms() + timeout_ms else: 0
     var codes: [i64] = []
     var pending = 0
     for pid in pids:
@@ -64,10 +88,15 @@ pub fn parse_shard_reap_v1(pids: [i64], indices: [i64], count: i64, timeout_ms: 
         var k = 0
         while k < pids.len():
             if codes[k] == -2:
-                val code = if expired: -2 else: process_wait(pids[k], SHARD_REAP_POLL_MS_V1)
+                # Sign-restore: a zero-extended -2 ("still running") must not
+                # be recorded as an exit status for a live child.
+                val code = if expired: -2 else: shard_exit_code_sign_restored_v1(process_wait(pids[k], SHARD_REAP_POLL_MS_V1))
                 if code != -2 or expired:
                     codes[k] = code
                     pending = pending - 1
+                    if pending > 0 and death_grace_ms > 0 and parse_shard_abnormal_exit_v1(code):
+                        deadline = parse_shard_death_deadline_v1(deadline, time_now_monotonic_ms(), death_grace_ms)
+                        eprint("[parse-shard] shard={indices[k]}/{count} pid={pids[k]} died {parse_shard_exit_label(code)}; {pending} live sibling(s) bounded by death_grace_ms={death_grace_ms}, remainder parses in process")
             k = k + 1
     var failed: [i64] = []
     var unconfirmed: [i64] = []
