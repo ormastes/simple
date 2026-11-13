@@ -273,13 +273,13 @@ Code: `src/compiler/10.frontend/snapshot/ast_pool_snapshot_v1.spl`. Spec:
   `module: "compiler.ast"` row would also drive every per-attribute choice of
   the generated AST views). **Default stays `direct`; no flip is proposed.**
 - **Equality oracle**: the materialised module lowers to a HIR codec blob
-  byte-identical to the production cache-hit restore of the same parse
-  (`build_module_from_flat_pool_blob`, and the packed hit is identical to that).
-  It is NOT identical to the fresh in-process boxed tree: on
-  `attr_access_sites.spl` 2,706 of 25,718 codec lines differ, all span offsets
-  that the fresh bridge gets wrong and every cache hit gets right — a
-  pre-existing cold/warm divergence filed as
-  `doc/08_tracking/bug/fresh_parse_vs_cache_hit_span_divergence_2026-11-13.md`.
+  byte-identical to the fresh in-process parse and to the production cache-hit
+  restore of the same parse (`build_module_from_flat_pool_blob`; the packed hit
+  is identical to that). Until the interpolation sub-parse gave the module
+  lexer back, the fresh parse differed in 2,706 of 25,718 codec lines on
+  `attr_access_sites.spl` (span byte offsets clamped to the last fragment;
+  `doc/08_tracking/bug/fresh_parse_vs_cache_hit_span_divergence_2026-11-13.md`,
+  fixed).
 
 Measurements (same seed binary as §1:
 `.../bootstrap.generations/8ea37491...e467bc/simple`, 119,570,696 bytes,
@@ -292,25 +292,34 @@ load ~8; one run of the spec, `SNAPSHOT` lines):
 | `lib/common/text_bytes.spl` | 198 | 51,664 | 260 | 3,631,250 | 2,213,935 | 3,833,567 |
 | `00.common/data/data_schema_resolver.spl` | 1,973 | 342,736 | 173 | 10,594,790 | 15,187,931 | 103,769,537 |
 
+After the lexer fix (same binary, one run): `data_schema_resolver.spl` parse
+7,524,121 µs, materialise 10,626,035 µs; `text_bytes.spl` 960,966 / 1,446,842;
+`attr_access_sites.spl` unchanged (ASCII).
+
+B/node counts `AstPoolSnapshotV1.bytes` only. The retained parse source
+(`AstPoolSnapshotV1.source`) is on top of it: 13.3 / 26.4 / 13.3 B per AST node
+on these three modules (8,517 / 5,235 / 26,285 bytes), unless it is the same
+text the driver already holds in its `SourceFile`.
+
 Before/after, like for like on `data_schema_resolver.spl`: boxed bridge 236 B
-per node on a reused heap (§1.1 row) and 1.3-1.5 KB per node on a cold heap
+per node (§1.1 first row, 466,944 B / 1,973 nodes) and 1.3-1.5 KB per node on a cold heap
 (§1.1 large-module row) versus 173 B per node packed — about 27 % smaller warm,
 7-8x smaller cold. The brief's "about 76 B per node" figure does not appear in
 this note's measurements; the measured packed snapshot is 173-260 B per node
 (small modules pay the fixed header and string table).
 
-Time: on this interpreter lane materialising costs ~10x the parse it replaces
-on the 514-line module (104 s vs 10.6 s); the cost is the pre-existing pool
-restore + bridge (the `.fpc` line-cache hit costs the same, 95 s; view
-validation is 2.7 s), filed as
-`doc/08_tracking/bug/flat_pool_restore_10x_slower_than_parse_interpreter_2026-11-13.md`.
-**The interpreter lane shows a time regression, not a win**; the native lane
-(where `.spab` is the default hit format) must be measured before any default
-changes.
+Time: as first measured, materialising cost ~10x the parse it replaces on the
+514-line module (104 s vs 10.6 s). The cause was not the restore but the
+char->byte span cursor rewinding on every backward query of a non-ASCII source
+(`doc/08_tracking/bug/flat_pool_restore_10x_slower_than_parse_interpreter_2026-11-13.md`,
+fixed with a per-source prefix table): materialise is now 10.6 s against a
+7.5 s parse (~1.4x). **Still a time cost on the interpreter lane, not a win**;
+the native lane (where `.spab` is the default hit format) must be measured
+before any default changes.
 
 ### 7.2 Phase C.2 (open): driver adoption
 
-Blocked on the restore-cost bug above and a native-lane RSS measurement
+Blocked on a native-lane RSS and time measurement (the restore-cost bug is fixed)
 (§1.3). The exact seam, so the change is mechanical once unblocked:
 
 - **Producer**: `parse_full_frontend_preprocessed_with_scope`

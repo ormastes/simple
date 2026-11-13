@@ -16,12 +16,15 @@ parse / encode / materialise microseconds).
 Interpreter lane. The default stays the boxed tree; the snapshot is selected
 only by a `compiler.ast` Layout rule (`column`).
 ## Verification guidance and troubleshooting
-Equality is HIR codec byte-equality between the materialised module and the
-production front-end cache hit of the same parse (`build_module_from_flat_pool_blob`
-over the captured line blob), plus pool re-dump equality after materialisation
-and the fresh parse's function set. The fresh in-process boxed tree is NOT the
-oracle: it carries bogus offsets for some nodes that every cache hit gets right
+Equality is HIR codec byte-equality between the materialised module, the
+fresh in-process parse and the production front-end cache hit of the same
+parse (`build_module_from_flat_pool_blob` over the captured line blob), plus
+pool re-dump equality after materialisation. Fresh and cache hit agree since
+the interpolation sub-parse restores the module lexer
 (doc/08_tracking/bug/fresh_parse_vs_cache_hit_span_divergence_2026-11-13.md).
+Bytes per node count `AstPoolSnapshotV1.bytes` only; the retained parse source
+(`AstPoolSnapshotV1.source`, 13-26 B per node on these modules) is extra unless
+it is the same text the driver already holds.
 """
 # Lifecycle: doc/05_design/compiler/data/node_tree_storage.md
 # @manual_section: AST pool snapshot
@@ -99,10 +102,13 @@ describe "AST pool snapshot (node storage phase C)":
         expect(bad.is_err()).to_equal(true)
         expect(bad.unwrap_err().contains("sparse_hash")).to_equal(true)
 
-    it "materialises a ParserModule whose HIR equals the cache-hit restore on real compiler files":
+    it "materialises a ParserModule whose HIR equals the fresh parse and the cache-hit restore on real compiler files":
         for path in ROUNDTRIP_MODULES:
             val oracle_hir = cache_hit_hir(path)
             val (fresh, snap) = snapshot_of(path)
+            val fresh_hir = hir_blob(fresh, path)
+            step("The fresh parse and the cache-hit restore lower identically")
+            expect(fresh_hir).to_equal(oracle_hir)
             expect(snap.node_count > 0).to_equal(true)
             expect(snap.bytes.len() > 0).to_equal(true)
             expect(snap.digest.len()).to_equal(64)
@@ -114,18 +120,18 @@ describe "AST pool snapshot (node storage phase C)":
             expect(flat_pools_dump_all()).to_equal(flat_packed_decode_lines_v1(snap.bytes, flat_pools_clear_chunks_v1()))
             val module = built.unwrap()
             expect(module.functions.len()).to_equal(fresh.functions.len())
-            expect(hir_blob(module, path)).to_equal(oracle_hir)
+            expect(hir_blob(module, path)).to_equal(fresh_hir)
             print "SNAPSHOT path={path} nodes={snap.node_count} bytes={snap.bytes.len()} bytes_per_node={snap.bytes.len() / snap.node_count} parse_us={snap.parse_us} encode_us={snap.encode_us} materialise_us={materialise_us}"
 
     it "keeps a materialised module self-contained after another snapshot is materialised":
         val path_a = ROUNDTRIP_MODULES[0]
         val path_b = ROUNDTRIP_MODULES[1]
-        val oracle_a_hir = cache_hit_hir(path_a)
-        val (_fresh_a, snap_a) = snapshot_of(path_a)
+        val (fresh_a, snap_a) = snapshot_of(path_a)
+        val fresh_a_hir = hir_blob(fresh_a, path_a)
         val (_fresh_b, snap_b) = snapshot_of(path_b)
         val module_a = ast_pool_snapshot_materialise_v1(snap_a).unwrap()
         val _module_b = ast_pool_snapshot_materialise_v1(snap_b).unwrap()
-        expect(hir_blob(module_a, path_a)).to_equal(oracle_a_hir)
+        expect(hir_blob(module_a, path_a)).to_equal(fresh_a_hir)
 
     it "refuses to materialise a snapshot over different source text":
         val (_fresh, snap) = snapshot_of(ROUNDTRIP_MODULES[1])
