@@ -259,3 +259,46 @@ only residency compose: a root with interface-only HIR shares a smaller page
 set, and each child reloads only its claimed bodies privately. The arming
 predicate currently refuses `SIMPLE_MIR_FORK_WORKERS>1` (named reason
 `fork-workers`) so the two experiments are measured separately first.
+
+## Keep rule hardened + first worker measurement (2026-11-13, `work/mir-worker-mem-20261113`)
+
+Keep rule (`hir_function_keeps_body_in_module_v1`): the function-local rule
+(extern, fn type params, `is_generic_template`, `const fn`, `@inline`) plus
+every method of a generic class / generic impl (catches trait defaults
+concretized into `impl<T> Trait for X<T>`, which HIR leaves unflagged) plus any
+signature mentioning a type parameter (unwalked kinds count as generic: fail
+closed). Pinned by `test/01_unit/compiler/driver/mir_shard_hir_residency_keep_rule_spec.spl`
+(run-21 rule 4/7, previous tip rule 5/7, now 7/7). 4 real stdlib modules:
+51 bodies dropped, encoded HIR 319301 -> 69611 bytes.
+
+Measured with the run-21 Stage 2 (`stage2-admitted/simple`, built from
+`554460a6b85a`, so it carries the OLD keep rule) on
+`src/app/test_runner_new/main.spl` (332 modules), `SIMPLE_MIR_SHARDING=1
+SIMPLE_MIR_SHARD_COUNT=3 --threads 2 --entry-closure --go-to-end`,
+`SIMPLE_FILE_WORKERS=0 SIMPLE_HIR_SHARDING=0`, one live worker, 8G cgroup,
+per-worker VmHWM sampled from /proc:
+
+| worker | full HIR (A2) | interface HIR (B2) |
+|---|---|---|
+| 0 | 3.84 GB (warm) | 3.75 GB (cold: lowered HIR itself) |
+| 1 | 2.74 GB | 2.43 GB (329 iface, 4817 bodies dropped) |
+| 2 | 3.83 GB | 3.65 GB |
+
+So at 332 modules residency saves 5-11% per worker: held HIR is not the
+dominant term there. Not re-priced: `shard_mir_worker_price_kb_v1` is
+unchanged.
+
+Findings:
+- **Residency is wired only into the streaming-surfaces HIR route.** With
+  `SIMPLE_STAGE3_STREAMING_SURFACES=0` (what `stage3-native-build-worker.sh`
+  sets) the retained-owner route (`driver_hir_pipeline_lowering.spl`
+  `lower_and_check_retained_owner_impl`, load at `:2085`) never reads the flag:
+  no `armed`/`refused` line, no effect. The Stage 3 parallel lane needs either
+  `STREAMING_SURFACES=1` or residency wired into the retained route.
+- **Object identity NOT established.** Per module (matched by queue key), 255 of
+  332 objects are byte-identical between A2 and B2, 77 differ (e.g.
+  `compiler.frontend.core.ast_stmt`, `lib.common.io.types`). No A2-vs-A2
+  determinism baseline was run, so it is unknown whether the 77 come from
+  residency (run-21's old rule) or from run-to-run nondeterminism. Required
+  before defaulting the flag: an A-vs-A rerun, then a B run on a Stage 2 that
+  carries the new keep rule.
