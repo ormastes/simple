@@ -100,3 +100,7 @@ mandatory banner — and per this doc must not be relaxed. The lane remains
 forbidden a bootstrap rebuild. Grant unchanged: deploy the self-hosted binary
 in a bootstrap-authorized lane, set the two pinned baseline env vars from the
 pinned host, run both named specs.
+
+## Triage 2026-11-13 (Linux aarch64, lane uia) — row stays OPEN
+
+Blocked on this host: multicore_green_fanout_spec asserts empty stderr, which needs a self-hosted binary (the seed banner cannot be suppressed through its env -i probe), and the vector-font spec needs host-pinned baselines. The font-fixture half is fixed (1fc1852855a). Regression found, not repaired here: transplant 88aac2ffe28 undid cbe6b94a79f in multicore_green_fanout_spec.spl (mkdir -p build/tmp in unique_probe_path; bin/simple fallback in simple_binary), so probes now fail with 98/127 before reaching the stderr assertion; origin/main carries the same reverted text.
