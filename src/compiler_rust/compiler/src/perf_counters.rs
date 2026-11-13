@@ -71,6 +71,11 @@ counters!(
     ARR_MUT_CALLS,
     ARR_MUT_COW_CLONES,
     ARR_MUT_COW_ELEMS_CLONED,
+    // identifier-receiver array element store (`arr[i] = v`, node_exec.rs):
+    // in-place stores of an owned module global vs. generic-path deep copies
+    INDEX_STORE_GLOBAL_IN_PLACE,
+    INDEX_STORE_COW_CLONES,
+    INDEX_STORE_COW_ELEMS_CLONED,
     // identifier-receiver dict mutation (d.insert(k, v) / d.remove(k) and friends)
     DICT_MUT_CALLS,
     DICT_MUT_COW_CLONES,
