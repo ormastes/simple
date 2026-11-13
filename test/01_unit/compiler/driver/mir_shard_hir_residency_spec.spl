@@ -35,6 +35,14 @@ use compiler.mir._MirLoweringExpr.expr_dispatch.*
 use compiler.mir._MirLowering.asm_and_targets.*
 use compiler.mir.mir_lowering_stmts.*
 use test.helpers.lowering_harness.{mir_module_text, first_text_difference}
+use app.io.env_ops.{env_get, env_set}
+use std.common.crypto.sha256.{sha256_text}
+use compiler.driver.driver_hir_cache.{hir_cache_store, hir_cache_load_parsed_v1,
+    hir_cache_reload_body_v1, hir_cache_last_warnings, hir_cache_parser_binding_v1}
+
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_dir_remove_all(path: text) -> bool
+extern fn rt_getpid() -> i64
 use compiler.driver.driver_mir_shard_hir_residency_v1.{
     mir_shard_hir_residency_refusal_v1, hir_module_interface_only_v1,
     hir_function_keeps_body_v1, mir_shard_hir_residency_plan_v1,
@@ -44,8 +52,8 @@ use compiler.driver.driver_mir_shard_hir_residency_v1.{
     mir_shard_hir_residency_mark_full_v1, mir_shard_hir_residency_held_v1,
     mir_shard_hir_residency_interface_v1, mir_shard_hir_residency_counters_v1}
 
-val RES_RECORDS_SOURCE = "pub struct Point:\n    x: i64\n    y: i64\n\npub const LIMIT: i64 = 7\n\npub trait Area:\n    fn area() -> i64\n    fn doubled() -> i64:\n        self.area() * 2\n\npub fn make(x: i64, y: i64 = 1) -> Point:\n    Point(x: x, y: y)\n\npub fn scale(p: Point, k: i64) -> Point:\n    Point(x: p.x * k, y: p.y * k)\n\npub fn pick<T>(a: T, b: T, first: bool) -> T:\n    if first: a else: b\n\npub extern fn rt_probe_extern(v: i64) -> i64\n"
-val RES_CONSUMER_SOURCE = "use app.probe.records.\{Point, LIMIT, make, scale, pick\}\n\nfn total(p: Point) -> i64:\n    p.x + p.y + LIMIT\n\nfn build() -> i64:\n    val p = scale(make(3), 2)\n    total(p) + pick(1, 2, true)\n"
+val RES_RECORDS_SOURCE = "pub struct Point:\n    x: i64\n    y: i64\n\npub const LIMIT: i64 = 7\n\npub val BASE: Point = make(5)\n\npub trait Area:\n    fn area() -> i64\n    fn doubled() -> i64:\n        self.area() * 2\n\nimpl Area for Point:\n    fn area() -> i64:\n        self.x * self.y\n\npub class Box<T>:\n    item: T\n    fn get() -> T:\n        self.item\n\npub fn make(x: i64, y: i64 = 1) -> Point:\n    Point(x: x, y: y)\n\npub fn scale(p: Point, k: i64) -> Point:\n    val mul = \\v: v * k\n    Point(x: mul(p.x), y: mul(p.y))\n\npub fn pick<T>(a: T, b: T, first: bool) -> T:\n    if first: a else: b\n\npub extern fn rt_probe_extern(v: i64) -> i64\n"
+val RES_CONSUMER_SOURCE = "use app.probe.records.\{Point, LIMIT, BASE, Area, Box, make, scale, pick\}\n\nfn total(p: Point) -> i64:\n    p.x + p.y + LIMIT\n\nfn boxed(v: i64) -> i64:\n    val b = Box<i64>(item: v)\n    b.get()\n\nfn build() -> i64:\n    val p = scale(make(3), 2)\n    val twice = \\n: n + n\n    total(p) + pick(1, 2, true) + p.area() + p.doubled() + boxed(4) + BASE.x + twice(1)\n"
 
 class ResidencyFixture:
     records: HirModule
@@ -83,6 +91,58 @@ fn function_named(module: HirModule, name: text) -> HirFunction:
         fail("function {name} not found in {module.name}")
     found.unwrap()
 
+fn function_ending(module: HirModule, suffix: text) -> HirFunction:
+    var found: HirFunction? = nil
+    for key in module.functions.keys():
+        val function: HirFunction = module.functions[key]
+        if function.name.ends_with(suffix):
+            found = Some(function)
+    if found == nil:
+        fail("no function ending with {suffix} in {module.name}")
+    found.unwrap()
+
+# Deterministic text of the struct facts the cross-module prescan registers
+# (driver_pipeline_lowering.spl prescan loop -> prescan_module_struct_names).
+fn struct_facts_text(lowering: MirLowering) -> text:
+    var keys: [text] = lowering.struct_field_type_name.keys()
+    keys.sort()
+    var out = ""
+    for key in keys:
+        out = out + key + " => [" + lowering.struct_field_type_name[key].join(",") + "]"
+        if lowering.struct_field_order.has(key):
+            out = out + " order=[" + lowering.struct_field_order[key].join(",") + "]"
+        out = out + "\n"
+    out
+
+fn prescan_struct_facts(consumer: HirModule, provider: HirModule) -> text:
+    var lowering = MirLowering.new(consumer.symbols)
+    var prescan_mods: Dict<text, HirModule> = {}
+    prescan_mods["consumer"] = consumer
+    prescan_mods["records"] = provider
+    lowering.prescan_module_struct_names(prescan_mods, "consumer")
+    lowering.prescan_module_struct_names(prescan_mods, "records")
+    struct_facts_text(lowering)
+
+# The lambda-lift counter (_mir_lambda_lift_counter, switch_operators_calls.spl:96)
+# is process-global and never reset, so the second lowering in this process names
+# the consumer's own closure __lambda_lift_<n+1> with symbol id 1073741824+n+1.
+# Neutralize exactly that counter and nothing else.
+fn strip_digits_after(s: text, marker: text) -> text:
+    val parts = s.split(marker)
+    var out = parts[0]
+    var i = 1
+    while i < parts.len():
+        val seg = parts[i]
+        var k = 0
+        while k < seg.len() and "0123456789".contains(seg.substring(k, k + 1)):
+            k = k + 1
+        out = out + marker + "N" + seg.substring(k, seg.len())
+        i = i + 1
+    out
+
+fn lift_counter_neutral(s: text) -> text:
+    strip_digits_after(strip_digits_after(s, "__lambda_lift_"), "1073741")
+
 fn lower_consumer_text(consumer: HirModule, provider: HirModule) -> text:
     var lowering = MirLowering.new(consumer.symbols)
     var prescan_mods: Dict<text, HirModule> = {}
@@ -96,24 +156,32 @@ fn lower_consumer_text(consumer: HirModule, provider: HirModule) -> text:
 
 describe "MIR shard HIR residency arming predicate":
     it "arms only a spawned MIR shard worker that opted in":
-        expect(mir_shard_hir_residency_refusal_v1("1", "0/2", "", "", "", "", false)).to_equal("")
-        expect(mir_shard_hir_residency_refusal_v1("1", "1/2", "", "", "0", "", false)).to_equal("")
+        expect(mir_shard_hir_residency_refusal_v1("1", "0/2", "", "", "", "", false, false, false)).to_equal("")
+        expect(mir_shard_hir_residency_refusal_v1("1", "1/2", "", "", "0", "", false, false, false)).to_equal("")
 
     it "refuses without the opt-in flag (default off)":
-        expect(mir_shard_hir_residency_refusal_v1("", "0/2", "", "", "", "", false)).to_equal("flag-off")
-        expect(mir_shard_hir_residency_refusal_v1("0", "0/2", "", "", "", "", false)).to_equal("flag-off")
+        expect(mir_shard_hir_residency_refusal_v1("", "0/2", "", "", "", "", false, false, false)).to_equal("flag-off")
+        expect(mir_shard_hir_residency_refusal_v1("0", "0/2", "", "", "", "", false, false, false)).to_equal("flag-off")
 
     it "refuses outside a MIR shard worker":
-        expect(mir_shard_hir_residency_refusal_v1("1", "", "", "", "", "", false)).to_equal("not-mir-shard-worker")
+        expect(mir_shard_hir_residency_refusal_v1("1", "", "", "", "", "", false, false, false)).to_equal("not-mir-shard-worker")
 
     it "refuses the link child, the export writer and the fork root":
-        expect(mir_shard_hir_residency_refusal_v1("1", "0/1", "/tmp/ledger", "", "", "", false)).to_equal("link-worker")
-        expect(mir_shard_hir_residency_refusal_v1("1", "0/1", "", "/tmp/export", "", "", false)).to_equal("export-writer")
-        expect(mir_shard_hir_residency_refusal_v1("1", "0/1", "", "", "3", "", false)).to_equal("fork-workers")
+        expect(mir_shard_hir_residency_refusal_v1("1", "0/1", "/tmp/ledger", "", "", "", false, false, false)).to_equal("link-worker")
+        expect(mir_shard_hir_residency_refusal_v1("1", "0/1", "", "/tmp/export", "", "", false, false, false)).to_equal("export-writer")
+        expect(mir_shard_hir_residency_refusal_v1("1", "0/1", "", "", "3", "", false, false, false)).to_equal("fork-workers")
 
     it "refuses a per-file unit child and a module-scoped child":
-        expect(mir_shard_hir_residency_refusal_v1("1", "0/1", "", "", "", "/tmp/hir-queue", false)).to_equal("file-worker-unit")
-        expect(mir_shard_hir_residency_refusal_v1("1", "0/1", "", "", "", "", true)).to_equal("module-scoped-unit")
+        expect(mir_shard_hir_residency_refusal_v1("1", "0/1", "", "", "", "/tmp/hir-queue", false, false, false)).to_equal("file-worker-unit")
+        expect(mir_shard_hir_residency_refusal_v1("1", "0/1", "", "", "", "", true, false, false)).to_equal("module-scoped-unit")
+
+    it "refuses the bootstrap flat-row store only when its rows would be lowered":
+        # SIMPLE_BOOTSTRAP=1 && STAGE4!=1 adopts _bootstrap_hir_store rows at load; a
+        # claim reload does not refresh them, and ENTRY_CLOSURE=1 lowers from them.
+        expect(mir_shard_hir_residency_refusal_v1("1", "0/1", "", "", "", "", false, true, true)).to_equal("bootstrap-flat-rows")
+        # rows adopted but never lowered (managed stages set ENTRY_CLOSURE=0): armed
+        expect(mir_shard_hir_residency_refusal_v1("1", "0/1", "", "", "", "", false, true, false)).to_equal("")
+        expect(mir_shard_hir_residency_refusal_v1("1", "0/1", "", "", "", "", false, false, true)).to_equal("")
 
 describe "interface-only HIR projection":
     it "keeps every function key, name and signature and empties only ordinary bodies":
@@ -148,6 +216,19 @@ describe "interface-only HIR projection":
         expect(body_is_empty(function_named(fixture.records, "pick"))).to_equal(false)
         expect(body_is_empty(function_named(projected, "pick"))).to_equal(false)
         expect(function_named(projected, "rt_probe_extern").is_extern).to_equal(true)
+
+    it "keeps generic class method bodies (is_generic_template with empty fn-level type_params)":
+        val fixture = residency_fixture()
+        val get_full = function_ending(fixture.records, "get")
+        expect(get_full.is_generic_template).to_equal(true)
+        expect(get_full.type_params.len()).to_equal(0)
+        expect(body_is_empty(get_full)).to_equal(false)
+        expect(hir_function_keeps_body_v1(get_full)).to_equal(true)
+        val (projected, _stripped) = hir_module_interface_only_v1(fixture.records)
+        expect(body_is_empty(function_ending(projected, "get"))).to_equal(false)
+        # ordinary impl methods and closure-bearing bodies are still dropped
+        expect(body_is_empty(function_ending(projected, "area"))).to_equal(true)
+        expect(body_is_empty(function_named(projected, "scale"))).to_equal(true)
 
     it "keeps parameter defaults, constants, structs, traits with default bodies and the symbol table":
         val fixture = residency_fixture()
@@ -189,7 +270,71 @@ describe "value semantics: consumer MIR is identical with a full or interface-on
         expect(stripped > 0).to_equal(true)
         val interface_text = lower_consumer_text(fixture.consumer, interface_records)
         expect(full_text != "").to_equal(true)
-        expect(first_text_difference("app.probe.main", full_text, interface_text)).to_equal("")
+        # generic class method call, impl static dispatch, trait default and closure are
+        # visible by name; the provider global `BASE` (`val X = f()`) is referenced by
+        # symbol id only, and is covered by the identical-text comparison + errors == 0.
+        var missing_markers: [text] = []
+        for marker in ["boxed", "area", "doubled", "__lambda_lift_"]:
+            if not full_text.contains(marker): missing_markers.push(marker)
+        expect(missing_markers).to_equal([])
+        expect(first_text_difference("app.probe.main", lift_counter_neutral(full_text), lift_counter_neutral(interface_text))).to_equal("")
+
+describe "cross-module struct prescan reads declarations only":
+    it "registers identical struct facts from a full and an interface-only provider":
+        val fixture = residency_fixture()
+        val full_facts = prescan_struct_facts(fixture.consumer, fixture.records)
+        val (interface_records, stripped) = hir_module_interface_only_v1(fixture.records)
+        expect(stripped > 0).to_equal(true)
+        val interface_facts = prescan_struct_facts(fixture.consumer, interface_records)
+        expect(full_facts.contains("Point")).to_equal(true)
+        expect(first_text_difference("struct-facts", full_facts, interface_facts)).to_equal("")
+
+    it "keeps the consumer's own body-derived facts after lowering against an interface-only provider":
+        val fixture = residency_fixture()
+        var full_lowering = MirLowering.new(fixture.consumer.symbols)
+        var full_mods: Dict<text, HirModule> = {}
+        full_mods["consumer"] = fixture.consumer
+        full_mods["records"] = fixture.records
+        full_lowering.prescan_module_struct_names(full_mods, "consumer")
+        full_lowering.prescan_module_struct_names(full_mods, "records")
+        val _full_mir = full_lowering.lower_module(fixture.consumer, [fixture.consumer, fixture.records])
+        val (interface_records, _stripped) = hir_module_interface_only_v1(fixture.records)
+        var iface_lowering = MirLowering.new(fixture.consumer.symbols)
+        var iface_mods: Dict<text, HirModule> = {}
+        iface_mods["consumer"] = fixture.consumer
+        iface_mods["records"] = interface_records
+        iface_lowering.prescan_module_struct_names(iface_mods, "consumer")
+        iface_lowering.prescan_module_struct_names(iface_mods, "records")
+        val _iface_mir = iface_lowering.lower_module(fixture.consumer, [fixture.consumer, interface_records])
+        expect(full_lowering.errors.len()).to_equal(0)
+        expect(iface_lowering.errors.len()).to_equal(0)
+        expect(first_text_difference("struct-facts-after-lowering", struct_facts_text(full_lowering), struct_facts_text(iface_lowering))).to_equal("")
+
+describe "claim-time body reload":
+    it "restores bodies and drains the retained warnings root the first load re-armed":
+        val dir = "build/hir_residency_reload_{rt_getpid()}"
+        expect(rt_dir_create_all(dir)).to_equal(true)
+        val old_scope = env_get("SIMPLE_FRONTEND_CACHE_SCOPE") ?? ""
+        val old_dir = env_get("SIMPLE_HIR_CACHE_DIR") ?? ""
+        expect(env_set("SIMPLE_FRONTEND_CACHE_SCOPE", "hir-residency-reload-spec")).to_equal(true)
+        expect(env_set("SIMPLE_HIR_CACHE_DIR", dir)).to_equal(true)
+        val fixture = residency_fixture()
+        val key = sha256_text("hir-residency-reload-records")
+        val binding = hir_cache_parser_binding_v1(key, "app.probe.records", "app/probe/records.spl", sha256_text(RES_RECORDS_SOURCE))
+        expect(hir_cache_store(key, fixture.records, ["records: unused import"], "bodyful:" + binding)).to_equal(true)
+        val iface_only = hir_cache_load_parsed_v1(key, binding, "app/probe/records.spl", "", true)
+        expect(iface_only != nil).to_equal(true)
+        expect(body_is_empty(function_named(iface_only.unwrap(), "make"))).to_equal(true)
+        # the first (interface-only) load replays the entry's warnings, as the HIR stage drains them
+        expect(hir_cache_last_warnings()).to_equal(["records: unused import"])
+        val reloaded = hir_cache_reload_body_v1(key, binding, "app/probe/records.spl", "")
+        expect(reloaded != nil).to_equal(true)
+        expect(body_is_empty(function_named(reloaded.unwrap(), "make"))).to_equal(false)
+        # the claim reload must not leave the root armed: lease consumers refuse on a non-empty root
+        expect(hir_cache_last_warnings().len()).to_equal(0)
+        expect(env_set("SIMPLE_HIR_CACHE_DIR", old_dir)).to_equal(true)
+        expect(env_set("SIMPLE_FRONTEND_CACHE_SCOPE", old_scope)).to_equal(true)
+        expect(rt_dir_remove_all(dir)).to_equal(true)
 
 describe "held module set after the claim loop":
     it "plans full bodies for the entry and the claimed modules only":
