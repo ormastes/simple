@@ -52,7 +52,7 @@ Notes on the evidence:
 - The red is **self-induced contention**: the serial runs did not reproduce the
   3-of-10 reported by #8765 (0 of 20). That report was taken while other lanes
   were using the GPU; four concurrent spec loops recreate the condition.
-- The first two rows also set `VK_LOADER_DEBUG=error,warn`; the loader printed
+- The first three rows also set `VK_LOADER_DEBUG=error,warn`; the loader printed
   nothing relevant.
 - Failures are per init, not per process: of the 32 processes in the third row,
   12 lost one of four examples, 4 lost two, 1 lost three, 3 lost all four. A
@@ -88,6 +88,7 @@ init failure in its log. It does not share this cause.
    after 50/100/200/400 ms (750 ms total). Every failed attempt and a late
    success are logged. Exhaustion returns the error: no CPU fallback, no skip,
    specs stay fail-closed. The success path makes one call and never sleeps.
+   A persistently failing init costs up to 750 ms per call and is not cached.
 
 Red -> green for the helper (`cargo test --release -p simple-compiler --lib
 vk_create_device_retry`): 2 passed / 2 failed on the single-attempt stub
@@ -100,7 +101,7 @@ vk_create_device_retry`): 2 passed / 2 failed on the single-attempt stub
 | 4 concurrent loops x 8, NVIDIA (the red condition) | **2 of 32** (was 11 of 32 and 20 of 32) | 28 inits hit -3 on attempt 1; 26 recovered (8 on attempt 2, 8 on 3, 6 on 4, 4 on 5); 2 exhausted all 5 |
 | 2 concurrent loops x 10, NVIDIA | 0 of 20 | 0 |
 | serial, unit spec | 0 of 20 | 0 |
-| serial, system spec | 0 of 10 | 1 init needed 2 retries (succeeded on attempt 3) while another lane used the GPU |
+| serial, system spec | 0 of 10 | 1 init needed 2 retries (succeeded on attempt 3); contention source not captured. The only natural (serial) reproduction of the #8765 symptom, and it recovered |
 
 Residual, stated rather than hidden: under four concurrent device-creating
 processes 2 of 32 still fail after 750 ms, with the full error text. The bound
