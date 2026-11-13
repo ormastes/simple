@@ -361,3 +361,21 @@ Other `b795b3f4a26`/`aba2a5f0a3e` sites, same seed and scope:
   refused by section containment), mirroring the runtime's uint32 truncation. The twin dump
   prints twice under the seed (engine demotion re-runs `main`); the objects check reads the
   first line — filed `doc/08_tracking/bug/seed_engine_demotion_reruns_main_side_effects_2026-11-13.md`.
+
+#### Review round 1 fixes (2026-11-13)
+- Aliased re-exports removed (`export use m.{a as b}` did not resolve on the reviewer's pinned
+  seed through `elf_writer`'s glob re-export; bug `seed_aliased_reexport_unresolved_2026-11-13`).
+  Thin local wrappers were measured on the ELF writer probe: 71.78 / 73.73 s vs release 52.24 /
+  50.95 s (1.4x) — so the hot emitters keep module-local bodies instead: `_ElfWriter/encoding.spl`
+  and `encode_x86_64.spl` are back to release content, `encode_aarch64.spl` keeps its local
+  `emit_u32_le`, `x64_push_imm32_le_v1` has its own body again (cold: XRay twins only), and the
+  `bytes_i64_push_u{16,32,64}_le` helpers are deleted. Step 3d's writer/x64 fold is withdrawn.
+  `coff_is_bigobj` is a local wrapper (once per object). `a64_new_encode_context` /
+  `encode_inst_aarch64` are `pub` so the encoder specs run on strict binaries.
+- Windows trampoline: a sled sits where rsp is 8 mod 16, so the trampoline entry is 0 mod 16;
+  the old 8 pushes + 0x238 left rsp 8 mod 16 at the handler CALL. Now push rbp; pushfq (RFLAGS
+  saved before the first flag-writing `sub`); 7 volatile GPRs; mov rbp,rsp; sub 0x238 -> 640
+  bytes, 0 mod 16 at the CALL. 340 bytes, prolog 23, 12 unwind slots (ALLOC_SMALL for pushfq),
+  epilog `lea; pops; popfq; pop rbp; ret`. New spec example decodes the prolog bytes and asserts
+  the alignment (old twin: 6/10, new: 10/10); clang byte/unwind parity check PASS. Windows
+  `-Wall -Wextra` build has no warnings (unused `field` fixed in the Windows XMAP_TEXT_BASE).
