@@ -1,7 +1,7 @@
 # Caret JIT run splices 392 externs through the interpreter (unregistered JIT symbols)
 
 - **Filed:** 2026-11-13
-- **Status:** OPEN. Out of scope for lane `work/jit-dynamic-dispatch-20261113`; tracked here only.
+- **Status:** OPEN (392 -> 309 after waves 1-3). Out of scope for lane `work/jit-dynamic-dispatch-20261113`; tracked here only.
 - **Related:** `doc/05_design/compiler/jit/jit_trait_dispatch_and_cross_module_link.md` (row 5)
 
 ## Symptom
@@ -355,4 +355,51 @@ and unimplemented declarations (about 180 names), not more registration.
   and `rt_process_run_bounded_bytes` as codegen-emitted and missing from the
   manifest. They are the ones left spliced above; settle their ABI questions
   and that gate's list shrinks with them.
-- `bug_db.sdn` rows for this bug were not updated; the bug stays OPEN.
+- `bug_db.sdn` rows for this bug were not updated in waves 1-2; wave 3 adds
+  the `bugs` row (open) and three investigation-log rows.
+
+## Wave 3 — only referenced externs count toward the splice (2026-11-13)
+
+`run_file_jit` (`driver/src/exec_core.rs`) now filters the unresolvable set by
+`mir::referenced_function_names` (`compiler/src/mir/hybrid.rs`): `Call` targets
+(raw, module-prefix-stripped, SFFI alias), `InterpCall`, `GlobalLoad` /
+`GlobalStore` function values, `ClosureCreate`, `MethodCallStatic`, global
+function-pointer initializers and vtable slots. `apply_hybrid_transform` only
+rewrites exact `Call` targets, all of which are in that set, so the transformed
+MIR is identical; a declaration nothing references no longer demotes the run
+or appears in the receipt. A called unresolvable extern still splices and fails
+closed; a function-value use is still named and still rejected module-wide by
+the JIT's `first_named_fn_value_load`.
+
+caret `--help`, aarch64, seeds `19f0d14f1c892d49…` (base) / `4da8af22722e0ed1…`
+(wave 3), 3 serial runs each plus interleaved pairs, host load 9-11:
+
+| | splice names | wall (median, 3 serial) | user CPU (median, 6 interleaved) | peak RSS | stdout vs interpreter |
+|---|---|---|---|---|---|
+| base | 325 | 7.12 s | 7.04 s | 1,593 MB | byte-identical |
+| wave 3 | 309 | 8.38 s | 6.95 s | 1,556 MB | byte-identical |
+
+Wall time on this shared host swings 7.2-11.4 s for BOTH seeds with system time
+(0.5-3.3 s, memory reclaim); interleaved wall medians were 9.26 s base vs
+8.39 s wave 3, and user CPU is flat. No regression; the added work is one MIR
+walk.
+
+Dropped from the splice (16): `GetModuleFileNameW`, `GetSystemTimes`,
+`retained_native_{close,read,write}`, `rt_arm32_dcache_{clean,invalidate}_range`,
+`rt_host_{commit,disk}_headroom_bytes_v1`, `rt_http_{delete,head,patch,post,put}`,
+`rt_http_url_{decode,encode}`.
+
+**Finding:** the reduction is small because the other 309 ARE referenced: the
+seed lowers every imported `src/lib` function body into the module MIR, called
+or not, so a Win32 wrapper in a reachable module references its extern. Driving
+the count further needs either reachability pruning of MIR functions from
+`main` (a larger change: function values, vtables and module init would all
+have to be roots) or the cfg-pruning / native providers listed under
+"Remaining after wave 2".
+
+Tests (`jit_extern_native_link_tests.rs`): 4 wave-3 cases; 2 red on the base
+seed (declared-never-called runs fully JIT; the receipt names only referenced
+externs), 2 pins green on both (called from a helper / a lambda still splices
+and fails closed; function value / function argument still detected). 10/10
+green on the wave 3 seed; `mir::hybrid` unit tests and `extern_drift_tests`
+green.

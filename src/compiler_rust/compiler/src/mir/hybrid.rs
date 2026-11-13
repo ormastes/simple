@@ -40,12 +40,13 @@ pub fn apply_hybrid_transform(
 /// (`GlobalLoad`/`GlobalStore` — an extern fn name is a global), closures,
 /// static method calls, global function-pointer initializers and vtable slots.
 ///
-/// Deliberately over-approximate: a name counted here that codegen never
-/// needs only costs a splice receipt; a name MISSED here would let an
-/// unresolvable extern skip the hybrid splice. Callers use it to drop extern
-/// DECLARATIONS nothing references (src/lib declares platform-foreign externs
-/// unconditionally) from the splice set; [`apply_hybrid_transform`] only
-/// rewrites exact `Call` targets, all of which are included.
+/// Callers use it to drop extern DECLARATIONS nothing references (src/lib
+/// declares platform-foreign externs unconditionally) from the splice set.
+/// [`apply_hybrid_transform`] only rewrites exact `Call` targets, all of which
+/// are included, so filtering by this set never changes the transformed MIR.
+/// The non-`Call` names are a deliberate over-approximation that keeps the
+/// splice receipt naming function-value uses (which `first_named_fn_value_load`
+/// in the JIT rejects module-wide).
 pub fn referenced_function_names(module: &MirModule) -> HashSet<String> {
     use crate::codegen::instr::calls::{sffi_alias_target, strip_call_module_prefix};
     let mut names = HashSet::new();
@@ -252,7 +253,8 @@ mod tests {
         for name in ["called_extern", "fn_value_extern", "init_fn_extern"] {
             assert!(names.contains(name), "{name} missing from {names:?}");
         }
-        assert!(!names.contains("declared_only_extern"));
+        module.extern_fn_names.insert("declared_only_extern".to_string());
+        assert!(!referenced_function_names(&module).contains("declared_only_extern"));
     }
 
     #[test]
