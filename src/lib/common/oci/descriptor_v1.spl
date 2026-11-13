@@ -1,0 +1,210 @@
+# Shared OCI descriptor, digest, platform and path validation (pure, no IO).
+#
+# Owner of the generic OCI image-spec primitives used by std.container.oci.
+# Every decoder is bounded and fails CLOSED with a stable "oci-..." reason.
+# Design: doc/05_design/simple_container_macos_seatbelt.md §16.5.4.
+
+use std.common.json.value.{JsonValue, json_value_type, json_value_has, json_value_field,
+    json_value_items, json_value_text_or, json_value_as_i64}
+
+pub const OCI_MEDIA_TYPE_INDEX_V1 = "application/vnd.oci.image.index.v1+json"
+pub const OCI_MEDIA_TYPE_MANIFEST_V1 = "application/vnd.oci.image.manifest.v1+json"
+pub const OCI_MEDIA_TYPE_CONFIG_V1 = "application/vnd.oci.image.config.v1+json"
+pub const OCI_MEDIA_TYPE_LAYER_TAR_V1 = "application/vnd.oci.image.layer.v1.tar"
+pub const OCI_MEDIA_TYPE_LAYER_GZIP_V1 = "application/vnd.oci.image.layer.v1.tar+gzip"
+pub const OCI_MEDIA_TYPE_LAYER_ZSTD_V1 = "application/vnd.oci.image.layer.v1.tar+zstd"
+
+pub struct OciLimitsV1:
+    """Decode bounds. A document, descriptor list or declared size above these
+    is rejected before any further processing."""
+    max_document_bytes: i64
+    max_descriptors: i64
+    max_blob_bytes: i64
+    max_total_bytes: i64
+
+pub struct OciPlatformV1:
+    os: text
+    architecture: text
+    variant: text
+
+pub struct OciDescriptorV1:
+    media_type: text
+    digest: text
+    size: i64
+    platform: OciPlatformV1?
+
+# 4 MiB documents, 1024 descriptors, 16 GiB per blob, 64 GiB per image.
+pub fn oci_limits_default_v1() -> OciLimitsV1:
+    OciLimitsV1(max_document_bytes: 4194304, max_descriptors: 1024,
+        max_blob_bytes: 17179869184, max_total_bytes: 68719476736)
+
+fn _oci_all_in(value: text, allowed: text) -> bool:
+    var i = 0
+    while i < value.len():
+        if not allowed.contains(value.substring(i, i + 1)):
+            return false
+        i = i + 1
+    true
+
+# Only sha256 (64) and sha512 (128) lowercase-hex digests are accepted.
+pub fn oci_digest_valid_v1(digest: text) -> bool:
+    val parts = digest.split(":")
+    if parts.len() != 2:
+        return false
+    var width = 0
+    if parts[0] == "sha256":
+        width = 64
+    elif parts[0] == "sha512":
+        width = 128
+    else:
+        return false
+    parts[1].len() == width and _oci_all_in(parts[1], "0123456789abcdef")
+
+# Platform/media-type tokens: bounded and drawn from a closed character set.
+pub fn oci_token_valid_v1(token: text, max_len: i64) -> bool:
+    token.len() > 0 and token.len() <= max_len and
+        _oci_all_in(token, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-+/")
+
+# A layer entry path: relative, no NUL/backslash, no "." or ".." component.
+pub fn oci_layer_path_valid_v1(path: text) -> bool:
+    if path.len() == 0 or path.len() > 4096:
+        return false
+    if path.starts_with("/") or path.contains("\0") or path.contains("\\"):
+        return false
+    for component in path.split("/"):
+        if component == ".." or component == ".":
+            return false
+    true
+
+# Whiteout target of a layer entry: "" for an ordinary entry; the opaque
+# marker ".wh..wh..opq" maps to its directory + "/"; ".wh.<name>" maps to the
+# sibling path it deletes.
+pub fn oci_layer_whiteout_target_v1(path: text) -> Result<text, text>:
+    if not oci_layer_path_valid_v1(path):
+        return Err("oci-layer-path-invalid")
+    val components = path.split("/")
+    val leaf = components[components.len() - 1]
+    if not leaf.starts_with(".wh."):
+        return Ok("")
+    var parent = ""
+    var i = 0
+    while i < components.len() - 1:
+        if components[i] != "":
+            parent = parent + components[i] + "/"
+        i = i + 1
+    if leaf == ".wh..wh..opq":
+        return Ok(parent)
+    val target = leaf.substring(4, leaf.len())
+    if target == "" or target.starts_with(".wh."):
+        return Err("oci-layer-whiteout-invalid")
+    Ok(parent + target)
+
+pub fn oci_json_object_v1(value: JsonValue, what: text) -> Result<JsonValue, text>:
+    if json_value_type(value) != "object":
+        return Err("oci-" + what + "-not-object")
+    Ok(value)
+
+fn _oci_text_payload_valid(payload: text) -> bool:
+    payload.len() <= 65536 and not payload.contains("\0")
+
+# Optional text member: "" when absent and not required.
+pub fn oci_json_text_v1(value: JsonValue, key: text, required: bool, what: text) -> Result<text, text>:
+    if not json_value_has(value, key):
+        if required:
+            return Err("oci-" + what + "-missing-" + key)
+        return Ok("")
+    val field = json_value_field(value, key)
+    if json_value_type(field) != "string":
+        return Err("oci-" + what + "-type-" + key)
+    val payload = json_value_text_or(field, "")
+    if not _oci_text_payload_valid(payload):
+        return Err("oci-" + what + "-text-invalid-" + key)
+    Ok(payload)
+
+pub fn oci_json_i64_v1(value: JsonValue, key: text, what: text) -> Result<i64, text>:
+    if not json_value_has(value, key):
+        return Err("oci-" + what + "-missing-" + key)
+    match json_value_as_i64(json_value_field(value, key)):
+        case Some(number): Ok(number)
+        case _: Err("oci-" + what + "-type-" + key)
+
+pub fn oci_json_bool_v1(value: JsonValue, key: text, what: text) -> Result<bool, text>:
+    if not json_value_has(value, key):
+        return Ok(false)
+    val field = json_value_field(value, key)
+    if json_value_type(field) != "boolean":
+        return Err("oci-" + what + "-type-" + key)
+    match field:
+        case JsonValue.Bool(flag): Ok(flag)
+        case _: Err("oci-" + what + "-type-" + key)
+
+# Array member checked for type and count; [] when absent or JSON null.
+pub fn oci_json_array_v1(value: JsonValue, key: text, max_items: i64, what: text) -> Result<[JsonValue], text>:
+    if not json_value_has(value, key):
+        return Ok([])
+    val field = json_value_field(value, key)
+    if json_value_type(field) == "null":
+        return Ok([])
+    if json_value_type(field) != "array":
+        return Err("oci-" + what + "-type-" + key)
+    val items = json_value_items(field)
+    if items.len() > max_items:
+        return Err("oci-" + what + "-too-many-" + key)
+    Ok(items)
+
+pub fn oci_json_text_list_v1(value: JsonValue, key: text, max_items: i64, what: text) -> Result<[text], text>:
+    val items = oci_json_array_v1(value, key, max_items, what)?
+    var out: [text] = []
+    for entry in items:
+        if json_value_type(entry) != "string":
+            return Err("oci-" + what + "-type-" + key)
+        val payload = json_value_text_or(entry, "")
+        if not _oci_text_payload_valid(payload):
+            return Err("oci-" + what + "-text-invalid-" + key)
+        out.push(payload)
+    Ok(out)
+
+# Environment entries must be KEY=VALUE with a non-empty key.
+pub fn oci_env_valid_v1(env: [text]) -> bool:
+    for entry in env:
+        val parts = entry.split("=")
+        if parts.len() < 2 or parts[0] == "":
+            return false
+    true
+
+pub fn oci_platform_decode_v1(value: JsonValue) -> Result<OciPlatformV1, text>:
+    val checked = oci_json_object_v1(value, "platform")?
+    val os = oci_json_text_v1(checked, "os", true, "platform")?
+    val architecture = oci_json_text_v1(checked, "architecture", true, "platform")?
+    val variant = oci_json_text_v1(checked, "variant", false, "platform")?
+    if not oci_token_valid_v1(os, 64) or not oci_token_valid_v1(architecture, 64):
+        return Err("oci-platform-token-invalid")
+    if variant != "" and not oci_token_valid_v1(variant, 64):
+        return Err("oci-platform-token-invalid")
+    Ok(OciPlatformV1(os: os, architecture: architecture, variant: variant))
+
+# Exact platform match; an empty wanted variant matches any variant.
+pub fn oci_platform_matches_v1(have: OciPlatformV1, want: OciPlatformV1) -> bool:
+    have.os == want.os and have.architecture == want.architecture and
+        (want.variant == "" or have.variant == want.variant)
+
+pub fn oci_descriptor_decode_v1(value: JsonValue, limits: OciLimitsV1) -> Result<OciDescriptorV1, text>:
+    val checked = oci_json_object_v1(value, "descriptor")?
+    # Foreign "urls" layers would be fetched from arbitrary hosts: refuse.
+    if json_value_has(checked, "urls"):
+        return Err("oci-descriptor-urls-unsupported")
+    val media_type = oci_json_text_v1(checked, "mediaType", true, "descriptor")?
+    if not oci_token_valid_v1(media_type, 255):
+        return Err("oci-descriptor-media-type-invalid")
+    val digest = oci_json_text_v1(checked, "digest", true, "descriptor")?
+    if not oci_digest_valid_v1(digest):
+        return Err("oci-descriptor-digest-invalid")
+    val size = oci_json_i64_v1(checked, "size", "descriptor")?
+    if size < 0:
+        return Err("oci-descriptor-size-negative")
+    if size > limits.max_blob_bytes:
+        return Err("oci-descriptor-size-exceeds-limit")
+    if json_value_has(checked, "platform"):
+        val platform = oci_platform_decode_v1(json_value_field(checked, "platform"))?
+        return Ok(OciDescriptorV1(media_type: media_type, digest: digest, size: size, platform: Some(platform)))
+    Ok(OciDescriptorV1(media_type: media_type, digest: digest, size: size, platform: None))

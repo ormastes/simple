@@ -1,0 +1,36 @@
+# The public Simple Container routes compile and resolve to the single
+# existing owners: std.container -> api_v2 facade, std.container.policy ->
+# common container contracts, std.container.oci -> std.common.oci codec.
+# Every call below is refused before any host effect (no engine, no IO).
+# Design: doc/05_design/simple_container_macos_seatbelt.md §16.5.2, §16.5.5.
+use std.spec.*
+use std.container.{SimpleContainerOwnerV2, ContainerOperationTurnV2,
+    simple_container_observe_v2, simple_container_open_v2}
+use std.container.policy.{ContainerHostCapabilityV1, ContainerHostRequirementV1,
+    container_host_admission_reason_v1, CONTAINER_ISOLATION_NATIVE_SANDBOX_V1,
+    container_kernel_qualification_profile_decode_v1}
+use std.container.oci.{oci_backend_platform_os_v1, oci_limits_default_v1}
+use std.common.contracts.container.execution_v2.ContainerHostScopeV2
+
+describe "public Simple Container entry points":
+    it "std.container re-exports the existing V2 facade, which refuses unknown backends":
+        expect(simple_container_observe_v2("docker", "policy").unwrap_err()).to_equal("container-api-backend-unsupported")
+        expect(simple_container_observe_v2("macos-seatbelt", "policy").unwrap_err()).to_equal("container-api-backend-unsupported")
+        val scope = ContainerHostScopeV2(physical_host_id: "h", service_scope_id: "s", boot_id: "b",
+            provider_generation: 1, native_machine_id: "m", continuity_mode: "native-boot-incarnation-v1",
+            continuity_id: "b")
+        val opened = simple_container_open_v2("linux-podman", "", "/state", scope, "digest", 1000)
+        expect(opened.unwrap_err()).to_equal("container-api-policy-size")
+
+    it "std.container.policy re-exports the capability contracts":
+        val capability = ContainerHostCapabilityV1(host_os: "", guest_os: "", provider_id: "",
+            isolation_class: CONTAINER_ISOLATION_NATIVE_SANDBOX_V1, client_privilege: "user",
+            admin_setup: false, launch_capable: false, reason: "")
+        val requirement = ContainerHostRequirementV1(host_os: "macos", guest_os: "macos",
+            isolation_class: CONTAINER_ISOLATION_NATIVE_SANDBOX_V1, require_unprivileged_client: true)
+        expect(container_host_admission_reason_v1(capability, requirement)).to_equal("host-capability-identity-missing")
+        expect(container_kernel_qualification_profile_decode_v1("").is_err()).to_equal(true)
+
+    it "std.container.oci re-exports the pure codec":
+        expect(oci_backend_platform_os_v1("macos-seatbelt").unwrap()).to_equal("darwin")
+        expect(oci_limits_default_v1().max_descriptors).to_equal(1024)
