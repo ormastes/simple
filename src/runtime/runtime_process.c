@@ -4443,6 +4443,19 @@ bool rt_pty_resize(int64_t handle, int32_t rows, int32_t cols) {
 }
 #endif
 
+/* C lane of rt_pty_hangup. Same scope as rt_pty_is_running above: the Rust
+ * lane signals the child it spawned (SIGHUP to its session group) and stamps
+ * its child-table record so the following rt_pty_close shares one grace
+ * period across a batch teardown. This lane spawns no pty child and owns no
+ * child table, so it has no child to signal and none whose grace to stamp; it
+ * answers false ("no child signalled"), which callers treat as a no-op before
+ * the close that still follows. Deliberately NOT a TIOCSIG/kill on anything
+ * this lane did not spawn. */
+bool rt_pty_hangup(int64_t handle) {
+    (void)handle;
+    return false;
+}
+
 #include "runtime_piped_byte_endpoint_v1_impl.h"
 int64_t rt_process_validate_byte_endpoint_v1(int64_t generation,const char* binding,int64_t binding_bytes) {
     return byte_endpoint_validate_impl_v1(generation,binding,binding_bytes);

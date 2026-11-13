@@ -72,4 +72,5 @@ until it outputs again. Spec:
 (200 typed chars into `sh -i` < 5 s): before 66.5 s, after ~4.0-4.3 s.
 
 Side observation, not fixed here: a CR sent to a cooked-mode `read -r x`
-(no readline) under ConPTY never completed the read within 40 s.
+(no readline) under ConPTY never completed the read within 40 s. Filed as
+`smux_pane_cooked_read_enter_never_completes_2026-11-13.md` (not reproducible on 2026-11-13).

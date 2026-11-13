@@ -179,3 +179,23 @@ owners. A full ratchet re-run on this Windows worktree exceeded its execution
 window (the script's repo-wide \`use\` scan is slow here); no part-file was
 added, edited or deleted in this lane, so the documented 2026-11-09 PASS state
 is unchanged. No code change.
+
+## Fix (2026-11-13) — `_CliCompile/native_build.spl` deleted (lane n5)
+
+Retargeted its three source-text readers at the live code, each assertion keeping
+its meaning: `stage4_smoke_gate_spec` (CLI entry-closure BFS) now reads
+`native_build_closure.spl` and pins the live `_native_build_entry_closure`
+signature, its `discovered` dedup set, `resolve_cache` read/write and the
+`driver_closure_import_specs_v1` import scan; `native_build_cache_plumbing_spec`
+(cache-dir diagnostics) reads `compile_targets.spl`, which carries the same strings;
+`fs_extern_optional_spec` drops the deleted file's pin (no non-optional
+`rt_dir_list` declaration can remain in a file that no longer exists). Removed the
+last `orphan_part_file_baseline.txt` row. Generated `doc/06_spec` copies are left to
+regeneration.
+
+Correction to the addendum above: of the ten consumers it lists, only the three
+specs named here read `native_build.spl`; the other seven (and
+`check-native-build-focused-entry-scope.shs`) read `native_build_closure.spl`, a
+live file this change does not touch (`git grep "_CliCompile/native_build.spl"`
+outside `doc/` now hits only `pipeline/native_project/tests.rs:365`, a negative
+assertion that the file is NOT in the CLI closure, which stays true).

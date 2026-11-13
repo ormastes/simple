@@ -1,0 +1,95 @@
+# @req REQ-PUBVIEW-010 REQ-PUBVIEW-011 REQ-PUBVIEW-012
+# Session view state through the simple-lsp-mcp bridge (`handle_tool_call`,
+# which spawns the deployed binary on src/app/cli/query_visibility.spl):
+# simple_set_visibility switches the session view, every symbol result states
+# its view in content[1] with the listing in content[0] in the same shape for
+# every view, a private view auto-reverts after 3 requests, and a per-request
+# `visibility` serves once without touching the session.
+# design: doc/05_design/app/source_view/public_view_by_feature_layer.md
+use std.spec
+use std.spec.step
+use app.simple_lsp_mcp.tools.{handle_tool_call}
+use app.simple_lsp_mcp.session_state.{lsp_reset_location}
+use app.simple_lsp_mcp.visibility_state.{lsp_mcp_view_reset, lsp_mcp_view_current}
+use std.common.json.value.{JsonValue, json_parse_value_strict, json_value_field, json_value_text_or, json_value_items}
+
+val X_CORE = "test/fixtures/mdsoc_pubview/feature_x/10.core/core.spl"
+
+fn call_blocks(tool: text, arguments: text) -> [text]:
+    lsp_reset_location()
+    val reply = handle_tool_call("1", "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"" + tool + "\",\"arguments\":{" + arguments + "}}}")
+    val wire = json_parse_value_strict(reply).unwrap()
+    var out: [text] = []
+    for block in json_value_items(json_value_field(json_value_field(wire, "result"), "content")):
+        out.push(json_value_text_or(json_value_field(block, "text"), ""))
+    out
+
+fn names(listing: text) -> [text]:
+    var out: [text] = []
+    for entry in json_value_items(json_parse_value_strict(listing).unwrap()):
+        val name = json_value_text_or(json_value_field(entry, "name"), "")
+        if not name.starts_with("⋯"): out.push(name)
+    out
+
+fn symbols() -> [text]:
+    call_blocks("lsp_symbols", "\"file\":\"" + X_CORE + "\"")
+
+describe "simple_set_visibility session view":
+    it "defaults to public and states the view beside an unchanged listing":
+        lsp_mcp_view_reset()
+        val blocks = symbols()
+        expect(blocks.len()).to_equal(2)
+        expect(blocks[1]).to_equal("view: public")
+        expect(names(blocks[0])).to_equal(["x_core_api"])
+
+    it "switches to layer_private, reveals more, then auto-reverts with a notice":
+        # @capture(view): view lines across the 3-request countdown
+        lsp_mcp_view_reset()
+        step("switch")
+        val set = call_blocks("simple_set_visibility", "\"visibility\":\"layer_private\"")
+        expect(set[1]).to_start_with("view: layer_private (session)")
+        expect(lsp_mcp_view_current().level).to_equal("layer_private")
+        step("request 1 reveals the layer-private type in the same listing shape")
+        val one = symbols()
+        expect(one[1]).to_contain("auto-revert in 2 requests")
+        expect(names(one[0])).to_contain("XCoreType")
+        step("requests 2 and 3")
+        expect(symbols()[1]).to_contain("auto-revert in 1 request;")
+        expect(symbols()[1]).to_contain("auto-reverts to public after this request")
+        step("request 4 is public again and says why")
+        val four = symbols()
+        expect(four[1]).to_equal("view: public (reverted from layer_private: auto-revert after 3 private requests)")
+        expect(names(four[0])).to_equal(["x_core_api"])
+
+    it "an explicit public request reverts and is noted":
+        lsp_mcp_view_reset()
+        call_blocks("simple_set_visibility", "\"visibility\":\"all\"")
+        call_blocks("simple_set_visibility", "\"visibility\":\"public\"")
+        expect(symbols()[1]).to_equal("view: public (reverted from all: explicit visibility=public)")
+
+    it "a per-request visibility serves once and leaves the session public":
+        lsp_mcp_view_reset()
+        val blocks = call_blocks("lsp_symbols", "\"file\":\"" + X_CORE + "\",\"visibility\":\"all\"")
+        expect(blocks[1]).to_equal("view: all (per-request override; session view: public)")
+        expect(names(blocks[0])).to_contain("x_core_secret")
+        expect(lsp_mcp_view_current().level).to_equal("public")
+        expect(symbols()[1]).to_equal("view: public")
+
+    it "rejects an unknown level without changing the session":
+        lsp_mcp_view_reset()
+        val reply = handle_tool_call("1", "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"simple_set_visibility\",\"arguments\":{\"visibility\":\"module_private\"}}}")
+        expect(reply).to_contain("\"isError\":true")
+        expect(lsp_mcp_view_current().level).to_equal("public")
+
+    it "a layer-scoped session view keeps its scope; a request scope narrows it once":
+        lsp_mcp_view_reset()
+        call_blocks("simple_set_visibility", "\"visibility\":\"layer_private\",\"layer\":\"10.core\"")
+        step("session scope")
+        val blocks = symbols()
+        expect(blocks[1]).to_start_with("view: layer_private (layer=10.core)")
+        expect(names(blocks[0])).to_contain("XCoreType")
+        step("request scope to another layer hides this file's symbols, session keeps 10.core")
+        val narrowed = call_blocks("lsp_symbols", "\"file\":\"" + X_CORE + "\",\"layer\":\"20.app\"")
+        expect(narrowed[1]).to_start_with("view: layer_private (layer=20.app)")
+        expect(names(narrowed[0])).to_equal([])
+        expect(lsp_mcp_view_current().layer).to_equal("10.core")

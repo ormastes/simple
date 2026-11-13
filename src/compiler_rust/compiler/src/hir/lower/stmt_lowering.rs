@@ -2074,6 +2074,18 @@ impl Lowerer {
                             inner,
                             ..
                         }) if matches!(*inner, TypeId::BOOL | TypeId::U64 | TypeId::F32 | TypeId::F64) => *inner,
+                        // An erased `any?` (the type of a generic `T?` return
+                        // whose `T` is uninferred, e.g. `Channel.try_recv()`)
+                        // binds plain `any`, as `lower_coalesce` types
+                        // `any? ?? d`: the payload word IS the tagged
+                        // RuntimeValue an `any` slot holds and MIR does not
+                        // unbox an `any`-typed `rt_unwrap_or_self`, so no
+                        // representation changes. Left as `any?`, the binding
+                        // was still an optional source for `lower_cast`, so
+                        // `if val m = ch.try_recv(): m as i64` — the narrowing
+                        // ERR-01 itself recommends — was rejected.
+                        // Bug: doc/08_tracking/bug/if_val_binding_from_generic_optional_stays_optional_err01_2026-11-13.md
+                        _ if self.module.types.optional_inner(subject_ty) == Some(TypeId::ANY) => TypeId::ANY,
                         _ => self
                             .optional_reference_payload_inner(subject_ty)
                             .or_else(|| self.optional_enum_payload_inner(subject_ty))

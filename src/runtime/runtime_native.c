@@ -20019,6 +20019,8 @@ static HMODULE simple_load_library_utf8(const char *path) {
 
 int64_t rt_host_dynlib_open(const uint8_t *path_ptr, int64_t path_len, int64_t mode) {
     if (!path_ptr || path_len <= 0 || path_len > 1048576) return 0;
+    /* Embedded NUL fails closed, like the Rust twin (wsffi_native.rs raw_text_cstring). */
+    if (memchr(path_ptr, 0, (size_t)path_len)) return 0;
     char *path = (char*)rt_observed_malloc_v1((size_t)path_len + 1);
     if (!path) return 0;
     memcpy(path, path_ptr, (size_t)path_len);
@@ -20036,6 +20038,7 @@ int64_t rt_host_dynlib_open(const uint8_t *path_ptr, int64_t path_len, int64_t m
 
 int64_t rt_host_dynlib_symbol(int64_t handle, const uint8_t *name_ptr, int64_t name_len) {
     if (handle <= 0 || !name_ptr || name_len <= 0 || name_len > 1048576) return 0;
+    if (memchr(name_ptr, 0, (size_t)name_len)) return 0;
     char *name = (char*)rt_observed_malloc_v1((size_t)name_len + 1);
     if (!name) return 0;
     memcpy(name, name_ptr, (size_t)name_len);

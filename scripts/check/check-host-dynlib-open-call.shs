@@ -1,0 +1,73 @@
+#!/bin/sh
+# Regression gate: rt_host_dynlib_open must load a real clang-built shared
+# library and the resolved symbol must be callable, under BOTH the JIT and the
+# interpreter. See doc/08_tracking/bug/seed_rt_host_dynlib_open_returns_zero_2026-11-13.md
+# Usage: sh scripts/check/check-host-dynlib-open-call.shs <simple-binary>
+#        sh scripts/check/check-host-dynlib-open-call.shs --selftest
+# The selftest runs first on every invocation and is fatal.
+# Verdict (last stdout line): PASS exit 0 / FAIL exit 1 / ERROR exit 2.
+set -u
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+fixture="$root/test/fixtures/compiler/seed_jit_miscompiles/host_dynlib_open_call_symbol.spl"
+want='open_ok=true sym_ok=true call=1042 close=0'
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT INT TERM
+
+# scan <simple-binary> <shared-library>: prints per-mode lines and a verdict.
+scan() {
+    bin=$1 so=$2
+    [ -n "$bin" ] && [ -f "$bin" ] && [ -x "$bin" ] || {
+        echo "ERROR — nothing was checked (no runnable simple binary: '${bin}')"; return 2; }
+    checked=0 failed=""
+    for mode in jit interpret; do
+        err="$work/$mode.stderr"
+        out=$(cd "$root" && SIMPLE_EXECUTION_MODE=$mode timeout 300 "$bin" run "$fixture" "$so" 2>"$err")
+        rc=$?
+        got=$(printf '%s\n' "$out" | grep -E '^(open_ok|sym_ok|call|close)=' | tr '\n' ' ' | sed 's/ $//')
+        checked=$((checked + 1))
+        echo "$mode: rc=$rc $got"
+        if [ "$rc" -ne 0 ] || [ "$got" != "$want" ]; then
+            failed="$failed $mode"
+            echo "--- $mode stderr (last 20 lines of $err) ---"
+            tail -n 20 "$err"
+        fi
+    done
+    [ "$checked" -gt 0 ] || { echo "ERROR — nothing was checked (0 modes ran)"; return 2; }
+    if [ -n "$failed" ]; then
+        echo "FAIL — $checked mode(s) checked, failed:$failed (want: $want)"
+        return 1
+    fi
+    echo "PASS — $checked mode(s) checked, dlopen+dlsym+call green"
+    return 0
+}
+
+selftest() {
+    st="$work/selftest"
+    mkdir -p "$st"
+    printf '#!/bin/sh\necho "WARNING: noise" >&2\nprintf "open_ok=true\\nsym_ok=true\\ncall=1042\\nclose=0\\n"\n' > "$st/good"
+    printf '#!/bin/sh\necho "fake stderr marker" >&2\nprintf "open_ok=true\\nsym_ok=true\\ncall=0\\nclose=0\\n"\n' > "$st/wrong"
+    chmod +x "$st/good" "$st/wrong"
+    scan "$st/good" /nonexistent.so > "$st/good.out" 2>&1; rc=$?
+    [ "$rc" -eq 0 ] && tail -n 1 "$st/good.out" | grep -q '^PASS — 2 mode' || { echo "selftest: correct fake did not PASS (rc=$rc)"; return 1; }
+    scan "$st/wrong" /nonexistent.so > "$st/wrong.out" 2>&1; rc=$?
+    [ "$rc" -eq 1 ] && tail -n 1 "$st/wrong.out" | grep -q '^FAIL — ' || { echo "selftest: wrong call= fake did not FAIL (rc=$rc)"; return 1; }
+    grep -q 'fake stderr marker' "$st/wrong.out" || { echo "selftest: FAIL did not print the binary's stderr"; return 1; }
+    scan "$st/missing" /nonexistent.so > "$st/missing.out" 2>&1; rc=$?
+    [ "$rc" -eq 2 ] && tail -n 1 "$st/missing.out" | grep -q '^ERROR — nothing was checked' || { echo "selftest: missing binary did not ERROR (rc=$rc)"; return 1; }
+    echo "selftest: 3 fixtures passed"
+}
+
+selftest || { echo "ERROR — nothing was checked (selftest failed)"; exit 2; }
+[ "${1:-}" = "--selftest" ] && { echo "PASS — 3 selftest fixture(s) checked"; exit 0; }
+
+bin=${1:-}
+[ -n "$bin" ] || { echo "ERROR — nothing was checked (usage: $0 <simple-binary> | --selftest)"; exit 2; }
+# Never GCC: pin to clang and refuse a CC that is not clang.
+cc=${CC:-clang}
+command -v "$cc" >/dev/null 2>&1 || { echo "ERROR — nothing was checked (compiler '$cc' not found)"; exit 2; }
+"$cc" --version 2>/dev/null | head -n 1 | grep -qi clang || {
+    echo "ERROR — nothing was checked (CC='$cc' is not clang; this repo never uses GCC)"; exit 2; }
+printf 'long long dynlib_probe_add(long long a, long long b) { return a + b + 1000; }\n' >"$work/probe.c"
+"$cc" -shared -fPIC -O2 -o "$work/libdynprobe.so" "$work/probe.c" || { echo "ERROR — nothing was checked (clang failed)"; exit 2; }
+scan "$bin" "$work/libdynprobe.so"
+exit $?
