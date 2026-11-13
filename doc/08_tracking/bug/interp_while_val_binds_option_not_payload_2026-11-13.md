@@ -1,7 +1,7 @@
 # Interpreter `while val` binds the whole `Option::Some(x)`, not the payload
 
 Date: 2026-11-13
-Status: OPEN
+Status: FIXED (2026-11-13, lane p3-whileval-20261113)
 Severity: P3
 Found by: lane p3-ifval-20261113 (if_val_binding_from_generic_optional_stays_optional_err01_2026-11-13)
 
@@ -35,7 +35,27 @@ the interpreter, and the JIT lane computes `30`.
 
 `while val x = <T?>` binds `x: T` on the interpreter exactly as `if val` does.
 
+## Cause
+
+The statement executor `exec_while`
+(`src/compiler_rust/compiler/src/interpreter_control.rs`) ran the `while val`
+pattern through `pattern_matches` only. A bare identifier pattern always
+matches there and binds the whole value, so `m` held `Option::Some(x)`.
+`exec_if` (if/elif val) and the block-closure executor
+(`interpreter_call/block_execution.rs evaluate_block_while_condition`) already
+went through `optional_let_binding_condition`, which unwraps `Some(x)` to `x`
+and stops on `nil` / `None` / `Some(nil)`.
+
+## Resolution
+
+`exec_while` now routes the condition through `optional_let_binding_condition`
+exactly like `exec_if`; structural patterns and non-Option enums still fall back
+to `pattern_matches` (`LetBind::NotApplicable`). Interpreter-only change: the
+HIR/JIT/native `while val` lowering is untouched.
+
 ## Pinned by
 
-`test/01_unit/language/if_val_generic_optional_cast_spec.spl` leaves `while val`
-out of its interpreter leg for this reason (its JIT leg covers `while val`).
+- cargo: `interpreter_control::optional_let_binding_tests::while_val_binds_optional_payload_not_wrapper`
+  (red on the parent: `type mismatch: cannot convert enum to int`; green after).
+- spec: `test/01_unit/language/if_val_generic_optional_cast_spec.spl`
+  "narrows while val on the interpreter lane (generic and concrete optional)".
