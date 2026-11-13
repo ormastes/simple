@@ -3,6 +3,8 @@
 # host/image version pair; matching observations do not prove compatibility.
 use std.common.crypto.sha256.sha256_text
 use std.common.contracts.container.runtime_v1.RuntimeCommandV1
+use std.nogc_async_mut.container.shared.request_digest_v1.{container_digest_lines_v1,
+    container_digest_vector_v1, container_args_equal_v1}
 
 # Provider/ownership label ID is separate from the native engine name.
 pub const WINDOWS_DOCKER_ENGINE_V1 = "windows-docker-process-v1"
@@ -196,16 +198,14 @@ pub fn windows_docker_request_digest_v1(policy: WindowsDockerPolicyV1,
         fields.push(if request.terminal_tty: "true" else: "false")
         fields.push(if request.stdin_open: "true" else: "false")
         body = "version: 4\nkind: windows-docker-request\nfields:\n"
-    for field in fields: body = body + "    - \"" + sha256_text(field) + "\"\n"
-    body = body + "commandCount: " + request.command.len().to_text() + "\ncommand:\n"
-    for value in request.command: body = body + "    - \"" + sha256_text(value) + "\"\n"
-    body = body + "argumentCount: " + request.args.len().to_text() + "\narguments:\n"
-    for value in request.args: body = body + "    - \"" + sha256_text(value) + "\"\n"
+    body = body + container_digest_lines_v1(fields)
+    body = body + container_digest_vector_v1("commandCount", "command", request.command)
+    body = body + container_digest_vector_v1("argumentCount", "arguments", request.args)
     if request.mounts.len() > 0:
         body = body + "mountCount: " + request.mounts.len().to_text() + "\nmounts:\n"
         for mount in request.mounts:
-            for scalar in [mount.host_root, mount.guest_root, if mount.read_only: "true" else: "false"]:
-                body = body + "    - \"" + sha256_text(scalar) + "\"\n"
+            body = body + container_digest_lines_v1([mount.host_root, mount.guest_root,
+                if mount.read_only: "true" else: "false"])
     Ok(sha256_text(body))
 
 pub fn windows_docker_name_v1(policy: WindowsDockerPolicyV1,
@@ -250,9 +250,4 @@ pub fn windows_docker_create_command_v1(policy: WindowsDockerPolicyV1,
     Ok(windows_docker_command_v1(policy, "create", args))
 
 pub fn windows_docker_args_equal_v1(left: [text], right: [text]) -> bool:
-    if left.len() != right.len(): return false
-    var index = 0
-    while index < left.len():
-        if left[index] != right[index]: return false
-        index = index + 1
-    true
+    container_args_equal_v1(left, right)

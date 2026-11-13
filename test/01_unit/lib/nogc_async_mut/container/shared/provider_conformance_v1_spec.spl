@@ -1,0 +1,302 @@
+# Backend-neutral provider conformance fixtures (design §16.5.6 steps 1 and 4).
+# Pure data and pure contract calls only: no engine, process, file or socket
+# effect is reached, so this runs on the seed on any host. Each backend projects
+# into the same observation shape; shared behaviour is asserted once, and
+# backend-specific behaviour is RECORDED (pinned per backend) rather than
+# normalized away. A backend-specific assertion establishes no shared
+# capability. Golden digests/records were captured before the shared-helper
+# extraction and pin byte-identical behaviour across it.
+# Qualification: contract-only; no Docker, Podman or Windows engine is run.
+use std.spec.*
+use std.nogc_async_mut.container.providers.windows.docker_contract_v1.*
+use std.nogc_async_mut.container.providers.windows.docker_codec_v1.{windows_docker_request_encode_v1,
+    windows_docker_request_decode_v1}
+use std.nogc_async_mut.container.providers.windows.docker_policy_codec_v1.{windows_docker_policy_encode_v1,
+    windows_docker_policy_decode_v1}
+use std.nogc_async_mut.container.providers.linux.request_v1.{LinuxOciRequestV1, linux_oci_request_digest_v1}
+use std.nogc_async_mut.container.providers.linux.request_codec_v1.{linux_oci_retained_request_encode_v1,
+    linux_oci_retained_request_decode_v1}
+use std.nogc_async_mut.container.providers.linux.engine_policy_v1.{LinuxOciEnginePolicyV1,
+    linux_oci_engine_policy_encode_v1, linux_oci_engine_policy_decode_v1, linux_oci_engine_policy_digest_v1,
+    LINUX_OCI_ENGINE_MODE_TRUSTED_ADMIN_V1}
+use std.common.crypto.sha256.sha256_text
+use std.nogc_async_mut.container.providers.linux.oci_runtime_v1.{build_create_command, linux_oci_container_name,
+    OCI_ENGINE_PODMAN, OCI_ENGINE_DOCKER}
+
+pub const CONFORMANCE_BACKEND_WINDOWS_DOCKER_V1 = "windows-docker-process"
+pub const CONFORMANCE_BACKEND_LINUX_PODMAN_V1 = "linux-oci-podman"
+pub const CONFORMANCE_BACKEND_LINUX_DOCKER_V1 = "linux-oci-docker"
+# Recorded, not normalized: the Windows provider has no standalone policy
+# digest; its policy fields are folded into every request digest.
+pub const CONFORMANCE_WINDOWS_POLICY_DIGEST_FOLDED_V1 = "folded-into-request-digest"
+
+# One provider's answers to the same logical questions.
+pub struct ProviderConformanceObservationV1:
+    backend: text
+    # "" when the baseline request is admitted; otherwise the refusal reason.
+    admission: text
+    # Request digest of the baseline request, or the refusal reason.
+    digest: text
+    # Digest after changing only the operation ID (must be identical).
+    digest_other_operation: text
+    # Digest after moving one byte across a command-vector boundary.
+    digest_boundary_shift: text
+    # Native container name for attempts 1 and 2 (empty on refusal).
+    attempt_one_name: text
+    attempt_two_name: text
+    # Refusal reason for attempt 0.
+    attempt_zero_reason: text
+    # Canonical retained request record and its roundtrip outcome.
+    record: text
+    record_roundtrip: bool
+    # Decode reasons for typed-field tampering, in conformance_tampers_v1 order:
+    # argument element integer, podUid integer, attempt text.
+    record_type_tamper_reasons: [text]
+    # Canonical provider/engine policy record, its digest and roundtrip outcome.
+    policy_record: text
+    policy_digest: text
+    policy_roundtrip: bool
+    # Create-effect evidence: program and full create argv.
+    create_program: text
+    create_args: [text]
+
+pub fn conformance_windows_policy_v1() -> WindowsDockerPolicyV1:
+    WindowsDockerPolicyV1(docker_executable: "C:\\Program Files\\Docker\\docker.exe",
+        endpoint: "npipe:////./pipe/docker_engine", engine_id: "engine-a",
+        node_boot_id: "boot-a", provider_generation: 4,
+        expected_kernel_version: "10.0 20348 (20348.2402.amd64fre)",
+        image_os_version: "10.0.20348.2402",
+        expected_image_id: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        timeout_ms: 5000, max_output_bytes: 8192,
+        system_root: "C:\\Windows", temp_directory: "C:\\Temp")
+
+pub fn conformance_windows_request_v1(attempt: i64) -> WindowsDockerRequestV1:
+    WindowsDockerRequestV1(pod_uid: "conformance-pod", attempt: attempt, operation_id: "operation-a",
+        image: "mcr.microsoft.com/windows/servercore@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        command: ["C:\\work\\fixture.exe", "ab", "c"], args: ["17"],
+        cpu_count: 2, memory_limit_bytes: 536870912, network: "none")
+
+pub fn conformance_linux_request_v1(attempt: i64) -> LinuxOciRequestV1:
+    LinuxOciRequestV1(pod_uid: "conformance-pod", attempt: attempt, operation_id: "operation-a",
+        image: "example/compiler@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        bundle_path: "", command: ["/agent", "ab", "c"], args: ["17"],
+        timeout_ms: 5000, cpu_limit_millis: 1000, memory_limit_bytes: 536870912,
+        pid_limit: 64, network_policy: "none", filesystem_policy: "read-only")
+
+pub fn conformance_linux_engine_policy_v1() -> LinuxOciEnginePolicyV1:
+    LinuxOciEnginePolicyV1(mode: LINUX_OCI_ENGINE_MODE_TRUSTED_ADMIN_V1, executable_path: "/usr/bin/podman",
+        expected_uid: 1000, expected_graph_root: "/home/simple/.local/share/containers/storage",
+        expected_run_root: "/run/user/1000/containers", expected_storage_driver: "overlay")
+
+# Typed-field tampering applied identically to every backend record.
+pub fn conformance_tampers_v1(record: text) -> [text]:
+    [record.replace("args: [\"17\"]", "args: [17]"),
+        record.replace("podUid: conformance-pod", "podUid: 7"),
+        record.replace("attempt: 1,", "attempt: one,")]
+
+fn text_or_reason(value: Result<text, text>) -> text:
+    match value:
+        case Ok(content): content
+        case Err(reason): reason
+
+fn windows_digest(request: WindowsDockerRequestV1) -> text:
+    text_or_reason(windows_docker_request_digest_v1(conformance_windows_policy_v1(), request))
+
+fn windows_name(attempt: i64) -> text:
+    val policy = conformance_windows_policy_v1()
+    val request = conformance_windows_request_v1(attempt)
+    if windows_docker_request_reason_v1(policy, request) != "": return ""
+    windows_docker_name_v1(policy, request)
+
+pub fn conformance_windows_docker_v1() -> ProviderConformanceObservationV1:
+    val policy = conformance_windows_policy_v1()
+    val request = conformance_windows_request_v1(1)
+    var other = request
+    other.operation_id = "operation-b"
+    var shifted = request
+    shifted.command = ["C:\\work\\fixture.exe", "a", "bc"]
+    val record = text_or_reason(windows_docker_request_encode_v1(policy, request))
+    val roundtrip = match windows_docker_request_decode_v1(policy, record):
+        case Ok(decoded): text_or_reason(windows_docker_request_encode_v1(policy, decoded)) == record
+        case Err(_): false
+    var tamper_reasons: [text] = []
+    for tampered in conformance_tampers_v1(record):
+        match windows_docker_request_decode_v1(policy, tampered):
+            case Ok(_): tamper_reasons.push("accepted")
+            case Err(reason): tamper_reasons.push(reason)
+    val policy_record = text_or_reason(windows_docker_policy_encode_v1(policy))
+    val policy_roundtrip = match windows_docker_policy_decode_v1(policy_record):
+        case Ok(decoded): text_or_reason(windows_docker_policy_encode_v1(decoded)) == policy_record
+        case Err(_): false
+    var create_program = ""
+    var create_args: [text] = []
+    match windows_docker_create_command_v1(policy, request):
+        case Ok(command):
+            create_program = command.program
+            create_args = command.args
+        case Err(reason): create_program = reason
+    ProviderConformanceObservationV1(backend: CONFORMANCE_BACKEND_WINDOWS_DOCKER_V1,
+        admission: windows_docker_request_reason_v1(policy, request),
+        digest: windows_digest(request), digest_other_operation: windows_digest(other),
+        digest_boundary_shift: windows_digest(shifted),
+        attempt_one_name: windows_name(1), attempt_two_name: windows_name(2),
+        attempt_zero_reason: windows_docker_request_reason_v1(policy, conformance_windows_request_v1(0)),
+        record: record, record_roundtrip: roundtrip, record_type_tamper_reasons: tamper_reasons,
+        policy_record: policy_record, policy_digest: CONFORMANCE_WINDOWS_POLICY_DIGEST_FOLDED_V1,
+        policy_roundtrip: policy_roundtrip,
+        create_program: create_program, create_args: create_args)
+
+fn linux_digest(request: LinuxOciRequestV1) -> text:
+    text_or_reason(linux_oci_request_digest_v1(request))
+
+fn linux_name(attempt: i64) -> text:
+    match linux_oci_container_name("conformance-pod", attempt):
+        case Ok(name): name
+        case Err(_): ""
+
+fn linux_observation(backend: text, engine: text) -> ProviderConformanceObservationV1:
+    val request = conformance_linux_request_v1(1)
+    var other = request
+    other.operation_id = "operation-b"
+    var shifted = request
+    shifted.command = ["/agent", "a", "bc"]
+    val record = text_or_reason(linux_oci_retained_request_encode_v1(request))
+    val roundtrip = match linux_oci_retained_request_decode_v1(record):
+        case Ok(decoded): text_or_reason(linux_oci_retained_request_encode_v1(decoded)) == record
+        case Err(_): false
+    var tamper_reasons: [text] = []
+    for tampered in conformance_tampers_v1(record):
+        match linux_oci_retained_request_decode_v1(tampered):
+            case Ok(_): tamper_reasons.push("accepted")
+            case Err(reason): tamper_reasons.push(reason)
+    val zero_reason = match linux_oci_container_name("conformance-pod", 0):
+        case Ok(_): ""
+        case Err(reason): reason
+    val engine_policy = conformance_linux_engine_policy_v1()
+    val policy_record = text_or_reason(linux_oci_engine_policy_encode_v1(engine_policy))
+    val policy_roundtrip = match linux_oci_engine_policy_decode_v1(policy_record):
+        case Ok(decoded): text_or_reason(linux_oci_engine_policy_encode_v1(decoded)) == policy_record
+        case Err(_): false
+    val created = build_create_command(engine, "/run/simple-oci", request, "operation-a", 4, "boot-a")
+    val create_program = if created.0 == "": created.1.program else: created.0
+    ProviderConformanceObservationV1(backend: backend,
+        admission: created.0, digest: linux_digest(request),
+        digest_other_operation: linux_digest(other), digest_boundary_shift: linux_digest(shifted),
+        attempt_one_name: linux_name(1), attempt_two_name: linux_name(2),
+        attempt_zero_reason: zero_reason,
+        record: record, record_roundtrip: roundtrip, record_type_tamper_reasons: tamper_reasons,
+        policy_record: policy_record,
+        policy_digest: text_or_reason(linux_oci_engine_policy_digest_v1(engine_policy)),
+        policy_roundtrip: policy_roundtrip,
+        create_program: create_program, create_args: created.1.args)
+
+pub fn conformance_linux_podman_v1() -> ProviderConformanceObservationV1:
+    linux_observation(CONFORMANCE_BACKEND_LINUX_PODMAN_V1, OCI_ENGINE_PODMAN)
+
+pub fn conformance_linux_docker_v1() -> ProviderConformanceObservationV1:
+    linux_observation(CONFORMANCE_BACKEND_LINUX_DOCKER_V1, OCI_ENGINE_DOCKER)
+
+pub fn conformance_observations_v1() -> [ProviderConformanceObservationV1]:
+    [conformance_windows_docker_v1(), conformance_linux_podman_v1(), conformance_linux_docker_v1()]
+
+
+fn lower_hex_digest(value: text) -> bool:
+    if value.len() != 64: return false
+    for ch in value.chars():
+        if not ((ch >= "0" and ch <= "9") or (ch >= "a" and ch <= "f")): return false
+    true
+
+fn reason_prefix(backend: text) -> text:
+    if backend == CONFORMANCE_BACKEND_WINDOWS_DOCKER_V1: "docker-request-record-invalid" else: "retained-request-invalid"
+
+describe "provider conformance: shared request behaviour":
+    it "admits the same logical baseline request on every backend":
+        for o in conformance_observations_v1():
+            expect(o.backend + ":" + o.admission).to_equal(o.backend + ":")
+
+    it "computes an operation-independent, vector-boundary-sensitive request digest":
+        for o in conformance_observations_v1():
+            expect(lower_hex_digest(o.digest)).to_equal(true)
+            expect(o.digest_other_operation).to_equal(o.digest)
+            expect(o.digest_boundary_shift == o.digest).to_equal(false)
+
+    it "derives deterministic distinct attempt identities and refuses attempt zero":
+        for o in conformance_observations_v1():
+            expect(o.attempt_one_name == "").to_equal(false)
+            expect(o.attempt_one_name == o.attempt_two_name).to_equal(false)
+            expect(o.attempt_zero_reason == "").to_equal(false)
+
+    it "roundtrips canonical request and policy records and rejects typed-field tampering":
+        for o in conformance_observations_v1():
+            expect(o.record_roundtrip).to_equal(true)
+            expect(o.policy_roundtrip).to_equal(true)
+            val prefix = reason_prefix(o.backend)
+            expect(o.record_type_tamper_reasons).to_equal([prefix + ":type:args.0",
+                prefix + ":type:podUid", prefix + ":type:attempt"])
+
+    it "binds pod, attempt, operation, boot and generation identity into create evidence":
+        for o in conformance_observations_v1():
+            val joined = o.create_args.join("\n")
+            for needle in ["conformance-pod", "operation-a", "boot-a"]:
+                expect(o.backend + ":" + needle + ":" + joined.contains(needle).to_text()).to_equal(o.backend + ":" + needle + ":true")
+            expect(o.create_args.contains("create")).to_equal(true)
+
+describe "provider conformance: golden pins (byte-identical across the shared-helper extraction)":
+    it "pins Windows Docker process-isolation outputs":
+        val o = conformance_windows_docker_v1()
+        expect(o.digest).to_equal("f31da4249f6a46355cc788f5a73a85a3ee054013f44d53ec34caeebe201a833b")
+        expect(o.digest_boundary_shift).to_equal("b525b54db365de50181343e17bc13012dd62b3836a9cd68f5dbd68b1c1366fc3")
+        expect(o.attempt_one_name).to_equal("simple-wpc-59759f3d951a04f1e2b7b88b3bd985042aa3c043469c09e3b4d2fa35af4dd179")
+        expect(o.attempt_two_name).to_equal("simple-wpc-83b9a26328adb1d4b0581bd0874cc1dc3b1d70d774d3198a85c83a085dce4230")
+        expect(o.attempt_zero_reason).to_equal("docker-request-identity-invalid")
+        expect(sha256_text(o.record)).to_equal("c249c5bc7cc2b36669bd600b08fdf488573f83562bb4f0ed50c32ca1b4f4e447")
+        expect(sha256_text(o.policy_record)).to_equal("bc120b31ee53029be1c987260087af757f28dfb335f66fb13e74867e7d2f3dba")
+        expect(o.policy_digest).to_equal(CONFORMANCE_WINDOWS_POLICY_DIGEST_FOLDED_V1)
+        expect(o.create_program).to_equal("C:\Program Files\Docker\docker.exe")
+        expect(sha256_text(o.create_args.join("|"))).to_equal("a75d0a77b0cd130830aa937523581996a209403e40e2ff580b22bc47432ef7d5")
+
+    it "pins Linux OCI Podman and Docker outputs":
+        val podman = conformance_linux_podman_v1()
+        val docker = conformance_linux_docker_v1()
+        for o in [podman, docker]:
+            expect(o.digest).to_equal("22e293c0a5891164a88287e710ff571cceb2b99ae1b710c16d06b0918d0533ef")
+            expect(o.digest_boundary_shift).to_equal("163966acae2fb3d41523ba5ac99abfb583d4752c8bc97e0a8822c168ab6086e1")
+            expect(o.attempt_one_name).to_equal("simpleorch-conformance-pod-1")
+            expect(o.attempt_two_name).to_equal("simpleorch-conformance-pod-2")
+            expect(o.attempt_zero_reason).to_equal("attempt-invalid")
+            expect(sha256_text(o.record)).to_equal("f43dc91b24c18bc022be4f9156075252f91ee2a6eb553c6cd300a4cfd73b893a")
+            expect(o.policy_digest).to_equal("74bbcb7823ffb4ddb0b480efc7c327c56a54abb1dcd1644f1b47015a78ceab33")
+            expect(sha256_text(o.policy_record)).to_equal(o.policy_digest)
+        expect(podman.create_program).to_equal("podman")
+        expect(docker.create_program).to_equal("docker")
+        expect(sha256_text(podman.create_args.join("|"))).to_equal("bbce5fa8c49987dd5f053d5c5505095d5e1cea587e82e957c94ef7ccd2f95e8e")
+        expect(sha256_text(docker.create_args.join("|"))).to_equal("a7122cd216b3680ccc9e69b850a23b47253cbd0c505455b33744f050a5546a9f")
+
+# Backend-specific behaviour, recorded rather than normalized. None of these
+# establishes a shared capability.
+describe "provider conformance: recorded backend-specific cases":
+    it "records differing identity-token alphabets":
+        expect(windows_docker_token_v1("pod:a")).to_equal(true)
+        expect(linux_oci_container_name("pod:a", 1)).to_equal(Err("pod-uid-contains-unsafe-character"))
+
+    it "records that only Windows Docker hard-requires network none":
+        var windows_request = conformance_windows_request_v1(1)
+        windows_request.network = "bridge"
+        expect(windows_docker_request_reason_v1(conformance_windows_policy_v1(), windows_request)).to_equal("docker-network-none-required")
+        var linux_request = conformance_linux_request_v1(1)
+        linux_request.network_policy = "bridge"
+        val created = build_create_command(OCI_ENGINE_PODMAN, "/run/simple-oci", linux_request, "operation-a", 4, "boot-a")
+        expect(created.0).to_equal("")
+
+    it "records Podman-only terminal mode and the Podman proxy guard":
+        var request = conformance_linux_request_v1(1)
+        request.terminal_mode = "tty"
+        expect(build_create_command(OCI_ENGINE_DOCKER, "/run/simple-oci", request, "operation-a", 4, "boot-a").0).to_equal("terminal-mode-podman-only")
+        expect(conformance_linux_podman_v1().create_args.contains("--http-proxy=false")).to_equal(true)
+        expect(conformance_linux_docker_v1().create_args.contains("--http-proxy=false")).to_equal(false)
+
+    it "records that the Windows provider folds its policy into every request digest":
+        var policy = conformance_windows_policy_v1()
+        policy.provider_generation = 5
+        expect(windows_docker_request_digest_v1(policy, conformance_windows_request_v1(1)) ==
+            Ok("f31da4249f6a46355cc788f5a73a85a3ee054013f44d53ec34caeebe201a833b")).to_equal(false)
