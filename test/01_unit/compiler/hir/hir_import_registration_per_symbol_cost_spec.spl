@@ -73,6 +73,14 @@ val FIXTURE_ITEMS_PER_PACKAGE: i64 = 40
 # 62-68 ms. 3x the post-fix budget keeps a loaded box green and the pre-fix
 # cost red.
 val PER_REGISTRATION_BUDGET_US: i64 = 33000
+# One composite per package is registered TRANSITIVELY before its own explicit
+# import: `T{k}_8` is a field dependency of `T{k}_10` and `T{k}_11`, which sort
+# before it in `composite_names` (`composites.keys()` order, observed here as
+# lexical). The explicit registration then supersedes
+# that transitive bare binding (5a4e937a6d1, 44ae909f04b: an explicit import
+# wins and starts clean), so the RISDONE memo misses and that type's one impl
+# row is read a second time. Every other composite reads only its own row.
+val SUPERSEDED_TRANSITIVE_PER_PACKAGE: i64 = 1
 
 fn gen_module(k: i64, n: i64) -> text:
     var parts: [text] = []
@@ -131,9 +139,10 @@ describe("HIR first-time import registration cost", fn():
         # Every export registered: N structs + N functions + 2N methods per package.
         expect(lowering.symbols.next_symbol_id).to_equal(FIXTURE_PACKAGES * n * 4)
         # IMPLIDX: one sweep per surface, and only the matching impl row is
-        # read per composite (N impls x N composites would be the old sweep).
+        # read per composite (N impls x N composites would be the old sweep),
+        # plus one re-read per superseded transitive registration.
         expect(lowering.impl_index_build_count).to_equal(FIXTURE_PACKAGES)
-        expect(lowering.impl_rows_visited).to_equal(FIXTURE_PACKAGES * n)
+        expect(lowering.impl_rows_visited).to_equal(FIXTURE_PACKAGES * (n + SUPERSEDED_TRANSITIVE_PER_PACKAGE))
         # NAMEIDX: the six per-registration name scans are Dict probes against
         # an index built ONCE per surface, never per registration.
         expect(lowering.name_index_build_count).to_equal(FIXTURE_PACKAGES)

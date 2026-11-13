@@ -1,28 +1,34 @@
-# WatchdogManager — facade over the native wall-clock watchdog timer.
+# WatchdogManager — facade over the runtime wall-clock watchdog timer.
 #
-# Owns the `rt_watchdog_start`/`rt_watchdog_stop` externs so app-layer code
-# (e.g. `src/app/interpreter/core/watchdog.spl`) never declares or calls them
+# Owns the watchdog extern so app-layer code (e.g.
+# `src/app/interpreter/core/watchdog.spl`) never declares or calls it
 # directly. Backend-isolation Gap D
-# (doc/03_plan/ui/rendering/backend_isolation_plan.md § P3 Gap D — "WatchdogManager
-# facade does not exist").
+# (doc/03_plan/ui/rendering/backend_isolation_plan.md § P3 Gap D).
 #
-# `start(timeout_secs)` arms a background-thread deadline; if execution runs
-# past it, the native side sets a shared timeout flag that pollers read via
-# `std.common.fault_detection.is_timeout_exceeded`. `stop()` disarms it. Any
-# existing timer is implicitly replaced by a fresh `start()` call (the native
-# side owns that semantics — this facade adds no extra bookkeeping).
+# Backed by `rt_fault_set_timeout`, which both runtime lanes implement:
+# - Rust seed interpreter (`interpreter_extern/cli.rs`): secs > 0 starts
+#   `watchdog::start_watchdog(secs)`, a background thread that sets
+#   TIMEOUT_EXCEEDED at the deadline; interpreted loops then stop with a
+#   timeout error. secs == 0 calls `watchdog::stop_watchdog()`.
+# - C runtime (`runtime_native.c`): records `SIMPLE_TIMEOUT_SECONDS`.
+# The earlier dedicated watchdog start/stop externs had no backing in either
+# lane and aborted the process
+# (doc/08_tracking/bug/watchdog_externs_unregistered_module_uncalled_2026-07-08.md).
 
-extern fn rt_watchdog_start(timeout_secs: i64)
-extern fn rt_watchdog_stop()
+extern fn rt_fault_set_timeout(secs: i64)
 
 pub class WatchdogManager:
     pass_dn
 
 impl WatchdogManager:
     pub static fn start(timeout_secs: i64):
-        """Arm the native watchdog timer for `timeout_secs` seconds."""
-        rt_watchdog_start(timeout_secs)
+        """Arm the watchdog for `timeout_secs` seconds, replacing any running one.
+        A value <= 0 disarms it."""
+        if timeout_secs > 0:
+            rt_fault_set_timeout(timeout_secs)
+        else:
+            rt_fault_set_timeout(0)
 
     pub static fn stop():
-        """Disarm the native watchdog timer if one is running."""
-        rt_watchdog_stop()
+        """Disarm the watchdog if one is running."""
+        rt_fault_set_timeout(0)
