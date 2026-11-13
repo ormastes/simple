@@ -1891,6 +1891,31 @@ impl Lowerer {
                             ty: inner,
                         }));
                     }
+                    // `f32?`/`f64?` unwrap: the same flat-nullable tagged
+                    // contract as the BoxInt arm above, but the payload
+                    // decoder is `UnboxFloat`, not `UnboxInt` -- the
+                    // name-keyed MIR tail (`lowering_expr_builtin.rs`,
+                    // `rt_unwrap_or_self` + `slot_holds_tagged_optional`)
+                    // already routes results typed F32/F64 through
+                    // `unbox_scalar_for_raw_slot`. Before this arm,
+                    // `.unwrap()` on a float optional fell through to generic
+                    // method dispatch and read a garbage register on BOTH
+                    // lanes (measured: `getf(true).unwrap()` on a `f64?`
+                    // holding 3.25 printed a nondeterministic denormal, with
+                    // different tails on JIT vs interpreter). Required by the
+                    // `parse_float`/`parse_f64` typing arm, whose results are
+                    // unwrapped by real callers.
+                    if let Some(HirType::Pointer { inner, .. }) = self.module.types.get(receiver.ty) {
+                        if matches!(*inner, TypeId::F32 | TypeId::F64) {
+                            return Ok(Some(HirExpr {
+                                kind: HirExprKind::BuiltinCall {
+                                    name: "rt_unwrap_or_self".to_string(),
+                                    args: vec![receiver.clone()],
+                                },
+                                ty: *inner,
+                            }));
+                        }
+                    }
                     if let Some(payload_ty) = self.enum_payload_type_for_builtin_method(receiver.ty) {
                         let name = match self.module.types.get(receiver.ty) {
                             Some(HirType::Enum { name, .. }) if name == "Result" || name == "Option" => {
@@ -2241,11 +2266,27 @@ impl Lowerer {
                 // flat optional lets interpolation render `Option::Some(v)` /
                 // `Option::None` like the interpreter. Bug:
                 // parse_family_strips_option_jit_native_2026-08-02.md
-                "parse_int" | "parse_i32" | "parse_i64" => Some(self.module.types.register(HirType::Pointer {
-                    kind: PointerKind::Shared,
-                    capability: ReferenceCapability::Shared,
-                    inner: TypeId::I64,
-                })),
+                // `register_optional` (NOT raw `register`) is required: only
+                // source-Optional ids land in `optional_type_ids`, and
+                // `TypeRegistry::optional_inner` returns None for a bare
+                // anonymous Pointer -- which made the match-binder's
+                // `subject_is_optional` gate (stmt_lowering.rs) fall through
+                // to bare `rt_enum_payload`, binding the nil sentinel on a
+                // `case Some(n):` over a parse result (measured: 87 bound as
+                // nil/3 on both lanes, corrupting e.g. the pure_sql reopen
+                // validators). See
+                // doc/08_tracking/bug/pure_sql_reopen_checkpointed_file_stack_overflow_2026-08-25.md
+                "parse_int" | "parse_i32" | "parse_i64" => Some(self.module.types.register_optional(TypeId::I64)),
+                // Float twin of the `parse_*` int arm directly above: the alias
+                // tables route the whole family to `rt_string_to_float`, which
+                // already returns the tagged-nullable ABI (a heap-boxed float
+                // on success, `NIL` on failure) -- exactly what a flat `f64?`
+                // slot holds. Typing it `ANY` (the fall-through dynamic table)
+                // made BOTH lanes render a bare `1.5` / `nil` under
+                // interpolation, diverging from the interpreter oracle's
+                // `Option::Some(1.5)` / `Option::None` and from the int
+                // family. Same `register_optional` requirement as the int arm.
+                "parse_float" | "parse_f64" | "parse_f64_safe" => Some(self.module.types.register_optional(TypeId::F64)),
                 _ => None,
             };
 
