@@ -417,20 +417,27 @@ fn io_file_write(fd: i64, data: [u8]) -> i64:
         # Neither branch resizes, releases or publishes the borrowed storage.
         rt_io_file_write(fd, address, count)
 
+# @workaround bug=cranelift_lsp_mcp_stdout_write_failed_2026-11-13 reason=frozen-phase2-reads-c-bool-as-full-word
+# A C `bool` defines only the low byte of the result register; Cranelift
+# compilers predating the import-result fix read the whole word. Keep only
+# the defined byte. Remove once Phase 2 is rebuilt with that fix.
+fn _io_c_bool(raw: bool) -> bool:
+    ((raw as i64) & 255) != 0
+
 fn io_file_write_all(fd: i64, data: [u8]) -> bool:
     if fd < 0 or fd > 2147483647: return false
     val count = data.len()
     if count == 0:
         # Keep empty spans on the provider's original no-syscall path.
         unsafe(capabilities: [ffi, raw_ptr]):
-            return rt_io_file_write_all(fd, 0, 0)
+            return _io_c_bool(rt_io_file_write_all(fd, 0, 0))
     val retained = match _io_file_write_packed(data):
         case Some(buffer): buffer
         case None: return false
     unsafe(capabilities: [ffi, raw_ptr]):
         val address = rt_array_bytes_basis_ptr(retained)
         if address == 0: return false
-        rt_io_file_write_all(fd, address, count)
+        _io_c_bool(rt_io_file_write_all(fd, address, count))
 
 export io_file_write, io_file_write_all
 

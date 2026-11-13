@@ -1746,7 +1746,7 @@ fn cl_translate_call(
                         if cl_jit_import_refused(cl_module, handle):
                             return cranelift_iconst(ctx, CL_TYPE_I64, 0)
                         val reference = cranelift_import_function(ctx, handle)
-                        return cranelift_call(ctx, reference, arg_vals)
+                        return cl_normalize_import_result(ctx, type_, args.len(), cranelift_call(ctx, reference, arg_vals))
                     if name == "rt_array_new" or name == "rt_array_push" or name == "rt_bytes_u8_at":
                         return translate_runtime_import_call_i64(ctx, cl_module, name, arg_vals)
                     val method = method_leaf_name(name)
@@ -1849,7 +1849,7 @@ fn cl_translate_call(
                         if cl_jit_import_refused(cl_module, handle):
                             return cranelift_iconst(ctx, CL_TYPE_I64, 0)
                         val func_ref = cranelift_import_function(ctx, handle)
-                        return cranelift_call(ctx, func_ref, arg_vals)
+                        return cl_normalize_import_result(ctx, type_, args.len(), cranelift_call(ctx, func_ref, arg_vals))
                 case _:
                     return cranelift_iconst(ctx, CL_TYPE_I64, 0)
         case Copy(local):
@@ -2117,6 +2117,36 @@ fn cl_import_call_signature(callee_type: MirType, arg_count: i64) -> i64:
     else:
         cranelift_sig_set_return(sig, sig_type_to_cl(declared_ret))
     sig
+
+pub fn cl_import_result_narrow_plan(declared_ret: MirType) -> (i64, bool):
+    """(narrow cl type, signed) an imported call's i64 result must be
+    re-extended from, or (0, false) when the declared return is already a
+    full machine word.
+
+    The import signature keeps sub-64 returns as I64 (sig_type_to_cl), but a
+    C callee returning `bool`/`int8_t`/`int32_t` only defines the low bits of
+    RAX (x86-64 SysV and Win64 alike): clang's rt_io_file_write_all ends
+    `setbe %bpl; movl %ebp, %eax`, leaving the caller's saved-RBP bits 8..31
+    in EAX. `not` lowers to `xor 1`, so a true result with garbage upper bits
+    read as false (bug cranelift_lsp_mcp_stdout_write_failed_2026-11-13).
+    Bool is unsigned 0/1 like LLVM's `zext i1`."""
+    match declared_ret.kind:
+        case Bool | U8: return (CL_TYPE_I8, false)
+        case I8: return (CL_TYPE_I8, true)
+        case U16: return (CL_TYPE_I16, false)
+        case I16: return (CL_TYPE_I16, true)
+        case U32 | Char: return (CL_TYPE_I32, false)
+        case I32: return (CL_TYPE_I32, true)
+        case _: return (0, false)
+
+fn cl_normalize_import_result(ctx: i64, callee_type: MirType, arg_count: i64, value: i64) -> i64:
+    # Only a DECLARED return is trusted; the unknown all-i64 import keeps its word.
+    if not cl_declared_callee_signature_known(callee_type, arg_count): return value
+    val (narrow, signed) = cl_import_result_narrow_plan(cl_declared_callee_return(callee_type))
+    if narrow == 0: return value
+    val low = cranelift_ireduce(ctx, narrow, value)
+    if signed: return cranelift_sextend(ctx, CL_TYPE_I64, low)
+    cranelift_uextend(ctx, CL_TYPE_I64, low)
 
 pub fn const_int_cl_type(ty: MirType) -> i64:
     """Int consts emit as I64 regardless of declared width: the lane is
