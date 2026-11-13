@@ -430,3 +430,221 @@ fn w3_indirect_extern_reference_is_still_detected() {
         assert!(!stdout.contains("after="), "{tag}: {stdout}");
     }
 }
+
+// Wave 4: `run_file_jit` keeps only MIR functions reachable from `main`, the
+// module initialisers, vtable slots and function-valued globals. An extern
+// called only from dead code must not force the splice; every live path into
+// an unresolvable extern must still reach it.
+
+const W4_DEAD_CALLER: &str = r#"
+extern fn rt_caret_w4_dead_only(x: i64) -> i64
+
+fn never_called(x: i64) -> i64:
+    rt_caret_w4_dead_only(x)
+
+fn main():
+    print "w4 ok"
+"#;
+
+const W4_LIVE_CALLER: &str = r#"
+extern fn rt_caret_w4_dead_only(x: i64) -> i64
+extern fn rt_caret_w4_live_call(x: i64) -> i64
+
+fn never_called(x: i64) -> i64:
+    rt_caret_w4_dead_only(x)
+
+fn helper(x: i64) -> i64:
+    rt_caret_w4_live_call(x)
+
+fn main():
+    print "before"
+    val v = helper(1)
+    print "after={v}"
+"#;
+
+const W4_VIA_TRAIT: &str = r#"
+extern fn rt_caret_w4_via_trait(x: i64) -> i64
+
+trait Shape:
+    fn area() -> i64
+
+class Sq with Shape:
+    s: i64
+    fn area() -> i64:
+        rt_caret_w4_via_trait(self.s)
+
+class Rect with Shape:
+    w: i64
+    fn area() -> i64:
+        self.w
+
+class Holder:
+    sh: Shape
+
+fn measure(h: Holder) -> i64:
+    val x: Shape = h.sh
+    x.area()
+
+fn main():
+    print "before"
+    val r = measure(Holder(sh: Rect(w: 1)))
+    val v = measure(Holder(sh: Sq(s: 2)))
+    print "after={r} {v}"
+"#;
+
+const W4_VIA_CLOSURE: &str = r#"
+extern fn rt_caret_w4_via_closure(x: i64) -> i64
+
+fn helper(x: i64) -> i64:
+    rt_caret_w4_via_closure(x)
+
+fn main():
+    print "before"
+    val g = \x: helper(x)
+    val v = g(1)
+    print "after={v}"
+"#;
+
+const W4_VIA_FN_VALUE: &str = r#"
+extern fn rt_caret_w4_via_fn_value(x: i64) -> i64
+
+fn helper(x: i64) -> i64:
+    rt_caret_w4_via_fn_value(x)
+
+fn apply(f: fn(i64) -> i64, x: i64) -> i64:
+    f(x)
+
+fn main():
+    print "before"
+    val v = apply(helper, 1)
+    print "after={v}"
+"#;
+
+const W4_VIA_STATIC: &str = r#"
+extern fn rt_caret_w4_via_static(x: i64) -> i64
+
+fn init_value() -> i64:
+    rt_caret_w4_via_static(3)
+
+val G: i64 = init_value()
+
+fn main():
+    print "before"
+    print "after={G}"
+"#;
+
+/// Trait dispatch, a JIT-internal closure, a static initialiser, and dead code
+/// that calls an unresolvable extern. Must run fully JIT, with no demotion,
+/// and print what the interpreter prints.
+const W4_EQUIVALENCE: &str = r#"
+extern fn rt_caret_w4_equiv_dead(x: i64) -> i64
+
+trait Shape:
+    fn area() -> i64
+
+class Sq with Shape:
+    s: i64
+    fn area() -> i64:
+        self.s * self.s
+
+class Rect with Shape:
+    w: i64
+    h: i64
+    fn area() -> i64:
+        self.w * self.h
+
+class Holder:
+    sh: Shape
+
+fn measure(h: Holder) -> i64:
+    val x: Shape = h.sh
+    x.area()
+
+fn triple(x: i64) -> i64:
+    x * 3
+
+fn apply(f: fn(i64) -> i64, x: i64) -> i64:
+    f(x)
+
+val BASE: i64 = triple(5)
+
+fn never_called(x: i64) -> i64:
+    rt_caret_w4_equiv_dead(x)
+
+fn main():
+    val add = \x: triple(x) + 1
+    print "trait={measure(Holder(sh: Sq(s: 4)))} {measure(Holder(sh: Rect(w: 2, h: 5)))}"
+    print "closure={add(2)}"
+    print "fn_value={apply(triple, 7)}"
+    print "static={BASE}"
+"#;
+
+#[test]
+fn w4_extern_called_only_from_dead_code_does_not_splice() {
+    let out = run(&write_source("w4_dead", W4_DEAD_CALLER), false, b"");
+    let stderr = text(&out.stderr);
+    assert!(out.status.success(), "JIT run failed:\n{stderr}");
+    assert_eq!(text(&out.stdout), "w4 ok\n");
+    assert!(
+        !stderr.contains("[engine-demotion]"),
+        "an extern called only from unreachable code demoted the run:\n{stderr}"
+    );
+}
+
+#[test]
+fn w4_receipt_names_the_live_extern_and_not_the_dead_one() {
+    let out = run(&write_source("w4_live", W4_LIVE_CALLER), false, b"");
+    let stderr = text(&out.stderr);
+    let stdout = text(&out.stdout);
+    assert!(!out.status.success(), "an unbacked extern must not succeed:\n{stdout}\n{stderr}");
+    let receipt = splice_receipt(&stderr).unwrap_or_else(|| panic!("no splice receipt:\n{stderr}"));
+    assert!(receipt.contains("rt_caret_w4_live_call"), "{receipt}");
+    assert!(
+        !receipt.contains("rt_caret_w4_dead_only"),
+        "receipt names an extern only dead code calls: {receipt}"
+    );
+    assert!(stdout.contains("before"), "{stdout}");
+    assert!(!stdout.contains("after="), "{stdout}");
+}
+
+/// Pins (green before and after): an extern reached only through trait
+/// dispatch, a closure, a function value or a static initialiser is still
+/// reachable, so it still splices and fails closed.
+#[test]
+fn w4_indirect_paths_keep_the_extern_reachable() {
+    for (tag, source, name) in [
+        ("w4_trait", W4_VIA_TRAIT, "rt_caret_w4_via_trait"),
+        ("w4_closure", W4_VIA_CLOSURE, "rt_caret_w4_via_closure"),
+        ("w4_fn_value", W4_VIA_FN_VALUE, "rt_caret_w4_via_fn_value"),
+        ("w4_static", W4_VIA_STATIC, "rt_caret_w4_via_static"),
+    ] {
+        let out = run(&write_source(tag, source), false, b"");
+        let stderr = text(&out.stderr);
+        let stdout = text(&out.stdout);
+        assert!(!out.status.success(), "{tag}: must not succeed:\n{stdout}\n{stderr}");
+        let receipt = splice_receipt(&stderr).unwrap_or_else(|| panic!("{tag}: no splice receipt:\n{stderr}"));
+        assert!(receipt.contains(name), "{tag}: {receipt}");
+        assert!(!stdout.contains("after="), "{tag}: {stdout}");
+    }
+}
+
+#[test]
+fn w4_pruned_jit_matches_the_interpreter_without_demotion() {
+    let path = write_source("w4_equiv", W4_EQUIVALENCE);
+    let mut command = Command::new(seed());
+    let jit = command
+        .arg("run")
+        .arg(&path)
+        .env("SIMPLE_RUST_SEED_WARNING", "0")
+        .env("SIMPLE_JIT_STRICT_ALL", "1")
+        .env_remove("SIMPLE_EXECUTION_MODE")
+        .output()
+        .expect("seed output");
+    let interp = run(&path, true, b"");
+    let jit_stderr = text(&jit.stderr);
+    assert!(jit.status.success(), "JIT run failed:\n{jit_stderr}");
+    assert!(interp.status.success(), "interpreter run failed:\n{}", text(&interp.stderr));
+    assert_eq!(text(&jit.stdout), "trait=16 10\nclosure=7\nfn_value=21\nstatic=15\n");
+    assert_eq!(text(&jit.stdout), text(&interp.stdout));
+    assert!(!jit_stderr.contains("[engine-demotion]"), "{jit_stderr}");
+}
