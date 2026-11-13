@@ -55,7 +55,7 @@ use std.io_runtime.{getpid}
 use std.io_runtime.{time_now_monotonic_ms}
 use std.io_runtime.{dir_create_all, dir_remove_all, dir_exists}
 use app.cli.parse_shard_queue.{parse_shard_release_claims}
-use app.cli.shard_worker_reap_v1.{shard_worker_kill_stopped_v1, parse_shard_reap_v1}
+use app.cli.shard_worker_reap_v1.{shard_worker_confirm_kill_v1, parse_shard_reap_v1}
 use app.cli.native_build_exit_status.{native_build_windows_status_label, native_build_posix_signal}
 use app.cli.file_worker_pool_refusal.{file_worker_pool_refusal_v1}
 use app.cli.shard_mem_clamp.{shard_default_threads}
@@ -825,9 +825,9 @@ fn parse_shard_queue_dir() -> text:
     dir
 
 fn spawn_parse_shards(base: [text], indices: [i64], count: i64, simple_bin: text, timeout_ms: i64,
-        split_flag: text) -> [i64]:
+        split_flag: text) -> ([i64], [i64]):
     # Spawn one child per index, then reap them all under one shared deadline
-    # (shard_worker_reap_v1.spl). Returns the failed shard indices.
+    # (shard_worker_reap_v1.spl). Returns (failed, unconfirmed) shard indices.
     var pids: [i64] = []
     for i in indices:
         var shard_args = base
@@ -888,23 +888,30 @@ fn run_parse_shards_with_base(base: [text], count: i64, simple_bin: text, timeou
     while i < count:
         indices = indices.push(i)
         i = i + 1
-    var failed = spawn_parse_shards(base, indices, count, simple_bin, timeout_ms, split_flag)
+    val (failed, unconfirmed) = spawn_parse_shards(base, indices, count, simple_bin, timeout_ms, split_flag)
     var done = count - failed.len()
+    var live = unconfirmed
     # Orphan reclaim: a dead shard's claims are released and the same indices
     # are run once more. Every other module is already claimed (and cached),
     # so the retry claims exactly the orphans. One round only -- a second
     # death degrades to the real build parsing the remainder, as before.
-    if queue_dir != "" and failed.len() > 0:
+    # Fail closed on an unconfirmed kill: a child that may still be alive is
+    # still writing claims, so its rows are not released and the queue stays.
+    if queue_dir != "" and failed.len() > 0 and live.len() == 0:
         var dead_specs: [text] = []
         for d in failed:
             dead_specs = dead_specs.push("{d}/{count}")
         val released = parse_shard_release_claims(queue_dir, dead_specs)
         print "[parse-shard] reclaim: {failed.len()} dead shard(s), {released} orphaned claim(s) released, retrying"
-        val failed_again = spawn_parse_shards(base, failed, count, simple_bin, timeout_ms, split_flag)
+        val (failed_again, unconfirmed_again) = spawn_parse_shards(base, failed, count, simple_bin, timeout_ms, split_flag)
         done = count - failed_again.len()
+        live = unconfirmed_again
     if queue_dir != "":
         native_build_env_restore_v1("SIMPLE_PARSE_SHARD_QUEUE", old_queue)
-        val _removed = dir_remove_all(queue_dir)
+        if live.len() > 0:
+            eprint "[parse-shard] {live.len()} killed shard(s) not confirmed stopped ({live}); queue retained, no reclaim: {queue_dir}"
+        else:
+            val _removed = dir_remove_all(queue_dir)
     val mode = if queue_dir != "": "queue" else: "static"
     print "[parse-shard] {done}/{count} shard(s) completed split={mode}"
 
@@ -1275,9 +1282,7 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
             # probe also means invalid handle; require a real reap result.
             var owner_stopped = if label == "hir-shard": hir_stopped else: pid <= 0 or (code != -2 and code != -1 and not process_is_running(pid))
             if label != "hir-shard" and not owner_stopped and pid > 0:
-                val killed = process_kill(pid)
-                val reaped = native_build_normalize_exit_code(process_wait(pid, 5000))
-                owner_stopped = shard_worker_kill_stopped_v1(killed, reaped, process_is_running(pid))
+                owner_stopped = shard_worker_confirm_kill_v1(pid, process_kill(pid))
                 if not owner_stopped:
                     all_stopped = false
                     val _blocked = hir_shard_recovery_block(queue_dir, "worker could not be reaped")
@@ -1331,9 +1336,7 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
                             all_stopped = false
                             val _blocked = hir_shard_recovery_block(queue_dir, hir_owner.reason)
                     elif pids[remaining] > 0:
-                        val killed = process_kill(pids[remaining])
-                        val reaped = native_build_normalize_exit_code(process_wait(pids[remaining], 5000))
-                        if shard_worker_kill_stopped_v1(killed, reaped, process_is_running(pids[remaining])):
+                        if shard_worker_confirm_kill_v1(pids[remaining], process_kill(pids[remaining])):
                             val _sealed = hir_shard_recovery_seal(queue_dir, owners[remaining], "BLOCKED")
                         else:
                             all_stopped = false
@@ -1847,9 +1850,7 @@ fn run_mir_shard_export_summaries(base: [text], queue_dir: text, simple_bin: tex
     val code = if pid > 0: native_build_normalize_exit_code(process_wait(pid, timeout_ms)) else: -1
     var stopped = pid <= 0 or (code != -1 and code != -2 and not process_is_running(pid))
     if pid > 0 and process_is_running(pid):
-        val _killed = process_kill(pid)
-        val reaped = native_build_normalize_exit_code(process_wait(pid, 5000))
-        stopped = reaped != -1 and reaped != -2 and not process_is_running(pid)
+        stopped = shard_worker_confirm_kill_v1(pid, process_kill(pid))
     val manifest = "{export_dir}/manifest"
     if code != 0 or not stopped or not file_exists(manifest):
         eprint "[mir-shard-export] summary step exit={code}; workers use full HIR"
