@@ -688,6 +688,16 @@ impl Lowerer {
                         // tracked as such so later MIR/LLVM stages do not redeclare
                         // them as data globals.
                         self.extern_fn_names.insert(extern_fn.name.clone());
+                        // Carry the declared parameter types across the import so
+                        // MIR call coercion sees the real slots for imported
+                        // externs too (raw scalar -> Any boxing). See
+                        // `HirModule::extern_param_types`.
+                        let param_types = extern_fn
+                            .params
+                            .iter()
+                            .map(|p| self.resolve_type_opt(&p.ty))
+                            .collect::<Result<Vec<_>, _>>()?;
+                        self.module.extern_param_types.insert(extern_fn.name.clone(), param_types);
                         imported_count += 1;
                     }
                 }
