@@ -1,6 +1,6 @@
 # Per-file lane (default Stage 3 route) fails before any real HIR: unit child's MIR gate wants HIR for the whole inventory
 
-- Status: open
+- Status: fix-implemented (layer 1, 2026-11-13); default route still blocked by layers 2-3 below
 - Severity: P1 (blocks the DEFAULT Stage 3 route; workaround exists)
 - Found: 2026-11-12 (early Phase 3 census lane)
 - Component: compiler driver, per-file unit pipeline
@@ -114,3 +114,46 @@ shard threads resolved to 1 (in-process). A Phase 4 / phase C tool build at
 3. HIR worker profile: admit `--mode <v>`. Decide the environment policy for
    inherited knobs (`SIMPLE_FILE_WORKERS`, `RUST_LOG`, ...). Either admit them
    or strip them before the child spawn. Do not let them fail the build.
+
+## 2026-11-13: layer 1 fixed, two further layers found
+
+Fix (branch `work/stage3-per-file-route-fix-20261113`): in a module-scoped
+unit (`worker_hir_loads_restricted_v1()`), both MIR ownership gates
+(physical inventory, and the checked entry-alias projection taken under
+`SIMPLE_BOOTSTRAP=1`) keep an unheld NON-target row as a placeholder
+(`driver_mir_owner_disposition_v1`, like a go-to-end exclusion). An unheld
+target still fails closed; outside a scoped unit nothing changes. The MIR
+ledger schedule names unheld rows by their canonical logical module
+(`driver_mir_schedule_name_v1`) so every unit publishes the same must-match
+inventory, and the only-paths skip now runs before the per-row HIR name read.
+Spec: `test/01_unit/compiler/driver/mir_physical_owners_spec.spl` (seed, red
+14/20 -> green 20/20).
+
+Native evidence: a Stage 2 built from the fix worktree by run 20's pinned
+seed (1638 files, 790 s). 3-file repro, default route: both leaf units now
+run HIR -> MIR -> object (`[mir-shard] done ... claimed=1 passed=1`); the
+"MIR physical ownership missing HIR" error is gone on both `SIMPLE_BOOTSTRAP`
+settings. Run 20's own Stage 2 still shows the original error, because its
+binary predates the fix.
+
+The first IMPORTING unit (`main`) still fails, differently per TLDR setting:
+
+- Layer 2 (default, unit TLDR imports on):
+  `FILE-WORKER-E-CLOSURE-INCOMPLETE: import-closure surface missing for <snapshot>/src/app/p3rp/main.spl`.
+  `SIMPLE_COMPILER_PHASE_PROFILE=1` shows
+  `phase2:surface:missing-direct-edge ... source=<scv snapshot>/src/app/p3rp/main.spl target=<checkout>/app/p3rp/aa.spl`.
+  main's import edges point at surface rows whose canonical path is
+  `<checkout root>/app/p3rp/aa.spl`, which has no `src/` and no SCV snapshot
+  prefix. They do not point at the summary-built surfaces registered under the
+  snapshot path, so `surface_built` is false for both imports.
+- Layer 3 (`SIMPLE_UNIT_TLDR_IMPORTS=0`): the closure loads (`modules=3 of=3`).
+  Phase 3 then fails `HIR completion receipt publication failed`
+  (`driver_hir_pipeline_lowering.spl` ~1496) right after `aa` loads from the
+  cache. Suspect: an unclaimed import that missed the cache is lowered
+  in-process, and the unconditional `hir_shard_finish(path, "PASS")` is then
+  refused because another unit already owns that row.
+
+Also observed: under a 12G cgroup the pool refuses ("need >= 2", 9 GB per
+worker). `file_worker_pool_refusal_v1` does not apply the guarded >= 2 floor
+(`shard_threads_guarded_floor_v1`). The probes needed
+`SIMPLE_{HIR,MIR}_SHARD_WORKER_KB=2000000`.
