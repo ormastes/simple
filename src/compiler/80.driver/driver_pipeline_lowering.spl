@@ -44,7 +44,9 @@ use compiler.driver.driver_mir_error_owner.{driver_trace_module_mir_errors,
     driver_mir_error_is_fatal_owned_v1}
 use compiler.driver.driver_mir_physical_owners.{driver_mir_physical_source_indices_v1,
     driver_mir_feed_is_identity_v1, driver_mir_projected_source_identities_v1,
-    driver_mir_entry_alias_projection_required_v1}
+    driver_mir_entry_alias_projection_required_v1, driver_mir_owner_disposition_v1,
+    driver_mir_schedule_name_v1}
+use compiler.driver.driver_worker_surface_closure_v1.{worker_hir_loads_restricted_v1}
 use compiler.driver.driver_mir_provider_aliases.{driver_mir_checked_provider_alias_indices_v1}
 use compiler.mir._MirLowering.provider_metadata.{mir_provider_callable_key}
 use compiler.driver.driver_native_prelower_cache.{driver_native_prelower_build_admissible_v1,
@@ -752,6 +754,12 @@ impl CompilerDriver:
             source_index = source_index + 1
         log_build_progress("mir", "modules", 0, self.ctx.hir_modules.len(),
             "mir_setup:physical_owners", 4, 6, 0, 0, "running")
+        # A module-scoped per-file unit holds HIR only for its targets' load
+        # closure; the ownership gates below keep its unheld non-target rows as
+        # placeholders (driver_mir_owner_disposition_v1) instead of demanding
+        # HIR for the whole inventory. Targets keep the fail-closed demand.
+        val mir_unit_scoped = worker_hir_loads_restricted_v1()
+        val mir_unit_targets: [text] = if mir_unit_scoped: native_file_worker_only_paths_from_env_v1() else: []
         # Phase 2's documented entry/closure route projects the phase-1
         # inventory to unique_entry_sources. Its parser already owns physical
         # deduplication; do not reinterpret unchanged phase-1 receipt rows.
@@ -782,6 +790,10 @@ impl CompilerDriver:
                     projected_owners = projected_owners.push(source.module_name)
                     continue
                 if not self.ctx.hir_modules.has(source.module_name):
+                    if driver_mir_owner_disposition_v1(mir_unit_scoped,
+                            mir_unit_targets.contains(source.path), false) == "placeholder":
+                        projected_owners = projected_owners.push(source.module_name)
+                        continue
                     self.ctx.add_error("MIR projected ownership missing HIR for {source.module_name}")
                     return false
                 val projected_hir: HirModule = self.ctx.hir_modules[source.module_name]
@@ -816,6 +828,9 @@ impl CompilerDriver:
                 if go_to_end_enabled_v1() and self.go_to_end.is_excluded(source_name):
                     continue
                 if not self.ctx.hir_modules.has(source_name):
+                    if driver_mir_owner_disposition_v1(mir_unit_scoped,
+                            mir_unit_targets.contains(self.ctx.sources[selected_index].path), false) == "placeholder":
+                        continue
                     self.ctx.add_error("MIR projected ownership missing HIR for {source_name}")
                     return false
                 val selected_hir: HirModule = self.ctx.hir_modules[source_name]
@@ -850,11 +865,22 @@ impl CompilerDriver:
                 # Use the same platform source identity as phase-1 admission.
                 admitted_physical_paths = admitted_physical_paths.push(_driver_physical_source_key(retained_path))
             var physical_owners: [text] = []
+            var owner_row = 0
             for logical_name in self.ctx.source_module_names_owner:
+                val owner_row_path = if owner_row < self.ctx.source_paths_owner.len(): self.ctx.source_paths_owner[owner_row] else: ""
+                owner_row = owner_row + 1
                 # go-to-end: a module dropped at HIR keeps its inventory slot
                 # (its logical name stands in for the owner); the lowering
                 # loop skips it and the manifest names it.
                 if go_to_end_enabled_v1() and self.go_to_end.is_excluded(logical_name):
+                    physical_owners = physical_owners.push(logical_name)
+                    continue
+                # Module-scoped per-file unit: an unheld non-target row keeps
+                # its slot the same way; its SIMPLE_MIR_SHARD_ONLY_PATHS filter
+                # never lowers it here.
+                if not self.ctx.hir_modules.has(logical_name) and
+                        driver_mir_owner_disposition_v1(mir_unit_scoped,
+                            mir_unit_targets.contains(owner_row_path), false) == "placeholder":
                     physical_owners = physical_owners.push(logical_name)
                     continue
                 if not self.ctx.hir_modules.contains_key(logical_name):
@@ -899,6 +925,9 @@ impl CompilerDriver:
                     # Cycle-125: guard-first double access (the erased-read
                     # class).
                     if not self.ctx.hir_modules.has(logical_name):
+                        if driver_mir_owner_disposition_v1(mir_unit_scoped,
+                                mir_unit_targets.contains(self.ctx.source_paths_owner[physical_index]), false) == "placeholder":
+                            continue
                         self.ctx.add_error("MIR physical ownership missing HIR for {logical_name}")
                         return false
                     val feed_hir_module: HirModule = self.ctx.hir_modules[logical_name]
@@ -1354,8 +1383,13 @@ impl CompilerDriver:
                 for staged_idx in mir_source_indices:
                     val staged_lookup = self.ctx.sources[staged_idx].module_name
                     var staged_name = staged_lookup
+                    # The ledger inventory must match in every unit of a
+                    # per-file pool, whatever HIR subset each one holds.
                     if mir_physical_ownership_active and self.ctx.hir_modules.has(staged_lookup):
-                        staged_name = mir_layout_canonical_module_name(self.ctx.hir_modules[staged_lookup].name)
+                        staged_name = driver_mir_schedule_name_v1(mir_unit_scoped, true,
+                            self.ctx.hir_modules[staged_lookup].name, staged_lookup)
+                    elif mir_physical_ownership_active:
+                        staged_name = driver_mir_schedule_name_v1(mir_unit_scoped, false, "", staged_lookup)
                     staged_schedule = staged_schedule.push(staged_name)
                     staged_source_names = staged_source_names.push(staged_name)
                 self.native_staged_codegen.scheduled_names = staged_schedule
@@ -1384,7 +1418,10 @@ impl CompilerDriver:
                             val excl_lookup = self.ctx.sources[excl_idx].module_name
                             var excl_name = excl_lookup
                             if mir_physical_ownership_active and self.ctx.hir_modules.has(excl_lookup):
-                                excl_name = mir_layout_canonical_module_name(self.ctx.hir_modules[excl_lookup].name)
+                                excl_name = driver_mir_schedule_name_v1(mir_unit_scoped, true,
+                                    self.ctx.hir_modules[excl_lookup].name, excl_lookup)
+                            elif mir_physical_ownership_active:
+                                excl_name = driver_mir_schedule_name_v1(mir_unit_scoped, false, "", excl_lookup)
                             mir_excluded_names = mir_excluded_names.push(excl_name)
                 if not hir_shard_recovery_excluded(mir_shard_queue, mir_shard_key, mir_excluded_names):
                     self.ctx.add_error("MIR shard ledger exclusion record refused for this worker")
@@ -1493,14 +1530,16 @@ impl CompilerDriver:
                     log_phase("aot:lower_to_mir:go_to_end_skip module={source_lookup_name}")
                     direct_pos = direct_pos + 1
                     continue
+                # Before any HIR read: a module-scoped unit holds no HIR for
+                # rows outside its targets' load closure (placeholder owners).
+                if mir_shard_only_paths.len() > 0 and not mir_shard_only_paths.contains(src_direct.path):
+                    direct_pos = direct_pos + 1
+                    continue
                 val module_lowering_errors_before = direct_lowering.errors.len()
                 val name_direct = if mir_physical_ownership_active:
                     mir_layout_canonical_module_name(self.ctx.hir_modules[source_lookup_name].name)
                 else:
                     source_lookup_name
-                if mir_shard_only_paths.len() > 0 and not mir_shard_only_paths.contains(src_direct.path):
-                    direct_pos = direct_pos + 1
-                    continue
                 if mir_shard_queue != "":
                     # Another worker owns it, or this worker's share is full:
                     # not lowered here. direct_pos still advances; the entry
