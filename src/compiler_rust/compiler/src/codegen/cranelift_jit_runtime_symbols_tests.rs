@@ -121,3 +121,54 @@ fn provider_links_and_calls_registered_runtime_symbols() {
         rt_cranelift_free_module(module);
     }
 }
+
+#[test]
+fn provider_registers_the_seed_jit_runtime_symbol_table() {
+    let provider = super::super::jit::default_runtime_provider();
+    let seed_jit = super::super::jit::seed_jit_runtime_symbol_table(provider.as_ref());
+    let registered = jit_provider_runtime_symbols();
+    // One source: the provider's table is exactly the seed JIT's table.
+    assert_eq!(registered.len(), seed_jit.len());
+    // Names, not addresses: a dynamic provider maps its own copy per load.
+    for (&(name, address), &(seed_name, _)) in registered.iter().zip(seed_jit.iter()) {
+        assert_eq!(name, seed_name);
+        assert!(!address.is_null(), "{name}");
+    }
+    let host = simple_common::target::Target::host();
+    let linkable = registered
+        .iter()
+        .filter(|(name, _)| super::super::runtime_sffi::spec_for_target(&host, name).is_some())
+        .count();
+    eprintln!("jit provider runtime symbols: registered={} linkable_with_spec={linkable}", registered.len());
+    assert!(linkable > 0);
+    for name in ["rt_getpid", "rt_time_now_unix_micros", "rt_string_new_literal", "rt_string_len", "rt_file_size"] {
+        assert!(matches!(jit_runtime_import_spec(name), Some(Some(_))), "{name} must be registered with a spec");
+    }
+    assert!(jit_runtime_import_spec(MISSING_SYMBOL).is_none());
+}
+
+#[test]
+fn runtime_table_import_linkage_never_binds_a_process_symbol() {
+    unsafe {
+        let module = jit_module("jit_rt_only");
+        // getpid is a libc process symbol, not a runtime-table name.
+        let sig = signature(&[], Some(CL_TYPE_I32));
+        let name = "getpid";
+        assert_eq!(
+            rt_cranelift_declare_function(module, name.as_ptr() as i64, name.len() as i64, sig, CRANELIFT_LINKAGE_RUNTIME_IMPORT),
+            0
+        );
+        rt_cranelift_free_module(module);
+
+        let module = jit_module("jit_rt_only_ok");
+        let sig = signature(&[], Some(CL_TYPE_I64));
+        let name = "rt_getpid";
+        assert!(rt_cranelift_declare_function(module, name.as_ptr() as i64, name.len() as i64, sig, CRANELIFT_LINKAGE_RUNTIME_IMPORT) > 0);
+        rt_cranelift_free_module(module);
+
+        let aot = rt_cranelift_new_aot_module(b"aot_rt_only".as_ptr() as i64, 11, HOST_TARGET);
+        let sig = signature(&[], Some(CL_TYPE_I64));
+        assert_eq!(rt_cranelift_declare_function(aot, name.as_ptr() as i64, name.len() as i64, sig, CRANELIFT_LINKAGE_RUNTIME_IMPORT), 0);
+        rt_cranelift_free_module(aot);
+    }
+}
