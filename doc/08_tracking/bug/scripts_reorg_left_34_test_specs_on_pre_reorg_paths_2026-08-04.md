@@ -105,3 +105,53 @@ surfaces as N opaque `expected false to equal true` lines rather than one
   would strengthen a currently-**passing** test; that is outside a
   make-failing-tests-pass lane and should not be done unilaterally in a tree with
   live parallel sessions. It should be done — the whole family is a false green.
+
+
+## 2026-11-13 addendum — lane p3-io (work/p3-io-20261113): remaining test-tier repoints landed
+
+The previously-deferred `test/` tiers were repointed in an isolated worktree
+(off the shared dirty tree). Each asserted string was re-verified at the new
+path before editing (no blind sed); the new script paths were confirmed present
+on disk first. Status: **PARTIALLY FIXED → further reduced**; the vacuity
+finding is still open by design.
+
+- `test/system/code_quality/live_kms_security_workflow_spec.spl:121,131` —
+  guide + hygiene `contains` assertions repointed to
+  `scripts/check/check-live-kms-security-workflow.shs` (both underlying files
+  already use the new spelling; spec was a false-RED). Now 7/7.
+- `test/01_unit/os/memory/mold_linker_spec.spl` — removed the stale duplicate
+  `it "scripts/install-mold.shs exists"` block (89-92); the new-path block
+  (84-87) already covered `scripts/setup/install-mold.shs`. Now 14/14.
+- `test/02_integration/http_baremetal_spec.spl:89,95` — repointed to
+  `scripts/qemu/qemu_rv64_http_test.shs`. The two repointed examples now pass.
+  Three other examples still fail on **genuine content drift** in
+  `qemu_rv64_http_test.shs` (HTTP-only / packet RX-TX markers), not a path
+  problem — left RED rather than masked, per this record's own rule.
+- `test/03_system/compiler/rtl_mdsoc_byte_equal_spec.spl:31,110` — repointed to
+  `scripts/rtl/rtl_riscv32_linux_generated.shs` (docstring + live call).
+- `test/system/os/port/dbfs_disk_boot_spec.spl:153` and
+  `test/system/simpleos_x86_32_boot_probe_live_spec.spl:118` — `make_os_disk.shs`
+  invocations repointed to `scripts/os/make_os_disk.shs`.
+- `test/system/simpleos_riscv_network_gate_spec.spl:276` — the RV32 deferred
+  contract repointed to `scripts/qemu/qemu_rv32_http_test.shs` (clean, per this
+  record). The RV64 references in the same file were already repointed; their
+  residual content-drift failures are unchanged and out of scope here.
+- `test/system/gui/arm64_wm_qemu_contract_spec.spl` — readiness script
+  repointed to `scripts/check/check-simpleos-arm64-wm-qemu-readiness.shs`
+  (helper + guide assertion), and `_guide_path()` corrected to the real
+  `doc/07_guide/platform/simpleos/simpleos_arm64_wm_qemu.md` (was missing the
+  `simpleos/` subdir). Readiness probe still needs live QEMU hardware.
+- `test/system/hardware/riscv64_fpga/preflight_spec.spl:12-13` and
+  `test/system/hardware/riscv64_fpga/jtag_unbind_spec.spl:12` — path strings
+  repointed (still vacuous; strengthening deliberately deferred as below).
+- **Product fix:** `scripts/check/check-riscv64-fpga-simpleos-preflight.shs:96`
+  advertised the pre-reorg `sh scripts/jtag-ftdi-unbind.shs`; corrected to
+  `scripts/fpga/jtag-ftdi-unbind.shs`. The `test/03_system/.../jtag_unbind_spec.spl`
+  assertion was strengthened to pin the corrected command (12/12).
+
+Still open: `test/01_unit/hardware/fpga_linux/mlk_s02_100t_generated_linux_wrapper_spec.spl`
+reads `scripts/mlk_s02_100t_generated_linux.shs`, which **does not exist anywhere
+in the tree** (not a reorg path issue — the wrapper is an un-generated/missing
+fixture), so it cannot be repaired by repointing; needs the wrapper generated or
+the spec's expectation re-scoped. The whole vacuous-spec family (literal ==
+literal, `to_start_with` on a literal) remains a tracked false-green follow-up.
