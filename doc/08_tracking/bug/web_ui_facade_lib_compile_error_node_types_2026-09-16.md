@@ -59,3 +59,12 @@ declared>=1 executed=1 passed=1 failed=0`, rc=0. `class Element`'s
 `namespace: text` field (node_types.spl:69) no longer trips any diagnostic;
 the unblock condition is met. The file's last touching merge is PR #7597
 (`9e7e7a526edb`); no source change on this branch.
+
+## 2026-11-13 closure (UI batch B, Linux aarch64, release/1.0.0 @ 35144b7f5e93)
+
+Re-run on a third host and seed: `simple test
+test/01_unit/lib/nogc_async_mut/web_ui/web_ui_facade_spec.spl` (Rust seed,
+16G cgroup cap) reported `SPEC FILE VERDICT ... outcome=OK declared>=1
+executed=1 passed=1 failed=0`, rc=0. The `namespace: text` field in
+`class Element` compiles; the unblock condition is met on Windows and Linux.
+`bug_db.sdn` row moved open -> closed to match the shard.
