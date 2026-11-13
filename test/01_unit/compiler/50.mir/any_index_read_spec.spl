@@ -4,7 +4,9 @@
 
 An Any value may hold a byte-packed [u8] (raw octets), so a raw GEP+load or
 rt_array_get misreads it. Reads whose base is an Any runtime-value local lower
-to the flag-aware, tagged rt_index_get. Typed arrays keep their own getters.
+to the flag-aware, tagged rt_index_get. Typed arrays keep their own getters,
+and a positional `t.0` read stays a native tuple word load (an `Any` json value
+is a raw `(tag, payload)` block that rt_index_get cannot read).
 """
 
 # @tag: unit, compiler, mir, builtins
@@ -20,6 +22,14 @@ use compiler.driver.driver_mir_target.{driver_mir_target_context}
 # Retargeted 2026-11-12: both helpers are package-visible and re-exported by
 # the mir_opt facade; import them through that public surface.
 use compiler.mir_opt.{create_collection_opt_pass, collection_opt_run_on_function}
+use compiler.common.diagnostics.span.Span
+use compiler.common.dependency.visibility.Visibility
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.mir.mir_lowering_types.MirLowering
+use compiler.mir.mir_instruction_kinds.MirInstKind
+use compiler.mir.mir_instruction_support.MirOperandKind
+use compiler.mir._MirLoweringExpr.expr_dispatch.*
 
 struct ReadShape:
     callees: [text]
@@ -57,6 +67,42 @@ fn shape_of(src: text, target: text) -> ReadShape:
                     case _: pass
     ReadShape(callees: callees, has_load: has_load)
 
+fn any_index_callees(base_span: Span, index_span: Span) -> [text]:
+    """Lower `x[3]` directly on an Any runtime-value local with the given
+    base/index spans (synthesized HIR often carries Span.empty() on both)."""
+    val empty = Span.empty()
+    val any_type = HirType(kind: HirTypeKind.Any, span: empty)
+    var symbols = SymbolTable.new()
+    val symbol = symbols.define("x", SymbolKind.Parameter, Some(any_type), empty,
+        Visibility.Private, false, Some("test.any_index_read"))
+    var lowering = MirLowering.new_for_target(symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    var builder = lowering.builder
+    builder.begin_function(SymbolId(id: 100), "any_index_probe", MirSignature(params: [],
+        return_type: MirType.i64(), is_variadic: false), empty)
+    val x_local = builder.new_temp(MirType.i64())
+    lowering.builder = builder
+    lowering.bind_local(symbol.id, x_local)
+    lowering.mark_runtime_value_local(x_local.id)
+    lowering.remember_local_hir_type(x_local.id, any_type, 0, 0)
+    val base = HirExpr(kind: HirExprKind.Var(symbol), has_type_: true, type_: any_type, span: base_span)
+    val index = HirExpr(kind: HirExprKind.IntLit(3, None), has_type_: false,
+        type_: HirType(kind: HirTypeKind.Unit, span: empty), span: index_span)
+    lowering.lower_index_expr(base, index, false, HirType(kind: HirTypeKind.Error, span: empty))
+    var finished = lowering.builder
+    finished.terminate_return(nil)
+    val function = finished.end_function()
+    var callees: [text] = []
+    for block in function.blocks:
+        for instruction in block.instructions:
+            match instruction.kind:
+                case MirInstKind.Call(_, target, _):
+                    match target.kind:
+                        case MirOperandKind.Const(MirConstValue.Str(name), _):
+                            callees = callees.push(name)
+                        case _: pass
+                case _: pass
+    callees
+
 describe "Any index read inside unsafe":
     it "lowers x[3] on an Any receiver to rt_index_get":
         step("lower an unsafe fn reading x[3] from an Any holding a [u8]")
@@ -64,6 +110,23 @@ describe "Any index read inside unsafe":
         expect(contains(shape.callees, "rt_index_get")).to_equal(true)
         expect(contains(shape.callees, "rt_array_get")).to_equal(false)
         expect(shape.has_load).to_equal(false)
+
+    it "keeps a positional t.0 read on an Any receiver a native tuple word load":
+        step("lower x.0 from an Any holding a native (tag, payload) tuple")
+        val shape = shape_of("fn t(x: Any) -> i64\n    unsafe:\n        val v = x.0\n    0\n", "t")
+        expect(contains(shape.callees, "rt_index_get")).to_equal(false)
+        expect(shape.has_load).to_equal(true)
+
+    it "keeps a synthesized x[3] with empty base and index spans on rt_index_get":
+        step("lower an Index whose base and IntLit both carry Span.empty()")
+        val callees = any_index_callees(Span.empty(), Span.empty())
+        expect(contains(callees, "rt_index_get")).to_equal(true)
+
+    it "treats an index literal carrying the non-empty base span as positional":
+        step("lower an Index whose IntLit carries the base's own span")
+        val base_span = Span.new(10, 11, 1, 11)
+        val callees = any_index_callees(base_span, base_span)
+        expect(contains(callees, "rt_index_get")).to_equal(false)
 
     it "keeps rt_bytes_u8_at for a typed [u8] read":
         step("lower a typed [u8] read")
