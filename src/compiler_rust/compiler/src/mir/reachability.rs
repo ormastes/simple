@@ -48,6 +48,14 @@ use super::{MirFunction, MirInst, MirModule};
 /// Matching keys of a name: the name, its normalised form (`::`, `.`,
 /// `_dot_` -> `__`), and every suffix after a `__` in the normalised form.
 fn name_keys(name: &str, out: &mut Vec<String>) {
+    // `f$dupN` (same-named overloads, MIR lowering) and `f$boxed`-style
+    // derived symbols also carry the keys of `f`, so a reference to either
+    // spelling keeps every variant.
+    if let Some((base, _)) = name.split_once('$') {
+        if !base.is_empty() {
+            name_keys(base, out);
+        }
+    }
     out.push(name.to_string());
     let normalized = name.replace("::", "__").replace("_dot_", "__").replace('.', "__");
     let bytes = normalized.as_bytes();
@@ -311,6 +319,19 @@ mod tests {
         assert!(!keep.contains("unrelated"));
         retain_reachable_functions(&mut m);
         assert_eq!(m.functions.len(), 4);
+    }
+
+    #[test]
+    fn dup_overload_variants_are_kept_with_their_bare_name() {
+        let m = module(vec![
+            func("main", vec![call("dir_create$dup0")]),
+            func("dir_create$dup0", vec![]),
+            func("dir_create", vec![]),
+            func("other$dup0", vec![]),
+        ]);
+        let keep = reachable_function_names(&m);
+        assert!(keep.contains("dir_create$dup0") && keep.contains("dir_create"), "{keep:?}");
+        assert!(!keep.contains("other$dup0"));
     }
 
     #[test]

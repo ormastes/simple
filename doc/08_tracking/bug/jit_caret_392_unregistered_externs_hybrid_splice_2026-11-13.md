@@ -524,12 +524,24 @@ instead of 309.
   - `text_static_builtins_jit`
 - Driver `interpreter_jit` SIGILLs in `jit_function_call_interpreter` /
   `jit_gcd_interpreter`. These are interpreter mode and never reach
-  `run_file_jit`, so this is pre-existing.
+  `run_file_jit`. They SIGILL identically with `SIMPLE_JIT_NO_REACH_PRUNE=1`.
+  `--skip _interpreter` runs 63/63 green.
+- Driver `--lib`: 541 green. The crashes are not caused by pruning:
+  - `exec_core` `smf_*` tests (SIGBUS, `run_smf_with_args` path) crash the
+    same way with pruning off;
+  - `build_cache::test_source_hash_refreshes_when_override_changes_on_same_cache`
+    fails;
+  - `jit_top_level_statement_tests` (`run_file_jit`) is green.
+- `bdd_pending_dsl_dispatch_test`: 2 red, and the same 2 are red with pruning
+  off.
+- `bdd_provisional_message_test`: 3/3 green.
 
 **Corpus A/B** (same seed, pruning on vs off, 79 `fn main` programs from
 `examples/` and `test/02_integration/`):
 
-- 77 same stdout and exit code.
+- 77 same stdout and exit code. Only 31 of the 79 ran with no JIT fallback
+  in either mode; the rest de-JIT in both modes, so for those this compares
+  interpreter runs.
 - 2 differed once and were identical on re-run: a 10 s harness timeout under
   load, and an exit code that flipped under load.
 - Pruning lowered the whole-module fallback count on 2 programs (7 -> 2,
