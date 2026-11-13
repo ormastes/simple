@@ -112,3 +112,67 @@ engine for these methods.
 The original Linux-seed stack-overflow manifestation (rc=134) was not
 re-observed here; if it recurs on a rebuilt seed, re-open with the
 reproducer spec above.
+
+
+---
+
+## Addendum 2026-11-13 — seed lane work/jit-option-boxing-fix-20261113 — SEED ROOT CAUSE FIXED
+
+The lane-4 addendum above isolated the library symptom correctly but the
+"unrecorded seed codegen defect" it pointed at has now been root-caused at
+`origin/release/1.0.0` tip (`9cfee77c614`) and fixed in the seed. Three
+distinct defects stacked:
+
+1. **`parse_*` method results were not source-Option-typed.** The int family
+   was typed via raw `TypeRegistry::register(Pointer{inner:I64})` and the
+   float family fell through to `TypeId::ANY`. Raw registration is the bug:
+   only `TypeRegistry::register_optional` records the id in
+   `optional_type_ids`, and `TypeRegistry::optional_inner` returns `None`
+   for a bare anonymous Pointer. The match binder's `subject_is_optional`
+   gate (`hir/lower/stmt_lowering.rs`, `build_pattern_binding_stmts`) then
+   fell through to bare `rt_enum_payload(subject)` — which answers NIL for
+   any non-enum — so `case Some(n):` over a parse result bound the nil
+   sentinel. Measured at the tip on BOTH lanes with a source-built seed:
+   `match "87".parse_int(): case Some(n):` bound `n = nil` (reboxed:
+   `Some(3)`), while the same match over a function PARAMETER (`i64?`
+   annotation → `register_optional`) bound `n = 87`. This is the exact
+   `_pdb_v2_decimal_length("87") = Some(3)` mechanism from the addendum
+   above; the interpreter-lane difference measured on the older pinned
+   binary was build drift, not a JIT-vs-interpreter codegen split.
+2. **`parse_float`/`parse_f64`/`parse_f64_safe` typed `ANY`** — both lanes
+   rendered bare `1.5` / `nil` under interpolation instead of
+   `Option::Some(1.5)` / `Option::None`. Fixed by typing the family as the
+   flat `f64?` (`register_optional(F64)`), mirroring the int family.
+3. **`.unwrap()` on `f32?`/`f64?` returned a garbage register on both
+   lanes** (measured: nondeterministic denormal, per-run tails) — the HIR
+   unwrap dispatch only routed BoxInt-family receivers through
+   `rt_unwrap_or_self`; floats fell to generic method dispatch. Added the
+   missing arm; the name-keyed MIR unbox tail
+   (`lowering_expr_builtin.rs`, `rt_unwrap_or_self` + F32/F64 →
+   `unbox_scalar_for_raw_slot`) already existed.
+
+Fix: `src/compiler_rust/compiler/src/hir/lower/expr/mod.rs` (parse-family
+typing arms → `register_optional`; f32?/f64? unwrap arm). Regression tests:
+`src/compiler_rust/compiler/tests/primitive_option_parity_jit.rs`
+(`parse_float_prints_some_and_none`, `parse_float_and_f64_unwrap_to_f64`,
+`match_binds_parse_result_payload`, `match_binds_parse_float_payload`).
+
+Seed-refresh requirement: `bin/simple.exe` is a pinned seed; the fix only
+takes effect for default-lane runs after the next pinned-seed refresh
+rebuilds `simple-driver` from source containing this change.
+
+Workaround status: the lane-4 `_pdb_decimal_parse_strict` workaround in
+`row_value_helpers.spl` was left in place (this change does not revert
+it), but it is NO LONGER REQUIRED — with this seed fix, the pre-workaround
+library (validators using `parse_int`/`parse_f64` + `match` + `unwrap`)
+passes `test/02_integration/app/pure_sql_reopen_process_spec.spl` 4/4 on
+the default JIT lane plus `pure_sql_select_cache_spec.spl` 10/10 and
+`pure_sql_autoincrement_spec.spl` 2/2, where the same pre-workaround tree
+failed 4/4 (reader process aborted) on the unfixed seed built from the
+same commit.
+
+Known remaining gap (recorded, not fixed here):
+`optionalize_array_accessor` (`hir/lower/expr/helpers.rs`) also registers
+its `T?` via raw `register` and plausibly shares defect 1 for
+`[T].first()/last()/pop()` match subjects; not exercised by this bug's
+reproducer.
