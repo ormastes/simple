@@ -211,3 +211,11 @@ Verified on the fresh seed (build-commit 46fe8f6b6def, `SIMPLE_LIB=src`,
 - The two real-world sites named in this doc
   (`imac_protected_core.spl:529-531`, `matrix_receipt.spl:697-698`) use exactly
   the accepted mixed forms.
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt)
+
+Concurs with lane compiler5's FIXED verdict; independently re-ran the plain-if
+root repro (`val v = if p == 1:\n lo else: 9`) on the tracked seed
+(@ 46fe8f6b6def) — parses and evaluates to 5 for (p=1, lo=5), the correct value
+(the doc's half-fix failure mode of parse-but-wrong-value was explicitly checked
+by compiler5 and this lane's value probe agrees). No in-lane change.

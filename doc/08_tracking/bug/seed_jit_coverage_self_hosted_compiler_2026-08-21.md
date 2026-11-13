@@ -511,3 +511,7 @@ and not admittable as-is (an ANY boundary has no sound unboxed encoding).
 
 Verdict: **LIVE + BLOCKED** (seed-side structural; owning lane command
 verbatim in runner5's addendum above).
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with the recorded status: OPEN — the census landed and both blockers were filed as follow-ups (runner5 addendum verbatim). No in-lane change.

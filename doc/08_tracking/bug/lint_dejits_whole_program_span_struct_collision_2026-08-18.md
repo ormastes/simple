@@ -339,3 +339,7 @@ So the titled condition ("two stacked de-JIT causes") is resolved; the record
 is superseded by the lint-JIT-parity record for whatever work is left. The
 measured expectations in this doc (rename buys ~1.23x, not 100x; lexer linear
 at ~21 ms/token) remain the standing guidance against over-investment.
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with lane interp9: the two titled de-JIT causes are FIXED at tip (entry-file text-grep gate now capability-armed, exec_core.rs); the residual span/struct pin is deliberate. No in-lane change.

@@ -256,3 +256,7 @@ Two consequences:
   peer-lane activity. A stage2 rebuild plus stage3 caches cannot be started
   here without risking ENOSPC across those lanes, so the discriminator is
   deferred on resources, not on method.
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with lane boot20: SUPERSEDED — absorbed (spec passes 6/6 seed-smoke per the dated addendum). No in-lane change.

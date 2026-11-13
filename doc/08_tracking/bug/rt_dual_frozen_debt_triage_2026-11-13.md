@@ -13,9 +13,16 @@ Gate: `sh scripts/check/check-rt-dual-implementation-ratchet.shs` (frozen mode).
 | wave 2, PR #8787 (this document) | unchanged |
 | wave 3, PR #8788 (C twin for `rt_string_to_digit`) | 2777 checked, 2370 baselined, 407 new, 0 stale |
 | wave 5 (231 class c and d rows baselined with reasons) | 2777 checked, 2601 baselined, 176 new, 0 stale |
+| extractor fix, before baseline edit (static skipped, definitions after macro calls seen) | 2323 checked, 2601 baselined, 36 new, 314 stale |
+| extractor fix, after baseline edit (-314 stale rows, +4 simd rows) | 2323 checked, 2291 baselined, 32 new, 0 stale |
+| Rust lane fix, before baseline edit (non-exported Rust `fn` skipped, `src/runtime/test` skipped) | 2305 checked, 2291 baselined, 27 new, 13 stale |
+| Rust lane fix, after baseline edit (-13 stale rows, +27 unmasked c-only rows) | 2305 checked, 2305 baselined, 0 new, 0 stale |
 
-The push tier and the required CI job compare against the base commit, so this
-debt fails only the non-required extended job.
+See "Extractor fix" below for what the 32 were and "Rust lane fix" for how
+they were cleared.
+
+The push tier and the required CI job compare against the base commit, so the
+frozen debt only ever failed the non-required extended job.
 
 ## What the gate measures (this decides what can pay the debt)
 
@@ -141,12 +148,147 @@ These are not runtime primitives. Two ways to clear them:
 - `rt_gui_html_present`: the C side is a `static` function-pointer variable in
   `runtime_native.c`, not a function.
 
+## Extractor fix (2026-11-13, after wave 5)
+
+Two corrections to the C lane of the gate's extractor. The sections above
+describe the state before them and are kept as the record of the triage.
+
+1. `static` definitions are skipped: `static`, `static inline`, attributes
+   before or between, and a non-`static` definition that follows a `static`
+   prototype in the same file. The test is per occurrence and per file, so a
+   name that is `static` in one file and external in another still counts.
+2. Leading semicolon-less macro invocations are dropped from a declaration's
+   prefix, so the definition after them is seen.
+
+Effect on the frozen comparison:
+
+- 314 baselined rows went stale and were removed. 313 were c-only rows whose
+  only C definition is `static` (the estimate above was "about 308"). One was
+  the rust-only row `rt_cuda_launch_kernel_ex`: its C definition in
+  `runtime_dynload.c` follows `GPU_CALLn` invocations and is now seen, so the
+  symbol is dual.
+- The four simd rows wave 1 dropped (`rt_simd_fma_f32x4`, `rt_simd_fma_f32x8`,
+  `rt_simd_fma_f64x4`, `rt_simd_shl_u64x4`) were reported new, as c-only, and
+  are baselined again with a dated comment.
+- `rt_simd_shl_i32x4` and `rt_simd_shl_i32x8` (class X) are now dual by name.
+  The ABI mismatch noted under X is unchanged; the gate compares names only.
+- All 168 class S names and 3 of the 5 class T names left the new list.
+
+The 32 names still reported new:
+
+- 2 c-only, class T, defined only in a `src/runtime/test/` source and not
+  `static`: `rt_hsa_test_fault_v1`, `rt_timestamp_oracle_from_components`.
+- 30 rust-only. Each is a non-exported Rust `fn` (private or `pub(crate)`, no
+  `extern "C"`, no `#[no_mangle]`) whose name matched a `static` C helper, so
+  the pair used to look dual. 29 have a
+  `static` C function of the same name; `rt_gui_html_present` (class X) has a
+  `static` function-pointer variable. None is a C `static` name counted by the
+  C lane. Clearing them needs either the Rust lane to skip non-exported `fn`
+  items or the Rust items to be renamed or deleted; neither was done here:
+
+  `rt_core_zero_array_alloc`, `rt_directx_submission_find`,
+  `rt_directx_submission_note_retired`, `rt_directx_submission_poll_locked`,
+  `rt_directx_submission_release`, `rt_directx_submission_unlink_and_free`,
+  `rt_directx_submission_was_retired`, `rt_file_atomic_write_impl`,
+  `rt_gui_event_owner`, `rt_gui_html_load`, `rt_gui_html_present`,
+  `rt_gui_html_refuse`, `rt_io_udp_multicast_membership`,
+  `rt_mcp_duplicate_std`, `rt_mcp_environment_w`, `rt_mcp_parent`,
+  `rt_mcp_parent_w`, `rt_mcp_regular`, `rt_mcp_regular_w`, `rt_mcp_wrapper`,
+  `rt_mcp_wrapper_w`, `rt_path_parent_ascii_equal`,
+  `rt_path_parent_is_separator_for`, `rt_path_parent_is_separator`,
+  `rt_path_parent_windows_root_len`, `rt_read_regular_no_follow_buffer`,
+  `rt_sorted_byte_cmp`, `rt_sorted_u64_cmp`, `rt_sorted_value_cmp`,
+  `rt_string_new_uncached`
+
+Blind spots left open:
+
+- Definitions whose name is pasted by a macro
+  (`RT_SIMD_F32X4_BINOP(rt_simd_add_f32x4, x + y)`, 32 such invocations in
+  `runtime_simd_dispatch.c`) are still invisible to the C lane: the name is
+  not followed by `(`. A symbol defined only that way is reported rust-only
+  if it has a Rust definition and is not counted at all otherwise.
+- A name that is `static` under one `#if` branch and external under another
+  in the same file is treated as `static`. None was found among the names whose
+  classification changed.
+- `scripts/check/check-runtime-api-regression-push.shs` has its own C
+  extractor, a line regex (`^type ... rt_NAME(...) {`). It still counts
+  `static` definitions, so removing or renaming a `static` `rt_` helper
+  counts toward its removal threshold. It is line-based and so is not
+  affected by the macro case. Its behaviour was not changed.
+- `scripts/check/extern-backing-census.shs` reads defined symbols with `nm`
+  and its own text scans; it does not share this extractor and was not
+  changed. Whether its scans tell a `static` definition from an external one
+  was not checked.
+
+## Rust lane fix (2026-11-13, after the extractor fix)
+
+Two more corrections to the gate's extractor, mirroring the C `static` rule on
+the Rust side. The sections above are kept as the record of the earlier state.
+
+1. The Rust lane skips non-exported `fn rt_*` items: no visibility or
+   `pub(...)`, no `extern` ABI, no `#[no_mangle]`/`#[export_name]`. A bare `fn`
+   inside an `extern` block (an import of the C symbol) is such an item. What
+   still counts: `pub fn`, any `extern "ABI" fn`, any
+   `#[no_mangle]`/`#[export_name]` fn. The verdict is per occurrence, so a name
+   exported elsewhere still counts.
+2. The C lane skips `src/runtime/test` (selfcheck, oracle and harness
+   programs). Only that top-level directory; `src/runtime/tests` and nested
+   `test` directories are still scanned.
+
+Effect on the frozen comparison (2323 / 2291 / 32 new / 0 stale before):
+
+- All 30 rust-only names listed above left the new list.
+- Both class T names (`rt_hsa_test_fault_v1`,
+  `rt_timestamp_oracle_from_components`) left the new list.
+- 13 baselined rows went stale and were removed: 4 rust-only rows whose only
+  Rust definition is a non-exported item (`rt_array_new_uninit_u64`, `rt_str`,
+  `rt_string_new_uncached_untracked`, `rt_string_new_with_len_hash`) and the 9
+  c-only `rt_timestamp_oracle_*` rows defined only in
+  `src/runtime/test/runtime_timestamp_calendar_oracle.c`.
+- 27 C primitives were reported new, as c-only. Each has a non-static C
+  definition and used to read as dual only because a non-exported Rust item
+  had the same name. They are baselined with a reason per group:
+  - 12, Rust side is an import declaration in an `extern` block:
+    `rt_font_load_bytes`, `rt_hosted_fs_private_atomic_write_utf8`,
+    `rt_pool_worker_block_begin`, `rt_pool_worker_block_end`,
+    `rt_ptr_write_bytes_raw`, `rt_struct_alloc`, `rt_struct_receiver_valid`,
+    `rt_transient_raw_promote`, `rt_transient_raw_scope_begin`,
+    `rt_transient_raw_scope_end`, `rt_transient_raw_scope_pause`,
+    `rt_transient_raw_words`.
+  - 11, Rust side is a private `#[cfg(test)]` fail-closed sentinel in
+    `runtime/src/process_observation_v4_twins.rs`: the nine
+    `rt_process_observation_v4_*_value` names and the two
+    `rt_process_owned_v3_*_value` names.
+  - 4, Rust side is a non-`extern` crate-internal helper:
+    `rt_array_new_uninit`, `rt_option_none`, `rt_option_some`,
+    `rt_path_parent_is_separator_for_test`.
+- Result: `2305 checked, 2305 baselined, 0 new, 0 stale`. The frozen run
+  passes.
+
+Blind spots left open by this fix:
+
+- `pub fn rt_*` declarations inside an `extern` block still count as Rust-lane
+  symbols, although they are imports. A prototype that also skipped them
+  moved 64 more names from dual to c-only. Not done here: it changes the
+  count further and needs the same per-row review.
+- A plain `pub fn rt_*` with no `extern` ABI and no `#[no_mangle]` still
+  counts, as it did before (the selftest fixtures treat it as a Rust-lane
+  symbol). A prototype that required `extern` or `#[no_mangle]` reported 135
+  new and 24 stale against the baseline as it was before this fix (the 135
+  include the 2 class T names).
+- A `fn rt_*` spelled in a Rust comment or string still counts (the legacy
+  lexical error bar, pinned by the `rust_attribute_leak` fixture).
+  `rt_value_print` reads as dual only through such a comment in
+  `runtime/src/value/sffi/io_print.rs`.
+
 ## Next steps, in order
 
-1. Owner decision on S/T: rename (option 1) or extractor skip (option 2).
+1. Done for S by the extractor fix (option 2) and for T by the Rust lane fix
+   (`src/runtime/test` is no longer scanned).
 2. Owner decision on the 79 boundary rows: allowlist or twin.
-3. Fix the extractor blind spot after macro invocations; expect 4 c-only rows
-   to reappear and 2 rust-only rows to become dual.
+3. Done by the extractor fix above: 4 c-only rows are back and the 2 rust-only
+   names are dual. The 30 rust-only names it unmasked are cleared by the Rust
+   lane fix.
 4. Owner decision on Rust lane scope: counting `interpreter_extern` handlers
    would make up to 86 of the C-only rows dual without new code.
 

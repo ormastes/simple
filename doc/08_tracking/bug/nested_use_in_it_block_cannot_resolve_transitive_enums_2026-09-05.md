@@ -91,3 +91,10 @@ Fix lives in the module loader / import-resolution of the running engine
 (seed here; pure-Simple frontend parity unverifiable on this lane).
 **Grant:** seed-lane fix, with the spec's nested-use revert as the
 acceptance run.
+
+## Triage 2026-11-13 (P3 tools lane)
+No code change this lane; the 2026-11-11 (lane ne17) addendum stands — the
+defect is LIVE with the surface symbol changed (`vhdl_kernel_accepts` not
+found), the mechanism is the running engine's module loader / import
+resolution (seed lane), and the hoist workaround must NOT be reverted. Fix
+grant belongs to the seed lane with the nested-use revert as acceptance.

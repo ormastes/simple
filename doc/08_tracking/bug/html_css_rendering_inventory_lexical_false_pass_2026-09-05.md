@@ -69,3 +69,10 @@ these three consumers to inventory rows is still not done. Not attempted here:
 the downstream Electron/bitmap evidence lanes cannot run on this Windows host,
 so a rewired gate could not be honestly exercised; owner remains the web
 renderer inventory lane.
+
+
+---
+
+## 2026-11-13 triage — lane live-p3-l2 (work/live-p3-l2-20261113, worktree lp2-wt, base origin/release/1.0.0 tip)
+
+**Verdict: LIVE (deferred).** `check-html-css-rendering-manifest-traceability.shs` still promotes by lexical occurrence and is still invoked by the three aggregate gates; the rewired gates cannot be fully exercised on this host (downstream Electron/bitmap evidence lanes do not run here), and landing an unverifiable gate replacement would repeat the false-evidence pattern this doc condemns. Owner: web renderer inventory lane.

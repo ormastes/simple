@@ -98,3 +98,9 @@ trivial):
   (that knob still governs actual deprecation warnings elsewhere, e.g.
   `interpreter_module/module_loader.rs`, `hir/lower/module_lowering/module_pass.rs`).
 - The fixing commit's comment block in-source cites this bug doc.
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with lane ne6: FIXED at tip since 2026-08-21 (dec68f5173ff gated the
+"[DEBUG declare_globals fallback]" print on the cranelift path). No independent
+re-verification in this lane; disposition stands.

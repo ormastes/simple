@@ -435,3 +435,7 @@ above rather than relying on it:
   identical to the p3-compiler3 observation on the older seed. Not a
   lexer-position symptom.
 - Status header flipped "partially fixed" → SUPERSEDED.
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with lane p3-comp8: SUPERSEDED — the position-unification fix is at tip (confirmed by comp8 from source). No independent re-verification in this lane; disposition stands.

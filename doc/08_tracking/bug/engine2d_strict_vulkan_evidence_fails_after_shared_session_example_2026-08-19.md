@@ -101,6 +101,13 @@ Owner follow-up: confirm the canonical WM chrome change (4px inset, alpha
 0x28) is intended, then update the oracle constants under review; separately
 adjudicate the 126-vs-127 blend rounding oracle.
 
+## Triage 2026-11-13 (P3 tools lane)
+No code change this lane; the 2026-11-11 (lane ne7) addendum stands — the
+recorded fresh-device `cpu_fallback` signature no longer occurs; the remaining
+red is canonical-scene oracle drift (4px inset, alpha 0x28) plus a 126-vs-127
+blend rounding oracle, both of which are owner calls, not P3 fixes.
+
 ## Triage 2026-11-13 (Linux aarch64, lane uia) — row stays OPEN
 
 On release/1.0.0 c8c3e7bc4f1, Linux aarch64 (DGX Spark GB10), Rust seed af717f53d6bce3e5: test/02_integration/rendering/engine2d_embedded_surface_spec.spl 10 examples, 8 passed, 2 failed. The two Vulkan-evidence examples this record names pass (uses the Vulkan device path only for preflighted root and named-child compositions; composites preflighted resolved text through checked Vulkan image blending); whether their Ok(engine) arm or their Err arm ran was not instrumented, so this is not device evidence. Red: (1) the WM example, on fixture oracles that no longer match the product (expected 40 to equal 51: commands[0] is now the 0x28 shadow rect; content rect is 14,68 112x44 against a 120x52 fixture frame, so the fail-closed placeholder is drawn); (2) opacity_milli=500, 126 vs 127. Not changed here: correcting (1) rewrites six oracles and needs the spec owner to confirm the 4px content inset is intended.
+

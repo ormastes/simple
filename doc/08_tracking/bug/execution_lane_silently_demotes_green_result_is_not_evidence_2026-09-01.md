@@ -106,3 +106,7 @@ here.
   documented in `doc/01_research/compiler/hardening/simple_hardening_plan_2026-08-21.md`; the
   receipt line format `[engine-receipt] engine=<E> requested=<R> demoted=<yes|no> reason=<R|->
   file=<P>` is pinned by the guard's selftest fixtures.
+
+## Triage 2026-11-13 (P3 tools lane)
+No code change this lane; CLOSED 2026-11-11 FIXED on release per the record
+header (verified lane ne8). Verdict trusted, not re-run.

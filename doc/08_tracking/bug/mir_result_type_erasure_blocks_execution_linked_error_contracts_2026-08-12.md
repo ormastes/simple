@@ -92,3 +92,7 @@ negative-test run proving a deliberately Err-returning implementation fails its
 generated theorem (this record's unblock condition).
 
 Disposition: BLOCKED. Header Status flipped "open" → BLOCKED.
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with lanes p3-compiler4/comp8: BLOCKED — MIR Result execution refinement for error contracts requires the granted native-verification path; no in-lane change.

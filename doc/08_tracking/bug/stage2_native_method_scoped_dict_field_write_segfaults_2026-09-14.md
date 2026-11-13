@@ -205,3 +205,7 @@ re-run per the no-green-rerun rule):
   candidate (receipt-free aarch64 build), which is the sanctioned stage-chain
   probe route — blocked in-lane; the scalar-reader fix shape and the hosted
   pin are the hosted evidence of record.
+
+## Triage 2026-11-13 (P3 tools lane)
+No code change this lane; FIXED per the 2026-11-11 addenda (lane boot18 and
+p3-comp12 row 7) in the record. Verdict trusted, not re-run.

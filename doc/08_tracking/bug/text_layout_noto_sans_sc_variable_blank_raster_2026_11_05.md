@@ -27,3 +27,14 @@ variable-font instancing, so `wght=100` is silently ignored in
 `src/runtime/runtime_font.c`) remains a seed/runtime-font limitation outside a
 no-cargo lane. Grant unchanged: native run on a pure-Simple self-hosted binary
 or the browser_renderer GPU lane.
+
+
+---
+## 2026-11-13 triage — lane live-p3-l6 (Windows host, seed bin/simple.exe, base f790f7f266e)
+
+Concur with the 2026-11-09 p3-scoping disposition: both interpreter repro specs
+were verdicted PASS on this base family and were not re-run (no-green-rerun
+rule); the remaining suspect is the native/GPU atlas-upload lane, which needs a
+pure-Simple self-hosted binary or the browser_renderer GPU lane. The adjacent
+stb_truetype variable-font-instancing gap remains a seed/runtime-font
+limitation. No in-lane change.

@@ -78,3 +78,10 @@ remains **UNPROVEN**. No boot was attempted.
 
 ## Round-10 verdict note (2026-11-06)
 Verdict: feature-sized. 579 undefined rt_* symbols: rt_cli_* and rt_cranelift_* are genuinely missing providers; the optional families belong in RT_OPTIONAL_SYMBOLS (native_project/stubs.rs). Needs per-family provider work plus a Phase-3 relink; check with scripts/check/check-no-unresolved-runtime-symbols.shs. SIMPLE_ALLOW_UNRESOLVED_RUNTIME must stay unset.
+
+## Triage 2026-11-13 (P3 tools lane)
+No code change this lane; the Round-10 verdict note (2026-11-06) stands —
+feature-sized: rt_cli_*/rt_crnelift_* are genuinely missing providers, the
+optional families belong in RT_OPTIONAL_SYMBOLS (seed
+native_project/stubs.rs). Seed-lane + per-family provider work; this lane did
+not re-run the link.

@@ -298,6 +298,8 @@ mod cuda_dlopen {
     type CuMemcpyHtoDAsync = unsafe extern "C" fn(u64, *const c_void, usize, *mut c_void) -> i32;
     type CuMemcpyDtoHAsync = unsafe extern "C" fn(*mut c_void, u64, usize, *mut c_void) -> i32;
     type CuDeviceGetCount = unsafe extern "C" fn(*mut i32) -> i32;
+    // CUdevice_attribute values: 75 = COMPUTE_CAPABILITY_MAJOR, 76 = MINOR.
+    type CuDeviceGetAttribute = unsafe extern "C" fn(*mut i32, i32, i32) -> i32;
     type CuModuleLoadData = unsafe extern "C" fn(*mut *mut c_void, *const c_void) -> i32;
     type CuModuleUnload = unsafe extern "C" fn(*mut c_void) -> i32;
     type CuModuleGetFunction = unsafe extern "C" fn(*mut *mut c_void, *mut c_void, *const std::os::raw::c_char) -> i32;
@@ -321,6 +323,9 @@ mod cuda_dlopen {
         pub device_get_uuid: CuDeviceGetUuid,
         pub device_get_name: CuDeviceGetName,
         pub device_get_count: CuDeviceGetCount,
+        // Optional: a driver without cuDeviceGetAttribute must not invalidate
+        // the whole table (capability callers surface a negative rc instead).
+        pub device_get_attribute: Option<CuDeviceGetAttribute>,
         pub ctx_create: CuCtxCreate,
         pub ctx_set_current: CuCtxSetCurrent,
         pub ctx_destroy: CuCtxDestroy,
@@ -480,6 +485,7 @@ mod cuda_dlopen {
             device_get_uuid: sym_alt!("cuDeviceGetUuid_v2", "cuDeviceGetUuid"),
             device_get_name: sym!("cuDeviceGetName"),
             device_get_count: sym!("cuDeviceGetCount"),
+            device_get_attribute: sym_opt!("cuDeviceGetAttribute"),
             ctx_create: sym!("cuCtxCreate_v2"),
             ctx_set_current: sym!("cuCtxSetCurrent"),
             ctx_destroy: sym!("cuCtxDestroy_v2"),
@@ -1387,7 +1393,23 @@ pub fn rt_cuda_device_compute_capability_fn(args: &[Value]) -> Result<Value, Com
     }
     #[cfg(not(feature = "cuda"))]
     {
-        Ok(Value::Int(-3))
+        // Reach the real driver through dlopen like the sibling device
+        // externs; the -3 build sentinel must survive only where no driver
+        // path exists, and a host with a working driver must report its
+        // packed capability (major*10+minor, e.g. 86 for sm_86).
+        if let Some(fns) = get_cuda_dl() {
+            if let Some(get_attr) = fns.device_get_attribute {
+                let mut major = 0i32;
+                let mut minor = 0i32;
+                let r_major = unsafe { get_attr(&mut major, 75, device as i32) };
+                let r_minor = unsafe { get_attr(&mut minor, 76, device as i32) };
+                if r_major == 0 && r_minor == 0 {
+                    return Ok(Value::Int((major * 10 + minor) as i64));
+                }
+                return Ok(Value::Int(if r_major != 0 { r_major } else { r_minor } as i64));
+            }
+        }
+        Ok(Value::Int(-1))
     }
 }
 
@@ -3459,6 +3481,7 @@ mod vulkan_dlopen {
         unsafe extern "C" fn(VkDevice, *const VkFenceCreateInfo, *const c_void, *mut u64) -> VkResult;
     type FnVkDestroyFence = unsafe extern "C" fn(VkDevice, u64, *const c_void);
     type FnVkWaitForFences = unsafe extern "C" fn(VkDevice, u32, *const u64, u32, u64) -> VkResult;
+    type FnVkGetFenceStatus = unsafe extern "C" fn(VkDevice, u64) -> VkResult;
 
     #[repr(C)]
     pub(super) struct VkFenceCreateInfo {
@@ -3537,6 +3560,7 @@ mod vulkan_dlopen {
         pub create_fence: FnVkCreateFence,
         pub destroy_fence: FnVkDestroyFence,
         pub wait_for_fences: FnVkWaitForFences,
+        pub get_fence_status: FnVkGetFenceStatus,
     }
     unsafe impl Send for VkFns {}
     unsafe impl Sync for VkFns {}
@@ -3698,6 +3722,7 @@ mod vulkan_dlopen {
             create_fence: sym!("vkCreateFence"),
             destroy_fence: sym!("vkDestroyFence"),
             wait_for_fences: sym!("vkWaitForFences"),
+            get_fence_status: sym!("vkGetFenceStatus"),
             queue_wait_idle: sym!("vkQueueWaitIdle"),
             device_wait_idle: sym!("vkDeviceWaitIdle"),
             reset_command_buffer: sym!("vkResetCommandBuffer"),
@@ -3775,11 +3800,16 @@ mod vulkan_dlopen {
     pub struct DescriptorSetEntry {
         pub set: VkDescriptorSet,
         pub pool: VkDescriptorPool,
+        /// `(binding, buffer handle)` currently written into this set, so an
+        /// async ring submission can retain the buffers it may still read.
+        pub buffers: Vec<(u32, i64)>,
     }
 
     pub struct CommandBufferEntry {
         pub cmd: VkCommandBuffer,
         pub pipeline_handle: i64,
+        /// Descriptor set handles bound while recording this command.
+        pub descriptor_sets: Vec<i64>,
     }
 
     pub struct VulkanState {
@@ -3805,6 +3835,9 @@ mod vulkan_dlopen {
         /// it is genuinely gone — or the caller is stranded in a permanent
         /// "release pending" state. Observed on a real RTX A6000.
         pub retired_fences: Vec<u64>,
+        /// Bounded async submission ring, when a session is open. It is the
+        /// sole owner of its submitted command buffers and fences.
+        pub async_ring: Option<super::vulkan_async_ring::AsyncRing>,
         pub last_error: String,
         pub selected_device_index: usize,
         pub fns: VkFns,
@@ -3825,6 +3858,18 @@ mod vulkan_dlopen {
         vk_create_device_error, vk_create_device_with_retry, vk_result_name, vk_retry_sleep_ms,
     };
 }
+
+#[path = "gpu_vulkan_async_ring.rs"]
+mod vulkan_async_ring;
+use vulkan_async_ring::RingResource;
+pub use vulkan_async_ring::{
+    rt_vulkan_async_session_acquire_fn, rt_vulkan_async_session_cancel_fn, rt_vulkan_async_session_capacity_fn,
+    rt_vulkan_async_session_close_fn, rt_vulkan_async_session_command_fn, rt_vulkan_async_session_create_fn,
+    rt_vulkan_async_session_create_with_wait_fn, rt_vulkan_async_session_in_flight_fn, rt_vulkan_async_session_poll_fn,
+    rt_vulkan_async_session_published_sequence_fn, rt_vulkan_async_session_receipt_fn,
+    rt_vulkan_async_session_recover_fn, rt_vulkan_async_session_retire_fn, rt_vulkan_async_session_submit_fn,
+    rt_vulkan_async_session_supported_fn,
+};
 
 static VULKAN_DL_AVAILABLE: OnceLock<bool> = OnceLock::new();
 static SHADERC_DL: OnceLock<Option<vulkan_dlopen::ShadercFns>> = OnceLock::new();
@@ -4108,6 +4153,7 @@ pub fn rt_vulkan_init_fn(_args: &[Value]) -> Result<Value, CompileError> {
             descriptor_sets: Vec::new(),
             command_buffers: Vec::new(),
             quarantined_commands: Vec::new(),
+            async_ring: None,
             accepted_compute_submit_count: 0,
             live_fences: Vec::new(),
             retired_fences: Vec::new(),
@@ -4150,6 +4196,13 @@ pub fn rt_vulkan_shutdown_fn(_args: &[Value]) -> Result<Value, CompileError> {
     use vulkan_dlopen::{VK_STATE, VK_SUCCESS};
     use std::ptr;
     let mut guard = VK_STATE.lock().unwrap();
+    // An open async ring still owns command buffers and fences on this device.
+    if guard
+        .as_mut()
+        .is_some_and(|s| vulkan_async_ring::ring_refuses(s, "shutdown"))
+    {
+        return Ok(Value::Bool(false));
+    }
     if let Some(st) = guard.take() {
         unsafe {
             let f = &st.fns;
@@ -4212,6 +4265,9 @@ pub fn rt_vulkan_select_device_fn(args: &[Value]) -> Result<Value, CompileError>
     use vulkan_dlopen::VK_STATE;
     let mut guard = VK_STATE.lock().unwrap();
     if let Some(s) = guard.as_mut() {
+        if vulkan_async_ring::ring_refuses(s, "select_device") {
+            return Ok(Value::Bool(false));
+        }
         if idx < s.physical_devices.len() {
             s.selected_device_index = idx;
             s.physical_device = s.physical_devices[idx];
@@ -4512,6 +4568,9 @@ pub fn rt_vulkan_free_buffer_fn(args: &[Value]) -> Result<Value, CompileError> {
     let h = arg_i64(args, 0, "rt_vulkan_free_buffer", 1)? as usize;
     let mut guard = VK_STATE.lock().unwrap();
     if let Some(s) = guard.as_mut() {
+        if vulkan_async_ring::ring_retains(s, RingResource::Buffer, h as i64, "free_buffer") {
+            return Ok(Value::Bool(false));
+        }
         if h > 0 && h <= s.buffers.len() {
             if let Some(e) = s.buffers[h - 1].take() {
                 unsafe {
@@ -5100,6 +5159,9 @@ pub fn rt_vulkan_destroy_pipeline_fn(args: &[Value]) -> Result<Value, CompileErr
     let h = arg_i64(args, 0, "rt_vulkan_destroy_pipeline", 1)? as usize;
     let mut guard = VK_STATE.lock().unwrap();
     if let Some(s) = guard.as_mut() {
+        if vulkan_async_ring::ring_retains(s, RingResource::Pipeline, h as i64, "destroy_pipeline") {
+            return Ok(Value::Bool(false));
+        }
         if h > 0 && h <= s.pipelines.len() {
             if let Some(e) = s.pipelines[h - 1].take() {
                 unsafe {
@@ -5166,7 +5228,11 @@ pub fn rt_vulkan_create_descriptor_set_fn(args: &[Value]) -> Result<Value, Compi
             (s.fns.destroy_descriptor_pool)(s.device, pool, ptr::null());
             return Ok(Value::Int(0));
         }
-        s.descriptor_sets.push(Some(DescriptorSetEntry { set, pool }));
+        s.descriptor_sets.push(Some(DescriptorSetEntry {
+            set,
+            pool,
+            buffers: Vec::new(),
+        }));
         Ok(Value::Int(s.descriptor_sets.len() as i64))
     }
 }
@@ -5187,12 +5253,21 @@ pub fn rt_vulkan_bind_buffer_fn(args: &[Value]) -> Result<Value, CompileError> {
     if dsh == 0 || dsh > s.descriptor_sets.len() || bh == 0 || bh > s.buffers.len() {
         return Ok(Value::Bool(false));
     }
-    let set = match s.descriptor_sets[dsh - 1].as_ref() {
-        Some(e) => e.set,
-        None => return Ok(Value::Bool(false)),
-    };
+    // A descriptor set an in-flight async submission may still read must not
+    // be rewritten until that submission is retired.
+    if vulkan_async_ring::ring_retains(s, RingResource::DescriptorSet, dsh as i64, "bind_buffer") {
+        return Ok(Value::Bool(false));
+    }
     let (buf, buf_size) = match s.buffers[bh - 1].as_ref() {
         Some(b) => (b.buffer, b.size),
+        None => return Ok(Value::Bool(false)),
+    };
+    let set = match s.descriptor_sets[dsh - 1].as_mut() {
+        Some(e) => {
+            e.buffers.retain(|&(bound, _)| bound != binding);
+            e.buffers.push((binding, bh as i64));
+            e.set
+        }
         None => return Ok(Value::Bool(false)),
     };
     unsafe {
@@ -5225,6 +5300,9 @@ pub fn rt_vulkan_destroy_descriptor_set_fn(args: &[Value]) -> Result<Value, Comp
     let h = arg_i64(args, 0, "rt_vulkan_destroy_descriptor_set", 1)? as usize;
     let mut guard = VK_STATE.lock().unwrap();
     if let Some(s) = guard.as_mut() {
+        if vulkan_async_ring::ring_retains(s, RingResource::DescriptorSet, h as i64, "destroy_descriptor_set") {
+            return Ok(Value::Bool(false));
+        }
         if h > 0 && h <= s.descriptor_sets.len() {
             if let Some(e) = s.descriptor_sets[h - 1].take() {
                 unsafe {
@@ -5240,12 +5318,23 @@ pub fn rt_vulkan_destroy_descriptor_set_fn(args: &[Value]) -> Result<Value, Comp
 /// `rt_vulkan_begin_compute() -> i64` — allocates and begins a command buffer; returns handle
 pub fn rt_vulkan_begin_compute_fn(_args: &[Value]) -> Result<Value, CompileError> {
     use vulkan_dlopen::*;
-    use std::ptr;
     let mut guard = VK_STATE.lock().unwrap();
     let s = match guard.as_mut() {
         Some(s) => s,
         None => return Ok(Value::Int(0)),
     };
+    // An open async ring is the sole compute admission owner; its commands
+    // come from `rt_vulkan_async_session_acquire`.
+    if vulkan_async_ring::ring_refuses(s, "begin_compute") {
+        return Ok(Value::Int(0));
+    }
+    Ok(Value::Int(begin_compute_command(s)))
+}
+
+/// Allocate and begin one compute command buffer; returns its handle or 0.
+fn begin_compute_command(s: &mut vulkan_dlopen::VulkanState) -> i64 {
+    use vulkan_dlopen::*;
+    use std::ptr;
     unsafe {
         let alloc_info = VkCommandBufferAllocateInfo {
             s_type: 40,
@@ -5256,7 +5345,7 @@ pub fn rt_vulkan_begin_compute_fn(_args: &[Value]) -> Result<Value, CompileError
         };
         let mut cmd: VkCommandBuffer = ptr::null_mut();
         if (s.fns.allocate_command_buffers)(s.device, &alloc_info, &mut cmd) != VK_SUCCESS {
-            return Ok(Value::Int(0));
+            return 0;
         }
         let begin_info = VkCommandBufferBeginInfo {
             s_type: 42,
@@ -5266,13 +5355,42 @@ pub fn rt_vulkan_begin_compute_fn(_args: &[Value]) -> Result<Value, CompileError
         };
         if (s.fns.begin_command_buffer)(cmd, &begin_info) != VK_SUCCESS {
             (s.fns.free_command_buffers)(s.device, s.command_pool, 1, &cmd);
-            return Ok(Value::Int(0));
+            return 0;
         }
         s.command_buffers.push(Some(CommandBufferEntry {
             cmd,
             pipeline_handle: 0,
+            descriptor_sets: Vec::new(),
         }));
-        Ok(Value::Int(s.command_buffers.len() as i64))
+        s.command_buffers.len() as i64
+    }
+}
+
+/// `rt_vulkan_discard_command(cmd: i64) -> bool` — free a recorded, never
+/// submitted command buffer. Refused while an async ring owns the commands.
+pub fn rt_vulkan_discard_command_fn(args: &[Value]) -> Result<Value, CompileError> {
+    use vulkan_dlopen::VK_STATE;
+    let ch = arg_i64(args, 0, "rt_vulkan_discard_command", 1)? as usize;
+    let mut guard = VK_STATE.lock().unwrap();
+    let s = match guard.as_mut() {
+        Some(s) => s,
+        None => return Ok(Value::Bool(false)),
+    };
+    if vulkan_async_ring::ring_refuses(s, "discard_command") {
+        return Ok(Value::Bool(false));
+    }
+    if ch == 0 || ch > s.command_buffers.len() {
+        return Ok(Value::Bool(false));
+    }
+    match s.command_buffers[ch - 1].take() {
+        Some(e) => {
+            unsafe { (s.fns.free_command_buffers)(s.device, s.command_pool, 1, &e.cmd) };
+            Ok(Value::Bool(true))
+        }
+        None => {
+            s.last_error = "discard_command: unknown command handle".to_string();
+            Ok(Value::Bool(false))
+        }
     }
 }
 
@@ -5344,6 +5462,11 @@ pub fn rt_vulkan_bind_descriptors_fn(args: &[Value]) -> Result<Value, CompileErr
     };
     unsafe {
         (s.fns.cmd_bind_descriptor_sets)(cmd, 1, layout, 0, 1, &set, 0, ptr::null());
+    }
+    if let Some(e) = s.command_buffers[ch - 1].as_mut() {
+        if !e.descriptor_sets.contains(&(dsh as i64)) {
+            e.descriptor_sets.push(dsh as i64);
+        }
     }
     Ok(Value::Bool(true))
 }
@@ -5461,6 +5584,9 @@ pub fn rt_vulkan_submit_and_wait_fn(args: &[Value]) -> Result<Value, CompileErro
         Some(s) => s,
         None => return Ok(Value::Bool(false)),
     };
+    if vulkan_async_ring::ring_refuses(s, "submit_and_wait") {
+        return Ok(Value::Bool(false));
+    }
     if ch == 0 || ch > s.command_buffers.len() {
         return Ok(Value::Bool(false));
     }
@@ -5508,6 +5634,9 @@ pub fn rt_vulkan_submit_and_wait_fence_fn(args: &[Value]) -> Result<Value, Compi
         Some(s) => s,
         None => return Ok(Value::Int(0)),
     };
+    if vulkan_async_ring::ring_refuses(s, "submit_and_wait_fence") {
+        return Ok(Value::Int(0));
+    }
     if ch == 0 || ch > s.command_buffers.len() {
         return Ok(Value::Int(0));
     }
@@ -5578,6 +5707,9 @@ pub fn rt_vulkan_submit_no_wait_fn(args: &[Value]) -> Result<Value, CompileError
         Some(s) => s,
         None => return Ok(Value::Int(0)),
     };
+    if vulkan_async_ring::ring_refuses(s, "submit_no_wait") {
+        return Ok(Value::Int(0));
+    }
     if ch == 0 || ch > s.command_buffers.len() {
         return Ok(Value::Int(0));
     }
@@ -5684,6 +5816,11 @@ pub fn rt_vulkan_wait_idle_fn(_args: &[Value]) -> Result<Value, CompileError> {
     use std::ptr;
     let mut guard = VK_STATE.lock().unwrap();
     if let Some(s) = guard.as_mut() {
+        // Ring submissions are released by exact-fence retirement or explicit
+        // session recovery, never by a device-wide idle reap.
+        if vulkan_async_ring::ring_refuses(s, "wait_idle") {
+            return Ok(Value::Bool(false));
+        }
         let ok = unsafe { (s.fns.device_wait_idle)(s.device) };
         if ok == vulkan_dlopen::VK_SUCCESS {
             for (fence, cmd) in s.quarantined_commands.drain(..) {

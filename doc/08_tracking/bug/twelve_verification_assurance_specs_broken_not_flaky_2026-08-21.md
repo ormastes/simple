@@ -107,3 +107,38 @@ on stdout, and piping through `tail` showed only stderr warnings and no
 
 - `doc/09_report/skipped_flaky_test_census_2026-08-21.md` §5
 - Daemon head-of-line blocking fix: `7a6f6459a81`
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Partial re-verification this lane: the record's named parser defect (multi-line if condition on trailing or at src/compiler/00.common/assurance/formal_delivery_gates.spl:127-131) now PARSES — this lane ran "check" on that file with the tracked seed and it passed the frontend (residual blocker is only the missing admitted check-worker artifact, an infra message, not a parse error). The other 11 stably-broken specs were not re-run in full (timebox). The parser-defect leg is FIXED at tip; the remaining 11 stand as recorded.
+
+## Addendum 2026-11-13 — lane lp5 (worktree lp5-wt, branch work/live-p3-l5-20261113)
+
+Full re-run of the 12 at release/1.0.0 tip (tracked seed, `--mode=interpreter
+--no-cache --no-session-daemon`). Substantially better than recorded; two rows fixed
+in this lane's PR, most of the rest self-greened:
+
+- **lean_workflow (was executed=0, broken import) — FIXED to 7/9.** The
+  `import io.fs as fs` row resolved `io` to a facade that does not export `fs`
+  (`Module "io" does not export 'fs'`); switched to the canonical `use std.fs`
+  (+ `fs.exists`). Also fixed API drift: `is_model_complete()` → `is_fully_proven()`
+  (renamed upstream, ×2) and `validate_regeneration` now returns the text
+  `"mismatch"`/`"match"` per file, not bool. Remaining 2 failures
+  ("writes regenerated files…", "hard-fails on files that still contain sorry") are
+  NOT spec drift: both pass in isolation (probed) and fail only in the full-import
+  combination with `semantic: ... function 'TextSessionCodec' not found` misattributed
+  to spec line 65 — the cross-module private-symbol-collision family
+  (compiler-behavior dependent, cf. the record's own caveat). Owned by compiler lane.
+- **proof_reference — FIXED to 11/11.** The two failing examples compared
+  `Option::Some(<message>)` against `to_contain` without unwrapping; unwrapped with
+  `?? ""`.
+- **Assertion-drift rows 7-12: 5 of 6 already green at tip** (lean_basic 5/5,
+  lean_codegen 5/5, regeneration 4/4, report_rendering 18/18, unified_attrs 6/6) —
+  implementation drifted back into agreement since 2026-08-21. proof_reference was
+  the only still-red one (fixed above).
+- **formal_delivery_gates (parser leg): confirmed FIXED at tip** (concurs with lane
+  p3-comp1 same-day addendum above — the multi-line `if` on trailing `or` now parses).
+- Not re-run this lane (timebox): sha512_integrity_receipt (compiler index-assign
+  class), lean_block_integration (`LeanBlock.namespace` field), unsupported_construct
+  (14/15), verification_diagnostics (`method 'format' on dict`). Stand as recorded —
+  compiler-behavior dependent per the record's caveat.

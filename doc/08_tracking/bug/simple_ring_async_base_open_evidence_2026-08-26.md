@@ -155,3 +155,9 @@ remains BLOCKED on SRA-P3-001 (deploy an admitted pure-Simple binary); Finding 3
 (await lowering / rt_future_await) and Finding 4 (perf/concurrency proof) are
 unchanged by this run. Raw logs and receipts:
 `build/test-artifacts/simple_ring_async_base/` (gitignored).
+
+## Triage 2026-11-13 (P3 tools lane)
+No code change this lane. The 2026-11-05 diagnostic evidence run stands: no
+admissible pure-Simple verification binary exists on this lane and the
+compiler/runtime async-compatibility paths remain blocking; the four findings
+need the bootstrap redeploy and async-compat owner work, not a P3 tools patch.

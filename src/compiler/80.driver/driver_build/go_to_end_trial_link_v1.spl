@@ -1,0 +1,372 @@
+# go-to-end TRIAL link ("go to obj gen if possible, link them", 2026-11-13).
+#
+# go-to-end never publishes a binary once any module failed (go_to_end.spl):
+# the link is skipped and the build exits non-zero. The objects of every module
+# that reached codegen are nevertheless in the cache, and the one question a
+# census wants answered is "what would the link say?". The trial link answers
+# it without ever producing an admissible artifact:
+#
+#   1. REPORT pass: the normal link line (same NativeLinkOptions: runtime,
+#      libraries, flags, target) plus `--error-limit=0`, so lld names EVERY
+#      undefined symbol and every other link error (duplicate symbol,
+#      relocation) instead of stopping at 20. A clean report means the surviving
+#      objects link by themselves.
+#   2. ARTIFACT pass (only when the report named undefined symbols): the same
+#      line plus `--unresolved-symbols=ignore-all --warn-unresolved-symbols`, to
+#      `<output>.go-to-end-trial` -- never the published candidate path. The
+#      verdict stays "unresolved"; the file exists for inspection only.
+#
+# Each undefined symbol is attributed to the failed module that defines it when
+# the name says so: native symbols keep their module path with dots
+# (`lib.common.text.text_len`), so the longest failed module M with
+# `symbol.starts_with(M + ".")` wins; a module's C entry shim is
+# `__simple_main_<M with . -> _>`. Anything else (a runtime extern, the entry
+# shim's target) is reported with module "".
+#
+# The linker is behind a trait so the classification, the two-pass rule and
+# the manifest block are testable against a real lld run over fixture objects
+# without the hosted runtime; production uses GoToEndHostedTrialLinkerV1 ->
+# link_llvm_native. Trial flags go through NativeLinkOptions.linker_flags ->
+# NativeLinkConfig.extra_flags, pushed verbatim onto the `cc -fuse-ld=lld`
+# driver line (measured: the hosted link always drives lld through cc), so they
+# are `-Wl,`-prefixed like the line's own `-Wl,--gc-sections`; a bare-lld
+# linker strips the prefix (the spec's fixture linker does).
+use std.io_runtime.{file_exists, file_delete, dir_list_optional, file_read}
+use std.nogc_sync_mut.io_runtime.{env_get_nullable}
+use std.nogc_sync_mut.io.process_ops.{eprint}
+use compiler.backend.llvm_native_link.{NativeLinkOptions, link_llvm_native}
+use compiler.driver.driver_build.go_to_end.{go_to_end_user_output_v1, go_to_end_sdn_quote_v1,
+    go_to_end_write_manifest_with_trial_v1, GoToEndLedgerV1, GO_TO_END_UNATTRIBUTED_V1}
+
+pub const GO_TO_END_TRIAL_SUFFIX_V1: text = ".go-to-end-trial"
+
+pub fn go_to_end_trial_output_v1(output: text) -> text:
+    go_to_end_user_output_v1(output) + GO_TO_END_TRIAL_SUFFIX_V1
+
+# Report pass: default `--unresolved-symbols=report-all`, no error cap, and
+# no section GC: lld reports undefined references only from live sections,
+# so with the line's own `-Wl,--gc-sections` (measured: once the entry shim
+# target was undefined, every module behind it was dead and only
+# `__simple_main` was reported) the list collapses. Extra flags land after
+# the fixed ones, so `--no-gc-sections` wins.
+pub fn go_to_end_trial_report_flags_v1() -> [text]:
+    ["-Wl,--error-limit=0", "-Wl,--no-gc-sections"]
+
+# Artifact pass: tolerate undefined symbols, still fail on anything else.
+pub fn go_to_end_trial_artifact_flags_v1() -> [text]:
+    ["-Wl,--unresolved-symbols=ignore-all", "-Wl,--warn-unresolved-symbols", "-Wl,--error-limit=0", "-Wl,--no-gc-sections"]
+
+pub class GoToEndTrialLinkV1:
+    attempted: bool
+    # "skipped" | "clean" | "unresolved" | "error"
+    verdict: text
+    # Path of the trial artifact when one was written, else "".
+    artifact: text
+    object_count: i64
+    object_files: [text]
+    undefined_symbols: [text]
+    # Parallel to undefined_symbols: the failed module that defines it, or "".
+    symbol_modules: [text]
+    # Link errors other than undefined symbols (duplicate symbol, relocation...).
+    link_errors: [text]
+    note: text
+
+impl GoToEndTrialLinkV1:
+    static fn skipped(note: text) -> GoToEndTrialLinkV1:
+        GoToEndTrialLinkV1(attempted: false, verdict: "skipped", artifact: "", object_count: 0,
+            object_files: [], undefined_symbols: [], symbol_modules: [], link_errors: [], note: note)
+
+    fn summary() -> text:
+        if not self.attempted:
+            return "trial link skipped ({self.note})"
+        var attributed = 0
+        for module in self.symbol_modules:
+            if module != "": attributed = attributed + 1
+        val artifact_text = if self.artifact != "": "; trial artifact {self.artifact} (never admitted)" else: ""
+        "trial link verdict={self.verdict} objects={self.object_count} undefined={self.undefined_symbols.len()} (attributed {attributed}) link_errors={self.link_errors.len()}{artifact_text}"
+
+# Undefined symbols named in linker output (lld "undefined symbol: X", lld
+# warn mode "warning: undefined symbol: X", GNU ld "undefined reference to
+# `X'"), first-seen order, deduplicated.
+pub fn go_to_end_link_undefined_symbols_v1(linker_text: text) -> [text]:
+    var names: [text] = []
+    for line in linker_text.split("\n"):
+        val trimmed = line.trim()
+        var payload = ""
+        if trimmed.contains("undefined symbol: "):
+            val parts = trimmed.split("undefined symbol: ")
+            payload = parts[parts.len() - 1].trim()
+        elif trimmed.contains("undefined reference to "):
+            val parts = trimmed.split("undefined reference to ")
+            payload = parts[parts.len() - 1].trim()
+        if payload == "":
+            continue
+        val name = payload.split(" ")[0].replace("`", "").replace("'", "").replace("\"", "").replace(",", "").replace(";", "").trim()
+        if name == "" or names.contains(name):
+            continue
+        names = names.push(name)
+    names
+
+# Error lines that are not undefined-symbol reports and not lld's ">>>"
+# reference detail, deduplicated. Lines are kept verbatim (trimmed).
+pub fn go_to_end_link_other_errors_v1(linker_text: text) -> [text]:
+    var errors: [text] = []
+    for line in linker_text.split("\n"):
+        val trimmed = line.trim()
+        if trimmed == "" or trimmed.starts_with(">>>"):
+            continue
+        if trimmed.contains("undefined symbol: ") or trimmed.contains("undefined reference to "):
+            continue
+        if not trimmed.contains("error:"):
+            continue
+        # Driver trailers restate the exit status, not an error of their own.
+        if trimmed.starts_with("collect2:") or trimmed.contains("linker command failed"):
+            continue
+        if not errors.contains(trimmed):
+            errors = errors.push(trimmed)
+    errors
+
+# The failed module that defines `symbol`, or "".
+pub fn go_to_end_symbol_module_v1(symbol: text, failed_modules: [text]) -> text:
+    var best = ""
+    for module in failed_modules:
+        if module == "":
+            continue
+        if symbol.starts_with(module + ".") or symbol == "__simple_main_" + module.replace(".", "_"):
+            if module.len() > best.len():
+                best = module
+    best
+
+pub fn go_to_end_symbol_modules_v1(symbols: [text], failed_modules: [text]) -> [text]:
+    var modules: [text] = []
+    for symbol in symbols:
+        modules = modules.push(go_to_end_symbol_module_v1(symbol, failed_modules))
+    modules
+
+# Classify a REPORT pass that failed with `linker_text`. Pure.
+pub fn go_to_end_trial_link_classify_v1(linker_text: text, object_files: [text],
+        failed_modules: [text]) -> GoToEndTrialLinkV1:
+    val undefined = go_to_end_link_undefined_symbols_v1(linker_text)
+    val others = go_to_end_link_other_errors_v1(linker_text)
+    val verdict = if undefined.len() > 0: "unresolved" elif others.len() > 0: "error" else: "error"
+    val note = if undefined.len() == 0 and others.len() == 0: "link failed without a recognised error line: " + linker_text.trim() else: ""
+    GoToEndTrialLinkV1(attempted: true, verdict: verdict, artifact: "", object_count: object_files.len(),
+        object_files: object_files, undefined_symbols: undefined,
+        symbol_modules: go_to_end_symbol_modules_v1(undefined, failed_modules),
+        link_errors: others, note: note)
+
+pub trait GoToEndTrialLinkerV1:
+    fn link(objects: [text], output: text, extra_flags: [text]) -> Result<text, text>
+
+# Production linker: the hosted native link line with extra lld flags.
+pub struct GoToEndHostedTrialLinkerV1:
+    opts: NativeLinkOptions
+
+impl GoToEndTrialLinkerV1 for GoToEndHostedTrialLinkerV1:
+    fn link(objects: [text], output: text, extra_flags: [text]) -> Result<text, text>:
+        var trial_opts = self.opts
+        var flags: [text] = []
+        for flag in self.opts.linker_flags:
+            flags = flags.push(flag)
+        for flag in extra_flags:
+            flags = flags.push(flag)
+        trial_opts.linker_flags = flags
+        link_llvm_native(objects, output, trial_opts)
+
+# Run the two-pass trial link. `output` is the build's (user or temporary)
+# output path; the artifact goes to go_to_end_trial_output_v1(output). Never
+# raises: every failure is a verdict.
+pub fn go_to_end_trial_link_run_v1(linker: GoToEndTrialLinkerV1, object_files: [text],
+        output: text, failed_modules: [text]) -> GoToEndTrialLinkV1:
+    if object_files.len() == 0:
+        return GoToEndTrialLinkV1.skipped("no objects were emitted")
+    val trial = go_to_end_trial_output_v1(output)
+    if file_exists(trial):
+        val _stale = file_delete(trial)
+    eprint("[go-to-end] trial link: report pass over {object_files.len()} object(s) -> {trial}")
+    val report = linker.link(object_files, trial, go_to_end_trial_report_flags_v1())
+    if report.is_ok():
+        return GoToEndTrialLinkV1(attempted: true, verdict: "clean",
+            artifact: if file_exists(trial): trial else: "", object_count: object_files.len(),
+            object_files: object_files, undefined_symbols: [], symbol_modules: [], link_errors: [],
+            note: "every surviving object linked; the failed modules' symbols were not referenced; the trial artifact is a fully linked, runnable binary (never admitted as the output)")
+    var result = go_to_end_trial_link_classify_v1(report.unwrap_err(), object_files, failed_modules)
+    if result.undefined_symbols.len() > 0:
+        eprint("[go-to-end] trial link: {result.undefined_symbols.len()} undefined symbol(s); artifact pass with unresolved symbols ignored")
+        val artifact = linker.link(object_files, trial, go_to_end_trial_artifact_flags_v1())
+        if artifact.is_ok() and file_exists(trial):
+            result.artifact = trial
+        elif artifact.is_err():
+            val artifact_error = artifact.unwrap_err().trim()
+            if artifact_error != "" and not result.link_errors.contains(artifact_error):
+                result.link_errors = result.link_errors.push("artifact pass: " + artifact_error)
+    result
+
+fn _go_to_end_trial_list_v1(names: [text]) -> text:
+    var out = "["
+    var index = 0
+    while index < names.len():
+        if index > 0:
+            out = out + ", "
+        out = out + go_to_end_sdn_quote_v1(names[index])
+        index = index + 1
+    out + "]"
+
+# The `trial_link:` block appended to `<output>.go-to-end.sdn`. Pure.
+pub fn go_to_end_trial_manifest_block_v1(trial: GoToEndTrialLinkV1) -> text:
+    var out = "  trial_link:\n"
+    out = out + "    attempted: {trial.attempted}\n"
+    out = out + "    verdict: {go_to_end_sdn_quote_v1(trial.verdict)}\n"
+    out = out + "    artifact: {go_to_end_sdn_quote_v1(trial.artifact)}\n"
+    out = out + "    admitted: false\n"
+    # A clean report pass is a complete link: the artifact runs. Never admitted.
+    out = out + "    runnable: {trial.verdict == \"clean\" and trial.artifact != \"\"}\n"
+    out = out + "    object_count: {trial.object_count}\n"
+    out = out + "    undefined_count: {trial.undefined_symbols.len()}\n"
+    out = out + "    link_error_count: {trial.link_errors.len()}\n"
+    out = out + "    note: {go_to_end_sdn_quote_v1(trial.note)}\n"
+    out = out + "    objects: {_go_to_end_trial_list_v1(trial.object_files)}\n"
+    out = out + "    link_errors: {_go_to_end_trial_list_v1(trial.link_errors)}\n"
+    out = out + "\ntrial_undefined |symbol, module|\n"
+    var index = 0
+    while index < trial.undefined_symbols.len():
+        val module = if index < trial.symbol_modules.len(): trial.symbol_modules[index] else: ""
+        out = out + "  {go_to_end_sdn_quote_v1(trial.undefined_symbols[index])}, {go_to_end_sdn_quote_v1(module)}\n"
+        index = index + 1
+    out
+
+# ---------------------------------------------------------------------------
+# Inputs from an existing object set (coordinator route and the one-shot tool)
+# ---------------------------------------------------------------------------
+
+pub class GoToEndTrialInputsV1:
+    object_files: [text]
+    # Module per object (ledger mode) or the object path (directory mode).
+    object_modules: [text]
+    # "<STATE> <module>" for every non-PASS or unfinished ledger row.
+    failed_rows: [text]
+    failed_modules: [text]
+    note: text
+
+# A MIR shard ledger (run_mir_shards / the per-file pool; `.object` sidecars
+# written by native_mir_shard_publish_pass_v1): PASS rows with an existing
+# object are inputs; every other row is a failure. Lenient where
+# native_mir_shard_link_inputs_v1 refuses: this is a trial, not a link.
+pub fn go_to_end_trial_inputs_from_ledger_v1(queue: text) -> GoToEndTrialInputsV1:
+    var inputs = GoToEndTrialInputsV1(object_files: [], object_modules: [], failed_rows: [],
+        failed_modules: [], note: "")
+    val listing = dir_list_optional(queue)
+    if listing == nil:
+        inputs.note = "ledger directory unreadable: " + queue
+        return inputs
+    var claimed_modules: [text] = []
+    for name in listing.unwrap():
+        if name.ends_with(".claim"):
+            val fields = file_read("{queue}/{name}").split("\n")
+            if fields.len() >= 2 and fields[1] != "":
+                claimed_modules = claimed_modules.push(fields[1])
+                val base = "{queue}/{name.substring(0, name.byte_len() - 6)}"
+                val terminal = if file_exists("{base}.terminal"): file_read("{base}.terminal").split("\n") else: []
+                if terminal.len() < 1 or terminal[0] == "":
+                    inputs.failed_rows = inputs.failed_rows.push("UNFINISHED " + fields[1])
+                    inputs.failed_modules = inputs.failed_modules.push(fields[1])
+                elif terminal[0] != "PASS":
+                    inputs.failed_rows = inputs.failed_rows.push(terminal[0] + " " + fields[1])
+                    inputs.failed_modules = inputs.failed_modules.push(fields[1])
+                else:
+                    val sidecar = if file_exists("{base}.object"): file_read("{base}.object").split("\n") else: []
+                    val object_path = if sidecar.len() > 0: sidecar[0] else: ""
+                    if object_path != "" and file_exists(object_path):
+                        inputs.object_files = inputs.object_files.push(object_path)
+                        inputs.object_modules = inputs.object_modules.push(fields[1])
+    # Inventory rows never claimed (the pool stopped before reaching them).
+    if file_exists("{queue}/inventory"):
+        val inventory = file_read("{queue}/inventory").split("\n")
+        var index = 1
+        while index < inventory.len():
+            val row = inventory[index]
+            if row != "" and not claimed_modules.contains(row):
+                inputs.failed_rows = inputs.failed_rows.push("UNCLAIMED " + row)
+                inputs.failed_modules = inputs.failed_modules.push(row)
+            index = index + 1
+    inputs.failed_rows = inputs.failed_rows.sort()
+    # Directory order is hash order; link inputs in module order so the trial
+    # line (and its manifest) is reproducible across runs.
+    # (`"<module>\t<object>"` rows keep the pair together under one sort.)
+    var pairs: [text] = []
+    var pair_index = 0
+    while pair_index < inputs.object_modules.len():
+        pairs = pairs.push(inputs.object_modules[pair_index] + "\t" + inputs.object_files[pair_index])
+        pair_index = pair_index + 1
+    val ordered = pairs.sort()
+    var ordered_modules: [text] = []
+    var ordered_files: [text] = []
+    for pair in ordered:
+        val cut = pair.index_of("\t")
+        ordered_modules = ordered_modules.push(pair.substring(0, cut))
+        ordered_files = ordered_files.push(pair.substring(cut + 1))
+    inputs.object_modules = ordered_modules
+    inputs.object_files = ordered_files
+    inputs
+
+# A directory of objects (recursive `*.o`), sorted. Failed modules come from
+# the caller (`--failed`), since a bare object directory records none.
+pub fn go_to_end_trial_inputs_from_objects_dir_v1(root: text, failed_modules: [text]) -> GoToEndTrialInputsV1:
+    var inputs = GoToEndTrialInputsV1(object_files: [], object_modules: [], failed_rows: [],
+        failed_modules: failed_modules, note: "")
+    var pending: [text] = [root]
+    while pending.len() > 0:
+        val dir = pending[pending.len() - 1]
+        pending = pending[0:pending.len() - 1]
+        val listing = dir_list_optional(dir)
+        if listing == nil:
+            if dir == root:
+                inputs.note = "object directory unreadable: " + root
+            continue
+        for name in listing.unwrap():
+            val path = "{dir}/{name}"
+            if name.ends_with(".o"):
+                inputs.object_files = inputs.object_files.push(path)
+            elif not name.contains("."):
+                pending = pending.push(path)
+    inputs.object_files = inputs.object_files.sort()
+    inputs.object_modules = inputs.object_files
+    inputs
+
+# Link options for a route that has no CompileContext (coordinator after the
+# MIR shard pool, one-shot tool): the hosted defaults plus the environment's
+# runtime selection, mirroring the final worker's hosted_opts.
+pub fn go_to_end_trial_link_options_v1(backend: text, target_triple: text, runtime_path: text) -> NativeLinkOptions:
+    NativeLinkOptions(
+        libraries: [], library_paths: [], linker_flags: [],
+        debug: false, verbose: false, pie: true, bare_metal: false, opt_level: 0,
+        stage4_backend: backend, stage4_compiler_hash: "", target_triple: target_triple,
+        runtime_path: if runtime_path != "": runtime_path else: (env_get_nullable("SIMPLE_RUNTIME_PATH") ?? ""),
+        runtime_bundle: env_get_nullable("SIMPLE_NATIVE_RUNTIME_BUNDLE") ?? "")
+
+# Trial link straight from a ledger or object directory, writing the go-to-end
+# manifest `<output>.go-to-end.sdn` the route never had, and returning the
+# verdict text. Shared by the coordinator (native_build_main.spl, after a
+# failed MIR shard pool) and the one-shot tool
+# (src/app/cli/go_to_end_trial_link_main.spl). Never exits 0 semantics: the
+# caller decides; the manifest says `linked: false` and `admitted: false`.
+pub fn go_to_end_trial_from_inputs_v1(inputs: GoToEndTrialInputsV1, output: text,
+        opts: NativeLinkOptions) -> text:
+    var ledger = GoToEndLedgerV1.empty()
+    for row in inputs.failed_rows:
+        val split_at = row.index_of(" ")
+        val state = if split_at > 0: row.substring(0, split_at) else: row
+        val module_name = if split_at > 0: row.substring(split_at + 1) else: GO_TO_END_UNATTRIBUTED_V1
+        ledger.record("mir", module_name, "{state} in the MIR shard pool")
+        ledger.exclude(module_name)
+    for module_name in inputs.failed_modules:
+        if not ledger.modules.contains(module_name):
+            ledger.record("mir", module_name, "named failed by the caller")
+            ledger.exclude(module_name)
+    if inputs.note != "":
+        ledger.record("build", GO_TO_END_UNATTRIBUTED_V1, inputs.note)
+    ledger.mir_scan_complete = true
+    val trial = go_to_end_trial_link_run_v1(GoToEndHostedTrialLinkerV1(opts: opts),
+        inputs.object_files, output, inputs.failed_modules)
+    go_to_end_write_manifest_with_trial_v1(output, ledger, inputs.object_files.len(),
+        inputs.object_modules, go_to_end_trial_manifest_block_v1(trial), trial.summary())

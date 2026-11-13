@@ -1,0 +1,273 @@
+#!/bin/sh
+# bootstrap-pin-prune.shs -- bounded retention for the pinned source snapshots
+# that bootstrap-pin-archive.shs materialises under build/bootstrap/pinned-src.
+#
+# Every bootstrap run on a new commit creates pinned-<sha12>/: a full checkout
+# (~2.9G here) that then also holds the run's whole output tree
+# (<pin>/build/<lane>, ~4G). Nothing removed them: measured 2026-11-13 on one
+# lane, 20 pins = 134G with 15 of the 20 runs terminal (pid dead) and the
+# consecutive shas differing by 33 files. This script is the retention policy.
+#
+# A pin is KEPT (never a candidate) when ANY of these holds, in this order:
+#   keep      named by --keep (the run that is starting passes its own pin)
+#   live      a process references it (cmdline mentions the path or cwd is
+#             inside it; /proc scan, overridable for the selftest)
+#   admitted  <pin>/build/*/stage3-planner-admission.receipt,
+#             <pin>/build/*/stage3/*/stage2-admitted or
+#             <pin>/build/*/managed-stage*-planner-admission*.env exists:
+#             resume-stage3-from-admitted.sh binds to exactly these, so an
+#             admitted run is retained for resume. --max-admitted N keeps only
+#             the N newest admitted pins; the default (0) keeps all of them.
+#   young     .bootstrap-pinned-sha is younger than --min-age-s (default 6h):
+#             a run between managed phases may have no live process yet.
+#   newest    among the remaining pins the --max-keep newest (default 2).
+# Everything else is a candidate. Leftover `pinned-*.tmp` (a clone that never
+# finished) and `*.pruning.*` (an interrupted prune) are candidates once old.
+#
+# Default is a DRY RUN: one line per pin (KEEP <reason> <dir> | PRUNE <dir>)
+# and nothing changes. --apply removes each candidate by renaming it away first
+# (`mv <pin> <pin>.pruning.<pid>`, so it disappears atomically and a crashed
+# rm leaves a recognisable leftover, no lock file) and then deleting it. A
+# Windows detached-worktree pin (`.git` is a file) is followed by
+# `git worktree prune` in its source repository. The Unix shared-object clone
+# borrows objects and owns nothing the source repo needs.
+#
+# Usage:
+#   bootstrap-pin-prune.shs <dest-parent> [--keep <dir>]... [--max-keep N]
+#       [--max-admitted N] [--min-age-s S] [--apply]
+#   bootstrap-pin-prune.shs --selftest
+# Opt-in from bootstrap-from-scratch.sh: SIMPLE_BOOTSTRAP_PIN_PRUNE=1 runs
+# `--apply --keep <this run's pin>` right after pinning.
+# Verdict is the last stdout line:
+#   PASS — <n> pin(s) scanned, <k> candidate(s), <r> removed      exit 0
+#   ERROR — nothing was checked (<reason>)                          exit 2
+set -u
+# Age of a pin: its .bootstrap-pinned-sha marker (refreshed on reuse), else the
+# directory itself. An unreadable age is NOW, never 0: a dir whose age is
+# unknown must read as young (kept), not as the oldest candidate.
+pin_mtime() {
+    pm_stamp=$(stat -c %Y "$1/.bootstrap-pinned-sha" 2>/dev/null) ||
+        pm_stamp=$(stat -c %Y "$1" 2>/dev/null) || pm_stamp=$(date +%s)
+    echo "$pm_stamp"
+}
+
+pin_proc_index() {
+    # One line per process: its cmdline (NULs as spaces), cwd and exe, then
+    # one line per path mapped into it (maps: a binary or library that lives
+    # inside a pin, e.g. a stage2 compiler running from <pin>/build/<lane>).
+    # Built once per scan and again right before each removal.
+    pi_proc=${SIMPLE_BOOTSTRAP_PIN_PRUNE_PROC:-/proc}
+    for pi_dir in "$pi_proc"/[0-9]*; do
+        [ -d "$pi_dir" ] || continue
+        pi_cwd=$(readlink "$pi_dir/cwd" 2>/dev/null) || pi_cwd=
+        pi_exe=$(readlink "$pi_dir/exe" 2>/dev/null) || pi_exe=
+        pi_cmd=$(tr '\0' ' ' <"$pi_dir/cmdline" 2>/dev/null) || pi_cmd=
+        [ -n "$pi_cmd$pi_cwd$pi_exe" ] && printf '%s %s/ %s/\n' "$pi_cmd" "$pi_cwd" "$pi_exe"
+        [ -r "$pi_dir/maps" ] && awk '$6 ~ /^\// { print $6 "/" }' "$pi_dir/maps" 2>/dev/null | sort -u
+    done >"$1" 2>/dev/null
+    return 0
+}
+
+pin_is_live() {
+    # Any process whose cmdline names the pin or whose cwd is inside it.
+    grep -qF -- "$2" "$1" || grep -qF -- "$2/" "$1"
+}
+
+pin_is_admitted() {
+    pa_pin=$1
+    for pa_hit in "$pa_pin"/build/*/stage3-planner-admission.receipt \
+                  "$pa_pin"/build/*/stage3/*/stage2-admitted \
+                  "$pa_pin"/build/*/managed-stage*-planner-admission*.env; do
+        [ -e "$pa_hit" ] && return 0
+    done
+    return 1
+}
+
+# Returns 0 removed, 1 failed, 3 skipped because the pin changed since the
+# scan (a run reused it -- pin-archive touches the marker -- or a process now
+# references it): the scan's verdict is minutes old by the time earlier
+# multi-GB candidates have been deleted, so each removal re-checks right
+# before its rename. SIMPLE_BOOTSTRAP_PIN_PRUNE_BEFORE_REMOVE is a selftest
+# seam that runs between the scan and this re-check.
+pin_remove() {
+    pr_pin=$1; pr_seen_mtime=$2
+    [ -z "${SIMPLE_BOOTSTRAP_PIN_PRUNE_BEFORE_REMOVE:-}" ] || sh -c "$SIMPLE_BOOTSTRAP_PIN_PRUNE_BEFORE_REMOVE" before-remove "$pr_pin"
+    [ "$(pin_mtime "$pr_pin")" = "$pr_seen_mtime" ] || return 3
+    pr_procs=$(mktemp) || return 1
+    pin_proc_index "$pr_procs"
+    if pin_is_live "$pr_procs" "$pr_pin"; then rm -f "$pr_procs"; return 3; fi
+    rm -f "$pr_procs"
+    pr_tmp="$pr_pin.pruning.$$"
+    pr_gitdir=
+    if [ -f "$pr_pin/.git" ]; then
+        pr_gitdir=$(sed -n 's/^gitdir: //p' "$pr_pin/.git" 2>/dev/null)
+    fi
+    mv "$pr_pin" "$pr_tmp" || return 1
+    rm -rf "$pr_tmp" || return 1
+    if [ -n "$pr_gitdir" ]; then
+        # <repo>/.git/worktrees/<name> -> <repo>
+        pr_repo=$(dirname "$(dirname "$(dirname "$pr_gitdir")")")
+        [ -d "$pr_repo" ] && git -C "$pr_repo" worktree prune >/dev/null 2>&1
+    fi
+    return 0
+}
+
+pin_prune() {
+    pp_parent=$1; shift
+    pp_keep_list=; pp_max_keep=2; pp_max_admitted=0; pp_min_age=21600; pp_apply=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --keep) pp_keep_list="$pp_keep_list
+$2"; shift 2 ;;
+            --max-keep) pp_max_keep=$2; shift 2 ;;
+            --max-admitted) pp_max_admitted=$2; shift 2 ;;
+            --min-age-s) pp_min_age=$2; shift 2 ;;
+            --apply) pp_apply=1; shift ;;
+            *) echo "ERROR — nothing was checked (unknown option '$1')"; return 2 ;;
+        esac
+    done
+    [ -d "$pp_parent" ] || { echo "ERROR — nothing was checked (no such directory: $pp_parent)"; return 2; }
+    pp_now=$(date +%s)
+    # A dry run is read-only on its target: report and process index live in
+    # the system temp dir, never under the scanned parent.
+    pp_report=$(mktemp) || { echo "ERROR — nothing was checked (mktemp failed)"; return 2; }
+    pp_procs=$(mktemp) || { rm -f "$pp_report"; echo "ERROR — nothing was checked (mktemp failed)"; return 2; }
+    pin_proc_index "$pp_procs"
+    pp_scanned=0; pp_candidates=0; pp_removed=0
+    pp_rows=   # "<mtime> <path>" per pin, newest first after sort
+    for pp_pin in "$pp_parent"/pinned-*; do
+        [ -d "$pp_pin" ] || continue
+        pp_scanned=$((pp_scanned + 1))
+        pp_rows="$pp_rows
+$(pin_mtime "$pp_pin") $pp_pin"
+    done
+    pp_sorted=$(printf '%s\n' "$pp_rows" | sed '/^$/d' | sort -rn)
+    pp_rank=0; pp_admitted_rank=0
+    printf '%s\n' "$pp_sorted" | while IFS=' ' read -r pp_mtime pp_pin; do
+        [ -n "$pp_pin" ] || continue
+        pp_reason=
+        # A leftover (`pinned-<sha>.tmp` is a clone still being written by a
+        # concurrent run for minutes; `*.pruning.*` an interrupted prune) is
+        # still subject to the live and young rules; only keep/admitted/newest
+        # do not apply to it.
+        pp_leftover=0
+        case "$pp_pin" in *.tmp|*.pruning.*) pp_leftover=1 ;; esac
+        if [ "$pp_leftover" = 0 ] && printf '%s\n' "$pp_keep_list" | grep -qxF -- "$pp_pin"; then
+            pp_reason=keep
+        fi
+        if [ -z "$pp_reason" ] && pin_is_live "$pp_procs" "$pp_pin"; then
+            pp_reason=live
+        fi
+        if [ -z "$pp_reason" ] && [ "$pp_leftover" = 0 ] && pin_is_admitted "$pp_pin"; then
+            pp_admitted_rank=$((pp_admitted_rank + 1))
+            if [ "$pp_max_admitted" -le 0 ] || [ "$pp_admitted_rank" -le "$pp_max_admitted" ]; then
+                pp_reason=admitted
+            fi
+        fi
+        if [ -z "$pp_reason" ] && [ $((pp_now - pp_mtime)) -lt "$pp_min_age" ]; then
+            pp_reason=young
+        fi
+        if [ -z "$pp_reason" ] && [ "$pp_leftover" = 0 ]; then
+            pp_rank=$((pp_rank + 1))
+            [ "$pp_rank" -le "$pp_max_keep" ] && pp_reason=newest
+        fi
+        if [ -n "$pp_reason" ]; then
+            echo "KEEP $pp_reason $pp_pin"
+            continue
+        fi
+        if [ "$pp_apply" = 1 ]; then
+            pin_remove "$pp_pin" "$pp_mtime"
+            case $? in
+                0) echo "PRUNED $pp_pin" ;;
+                3) echo "SKIPPED $pp_pin (changed or referenced since the scan)" ;;
+                *) echo "PRUNE-FAILED $pp_pin" ;;
+            esac
+        else
+            echo "PRUNE $pp_pin"
+        fi
+    done >"$pp_report"
+    pp_candidates=$(grep -c '^PRUNE\|^SKIPPED' "$pp_report")
+    pp_removed=$(grep -c '^PRUNED ' "$pp_report")
+    cat "$pp_report"; rm -f "$pp_report" "$pp_procs"
+    echo "PASS — ${pp_scanned} pin(s) scanned, ${pp_candidates} candidate(s), ${pp_removed} removed"
+    return 0
+}
+
+selftest() {
+    st=$(mktemp -d) || return 2; fail=0
+    mk_pin() {  # name age-days [receipt]
+        mkdir -p "$st/pins/$1/src" && echo "sha-$1" >"$st/pins/$1/.bootstrap-pinned-sha" &&
+            touch -d "-$2 days" "$st/pins/$1/.bootstrap-pinned-sha"
+        [ "${3:-}" = receipt ] && mkdir -p "$st/pins/$1/build/lane" && : >"$st/pins/$1/build/lane/stage3-planner-admission.receipt"
+        [ "${3:-}" = admitted ] && mkdir -p "$st/pins/$1/build/lane/stage3/x/stage2-admitted"
+        return 0
+    }
+    mk_pin pinned-aaaa0000newest 1; mk_pin pinned-bbbb0000second 2
+    mk_pin pinned-cccc0000live 9; mk_pin pinned-dddd0000rcpt 8 receipt
+    mk_pin pinned-eeee0000prune 7; mk_pin pinned-ffff0000keep 6
+    mk_pin pinned-9999000admit2 5 admitted
+    mkdir -p "$st/pins/pinned-0000000young/src" && echo y >"$st/pins/pinned-0000000young/.bootstrap-pinned-sha"
+    mkdir -p "$st/pins/pinned-1111000leftover.tmp" && touch -d "-3 days" "$st/pins/pinned-1111000leftover.tmp"
+    # A clone another run is still writing (named by a live cmdline) and a
+    # fresh clone with no marker yet must both survive; no marker => age of dir.
+    mkdir -p "$st/pins/pinned-2222000inflight.tmp" && touch -d "-3 days" "$st/pins/pinned-2222000inflight.tmp"
+    mkdir -p "$st/pins/pinned-3333000fresh.tmp"
+    # Referenced only through /proc/<pid>/exe, only through a mapped library,
+    # and one that a run reuses between the scan and its removal.
+    mk_pin pinned-4444000exelive 9; mkdir -p "$st/pins/pinned-4444000exelive/build/lane"; : >"$st/pins/pinned-4444000exelive/build/lane/simple"
+    mk_pin pinned-5555000mapslive 9; mk_pin pinned-6666000touched 9
+    # Fake /proc: one cmdline naming the live pin, one cwd inside it.
+    mkdir -p "$st/proc/101" "$st/proc/102" "$st/proc/103" "$st/proc/104" "$st/proc/105" "$st/proc/106"
+    printf 'sh\0%s/scripts/bootstrap/bootstrap-from-scratch.sh\0' "$st/pins/pinned-cccc0000live" >"$st/proc/101/cmdline"
+    printf 'sleep\0' >"$st/proc/102/cmdline"; ln -s "$st/pins/pinned-cccc0000live/src" "$st/proc/102/cwd"
+    printf 'unrelated\0' >"$st/proc/103/cmdline"; ln -s "$st" "$st/proc/103/cwd"
+    printf 'git\0clone\0-q\0--shared\0%s\0' "$st/pins/pinned-2222000inflight.tmp" >"$st/proc/104/cmdline"
+    printf 'simple\0test\0' >"$st/proc/105/cmdline"; ln -s "$st/pins/pinned-4444000exelive/build/lane/simple" "$st/proc/105/exe"
+    printf 'worker\0' >"$st/proc/106/cmdline"
+    printf '7f00 r-xp 00000000 fd:01 1 %s\n7f10 rw-p 00000000 00:00 0\n' "$st/pins/pinned-5555000mapslive/build/lane/libscv.so" >"$st/proc/106/maps"
+    out=$(SIMPLE_BOOTSTRAP_PIN_PRUNE_PROC="$st/proc" pin_prune "$st/pins" --keep "$st/pins/pinned-ffff0000keep")
+    rc=$?
+    [ "$rc" -eq 0 ] || { echo "selftest FAIL: dry run exit $rc"; fail=1; }
+    expect_line() { printf '%s\n' "$out" | grep -qxF -- "$1" || { echo "selftest FAIL: missing '$1'"; fail=1; }; }
+    expect_line "KEEP newest $st/pins/pinned-aaaa0000newest"
+    expect_line "KEEP newest $st/pins/pinned-bbbb0000second"
+    expect_line "KEEP live $st/pins/pinned-cccc0000live"
+    expect_line "KEEP admitted $st/pins/pinned-dddd0000rcpt"
+    expect_line "KEEP admitted $st/pins/pinned-9999000admit2"
+    expect_line "KEEP keep $st/pins/pinned-ffff0000keep"
+    expect_line "KEEP young $st/pins/pinned-0000000young"
+    expect_line "PRUNE $st/pins/pinned-eeee0000prune"
+    expect_line "KEEP live $st/pins/pinned-2222000inflight.tmp"
+    expect_line "KEEP young $st/pins/pinned-3333000fresh.tmp"
+    expect_line "KEEP live $st/pins/pinned-4444000exelive"
+    expect_line "KEEP live $st/pins/pinned-5555000mapslive"
+    expect_line "PRUNE $st/pins/pinned-6666000touched"
+    expect_line "PRUNE $st/pins/pinned-1111000leftover.tmp"
+    expect_line "PASS — 14 pin(s) scanned, 3 candidate(s), 0 removed"
+    [ -d "$st/pins/pinned-eeee0000prune" ] || { echo "selftest FAIL: dry run removed a pin"; fail=1; }
+    # Admitted pins are bounded only when asked: the OLDER admitted pin falls.
+    out=$(SIMPLE_BOOTSTRAP_PIN_PRUNE_PROC="$st/proc" pin_prune "$st/pins" --max-admitted 1)
+    expect_line "KEEP admitted $st/pins/pinned-9999000admit2"
+    expect_line "PRUNE $st/pins/pinned-dddd0000rcpt"
+    # Apply removes exactly the candidates and nothing else; a candidate that a
+    # run reuses between the scan and its removal (marker touched) is skipped.
+    out=$(SIMPLE_BOOTSTRAP_PIN_PRUNE_BEFORE_REMOVE='[ "${1##*/}" = pinned-6666000touched ] && touch "$1/.bootstrap-pinned-sha"; :' SIMPLE_BOOTSTRAP_PIN_PRUNE_PROC="$st/proc" pin_prune "$st/pins" --keep "$st/pins/pinned-ffff0000keep" --apply)
+    expect_line "PRUNED $st/pins/pinned-eeee0000prune"
+    expect_line "PASS — 14 pin(s) scanned, 3 candidate(s), 2 removed"
+    [ -e "$st/pins/pinned-eeee0000prune" ] && { echo "selftest FAIL: candidate survived --apply"; fail=1; }
+    [ -e "$st/pins/pinned-1111000leftover.tmp" ] && { echo "selftest FAIL: leftover survived --apply"; fail=1; }
+    expect_line "SKIPPED $st/pins/pinned-6666000touched (changed or referenced since the scan)"
+    [ -d "$st/pins/pinned-6666000touched" ] || { echo "selftest FAIL: a pin reused during the prune was removed"; fail=1; }
+    [ "$(ls "$st/pins" | wc -l)" -eq 12 ] || { echo "selftest FAIL: --apply touched a kept pin ($(ls "$st/pins" | tr '\n' ' '))"; fail=1; }
+    [ -z "$(ls "$st/pins" | grep pruning)" ] || { echo "selftest FAIL: pruning leftover remained"; fail=1; }
+    pin_prune "$st/absent" >/dev/null 2>&1; [ $? -eq 2 ] || { echo "selftest FAIL: missing parent not exit 2"; fail=1; }
+    rm -rf "$st"
+    [ "$fail" -eq 0 ] && { echo "PASS — 23 selftest assertion(s) checked, pinned-src retention keeps live (cmdline, cwd, exe, maps), admitted, young, kept and newest pins, leftovers too, and re-checks before each removal"; return 0; }
+    echo "FAIL — selftest"; return 1
+}
+
+case "${1:-}" in
+    --selftest) selftest; exit $? ;;
+    ""|-*) echo "usage: $0 <dest-parent> [--keep <dir>]... [--max-keep N] [--max-admitted N] [--min-age-s S] [--apply] | --selftest" >&2; exit 2 ;;
+    *) pin_prune "$@"; exit $? ;;
+esac

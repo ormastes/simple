@@ -138,4 +138,43 @@ Source checks and these tests do not establish device execution. Current-source
 admitted Simple execution, Vulkan failure/resource-retention injection,
 two-thread live-fence contention, provider linking, actual three-submit/fourth-
 command recycling, production compositor integration, and matched C/Simple
-performance evidence remain required acceptance gates.
+performance evidence remain required acceptance gates for the compiled
+runtime's ring. The interpreter bridge's ring has the device recycling evidence
+described below.
+
+## Two ring owners: compiled runtime and interpreter bridge
+
+The interpreter does not run Vulkan compute on the runtime crate's ash `STATE`.
+It runs it on the dlopen bridge (`VK_STATE` in
+`src/compiler_rust/compiler/src/interpreter_extern/gpu.rs`), whose pipeline,
+descriptor, buffer and command handles are a different handle space. A ring
+that lives only in the runtime crate therefore cannot open for interpreted code.
+
+Since 2026-11-13 the bridge owns its own ring,
+`interpreter_extern/gpu_vulkan_async_ring.rs`. Both owners take the status
+values, slot state machine, admission window and receipt publication from one
+module, `simple_runtime::vulkan_async_protocol`, so they cannot drift on those.
+
+| | compiled runtime | interpreter bridge |
+|---|---|---|
+| device | ash `STATE` (`vulkan` feature) | dlopen `VK_STATE` |
+| submitted command + fence | `quarantined_compute` with a private wait handle | the ring's own table; never `quarantined_commands` / `live_fences` |
+| retained until retire | buffer/descriptor/pipeline owners (`Arc`) | handles; destroy and descriptor rewrite are refused |
+| direct compute while a session is open | refused | refused (`begin_compute`, `discard_command`, direct submits, `wait_idle`, `select_device`, `shutdown`) |
+| bounded wait in `acquire` | outside the registry lock | under the `VK_STATE` mutex (single interpreter thread) |
+| `snapshot`, `snapshot_word`, `abandon_device` | implemented | not served: the call reaches the runtime crate, which answers -1 for a bridge session |
+| `close` | 1 when nothing is in flight | additionally requires created == released for command buffers and fences |
+
+Traps:
+
+- `bin/simple run` of a file with a `main` goes through the JIT, which calls the
+  runtime crate directly. On a Linux seed (no `vulkan` feature) that lane has no
+  Vulkan device at all. A probe script that must reach the bridge has no `main`.
+- A seed built with an exported `RUSTFLAGS` loses the `--export-dynamic` link
+  flag from `.cargo/config.toml`, and the three dlsym-resolved calls then fail
+  as "not linked". Build with `env -u RUSTFLAGS`.
+
+Live-device evidence for the bridge ring (NVIDIA GB10, three submissions before
+any host wait, fourth after one retirement without device idle):
+`test/02_integration/gpu_lane/vulkan_async_ring_live_device_spec.spl`. It does
+not exercise the compiled runtime's ring.

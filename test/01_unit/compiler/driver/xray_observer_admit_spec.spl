@@ -1,0 +1,120 @@
+# @cover src/compiler/80.driver/driver_xray_policy.spl
+# @req REQ-XRAY-V1-API-01
+"""
+# Sled-aware observer admission (XRay step 3a)
+
+`xray_observer_request_check` rejected EVERY non-Off observer request as
+`UnsupportedProfile` "until a backend adapter can honour it". The pure-Simple
+backend (PR5/5b/6) now honours `backend: simple` on a `--xray` native build,
+so the compile-time gate must admit exactly that build shape and nothing more:
+
+  request backend | build                       | verdict
+  simple          | --xray, backend native      | admitted
+  simple          | no --xray (no sleds)        | InstrumentationAbsent
+  simple          | --xray, backend llvm        | UnsupportedTarget (no Simple sleds there)
+  llvm / auto     | any                         | UnsupportedProfile (PR4 clang_rt.xray link pending)
+  any             | Windows / non-ELF target    | UnsupportedTarget
+  off / absent    | any                         | admitted, writes nothing
+
+The two-argument form keeps its contract (a build with no sleds) so the
+PR2 gate spec stays valid unchanged.
+"""
+use std.spec.*
+use std.common.plugin.aspect_params.*
+use std.common.plugin.iface_id.{ParamExt}
+use std.common.trace.observer_contract_v1.*
+use std.common.trace.observer_config_v1.*
+use std.common.text_bytes.{text_to_bytes}
+use compiler.common.driver_compile_options.{driver_core_compile_options_default}
+use compiler.common.driver_core_modes.{CompileMode}
+use compiler.driver.driver_types.{CompileContext}
+use compiler.driver.driver_xray_policy.{xray_observer_request_check, xray_observer_request_admit, xray_observer_request_error, xray_observer_request_error_for_build}
+
+val LINUX_A64 = "aarch64-unknown-linux-gnu"
+val LINUX_X64 = "x86_64-unknown-linux-gnu"
+
+fn request_params(backend: TraceBackendV1) -> AspectParamsV1:
+    var config = trace_config_defaults_v1()
+    config.instrumentation = TraceInstrumentationV1.Dynamic
+    config.backend = backend
+    config.abi_profile = "simple-aarch64-sled-v1"
+    var params = AspectParamsV1.defaults()
+    params.ext.push(ParamExt(ASPECT_TRACE_OBSERVER_EXT_V1, 1,
+        text_to_bytes(trace_config_format_sdn_v1(config).unwrap()), TRACE_CONFIG_SCHEMA_HASH_V1))
+    params
+
+fn off_params() -> AspectParamsV1:
+    var params = AspectParamsV1.defaults()
+    params.ext.push(ParamExt(ASPECT_TRACE_OBSERVER_EXT_V1, 1,
+        text_to_bytes(trace_config_format_sdn_v1(trace_config_defaults_v1()).unwrap()), TRACE_CONFIG_SCHEMA_HASH_V1))
+    params
+
+describe "sled-aware observer admission (pure predicate)":
+    it "admits backend=simple only on a --xray native build":
+        val simple = request_params(TraceBackendV1.Simple)
+        expect(xray_observer_request_admit(simple, LINUX_A64, true, "native")).to_equal(Ok(true))
+        expect(xray_observer_request_admit(simple, LINUX_X64, true, "native")).to_equal(Ok(true))
+        expect(xray_observer_request_admit(simple, LINUX_A64, false, "native")).to_equal(Err(TraceFailureV1.InstrumentationAbsent))
+        expect(xray_observer_request_admit(simple, LINUX_A64, true, "llvm")).to_equal(Err(TraceFailureV1.UnsupportedTarget))
+        expect(xray_observer_request_admit(simple, LINUX_A64, true, "cranelift")).to_equal(Err(TraceFailureV1.UnsupportedTarget))
+        expect(xray_observer_request_admit(simple, "x86_64-pc-windows-msvc", true, "native")).to_equal(Err(TraceFailureV1.UnsupportedTarget))
+
+    it "keeps the LLVM route rejected until its runtime link lands":
+        for backend in [TraceBackendV1.Llvm, TraceBackendV1.Auto]:
+            val params = request_params(backend)
+            expect(xray_observer_request_admit(params, LINUX_A64, true, "llvm")).to_equal(Err(TraceFailureV1.UnsupportedProfile))
+            expect(xray_observer_request_admit(params, LINUX_A64, true, "native")).to_equal(Err(TraceFailureV1.UnsupportedProfile))
+            expect(xray_observer_request_admit(params, LINUX_A64, false, "")).to_equal(Err(TraceFailureV1.UnsupportedProfile))
+
+    it "admits off and absent requests regardless of the build":
+        expect(xray_observer_request_admit(off_params(), "x86_64-pc-windows-msvc", false, "")).to_equal(Ok(true))
+        expect(xray_observer_request_admit(off_params(), LINUX_A64, true, "native")).to_equal(Ok(true))
+        expect(xray_observer_request_admit(AspectParamsV1.defaults(), "", false, "")).to_equal(Ok(true))
+
+    it "the two-argument check is the no-sleds build and never admits a dynamic request":
+        expect(xray_observer_request_check(request_params(TraceBackendV1.Simple), LINUX_A64)).to_equal(Err(TraceFailureV1.InstrumentationAbsent))
+        expect(xray_observer_request_check(request_params(TraceBackendV1.Llvm), LINUX_A64)).to_equal(Err(TraceFailureV1.UnsupportedProfile))
+        expect(xray_observer_request_check(off_params(), LINUX_A64)).to_equal(Ok(true))
+
+    it "formats the stable TRACE-E-REQUEST text, empty when admitted":
+        val simple = request_params(TraceBackendV1.Simple)
+        expect(xray_observer_request_error_for_build(simple, LINUX_A64, true, "native")).to_equal("")
+        expect(xray_observer_request_error_for_build(simple, LINUX_A64, false, "native"))
+            .to_equal("TRACE-E-REQUEST: observer V1 request rejected (status=4)")
+        expect(xray_observer_request_error(simple, LINUX_A64))
+            .to_equal("TRACE-E-REQUEST: observer V1 request rejected (status=4)")
+
+describe "sled-aware observer admission (CompileContext.create, single decision point)":
+    it "a --xray native build admits backend=simple: no xray_config_error, static switch on":
+        var options = driver_core_compile_options_default()
+        options.mode = CompileMode.Aot
+        options.backend = "native"
+        options.xray_enabled = true
+        options.native_target = LINUX_A64
+        options.aspect_params = request_params(TraceBackendV1.Simple)
+        val ctx = CompileContext.create(options)
+        expect(ctx.config["xray"] ?? "").to_equal("on")
+        expect(ctx.config.contains_key("xray_config_error")).to_equal(false)
+
+    it "the same request without --xray is rejected as InstrumentationAbsent (status=4)":
+        var options = driver_core_compile_options_default()
+        options.mode = CompileMode.Aot
+        options.backend = "native"
+        options.native_target = LINUX_A64
+        options.aspect_params = request_params(TraceBackendV1.Simple)
+        val ctx = CompileContext.create(options)
+        expect(ctx.config.contains_key("xray")).to_equal(false)
+        expect(ctx.config["xray_config_error"] ?? "").to_equal("TRACE-E-REQUEST: observer V1 request rejected (status=4)")
+
+    it "a --xray llvm build still rejects backend=simple and backend=llvm":
+        var options = driver_core_compile_options_default()
+        options.mode = CompileMode.Aot
+        options.backend = "llvm"
+        options.xray_enabled = true
+        options.native_target = LINUX_A64
+        options.aspect_params = request_params(TraceBackendV1.Simple)
+        val simple_ctx = CompileContext.create(options)
+        expect(simple_ctx.config["xray_config_error"] ?? "").to_equal("TRACE-E-REQUEST: observer V1 request rejected (status=1)")
+        options.aspect_params = request_params(TraceBackendV1.Llvm)
+        val llvm_ctx = CompileContext.create(options)
+        expect(llvm_ctx.config["xray_config_error"] ?? "").to_equal("TRACE-E-REQUEST: observer V1 request rejected (status=2)")

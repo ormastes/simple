@@ -22,3 +22,20 @@ so every file in those trees is digested under the interpreter.
 
 Scope cold-init digests to the entry's closure, or cache them per root, so a
 single-entry cold init is bounded (target well under 30 s).
+
+
+---
+## 2026-11-13 triage — lane live-p3-l6 (Windows host, seed bin/simple.exe, base f790f7f266e)
+
+Code-path read (`compiler_source_authority_acquire_v1`,
+`source_authority.spl:235-251`): cold init widens `inventory_roots` to
+src+test+examples/10_tooling deliberately — the event cursor needs a full
+generation baseline so later incremental membership refreshes can diff. The
+record's two suggested fixes both carry authority risk in this lane: scoping
+cold-init digests to the entry closure breaks that baseline for files outside
+the closure that later enter it; a per-root digest cache needs an invalidation
+proof the SCV admission path does not currently have. Given this is the build
+authority gate (not a hot path) and a wrong cache silently weakens admission,
+no change was attempted; the bounded real fix is parallel/digest acceleration
+or an admitted self-hosted compiler, both outside a P3 lane. No in-lane
+change.

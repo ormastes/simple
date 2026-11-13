@@ -1,0 +1,55 @@
+# @cover src/lib/common/isa/a64_encode_v1.spl
+# @req REQ-XRAY-SHARED-ISA-ENCODE
+"""
+# Shared AArch64 instruction encoders
+
+The forms the XRay trampoline twin, the sled template and the native backend
+all emit: NOP, B/BL imm26 with its word-range check, STP/LDP (signed offset,
+X and Q), LDR/STR unsigned offset, ADD/SUB imm12. Golden words are the clang
+assembly already pinned by the AArch64 trampoline twin spec and the backend
+relocation engine's CALL26/JUMP26 rules.
+"""
+use std.spec.*
+use std.common.isa.a64_encode_v1.*
+
+describe "AArch64 shared encoders":
+    it "encodes the trampoline prologue words":
+        expect(a64_add_imm_v1(29, 31, 0)).to_equal(0x910003FD)          # mov x29, sp
+        expect(a64_sub_imm_v1(31, 31, 672)).to_equal(0xD10A83FF)        # sub sp, sp, #672
+        expect(a64_stp_x_v1(1, 2, 31, 0)).to_equal(0xA9000BE1)          # stp x1, x2, [sp]
+        expect(a64_stp_x_v1(15, 18, 31, 112)).to_equal(0xA9074BEF)      # stp x15, x18, [sp, #112]
+        expect(a64_stp_x_v1(9, 10, 31, 128)).to_equal(0xA9082BE9)
+        expect(a64_str_x_v1(11, 31, 144)).to_equal(0xF9004BEB)          # str x11, [sp, #144]
+        expect(a64_add_imm_v1(9, 31, 160)).to_equal(0x910283E9)         # add x9, sp, #160
+        expect(a64_stp_q_v1(0, 1, 9, 0)).to_equal(0xAD000520)           # stp q0, q1, [x9]
+        expect(a64_stp_q_v1(30, 31, 9, 480)).to_equal(0xAD0F7D3E)
+
+    it "encodes the trampoline epilogue words":
+        expect(a64_ldp_q_v1(0, 1, 9, 0)).to_equal(0xAD400520)
+        expect(a64_ldp_q_v1(30, 31, 9, 480)).to_equal(0xAD4F7D3E)
+        expect(a64_ldp_x_v1(9, 10, 31, 128)).to_equal(0xA9482BE9)
+        expect(a64_ldr_x_v1(11, 31, 144)).to_equal(0xF9404BEB)
+        expect(a64_ldp_x_v1(1, 2, 31, 0)).to_equal(0xA9400BE1)
+        expect(a64_ldp_x_v1(15, 18, 31, 112)).to_equal(0xA9474BEF)
+        expect(a64_add_imm_v1(31, 29, 0)).to_equal(0x910003BF)          # mov sp, x29
+        expect(a64_nop_v1()).to_equal(0xD503201F)
+
+    it "masks immediates exactly like the native backend":
+        expect(a64_add_imm_v1(0, 1, 4096 + 5)).to_equal(a64_add_imm_v1(0, 1, 5))
+        expect(a64_sub_imm_v1(0, 1, 4095)).to_equal(0xD13FFC20)
+        expect(a64_ldr_x_v1(0, 1, 32760)).to_equal(0xF97FFC20)          # imm12 = 4095
+        expect(a64_str_x_v1(0, 1, 32768)).to_equal(0xF9000020)          # 4096 & 0xFFF = 0
+        expect(a64_stp_x_v1(0, 1, 2, -16)).to_equal(0xA93F0440)         # simm7 = -2
+        expect(a64_ldp_x_v1(0, 1, 2, -512)).to_equal(0xA9600440)        # simm7 = -64
+
+    it "encodes B and BL imm26 and checks the branch range in words and bytes":
+        expect(a64_bl_v1(-1)).to_equal(0x97FFFFFF)
+        expect(a64_bl_v1(34)).to_equal(0x94000022)
+        expect(a64_b_v1(8)).to_equal(0x14000008)                        # B +32
+        expect(a64_bl_v1(0)).to_equal(0x94000000)
+        expect(a64_branch26_words_in_range_v1(33554431)).to_equal(true)
+        expect(a64_branch26_words_in_range_v1(33554432)).to_equal(false)
+        expect(a64_branch26_words_in_range_v1(-33554432)).to_equal(true)
+        expect(a64_branch26_words_in_range_v1(-33554433)).to_equal(false)
+        expect(A64_BRANCH26_MAX_FORWARD_BYTES_V1).to_equal(134217724)
+        expect(A64_BRANCH26_MAX_BACKWARD_BYTES_V1).to_equal(134217728)

@@ -10,12 +10,43 @@ val CL_TYPE_F64_FOR_RUNTIME_IMPORT: i64 = 6
 val CL_CC_PLATFORM_FOR_RUNTIME_IMPORT: i64 = -1
 val CL_LINKAGE_IMPORT_FOR_RUNTIME_IMPORT: i64 = 1
 
+# Import ledger for one host JIT module. The JIT provider binds imports by
+# process symbol lookup and aborts the host at finalize on a miss, so the JIT
+# entry (cranelift_jit_run_main) must see every import the lowering declares,
+# including ones no MIR callee names (string boxing, array/aggregate helpers).
+# Recording is keyed to one module handle; AOT modules are never recorded.
+# Compilation of a JIT module is single-threaded: begin, lower, end.
+var _cl_import_ledger_module_v1: i64 = 0
+var _cl_import_ledger_names_v1: [text] = []
+
+fn cl_import_ledger_begin(cl_module: i64):
+    _cl_import_ledger_module_v1 = cl_module
+    _cl_import_ledger_names_v1 = []
+
+fn cl_import_ledger_end() -> [text]:
+    """Distinct import names recorded since cl_import_ledger_begin, in first-declared order."""
+    var names: [text] = []
+    var seen: Dict<text, bool> = {}
+    for name in _cl_import_ledger_names_v1:
+        if not seen.has(name):
+            seen[name] = true
+            names = names.push(name)
+    _cl_import_ledger_module_v1 = 0
+    _cl_import_ledger_names_v1 = []
+    names
+
+fn cl_declare_import_function(cl_module: i64, name: text, sig: i64) -> i64:
+    """The one import declaration path of the Cranelift lowering."""
+    if cl_module != 0 and cl_module == _cl_import_ledger_module_v1:
+        _cl_import_ledger_names_v1 = _cl_import_ledger_names_v1.push(name)
+    cranelift_declare_function(cl_module, name, sig, CL_LINKAGE_IMPORT_FOR_RUNTIME_IMPORT)
+
 fn translate_runtime_import_call_i64(ctx: i64, cl_module: i64, name: text, args: [i64]) -> i64:
     val sig = cranelift_new_signature(CL_CC_PLATFORM_FOR_RUNTIME_IMPORT)
     for _arg in args:
         cranelift_sig_add_param(sig, CL_TYPE_I64_FOR_RUNTIME_IMPORT)
     cranelift_sig_set_return(sig, CL_TYPE_I64_FOR_RUNTIME_IMPORT)
-    val handle = cranelift_declare_function(cl_module, name, sig, CL_LINKAGE_IMPORT_FOR_RUNTIME_IMPORT)
+    val handle = cl_declare_import_function(cl_module, name, sig)
     val func_ref = cranelift_import_function(ctx, handle)
     return cranelift_call(ctx, func_ref, args)
 
@@ -24,7 +55,7 @@ fn translate_runtime_import_call_i8(ctx: i64, cl_module: i64, name: text, args: 
     for _arg in args:
         cranelift_sig_add_param(sig, CL_TYPE_I64_FOR_RUNTIME_IMPORT)
     cranelift_sig_set_return(sig, CL_TYPE_I8_FOR_RUNTIME_IMPORT)
-    val handle = cranelift_declare_function(cl_module, name, sig, CL_LINKAGE_IMPORT_FOR_RUNTIME_IMPORT)
+    val handle = cl_declare_import_function(cl_module, name, sig)
     val func_ref = cranelift_import_function(ctx, handle)
     return cranelift_call(ctx, func_ref, args)
 
@@ -32,7 +63,7 @@ fn translate_runtime_import_call_void(ctx: i64, cl_module: i64, name: text, args
     val sig = cranelift_new_signature(CL_CC_PLATFORM_FOR_RUNTIME_IMPORT)
     for _arg in args:
         cranelift_sig_add_param(sig, CL_TYPE_I64_FOR_RUNTIME_IMPORT)
-    val handle = cranelift_declare_function(cl_module, name, sig, CL_LINKAGE_IMPORT_FOR_RUNTIME_IMPORT)
+    val handle = cl_declare_import_function(cl_module, name, sig)
     val func_ref = cranelift_import_function(ctx, handle)
     cranelift_call(ctx, func_ref, args)
 
@@ -40,7 +71,7 @@ fn translate_runtime_import_call_f64_i64(ctx: i64, cl_module: i64, name: text, a
     val sig = cranelift_new_signature(CL_CC_PLATFORM_FOR_RUNTIME_IMPORT)
     cranelift_sig_add_param(sig, CL_TYPE_F64_FOR_RUNTIME_IMPORT)
     cranelift_sig_set_return(sig, CL_TYPE_I64_FOR_RUNTIME_IMPORT)
-    val handle = cranelift_declare_function(cl_module, name, sig, CL_LINKAGE_IMPORT_FOR_RUNTIME_IMPORT)
+    val handle = cl_declare_import_function(cl_module, name, sig)
     val func_ref = cranelift_import_function(ctx, handle)
     return cranelift_call(ctx, func_ref, [arg])
 
@@ -48,7 +79,7 @@ fn translate_runtime_import_call_i64_f64(ctx: i64, cl_module: i64, name: text, a
     val sig = cranelift_new_signature(CL_CC_PLATFORM_FOR_RUNTIME_IMPORT)
     cranelift_sig_add_param(sig, CL_TYPE_I64_FOR_RUNTIME_IMPORT)
     cranelift_sig_set_return(sig, CL_TYPE_F64_FOR_RUNTIME_IMPORT)
-    val handle = cranelift_declare_function(cl_module, name, sig, CL_LINKAGE_IMPORT_FOR_RUNTIME_IMPORT)
+    val handle = cl_declare_import_function(cl_module, name, sig)
     val func_ref = cranelift_import_function(ctx, handle)
     return cranelift_call(ctx, func_ref, [arg])
 
@@ -58,6 +89,6 @@ fn translate_runtime_import_call_i64_i64_f64_i64(ctx: i64, cl_module: i64, name:
     cranelift_sig_add_param(sig, CL_TYPE_I64_FOR_RUNTIME_IMPORT)
     cranelift_sig_add_param(sig, CL_TYPE_F64_FOR_RUNTIME_IMPORT)
     cranelift_sig_set_return(sig, CL_TYPE_I64_FOR_RUNTIME_IMPORT)
-    val handle = cranelift_declare_function(cl_module, name, sig, CL_LINKAGE_IMPORT_FOR_RUNTIME_IMPORT)
+    val handle = cl_declare_import_function(cl_module, name, sig)
     val func_ref = cranelift_import_function(ctx, handle)
     return cranelift_call(ctx, func_ref, [arg0, arg1, arg2])

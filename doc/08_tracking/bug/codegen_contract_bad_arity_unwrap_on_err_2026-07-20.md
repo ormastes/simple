@@ -173,3 +173,10 @@ separate feature/oracle divergence this doc's 2026-11-07 note
 quarantined, not this row's arity defect. Absorber: the 2026-11-07
 arity-oracle rewrite (executed and verified per the 2026-11-10 addendum
 above). Status line flipped from OPEN.
+
+
+---
+
+## 2026-11-13 triage (live-P3 lane l1, work/live-p3-l1-20261113, base f790f7f266e)
+
+**SUPERSEDED (confirmed)** — Arity defect absorbed by the 2026-11-07 oracle rewrite, executed and verified by two lanes (p3-compiler, comp6: bad-arity scenarios PASS, no `.unwrap()` on the bad-arity path). The 4 positive CUDA vec failures are the quarantined separate feature/oracle divergence, not this row's defect.

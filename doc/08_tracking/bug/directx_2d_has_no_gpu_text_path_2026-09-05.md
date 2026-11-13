@@ -87,3 +87,10 @@ Host-limit note: the triage host IS Windows, but closing evidence per this doc
 requires the GPU text path to be IMPLEMENTED first (HLSL twin, frame opcode,
 `rt_directx_*` dispatch) and then proven with a device-produced text frame on
 Windows or DXVK. None of the implementation exists, so the row stays OPEN.
+
+
+---
+
+## 2026-11-13 triage — lane live-p3-l2 (work/live-p3-l2-20261113, worktree lp2-wt, base origin/release/1.0.0 tip)
+
+**Verdict: LIVE (deferred).** Source re-check at this base: `backend_directx.spl` text entrypoints still delegate to the software mirror and poison native receipt; `font_atlas_composite.spl` still has no HLSL/DirectX twin; `runtime_directx_core.c` still exports no compute dispatch/fence/present. The lane host IS Windows, but the missing work is a device-verifiable feature (HLSL twin + frame opcode + rt_directx_* dispatch + proven text frame), not a bounded P3 defect fix; per this record's own reasoning, landing unverifiable D3D compute code from a lane that cannot prove it would be the false-evidence class the guards exist to catch. Remains with the owner who can prove it on a device host.

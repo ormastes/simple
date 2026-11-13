@@ -117,3 +117,7 @@ is library-owner hygiene, not required for this verdict.
 Not carried by seedfix A (fa6939eb4b9e, 2026-11-10, is JIT tuple-destructure
 unbox in `lowering_stmt.rs`; a00a1811c049 landed 2026-10-05 and pins this
 exact shape — honest attribution is the October fix).
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with lane ne12: FIXED at tip (seed fix a00a1811c049, ANY-argument decode before the typed store). No independent re-verification in this lane; disposition stands.

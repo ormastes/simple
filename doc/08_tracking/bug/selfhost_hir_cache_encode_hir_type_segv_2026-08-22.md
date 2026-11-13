@@ -69,3 +69,7 @@ Triage on `origin/release/1.0.0` tip `dacccfc78fd10` (worktree
 
 Disposition: SUPERSEDED (hardening absorbed the crash class). Header flipped
 OPEN → SUPERSEDED.
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with lane comp8: SUPERSEDED — the crash path was hardened. No independent re-verification in this lane; disposition stands.

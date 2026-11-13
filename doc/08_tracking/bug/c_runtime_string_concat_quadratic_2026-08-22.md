@@ -304,3 +304,7 @@ Carried side observation (from prior addendum, out of scope here):
 Windows host (link step: PE/COFF gc-root rule pulls the full
 `runtime_native.c` closure); a capsule-grade provider-closure repair or a
 scoped-probe harness is left for the owning lane. No change made.
+
+## Triage 2026-11-13 (P3 tools lane)
+No code change this lane; defect is SUPERSEDED per the record header
+(purelane audit). Disposition accepted as-recorded.

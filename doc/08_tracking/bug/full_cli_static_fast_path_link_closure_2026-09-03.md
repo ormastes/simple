@@ -49,3 +49,8 @@ this Windows lane, and no Windows-side signal can advance it.
   30-sample before/after harness against the admitted binary. Any fix must preserve the
   single-executable contract, K1 validation, exact output, global-option behaviour, Phase-7
   activation, signing, and plugin admission, per the body above.
+
+## Triage 2026-11-13 (P3 tools lane)
+No code change this lane; the 2026-11-11 (lane ne10) addendum stands —
+host-blocked, feature-sized macOS arm64 link-closure optimisation; not
+reproducible on this Windows lane and no Windows-side signal can advance it.

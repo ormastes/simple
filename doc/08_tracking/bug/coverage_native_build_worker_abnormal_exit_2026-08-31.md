@@ -148,3 +148,10 @@ No change made in this lane.
 ## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
 
 **STALE (confirmed)** — boot12/runner6: subject 2026-08-31 Linux binary absent from tree; runner-side fail-closed contract and the worker-failure-lines reporter verified live in source. Host-side worker reaping root cause stays with the compiler/native-build lane.
+
+
+---
+
+## 2026-11-13 triage (live-P3 lane l1, work/live-p3-l1-20261113, base f790f7f266e)
+
+**STALE (confirmed)** — 2026-08-31 filing-host Linux binary absent from this tree; runner-side fail-closed contract (`test_runner_execute.spl:1473-1494`) and `native_build_worker_failure_lines_v1` (`native_build_main.spl:2298`) verified live (grep, this base). Host-side worker-reaping root cause stays with the compiler/native-build lane.

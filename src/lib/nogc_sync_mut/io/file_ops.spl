@@ -15,7 +15,7 @@ use std.io_runtime.{read_file_text, read_file_text_result, file_delete, file_cop
 # name-keyed registry silently misdispatches duplicate bodies across a closure
 # (doc/08_tracking/bug/file_read_has_23_definitions_with_two_return_types_2026-08-16.md).
 use std.io_runtime.{file_read}
-use std.nogc_sync_mut.fs.host_path.{host_path_native}
+use std.nogc_sync_mut.fs.host_path.{host_path_native, host_path_canonical}
 use std.nogc_sync_mut.sffi.file_bytes.{file_write_bytes_tagged_native, file_atomic_write_bytes_tagged_native}
 use std.nogc_sync_mut.io.dir_ops.{dir_is_real_no_follow}
 # Cycle-170 split crossing (parent slot, prefix slot, make) is a SOSIX
@@ -58,6 +58,12 @@ extern fn rt_file_fsync(path: text) -> bool
 extern fn rt_secure_temp_dir(parent: text, prefix: text) -> text
 @unsafe(reason: "atomically transfers ownership of a staged file path", capabilities: [ffi])
 extern fn rt_file_publish_noreplace(staged_path: text, destination: text) -> i64
+@unsafe(reason: "creates a second name for a regular file; no follow, no replace", capabilities: [ffi])
+extern fn rt_file_link_create_excl_no_follow(source: text, destination: text) -> bool
+@unsafe(reason: "raw chmod ABI; 0 is success, the Windows runtime stub also answers 0", capabilities: [ffi])
+extern fn rt_package_chmod(path: text, mode: i32) -> i32
+@unsafe(reason: "raw runtime ABI for rt_file_mode; negative is the failure sentinel", capabilities: [ffi])
+extern fn rt_file_mode(path: text) -> i64
 @unsafe(reason: "raw file-size ABI; negative status is the provider failure sentinel", capabilities: [ffi])
 extern fn rt_file_size(path: text) -> i64
 @unsafe(reason: "raw file-stat ABI; zero and negative values are provider-defined failure states", capabilities: [ffi])
@@ -223,11 +229,48 @@ fn secure_temp_dir_raw(parent: text, prefix: text) -> text:
         val prefix_set: i64 = sosix_secure_temp_dir_set_prefix(host_path_native(prefix + ""))
         if prefix_set != 1:
             return ""
-        sosix_secure_temp_dir_make()
+        val made = sosix_secure_temp_dir_make()
+        # Canonical forward-slash spelling on Windows, matching
+        # path_final_existing/dir_walk output, so callers that textually
+        # compare against canonical paths (scv scope validators, fixture
+        # oracles) see one spelling. host_path_native re-adds native
+        # separators at every extern boundary. Identity off Windows.
+        # The nil/empty failure signal is preserved untouched: len() on the
+        # returned value is what callers gate on (nil measures -1).
+        if made.len() <= 0:
+            return made
+        host_path_canonical(made)
 
 fn file_publish_noreplace_raw(staged_path: text, destination: text) -> i64:
     unsafe(capabilities: [ffi]):
         rt_file_publish_noreplace(host_path_native(staged_path), host_path_native(destination))
+
+# Hard link `source` (a regular file, never followed) to the not-yet-existing
+# `destination`. The runtime verifies the new name resolves to the same inode
+# and removes it otherwise, so true means both names are one file. False for
+# a missing or non-regular source, an existing destination, a cross-device
+# pair, or a host without hard links -- callers fall back to a copy.
+fn file_hardlink(source: text, destination: text) -> bool:
+    if source == "" or destination == "" or source == destination:
+        return false
+    unsafe(capabilities: [ffi]):
+        rt_file_link_create_excl_no_follow(host_path_native(source), host_path_native(destination))
+
+# Seal a regular file read-only (0444) so that an in-place write through ANY of
+# its names (fopen "wb" truncates the shared inode) fails instead of rewriting
+# bytes every hard link shares. True only when the mode read back is exactly
+# r--r--r--: the Windows runtime chmod stub reports success without changing
+# anything and its mode word is attribute bits, so a host that cannot seal
+# answers false and callers keep copying instead of linking.
+fn file_seal_readonly(path: text) -> bool:
+    if path == "":
+        return false
+    var status: i32 = -1
+    var mode: i64 = -1
+    unsafe(capabilities: [ffi]):
+        status = rt_package_chmod(host_path_native(path), 292)
+        mode = rt_file_mode(host_path_native(path))
+    status == 0 and mode > 0 and (mode & 511) == 292
 
 fn secure_temp_dir(parent: text, prefix: text) -> Result<text, text>:
     if parent == "" or prefix == "" or prefix.contains("/") or prefix.contains("\\"):

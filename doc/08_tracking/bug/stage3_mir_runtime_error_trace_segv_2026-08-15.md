@@ -61,3 +61,7 @@ Grant needed (verbatim): a Linux x86_64 host with the admitted Stage 2
 candidate `042b35c2ef8c…` restored and core-pattern (`ulimit -c` / gdb
 batch `-ex run -ex bt`) wired into the stage3 command snapshot, so the crash
 IP/registers are retained on the first retry.
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with the recorded triage: the stage-3 MIR RuntimeError trace SIGSEGV remains tracked in the stage-3 cluster; reproduction requires the sanctioned native-stage build path unavailable in this lane. No in-lane change.

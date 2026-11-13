@@ -90,3 +90,7 @@ The exact observed command from this row
 was NOT re-executed this lane (session died mid-flight; campaign no-rerun
 rule); the flip rests on the unambiguous in-tree source plus the existing
 spec coverage above.
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with lane runner10: FIXED 2026-11-11 — check now detects SSpec DSL files and emits the fast actionable message (expected-behavior option 2). No independent re-verification in this lane; disposition stands.

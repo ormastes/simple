@@ -40,3 +40,7 @@ The full 829-entry list captured at the base is stored alongside this file as
 `test_tree_divergence_preexisting_2026-08-17.txt`. This backlog is owned by
 whichever lane last touched the duplicate trees; nothing here widens it.
 
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with the recorded status: OPEN (backlog pre-existing); the newly-introduced pair was FIXED in the original triage. The surviving divergence items are pre-existing backlog owned by their lanes. No in-lane change.

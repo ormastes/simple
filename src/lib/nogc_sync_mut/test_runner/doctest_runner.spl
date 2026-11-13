@@ -370,7 +370,54 @@ fn run_md_doctests(file_path: text, timeout_ms: i64) -> TestFileResult:
 # failure reasons were that banner, so the run's 215 doctest failures had no
 # usable diagnosis at all. This does not change any verdict — only the text
 # shown for an already-failing block.
-fn _dt_failure_reason(stderr: text) -> text:
+#
+# `stdout` is the child's captured stdout: for a block that RAN as a spec, the
+# seed prints the failing example's detail (`✗ <name>` plus its indented
+# `semantic: ...` line) there, while stderr only carries the generic
+# `spec failure: N of M example(s) failed` tail. Scanning stdout is what keeps
+# the MESSAGE in the reason instead of a bare `-->` span or a decoration
+# remnant. See doc/08_tracking/bug/
+# spl_doctest_composite_fails_wildcard_reexport_modes_2026-08-25.md
+# ("the reason line loses the message").
+fn _dt_stdout_failure_detail(stdout: text) -> text:
+    val lines = stdout.split("\n")
+    var i = 0
+    while i < lines.len():
+        val line = strip_ansi(lines[i]).trim()
+        if line.starts_with("✗") or line.starts_with("✘"):
+            # The example's detail is the first non-empty line after the ✗
+            # marker (e.g. `semantic: <path>:<line>:<col>: <message>`).
+            var j = i + 1
+            while j < lines.len():
+                val detail = strip_ansi(lines[j]).trim()
+                if detail != "":
+                    return "{line}: {detail}"
+                j = j + 1
+            return line
+        i = i + 1
+    ""
+
+fn _dt_failure_reason(stderr: text, stdout: text) -> text:
+    # Pass 1: a bare compile error (no spec wrapper) — the seed colourises
+    # `error:` with ANSI codes, so classify on the stripped text. Scanning the
+    # WHOLE stream for an `error:` line (instead of taking the first
+    # non-warning line) keeps the MESSAGE rather than a bare `-->` span: the
+    # first non-warning line in a child compile failure is usually the `-->`
+    # continuation of an earlier skipped warning, not the error.
+    for raw in stderr.split("\n"):
+        val line = strip_ansi(raw).trim()
+        if line.lower().starts_with("error"):
+            return line
+    # Pass 2: the failing example's detail from the child's spec stdout.
+    val detail = _dt_stdout_failure_detail(stdout)
+    if detail != "":
+        return detail
+    # Pass 3 (fallback, only reached when neither stream carries a real
+    # message): the LAST informative stderr line, skipping banners, every
+    # warning class, and the diagnostic decoration blocks those warnings print
+    # (span lines, gutter bars, source-gutter lines, carets). The seed prints
+    # its failure summary last, so the tail carries the message; the head is
+    # decoration.
     var fallback = ""
     for raw in stderr.split("\n"):
         # The seed colourises `warning:` with ANSI codes, so the marker is not
@@ -378,8 +425,6 @@ fn _dt_failure_reason(stderr: text) -> text:
         val line = strip_ansi(raw).trim()
         if line == "":
             continue
-        if fallback == "":
-            fallback = line
         if line.starts_with("WARNING: this Rust-built Simple binary"):
             continue
         if line.starts_with("Build and use the pure-Simple"):
@@ -388,9 +433,19 @@ fn _dt_failure_reason(stderr: text) -> text:
             continue
         if line.starts_with("[gc-warning]") or line.starts_with("[INFO]"):
             continue
-        if line.starts_with("[use-warning]"):
+        if line.starts_with("[use-warning]") or line.starts_with("[visibility-warning]"):
             continue
-        return line
+        if line.starts_with("[engine-demotion]") or line.starts_with("note:"):
+            continue
+        if line.starts_with("-->") or line.starts_with("|"):
+            continue
+        # Source-gutter line: "<line-no> | <code>".
+        val bar_at = line.index_of(" | ")
+        if bar_at > 0:
+            val head = line[0:bar_at].trim()
+            if head != "" and (head.to_int() ?? -1) >= 0:
+                continue
+        fallback = line
     if fallback != "":
         return fallback
     "Exit code non-zero"
@@ -508,7 +563,7 @@ fn run_spl_doctests_same_file(file_path: text, timeout_ms: i64, binary: text, op
                 ))
             else:
                 failed = failed + 1
-                val error_msg = _dt_failure_reason(stderr)
+                val error_msg = _dt_failure_reason(stderr, stdout)
                 block_results.push(BlockResult(
                     block: block, status: BlockStatus.Failed,
                     duration_ms: duration_ms, stdout: stdout, stderr: stderr,

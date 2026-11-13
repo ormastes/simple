@@ -217,3 +217,7 @@ cp target/release/simple.exe ../../bin/simple.exe`, followed by the matching
 pure-frontend change and the negative coverage this record already demands
 (`cross_query.spl:137` shape in
 `test/01_unit/compiler/parser_leading_operator_continuation_spec.spl` FIRST).
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with lane compiler6: OPEN/BLOCKED. Same-indent +/- continuation still fails on this lane binary (by seed design, binary.rs indent_required, citing this record cross_query.spl:137 hazard); the record itself demands a disambiguation rule, which is a grammar-owner decision, plus a seed rebuild. No in-lane change.

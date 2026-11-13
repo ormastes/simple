@@ -45,3 +45,30 @@ forward-progress guard in the field loop. New `test/01_unit/compiler/parser/bitf
 12 executed, 7 passed, 5 failed — sort-comparator hoist, field defaults/array-size,
 export route, unresolved imports, bitfield widths/extend payload. Those are semantic-identity
 assertion failures, not hangs; tracked as the remaining work on this row.
+
+## Fix (2026-11-13) — 4 of the 5 residual semantic-identity failures
+
+Re-run on release/1.0.0 `9777875d0d2` with the Rust seed: the hang is gone (78 s,
+12 executed, 7 passed, 5 failed). Causes of the five:
+
+1. **Sort comparator oracle stale.** `4183b795175` moved the comparator to
+   `byte_len()`; the spec still grepped for `len()`. Oracle updated (same shape).
+2. **Export route / resolved origin and 3. eager vs lazy imports.** The frozen
+   identity digest `_module_surface_final_semantic_digest` (declaration limbs +
+   import targets/lazy flag/items, export routes, friends, internal exports,
+   sorted export origins) and its publish step in `module_surfaces_freeze` were
+   deleted by the `4edef8fab8e` whole-tree snapshot. Restored in
+   `module_surface_registry_index.spl`; sorting reuses
+   `module_surface_resolution_rows_sorted_v1`.
+4. **Extend payload (the bitfield half already passed).** `extend_decls.spl` resolved a bare payload
+   `T` through `named_type_find`, which returns a raw named-type registry index,
+   not a type tag, so `convert_flat_type` read it as a fixed tag (`text` came back
+   as `bool`, as did `i64`). Now parses the full type first, like the enum variant
+   loop.
+
+After: 11/12 passed. **Still red: the array-size half of "field defaults and
+array-size expressions".** The pure-Simple parser carries a fixed array size only
+on the `par_fixed_array_*` side channel used by `val/var` declarations; struct
+field types are bare tags, so `[i64; 2]` and `[i64; 3]` bridge to the same
+`TypeKind.Array(i64, nil)`. Retaining it needs a per-field size in the flat decl
+nodes and the bridge. That is a parser/AST change, left open on this row.

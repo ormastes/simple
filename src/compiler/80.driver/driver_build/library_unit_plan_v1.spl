@@ -1,0 +1,215 @@
+# Library unit plan (slice 1 of library_unit_build_and_link.md).
+#
+# Pure functions only: read `simple.sdn` declarations that the caller has
+# already loaded, resolve their `dependencies[].project` paths as text, and
+# produce a dependency-ordered, levelled unit plan with explicit cycle detection
+# and fail-closed dependency resolution. `BuildGraph.topological_order`
+# (parallel.spl) is DFS-with-visited and tolerates cycles silently, which is why
+# planning does not reuse it. Nothing here touches the filesystem or the
+# default native-build path.
+#
+# Design: doc/05_design/compiler/incremental_build/library_unit_build_and_link.md
+
+use std.common.crypto.sha256.{sha256_text}
+use std.common.sdn.parser (parse)
+use std.common.sdn.value.{SdnValue}
+use compiler.common.cache.canonical_identity.{canonical_identity_sort_texts}
+use compiler.driver.driver_build.incremental.{cache_key_frame}
+
+# One `simple.sdn` as the planner sees it. `dir` and `deps` are repo-relative
+# directories already normalised by `library_unit_path_normalize_v1`.
+struct LibraryUnitDeclV1:
+    name: text
+    kind: text      # project.type: library | runtime | application | other
+    dir: text
+    deps: [text]
+
+# One planned unit. `deps` are unit NAMES; `level` is the longest dependency
+# path from a root, so every unit at one level can build concurrently.
+struct LibraryUnitPlanEntryV1:
+    name: text
+    kind: text
+    dir: text
+    deps: [text]
+    level: i64
+
+val LIBRARY_UNIT_CACHE_KEY_DOMAIN_V1 = "simple/library-unit/v1"
+
+fn _library_unit_is_build_or_link_kind(kind: text) -> bool:
+    kind == "library" or kind == "runtime" or kind == "application"
+
+fn _library_unit_segments_join(segments: [text]) -> text:
+    if segments.len() == 0: "." else: segments.join("/")
+
+# Resolve `rel` against the manifest directory `base_dir` as pure text.
+# `..` above the root is kept (`../rust`) rather than swallowed, so the caller
+# can see and refuse it.
+pub fn library_unit_path_normalize_v1(base_dir: text, rel: text) -> text:
+    var stack: [text] = []
+    val joined = base_dir + "/" + rel
+    for seg in joined.split("/"):
+        if seg == "" or seg == ".":
+            continue
+        if seg == "..":
+            if stack.len() > 0 and stack[stack.len() - 1] != "..":
+                stack.pop()
+            else:
+                stack.push("..")
+        else:
+            stack.push(seg)
+    _library_unit_segments_join(stack)
+
+fn _library_unit_sdn_text(root: SdnValue, path: text) -> text:
+    match root.get_path(path):
+        case Some(v): v.as_str() ?? ""
+        case None: ""
+
+# Parse one manifest's content. Fails closed on a missing name or type.
+pub fn library_unit_decl_parse_v1(manifest_dir: text, content: text) -> Result<LibraryUnitDeclV1, text>:
+    val root = match parse(content):
+        case Ok(v): v
+        case Err(e): return Err("{manifest_dir}/simple.sdn: {e}")
+    val name = _library_unit_sdn_text(root, "project.name")
+    if name == "":
+        return Err("{manifest_dir}/simple.sdn: project.name is missing")
+    val kind = _library_unit_sdn_text(root, "project.type")
+    if kind == "":
+        return Err("{manifest_dir}/simple.sdn: project.type is missing")
+    val dir = library_unit_path_normalize_v1(base_dir: manifest_dir, rel: ".")
+    var deps: [text] = []
+    match root.get_path("project.dependencies"):
+        case Some(list):
+            match list.as_array():
+                case Some(items):
+                    for item in items:
+                        val rel = match item.get("project"):
+                            case Some(p): p.as_str() ?? ""
+                            case None: ""
+                        if rel == "":
+                            return Err("{manifest_dir}/simple.sdn: dependency entry without `project:`")
+                        if rel.starts_with("/") or rel.starts_with("\\") or (rel.len() > 1 and rel[1:2] == ":"):
+                            return Err("{manifest_dir}/simple.sdn: dependency path '{rel}' is absolute; only manifest-relative paths are accepted")
+                        val dep_dir = library_unit_path_normalize_v1(base_dir: manifest_dir, rel: rel)
+                        for seen in deps:
+                            if seen == dep_dir:
+                                return Err("{manifest_dir}/simple.sdn: dependency '{rel}' is declared twice")
+                        deps.push(dep_dir)
+                case None:
+                    return Err("{manifest_dir}/simple.sdn: project.dependencies is not a list")
+        case None:
+            pass
+    Ok(LibraryUnitDeclV1(name: name, kind: kind, dir: dir, deps: deps))
+
+fn _library_unit_cycle_text(remaining: {text: [text]}, start: text) -> text:
+    # Walk dependency edges inside the unresolved set until a name repeats.
+    var path: [text] = [start]
+    var seen: {text: bool} = {}
+    seen[start] = true
+    var cur = start
+    var guard = 0
+    while guard <= remaining.keys().len():
+        var next = ""
+        for d in remaining[cur]:
+            if remaining.contains_key(d):
+                next = d
+                break
+        if next == "":
+            break
+        path.push(next)
+        if seen.contains_key(next):
+            break
+        seen[next] = true
+        cur = next
+        guard = guard + 1
+    path.join(" -> ")
+
+# Plan: library/runtime units and application link targets, dependency-first.
+# Deterministic (sorted by level, then name) regardless of input order.
+pub fn library_unit_plan_v1(decls: [LibraryUnitDeclV1]) -> Result<[LibraryUnitPlanEntryV1], text>:
+    var by_name: {text: LibraryUnitDeclV1} = {}
+    var name_by_dir: {text: text} = {}
+    var names: [text] = []
+    for d in decls:
+        if not _library_unit_is_build_or_link_kind(d.kind):
+            continue
+        if by_name.contains_key(d.name):
+            return Err("unit name '{d.name}' is declared by both '{by_name[d.name].dir}' and '{d.dir}'")
+        if name_by_dir.contains_key(d.dir):
+            return Err("directory '{d.dir}' declares both '{name_by_dir[d.dir]}' and '{d.name}'")
+        by_name[d.name] = d
+        name_by_dir[d.dir] = d.name
+        names.push(d.name)
+    names = canonical_identity_sort_texts(names)
+
+    # Resolve dependency directories to unit names; fail closed on a miss.
+    var dep_names: {text: [text]} = {}
+    var indegree: {text: i64} = {}
+    var dependents: {text: [text]} = {}
+    for n in names:
+        dep_names[n] = []
+        indegree[n] = 0
+        dependents[n] = []
+    for n in names:
+        var resolved: [text] = []
+        for dir in by_name[n].deps:
+            if not name_by_dir.contains_key(dir):
+                return Err("unit '{n}' depends on '{dir}' but no manifest declares a unit there")
+            val dep_name = name_by_dir[dir]
+            for seen in resolved:
+                if seen == dep_name:
+                    return Err("unit '{n}' declares dependency '{dep_name}' twice")
+            resolved.push(dep_name)
+        resolved = canonical_identity_sort_texts(resolved)
+        dep_names[n] = resolved
+        indegree[n] = resolved.len()
+        for dn in resolved:
+            var ds = dependents[dn]
+            ds.push(n)
+            dependents[dn] = ds
+
+    # Kahn by levels: every unit whose deps are all placed goes into this level.
+    var plan: [LibraryUnitPlanEntryV1] = []
+    var placed: {text: bool} = {}
+    var level = 0
+    var ready: [text] = []
+    for n in names:
+        if indegree[n] == 0:
+            ready.push(n)
+    while ready.len() > 0:
+        var next_ready: [text] = []
+        for n in ready:
+            val d = by_name[n]
+            plan.push(LibraryUnitPlanEntryV1(name: n, kind: d.kind, dir: d.dir, deps: dep_names[n], level: level))
+            placed[n] = true
+            for user in dependents[n]:
+                indegree[user] = indegree[user] - 1
+                if indegree[user] == 0:
+                    next_ready.push(user)
+        ready = canonical_identity_sort_texts(next_ready)
+        level = level + 1
+
+    if plan.len() < names.len():
+        var remaining: {text: [text]} = {}
+        var first = ""
+        for n in names:
+            if not placed.contains_key(n):
+                remaining[n] = dep_names[n]
+                if first == "":
+                    first = n
+        return Err("dependency cycle: {_library_unit_cycle_text(remaining, first)}")
+    Ok(plan)
+
+# Unit cache key: producer identity + unit source digest + each dependency's
+# INTERFACE digest (name-sorted), every component length-framed so adjacent
+# texts cannot collide. A dependency body change leaves this key intact.
+pub fn library_unit_cache_key_v1(producer_identity: text, unit_source_digest: text,
+        dep_ifaces: [(text, text)]) -> text:
+    var dep_names: [text] = []
+    var iface_by_name: {text: text} = {}
+    for (name, iface) in dep_ifaces:
+        dep_names.push(name)
+        iface_by_name[name] = iface
+    var serial = "{LIBRARY_UNIT_CACHE_KEY_DOMAIN_V1};producer={cache_key_frame(producer_identity)};source={cache_key_frame(unit_source_digest)};deps="
+    for name in canonical_identity_sort_texts(dep_names):
+        serial = serial + cache_key_frame(name) + cache_key_frame(iface_by_name[name])
+    sha256_text(serial)
