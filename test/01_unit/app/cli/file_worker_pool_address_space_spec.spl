@@ -1,0 +1,122 @@
+use std.spec
+use app.cli.file_worker_pool_refusal.{file_worker_pool_refusal_v1,
+    file_worker_pool_address_space_kib_v1, file_worker_pool_addressable_budget_kb_v1,
+    file_worker_pool_mir_price_kb_v1, FILE_WORKER_POOL_ADDR32_KIB_V1,
+    FILE_WORKER_POOL_HOST_POINTER_BITS_V1}
+use app.cli.shard_mem_clamp.{SHARD_HIR_WORKER_KB_V1, SHARD_MIR_WORKER_KB_V1,
+    SHARD_MIR_WORKER_FLOOR_KB_V1, SHARD_MIR_WORKER_PER_MODULE_KB_V1, shard_threads_cap_for}
+
+# Pure admission arithmetic for 32-bit hosts (i686, armv7, riscv32). The
+# pointer width is a parameter, so every branch runs on a 64-bit host.
+describe "file worker pool: 32-bit address-space clamp":
+    val i64_max = 9223372036854775807
+
+    it "a 32-bit worker addresses at most 4 GiB; 64-bit is unbounded; other widths are unknown":
+        expect(FILE_WORKER_POOL_ADDR32_KIB_V1).to_equal(4194304)
+        expect(file_worker_pool_address_space_kib_v1(32)).to_equal(4194304)
+        expect(file_worker_pool_address_space_kib_v1(64)).to_equal(0)
+        expect(file_worker_pool_address_space_kib_v1(16)).to_equal(-1)
+        expect(file_worker_pool_address_space_kib_v1(0)).to_equal(-1)
+        expect(file_worker_pool_address_space_kib_v1(-32)).to_equal(-1)
+        expect(file_worker_pool_address_space_kib_v1(128)).to_equal(-1)
+
+    it "the compile-time host width is 32 or 64":
+        expect(FILE_WORKER_POOL_HOST_POINTER_BITS_V1 == 32 or FILE_WORKER_POOL_HOST_POINTER_BITS_V1 == 64).to_be_true()
+
+    it "clamps a 32-bit per-worker budget to the address space":
+        expect(file_worker_pool_addressable_budget_kb_v1(SHARD_HIR_WORKER_KB_V1, 32)).to_equal(4194304)
+        expect(file_worker_pool_addressable_budget_kb_v1(SHARD_MIR_WORKER_KB_V1, 32)).to_equal(4194304)
+        expect(file_worker_pool_addressable_budget_kb_v1(i64_max, 32)).to_equal(4194304)
+
+    it "is exact at the 32-bit boundary":
+        expect(file_worker_pool_addressable_budget_kb_v1(4194305, 32)).to_equal(4194304)
+        expect(file_worker_pool_addressable_budget_kb_v1(4194304, 32)).to_equal(4194304)
+        expect(file_worker_pool_addressable_budget_kb_v1(4194303, 32)).to_equal(4194303)
+
+    it "never changes a 64-bit budget, including the 9 GB default and huge values":
+        expect(file_worker_pool_addressable_budget_kb_v1(SHARD_HIR_WORKER_KB_V1, 64)).to_equal(9000000)
+        expect(file_worker_pool_addressable_budget_kb_v1(SHARD_MIR_WORKER_KB_V1, 64)).to_equal(26424115)
+        expect(file_worker_pool_addressable_budget_kb_v1(i64_max, 64)).to_equal(i64_max)
+
+    it "leaves an unknown width or an unknown budget unchanged (never lowers the reservation)":
+        expect(file_worker_pool_addressable_budget_kb_v1(9000000, 0)).to_equal(9000000)
+        expect(file_worker_pool_addressable_budget_kb_v1(9000000, 16)).to_equal(9000000)
+        expect(file_worker_pool_addressable_budget_kb_v1(0, 32)).to_equal(0)
+        expect(file_worker_pool_addressable_budget_kb_v1(-1, 32)).to_equal(-1)
+
+    it "admits 2 clamped workers on a 32-bit host with 16 GiB free, where 9 GB budgets admit 1":
+        val avail = 16777216
+        expect(shard_threads_cap_for(2, SHARD_HIR_WORKER_KB_V1, avail)).to_equal(1)
+        val clamped = file_worker_pool_addressable_budget_kb_v1(SHARD_HIR_WORKER_KB_V1, 32)
+        expect(shard_threads_cap_for(2, clamped, avail)).to_equal(2)
+
+    it "still refuses a 32-bit host with 4 GiB free, and names the clamp":
+        val clamped = file_worker_pool_addressable_budget_kb_v1(SHARD_HIR_WORKER_KB_V1, 32)
+        expect(shard_threads_cap_for(2, clamped, 4194304)).to_equal(1)
+        val msg = file_worker_pool_refusal_v1(1, 1, 4194304, SHARD_HIR_WORKER_KB_V1, SHARD_MIR_WORKER_KB_V1, 2, "", false, 32)
+        expect(msg.starts_with("error:")).to_be_true()
+        expect(msg.contains("per-worker budget=4194304 kB")).to_be_true()
+        expect(msg.contains("need >= 13981014 kB free")).to_be_true()
+        expect(msg.contains("32-bit host: per-worker budgets are clamped to the 4194304 kB a 32-bit worker can address")).to_be_true()
+        expect(msg.contains("cross-compile from a 64-bit host")).to_be_true()
+
+    it "the 64-bit refusal text has no 32-bit note and keeps the declared budget":
+        val msg = file_worker_pool_refusal_v1(1, 1, 4194304, SHARD_HIR_WORKER_KB_V1, SHARD_MIR_WORKER_KB_V1, 2, "", false, 64)
+        expect(msg.contains("per-worker budget=26424115 kB")).to_be_true()
+        expect(msg.contains("32-bit")).to_be_false()
+
+    it "a 32-bit refusal for a non-memory cause carries no memory note":
+        val msg = file_worker_pool_refusal_v1(1, 4, 99999999, SHARD_HIR_WORKER_KB_V1, SHARD_MIR_WORKER_KB_V1, 1, "", false, 32)
+        expect(msg.contains("only 1 worker was requested")).to_be_true()
+        expect(msg.contains("32-bit")).to_be_false()
+
+describe "file worker pool: refusal arithmetic never overflows":
+    val i64_max = 9223372036854775807
+
+    it "saturates need and floor for an i64-max budget instead of going negative":
+        val msg = file_worker_pool_refusal_v1(1, 1, 1048576, i64_max, i64_max, 2, "", false, 64)
+        expect(msg.contains("need >= -")).to_be_false()
+        expect(msg.contains("need >= 9223372036854775807 kB free")).to_be_true()
+        expect(msg.contains("= 9223372036854775807 kB inside")).to_be_true()
+
+    it "is exact just below the saturation boundary and saturates just above it":
+        val q = i64_max / 10
+        val below = file_worker_pool_refusal_v1(0, 0, 0, 3 * q, 0, 2, "", false, 64)
+        expect(below.contains("need >= 9223372036854775800 kB free")).to_be_true()
+        val above = file_worker_pool_refusal_v1(0, 0, 0, 3 * q + 3, 0, 2, "", false, 64)
+        expect(above.contains("need >= 9223372036854775807 kB free")).to_be_true()
+
+    it "the guarded floor saturates exactly at the top of i64":
+        val half = (i64_max - 4194304) / 2
+        val exact = file_worker_pool_refusal_v1(0, 0, 0, half, 0, 2, "", false, 64)
+        expect(exact.contains("= {2 * half + 4194304} kB inside")).to_be_true()
+        val over = file_worker_pool_refusal_v1(0, 0, 0, half + 1, 0, 2, "", false, 64)
+        expect(over.contains("= 9223372036854775807 kB inside")).to_be_true()
+
+    it "keeps the existing rounding for ordinary budgets":
+        expect(file_worker_pool_refusal_v1(0, 0, 0, 6000000, 9000000, 2, "", false, 64).contains("need >= 30000000 kB free")).to_be_true()
+        expect(file_worker_pool_refusal_v1(0, 0, 0, 1, 0, 2, "", false, 64).contains("need >= 4 kB free")).to_be_true()
+        expect(file_worker_pool_refusal_v1(0, 0, 0, 2, 0, 2, "", false, 64).contains("need >= 7 kB free")).to_be_true()
+
+    it "a negative budget reads as 0, never a negative need":
+        val msg = file_worker_pool_refusal_v1(0, 0, 0, -5, -7, 2, "", false, 64)
+        expect(msg.contains("need >= 0 kB free")).to_be_true()
+        expect(msg.contains("per-worker budget=0 kB")).to_be_true()
+        expect(msg.contains("need >= -")).to_be_false()
+
+describe "file worker pool: MIR price never wraps to the floor":
+    val i64_max = 9223372036854775807
+
+    it "matches the closure-scaled price for ordinary closures":
+        expect(file_worker_pool_mir_price_kb_v1(-1)).to_equal(SHARD_MIR_WORKER_KB_V1)
+        expect(file_worker_pool_mir_price_kb_v1(0)).to_equal(SHARD_MIR_WORKER_FLOOR_KB_V1)
+        expect(file_worker_pool_mir_price_kb_v1(50)).to_equal(9000000)
+        expect(file_worker_pool_mir_price_kb_v1(1000)).to_equal(1000 * SHARD_MIR_WORKER_PER_MODULE_KB_V1)
+        expect(file_worker_pool_mir_price_kb_v1(1649)).to_equal(1649 * SHARD_MIR_WORKER_PER_MODULE_KB_V1)
+        expect(file_worker_pool_mir_price_kb_v1(1650)).to_equal(SHARD_MIR_WORKER_KB_V1)
+        expect(file_worker_pool_mir_price_kb_v1(3134)).to_equal(SHARD_MIR_WORKER_KB_V1)
+
+    it "prices a closure whose product would overflow i64 at the ceiling":
+        val wraps = i64_max / SHARD_MIR_WORKER_PER_MODULE_KB_V1 + 1
+        expect(file_worker_pool_mir_price_kb_v1(wraps)).to_equal(SHARD_MIR_WORKER_KB_V1)
+        expect(file_worker_pool_mir_price_kb_v1(i64_max)).to_equal(SHARD_MIR_WORKER_KB_V1)
