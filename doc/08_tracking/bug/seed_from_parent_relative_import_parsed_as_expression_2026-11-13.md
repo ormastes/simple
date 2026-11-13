@@ -33,7 +33,7 @@ Forms, measured on the seed:
 |---|---|
 | `from std.common.x import {...}` (absolute) | loads |
 | `from sibling import {...}`, multi-line braces | loads |
-| `from .sibling import {...}` | loads |
+| `from .sibling import {...}` | parses as one import (parser unit test; not load-tested) |
 | `from ..pkg import {...}`, `from ..pkg.mod import {...}` | `variable 'from' not found` |
 
 The pure-Simple parser has no such gap: `src/compiler/10.frontend/core/_ParserDecls/enum_module_body.spl`
@@ -105,3 +105,22 @@ No statement starting with `from ..` that is not an import exists in `src`, `tes
 - The deployed seed still has the gate gap until the next seed redeploy.
 - 79 deprecated `from X import` lines remain elsewhere under `src`, `test` and `examples`
   (78 bare, 1 `.sibling`); both forms parse on the seed.
+- Modules outside the two load closures still have their own defects, unchanged by this
+  fix: `utils/slicing.spl:61` (`val` used as a parameter name) and `lazy/lazy_seq.spl` do
+  not parse; `SafeTransferPacket` / `safe_send_int`, imported by
+  `async_runtime/actor_scheduler.spl` and `mailbox.spl`, are defined nowhere.
+
+## Regression sweep
+
+All 35 specs under `test/01_unit/app/interpreter/` and `src/app/interpreter/**` were run one
+at a time on the deployed seed. 24 are `outcome=OK`. The 11 that are not were re-run with
+`src/app/interpreter` at the base commit: ten have identical counts before and after
+(`async_runtime/{actor_heap,actor_scheduler,mailbox}_spec`,
+`collections/persistent_{dict,vec}_spec`, `lazy/lazy_{seq,val}_spec`,
+`memory/{message_transfer,refc_binary}_spec`, `perf/perf_spec`), and
+`helpers/debug_spec.spl` went from `executed=0` to `executed=111 passed=55 failed=56`.
+No spec got worse.
+
+Negative control: with only `call/function_exec.spl` put back to its `from ..core` form,
+`call_function_exec_load_spec.spl` is `outcome=ERROR executed=0` again, so the spec does
+depend on that module loading.
