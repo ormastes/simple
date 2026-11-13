@@ -120,3 +120,13 @@ forbidden to do. The staged path is: keep the guard red, drive the census
 backlog down, then flip severity. A cheaper intermediate that needs no census
 work is to reuse the existing `SIMPLE_JIT_STRICT=1` escalation the jit-fallback
 line already advertises, and make the off-path case honour it.
+
+
+## 2026-11-13 triage (lane p3-io, work/p3-io-20261113)
+
+Still OPEN, unchanged. The fail-open downgrade lives in the Rust seed
+(`src/compiler_rust/compiler/src/interpreter_module/module_loader.rs`,
+`warn_unprovided_use_names`), which this lane cannot edit/rebuild; flipping
+severity would also red up to ~380 exposed files per the census. Remains a
+documented-RED pin guarded by `scripts/check/check-undefined-import-run-exit-code.shs`.
+No change in this closure.
