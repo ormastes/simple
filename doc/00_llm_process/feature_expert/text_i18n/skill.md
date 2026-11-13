@@ -1,3 +1,5 @@
 # Text and i18n feature expert
 
 Use the validated UTF-8 primitive and explicit coordinate types. Start at `doc/07_guide/lib/utf8_internationalized_text_architecture.md` and follow its research, requirements, architecture, design, system-test, and performance links. Never add a competing text object, unchecked public bytes-to-text path, implicit locale/encoding mode, repeated message replacement, or production code-point-array transcoder. Keep planned, source-contract, forced-backend, and native-device evidence distinct.
+
+Units (owner decision 2026-11-13, ADR-005 "Staging"): `substring(a, b)`, `slice(a, b)`, `index_of`/`find`/`rfind` are BYTE offsets bounded by `byte_len()`; `len()`, `s[i]`, `s[a:b]` are code points. Trap: a byte cut bounded by a code-point count drops the tail of non-ASCII text, and it hides behind a hoisted local as often as inline (`val len = line.length()` then `line.substring(pos + 1, len)`). Write `byte_len()` for any length that bounds a byte cut. Record: `doc/08_tracking/bug/text_len_codepoint_switch_2026-11-03.md`.

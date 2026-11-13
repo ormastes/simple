@@ -22,5 +22,50 @@ pub fn native_build_capsule_user_args_v1(args: [text]) -> [text]:
 pub fn native_build_hir_refusal_runs_serial_v1(code: i64, refused_before_spawn: bool) -> bool:
     code != 0 and refused_before_spawn
 
+# go-to-end (compiler/80.driver/driver_build/go_to_end.spl), Stage 3 census
+# directive 2026-11-13: HIR runs to the end and MIR lowers every module whose
+# HIR succeeded. A pool that started and retired every owner has warmed the
+# HIR cache for each module that lowered, so its module failures no longer
+# skip the MIR shard pool: each MIR worker redoes HIR for the failed modules,
+# drops them and their importers (go_to_end_recover_hir_v1) and records them
+# as non-PASS rows, so the aggregate fails and the link stays blocked. A pool
+# refused before any spawn warmed nothing (every MIR worker would lower the
+# whole closure's HIR) and an unconfirmed retirement stays "fail". A pool
+# that failed without naming a failed module (an owner killed before claiming,
+# a timeout, a BLOCKED ledger; failed_modules 0, or -1 when unreadable) keeps
+# the in-process fallback, which may still succeed.
+pub fn native_build_hir_warmup_go_to_end_outcome_v1(outcome: text, refused_before_spawn: bool,
+        failed_modules: i64, go_to_end: bool) -> text:
+    if go_to_end and outcome == "fallback" and not refused_before_spawn and failed_modules > 0:
+        return "ready-with-failures"
+    outcome
+
+pub fn native_build_hir_warmup_admits_mir_v1(outcome: text) -> bool:
+    outcome == "ready" or outcome == "ready-with-failures"
+
+# A HIR-failed module may never reach the MIR ledger, so an all-PASS MIR
+# verdict after a HIR pool with module failures must not link: the binary would
+# miss those modules. Every verdict becomes "fail" (the link stays blocked).
+pub fn native_build_mir_outcome_after_hir_failures_v1(outcome: text, hir_failed: bool) -> text:
+    if hir_failed:
+        return "fail"
+    outcome
+
+# Stage 3 bootstrap_main capsule route. "per-file": the default file-worker
+# pool. "two-pass": SIMPLE_FILE_WORKERS=0 under go-to-end runs the HIR shard
+# pool and then the MIR shard pool, so a codegen panic costs one module and one
+# worker instead of the whole in-process build. "hir-warmup": the unchanged
+# two-pass default (HIR warm-up, then in-process MIR), also kept for the
+# single-object whole-program route.
+pub fn native_build_stage3_capsule_mir_route_v1(per_file_selected: bool, go_to_end: bool,
+        whole_program: text) -> text:
+    if per_file_selected:
+        return "per-file"
+    if go_to_end and whole_program != "1":
+        return "two-pass"
+    "hir-warmup"
+
 export native_build_hir_warmup_outcome_v1, native_build_capsule_user_args_v1,
-    native_build_hir_refusal_runs_serial_v1
+    native_build_hir_refusal_runs_serial_v1, native_build_hir_warmup_go_to_end_outcome_v1,
+    native_build_hir_warmup_admits_mir_v1, native_build_stage3_capsule_mir_route_v1,
+    native_build_mir_outcome_after_hir_failures_v1

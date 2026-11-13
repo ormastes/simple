@@ -253,14 +253,19 @@ fn static_call_names(source: &str, function: &str) -> Vec<String> {
 /// being refused as ambiguous (`[CODEGEN-AMBIGUOUS-METHOD]`).
 #[test]
 fn impl_less_trait_receiver_binds_the_only_conforming_class() {
-    // No class provides `reduce`, so none conforms: the bare name is kept and
-    // codegen keeps refusing it (no run-time by-name dispatch exists for an
-    // object of a conforming class defined outside the unit).
-    let none = static_call_names(
-        &format!("{IMPL_LESS_TRAIT}{PICK_FROM_SLOT}"),
-        "pick",
+    // No class provides `reduce`, so none conforms. The local carries the
+    // field's declared trait owner, so the call goes through the trait vtable
+    // (a bare name would be refused as ambiguous and drop the whole unit from
+    // the JIT; caret row 1 of
+    // doc/05_design/compiler/jit/jit_trait_dispatch_and_cross_module_link.md).
+    let none_source = format!("{IMPL_LESS_TRAIT}{PICK_FROM_SLOT}");
+    assert_eq!(static_call_names(&none_source, "pick"), Vec::<String>::new());
+    assert!(
+        instructions_of(&none_source, "pick")
+            .iter()
+            .any(|inst| matches!(inst, MirInst::MethodCallVirtual { vtable_slot: 0, .. })),
+        "no-conformer trait local must use the vtable slot"
     );
-    assert_eq!(none, vec!["provider_identity".to_string()]);
 
     // Exactly one class provides the whole trait: bind it.
     let one = static_call_names(

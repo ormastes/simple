@@ -1,9 +1,11 @@
 use app.io.time_ops.{sleep_ms}
+use std.common.string_core.{str_split}
 use app.cli.worker_hir_profile_v1.{WorkerHirProfileV1, worker_hir_profile_admit_v1, worker_hir_profile_for_owner_v1,
     worker_hir_pool_skip_without_closure_v1}
 use app.cli.worker_hir_owner_v1.{WorkerHirOwnerV1, worker_hir_owner_start_v1, worker_hir_owner_retain_failure_v1}
 use app.cli.native_build_hir_warmup_outcome.{native_build_hir_warmup_outcome_v1, native_build_capsule_user_args_v1,
-    native_build_hir_refusal_runs_serial_v1}
+    native_build_hir_refusal_runs_serial_v1, native_build_hir_warmup_go_to_end_outcome_v1,
+    native_build_hir_warmup_admits_mir_v1, native_build_mir_outcome_after_hir_failures_v1}
 # Lightweight entrypoint for `simple native-build`.
 
 use app.io.env_ops.{env_get, env_set, env_unset, cwd, host_os}
@@ -584,18 +586,20 @@ fn native_build_range_is_diagnostic(
         or native_build_range_contains(output, "[mir-tag-probe]", line_start, line_end)
 
 fn native_build_collect_diagnostics(output: text) -> [text]:
-    """Every diagnostic line in the WHOLE stream, including the part head+tail drops."""
+    """Every diagnostic line in the WHOLE stream, including the part head+tail drops.
+
+    One str_split pass, not index_of-from-offset: index_of with a byte offset
+    re-walks the whole prefix through cp space on every call, so the previous
+    line-scan loop was O(n^2) over the stream. A truncated 121 MiB stage-3
+    stderr (2026-11-13) made that hang past 7 h in
+    native_build_collect_diagnostics -> rt_text_find. Split is a single O(n)
+    byte walk; the per-line diagnostic test is byte-wise on a small line.
+    See doc/08_tracking/bug/native_build_collect_diagnostics_quadratic_hang_2026-11-13.md"""
     var kept: [text] = []
-    var line_start = 0
-    while line_start <= output.byte_len():
-        val newline = output.index_of("\n", line_start)
-        var line_end = output.byte_len()
-        if newline >= 0: line_end = newline
-        if native_build_range_is_diagnostic(output, line_start, line_end):
-            val line = output.substring(line_start, line_end)
+    val lines = str_split(output, "\n")
+    for line in lines:
+        if native_build_range_is_diagnostic(line, 0, line.byte_len()):
             kept.push(line)
-        if newline < 0: break
-        line_start = newline + 1
     kept
 
 fn eprint_bounded(output: text):
@@ -1577,6 +1581,7 @@ pub fn native_build_focused_capsule_shards_v1(base: [text], args: [text], allow_
         native_build_env_restore_v1("SIMPLE_BUILD_PROGRESS_EVENTS", old_progress_events)
         return file_result
     var hir_ok = true
+    var hir_module_failures = false
     val requested_hir_count = if native_build_hir_shard_policy_v1(env_get("SIMPLE_PARSE_SHARDING") ?? "",
             env_get("SIMPLE_HIR_SHARDING") ?? "") == 1: native_build_hir_shard_count(args) else: 0
     # Reuse the ordinary coordinator's published-closure sizing policy after
@@ -1595,14 +1600,20 @@ pub fn native_build_focused_capsule_shards_v1(base: [text], args: [text], allow_
             print "[capsule-shard] hir shards={hir_count} ledger={hir_queue}"
             val hir_run = native_build_capsule_hir_ledger_run_v1(args, hir_queue, hir_count,
                 simple_bin, timeout_ms)
-            val hir_outcome = native_build_hir_warmup_outcome_v1(hir_run.code, hir_run.all_stopped)
+            val hir_go_to_end = args.contains("--go-to-end") or (env_get("SIMPLE_NATIVE_GO_TO_END") ?? "") == "1"
+            val hir_outcome = native_build_hir_warmup_go_to_end_outcome_v1(
+                native_build_hir_warmup_outcome_v1(hir_run.code, hir_run.all_stopped),
+                hir_run.refused_before_spawn, hir_run.failed_modules, hir_go_to_end)
             if hir_outcome == "fail":
                 eprint "[capsule-shard] HIR worker retirement unconfirmed (exit={hir_run.code}); in-process fallback blocked"
                 native_build_env_restore_v1("SIMPLE_MEM_SNAPSHOT_FILE", old_mem_snapshot)
                 native_build_env_restore_v1("SIMPLE_COMPILER_PHASE_PROFILE_FILE", old_phase_file)
                 native_build_env_restore_v1("SIMPLE_BUILD_PROGRESS_EVENTS", old_progress_events)
                 return "fail"
-            hir_ok = hir_outcome == "ready"
+            hir_ok = native_build_hir_warmup_admits_mir_v1(hir_outcome)
+            hir_module_failures = hir_outcome == "ready-with-failures"
+            if hir_module_failures:
+                eprint "[go-to-end] HIR shard pool recorded {hir_run.failed_modules} failed module(s); the MIR stage continues over the modules whose HIR succeeded, link blocked"
             if not hir_ok:
                 eprint "[capsule-shard] HIR warm-up failed (exit={hir_run.code} failed_modules={hir_run.failed_modules} reason={hir_run.blocked_reason}); in-process build redoes HIR and reports it"
     var result = ""
@@ -1617,10 +1628,12 @@ pub fn native_build_focused_capsule_shards_v1(base: [text], args: [text], allow_
                 val mir_run = run_ledger_shards("mir-shard", "--mir-shard", "SIMPLE_MIR_SHARD_QUEUE",
                     "SIMPLE_MIR_SHARD_OWNER", base, mir_queue, args, count, parallel,
                     simple_bin, timeout_ms)
-                val outcome = native_mir_shard_outcome_after_hir_errors_v1(
+                val outcome = native_build_mir_outcome_after_hir_failures_v1(
+                    native_mir_shard_outcome_after_hir_errors_v1(
                     native_mir_shard_outcome_v1(mir_run.code, mir_run.failed_modules,
                         mir_run.total_claims, mir_run.all_stopped),
-                    native_mir_shard_hir_compile_errors_recorded_v1(mir_queue))
+                    native_mir_shard_hir_compile_errors_recorded_v1(mir_queue)),
+                    hir_module_failures)
                 if outcome == "link":
                     result = mir_queue
                 elif outcome == "fail":

@@ -145,7 +145,7 @@ pub use collections::{
     rt_transient_heap_adopt, session_adopt_visits_debug, session_heap_owns,
     transient_heap_scope_paused, rt_byte_array_new, rt_byte_array_new_len, rt_bytes_u32_le_at, rt_bytes_u64_le_at,
     rt_bytes_u8_at, rt_bytes_u8_set, rt_collection_set, rt_contains, rt_cstring_to_text, rt_hash_text, rt_for_iterable, rt_index_get, rt_get,
-    rt_index_set, rt_len, rt_range, rt_range_inclusive, rt_slice, rt_string_char_at, rt_interp_cstr, rt_string_bytes,
+    rt_index_set, rt_len, rt_range, rt_range_inclusive, rt_slice, rt_slice_text_bytes, rt_string_char_at, rt_interp_cstr, rt_string_bytes,
     rt_string_chars, rt_string_lines, rt_string_byte_at, rt_string_char_code_at, rt_string_concat, rt_string_contains,
     rt_string_data, rt_string_ends_with, rt_string_eq, rt_string_find, rt_string_free, rt_string_capitalize,
     rt_string_char_count, rt_string_to_digit, rt_string_chomp, rt_string_index_of, rt_string_is_alnum, rt_string_is_alpha,
