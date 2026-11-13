@@ -1,6 +1,6 @@
 # Three pre-existing `hir::lower` Rust unit test failures (2026-11-13)
 
-Status: open. Severity: P2 (seed unit tests red; no product spec known to depend on them).
+Status: verification-pending (fixed on work/hir-lower-unit-fixes-20261113). Severity: P2 (seed unit tests red; no product spec known to depend on them).
 
 ## Reproduction
 At origin/release/1.0.0 (7b8c3e323a3), on Windows with `windows-llvm-23.1.1.shs`
@@ -28,3 +28,18 @@ caused by the Option<Enum> match payload fix (work/option-enum-match-20261113).
 Bisect each one separately on release/1.0.0. They are independent: one is
 projection typing, one is Some payload typing, and one is lenient-diagnostic
 bookkeeping.
+
+## Fix (2026-11-13)
+1. `expr/access.rs` `lower_field_access`: `.ok`/`.err` on a typed Result now
+   projects the Result BEFORE the Ok-payload projection (added for `.0` on
+   `Result<Tuple>`), which had looked `.ok` up on the payload (`i64.ok`).
+2. `FunctionContext::lambda_local_fn_types`: a `val f = \x: ...` local records
+   its function type by slot; `Some(f)` uses it, so the Option keeps its fn
+   payload. The local's own type is unchanged — retyping it to `Function`
+   broke 4 `mir::lower::tests::closure_call_types` tests.
+3. The test premise was stale: list comprehensions have a real HIR lowering
+   since 5a7b65c59db, so nothing is dropped. The test now checks a dict
+   comprehension (still unlowered) IS recorded and a list comprehension is NOT.
+
+After: `cargo test -p simple-compiler --lib hir::lower` -> 430 passed; 0 failed
+(before: 427 passed; 3 failed).
