@@ -77,9 +77,10 @@ are 25 files.
 
 **Figures at 14:30 KST** (366 `src/compiler` files, about 28% of compiler
 candidates; `src/lib` and `src/app` not reached yet): 13 rows, 6 sites,
-4 classes, all `E_ATTR_REQUIRED_UNINIT`. Every one is the same pattern: a
-`# DESUGARED` optional pair (`has_<f>: bool` + `<f>: T`) whose `has_<f>` flag
-is omitted at construction, so the run relies on the zero-fill `false`.
+4 classes, all `E_ATTR_REQUIRED_UNINIT`. Every site omits a `bool` field and
+relies on the zero-fill `false`. In three classes it is the `has_<f>` flag
+of a `# DESUGARED` optional pair (`has_<f>: bool` + `<f>: T`). In the
+fourth, `AwaitChecker`, it is a plain accumulator built as `AwaitChecker()`.
 `MatchContext` (`00.common/predicate.spl:90`, 6 rows),
 `PromiseTypeInfo` (`30.types/type_system/effects.spl:89,93`, 4),
 `StateVariant` (`10.frontend/desugar/state_enum.spl:96,109`, 2),
