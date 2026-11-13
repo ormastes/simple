@@ -101,3 +101,36 @@ server and five source-coherent workers remain missing/unqualified. Caches,
 raw stdout/stderr, claims, selection, terminal status, and owned argv are
 retained for focused diagnosis. No additional compiler or test was launched
 for this documentation update.
+
+## 2026-11-13: Windows diag-phase4 lint_entry recurrence + parent hang (hang fixed, AV open)
+
+New occurrence, frozen Phase 2 compiler (`19c5aea975e`, Windows llvm-mingw UCRT)
+native-building `src/app/cli/lint_entry.spl` (362 closure modules, 2 parse
+shards, `split=static`, `--parse-fibers`) from source tree `4b7375e435a`
+(log: `/c/dev/wt-lane2/build/diag-phase4/m_lint/build.log`):
+
+- Shard 0/2, PID 22644, exited `-1073741819` (0xC0000005).
+- Shard 1/2, PID 7880, stayed alive; the parent printed nothing for ~85 min
+  and was killed by hand (shard 1 then reported `exit=143`). The same
+  surviving-sibling shape appeared on 2026-11-07 (shard 2/4 live to the
+  deadline).
+
+AV status: the source tree already carried `f07a5101d3e` (`reset_all_pools()`
+before `module_tldr_companion_view_sections_v1` in
+`driver_parse_shard_entry.spl`, PR #8700), yet the child still faulted. Not
+established: whether the `run src/app/cli/parse_shard_main.spl` child executed
+that source copy of the driver or the frozen binary's compiled-in 19c5 driver
+(which predates the fix). No symbolized stack for this run; root cause stays
+open. Re-check on a compiler built from a tree containing `f07a5101d3e`.
+
+Parent hang root cause and fix: the frozen 19c5 parent waited its shards one
+after another with the build timeout (default 6 h, `DEFAULT_TIMEOUT_MS`), and
+even the current shared-deadline reap (`parse_shard_reap_v1`) did nothing on a
+peer's death. Now a shard that dies bounds its live siblings by
+`SIMPLE_PARSE_SHARD_DEATH_GRACE_MS` (default 300000; 0 = old behaviour); they
+are then killed as TIMEOUT and the real build parses the remainder in process
+(shard output is per-module cache entries, so no finished work is lost). The
+reap loop also sign-restores `process_wait` statuses so a zero-extended -2 is
+never recorded as an exit of a live child. Spec:
+`test/01_unit/app/cli/shard_worker_reap_spec.spl` ("parse shard death bounds
+live siblings").
