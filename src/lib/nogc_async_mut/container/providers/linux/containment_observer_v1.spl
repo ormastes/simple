@@ -1,0 +1,104 @@
+# Podman v5.2.5 define/info.go bc37d813967cf9c9faad19869a081889aff3c78b;
+# info_linux.go reports v2; oci_conmon_common.go RuntimeInfo supplies actual path/name/version.
+# Trusted-admin mutable executable paths are observed, never sealed.
+use std.nogc_async_mut.container.providers.linux.engine_policy_v1.*
+use std.nogc_async_mut.container.providers.linux.engine_observer_v1.*
+use std.nogc_async_mut.container.providers.linux.containment_profile_v1.*
+use std.nogc_async_mut.container.providers.linux.installed_containment_policy_v1.*
+use std.nogc_sync_mut.io.process_ops.{ProcessResult, process_run_bounded_observed_v1}
+use std.common.json.value.{JsonValue, json_parse_value_strict, json_value_get}
+use std.common.crypto.sha256.sha256_text
+use std.common.string_core.str_len
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+
+pub struct LinuxOciContainmentObservationV1:
+    cli_observation: LinuxOciEngineObservationV1
+    profile_digest: text
+    runtime_program: text
+    runtime_digest: text
+    runtime_name: text
+    runtime_version: text
+    cgroup_manager: text
+    cgroup_version: text
+    identity_digest: text
+
+fn containment_field_v1(value: JsonValue, key: text) -> Result<JsonValue, text>:
+    match json_value_get(value, key):
+        case Some(field): Ok(field)
+        case None: Err("containment-info-field-missing:" + key)
+
+fn containment_text_v1(value: JsonValue, key: text) -> Result<text, text>:
+    match containment_field_v1(value, key)?:
+        case JsonValue.Str(field): Ok(field)
+        case _: Err("containment-info-field-type:" + key)
+
+pub fn linux_oci_containment_identity_digest_v1(value: LinuxOciContainmentObservationV1) -> text:
+    sha256_text(sdn_encode_canonical(SdnValue.Dict({"kind": SdnValue.String("linux-oci-containment-observation"),
+        "version": SdnValue.Int(1), "cliIdentity": SdnValue.String(value.cli_observation.identity_digest),
+        "profileDigest": SdnValue.String(value.profile_digest), "runtimeProgram": SdnValue.String(value.runtime_program),
+        "runtimeDigest": SdnValue.String(value.runtime_digest), "runtimeName": SdnValue.String(value.runtime_name),
+        "runtimeVersion": SdnValue.String(value.runtime_version), "cgroupManager": SdnValue.String(value.cgroup_manager),
+        "cgroupVersion": SdnValue.String(value.cgroup_version)})) + "\n")
+
+# Data-only processing seam; successful fixture data is not native observation authority.
+pub fn linux_oci_containment_capture_observation_v1(installed: LinuxOciInstalledContainmentPolicyV1,
+        result: ProcessResult, cli_digest: text, runtime_digest: text) -> Result<LinuxOciContainmentObservationV1, text>:
+    linux_oci_installed_containment_policy_encode_v1(installed)?
+    val cli = linux_oci_engine_capture_observation_v1(installed.cli_policy, result, cli_digest)?
+    if cli.engine_version != "5.2.5": return Err("containment-engine-version-unsupported")
+    if runtime_digest != installed.profile.runtime_digest: return Err("containment-runtime-digest-mismatch")
+    # Existing capture parser first enforces source/depth/duplicate-key bounds.
+    val info = json_parse_value_strict(result.stdout)?
+    val host = containment_field_v1(info, "host")?
+    val runtime = containment_field_v1(host, "ociRuntime")?
+    val program = containment_text_v1(runtime, "path")?
+    val name = containment_text_v1(runtime, "name")?
+    val version = containment_text_v1(runtime, "version")?
+    val manager = containment_text_v1(host, "cgroupManager")?
+    val cgroups = containment_text_v1(host, "cgroupVersion")?
+    if (program != installed.profile.runtime_program or name != installed.profile.runtime_name or
+            manager != installed.profile.cgroup_manager or cgroups != "v2"):
+        return Err("containment-runtime-profile-mismatch")
+    if str_len(version) == 0 or str_len(version) > 4096: return Err("containment-runtime-version-invalid")
+    for byte in version.bytes():
+        if byte == 0: return Err("containment-runtime-version-invalid")
+    var observed = LinuxOciContainmentObservationV1(cli_observation: cli,
+        profile_digest: linux_oci_containment_profile_digest_v1(installed.profile)?, runtime_program: program,
+        runtime_digest: runtime_digest, runtime_name: name, runtime_version: version,
+        cgroup_manager: manager, cgroup_version: cgroups, identity_digest: "")
+    observed.identity_digest = linux_oci_containment_identity_digest_v1(observed)
+    Ok(observed)
+
+pub fn linux_oci_containment_observe_v1(installed: LinuxOciInstalledContainmentPolicyV1,
+        timeout_ms: i64) -> Result<LinuxOciContainmentObservationV1, text>:
+    if timeout_ms <= 0 or timeout_ms > 30000: return Err("containment-observation-timeout-invalid")
+    linux_oci_installed_containment_policy_encode_v1(installed)?
+    val cli_digest = linux_oci_engine_executable_digest_v1(installed.cli_policy)?
+    val runtime_digest = linux_oci_trusted_executable_digest_v1(installed.profile.runtime_program,
+        installed.cli_policy.expected_uid)?
+    if runtime_digest != installed.profile.runtime_digest: return Err("containment-runtime-digest-mismatch")
+    val args = linux_oci_containment_route_v1(installed, ["info", "--format", "json"])?
+    val result = process_run_bounded_observed_v1(installed.cli_policy.executable_path, args,
+        timeout_ms, LINUX_OCI_ENGINE_INFO_MAX_BYTES_V1)?
+    linux_oci_containment_capture_observation_v1(installed, result, cli_digest, runtime_digest)
+
+# Structural integrity and policy matching only; data cannot establish capture authority.
+pub fn linux_oci_containment_observation_match_v1(installed: LinuxOciInstalledContainmentPolicyV1,
+        observed: LinuxOciContainmentObservationV1) -> Result<bool, text>:
+    linux_oci_installed_containment_policy_encode_v1(installed)?
+    linux_oci_engine_observation_match_v1(installed.cli_policy, observed.cli_observation)?
+    if (observed.cli_observation.engine_version != "5.2.5" or observed.cgroup_version != "v2" or
+            observed.profile_digest != linux_oci_containment_profile_digest_v1(installed.profile)? or
+            observed.runtime_program != installed.profile.runtime_program or
+            observed.runtime_digest != installed.profile.runtime_digest or
+            observed.runtime_name != installed.profile.runtime_name or
+            observed.cgroup_manager != installed.profile.cgroup_manager):
+        return Err("containment-observation-profile-mismatch")
+    if str_len(observed.runtime_version) == 0 or str_len(observed.runtime_version) > 4096:
+        return Err("containment-runtime-version-invalid")
+    for byte in observed.runtime_version.bytes():
+        if byte == 0: return Err("containment-runtime-version-invalid")
+    if observed.identity_digest != linux_oci_containment_identity_digest_v1(observed):
+        return Err("containment-observation-identity-mismatch")
+    Ok(true)

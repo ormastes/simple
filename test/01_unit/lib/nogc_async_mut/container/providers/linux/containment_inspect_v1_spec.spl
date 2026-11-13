@@ -1,0 +1,73 @@
+# AUTHORED/NOT_RUN. Inspect payloads are data, not native capability authority.
+use std.spec.*
+use std.common.contracts.container.runtime_v1.*
+use std.nogc_async_mut.container.providers.linux.containment_inspect_v1.*
+use std.nogc_async_mut.container.providers.linux.containment_profile_v1.*
+use test.fixtures.orchestration.simple_container_linux_adapter_fixture_v2.*
+
+fn _containment_inspect_profile_v1() -> LinuxOciContainmentProfileV1:
+    LinuxOciContainmentProfileV1(cli_policy_digest: "a".repeat(64), runtime_program: "/usr/bin/crun",
+        runtime_digest: "b".repeat(64), runtime_name: "/usr/bin/crun", cgroup_manager: "systemd")
+
+fn _containment_inspect_identity_v1() -> RuntimeIdentityV1:
+    val request = linux_container_leaf_fixture_v2()
+    RuntimeIdentityV1(pod_uid: request.pod_uid, attempt: request.attempt, provider_generation: 7,
+        operation_id: request.operation_id, engine: "podman", native_id: "c".repeat(64), node_boot_id: "boot-1")
+
+use test.fixtures.orchestration.containment_provider_fixture_v1.containment_inspect_payload_fixture_v1
+
+describe "exact configured containment inspect":
+    it "builds only an exact Podman container query and refuses unqualified IDs":
+        val command = linux_oci_containment_inspect_command_v1("c".repeat(64)).unwrap()
+        expect(command.operation).to_equal("containment-inspect")
+        expect(command.program).to_equal("podman")
+        expect(command.args.len()).to_equal(5)
+        expect(command.args[0]).to_equal("container")
+        expect(command.args[1]).to_equal("inspect")
+        expect(command.args[2]).to_equal("--format")
+        expect(command.args[4]).to_equal("c".repeat(64))
+        expect(command.args[3]).to_contain("{{len .EffectiveCaps}}")
+        expect(command.args[3]).to_contain("{{json .HostConfig.Cgroups}}")
+        for invalid in ["--all", "name", "abc", "C".repeat(64)]:
+            expect(linux_oci_containment_inspect_command_v1(invalid).is_err()).to_equal(true)
+
+    it "accepts exact running identity selected profile and empty configured capability sets":
+        var request = linux_container_leaf_fixture_v2()
+        request.containment_profile_digest = linux_oci_containment_profile_digest_v1(_containment_inspect_profile_v1()).unwrap()
+        val result = linux_oci_containment_inspect_v1(containment_inspect_payload_fixture_v1(),
+            _containment_inspect_identity_v1(), request, _containment_inspect_profile_v1()).unwrap()
+        expect(result.pid).to_equal(123)
+        expect(result.cgroup_path).to_equal("/user.slice/libpod-" + "c".repeat(64) + ".scope")
+
+    it "rejects every mismatched identity security profile or process field":
+        var request = linux_container_leaf_fixture_v2()
+        request.containment_profile_digest = linux_oci_containment_profile_digest_v1(_containment_inspect_profile_v1()).unwrap()
+        val source = containment_inspect_payload_fixture_v1()
+        for pair in [("workload-1", "workload-2"), ("boot-1", "boot-2"), ("create-api", "other"),
+                ("\"attempt\":\"1\"", "\"attempt\":\"2\""), ("\"provider_generation\":\"7\"", "\"provider_generation\":\"8\""),
+                ("running", "exited"), ("crun", "runc"), ("systemd", "cgroupfs"), ("private", "host"),
+                ("default", "disabled"), ("\"privileged\":false", "\"privileged\":true"),
+                ("\"effective_caps\":0", "\"effective_caps\":1"), ("\"bounding_caps\":0", "\"bounding_caps\":1"),
+                ("\"no_new_privileges\":true", "\"no_new_privileges\":false"),
+                ("\"readonly_rootfs\":true", "\"readonly_rootfs\":false"), ("\"pid\":123", "\"pid\":0"),
+                ("/user.slice/libpod-", "/user.slice/not-owned-")]:
+            val changed = source.replace(pair.0, pair.1)
+            expect(changed == source).to_equal(false)
+            expect(linux_oci_containment_inspect_v1(changed, _containment_inspect_identity_v1(), request,
+                _containment_inspect_profile_v1()).is_err()).to_equal(true)
+        request.containment_profile_digest = "d".repeat(64)
+        expect(linux_oci_containment_inspect_v1(source, _containment_inspect_identity_v1(), request,
+            _containment_inspect_profile_v1()).is_err()).to_equal(true)
+
+    it "rejects unknown duplicate nested trailing and malformed no-new-privileges output":
+        var request = linux_container_leaf_fixture_v2()
+        request.containment_profile_digest = linux_oci_containment_profile_digest_v1(_containment_inspect_profile_v1()).unwrap()
+        val source = containment_inspect_payload_fixture_v1()
+        for changed in [source + "{}", source.replace("\"pid\":123", "\"pid\":123,\"extra\":0"),
+                source.replace("\"pid\":123", "\"pid\":123,\"pid\":123"),
+                source.replace("\"pid\":123", "\"pid\":{}"),
+                source.replace("\"no_new_privileges\":true", "\"no_new_privileges\":"),
+                source.replace("\"no_new_privileges\":true", "\"no_new_privileges\":truetrue")]:
+            expect(changed == source).to_equal(false)
+            expect(linux_oci_containment_inspect_v1(changed, _containment_inspect_identity_v1(), request,
+                _containment_inspect_profile_v1()).is_err()).to_equal(true)
