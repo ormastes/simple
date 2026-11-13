@@ -33,7 +33,7 @@ use compiler.backend.verify.allocator_symbol_scan.{flight_allocator_scan_for_pro
 # Match runtime_compiler and the native linker: use runtime-owned host facts.
 # The std.platform facade can bind an OS/OSTYPE-based detector in a bootstrap
 # capsule; canonical sanity intentionally scrubs those environment variables.
-use std.nogc_sync_mut.io_runtime.{host_arch, host_os, env_get, file_copy, file_delete, file_exists, file_read, file_write, file_hash_sha256, file_size_raw, remove_file_if_exists, process_run, dir_create_all, dir_exists, dir_remove_all}
+use std.nogc_sync_mut.io_runtime.{host_arch, host_os, env_get, file_copy, file_delete, file_exists, file_read, file_write, file_hash_sha256_or_shell, file_size_raw, remove_file_if_exists, process_run, dir_create_all, dir_exists, dir_remove_all}
 use std.nogc_sync_mut.io.file_ops.{file_atomic_write}
 use compiler.backend.llvm_native_link_stage4_projection.{llvm_link_trace_enabled, llvm_configured_external_link_objects, llvm_external_provider_rpath_flags, llvm_external_provider_retained_symbols, llvm_stage4_final_requested_symbols, llvm_stage4_file_hash_rows, llvm_stage4_selected_archive_hash_rows, llvm_stage4_cleanup_candidate_inputs, llvm_stage4_profile_failure, llvm_stage4_receipt_failure, llvm_stage4_candidate_archive_inventory, llvm_stage4_project_selected_archives}
 use compiler.common.cache.reverse_reference_facts.{
@@ -136,16 +136,16 @@ fn _llvm_darwin_snapshot_link_inputs(
     var index: i64 = 0
     for input in inputs:
         if not file_exists(input): return Err("darwin-link-input-missing:" + input)
-        val digest = file_hash_sha256(input)
+        val digest = file_hash_sha256_or_shell(input)
         if digest.len() != 64: return Err("darwin-link-input-digest-failed:" + input)
         val snapshot = llvm_darwin_link_input_snapshot_path(snapshot_root, index, digest, input)
         val snapshot_dir = _llvm_darwin_link_input_snapshot_dir(snapshot_root, index, digest)
         if not dir_create_all(snapshot_dir):
             return Err("darwin-link-input-snapshot-directory-failed:" + snapshot_dir)
         if file_exists(snapshot):
-            if file_hash_sha256(snapshot) != digest:
+            if file_hash_sha256_or_shell(snapshot) != digest:
                 return Err("darwin-link-input-snapshot-corrupt:" + snapshot)
-        elif not file_copy(input, snapshot) or file_hash_sha256(snapshot) != digest:
+        elif not file_copy(input, snapshot) or file_hash_sha256_or_shell(snapshot) != digest:
             return Err("darwin-link-input-snapshot-copy-failed:" + input)
         snapshots.push(snapshot)
         index = index + 1
@@ -735,7 +735,7 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
                     return Err("Stage4 selected-archive projection cleanup failed after linking; output cleanup also failed")
                 return Err("Stage4 selected-archive projection cleanup failed after linking")
             if stage4_requested:
-                val output_hash = file_hash_sha256(path)
+                val output_hash = file_hash_sha256_or_shell(path)
                 if output_hash.len() != 64:
                     return llvm_stage4_receipt_failure(path, "", "", false, false, "Stage4 link-profile output hash failed")
                 val receipt = "stage4-link-profile-receipt-v1\nprofile=" + stage4_profile_hash + "\noutput=" + output_hash + "\n"

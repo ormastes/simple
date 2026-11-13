@@ -20,7 +20,7 @@ use app.test_daemon.environment_identity.{test_daemon_environment_identity_v1, t
 
 use std.io_runtime.{dir_create_all}
 use std.nogc_sync_mut.io.file_ops.{file_atomic_write}
-use std.io_runtime.{dir_list}
+use std.io_runtime.{dir_list_or_empty}
 use std.io_runtime.{file_exists}
 use std.io_runtime.{read_file_text}
 use std.io_runtime.{read_file_text_result}
@@ -49,7 +49,7 @@ val LIGHT_REQ_DIR: text = ".build/test_daemon_light/requests"
 val LIGHT_RESP_DIR: text = ".build/test_daemon_light/responses"
 val LIGHT_LOCK: text = ".build/test_daemon_light/daemon.lock"
 # Wakeup sequence bumped after every request publish; the daemon's idle loop
-# stat()s this file in-process instead of shelling out to `ls -1` (dir_list)
+# stat()s this file in-process instead of shelling out to `ls -1` (dir_list_or_empty)
 # every 250 ms. Shared with light_daemon.spl (see its LIGHT_WAKE note).
 val LIGHT_WAKE: text = ".build/test_daemon_light/wakeup.seq"
 # The live daemon records here the absolute path of the binary it executes every
@@ -613,7 +613,7 @@ fn run_one_via_daemon(path: text, timeout_ms: i64, seq: i64,
         return 1
     # Wake the daemon AFTER the request rename is visible: its idle loop
     # stat()s this sequence file in-process every ~10 ms, so a visible bump
-    # replaces the old 250 ms dir_list() poll (a `/bin/sh -c "ls -1 ..."`
+    # replaces the old 250 ms dir_list_or_empty() poll (a `/bin/sh -c "ls -1 ..."`
     # shell-out per poll) with a ~10 ms claim path. Best-effort: a lost bump
     # (e.g. this process dying here) only costs one 500 ms daemon fallback
     # sweep, never the request.
@@ -948,13 +948,13 @@ fn main() -> i64:
     # daemon_backlog.spl already decided the policy and pinned it with a unit
     # spec, but had ZERO production call sites -- the decision was never
     # consulted, so clients joined the queue unconditionally. This is that wiring.
-    # Count only `.req` entries. A raw dir_list().len() also counts the
+    # Count only `.req` entries. A raw dir_list_or_empty().len() also counts the
     # `.req.tmp` files produced by the atomic tmp+rename write above, so a
     # client could bypass on the in-flight write that is about to become its
     # OWN request -- and, worse, on leftover `.resp`/lock names. That is what
     # `count_pending_requests` exists for; it was pinned by a unit spec but had
     # zero production call sites. This is that wiring.
-    val backlog_pending = if not daemon_host_bypass and file_exists(LIGHT_REQ_DIR): count_pending_requests(dir_list(LIGHT_REQ_DIR)) else: 0
+    val backlog_pending = if not daemon_host_bypass and file_exists(LIGHT_REQ_DIR): count_pending_requests(dir_list_or_empty(LIGHT_REQ_DIR)) else: 0
     val backlog_bypass = daemon_backlog_bypass(backlog_pending)
     # The daemon is pinned to its own binary for life; a `--compiler` selection
     # can only be honoured by the direct single lane.
