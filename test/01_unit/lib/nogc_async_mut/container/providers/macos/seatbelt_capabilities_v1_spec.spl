@@ -1,0 +1,91 @@
+"""Seatbelt qualification plan: unqualified until every native canary passes."""
+
+use std.spec.{describe, it, expect}
+use std.nogc_async_mut.container.providers.macos.seatbelt_capabilities_v1.{
+    SeatbeltCanaryResultV1, SeatbeltCapabilityManifestV1, seatbelt_qualification_plan_v1,
+    seatbelt_manifest_unprobed_v1, seatbelt_capability_status_v1,
+    SEATBELT_PROBE_PROVENANCE_V1, SEATBELT_QUALIFIED_V1, SEATBELT_UNQUALIFIED_V1,
+    SEATBELT_EXPECT_ALLOW_V1, SEATBELT_EXPECT_DENY_V1}
+
+fn _digest(c: text) -> text:
+    var out = ""
+    var i = 0
+    while i < 64:
+        out = out + c
+        i = i + 1
+    out
+
+fn _passing() -> SeatbeltCapabilityManifestV1:
+    var manifest = seatbelt_manifest_unprobed_v1()
+    var results: [SeatbeltCanaryResultV1] = []
+    for canary in seatbelt_qualification_plan_v1():
+        results.push(SeatbeltCanaryResultV1(id: canary.id, observed: canary.expected, evidence_digest: _digest("e")))
+    manifest.canaries = results
+    manifest.provenance = SEATBELT_PROBE_PROVENANCE_V1
+    manifest.os_version = "15.1"
+    manifest.os_build = "24B83"
+    manifest.architecture = "arm64"
+    manifest.helper_digest = _digest("a")
+    manifest.profile_digest = _digest("b")
+    manifest
+
+fn _status(manifest: SeatbeltCapabilityManifestV1) -> text:
+    seatbelt_capability_status_v1(manifest, "24B83", "arm64", _digest("a")).status
+
+describe "seatbelt capabilities v1":
+    it "plans paired allow and deny canaries covering file, network and spawn":
+        val plan = seatbelt_qualification_plan_v1()
+        var allows = 0
+        var denies = 0
+        var ids: [text] = []
+        for canary in plan:
+            if canary.expected == SEATBELT_EXPECT_ALLOW_V1: allows = allows + 1
+            if canary.expected == SEATBELT_EXPECT_DENY_V1: denies = denies + 1
+            ids.push(canary.id)
+        expect(allows >= 2).to_equal(true)
+        expect(denies >= 10).to_equal(true)
+        expect(ids.contains("activation-failure-never-execs-target")).to_equal(true)
+        expect(ids.contains("tcp-ipv6-connect-denied")).to_equal(true)
+        expect(ids.contains("broker-endpoint-connect-allowed")).to_equal(true)
+        expect(ids.contains("process-fork-denied")).to_equal(true)
+
+    it "reports the unprobed manifest as unqualified":
+        val status = seatbelt_capability_status_v1(seatbelt_manifest_unprobed_v1(), "24B83", "arm64", _digest("a"))
+        expect(status.status).to_equal(SEATBELT_UNQUALIFIED_V1)
+        expect(status.reason.starts_with("SCMAC-PLATFORM-001")).to_equal(true)
+
+    it "qualifies only a complete matching native manifest":
+        expect(_status(_passing())).to_equal(SEATBELT_QUALIFIED_V1)
+
+    it "treats an OS build, architecture or helper change as unqualified":
+        expect(seatbelt_capability_status_v1(_passing(), "24C101", "arm64", _digest("a")).status).to_equal(SEATBELT_UNQUALIFIED_V1)
+        expect(seatbelt_capability_status_v1(_passing(), "24B83", "x86_64", _digest("a")).status).to_equal(SEATBELT_UNQUALIFIED_V1)
+        expect(seatbelt_capability_status_v1(_passing(), "24B83", "arm64", _digest("c")).status).to_equal(SEATBELT_UNQUALIFIED_V1)
+
+    it "rejects a manifest not produced by the Darwin probe owner":
+        var forged = _passing()
+        forged.provenance = "caller-supplied"
+        expect(_status(forged)).to_equal(SEATBELT_UNQUALIFIED_V1)
+
+    it "lists every failed or missing canary":
+        var partial = _passing()
+        var results: [SeatbeltCanaryResultV1] = []
+        for result in partial.canaries:
+            if result.id == "tcp-ipv4-connect-denied":
+                results.push(SeatbeltCanaryResultV1(id: result.id, observed: SEATBELT_EXPECT_ALLOW_V1, evidence_digest: _digest("e")))
+            elif result.id != "udp-send-denied":
+                results.push(result)
+        partial.canaries = results
+        val status = seatbelt_capability_status_v1(partial, "24B83", "arm64", _digest("a"))
+        expect(status.status).to_equal(SEATBELT_UNQUALIFIED_V1)
+        expect(status.missing.len()).to_equal(2)
+        expect(status.missing.contains("tcp-ipv4-connect-denied")).to_equal(true)
+        expect(status.missing.contains("udp-send-denied")).to_equal(true)
+
+    it "requires evidence digests, not bare observed flags":
+        var bare = _passing()
+        var results: [SeatbeltCanaryResultV1] = []
+        for result in bare.canaries:
+            results.push(SeatbeltCanaryResultV1(id: result.id, observed: result.observed, evidence_digest: ""))
+        bare.canaries = results
+        expect(_status(bare)).to_equal(SEATBELT_UNQUALIFIED_V1)

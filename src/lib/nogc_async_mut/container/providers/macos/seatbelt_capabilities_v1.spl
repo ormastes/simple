@@ -1,0 +1,143 @@
+# Seatbelt qualification plan and capability manifest model (design §9.4,
+# §19.3, SC-MAC-021/022/023).
+#
+# This module performs NO native probe. It defines (1) the fixed canary plan a
+# disposable worker must execute on a real Darwin host, and (2) the manifest
+# that records one qualification run. The status function reports QUALIFIED
+# only when every planned canary has a recorded native result equal to its
+# expectation for the exact OS build, architecture, helper digest, runtime ABI
+# and profile baseline revision. Anything missing, stale or mismatched is
+# UNQUALIFIED. A manifest must come from the trusted Darwin probe owner; the
+# provider never accepts one from a request, and "dylib present" or "function
+# returned 0" is not a canary result.
+
+use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.nogc_async_mut.container.providers.macos.seatbelt_profile_v1.SEATBELT_BASELINE_REVISION_V1
+
+pub const SEATBELT_MANIFEST_SCHEMA_V1 = "simple-seatbelt-qualification-v1"
+pub const SEATBELT_PROBE_PROVENANCE_V1 = "sosix-darwin-seatbelt-probe-v1"
+pub const SEATBELT_RUNTIME_ABI_V1 = "simple-seatbelt-runtime-abi-v1"
+
+pub const SEATBELT_QUALIFIED_V1 = "qualified"
+pub const SEATBELT_UNQUALIFIED_V1 = "unqualified"
+
+pub const SEATBELT_EXPECT_ALLOW_V1 = "allow"
+pub const SEATBELT_EXPECT_DENY_V1 = "deny"
+pub const SEATBELT_OBSERVED_NOT_RUN_V1 = "not-run"
+
+pub struct SeatbeltCanaryPlanV1:
+    id: text
+    expected: text
+    requirement: text
+
+pub struct SeatbeltCanaryResultV1:
+    id: text
+    observed: text
+    evidence_digest: text
+
+pub struct SeatbeltCapabilityManifestV1:
+    schema: text
+    provenance: text
+    os_version: text
+    os_build: text
+    architecture: text
+    helper_digest: text
+    runtime_abi: text
+    profile_revision: i64
+    profile_digest: text
+    canaries: [SeatbeltCanaryResultV1]
+
+pub struct SeatbeltQualificationV1:
+    status: text
+    missing: [text]
+    reason: text
+
+fn _canary(id: text, expected: text, requirement: text) -> SeatbeltCanaryPlanV1:
+    SeatbeltCanaryPlanV1(id: id, expected: expected, requirement: requirement)
+
+# Each canary pairs an allowed operation with deliberately denied ones so a
+# no-op sandbox (or a function that returns success without enforcement)
+# cannot qualify.
+pub fn seatbelt_qualification_plan_v1() -> [SeatbeltCanaryPlanV1]:
+    [_canary("activation-failure-never-execs-target", SEATBELT_EXPECT_DENY_V1, "SC-MAC-004"),
+     _canary("workspace-read-allowed", SEATBELT_EXPECT_ALLOW_V1, "SC-MAC-005"),
+     _canary("output-write-allowed", SEATBELT_EXPECT_ALLOW_V1, "SC-MAC-005"),
+     _canary("workspace-write-outside-grant-denied", SEATBELT_EXPECT_DENY_V1, "SC-MAC-005"),
+     _canary("ungranted-exec-denied", SEATBELT_EXPECT_DENY_V1, "SC-MAC-005"),
+     _canary("child-inherits-confinement", SEATBELT_EXPECT_DENY_V1, "SC-MAC-005"),
+     _canary("sibling-attempt-read-denied", SEATBELT_EXPECT_DENY_V1, "SC-MAC-006"),
+     _canary("host-scope-state-read-denied", SEATBELT_EXPECT_DENY_V1, "SC-MAC-006"),
+     _canary("attempt-private-read-denied", SEATBELT_EXPECT_DENY_V1, "SC-MAC-006"),
+     _canary("user-home-credential-read-denied", SEATBELT_EXPECT_DENY_V1, "SC-MAC-006"),
+     _canary("symlink-to-protected-root-denied", SEATBELT_EXPECT_DENY_V1, "SC-MAC-006"),
+     _canary("case-alias-protected-root-denied", SEATBELT_EXPECT_DENY_V1, "SC-MAC-006"),
+     _canary("tcp-ipv4-connect-denied", SEATBELT_EXPECT_DENY_V1, "SC-MAC-007"),
+     _canary("tcp-ipv6-connect-denied", SEATBELT_EXPECT_DENY_V1, "SC-MAC-007"),
+     _canary("udp-send-denied", SEATBELT_EXPECT_DENY_V1, "SC-MAC-007"),
+     _canary("dns-resolve-denied", SEATBELT_EXPECT_DENY_V1, "SC-MAC-007"),
+     _canary("localhost-connect-denied", SEATBELT_EXPECT_DENY_V1, "SC-MAC-007"),
+     _canary("inet-listen-denied", SEATBELT_EXPECT_DENY_V1, "SC-MAC-007"),
+     _canary("broker-endpoint-connect-allowed", SEATBELT_EXPECT_ALLOW_V1, "SC-MAC-007"),
+     _canary("other-unix-socket-connect-denied", SEATBELT_EXPECT_DENY_V1, "SC-MAC-007"),
+     _canary("mach-lookup-denied", SEATBELT_EXPECT_DENY_V1, "SC-MAC-006"),
+     _canary("process-fork-denied", SEATBELT_EXPECT_DENY_V1, "SC-MAC-014"),
+     _canary("posix-spawn-denied", SEATBELT_EXPECT_DENY_V1, "SC-MAC-014")]
+
+# The manifest the provider holds before any Darwin probe has run: identity
+# fields empty and every canary not-run. It is UNQUALIFIED by construction.
+pub fn seatbelt_manifest_unprobed_v1() -> SeatbeltCapabilityManifestV1:
+    var results: [SeatbeltCanaryResultV1] = []
+    for canary in seatbelt_qualification_plan_v1():
+        results.push(SeatbeltCanaryResultV1(id: canary.id, observed: SEATBELT_OBSERVED_NOT_RUN_V1,
+            evidence_digest: ""))
+    SeatbeltCapabilityManifestV1(schema: SEATBELT_MANIFEST_SCHEMA_V1, provenance: "",
+        os_version: "", os_build: "", architecture: "", helper_digest: "",
+        runtime_abi: SEATBELT_RUNTIME_ABI_V1, profile_revision: SEATBELT_BASELINE_REVISION_V1,
+        profile_digest: "", canaries: results)
+
+fn _seatbelt_unqualified_v1(missing: [text], reason: text) -> SeatbeltQualificationV1:
+    SeatbeltQualificationV1(status: SEATBELT_UNQUALIFIED_V1, missing: missing, reason: reason)
+
+fn _seatbelt_field_text_v1(value: text) -> bool:
+    value.byte_len() > 0 and value.byte_len() <= 128 and not value.contains("\0") and
+        not value.contains("\n")
+
+# Pure status check. Identity mismatch is reported before canaries so an
+# OS update (different build) never inherits an earlier qualification.
+pub fn seatbelt_capability_status_v1(manifest: SeatbeltCapabilityManifestV1,
+        expected_os_build: text, expected_architecture: text,
+        expected_helper_digest: text) -> SeatbeltQualificationV1:
+    if manifest.schema != SEATBELT_MANIFEST_SCHEMA_V1:
+        return _seatbelt_unqualified_v1([], "SCMAC-PLATFORM-001 manifest-schema-unsupported")
+    if manifest.provenance != SEATBELT_PROBE_PROVENANCE_V1:
+        return _seatbelt_unqualified_v1([], "SCMAC-PLATFORM-001 manifest-not-from-darwin-probe")
+    if not _seatbelt_field_text_v1(manifest.os_version) or not _seatbelt_field_text_v1(manifest.os_build):
+        return _seatbelt_unqualified_v1([], "SCMAC-PLATFORM-001 os-identity-missing")
+    if manifest.os_build != expected_os_build:
+        return _seatbelt_unqualified_v1([], "SCMAC-PLATFORM-001 os-build-unqualified")
+    if (manifest.architecture != "arm64" and manifest.architecture != "x86_64") or
+            manifest.architecture != expected_architecture:
+        return _seatbelt_unqualified_v1([], "SCMAC-PLATFORM-001 architecture-unqualified")
+    if not builder_digest_valid_v1(manifest.helper_digest) or manifest.helper_digest != expected_helper_digest:
+        return _seatbelt_unqualified_v1([], "SCMAC-PLATFORM-001 helper-digest-unqualified")
+    if manifest.runtime_abi != SEATBELT_RUNTIME_ABI_V1:
+        return _seatbelt_unqualified_v1([], "SCMAC-PLATFORM-001 runtime-abi-unqualified")
+    if manifest.profile_revision != SEATBELT_BASELINE_REVISION_V1 or not builder_digest_valid_v1(manifest.profile_digest):
+        return _seatbelt_unqualified_v1([], "SCMAC-PLATFORM-001 profile-revision-unqualified")
+    var missing: [text] = []
+    for canary in seatbelt_qualification_plan_v1():
+        var passed = false
+        for result in manifest.canaries:
+            if result.id == canary.id and result.observed == canary.expected and
+                    builder_digest_valid_v1(result.evidence_digest):
+                passed = true
+        if not passed: missing.push(canary.id)
+    if missing.len() > 0:
+        return _seatbelt_unqualified_v1(missing, "SCMAC-PLATFORM-001 canaries-not-passed")
+    SeatbeltQualificationV1(status: SEATBELT_QUALIFIED_V1, missing: [], reason: "")
+
+export SeatbeltCanaryPlanV1, SeatbeltCanaryResultV1, SeatbeltCapabilityManifestV1, SeatbeltQualificationV1
+export seatbelt_qualification_plan_v1, seatbelt_manifest_unprobed_v1, seatbelt_capability_status_v1
+export SEATBELT_MANIFEST_SCHEMA_V1, SEATBELT_PROBE_PROVENANCE_V1, SEATBELT_RUNTIME_ABI_V1
+export SEATBELT_QUALIFIED_V1, SEATBELT_UNQUALIFIED_V1
+export SEATBELT_EXPECT_ALLOW_V1, SEATBELT_EXPECT_DENY_V1, SEATBELT_OBSERVED_NOT_RUN_V1

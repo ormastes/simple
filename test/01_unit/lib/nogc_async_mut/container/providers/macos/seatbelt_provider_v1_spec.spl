@@ -1,0 +1,193 @@
+"""Seatbelt provider: fail-closed lifecycle, exact backend identity, attempt plan."""
+
+use std.spec.{describe, it, expect}
+use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, ContainerExecutionPlanV2,
+    ContainerExecutionRequestV2, ContainerHostObservationV2}
+use std.common.contracts.container.effect_deadline_v1.container_effect_deadline_v1
+use std.common.contracts.container.control_deadline_v1.container_control_deadline_v1
+use std.common.contracts.container.runtime_v1.{RuntimeIntentV1, RUNTIME_STATUS_BLOCKED, RUNTIME_STATUS_REJECTED,
+    RUNTIME_PHASE_PREPARED, RUNTIME_PHASE_CREATED, RUNTIME_PHASE_RUNNING, RUNTIME_PHASE_EXITED,
+    RUNTIME_PHASE_DESTROYED, RUNTIME_PHASE_UNKNOWN}
+use std.nogc_async_mut.container.providers.macos.seatbelt_capabilities_v1.{SeatbeltCanaryResultV1,
+    SeatbeltCapabilityManifestV1, seatbelt_manifest_unprobed_v1, seatbelt_qualification_plan_v1,
+    SEATBELT_PROBE_PROVENANCE_V1, SEATBELT_QUALIFIED_V1}
+use std.nogc_async_mut.container.providers.macos.seatbelt_provider_v1.{MacOsSeatbeltAdapterV1,
+    seatbelt_lifecycle_next_v1, seatbelt_runtime_phase_v1, seatbelt_attempt_dir_plan_v1,
+    seatbelt_launch_plan_v1, seatbelt_sosix_port_status_v1, MACOS_SEATBELT_BACKEND_V1,
+    MACOS_SEATBELT_ENGINE_V1, SEATBELT_STEP_UNSUPPORTED_V1, SEATBELT_STEP_IMPLEMENTED_PURE_V1}
+use std.nogc_async_mut.container.providers.macos.native_admission_v1.MACOS_NATIVE_SANDBOX_ENGINE_V1
+use std.nogc_async_mut.container.providers.macos.seatbelt_profile_v1.{SEATBELT_NETWORK_ENDPOINT_V1,
+    SEATBELT_NETWORK_POD_IP_V1}
+
+fn _digest(c: text) -> text:
+    var out = ""
+    var i = 0
+    while i < 64:
+        out = out + c
+        i = i + 1
+    out
+
+fn _scope() -> ContainerHostScopeV2:
+    ContainerHostScopeV2(physical_host_id: "mac-1", service_scope_id: "svc-1", boot_id: "boot-1",
+        provider_generation: 1, native_machine_id: "machine-1", continuity_mode: "native-boot-incarnation-v1",
+        continuity_id: "boot-1")
+
+fn _observed() -> ContainerHostObservationV2:
+    ContainerHostObservationV2(backend: MACOS_SEATBELT_BACKEND_V1, native_machine_id: "machine-1",
+        native_boot_id: "boot-1", provider_identity_digest: _digest("a"), execution_os: "macos",
+        architecture: "arm64", continuity_assurance: "native-boot-incarnation-v1", boot_observation: "")
+
+fn _qualified_manifest() -> SeatbeltCapabilityManifestV1:
+    var manifest = seatbelt_manifest_unprobed_v1()
+    var results: [SeatbeltCanaryResultV1] = []
+    for canary in seatbelt_qualification_plan_v1():
+        results.push(SeatbeltCanaryResultV1(id: canary.id, observed: canary.expected, evidence_digest: _digest("e")))
+    manifest.canaries = results
+    manifest.provenance = SEATBELT_PROBE_PROVENANCE_V1
+    manifest.os_version = "15.1"
+    manifest.os_build = "24B83"
+    manifest.architecture = "arm64"
+    manifest.helper_digest = _digest("a")
+    manifest.profile_digest = _digest("b")
+    manifest
+
+fn _adapter(manifest: SeatbeltCapabilityManifestV1) -> MacOsSeatbeltAdapterV1:
+    MacOsSeatbeltAdapterV1.open_observed_v1(_scope(), _observed(), manifest, "24B83",
+        "/state", _digest("a"), 1000).unwrap()
+
+fn _request(backend: text) -> ContainerExecutionRequestV2:
+    ContainerExecutionRequestV2(plan: ContainerExecutionPlanV2(backend: backend, workload_uid: "pod-1",
+        attempt: 1, operation_id: "op-1", request_digest: _digest("d"), physical_host_id: "mac-1",
+        service_scope_id: "svc-1", boot_id: "boot-1", provider_generation: 1, native_machine_id: "machine-1",
+        continuity_mode: "native-boot-incarnation-v1", continuity_id: "boot-1"), request_bytes: "request")
+
+describe "seatbelt provider v1 identity":
+    it "uses its own backend and engine, never a docker, podman or signed-sandbox alias":
+        expect(MACOS_SEATBELT_BACKEND_V1).to_equal("macos-seatbelt-process")
+        expect(MACOS_SEATBELT_ENGINE_V1).to_equal("macos-seatbelt-process-v1")
+        expect(MACOS_SEATBELT_ENGINE_V1 == MACOS_NATIVE_SANDBOX_ENGINE_V1).to_equal(false)
+        val adapter = _adapter(seatbelt_manifest_unprobed_v1())
+        for backend in ["docker", "podman", "linux-podman", "windows-docker-process", "macos-native-sandbox-v1", ""]:
+            expect(adapter.validate(_request(backend)).unwrap_err()).to_equal("SCMAC-ADMIT-001 backend-mismatch")
+        expect(adapter.validate(_request(MACOS_SEATBELT_BACKEND_V1)).is_ok()).to_equal(true)
+
+    it "refuses observe and open without the Darwin SOSIX owner":
+        expect(seatbelt_sosix_port_status_v1().available).to_equal(false)
+        expect(MacOsSeatbeltAdapterV1.observe("policy").unwrap_err().starts_with("SCMAC-PLATFORM-001")).to_equal(true)
+        val opened = MacOsSeatbeltAdapterV1.open("policy", "/state", _scope(), _digest("a"), 1000)
+        expect(opened.is_err()).to_equal(true)
+
+    it "rejects observations for the wrong OS, backend or pin":
+        var linux = _observed()
+        linux.execution_os = "linux"
+        expect(MacOsSeatbeltAdapterV1.open_observed_v1(_scope(), linux, seatbelt_manifest_unprobed_v1(),
+            "24B83", "/state", _digest("a"), 1000).is_err()).to_equal(true)
+        var docker = _observed()
+        docker.backend = "windows-docker-process"
+        expect(MacOsSeatbeltAdapterV1.open_observed_v1(_scope(), docker, seatbelt_manifest_unprobed_v1(),
+            "24B83", "/state", _digest("a"), 1000).is_err()).to_equal(true)
+        expect(MacOsSeatbeltAdapterV1.open_observed_v1(_scope(), _observed(), seatbelt_manifest_unprobed_v1(),
+            "24B83", "/state", _digest("c"), 1000).is_err()).to_equal(true)
+
+describe "seatbelt provider v1 lifecycle":
+    it "maps the design state machine onto runtime phases":
+        expect(seatbelt_runtime_phase_v1("validated")).to_equal(RUNTIME_PHASE_PREPARED)
+        expect(seatbelt_runtime_phase_v1("launch-pending")).to_equal(RUNTIME_PHASE_CREATED)
+        expect(seatbelt_runtime_phase_v1("running")).to_equal(RUNTIME_PHASE_RUNNING)
+        expect(seatbelt_runtime_phase_v1("retiring")).to_equal(RUNTIME_PHASE_EXITED)
+        expect(seatbelt_runtime_phase_v1("absent")).to_equal(RUNTIME_PHASE_DESTROYED)
+        expect(seatbelt_runtime_phase_v1("outcome-unknown")).to_equal(RUNTIME_PHASE_UNKNOWN)
+        expect(seatbelt_runtime_phase_v1("quarantined")).to_equal(RUNTIME_PHASE_UNKNOWN)
+
+    it "allows only the design edges":
+        expect(seatbelt_lifecycle_next_v1("validated", "prepare").unwrap()).to_equal("prepared")
+        expect(seatbelt_lifecycle_next_v1("launch-pending", "interrupted").unwrap()).to_equal("outcome-unknown")
+        expect(seatbelt_lifecycle_next_v1("outcome-unknown", "quarantine").unwrap()).to_equal("quarantined")
+        expect(seatbelt_lifecycle_next_v1("running", "absence-proven").is_err()).to_equal(true)
+        expect(seatbelt_lifecycle_next_v1("validated", "admitted").is_err()).to_equal(true)
+        expect(seatbelt_lifecycle_next_v1("quarantined", "close").is_err()).to_equal(true)
+
+    it "blocks prepare as unqualified and never advances the lifecycle":
+        var adapter = _adapter(seatbelt_manifest_unprobed_v1())
+        val deadline = container_effect_deadline_v1(_digest("d"), "op-1", ["create", "start"], 9999999999999).unwrap()
+        val op = adapter.apply("prepare", _request(MACOS_SEATBELT_BACKEND_V1), deadline)
+        expect(op.status).to_equal(RUNTIME_STATUS_BLOCKED)
+        expect(op.reason.starts_with("SCMAC-PLATFORM-001")).to_equal(true)
+        expect(op.state.identity.engine).to_equal(MACOS_SEATBELT_ENGINE_V1)
+        expect(op.state.identity.native_id).to_equal("")
+        expect(adapter.lifecycle_v1()).to_equal("validated")
+
+    it "stays blocked even with a qualified manifest because no SOSIX owner exists":
+        var adapter = _adapter(_qualified_manifest())
+        expect(adapter.qualification_v1().status).to_equal(SEATBELT_QUALIFIED_V1)
+        val deadline = container_effect_deadline_v1(_digest("d"), "op-1", ["create"], 9999999999999).unwrap()
+        val op = adapter.apply("prepare", _request(MACOS_SEATBELT_BACKEND_V1), deadline)
+        expect(op.status).to_equal(RUNTIME_STATUS_BLOCKED)
+        expect(op.reason).to_equal("SCMAC-PLATFORM-001 darwin-seatbelt-sosix-owner-unavailable")
+        expect(adapter.lifecycle_v1()).to_equal("validated")
+
+    it "rejects out-of-order effects before qualification is consulted":
+        var adapter = _adapter(seatbelt_manifest_unprobed_v1())
+        val deadline = container_effect_deadline_v1(_digest("d"), "op-1", ["start"], 9999999999999).unwrap()
+        val op = adapter.apply("start", _request(MACOS_SEATBELT_BACKEND_V1), deadline)
+        expect(op.status).to_equal(RUNTIME_STATUS_REJECTED)
+        expect(op.reason.starts_with("seatbelt-invalid-transition")).to_equal(true)
+
+    it "never reports stop, destroy, absence, recovery or reads as success":
+        var adapter = _adapter(_qualified_manifest())
+        val request = _request(MACOS_SEATBELT_BACKEND_V1)
+        val control = container_control_deadline_v1(_digest("d"), "op-1", ["stop", "destroy"], 9999999999999).unwrap()
+        val stop = adapter.control("stop", request, control)
+        expect(stop.status).to_equal(RUNTIME_STATUS_REJECTED)
+        expect(stop.reason.starts_with("seatbelt-invalid-transition")).to_equal(true)
+        val destroy = adapter.control("destroy", request, control)
+        expect(destroy.status == "ok").to_equal(false)
+        for action in ["inspect", "logs", "wait"]:
+            val read = adapter.read(action, request)
+            expect(read.status).to_equal(RUNTIME_STATUS_BLOCKED)
+            expect(read.reason.starts_with("SCMAC-OWNER-001")).to_equal(true)
+        val intent = RuntimeIntentV1(pod_uid: "pod-1", attempt: 1, provider_generation: 1, operation_id: "op-1",
+            engine: MACOS_SEATBELT_ENGINE_V1, native_id: _digest("f"), node_boot_id: "boot-1", phase: "running")
+        expect(adapter.recover(request, intent).status).to_equal(RUNTIME_STATUS_BLOCKED)
+        var docker_intent = intent
+        docker_intent.engine = "docker"
+        expect(adapter.recover(request, docker_intent).status).to_equal(RUNTIME_STATUS_REJECTED)
+        expect(adapter.intent(request).is_err()).to_equal(true)
+        expect(adapter.project(request).is_err()).to_equal(true)
+        expect(adapter.action_project(request).is_err()).to_equal(true)
+        expect(adapter.lifecycle_v1()).to_equal("validated")
+
+describe "seatbelt provider v1 attempt plan":
+    it "lays out the attempt directories under the protected state root":
+        val dirs = seatbelt_attempt_dir_plan_v1("/state", "pod-1-a1").unwrap()
+        expect(dirs.host_scope).to_equal("/state/host-scope")
+        expect(dirs.private_dir).to_equal("/state/attempts/pod-1-a1/private")
+        expect(dirs.workspace).to_equal("/state/attempts/pod-1-a1/workspace")
+        expect(dirs.broker_socket).to_equal("/state/attempts/pod-1-a1/ipc/broker.sock")
+        expect(seatbelt_attempt_dir_plan_v1("/state", "../x").is_err()).to_equal(true)
+        expect(seatbelt_attempt_dir_plan_v1("relative", "pod-1-a1").is_err()).to_equal(true)
+
+    it "projects a profile that protects host scope and private receipts":
+        val adapter = _adapter(seatbelt_manifest_unprobed_v1())
+        val plan = adapter.project_policy_v1(_request(MACOS_SEATBELT_BACKEND_V1), [], SEATBELT_NETWORK_ENDPOINT_V1).unwrap()
+        val body = plan.profile.profile_text
+        expect(body.contains("(deny file-read* file-write* process-exec (subpath \"/state/host-scope\"))")).to_equal(true)
+        expect(body.contains("(deny file-read* file-write* process-exec (subpath \"/state/attempts/pod-1-a1/private\"))")).to_equal(true)
+        expect(body.contains("(path-literal \"/state/attempts/pod-1-a1/ipc/broker.sock\")")).to_equal(true)
+        expect(body.contains("(subpath \"/state/attempts/pod-1-a1/workspace\")")).to_equal(true)
+        expect(body.contains("file-write-data file-write-create file-write-unlink (subpath \"/state/attempts/pod-1-a1/workspace\")")).to_equal(false)
+
+    it "refuses pod-ip-v1 before any effect":
+        val adapter = _adapter(seatbelt_manifest_unprobed_v1())
+        val refused = adapter.project_policy_v1(_request(MACOS_SEATBELT_BACKEND_V1), [], SEATBELT_NETWORK_POD_IP_V1)
+        expect(refused.unwrap_err().starts_with("SCMAC-NET-001")).to_equal(true)
+
+    it "plans the ten launch steps with every native step unsupported":
+        val steps = seatbelt_launch_plan_v1()
+        expect(steps.len()).to_equal(10)
+        expect(steps[0].status).to_equal(SEATBELT_STEP_IMPLEMENTED_PURE_V1)
+        var i = 1
+        while i < steps.len():
+            expect(steps[i].native_effect).to_equal(true)
+            expect(steps[i].status).to_equal(SEATBELT_STEP_UNSUPPORTED_V1)
+            i = i + 1
