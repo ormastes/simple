@@ -1,0 +1,171 @@
+# @cover src/lib/common/pe/pe_image_v1.spl
+# @req REQ-XRAY-SHARED-PE-IMAGE
+"""
+# Shared PE/COFF image reader
+
+One reader for the Windows linker's COFF object parser and the XRay stage-3
+(Windows) map locator: bounds-checked LE fields (-1 when truncated), the
+classic and bigobj COFF headers, 40-byte section headers, and a linked PE32+ image (machine, image base, exception directory,
+section table, section-by-name, RVA -> file offset). The image fixture comes
+from the linker's own PE writer, so reader and writer agree byte for byte.
+"""
+use std.spec.*
+use std.common.pe.pe_image_v1.*
+use compiler.backend.linker.coff.pe_image_writer.{PeImageSection, PE_AMD64_IMAGE_BASE, pe_write_amd64_console}
+
+fn put16(bytes: [u8], value: i64) -> [u8]:
+    var out = bytes
+    out.push((value & 255) as u8)
+    out.push(((value >> 8) & 255) as u8)
+    out
+
+fn put32(bytes: [u8], value: i64) -> [u8]:
+    put16(put16(bytes, value & 65535), (value >> 16) & 65535)
+
+fn name8(bytes: [u8], name: text) -> [u8]:
+    var out = bytes
+    val raw = name.bytes()
+    for i in 0..8:
+        out.push(if i < raw.len(): raw[i] else: 0u8)
+    out
+
+# Classic AMD64 object: header, one .text section (4 bytes at 60), one
+# REL32 relocation at 64, symbol table at 74 (count 2).
+fn classic_object() -> [u8]:
+    var b: [u8] = []
+    b = put16(b, 0x8664)
+    b = put16(b, 1)
+    b = put32(b, 0x12345678)
+    b = put32(b, 74)
+    b = put32(b, 2)
+    b = put16(b, 0)
+    b = put16(b, 0x0004)
+    b = name8(b, ".text")
+    b = put32(b, 0)
+    b = put32(b, 0)
+    b = put32(b, 4)
+    b = put32(b, 60)
+    b = put32(b, 64)
+    b = put32(b, 0)
+    b = put16(b, 1)
+    b = put16(b, 0)
+    b = put32(b, 0x60000020)
+    for byte in [0xe8u8, 0u8, 0u8, 0u8]: b.push(byte)
+    b = put32(b, 1)
+    b = put32(b, 1)
+    b = put16(b, 4)
+    b
+
+fn bigobj_header() -> [u8]:
+    var b: [u8] = []
+    b = put16(b, 0)
+    b = put16(b, 0xffff)
+    b = put16(b, 2)
+    b = put16(b, 0xaa64)
+    b = put32(b, 0x0badf00d)
+    for byte in [0xc7, 0xa1, 0xba, 0xd1, 0xee, 0xba, 0xa9, 0x4b, 0xaf, 0x20, 0xfa, 0xf6, 0x6a, 0xa4, 0xdc, 0xb8]:
+        b.push(byte as u8)
+    for i in 0..16: b.push(0u8)
+    b = put32(b, 70000)
+    b = put32(b, 4096)
+    b = put32(b, 3)
+    b
+
+fn image_with_map() -> [u8]:
+    val text = PeImageSection(name: ".text", virtual_address: 0x1000, virtual_size: 2,
+        data: [0x90u8, 0xc3u8], characteristics: 0x60000020)
+    val map = PeImageSection(name: ".sxray", virtual_address: 0x2000, virtual_size: 4,
+        data: [83u8, 88u8, 82u8, 77u8], characteristics: 0x40000040)
+    pe_write_amd64_console([text, map], 0x1000).unwrap()
+
+describe "PE/COFF field readers":
+    it "reads LE fields and answers -1 past the end":
+        val b: [u8] = [0x34u8, 0x12u8, 0xffu8, 0xffu8, 0x78u8, 0x56u8, 0x34u8, 0x12u8]
+        expect(pe_u16_le_v1(b, 0)).to_equal(0x1234)
+        expect(pe_u32_le_v1(b, 4)).to_equal(0x12345678)
+        expect(pe_u64_le_v1(b, 0)).to_equal(0x12345678ffff1234)
+        expect(pe_u16_le_v1(b, 7)).to_equal(-1)
+        expect(pe_u32_le_v1(b, 5)).to_equal(-1)
+        expect(pe_u32_le_v1(b, -1)).to_equal(-1)
+        expect(pe_u64_le_v1(b, 1)).to_equal(-1)
+
+    it "decodes a NUL- or count-bounded name":
+        val b: [u8] = [46u8, 116u8, 101u8, 120u8, 116u8, 0u8, 9u8, 9u8, 65u8, 66u8]
+        expect(pe_fixed_name_v1(b, 0, 8)).to_equal(".text")
+        expect(pe_fixed_name_v1(b, 8, 8)).to_equal("AB")
+        expect(pe_fixed_name_v1(b, 1, 3)).to_equal("tex")
+        expect(pe_fixed_name_v1(b, 20, 8)).to_equal("")
+
+describe "COFF object records":
+    it "reads a classic header and its section header":
+        val obj = classic_object()
+        expect(pe_coff_is_bigobj_v1(obj)).to_equal(false)
+        val header = pe_coff_header_v1(obj)
+        expect(header.machine).to_equal(PE_MACHINE_AMD64_V1)
+        expect(header.section_count).to_equal(1)
+        expect(header.timestamp).to_equal(0x12345678)
+        expect(header.symbol_table_offset).to_equal(74)
+        expect(header.symbol_count).to_equal(2)
+        expect(header.characteristics).to_equal(4)
+        expect(header.header_size).to_equal(PE_COFF_HEADER_BYTES_V1)
+        expect(header.symbol_size).to_equal(PE_COFF_SYMBOL_BYTES_V1)
+        val section = pe_section_header_v1(obj, header.header_size)
+        expect(section.raw_name).to_equal(".text")
+        expect(section.raw_size).to_equal(4)
+        expect(section.raw_pointer).to_equal(60)
+        expect(section.relocation_pointer).to_equal(64)
+        expect(section.relocation_count).to_equal(1)
+        expect(section.characteristics).to_equal(0x60000020)
+
+    it "reads the bigobj header layout":
+        val big = bigobj_header()
+        expect(pe_coff_is_bigobj_v1(big)).to_equal(true)
+        val header = pe_coff_header_v1(big)
+        expect(header.machine).to_equal(PE_MACHINE_ARM64_V1)
+        expect(header.timestamp).to_equal(0x0badf00d)
+        expect(header.section_count).to_equal(70000)
+        expect(header.symbol_table_offset).to_equal(4096)
+        expect(header.symbol_count).to_equal(3)
+        expect(header.header_size).to_equal(PE_BIGOBJ_HEADER_BYTES_V1)
+        expect(header.symbol_size).to_equal(PE_BIGOBJ_SYMBOL_BYTES_V1)
+        var not_big = big
+        not_big[12] = 0u8
+        expect(pe_coff_is_bigobj_v1(not_big)).to_equal(false)
+
+describe "Linked PE32+ image":
+    it "reads machine, image base and the section table written by the linker":
+        val bytes = image_with_map()
+        val image = pe_image_v1(bytes).unwrap()
+        expect(image.machine).to_equal(PE_MACHINE_AMD64_V1)
+        expect(image.image_base).to_equal(PE_AMD64_IMAGE_BASE)
+        expect(image.sections.len()).to_equal(2)
+        expect(image.sections[0].raw_name).to_equal(".text")
+        expect(image.section_alignment).to_equal(0x1000)
+        expect(image.size_of_image >= 0x3000).to_equal(true)
+
+    it "finds a section by name and maps its RVA to the file bytes":
+        val bytes = image_with_map()
+        val image = pe_image_v1(bytes).unwrap()
+        val map = pe_image_section_by_name_v1(image, ".sxray").unwrap()
+        expect(map.virtual_address).to_equal(0x2000)
+        val at = pe_image_rva_to_offset_v1(image, 0x2000).unwrap()
+        expect(at).to_equal(map.raw_pointer)
+        expect(bytes[at] as i64).to_equal(83)
+        expect(bytes[at + 3] as i64).to_equal(77)
+        expect(pe_image_rva_to_offset_v1(image, 0x2002).unwrap()).to_equal(at + 2)
+        expect(pe_image_section_by_name_v1(image, ".nothere").is_none()).to_equal(true)
+        expect(pe_image_rva_to_offset_v1(image, 0x9000).is_none()).to_equal(true)
+
+    it "refuses images without MZ, without PE\\0\\0, or with a truncated section table":
+        val bytes = image_with_map()
+        var no_mz = bytes
+        no_mz[0] = 0u8
+        expect(pe_image_v1(no_mz).is_err()).to_equal(true)
+        var no_pe = bytes
+        val nt = pe_u32_le_v1(bytes, 0x3c)
+        no_pe[nt] = 0u8
+        expect(pe_image_v1(no_pe).is_err()).to_equal(true)
+        var short: [u8] = []
+        for i in 0..(nt + 24 + 240): short.push(bytes[i])
+        expect(pe_image_v1(short).is_err()).to_equal(true)
+        expect(pe_image_v1(classic_object()).is_err()).to_equal(true)

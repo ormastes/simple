@@ -8,7 +8,9 @@
 # against every backend:
 #   - LLVM:   `FakeXrayLeafV1` (compiler-rt statuses, patch unit = LLVM id)
 #   - Simple: `XrayNativeBoundLeafV1` over a simulated code page
-#             (`FakePatchPortV1`, AArch64 B/NOP words or x86-64 EB0B/6690 halves)
+#             (`FakePatchPortV1`, AArch64 B/NOP words or x86-64 EB0B/6690 halves);
+#             the Windows x64 column (stage 3) gets its manifest and image from
+#             a real PE image through xray_native_pe_locate_v1
 # The shared "program" is three functions (ids 1..3). LLVM patches a function
 # as one id; the Simple map has an entry and an exit sled per function, so the
 # harness answers at FUNCTION level and expands to sites itself.
@@ -20,6 +22,8 @@ use std.common.trace.observer_native_map_v1.*
 use std.common.trace.xray_native_map_format_v1.{XRAY_MAP_AARCH64_OFF_WORD_V1, XRAY_MAP_AARCH64_ON_WORD_V1, XRAY_MAP_X86_64_OFF_WORD_V1, XRAY_MAP_X86_64_ON_WORD_V1}
 use std.nogc_sync_mut.trace.xray_llvm_adapter_v1.*
 use std.nogc_sync_mut.trace.xray_native_sled_leaf_v1.*
+use std.common.trace.xray_native_pe_locate_v1.{xray_native_pe_locate_v1, XRAY_NATIVE_ABI_PROFILE_WIN64_V1}
+use test.fixtures.xray.xray_win64_pe_fixture_v1.{xray_win64_fixture_image_v1}
 
 pub const XRAY_HARNESS_BASE_V1: i64 = 1048576
 pub const XRAY_HARNESS_PAGE_V1: i64 = 4096
@@ -387,6 +391,10 @@ impl XrayBackendHarnessV1 for XraySimpleFakeHarnessV1:
 fn xray_simple_harness_for_v1(label: text, encoding: TraceNativeEncodingV1, target: text,
         abi_profile: text) -> XraySimpleFakeHarnessV1:
     val (bytes, manifest) = xray_harness_native_image_v1(encoding, target, abi_profile)
+    xray_simple_harness_from_image_v1(label, abi_profile, bytes, manifest)
+
+fn xray_simple_harness_from_image_v1(label: text, abi_profile: text, bytes: [u8],
+        manifest: TraceNativeMapV1) -> XraySimpleFakeHarnessV1:
     var port = xray_harness_port_from_image_v1(bytes)
     var dispatch = FakeDispatchV1(status: 1, log: [])
     val leaf = XrayNativeSledLeafV1.create(manifest, bytes, XRAY_HARNESS_BASE_V1, XRAY_HARNESS_PAGE_V1).unwrap()
@@ -401,3 +409,11 @@ pub fn xray_simple_aarch64_harness_v1() -> XraySimpleFakeHarnessV1:
 pub fn xray_simple_x86_64_harness_v1() -> XraySimpleFakeHarnessV1:
     xray_simple_harness_for_v1("simple-x86_64", TraceNativeEncodingV1.X64Rel32,
         "x86_64-unknown-linux-gnu", "simple-x86_64-sysv-sled-v1")
+
+# Stage 3: the same three functions in a Windows x64 PE image (EB0B/6690
+# halves, Windows trampoline twin), located from the PE bytes.
+pub fn xray_simple_win64_harness_v1() -> XraySimpleFakeHarnessV1:
+    val module = xray_native_pe_locate_v1(xray_win64_fixture_image_v1(), XRAY_HARNESS_BASE_V1,
+        XRAY_HARNESS_MODULE_V1, XRAY_HARNESS_PAGE_V1, "win64-fixture").unwrap()
+    xray_simple_harness_from_image_v1("simple-win64", XRAY_NATIVE_ABI_PROFILE_WIN64_V1,
+        module.image, module.manifest)

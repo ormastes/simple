@@ -240,3 +240,146 @@ Other `b795b3f4a26`/`aba2a5f0a3e` sites, same seed and scope:
   calls with a branch + division each): 1,000,000 calls, 5 alternating pairs at load ~20,
   old 3.02 / 3.61 / 2.53 / 3.63 / 4.25 s vs new 2.07 / 4.13 / 4.62 / 2.11 / 2.11 s (median
   3.61 vs 2.11). No regression signal; kept.
+
+#### Step 4c (2026-11-13, branch `work/spy-xray-2-20261113`): host policy + construction value
+
+- `src/lib/nogc_sync_mut/trace/xray_data_profiling_v1.spl` `XrayDataProfilingV1.from_aspect`:
+  absent observer extension -> containers profile as before (initial and after = true);
+  malformed or `off` -> false; `always_on` -> true; `dynamic` -> false at construction, then
+  `after(adapter.state_code())` is true only while Active. Spec 6/6 (red: module missing);
+  mutation absent -> Never: 4/6 and IN 33/36.
+- `AdaptiveMap.with_profiling(profile, enabled)` / `AdaptiveSet.with_profiling` construct with
+  the policy's `initial()`; the per-instance bool stays the only per-operation cost.
+- The in-process host fixture (`test/fixtures/xray/xray_native_inprocess_host.spl`) now builds a
+  container per session with `initial()`, flips it right after `start` and right after
+  `request_stop`, and prints `E2E <s> container ...`; `xr_session_ok` checks it (selftest has
+  four new rejecting mutations). The lane remains OUT-blocked by the seed dynlib bug, so
+  "a compiled program flips set_profiling" is wired but not yet observed on a real module.
+- IN suite scenario now goes through the policy (36/36).
+
+#### Step 3d (2026-11-13): linker folds, branch `work/spy-xray-2-20261113`
+
+> WITHDRAWN in part (see "Review round 1 fixes" below): the `export use ... as ...` writer /
+> x64 fold did not resolve on the reviewer's pinned seed and was reverted; the ELF writer and
+> the backend emitters keep module-local LE writers. The elf_parser decision below stands.
+
+- `_ElfWriter/encoding.spl` `write_u{16,32,64}_le` and `std.common.isa.x64_encode_v1`
+  `x64_push_imm32_le_v1` are now ONE body each in `std.common.binary_io`
+  (`bytes_i64_push_u{16,32,64}_le`), re-exported with `export use ... as ...` so no caller
+  gains a call layer. 64 x (u16+u32+u64) writes x 20,000 through `elf_writer`: old
+  51.61 / 51.46 / 52.74 s vs shared 47.91 / 47.81 / 48.43 s (RSS 233-259 MB both). Same
+  failure set on 9 writer/encoder specs; mutating the shared writers turns
+  `elf_writer_spec` (17/18), `x86_negative_imm64` (1/9) and `x64_encode_v1` (1/2) red.
+- `linker/elf_parser.spl` is NOT folded further: it already reads every field through the
+  shared readers (`elf_inspect` -> `elf_image_u*_le_v1`, Step 3c), and its section-table
+  walk carries ELF32 support that `elf_image_v1` deliberately lacks; routing its ELF64 half
+  through `elf_image_sections_v1` would add an intermediate list per parse on the path
+  Step 3c measured.
+- `backend/native/encode_aarch64.spl`: `emit_u32_le` is the shared `bytes_i64_push_u32_le`
+  (aliased import; the local mod/div body is gone); ADD/SUB imm12, LDR/STR unsigned offset
+  and the offset (non-writeback) STP/LDP forms call `std.common.isa.a64_encode_v1`. Kept
+  local: the pre/post-indexed writeback pairs (no shared form) and the ADD relocation
+  placeholder (its literal text is pinned by `global_addr_aarch64_riscv64_contract_spec`).
+  New `aarch64_shared_encoder_parity_spec` (3/3 on old and new encoder; mutations of the
+  shared ADD/SUB/LDR/STR encoders -> 1/3, LDP -> 2/3). 7 instructions x 20,000 through
+  `encode_inst_aarch64`: old 12.07 / 12.16 / 12.28 s vs new 12.07 / 12.23 / 12.28 s, RSS
+  ~142 MB both. Same verdicts on the 9 AArch64 encoder specs (incl. the pre-existing 3
+  failures of `global_addr_aarch64_riscv64_contract_spec`).
+- `a64_b_v1` / `a64_nop_v1` deleted: the backend emits B/BL/NOP as constant placeholders
+  that relocations patch, so a call buys nothing and they had no other consumer.
+- Kernel loader (`src/os/kernel/loader/elf64.spl`) keeps its ELF64 readers. It could import
+  `std.common` (sibling loader files do), but its readers come from the kernel-owned
+  `os.kernel.loader.byte_utils` shared by the whole loader, and any loader change needs the
+  real-firmware QEMU/board boot evidence of `.claude/rules/board-runnable.md`, which this
+  lane does not produce. Recorded as remaining duplication, not folded.
+
+#### Step 3e (2026-11-13): shared PE/COFF reader (stage-3 groundwork)
+
+- New `src/lib/common/pe/pe_image_v1.spl`: bounds-checked LE readers (-1 when truncated, the
+  linker's contract), name decoder, bigobj probe, classic/bigobj COFF header record, 40-byte
+  section header record, and a linked PE32+ image (machine, image base, section alignment,
+  size, exception directory, section table, section-by-name, RVA -> file offset). Spec
+  `test/01_unit/lib/pe/pe_image_v1_spec.spl` 7/7; its image fixture is written by the
+  linker's own `pe_write_amd64_console`.
+- `linker/coff/coff_object.spl` takes header layout (`pe_coff_header_v1`), section headers
+  (`pe_section_header_v1`) and `coff_is_bigobj` (aliased re-export) from it; 3 private size
+  constants deleted. Mutating the shared section-header / header readers -> `coff_object_spec`
+  15/21 and 11/21. 15 COFF/PE linker specs: identical failure set before/after.
+- Timing (626,353-byte clang `x86_64-pc-windows-msvc` object, 12 x `coff_parse_object`):
+  old 15.89 / 15.90 / 15.47 / 15.40 / 15.90 s; first fold with a record per relocation
+  ~1.3x and imported readers +8% (17.1-17.3 s) -> reverted both: the relocation loop reads
+  fields directly and the five field readers stay module-local. Final: 15.72 / 16.28 s.
+  Filed `doc/08_tracking/bug/seed_cross_module_call_overhead_2026-11-13.md`.
+- Not folded (remaining PE duplication): `linker/pe_inspect.spl`, `linker/pe_parser.spl`,
+  `std.common.pe_coff_header` (image gates), `src/lib/pe_coff_header.spl` (stub).
+
+### Stage 3 (Windows x64, Simple-owned) — 2026-11-13
+
+#### W1: trampoline, unwind records, resident runtime TU
+- `src/lib/common/trace/xray_native_trampoline_win64_v1.spl`: Simple twin of
+  `__simple_xray_trampoline_win64_v1` (354 bytes; bounded AVX profile: rbp + rax rcx rdx
+  r8-r11, ymm0-15 in full, MXCSR, RFLAGS in-frame; 32-byte shadow space; rsp 16-aligned
+  and DF clear at the CALL; ecx = id, rdx = sled return; canonical `lea rsp,[rbp]` epilog),
+  UNWIND_INFO / RUNTIME_FUNCTION encoders, and the entry-sled admission rule (no prolog
+  unwind code inside the 13-byte sled; chained / non-v1 info refused).
+- `src/runtime/xray/xray_native_runtime_win64.c`: the resident TU (same .seh-annotated asm,
+  sled leaf, registry with `__ImageBase` + RVA text_base and `__declspec(dllexport)` entry
+  points). `xray_native_registry_v1.h` gained two overridable macros (`SIMPLE_XRAY_API`,
+  `XMAP_TEXT_BASE`); the Linux expansions are unchanged.
+- Evidence: spec 9/9 with goldens from clang 23 `x86_64-pc-windows-msvc` (text and .xdata);
+  `scripts/check/check-xray-native-win64-objects.shs --simple <seed>` PASS (trampoline
+  bytes and assembler UNWIND_INFO == twin); mutating the twin (cld -> nop) -> script FAIL and
+  spec 8/9. Wired as `local-xray-native-win64-objects` in `config/check/must_check_gates.sdn`.
+- Patching on Windows reuses the existing leaf and SOSIX port: `rt_mprotect` is
+  VirtualProtect + FlushInstructionCache with rollback (`platform_win.h:504-520`), one
+  aligned u16 activation-word store, quiescent only.
+
+#### W2: Windows map profile, PE locator, 4th IN column
+- `xray_native_map_format_v1`: `XRAY_MAP_ABI_X86_64_WIN64_V1 = 3` admitted on x86-64 rows (text_base
+  = .text RVA), refused under AArch64; `.sxray` is the PE section name. Map spec 10/10 (red
+  9/10 with the old validator).
+- `src/lib/common/trace/xray_native_pe_locate_v1.spl` (pure): PE file bytes + HMODULE base ->
+  RVA manifest (`x86_64-pc-windows-msvc`, `simple-x86_64-win64-sled-v1`), reconstructed image,
+  CALL targets decoded per sled; refuses missing `.sxray` (InstrumentationAbsent), writable /
+  executable map section, non-Windows profile, 64-bit text_base, tampered CALL, unaligned base.
+  Spec 5/5; mutation of the CALL decode -> 4/5.
+- IN differential suite: 4th column `simple-win64` built from a PE image written by the
+  linker's own PE writer (`test/fixtures/xray/xray_win64_pe_fixture_v1.spl`) -> locator ->
+  validator -> `XrayNativeSledLeafV1` over the simulated page: 12/12 identical scenarios,
+  48/48 total. Mutating the locator's CALL target -> 36/48 (the whole win64 column red).
+- NOT changed (coordinator decision): the W3 build route still refuses every Windows target.
+  Admitting `x86_64-pc-windows-msvc` + backend Simple needs the native backend's COFF sled
+  emission (sleds, `.sxray` with ADDR32NB text_base, `.pdata` offsets past the entry sled)
+  and touches `observer_build_route_v1.spl`, `driver_xray_policy.spl:85-92`,
+  `observer_build_route_v1_spec.spl` and `xray_observer_gate_spec.spl` in one reviewed change.
+
+#### W3: OUT suite, Windows column
+- `test/03_system/xray/xray_backend_differential_out_spec.spl` (still `@tag:in-development`)
+  gains `simple-win64`: the static half (`check-xray-native-win64-objects.shs`) PASSes on this
+  Linux host; the in-process half fails with an explicit BLOCKED message naming the missing
+  lane `scripts/check/check-xray-native-win64-inprocess-e2e.shs` (Windows x64 host + the
+  backend's COFF sled emitter), never a skip. Explicit-path run 2026-11-13 (seed, lanes capped
+  150 s, 8G scope): llvm PASS, simple FAIL (seed `rt_host_dynlib_open` bug), win64 static PASS,
+  win64 in-process BLOCKED -> `passed=2 failed=2`, `IN-DEVELOPMENT EXPLICIT`.
+- Notes: the locator's 64-bit-text_base refusal is defence in depth (a wide value is also
+  refused by section containment), mirroring the runtime's uint32 truncation. The twin dump
+  prints twice under the seed (engine demotion re-runs `main`); the objects check reads the
+  first line — filed `doc/08_tracking/bug/seed_engine_demotion_reruns_main_side_effects_2026-11-13.md`.
+
+#### Review round 1 fixes (2026-11-13)
+- Aliased re-exports removed (`export use m.{a as b}` did not resolve on the reviewer's pinned
+  seed through `elf_writer`'s glob re-export; bug `seed_aliased_reexport_unresolved_2026-11-13`).
+  Thin local wrappers were measured on the ELF writer probe: 71.78 / 73.73 s vs release 52.24 /
+  50.95 s (1.4x) — so the hot emitters keep module-local bodies instead: `_ElfWriter/encoding.spl`
+  and `encode_x86_64.spl` are back to release content, `encode_aarch64.spl` keeps its local
+  `emit_u32_le`, `x64_push_imm32_le_v1` has its own body again (cold: XRay twins only), and the
+  `bytes_i64_push_u{16,32,64}_le` helpers are deleted. Step 3d's writer/x64 fold is withdrawn.
+  `coff_is_bigobj` is a local wrapper (once per object). `a64_new_encode_context` /
+  `encode_inst_aarch64` are `pub` so the encoder specs run on strict binaries.
+- Windows trampoline: a sled sits where rsp is 8 mod 16, so the trampoline entry is 0 mod 16;
+  the old 8 pushes + 0x238 left rsp 8 mod 16 at the handler CALL. Now push rbp; pushfq (RFLAGS
+  saved before the first flag-writing `sub`); 7 volatile GPRs; mov rbp,rsp; sub 0x238 -> 640
+  bytes, 0 mod 16 at the CALL. 340 bytes, prolog 23, 12 unwind slots (ALLOC_SMALL for pushfq),
+  epilog `lea; pops; popfq; pop rbp; ret`. New spec example decodes the prolog bytes and asserts
+  the alignment (old twin: 6/10, new: 10/10); clang byte/unwind parity check PASS. Windows
+  `-Wall -Wextra` build has no warnings (unused `field` fixed in the Windows XMAP_TEXT_BASE).
