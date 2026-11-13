@@ -83,6 +83,7 @@ use compiler.backend.linker.elf.link_trace.{elf_link_trace}
 use compiler.backend.linker.elf.elf_boot_link.{elf_boot_link_archives_policy}
 use compiler.backend.linker.boot_layout.boot_layout_plan.{boot_layout_from_text, boot_layout_add_defsym}
 use compiler.backend.linker.reloc_engine.{RelocArch}
+use compiler.backend.linker.internal_elf_hosted_target.{internal_elf_hosted_target_v1}
 use compiler.backend.linker.coff.coff_link.{
     CoffLinkRequest,
     coff_link_amd64_retained_image_policy_full,
@@ -1514,17 +1515,7 @@ fn internal_link_native_with_operations(os: text, arch: text, config: NativeLink
         object_files: [text], output: text, operations: ElfSealedOperationsV1) -> Result<text, text>:
     if not operations.has_byte_source(): return Err("internal engine: ELF byte-source operation is not bound")
     var source = _InternalElfByteInputs(operations: operations, cache: {})
-    var norm_arch = arch
-    if arch == "amd64":
-        norm_arch = "x86_64"
-    elif arch == "arm64":
-        norm_arch = "aarch64"
-    if os != "linux" and os != "freebsd":
-        return Err("internal engine: unsupported hosted ELF OS '{os}'")
-    if norm_arch != "x86_64" and norm_arch != "aarch64":
-        return Err("internal engine: unsupported architecture '{arch}' (internal:elf supports x86_64 and aarch64 only)")
-    if norm_arch != host_arch() or os != host_os():
-        return Err("internal engine: unsupported cross-host link (target {os}/{arch}; hosted ELF requires the matching sysroot)")
+    val hosted = internal_elf_hosted_target_v1(os, arch, host_os(), host_arch())?
     var before: [text] = []
     var after: [text] = []
     var system_shared: [text] = []
@@ -1557,12 +1548,8 @@ fn internal_link_native_with_operations(os: text, arch: text, config: NativeLink
         if not system_paths.contains(libdir): system_paths.push(libdir)
         val nonshared = "{libdir}/libc_nonshared.a"
         if file_exists(nonshared): system_archives.push(nonshared)
-        if norm_arch == "x86_64":
-            for directory in ["/lib/x86_64-linux-gnu", "/usr/lib/x86_64-linux-gnu", "/lib64", "/usr/lib64"]:
-                if not system_paths.contains(directory): system_paths.push(directory)
-        else:
-            for directory in ["/lib/aarch64-linux-gnu", "/usr/lib/aarch64-linux-gnu", "/lib", "/usr/lib"]:
-                if not system_paths.contains(directory): system_paths.push(directory)
+        for directory in hosted.lib_dirs:
+            if not system_paths.contains(directory): system_paths.push(directory)
     elf_link_trace("inputs: read start")
     # Inputs stay packed `[u8]` all the way into the engine. Widening them per
     # byte to `[i64]` cost 8x the input size and OOM-killed full-CLI links.
@@ -1600,9 +1587,7 @@ fn internal_link_native_with_operations(os: text, arch: text, config: NativeLink
         else:
             return Err("internal engine: ELF library '{path}' is neither an ar archive nor an ET_DYN object")
     elf_link_trace("inputs: read done")
-    var target_arch = RelocArch.X86_64
-    if norm_arch == "aarch64":
-        target_arch = RelocArch.AArch64
+    val target_arch = hosted.reloc
     var mode = ELF_LINK_DYNAMIC_EXEC
     if config.pie:
         mode = ELF_LINK_DYNAMIC_PIE

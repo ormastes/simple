@@ -41,6 +41,10 @@ pub(super) struct FunctionContext {
     /// lowering needs this metadata to preserve Result<T, E>.ok / .err.
     /// Slots keep shadowed bindings distinct.
     pub result_projection_types: HashMap<usize, (TypeId, TypeId)>,
+    /// Function type of a local initialized by a lambda, keyed by local slot.
+    /// The local itself keeps the lambda expression type (MIR closure typing
+    /// reads it); `Some(local)` consults this so the Option keeps its fn payload.
+    pub lambda_local_fn_types: HashMap<usize, TypeId>,
     /// Declared trait identity of the PAYLOAD of an `Option<Trait>` local
     /// (`reducer: Ident?`), keyed by local slot. Never stored on the optional
     /// local itself (`reducer.is_some()` must not qualify as `Ident.is_some`);
@@ -66,6 +70,7 @@ impl FunctionContext {
             is_me_method: false,
             static_call_type_hints: HashMap::new(),
             result_projection_types: HashMap::new(),
+            lambda_local_fn_types: HashMap::new(),
             optional_trait_payloads: HashMap::new(),
             unsafe_depth: 0,
         }
@@ -83,6 +88,7 @@ impl FunctionContext {
             is_me_method,
             static_call_type_hints: HashMap::new(),
             result_projection_types: HashMap::new(),
+            lambda_local_fn_types: HashMap::new(),
             optional_trait_payloads: HashMap::new(),
             unsafe_depth: 0,
         }

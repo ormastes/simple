@@ -632,6 +632,7 @@ int64_t  rt_tagged_add(int64_t left, int64_t right);
 int64_t  rt_len(int64_t value);
 int64_t  rt_to_string(int64_t value);
 int64_t  rt_raw_u64_to_string(int64_t raw);
+int64_t  rt_i64_to_hex(int64_t raw);
 int64_t  rt_raw_i64_to_string(int64_t raw);
 /* P1 fix (2026-07-22): flat-optional print helpers, parity mirrors of the
  * Cranelift-path (compiler_rust) helpers of the same name. See

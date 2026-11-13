@@ -581,6 +581,15 @@ fn draw_text_to_buffer(buffer: [u32], buf_w: i32, buf_h: i32, x: i32, y: i32, te
 # Main executor
 # ============================================================================
 
+struct SceneExecReceipt:
+    """Result of `execute_scene_to_buffer_receipt`: the pixels plus how many
+    commands were of a kind this executor does not know (never silently dropped)."""
+    buffer: [u32]
+    unsupported: i64
+
+fn _scene_kind_known(kind: text) -> bool:
+    kind == "fill_rect" or kind == "stroke_rect" or kind == "text" or kind == "line" or kind == "circle" or kind == "circle_filled" or kind == "rounded_rect" or kind == "gradient_rect" or kind == "blur_rect" or kind == "image" or kind == "clip_push" or kind == "clip_pop"
+
 fn execute_scene_to_buffer(scene: RenderScene, buffer: [u32], buf_w: i32, buf_h: i32) -> [u32]:
     """Execute all SceneCommands in a RenderScene, drawing into a flat u32 pixel buffer.
 
@@ -588,13 +597,23 @@ fn execute_scene_to_buffer(scene: RenderScene, buffer: [u32], buf_w: i32, buf_h:
     Pixel format is ARGB (same as SceneCommand.color).
 
     Returns the (mutated) buffer for callers that still capture the result.
+    Use `execute_scene_to_buffer_receipt` to also see the unsupported-kind count.
     """
+    execute_scene_to_buffer_receipt(scene, buffer, buf_w, buf_h).buffer
+
+fn execute_scene_to_buffer_receipt(scene: RenderScene, buffer: [u32], buf_w: i32, buf_h: i32) -> SceneExecReceipt:
+    """Same as `execute_scene_to_buffer`, returning the pixels and the number of
+    commands whose kind is unknown to the executor."""
     var out = copy_u32_buffer(buffer)
     var clip_stack: [ClipRect] = []
+    var unsupported: i64 = 0
 
     var i: i32 = 0
     while i < scene.commands.len():
         val cmd = scene.commands[i]
+
+        if not _scene_kind_known(cmd.kind):
+            unsupported = unsupported + 1
 
         if cmd.kind == "fill_rect":
             out = draw_fill_rect_value(out, buf_w, buf_h, cmd.x, cmd.y, cmd.width, cmd.height, cmd.color, clip_stack)
@@ -626,7 +645,23 @@ fn execute_scene_to_buffer(scene: RenderScene, buffer: [u32], buf_w: i32, buf_h:
             # Backdrop blur: read pixels from buffer, apply box blur, write back
             val blur_radius = cmd.font_size  # blur radius stored in font_size
             if blur_radius > 0:
-                apply_box_blur(out, buf_w, buf_h, cmd.x, cmd.y, cmd.width, cmd.height, blur_radius)
+                var bx = cmd.x
+                var by = cmd.y
+                var bw = cmd.width
+                var bh = cmd.height
+                if clip_stack.len() > 0:
+                    # Honour the active clip like every other op: blur only the
+                    # intersection so pixels outside the clip stay untouched.
+                    val clip = clip_stack[clip_stack.len() - 1]
+                    val ix0 = if bx > clip.x: bx else: clip.x
+                    val iy0 = if by > clip.y: by else: clip.y
+                    val ix1 = if bx + bw < clip.x + clip.w: bx + bw else: clip.x + clip.w
+                    val iy1 = if by + bh < clip.y + clip.h: by + bh else: clip.y + clip.h
+                    bx = ix0
+                    by = iy0
+                    bw = ix1 - ix0
+                    bh = iy1 - iy0
+                apply_box_blur(out, buf_w, buf_h, bx, by, bw, bh, blur_radius)
 
         if cmd.kind == "image":
             draw_image(out, buf_w, buf_h, cmd.x, cmd.y, cmd.width, cmd.height, cmd.pixels, cmd.pixel_width, cmd.pixel_height, clip_stack)
@@ -640,7 +675,7 @@ fn execute_scene_to_buffer(scene: RenderScene, buffer: [u32], buf_w: i32, buf_h:
 
         i = i + 1
 
-    return out
+    return SceneExecReceipt(buffer: out, unsupported: unsupported)
 
 # ============================================================================
 # Query helpers

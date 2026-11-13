@@ -1,0 +1,65 @@
+use std.spec
+use std.spec.step
+use common.render_scene.scene.{SceneCommand, RenderScene, scene_clip_push, scene_clip_pop}
+use common.render_scene.executor.{execute_scene_to_buffer}
+
+"""
+## Purpose and audience
+
+`blur_rect` must honour the active clip stack like every other executor op:
+pixels outside the clip stay untouched. Audience: render_scene maintainers.
+Plan: doc/03_plan/ui/rendering/unified_rendering_qualification_plan_2026-11-13.md section 3.3 / P0.
+Note: blur radius is read from `font_size` by the executor, so the command is
+built with SceneCommand.make directly.
+"""
+
+fn _stripes(w: i32, h: i32) -> [u32]:
+    var px: [u32] = []
+    var y: i32 = 0
+    while y < h:
+        var x: i32 = 0
+        while x < w:
+            px.push(if x % 2 == 0: 0xFF000000u32 else: 0xFFFFFFFFu32)
+            x = x + 1
+        y = y + 1
+    px
+
+fn _blur(x: i32, y: i32, w: i32, h: i32, radius: i32) -> SceneCommand:
+    SceneCommand.make("blur_rect", x, y, w, h, 0, "", radius, 0, 0, 0, [], 0, 0)
+
+describe "executor blur_rect clip":
+    it "leaves pixels outside the clip untouched and blurs inside":
+        step("Blur the whole 20x20 stripe buffer under a clip of x in [0,10)")
+        val src = _stripes(20, 20)
+        var sc = RenderScene.new(20, 20)
+        sc = sc.push(scene_clip_push(0, 0, 10, 20))
+        sc = sc.push(_blur(0, 0, 20, 20, 2))
+        sc = sc.push(scene_clip_pop())
+        val out = execute_scene_to_buffer(sc, src, 20, 20)
+        # Outside the clip: every pixel identical to the source.
+        var changed_outside = 0
+        var y: i32 = 0
+        while y < 20:
+            var x: i32 = 10
+            while x < 20:
+                if out[y * 20 + x] != src[y * 20 + x]:
+                    changed_outside = changed_outside + 1
+                x = x + 1
+            y = y + 1
+        expect(changed_outside).to_equal(0)
+        # Inside the clip the stripes were actually blurred (anti-vacuity).
+        var changed_inside = 0
+        var x2: i32 = 2
+        while x2 < 8:
+            if out[10 * 20 + x2] != src[10 * 20 + x2]:
+                changed_inside = changed_inside + 1
+            x2 = x2 + 1
+        expect(changed_inside).to_be_greater_than(0)
+
+    it "still blurs the full rect when no clip is active":
+        step("Unclipped blur changes pixels at x=15")
+        val src = _stripes(20, 20)
+        var sc = RenderScene.new(20, 20)
+        sc = sc.push(_blur(0, 0, 20, 20, 2))
+        val out = execute_scene_to_buffer(sc, src, 20, 20)
+        expect(out[10 * 20 + 15] != src[10 * 20 + 15]).to_equal(true)

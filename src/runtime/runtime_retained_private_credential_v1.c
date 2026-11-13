@@ -327,6 +327,7 @@ int64_t rt_retained_private_credential_close_v1(int64_t token) {
 end: pthread_mutex_unlock(&simple_private_credentials_lock_v1); return result;
 }
 #else
+#include <stdint.h>
 int64_t rt_retained_private_credential_open_v1(int64_t a,int64_t b) { (void)a;(void)b;return -1; }
 int64_t rt_retained_private_credential_state_v1(int64_t a) { (void)a;return -1; }
 int64_t rt_retained_private_credential_error_v1(int64_t a) { (void)a;return -1; }

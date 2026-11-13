@@ -21,6 +21,8 @@ use app.io.source_discovery.{discover_spl_files, source_path_identity}
 use app.io.cli_ops.{_cli_eprint, _cli_process_run, _cli_run_workspace_root_guard}
 use app.io.cli_ops.{cli_kernel_executable_path}
 use app.io.cli_parallel_children.{cli_jobs_from_args, cli_default_workers, cli_run_children_ordered, cli_all_unique}
+use app.io.sysinfo_ops.{cpu_count}
+use app.cli.shard_mem_clamp.{shard_threads_mem_cap}
 use compiler.common.assurance.warning_phase.warning_phase_env_var_name
 
 extern fn rt_env_set(key: text, value: text) -> bool
@@ -126,6 +128,56 @@ fn _lint_child_split_stats(stdout: text) -> (text, [i64]):
         kept = kept + (if first: "" else: "\n") + line
         first = false
     (kept, stats)
+
+# Lint children are FULL seed runtimes: each loads the lint closure and holds
+# the interpreted parse of its target. Measured tree peaks run ~2.4-3.4 GB per
+# worker on this repo, while the shared cli_parallel_children estimate prices a
+# child at 512 MiB. At 28-32 cores that schedules 28 x ~2.7 GB ~= 75 GB of
+# children onto a host with ~24 GB free, and `simple lint <dir>` swap-thrashes
+# for hours instead of finishing (children also have no timeout, so every
+# pathological file serializes the whole pool behind it). Price lint children
+# honestly and keep automatic fan-out inside a conservative ceiling; an
+# explicit `--jobs N` still wins (it is an operator promise).
+val LINT_CHILD_RSS_ESTIMATE_KIB: i64 = 2097152
+val LINT_FANOUT_MAX_WORKERS: i64 = 12
+
+# Per-child wall-clock bound for the lint fan-out, in seconds. Generous on
+# purpose: the bound exists to convert "hangs forever" into "reports failed",
+# not to time out legitimate large-file lints.
+val LINT_CHILD_TIMEOUT_S: i64 = 900
+
+# (executable, leading argv) for a lint fan-out child. Wrap in GNU timeout
+# when it is present so one pathological file cannot stall the pool; bare
+# hosts (no /usr/bin/timeout) run the child unwrapped exactly as before.
+fn lint_child_supervisor(exe_path: text) -> (text, [text]):
+    if file_exists("/usr/bin/timeout"):
+        ("timeout", ["{LINT_CHILD_TIMEOUT_S}", exe_path])
+    else:
+        (exe_path, [])
+
+fn lint_fanout_workers(requested: i64, files: [text]) -> i64:
+    if files.len() <= 1 or requested == 1:
+        return 1
+    if requested <= 0 and cli_default_workers(requested, files) <= 1:
+        return 1
+    if requested > 0:
+        var honored = requested
+        if honored > files.len():
+            honored = files.len()
+        return honored
+    val cores = cpu_count()
+    val want = if cores > 0: cores else: 1
+    val mem_cap = shard_threads_mem_cap(want, LINT_CHILD_RSS_ESTIMATE_KIB)
+    var workers = want
+    if mem_cap >= 2 and mem_cap < workers:
+        workers = mem_cap
+    if workers > LINT_FANOUT_MAX_WORKERS:
+        workers = LINT_FANOUT_MAX_WORKERS
+    if workers > files.len():
+        workers = files.len()
+    if workers < 1:
+        workers = 1
+    workers
 
 pub fn run_lint_command(args: [text]) -> i64:
     val option_error = lint_option_error(args)
@@ -313,14 +365,25 @@ pub fn run_lint_command(args: [text]) -> i64:
         return 2
     # Fan out one child per file (same binary, single-file => in-process path,
     # so children never recurse). Output is replayed in INPUT order.
+    # Each child is wrapped in a wall-clock bound: a single pathological file
+    # (interpreted parse cost grows with file size; >100 KB files run for
+    # many minutes on the seed) previously stalled the whole pool forever
+    # because nothing could reap or bypass it. GNU timeout exists on every
+    # supported host path except bare macOS, where we keep the unwrapped
+    # spawn. A timed-out child exits 124 with no stats line, so the existing
+    # "produced no result" path reports it as failed instead of hanging.
     val fan_exe = if child_stats_mode or lint_files.len() < 2: "" else: cli_kernel_executable_path()
-    val fan_workers = if fan_exe == "": 1 else: cli_default_workers(jobs_requested, lint_files)
+    val fan_workers = if fan_exe == "": 1 else: lint_fanout_workers(jobs_requested, lint_files)
     var serial_files: [text] = lint_files
     if fan_workers > 1:
         serial_files = []
+        val supervisor = lint_child_supervisor(fan_exe)
         var fan_argvs: [[text]] = []
         for fan_file in lint_files:
-            var fan_args: [text] = ["lint"]
+            var fan_args: [text] = []
+            for sup_arg in supervisor.1:
+                fan_args.push(sup_arg)
+            fan_args.push("lint")
             for opt in child_opts:
                 fan_args.push(opt)
             fan_args.push("--lint-child-stats")
@@ -328,7 +391,7 @@ pub fn run_lint_command(args: [text]) -> i64:
             fan_args.push("1")
             fan_args.push(fan_file)
             fan_argvs.push(fan_args)
-        val fan_runs = cli_run_children_ordered(fan_exe, fan_argvs, fan_workers)
+        val fan_runs = cli_run_children_ordered(supervisor.0, fan_argvs, fan_workers)
         for fan_run in fan_runs:
             val (child_out, stats) = _lint_child_split_stats(fan_run.stdout)
             if child_out.len() > 0:
