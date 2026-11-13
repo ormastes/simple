@@ -4,14 +4,94 @@ use app.cli.worker_hir_profile_v1.{worker_hir_argument_error_v1, worker_hir_stag
     worker_hir_tool_build_environment_keys_v1, worker_hir_base_environment_keys_v1, worker_hir_environment_value_error_v1,
     worker_hir_unsupported_environment_keys_v1,
     worker_hir_environment_key_admitted_v1, worker_hir_child_validate_v1,
-    worker_hir_pool_skip_without_closure_v1}
+    worker_hir_pool_skip_without_closure_v1, worker_hir_environment_admit_v1, worker_hir_profile_admit_v1}
 use app.cli.worker_hir_owner_v1.{worker_hir_cleanup_deadline_v1,
     worker_hir_remaining_budget_v1, worker_hir_environment_sort_v1}
 use app.cli.native_build_output_plan.{native_build_entry_and_sources_v1}
 use app.cli.environment_variant_policy_handoff_owner_v1.{
     ENVIRONMENT_VARIANT_POLICY_HANDOFF_ARG_PREFIX_V1}
+use app.cli.environment_variant_policy_handoff_owner_v1.{
+    environment_variant_policy_handoff_prepare_from_snapshot_v1, environment_variant_policy_handoff_attach_v1}
+use app.cli.environment_variant_policy_sources_v1.{EnvironmentVariantConfigSourceV1}
 use std.common.process.observation_v4.{ProcessObservationEnvironmentV4,
     PROCESS_OBSERVATION_V4_MAX_WALL_BUDGET_NS}
+
+# Exact Stage 3 launch environment as the HIR pool coordinator captures it:
+# the transcribed runner's env -i base, the RSS watchdog's exports, the
+# coordinator's own pool markers, and the lane values that reach the HIR pool
+# (two-pass route: SIMPLE_FILE_WORKERS=0).
+fn stage3_common_launch_env() -> [(text, text)]:
+    [("HOME", "/w/home"), ("PATH", "/usr/bin:/bin"), ("TMPDIR", "/w/tmp"), ("TMP", "/w/tmp"),
+        ("TEMP", "/w/tmp"), ("LC_ALL", "C"), ("LANG", "C"),
+        ("SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB", "8388608"), ("SIMPLE_BOOTSTRAP_RSS_CAP_MODE", "enforce"),
+        ("SIMPLE_BOOTSTRAP_SESSION_ID", "4242"), ("SIMPLE_BOOTSTRAP_SESSION_EXEC", "/w/tmp/session"),
+        ("SIMPLE_BOOTSTRAP_PROCESS_OBSERVER", "/w/tmp/observer"),
+        ("SIMPLE_BOOTSTRAP_PROCESS_OBSERVER_SHA256", "ab"),
+        ("RUST_LOG", "error"), ("LIBRARY_PATH", ""), ("SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256", "absent"),
+        ("SIMPLE_BOOTSTRAP", "1"), ("SIMPLE_FILE_WORKERS", "0"), ("SIMPLE_NATIVE_GO_TO_END", "1"),
+        ("SIMPLE_ABI_POLICY", "v1"), ("SIMPLE_ABI_ADMISSION_RECEIPT", "/w/admission.sdn"),
+        ("SIMPLE_NO_DEPRECATED_WARNINGS", "1"), ("SIMPLE_STAGE3_STREAMING_SURFACES", "0"),
+        ("SIMPLE_FRONTEND_CACHE", "1"), ("SIMPLE_FRONTEND_CACHE_DIR", "/w/c/frontend"),
+        ("SIMPLE_HIR_CACHE", "1"), ("SIMPLE_HIR_CACHE_DIR", "/w/c/hir"),
+        ("MALLOC_ARENA_MAX", "2"), ("MALLOC_TRIM_THRESHOLD_", "0"),
+        ("SIMPLE_NATIVE_ARENA_DECLS", "1"), ("SIMPLE_NO_STUB_FALLBACK", "1"),
+        ("SIMPLE_PACKAGE_INDEX_COLD_INIT", "1"), ("SIMPLE_SAFETY_PROFILE", "critical"),
+        ("SIMPLE_ASSURANCE_WARNING_PHASE", "1"), ("SIMPLE_BUILD_PROGRESS_EVENTS", "1"),
+        ("SIMPLE_COMPILER_PHASE_PROFILE", "1"), ("SIMPLE_COMPILER_PHASE_PROFILE_FILE", "/w/phase.sdn"),
+        ("SIMPLE_MEM_SNAPSHOT_FILE", "/w/mem.sdn"), ("SIMPLE_EVIDENCE_RUN_ID", "run-28"),
+        ("LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING", "1"),
+        ("SIMPLE_NATIVE_BUILD_TARGET", "x86_64-unknown-linux-gnu"), ("SIMPLE_NATIVE_BUILD_THREADS", "8"),
+        ("SIMPLE_NATIVE_BUILD_CACHE_DIR", "/w/c"), ("SIMPLE_RUNTIME_PATH", "/w/rt"),
+        ("SIMPLE_NATIVE_RUNTIME_BUNDLE", "core-c-bootstrap"), ("SIMPLE_BINARY", "/w/stage2/simple"),
+        ("SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB", "16777216"),
+        ("SIMPLE_BOOTSTRAP_INTERNAL_NATIVE_BUILD_ROUTING", "1"), ("SIMPLE_HIR_SHARD_QUEUE", "/w/c/q")]
+
+# resume-stage3-from-admitted.sh -> lib/stage3-native-build-worker.sh:205-235.
+fn stage3_resume_launch_env(route: text, fallback: text) -> [(text, text)]:
+    var env = stage3_common_launch_env()
+    env.push(("SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB", "16777216"))
+    env.push(("SIMPLE_BOOTSTRAP_STAGE3_REQUESTED_ROUTE", route))
+    env.push(("SIMPLE_BOOTSTRAP_STAGE3_FALLBACK_ROUTE", fallback))
+    env
+
+# bootstrap-from-scratch.sh --full-bootstrap Stage 3 block (no route keys).
+fn stage3_full_launch_env() -> [(text, text)]:
+    var env = stage3_common_launch_env()
+    for pair in [("SIMPLE_BOOTSTRAP_STAGE3", "1"), ("SIMPLE_PLUGIN_MANIFEST_POLICY", "v1"),
+            ("SIMPLE_KERNEL_K1_POLICY", "v1"), ("SIMPLE_COVERAGE_CUTOVER_STATE", "off"),
+            ("SIMPLE_K1_COMPOSITION_SHA256_BEFORE", "ab"), ("SIMPLE_NATIVE_STAGED_CODEGEN_BATCH", "64"),
+            ("SIMPLE_CACHE_SCOPE", "stage3"), ("SIMPLE_KEEP_SOURCE_CONTENTS", ""),
+            ("SIMPLE_MIR_TAG_PROBE", ""), ("SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_READ", "/w/p2.sdn"),
+            ("SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT", "/w/c")]:
+        env.push(pair)
+    env
+
+fn admitted_env_size(env: [(text, text)]) -> text:
+    match worker_hir_environment_admit_v1(env):
+        case Ok(environment): "{environment.len()}"
+        case Err(reason): reason
+
+fn admit_error(env: [(text, text)]) -> text:
+    match worker_hir_environment_admit_v1(env):
+        case Ok(_): ""
+        case Err(reason): reason
+
+fn handed_args(user_args: [text]) -> [text]:
+    val absent = EnvironmentVariantConfigSourceV1(present: false, source_identity: "", content: "")
+    val prepared = environment_variant_policy_handoff_prepare_from_snapshot_v1(user_args, [], absent, absent).unwrap()
+    environment_variant_policy_handoff_attach_v1(user_args, prepared.encoded_payload).unwrap()
+
+fn profile_error(args: [text], deadline_ms: i64) -> text:
+    match worker_hir_profile_admit_v1(args, "src/app/cli/bootstrap_main.spl", [], deadline_ms):
+        case Ok(_): ""
+        case Err(reason): reason
+
+fn launch_env_value_errors(env: [(text, text)]) -> [text]:
+    var out: [text] = []
+    for pair in env:
+        val reason = worker_hir_environment_value_error_v1(pair.0, pair.1)
+        if reason != "": out.push(pair.0 + ": " + reason)
+    out
 
 describe "worker HIR profile admission":
     it "admits explicit HIR consumer arguments":
@@ -96,10 +176,72 @@ describe "worker HIR profile admission":
             "SIMPLE_EVIDENCE_RUN_ID", "SIMPLE_NATIVE_BUILD_TARGET", "SIMPLE_NATIVE_BUILD_THREADS",
             "SIMPLE_RUNTIME_PATH", "SIMPLE_NATIVE_RUNTIME_BUNDLE",
             "SIMPLE_MIR_SHARD_INTERFACE_HIR",
-            "SIMPLE_WINDOWS_ABI", "CC", "INCLUDE", "LIB", "LIBPATH", "OS"]
+            "SIMPLE_BOOTSTRAP_STAGE3_REQUESTED_ROUTE", "SIMPLE_BOOTSTRAP_STAGE3_FALLBACK_ROUTE",
+            "SIMPLE_WINDOWS_ABI", "SIMPLE_LINKER_FLAVOR", "CC", "INCLUDE", "LIB", "LIBPATH", "OS"]
         expect(worker_hir_stage3_capsule_environment_keys_v1()).to_equal(stage3)
         for name in stage3:
             expect(worker_hir_environment_key_admitted_v1(name)).to_equal(true)
+
+    it "admits the resume Stage 3 launch environment so the HIR pool is not refused":
+        # Run 28 debug log: "[hir-shard] profile admission rejected: unsupported
+        # HIR worker environment key: SIMPLE_BOOTSTRAP_STAGE3_REQUESTED_ROUTE,
+        # SIMPLE_BOOTSTRAP_STAGE3_FALLBACK_ROUTE" -> HIR ran in one process.
+        for routes in [("coordinator", "direct"), ("direct", "none")]:
+            val env = stage3_resume_launch_env(routes.0, routes.1)
+            expect(worker_hir_unsupported_environment_keys_v1(env).join(", ")).to_equal("")
+            expect(launch_env_value_errors(env).join("; ")).to_equal("")
+            expect(admitted_env_size(env)).to_equal("{env.len()}")
+
+    it "admits the full-bootstrap Stage 3 launch environment":
+        val env = stage3_full_launch_env()
+        expect(worker_hir_unsupported_environment_keys_v1(env).join(", ")).to_equal("")
+        expect(launch_env_value_errors(env).join("; ")).to_equal("")
+        expect(admitted_env_size(env)).to_equal("{env.len()}")
+
+    it "refuses an inadmissible captured environment at the admission step":
+        expect(admit_error(stage3_resume_launch_env("coordinator", "direct"))).to_equal("")
+        var unknown = stage3_full_launch_env()
+        unknown.push(("SIMPLE_SCV_INVENTORY_COLD_INIT", "1"))
+        unknown.push(("LD_PRELOAD", "x.so"))
+        expect(admit_error(unknown)).to_equal(
+            "unsupported HIR worker environment key: SIMPLE_SCV_INVENTORY_COLD_INIT, LD_PRELOAD")
+        var duplicate = stage3_full_launch_env()
+        duplicate.push(("HOME", "/other"))
+        expect(admit_error(duplicate)).to_equal("duplicate HIR worker environment key")
+        expect(admit_error(stage3_resume_launch_env("process", "none"))).to_equal(
+            "HIR profile requires a Stage 3 requested route of direct or coordinator")
+        expect(admit_error([("PATH", "/bin".repeat(17000))])).to_equal("HIR worker environment exceeds byte bound")
+        var many: [(text, text)] = []
+        for _ in 0..257: many.push(("HOME", "/h"))
+        expect(admit_error(many)).to_equal("HIR worker environment exceeds profile bound")
+
+    it "checks profile arguments and deadline before the frozen closure":
+        expect(profile_error(handed_args(["--plugin", "x"]), 1)).to_equal("unsupported HIR worker option: --plugin")
+        var wide = ["--entry-closure"]
+        for _ in 0..256: wide.push("--strip")
+        expect(profile_error(handed_args(wide), 1)).to_equal("HIR worker argv exceeds profile bound")
+        expect(profile_error(handed_args(["--entry-closure", "--log", "x".repeat(262145)]), 1)).to_equal(
+            "HIR worker argv exceeds byte bound")
+        expect(profile_error(handed_args(["--entry-closure"]), 0)).to_equal("HIR worker requires a parent absolute deadline")
+        expect(profile_error(handed_args(["--entry-closure"]), 1)).to_equal("no closure request published")
+
+    it "gates the Stage 3 route keys to the bootstrap route policy values":
+        # lib/stage3-direct-parallel.shs: route direct|coordinator, fallback none|direct.
+        for good in ["direct", "coordinator"]:
+            expect(worker_hir_environment_value_error_v1("SIMPLE_BOOTSTRAP_STAGE3_REQUESTED_ROUTE", good)).to_equal("")
+        for good in ["none", "direct"]:
+            expect(worker_hir_environment_value_error_v1("SIMPLE_BOOTSTRAP_STAGE3_FALLBACK_ROUTE", good)).to_equal("")
+        for bad in ["", "process", "Direct", "coordinator "]:
+            expect(worker_hir_environment_value_error_v1("SIMPLE_BOOTSTRAP_STAGE3_REQUESTED_ROUTE", bad) == "").to_equal(false)
+        for bad in ["", "coordinator", "NONE"]:
+            expect(worker_hir_environment_value_error_v1("SIMPLE_BOOTSTRAP_STAGE3_FALLBACK_ROUTE", bad) == "").to_equal(false)
+        expect(launch_env_value_errors(stage3_resume_launch_env("process", "none")).len()).to_equal(1)
+
+    it "still refuses opt-in Stage 3 keys that change worker behaviour":
+        # Operator opt-ins outside the reviewed profile stay refused, by name.
+        for name in ["SIMPLE_SCV_INVENTORY_COLD_INIT", "SIMPLE_BOOTSTRAP_DIAG", "SIMPLE_COMPILER_TRACE",
+                "SIMPLE_BOOTSTRAP_STAGE3_ROUTE", "SIMPLE_BOOTSTRAP_STAGE3_REQUESTED_ROUTE_X"]:
+            expect(worker_hir_environment_key_admitted_v1(name)).to_equal(false)
 
     it "admits the MIR shard HIR residency opt-in on the Stage 3 lane":
         # Stage 3 forwards SIMPLE_MIR_SHARD_INTERFACE_HIR to every pool child; a
@@ -127,6 +269,7 @@ describe "worker HIR profile admission":
             "SIMPLE_BOOTSTRAP_PROCESS_OBSERVER", "SIMPLE_BOOTSTRAP_PROCESS_OBSERVER_SHA256",
             "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT",
             "CXX", "SIMPLE_CC", "SIMPLE_NO_BOOTSTRAP_DELEGATE", "SIMPLE_RUNTIME_RISCV64_VECTOR",
+            "SIMPLE_LINKER_FLAVOR",
             "SIMPLE_SHARD_MEM_CLAMP", "SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS",
             "SIMPLE_BUILD_MEMORY_RESERVE_BYTES"]
         expect(worker_hir_tool_build_environment_keys_v1()).to_equal(tools)
