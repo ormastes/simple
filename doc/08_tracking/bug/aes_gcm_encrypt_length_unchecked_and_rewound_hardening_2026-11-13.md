@@ -34,6 +34,9 @@ open.
      again. The canonical copy lost it (item 2).
    - No spec pins the encrypt panic yet. The spec runner has no way to assert
      a panic, so the NVFS encrypt guard is restored but not pinned by a test.
+     NVFS callers cannot reach the panic as written: `_gen_key_bytes` and
+     `_derive_data_key_bytes_gen` always produce 16-byte keys, and `_make_iv`
+     always produces 12 bytes (`encryption.spl`).
 2. **Canonical `src/os/crypto/aes128_gcm.spl` is still the rewound blob.**
    - `e274cd33719`, a stale-snapshot merge on 2026-08-27, reverted
      `db9fa3350a4` (2026-08-25) in both the canonical and the NVFS copy.
@@ -43,18 +46,21 @@ open.
    - `sh scripts/audit/aes128-gcm-sffi-authority.shs` fails at its second
      line, which expects 15 `@unsafe` annotations in canonical and finds 1. The
      NVFS half of the audit passes.
-3. **`std.common.crypto.aes_gcm` has no length checks in decrypt** for
-   aes128/192/256.
-   - Direct callers: `typed/aead`, `quic_crypto`, `os/apps/sshd/ssh_cipher`
-     and `os.crypto.aes_gcm`.
-   - `os/crypto/aes256_gcm.spl` now checks lengths before it calls into this
-     module. The module's other callers get no check.
+3. **Two more copies have no length checks in decrypt:**
+   - `std.common.crypto.aes_gcm` (aes128/192/256). Its direct callers are
+     `typed/aead`, `quic_crypto` and `os/crypto/aes256_gcm.spl`. The
+     `aes256_gcm` wrapper now checks lengths before it calls in, but the
+     other callers get no check.
+   - `src/os/crypto/aes_gcm.spl`, a separate pure-Simple AES-256-GCM
+     implementation with its own `aes256_gcm_decrypt`. It is imported by
+     `src/os/apps/sshd/ssh_cipher.spl:18` and `src/os/crypto/mod.spl:25`.
 4. **`rt_tls13_aes128_gcm_decrypt` returns different encodings depending on
    the backing.**
    - The Rust interpreter (`interpreter_extern/simd.rs`) and the Rust runtime
-     (`runtime/src/value/aes.rs`) return status-prefixed bytes: `[]` for
-     invalid input, `[0x00]` for a tag mismatch, and `[0x01, ...pt]` on
-     success.
+     (`runtime/src/value/aes.rs`) both return status-prefixed bytes:
+     `[0x00]` for a tag mismatch and `[0x01, ...pt]` on success.
+   - On invalid input they differ. The runtime returns `[]`. The interpreter
+     raises `rt_tls13_aes128_gcm_decrypt rejected its inputs`.
    - The baremetal C stub (`examples/.../baremetal_stubs.c`) returns raw
      plaintext, or `NIL` on failure.
    - `src/os/tls13/record13.spl:294,346` and `sffi/host.spl:606` still read

@@ -143,6 +143,9 @@ noalloc TLS:
   **corrupted tag as `Ok`**. On the Rust backings that extern returns `[0x00]`
   for a tag mismatch, and the copy only checked `len() > 0`. A valid decrypt
   came back with a 0x01 status byte in front of the plaintext.
+- How the red failed: TC2 decrypt and corrupted-tag failed on their
+  assertions. The three length examples failed when the interpreter's
+  extern raised `rt_tls13_aes128_gcm_decrypt rejected its inputs`.
 - Fix: remove the fast path and its extern, so only the pure path runs.
 - Add the key 16 / nonce 12 / tag 16 guards before any input is read.
 
