@@ -6,15 +6,16 @@ ContextStoreV1 owners, so in-memory rows cannot satisfy the reopen assertions.
 
 use std.io_runtime.{file_delete, file_exists, file_read, file_write}
 use std.nogc_sync_mut.io.file_ops.{file_lock, file_unlock}
+use std.env.platform.{get_temp_dir}
+use test.helpers.simple_cli_spawn_fixture.{simple_cli_run}
 
 extern fn rt_getpid() -> i64
 extern fn rt_time_now_unix_micros() -> i64
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 
-val RUNNER = "test/integration/app/context_store_v1_recovery_runner.spl"
+val RUNNER = "test/02_integration/app/context_store_v1_recovery_runner.spl"
 
 fn path(suffix: text) -> text:
-    "/tmp/context_store_v1_{rt_getpid()}_{rt_time_now_unix_micros()}_{suffix}.db"
+    get_temp_dir() + "/context_store_v1_{rt_getpid()}_{rt_time_now_unix_micros()}_{suffix}.db"
 
 fn remove(path: text):
     if file_exists(path):
@@ -23,13 +24,13 @@ fn remove(path: text):
         file_delete(path + ".context.lock")
 
 fn run(mode: text, db_path: text) -> (text, text, i64):
-    rt_process_run("bin/simple", ["run", RUNNER, mode, db_path])
+    simple_cli_run([RUNNER, mode, db_path], 120000)
 
 fn run_malformed(db_path: text, kind: text) -> (text, text, i64):
-    rt_process_run("bin/simple", ["run", RUNNER, "malformed", db_path, kind])
+    simple_cli_run([RUNNER, "malformed", db_path, kind], 120000)
 
 fn run_corrupt(db_path: text, kind: text) -> (text, text, i64):
-    rt_process_run("bin/simple", ["run", RUNNER, "corrupt", db_path, kind])
+    simple_cli_run([RUNNER, "corrupt", db_path, kind], 120000)
 
 describe "ContextStoreV1 durable recovery" :
     it "persists rows and reopens them through independent ContextStore owners":
@@ -70,12 +71,12 @@ describe "ContextStoreV1 durable recovery" :
         remove(truncated_path)
         expect(file_write(empty_path, "")).to_equal(true)
         expect(file_write(foreign_path, "SQLite format 3\000\000")).to_equal(true)
-        val (empty_out, _empty_err, empty_code) = rt_process_run(
-            "bin/simple", ["run", RUNNER, "reject", empty_path, "empty"])
+        val (empty_out, _empty_err, empty_code) = simple_cli_run(
+            [RUNNER, "reject", empty_path, "empty"], 120000)
         expect(empty_code).to_equal(0)
         expect(empty_out).to_contain("CONTEXT_STORE_IMAGE_REJECTED kind=empty")
-        val (foreign_out, _foreign_err, foreign_code) = rt_process_run(
-            "bin/simple", ["run", RUNNER, "reject", foreign_path, "foreign"])
+        val (foreign_out, _foreign_err, foreign_code) = simple_cli_run(
+            [RUNNER, "reject", foreign_path, "foreign"], 120000)
         expect(foreign_code).to_equal(0)
         expect(foreign_out).to_contain("CONTEXT_STORE_IMAGE_REJECTED kind=foreign")
         val (corrupt_out, _corrupt_err, corrupt_code) = run_corrupt(corrupt_path, "checksum")

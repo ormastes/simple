@@ -298,3 +298,82 @@ Source queue: `build/phase2-runner/fails_so_far.txt` (227) minus 29 `*_log_modes
 | `test/02_integration/bootstrap/macos_process_live_tmpdir_expansion_spec.spl` | product-bug-suspect / seed-gap — not root-caused within budget |
 | `test/02_integration/bootstrap/stage2_object_path_diagnostic_read_spec.spl` | shell/tmp-fixture family (agent-20 scope) |
 | `test/02_integration/compiler/backend/cranelift_cross_module_call_abi_spec.spl` | product-bug-suspect / seed-gap — not root-caused within budget |
+
+
+---
+
+# Lane addendum — product-queue p1 (work/product-queue-p1-20261112, 2026-11-13)
+
+Scope: lines 1-57 of `build/phase2-runner/lanes/product_queue.txt` minus the
+scv_* cluster (lines 48-57, owned by the scv lane) = 47 specs. All 47
+reproduced once with `./bin/simple.exe test <spec> --timeout 300` in the pq1
+worktree at `origin/release/1.0.0` plus the phase2 seed binary. Per-spec
+dispositions are in the PR table (work/product-queue-p1-20261112); the summary
+below is the durable record.
+
+## Product fixes verified green this lane
+
+1. `MarkdownBuilder(content: "")` stale constructor (7 sites: audit ×4,
+   gen_spec_docs ×2, spec_gen/markdown) — field renamed to `parts` upstream;
+   every render path died at compile time. Fixed; `semantic_document_rendering`
+   3/8 → 7/8.
+2. `timestamp_*()` zero-arg calls in three `current_timestamp()` helpers —
+   functions now require `micros`; threaded `time_now_unix_micros()`.
+3. `app.debug.interpreter_backend` (+ `std.nogc_sync_mut` twin): raw native
+   debug externs (`rt_debug_set_active(i64)`, ptr-style breakpoint ABI)
+   collided with the bool interpreter-mode facade and/or are unregistered
+   under the seed. Migrated to the `std.nogc_sync_mut.io.debug_stubs` facade;
+   added `ds_remove_all_breakpoints`/`rt_debug_remove_all_breakpoints`.
+   `debug_interpreter_service_v1` 0/3 → 3/3.
+4. `service_v1.record_outcome_receipt_at` hardcoded `allowed=true` on every
+   outcome receipt, including refusals — now `allowed = succeeded` (matches
+   the sibling receipt paths).
+5. `proton_session_plan/main.spl` declared unprefixed `stdout_write` extern
+   (no such runtime symbol) — renamed to `rt_stdout_write_text`; plan now
+   prints (spec oracle updated to the current deterministic runtime-feature
+   strings; `stderr == ""` remains seed-blocked).
+6. `app.io.context_ops.context_sql_db_format` was imported by
+   `context_pure_database_importer` but never implemented (file would not
+   compile) — implemented as a semantic facade probe (open + context_packs
+   table check) because the same facade runs over real SQLite pages and the
+   pure-database codec.
+
+## Spec-environment fixes (merged conventions)
+
+- `provider_cli_entry_spec`: stale `abi=771` oracle (field migrated
+  i64 -> 64-hex text by 7306928a2aa) updated to the current placeholder
+  output; placeholder itself bug-doc'd.
+- `context_store_v1_recovery`, `context_pure_database_import`,
+  `pure_sql_reopen_process`, `run_diagnostics_contract`: wrong runner paths
+  (`test/integration/app/...` → `test/02_integration/app/...`), POSIX `/tmp`
+  fixtures anchored at `get_temp_dir()`, raw `rt_process_run` replaced with
+  the host-portable `process_run`/`simple_cli_run` fixtures, stale
+  `bin/release/x86_64-unknown-linux-gnu/simple` repointed to `bin/simple`.
+- `bug_add_database_preservation`: POSIX `/tmp` anchored; examples gated on
+  the `SIMPLE_BINARY` + `SIMPLE_BUGDB_CAPTURE_ROOT` harness contract via a
+  `skip` helper (portal `it_git` precedent). Outcome OK, skipped.
+- `semantic_document_rendering`: spipe-docgen spawn timeouts 30s → 120s
+  (seed compile of docgen is ~40s; 30s was a silent per-call timeout).
+
+## Bug docs filed (deep gaps, specs stay RED — no skip-gating to hide)
+
+- `2026-11-12_dir_create_all_same_signature_collision_swaps_bodies.md` —
+  release/* family blocked (compiler-confirmed same-signature collision).
+- `2026-11-12_pure_db_reopen_crashes_under_seed.md` — reader
+  STATUS_STACK_BUFFER_OVERRUN (0xC0000409), sqlite_sffi create/reopen
+  asymmetry, constant `1/0` STATUS_ILLEGAL_INSTRUCTION (0xC000001D).
+- `2026-11-12_provider_cli_abi_digest_placeholder.md` — fabricated abi_digest.
+- `2026-11-12_cli_debug_unprefixed_stdout_write_extern.md` — latent extern
+  defect, same class as the proton fix.
+- `2026-11-12_query_visibility_hidden_summary_needs_decision.md` — `[]` vs
+  hidden-symbols-summary oracle, needs owner decision.
+
+## Seed-gap cluster (documented, unchanged)
+
+CLI specs spawning `bin/simple` with exact-output/stderr-purity assertions
+(`semantic_ast_link_cli`, `semantic_doc_links_cli`, `semantic_spec_gen_cli`,
+`query_visibility_workspace_symbols`, `proton_session_plan` stderr half,
+`itf_color_pipe`, `lsp_runtime_owner` [SIMPLE_LSP_TEST_BINARY],
+`revision_code_action_child`) — the Rust seed lacks the newer subcommands
+(`ast-link`, `semantic-doc-links`) and cannot satisfy stderr-purity; expected
+green under the self-hosted binary per the ledger's seed-gap class.
