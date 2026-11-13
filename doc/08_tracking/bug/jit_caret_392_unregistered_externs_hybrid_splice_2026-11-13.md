@@ -259,7 +259,8 @@ Class (a) Rust exports deliberately **left spliced**:
 | `rt_black_box` | `.spl` return is `i64?` |
 | `rt_perf_dump_sdn` | native has no perf-region recorder; only the interpreter records |
 | `rt_linux_container_user_{open,observe,close}_v1` | Rust definitions are `-95` stubs |
-| `rt_tagged_add`, `rt_dyncall_4/5/6` | no single-line `.spl` declaration to check the ABI against |
+| `rt_tagged_add` | declared with `RuntimeValuePtr` parameters; not checked against the JIT value representation |
+| `rt_dyncall_4/5/6` | all-`i64` Rust ABI, but the `.spl` declaration was not located; register once it is read |
 | `rt_process_run_bounded_bytes` | (ptr, len) text ABI; needs the text-expansion path verified |
 | `rt_process_stdout_state`, `rt_process_piped_exit_status_value` | `piped_process_observer.rs` is not compiled into the seed (not class (a); link fails) |
 
@@ -305,3 +306,53 @@ succeed. Native linking is the only working lane for them.
 
 Zero splice for caret `--help` therefore needs cfg-pruning of the platform-foreign
 and unimplemented declarations (about 180 names), not more registration.
+
+## Verification notes and follow-ups (2026-11-13)
+
+- **Interpreter drift ratchet.** `extern_dispatch_covers_declared_runtime_symbols_with_live_callers`
+  (`interpreter_extern/extern_drift_tests.rs`) requires every manifest name with a
+  live `.spl` caller to have an interpreter handler. 19 of the registered names
+  never had one (16 from wave 1, 3 from wave 2), so wave 1 turned that unit test
+  red on `release/1.0.0`; wave 2 adds them to `ALLOWED_KNOWN_GAPS` with reasons.
+  Interpreter behaviour is unchanged (a call failed closed before and still
+  does). Writing real handlers for the cheap ones (`rt_path_extension`,
+  `rt_path_filename`, `rt_term_write`, `rt_term_flush`, `rt_stdin_read*`) would
+  remove them from that list.
+- **Invalid-fd divergence, pre-existing family behaviour.** For `rt_io_file_*`
+  the interpreter handler raises `argument 0 must be a valid file descriptor`,
+  the native export returns `false`/`0`. The already-registered sibling
+  `rt_io_file_flush(-1)` behaves the same way on the base seed, so the newly
+  registered `rt_io_file_set_permissions` / `rt_io_file_meta_*` /
+  `rt_io_file_write*` follow the family, not a new rule.
+- **Probed under JIT and interpreter:** file mtime/mode, byte-array/text
+  round-trip, UTF-8 validation, random int/f64, stderr print, shell exec, memory
+  counters, time (i64 and f64), thread id, `rt_file_sync`, `rt_file_create_excl`,
+  `rt_pty_resize` (i32 parameters), `rt_file_atomic_write_bytes_array`,
+  `rt_pty_read`. **Probed under JIT only** (no interpreter handler, or handler
+  refuses): path extension/filename, term write/flush, stdin readers,
+  `rt_io_file_set_permissions` (bool parameter), V4 reserved scalars, alloc
+  probes, linux-group scalars.
+- **Registered but not probed:** `rt_process_run_tuple`,
+  `rt_process_run_bounded_tuple`, `rt_process_run_bounded_*_tuple_v1`,
+  `rt_process_spawn_async_environment_v1` (raw pointer/tuple ABI),
+  `rt_io_file_write`, `rt_io_file_write_all`, `rt_io_file_meta_created/flags`,
+  `rt_fd_stat_snapshot_v1`, `rt_par_atomic_*`, `spl_dlopen/dlsym/dlclose`,
+  `spl_wffi_call_i64`, `rt_arm_array_*`, `rt_debug_exit_success`,
+  `rt_process_observation_v4_reserve_value`, `rt_linux_group_stream_release_inherited_v2`.
+- **Declarations are unconditional.** The platform-foreign names are declared
+  with no `@cfg` in `src/lib/nogc_sync_mut/io/windows_process_owner_abi.spl`
+  (Win32), `src/lib/nogc_async_mut/io/platform_event.spl` (kqueue/iocp/event
+  ports) and `src/os/kernel/arch/**` (`pmm_*`, `rt_port_*`). `run_file_jit`
+  lists every declared extern without a symbol, whether or not any MIR `Call`
+  targets it, while `apply_hybrid_transform` only rewrites `Call` instructions.
+  The cheapest next step is seed-side: in
+  `src/compiler_rust/driver/src/exec_core.rs` (the `unresolvable_externs`
+  block), keep only names that are a `Call` target or `GlobalLoad` name in the
+  lowered MIR. That removes declared-but-never-called names from the receipt
+  without touching `.spl`.
+- `scripts/check/check-jit-runtime-symbol-manifest.shs` is red on the base and
+  names `rt_file_atomic_write`, `rt_file_atomic_write_mode`, `rt_perf_dump_sdn`
+  and `rt_process_run_bounded_bytes` as codegen-emitted and missing from the
+  manifest. They are the ones left spliced above; settle their ABI questions
+  and that gate's list shrinks with them.
+- `bug_db.sdn` rows for this bug were not updated; the bug stays OPEN.

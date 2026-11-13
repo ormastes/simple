@@ -67,6 +67,9 @@ extern fn rt_heap_array_capacity_bytes() -> i64
 extern fn rt_mem_attr_enabled() -> i64
 extern fn rt_transient_array_scope_state_v1() -> i64
 extern fn rt_process_last_child_peak_rss_kib() -> i64
+extern fn rt_pty_resize(handle: i64, rows: i32, cols: i32) -> bool
+extern fn rt_pty_read(handle: i64, timeout_ms: i64) -> text
+extern fn rt_file_atomic_write_bytes_array(path: text, data: [u8]) -> bool
 
 fn main():
     val p = "__P__"
@@ -96,6 +99,16 @@ fn main():
     print "heapcap_nonneg={rt_heap_array_capacity_bytes() >= 0} attr={rt_mem_attr_enabled()}"
     print "scope_state={rt_transient_array_scope_state_v1()}"
     print "child_rss_nonneg={rt_process_last_child_peak_rss_kib() >= 0}"
+    val resized = rt_pty_resize(-1, 24, 80)
+    var resized_text = "false"
+    if resized:
+        resized_text = "true"
+    val wrote = rt_file_atomic_write_bytes_array("__P__.atomic", rt_string_to_byte_array("payload"))
+    var wrote_text = "false"
+    if wrote:
+        wrote_text = "true"
+    print "resize_bad={resized_text} atomic={wrote_text} atomic_mode_ok={rt_file_mode("__P__.atomic") >= 0}"
+    print "pty_read_bad=[{rt_pty_read(-1, 0)}]"
 "#;
 
 /// Externs with a native provider and no interpreter handler: before
@@ -108,6 +121,8 @@ extern fn rt_term_write(data: text) -> i64
 extern fn rt_term_flush() -> i32
 extern fn rt_stdin_read_all() -> [u8]
 extern fn rt_stdin_read(size: i64) -> [u8]
+extern fn rt_io_file_set_permissions(fd: i64, readonly: bool) -> bool
+extern fn rt_io_file_meta_modified(fd: i64) -> i64
 
 fn main():
     print "ext=[{rt_path_extension("/a/b/c.tar.gz")}] name=[{rt_path_filename("/a/b/c.tar.gz")}] noext=[{rt_path_extension("/a/b/c")}]"
@@ -118,10 +133,15 @@ fn main():
     print "stdin_head_len={head.len()} h0={head[0]}"
     val rest = rt_stdin_read_all()
     print "stdin_rest_len={rest.len()} text=[{rt_string_from_byte_array(rest)}]"
+    val perm = rt_io_file_set_permissions(-1, true)
+    var perm_text = "false"
+    if perm:
+        perm_text = "true"
+    print "perm_bad={perm_text} meta_bad={rt_io_file_meta_modified(-1)}"
 "#;
 
 const NATIVE_ONLY_EXPECTED: &str = "ext=[gz] name=[c.tar.gz] noext=[]\nterm-out\nterm_write=9 flush=0\n\
-stdin_head_len=3 h0=97\nstdin_rest_len=5 text=[defgh]\n";
+stdin_head_len=3 h0=97\nstdin_rest_len=5 text=[defgh]\nperm_bad=false meta_bad=0\n";
 
 const UNKNOWN_EXTERN: &str = r#"
 extern fn rt_caret_jit_extern_gate_never_registered(x: i64) -> i64
@@ -154,7 +174,14 @@ fn jit_and_interpreter_agree_on_registered_externs() {
     assert!(interp.status.success(), "interpreter run failed:\n{}", text(&interp.stderr));
     assert_eq!(text(&jit.stdout), text(&interp.stdout));
     let stdout = text(&jit.stdout);
-    for line in ["uniform=2.5", "randint=7", "roundtrip=[héllo]", "shell=[hi-from-shell", "mode_missing=-1"] {
+    for line in [
+        "uniform=2.5",
+        "randint=7",
+        "roundtrip=[héllo]",
+        "shell=[hi-from-shell",
+        "mode_missing=-1",
+        "resize_bad=false atomic=true atomic_mode_ok=true",
+    ] {
         assert!(stdout.contains(line), "missing `{line}` in:\n{stdout}");
     }
     assert!(text(&jit.stderr).contains("to-stderr"));
