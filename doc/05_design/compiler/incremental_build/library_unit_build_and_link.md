@@ -167,5 +167,9 @@ the user-visible win. Receipt-gate and per-lane cache scope rules are unchanged.
 3. (done) `library_unit_archive_v1.spl`: archive writer over `objects/` via the
    existing archiver command builder; write-once `receipt.sdn` (unit_key
    re-verified on read, scope_key recorded); `library_unit_archive_complete_v1`.
-4. `BuildGraph` adapter: plan → `BuildUnit`s, poison propagation.
+4. (done) `library_unit_graph_v1.spl`: plan → `ParallelBuilder` units (ids in plan
+   order, fail-closed on a non-dependency-first plan); pure `library_unit_poison_v1`
+   / `library_unit_buildable_v1`. Note: `ParallelBuilder.build` records only DIRECT
+   failures in `errors` and counts dependents as `Failed("Dependency failed")` in
+   `stats.failed`; the poison function is what names them for the manifest.
 5. Link from archives; Stage 3 behind the flag; Stage 4 reuse; manifest drift fix.
