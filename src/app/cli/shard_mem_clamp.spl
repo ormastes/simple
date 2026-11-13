@@ -23,68 +23,62 @@ use app.io.env_ops.{env_get}
 use app.io.process_ops.{process_run_timeout}
 use std.nogc_sync_mut.host_limits.{host_limit_value, host_limit_mem_reserve_free_kib}
 
-@when(os="windows"):
-use std.nogc_sync_mut.io.windows_process_owner.{windows_available_memory_headroom_v1}
-use app.io.process_ops.{process_run_bounded}
+use std.nogc_sync_mut.sffi.process_memory.{freebsd_vm_available_kib_from_sysctl}
 
-pub fn shard_mem_available_kb() -> i64:
-    match windows_available_memory_headroom_v1():
-        case Ok(bytes): bytes / 1024
-        case Err(_): 0
+# ===== Pure per-OS decoders ===================================================
+# Every platform compiles these, so one host's specs cover every OS branch's
+# decisions. The @when arms below only gather raw text or numbers. Unknown is
+# 0 here (sequential clamp), never a negative count.
 
-# Installed RAM via a bounded PowerShell CIM query (TotalVisibleMemorySize is
-# kB), the same probe scripts/bootstrap/bootstrap-host-capacity.shs runs and
-# the same bounded runner cli_ops uses for PowerShell on the seed (the
-# unbounded direct call segfaults there). NOT the raw kernel32
-# GlobalMemoryStatusEx externs: the headroom helper only reaches them behind a
-# registered rt_ wrapper, and under the seed's pure interpreter an unresolved
-# extern is a hard abort, not an Err
-# (seed_interp_windows_memory_probe_2026_10_24.md). No rt_ host total exists
-# (owner-allowlisted C primitives). A timed-out or failed query is unknown ->
-# the reserve keeps its fixed 24 GiB cap, never admit-all.
-pub fn build_host_memory_total_kib() -> i64:
-    val (out, _err, code) = process_run_bounded("powershell.exe",
-        ["-NoProfile", "-NonInteractive", "-Command", "(Get-CimInstance Win32_OperatingSystem).TotalVisibleMemorySize"],
-        20000, 65536)
-    if code != 0:
-        return 0
-    shard_mem_available_kb_from_field(out.trim())
-@else:
-@when(os="freebsd"):
-# FreeBSD headroom: unchanged from before this branch existed -- it fell into
-# the Linux /proc/meminfo probe, which is absent without linprocfs, so the
-# headroom is unknown (0: sequential clamp, admitted start). A sysctl
-# free+inactive probe is a separate change.
-pub fn shard_mem_available_kb() -> i64:
-    val (out, _err, code) = process_run_timeout("awk", ["/^MemAvailable:/ {print $2}", "/proc/meminfo"], 2000)
-    if code != 0:
-        return 0
-    shard_mem_available_kb_from_field(out.trim())
+# Windows: headroom bytes (min of available physical and commit) to kB.
+pub fn shard_windows_headroom_kb_v1(bytes: i64) -> i64:
+    if bytes > 0: bytes / 1024 else: 0
 
-# FreeBSD: `sysctl -n hw.physmem` prints installed RAM in bytes.
-pub fn build_host_memory_total_kib() -> i64:
-    val (out, _err, code) = process_run_timeout("sysctl", ["-n", "hw.physmem"], 2000)
-    if code != 0:
-        return 0
-    build_host_memory_total_kib_from_bytes_field(out)
-@else:
-@when(os="macos"):
-# Darwin has no /proc/meminfo and no MemAvailable analogue. `vm_stat` reports
-# page counts (suffixed with '.') and the page size only inside its header
-# line. Headroom is free + inactive pages: inactive is the reclaimable cache
-# pool (file-backed pages purgeable under pressure), while active/wired/
-# speculative/compressed are not real headroom. Same subprocess mechanism as
-# the Linux probe below (see the NOTE there): `process_run_timeout`, never
-# `file_read`, which fatally recursed in the run20-class seed.
-pub fn shard_mem_available_kb() -> i64:
-    val (out, _err, code) = process_run_timeout("vm_stat", [], 2000)
-    if code != 0:
-        return 0
-    shard_macos_available_kb_from_vm_stat(out)
+# FreeBSD: `sysctl hw.pagesize vm.stats.vm.v_free_count
+# vm.stats.vm.v_inactive_count` to free + inactive kB (decoder owned by
+# std.nogc_sync_mut.sffi.process_memory, shared with host_commit_avail_kib).
+pub fn shard_freebsd_available_kb_from_sysctl(output: text) -> i64:
+    val kib = freebsd_vm_available_kib_from_sysctl(output)
+    if kib > 0: kib else: 0
 
-# Page count on one "Pages <kind>: <n>." vm_stat line; -1 when the prefix
-# does not match or the count is not plain digits (a garbage count makes the
-# whole probe "unknown", same as a missing line -- never a silent 0-pages).
+# FreeBSD rctl is the cgroup memory.max equivalent. `rctl -l process:<pid>`
+# lists every rule applicable to that process, whatever its subject. Only the
+# user / loginclass / jail subjects bound the whole build tree; a process rule
+# is inherited per child and caps one process, so it is not a tree cap. A rule
+# limits when its action is deny or a signal (log/devctl/throttle do not).
+# Amounts are raw bytes (rctl without -h). Returns the tightest cap in kB; 0 =
+# no cap.
+pub fn shard_rctl_memory_cap_kb_from_rules(output: text) -> i64:
+    var best: i64 = 0
+    for raw in output.split("\n"):
+        val fields = raw.trim().split(":")
+        if fields.len() < 4: continue
+        val subject = fields[0]
+        if subject != "user" and subject != "loginclass" and subject != "jail": continue
+        if fields[fields.len() - 2] != "memoryuse": continue
+        val rule = fields[fields.len() - 1]
+        val eq = rule.index_of("=")
+        if eq <= 0: continue
+        val action = rule.substring(0, eq)
+        if action != "deny" and not action.starts_with("sig"): continue
+        var amount = rule.substring(eq + 1)
+        val slash = amount.index_of("/")
+        if slash >= 0: amount = amount.substring(0, slash)
+        val kb = shard_mem_available_kb_from_field(amount) / 1024
+        if kb > 0 and (best == 0 or kb < best): best = kb
+    best
+
+# A failed rctl probe (racct compiled out, kern.racct.enable=0, no rctl) means
+# "no enclosing cap"; that must be said, not silently read as unlimited.
+pub fn shard_rctl_probe_note_v1(code: i64, err: text) -> text:
+    if code == 0: return ""
+    val first = err.trim().split("\n")[0].trim()
+    val detail = if first == "": "no message" else: first
+    "[shard] freebsd rctl unavailable (exit {code}: {detail}); no enclosing memory cap is known (rctl needs the kern.racct.enable=1 boot tunable)"
+
+# macOS: page count on one "Pages <kind>: <n>." vm_stat line; -1 when the
+# prefix does not match or the count is not plain digits (a garbage count makes
+# the whole probe "unknown", same as a missing line -- never a silent 0-pages).
 fn shard_macos_page_count_from_line(line: text, prefix: text) -> i64:
     if not line.starts_with(prefix):
         return -1
@@ -101,10 +95,11 @@ fn shard_macos_page_count_from_line(line: text, prefix: text) -> i64:
         i = i + 1
     shard_mem_available_kb_from_field(field)
 
-# Pure vm_stat parser, split out so the unit spec can pin it without a host
-# probe: free + inactive pages times the header page size, in kB. 0 when the
-# page size or either count is missing/unparseable -- unknown memory permits
-# only the sequential path, same contract as the Linux probe.
+# macOS vm_stat parser: free + inactive pages times the header page size, in
+# kB. 0 when the page size or either count is missing/unparseable -- unknown
+# memory permits only the sequential path, same contract as the Linux probe.
+# Headroom is free + inactive: inactive is the reclaimable cache pool, while
+# active/wired/speculative/compressed are not real headroom.
 pub fn shard_macos_available_kb_from_vm_stat(output: text) -> i64:
     var page_size: i64 = 0
     var free_pages: i64 = 0
@@ -149,8 +144,63 @@ pub fn shard_macos_available_kb_from_vm_stat(output: text) -> i64:
         return 0
     (pages * page_size) / 1024
 
+@when(os="windows"):
+use std.nogc_sync_mut.io.windows_process_owner.{windows_available_memory_headroom_v1}
+use app.io.process_ops.{process_run_bounded}
+
+pub fn shard_mem_available_kb() -> i64:
+    match windows_available_memory_headroom_v1():
+        case Ok(bytes): shard_windows_headroom_kb_v1(bytes)
+        case Err(_): 0
+
+# Installed RAM via a bounded PowerShell CIM query (TotalVisibleMemorySize is
+# kB), the same probe scripts/bootstrap/bootstrap-host-capacity.shs runs and
+# the same bounded runner cli_ops uses for PowerShell on the seed (the
+# unbounded direct call segfaults there). NOT the raw kernel32
+# GlobalMemoryStatusEx externs: the headroom helper only reaches them behind a
+# registered rt_ wrapper, and under the seed's pure interpreter an unresolved
+# extern is a hard abort, not an Err
+# (seed_interp_windows_memory_probe_2026_10_24.md). No rt_ host total exists
+# (owner-allowlisted C primitives). A timed-out or failed query is unknown ->
+# the reserve keeps its fixed 24 GiB cap, never admit-all.
+pub fn build_host_memory_total_kib() -> i64:
+    val (out, _err, code) = process_run_bounded("powershell.exe",
+        ["-NoProfile", "-NonInteractive", "-Command", "(Get-CimInstance Win32_OperatingSystem).TotalVisibleMemorySize"],
+        20000, 65536)
+    if code != 0:
+        return 0
+    shard_mem_available_kb_from_field(out.trim())
+@else:
+@when(os="freebsd"):
+# FreeBSD has no /proc/meminfo without linprocfs (that probe read 0, clamped
+# threads to 1 and refused every per-file worker pool). Free + inactive VM
+# pages from sysctl instead; subprocess, never file_read (NOTE below).
+pub fn shard_mem_available_kb() -> i64:
+    val (out, _err, code) = process_run_timeout("sysctl",
+        ["hw.pagesize", "vm.stats.vm.v_free_count", "vm.stats.vm.v_inactive_count"], 2000)
+    if code != 0:
+        return 0
+    shard_freebsd_available_kb_from_sysctl(out)
+
+# FreeBSD: `sysctl -n hw.physmem` prints installed RAM in bytes, bounded by an
+# enclosing rctl memoryuse cap (the cgroup memory.max analogue) when one exists.
+pub fn build_host_memory_total_kib() -> i64:
+    val (out, _err, code) = process_run_timeout("sysctl", ["-n", "hw.physmem"], 2000)
+    val physmem_kib = if code != 0: 0 else: build_host_memory_total_kib_from_bytes_field(out)
+    build_host_memory_total_kib_bounded(physmem_kib, shard_cgroup_memory_max_kb())
+@else:
+@when(os="macos"):
+# Darwin has no /proc/meminfo and no MemAvailable analogue; `vm_stat` reports
+# page counts (decoded by shard_macos_available_kb_from_vm_stat above). Same
+# subprocess mechanism as the Linux probe below (see the NOTE there).
+pub fn shard_mem_available_kb() -> i64:
+    val (out, _err, code) = process_run_timeout("vm_stat", [], 2000)
+    if code != 0:
+        return 0
+    shard_macos_available_kb_from_vm_stat(out)
+
 # Installed RAM: `sysctl -n hw.memsize` prints bytes (25769803776 on the
-# 24 GB Apple-silicon shape). Subprocess, never file_read (NOTE above).
+# 24 GB Apple-silicon shape). Subprocess, never file_read (NOTE below).
 pub fn build_host_memory_total_kib() -> i64:
     val (out, _err, code) = process_run_timeout("sysctl", ["-n", "hw.memsize"], 2000)
     if code != 0:
@@ -645,6 +695,18 @@ pub fn shard_cgroup_v1_limit_kb_from_fields(fields: [text]) -> i64:
 pub fn shard_cgroup_memory_max_kb() -> i64:
     0
 @else:
+@when(os="freebsd"):
+# rctl stands in for cgroup memory.max. The probe runs as a child shell that
+# execs rctl on its own pid: a child shares this process's user, login class
+# and jail, the only subjects that cap the tree. A failed probe is logged.
+pub fn shard_cgroup_memory_max_kb() -> i64:
+    val (out, err, code) = process_run_timeout("sh", ["-c", "exec rctl -l process:$$"], 2000)
+    val note = shard_rctl_probe_note_v1(code as i64, err)
+    if note != "":
+        eprint(note)
+        return 0
+    shard_rctl_memory_cap_kb_from_rules(out)
+@else:
 # Same subprocess mechanism as shard_mem_available_kb (see the NOTE there); a
 # child inherits this process's cgroup, so its /proc/self/cgroup is ours. v2
 # unified rows and the v1 memory controller row are both probed; when a hybrid
@@ -673,6 +735,7 @@ pub fn shard_cgroup_memory_max_kb() -> i64:
         if v1_kb > 0 and (best == 0 or v1_kb < best):
             best = v1_kb
     best
+@end
 @end
 
 # The enclosing cgroup cap may only tighten a declared tree budget: an

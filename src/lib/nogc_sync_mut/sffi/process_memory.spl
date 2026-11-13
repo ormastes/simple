@@ -1,6 +1,65 @@
 # System commit headroom over registered probes only, so it answers in the
 # seed interpreter and in native code alike (no kernel32 binding needed).
 # Shard coordinators admit workers by it instead of a fixed estimate.
+#
+# Every host's raw answer is decoded by a pure function below that every
+# platform compiles, so one host's spec covers every branch's decisions; the
+# @when arms only gather the raw text or number. -1 always means unknown (the
+# pool keeps its static admission cap), never "0 KiB free".
+
+# Decimal digits only, at most 18 of them (no i64 overflow); -1 otherwise.
+fn _process_memory_digits_v1(field: text) -> i64:
+    val digits = field.trim()
+    if digits == "" or digits.byte_len() > 18: return -1
+    var i = 0
+    while i < digits.byte_len():
+        val b = digits.byte_at(i)
+        if b < 48 or b > 57: return -1
+        i = i + 1
+    digits.to_i64() ?? -1
+
+# Value of a "<key> <n> kB" row of a /proc table; -1 when absent or junk.
+pub fn proc_status_kib(table: text, key: text) -> i64:
+    for line in table.split("\n"):
+        if line.starts_with(key):
+            val rest = line.substring(key.len()).trim()
+            val space = rest.index_of(" ")
+            val digits = if space > 0: rest.substring(0, space) else: rest
+            return _process_memory_digits_v1(digits)
+    -1
+
+# Linux (and SimpleOS's synthetic procfs): MemAvailable + SwapFree KiB.
+pub fn host_commit_avail_kib_from_meminfo(table: text) -> i64:
+    val avail = proc_status_kib(table, "MemAvailable:")
+    if avail < 0: return -1
+    val swap = proc_status_kib(table, "SwapFree:")
+    avail + (if swap > 0: swap else: 0)
+
+# Windows: CommitLimit - CommitTotal in bytes from the runtime probe.
+pub fn host_commit_avail_kib_from_bytes(bytes: i64) -> i64:
+    if bytes > 0: bytes / 1024 else: -1
+
+# FreeBSD: `sysctl hw.pagesize vm.stats.vm.v_free_count
+# vm.stats.vm.v_inactive_count` ("name: value" rows, any order). Headroom is
+# free + inactive pages (inactive is the reclaimable pool, same rule as the
+# macOS vm_stat probe); laundry/active/wired are not headroom. Swap is not
+# added: it has no "name: value" sysctl, so this answer is conservative.
+pub fn freebsd_vm_available_kib_from_sysctl(output: text) -> i64:
+    var page_size: i64 = -1
+    var free_pages: i64 = -1
+    var inactive_pages: i64 = -1
+    for raw in output.split("\n"):
+        val colon = raw.index_of(":")
+        if colon <= 0: continue
+        val name = raw.substring(0, colon).trim()
+        val value = _process_memory_digits_v1(raw.substring(colon + 1))
+        if name == "hw.pagesize": page_size = value
+        elif name == "vm.stats.vm.v_free_count": free_pages = value
+        elif name == "vm.stats.vm.v_inactive_count": inactive_pages = value
+    if page_size <= 0 or free_pages < 0 or inactive_pages < 0: return -1
+    val pages = free_pages + inactive_pages
+    if pages <= 0 or pages > 9223372036854775807 / page_size: return -1
+    (pages * page_size) / 1024
 
 @when(os="windows"):
 use std.nogc_sync_mut.io.windows_process_owner_abi.{rt_host_commit_headroom_bytes_v1}
@@ -10,25 +69,22 @@ pub fn host_commit_avail_kib() -> i64:
     var bytes: i64 = 0
     unsafe(capabilities: [ffi]):
         bytes = rt_host_commit_headroom_bytes_v1()
-    if bytes > 0: bytes / 1024 else: -1
+    host_commit_avail_kib_from_bytes(bytes)
+@else:
+@when(os="freebsd"):
+use std.nogc_sync_mut.io.process_ops.{process_run_timeout}
+
+# No /proc/meminfo without linprocfs: read the VM page counters instead.
+pub fn host_commit_avail_kib() -> i64:
+    val (out, _err, code) = process_run_timeout("sysctl",
+        ["hw.pagesize", "vm.stats.vm.v_free_count", "vm.stats.vm.v_inactive_count"], 2000)
+    if code != 0: return -1
+    freebsd_vm_available_kib_from_sysctl(out)
 @else:
 use std.nogc_sync_mut.io_runtime.{file_read_nullable}
 
-# Value of a "<key> <n> kB" row of a /proc table; -1 when absent.
-pub fn proc_status_kib(table: text, key: text) -> i64:
-    for line in table.split("\n"):
-        if line.starts_with(key):
-            val rest = line.substring(key.len()).trim()
-            val space = rest.index_of(" ")
-            val digits = if space > 0: rest.substring(0, space) else: rest
-            return digits.to_i64() ?? -1
-    -1
-
 # MemAvailable + SwapFree KiB; -1 when unknown.
 pub fn host_commit_avail_kib() -> i64:
-    val table = file_read_nullable("/proc/meminfo") ?? ""
-    val avail = proc_status_kib(table, "MemAvailable:")
-    if avail < 0: return -1
-    val swap = proc_status_kib(table, "SwapFree:")
-    avail + (if swap > 0: swap else: 0)
+    host_commit_avail_kib_from_meminfo(file_read_nullable("/proc/meminfo") ?? "")
+@end
 @end
