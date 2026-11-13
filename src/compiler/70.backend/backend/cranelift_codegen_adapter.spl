@@ -93,14 +93,14 @@ val CRANELIFT_STATIC_MAX_ALIGNMENT: i64 = 4096
 
 # Takes the MirStatic (both callers pass one): the original signature took a
 # bare Visibility, so matching a MirStatic against it fell through every arm.
-fn cranelift_static_linkage(static_: MirStatic) -> i64:
+pub fn cranelift_static_linkage(static_: MirStatic) -> i64:
     if static_.is_external: return CL_LINKAGE_IMPORT
     match static_.visibility:
         case Visibility.Public: CL_LINKAGE_EXPORT
         case Visibility.Private: CL_LINKAGE_LOCAL
         case Visibility.Peer | Visibility.Up | Visibility.Internal | Visibility.Package: CL_LINKAGE_HIDDEN
 
-fn cranelift_static_alignment(static_: MirStatic) -> i64:
+pub fn cranelift_static_alignment(static_: MirStatic) -> i64:
     if static_.alignment == 0:
         return static_.type_.alignment()
     if static_.alignment < 0 or static_.alignment > CRANELIFT_STATIC_MAX_ALIGNMENT:
@@ -132,7 +132,7 @@ class CraneliftCodegenAdapter:
     # @workaround bug=mir_provider_optional_type_wrapper_segv_2026-10-14 recover=4710b22a9913b294d8c1c8edd44c9e22bceddede reason=old-A174-provider-ArrayLit-optional-ABI
     retained_features_v2: [text] = cranelift_default_retained_features_v2()
 
-fn cranelift_isa_opt_level_v2(options: BackendCompileOptions) -> i64:
+pub fn cranelift_isa_opt_level_v2(options: BackendCompileOptions) -> i64:
     match options.opt_level:
         case OptimizationLevel.None_ | OptimizationLevel.Debug: 0
         # Cranelift 0.116 has no distinct O1/Basic mode; fail closed rather
@@ -401,7 +401,7 @@ fn sig_type_to_cl(ty: MirType) -> i64:
         return CL_TYPE_I64
     return cl
 
-fn build_signature(sig: MirSignature, is_main: bool) -> i64:
+pub fn build_signature(sig: MirSignature, is_main: bool) -> i64:
     val cl_sig = cranelift_new_signature(CL_CC_PLATFORM)
     for param in sig.params:
         cranelift_sig_add_param(cl_sig, sig_type_to_cl(param))
@@ -414,7 +414,7 @@ fn build_signature(sig: MirSignature, is_main: bool) -> i64:
 # Split supported/value pair instead of one `-> i64?` accessor: Option
 # returns from live-interpreted compiler code are unreliable (same seed
 # interpreter bug as STATICS_FAILED_KEY above).
-fn cranelift_static_init_supported(static_: MirStatic) -> bool:
+pub fn cranelift_static_init_supported(static_: MirStatic) -> bool:
     # Imported declarations never own initial storage bytes.
     if static_.is_external and static_.init.?: return false
     match static_.type_.kind:
@@ -443,7 +443,7 @@ fn cranelift_static_init_supported(static_: MirStatic) -> bool:
         case Zero: true
         case _: false
 
-fn cranelift_static_init_bits_value(static_: MirStatic) -> i64:
+pub fn cranelift_static_init_bits_value(static_: MirStatic) -> i64:
     if not static_.init.?:
         return 0
     match static_.init.unwrap().value:
@@ -521,7 +521,7 @@ fn declare_module_statics(cl_module: i64, module: MirModule) -> Dict<i64, Cranel
 # Function Compilation
 # ============================================================================
 
-fn cranelift_ssa_phi_dest_ids(func: MirFunction) -> Dict<i64, bool>:
+pub fn cranelift_ssa_phi_dest_ids(func: MirFunction) -> Dict<i64, bool>:
     # __simple_ssa_phi destinations must always carry a stack slot: incoming
     # values are stored per predecessor edge (store_phi_incomings_for_edge)
     # and the join reloads the slot -- that path is arity-agnostic and is the
@@ -541,7 +541,7 @@ fn cranelift_ssa_phi_dest_ids(func: MirFunction) -> Dict<i64, bool>:
                     ()
     ids
 
-fn cranelift_local_slot_sizes(func: MirFunction) -> Dict<i64, i64>:
+pub fn cranelift_local_slot_sizes(func: MirFunction) -> Dict<i64, i64>:
     # Stack-slot size per local id; compile_function allocates exactly these.
     # 8-byte floor: Bool lowers to i64 (mir_type_to_cl), so a 1-byte slot would
     # be overflowed by i64 stores. Kind-based sizing, no method calls
@@ -692,7 +692,7 @@ fn store_local_result(ctx: i64, dest: LocalId, value: i64, slot_map: Dict<i64, i
         val addr = cranelift_stack_addr(ctx, slot_map[dest.id], 0)
         cranelift_store(ctx, value, addr, 0)
 
-fn cl_translate_instruction(
+pub fn cl_translate_instruction(
     ctx: i64,
     inst: MirInst,
     mut value_map: Dict<i64, i64>,
@@ -1110,7 +1110,7 @@ fn store_phi_incomings_for_edge(
                     case _:
                         ()
 
-fn cl_translate_terminator(
+pub fn cl_translate_terminator(
     ctx: i64,
     cl_module: i64,
     current_block: BlockId,
@@ -1960,7 +1960,7 @@ fn type_is_slot_scalar(ty: MirType) -> bool:
         case _:
             return false
 
-fn cl_cast_narrow_int_type(ty: MirType) -> i64:
+pub fn cl_cast_narrow_int_type(ty: MirType) -> i64:
     """Cranelift type a Cast must `ireduce` to for a sub-64 integer target,
     or 0 when the target is already 64 bits wide in this lane.
 
@@ -1976,7 +1976,7 @@ fn cl_cast_narrow_int_type(ty: MirType) -> i64:
         case I32 | U32 | Char: return CL_TYPE_I32
         case _: return 0
 
-fn cl_cast_int_width_bytes(ty: MirType) -> i64:
+pub fn cl_cast_int_width_bytes(ty: MirType) -> i64:
     """Integer value width for Cast width decisions in this uniformly-i64
     lane: Bool is materialized as i64 (see mir_type_to_cl) and Char is a
     32-bit Unicode scalar (see cl_cast_narrow_int_type)."""
@@ -1985,7 +1985,7 @@ fn cl_cast_int_width_bytes(ty: MirType) -> i64:
         case Char: return 4
         case _: return ty.size_bytes()
 
-fn cl_fallback_abi_type(ty: MirType) -> i64:
+pub fn cl_fallback_abi_type(ty: MirType) -> i64:
     """Register class of a CALLER-side value at an imported call: F32/F64
     stay float, everything else is the uniform i64 lane. Used only to CHECK
     the caller against the callee's declared signature -- never to build the
@@ -2052,7 +2052,7 @@ fn cl_import_call_abi_error(callee_type: MirType, args: [MirOperand], ret_type: 
         arg_types = arg_types.push(operand_type(arg, func))
     cl_call_abi_mismatch(callee_type, arg_types, ret_type, has_ret_dest)
 
-fn cl_call_abi_mismatch(callee_type: MirType, arg_types: [MirType], ret_type: MirType, has_ret_dest: bool) -> text:
+pub fn cl_call_abi_mismatch(callee_type: MirType, arg_types: [MirType], ret_type: MirType, has_ret_dest: bool) -> text:
     """Empty when an imported call is ABI-sound; otherwise why it is not.
 
     Known callee signature: every argument's register class must equal the
@@ -2118,14 +2118,14 @@ fn cl_import_call_signature(callee_type: MirType, arg_count: i64) -> i64:
         cranelift_sig_set_return(sig, sig_type_to_cl(declared_ret))
     sig
 
-fn const_int_cl_type(ty: MirType) -> i64:
+pub fn const_int_cl_type(ty: MirType) -> i64:
     """Int consts emit as I64 regardless of declared width: the lane is
     uniformly i64 and sub-64 iconst types leaked i16 args into i64-signature
     calls (probe_enum6 verifier reject). Never a float type: `iconst` is integer-only (float consts go through
     cl_scalar_const_plan)."""
     CL_TYPE_I64
 
-fn cl_const_is_float(ty: MirType) -> bool:
+pub fn cl_const_is_float(ty: MirType) -> bool:
     match ty.kind:
         case F32 | F64: true
         case _: false
