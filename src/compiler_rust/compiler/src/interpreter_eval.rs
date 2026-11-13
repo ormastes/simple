@@ -70,6 +70,14 @@ fn bind_module_namespace_after_import(
     true
 }
 
+/// Closure origin for a flattened global initializer: it runs at the entry's
+/// top level but is written in `owner` (test_private_access_closure_attribution).
+fn flattened_initializer_origin(
+    owner: Option<&str>,
+) -> Option<crate::interpreter::interpreter_module::ClosureOriginGuard> {
+    owner.map(|owner| crate::interpreter::interpreter_module::ClosureOriginGuard::enter_module_top_level(Some(owner)))
+}
+
 fn record_flattened_global(owner: Option<&Arc<str>>, name: String, value: Value) {
     MODULE_GLOBALS.with(|cell| {
         cell.borrow_mut().insert(name.clone(), value.clone());
@@ -1422,6 +1430,8 @@ fn evaluate_module_items(module_items: ModuleItems<'_>) -> Result<i32, CompileEr
             Node::Const(marker) if marker.name.starts_with(FLATTEN_MODULE_NAMESPACE_MARKER_PREFIX) => {}
             Node::Let(let_stmt) => {
                 use super::Control;
+                // A flattened global initializer is lexically in its owner module.
+                let _origin = flattened_initializer_origin(pending_flattened_global_owner.as_deref());
                 if let Control::Return(val) =
                     exec_node(item, &mut env, &mut functions, &mut classes, &enums, &impl_methods)?
                 {
@@ -1440,6 +1450,7 @@ fn evaluate_module_items(module_items: ModuleItems<'_>) -> Result<i32, CompileEr
             }
             Node::Const(const_stmt) => {
                 use super::Control;
+                let _origin = flattened_initializer_origin(pending_flattened_global_owner.as_deref());
                 if let Control::Return(val) =
                     exec_node(item, &mut env, &mut functions, &mut classes, &enums, &impl_methods)?
                 {
@@ -1456,6 +1467,7 @@ fn evaluate_module_items(module_items: ModuleItems<'_>) -> Result<i32, CompileEr
             }
             Node::Static(static_stmt) => {
                 use super::Control;
+                let _origin = flattened_initializer_origin(pending_flattened_global_owner.as_deref());
                 if let Control::Return(val) =
                     exec_node(item, &mut env, &mut functions, &mut classes, &enums, &impl_methods)?
                 {

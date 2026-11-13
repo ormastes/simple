@@ -986,7 +986,10 @@ pub(super) fn exec_block_closure_into(
                 let plain = Value::Function {
                     name: f.name.clone(),
                     def: arc_f,
-                    captured_env: Arc::new(local_env.clone()), // Capture current scope
+                    // Capture current scope, stamped with its lexical origin.
+                    captured_env: Arc::new(crate::interpreter::interpreter_module::capture_env_with_origin(
+                        local_env,
+                    )),
                 };
                 local_env.insert(f.name.clone(), plain.clone());
                 // A user-defined (non-directive) decorator rebinds the name to
@@ -2181,7 +2184,10 @@ fn exec_block_closure_mut_inner(
                 let plain = Value::Function {
                     name: f.name.clone(),
                     def: arc_f,
-                    captured_env: Arc::new(local_env.clone()), // Capture current scope
+                    // Capture current scope, stamped with its lexical origin.
+                    captured_env: Arc::new(crate::interpreter::interpreter_module::capture_env_with_origin(
+                        local_env,
+                    )),
                 };
                 local_env.insert(f.name.clone(), plain.clone());
                 // A user-defined (non-directive) decorator rebinds the name to

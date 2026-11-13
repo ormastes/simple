@@ -37,21 +37,33 @@ refused.
 The fix keeps one predicate, `is_test_caller`, and makes the closure's lexical
 origin visible to it:
 
-- **Closure creation** (`interpreter/expr/control.rs`, both lambda capture
-  branches and `DoBlock`) stamps the captured env with
-  `closure_created_in_test()`. A new `CowEnv::closure_in_test` field holds the
-  stamp, and `Clone` copies it. The origin is resolved in this order:
-  1. inside a closure body, that closure's own origin;
-  2. inside a named function, its owner; an `<entry>` function means the entry
-     file (`CURRENT_FILE`);
-  3. at the entry top level, the entry file;
-  4. at an imported module's top level, false. This case is tracked by
-     `ModuleEvalGuard` in `evaluate_module_exports_with_preloaded`.
-- **Closure execution** (`exec_lambda`, plus the `BlockClosure` value dispatch in
-  `interpreter_call/mod.rs` and `bdd.rs`) enters
-  `ClosureOriginGuard::enter(Some(stamp))`. An owned named-function frame
-  (`function_exec.rs`) enters `ClosureOriginGuard::enter(None)`. Both are RAII
-  guards, so an early `?` return restores the previous value.
+- **Closure creation** stamps the captured env with `closure_created_in_test()`.
+  The creation sites are both lambda capture branches and `DoBlock` in
+  `interpreter/expr/control.rs`, plus nested `fn` values via
+  `capture_env_with_origin` in `node_exec.rs` and `block_execution.rs`. A new
+  `CowEnv::closure_in_test` field holds the stamp, and `Clone` copies it. The
+  origin is resolved in this order:
+  1. inside a closure body, an owner-less fn, or a module top level, that
+     scope's recorded origin;
+  2. inside an owned named function, its owner; an `<entry>` function means
+     the entry file (`CURRENT_FILE`);
+  3. at the entry top level, the entry file.
+- **Module top level is its own scope.**
+  - Imported module evaluation (`evaluate_module_exports_with_preloaded`) and
+    flattened global initializers (`interpreter_eval.rs`) enter
+    `ClosureOriginGuard::enter_module_top_level(path)`.
+  - So an src module loaded from a test frame (a block-scoped `use` in an `it`
+    body) is never stamped as test-written.
+  - A `test/**` helper module's top level is stamped as test-written.
+- **Closure execution** enters `ClosureOriginGuard::enter(Some(stamp))`. This
+  applies in `exec_lambda`, the `BlockClosure` value dispatch in
+  `interpreter_call/mod.rs` and `bdd.rs`, and owner-less named fns in
+  `execute_function_body`. An owner-less fn reads the stamp from its captured
+  env, and a flat-path fresh env carries none, so it stays strict. An owned
+  named-function frame enters `enter(None)`. All of these are RAII guards, so
+  an early `?` return restores the previous value.
+- **`is_test_caller`** no longer allocates. It scans bytes and treats `/` and
+  `\` as separators, with the same verdicts; a unit test pins them.
 - **`check_private_call_visibility`** is otherwise unchanged. It gains one
   clause: the call is exempt when the running closure body is test-written.
   Every non-test verdict stays the same. The exemption is lexical, so a
@@ -82,7 +94,9 @@ the seed. "def" is the default lane; "int" is `SIMPLE_EXECUTION_MODE=interpret`.
 | **test lambda run by src `run_cb`** | **rc1 nv1** | **rc1 nv1** | 0 | 0 |
 | **test lambda in a test fn, run by `run_cb`** | **rc1 nv1** | **rc1 nv1** | 0 | 0 |
 | **test lambda in an `it` block, run by `run_cb`** | **rc1** | **rc1** | 0 | 0 |
+| **nested `fn` in a test fn, handed to `run_cb`** | **rc1** | **rc1** | 0 | 0 |
 | control: src-written lambda run by `run_cb`, test entry | rc1 nv1 | rc1 nv1 | rc1 nv1 | rc1 nv1 |
+| control: src-written nested `fn` called in a test closure body | refused | refused | refused | refused |
 | product braced import | rc1 nv1 | rc1 nv1 | rc1 nv1 | rc1 nv1 |
 | product braced import, `fn main` | 0 (P2 below) | rc1 nv1 | 0 (P2 below) | rc1 nv1 |
 | product lambda run by `run_cb` | rc1 nv1 | rc1 nv1 | rc1 nv1 | rc1 nv1 |
@@ -94,15 +108,62 @@ The committed specs and their results on the seed from base `228560191e0`
 
 | spec | base | fixed |
 |---|---|---|
-| `test/01_unit/compiler/95.interp/interpreter/test_private_access_matrix_spec.spl` | 9/12, the three closure rows red | **12/12** |
+| `test/01_unit/compiler/95.interp/interpreter/test_private_access_matrix_spec.spl` | 10/14, the four closure rows red | **14/14** |
 | `test/01_unit/compiler/20.hir/private_import_test_importer_parity_spec.spl` | 2/2 | 2/2 |
 | `test/01_unit/compiler/95.interp/interpreter/private_import_visibility_fail_closed_spec.spl` | 2/2 | 2/2 |
 
 Seed unit tests (`cargo test -p simple-compiler --lib private_call_visibility_tests`):
-6/6. These include two new tests: the guard nesting, and origin resolution for
-the owner, the entry file and module evaluation.
+7/7. Three of them are new:
+- guard nesting;
+- origin resolution for the owner, the entry file, and an src or test module
+  top level loaded from a test frame;
+- `is_test_caller` separator and component cases.
 
-Real specs: see "Real-spec sweep" below.
+The independent Opus review found three P1s, all fixed here:
+- src module top-level closures were stamped as test-written when the module
+  was loaded from a test frame;
+- owner-less nested fns inherited a test closure's origin;
+- the self-hosted HIR file was missing an explicit import of
+  `private_import_is_test_importer`.
+
+Remaining unguarded closure paths fail closed (they are judged by the invoking
+frame, as before): `exec_bdd_block_into` hook/example blocks, the
+`call_value_with_args` `Value::Function` and `Value::Lambda` arms (decorators).
+One known edge goes the other way:
+- **The case:** an owner-less `on pc{}` advice body runs on a clone of the
+  caller's env (`aop_runtime.rs`).
+- **The effect:** that body takes the caller's closure origin.
+- **Why it is left:** it applies only when advice fires inside a test closure
+  body.
+
+### Real-spec sweep
+
+The sweep ran `seed test <spec>` from the worktree, serially. It covered every
+spec whose wave-3 log had an `is not visible` line (14 specs). It also covered
+the 3 specs that call a non-baselined private fn inside a lambda:
+`supervised_build_peak_rss`, `supervised_build_survives_worker_death` and
+`scv_restore`.
+
+Every one of them reports **nv 0 on both the base seed and the fixed seed**,
+with identical pass/fail counts:
+
+- **11 green**, among them `doc_coverage_single_scan` 3/3,
+  `module_namespace_alias_runtime` 10/10, `x25519_rfc7748_kat` 6/6 and
+  `supervised_build_survives_worker_death` 4/4.
+- **6 red, unchanged and with no visibility line:**
+  - `daemon_sdk_exact_lock_owner` 5/6
+  - `facet_runtime` 0/2
+  - `hal_types` rc 5
+  - `database_resource` 24/27
+  - `supervised_build_peak_rss` 1/2
+  - `scv_restore` 8/11
+
+#8961 had already cleared the wave-3 test-side lines. The two driver specs'
+lambda runs inside `driver_build/parallel.spl`, which is in the same directory
+as the private fn, so it was never refused. No in-tree spec hits the closure
+case today; the fixture matrix is the red-to-green evidence. The baseline gate
+(`check-private-import-baseline.shs`) passed with 11562 entries, 0 stale and
+0 added, so there was nothing to prune.
 
 ## Observed and not fixed here (product side, no test refusal)
 

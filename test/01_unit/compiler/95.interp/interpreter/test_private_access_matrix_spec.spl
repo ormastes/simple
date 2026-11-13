@@ -33,7 +33,7 @@ fn fixture_root(tag: text) -> text:
     val _f = write_file(root + "/src/app/sub/sub_facade.spl", "export use app.sub.lib_mod.{{secret_helper, open_api}}\n")
     val _g = write_file(root + "/src/app/facade/glob_facade.spl", "export use app.sub.lib_mod.*\n")
     val _r = write_file(root + "/src/app/runner/run.spl", "pub fn run_cb(f: fn() -> i64) -> i64:\n    f()\n")
-    val _k = write_file(root + "/src/app/runner/mk.spl", "use app.sub.lib_mod.*\npub fn make_cb() -> fn() -> i64:\n    \\: secret_helper()\n")
+    val _k = write_file(root + "/src/app/runner/mk.spl", "use app.sub.lib_mod.*\npub fn make_cb() -> fn() -> i64:\n    \\: secret_helper()\npub fn make_fn() -> fn() -> i64:\n    fn inner() -> i64:\n        secret_helper()\n    inner\n")
     root
 
 # The fixture root itself must not look like a test path, or every product
@@ -103,9 +103,15 @@ describe "a test file can call private fns on every lane":
     it "test lambda written inside an `it` block, run by a src helper":
         expect(allowed_on_every_lane("itlambda", "test/unit/itlambda_spec.spl", T_BRACED + T_RUNNER + "describe \"p\":\n    it \"x\":\n        print run_cb(\\: secret_helper())\n")).to_equal(true)
 
+    it "nested fn written in a test fn, handed to a src helper":
+        expect(allowed_on_every_lane("nestedfn", "test/unit/nestedfn_spec.spl", T_BRACED + T_RUNNER + "fn outer() -> i64:\n    fn inner() -> i64:\n        secret_helper()\n    run_cb(inner)\nprint outer()\n")).to_equal(true)
+
 describe "product code stays refused (the exemption is lexical)":
     it "a src-written lambda run by a src helper, from a test entry":
         expect(refused_on_every_lane("srclambda", "test/unit/srclambda_spec.spl", "use app.runner.mk.{{make_cb}}\n" + T_RUNNER + "print run_cb(make_cb())\n")).to_equal(true)
+
+    it "a src-written nested fn called inside a test closure body":
+        expect(refused_on_every_lane("srcnested", "test/unit/srcnested_spec.spl", "use app.runner.mk.{{make_fn}}\n" + T_RUNNER + "print run_cb(\\: make_fn()())\n")).to_equal(true)
 
     it "a product file importing the private fn":
         expect(refused_on_every_lane("prodbraced", "src/app/other/prod_braced.spl", T_BRACED + "print secret_helper()\n")).to_equal(true)

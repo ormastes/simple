@@ -2856,9 +2856,16 @@ mod private_fn_visibility_tests {
 /// on thread A and called from thread B finds no entry and the check is skipped
 /// (fails open, same as the pre-gate behaviour and as `FUNCTION_MODULE_OWNER`).
 fn is_test_caller(current: &str) -> bool {
-    let norm = current.replace('\\', "/");
-    let norm = norm.trim_start_matches("./");
-    norm.starts_with("test/") || norm.contains("/test/")
+    // `\` and `/` are both separators; leading `./` (or `.\`) runs are
+    // stripped. Allocation-free: closure creation calls this on hot paths.
+    let mut s = current;
+    while let Some(rest) = s.strip_prefix("./").or_else(|| s.strip_prefix(".\\")) {
+        s = rest;
+    }
+    let b = s.as_bytes();
+    let sep = |c: u8| c == b'/' || c == b'\\';
+    (b.len() >= 5 && &b[..4] == b"test" && sep(b[4]))
+        || b.windows(6).any(|w| sep(w[0]) && &w[1..5] == b"test" && sep(w[5]))
 }
 
 thread_local! {
@@ -2872,19 +2879,24 @@ thread_local! {
     /// (test_private_access_closure_attribution_2026-11-14). Thread-local like
     /// `PRIVATE_FNS_BY_OWNER`; set only through `ClosureOriginGuard`.
     static CLOSURE_ORIGIN_IS_TEST: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
-    /// Depth of module top-level evaluation in progress. Module top-level code
-    /// runs with no `CURRENT_EXEC_MODULE`, exactly like the entry script's top
-    /// level, so a closure created there must not be attributed to the entry.
-    static MODULE_EVAL_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Scoped `CLOSURE_ORIGIN_IS_TEST` value, restored on drop (early `?` returns
-/// included). `enter(None)` marks a named function frame.
+/// included). `enter(None)` marks an owned named function frame.
 pub(crate) struct ClosureOriginGuard(Option<bool>);
 
 impl ClosureOriginGuard {
     pub(crate) fn enter(origin_is_test: Option<bool>) -> Self {
         ClosureOriginGuard(CLOSURE_ORIGIN_IS_TEST.with(|c| c.replace(origin_is_test)))
+    }
+
+    /// Top-level code of module `module_path` (an imported module's
+    /// evaluation, or a flattened global initializer) is lexically in that
+    /// module. It runs with no `CURRENT_EXEC_MODULE`, exactly like the entry
+    /// script's top level, and may be triggered from a test frame (a
+    /// block-scoped `use`), so its origin must be set explicitly.
+    pub(crate) fn enter_module_top_level(module_path: Option<&str>) -> Self {
+        Self::enter(Some(module_path.is_some_and(is_test_caller)))
     }
 }
 
@@ -2894,43 +2906,35 @@ impl Drop for ClosureOriginGuard {
     }
 }
 
-/// Marks module top-level evaluation; see `MODULE_EVAL_DEPTH`.
-pub(crate) struct ModuleEvalGuard;
-
-impl ModuleEvalGuard {
-    pub(crate) fn enter() -> Self {
-        MODULE_EVAL_DEPTH.with(|d| d.set(d.get() + 1));
-        ModuleEvalGuard
-    }
-}
-
-impl Drop for ModuleEvalGuard {
-    fn drop(&mut self) {
-        MODULE_EVAL_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
-    }
-}
-
-/// Is a closure being created right now lexically inside a test file, by the
-/// same `is_test_caller` predicate as the import and call rules? Inside a
-/// closure body the answer is that closure's own origin; inside a named
-/// function it is the function's owner, where an entry-script function
-/// (`<entry>`) and the entry's top level (no owner, no module evaluation in
-/// progress) resolve to the entry file. Unknown -> false (stays strict).
+/// Is a closure (or nested `fn`) being created right now lexically inside a
+/// test file, by the same `is_test_caller` predicate as the import and call
+/// rules? Inside a closure body or module top level the answer is that
+/// scope's recorded origin; inside an owned named function it is the
+/// function's owner, where an entry-script function (`<entry>`) and the
+/// entry's own top level resolve to the entry file. Unknown -> false.
 pub(crate) fn closure_created_in_test() -> bool {
     if let Some(origin) = CLOSURE_ORIGIN_IS_TEST.with(|c| c.get()) {
         return origin;
     }
-    let current = crate::interpreter::CURRENT_EXEC_MODULE.with(|c| c.borrow().clone());
     let entry_file = || {
-        crate::interpreter::CURRENT_FILE
-            .with(|c| c.borrow().clone())
-            .is_some_and(|p| is_test_caller(&p.to_string_lossy()))
+        crate::interpreter::CURRENT_FILE.with(|c| {
+            c.borrow()
+                .as_ref()
+                .is_some_and(|p| is_test_caller(&p.to_string_lossy()))
+        })
     };
-    match current {
-        Some(owner) if &*owner == "<entry>" => entry_file(),
-        Some(owner) => is_test_caller(&owner),
-        None => MODULE_EVAL_DEPTH.with(|d| d.get()) == 0 && entry_file(),
-    }
+    crate::interpreter::CURRENT_EXEC_MODULE.with(|c| match c.borrow().as_deref() {
+        Some("<entry>") | None => entry_file(),
+        Some(owner) => is_test_caller(owner),
+    })
+}
+
+/// `env.clone()` stamped with `closure_created_in_test()`: the captured env of
+/// a nested `fn` value created now.
+pub(crate) fn capture_env_with_origin(env: &Env) -> Env {
+    let mut captured = env.clone();
+    captured.set_closure_in_test(closure_created_in_test());
+    captured
 }
 
 pub(crate) fn check_private_call_visibility(
@@ -3051,9 +3055,20 @@ mod private_call_visibility_tests {
         set_owner(Some("<entry>"));
         assert!(closure_created_in_test(), "test entry function");
         {
-            let _loading = ModuleEvalGuard::enter();
+            // Imported src module top level, even when loaded from a test frame
+            // (a block-scoped `use` inside an `it` body / test closure).
+            let _test_body = ClosureOriginGuard::enter(Some(true));
+            let _loading = ClosureOriginGuard::enter_module_top_level(Some("/repo/src/app/sub/lib.spl"));
             set_owner(None);
-            assert!(!closure_created_in_test(), "imported module top level is not the entry");
+            assert!(!closure_created_in_test(), "imported src module top level is not the test");
+        }
+        {
+            let _loading = ClosureOriginGuard::enter_module_top_level(Some("/repo/test/helpers/fx.spl"));
+            assert!(closure_created_in_test(), "test-tree helper module top level is test-written");
+        }
+        {
+            let _loading = ClosureOriginGuard::enter_module_top_level(None);
+            assert!(!closure_created_in_test(), "unknown module path stays strict");
         }
         set_owner(Some("/repo/src/app/runner/run.spl"));
         assert!(!closure_created_in_test(), "src function");
@@ -3064,5 +3079,15 @@ mod private_call_visibility_tests {
         assert!(!closure_created_in_test(), "product entry top level");
         set_owner(None);
         set_file(None);
+    }
+
+    #[test]
+    fn is_test_caller_is_component_exact_for_both_separators() {
+        for yes in ["test/a.spl", "./test/a.spl", ".\\test\\a.spl", "/r/test/a.spl", "r\\test\\a.spl", "././test/x"] {
+            assert!(is_test_caller(yes), "{yes}");
+        }
+        for no in ["src/app/contest/a.spl", "tests/a.spl", "src/test_runner/a.spl", "atest/a.spl", "test", "/r/test"] {
+            assert!(!is_test_caller(no), "{no}");
+        }
     }
 }
