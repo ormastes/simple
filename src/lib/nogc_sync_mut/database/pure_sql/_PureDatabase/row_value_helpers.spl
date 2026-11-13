@@ -104,7 +104,7 @@ fn _resolve_col_in_names(names: [text], name: text) -> i32:
         return direct
     val dot = name.last_index_of(".")
     if dot >= 0 and dot + 1 < name.len() as i32:
-        return _find_idx(names, name.slice(dot + 1, name.len() as i32))
+        return _find_idx(names, name.slice(dot + 1, name.byte_len() as i32))
     -1
 
 fn _col_idx(m: Dict<text, i32>, name: text) -> i32:
@@ -116,7 +116,7 @@ fn _col_idx(m: Dict<text, i32>, name: text) -> i32:
     # `SELECT products.name` resolve to nothing and silently yield NULL / no rows.
     val dot = name.last_index_of(".")
     if dot >= 0 and dot + 1 < name.len() as i32:
-        val bare = name.slice(dot + 1, name.len() as i32)
+        val bare = name.slice(dot + 1, name.byte_len() as i32)
         if m.has(bare):
             return m[bare]
     -1
@@ -320,18 +320,18 @@ fn _deserialize_row(data: text) -> [DbValue]:
     while i < parts.len() as i32:
         val p = parts[i]
         if p.starts_with("I:"):
-            val ns = p.slice(2, p.len())
+            val ns = p.slice(2, p.byte_len())
             # V1 compatibility deliberately keeps the total conversion.
             val n = ns.to_int()
             result.push(DbValue.Integer(value: n))
         elif p.starts_with("R:"):
-            val fs = p.slice(2, p.len())
+            val fs = p.slice(2, p.byte_len())
             result.push(DbValue.Real(value: fs.to_float()))
         elif p.starts_with("T:"):
-            val txt = p.slice(2, p.len())
+            val txt = p.slice(2, p.byte_len())
             result.push(DbValue.Text(value: txt))
         elif p.starts_with("B:"):
-            val bv = p.slice(2, p.len())
+            val bv = p.slice(2, p.byte_len())
             result.push(DbValue.Bool(value: bv == "1"))
         elif p.starts_with("X:"):
             result.push(DbValue.Blob(value: []))
@@ -705,7 +705,7 @@ fn _like_prefix_str(where_expr: SqlExpr?) -> text:
     # Remove surrounding quotes if present
     var pat: text = pattern
     if pat.starts_with("'") and pat.ends_with("'"):
-        pat = pat.slice(1, pat.len() - 1)
+        pat = pat.slice(1, pat.byte_len() - 1)
     # Find first % and take everything before it as the prefix
     # Reject if any _ wildcard appears before the %
     var i: i64 = 0
@@ -735,7 +735,7 @@ fn _like_any_prefix(where_expr: SqlExpr?) -> text:
     val pattern: text = expr.right.value
     var pat: text = pattern
     if pat.starts_with("'") and pat.ends_with("'"):
-        pat = pat.slice(1, pat.len() - 1)
+        pat = pat.slice(1, pat.byte_len() - 1)
     var i: i64 = 0
     while i < pat.len():
         # byte-consistent scan (see _like_starts_with_prefix): slice(i, i+1) keeps i
@@ -780,7 +780,7 @@ fn _extract_like_pattern(where_expr: SqlExpr?) -> text:
     val pattern: text = expr.right.value
     var pat: text = pattern
     if pat.starts_with("'") and pat.ends_with("'"):
-        pat = pat.slice(1, pat.len() - 1)
+        pat = pat.slice(1, pat.byte_len() - 1)
     pat
 
 # Extract a single-sided integer comparison from a WHERE clause.
@@ -1122,7 +1122,7 @@ fn _eval_expr(expr: SqlExpr, cols: [text], vals: [DbValue], params: [DbValue]) -
                 if end_i > st.len():
                     end_i = st.len()
                 return DbValue.Text(value: st.slice(start_i, end_i))
-            return DbValue.Text(value: st.slice(start_i, st.len()))
+            return DbValue.Text(value: st.slice(start_i, st.byte_len()))
         if fname == "replace":
             if expr.args.len() < 3:
                 return DbValue.Null
@@ -1401,7 +1401,7 @@ fn _eval_expr_fast(expr: SqlExpr, cm: Dict<text, i32>, vals: [DbValue], params: 
                 if end_i > st.len():
                     end_i = st.len()
                 return DbValue.Text(value: st.slice(start_i, end_i))
-            return DbValue.Text(value: st.slice(start_i, st.len()))
+            return DbValue.Text(value: st.slice(start_i, st.byte_len()))
         if fname == "replace":
             if expr.args.len() < 3:
                 return DbValue.Null
@@ -1722,15 +1722,15 @@ fn _parse_drop_table(sql: text) -> [text]:
     val upper = trimmed.to_upper()
     if not upper.starts_with("DROP TABLE"):
         return []
-    var rest = trimmed.slice(10, trimmed.len()).trim()
+    var rest = trimmed.slice(10, trimmed.byte_len()).trim()
     val rest_up = rest.to_upper()
     var if_exists = "false"
     if rest_up.starts_with("IF EXISTS"):
         if_exists = "true"
-        rest = rest.slice(9, rest.len()).trim()
+        rest = rest.slice(9, rest.byte_len()).trim()
     # Strip trailing semicolon
     if rest.ends_with(";"):
-        rest = rest.slice(0, rest.len() - 1).trim()
+        rest = rest.slice(0, rest.byte_len() - 1).trim()
     if rest == "":
         return []
     var out: [text] = []
@@ -1746,24 +1746,24 @@ fn _parse_create_index(sql: text) -> [text]:
     val trimmed = sql.trim()
     var upper = trimmed.to_upper()
     if upper.ends_with(";"):
-        upper = upper.slice(0, upper.len() - 1).trim()
+        upper = upper.slice(0, upper.byte_len() - 1).trim()
     var is_unique = "false"
     var rest = trimmed
     if upper.starts_with("CREATE UNIQUE INDEX"):
         is_unique = "true"
-        rest = trimmed.slice(19, trimmed.len()).trim()
+        rest = trimmed.slice(19, trimmed.byte_len()).trim()
     elif upper.starts_with("CREATE INDEX"):
-        rest = trimmed.slice(12, trimmed.len()).trim()
+        rest = trimmed.slice(12, trimmed.byte_len()).trim()
     else:
         return []
     # Strip trailing semicolon from rest too
     if rest.ends_with(";"):
-        rest = rest.slice(0, rest.len() - 1).trim()
+        rest = rest.slice(0, rest.byte_len() - 1).trim()
     # Optional IF NOT EXISTS guard, e.g. "CREATE INDEX IF NOT EXISTS i ON t (c)"
     var if_not_exists = "false"
     if rest.to_upper().starts_with("IF NOT EXISTS"):
         if_not_exists = "true"
-        rest = rest.slice(13, rest.len()).trim()
+        rest = rest.slice(13, rest.byte_len()).trim()
     # rest = "idx_name ON table (col1, col2)"
     val parts = rest.split(" ")
     if parts.len() < 3:
@@ -1814,13 +1814,13 @@ fn _parse_drop_index(sql: text) -> [text]:
     val upper = trimmed.to_upper()
     if not upper.starts_with("DROP INDEX"):
         return []
-    var rest = trimmed.slice(10, trimmed.len()).trim()
+    var rest = trimmed.slice(10, trimmed.byte_len()).trim()
     if rest.ends_with(";"):
-        rest = rest.slice(0, rest.len() - 1).trim()
+        rest = rest.slice(0, rest.byte_len() - 1).trim()
     var if_exists = "false"
     if rest.to_upper().starts_with("IF EXISTS"):
         if_exists = "true"
-        rest = rest.slice(9, rest.len()).trim()
+        rest = rest.slice(9, rest.byte_len()).trim()
     if rest == "":
         return []
     var out: [text] = []
@@ -1833,7 +1833,7 @@ fn _parse_txn_command(sql: text) -> text:
     var low = trimmed.to_lower()
     # Strip trailing semicolon
     if low.ends_with(";"):
-        low = low.slice(0, low.len() - 1).trim()
+        low = low.slice(0, low.byte_len() - 1).trim()
     if low == "begin" or low == "begin transaction":
         return "BEGIN"
     if low == "commit" or low == "end transaction":
@@ -1847,10 +1847,10 @@ fn _parse_alter_table(sql: text) -> [text]:
     val upper = trimmed.to_upper()
     if not upper.starts_with("ALTER TABLE"):
         return []
-    var rest = trimmed.slice(11, trimmed.len()).trim()
+    var rest = trimmed.slice(11, trimmed.byte_len()).trim()
     # Strip trailing semicolon
     if rest.ends_with(";"):
-        rest = rest.slice(0, rest.len() - 1).trim()
+        rest = rest.slice(0, rest.byte_len() - 1).trim()
     # Extract table name (first token)
     val parts = rest.split(" ")
     if parts.len() < 4:

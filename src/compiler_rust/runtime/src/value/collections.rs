@@ -4521,16 +4521,6 @@ pub(crate) fn text_cp_len_bytes(bytes: &[u8]) -> usize {
     bytes.iter().filter(|b| (**b & 0xC0) != 0x80).count()
 }
 
-/// Code-point index of byte offset `byte` (a char boundary) in `bytes`.
-#[inline]
-pub(crate) fn text_byte_to_cp(bytes: &[u8], byte: usize) -> usize {
-    let byte = byte.min(bytes.len());
-    if bytes.is_ascii() {
-        return byte;
-    }
-    text_cp_len_bytes(&bytes[..byte])
-}
-
 /// Byte offset of code-point index `cp` in `bytes`; `bytes.len()` past the end.
 #[inline]
 pub(crate) fn text_cp_to_byte(bytes: &[u8], cp: usize) -> usize {
@@ -4594,23 +4584,6 @@ pub(crate) fn text_cp_len_memo(string: RuntimeValue, bytes: &[u8]) -> usize {
     bytes.iter().filter(|b| (**b & 0xC0) != 0x80).count()
 }
 
-#[inline]
-pub(crate) fn text_byte_to_cp_memo(string: RuntimeValue, bytes: &[u8], byte: usize) -> usize {
-    let byte = byte.min(bytes.len());
-    if text_is_ascii_memo(string, bytes) {
-        return byte;
-    }
-    text_cp_len_bytes(&bytes[..byte])
-}
-
-#[inline]
-pub(crate) fn text_cp_to_byte_memo(string: RuntimeValue, bytes: &[u8], cp: usize) -> usize {
-    if text_is_ascii_memo(string, bytes) {
-        return cp.min(bytes.len());
-    }
-    text_cp_to_byte(bytes, cp)
-}
-
 /// User-facing text length (ADR-005 item 5): number of Unicode scalar values.
 /// `len()`, `char_count()`, the `s[i]` bound and `rt_len`'s text arm all route
 /// here; `rt_string_len` stays the BYTE primitive (`byte_len()`, the
@@ -4618,10 +4591,20 @@ pub(crate) fn text_cp_to_byte_memo(string: RuntimeValue, bytes: &[u8], cp: usize
 /// non-text receiver, matching `rt_string_len` and `rt_len`.
 #[no_mangle]
 pub extern "C" fn rt_string_char_count(string: RuntimeValue) -> i64 {
-    match string_as_str(string) {
-        Some(s) => text_cp_len_memo(string, s.as_bytes()) as i64,
-        None => -1,
+    let len = rt_string_len(string);
+    if len < 0 {
+        return -1;
     }
+    let data = rt_string_data(string);
+    if len == 0 || data.is_null() {
+        return 0;
+    }
+    // Count lead bytes on the RAW bytes, like the C runtime's
+    // `spl_core_string_cp_len`: a byte-offset `substring`/`slice` that cuts
+    // inside a code point yields text that is not valid UTF-8, and its
+    // `len()` must not be the -1 "not text" answer.
+    let bytes = unsafe { std::slice::from_raw_parts(data, len as usize) };
+    text_cp_len_memo(string, bytes) as i64
 }
 
 /// `to_digit` on a one-character text (ADR-005): `Some(0..=9)` for an ASCII
@@ -5796,18 +5779,17 @@ pub extern "C" fn rt_text_find(haystack: RuntimeValue, needle: RuntimeValue, sta
     unsafe {
         let hay = std::slice::from_raw_parts(hay_ptr, hay_len as usize);
         let needle_bytes = std::slice::from_raw_parts(needle_ptr, needle_len as usize);
-        // `start` and the answer are CODE-POINT indices (ADR-005 item 5);
-        // ASCII text keeps byte == code point.
-        let cp_len = text_cp_len_memo(haystack, hay) as i64;
+        // `start` and the answer are BYTE offsets (owner decision 2026-11-07,
+        // ADR-005 "Staging"): `index_of` is in the named byte family with
+        // `byte_at`/`substring`, bounded by `byte_len()`.
         if needle_len == 0 {
-            return start.min(cp_len);
+            return start.min(hay_len);
         }
-        if start >= cp_len || needle_len > hay_len {
+        if start >= hay_len || needle_len > hay_len {
             return -1;
         }
-        let start_byte = text_cp_to_byte_memo(haystack, hay, start as usize);
-        (collection_providers().byte_find)(hay, needle_bytes, start_byte)
-            .map(|idx| text_byte_to_cp_memo(haystack, hay, idx) as i64)
+        (collection_providers().byte_find)(hay, needle_bytes, start as usize)
+            .map(|idx| idx as i64)
             .unwrap_or(-1)
     }
 }
@@ -6444,14 +6426,14 @@ pub extern "C" fn rt_string_find(string: RuntimeValue, needle: RuntimeValue) -> 
     unsafe {
         let haystack = std::slice::from_raw_parts(str_data, str_len as usize);
         let needle_bytes = std::slice::from_raw_parts(needle_data, needle_len as usize);
-        // The answer is a CODE-POINT index (ADR-005 item 5), so it composes
-        // with `len()` / `slice()`; ASCII text keeps the raw byte index.
+        // The answer is a BYTE offset (owner decision 2026-11-07), so it
+        // composes with `byte_len()` / `byte_at` / `substring`.
         let found = if needle_bytes.len() == 1 {
             haystack.iter().position(|byte| *byte == needle_bytes[0])
         } else {
             (collection_providers().byte_find)(haystack, needle_bytes, 0)
         };
-        found.map(|idx| text_byte_to_cp_memo(string, haystack, idx) as i64).unwrap_or(-1)
+        found.map(|idx| idx as i64).unwrap_or(-1)
     }
 }
 
@@ -6472,7 +6454,7 @@ pub extern "C" fn rt_string_rfind(string: RuntimeValue, needle: RuntimeValue) ->
     }
 
     if needle_len == 0 {
-        return rt_string_char_count(string);
+        return str_len;
     }
 
     if needle_len > str_len {
@@ -6489,15 +6471,13 @@ pub extern "C" fn rt_string_rfind(string: RuntimeValue, needle: RuntimeValue) ->
     unsafe {
         let haystack = std::slice::from_raw_parts(str_data, str_len as usize);
         let needle_bytes = std::slice::from_raw_parts(needle_data, needle_len as usize);
-        // CODE-POINT index (ADR-005 item 5), like `index_of`/`find`.
+        // BYTE offset, like `index_of`/`find`.
         let found = if needle_bytes.len() == 1 {
             haystack.iter().rposition(|byte| *byte == needle_bytes[0])
         } else {
             (collection_providers().byte_rfind)(haystack, needle_bytes)
         };
-        found
-            .map(|idx| text_byte_to_cp_memo(string, haystack, idx) as i64)
-            .unwrap_or(-1)
+        found.map(|idx| idx as i64).unwrap_or(-1)
     }
 }
 
@@ -6607,7 +6587,7 @@ pub extern "C" fn rt_string_index_of(string: RuntimeValue, needle: RuntimeValue)
         let haystack = std::str::from_utf8_unchecked(std::slice::from_raw_parts(str_data, str_len as usize));
         let needle_str = std::str::from_utf8_unchecked(std::slice::from_raw_parts(needle_data, needle_len as usize));
         match haystack.find(needle_str) {
-            Some(idx) => super::objects::rt_option_some(RuntimeValue::from_int(text_byte_to_cp_memo(string, haystack.as_bytes(), idx) as i64)),
+            Some(idx) => super::objects::rt_option_some(RuntimeValue::from_int(idx as i64)),
             None => super::objects::rt_option_none(),
         }
     }
@@ -6923,6 +6903,50 @@ pub extern "C" fn rt_slice(collection: RuntimeValue, start: i64, end: i64, step:
             }
         }
         _ => RuntimeValue::NIL,
+    }
+}
+
+/// `.slice(a, b)` / `.substring(a, b)` METHOD entry: same ABI as `rt_slice`,
+/// but a text receiver is cut at BYTE offsets clamped to `0..=byte_len()`
+/// (owner decision 2026-11-07; ADR-005 "Staging";
+/// doc/05_design/language/text/text_len_counts_characters_2026-11-07.md).
+/// `rt_slice` itself serves the `s[a:b]` operator and stays code-point indexed.
+/// A range that splits a multi-byte code point is copied RAW, like
+/// `spl_str_slice` in the C runtime: no snapping and no U+FFFD. Every other
+/// receiver (array, tuple) is `rt_slice`.
+#[no_mangle]
+pub extern "C" fn rt_slice_text_bytes(collection: RuntimeValue, start: i64, end: i64, step: i64) -> RuntimeValue {
+    let Some(str_ptr) = get_typed_ptr::<RuntimeString>(collection, HeapObjectType::String) else {
+        return rt_slice(collection, start, end, step);
+    };
+    if step < 1 {
+        // Zero / negative step keep `rt_slice`'s own nil / hard-error policy.
+        return rt_slice(collection, start, end, step);
+    }
+    unsafe {
+        let len = (*str_ptr).len as i64;
+        let end = end.max(0).min(len);
+        let start = start.max(0).min(end);
+        if step != 1 || start >= end {
+            return rt_string_new(std::ptr::null(), 0);
+        }
+        // Identity fast path, as in `rt_slice`.
+        if start == 0 && end == len {
+            return collection;
+        }
+        let data = str_ptr.add(1) as *const u8;
+        // UTF-8 slice audit, stage 1 (COUNTING ONLY, default off).
+        if crate::text_slice_audit::enabled() {
+            let src = std::slice::from_raw_parts(data, len as usize);
+            crate::text_slice_audit::note(
+                crate::text_slice_audit::site::RT_SLICE_RUST,
+                start,
+                end,
+                src,
+                &src[start as usize..end as usize],
+            );
+        }
+        rt_string_new(data.add(start as usize), (end - start) as u64)
     }
 }
 
@@ -9863,22 +9887,58 @@ mod text_len_slice_codepoint_tests {
     }
 
     #[test]
-    fn index_of_and_rfind_return_code_point_indices() {
-        let s = t("h\u{e9}llo");
-        assert_eq!(some_int(rt_string_index_of(s, t("l"))), Some(2));
-        assert_eq!(some_int(rt_string_index_of(s, t("o"))), Some(4));
+    fn index_of_and_rfind_return_byte_offsets() {
+        // Owner decision 2026-11-07 (ADR-005 "Staging"): the find family is
+        // byte-offset, like `byte_at` / `substring`, bounded by `byte_len()`.
+        let s = t("h\u{e9}llo"); // h | C3 A9 | l l o : 6 bytes, 5 code points
+        assert_eq!(some_int(rt_string_index_of(s, t("l"))), Some(3));
+        assert_eq!(some_int(rt_string_index_of(s, t("o"))), Some(5));
         assert_eq!(some_int(rt_string_index_of(s, t("\u{e9}"))), Some(1));
         assert_eq!(some_int(rt_string_index_of(s, t("z"))), None);
         assert_eq!(some_int(rt_string_index_of(s, t(""))), Some(0));
-        assert_eq!(rt_string_rfind(s, t("l")), 3);
-        assert_eq!(rt_string_rfind(s, t("")), 5);
+        assert_eq!(rt_string_find(s, t("l")), 3);
+        assert_eq!(rt_text_find(s, t("l"), 4), 4);
+        assert_eq!(rt_text_find(s, t(""), 99), 6);
+        assert_eq!(rt_string_rfind(s, t("l")), 4);
+        assert_eq!(rt_string_rfind(s, t("")), 6);
         assert_eq!(rt_string_rfind(s, t("z")), -1);
-        // index_of result composes with slice (both code points).
+        // index_of result composes with the byte slice entry.
         let i = some_int(rt_string_index_of(s, t("l"))).unwrap();
-        assert_eq!(text_of(rt_slice(s, i, rt_len(s), 1)), "llo");
+        assert_eq!(text_of(rt_slice_text_bytes(s, i, i64::MAX, 1)), "llo");
         // ASCII unchanged.
         assert_eq!(some_int(rt_string_index_of(t("hello"), t("lo"))), Some(3));
         assert_eq!(rt_string_rfind(t("hello"), t("l")), 3);
+    }
+
+    #[test]
+    fn slice_text_bytes_is_byte_indexed_and_keeps_raw_bytes() {
+        let s = t("\u{65e5}\u{672c}ab"); // 3 + 3 + 1 + 1 bytes
+        assert_eq!(text_of(rt_slice_text_bytes(s, 0, 3, 1)), "\u{65e5}");
+        assert_eq!(text_of(rt_slice_text_bytes(s, 3, 6, 1)), "\u{672c}");
+        assert_eq!(text_of(rt_slice_text_bytes(s, 6, 8, 1)), "ab");
+        assert_eq!(text_of(rt_slice_text_bytes(s, 6, i64::MAX, 1)), "ab");
+        // Clamped to 0..=byte_len(); negative offsets clamp to 0.
+        assert_eq!(text_of(rt_slice_text_bytes(s, -5, 3, 1)), "\u{65e5}");
+        assert_eq!(rt_string_len(rt_slice_text_bytes(s, 7, 99, 1)), 1);
+        assert_eq!(rt_string_len(rt_slice_text_bytes(s, 5, 2, 1)), 0);
+        // A cut inside a code point is copied RAW: the byte length is the
+        // requested width and adjacent cuts reassemble the original bytes.
+        let head = rt_slice_text_bytes(s, 0, 2, 1);
+        let tail = rt_slice_text_bytes(s, 2, 8, 1);
+        assert_eq!(rt_string_len(head), 2);
+        assert_eq!(rt_string_len(tail), 6);
+        assert_eq!(string_as_str(head), None);
+        // `len()` of such a fragment counts lead bytes, like the C runtime's
+        // `rt_string_char_count`; it is never the -1 "not text" answer.
+        assert_eq!(rt_string_char_count(head), 1);
+        // The bracket operator entry is untouched: code points.
+        assert_eq!(text_of(rt_slice(s, 0, 2, 1)), "\u{65e5}\u{672c}");
+        // A non-text receiver is `rt_slice`.
+        let arr = rt_array_new(3);
+        for v in [10, 20, 30] {
+            rt_array_push(arr, RuntimeValue::from_int(v));
+        }
+        assert_eq!(rt_array_len(rt_slice_text_bytes(arr, 1, i64::MAX, 1)), 2);
     }
 }
 
@@ -9915,7 +9975,7 @@ mod text_len_memo_concurrency_tests {
                         let expect_len = (k + 3).min(257) - k.min(257);
                         assert_eq!(rt_string_len(rt_slice(a, k, k + 3, 1)), expect_len);
                         assert_eq!(string_as_str(rt_slice(u, 12 * (i % 40), 12 * (i % 40) + 2, 1)), Some("h\u{e9}"));
-                        assert_eq!(rt_string_find(u, n), 6);
+                        assert_eq!(rt_string_find(u, n), 7);
                     }
                 })
             })

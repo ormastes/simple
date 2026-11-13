@@ -2131,9 +2131,9 @@ impl LlvmBackend {
             return Ok(());
         }
 
-        // Special case: substring(text, start[, end]) → rt_slice(text, start, end, 1)
-        // rt_string_substring doesn't exist in the runtime, so we expand to rt_slice + rt_len.
-        if (func_name_raw == "substring" || resolved_text_runtime == Some("rt_slice")) && matches!(args.len(), 2 | 3) {
+        // Special case: substring(text, start[, end]) → rt_slice_text_bytes(text, start, end, 1)
+        // (BYTE offsets). The open-end form passes i64::MAX, clamped by the runtime.
+        if (func_name_raw == "substring" || resolved_text_runtime == Some("rt_slice_text_bytes")) && matches!(args.len(), 2 | 3) {
             let text_val = self.get_vreg(&args[0], vreg_map)?;
             let text_casted = self.coerce_value_to_type(text_val, Some(i64_type.into()), builder)?;
             let start_val = self.get_vreg(&args[1], vreg_map)?;
@@ -2142,17 +2142,9 @@ impl LlvmBackend {
                 let value = self.get_vreg(&args[2], vreg_map)?;
                 self.coerce_value_to_type(value, Some(i64_type.into()), builder)?
             } else {
-                let len_fn_type = i64_type.fn_type(&[i64_type.into()], false);
-                let len_func = module
-                    .get_function("rt_len")
-                    .unwrap_or_else(|| module.add_function("rt_len", len_fn_type, None));
-                let len_call = builder
-                    .build_call(len_func, &[text_casted.into()], "text_len")
-                    .map_err(|e| crate::error::factory::llvm_build_failed("rt_len for substring", &e))?;
-                len_call
-                    .try_as_basic_value()
-                    .basic()
-                    .unwrap_or_else(|| i64_type.const_int(0, false).into())
+                // Open end: BYTE offsets (owner decision 2026-11-07); the runtime
+                // clamps i64::MAX to `byte_len()`. `rt_len` counts code points.
+                i64_type.const_int(i64::MAX as u64, false).into()
             };
             let step_val = i64_type.const_int(1, false);
             // Call rt_slice(text, start, end, step) — 4 args
@@ -2161,8 +2153,8 @@ impl LlvmBackend {
                 false,
             );
             let slice_func = module
-                .get_function("rt_slice")
-                .unwrap_or_else(|| module.add_function("rt_slice", slice_fn_type, None));
+                .get_function("rt_slice_text_bytes")
+                .unwrap_or_else(|| module.add_function("rt_slice_text_bytes", slice_fn_type, None));
             let slice_args = &[text_casted.into(), start_casted.into(), end_val.into(), step_val.into()];
             let declared_params = slice_func.get_type().get_param_types().len();
             let slice_call = if declared_params != 4 {
@@ -2227,7 +2219,7 @@ impl LlvmBackend {
             "reverse" => Some("rt_array_reverse"),
             "join" => Some("rt_array_join"),
             "clear" => Some("rt_array_clear"),
-            "slice" => Some("rt_slice"),
+            "slice" => Some("rt_slice_text_bytes"),
             // Collection methods (verified as T symbols)
             "len" => Some("rt_len"),
             "get" => Some("rt_get"),
@@ -2475,7 +2467,7 @@ impl LlvmBackend {
                 "sort" => Some("rt_array_sort"),
                 "reverse" => Some("rt_array_reverse"),
                 "clear" => Some("rt_array_clear"),
-                "slice" => Some("rt_slice"),
+                "slice" => Some("rt_slice_text_bytes"),
                 "len" => Some("rt_len"),
                 "get" => Some("rt_get"),
                 "set" => Some("rt_index_set"),

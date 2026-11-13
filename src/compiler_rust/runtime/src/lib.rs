@@ -1100,6 +1100,7 @@ pub use value::{
     rt_shared_ref_count,
     rt_shared_release,
     rt_slice,
+    rt_slice_text_bytes,
     // String operations
     rt_any_add,
     rt_tagged_add,

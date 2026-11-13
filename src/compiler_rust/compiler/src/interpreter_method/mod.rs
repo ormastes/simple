@@ -177,22 +177,6 @@ pub(crate) fn text_cp_len(s: &Arc<String>) -> usize {
     }
 }
 
-/// Byte offset of code-point index `cp` in `s`; `s.len()` when `cp` is past the end.
-pub(crate) fn text_cp_to_byte(s: &str, cp: usize) -> usize {
-    if s.is_ascii() {
-        return cp.min(s.len());
-    }
-    s.char_indices().nth(cp).map(|(i, _)| i).unwrap_or(s.len())
-}
-
-/// Code-point index of byte offset `byte` in `s` (`byte` must be a char boundary).
-pub(crate) fn text_byte_to_cp(s: &str, byte: usize) -> usize {
-    if s.is_ascii() {
-        return byte;
-    }
-    s[..byte].chars().count()
-}
-
 // Thread-local storage for pinned strings used by the "ptr" method on strings.
 // Strings are kept alive here so that raw pointers returned to SFFI/codegen remain valid.
 // Call `clear_pinned_strings()` between test runs or when the interpreter resets to reclaim memory.
@@ -1304,7 +1288,7 @@ pub(crate) fn evaluate_method_call(
             // directly rather than through a lossy stand-in (U+FFFD
             // substitution changes the byte length).
             match method {
-                "len" | "length" => return Ok(Value::Int(bytes.len() as i64)),
+                "len" | "length" | "byte_len" => return Ok(Value::Int(bytes.len() as i64)),
                 "is_empty" => return Ok(Value::Bool(bytes.is_empty())),
                 "bytes" | "to_bytes" => {
                     let out: Vec<Value> = bytes.iter().map(|b| Value::Int(*b as i64)).collect();
@@ -2780,5 +2764,93 @@ mod text_from_bytes_static_tests {
     fn text_from_bytes_builds_text_from_a_byte_array() {
         let src = "fn probe() -> i64:\n    val b: [u8] = [97u8, 98u8, 99u8]\n    val t = text.from_bytes(b)\n    if t == \"abc\":\n        return 1\n    0\nmain = probe()\n";
         assert_eq!(evaluate_module(&Parser::new(src).parse().expect("parse").items).expect("evaluate"), 1);
+    }
+}
+
+#[cfg(test)]
+mod text_byte_offset_method_tests {
+    //! `substring`/`slice(a, b)`, `index_of`/`find`/`find_str` and
+    //! `last_index_of`/`rfind` are the BYTE-offset family (bounded by
+    //! `byte_len()`); `len()`, `s[i]` and `s[a:b]` are code points. Owner
+    //! decision 2026-11-07, ADR-005 "Staging" and
+    //! doc/05_design/language/text/text_len_counts_characters_2026-11-07.md.
+    //! 04969955c75 flipped the direct-receiver method arms to code points, so a
+    //! byte scanner (`byte_at` + `substring`) cut the wrong range on any
+    //! non-ASCII input: the SDN parser re-encoded `{error: "日本", schema: x}`
+    //! as `{cess: ..., ema: ...}`.
+
+    use crate::interpreter::evaluate_module;
+    use simple_parser::Parser;
+
+    /// Run a snippet; `main` is a bitmask of the checks that FAILED (0 = pass).
+    fn run(src: &str) -> i32 {
+        let mut parser = Parser::new(src);
+        let module = parser.parse().expect("parse");
+        evaluate_module(&module.items).expect("evaluate")
+    }
+
+    #[test]
+    fn substring_and_slice_methods_take_byte_offsets() {
+        // "日本ab": 4 code points, 8 bytes (3 + 3 + 1 + 1).
+        let src = r#"
+fn check() -> i64:
+    val s = "日本ab"
+    var bad = 0
+    if s.byte_len() != 8: bad = bad + 1
+    if s.len() != 4: bad = bad + 2
+    if s.substring(0, 3) != "日": bad = bad + 4
+    if s.slice(3, 6) != "本": bad = bad + 8
+    if s.substring(6, 8) != "ab": bad = bad + 16
+    if s.substring(6) != "ab": bad = bad + 32
+    if s.slice(0, s.byte_len()) != s: bad = bad + 64
+    if s[0:2] != "日本": bad = bad + 128
+    bad
+
+main = check()
+"#;
+        assert_eq!(run(src), 0);
+    }
+
+    #[test]
+    fn index_of_family_returns_byte_offsets_usable_with_substring() {
+        let src = r#"
+fn check() -> i64:
+    val s = "日本ab日"
+    var bad = 0
+    if s.index_of("a") != 6: bad = bad + 1
+    if s.find("b") != 7: bad = bad + 2
+    if s.index_of("日", 1) != 8: bad = bad + 4
+    if s.last_index_of("日") != 8: bad = bad + 8
+    if s.rfind("本") != 3: bad = bad + 16
+    if s.index_of("", 99) != 11: bad = bad + 32
+    if s.substring(s.index_of("a"), s.byte_len()) != "ab日": bad = bad + 64
+    if s.byte_at(6) != 97: bad = bad + 128
+    bad
+
+main = check()
+"#;
+        assert_eq!(run(src), 0);
+    }
+
+    #[test]
+    fn mid_code_point_offset_keeps_the_raw_bytes() {
+        // Same policy as `spl_str_slice` (C) and the nested-receiver arm in
+        // interpreter_helpers/method_dispatch.rs: no snapping, no U+FFFD. The
+        // byte length is the requested width and adjacent cuts reassemble.
+        let src = r#"
+fn check() -> i64:
+    val s = "aé€z"
+    var bad = 0
+    if s.slice(0, 2).byte_len() != 2: bad = bad + 1
+    if s.substring(2, 4).byte_len() != 2: bad = bad + 2
+    if s.slice(0, 2) + s.slice(2, 7) != s: bad = bad + 4
+    if s.slice(-3, 1) != "a": bad = bad + 8
+    if s.slice(6, 99) != "z": bad = bad + 16
+    if s.slice(4, 2) != "": bad = bad + 32
+    bad
+
+main = check()
+"#;
+        assert_eq!(run(src), 0);
     }
 }

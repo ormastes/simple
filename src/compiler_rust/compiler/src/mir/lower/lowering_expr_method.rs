@@ -1503,10 +1503,13 @@ impl<'a> MirLowerer<'a> {
                 return self.lower_builtin_call_expr(runtime_name, std::slice::from_ref(receiver), TypeId::STRING);
             }
 
-            // Preserve the canonical substring ABI: rt_slice(text, start, end, 1).
-            // The one-bound form obtains `end` from rt_len; the two-bound form
-            // forwards its explicit end. This is STRING-gated so a user type
-            // declaring `substring` remains a direct user-method call.
+            // Canonical substring ABI: rt_slice_text_bytes(text, start, end, 1),
+            // BYTE offsets (owner decision 2026-11-07). The one-bound form
+            // passes i64::MAX, which the runtime clamps to `byte_len()`
+            // (`rt_len` counts code points and would cut non-ASCII text
+            // short); the two-bound form forwards its explicit end. This is
+            // STRING-gated so a user type declaring `substring` remains a
+            // direct user-method call.
             if method == "substring" && matches!(args.len(), 1 | 2) {
                 let receiver_reg = self.lower_expr(receiver)?;
                 let start_reg = self.lower_expr(&args[0])?;
@@ -1515,11 +1518,10 @@ impl<'a> MirLowerer<'a> {
                 } else {
                     self.with_func(|func, current_block| {
                         let dest = func.new_vreg();
-                        func.block_mut(current_block).unwrap().instructions.push(MirInst::Call {
-                            dest: Some(dest),
-                            target: crate::mir::effects::CallTarget::from_name("rt_len"),
-                            args: vec![receiver_reg],
-                        });
+                        func.block_mut(current_block)
+                            .unwrap()
+                            .instructions
+                            .push(MirInst::ConstInt { dest, value: i64::MAX });
                         dest
                     })?
                 };
@@ -1535,7 +1537,7 @@ impl<'a> MirLowerer<'a> {
                     let dest = func.new_vreg();
                     func.block_mut(current_block).unwrap().instructions.push(MirInst::Call {
                         dest: Some(dest),
-                        target: crate::mir::effects::CallTarget::from_name("rt_slice"),
+                        target: crate::mir::effects::CallTarget::from_name("rt_slice_text_bytes"),
                         args: vec![receiver_reg, start_reg, end_reg, step_reg],
                     });
                     dest

@@ -117,3 +117,116 @@ and the pure-Simple twin, with parity:
   not define `rt_string_char_count`, so the Cranelift inline keeps the byte load
   there (`string_cp_len_ref` returns `None` when `ctx.baremetal`); Phase 3
   self-hosted verification (stage2/stage3 compile the pure-Simple MIR change).
+
+## 2026-11-12 — seed `substring`/`slice(a, b)`/`index_of` back to byte offsets
+
+The 2026-11-09 note above ("superseding the stay byte-offset wording") is
+withdrawn for the seed. The owner decision of 2026-11-07 stands and is what
+ADR-005 "Staging", the design doc table and the syntax reference state:
+`len()`, `s[i]`, `s[a:b]` are code points; `byte_len`, `byte_at`,
+`substring`, `slice(a, b)`, `index_of`/`find`/`find_str`,
+`last_index_of`/`rfind` are byte offsets.
+
+Why it could not stay flipped: `4183b795175` had already moved the stdlib byte
+scanners to `byte_len()` + `byte_at` + `substring`. With code-point
+`substring` every such scanner cut the wrong range on non-ASCII input; the SDN
+parser re-encoded `{error: "日本", schema: x}` as `{cess: ..., ema: ...}`.
+
+Seed change (interpreter and Cranelift/LLVM lowering):
+
+- `interpreter_method/string.rs`: `slice`/`substring`, the `index_of` family
+  and `rfind` take and return byte offsets again; a cut inside a code point
+  keeps the raw bytes (`Value::StrBytes`), as `spl_str_slice` does.
+- New runtime entry `rt_slice_text_bytes` (Rust runtime + C twin), same ABI as
+  `rt_slice`. Method calls lower to it; `rt_slice` keeps serving `s[a:b]` in
+  code points. The open-end form passes `i64::MAX` (clamped to `byte_len()`),
+  not `rt_len`.
+- Rust runtime `rt_string_find` / `rt_text_find` / `rt_string_rfind` /
+  `rt_string_index_of` return byte offsets.
+- `rt_string_char_count` (Rust) counts lead bytes on raw bytes instead of
+  answering -1 for text that is not valid UTF-8, matching the C runtime.
+
+Open after this change:
+
+- C runtime `rt_string_find` / `rt_text_find` / `rt_string_rfind` and the
+  `simple_core/core_string.spl` twin are still code-point indexed, while the
+  pure-Simple MIR lowers text `substring` to byte-indexed `spl_str_slice`. The
+  self-hosted lane is therefore mixed on non-ASCII text.
+- `X.substring(a, X.len())` (same receiver) is a byte cut bounded by a
+  code-point count: 940 sites in `src/lib`, 726 in `src/app`, 380 in
+  `src/compiler`. On non-ASCII text it drops the last
+  `byte_len() - len()` bytes. Rewrite to `X.substring(a)` or
+  `X.substring(a, X.byte_len())`; both are correct under either unit.
+- `char_code_at` is listed as a byte API in the design doc but is
+  character-indexed in the interpreter and both runtimes. Not changed here.
+
+## 2026-11-13 — owner decision recorded; sources and C runtime follow
+
+**Owner decision (2026-11-13):** `substring(a, b)`, `slice(a, b)` and
+`index_of` take BYTE offsets (ADR-005 "Staging", syntax reference
+`doc/07_guide/quick_reference/syntax_quick_reference.md`). `len()`, `s[i]`
+and `s[a:b]` stay code points. This reverses PR #7877 (`04969955c75`,
+`db56bd08e19`) for those methods. Branch `work/text-byte-offsets-20261113`.
+
+The 2026-11-12 note named the same-receiver `X.substring(a, X.len())` form
+as the cause of the imap/engine2d/smtp multibyte regressions. That was
+incomplete. Rewriting that form alone left them at 2/9, 3/6 and 6/7. All
+three hoist the length into a local (`val len = line.length()`) and scan
+bytes with it. Changes:
+
+- Same-receiver inline bound `R.substring/slice(.., R.len())` changed to
+  `R.byte_len()`: 2628 sites (src/lib 1169, src/app 945, src/compiler 514).
+- The `.length()` alias in the same position: 158 sites (138 / 18 / 2).
+- A local `N = R.len()|R.length()` whose every use bounds a byte cut on R:
+  182 declarations (108 / 25 / 49), out of 1410 candidates.
+- C runtime and `simple_core/core_string.spl`: `rt_string_find`,
+  `rt_text_find` and `rt_string_rfind` return byte offsets, matching the Rust
+  runtime. `rt_text_len_slice_codepoint_selfcheck.c`: red at check 45 on the
+  old runtime, PASS with 62 checks on the new one.
+
+Left unchanged:
+
+- 56 array/byte receivers.
+- 44 `X.len() - Y.len()` bounds. These are right today when the prefix is
+  ASCII; the fully byte form needs `Y.byte_len()` too.
+- 67 `X.len() - 1` or variable-k bounds that have no end check on X.
+- All `s[a:b]` slices, and every bound that is another text's `len()`.
+
+`scripts/check/check-text-len-unit-mix.shs` was already red on origin
+(1382). It is 1397 after this change. By (file, receiver), 64 entries are
+new and 51 are gone. Of the new ones, 23 are rule 2 (`prefix.len()` used as
+a byte width beside a byte-scanned receiver). The other 41 are functions
+that also index R by code point. Both kinds are real residual unit mixes,
+and the gate was not loosened.
+
+Evidence uses the seed from origin `fe75b13a584` against the seed from the
+branch (same Rust/C as the final sha). Specs were run serially under
+MemoryMax=24G.
+
+| spec | origin | seed fix only | branch |
+|---|---|---|---|
+| imap/parse_multibyte | 9/9 | 2/9 | 9/9 |
+| simple_web_engine2d_class_name_multibyte | 6/6 | 3/6 | 6/6 |
+| smtp/send_email_validate_multibyte | 7/7 | 6/7 | 7/7 |
+| test_runner_new/sdn_wrapper | 9/10 | 10/10 | 10/10 |
+| test_runner_new/sdn_worker_protocol | 7/9 | 9/9 | 9/9 |
+| sweep (110 files: json/sdn/text/string_core + utf8/multibyte) | 1688/1745, 79 files OK | — | 1705/1745, 87 files OK |
+
+Sweep rows that changed (all improvements, none regressed):
+`text_ops_bom` 2→3/3, `string_core_case_utf8` 10→12/12,
+`string_core_ops` 206→207/207, `str_split_empty_sep_multibyte` 1→2/2,
+`security_sanitize_utf8` 3→7/8, and the two ADR-005 specs 6→8/8 and 8→11/11.
+
+Seed cargo suites on the branch (clang + lld): `cargo test --release -p
+simple-runtime --lib` has 1538 passed, 0 failed, 12 ignored. `-p
+simple-compiler --test interpreter_utf8_slice_boundary` has 6 passed.
+
+Still open:
+
+- src/compiler sources were changed but bootstrap was not run, so the
+  self-hosted compiler was not rebuilt or exercised.
+- 23 new rule-2 offenders, such as `line.substring(prefix.len(), ..)` and
+  `while i <= hlen - nlen` with `nlen = needle.len()`. Another text's
+  `len()` is still used as a byte width. These are wrong for a non-ASCII
+  needle or prefix, under either unit.
+- `char_code_at` is unchanged, as in the previous note.

@@ -4600,7 +4600,7 @@ pub fn compile_call<M: Module>(
                 "find_str" => Some("rt_string_find"),
                 "rfind" | "last_index_of" => Some("rt_string_rfind"),
                 "to_string" | "to_text" | "str" => Some("rt_to_string"),
-                "slice" | "substring" => Some("rt_slice"),
+                "slice" | "substring" => Some("rt_slice_text_bytes"),
                 "get" => Some("rt_get"),
                 "keys" => Some("rt_dict_keys"),
                 "values" => Some("rt_dict_values"),

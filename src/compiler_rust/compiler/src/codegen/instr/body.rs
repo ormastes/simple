@@ -453,7 +453,7 @@ pub(super) fn build_vreg_types(
                         // so they never reach that helper — this arm is where the
                         // Call-shaped half of the family must be typed.
                         let ty = ty.or_else(|| match base {
-                            "rt_slice" | "rt_take" | "rt_drop" | "rt_reverse" | "rt_concat" => {
+                            "rt_slice" | "rt_slice_text_bytes" | "rt_take" | "rt_drop" | "rt_reverse" | "rt_concat" => {
                                 match args.first().and_then(|a| types_map.get(a).copied()) {
                                     Some(TypeId::STRING) => Some(TypeId::STRING),
                                     _ => None,

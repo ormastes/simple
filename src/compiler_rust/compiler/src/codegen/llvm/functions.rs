@@ -2664,23 +2664,15 @@ impl LlvmBackend {
                     }
                 }
 
-                // Special case: substring(start) → rt_slice(receiver, start, rt_len(receiver), 1)
+                // Special case: substring(start) → rt_slice_text_bytes(receiver, start, i64::MAX, 1)
                 if method == "substring" && args.len() == 1 {
                     let recv_val = self.get_vreg(receiver, vreg_map)?;
                     let recv_casted = self.coerce_value_to_type(recv_val, Some(i64_type.into()), builder)?;
                     let start_val = self.get_vreg(&args[0], vreg_map)?;
                     let start_casted = self.coerce_value_to_type(start_val, Some(i64_type.into()), builder)?;
-                    let len_fn_type = i64_type.fn_type(&[i64_type.into()], false);
-                    let len_func = module
-                        .get_function("rt_len")
-                        .unwrap_or_else(|| module.add_function("rt_len", len_fn_type, None));
-                    let len_call = builder
-                        .build_call(len_func, &[recv_casted.into()], "text_len")
-                        .map_err(|e| crate::error::factory::llvm_build_failed("rt_len for substring", &e))?;
-                    let end_val = len_call
-                        .try_as_basic_value()
-                        .basic()
-                        .unwrap_or_else(|| i64_type.const_int(0, false).into());
+                    // Open end: BYTE offsets (owner decision 2026-11-07); the runtime
+                    // clamps i64::MAX to `byte_len()`. `rt_len` counts code points.
+                    let end_val = i64_type.const_int(i64::MAX as u64, false);
                     let step_val = i64_type.const_int(1, false);
                     // rt_slice(collection, start, end, step) takes 4 args
                     let slice_fn_type = i64_type.fn_type(
@@ -2688,8 +2680,8 @@ impl LlvmBackend {
                         false,
                     );
                     let slice_func = module
-                        .get_function("rt_slice")
-                        .unwrap_or_else(|| module.add_function("rt_slice", slice_fn_type, None));
+                        .get_function("rt_slice_text_bytes")
+                        .unwrap_or_else(|| module.add_function("rt_slice_text_bytes", slice_fn_type, None));
                     let slice_args = &[recv_casted.into(), start_casted.into(), end_val.into(), step_val.into()];
                     let declared_params = slice_func.get_type().get_param_types().len();
                     let slice_call = if declared_params != 4 {
@@ -3205,7 +3197,7 @@ impl LlvmBackend {
                     "find" | "find_str" => Some("rt_string_find"),
                     "rfind" | "last_index_of" => Some("rt_string_rfind"),
                     "to_string" | "to_text" | "str" => Some("rt_to_string"),
-                    "slice" | "substring" => Some("rt_slice"),
+                    "slice" | "substring" => Some("rt_slice_text_bytes"),
                     "get" => Some("rt_get"),
                     "keys" => Some("rt_dict_keys"),
                     "values" => Some("rt_dict_values"),
@@ -3269,7 +3261,7 @@ impl LlvmBackend {
                     // rt_slice requires exactly 4 args: (collection, start, end, step).
                     // Handle it specially to pad missing optional args with defaults
                     // (matching Cranelift behavior in try_compile_builtin_method_call).
-                    if rt_name == "rt_slice" {
+                    if rt_name == "rt_slice_text_bytes" {
                         let coll = self.get_vreg(receiver, vreg_map)?;
                         let coll_i64 = self.coerce_value_to_type(coll, Some(i64_type.into()), builder)?;
                         let start_val = if !args.is_empty() {
@@ -3295,8 +3287,8 @@ impl LlvmBackend {
                             false,
                         );
                         let slice_fn = module
-                            .get_function("rt_slice")
-                            .unwrap_or_else(|| module.add_function("rt_slice", slice_fn_type, None));
+                            .get_function("rt_slice_text_bytes")
+                            .unwrap_or_else(|| module.add_function("rt_slice_text_bytes", slice_fn_type, None));
                         let call_site = builder
                             .build_call(
                                 slice_fn,
@@ -3803,7 +3795,7 @@ impl LlvmBackend {
                     | ("String" | "string", "has")
                     | ("Array" | "array", "has")
                     | ("Dict" | "dict", "has") => Some("rt_contains"),
-                    ("String" | "string", "substring") => Some("rt_slice"),
+                    ("String" | "string", "substring") => Some("rt_slice_text_bytes"),
                     ("String" | "string", "split") => Some("rt_string_split"),
                     ("String" | "string" | "str" | "text", "trim" | "trimmed" | "strip") => {
                         Some("rt_string_trim")
@@ -3833,7 +3825,7 @@ impl LlvmBackend {
                     ("Tuple" | "tuple", "get") => Some("rt_tuple_get"),
                     ("Tuple" | "tuple", "len") => Some("rt_tuple_len"),
                     ("Tuple" | "tuple", "set") => Some("rt_tuple_set"),
-                    ("Array" | "array", "slice") | ("String" | "string", "slice") => Some("rt_slice"),
+                    ("Array" | "array", "slice") | ("String" | "string", "slice") => Some("rt_slice_text_bytes"),
                     ("Array" | "array", "join") => Some("rt_array_join"),
                     ("Array" | "array", "sort") => Some("rt_array_sort"),
                     ("Array" | "array", "reverse") => Some("rt_array_reverse"),
@@ -3849,7 +3841,7 @@ impl LlvmBackend {
 
                 if let Some(rt_fn_name) = rt_name {
                     // rt_slice: handle specially to pad missing optional args
-                    if rt_fn_name == "rt_slice" {
+                    if rt_fn_name == "rt_slice_text_bytes" {
                         let start_val = if !args.is_empty() {
                             let v = self.get_vreg(&args[0], vreg_map)?;
                             self.coerce_value_to_type(v, Some(i64_type.into()), builder)?
@@ -3873,8 +3865,8 @@ impl LlvmBackend {
                             false,
                         );
                         let slice_fn = module
-                            .get_function("rt_slice")
-                            .unwrap_or_else(|| module.add_function("rt_slice", slice_fn_type, None));
+                            .get_function("rt_slice_text_bytes")
+                            .unwrap_or_else(|| module.add_function("rt_slice_text_bytes", slice_fn_type, None));
                         let call_site = builder
                             .build_call(
                                 slice_fn,

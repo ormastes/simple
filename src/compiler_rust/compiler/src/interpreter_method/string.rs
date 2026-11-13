@@ -62,24 +62,25 @@ if let Value::Str(ref s) = recv_val {
             // keeps the interpreter and the compiled lane in agreement.
             if args.len() >= 2 {
                 let start_raw = eval_arg_int(args, 1, 0, env, functions, classes, enums, impl_methods)?;
-                let start_cp = start_raw.max(0) as usize;
-                // Code-point units (ADR-005): convert to a byte offset, search, convert back.
-                let start = crate::interpreter::text_cp_to_byte(s, start_cp);
+                // BYTE offsets in and out (owner decision 2026-11-07, ADR-005
+                // "Staging"): `index_of` belongs to the named byte family with
+                // `byte_at`/`substring`, bounded by `byte_len()`.
+                let start = start_raw.max(0) as usize;
                 let bytes = s.as_bytes();
                 let nb = needle.as_bytes();
                 if nb.is_empty() {
-                    return Ok(Value::Int(crate::interpreter::text_byte_to_cp(s, start.min(bytes.len())) as i64));
+                    return Ok(Value::Int(start.min(bytes.len()) as i64));
                 }
                 if start >= bytes.len() {
                     return Ok(Value::Int(-1));
                 }
                 return Ok(match bytes[start..].windows(nb.len()).position(|w| w == nb) {
-                    Some(idx) => Value::Int(crate::interpreter::text_byte_to_cp(s, start + idx) as i64),
+                    Some(idx) => Value::Int((start + idx) as i64),
                     None => Value::Int(-1),
                 });
             }
             return Ok(match s.find(&needle) {
-                Some(idx) => Value::Int(crate::interpreter::text_byte_to_cp(s, idx) as i64),
+                Some(idx) => Value::Int(idx as i64),
                 None => Value::Int(-1),
             });
         }
@@ -341,26 +342,45 @@ if let Value::Str(ref s) = recv_val {
             return Ok(Value::text(s.replacen(&old, &new, 1)));
         }
         "slice" | "substring" => {
-            // CODE-POINT-indexed (ADR-005 item 5): agrees with `len()`, `s[i]`
-            // and `s[a:b]`. ASCII text is unchanged (byte == code point).
-            let cp_len = crate::interpreter::text_cp_len(s) as i64;
+            // BYTE offsets, clamped to `0..=byte_len()` (owner decision
+            // 2026-11-07; ADR-005 "Staging";
+            // doc/05_design/language/text/text_len_counts_characters_2026-11-07.md).
+            // Only `len()`, `s[i]` and `s[a:b]` are code points. 04969955c75
+            // made these two methods code-point indexed as well, which broke
+            // every byte scanner that bounds with `byte_len()`, reads with
+            // `byte_at`/`index_of` and cuts with `substring` on non-ASCII text.
+            let byte_len = s.len() as i64;
             let start_raw = eval_arg_int(args, 0, 0, env, functions, classes, enums, impl_methods)?;
             let end_raw = args.get(1)
                 .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
                 .transpose()?
-                .map(|v| v.as_int().unwrap_or(cp_len))
-                .unwrap_or(cp_len);
+                .map(|v| v.as_int().unwrap_or(byte_len))
+                .unwrap_or(byte_len);
             let start = start_raw.max(0) as usize;
             let end = end_raw.max(0) as usize;
             // Identity fast path: full-string slice.
-            if start == 0 && end as i64 >= cp_len {
+            if start == 0 && end >= s.len() {
                 return Ok(Value::shared_text(s.clone()));
             }
-            let end = end.min(cp_len as usize);
+            let bytes = s.as_bytes();
+            let end = end.min(bytes.len());
             let start = start.min(end);
-            let b0 = crate::interpreter::text_cp_to_byte(s, start);
-            let b1 = crate::interpreter::text_cp_to_byte(s, end);
-            return Ok(Value::text(s[b0..b1].to_string()));
+            // A range that splits a multi-byte code point keeps the RAW bytes
+            // (`Value::StrBytes`), like `spl_str_slice` in the C runtime and
+            // the nested-receiver arm in interpreter_helpers/method_dispatch.rs:
+            // no snapping and no U+FFFD, so the result's byte length is the
+            // requested width and adjacent cuts reassemble the original.
+            // UTF-8 slice audit, stage 1 (COUNTING ONLY, default off).
+            if simple_runtime::text_slice_audit::enabled() {
+                simple_runtime::text_slice_audit::note(
+                    simple_runtime::text_slice_audit::site::INTERP_METHOD,
+                    start as i64,
+                    end as i64,
+                    bytes,
+                    &bytes[start..end],
+                );
+            }
+            return Ok(Value::text_from_bytes(bytes[start..end].to_vec()));
         }
         "repeat" => {
             // Read the count as a SIGNED integer and clamp. `eval_arg_usize`
@@ -382,7 +402,8 @@ if let Value::Str(ref s) = recv_val {
         "last_index_of" | "rfind" => {
             let needle = eval_arg(args, 0, Value::text(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
             return Ok(match s.rfind(&needle) {
-                Some(idx) => Value::Int(crate::interpreter::text_byte_to_cp(s, idx) as i64),
+                // BYTE offset, like `index_of`.
+                Some(idx) => Value::Int(idx as i64),
                 None => Value::Int(-1),
             });
         }
