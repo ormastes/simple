@@ -1,0 +1,112 @@
+# Bug: if_val_binding_from_generic_optional_stays_optional_err01_2026-11-13
+#
+# ERR-01 (`T? as <numeric>` outside `unsafe`, seed `hir/lower/expr/operators.rs
+# lower_cast`) tells the user to narrow with `?? <default>`, `if val x = ...` or
+# `match`. `if val` did not narrow when the optional came from a GENERIC return
+# (`Channel.try_recv<T>() -> T?`, `fn pick<T>(..) -> T?`): with `T` uninferred
+# the subject is the registry optional over `any`, and the seed's if-let binder
+# (`stmt_lowering.rs build_if_let_binding_stmts`) kept the binding typed as the
+# optional, so `m as i64` was rejected as ERR-01 and the whole module failed
+# to lower.
+#
+# Each case runs a fixture through the compiler binary (`SIMPLE_BINARY`, default
+# `bin/simple`) in strict JIT mode and asserts exit status and output, because a
+# lowering error would otherwise abort this spec file before any example runs.
+# The negative cases pin that ERR-01 itself is NOT weakened: the un-narrowed
+# generic optional cast is still rejected.
+use std.spec
+use std.io_runtime.{process_run, file_write, dir_create_all, env_get, env_set}
+
+val PICK = """fn pick<T>(v: T, ok: bool) -> T?:
+    if ok:
+        v
+    else:
+        nil
+"""
+
+fn work_dir() -> text:
+    val tmp = env_get("TMPDIR")
+    val temp = env_get("TEMP")
+    val root = if tmp != "": tmp elif temp != "": temp else: "/tmp"
+    val dir = root + "/simple-spec-if-val-generic-optional-cast"
+    dir_create_all(dir)
+    dir
+
+fn compiler_binary() -> text:
+    val configured = env_get("SIMPLE_BINARY")
+    if configured == "": "bin/simple" else: configured
+
+# Returns (stdout, stderr, exit status).
+fn run_jit(name: text, source: text) -> (text, text, i64):
+    val path = work_dir() + "/" + name + ".spl"
+    assert_true(file_write(path, source))
+    env_set("SIMPLE_EXECUTION_MODE", "jit")
+    env_set("SIMPLE_JIT_STRICT_ALL", "1")
+    env_set("SIMPLE_RUST_SEED_WARNING", "0")
+    env_set("SIMPLE_TIMEOUT_SECONDS", "0")
+    val ran = process_run(compiler_binary(), ["run", path])
+    (ran[0].trim(), ran[1], ran[2])
+
+describe "if val narrowing of a generic optional before an `as` cast":
+    it "binds the payload of a generic fn's T? so `m as i64` lowers and computes":
+        val (out, err, rc) = run_jit("pick_stmt", PICK + """fn drain(ok: bool) -> i64:
+    if val m = pick(41, ok):
+        return (m as i64) + 1
+    return 0
+fn main():
+    print("got {drain(true)} {drain(false)}")
+""")
+        assert_equal(err.contains("ERR-01"), false)
+        assert_equal(rc, 0)
+        assert_equal(out, "got 42 0")
+
+    it "narrows the expression form and elif val the same way":
+        val (out, err, rc) = run_jit("pick_expr", PICK + """fn a(ok: bool) -> i64:
+    val r = if val m = pick(7, ok): (m as i64) * 2 else: -1
+    r
+fn b(f: bool) -> i64:
+    if f:
+        return 1
+    elif val m = pick(9, true):
+        return m as i64
+    return 0
+fn main():
+    print("got {a(true)} {a(false)} {b(false)}")
+""")
+        assert_equal(err.contains("ERR-01"), false)
+        assert_equal(rc, 0)
+        assert_equal(out, "got 14 -1 9")
+
+    it "narrows Channel.try_recv() (the reported shape)":
+        val (out, err, rc) = run_jit("chan", """use std.concurrent.channel.{channel_new}
+fn drain() -> i64:
+    val ch = channel_new()
+    ch.send(41)
+    if val m = ch.try_recv():
+        return (m as i64) + 1
+    return 0
+fn main():
+    print("got {drain()}")
+""")
+        assert_equal(err.contains("ERR-01"), false)
+        assert_equal(rc, 0)
+        assert_equal(out, "got 42")
+
+    it "still rejects the un-narrowed generic optional cast (ERR-01 not weakened)":
+        val (out, err, rc) = run_jit("pick_bad", PICK + """fn bad() -> i64:
+    pick(41, true) as i64
+fn main():
+    print("got {bad()}")
+""")
+        assert_equal(rc == 0, false)
+        assert_equal(err.contains("ERR-01"), true)
+
+    it "still rejects a plain val of a generic optional cast with as":
+        val (out, err, rc) = run_jit("pick_val_bad", PICK + """fn bad() -> i64:
+    val m = pick(41, true)
+    m as i64
+fn main():
+    print("got {bad()}")
+""")
+        assert_equal(rc == 0, false)
+        assert_equal(err.contains("ERR-01"), true)

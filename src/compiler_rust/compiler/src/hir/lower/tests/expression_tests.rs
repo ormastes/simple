@@ -1947,6 +1947,46 @@ fn optional_as_numeric_cast_is_rejected_outside_unsafe() {
     assert!(matches!(&cast.kind, HirExprKind::Cast { expr, .. } if expr.ty == TypeId::ANY), "{:?}", cast.kind);
 }
 
+// `if val m = <generic T?>` must bind the PAYLOAD, so `m as i64` is the
+// narrowed cast ERR-01 recommends. With `T` uninferred the subject is the
+// registry optional over `any`, and the binding used to keep the optional
+// type, so the very narrowing the diagnostic suggests was itself rejected.
+// The un-narrowed generic cast must still be rejected.
+// Bug: doc/08_tracking/bug/if_val_binding_from_generic_optional_stays_optional_err01_2026-11-13.md
+#[test]
+fn if_val_on_generic_optional_binds_payload_for_numeric_cast() {
+    let pick = "fn pick<T>(v: T, ok: bool) -> T?:\n    if ok:\n        v\n    else:\n        nil\n\n";
+
+    // Statement form, expression form, and `elif val`.
+    for (body, what) in [
+        (
+            "fn ok() -> i64:\n    if val m = pick(41, true):\n        return (m as i64) + 1\n    return 0\n",
+            "statement `if val`",
+        ),
+        (
+            "fn ok() -> i64:\n    val r = if val m = pick(41, true): (m as i64) + 1 else: 0\n    return r\n",
+            "expression `if val`",
+        ),
+        (
+            "fn ok(f: bool) -> i64:\n    if f:\n        return 1\n    elif val m = pick(41, true):\n        return m as i64\n    return 0\n",
+            "`elif val`",
+        ),
+    ] {
+        parse_and_lower(&format!("{pick}{body}"))
+            .unwrap_or_else(|e| panic!("{what}: `m as i64` on the narrowed binding must lower: {e}"));
+    }
+
+    // Negative: the generic optional itself, un-narrowed, is still ERR-01.
+    let err = parse_and_lower(&format!("{pick}fn bad() -> i64:\n    return pick(41, true) as i64\n"))
+        .expect_err("`pick(..) as i64` on a generic `T?` must not lower");
+    assert!(format!("{err}").contains("SIMPLE_JIT_STRICT:"), "{err}");
+    let err = parse_and_lower(&format!(
+        "{pick}fn bad() -> i64:\n    val m = pick(41, true)\n    return m as i64\n"
+    ))
+    .expect_err("a plain `val` of a generic `T?` is not narrowed");
+    assert!(format!("{err}").contains("optional"), "{err}");
+}
+
 // The PipelineOp LLVM plugin transports an Option word, rather than narrowing
 // its payload. Compile its actual production cast through the strict HIR owner.
 #[test]
