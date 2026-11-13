@@ -41,6 +41,16 @@ lexical gate it was meant to replace is still the wired gate.**
   landing an unverifiable gate replacement would repeat the false-evidence
   pattern this doc condemns.
 
+## 2026-11-13 triage (UI batch B, Linux aarch64, release/1.0.0 @ 35144b7f5e93): LIVE, blocked on this host
+
+Unchanged since the 2026-11-11 addendum: the lexical checker
+`check-html-css-rendering-manifest-traceability.shs` is still what the three
+aggregate gates call. Rewiring those gates to `WebRenderableFeatureInventory`
+rows needs their downstream Electron and bitmap evidence lanes to run, and this
+host has no Chrome, Chromium or Electron. A gate replacement that cannot be
+executed end to end would repeat the false-pass class this record exists to
+stop, so none was landed. Row stays open. Grant: a Linux host with Electron.
+
 
 ---
 

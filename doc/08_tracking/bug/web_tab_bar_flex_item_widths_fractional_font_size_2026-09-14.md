@@ -57,6 +57,24 @@ constant: that would trade this page's error for every other page's.
 (fixed round 15) — that was vertical and touched `html` only. `tab-bar`'s 7/7
 did not move under it, as expected.
 
+## 2026-11-13 triage (UI batch B, Linux aarch64, release/1.0.0 @ 35144b7f5e93): LIVE, blocked on this host
+
+Still live at source: `FORM_CONTROL_UA_FONT_SIZE_PX: i32 = 13`
+(`simple_web_html_layout_renderer_declarations.spl:1331`, applied at
+`:1512` and `:1536`), and the style record still carries font size as
+integer px. Nothing in `browser_engine/` stores a fractional font size.
+
+Not fixed in this lane, for two reasons:
+
+- The fix is the sub-pixel font-size change to the style model this doc
+  describes, not a constant change. This doc forbids nudging the constant.
+- The acceptance oracle is the Chrome geometry differ. This host has no
+  Chrome, Chromium or Electron (`which` finds none), so a style-model change
+  could not be shown to move `tab-bar` from 7/7 mismatches without moving the
+  other catalog pages. Landing it unmeasured would be unverified evidence.
+
+Grant: a host with Chrome for the catalog differ. Row stays open.
+
 
 ---
 
