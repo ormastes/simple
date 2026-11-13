@@ -243,10 +243,17 @@ mod unix_impl {
                 }
             }
         }
-        if let Ok(mut table) = CHILD_TABLE.lock() {
-            table.remove(&fd);
+        let child = CHILD_TABLE.lock().ok().and_then(|mut table| table.remove(&fd));
+        let closed = unsafe { libc::close(fd) == 0 };
+        // Closing the master hangs up the child; reap it (bounded, then
+        // SIGKILL) so no zombie or survivor outlives the close. Same owner as
+        // the compiled lane: simple_runtime::value::pty::reap_pty_child.
+        if let Some(pid) = child {
+            if !simple_runtime::value::pty::reap_pty_child(pid) {
+                eprintln!("PTY close: child {pid} not reaped after SIGKILL");
+            }
         }
-        unsafe { libc::close(fd) == 0 }
+        closed
     }
 
     /// TIOCSWINSZ makes the kernel signal the foreground group; the direct
