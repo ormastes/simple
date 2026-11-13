@@ -111,3 +111,16 @@ step before creating directories or launching; an `Unqualified` observation
 always refuses. Host path resolution stays in the OS boundary; planning only
 consumes resolved paths and object identities. Specs:
 `test/01_unit/lib/common/container_policy/`.
+## Shared provider helpers and conformance (2026-11-13)
+
+Portable logic that was duplicated byte-for-byte across the Windows Docker and
+Linux OCI leaf adapters now lives in `src/lib/nogc_async_mut/container/shared/`:
+`request_record_v1.spl` (strict SDN typed field readers; each leaf keeps its own
+vector limit) and `request_digest_v1.spl` (hashed-scalar and counted-vector
+digest fragments, exact argv equality). Each backend still owns its digest
+schema, admission rules, engine commands, isolation setup and inspect/kill.
+New providers (Seatbelt) reuse these helpers instead of copying a Docker codec.
+`test/01_unit/lib/nogc_async_mut/container/shared/provider_conformance_v1_spec.spl`
+pins Docker/Podman behaviour (shared assertions plus recorded backend-specific
+cases); a new backend adds a row there. Inventory and remaining extraction
+candidates: design `simple_container_macos_seatbelt.md` §16.5.6 / PR body.
