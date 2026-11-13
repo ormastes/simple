@@ -1,5 +1,16 @@
 # Engine2D rendering-parity adapter: Engine2D readback -> canonical straight
 # RGBA8 plus truthful backend evidence for common.ui.rendering_parity.
+#
+# Alpha mode: the Engine2D CPU raster composites in straight alpha
+# (color.blend: "Porter-Duff src-over on straight alpha", unpremultiplied
+# output), so its framebuffer words are straight ARGB. The caller passes the
+# alpha mode of the lane it read; ENGINE2D_CPU_ALPHA_MODE is that value for CPU.
+#
+# TODO(rendering-parity-gap): pre-existing rendering_parity_adapter_spec.spl
+# (engine2d and browser_engine) still needs engine2d_rendering_parity_execute_composition,
+# simple_web_rendering_parity_observe, simple_web_rendering_parity_paint_payload,
+# simple_web_rendering_parity_stage_records(_from_observation) and
+# SIMPLE_WEB_PARITY_CONVERTER. Not implemented here.
 use std.gc_async_mut.gpu.engine2d.backend.{Engine2DReadback}
 use common.ui.rendering_parity.{
     BackendEvidence, backend_evidence, backend_evidence_v1,
@@ -9,6 +20,7 @@ use common.ui.rendering_parity.{
 }
 
 val ENGINE2D_PARITY_CONVERTER: text = "engine2d-argb32-to-rgba8-v1"
+val ENGINE2D_CPU_ALPHA_MODE: text = PIXEL_ALPHA_STRAIGHT
 
 pub struct Engine2dParityOutput:
     valid: bool
@@ -28,6 +40,9 @@ pub struct Engine2dParityEvidence:
 fn _physical_backend(name: text) -> bool:
     name == "vulkan" or name == "cuda" or name == "metal" or name == "rocm" or name == "directx" or name == "opengl" or name == "opencl"
 
+fn _cpu_backend(name: text) -> bool:
+    name == "cpu" or name == "cpu_simd"
+
 # Manifest row name -> explicit Engine2D backend. A GPU row never maps to a CPU backend.
 pub fn engine2d_rendering_parity_backend_name(row: text, api: text) -> Result<text, text>:
     if row == "simple_cpu":
@@ -43,7 +58,7 @@ pub fn engine2d_rendering_parity_backend_name(row: text, api: text) -> Result<te
 fn _invalid_output(reason: text) -> Engine2dParityOutput:
     Engine2dParityOutput(valid: false, reason: reason, rgba: [])
 
-pub fn engine2d_rendering_parity_canonicalize(readback: Engine2DReadback, width: i64, height: i64, requested_backend: text, actual_backend: text) -> Engine2dParityOutput:
+pub fn engine2d_rendering_parity_canonicalize(readback: Engine2DReadback, width: i64, height: i64, requested_backend: text, actual_backend: text, alpha_mode: text) -> Engine2dParityOutput:
     if requested_backend != actual_backend:
         return _invalid_output("backend-fallback")
     if width <= 0 or height <= 0 or readback.pixel_count != width * height or readback.pixels.len() != width * height:
@@ -53,22 +68,27 @@ pub fn engine2d_rendering_parity_canonicalize(readback: Engine2DReadback, width:
             return _invalid_output("device-readback-required")
         if readback.device_identity <= 0:
             return _invalid_output("device-identity-required")
-    match pixel_format_descriptor(PIXEL_FORMAT_ARGB_U32, PIXEL_ALPHA_STRAIGHT, PIXEL_ORIGIN_TOP_LEFT, PIXEL_COLOR_SPACE_SRGB, width * 4, width):
+    match pixel_format_descriptor(PIXEL_FORMAT_ARGB_U32, alpha_mode, PIXEL_ORIGIN_TOP_LEFT, PIXEL_COLOR_SPACE_SRGB, width * 4, width):
         Err(e): _invalid_output(e)
         Ok(d):
             match argb_u32_to_straight_rgba8(readback.pixels, width, height, d):
                 Err(e): _invalid_output(e)
                 Ok(rgba): Engine2dParityOutput(valid: true, reason: "", rgba: rgba)
 
-# Evidence for one executed lane. A rejected output (fallback, forged GPU
-# identity, malformed size) is a "fail", never a pass.
-pub fn engine2d_rendering_parity_evidence(case_id: text, readback: Engine2DReadback, width: i64, height: i64, requested_backend: text, actual_backend: text, execution_id: text, revision_id: text, generation: i64, fallback_count: i64, degraded: bool, simd_receipt: text, started_at: i64, finished_at: i64) -> Result<Engine2dParityEvidence, text>:
-    val out = engine2d_rendering_parity_canonicalize(readback, width, height, requested_backend, actual_backend)
+# Evidence for one executed lane. A rejected output, a degraded run or any
+# recorded fallback is a "fail", never a pass.
+pub fn engine2d_rendering_parity_evidence(case_id: text, readback: Engine2DReadback, width: i64, height: i64, requested_backend: text, actual_backend: text, execution_id: text, revision_id: text, generation: i64, fallback_count: i64, degraded: bool, simd_receipt: text, started_at: i64, finished_at: i64, alpha_mode: text) -> Result<Engine2dParityEvidence, text>:
+    val out = engine2d_rendering_parity_canonicalize(readback, width, height, requested_backend, actual_backend, alpha_mode)
     val physical = _physical_backend(requested_backend)
-    val status = if out.valid: "pass" else: "fail"
     val fell_back = requested_backend != actual_backend
+    var reason = out.reason
+    if out.valid and degraded:
+        reason = "degraded-run"
+    if out.valid and not degraded and fallback_count > 0:
+        reason = "fallback-count-nonzero"
+    val status = if reason == "": "pass" else: "fail"
     # A physical claim is only recorded when the lane really is that device.
-    val claim = physical and out.valid and not degraded and fallback_count == 0
+    val claim = physical and status == "pass"
     val device = if claim: readback.device_identity.to_string() else: ""
     val readback_id = if claim: readback.checksum.to_string() else: ""
     val driver = if claim: "handle-" + readback.backend_handle.to_string() else: ""
@@ -76,10 +96,10 @@ pub fn engine2d_rendering_parity_evidence(case_id: text, readback: Engine2DReadb
     val ev = backend_evidence_v1(
         case_id, requested_backend, api, execution_id, revision_id, driver, device, readback_id,
         width, height, PIXEL_FORMAT_ARGB_U32, generation, fallback_count, claim,
-        false, fell_back and not physical, false, if fell_back: "backend-fallback" else: "",
-        started_at, finished_at, status, out.reason)?
+        false, fell_back and _cpu_backend(actual_backend), false, if fell_back: "backend-fallback" else: "",
+        started_at, finished_at, status, reason)?
     Ok(Engine2dParityEvidence(
-        status: status, reason: out.reason, requested_backend: requested_backend,
+        status: status, reason: reason, requested_backend: requested_backend,
         actual_backend: actual_backend, physical_backend: physical, execution_id: execution_id,
         simd_execution_receipt: simd_receipt, evidence: ev))
 
