@@ -1197,6 +1197,17 @@ pub fn handle_array_methods(
             // Return empty array (functional style - original is not modified)
             Value::array(vec![])
         }
+        "reserve" => {
+            // `[T].reserve(additional)` is a capacity hint (std `Reserve`
+            // trait: `fn reserve(additional: usize)`): it never changes
+            // contents. The interpreter's `Vec<Value>` model has implicit
+            // capacity, so the only observable work is evaluating the
+            // argument; the receiver is untouched (deliberately NOT in the
+            // self-update MUTATING_METHODS list -- write-back would clobber
+            // the receiver with this unit value).
+            let _additional = eval_arg(args, 0, Value::Int(0), env, functions, classes, enums, impl_methods)?;
+            Value::Nil
+        }
         "sorted" => {
             // Alias for sort - returns a new sorted array
             let mut new_arr = arr.to_vec();

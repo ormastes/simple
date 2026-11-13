@@ -136,6 +136,7 @@ fn qualified_runtime_arity(method: &str, rt_name: &str) -> Option<usize> {
         | "rt_string_partition"
         | "rt_string_rpartition"
         | "rt_array_push"
+        | "rt_array_reserve"
         | "rt_index_get"
         | "rt_get"
         | "rt_index_set"
@@ -2219,6 +2220,7 @@ impl LlvmBackend {
             "reverse" => Some("rt_array_reverse"),
             "join" => Some("rt_array_join"),
             "clear" => Some("rt_array_clear"),
+            "reserve" => Some("rt_array_reserve"),
             "slice" => Some("rt_slice_text_bytes"),
             // Collection methods (verified as T symbols)
             "len" => Some("rt_len"),
@@ -2467,6 +2469,7 @@ impl LlvmBackend {
                 "sort" => Some("rt_array_sort"),
                 "reverse" => Some("rt_array_reverse"),
                 "clear" => Some("rt_array_clear"),
+                "reserve" => Some("rt_array_reserve"),
                 "slice" => Some("rt_slice_text_bytes"),
                 "len" => Some("rt_len"),
                 "get" => Some("rt_get"),
@@ -2561,6 +2564,7 @@ impl LlvmBackend {
                         let returns_bool = matches!(
                             rt_fn_name,
                             "rt_array_clear"
+                                | "rt_array_reserve"
                                 | "rt_array_reverse"
                                 | "rt_array_sort"
                                 | "rt_index_set"

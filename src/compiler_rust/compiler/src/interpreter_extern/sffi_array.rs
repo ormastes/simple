@@ -9,7 +9,7 @@ use simple_runtime::value::RuntimeValue;
 // Import actual SFFI functions from runtime
 use simple_runtime::value::{
     rt_array_clear, rt_array_extend_i64, rt_array_free, rt_array_free_deep, rt_array_get, rt_array_len, rt_array_new,
-    rt_array_pop, rt_array_push, rt_array_set, rt_bytes_u32_le_at, rt_bytes_u64_le_at, rt_bytes_u8_set,
+    rt_array_pop, rt_array_push, rt_array_reserve, rt_array_set, rt_bytes_u32_le_at, rt_bytes_u64_le_at, rt_bytes_u8_set,
     rt_typed_bytes_u8_push, rt_typed_words_u32_at, rt_typed_words_u32_push, rt_typed_words_u32_set,
     rt_typed_words_u32_unchecked, rt_typed_words_u64_at, rt_typed_words_u64_unchecked,
 };
@@ -676,6 +676,25 @@ pub fn rt_array_clear_fn(args: &[Value]) -> Result<Value, CompileError> {
 
     let arr = RuntimeValue::from_raw(arr_raw as u64);
     let result = rt_array_clear(arr);
+    Ok(Value::Bool(result))
+}
+
+/// Ensure capacity for `len + additional` elements (capacity hint, contents
+/// unchanged). Mirrors the `[T].reserve(additional)` builtin the pure-Simple
+/// core implements in src/runtime/simple_core/core_array.spl.
+pub fn rt_array_reserve_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let (arr_raw, additional) = match (args.first(), args.get(1)) {
+        (Some(arr), Some(additional)) => (arr.as_int()?, additional.as_int()?),
+        _ => {
+            return Err(CompileError::semantic_with_context(
+                "rt_array_reserve expects 2 arguments".to_string(),
+                ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+            ))
+        }
+    };
+
+    let arr = RuntimeValue::from_raw(arr_raw as u64);
+    let result = rt_array_reserve(arr, additional);
     Ok(Value::Bool(result))
 }
 

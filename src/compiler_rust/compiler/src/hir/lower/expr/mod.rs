@@ -2269,6 +2269,15 @@ impl Lowerer {
                 "len" | "length" => Some(TypeId::I64),
                 "push" => Some(receiver.ty), // Returns the new array (same type)
                 "clear" => Some(TypeId::VOID),
+                // `[T].reserve(additional)` is the std `Reserve` trait's
+                // capacity hint: unit return, never touches `len`. Without
+                // this entry the call fell through to generic dynamic
+                // dispatch typed ANY and codegen emitted a cross-module
+                // fallback call to "Array.reserve", which no runtime defines
+                // -- every seed-run spec touching `.reserve(...)` died with
+                // "Function 'Array.reserve' not found" (dispatch gap, see
+                // doc/08_tracking/bug/compiler_seed_missing_array_reserve_2026-11-12.md).
+                "reserve" => Some(TypeId::VOID),
                 // `pop` and `remove(index)` both yield the ELEMENT, so both take
                 // the element type. `remove` was MISSING from this table, which
                 // is the same gap class documented for `index_of` and `sum`
