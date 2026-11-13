@@ -40,14 +40,15 @@ second collector.
 | W0/W1a | Extend existing schema owner with explicit views/property contracts, V2 digest, SPL/SDN equivalence and conflict refusal | V2 source and 25 unit examples approved by Astra, including UTF-8 byte bounds; execution UNEXECUTED |
 | W1b | Frontend extraction, exact language type/symbol binding including qualifiers, source/config authority, off/enabled mode, driver freeze and one LSP surface | Remaining integration; no PASS claimed. 2026-11-13: storage-mechanism resolver `data_attr_storage_resolve_v1` landed with the SPL tag reader (`@node_tree` class + `@attr_storage`) in `node_view_gen`; `data_schema_resolver_spec` 10/10 GREEN (interpreter lane) |
 | W2a | Reuse existing HIR site identity for real AttrRead/Write places, evaluation order, nested writes, moves, borrows and logical event identity | Site side table already landed; places/lowering remain |
-| W2b | Must-resolve construction, executed default commits/retry, cleanup, readiness and interpreter parity | V1 facts landed; no compiler/runtime enforcement proof |
-| W3b | Extend existing read pilot through actual writes/construction/retirement and sparse/direct/column exact-value/presence parity | Pilot source exists; broader runtime integration remains. 2026-11-13: storage mechanism per attribute switchable by tag or SDN rule; committed pilot reads `op` through a generated column and `inferred_type` through the sparse hash store with value parity against the AST pool owner (`ast_node_pool_pilot_spec` 6/6 GREEN). Phase B: design note `doc/05_design/compiler/data/node_tree_storage.md` with measured bytes per node (bridge 1.3-1.5 KB/AST node on a cold heap, HIR blob 157-183 B/node) and per-(phase, module) write-once cells (`node_lifecycle_contracts_spec` 14/14) |
+| W2b | Must-resolve construction, executed default commits/retry, cleanup, readiness and interpreter parity | V1 facts landed; no compiler/runtime enforcement proof. **Sub-plan P1** (effective-public definite-initialization verifier → `E_ATTR_REQUIRED_UNINIT` / `E_ASYNC_INIT_MISSING` / `E_ASYNC_INIT_UNSUPPORTED`, behind the §4.3 migration-warning gate with an offender census; ASY-03/04/05, ATTR-01/04) and **P3** (async registered init on the write-once `phase_cell_*_v1` cells of the node-storage lane; ASY-01/02/06/07/08) land here. Immview lane; it consumes `node_construction_*_v1` facts and does not edit `node_lifecycle_contracts.spl` |
+| W2c (added 2026-11-13) | `Immutable<T>` live read-only projection (IMM-01/02), then `RevisionImmutable<T>`/`FrozenImmutable<T>` with W8 cache identity (IMM-03/04, REV-01/02); contract in the [sub-plan](../03_plan/compiler/data/immutable_views_async_init_revisions_2026-11-13.md) §2 | Not started; grammar for `Immutable<T>` unverified until P0 probes |
+| W3b | Extend existing read pilot through actual writes/construction/retirement and sparse/direct/column exact-value/presence parity | Pilot source exists; broader runtime integration remains. 2026-11-13: storage mechanism per attribute switchable by tag or SDN rule; committed pilot reads `op` through a generated column and `inferred_type` through the sparse hash store with value parity against the AST pool owner (`ast_node_pool_pilot_spec` 6/6 GREEN). Phase B: design note `doc/05_design/compiler/data/node_tree_storage.md` with measured bytes per node (bridge 1.3-1.5 KB/AST node on a cold heap, HIR blob 157-183 B/node) and per-(phase, module) write-once cells (`node_lifecycle_contracts_spec` 14/14). Sub-plan P4 (one `AttributeSchema` over embedded/SoA/sparse-hash) = node-storage lane |
 | W4b | Apply existing CollectionPlan/adaptive adapter at real source sites with exact result/order/refusal evidence | Foundation landed; source-site integration remains |
-| W5b | Bind existing data record/aggregation/profile path to admitted logical emitters and one correlated session/coverage/loss identity | Prior record/profile source exists; emitters/integration remain |
+| W5b | Bind existing data record/aggregation/profile path to admitted logical emitters and one correlated session/coverage/loss identity | Prior record/profile source exists; emitters/integration remain. Sub-plan P5 (static profile-guided `StoragePolicyId`, PROF-01) spans W5b/W6/W7 |
 | W6 | Three-family reference workload, report-only plan, exact next-instance/next-build results and cost/peak-memory report | Depends on W3b–W5b; no combined evidence |
 | W7 | Qualified native source bindings and field widths/layouts plus XRay on the same workload and provider/backend combination | Depends on reference result and admitted backend/provider evidence |
 | W8 | BuildRunner contexts, cache semantic/physical invalidation, transfer/ownership and LSP adoption | Existing owners retained; adoption evidence remains |
-| W9 | Transactional shared live migration, budgets, failure retention and lease/reclamation checks | Deferred under original W6–W8/progress gates |
+| W9 | Transactional shared live migration, budgets, failure retention and lease/reclamation checks | Deferred under original W6–W8/progress gates. Sub-plan P6 (`ContainerPolicy.selection = runtime`, PROF-02/03) inherits the deferral |
 | W10 | Staged provider/platform expansion under the existing shared trace contract | Original platform/evidence gates retained; no Windows/GPU inference |
 
 Every package must record producer path/hash/stage/admission, source revision,
@@ -71,3 +72,19 @@ manually maintained with execution/docgen/maintenance explicitly pending.
 No full W0/W1, generated accessor, lifecycle, storage, AOP, profile integration,
 native layout, BuildRunner adoption or whole-project completion is claimed by
 this contract extension. The runtime qualification gate remains open.
+
+## Immutable views / async initialization sub-plan (bound 2026-11-13)
+
+Plan: [`immutable_views_async_init_revisions_2026-11-13.md`](../03_plan/compiler/data/immutable_views_async_init_revisions_2026-11-13.md)
+(its §0a holds the phase → package map; this file does not repeat it).
+Pin: `origin/release/1.0.0` @ `9100f50e680`. Lane: `work/immutable-views-async-init-20261113`.
+
+| Step | Deliverable | State |
+|---|---|---|
+| P0 inventory | symbol-to-requirement map + parser probes (`Immutable<T>`, `@support_async_immutable`, `async <expr>` ctor argument, `await x.field`) under `doc/08_tracking/` | pending |
+| P1 verifier | SSpec ASY-03/04/05, ATTR-01/04 RED → GREEN; verifier as report over `src/compiler`+`src/lib`+`src/app`; offender count decides gate (warning / opt-in vs error) | pending |
+| P2 `Immutable<T>` | IMM-01/02; then revision/frozen handles | pending, after P1 review |
+| P3 async-init gate | ASY-01/02/06/07/08 on `phase_cell_*_v1`; blocked until the node-storage lane lands `f8db9920671` | pending |
+
+Authored plan text, reviewed source and executed runtime evidence remain
+different states; nothing above is complete because the plan exists.
