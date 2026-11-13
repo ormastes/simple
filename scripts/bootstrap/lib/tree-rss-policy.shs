@@ -644,6 +644,98 @@ bootstrap_tree_rss_phase_pricing_resolve() {
   esac
 }
 
+# bootstrap_tree_rss_host_reserve_kib HOST_TOTAL_KIB [REPO_ROOT] -> KiB, or
+# empty when an explicit reserve is malformed. Shell twin of
+# shard_tree_headroom_kib_v1 (src/app/cli/shard_mem_clamp.spl): the free
+# RAM/commit floor the build start guard and the worker pool keep.
+# Precedence: SIMPLE_BUILD_MEMORY_RESERVE_BYTES, then host config
+# mem_reserve_free_mib (SIMPLE_HOST_MEM_RESERVE_FREE_MIB > host config file),
+# then min(24 GiB, total / 2); an unknown total keeps 24 GiB (unknown never
+# shrinks the reserve). A malformed explicit bytes value yields empty: the
+# two-worker floor then fails closed instead of guessing a reserve.
+bootstrap_tree_rss_host_reserve_kib() {
+  btr_hr_total=${1:-}
+  btr_hr_root=${2:-}
+  btr_hr_cap=25165824
+  case ${SIMPLE_BUILD_MEMORY_RESERVE_BYTES:-} in
+    "") ;;
+    *[!0-9]*|0*) printf '\n'; return 0 ;;
+    *) bootstrap_tree_rss_is_uint "$SIMPLE_BUILD_MEMORY_RESERVE_BYTES" 18 || { printf '\n'; return 0; }
+       printf '%s\n' $((SIMPLE_BUILD_MEMORY_RESERVE_BYTES / 1024)); return 0 ;;
+  esac
+  btr_hr_mib=${SIMPLE_HOST_MEM_RESERVE_FREE_MIB:-}
+  if [ -z "$btr_hr_mib" ] && [ -n "$btr_hr_root" ] && [ -f "$btr_hr_root/scripts/setup/host-env.shs" ]; then
+    btr_hr_mib=$(sh "$btr_hr_root/scripts/setup/host-env.shs" --get mem_reserve_free_mib 2>/dev/null | tail -n 1) || btr_hr_mib=
+  fi
+  btr_hr_mib=$(bootstrap_tree_rss_canonical_uint "$btr_hr_mib" 9)
+  if bootstrap_tree_rss_is_uint "$btr_hr_mib" 9 && [ "$btr_hr_mib" -gt 0 ]; then
+    printf '%s\n' $((btr_hr_mib * 1024)); return 0
+  fi
+  if bootstrap_tree_rss_is_uint "$btr_hr_total" 15 && [ "$btr_hr_total" -gt 1 ] &&
+     [ $((btr_hr_total / 2)) -lt "$btr_hr_cap" ]; then
+    printf '%s\n' $((btr_hr_total / 2)); return 0
+  fi
+  printf '%s\n' "$btr_hr_cap"
+}
+
+# bootstrap_tree_rss_two_worker_floor REQUESTED FIT SMALL RSS_MODE AVAIL_KIB RESERVE_KIB CEILING_KIB
+# Guarded two-worker floor of the whole-build phase (owner rule 2026-11-13:
+# bootstrap builds run >= 2 workers even under resource limits, guarded by
+# the enforcing RSS watchdog). Run 20 (release/1.0.0 10223749f6c, busy
+# 121 GiB aarch64): "host budget fits 1" ran compiler_cli_build HIR serially
+# in-process, ~28 modules/min, ~2 h for HIR alone. Mirrors
+# shard_threads_guarded_floor_v1 (#8522, #8596 headroom precondition) clause
+# by clause; pure (numbers in, variables out) so every branch is testable.
+# Lifts a fitted 1 to 2 only when ALL hold:
+#   - REQUESTED >= 2 and FIT == 1 (a serial request stays serial; FIT >= 2 is
+#     never touched) and not small-host mode (one worker already exceeds the
+#     price there);
+#   - RSS_MODE is enforce: the watchdog kills the tree at the cap;
+#   - cap2 = base + 2 x worker floor fits inside AVAIL_KIB - RESERVE_KIB, so
+#     the watchdog, not the host, is the binding bound (#8596). The floor is
+#     the measured per-worker load_sources need (15.6 GiB, 2026-11-05); the
+#     150% runaway margin is what is traded for the second worker;
+#   - cap2 <= CEILING_KIB, the DEFAULT hard ceiling for two workers: the
+#     floor never asks for an elevated ceiling (whose 3/4-of-available
+#     admission would refuse it later).
+# This is a REQUEST like the bootstrap-build-jobs-policy floor: the compiler's
+# shard pools re-admit it against the exported tree budget (their own guarded
+# floor needs 2 x worker estimate + coordinator inside the cap) and the live
+# commit admission gates every spawn, so MIR shards measured at ~25 GiB
+# (run 11) stay at one worker under this cap.
+# Sets bootstrap_tree_rss_floor_workers (FIT or 2), bootstrap_tree_rss_floor_cap_kib
+# (cap2 when applied, else 0) and bootstrap_tree_rss_floor_note: empty when
+# there was nothing to lift, else a greppable "build-threads floor applied: ..."
+# or "build-threads floor not applied: <reason>" line -- never silent.
+bootstrap_tree_rss_two_worker_floor() {
+  btr_tf_requested=$1 btr_tf_fit=$2 btr_tf_small=$3 btr_tf_mode=$4
+  btr_tf_avail=$5 btr_tf_reserve=$6 btr_tf_ceiling=$7
+  bootstrap_tree_rss_floor_workers=$btr_tf_fit
+  bootstrap_tree_rss_floor_cap_kib=0
+  bootstrap_tree_rss_floor_note=
+  [ "$btr_tf_requested" -ge 2 ] && [ "$btr_tf_fit" -le 1 ] || return 0
+  btr_tf_cap=$((BOOTSTRAP_TREE_RSS_PHASE_BASE_KIB + 2 * BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_KIB))
+  btr_tf_price="base ${BOOTSTRAP_TREE_RSS_PHASE_BASE_KIB} KiB + 2 x worker floor ${BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_KIB} KiB"
+  btr_tf_no='build-threads floor not applied:'
+  if [ "$btr_tf_small" = 1 ]; then
+    bootstrap_tree_rss_floor_note="$btr_tf_no small-host single-worker mode (one worker already exceeds floor x margin)"
+  elif [ "$btr_tf_mode" != enforce ]; then
+    bootstrap_tree_rss_floor_note="$btr_tf_no RSS cap mode $btr_tf_mode, the watchdog does not enforce a two-worker cap"
+  elif ! bootstrap_tree_rss_is_uint "$btr_tf_avail" 15 || [ "$btr_tf_avail" -le 0 ]; then
+    bootstrap_tree_rss_floor_note="$btr_tf_no host available memory unknown"
+  elif ! bootstrap_tree_rss_is_uint "$btr_tf_reserve" 15; then
+    bootstrap_tree_rss_floor_note="$btr_tf_no host memory reserve unknown (malformed SIMPLE_BUILD_MEMORY_RESERVE_BYTES?)"
+  elif [ "$btr_tf_avail" -le "$btr_tf_reserve" ] || [ "$btr_tf_cap" -gt $((btr_tf_avail - btr_tf_reserve)) ]; then
+    bootstrap_tree_rss_floor_note="$btr_tf_no two-worker cap ${btr_tf_cap} KiB (${btr_tf_price}) exceeds available ${btr_tf_avail} KiB - reserve ${btr_tf_reserve} KiB"
+  elif ! bootstrap_tree_rss_is_uint "$btr_tf_ceiling" 15 || [ "$btr_tf_cap" -gt "$btr_tf_ceiling" ]; then
+    bootstrap_tree_rss_floor_note="$btr_tf_no two-worker cap ${btr_tf_cap} KiB exceeds the default hard ceiling ${btr_tf_ceiling:-unknown} KiB (the floor never requests an elevated ceiling)"
+  else
+    bootstrap_tree_rss_floor_workers=2
+    bootstrap_tree_rss_floor_cap_kib=$btr_tf_cap
+    bootstrap_tree_rss_floor_note="build-threads floor applied: 2 workers (host budget fits 1) under the enforcing RSS guard, cap ${btr_tf_cap} KiB = ${btr_tf_price} (no runaway margin) <= available ${btr_tf_avail} KiB - reserve ${btr_tf_reserve} KiB; compiler pools re-admit each worker"
+  fi
+}
+
 # bootstrap_tree_rss_whole_build_plan REQUESTED_WORKERS [REPO_ROOT]
 # Prices the Stage 2 compiler-tests phase by its real per-worker need
 # (BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_KIB) instead of the compile-shard
@@ -741,8 +833,26 @@ bootstrap_tree_rss_whole_build_plan() {
   [ "$bootstrap_tree_rss_plan_workers" -le "$btr_wb_requested" ] || bootstrap_tree_rss_plan_workers=$btr_wb_requested
   bootstrap_tree_rss_plan_cap_kib=$((BOOTSTRAP_TREE_RSS_PHASE_BASE_KIB + bootstrap_tree_rss_plan_workers * btr_wb_worker))
   [ "$btr_wb_small" = 0 ] || bootstrap_tree_rss_plan_cap_kib=$btr_wb_budget
+  # Guarded two-worker floor (bootstrap_tree_rss_two_worker_floor): only a
+  # fitted 1 under a >= 2 request is ever considered; FIT >= 2 is untouched.
+  btr_wb_floored=0
+  btr_wb_floor_note=
+  if [ "$btr_wb_requested" -ge 2 ] && [ "$bootstrap_tree_rss_plan_workers" -eq 1 ]; then
+    bootstrap_tree_rss_two_worker_floor "$btr_wb_requested" 1 "$btr_wb_small" \
+      "${SIMPLE_BOOTSTRAP_RSS_CAP_MODE:-enforce}" "${bootstrap_tree_rss_host_available_kib:-}" \
+      "$(bootstrap_tree_rss_host_reserve_kib "$bootstrap_tree_rss_host_total_kib" "$btr_wb_root")" \
+      "$(bootstrap_tree_rss_ceiling_kib 2 "$bootstrap_tree_rss_host_total_kib")"
+    btr_wb_floor_note="; $bootstrap_tree_rss_floor_note"
+    if [ "$bootstrap_tree_rss_floor_workers" -eq 2 ]; then
+      btr_wb_floored=1
+      bootstrap_tree_rss_plan_workers=2
+      bootstrap_tree_rss_plan_cap_kib=$bootstrap_tree_rss_floor_cap_kib
+      btr_wb_price="base ${BOOTSTRAP_TREE_RSS_PHASE_BASE_KIB} KiB + worker floor ${BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_KIB} KiB x 100% (guarded two-worker floor)"
+    fi
+  fi
   btr_wb_default_ceiling=$(bootstrap_tree_rss_ceiling_kib "$bootstrap_tree_rss_plan_workers" "$bootstrap_tree_rss_host_total_kib")
   bootstrap_tree_rss_plan_bound=worker-floor
+  [ "$btr_wb_floored" = 0 ] || bootstrap_tree_rss_plan_bound=two-worker-guarded-floor
   if [ "$bootstrap_tree_rss_plan_cap_kib" -gt "$btr_wb_default_ceiling" ]; then
     bootstrap_tree_rss_plan_ceiling_kib=$bootstrap_tree_rss_plan_cap_kib
     bootstrap_tree_rss_plan_bound=worker-floor-elevated
@@ -766,7 +876,11 @@ bootstrap_tree_rss_whole_build_plan() {
   bootstrap_tree_rss_plan_cli_row_bound=$bootstrap_tree_rss_plan_bound
   btr_wb_cli=$BOOTSTRAP_TREE_RSS_PHASE_CLI_ROW_CAP_KIB
   btr_wb_cli_note=
-  if [ "$btr_wb_small" = 0 ] && [ "$bootstrap_tree_rss_plan_workers" -ge 2 ] &&
+  # A guarded-floor plan keeps the row at the plan cap, like one worker: the
+  # floor only applies where the budget cannot hold the 60 GiB row, and the
+  # compiler's MIR pool re-admits its second worker against this cap (run 11
+  # MIR workers ~25 GiB each stay at one), so the row is not refused here.
+  if [ "$btr_wb_small" = 0 ] && [ "$btr_wb_floored" = 0 ] && [ "$bootstrap_tree_rss_plan_workers" -ge 2 ] &&
      [ "$btr_wb_cli" -gt "$bootstrap_tree_rss_plan_cap_kib" ]; then
     if [ "$btr_wb_cli" -le "$btr_wb_budget" ]; then
       bootstrap_tree_rss_plan_cli_row_cap_kib=$btr_wb_cli
@@ -785,7 +899,7 @@ bootstrap_tree_rss_whole_build_plan() {
       return 1
     }
   fi
-  bootstrap_tree_rss_plan_summary="whole-build phase: workers ${bootstrap_tree_rss_plan_workers} (requested ${btr_wb_requested}, host budget fits ${btr_wb_fit}, timeout scale x${bootstrap_tree_rss_plan_timeout_scale}), cap ${bootstrap_tree_rss_plan_cap_kib} KiB = ${btr_wb_price}$([ "$btr_wb_small" = 1 ] || printf ' x %s' "$bootstrap_tree_rss_plan_workers"), host budget ${btr_wb_budget} KiB (${btr_wb_budget_bound}; host RAM via ${bootstrap_tree_rss_host_total_source}), default ceiling ${btr_wb_default_ceiling} KiB, elevated ceiling ${bootstrap_tree_rss_plan_ceiling_kib} KiB, bound ${bootstrap_tree_rss_plan_bound}${btr_wb_cli_note}"
+  bootstrap_tree_rss_plan_summary="whole-build phase: workers ${bootstrap_tree_rss_plan_workers} (requested ${btr_wb_requested}, host budget fits ${btr_wb_fit}, timeout scale x${bootstrap_tree_rss_plan_timeout_scale}), cap ${bootstrap_tree_rss_plan_cap_kib} KiB = ${btr_wb_price}$([ "$btr_wb_small" = 1 ] || printf ' x %s' "$bootstrap_tree_rss_plan_workers"), host budget ${btr_wb_budget} KiB (${btr_wb_budget_bound}; host RAM via ${bootstrap_tree_rss_host_total_source}), default ceiling ${btr_wb_default_ceiling} KiB, elevated ceiling ${bootstrap_tree_rss_plan_ceiling_kib} KiB, bound ${bootstrap_tree_rss_plan_bound}${btr_wb_cli_note}${btr_wb_floor_note}"
 }
 
 # bootstrap_tree_rss_whole_build_export REQUESTED_WORKERS [REPO_ROOT]
