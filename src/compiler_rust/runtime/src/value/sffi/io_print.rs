@@ -527,6 +527,15 @@ pub extern "C" fn rt_opt_value_to_string(v: RuntimeValue) -> RuntimeValue {
     unsafe { crate::value::collections::rt_string_new(s.as_ptr(), s.len() as u64) }
 }
 
+/// `n.to_hex()`: lowercase two's-complement hex, no prefix -- same text as the
+/// interpreter's `format!("{:x}", n)`. C twin: `runtime_native.c`.
+/// doc/08_tracking/bug/jit_primitive_method_parity_gaps_2026-11-13.md
+#[no_mangle]
+pub extern "C" fn rt_i64_to_hex(raw: i64) -> RuntimeValue {
+    let s = format!("{raw:x}");
+    unsafe { crate::value::collections::rt_string_new(s.as_ptr(), s.len() as u64) }
+}
+
 /// Flat (raw, non-tagged) `i64?` payload renderer; see the doc block above
 /// `rt_opt_value_to_string`. Its `#[no_mangle]` had been detached onto the
 /// wrong item, so the symbol was mangled and the JIT could not resolve it.

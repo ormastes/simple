@@ -2595,6 +2595,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_opt_bool_to_string",
     "rt_opt_f64_to_string",
     "rt_opt_i64_to_string",
+    "rt_i64_to_hex",
     "rt_opt_value_to_string",
     "rt_file_delete", // -> rt_file_remove
     "rt_neighbor_load",

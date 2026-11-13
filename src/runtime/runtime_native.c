@@ -5232,6 +5232,15 @@ int64_t rt_raw_u64_to_string(int64_t raw) {
     return rt_string_new((const uint8_t*)buf, len > 0 ? (uint64_t)len : 0);
 }
 
+/* rt_i64_to_hex: `n.to_hex()` -- lowercase two's-complement hex, no prefix;
+ * twin of the Rust runtime and the interpreter's format!("{:x}", n).
+ * doc/08_tracking/bug/jit_primitive_method_parity_gaps_2026-11-13.md */
+int64_t rt_i64_to_hex(int64_t raw) {
+    char buf[24];
+    int len = snprintf(buf, sizeof(buf), "%llx", (unsigned long long)(uint64_t)raw);
+    return rt_string_new((const uint8_t*)buf, len > 0 ? (uint64_t)len : 0);
+}
+
 int64_t rt_raw_i64_to_string(int64_t raw) {
     char buf[32];
     /* %lld handles INT64_MIN correctly (no manual negation needed). */
