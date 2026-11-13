@@ -14,7 +14,7 @@ use compiler.backend.native.mach_inst.{MachReg, virtual_reg, physical_reg, reg_i
 use compiler.backend.common.isel_common.{LoweredOperand, ISelFuncResult, ISelBlockResult, ISelInstResult, local_to_vreg, local_vreg_op, isel_fresh_dest, isel_emit_one}
 use compiler.backend.native.mach_inst.{X86_RAX, X86_RCX, X86_RDX, X86_RBX, X86_RSP, X86_RBP, X86_RSI, X86_RDI, X86_R8, X86_R9, X86_R10, X86_R11, X86_R12, X86_R13, X86_R14, X86_R15, X86_YMM_ALLOCATABLE}
 use compiler.backend.native.mach_inst.{X86_ARG_REGS, X86_ARG_REG_COUNT, X86_CALLEE_SAVED}
-use compiler.backend.native.mach_inst.{X86_OP_MOV_REG_REG, X86_OP_MOV_REG_IMM, X86_OP_MOV_REG_MEM, X86_OP_MOV_MEM_REG, X86_OP_ADD, X86_OP_SUB, X86_OP_IMUL, X86_OP_IDIV, X86_OP_AND, X86_OP_OR, X86_OP_XOR, X86_OP_SHL, X86_OP_SAR, X86_OP_SHR, X86_OP_NEG, X86_OP_NOT, X86_OP_BSWAP, X86_OP_POPCNT, X86_OP_CMP, X86_OP_TEST, X86_OP_SETE, X86_OP_SETNE, X86_OP_SETL, X86_OP_SETLE, X86_OP_SETG, X86_OP_SETGE, X86_OP_JMP, X86_OP_JE, X86_OP_JNE, X86_OP_JNZ, X86_OP_JZ, X86_OP_CALL, X86_OP_RET, X86_OP_PUSH, X86_OP_POP, X86_OP_LEA, X86_OP_MOVZX, X86_OP_CQO, X86_OP_NOP, X86_OP_INT3, X86_OP_ADD_IMM, X86_OP_SUB_IMM, X86_OP_CMP_IMM, X86_OP_MOV_REG_IMM32, X86_OP_CALL_INDIRECT, X86_OP_VMOVAPS_LOAD_YMM, X86_OP_VMOVAPS_STORE_YMM, X86_OP_VADDPS_YMM, X86_OP_VSUBPS_YMM, X86_OP_VMULPS_YMM, X86_OP_VDIVPS_YMM}
+use compiler.backend.native.mach_inst.{X86_OP_MOV_REG_REG, X86_OP_MOV_REG_IMM, X86_OP_MOV_REG_MEM, X86_OP_MOV_MEM_REG, X86_OP_ADD, X86_OP_SUB, X86_OP_IMUL, X86_OP_IDIV, X86_OP_DIV, X86_OP_AND, X86_OP_OR, X86_OP_XOR, X86_OP_SHL, X86_OP_SAR, X86_OP_SHR, X86_OP_NEG, X86_OP_NOT, X86_OP_BSWAP, X86_OP_POPCNT, X86_OP_CMP, X86_OP_TEST, X86_OP_SETE, X86_OP_SETNE, X86_OP_SETL, X86_OP_SETLE, X86_OP_SETG, X86_OP_SETGE, X86_OP_SETB, X86_OP_SETBE, X86_OP_SETA, X86_OP_SETAE, X86_OP_JMP, X86_OP_JE, X86_OP_JNE, X86_OP_JNZ, X86_OP_JZ, X86_OP_CALL, X86_OP_RET, X86_OP_PUSH, X86_OP_POP, X86_OP_LEA, X86_OP_MOVZX, X86_OP_CQO, X86_OP_NOP, X86_OP_INT3, X86_OP_ADD_IMM, X86_OP_SUB_IMM, X86_OP_CMP_IMM, X86_OP_MOV_REG_IMM32, X86_OP_CALL_INDIRECT, X86_OP_VMOVAPS_LOAD_YMM, X86_OP_VMOVAPS_STORE_YMM, X86_OP_VADDPS_YMM, X86_OP_VSUBPS_YMM, X86_OP_VMULPS_YMM, X86_OP_VDIVPS_YMM}
 use compiler.backend.native.mach_inst.{X86_OP_VMOVAPS_LOAD_ZMM, X86_OP_VMOVAPS_STORE_ZMM, X86_OP_VADDPS_ZMM, X86_OP_VSUBPS_ZMM, X86_OP_VMULPS_ZMM, X86_OP_VDIVPS_ZMM, X86_OP_VADDPD_ZMM, X86_OP_VSUBPD_ZMM, X86_OP_VMULPD_ZMM, X86_OP_VDIVPD_ZMM, X86_OP_VPADDD_ZMM, X86_OP_VPSUBD_ZMM, X86_OP_VPMULLD_ZMM, X86_OP_VPANDD_ZMM, X86_OP_VPORD_ZMM, X86_OP_VPXORD_ZMM}
 use compiler.backend.native.mach_inst.{X86_OP_MOVZX_REG_MEM8, X86_OP_MOVZX_REG_MEM16, X86_OP_MOV_REG_MEM32, X86_OP_MOV_MEM8_REG, X86_OP_MOV_MEM16_REG, X86_OP_MOV_MEM32_REG}
 use compiler.backend.native.mach_inst.{X86_OP_MOVSX_REG_MEM8, X86_OP_MOVSX_REG_MEM16, X86_OP_MOVSX_REG_MEM32}
@@ -217,6 +217,12 @@ fn isel_function_with_x86_simd_capability(ctx: ISelContext, func: MirFunction, c
     val simd_plan_active = simd_registers.len() > 0 or avx512_shapes.len() > 0
     var mach_func = new_mach_function(isel_definition_symbol(func))
 
+    # Unsigned integer locals pick setb/seta, div and shr (LLVM/Cranelift parity).
+    var unsigned_locals: Dict<i64, bool> = {}
+    for local in func.locals:
+        if x86_type_is_unsigned(local.type_):
+            unsigned_locals[local.id.id] = true
+
     # Reset vreg counter - use local IDs directly, start high for temps
     var local_ctx = ISelContext(
         next_vreg: func.locals.len() + 100,
@@ -229,7 +235,8 @@ fn isel_function_with_x86_simd_capability(ctx: ISelContext, func: MirFunction, c
         global_sizes: ctx.global_sizes,
         global_signed: ctx.global_signed,
         global_mutable: ctx.global_mutable,
-        function_names: ctx.function_names
+        function_names: ctx.function_names,
+        unsigned_locals: unsigned_locals
     )
 
     # Allocate frame slots for locals that need stack space
@@ -958,6 +965,10 @@ fn isel_binop(ctx: ISelContext, dest: LocalId, op: MirBinOp, left: MirOperand, r
         insts.push(ai)
     for ai in right_low.insts:
         insts.push(ai)
+    # Same rule as LLVM codegen / Cranelift adapter: either operand unsigned
+    # makes compare/div unsigned; shift uses the left operand only.
+    val left_unsigned = x86_operand_is_unsigned(current_ctx, left)
+    val is_unsigned = left_unsigned or x86_operand_is_unsigned(current_ctx, right)
 
     match op:
         case Add:
@@ -970,16 +981,16 @@ fn isel_binop(ctx: ISelContext, dest: LocalId, op: MirBinOp, left: MirOperand, r
             insts.push(new_mach_inst(X86_OP_MOV_REG_REG, [dest_op, left_low.result]))
             insts.push(new_mach_inst(X86_OP_IMUL, [dest_op, right_low.result]))
         case Div:
-            # idiv uses rax:rdx / operand -> quotient in rax
+            # signed: cqo + idiv; unsigned: zero rdx + div. Quotient in rax.
             insts.push(new_mach_inst(X86_OP_MOV_REG_REG, [op_phys(X86_RAX), left_low.result]))
-            insts.push(new_mach_inst(X86_OP_CQO, []))
-            insts.push(new_mach_inst(X86_OP_IDIV, [right_low.result]))
+            for ai in x86_div_insts(is_unsigned, right_low.result):
+                insts.push(ai)
             insts.push(new_mach_inst(X86_OP_MOV_REG_REG, [dest_op, op_phys(X86_RAX)]))
         case Rem:
-            # idiv uses rax:rdx / operand -> remainder in rdx
+            # signed: cqo + idiv; unsigned: zero rdx + div. Remainder in rdx.
             insts.push(new_mach_inst(X86_OP_MOV_REG_REG, [op_phys(X86_RAX), left_low.result]))
-            insts.push(new_mach_inst(X86_OP_CQO, []))
-            insts.push(new_mach_inst(X86_OP_IDIV, [right_low.result]))
+            for ai in x86_div_insts(is_unsigned, right_low.result):
+                insts.push(ai)
             insts.push(new_mach_inst(X86_OP_MOV_REG_REG, [dest_op, op_phys(X86_RDX)]))
         case BitAnd:
             insts.push(new_mach_inst(X86_OP_MOV_REG_REG, [dest_op, left_low.result]))
@@ -997,7 +1008,8 @@ fn isel_binop(ctx: ISelContext, dest: LocalId, op: MirBinOp, left: MirOperand, r
         case Shr:
             insts.push(new_mach_inst(X86_OP_MOV_REG_REG, [dest_op, left_low.result]))
             insts.push(new_mach_inst(X86_OP_MOV_REG_REG, [op_phys(X86_RCX), right_low.result]))
-            insts.push(new_mach_inst(X86_OP_SHR, [dest_op]))
+            # Right shift follows the LEFT operand: logical for unsigned, arithmetic for signed.
+            insts.push(new_mach_inst(if left_unsigned: X86_OP_SHR else: X86_OP_SAR, [dest_op]))
         case Eq:
             for ai in isel_comparison(dest_op, left_low.result, right_low.result, X86_OP_SETE):
                 insts.push(ai)
@@ -1005,22 +1017,44 @@ fn isel_binop(ctx: ISelContext, dest: LocalId, op: MirBinOp, left: MirOperand, r
             for ai in isel_comparison(dest_op, left_low.result, right_low.result, X86_OP_SETNE):
                 insts.push(ai)
         case Lt:
-            for ai in isel_comparison(dest_op, left_low.result, right_low.result, X86_OP_SETL):
+            for ai in isel_comparison(dest_op, left_low.result, right_low.result, if is_unsigned: X86_OP_SETB else: X86_OP_SETL):
                 insts.push(ai)
         case Le:
-            for ai in isel_comparison(dest_op, left_low.result, right_low.result, X86_OP_SETLE):
+            for ai in isel_comparison(dest_op, left_low.result, right_low.result, if is_unsigned: X86_OP_SETBE else: X86_OP_SETLE):
                 insts.push(ai)
         case Gt:
-            for ai in isel_comparison(dest_op, left_low.result, right_low.result, X86_OP_SETG):
+            for ai in isel_comparison(dest_op, left_low.result, right_low.result, if is_unsigned: X86_OP_SETA else: X86_OP_SETG):
                 insts.push(ai)
         case Ge:
-            for ai in isel_comparison(dest_op, left_low.result, right_low.result, X86_OP_SETGE):
+            for ai in isel_comparison(dest_op, left_low.result, right_low.result, if is_unsigned: X86_OP_SETAE else: X86_OP_SETGE):
                 insts.push(ai)
         case _:
             # Unsupported binop - zero result
             insts.push(new_mach_inst(X86_OP_XOR, [dest_op, dest_op]))
 
     ISelInstResult(insts: insts, ctx: current_ctx)
+
+fn x86_type_is_unsigned(ty: MirType) -> bool:
+    match ty.kind:
+        case MirTypeKind.U8 | MirTypeKind.U16 | MirTypeKind.U32 | MirTypeKind.U64: true
+        case _: false
+
+fn x86_operand_is_unsigned(ctx: ISelContext, operand: MirOperand) -> bool:
+    match operand.kind:
+        case Copy(local): ctx.unsigned_locals.contains(local.id)
+        case Move(local): ctx.unsigned_locals.contains(local.id)
+        case Const(_, type_): x86_type_is_unsigned(type_)
+        case _: false
+
+fn x86_div_insts(is_unsigned: bool, divisor: Operand) -> [MachInst]:
+    """rdx:rax / divisor. Signed sign-extends rax into rdx (cqo) and uses idiv;
+    unsigned zeroes rdx and uses div, so a high-bit u64 dividend is not negative."""
+    if is_unsigned:
+        return [
+            new_mach_inst(X86_OP_XOR, [op_phys(X86_RDX), op_phys(X86_RDX)]),
+            new_mach_inst(X86_OP_DIV, [divisor])
+        ]
+    [new_mach_inst(X86_OP_CQO, []), new_mach_inst(X86_OP_IDIV, [divisor])]
 
 fn isel_comparison(dest: Operand, left: Operand, right: Operand, setcc_op: i64) -> [MachInst]:
     var insts: [MachInst] = []
