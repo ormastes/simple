@@ -57,6 +57,43 @@ fn main() -> i64:
     assert_eq!(run_jit_no_fallback(source), 7 + 0 + 255);
 }
 
+/// The exact pre-workaround `EngineColor.to_rgba8` shape (commit e66eff434bb
+/// hoisted it): an f64-parameter nested fn called four times inside a struct
+/// constructor in an impl method.
+#[test]
+fn original_engine_color_to_rgba8_shape_runs_under_jit() {
+    let source = r#"
+struct Rgba8:
+    r: i64
+    g: i64
+    b: i64
+    a: i64
+
+struct EngineColor:
+    r: f64
+    g: f64
+    b: f64
+    a: f64
+
+impl EngineColor:
+    fn to_rgba8() -> Rgba8:
+        fn clamp_f(v: f64) -> i64:
+            val i = (v * 255.0).to_i64()
+            if i < 0:
+                return 0
+            if i > 255:
+                return 255
+            i
+        Rgba8(r: clamp_f(self.r), g: clamp_f(self.g), b: clamp_f(self.b), a: clamp_f(self.a))
+
+fn main() -> i64:
+    val c = EngineColor(r: 1.0, g: 0.5, b: -1.0, a: 2.0)
+    val p = c.to_rgba8()
+    p.r * 1000000000 + p.g * 1000000 + p.b * 1000 + p.a
+"#;
+    assert_eq!(run_jit_no_fallback(source), 255 * 1000000000 + 127 * 1000000 + 0 * 1000 + 255);
+}
+
 /// Same shape inside a class method.
 #[test]
 fn nested_fn_inside_class_method_runs_under_jit() {
