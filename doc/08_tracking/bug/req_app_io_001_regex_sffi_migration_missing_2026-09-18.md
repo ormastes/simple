@@ -28,3 +28,9 @@ REQ-APP-IO-001, not a test fix.
 first_api: `regex_new`, last_api: `is_valid_ipv4`; facade must read
 `export use app.io.regex_sffi.{` and contain no `extern fn`, `@extern(`,
 `rt_`, or wildcard `_sffi.*` imports.
+
+---
+
+## Lane disposition 2026-11-13 (live-p3-l4, work/live-p3-l4-20261113, base f790f7f266e)
+
+Re-verified at this base: `src/app/io/regex_sffi.spl` is still a stub and `regex_ffi.spl` still carries raw externs; the pinning `test/01_unit/app/io/legacy_ffi_facades_spec.spl` stays red on the regex leg (compression and FTP legs were rerouted 2026-09-18). The pinned surface (`regex_new` .. `is_valid_ipv4` + validators) is a safe-SFFI regex implementation — feature work under REQ-APP-IO-001; there is no canonical module to reroute to (unlike compress/ftp). Note for the owner: any implementation must avoid `text.parse_int()`/Option-returning parse methods on JIT-compiled paths — the seed JIT currently boxes their tagged results into `Some(nil)` (see pure_sql_reopen_checkpointed_file_stack_overflow_2026-08-25.md 2026-11-13 addendum; measured on this host). No in-lane change. Owner: app-io regex lane.

@@ -84,3 +84,8 @@ runner-supplied nonce correlated into the retained receipt.
 ## Lane disposition 2026-11-13 (p3-misc-b)
 
 Not pursued in this lane: re-verified 2026-11-05: both blockers stand (seed cross-compile, no per-run nonce). Needs the QEMU/release-lineage lane on a Linux host with cargo.
+---
+
+## Lane disposition 2026-11-13 (live-p3-l4, work/live-p3-l4-20261113, base f790f7f266e)
+
+Concurs with boot13/p3-misc-b: BLOCKED on this host — both release blockers stand at guard level (no canonical system-spec run through the deployed pure-Simple CLI; no riscv64 runner-nonce guard — only arm64/x86-64 nonce-slot guards exist), and this Windows lane has no `qemu-system-riscv64` (`command -v` empty). The exact grant (Linux host with QEMU RV64 + OpenSBI/U-Boot + workspace-admitted deployed CLI) is recorded in the boot13 addendum. No in-lane change. Owner: RISC-V64 SimpleOS execution lane + SOSIX/QEMU integration lane.

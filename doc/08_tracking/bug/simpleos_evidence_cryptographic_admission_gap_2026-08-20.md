@@ -125,3 +125,9 @@ baseline values only after an exact baseline artifact is available. Run the
 focused policy and verifier authority specs with an admitted test-capable
 self-hosted runtime and the native/QEMU campaign when the phase environment is
 ready.
+
+---
+
+## Lane disposition 2026-11-13 (live-p3-l4, work/live-p3-l4-20261113, base f790f7f266e)
+
+Concurs with the record: still open, release-blocking for every capability-ledger PASS — the structural model (verifier_owner behind the canonical mutex, authority_owner trust/policy/time projection, performance_policy_owner catalog) is in source, but the cryptographic half remains deliberately disabled (`SIMPLEOS_EVIDENCE_*_ADMITTED` gates false) pending authoritative self-hosted concurrent-execution evidence, executable Ed25519 KAT and native constant-work evidence, capture-owner delivery, and the forgery/replay/key-revocation/restart test matrix. All of that needs the admitted Phase-2 test-capable runtime + QEMU, which this Windows lane is not. No in-lane change. Owner: SimpleOS evidence lane with the TODO(environment) grant in the record.
