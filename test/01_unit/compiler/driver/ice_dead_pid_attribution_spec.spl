@@ -1,0 +1,58 @@
+"""A ledger-pool worker death is attributed from THAT worker's breadcrumbs.
+
+Phase 3 census (run-19 Stage 2, 2026-11-13): both MIR shard workers aborted
+(`status=CRASH exit=-134`) and the pool then listed all 1619 claimed modules as
+`failed module: CRASH <m>` -- nothing said which module the workers died in.
+Breadcrumbs are per pid (`ice_breadcrumbs.<pid>.log`); sibling workers that are
+still running have open breadcrumbs of their own, so the pool parent must read
+only the reaped worker's file.
+"""
+# @req REQ-ROBUST-10A
+# @cover src/compiler/80.driver/driver_ice_boundary.spl
+use std.spec.*
+use std.io_runtime.{env_set, file_append_text, file_read}
+use compiler.driver.driver_ice_boundary.*
+
+fn dead_pid_env(case_name: text):
+    env_set("SIMPLE_ICE_DIR", "build/test_ice_dead_pid/" + case_name)
+    env_set("SIMPLE_ICE_BOUNDARY", "")
+    env_set("SIMPLE_COMPILE_FAIL_FAST", "")
+    ice_boundary_begin_run()
+
+describe "ledger-pool dead-worker attribution":
+    it "names the module the reaped worker died in, with the signal, and not a live sibling's":
+        dead_pid_env("one")
+        val _dead = file_append_text(ice_breadcrumb_path_for_pid_v1(4242),
+            "start\tcodegen\tmod.alpha\tsrc/a.spl\tcranelift\ndone\tcodegen\tmod.alpha\nstart\tcodegen\tapp.cli.bootstrap_focused_native_build\tsrc/app/cli/bootstrap_focused_native_build.spl\tcranelift\n")
+        val _live = file_append_text(ice_breadcrumb_path_for_pid_v1(4343),
+            "start\tcodegen\tmod.live\tsrc/live.spl\tcranelift\n")
+        val lines = ice_boundary_attribute_dead_pid_v1(4242, -134, " signal=SIGABRT(6)")
+        expect(lines.len()).to_equal(1)
+        expect(lines[0]).to_contain("ICE[codegen] module app.cli.bootstrap_focused_native_build (attributed)")
+        expect(lines[0]).to_contain("worker exit status -134 signal=SIGABRT(6)")
+        expect(lines[0]).to_contain("src/app/cli/bootstrap_focused_native_build.spl")
+        expect(lines[0]).not_to_contain("mod.live")
+        val records = ice_records_read()
+        expect(records.len()).to_equal(1)
+        expect(records[0].kind).to_equal("attributed")
+        expect(records[0].module_name).to_equal("app.cli.bootstrap_focused_native_build")
+        # Closed in the dead worker's file: a later run-wide scan sees only the
+        # live sibling, so the module is not attributed twice.
+        val still_open = ice_boundary_dead_worker_modules()
+        expect(still_open.len()).to_equal(1)
+        expect(still_open[0].module_name).to_equal("mod.live")
+
+    it "says nothing more when the worker left no open breadcrumb":
+        dead_pid_env("none")
+        expect(ice_boundary_attribute_dead_pid_v1(5151, -134, " signal=SIGABRT(6)").len()).to_equal(0)
+
+    it "is inert without a run directory":
+        env_set("SIMPLE_ICE_DIR", "")
+        expect(ice_boundary_attribute_dead_pid_v1(4242, -134, "").len()).to_equal(0)
+
+    it "is wired into the ledger pool: claims a run, attributes by pid, merges and releases":
+        val pool = file_read("src/app/cli/native_build_main.spl")
+        expect(pool).to_contain("val pool_ice_owned = ice_boundary_claim_run(queue_dir)")
+        expect(pool).to_contain("ice_boundary_attribute_dead_pid_v1(pid, code, native_build_exit_cause_field_v1(code))")
+        expect(pool).to_contain("ice_boundary_merge_receipt(pool_ice_owned)")
+        expect(pool).to_contain("ice_boundary_release_run(pool_ice_owned)")
