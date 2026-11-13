@@ -1,7 +1,7 @@
 # Integer `.max()` / `.min()` method calls fail: `Function 'i64.max' not found`
 
 - **Date:** 2026-11-13
-- Status: OPEN
+- Status: verification-pending
 - **Lane:** seed `run`/`test` (JIT-first), phase-1 seed `C:/dev/wt/p1-20261112/.../bootstrap/simple.exe`
 - **Found by:** llm_caret yoga coverage (`resolveGap` crashed on any node with children)
 
@@ -40,3 +40,20 @@ Add rows to `scripts/check/check-numeric-method-family-dispatch.shs`.
 
 `src/app/llm_caret/claude_full/native_ts/yoga_layout/index.spl` uses a local
 `nonNegative()` helper instead of `.max(0)`.
+
+## Fix (2026-11-13, work/jit-intmax-20261113)
+
+- Seed JIT: `codegen/instr/methods.rs::emit_int_min_max` lowers integer
+  `max`/`min`/`clamp`/`abs` to `smax`/`smin` (`umax`/`umin` for unsigned; u64
+  `abs` is identity), called from both `compile_builtin_method` and the
+  qualified-receiver path in `closures_structs.rs::try_compile_builtin_method_call`.
+  HIR stamps the receiver type as the result (`builtin_numeric_method_result_type`).
+- Pure-Simple MIR (`50.mir/_MirLoweringExpr/builtin_method_extras.spl`): had
+  signed `max`/`min`/`abs` only; added `clamp` and unsigned `max`/`min`/`clamp`
+  (operands cast to the unsigned receiver type, so LLVM/Cranelift adapters pick
+  `ult`/`ugt`). Known residual: the native `isel_x86_64` backend's `Lt`/`Gt`
+  are signed-only for every unsigned compare (pre-existing, not specific to this).
+- Workaround removed: yoga `resolveGap` uses `g.max(0)` again.
+- Spec: `test/01_unit/compiler/50.mir/int_min_max_methods_spec.spl` (in-process,
+  `simple run` subprocess, MIR lowering); guard rows added to
+  `scripts/check/check-numeric-method-family-dispatch.shs`.

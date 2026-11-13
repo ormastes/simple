@@ -51,6 +51,7 @@ impl Lowerer {
             "to_u64" => Some(TypeId::U64),
             "to_f32" => Some(TypeId::F32),
             "to_float" | "to_f64" => Some(TypeId::F64),
+            "max" | "min" | "clamp" | "abs" => Some(receiver_ty),
             _ => None,
         }
     }
