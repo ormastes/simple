@@ -136,3 +136,23 @@ Spec: `test/01_unit/compiler/mir/interp_builtin_fallback_call_origin_spec.spl`
 (seed: 1/2 red -> 2/2 green). Source workaround for run-21 (separate commit):
 both producer modules call the already-imported nullable accessors, tagged
 `@workaround bug=unknown_call_origin_driver_hir_archive_stage3_2026-11-13`.
+
+## Resolution path and HIR-time diagnostic (2026-11-13 ~16:30 KST)
+
+Leak route, verified: NOT `driver_bootstrap.spl:17`'s private `fn env_get`
+(driver_pipeline_lowering does not import driver_bootstrap; a binding to it
+would carry owner `compiler.driver.driver_bootstrap`, own a registry row, and
+lower as a Source call with a qualified link name, not bare `env_get`/Unknown)
+and NOT a glob (`compiler.hir.hir.*`, `compiler.mir.mir.*`,
+`compiler.driver.driver_aot_pipeline.*` neither define nor re-export
+`env_get`). The symbol-table lookup misses, `lower_unresolved_ident`
+(`expression_support.spl`) runs, and `is_interp_builtin_fn("env_get")`
+synthesizes the module-less symbol. The 3-line repro has no driver_bootstrap in
+its closure and aborts identically.
+
+`HirLowering.forbid_interp_builtin_fallback` (set by the driver for
+Aot/Jit/SmfExec) now reports `[E-HIR-BUILTIN-IMPORT-001] `<name>` is not
+imported here ...` for the interpreter-only builtins MIR cannot lower
+(env_get, env_set, type_of, file_exists/read/write/delete,
+file_is_regular_no_follow). Spec:
+`test/01_unit/compiler/hir/unimported_interp_builtin_spec.spl`.
