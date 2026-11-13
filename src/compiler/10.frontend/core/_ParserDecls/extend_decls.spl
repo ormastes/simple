@@ -32,7 +32,6 @@ use compiler.core.parser.{parser_advance, parser_expect, parser_error}
 use compiler.core.parser.{parser_skip_newlines, parser_skip_newlines_and_semicolons}
 use compiler.core.parser.{parser_parse_type}
 use compiler.core.tokens.{TOK_KW_DYN, TOK_DOT}
-use compiler.core.types.{named_type_register, named_type_find}
 use compiler.frontend.core.flat_pool_codec.*
 
 # One entry per parsed `complete:`/`dyn:` SECTION, in source order.
@@ -119,15 +118,17 @@ fn parse_extend_constructor() -> bool:
             if par_kind_get() == 190:
                 break
             # `name: T` (named payload field) and bare `T` are both accepted,
-            # matching parse_enum_decl's variant payload loop.
+            # matching parse_enum_decl's variant payload loop: parse a full
+            # type FIRST (correct for bare `T`, which must yield a type TAG,
+            # not a raw named-type registry index), and reinterpret it as a
+            # field name only when a `:` follows.
             if par_kind_get() == 6:
-                val first = par_text_get()
-                parser_advance()
+                val first_type = parser_parse_type()
                 if par_kind_get() == 161:
                     parser_advance()
                     type_ids.push(parser_parse_type())
                 else:
-                    type_ids.push(parser_type_id_for_name(first))
+                    type_ids.push(first_type)
             elif par_kind_get() == 144:
                 type_ids.push(parser_parse_type())
             else:
@@ -151,15 +152,6 @@ fn parser_is_identifier_shaped(t: text) -> bool:
         return false
     val c = t.substring(0, 1)
     (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or c == "_"
-
-# A bare `T` payload position: the identifier was already consumed to decide
-# between `name: T` and `T`, so the type is resolved from its name here rather
-# than by re-entering parser_parse_type on a token that is gone.
-fn parser_type_id_for_name(name: text) -> i64:
-    val found = named_type_find(name)
-    if found > 0:
-        return found
-    named_type_register(name, [], [])
 
 # Parses one `complete:` / `dyn:` subsection body. `closure` is the recorded
 # axis spelling. Returns the number of constructors parsed.

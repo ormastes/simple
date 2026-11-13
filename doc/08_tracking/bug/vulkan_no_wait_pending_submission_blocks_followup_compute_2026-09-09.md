@@ -1,10 +1,11 @@
 # Vulkan no-wait submission blocks the next compute command
-## Open 2026-09-16 — needs owner triage
+## Fixed 2026-11-13 — live-device acceptance met on the interpreter lane
 
-Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
-evidence found in the body. This is bookkeeping, not verification.
+The acceptance test below passes on a real device (NVIDIA GB10) since the
+interpreter's Vulkan bridge gained its own submission ring. Evidence, design and
+what is still not covered are in the last section, "2026-11-13 lane vk-ring".
 
-**Status:** OPEN
+**Status:** FIXED (interpreter lane; residuals listed in the last section)
 **Found:** 2026-09-09
 **Component:** Vulkan runtime compute ownership
 
@@ -189,3 +190,131 @@ path reports the honest red verdict. `vulkan_resident_2d.spl` is untouched and
 still submits with the blocking call.
 
 Not verified: riscv64 Linux has the same missing flag in the same config file.
+
+## 2026-11-13 lane vk-ring — bridge ring implemented; acceptance spec green on GB10
+
+Host: Linux aarch64, DGX Spark, `NVIDIA GB10|vendor=000010de|device=00002e12|
+driver=912b4080|api=00404138`. Base release/1.0.0 `9100f50e680`. Both seeds
+were built from that commit with `env -u RUSTFLAGS cargo build --release --bin
+simple` (an exported `RUSTFLAGS` drops `--export-dynamic`; the first build here
+had 0 exported `rt_vulkan_*` symbols for that reason and was discarded).
+
+| seed | sha256 (first 16) | size |
+|---|---|---|
+| base, unmodified tree | `a01a6e3df5426709` | 66,617,744 |
+| with the bridge ring | `35aec8193c70d864` | 66,639,000 |
+
+### What changed
+
+Blocker 2 of the previous section is closed by giving the bridge its own ring
+rather than routing the interpreter to the runtime crate:
+`src/compiler_rust/compiler/src/interpreter_extern/gpu_vulkan_async_ring.rs`.
+
+- **Shared protocol.** `runtime/src/vulkan_async_protocol.rs` (slot state
+  machine, admission window, contiguous receipt publication, status values) is
+  now a public module of the runtime crate and is used by both owners. The
+  runtime's own ring is otherwise untouched; its injected-device harness still
+  passes (23 tests).
+- **Ownership.** A submitted command buffer and its `VkFence` sit in the ring's
+  own table until `retire` sees the fence signaled (`vkGetFenceStatus`, added
+  to the bridge's function table) or `recover` sees device idle. They are never
+  in `quarantined_commands` or `live_fences`, so neither `wait_idle` nor the
+  caller-fence API can free them underneath the ring. Session, token and
+  caller-visible fence identities come from one monotonic counter and are never
+  reused; a raw `VkFence` value can be recycled by the driver.
+- **Retention.** The pipeline, descriptor sets and buffers recorded into a
+  submission are refused for `destroy_pipeline`, `destroy_descriptor_set`,
+  `bind_buffer` (descriptor rewrite) and `free_buffer` until that submission is
+  released.
+- **Admission.** While a session is open the bridge refuses `begin_compute`,
+  `discard_command`, `submit_and_wait`, `submit_and_wait_fence`,
+  `submit_no_wait`, `wait_idle`, `select_device` and `shutdown`: the set
+  the runtime gates on `async_compute_session_active`, plus `submit_and_wait`.
+- **Fail-closed close.** `close` answers 1 only with nothing in flight and with
+  created == released for both command buffers and fences.
+- **`rt_vulkan_discard_command`** was a constant-0 stub in the bridge. It now
+  frees a recorded, unsubmitted command.
+
+The compute path submits with a fence only. It uses no semaphores, so there is
+no semaphore lifetime to report.
+
+### Evidence (all serial, one spec per process, exit code read directly)
+
+| spec | base seed | ring seed, 10 runs |
+|---|---|---|
+| `vulkan_async_ring_live_device_spec` | 1 example, 1 failure | 10/10: 1 example, 0 failures; then 10/10: 2 examples, 0 failures with the release-path example below |
+| `vulkan_async_session_backed_spec` | 2 examples, 0 failures | 10/10: 3 examples, 0 failures (one example added) |
+| `vulkan_async_session_lifecycle_contract_spec` | 5 examples, 1 failure | 10/10: 5 examples, 1 failure (unchanged) |
+| `vulkan_async_submission_contract_spec` | 3 examples, 0 failures | 10/10: 3 examples, 0 failures |
+| `vulkan_lane_session_spec` | 2 examples, 0 failures | 10/10: 2 examples, 0 failures |
+
+Flakes: 0 in 60 invocations. The lifecycle failure is the same example on both
+seeds, "keeps every async forward visible to the dual-lane ABI audit"; it reads
+`src/runtime/runtime_dynload.c` and is not touched by this change.
+
+The live-device spec lost its `@tag:in-development` tag and gained one step:
+with the ring open, a direct `begin_compute` answers 0 and `bind_buffer` on the
+descriptor set of an unretired submission answers false.
+
+It also gained a second example for the release paths that are not `retire`,
+none of which the first example reaches: `close` with a command that was
+acquired but never submitted answers 1; with two submissions unretired and a
+third recording, `cancel` answers 1 and `acquire` then answers CLOSED, `close`
+drops the recording slot and answers 0 with `in_flight` 2, `recover` answers 1
+with `in_flight` 0 and `published_sequence` still 0 (no receipt is
+manufactured), and the following `close` answers 1 (accounting balanced), after
+which a direct `begin_compute` and `discard_command` succeed.
+
+No `bin/simple` is deployed in the main clone on this host, so the untagged
+spec was not run against a deployed binary. A seed built before this commit
+answers `supported == 0` and the spec is red there; whole-suite runs on a GPU
+host need a seed from this commit or later.
+
+Ten neighbouring Vulkan specs, one run per seed, same verdict and same failing
+set on both: `vulkan_resident_2d_spec` 3/3, `vulkan_submit_no_wait_backed_spec`
+2/2, `vulkan_sffi_completion_recovery_contract_spec` 4/4,
+`vulkan_debug_session_conformance_spec` 1/1,
+`vulkan_vm_executor_conformance_spec` 2/2, `gpu_resident_vulkan_slice_spec`
+1/1, `gui_content_renderer_spec` 5/5, `draw_ir_adv_spec` 69/70,
+`backend_vulkan_font_spec` 17/22, `vulkan_sffi_provider_parity_spec` 0/4.
+
+Rust: `cargo test --release -p simple-runtime --lib vulkan_async_protocol` 14
+passed; `-p simple-compiler --lib interpreter_extern` 460 passed.
+
+### Leak check, 30,000 cycles on the device
+
+One process, capacity-3 ring, 30,000 x (acquire, record, submit, poll to
+completion, retire) against a control of 30,000 x (`begin_compute`,
+`submit_and_wait_fence`, `destroy_fence`) on the same seed:
+
+| iteration | ring VmRSS kB | direct VmRSS kB |
+|---|---|---|
+| 3,000 | 333,956 | 333,948 |
+| 15,000 | 328,016 | 325,964 |
+| 18,000 | 330,116 | 328,064 |
+| 30,000 | 330,116 | 328,064 |
+
+Ring: 0 failures, `published_sequence` 30,000, `close` 1 (so 30,000 fences and
+30,000 command buffers created and released), descriptor destroy and device
+shutdown clean. RSS does not grow over the last 12,000 cycles in either lane.
+The dips are host reclaim on a shared box, present in the control too. RSS
+cannot see a leaked driver object by itself; the `close` accounting is the
+ownership evidence, RSS is the supporting one.
+
+### Not covered
+
+- The **compiled runtime's** ring has still not run on a live device. The Linux
+  seed is built without the runtime crate's `vulkan` feature, so JIT or natively
+  compiled code has no Vulkan device there at all.
+- Unknown-completion (`VK_ERROR_DEVICE_LOST` class) on real hardware. The
+  bridge keeps the command and fence owned and closes admission on that path,
+  but it was not provoked. It stays with the injected-device tests, which
+  exercise the runtime owner, not the bridge.
+- `snapshot`, `snapshot_word` and `abandon_device` are not served by the bridge
+  ring. They reach the runtime crate, which answers -1 for a bridge session, so
+  `telemetry()` is empty for an interpreter-lane ring.
+- The bounded wait in `acquire` holds the bridge mutex (at most the session
+  timeout, 1 s ceiling). The runtime owner waits outside its registry lock.
+- `vulkan_resident_2d.spl` still submits with the blocking call. Adopting the
+  ring there is a separate change.
+- riscv64 Linux: the `--export-dynamic` gap noted above is unverified.

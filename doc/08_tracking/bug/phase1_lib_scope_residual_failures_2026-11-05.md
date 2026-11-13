@@ -14,3 +14,14 @@
 - **Evidence (local, not in git):** per-file results and per-area triage were kept in the
   coordinator scratch (`p1suite/lib_results_final.tsv`, `triage_*.tsv`, `interp_repros_*.tsv`);
   re-run on the current seed to refresh before acting.
+
+## Fix (2026-11-13) — jwt_rfc7519_kat (lane fA)
+
+`jwt_rfc7519_kat_spec.spl` was 1/8 on the seed: every verify path raised
+`variable 'idx3' not found` from `_b64u_decode` in `src/os/crypto/jwt.spl`, which
+declared `idx3` as a branch-local `val` inside `if i + 2 < clean_len:` and then read
+it in the sibling `if i + 3 < clean_len:` branch. Same defect and same fix as
+`paseto.spl` (5294ff50d07): hoist `var idx3: i64 = 0` to the loop scope. Spec now
+8/8 on the seed. Still residual in this umbrella: `process_observation_v4_spec.spl`
+15/16 ("allows a pre-spawn rejection to retain absent process times"), and
+`zstd_sequence_fse_execution` (not re-run).

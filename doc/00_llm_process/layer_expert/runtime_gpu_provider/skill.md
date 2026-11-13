@@ -23,3 +23,13 @@ provider-table access are forbidden.
 The focused authoritative test is
 `scripts/check/check-gpu-provider-dynload-registry.shs --intensive`; native GPU
 readback and Tier-3 profiles are separate evidence rows.
+
+## Vulkan async submission ring: two owners
+
+The bounded async compute ring (`rt_vulkan_async_session_*`) has one owner per
+execution lane: the compiled runtime (ash `STATE`) and, for interpreted code,
+the dlopen bridge (`interpreter_extern/gpu_vulkan_async_ring.rs`, `VK_STATE`).
+Both take the slot protocol from `simple_runtime::vulkan_async_protocol`.
+Differences, traps (JIT `main` bypasses the bridge; exported `RUSTFLAGS` drops
+`--export-dynamic`) and evidence boundaries:
+`doc/07_guide/platform/ffi/vulkan_async_session.md` § "Two ring owners".
