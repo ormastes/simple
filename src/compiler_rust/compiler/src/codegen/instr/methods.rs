@@ -301,7 +301,9 @@ pub(crate) fn compile_builtin_method<M: Module>(
         return Ok(());
     }
     // Integer max/min/clamp/abs (see emit_int_min_max).
-    if matches!(method, "max" | "min" | "clamp" | "abs") {
+    // Only a receiver PROVEN to be an integer: an untyped vreg may be a tagged
+    // handle whose own `max` must not be replaced by an integer compare.
+    if matches!(method, "max" | "min" | "clamp" | "abs") && ctx.vreg_types.contains_key(&receiver) {
         let recv_ty_id = ctx.vreg_types.get(&receiver).copied().unwrap_or(TypeId::I64);
         if matches!(
             recv_ty_id,
