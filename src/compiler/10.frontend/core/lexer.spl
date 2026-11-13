@@ -149,6 +149,10 @@ fn lex_source_byte_offset(char_offset: i64) -> i64:
     if lex_span_all_ascii[0]:
         # One byte per character: the offsets coincide, no walk needed.
         return target
+    lex_span_prefix_ensure(char_count)
+    lex_span_byte_prefix[target]
+
+fn lex_span_prefix_ensure(char_count: i64):
     if lex_span_byte_prefix.len() != char_count + 1:
         # One pass per source. Read each character in place: passing
         # source_chars as an argument would copy the full source.
@@ -160,7 +164,34 @@ fn lex_source_byte_offset(char_offset: i64) -> i64:
             prefix.push(acc)
             i = i + 1
         lex_span_byte_prefix = prefix
-    lex_span_byte_prefix[target]
+
+# Inverse of lex_source_byte_offset over the live source: the char index whose
+# byte offset is the largest one <= `byte_offset` (clamped to the source). For
+# callers that only hold a BYTE position (a converted Span) but must record a
+# CHAR offset in the span pool, which the bridge converts to bytes exactly once.
+fn lex_source_char_offset(byte_offset: i64) -> i64:
+    if current_core_lexer_slot.len() == 0:
+        return 0
+    var target = byte_offset
+    if target < 0:
+        target = 0
+    val char_count = current_core_lexer_slot[0].source_chars.len()
+    if lex_span_all_ascii.len() == 0:
+        lex_span_all_ascii = [str_len(current_core_lexer_slot[0].source) == char_count]
+    if lex_span_all_ascii[0]:
+        return if target > char_count: char_count else: target
+    lex_span_prefix_ensure(char_count)
+    if target >= lex_span_byte_prefix[char_count]:
+        return char_count
+    var lo: i64 = 0
+    var hi: i64 = char_count
+    while lo < hi:
+        val mid = (lo + hi + 1) / 2
+        if lex_span_byte_prefix[mid] <= target:
+            lo = mid
+        else:
+            hi = mid - 1
+    lo
 
 fn lex_current_token_byte_span(kind: i64, line: i64, col: i64) -> LexSpan:
     # EOF and dedents do not consume source. Their cur_start may still name
@@ -390,6 +421,10 @@ pub fn lexer_release_parse_source_globals():
     lex_source_codes = []
     lex_source_char_count_slot = [0]
     lex_source_code_base_slot = [0]
+    # The span offset table is sized by the released source (8 B per char of
+    # the last non-ASCII module); the ASCII flag is per source too.
+    lex_span_byte_prefix = []
+    lex_span_all_ascii = []
     env_set("SIMPLE_BOOTSTRAP_LEX_SOURCE", "")
     env_set("SIMPLE_BOOTSTRAP_LEX_PATH", "")
 
@@ -1014,7 +1049,7 @@ pub fn lex_tokenize_all(source: text) -> i64:
     lex_all_kinds.len()
 
 export LexNextSnapshot, lex_next_snapshot
-export lex_source_byte_offset, lex_current_token_decl_end_byte
+export lex_source_byte_offset, lex_source_char_offset, lex_current_token_decl_end_byte
 
 # ===== LexerState snapshot (ParseContext stage 1) =====
 # See doc/05_design/compiler/frontend/parse_context_per_context_state.md.

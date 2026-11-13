@@ -3,7 +3,7 @@
 # Result errors are repository policy, not RFC-mandated strings.
 use std.spec.step
 use std.spipe.*
-use os.tls13.record13.{RecordKey, record13_encrypt_for_suite, record13_encrypt_for_suite_checked}
+use os.tls13.record13.{RecordKey, RecordResult, record13_encrypt, record13_decrypt_fd, record13_encrypt_for_suite, record13_encrypt_for_suite_checked}
 
 fn _checked_bytes(size: i64) -> [u8]:
     var data: [u8] = []
@@ -104,3 +104,51 @@ describe "Checked TLS record input domain":
         step("Reject 16385 bytes before allocating a truncated record header")
         val key = RecordKey(key: _checked_bytes(32), iv: _checked_bytes(12))
         expect(record13_encrypt_for_suite_checked(4867u16, key, 0u64, 23u8, _checked_bytes(16385))).to_equal(Err("tls-record-plaintext-too-large"))
+
+# record13_decrypt_fd used the rt_tls13_aes128_gcm_decrypt fast path and read
+# its result as raw plaintext. The Rust backings return status-prefixed bytes
+# ([0x00] on tag mismatch, [0x01, ...pt] on success), so a forged tag unpacked
+# to Ok(content_type: 0, data: []) and a genuine record kept the 0x01 status
+# byte as data. The fd path now authenticates through the same canonical
+# aes128_gcm_decrypt as record13_decrypt.
+# (bug aes_gcm_encrypt_length_unchecked_and_rewound_hardening_2026-11-13, item 4)
+
+fn _fd_err_msg(r: RecordResult) -> text:
+    match r:
+        RecordResult.Ok(ct, data):
+            "Ok"
+        RecordResult.Err(msg):
+            msg
+
+describe "record13_decrypt_fd authenticates fail closed":
+    it "decrypts a genuine record to the exact plaintext and content type":
+        step("Positive control: no status byte leaks into the data")
+        val key = RecordKey(key: _checked_bytes(16), iv: _checked_bytes(12))
+        val record = record13_encrypt(key, 3u64, 23u8, [65u8, 66u8, 67u8])
+        match record13_decrypt_fd(key, 3u64, record):
+            RecordResult.Ok(ct, data):
+                expect(ct).to_equal(23)
+                expect(data).to_equal([65u8, 66u8, 67u8])
+            RecordResult.Err(msg):
+                fail("genuine record must decrypt: {msg}")
+
+    it "rejects a record whose tag was forged":
+        step("Flip one tag bit; authentication failure is never Ok")
+        val key = RecordKey(key: _checked_bytes(16), iv: _checked_bytes(12))
+        var record = record13_encrypt(key, 3u64, 23u8, [65u8, 66u8, 67u8])
+        val last = record.len() - 1
+        record[last] = record[last] ^ 0x01u8
+        expect(_fd_err_msg(record13_decrypt_fd(key, 3u64, record))).to_equal("authentication tag mismatch")
+
+    it "rejects a record decrypted under the wrong sequence number":
+        step("Nonce mismatch must fail authentication")
+        val key = RecordKey(key: _checked_bytes(16), iv: _checked_bytes(12))
+        val record = record13_encrypt(key, 3u64, 23u8, [65u8, 66u8, 67u8])
+        expect(_fd_err_msg(record13_decrypt_fd(key, 4u64, record))).to_equal("authentication tag mismatch")
+
+    it "rejects a 15-byte record key before decrypting":
+        step("Key shape is checked before any key byte is read")
+        val key = RecordKey(key: _checked_bytes(16), iv: _checked_bytes(12))
+        val record = record13_encrypt(key, 3u64, 23u8, [65u8, 66u8, 67u8])
+        val short_key = RecordKey(key: _checked_bytes(15), iv: _checked_bytes(12))
+        expect(_fd_err_msg(record13_decrypt_fd(short_key, 3u64, record))).to_equal("AES-128 key must be 16 bytes")

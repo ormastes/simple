@@ -1,0 +1,98 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-LIB
+#
+# std.nogc_sync_mut.sffi.host.tls13_aes128_gcm_decrypt — the safe alias over
+# the rt_tls13_aes128_gcm_decrypt fast path. The Rust backings (interpreter
+# simd.rs and runtime value/aes.rs) return status-prefixed bytes:
+#   []           invalid input (runtime; the interpreter raises instead)
+#   [0x00]       tag mismatch
+#   [0x01, ...]  success, trailing bytes are the plaintext (may be empty)
+# The alias used to hand those bytes back as if they were plaintext, so a
+# caller saw a forged tag as the one-byte "plaintext" [0x00]. It now decodes
+# the status explicitly, rejects wrong-length key/nonce/tag before the
+# provider is called, and fails closed on any other encoding.
+# (bug aes_gcm_encrypt_length_unchecked_and_rewound_hardening_2026-11-13, item 4)
+#
+# Source: NIST SP 800-38D (Nov 2007), Appendix B TC1/TC2.
+
+use std.spec.step
+
+use std.nogc_sync_mut.sffi.host.{tls13_aes128_gcm_decrypt, tls13_aes128_gcm_decrypt_decode}
+
+fn _zeros(n: i64) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < n:
+        out.push(0x00u8)
+        i = i + 1
+    out
+
+fn _tc1_tag() -> [u8]:
+    [0x58u8, 0xe2u8, 0xfcu8, 0xceu8, 0xfau8, 0x7eu8, 0x30u8, 0x61u8,
+     0x36u8, 0x7fu8, 0x1du8, 0x57u8, 0xa4u8, 0xe7u8, 0x45u8, 0x5au8]
+
+fn _tc2_ct() -> [u8]:
+    [0x03u8, 0x88u8, 0xdau8, 0xceu8, 0x60u8, 0xb6u8, 0xa3u8, 0x92u8,
+     0xf3u8, 0x28u8, 0xc2u8, 0xb9u8, 0x71u8, 0xb2u8, 0xfeu8, 0x78u8]
+
+fn _tc2_tag() -> [u8]:
+    [0xabu8, 0x6eu8, 0x47u8, 0xd4u8, 0x2cu8, 0xecu8, 0x13u8, 0xbdu8,
+     0xf5u8, 0x3au8, 0x67u8, 0xb2u8, 0x12u8, 0x57u8, 0xbdu8, 0xdfu8]
+
+describe "tls13_aes128_gcm_decrypt_decode: status-prefixed provider result":
+    it "decodes [0x01, ...pt] to the plaintext":
+        step("success status")
+        expect(tls13_aes128_gcm_decrypt_decode([0x01u8, 0x41u8, 0x42u8])).to_equal(Ok([0x41u8, 0x42u8]))
+
+    it "decodes [0x01] to an empty plaintext":
+        step("success status, empty plaintext")
+        val empty: [u8] = []
+        expect(tls13_aes128_gcm_decrypt_decode([0x01u8])).to_equal(Ok(empty))
+
+    it "rejects [0x00] as a tag mismatch":
+        step("tag mismatch status")
+        expect(tls13_aes128_gcm_decrypt_decode([0x00u8])).to_equal(Err("authentication tag mismatch"))
+
+    it "rejects an empty provider result":
+        step("invalid-input encoding")
+        val empty: [u8] = []
+        expect(tls13_aes128_gcm_decrypt_decode(empty)).to_equal(Err("tls13 aes128-gcm provider rejected its inputs"))
+
+    it "rejects any other encoding":
+        step("unknown status bytes fail closed")
+        expect(tls13_aes128_gcm_decrypt_decode([0x00u8, 0x41u8])).to_equal(Err("tls13 aes128-gcm provider returned an invalid result"))
+        expect(tls13_aes128_gcm_decrypt_decode([0x02u8, 0x41u8])).to_equal(Err("tls13 aes128-gcm provider returned an invalid result"))
+        expect(tls13_aes128_gcm_decrypt_decode([0x41u8])).to_equal(Err("tls13 aes128-gcm provider returned an invalid result"))
+
+describe "tls13_aes128_gcm_decrypt: decoded fast path, fail closed":
+    it "TC2 decrypts to the exact zero plaintext (no status byte)":
+        step("positive control through the real provider")
+        val empty: [u8] = []
+        expect(tls13_aes128_gcm_decrypt(_zeros(16), _zeros(12), _tc2_ct(), empty, _tc2_tag())).to_equal(Ok(_zeros(16)))
+
+    it "TC1 (empty plaintext) decrypts to an empty plaintext":
+        step("empty plaintext is not confused with failure")
+        val empty: [u8] = []
+        expect(tls13_aes128_gcm_decrypt(_zeros(16), _zeros(12), empty, empty, _tc1_tag())).to_equal(Ok(empty))
+
+    it "rejects a forged tag":
+        step("forged tag through the real provider")
+        val empty: [u8] = []
+        var bad_tag = _tc2_tag()
+        bad_tag[15] = bad_tag[15] ^ 0x01u8
+        expect(tls13_aes128_gcm_decrypt(_zeros(16), _zeros(12), _tc2_ct(), empty, bad_tag)).to_equal(Err("authentication tag mismatch"))
+
+    it "rejects a short key before calling the provider":
+        step("key length")
+        val empty: [u8] = []
+        expect(tls13_aes128_gcm_decrypt(_zeros(15), _zeros(12), _tc2_ct(), empty, _tc2_tag())).to_equal(Err("AES-128 key must be 16 bytes"))
+
+    it "rejects a short nonce before calling the provider":
+        step("nonce length")
+        val empty: [u8] = []
+        expect(tls13_aes128_gcm_decrypt(_zeros(16), _zeros(11), _tc2_ct(), empty, _tc2_tag())).to_equal(Err("GCM nonce must be 12 bytes"))
+
+    it "rejects a short tag before calling the provider":
+        step("tag length")
+        val empty: [u8] = []
+        expect(tls13_aes128_gcm_decrypt(_zeros(16), _zeros(12), _tc2_ct(), empty, _zeros(8))).to_equal(Err("GCM tag must be 16 bytes"))

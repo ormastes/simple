@@ -22,13 +22,17 @@ use os.apps.smux.api.{smux_create_session, smux_list_sessions, smux_list_windows
     smux_list_panes, smux_split_pane, smux_resize, smux_focus_pane,
     smux_pane_spawn_pty, smux_pane_close_pty, smux_close_pane, smux_pane_alive,
     smux_paste_text, smux_send_text, smux_capture, smux_kill_session}
-use app.llm_caret.pane_backend.{windows_command_line, posix_command_line}
+use app.llm_caret.pane_backend.{windows_command_line, posix_command_line,
+    posix_pane_launcher_create, posix_pane_launcher_remove}
 
 struct CaretSmuxChildSpec:
     agent_id: text
     command: text
     args: [text]
 
+# `launcher_dir` is the private POSIX launcher directory backing this child's
+# spawn ("" on Windows or when nothing was spawned); it is removed when the
+# child's pane PTY is closed.
 struct CaretSmuxChildBinding:
     agent_id: text
     pane_id: text
@@ -36,6 +40,7 @@ struct CaretSmuxChildBinding:
     command_line: text
     status: text
     reason: text
+    launcher_dir: text
 
 struct CaretSmuxTeamBinding:
     manager_id: text
@@ -55,6 +60,30 @@ pub fn caret_smux_command_line(command: text, args: [text]) -> text:
     if _is_windows():
         return windows_command_line(command, args)
     posix_command_line(command, args)
+
+struct _SpawnLine:
+    line: text
+    launcher_dir: text
+
+# What smux_pane_spawn_pty receives. Windows takes the CreateProcess command
+# line. The POSIX PTY provider execs its argument as ONE program path with no
+# argv (a quoted command line fails exec and the child exits 127), so POSIX
+# goes through the pane backend's private launcher script, which preserves
+# argv exactly. An empty line means the launcher could not be created.
+fn _spawn_line(command: text, args: [text]) -> _SpawnLine:
+    if _is_windows():
+        return _SpawnLine(line: windows_command_line(command, args),
+            launcher_dir: "")
+    val dir = posix_pane_launcher_create(command, args, "")
+    if dir == "":
+        return _SpawnLine(line: "", launcher_dir: "")
+    _SpawnLine(line: dir + "/launch", launcher_dir: dir)
+
+fn _with_status(child: CaretSmuxChildBinding, status: text,
+        reason: text) -> CaretSmuxChildBinding:
+    CaretSmuxChildBinding(agent_id: child.agent_id, pane_id: child.pane_id,
+        pid: child.pid, command_line: child.command_line, status: status,
+        reason: reason, launcher_dir: child.launcher_dir)
 
 # The smux session name a manager's children live in. One session per manager.
 pub fn caret_smux_session_name(manager_id: text) -> text:
@@ -141,14 +170,14 @@ pub fn caret_smux_launch_team(manager_id: text,
         if spec.command == "":
             children = children + [CaretSmuxChildBinding(agent_id: spec.agent_id,
                 pane_id: "", pid: -1, command_line: "", status: "not_started",
-                reason: "child_command_required")]
+                reason: "child_command_required", launcher_dir: "")]
             complete = false
             continue
         val free = _free_pane(scope)
         if free.is_err():
             children = children + [CaretSmuxChildBinding(agent_id: spec.agent_id,
                 pane_id: "", pid: -1, command_line: "", status: "error",
-                reason: free.unwrap_err())]
+                reason: free.unwrap_err(), launcher_dir: "")]
             complete = false
             continue
         val pane_id = free.unwrap()
@@ -161,33 +190,41 @@ pub fn caret_smux_launch_team(manager_id: text,
                 children = children + [CaretSmuxChildBinding(
                     agent_id: spec.agent_id, pane_id: pane_id, pid: -1,
                     command_line: "", status: "error",
-                    reason: "smux_resize_refused")]
+                    reason: "smux_resize_refused", launcher_dir: "")]
                 complete = false
                 continue
         val line = caret_smux_command_line(spec.command, spec.args)
-        val spawned = smux_pane_spawn_pty(scope.session_id, scope.window_id,
-            pane_id, line)
-        if spawned.is_err():
+        val spawn_line = _spawn_line(spec.command, spec.args)
+        if spawn_line.line == "":
             children = children + [CaretSmuxChildBinding(agent_id: spec.agent_id,
                 pane_id: pane_id, pid: -1, command_line: line, status: "error",
-                reason: spawned.unwrap_err())]
+                reason: "posix_launcher_unavailable", launcher_dir: "")]
+            complete = false
+            continue
+        val spawned = smux_pane_spawn_pty(scope.session_id, scope.window_id,
+            pane_id, spawn_line.line)
+        if spawned.is_err():
+            posix_pane_launcher_remove(spawn_line.launcher_dir)
+            children = children + [CaretSmuxChildBinding(agent_id: spec.agent_id,
+                pane_id: pane_id, pid: -1, command_line: line, status: "error",
+                reason: spawned.unwrap_err(), launcher_dir: "")]
             complete = false
             continue
         val _focused = smux_focus_pane(scope.session_id, scope.window_id, pane_id)
         children = children + [CaretSmuxChildBinding(agent_id: spec.agent_id,
             pane_id: pane_id, pid: spawned.unwrap(), command_line: line,
-            status: "started", reason: "smux_pty_spawned")]
+            status: "started", reason: "smux_pty_spawned",
+            launcher_dir: spawn_line.launcher_dir)]
     if not complete:
         # Fail closed: terminate every child this batch started and remove the
         # whole session, so a partial launch never leaves a running child.
         val _killed = smux_kill_session(scope.session_id)
         var rolled: [CaretSmuxChildBinding] = []
         for child in children:
+            posix_pane_launcher_remove(child.launcher_dir)
             if child.status == "started":
-                rolled = rolled + [CaretSmuxChildBinding(agent_id: child.agent_id,
-                    pane_id: child.pane_id, pid: child.pid,
-                    command_line: child.command_line, status: "stopped",
-                    reason: "launch_rolled_back")]
+                rolled = rolled + [_with_status(child, "stopped",
+                    "launch_rolled_back")]
             else:
                 rolled = rolled + [child]
         val binding = CaretSmuxTeamBinding(manager_id: manager_id,
@@ -217,14 +254,12 @@ pub fn caret_smux_cancel_child(binding: CaretSmuxTeamBinding,
                     child.pane_id):
                 reason = "pty_close_refused"
             else:
+                posix_pane_launcher_remove(child.launcher_dir)
                 # Keep the last pane slot so later spawns can still split.
                 if smux_list_panes(binding.session_id, binding.window_id).len() > 1:
                     val _removed = smux_close_pane(binding.session_id,
                         binding.window_id, child.pane_id)
-            children = children + [CaretSmuxChildBinding(agent_id: child.agent_id,
-                pane_id: child.pane_id, pid: child.pid,
-                command_line: child.command_line, status: "cancelled",
-                reason: reason)]
+            children = children + [_with_status(child, "cancelled", reason)]
         else:
             children = children + [child]
     var status = binding.status
@@ -247,11 +282,11 @@ pub fn caret_smux_stop_all(binding: CaretSmuxTeamBinding) -> CaretSmuxTeamBindin
     val closed = smux_kill_session(binding.session_id)
     var children: [CaretSmuxChildBinding] = []
     for child in binding.children:
-        children = children + [CaretSmuxChildBinding(agent_id: child.agent_id,
-            pane_id: child.pane_id, pid: child.pid,
-            command_line: child.command_line,
-            status: if closed.is_ok(): "stopped" else: "error",
-            reason: if closed.is_ok(): "smux_session_closed" else:
+        if closed.is_ok():
+            posix_pane_launcher_remove(child.launcher_dir)
+        children = children + [_with_status(child,
+            if closed.is_ok(): "stopped" else: "error",
+            if closed.is_ok(): "smux_session_closed" else:
                 "smux_session_close_failed")]
     val updated = CaretSmuxTeamBinding(manager_id: binding.manager_id,
         session_id: binding.session_id, window_id: binding.window_id,

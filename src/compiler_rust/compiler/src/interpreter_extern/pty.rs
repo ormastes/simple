@@ -65,6 +65,15 @@ pub fn rt_pty_is_running(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Bool(pty_is_running_impl(handle)))
 }
 
+/// `rt_pty_hangup(handle: i64) -> bool`
+///
+/// Hangs up the child ahead of `rt_pty_close` so a batch teardown shares one
+/// grace period (see `simple_runtime::value::pty::rt_pty_hangup`).
+pub fn rt_pty_hangup(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = args.first().and_then(|v| v.as_int().ok()).unwrap_or(-1) as i32;
+    Ok(Value::Bool(pty_hangup_impl(handle)))
+}
+
 /// `rt_pty_resize(handle: i64, rows: i32, cols: i32) -> bool`
 pub fn rt_pty_resize(args: &[Value]) -> Result<Value, CompileError> {
     let handle = args.first().and_then(|v| v.as_int().ok()).unwrap_or(-1) as i32;
@@ -79,6 +88,10 @@ pub fn rt_pty_resize(args: &[Value]) -> Result<Value, CompileError> {
 
 #[cfg(unix)]
 mod unix_impl {
+    use simple_runtime::value::pty::{
+        hangup_pty_child, probe_pty_child_with, reap_pty_child_record, set_pty_fd_cloexec, waitpid_nohang,
+        PtyChildProbe, PtyChildRecord,
+    };
     use std::collections::HashMap;
     use std::ffi::CString;
     use std::sync::Mutex;
@@ -86,7 +99,7 @@ mod unix_impl {
     /// Maps master_fd -> slave_fd so `pty_spawn_impl` can wire up the child.
     lazy_static::lazy_static! {
         static ref SLAVE_TABLE: Mutex<HashMap<i32, i32>> = Mutex::new(HashMap::new());
-        static ref CHILD_TABLE: Mutex<HashMap<i32, libc::pid_t>> = Mutex::new(HashMap::new());
+        static ref CHILD_TABLE: Mutex<HashMap<i32, PtyChildRecord>> = Mutex::new(HashMap::new());
     }
 
     pub(super) fn pty_open(rows: i32, cols: i32) -> i32 {
@@ -121,6 +134,9 @@ mod unix_impl {
                 libc::fcntl(master_fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
             }
         }
+        // Later panes' children must not inherit this pair (see set_pty_fd_cloexec).
+        set_pty_fd_cloexec(master_fd);
+        set_pty_fd_cloexec(slave_fd);
 
         if let Ok(mut table) = SLAVE_TABLE.lock() {
             table.insert(master_fd, slave_fd);
@@ -179,6 +195,11 @@ mod unix_impl {
                 libc::dup2(slave_fd, libc::STDIN_FILENO);
                 libc::dup2(slave_fd, libc::STDOUT_FILENO);
                 libc::dup2(slave_fd, libc::STDERR_FILENO);
+                // A slave that already was fd 0-2 kept its close-on-exec flag through
+                // the no-op dup2; clear it so exec keeps the standard streams.
+                for std_fd in 0..=libc::STDERR_FILENO {
+                    libc::fcntl(std_fd, libc::F_SETFD, 0);
+                }
                 if slave_fd > libc::STDERR_FILENO {
                     libc::close(slave_fd);
                 }
@@ -205,7 +226,7 @@ mod unix_impl {
                 table.remove(&master_fd);
             }
             if let Ok(mut table) = CHILD_TABLE.lock() {
-                table.insert(master_fd, pid);
+                table.insert(master_fd, PtyChildRecord::new(pid));
             }
 
             pid as i64
@@ -243,10 +264,29 @@ mod unix_impl {
                 }
             }
         }
-        if let Ok(mut table) = CHILD_TABLE.lock() {
-            table.remove(&fd);
+        let child = CHILD_TABLE.lock().ok().and_then(|mut table| table.remove(&fd));
+        let closed = unsafe { libc::close(fd) == 0 };
+        // Closing the master hangs up the child; reap it (bounded, then
+        // SIGKILL) so no zombie or survivor outlives the close. Same owner as
+        // the compiled lane: simple_runtime::value::pty::reap_pty_child.
+        if let Some(record) = child {
+            if !reap_pty_child_record(record) {
+                eprintln!("PTY close: child {} could not be reaped", record.pid);
+            }
         }
-        unsafe { libc::close(fd) == 0 }
+        closed
+    }
+
+    /// Hangs up the child of `fd` ahead of its close, under the table lock
+    /// (see `hangup_pty_child`). False when no child is attached.
+    pub(super) fn pty_hangup(fd: i32) -> bool {
+        let Ok(mut table) = CHILD_TABLE.lock() else {
+            return false;
+        };
+        match table.get_mut(&fd) {
+            Some(record) => hangup_pty_child(record),
+            None => false,
+        }
     }
 
     /// TIOCSWINSZ makes the kernel signal the foreground group; the direct
@@ -264,7 +304,11 @@ mod unix_impl {
         if unsafe { libc::ioctl(fd, libc::TIOCSWINSZ as _, &ws as *const libc::winsize) } != 0 {
             return false;
         }
-        if let Some(pid) = CHILD_TABLE.lock().ok().and_then(|table| table.get(&fd).copied()) {
+        if let Some(pid) = CHILD_TABLE
+            .lock()
+            .ok()
+            .and_then(|table| table.get(&fd).map(|record| record.pid))
+        {
             unsafe {
                 libc::kill(pid, libc::SIGWINCH);
             }
@@ -277,19 +321,18 @@ mod unix_impl {
             Ok(value) => value,
             Err(_) => return false,
         };
-        let pid = match table.get(&fd).copied() {
-            Some(value) => value,
+        let pid = match table.get(&fd) {
+            Some(record) => record.pid,
             None => return false,
         };
-        let mut status = 0;
-        let result = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
-        if result == 0 {
-            return true;
+        // Same classifier as the compiled lane: EINTR is retried, not an exit.
+        match probe_pty_child_with(pid, waitpid_nohang) {
+            PtyChildProbe::Running => true,
+            PtyChildProbe::Gone => {
+                table.remove(&fd);
+                false
+            }
         }
-        if result == pid {
-            table.remove(&fd);
-        }
-        false
     }
 }
 
@@ -318,6 +361,10 @@ fn pty_close_impl(handle: i32) -> bool {
 #[cfg(unix)]
 fn pty_is_running_impl(handle: i32) -> bool {
     unix_impl::pty_is_running(handle)
+}
+#[cfg(unix)]
+fn pty_hangup_impl(handle: i32) -> bool {
+    unix_impl::pty_hangup(handle)
 }
 
 #[cfg(unix)]
@@ -351,6 +398,10 @@ fn pty_close_impl(handle: i32) -> bool {
 fn pty_is_running_impl(handle: i32) -> bool {
     simple_runtime::value::pty::host_pty_is_running(handle as i64)
 }
+#[cfg(windows)]
+fn pty_hangup_impl(handle: i32) -> bool {
+    simple_runtime::value::pty::rt_pty_hangup(handle as i64)
+}
 
 #[cfg(windows)]
 fn pty_resize_impl(handle: i32, rows: i32, cols: i32) -> bool {
@@ -381,6 +432,10 @@ fn pty_close_impl(_handle: i32) -> bool {
 fn pty_is_running_impl(_handle: i32) -> bool {
     false
 }
+#[cfg(not(any(unix, windows)))]
+fn pty_hangup_impl(_handle: i32) -> bool {
+    false
+}
 
 #[cfg(not(any(unix, windows)))]
 fn pty_resize_impl(_handle: i32, _rows: i32, _cols: i32) -> bool {
@@ -403,6 +458,7 @@ mod tests {
         assert_eq!(rt_pty_read(&[Value::Int(-1), Value::Int(0)]).unwrap(), Value::text(""));
         assert_eq!(rt_pty_close(&[Value::Int(-1)]).unwrap(), Value::Bool(false));
         assert_eq!(rt_pty_is_running(&[Value::Int(-1)]).unwrap(), Value::Bool(false));
+        assert_eq!(rt_pty_hangup(&[Value::Int(-1)]).unwrap(), Value::Bool(false));
         assert_eq!(
             rt_pty_resize(&[Value::Int(-1), Value::Int(24), Value::Int(80)]).unwrap(),
             Value::Bool(false)
