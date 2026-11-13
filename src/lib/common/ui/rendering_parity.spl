@@ -617,7 +617,7 @@ fn compare_rgba8(expected: [u8], actual: [u8], width: i64, height: i64, policy: 
         return Err("exact policy takes no tolerance")
     Ok(_compare_core(expected, actual, width, height, "expected", "actual", "raster", policy, "exact", 0, 0))
 
-fn compare_rgba8_with_policy(expected: [u8], actual: [u8], width: i64, height: i64, expected_lane: text, actual_lane: text, stage: text, policy: text, policy_id: text, policy_version: i64, max_channel_delta: i64, max_differing_pixels: i64) -> Result<RenderComparison, text>:
+fn _compare_rgba8_policy_core(expected: [u8], actual: [u8], width: i64, height: i64, expected_lane: text, actual_lane: text, stage: text, policy: text, policy_id: text, policy_version: i64, max_channel_delta: i64, max_differing_pixels: i64) -> Result<RenderComparison, text>:
     val err = _check_rgba_inputs(expected, actual, width, height)
     if _nonempty(err):
         return Err(err)
@@ -636,6 +636,31 @@ fn compare_rgba8_with_policy(expected: [u8], actual: [u8], width: i64, height: i
     else:
         return Err("unknown compare policy " + policy)
     Ok(_compare_core(expected, actual, width, height, expected_lane, actual_lane, stage, policy, policy_id, max_channel_delta, max_differing_pixels))
+
+# Public policy comparison accepts the exact policy only. Channel tolerance is
+# rejected here: it is legal solely through compare_rgba8_for_fixture, where the
+# policy and bounds must equal what the RenderingFixture declares.
+fn compare_rgba8_with_policy(expected: [u8], actual: [u8], width: i64, height: i64, expected_lane: text, actual_lane: text, stage: text, policy: text, policy_id: text, policy_version: i64, max_channel_delta: i64, max_differing_pixels: i64) -> Result<RenderComparison, text>:
+    if policy == RENDER_COMPARE_CHANNEL_TOLERANCE:
+        return Err("channel tolerance requires a RenderingFixture (compare_rgba8_for_fixture)")
+    _compare_rgba8_policy_core(expected, actual, width, height, expected_lane, actual_lane, stage, policy, policy_id, policy_version, max_channel_delta, max_differing_pixels)
+
+fn _attach_diagnostics(base: RenderComparison, expected_evidence_path: text, actual_evidence_path: text, diff_path: text, reproduction_command: text) -> RenderComparison:
+    var r = base
+    r.diagnostic.expected_evidence_path = expected_evidence_path
+    r.diagnostic.actual_evidence_path = actual_evidence_path
+    r.diagnostic.diff_path = diff_path
+    r.diagnostic.reproduction_command = reproduction_command
+    r
+
+fn _diagnostics_missing(expected_evidence_path: text, actual_evidence_path: text, diff_path: text, reproduction_command: text) -> bool:
+    not _nonempty(expected_evidence_path) or not _nonempty(actual_evidence_path) or not _nonempty(diff_path) or not _nonempty(reproduction_command)
+
+fn compare_rgba8_for_fixture_with_diagnostics(fixture: RenderingFixture, expected: [u8], actual: [u8], width: i64, height: i64, expected_lane: text, actual_lane: text, stage: text, policy_id: text, max_channel_delta: i64, max_differing_pixels: i64, expected_evidence_path: text, actual_evidence_path: text, diff_path: text, reproduction_command: text) -> Result<RenderComparison, text>:
+    if _diagnostics_missing(expected_evidence_path, actual_evidence_path, diff_path, reproduction_command):
+        return Err("diagnostics: evidence paths and reproduction command are required")
+    val base = compare_rgba8_for_fixture(fixture, expected, actual, width, height, expected_lane, actual_lane, stage, policy_id, max_channel_delta, max_differing_pixels)?
+    Ok(_attach_diagnostics(base, expected_evidence_path, actual_evidence_path, diff_path, reproduction_command))
 
 # Same comparison, with the evidence paths and repro command a failing case must retain.
 fn compare_rgba8_with_policy_and_diagnostics(expected: [u8], actual: [u8], width: i64, height: i64, expected_lane: text, actual_lane: text, stage: text, policy: text, policy_id: text, policy_version: i64, max_channel_delta: i64, max_differing_pixels: i64, expected_evidence_path: text, actual_evidence_path: text, diff_path: text, reproduction_command: text) -> Result<RenderComparison, text>:
@@ -671,7 +696,7 @@ fn compare_rgba8_for_fixture(fixture: RenderingFixture, expected: [u8], actual: 
         return Err("policy bounds differ from the fixture's declared bounds")
     if width != fixture.width or height != fixture.height:
         return Err("comparison size differs from the fixture viewport")
-    compare_rgba8_with_policy(expected, actual, width, height, expected_lane, actual_lane, stage, RENDER_COMPARE_CHANNEL_TOLERANCE, policy_id, 1, max_channel_delta, max_differing_pixels)
+    _compare_rgba8_policy_core(expected, actual, width, height, expected_lane, actual_lane, stage, RENDER_COMPARE_CHANNEL_TOLERANCE, policy_id, 1, max_channel_delta, max_differing_pixels)
 
 struct RegionProof:
     changed_inside: i64
