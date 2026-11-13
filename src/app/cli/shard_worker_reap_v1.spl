@@ -95,3 +95,35 @@ pub fn parse_shard_reap_v1(pids: [i64], indices: [i64], count: i64, timeout_ms: 
             print "[parse-shard] shard={i}/{count} pid={pid} exit=0"
         k = k + 1
     (failed, unconfirmed)
+
+# Per-child poll quantum for a pool that waits its live children one after
+# another (run_ledger_shards): a full round costs at most `poll_ms` however
+# many are live. Before this every live worker got the full quantum, so with
+# 16 workers a finished worker's slot waited up to 16 x 200 ms = 3.2 s to be
+# refilled. A liveness pre-probe is NOT the alternative: both host runtimes
+# implement rt_process_is_running by reaping (seed try_wait, hosted
+# waitpid(WNOHANG)), so a probe before the wait loses the exit status.
+pub fn shard_pool_poll_quantum_v1(live: i64, poll_ms: i64) -> i64:
+    if poll_ms <= 0:
+        return 1
+    if live <= 1:
+        return poll_ms
+    val quantum = poll_ms / live
+    if quantum < 1: 1 else: quantum
+
+# Wait for ONE shard child under `timeout_ms` (<= 0 = no deadline: the user's
+# explicit `--timeout 0`). A child that outlives the budget is killed,
+# re-waited and confirmed stopped, the reason is printed, and -2 is returned:
+# still < 0, so the caller's ledger seal records it CRASH unchanged. Replaces
+# the file-worker's process_wait(pid, 0) forever-waits.
+pub fn shard_child_wait_bounded_v1(label: text, pid: i64, timeout_ms: i64) -> i64:
+    if pid <= 0:
+        return -1
+    val code = process_wait(pid, if timeout_ms > 0: timeout_ms else: 0)
+    if code != -2 or timeout_ms <= 0:
+        return code
+    val killed = process_kill(pid)
+    val reaped = process_wait(pid, 5000)
+    val stopped = shard_worker_kill_stopped_v1(killed, reaped, process_is_running(pid))
+    eprint("[{label}] pid={pid} exceeded timeout_ms={timeout_ms}; kill={killed} stopped={stopped}")
+    -2

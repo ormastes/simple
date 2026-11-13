@@ -6,6 +6,8 @@
 # thread-safety issues with global compiler state.
 
 use std.nogc_async_mut.sosix.environment.{sosix_env_get_nullable}
+use std.io_runtime.{time_now_monotonic_ms}
+use std.nogc_sync_mut.io.process_ops.{process_wait, process_kill}
 use compiler.driver.driver_build.build_outcome.{
     BuildOutcomeKind, BuildUnitOutcome, BuildOutcomeSet,
     build_outcome_kind_label}
@@ -81,6 +83,15 @@ fn parallel_supervised_cmd() -> text:
 # ============================================================================
 # Configuration
 # ============================================================================
+
+# Per-unit wall budget predicate shared by build_parallel's wait: a child
+# started at `started_ms` has expired at `now_ms` once a POSITIVE budget has
+# elapsed; 0 (or less) keeps the documented "0 disables the budget" meaning.
+pub fn parallel_unit_budget_expired_v1(started_ms: i64, now_ms: i64, budget_ms: i64) -> bool:
+    budget_ms > 0 and now_ms - started_ms >= budget_ms
+
+# Exit code build_parallel's wait returns for a child it killed at the budget.
+pub const PARALLEL_UNIT_TIMEOUT_CODE_V1: i64 = -2
 
 struct ParallelBuildConfig:
     num_threads: i64            # 0 = use all available CPUs
@@ -425,10 +436,15 @@ impl ParallelBuilder:
         self.has_spawn_dispatch = true
         self.spawn_collect_fn = collect_fn
 
-    fn wait_for_finished_process(live_pid: [i64]) -> (i64, i64):
+    fn wait_for_finished_process(live_pid: [i64], live_start: [i64], budget_ms: i64) -> (i64, i64):
         """Wait for any in-flight process to finish using bounded polling.
 
-        Returns: (pid, exit_code), or (-1, -1) if no process is in flight.
+        Returns: (pid, exit_code), or (-1, -1) if no process is in flight, or
+        (pid, PARALLEL_UNIT_TIMEOUT_CODE_V1) for a child that outlived
+        `budget_ms` (index-aligned `live_start`; 0 = no budget) and was killed
+        here. Until 2026-11-13 this loop was `while true` with no deadline:
+        ParallelBuildConfig.unit_timeout_ms was honoured by build_supervised
+        only, so one hung child parked the whole process-parallel build.
 
         `live_pid` is a plain `[i64]` ARRAY, not a pid-keyed Dict. This is not
         a style choice: measured 2026-09-14 running this function for the
@@ -451,6 +467,14 @@ impl ParallelBuilder:
                     val exit_code = rt_process_wait(pid, 1)
                     if exit_code != -2:
                         return (pid, exit_code)
+            var at = 0
+            while at < live_pid.len() and at < live_start.len():
+                if parallel_unit_budget_expired_v1(live_start[at], time_now_monotonic_ms(), budget_ms):
+                    val pid = live_pid[at]
+                    val _killed = process_kill(pid)
+                    val _reaped = process_wait(pid, 5000)
+                    return (pid, PARALLEL_UNIT_TIMEOUT_CODE_V1)
+                at = at + 1
 
             var sleep_ms = 10
             if poll_iteration >= 50:
@@ -699,6 +723,8 @@ impl ParallelBuilder:
         var live_pid: [i64] = []
         var live_unit: [i64] = []
         var live_path: [text] = []
+        var live_start: [i64] = []
+        val budget = self.config.unit_timeout_ms
 
         while not self.graph.is_complete():
             # Fill worker slots with ready units
@@ -739,6 +765,7 @@ impl ParallelBuilder:
                 live_pid = live_pid.push(pid)
                 live_unit = live_unit.push(build_unit.id)
                 live_path = live_path.push(build_unit.path)
+                live_start = live_start.push(time_now_monotonic_ms())
                 if self.config.verbose:
                     print "[PARALLEL] spawned pid={pid} for {build_unit.path}"
 
@@ -764,7 +791,7 @@ impl ParallelBuilder:
                 break
 
             # Wait for one process to finish before recomputing ready work.
-            val (finished_pid, finished_exit_code) = self.wait_for_finished_process(live_pid)
+            val (finished_pid, finished_exit_code) = self.wait_for_finished_process(live_pid, live_start, budget)
             if finished_pid < 0:
                 break
 
@@ -784,18 +811,28 @@ impl ParallelBuilder:
             var next_pid: [i64] = []
             var next_unit: [i64] = []
             var next_path: [text] = []
+            var next_start: [i64] = []
             var keep_idx = 0
             while keep_idx < live_pid.len():
                 if keep_idx != found_idx:
                     next_pid = next_pid.push(live_pid[keep_idx])
                     next_unit = next_unit.push(live_unit[keep_idx])
                     next_path = next_path.push(live_path[keep_idx])
+                    next_start = next_start.push(live_start[keep_idx])
                 keep_idx = keep_idx + 1
             live_pid = next_pid
             live_unit = next_unit
             live_path = next_path
+            live_start = next_start
 
-            val result = collect_fn(finished_exit_code, unit_path)
+            # A killed-at-budget child never reaches collect_fn (that callback
+            # interprets EXIT codes); the unit is recorded as a timeout error
+            # explicitly, never silently absent (R3).
+            var result: Result<text, text> = Err("unit timeout: exceeded unit_timeout_ms={budget}; killed")
+            if finished_exit_code == PARALLEL_UNIT_TIMEOUT_CODE_V1:
+                eprint "[PARALLEL] unit {unit_path} pid={finished_pid} exceeded unit_timeout_ms={budget}; killed"
+            else:
+                result = collect_fn(finished_exit_code, unit_path)
             match result:
                 case Ok(output):
                     self.graph.mark_completed(unit_id, Some(output))
@@ -913,7 +950,7 @@ impl ParallelBuilder:
                 live_pid = live_pid.push(pid)
                 live_unit = live_unit.push(id)
                 live_path = live_path.push(unit_path)
-                live_start = live_start.push(rt_time_now_monotonic_ms())
+                live_start = live_start.push(time_now_monotonic_ms())
                 if self.config.verbose:
                     print "[SUPERVISED] spawned pid={pid} for {unit_path}"
 

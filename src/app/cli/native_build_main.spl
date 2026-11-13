@@ -55,7 +55,8 @@ use std.io_runtime.{getpid}
 use std.io_runtime.{time_now_monotonic_ms}
 use std.io_runtime.{dir_create_all, dir_remove_all, dir_exists}
 use app.cli.parse_shard_queue.{parse_shard_release_claims}
-use app.cli.shard_worker_reap_v1.{shard_worker_confirm_kill_v1, parse_shard_reap_v1}
+use app.cli.shard_worker_reap_v1.{shard_worker_confirm_kill_v1, parse_shard_reap_v1,
+    shard_pool_poll_quantum_v1, shard_child_wait_bounded_v1}
 use app.cli.native_build_exit_status.{native_build_windows_status_label, native_build_posix_signal}
 use app.cli.file_worker_pool_refusal.{file_worker_pool_refusal_v1}
 use app.cli.shard_mem_clamp.{shard_default_threads}
@@ -92,8 +93,8 @@ use compiler.driver.driver_build.native_file_worker_v1.{NATIVE_FILE_WORKERS_ENV_
     native_file_worker_mir_count_v1, native_file_worker_receipt_publish_v1, native_file_worker_receipts_in_v1,
     native_file_worker_owner_claims_v1, native_file_worker_terminal_state_v1, native_file_worker_inventory_rows_v1,
     native_file_worker_hir_ledger_state_v1, native_file_worker_hir_gate_verdict_v1, NATIVE_FILE_WORKER_HIR_GATE_BUDGET_MS_V1,
-    native_file_worker_object_path_v1, file_worker_overlap_proven_v1,
     native_file_worker_hir_ledger_progress_v1,
+    native_file_worker_object_path_v1, file_worker_overlap_proven_v1,
     NATIVE_BOOTSTRAP_WHOLE_PROGRAM_ENV_V1, file_worker_module_scoped_selected_v1,
     NativeFileUnitInvokerV1, NATIVE_FILE_WORKER_UNIT_ENV_V1}
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_complete, HIR_SHARD_FORK_OWNER_MARK_V1,
@@ -1280,7 +1281,12 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
                 elif pids[i] <= 0:
                     reap_at = i
                 else:
-                    val polled = native_build_normalize_exit_code(process_wait(pids[i], SHARD_POOL_POLL_MS))
+                    # One poll quantum per ROUND, split across the live
+                    # workers (shard_worker_reap_v1), so a finished worker's
+                    # slot is refilled within SHARD_POOL_POLL_MS instead of
+                    # SHARD_POOL_POLL_MS x live.
+                    val polled = native_build_normalize_exit_code(process_wait(pids[i],
+                        shard_pool_poll_quantum_v1(pids.len(), SHARD_POOL_POLL_MS)))
                     val deadline_now = hir_shard_reap_deadline_hit_v1(polled, timeout_ms, time_now_monotonic_ms() - started_ms[i])
                     if polled != -2 or deadline_now:
                         reap_at = i
@@ -1801,7 +1807,7 @@ pub fn run_native_file_worker_v1(args: [text]) -> i64:
         env_set("SIMPLE_HIR_SHARD_CLAIM_LIMIT", "{batch}")
         val hir_start = time_now_monotonic_ms()
         val pid = process_spawn_async(simple_bin, native_file_worker_child_args_v1(args, "--hir-shard={spec}"))
-        val code = if pid > 0: native_build_normalize_exit_code(process_wait(pid, 0)) else: -1
+        val code = native_build_normalize_exit_code(shard_child_wait_bounded_v1("file-worker hir", pid, native_build_timeout_ms(args)))
         val hir_done = time_now_monotonic_ms()
         env_set("SIMPLE_HIR_SHARD_CLAIM_LIMIT", "")
         env_set("SIMPLE_HIR_SHARD_QUEUE", "")
@@ -1853,7 +1859,7 @@ pub fn run_native_file_worker_v1(args: [text]) -> i64:
         env_set("SIMPLE_MIR_SHARD_QUEUE", mir_queue)
         env_set("SIMPLE_MIR_SHARD_OWNER", child_owner)
         val pid = process_spawn_async(simple_bin, native_file_worker_child_args_v1(args, "--mir-shard=0/{mir_count}"))
-        val code = if pid > 0: native_build_normalize_exit_code(process_wait(pid, 0)) else: -1
+        val code = native_build_normalize_exit_code(shard_child_wait_bounded_v1("file-worker mir", pid, native_build_timeout_ms(args)))
         val obj_done = time_now_monotonic_ms()
         val _sealed = hir_shard_recovery_seal(mir_queue, child_owner, if code < 0: "CRASH" else: "FAILED")
         val claimed = native_file_worker_owner_claims_v1(mir_queue, child_owner)
@@ -2868,7 +2874,7 @@ impl NativeFileUnitInvokerV1 for NativeFileUnitProcessInvokerV1:
         env_set("SIMPLE_MIR_SHARD_QUEUE", self.mir_queue)
         env_set("SIMPLE_MIR_SHARD_OWNER", mir_owner)
         val pid = process_spawn_async(self.simple_bin, native_file_worker_child_args_v1(self.args, "--hir-shard={self.spec}"))
-        val code = if pid > 0: native_build_normalize_exit_code(process_wait(pid, 0)) else: -1
+        val code = native_build_normalize_exit_code(shard_child_wait_bounded_v1("file-worker unit", pid, native_build_timeout_ms(self.args)))
         env_set(NATIVE_FILE_WORKER_UNIT_ENV_V1, "")
         env_set("SIMPLE_HIR_SHARD_QUEUE", "")
         env_set("SIMPLE_HIR_SHARD_OWNER", "")

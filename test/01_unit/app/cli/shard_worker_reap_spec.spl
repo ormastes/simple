@@ -14,7 +14,8 @@ Audience: engineers maintaining the native-build worker pools.
 """
 
 use std.spec
-use app.cli.shard_worker_reap_v1.{shard_worker_kill_stopped_v1, shard_worker_confirm_kill_v1, parse_shard_reap_v1}
+use app.cli.shard_worker_reap_v1.{shard_worker_kill_stopped_v1, shard_worker_confirm_kill_v1, parse_shard_reap_v1,
+    shard_pool_poll_quantum_v1, shard_child_wait_bounded_v1}
 use app.io.process_ops.{process_spawn_async, process_wait, process_kill, process_is_running}
 use std.io_runtime.{time_now_monotonic_ms}
 
@@ -87,3 +88,34 @@ describe "parse shard reap deadline":
         val bad = process_spawn_async("sh", ["-c", "exit 3"])
         val good = process_spawn_async("sh", ["-c", "exit 0"])
         expect(parse_shard_reap_v1([bad, good], [4, 5], 8, 10000)).to_equal(([4], []))
+
+describe "ledger pool poll quantum":
+    it "spends at most one poll quantum per round however many workers are live":
+        expect(shard_pool_poll_quantum_v1(1, 200)).to_equal(200)
+        expect(shard_pool_poll_quantum_v1(0, 200)).to_equal(200)
+        expect(shard_pool_poll_quantum_v1(16, 200)).to_equal(12)
+        expect(shard_pool_poll_quantum_v1(400, 200)).to_equal(1)
+
+    it "never returns a zero quantum (that would be a busy loop)":
+        expect(shard_pool_poll_quantum_v1(4, 0)).to_equal(1)
+        expect(shard_pool_poll_quantum_v1(1000, 200)).to_equal(1)
+
+describe "bounded shard child wait":
+    it "returns the exit status of a child that finishes inside the budget":
+        val pid = process_spawn_async("sh", ["-c", "exit 3"])
+        expect(pid).to_be_greater_than(0)
+        expect(shard_child_wait_bounded_v1("spec", pid, 5000)).to_equal(3)
+
+    it "kills a child that outlives the budget, confirms it stopped and answers -2":
+        val pid = process_spawn_async("sh", ["-c", "sleep 30"])
+        expect(pid).to_be_greater_than(0)
+        val started = time_now_monotonic_ms()
+        val code = shard_child_wait_bounded_v1("spec", pid, 300)
+        val elapsed = time_now_monotonic_ms() - started
+        expect(code).to_equal(-2)
+        expect(process_is_running(pid)).to_equal(false)
+        expect(elapsed < 10000).to_equal(true)
+
+    it "refuses a non-positive pid without waiting":
+        expect(shard_child_wait_bounded_v1("spec", -1, 300)).to_equal(-1)
+        expect(shard_child_wait_bounded_v1("spec", 0, 300)).to_equal(-1)
