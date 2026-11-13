@@ -63,15 +63,25 @@ added 2026-11-12) maps symbols to archive members by parsing `nm -A` output:
   `@clang_cl_link_full.rsp` (clang expands `@file` inline; single-quote
   posix rsp quoting is not clang-parseable). The swap logs its char count,
   so the log shows the mechanism firing.
-- First rsp attempt mis-quoted: llvm's response-file tokenizer treats
-  backslash as an escape both inside and outside quotes, so raw
-  `"/WHOLEARCHIVE:\\?\D:\..."` lines collapsed every `\x` pair and a
-  trailing `\"` swallowed the closing quote (clang-cl: "no such file or
-  directory: '/WHOLEARCHIVE:...'", next line glued in). Fix:
-  `quote_cl_response_arg` doubles every backslash and quotes the token;
-  validated end-to-end 2026-11-12 (clang-cl `@file` link of a quoted
-  `/WHOLEARCHIVE:<path with spaces>`; produced exe ran, exit 0). Both the
-  owner-members rsp and the whole-command rsp use it.
+- Two clang-cl 23.1.1 response-file quirks, measured 2026-11-13 with a
+  minimal repro, turned out to be the real blockers once the overflow was
+  bypassed (both earlier rsp attempts failed with
+  "clang-cl: error: no such file or directory: '/WHOLEARCHIVE:...'"):
+  1. llvm's response-file tokenizer does NOT split tokens on newlines --
+     an interior '\n' is attached to the token, so newline-separated rsp
+     lines produce unrecognizable `/OPTION...<LF>` tokens that clang treats
+     as input files. Space-separated single-line rsp content links fine.
+     Both rsp writers space-join (a trailing newline at EOF is stripped).
+  2. Verbatim `\\?\` paths cannot pass through clang-cl response-file
+     expansion at all: whether as `/WHOLEARCHIVE:` options or plain input
+     objects, clang re-escapes them when forwarding to lld and lld reports
+     "could not open '\\\\?\\D:\\...'" (doubled backslashes). The identical
+     args on the direct command line work. Fix: plain-spell
+     (`external_tool_path`) every arg written to an rsp -- the owner-member
+     objects are additionally hard-linked to short flat names
+     (`owner_NNNN.o`) because their deep member relpaths exceed MAX_PATH
+     once spelled plain. Backslash doubling (`quote_cl_response_arg`)
+     remains necessary: clang's tokenizer DOES unescape `\\` inside quotes.
 
 `cargo check -p simple-compiler` clean (only a pre-existing unrelated
 warning). Stage 2 rerun with the fix in progress at time of writing.

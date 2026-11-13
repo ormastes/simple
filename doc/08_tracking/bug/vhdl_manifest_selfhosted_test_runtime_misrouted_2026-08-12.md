@@ -106,3 +106,63 @@ concrete expected/actual per assertion.
 ## Lane disposition 2026-11-13 (p3-misc-b)
 
 Not pursued in this lane: BLOCKED re-confirmed 2026-11-11 (lane boot23): needs the self-hosted runtime lane (seed cannot emit the required artifacts). Not chaseable here.
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+Not pursued in this lane: BLOCKED re-confirmed 2026-11-11 (lane boot23): needs the self-hosted runtime lane (seed cannot emit the required artifacts). Not chaseable here.
+
+## Addendum 2026-11-13 (lane vhdl-20261113, base 6a5f8e708f2, worktree /c/dev/vhdl-wt)
+
+Ran the record's exact command once at this tip on the refreshed in-worktree
+seed (`bin/simple.exe`, TRACKED regular file, 37,622,272 B, `</dev/null`):
+
+```
+SPEC FILE VERDICT: test/01_unit/compiler/backend/vhdl_artifact_manifest_spec.spl
+  outcome=ERROR declared>=21 executed=21 passed=15 failed=6 skipped=0
+```
+
+Totals are identical to lane boot15's 2026-11-11 seed-smoke (21 executed /
+15 passed / 6 failed). The runner is still the untrusted Rust seed, so per this
+record's own provenance rule this classifies nothing; **BLOCKED stands**, and
+no blind source edit was made to `driver_vhdl_artifacts.spl` or
+`driver_riscv_gen2_product.spl` — whether the 6 Gen2 assurance-policy/provenance
+failures are real defects or seed-divergence artifacts (e.g. hashed
+serialization drift) is undecidable without an admitted pure-Simple runtime,
+which this Windows lane host cannot produce (Stage 3/4 admission, blocked by
+the OPEN `stage3_*` / `stage4_full_cli_unlinkable_579_*` records).
+
+Per-example verdicts from this run (P = pass, F = fail), example names per the
+spec's `it` blocks, in declaration order:
+
+- P rejects case-only Gen2 port identity collisions
+- P routes every artifact writer error to CompileResult failure
+- P preserves a prior Gen2 bundle until the authorized receipt write boundary
+- P pins the production RISC-V target profiles
+- P is deterministic and retains exact source and flat-port provenance
+- F records typed HWIR aspect-lock provenance independently of legacy AOP counts
+- P rejects missing compiler and source hashes
+- P rejects syntactically forged SHA-256 provenance identities
+- P requires concrete HWIR provenance for strict source emission
+- F requires graph-bound provenance for typed stateful compiler products
+- F accepts the RV32-only C.JAL product only with its frozen profile and capability closure
+- F accepts the RV64-only C.ADDIW product only with its frozen profile and capability closure
+- F admits specialized stateful frontend manifests only with their matching decoder closure
+- F admits the specialized RV32 target-trap manifest only with its 26-row decoder closure
+- P removes the VHDL when a sidecar write fails
+- P rejects forged raw Gen2 text and preserves stale artifacts without an exported special writer
+- P rejects escaped Gen2 route claims before changing existing artifacts
+- P rejects ambiguous or malformed manifest routes before stale cleanup
+- P preserves generic legacy and strict writes with decoded route spellings
+- P returns an error when the VHDL path is not writable
+- P removes VHDL and source map when the manifest write fails
+
+The 6 failures are exactly the Gen2 assurance-policy/provenance family lane
+boot15 described (aspect-lock / graph-bound provenance, frozen-profile +
+capability closure for C.JAL and C.ADDIW, decoder closure for the stateful
+frontend and RV32 target-trap manifests) — consistent across two independent
+seed runs at this tip, but still unattributable per this record's provenance
+rule. Concrete expected/actual per assertion therefore cannot be recorded
+honestly from this runner; that remains gated on the deployed pure-Simple
+runtime per the "Required correction" section.
