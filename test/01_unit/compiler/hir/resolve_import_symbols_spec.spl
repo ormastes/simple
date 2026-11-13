@@ -96,10 +96,14 @@ describe "resolve_import_symbols 2-pass import resolver":
         lowering.lower_module(consumer)
 
         # Contract since e05dbf566db (seed parity): a selective import of a name
-        # the target does not export is tolerated at the import (receipt
-        # [hir-reexport-chase-unresolved]); only a use site that needs the name
-        # fails. The local declaration keeps the name bound here.
-        expect(lowering.errors.len()).to_equal(0)
+        # the target does not export is tolerated at the import; only a use site
+        # that needs the name fails. The local declaration keeps the name bound
+        # here. Since 54356c20894 the tolerated import is RECORDED as the
+        # recovered warning W-HIR-UNDECL-IMPORT-001 (a hard error only under
+        # SIMPLE_STRICT_IMPORTS=1), so exactly that one recovered entry appears.
+        expect(lowering.errors.len()).to_equal(1)
+        expect(lowering.errors[0].message).to_contain("[W-HIR-UNDECL-IMPORT-001]")
+        expect(lowering.diagnostic_recovered).to_equal([true])
         val sid = lowering.symbols.lookup("missing")
         expect(sid.?).to_equal(true)
         expect(lowering.symbols.get_symbol(sid.unwrap()).unwrap().defining_module.unwrap()).to_equal("named.consumer")
@@ -139,9 +143,12 @@ describe "resolve_import_symbols 2-pass import resolver":
         var lowering = hirlowering_for_module("named.alias_consumer", surfaces)
         lowering.lower_module(consumer)
 
-        # Same seed-parity contract (e05dbf566db): no import-site error; the
-        # local declaration binds the alias name.
-        expect(lowering.errors.len()).to_equal(0)
+        # Same seed-parity contract (e05dbf566db): no hard import-site error; the
+        # local declaration binds the alias name. The tolerated import is the
+        # recovered warning W-HIR-UNDECL-IMPORT-001 (54356c20894).
+        expect(lowering.errors.len()).to_equal(1)
+        expect(lowering.errors[0].message).to_contain("[W-HIR-UNDECL-IMPORT-001]")
+        expect(lowering.diagnostic_recovered).to_equal([true])
         val sid = lowering.symbols.lookup("local_present")
         expect(sid.?).to_equal(true)
         expect(lowering.symbols.get_symbol(sid.unwrap()).unwrap().defining_module.unwrap()).to_equal("named.alias_consumer")
@@ -907,24 +914,29 @@ describe "resolve_import_symbols 2-pass import resolver":
 
         expect(hir.symbols.lookup("provider").?).to_be_truthy()
         expect(lowering.errors.len()).to_equal(0)
+        # `main`'s single trailing call is the block's tail VALUE
+        # (HirBlock.value), not a statement: the body has zero stmts.
+        var checked_main = 0
         for fn_ in hir.functions.values():
             if fn_.name == "main":
-                match fn_.body.stmts[0].kind:
-                    case HirStmtKind.Expr(expr):
-                        match expr.kind:
-                            case HirExprKind.Call(callee, _, _):
-                                match callee.kind:
-                                    case HirExprKind.NamedVar(symbol, _):
-                                        if val callable = hir.symbols.get_symbol(symbol):
-                                            expect(callable.defining_module.unwrap()).to_equal("provider")
-                                        else:
-                                            assert_true(false)
-                                    case _:
+                checked_main = checked_main + 1
+                expect(fn_.body.stmts.len()).to_equal(0)
+                if val tail = fn_.body.value:
+                    match tail.kind:
+                        case HirExprKind.Call(callee, _, _):
+                            match callee.kind:
+                                case HirExprKind.NamedVar(symbol, _):
+                                    if val callable = hir.symbols.get_symbol(symbol):
+                                        expect(callable.defining_module.unwrap()).to_equal("provider")
+                                    else:
                                         assert_true(false)
-                            case _:
-                                assert_true(false)
-                    case _:
-                        assert_true(false)
+                                case _:
+                                    assert_true(false)
+                        case _:
+                            assert_true(false)
+                else:
+                    assert_true(false)
+        expect(checked_main).to_equal(1)
 
     it "binds a relative mod namespace before lowering its qualified member":
         step("Verify: binds a relative mod namespace before lowering its qualified member")
