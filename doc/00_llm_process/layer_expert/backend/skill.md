@@ -335,3 +335,12 @@ lookup: an unbound import aborts the host inside
 `rt_*` name table to lift the refusal; the provider has to register the
 symbols first. See
 [provider gap](../../../08_tracking/bug/pure_simple_jit_provider_registers_no_runtime_symbols_2026-11-13.md).
+Imports the lowering declares on its own, such as `rt_string_new_literal` for
+any string constant, are covered too. Declare every import through
+`cl_declare_import_function` (`cranelift_runtime_imports.spl`). It records the
+import in the JIT module's ledger, and `cranelift_jit_run_main` refuses any
+non-Foreign import (`E-JIT-LOWERING-IMPORT-UNBOUND`) before finalize. A direct
+`cranelift_declare_function(..., IMPORT)` would skip the ledger, and the host
+aborts again. `cranelift_runtime_import_seed_parity_spec.spl` pins the
+signatures of the adapter's runtime-import shims against the seed's
+`RuntimeFuncSpec` table.

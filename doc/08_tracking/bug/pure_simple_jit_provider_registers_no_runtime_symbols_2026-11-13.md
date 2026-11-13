@@ -77,6 +77,42 @@ host.
 Natively linked after: local and Foreign callees. Runtime externs: still 0,
 now a named compile error instead of a call through handle 0.
 
+### Follow-up: lowering-owned imports (same lane, continued on Opus)
+
+The named-callee pre-scan did not cover imports the lowering declares by
+itself. A JIT `main` holding only the string constant `"hi"` aborted the host:
+`PANIC can't resolve symbol rt_string_new_literal`, exit 134 (pinned red by
+`jit_lowering_import_fail_closed_spec.spl`, `child-died-by-signal`). Fix:
+
+- Every import declaration in the lowering goes through
+  `cl_declare_import_function` (`cranelift_runtime_imports.spl`). That function
+  records the name while one JIT module is being compiled.
+- `cranelift_jit_run_main` refuses any recorded import that is not a Foreign
+  callee of the module: `E-JIT-LOWERING-IMPORT-UNBOUND: <name>`. It does this
+  before finalize and frees the module. The check is an allowlist, so a helper
+  added to the lowering later is refused too, not aborted on.
+- Imported statics are refused up front: `E-JIT-EXTERN-STATIC-UNBOUND: <name>`.
+  Their accessor symbol exists only in the providing object.
+- A `main` with parameters is refused: `E-JIT-ENTRY`. The entry is called with
+  no arguments and read as one i64. The spec pins `-5` and `2^33+1` round-trips.
+- Cost: float `%`/`pow` libcalls (`fmod`, `pow`) are now refused in the JIT too,
+  because they are not Foreign callees. Before, they would have bound through
+  libc.
+
+Seed-signature parity: `cranelift_runtime_import_seed_parity_spec.spl` reads the
+seed's `RuntimeFuncSpec` table and the adapter's runtime-import shims as source.
+The shims include the lowering-owned `cl_is_lowering_owned_runtime` names. The
+spec fails on any new disagreement, and on any recorded one that has
+disappeared. There are 12 recorded disagreements:
+
+- Width: `rt_array_push`, `rt_array_set` and `rt_array_set_text` return an i8
+  bool in the seed and are read as i64 by the shim.
+- Missing from the seed table: 9 names (`rt_raw_f64_to_string`,
+  `rt_process_*_tuple`/`_value`/`_text`, `rt_cpuid_tuple_block`,
+  `rt_env_get_value`).
+
+None of these is imported by the JIT today, because each one is refused.
+
 ## Fix needed (seed side, not done here)
 
 Register the runtime symbol table on the `JITBuilder` in
@@ -97,9 +133,12 @@ side:
 
 ## Not covered
 
-- Imports the lowering emits on its own (array and aggregate helpers, float
-  libcalls, GEMM fusion) are not named callees, so the pre-scan does not see
-  them. A JIT module that needs one still aborts the host at finalize.
+- `_cranelift_jit_run` (K1 lane) scans every module and compiles only the
+  last. Cross-module Source calls are refused as `E-JIT-UNRESOLVED-CALLEE`
+  rather than linked across JIT modules.
+- Passing the runtime-import parity check does not prove the ABI of a Runtime
+  callee whose signature comes from its `extern fn` declaration. That import
+  is refused today, so the gap is latent until the provider registers symbols.
 - `CodegenPipeline.jit()` in `codegen.spl` is unchanged. Its remaining users are
   `jit_compile` / `compile_and_run` and the SMF path; the defects listed
   above are still there.
