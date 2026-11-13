@@ -1,0 +1,42 @@
+# Bug: no_main_runtime_error_reruns_on_interpreter_2026-11-13
+#
+# A main-less script already runs on the interpreter inside the JIT lane's
+# no-main arm. When it fails at runtime the driver must propagate that error,
+# not treat it as a JIT gap and run the whole program a second time. Before
+# the fix the script below printed "A" twice, reported the error twice, and
+# every side effect before the failure happened twice.
+# Needs the fixed seed: SIMPLE_BINARY=<seed built from this tree>.
+use std.spec.{describe, it, expect}
+use std.io_runtime.{write_file, file_exists, env_get, mkdir_p}
+use std.nogc_sync_mut.env.platform.{get_temp_dir}
+use app.io.process_ops.{process_run_timeout}
+
+fn binary() -> text:
+    val env_bin = env_get("SIMPLE_BINARY") ?? ""
+    if env_bin != "": return env_bin
+    if file_exists("bin/simple.exe"): "bin/simple.exe" else: "bin/simple"
+
+fn count_of(hay: text, needle: text) -> i64:
+    val parts = hay.split(needle)
+    parts.len() - 1
+
+describe "a main-less script that fails at runtime":
+    it "runs once: prints A once, fails non-zero, reports the error once":
+        val root = get_temp_dir().replace("\\", "/") + "/no_main_rerun_spec"
+        val _d = mkdir_p(root)
+        val script = root + "/noman.spl"
+        val _w = write_file(script, "print \"A\"\nval xs = [1]\nprint xs[5]\n")
+        val (out, err, rc) = process_run_timeout(binary(), [script], 300000)
+        expect(rc != 0).to_equal(true)
+        expect(count_of(out, "A")).to_equal(1)
+        expect(count_of(err, "array index out of bounds")).to_equal(1)
+        expect(err.contains("falling back to interpreter")).to_equal(false)
+
+    it "still runs a main-less script that succeeds":
+        val root = get_temp_dir().replace("\\", "/") + "/no_main_rerun_spec_ok"
+        val _d = mkdir_p(root)
+        val script = root + "/ok.spl"
+        val _w = write_file(script, "print \"B\"\n")
+        val (out, _err, rc) = process_run_timeout(binary(), [script], 300000)
+        expect(rc).to_equal(0)
+        expect(count_of(out, "B")).to_equal(1)
