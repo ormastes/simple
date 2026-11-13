@@ -9,7 +9,8 @@
 1. **The original four are no longer single-lane.** The four symbols were
    `rt_vulkan_copy_u32_slots`, `rt_vulkan_readback_u32_checksum`,
    `rt_phase_profile_record` and `rt_to_int_dynamic` (named in
-   `scripts/check/rt_dual_implementation_baseline.txt`, 2026-09-06 note).
+   `rt_dual_ratchet_red_at_origin_four_unbaselined_symbols_2026-09-06.md`;
+   only two of the four are `rt_vulkan_*`, despite this record's title).
    - `rt_vulkan_copy_u32_slots`: C twin `src/runtime/runtime_native.c`
      (`int64_t rt_vulkan_copy_u32_slots(...)`), Rust
      `vulkan_graphics_runtime_buffer.rs`.
@@ -44,8 +45,13 @@
 
    The only line that differs between the two full reports is
    `rt_vulkan_selected_device_identity_v1` leaving the NEW list.
-   `clang -fsyntax-only src/runtime/runtime_native.c`: 0 errors.
-   `backend_vulkan_showcase_frame_parity_spec.spl`: 4 passed, 0 failed.
+   `clang -fsyntax-only src/runtime/runtime_native.c`: 0 errors. (The whole-tree
+   `check-c-runtime-compiles-push.shs` is red on this aarch64 host for 20
+   unrelated files — x86 vector providers, darwin/windows selfchecks — and
+   `runtime_native.c` is not among them.)
+   `backend_vulkan_showcase_frame_parity_spec.spl`: 4 passed, 0 failed — a
+   no-regression check only: the seed runs the Rust lane and does not call
+   the C twin.
 4. **Not in scope, still red:** the frozen full ratchet (408 new / 120 stale
    after this change) is repo-wide single-lane debt across many subsystems. It
    is informational at push and enforced by the extended CI job; it is not this
