@@ -117,6 +117,27 @@ describe "optional `as` numeric cast policy":
         step("an unannotated `val` of a non-generic `T?` call cast with `as` is an error")
         assert_equal(opt_cast_error_count(lowering_errors(plain_val)), 1)
 
+    it "does not leak an optional-call local mark into the next module lowered by the same lowerer":
+        # Symbol ids restart at zero per module; a mark from module A must not
+        # reject module B's same-id narrowed local.
+        val pick = "fn pick<T>(v: T, ok: bool) -> T?:\n    if ok:\n        v\n    else:\n        nil\n\n"
+        val first = pick + "fn f() -> i64:\n    val m = pick(41, true)\n    0\n"
+        val second = pick + "fn f() -> i64:\n    val m = pick(41, true) ?? 0\n    m as i64\n"
+        var lowering = HirLowering.with_filename("optional_cast_a.spl")
+        lowering.begin_module("optional_cast_a.spl")
+        val _a = lowering.lower_module(parse_full_frontend(first, "optional_cast_a.spl", "optional_cast_a.spl", Logger(level: 0)))
+        # begin_module restarts SymbolIds at zero, as the driver does per module.
+        lowering.begin_module("optional_cast_b.spl")
+        val _b = lowering.lower_module(parse_full_frontend(second, "optional_cast_b.spl", "optional_cast_b.spl", Logger(level: 0)))
+        var errors = ""
+        var idx = 0
+        while idx < lowering.lowering_error_count():
+            if not lowering.lowering_error_is_recovered_at(idx):
+                errors = errors + lowering.lowering_error_message_at(idx, "optional_cast_b.spl") + "\n"
+            idx = idx + 1
+        step("the second module's `??`-defaulted local is accepted")
+        assert_equal(opt_cast_error_count(errors), 0)
+
     it "admits narrowed, defaulted, non-optional and unsafe forms of an optional-call local":
         val pick = "fn pick<T>(v: T, ok: bool) -> T?:\n    if ok:\n        v\n    else:\n        nil\n\n"
         val if_val = pick + "fn f() -> i64:\n    if val m = pick(41, true):\n        return m as i64\n    0\n"
