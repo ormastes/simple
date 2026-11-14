@@ -1,0 +1,128 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-BROWSER_ENGINE
+# @cover src/lib/gc_async_mut/gpu/browser_engine/layout_float.spl 95%
+# @tag: unit, browser_engine, layout, float
+#
+# CSS 2.1 section 9.5 float placement arithmetic on a hand-built float
+# context: in a 300 px container, a 100x50 left float at (0,0) and an 80x30
+# right float at (220,0). Line boxes beside them are shortened to
+# 300-100-80 = 120 px for y in [0,30), 200 px for y in [30,50) and the full
+# 300 px from y = 50; `clear` moves below the relevant side's floats; a float
+# too wide for the band drops to the next y where it fits.
+
+use std.spec.{describe, context, it, expect}
+use std.gc_async_mut.gpu.browser_engine.layout_float.{
+    FloatBox, FloatContext, FloatPos,
+    float_available_width_at, float_left_offset_at, float_clear_y,
+    float_next_clear_y, float_find_position, float_place, float_context_height
+}
+
+fn _ctx() -> FloatContext:
+    var ctx = FloatContext.create()
+    ctx.left_floats.push(FloatBox(x: 0, y: 0, width: 100, height: 50, side: 1))
+    ctx.right_floats.push(FloatBox(x: 220, y: 0, width: 80, height: 30, side: 2))
+    ctx
+
+describe "Float placement arithmetic":
+
+    context "empty context":
+
+        it "leaves the full width and no offset":
+            val ctx = FloatContext.create()
+            expect(float_available_width_at(0, ctx, 300)).to_equal(300)
+            expect(float_left_offset_at(0, ctx)).to_equal(0)
+            expect(float_context_height(ctx)).to_equal(0)
+            expect(float_clear_y(3, ctx)).to_equal(0)
+
+        it "starts at the requested y":
+            val ctx = FloatContext.at_y(40)
+            expect(ctx.current_y).to_equal(40)
+            expect(float_clear_y(3, ctx)).to_equal(40)
+            expect(float_place(50, 10, 1, ctx, 300).y).to_equal(40)
+
+    context "available width beside floats":
+
+        it "subtracts both floats while both are alongside":
+            expect(float_available_width_at(0, _ctx(), 300)).to_equal(120)
+            expect(float_available_width_at(29, _ctx(), 300)).to_equal(120)
+
+        it "subtracts only the left float after the right one ends":
+            expect(float_available_width_at(30, _ctx(), 300)).to_equal(200)
+            expect(float_available_width_at(49, _ctx(), 300)).to_equal(200)
+
+        it "returns the full width below every float":
+            expect(float_available_width_at(50, _ctx(), 300)).to_equal(300)
+
+        it "never goes negative when floats overfill the line":
+            var ctx = FloatContext.create()
+            ctx.left_floats.push(FloatBox(x: 0, y: 0, width: 100, height: 50, side: 1))
+            ctx.right_floats.push(FloatBox(x: 70, y: 0, width: 80, height: 30, side: 2))
+            expect(float_available_width_at(0, ctx, 150)).to_equal(0)
+            expect(float_available_width_at(30, ctx, 150)).to_equal(50)
+
+        it "reports the left edge a line box starts at":
+            expect(float_left_offset_at(10, _ctx())).to_equal(100)
+            expect(float_left_offset_at(50, _ctx())).to_equal(0)
+
+    context "clear":
+
+        it "clear none stays at the current y":
+            expect(float_clear_y(0, _ctx())).to_equal(0)
+
+        it "clear left moves below the left float":
+            expect(float_clear_y(1, _ctx())).to_equal(50)
+
+        it "clear right moves below the right float":
+            expect(float_clear_y(2, _ctx())).to_equal(30)
+
+        it "clear both moves below the taller side":
+            expect(float_clear_y(3, _ctx())).to_equal(50)
+
+        it "finds the next y at which a float ends":
+            expect(float_next_clear_y(0, _ctx())).to_equal(30)
+            expect(float_next_clear_y(30, _ctx())).to_equal(50)
+            expect(float_next_clear_y(50, _ctx())).to_equal(50)
+
+    context "placing a new float":
+
+        it "puts a left float against the existing left float":
+            val p = float_find_position(40, 1, 0, _ctx(), 300)
+            expect(p.x).to_equal(100)
+            expect(p.y).to_equal(0)
+
+        it "puts a right float against the existing right float":
+            val p = float_find_position(40, 2, 0, _ctx(), 300)
+            expect(p.x).to_equal(180)
+            expect(p.y).to_equal(0)
+
+        it "puts a right float at the container edge below the right float":
+            val p = float_find_position(40, 2, 30, _ctx(), 300)
+            expect(p.x).to_equal(260)
+
+        it "keeps a float that fits on the current line":
+            val p = float_place(120, 10, 1, _ctx(), 300)
+            expect(p.x).to_equal(100)
+            expect(p.y).to_equal(0)
+
+        it "drops a float one band down when it only fits there":
+            val p = float_place(150, 10, 1, _ctx(), 300)
+            expect(p.x).to_equal(100)
+            expect(p.y).to_equal(30)
+
+        it "drops a float below all floats when it needs the full width":
+            val p = float_place(250, 10, 2, _ctx(), 300)
+            expect(p.x).to_equal(50)
+            expect(p.y).to_equal(50)
+
+        it "places an over-wide float at the first float-free y":
+            val p = float_place(400, 10, 1, _ctx(), 300)
+            expect(p.x).to_equal(0)
+            expect(p.y).to_equal(50)
+
+    context "context height":
+
+        it "is the lowest float bottom on either side":
+            expect(float_context_height(_ctx())).to_equal(50)
+            var ctx = _ctx()
+            ctx.right_floats.push(FloatBox(x: 200, y: 60, width: 100, height: 25, side: 2))
+            expect(float_context_height(ctx)).to_equal(85)
