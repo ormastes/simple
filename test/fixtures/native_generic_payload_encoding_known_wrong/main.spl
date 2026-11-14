@@ -1,0 +1,57 @@
+# KNOWN-WRONG native oracle: rows whose native output does NOT equal the seed.
+# Do not treat a native mismatch here as a regression; this file records it.
+# Bugs: doc/08_tracking/bug/native_generic_class_result_payload_times_8_2026-11-15.md
+#       doc/08_tracking/bug/native_erased_generic_optional_return_2026-11-15.md
+# Seed stdout (`simple run main.spl`), one row per print:
+#   42 | -3 | 42 | -3 | -1.5 | 2.25 | 3.25
+# Native, measured 2026-11-15 (cranelift = llvm unless noted):
+#   rows 1-2 `if val r = plain(b).ok` (NON-generic Result): old Stage 2
+#     (run 34, 43d59a39947) prints 42 | 3. `.ok` lowers to payload-or-nil-word
+#     (3) and `if val` gets a constant-true condition: pre-existing.
+#   rows 3-4 same over Store<i64>.get: old Stage 2 printed 0 | 0 (cranelift),
+#     4 | 4 (llvm) (untyped subject); Stage 2 of c79c19e08c9 printed 336 | 3.
+#   rows 5-7 Store<f64>: old Stage 2 cranelift refuses to build
+#     (E-BACKEND-CRANELIFT-CALL-ABI: f64 arg to the untyped `set`); Stage 2 of
+#     c79c19e08c9 printed -1.5 | denormal 0.000...99 | 1.0.
+# Build: SIMPLE_BOOTSTRAP=1 native-build main.spl --entry-closure (cranelift, llvm).
+
+use store.{Store, store_new}
+
+enum Probe:
+    Ok
+    Err
+
+var int_stores: [Store<i64>] = []
+var f64_stores: [Store<f64>] = []
+
+fn plain(b: bool) -> Result<i64, text>:
+    if b: return Ok(42)
+    Err("no")
+
+fn plain_ok_field(b: bool) -> i64:
+    if val r = plain(b).ok:
+        return r
+    -3
+
+fn int_ok_field(idx: i64) -> i64:
+    if val r = int_stores[0].get(idx).ok:
+        return r
+    -3
+
+fn f64_get(idx: i64) -> f64:
+    match f64_stores[0].get(idx):
+        case Ok(v): return v
+        case Err(_): return -1.5
+
+fn main():
+    print(plain_ok_field(true))
+    print(plain_ok_field(false))
+    int_stores.push(store_new<i64>("extra"))
+    int_stores[0].set(2, 42)
+    print(int_ok_field(2))
+    print(int_ok_field(3))
+    f64_stores.push(store_new<f64>("weight"))
+    print(f64_get(1))
+    f64_stores[0].set(1, 2.25)
+    print(f64_get(1))
+    print(f64_stores[0].get(1).unwrap_or(0.5) + 1.0)

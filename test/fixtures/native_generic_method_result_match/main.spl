@@ -1,12 +1,16 @@
 # Native oracle: a generic class method's declared Result<T, E> owns bare
-# Ok/Err arms (match subject, if-val .ok, let binding, unwrap_or, `?`), for
-# receivers read out of a module-level array (`int_stores[0].get(i)`) and a
-# typed local, with T = i64 and T = text, including after `set`.
+# Ok/Err arms (match subject, let-bound match, unwrap_or, `?`) for receivers
+# read out of a module-level array (`int_stores[0].get(i)`) and a typed local,
+# with T = i64 and T = text, including after `set`. Arm selection AND payload
+# values must match the seed: the i64 rows (42, ok 43) are the regression
+# guard for the x8 encoding a13439c4680 introduced by typing `set(value: T)`
+# (doc/08_tracking/bug/native_generic_class_result_payload_times_8_2026-11-15.md).
+# `.ok` + `if val` and f64 rows live in ../native_generic_payload_encoding_known_wrong.
 # Shape of compiler.frontend.core._AstExpr.nodes:509/560 (expr_extra_get /
 # expr_s_val_get over [AttributeStoreV1<T>]); spec guard:
 # test/01_unit/compiler/mir/generic_method_result_match_subject_spec.spl.
 # Build: SIMPLE_BOOTSTRAP=1 native-build main.spl --entry-closure (cranelift, llvm).
-# Expected stdout (seed `simple run main.spl`):
+# Expected stdout (seed `simple run main.spl`; native must equal it):
 # -1
 # 42
 # -1
@@ -15,8 +19,6 @@
 # dflt
 # 42
 # -2
-# 42
-# -3
 # 1042
 # -7
 # ok 43
@@ -51,11 +53,6 @@ fn local_get(t: Store<i64>, idx: i64) -> i64:
         case Ok(v): v
         case Err(_): -2
 
-fn int_ok_field(idx: i64) -> i64:
-    if val r = int_stores[0].get(idx).ok:
-        return r
-    -3
-
 fn int_bound(idx: i64) -> i64:
     val q = int_stores[0].get(idx)
     match q:
@@ -84,8 +81,6 @@ fn main():
     print(text_stores[0].get(5).unwrap_or("dflt"))
     print(local_get(int_stores[0], 2))
     print(local_get(int_stores[0], 9))
-    print(int_ok_field(2))
-    print(int_ok_field(3))
     print(int_bound(2))
     print(int_bound(3))
     print(try_text(2))

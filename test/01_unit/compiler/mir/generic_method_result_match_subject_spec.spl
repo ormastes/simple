@@ -19,7 +19,10 @@ receiver.get() has type unresolved". Two independent gaps:
    SIMPLE_BOOTSTRAP=1 HirFunction.return_type is erased to i64, so the RTI
    row said `get` returns i64 even for a typed local receiver. The method's
    semantic signature is now published on its symbol, as it already was for
-   generic free functions.
+   generic free functions. Only for methods with no parameter mentioning a
+   type parameter: a typed `put(value: T)` makes callers box the argument
+   while the erased body and the Ok-payload read stay raw (42 printed as 336,
+   doc/08_tracking/bug/native_generic_class_result_payload_times_8_2026-11-15.md).
 
 The bootstrap rows lower HIR with SIMPLE_BOOTSTRAP=1 and
 SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE=1 (how native-build declares a module's own
@@ -40,13 +43,15 @@ val SOURCE: text = "class Store<T>:\n    name: text\n    slots: [T?]\n\n" +
     "impl Store<T>:\n    fn get(node: i64) -> Result<T, text>:\n" +
     "        if node >= 0 and node < self.slots.len():\n            match self.slots[node]:\n" +
     "                case Some(v): return Ok(v)\n                case None: pass\n" +
-    "        Err(\"absent\")\n\n" +
+    "        Err(\"absent\")\n" +
+    "    me put(node: i64, value: T) -> bool:\n        self.slots[node] = Some(value)\n        true\n\n" +
     "enum Probe:\n    Ok\n    Err\n\n" +
     "fn int_get(xs: [Store<i64>], i: i64) -> i64:\n    match xs[0].get(i):\n        case Ok(v): v\n        case Err(_): -1\n\n" +
     "fn text_get(xs: [Store<text>], i: i64) -> text:\n    match xs[0].get(i):\n        case Ok(v): v\n        case Err(_): \"<none>\"\n\n" +
     "fn local_get(t: Store<i64>, i: i64) -> i64:\n    match t.get(i):\n        case Ok(v): v\n        case Err(_): -1\n\n" +
     "fn bound_get(xs: [Store<i64>], i: i64) -> i64:\n    val q = xs[0].get(i)\n    match q:\n        case Ok(v): v\n        case Err(_): xs[0].get(i).unwrap_or(-7)\n\n" +
-    "fn try_get(xs: [Store<i64>], i: i64) -> Result<i64, text>:\n    val v = xs[0].get(i)?\n    Ok(v + 1)\n"
+    "fn try_get(xs: [Store<i64>], i: i64) -> Result<i64, text>:\n    val v = xs[0].get(i)?\n    Ok(v + 1)\n\n" +
+    "fn put_one(xs: [Store<i64>]) -> bool:\n    xs[0].put(1, 7)\n"
 
 fn lower_errors_and_mir(bootstrap_hir: bool) -> (Dict<text, text>, [text]):
     val module = parse_and_build_module(SOURCE, "generic_match.spl")
@@ -79,6 +84,12 @@ fn expect_owned_arms(bootstrap_hir: bool):
         val mir = fns[name] ?? ""
         expect(mir.len() > 0).to_equal(true)
         expect(mir).to_contain("rt_enum_payload")
+    # A method with a `T` parameter keeps its untyped symbol, so the caller
+    # passes the argument raw exactly as before; typing it boxed 42 into the
+    # tagged word that the raw Ok-payload read printed as 336.
+    val put_mir = fns["put_one"] ?? ""
+    expect(put_mir).to_contain("Store.put")
+    expect(put_mir.contains("rt_value_int_wide")).to_equal(false)
 
 describe "generic class method Result subject owns bare Ok/Err arms":
     it "lowers indexed and typed-local receivers (ordinary HIR)":
