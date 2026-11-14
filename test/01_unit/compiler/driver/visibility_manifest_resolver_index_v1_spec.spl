@@ -1,0 +1,59 @@
+# Authored UNRUN. Actual resolver functions over explicit input records;
+# these unit records are not SCV authentication or directory coverage proof.
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use compiler.driver.driver_entry_closure_core.{DriverEntryResolverOutcomeV1,
+    DriverEntryResolverSelectionKindV1, driver_entry_resolver_index_prepare_v1,
+    driver_resolve_relative_entry_import_indexed_v1}
+
+describe "REQ-VIS-MANIFEST indexed resolver contract":
+    it "preserves exact Windows drive and UNC snapshot identities":
+        for root in ["C:/snapshot", "//server/share/snapshot"]:
+            val path = root + "/src/pkg/child.spl"
+            val digest = sha256_text("pub fn value(): 1\n")
+            val index = driver_entry_resolver_index_prepare_v1(root, "unit-snapshot", {path: digest})
+            expect(index.is_ok()).to_equal(true)
+            val resolved = driver_resolve_relative_entry_import_indexed_v1(
+                ".child", root + "/src/pkg", index.unwrap())
+            expect(resolved.is_ok()).to_equal(true)
+            match resolved.unwrap():
+                case DriverEntryResolverOutcomeV1.Found(selection):
+                    expect(selection.path).to_equal(path)
+                    expect(selection.digest).to_equal(digest)
+                    match selection.kind:
+                        case DriverEntryResolverSelectionKindV1.SourceFile: ()
+                        case DriverEntryResolverSelectionKindV1.DirectoryInterface: fail("wrong interface kind")
+                case _: fail("exact source missing")
+
+    it "uses the successful candidate branch rather than an init filename suffix":
+        val path = "/snapshot/src/pkg/__init__.spl"
+        val digest = sha256_text("pub mod __init__\n")
+        val index = driver_entry_resolver_index_prepare_v1("/snapshot", "unit-snapshot", {path: digest})
+        expect(index.is_ok()).to_equal(true)
+        val result = driver_resolve_relative_entry_import_indexed_v1(
+            ".__init__", "/snapshot/src/pkg", index.unwrap())
+        expect(result.is_ok()).to_equal(true)
+        match result.unwrap():
+            case DriverEntryResolverOutcomeV1.Found(selection):
+                expect(selection.path).to_equal(path)
+                match selection.kind:
+                    case DriverEntryResolverSelectionKindV1.SourceFile: ()
+                    case DriverEntryResolverSelectionKindV1.DirectoryInterface: fail("suffix guessed interface kind")
+            case _: fail("exact init-named source missing")
+
+    it "preserves fixed root candidate precedence before importer and refuses unsupported grammar":
+        val root_candidate = "/snapshot/child.spl"
+        val importer_candidate = "/snapshot/src/pkg/child.spl"
+        val digest = sha256_text("pub fn value(): 2\n")
+        val index = driver_entry_resolver_index_prepare_v1("/snapshot", "unit-snapshot",
+            {root_candidate: digest, importer_candidate: digest})
+        expect(index.is_ok()).to_equal(true)
+        val result = driver_resolve_relative_entry_import_indexed_v1(
+            ".child", "/snapshot/src/pkg", index.unwrap())
+        expect(result.is_ok()).to_equal(true)
+        match result.unwrap():
+            case DriverEntryResolverOutcomeV1.Found(selection): expect(selection.path).to_equal(root_candidate)
+            case _: fail("fixed root winner missing")
+        for spelling in ["child", "..child", ".child.member", ".child/escape"]:
+            expect(driver_resolve_relative_entry_import_indexed_v1(spelling,
+                "/snapshot/src/pkg", index.unwrap()).is_err()).to_equal(true)

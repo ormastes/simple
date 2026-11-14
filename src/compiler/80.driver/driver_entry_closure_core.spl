@@ -7,10 +7,14 @@ use compiler.common.module_path_naming.{module_logical_name_from_path, module_ca
 use compiler.common.source_root_resolution.{SourceRootResolutionV1,
     source_root_numbered_candidate_v1, source_root_numbered_match_v1,
     source_root_std_family_order_v1}
+use compiler.common.cache.canonical_identity.{canonical_identity_sort_texts}
+use compiler.common.cache.visibility_manifest_read_v1.{visibility_manifest_path_valid_v1}
 use compiler.core.interpreter.hashmap.{hm_hash_text}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded}
 use std.common.crypto.sha256.{sha256_text}
+use std.common.build_manager.contracts.{builder_digest_valid_v1}
+use std.scv.core.{scv_worktree_path_safe}
 use compiler.core.parser_preprocessor.{_pp_preprocess_conditionals}
 use std.nogc_sync_mut.fs.host_path.{host_is_windows_host}
 use compiler.driver.driver_admitted_epoch.{driver_admitted_epoch_active_v1,
@@ -1210,66 +1214,173 @@ pub fn _driver_entry_sibling_module_paths(content: text) -> [text]:
             result = result.push(sibling)
     result
 
-fn _driver_numbered_child_dir(parent: text, segment: text) -> SourceRootResolutionV1:
+pub enum DriverEntryResolverSelectionKindV1:
+    SourceFile
+    DirectoryInterface
+
+pub struct DriverEntryResolverSelectionV1:
+    path: text
+    digest: text
+    kind: DriverEntryResolverSelectionKindV1
+
+pub enum DriverEntryResolverOutcomeV1:
+    Found(DriverEntryResolverSelectionV1)
+    Missing
+    Ambiguous(text)
+
+pub class DriverEntryResolverIndexV1:
+    snapshot_root: text
+    snapshot_id: text
+    files: Dict<text, text>
+    directories: Dict<text, bool>
+    children: Dict<text, [text]>
+
+pub enum DriverEntryResolverObservationV1:
+    Live
+    Indexed(DriverEntryResolverIndexV1)
+
+enum DriverEntryResolverNumberedOutcomeV1:
+    Found(text, DriverEntryResolverSelectionKindV1)
+    Missing
+    Ambiguous(text)
+
+fn _driver_resolver_index_normalize_path_v1(path: text) -> text:
+    if not visibility_manifest_path_valid_v1(path): return ""
+    path
+
+pub fn driver_entry_resolver_index_prepare_v1(snapshot_root: text, snapshot_id: text,
+        complete: Dict<text, text>) -> Result<DriverEntryResolverIndexV1, text>:
+    val root = _driver_resolver_index_normalize_path_v1(snapshot_root)
+    val drive_absolute = root.byte_len() >= 3 and root.substring(1, 3) == ":/" and
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz".contains(root.substring(0, 1))
+    if root == "" or (not root.starts_with("/") and not drive_absolute) or snapshot_id == "":
+        return Err("ENTRY_RESOLVER_INDEX_IDENTITY_INVALID")
+    if complete.len() == 0 or complete.len() > 100000:
+        return Err("ENTRY_RESOLVER_INDEX_INVENTORY_LIMIT")
+    var files: Dict<text, text> = {}
+    var seen_paths: Dict<text, bool> = {}
+    var directories: Dict<text, bool> = {}
+    var children: Dict<text, [text]> = {}
+    directories[root] = true
+    var total_bytes: i64 = 0
+    for path, digest in complete:
+        total_bytes = total_bytes + path.byte_len() + digest.byte_len()
+        if total_bytes > 67108864: return Err("ENTRY_RESOLVER_INDEX_BYTE_LIMIT")
+        val normalized = _driver_resolver_index_normalize_path_v1(path)
+        if normalized == "" or not normalized.starts_with(root + "/"):
+            return Err("ENTRY_RESOLVER_INDEX_PATH_INVALID: " + path)
+        val relative = normalized.substring(root.byte_len() + 1)
+        if not scv_worktree_path_safe(relative):
+            return Err("ENTRY_RESOLVER_INDEX_PATH_INVALID: " + path)
+        if not builder_digest_valid_v1(digest):
+            return Err("ENTRY_RESOLVER_INDEX_DIGEST_INVALID: " + path)
+        if seen_paths.contains_key(normalized):
+            return Err("ENTRY_RESOLVER_INDEX_PATH_ALIAS: " + path)
+        seen_paths[normalized] = true
+        var parent = _driver_entry_import_dirname(normalized)
+        while parent.starts_with(root + "/"):
+            directories[parent] = true
+            val parent_of_parent = _driver_entry_import_dirname(parent)
+            val child_name = parent.substring(parent_of_parent.byte_len() + 1)
+            var names = children[parent_of_parent] ?? []
+            if not names.contains(child_name): names = names.push(child_name)
+            children[parent_of_parent] = names
+            if parent_of_parent == parent: break
+            parent = parent_of_parent
+        if normalized.ends_with(".spl"):
+            files[normalized] = digest
+    if files.len() == 0: return Err("ENTRY_RESOLVER_INDEX_NO_SOURCE_FILES")
+    for key, names in children:
+        children[key] = canonical_identity_sort_texts(names)
+    Ok(DriverEntryResolverIndexV1(root, snapshot_id, files, directories, children))
+
+fn _driver_resolver_observed_file_v1(path: text, observation: DriverEntryResolverObservationV1) -> bool:
+    match observation:
+        case DriverEntryResolverObservationV1.Live:
+            _driver_resolver_path_exists_v1(path)
+        case DriverEntryResolverObservationV1.Indexed(index):
+            index.files.contains_key(path)
+
+fn _driver_resolver_observed_dir_v1(path: text, observation: DriverEntryResolverObservationV1) -> bool:
+    match observation:
+        case DriverEntryResolverObservationV1.Live: dir_exists(path)
+        case DriverEntryResolverObservationV1.Indexed(index): index.directories.contains_key(path)
+
+fn _driver_resolver_observed_children_v1(path: text,
+        observation: DriverEntryResolverObservationV1) -> [text]?:
+    match observation:
+        case DriverEntryResolverObservationV1.Live:
+            unsafe(capabilities: [ffi]): rt_dir_list(path)
+        case DriverEntryResolverObservationV1.Indexed(index):
+            if not index.directories.contains_key(path): return nil
+            Some(index.children[path] ?? [])
+
+fn _driver_numbered_child_dir_observed_v1(parent: text, segment: text,
+        observation: DriverEntryResolverObservationV1) -> SourceRootResolutionV1:
     if parent == "": return SourceRootResolutionV1.Missing
-    var parent_exists = false
-    unsafe(capabilities: [ffi]):
-        parent_exists = _driver_resolver_path_exists_v1(parent)
-    if not parent_exists: return SourceRootResolutionV1.Missing
+    if not _driver_resolver_observed_dir_v1(parent, observation) and
+            not _driver_resolver_observed_file_v1(parent, observation):
+        return SourceRootResolutionV1.Missing
     var matched = SourceRootResolutionV1.Missing
-    unsafe(capabilities: [ffi]):
-        val entries_opt = rt_dir_list(parent)
-        if entries_opt == nil: return SourceRootResolutionV1.Missing
-        for entry in entries_opt.unwrap():
-            if source_root_numbered_candidate_v1(entry, segment):
-                val candidate = parent + "/" + entry
-                if dir_exists(candidate):
-                    matched = source_root_numbered_match_v1(matched, candidate, parent + "/" + segment)
-                    match matched:
-                        case SourceRootResolutionV1.Ambiguous(_): return matched
-                        case SourceRootResolutionV1.Found(_): ()
-                        case SourceRootResolutionV1.Missing: ()
+    val entries_opt = _driver_resolver_observed_children_v1(parent, observation)
+    if entries_opt == nil: return SourceRootResolutionV1.Missing
+    for entry in entries_opt.unwrap():
+        if source_root_numbered_candidate_v1(entry, segment):
+            val candidate = parent + "/" + entry
+            if _driver_resolver_observed_dir_v1(candidate, observation):
+                matched = source_root_numbered_match_v1(matched, candidate, parent + "/" + segment)
+                match matched:
+                    case SourceRootResolutionV1.Ambiguous(_): return matched
+                    case SourceRootResolutionV1.Found(_): ()
+                    case SourceRootResolutionV1.Missing: ()
     matched
 
 pub fn _driver_try_numbered_entry_import_rel_checked_v1(root: text, rel: text) -> SourceRootResolutionV1:
+    match _driver_try_numbered_entry_import_rel_observed_v1(root, rel, DriverEntryResolverObservationV1.Live):
+        case DriverEntryResolverNumberedOutcomeV1.Found(path, _): SourceRootResolutionV1.Found(path)
+        case DriverEntryResolverNumberedOutcomeV1.Missing: SourceRootResolutionV1.Missing
+        case DriverEntryResolverNumberedOutcomeV1.Ambiguous(reason): SourceRootResolutionV1.Ambiguous(reason)
+
+fn _driver_try_numbered_entry_import_rel_observed_v1(root: text, rel: text,
+        observation: DriverEntryResolverObservationV1) -> DriverEntryResolverNumberedOutcomeV1:
     val parts = rel.split("/")
-    if parts.len() == 0: return SourceRootResolutionV1.Missing
+    if parts.len() == 0: return DriverEntryResolverNumberedOutcomeV1.Missing
     var current = root
     var i = 0
     while i + 1 < parts.len():
         val direct = if current == "": parts[i] else: current + "/" + parts[i]
-        if dir_exists(direct):
+        if _driver_resolver_observed_dir_v1(direct, observation):
             current = direct
         else:
-            match _driver_numbered_child_dir(current, parts[i]):
+            match _driver_numbered_child_dir_observed_v1(current, parts[i], observation):
                 case SourceRootResolutionV1.Found(path): current = path
-                case SourceRootResolutionV1.Missing: return SourceRootResolutionV1.Missing
-                case SourceRootResolutionV1.Ambiguous(reason): return SourceRootResolutionV1.Ambiguous(reason)
+                case SourceRootResolutionV1.Missing: return DriverEntryResolverNumberedOutcomeV1.Missing
+                case SourceRootResolutionV1.Ambiguous(reason): return DriverEntryResolverNumberedOutcomeV1.Ambiguous(reason)
         i = i + 1
     val base = if current == "": parts[parts.len() - 1] else: current + "/" + parts[parts.len() - 1]
     val spl_path = base + ".spl"
     var spl_exists = false
-    unsafe(capabilities: [ffi]):
-        spl_exists = _driver_resolver_path_exists_v1(spl_path)
-    if spl_exists: return SourceRootResolutionV1.Found(spl_path)
+    spl_exists = _driver_resolver_observed_file_v1(spl_path, observation)
+    if spl_exists: return DriverEntryResolverNumberedOutcomeV1.Found(spl_path,
+        DriverEntryResolverSelectionKindV1.SourceFile)
     var module_dir = base
-    if not dir_exists(module_dir):
-        match _driver_numbered_child_dir(current, parts[parts.len() - 1]):
+    if not _driver_resolver_observed_dir_v1(module_dir, observation):
+        match _driver_numbered_child_dir_observed_v1(current, parts[parts.len() - 1], observation):
             case SourceRootResolutionV1.Found(path): module_dir = path
-            case SourceRootResolutionV1.Missing: return SourceRootResolutionV1.Missing
-            case SourceRootResolutionV1.Ambiguous(reason): return SourceRootResolutionV1.Ambiguous(reason)
+            case SourceRootResolutionV1.Missing: return DriverEntryResolverNumberedOutcomeV1.Missing
+            case SourceRootResolutionV1.Ambiguous(reason): return DriverEntryResolverNumberedOutcomeV1.Ambiguous(reason)
     # __init__ owns package exports; mod.spl is a legacy fallback.
     val init_path = module_dir + "/__init__.spl"
     var init_exists = false
-    unsafe(capabilities: [ffi]):
-        init_exists = _driver_resolver_path_exists_v1(init_path)
-    if init_exists: return SourceRootResolutionV1.Found(init_path)
+    init_exists = _driver_resolver_observed_file_v1(init_path, observation)
+    if init_exists: return DriverEntryResolverNumberedOutcomeV1.Found(init_path,
+        DriverEntryResolverSelectionKindV1.DirectoryInterface)
     val mod_path = module_dir + "/mod.spl"
     var mod_exists = false
-    unsafe(capabilities: [ffi]):
-        mod_exists = _driver_resolver_path_exists_v1(mod_path)
-    if mod_exists: return SourceRootResolutionV1.Found(mod_path)
-    SourceRootResolutionV1.Missing
+    mod_exists = _driver_resolver_observed_file_v1(mod_path, observation)
+    if mod_exists: return DriverEntryResolverNumberedOutcomeV1.Found(mod_path,
+        DriverEntryResolverSelectionKindV1.DirectoryInterface)
+    DriverEntryResolverNumberedOutcomeV1.Missing
 
 fn _driver_try_numbered_entry_import_rel(root: text, rel: text) -> text:
     # Legacy path probes retain their text result. Selected source roots use
@@ -1300,36 +1411,78 @@ fn _driver_entry_import_checkout_prefix(entry_dir: text) -> text:
 fn _driver_try_entry_import_rel(rel: text, entry_dir: text) -> text:
     val checkout_prefix = _driver_entry_import_checkout_prefix(entry_dir)
     var roots: [text] = [checkout_prefix, checkout_prefix + "src/"]
-    if entry_dir != "":
-        roots = roots.push(entry_dir + "/")
+    if entry_dir != "": roots = roots.push(entry_dir + "/")
+    match _driver_resolve_entry_rel_observed_v1(rel, roots, DriverEntryResolverObservationV1.Live):
+        case DriverEntryResolverOutcomeV1.Found(selection): selection.path
+        case DriverEntryResolverOutcomeV1.Missing: ""
+        case DriverEntryResolverOutcomeV1.Ambiguous(_): ""
+
+fn _driver_resolve_entry_rel_observed_v1(rel: text, roots: [text],
+        observation: DriverEntryResolverObservationV1) -> DriverEntryResolverOutcomeV1:
     for root in roots:
         val base = root + rel
         val spl_path = base + ".spl"
-        var spl_exists = false
-        unsafe(capabilities: [ffi]):
-            spl_exists = _driver_resolver_path_exists_v1(spl_path)
-        if spl_exists:
-            return spl_path
+        if _driver_resolver_observed_file_v1(spl_path, observation):
+            return DriverEntryResolverOutcomeV1.Found(
+                DriverEntryResolverSelectionV1(spl_path, "", DriverEntryResolverSelectionKindV1.SourceFile))
         val init_path = base + "/__init__.spl"
-        var init_exists = false
-        unsafe(capabilities: [ffi]):
-            init_exists = _driver_resolver_path_exists_v1(init_path)
-        if init_exists:
-            return init_path
+        if _driver_resolver_observed_file_v1(init_path, observation):
+            return DriverEntryResolverOutcomeV1.Found(
+                DriverEntryResolverSelectionV1(init_path, "", DriverEntryResolverSelectionKindV1.DirectoryInterface))
         val mod_path = base + "/mod.spl"
-        var mod_exists = false
-        unsafe(capabilities: [ffi]):
-            mod_exists = _driver_resolver_path_exists_v1(mod_path)
-        if mod_exists:
-            return mod_path
-    # Resolver-transparent `NN.name` directories are a fallback only: ordinary
-    # imports keep the existing fixed probes and pay no directory-list cost.
+        if _driver_resolver_observed_file_v1(mod_path, observation):
+            return DriverEntryResolverOutcomeV1.Found(
+                DriverEntryResolverSelectionV1(mod_path, "", DriverEntryResolverSelectionKindV1.DirectoryInterface))
+    # The authenticated visibility inventory is file-only. File ancestry does
+    # not prove complete directory enumeration: an empty numbered sibling can
+    # change a would-be winner into an ambiguity. Refuse this fallback until
+    # the snapshot authority carries directory entries as well.
+    match observation:
+        case DriverEntryResolverObservationV1.Indexed(_):
+            return DriverEntryResolverOutcomeV1.Ambiguous(
+                "ENTRY_RESOLVER_INDEX_DIRECTORY_COVERAGE_UNAVAILABLE")
+        case DriverEntryResolverObservationV1.Live: ()
+    # Resolver-transparent numbered directories are the same lower-priority
+    # fallback used by the live resolver.
     for root in roots:
         val normalized_root = if root.ends_with("/"): root[0:root.len() - 1] else: root
-        val numbered = _driver_try_numbered_entry_import_rel(normalized_root, rel)
-        if numbered != "":
-            return numbered
-    ""
+        match _driver_try_numbered_entry_import_rel_observed_v1(normalized_root, rel, observation):
+            case DriverEntryResolverNumberedOutcomeV1.Found(path, kind):
+                return DriverEntryResolverOutcomeV1.Found(DriverEntryResolverSelectionV1(path, "", kind))
+            case DriverEntryResolverNumberedOutcomeV1.Ambiguous(reason):
+                match observation:
+                    case DriverEntryResolverObservationV1.Live: ()
+                    case DriverEntryResolverObservationV1.Indexed(_):
+                        return DriverEntryResolverOutcomeV1.Ambiguous(reason)
+            case DriverEntryResolverNumberedOutcomeV1.Missing: ()
+    DriverEntryResolverOutcomeV1.Missing
+
+pub fn driver_resolve_relative_entry_import_indexed_v1(module_path: text,
+        importer_dir: text, index: DriverEntryResolverIndexV1) -> Result<DriverEntryResolverOutcomeV1, text>:
+    if not module_path.starts_with(".") or module_path.starts_with("..") or
+            module_path.len() < 2 or module_path.contains("/") or module_path.contains("\\"):
+        return Err("ENTRY_RESOLVER_INDEX_RELATIVE_GRAMMAR")
+    val child = module_path.substring(1)
+    if child == "" or child.contains(".") or child.contains(".."):
+        return Err("ENTRY_RESOLVER_INDEX_RELATIVE_GRAMMAR")
+    val importer = _driver_resolver_index_normalize_path_v1(importer_dir)
+    if importer == "" or (importer != index.snapshot_root and
+            not importer.starts_with(index.snapshot_root + "/")):
+        return Err("ENTRY_RESOLVER_INDEX_IMPORTER_OUTSIDE_SNAPSHOT")
+    var roots: [text] = [index.snapshot_root + "/", index.snapshot_root + "/src/"]
+    if importer != "": roots = roots.push(importer + "/")
+    val observed = _driver_resolve_entry_rel_observed_v1(child, roots,
+        DriverEntryResolverObservationV1.Indexed(index))
+    match observed:
+        case DriverEntryResolverOutcomeV1.Found(selection):
+            if not index.files.contains_key(selection.path):
+                return Err("ENTRY_RESOLVER_INDEX_PLANNER_CONTRACT")
+            val exact = DriverEntryResolverSelectionV1(selection.path,
+                index.files[selection.path], selection.kind)
+            Ok(DriverEntryResolverOutcomeV1.Found(exact))
+        case DriverEntryResolverOutcomeV1.Missing: Ok(DriverEntryResolverOutcomeV1.Missing)
+        case DriverEntryResolverOutcomeV1.Ambiguous(reason):
+            Ok(DriverEntryResolverOutcomeV1.Ambiguous(reason))
 
 fn _driver_resolve_rewritten_import(module_path: text, prefix: text, rel_prefix: text, entry_dir: text) -> text:
     if module_path != prefix and not module_path.starts_with(prefix + "."):
