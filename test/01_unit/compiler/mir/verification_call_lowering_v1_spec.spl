@@ -409,6 +409,34 @@ describe "C1 compiler-owned resolved call transport":
                     case Err(message): fail(message)
             case Err(message): fail(message)
 
+    it "binds profile subarch and cpu tier into receipts even for identical MIR":
+        step("lower one neutral direct-call source with identical and independently changed contexts")
+        val hir = c1_calls_hir("fn leaf(value: i64) -> i64:\n    value\n\nfn caller() -> i64:\n    leaf(5)\n")
+        val baseline = mir_target_context_from("x86_64-unknown-linux-gnu", "unknown", "unknown", "llvm", 1)
+        match lower_module_with_resolved_calls_for_target_v1(hir, baseline):
+            case Ok(original):
+                expect(validate_resolved_direct_call_manifest_v1(original.module, original.calls).closed()).to_equal(true)
+                c1_calls_check_site(original, "caller", "leaf", 1)
+                match lower_module_with_resolved_calls_for_target_v1(hir, baseline):
+                    case Ok(repeated):
+                        expect(validate_resolved_direct_call_manifest_v1(repeated.module, repeated.calls).closed()).to_equal(true)
+                        expect(repeated.calls.module_hash).to_equal(original.calls.module_hash)
+                        expect(repeated.calls.resolver_receipt_hash).to_equal(original.calls.resolver_receipt_hash)
+                    case Err(message): fail(message)
+                for dimension in ["profile", "subarch", "tier"]:
+                    var changed = mir_target_context_from("x86_64-unknown-linux-gnu", "unknown", "unknown", "llvm", 1)
+                    if dimension == "profile": changed.build_profile = "release"
+                    if dimension == "subarch": changed.subarch = "identity-fixture"
+                    if dimension == "tier": changed.cpu_tier = "x86-64-v3"
+                    match lower_module_with_resolved_calls_for_target_v1(hir, changed):
+                        case Ok(result):
+                            expect(validate_resolved_direct_call_manifest_v1(result.module, result.calls).closed()).to_equal(true)
+                            c1_calls_check_site(result, "caller", "leaf", 1)
+                            expect(result.calls.module_hash).to_equal(original.calls.module_hash)
+                            expect(result.calls.resolver_receipt_hash == original.calls.resolver_receipt_hash).to_equal(false)
+                        case Err(message): fail(message)
+            case Err(message): fail(message)
+
     it "captures a same-module call inside an omitted default before its consuming call":
         step("lower the retained default expression and bind both emitted call sites")
         val source = "fn seed() -> i64:\n    17\n\nfn leaf(enabled: bool, value: i64 = seed()) -> i64:\n    value\n\nfn caller() -> i64:\n    leaf(true)\n"
