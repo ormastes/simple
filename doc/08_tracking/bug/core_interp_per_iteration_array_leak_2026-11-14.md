@@ -136,8 +136,8 @@ before and after, including the four that are red on base.
 ## Follow-up 2026-11-14: first reclamation slice (S1) on the seed JIT
 
 The root cause above is now partly addressed. On the in-process JIT lane the seed emits
-`rt_array_free` at the end of a statement list for array locals with int/float/bool
-elements that have a proven single holder (design slice S1,
+`rt_array_free` at the end of a statement list for array locals with int/bool
+elements (not float or u64: those elements are heap-boxed) that have a proven single holder (design slice S1,
 `doc/05_design/compiler/jit_memory/seed_jit_array_reclamation.md`). Every other array
 is still never freed, so this record stays open.
 
@@ -158,6 +158,20 @@ Base seed sha256 `f30ba4d66d443a3c…`, changed seed `820b3886088da71c…`.
 The core-interpreter workload itself does not shrink: its per-iteration arrays escape
 through calls and struct fields, which S1 deliberately leaves alone. Stages S2 and later
 in the design cover those.
+
+### Landing evidence after merging `origin/release/1.0.0` `c1099bb7897`
+
+Base seed (that commit) sha256 `30f66bc64351c55e…`; S1 seed (float and u64 arrays
+excluded) `b7a9577fe8c41a73…`. Serial, cgroup-capped, aarch64.
+
+| run | base | S1 |
+|---|---|---|
+| `jit_block_array_release_spec.spl` (37 cases incl. the open-transient-scope case and the float negative row) | 28 passed, 9 failed | 37/37; 37/37 under quarantine (10,001 frees, 0 hits) |
+| alias matrix, 20 rows, JIT and interpreter lanes | — | identical to base on both lanes, also under quarantine |
+| 2M iterations `val a = [i, i + 1, i + 2]`, peak RSS | 200,364 KB | 25,004 KB (empty loop 28,380 KB) |
+| 2M iterations `[1.5, 2.5, 3.5]` (excluded), peak RSS | 411,868 KB | 393,740 KB (unchanged: not released) |
+| 177 specs in `test/01_unit/compiler/interpreter`, forced JIT | exit codes recorded | same exit code on all 177; under quarantine 0 hits, 18 files freed 47,240 arrays |
+| caret `--help` | help text | identical help text; 0 frees, so quarantine is vacuous there |
 
 Known limits of the quarantine mode: a stale `len()` on a freed array reads `i64::MAX`
 instead of aborting (stale element reads and writes do fault). The self-hosted
