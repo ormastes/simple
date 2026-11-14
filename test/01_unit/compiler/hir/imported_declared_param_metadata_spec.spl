@@ -1,0 +1,92 @@
+# Real parser/HIR/MIR/codec regression; execute with a compiler containing this change.
+# Existing bootstrap producer cannot acquire the fix merely by compiling its source.
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{ParserModule}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.{HirModule}
+use compiler.hir.hir_codec.{hir_module_encode, hir_module_decode}
+use compiler.mir.mir.*
+use compiler.mir._MirLoweringExpr.method_calls_literals.*
+
+fn declared_params_fixture() -> HirModule:
+    val logger = Logger(level: 0)
+    val kinds = "pub enum PrimitiveType:\n    F32\n    F64\n"
+    val provider = "use params.kinds.\{PrimitiveType\}\npub class Builder:\n    handle: i64\n\nimpl Builder:\n    me emit_const_float(dest: text, ty: PrimitiveType, value: f64):\n        pass\n\npub fn empty():\n    pass\npub fn unknown(value):\n    pass\n"
+    val consumer = "use params.owner.\{Builder, empty, unknown\}\nstruct PrimitiveType:\n    decoy: i64\nfn main() -> i64:\n    0\n"
+    var modules: Dict<text, ParserModule> = {}
+    modules["params.kinds"] = parse_full_frontend(kinds, "params.kinds", "params.kinds", logger)
+    modules["params.owner"] = parse_full_frontend(provider, "params.owner", "params.owner", logger)
+    val sources = [SourceFile(path: "params/kinds.spl", content: kinds, module_name: "params.kinds"), SourceFile(path: "params/owner.spl", content: provider, module_name: "params.owner")]
+    val surfaces = module_surfaces_from_modules(modules, sources)
+    expect(surfaces.is_ok()).to_equal(true)
+    var lowering = hirlowering_for_module("params.consumer", surfaces.unwrap())
+    val hir = lowering.lower_module(parse_full_frontend(consumer, "params.consumer", "params.consumer", logger))
+    expect(lowering.errors.len()).to_equal(0)
+    hir
+
+fn check_declared_params(hir: HirModule):
+    val id = hir.symbols.lookup_or_invalid("params.owner.Builder::emit_const_float")
+    expect(id.is_valid()).to_equal(true)
+    val symbol: HirSymbol = hir.symbols.get_symbol_raw(id.id)
+    expect(symbol.type_ == nil).to_equal(true)
+    expect(symbol.declared_param_types_v1.?).to_equal(true)
+    val params = symbol.declared_param_types_v1.unwrap()
+    expect(params.len()).to_equal(4)
+    val nominal = hir.symbols.lookup_qualified_type_raw("params.kinds", "PrimitiveType")
+    expect(nominal).to_be_greater_than(-1)
+    match params[2].kind:
+        case Named(owner, _): expect(owner.id).to_equal(nominal)
+        case _: expect(false).to_equal(true)
+    val hir_float = match params[3].kind:
+        case F64: true
+        case _: false
+    expect(hir_float).to_equal(true)
+    var lowering = MirLowering.new(hir.symbols)
+    val operand = lowering.symbol_to_operand(id)
+    match operand.kind:
+        case Const(_, type_):
+            match type_.kind:
+                case FuncPtr(signature):
+                    expect(signature.declared_params_known).to_equal(true)
+                    expect(signature.declared_params.len()).to_equal(4)
+                    val mir_float = match signature.declared_params[3].kind:
+                        case F64: true
+                        case _: false
+                    expect(mir_float).to_equal(true)
+                case _: expect(false).to_equal(true)
+        case _: expect(false).to_equal(true)
+
+describe "imported callable declared parameter metadata":
+    it "retains nominal and float parameters without inventing a return annotation":
+        check_declared_params(declared_params_fixture())
+
+    it "retains parameter owner identities through the actual generated HIR codec":
+        val blob = hir_module_encode(declared_params_fixture())
+        expect(blob.len()).to_be_greater_than(0)
+        val restored = hir_module_decode(blob)
+        expect(restored.?).to_equal(true)
+        check_declared_params(restored.unwrap())
+
+    it "distinguishes known zero arity from missing parameter annotations":
+        val hir = declared_params_fixture()
+        val empty = hir.symbols.get_symbol_raw(hir.symbols.lookup_or_invalid("empty").id)
+        val unknown = hir.symbols.get_symbol_raw(hir.symbols.lookup_or_invalid("unknown").id)
+        expect(empty.declared_param_types_v1.?).to_equal(true)
+        expect(empty.declared_param_types_v1.unwrap().len()).to_equal(0)
+        expect(unknown.declared_param_types_v1 == nil).to_equal(true)
+
+    it "keeps callable metadata through a lexical alias rename":
+        val hir = declared_params_fixture()
+        val id = hir.symbols.lookup_or_invalid("params.owner.Builder::emit_const_float")
+        var symbols = hir.symbols
+        symbols.rename_symbol(id, "renamed_emit_const_float")
+        val renamed: HirSymbol = symbols.get_symbol_raw(id.id)
+        expect(renamed.declared_param_types_v1.?).to_equal(true)
+        expect(renamed.declared_param_types_v1.unwrap().len()).to_equal(4)
+        expect(renamed.type_ == nil).to_equal(true)
