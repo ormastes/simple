@@ -1,0 +1,76 @@
+# Source-level composition boundary, not a native ABI or code-admission token.
+# The loader factory derives/crosschecks these identities from admitted bytes,
+# entry ABI and normalized instance config, and owns token lifetime validation.
+use compiler.common.cache_contract.aspect_plugin_model_v1.{PluginInstanceDescriptorV1}
+use compiler.common.cache_contract.aspect_traversal_v1.{DirTldrViewV1}
+use compiler.common.cache_contract.aspect_match_shard_v1.{PointcutSelectorV1, WeavePlanDeltaV1}
+use compiler.common.cache_contract.hash_algorithm_registry_v1.{digest_v1_parse,
+    digest_v1_text, HASH_ALGO_SHA256_V1}
+use compiler.common.cache.canonical_identity.{canon_field, canon_seq, canon_str}
+use std.common.crypto.sha256.{sha256_text}
+
+pub struct TraversalPluginSelectionV1:
+    provider_id: text
+    provider_code_digest: text
+    entry_identity: text
+    abi_schema: text
+    policy_identity: text
+    instance: PluginInstanceDescriptorV1
+    provider_token: i64
+    invoke: fn(i64, DirTldrViewV1, PointcutSelectorV1) -> Result<WeavePlanDeltaV1, text>
+
+# Structural validation does not authenticate a plugin. Only the effectful
+# admitted loader may install a selection in the real compiler context.
+pub fn traversal_selection_identity_v1(selection: TraversalPluginSelectionV1) -> Result<text, text>:
+    if selection.provider_token <= 0 or selection.provider_id == "" or selection.entry_identity == "" or selection.abi_schema == "":
+        return Err("traversal-provider-selection-invalid")
+    val code = digest_v1_parse(selection.provider_code_digest)
+    val instance_key = digest_v1_parse(selection.instance.key)
+    val policy = digest_v1_parse(selection.policy_identity)
+    if code == nil or instance_key == nil or policy == nil: return Err("traversal-provider-digest-invalid")
+    if code.unwrap().algo_id != HASH_ALGO_SHA256_V1 or
+            instance_key.unwrap().algo_id != HASH_ALGO_SHA256_V1 or
+            policy.unwrap().algo_id != HASH_ALGO_SHA256_V1 or
+            digest_v1_text(policy.unwrap()) != selection.policy_identity or
+            digest_v1_text(code.unwrap()) != selection.provider_code_digest or
+            digest_v1_text(instance_key.unwrap()) != selection.instance.key:
+        return Err("traversal-provider-digest-invalid")
+    var size: i64 = 0
+    val fields = [selection.provider_id, selection.provider_code_digest, selection.entry_identity,
+        selection.abi_schema, selection.policy_identity, selection.instance.key, selection.instance.canonical_identity]
+    for field in fields:
+        if field.byte_len() > 65536 - size: return Err("traversal-provider-identity-budget")
+        size = size + field.byte_len()
+    if selection.instance.canonical_identity == "" or
+            sha256_text(selection.instance.canonical_identity) != instance_key.unwrap().hex:
+        return Err("traversal-provider-instance-identity-mismatch")
+    var encoded: [text] = []
+    for field in fields: encoded.push(canon_str(field))
+    # Runtime token/address is deliberately absent. Re-admission must still be
+    # checked by the loader on every invocation, including an all-reuse visit.
+    Ok(canon_field("simple/admitted-traversal-provider/v1", canon_seq(encoded)))
+
+pub fn traversal_bind_ordered_identity_v1(ordered: text,
+        selection: TraversalPluginSelectionV1?) -> Result<text, text>:
+    # Preserve the existing builtin batch identity exactly.
+    if selection == nil: return Ok(ordered)
+    val provider = traversal_selection_identity_v1(selection.unwrap())?
+    Ok(canon_field("simple/selected-traversal-batch/v1",
+        canon_seq([canon_str(ordered), canon_str(provider)])))
+
+pub fn traversal_delta_equal_v1(left: WeavePlanDeltaV1, right: WeavePlanDeltaV1) -> bool:
+    left.weave == right.weave and left.unweave == right.unweave and
+        left.reweave == right.reweave and left.reuse == right.reuse
+
+# Both inputs are public collision-resistant identities. No private signing-key
+# bytes, policy paths or artifact paths enter the semantic key.
+pub fn traversal_policy_identity_v1(signed_source_digest: text,
+        trust_root_fingerprint: text) -> Result<text, text>:
+    for value in [signed_source_digest, trust_root_fingerprint]:
+        val parsed = digest_v1_parse(value)
+        if parsed == nil or parsed.unwrap().algo_id != HASH_ALGO_SHA256_V1:
+            return Err("traversal-policy-digest-invalid")
+        if digest_v1_text(parsed.unwrap()) != value:
+            return Err("traversal-policy-digest-invalid")
+    Ok("sha256:" + sha256_text(canon_field("simple/signed-traversal-policy/v1",
+        canon_seq([canon_str(signed_source_digest), canon_str(trust_root_fingerprint)]))))
