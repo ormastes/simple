@@ -1,0 +1,59 @@
+# Fresh-process lifetime probe for the production kernel-image memo owner.
+# The hash is captured while BuildSession's explicit publish allocation is
+# active, then read again after the real session heap has been ended.
+
+use std.io_runtime.{env_set, platform_name}
+use std.nogc_sync_mut.io.kernel_image_digest_v1.{kernel_image_digest_v1}
+use std.nogc_sync_mut.sffi.rc_graph.{rt_rc_count}
+use compiler.driver.session.build_session.{
+    build_session_inactive, session_kept_begin
+}
+
+fn main() -> i64:
+    if platform_name() != "linux":
+        print "FAIL: probe requires the supported Linux image owner"
+        return 2
+    if not env_set("SIMPLE_BUILD_SESSION", "1") or
+            not env_set("SIMPLE_BUILD_SESSION_END", "1"):
+        print "FAIL: session environment setup failed"
+        return 3
+    var session = build_session_inactive()
+    if not session.begin():
+        print "FAIL: real BuildSession begin failed"
+        return 4
+    if not session.publish_alloc_begin():
+        print "FAIL: real BuildSession publish allocation begin failed"
+        return 5
+    var first_digest = ""
+    var capture_ok = false
+    match kernel_image_digest_v1():
+        case Ok(identity):
+            first_digest = identity.sha256
+            capture_ok = true
+        case Err(reason):
+            print "FAIL: first capture unavailable: {reason}"
+    val allocation_ended = session.publish_alloc_end()
+    val session_ended = allocation_ended and
+        session.end(session_kept_begin(session))
+    if not capture_ok:
+        return 6
+    if not allocation_ended or not session_ended:
+        print "FAIL: real BuildSession teardown failed"
+        return 7
+    val root_count = unsafe(capabilities: [ffi]): rt_rc_count(first_digest)
+    if root_count != 1:
+        print "FAIL: retained digest RC root is missing after session teardown"
+        return 8
+    match kernel_image_digest_v1():
+        case Ok(repeated):
+            if repeated.sha256 != first_digest:
+                print "FAIL: memo changed after session teardown"
+                return 9
+            print "actual_host={platform_name()}"
+            print "kernel_image_sha256={first_digest}"
+            print "kernel_image_sha256_after_session={repeated.sha256}"
+            print "digest_rc_count_after_session={root_count}"
+            0
+        case Err(reason):
+            print "FAIL: repeated capture unavailable after session teardown: {reason}"
+            10
