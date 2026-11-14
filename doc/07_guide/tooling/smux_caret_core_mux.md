@@ -48,8 +48,8 @@ N2 requires both backend cohorts, concurrency/recovery/slow-consumer controls an
 A pane's shell is chosen by kind through `std.sosix.pty`:
 
 ```bash
-SIMPLE_PTY_SHELL=shs      # panes start the Simple shell (same commands on every OS)
-SIMPLE_PTY_SHELL=native   # default on Windows/macOS/Linux/BSD: /bin/sh or cmd.exe
+SIMPLE_PTY_SHELL=shs      # default everywhere: the Simple shell (same commands on every OS)
+SIMPLE_PTY_SHELL=native   # opt out on Windows/macOS/Linux/BSD: /bin/sh or cmd.exe
 SIMPLE_SHS_COMMAND='simple /abs/path/src/app/shs/main.spl'   # hosted shs launcher
 ```
 
@@ -61,6 +61,11 @@ val shell = sosix_pty_shell_command_v1(SOSIX_PTY_SHELL_SHS)?
 smux_pane_spawn_pty(session, window, pane, shell)
 ```
 
-SimpleOS always uses shs; it has no native shell. Hosted shs currently has no
-host filesystem and cannot start host programs, which is why hosts default to
-native. Details: `doc/05_design/pty_shell_kinds_shs_default.md`.
+SimpleOS always uses shs; it has no native shell. Hosted shs
+(`ShellApp.hosted_on_host`, `src/os/apps/shell/shell_host.spl`) runs over the
+real host filesystem (`ls`/`cat`/`cd`, and `cd` moves the process cwd),
+expands `$VAR` from the host environment (`export` reaches children), and
+launches unknown commands as host programs through the SOSIX process facade.
+A host whose shs launcher cannot be resolved (no `SIMPLE_SHS_COMMAND`, no
+`SIMPLE_BINARY` + `src/app/shs/main.spl`) falls back to the native shell.
+Details: `doc/05_design/pty_shell_kinds_shs_default.md`.

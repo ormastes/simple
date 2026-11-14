@@ -23,6 +23,7 @@ use os.userlib.window.{WindowClient}
 use common.window_protocol.window_protocol.{WM_EVENT_CLOSE}
 
 use os.userlib.system.{uptime, hostname, mem_info, reboot}
+use os.apps.shell.shell_host.{shell_host_vfs, shell_host_env, shell_host_cwd}
 use os.userlib.log.{read_recent}
 use os.kernel.types.syscall_types.{SignalKind}
 use os.apps.shell.shell_job.{JobTable, JobState, Job}
@@ -127,7 +128,19 @@ impl ShellApp:
             capture_mode: false,
             capture_lines: [],
             exit_on_error: false,
+            hosted: false,
         )
+
+    static fn hosted_on_host() -> ShellApp:
+        """Create a host-parity shell: host filesystem at `/`, host cwd and
+        environment, unknown commands launched as host programs."""
+        var shell = ShellApp.with_vfs(shell_host_vfs())
+        shell.hosted = true
+        shell.cwd = shell_host_cwd()
+        val host_env = shell_host_env()
+        if host_env.len() > 0:
+            shell.env = host_env
+        return shell
 
     static fn with_vfs(vfs: VfsManager) -> ShellApp:
         """Create a shell connected to a VFS manager."""
@@ -232,6 +245,22 @@ impl ShellApp:
             self._execute_chain(cmd)
             return
 
+        # Hosted shs: pipelines, redirections and `&` still run on the SimpleOS
+        # fd/spawn layer, which a host does not have. Refuse cleanly instead of
+        # dying; SIMPLE_PTY_SHELL=native gives a host shell for these.
+        if self.hosted:
+            val plain = self.parse_command(cmd)
+            var host_unsupported = has_pipeline(cmd)
+            for tok in plain:
+                if tok == "&" or tok == ">" or tok == ">>" or tok == "<" or tok == "2>" or tok == "2>&1":
+                    host_unsupported = true
+                elif tok.ends_with("&") or tok.starts_with(">") or tok.starts_with("<") or tok.starts_with("2>"):
+                    host_unsupported = true
+            if host_unsupported:
+                self._write_error("shs: pipelines, redirections and & are not supported in hosted shs yet (SIMPLE_PTY_SHELL=native)")
+                self.last_exit_code = 2
+                return
+
         # Check for pipeline first (before redirect parsing)
         if has_pipeline(cmd):
             val stages = parse_pipeline(cmd)
@@ -278,7 +307,12 @@ impl ShellApp:
 
         val parsed = parse_redirects(argv)
         val command = parsed.command
-        val args = parsed.args
+        # Hosted shs: `$VAR`/`${VAR}`/`$?` expansion from the host-seeded
+        # environment for every argument (the SimpleOS path is unchanged).
+        var args: [text] = []
+        for raw_arg in parsed.args:
+            val expand = self.hosted and raw_arg.contains("$")
+            args.push(if expand: self._expand_vars(raw_arg) else: raw_arg)
         val background = parsed.background
 
         if command == "":
@@ -308,7 +342,22 @@ impl ShellApp:
         val text_tool_path = text_tool_canonical_path_v1(artifact_command)
         val checksum_path = checksum_tool_canonical_path_v1(artifact_command)
         val process_path = process_tool_canonical_path_v1(artifact_command)
-        if text_tool_path != "":
+        # Hosted shs: SimpleOS guest artifact gates and staged toolchains do
+        # not apply; builtins run over the host VFS, everything else is a
+        # host program.
+        if self.hosted:
+            # SimpleOS system builtins answer about the guest kernel; on a
+            # host the host's own program is the truthful answer.
+            val host_owned = command == "uname" or command == "hostname" or command == "uptime" or
+                command == "dmesg" or command == "mem" or command == "ps" or command == "kill" or
+                command == "mount" or command == "umount" or command == "date"
+            if host_owned:
+                self._try_external(command, args)
+            elif self._is_builtin_command(command):
+                self._dispatch_builtin(command, args)
+            else:
+                self._try_external(command, args)
+        elif text_tool_path != "":
             val result = launcher_dispatch_text_tool_v1(artifact_command, args)
             self.last_exit_code = result.exit_code
             if not result.ok:
