@@ -73,11 +73,11 @@ physical-scope selector and accounting consumer.
 
 ## Native qualification obligations
 
-The all-source Windows linker lists shell32, ole32 and ntdll; ordinary MSVC and
-some entry-closure link routes currently omit shell32/ole32. Therefore source
-authorship does not establish linkability. SHGetKnownFolderPath requires
-shell32, CoTaskMemFree requires ole32, and NtCreateFile requires ntdll. No
-linker defaults are changed by this lane.
+PR #9280 adds shell32 and ole32 to the ordinary MSVC and internal COFF
+linker source lists; the all-source route already lists these libraries and
+ntdll. SHGetKnownFolderPath requires shell32, CoTaskMemFree requires ole32,
+and NtCreateFile requires ntdll. These source changes do not establish native
+linkability: Windows linking and runtime qualification remain NOT_RUN.
 
 Native fixtures must use an administrator-installed canonical policy. The
 tests do not rewrite policy, change ACLs or install a service. Reparse, foreign
