@@ -9,6 +9,37 @@ use std.nogc_sync_mut.orchestration.host_helper_stream_owner_v1.HostHelperStream
 use std.nogc_sync_mut.orchestration.host_helper_settlement_v1.{HostHelperRecoveredStreamV1, HostHelperSettlementAckV1}
 use std.common.task_runner.distributed_operation_journal_v2.DistributedOperationJournalOpenCleanupV2
 use std.nogc_sync_mut.io.file_lock_owned_v2.FileLockReleaseStateV2
+use os.apps.smux.runtime_primary_state_v4.SmuxRuntimePrimaryEntryV4
+
+# Internal pending identity includes the archive domain. Public wire UIDs stay
+# unchanged; resolving one domain must not release another domain's stop guard.
+pub enum SmuxRuntimeBindingDomainV4:
+    OutputFollowV3
+    PrimaryAttachV4
+
+fn binding_pending_key_v4(domain: SmuxRuntimeBindingDomainV4, uid: text) -> text:
+    match domain:
+        case SmuxRuntimeBindingDomainV4.OutputFollowV3: "output-follow-v3:" + uid
+        case SmuxRuntimeBindingDomainV4.PrimaryAttachV4: "primary-attach-v4:" + uid
+
+pub fn smux_binding_pending_add_v4(pending: [text], domain: SmuxRuntimeBindingDomainV4, uid: text) -> [text]:
+    var updated = pending
+    val key = binding_pending_key_v4(domain, uid)
+    if not updated.contains(key): updated.push(key)
+    updated
+
+pub fn smux_binding_pending_resolve_v4(pending: [text], domain: SmuxRuntimeBindingDomainV4, uid: text) -> [text]:
+    val key = binding_pending_key_v4(domain, uid)
+    var retained: [text] = []
+    for item in pending:
+        if item != key: retained.push(item)
+    retained
+
+# Shared by pruning and opposite-domain inspection. A released label alone
+# cannot discard a retained carrier or an outstanding release/adoption flag.
+pub fn smux_binding_entry_blocks_v4(requested_uid: text, entry_uid: text,
+        status: text, retained: bool, pending: bool) -> bool:
+    requested_uid == entry_uid and (status != "released" or retained or pending)
 
 pub struct SmuxRuntimeBindingEntryV3:
     request: SmuxRuntimeBindRequestV3
@@ -25,11 +56,21 @@ pub struct SmuxRuntimeBindingOwnerV3:
     policy: SmuxRuntimeBindingPolicyV3
     service_incarnation: text
     entries: [SmuxRuntimeBindingEntryV3]
-    unresolved_uids: [text] = []
+    unresolved_uids: [text] = [] # Domain-qualified internal keys, never wire UIDs.
+    primary_entries: [SmuxRuntimePrimaryEntryV4] = []
 
 pub struct SmuxRuntimeBindingTurnV3:
     owner: SmuxRuntimeBindingOwnerV3
     reply: text
+
+pub fn smux_output_entry_blocks_v4(entry: SmuxRuntimeBindingEntryV3, uid: text) -> bool:
+    smux_binding_entry_blocks_v4(uid, entry.request.binding_uid, entry.reply.status,
+        entry.retained != nil or entry.recovered != nil, entry.reply.host_release_pending)
+
+pub fn smux_primary_entry_blocks_v4(entry: SmuxRuntimePrimaryEntryV4, uid: text) -> bool:
+    smux_binding_entry_blocks_v4(uid, entry.request.target.binding_uid, entry.status,
+        entry.helper != nil or entry.session != nil or entry.cleanup_spawn != nil or entry.recovered != nil,
+        entry.adopted)
 
 # Partial host startup is not a fabricated ready root. Preserve the canonical
 # cleanup carrier and its actual release state independently of error text.
@@ -51,9 +92,12 @@ pub fn smux_runtime_binding_prune_released_v3(owner: SmuxRuntimeBindingOwnerV3) 
     var current = owner
     var retained: [SmuxRuntimeBindingEntryV3] = []
     for entry in current.entries:
-        if (entry.reply.status != "released" or entry.retained != nil or entry.recovered != nil or
-                entry.reply.host_release_pending): retained.push(entry)
+        if smux_output_entry_blocks_v4(entry, entry.request.binding_uid): retained.push(entry)
     current.entries = retained
+    var primary: [SmuxRuntimePrimaryEntryV4] = []
+    for entry in current.primary_entries:
+        if smux_primary_entry_blocks_v4(entry, entry.request.target.binding_uid): primary.push(entry)
+    current.primary_entries = primary
     current
 
 pub fn smux_runtime_binding_reply_turn_v3(owner: SmuxRuntimeBindingOwnerV3,

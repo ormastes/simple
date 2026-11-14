@@ -1,0 +1,153 @@
+# Installed V4 binding uses the existing persistent Host owner and signed helper
+# staging. No shell command, second writer, or unverified helper lease is minted.
+use os.apps.smux.runtime_binding_state_v3.{SmuxRuntimeBindingOwnerV3, SmuxRuntimeBindingTurnV3,
+    smux_runtime_binding_index_v3, smux_runtime_binding_prune_released_v3}
+use os.apps.smux.runtime_binding_state_v3.{SmuxRuntimeBindingDomainV4, smux_binding_pending_add_v4}
+use os.apps.smux.runtime_primary_state_v4.*
+use os.apps.smux.runtime_primary_request_v4.*
+use os.apps.smux.runtime_primary_store_v4.*
+use os.apps.smux.runtime_primary_reply_v4.*
+use os.apps.smux.runtime_primary_planning_v4.smux_primary_resolve_v4
+use os.apps.smux.runtime_binding_planning_v3.smux_runtime_binding_target_check_v3
+use os.apps.smux.runtime_binding_prepare_v3.smux_runtime_binding_staged_execution_v3
+use os.apps.smux.api.smux_pane_adopt_primary_v4
+use std.nogc_sync_mut.orchestration.host_helper_request_v1.{host_helper_request_decode_v1, host_helper_request_load_v1}
+use std.nogc_sync_mut.orchestration.host_helper_owner_v1.{host_helper_prepare_v1, host_helper_begin_v1}
+use std.nogc_sync_mut.orchestration.host_local_root_v1.{host_local_context_v1, host_local_refresh_context_v1}
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.{HostReservationAuthorizationContextV1, HostCapacityOwnerV1}
+use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
+use std.nogc_sync_mut.orchestration.host_primary_attach_owner_v1.host_primary_attach_open_v1
+use std.nogc_sync_mut.daemon_sdk.operation_dispatch_v2.daemon_operation_exact_v2
+use std.common.contracts.orchestration.host_reservation_codec_v1.host_helper_reservation_receipt_v1
+use std.common.contracts.container.primary_attach_v1.container_primary_attach_plan_encode_v1
+use std.nogc_async_mut.container.terminal_session_v1.{ContainerOwnedTerminalSessionV1,
+    container_terminal_reference_v1, container_primary_attach_identity_v1}
+use std.nogc_sync_mut.io.file_ops.file_read_regular_no_follow_bounded
+use std.common.crypto.sha256.sha256_text
+
+# Current-journal observation, not a caller retry flag. Only an admitted helper
+# without execution intent may retry corrected staging after begin refusal.
+pub fn smux_primary_begin_retryable_v4(owner: HostCapacityOwnerV1, operation: OperationEnvelopeV2) -> bool:
+    val exact = daemon_operation_exact_v2(owner.journal, operation)
+    exact.is_ok() and exact.unwrap().state == "admitted"
+
+pub fn smux_primary_prepare_v4(owner: SmuxRuntimeBindingOwnerV3, uid: text) -> SmuxRuntimeBindingTurnV3:
+    var current = owner
+    val loaded = smux_primary_request_load_v4(current.local.capacity.journal.root, uid)
+    if loaded.is_err(): return smux_primary_reply_v4(current, uid, "rejected", loaded.unwrap_err())
+    val request = loaded.unwrap()
+    val target = smux_runtime_binding_target_check_v3(request.target, current.service_incarnation)
+    if target.is_err(): return smux_primary_reply_v4(current, uid, "rejected", target.unwrap_err())
+    val planned = smux_primary_plan_load_v4(current.local.capacity.journal.root, request)
+    if planned.is_err(): return smux_primary_reply_v4(current, uid, "rejected", planned.unwrap_err())
+    val plan = planned.unwrap()
+    val source = file_read_regular_no_follow_bounded(current.local.root + "/smux-helper-staging/" + sha256_text(uid) + ".request.sdn", 2097152)
+    if source.is_err(): return smux_primary_reply_v4(current, uid, "rejected", source.unwrap_err())
+    val decoded = host_helper_request_decode_v1(source.unwrap())
+    if decoded.is_err(): return smux_primary_reply_v4(current, uid, "rejected", decoded.unwrap_err())
+    val helper = decoded.unwrap()
+    if (helper.plan.helper_kind != "attach-broker" or helper.operation.id != request.target.helper_operation_id or
+            helper.plan.operation_id != request.target.helper_operation_id or helper.plan.request_digest != plan.request_digest or
+            helper.plan.parent_operation_id != plan.identity.parent_operation_id or
+            helper.plan.parent_operation_digest != plan.identity.parent_operation_digest or
+            helper.plan.parent_assignment_digest != plan.identity.parent_assignment_digest or
+            helper.plan.parent_budget_digest != plan.identity.parent_budget_digest or
+            helper.intent.reservation.cpu_millis != plan.resources.cpu_millis or
+            helper.intent.reservation.memory_bytes != plan.resources.memory_bytes):
+        return smux_primary_reply_v4(current, uid, "rejected", "primary-staged-helper-mismatch")
+    val root = current.local.root
+    val enrollment = current.local.binding
+    val refresh = fn() -> HostReservationAuthorizationContextV1:
+        host_local_refresh_context_v1(root, enrollment)
+    val prepared = host_helper_prepare_v1(current.local.capacity, helper, current.local.policy, current.local.scope,
+        host_local_context_v1(current.local.policy), refresh)
+    current.local.capacity = prepared.owner
+    smux_primary_reply_v4(current, uid, if prepared.error == "" and prepared.receipt != nil: "helper-prepared" else: "unconfirmed",
+        if prepared.error == "": "primary-helper-reservation-retained" else: prepared.error,
+        plan.request_digest, plan.identity.binding_digest, false, true)
+
+pub fn smux_primary_bind_v4(owner: SmuxRuntimeBindingOwnerV3,
+        request: SmuxRuntimePrimaryRequestV4) -> SmuxRuntimeBindingTurnV3:
+    var current = owner
+    val target = request.target
+    val uid = target.binding_uid
+    if smux_runtime_binding_index_v3(current, uid) >= 0:
+        return smux_primary_reply_v4(current, uid, "rejected", "binding-uid-owned-by-output")
+    val previous = smux_primary_index_v4(current.primary_entries, uid)
+    if previous >= 0:
+        val before = smux_runtime_primary_request_encode_v4(current.primary_entries[previous].request)
+        val incoming = smux_runtime_primary_request_encode_v4(request)
+        if before.is_err() or incoming.is_err() or before.unwrap() != incoming.unwrap():
+            return smux_primary_reply_v4(current, uid, "rejected", "primary-request-replay-conflict")
+        return smux_primary_entry_reply_v4(current, current.primary_entries[previous])
+    current = smux_runtime_binding_prune_released_v3(current)
+    if current.entries.len() + current.primary_entries.len() >= 8:
+        return smux_primary_reply_v4(current, uid, "rejected", "runtime-binding-owner-capacity")
+    val stored = smux_primary_plan_load_v4(current.local.capacity.journal.root, request)
+    if stored.is_err(): return smux_primary_reply_v4(current, uid, "rejected", stored.unwrap_err())
+    val resolved = smux_primary_resolve_v4(current, request)
+    current = resolved.owner
+    if resolved.error != "" or resolved.plan == nil:
+        return smux_primary_reply_v4(current, uid, "rejected", resolved.error)
+    val plan = resolved.plan.unwrap()
+    val original = container_primary_attach_plan_encode_v1(stored.unwrap())
+    val fresh = container_primary_attach_plan_encode_v1(plan)
+    if original.is_err() or fresh.is_err() or original.unwrap() != fresh.unwrap():
+        return smux_primary_reply_v4(current, uid, "rejected", "primary-plan-changed")
+    val helper_result = host_helper_request_load_v1(current.local.capacity.journal.root, target.helper_operation_id)
+    if helper_result.is_err(): return smux_primary_reply_v4(current, uid, "rejected", helper_result.unwrap_err())
+    val helper = helper_result.unwrap()
+    val state = daemon_operation_exact_v2(current.local.capacity.journal, helper.operation)
+    if state.is_err(): return smux_primary_reply_v4(current, uid, "rejected", state.unwrap_err())
+    if state.unwrap().state != "admitted":
+        current.unresolved_uids = smux_binding_pending_add_v4(current.unresolved_uids,
+            SmuxRuntimeBindingDomainV4.PrimaryAttachV4, uid)
+        return smux_primary_reply_v4(current, uid, "unconfirmed", "primary-inspect-required", plan.request_digest,
+            plan.identity.binding_digest, false, true)
+    if (helper.plan.request_digest != plan.request_digest or helper.plan.helper_kind != "attach-broker" or
+            helper.plan.parent_operation_id != target.workload_operation_id or
+            helper.plan.parent_budget_digest != target.parent_budget_digest):
+        return smux_primary_reply_v4(current, uid, "rejected", "primary-helper-plan-mismatch")
+    val proof = smux_runtime_binding_staged_execution_v3(current.local.root, uid, helper)
+    if proof.is_err(): return smux_primary_reply_v4(current, uid, "rejected", proof.unwrap_err())
+    val prepared = host_helper_reservation_receipt_v1(helper.intent, helper.operation)
+    if prepared.is_err(): return smux_primary_reply_v4(current, uid, "rejected", prepared.unwrap_err())
+    val root = current.local.root
+    val enrollment = current.local.binding
+    val refresh = fn() -> HostReservationAuthorizationContextV1:
+        host_local_refresh_context_v1(root, enrollment)
+    val begun = host_helper_begin_v1(current.local.capacity, helper, prepared.unwrap(), proof.unwrap().signed,
+        proof.unwrap().approval, current.local.policy, current.local.scope, host_local_context_v1(current.local.policy), refresh)
+    current.local.capacity = begun.owner
+    var entry = SmuxRuntimePrimaryEntryV4(request: request, plan: plan, helper: begun.lease)
+    if begun.lease == nil:
+        if smux_primary_begin_retryable_v4(current.local.capacity, helper.operation):
+            return smux_primary_reply_v4(current, uid, "helper-prepared", "primary-execution-not-begun",
+                plan.request_digest, plan.identity.binding_digest, false, true)
+        entry.code = if begun.error == "": "primary-helper-begin-unconfirmed" else: begun.error
+        current.primary_entries.push(entry)
+        return smux_primary_entry_reply_v4(current, entry)
+    val opened = host_primary_attach_open_v1(current.local, plan, begun.lease.unwrap(), current.policy.stream)
+    current.local = opened.local
+    entry.session = opened.session
+    entry.cleanup_spawn = opened.cleanup_spawn
+    entry.code = opened.error
+    if opened.error == "" and opened.session != nil:
+        val session = opened.session.unwrap()
+        entry.session_identity = container_primary_attach_identity_v1(session)
+        val reference = container_terminal_reference_v1(ContainerOwnedTerminalSessionV1.PrimaryAttach(session))
+        if reference.is_ok():
+            entry.native_identity = reference.unwrap().group_identity
+            val adopted = smux_pane_adopt_primary_v4(target.session_id, target.window_id, target.pane_id,
+                target.expected_epoch, target.expected_revision, target.expected_child_incarnation,
+                uid, current.service_incarnation, session)
+            if adopted.is_ok():
+                entry.adopted = true
+                entry.session = nil
+                entry.status = "adopted-opening"
+                entry.code = "primary-transport-owned-control-unavailable"
+            else: entry.code = adopted.unwrap_err()
+        else: entry.code = reference.unwrap_err()
+    if not entry.adopted: entry.status = "cleanup-required"
+    current.primary_entries.push(entry)
+    smux_primary_entry_reply_v4(current, entry)

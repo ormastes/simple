@@ -75,14 +75,14 @@ consumption/native domain against canonical broker cleanup proof and uses the
 existing Host journal settlement before releasing the helper charge. Runtime
 qualification and positive native cleanup/settlement coverage remain pending.
 
-smux must then retain the primary session throughout plan, bind, pane adoption,
-output polling, independently authorized input/geometry, stop, cleanup, and
-settlement. Its existing output-follow state and settlement cannot be relabeled
-as primary. Caret can migrate only after that composition works end to end.
+smux now consumes this owner through an explicit V4 plan/bind/adoption and
+cleanup/settlement lifecycle; see `doc/05_design/smux_primary_session_v4.md`.
+That source integration is unqualified at runtime and exposes no interactive
+input or geometry capability. Caret can migrate only after that composition
+works end to end with independently authorized control ports.
 The current Caret `--container` path is preserved and is not migrated here.
 smux V3 replies require `outputMode = output-follow` and an exact output-only
-capability shape. Primary binding needs a versioned or explicitly negotiated
-protocol extension; changing the meaning of existing V3 replies is not valid.
+capability shape. The separate V4 extension preserves those V3 semantics.
 
 Windows Docker process primary attachment remains explicitly unavailable in
 the common provider. Its actual attach broker loop, process ownership, and

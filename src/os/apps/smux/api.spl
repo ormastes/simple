@@ -26,12 +26,13 @@ use os.apps.smux.service.{ServiceState, PaneRecord}
 use os.apps.smux.service_queries.{service_list_sessions, service_list_clients,
     service_list_windows, service_active_window, service_list_panes, service_focused_pane,
     service_pane_index as _pane_idx, service_window_index as _window_idx}
+pub use os.apps.smux.service_queries.{smux_backend_contract_name, smux_is_deferred_feature}
 use os.apps.smux.terminal_settlement_service_v3.terminal_transport_settle_owned_v3
 use std.nogc_sync_mut.orchestration.host_helper_settlement_v1.HostHelperSettlementAckV1
 use os.apps.smux.pane_configured_launch_service.{pane_spawn_configured_pty_state}
 use std.sosix.pty.{PtyLaunchV1}
 use os.apps.smux.client_context_service.{client_context_reconcile}
-use os.apps.smux.window_metadata_service.{rename_window_state}
+use os.apps.smux.window_metadata_service.{rename_window_state, activate_window_state, add_window_state}
 use os.apps.smux.service_revision.{ServiceRevisionState, service_revision_new,
     service_revision_publish, service_revision_writable, service_revision_reset, service_attachment_identities, service_revision_rollback_allowed}
 use os.apps.smux.client_attachment_service.{ClientAttachmentUpdate, client_attachment_index,
@@ -57,6 +58,8 @@ use os.apps.smux.session_lifecycle.{rename_session_state, remove_session_state, 
 use os.apps.smux.child_lifecycle.{close_owned_children, prepare_pane_reset_v2}
 use std.sosix.process.{PipedProcessRefV1, PipedProcessOwnedTransferV2}
 use os.apps.smux.terminal_adoption_service_v2.{terminal_transport_adopt_ref_v2, terminal_transport_adopt_owned_v2}
+use os.apps.smux.terminal_primary_service_v4.{terminal_primary_adopt_v4, terminal_primary_progress_v4, terminal_primary_settle_v4, terminal_primary_cleanup_v4}
+use std.nogc_async_mut.container.terminal_session_v1.ContainerPrimaryAttachSessionV1
 use os.apps.smux.pane_lifecycle.{PaneClosePending, close_pane_state,
     pane_close_window_pending, pane_close_poll_windows, pane_close_forget}
 use os.apps.smux.split_checkpoint.{SplitCheckpoint, split_checkpoint_capture, split_checkpoint_restore}
@@ -388,11 +391,8 @@ pub fn smux_new_window(session_id: text, name: text) -> MuxWindow:
         return MuxWindow.create("", session_id, name)
     val n = _svc.next_id
     val wid = id_text(n)
-    val window = MuxWindow.create(wid, session_id, name)
-    var st = _svc.add_window(window)
-    st = st.add_pane(PaneRecord.create(MuxPane.create(id_text(n + 1), wid, session_id)).with_focus(true))
-    _svc = _publish(st.with_next_id(n + 2))
-    return window
+    _svc = _publish(add_window_state(_svc, session_id, name, wid, id_text(n + 1)))
+    return _svc.get_window(_svc.find_window_idx(wid))
 
 pub fn smux_rename_window(session_id: text, window_id: text, name: text) -> Result<MuxWindow, text>:
     if not smux_configuration_writable(): return Err("service revision authority exhausted")
@@ -412,14 +412,7 @@ pub fn smux_focus_window(session_id: text, window_id: text) -> bool:
     if smux_window_closing(session_id, window_id): return false
     if _window_idx(_svc, session_id, window_id) < 0:
         return false
-    var st = _svc
-    var i = 0
-    while i < st.window_count:
-        val w = st.get_window(i)
-        if w.session_id == session_id:
-            st = st.replace_window(i, w.with_active(w.id == window_id))
-        i = i + 1
-    _svc = _publish(st)
+    _svc = _publish(activate_window_state(_svc, session_id, window_id))
     return true
 
 pub fn smux_active_window(session_id: text) -> Result<MuxWindow, text>:
@@ -574,6 +567,33 @@ pub fn smux_pane_adopt_owned_terminal_transport_v2(session_id: text, window_id: 
     _svc = _publish(updated)
     return Ok(transfer.reference.pid)
 
+pub fn smux_pane_adopt_primary_v4(session_id: text, window_id: text, pane_id: text,
+        expected_epoch: u64, expected_revision: u64, expected_child_incarnation: u64,
+        binding_uid: text, service_incarnation: text, session: ContainerPrimaryAttachSessionV1) -> Result<bool, text>:
+    val updated = terminal_primary_adopt_v4(_svc, _revisions, smux_window_closing(session_id, window_id),
+        session_id, window_id, pane_id, expected_epoch, expected_revision, expected_child_incarnation,
+        binding_uid, service_incarnation, session)?
+    _svc = _publish(updated)
+    Ok(true)
+
+pub fn smux_pane_primary_progress_v4(pane_id: text, expected_identity: text,
+        session: ContainerPrimaryAttachSessionV1) -> Result<bool, text>:
+    val updated = terminal_primary_progress_v4(_svc, _revisions, pane_id, expected_identity, session)?
+    _svc = _publish(updated)
+    Ok(true)
+
+pub fn smux_pane_primary_settlement_v4(pane_id: text, expected_identity: text,
+        native_identity: text, ack: HostHelperSettlementAckV1) -> Result<bool, text>:
+    val updated = terminal_primary_settle_v4(_svc, _revisions, pane_id, expected_identity, native_identity, ack)?
+    _svc = _publish(updated)
+    Ok(true)
+
+# Explicit cleanup stays with the sole pane owner and retains Host release state.
+pub fn smux_pane_cleanup_primary_v4(pane_id: text, expected_identity: text) -> Result<bool, text>:
+    val updated = terminal_primary_cleanup_v4(_svc, pane_id, expected_identity)?
+    _svc = _publish(updated)
+    Ok(_svc.get_pane(_svc.find_pane_idx(pane_id)).helper_cleaned_awaiting_release)
+
 # Trusted host ACK only; no peer decoder or native cleanup is invoked here.
 pub fn smux_pane_acknowledge_owned_terminal_settlement_v3(session_id: text, window_id: text,
         pane_id: text, expected_epoch: u64, expected_revision: u64, expected_child_incarnation: u64,
@@ -671,26 +691,6 @@ pub fn smux_paste_text(session_id: text, window_id: text, pane_id: text, body: t
     val updated = pane_paste_state(_svc, smux_window_closing(session_id, window_id), session_id, window_id, pane_id, body)
     if updated.commit: _svc = _publish(updated.state)
     return updated.result
-
-# Backend contract
-
-pub fn smux_backend_contract_name() -> text:
-    return "smux-native"
-
-# Deferred feature gate
-
-pub fn smux_is_deferred_feature(feature: text) -> bool:
-    # Hosted interactive copy navigation/line selection is implemented.
-    # Exact tmux key-table/config compatibility remains separately deferred.
-    if feature == "mouse":
-        return true
-    if feature == "key-table-compat":
-        return true
-    if feature == "tmux-conf":
-        return true
-    if feature == "control-mode":
-        return true
-    return false
 
 # Observability
 

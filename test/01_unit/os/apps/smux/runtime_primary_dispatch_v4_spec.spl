@@ -1,0 +1,60 @@
+# Execution NOT_RUN. Actual in-process dispatch at the unconfigured default;
+# no fake HostLocalRoot, native owner, live session, or capability admission.
+use std.spec.{describe, it, expect, step}
+use os.apps.smux.server.smux_server_dispatch
+use os.apps.smux.api.smux_configuration_revision
+use os.apps.smux.runtime_primary_reply_v4.smux_primary_capabilities_v4
+use os.apps.smux.runtime_binding_protocol_v1.smux_runtime_binding_capabilities_v1
+use std.common.contracts.orchestration.resource_v1.{parse_resource_document, as_dict}
+use std.common.sdn.value.SdnValue
+
+describe "authenticated smux primary V4 unconfigured dispatch":
+    it "keeps the complete authenticated primary frame within the existing transport bound":
+        step("keeps the complete authenticated primary frame within the existing transport bound")
+        var frame = "secret plan-primary-runtime-v4 "
+        while frame.len() < 4096:
+            frame = frame + "a"
+        expect(smux_server_dispatch(frame, "secret")).to_equal(smux_primary_capabilities_v4(false))
+        expect(smux_server_dispatch(frame + "a", "secret")).to_equal("smux: invalid request")
+
+    it "authenticates primary discovery and every V4 operation before request parsing":
+        step("authenticates primary discovery and every V4 operation before request parsing")
+        val before = smux_configuration_revision()
+        for command in ["runtime-primary-capabilities-v4", "plan-primary-runtime-v4 %%%",
+                "bind-primary-runtime-v4 %%%", "prepare-primary-helper-v4 invalid/uid",
+                "inspect-primary-binding-v4 invalid/uid", "cleanup-primary-binding-v4 invalid/uid"]:
+            expect(smux_server_dispatch("wrong " + command, "secret")).to_equal("smux: unauthorized")
+        val after = smux_configuration_revision()
+        expect(after.epoch).to_equal(before.epoch)
+        expect(after.value).to_equal(before.value)
+
+    it "returns explicit unavailable primary capabilities for every verb before parsing":
+        step("returns explicit unavailable primary capabilities for every verb before parsing")
+        val before = smux_configuration_revision()
+        val unavailable = smux_primary_capabilities_v4(false)
+        for command in ["runtime-primary-capabilities-v4", "plan-primary-runtime-v4 %%%",
+                "bind-primary-runtime-v4 %%%", "prepare-primary-helper-v4 invalid/uid",
+                "inspect-primary-binding-v4 invalid/uid", "cleanup-primary-binding-v4 invalid/uid",
+                "plan-primary-runtime-v4", "bind-primary-runtime-v4", "prepare-primary-helper-v4",
+                "inspect-primary-binding-v4", "cleanup-primary-binding-v4"]:
+            expect(smux_server_dispatch("secret " + command, "secret")).to_equal(unavailable)
+        val parsed = parse_resource_document(unavailable).unwrap()
+        val fields = as_dict(parsed.0, "", parsed.1).unwrap()
+        expect(fields["version"]).to_equal(SdnValue.Int(4))
+        expect(fields["kind"]).to_equal(SdnValue.String("smux-primary-binding-capabilities"))
+        expect(fields["planningSupported"]).to_equal(SdnValue.Bool(false))
+        expect(fields["primaryPlanRequired"]).to_equal(SdnValue.Bool(true))
+        expect(fields["inputSupported"]).to_equal(SdnValue.Bool(false))
+        expect(fields["geometrySupported"]).to_equal(SdnValue.Bool(false))
+        expect(fields["interactive"]).to_equal(SdnValue.Bool(false))
+        expect(fields["reason"]).to_equal(SdnValue.String("host-policy-unavailable"))
+        val after = smux_configuration_revision()
+        expect(after.epoch).to_equal(before.epoch)
+        expect(after.value).to_equal(before.value)
+
+    it "preserves the existing runtime binding capability bytes alongside V4 discovery":
+        step("preserves the existing runtime binding capability bytes alongside V4 discovery")
+        val before = smux_server_dispatch("secret runtime-binding-capabilities-v1", "secret")
+        expect(before).to_equal(smux_runtime_binding_capabilities_v1())
+        expect(smux_server_dispatch("secret runtime-primary-capabilities-v4", "secret")).to_equal(smux_primary_capabilities_v4(false))
+        expect(smux_server_dispatch("secret runtime-binding-capabilities-v1", "secret")).to_equal(before)
