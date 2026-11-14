@@ -136,6 +136,22 @@ pub fn rt_stdin_read_byte(_args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
+/// `rt_stdin_read_timeout_v1(size, timeout_ms)` — bounded poll + one partial
+/// read of stdin; empty packed byte array on timeout/EOF/error. Shares the
+/// runtime's helper so both lanes have identical semantics.
+pub fn rt_stdin_read_timeout_v1(args: &[Value]) -> Result<Value, CompileError> {
+    let size = match args.first() {
+        Some(Value::Int(n)) => *n,
+        _ => 0,
+    };
+    let timeout_ms = match args.get(1) {
+        Some(Value::Int(n)) => *n,
+        _ => 0,
+    };
+    let bytes = simple_runtime::value::sffi::io_print::stdin_read_timeout_bytes_v1(size, timeout_ms);
+    Ok(Value::byte_array(bytes))
+}
+
 /// `rt_terminal_enable_raw_mode` — bridges to `native_enable_raw_mode` on
 /// stdin (handle 0), converting its `i64` status code (0 = ok) to the `bool`
 /// the `rt_` extern declares.
