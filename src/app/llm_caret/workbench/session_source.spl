@@ -111,23 +111,28 @@ pub fn hints_declare(hints: [AgentProviderHint], agent_id: text, provider: text)
 # generation + 1. A dead/never-spawned slot (pid <= 0) keeps its generation and
 # last live pid, so a later relaunch is still recognised as a restart.
 pub fn ledger_observe(ledger: [SessionLedgerEntry], agent: ManagedAgent) -> [SessionLedgerEntry]:
+    ledger_observe_pid(ledger, agent.agent_id, agent.pid)
+
+# Same rule keyed on a bare (agent id, pid): the cs dashboard's agent table
+# carries a pid per agent but no ManagedAgent.
+pub fn ledger_observe_pid(ledger: [SessionLedgerEntry], agent_id: text, pid: i64) -> [SessionLedgerEntry]:
     var out: [SessionLedgerEntry] = []
     var found = false
     for e in ledger:
-        if e.agent_id == agent.agent_id:
+        if e.agent_id == agent_id:
             found = true
-            if agent.pid > 0 and e.last_pid > 0 and agent.pid != e.last_pid:
-                out.push(SessionLedgerEntry(agent_id: e.agent_id, last_pid: agent.pid,
+            if pid > 0 and e.last_pid > 0 and pid != e.last_pid:
+                out.push(SessionLedgerEntry(agent_id: e.agent_id, last_pid: pid,
                     generation: e.generation + 1))
-            elif agent.pid > 0 and e.last_pid <= 0:
-                out.push(SessionLedgerEntry(agent_id: e.agent_id, last_pid: agent.pid,
+            elif pid > 0 and e.last_pid <= 0:
+                out.push(SessionLedgerEntry(agent_id: e.agent_id, last_pid: pid,
                     generation: e.generation))
             else:
                 out.push(e)
         else:
             out.push(e)
     if not found:
-        out.push(SessionLedgerEntry(agent_id: agent.agent_id, last_pid: agent.pid, generation: 1))
+        out.push(SessionLedgerEntry(agent_id: agent_id, last_pid: pid, generation: 1))
     out
 
 pub fn ledger_generation(ledger: [SessionLedgerEntry], agent_id: text) -> i64:
@@ -224,6 +229,12 @@ pub fn publish_manager_sessions(manager: MultiCaretManager):
     else:
         _live_selected = ""
 
+# Records an agent's current pid in the live ledger and returns its live
+# generation (a pid change bumps it).
+pub fn observe_agent_generation(agent_id: text, pid: i64) -> i64:
+    _live_ledger = ledger_observe_pid(_live_ledger, agent_id, pid)
+    ledger_generation(_live_ledger, agent_id)
+
 pub fn select_live_session(id: SessionId):
     _live_selected = id.value
 
@@ -297,6 +308,7 @@ pub fn clear_pane_output():
 
 export lifecycle_for_agent, session_view_for_agent, session_view_for_agent_at,
     manager_session_views, manager_session_views_with, UNKNOWN_PROVIDER
+export observe_agent_generation, ledger_observe_pid
 export AgentProviderHint, SessionLedgerEntry, provider_for_agent, hints_declare, ledger_observe,
     ledger_generation, send_draft_guarded, declare_agent_provider
 export publish_pane_binding, live_pane_bindings, live_pane_generation
