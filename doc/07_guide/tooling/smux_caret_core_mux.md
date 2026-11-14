@@ -42,3 +42,25 @@ The current instruction is to use a genuine Phase3 compiler and, if needed, rebu
 Required Caret operations cannot become optional to mask an implementation gap. Optional terminal extensions may report Unsupported without mutation. Distinguish unsupported, permission denial, unavailable transport, invalid/stale targets, busy/timeout and partial commit. Do not silently switch backends or blindly replay a timed-out launch/delete.
 
 N2 requires both backend cohorts, concurrency/recovery/slow-consumer controls and a real 24-hour soak each. No shortened run, source review, authored case count, successful command formatting or historical different-producer result qualifies that gate.
+
+## Pane shell: shs or native
+
+A pane's shell is chosen by kind through `std.sosix.pty`:
+
+```bash
+SIMPLE_PTY_SHELL=shs      # panes start the Simple shell (same commands on every OS)
+SIMPLE_PTY_SHELL=native   # default on Windows/macOS/Linux/BSD: /bin/sh or cmd.exe
+SIMPLE_SHS_COMMAND='simple /abs/path/src/app/shs/main.spl'   # hosted shs launcher
+```
+
+From code, ask for a kind explicitly instead of hard-coding a shell:
+
+```simple
+use std.sosix.pty.{sosix_pty_shell_command_v1, SOSIX_PTY_SHELL_SHS}
+val shell = sosix_pty_shell_command_v1(SOSIX_PTY_SHELL_SHS)?
+smux_pane_spawn_pty(session, window, pane, shell)
+```
+
+SimpleOS always uses shs; it has no native shell. Hosted shs currently has no
+host filesystem and cannot start host programs, which is why hosts default to
+native. Details: `doc/05_design/pty_shell_kinds_shs_default.md`.
