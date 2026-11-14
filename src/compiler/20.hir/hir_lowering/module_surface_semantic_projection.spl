@@ -228,6 +228,67 @@ fn _surface_assoc_type(seed: ModuleSurfaceProjectionState, value: AssocTypeDecl)
         digest = _surface_fold_digest(digest, "assoc-default", _surface_type_digest(value.default))
     digest
 
+fn _surface_traits_v2(seed: ModuleSurfaceProjectionState, traits: Dict<text, ParserTrait>) -> ModuleSurfaceProjectionState:
+    var digest = seed
+    for name in _surface_sorted(traits.keys()):
+        val value: ParserTrait = traits[name]
+        digest = _surface_fold(digest, "trait", value.name)
+        digest = _surface_type_params(digest, value.type_params)
+        for type_ in value.super_traits: digest = _surface_fold_digest(digest, "super", _surface_type_digest(type_))
+        for bound in value.where_clause:
+            digest = _surface_fold(digest, "where-name", bound.type_param)
+            digest = _surface_fold_digest(digest, "where-type", _surface_type_digest(bound.trait_))
+        for method in value.methods: digest = _surface_function(digest, method, not method.body.stmts.is_empty())
+        for assoc in value.assoc_types: digest = _surface_assoc_type(digest, assoc)
+        digest = _surface_fold(digest, "visibility", _surface_visibility(value.visibility))
+    digest
+
+fn _surface_impls_v2(seed: ModuleSurfaceProjectionState, impls: [Impl]) -> ModuleSurfaceProjectionState:
+    var digest = seed
+    digest = _surface_fold(digest, "impl-count", "{impls.len()}")
+    for raw_value in impls:
+        # ANY-transport hazard sweep round 3: annotated rebind.
+        val value: Impl = raw_value
+        digest = _surface_fold_digest(digest, "impl-type", _surface_type_digest(value.type_))
+        digest = _surface_fold(digest, "impl-has-trait", _surface_bool(value.has_trait_))
+        if value.has_trait_: digest = _surface_fold_digest(digest, "impl-trait", _surface_type_digest(value.trait_))
+        digest = _surface_type_params(digest, value.type_params)
+        for bound in value.where_clause:
+            digest = _surface_fold(digest, "impl-where-name", bound.type_param)
+            digest = _surface_fold_digest(digest, "impl-where-type", _surface_type_digest(bound.trait_))
+        for method_name in _surface_sorted(value.methods.keys()):
+            digest = _surface_function(digest, value.methods[method_name], false)
+        for assoc in value.assoc_types: digest = _surface_assoc_type(digest, assoc)
+    digest
+
+fn _surface_enum_extensions_v2(seed: ModuleSurfaceProjectionState, extensions: [ParserExtendEnum]) -> ModuleSurfaceProjectionState:
+    var digest = seed
+    digest = _surface_fold(digest, "extend-enum-count", "{extensions.len()}")
+    for extension in extensions:
+        digest = _surface_fold(digest, "extend-target", extension.target)
+        digest = _surface_fold(digest, "extend-closure", extension.closure.name())
+        digest = _surface_fold(digest, "extend-constructor-count", "{extension.constructors.len()}")
+        for constructor in extension.constructors:
+            digest = _surface_fold(digest, "extend-provider", constructor.provider)
+            digest = _surface_fold(digest, "extend-name", constructor.name)
+            digest = _surface_fold(digest, "extend-payload-count", "{constructor.payload_types.len()}")
+            for payload_type in constructor.payload_types:
+                digest = _surface_fold_digest(digest, "extend-payload", _surface_type_digest(payload_type))
+    digest
+
+# Category projections reuse the whole-surface encoding, including trait default
+# bodies and excluding ordinary impl method bodies. A digest represents only the
+# supplied collection: it does not prove complete parsing or directory coverage.
+# Invalid child encodings propagate the existing empty/non-cacheable result.
+pub fn module_surface_trait_root_v2(traits: Dict<text, ParserTrait>) -> text:
+    val digest = _surface_fold(_surface_state(), "schema", "module-surface-traits-v2")
+    module_surface_semantic_finish(_surface_traits_v2(digest, traits))
+
+pub fn module_surface_extension_root_v2(impls: [Impl], extensions: [ParserExtendEnum]) -> text:
+    var digest = _surface_fold(_surface_state(), "schema", "module-surface-extensions-v2")
+    digest = _surface_impls_v2(digest, impls)
+    module_surface_semantic_finish(_surface_enum_extensions_v2(digest, extensions))
+
 pub(package) fn module_surface_semantic_projection(module: ParserModule) -> text:
     var digest = _surface_state()
     digest = _surface_fold(digest, "schema", "module-surface-semantic-v1")
@@ -270,31 +331,8 @@ pub(package) fn module_surface_semantic_projection(module: ParserModule) -> text
         digest = _surface_fold(digest, "complete-open", _surface_bool(value.complete_open))
         digest = _surface_fold(digest, "dyn-open", _surface_bool(value.dyn_open))
         digest = _surface_fold(digest, "visibility", _surface_visibility(value.visibility))
-    for name in _surface_sorted(module.traits.keys()):
-        val value: ParserTrait = module.traits[name]
-        digest = _surface_fold(digest, "trait", value.name)
-        digest = _surface_type_params(digest, value.type_params)
-        for type_ in value.super_traits: digest = _surface_fold_digest(digest, "super", _surface_type_digest(type_))
-        for bound in value.where_clause:
-            digest = _surface_fold(digest, "where-name", bound.type_param)
-            digest = _surface_fold_digest(digest, "where-type", _surface_type_digest(bound.trait_))
-        for method in value.methods: digest = _surface_function(digest, method, not method.body.stmts.is_empty())
-        for assoc in value.assoc_types: digest = _surface_assoc_type(digest, assoc)
-        digest = _surface_fold(digest, "visibility", _surface_visibility(value.visibility))
-    digest = _surface_fold(digest, "impl-count", "{module.impls.len()}")
-    for raw_value in module.impls:
-        # ANY-transport hazard sweep round 3: annotated rebind.
-        val value: Impl = raw_value
-        digest = _surface_fold_digest(digest, "impl-type", _surface_type_digest(value.type_))
-        digest = _surface_fold(digest, "impl-has-trait", _surface_bool(value.has_trait_))
-        if value.has_trait_: digest = _surface_fold_digest(digest, "impl-trait", _surface_type_digest(value.trait_))
-        digest = _surface_type_params(digest, value.type_params)
-        for bound in value.where_clause:
-            digest = _surface_fold(digest, "impl-where-name", bound.type_param)
-            digest = _surface_fold_digest(digest, "impl-where-type", _surface_type_digest(bound.trait_))
-        for method_name in _surface_sorted(value.methods.keys()):
-            digest = _surface_function(digest, value.methods[method_name], false)
-        for assoc in value.assoc_types: digest = _surface_assoc_type(digest, assoc)
+    digest = _surface_traits_v2(digest, module.traits)
+    digest = _surface_impls_v2(digest, module.impls)
     for name in _surface_sorted(module.constants.keys()):
         val value: ParserConst = module.constants[name]
         digest = _surface_fold(digest, "const", value.name)
@@ -328,17 +366,7 @@ pub(package) fn module_surface_semantic_projection(module: ParserModule) -> text
             digest = _surface_fold(digest, "bitfield-has-bits", _surface_bool(field.has_bits))
             if field.has_bits: digest = _surface_fold(digest, "bitfield-bits", "{field.bits}")
             digest = _surface_fold(digest, "bitfield-reserved", _surface_bool(field.is_reserved))
-    digest = _surface_fold(digest, "extend-enum-count", "{module.extend_enums.len()}")
-    for extension in module.extend_enums:
-        digest = _surface_fold(digest, "extend-target", extension.target)
-        digest = _surface_fold(digest, "extend-closure", extension.closure.name())
-        digest = _surface_fold(digest, "extend-constructor-count", "{extension.constructors.len()}")
-        for constructor in extension.constructors:
-            digest = _surface_fold(digest, "extend-provider", constructor.provider)
-            digest = _surface_fold(digest, "extend-name", constructor.name)
-            digest = _surface_fold(digest, "extend-payload-count", "{constructor.payload_types.len()}")
-            for payload_type in constructor.payload_types:
-                digest = _surface_fold_digest(digest, "extend-payload", _surface_type_digest(payload_type))
+    digest = _surface_enum_extensions_v2(digest, module.extend_enums)
     module_surface_semantic_finish(digest)
 
 pub(package) fn module_surface_semantic_hex_limb(hex: text, limb: i64) -> i64:

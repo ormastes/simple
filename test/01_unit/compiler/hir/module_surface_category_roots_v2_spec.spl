@@ -1,0 +1,87 @@
+"""
+Category-root regression contract. Parse real modules and project only supplied
+traits or impl/enum-extension collections. Empty collections are representable,
+not evidence that a source inventory was completely parsed. Run with an admitted
+pure-Simple self-hosted test runner; these specs require the real frontend.
+"""
+use std.spec.*
+use compiler.frontend.parser_types.{Expr, ExprKind, StmtKind}
+use compiler.blocks.blocks.value.{BlockValue}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.hir.hir_lowering.module_surface_semantic_projection.{module_surface_trait_root_v2, module_surface_extension_root_v2}
+
+fn category_trait_root(source: text) -> text:
+    val parsed = parse_and_build_module(source, "category_roots.spl")
+    expect(parsed.traits.len()).to_be_greater_than(0)
+    val digest = module_surface_trait_root_v2(parsed.traits)
+    expect(digest.len()).to_equal(64)
+    digest
+
+fn category_extension_root(source: text) -> text:
+    val parsed = parse_and_build_module(source, "category_roots.spl")
+    expect(parsed.impls.len() + parsed.extend_enums.len()).to_be_greater_than(0)
+    val digest = module_surface_extension_root_v2(parsed.impls, parsed.extend_enums)
+    expect(digest.len()).to_equal(64)
+    digest
+
+describe "Module surface category roots v2":
+    it "tracks trait default bodies and signatures":
+        val source = "trait Value:\n    fn get(self) -> i64:\n        1\n"
+        val base = category_trait_root(source)
+        expect(base == category_trait_root(source.replace("        1", "        2"))).to_equal(false)
+        expect(base == category_trait_root(source.replace("-> i64", "-> u64"))).to_equal(false)
+
+    it "ignores unrelated declarations and comments for traits":
+        val source = "trait Value:\n    fn get(self) -> i64\n"
+        val unrelated = "\nstruct Other:\n    count: i64\n\nconst OFFSET = 3\n"
+        expect(category_trait_root(source)).to_equal(category_trait_root("# comment\n" + source + unrelated))
+
+    it "normalizes trait dictionary order":
+        val first = "trait First:\n    fn one(self) -> i64\n"
+        val second = "trait Second:\n    fn two(self) -> i64\n"
+        expect(category_trait_root(first + second)).to_equal(category_trait_root(second + first))
+
+    it "tracks impl signatures but excludes ordinary impl bodies":
+        val source = "struct Value:\n    count: i64\nimpl Value:\n    fn get(self) -> i64:\n        1\n"
+        val base = category_extension_root(source)
+        expect(base).to_equal(category_extension_root(source.replace("        1", "        2")))
+        expect(base == category_extension_root(source.replace("-> i64", "-> u64"))).to_equal(false)
+        expect(base).to_equal(category_extension_root(source + "\nconst UNRELATED = 7\n"))
+
+    it "tracks enum extension payload types":
+        val source = "enum E:\n    A\n    complete:\nextend E:\n    complete:\n        pkg.B(i64)\n"
+        expect(category_extension_root(source) == category_extension_root(source.replace("pkg.B(i64)", "pkg.B(text)"))).to_equal(false)
+
+    it "preserves impl declaration order":
+        val declarations = "struct A:\n    value: i64\nstruct B:\n    value: i64\n"
+        val first = "impl A:\n    fn one(self) -> i64:\n        1\n"
+        val second = "impl B:\n    fn two(self) -> i64:\n        2\n"
+        expect(category_extension_root(declarations + first + second) == category_extension_root(declarations + second + first)).to_equal(false)
+
+    it "represents empty collections deterministically in separate domains":
+        val parsed = parse_and_build_module("fn ordinary() -> i64:\n    1\n", "category_empty.spl")
+        expect(parsed.traits.len()).to_equal(0)
+        expect(parsed.impls.len()).to_equal(0)
+        expect(parsed.extend_enums.len()).to_equal(0)
+        val traits = module_surface_trait_root_v2(parsed.traits)
+        val extensions = module_surface_extension_root_v2(parsed.impls, parsed.extend_enums)
+        expect(traits.len()).to_equal(64)
+        expect(extensions.len()).to_equal(64)
+        expect(traits).to_equal(module_surface_trait_root_v2(parsed.traits))
+        expect(extensions).to_equal(module_surface_extension_root_v2(parsed.impls, parsed.extend_enums))
+        expect(traits == extensions).to_equal(false)
+
+    it "refuses a trait body containing an opaque AST child":
+        val parsed = parse_and_build_module("trait Value:\n    fn get(self) -> i64:\n        1\n", "category_opaque.spl")
+        var traits = parsed.traits
+        var trait_ = traits["Value"]
+        var method = trait_.methods[0]
+        var body = method.body
+        var statement = body.stmts[0]
+        val opaque = Expr(kind: ExprKind.CustomBlock("opaque", BlockValue.Expr(1)), span: statement.span)
+        statement.kind = StmtKind.Expr(opaque)
+        body.stmts[0] = statement
+        method.body = body
+        trait_.methods[0] = method
+        traits["Value"] = trait_
+        expect(module_surface_trait_root_v2(traits)).to_equal("")
