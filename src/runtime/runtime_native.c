@@ -15,6 +15,7 @@
 #include <ws2tcpip.h>
 #endif
 #include "runtime_alloc_observer.h"
+#include "xray/xray_startup_owned_threads_v1.h"
 #if defined(SIMPLE_ALLOC_OBSERVER_V1) && SIMPLE_ALLOC_OBSERVER_V1
 const volatile int rt_alloc_observer_native_owner_v1 = 1;
 #endif
@@ -15990,7 +15991,7 @@ static int rt_http_resolve(const char* host, const char* port, const struct addr
         return EAI_SYSTEM;
     }
     pthread_t thread;
-    int create_result = pthread_create(&thread, &thread_attr, rt_http_resolve_worker, job);
+    int create_result = SIMPLE_XRAY_STARTUP_PTHREAD_CREATE_V1(&thread, &thread_attr, rt_http_resolve_worker, job);
     pthread_attr_destroy(&thread_attr);
     if (create_result != 0) {
         close(notify[0]); close(notify[1]); free(job->host); free(job->port); free(job);

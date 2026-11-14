@@ -1,0 +1,169 @@
+# Linux LLVM-XRay executable runtime inputs. No public profile admission here.
+# compiler-rt is materialized as a relocatable resident object: the final
+# hosted linker may be ld/lld, so no Clang-only -fxray flag escapes this owner.
+# Both resident object bytes and explicit libraries enter the normal link key.
+use std.nogc_sync_mut.io_runtime.{dir_create_all, is_file, process_run_timeout}
+use compiler.backend.runtime_compiler.{find_c_compiler, find_runtime_source_dir}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir_raw}
+
+pub fn xray_llvm_link_needed_v1(enabled: bool, backend: text, target: text,
+        shared: bool) -> Result<bool, text>:
+    if not enabled or (backend != "llvm" and backend != "llvm-lib"):
+        return Ok(false)
+    if target == "":
+        return Err("XRAY-E-LLVM-TARGET: unresolved target")
+    # Other platform owners, including the Windows IR-slot lane, are unchanged.
+    if not target.contains("-linux"):
+        return Ok(false)
+    if target != "aarch64-unknown-linux-gnu" and target != "x86_64-unknown-linux-gnu":
+        return Err("XRAY-E-LLVM-TARGET: unsupported Linux target {target}")
+    if shared:
+        return Err("XRAY-E-LLVM-IMAGE: LLVM observer supports the main executable only")
+    Ok(true)
+
+pub fn xray_llvm_link_libraries_v1(libraries: [text]) -> [text]:
+    var result: [text] = []
+    for library in libraries: result.push(library)
+    # These are compiler-rt's Linux dependencies, also exercised by its native
+    # adapter harness. No basic/FDR logging-mode archives are requested.
+    for library in ["pthread", "rt", "m", "dl"]:
+        if not result.contains(library): result.push(library)
+    result
+
+# NativeLinkOptions carries direct-linker arguments. The hosted CC fallback
+# translates these exact options; Clang-only flags must never reach ld/lld.
+pub fn xray_llvm_semantic_link_flags_v1(flags: [text]) -> Result<[text], text>:
+    var result: [text] = []
+    var at = 0
+    while at < flags.len():
+        val flag = flags[at]
+        if flag.contains("--build-id"):
+            if flag != "--build-id=sha1" and flag != "-Wl,--build-id=sha1":
+                return Err("XRAY-E-IMAGE-ID: observer requires an explicit SHA1 ELF build-id")
+        elif flag.contains("nostart-stop-gc"):
+            return Err("XRAY-E-SEMANTIC-GC: start/stop references must not retain dead functions")
+        elif flag == "-z" and at + 1 < flags.len() and flags[at + 1] == "start-stop-gc":
+            at = at + 1
+        elif flag == "-zstart-stop-gc" or flag == "-Wl,-z,start-stop-gc":
+            pass
+        elif flag.contains("start-stop-gc"):
+            return Err("XRAY-E-SEMANTIC-GC: unsupported combined start/stop option")
+        else:
+            result.push(flag)
+        at = at + 1
+    result.push("--build-id=sha1")
+    result.push("-z")
+    result.push("start-stop-gc")
+    Ok(result)
+
+pub fn xray_llvm_adapter_flags_v1(target: text) -> [text]:
+    var flags = ["--target={target}", "-O2", "-fPIC", "-mgeneral-regs-only"]
+    if target == "aarch64-unknown-linux-gnu": flags.push("-mno-outline-atomics")
+    flags
+
+pub fn xray_llvm_runtime_query_args_v1(target: text) -> [text]:
+    ["--target={target}", "--print-file-name=libclang_rt.xray.a"]
+
+# LLVM 18 uses architecture-suffixed Linux archives; newer toolchains may
+# return a per-target directory containing the unsuffixed archive. Query the
+# same selected compiler and exact target, never scan ambient runtime paths.
+pub fn xray_llvm_runtime_arch_name_v1(target: text) -> Result<text, text>:
+    match target:
+        case "aarch64-unknown-linux-gnu": Ok("libclang_rt.xray-aarch64.a")
+        case "x86_64-unknown-linux-gnu": Ok("libclang_rt.xray-x86_64.a")
+        case _: Err("XRAY-E-LLVM-TARGET: unsupported runtime archive target")
+
+pub fn xray_llvm_runtime_arch_path_valid_v1(path: text, target: text) -> bool:
+    match xray_llvm_runtime_arch_name_v1(target):
+        case Err(_): false
+        case Ok(name):
+            path.starts_with("/") and path.ends_with("/" + name) and
+                not path.contains("\n") and not path.contains("\r")
+
+pub fn xray_llvm_runtime_archive_path_valid_v1(path: text) -> bool:
+    path.starts_with("/") and path.ends_with("/libclang_rt.xray.a") and
+        not path.contains("\n") and not path.contains("\r")
+
+pub fn xray_llvm_resident_args_v1(target: text, archive: text, output: text) -> [text]:
+    ["--target={target}", "-nostdlib", "-r", "-Wl,--whole-archive", archive,
+        "-Wl,--no-whole-archive", "-o", output]
+
+pub fn xray_llvm_link_objects_v1(objects: [text], enabled: bool, backend: text,
+        target: text, shared: bool) -> Result<[text], text>:
+    val needed = xray_llvm_link_needed_v1(enabled, backend, target, shared)?
+    if not needed:
+        return Ok(objects)
+    # Use the hosted runtime's compiler owner, not a second ambient CC resolver.
+    val compiler = find_c_compiler()
+    if compiler.len() == 0:
+        return Err("XRAY-E-LLVM-CC: no hosted Clang compiler")
+    val runtime_source = find_runtime_source_dir()
+    if runtime_source.len() == 0:
+        return Err("XRAY-E-LLVM-SOURCE: no hosted runtime source owner")
+    xray_llvm_materialize_runtime_v1(objects, target, compiler,
+        "{runtime_source}/xray/xray_llvm_adapter_linux.c",
+        "{runtime_source}/xray/xray_llvm_image_linux.c",
+        "{runtime_source}/xray/xray_qualification_profile_linux.c", "build/xray")
+
+# Internal effectful executor; callers must first resolve policy and compiler.
+# Keeping explicit inputs permits native integration tests without a second
+# compiler discovery implementation or a simulated process provider.
+fn xray_llvm_materialize_runtime_v1(objects: [text], target: text, compiler: text,
+        source: text, image_source: text, profile_source: text, output_root: text) -> Result<[text], text>:
+    val (archive_out, archive_error, archive_code) = process_run_timeout(
+        compiler, xray_llvm_runtime_query_args_v1(target), 10000)
+    var archive = archive_out.trim()
+    if archive_code != 0:
+        return Err("XRAY-E-LLVM-RUNTIME: compiler runtime query failed: {archive_error}")
+    if archive == "libclang_rt.xray.a":
+        val arch_name = xray_llvm_runtime_arch_name_v1(target)?
+        val (arch_out, arch_error, arch_code) = process_run_timeout(compiler,
+            ["--target={target}", "--print-file-name={arch_name}"], 10000)
+        archive = arch_out.trim()
+        if arch_code != 0 or not xray_llvm_runtime_arch_path_valid_v1(archive, target):
+            return Err("XRAY-E-LLVM-RUNTIME: matching architecture archive unavailable: {arch_error}")
+    elif not xray_llvm_runtime_archive_path_valid_v1(archive):
+        return Err("XRAY-E-LLVM-RUNTIME: unexpected compiler runtime archive path")
+    if not is_file(archive):
+        return Err("XRAY-E-LLVM-RUNTIME: matching compiler-rt archive file absent")
+    if not is_file(source):
+        return Err("XRAY-E-LLVM-SOURCE: {source} not found")
+    if not is_file(image_source):
+        return Err("XRAY-E-LLVM-SOURCE: {image_source} not found")
+    if not is_file(profile_source):
+        return Err("XRAY-E-LLVM-SOURCE: {profile_source} not found")
+    if not dir_create_all(output_root):
+        return Err("XRAY-E-LLVM-OUTPUT: cannot create runtime output root")
+    val directory = secure_temp_dir_raw(output_root, "llvm-runtime")
+    if directory.len() <= 0:
+        return Err("XRAY-E-LLVM-OUTPUT: cannot create private runtime directory")
+    val adapter = "{directory}/adapter.o"
+    val resident = "{directory}/resident.o"
+    val image = "{directory}/image.o"
+    val profile = "{directory}/profile.o"
+    var adapter_args = xray_llvm_adapter_flags_v1(target)
+    for argument in ["-c", source, "-o", adapter]: adapter_args.push(argument)
+    val (_adapter_out, adapter_error, adapter_code) = process_run_timeout(compiler, adapter_args, 120000)
+    if adapter_code != 0 or not is_file(adapter):
+        return Err("XRAY-E-LLVM-ADAPTER: compile failed ({adapter_code}): {adapter_error}")
+    var image_args = xray_llvm_adapter_flags_v1(target)
+    for argument in ["-c", image_source, "-o", image]: image_args.push(argument)
+    val (_image_out, image_error, image_code) = process_run_timeout(compiler, image_args, 120000)
+    if image_code != 0 or not is_file(image):
+        return Err("XRAY-E-LLVM-IMAGE: compile failed ({image_code}): {image_error}")
+    var profile_args = xray_llvm_adapter_flags_v1(target)
+    for argument in ["-c", profile_source, "-o", profile]: profile_args.push(argument)
+    val (_profile_out, profile_error, profile_code) = process_run_timeout(compiler, profile_args, 120000)
+    if profile_code != 0 or not is_file(profile):
+        return Err("XRAY-E-LLVM-PROFILE: compile failed ({profile_code}): {profile_error}")
+    val (_resident_out, resident_error, resident_code) = process_run_timeout(
+        compiler, xray_llvm_resident_args_v1(target, archive, resident), 120000)
+    if resident_code != 0 or not is_file(resident):
+        return Err("XRAY-E-LLVM-RESIDENT: partial link failed ({resident_code}): {resident_error}")
+    var result: [text] = []
+    for object in objects: result.push(object)
+    result.push(adapter)
+    result.push(image)
+    result.push(profile)
+    result.push(resident)
+    Ok(result)

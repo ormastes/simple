@@ -34,6 +34,7 @@ pub const XRAY_LLVM_STATE_IDLE_V1: i64 = 0
 pub const XRAY_LLVM_STATE_PREPARED_V1: i64 = 1
 pub const XRAY_LLVM_STATE_ACTIVE_V1: i64 = 2
 pub const XRAY_LLVM_STATE_FAULTED_V1: i64 = 3
+pub const XRAY_LLVM_STATE_RECORDING_CLOSED_V1: i64 = 4
 
 const XRAY_LLVM_MAX_SITES_V1: i64 = 4096
 const XRAY_LLVM_ID_MAX_V1: u64 = 18446744073709551615u64
@@ -121,6 +122,8 @@ impl XrayLlvmAdapterV1:
     # effect happens here. Failure leaves the adapter exactly as it was.
     me prepare(leaf: XrayLlvmLeafV1, config: TraceConfigV1, selection: TraceSelectionV1
             ) -> Result<TracePreparedV1, TraceFailureV1>:
+        if self.state == XRAY_LLVM_STATE_RECORDING_CLOSED_V1:
+            return Err(TraceFailureV1.UnsupportedConsistency)
         if self.state == XRAY_LLVM_STATE_FAULTED_V1: return Err(TraceFailureV1.BackendFailure)
         if self.state != XRAY_LLVM_STATE_IDLE_V1: return Err(TraceFailureV1.Busy)
         trace_config_validate_v1(config)?
@@ -234,6 +237,27 @@ impl XrayLlvmAdapterV1:
         if not self.unpatch_all(leaf): return Err(TraceFailureV1.BackendFailure)
         self.state = XRAY_LLVM_STATE_IDLE_V1
         Ok(true)
+
+    # Startup-only profile stop. Closing recording admission is safe after
+    # user main begins; changing executable sled bytes is not authorized by the
+    # expired startup window. Keep exact armed IDs and never recycle this state
+    # into preparation/restart. Descriptor pins and queued records still need
+    # the owner's separate drain; this operation never reports Drained.
+    me request_recording_stop(leaf: XrayLlvmLeafV1, session: TraceSessionV1
+            ) -> Result<TraceSessionStateV1, TraceFailureV1>:
+        if (session.slot != 1 or session.incarnation != self.incarnation or
+                session.generation != self.incarnation):
+            return Err(TraceFailureV1.InvalidHandle)
+        if self.state == XRAY_LLVM_STATE_RECORDING_CLOSED_V1:
+            return Ok(TraceSessionStateV1.Draining)
+        if self.state == XRAY_LLVM_STATE_FAULTED_V1:
+            return Err(TraceFailureV1.BackendFailure)
+        if self.state != XRAY_LLVM_STATE_ACTIVE_V1:
+            return Err(TraceFailureV1.InvalidHandle)
+        self.close_admission(leaf)
+        if self.close_pending: return Err(TraceFailureV1.Busy)
+        self.state = XRAY_LLVM_STATE_RECORDING_CLOSED_V1
+        Ok(TraceSessionStateV1.Draining)
 
     # Quiescent stop: admission closes, then every selected sled returns to its
     # taken branch. The handler and arena stay resident (no unload); a late

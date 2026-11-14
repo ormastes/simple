@@ -16,6 +16,7 @@ use compiler.common.driver_compile_options.{driver_core_compile_options_default}
 use compiler.driver.driver_types.{compute_options_hash}
 use compiler.driver.cache.compile_options_hash.{compile_options_hash_compute}
 use compiler.driver.driver_xray_policy.{xray_trace_instrumentation_enabled, xray_sdn_trace_instrumentation}
+use compiler.backend.llvm_xray_semantic_rows.{llvm_xray_semantic_attachment_v1}
 
 fn xray_attr_fn(id: i64, name: text, mode: i64) -> MirFunction:
     var builder = MirBuilder.new()
@@ -49,6 +50,19 @@ fn xray_define_line(ir: text, name: text) -> text:
     ""
 
 describe "XRay LLVM function attributes":
+    it "attaches semantic rows to actual emitted instrumented definitions only":
+        val ir = xray_attr_ir(xray_attr_module([xray_attr_fn(1, "xr_tail", 2), xray_attr_fn(2, "xr_never", 0)]))
+        expect(xray_define_line(ir, "xr_tail")).to_contain(" !pcsections !{")
+        expect(xray_define_line(ir, "xr_tail")).to_contain("simple_xray_semantic_v1")
+        expect(xray_define_line(ir, "xr_never").contains("pcsections")).to_equal(false)
+        expect(ir.contains("@llvm.used")).to_equal(false)
+        expect(ir.contains("@llvm.compiler.used")).to_equal(false)
+
+    it "uses the final main symbol as semantic identity":
+        val ir = xray_attr_ir(xray_attr_module([xray_attr_fn(1, "main", 2)]))
+        val expected = llvm_xray_semantic_attachment_v1("__simple_main", "probe.attrs").unwrap()
+        expect(xray_define_line(ir, "__simple_main")).to_contain(expected)
+
     it "marks entry+exit+tail functions xray-always":
         step("Translate a module with an xray_mode=2 function")
         val ir = xray_attr_ir(xray_attr_module([xray_attr_fn(1, "xr_tail", 2), xray_attr_fn(2, "xr_never", 0)]))
@@ -114,6 +128,23 @@ describe "XRay LLVM function attributes":
         expect(xray_define_line(ir, "xr_a")).to_contain(" alwaysinline")
         expect(ir.contains("xray")).to_equal(false)
         expect(ir.contains("function-instrument")).to_equal(false)
+
+describe "XRay LLVM semantic row payload":
+    it "spells the agreed bounded uncompressed row and zero padding":
+        val attachment = llvm_xray_semantic_attachment_v1("probe.f1", "probe").unwrap()
+        expect(attachment).to_start_with(" !pcsections !{!\"simple_xray_semantic_v1\", !{")
+        expect(attachment).to_contain("i64 3552587323878299731, i32 1, i32 56, i32 8, i32 5, i64 0")
+        expect(attachment).to_end_with("i8 112, i8 114, i8 111, i8 98, i8 101, i8 0, i8 0, i8 0}}")
+
+    it "rejects empty identities instead of emitting unbindable rows":
+        expect(llvm_xray_semantic_attachment_v1("", "probe").is_err()).to_equal(true)
+        expect(llvm_xray_semantic_attachment_v1("probe.f1", "").is_err()).to_equal(true)
+
+    it "rejects over-limit identities instead of truncating":
+        var identity = ""
+        while identity.byte_len() < 4097: identity = identity + "x"
+        expect(llvm_xray_semantic_attachment_v1(identity, "probe").is_err()).to_equal(true)
+        expect(llvm_xray_semantic_attachment_v1("probe.f1", identity).is_err()).to_equal(true)
 
 describe "XRay compile options hash token":
     it "omits the XRay token within the current target-profile schema":

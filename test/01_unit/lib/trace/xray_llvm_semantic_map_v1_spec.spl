@@ -1,0 +1,57 @@
+use std.spec.*
+use std.common.trace.xray_llvm_semantic_map_v1.*
+use std.common.trace.observer_native_map_v1.{TraceImageRangeV1}
+
+fn row_bytes() -> [u8]:
+    [200u8, 2u8, 254u8, 255u8, 24u8, 0u8, 0u8, 0u8, 83u8, 88u8, 82u8, 65u8, 89u8, 83u8, 77u8, 49u8, 1u8, 0u8, 0u8, 0u8, 56u8, 0u8, 0u8, 0u8, 8u8, 0u8, 0u8, 0u8, 5u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 108u8, 105u8, 118u8, 101u8, 95u8, 107u8, 101u8, 121u8, 111u8, 119u8, 110u8, 101u8, 114u8, 0u8, 0u8, 0u8]
+
+fn image_ranges() -> [TraceImageRangeV1]:
+    [TraceImageRangeV1(offset: 0x200u64, size: 4096u64, readable: true, writable: false, executable: true)]
+
+describe "LLVM final-image semantic row contract":
+    it "reads unaligned little-endian rows and signed PC-relative addresses":
+        val rows = xray_llvm_semantic_decode_v1(row_bytes(), 0x20000u64, image_ranges()).unwrap()
+        expect(rows.len()).to_equal(1)
+        expect(rows[0].key).to_equal("live_key")
+        expect(rows[0].owner).to_equal("owner")
+        expect(rows[0].address).to_equal(0x2c8u64)
+        expect(rows[0].size).to_equal(24u64)
+
+    it "rejects corrupt headers, malformed UTF8, NULs and nonzero padding":
+        for position in [8, 16, 20, 24, 28, 32, 40, 55]:
+            var bytes = row_bytes()
+            bytes[position] = 255u8
+            expect(xray_llvm_semantic_decode_v1(bytes, 0x20000u64, image_ranges()).is_err()).to_equal(true)
+        expect(xray_llvm_semantic_decode_v1(row_bytes(), 1u64, image_ranges()).is_err()).to_equal(true)
+        expect(xray_llvm_semantic_decode_v1(row_bytes(), 0x20000u64, []).is_err()).to_equal(true)
+
+    it "binds explicit semantic rows to exact addresses rather than LLVM ID order":
+        val rows = xray_llvm_semantic_decode_v1(row_bytes(), 0x20000u64, image_ranges()).unwrap()
+        val actual = [XrayLlvmFunctionAddressV1(llvm_id: 7, address: 0x2c8u64), XrayLlvmFunctionAddressV1(llvm_id: 12, address: 0x888u64)]
+        val identity: [u8] = [1u8,2u8,3u8,4u8,5u8,6u8,7u8,8u8,9u8,10u8,11u8,12u8,13u8,14u8,15u8,16u8,17u8,18u8,19u8,20u8]
+        val map = xray_llvm_semantic_bind_v1(rows, actual, identity, 1u64, 9u64).unwrap()
+        expect(map.bindings[0].llvm_id).to_equal(7)
+        expect(map.bindings[0].function_id).to_equal(1u32)
+        expect(map.bindings[0].site_id).to_equal(1u32)
+        expect(map.incarnation).to_equal(9u64)
+        expect(map.build_id).to_equal(identity)
+        expect(xray_llvm_semantic_bind_v1(rows, actual, [], 1u64, 9u64).is_err()).to_equal(true)
+        expect(xray_llvm_semantic_bind_v1(rows, [], identity, 1u64, 9u64).is_err()).to_equal(true)
+        expect(xray_llvm_semantic_bind_v1(rows, [actual[0], actual[0]], identity, 1u64, 9u64).is_err()).to_equal(true)
+        expect(xray_llvm_semantic_bind_v1(rows, actual, identity, 0u64, 9u64).is_err()).to_equal(true)
+
+    it "issues semantic IDs independently of linker row order":
+        val first = XrayLlvmSemanticRowV1(key: "zzz", owner: "app", address: 4096u64, size: 16u64)
+        val second = XrayLlvmSemanticRowV1(key: "aaa", owner: "app", address: 8192u64, size: 16u64)
+        val actual = [XrayLlvmFunctionAddressV1(llvm_id: 7, address: 4096u64), XrayLlvmFunctionAddressV1(llvm_id: 12, address: 8192u64)]
+        val identity: [u8] = [1u8,2u8,3u8,4u8,5u8,6u8,7u8,8u8,9u8,10u8,11u8,12u8,13u8,14u8,15u8,16u8,17u8,18u8,19u8,20u8]
+        val forward = xray_llvm_semantic_bind_v1([first, second], actual, identity, 1u64, 1u64).unwrap()
+        val reverse = xray_llvm_semantic_bind_v1([second, first], actual, identity, 1u64, 1u64).unwrap()
+        expect(forward.bindings[0].row.key).to_equal("aaa")
+        expect(forward.bindings[0].llvm_id).to_equal(reverse.bindings[0].llvm_id)
+        expect(forward.bindings[1].site_id).to_equal(reverse.bindings[1].site_id)
+
+    it "rejects overflowing executable ranges before membership checks":
+        val overflow = TraceImageRangeV1(offset: 18446744073709551600u64, size: 100u64,
+            readable: true, writable: false, executable: true)
+        expect(xray_llvm_semantic_decode_v1(row_bytes(), 0x20000u64, [overflow]).is_err()).to_equal(true)

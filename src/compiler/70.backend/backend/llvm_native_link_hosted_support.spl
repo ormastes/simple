@@ -13,7 +13,7 @@ use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
 use compiler.common.mir_target_context.{mir_target_context_normalize_arch}
 use compiler.backend.entry_point.{generate_entry_point_ir}
 use compiler.backend.llvm_target.{LlvmTargetConfig}
-use compiler.backend.llvm_backend_tools.{compile_ir_to_object, extract_symbols_nm, llc_available}
+use compiler.backend.llvm_backend_tools.{compile_ir_to_object, extract_symbols_nm, llc_available, xray_startup_require_export_v1}
 use compiler.backend.llvm_capability.{find_archive_portable, find_nm_portable, find_objcopy_portable, find_objdump_portable}
 use compiler.backend.backend.backend_types.{CodegenTarget, OptimizationLevel}
 use compiler.backend.runtime_compiler.{compile_runtime_objects, cleanup_runtime_objects, find_c_compiler, hosted_c_compiler_plan, _get_temp_dir, _obj_ext, _is_windows, _is_mingw, _is_msvc_cc}
@@ -50,6 +50,8 @@ struct NativeLinkOptions:
     libraries: [text] = []
     library_paths: [text] = []
     linker_flags: [text] = []
+    xray_thread_context_v1: bool = false
+    xray_startup_consumer_v1: bool = false
 
 impl NativeLinkOptions:
     static fn default() -> NativeLinkOptions:
@@ -122,7 +124,7 @@ pub fn entry_point_c_target_args(target_triple: text) -> [text]:
         args.push("-mabi=lp64d")
     args
 
-pub fn compile_entry_point_c(user_objects: [text], pid: i64, verbose: bool, opt_level: i64, compiler: text = "", target_triple: text = "") -> Result<text, text>:
+pub fn compile_entry_point_c(user_objects: [text], pid: i64, verbose: bool, opt_level: i64, compiler: text = "", target_triple: text = "", xray_thread_context_v1: bool = false, xray_startup_consumer_v1: bool = false) -> Result<text, text>:
     """Compile entry point as C source (no llc needed)."""
     # @workaround bug=stage2_try_unwrap_text_typed_as_i64_2026-11-02 reason=frozen stage2 ef0681fc0e1 decodes a `?`-unwrapped Result<text,_> payload as an i64 local (handle rendered as digits / compared as int); bind through a typed match
     var cc: text = ""
@@ -138,6 +140,10 @@ pub fn compile_entry_point_c(user_objects: [text], pid: i64, verbose: bool, opt_
         return Err("entry C compiler differs from admitted tool")
     if cc == "":
         return Err("No C compiler found")
+    if xray_startup_consumer_v1:
+        if not xray_thread_context_v1:
+            return Err("XRAY-E-STARTUP: consumer requires source-built LLVM thread context")
+        xray_startup_require_export_v1(user_objects)?
     val tmp_dir = _get_temp_dir()
     val ext = _obj_ext()
     # Deterministic entry-shim basename for reproducible builds: the C compiler
@@ -148,7 +154,9 @@ pub fn compile_entry_point_c(user_objects: [text], pid: i64, verbose: bool, opt_
     dir_create_all(entry_dir)
     val entry_c = "{entry_dir}/simple_entry.c"
     val entry_o = "{entry_dir}/simple_entry{ext}"
-    val init_names = if native_tool_strict_requested_v1():
+    # Trace readiness requires successful symbol discovery, including a valid
+    # empty result; tool failures must not masquerade as no initializers.
+    val init_names = if xray_thread_context_v1 or native_tool_strict_requested_v1():
         simpleos_module_init_symbols_checked_v1(user_objects)?
     else: simpleos_module_init_symbols(user_objects)
     var c_source = "extern void spl_init_args(int argc, char** argv);\n"
@@ -172,6 +180,16 @@ pub fn compile_entry_point_c(user_objects: [text], pid: i64, verbose: bool, opt_
     c_source = c_source + "extern int __simple_startup_before_main(int argc, char** argv) __attribute__((weak));\n"
     c_source = c_source + "#endif\n"
     c_source = c_source + "extern void __simple_runtime_init(void);\n"
+    if xray_thread_context_v1:
+        c_source = c_source + "extern void simple_xray_resident_runtime_ready_v1(void);\n"
+        c_source = c_source + "extern void simple_xray_startup_window_seal_v1(void);\n"
+    if xray_startup_consumer_v1:
+        c_source = c_source + "#include <stdint.h>\n#include <stdio.h>\n"
+        c_source = c_source + "extern int64_t __simple_xray_resident_startup_v1(void);\n"
+        c_source = c_source + "extern int64_t simple_xray_resident_control_enter_v1(void);\n"
+        c_source = c_source + "extern void simple_xray_resident_control_leave_v1(void);\n"
+        c_source = c_source + "extern int64_t simple_xray_startup_no_owned_threads_begin_v1(void);\n"
+        c_source = c_source + "extern int64_t simple_xray_startup_no_owned_threads_end_v1(void);\n"
     c_source = c_source + "extern long long __simple_main(void);\n"
     c_source = c_source + "extern void __simple_runtime_shutdown(void);\n"
     for name in init_names:
@@ -191,13 +209,36 @@ pub fn compile_entry_point_c(user_objects: [text], pid: i64, verbose: bool, opt_
     c_source = c_source + "#endif\n"
     c_source = c_source + "    spl_init_args(argc, argv);\n"
     c_source = c_source + "#if defined(__ELF__)\n"
-    c_source = c_source + "    if (__simple_startup_before_main && __simple_startup_before_main(argc, argv) != 0) return 125;\n"
+    if xray_thread_context_v1:
+        c_source = c_source + "    if (__simple_startup_before_main && __simple_startup_before_main(argc, argv) != 0) { simple_xray_startup_window_seal_v1(); return 125; }\n"
+    else:
+        c_source = c_source + "    if (__simple_startup_before_main && __simple_startup_before_main(argc, argv) != 0) return 125;\n"
     c_source = c_source + "#else\n"
-    c_source = c_source + "    if (__simple_startup_before_main(argc, argv) != 0) return 125;\n"
+    if xray_thread_context_v1:
+        c_source = c_source + "    if (__simple_startup_before_main(argc, argv) != 0) { simple_xray_startup_window_seal_v1(); return 125; }\n"
+    else:
+        c_source = c_source + "    if (__simple_startup_before_main(argc, argv) != 0) return 125;\n"
     c_source = c_source + "#endif\n"
     c_source = c_source + "    __simple_runtime_init();\n"
     for name in init_names:
         c_source = c_source + "    {name}();\n"
+    # Readiness follows runtime/TLS and all mandatory initializer calls.
+    # It grants neither observer capability nor quiescence.
+    if xray_thread_context_v1:
+        c_source = c_source + "    simple_xray_resident_runtime_ready_v1();\n"
+    if xray_startup_consumer_v1:
+        c_source = c_source + "    if (simple_xray_resident_control_enter_v1() != 1) { simple_xray_startup_window_seal_v1(); return 125; }\n"
+        c_source = c_source + "    int64_t trace_window = simple_xray_startup_no_owned_threads_begin_v1();\n"
+        c_source = c_source + "    simple_xray_resident_control_leave_v1();\n"
+        c_source = c_source + "    if (trace_window != 1) { simple_xray_startup_window_seal_v1(); return 125; }\n"
+        c_source = c_source + "    int64_t trace_status = __simple_xray_resident_startup_v1();\n"
+        c_source = c_source + "    if (simple_xray_resident_control_enter_v1() != 1) { simple_xray_startup_window_seal_v1(); return 125; }\n"
+        c_source = c_source + "    int64_t trace_ended = simple_xray_startup_no_owned_threads_end_v1();\n"
+        c_source = c_source + "    simple_xray_resident_control_leave_v1();\n"
+        c_source = c_source + "    simple_xray_startup_window_seal_v1();\n"
+        c_source = c_source + "    if (trace_status != 0 || trace_ended != 1) { fprintf(stderr, \"Simple XRay startup refused: status=%lld window=%lld\\n\", (long long)trace_status, (long long)trace_ended); return 125; }\n"
+    if xray_thread_context_v1:
+        c_source = c_source + "    simple_xray_startup_window_seal_v1();\n"
     c_source = c_source + "    long long result = __simple_main();\n"
     c_source = c_source + "    __simple_runtime_shutdown();\n"
     c_source = c_source + "    return (int)result;\n"

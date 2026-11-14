@@ -58,6 +58,7 @@ CC=${CLANG:-clang}
 OBJDUMP=${LLVM_OBJDUMP:-llvm-objdump}
 READELF=${LLVM_READELF:-llvm-readelf}
 NM=${LLVM_NM:-llvm-nm}
+LINKER=${XRAY_E2E_LD:-lld}
 STEP_TIMEOUT=${XRAY_E2E_TIMEOUT:-120}
 
 while [ $# -gt 0 ]; do
@@ -167,6 +168,9 @@ if grep -qE 'R_AARCH64_(CALL26|JUMP26)|R_X86_64_PLT32' "$WORK/handler.rel" \
         || grep -E '^[[:space:]]+[0-9a-f]+:' "$WORK/handler.dis" | cut -f2- \
             | grep -qE '^(bl|blr|br|call|callq)[[:space:]]|^(jmp|jmpq)[[:space:]]+\*'; then
     echo "FAIL — handler shim calls or branches out: $(grep -E 'R_AARCH64_(CALL26|JUMP26)|R_X86_64_PLT32' "$WORK/handler.rel" | head -2 | tr '\n' ' ')"
+    # Same-section calls need no relocation; retain their actual instructions.
+    grep -E '^[[:space:]]+[0-9a-f]+:' "$WORK/handler.dis" | cut -f2- \
+        | grep -E '^(bl|blr|br|call|callq)[[:space:]]|^(jmp|jmpq)[[:space:]]+\*' | head -6
     exit 1
 fi
 # A direct branch to a static function in the same section has no relocation:
@@ -198,7 +202,7 @@ CHECKS=$((CHECKS + 1))
 "$CC" --target="$HOST_T" -O1 -Wall -pthread -c "$HARNESS" -o "$WORK/harness.o" 2> "$WORK/harness.err"
 rc=$?
 [ "$rc" -eq 0 ] || { echo "ERROR — nothing was checked (harness does not compile: $(head -3 "$WORK/harness.err" | tr '\n' ' '))"; exit 2; }
-"$CC" --target="$HOST_T" -fxray-instrument -fuse-ld=lld -pthread -Wl,--wrap=mprotect \
+"$CC" --target="$HOST_T" -fxray-instrument "-fuse-ld=$LINKER" -pthread -Wl,--wrap=mprotect \
     "$WORK/harness.o" "$WORK/targets.o" "$WORK/adapter.o" -o "$WORK/xray_e2e" 2> "$WORK/link.err"
 rc=$?
 [ "$rc" -eq 0 ] || { echo "ERROR — nothing was checked (link with compiler-rt xray failed: $(head -3 "$WORK/link.err" | tr '\n' ' '))"; exit 2; }
@@ -209,6 +213,16 @@ classify "$WORK/run.out" "$rc"
 rc=$?
 [ "$rc" -eq 0 ] || exit "$rc"
 CHECKS=$((CHECKS + $(grep '^PASS ' "$WORK/run.out" | grep -vc '^PASS — ')))
+
+# Resident and legacy handler modes are process-exclusive. Exercise the real
+# resident path in a fresh process using the same instrumented targets/runtime.
+XRAY_OPTIONS=patch_premain=false timeout "$STEP_TIMEOUT" "$WORK/xray_e2e" --resident > "$WORK/resident.out" 2> "$WORK/resident.err"
+rc=$?
+cat "$WORK/resident.out"
+classify "$WORK/resident.out" "$rc"
+rc=$?
+[ "$rc" -eq 0 ] || exit "$rc"
+CHECKS=$((CHECKS + $(grep '^PASS ' "$WORK/resident.out" | grep -vc '^PASS — ')))
 
 # ---- 4. other arch, object-only
 "$CC" --target="$OTHER_T" -O2 -Wno-override-module -c "$TARGETS" -o "$WORK/targets_other.o" 2> "$WORK/to.err" \
