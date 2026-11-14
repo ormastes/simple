@@ -1,0 +1,51 @@
+"""Linux LLVM runtime link planning; no profile admission is inferred."""
+use std.spec.*
+use compiler.driver.driver_xray_llvm_link.{xray_llvm_link_needed_v1, xray_llvm_link_libraries_v1, xray_llvm_adapter_flags_v1, xray_llvm_runtime_query_args_v1, xray_llvm_runtime_archive_path_valid_v1, xray_llvm_resident_args_v1}
+
+describe "LLVM XRay executable runtime link":
+    it "does not inspect an unresolved target for Off or native backend":
+        expect(xray_llvm_link_needed_v1(false, "llvm", "", true).unwrap()).to_equal(false)
+        expect(xray_llvm_link_needed_v1(true, "native", "", true).unwrap()).to_equal(false)
+
+    it "selects both canonical Linux LLVM executable targets":
+        expect(xray_llvm_link_needed_v1(true, "llvm", "aarch64-unknown-linux-gnu", false).unwrap()).to_equal(true)
+        expect(xray_llvm_link_needed_v1(true, "llvm-lib", "x86_64-unknown-linux-gnu", false).unwrap()).to_equal(true)
+
+    it "rejects missing or unsupported Linux targets":
+        expect(xray_llvm_link_needed_v1(true, "llvm", "", false).is_err()).to_equal(true)
+        expect(xray_llvm_link_needed_v1(true, "llvm", "riscv64-unknown-linux-gnu", false).is_err()).to_equal(true)
+        expect(xray_llvm_link_needed_v1(true, "llvm", "x86_64-unknown-linux-musl", false).is_err()).to_equal(true)
+
+    it "refuses shared LLVM Linux images because the adapter only accepts main-image IDs":
+        expect(xray_llvm_link_needed_v1(true, "llvm", "aarch64-unknown-linux-gnu", true).is_err()).to_equal(true)
+
+    it "leaves other platform link owners unchanged":
+        expect(xray_llvm_link_needed_v1(true, "llvm", "x86_64-pc-windows-msvc", false).unwrap()).to_equal(false)
+        expect(xray_llvm_link_needed_v1(true, "llvm", "aarch64-apple-darwin", false).unwrap()).to_equal(false)
+
+    it "compiles the adapter without instrumentation and without SIMD or outlined atomics":
+        val arm = xray_llvm_adapter_flags_v1("aarch64-unknown-linux-gnu")
+        val x86 = xray_llvm_adapter_flags_v1("x86_64-unknown-linux-gnu")
+        expect(arm.contains("-mgeneral-regs-only")).to_equal(true)
+        expect(arm.contains("-mno-outline-atomics")).to_equal(true)
+        expect(x86.contains("-mno-outline-atomics")).to_equal(false)
+        expect(arm.contains("-fxray-instrument")).to_equal(false)
+        expect(x86.contains("-fxray-instrument")).to_equal(false)
+
+    it "requires an actual absolute compiler-rt archive response":
+        expect(xray_llvm_runtime_archive_path_valid_v1("/tool/lib/libclang_rt.xray.a")).to_equal(true)
+        expect(xray_llvm_runtime_archive_path_valid_v1("libclang_rt.xray.a")).to_equal(false)
+        expect(xray_llvm_runtime_archive_path_valid_v1("/tool/lib/libclang_rt.xray.a\n/evil/libclang_rt.xray.a")).to_equal(false)
+        expect(xray_llvm_runtime_archive_path_valid_v1("/tool/lib/libclang_rt.xray-dso.a")).to_equal(false)
+        expect(xray_llvm_runtime_query_args_v1("aarch64-unknown-linux-gnu")).to_equal(["--target=aarch64-unknown-linux-gnu", "--print-file-name=libclang_rt.xray.a"])
+
+    it "keeps whole-archive inside the explicit partial link only":
+        expect(xray_llvm_resident_args_v1("aarch64-unknown-linux-gnu", "/tool/libclang_rt.xray.a", "resident.o")).to_equal([
+            "--target=aarch64-unknown-linux-gnu", "-nostdlib", "-r", "-Wl,--whole-archive", "/tool/libclang_rt.xray.a", "-Wl,--no-whole-archive", "-o", "resident.o"])
+        expect(xray_llvm_link_libraries_v1(["custom", "m", "pthread"])).to_equal(["custom", "m", "pthread", "rt", "dl"])
+
+    it "does not mutate caller library inputs":
+        val original = ["custom"]
+        val linked = xray_llvm_link_libraries_v1(original)
+        expect(original).to_equal(["custom"])
+        expect(linked).to_equal(["custom", "pthread", "rt", "m", "dl"])
