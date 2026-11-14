@@ -1,0 +1,59 @@
+# Coordinator inventory semantics, authored and UNRUN.
+use compiler.driver.driver_accessor_producer_v1.{driver_accessor_order_inventory_v1, driver_accessor_is_builtin_field_v1}
+use compiler.driver.driver_accessor_sites_v1.{AccessorSourceSiteV1}
+use compiler.hir.hir_definitions.{HirAopAdvice, HirExpr, HirExprKind}
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId}
+use compiler.common.diagnostics.span.{Span}
+use compiler.mir.mir_accessor_plan_v1.{MirAccessorOperationV1}
+use compiler.mir.mir_accessor_plan_set_v1.{AccessorSiteKeyV1}
+
+fn inventory_advice(owner: text, start: i64) -> HirAopAdvice:
+    HirAopAdvice(predicate_text: "get(app.Box.len)", advice_function: "observe",
+        form: "before", priority: 0,
+        span: Span(start: start, end: start + 10, line: 1, col: 1, file: "", length: 10),
+        aspect_module: owner, aspect_name: "Trace")
+
+fn inventory_len_site(type_: HirTypeKind) -> AccessorSourceSiteV1:
+    val span = Span(start: 20, end: 25, line: 2, col: 1, file: "", length: 5)
+    val base = HirExpr(kind: HirExprKind.NamedVar(SymbolId.new(7), "value"),
+        has_type_: true, type_: HirType(kind: type_, span: span), span: span)
+    val field = HirExpr(kind: HirExprKind.Field(base, "len", None), has_type_: true,
+        type_: HirType(kind: HirTypeKind.Int(64, true), span: span), span: span)
+    AccessorSourceSiteV1(key: AccessorSiteKeyV1(module_identity: "app", function_identity: "app.f",
+        start: 20, end: 25, line: 2, col: 1, operation: MirAccessorOperationV1.Read),
+        expression: field, compound_assignment: false)
+
+describe "accessor coordinator ordering and builtin boundaries":
+    it "gives saved and retained inventories the same declaration order":
+        val first = inventory_advice("app.a", 10)
+        val second = inventory_advice("app.b", 20)
+        val left = driver_accessor_order_inventory_v1([second, first, second])
+        val right = driver_accessor_order_inventory_v1([first, second])
+        expect(left).to_equal(right)
+        expect(left.len()).to_equal(2)
+
+    it "deduplicates only the same source declaration":
+        val first = inventory_advice("app.a", 10)
+        val second = inventory_advice("app.a", 40)
+        expect(driver_accessor_order_inventory_v1([first, second]).len()).to_equal(2)
+
+    it "separates known builtin text length from a real class field named len":
+        expect(driver_accessor_is_builtin_field_v1(inventory_len_site(HirTypeKind.Str))).to_equal(true)
+        expect(driver_accessor_is_builtin_field_v1(inventory_len_site(HirTypeKind.Named(SymbolId.new(9), [])))).to_equal(false)
+        expect(driver_accessor_is_builtin_field_v1(inventory_len_site(HirTypeKind.Tuple([])))).to_equal(false)
+
+use compiler.driver.driver_accessor_publication_v1.{driver_refresh_accessor_inventory_v1}
+use compiler.driver.driver_types.{CompileContext}
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.mir.mir_accessor_plan_set_v1.{AccessorPlanSetV1}
+
+describe "reused context accessor inventory":
+    it "clears prior plan publication when the current source has no field advice":
+        val context = CompileContext.create(driver_core_compile_options_default())
+        context.accessor_plan_sets_v1["old.module"] = AccessorPlanSetV1(source_snapshot: "old",
+            hir_snapshot: "old", plan_digest: "old", module_identity: "old.module",
+            covered_functions: [], sites: [], helpers: [])
+        expect(driver_refresh_accessor_inventory_v1(context)).to_equal(false)
+        expect(context.accessor_plan_sets_v1.len()).to_equal(0)
+        expect(context.accessor_inventory_checked_v1).to_equal(true)
+        expect(context.accessor_no_field_aspects_v1).to_equal(true)

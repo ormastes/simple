@@ -3,6 +3,8 @@
 use compiler.mir.mir_lowering_types.{MirLowering}
 use compiler.mir.mir_instructions.{MirModule, MirFunction}
 use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir_types.{MirTypeKind, MirTypeDefKind}
+use compiler.mir.mir_accessor_layout_lookup_v1.{mir_accessor_layout_lookup_v1}
 use compiler.mir.mir_accessor_emit_v1.{mir_accessor_emit_v1}
 use compiler.mir.mir_compiler_private_function_v1.{MirCompilerPrivateFunctionV1}
 use compiler.mir.mir_compiler_private_validate_v1.{mir_compiler_private_validate_v1}
@@ -25,6 +27,31 @@ impl MirLowering:
             for symbol in original.functions.keys(): functions[symbol] = original.functions[symbol]
             var bindings: [MirCompilerPrivateFunctionV1] = []
             for helper in plan.helpers:
+                val receiver_symbol = match helper.plan.physical.receiver_type.kind:
+                    case MirTypeKind.Struct(symbol): symbol
+                    case _:
+                        self.error_fatal("E-AOP-FIELD-TYPE: prepared receiver lost its class representation", None)
+                        return
+                val actual_type = match mir_accessor_layout_lookup_v1(original, receiver_symbol):
+                    case Ok(value): value
+                    case Err(message):
+                        self.error_fatal(message, None)
+                        return
+                match actual_type.kind:
+                    case MirTypeDefKind.Struct(fields):
+                        if fields.len() != helper.plan.physical.field_order.len():
+                            self.error_fatal("E-AOP-FIELD-TYPE: worker layout differs from frozen declaration", None)
+                            return
+                        for index in 0..fields.len():
+                            if fields[index].name != helper.plan.physical.field_order[index]:
+                                self.error_fatal("E-AOP-FIELD-TYPE: worker field ordinal differs from frozen declaration", None)
+                                return
+                        if fields[helper.plan.declaration.field_index].type_ != helper.plan.physical.field_type:
+                            self.error_fatal("E-AOP-FIELD-TYPE: worker field ABI differs from frozen declaration", None)
+                            return
+                    case _:
+                        self.error_fatal("E-AOP-FIELD-TYPE: declaring worker type is not a class layout", None)
+                        return
                 val defines_here = helper.emission_owner == plan.module_identity
                 for symbol in original.functions.keys():
                     val source_function = original.functions[symbol]

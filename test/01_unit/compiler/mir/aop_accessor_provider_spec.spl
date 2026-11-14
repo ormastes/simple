@@ -1,0 +1,77 @@
+# Authored frozen-route and permission tests. Full imported-provider/native
+# relocation qualification remains separate and has not been executed here.
+use compiler.driver.driver_accessor_provider_v1.{driver_accessor_import_route_v1}
+use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface, ModuleSurfacesByName}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_accessor_field_v1.{hir_accessor_field_admit_v1}
+use compiler.common.dependency.{member_access_scope_for_modules}
+
+fn provider_surface(name: text, path: text, index: i64) -> ModuleSurface:
+    val surface = ModuleSurface.empty(name)
+    surface.canonical_path = path
+    surface.physical_index = index
+    surface.generation = 7
+    surface.frozen = true
+    surface.export_origin_index.frozen = true
+    surface
+
+fn provider_routes(two_aliases: bool = false) -> ModuleSurfacesByName:
+    val requester = provider_surface("app.ui", "src/app/ui.spl", 0)
+    val facade = provider_surface("app.api", "src/app/api.spl", 1)
+    val declaring = provider_surface("app.model", "src/app/model.spl", 2)
+    requester.import_target_indices = [1]
+    requester.import_target_names = ["app.api"]
+    requester.import_item_offsets = if two_aliases: [0, 2] else: [0, 1]
+    requester.import_item_names = if two_aliases: ["PublicBox", "PublicBox"] else: ["PublicBox"]
+    requester.import_item_aliases = if two_aliases: ["BoxAlias", "SecondAlias"] else: ["BoxAlias"]
+    requester.import_item_has_alias = if two_aliases: [true, true] else: [true]
+    facade.export_origin_index.names = ["PublicBox"]
+    facade.export_origin_index.owner_modules = ["app.model"]
+    facade.export_origin_index.source_names = ["Box"]
+    facade.export_origin_index.resolution_kinds = ["explicit"]
+    ModuleSurfacesByName(surfaces: [requester, facade, declaring],
+        index_by_name: {}, ordered_names: [], ordered_indices: [], generation: 7, frozen: true)
+
+describe "accessor imported declaring-provider route":
+    it "preserves explicit facade and local alias provenance":
+        val route = driver_accessor_import_route_v1(provider_routes(), "app.ui", "src/app/ui.spl", "app.model", "Box").unwrap()
+        expect(route.requester_surface).to_equal(0)
+        expect(route.target_surface).to_equal(1)
+        expect(route.declaring_surface).to_equal(2)
+        expect(route.imported_name).to_equal("PublicBox")
+        expect(route.local_alias).to_equal("BoxAlias")
+        expect(route.import_ordinal).to_equal(0)
+        expect(route.item_ordinal).to_equal(0)
+
+    it "does not infer a route from a matching short type name":
+        expect(driver_accessor_import_route_v1(provider_routes(), "app.ui", "src/app/ui.spl", "app.model", "OtherBox").is_err()).to_equal(true)
+        expect(driver_accessor_import_route_v1(provider_routes(), "app.ui", "src/app/other.spl", "app.model", "Box").is_err()).to_equal(true)
+
+    it "rejects ambiguous aliases until original source-site provenance exists":
+        expect(driver_accessor_import_route_v1(provider_routes(true), "app.ui", "src/app/ui.spl", "app.model", "Box").is_err()).to_equal(true)
+
+    it "rejects glob and stale-generation routes rather than inventing permission":
+        val glob = provider_routes()
+        glob.surfaces[0].import_item_names = ["*"]
+        expect(driver_accessor_import_route_v1(glob, "app.ui", "src/app/ui.spl", "app.model", "Box").is_err()).to_equal(true)
+        val stale = provider_routes()
+        stale.surfaces[2].generation = 6
+        expect(driver_accessor_import_route_v1(stale, "app.ui", "src/app/ui.spl", "app.model", "Box").is_err()).to_equal(true)
+
+    it "rejects malformed frozen item ranges":
+        val malformed = provider_routes()
+        malformed.surfaces[0].import_item_offsets = [0, 2]
+        expect(driver_accessor_import_route_v1(malformed, "app.ui", "src/app/ui.spl", "app.model", "Box").is_err()).to_equal(true)
+
+    it "a valid import route never grants access to a private field":
+        val route = driver_accessor_import_route_v1(provider_routes(), "app.ui", "src/app/ui.spl", "app.model", "Box").unwrap()
+        expect(route.local_alias).to_equal("BoxAlias")
+        val parsed = parse_and_build_module("pub class Box:\n    pri count: i64\n", "src/app/model.spl")
+        var lowering = HirLowering.new()
+        val module = lowering.lower_module(parsed)
+        val scope = member_access_scope_for_modules("src/app/ui.spl", "app", "src/app/model.spl", "app", [])
+        for key in module.classes.keys():
+            val owner = module.classes[key]
+            expect(hir_accessor_field_admit_v1(owner, "app.model", "count", scope).is_err()).to_equal(true)
+        expect(module.classes.len()).to_equal(1)

@@ -1,0 +1,64 @@
+# Authored source tests; no native lowering or public get/set admission claim.
+use compiler.driver.driver_accessor_selection_v1.*
+use compiler.hir.hir_definitions.{HirAopAdvice}
+use compiler.common.diagnostics.span.{Span}
+use compiler.mir.mir_accessor_plan_v1.{MirAccessorOperationV1}
+use compiler.frontend.core.aop_predicate_parser.{validate_predicate}
+
+fn selection_target() -> AccessorFieldTargetV1:
+    AccessorFieldTargetV1(owner_module: "app.model", owner_type: "Box", field_name: "count",
+        operation: MirAccessorOperationV1.Read, lexical_owner: "app.ui.view",
+        lexical_owner_known: true, attributes: ["observed"], attributes_known: true)
+
+fn selection_advice(predicate: text, handler: text = "trace") -> HirAopAdvice:
+    HirAopAdvice(predicate_text: predicate, advice_function: handler, form: "before",
+        priority: 0, span: Span.empty(), aspect_name: "Trace", aspect_module: "app.trace")
+
+describe "internal named field selector adapter":
+    it "matches canonical fields and preserves source advice order and owner":
+        val advice = [selection_advice("get(app.model.Box.count)", "first"),
+            selection_advice("set(*)", "setter"), selection_advice("get(app.model.*)", "last")]
+        val selected = accessor_select_advices_v1(advice, selection_target()).unwrap()
+        expect(selected.len()).to_equal(2)
+        expect(selected[0].source_ordinal).to_equal(0)
+        expect(selected[1].source_ordinal).to_equal(2)
+        expect(selected[0].advice.advice_function).to_equal("first")
+        expect(selected[1].advice.advice_function).to_equal("last")
+        expect(selected[0].advice.aspect_module).to_equal("app.trace")
+        val write = AccessorFieldTargetV1(..selection_target(), operation: MirAccessorOperationV1.Write)
+        expect(accessor_select_advices_v1(advice, write).unwrap()[0].source_ordinal).to_equal(1)
+
+    it "uses shared precedence and explicit access-site lexical ownership":
+        val query = selection_advice("get(*) & within(app.ui.*) & attr(observed) | set(*) & !get(*)")
+        expect(accessor_select_advices_v1([query], selection_target()).unwrap().len()).to_equal(1)
+        val wrong_site = AccessorFieldTargetV1(..selection_target(), lexical_owner: "app.model")
+        expect(accessor_select_advices_v1([query], wrong_site).unwrap().len()).to_equal(0)
+        val grouped = selection_advice("!(get(*) | set(*)) & within(app.ui.*)")
+        expect(accessor_select_advices_v1([grouped], selection_target()).unwrap().len()).to_equal(0)
+
+    it "normalizes whitespace and comments through shared tokens":
+        val first = accessor_select_advices_v1([selection_advice("get(app.model.Box.count)")], selection_target()).unwrap()
+        val spaced = accessor_select_advices_v1([selection_advice("get ( app . model . Box . count ) # note\n")], selection_target()).unwrap()
+        expect(first[0].selector_digest).to_equal(spaced[0].selector_digest)
+
+    it "rejects unavailable facts and unsupported atoms even in dead branches":
+        val unknown_site = AccessorFieldTargetV1(..selection_target(), lexical_owner_known: false)
+        expect(accessor_select_advices_v1([selection_advice("get(*) | !within(app.*)")], unknown_site).is_err()).to_equal(true)
+        val unknown_attr = AccessorFieldTargetV1(..selection_target(), attributes_known: false)
+        expect(accessor_select_advices_v1([selection_advice("get(*) | !attr(observed)")], unknown_attr).is_err()).to_equal(true)
+        for unsupported in ["get(*) | !call(app.*)", "get(*) & attr(layer_public)", "get(*) & attr(feature_public)", "get(*) | execution(* app.*(..))"]:
+            expect(accessor_select_advices_v1([selection_advice(unsupported)], selection_target()).is_err()).to_equal(true)
+
+    it "rejects malformed complete expressions and typed or broad wildcard forms":
+        for malformed in ["get(*) trailing", "get(*) && set(*)", "get(*) || set(*)", "get(*) |", "(get(*)", "get(* app.Box.count)", "get(app.*.count)", "get(app.Box.count())", "get()"]:
+            expect(accessor_select_advices_v1([selection_advice(malformed)], selection_target()).is_err()).to_equal(true)
+
+    it "requires named owners and leaves execution advice with its existing owner":
+        val unresolved = HirAopAdvice(..selection_advice("get(*)"), aspect_module: "")
+        expect(accessor_select_advices_v1([unresolved], selection_target()).is_err()).to_equal(true)
+        val legacy = HirAopAdvice(..selection_advice("get(*)"), aspect_name: "")
+        expect(accessor_select_advices_v1([legacy], selection_target()).is_err()).to_equal(true)
+        expect(accessor_select_advices_v1([selection_advice("execution(* app.*(..))")], selection_target()).unwrap().len()).to_equal(0)
+        expect(accessor_has_field_selector_v1(selection_advice("execution(* get(..))"))).to_equal(false)
+        expect(validate_predicate("get(*)").contains("E1507")).to_equal(true)
+        expect(validate_predicate("set(*)").contains("E1507")).to_equal(true)

@@ -1,0 +1,37 @@
+# Real parser/HIR inventory oracle; authored and UNRUN.
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_definitions.{HirFunction}
+use compiler.driver.driver_accessor_sites_v1.{driver_accessor_source_sites_v1}
+use compiler.mir.mir_accessor_plan_v1.{MirAccessorOperationV1}
+
+fn accessor_source_function(body: text) -> HirFunction:
+    val source = "class Box:\n    value: i64\n\nfn probe(box: Box) -> i64:\n" + body
+    var lowering = HirLowering.new()
+    val module = lowering.lower_module(parse_and_build_module(source, "app/box.spl"))
+    for key in module.functions.keys():
+        val function = module.functions[key]
+        if function.name == "probe": return function
+    panic("real HIR fixture did not produce probe")
+
+describe "accessor source inventory through canonical HIR visitor":
+    it "records assignment targets as writes while keeping RHS fields as reads":
+        val function = accessor_source_function("    box.value = box.value\n    box.value\n")
+        val sites = driver_accessor_source_sites_v1(function, "app.box", "app.box::probe").unwrap()
+        expect(sites.len()).to_equal(3)
+        var reads = 0
+        var writes = 0
+        for site in sites:
+            if site.key.operation == MirAccessorOperationV1.Read: reads = reads + 1
+            else: writes = writes + 1
+            expect(site.compound_assignment).to_equal(false)
+            expect(site.key.function_identity).to_equal("app.box::probe")
+        expect(reads).to_equal(2)
+        expect(writes).to_equal(1)
+
+    it "preserves compound-place intent for explicit unsupported selection":
+        val function = accessor_source_function("    box.value += 1\n    0\n")
+        val sites = driver_accessor_source_sites_v1(function, "app.box", "app.box::probe").unwrap()
+        expect(sites.len()).to_equal(1)
+        expect(sites[0].key.operation).to_equal(MirAccessorOperationV1.Write)
+        expect(sites[0].compound_assignment).to_equal(true)

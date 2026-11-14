@@ -1,0 +1,194 @@
+# Resolve selected source fields against their real defining HIR declaration.
+# Imported layout rows are identity-only and are never field authority.
+use compiler.hir.hir_definitions.{HirModule, HirExpr, HirExprKind, HirClass}
+use compiler.hir.hir_types.{HirTypeKind, SymbolId}
+use compiler.hir.hir_accessor_field_v1.{HirAccessorFieldV1, hir_accessor_field_admit_v1}
+use compiler.common.dependency.{MemberAccessScope}
+
+struct AccessorDeclaredProviderV1:
+    field: HirAccessorFieldV1
+    owner: HirClass
+    original_receiver: HirExpr
+    importer_module: text = ""
+    importer_receiver_symbol: SymbolId = SymbolId(id: -1)
+    import_route: AccessorImportRouteV1? = nil
+
+pub fn driver_accessor_local_provider_v1(module: HirModule, canonical_module: text,
+    field_expression: HirExpr) -> Result<AccessorDeclaredProviderV1, text>:
+    if canonical_module == "":
+        return Err("E-AOP-FIELD-OWNER: missing loader module identity")
+    match field_expression.kind:
+        case HirExprKind.Field(receiver, field_name, resolved):
+            if not receiver.has_type_:
+                return Err("E-AOP-FIELD-TYPE: selected receiver has no authoritative HIR type")
+            val owner_symbol = match receiver.type_.kind:
+                case HirTypeKind.Named(symbol, args):
+                    if args.len() != 0:
+                        return Err("E-AOP-FIELD-PROFILE: generic receiver needs an instantiated declaring provider")
+                    symbol
+                case _: return Err("E-AOP-FIELD-PROFILE: selected receiver is not a direct named reference class")
+            # Search only this module's actual class declarations. Matching a
+            # short name or an imported identity row would grant false authority.
+            for key in module.classes.keys():
+                val owner: HirClass = module.classes[key]
+                if owner.symbol.id != owner_symbol.id: continue
+                val scope = MemberAccessScope(same_module: true, same_package: false,
+                    declared_friend: false, internally_exported: false,
+                    immediate_parent_facade: false, peer_logical_path: false)
+                val declaration = hir_accessor_field_admit_v1(owner, canonical_module, field_name, scope)?
+                if val resolved_field = resolved:
+                    if resolved_field.id != declaration.field_symbol.id:
+                        return Err("E-AOP-FIELD-OWNER: source field resolution disagrees with declaring provider")
+                return Ok(AccessorDeclaredProviderV1(field: declaration, owner: owner,
+                    original_receiver: receiver, importer_module: canonical_module,
+                    importer_receiver_symbol: owner_symbol))
+            Err("E-AOP-FIELD-PROVIDER: selected receiver requires its declaring module and original export route")
+        case _: Err("E-AOP-FIELD-OWNER: provider resolution requires an original field expression")
+
+# Imported lookup is a cold coordinator operation over one frozen HIR epoch.
+# These facts identify semantic declarations; they are NOT a MIR relocation,
+# writable-place proof, atomic-layout proof, or borrowed-receiver lifetime lease.
+use compiler.driver.driver_types.{CompileContext}
+use compiler.hir.hir_types.{HirSymbol, SymbolKind}
+use compiler.hir.hir_owner_name.{hir_symbol_owner_module}
+use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface, ModuleSurfacesByName, module_surface_export_origin_index_lookup}
+use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_package_name, module_surface_package_name_from_name}
+use compiler.common.module_path_naming.{module_logical_name_from_path}
+use compiler.common.dependency.{member_access_scope_for_modules}
+
+struct AccessorImportRouteV1:
+    requester_surface: i64
+    target_surface: i64
+    declaring_surface: i64
+    import_ordinal: i64
+    item_ordinal: i64
+    imported_name: text
+    local_alias: text
+
+fn accessor_surface_index_v1(surfaces: ModuleSurfacesByName, module_name: text) -> Result<i64, text>:
+    var found = -1
+    for index in 0..surfaces.surfaces.len():
+        val surface = surfaces.surfaces[index]
+        if hir_symbol_owner_module(surface.module_name) != hir_symbol_owner_module(module_name): continue
+        if found >= 0: return Err("E-AOP-FIELD-ROUTE: ambiguous defining surface")
+        if not surface.frozen or surface.generation != surfaces.generation:
+            return Err("E-AOP-FIELD-ROUTE: surface is not in the admitted frozen generation")
+        found = index
+    if found < 0: return Err("E-AOP-FIELD-ROUTE: missing defining surface")
+    Ok(found)
+
+pub fn driver_accessor_import_route_v1(surfaces: ModuleSurfacesByName,
+    requester_module: text, requester_path: text, owner_module: text,
+    owner_name: text) -> Result<AccessorImportRouteV1, text>:
+    if not surfaces.frozen:
+        return Err("E-AOP-FIELD-ROUTE: module surfaces must be frozen")
+    val requester_index = accessor_surface_index_v1(surfaces, requester_module)?
+    val declaring_index = accessor_surface_index_v1(surfaces, owner_module)?
+    val requester = surfaces.surfaces[requester_index]
+    if requester.canonical_path != requester_path:
+        return Err("E-AOP-FIELD-ROUTE: original requester path differs from frozen source")
+    val count = requester.import_target_indices.len()
+    if requester.import_target_names.len() != count or requester.import_item_offsets.len() != count + 1 or
+        requester.import_item_names.len() != requester.import_item_aliases.len() or
+        requester.import_item_names.len() != requester.import_item_has_alias.len():
+        return Err("E-AOP-FIELD-ROUTE: malformed frozen import arrays")
+    if requester.import_item_offsets[0] != 0 or requester.import_item_offsets[count] != requester.import_item_names.len():
+        return Err("E-AOP-FIELD-ROUTE: malformed frozen import range")
+    var found: AccessorImportRouteV1? = nil
+    for ordinal in 0..count:
+        val begin = requester.import_item_offsets[ordinal]
+        val end = requester.import_item_offsets[ordinal + 1]
+        if begin < 0 or end < begin or end > requester.import_item_names.len():
+            return Err("E-AOP-FIELD-ROUTE: invalid frozen import item range")
+        val target_index = requester.import_target_indices[ordinal]
+        if target_index < 0 or target_index >= surfaces.surfaces.len():
+            return Err("E-AOP-FIELD-ROUTE: unresolved frozen import target")
+        val target = surfaces.surfaces[target_index]
+        if not target.frozen or target.generation != surfaces.generation or
+            not target.export_origin_index.frozen:
+            return Err("E-AOP-FIELD-ROUTE: target route is not frozen")
+        # Module/glob imports carry no source-specific class item. They do not
+        # establish this slice's explicit route witness.
+        for item in begin..end:
+            val imported_name = requester.import_item_names[item]
+            if imported_name == "*": continue
+            val terminal = module_surface_export_origin_index_lookup(target.export_origin_index, imported_name)
+            if not terminal.found: continue
+            if hir_symbol_owner_module(terminal.owner_module) != hir_symbol_owner_module(owner_module) or terminal.source_name != owner_name:
+                continue
+            val alias = if requester.import_item_has_alias[item]: requester.import_item_aliases[item] else: imported_name
+            if alias == "": return Err("E-AOP-FIELD-ROUTE: empty imported alias")
+            if found != nil:
+                return Err("E-AOP-FIELD-ROUTE: multiple import routes need original source-site provenance")
+            found = Some(AccessorImportRouteV1(requester_surface: requester_index,
+                target_surface: target_index, declaring_surface: declaring_index,
+                import_ordinal: ordinal, item_ordinal: item,
+                imported_name: imported_name, local_alias: alias))
+    if val route = found: return Ok(route)
+    Err("E-AOP-FIELD-ROUTE: no unique explicit class import route; module/glob access needs source provenance")
+
+pub fn driver_accessor_imported_provider_v1(ctx: CompileContext, module: HirModule,
+    canonical_module: text, field_expression: HirExpr) -> Result<AccessorDeclaredProviderV1, text>:
+    val surfaces = match ctx.module_surfaces:
+        case Some(value): value
+        case _: return Err("E-AOP-FIELD-ROUTE: missing admitted module surfaces")
+    match field_expression.kind:
+        case HirExprKind.Field(receiver, field_name, resolved):
+            if not receiver.has_type_:
+                return Err("E-AOP-FIELD-TYPE: selected receiver has no authoritative HIR type")
+            val receiver_id = match receiver.type_.kind:
+                case HirTypeKind.Named(symbol, args):
+                    if args.len() != 0: return Err("E-AOP-FIELD-PROFILE: generic receiver needs instantiated provider")
+                    symbol
+                case _: return Err("E-AOP-FIELD-PROFILE: selected imported receiver is not a named class")
+            if not receiver_id.is_valid() or not module.symbols.symbols.has(receiver_id.id):
+                return Err("E-AOP-FIELD-OWNER: imported receiver has no canonical symbol row")
+            val imported: HirSymbol = module.symbols.symbols[receiver_id.id]
+            val owner_module = imported.defining_module ?? ""
+            if imported.id.id != receiver_id.id or imported.kind != SymbolKind.Class or owner_module == "" or
+                module.symbols.lookup_qualified_type_raw(owner_module, imported.name) != receiver_id.id:
+                return Err("E-AOP-FIELD-OWNER: imported class identity disagrees with qualified symbol row")
+            if hir_symbol_owner_module(owner_module) == hir_symbol_owner_module(canonical_module):
+                return Err("E-AOP-FIELD-OWNER: imported provider cannot replace the local declaration path")
+            val route = driver_accessor_import_route_v1(surfaces, canonical_module, module.path, owner_module, imported.name)?
+            val declaring_surface = surfaces.surfaces[route.declaring_surface]
+            val target_surface = surfaces.surfaces[route.target_surface]
+            if module.symbols.lookup_qualified_type_raw(target_surface.module_name, route.imported_name) != receiver_id.id:
+                return Err("E-AOP-FIELD-ROUTE: facade alias does not bind the original receiver")
+            if not ctx.hir_modules.contains_key(declaring_surface.module_name):
+                return Err("E-AOP-FIELD-PROVIDER: declaring module HIR is not retained in this snapshot")
+            val defining: HirModule = ctx.hir_modules[declaring_surface.module_name]
+            if defining.path != declaring_surface.canonical_path:
+                return Err("E-AOP-FIELD-PROVIDER: declaring HIR path differs from frozen provider")
+            val declaring_id = defining.symbols.lookup_qualified_type_raw(declaring_surface.module_name, imported.name)
+            if declaring_id < 0 or not defining.symbols.symbols.has(declaring_id):
+                return Err("E-AOP-FIELD-PROVIDER: missing declaring qualified class row")
+            val declared: HirSymbol = defining.symbols.symbols[declaring_id]
+            if declared.id.id != declaring_id or declared.kind != SymbolKind.Class or declared.name != imported.name or
+                hir_symbol_owner_module(declared.defining_module ?? "") != hir_symbol_owner_module(owner_module):
+                return Err("E-AOP-FIELD-PROVIDER: declaring class identity mismatch")
+            var matched_owner: HirClass? = nil
+            for key in defining.classes.keys():
+                val owner: HirClass = defining.classes[key]
+                if owner.symbol.id != declaring_id: continue
+                if matched_owner != nil: return Err("E-AOP-FIELD-PROVIDER: ambiguous declaring class body")
+                matched_owner = Some(owner)
+            val owner = match matched_owner:
+                case Some(value): value
+                case _: return Err("E-AOP-FIELD-PROVIDER: missing declaring class body")
+            if owner.name != imported.name:
+                return Err("E-AOP-FIELD-PROVIDER: declaring class body name mismatch")
+            val scope = member_access_scope_for_modules(module.path,
+                module_surface_package_name_from_name(module_logical_name_from_path(module.path)),
+                declaring_surface.canonical_path, module_surface_package_name(declaring_surface),
+                declaring_surface.friends, declaring_surface.internal_exports.contains(owner.name))
+            # No fake same_module or test-private exemption. A selected access
+            # relying on test-only privilege remains unsupported until its
+            # original explicit authority is carried into this owner.
+            val declaration = hir_accessor_field_admit_v1(owner, declaring_surface.module_name, field_name, scope)?
+            if resolved != nil:
+                return Err("E-AOP-FIELD-RELOCATION: imported resolved field ID needs original symbol relocation proof")
+            return Ok(AccessorDeclaredProviderV1(field: declaration, owner: owner,
+                original_receiver: receiver, importer_module: canonical_module,
+                importer_receiver_symbol: receiver_id, import_route: Some(route)))
+        case _: Err("E-AOP-FIELD-OWNER: provider resolution requires an original field expression")

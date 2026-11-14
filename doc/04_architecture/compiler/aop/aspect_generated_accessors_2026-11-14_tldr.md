@@ -1,6 +1,6 @@
 # Aspect-generated accessors — TLDR
 
-[Full contract](aspect_generated_accessors_2026-11-14.md). Proposed design; no implementation or runtime qualification is claimed.
+[Full contract](aspect_generated_accessors_2026-11-14.md). Accepted architecture with staged source implementation; public/runtime support remains unqualified.
 
 - Generate typed internal get/set helpers only for explicitly requested generation or matching field aspects. Keep existing field layout, access checks and RHS-before-receiver assignment order.
 - Freeze named aspect identity and token-aware selector handling first (P0). Keep get/set rejection until actual typed lowering and consumers exist.
@@ -13,3 +13,5 @@
 Source owners: frontend advice/parser; HIR resolved field/place facts; MIR field read/assignment and existing advice injection; schema-generated artifact metadata. Coordinate node-storage ownership before editing its files.
 
 Acceptance: full contract G1–G14 includes operand order, actual object mutation, visibility, zero-change off baseline, single helper emission, captured-value/liveness and native/interpreter parity. These are planned tests, not passes.
+
+Current [producer checkpoint](../../../09_report/compiler/aspect_accessor_producer_checkpoint_2026-11-14.md) connects source inventory, authenticated providers, named handlers, coordinator-reserved canonical type IDs and real MIR consumers. Native and cache/transport qualification remain open; public get/set stays rejected.

@@ -1,4 +1,5 @@
-use compiler.driver.driver_accessor_publication_v1.{driver_accessor_inventory_has_requests_v1, driver_lower_module_with_accessors_v1}
+use compiler.driver.driver_accessor_producer_v1.{driver_prepare_accessor_plans_v1}
+use compiler.driver.driver_accessor_publication_v1.{driver_refresh_accessor_inventory_v1, driver_lower_module_with_accessors_v1}
 use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
 # CompilerDriver MIR lowering and diagnostic methods.
 #
@@ -960,8 +961,19 @@ impl CompilerDriver:
             self.ctx.mir_feed_modules.len()
         else:
             self.ctx.sources.len()
-        self.ctx.accessor_no_field_aspects_v1 = not driver_accessor_inventory_has_requests_v1(self.ctx)
-        self.ctx.accessor_inventory_checked_v1 = true
+        val accessor_requested = driver_refresh_accessor_inventory_v1(self.ctx)
+        if accessor_requested:
+            # Freeze before parallel MIR or any worker canonical-type minting.
+            # Source entry order is already checked by the scheduling owner.
+            val entry_index = if mir_source_indices.len() > 0: mir_source_indices[0] else: 0
+            if entry_index < 0 or entry_index >= self.ctx.sources.len():
+                self.ctx.add_error("E-AOP-FIELD-OWNER: exact scheduled source entry is unavailable")
+                return false
+            val accessor_plans = driver_prepare_accessor_plans_v1(self.ctx,
+                self.ctx.sources[entry_index].module_name, collection_target)
+            if accessor_plans.is_err():
+                self.ctx.add_error(accessor_plans.unwrap_err())
+                return false
         compiler_work_mir_schedule_v1(mir_scheduled_count)
         if self.ctx.runtime_std_full_inventory_selection != nil and
                 (self.ctx.sources.len() == 0 or

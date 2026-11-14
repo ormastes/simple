@@ -1,6 +1,8 @@
 # Frozen coordinator-to-worker contract. No source lookup, declaration
 # invention, helper emission or hashing occurs in a MIR worker.
 use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir_types.{MirTypeKind}
+use compiler.mir.mir_accessor_type_bindings_v1.{AccessorTypeBindingV1, accessor_type_bindings_validate_v1}
 use compiler.mir.mir_accessor_plan_v1.{MirAccessorPlanV1, MirAccessorOperationV1, mir_accessor_prepare_v1}
 
 struct AccessorSiteKeyV1:
@@ -52,6 +54,8 @@ struct AccessorPlanSetV1:
     covered_functions: [AccessorFunctionIdentityV1]
     sites: [AccessorSitePlanV1]
     helpers: [AccessorPreparedHelperV1]
+    type_bindings: [AccessorTypeBindingV1] = []
+    layout_mode: text = ""
 
 # Construction is a trusted driver operation. It must compute the framed
 # canonical encodings/digests from actual resolved facts before publication.
@@ -59,6 +63,9 @@ struct AccessorPlanSetV1:
 pub fn accessor_plan_set_validate_v1(plan_set: AccessorPlanSetV1) -> Result<bool, text>:
     if plan_set.source_snapshot == "" or plan_set.hir_snapshot == "" or plan_set.plan_digest == "" or plan_set.module_identity == "":
         return Err("E-AOP-FIELD-SNAPSHOT: incomplete frozen source/HIR/plan identity")
+    val types_checked = accessor_type_bindings_validate_v1(plan_set.type_bindings)?
+    if plan_set.helpers.len() > 0 and not ["legacy", "shadow", "typed"].contains(plan_set.layout_mode):
+        return Err("E-AOP-FIELD-LAYOUT: missing frozen target layout mode")
     for function_index in 0..plan_set.covered_functions.len():
         if plan_set.covered_functions[function_index].canonical_identity == "" or not plan_set.covered_functions[function_index].symbol.is_valid():
             return Err("E-AOP-FIELD-COVERAGE: unresolved function identity")
@@ -77,6 +84,16 @@ pub fn accessor_plan_set_validate_v1(plan_set: AccessorPlanSetV1) -> Result<bool
             helper.plan.operation, helper.plan.ordered_advice)?
         if checked.signature != helper.plan.signature:
             return Err("E-AOP-FIELD-HELPER: helper signature differs from the typed plan")
+        var type_found = false
+        for binding in plan_set.type_bindings:
+            if binding.canonical_key != helper.plan.physical.receiver_identity_key: continue
+            match helper.plan.physical.receiver_type.kind:
+                case MirTypeKind.Struct(symbol):
+                    if symbol.id != binding.physical_symbol.id or binding.layout_identity != helper.plan.physical.layout_identity or binding.provider_identity != helper.plan.physical.provider_identity:
+                        return Err("E-AOP-FIELD-TYPE: helper disagrees with reserved declaring layout")
+                    type_found = true
+                case _: return Err("E-AOP-FIELD-TYPE: helper receiver is not a canonical class")
+        if not type_found: return Err("E-AOP-FIELD-TYPE: helper has no reserved physical type")
         for earlier in 0..helper_index:
             val previous = plan_set.helpers[earlier]
             if previous.helper_name == helper.helper_name or previous.content_digest == helper.content_digest:
