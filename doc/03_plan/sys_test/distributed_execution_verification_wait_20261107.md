@@ -696,3 +696,48 @@ work, not delivered readiness in this snapshot. Linux remains explicit Podman;
 Windows remains Docker process isolation; both are accessed through Simple
 Container API. Overall status remains **AWAITING_VERIFICATION**, implementation
 incomplete, with the original full-plan acceptance scope and five-core limit.
+
+## Primary terminal source integration — 2026-11-14
+
+This addendum supersedes earlier descriptions of missing Linux primary opening,
+settlement, smux binding and input wiring. It does not supersede their runtime
+qualification gaps or the frozen full-system acceptance interface above.
+
+| Merged release PR | Source behavior | Qualification |
+| --- | --- | --- |
+| #9170, `394114b5fae2dafc0e91c9d365ee3ea4ba7aa156` | Host primary opening consumes the common Container provider and retains post-effect ownership | Source reviewed; eight authored record cases NOT_RUN |
+| #9173, `631ecfb3ec336d3ddc8fac192d5a802fa6bb4671` | Exact primary cleanup, settlement and metadata-only recovery consume the shared journal commit | Source reviewed; nine authored evidence cases NOT_RUN |
+| #9182, `45903e96e4c6c4943f61d19fa95627b07f54bd0a` | Authenticated smux V4 primary lifecycle adopts the sole canonical pane session | Source reviewed; nineteen authored cases NOT_RUN |
+| #9186, `8e6b22337ac38e332a8145988d2bc8946374651e` | V4 primary input uses the common Container port and exact native lease gate; uncertain attempts are retained | Source reviewed; sixteen authored cases NOT_RUN |
+
+The associated designs are `doc/05_design/host_primary_attach_owner_v1.md`,
+`host_primary_attach_settlement_v1.md`, `smux_primary_session_v4.md`, and
+`container_primary_input_v4.md` in that same directory. These are source
+integration milestones, not four successful end-to-end executions. GitHub source
+gates and review do not certify the authored cases, native effects or performance.
+
+The current geometry change adds a separate common Container request and owned
+Podman continuation, protected endpoint policy, exact running TTY inspection,
+and smux V4 Geometry-lease dispatch. Its source/spec inventory is recorded in
+`doc/05_design/container_primary_geometry_v1.md`. All authored geometry cases
+remain NOT_RUN. Successful native resize, expiration/revocation races, partial
+submission, lost response, cleanup failure and output-flood latency still need
+configured acceptance evidence. Observed dimensions alone do not resolve an
+unknown submission. Input authority does not grant geometry authority.
+
+Windows primary attachment remains incomplete. The selected integration retains
+the actual Docker named-pipe owner behind a versioned common terminal variant;
+it must not fabricate a Linux grouped-process lease or Job-reaping receipt.
+Signed one-use attach admission, native control barriers, sole-reader adoption,
+pending-I/O cleanup and platform-specific settlement remain required. An old
+export-placement commit is not a missing prerequisite: the current source census
+already reads public definitions in both C files and headers.
+
+Caret's legacy `--container` engine launch still requires migration to the common
+session owner. Neither that migration, Windows execution, remote build/test
+acceptance nor the full distributed workflow is certified by these terminal
+changes. The admitted Linux release runtime remains unavailable in the inspected
+expected paths; no qualified replacement has been established. Exhausted native
+and bootstrap campaigns remain closed, no Rust-seed fallback is authorized, and
+the aggregate five-core limit remains in force. Overall: **AWAITING_VERIFICATION;
+full implementation and full-system acceptance incomplete**.

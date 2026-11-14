@@ -1,0 +1,125 @@
+# Execution NOT_RUN. Pinned HTTP/JSON byte contracts only, no live engine,
+# TTY ownership, resize effect, socket submission, or cleanup evidence.
+use std.spec.{describe, it, expect, step}
+use std.nogc_async_mut.container.providers.linux.primary_geometry_http_v1.*
+use std.nogc_async_mut.container.providers.linux.engine_exec_http_v3.{linux_engine_exec_http_decode_v3, linux_engine_info_http_decode_v3}
+use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
+use std.common.string_core.str_len
+
+fn geometry_http_v1(status: i64, headers: text, body: text) -> [u8]:
+    ("HTTP/1.1 " + status.to_text() + " Fixture\r\nContent-Length: " + str_len(body).to_text() +
+        "\r\nConnection: close\r\n" + headers + "\r\n" + body).bytes()
+
+fn geometry_expected_v1() -> RuntimeIdentityV1:
+    RuntimeIdentityV1(pod_uid: "pod-a", attempt: 2, operation_id: "operation-a", provider_generation: 7,
+        engine: "podman", native_id: "a".repeat(64), node_boot_id: "boot-a")
+
+fn geometry_inspect_body_v1() -> text:
+    val expected = geometry_expected_v1()
+    "{\"Id\":\"" + expected.native_id + "\",\"State\":{\"Status\":\"running\",\"Running\":true}," +
+        "\"Config\":{\"OpenStdin\":true,\"Tty\":true,\"Labels\":{\"io.simpleorch.pod_uid\":\"" + expected.pod_uid +
+        "\",\"io.simpleorch.attempt\":\"2\",\"io.simpleorch.node_boot_id\":\"boot-a\"," +
+        "\"io.simpleorch.provider_generation\":\"7\",\"io.simpleorch.operation_id\":\"operation-a\"}}}"
+
+describe "Linux primary geometry pinned HTTP and inspect codec":
+    it "encodes direct container inspect and resize with exact dimensions method and empty body":
+        step("encodes direct container inspect and resize with exact dimensions method and empty body")
+        val id = geometry_expected_v1().native_id
+        val suffix = " HTTP/1.1\r\nHost: localhost\r\nAccept: application/json\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
+        expect(linux_primary_geometry_http_request_v1("inspect", id, 0, 0).unwrap()).to_equal(("GET /v5.2.5/libpod/containers/" + id + "/json" + suffix).bytes())
+        expect(linux_primary_geometry_http_request_v1("resize", id, 80, 24).unwrap()).to_equal(("POST /v5.2.5/libpod/containers/" + id + "/resize?h=24&w=80" + suffix).bytes())
+        for dims in [(1, 1), (512, 1), (1, 256), (500, 120)]:
+            expect(linux_primary_geometry_http_request_v1("resize", id, dims.0, dims.1).is_ok()).to_equal(true)
+
+    it "rejects unsupported actions nonfull lowercase identities and invalid dimensions before encoding":
+        step("rejects unsupported actions nonfull lowercase identities and invalid dimensions before encoding")
+        val id = geometry_expected_v1().native_id
+        for action in ["exec", "start", "create", "", "RESIZE"]:
+            expect(linux_primary_geometry_http_request_v1(action, id, 80, 24).is_err()).to_equal(true)
+        for invalid in ["", "a".repeat(63), "a".repeat(65), "A".repeat(64), "g".repeat(64), "a".repeat(62) + "\r\n"]:
+            expect(linux_primary_geometry_http_request_v1("resize", invalid, 80, 24).is_err()).to_equal(true)
+        for dims in [(0, 24), (-1, 24), (513, 24), (80, 0), (80, -1), (80, 257), (512, 256), (501, 120), (9223372036854775807, 2)]:
+            expect(linux_primary_geometry_http_request_v1("resize", id, dims.0, dims.1).is_err()).to_equal(true)
+        for dims in [(1, 0), (0, 1), (-1, 0)]:
+            expect(linux_primary_geometry_http_request_v1("inspect", id, dims.0, dims.1).is_err()).to_equal(true)
+
+    it "accepts only the pinned resize HTTP 200 empty response including omitted content type":
+        step("accepts only the pinned resize HTTP 200 empty response including omitted content type")
+        expect(linux_primary_geometry_http_decode_v1("resize", geometry_http_v1(200, "", "")).unwrap()).to_equal("")
+        expect(linux_primary_geometry_http_decode_v1("resize", geometry_http_v1(200, "Content-Type: text/plain\r\n", "")).unwrap()).to_equal("")
+        val chunked = "HTTP/1.1 200 OK\r\nConnection: close\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n"
+        expect(linux_primary_geometry_http_decode_v1("resize", chunked.bytes()).unwrap()).to_equal("")
+        for status in [201, 204, 301, 400, 500]:
+            expect(linux_primary_geometry_http_decode_v1("resize", geometry_http_v1(status, "", "")).is_err()).to_equal(true)
+        for body in ["\n", "{}", "null"]:
+            expect(linux_primary_geometry_http_decode_v1("resize", geometry_http_v1(200, "", body)).is_err()).to_equal(true)
+        expect(linux_primary_geometry_http_decode_v1("start", geometry_http_v1(200, "", "")).is_err()).to_equal(true)
+
+    it "rejects ambiguous duplicate incomplete trailing malformed and oversized HTTP framing":
+        step("rejects ambiguous duplicate incomplete trailing malformed and oversized HTTP framing")
+        for headers in ["Content-Length: 0\r\n", "cOnTeNt-LeNgTh: 0\r\n", "Transfer-Encoding: chunked\r\n",
+                "Connection: keep-alive\r\n", "Content-Encoding: gzip\r\n", "Upgrade: websocket\r\n", "Location: /elsewhere\r\n",
+                "Bad Header: value\r\n", "X-Bad: value\nforged\r\n", "X-Large: " + "x".repeat(16384) + "\r\n"]:
+            expect(linux_primary_geometry_http_decode_v1("resize", geometry_http_v1(200, headers, "")).is_err()).to_equal(true)
+        for wire in ["HTTP/1.1 200 OK\r\n\r\n", "HTTP/1.0 200 OK\r\nContent-Length: 0\r\n\r\n",
+                "HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\n", "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\nx",
+                "HTTP/1.1 200 OK\r\nContent-Length: 00\r\n\r\n", "HTTP/1.1 200 OK\r\nContent-Length: 1048577\r\n\r\n",
+                "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\nX: trailer\r\n\r\n",
+                "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\nx"]:
+            expect(linux_primary_geometry_http_decode_v1("resize", wire.bytes()).is_err()).to_equal(true)
+
+    it "decodes direct inspect JSON and matches retained runtime labels running state and configured tty":
+        step("decodes direct inspect JSON and matches retained runtime labels running state and configured tty")
+        val body = geometry_inspect_body_v1()
+        val wire = geometry_http_v1(200, "Content-Type: application/json\r\n", body)
+        expect(linux_primary_geometry_http_decode_v1("inspect", wire).unwrap()).to_equal(body)
+        expect(linux_primary_geometry_inspect_match_v1(body, geometry_expected_v1()).is_ok()).to_equal(true)
+        val extra = body.slice(0, body.len() - 1) + ",\"AdditionalEngineField\":\"café {not structure}\"}"
+        expect(linux_primary_geometry_inspect_match_v1(extra, geometry_expected_v1()).is_ok()).to_equal(true)
+        for headers in ["", "Content-Type: text/plain\r\n"]:
+            expect(linux_primary_geometry_http_decode_v1("inspect", geometry_http_v1(200, headers, body)).is_err()).to_equal(true)
+
+    it "refuses changed missing or mistyped direct runtime state tty and every identity label":
+        step("refuses changed missing or mistyped direct runtime state tty and every identity label")
+        val body = geometry_inspect_body_v1()
+        for replacement in [("\"Id\":\"" + "a".repeat(64) + "\"", "\"Id\":\"" + "c".repeat(64) + "\""),
+                ("\"Status\":\"running\"", "\"Status\":\"exited\""), ("\"Running\":true", "\"Running\":false"),
+                ("\"OpenStdin\":true", "\"OpenStdin\":false"), ("\"Tty\":true", "\"Tty\":false"),
+                ("\"Running\":true", "\"Running\":\"true\""), ("\"Tty\":true", "\"Tty\":1"),
+                ("\"io.simpleorch.pod_uid\":\"pod-a\"", "\"io.simpleorch.pod_uid\":\"other\""),
+                ("\"io.simpleorch.attempt\":\"2\"", "\"io.simpleorch.attempt\":\"3\""),
+                ("\"io.simpleorch.node_boot_id\":\"boot-a\"", "\"io.simpleorch.node_boot_id\":\"other\""),
+                ("\"io.simpleorch.provider_generation\":\"7\"", "\"io.simpleorch.provider_generation\":\"8\""),
+                ("\"io.simpleorch.operation_id\":\"operation-a\"", "\"io.simpleorch.operation_id\":\"other\""),
+                ("\"io.simpleorch.attempt\":\"2\"", "\"io.simpleorch.attempt\":2"),
+                ("\"OpenStdin\":true", "\"MissingOpenStdin\":true"), ("\"Labels\":{", "\"MissingLabels\":{"),
+                ("\"State\":{", "\"MissingState\":{"), ("\"Config\":{", "\"MissingConfig\":{")]:
+            val changed = body.replace(replacement.0, replacement.1)
+            expect(changed == body).to_equal(false)
+            expect(linux_primary_geometry_inspect_match_v1(changed, geometry_expected_v1()).is_err()).to_equal(true)
+        var wrong_engine = geometry_expected_v1()
+        wrong_engine.engine = "docker"
+        expect(linux_primary_geometry_inspect_match_v1(body, wrong_engine).is_err()).to_equal(true)
+
+    it "bounds strict inspect JSON and rejects duplicate decoded names arrays depth and trailing data":
+        step("bounds strict inspect JSON and rejects duplicate decoded names arrays depth and trailing data")
+        val body = geometry_inspect_body_v1()
+        val duplicate_root = body.slice(0, body.len() - 1) + ",\"Id\":\"" + "a".repeat(64) + "\"}"
+        val duplicate_label = body.replace("\"io.simpleorch.attempt\":\"2\"", "\"io.simpleorch.attempt\":\"2\",\"io.simpleorch.attempt\":\"2\"")
+        for invalid in ["", "[]", "[" + body + "]", body + "{}", duplicate_root, duplicate_label,
+                "[".repeat(17) + "0" + "]".repeat(17), "x".repeat(1048577), "é".repeat(524289),
+                "{\"nodes\":[" + "0,".repeat(16385) + "0]}"]:
+            expect(linux_primary_geometry_inspect_match_v1(invalid, geometry_expected_v1()).is_err()).to_equal(true)
+            expect(linux_primary_geometry_http_decode_v1("inspect", geometry_http_v1(200, "Content-Type: application/json\r\n", invalid)).is_err()).to_equal(true)
+
+    it "preserves exec and info action semantics after neutral HTTP framing extraction":
+        step("preserves exec and info action semantics after neutral HTTP framing extraction")
+        val json = geometry_http_v1(200, "Content-Type: application/json\r\n", "{}")
+        expect(linux_engine_exec_http_decode_v3("inspect", json).unwrap().action).to_equal("inspect")
+        expect(linux_engine_exec_http_decode_v3("create", geometry_http_v1(201, "Content-Type: application/json\r\n", "{}")).unwrap().status).to_equal(201)
+        expect(linux_engine_exec_http_decode_v3("start", geometry_http_v1(200, "Content-Type: text/plain; charset=us-ascii\r\n", "\n")).unwrap().body).to_equal("\n")
+        expect(linux_engine_exec_http_decode_v3("start", geometry_http_v1(200, "", "")).is_err()).to_equal(true)
+        expect(linux_engine_exec_http_decode_v3("resize", geometry_http_v1(200, "", "")).is_err()).to_equal(true)
+        expect(linux_engine_exec_http_decode_v3("create", json).is_err()).to_equal(true)
+        expect(linux_engine_info_http_decode_v3(json).is_err()).to_equal(true)
+        expect(linux_engine_info_http_decode_v3(geometry_http_v1(200, "Content-Type: application/json\r\nLibpod-API-Version: 5.2.5\r\n", "{}")).unwrap().api_version).to_equal("5.2.5")
