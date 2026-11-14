@@ -98,9 +98,14 @@ find_chrome() {
         echo "$CHROME_BIN"
         return 0
     fi
-    for candidate in "$HOME"/.cache/ms-playwright/chromium-*/chrome-linux/chrome; do
-        [ -x "$candidate" ] && { echo "$candidate"; return 0; }
+    # Newest Playwright build wins: UA defaults change between Chrome versions
+    # (Chromium 131 still shrinks `section h1`; Chrome 159 does not), so an old
+    # reference browser is a wrong oracle, not a stricter one.
+    newest=""
+    for candidate in "$HOME"/.cache/ms-playwright/chromium-*/chrome-linux*/chrome; do
+        [ -x "$candidate" ] && newest="$candidate"
     done
+    [ -n "$newest" ] && { echo "$newest"; return 0; }
     for candidate in \
         "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
         "/Applications/Chromium.app/Contents/MacOS/Chromium" \
@@ -215,6 +220,17 @@ run_selftest() {
     printf '\377\377\377\377\377\377\0\0\0\377\377\377' >> "$st_dir/ink.ppm"
     ink_n=$(ppm_non_background_pixels "$st_dir/ink.ppm")
     [ "$ink_n" = "0" ] && { echo "selftest: an inked image classified as zero-pixel-render"; return 1; }
+    # --ref-viewport-rows: a reference one row taller than the frame, whose
+    # extra row is padding, must be a dimension mismatch WITHOUT the option and
+    # 0.00 WITH it. Pins both the crop and that it is never inferred.
+    printf 'P6\n4 2\n255\n' > "$st_dir/tall.chrome.ppm"
+    printf '\377\0\0\377\0\0\377\0\0\377\0\0\0\0\0\0\0\0\0\0\0\0\0\0' >> "$st_dir/tall.chrome.ppm"
+    tall_strict=$("$SIMPLE_BIN" run src/app/ui/chrome_showcase/pixel_diff.spl \
+        --pair "$st_dir/tall.chrome.ppm" "$st_dir/same.simple.ppm" 2>/dev/null)
+    echo "$tall_strict" | grep -q 'dimension mismatch' || { echo "selftest: a taller reference was accepted without --ref-viewport-rows"; return 1; }
+    tall_crop=$("$SIMPLE_BIN" run src/app/ui/chrome_showcase/pixel_diff.spl \
+        --ref-viewport-rows 1 --pair "$st_dir/tall.chrome.ppm" "$st_dir/same.simple.ppm" 2>/dev/null)
+    echo "$tall_crop" | grep -q 'mismatch_pct=0\.00' || { echo "selftest: --ref-viewport-rows 1 did not compare the top row only"; return 1; }
     # Ratchet: within tolerance passes, a regression and an unbaselined page are
     # both named. Without the negative fixtures the ratchet could accept anything.
     printf 'a 2.00\nb 5.00\n' > "$st_dir/base.txt"
@@ -230,7 +246,7 @@ if ! run_selftest; then
     exit 2
 fi
 if [ "$SELFTEST" -eq 1 ]; then
-    echo "PASS — 7 selftest fixture(s) checked, differ discriminates, zero-pixel-render is named, ratchet names regressions"
+    echo "PASS — 9 selftest fixture(s) checked, differ discriminates, viewport crop is explicit, zero-pixel-render is named, ratchet names regressions"
     exit 0
 fi
 
