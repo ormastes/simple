@@ -1,0 +1,138 @@
+"""
+## Purpose and audience
+Purpose: Pin `vertical-align: sub | super` (the UA style of `<sub>`/`<sup>`)
+against Chrome 159. A shifted inline box was placed at the line top plus or
+minus a quarter of the font size and took no part in the line box: the line
+never grew, so every block holding a `<sub>`/`<sup>` was 3 px short (5-6 px in
+a heading) and the box itself sat 5-7 px too high. `<sub>`/`<sup>` also reset
+`line-height` to `normal` instead of inheriting it.
+Audience: browser-engine layout maintainers.
+
+Model (Blink): the box's baseline is lowered by `parent font-size / 5 + 1`
+(sub) or raised by `parent font-size / 3 + 1` (super); the box keeps its own
+line-height, and the line box grows to hold it.
+
+Chrome oracle (Chrome 159.0.8154.6 headless shell, 900x2000,
+`body{margin:0;font:16px/1.5 sans-serif}`, getBoundingClientRect, `y` and `h`
+relative to the top of the block that holds the line). The layout engine works
+in whole pixels, so the spec accepts a result within 1 px of Chrome's value
+(the same tolerance the combination-matrix gate uses).
+
+| markup                                             | block h | shifted box y, h | other            |
+|----------------------------------------------------|---------|------------------|------------------|
+| `<div>ab <sub>cd</sub> ef</div>`                   | 27.17   | 9.19, 15         | next block 27.17 |
+| `<div>ab <sup>cd</sup> ef</div>`                   | 27.33   | 2, 15            | next block 27.33 |
+| `<div style="line-height:24px">ab <sub>…`          | 29.19   | 9.19, 15         |                  |
+| `<div style="line-height:24px">ab <sup>…`          | 29.33   | 4, 15            |                  |
+| `<div>ab <span style="vertical-align:sub">cd…`     | 28.19   | 7.19, 17         |                  |
+| `<div>ab <span style="vertical-align:super">cd…`   | 30.33   | 3, 17            |                  |
+| `<div style="font-size:32px">ab <sub>cd</sub> ef`  | 53.39   | 18.39, 30        |                  |
+| `<div style="font-size:32px">ab <sup>cd</sup> ef`  | 53.66   | 5, 30            |                  |
+| `<div>ab <sub>cd</sub> <sup>ef</sup> <b>gh</b>`    | 30.5    | sub 12.52, sup 2 | b 6.33           |
+| `<div><b>ab</b> <sup>cd</sup> <i>ef</i></div>`     | 27.33   | 2, 15            | b 6.33, i 6.33   |
+| `<div><b>x<sup>2</sup></b> ef</div>` (nested)      | 27.33   | 2, 15            | b 6.33, h 17     |
+| `<div><span>ab<sub>cd</sub></span> ef</div>`       | 27.17   | 9.19, 15         | span 3, h 17     |
+| `<div>ab <b>cd</b> ef</div>` (control)             | 24      | b 3, 17          |                  |
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-SUB-SUP-BASELINE-SHIFT-001 — sub/super inline boxes shift from the parent baseline and grow the line box like Chrome 159.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_foundation.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id
+}
+
+val VW: i32 = 900
+val VH: i32 = 2000
+val HEAD: text = "<html><head><style>body{margin:0;font:16px/1.5 sans-serif}</style></head><body>"
+val TAIL: text = "</body></html>"
+
+fn field(inner: text, id: text, name: text) -> i32:
+    simple_web_layout_debug_layout_by_id(HEAD + inner + TAIL, VW, VH, id, name).to_int()
+
+# Distance from Chrome's value, in whole pixels.
+fn off(actual: i32, chrome: i32) -> i32:
+    if actual > chrome: actual - chrome else: chrome - actual
+
+describe "sub and super inline boxes match Chrome 159":
+    it "AC-1: <sub> hangs below the baseline and grows the line":
+        step("Chrome 159: block 27.17, sub at y=9.19 h=15, next block at 27.17")
+        val page = "<div id=\"p\">ab <sub id=\"c\">cd</sub> ef</div><div id=\"n\">zz</div>"
+        expect(off(field(page, "p", "h"), 27)).to_be_less_than(2)
+        expect(off(field(page, "c", "y"), 9)).to_be_less_than(2)
+        expect(off(field(page, "c", "h"), 15)).to_be_less_than(2)
+        expect(off(field(page, "n", "y"), 27)).to_be_less_than(2)
+
+    it "AC-2: <sup> rises above the baseline and grows the line upward":
+        step("Chrome 159: block 27.33, sup at y=2 h=15, next block at 27.33")
+        val page = "<div id=\"p\">ab <sup id=\"c\">cd</sup> ef</div><div id=\"n\">zz</div>"
+        expect(off(field(page, "p", "h"), 27)).to_be_less_than(2)
+        expect(off(field(page, "c", "y"), 2)).to_be_less_than(2)
+        expect(off(field(page, "n", "y"), 27)).to_be_less_than(2)
+
+    it "AC-3: <sub>/<sup> inherit a px line-height":
+        step("Chrome 159, line-height:24px: sub block 29.19 (y 9.19), sup block 29.33 (y 4)")
+        val sub_page = "<div id=\"p\" style=\"line-height:24px\">ab <sub id=\"c\">cd</sub> ef</div>"
+        expect(off(field(sub_page, "p", "h"), 29)).to_be_less_than(2)
+        expect(off(field(sub_page, "c", "y"), 9)).to_be_less_than(2)
+        val sup_page = "<div id=\"p\" style=\"line-height:24px\">ab <sup id=\"c\">cd</sup> ef</div>"
+        expect(off(field(sup_page, "p", "h"), 29)).to_be_less_than(2)
+        expect(off(field(sup_page, "c", "y"), 4)).to_be_less_than(2)
+
+    it "AC-4: vertical-align sub/super on a span shifts without a font change":
+        step("Chrome 159: sub block 28.19 (y 7.19), super block 30.33 (y 3)")
+        val sub_page = "<div id=\"p\">ab <span id=\"c\" style=\"vertical-align:sub\">cd</span> ef</div>"
+        expect(off(field(sub_page, "p", "h"), 28)).to_be_less_than(2)
+        expect(off(field(sub_page, "c", "y"), 7)).to_be_less_than(2)
+        val sup_page = "<div id=\"p\">ab <span id=\"c\" style=\"vertical-align:super\">cd</span> ef</div>"
+        expect(off(field(sup_page, "p", "h"), 30)).to_be_less_than(2)
+        expect(off(field(sup_page, "c", "y"), 3)).to_be_less_than(2)
+
+    it "AC-5: the shift scales with the parent font size":
+        step("Chrome 159, 32px: sub block 53.39 (y 18.39, h 30), sup block 53.66 (y 5)")
+        val sub_page = "<div id=\"p\" style=\"font-size:32px\">ab <sub id=\"c\">cd</sub> ef</div>"
+        expect(off(field(sub_page, "p", "h"), 53)).to_be_less_than(2)
+        expect(off(field(sub_page, "c", "y"), 18)).to_be_less_than(2)
+        expect(off(field(sub_page, "c", "h"), 30)).to_be_less_than(2)
+        val sup_page = "<div id=\"p\" style=\"font-size:32px\">ab <sup id=\"c\">cd</sup> ef</div>"
+        expect(off(field(sup_page, "p", "h"), 54)).to_be_less_than(2)
+        expect(off(field(sup_page, "c", "y"), 5)).to_be_less_than(2)
+
+    it "AC-6: a line holding both grows on both sides and moves its baseline":
+        step("Chrome 159: block 30.5, sub 12.52, sup 2, <b> 6.33")
+        val page = "<div id=\"p\">ab <sub id=\"c\">cd</sub> <sup id=\"d\">ef</sup> <b id=\"e\">gh</b></div>"
+        expect(off(field(page, "p", "h"), 30)).to_be_less_than(2)
+        expect(off(field(page, "c", "y"), 12)).to_be_less_than(2)
+        expect(off(field(page, "d", "y"), 2)).to_be_less_than(2)
+        expect(off(field(page, "e", "y"), 6)).to_be_less_than(2)
+
+    it "AC-7: baseline siblings follow the lowered baseline":
+        step("Chrome 159: <b> and <i> at y=6.33 beside a <sup> at y=2")
+        val page = "<div id=\"p\"><b id=\"b\">ab</b> <sup id=\"c\">cd</sup> <i id=\"i\">ef</i></div>"
+        expect(off(field(page, "b", "y"), 6)).to_be_less_than(2)
+        expect(off(field(page, "i", "y"), 6)).to_be_less_than(2)
+        expect(off(field(page, "c", "y"), 2)).to_be_less_than(2)
+
+    it "AC-8: a <sup> nested in an inline element still grows the line":
+        step("Chrome 159: block 27.33, <b> at y=6.33 h=17, nested sup at y=2")
+        val page = "<div id=\"p\"><b id=\"b\">x<sup id=\"c\">2</sup></b> ef</div>"
+        expect(off(field(page, "p", "h"), 27)).to_be_less_than(2)
+        expect(off(field(page, "b", "y"), 6)).to_be_less_than(2)
+        expect(off(field(page, "b", "h"), 17)).to_be_less_than(2)
+        expect(off(field(page, "c", "y"), 2)).to_be_less_than(2)
+
+    it "AC-9: a <sub> nested in an inline element still grows the line":
+        step("Chrome 159: block 27.17, span at y=3 h=17, nested sub at y=9.19")
+        val page = "<div id=\"p\"><span id=\"a\">ab<sub id=\"c\">cd</sub></span> ef</div>"
+        expect(off(field(page, "p", "h"), 27)).to_be_less_than(2)
+        expect(off(field(page, "a", "y"), 3)).to_be_less_than(2)
+        expect(off(field(page, "a", "h"), 17)).to_be_less_than(2)
+        expect(off(field(page, "c", "y"), 9)).to_be_less_than(2)
+
+    it "AC-10: control — a line without shifted boxes keeps its height":
+        step("Chrome 159: block 24, <b> at y=3")
+        val page = "<div id=\"p\">ab <b id=\"b\">cd</b> ef</div>"
+        expect(field(page, "p", "h")).to_equal(24)
+        expect(field(page, "b", "y")).to_equal(3)

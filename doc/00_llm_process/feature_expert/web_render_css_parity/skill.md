@@ -1076,7 +1076,7 @@ turns green in the same change, or the check FAILs as stale.
 - Open clusters, largest first (cells): form-control UA size, i.e. `button`
   and `input` have no UA border and `input` a different content width (78);
   table-cell residue: max-content width drops the spaces around an inline child (9), a `td` whose `display` is not `table-cell` is not laid out (8);
-  `sub`/`sup` (36); floats (34, CLOSED -- see the float section below); `fieldset`/`legend` (24); `flex-grow` on an
+  `sub`/`sup` (36, CLOSED -- see the sub/sup section below); floats (34, CLOSED -- see the float section below); `fieldset`/`legend` (24); `flex-grow` on an
   item with a definite width (17); monospace metrics for `code` (16); width /
   height / vertical padding applied to non-replaced inline boxes (15).
 - **`parse_int` drops the sign.** Any signed CSS integer read through it is
@@ -1329,3 +1329,29 @@ never cache an answer computed while exhausted) —
   96.95 px but does not fit 100); `<span>bb</span> cc <b>dd</b>` puts `dd` 6 px
   right of Chrome.
 - Spec: `test/01_unit/browser_engine/float_clear_chrome159_geometry_spec.spl`.
+
+## 2026-11-14 — `<sub>` / `<sup>` join the line box (matrix 205 -> 167 cells)
+
+- **Cause.** A `vertical-align: sub | super` box was laid out at line top
+  +- font-size/4 and never entered `inline_baseline_nodes`, so the line box
+  could not grow (every block 3 px short, 5-6 px in a heading). `<sub>`/`<sup>`
+  also reset `line-height` to normal; html.css sets only `vertical-align` and
+  `font-size: smaller`.
+- **Model (Blink).** Baseline lowered by parent-font/5 + 1 (sub) or raised by
+  parent-font/3 + 1 (super): `vertical_align_baseline_shift`. In
+  `align_inline_line_baselines` a plain inline element's ascent/descent are
+  `inline_box_shifted_ascent/descent` -+ its own shift, which also walks the
+  sub/super boxes NESTED in it (`<b>x<sup>2</sup></b>` grows the line and
+  lowers `<b>`). The shifted box's top is `baseline + shift -
+  inline_content_area_ascent`.
+- **Two placements.** On a block's line the aligner places the box. Inside an
+  inline parent (`st.display == "inline"`) the run loop places it from the
+  parent's content-area top, because that parent's box must stay its content
+  area. Inline-block / replaced boxes with sub/super keep the flat nudge.
+- **Trap — integer metrics drift 1 px per term.** Deriving the top from
+  `strut offset` and `half-leading` separately lost 2 px; go through
+  `inline_content_area_ascent` once.
+- **Found, not fixed:** `line-height: normal` on a block does not override an
+  inherited unitless factor (block stays 24 px, Chrome 18-21); the
+  `td`/sub cells are the table-cell max-content residue, not sub/sup.
+- Spec: `test/01_unit/browser_engine/sub_sup_baseline_shift_chrome159_spec.spl`.

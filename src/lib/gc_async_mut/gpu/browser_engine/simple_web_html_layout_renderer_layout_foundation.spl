@@ -284,6 +284,53 @@ fn inline_line_baseline_offset(child_index: HtmlChildIndex, node_index: i32, st:
 fn inline_line_baseline_descent(st: Style) -> i32:
     style_line_h(st) - inline_line_strut_baseline_offset(st)
 
+# An inline non-replaced ELEMENT: the only kind of box whose `vertical-align:
+# sub | super` is modelled as a baseline shift.
+fn inline_box_is_plain_element(node: HNode, st: Style) -> bool:
+    node.tag != "#text" and st.display == "inline" and not grid_item_is_replaced(node)
+
+# Baseline shift of `vertical-align: sub | super`, positive = DOWN, rounded to
+# the nearest pixel. Chrome (Blink) lowers a `sub` box by a fifth of the
+# PARENT's font size plus 1 px and raises a `super` box by a third plus 1 px.
+fn vertical_align_baseline_shift(st: Style, parent_font_size: i32) -> i32:
+    if st.vertical_align == "sub":
+        return (parent_font_size * 2 + 15) / 10
+    if st.vertical_align == "super":
+        return 0 - (parent_font_size * 2 + 9) / 6
+    0
+
+# Distance from the top of an inline box's content area to its baseline.
+fn inline_content_area_ascent(st: Style) -> i32:
+    (inline_content_area_height(st) - st.font_size + 1) / 2 + style_baseline_offset(st)
+
+# Extent of an inline element's line-height box ABOVE its own baseline,
+# including the sub/super boxes nested in it: those are laid out inside the
+# element but still have to fit in the line box that holds it.
+fn inline_box_shifted_ascent(child_index: HtmlChildIndex, html_nodes: [HNode], styles: [Style], node_index: i32) -> i32:
+    val st = styles[node_index]
+    var ascent = inline_line_strut_baseline_offset(st)
+    var child = child_index.first_child[node_index]
+    while child >= 0:
+        if inline_box_is_plain_element(html_nodes[child], styles[child]):
+            val child_ascent = inline_box_shifted_ascent(child_index, html_nodes, styles, child) - vertical_align_baseline_shift(styles[child], st.font_size)
+            if child_ascent > ascent:
+                ascent = child_ascent
+        child = child_index.next_sibling[child]
+    ascent
+
+# The same extent BELOW the baseline.
+fn inline_box_shifted_descent(child_index: HtmlChildIndex, html_nodes: [HNode], styles: [Style], node_index: i32) -> i32:
+    val st = styles[node_index]
+    var descent = inline_line_baseline_descent(st)
+    var child = child_index.first_child[node_index]
+    while child >= 0:
+        if inline_box_is_plain_element(html_nodes[child], styles[child]):
+            val child_descent = inline_box_shifted_descent(child_index, html_nodes, styles, child) + vertical_align_baseline_shift(styles[child], st.font_size)
+            if child_descent > descent:
+                descent = child_descent
+        child = child_index.next_sibling[child]
+    descent
+
 fn align_inline_line_baselines(child_index: HtmlChildIndex, line_style: Style, html_nodes: [HNode], nodes: [i32], margin_ts: [i32], margin_bs: [i32], styles: [Style], line_y: i32, line_height: i32, bx: [i32], by: [i32], bh: [i32]) -> InlineLineAlignment:
     var out_bx = bx
     var out_by = by
@@ -301,18 +348,25 @@ fn align_inline_line_baselines(child_index: HtmlChildIndex, line_style: Style, h
         val widget_baseline = form_control_baseline_from_top(
             html_nodes[node_index], node_style, bh[node_index]
         )
-        val node_ascent = if widget_baseline >= 0:
+        var node_ascent = if widget_baseline >= 0:
             margin_ts[baseline_i] + widget_baseline
         else:
             inline_line_baseline_ascent(
                 child_index, node_index, node_style,
                 margin_ts[baseline_i], margin_bs[baseline_i], bh, node_replaced
             )
-        val node_descent = if widget_baseline >= 0:
+        var node_descent = if widget_baseline >= 0:
             bh[node_index] - widget_baseline + margin_bs[baseline_i]
         elif bottom_edge_baseline(
             child_index, node_index, node_style, node_replaced
         ): 0 else: inline_line_baseline_descent(node_style)
+        # A plain inline element reaches as far as the sub/super boxes nested
+        # in it, and a sub/super element is itself moved off the baseline --
+        # both have to fit in the line box, which grows to hold them.
+        if widget_baseline < 0 and inline_box_is_plain_element(html_nodes[node_index], node_style):
+            val node_line_shift = vertical_align_baseline_shift(node_style, line_style.font_size)
+            node_ascent = inline_box_shifted_ascent(child_index, html_nodes, styles, node_index) - node_line_shift
+            node_descent = inline_box_shifted_descent(child_index, html_nodes, styles, node_index) + node_line_shift
         if node_ascent > ascent:
             ascent = node_ascent
         if node_descent > descent:
@@ -380,7 +434,15 @@ fn align_inline_line_baselines(child_index: HtmlChildIndex, line_style: Style, h
             (style_line_h(styles[node_index]) - inline_content_area_height(styles[node_index])) / 2
         else:
             0
-        val shift_y = if node_is_half_leaded:
+        # A sub/super element hangs from the line's baseline by its shift; its
+        # box is its content area, so the content-area ascent places the top.
+        val node_baseline_shift = if inline_box_is_plain_element(html_nodes[node_index], styles[node_index]):
+            vertical_align_baseline_shift(styles[node_index], line_style.font_size)
+        else:
+            0
+        val shift_y = if node_baseline_shift != 0:
+            line_y + ascent + node_baseline_shift - inline_content_area_ascent(styles[node_index]) - out_by[node_index]
+        elif node_is_half_leaded:
             line_y + (resolved_height - bh[node_index]) / 2 - out_by[node_index]
         else:
             line_y + ascent - node_baseline_offset - out_by[node_index] + text_half_leading
