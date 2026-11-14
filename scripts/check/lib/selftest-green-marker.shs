@@ -1,0 +1,71 @@
+# selftest-green-marker.shs — content-keyed cache for a guard's IMPLICIT
+# pre-scan selftest. Sourced, not executed.
+#
+# Why: on the Windows host every guard's fatal pre-scan selftest builds temp git
+# repos (git init + several commits), and process creation there costs ~0.4-1s
+# per spawn, so the selftests — not the scans — were most of every push-tier
+# gate's wall time (e.g. check-no-monomorphization.shs: selftest 46s, scan 4s;
+# measured 2026-11-14). A selftest's verdict is a pure function of the guard's
+# own source (plus what it sources), so re-running it on every push proves
+# nothing new. Same positive-proof pattern as check-c-runtime-compiles-push.shs
+# and check-seed-builds-push.shs: a marker is written ONLY after a genuine green
+# selftest; a missing marker or any keying failure means the selftest runs;
+# deleting the directory merely forces the selftests to run again.
+#
+# Rules:
+#   * An explicit `--selftest` invocation must NOT consult the marker; guards
+#     use this only for the implicit pre-scan selftest.
+#   * Key = sha256 over the listed files' bytes, this library's bytes, and
+#     `uname -s`. Any edit to any listed file is a cache miss.
+#   * SELFTEST_GREEN_MARKER_DIR=none disables the cache (always run).
+#
+# Usage (from a guard):
+#   . "$root/scripts/check/lib/selftest-green-marker.shs"
+#   _stk=$(selftest_marker_key "$0" <sourced files...>)
+#   if ! selftest_marker_hit "$_stk"; then
+#       selftest || <fatal ERROR as before>
+#       selftest_marker_record "$_stk"
+#   fi
+
+SELFTEST_MARKER_LIB=${SELFTEST_MARKER_LIB:-$(CDPATH= cd -- "$(dirname -- "${SELFTEST_MARKER_LIB_PATH:-$0}")" 2>/dev/null && pwd)/lib/selftest-green-marker.shs}
+
+selftest_marker_dir() {
+    if [ -n "${SELFTEST_GREEN_MARKER_DIR:-}" ]; then echo "$SELFTEST_GREEN_MARKER_DIR"; return; fi
+    if [ -d /mnt/data ] && [ -w /mnt/data ]; then echo /mnt/data/.selftest-green; return; fi
+    if [ -n "${SIMPLE_USER_STORAGE_ROOT:-}" ]; then echo "$SIMPLE_USER_STORAGE_ROOT/.selftest-green"; return; fi
+    echo "${TMPDIR:-/tmp}/.selftest-green"
+}
+
+# selftest_marker_key <files...> -> prints a 64-hex key; prints nothing and
+# returns 1 on any failure (a failure is a miss, never a hit).
+selftest_marker_key() {
+    [ "$(selftest_marker_dir)" = none ] && return 1
+    [ $# -gt 0 ] || return 1
+    for _smk_f in "$@" "$SELFTEST_MARKER_LIB"; do
+        [ -f "$_smk_f" ] && [ -r "$_smk_f" ] || return 1
+    done
+    _smk_k=$( { cat -- "$@" "$SELFTEST_MARKER_LIB" && uname -s; } 2>/dev/null | sha256sum 2>/dev/null) || return 1
+    _smk_k=${_smk_k%% *}
+    case "$_smk_k" in ''|*[!0-9a-f]*) return 1 ;; esac
+    [ "${#_smk_k}" -eq 64 ] || return 1
+    printf '%s\n' "$_smk_k"
+}
+
+# selftest_marker_hit <key> -> 0 only when a green marker for exactly <key> exists.
+selftest_marker_hit() {
+    [ -n "${1:-}" ] || return 1
+    _smh_d=$(selftest_marker_dir)
+    [ "$_smh_d" != none ] && [ -f "$_smh_d/$1" ]
+}
+
+# selftest_marker_record <key> — call ONLY after a genuine green selftest.
+# Best effort: an unwritable directory just means the next run selftests again.
+selftest_marker_record() {
+    [ -n "${1:-}" ] || return 0
+    _smr_d=$(selftest_marker_dir)
+    [ "$_smr_d" != none ] || return 0
+    mkdir -p "$_smr_d" 2>/dev/null || return 0
+    printf '%s\n' "${0##*/}" > "$_smr_d/$1.tmp.$$" 2>/dev/null && mv -f "$_smr_d/$1.tmp.$$" "$_smr_d/$1" 2>/dev/null
+    rm -f "$_smr_d/$1.tmp.$$" 2>/dev/null
+    return 0
+}
