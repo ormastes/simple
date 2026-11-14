@@ -1062,3 +1062,29 @@ painted and over-tall), `html`, `forms-media`, `css-paint`, `css-layout`.
   `byte_len()` for byte arity. Still open elsewhere in the style/metrics stage:
   a lone `<p>— partial; values</p>` measures 160 px on the current seed vs 119.
 - Spec: `test/01_unit/browser_engine/inline_text_wrap_line_box_spec.spl`.
+## 2026-11-14 — combination matrix vs Chrome 159 (tag x tag, tag x CSS, CSS x CSS)
+
+`sh scripts/check/check-web-combo-matrix-chrome.shs` (about 45 s; set
+`SIMPLE_BIN`): 849 generated cells / 3415 element ids in
+`test/fixtures/browser/combo_matrix/` (generator:
+`scripts/generate/generate-web-combo-matrix.shs`), each cell in its own 400x140
+slot and compared slot-relative at 1 px. It is a RATCHET on
+`scripts/check/web_combo_matrix_baseline.txt`: a fix must delete the rows it
+turns green in the same change, or the check FAILs as stale.
+
+- Matching after the first two fixes: 518 / 849 cells (61.0%).
+- Open clusters, largest first (cells): form-control UA size, i.e. `button`
+  and `input` have no UA border and `input` a different content width (78);
+  table UA defaults, no `border-spacing:2px` and no `td{padding:1px}` (48);
+  `sub`/`sup` (34); floats (34); `fieldset`/`legend` (24); `flex-grow` on an
+  item with a definite width (17); monospace metrics for `code` (15); width /
+  height / vertical padding applied to non-replaced inline boxes (15).
+- **`parse_int` drops the sign.** Any signed CSS integer read through it is
+  wrong for negatives; `left`/`top`/`order` were fixed, `right`/`bottom` are
+  not, because `right_px >= 0` doubles as "right is set".
+- **`left:10%` is read as 10 px**: offsets have no percentage form yet.
+- The Chrome harvest is `check-chrome-layout-geometry-diff.shs --harvest
+  <page> <out>`; rows now end in `id=<id>`. Use the headless shell under
+  `~/.cache/ms-playwright/chromium_headless_shell-*` (viewport == window); the
+  131 build has an outdated UA stylesheet.
+- Record: `doc/08_tracking/bug/web_combo_matrix_signed_offset_order_flex_basis_2026-11-14.md`.

@@ -1,0 +1,78 @@
+"""
+## Purpose and audience
+Purpose: Prove that a row flex item with `flex-basis:100px`, no `width` and no
+`flex-grow` is 100 px wide, and that the items after it follow it.
+Audience: browser-engine layout maintainers.
+
+The row-flex placement pass tested `width_px == 0` before it tested
+`flex_basis_px > 0`. An item sized only by `flex-basis` therefore took the
+auto-width branch, and because the measuring pass had already counted it as a
+definite 100 px (so no auto weight existed) it kept the whole remaining inner
+width: 282 px in a 300 px row, pushing every later item out of the container.
+
+Found by the web combination matrix (cells `tc-{div,p,span,li,button}-basis100`).
+
+Chrome oracle (Chrome 159.0.8154.6 headless shell, 900x2000,
+getBoundingClientRect, `body{margin:0;font:16px/1.5 sans-serif}`), a
+`display:flex;width:300px;height:60px` row:
+  aa | flex-basis:100px | bb            x = 0, 18, 118    w = 18, 100, 18
+  aa | basis 100px | basis 60px | bb    x = 0, 18, 118, 178   w = 18, 100, 60, 18
+  flex-basis:100px | bb                 x = 0, 100        w = 100, 18
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-FLEX-BASIS-NO-GROW-001 — a flex-basis-only item takes its basis.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_engine.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id
+}
+
+val VW: i32 = 900
+val VH: i32 = 2000
+
+val HEAD: text = (
+    "<html><head><style>body{margin:0;font:16px/1.5 sans-serif}" +
+    ".s{position:relative;width:400px;height:140px;overflow:hidden}" +
+    "</style></head><body><div class=\"s\">" +
+    "<div id=\"w\" style=\"display:flex;width:300px;height:60px\">"
+)
+val TAIL: text = "</div></div></body></html>"
+
+val BASIS_MIDDLE: text = (
+    HEAD + "<div id=\"a\">aa</div><div id=\"t\" style=\"flex-basis:100px\">cd</div>" +
+    "<div id=\"b\">bb</div>" + TAIL
+)
+val BASIS_TWO: text = (
+    HEAD + "<div id=\"a\">aa</div><div id=\"t\" style=\"flex-basis:100px\">cd</div>" +
+    "<div id=\"u\" style=\"flex-basis:60px\">ef</div><div id=\"b\">bb</div>" + TAIL
+)
+val BASIS_FIRST: text = (
+    HEAD + "<div id=\"t\" style=\"flex-basis:100px\">cd</div><div id=\"b\">bb</div>" + TAIL
+)
+
+fn geom(html: text, id: text, field: text) -> text:
+    simple_web_layout_debug_layout_by_id(html, VW, VH, id, field)
+
+describe "a flex-basis-only item is as wide as its basis":
+    it "flex-basis:100px between two text items is 100 px wide, as Chrome reports":
+        expect(geom(BASIS_MIDDLE, "t", "x")).to_equal("18")
+        expect(geom(BASIS_MIDDLE, "t", "w")).to_equal("100")
+        expect(geom(BASIS_MIDDLE, "t", "h")).to_equal("60")
+
+    it "the item after it starts where the basis ends, inside the row":
+        expect(geom(BASIS_MIDDLE, "b", "x")).to_equal("118")
+        expect(geom(BASIS_MIDDLE, "b", "w")).to_equal("18")
+
+describe "generalization: other rows sized by flex-basis alone":
+    it "two basis items in a row each take their own basis":
+        expect(geom(BASIS_TWO, "t", "w")).to_equal("100")
+        expect(geom(BASIS_TWO, "u", "x")).to_equal("118")
+        expect(geom(BASIS_TWO, "u", "w")).to_equal("60")
+        expect(geom(BASIS_TWO, "b", "x")).to_equal("178")
+
+    it "a basis item that is the first child starts at the row origin":
+        expect(geom(BASIS_FIRST, "t", "x")).to_equal("0")
+        expect(geom(BASIS_FIRST, "t", "w")).to_equal("100")
+        expect(geom(BASIS_FIRST, "b", "x")).to_equal("100")
