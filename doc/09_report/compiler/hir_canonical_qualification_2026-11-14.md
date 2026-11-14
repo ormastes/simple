@@ -85,3 +85,34 @@ ordinary integer prefix lengths, avoiding optional search-result ordering.
 No native retry is authorized while the current provisional phase-3 build is
 active. The prior 4 GiB failure does not itself authorize a larger memory cap,
 and a projected codec cannot substitute for actual-import qualification.
+
+## Expanded corpus and public-wrapper oracles — authored, UNRUN
+
+The fixture now constructs actual production `HirFunction`, parameter, local,
+scope, statement, and expression records. Three function bodies contain a
+typed local binding and an `if` with comparison/addition and both result arms.
+Nonempty struct and class fields, a static class method, and trait methods,
+default body, and associated type exercise the declaration codecs. Independent
+decoded-record assertions inspect the nested symbols, operators, values,
+declarations, and named-owner fields; byte roundtrip equality is not the only
+oracle. These are manually constructed production records, not parser-lowered
+source, and do not qualify the frontend or downstream execution.
+
+Public-wrapper oracles first honor the actual availability gate. While it is
+closed, both encode and decode must return the specific unavailable error;
+the fixture explicitly reports public admission checks **UNRUN**. The authored
+available branch checks canonical encode/decode, the exact input-byte boundary,
+version/header rejection, and trailing, unterminated, and permuted frame
+refusals. It never changes or bypasses the gate. A machine-readable execution
+receipt separately records whether those public admission oracles ran, so an
+internal-codec success cannot be mistaken for public qualification.
+
+Astra accepted this expanded source and receipt for push. Static inspection
+also matched all 16 constructed record field sets against the production
+declarations without missing required or unknown fields. Neither review is a
+compiler check, runtime test, golden review, or gate admission.
+
+The expanded source invalidates the held attempt-2 plan for `19703eaed7a`.
+No second native attempt has started. A newly frozen source manifest and fresh
+resource admission are required before the pending 8 GiB / 600-second
+continuation. The earlier failed source, logs, and cache remain intact.

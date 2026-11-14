@@ -1,16 +1,145 @@
 # Qualification entry: imports the real generated codec and every production
 # dependency. Internal codec evidence does not open the public canonical gate.
+# Expanded corpus and public-wrapper oracles: AUTHORED / UNRUN.
 use compiler.common.diagnostics.span.{Span}
 use compiler.common.dependency.visibility.{Visibility}
-use compiler.hir.hir_types.{HirModule, SymbolTable, HirSymbol, SymbolId, ScopeId, SymbolKind, HirType, HirTypeKind}
-use compiler.hir.hir_definitions.{HirConst, HirExpr, HirExprKind, HirAopAdvice}
+use compiler.common.attributes.{FunctionAttr}
+use compiler.types.type_layout.{layoutattr_default_}
+use compiler.hir.hir_types.{HirModule, SymbolTable, HirSymbol, SymbolId, ScopeId, Scope, ScopeKind, SymbolKind, HirType, HirTypeKind}
+use compiler.hir.hir_definitions.{HirConst, HirExpr, HirExprKind, HirAopAdvice,
+    HirFunction, HirParam, HirStmt, HirStmtKind, HirBlock, HirField, HirStruct,
+    HirClass, HirTrait, HirAssocTypeDecl}
+use compiler.hir.hir_operators.{HirBinOp}
 use compiler.blocks.value.{BlockValue}
 use compiler.hir.generated.hir_codec.{hc_enc_hir_module, hc_dec_hir_module}
-use compiler.hir.hir_codec_support.{HirCodecWriter}
-use compiler.hir.hir_codec.{hir_canonical_codec_header}
+use compiler.hir.hir_codec_support.{HirCodecWriter, HirDecodeLimits}
+use compiler.hir.hir_codec.{hir_canonical_codec_header,
+    hir_canonical_codec_generated_available_v1, hir_module_encode_canonical,
+    hir_module_decode_bounded, HirDecodeError}
 use compiler.frontend.core.flat_pool_codec.{FlatPoolReader}
 use std.common.encoding.utf8.{text_byte_len}
 use std.nogc_sync_mut.io.file_ops.{file_write}
+
+fn integer_type() -> HirType:
+    HirType(kind: HirTypeKind.Int(64, true), span: Span.empty())
+
+fn typed(kind: HirExprKind, type_: HirType) -> HirExpr:
+    HirExpr(kind: kind, has_type_: true, type_: type_, span: Span.empty())
+
+fn integer(value: i64) -> HirExpr:
+    typed(HirExprKind.IntLit(value, nil), integer_type())
+
+fn value_block(value: HirExpr) -> HirBlock:
+    HirBlock(stmts: [], has: true, value: value, span: Span.empty())
+
+# Same production constructor shape used by portable_hir_semantic_profile_v1_spec.
+# Body: val saved = value; if saved > 0: saved + 1 else: -1.
+fn typed_function(id: i64, name: text, method: bool) -> HirFunction:
+    val parameter = SymbolId(id: id + 1)
+    val local = SymbolId(id: id + 2)
+    val local_value = typed(HirExprKind.Var(local), integer_type())
+    val condition = typed(HirExprKind.Binary(HirBinOp.Gt, local_value, integer(0)),
+        HirType(kind: HirTypeKind.Bool, span: Span.empty()))
+    val incremented = typed(HirExprKind.Binary(HirBinOp.Add, local_value, integer(1)), integer_type())
+    val branch = typed(HirExprKind.If(condition, value_block(incremented),
+        Some(value_block(integer(-1)))), integer_type())
+    val statement = HirStmt(kind: HirStmtKind.Let(local, integer_type(),
+        typed(HirExprKind.Var(parameter), integer_type())), span: Span.empty())
+    val body = HirBlock(stmts: [statement], has: true, value: branch, span: Span.empty())
+    HirFunction(symbol: SymbolId(id: id), name: name, type_params: [],
+        params: [HirParam(symbol: parameter, name: "value", type_: integer_type(),
+            has_default: false, default: nil, span: Span.empty(), is_mutable: false)],
+        return_type: integer_type(), body: body, effects: [], visibility: Visibility.Public,
+        is_async: false, is_static: method, is_public: true, is_method: method,
+        is_mutable: false, is_const: false, is_extern: false,
+        func_attr: FunctionAttr.default(), has_export_attr: false, export_attr: nil,
+        has_driver_manifest_attr: false, driver_manifest_attr: nil,
+        has_suspension: false, has_vhdl_metadata: false, vhdl_metadata: nil,
+        has_doc_comment: true, doc_comment: "typed corpus: " + name, span: Span.empty(),
+        is_gpu_kernel: false, gpu_target: "", gpu_backend_order: "",
+        verification_contract: nil, is_generic_template: false)
+
+fn typed_field(id: i64, name: text, type_: HirType) -> HirField:
+    HirField(symbol: SymbolId(id: id), name: name, type_: type_,
+        has_default: false, default: nil, visibility: Visibility.Public,
+        is_public: true, is_volatile: false, has_bits_attr: false, bits_width: 0,
+        has_fixed_address: false, fixed_address: 0, span: Span.empty())
+
+fn record_symbol(table: SymbolTable, id: i64, name: text, kind: SymbolKind,
+        type_: HirType, scope: i64):
+    table.symbols[id] = HirSymbol(id: SymbolId(id: id), name: name, kind: kind,
+        type_: Some(type_), scope: ScopeId(id: scope), span: Span.empty(),
+        visibility: if scope == 0: Visibility.Public else: Visibility.Private,
+        is_public: scope == 0, is_mutable: false,
+        defining_module: Some("canonical.fixture"), builtin_method_tag: 0)
+
+fn function_symbols(table: SymbolTable, function: HirFunction, scope: i64):
+    val id = function.symbol.id
+    record_symbol(table, id, function.name,
+        if function.is_method: SymbolKind.Method else: SymbolKind.Function,
+        HirType(kind: HirTypeKind.Function([integer_type()], integer_type(), []), span: Span.empty()), 0)
+    record_symbol(table, id + 1, "value", SymbolKind.Parameter, integer_type(), scope)
+    record_symbol(table, id + 2, "saved", SymbolKind.Variable, integer_type(), scope)
+    table.scopes[scope] = Scope(id: ScopeId(id: scope), parent: Some(ScopeId(id: 0)),
+        kind: ScopeKind.Function, symbols: {"value": id + 1, "saved": id + 2})
+
+fn add_typed_declarations(module: HirModule) -> HirModule:
+    var result = module
+    val function = typed_function(100, "choose", false)
+    val method = typed_function(110, "choose_method", true)
+    val default_method = typed_function(120, "choose_default", true)
+    result.functions[function.symbol] = function
+    result.functions[method.symbol] = method
+    function_symbols(result.symbols, function, 1)
+    function_symbols(result.symbols, method, 2)
+    function_symbols(result.symbols, default_method, 3)
+    result.symbols.next_symbol_id = 123
+    result.symbols.next_scope_id = 4
+    val field = typed_field(51, "count", integer_type())
+    result.structs[SymbolId(id: 50)] = HirStruct(symbol: SymbolId(id: 50), name: "CounterRow",
+        type_params: [], fields: [field], visibility: Visibility.Public, is_public: true,
+        has_doc_comment: true, doc_comment: "typed struct", span: Span.empty(),
+        has_layout_attr: true, layout_attr: layoutattr_default_(), has_platform_attr: false,
+        platform_has_error: false, platform_has_warning: false,
+        platform_diagnostic_message: "", platform_diagnostic_line: 0,
+        is_generic_template: false, has_specialization_of: false, specialization_of: "",
+        type_bindings: {})
+    result.classes[SymbolId(id: 60)] = HirClass(symbol: SymbolId(id: 60), name: "Counter",
+        type_params: [], fields: [typed_field(61, "enabled",
+            HirType(kind: HirTypeKind.Bool, span: Span.empty()))],
+        methods: {"choose_method": method.symbol}, visibility: Visibility.Public, is_public: true,
+        has_doc_comment: true, doc_comment: "typed class", span: Span.empty(),
+        has_layout_attr: true, layout_attr: layoutattr_default_(),
+        has_export_attr: false, export_attr: nil, has_platform_attr: false,
+        platform_has_error: false, platform_has_warning: false,
+        platform_diagnostic_message: "", platform_diagnostic_line: 0,
+        is_generic_template: false, has_specialization_of: false, specialization_of: "",
+        type_bindings: {})
+    result.traits[SymbolId(id: 70)] = HirTrait(symbol: SymbolId(id: 70), name: "Choose",
+        type_params: [], methods: [default_method], supertraits: [], defaults: [default_method],
+        where_clause: [], assoc_types: [HirAssocTypeDecl(name: "Item", bounds: [],
+            has_default: true, default: integer_type(), span: Span.empty())],
+        visibility: Visibility.Public, is_public: true, has_doc_comment: true,
+        doc_comment: "typed trait", span: Span.empty(), is_generic_template: false,
+        has_specialization_of: false, specialization_of: "", type_bindings: {})
+    record_symbol(result.symbols, 50, "CounterRow", SymbolKind.Struct,
+        HirType(kind: HirTypeKind.Named(SymbolId(id: 50), []), span: Span.empty()), 0)
+    record_symbol(result.symbols, 51, "count", SymbolKind.Field, integer_type(), 0)
+    record_symbol(result.symbols, 60, "Counter", SymbolKind.Class,
+        HirType(kind: HirTypeKind.Named(SymbolId(id: 60), []), span: Span.empty()), 0)
+    record_symbol(result.symbols, 61, "enabled", SymbolKind.Field,
+        HirType(kind: HirTypeKind.Bool, span: Span.empty()), 0)
+    record_symbol(result.symbols, 70, "Choose", SymbolKind.Trait,
+        HirType(kind: HirTypeKind.Named(SymbolId(id: 70), []), span: Span.empty()), 0)
+    var root_names: Dict<text, i64> = {}
+    for id in result.symbols.symbols.keys():
+        val symbol = result.symbols.symbols[id]
+        if symbol.scope.id == 0:
+            root_names[symbol.name] = id
+    result.symbols.root_scope_symbols = root_names
+    result.symbols.scopes[0] = Scope(id: ScopeId(id: 0), parent: nil,
+        kind: ScopeKind.Module, symbols: root_names)
+    result
 
 fn fixture(order: [i64], names: [text]) -> HirModule:
     var table = SymbolTable.new()
@@ -33,7 +162,7 @@ fn fixture(order: [i64], names: [text]) -> HirModule:
     var targets: Dict<text, text> = {}
     for name in names:
         targets[name] = "target:" + name
-    HirModule(name: "canonical\n한글\\fixture", path: "codec/fixture.spl",
+    val module = HirModule(name: "canonical\n한글\\fixture", path: "codec/fixture.spl",
         imports: [], exports: [], domain_blocks: [], symbols: table,
         functions: {}, gpu_function_targets: targets, gpu_function_backend_orders: {},
         classes: {}, structs: {}, enums: {}, bitfields: {}, traits: {}, impls: [],
@@ -43,6 +172,7 @@ fn fixture(order: [i64], names: [text]) -> HirModule:
             span: Span.empty(), aspect_module: "app.owner", aspect_name: "Trace")],
         di_bindings: [],
         arch_rules: [], mock_decls: [], types: [], extend_enums: [])
+    add_typed_declarations(module)
 
 fn raw_canonical(module: HirModule) -> text:
     var writer = HirCodecWriter.create_canonical()
@@ -60,6 +190,161 @@ fn marker_position(blob: text, marker: text) -> i64:
     # must never depend on how an optional/missing search result compares.
     assert(blob.contains(marker))
     blob.split(marker)[0].len()
+
+fn assert_integer(expression: HirExpr, expected: i64):
+    match expression.kind:
+        case HirExprKind.IntLit(value, suffix):
+            assert(value == expected)
+            assert(suffix == nil)
+        case _: assert(false)
+
+fn assert_variable(expression: HirExpr, expected: i64):
+    match expression.kind:
+        case HirExprKind.Var(symbol): assert(symbol.id == expected)
+        case _: assert(false)
+
+fn assert_function_body(function: HirFunction, id: i64):
+    assert(function.symbol.id == id)
+    assert(function.params.len() == 1)
+    assert(function.params[0].symbol.id == id + 1)
+    assert(function.params[0].name == "value")
+    assert(function.body.stmts.len() == 1)
+    match function.body.stmts[0].kind:
+        case HirStmtKind.Let(symbol, type_, init):
+            assert(symbol.id == id + 2)
+            assert_variable(init, id + 1)
+            match type_.kind:
+                case HirTypeKind.Int(bits, signed):
+                    assert(bits == 64)
+                    assert(signed)
+                case _: assert(false)
+        case _: assert(false)
+    assert(function.body.has)
+    match function.body.value.kind:
+        case HirExprKind.If(condition, then_, else_):
+            match condition.kind:
+                case HirExprKind.Binary(op, left, right):
+                    assert(op == HirBinOp.Gt)
+                    assert_variable(left, id + 2)
+                    assert_integer(right, 0)
+                case _: assert(false)
+            assert(then_.has)
+            match then_.value.kind:
+                case HirExprKind.Binary(op, left, right):
+                    assert(op == HirBinOp.Add)
+                    assert_variable(left, id + 2)
+                    assert_integer(right, 1)
+                case _: assert(false)
+            assert(else_ != nil)
+            assert(else_.unwrap().has)
+            assert_integer(else_.unwrap().value, -1)
+        case _: assert(false)
+
+fn assert_typed_declarations(module: HirModule):
+    assert(module.functions.len() == 2)
+    assert(module.functions[SymbolId(id: 100)].name == "choose")
+    assert_function_body(module.functions[SymbolId(id: 100)], 100)
+    assert_function_body(module.functions[SymbolId(id: 110)], 110)
+    assert(module.symbols.symbols[102].scope.id == 1)
+    assert(module.symbols.scopes[1].symbols["saved"] == 102)
+    assert(module.structs.len() == 1)
+    val structure = module.structs[SymbolId(id: 50)]
+    assert(structure.name == "CounterRow")
+    assert(structure.fields.len() == 1)
+    assert(structure.fields[0].symbol.id == 51)
+    assert(structure.fields[0].name == "count")
+    match structure.fields[0].type_.kind:
+        case HirTypeKind.Int(bits, signed):
+            assert(bits == 64)
+            assert(signed)
+        case _: assert(false)
+    assert(module.classes.len() == 1)
+    val class_ = module.classes[SymbolId(id: 60)]
+    assert(class_.name == "Counter")
+    assert(class_.fields.len() == 1)
+    assert(class_.fields[0].name == "enabled")
+    match class_.fields[0].type_.kind:
+        case HirTypeKind.Bool: assert(class_.fields[0].symbol.id == 61)
+        case _: assert(false)
+    assert(class_.methods["choose_method"].id == 110)
+    assert(module.traits.len() == 1)
+    val trait_ = module.traits[SymbolId(id: 70)]
+    assert(trait_.name == "Choose")
+    assert(trait_.methods.len() == 1)
+    assert(trait_.defaults.len() == 1)
+    assert_function_body(trait_.methods[0], 120)
+    assert_function_body(trait_.defaults[0], 120)
+    assert(trait_.assoc_types.len() == 1)
+    assert(trait_.assoc_types[0].name == "Item")
+    assert(trait_.assoc_types[0].has_default)
+    match trait_.assoc_types[0].default.kind:
+        case HirTypeKind.Int(bits, signed):
+            assert(bits == 64)
+            assert(signed)
+        case _: assert(false)
+
+fn assert_unavailable_decode(frame: text):
+    match hir_module_decode_bounded(frame, HirDecodeLimits.standard()):
+        case Err(error):
+            match error:
+                case HirDecodeError.Unavailable(detail):
+                    assert(detail == "canonical_codec_generator_stale")
+                case _: assert(false)
+        case Ok(_): assert(false)
+
+fn assert_public_malformed(frame: text, detail: text):
+    match hir_module_decode_bounded(frame, HirDecodeLimits.standard()):
+        case Err(error):
+            match error:
+                case HirDecodeError.Malformed(actual): assert(actual == detail)
+                case _: assert(false)
+        case Ok(_): assert(false)
+
+# Closed-gate unavailability is a distinct tested outcome, never a substitute
+# for public admission. The admission branch is authored / UNRUN until the gate
+# is independently admitted; this fixture never changes it or bypasses it.
+fn public_wrapper_oracles(module: HirModule, raw: text, framed: text,
+        permuted: text) -> bool:
+    val stale = "spl-hircodec-canonical-v0 stale-flatpool\n" + raw
+    val trailing = framed + "0\n"
+    if not hir_canonical_codec_generated_available_v1():
+        match hir_module_encode_canonical(module):
+            case Err(error):
+                match error:
+                    case HirDecodeError.Unavailable(detail):
+                        assert(detail == "canonical_codec_generator_stale")
+                    case _: assert(false)
+            case Ok(_): assert(false)
+        for candidate in [framed, stale, trailing, permuted]:
+            assert_unavailable_decode(candidate)
+        print "PASS public wrappers explicitly unavailable while canonical gate closed"
+        print "UNRUN public admission: version/header, exact consumption, permutation/trailing refusal"
+        return false
+    val encoded = hir_module_encode_canonical(module)
+    assert(encoded.is_ok())
+    assert(encoded.unwrap() == framed)
+    var exact = HirDecodeLimits.standard()
+    exact.max_input_bytes = text_byte_len(framed)
+    val decoded = hir_module_decode_bounded(framed, exact)
+    assert(decoded.is_ok())
+    assert_typed_declarations(decoded.unwrap())
+    assert(raw_canonical(decoded.unwrap()) == raw)
+    assert_public_malformed(stale, "codec_header")
+    assert_public_malformed("invalid-header\n" + raw, "codec_header")
+    assert_public_malformed(trailing, "trailing_or_missing_frame")
+    assert_public_malformed(framed.substring(0, text_byte_len(framed) - 1),
+        "trailing_or_missing_frame")
+    assert_public_malformed(permuted, "noncanonical_encoding")
+    var one_short = HirDecodeLimits.standard()
+    one_short.max_input_bytes = text_byte_len(framed) - 1
+    match hir_module_decode_bounded(framed, one_short):
+        case Err(error):
+            match error:
+                case HirDecodeError.BoundsExceeded(detail): assert(detail == "input_bytes")
+                case _: assert(false)
+        case Ok(_): assert(false)
+    print "PASS public encode/decode, header rejection, exact byte limit and exact consumption"
+    true
 
 fn main() -> i64:
     val first = fixture([3, -7, 0, 12], ["한", "é", "z", "a"])
@@ -93,7 +378,9 @@ fn main() -> i64:
     assert(decoded.aop_advices.len() == 1)
     assert(decoded.aop_advices[0].aspect_module == "app.owner")
     assert(decoded.aop_advices[0].aspect_name == "Trace")
+    assert_typed_declarations(decoded)
     print "PASS real-HIR roundtrip, signed keys, integer-three, escaped text"
+    print "PASS real function/parameter/local/if bodies and struct/class/trait declarations"
 
     var truncated = raw_reader(blob.substring(0, blob.len() / 2), 65536, 128)
     val truncated_module = hc_dec_hir_module(truncated)
@@ -185,8 +472,22 @@ fn main() -> i64:
     assert(refused.unsupported == "BlockValue with a non-text payload")
     print "PASS actual unsupported opaque HIR payload refused"
 
+    val public_admission_checked = public_wrapper_oracles(first, blob, framed,
+        header + "\n" + swapped)
     assert(file_write("build/hir-canonical-qualification.raw.golden", blob))
     assert(file_write("build/hir-canonical-qualification.framed.golden", framed))
+    val public_checked_text = if public_admission_checked: "true" else: "false"
+    val receipt = "schema: hir_canonical_corpus_execution_v1\n" +
+        "actual_production_records: true\nraw_codec_oracles_executed: true\n" +
+        "public_admission_oracles_executed: " + public_checked_text + "\n" +
+        "raw_bytes: " + text_byte_len(blob).to_text() + "\n" +
+        "framed_bytes: " + text_byte_len(framed).to_text() + "\n" +
+        "parser_lowering_executed: false\nwarm_f1_qualified: false\n" +
+        "complete_cache_qualified: false\n"
+    assert(file_write("build/hir-canonical-qualification.sdn", receipt))
     print "GOLDEN actual generated-codec bytes={text_byte_len(blob)}"
-    print "SCOPE raw internal codec only; public gate remains closed"
+    if public_admission_checked:
+        print "SCOPE codec wrappers checked; warm F1 and complete-cache authority remain separate"
+    else:
+        print "SCOPE raw internal codec only; public gate remains closed"
     0
