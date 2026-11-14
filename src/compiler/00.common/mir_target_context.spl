@@ -7,7 +7,7 @@ struct MirTargetContext:
     backend: text
     # Build profile: "debug" or "release" (driver sets from CompileOptions.release).
     build_profile: text = "debug"
-    # ARM sub-arch from the triple (armv7, armv7a, thumbv7em, ...); "" otherwise.
+    # Retained ARM sub-arch or canonical x86 generation (i686); "" otherwise.
     subarch: text = ""
     # Canonical CPU tier text (tier_text form, e.g. "x86-64-v3+avx512vnni"); "" = baseline.
     # HIR stays target-neutral; MIR/backend pick the tier from this (cpu_tier_multibuild.md).
@@ -72,13 +72,13 @@ fn mir_collection_target_admitted(target: text, host_arch: text, host_os: text, 
 
 # Conservative explicit tuple vocabulary. This validates representable context
 # inputs, not backend capability, semantic portability or cache admission.
-# Keep ISA-bearing RISC-V and x86-generation spellings out until the context
-# retains that detail: riscv64gc -> riscv64 and i686 -> x86 are lossy here.
+# Keep unrepresented ISA-bearing spellings out. Canonical i686 retains its
+# generation in subarch; other x86 generations remain outside this vocabulary.
 fn _mir_target_context_explicit_suffix(target: text) -> Result<text, text>:
     if mir_target_context_uses_host(target):
         return Err("explicit_target_required: resolve native at the compile request boundary")
     val arch = target.split("-")[0]
-    if not ["x86_64", "amd64", "x64", "x86",
+    if not ["x86_64", "amd64", "x64", "x86", "i686",
         "aarch64", "arm64", "arm", "armv6", "armv7", "armv7a", "armv7m", "armv7em",
         "thumbv6m", "thumbv7m", "thumbv7em", "riscv32", "rv32", "riscv64", "rv64"].contains(arch):
         return Err("unsupported_explicit_arch: architecture is unknown or loses target detail")
@@ -88,6 +88,8 @@ fn _mir_target_context_explicit_suffix(target: text) -> Result<text, text>:
         "unknown-freebsd", "freebsd", "unknown-simpleos", "simpleos", "unknown-none-elf"]:
         if target == arch + "-" + suffix:
             return Ok(suffix)
+    if arch == "i686" and target == "i686-unknown-none":
+        return Ok("unknown-none")
     val normalized_arch = mir_target_context_normalize_arch(arch)
     if normalized_arch == "arm":
         for suffix in ["linux-gnueabihf", "unknown-linux-gnueabihf", "none-eabi", "none-eabihf"]:
@@ -221,7 +223,7 @@ fn mir_target_context_from(
     val os = mir_target_context_os_from(target, host_os)
     val first = target.split("-")[0]
     val sub_src = if mir_target_context_uses_host(target): host_arch.trim().lower() else: first
-    val subarch = if sub_src.starts_with("armv") or sub_src.starts_with("thumbv"): sub_src else: ""
+    val subarch = if sub_src.starts_with("armv") or sub_src.starts_with("thumbv") or sub_src == "i686": sub_src else: ""
     MirTargetContext(
         arch: arch,
         os: os,
