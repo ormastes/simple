@@ -8,7 +8,8 @@ use compiler.common.cache_contract.package_init_tld_v1.{PackageInitTldV1,
     package_init_tld_physical_binding_valid_v1}
 use compiler.common.cache_contract.package_init_directory_v2.{FileTldrDigestV2,
     directory_file_tldr_root_v2, package_init_directory_produce_v2,
-    package_init_directory_compare_v2, package_init_directory_identity_v2}
+    package_init_directory_compare_v2, package_init_directory_identity_v2,
+    package_init_directory_produce_v3, package_init_directory_compare_v3, package_init_directory_identity_v3}
 use compiler.common.cache_contract.aspect_match_shard_v1.{
     DirectoryJoinPointFactsV1, JoinPointFactV1, directory_join_point_facts_v1}
 
@@ -187,3 +188,28 @@ describe "directory package roots and versioned codec":
         val changed = DirectoryFixtureReaderV2(a_tldr: "TLDR a edited", b_tldr: "TLDR b")
         val fresh = directory_tldr_from_reader_v2(changed, base(), facts(), "provider").unwrap()
         expect(package_init_directory_compare_v2(actual, fresh, facts())).to_equal(nil)
+
+
+describe "schema3 complete inline facts comparison":
+    it "produces schema3 through the existing root owner and rejects schema2 hits":
+        val current = package_init_directory_produce_v3(base(), members(), facts(), "compiler/provider-A").unwrap()
+        expect(package_init_tld_schema_v1(current)).to_equal(3)
+        expect(package_init_directory_compare_v3(current, current, facts()) != nil).to_equal(true)
+        expect(package_init_directory_compare_v3(produced(), current, facts())).to_equal(nil)
+        expect(package_init_directory_identity_v3(current) != nil).to_equal(true)
+        expect(package_init_directory_identity_v2(current)).to_equal(nil)
+        expect(package_init_directory_produce_v2(current, members(), facts(), "compiler/provider-A").is_err()).to_equal(true)
+
+    it "compares body facets even when selection facts keys remain equal":
+        val before = facts()
+        val point = JoinPointFactV1(..before.sorted_join_points[0], base_body_digest: "sha256:" + d("b"))
+        val after = directory_join_point_facts_v1("pkg", before.sorted_member_files, [point], [], true)
+        expect(before.facts_key).to_equal(after.facts_key)
+        val current = package_init_directory_produce_v3(base(), members(), before, "compiler/provider-A").unwrap()
+        expect(package_init_directory_compare_v3(current, current, after)).to_equal(nil)
+
+    it "refuses noncanonical inline attributes instead of silently reordering them":
+        val before = facts()
+        val point = JoinPointFactV1(..before.sorted_join_points[0], attrs: ["z", "a"])
+        val unordered = directory_join_point_facts_v1("pkg", before.sorted_member_files, [point], [], true)
+        expect(package_init_directory_produce_v3(base(), members(), unordered, "compiler/provider-A").is_err()).to_equal(true)
