@@ -1560,133 +1560,15 @@ fn parse_color(raw: text) -> u32:
             val b = hex_val(s.substring(3, 4)) * 17
             return web_argb(r, g, b)
         return 0u32
-    if text_matches_at(s, "rgb", 0) or text_matches_at(s, "hsl", 0):
-        val fn_argb = css_color_function_argb(s)
-        if fn_argb >= 0:
-            # This entry point is opaque: the alpha is dropped.
-            return ((fn_argb as u32) & 0xFFFFFFu32) | 0xFF000000u32
+    if text_matches_at(s, "rgb", 0) and text_index_of(s, ",") >= 0:
+        # Legacy comma rgb()/rgba() has always answered opaque here (alpha
+        # dropped); every other function form keeps its alpha through the
+        # delegate below. Invalid input is 0 -- not a colour -- so the
+        # declaration is dropped instead of painting black.
+        if val rgba = parse_color_value_checked(s):
+            return 0xFF000000u32 | ((rgba >> 8) & 0xFFFFFFu32)
+        return 0u32
     _parse_color_delegated(s)
-
-# Leading CSS number of `t` ("50", "-1.5", ".25"); 0.0 when there is none.
-fn _css_leading_number(t: text) -> f64:
-    val n = t.byte_len()
-    var i = 0
-    var neg = false
-    if n > 0 and (t.substring(0, 1) == "-" or t.substring(0, 1) == "+"):
-        neg = t.substring(0, 1) == "-"
-        i = 1
-    var v = 0.0
-    var scale = 0.0
-    while i < n:
-        val c = t.substring(i, i + 1)
-        val d = dec_val(c)
-        if d < 10:
-            if scale > 0.0:
-                v = v + (d as f64) * scale
-                scale = scale / 10.0
-            else:
-                v = v * 10.0 + (d as f64)
-        elif c == "." and scale == 0.0:
-            scale = 0.1
-        else:
-            break
-        i = i + 1
-    if neg: 0.0 - v else: v
-
-fn _css_unit_round_255(v: f64) -> i64:
-    var c = v
-    if c < 0.0:
-        c = 0.0
-    if c > 1.0:
-        c = 1.0
-    (c * 255.0 + 0.5) as i64
-
-fn _css_rgb_channel(t: text) -> i64:
-    val v = _css_leading_number(t)
-    _css_unit_round_255(if t.ends_with("%"): v / 100.0 else: v / 255.0)
-
-fn _css_hue_channel(p: f64, q: f64, t0: f64) -> f64:
-    var t = t0
-    if t < 0.0:
-        t = t + 1.0
-    if t > 1.0:
-        t = t - 1.0
-    if t < 1.0 / 6.0:
-        return p + (q - p) * 6.0 * t
-    if t < 0.5:
-        return q
-    if t < 2.0 / 3.0:
-        return p + (q - p) * (2.0 / 3.0 - t) * 6.0
-    p
-
-# `rgb()` / `rgba()` / `hsl()` / `hsla()` in comma or space syntax (CSS
-# Color 4), with `/ alpha`, percentages and hue units. ARGB with the real
-# alpha, or -1 when `s` (lowercase) is not such a function.
-fn css_color_function_argb(s: text) -> i64:
-    val lp = text_index_of(s, "(")
-    val rp = text_index_of(s, ")")
-    if lp < 3 or rp <= lp:
-        return -1
-    val name = s.substring(0, lp).trim()
-    var args: [text] = []
-    var cur = ""
-    var i = lp + 1
-    while i < rp:
-        val ch = s.substring(i, i + 1)
-        if ch == "," or ch == " " or ch == "/" or ch == "\t":
-            if cur != "":
-                args.push(cur)
-                cur = ""
-        else:
-            cur = cur + ch
-        i = i + 1
-    if cur != "":
-        args.push(cur)
-    if args.len() != 3 and args.len() != 4:
-        return -1
-    var a255: i64 = 255
-    if args.len() == 4:
-        val at = args[3]
-        val av = _css_leading_number(at)
-        a255 = _css_unit_round_255(if at.ends_with("%"): av / 100.0 else: av)
-    var r: i64 = 0
-    var g: i64 = 0
-    var b: i64 = 0
-    if name == "rgb" or name == "rgba":
-        r = _css_rgb_channel(args[0])
-        g = _css_rgb_channel(args[1])
-        b = _css_rgb_channel(args[2])
-    elif name == "hsl" or name == "hsla":
-        val ht = args[0]
-        var h = _css_leading_number(ht)
-        if ht.ends_with("turn"):
-            h = h * 360.0
-        elif ht.ends_with("grad"):
-            h = h * 0.9
-        elif ht.ends_with("rad"):
-            h = h * 180.0 / 3.141592653589793
-        h = h / 360.0
-        h = h - ((h as i64) as f64)
-        if h < 0.0:
-            h = h + 1.0
-        var sat = _css_leading_number(args[1]) / 100.0
-        var lig = _css_leading_number(args[2]) / 100.0
-        if sat < 0.0:
-            sat = 0.0
-        if sat > 1.0:
-            sat = 1.0
-        if lig < 0.0:
-            lig = 0.0
-        if lig > 1.0:
-            lig = 1.0
-        val q = if lig < 0.5: lig * (1.0 + sat) else: lig + sat - lig * sat
-        val p = 2.0 * lig - q
-        r = _css_unit_round_255(_css_hue_channel(p, q, h + 1.0 / 3.0))
-        g = _css_unit_round_255(_css_hue_channel(p, q, h))
-        b = _css_unit_round_255(_css_hue_channel(p, q, h - 1.0 / 3.0))
-    else:
-        return -1
-    (a255 * 16777216) + (r * 65536) + (g * 256) + b
 
 fn _parse_color_delegated(lowered: text) -> u32:
     """Named colors, hsl()/hsla() and the other CSS color forms this local
@@ -1762,9 +1644,9 @@ fn parse_alpha_fraction_range(s: text, start: i32, end: i32) -> i32:
 fn parse_color_alpha(raw: text) -> u32:
     val s = raw.trim().lower()
     if text_matches_at(s, "rgb", 0) or text_matches_at(s, "hsl", 0):
-        val fn_argb = css_color_function_argb(s)
-        if fn_argb >= 0:
-            return fn_argb as u32
+        # dom_color's CSS Color 4 parser: comma or space syntax, `/ alpha`,
+        # percentages, hue units; 0 when invalid or fully transparent.
+        return _parse_color_delegated(s)
     val rgba_at = text_index_of(s, "rgba")
     if rgba_at >= 0:
         val lp = find_from(s, "(", rgba_at)
@@ -3108,13 +2990,44 @@ fn _decl_table_build_inner(decls: text) -> [text]:
         val end = if semi >= 0: semi else: decls_len
         val colon = find_from(decls, ":", pos)
         if colon >= 0 and colon < end:
-            tbl[idx] = decls.substring(pos, colon).trim().lower()
-            tbl[idx + 1] = decls.substring(colon + 1, end).trim()
-            idx = idx + 2
+            val prop = decls.substring(pos, colon).trim().lower()
+            val value = decls.substring(colon + 1, end).trim()
+            if not _decl_invalid_color_function(prop, value):
+                tbl[idx] = prop
+                tbl[idx + 1] = value
+                idx = idx + 2
         if semi < 0:
             break
         pos = semi + 1
     tbl
+
+# A colour longhand whose value is a malformed rgb()/rgba()/hsl()/hsla() is an
+# invalid declaration: CSS drops it, so the earlier (or inherited) value stays.
+# Leaving it in the table let the last-wins lookup read it as "no colour" and
+# lose the earlier one (`background-color: hsl(foo, bar, baz)` after a valid
+# colour painted nothing; css_color_parse_chrome159_spec.spl AC-9).
+fn _decl_invalid_color_function(prop: text, value: text) -> bool:
+    if not (
+        prop == "color" or prop == "background-color" or
+        prop == "border-color" or prop == "border-top-color" or
+        prop == "border-right-color" or prop == "border-bottom-color" or
+        prop == "border-left-color" or prop == "outline-color" or
+        prop == "text-decoration-color" or prop == "caret-color"
+    ):
+        return false
+    var v = value.lower()
+    val bang = text_index_of(v, "!")
+    if bang >= 0:
+        v = v.substring(0, bang).trim()
+    if not (v.starts_with("rgb") or v.starts_with("hsl")) or not v.ends_with(")"):
+        return false
+    # One function token only (a multi-value border-color is not judged here),
+    # and nothing a later stage substitutes.
+    if text_index_of(v, "var(") >= 0 or text_index_of(v, "calc(") >= 0 or text_index_of(v, "env(") >= 0:
+        return false
+    if find_from(v, "(", text_index_of(v, "(") + 1) >= 0:
+        return false
+    parse_color_value_checked(v) == nil
 
 # ---------------------------------------------------------------------------
 # Presence set over a declaration table.

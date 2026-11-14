@@ -58,6 +58,9 @@ Traceability: REQ-BROWSER-ENGINE-CSS-COLOR-PARSE-001 — CSS named colours, hex,
 use std.spec.*
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{parse_color, parse_color_alpha}
 use std.gc_async_mut.gpu.browser_engine.simple_web_css_box_effects.{parse_box_shadow_layers}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_html_to_pixels_with_engine2d_backend}
+
+val CASCADE_PAGE: text = "<!doctype html><html><head><style>body{{margin:0;background:#fff}}div{{width:20px;height:20px;margin:0}}#a{{background-color:#00ff00;background-color:hsl(foo, bar, baz)}}#b{{background-color:#00ff00;background-color:rgb(foo, 0, 0)}}#c{{background-color:#00ff00;background-color:hsl(120, bar, 50%)}}#d{{border:5px solid #0000ff;border-color:hsla(0,0%,0%,0);height:10px;width:10px}}#e{{background:#fff;border:5px solid #0000ff;border-color:hsl(0 100% 50% / .5);height:10px;width:10px}}</style></head><body><div id=a></div><div id=b></div><div id=c></div><div id=d></div><div id=e></div></body></html>"
 
 describe "CSS colour parsing":
     it "AC-1: named colours are the CSS Color 4 values, any case":
@@ -104,7 +107,7 @@ describe "CSS colour parsing":
         expect(parse_color_alpha("rgb(100% 50% 0%)")).to_equal(0xFFFF8000u32)
         expect(parse_color_alpha("rgba(0 0 255 / .25)")).to_equal(0x400000FFu32)
         expect(parse_color_alpha("rgb(255,0,0,0.5)")).to_equal(0x80FF0000u32)
-        step("the opaque entry point keeps the colour and drops the alpha")
+        step("the opaque entry point answers the same opaque colour")
         expect(parse_color("rgb(100% 50% 0%)")).to_equal(0xFFFF8000u32)
 
     it "AC-4: hsl() / hsla()":
@@ -128,3 +131,27 @@ describe "CSS colour parsing":
         expect(hsl.layers[0].color_rgba).to_equal(0xFF008000u32)
         val red = parse_box_shadow_layers("1px 2px red", 0u32)
         expect(red.layers[0].color_rgba).to_equal(0xFFFF0000u32)
+
+    it "AC-7: an invalid rgb() / hsl() is not a colour, so the declaration is dropped":
+        step("Chrome 159: `hsl(foo, bar, baz)`, `rgb(foo, 0, 0)`, `hsl(120, bar, 50%)` leave the earlier value")
+        for bad in ["hsl(foo, bar, baz)", "hsla(foo, bar, baz, 1)", "rgb(foo, 0, 0)", "rgba(1, 2, x, 1)", "hsl(120, bar, 50%)", "rgb(1, 2)", "rgb(1 2 3 / )", "rgb(255, 0, 0 / 0.5)", "hsl(120 100% 50% 1)"]:
+            expect(parse_color(bad)).to_equal(0u32)
+            expect(parse_color_alpha(bad)).to_equal(0u32)
+
+    it "AC-8: hsl() / hsla() and space-syntax rgb() keep their alpha in the opaque-named entry point":
+        step("Chrome 159: `border-color: hsla(0,0%,0%,0)` is transparent, `hsl(0 100% 50% / .5)` is half red")
+        expect(parse_color("hsla(0,0%,0%,0)")).to_equal(0u32)
+        expect(parse_color("hsl(0 100% 50% / .5)")).to_equal(0x80FF0000u32)
+        expect(parse_color("hsla(240,100%,50%,0.5)")).to_equal(0x800000FFu32)
+        expect(parse_color("rgb(0 0 255 / 50%)")).to_equal(0x800000FFu32)
+        expect(parse_color_alpha("hsl(0 100% 50% / 50%)")).to_equal(0x80FF0000u32)
+
+    it "AC-9: painted -- an invalid colour keeps the earlier one, a translucent border stays translucent":
+        val px = simple_web_render_html_to_pixels_with_engine2d_backend(CASCADE_PAGE, 420, 140, "cpu_simd")
+        step("Chrome 159: column x = 2 is #00ff00 for y 0..59 and #ff7f7f on the half-red border (80..)")
+        expect(px[2 + 10 * 420] & 0xFFFFFFu32).to_equal(0x00FF00u32)
+        expect(px[2 + 30 * 420] & 0xFFFFFFu32).to_equal(0x00FF00u32)
+        expect(px[2 + 50 * 420] & 0xFFFFFFu32).to_equal(0x00FF00u32)
+        val half = px[2 + 82 * 420]
+        expect(((half >> 16u32) & 255u32) as i32).to_equal(255)
+        expect((((half >> 8u32) & 255u32) as i32 - 127) * (((half >> 8u32) & 255u32) as i32 - 127) <= 1).to_equal(true)

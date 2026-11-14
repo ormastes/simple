@@ -1298,14 +1298,35 @@ fn fb_background_radial_stack_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32
 fn fb_border_sides_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, bl: i32, bt: i32, br: i32, bb: i32, cl: u32, ct: u32, cr: u32, cb: u32, clip: ClipRect) -> [u32]:
     var out = fb
     if bt > 0 and ct != 0u32:
-        out = fb_rect_clip(out, fbw, fbh, x, y, w, bt, ct, clip)
+        out = _fb_border_side_clip(out, fbw, fbh, x, y, w, bt, ct, clip)
     if bb > 0 and cb != 0u32:
-        out = fb_rect_clip(out, fbw, fbh, x, y + h - bb, w, bb, cb, clip)
+        out = _fb_border_side_clip(out, fbw, fbh, x, y + h - bb, w, bb, cb, clip)
+    # A translucent left/right side skips the rows the top/bottom sides
+    # already covered, so a corner is blended once, not twice.
     if bl > 0 and cl != 0u32:
-        out = fb_rect_clip(out, fbw, fbh, x, y, bl, h, cl, clip)
+        if _fb_border_translucent(cl):
+            out = _fb_border_side_clip(out, fbw, fbh, x, y + bt, bl, h - bt - bb, cl, clip)
+        else:
+            out = _fb_border_side_clip(out, fbw, fbh, x, y, bl, h, cl, clip)
     if br > 0 and cr != 0u32:
-        out = fb_rect_clip(out, fbw, fbh, x + w - br, y, br, h, cr, clip)
+        if _fb_border_translucent(cr):
+            out = _fb_border_side_clip(out, fbw, fbh, x + w - br, y + bt, br, h - bt - bb, cr, clip)
+        else:
+            out = _fb_border_side_clip(out, fbw, fbh, x + w - br, y, br, h, cr, clip)
     out
+
+fn _fb_border_translucent(color: u32) -> bool:
+    val alpha = ((color >> 24) & 255u32) as i32
+    alpha > 0 and alpha < 255
+
+# A translucent border colour (`hsl(0 100% 50% / .5)`) blends over what is
+# under it, as Chrome does; it used to be stored raw, alpha byte and all. An
+# alpha byte of 0 is a colour packed without one and stays opaque.
+fn _fb_border_side_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, color: u32, clip: ClipRect) -> [u32]:
+    if not _fb_border_translucent(color):
+        return fb_rect_clip(fb, fbw, fbh, x, y, w, h, color, clip)
+    val alpha = ((color >> 24) & 255u32) as i32
+    fb_rect_opacity_clip(fb, fbw, fbh, x, y, w, h, color | 0xFF000000u32, (alpha * 100 + 127) / 255, clip)
 
 fn fb_outline_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, outline_w: i32, outline_offset: i32, color: u32, clip: ClipRect) -> [u32]:
     if outline_w <= 0 or color == 0u32:
