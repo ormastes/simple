@@ -202,3 +202,56 @@ Still open:
   style="width:50%">` in an inline-block is 150x150 in Chrome (the percentage
   falls back to the 300 px default for the container's intrinsic width) and
   1x1 here.
+
+### 12. Out-of-flow NON-replaced box inside an inline box is sized against the span
+
+Fixed for replaced boxes: `<span>a<svg viewBox="0 0 24 24"
+style="position:absolute"></svg>b</span>` in a 900 px positioned block is
+891x891 (Chrome 891.1), a `float:left;max-width:30px` one is 30x30, and an
+absolute canvas / floated video in a span is 300x150 with the span left 18-19
+wide (Chrome 17.8). Owner: `inline_parent_containing_block` in
+`layout_engine.spl`.
+
+The containing block is the nearest POSITIONED ancestor, a span included (an
+absolute svg with `left:0` in a 48 px `position:relative` span is 48x48), and
+`left`/`right`/percentages are resolved against it (`left:1px` in a 200 px
+positioned div is 199x199 at x=1; `right:1px` puts it at x=0; `height:50%` of
+a 50 px div is 25).
+
+Remaining deltas for the replaced case: the box's y is the span's top where
+Chrome uses the line top (27 against 24 on a 24 px line); a positioned span
+leaving 0 available gives 1x1 here and 0x0 in Chrome (the 1 px floor);
+`<canvas style="position:absolute;width:50%">` is 100x150 here and 100x50 in
+Chrome (a canvas keeps its 2:1 ratio there); a percentage height resolves
+only against an EXPLICIT containing-block height.
+
+Still open: a NON-replaced absolute box in a span (`<span>a<div
+style="position:absolute">some longer text here</div>b</span>`) still takes
+the span's width as its available width (Chrome 154.75x24). Widening that arm
+to non-replaced boxes gave the right width but a 168 px height, so it was left
+as it was. Also open: text after a float inside a span does not start beside
+the float (Chrome x=47.8, here 19).
+
+### 13. svg `<title>` content is dropped
+
+The tokenizer reads every `<title>` as RCDATA, so `<svg><title><div/>x</title>
+<rect/></svg>` loses the title subtree here; Chrome parses svg `title` as an
+HTML integration point (`<title><div>x<rect></rect></div></title>`). The
+integration-point list in `_TreeStack.in_foreign_content` therefore omits
+`title`. Unblock: make the RCDATA switch depend on the current namespace.
+
+### 14. Extreme viewBox ratios (fixed; boundary noted)
+
+Derived sizes saturate at 33554432 px (`svg_ratio_scaled_px`); they wrapped
+before (`viewBox="0 0 1000000 0.001" height=100` was 1215752192 wide). Chrome
+159 drops the ratio for a viewBox under one unit wide whose height is more
+than 10^7 times its width (`0 0 0.001 1000000` with `width=100` is 100x150,
+with no size 300x150); `svg_ratio_view_box_milli` does the same. Measured
+rows are in the header of AC-20..AC-24 in
+`test/01_unit/browser_engine/svg_viewbox_percent_sizing_spec.spl`.
+
+Not matched: at exactly 10^7 Chrome is inconsistent (`0.1 x 1000000` keeps
+the ratio, `0.001 x 10000` and `0.00001 x 100` drop it and measure 152 px
+tall, not 150); here a ratio of exactly 10^7 is dropped only below one unit,
+and a width under 0.001 is an invalid viewBox. `viewBox="0 0 1e30 1e-30"` is
+300x100 in Chrome and 100x100 here (exponents are not parsed).

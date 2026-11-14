@@ -253,3 +253,177 @@ describe "a ratio-only svg in a shrink-to-fit container":
     it "AC-15: an svg without a viewBox keeps the 300x150 default":
         step("Chrome: inline-block around a plain svg is 300 wide")
         expect(stf(STF_IB_PLAIN)).to_equal("container 300 svg 300x150")
+
+# Constrained or out-of-flow ratio-only svg inside a span (Chrome 159; `a` and
+# `b` are 8.9 px each there and 9 px here; `<span id="n">next</span>` follows):
+#
+# | svg style                         | svg     | span w | next x |
+# |-----------------------------------|---------|--------|--------|
+# | `max-width:24px`                  | 24x24   | 41.8   | 41.8   |
+# | `min-width:40px;max-width:40px`   | 40x40   | 57.8   | 57.8   |
+# | `max-width:24px`, in a nested span| 24x24   | 41.8   | 71.8 (after a 30 px float row above) |
+# | `position:absolute`               | 891x891 | 17.8   | 17.8   |
+# | `float:left;max-width:30px`       | 30x30   | 17.8   | 47.8   |
+#
+# Only an in-flow svg widens the span, and only by its constrained width.
+# The out-of-flow svg itself is sized against its containing block, never the
+# span: absolute -> 891x891 (900 minus its 8.9 px static position), float ->
+# 30x30. `<canvas style="position:absolute">` / `<video style="float:left">`
+# in a span are 300x150 and leave the span 17.8 wide.
+fn span_row(svg_style: text) -> text:
+    "<div style=\"position:relative\"><span id=\"p\">a<svg id=\"s\" " + VB + " style=\"" + svg_style + "\"></svg>b</span><span id=\"n\">next</span></div>"
+
+val SPAN_NESTED: text = "<div><span id=\"p\">a<span id=\"q\"><svg id=\"s\" " + VB + " style=\"max-width:24px\"></svg></span>b</span><span id=\"n\">next</span></div>"
+
+# Extreme ratios (Chrome 159, `width=100` unless noted):
+#
+# | viewBox w x h              | Chrome        |
+# |----------------------------|---------------|
+# | 1000000 x 0.001 (height=100) | 33554432x100 |
+# | 1 x 10000000000            | 100x33554432  |
+# | 1 x 10000000               | 100x33554432  |
+# | 0.1 x 1000000              | 100x33554432  |
+# | 0.001 x 100                | 100x9999900   |
+# | 0.0001 x 100               | 100x33554432  |
+# | 0.01 x 1000000             | 100x150 (measured 150 or 152 by page) |
+# | 0.001 x 1000000            | 100x150       |
+# | 0.001 x 1000000, no size   | 300x150       |
+# | 0.001 x 10000              | 100x152       |
+# | 0.00001 x 100              | 100x152       |
+#
+# Derived sizes saturate at 33554432. A viewBox under one unit wide whose
+# height is more than 10^7 times its width gives no ratio (plain defaults).
+# At exactly 10^7 Chrome is not consistent (0.1 x 1000000 keeps the ratio,
+# 0.001 x 10000 drops it), so no row is asserted on that boundary.
+val MAX_PX: i32 = 33554432
+val RATIO_WIDE: text = "<div id=\"p\"><svg id=\"s\" viewBox=\"0 0 1000000 0.001\" height=\"100\"></svg></div>"
+val RATIO_TALL: text = "<div id=\"p\"><svg id=\"s\" viewBox=\"0 0 0.001 1000000\" width=\"100\"></svg></div>"
+val RATIO_EXP: text = "<div><svg id=\"s\" viewBox=\"0 0 1e30 1e-30\" height=\"100\"></svg></div>"
+
+describe "a constrained or out-of-flow ratio-only svg inside a span":
+    it "AC-18: max-width and min-width bound the span's width":
+        step("Chrome: max-width:24px gives a 24x24 svg, span 41.8, next at 41.8 (here 42)")
+        expect(stf(span_row("max-width:24px"))).to_equal("container 42 svg 24x24")
+        expect(px(span_row("max-width:24px"), "n", "x")).to_equal(42)
+        step("Chrome: min-width:40px;max-width:40px gives 40x40, span 57.8 (here 58)")
+        expect(stf(span_row("min-width:40px;max-width:40px"))).to_equal("container 58 svg 40x40")
+        expect(px(span_row("min-width:40px;max-width:40px"), "n", "x")).to_equal(58)
+        step("Chrome: the same svg one span deeper gives the same 41.8 span")
+        expect(stf(SPAN_NESTED)).to_equal("container 42 svg 24x24")
+        expect(px(SPAN_NESTED, "q", "w")).to_equal(24)
+
+    it "AC-19: an out-of-flow svg does not widen the span":
+        step("Chrome: position:absolute leaves the span 17.8 wide and next at 17.8; asserted 17 < v < 20 (1 px box floor)")
+        expect(px(span_row("position:absolute"), "p", "w")).to_be_greater_than(17)
+        expect(px(span_row("position:absolute"), "p", "w")).to_be_less_than(20)
+        expect(px(span_row("position:absolute"), "n", "x")).to_be_greater_than(17)
+        expect(px(span_row("position:absolute"), "n", "x")).to_be_less_than(20)
+        step("Chrome: float:left;max-width:30px leaves the span 17.8 wide; asserted 17 < w < 20")
+        expect(px(span_row("float:left;max-width:30px"), "p", "w")).to_be_greater_than(17)
+        expect(px(span_row("float:left;max-width:30px"), "p", "w")).to_be_less_than(20)
+
+    it "AC-22: an out-of-flow replaced box in a span is sized against its containing block":
+        step("Chrome: the absolute svg is 891.1x891.1 (asserted 890 < v < 893)")
+        expect(px(span_row("position:absolute"), "s", "w")).to_be_greater_than(890)
+        expect(px(span_row("position:absolute"), "s", "w")).to_be_less_than(893)
+        expect(px(span_row("position:absolute"), "s", "h")).to_be_greater_than(890)
+        expect(px(span_row("position:absolute"), "s", "h")).to_be_less_than(893)
+        step("Chrome: the float:left;max-width:30px svg is 30x30")
+        expect(px(span_row("float:left;max-width:30px"), "s", "w")).to_equal(30)
+        expect(px(span_row("float:left;max-width:30px"), "s", "h")).to_equal(30)
+        step("Chrome: an absolute canvas in a span is 300x150 and the span stays 17.8 wide (asserted 17 < w < 20)")
+        expect(stf("<div id=\"p\" style=\"position:relative;height:160px\"><span id=\"q\">a<canvas id=\"s\" style=\"position:absolute\"></canvas>b</span></div>")).to_equal("container 900 svg 300x150")
+        expect(px("<div id=\"p\" style=\"position:relative;height:160px\"><span id=\"q\">a<canvas id=\"s\" style=\"position:absolute\"></canvas>b</span></div>", "q", "w")).to_be_greater_than(17)
+        expect(px("<div id=\"p\" style=\"position:relative;height:160px\"><span id=\"q\">a<canvas id=\"s\" style=\"position:absolute\"></canvas>b</span></div>", "q", "w")).to_be_less_than(20)
+        step("Chrome: a floated video in a span is 300x150 and the span stays 17.8 wide")
+        expect(stf("<div id=\"p\" style=\"overflow:hidden\"><span id=\"q\">a<video id=\"s\" style=\"float:left\"></video>b</span></div>")).to_equal("container 900 svg 300x150")
+        expect(px("<div id=\"p\" style=\"overflow:hidden\"><span id=\"q\">a<video id=\"s\" style=\"float:left\"></video>b</span></div>", "q", "w")).to_be_greater_than(17)
+        expect(px("<div id=\"p\" style=\"overflow:hidden\"><span id=\"q\">a<video id=\"s\" style=\"float:left\"></video>b</span></div>", "q", "w")).to_be_less_than(20)
+
+describe "an extreme viewBox ratio is bounded":
+    it "AC-20: the derived axis stops at the largest layout size":
+        step("Chrome: viewBox 1000000 x 0.001 at height=100 is 33554432x100")
+        expect(stf(RATIO_WIDE)).to_equal("container 900 svg 33554432x100")
+        step("Chrome: a tall viewBox at least one unit wide saturates too: 1 x 10000000000 at width=100 is 100x33554432")
+        expect(stf("<div id=\"p\"><svg id=\"s\" viewBox=\"0 0 1 10000000000\" width=\"100\"></svg></div>")).to_equal("container 900 svg 100x33554432")
+
+    it "AC-23: a viewBox under one unit wide and over 10^7 times taller gives no ratio":
+        step("Chrome: viewBox 0.001 x 1000000 at width=100 is 100x150, and 300x150 with no size")
+        expect(stf(RATIO_TALL)).to_equal("container 900 svg 100x150")
+        expect(stf("<div id=\"p\"><svg id=\"s\" viewBox=\"0 0 0.001 1000000\"></svg></div>")).to_equal("container 900 svg 300x150")
+        step("Chrome: viewBox 0.01 x 1000000 at width=100 is 100x150")
+        expect(stf("<div id=\"p\"><svg id=\"s\" viewBox=\"0 0 0.01 1000000\" width=\"100\"></svg></div>")).to_equal("container 900 svg 100x150")
+        step("Chrome: viewBox 0.001 x 100 (10^5 times taller) keeps its ratio: 100x9999900; asserted 9999000 < h < 10001000")
+        expect(px("<div><svg id=\"s\" viewBox=\"0 0 0.001 100\" width=\"100\"></svg></div>", "s", "h")).to_be_greater_than(9999000)
+        expect(px("<div><svg id=\"s\" viewBox=\"0 0 0.001 100\" width=\"100\"></svg></div>", "s", "h")).to_be_less_than(10001000)
+
+    it "AC-24: a malformed viewBox never crashes":
+        step("Malformed exponent viewBox does not crash and stays bounded")
+        expect(px(RATIO_EXP, "s", "w")).to_be_greater_than(0)
+        expect(px(RATIO_EXP, "s", "w")).to_be_less_than(MAX_PX + 1)
+
+describe "a floated or absolute canvas and video keep their default box":
+    it "AC-21: 300x150 in each position (Chrome 159)":
+        step("Chrome: float:left canvas and video are 300x150")
+        expect(stf("<div id=\"p\" style=\"overflow:hidden\"><canvas id=\"s\" style=\"float:left\"></canvas></div>")).to_equal("container 900 svg 300x150")
+        expect(stf("<div id=\"p\" style=\"overflow:hidden\"><video id=\"s\" style=\"float:left\"></video></div>")).to_equal("container 900 svg 300x150")
+        step("Chrome: position:absolute canvas and video in a 500 px block are 300x150; left:310px is honoured")
+        expect(stf("<div id=\"p\" style=\"position:relative;height:160px;width:500px\"><canvas id=\"s\" style=\"position:absolute\"></canvas></div>")).to_equal("container 500 svg 300x150")
+        expect(stf("<div id=\"p\" style=\"position:relative;height:160px;width:500px\"><video id=\"s\" style=\"position:absolute;left:310px\"></video></div>")).to_equal("container 500 svg 300x150")
+        expect(px("<div id=\"p\" style=\"position:relative;height:160px;width:500px\"><video id=\"s\" style=\"position:absolute;left:310px\"></video></div>", "s", "x")).to_equal(310)
+
+# Absolute replaced box in a span, insets and positioned spans (Chrome 159;
+# `S` = `<svg viewBox="0 0 24 24" style="position:absolute;...">`):
+#
+# | fixture                                                              | svg x | svg     |
+# |----------------------------------------------------------------------|-------|---------|
+# | `<div style="width:600px"><span style="position:relative">a S</span>` | 8.9   | 0x0     |
+# | same, span text `abcdef` (48 wide), `left:0`                         | 0     | 48x48   |
+# | same, `left:2px;width:50%`                                           | 2     | 24x24   |
+# | `<div style="position:relative;width:200px">some text <span>a S`, `left:1px` | 1 | 199x199 |
+# | same, `right:1px`                                                    | 0     | 199x199 |
+# | same with `height:50px` on the div, `left:10px;height:50%`           | 10    | 25x25   |
+# | same, `<canvas style="position:absolute;left:1px;width:50%">`        | 1     | 100x50  |
+#
+# The containing block is the nearest POSITIONED ancestor, a span included
+# (its box); an inset is measured from that block's edge and leaves the rest
+# of its width available. The canvas height (Chrome keeps the 2:1 ratio: 50)
+# is 150 here and is not asserted.
+fn abs_in_positioned_span(text_run: text, svg_style: text) -> text:
+    "<div style=\"width:600px\"><span id=\"p\" style=\"position:relative\">" + text_run + "<svg id=\"s\" " + VB + " style=\"position:absolute;" + svg_style + "\"></svg></span></div>"
+
+fn abs_in_span_of(div_style: text, child: text) -> text:
+    "<div id=\"p\" style=\"position:relative;width:200px;" + div_style + "\">some text <span>a" + child + "</span></div>"
+
+fn abs_svg(svg_style: text) -> text:
+    "<svg id=\"s\" " + VB + " style=\"position:absolute;" + svg_style + "\"></svg>"
+
+describe "an absolute replaced box in a span uses the nearest positioned ancestor":
+    it "AC-25: a positioned span is the containing block":
+        step("Chrome: static position at the span's right edge leaves 0 available: 0x0 (asserted w < 2)")
+        expect(px(abs_in_positioned_span("a", ""), "s", "w")).to_be_greater_than(-1)
+        expect(px(abs_in_positioned_span("a", ""), "s", "w")).to_be_less_than(2)
+        step("Chrome: left:0 in a 48 px span is 48x48 at x=0 (asserted 47 < w < 50)")
+        expect(px(abs_in_positioned_span("abcdef", "left:0"), "s", "x")).to_equal(0)
+        expect(px(abs_in_positioned_span("abcdef", "left:0"), "s", "w")).to_be_greater_than(47)
+        expect(px(abs_in_positioned_span("abcdef", "left:0"), "s", "w")).to_be_less_than(50)
+        step("Chrome: left:2px;width:50% of the 48 px span is 24x24 at x=2")
+        expect(px(abs_in_positioned_span("abcdef", "left:2px;width:50%"), "s", "x")).to_equal(2)
+        expect(px(abs_in_positioned_span("abcdef", "left:2px;width:50%"), "s", "w")).to_equal(24)
+        expect(px(abs_in_positioned_span("abcdef", "left:2px;width:50%"), "s", "h")).to_equal(24)
+
+    it "AC-26: an inset is measured from the containing block, not the span":
+        step("Chrome: left:1px in a 200 px positioned div is 199x199 at x=1")
+        expect(px(abs_in_span_of("", abs_svg("left:1px")), "s", "x")).to_equal(1)
+        expect(px(abs_in_span_of("", abs_svg("left:1px")), "s", "w")).to_equal(199)
+        expect(px(abs_in_span_of("", abs_svg("left:1px")), "s", "h")).to_equal(199)
+        step("Chrome: right:1px is 199x199 at x=0")
+        expect(px(abs_in_span_of("", abs_svg("right:1px")), "s", "x")).to_equal(0)
+        expect(px(abs_in_span_of("", abs_svg("right:1px")), "s", "w")).to_equal(199)
+        step("Chrome: left:10px;height:50% of a 50 px div is 25x25 at x=10")
+        expect(px(abs_in_span_of("height:50px", abs_svg("left:10px;height:50%")), "s", "x")).to_equal(10)
+        expect(px(abs_in_span_of("height:50px", abs_svg("left:10px;height:50%")), "s", "w")).to_equal(25)
+        expect(px(abs_in_span_of("height:50px", abs_svg("left:10px;height:50%")), "s", "h")).to_equal(25)
+        step("Chrome: canvas left:1px;width:50% is 100 wide at x=1")
+        expect(px(abs_in_span_of("", "<canvas id=\"s\" style=\"position:absolute;left:1px;width:50%\"></canvas>"), "s", "x")).to_equal(1)
+        expect(px(abs_in_span_of("", "<canvas id=\"s\" style=\"position:absolute;left:1px;width:50%\"></canvas>"), "s", "w")).to_equal(100)
