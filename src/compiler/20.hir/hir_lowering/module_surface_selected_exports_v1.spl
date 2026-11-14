@@ -1,0 +1,580 @@
+# Typed selected export routes, built only from configured registry targets.
+# Selection records semantic origin; requester access is a separate operation.
+use compiler.hir.hir_lowering.module_surface_types.*
+use compiler.hir.hir_lowering.module_surface_semantic_projection.{module_surface_semantic_state, module_surface_semantic_mix, module_surface_semantic_finish}
+use compiler.common.module_path_naming.{module_source_relative_path}
+
+pub fn module_surface_export_category_name_v1(category: ModuleSurfaceExportCategoryV1) -> text:
+    match category:
+        ModuleSurfaceExportCategoryV1.Function: "function"
+        ModuleSurfaceExportCategoryV1.Class: "class"
+        ModuleSurfaceExportCategoryV1.Struct: "struct"
+        ModuleSurfaceExportCategoryV1.Enum: "enum"
+        ModuleSurfaceExportCategoryV1.Trait: "trait"
+        ModuleSurfaceExportCategoryV1.TypeAlias: "type_alias"
+        ModuleSurfaceExportCategoryV1.Constant: "constant"
+        ModuleSurfaceExportCategoryV1.Bitfield: "bitfield"
+
+fn selected_category_v1(name: text) -> ModuleSurfaceExportCategoryV1?:
+    match name:
+        "function": Some(ModuleSurfaceExportCategoryV1.Function)
+        "class": Some(ModuleSurfaceExportCategoryV1.Class)
+        "struct": Some(ModuleSurfaceExportCategoryV1.Struct)
+        "enum": Some(ModuleSurfaceExportCategoryV1.Enum)
+        "trait": Some(ModuleSurfaceExportCategoryV1.Trait)
+        "type_alias": Some(ModuleSurfaceExportCategoryV1.TypeAlias)
+        "constant": Some(ModuleSurfaceExportCategoryV1.Constant)
+        "bitfield": Some(ModuleSurfaceExportCategoryV1.Bitfield)
+        _: nil
+
+fn selected_binding_key_v1(surface: i64, role: i64, category: text, name: text) -> text:
+    "{surface}:{role}:{category}:{name.byte_len()}:{name}"
+
+# Construction keys use scalar collision chains, like the retained registry
+# path owner; no class-field aggregate dictionary is a native read authority.
+extern fn rt_hash_text(content: text) -> i64
+
+class SelectedExportBuildKeysV1:
+    names: [text] = []
+    rows: [i64] = []
+    buckets: [i64] = []
+    next: [i64] = []
+
+fn selected_key_position_v1(keys: SelectedExportBuildKeysV1, key: text) -> i64:
+    if keys.buckets.len() != 4096: return -1
+    var slot = keys.buckets[rt_hash_text(key) & 4095]
+    var visited = 0
+    while slot >= 0 and slot < keys.names.len() and slot < keys.next.len() and slot < keys.rows.len() and visited < keys.names.len():
+        if keys.names[slot] == key: return keys.rows[slot]
+        slot = keys.next[slot]
+        visited = visited + 1
+    -1
+
+fn selected_key_put_v1(keys: SelectedExportBuildKeysV1, key: text, row: i64):
+    val bucket = rt_hash_text(key) & 4095
+    keys.next = keys.next.push(keys.buckets[bucket])
+    keys.buckets[bucket] = keys.names.len()
+    keys.names = keys.names.push(key)
+    keys.rows = keys.rows.push(row)
+
+fn selected_binding_add_v1(index: ModuleSurfaceSelectedExportIndexV1, keys: SelectedExportBuildKeysV1, surface: i64, role: i64, category: text, name: text) -> i64:
+    val key = selected_binding_key_v1(surface, role, category, name)
+    val existing = selected_key_position_v1(keys, key)
+    if existing >= 0: return existing
+    val row = index.names.len()
+    selected_key_put_v1(keys, key, row)
+    index.source_surfaces = index.source_surfaces.push(surface)
+    index.roles = index.roles.push(role)
+    index.categories = index.categories.push(category)
+    index.names = index.names.push(name)
+    index.states = index.states.push(0)
+    index.terminal_surfaces = index.terminal_surfaces.push(-1)
+    index.terminal_names = index.terminal_names.push("")
+    index.terminal_projections = index.terminal_projections.push("")
+    index.tiers = index.tiers.push(-1)
+    index.hop_starts = index.hop_starts.push(0)
+    index.hop_counts = index.hop_counts.push(0)
+    row
+
+fn selected_binding_target_v1(keys: SelectedExportBuildKeysV1, surface: i64, category: text, name: text) -> i64:
+    if surface < 0: return -2
+    val declaration = selected_binding_key_v1(surface, 0, category, name)
+    val declaration_row = selected_key_position_v1(keys, declaration)
+    if declaration_row >= 0: return declaration_row
+    val exported = selected_binding_key_v1(surface, 1, category, name)
+    selected_key_position_v1(keys, exported)
+
+# Construction-local candidate data never escapes the registry owner.
+class SelectedExportCandidatesV1:
+    tier: i64 = -1
+    kinds: [i64] = []
+    targets: [i64] = []
+    import_rows: [i64] = []
+    import_items: [i64] = []
+    export_rows: [i64] = []
+    export_items: [i64] = []
+    export_routes: [i64] = []
+
+fn selected_candidate_add_v1(candidates: SelectedExportCandidatesV1, tier: i64, kind: i64, target: i64, import_row: i64, import_item: i64, export_row: i64, export_item: i64, export_route: i64):
+    if candidates.tier >= 0 and tier > candidates.tier: return
+    if candidates.tier < 0 or tier < candidates.tier:
+        candidates.tier = tier
+        candidates.kinds = []
+        candidates.targets = []
+        candidates.import_rows = []
+        candidates.import_items = []
+        candidates.export_rows = []
+        candidates.export_items = []
+        candidates.export_routes = []
+    candidates.kinds = candidates.kinds.push(kind)
+    candidates.targets = candidates.targets.push(target)
+    candidates.import_rows = candidates.import_rows.push(import_row)
+    candidates.import_items = candidates.import_items.push(import_item)
+    candidates.export_rows = candidates.export_rows.push(export_row)
+    candidates.export_items = candidates.export_items.push(export_item)
+    candidates.export_routes = candidates.export_routes.push(export_route)
+
+fn selected_hops_publish_v1(index: ModuleSurfaceSelectedExportIndexV1, row: i64, candidates: SelectedExportCandidatesV1):
+    index.tiers[row] = candidates.tier
+    index.hop_starts[row] = index.hop_sources.len()
+    index.hop_counts[row] = candidates.targets.len()
+    var offset = 0
+    while offset < candidates.targets.len():
+        index.hop_sources = index.hop_sources.push(row)
+        index.hop_kinds = index.hop_kinds.push(candidates.kinds[offset])
+        index.hop_targets = index.hop_targets.push(candidates.targets[offset])
+        index.hop_import_rows = index.hop_import_rows.push(candidates.import_rows[offset])
+        index.hop_import_items = index.hop_import_items.push(candidates.import_items[offset])
+        index.hop_export_rows = index.hop_export_rows.push(candidates.export_rows[offset])
+        index.hop_export_items = index.hop_export_items.push(candidates.export_items[offset])
+        index.hop_export_routes = index.hop_export_routes.push(candidates.export_routes[offset])
+        offset = offset + 1
+
+fn selected_candidates_v1(registry: ModuleSurfacesByName, index: ModuleSurfaceSelectedExportIndexV1, keys: SelectedExportBuildKeysV1, row: i64) -> SelectedExportCandidatesV1:
+    val candidates = SelectedExportCandidatesV1()
+    val source = index.source_surfaces[row]
+    val surface = registry.surfaces[source]
+    val category = index.categories[row]
+    val local_name = index.names[row]
+    if index.roles[row] == 0:
+        selected_candidate_add_v1(candidates, 0, 0, row, -1, -1, -1, -1, -1)
+        return candidates
+    var route = 0
+    var export_row = 0
+    while export_row < surface.exports.len():
+        var export_item = 0
+        while export_item < surface.exports[export_row].items.len():
+            val matching = surface.export_route_is_glob[route] or surface.export_route_locals[route] == local_name
+            if matching:
+                val target_surface = surface.export_route_target_indices[route]
+                if surface.export_route_is_glob[route]:
+                    val target = selected_binding_target_v1(keys, target_surface, category, local_name)
+                    if target != -1:
+                        selected_candidate_add_v1(candidates, 3, 3, target, -1, -1, export_row, export_item, route)
+                else:
+                    val source_name = surface.export_route_sources[route]
+                    val direct_key = selected_binding_key_v1(source, 0, category, source_name)
+                    val direct_row = selected_key_position_v1(keys, direct_key)
+                    if direct_row >= 0:
+                        selected_candidate_add_v1(candidates, 0, 0, direct_row, -1, -1, export_row, export_item, route)
+                    # Matching named rows mask every lower tier, even when the
+                    # configured target is absent or its declaration is delayed.
+                    var import_row = 0
+                    while import_row < surface.imports.len():
+                        val item_start = surface.import_item_offsets[import_row]
+                        val item_end = surface.import_item_offsets[import_row + 1]
+                        var item = item_start
+                        while item < item_end:
+                            val imported_local = if surface.import_item_has_alias[item]: surface.import_item_aliases[item] else: surface.import_item_names[item]
+                            if imported_local == source_name:
+                                val target = selected_binding_target_v1(keys, surface.import_target_indices[import_row], category, surface.import_item_names[item])
+                                selected_candidate_add_v1(candidates, 1, 1, target, import_row, item - item_start, export_row, export_item, route)
+                            item = item + 1
+                        if item_start == item_end:
+                            val target = selected_binding_target_v1(keys, surface.import_target_indices[import_row], category, source_name)
+                            if target != -1:
+                                selected_candidate_add_v1(candidates, 2, 2, target, import_row, -1, export_row, export_item, route)
+                        import_row = import_row + 1
+                    if target_surface >= 0:
+                        val target = selected_binding_target_v1(keys, target_surface, category, source_name)
+                        selected_candidate_add_v1(candidates, 3, 3, target, -1, -1, export_row, export_item, route)
+            route = route + 1
+            export_item = export_item + 1
+        export_row = export_row + 1
+    candidates
+
+# Stable O(n log n) ordering for immutable binary-search lookup. The temporary
+# construction dictionary is not a retained read authority.
+fn selected_keys_sorted_v1(rows: [text]) -> [text]:
+    var result = rows
+    var width = 1
+    while width < rows.len():
+        var next: [text] = []
+        var start = 0
+        while start < rows.len():
+            val middle = if width > rows.len() - start: rows.len() else: start + width
+            val end = if width > rows.len() - middle: rows.len() else: middle + width
+            var left = start
+            var right = middle
+            while left < middle or right < end:
+                if right >= end or (left < middle and not (result[right] < result[left])):
+                    next.push(result[left])
+                    left = left + 1
+                else:
+                    next.push(result[right])
+                    right = right + 1
+            start = end
+        result = next
+        if width > rows.len() / 2: break
+        width = width * 2
+    result
+
+pub(package) fn module_surface_selected_exports_build_v1(registry: ModuleSurfacesByName) -> Result<(), text>:
+    if registry.frozen or registry.generation <= 0: return Err("selected export construction requires unpublished configured registry")
+    # Replace rather than copy: reselection cannot preserve a stale Selected row.
+    val index = ModuleSurfaceSelectedExportIndexV1(generation: registry.generation, route_generation: registry.configured_route_generation_v1)
+    registry.selected_exports_v1 = index
+    val keys = SelectedExportBuildKeysV1()
+    var bucket = 0
+    while bucket < 4096:
+        keys.buckets = keys.buckets.push(-1)
+        bucket = bucket + 1
+    val categories = ["function", "class", "struct", "enum", "trait", "type_alias", "constant", "bitfield"]
+    var source = 0
+    while source < registry.surfaces.len():
+        val surface = registry.surfaces[source]
+        val authority = surface.declaration_authority_index
+        var declaration = 0
+        while declaration < authority.names.len():
+            if declaration >= authority.projection_keys.len(): return Err("selected export declaration authority is misaligned")
+            val category = module_surface_authority_category_v1(authority.projection_keys[declaration])
+            if val admitted_category = selected_category_v1(category):
+                val name = authority.names[declaration]
+                val facts = module_surface_declaration_authority_lookup_typed_building_v1(authority, name, category)
+                if not facts.found: return Err("selected export declaration authority is invalid")
+                # Only physical declarations seed terminals. Forwarded authority
+                # from a previous resolver must never masquerade as a declaration.
+                if facts.source_path == surface.canonical_path and facts.source_name == name:
+                    val row = selected_binding_add_v1(index, keys, source, 0, category, name)
+                    index.states[row] = 1
+                    index.terminal_surfaces[row] = source
+                    index.terminal_names[row] = name
+                    index.terminal_projections[row] = facts.projection_key
+            declaration = declaration + 1
+        var route = 0
+        while route < surface.export_route_sources.len():
+            if surface.export_route_is_glob[route]:
+                if surface.export_route_target_indices[route] < 0:
+                    return Err("selected export glob has no configured target: {surface.module_name}")
+            else:
+                for category in categories:
+                    selected_binding_add_v1(index, keys, source, 1, category, surface.export_route_locals[route])
+            route = route + 1
+        source = source + 1
+    # A glob adds only names already present in its configured target. No
+    # sibling scan or generated textual hint supplies route authority.
+    var changed = true
+    while changed:
+        changed = false
+        val prior_count = index.names.len()
+        source = 0
+        while source < registry.surfaces.len():
+            val surface = registry.surfaces[source]
+            var route = 0
+            while route < surface.export_route_sources.len():
+                if surface.export_route_is_glob[route]:
+                    val target = surface.export_route_target_indices[route]
+                    var row = 0
+                    while row < prior_count:
+                        if index.source_surfaces[row] == target:
+                            selected_binding_add_v1(index, keys, source, 1, index.categories[row], index.names[row])
+                        row = row + 1
+                route = route + 1
+            source = source + 1
+        changed = index.names.len() != prior_count
+    var row = 0
+    while row < index.names.len():
+        val candidates = selected_candidates_v1(registry, index, keys, row)
+        selected_hops_publish_v1(index, row, candidates)
+        # A bare export may require implicit sibling lookup. Selected closure
+        # membership does not prove the complete same-folder declaration set.
+        # Until that owner supplies admitted typed coverage, this is Unknown,
+        # not a proven Missing declaration and not a cacheable selected hint.
+        if candidates.targets.len() == 0: index.states[row] = 4
+        row = row + 1
+    # Fixed point: resolve only when every retained winning-tier predecessor is
+    # complete. Equal terminals retain ALL edges; different terminals conflict.
+    changed = true
+    while changed:
+        changed = false
+        row = 0
+        while row < index.names.len():
+            if index.states[row] == 0:
+                var pending = false
+                var unavailable = false
+                var missing = false
+                var ambiguous = false
+                var terminal = -1
+                var offset = 0
+                while offset < index.hop_counts[row]:
+                    val edge = index.hop_starts[row] + offset
+                    val target = index.hop_targets[edge]
+                    if target == -1:
+                        missing = true
+                    elif target < 0:
+                        unavailable = true
+                    elif index.states[target] == 0:
+                        pending = true
+                    elif index.states[target] == 3:
+                        ambiguous = true
+                    elif index.states[target] == 2:
+                        missing = true
+                    elif index.states[target] != 1:
+                        unavailable = true
+                    elif terminal < 0:
+                        terminal = target
+                    elif index.terminal_surfaces[terminal] != index.terminal_surfaces[target] or index.terminal_names[terminal] != index.terminal_names[target] or index.terminal_projections[terminal] != index.terminal_projections[target]:
+                        ambiguous = true
+                    offset = offset + 1
+                if not pending:
+                    if ambiguous:
+                        index.states[row] = 3
+                    elif unavailable or (missing and terminal >= 0):
+                        index.states[row] = 4
+                    elif terminal < 0:
+                        index.states[row] = 2
+                    else:
+                        val terminal_surface = index.terminal_surfaces[terminal]
+                        val facts = module_surface_declaration_authority_lookup_typed_building_v1(registry.surfaces[terminal_surface].declaration_authority_index, index.terminal_names[terminal], index.categories[row])
+                        if not facts.found or facts.source_modifier == "pri":
+                            index.states[row] = 4
+                        else:
+                            index.states[row] = 1
+                            index.terminal_surfaces[row] = terminal_surface
+                            index.terminal_names[row] = index.terminal_names[terminal]
+                            index.terminal_projections[row] = index.terminal_projections[terminal]
+                    changed = true
+            row = row + 1
+    row = 0
+    while row < index.names.len():
+        if index.states[row] == 0: index.states[row] = 4
+        row = row + 1
+    index.lookup_keys = selected_keys_sorted_v1(keys.names)
+    for key in index.lookup_keys:
+        index.lookup_rows = index.lookup_rows.push(selected_key_position_v1(keys, key))
+    Ok(())
+
+fn selected_arrays_aligned_v1(index: ModuleSurfaceSelectedExportIndexV1) -> bool:
+    val rows = index.names.len()
+    if index.source_surfaces.len() != rows or index.roles.len() != rows or index.categories.len() != rows or index.states.len() != rows or index.terminal_surfaces.len() != rows or index.terminal_names.len() != rows or index.terminal_projections.len() != rows or index.tiers.len() != rows or index.hop_starts.len() != rows or index.hop_counts.len() != rows:
+        return false
+    val hops = index.hop_sources.len()
+    if index.hop_kinds.len() != hops or index.hop_targets.len() != hops or index.hop_import_rows.len() != hops or index.hop_import_items.len() != hops or index.hop_export_rows.len() != hops or index.hop_export_items.len() != hops or index.hop_export_routes.len() != hops:
+        return false
+    index.lookup_keys.len() == rows and index.lookup_rows.len() == rows
+
+fn selected_window_valid_v1(index: ModuleSurfaceSelectedExportIndexV1, row: i64) -> bool:
+    if row < 0 or row >= index.names.len(): return false
+    val start = index.hop_starts[row]
+    val count = index.hop_counts[row]
+    start >= 0 and count >= 0 and start <= index.hop_sources.len() and count <= index.hop_sources.len() - start
+
+fn selected_readable_v1(registry: ModuleSurfacesByName) -> bool:
+    val index = registry.selected_exports_v1
+    registry.frozen and index.frozen and registry.generation > 0 and index.generation == registry.generation and index.route_generation != "" and index.route_generation == registry.configured_route_generation_v1 and selected_arrays_aligned_v1(index)
+
+fn selected_position_v1(index: ModuleSurfaceSelectedExportIndexV1, key: text) -> i64:
+    var lower = 0
+    var upper = index.lookup_keys.len()
+    while lower < upper:
+        val middle = lower + (upper - lower) / 2
+        val candidate = index.lookup_keys[middle]
+        if candidate == key:
+            val row = index.lookup_rows[middle]
+            if row < 0 or row >= index.names.len(): return -1
+            if selected_binding_key_v1(index.source_surfaces[row], index.roles[row], index.categories[row], index.names[row]) != key: return -1
+            return row
+        if candidate < key: lower = middle + 1
+        else: upper = middle
+    -1
+
+fn selected_empty_v1(state: ModuleSurfaceExportSelectionStateV1, reason: text, source: i64, role: ModuleSurfaceExportBindingRoleV1, category: ModuleSurfaceExportCategoryV1, name: text) -> ModuleSurfaceExportSelectionV1:
+    ModuleSurfaceExportSelectionV1(state: state, reason: reason, generation: 0, binding_row: -1, source_surface: source, role: role, category: category, local_name: name, terminal_surface: -1, terminal_name: "", terminal_projection: "", tier: -1, hop_start: 0, hop_count: 0)
+
+fn selected_route_shape_v1(surface: ModuleSurface) -> bool:
+    val routes = surface.export_route_sources.len()
+    routes == surface.export_route_locals.len() and routes == surface.export_route_target_indices.len() and routes == surface.export_route_is_glob.len() and routes == surface.export_route_rows_v1.len() and routes == surface.export_route_items_v1.len() and surface.import_target_indices.len() == surface.imports.len() and surface.import_item_offsets.len() == surface.imports.len() + 1 and surface.import_item_names.len() == surface.import_item_aliases.len() and surface.import_item_names.len() == surface.import_item_has_alias.len()
+
+fn selected_lookup_v1(registry: ModuleSurfacesByName, source: i64, role: ModuleSurfaceExportBindingRoleV1, category: ModuleSurfaceExportCategoryV1, name: text) -> ModuleSurfaceExportSelectionV1:
+    if not selected_readable_v1(registry) or source < 0 or source >= registry.surfaces.len():
+        return selected_empty_v1(ModuleSurfaceExportSelectionStateV1.Unavailable, "unpublished-or-stale-registry", source, role, category, name)
+    val surface = registry.surfaces[source]
+    if not surface.frozen or surface.generation != registry.generation or surface.physical_index != source or not selected_route_shape_v1(surface):
+        return selected_empty_v1(ModuleSurfaceExportSelectionStateV1.Unavailable, "stale-source-surface", source, role, category, name)
+    val index = registry.selected_exports_v1
+    val role_tag = if role == ModuleSurfaceExportBindingRoleV1.Declaration: 0 else: 1
+    val row = selected_position_v1(index, selected_binding_key_v1(source, role_tag, module_surface_export_category_name_v1(category), name))
+    if row < 0: return selected_empty_v1(ModuleSurfaceExportSelectionStateV1.Missing, "binding-absent", source, role, category, name)
+    if not selected_window_valid_v1(index, row): return selected_empty_v1(ModuleSurfaceExportSelectionStateV1.Unavailable, "invalid-edge-window", source, role, category, name)
+    if index.states[row] != 1:
+        val state = match index.states[row]:
+            0: ModuleSurfaceExportSelectionStateV1.Pending
+            2: ModuleSurfaceExportSelectionStateV1.Missing
+            3: ModuleSurfaceExportSelectionStateV1.Ambiguous
+            _: ModuleSurfaceExportSelectionStateV1.Unavailable
+        return selected_empty_v1(state, "selection-incomplete-or-conflicting", source, role, category, name)
+    if index.hop_counts[row] == 0 or index.terminal_surfaces[row] < 0 or index.terminal_surfaces[row] >= registry.surfaces.len():
+        return selected_empty_v1(ModuleSurfaceExportSelectionStateV1.Unavailable, "missing-terminal-evidence", source, role, category, name)
+    val terminal_surface = registry.surfaces[index.terminal_surfaces[row]]
+    if not terminal_surface.frozen or terminal_surface.generation != registry.generation or terminal_surface.physical_index != index.terminal_surfaces[row]:
+        return selected_empty_v1(ModuleSurfaceExportSelectionStateV1.Unavailable, "stale-terminal", source, role, category, name)
+    val authority = module_surface_declaration_authority_lookup_typed_v1(terminal_surface.declaration_authority_index, index.terminal_names[row], index.categories[row])
+    if not authority.found or authority.projection_key != index.terminal_projections[row] or authority.source_path != terminal_surface.canonical_path or (role_tag == 1 and authority.source_modifier == "pri"):
+        return selected_empty_v1(ModuleSurfaceExportSelectionStateV1.Unavailable, "terminal-authority-mismatch", source, role, category, name)
+    ModuleSurfaceExportSelectionV1(state: ModuleSurfaceExportSelectionStateV1.Selected, reason: "", generation: index.generation, binding_row: row, source_surface: source, role: role, category: category, local_name: name, terminal_surface: index.terminal_surfaces[row], terminal_name: index.terminal_names[row], terminal_projection: index.terminal_projections[row], tier: index.tiers[row], hop_start: index.hop_starts[row], hop_count: index.hop_counts[row])
+
+pub fn module_surface_selected_export_lookup_v1(registry: ModuleSurfacesByName, surface_index: i64, category: ModuleSurfaceExportCategoryV1, local_name: text) -> ModuleSurfaceExportSelectionV1:
+    selected_lookup_v1(registry, surface_index, ModuleSurfaceExportBindingRoleV1.Export, category, local_name)
+
+pub fn module_surface_selected_declaration_lookup_v1(registry: ModuleSurfacesByName, surface_index: i64, category: ModuleSurfaceExportCategoryV1, local_name: text) -> ModuleSurfaceExportSelectionV1:
+    selected_lookup_v1(registry, surface_index, ModuleSurfaceExportBindingRoleV1.Declaration, category, local_name)
+
+pub fn module_surface_selected_export_hop_v1(registry: ModuleSurfacesByName, selection: ModuleSurfaceExportSelectionV1, offset: i64) -> Result<ModuleSurfaceExportHopV1, text>:
+    val current = selected_lookup_v1(registry, selection.source_surface, selection.role, selection.category, selection.local_name)
+    if current.state != ModuleSurfaceExportSelectionStateV1.Selected or selection.state != current.state or selection.generation != current.generation or selection.binding_row != current.binding_row or selection.hop_start != current.hop_start or selection.hop_count != current.hop_count or selection.terminal_surface != current.terminal_surface or selection.terminal_name != current.terminal_name or selection.terminal_projection != current.terminal_projection or selection.tier != current.tier:
+        return Err("stale selected export handle")
+    if offset < 0 or offset >= current.hop_count: return Err("selected export hop is out of bounds")
+    val index = registry.selected_exports_v1
+    val edge = current.hop_start + offset
+    val target = index.hop_targets[edge]
+    if index.hop_sources[edge] != current.binding_row or target < 0 or target >= index.names.len() or index.states[target] != 1 or not selected_window_valid_v1(index, target):
+        return Err("selected export predecessor is invalid")
+    if index.categories[target] != index.categories[current.binding_row] or index.terminal_surfaces[target] != current.terminal_surface or index.terminal_names[target] != current.terminal_name or index.terminal_projections[target] != current.terminal_projection:
+        return Err("selected export typed terminal changed")
+    val target_surface = index.source_surfaces[target]
+    if target_surface < 0 or target_surface >= registry.surfaces.len() or registry.surfaces[target_surface].generation != registry.generation or not registry.surfaces[target_surface].frozen:
+        return Err("selected export target generation changed")
+    val target_role = if index.roles[target] == 0: ModuleSurfaceExportBindingRoleV1.Declaration else: ModuleSurfaceExportBindingRoleV1.Export
+    if index.roles[target] < 0 or index.roles[target] > 1: return Err("selected export target role is invalid")
+    val source = registry.surfaces[current.source_surface]
+    val route = index.hop_export_routes[edge]
+    val export_row = index.hop_export_rows[edge]
+    val export_item = index.hop_export_items[edge]
+    if current.role == ModuleSurfaceExportBindingRoleV1.Declaration:
+        if index.hop_kinds[edge] != 0 or target != current.binding_row or route != -1 or export_row != -1 or export_item != -1:
+            return Err("invalid direct declaration marker")
+    else:
+        if export_row < 0 or export_row >= source.exports.len() or export_item < 0 or export_item >= source.exports[export_row].items.len():
+            return Err("selected export source position is invalid")
+        if route < 0 or route >= source.export_route_sources.len() or route >= source.export_route_rows_v1.len() or route >= source.export_route_items_v1.len() or source.export_route_rows_v1[route] != export_row or source.export_route_items_v1[route] != export_item:
+            return Err("selected export source item changed")
+        if not source.export_route_is_glob[route] and source.export_route_locals[route] != current.local_name:
+            return Err("selected export source binding changed")
+    val kind_tag = index.hop_kinds[edge]
+    val import_row = index.hop_import_rows[edge]
+    val import_item = index.hop_import_items[edge]
+    if kind_tag == 0:
+        if import_row != -1 or import_item != -1 or target_surface != current.source_surface or index.roles[target] != 0:
+            return Err("invalid direct export predecessor")
+        if route >= 0 and index.names[target] != source.export_route_sources[route]: return Err("direct export source changed")
+    elif kind_tag == 1 or kind_tag == 2:
+        if import_row < 0 or import_row >= source.import_target_indices.len() or import_row + 1 >= source.import_item_offsets.len() or source.import_target_indices[import_row] != target_surface:
+            return Err("configured import target changed")
+        val start = source.import_item_offsets[import_row]
+        val end = source.import_item_offsets[import_row + 1]
+        if kind_tag == 1:
+            if import_item < 0 or start < 0 or end < start or import_item >= end - start or end > source.import_item_names.len() or end > source.import_item_aliases.len() or end > source.import_item_has_alias.len(): return Err("named import item changed")
+            val item = start + import_item
+            val local_name = if source.import_item_has_alias[item]: source.import_item_aliases[item] else: source.import_item_names[item]
+            if index.names[target] != source.import_item_names[item] or route < 0 or local_name != source.export_route_sources[route]: return Err("named import binding changed")
+        else:
+            if import_item != -1 or start != end or route < 0 or index.names[target] != source.export_route_sources[route]: return Err("glob import binding changed")
+    elif kind_tag == 3:
+        if import_row != -1 or import_item != -1 or route < 0 or source.export_route_target_indices[route] != target_surface: return Err("configured export target changed")
+        val wanted = if source.export_route_is_glob[route]: current.local_name else: source.export_route_sources[route]
+        if index.names[target] != wanted: return Err("qualified export binding changed")
+    else:
+        return Err("unknown selected export hop role")
+    val kind = match kind_tag:
+        0: ModuleSurfaceExportHopKindV1.Direct
+        1: ModuleSurfaceExportHopKindV1.NamedImport
+        2: ModuleSurfaceExportHopKindV1.GlobImport
+        _: ModuleSurfaceExportHopKindV1.QualifiedExport
+    Ok(ModuleSurfaceExportHopV1(kind: kind, source_binding_row: current.binding_row, target_binding_row: target, target_surface: target_surface, target_role: target_role, target_category: selection.category, target_name: index.names[target], generation: index.generation, import_row: import_row, import_item: import_item, export_row: export_row, export_item: export_item, terminal_surface: current.terminal_surface, terminal_name: current.terminal_name, terminal_projection: current.terminal_projection))
+
+# Called before freeze. The legacy projection is conservative: only one typed
+# selected category may occupy a name. It never supplies the new access proof.
+pub(package) fn module_surface_selected_exports_project_v1(registry: ModuleSurfacesByName) -> Result<(), text>:
+    val index = registry.selected_exports_v1
+    if not selected_arrays_aligned_v1(index): return Err("selected export backing arrays are misaligned")
+    var source = 0
+    while source < registry.surfaces.len():
+        val surface = registry.surfaces[source]
+        surface.export_origin_index = module_surface_export_origin_index_empty()
+        surface.export_origins = {}
+        var selected_names: Dict<text, i64> = {}
+        var incompatible_names: Dict<text, bool> = {}
+        var digest = module_surface_semantic_state()
+        digest = module_surface_semantic_mix(digest, "schema", "selected-typed-export-v1")
+        var complete = true
+        # Sorted keys make declaration ordering irrelevant. Edge order preserves
+        # exact source item positions, which are part of route semantics.
+        for row in index.lookup_rows:
+            if index.source_surfaces[row] != source: continue
+            if not selected_window_valid_v1(index, row): return Err("selected export edge window is invalid")
+            digest = module_surface_semantic_mix(digest, "role", "{index.roles[row]}")
+            digest = module_surface_semantic_mix(digest, "category", index.categories[row])
+            digest = module_surface_semantic_mix(digest, "local", index.names[row])
+            digest = module_surface_semantic_mix(digest, "state", "{index.states[row]}")
+            digest = module_surface_semantic_mix(digest, "tier", "{index.tiers[row]}")
+            if index.states[row] == 0 or index.states[row] == 3 or index.states[row] == 4:
+                complete = false
+                if index.roles[row] == 1: incompatible_names[index.names[row]] = true
+            if index.states[row] != 1: continue
+            val terminal = index.terminal_surfaces[row]
+            if terminal < 0 or terminal >= registry.surfaces.len(): return Err("selected export terminal is invalid")
+            digest = module_surface_semantic_mix(digest, "terminal-path", module_source_relative_path(registry.surfaces[terminal].canonical_path))
+            digest = module_surface_semantic_mix(digest, "terminal-name", index.terminal_names[row])
+            digest = module_surface_semantic_mix(digest, "terminal-projection", index.terminal_projections[row])
+            val terminal_authority = module_surface_declaration_authority_lookup_typed_building_v1(registry.surfaces[terminal].declaration_authority_index, index.terminal_names[row], index.categories[row])
+            if not terminal_authority.found: return Err("selected digest terminal authority is absent")
+            digest = module_surface_semantic_mix(digest, "terminal-modifier", terminal_authority.source_modifier)
+            var offset = 0
+            while offset < index.hop_counts[row]:
+                val edge = index.hop_starts[row] + offset
+                val target = index.hop_targets[edge]
+                if index.hop_sources[edge] != row or target < 0 or target >= index.names.len() or index.states[target] != 1: return Err("selected export has invalid predecessor")
+                digest = module_surface_semantic_mix(digest, "hop-kind", "{index.hop_kinds[edge]}")
+                digest = module_surface_semantic_mix(digest, "hop-target-path", module_source_relative_path(registry.surfaces[index.source_surfaces[target]].canonical_path))
+                digest = module_surface_semantic_mix(digest, "hop-target-role", "{index.roles[target]}")
+                digest = module_surface_semantic_mix(digest, "hop-target-category", index.categories[target])
+                digest = module_surface_semantic_mix(digest, "hop-target-name", index.names[target])
+                digest = module_surface_semantic_mix(digest, "hop-import-row", "{index.hop_import_rows[edge]}")
+                digest = module_surface_semantic_mix(digest, "hop-import-item", "{index.hop_import_items[edge]}")
+                digest = module_surface_semantic_mix(digest, "hop-export-row", "{index.hop_export_rows[edge]}")
+                digest = module_surface_semantic_mix(digest, "hop-export-item", "{index.hop_export_items[edge]}")
+                offset = offset + 1
+            if index.roles[row] == 1:
+                val name = index.names[row]
+                if selected_names.contains_key(name): incompatible_names[name] = true
+                else: selected_names[name] = row
+                # Typed terminal metadata follows every selected binding, even
+                # when a legacy name-only consumer cannot represent the result.
+                val authority = module_surface_declaration_authority_lookup_typed_building_v1(registry.surfaces[terminal].declaration_authority_index, index.terminal_names[row], index.categories[row])
+                if not authority.found: return Err("selected export terminal authority is absent")
+                # A local declaration retains its own authority in a collision;
+                # the selected export index carries the distinct export role.
+                val existing = module_surface_declaration_authority_lookup_typed_building_v1(surface.declaration_authority_index, name, index.categories[row])
+                if not existing.found:
+                    module_surface_declaration_authority_index_put(surface.declaration_authority_index, name, authority.declaring_module, authority.source_name, authority.visibility, authority.source_modifier, authority.source_path, authority.projection_key)?
+        for name in selected_names.keys():
+            if incompatible_names.contains_key(name): continue
+            val row = selected_names[name]
+            val terminal = registry.surfaces[index.terminal_surfaces[row]]
+            module_surface_export_origin_index_put(surface.export_origin_index, name, terminal.preferred_registry_name, index.terminal_names[row], "selected-typed-v1")?
+        surface.export_origins = surface.export_origin_index.origins
+        index.surface_digests = index.surface_digests.push(if complete: module_surface_semantic_finish(digest) else: "")
+        source = source + 1
+    # Conservative transitive identity: a changed intermediate route must
+    # invalidate a root even when its terminal stays the same. A later tested
+    # dependency slice can replace this whole-registry salt without weakening
+    # provenance. Process-local generation is deliberately excluded.
+    var snapshot_rows: [text] = []
+    source = 0
+    while source < registry.surfaces.len():
+        val path = module_source_relative_path(registry.surfaces[source].canonical_path)
+        snapshot_rows.push("{path.byte_len()}:{path}:{index.surface_digests[source]}")
+        source = source + 1
+    var snapshot = module_surface_semantic_state()
+    for item in selected_keys_sorted_v1(snapshot_rows):
+        snapshot = module_surface_semantic_mix(snapshot, "selected-surface", item)
+    val snapshot_digest = module_surface_semantic_finish(snapshot)
+    source = 0
+    while source < index.surface_digests.len():
+        if index.surface_digests[source].byte_len() == 64:
+            var digest = module_surface_semantic_state()
+            digest = module_surface_semantic_mix(digest, "selected-snapshot", snapshot_digest)
+            digest = module_surface_semantic_mix(digest, "selected-surface", index.surface_digests[source])
+            index.surface_digests[source] = module_surface_semantic_finish(digest)
+        source = source + 1
+    Ok(())
