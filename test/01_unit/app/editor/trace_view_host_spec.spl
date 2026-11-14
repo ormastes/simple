@@ -1,0 +1,47 @@
+"""Editor view host: renders a registered extension view through its provider."""
+# @req REQ-CARET-EXT-003 REQ-CARET-TRC-001
+use std.spec.*
+use std.editor.extensions.host.{ExtensionHost, extension_host_with_builtin_handlers}
+use std.common.traceability.model.*
+use std.common.traceability.query_nodes_v1.{TraceNodeQueryV1}
+use app.editor.trace_view_host.{TraceViewInput, view_host_render}
+use app.traceability.ide_view_render.{trace_view_lines}
+
+fn graph() -> TraceGraph:
+    val subject = SnapshotSubject(repository_id: "simple", snapshot_id: "snapshot:r", kind: "git_tree", revision_id: "commit:r", tree_id: "tree:r", object_format: "sha256")
+    val nodes = [TraceNode(id: "req:R-1", kind: TraceNodeKind.Requirement, title: "R one")]
+    TraceGraph(subject: subject, input_manifest_id: "inputs:r", nodes: nodes, test_definitions: [], claims: [],
+        edges: [], edge_origins: [], origins: [], locators: [], diagnostics: [], generation_id: "generation:r", complete: false)
+
+fn input() -> TraceViewInput:
+    TraceViewInput(graph: graph(), query: TraceNodeQueryV1(snapshot_id: "snapshot:r", operation: "list", kind: "requirements", selected_id: "", limit: 10), quals: [], snapshot: "snapshot:r")
+
+fn caret_host() -> ExtensionHost:
+    val host = extension_host_with_builtin_handlers()
+    host.activate_event("onProfile:caret")
+    host
+
+describe "view host":
+    it "renders trace.explorer through trace_view_lines":
+        step("active caret profile, snapshot loaded")
+        val host = caret_host()
+        val i = input()
+        val lines = view_host_render(host, "trace.explorer", Some(i))
+        expect(lines).to_equal(trace_view_lines(i.graph, i.query, i.quals, i.snapshot))
+        expect(lines[0]).to_equal("snapshot: snapshot:r")
+
+    it "reports an unloaded snapshot explicitly":
+        step("no snapshot input")
+        val lines = view_host_render(caret_host(), "trace.explorer", None)
+        expect(lines[0].contains("source blob is missing")).to_equal(true)
+
+    it "an unregistered view is unavailable":
+        step("editor profile never registers caret views")
+        val host = extension_host_with_builtin_handlers()
+        val lines = view_host_render(host, "trace.explorer", Some(input()))
+        expect(lines).to_equal(["unavailable: view not registered: trace.explorer"])
+
+    it "a view with a non-trace provider is not rendered as trace":
+        step("caret.agent_roster has provider caret.session_roster")
+        val lines = view_host_render(caret_host(), "caret.agent_roster", Some(input()))
+        expect(lines).to_equal(["unavailable: no renderer for provider caret.session_roster"])

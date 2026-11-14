@@ -1,7 +1,30 @@
 use std.spec.*
-use compiler.common.mir_target_context.{mir_target_context_from, mir_target_context_from_explicit, mir_collection_target_is_supported}
+use compiler.backend.llvm_target.{llvm_explicit_target_config}
+use compiler.common.mir_target_context.{mir_target_context_from, mir_target_context_from_explicit, mir_collection_target_is_supported, mir_target_context_identity_payload_v1}
 
 describe "explicit MIR target context preparation":
+    it "retains canonical i686 generation across explicit and legacy contexts":
+        for suffix in ["unknown-linux-gnu", "pc-windows-msvc", "pc-windows-gnu", "unknown-none", "unknown-none-elf"]:
+            val triple = "i686-" + suffix
+            val target = mir_target_context_from_explicit(triple, "llvm", 23).unwrap()
+            val legacy = mir_target_context_from(triple, "aarch64", "macos", "llvm", 23)
+            expect(target.arch).to_equal("x86")
+            expect(target.subarch).to_equal("i686")
+            expect(target.os).to_equal(if suffix.contains("linux"): "linux" elif suffix.contains("windows"): "windows" else: "baremetal")
+            expect(target.abi).to_equal(if suffix.contains("msvc"): "msvc" elif suffix.contains("gnu"): "gnu" else: "none")
+            expect(mir_target_context_identity_payload_v1(target)).to_equal(mir_target_context_identity_payload_v1(legacy))
+            expect(mir_collection_target_is_supported(target)).to_be(false)
+            val llvm = llvm_explicit_target_config(triple, suffix.starts_with("unknown-none")).unwrap()
+            expect(llvm.triple.arch).to_equal("i686")
+            expect(llvm.triple.is_32bit()).to_be(true)
+            expect(llvm.triple.to_text()).to_equal(triple)
+        val generic = mir_target_context_from_explicit("x86-unknown-linux-gnu", "llvm", 23).unwrap()
+        val generation = mir_target_context_from_explicit("i686-unknown-linux-gnu", "llvm", 23).unwrap()
+        expect(generic.subarch).to_equal("")
+        expect(mir_target_context_identity_payload_v1(generic) == mir_target_context_identity_payload_v1(generation)).to_be(false)
+        for triple in ["i686-unknown-none-extra", "i686-none-eabi", "x86-unknown-none"]:
+            expect(mir_target_context_from_explicit(triple, "llvm", 23).is_err()).to_be(true)
+
     it "binds six architecture widths to explicit Linux Windows and SimpleOS tuples":
         # Recognition binds context only; it does not prove any backend can
         # emit/link/execute all of these architecture and operating-system pairs.
@@ -58,7 +81,7 @@ describe "explicit MIR target context preparation":
     it "rejects unknown or lossy architecture names and unresolved backends":
         for requested in ["mystery-unknown-linux-gnu", "riscv64gc-unknown-linux-gnu",
             "rv32imac-unknown-none-elf", "armv999-unknown-linux-gnu", "i386-unknown-linux-gnu",
-            "i486-unknown-linux-gnu", "i586-unknown-linux-gnu", "i686-unknown-linux-gnu"]:
+            "i486-unknown-linux-gnu", "i586-unknown-linux-gnu"]:
             val result = mir_target_context_from_explicit(requested, "llvm", 23)
             expect(result.is_err()).to_be(true)
             expect(result.unwrap_err()).to_start_with("unsupported_explicit_arch:")

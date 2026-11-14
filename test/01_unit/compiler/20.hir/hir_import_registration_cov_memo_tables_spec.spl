@@ -1,0 +1,225 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+"""
+# HIR imports: the scalar chain tables behind the registration memos
+
+Import registration keeps five memo tables as scalar hash chains (bucket
+heads, a `next` link per entry, parallel key/value arrays) rather than as
+Dicts. These examples pin the table contract every caller relies on, and in
+particular what happens when two keys land in the SAME bucket -- the case a
+small fixture never reaches by accident:
+
+- the completed-registration memo holds one entry per tuple and records its
+  latest binding state, so a changed state replaces the old one;
+- the per-surface name index is first-occurrence-wins and is built once per
+  frozen surface;
+- the glob-miss memo and the built-surface set are plain membership sets;
+- the re-export root memo answers with the NEWEST entry for a key, which is
+  what lets a corrected answer replace a wrong one.
+"""
+
+use std.spec
+use std.io_runtime.{hash_text}
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{ModuleSurface, ModuleSurfacesByName}
+
+
+fn fresh_lowering() -> HirLowering:
+    var surface = ModuleSurface.empty("pkg.mod")
+    surface.composite_names = ["Alpha", "Beta", "Alpha"]
+    surface.callable_names = ["run"]
+    val registry = ModuleSurfacesByName.from_parts([surface], {"pkg.mod": 0}, ["pkg.mod"], [0]).unwrap()
+    hirlowering_for_module("app/main.spl", registry)
+
+fn colliding_key(base: text, mask: i64) -> text:
+    """A different key that lands in `base`'s bucket of a table with `mask`."""
+    val wanted = hash_text(base) & mask
+    var n = 0
+    while n < 200000:
+        val candidate = "{base}#{n}"
+        if (hash_text(candidate) & mask) == wanted:
+            return candidate
+        n = n + 1
+    ""
+
+describe "completed-registration memo":
+    it "misses while nothing is recorded":
+        var lowering = fresh_lowering()
+        expect(lowering.registered_import_memo_lookup("pkg.mod Alpha Alpha E", true)).to_equal(false)
+        expect(lowering.registered_import_memo_lookup("pkg.mod Alpha Alpha E", false)).to_equal(false)
+
+    it "hits only for the binding state that was recorded":
+        var lowering = fresh_lowering()
+        lowering.registered_import_memo_record("pkg.mod Alpha Alpha E", true)
+        expect(lowering.registered_import_memo_lookup("pkg.mod Alpha Alpha E", true)).to_equal(true)
+        expect(lowering.registered_import_memo_lookup("pkg.mod Alpha Alpha E", false)).to_equal(false)
+        expect(lowering.registered_import_memo_lookup("pkg.mod Beta Beta E", true)).to_equal(false)
+
+    it "replaces a tuple's earlier state instead of appending a second entry":
+        var lowering = fresh_lowering()
+        lowering.registered_import_memo_record("pkg.mod Alpha Alpha E", false)
+        lowering.registered_import_memo_record("pkg.mod Alpha Alpha E", true)
+        expect(lowering.registered_import_memo_keys.len()).to_equal(1)
+        expect(lowering.registered_import_memo_lookup("pkg.mod Alpha Alpha E", true)).to_equal(true)
+        expect(lowering.registered_import_memo_lookup("pkg.mod Alpha Alpha E", false)).to_equal(false)
+        expect(lowering.registered_import_memo["pkg.mod Alpha Alpha E"]).to_equal(true)
+        expect(lowering.registered_import_memo.len()).to_equal(1)
+
+    it "keeps one entry when the same state is recorded twice":
+        var lowering = fresh_lowering()
+        lowering.registered_import_memo_record("pkg.mod Alpha Alpha E", true)
+        lowering.registered_import_memo_record("pkg.mod Alpha Alpha E", true)
+        expect(lowering.registered_import_memo_keys.len()).to_equal(1)
+        expect(lowering.registered_import_memo_lookup("pkg.mod Alpha Alpha E", true)).to_equal(true)
+
+    it "keeps two tuples of one bucket apart":
+        var lowering = fresh_lowering()
+        val first = "pkg.mod Alpha Alpha E"
+        lowering.registered_import_memo_record(first, true)
+        # The bucket mask is the table's own, read once the table exists.
+        val second = colliding_key(first, lowering.registered_import_memo_hash_mask)
+        expect(second == "").to_equal(false)
+        lowering.registered_import_memo_record(second, false)
+        expect(lowering.registered_import_memo_keys.len()).to_equal(2)
+        expect(lowering.registered_import_memo_lookup(first, true)).to_equal(true)
+        expect(lowering.registered_import_memo_lookup(second, false)).to_equal(true)
+        expect(lowering.registered_import_memo_lookup(second, true)).to_equal(false)
+        # Flipping the older tuple walks past the newer one in the same bucket.
+        lowering.registered_import_memo_record(first, false)
+        expect(lowering.registered_import_memo_keys.len()).to_equal(2)
+        expect(lowering.registered_import_memo_lookup(first, false)).to_equal(true)
+        expect(lowering.registered_import_memo_lookup(first, true)).to_equal(false)
+
+describe "per-surface name index":
+    it "answers -1 before any name is indexed":
+        var lowering = fresh_lowering()
+        expect(lowering.name_index_lookup("1 0 C Alpha")).to_equal(-1)
+        expect(lowering.surface_name_position("1 0", "C", "Alpha")).to_equal(-1)
+
+    it "keeps the first position of a repeated name":
+        var lowering = fresh_lowering()
+        lowering.index_surface_names("1 0 C ", ["Alpha", "Beta", "Alpha"])
+        expect(lowering.surface_name_position("1 0", "C", "Alpha")).to_equal(0)
+        expect(lowering.surface_name_position("1 0", "C", "Beta")).to_equal(1)
+        expect(lowering.name_index_keys.len()).to_equal(2)
+        expect(lowering.name_index_positions["1 0 C Alpha"]).to_equal(0)
+
+    it "keeps names of different kinds and surfaces apart":
+        var lowering = fresh_lowering()
+        lowering.index_surface_names("1 0 C ", ["Alpha"])
+        lowering.index_surface_names("1 0 F ", ["run", "Alpha"])
+        lowering.index_surface_names("1 1 C ", ["Other", "Alpha"])
+        expect(lowering.surface_name_position("1 0", "C", "Alpha")).to_equal(0)
+        expect(lowering.surface_name_position("1 0", "F", "Alpha")).to_equal(1)
+        expect(lowering.surface_name_position("1 1", "C", "Alpha")).to_equal(1)
+        expect(lowering.surface_name_position("1 0", "E", "Alpha")).to_equal(-1)
+
+    it "resolves two keys of one bucket to their own positions":
+        var lowering = fresh_lowering()
+        val first = "1 0 C Alpha"
+        lowering.name_index_put(first, 4)
+        # The bucket mask is the table's own, read once the table exists.
+        val second = colliding_key(first, lowering.name_index_hash_mask)
+        val absent = colliding_key(second, lowering.name_index_hash_mask)
+        expect(second == "").to_equal(false)
+        lowering.name_index_put(second, 9)
+        expect(lowering.name_index_positions_values[lowering.name_index_lookup(first)]).to_equal(4)
+        expect(lowering.name_index_positions_values[lowering.name_index_lookup(second)]).to_equal(9)
+        expect(lowering.name_index_lookup(absent)).to_equal(-1)
+        # A later put of an existing key never moves it.
+        lowering.name_index_put(first, 77)
+        expect(lowering.name_index_positions_values[lowering.name_index_lookup(first)]).to_equal(4)
+        expect(lowering.name_index_keys.len()).to_equal(2)
+
+    it "builds the index of a frozen surface once":
+        var lowering = fresh_lowering()
+        val surface = lowering.module_surfaces.surfaces[0]
+        val key = lowering.ensure_surface_name_index(surface)
+        expect(lowering.ensure_surface_name_index(surface)).to_equal(key)
+        expect(lowering.name_index_build_count).to_equal(1)
+        expect(lowering.surface_name_position(key, "C", "Alpha")).to_equal(0)
+        expect(lowering.surface_name_position(key, "C", "Beta")).to_equal(1)
+        expect(lowering.surface_name_position(key, "F", "run")).to_equal(0)
+        expect(lowering.surface_name_position(key, "F", "Alpha")).to_equal(-1)
+
+describe "built-surface set":
+    it "reports only the surface keys that were recorded":
+        var lowering = fresh_lowering()
+        expect(lowering.name_index_built_lookup("1 0")).to_equal(false)
+        lowering.name_index_built_record("1 0")
+        expect(lowering.name_index_built_lookup("1 0")).to_equal(true)
+        expect(lowering.name_index_built_lookup("1 1")).to_equal(false)
+
+    it "keeps two surface keys of one bucket apart":
+        var lowering = fresh_lowering()
+        val first = "1 0"
+        lowering.name_index_built_record(first)
+        # The bucket mask is the table's own, read once the table exists.
+        val second = colliding_key(first, lowering.name_index_built_mask)
+        val absent = colliding_key(second, lowering.name_index_built_mask)
+        expect(second == "").to_equal(false)
+        lowering.name_index_built_record(second)
+        expect(lowering.name_index_built_lookup(first)).to_equal(true)
+        expect(lowering.name_index_built_lookup(second)).to_equal(true)
+        expect(lowering.name_index_built_lookup(absent)).to_equal(false)
+        expect(lowering.name_index_built_keys.len()).to_equal(2)
+
+describe "glob-reachable miss memo":
+    it "reports only the misses that were recorded":
+        var lowering = fresh_lowering()
+        expect(lowering.glob_reachable_miss_memo_lookup("1 0 Nowhere")).to_equal(false)
+        lowering.glob_reachable_miss_memo_record("1 0 Nowhere")
+        expect(lowering.glob_reachable_miss_memo_lookup("1 0 Nowhere")).to_equal(true)
+        expect(lowering.glob_reachable_miss_memo_lookup("1 0 Elsewhere")).to_equal(false)
+
+    it "keeps two misses of one bucket apart":
+        var lowering = fresh_lowering()
+        val first = "1 0 Nowhere"
+        lowering.glob_reachable_miss_memo_record(first)
+        # The bucket mask is the table's own, read once the table exists.
+        val second = colliding_key(first, lowering.glob_reachable_miss_memo_hash_mask)
+        val absent = colliding_key(second, lowering.glob_reachable_miss_memo_hash_mask)
+        expect(second == "").to_equal(false)
+        lowering.glob_reachable_miss_memo_record(second)
+        expect(lowering.glob_reachable_miss_memo_lookup(first)).to_equal(true)
+        expect(lowering.glob_reachable_miss_memo_lookup(second)).to_equal(true)
+        expect(lowering.glob_reachable_miss_memo_lookup(absent)).to_equal(false)
+        expect(lowering.glob_reachable_miss_memo_keys.len()).to_equal(2)
+
+describe "re-export root memo table":
+    it "answers -1 for a root that was never recorded":
+        var lowering = fresh_lowering()
+        expect(lowering.reexport_root_memo_lookup("0 Item")).to_equal(-1)
+        lowering.reexport_root_memo_record("0 Item", 3, "Source")
+        expect(lowering.reexport_root_memo_lookup("0 Other")).to_equal(-1)
+
+    it "returns the recorded owner index and item name":
+        var lowering = fresh_lowering()
+        lowering.reexport_root_memo_record("0 Item", 3, "Source")
+        val slot = lowering.reexport_root_memo_lookup("0 Item")
+        expect(lowering.reexport_root_memo_index_values[slot]).to_equal(3)
+        expect(lowering.reexport_root_memo_item_values[slot]).to_equal("Source")
+        expect(lowering.reexport_root_memo_index["0 Item"]).to_equal(3)
+        expect(lowering.reexport_root_memo_item["0 Item"]).to_equal("Source")
+
+    it "answers with the newest entry recorded for a root":
+        var lowering = fresh_lowering()
+        lowering.reexport_root_memo_record("0 Item", -1, "")
+        lowering.reexport_root_memo_record("0 Item", 3, "Source")
+        val slot = lowering.reexport_root_memo_lookup("0 Item")
+        expect(lowering.reexport_root_memo_index_values[slot]).to_equal(3)
+        expect(lowering.reexport_root_memo_item_values[slot]).to_equal("Source")
+
+    it "keeps two roots of one bucket apart":
+        var lowering = fresh_lowering()
+        val first = "0 Item"
+        lowering.reexport_root_memo_record(first, 1, "One")
+        # The bucket mask is the table's own, read once the table exists.
+        val second = colliding_key(first, lowering.reexport_root_memo_hash_mask)
+        val absent = colliding_key(second, lowering.reexport_root_memo_hash_mask)
+        expect(second == "").to_equal(false)
+        lowering.reexport_root_memo_record(second, 2, "Two")
+        expect(lowering.reexport_root_memo_item_values[lowering.reexport_root_memo_lookup(first)]).to_equal("One")
+        expect(lowering.reexport_root_memo_item_values[lowering.reexport_root_memo_lookup(second)]).to_equal("Two")
+        expect(lowering.reexport_root_memo_lookup(absent)).to_equal(-1)

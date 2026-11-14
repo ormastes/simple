@@ -79,6 +79,7 @@ pub mod terminal;
 pub mod torch;
 pub mod atomic;
 pub mod concurrency;
+pub mod collection_capture;
 #[cfg(feature = "tui")]
 pub mod tui;
 pub mod repl;
@@ -494,6 +495,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     // terminal extern declarations (were missing from this table entirely — see
     // doc/08_tracking/bug/raw_mode_extern_registry_2026-07-03.md).
     insert_simple!("rt_stdin_read_byte", terminal::rt_stdin_read_byte);
+    insert_simple!("rt_stdin_read_timeout_v1", terminal::rt_stdin_read_timeout_v1);
     insert_simple!("rt_terminal_enable_raw_mode", terminal::rt_terminal_enable_raw_mode);
     insert_simple!("rt_terminal_disable_raw_mode", terminal::rt_terminal_disable_raw_mode);
     insert_simple!("rt_terminal_is_tty", terminal::rt_terminal_is_tty);
@@ -2122,6 +2124,14 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     // `.spl` callers, but unregistered here until 2026-08-17. See
     // doc/08_tracking/bug/interpreter_sffi_missing_piped_process_externs_2026-07-29.md
     insert_simple!("rt_process_spawn_piped", system::rt_process_spawn_piped);
+    insert_simple!("rt_process_spawn_piped_generation_v1", system::rt_process_spawn_piped_generation_v1);
+    insert_simple!("rt_process_piped_pid_for_generation_v1", system::rt_process_piped_pid_for_generation_v1);
+    insert_simple!("rt_process_read_stdout_ref_v1", system::rt_process_read_stdout_ref_v1);
+    insert_simple!("rt_process_stdout_state_ref_v1", system::rt_process_stdout_state_ref_v1);
+    insert_simple!("rt_process_validate_piped_ref_v1", system::rt_process_validate_piped_ref_v1);
+    insert_simple!("rt_process_write_stdin_some_ref_v1", system::rt_process_write_stdin_some_ref_v1);
+    insert_simple!("rt_process_is_piped_alive_ref_v1", system::rt_process_is_piped_alive_ref_v1);
+    insert_simple!("rt_process_close_piped_ref_v1", system::rt_process_close_piped_ref_v1);
     insert_simple!("rt_process_write_stdin", system::rt_process_write_stdin);
     // Implemented in system.rs and declared by process_ops.spl, but never
     // registered here (found by the same extern census as the entry above).
@@ -2499,6 +2509,19 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
         "rt_thread_available_parallelism",
         concurrency::rt_thread_available_parallelism
     );
+    insert_simple!("spl_ordered_key_cmp", collection_capture::spl_ordered_key_cmp);
+    insert_simple!("spl_collection_capture_begin", collection_capture::capture_begin);
+    insert_simple!("spl_collection_capture_note_size", collection_capture::capture_note_size);
+    insert_simple!("spl_collection_capture_note_lookup", collection_capture::capture_note_lookup);
+    insert_simple!(
+        "spl_collection_capture_note_materialization",
+        collection_capture::capture_note_materialization
+    );
+    insert_simple!("spl_collection_capture_note_hash_probe", collection_capture::capture_note_hash_probe);
+    insert_simple!("spl_collection_capture_note_filter", collection_capture::capture_note_filter);
+    insert_simple!("spl_collection_capture_note_loop", collection_capture::capture_note_loop);
+    insert_simple!("spl_collection_capture_finish", collection_capture::capture_finish);
+    insert_simple!("spl_collection_capture_abort", collection_capture::capture_abort);
     insert_simple!("spl_thread_cpu_count", concurrency::rt_thread_available_parallelism);
     insert_simple!(
         "spl_thread_pool_spawn_worker",
@@ -3294,6 +3317,9 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_pty_is_running", pty::rt_pty_is_running);
     insert_simple!("rt_pty_hangup", pty::rt_pty_hangup);
     insert_simple!("rt_pty_resize", pty::rt_pty_resize);
+    insert_simple!("rt_pty_spawn_exec_v1", pty::rt_pty_spawn_exec_v1);
+    insert_simple!("rt_pty_write_bytes_v1", pty::rt_pty_write_bytes_v1);
+    insert_simple!("rt_pty_exit_code_v1", pty::rt_pty_exit_code_v1);
     // I/O wrappers that pass empty slice or alias another function
     insert_simple!("rt_stdin_read_line", rt_stdin_read_line_stub);
     insert_simple!("rt_stdout_flush", io::stdout_flush);

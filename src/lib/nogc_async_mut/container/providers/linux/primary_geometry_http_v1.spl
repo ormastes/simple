@@ -1,0 +1,96 @@
+# Podman v5.2.5 direct container inspect/resize bytes only. The pinned compat
+# ResizeTTY container branch calls AttachResize and returns HTTP 200, no body.
+# No exec/start relabeling, socket submission, or live geometry proof here.
+use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
+use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.common.string_core.str_len
+use std.common.json.value.{JsonValue, json_parse_value_strict, json_value_get, json_value_as_text}
+use std.nogc_async_mut.container.providers.linux.engine_exec_http_v3.linux_engine_http_frame_decode_v3
+use std.nogc_async_mut.container.providers.linux.engine_exec_codec_v3.LINUX_ENGINE_EXEC_BODY_LIMIT_V3
+
+pub fn linux_primary_geometry_http_request_v1(action: text, native_id: text,
+        columns: i64, rows: i64) -> Result<[u8], text>:
+    if not builder_digest_valid_v1(native_id): return Err("primary-geometry-native-id")
+    var method = "GET"
+    var path = "/v5.2.5/libpod/containers/" + native_id
+    if action == "inspect":
+        if columns != 0 or rows != 0: return Err("primary-geometry-inspect-dimensions")
+        path = path + "/json"
+    elif action == "resize":
+        if columns < 1 or columns > 512 or rows < 1 or rows > 256:
+            return Err("primary-geometry-dimensions")
+        if columns * rows > 60000: return Err("primary-geometry-area")
+        method = "POST"
+        path = path + "/resize?h=" + rows.to_text() + "&w=" + columns.to_text()
+    else: return Err("primary-geometry-action")
+    Ok((method + " " + path + " HTTP/1.1\r\nHost: localhost\r\nAccept: application/json\r\n" +
+        "Connection: close\r\nContent-Length: 0\r\n\r\n").bytes())
+
+fn primary_geometry_json_v1(body: text) -> Result<JsonValue, text>:
+    if str_len(body) == 0 or str_len(body) > LINUX_ENGINE_EXEC_BODY_LIMIT_V3:
+        return Err("primary-geometry-inspect-body-bound")
+    # Bound recursive-parser work before parsing. Quoted structures are data;
+    # duplicate decoded keys and JSON syntax remain the strict parser's job.
+    var quoted = false
+    var escaped = false
+    var depth = 0
+    var structures = 0
+    for byte in body.bytes():
+        if quoted:
+            if escaped: escaped = false
+            elif byte == 92: escaped = true
+            elif byte == 34: quoted = false
+        else:
+            if byte == 34: quoted = true
+            elif byte == 123 or byte == 91:
+                depth = depth + 1
+                structures = structures + 1
+                if depth > 16: return Err("primary-geometry-inspect-json-depth")
+            elif byte == 125 or byte == 93: depth = depth - 1
+            elif byte == 44 or byte == 58: structures = structures + 1
+            if structures > 16384: return Err("primary-geometry-inspect-json-nodes")
+    val parsed = json_parse_value_strict(body)?
+    match parsed:
+        case JsonValue.Object(_, _): Ok(parsed)
+        case _: Err("primary-geometry-inspect-object")
+
+pub fn linux_primary_geometry_http_decode_v1(action: text, wire: [u8]) -> Result<text, text>:
+    if not ["inspect", "resize"].contains(action): return Err("primary-geometry-action")
+    val response = linux_engine_http_frame_decode_v3(wire, 200)?
+    if action == "resize":
+        if response.body != "": return Err("primary-geometry-resize-body")
+    else:
+        if response.content_type != "application/json": return Err("primary-geometry-inspect-content-type")
+        val checked = primary_geometry_json_v1(response.body)?
+    Ok(response.body)
+
+fn primary_geometry_field_v1(value: JsonValue, key: text) -> Result<JsonValue, text>:
+    match json_value_get(value, key):
+        case Some(found): Ok(found)
+        case None: Err("primary-geometry-inspect-missing:" + key)
+
+fn primary_geometry_text_v1(value: JsonValue, key: text) -> Result<text, text>:
+    match json_value_as_text(primary_geometry_field_v1(value, key)?):
+        case Some(found): Ok(found)
+        case None: Err("primary-geometry-inspect-type:" + key)
+
+pub fn linux_primary_geometry_inspect_match_v1(body: text, expected: RuntimeIdentityV1) -> Result<(), text>:
+    if expected.engine != "podman" or not builder_digest_valid_v1(expected.native_id):
+        return Err("primary-geometry-inspect-expected-identity")
+    val value = primary_geometry_json_v1(body)?
+    val state = primary_geometry_field_v1(value, "State")?
+    val config = primary_geometry_field_v1(value, "Config")?
+    val labels = primary_geometry_field_v1(config, "Labels")?
+    if (primary_geometry_text_v1(value, "Id")? != expected.native_id or
+            primary_geometry_text_v1(state, "Status")? != "running" or
+            primary_geometry_field_v1(state, "Running")? != JsonValue.Bool(true) or
+            primary_geometry_field_v1(config, "OpenStdin")? != JsonValue.Bool(true) or
+            primary_geometry_field_v1(config, "Tty")? != JsonValue.Bool(true)):
+        return Err("primary-geometry-inspect-runtime-or-tty-mismatch")
+    if (primary_geometry_text_v1(labels, "io.simpleorch.pod_uid")? != expected.pod_uid or
+            primary_geometry_text_v1(labels, "io.simpleorch.attempt")? != expected.attempt.to_text() or
+            primary_geometry_text_v1(labels, "io.simpleorch.node_boot_id")? != expected.node_boot_id or
+            primary_geometry_text_v1(labels, "io.simpleorch.provider_generation")? != expected.provider_generation.to_text() or
+            primary_geometry_text_v1(labels, "io.simpleorch.operation_id")? != expected.operation_id):
+        return Err("primary-geometry-inspect-label-mismatch")
+    Ok(())

@@ -477,7 +477,13 @@ static int64_t slang_model_load_locked(int64_t n_gpu_layers) {
         return SLANG_ERR_EXHAUSTED;
     }
     g_model_generation++;
-    g_model_offloaded = mp.n_gpu_layers != 0;
+    /* "Offloaded" means layers can really go to a GPU. The engine asks for -1
+     * (all layers) on every host, so on a CPU-only llama.cpp the requested
+     * count alone armed the CUDA first-micro-batch workaround below: a prefix
+     * restore gave back reuse until its suffix was a full n_ubatch (measured
+     * 2026-11-14, Windows mingw CPU: 512 of ~990 prompt tokens re-prefilled on
+     * an exact repeat; doc/08_tracking/bug/slang_prefix_cache_cpu_offload_misdetect_2026-11-14.md). */
+    g_model_offloaded = mp.n_gpu_layers != 0 && llama_supports_gpu_offload();
     return 0;
 }
 

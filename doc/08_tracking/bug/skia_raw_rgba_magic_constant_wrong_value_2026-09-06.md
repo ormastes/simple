@@ -1,7 +1,7 @@
 # `RAW_RGBA_MAGIC` constant value does not match its documented 'RBPA' byte pattern
 
 Date: 2026-09-06
-Status: open
+Status: FIXED (verified 2026-11-14, lane p3-batch-c) — constant corrected by `6bd47a947e9`; see the 2026-11-14 addendum
 Severity: P4 (test-only codec, no production callers affected beyond snapshot tests)
 Location: `src/lib/skia/feature/codec/raw_rgba.spl:14-16`
 
@@ -78,3 +78,12 @@ None found in `doc/08_tracking/bug/` prior to this record (checked via
 ## Lane disposition 2026-11-13 (p3-misc-b)
 
 deliberate pin: the spec is RED (not weakened) to document the real, pinned wire format until the codec owner picks a transition. Left as recorded.
+## Addendum 2026-11-14 (lane p3-batch-c) — verified fixed
+
+`6bd47a947e9` ("fix: correct raw RGBA magic with legacy decode") set
+`RAW_RGBA_MAGIC` to `1380077633` (`0x52425041`, `RBPA`) and kept
+`LEGACY_RAW_RGBA_MAGIC = 1380012353` as a decode-only alias, so old blobs still
+decode. `test/01_unit/lib/skia/raw_rgba_spec.spl` passes 7/7 on the Rust seed
+built from `release/1.0.0` @ `c541817df822` (Linux aarch64). Its magic-byte
+example pins `expect(RAW_RGBA_MAGIC).to_equal(1380077633)` and the header bytes,
+so no new spec is needed.

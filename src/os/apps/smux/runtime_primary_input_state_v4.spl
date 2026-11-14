@@ -1,0 +1,59 @@
+# Request/receipt metadata only. No native reference, session, or live grant.
+use std.common.process.input_control_v1.{ProcessInputWriteDispositionV1, ProcessInputControlStateV1}
+
+pub struct SmuxPrimaryInputAttemptV4:
+    binding_uid: text
+    session_identity: text
+    revision: i64
+    sequence: i64
+    request_digest: text
+    target_digest: text
+    nonce_digest: text
+    expires_ns: i64
+    requested_bytes: i64
+    disposition: ProcessInputWriteDispositionV1
+    accepted_bytes: i64
+    error: text
+
+pub fn smux_primary_attempt_index_v4(attempts: [SmuxPrimaryInputAttemptV4], uid: text) -> int:
+    var index = 0
+    while index < attempts.len():
+        if attempts[index].binding_uid == uid: return index
+        index = index + 1
+    -1
+
+pub fn smux_primary_input_uncertain_v4(attempts: [SmuxPrimaryInputAttemptV4], uid: text) -> bool:
+    val index = smux_primary_attempt_index_v4(attempts, uid)
+    index >= 0 and attempts[index].disposition == ProcessInputWriteDispositionV1.Unknown
+
+# A saved attempt may be answered again but never invoked again. Old/changed
+# attempts are refusals, even when the native gate no longer has their history.
+pub fn smux_primary_attempt_replay_v4(saved: SmuxPrimaryInputAttemptV4,
+        identity: text, revision: i64, sequence: i64, digest: text) -> Result<bool, text>:
+    if saved.session_identity != identity or saved.revision != revision:
+        if saved.disposition == ProcessInputWriteDispositionV1.Unknown:
+            return Err("primary-input-prior-outcome-unknown")
+        return Ok(false)
+    if sequence < saved.sequence: return Err("primary-input-old-attempt")
+    if sequence == saved.sequence:
+        if digest != saved.request_digest: return Err("primary-input-attempt-payload-changed")
+        return Ok(true)
+    if saved.disposition == ProcessInputWriteDispositionV1.Unknown:
+        return Err("primary-input-prior-outcome-unknown")
+    Ok(false)
+
+# Native history has no payload digest. Only an already reserved request may
+# correlate this receipt; unrelated/missing history never clears uncertainty.
+pub fn smux_primary_attempt_reconcile_v4(saved: SmuxPrimaryInputAttemptV4,
+        state: ProcessInputControlStateV1) -> SmuxPrimaryInputAttemptV4:
+    if saved.disposition != ProcessInputWriteDispositionV1.Unknown: return saved
+    if (state.last_revision != saved.revision or state.last_attempt_sequence != saved.sequence or
+            state.last_target_digest != saved.target_digest or state.last_nonce_digest != saved.nonce_digest or
+            state.last_expires_monotonic_ns != saved.expires_ns or
+            state.last_disposition != ProcessInputWriteDispositionV1.Recorded or
+            state.last_accepted_bytes < 0 or state.last_accepted_bytes > saved.requested_bytes): return saved
+    var result = saved
+    result.disposition = ProcessInputWriteDispositionV1.Recorded
+    result.accepted_bytes = state.last_accepted_bytes
+    result.error = if state.last_status == 0: "" else: "primary-input-native-status:{state.last_status}"
+    result

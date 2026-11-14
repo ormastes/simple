@@ -1,8 +1,8 @@
 # Host primary attachment cleanup and settlement
 
 Status: source implementation; runtime qualification NOT_RUN. This advances
-the Host prerequisite for primary terminals. smux/Caret migration and Windows
-primary transport remain incomplete.
+the Host prerequisite for primary terminals. The smux V4 lifecycle now consumes
+it in source; Caret, interactive controls, and Windows remain incomplete.
 
 The primary opener previously retained charged helpers and actual sessions or
 cleanup carriers, but Host completion only recognized output-follow evidence.
@@ -94,8 +94,9 @@ Positive native cleanup, actual descriptor retirement, post-retirement failure
 retention, successful/replayed live or recovered settlement, adoption handoff, and performance are
 NOT_COVERED by these evidence tests. Source review does not replace them.
 
-smux must migrate planning, bind, retained state, pane adoption, sole-reader
-output, separately authorized input/geometry, cleanup, and settlement together.
-Its current V3 wire requires output-follow semantics, so primary support needs
-a versioned or negotiated extension. Caret and Windows Docker primary support
-cannot be claimed from this Host prerequisite.
+smux now consumes planning, bind, retained pane state, sole-reader output,
+cleanup, and settlement through a separate V4 extension. Its existing V3 wire
+retains output-follow semantics. See `doc/05_design/smux_primary_session_v4.md`
+for the canonical owner handoff and unqualified native boundaries. Separately
+authorized input/geometry, Caret, and Windows Docker primary support remain
+pending and cannot be claimed from this Host prerequisite.

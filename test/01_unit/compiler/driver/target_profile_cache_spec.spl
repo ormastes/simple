@@ -1,0 +1,35 @@
+use compiler.driver.driver_aot_native_output.{driver_native_profile_cache_identity_v1}
+use std.spec
+use compiler.common.driver_compile_options.*
+use compiler.driver.cache.compile_options_hash.{compile_options_hash_compute}
+use compiler.driver.cache.native_noop_admission.{native_noop_normalized_invocation_v1}
+
+fn target_profile_test_cache_key_v1(profile: NormalizedTargetProfileV1) -> i64:
+    # Same positional shape as the production driver call.
+    compile_options_hash_compute("llvm", 0, false, true, false, "dev", [], [], [], [], "moderate", -1, "", "", "", false, target_profile_identity_text_v1(profile)).hash
+
+describe "target profile cache identity":
+    it "frames unavailable reasons without treating embedded fields as structure":
+        val first = NormalizedTargetProfileV1(TargetBuildProfileV1.Development, TargetDebugRequestV1.Default, TargetTraceResolutionV1.Unavailable("abc\ntarget_trace_resolution=available"))
+        val second = NormalizedTargetProfileV1(TargetBuildProfileV1.Development, TargetDebugRequestV1.Default, TargetTraceResolutionV1.Unavailable("abc"))
+        expect(target_profile_test_cache_key_v1(first) == target_profile_test_cache_key_v1(second)).to_equal(false)
+
+    it "keeps ordinary and managed development requests out of the same no-op cache":
+        var options = driver_core_compile_options_default()
+        options.native_target = "aarch64-unknown-linux-gnu"
+        options.backend = "llvm"
+        val ordinary = native_noop_normalized_invocation_v1(options, "out")
+        options.managed_build_phase = "phase3"
+        val managed = native_noop_normalized_invocation_v1(options, "out")
+        expect(ordinary == "").to_equal(false)
+        expect(managed == "").to_equal(false)
+        expect(ordinary == managed).to_equal(false)
+
+    it "separates native object policy by static XRay and output variant":
+        val native = driver_native_profile_cache_identity_v1("profile-a", false, "native")
+        val sleds = driver_native_profile_cache_identity_v1("profile-a", true, "native")
+        val both = driver_native_profile_cache_identity_v1("profile-a", false, "both")
+        expect(native == "").to_equal(false)
+        expect(native == sleds).to_equal(false)
+        expect(native == both).to_equal(false)
+        expect(driver_native_profile_cache_identity_v1("", false, "native")).to_equal("")

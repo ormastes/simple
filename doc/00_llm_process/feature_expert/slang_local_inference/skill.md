@@ -35,7 +35,9 @@ Caret side: providers `slang` (HTTP) and `slang_local` (in-process) in
   the token budget stay in Simple. If you move the loop into C to make it
   faster, slang stops owning the thing that makes it slang.
 - **Clear the KV cache between requests.** The model stays resident; the
-  conversation must not. `generate` calls `slang_ggml_kv_clear` first. Without
+  conversation must not. Each request gets its own context, and
+  `slang_ggml_request_prefix_prepare` either clears it or restores only an
+  exact-token prefix snapshot. Without
   it the second request answers while still attending to the first, then
   overruns `n_ctx`. Verified by generating twice in one process and getting
   independent answers.
@@ -58,8 +60,16 @@ Caret side: providers `slang` (HTTP) and `slang_local` (in-process) in
 
 - GGUF only. safetensors (BF16, NVFP4) is recognised and refused.
 - One model, one context, greedy sampling, one request at a time.
-- No continuous batching or prefix caching — that is master plan A5, and it
-  needs the A4 paged KV cache underneath it.
+- No continuous batching (master plan A5). Prefix caching DOES exist: the
+  serial exact-prefix snapshot cache (S1-S3, shim `slang_prefix_*`) is on by
+  default at 4 entries / 2 GiB, works with stock llama.cpp, and is toggled with
+  `engine_set_prefix_cache_limits(0, 0)` / `(4, 2147483648)`. Live receipt:
+  `test/03_system/lib/slang/feature/slang_kv_cache_live_spec.spl` and the
+  2026-11-14 table in `test/05_perf/slang_kv_cache/README.md` (Qwen2.5-1.5B,
+  CPU: exact repeat re-prefills 1 of 988 prompt tokens, ~40x faster request).
+  A hit's output may drift from a full prefill (first differing byte 2-42; ggml batch
+  shape, `doc/08_tracking/bug/slang_prefix_cache_hit_output_drift_2026-11-14.md`).
+  The physical paged-KV lane needs a llama.cpp with `include/llama-slang-paged.h`.
 - The HTTP path is unreachable on the bootstrap seed; see
   `doc/08_tracking/bug/seed_jit_cannot_resolve_text_dot_from_char_code_2026-09-04.md`
   and `doc/08_tracking/bug/seed_http_server_handle_connection_dispatch_2026-09-04.md`.
@@ -142,6 +152,22 @@ cd <worktree> && SIMPLE_RUST_SEED_WARNING=0 SIMPLE_TIMEOUT_SECONDS=0 \
   holds a model (aborts the server; single-server/two-client fix in progress);
   JIT demotions to the interpreter (`_first_safetensors` bare `dir_list`;
   caret `telemetry().active_requests` inferred as `RingTelemetry`). Both still work.
+
+## Windows (llvm-mingw) (verified 2026-11-14, Windows 11, CPU)
+
+- **Build:** llama.cpp with llvm-mingw, `BUILD_SHARED_LIBS=ON`, into
+  `$LLAMA_ROOT/build-mingw`; then
+  `LLAMA_ROOT=/c/dev/tools/llama.cpp sh scripts/check/build-slang-ggml-shim.shs`.
+  mingw is the Windows default; clang-cl/lld-link is opt-in via `SLANG_SHIM_MSVC=1`.
+  `LLAMA_ROOT` is required on Windows (no Linux default).
+- **DLL naming trap:** mingw produces `libllama.dll` (import lib
+  `src/libllama.dll.a`), MSVC produces `llama.dll`/`llama.lib`. The mingw DLLs
+  also import `libc++.dll`/`libunwind.dll` from llvm-mingw's
+  `x86_64-w64-mingw32/bin`. The script copies all of them next to the shim and
+  `backend.spl` `_preload_windows_dll_siblings` preloads them, so no PATH edit
+  is needed. A missing sibling shows up only as "backend library could not be opened".
+- **Compiler trap:** a bare `clang` on PATH may target MSVC (ROCm ships one);
+  the script uses `$SIMPLE_MINGW_ROOT/bin/clang.exe` and checks `-dumpmachine`.
 
 ## Related
 

@@ -50,7 +50,7 @@ code/spec, so a retarget would be weakening the assertion.
 ## Not yet triaged (behavioural; need a focused run)
 
 - `20.hir/bootstrap_regressions/unresolved_name_eager_resolution_spec.spl` (2 tests). A name declared in a never-imported sibling module produces no `unresolved name` error.
-- `30.types/written_any_compile_mode_spec.spl` (1). The `assert_equal` failure carries no step detail.
+- `30.types/written_any_compile_mode_spec.spl` (1). Triaged 2026-11-14: a written `Any` in a callable signature is diagnosed twice (signature registration + declaration lowering), so the spec sees 4 warnings for 2 occurrences. Filed as `written_any_signature_diagnostic_reported_twice_2026-11-14.md`; the assertion stays red.
 - 50.mir, rest of the sweep (seed-run at `88a17aa6e20`): these files still fail and are not fixed:
   - `for_in_runtime_tuple_decode` (2 tests, struct elements bound by value);
   - `generic_self_method_result_ctor`;

@@ -1,0 +1,54 @@
+# AUTHORED_NOT_RUN. Mandatory actual Windows administrator-installed fixture.
+# No path/env override, self-installation, injected owner or unsupported skip.
+# @req REQ-WINDOWS-MACHINE-POLICY-001
+# @req REQ-WINDOWS-MACHINE-POLICY-002
+# @req REQ-WINDOWS-MACHINE-POLICY-003
+use std.spec.{describe, it, expect, step}
+use std.nogc_sync_mut.io.windows_machine_policy_owner_v1.*
+
+# Retain actual owners for diagnosis if a fixture assertion or native cleanup
+# fails. No handle/slot is fabricated and no native ownership is discarded.
+var machine_policy_fixture_owners_v1: [WindowsMachinePolicyOwnerV1] = []
+
+fn machine_policy_fixture_open_v1() -> Result<WindowsMachinePolicyOwnerV1, text>:
+    match windows_machine_policy_open_v1():
+        case WindowsMachinePolicyOpenV1.Ready(owner):
+            machine_policy_fixture_owners_v1.push(owner)
+            Ok(owner)
+        case WindowsMachinePolicyOpenV1.CleanupRequired(owner, reason):
+            machine_policy_fixture_owners_v1.push(owner)
+            val cleanup = machine_policy_fixture_close_v1(owner)
+            Err("actual installed machine-policy fixture refused: " + reason + "; cleanup=" + cleanup)
+        case WindowsMachinePolicyOpenV1.Rejected(reason):
+            Err("actual installed Windows machine-policy fixture required: " + reason)
+
+fn machine_policy_fixture_close_v1(owner: WindowsMachinePolicyOwnerV1) -> text:
+    owner.close_v1()
+
+describe "Actual Windows machine installed-policy owner v1":
+    it "reads one retained installed policy repeatedly and refuses copied ownership after close":
+        step("Open the actual administrator-installed machine policy")
+        # The fixed production factory has no root/path argument. Missing
+        # installation or unsupported hosts fail this unwrap rather than skip.
+        val owner = machine_policy_fixture_open_v1().unwrap()
+        val copied = owner
+        step("Read the same retained policy bytes twice")
+        val first = owner.read_policy_v1()
+        val second = owner.read_policy_v1()
+        step("Close and reject a copied owner")
+        # Collect all results and attempt cleanup before assertions can abort.
+        val closed = machine_policy_fixture_close_v1(owner)
+        val stale_read = copied.read_policy_v1()
+        val copied_close = machine_policy_fixture_close_v1(copied)
+        val repeated_close = machine_policy_fixture_close_v1(owner)
+        expect(closed).to_equal("released")
+        expect(first.is_ok()).to_equal(true)
+        expect(second.is_ok()).to_equal(true)
+        val first_bytes = first.unwrap()
+        val second_bytes = second.unwrap()
+        expect(first_bytes.len()).to_be_greater_than(0)
+        expect(first_bytes.len()).to_be_less_than(1048577)
+        expect(second_bytes).to_equal(first_bytes)
+        expect(stale_read.is_err()).to_equal(true)
+        expect(copied_close).to_equal("stale")
+        expect(repeated_close).to_equal("stale")

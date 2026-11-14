@@ -56,6 +56,7 @@ void mock_llama_corrupt_restore_once(void);
 void mock_llama_short_decode_once(void);
 int64_t mock_llama_restore_calls(void);
 void mock_llama_set_n_ubatch(uint32_t);
+void mock_llama_set_gpu_offload(int);
 int64_t mock_llama_short_first_decodes(void);
 int64_t mock_llama_decode_calls(void);
 static void text(const char *s) { slang_ggml_str_reset(); while (*s) slang_ggml_str_push((unsigned char)*s++); }
@@ -300,6 +301,27 @@ int main(void) {
     assert(mock_llama_decode_calls() == decodes + 1);
     assert(slang_ggml_request_close(whole) == 0);
     mock_llama_set_n_ubatch(1);
+    assert(slang_ggml_free() == 0);
+
+    /* Asking for every layer (-1) on a llama.cpp with no GPU device offloads
+     * nothing, so the rule stays off: no throwaway decode, full reuse. */
+    mock_llama_set_gpu_offload(0);
+    text("model"); assert(slang_ggml_model_load(-1) == 0);
+    assert(slang_ggml_prefix_cache_configure(2, 1024) == 2);
+    mock_llama_set_n_ubatch(4);
+    decodes = mock_llama_decode_calls();
+    int64_t no_gpu_tiny = slang_ggml_request_create(32);
+    request_prefill(no_gpu_tiny, "ab", 0);
+    assert(mock_llama_decode_calls() == decodes + 1);
+    assert(slang_ggml_request_close(no_gpu_tiny) == 0);
+    int64_t no_gpu_seeded = slang_ggml_request_create(32);
+    request_prefill(no_gpu_seeded, "warmup", 0);
+    assert(slang_ggml_request_close(no_gpu_seeded) == 0);
+    int64_t no_gpu_hit = slang_ggml_request_create(32);
+    request_prefill(no_gpu_hit, "warmupX", 6);
+    assert(slang_ggml_request_close(no_gpu_hit) == 0);
+    mock_llama_set_n_ubatch(1);
+    mock_llama_set_gpu_offload(1);
     assert(slang_ggml_free() == 0);
     return 0;
 }

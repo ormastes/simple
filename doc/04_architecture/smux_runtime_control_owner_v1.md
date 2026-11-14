@@ -61,10 +61,16 @@ the target digest. `issue` requires that digest unchanged. The hosted CLI checks
 the exact request digest, right, target digest, nonce digest and revision; merely
 well-formed hashes are insufficient. `inspect` redacts the nonce and checks the
 live holder. `revoke` changes only the selected kind and does not stop a workload.
-`input` and `resize` perform actual issuer validation, then return unsupported
-because no shared provider control port is admitted yet. Replies explicitly say
+V1 `input` and `resize` perform actual issuer validation, then return unsupported
+because that wire has no attempt/partial-outcome contract. Replies explicitly say
 `controlReady: false` and `effectApplied: false`; the compiled CLI returns nonzero
 for effect attempts. No branch falls through to raw pipe writes or PTY resizing.
+
+The later `runtime-primary-control-v4` source adapter consumes the same issuer
+with an explicit attempt/range request and native-prefix receipt. V1 itself
+retains the unsupported effect wire above. See
+`doc/05_design/container_primary_input_v4.md` for actual session-bound common
+ports, synchronized revocation, Unknown retention, and pending qualification.
 
 Existing pane input, VT-response and geometry guards remain at the real legacy
 effect boundaries. In particular, the broad `client-request` attachment lease

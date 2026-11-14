@@ -15,8 +15,20 @@
 #   FAIL  -- <reason>                              exit 1
 #   ERROR -- nothing was built (<reason>)          exit 2
 #
-# Windows (MSYS/Git Bash): builds build/sffi/slang_ggml.dll with clang-cl +
-# lld-link (toolchain policy: never cl). Needs the MSVC/SDK env
+# Windows (MSYS/Git Bash), default lane = llvm-mingw UCRT (toolchain policy:
+# never GCC, never cl). LLAMA_ROOT must be set (no Linux default applies); the
+# build dir defaults to $LLAMA_ROOT/build-mingw when it holds bin/libllama.dll,
+# else $LLAMA_ROOT/build. Needs a llama.cpp built with llvm-mingw and
+# BUILD_SHARED_LIBS=ON: bin/libllama.dll plus the import library
+# src/libllama.dll.a (LLAMA_IMPLIB overrides). The compiler is CC, else
+# $SIMPLE_MINGW_ROOT/bin/clang, else the newest repo-managed
+# ~/.simple/toolchains/llvm-mingw-*-ucrt-x86_64; a bare `clang` on PATH may be
+# an MSVC-target clang (e.g. ROCm's), so the target is checked with
+# -dumpmachine. libllama.dll, ggml*.dll and the mingw runtime DLLs
+# (libc++.dll, libunwind.dll, libwinpthread-1.dll) are copied next to the shim.
+# Note the DLL naming trap: mingw builds produce libllama.dll, MSVC llama.dll.
+#
+# Optional MSVC lane (SLANG_SHIM_MSVC=1): clang-cl + lld-link. Needs the MSVC/SDK env
 # (`. scripts/setup/windows-msvc-bootstrap-env.shs`) and a llama.cpp built
 # with BUILD_SHARED_LIBS=ON, i.e. build/bin/llama.dll plus the import library
 # build/src/llama.lib (LLAMA_IMPLIB overrides). Exports come from a .def
@@ -27,8 +39,6 @@
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd -P)
-LLAMA_ROOT=${LLAMA_ROOT:-/home/yoon/dev/llama.cpp}
-LLAMA_BUILD_DIR=${LLAMA_BUILD_DIR:-$LLAMA_ROOT/build}
 OUT_DIR=${SLANG_SHIM_OUT_DIR:-$ROOT/build/sffi}
 SRC=$ROOT/src/runtime/slang_ggml_shim.c
 
@@ -36,11 +46,48 @@ case "$(uname -s)" in
     MINGW*|MSYS*|CYGWIN*) IS_WINDOWS=1 ;;
     *) IS_WINDOWS=0 ;;
 esac
+WIN_MSVC=0
+if [ "$IS_WINDOWS" -eq 1 ] && [ "${SLANG_SHIM_MSVC:-0}" = 1 ]; then
+    WIN_MSVC=1
+fi
 
 if [ "$IS_WINDOWS" -eq 1 ]; then
+    [ -n "${LLAMA_ROOT:-}" ] || { echo "ERROR -- nothing was built (LLAMA_ROOT is not set)"; exit 2; }
+    if [ "$WIN_MSVC" -eq 0 ] && [ -z "${LLAMA_BUILD_DIR:-}" ] && [ -f "$LLAMA_ROOT/build-mingw/bin/libllama.dll" ]; then
+        LLAMA_BUILD_DIR=$LLAMA_ROOT/build-mingw
+    fi
+else
+    LLAMA_ROOT=${LLAMA_ROOT:-/home/yoon/dev/llama.cpp}
+fi
+LLAMA_BUILD_DIR=${LLAMA_BUILD_DIR:-$LLAMA_ROOT/build}
+
+if [ "$WIN_MSVC" -eq 1 ]; then
     OUT=$OUT_DIR/slang_ggml.dll
     LLAMA_LIB=$LLAMA_BUILD_DIR/bin/llama.dll
     LLAMA_IMPLIB=${LLAMA_IMPLIB:-$LLAMA_BUILD_DIR/src/llama.lib}
+elif [ "$IS_WINDOWS" -eq 1 ]; then
+    OUT=$OUT_DIR/slang_ggml.dll
+    LLAMA_LIB=$LLAMA_BUILD_DIR/bin/libllama.dll
+    LLAMA_IMPLIB=${LLAMA_IMPLIB:-$LLAMA_BUILD_DIR/src/libllama.dll.a}
+    if [ -z "${CC:-}" ]; then
+        if [ -n "${SIMPLE_MINGW_ROOT:-}" ] && [ -x "$SIMPLE_MINGW_ROOT/bin/clang.exe" ]; then
+            CC=$SIMPLE_MINGW_ROOT/bin/clang.exe
+        else
+            for cand in $(ls -d "$HOME"/.simple/toolchains/llvm-mingw-*-ucrt-x86_64/bin 2>/dev/null | sort -r); do
+                CC=$cand/clang.exe
+                break
+            done
+        fi
+    fi
+    CC=${CC:-clang}
+    command -v "$CC" >/dev/null 2>&1 || { echo "ERROR -- nothing was built (no llvm-mingw clang: $CC)"; exit 2; }
+    MINGW_BIN=$(CDPATH= cd -- "$(dirname "$(command -v "$CC")")" && pwd -P)
+    case "$("$CC" -dumpmachine 2>/dev/null)" in
+        *-w64-mingw32*|*-windows-gnu*) ;;
+        *) echo "ERROR -- nothing was built ($CC does not target mingw; set SIMPLE_MINGW_ROOT or CC to llvm-mingw clang)"; exit 2 ;;
+    esac
+    READOBJ=$MINGW_BIN/llvm-readobj.exe
+    MINGW_RT_DIR=$MINGW_BIN/../x86_64-w64-mingw32/bin
 else
     OUT=$OUT_DIR/libslang_ggml.so
     LLAMA_LIB=$LLAMA_BUILD_DIR/bin/libllama.so
@@ -50,7 +97,7 @@ fi
 # shape so the required-symbol checks below are shared across platforms.
 list_exports() {
     if [ "$IS_WINDOWS" -eq 1 ]; then
-        llvm-readobj --coff-exports "$1" 2>/dev/null | sed -n 's/^ *Name: \(.*\)$/0 T \1/p'
+        "${READOBJ:-llvm-readobj}" --coff-exports "$1" 2>/dev/null | sed -n 's/^ *Name: \(.*\)$/0 T \1/p'
     else
         nm -D --defined-only "$1" 2>/dev/null
     fi
@@ -64,7 +111,30 @@ list_exports() {
 
 mkdir -p "$OUT_DIR"
 
-if [ "$IS_WINDOWS" -eq 1 ]; then
+if [ "$IS_WINDOWS" -eq 1 ] && [ "$WIN_MSVC" -eq 0 ]; then
+    [ -f "$LLAMA_IMPLIB" ] || { echo "ERROR -- nothing was built (no import library $LLAMA_IMPLIB)"; exit 2; }
+    [ -x "$READOBJ" ] || { echo "ERROR -- nothing was built (missing tool: $READOBJ)"; exit 2; }
+    for rt in libwinpthread-1.dll libunwind.dll libc++.dll; do
+        [ -f "$MINGW_RT_DIR/$rt" ] || { echo "ERROR -- nothing was built (no mingw runtime $rt under $MINGW_RT_DIR)"; exit 2; }
+    done
+    winpath() { cygpath -m "$1" 2>/dev/null || printf '%s' "$1"; }
+    # mingw ld auto-exports every non-static function when none is marked
+    # dllexport, so functions behind a disabled #if never reach the exports.
+    cc_rc=0
+    "$CC" -O2 -shared -o "$(winpath "$OUT")" "$(winpath "$SRC")" \
+        -I"$(winpath "$LLAMA_ROOT/include")" -I"$(winpath "$LLAMA_ROOT/ggml/include")" \
+        "$(winpath "$LLAMA_IMPLIB")" >"$OUT_DIR/build.log" 2>&1 || cc_rc=$?
+    if [ "$cc_rc" -eq 0 ]; then
+        for dep in ggml-base.dll ggml-cpu.dll ggml.dll libllama.dll; do
+            if [ -f "$LLAMA_BUILD_DIR/bin/$dep" ]; then
+                cp -f "$LLAMA_BUILD_DIR/bin/$dep" "$OUT_DIR/$dep"
+            fi
+        done
+        for rt in libwinpthread-1.dll libunwind.dll libc++.dll; do
+            cp -f "$MINGW_RT_DIR/$rt" "$OUT_DIR/$rt"
+        done
+    fi
+elif [ "$IS_WINDOWS" -eq 1 ]; then
     [ -f "$LLAMA_IMPLIB" ] || { echo "ERROR -- nothing was built (no import library $LLAMA_IMPLIB)"; exit 2; }
     CC=${CC:-clang-cl}
     for tool in "$CC" lld-link llvm-nm llvm-readobj; do
