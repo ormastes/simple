@@ -1,0 +1,169 @@
+# REQ-DTA-A1: directory roots over file TLDR bytes and existing AOP facts.
+# Pure production/snapshot comparison boundary. The driver supplies fresh file-TLDR
+# digests; source-file hashes are not substitutes. The facts come from the
+# existing semantic owner, not from parsing the persisted root as authority.
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.structural.wire.{wire_put_u64}
+use compiler.common.cache.canonical_identity.{canonical_identity_text_lt}
+use compiler.common.cache_contract.package_init_tld_v1.{PackageInitTldV1,
+    package_init_tld_valid_v1, package_init_tld_schema_v1,
+    package_init_tld_encode_v1, package_init_tagged_sha256_valid_v2}
+use compiler.common.cache_contract.physical_tld_v1.{
+    three_payload_contract_digest_valid_v1, three_payload_contract_text_valid_v1,
+    three_payload_contract_max_items_v1, three_payload_contract_budget_v1,
+    three_payload_contract_put_text_v1, three_payload_contract_put_digest_v1}
+use compiler.common.cache_contract.aspect_match_shard_v1.{
+    DirectoryJoinPointFactsV1, directory_facts_key_v1}
+
+pub struct FileTldrDigestV2:
+    member_id: text
+    tldr_digest: text
+
+# This is a structurally compared snapshot, not the plugin planner's DirTldrViewV1.
+# Previous match/application state belongs to the planner and is never serialized
+# into __init__.tld. Possessing this value does not authenticate a plugin or code.
+pub struct DirectoryTldrViewV2:
+    package: PackageInitTldV1
+    facts: DirectoryJoinPointFactsV1
+    output_digest: text
+
+fn _directory_members_valid_v2(members: [FileTldrDigestV2]) -> bool:
+    if members.len() > three_payload_contract_max_items_v1(): return false
+    val budget = three_payload_contract_budget_v1()
+    var previous = ""
+    var have_previous = false
+    for member in members:
+        if not three_payload_contract_text_valid_v1(member.member_id, false) or
+                not three_payload_contract_digest_valid_v1(member.tldr_digest): return false
+        if have_previous and not canonical_identity_text_lt(previous, member.member_id): return false
+        budget.add_text(member.member_id, false)
+        budget.add_digest(member.tldr_digest)
+        if not budget.ok: return false
+        previous = member.member_id
+        have_previous = true
+    budget.ok
+
+fn _directory_hash_v2(domain: text, values: [text]) -> text:
+    var bytes: [u8] = []
+    bytes = three_payload_contract_put_text_v1(bytes, domain)
+    for value in values: bytes = three_payload_contract_put_text_v1(bytes, value)
+    sha256_u8_hex(bytes)
+
+# A leaf binds member identity AND its exact file-TLDR digest. Odd levels promote
+# the last node unchanged; the domain-separated final root also binds leaf count.
+# Thus duplicated final leaves, path renames and empty/nonempty trees differ.
+pub fn directory_file_tldr_root_v2(members: [FileTldrDigestV2]) -> text?:
+    if not _directory_members_valid_v2(members): return nil
+    var level: [text] = []
+    for member in members:
+        level.push(_directory_hash_v2("directory-file-tldr-leaf/v2",
+            [member.member_id, member.tldr_digest]))
+    while level.len() > 1:
+        var next: [text] = []
+        var index = 0
+        while index < level.len():
+            if index + 1 < level.len():
+                next.push(_directory_hash_v2("directory-file-tldr-node/v2",
+                    [level[index], level[index + 1]]))
+            else:
+                next.push(level[index])
+            index = index + 2
+        level = next
+    var root_bytes: [u8] = []
+    root_bytes = three_payload_contract_put_text_v1(root_bytes, "directory-file-tldr-root/v2")
+    root_bytes = wire_put_u64(root_bytes, members.len())
+    if level.len() == 1: root_bytes = three_payload_contract_put_digest_v1(root_bytes, level[0])
+    Some(sha256_u8_hex(root_bytes))
+
+fn _directory_facts_match_v2(value: PackageInitTldV1, facts: DirectoryJoinPointFactsV1) -> bool:
+    if not facts.complete or facts.scope_id != value.package_id or
+            facts.sorted_member_files != value.ordered_member_ids or
+            facts.sorted_join_points.len() > three_payload_contract_max_items_v1() or
+            facts.sorted_child_roots.len() > three_payload_contract_max_items_v1() or
+            not package_init_tagged_sha256_valid_v2(facts.facts_key) or
+            not package_init_tagged_sha256_valid_v2(facts.negative_root) or
+            not package_init_tagged_sha256_valid_v2(facts.active_guard_root): return false
+    var previous = ""
+    var first = true
+    val budget = three_payload_contract_budget_v1()
+    var member_ids: Dict<text, bool> = {}
+    for member in value.ordered_member_ids:
+        if not first and not canonical_identity_text_lt(previous, member): return false
+        member_ids[member] = true
+        previous = member
+        first = false
+    previous = ""
+    first = true
+    budget.add_items(facts.sorted_join_points.len())
+    for point in facts.sorted_join_points:
+        if not first and not canonical_identity_text_lt(previous, point.id): return false
+        if not member_ids.contains_key(point.owner_file): return false
+        for field in [point.id, point.kind, point.symbol, point.owner_file]:
+            if not three_payload_contract_text_valid_v1(field, false): return false
+            budget.add_text(field, false)
+        budget.add_items(point.attrs.len())
+        if not budget.ok: return false
+        for attr in point.attrs: budget.add_text(attr, false)
+        if not budget.ok: return false
+        previous = point.id
+        first = false
+    previous = ""
+    first = true
+    budget.add_items(facts.sorted_child_roots.len())
+    for child in facts.sorted_child_roots:
+        if not package_init_tagged_sha256_valid_v2(child): return false
+        if not first and not canonical_identity_text_lt(previous, child): return false
+        budget.add_text(child, false)
+        if not budget.ok: return false
+        previous = child
+        first = false
+    budget.ok and directory_facts_key_v1(facts) == facts.facts_key
+
+pub fn package_init_directory_produce_v2(base: PackageInitTldV1,
+        members: [FileTldrDigestV2], facts: DirectoryJoinPointFactsV1,
+        compiler_provider_id: text) -> Result<PackageInitTldV1, text>:
+    if not package_init_tld_valid_v1(base): return Err("directory-package-invalid")
+    if not three_payload_contract_text_valid_v1(compiler_provider_id, false):
+        return Err("directory-provider-missing")
+    val root = directory_file_tldr_root_v2(members)
+    if root == nil: return Err("directory-members-noncanonical")
+    var member_ids: [text] = []
+    for member in members: member_ids.push(member.member_id)
+    if member_ids != base.ordered_member_ids: return Err("directory-membership-mismatch")
+    if not _directory_facts_match_v2(base, facts): return Err("directory-facts-mismatch")
+    val result = PackageInitTldV1(..base, file_tldr_root_digest: root,
+        join_point_facts_digest: Some(facts.facts_key), compiler_provider_id: Some(compiler_provider_id),
+        active_guard_root_digest: Some(facts.active_guard_root))
+    if not package_init_tld_valid_v1(result): return Err("directory-package-bounds")
+    Ok(result)
+
+# Compare with trusted, freshly produced semantic-owner facts and file-TLDR roots.
+# The caller must establish snapshot freshness and guard evaluation; this pure
+# comparator cannot authenticate publicly constructible values. Never derive
+# expected/facts from the stored record. Legacy records cannot match this schema.
+# A miss requires rebuild/full visit. Full compiler cache admission is separate.
+pub fn package_init_directory_compare_v2(stored: PackageInitTldV1,
+        expected: PackageInitTldV1, facts: DirectoryJoinPointFactsV1) -> DirectoryTldrViewV2?:
+    if package_init_tld_schema_v1(stored) != 2 or package_init_tld_schema_v1(expected) != 2 or
+            not package_init_tld_valid_v1(stored) or not package_init_tld_valid_v1(expected): return nil
+    if not _directory_facts_match_v2(expected, facts): return nil
+    if expected.join_point_facts_digest != Some(facts.facts_key) or
+            expected.active_guard_root_digest != Some(facts.active_guard_root): return nil
+    val expected_bytes = package_init_tld_encode_v1(expected)
+    if package_init_tld_encode_v1(stored) != expected_bytes: return nil
+    Some(DirectoryTldrViewV2(package: stored, facts: facts, output_digest: sha256_u8_hex(expected_bytes)))
+
+# Only the producer's scope tuple names the directory identity. Content roots
+# remain in the output digest, so body/interface updates can trigger early cutoff
+# without pretending that every edit created a different directory owner.
+pub fn package_init_directory_identity_v2(value: PackageInitTldV1) -> text?:
+    if package_init_tld_schema_v1(value) != 2 or not package_init_tld_valid_v1(value): return nil
+    var bytes: [u8] = []
+    bytes = three_payload_contract_put_text_v1(bytes, "directory-tldr-identity/v2")
+    bytes = three_payload_contract_put_text_v1(bytes, value.package_id)
+    # Explicit absence is distinct from any real parent scope digest.
+    bytes = three_payload_contract_put_text_v1(bytes, value.parent_scope_digest ?? "")
+    bytes = three_payload_contract_put_digest_v1(bytes, value.membership_root_digest)
+    bytes = three_payload_contract_put_text_v1(bytes, value.compiler_provider_id.unwrap())
+    bytes = three_payload_contract_put_text_v1(bytes, value.active_guard_root_digest.unwrap())
+    Some(sha256_u8_hex(bytes))
