@@ -12,21 +12,29 @@ use std.tooling.easy_fix.rules_helpers.{LineContext, line_contexts}
 # Confidence: Likely
 # ============================================================================
 
-fn check_print_in_test_spec(source: String, file: String) -> [EasyFix]:
+pub fn check_print_in_test_spec(source: String, file: String) -> [EasyFix]:
+    if not file.ends_with("_spec.spl"):
+        return []
+    check_print_in_test_spec_with_contexts(file, line_contexts(source))
+
+pub fn check_print_in_test_spec_with_contexts(file: String, contexts: [LineContext]) -> [EasyFix]:
     # Only applies to spec files
     if not file.ends_with("_spec.spl"):
         return []
 
     var fixes: [EasyFix] = []
-
-    for raw_ctx in line_contexts(source):
+    for raw_ctx in contexts:
         val ctx: LineContext = raw_ctx
+
+        # Detect bare print(...) inside test context
         if ctx.trimmed.starts_with("print(") or ctx.trimmed.starts_with("print "):
             val start = ctx.byte_offset + ctx.indent
             val end = ctx.byte_offset + ctx.line.len()
 
+            # Extract the argument
             var arg = ""
             if ctx.trimmed.starts_with("print("):
+                # Find matching closing paren
                 val inner = ctx.trimmed.slice(6)
                 if inner.ends_with(")"):
                     arg = inner.slice(0, inner.byte_len() - 1)
@@ -107,33 +115,42 @@ pub fn check_resource_leak_with_contexts(file: String, contexts: [LineContext]) 
 # Confidence: Safe
 # ============================================================================
 
-fn check_spipe_missing_docstrings(source: String, file: String) -> [EasyFix]:
+pub fn check_spipe_missing_docstrings(source: String, file: String) -> [EasyFix]:
+    if not file.ends_with("_spec.spl"):
+        return []
+    check_spipe_missing_docstrings_with_lines(file, source.split("\n"))
+
+pub fn check_spipe_missing_docstrings_with_lines(file: String, lines: [String]) -> [EasyFix]:
     var fixes: [EasyFix] = []
 
     if not file.ends_with("_spec.spl"):
         return fixes
 
-    val lines = source.split("\n")
+    var line_num = 0
+    var byte_offset = 0
 
-    for raw_ctx in line_contexts(source):
-        val ctx: LineContext = raw_ctx
-        val is_describe = ctx.trimmed.starts_with("describe ")
-        val is_context = ctx.trimmed.starts_with("context ")
+    for line in lines:
+        line_num = line_num + 1
+        val trimmed = line.trim()
+
+        val is_describe = trimmed.starts_with("describe ")
+        val is_context = trimmed.starts_with("context ")
 
         if is_describe or is_context:
-            val keyword = if is_describe: "describe" else: "context"
+            val keyword = if is_describe then "describe" else "context"
 
             # Extract the name string
-            val after_kw = ctx.trimmed.slice(keyword.len()).trim()
+            val after_kw = trimmed.slice(keyword.len()).trim()
             var block_name = after_kw
             if after_kw.starts_with("\""):
-                val close_quote = _lint_find_text_from(after_kw.slice(1), "\"", 0)
+                val close_quote = after_kw.slice(1).find("\"")
                 if close_quote >= 0:
                     block_name = after_kw.slice(1, close_quote + 1)
 
             # Check if next non-empty line is a docstring (""")
-            var next_idx = ctx.line_num  # 0-indexed for next line
+            var next_idx = line_num  # 0-indexed for next line
             var has_docstring = false
+            var check_offset = byte_offset + line.len() + 1
 
             if next_idx < lines.len():
                 val next_line = lines[next_idx]
@@ -142,14 +159,15 @@ fn check_spipe_missing_docstrings(source: String, file: String) -> [EasyFix]:
                     has_docstring = true
 
             if not has_docstring:
-                val insert_pos = ctx.byte_offset + ctx.line.len() + 1  # After newline
-                val spaces = " ".repeat(ctx.indent + 4)
-                val header = if is_describe: "##" else: "###"
-                val scenario = if is_describe: "" else: "Scenario: "
+                val indent = line.len() - trimmed.len()
+                val insert_pos = byte_offset + line.len() + 1  # After newline
+                val spaces = " ".repeat(indent + 4)
+                val header = if is_describe then "##" else "###"
+                val scenario = if is_describe then "" else "Scenario: "
                 val docstring = "{spaces}\"\"\"\n{spaces}{header} {scenario}{block_name}\n{spaces}\n{spaces}Description of this {keyword} block.\n{spaces}\"\"\"\n"
 
                 var fix = EasyFix.create(
-                    id: "L:spipe_missing_docstrings:{ctx.line_num}",
+                    id: "L:spipe_missing_docstrings:{line_num}",
                     description: "add template docstring to {keyword} block",
                     confidence: FixConfidence.Safe
                 )
@@ -157,11 +175,13 @@ fn check_spipe_missing_docstrings(source: String, file: String) -> [EasyFix]:
                     file: file,
                     start: insert_pos,
                     end: insert_pos,
-                    line: ctx.line_num + 1,
+                    line: line_num + 1,
                     column: 1,
                     new_text: docstring
                 ))
                 fixes.push(fix)
+
+        byte_offset = byte_offset + line.len() + 1
 
     fixes
 
@@ -171,18 +191,23 @@ fn check_spipe_missing_docstrings(source: String, file: String) -> [EasyFix]:
 # Confidence: Likely
 # ============================================================================
 
-fn check_spipe_manual_assertions(source: String, file: String) -> [EasyFix]:
+pub fn check_spipe_manual_assertions(source: String, file: String) -> [EasyFix]:
+    if not file.ends_with("_spec.spl"):
+        return []
+    check_spipe_manual_assertions_with_contexts(file, line_contexts(source))
+
+pub fn check_spipe_manual_assertions_with_contexts(file: String, contexts: [LineContext]) -> [EasyFix]:
     if not file.ends_with("_spec.spl"):
         return []
 
     var fixes: [EasyFix] = []
-
-    for raw_ctx in line_contexts(source):
+    for raw_ctx in contexts:
         val ctx: LineContext = raw_ctx
+
         # Pattern: if <cond>: fail(...) or if not <cond>: fail(...)
         if ctx.trimmed.starts_with("if ") and ctx.trimmed.contains("fail("):
             # Extract condition: between "if " and ":"
-            val colon_pos = _lint_find_text_from(ctx.trimmed, ":", 0)
+            val colon_pos = ctx.trimmed.find(":")
             if colon_pos > 3:
                 val condition = ctx.trimmed.slice(3, colon_pos).trim()
                 val after_colon = ctx.trimmed.slice(colon_pos + 1).trim()
@@ -290,16 +315,6 @@ pub fn check_non_exhaustive_match_with_lines(file: String, lines: [String]) -> [
         end_columns.pop()
 
     fixes
-
-fn _lint_find_text_from(line: text, needle: text, search_from: i64) -> i64:
-    if needle == "":
-        return search_from
-    var i = search_from
-    while i + needle.len() <= line.len():
-        if line.slice(i, i + needle.len()) == needle:
-            return i
-        i = i + 1
-    -1
 
 fn _emit_non_exhaustive_fix(fixes: [EasyFix], file: String, after_line: Int, after_offset: Int, after_column: Int, case_indent: Int, bare: bool):
     val spaces = " ".repeat(case_indent)
