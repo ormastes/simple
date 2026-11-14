@@ -1,0 +1,120 @@
+# CSS An+B microsyntax — the one evaluator for :nth-child(), :nth-last-child(),
+# :nth-of-type() and :nth-last-of-type() arguments.
+#
+# Selectors 4 section 14.4.1 / CSS Syntax 3 section 6: an element at 1-based
+# index i matches An+B when i = A*k + B for some integer k >= 0. `odd` is
+# 2n+1 and `even` is 2n; keywords and the `n` are ASCII case-insensitive.
+# Whitespace (space, tab, LF, CR, FF) is allowed around the whole argument and
+# on either side of the sign that follows `n`, nowhere else: `2n + 1` is
+# valid, `1 2`, `+ 3`, `2 n` and `2n+` are not, and an invalid argument makes
+# the selector match nothing.
+#
+# Both the layout renderer's selector matcher and the fallback stylesheet
+# lookup call this; neither keeps its own copy.
+
+fn _css_nth_is_space(ch: text) -> bool:
+    ch == " " or ch == "\t" or ch == "\n" or ch == "\r" or ch == "\x0c"
+
+fn _css_nth_trim(s: text) -> text:
+    var start = 0
+    var end = s.byte_len()
+    while start < end and _css_nth_is_space(s.slice(start, start + 1)):
+        start = start + 1
+    while end > start and _css_nth_is_space(s.slice(end - 1, end)):
+        end = end - 1
+    s.slice(start, end)
+
+# Unsigned decimal digits only; -1 for anything else (including "").
+fn _css_nth_digits(s: text) -> i64:
+    if s.byte_len() == 0 or s.byte_len() > 9:
+        return -1
+    val digits = "0123456789"
+    var value = 0
+    var i = 0
+    while i < s.byte_len():
+        val d = digits.index_of(s.slice(i, i + 1)) ?? -1
+        if d < 0:
+            return -1
+        value = value * 10 + d
+        i = i + 1
+    value
+
+pub class CssNth:
+    valid: bool
+    a: i64
+    b: i64
+
+fn _css_nth_invalid() -> CssNth:
+    CssNth(valid: false, a: 0, b: 0)
+
+# Parse one An+B argument. `valid` is false for anything the grammar rejects.
+pub fn css_nth_parse(expr: text) -> CssNth:
+    val e = _css_nth_trim(expr).lower()
+    if e == "odd":
+        return CssNth(valid: true, a: 2, b: 1)
+    if e == "even":
+        return CssNth(valid: true, a: 2, b: 0)
+    val n_at = e.index_of("n") ?? -1
+    if n_at < 0:
+        # <integer>: optional sign glued to the digits.
+        var body = e
+        var sign = 1
+        if body.starts_with("+"):
+            body = body.slice(1, body.byte_len())
+        elif body.starts_with("-"):
+            body = body.slice(1, body.byte_len())
+            sign = -1
+        val value = _css_nth_digits(body)
+        if value < 0:
+            return _css_nth_invalid()
+        return CssNth(valid: true, a: 0, b: sign * value)
+    # A: "", "+", "-" or a signed integer, with no whitespace before `n`.
+    val a_text = e.slice(0, n_at)
+    var a = 1
+    if a_text == "" or a_text == "+":
+        a = 1
+    elif a_text == "-":
+        a = -1
+    else:
+        var a_body = a_text
+        var a_sign = 1
+        if a_body.starts_with("+"):
+            a_body = a_body.slice(1, a_body.byte_len())
+        elif a_body.starts_with("-"):
+            a_body = a_body.slice(1, a_body.byte_len())
+            a_sign = -1
+        val a_value = _css_nth_digits(a_body)
+        if a_value < 0:
+            return _css_nth_invalid()
+        a = a_sign * a_value
+    # B: nothing, or a sign, optional whitespace, digits.
+    val rest = _css_nth_trim(e.slice(n_at + 1, e.byte_len()))
+    if rest == "":
+        return CssNth(valid: true, a: a, b: 0)
+    var b_sign = 1
+    if rest.starts_with("+"):
+        b_sign = 1
+    elif rest.starts_with("-"):
+        b_sign = -1
+    else:
+        return _css_nth_invalid()
+    val b_value = _css_nth_digits(_css_nth_trim(rest.slice(1, rest.byte_len())))
+    if b_value < 0:
+        return _css_nth_invalid()
+    CssNth(valid: true, a: a, b: b_sign * b_value)
+
+# Does 1-based `index` equal a*k + b for some integer k >= 0?
+pub fn css_nth_index_matches(a: i64, b: i64, index: i64) -> bool:
+    if index < 1:
+        return false
+    val delta = index - b
+    if a == 0:
+        return delta == 0
+    if a > 0:
+        return delta >= 0 and delta % a == 0
+    delta <= 0 and (0 - delta) % (0 - a) == 0
+
+# Parse and test in one step; an invalid argument matches nothing.
+pub fn css_nth_matches(expr: text, index: i64) -> bool:
+    val parsed = css_nth_parse(expr)
+    parsed.valid and css_nth_index_matches(parsed.a, parsed.b, index)
