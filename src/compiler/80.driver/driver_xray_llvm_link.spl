@@ -3,7 +3,7 @@
 # hosted linker may be ld/lld, so no Clang-only -fxray flag escapes this owner.
 # Both resident object bytes and explicit libraries enter the normal link key.
 use std.nogc_sync_mut.io_runtime.{dir_create_all, is_file, process_run_timeout}
-use compiler.backend.runtime_compiler.{find_c_compiler}
+use compiler.backend.runtime_compiler.{find_c_compiler, find_runtime_source_dir}
 use std.nogc_sync_mut.io.file_ops.{secure_temp_dir_raw}
 
 pub fn xray_llvm_link_needed_v1(enabled: bool, backend: text, target: text,
@@ -81,14 +81,18 @@ pub fn xray_llvm_link_objects_v1(objects: [text], enabled: bool, backend: text,
     val compiler = find_c_compiler()
     if compiler.len() == 0:
         return Err("XRAY-E-LLVM-CC: no hosted Clang compiler")
+    val runtime_source = find_runtime_source_dir()
+    if runtime_source.len() == 0:
+        return Err("XRAY-E-LLVM-SOURCE: no hosted runtime source owner")
     xray_llvm_materialize_runtime_v1(objects, target, compiler,
-        "src/runtime/xray/xray_llvm_adapter_linux.c", "build/xray")
+        "{runtime_source}/xray/xray_llvm_adapter_linux.c",
+        "{runtime_source}/xray/xray_llvm_image_linux.c", "build/xray")
 
 # Internal effectful executor; callers must first resolve policy and compiler.
 # Keeping explicit inputs permits native integration tests without a second
 # compiler discovery implementation or a simulated process provider.
 fn xray_llvm_materialize_runtime_v1(objects: [text], target: text, compiler: text,
-        source: text, output_root: text) -> Result<[text], text>:
+        source: text, image_source: text, output_root: text) -> Result<[text], text>:
     val (archive_out, archive_error, archive_code) = process_run_timeout(
         compiler, xray_llvm_runtime_query_args_v1(target), 10000)
     val archive = archive_out.trim()
@@ -96,6 +100,8 @@ fn xray_llvm_materialize_runtime_v1(objects: [text], target: text, compiler: tex
         return Err("XRAY-E-LLVM-RUNTIME: matching compiler-rt archive unavailable: {archive_error}")
     if not is_file(source):
         return Err("XRAY-E-LLVM-SOURCE: {source} not found")
+    if not is_file(image_source):
+        return Err("XRAY-E-LLVM-SOURCE: {image_source} not found")
     if not dir_create_all(output_root):
         return Err("XRAY-E-LLVM-OUTPUT: cannot create runtime output root")
     val directory = secure_temp_dir_raw(output_root, "llvm-runtime")
@@ -103,11 +109,17 @@ fn xray_llvm_materialize_runtime_v1(objects: [text], target: text, compiler: tex
         return Err("XRAY-E-LLVM-OUTPUT: cannot create private runtime directory")
     val adapter = "{directory}/adapter.o"
     val resident = "{directory}/resident.o"
+    val image = "{directory}/image.o"
     var adapter_args = xray_llvm_adapter_flags_v1(target)
     for argument in ["-c", source, "-o", adapter]: adapter_args.push(argument)
     val (_adapter_out, adapter_error, adapter_code) = process_run_timeout(compiler, adapter_args, 120000)
     if adapter_code != 0 or not is_file(adapter):
         return Err("XRAY-E-LLVM-ADAPTER: compile failed ({adapter_code}): {adapter_error}")
+    var image_args = xray_llvm_adapter_flags_v1(target)
+    for argument in ["-c", image_source, "-o", image]: image_args.push(argument)
+    val (_image_out, image_error, image_code) = process_run_timeout(compiler, image_args, 120000)
+    if image_code != 0 or not is_file(image):
+        return Err("XRAY-E-LLVM-IMAGE: compile failed ({image_code}): {image_error}")
     val (_resident_out, resident_error, resident_code) = process_run_timeout(
         compiler, xray_llvm_resident_args_v1(target, archive, resident), 120000)
     if resident_code != 0 or not is_file(resident):
@@ -115,5 +127,6 @@ fn xray_llvm_materialize_runtime_v1(objects: [text], target: text, compiler: tex
     var result: [text] = []
     for object in objects: result.push(object)
     result.push(adapter)
+    result.push(image)
     result.push(resident)
     Ok(result)

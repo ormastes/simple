@@ -79,11 +79,22 @@ static uint64_t g_simple_xray_sequence;
 static simple_xray_resident_admission_v1 g_resident_admission = SIMPLE_XRAY_RESIDENT_ADMISSION_INIT_V1;
 static uint64_t g_xray_handler_mode;
 static uint64_t g_xray_control;
+static uint64_t g_xray_runtime_ready;
 static uint64_t g_xray_last_generation;
 static uint64_t g_xray_admission_lost;
 static __thread __attribute__((tls_model("initial-exec"))) int g_xray_control_owned;
 static __thread __attribute__((tls_model("initial-exec"))) int g_xray_in_handler;
 static __thread __attribute__((tls_model("initial-exec"))) uint64_t g_xray_context_sequence;
+
+/* Called only by the owned hosted entry wrapper after runtime/TLS init.
+ * This is readiness, never target/profile or quiescence admission. */
+void simple_xray_resident_runtime_ready_v1(void) {
+    __atomic_store_n(&g_xray_runtime_ready, 1, __ATOMIC_RELEASE);
+}
+int64_t simple_xray_resident_runtime_is_ready_v1(void) {
+    return (int64_t)__atomic_load_n(&g_xray_runtime_ready, __ATOMIC_ACQUIRE);
+}
+int64_t simple_xray_resident_in_hook_v1(void) { return g_xray_in_handler != 0; }
 
 int64_t simple_xray_resident_control_enter_v1(void) {
     uint64_t expected = 0;
@@ -130,6 +141,9 @@ void simple_xray_thread_detach_v1(void) {
 __attribute__((always_inline)) static inline void simple_xray_resident_event_v1(
         int32_t fid, uint64_t kind) {
     if (g_xray_in_handler) {
+        /* Reentry may precede first TLS publication or refer to a retired
+         * pool. Never silently charge an unidentifiable generation. */
+        __atomic_store_n(&g_xray_admission_lost, UINT64_MAX, __ATOMIC_RELAXED);
         simple_xray_thread_note_unattached_v1(simple_xray_thread_current_pool_v1);
         return;
     }
@@ -230,7 +244,11 @@ static int simple_xray_resident_descriptor_valid_v1(SimpleXrayResidentDescriptor
             arena[CH_ARENA_BYTES] != (int64_t)slot->bytes ||
             arena[CH_GENERATION] != (int64_t)d->generation ||
             arena[CH_CONTEXT] != (int64_t)slot->context_id ||
-            __atomic_load_n(&arena[CH_GATE], __ATOMIC_ACQUIRE) != 0) return 0;
+            __atomic_load_n(&arena[CH_GATE], __ATOMIC_ACQUIRE) != 0 ||
+            arena[4] != 0 || arena[CH_WRITE] != 0 || arena[CH_READ] != 0 ||
+            arena[CH_LOST] != 0 || arena[CH_LOSS_INEXACT] != 0) return 0;
+        for (unsigned reserved = 10; reserved < CH_HEADER_WORDS; ++reserved)
+            if (arena[reserved] != 0) return 0;
         if (simple_xray_resident_overlap_v1(slot->arena, slot->bytes, (uintptr_t)d, 80) ||
             simple_xray_resident_overlap_v1(slot->arena, slot->bytes, d->pool, d->pool_bytes) ||
             simple_xray_resident_overlap_v1(slot->arena, slot->bytes, d->map, d->map_count * 16)) return 0;
@@ -252,7 +270,8 @@ static int simple_xray_resident_descriptor_valid_v1(SimpleXrayResidentDescriptor
     return 1;
 }
 int64_t simple_xray_llvm_resident_publish_v1(int64_t descriptor) {
-    if (!g_xray_control_owned || !simple_xray_resident_drained_v1(&g_resident_admission)) return 0;
+    if (!g_xray_control_owned || !simple_xray_resident_runtime_is_ready_v1() ||
+        !simple_xray_resident_drained_v1(&g_resident_admission)) return 0;
     SimpleXrayResidentDescriptorV1 *d = (void *)(intptr_t)descriptor;
     if (!simple_xray_resident_descriptor_valid_v1(d) ||
         d->generation <= g_xray_last_generation) return 0;
