@@ -1,0 +1,42 @@
+# Caret observer -- provider adapters for installed Codex / Claude, pure.
+#
+# Each adapter maps ONLY signals that already exist in the repo
+# (messaging/adapter/agent/hook_bridge.spl hook and notification names) into
+# observer events. A provider signal that carries no structured evidence for
+# an observer fact yields an empty list, so the fact stays Unknown. Nothing
+# here reads screen text.
+#
+# Not mapped, deliberately:
+#   - Claude stream-json `rate_limit_event`: claude_cli.spl only accepts the
+#     type; no reset time is parsed, so the reset is not known.
+#   - Claude has no structured question hook in the repo.
+#   - Codex `turn/failed` / `turn/blocked`: a failed turn is not owner-detected
+#     process/child exit nor a confirmed tool timeout.
+
+use app.llm_caret.observer.observation_builder.*
+
+fn claude_hook_events(session: text, generation: i64, op: text, seq: i64, at_ms: i64, hook_name: text) -> [ObserverEvent]:
+    match hook_name:
+        "PermissionRequest": [observer_event(session, generation, op, seq, at_ms, ObserverEventKind.StructuredApproval, "Claude permission request")]
+        "PreToolUse": [observer_event(session, generation, op, seq, at_ms, ObserverEventKind.ToolStart, "Claude tool start")]
+        "PostToolUse": [observer_event(session, generation, op, seq, at_ms, ObserverEventKind.ToolEnd, "Claude tool end")]
+        "PostToolUseFailure": [observer_event(session, generation, op, seq, at_ms, ObserverEventKind.ToolEnd, "Claude tool failed")]
+        "SubagentStart": [observer_event(session, generation, op, seq, at_ms, ObserverEventKind.ChildStarted, "Claude subagent start")]
+        "SubagentStop": [observer_event(session, generation, op, seq, at_ms, ObserverEventKind.ChildFinished, "Claude subagent stop")]
+        _: []
+
+# Codex `turn/waiting_input` is mapped to an approval, as hook_bridge.spl does
+# (progress_kind "approval"); the notification does not distinguish a question.
+fn codex_notification_events(session: text, generation: i64, op: text, seq: i64, at_ms: i64, event_name: text) -> [ObserverEvent]:
+    match event_name:
+        "turn/waiting_input": [observer_event(session, generation, op, seq, at_ms, ObserverEventKind.StructuredApproval, "Codex waiting for input")]
+        _: []
+
+fn provider_events(provider: text, session: text, generation: i64, op: text, seq: i64, at_ms: i64, event_name: text) -> [ObserverEvent]:
+    if provider == "claude":
+        return claude_hook_events(session, generation, op, seq, at_ms, event_name)
+    if provider == "codex":
+        return codex_notification_events(session, generation, op, seq, at_ms, event_name)
+    []
+
+export claude_hook_events, codex_notification_events, provider_events
