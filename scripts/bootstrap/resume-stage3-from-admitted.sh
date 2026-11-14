@@ -986,7 +986,7 @@ if [ "$stage3_lowering_lane" = per-file ]; then
   stage3_per_file_lane="$stage3_per_file_lane:gte=$stage3_go_to_end"
   stage3_mir_shard_count=${SIMPLE_MIR_SHARD_COUNT:-${SIMPLE_BOOTSTRAP_STAGE3_MIR_SHARD_COUNT:-9}}
   case "$stage3_mir_shard_count" in
-    ''|*[!0-9]*|0*) stage3_mir_shard_count= ;;
+    ''|*[!0-9]*|0*|????*) stage3_mir_shard_count= ;;
   esac
   if [ -z "$stage3_mir_shard_count" ] || [ "$stage3_mir_shard_count" -gt 128 ]; then
     echo "error: Stage 3 MIR shard count must be an integer 1..128 (SIMPLE_MIR_SHARD_COUNT or SIMPLE_BOOTSTRAP_STAGE3_MIR_SHARD_COUNT)" >&2
