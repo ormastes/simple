@@ -1138,3 +1138,39 @@ turns green in the same change, or the check FAILs as stale.
 - Measured: catalog `animation` 12.23% -> 7.36%; `forms-media` 6.38% unchanged;
   combo matrix unchanged (463 baselined ids, 0 new, 0 stale).
 - Residues: `doc/08_tracking/bug/web_replaced_media_residues_vs_chrome_159_2026-11-14.md`.
+
+## 2026-11-14 — svg viewBox / percentage / em sizing, self-closing foreign elements
+
+- A valid `viewBox` gives an `<svg>` a ratio and NO size: one specified axis
+  derives the other on the content box; with both auto the width is the
+  available width (`viewBox="0 0 200 50"` in 900 px -> 900x225). Owners:
+  `replaced_auto_box_w/h`, `svg_view_box_milli` (shared with the painter).
+- **Inline percentage trap:** `layout_with_style` receives the predicted pen
+  width for an inline child, so a percentage width must be resolved at the
+  inline-run site (`inline_media` in `layout_engine.spl`), not inside it.
+  A percentage height against an auto-height container computes to auto.
+- `width`/`height` in `em` went through `parse_int` (`height:1em` = 1 px);
+  they now use `_decl_font_relative_length_px` in BOTH declaration paths
+  (`decl_apply.spl` and the dispatch fast path in `declarations.spl`).
+- `html_tree_builder` honours the tokenizer's `self_closing` flag only in
+  svg/math foreign content (`_TreeStack.in_foreign_content`); `<div/>` stays
+  open, as in Chrome.
+- **Ratio-only svg and shrink-to-fit:** it contributes 0 to min/max-content
+  (a specified height contributes `height x ratio`) and then fills the width
+  the container resolved to. `intrinsic_text_width` serves BOTH shrink-to-fit
+  and a span's pen prediction, so a span holding such an svg takes the line's
+  available width instead (`inline_box_holds_ratio_only_svg`). A floated or
+  absolute replaced box is not shrink-to-fit: size it with
+  `replaced_auto_box_w` against the available width.
+- **1 px box floor:** an empty inline-block is 1x1 here, 0x0 in Chrome; 0-wide
+  oracle rows are asserted as `<= Chrome + 1`. `display:inline-flex` is
+  dropped by the cascade as unsupported (the box stays a full-width block);
+  `Style.display_inline_flex_authored` records it so an unsized svg there
+  keeps the 300x150 default instead of filling the row. A flag set in
+  `apply_authored_style_metadata` only sees INLINE styles: stylesheet rules
+  are applied without display, so set display-derived flags beside
+  `_final_authored_display` in `core.spl`.
+- Still open: residues 6-11 (9: a rule `em` is resolved before an inline
+  `font-size`; 11: the 1 px floor, inline-flex, percentage width in a
+  shrink-to-fit container) in
+  `doc/08_tracking/bug/web_replaced_media_residues_vs_chrome_159_2026-11-14.md`.

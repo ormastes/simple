@@ -17,6 +17,7 @@ use std.common.encoding.utf8.{text_codepoints}
 use std.nogc_sync_mut.text_layout.font_provider.{browser_font_family_category}
 use std.nogc_sync_mut.text_layout.font_renderer.{resolve_font_metrics_with_language}
 use std.nogc_sync_mut.text_layout.font_provider.{browser_font_family_for_style}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{svg_view_box_milli}
 
 pub val SIMPLE_WEB_SUMMARY_MARKER_INLINE_WIDTH: i32 = 16
 
@@ -904,29 +905,71 @@ fn replaced_default_is_content_size(tag: text) -> bool:
     """
     tag != "audio" and replaced_default_box_w(tag) > 0
 
-fn replaced_auto_box_w(node: HNode, st: Style) -> i32:
-    """BORDER-BOX width of a replaced element whose CSS width is auto: the
-    `width` attribute, else the UA default (plus the element's own horizontal
-    padding and border when that default is a content size). Shared by the
-    final box and the inline pen prediction so they cannot disagree."""
+fn replaced_specified_box_h(st: Style) -> i32:
+    """BORDER-BOX height CSS gave a replaced element (the `height` attribute
+    arrives as CSS through `presentational_attr_decls`), or 0 when the height
+    is auto -- which includes a percentage the caller could not resolve."""
+    if st.height_px <= 0:
+        return 0
+    if st.border_box:
+        return st.height_px
+    st.height_px + st.pad_t + st.pad_b + st.border_t + st.border_b
+
+fn replaced_auto_box_w(node: HNode, st: Style, available_w: i32) -> i32:
+    """BORDER-BOX width of a replaced element whose CSS width is auto. Shared
+    by the final box and the inline pen prediction so they cannot disagree.
+
+    An `<svg>` with a valid viewBox has a ratio and no size (Chrome 159): a
+    specified height derives the width on the CONTENT box (`viewBox="0 0 24
+    24" style="height:1em"` is 16x16), and with the height auto too the width
+    is the available width (`viewBox="0 0 200 50"` in 900 px is 900x225).
+    Everything else: the `width` attribute, else the UA default, plus the
+    element's own horizontal padding and border when that default is a
+    content size.
+    """
     val attr_w = parse_int(attr_value(node.attrs_raw, "width"))
-    if attr_w > 0:
+    if attr_w > 0 and not attr_value(node.attrs_raw, "width").trim().ends_with("%"):
         return attr_w
+    val inset_x = st.pad_l + st.pad_r + st.border_l + st.border_r
+    if node.tag == "svg":
+        val view_box = svg_view_box_milli(node.attrs_raw)
+        if view_box.len() == 4:
+            val box_h = replaced_specified_box_h(st)
+            if box_h > 0:
+                var content_h = box_h - st.pad_t - st.pad_b - st.border_t - st.border_b
+                if content_h < 0:
+                    content_h = 0
+                return ((content_h.to_i64() * view_box[2] + view_box[3] / 2) / view_box[3]).to_i32() + inset_x
+            # Ratio only: fill the available width, even when a shrink-to-fit
+            # container resolved it to 0 (Chrome 159: 0x0 in an empty
+            # inline-block, button, float or abspos box).
+            if available_w > inset_x:
+                return available_w
+            return inset_x
     val default_w = replaced_default_box_w(node.tag)
     if replaced_default_is_content_size(node.tag):
-        return default_w + st.pad_l + st.pad_r + st.border_l + st.border_r
+        return default_w + inset_x
     default_w
 
-fn replaced_auto_box_h(node: HNode, st: Style) -> i32:
-    """BORDER-BOX height of a replaced element whose CSS height is auto; the
-    height twin of `replaced_auto_box_w`. There is no ratio scaling: Chrome
-    159 gives `<video width=120>` 120x150 and `<video height=50>` 300x50."""
+fn replaced_auto_box_h(node: HNode, st: Style, box_w: i32) -> i32:
+    """BORDER-BOX height of a replaced element whose CSS height is auto, given
+    its used border-box width; the height twin of `replaced_auto_box_w`. An
+    `<svg>` with a valid viewBox follows its ratio from the content width;
+    nothing else scales (Chrome 159: `<video width=120>` is 120x150)."""
     val attr_h = parse_int(attr_value(node.attrs_raw, "height"))
-    if attr_h > 0:
+    if attr_h > 0 and not attr_value(node.attrs_raw, "height").trim().ends_with("%"):
         return attr_h
+    val inset_y = st.pad_t + st.pad_b + st.border_t + st.border_b
+    if node.tag == "svg":
+        val view_box = svg_view_box_milli(node.attrs_raw)
+        if view_box.len() == 4:
+            var content_w = box_w - st.pad_l - st.pad_r - st.border_l - st.border_r
+            if content_w < 0:
+                content_w = 0
+            return ((content_w.to_i64() * view_box[3] + view_box[2] / 2) / view_box[2]).to_i32() + inset_y
     val default_h = replaced_default_box_h(node.tag)
     if replaced_default_is_content_size(node.tag):
-        return default_h + st.pad_t + st.pad_b + st.border_t + st.border_b
+        return default_h + inset_y
     default_h
 
 
@@ -1149,9 +1192,35 @@ fn inline_replaced_predicted_width(node: HNode, st: Style) -> i32:
     if st.width_px < 0:
         return 0
     val attr_w = parse_int(attr_value(node.attrs_raw, "width"))
+    if attr_w <= 0 and node.tag == "svg" and svg_view_box_milli(node.attrs_raw).len() == 4:
+        # An svg with a ratio and no width contributes its height-derived
+        # width, or nothing: `replaced_auto_box_w` with no available width.
+        return constrained_outer_width(node, st, replaced_auto_box_w(node, st, 0))
     constrained_outer_width(
         node, st, if attr_w > 0: attr_w else: replaced_default_box_w(node.tag)
     )
+
+# True when an inline box holds, through inline boxes only, an `<svg>` that has
+# a viewBox ratio and no size. Such an svg fills the line's available width
+# (Chrome 159: `<span>a<svg viewBox="0 0 24 24"></svg>b</span>` in 900 px is a
+# 900x900 svg), so the span's pen prediction cannot be its intrinsic width,
+# to which the svg contributes 0.
+fn inline_box_holds_ratio_only_svg(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32) -> bool:
+    var c = child_index.first_child[i]
+    while c >= 0:
+        if styles[c].display == "inline":
+            if nodes[c].tag == "svg":
+                if (
+                    styles[c].width_px == 0 and
+                    parse_int(attr_value(nodes[c].attrs_raw, "width")) <= 0 and
+                    replaced_specified_box_h(styles[c]) == 0 and
+                    svg_view_box_milli(nodes[c].attrs_raw).len() == 4
+                ):
+                    return true
+            elif nodes[c].tag != "#text" and inline_box_holds_ratio_only_svg(nodes, styles, child_index, c):
+                return true
+        c = child_index.next_sibling[c]
+    false
 
 fn _lay_intrinsic_text_width_inner(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, widths: [i32]) -> IntrinsicWidthResult:
     if widths[i] >= 0:
@@ -2186,6 +2255,10 @@ fn absolute_outer_width(nodes: [HNode], styles: [Style], child_index: HtmlChildI
         available = available - st.right_px
     if st.left_px > 0:
         available = available - st.left_px
+    if replaced_default_box_w(node.tag) > 0:
+        # 10.3.8: a replaced box is not shrink-to-fit. Chrome 159: an
+        # absolute viewBox-only svg in a 500 px containing block is 500x500.
+        return constrained_outer_width(node, st, replaced_auto_box_w(node, st, available))
     var shrink_to_fit = flex_item_max_content_width(nodes, styles, child_index, node_i)
     if shrink_to_fit > available:
         shrink_to_fit = available
