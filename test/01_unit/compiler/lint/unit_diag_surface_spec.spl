@@ -1,0 +1,92 @@
+"""
+## Purpose and audience
+Executable spec that unit-type diagnostics reach a lint user: the parser-recorded
+SPL-UNIT-001 (`newunit`) and SPL-UNIT-003 (numeric `newtype`) warnings and the
+registry-detected SPL-UNIT-004 suffix collision, for lint maintainers.
+## Operator workflow
+Run: bin/simple test test/01_unit/compiler/lint/unit_diag_surface_spec.spl
+## Compatibility and limitations
+Warnings never become errors; SPL-UNIT-004 is an error. Line numbers of
+SPL-UNIT-004 are 1 (the registry records no site).
+## Verification guidance and troubleshooting
+A failure names which code was missing, duplicated, or at the wrong level.
+"""
+# @feature: unit-diag-surface
+# @manual_section: unit-diag-surface
+
+use std.spec.*
+use compiler.tools.lint.main.{Linter, LintLevel, lint_cli_source}
+
+fn _count(source: text, path: text, code: text) -> i64:
+    val linter = Linter.new()
+    var n = 0
+    for r in lint_cli_source(linter, path, source):
+        if r.lint.code == code:
+            n = n + 1
+    n
+
+fn _first(source: text, path: text, code: text) -> text:
+    val linter = Linter.new()
+    for r in lint_cli_source(linter, path, source):
+        if r.lint.code == code:
+            return r.lint.message
+    ""
+
+fn _level_is_warn(source: text, path: text, code: text) -> bool:
+    val linter = Linter.new()
+    for r in lint_cli_source(linter, path, source):
+        if r.lint.code == code:
+            return r.lint.level == LintLevel.Warn
+    false
+
+fn _level_is_deny(source: text, path: text, code: text) -> bool:
+    val linter = Linter.new()
+    for r in lint_cli_source(linter, path, source):
+        if r.lint.code == code:
+            return r.lint.level == LintLevel.Deny
+    false
+
+describe "unit diagnostics surface through lint":
+    it "newunit yields one SPL-UNIT-001 warning":
+        # @req REQ-UNIT-DIAG-001
+        step("lint a file with one newunit")
+        val src = "newunit Meters: i64 as m\n"
+        expect(_count(src, "/tmp/unit_diag_nu.spl", "SPL-UNIT-001")).to_equal(1)
+        assert_true(_level_is_warn(src, "/tmp/unit_diag_nu.spl", "SPL-UNIT-001"))
+        assert_true(_first(src, "/tmp/unit_diag_nu.spl", "SPL-UNIT-001").contains("newunit"))
+
+    it "numeric newtype yields one SPL-UNIT-003 warning":
+        # @req REQ-UNIT-DIAG-001
+        step("lint a file with one numeric newtype")
+        val src = "newtype Count = i64\n"
+        expect(_count(src, "/tmp/unit_diag_nt.spl", "SPL-UNIT-003")).to_equal(1)
+        assert_true(_level_is_warn(src, "/tmp/unit_diag_nt.spl", "SPL-UNIT-003"))
+
+    it "canonical unit declarations produce no unit diagnostics":
+        # @req REQ-UNIT-DIAG-001
+        step("lint a file using only the unit keyword")
+        val src = "unit ByteCount: u64 as Bc\nunit BitCount: u64 as bc\n"
+        expect(_count(src, "/tmp/unit_diag_ok.spl", "SPL-UNIT-001")).to_equal(0)
+        expect(_count(src, "/tmp/unit_diag_ok.spl", "SPL-UNIT-003")).to_equal(0)
+        expect(_count(src, "/tmp/unit_diag_ok.spl", "SPL-UNIT-004")).to_equal(0)
+
+    it "two units sharing a suffix yield one SPL-UNIT-004 error naming both":
+        # @req REQ-UNIT-DIAG-002
+        step("lint a file whose units share the suffix x")
+        val src = "unit Alpha: u64 as x\nunit Beta: u64 as x\n"
+        expect(_count(src, "/tmp/unit_diag_col.spl", "SPL-UNIT-004")).to_equal(1)
+        assert_true(_level_is_deny(src, "/tmp/unit_diag_col.spl", "SPL-UNIT-004"))
+        val msg = _first(src, "/tmp/unit_diag_col.spl", "SPL-UNIT-004")
+        assert_true(msg.contains("Alpha"))
+        assert_true(msg.contains("Beta"))
+
+    it "a collision in one file does not leak into the next file":
+        # @req REQ-UNIT-DIAG-002
+        step("lint a colliding file, then a clean one with the same suffix")
+        val linter = Linter.new()
+        lint_cli_source(linter, "/tmp/unit_diag_a.spl", "unit Alpha: u64 as x\nunit Beta: u64 as x\n")
+        var n = 0
+        for r in lint_cli_source(linter, "/tmp/unit_diag_b.spl", "unit Gamma: u64 as y\n"):
+            if r.lint.code == "SPL-UNIT-004":
+                n = n + 1
+        expect(n).to_equal(0)
