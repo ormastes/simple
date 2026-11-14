@@ -55,17 +55,24 @@ pub fn xray_llvm_link_objects_v1(objects: [text], enabled: bool, backend: text,
     val compiler = find_c_compiler()
     if compiler.len() == 0:
         return Err("XRAY-E-LLVM-CC: no hosted Clang compiler")
+    xray_llvm_materialize_runtime_v1(objects, target, compiler,
+        "src/runtime/xray/xray_llvm_adapter_linux.c", "build/xray")
+
+# Internal effectful executor; callers must first resolve policy and compiler.
+# Keeping explicit inputs permits native integration tests without a second
+# compiler discovery implementation or a simulated process provider.
+fn xray_llvm_materialize_runtime_v1(objects: [text], target: text, compiler: text,
+        source: text, output_root: text) -> Result<[text], text>:
     val (archive_out, archive_error, archive_code) = process_run_timeout(
         compiler, xray_llvm_runtime_query_args_v1(target), 10000)
     val archive = archive_out.trim()
     if archive_code != 0 or not xray_llvm_runtime_archive_path_valid_v1(archive) or not is_file(archive):
         return Err("XRAY-E-LLVM-RUNTIME: matching compiler-rt archive unavailable: {archive_error}")
-    val source = "src/runtime/xray/xray_llvm_adapter_linux.c"
     if not is_file(source):
         return Err("XRAY-E-LLVM-SOURCE: {source} not found")
-    if not dir_create_all("build/xray"):
+    if not dir_create_all(output_root):
         return Err("XRAY-E-LLVM-OUTPUT: cannot create runtime output root")
-    val directory = secure_temp_dir_raw("build/xray", "llvm-runtime")
+    val directory = secure_temp_dir_raw(output_root, "llvm-runtime")
     if directory.len() <= 0:
         return Err("XRAY-E-LLVM-OUTPUT: cannot create private runtime directory")
     val adapter = "{directory}/adapter.o"
