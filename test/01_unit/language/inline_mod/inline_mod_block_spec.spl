@@ -1,0 +1,284 @@
+# @tag: unit, language, interpreter, enum, module
+# Bugs: `mod X:` residuals of
+# doc/08_tracking/bug/match_on_callable_scrutinee_silently_takes_first_arm_2026-11-14.md
+#
+# 1. A `mod X:` block was bound only in the module-level env, so a function
+#    body naming `X` failed with "variable `X` not found".
+# 2. `X.Pay(3)` (a payload variant of an enum declared in the block) failed
+#    with "method `Pay` not found on type `dict`".
+# 3. `X.Kind` (the enum type itself) was missing from the block.
+#
+# Each case runs a fixture through the compiler binary (`SIMPLE_BINARY` or
+# `bin/simple`) in interpreter mode, because the failure is a process exit.
+use std.spec
+use std.io_runtime.{process_run, file_write, dir_create_all, env_get, env_set}
+
+fn work_dir() -> text:
+    val tmp = env_get("TMPDIR")
+    val root = if tmp != "": tmp else: "/tmp"
+    val dir = root + "/simple-spec-inline-mod-block"
+    dir_create_all(dir)
+    dir
+
+fn run_interp(name: text, source: text) -> (text, text, i64):
+    val path = work_dir() + "/" + name + ".spl"
+    assert_true(file_write(path, source))
+    val ran = run_path(path)
+    (ran[0].trim(), ran[1], ran[2])
+
+fn run_path(path: text) -> (text, text, i64):
+    env_set("SIMPLE_EXECUTION_MODE", "interpret")
+    env_set("SIMPLE_RUST_SEED_WARNING", "0")
+    env_set("SIMPLE_TIMEOUT_SECONDS", "0")
+    val configured = env_get("SIMPLE_BINARY")
+    val bin = if configured == "": "bin/simple" else: configured
+    process_run(bin, ["run", path])
+
+describe "a mod block named from a function body":
+    it "is visible in a function declared after it":
+        val (out, err, rc) = run_interp("fn_after", """mod X:
+    enum Kind:
+        I8
+        F32
+        Pay(v: i64)
+    const LIMIT = 9
+    fn twice(n: i64) -> i64:
+        n * 2
+
+fn main():
+    print(X.F32)
+    print(X.LIMIT)
+    print(X.twice(4))
+    print(X.F32 == X.F32)
+
+main()
+""")
+        assert_equal(rc, 0)
+        assert_equal(out, "Kind::F32\n9\n8\ntrue")
+
+    it "is visible in a function declared before it":
+        val (out, err, rc) = run_interp("fn_before", """fn show():
+    print(X.F32)
+    print(X.twice(4))
+
+mod X:
+    enum Kind:
+        I8
+        F32
+    fn twice(n: i64) -> i64:
+        n * 2
+
+show()
+""")
+        assert_equal(rc, 0)
+        assert_equal(out, "Kind::F32\n8")
+
+    it "lets a function inside the block reach its siblings through the block name":
+        val (out, err, rc) = run_interp("fn_inside", """val TOP = 5
+
+mod X:
+    enum Kind:
+        I8
+        F32
+    const LIMIT = 9
+    fn twice(n: i64) -> i64:
+        n * 2
+    fn four() -> i64:
+        X.twice(2)
+    fn lim() -> i64:
+        X.LIMIT + TOP
+    fn pick() -> Kind:
+        Kind.F32
+
+print(X.four())
+print(X.lim())
+print(X.pick())
+""")
+        assert_equal(rc, 0)
+        assert_equal(out, "4\n14\nKind::F32")
+
+describe "a payload variant of an enum declared in a mod block":
+    it "is callable through the block":
+        val (out, err, rc) = run_interp("pay_call", """mod X:
+    enum Kind:
+        I8
+        Pay(v: i64)
+        Pair(a: i64, b: i64)
+
+fn code(k) -> i64:
+    match k:
+        case I8: 0
+        case Pay(v): v
+        case Pair(a, b): a * 10 + b
+
+fn main():
+    val p = X.Pay(3)
+    print(p)
+    print(code(p))
+    print(code(X.Pair(1, 2)))
+    print(code(X.I8))
+    print(X.Pay(3) == X.Pay(3))
+    print(X.Pay(3) == X.Pay(4))
+
+main()
+""")
+        assert_equal(rc, 0)
+        assert_equal(out, "Kind::Pay(3)\n3\n12\n0\ntrue\nfalse")
+
+    it "refuses a wrong payload count like a top-level enum does":
+        val (out, err, rc) = run_interp("pay_arity", """mod X:
+    enum Kind:
+        I8
+        Pay(v: i64)
+
+val p = X.Pay()
+print(p)
+""")
+        assert_true(rc != 0)
+        assert_true(err.contains("enum construction `Kind.Pay`: payload arity mismatch: expected 1, got 0"))
+        val (out2, err2, rc2) = run_interp("pay_arity_two", """mod X:
+    enum Kind:
+        I8
+        Pay(v: i64)
+
+val p = X.Pay(1, 2)
+print(p)
+""")
+        assert_true(rc2 != 0)
+        assert_true(err2.contains("payload arity mismatch: expected 1, got 2"))
+
+describe "the enum type of a mod block":
+    it "is a member of the block and gives the same values":
+        val (out, err, rc) = run_interp("enum_type", """mod X:
+    enum Kind:
+        I8
+        F32
+        Pay(v: i64)
+
+print(X.Kind)
+print(X.Kind.F32)
+print(X.Kind.F32 == X.F32)
+print(X.Kind.Pay(3) == X.Pay(3))
+print(X.Kind.I8 == X.F32)
+""")
+        assert_equal(rc, 0)
+        assert_equal(out, "<enum:Kind>\nKind::F32\ntrue\ntrue\nfalse")
+
+describe "what the mod block fixes leave alone":
+    it "does not leak block members into the enclosing file":
+        val (out, err, rc) = run_interp("no_leak_fn", """mod X:
+    fn twice(n: i64) -> i64:
+        n * 2
+
+print(twice(4))
+""")
+        assert_true(rc != 0)
+        assert_true(err.contains("function `twice` not found"))
+        val (out2, err2, rc2) = run_interp("no_leak_const", """mod X:
+    const LIMIT = 9
+
+print(LIMIT)
+""")
+        assert_true(rc2 != 0)
+        assert_true(err2.contains("variable `LIMIT` not found"))
+
+    it "still reports an unknown block member":
+        val (out, err, rc) = run_interp("unknown_member", """mod X:
+    enum Kind:
+        I8
+
+fn main():
+    print(X.Nope(1))
+
+main()
+""")
+        assert_true(rc != 0)
+        assert_true(err.contains("Nope"))
+
+    it "keeps top-level enums and unapplied payload variants as they were":
+        val (out, err, rc) = run_interp("top_level", """enum Kind:
+    I8
+    Pay(v: i64)
+
+mod X:
+    const LIMIT = 9
+
+fn main():
+    print(Kind.I8)
+    print(Kind.Pay(3))
+    print(Kind.Pay)
+
+main()
+print(X.LIMIT)
+""")
+        assert_equal(rc, 0)
+        assert_equal(out, "Kind::I8\nKind::Pay(3)\n<enum_variant_constructor>\n9")
+
+    it "keeps each imported file's own block when two files name it the same":
+        val dir = work_dir() + "/twolibs"
+        dir_create_all(dir)
+        assert_true(file_write(dir + "/liba.spl", """mod Util:
+    const V = 1
+
+fn a_v() -> i64:
+    Util.V
+"""))
+        assert_true(file_write(dir + "/libb.spl", """mod Util:
+    const V = 2
+
+fn b_v() -> i64:
+    Util.V
+"""))
+        assert_true(file_write(dir + "/main.spl", """use liba.{a_v}
+use libb.{b_v}
+
+print(a_v())
+print(b_v())
+"""))
+        val ran = run_path(dir + "/main.spl")
+        assert_equal(ran[2], 0)
+        assert_equal(ran[0].trim(), "1\n2")
+
+    it "keeps a variant of an earlier enum that is spelled like a later enum":
+        val (out, err, rc) = run_interp("variant_named_like_enum", """mod X:
+    enum A:
+        Kind
+        Other
+    enum Kind:
+        P
+        Q
+
+print(X.Kind)
+print(X.Kind == X.Kind)
+print(X.P)
+""")
+        assert_equal(rc, 0)
+        assert_equal(out, "A::Kind\ntrue\nKind::P")
+
+    it "keeps a file-level module's enum and functions as they were":
+        val dir = work_dir() + "/filemod"
+        dir_create_all(dir)
+        assert_true(file_write(dir + "/shapes_lib.spl", """enum Shape:
+    Dot
+    Circle(r: i64)
+
+mod Inner:
+    const LIMIT = 9
+
+fn area(s: Shape) -> i64:
+    match s:
+        case Dot: 0
+        case Circle(r): r * r
+
+fn inner_limit() -> i64:
+    Inner.LIMIT
+"""))
+        assert_true(file_write(dir + "/main.spl", """use shapes_lib.{Shape, area, inner_limit}
+
+print(area(Shape.Circle(3)))
+print(area(Shape.Dot))
+print(inner_limit())
+"""))
+        val ran = run_path(dir + "/main.spl")
+        assert_equal(ran[2], 0)
+        assert_equal(ran[0].trim(), "9\n0\n9")
