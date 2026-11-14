@@ -54,7 +54,126 @@ var aspect_registry_readonly: Dict<text, bool> = {}
 var aspect_registry_noalloc: Dict<text, bool> = {}
 var aspect_registry_bounded_time: Dict<text, bool> = {}
 
+# Ordered source declarations are separate from the effective last-wins map.
+# Only the actual parser appends; replaying __advice_decl updates the old map.
+pub struct AspectDeclarationRowV2:
+    path: text
+    handler: text
+    kind: text
+    selector: text
+    mode: text
+    readonly: bool
+    noalloc: bool
+    bounded_time: bool
+    family_inventory_index: i64
+
+pub struct AspectDeclarationInventoryV2:
+    rows: [AspectDeclarationRowV2]
+    advice_family_complete: bool
+
+struct AspectDeclarationPathStateV2:
+    count: i64
+    bytes: i64
+    status: i64  # 0 pending; 1 successful full parse; 2 incomplete/failed
+
+var aspect_declaration_rows_v2: [AspectDeclarationRowV2] = []
+var aspect_declaration_paths_v2: Dict<text, AspectDeclarationPathStateV2> = {}
+var aspect_declaration_bytes_v2: i64 = 0
+var aspect_declaration_active_path_v2: text = ""
+var aspect_declaration_has_active_path_v2: bool = false
+var aspect_declaration_overflow_v2: bool = false
+
+fn _aspect_declaration_reset_v2():
+    aspect_declaration_rows_v2 = []
+    aspect_declaration_paths_v2 = {}
+    aspect_declaration_bytes_v2 = 0
+    aspect_declaration_active_path_v2 = ""
+    aspect_declaration_has_active_path_v2 = false
+    aspect_declaration_overflow_v2 = false
+
+fn _aspect_declaration_begin_v2(path: text):
+    # Exact typed equality: a path containing '|' is not a synthetic claim key.
+    var kept: [AspectDeclarationRowV2] = []
+    var paths: Dict<text, AspectDeclarationPathStateV2> = {}
+    var bytes = 0
+    for row in aspect_declaration_rows_v2:
+        if row.path != path: kept.push(row)
+    for old_path in aspect_declaration_paths_v2.keys():
+        if old_path == path: continue
+        val state = aspect_declaration_paths_v2[old_path]
+        paths[old_path] = state
+        bytes = bytes + state.bytes + old_path.byte_len()
+    aspect_declaration_rows_v2 = kept
+    aspect_declaration_paths_v2 = paths
+    aspect_declaration_bytes_v2 = bytes
+    aspect_declaration_has_active_path_v2 = false
+    aspect_declaration_active_path_v2 = ""
+    if path == "" or path.byte_len() > 4096 or paths.len() >= 1024 or bytes + path.byte_len() > 4194304:
+        aspect_declaration_overflow_v2 = true
+        return
+    aspect_declaration_paths_v2[path] = AspectDeclarationPathStateV2(count: 0, bytes: 0, status: 0)
+    aspect_declaration_bytes_v2 = bytes + path.byte_len()
+    aspect_declaration_active_path_v2 = path
+    aspect_declaration_has_active_path_v2 = true
+
+pub fn aspect_registry_record_parser_declaration_v2(handler: text, kind: text, selector: text,
+        mode: text, readonly: bool, noalloc: bool, bounded_time: bool):
+    if not aspect_declaration_has_active_path_v2 or aspect_declaration_overflow_v2: return
+    val path = aspect_declaration_active_path_v2
+    if not aspect_declaration_paths_v2.has(path):
+        aspect_declaration_overflow_v2 = true
+        return
+    var state = aspect_declaration_paths_v2[path]
+    if state.status != 0:
+        state.status = 2
+        aspect_declaration_paths_v2[path] = state
+        return
+    val effective_mode = if mode == "": ASPECT_MODE_DEFAULT else: mode
+    var bytes = 32
+    for value in [path, handler, kind, selector, effective_mode]:
+        if value.byte_len() > 262144 - bytes:
+            state.status = 2
+            aspect_declaration_paths_v2[path] = state
+            return
+        bytes = bytes + value.byte_len()
+    if state.count >= 256 or bytes > 262144 - state.bytes:
+        state.status = 2
+        aspect_declaration_paths_v2[path] = state
+        return
+    if aspect_declaration_rows_v2.len() >= 4096 or bytes > 4194304 - aspect_declaration_bytes_v2:
+        aspect_declaration_overflow_v2 = true
+        state.status = 2
+        aspect_declaration_paths_v2[path] = state
+        return
+    aspect_declaration_rows_v2.push(AspectDeclarationRowV2(path: path, handler: handler,
+        kind: kind, selector: selector, mode: effective_mode, readonly: readonly,
+        noalloc: noalloc, bounded_time: bounded_time, family_inventory_index: state.count))
+    state.count = state.count + 1
+    state.bytes = state.bytes + bytes
+    aspect_declaration_paths_v2[path] = state
+    aspect_declaration_bytes_v2 = aspect_declaration_bytes_v2 + bytes
+
+# Trusted full-parse owner calls only after checking successful fresh parse.
+# Failure is sticky for this parse; reset_module begins a new parse attempt.
+pub fn aspect_registry_seal_parser_inventory_v2(path: text, parse_succeeded: bool) -> bool:
+    if not aspect_declaration_has_active_path_v2 or path != aspect_declaration_active_path_v2 or
+            not aspect_declaration_paths_v2.has(path) or aspect_declaration_overflow_v2: return false
+    var state = aspect_declaration_paths_v2[path]
+    if not parse_succeeded: state.status = 2
+    elif state.status == 0: state.status = 1
+    aspect_declaration_paths_v2[path] = state
+    state.status == 1
+
+pub fn aspect_registry_parser_inventory_v2(path: text) -> AspectDeclarationInventoryV2:
+    var rows: [AspectDeclarationRowV2] = []
+    for row in aspect_declaration_rows_v2:
+        if row.path == path: rows.push(row)
+    val complete = not aspect_declaration_overflow_v2 and aspect_declaration_paths_v2.has(path) and
+        aspect_declaration_paths_v2[path].status == 1
+    AspectDeclarationInventoryV2(rows: rows, advice_family_complete: complete)
+
 fn aspect_registry_reset():
+    _aspect_declaration_reset_v2()
     aspect_registry_fns = []
     aspect_registry_kinds = {}
     aspect_registry_selectors = {}
@@ -73,6 +192,7 @@ fn aspect_registry_reset():
 # LAST-parsed module's advice to check and every earlier module's obligations
 # would go unproven while still reporting green.
 fn aspect_registry_reset_module(path: text):
+    _aspect_declaration_begin_v2(path)
     val prefix = path + "|"
     var kept: [text] = []
     var kept_kinds: Dict<text, text> = {}
@@ -113,7 +233,11 @@ fn aspect_registry_promote_transient_owner() -> bool:
     val readonly_ok = _aspect_registry_promote_raw(aspect_registry_readonly)
     val noalloc_ok = _aspect_registry_promote_raw(aspect_registry_noalloc)
     val bounded_ok = _aspect_registry_promote_raw(aspect_registry_bounded_time)
-    fns_ok and kinds_ok and selectors_ok and modes_ok and readonly_ok and noalloc_ok and bounded_ok
+    val declaration_rows_ok = _aspect_registry_promote_raw(aspect_declaration_rows_v2)
+    val declaration_paths_ok = _aspect_registry_promote_raw(aspect_declaration_paths_v2)
+    val declaration_path_ok = _aspect_registry_promote_raw(aspect_declaration_active_path_v2)
+    fns_ok and kinds_ok and selectors_ok and modes_ok and readonly_ok and noalloc_ok and bounded_ok and
+        declaration_rows_ok and declaration_paths_ok and declaration_path_ok
 
 fn aspect_claim_key(path: text, fn_name: text) -> text:
     path + "|" + fn_name
@@ -314,9 +438,17 @@ struct AspectRegistryOwnerSnapshotV1:
     readonly: Dict<text, bool>
     noalloc: Dict<text, bool>
     bounded_time: Dict<text, bool>
+    declaration_rows: [AspectDeclarationRowV2]
+    declaration_paths: Dict<text, AspectDeclarationPathStateV2>
+    declaration_bytes: i64
+    declaration_active_path: text
+    declaration_has_active_path: bool
+    declaration_overflow: bool
 
 fn aspect_registry_owner_snapshot_v1() -> AspectRegistryOwnerSnapshotV1:
-    AspectRegistryOwnerSnapshotV1(aspect_registry_fns, aspect_registry_kinds, aspect_registry_selectors, aspect_registry_modes, aspect_registry_readonly, aspect_registry_noalloc, aspect_registry_bounded_time)
+    AspectRegistryOwnerSnapshotV1(aspect_registry_fns, aspect_registry_kinds, aspect_registry_selectors, aspect_registry_modes, aspect_registry_readonly, aspect_registry_noalloc, aspect_registry_bounded_time,
+        aspect_declaration_rows_v2, aspect_declaration_paths_v2, aspect_declaration_bytes_v2,
+        aspect_declaration_active_path_v2, aspect_declaration_has_active_path_v2, aspect_declaration_overflow_v2)
 
 fn aspect_registry_owner_restore_v1(snapshot: AspectRegistryOwnerSnapshotV1):
     aspect_registry_fns = snapshot.fns
@@ -326,5 +458,11 @@ fn aspect_registry_owner_restore_v1(snapshot: AspectRegistryOwnerSnapshotV1):
     aspect_registry_readonly = snapshot.readonly
     aspect_registry_noalloc = snapshot.noalloc
     aspect_registry_bounded_time = snapshot.bounded_time
+    aspect_declaration_rows_v2 = snapshot.declaration_rows
+    aspect_declaration_paths_v2 = snapshot.declaration_paths
+    aspect_declaration_bytes_v2 = snapshot.declaration_bytes
+    aspect_declaration_active_path_v2 = snapshot.declaration_active_path
+    aspect_declaration_has_active_path_v2 = snapshot.declaration_has_active_path
+    aspect_declaration_overflow_v2 = snapshot.declaration_overflow
 
 export AspectRegistryOwnerSnapshotV1, aspect_registry_owner_snapshot_v1, aspect_registry_owner_restore_v1
