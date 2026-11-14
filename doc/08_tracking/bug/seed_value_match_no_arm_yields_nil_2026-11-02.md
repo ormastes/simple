@@ -99,3 +99,23 @@ The 2026-11-03 fix is verified executable at current release/1.0.0 source:
 Remaining acceptance: the full proposed rule (fail-closed on every lane
 regardless of SIMPLE_SAFETY_PROFILE, including implicit tails) still needs
 the strictness-tiers spec change before it becomes compiler behaviour.
+
+## Fix (2026-11-13) — implicit tail match of a non-void function fails closed
+
+Owner direction: the proposed rule above is the spec; the interpreter already fails
+closed for every exhausted `match` expression (`interpreter/expr/control.rs`). The
+seed now treats the implicit tail of a function with a declared non-void return
+(`fn pick(s: text) -> i64: match s: ...`) as value position:
+`module_lowering/function.rs` records the address of the body's last AST node when
+it is a `match` (`Node::Match` or `Node::Expression(Expr::Match)`), and
+`stmt_lowering.rs` lowers exactly that node with the exhaustion panic — for the
+`Node::Match` form by setting the empty final `else` of the arm chain to
+`rt_panic("invalid pattern: match expression exhausted without matching any pattern")`
+typed as the declared return (so tail-merge typing and implicit-return validation
+are unchanged). Unchanged: matches with an unguarded `case _`, statement matches
+that are not the tail, and functions without a declared return type or with
+`-> void`. Rust tests: `test_tail_match_without_wildcard_fails_closed`,
+`test_tail_match_with_wildcard_or_void_has_no_exhaustion_panic`
+(`hir/lower/tests/control_flow_tests.rs`). Needs a seed rebuild to verify, and —
+because seed-compiled bootstrap code that relied on a silent tail fall-through
+will now abort — a bootstrap Stage 1/2 run before landing.

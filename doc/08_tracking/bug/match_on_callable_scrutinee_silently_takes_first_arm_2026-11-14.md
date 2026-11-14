@@ -3,7 +3,10 @@
 - **ID:** match_on_callable_scrutinee_silently_takes_first_arm_2026-11-14
 - **Severity:** P2 (silent wrong value)
 - **Status:** fixed (seed interpreter); JIT enum-slot residual fixed
-  2026-11-14 (HIR + interpreter call boundary); JIT method-call arguments open
+  2026-11-14 (HIR + interpreter call boundary); nested sub-pattern and
+  `mod` unit-variant residuals fixed 2026-11-14; `mod X:` block residuals
+  (function-body visibility, `X.Pay(3)`, `X.Kind`) fixed 2026-11-14;
+  JIT method-call arguments open
 - **Found by:** PR #9002 (`e4300d7920b`), left open in
   `opencl_backend_contract_plug_notfound_and_enum_variant_class_shadow_2026-11-13.md`
 
@@ -64,8 +67,8 @@ Scope is deliberate:
 - An earlier arm that matches (`case _:`, a lowercase binder) still wins; the
   error fires only when a variant-shaped arm is reached. An arm with a real
   catch-all alternative (`case _ | I8:`, `case f | I8:`) still matches.
-- Nested sub-patterns are not checked (`case Wrap(I8):` with a callable
-  payload still binds); filed as a residual below.
+- Nested sub-patterns are checked since 2026-11-14 (see "Nested
+  sub-patterns and `mod` unit variants" below).
 - A capitalized arm over plain data (`case WS_OPCODE_TEXT:` on an `i64`)
   keeps binding, as pinned by `bare_case_ident_variant_pattern_spec`.
 - `case Some(f):` over a callable keeps the flat-Option binding.
@@ -88,11 +91,13 @@ Native-build: not measured; `SIMPLE_BOOTSTRAP=1 native-build` of the fixture hit
 
 ## Residuals (open)
 
-- Nested variant-spelled sub-patterns over a callable payload
-  (`case Wrap(I8):`) still bind silently; only the top-level arm is checked.
-- `mod X:` module dicts store unit variants as `EnumVariantConstructor`
+- ~~Nested variant-spelled sub-patterns over a callable payload
+  (`case Wrap(I8):`) still bind silently; only the top-level arm is checked.~~
+  Fixed 2026-11-14, see below.
+- ~~`mod X:` module dicts store unit variants as `EnumVariantConstructor`
   (`interpreter_eval.rs`, found by review). A match on such a value now
-  errors loudly instead of answering silently, but the encoding is wrong.
+  errors loudly instead of answering silently, but the encoding is wrong.~~
+  Fixed 2026-11-14, see below.
 
 - ~~JIT/HIR: a class constructor passed where an enum parameter is declared is
   not rejected at compile time; the match then takes `case _:` silently.~~
@@ -206,6 +211,137 @@ Open after this fix:
     interpreter state, so an earlier snippet's `fn code` answered. Fixed in the
     same change.
 
+## Nested sub-patterns and `mod` unit variants (residuals, fixed 2026-11-14)
+
+Measured on the base seed (`ff993c1134d`, aarch64, interpreter):
+
+| fixture | before | after |
+|---|---|---|
+| `name_of(Wrap.W(Vec4f))`, `case W(I8):` first | `i8`, rc 0 | error, rc 1 |
+| `name_of(Some(helper))`, `case Some(I8):` | `i8`, rc 0 | error, rc 1 |
+| `mod X: enum Kind: I8 F32`, `print(X.F32)` | `<enum_variant_constructor>` | `Kind::F32` |
+| `X.F32 == X.F32` | `false` | `true` |
+| `match X.F32: case I8 / case F32` | error (callable scrutinee) | `f32` |
+| controls: real `W(Kind.F32)`, `W(f)`, `W(I8 \| f)`, `W(I8) \| _`, `X.Pay`, `X.LIMIT`, `X.twice(4)` | correct | unchanged |
+
+Nested fix (`interpreter_patterns.rs`):
+
+- `match_arm_matches` enters an arm mode (thread-local, restored by a drop
+  guard, so it never leaks into `val`/`if val`/`for` destructuring, which
+  keep binding).
+- In arm mode, `pattern_matches` treats a variant-spelled identifier or a
+  non-`Some`/`None`/`Ok`/`Err` enum-variant node reached with a callable or
+  type value as a non-match and records it. The value shape is tested first,
+  so data values never read the thread-local.
+- If the whole arm then fails, `match_arm_matches` raises
+  `invalid pattern: match payload is a constructor value <constructor:Vec4f>,
+  not an enum value; sub-pattern `I8` can never match it`. An alternative that
+  does match (`W(I8 | f)`, `W(I8) | _`) still wins, as at the top level.
+
+`mod` fix (`interpreter_eval.rs`, `Node::ModDecl`): unit variants go into the
+module dict as `Value::Enum { payload: None }`; payload variants stay
+`EnumVariantConstructor`. Same rule as `Enum.Variant` in
+`interpreter/expr/calls.rs`.
+
+Census: every `*_spec.spl` whose path names enum/match/pattern/variant (414
+files) was run on the branch binary. No output contained the new
+sub-pattern refusal. The 89 files that were not green on the branch were
+re-run on the base binary, and per-file results matched exactly (89/89).
+Perf: an interleaved interpreter A/B of a 300k-iteration match loop took
+base 1.26/1.27/0.98 s and branch 1.13/1.15/0.99 s, so there is no regression.
+
+Seen while writing the fixtures; the first three were fixed 2026-11-14, see
+"`mod X:` block residuals" below:
+
+- ~~A `mod X:` dict is not visible inside function bodies (`fn main(): X.F32`
+  gives `variable X not found`). Only module-level code can use it.~~
+- ~~`X.Pay(3)` (calling a payload variant through the dict) fails with
+  `method Pay not found on type dict`.~~
+- ~~`X.Kind` is not in the dict.~~ A function inside `mod X:` cannot name a
+  sibling variant bare (`F32` gives `variable F32 not found`): not a `mod`
+  defect, see below.
+- `reject_callable_for_enum_param` still admits `EnumVariantConstructor`.
+  Not tightened, see below.
+
+## `mod X:` block residuals (fixed 2026-11-14)
+
+The language docs do not specify inline `mod X:` blocks (the only mention is
+the `namespace foo` → `mod foo:` row in `doc/07_guide/language/coding_style.md`),
+so each behaviour follows file-level modules.
+
+Measured on the base seed (`76f3263aa71`, aarch64, interpreter):
+
+| fixture | before | after |
+|---|---|---|
+| `fn main(): print(X.F32)`, `X.LIMIT`, `X.twice(4)` | `variable X not found` | `Kind::F32`, `9`, `8` |
+| same, function declared before the `mod` | `variable X not found` | works |
+| `mod X:` in an imported file, used by that file's function | `variable X not found` | works |
+| `X.Pay(3)` | `method Pay not found on type dict` | `Kind::Pay(3)`, matches `case Pay(v)` |
+| `X.Pay()` / `X.Pay(1, 2)` | `method Pay not found on type dict` | `payload arity mismatch`, same text as `Kind.Pay()` |
+| `X.Kind`, `X.Kind.F32 == X.F32`, `X.Kind.Pay(3) == X.Pay(3)` | `unknown property ... 'Kind' on Dict` | `<enum:Kind>`, `true`, `true` |
+| controls: top-level `Kind.Pay(3)` / `Kind.Pay`, bare `twice(4)` / `LIMIT` outside the block still refused, file-level module enum + fns | correct | unchanged |
+
+Fix:
+
+- `interpreter_eval.rs`, `Node::ModDecl`: the block's dict is also recorded
+  as a global of its declaring file (`record_flattened_global`, the same call
+  a top-level `val` makes), so function bodies resolve `X`. The enum type goes
+  into the dict under its name (`Value::EnumType`) only when that key is
+  free, so a variant of an earlier enum spelled `Kind` keeps its value.
+- `pipeline/module_loader.rs`, `strip_flattened_import_nodes`: a block
+  flattened in from an imported file gets that file as an owner attribute
+  (the one functions already carry). Without it two imported files that
+  both declare `mod Util:` shared one global and both read the later one
+  (found by review; `1 2` now, `2 2` before the review fix).
+- `interpreter_method/mod.rs`, Dict receiver: an `EnumVariantConstructor`
+  entry is applied through `construct_enum_variant`, the arity and payload
+  code factored out of the plain-call arm in `interpreter_call/mod.rs`.
+
+Census: 99 `*_spec.spl` files whose path names enum/variant/module were run
+on the base seed (sha256 `a65b2e219cfb273a`, 54940824 bytes) and the branch
+seed (`3330c3e9e96da407`, 54934504 bytes): per-file results identical 99/99
+(89 green, the same 10 not green on both). The three neighbouring specs
+(`match_nested_callable_and_mod_unit_variant`, `enum_param_rejects_callable_value`,
+`match_callable_scrutinee_no_silent_first_arm`) are 5/5, 10/10, 3/3 on both.
+Perf: an interleaved interpreter A/B of a 300k-iteration loop (typed enum
+call, payload construction, match, `dict.len()`, `dict.get`) took base
+2.40/2.72/2.09 s and branch 2.14/2.24/2.12 s, so there is no regression.
+
+Decided, not changed:
+
+- Bare sibling variant inside a block function (`fn pick(): F32`). A bare
+  `F32` in a function body is refused for a top-level enum too
+  (`variable F32 not found`), so this is the file-level rule, not a `mod`
+  defect. `Kind.F32` and `X.F32` both work inside the block.
+- `reject_callable_for_enum_param` and `EnumVariantConstructor`. An unapplied
+  payload variant is a deliberate discriminant tag (`x is Kind.Pay`,
+  `interpreter/expr/ops.rs` `BinOp::Is`), so passing one through a `Kind`
+  parameter may be legitimate, and refusing it only in the interpreter would
+  diverge from the HIR twin. Needs a census and an owner decision.
+
+Still open (pre-existing, found here):
+
+- An entry-script function can read an imported file's block it never
+  imported (`Inner.LIMIT`). An imported file's top-level `val` leaks the same
+  way through the flat `MODULE_GLOBALS` compatibility map, so this is the
+  existing global rule, not specific to blocks.
+- Any dict entry holding an unapplied payload variant is now called by
+  `d.name(args)`, like a function or class entry already was; so
+  `{"len": K.Pay}.len()` applies the variant instead of answering 1 (review
+  P2, same precedence as the existing function/constructor entries).
+
+- A function inside `mod X:` cannot name a sibling function or constant bare
+  (`fn four(): twice(2)` gives `function twice not found`). The block's
+  functions carry an empty captured env. Workaround, now that `X` is a
+  global: `X.twice(2)`, `X.LIMIT`. A file-level module's functions do see
+  their siblings, so this is a real gap.
+- A `mod X: enum Kind` registers `Kind` under its bare name, so it replaces a
+  top-level `enum Kind` of the same file (`Kind.A` then gives
+  `unknown variant or method 'A' on enum Kind`). Same for classes and structs.
+- Nested `mod` blocks and items other than fn/class/struct/enum/const/bitfield
+  inside a block are ignored silently.
+- JIT/HIR ignores `ModDecl`; all of the above is interpreter-only.
+
 ## Census (false-positive sweep)
 
 The census used a binary in which both checks logged and passed instead of
@@ -239,6 +375,11 @@ erroring. It ran each file once with `SIMPLE_EXECUTION_MODE=jit run`:
   `kind_name(k)` parameter, since a typed one refuses it before the match.
 - `test/01_unit/language/match_callable_scrutinee_no_silent_first_arm_spec.spl`
   (runs fixtures through `SIMPLE_BINARY`/`bin/simple` in interpreter mode)
+- `test/01_unit/compiler/95.interp/interpreter/match_nested_callable_and_mod_unit_variant_spec.spl`
+  (nested and `mod` residuals; red 3/5 on the base seed, green 5/5 after)
+- `test/01_unit/language/inline_mod/inline_mod_block_spec.spl`
+  (`mod X:` block residuals; red 3/12 on the base seed, green 12/12 after)
+- Rust: `interpreter_patterns::tests::nested_variant_sub_pattern_over_callable_payload_is_refused`
 - Rust: `interpreter_patterns::tests::{match_on_constructor_value_errors_instead_of_taking_first_arm,
   match_on_function_value_errors_instead_of_taking_first_arm,
   statement_and_val_match_on_constructor_value_error_too,

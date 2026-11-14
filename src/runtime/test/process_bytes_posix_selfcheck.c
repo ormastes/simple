@@ -1,3 +1,8 @@
+#if defined(_WIN32)
+/* POSIX-only (/bin/sh process-bytes witness): not applicable on Windows -> exit 77 (SKIP). */
+#include <stdio.h>
+int main(void) { puts("SKIP: POSIX-only /bin/sh process-bytes witness"); return 77; }
+#else
 #include "runtime.h"
 #include <stdio.h>
 #include <string.h>
@@ -39,3 +44,4 @@ int main(void) {
     printf("POSIX production runtime bytes: %d checks, %d failures\n", checks, failures);
     return failures;
 }
+#endif /* !_WIN32 */

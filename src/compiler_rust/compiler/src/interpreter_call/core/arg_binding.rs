@@ -22,9 +22,10 @@ const METHOD_SELF: &str = "self";
 /// `kind_name(Vec4f)` and a later `case Some(I8):` matched it silently.
 /// Bug: doc/08_tracking/bug/match_on_callable_scrutinee_silently_takes_first_arm_2026-11-14.md
 ///
-/// `EnumVariantConstructor` is not refused: `mod X:` dicts store unit variants
-/// in that encoding (see that bug doc's residuals), so it can be a real
-/// variant value here.
+/// `EnumVariantConstructor` (an unapplied payload variant such as `Kind.Pay`)
+/// is not refused here. `mod X:` dicts used to store unit variants in that
+/// encoding; they now store `Value::Enum` (fixed 2026-11-14), so refusing it
+/// is a possible later tightening, not done in that fix.
 pub(crate) fn reject_callable_for_enum_param(value: &Value, ty: Option<&Type>, enums: &Enums) -> Option<String> {
     // Value shape first: it is a plain discriminant test, so the hot binding
     // path never pays the enum-table lookup for ordinary data arguments.

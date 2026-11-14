@@ -134,7 +134,7 @@ static uint64_t rng = 0x9E3779B97F4A7C15ull;
 static uint64_t next(void) { rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17; return rng; }
 
 int main(int argc, char **argv) {
-    if (argc < 3) FAIL("usage: %s provider expect_level [random_cases]", argv[0]);
+    if (argc < 3) { fprintf(stderr, "usage: %s provider expect_level [random_cases]\n", argv[0]); return 64; /* EX_USAGE: harness-driven */ }
     const int expect = atoi(argv[2]);
     const int random_cases = argc > 3 ? atoi(argv[3]) : 20000;
     void *lib = LOAD(argv[1]);

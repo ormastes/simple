@@ -62,6 +62,54 @@ macOS process handle. Both leaves return immutable common observations with
 exact attempt/generation/boot/native identity; the controller commits only a
 matching result. No VM path is a Simple Container backend.
 
+Darwin substrate for the separate custom-Seatbelt lane
+(`doc/05_design/simple_container_macos_seatbelt.md` §2.3, §9.1, §15.2; source
+only, NOT qualified on a Mac):
+
+- `local_ipc_v1` now has a Darwin implementation beneath the same owned
+  token/generation/close receipts (`src/runtime/runtime_local_unix_v1.h`).
+  Origin is the PID only (no PID namespace); paths are re-walked and compared
+  after connect/bind instead of `/proc/self/fd` anchoring; descriptor flags and
+  `SO_NOSIGPIPE` are applied right after creation/accept/receipt; peer identity
+  is `getpeereid` cross-checked against the `LOCAL_PEERTOKEN` audit token and
+  `LOCAL_PEERPID`. `local_unix_peer_identity_class_v1()` reports this as
+  `DarwinKernelObservedPeer`, weaker than Linux connect-time `SO_PEERCRED` and
+  never an incarnation credential. The process-pipe stdout handoff stays
+  Linux-only (unsupported on Darwin).
+- SOSIX owns the Seatbelt activation leaf
+  (`std.nogc_async_mut.sosix.darwin_sandbox_v1`, native call pair in
+  `src/runtime/runtime_sosix_darwin_sandbox_v1.h`): `sandbox_init(profile, 0,
+  &err)` + `sandbox_free_error`, a preallocated receipt, Simple-side profile
+  admission and error sanitization, no unrestricted fallback, and
+  `Unsupported` on every non-Darwin host without entering native code.
+- Mac-qualified 2026-11-14 (macOS 26.5, arm64; build recipe from
+  `doc/06_spec/01_unit/lib/io/local_ipc_v1_native_evidence.sdn` plus Darwin
+  `-Wl,-dead_strip -Wl,-undefined,dynamic_lookup`):
+  `local_unix_v1_selfcheck.c` prints `PASS Darwin local Unix
+  bytes/peer(getpeereid+audit token)/path/ancillary/shutdown/close/listener
+  contract; separate-UID accept NOT_RUN`. The disposable-child probe
+  `src/runtime/test/sosix_darwin_sandbox_v1_selfcheck.c <profile> <root> <key>`,
+  fed the exact text `seatbelt_profile_compile_v1(seatbelt_attempt_policy_v1(...,
+  "endpoint-v1"))` emits, passes 12/12: unconfined control reads host-scope;
+  after activation workspace read and output create are allowed, workspace
+  write, private/host-scope/sibling-attempt/`/private/etc` reads, loopback inet
+  connect and `fork` are denied, and only the attempt broker socket connects.
+  The probe now reports every `seatbelt_qualification_plan_v1` canary as
+  `canary <id> allow|deny` after an unconfined reachability control; on this
+  Mac all 23 match (incl. symlink/case-alias to protected roots, home sentinel,
+  IPv6/UDP/DNS/listen, other unix socket, mach-lookup, fork/posix_spawn/execve,
+  refused-profile reporting; `child-inherits-confinement` comes from a real
+  grandchild under the same profile plus `(allow process-fork)` only, and DNS
+  and mach-lookup have unconfined controls). `seatbelt_manifest_from_probe_v1` decodes that
+  transcript into a manifest that `seatbelt_capability_status_v1` reports
+  `qualified` for the observed build (checked under `bin/simple test`; the
+  seed `run` mode diverges, see
+  `doc/08_tracking/bug/seed_run_mode_or_compare_diverges_from_test_2026-11-14.md`).
+  Launch step 7 is therefore `qualified-darwin-native`; steps 2-6, 8-10 and
+  fresh-worker admission stay unsupported, so the adapter still blocks with
+  `darwin-worker-admission-unwired`. BSD: the probe is Darwin-only (exit 77
+  elsewhere); no FreeBSD path changes.
+
 Sources and code map:
 [domain research](../01_research/domain/native_macos_simple_container_2026-09-27.md),
 [local research](../01_research/local/native_macos_simple_container_2026-09-27.md).

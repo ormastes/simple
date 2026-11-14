@@ -296,17 +296,22 @@ static void check_sum_and_sorted(void) {
     expect_i64("mixed unsigned positive next", rt_array_get((SplArray*)(uintptr_t)sorted_uint, 1), rt_value_int(1));
     expect_i64("mixed unsigned boxed last", rt_array_get((SplArray*)(uintptr_t)sorted_uint, 2), unsigned_2);
 
-    int64_t text_b = rt_string_new((const uint8_t*)"b", 1);
-    int64_t text_a1 = rt_string_new((const uint8_t*)"a", 1);
-    int64_t text_a2 = rt_string_new((const uint8_t*)"a", 1);
+    /* Two texts compare byte-lexicographically in both twins (C
+     * rt_sorted_value_cmp, Rust collections.rs rt_sorted_value_cmp: "before
+     * this arm every text pair compared Equal"), and the sort is stable.
+     * Multi-byte keys: single-byte text is interned to one handle, which
+     * would make the stability probe vacuous. */
+    int64_t text_b = rt_string_new((const uint8_t*)"bkey", 4);
+    int64_t text_a1 = rt_string_new((const uint8_t*)"akey", 4);
+    int64_t text_a2 = rt_string_new((const uint8_t*)"akey", 4);
     SplArray* texts = rt_array_new(3);
     rt_array_push(texts, text_b);
     rt_array_push(texts, text_a1);
     rt_array_push(texts, text_a2);
     int64_t sorted_texts = rt_array_sorted((int64_t)(uintptr_t)texts);
-    expect_i64("sorted text keeps first mixed-equal", rt_array_get((SplArray*)(uintptr_t)sorted_texts, 0), text_b);
-    expect_i64("sorted text keeps second mixed-equal", rt_array_get((SplArray*)(uintptr_t)sorted_texts, 1), text_a1);
-    expect_i64("sorted text keeps third mixed-equal", rt_array_get((SplArray*)(uintptr_t)sorted_texts, 2), text_a2);
+    expect_i64("sorted text: first equal key first (stable)", rt_array_get((SplArray*)(uintptr_t)sorted_texts, 0), text_a1);
+    expect_i64("sorted text: second equal key second (stable)", rt_array_get((SplArray*)(uintptr_t)sorted_texts, 1), text_a2);
+    expect_i64("sorted text: greater key last", rt_array_get((SplArray*)(uintptr_t)sorted_texts, 2), text_b);
     expect_i64("sorted(nil) is nil", rt_array_sorted(RT_NIL_VALUE), RT_NIL_VALUE);
 }
 

@@ -94,7 +94,7 @@ static void check(RtCoreStringSimd *s, RtCoreStringSimd *nd) {
 }
 
 int main(int argc, char **argv) {
-    if (argc < 3) FAIL("usage: %s expect_status expect_level", argv[0]);
+    if (argc < 3) { fprintf(stderr, "usage: %s expect_status expect_level\n", argv[0]); return 64; /* EX_USAGE: harness-driven */ }
     if (g_simd_text.utf8_validate) FAIL("eager text initialization");
     const int64_t want_status = atoll(argv[1]), want_level = atoll(argv[2]);
     const int64_t status = simd_text_provider_status(), level = simd_text_provider_level();

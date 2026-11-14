@@ -1909,15 +1909,37 @@ fn evaluate_module_items(module_items: ModuleItems<'_>) -> Result<i32, CompileEr
                                 enums.insert(prefixed_name, Arc::clone(&arc_e));
                                 enums.insert(e.name.clone(), arc_e);
 
-                                // Add enum variants to module dict as constructors
+                                // `X.Kind` is the enum type, as for a file-level
+                                // module. Never replaces an entry: a variant of an
+                                // earlier enum spelled `Kind` keeps its value, and
+                                // this enum's own variants are inserted after.
+                                module_dict
+                                    .entry(e.name.clone())
+                                    .or_insert_with(|| Value::EnumType {
+                                        enum_name: e.name.clone(),
+                                    });
+
+                                // Add enum variants to the module dict: a unit variant
+                                // is its enum value, a payload variant a constructor
+                                // (same rule as `Enum.Variant` in interpreter/expr/calls.rs).
+                                // Storing unit variants as constructors made `X.F32`
+                                // unequal to itself and unmatchable
+                                // (match_on_callable_scrutinee_silently_takes_first_arm_2026-11-14).
                                 for variant in &e.variants {
-                                    module_dict.insert(
-                                        variant.name.clone(),
+                                    let has_fields = variant.fields.as_ref().is_some_and(|f| !f.is_empty());
+                                    let value = if has_fields {
                                         Value::EnumVariantConstructor {
                                             enum_name: e.name.clone(),
                                             variant_name: variant.name.clone(),
-                                        },
-                                    );
+                                        }
+                                    } else {
+                                        Value::Enum {
+                                            enum_name: e.name.clone(),
+                                            variant: variant.name.clone(),
+                                            payload: None,
+                                        }
+                                    };
+                                    module_dict.insert(variant.name.clone(), value);
                                 }
                             }
                             Node::Const(c) => {
@@ -1942,8 +1964,19 @@ fn evaluate_module_items(module_items: ModuleItems<'_>) -> Result<i32, CompileEr
                         }
                     }
 
-                    // Store module dict in environment
-                    env.insert(mod_decl.name.clone(), Value::Dict(Arc::new(module_dict)));
+                    // Store module dict in environment, and as a global of its
+                    // declaring file (like a top-level `val`) so function bodies
+                    // can name it. A block flattened in from an imported file
+                    // carries that file as an owner attribute
+                    // (`strip_flattened_import_nodes`); none means the entry script.
+                    let module_value = Value::Dict(Arc::new(module_dict));
+                    env.insert(mod_decl.name.clone(), module_value.clone());
+                    let owner: Option<Arc<str>> = mod_decl.attributes.iter().find_map(|a| {
+                        a.name
+                            .strip_prefix(FLATTEN_MODULE_OWNER_ATTR_PREFIX)
+                            .map(|raw| Arc::from(normalize_path_key(Path::new(raw)).to_string_lossy().as_ref()))
+                    });
+                    record_flattened_global(owner.as_ref(), mod_decl.name.clone(), module_value);
                 }
                 // External module declarations (no body) are handled by the module resolver
             }

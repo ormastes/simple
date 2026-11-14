@@ -48,7 +48,7 @@ static void require(int condition, const char *message) {
 }
 
 int main(int argc, char **argv) {
-    if (argc != 2) return 2;
+    if (argc != 2) return 64; /* EX_USAGE: the harness supplies a scratch directory */
     /* Case 1: binary-mode round trip. A text-mode fopen would corrupt this
      * "\n" into "\r\n" on write; explicit "wb"/"rb" (what the fixed
      * production call sites now use) must not. */

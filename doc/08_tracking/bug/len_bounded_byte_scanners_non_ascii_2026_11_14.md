@@ -206,3 +206,14 @@ High-risk subset (json/sdn/lexer/escape/base64/redact/token/parse in path or nam
 Recommendation: 2 first (stops growth), then 1 by risk.
 
 Spec: test/01_unit/lib/text/text_unit_parity_scanner_spec.spl
+
+## Progress (2026-11-14)
+- Gate: rule 4 added to scripts/check/check-text-len-unit-mix.shs (function with
+  no byte_len() bounding substring/byte_at/char_code_at by the receiver's len()),
+  ratcheted by scripts/check/text_len_bounded_byte_scan_baseline.txt (952 rows;
+  new and stale rows FAIL). --selftest: 10 fixtures.
+- Fixed with red-first specs: nogc_async_mut gdb_mi_parser unescape_mi_string,
+  engine_policy_v1 _engine_json_depth_v1.
+- Not a defect (verified): sdn/value.spl _sdn_index (any non-ASCII byte is
+  reached before the len() bound and rejected), structural_inline_lexer_v2
+  (caller rejects non-ASCII before lexing).

@@ -156,3 +156,16 @@ module-local SymbolId — it MUST be cleared in `begin_module`/`lower_module`
 Not covered yet: method-call initialisers (`val m = o.get(k)`) and copies
 (`val n = m`). Spec: `test/01_unit/compiler/hir/optional_as_cast_rejected_spec.spl`.
 Bug: `pure_err01_untyped_local_of_optional_call_not_rejected_2026-11-13`.
+
+## `begin_module` must detach every module-local owner (2026-11-14)
+
+A HIR shard worker reuses one `HirLowering` for thousands of modules and
+reclaims each module's transient scope. Any field that survives `begin_module`
+and is not a promoted phase memo dangles after reclamation and is read as
+garbage by the next module. `lambda_param_hint` did this and ended bootstrap
+run 29's `compiler_cli_build` at module 2758/3145 with E-HIR-VISIT-UNHANDLED.
+When you add a field to `HirLowering`, either reset it in
+`context_helpers.spl::begin_module` or add it to
+`promote_phase_memo_transient_owners`. Order-dependent HIR failures reproduce in
+a few seconds with two modules and `native-build --threads 1`.
+Record: `doc/08_tracking/bug/hir_lambda_param_hint_outlives_module_scope_2026-11-14.md`.

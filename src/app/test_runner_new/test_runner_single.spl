@@ -480,6 +480,27 @@ fn spec_exec_limit_directive(file_path: text) -> i64:
         return 0
     value
 
+fn spec_jit_spec_entry_directive(file_path: text) -> bool:
+    """True when the spec header carries `# @jit_spec_entry`.
+
+    Such a spec runs its module-level examples on the seed's Cranelift JIT
+    (SIMPLE_JIT_SPEC_ENTRY=1) instead of the pinned interpreter: a spec whose
+    honest interpreted run cannot fit the 900s cap (3M iterations of the core
+    interpreter, ~40 min tree-walked, ~2.5 min JIT'd) opts in per file.
+    SIMPLE_JIT_STRICT_ALL=1 makes a JIT refusal a fast named ERROR instead of a
+    silent full-length interpreter fallback. Spec entry is not the default
+    because JIT/interpreter verdict parity is only sampled, not proven; see
+    doc/08_tracking/bug/seed_jit_spec_entry_demoted_by_entry_reparse_2026-11-14.md.
+    The directive must be a whole line, so prose or a fixture string that
+    merely mentions it does not opt in. The two JIT pins are deliberately NOT
+    in the process-facade grandchild scrub (process_ops.spl): under the
+    light-daemon lane this runner is itself a scrub-marked descendant and
+    spawns its spec child through that facade, so scrubbing them silently
+    dropped the opt-in (measured). They therefore reach processes the spec
+    spawns: use the directive on self-contained specs only."""
+    val content = unsafe(capabilities: [ffi]): rt_file_read_text(file_path) ?? ""
+    content.starts_with("# @jit_spec_entry\n") or find_raw(content, "\n# @jit_spec_entry\n") >= 0
+
 fn spec_timeout_secs_directive(file_path: text) -> i64:
     """Parse `# @timeout_secs <N>` from a spec header (0 when absent/invalid).
 
@@ -1530,6 +1551,15 @@ fn run_single_target(args: [text]) -> i64:
 
     env_set("SIMPLE_RUNTIME_MODE", "interpreter")
     env_set("SIMPLE_EXECUTION_MODE", "interpret")
+    if spec_jit_spec_entry_directive(run.path):
+        env_set("SIMPLE_RUNTIME_MODE", "jit")
+        env_set("SIMPLE_EXECUTION_MODE", "jit")
+        env_set("SIMPLE_JIT_SPEC_ENTRY", "1")
+        env_set("SIMPLE_JIT_STRICT_ALL", "1")
+    else:
+        # "0" is off for both; never leak a previous spec's opt-in.
+        env_set("SIMPLE_JIT_SPEC_ENTRY", "0")
+        env_set("SIMPLE_JIT_STRICT_ALL", "0")
     val monitor_timeout = env_get("SIMPLE_TIMEOUT_SECONDS") ?? ""
     # Converting an empty string must not become a valid timeout value.
     # split the unset case out before any to_int call (this condition broke

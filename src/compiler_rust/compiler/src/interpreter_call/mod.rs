@@ -61,6 +61,46 @@ fn enum_variant_arity_error(enum_name: &str, variant_name: &str, expected: usize
     )
 }
 
+/// Apply an unapplied payload variant (`Kind.Pay`, or `X.Pay` out of a
+/// `mod X:` dict) to its arguments: arity check, then one payload value or a
+/// tuple of them.
+pub(crate) fn construct_enum_variant(
+    enum_name: String,
+    variant_name: String,
+    args: &[Argument],
+    env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<Value, CompileError> {
+    let enum_def = crate::interpreter::owner_module_enum(&enum_name)
+        .or_else(|| enums.get(&enum_name).cloned())
+        .or_else(|| crate::interpreter::BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow().get(&enum_name).cloned()))
+        .or_else(|| GLOBAL_ENUMS.with(|cell| cell.borrow().get(&enum_name).cloned()));
+    if let Some(enum_def) = enum_def {
+        validate_enum_variant_arity(&enum_def, &variant_name, args.len())?;
+    }
+    let payload = if args.is_empty() {
+        None
+    } else if args.len() == 1 {
+        let val = evaluate_expr(&args[0].value, env, functions, classes, enums, impl_methods)?;
+        Some(Box::new(val))
+    } else {
+        // Multiple args - wrap in tuple
+        let vals: Result<Vec<Value>, _> = args
+            .iter()
+            .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+            .collect();
+        Some(Box::new(Value::Tuple(vals?)))
+    };
+    Ok(Value::Enum {
+        enum_name,
+        variant: variant_name,
+        payload,
+    })
+}
+
 pub(crate) fn validate_enum_variant_arity(
     enum_def: &EnumDef,
     variant_name: &str,
@@ -2104,33 +2144,7 @@ pub(crate) fn evaluate_call(
         Value::EnumVariantConstructor {
             enum_name,
             variant_name,
-        } => {
-            let enum_def = crate::interpreter::owner_module_enum(&enum_name)
-                .or_else(|| enums.get(&enum_name).cloned())
-                .or_else(|| crate::interpreter::BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow().get(&enum_name).cloned()))
-                .or_else(|| GLOBAL_ENUMS.with(|cell| cell.borrow().get(&enum_name).cloned()));
-            if let Some(enum_def) = enum_def {
-                validate_enum_variant_arity(&enum_def, &variant_name, args.len())?;
-            }
-            let payload = if args.is_empty() {
-                None
-            } else if args.len() == 1 {
-                let val = evaluate_expr(&args[0].value, env, functions, classes, enums, impl_methods)?;
-                Some(Box::new(val))
-            } else {
-                // Multiple args - wrap in tuple
-                let vals: Result<Vec<Value>, _> = args
-                    .iter()
-                    .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
-                    .collect();
-                Some(Box::new(Value::Tuple(vals?)))
-            };
-            Ok(Value::Enum {
-                enum_name,
-                variant: variant_name,
-                payload,
-            })
-        }
+        } => construct_enum_variant(enum_name, variant_name, args, env, functions, classes, enums, impl_methods),
         Value::Object { ref class, ref fields } => {
             // Support __call__ protocol: objects with __call__ method are callable
             let evaluated_args: Vec<Value> = args
