@@ -1,0 +1,96 @@
+# Caret TUI workbench leader keys (REQ-CARET-UI-004, CU-005).
+#
+# Pure state machine: (state, key) -> (state, action). Ctrl+G is the proposed
+# default leader (plan §6.3). While a leader is pending, NO key is ever
+# reported as PassThrough, so a bound chord never reaches the child pane; an
+# unbound chord returns PassThroughChord (caller forwards leader then key). Leader twice sends a literal
+# leader to the foreground CLI. Keys are normalized names ("ctrl+g", "a").
+# No IO, no timers; decoding and the ambiguous-prefix timeout belong to the
+# input decoder, not here.
+
+val LEADER_KEY = "ctrl+g"
+
+enum LeaderState:
+    Idle
+    LeaderPending
+
+enum LeaderAction:
+    # Idle, non-leader key: forward to the focused pane unchanged.
+    PassThrough
+    # Leader consumed; waiting for the chord.
+    AwaitingChord
+    AgentNavigator
+    NextAgent
+    PrevAgent
+    NextAttention
+    PinnedSlot
+    ToggleComposerTerminal
+    TraceView
+    ReviewView
+    FocusMode
+    StatusInspector
+    CreateAgent
+    Help
+    # Leader pressed twice: send the literal leader key to the CLI.
+    LiteralLeader
+    # Chord not bound: back to Idle; caller forwards the leader key THEN `key`
+    # to the focused CLI, in that order (plan 6.3 explicit unknown-chord passthrough).
+    PassThroughChord
+
+struct LeaderOutcome:
+    state: LeaderState
+    action: LeaderAction
+    # The key the action concerns (PassThrough / LiteralLeader / PassThroughChord).
+    key: text
+    # 1..9 for PinnedSlot, else 0.
+    slot: i64
+
+fn new_leader_state() -> LeaderState:
+    LeaderState.Idle
+
+fn is_pending(state: LeaderState) -> bool:
+    state == LeaderState.LeaderPending
+
+fn _out(state: LeaderState, action: LeaderAction, key: text, slot: i64) -> LeaderOutcome:
+    LeaderOutcome(state: state, action: action, key: key, slot: slot)
+
+fn _chord(key: text) -> LeaderOutcome:
+    val idle = LeaderState.Idle
+    if key == LEADER_KEY:
+        return _out(idle, LeaderAction.LiteralLeader, key, 0)
+    if key == "a":
+        return _out(idle, LeaderAction.AgentNavigator, key, 0)
+    if key == "n":
+        return _out(idle, LeaderAction.NextAgent, key, 0)
+    if key == "p":
+        return _out(idle, LeaderAction.PrevAgent, key, 0)
+    if key == "u":
+        return _out(idle, LeaderAction.NextAttention, key, 0)
+    if key == "m":
+        return _out(idle, LeaderAction.ToggleComposerTerminal, key, 0)
+    if key == "t":
+        return _out(idle, LeaderAction.TraceView, key, 0)
+    if key == "r":
+        return _out(idle, LeaderAction.ReviewView, key, 0)
+    if key == "f":
+        return _out(idle, LeaderAction.FocusMode, key, 0)
+    if key == "s":
+        return _out(idle, LeaderAction.StatusInspector, key, 0)
+    if key == "c":
+        return _out(idle, LeaderAction.CreateAgent, key, 0)
+    if key == "?":
+        return _out(idle, LeaderAction.Help, key, 0)
+    val digits = "123456789"
+    var i = 0
+    while i < 9:
+        if key == digits.slice(i, i + 1):
+            return _out(idle, LeaderAction.PinnedSlot, key, i + 1)
+        i = i + 1
+    _out(idle, LeaderAction.PassThroughChord, key, 0)
+
+fn leader_step(state: LeaderState, key: text) -> LeaderOutcome:
+    if state == LeaderState.LeaderPending:
+        return _chord(key)
+    if key == LEADER_KEY:
+        return _out(LeaderState.LeaderPending, LeaderAction.AwaitingChord, key, 0)
+    _out(LeaderState.Idle, LeaderAction.PassThrough, key, 0)
