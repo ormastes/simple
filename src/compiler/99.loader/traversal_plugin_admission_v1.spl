@@ -12,6 +12,7 @@ use std.common.sdn.encode.{sdn_encode_canonical}
 use std.common.crypto.ed25519.{pure_ed25519_verify}
 use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
 use std.common.string_core.{text_to_bytes}
+use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear}
 use compiler.common.cache_contract.hash_algorithm_registry_v1.{
     DigestV1, HASH_ALGO_SHA256_V1, digest_v1_parse, digest_v1_text
 }
@@ -23,12 +24,21 @@ use std.nogc_sync_mut.sffi.dynlib_exact_admission_v1.{
     dynlib_symbol_address_v1, dynlib_admitted_close_v1
 }
 use compiler.loader.traversal_plugin_elf_gate_v1.{traversal_plugin_elf_gate_v1}
+use compiler.common.driver_core_types.{TraversalPluginProviderRequestV1}
 
 pub val TRAVERSAL_PLUGIN_ALLOWLIST_MAX_SOURCE_BYTES_V1: i64 = 65536
 pub val TRAVERSAL_PLUGIN_ALLOWLIST_MAX_ENTRIES_V1: i64 = 128
 pub val TRAVERSAL_PLUGIN_ARTIFACT_MAX_BYTES_V1: i64 = 67108864
 pub val TRAVERSAL_PLUGIN_ENTRY_SYMBOL_V1: text = "simple_traversal_plugin_v1"
 pub val TRAVERSAL_PLUGIN_ABI_ID_V1: text = "simple-traversal-plugin/v1"
+pub val TRAVERSAL_PLUGIN_MAX_WIRE_BYTES_V1: i64 = 1048576
+
+var _traversal_plugin_host_arch_cache_v1: text = ""
+
+fn _traversal_plugin_host_arch_v1() -> text:
+    if _traversal_plugin_host_arch_cache_v1 == "":
+        _traversal_plugin_host_arch_cache_v1 = cfg_normalize_arch(host_arch())
+    _traversal_plugin_host_arch_cache_v1
 
 pub struct TraversalPluginAllowlistEntryV1:
     provider_id: text
@@ -94,7 +104,7 @@ fn _traversal_allowlist_path_valid_v1(path: text) -> bool:
 
 pub fn traversal_plugin_host_abi_fingerprint_v1() -> text:
     if platform_name() != "linux": return ""
-    val arch = cfg_normalize_arch(host_arch())
+    val arch = _traversal_plugin_host_arch_v1()
     if arch == "x86_64": return "linux-x86_64-elf64-le-sysv-v1"
     if arch == "aarch64": return "linux-aarch64-elf64-le-aapcs64-v1"
     ""
@@ -200,7 +210,7 @@ pub fn traversal_plugin_provider_load_v1(source: text, signature: [u8],
     val policy = traversal_plugin_allowlist_verify_decode_v1(source, signature,
         external_trust_root)?
     val entry = traversal_plugin_allowlist_select_v1(policy, provider_id)?
-    val arch = cfg_normalize_arch(host_arch())
+    val arch = _traversal_plugin_host_arch_v1()
     val artifact = match file_read_regular_no_follow_bounded(entry.artifact_path,
             TRAVERSAL_PLUGIN_ARTIFACT_MAX_BYTES_V1):
         case Ok(bytes): bytes
@@ -238,12 +248,40 @@ pub fn traversal_plugin_provider_load_v1(source: text, signature: [u8],
         abi_fingerprint: entry.abi_fingerprint, artifact_path: entry.artifact_path,
         library_handle: admitted_handle, entry_symbol_address: symbol))
 
+pub fn traversal_plugin_provider_load_request_v1(
+        request: TraversalPluginProviderRequestV1,
+        external_trust_root: [u8]) -> Result<AdmittedTraversalPluginProviderV1, text>:
+    """Read local signed policy files and then admit the exact pinned provider.
+
+    The allowlist is canonical UTF-8 SDN and `.sig` is exactly 64 raw
+    Ed25519 bytes. The public key is injected by a trusted composition root,
+    independently of the user request and the policy being verified. Every
+    file read rejects symlinks and is bounded. No network loader is involved.
+    """
+    val policy_bytes = match file_read_regular_no_follow_bounded(
+            request.allowlist_path, TRAVERSAL_PLUGIN_ALLOWLIST_MAX_SOURCE_BYTES_V1):
+        case Ok(value): value
+        case Err(_): return Err("traversal-allowlist-unreadable")
+    val policy_text = match validated_utf8_bytes_to_text_linear(policy_bytes):
+        case Ok(value): value
+        case Err(_): return Err("traversal-allowlist-utf8-invalid")
+    val signature = match file_read_regular_no_follow_bounded(request.signature_path, 64):
+        case Ok(value): value
+        case Err(_): return Err("traversal-allowlist-signature-unreadable")
+    if signature.len() != 64: return Err("traversal-allowlist-signature-required")
+    if external_trust_root.len() != 32:
+        return Err("traversal-provider-trust-root-unavailable")
+    traversal_plugin_provider_load_v1(policy_text, signature,
+        external_trust_root, request.provider_id)
+
 export TRAVERSAL_PLUGIN_ALLOWLIST_MAX_SOURCE_BYTES_V1,
     TRAVERSAL_PLUGIN_ALLOWLIST_MAX_ENTRIES_V1,
     TRAVERSAL_PLUGIN_ARTIFACT_MAX_BYTES_V1,
-    TRAVERSAL_PLUGIN_ENTRY_SYMBOL_V1, TRAVERSAL_PLUGIN_ABI_ID_V1
+    TRAVERSAL_PLUGIN_ENTRY_SYMBOL_V1, TRAVERSAL_PLUGIN_ABI_ID_V1,
+    TRAVERSAL_PLUGIN_MAX_WIRE_BYTES_V1
 export TraversalPluginAllowlistEntryV1, VerifiedTraversalPluginAllowlistV1
 export AdmittedTraversalPluginProviderV1
 export traversal_plugin_host_abi_fingerprint_v1
 export traversal_plugin_allowlist_verify_decode_v1, traversal_plugin_allowlist_select_v1
 export traversal_plugin_provider_load_v1
+export traversal_plugin_provider_load_request_v1
