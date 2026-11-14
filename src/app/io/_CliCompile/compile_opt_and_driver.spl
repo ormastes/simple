@@ -99,6 +99,21 @@ fn cli_print_shared_optimization_inventory(command: text):
         print "  - Native executable builds default to aggressive on native backends."
         print "  - Release MIR/self-hosted builds normalize to standard unless --opt-level overrides it."
 
+# cli_mode_text for the pure-Simple single-file compile. A native-output
+# compile is "aot", in parity with the standalone compiler (80.driver/main.spl):
+# without it the positional input is not an AOT input and MIR lowering replaces
+# it with an empty stub module (driver_pipeline_lowering.spl
+# native_entry_closure_mir), so the object carries zero functions and only the
+# `simple_empty_module_<name>` export. This used to be set only for
+# `--xray` with a non-empty native target, i.e. never for the LLVM backend and
+# never on a non-Linux host
+# (doc/08_tracking/bug/xray_llvm_simple_compiled_module_emits_zero_functions_2026-11-13.md).
+# Non-native formats (smf, vulkan, wasm, ...) keep the driver default.
+pub fn cli_compile_pure_simple_mode_text(output_format: text) -> text:
+    if output_format == "" or output_format == "native":
+        return "aot"
+    ""
+
 # Pure Simple compiler implementation (no Rust SFFI dependency)
 fn cli_compile_pure_simple(source_file: text, output_file: text, output_format: text, backend: text, verbose: bool, release: bool, low_memory: bool, opt_level: i64, profile: text, debug_trace_level: text, coverage_enabled: bool, mcdc_mode_text: text, mcdc_owner_bytes: i64, mcdc_global_bytes: i64, xray_enabled: bool = false, native_target: text = "", nogc_require_strict: bool = false) -> i64:
     var out = output_file
@@ -157,16 +172,9 @@ fn cli_compile_pure_simple(source_file: text, output_file: text, output_format: 
     options.coverage_enabled = coverage_enabled
     options.xray_enabled = xray_enabled
     options.nogc_require_strict = nogc_require_strict
+    options.cli_mode_text = cli_compile_pure_simple_mode_text(output_format)
     if xray_enabled and native_target != "":
-        # Parity with the standalone compiler (80.driver/main.spl sets
-        # cli_mode_text): without it the positional input is not an AOT
-        # input and MIR lowering emits an empty stub module
-        # (driver_pipeline_lowering.spl native_entry_closure_mir), so the
-        # native object had zero functions. Gated on --xray so every
-        # non-xray route through this function is unchanged; native_target is
-        # passed only by cli_compile_xray_native, so the LLVM --xray route
-        # (PR4) is unchanged too.
-        options.cli_mode_text = "aot"
+        # native_target is passed only by cli_compile_xray_native.
         options.native_target = native_target
     options.mcdc_mode_text = mcdc_mode_text
     options.mcdc_owner_bytes = mcdc_owner_bytes
