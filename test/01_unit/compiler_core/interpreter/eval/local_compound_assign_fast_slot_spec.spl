@@ -1,0 +1,70 @@
+# Regression spec for
+# doc/08_tracking/bug/core_array_cow_spec_timeout_2026-11-14.md
+#
+# The resolver gives a non-shadowed function local a LOAD_FAST slot and
+# `eval_ident` reads that slot first. Plain assignment writes the scope map
+# AND the slot; compound assignment (`x += 1`) wrote only the scope map, so the
+# next read of `x` returned the pre-assignment value. Every guest
+# `while i < n: ... i += 1` therefore never terminated, which is what timed out
+# test/01_unit/compiler/interpreter/core_array_cow_spec.spl.
+#
+# Every loop below carries an independent `guard = guard + 1` bound (plain
+# assignment, which was never affected), so a regression shows up as a wrong
+# value rather than as a hang.
+
+use std.spec.{describe, it, expect}
+use compiler.core.interpreter.mod.{core_jit_interpret}
+use compiler.core.interpreter.eval.{eval_has_error, eval_get_error}
+use compiler.core.interpreter.value.{val_is_int, val_get_int}
+
+# jit_init disables the JIT at threshold >= 999999: this selects the tree-walking
+# core evaluator under test.
+fn guest_result(source: text) -> i64:
+    val result = core_jit_interpret(source, "local_compound_assign_guest.spl", 999999)
+    if eval_has_error():
+        print "guest error: {eval_get_error()}"
+        return -1000
+    if not val_is_int(result): return -1001
+    val_get_int(result)
+
+describe "core evaluator compound assignment to fast-slot locals":
+    it "reads back each compound operator on a local":
+        val source = "fn main() -> i64:\n    var a = 5\n    a += 2\n    if a != 7: return 1\n    a -= 3\n    if a != 4: return 2\n    a *= 6\n    if a != 24: return 3\n    a /= 4\n    if a != 6: return 4\n    0\n"
+        expect(guest_result(source)).to_equal(0)
+
+    it "keeps consecutive compound assignments cumulative":
+        val source = "fn main() -> i64:\n    var total = 0\n    total += 1\n    total += 1\n    total += 1\n    total\n"
+        expect(guest_result(source)).to_equal(3)
+
+    it "terminates a counted while loop after exactly the counted iterations":
+        val source = "fn main() -> i64:\n    var index = 0\n    var guard = 0\n    while index < 3:\n        index += 1\n        guard = guard + 1\n        if guard > 10: return 99\n    if index != 3: return 1\n    guard\n"
+        expect(guest_result(source)).to_equal(3)
+
+    it "updates a parameter slot":
+        val source = "fn bump(n: i64) -> i64:\n    n += 10\n    n\nfn main() -> i64:\n    val before = 4\n    val after = bump(before)\n    if before != 4: return 1\n    after\n"
+        expect(guest_result(source)).to_equal(14)
+
+    it "keeps recursive frames' compound-assigned locals independent":
+        val source = "fn depth(n: i64) -> i64:\n    var acc = n\n    if n > 0:\n        val inner = depth(n - 1)\n        acc += inner\n    acc\nfn main() -> i64:\n    depth(4)\n"
+        expect(guest_result(source)).to_equal(10)
+
+    it "mixes plain and compound assignment on the same local":
+        val source = "fn main() -> i64:\n    var x = 1\n    x += 1\n    x = x * 10\n    x += 1\n    x\n"
+        expect(guest_result(source)).to_equal(21)
+
+    it "still updates a global from inside a function":
+        val source = "var counter = 0\nfn tick():\n    counter += 2\nfn main() -> i64:\n    tick()\n    tick()\n    counter\n"
+        expect(guest_result(source)).to_equal(4)
+
+    it "does not write a local's slot when a same-named global is the target":
+        val source = "var shared = 1\nfn touch() -> i64:\n    shared += 5\n    shared\nfn main() -> i64:\n    var mine = 100\n    val seen = touch()\n    mine += 1\n    if seen != 6: return 1\n    if shared != 6: return 2\n    mine\n"
+        expect(guest_result(source)).to_equal(101)
+
+    it "uses the compound-assigned local as an array index and element":
+        val source = "fn main() -> i64:\n    var values = [0, 0, 0]\n    var index = 0\n    var guard = 0\n    while index < 3:\n        values[index] = index + 1\n        index += 1\n        guard = guard + 1\n        if guard > 10: return 99\n    if values[0] != 1: return 1\n    if values[1] != 2: return 2\n    if values[2] != 3: return 3\n    0\n"
+        expect(guest_result(source)).to_equal(0)
+
+    it "reports an undefined compound target instead of defining it":
+        val result = core_jit_interpret("fn main() -> i64:\n    missing += 1\n    0\n", "local_compound_assign_guest.spl", 999999)
+        expect(eval_has_error()).to_equal(true)
+        expect(eval_get_error().contains("undefined variable: missing")).to_equal(true)
