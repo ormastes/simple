@@ -717,7 +717,7 @@ fn replaced_default_box_w(tag: text) -> i32:
     they are sized from real intrinsic/UA metrics further down this function's
     caller, and giving them a 300px default would be a regression.
     """
-    if tag == "iframe" or tag == "video" or tag == "canvas" or tag == "embed" or tag == "object" or tag == "audio":
+    if tag == "iframe" or tag == "video" or tag == "canvas" or tag == "embed" or tag == "object" or tag == "audio" or tag == "svg":
         return 300
     0
 
@@ -892,6 +892,46 @@ fn form_control_baseline_from_top(node: HNode, st: Style, h: i32) -> i32:
     if lead < 0:
         lead = 0
     st.border_t + st.pad_t + lead + inline_line_strut_baseline_offset(st)
+
+fn replaced_default_is_content_size(tag: text) -> bool:
+    """True when the tag's UA default box is its CONTENT size.
+
+    The 300x150 fallback is an intrinsic (object) size, so the element's own
+    padding and border are added around it even under `box-sizing:border-box`
+    -- an auto axis has no specified size for border-box to apply to. Chrome
+    159: `<video style="border:2px solid;padding:3px">`, the same `<canvas>`
+    and the same `<svg>` are all 310x160. `<audio controls>` is the exception:
+    its 300x54 comes from the UA sheet's explicit `width`/`height`, and Chrome
+    159 keeps it 300x54 with that border and padding under border-box.
+    """
+    tag != "audio" and replaced_default_box_w(tag) > 0
+
+fn replaced_auto_box_w(node: HNode, st: Style) -> i32:
+    """BORDER-BOX width of a replaced element whose CSS width is auto: the
+    `width` attribute, else the UA default (plus the element's own horizontal
+    padding and border when that default is a content size). Shared by the
+    final box and the inline pen prediction so they cannot disagree."""
+    val attr_w = parse_int(attr_value(node.attrs_raw, "width"))
+    if attr_w > 0:
+        return attr_w
+    val default_w = replaced_default_box_w(node.tag)
+    if replaced_default_is_content_size(node.tag):
+        return default_w + st.pad_l + st.pad_r + st.border_l + st.border_r
+    default_w
+
+fn replaced_auto_box_h(node: HNode, st: Style) -> i32:
+    """BORDER-BOX height of a replaced element whose CSS height is auto; the
+    height twin of `replaced_auto_box_w`. There is no ratio scaling: Chrome
+    159 gives `<video width=120>` 120x150 and `<video height=50>` 300x50."""
+    val attr_h = parse_int(attr_value(node.attrs_raw, "height"))
+    if attr_h > 0:
+        return attr_h
+    val default_h = replaced_default_box_h(node.tag)
+    if replaced_default_is_content_size(node.tag):
+        return default_h + st.pad_t + st.pad_b + st.border_t + st.border_b
+    default_h
+
+
 
 # Per-column advance and content-box intercept Chrome's UA uses to turn a text
 # control's `size`/`cols` attribute into an intrinsic CONTENT width. These are

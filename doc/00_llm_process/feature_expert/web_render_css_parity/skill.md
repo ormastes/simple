@@ -1111,3 +1111,26 @@ turns green in the same change, or the check FAILs as stale.
 - 4K (3840x2160, Vulkan on llvmpipe): `overview` was 9.15% before the
   clamped-width auto-margin fix; not re-measured after it. No 4K baseline yet.
 - Open review items: `doc/08_tracking/bug/web_render_chrome_lane_review_residue_2026-11-14.md`.
+
+## 2026-11-14 — replaced media (canvas / svg / audio / video) vs Chrome 159
+
+- **Oracle trap:** Chromium 131 scales a media-less `<video>` 2:1 from one
+  specified axis (`width=120` -> 120x60). Chrome 159 does not (120x150). Any
+  number taken with the chromium-1148 build must be re-measured.
+- The 300x150 default is a CONTENT size: an auto axis of canvas/svg/video adds
+  the element's own padding and border even under `box-sizing:border-box`
+  (310x160 with `border:2px;padding:3px`). `<audio controls>` is an explicit
+  UA size and stays 300x54. `<audio>` without `controls` is `display:none`.
+  Owners: `replaced_auto_box_w` / `replaced_auto_box_h`
+  (`simple_web_html_layout_renderer_layout_foundation.spl`), shared by the
+  final box and the inline pen prediction.
+- Paint is lowered to Draw IR rects in `_html_draw_ir_replaced_media_commands`
+  (`simple_web_html_layout_renderer_paint_layout.spl`): svg `<rect>`, the
+  `<video controls>` panel (#333 -> #000), the `<audio controls>` pill
+  (#f1f3f4). A video WITHOUT `controls` is transparent in Chrome — the dark
+  box is the controls panel, not a video surface.
+- The skia SVG rasteriser (`std.skia.feature.codec.svg_render`) is not wired:
+  the Draw IR result cannot return an image resource.
+- Measured: catalog `animation` 12.23% -> 7.36%; `forms-media` 6.38% unchanged;
+  combo matrix unchanged (463 baselined ids, 0 new, 0 stale).
+- Residues: `doc/08_tracking/bug/web_replaced_media_residues_vs_chrome_159_2026-11-14.md`.
