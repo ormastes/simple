@@ -17,6 +17,7 @@ use os.kernel.loader.fs_exec_spawn.{FsExecPrepareResult,
 use os.kernel.loader.spawn_recipes.{SPAWN_RECIPE_APP_LAUNCHER}
 use os.kernel.security.execution_context.{KernelCallContext}
 use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.scheduler.scheduler_security_types.{task_security_binding_managed_child}
 use os.kernel.types.task_types.{TaskId, TaskPriority}
 use os.kernel.arch.arch_context.{Architecture}
 
@@ -51,6 +52,11 @@ pub fn launch_compiled_workload_into_scheduler(
         return FsExecPrepareResult(scheduler: scheduler, pid: -13, entry: 0)
     if workload_image_blake3_hash(bytes) != policy.spawn_spec.image_hash:
         return FsExecPrepareResult(scheduler: scheduler, pid: -13, entry: 0)
+    # Charge the new child against every bound process limit on the caller's
+    # resource ancestry before staging, so an over-budget launch never
+    # burns a one-use authority.
+    if not scheduler.resource_process_admits(context.task_id):
+        return FsExecPrepareResult(scheduler: scheduler, pid: -11, entry: 0)
     val staged = managed_image_authority_issue_v1(bytes, arch,
         "managed-workload")
     if not staged.staged:
@@ -65,6 +71,22 @@ pub fn launch_compiled_workload_into_scheduler(
         return prepared
     var live_scheduler = prepared.scheduler
     val child = TaskId(id: prepared.pid as u64)
+    # Adoption publishes the child with unbound default security; every
+    # later binder (limits, weight, filter, view) requires `policy_bound`, so
+    # bind the fresh managed identity first, parented on the caller's
+    # resource domain. A forked caller keeps its parent's domain
+    # (task_security_fork), so read the caller's TCB rather than assuming
+    # domain == task id; otherwise its launches would escape the limit.
+    val parent_id = context.task_id.id
+    val caller_task = live_scheduler.get_task(context.task_id)
+    if caller_task == nil:
+        live_scheduler.exit_task_by_id(child, -125)
+        return FsExecPrepareResult(scheduler: live_scheduler, pid: -12, entry: 0)
+    val parent_domain = caller_task.unwrap().security.resource_domain_id
+    if not live_scheduler.bind_managed_child_security(child,
+        task_security_binding_managed_child(parent_id, parent_domain, child)):
+        live_scheduler.exit_task_by_id(child, -125)
+        return FsExecPrepareResult(scheduler: live_scheduler, pid: -12, entry: 0)
     if not live_scheduler.bind_managed_child_resource_limits(
         child, policy.resource_spec.process_limit,
         policy.resource_spec.memory_pages

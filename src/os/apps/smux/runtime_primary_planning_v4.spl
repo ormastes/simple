@@ -1,0 +1,38 @@
+use os.apps.smux.runtime_primary_request_v4.*
+use os.apps.smux.runtime_primary_store_v4.*
+use os.apps.smux.runtime_primary_reply_v4.smux_primary_reply_v4
+use os.apps.smux.runtime_binding_state_v3.{SmuxRuntimeBindingOwnerV3, SmuxRuntimeBindingTurnV3}
+use os.apps.smux.runtime_binding_planning_v3.smux_runtime_binding_resolve_context_v3
+use std.common.contracts.container.primary_attach_v1.ContainerPrimaryAttachPlanV1
+use std.nogc_async_mut.container.primary_attach_v1.simple_container_primary_attach_plan_v1
+
+pub struct SmuxPrimaryPlanningTurnV4:
+    owner: SmuxRuntimeBindingOwnerV3
+    plan: ContainerPrimaryAttachPlanV1?
+    error: text
+
+pub fn smux_primary_resolve_v4(owner: SmuxRuntimeBindingOwnerV3,
+        request: SmuxRuntimePrimaryRequestV4) -> SmuxPrimaryPlanningTurnV4:
+    var current = owner
+    val digest = smux_runtime_primary_request_digest_v4(request)
+    if digest.is_err(): return SmuxPrimaryPlanningTurnV4(current, nil, digest.unwrap_err())
+    val resolved = smux_runtime_binding_resolve_context_v3(current.local, current.policy, request.target,
+        current.service_incarnation, digest.unwrap())
+    current.local = resolved.local
+    if resolved.error != "": return SmuxPrimaryPlanningTurnV4(current, nil, resolved.error)
+    val planned = simple_container_primary_attach_plan_v1(current.local.container, resolved.execution.unwrap(),
+        resolved.runtime.unwrap(), resolved.identity.unwrap(), current.policy.stream, current.policy.resources, request.terminal_mode)
+    current.local.container = planned.owner
+    SmuxPrimaryPlanningTurnV4(current, planned.plan, planned.error)
+
+pub fn smux_primary_plan_v4(owner: SmuxRuntimeBindingOwnerV3,
+        request: SmuxRuntimePrimaryRequestV4) -> SmuxRuntimeBindingTurnV3:
+    val planned = smux_primary_resolve_v4(owner, request)
+    if planned.error != "" or planned.plan == nil:
+        return smux_primary_reply_v4(planned.owner, request.target.binding_uid, "rejected",
+            if planned.error == "": "primary-plan-unavailable" else: planned.error)
+    val plan = planned.plan.unwrap()
+    val stored = smux_primary_plan_store_v4(planned.owner.local.capacity.journal.root, request, plan)
+    if stored.is_err(): return smux_primary_reply_v4(planned.owner, request.target.binding_uid, "rejected", stored.unwrap_err())
+    smux_primary_reply_v4(planned.owner, request.target.binding_uid, "planned", "primary-helper-demand-retained",
+        plan.request_digest, plan.identity.binding_digest)

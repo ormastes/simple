@@ -9,6 +9,11 @@ Source: `test/01_unit/os/apps/smux/runtime_control_owner_v1_spec.spl`.
 Production modules: common `session_runtime_control_v1`, fixed
 `runtime_control_policy_v1`, and `smux_runtime_control_owner_v1`.
 
+The primary input addition includes one NOT_RUN pure scenario: a retained
+Unknown receipt blocks new Input revisions and server stop while allowing exact
+issuance replay and independent Geometry metadata. Selected-kind admin revoke
+preserves the receipt and the other kind. It uses no native session or effect.
+
 The canonical target uses existing host-scope and runtime codecs, exact runtime
 scope fencing, immutable workload/binding digests, service/child incarnations,
 and exact attachment identity. Primary targets have no exec fields. Exec shape

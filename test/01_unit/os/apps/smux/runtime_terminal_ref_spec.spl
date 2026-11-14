@@ -1,3 +1,4 @@
+use std.nogc_async_mut.container.terminal_session_v1.ContainerOwnedTerminalSessionV1
 # Pure state regressions only. Synthetic refs never enter a native operation.
 # AUTHORED / NOT_RUN: these checks do not prove a live provider stream.
 use std.spec.{describe, it, expect, step}
@@ -98,13 +99,13 @@ describe "smux canonical terminal ref state":
         step("Apply a pure settlement metadata transition while retaining captured bytes and incarnation")
         val before = terminal_cleaned_state_fixture_v3()
         val pane = before.get_pane(0)
-        val transfer = pane.owned_terminal_transfer.unwrap()
+        val transfer = pane.output_terminal_transfer().unwrap()
         val clock = service_revision_new()
         val ack = terminal_settlement_ack_fixture_v3(transfer)
         val changed = terminal_transport_settle_owned_v3(before, clock, "s", "w", "p",
             clock.epoch, clock.value, pane.child_incarnation, transfer, transfer.owner.launch.worker_id, ack.request_digest, ack).unwrap()
         val after = changed.get_pane(0)
-        expect(after.owned_terminal_transfer == nil).to_equal(true)
+        expect(after.owned_terminal_session == nil).to_equal(true)
         expect(after.terminal_ref == nil).to_equal(true)
         expect(after.helper_cleaned_awaiting_release).to_equal(false)
         expect(after.child_pid).to_equal(-1)
@@ -121,7 +122,7 @@ describe "smux canonical terminal ref state":
         step("Keep retained authority on wrong host correlations target fences or full owner bundle")
         val before = terminal_cleaned_state_fixture_v3()
         val pane = before.get_pane(0)
-        val transfer = pane.owned_terminal_transfer.unwrap()
+        val transfer = pane.output_terminal_transfer().unwrap()
         val clock = service_revision_new()
         for mismatch in ["operation", "request", "native", "prepared", "tree", "outcome", "revision", "sequence"]:
             var ack = terminal_settlement_ack_fixture_v3(transfer)
@@ -152,7 +153,7 @@ describe "smux canonical terminal ref state":
         step("Retire retained cleanup authority without resetting an exhausted clock or child incarnation")
         val before = terminal_cleaned_state_fixture_v3()
         val pane = before.get_pane(0)
-        val transfer = pane.owned_terminal_transfer.unwrap()
+        val transfer = pane.output_terminal_transfer().unwrap()
         val ack = terminal_settlement_ack_fixture_v3(transfer)
         var clock = service_revision_new()
         clock.value = 18446744073709551615u64
@@ -264,7 +265,7 @@ describe "smux canonical terminal ref state":
         for copy in [pane.with_focus(true), pane.with_input(pane_input_new()), pane.resize(81, 25),
                 pane.without_replies(), pane.with_child(-1), pane.with_pty(-1, -1),
                 pane.with_terminal_ref(PipedProcessRefV1(pid: 99, generation: 2))]:
-            expect(copy.same_owned_terminal_transfer(pane.owned_terminal_transfer)).to_equal(true)
+            expect(copy.same_owned_terminal_transfer(pane.output_terminal_transfer())).to_equal(true)
             expect(copy.same_terminal_ref(pane.terminal_ref)).to_equal(true)
             expect(copy.helper_cleaned_awaiting_release).to_equal(true)
             expect(copy.can_attach()).to_equal(false)
@@ -276,9 +277,9 @@ describe "smux canonical terminal ref state":
         var other = owned_terminal_fixture(8192)
         other.reference = pane.terminal_ref.unwrap()
         var changed_owner = pane
-        changed_owner.owned_terminal_transfer = other
+        changed_owner.owned_terminal_session = Some(ContainerOwnedTerminalSessionV1.OutputFollow(other))
         expect(changed_owner.same_terminal_ref(pane.terminal_ref)).to_equal(true)
-        expect(changed_owner.same_owned_terminal_transfer(pane.owned_terminal_transfer)).to_equal(false)
+        expect(changed_owner.same_owned_terminal_transfer(pane.output_terminal_transfer())).to_equal(false)
         expect(service_configuration_equal(state, state.replace_pane(0, changed_owner))).to_equal(false)
         var cleaned = pane
         cleaned.helper_cleaned_awaiting_release = true
@@ -292,7 +293,7 @@ describe "smux canonical terminal ref state":
         state = state.replace_pane(0, pane)
         # The cleaned flag skips cleanup; these calls must not touch native fake refs.
         val closed = close_owned_children(state, "s")
-        expect(closed.get_pane(0).same_owned_terminal_transfer(pane.owned_terminal_transfer)).to_equal(true)
+        expect(closed.get_pane(0).same_owned_terminal_transfer(pane.output_terminal_transfer())).to_equal(true)
         expect(closed.get_pane(0).helper_cleaned_awaiting_release).to_equal(true)
         val reset = prepare_pane_reset_v2(state)
         expect(reset.may_reset).to_equal(false)
@@ -304,7 +305,7 @@ describe "smux canonical terminal ref state":
         expect(pane_alive_state(state, false, "s", "w", "p").result.unwrap_err()).to_equal("terminal helper cleaned; host release pending")
         val polled = pane_poll_state(state, [], [])
         expect(polled.result).to_equal(0)
-        expect(polled.state.get_pane(0).same_owned_terminal_transfer(pane.owned_terminal_transfer)).to_equal(true)
+        expect(polled.state.get_pane(0).same_owned_terminal_transfer(pane.output_terminal_transfer())).to_equal(true)
 
     it "rejects budget-bearing references on the old bare adoption path before native validation":
         step("Prevent dropping broker cleanup provenance into a ref-only pane")
@@ -332,7 +333,7 @@ describe "smux canonical terminal ref state":
         var other = owned_terminal_fixture(8192)
         other.reference = changed.terminal_ref.unwrap()
         changed = after.get_pane(0)
-        changed.owned_terminal_transfer = other
+        changed.owned_terminal_session = Some(ContainerOwnedTerminalSessionV1.OutputFollow(other))
         val authority = split_checkpoint_restore(after.replace_pane(0, changed), checkpoint)
         expect(authority.is_err()).to_equal(true)
         expect(authority.unwrap_err()).to_contain("owned cleanup authority changed")

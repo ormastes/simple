@@ -1,0 +1,38 @@
+use os.apps.smux.runtime_primary_control_request_v4.{SmuxPrimaryControlRequestV4, smux_primary_control_request_digest_v4}
+use os.apps.smux.runtime_primary_input_state_v4.SmuxPrimaryInputAttemptV4
+use std.common.process.input_control_v1.ProcessInputWriteDispositionV1
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+
+pub fn smux_primary_control_reply_v4(request: SmuxPrimaryControlRequestV4,
+        incarnation: text, status: text, code: text, revision: i64, nonce: text,
+        target_digest: text, usable: bool, attempt: SmuxPrimaryInputAttemptV4?) -> text:
+    val digest = smux_primary_control_request_digest_v4(request)
+    if digest.is_err(): return "smux: invalid primary control request"
+    var disposition = "none"
+    var sequence: i64 = 0
+    var accepted: i64 = 0
+    var attempted_revision: i64 = 0
+    var attempt_digest = ""
+    var attempt_error = ""
+    if attempt != nil:
+        val retained = attempt.unwrap()
+        disposition = match retained.disposition:
+            case ProcessInputWriteDispositionV1.Rejected: "rejected"
+            case ProcessInputWriteDispositionV1.Recorded: "recorded"
+            case ProcessInputWriteDispositionV1.Unknown: "unknown"
+        sequence = retained.sequence
+        attempted_revision = retained.revision
+        accepted = retained.accepted_bytes
+        attempt_digest = retained.request_digest
+        attempt_error = retained.error
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(4), "kind": SdnValue.String("smux-primary-control-reply"),
+        "bindingUid": SdnValue.String(request.control.binding_uid), "serviceIncarnation": SdnValue.String(incarnation),
+        "status": SdnValue.String(status), "code": SdnValue.String(code), "requestDigest": SdnValue.String(digest.unwrap()),
+        "revision": SdnValue.Int(revision), "nonce": SdnValue.String(nonce), "targetDigest": SdnValue.String(target_digest),
+        "inputSupported": SdnValue.Bool(usable), "geometrySupported": SdnValue.Bool(false), "interactive": SdnValue.Bool(false),
+        "attemptSequence": SdnValue.Int(sequence), "attemptRevision": SdnValue.Int(attempted_revision),
+        "attemptRequestDigest": SdnValue.String(attempt_digest), "disposition": SdnValue.String(disposition),
+        "acceptedBytes": SdnValue.Int(accepted), "attemptError": SdnValue.String(attempt_error),
+        "qualification": SdnValue.String("source-only-not-run")}
+    sdn_encode_canonical(SdnValue.Dict(fields))

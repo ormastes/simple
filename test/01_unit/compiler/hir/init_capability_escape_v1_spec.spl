@@ -1,0 +1,80 @@
+# @cover src/compiler/20.hir/hir_lowering/required_field_init_v1.spl 80%
+"""
+## Purpose and audience
+`E_INIT_CAPABILITY_ESCAPE` of the immutable-views sub-plan (section 3.2:
+"Producer or mutable alias illegally escapes its region"). The plan leaves
+"region" undefined; this spec pins the PROVISIONAL definition proposed in
+doc/08_tracking/bug/immutable_async_open_questions_2026-11-15.md (owner to
+ratify): the region is the constructing function's short-borrow boundary
+(the one `record_loan_escape` in the borrow checker already uses for task and
+promise capture). An async producer runs after that boundary, so a mutable
+local named directly as a producer argument escapes it.
+Default OFF: the check runs only when SIMPLE_INIT_CAPABILITY_ESCAPE=on.
+## Operator workflow
+bin/simple test test/01_unit/compiler/hir/init_capability_escape_v1_spec.spl
+## Compatibility and limitations
+Only a mutable local that is a direct argument of the producer call is judged.
+Captures nested in producer sub-expressions, aliases and closures are not.
+## Verification guidance and troubleshooting
+A RED on the `val` or parameter cases means false positives; fix first.
+"""
+# Lifecycle: doc/03_plan/compiler/data/immutable_views_async_init_revisions_2026-11-13.md
+# @manual_section: Producer capability escape
+use std.spec.*
+use std.env.variables.{env_set, env_get}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.required_field_init_v1.*
+
+fn check(source: text, name: text, switch: text) -> RequiredInitReportV1:
+    val filename = "init_escape_" + name + ".spl"
+    val saved_bootstrap = env_get("SIMPLE_BOOTSTRAP")
+    env_set("SIMPLE_BOOTSTRAP", "0")
+    env_set("SIMPLE_INIT_CAPABILITY_ESCAPE", switch)
+    val module = parse_full_frontend(source, filename, filename, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(filename)
+    val hir = hir_lowering.lower_module(module)
+    env_set("SIMPLE_BOOTSTRAP", saved_bootstrap)
+    val report = hir_required_field_init_check_v1(hir.name, hir.path, hir.symbols, module.classes,
+        hir.classes, hir.structs, hir.functions)
+    env_set("SIMPLE_INIT_CAPABILITY_ESCAPE", "")
+    report
+
+fn codes(report: RequiredInitReportV1) -> text:
+    var out = ""
+    for row in report.rows:
+        out = out + row.code + ":" + row.class_name + "." + row.field + ";"
+    out
+
+val NODE_CLASS: text = "@support_async_immutable\nclass HirNode:\n    id: i64\n    body: text\n    inferred: i64\n"
+val ASYNC_STAND_IN: text = "fn async_init(x: i64) -> i64:\n    x\n"
+
+describe "Producer capability escape (E_INIT_CAPABILITY_ESCAPE, provisional, default off)":
+    it "reports a mutable local passed to the producer when the switch is on (repro)":
+        # @req REQ-IMM-ASY-ESC
+        step("Bind `inferred` to a producer that takes a `var` local")
+        val src = NODE_CLASS + ASYNC_STAND_IN + "fn build() -> HirNode:\n    var counter = 3\n    HirNode(id: 1, body: \"b\", inferred: async_init(counter))\n"
+        val report = check(src, "var_on", "on")
+        expect(codes(report)).to_equal("E_INIT_CAPABILITY_ESCAPE:HirNode.inferred;")
+        expect(report.rows[0].diagnostic.fixes.len() >= 1).to_equal(true)
+
+    it "is off by default: identical report to a build without the check (off-identity)":
+        # @req REQ-IMM-ASY-ESC
+        val src = NODE_CLASS + ASYNC_STAND_IN + "fn build() -> HirNode:\n    var counter = 3\n    HirNode(id: 1, body: \"b\", inferred: async_init(counter))\n"
+        expect(codes(check(src, "var_off", ""))).to_equal("")
+        expect(codes(check(src, "var_off_word", "off"))).to_equal("")
+
+    it "accepts an immutable local and a literal as the producer argument (neighbouring pattern)":
+        # @req REQ-IMM-ASY-ESC
+        val val_src = NODE_CLASS + ASYNC_STAND_IN + "fn build() -> HirNode:\n    val counter = 3\n    HirNode(id: 1, body: \"b\", inferred: async_init(counter))\n"
+        expect(codes(check(val_src, "val_on", "on"))).to_equal("")
+        val lit_src = NODE_CLASS + ASYNC_STAND_IN + "fn build() -> HirNode:\n    HirNode(id: 1, body: \"b\", inferred: async_init(7))\n"
+        expect(codes(check(lit_src, "lit_on", "on"))).to_equal("")
+
+    it "does not judge a mutable local used only by a synchronous field of the same construction":
+        # @req REQ-IMM-ASY-ESC
+        val src = NODE_CLASS + ASYNC_STAND_IN + "fn build() -> HirNode:\n    var counter = 3\n    HirNode(id: counter, body: \"b\", inferred: async_init(7))\n"
+        expect(codes(check(src, "sync_field_on", "on"))).to_equal("")

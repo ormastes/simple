@@ -193,8 +193,12 @@ fn get_iterator_values(iterable: &Value) -> Result<Vec<Value>, CompileError> {
         Value::Dict(map) => {
             // Iterate over dict returns (key, value) tuples; a layered module
             // value iterates its whole visible surface.
+            let is_namespace = crate::interpreter::is_module_namespace_dict(map);
             let flat = crate::interpreter::module_dict_flat(map);
             let map = flat.as_ref().unwrap_or(map);
+            if is_namespace {
+                super::gate_namespace_private_entries(map)?;
+            }
             let entries: Vec<Value> = crate::value::dict_entries_ordered(map)
                 .into_iter()
                 .map(|(k, v)| {

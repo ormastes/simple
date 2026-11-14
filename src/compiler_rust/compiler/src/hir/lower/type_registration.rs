@@ -17,6 +17,24 @@ use super::error::{LowerError, LowerResult};
 use super::lowerer::Lowerer;
 
 impl Lowerer {
+    fn record_field_declarations(&mut self, type_id: TypeId, owner: String, fields: &[ast::Field]) {
+        let declared = fields.iter().map(|f| (f.name.clone(), f.ty.clone())).collect();
+        match self.struct_field_declared_types.get(&type_id) {
+            Some(None) => return,
+            Some(Some((previous_owner, _))) if previous_owner != &owner => {
+                self.struct_field_declared_types.insert(type_id, None);
+                return;
+            }
+            _ => {}
+        }
+        self.struct_field_declared_types.insert(type_id, Some((owner, declared)));
+    }
+
+    fn field_declaration_owner<'a>(&self, attrs: impl IntoIterator<Item = &'a str>) -> String {
+        Self::flatten_owner_of(attrs)
+            .or_else(|| self.current_file.as_ref().map(|p| crate::interpreter::normalize_path_key(p).to_string_lossy().into_owned()))
+            .unwrap_or_else(|| "<local-module>".to_string())
+    }
     fn register_named_struct_preserving_distinct_layout(&mut self, name: String, hir_type: HirType) -> TypeId {
         let HirType::Struct { fields: new_fields, .. } = &hir_type else {
             return self.module.types.update_named(name, hir_type);
@@ -58,17 +76,6 @@ impl Lowerer {
             .collect();
         if !defaults.is_empty() {
             self.struct_field_defaults.insert(c.name.clone(), defaults);
-        }
-        let type_names: std::collections::HashMap<String, String> = c
-            .fields
-            .iter()
-            .filter_map(|f| match &f.ty {
-                ast::Type::Simple(n) => Some((f.name.clone(), n.clone())),
-                _ => None,
-            })
-            .collect();
-        if !type_names.is_empty() {
-            self.struct_field_type_names.insert(c.name.clone(), type_names);
         }
 
         // F1/S3 — carry the declaration KIND the parser knew into HIR. `class`
@@ -121,6 +128,9 @@ impl Lowerer {
                 type_bindings: std::collections::HashMap::new(), // Will be filled during specialization
             },
         );
+        let owner = self.field_declaration_owner(c.attributes.iter().map(|a| a.name.as_str())
+            .chain(c.methods.iter().flat_map(|m| m.attributes.iter().map(|a| a.name.as_str()))));
+        self.record_field_declarations(type_id, owner, &c.fields);
         if let Some(canonical_key) = self.global_struct_key_for_name(&c.name) {
             if canonical_key != c.name {
                 self.module.types.register_alias(canonical_key, type_id);
@@ -193,17 +203,6 @@ impl Lowerer {
         if !defaults.is_empty() {
             self.struct_field_defaults.insert(s.name.clone(), defaults);
         }
-        let type_names: std::collections::HashMap<String, String> = s
-            .fields
-            .iter()
-            .filter_map(|f| match &f.ty {
-                ast::Type::Simple(n) => Some((f.name.clone(), n.clone())),
-                _ => None,
-            })
-            .collect();
-        if !type_names.is_empty() {
-            self.struct_field_type_names.insert(s.name.clone(), type_names);
-        }
 
         let mut fields = Vec::new();
         for field in &s.fields {
@@ -227,6 +226,9 @@ impl Lowerer {
         };
 
         let type_id = self.register_named_struct_preserving_distinct_layout(s.name.clone(), hir_type);
+        let owner = self.field_declaration_owner(s.attributes.iter().map(|a| a.name.as_str())
+            .chain(s.methods.iter().flat_map(|m| m.attributes.iter().map(|a| a.name.as_str()))));
+        self.record_field_declarations(type_id, owner, &s.fields);
         if let Some(canonical_key) = self.global_struct_key_for_name(&s.name) {
             if canonical_key != s.name {
                 self.module.types.register_alias(canonical_key, type_id);

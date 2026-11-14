@@ -52,7 +52,8 @@ use .main_lazy_node_tools.{require_external_tool}
 use .main_lazy_telemetry.{tok_record, tok_rollup, tok_load_events, TOK_FEATURE_CTX}
 use .main_lazy_log_opt.{log_opt_optimize, log_opt_optimize_recorded, log_opt_plugins_text, LOG_OPT_FEATURE}
 
-use std.io_runtime.{env_get, file_read, file_write, file_append_text, file_exists, file_delete, dir_create, time_now_unix_micros}
+use .ctx_index_cache.{CtxStorePath, CtxStoreLength, CtxStoreDigest, CtxGenerationKey, CtxCacheDecision, CtxCacheRebuildCount, ctx_generation_key_missing, ctx_generation_key_present, ctx_cache_decide, ctx_cache_rebuild_count_next}
+use std.io_runtime.{env_get, file_read, file_write, file_append_text, file_exists, file_delete, dir_create, time_now_unix_micros, file_size_signed, file_hash_sha256_or_empty}
 use std.nogc_sync_mut.io.file_ops.{file_atomic_write, file_read_text_at}
 use std.database.core.{parse_sdn_table}
 use std.nogc_sync_mut.io.resource_scope.{ExecutionResourceClass, execution_resource_scope, run_in_execution_resource_scope}
@@ -508,6 +509,60 @@ fn ctx_prepare_index(chunks: [CtxChunk], source_prefix: text) -> CtxIndex:
     if avg < 1.0:
         avg = 1.0
     CtxIndex(docs: docs, norm: norm, avg_bytes: avg)
+
+# ---------------------------------------------------------------------------
+# Per-process generation cache (see ctx_index_cache.spl)
+# ---------------------------------------------------------------------------
+# The parsed store and the last prepared index are reused while the store's
+# generation key (path, presence, length, SHA-256) is unchanged; any append,
+# delete or rename-replace changes the key and forces one re-read. The key is
+# read BEFORE the store, so a concurrent append can only make the cached
+# chunks newer than their key, which the next call then rebuilds.
+
+var _CTX_CACHE_KEY: CtxGenerationKey? = None
+var _CTX_CACHE_CHUNKS: [CtxChunk] = []
+var _CTX_CACHE_INDEX: CtxIndex? = None
+var _CTX_CACHE_PREFIX: text = ""
+var _CTX_CACHE_REBUILDS: CtxCacheRebuildCount = CtxCacheRebuildCount(count: 0)
+
+fn _ctx_store_generation_key() -> CtxGenerationKey:
+    val path = _ctx_chunks_path()
+    val store = CtxStorePath(value: path)
+    if not file_exists(path):
+        return ctx_generation_key_missing(store)
+    val size = file_size_signed(path)
+    if size < 0:
+        return ctx_generation_key_missing(store)
+    ctx_generation_key_present(store, CtxStoreLength(bytes: size), CtxStoreDigest(sha256: file_hash_sha256_or_empty(path)))
+
+# Store re-reads performed by this process (spec / perf probe).
+pub fn ctx_index_cache_rebuilds() -> CtxCacheRebuildCount:
+    _CTX_CACHE_REBUILDS
+
+fn _ctx_cached_index(source_prefix: text) -> CtxIndex:
+    val key = _ctx_store_generation_key()
+    match ctx_cache_decide(_CTX_CACHE_KEY, key):
+        case Hit:
+            pass
+        case DigestUnavailable:
+            # Unverifiable store: never cached, read fresh every time.
+            _CTX_CACHE_KEY = None
+            _CTX_CACHE_INDEX = None
+            _CTX_CACHE_CHUNKS = []
+            _CTX_CACHE_REBUILDS = ctx_cache_rebuild_count_next(_CTX_CACHE_REBUILDS)
+            return ctx_prepare_index(_ctx_load_chunks(), source_prefix)
+        case _:
+            _CTX_CACHE_CHUNKS = _ctx_load_chunks()
+            _CTX_CACHE_KEY = Some(key)
+            _CTX_CACHE_INDEX = None
+            _CTX_CACHE_REBUILDS = ctx_cache_rebuild_count_next(_CTX_CACHE_REBUILDS)
+    if val cached = _CTX_CACHE_INDEX:
+        if _CTX_CACHE_PREFIX == source_prefix:
+            return cached
+    val idx = ctx_prepare_index(_CTX_CACHE_CHUNKS, source_prefix)
+    _CTX_CACHE_INDEX = Some(idx)
+    _CTX_CACHE_PREFIX = source_prefix
+    idx
 
 fn _ctx_dedupe(terms: [text]) -> [text]:
     var seen: Dict<text, bool> = {}
@@ -984,7 +1039,7 @@ fn handle_simple_ctx_search(id: text, body: text) -> text:
         return make_tool_error(id, -32602, "Missing required parameter: queries (array) or query")
     val source = extract_field(body, "source")
     val limit = _ctx_int_param(body, "limit", _CTX_DEFAULT_LIMIT, _CTX_MAX_LIMIT)
-    val index = ctx_prepare_index(_ctx_load_chunks(), source)
+    val index = _ctx_cached_index(source)
     var blocks: [text] = []
     for q in queries:
         blocks.push(ctx_format_hits(q, ctx_bm25_search_index(index, q, limit)))
@@ -1063,8 +1118,9 @@ fn handle_simple_ctx_batch_execute(id: text, body: text) -> text:
     if queries.len() == 0:
         lines.push("(no queries given — use simple_ctx_search with source '" + source + "')")
     else:
-        # One store load + one normalization pass, shared by every query.
-        val index = ctx_prepare_index(_ctx_load_chunks(), source)
+        # One store load + one normalization pass, shared by every query
+        # (reused across calls while the store generation is unchanged).
+        val index = _ctx_cached_index(source)
         for q in queries:
             lines.push(ctx_format_hits(q, ctx_bm25_search_index(index, q, limit)))
     val out = lines.join("\n")

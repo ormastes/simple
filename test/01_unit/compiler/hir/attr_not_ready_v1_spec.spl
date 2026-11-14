@@ -1,0 +1,94 @@
+# @cover src/compiler/20.hir/hir_lowering/required_field_init_v1.spl 80%
+"""
+## Purpose and audience
+ASY-02 / `E_ATTR_NOT_READY` of the immutable-views sub-plan (section 3.2:
+"Pending field read without proven readiness/await -> compile error").
+A field bound to an async producer at a construction (`f: async_init(...)`,
+i.e. source `f: async <expr>`) is pending until awaited. Reading it through the
+constructed local without `await` is a compile error; `await node.f` is the
+explicit suspension and passes. Readers are compiler authors and the lane reviewer.
+Plan: doc/03_plan/compiler/data/immutable_views_async_init_revisions_2026-11-13.md
+(sections 3.1-3.2, 10: ASY-02). Category: Language.
+## Operator workflow
+bin/simple test test/01_unit/compiler/hir/attr_not_ready_v1_spec.spl
+## Compatibility and limitations
+Only direct reads through a local initialized by a construction in the same
+function are judged (statically evident pending state). Aliases, fields of
+parameters and cross-function flow are not tracked; readiness proofs other than
+`await` are an open question, see
+doc/08_tracking/bug/immutable_async_open_questions_2026-11-15.md.
+The error is unconditional once the class opts in with `@support_async_immutable`
+(the annotation is the opt-in), like the other E_ASYNC_INIT_* codes.
+## Verification guidance and troubleshooting
+A RED on the sync-constructed or `await` cases means false positives, which
+would break the compiler's own bootstrap; fix before anything else.
+"""
+# Lifecycle: doc/03_plan/compiler/data/immutable_views_async_init_revisions_2026-11-13.md
+# @manual_section: Pending attribute readiness
+use std.spec.*
+use std.env.variables.{env_set, env_get}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.required_field_init_v1.*
+
+fn check(source: text, name: text) -> RequiredInitReportV1:
+    val filename = "attr_not_ready_" + name + ".spl"
+    val saved_bootstrap = env_get("SIMPLE_BOOTSTRAP")
+    env_set("SIMPLE_BOOTSTRAP", "0")
+    val module = parse_full_frontend(source, filename, filename, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(filename)
+    val hir = hir_lowering.lower_module(module)
+    env_set("SIMPLE_BOOTSTRAP", saved_bootstrap)
+    hir_required_field_init_check_v1(hir.name, hir.path, hir.symbols, module.classes,
+        hir.classes, hir.structs, hir.functions)
+
+fn codes(report: RequiredInitReportV1) -> text:
+    var out = ""
+    for row in report.rows:
+        out = out + row.code + ":" + row.class_name + "." + row.field + ";"
+    out
+
+val NODE_CLASS: text = "@support_async_immutable\nclass HirNode:\n    id: i64\n    body: text\n    inferred: i64\n"
+val ASYNC_STAND_IN: text = "fn async_init(x: i64) -> i64:\n    x\n"
+val BOUND: text = "    val n = HirNode(id: 1, body: \"b\", inferred: async_init(7))\n"
+
+describe "Pending attribute readiness (E_ATTR_NOT_READY)":
+    it "reports E_ATTR_NOT_READY for a pending field read without await (ASY-02 repro)":
+        # @req REQ-IMM-ASY-02
+        step("Bind `inferred` to a producer, then read it directly")
+        val src = NODE_CLASS + ASYNC_STAND_IN + "fn use_it() -> i64:\n" + BOUND + "    n.inferred\n"
+        val report = check(src, "unawaited")
+        # @capture(exec): one diagnostic naming the pending field, with fixes
+        expect(codes(report)).to_equal("E_ATTR_NOT_READY:HirNode.inferred;")
+        expect(report.rows[0].diagnostic.fixes.len() >= 1).to_equal(true)
+
+    it "accepts the same read under an explicit await (ASY-02 pass half)":
+        # @req REQ-IMM-ASY-02
+        val src = NODE_CLASS + ASYNC_STAND_IN + "fn use_it() -> i64:\n" + BOUND + "    val r = await n.inferred\n    r\n"
+        expect(codes(check(src, "awaited"))).to_equal("")
+
+    it "does not judge synchronously initialized fields of the same construction":
+        # @req REQ-IMM-ASY-02
+        step("`id` is sync-initialized: reading it needs no await")
+        val src = NODE_CLASS + ASYNC_STAND_IN + "fn use_it() -> i64:\n" + BOUND + "    n.id\n"
+        expect(codes(check(src, "syncfield"))).to_equal("")
+
+    it "does not judge a field of a fully synchronous construction":
+        # @req REQ-IMM-ASY-01
+        val src = NODE_CLASS + "fn use_it() -> i64:\n    val n = HirNode(id: 1, body: \"b\", inferred: 7)\n    n.inferred\n"
+        expect(codes(check(src, "allsync"))).to_equal("")
+
+    it "reports each unawaited read, and only the unawaited ones (neighbouring pattern)":
+        # @req REQ-IMM-ASY-02
+        val src = NODE_CLASS + ASYNC_STAND_IN + "fn use_it() -> i64:\n" + BOUND +
+            "    val a = await n.inferred\n    val b = n.inferred\n    a + b + n.inferred\n"
+        expect(codes(check(src, "mixed"))).to_equal("E_ATTR_NOT_READY:HirNode.inferred;E_ATTR_NOT_READY:HirNode.inferred;")
+
+    it "forgets a pending local once it is rebound to a fresh value":
+        # @req REQ-IMM-ASY-02
+        val src = NODE_CLASS + ASYNC_STAND_IN + "fn use_it() -> i64:\n    var n = HirNode(id: 1, body: \"b\", inferred: async_init(7))\n" +
+            "    n = HirNode(id: 2, body: \"c\", inferred: 9)\n    n.inferred\n"
+        expect(codes(check(src, "rebound"))).to_equal("")
