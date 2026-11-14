@@ -67,6 +67,10 @@ class ExtensionHost:
     keybinding_registry: [ExtensionKeybindingEntry]
     custom_editor_registry: [ExtensionCustomEditorEntry]
     theme_registry: [ExtensionThemeEntry]
+    view_container_registry: [ExtensionViewContainerEntry]
+    view_registry: [ExtensionViewEntry]
+    panel_registry: [ExtensionPanelEntry]
+    status_item_registry: [ExtensionStatusItemEntry]
 
 struct ExtensionCommandEntry:
     extension_name: text
@@ -121,6 +125,24 @@ struct ExtensionCustomEditorEntry:
 struct ExtensionThemeEntry:
     extension_name: text
     theme: ExtensionTheme
+
+# Ownership records for schema-v2 contributions (view containers, views,
+# panels, status items); registered on activate, dropped on deactivate.
+struct ExtensionViewContainerEntry:
+    extension_name: text
+    container: ExtensionViewContainer
+
+struct ExtensionViewEntry:
+    extension_name: text
+    view: ExtensionView
+
+struct ExtensionPanelEntry:
+    extension_name: text
+    panel: ExtensionPanel
+
+struct ExtensionStatusItemEntry:
+    extension_name: text
+    item: ExtensionStatusItem
 
 pub fn extension_debug_adapter_id(entry: ExtensionDebugAdapterEntry) -> text:
     entry.adapter.id
@@ -182,7 +204,11 @@ impl ExtensionHost:
             keybinding_manager: keybinding_manager_new(),
             keybinding_registry: [],
             custom_editor_registry: [],
-            theme_registry: []
+            theme_registry: [],
+            view_container_registry: [],
+            view_registry: [],
+            panel_registry: [],
+            status_item_registry: []
         )
 
     me index_extension(path: text):
@@ -720,6 +746,35 @@ impl ExtensionHost:
                 extension_name: manifest.name,
                 theme: theme
             ))
+        for container in manifest.contributes_view_containers:
+            me.view_container_registry.push(ExtensionViewContainerEntry(
+                extension_name: manifest.name,
+                container: container
+            ))
+        for view in manifest.contributes_views:
+            me.view_registry.push(ExtensionViewEntry(extension_name: manifest.name, view: view))
+        for panel in manifest.contributes_panels:
+            me.panel_registry.push(ExtensionPanelEntry(extension_name: manifest.name, panel: panel))
+        for item in manifest.contributes_status_items:
+            me.status_item_registry.push(ExtensionStatusItemEntry(extension_name: manifest.name, item: item))
+
+    fn view_registered(view_id: text) -> bool:
+        for entry in me.view_registry:
+            if entry.view.id == view_id:
+                return true
+        false
+
+    fn panel_registered(panel_id: text) -> bool:
+        for entry in me.panel_registry:
+            if entry.panel.id == panel_id:
+                return true
+        false
+
+    fn status_item_registered(item_id: text) -> bool:
+        for entry in me.status_item_registry:
+            if entry.item.id == item_id:
+                return true
+        false
 
     me _register_context(manifest: ExtensionManifest, path: text):
         me._unregister_context(manifest.name)
@@ -759,6 +814,26 @@ impl ExtensionHost:
             if entry.extension_name != name:
                 new_themes.push(entry)
         me.theme_registry = new_themes
+        var new_containers: [ExtensionViewContainerEntry] = []
+        for entry in me.view_container_registry:
+            if entry.extension_name != name:
+                new_containers.push(entry)
+        me.view_container_registry = new_containers
+        var new_views: [ExtensionViewEntry] = []
+        for entry in me.view_registry:
+            if entry.extension_name != name:
+                new_views.push(entry)
+        me.view_registry = new_views
+        var new_panels: [ExtensionPanelEntry] = []
+        for entry in me.panel_registry:
+            if entry.extension_name != name:
+                new_panels.push(entry)
+        me.panel_registry = new_panels
+        var new_status: [ExtensionStatusItemEntry] = []
+        for entry in me.status_item_registry:
+            if entry.extension_name != name:
+                new_status.push(entry)
+        me.status_item_registry = new_status
 
     # KeybindingManager.overrides has no owner tag, so a per-extension removal
     # rebuilds the override list from the surviving keybinding_registry entries
