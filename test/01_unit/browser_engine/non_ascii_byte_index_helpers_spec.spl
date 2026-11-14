@@ -1,0 +1,144 @@
+"""
+Byte offsets stay byte offsets across helper boundaries.
+
+Sibling of `non_ascii_byte_len_scanners_spec`. That spec pins scanners whose
+bound was `len()`; this one pins the places where a BYTE offset produced by one
+function is consumed by another. A finder that answers in bytes and a probe
+that reads with the codepoint-indexed `char_at` agree on ASCII and disagree by
+(bytes - codepoints) after the first multi-byte character, so every case puts a
+non-ASCII character BEFORE the thing being read.
+
+Two cases are the other way round on purpose: the fallback renderer's
+`max_chars` / `chars_per_line` are CHARACTER budgets, so those functions count
+and cut in codepoints and must not be moved to bytes.
+
+HTTP/2: wire lengths are byte counts. Known limit, not asserted and not changed
+here: `encode_byte(n)` for n >= 128 yields a multi-byte character, so a frame
+whose length or payload carries such a control byte does not round-trip. The
+cases below stay under 128 bytes per field.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-TEXT-WRAP-004 — non-ASCII text is scanned in one index space (bytes) end to end.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_engine2d_renderer.spl 1%
+use std.spec.*
+use std.common.web.browser_renderer_protocol.{BrowserTextInputOverlay}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_draw_ir_result_with_overlay_at_time
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_engine2d_renderer.{
+    _class_has, _hex_color_at, _selector_boundary_before
+}
+use std.gc_async_mut.gpu.browser_engine.html_fallback_renderer.{
+    br_fallback_wrap_lines, br_apply_text_overflow_ellipsis
+}
+use std.gc_async_mut.gpu.browser_engine.browser_renderer_utils.{
+    br_last_nested_selector_start
+}
+use std.gc_async_mut.gpu.browser_engine.net.h2_hpack.{
+    encode_header_block, decode_header_block, split_into_data_frames
+}
+use std.gc_async_mut.gpu.browser_engine.net.h2_frame.{encode_frame, decode_frame}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_raster.{
+    input_text_prefix
+}
+
+fn _caret_at_start() -> BrowserTextInputOverlay:
+    BrowserTextInputOverlay(
+        target_key: "id:q", anchor_byte: 0, focus_byte: 0,
+        view_start_byte: 0, caret_visible: true
+    )
+
+fn _boundaries(css: text, value: text) -> [i32]:
+    val html = "<style>html,body{{margin:0}}#q{{width:100px;height:18px" + css + "}}</style><input id='q' value='" + value + "'>"
+    val result = simple_web_layout_render_html_draw_ir_result_with_overlay_at_time(
+        html, 120, 30, 0, _caret_at_start()
+    )
+    # The page holds exactly one input, so its hit map is the only entry.
+    result.hit_index.input_text_hits[0].boundary_x_px
+
+describe "byte offsets survive helper boundaries on non-ASCII text":
+    it "AC-1: a class token after a non-ASCII token matches":
+        step("`é b` contains the class `b`; the token starts at BYTE 3")
+        expect(_class_has("é b", "b")).to_be(true)
+        step("a non-ASCII class name matches itself")
+        expect(_class_has("é", "é")).to_be(true)
+        step("control: a different name still does not match")
+        expect(_class_has("é b", "c")).to_be(false)
+
+    it "AC-2: the fallback wrap budget counts characters, not bytes":
+        step("6 Hangul characters (18 bytes), 64 px at 8 px per character = 8 per line")
+        val lines = br_fallback_wrap_lines("한국어한국어", 64, 16)
+        expect(lines.len()).to_equal(1)
+        expect(lines[0]).to_equal("한국어한국어")
+        step("over budget: cut on a character boundary")
+        val wrapped = br_fallback_wrap_lines("한국어한국어", 32, 16)
+        expect(wrapped.len()).to_equal(2)
+        expect(wrapped[0]).to_equal("한국어한")
+        expect(wrapped[1]).to_equal("국어")
+
+    it "AC-3: the fallback ellipsis budget counts characters, not bytes":
+        step("6 characters fit a budget of 8")
+        expect(br_apply_text_overflow_ellipsis("한국어한국어", 64, 16)).to_equal("한국어한국어")
+        step("budget 5: keep 2 characters, then the ellipsis")
+        expect(br_apply_text_overflow_ellipsis("한국어한국어", 40, 16)).to_equal("한국...")
+
+    it "AC-4: a hex colour after a non-ASCII character is read from its own bytes":
+        step("`#` is at BYTE 2 of `é#ff0000`")
+        expect(_hex_color_at("é#ff0000", 2, 0u32)).to_equal(0xFFFF0000u32)
+        step("3-digit form")
+        expect(_hex_color_at("é#0f0", 2, 0u32)).to_equal(0xFF00FF00u32)
+
+    it "AC-5: the byte before a selector is read at its byte offset":
+        step("`é{p`: `p` is at BYTE 3 and follows `{`")
+        expect(_selector_boundary_before("é{p", 3)).to_be(true)
+        step("control: `éxp` has no boundary before `p`")
+        expect(_selector_boundary_before("éxp", 3)).to_be(false)
+
+    it "AC-6: a nested selector start is found behind non-ASCII text":
+        step("`é;a{`: `{` at BYTE 4, the selector starts after `;` at BYTE 3")
+        expect(br_last_nested_selector_start("é;a{", 0, 4)).to_equal(3)
+
+    it "AC-7: an HPACK header with a non-ASCII value round-trips":
+        step("`café` is 5 bytes; the length prefix must say 5")
+        val block = encode_header_block([Pair(first: "x-name", second: "café")])
+        val decoded = decode_header_block(block)
+        expect(decoded.is_ok()).to_be(true)
+        val headers = decoded.unwrap()
+        expect(headers.len()).to_equal(1)
+        expect(headers[0].first).to_equal("x-name")
+        expect(headers[0].second).to_equal("café")
+
+    it "AC-8: a DATA frame with a non-ASCII body round-trips":
+        step("`héllo` is 6 bytes; frame length and payload must agree")
+        val frames = split_into_data_frames("héllo", 1, 16384)
+        expect(frames.len()).to_equal(1)
+        expect(frames[0].length).to_equal(6)
+        val decoded = decode_frame(encode_frame(frames[0]))
+        expect(decoded.is_ok()).to_be(true)
+        expect(decoded.unwrap().payload).to_equal("héllo")
+
+    it "AC-9: the end caret of `éab` lies past the caret before `b`":
+        step("4 boundaries; the last prefix is the whole value")
+        val xs = _boundaries("", "éab")
+        expect(xs.len()).to_equal(4)
+        expect(xs[3]).to_be_greater_than(xs[2])
+        expect(xs[2]).to_be_greater_than(xs[1])
+
+    it "AC-10: in RTL the end caret of `éab` lies left of the caret before `b`":
+        step("visual x descends with the source offset")
+        val xs = _boundaries(";direction:rtl", "éab")
+        expect(xs.len()).to_equal(4)
+        expect(xs[2]).to_be_greater_than(xs[3])
+        expect(xs[1]).to_be_greater_than(xs[2])
+
+    it "AC-11: an input value is truncated on a codepoint boundary":
+        step("2 glyphs of `éab` are `éa` (3 bytes), not the first 2 bytes")
+        expect(input_text_prefix("éab", 2)).to_equal("éa")
+        step("1 glyph of `—b` is the whole em dash")
+        expect(input_text_prefix("—b", 1)).to_equal("—")
+        step("a budget that covers the value returns it unchanged")
+        expect(input_text_prefix("한국어", 3)).to_equal("한국어")
+        step("control: the ASCII twin")
+        expect(input_text_prefix("eab", 2)).to_equal("ea")

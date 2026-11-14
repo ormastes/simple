@@ -1,0 +1,96 @@
+"""
+Byte scans in the web renderer are bounded by `byte_len()`, not `len()`.
+
+`text.len()` counts CODEPOINTS; `substring`, `slice`, `index_of`, `bytes()` and
+`byte_at` take BYTE offsets. The renderer was written when the two were the
+same number, so every scanner that bounded a byte cursor by `len()` stopped
+short by (bytes - codepoints) on any text carrying a non-ASCII character, and
+every scanner that probed with the codepoint-indexed `char_at`/`char_code_at`
+at a byte cursor read the wrong character. ASCII input cannot see either
+defect, so each case here carries a multi-byte codepoint BEFORE the thing the
+scanner has to find.
+
+Geometry rows measured against headless Chrome 159
+(`--window-size=900,2000`, `font:16px/1.5 sans-serif`, `body{margin:0}`):
+
+| fixture                                               | Chrome  |
+|-------------------------------------------------------|---------|
+| `.é.b{height:30px}` on `class="é b"`                  | h = 30  |
+| `#a::before{content:"—é—"} #x{height:40px}`           | h = 40  |
+| `<p>é—é—é—é—é—é—</p><div id=x style="height:33px">`   | h = 33  |
+
+Not asserted: a rule that follows a CSS COMMENT. The stylesheet scanner drops
+it for an ASCII comment too (`/* a */ #x{height:50px}` lays #x out 1 px tall,
+Chrome 50), so that is a comment-handling gap, not a length-unit one.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-TEXT-WRAP-004 — non-ASCII text is scanned in one index space (bytes) end to end.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_foundation.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{
+    web_wrap_line_end
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{
+    skip_wrap_spaces, _decode_numeric_entities
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{
+    css_important_marker_start, paren_matching_close
+}
+use std.gc_async_mut.gpu.browser_engine.dom_color.{strip_css_comments}
+
+val VW: i32 = 900
+val VH: i32 = 2000
+val BASE_CSS: text = "*{box-sizing:border-box}body{margin:0;font:16px/1.5 sans-serif}"
+
+fn height_of_x(css: text, body: text) -> text:
+    simple_web_layout_debug_layout_by_id(
+        "<html><head><style>" + BASE_CSS + css + "</style></head><body>" + body + "</body></html>",
+        VW, VH, "x", "h")
+
+describe "non-ASCII text is scanned by byte, end to end":
+    it "AC-1: the flat wrap spends its budget per codepoint and breaks on the byte":
+        step("two em dashes (6 bytes), a space at byte 6, budget of 4 characters")
+        expect(web_wrap_line_end("—— ab cd", 0, 4)).to_equal(6)
+        step("the whole run fits: the end is the BYTE length, 12, not the 8 codepoints")
+        expect(web_wrap_line_end("—— ab cd", 0, 40)).to_equal(12)
+
+    it "AC-2: skipping wrap spaces walks to the last space byte":
+        step("em dash (bytes 0..2), two spaces at bytes 3 and 4, then `b`")
+        expect(skip_wrap_spaces("—  b", 3)).to_equal(5)
+
+    it "AC-3: a numeric entity after a multi-byte character is still decoded":
+        step("the scanner must reach the trailing `;`, which lies past len()")
+        expect(_decode_numeric_entities("—&#65;&#66;")).to_equal("—AB")
+
+    it "AC-4: !important is found behind a non-ASCII value":
+        step("`\"é—\" !important`: the `!` is at BYTE 8 (quote, 2, 3, quote, space = 8 bytes)")
+        expect(css_important_marker_start("\"é—\" !important")).to_equal(8)
+
+    it "AC-5: the matching paren is reported as a byte offset":
+        step("`é(a)`: `(` at byte 2, `)` at byte 4")
+        expect(paren_matching_close("é(a)", 2)).to_equal(4)
+
+    it "AC-6: CSS comments are stripped without splitting or dropping a codepoint":
+        step("text on both sides of the comment survives whole")
+        expect(strip_css_comments("é/* x — */—b")).to_equal("é—b")
+        step("an unterminated comment drops the tail, nothing else")
+        expect(strip_css_comments("—a/* é")).to_equal("—a")
+
+    it "AC-7: a class selector with a non-ASCII identifier matches":
+        step("Chrome: .é.b applies, #x is 30 px tall")
+        expect(height_of_x(".é.b{width:100px;height:30px}", "<div id=\"x\" class=\"é b\"></div>")).to_equal("30")
+
+    it "AC-8: a rule after a non-ASCII declaration value still applies":
+        step("Chrome: #x is 40 px tall")
+        expect(height_of_x(
+            "#a::before{content:\"—é—\"} #x{width:120px;height:40px}",
+            "<p id=\"a\">——————</p><div id=\"x\"></div>")).to_equal("40")
+
+    it "AC-9: an element after non-ASCII body text keeps its inline style":
+        step("Chrome: #x is 33 px tall")
+        expect(height_of_x("", "<p>é—é—é—é—é—é—</p><div id=\"x\" style=\"width:77px;height:33px\"></div>")).to_equal("33")

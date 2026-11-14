@@ -67,9 +67,9 @@ fn encode_header_block(headers: [Pair<text, text>]) -> text:
         val name = header.first
         val value = header.second
         result = result + encode_byte(0)  # Literal without indexing prefix
-        result = result + encode_byte(name.len())
+        result = result + encode_byte(name.byte_len())
         result = result + name
-        result = result + encode_byte(value.len())
+        result = result + encode_byte(value.byte_len())
         result = result + value
     result
 
@@ -79,24 +79,25 @@ fn decode_header_block(block: text) -> Result<[Pair<text, text>]>:
     # is real parser state, not a fabricated response path.
     var headers: [Pair<text, text>] = []
     var pos = 0
-    while pos < block.len():
+    val block_blen = block.byte_len()
+    while pos < block_blen:
         val prefix = decode_byte(block, pos)
         pos = pos + 1
         if prefix != 0:
             return Err(parse_error("h2: unsupported HPACK header prefix 0x{int_to_hex(prefix)}"))
-        if pos >= block.len():
+        if pos >= block_blen:
             return Err(parse_error("h2: truncated header name length"))
         val name_len = decode_byte(block, pos)
         pos = pos + 1
-        if name_len < 0 or pos + name_len > block.len():
+        if name_len < 0 or pos + name_len > block_blen:
             return Err(parse_error("h2: truncated header name"))
         val name = block.slice(pos, pos + name_len)
         pos = pos + name_len
-        if pos >= block.len():
+        if pos >= block_blen:
             return Err(parse_error("h2: truncated header value length for {name}"))
         val value_len = decode_byte(block, pos)
         pos = pos + 1
-        if value_len < 0 or pos + value_len > block.len():
+        if value_len < 0 or pos + value_len > block_blen:
             return Err(parse_error("h2: truncated header value for {name}"))
         val value = block.slice(pos, pos + value_len)
         pos = pos + value_len
@@ -203,11 +204,12 @@ fn split_into_data_frames(body: text, stream_id: i64, max_frame_size: i64) -> [H
     var frames: [H2Frame] = []
     var offset = 0
 
-    while offset < body.len():
-        val remaining = body.len() - offset
+    val body_blen = body.byte_len()
+    while offset < body_blen:
+        val remaining = body_blen - offset
         val chunk_size = if remaining > max_frame_size: max_frame_size else: remaining
         val chunk = body.slice(offset, offset + chunk_size)
-        val is_last = offset + chunk_size >= body.len()
+        val is_last = offset + chunk_size >= body_blen
 
         val flags = if is_last: FLAG_END_STREAM else: 0
         val frame = H2Frame.create(H2FrameType.Data, flags, stream_id, chunk)
