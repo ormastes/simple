@@ -7,7 +7,7 @@ carries `target`, messenger_sdn_and_api.md §2)."""
 use std.spec
 use std.io_runtime.{env_get_opt}
 use std.env.{env_set, env_unset}
-use app.devhub.cmd_messenger.{messenger_read_record}
+use app.devhub.cmd_messenger.{messenger_read_record, messenger_doctor_record, messenger_send_record}
 
 fn _restore(name: text, previous: text?) -> bool:
     if val value = previous:
@@ -22,7 +22,13 @@ fn rooms_with_missing_config(args: [text]) -> (i64, text):
         return (-1, "")
     if not env_set("USERPROFILE", nowhere):
         return (-1, "")
-    val record = messenger_read_record("rooms", args)
+    val record = if args[0] == "doctor":
+        messenger_doctor_record(args)
+    elif args[0] == "send":
+        val sent = messenger_send_record(args)
+        (sent.0, sent.1)
+    else:
+        messenger_read_record("rooms", args)
     val _h = _restore("HOME", home)
     val _p = _restore("USERPROFILE", profile)
     record
@@ -40,3 +46,19 @@ describe "devhub messenger rooms with no messenger.sdn":
         val record = rooms_with_missing_config(["rooms", "--json"])
         expect(record.0).to_equal(2)
         expect(record.1).to_contain("\"target\":\"\"")
+
+describe "devhub messenger doctor and send with no messenger.sdn":
+
+    it "doctor echoes the requested --target in the config error record":
+        val record = rooms_with_missing_config(["doctor", "--target", "dense", "--json"])
+        expect(record.0).to_equal(2)
+        expect(record.1).to_contain("messenger config not found")
+        expect(record.1).to_contain("\"action\":\"doctor\"")
+        expect(record.1).to_contain("\"target\":\"dense\"")
+
+    it "send fails on the missing config before any transport and echoes --target":
+        val record = rooms_with_missing_config(["send", "--target", "dense", "--room", "r1", "--text", "hi", "--confirm", "--json"])
+        expect(record.0).to_equal(2)
+        expect(record.1).to_contain("messenger config not found")
+        expect(record.1).to_contain("\"action\":\"send\"")
+        expect(record.1).to_contain("\"target\":\"dense\"")
