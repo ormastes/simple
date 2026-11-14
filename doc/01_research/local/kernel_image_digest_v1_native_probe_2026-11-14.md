@@ -79,17 +79,28 @@ current was 3,647,954,944 bytes and `memory.events` reported `oom=0`,
 and no runtime lifetime evidence. No retry was made.
 
 The closure increase came from the high-level `BuildSession` import and its
-compiler-store dependencies. A narrower, separately authorized probe is now
-being prepared against the runtime session ABI owned by
-`src/lib/nogc_sync_mut/sffi/transient.spl`, which already declares session
-begin/end and allocation begin/end. Such a run can test actual runtime session
-reclamation with the actual digest memo, but it will not qualify the
-`BuildSession` compiler-store reset wrapper. That wrapper spec and its
-fresh-process cold-first-capture scenario remain unrun.
+compiler-store dependencies. A narrower probe was then source-reviewed and
+attempted using typed session lifecycle wrappers over the existing runtime
+externs in `src/lib/nogc_sync_mut/sffi/transient.spl`. The fresh process used
+the actual digest memo, began a runtime session and session allocation, then
+would have ended both and reread the memo. This smaller closure was 77 modules.
+It completed parse/HIR/MIR/AOP/native-cache but reached only 9/77 native
+codegen modules when its 120 second watchdog stopped it with exit 143. The
+4 GiB cgroup's last current usage was 2,890,330,112 bytes; `memory.events`
+reported `oom=0`, `oom_kill=0`, `oom_group_kill=0`. Start and terminal
+`MemAvailable` were 51,437,300 KiB and 43,156,916 KiB. No executable or runtime
+output was produced, so this attempt also provides no RC lifetime execution
+evidence. No retry was made.
+
+The runtime-owner probe can qualify session heap reclamation with the actual
+digest memo if a future bounded build reaches execution; it does not qualify
+the high-level `BuildSession` compiler-store reset wrapper. That wrapper spec
+and its fresh-process cold-first-capture scenario remain unrun.
 
 Attempt artifacts are retained under
 `/tmp/simple-kernel-image-digest-v1/build/kernel-image-session-probe/`:
-`native-build.log`, `watchdog.env`, `provenance.env`, `systemd-run.log`, and
-`source-inputs.sha256`. This incomplete attempt does not change the earlier
-probe's narrower Linux image-hash qualification and does not qualify the new
-RC lifetime path.
+`native-build.log`, `watchdog.env`, `provenance.env`, `systemd-run.log`,
+`source-inputs.sha256`, plus `native-build-v2.log`, `watchdog-v2.env`,
+`provenance-v2.env`, `systemd-run-v2.log`, and `source-inputs-v2.sha256` for
+the narrowed run. Neither incomplete attempt changes the earlier probe's
+narrower Linux image-hash qualification or qualifies the new RC lifetime path.
