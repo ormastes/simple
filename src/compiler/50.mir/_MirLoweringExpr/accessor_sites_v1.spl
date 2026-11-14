@@ -1,0 +1,153 @@
+# The three original field consumers share this one decision/identity path.
+# Generated helper bodies use MirBuilder directly and never reenter it.
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind, HirAssignOp}
+use compiler.mir.mir_types.{LocalId, MirTypeKind}
+use compiler.mir.mir_instruction_support.{MirOperand, MirOperandKind, MirCallOrigin, mir_operand_copy}
+use compiler.mir.mir_types.{MirConstValue, MirType}
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.asm_and_targets.*
+use compiler.mir._MirLowering.module_lowering.{mir_layout_canonical_module_name}
+use compiler.mir.mir_lowering_expr.*
+use compiler.mir.mir_accessor_plan_v1.{MirAccessorOperationV1}
+use compiler.mir.mir_accessor_plan_set_v1.*
+
+impl MirLowering:
+    me install_accessor_plan_v1(plan: AccessorPlanSetV1?, module_name: text,
+        source_snapshot: text, hir_snapshot: text, no_field_aspects_proven: bool) -> Result<bool, text>:
+        # Clear old module state even if admission fails; a failed lookup may
+        # never leave another module's field decisions active.
+        self.accessor_plan_v1 = None
+        self.accessor_plan_module_name_v1 = ""
+        self.accessor_site_hits_v1 = []
+        if val present = plan:
+            val checked = accessor_plan_set_validate_v1(present)?
+            if present.source_snapshot != source_snapshot or present.hir_snapshot != hir_snapshot or module_name == "":
+                return Err("E-AOP-FIELD-SNAPSHOT: plan does not belong to the admitted source/HIR snapshot")
+            self.accessor_plan_v1 = Some(present)
+            self.accessor_plan_module_name_v1 = mir_layout_canonical_module_name(module_name)
+            return Ok(true)
+        if not no_field_aspects_proven:
+            return Err("E-AOP-FIELD-COVERAGE: missing plan for requested field aspects")
+        Ok(true)
+
+    me accessor_site_row_v1(span: Span, operation: MirAccessorOperationV1) -> Result<i64, text>:
+        if val plan = self.accessor_plan_v1:
+            if self.builder.loop_view_capture_v1.?:
+                return Err("E-AOP-FIELD-TRANSPORT: captured MIR field lowering is not admitted")
+            if self.current_module_id != self.accessor_plan_module_name_v1:
+                return Err("E-AOP-FIELD-SNAPSHOT: active field plan belongs to another module")
+            if val function = self.builder.current_function:
+                val identity = accessor_function_identity_v1(plan, function.symbol)?
+                val site = AccessorSiteKeyV1(module_identity: plan.module_identity,
+                    function_identity: identity, start: span.start, end: span.end,
+                    line: span.line, col: span.col, operation: operation)
+                val decision = accessor_site_lookup_v1(plan, site)?
+                for index in 0..plan.sites.len():
+                    if accessor_site_equal_v1(plan.sites[index].site, site): return Ok(index)
+            return Err("E-AOP-FIELD-COVERAGE: field lowering has no original function identity")
+        Ok(-1)
+
+    me accessor_error_local_v1(message: text, span: Span) -> LocalId:
+        self.error_fatal(message, Some(span))
+        var builder = self.builder
+        val rejected = builder.emit_const_int(0)
+        self.builder = builder
+        rejected
+
+    me try_lower_accessor_get_v1(base: HirExpr, field_name: text, span: Span) -> LocalId?:
+        val row_index = match self.accessor_site_row_v1(span, MirAccessorOperationV1.Read):
+            case Ok(index): index
+            case Err(message): return Some(self.accessor_error_local_v1(message, span))
+        if row_index < 0: return None
+        val plan = self.accessor_plan_v1.unwrap()
+        val helper_index = match plan.sites[row_index].decision:
+            case AccessorSiteDecisionV1.Unmatched: return None
+            case AccessorSiteDecisionV1.Unsupported(message): return Some(self.accessor_error_local_v1(message, span))
+            case AccessorSiteDecisionV1.Prepared(index): index
+        if self.accessor_site_hits_v1.contains(row_index):
+            return Some(self.accessor_error_local_v1("E-AOP-FIELD-COVERAGE: original field site lowered more than once", span))
+        val helper = plan.helpers[helper_index]
+        if helper.plan.declaration.field_name != field_name:
+            return Some(self.accessor_error_local_v1("E-AOP-FIELD-COVERAGE: selected field identity changed", span))
+        val receiver = self.lower_expr(base)
+        val receiver_type = self.local_mir_type_of(receiver)
+        if not receiver_type.? or receiver_type.unwrap() != helper.plan.physical.receiver_type:
+            return Some(self.accessor_error_local_v1("E-AOP-FIELD-PROFILE: lowered receiver differs from frozen reference ABI", span))
+        val callee = MirOperand(kind: MirOperandKind.Const(MirConstValue.Str(helper.helper_name),
+            MirType(kind: MirTypeKind.FuncPtr(helper.plan.signature))), call_origin: MirCallOrigin.Source)
+        var builder = self.builder
+        val result = builder.emit_call(callee, [mir_operand_copy(receiver)], helper.plan.physical.field_type)
+        self.builder = builder
+        if val value = result:
+            self.accessor_site_hits_v1.push(row_index)
+            return Some(value)
+        Some(self.accessor_error_local_v1("E-AOP-FIELD-EMIT: typed getter produced no value", span))
+
+    me try_lower_accessor_set_v1(base: HirExpr, field_name: text, span: Span,
+        op: HirAssignOp?, value: LocalId, value_kind: HirExprKind) -> bool:
+        val row_index = match self.accessor_site_row_v1(span, MirAccessorOperationV1.Write):
+            case Ok(index): index
+            case Err(message):
+                self.error_fatal(message, Some(span))
+                return true
+        if row_index < 0: return false
+        val plan = self.accessor_plan_v1.unwrap()
+        val helper_index = match plan.sites[row_index].decision:
+            case AccessorSiteDecisionV1.Unmatched: return false
+            case AccessorSiteDecisionV1.Unsupported(message):
+                self.error_fatal(message, Some(span))
+                return true
+            case AccessorSiteDecisionV1.Prepared(index): index
+        if op.? or self.accessor_site_hits_v1.contains(row_index):
+            self.error_fatal("E-AOP-FIELD-PROFILE: compound or repeated setter site is not admitted", Some(span))
+            return true
+        val helper = plan.helpers[helper_index]
+        if helper.plan.declaration.field_name != field_name:
+            self.error_fatal("E-AOP-FIELD-COVERAGE: selected setter identity changed", Some(span))
+            return true
+        # The caller has ALREADY lowered the RHS. Lower only the original
+        # receiver here, once, preserving ordinary RHS-before-receiver order.
+        val receiver = self.lower_expr(base)
+        val receiver_type = self.local_mir_type_of(receiver)
+        if not receiver_type.? or receiver_type.unwrap() != helper.plan.physical.receiver_type:
+            self.error_fatal("E-AOP-FIELD-PROFILE: setter receiver differs from frozen reference ABI", Some(span))
+            return true
+        var builder = self.builder
+        var stored_value = value
+        if val value_type = builder.local_type(value):
+            if value_type != helper.plan.physical.field_type:
+                # Only an unsuffixed integer literal can use the original
+                # typed-field literal adaptation in this initial consumer.
+                # Do not invent a numeric conversion for an arbitrary RHS.
+                val literal = match value_kind:
+                    case HirExprKind.IntLit(_, None): true
+                    case _: false
+                if not literal:
+                    self.error_fatal("E-AOP-FIELD-PROFILE: setter RHS conversion is not admitted", Some(span))
+                    return true
+                stored_value = builder.emit_cast(mir_operand_copy(value), helper.plan.physical.field_type)
+        else:
+            self.error_fatal("E-AOP-FIELD-PROFILE: setter value has no resolved MIR type", Some(span))
+            return true
+        val callee = MirOperand(kind: MirOperandKind.Const(MirConstValue.Str(helper.helper_name),
+            MirType(kind: MirTypeKind.FuncPtr(helper.plan.signature))), call_origin: MirCallOrigin.Source)
+        builder.emit_call(callee, [mir_operand_copy(receiver), mir_operand_copy(stored_value)], MirType.unit())
+        self.builder = builder
+        self.accessor_site_hits_v1.push(row_index)
+        true
+
+    me finish_accessor_coverage_v1() -> bool:
+        var complete = true
+        if val plan = self.accessor_plan_v1:
+            for index in 0..plan.sites.len():
+                match plan.sites[index].decision:
+                    case AccessorSiteDecisionV1.Prepared(_):
+                        if not self.accessor_site_hits_v1.contains(index):
+                            self.error_fatal("E-AOP-FIELD-COVERAGE: selected source field was not lowered; no elision proof", None)
+                            complete = false
+                    case AccessorSiteDecisionV1.Unsupported(message):
+                        self.error_fatal(message, None)
+                        complete = false
+                    case AccessorSiteDecisionV1.Unmatched: ()
+        complete

@@ -1,3 +1,4 @@
+use compiler.mir.mir_compiler_private_validate_v1.{mir_compiler_private_validate_v1}
 use compiler.mir.mir_instruction_support.{MirCallOrigin, mir_call_origin_uses_local_symbols, mir_call_origin_uses_local_symbols_named}
 use std.common.binary_io.{f64_to_bits}
 use std.common.math.ieee754_bits.{math_f64_round_to_f32_bits, math_f32_widen_bits}
@@ -443,6 +444,17 @@ impl MirTextCodegen for MirToLlvm:
         allow_bootstrap_shortcuts: bool
     ) -> text:
         """Translate MIR module to LLVM IR."""
+        self.compiler_private_names_v1 = {}
+        match mir_compiler_private_validate_v1(module):
+            case Err(message): return llvm_codegen_error_module([message])
+            case Ok(_): ()
+        if module.compiler_private_functions_v1.len() > 0:
+            if self.target_os != "linux" or (allow_bootstrap_shortcuts and self.bootstrap_mode_enabled()):
+                return llvm_codegen_error_module(["E-MIR-PRIVATE: compiler-private accessor transport is not qualified on this target/bootstrap path"])
+            for binding in module.compiler_private_functions_v1:
+                self.compiler_private_names_v1[binding.name] = true
+                self.remember_function_return_type(binding.name, self.llvm_type_text(binding.signature.return_type))
+                self.remember_function_param_types_from_signature(binding.name, binding.signature)
         val coverage_probe_diagnostic =
             mir_coverage_probe_admission_diagnostic_module_v1(module)
         if coverage_probe_diagnostic != "":
@@ -500,7 +512,8 @@ impl MirTextCodegen for MirToLlvm:
             for fn_qualify in mir_module_functions_sorted(module):
                 # A COMDAT instance keeps its bare mangled name: every object
                 # that instantiated it must spell the same symbol to dedupe.
-                if not fn_qualify.name.contains(".") and not fn_qualify.is_comdat:
+                # Explicit private bindings already carry their final cross-object name.
+                if not fn_qualify.name.contains(".") and not fn_qualify.is_comdat and not self.compiler_private_names_v1.has(fn_qualify.name):
                     self.module_qualified_symbol_names[fn_qualify.name] = "{module.name}.{fn_qualify.name}"
         # XRay (design A.5/B): per-module state, derived only from this
         # module's functions. Off leaves both empty.
@@ -1064,6 +1077,7 @@ impl MirTextCodegen for MirToLlvm:
         if self.fn_align.has(name):
             placement_suffix = placement_suffix + " align {self.fn_align[name]}"
         var placement_prefix = if self.fn_global.has(name): "define dso_local" else: "define"
+        if self.compiler_private_names_v1.has(name): placement_prefix = "define hidden"
         # module-scoped instance: every requesting object defines its own
         # copy as `linkonce_odr` in a same-named `any` comdat; the linker
         # keeps one (ELF group / COFF IMAGE_COMDAT_SELECT_ANY / Mach-O weak).
@@ -1899,7 +1913,11 @@ impl MirTextCodegen for MirToLlvm:
             # compiler otherwise erases this local's array receiver and can
             # resolve `join` to the unrelated ThreadHandle.join method.
             val param_tys: [text] = recorded.unwrap()
-            return "declare {ret_ty} @{name}({param_tys.join(\", \")})"
+            val declaration_prefix = if self.compiler_private_names_v1.has(name): "declare hidden" else: "declare"
+            return "{declaration_prefix} {ret_ty} @{name}({param_tys.join(\", \")})"
+        if self.compiler_private_names_v1.has(name):
+            self.codegen_error("E-MIR-PRIVATE: compiler-private declaration lost its authoritative signature")
+            return ""
         "declare {ret_ty} @{name}(...)"
 
     me remember_external_call_signature(name: text, sig: MirSignature):

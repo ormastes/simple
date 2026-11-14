@@ -1,0 +1,171 @@
+# Driver-owned canonical helper freezing. MIR workers consume these records;
+# they neither assign names/symbols nor reinterpret the ordered advice plan.
+use compiler.hir.hir_types.{SymbolId, HirTypeKind}
+use compiler.mir.mir_types.{MirType, MirTypeKind, MirSignature}
+use compiler.frontend.core.aop.{AdviceForm}
+use compiler.mir.mir_accessor_plan_v1.{MirAccessorPlanV1, MirAccessorOperationV1, mir_accessor_prepare_v1}
+use compiler.mir.mir_accessor_plan_set_v1.{AccessorPreparedHelperV1}
+use compiler.driver.cache.action_key.{canon_str, canon_nat, canon_field, canon_seq, action_key_sort_texts}
+use std.common.crypto.sha256.{sha256_text}
+
+fn accessor_bool_key_v1(value: bool) -> text:
+    canon_nat(if value: 1 else: 0)
+
+fn accessor_type_key_v1(type_: MirType, plan: MirAccessorPlanV1) -> Result<text, text>:
+    val scalar = match type_.kind:
+        case MirTypeKind.I8: "i8"
+        case MirTypeKind.I16: "i16"
+        case MirTypeKind.I32: "i32"
+        case MirTypeKind.I64: "i64"
+        case MirTypeKind.U8: "u8"
+        case MirTypeKind.U16: "u16"
+        case MirTypeKind.U32: "u32"
+        case MirTypeKind.U64: "u64"
+        case MirTypeKind.Bool: "bool"
+        case MirTypeKind.Unit: "unit"
+        case _: ""
+    if scalar != "": return Ok(canon_field("scalar", canon_str(scalar)))
+    match type_.kind:
+        case MirTypeKind.Struct(symbol):
+            if symbol.id != plan.declaration.owner_symbol.id:
+                return Err("E-AOP-FIELD-KEY: signature contains a different nominal owner")
+            Ok(canon_field("referenceClass", canon_seq([
+                canon_field("module", canon_str(plan.declaration.owner_module)),
+                canon_field("name", canon_str(plan.declaration.owner_name))])))
+        case _: Err("E-AOP-FIELD-KEY: signature type is outside the qualified accessor profile")
+
+fn accessor_signature_key_v1(signature: MirSignature, plan: MirAccessorPlanV1) -> Result<text, text>:
+    var params: [text] = []
+    for param in signature.params:
+        params.push(accessor_type_key_v1(param, plan)?)
+    var declared: [text] = []
+    for param in signature.declared_params:
+        declared.push(accessor_type_key_v1(param, plan)?)
+    var coerced: [text] = []
+    for literal in signature.int_literal_coerced_params:
+        coerced.push(accessor_bool_key_v1(literal))
+    val returned = accessor_type_key_v1(signature.return_type, plan)?
+    Ok(canon_seq([
+        canon_field("params", canon_seq(params)),
+        canon_field("paramsKnown", accessor_bool_key_v1(signature.params_known)),
+        canon_field("return", returned),
+        canon_field("variadic", accessor_bool_key_v1(signature.is_variadic)),
+        canon_field("declaredParams", canon_seq(declared)),
+        canon_field("declaredParamsKnown", accessor_bool_key_v1(signature.declared_params_known)),
+        canon_field("literalCoercions", canon_seq(coerced))]))
+
+pub fn accessor_helper_key_v1(plan: MirAccessorPlanV1) -> Result<text, text>:
+    val checked = mir_accessor_prepare_v1(plan.declaration, plan.physical,
+        plan.operation, plan.ordered_advice)?
+    if checked.signature != plan.signature:
+        return Err("E-AOP-FIELD-KEY: helper signature differs from its prepared facts")
+    if plan.declaration.owner_name == "" or plan.declaration.field_name == "":
+        return Err("E-AOP-FIELD-KEY: incomplete canonical field identity")
+    match plan.declaration.receiver_type.kind:
+        case HirTypeKind.Named(symbol, args):
+            if symbol.id != plan.declaration.owner_symbol.id or args.len() != 0:
+                return Err("E-AOP-FIELD-KEY: receiver instantiation is not the qualified declaration")
+        case _: return Err("E-AOP-FIELD-KEY: receiver is not a resolved nominal declaration")
+    var field_order: [text] = []
+    for field in plan.physical.field_order: field_order.push(canon_str(field))
+    val declared_scalar = match plan.declaration.field_type.kind:
+        case HirTypeKind.Bool: canon_field("bool", canon_seq([]))
+        case HirTypeKind.Int(bits, signed): canon_field("integer", canon_seq([
+            canon_field("bits", canon_nat(bits)), canon_field("signed", accessor_bool_key_v1(signed))]))
+        case _: return Err("E-AOP-FIELD-KEY: unresolved scalar declaration")
+    var advice_keys: [text] = []
+    for advice in plan.ordered_advice:
+        if advice.selector_digest == "" or advice.selection_scope_digest == "":
+            return Err("E-AOP-FIELD-KEY: missing selector or selection-scope identity")
+        val form = match advice.form:
+            case AdviceForm.Before: "before"
+            case AdviceForm.AfterSuccess: "after_success"
+            case _: return Err("E-AOP-FIELD-KEY: unsupported advice form")
+        val signature = accessor_signature_key_v1(advice.signature, plan)?
+        # function_name is the coordinator's resolved callable identity,
+        # never an unqualified source alias inferred from the aspect owner.
+        advice_keys.push(canon_seq([
+            canon_field("aspectModule", canon_str(advice.aspect_module)),
+            canon_field("aspectName", canon_str(advice.aspect_name)),
+            canon_field("function", canon_str(advice.function_name)),
+            canon_field("signature", signature),
+            canon_field("form", canon_str(form)),
+            canon_field("selector", canon_str(advice.selector_digest)),
+            canon_field("scope", canon_str(advice.selection_scope_digest)),
+            canon_field("interface", canon_str(advice.interface_digest)),
+            canon_field("body", canon_str(advice.body_digest)),
+            canon_field("effects", canon_str(advice.effects_digest))]))
+    val operation = if plan.operation == MirAccessorOperationV1.Read: "read" else: "write"
+    val receiver = accessor_type_key_v1(plan.physical.receiver_type, plan)?
+    val field_type = accessor_type_key_v1(plan.physical.field_type, plan)?
+    val signature = accessor_signature_key_v1(plan.signature, plan)?
+    # Profile/representation tags are explicit. The checked initial profile
+    # admits no generic instantiations; future profiles require a new domain.
+    Ok(canon_field("simple/accessor-helper/v1", canon_seq([
+        canon_field("ownerModule", canon_str(plan.declaration.owner_module)),
+        canon_field("ownerName", canon_str(plan.declaration.owner_name)),
+        canon_field("field", canon_str(plan.declaration.field_name)),
+        canon_field("ordinal", canon_nat(plan.declaration.field_index)),
+        canon_field("instantiation", canon_str("nongeneric-reference-class")),
+        canon_field("declaredScalar", declared_scalar),
+        canon_field("operation", canon_str(operation)),
+        canon_field("receiverAbi", receiver),
+        canon_field("fieldAbi", field_type),
+        canon_field("helperSignature", signature),
+        canon_field("fieldOrder", canon_seq(field_order)),
+        canon_field("layout", canon_str(plan.physical.layout_identity)),
+        canon_field("provider", canon_str(plan.physical.provider_identity)),
+        canon_field("targetAbi", canon_str(plan.physical.target_abi)),
+        canon_field("emissionOwner", canon_str(plan.physical.emission_owner)),
+        canon_field("place", canon_str("direct-reference")),
+        canon_field("memoryProfile", canon_str("nogc-synchronous")),
+        canon_field("writable", accessor_bool_key_v1(plan.physical.writable)),
+        canon_field("nullable", accessor_bool_key_v1(plan.physical.nullable)),
+        canon_field("atomic", accessor_bool_key_v1(plan.physical.atomic)),
+        canon_field("volatile", accessor_bool_key_v1(plan.physical.volatile)),
+        canon_field("advice", canon_seq(advice_keys))])))
+
+fn accessor_same_resolution_v1(left: MirAccessorPlanV1, right: MirAccessorPlanV1) -> bool:
+    # A canonical key excludes transient SymbolIds, but a single frozen link
+    # snapshot cannot bind that key to conflicting relocated declarations.
+    if left.declaration.owner_symbol.id != right.declaration.owner_symbol.id or
+            left.declaration.field_symbol.id != right.declaration.field_symbol.id or
+            left.signature != right.signature or left.ordered_advice.len() != right.ordered_advice.len():
+        return false
+    for index in 0..left.ordered_advice.len():
+        if left.ordered_advice[index].symbol.id != right.ordered_advice[index].symbol.id:
+            return false
+    true
+
+pub fn freeze_accessor_helpers_v1(plans: [MirAccessorPlanV1], first_symbol_id: i64) -> Result<[AccessorPreparedHelperV1], text>:
+    if first_symbol_id < 0:
+        return Err("E-AOP-FIELD-SYMBOL: invalid coordinator-reserved symbol range")
+    var keys: [text] = []
+    var unique_plans: [MirAccessorPlanV1] = []
+    var key_indices: Dict<text, i64> = {}
+    for plan in plans:
+        val key = accessor_helper_key_v1(plan)?
+        if key_indices.has(key):
+            if not accessor_same_resolution_v1(unique_plans[key_indices[key]], plan):
+                return Err("E-AOP-FIELD-KEY: canonical helper has conflicting resolved symbols")
+        else:
+            key_indices[key] = unique_plans.len()
+            keys.push(key)
+            unique_plans.push(plan)
+    if keys.len() > 0 and first_symbol_id > 9223372036854775807 - (keys.len() - 1):
+        return Err("E-AOP-FIELD-SYMBOL: coordinator-reserved symbol range is exhausted")
+    val ordered_keys = action_key_sort_texts(keys)
+    var digest_keys: Dict<text, text> = {}
+    var helpers: [AccessorPreparedHelperV1] = []
+    for index in 0..ordered_keys.len():
+        val key = ordered_keys[index]
+        val digest = sha256_text(key)
+        if digest_keys.has(digest) and digest_keys[digest] != key:
+            return Err("E-AOP-FIELD-COLLISION: helper digest names different canonical content")
+        digest_keys[digest] = key
+        val plan = unique_plans[key_indices[key]]
+        helpers.push(AccessorPreparedHelperV1(canonical_key: key,
+            content_digest: digest, helper_name: "__simple_accessor_" + digest,
+            helper_symbol: SymbolId.new(first_symbol_id + index),
+            emission_owner: plan.physical.emission_owner, plan: plan))
+    Ok(helpers)

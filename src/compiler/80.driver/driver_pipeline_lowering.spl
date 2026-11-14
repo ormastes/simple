@@ -1,3 +1,4 @@
+use compiler.driver.driver_accessor_publication_v1.{driver_accessor_inventory_has_requests_v1, driver_lower_module_with_accessors_v1}
 use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
 # CompilerDriver MIR lowering and diagnostic methods.
 #
@@ -959,6 +960,8 @@ impl CompilerDriver:
             self.ctx.mir_feed_modules.len()
         else:
             self.ctx.sources.len()
+        self.ctx.accessor_no_field_aspects_v1 = not driver_accessor_inventory_has_requests_v1(self.ctx)
+        self.ctx.accessor_inventory_checked_v1 = true
         compiler_work_mir_schedule_v1(mir_scheduled_count)
         if self.ctx.runtime_std_full_inventory_selection != nil and
                 (self.ctx.sources.len() == 0 or
@@ -1644,7 +1647,10 @@ impl CompilerDriver:
                         # @workaround bug=mir_unresolved_method_inferred_receiver_2026-10-24
                         val module_lower_started_ms = time_now_monotonic_ms()
                         val scoped_entry: Result<MirModule, text> = if val scoped_hir = direct_hir:
-                            direct_lowering.lower_module_transient_scoped(scoped_hir, self.ctx.mir_feed_modules, mir_schedule_pos == 0)
+                            if self.ctx.accessor_no_field_aspects_v1 and self.ctx.accessor_plan_sets_v1.len() == 0:
+                                direct_lowering.lower_module_transient_scoped(scoped_hir, self.ctx.mir_feed_modules, mir_schedule_pos == 0)
+                            else:
+                                driver_lower_module_with_accessors_v1(self.ctx, direct_lowering, scoped_hir, self.ctx.mir_feed_modules, mir_schedule_pos == 0, name_direct)
                         else:
                             Err("MIR lowering missing HIR module for {name_direct}")
                         # Per-module MIR cost receipt, slow modules only (bounded output):
@@ -1796,7 +1802,10 @@ impl CompilerDriver:
                     if not may_continue: return false
                     continue
                 val module_errors_before = lowering.errors.len()
-                val scoped_fallback = lowering.lower_module_transient_scoped(hir_module, self.ctx.mir_feed_modules, true)
+                val scoped_fallback = if self.ctx.accessor_no_field_aspects_v1 and self.ctx.accessor_plan_sets_v1.len() == 0:
+                    lowering.lower_module_transient_scoped(hir_module, self.ctx.mir_feed_modules, true)
+                else:
+                    driver_lower_module_with_accessors_v1(self.ctx, lowering, hir_module, self.ctx.mir_feed_modules, true, name)
                 driver_trace_module_mir_errors(name, typed_hir_module.path,
                     lowering.errors, module_errors_before)
                 if scoped_fallback.is_err():

@@ -1,0 +1,125 @@
+# Frozen coordinator-to-worker contract. No source lookup, declaration
+# invention, helper emission or hashing occurs in a MIR worker.
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir_accessor_plan_v1.{MirAccessorPlanV1, MirAccessorOperationV1, mir_accessor_prepare_v1}
+
+struct AccessorSiteKeyV1:
+    module_identity: text
+    function_identity: text
+    start: i64
+    end: i64
+    line: i64
+    col: i64
+    operation: MirAccessorOperationV1
+
+# The initial source-only identity rejects duplicate span keys rather than
+# assigning traversal-dependent ordinals in two different expression paths.
+# Synthetic/duplicated HIR sites need a later explicit stable node identity.
+pub fn accessor_site_equal_v1(left: AccessorSiteKeyV1, right: AccessorSiteKeyV1) -> bool:
+    left.module_identity == right.module_identity and
+        left.function_identity == right.function_identity and
+        left.start == right.start and left.end == right.end and
+        left.line == right.line and left.col == right.col and
+        left.operation == right.operation
+
+enum AccessorSiteDecisionV1:
+    Unmatched
+    Prepared(helper_index: i64)
+    Unsupported(message: text)
+
+struct AccessorSitePlanV1:
+    site: AccessorSiteKeyV1
+    decision: AccessorSiteDecisionV1
+
+struct AccessorPreparedHelperV1:
+    # Full canonical encoding is retained: the hash/name are indexes only.
+    canonical_key: text
+    content_digest: text
+    helper_name: text
+    helper_symbol: SymbolId
+    emission_owner: text
+    plan: MirAccessorPlanV1
+
+struct AccessorFunctionIdentityV1:
+    symbol: SymbolId
+    canonical_identity: text
+
+struct AccessorPlanSetV1:
+    source_snapshot: text
+    hir_snapshot: text
+    plan_digest: text
+    module_identity: text
+    covered_functions: [AccessorFunctionIdentityV1]
+    sites: [AccessorSitePlanV1]
+    helpers: [AccessorPreparedHelperV1]
+
+# Construction is a trusted driver operation. It must compute the framed
+# canonical encodings/digests from actual resolved facts before publication.
+# Validate again on worker installation to reject stale/malformed transport.
+pub fn accessor_plan_set_validate_v1(plan_set: AccessorPlanSetV1) -> Result<bool, text>:
+    if plan_set.source_snapshot == "" or plan_set.hir_snapshot == "" or plan_set.plan_digest == "" or plan_set.module_identity == "":
+        return Err("E-AOP-FIELD-SNAPSHOT: incomplete frozen source/HIR/plan identity")
+    for function_index in 0..plan_set.covered_functions.len():
+        if plan_set.covered_functions[function_index].canonical_identity == "" or not plan_set.covered_functions[function_index].symbol.is_valid():
+            return Err("E-AOP-FIELD-COVERAGE: unresolved function identity")
+        for earlier in 0..function_index:
+            if plan_set.covered_functions[earlier].canonical_identity == plan_set.covered_functions[function_index].canonical_identity or plan_set.covered_functions[earlier].symbol.id == plan_set.covered_functions[function_index].symbol.id:
+                return Err("E-AOP-FIELD-COVERAGE: duplicated function coverage")
+    for helper_index in 0..plan_set.helpers.len():
+        val helper = plan_set.helpers[helper_index]
+        if helper.canonical_key == "" or helper.content_digest == "" or
+                not helper.helper_name.starts_with("__simple_accessor_") or
+                not helper.helper_symbol.is_valid() or helper.emission_owner == "":
+            return Err("E-AOP-FIELD-HELPER: incomplete coordinator identity")
+        if helper.emission_owner != helper.plan.physical.emission_owner:
+            return Err("E-AOP-FIELD-HELPER: conflicting emission owner")
+        val checked = mir_accessor_prepare_v1(helper.plan.declaration, helper.plan.physical,
+            helper.plan.operation, helper.plan.ordered_advice)?
+        if checked.signature != helper.plan.signature:
+            return Err("E-AOP-FIELD-HELPER: helper signature differs from the typed plan")
+        for earlier in 0..helper_index:
+            val previous = plan_set.helpers[earlier]
+            if previous.helper_name == helper.helper_name or previous.content_digest == helper.content_digest:
+                if previous.canonical_key != helper.canonical_key:
+                    return Err("E-AOP-FIELD-COLLISION: equal helper index has different canonical content")
+                return Err("E-AOP-FIELD-HELPER: duplicate helper definition in frozen plan_set")
+            if previous.canonical_key == helper.canonical_key or previous.helper_symbol.id == helper.helper_symbol.id:
+                return Err("E-AOP-FIELD-HELPER: canonical helper has conflicting identities")
+    for site_index in 0..plan_set.sites.len():
+        val row = plan_set.sites[site_index]
+        if row.site.start < 0 or row.site.end <= row.site.start or row.site.line < 0 or row.site.col < 0:
+            return Err("E-AOP-FIELD-COVERAGE: site lacks a nonempty original source span")
+        if row.site.module_identity != plan_set.module_identity or
+                not accessor_function_is_covered_v1(plan_set, row.site.function_identity):
+            return Err("E-AOP-FIELD-COVERAGE: site is outside frozen module/function coverage")
+        for earlier in 0..site_index:
+            if accessor_site_equal_v1(plan_set.sites[earlier].site, row.site):
+                return Err("E-AOP-FIELD-COVERAGE: ambiguous repeated source-span site")
+        match row.decision:
+            case AccessorSiteDecisionV1.Prepared(helper_index):
+                if helper_index < 0 or helper_index >= plan_set.helpers.len():
+                    return Err("E-AOP-FIELD-COVERAGE: site references missing helper")
+                if plan_set.helpers[helper_index].plan.operation != row.site.operation:
+                    return Err("E-AOP-FIELD-COVERAGE: site/helper operation mismatch")
+            case AccessorSiteDecisionV1.Unsupported(message):
+                if message == "": return Err("E-AOP-FIELD-COVERAGE: unsupported site lacks diagnostic")
+            case AccessorSiteDecisionV1.Unmatched: ()
+    Ok(true)
+
+pub fn accessor_site_lookup_v1(plan_set: AccessorPlanSetV1, site: AccessorSiteKeyV1) -> Result<AccessorSiteDecisionV1, text>:
+    if site.module_identity != plan_set.module_identity or not accessor_function_is_covered_v1(plan_set, site.function_identity):
+        return Err("E-AOP-FIELD-COVERAGE: lowering attempted an uncovered source function")
+    for row in plan_set.sites:
+        if accessor_site_equal_v1(row.site, site): return Ok(row.decision)
+    # Crucially, absence is not equivalent to a planner-recorded Unmatched.
+    Err("E-AOP-FIELD-COVERAGE: field site is missing from the frozen selection decisions")
+
+fn accessor_function_is_covered_v1(plan_set: AccessorPlanSetV1, identity: text) -> bool:
+    for function in plan_set.covered_functions:
+        if function.canonical_identity == identity: return true
+    false
+
+pub fn accessor_function_identity_v1(plan_set: AccessorPlanSetV1, symbol: SymbolId) -> Result<text, text>:
+    for function in plan_set.covered_functions:
+        if function.symbol.id == symbol.id: return Ok(function.canonical_identity)
+    Err("E-AOP-FIELD-COVERAGE: current function has no frozen canonical identity")

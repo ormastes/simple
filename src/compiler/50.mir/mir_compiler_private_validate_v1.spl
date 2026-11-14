@@ -1,0 +1,44 @@
+use compiler.mir.mir_instructions.{MirModule}
+use compiler.mir.mir_compiler_private_function_v1.{mir_compiler_private_identity_valid_v1}
+
+pub fn mir_compiler_private_validate_v1(module: MirModule) -> Result<bool, text>:
+    if module.compiler_private_functions_v1.len() == 0: return Ok(true)
+    if module.compiler_private_module_identity_v1 == "":
+        return Err("E-MIR-PRIVATE: missing canonical publishing module")
+    for index in 0..module.compiler_private_functions_v1.len():
+        val binding = module.compiler_private_functions_v1[index]
+        if not mir_compiler_private_identity_valid_v1(binding):
+            return Err("E-MIR-PRIVATE: unsupported schema or incomplete typed binding")
+        if binding.defines_here != (binding.emission_owner == module.compiler_private_module_identity_v1):
+            return Err("E-MIR-PRIVATE: definition disagrees with its single emitting owner")
+        for earlier in 0..index:
+            val previous = module.compiler_private_functions_v1[earlier]
+            if previous.name == binding.name or previous.key_digest == binding.key_digest:
+                if previous.canonical_key != binding.canonical_key:
+                    return Err("E-MIR-PRIVATE: linkage index collides with different canonical content")
+                return Err("E-MIR-PRIVATE: duplicate linkage binding")
+            if previous.symbol.id == binding.symbol.id:
+                return Err("E-MIR-PRIVATE: distinct helpers share one generated symbol")
+            if previous.canonical_key == binding.canonical_key:
+                return Err("E-MIR-PRIVATE: one canonical helper has different linkage identities")
+        var definitions = 0
+        for function_key in module.functions.keys():
+            val function = module.functions[function_key]
+            if function.name == binding.name:
+                definitions = definitions + 1
+                if not binding.defines_here or function.symbol.id != binding.symbol.id or
+                        function.signature != binding.signature or function.is_export_c or
+                        function.export_name != "" or function.is_comdat:
+                    return Err("E-MIR-PRIVATE: source collision or inconsistent helper definition ABI")
+            elif function.symbol.id == binding.symbol.id and binding.defines_here:
+                return Err("E-MIR-PRIVATE: generated symbol collides with another module function")
+        if binding.defines_here and definitions != 1:
+            return Err("E-MIR-PRIVATE: emitting module does not own exactly one helper body")
+        if not binding.defines_here and definitions != 0:
+            return Err("E-MIR-PRIVATE: referencing module contains a duplicate helper body")
+    Ok(true)
+
+pub fn mir_function_is_compiler_private_v1(module: MirModule, name: text) -> bool:
+    for binding in module.compiler_private_functions_v1:
+        if binding.name == name: return true
+    false

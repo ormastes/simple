@@ -1,0 +1,56 @@
+# Publish a module's single-owner helper definitions and typed hidden
+# declarations only after all selected source sites were consumed.
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir.mir_instructions.{MirModule, MirFunction}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir_accessor_emit_v1.{mir_accessor_emit_v1}
+use compiler.mir.mir_compiler_private_function_v1.{MirCompilerPrivateFunctionV1}
+use compiler.mir.mir_compiler_private_validate_v1.{mir_compiler_private_validate_v1}
+use compiler.mir._MirLoweringExpr.accessor_sites_v1.*
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLowering.asm_and_targets.*
+
+impl MirLowering:
+    me publish_accessor_helpers_v1():
+        if val plan = self.accessor_plan_v1:
+            if self.ambient_bootstrap_enabled() or self.builder.loop_view_capture_v1.?:
+                self.error_fatal("E-AOP-FIELD-TRANSPORT: accessor metadata is not admitted on flat/captured MIR transport", None)
+                return
+            if not self.finish_accessor_coverage_v1(): return
+            val original = self.builder.module
+            if original.compiler_private_functions_v1.len() != 0:
+                self.error_fatal("E-AOP-FIELD-PUBLISH: compiler-private bindings were already published", None)
+                return
+            var functions: Dict<SymbolId, MirFunction> = {}
+            for symbol in original.functions.keys(): functions[symbol] = original.functions[symbol]
+            var bindings: [MirCompilerPrivateFunctionV1] = []
+            for helper in plan.helpers:
+                val defines_here = helper.emission_owner == plan.module_identity
+                for symbol in original.functions.keys():
+                    val source_function = original.functions[symbol]
+                    if source_function.name == helper.helper_name or (defines_here and symbol.id == helper.helper_symbol.id):
+                        self.error_fatal("E-AOP-FIELD-PUBLISH: generated helper collides with a source function", None)
+                        return
+                if defines_here:
+                    match mir_accessor_emit_v1(helper.plan, helper.helper_symbol, helper.helper_name,
+                            helper.plan.declaration.field_type.span):
+                        case Err(message):
+                            self.error_fatal(message, None)
+                            return
+                        case Ok(function): functions[helper.helper_symbol] = function
+                bindings.push(MirCompilerPrivateFunctionV1(schema_version: 1,
+                    symbol: helper.helper_symbol, name: helper.helper_name,
+                    signature: helper.plan.signature, emission_owner: helper.emission_owner,
+                    canonical_key: helper.canonical_key, key_digest: helper.content_digest,
+                    defines_here: defines_here))
+            val published = MirModule(..original, functions: functions,
+                compiler_private_functions_v1: bindings,
+                compiler_private_module_identity_v1: plan.module_identity)
+            match mir_compiler_private_validate_v1(published):
+                case Err(message):
+                    self.error_fatal(message, None)
+                    return
+                case Ok(_): ()
+            var builder = self.builder
+            builder.module = published
+            self.builder = builder

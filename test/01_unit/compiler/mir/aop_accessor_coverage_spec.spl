@@ -1,0 +1,57 @@
+# Source-authored coverage contract tests. Native execution remains unqualified.
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir_accessor_plan_v1.{MirAccessorOperationV1}
+use compiler.mir.mir_accessor_plan_set_v1.*
+
+fn coverage_site() -> AccessorSiteKeyV1:
+    AccessorSiteKeyV1(module_identity: "app.main", function_identity: "app.main::read",
+        start: 20, end: 29, line: 3, col: 4, operation: MirAccessorOperationV1.Read)
+
+fn coverage_plan(rows: [AccessorSitePlanV1]) -> AccessorPlanSetV1:
+    AccessorPlanSetV1(source_snapshot: "source-v1", hir_snapshot: "hir-v1",
+        plan_digest: "plan-v1", module_identity: "app.main",
+        covered_functions: [AccessorFunctionIdentityV1(symbol: SymbolId.new(7),
+            canonical_identity: "app.main::read")], sites: rows, helpers: [])
+
+describe "frozen accessor source coverage":
+    it "distinguishes an explicit unmatched field from a missing decision":
+        val site = coverage_site()
+        val plan = coverage_plan([AccessorSitePlanV1(site: site, decision: AccessorSiteDecisionV1.Unmatched)])
+        expect(accessor_plan_set_validate_v1(plan).is_ok()).to_equal(true)
+        expect(accessor_site_lookup_v1(plan, site).unwrap()).to_equal(AccessorSiteDecisionV1.Unmatched)
+        val missing = AccessorSiteKeyV1(..site, start: 40, end: 49)
+        expect(accessor_site_lookup_v1(plan, missing).is_err()).to_equal(true)
+
+    it "keeps read and write identities separate at the same source span":
+        val site = coverage_site()
+        val plan = coverage_plan([AccessorSitePlanV1(site: site, decision: AccessorSiteDecisionV1.Unmatched)])
+        expect(accessor_site_lookup_v1(plan,
+            AccessorSiteKeyV1(..site, operation: MirAccessorOperationV1.Write)).is_err()).to_equal(true)
+
+    it "rejects duplicate source spans instead of inventing occurrence ordinals":
+        val row = AccessorSitePlanV1(site: coverage_site(), decision: AccessorSiteDecisionV1.Unmatched)
+        expect(accessor_plan_set_validate_v1(coverage_plan([row, row])).is_err()).to_equal(true)
+
+    it "rejects synthetic empty spans and unresolved helper references":
+        val site = coverage_site()
+        val empty = AccessorSitePlanV1(site: AccessorSiteKeyV1(..site, end: site.start),
+            decision: AccessorSiteDecisionV1.Unmatched)
+        expect(accessor_plan_set_validate_v1(coverage_plan([empty])).is_err()).to_equal(true)
+        val prepared = AccessorSitePlanV1(site: site, decision: AccessorSiteDecisionV1.Prepared(0))
+        expect(accessor_plan_set_validate_v1(coverage_plan([prepared])).is_err()).to_equal(true)
+
+    it "requires a diagnostic for a selected unsupported site":
+        val site = coverage_site()
+        val bad = AccessorSitePlanV1(site: site, decision: AccessorSiteDecisionV1.Unsupported(""))
+        expect(accessor_plan_set_validate_v1(coverage_plan([bad])).is_err()).to_equal(true)
+        val good = AccessorSitePlanV1(site: site, decision: AccessorSiteDecisionV1.Unsupported("atomic place"))
+        expect(accessor_plan_set_validate_v1(coverage_plan([good])).is_ok()).to_equal(true)
+        expect(accessor_site_lookup_v1(coverage_plan([good]), site).unwrap()).to_equal(
+            AccessorSiteDecisionV1.Unsupported("atomic place"))
+
+    it "uses canonical function identity rather than matching a symbol from another function":
+        val plan = coverage_plan([])
+        expect(accessor_function_identity_v1(plan, SymbolId.new(7)).unwrap()).to_equal("app.main::read")
+        expect(accessor_function_identity_v1(plan, SymbolId.new(8)).is_err()).to_equal(true)
+        expect(accessor_site_lookup_v1(plan,
+            AccessorSiteKeyV1(..coverage_site(), function_identity: "other.main::read")).is_err()).to_equal(true)
