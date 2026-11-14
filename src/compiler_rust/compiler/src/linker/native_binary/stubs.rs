@@ -269,6 +269,7 @@ const RT_KEEP: &[&str] = &[
     "rt_epoll_wait",
     "rt_stdin_read",
     "rt_stdin_read_all",
+    "rt_stdin_read_timeout_v1",
     "rt_stdin_read_line",
     "rt_stdout_write",
     "rt_stdout_flush",

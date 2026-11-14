@@ -2663,6 +2663,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_shell_exec", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_stdin_read", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_stdin_read_all", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_stdin_read_timeout_v1", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_from_byte_array", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_to_byte_array", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_term_flush", &[], &[I32]),

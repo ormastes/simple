@@ -12,6 +12,7 @@ use os.apps.smux.window_layout_service.layout_resize_capable
 use os.apps.smux.client_attachment_service.{client_lease_snapshot, client_attach_leased, client_resize_leased}
 use os.apps.smux.client_leases.{smux_leases_new, smux_lease_admit}
 use std.sosix.process.PipedProcessRefV1
+use os.apps.smux.runtime_primary_control_request_v4.{SmuxPrimaryControlRequestV4, smux_primary_control_request_token_v4}
 
 fn control_request_v1() -> SmuxRuntimeControlRequestV1:
     SmuxRuntimeControlRequestV1(action: "issue", binding_uid: "binding-a", control_kind: SessionRuntimeControlKindV1.Input,
@@ -19,6 +20,22 @@ fn control_request_v1() -> SmuxRuntimeControlRequestV1:
         nonce: "", payload: "", columns: 0, rows: 0, expected_target_digest: "c".repeat(64))
 
 describe "authenticated runtime control adapter prevention":
+    it "authenticates primary controls and preserves explicit owner-admin revoke shape":
+        step("Refuse unauthenticated primary control and bearer-shaped administrative revoke")
+        val request = SmuxPrimaryControlRequestV4(control: control_request_v1(), attempt_sequence: 0, offset: 0, maximum: 0)
+        val token = smux_primary_control_request_token_v4(request).unwrap()
+        expect(smux_server_dispatch("wrong runtime-primary-control-v4 " + token, "secret")).to_equal("smux: unauthorized")
+        expect(smux_server_dispatch("secret runtime-primary-control-v4 " + token, "secret")).to_equal("smux: runtime control policy unavailable")
+        var revoke = control_request_v1()
+        revoke.action = "revoke"
+        revoke.client_id = ""
+        revoke.attachment_token = ""
+        revoke.expected_target_digest = ""
+        revoke.expected_revision = 1
+        expect(smux_runtime_control_request_validate_v1(revoke).is_ok()).to_equal(true)
+        revoke.nonce = "b".repeat(64)
+        expect(smux_runtime_control_request_validate_v1(revoke).unwrap_err()).to_equal("runtime-control-unexpected-nonce")
+
     it "round trips canonical requests and refuses caller authority fields":
         step("Reject caller supplied principal roots argv and lease metadata")
         val request = control_request_v1()

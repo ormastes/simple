@@ -9,11 +9,11 @@ extern fn rt_file_read_text(path: text) -> text?
 # violation inside the MIR worker). Source-shape gate: every declared field of
 # `struct MirLowering` must be a promote_and_release_transient_owner_roots root.
 
-fn mir_lowering_struct_fields(source: text) -> [text]:
+fn mir_owner_struct_fields(source: text, owner: text) -> [text]:
     var fields: [text] = []
     var in_struct = false
     for line in source.split("\n"):
-        if line.starts_with("struct MirLowering:"):
+        if line.starts_with("struct " + owner + ":"):
             in_struct = true
             continue
         if not in_struct:
@@ -34,6 +34,9 @@ fn mir_lowering_struct_fields(source: text) -> [text]:
             continue
         fields = fields.push(name)
     fields
+
+fn mir_lowering_struct_fields(source: text) -> [text]:
+    mir_owner_struct_fields(source, "MirLowering")
 
 fn promote_transient_owner_body(source: text) -> text:
     """Only the non-comment lines of `me promote_transient_owner()`: a root
@@ -181,4 +184,25 @@ describe "MirLowering transient owner promotion of class-typed field children":
             if not owner_source3.contains("promote_and_release_transient_owner_roots([self.rti.{child}])"):
                 missing = missing.push("rti.{child}")
         expect(class_fields_of(hir_types_source, "SymbolTable").len()).to_be_greater_than(5)
+        expect(missing).to_equal([])
+
+# Mut-reference writeback arrays remain reachable through the retained builder.
+# This checks explicit child roots, not native execution or an observed UAF.
+describe "MirBuilder transient owner child roots":
+    val builder_source = rt_file_read_text("src/compiler/50.mir/mir_data.spl") ?? ""
+    val builder_owner_file = rt_file_read_text("src/compiler/50.mir/_MirLowering/transient_owner.spl") ?? ""
+    val builder_owner_body = promote_transient_owner_body(builder_owner_file)
+
+    it "discovers both mutable-reference writeback arrays in the builder":
+        val fields = mir_owner_struct_fields(builder_source, "MirBuilder")
+        expect(fields.contains("mut_ref_param_ptrs")).to_equal(true)
+        expect(fields.contains("mut_ref_param_values")).to_equal(true)
+
+    it "promotes every declared MirBuilder child independently":
+        val fields = mir_owner_struct_fields(builder_source, "MirBuilder")
+        expect(fields.len()).to_be_greater_than(0)
+        var missing: [text] = []
+        for field in fields:
+            if not builder_owner_body.contains("promote_and_release_transient_owner_roots([self.builder.{field}])"):
+                missing = missing.push(field)
         expect(missing).to_equal([])

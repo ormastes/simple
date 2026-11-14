@@ -1,6 +1,6 @@
 # private_fn_registry_late_for_importer_top_level_2026-11-14
 
-- **Severity:** P3. **Status:** open (fail-open, product side).
+- **Severity:** P3. **Status:** fixed (`work/private-gate-residuals-20261114`).
 - **Found by:** `private_call_gate_skips_import_bound_and_entry_calls_2026-11-14`
   (fixture `p_top_init_glob`).
 
@@ -27,9 +27,17 @@ by `record_provided_names` after a module's evaluation (`module_loader.rs`
 around :1530). Glob-loaded modules evidently reach the registry only after
 their importer's top level has run.
 
-## Fix direction
+## Fix
 
-Register a module's private fn names before any importer's top-level code can
-run. They are purely syntactic (`private_top_level_fn_names` of the module's
-items), so they can be recorded before evaluation. That tightens the rule for
-module initializers, so it needs its own census.
+The flattening loader (`pipeline/module_loader.rs`
+`load_module_with_imports_internal`) registers a module's private fn names
+right after parsing it (`register_module_private_fns`, the same
+`private_top_level_fn_names` the interpreter loader uses), so they are known
+before any flattened top-level initializer runs. The measured cause was that
+a flattened importer's initializers run before the kept `use` statement makes
+the interpreter loader evaluate (and register) the imported module. The
+registry is now process-wide with a per-thread cache.
+
+Evidence and census: `private_call_gate_skips_import_bound_and_entry_calls_2026-11-14.md`,
+"Residuals closed". Matrix rows `topglob`, `topglobmain` (refused) and
+`topsame`, `topsamemain`, `toptest` (allowed).

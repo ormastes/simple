@@ -656,9 +656,9 @@ fn _apply_decls_dispatch(
         val width = css_math_primary(width_raw)
         val implied_max = css_math_implied_max_px(width_raw)
         val implied_min = css_math_implied_min_px(width_raw)
-        if implied_max > 0 and st.max_width_px <= 0:
+        if implied_max > 0 and st.max_width_px == 0:
             st.max_width_px = implied_max
-        if implied_min > 0 and st.min_width_px <= 0:
+        if implied_min > 0 and st.min_width_px == 0:
             st.min_width_px = implied_min
         if width.len() > 0:
             if width.ends_with("%"):
@@ -686,7 +686,10 @@ fn _apply_decls_dispatch(
                 st.min_height_vh = true
             else:
                 st.min_height_vh = false
-                st.min_height_px = parse_int(min_height)
+                # A percentage is the negative sentinel, resolved at layout
+                # time against a definite containing height (else `none`).
+                val min_height_n = parse_int(min_height)
+                st.min_height_px = if min_height.trim().ends_with("%"): (if min_height_n > 0: 0 - min_height_n else: 0) else: min_height_n
     # Cascade order for the margin family mirrors the full-probe body:
     # decl_tbl is source-ordered, so the margin-left longhand only applies
     # when it was declared AFTER the last `margin` shorthand (last-declared
@@ -783,16 +786,26 @@ fn _apply_decls_dispatch(
             val basis_v = parse_supported_nonnegative_px(flex_basis_decl)
             if basis_v >= 0:
                 st.flex_basis_px = basis_v
+                st.flex_basis_zero = basis_v == 0
+            elif flex_basis_decl.trim() == "0%":
+                st.flex_basis_px = 0
+                st.flex_basis_zero = true
+            elif flex_basis_decl.trim() == "auto":
+                st.flex_basis_px = 0
+                st.flex_basis_zero = false
     if css_prop_mask_has(mask, CSS_PROP_TEXT_ALIGN):
         css_probe_note()
         val ta = decl_tbl_get(decl_tbl, "text-align")
         if ta.len() > 0:
             st.text_align = ta
+            st.text_align_set = true
     if css_prop_mask_has(mask, CSS_PROP_FONT_STYLE):
         css_probe_note()
         val font_style_decl = decl_tbl_get(decl_tbl, "font-style").trim().lower()
         if font_style_decl == "normal":
             st.font_style_italic = false
+        elif font_style_decl == "inherit":
+            st.font_style_italic = st.inherit_italic
         elif font_style_decl == "italic" or font_style_decl == "oblique":
             st.font_style_italic = true
     if css_prop_mask_has(mask, CSS_PROP_CURSOR):
@@ -1451,8 +1464,9 @@ fn _tag_defaults_without_metadata(st: Style, tag: text) -> Style:
     elif tag == "h6":
         font_size_v = 11
         bold_v = true
-        margin_t_v = 26
-        margin_b_v = 26
+        # 2.33em of the 10.72 px h6 font is 24.98 (Chrome 159), not 26.
+        margin_t_v = 25
+        margin_b_v = 25
     elif tag == "b" or tag == "strong":
         # Chrome UA sheet: b/strong are font-weight:bold with no size change.
         bold_v = true
@@ -1472,9 +1486,10 @@ fn _tag_defaults_without_metadata(st: Style, tag: text) -> Style:
         fg_v = web_argb(0, 0, 0)
     elif tag == "sub" or tag == "sup":
         # Selected medium-UA profile: `smaller` is 5/6 of the inherited size,
-        # rounded half up. The inherited zero line-height sentinel stays normal.
+        # rounded half up. `line-height` is inherited like any other inline
+        # box (html.css sets only vertical-align and font-size): a unitless
+        # factor re-resolves against the smaller font, a px value stays.
         font_size_v = (st.font_size * 5 + 3) / 6
-        line_height_v = 0
         vertical_align_v = if tag == "sub": "sub" else: "super"
     elif tag == "hr":
         var rule = st
@@ -1556,6 +1571,13 @@ fn _tag_defaults_without_metadata(st: Style, tag: text) -> Style:
         line_height_v = FORM_CONTROL_UA_LINE_HEIGHT_RATIO
         if tag == "textarea":
             font_family_v = "monospace"
+        else:
+            font_family_v = "sans-serif"
+        # `font: -webkit-small-control` is a whole shorthand: it resets weight
+        # and style too, so a control in a heading or an <em> is not bold or
+        # italic unless the author says so.
+        bold_v = false
+        st.font_style_italic = false
         if tag == "input":
             pad_l_v = 2
             pad_r_v = 2
@@ -1578,6 +1600,9 @@ fn _tag_defaults_without_metadata(st: Style, tag: text) -> Style:
         # Form controls do not inherit `font` from their ancestors.
         font_size_v = FORM_CONTROL_UA_FONT_SIZE_PX
         line_height_v = FORM_CONTROL_UA_LINE_HEIGHT_RATIO
+        font_family_v = "sans-serif"
+        bold_v = false
+        st.font_style_italic = false
     elif tag == "a":
         fg_v = web_argb(0, 0, 238)
         underline_v = true

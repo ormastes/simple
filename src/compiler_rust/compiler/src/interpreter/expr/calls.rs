@@ -685,6 +685,9 @@ pub(super) fn eval_call_expr(
                             }
                         }
                         if let Some(func) = shortcut_func {
+                            // `m.f` read as a value where `m` is not bound
+                            // (inside `fn main`): a use of `f` by this caller.
+                            crate::interpreter::interpreter_call::gate_private_call(&func.name, &func)?;
                             return Ok(Some(Value::Function {
                                 name: field.clone(),
                                 def: func,

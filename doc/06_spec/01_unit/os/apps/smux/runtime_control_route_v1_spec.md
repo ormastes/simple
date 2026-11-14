@@ -4,6 +4,11 @@ AUTHORED_UNRUN. This manual corresponds to
 `test/01_unit/os/apps/smux/runtime_control_route_v1_spec.spl`; it records no
 compiled, native or runtime acceptance result.
 
+The primary input addition includes one NOT_RUN scenario against the actual
+unconfigured dispatcher: V4 authenticates before parsing and refuses absent
+policy. The existing V1 codec accepts nonce-free owner-admin revoke but rejects
+a bearer-shaped revoke. No configured/native revocation effect is proved.
+
 - **Reject caller supplied principal roots argv and lease metadata.** Canonical
   requests round trip; extra authority fields and noncanonical base64 are denied.
 - **Reject cross-kind payloads overflow revisions and unsupported geometry.**

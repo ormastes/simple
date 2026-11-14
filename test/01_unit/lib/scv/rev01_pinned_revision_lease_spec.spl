@@ -1,0 +1,53 @@
+"""REV-01 (immutable views plan 2026-11-13, section 10): old pinned readers stay stable.
+
+An editor process holds several retained document revisions while newer
+revisions are published. The reclamation hook is the SCV per-reader lease
+(`scv_compile_snapshot_lease_*`); a pinned revision must survive eviction and
+be reclaimed only after its lease is released.
+"""
+
+use std.spec.*
+use std.scv.compile_snapshot.{scv_compile_snapshot_provenance_v1,
+    scv_compile_snapshot_receipt_v1, scv_compile_snapshot_retain_newest_v1,
+    scv_compile_snapshot_lease_acquire_v1, scv_compile_snapshot_lease_release_v1}
+use app.io.mod.{dir_create}
+use app.io.file_ops.{path_absolute}
+use std.nogc_sync_mut.io_runtime.{file_write, dir_exists}
+
+extern fn rt_getpid() -> i64
+
+fn _rev(ch: text) -> text: "scv-revision-v1-" + ch.repeat(64)
+
+fn _fixture(label: text, names: [text]) -> text:
+    val cache = path_absolute("build/test-artifacts/rev01-{rt_getpid()}-{label}").replace("\\", "/")
+    expect(dir_create(cache + "/receipts", true)).to_equal(true)
+    for name in names:
+        expect(dir_create(cache + "/snapshots/" + name, true)).to_equal(true)
+        val provenance = scv_compile_snapshot_provenance_v1(name, "c", "t", "d", 1)
+        file_write(cache + "/snapshots/" + name + "/SCV_COMPILE_SNAPSHOT", provenance)
+        file_write(cache + "/receipts/" + name + ".receipt", scv_compile_snapshot_receipt_v1(provenance, name))
+    cache
+
+fn _alive(cache: text, name: text) -> bool: dir_exists(cache + "/snapshots/" + name)
+
+describe "REV-01 pinned revision reclamation":
+    it "keeps one pinned old revision through several newer publishes and reclaims it after release":
+        val cache = _fixture("one", [_rev("a"), _rev("b"), _rev("c"), _rev("d")])
+        file_write(cache + "/receipts/" + _rev("a") + ".used", "1")
+        scv_compile_snapshot_lease_acquire_v1(cache, _rev("a"))
+        expect(scv_compile_snapshot_retain_newest_v1(cache, _rev("d"), 1, 0)).to_equal(2)
+        expect(_alive(cache, _rev("a"))).to_equal(true)
+        expect(_alive(cache, _rev("d"))).to_equal(true)
+        scv_compile_snapshot_lease_release_v1(cache, _rev("a"))
+        expect(scv_compile_snapshot_retain_newest_v1(cache, _rev("d"), 1, 0)).to_equal(1)
+        expect(_alive(cache, _rev("a"))).to_equal(false)
+
+    it "keeps every revision one reader process pins at the same time (several retained documents)":
+        val cache = _fixture("two", [_rev("a"), _rev("b"), _rev("c"), _rev("d")])
+        file_write(cache + "/receipts/" + _rev("a") + ".used", "1")
+        file_write(cache + "/receipts/" + _rev("b") + ".used", "1")
+        scv_compile_snapshot_lease_acquire_v1(cache, _rev("a"))
+        scv_compile_snapshot_lease_acquire_v1(cache, _rev("b"))
+        discard scv_compile_snapshot_retain_newest_v1(cache, _rev("d"), 1, 0)
+        expect(_alive(cache, _rev("a"))).to_equal(true)
+        expect(_alive(cache, _rev("b"))).to_equal(true)

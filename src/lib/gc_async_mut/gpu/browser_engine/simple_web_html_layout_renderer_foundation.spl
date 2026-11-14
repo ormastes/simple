@@ -1748,7 +1748,8 @@ fn parse_linear_gradient_color(raw: text, target: i32) -> u32:
             # IS the sheen (e.g. rgba(255,255,255,0.08)); parse_color_any made
             # every stop opaque (0xFFFFFFFF), erasing the translucency the CPU
             # material admission keys on.
-            return parse_color_alpha(part)
+            # A positioned stop (`#0f0 60%`) is still that colour.
+            return parse_color_alpha(gradient_stop_color_text(part))
         item_index = item_index + 1
     0u32
 
@@ -1915,6 +1916,48 @@ fn parse_signed_leading_int(s: text) -> i32:
     else:
         v
 
+# A `<angle>` token (`deg`, `grad`, `rad`, `turn`, decimals allowed) in
+# whole degrees, rounded and reduced to 0..359.
+fn gradient_angle_token_deg(s: text) -> i32:
+    val n = s.byte_len()
+    var i = 0
+    var neg = false
+    if n > 0 and s.substring(0, 1) == "-":
+        neg = true
+        i = 1
+    elif n > 0 and s.substring(0, 1) == "+":
+        i = 1
+    var v = 0.0
+    var scale = 0.0
+    while i < n:
+        val c = s.substring(i, i + 1)
+        val d = dec_val(c)
+        if d < 10:
+            if scale > 0.0:
+                v = v + (d as f64) * scale
+                scale = scale / 10.0
+            else:
+                v = v * 10.0 + (d as f64)
+            i = i + 1
+        elif c == "." and scale == 0.0:
+            scale = 0.1
+            i = i + 1
+        else:
+            break
+    val unit = s.substring(i, n)
+    var deg = v
+    if unit == "grad":
+        deg = v * 0.9
+    elif unit == "rad":
+        deg = v * 180.0 / 3.141592653589793
+    elif unit == "turn":
+        deg = v * 360.0
+    val r = (deg + 0.5) as i32
+    # Reduced to 0..359: values >= 1000 are the `to <corner>` codes, so
+    # `3turn` or `1080deg` must never reach the painter unreduced.
+    val m = (if neg: 0 - r else: r) % 360
+    if m < 0: m + 360 else: m
+
 # Linear-gradient angle in CSS degrees (0 = to top, 90 = to right, 180 (the
 # CSS default) = to bottom, 270 = to left). Radial gradients have no angle.
 fn parse_gradient_angle_deg(raw: text) -> i32:
@@ -1926,7 +1969,17 @@ fn parse_gradient_angle_deg(raw: text) -> i32:
         return 180
     val first = parts[0].trim()
     if is_gradient_angle_token(first):
-        return parse_signed_leading_int(first)
+        return gradient_angle_token_deg(first)
+    # `to <corner>`: the angle depends on the box, resolved at paint time
+    # (`gradient_corner_dir_q16`); 1000 + the square-box angle.
+    if first == "to top right" or first == "to right top":
+        return 1045
+    if first == "to bottom right" or first == "to right bottom":
+        return 1135
+    if first == "to bottom left" or first == "to left bottom":
+        return 1225
+    if first == "to top left" or first == "to left top":
+        return 1315
     if first == "to top":
         return 0
     if first == "to right":
@@ -1974,6 +2027,16 @@ fn parse_gradient_stops(raw: text) -> [GradientStopSpec]:
         raw_pos[0] = 0
     if raw_pos[n - 1] < 0:
         raw_pos[n - 1] = 1000
+    # CSS Images 3 §3.4.3: a positioned stop below the largest position
+    # before it is raised to that position (a hard edge).
+    var run_max = raw_pos[0]
+    var q = 1
+    while q < n:
+        if raw_pos[q] >= 0:
+            if raw_pos[q] < run_max:
+                raw_pos[q] = run_max
+            run_max = raw_pos[q]
+        q = q + 1
     var k = 1
     while k < n - 1:
         if raw_pos[k] < 0:

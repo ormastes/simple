@@ -30,8 +30,9 @@ observation_budget_ms=${13}
 # identity and cross-module import resolution do not serve the per-module
 # lane. "whole-program" restores SIMPLE_BOOTSTRAP=1 plus
 # SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1.
-# A per-file lane may carry ":fw=0|1" and ":gte=0|1" items, forwarded in that
-# order as SIMPLE_FILE_WORKERS and SIMPLE_NATIVE_GO_TO_END (systemd does not
+# A per-file lane may carry ":fw=0|1", ":gte=0|1" and ":msc=<1..128>" items,
+# forwarded in that order as SIMPLE_FILE_WORKERS, SIMPLE_NATIVE_GO_TO_END and
+# SIMPLE_MIR_SHARD_COUNT (systemd does not
 # inherit, and the compiler runs under env -i).
 bootstrap_flag=1 whole_program_env= per_file_env=
 if [ "$worker_arg_count" -ge 34 ]; then
@@ -44,6 +45,8 @@ if [ "$worker_arg_count" -ge 34 ]; then
         case "$lane_item" in
           fw=0|fw=1) per_file_env="$per_file_env SIMPLE_FILE_WORKERS=${lane_item#fw=}" ;;
           gte=0|gte=1) per_file_env="$per_file_env SIMPLE_NATIVE_GO_TO_END=${lane_item#gte=}" ;;
+          msc=[1-9]|msc=[1-9][0-9]|msc=1[01][0-9]|msc=12[0-8])
+            per_file_env="$per_file_env SIMPLE_MIR_SHARD_COUNT=${lane_item#msc=}" ;;
           *) echo "stage3 worker: invalid lowering lane" >&2; exit 64 ;;
         esac
       done ;;
