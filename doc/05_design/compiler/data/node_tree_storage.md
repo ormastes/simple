@@ -382,3 +382,49 @@ shared read-only by every MIR shard worker, instead of N decoded copies.
   regeneration goes through `simple test` until fixed.
 - Interpreter-lane numbers over-state bytes per node; they rank the phases and
   attributes, the native lane confirms the absolute savings.
+
+### 7.4 AST placement census (measured 2026-11-14, node-attribute step 3)
+
+Probe: `test/05_perf/compiler/data/ast_placement_census_probe_spec.spl` (perf lane,
+`SIMPLE_PERF_PROBES=1`), seed-tip interpreter, Windows. Inputs: 6 real modules
+(`mir_lowering_stmts`, `data_schema_resolver`, `attr_access_sites`, `_AstExpr/nodes`,
+`driver_types`, `test_runner_single`) = **24,936 expr nodes, 6,137 stmt nodes**, parsed
+with `parse_module_body` after `reset_all_pools()`. A slot counts as populated when it
+differs from `expr_alloc`'s default. **Access frequency is NOT measured** (no dynamic
+read counters exist; the static fan-in scan timed out) — class "hot" below is by role,
+not by count, and must be confirmed by the native lane before any default flip.
+
+| column | populated | density | class (proposed) | reason |
+|---|---|---|---|---|
+| expr `tag` | 24,936 | 100% | main node | every node, 8 B, read on every dispatch |
+| expr `span` | 24,936 | 100% | main node | every node, diagnostics + HIR |
+| expr `i_val` | 17,046 | 68% | main node | dense small scalar (op / int value / ident id by tag) |
+| expr `s_val` | 17,188 | 69% | array (column) | dense but a wide text ref; read per tag family |
+| expr `left` | 9,096 | 36% | array (column) | mid density; node-id scalar |
+| expr `right` | 3,056 | 12% | array (column) / hash | binary/index/range only |
+| expr `extra` | 101 | 0.4% | sparse hash | almost always -1 |
+| expr `args` | 3,179 | 13% | sparse hash | list ref; 87% share one empty list |
+| expr `arg_names` | 2,926 | 12% | sparse hash | call-site named args only |
+| expr `stmts` | 188 | 0.8% | sparse hash | block-like exprs only |
+| expr `call_type_args` | 3 | 0.01% | sparse hash | turbofish only |
+| expr `f_val` | 0 | 0% | sparse hash (unconfirmed) | none in this sample; needs a float-bearing input |
+| stmt `expr` | 5,942 | 97% | main node | dense node-id scalar |
+| stmt `name` | 1,586 | 26% | array (column) | let/var names |
+| stmt `type_tag` | 1,275 | 21% | array (column) | annotated bindings |
+| stmt `if_single_else` | 157 | 2.6% | sparse hash | if-statements only |
+| stmt `body` | 0 | 0% | n/a | bodies live in `stmt_body_flat` + offsets, not `stmt_body` |
+
+Per-tag shape (tag ids from `_AstExpr/nodes.spl`): IDENT (6) = 11,960 nodes (48%)
+uses only `i_val`+`s_val`; BINARY (7) = 1,974 (7.9%) uses `i_val` (op), `left`,
+`right` on 100% of its own nodes; CALL (9) 1,571 uses `left`+`args`, 87% with named
+args absent; FIELD_ACCESS (11) 1,988 uses `i_val`,`s_val`,`left`.
+
+Findings that change the plan:
+- **`op` is family-sparse.** The pilot gives `op` a column indexed by global node id;
+  that column is 7.9% dense for Binary alone (92% of slots empty). A column wins only
+  when indexed per tag family (a view-local index); over the global id space the sparse
+  hash is the smaller choice for any attribute whose owning tag is under ~25% of nodes.
+- `left`/`right`/`extra` are tag-conditional: dense within their tags, sparse overall.
+- `args`/`arg_names`/`stmts`/`extra`/`call_type_args` are each < 15% populated and
+  hold list/text refs: first hash candidates after the two pilot attributes.
+- Not yet censused: decl columns, `asm_*` expr columns, HIR/MIR nodes.
