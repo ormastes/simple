@@ -1,0 +1,254 @@
+# MDSOC: feature dimension
+# Cross-layer / cross-feature edge selection + fold (XRay V1, plan: edge profile).
+#
+# There is no new machine hook. The raw Entry/Exit stream already lets a
+# deferred consumer recover caller->callee from the per-context stack
+# (observer_profile_v1 does the same for per-function timing), so this module
+# only adds (1) a selector extension, (2) a function -> (layer, feature) table
+# built from the admitted map's canonical names, and (3) a pure fold that keeps
+# only edges whose caller class differs from the callee class.
+#
+# Selector extension (default OFF: absent extension = no edge selection):
+#   ext_name  simple.trace/observer-v1.edges, ext_major 1
+#   payload   lines separated by "\n" or ";":
+#               edge layer|feature [from=<class>] [to=<class>]
+#               rule layer|feature <name-prefix>=<class>
+# Classes: a `rule` (longest name prefix wins) else, for layers only, the
+# module path (`compiler.NN.name`, `std.<tier>` -> `lib.<tier>`, `app`);
+# anything unclassified is "?". Malformed input fails closed with
+# InvalidArgument, so the caller selects nothing and tracing stays off.
+# The caller of a traced function is known only if it is traced too: the
+# selection names include callers (see trace_edge_selection_names_v1), and a
+# traced function whose caller is untraced is a root, never guessed.
+use std.common.plugin.aspect_params.{AspectParamsV1}
+use std.common.trace.observer_contract_v1.{TraceEventV1, TraceEventKindV1, TraceFailureV1}
+use std.common.trace.xray_native_map_format_v1.{XrayMapV1}
+use std.common.text_bytes.{utf8_bytes_valid, bytes_to_text}
+
+pub const ASPECT_TRACE_EDGES_EXT_V1 = "simple.trace/observer-v1.edges"
+pub const TRACE_EDGES_SCHEMA_V1 = "simple.trace.observer.edges.v1"
+const TRACE_EDGES_MAX_BYTES_V1 = 4096
+
+pub enum TraceEdgeDimensionV1:
+    Layer
+    Feature
+
+pub struct TraceEdgeSelectorV1:
+    dimension: TraceEdgeDimensionV1
+    from: text
+    to: text
+
+pub struct TraceEdgeRuleV1:
+    dimension: TraceEdgeDimensionV1
+    prefix: text
+    label: text
+
+pub struct TraceEdgeSpecV1:
+    selectors: [TraceEdgeSelectorV1]
+    rules: [TraceEdgeRuleV1]
+
+pub struct TraceEdgeClassRowV1:
+    function_id: u32
+    layer: text
+    feature: text
+
+pub struct TraceEdgeRowV1:
+    dimension: TraceEdgeDimensionV1
+    from: text
+    to: text
+    calls: u64
+    inclusive_ns: u64
+    exclusive_ns: u64
+
+pub struct TraceEdgeProfileV1:
+    rows: [TraceEdgeRowV1]
+    unmatched_exits: u64
+    open_entries: u64
+
+struct _TraceEdgeFrameV1:
+    context_id: u64
+    function_id: u32
+    entered_at: u64
+    child_ns: u64
+    has_edge: bool
+    edge_from: text
+    edge_to: text
+
+fn _edge_dimension_v1(word: text) -> TraceEdgeDimensionV1?:
+    if word == "layer": return Some(TraceEdgeDimensionV1.Layer)
+    if word == "feature": return Some(TraceEdgeDimensionV1.Feature)
+    None
+
+fn _edge_dimension_name_v1(dimension: TraceEdgeDimensionV1) -> text:
+    if dimension == TraceEdgeDimensionV1.Layer: "layer" else: "feature"
+
+pub fn trace_edge_spec_parse_v1(source: text) -> Result<TraceEdgeSpecV1, TraceFailureV1>:
+    var spec = TraceEdgeSpecV1(selectors: [], rules: [])
+    for raw in source.replace(";", "\n").split("\n"):
+        var words: [text] = []
+        for word in raw.trim().split(" "):
+            if word != "": words.push(word)
+        if words.len() == 0: continue
+        if words.len() < 2: return Err(TraceFailureV1.InvalidArgument)
+        val dimension = _edge_dimension_v1(words[1])
+        if not dimension.?: return Err(TraceFailureV1.InvalidArgument)
+        if words[0] == "edge":
+            var from = ""
+            var to = ""
+            for index in 2..words.len():
+                val pair = words[index].split("=")
+                if pair.len() != 2 or pair[1] == "": return Err(TraceFailureV1.InvalidArgument)
+                if pair[0] == "from" and from == "": from = pair[1]
+                elif pair[0] == "to" and to == "": to = pair[1]
+                else: return Err(TraceFailureV1.InvalidArgument)
+            spec.selectors.push(TraceEdgeSelectorV1(dimension: dimension.unwrap(), from: from, to: to))
+        elif words[0] == "rule":
+            if words.len() != 3: return Err(TraceFailureV1.InvalidArgument)
+            val pair = words[2].split("=")
+            if pair.len() != 2 or pair[0] == "" or pair[1] == "": return Err(TraceFailureV1.InvalidArgument)
+            spec.rules.push(TraceEdgeRuleV1(dimension: dimension.unwrap(), prefix: pair[0], label: pair[1]))
+        else:
+            return Err(TraceFailureV1.InvalidArgument)
+    if spec.selectors.len() == 0: return Err(TraceFailureV1.InvalidArgument)
+    Ok(spec)
+
+# The edge spec in params; Ok(None) when no edge extension is present.
+pub fn trace_aspect_edge_spec_v1(params: AspectParamsV1) -> Result<TraceEdgeSpecV1?, TraceFailureV1>:
+    var seen = false
+    var found: TraceEdgeSpecV1? = None
+    for extension in params.ext:
+        if extension.ext_name != ASPECT_TRACE_EDGES_EXT_V1: continue
+        if seen or extension.ext_major != 1 or extension.payload_schema_hash != TRACE_EDGES_SCHEMA_V1:
+            return Err(TraceFailureV1.InvalidArgument)
+        seen = true
+        if extension.payload.len() == 0 or extension.payload.len() > TRACE_EDGES_MAX_BYTES_V1:
+            return Err(TraceFailureV1.InvalidArgument)
+        if not utf8_bytes_valid(extension.payload): return Err(TraceFailureV1.InvalidArgument)
+        match trace_edge_spec_parse_v1(bytes_to_text(extension.payload)):
+            case Ok(spec): found = Some(spec)
+            case Err(failure): return Err(failure)
+    Ok(found)
+
+fn _edge_default_layer_v1(name: text) -> text:
+    val parts = name.replace("::", ".").split(".")
+    if parts[0] == "compiler" and parts.len() >= 3: return "compiler.{parts[1]}.{parts[2]}"
+    if parts[0] == "std" and parts.len() >= 2: return "lib.{parts[1]}"
+    if parts[0] == "app": return "app"
+    "?"
+
+fn _edge_classify_v1(spec: TraceEdgeSpecV1, dimension: TraceEdgeDimensionV1, name: text) -> text:
+    var best = ""
+    var label = ""
+    for rule in spec.rules:
+        if rule.dimension == dimension and name.starts_with(rule.prefix) and rule.prefix.len() > best.len():
+            best = rule.prefix
+            label = rule.label
+    if best != "": return label
+    if dimension == TraceEdgeDimensionV1.Layer: return _edge_default_layer_v1(name)
+    "?"
+
+# Site -> (layer, feature) table, one row per function of the admitted map.
+pub fn trace_edge_table_v1(map: XrayMapV1, spec: TraceEdgeSpecV1) -> [TraceEdgeClassRowV1]:
+    var rows: [TraceEdgeClassRowV1] = []
+    for function in map.functions:
+        rows.push(TraceEdgeClassRowV1(function_id: function.local_fn_id,
+            layer: _edge_classify_v1(spec, TraceEdgeDimensionV1.Layer, function.name),
+            feature: _edge_classify_v1(spec, TraceEdgeDimensionV1.Feature, function.name)))
+    rows
+
+fn _edge_class_of_v1(table: [TraceEdgeClassRowV1], dimension: TraceEdgeDimensionV1, function_id: u32) -> text:
+    for row in table:
+        if row.function_id == function_id:
+            if dimension == TraceEdgeDimensionV1.Layer: return row.layer
+            return row.feature
+    "?"
+
+# Names to hand to xray_native_selection_v1: every function whose class is a
+# `from` or `to` of some selector (callers must be traced to be identified);
+# a selector with an open side needs every function.
+pub fn trace_edge_selection_names_v1(map: XrayMapV1, spec: TraceEdgeSpecV1) -> [text]:
+    val table = trace_edge_table_v1(map, spec)
+    var names: [text] = []
+    for index in 0..map.functions.len():
+        var wanted = false
+        for selector in spec.selectors:
+            if selector.from == "" or selector.to == "":
+                wanted = true
+            else:
+                val cls = _edge_class_of_v1(table, selector.dimension, map.functions[index].local_fn_id)
+                if cls == selector.from or cls == selector.to: wanted = true
+        if wanted: names.push(map.functions[index].name)
+    names
+
+fn _edge_row_index_v1(profile: TraceEdgeProfileV1, from: text, to: text) -> i64:
+    for index in 0..profile.rows.len():
+        if profile.rows[index].from == from and profile.rows[index].to == to: return index
+    -1
+
+# Fold the raw edges into one row per (caller class, callee class) pair of
+# `selector`'s dimension, same-class calls excluded. Timing follows
+# trace_profile_fold_v1: exclusive = inclusive minus time in traced children.
+pub fn trace_edge_fold_v1(events: [TraceEventV1], table: [TraceEdgeClassRowV1],
+        selector: TraceEdgeSelectorV1) -> TraceEdgeProfileV1:
+    var profile = TraceEdgeProfileV1(rows: [], unmatched_exits: 0, open_entries: 0)
+    var open: [_TraceEdgeFrameV1] = []
+    for event in events:
+        if event.kind == TraceEventKindV1.Entry:
+            var has_edge = false
+            var edge_from = ""
+            var edge_to = ""
+            var parent = open.len() - 1
+            while parent >= 0:
+                if open[parent].context_id == event.context_id:
+                    edge_from = _edge_class_of_v1(table, selector.dimension, open[parent].function_id)
+                    edge_to = _edge_class_of_v1(table, selector.dimension, event.function_id)
+                    has_edge = edge_from != edge_to and (selector.from == "" or selector.from == edge_from)
+                        and (selector.to == "" or selector.to == edge_to)
+                    break
+                parent = parent - 1
+            open.push(_TraceEdgeFrameV1(context_id: event.context_id, function_id: event.function_id,
+                entered_at: event.timestamp, child_ns: 0, has_edge: has_edge, edge_from: edge_from, edge_to: edge_to))
+            continue
+        if event.kind != TraceEventKindV1.Exit and event.kind != TraceEventKindV1.TailExit: continue
+        var frame_index = open.len() - 1
+        while frame_index >= 0:
+            if open[frame_index].context_id == event.context_id and open[frame_index].function_id == event.function_id: break
+            frame_index = frame_index - 1
+        if frame_index < 0:
+            profile.unmatched_exits = profile.unmatched_exits + 1u64
+            continue
+        val frame = open[frame_index]
+        val inclusive: u64 = if event.timestamp >= frame.entered_at: event.timestamp - frame.entered_at else: 0
+        val exclusive: u64 = if inclusive >= frame.child_ns: inclusive - frame.child_ns else: 0
+        var kept: [_TraceEdgeFrameV1] = []
+        for index in 0..open.len():
+            if index == frame_index: continue
+            if index > frame_index and open[index].context_id == event.context_id:
+                profile.open_entries = profile.open_entries + 1u64
+                continue
+            kept.push(open[index])
+        open = kept
+        var parent = open.len() - 1
+        while parent >= 0:
+            if open[parent].context_id == event.context_id:
+                open[parent].child_ns = open[parent].child_ns + inclusive
+                break
+            parent = parent - 1
+        if frame.has_edge:
+            var row = _edge_row_index_v1(profile, frame.edge_from, frame.edge_to)
+            if row < 0:
+                profile.rows.push(TraceEdgeRowV1(dimension: selector.dimension, from: frame.edge_from,
+                    to: frame.edge_to, calls: 0, inclusive_ns: 0, exclusive_ns: 0))
+                row = profile.rows.len() - 1
+            profile.rows[row].calls = profile.rows[row].calls + 1u64
+            profile.rows[row].inclusive_ns = profile.rows[row].inclusive_ns + inclusive
+            profile.rows[row].exclusive_ns = profile.rows[row].exclusive_ns + exclusive
+    profile.open_entries = profile.open_entries + (open.len() as u64)
+    profile
+
+# Log-profile output: one line per edge, first-seen order.
+pub fn trace_edge_lines_v1(profile: TraceEdgeProfileV1) -> [text]:
+    var lines: [text] = []
+    for row in profile.rows:
+        lines.push("edge {_edge_dimension_name_v1(row.dimension)} {row.from}->{row.to} calls={row.calls} inclusive_ns={row.inclusive_ns} exclusive_ns={row.exclusive_ns}")
+    lines

@@ -43,7 +43,7 @@ use common.text_layout.font_provider.{browser_bundled_font_path_for_family}
 use std.common.encoding.font_registry.{selected_font_asset_candidates, selected_font_asset_identity}
 use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, FONT_ATLAS_COMPOSITE_SEMANTICS_VERSION, font_atlas_composite_program_version_valid, font_atlas_subrect_pixels}
 use std.common.crypto.sha256.{sha256_u8_hex}
-use std.nogc_sync_mut.sffi.io.{file_read_bytes}
+use std.nogc_sync_mut.sffi.io.{file_read_bytes, file_exists}
 
 fn expect_resolved_font_metrics(metrics: ResolvedFontMetrics):
     expect(metrics.valid).to_be(true)
@@ -608,8 +608,29 @@ describe "shared font renderer fallbacks":
         step("defaults unspecified text to bundled Noto Sans Mono")
         # Unspecified / unmatched family falls back to bundled Noto Sans Mono,
         # while explicit families above keep their own lanes.
-        expect(browser_font_candidates_for_family("")[0]).to_equal("examples/09_embedded/simple_os/fonts/mono/FiraCodeNerdFontMono-Regular.ttf")
-        expect(browser_font_candidates_for_family("UnknownFamily")[0]).to_equal("examples/09_embedded/simple_os/fonts/mono/FiraCodeNerdFontMono-Regular.ttf")
+        # Corrected 2026-11-14 for the host the per-name resolver runs on
+        # (Liberation Sans/Serif/Mono present, no macOS system faces). Both
+        # literal pins below were already false there before that change (the
+        # head was the platform DejaVu Sans Mono, not this FiraCode path).
+        #   "UnknownFamily": Chrome 159.0.8154.6 measures the 20-char probe
+        #     "Hamburgefonstiv 0123" at 16px as 147.69 wide = Liberation Serif,
+        #     the default face, so the head is the serif stack's.
+        #   "": not a CSS family list (Chrome drops an empty `font-family`
+        #     declaration; nothing reaches font matching). It is the value
+        #     non-web callers pass, and keeps the mono stack it always had.
+        # Every other host keeps the previous expectations unchanged.
+        val measured_linux_host = (
+            file_exists("/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf") and
+            file_exists("/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf") and
+            file_exists("/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf") and
+            not file_exists("/System/Library/Fonts/Helvetica.ttc")
+        )
+        if measured_linux_host:
+            expect(browser_font_candidates_for_family("")[0]).to_equal(browser_mono_font_candidates()[0])
+            expect(browser_font_candidates_for_family("UnknownFamily")[0]).to_equal(browser_serif_font_candidates()[0])
+        else:
+            expect(browser_font_candidates_for_family("")[0]).to_equal("examples/09_embedded/simple_os/fonts/mono/FiraCodeNerdFontMono-Regular.ttf")
+            expect(browser_font_candidates_for_family("UnknownFamily")[0]).to_equal("examples/09_embedded/simple_os/fonts/mono/FiraCodeNerdFontMono-Regular.ttf")
 
     it "selects one Chrome-compatible normal font and one vector fallback":
         # @req REQ-SSPEC-LIB

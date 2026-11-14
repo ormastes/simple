@@ -3890,3 +3890,30 @@ fn string_to_digit_is_option_not_silent_zero() {
         assert_eq!(payload(opt(bad)).0, none, "{bad:?}");
     }
 }
+
+fn split_limit_parts(s: &str, sep: &str, limit: i64) -> Vec<String> {
+    let result = collections::rt_string_split_limit(text_value(s), text_value(sep), limit);
+    (0..rt_array_len(result)).map(|i| text_at(result, i)).collect()
+}
+
+/// `text.split(sep, limit)` on the JIT: at most `limit` parts, remainder kept,
+/// `limit <= 0` unbounded. An empty separator splits on codepoints, matching
+/// the interpreter's bounded arm (interpreter_method/string.rs "split"). Before
+/// the fix the empty-separator arm sliced single BYTES and aborted the process
+/// ("not a char boundary" inside an `extern "C"` fn) on any multibyte text.
+/// doc/08_tracking/bug/text_split_limit_ignored_2026-07-20.md
+#[test]
+fn test_string_split_limit_matches_interpreter_bounded_split() {
+    assert_eq!(split_limit_parts("a:b:c", ":", 2), ["a", "b:c"]);
+    assert_eq!(split_limit_parts("a:b:c", ":", 1), ["a:b:c"]);
+    assert_eq!(split_limit_parts("a:b:c", ":", 10), ["a", "b", "c"]);
+    assert_eq!(split_limit_parts("a:b:c", ":", 0), ["a", "b", "c"]);
+    assert_eq!(split_limit_parts("a:b:c", ":", -1), ["a", "b", "c"]);
+    assert_eq!(split_limit_parts("abc", ":", 2), ["abc"]);
+    assert_eq!(split_limit_parts("é✓x✓y", "✓", 2), ["é", "x✓y"]);
+    assert_eq!(split_limit_parts("abc", "", 2), ["a", "bc"]);
+    assert_eq!(split_limit_parts("abc", "", 10), ["a", "b", "c", ""]);
+    assert_eq!(split_limit_parts("é✓日", "", 2), ["é", "✓日"]);
+    assert_eq!(split_limit_parts("é✓日", "", 3), ["é", "✓", "日"]);
+    assert_eq!(split_limit_parts("é✓日", "", 1), ["é✓日"]);
+}

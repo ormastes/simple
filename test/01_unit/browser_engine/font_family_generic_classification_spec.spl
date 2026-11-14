@@ -18,6 +18,19 @@ use std.nogc_sync_mut.text_layout.font_provider.{
     browser_serif_font_candidates, browser_mono_font_candidates
 }
 
+val DEJAVU_SANS: text = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+val LIBERATION_MONO: text = "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf"
+
+# The host Chrome 159 was measured on; the provider applies the per-name walk
+# only there. Decided from the face FILES, never from the value under test.
+fn _measured_linux_host() -> bool:
+    (
+        file_exists("/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf") and
+        file_exists("/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf") and
+        file_exists(LIBERATION_MONO) and
+        not file_exists("/System/Library/Fonts/Helvetica.ttc")
+    )
+
 fn _first(list: [text]) -> text:
     if list.len() > 0: list[0] else: ""
 
@@ -31,26 +44,28 @@ describe "generic font-family classification":
         # Corrected 2026-11-14 against Chrome 159 (Linux, 20-char probe at
         # 16px): `system-ui` is 183.91 = DejaVu Sans, the fontconfig UI face,
         # not the Arial alias (160.98) this example used to pin as the head.
-        # Where the host has DejaVu Sans that face leads and the sans stack
-        # follows it; elsewhere the sans stack leads as before.
+        # One expected value per host: DejaVu Sans then the sans stack on the
+        # measured Linux face set with DejaVu installed, the sans stack alone
+        # everywhere else.
         val list = browser_font_candidates_for_family("system-ui")
         val sans_head = _first(browser_sans_font_candidates())
-        if _first(list) == "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf":
+        if _measured_linux_host() and file_exists(DEJAVU_SANS):
+            expect(list[0]).to_equal(DEJAVU_SANS)
             expect(list[1]).to_equal(sans_head)
         else:
-            expect(_first(list)).to_equal(sans_head)
+            expect(list[0]).to_equal(sans_head)
 
     it "sends -apple-system to the sans stack only where the host serves it":
         # Corrected 2026-11-14: Chrome 159 on Linux serves no `-apple-system`
         # (147.69 = the default serif face; with a following name the walk
-        # continues to it). Only macOS maps it to the platform sans face.
-        if file_exists("/System/Library/Fonts/Helvetica.ttc"):
-            expect(_first(browser_font_candidates_for_family("-apple-system")))
-                .to_equal(_first(browser_sans_font_candidates()))
-        else:
+        # continues to it). Hosts that were not measured keep the sans stack.
+        if _measured_linux_host():
             expect(_first(browser_font_candidates_for_family("-apple-system")))
                 .to_equal(_first(browser_serif_font_candidates()))
             expect(_first(browser_font_candidates_for_family("-apple-system, sans-serif")))
+                .to_equal(_first(browser_sans_font_candidates()))
+        else:
+            expect(_first(browser_font_candidates_for_family("-apple-system")))
                 .to_equal(_first(browser_sans_font_candidates()))
 
     it "still sends a real serif family to the serif stack":
@@ -63,11 +78,13 @@ describe "generic font-family classification":
         expect(_first(browser_font_candidates_for_family("monospace")))
             .to_equal(_first(browser_mono_font_candidates()))
         # Corrected 2026-11-14: `Courier New` is Liberation Mono in Chrome 159
-        # (192.03), the generic `monospace` is DejaVu Sans Mono (192.66). The
-        # alias face leads where the host has it, and the mono stack follows.
+        # (192.03), the generic `monospace` is DejaVu Sans Mono (192.66). One
+        # expected value per host: Liberation Mono then the mono stack on the
+        # measured Linux face set, the mono stack alone everywhere else.
         val courier = browser_font_candidates_for_family("Courier New")
         val mono_head = _first(browser_mono_font_candidates())
-        if _first(courier) == "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf":
+        if _measured_linux_host():
+            expect(courier[0]).to_equal(LIBERATION_MONO)
             expect(courier[1]).to_equal(mono_head)
         else:
-            expect(_first(courier)).to_equal(mono_head)
+            expect(courier[0]).to_equal(mono_head)

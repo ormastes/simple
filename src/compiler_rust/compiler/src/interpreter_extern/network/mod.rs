@@ -197,7 +197,10 @@ pub fn rt_http_request_v2(args: &[Value]) -> Result<Value, CompileError> {
         Some(Value::Str(value)) => value.as_str(),
         _ => return Ok(error_tuple("rt_http_request_v2: invalid URL")),
     };
-    let body = match args.get(3).and_then(Value::byte_array_view) {
+    // `body: [u8]` arrives packed (`ByteArray`) or, for a pure-Simple `[u8]`
+    // literal, as boxed `Int`/`UInt` elements; both are bytes. Anything outside
+    // 0..=255 still fails closed before I/O.
+    let body = match args.get(3).and_then(Value::try_array_bytes) {
         Some(value) => value,
         None => return Ok(error_tuple("rt_http_request_v2: body must be bytes")),
     };
@@ -242,7 +245,7 @@ pub fn rt_http_request_v2(args: &[Value]) -> Result<Value, CompileError> {
     let response = if body.is_empty() {
         request.call()
     } else {
-        request.send_bytes(body)
+        request.send_bytes(&body)
     };
     let response = match response {
         Ok(response) | Err(ureq::Error::Status(_, response)) => response,
@@ -330,5 +333,96 @@ mod http_v2_tests {
             Value::Int(1),
         ];
         assert_typed_error(rt_http_request_v2(&args).expect("typed failure"));
+    }
+
+    /// Serve exactly one request on loopback and hand back the received body.
+    fn one_shot_server() -> (String, std::sync::mpsc::Receiver<Vec<u8>>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let url = format!("http://{}/obj", listener.local_addr().expect("addr"));
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut raw = Vec::new();
+            let mut chunk = [0u8; 1024];
+            let body = loop {
+                let n = stream.read(&mut chunk).expect("read request");
+                raw.extend_from_slice(&chunk[..n]);
+                let Some(end) = raw.windows(4).position(|w| w == b"\r\n\r\n") else {
+                    assert!(n > 0, "request ended before headers");
+                    continue;
+                };
+                let head = String::from_utf8_lossy(&raw[..end]).to_ascii_lowercase();
+                let length = head
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length:"))
+                    .map(|value| value.trim().parse::<usize>().expect("content-length"))
+                    .unwrap_or(0);
+                if raw.len() >= end + 4 + length {
+                    break raw[end + 4..end + 4 + length].to_vec();
+                }
+                assert!(n > 0, "request ended before body");
+            };
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .expect("write response");
+            tx.send(body).expect("send body");
+        });
+        (url, rx)
+    }
+
+    fn put_args(url: String, body: Value) -> Vec<Value> {
+        vec![
+            Value::text("PUT".to_string()),
+            Value::text(url),
+            Value::array(vec![Value::text("Content-Type: application/octet-stream".to_string())]),
+            body,
+            Value::Int(5000),
+        ]
+    }
+
+    /// A pure-Simple `[u8]` literal reaches the interpreter as a boxed element
+    /// array, not packed `ByteArray` storage. The extern ABI is `body: [u8]`, so
+    /// both representations must send the identical octets.
+    #[test]
+    fn http_v2_accepts_boxed_u8_array_body() {
+        let octets = [0u8, 128, 255, 65, 10];
+        for body in [
+            Value::array(octets.iter().map(|b| Value::Int(i64::from(*b))).collect::<Vec<_>>()),
+            Value::array(Value::byte_array_values(&octets)),
+        ] {
+            let (url, received) = one_shot_server();
+            let Value::Tuple(fields) = rt_http_request_v2(&put_args(url, body)).expect("tuple") else {
+                panic!("expected HTTP v2 tuple")
+            };
+            assert!(
+                matches!(&fields[4], Value::Str(message) if message.is_empty()),
+                "{:?}",
+                fields[4]
+            );
+            assert!(matches!(fields[0], Value::Int(200)), "{:?}", fields[0]);
+            assert_eq!(fields[3].byte_array_view(), Some(&b"ok"[..]));
+            let sent = received
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("server saw body");
+            assert_eq!(sent, octets);
+        }
+    }
+
+    /// Elements outside 0..=255 are not `[u8]`; refuse before any I/O.
+    #[test]
+    fn http_v2_rejects_out_of_range_array_body_before_io() {
+        for bad in [Value::Int(256), Value::Int(-1), Value::text("x".to_string())] {
+            let args = put_args(
+                "http://127.0.0.1:9/".to_string(),
+                Value::array(vec![Value::Int(1), bad]),
+            );
+            let value = rt_http_request_v2(&args).expect("typed failure");
+            let Value::Tuple(ref fields) = value else {
+                panic!("expected HTTP v2 tuple")
+            };
+            assert!(matches!(&fields[4], Value::Str(m) if m.as_str() == "rt_http_request_v2: body must be bytes"));
+            assert_typed_error(value);
+        }
     }
 }
