@@ -5,7 +5,7 @@ use std.nogc_async_mut.container.providers.macos.seatbelt_capabilities_v1.{
     SeatbeltCanaryResultV1, SeatbeltCapabilityManifestV1, seatbelt_qualification_plan_v1,
     seatbelt_manifest_unprobed_v1, seatbelt_capability_status_v1,
     SEATBELT_PROBE_PROVENANCE_V1, SEATBELT_QUALIFIED_V1, SEATBELT_UNQUALIFIED_V1,
-    SEATBELT_EXPECT_ALLOW_V1, SEATBELT_EXPECT_DENY_V1}
+    SEATBELT_EXPECT_ALLOW_V1, SEATBELT_EXPECT_DENY_V1, seatbelt_manifest_from_probe_v1}
 
 fn _digest(c: text) -> text:
     var out = ""
@@ -89,3 +89,32 @@ describe "seatbelt capabilities v1":
             results.push(SeatbeltCanaryResultV1(id: result.id, observed: result.observed, evidence_digest: ""))
         bare.canaries = results
         expect(_status(bare)).to_equal(SEATBELT_UNQUALIFIED_V1)
+
+    it "decodes a full native probe transcript into a qualifying manifest":
+        var lines = "noise line\n"
+        for canary in seatbelt_qualification_plan_v1():
+            lines = lines + "canary " + canary.id + " " + canary.expected + "\n"
+        val manifest = seatbelt_manifest_from_probe_v1(lines, "15.1", "24B83", "arm64",
+            _digest("a"), _digest("b"), _digest("e")).unwrap()
+        expect(_status(manifest)).to_equal(SEATBELT_QUALIFIED_V1)
+
+    it "keeps an observed mismatch and absent canaries unqualified":
+        val plan = seatbelt_qualification_plan_v1()
+        val lines = "canary " + plan[1].id + " deny\n"
+        val manifest = seatbelt_manifest_from_probe_v1(lines, "15.1", "24B83", "arm64",
+            _digest("a"), _digest("b"), _digest("e")).unwrap()
+        val status = seatbelt_capability_status_v1(manifest, "24B83", "arm64", _digest("a"))
+        expect(status.status).to_equal(SEATBELT_UNQUALIFIED_V1)
+        expect(status.missing.len()).to_equal(plan.len())
+
+    it "rejects unknown, duplicate or malformed canary lines":
+        val plan = seatbelt_qualification_plan_v1()
+        val unknown = "canary made-up-canary allow\n"
+        expect(seatbelt_manifest_from_probe_v1(unknown, "15.1", "24B83", "arm64", _digest("a"), _digest("b"),
+            _digest("e")).is_err()).to_equal(true)
+        val dup = "canary " + plan[0].id + " deny\ncanary " + plan[0].id + " deny\n"
+        expect(seatbelt_manifest_from_probe_v1(dup, "15.1", "24B83", "arm64", _digest("a"), _digest("b"),
+            _digest("e")).is_err()).to_equal(true)
+        val bad = "canary " + plan[0].id + " maybe\n"
+        expect(seatbelt_manifest_from_probe_v1(bad, "15.1", "24B83", "arm64", _digest("a"), _digest("b"),
+            _digest("e")).is_err()).to_equal(true)

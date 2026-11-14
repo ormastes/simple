@@ -1,0 +1,109 @@
+# SOSIX Darwin Seatbelt activation (design
+# doc/05_design/simple_container_macos_seatbelt.md §9.1, §15.2).
+#
+# SOSIX owns the only call into sandbox_init/sandbox_free_error; container
+# providers reach it only through this module. The native leaf
+# (src/runtime/runtime_sosix_darwin_sandbox_v1.h) performs exactly that call
+# pair on the CALLING process and nothing else. Profile admission, receipt
+# decoding and error sanitization are here, in Simple — the twin of every part
+# of the boundary that is not the platform call itself.
+#
+# Activation is irreversible and process-wide: only the minimal trusted worker
+# may call it, immediately before exec (design §9.2). A refusal is final; there
+# is no unrestricted fallback, and a non-Darwin host answers Unsupported
+# without entering native code. Applied means sandbox_init returned 0 for THIS
+# process. It is not host qualification and not proof that the profile
+# enforces what its author intended (that needs native macOS evidence).
+use std.common.char_from_code_pure.{char_from_code}
+
+pub enum SosixDarwinSandboxStatusV1:
+    Applied
+    # sandbox_init returned non-zero; `error` carries the sanitized reason.
+    Refused
+    # Empty, oversized, or NUL-containing profile; native code was not entered.
+    InvalidProfile
+    # Host is not Darwin; native code was not entered.
+    Unsupported
+    # Native profile copy could not be allocated; sandbox_init did not run.
+    AllocationFailed
+    # Receipt allocation failed before sandbox_init ran.
+    ReceiptUnavailable
+    # Receipt shape is not the declared ABI; activation state is UNKNOWN and
+    # the caller must treat the process as unusable rather than unrestricted.
+    ReceiptInvalid
+
+pub struct SosixDarwinSandboxResultV1:
+    status: SosixDarwinSandboxStatusV1
+    error: text
+
+val SOSIX_DARWIN_SANDBOX_PROFILE_MAX_V1: i64 = 262144
+val SOSIX_DARWIN_SANDBOX_ERROR_MAX_V1: i64 = 512
+
+pub fn sosix_darwin_sandbox_profile_admissible_v1(profile: [u8]) -> bool:
+    if profile.len() < 1 or profile.len() > SOSIX_DARWIN_SANDBOX_PROFILE_MAX_V1: return false
+    for b in profile:
+        # NUL would silently truncate the compiled policy at the C boundary.
+        if b == 0u8: return false
+    true
+
+# Platform error text can carry paths, profile fragments and control bytes that
+# must not reach logs verbatim. Keep printable ASCII, map everything else to
+# '?', and bound the length.
+pub fn sosix_darwin_sandbox_sanitize_error_v1(raw: [i64]) -> text:
+    var out = ""
+    var count = 0
+    for code in raw:
+        if count >= SOSIX_DARWIN_SANDBOX_ERROR_MAX_V1: break
+        if code >= 32 and code <= 126:
+            out = out + char_from_code(code)
+        else:
+            out = out + "?"
+        count = count + 1
+    out
+
+# Pure receipt decoder; shared by the Darwin path and its specs.
+pub fn sosix_darwin_sandbox_decode_v1(raw: [i64]?) -> SosixDarwinSandboxResultV1:
+    if not raw.?:
+        return SosixDarwinSandboxResultV1(SosixDarwinSandboxStatusV1.ReceiptUnavailable, "sandbox_receipt_unavailable")
+    val words: [i64] = raw ?? []
+    if words.len() != 2 + SOSIX_DARWIN_SANDBOX_ERROR_MAX_V1 or words[1] < 0 or words[1] > SOSIX_DARWIN_SANDBOX_ERROR_MAX_V1:
+        return SosixDarwinSandboxResultV1(SosixDarwinSandboxStatusV1.ReceiptInvalid, "sandbox_receipt_invalid")
+    val status = words[0]
+    val reported = words[1]
+    if status == 0 and reported == 0:
+        return SosixDarwinSandboxResultV1(SosixDarwinSandboxStatusV1.Applied, "")
+    if status == -3:
+        var detail: [i64] = []
+        for i in 0..reported:
+            detail.push(words[2 + i])
+        val reason = sosix_darwin_sandbox_sanitize_error_v1(detail)
+        if reason == "":
+            return SosixDarwinSandboxResultV1(SosixDarwinSandboxStatusV1.Refused, "sandbox_init_refused")
+        return SosixDarwinSandboxResultV1(SosixDarwinSandboxStatusV1.Refused, "sandbox_init_refused: " + reason)
+    # Every other status carries no error bytes; any present means a bad receipt.
+    if reported != 0:
+        return SosixDarwinSandboxResultV1(SosixDarwinSandboxStatusV1.ReceiptInvalid, "sandbox_receipt_invalid")
+    if status == -1:
+        return SosixDarwinSandboxResultV1(SosixDarwinSandboxStatusV1.InvalidProfile, "sandbox_profile_invalid")
+    if status == -4:
+        return SosixDarwinSandboxResultV1(SosixDarwinSandboxStatusV1.Unsupported, "sandbox_unsupported_host")
+    if status == -6:
+        return SosixDarwinSandboxResultV1(SosixDarwinSandboxStatusV1.AllocationFailed, "sandbox_profile_allocation_failed")
+    SosixDarwinSandboxResultV1(SosixDarwinSandboxStatusV1.ReceiptInvalid, "sandbox_receipt_invalid")
+
+@when(os="macos"):
+@unsafe(reason: "irreversible process-wide Seatbelt activation; bounded preallocated receipt", capabilities: [ffi])
+extern fn sosix_darwin_sandbox_apply_profile_v1(profile: [u8]) -> [i64]?
+@end
+
+# Apply a compiled SBPL profile to the calling process. Never call from a
+# general-purpose process: success cannot be undone.
+pub fn sosix_darwin_sandbox_apply_v1(profile: [u8]) -> SosixDarwinSandboxResultV1:
+    @when(os="macos"):
+    if not sosix_darwin_sandbox_profile_admissible_v1(profile):
+        return SosixDarwinSandboxResultV1(SosixDarwinSandboxStatusV1.InvalidProfile, "sandbox_profile_invalid")
+    val raw = unsafe(capabilities: [ffi]): sosix_darwin_sandbox_apply_profile_v1(profile)
+    return sosix_darwin_sandbox_decode_v1(raw)
+    @else:
+    return SosixDarwinSandboxResultV1(SosixDarwinSandboxStatusV1.Unsupported, "sandbox_unsupported_host")
+    @end

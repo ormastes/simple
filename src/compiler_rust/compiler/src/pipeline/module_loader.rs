@@ -918,13 +918,54 @@ fn should_flatten_nested_import(use_stmt: &UseStmt, source: &str) -> bool {
     }
 }
 
+thread_local! {
+    static FLATTEN_PACKAGE_SYMBOL_IMPORTS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// While alive, an unbraced symbol import into a package aggregator
+/// (`use pkg.sym` where `pkg` resolves to `__init__.spl`) is flattened exactly
+/// like `use pkg.{sym}`. Entered only by the JIT lane, which links nothing it
+/// did not flatten; interpreter lanes resolve `sym` lazily through the module
+/// exports cache and keep doing so. Thread-local, restored on drop.
+pub struct FlattenPackageSymbolImportsScope {
+    previous: bool,
+}
+
+impl FlattenPackageSymbolImportsScope {
+    pub fn enter() -> Self {
+        let previous = FLATTEN_PACKAGE_SYMBOL_IMPORTS.with(|flag| flag.replace(true));
+        Self { previous }
+    }
+}
+
+impl Drop for FlattenPackageSymbolImportsScope {
+    fn drop(&mut self) {
+        let previous = self.previous;
+        FLATTEN_PACKAGE_SYMBOL_IMPORTS.with(|flag| flag.set(previous));
+    }
+}
+
 /// The one flatten decision for every import form (`use`, `pub use`/`export
 /// use`, `common use`, comma multi-use). `pub use a.b.f` used to skip the
 /// module-file arm, so a function reachable only through such a re-export never
 /// reached the JIT unit (caret: `smux_runtime_binding_bind_v3`, "unresolved
 /// external symbol ... cross-module Simple function").
-fn should_flatten_import(use_stmt: &UseStmt, source: &str, resolved: &Path) -> bool {
-    should_flatten_nested_import(use_stmt, source) || single_import_targets_module_file(&use_stmt.target, resolved)
+fn should_flatten_import(use_stmt: &UseStmt, source: &str, resolved: &Path, base: &Path) -> bool {
+    should_flatten_nested_import(use_stmt, source)
+        || single_import_targets_module_file(&use_stmt.target, resolved)
+        || single_import_targets_package_symbol(use_stmt, resolved, base)
+}
+
+/// Under [`FlattenPackageSymbolImportsScope`] only: `use pkg.sym` where `pkg`
+/// is a package `__init__.spl` and `sym` is a SYMBOL of it (not a submodule
+/// file) flattens the package exactly like `use pkg.{sym}` — `Group` imports
+/// already take that path, including the requested-name sibling filter.
+/// A whole-package `use pkg` (`sym` names the package itself) stays lazy.
+fn single_import_targets_package_symbol(use_stmt: &UseStmt, resolved: &Path, base: &Path) -> bool {
+    matches!(use_stmt.target, ImportTarget::Single(_) | ImportTarget::Aliased { .. })
+        && FLATTEN_PACKAGE_SYMBOL_IMPORTS.with(|flag| flag.get())
+        && resolved.file_name().is_some_and(|name| name == "__init__.spl")
+        && resolve_use_to_path_and_kind(use_stmt, base).is_some_and(|(_, target_is_symbol)| target_is_symbol)
 }
 
 /// True when a `Single`/`Aliased` import resolves to a standalone module file,
@@ -2546,7 +2587,7 @@ fn load_module_with_imports_internal(
         if let Node::UseStmt(use_stmt) = &item {
             if let Some(resolved) = resolve_use_to_path(use_stmt, path.parent().unwrap_or(Path::new("."))) {
                 if flatten_imports {
-                    let flatten_this_import = should_flatten_import(use_stmt, &source, &resolved);
+                    let flatten_this_import = should_flatten_import(use_stmt, &source, &resolved, path.parent().unwrap_or(Path::new(".")));
                     let mut imported = load_module_with_imports_internal(
                         &resolved,
                         visited,
@@ -2606,7 +2647,7 @@ fn load_module_with_imports_internal(
             };
             if let Some(resolved) = resolve_use_to_path(&temp_use, path.parent().unwrap_or(Path::new("."))) {
                 if flatten_imports {
-                    let flatten_this_import = should_flatten_import(&temp_use, &source, &resolved);
+                    let flatten_this_import = should_flatten_import(&temp_use, &source, &resolved, path.parent().unwrap_or(Path::new(".")));
                     let mut imported = load_module_with_imports_internal(
                         &resolved,
                         visited,
@@ -2657,7 +2698,7 @@ fn load_module_with_imports_internal(
             };
             if let Some(resolved) = resolve_use_to_path(&temp_use, path.parent().unwrap_or(Path::new("."))) {
                 if flatten_imports {
-                    let flatten_this_import = should_flatten_import(&temp_use, &source, &resolved);
+                    let flatten_this_import = should_flatten_import(&temp_use, &source, &resolved, path.parent().unwrap_or(Path::new(".")));
                     let mut imported = load_module_with_imports_internal(
                         &resolved,
                         visited,
@@ -2710,7 +2751,7 @@ fn load_module_with_imports_internal(
                 };
                 if let Some(resolved) = resolve_use_to_path(&temp_use, path.parent().unwrap_or(Path::new("."))) {
                     if flatten_imports {
-                        let flatten_this_import = should_flatten_import(&temp_use, &source, &resolved);
+                        let flatten_this_import = should_flatten_import(&temp_use, &source, &resolved, path.parent().unwrap_or(Path::new(".")));
                         let mut imported = load_module_with_imports_internal(
                             &resolved,
                             visited,
@@ -3090,6 +3131,53 @@ mod tests {
                 })
                 .collect::<Vec<_>>()
         );
+    }
+
+    /// `use pkg.sym` (unbraced) where `pkg` is a package `__init__.spl` that
+    /// only RE-EXPORTS `sym` must flatten like `use pkg.{sym}` on the JIT lane.
+    /// The package aggregator used to stay lazy for every `Single` import, so
+    /// the JIT unit carried the import binding but no `sym` body and refused
+    /// with `unresolved external symbol` (`use std.spec.step`, 10.8k specs).
+    /// Interpreter lanes keep the lazy load (they resolve `sym` through the
+    /// exports cache, and flattening costs them warnings and RSS), and a
+    /// whole-package `use pkg` stays lazy everywhere.
+    /// See doc/08_tracking/bug/seed_jit_spec_entry_demoted_by_entry_reparse_2026-11-14.md.
+    #[test]
+    fn unbraced_package_symbol_import_flattens_reexport_only_under_jit_scope() {
+        let temp = tempfile::tempdir().unwrap();
+        let src = temp.path().join("src");
+        let pkg = src.join("35.sem").join("pkg_c");
+        fs::create_dir_all(&pkg).unwrap();
+        fs::write(pkg.join("__init__.spl"), "export use sem.pkg_c.inner.{facade_g}\n").unwrap();
+        fs::write(
+            pkg.join("inner.spl"),
+            "pub fn facade_g(x: i64) -> i64:\n    x * 3\n\nexport facade_g\n",
+        )
+        .unwrap();
+        let entry = src.join("main.spl");
+        fs::write(&entry, "use sem.pkg_c.facade_g\n\nfn main():\n    print(\"{facade_g(2)}\")\n").unwrap();
+        let whole = src.join("whole.spl");
+        fs::write(&whole, "use sem.pkg_c\n\nfn main():\n    print(\"x\")\n").unwrap();
+        let has_facade = |module: &Module| {
+            module
+                .items
+                .iter()
+                .any(|item| matches!(item, Node::Function(f) if f.name == "facade_g"))
+        };
+        clear_module_source_text_cache();
+
+        let lazy = load_module_with_imports(&entry, &mut HashSet::new()).unwrap();
+        assert!(!has_facade(&lazy), "outside the JIT scope the package stays lazy");
+
+        let _scope = FlattenPackageSymbolImportsScope::enter();
+        let jit = load_module_with_imports(&entry, &mut HashSet::new()).unwrap();
+        assert!(has_facade(&jit), "under the JIT scope `use pkg.sym` must flatten the re-exported body");
+        let whole_pkg = load_module_with_imports(&whole, &mut HashSet::new()).unwrap();
+        assert!(!has_facade(&whole_pkg), "a whole-package `use pkg` stays lazy even under the JIT scope");
+        let aliased = src.join("aliased.spl");
+        fs::write(&aliased, "use sem.pkg_c.facade_g as g3\n\nfn main():\n    print(\"{g3(2)}\")\n").unwrap();
+        let aliased_jit = load_module_with_imports(&aliased, &mut HashSet::new()).unwrap();
+        assert!(has_facade(&aliased_jit), "`use pkg.sym as alias` flattens like `use pkg.{{sym as alias}}`");
     }
 
     /// Ordering pin for the fix above: a same-named `<pkg>.spl` file next to a

@@ -477,6 +477,32 @@ impl ExecCore {
             .count()
     }
 
+    /// Top-level statements of the ENTRY file the JIT entry path would skip.
+    ///
+    /// `flattened` is the import closure and carries imported modules' own
+    /// top-level statements, so the entry file is re-parsed from disk and only
+    /// its statements are counted (`flattened` is the fallback when the
+    /// re-parse fails).
+    ///
+    /// The re-parse cannot see spec-entry synthesis: when `spec_entry` is set,
+    /// `synthesize_spec_main` has already moved every non-binding,
+    /// non-declaration item (a superset of what is counted here) into the
+    /// synthesized `main`, so nothing is skipped. Counting the on-disk
+    /// `describe` anyway demoted every spec run under SIMPLE_JIT_SPEC_ENTRY=1.
+    /// See doc/08_tracking/bug/seed_jit_spec_entry_demoted_by_entry_reparse_2026-11-14.md.
+    fn jit_entry_skipped_statements(path: &Path, flattened: &[simple_parser::ast::Node], spec_entry: bool) -> usize {
+        if spec_entry {
+            return 0;
+        }
+        match std::fs::read_to_string(path)
+            .ok()
+            .and_then(|src| simple_parser::Parser::new(&src).parse().ok())
+        {
+            Some(entry) => Self::jit_skipped_top_level_statements(&entry.items),
+            None => Self::jit_skipped_top_level_statements(flattened),
+        }
+    }
+
     /// Guard the silent no-op run.
     ///
     /// A module with no `fn main` AND no executable top-level item runs
@@ -1171,9 +1197,37 @@ impl ExecCore {
         // Set current file for module resolution
         set_current_file(Some(path.to_path_buf()));
 
+        // Opt-in until JIT/interpreter spec verdict parity holds (see the
+        // spec-entry synthesis below).
+        let spec_entry_requested = std::env::var_os("SIMPLE_JIT_SPEC_ENTRY").is_some_and(|v| v != "0");
+
+        // The JIT links only what was flattened, so an unbraced symbol import
+        // into a package aggregator (`use std.spec.step`) must flatten like
+        // `use std.spec.{step}` or the call is an unresolved external. Scoped
+        // to opted-in spec entry only: widening it to every `fn main` program
+        // would change the JIT closure of programs that already JIT, with no
+        // parity evidence (an ordinary program still de-JITs on such an
+        // import, as before). A mainless non-spec module is handed to the
+        // interpreter below, which resolves the symbol lazily.
+        // See doc/08_tracking/bug/seed_jit_spec_entry_demoted_by_entry_reparse_2026-11-14.md.
+        let spec_entry_candidate = spec_entry_requested
+            && std::fs::read_to_string(path)
+                .ok()
+                .and_then(|src| simple_parser::Parser::new(&src).parse().ok())
+                .is_some_and(|entry| {
+                    !entry
+                        .items
+                        .iter()
+                        .any(|i| matches!(i, simple_parser::ast::Node::Function(f) if f.name == "main"))
+                        && simple_parser::test_analyzer::extract_file_test_meta(&entry.items, None).total_tests > 0
+                });
+        let package_symbol_scope = spec_entry_candidate
+            .then(simple_compiler::pipeline::module_loader::FlattenPackageSymbolImportsScope::enter);
+
         // Load with import resolution (handles `use` statements)
         let mut ast =
             load_module_with_imports(path, &mut HashSet::new()).map_err(|e| format!("module load error: {}", e))?;
+        drop(package_symbol_scope);
 
         // Drop wrong-arch @cfg(<arch>) fn variants: the JIT executes on the
         // HOST, and codegen's declare_functions is first-wins by source order,
@@ -1191,8 +1245,7 @@ impl ExecCore {
         // the compiled rt_bdd lane (value-encoding mismatches in
         // rt_bdd_expect_eq_rv). Default-on would turn those green runs red
         // for reasons unrelated to the code under test.
-        let spec_entry = std::env::var_os("SIMPLE_JIT_SPEC_ENTRY").is_some_and(|v| v != "0")
-            && synthesize_spec_main(&mut ast.items);
+        let spec_entry = spec_entry_requested && synthesize_spec_main(&mut ast.items);
         if spec_entry {
             simple_runtime::value::rt_bdd_clear_state();
             if trace || std::env::var_os("SIMPLE_JIT_TRACE_SPEC_ENTRY").is_some() {
@@ -1429,13 +1482,7 @@ impl ExecCore {
         // Count only the ENTRY file's own statements: `ast` is the flattened import
         // closure, and imported modules carry top-level statements of their own
         // that must not demote every JIT run.
-        let skipped_statements = match std::fs::read_to_string(path)
-            .ok()
-            .and_then(|src| simple_parser::Parser::new(&src).parse().ok())
-        {
-            Some(entry) => Self::jit_skipped_top_level_statements(&entry.items),
-            None => Self::jit_skipped_top_level_statements(&ast.items),
-        };
+        let skipped_statements = Self::jit_entry_skipped_statements(path, &ast.items, spec_entry);
         if skipped_statements > 0 {
             return Err(format!(
                 "module has {skipped_statements} top-level statement(s) that the JIT entry path \
@@ -2104,6 +2151,34 @@ mod tests {
         assert!(!super::synthesize_spec_main(&mut ast.items));
         let mut plain = simple_parser::Parser::new("print \"hi\"\n").parse().unwrap();
         assert!(!super::synthesize_spec_main(&mut plain.items));
+    }
+
+    /// Regression: the skipped-statement demotion guard re-parses the entry
+    /// file from disk, so it never saw that `synthesize_spec_main` had already
+    /// moved the spec's `describe` into the synthesized `main`. Every spec run
+    /// under SIMPLE_JIT_SPEC_ENTRY=1 was demoted with "module has 1 top-level
+    /// statement(s) that the JIT entry path would silently skip".
+    /// See doc/08_tracking/bug/seed_jit_spec_entry_demoted_by_entry_reparse_2026-11-14.md.
+    #[test]
+    fn spec_entry_synthesis_leaves_no_skipped_entry_statements() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("cap_spec.spl");
+        let source = "val k = 1\n\nfn helper() -> i64:\n    k\n\ndescribe \"g\":\n    it \"a\":\n        expect(helper()).to_equal(1)\n";
+        fs::write(&path, source).expect("write fixture");
+        let mut ast = simple_parser::Parser::new(source).parse().expect("fixture must parse");
+        assert!(super::synthesize_spec_main(&mut ast.items));
+        assert_eq!(
+            super::ExecCore::jit_entry_skipped_statements(&path, &ast.items, true),
+            0,
+            "a synthesized spec main runs the entry's describe; nothing is skipped"
+        );
+        // Without synthesis the same describe IS skipped by a main-only entry.
+        assert_eq!(super::ExecCore::jit_entry_skipped_statements(&path, &ast.items, false), 1);
+        // The guard still fires for an ordinary program with a stray statement.
+        let prog = dir.path().join("prog.spl");
+        fs::write(&prog, "print \"x\"\n\nfn main():\n    print \"hi\"\n").expect("write fixture");
+        let prog_ast = simple_parser::Parser::new("fn main():\n    print \"hi\"\n").parse().unwrap();
+        assert_eq!(super::ExecCore::jit_entry_skipped_statements(&prog, &prog_ast.items, false), 1);
     }
 
     fn module_level_example_count_items(items: &[simple_parser::ast::Node]) -> usize {

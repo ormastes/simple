@@ -136,7 +136,39 @@ pub fn seatbelt_capability_status_v1(manifest: SeatbeltCapabilityManifestV1,
         return _seatbelt_unqualified_v1(missing, "SCMAC-PLATFORM-001 canaries-not-passed")
     SeatbeltQualificationV1(status: SEATBELT_QUALIFIED_V1, missing: [], reason: "")
 
+# Decode the native probe transcript (sosix_darwin_sandbox_v1_selfcheck.c
+# prints `canary <id> allow|deny` per observation) into a manifest. Other
+# lines are ignored; an unknown id, duplicate or unknown verdict rejects the
+# whole transcript. Unreported canaries stay not-run, so the status check
+# keeps a partial probe unqualified.
+pub fn seatbelt_manifest_from_probe_v1(transcript: text, os_version: text, os_build: text,
+        architecture: text, helper_digest: text, profile_digest: text,
+        evidence_digest: text) -> Result<SeatbeltCapabilityManifestV1, text>:
+    val plan = seatbelt_qualification_plan_v1()
+    var results = seatbelt_manifest_unprobed_v1().canaries
+    var seen: [text] = []
+    for line in transcript.split("\n"):
+        if not line.starts_with("canary "): continue
+        val parts = line.trim().split(" ")
+        if parts.len() != 3: return Err("SCMAC-PLATFORM-001 probe-line-malformed")
+        val id = parts[1]
+        val observed = parts[2]
+        if observed != SEATBELT_EXPECT_ALLOW_V1 and observed != SEATBELT_EXPECT_DENY_V1:
+            return Err("SCMAC-PLATFORM-001 probe-verdict-unknown " + id)
+        if seen.contains(id): return Err("SCMAC-PLATFORM-001 probe-canary-duplicate " + id)
+        var index = -1
+        for i in 0..plan.len():
+            if plan[i].id == id: index = i
+        if index < 0: return Err("SCMAC-PLATFORM-001 probe-canary-unknown " + id)
+        seen.push(id)
+        results[index] = SeatbeltCanaryResultV1(id: id, observed: observed, evidence_digest: evidence_digest)
+    Ok(SeatbeltCapabilityManifestV1(schema: SEATBELT_MANIFEST_SCHEMA_V1, provenance: SEATBELT_PROBE_PROVENANCE_V1,
+        os_version: os_version, os_build: os_build, architecture: architecture, helper_digest: helper_digest,
+        runtime_abi: SEATBELT_RUNTIME_ABI_V1, profile_revision: SEATBELT_BASELINE_REVISION_V1,
+        profile_digest: profile_digest, canaries: results))
+
 export SeatbeltCanaryPlanV1, SeatbeltCanaryResultV1, SeatbeltCapabilityManifestV1, SeatbeltQualificationV1
+export seatbelt_manifest_from_probe_v1
 export seatbelt_qualification_plan_v1, seatbelt_manifest_unprobed_v1, seatbelt_capability_status_v1
 export SEATBELT_MANIFEST_SCHEMA_V1, SEATBELT_PROBE_PROVENANCE_V1, SEATBELT_RUNTIME_ABI_V1
 export SEATBELT_QUALIFIED_V1, SEATBELT_UNQUALIFIED_V1

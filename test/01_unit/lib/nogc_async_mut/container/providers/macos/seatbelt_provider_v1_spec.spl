@@ -14,7 +14,8 @@ use std.nogc_async_mut.container.providers.macos.seatbelt_capabilities_v1.{Seatb
 use std.nogc_async_mut.container.providers.macos.seatbelt_provider_v1.{MacOsSeatbeltAdapterV1,
     seatbelt_lifecycle_next_v1, seatbelt_runtime_phase_v1, seatbelt_attempt_dir_plan_v1,
     seatbelt_launch_plan_v1, seatbelt_sosix_port_status_v1, MACOS_SEATBELT_BACKEND_V1,
-    MACOS_SEATBELT_ENGINE_V1, SEATBELT_STEP_UNSUPPORTED_V1, SEATBELT_STEP_IMPLEMENTED_PURE_V1}
+    MACOS_SEATBELT_ENGINE_V1, SEATBELT_STEP_UNSUPPORTED_V1, SEATBELT_STEP_IMPLEMENTED_PURE_V1,
+    SEATBELT_STEP_QUALIFIED_DARWIN_V1, SEATBELT_SOSIX_SANDBOX_OWNER_V1}
 use std.nogc_async_mut.container.providers.macos.native_admission_v1.MACOS_NATIVE_SANDBOX_ENGINE_V1
 use std.nogc_async_mut.container.providers.macos.seatbelt_profile_v1.{SEATBELT_NETWORK_ENDPOINT_V1,
     SEATBELT_NETWORK_POD_IP_V1}
@@ -72,7 +73,10 @@ describe "seatbelt provider v1 identity":
         expect(adapter.validate(_request(MACOS_SEATBELT_BACKEND_V1)).is_ok()).to_equal(true)
 
     it "refuses observe and open without the Darwin SOSIX owner":
-        expect(seatbelt_sosix_port_status_v1().available).to_equal(false)
+        val port = seatbelt_sosix_port_status_v1()
+        expect(port.available).to_equal(false)
+        # The sandbox leaf and local IPC are Mac-qualified; worker admission is not.
+        expect(port.reason).to_equal("SCMAC-PLATFORM-001 darwin-worker-admission-unwired")
         expect(MacOsSeatbeltAdapterV1.observe("policy").unwrap_err().starts_with("SCMAC-PLATFORM-001")).to_equal(true)
         val opened = MacOsSeatbeltAdapterV1.open("policy", "/state", _scope(), _digest("a"), 1000)
         expect(opened.is_err()).to_equal(true)
@@ -117,13 +121,13 @@ describe "seatbelt provider v1 lifecycle":
         expect(op.state.identity.native_id).to_equal("")
         expect(adapter.lifecycle_v1()).to_equal("validated")
 
-    it "stays blocked even with a qualified manifest because no SOSIX owner exists":
+    it "stays blocked even with a qualified manifest because worker admission is unwired":
         var adapter = _adapter(_qualified_manifest())
         expect(adapter.qualification_v1().status).to_equal(SEATBELT_QUALIFIED_V1)
         val deadline = container_effect_deadline_v1(_digest("d"), "op-1", ["create"], 9999999999999).unwrap()
         val op = adapter.apply("prepare", _request(MACOS_SEATBELT_BACKEND_V1), deadline)
         expect(op.status).to_equal(RUNTIME_STATUS_BLOCKED)
-        expect(op.reason).to_equal("SCMAC-PLATFORM-001 darwin-seatbelt-sosix-owner-unavailable")
+        expect(op.reason).to_equal("SCMAC-PLATFORM-001 darwin-worker-admission-unwired")
         expect(adapter.lifecycle_v1()).to_equal("validated")
 
     it "rejects out-of-order effects before qualification is consulted":
@@ -182,12 +186,18 @@ describe "seatbelt provider v1 attempt plan":
         val refused = adapter.project_policy_v1(_request(MACOS_SEATBELT_BACKEND_V1), [], SEATBELT_NETWORK_POD_IP_V1)
         expect(refused.unwrap_err().starts_with("SCMAC-NET-001")).to_equal(true)
 
-    it "plans the ten launch steps with every native step unsupported":
+    it "names the landed SOSIX Darwin sandbox leaf as the activation owner":
+        expect(SEATBELT_SOSIX_SANDBOX_OWNER_V1).to_equal("std.nogc_async_mut.sosix.darwin_sandbox_v1")
+
+    it "plans the ten launch steps with only Mac-qualified activation native":
         val steps = seatbelt_launch_plan_v1()
         expect(steps.len()).to_equal(10)
         expect(steps[0].status).to_equal(SEATBELT_STEP_IMPLEMENTED_PURE_V1)
         var i = 1
         while i < steps.len():
             expect(steps[i].native_effect).to_equal(true)
-            expect(steps[i].status).to_equal(SEATBELT_STEP_UNSUPPORTED_V1)
+            if steps[i].name == "worker-activates-sandbox-and-reports":
+                expect(steps[i].status).to_equal(SEATBELT_STEP_QUALIFIED_DARWIN_V1)
+            else:
+                expect(steps[i].status).to_equal(SEATBELT_STEP_UNSUPPORTED_V1)
             i = i + 1
