@@ -166,21 +166,55 @@ fn _sel_is_combinator_or_space(ch: text) -> bool:
 
 # Is the text after a pseudo-class, up to the end of its selector, still the
 # same compound? `div:nth-child(1) p` continues with another compound, so the
-# pseudo-class belongs to an ancestor and must not style the div.
+# pseudo-class belongs to an ancestor and must not style the div. Commas and
+# spaces inside parentheses or brackets (`:not(.a, .b)`) are not boundaries.
 fn _sel_rest_is_same_compound(rest: text) -> bool:
-    val comma = rest.index_of(",")
-    val raw = if comma >= 0: rest.substring(0, comma) else: rest
-    val tail = raw.trim()
-    if tail == "":
-        return true
-    # Anything after leading whitespace is a descendant; otherwise the rest
-    # (more pseudo-classes, attribute parts) must not contain a combinator.
-    if _sel_is_combinator_or_space(raw.substring(0, 1)):
-        return false
-    not (
-        tail.contains(" ") or tail.contains(">") or tail.contains("+") or
-        tail.contains("~") or tail.contains("\t") or tail.contains("\n")
-    )
+    var depth = 0
+    var i = 0
+    val n = rest.byte_len()
+    while i < n:
+        val ch = rest.substring(i, i + 1)
+        if ch == "(" or ch == "[":
+            depth = depth + 1
+        elif ch == ")" or ch == "]":
+            if depth > 0:
+                depth = depth - 1
+        elif depth == 0:
+            if ch == ",":
+                return true
+            if ch == ">" or ch == "+" or ch == "~":
+                return false
+            if ch == " " or ch == "\t" or ch == "\n" or ch == "\r":
+                # Trailing whitespace before the next selector or the end is
+                # fine; anything else starts another compound.
+                var j = i
+                while j < n:
+                    val next = rest.substring(j, j + 1)
+                    if next == ",":
+                        return true
+                    if next != " " and next != "\t" and next != "\n" and next != "\r":
+                        return false
+                    j = j + 1
+                return true
+        i = i + 1
+    true
+
+# Start of the compound that ends at byte `at`: scans left to the nearest
+# combinator, whitespace or comma that is outside parentheses and brackets.
+fn _sel_compound_start(selector: text, at: i64) -> i64:
+    var depth = 0
+    var start = at
+    while start > 0:
+        val ch = selector.substring(start - 1, start)
+        if ch == ")" or ch == "]":
+            depth = depth + 1
+        elif ch == "(" or ch == "[":
+            if depth > 0:
+                depth = depth - 1
+        elif depth == 0 and _sel_is_combinator_or_space(ch):
+            return start
+        start = start - 1
+    start
 
 # True when one selector of the rule's selector list has `marker` on its
 # SUBJECT compound and that compound describes this element. For the
@@ -208,9 +242,7 @@ fn _sel_list_subject_pseudo(selector: text, marker: text, tag_name: text, tag: t
             end = end + close + 1
         elif end < total and _sel_name_char(selector.substring(end, end + 1)):
             arg_ok = false
-        var start = at
-        while start > 0 and not _sel_is_combinator_or_space(selector.substring(start - 1, start)):
-            start = start - 1
+        val start = _sel_compound_start(selector, at)
         if (
             arg_ok and _sel_rest_is_same_compound(selector.substring(end, total)) and
             _sel_compound_matches_element(selector.substring(start, at), tag_name, tag)
