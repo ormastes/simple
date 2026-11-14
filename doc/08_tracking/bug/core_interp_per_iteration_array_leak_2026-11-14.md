@@ -77,7 +77,9 @@ semantics pass; the scope-ops, fast-local and loop-bound examples fail). After: 
 - **Root cause: the seed JIT never frees arrays.** Every array a JIT'd program allocates
   stays live until exit, so any long-running JIT'd Simple program grows without bound.
   Fixing it needs ownership- or refcount-driven drops in MIR lowering, which is a redesign
-  outside this lane.
+  outside this lane. Design options, measurements and a first slice:
+  `doc/05_design/compiler/jit_memory/seed_jit_array_reclamation.md`. It also shows the
+  18 frees are 9 per `core_interpret` call, independent of iteration count.
 - **`val_alloc` still mints two empty arrays per fresh value slot.** These are the
   `val_struct_fields` / `val_struct_values` rows. Each one is ~128 B of data, because an
   empty `[]` literal reserves capacity, plus its header. Sharing one empty row is unsafe:
