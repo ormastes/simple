@@ -484,7 +484,31 @@ impl MirLowering:
                 val declared = self.enum_payload_declared_name(expected)
                 return "{stem}: nil into non-optional payload slot (declared '{declared}'); declare it '{declared}?' if absence is valid{context}"
             case _: ()
+        # An unguarded `T?` binding in a non-optional `T` slot: a nullable
+        # merge, or an annotated `val` whose initializer is one (a `T?` / `T`
+        # join is `T?` in either arm order). The refusal stands (never widen
+        # nil); name the unwrap so the site is fixable without
+        # SIMPLE_ENUM_PAYLOAD_TRACE.
+        if self.enum_payload_is_unguarded_optional(expected, expression):
+            val declared = self.enum_payload_declared_name(expected)
+            return "{stem}: optional '{declared}?' value into non-optional payload slot (declared '{declared}'); unwrap it first (`if val`){context}"
         stem + context
+
+    fn enum_payload_is_unguarded_optional(expected: HirType, expression: HirExpr) -> bool:
+        match expected.kind:
+            case HirTypeKind.Optional(_): return false
+            case _: ()
+        match expression.kind:
+            case HirExprKind.Var(symbol) | HirExprKind.NamedVar(symbol, _):
+                val bound_local = self.symbol_bound_local(symbol.id)
+                if bound_local.id < 0: return false
+                if val actual = self.find_local_hir_type(bound_local.id):
+                    match actual.kind:
+                        case HirTypeKind.Optional(actual_inner):
+                            return enum_payload_types_alias_compatible(expected, actual_inner, self.symbols)
+                        case _: ()
+            case _: ()
+        false
 
     fn enum_payload_declared_name(declared_type: HirType) -> text:
         match declared_type.kind:

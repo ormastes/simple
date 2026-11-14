@@ -800,3 +800,15 @@ retracts the journaled copies (`provider_type_relocation_journal`) after
   for type-defining modules** (`{t.kind}` struct Display, hash order) -- compare
   serialized rows, not the fingerprint
   (`mir_canonical_fingerprint_type_row_hash_order_seed_2026-11-14.md`).
+
+## 2026-11-14 — an annotated `val x: T` does not launder a `T?` initializer
+
+`val x: T = if c: opt else: plain` keeps the initializer's `T?` (a `T?` / `T` join is `T?` in
+either arm order; `let_declared_type_override_v1` only lets the annotation win over Infer / Error /
+erased / Result). `Enum.Variant(x)` into a non-optional slot is then refused, now with
+`optional 'T?' value into non-optional payload slot ... unwrap it first`. Fix the source with
+`if val`, or bind the plain value once; do not make the annotation win. Struct fields and
+plain parameters still accept the same value silently. Red/green in about 30 s on the seed:
+`test/01_unit/compiler/mir/let_annotated_optional_join_spec.spl` (it also pins the three
+`HirStmtKind.Let` sites in `statements.spl`, lost once to a rebase). Record:
+`doc/08_tracking/bug/stage3_let_payload_unguarded_optional_arm_2026-11-14.md`.
