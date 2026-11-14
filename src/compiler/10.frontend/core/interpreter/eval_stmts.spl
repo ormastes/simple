@@ -16,14 +16,14 @@
 # Explicit owners for names the seed resolved through its flat namespace;
 # the pure-Simple HIR resolves per module and reported them as unresolved.
 use compiler.core.ast.{arm_get_body, arm_get_guard, arm_get_pattern, elif_get_body, elif_get_cond}
-use compiler.core.ast.{elif_get_else, expr_get, stmt_get}
+use compiler.core.ast.{elif_get_else, expr_get}
 use compiler.core.ast_expr.{EXPR_CALL, EXPR_EXISTS_CHECK, EXPR_FIELD_ACCESS, EXPR_IDENT, EXPR_INDEX, EXPR_RANGE}
 use compiler.core.ast_expr.{expr_owner_int, expr_owner_int_set}
 use compiler.core.ast_stmt.{STMT_ASSIGN, STMT_BIND, STMT_BLOCK, STMT_BREAK, STMT_COMPOUND_ASSIGN}
 use compiler.core.ast_stmt.{STMT_CONTINUE, STMT_DEFER, STMT_ERRDEFER, STMT_EXPR, STMT_FOR}
 use compiler.core.ast_stmt.{STMT_IF, STMT_LABELED_LOOP, STMT_MATCH, STMT_RECEIVE, STMT_RETURN}
 use compiler.core.ast_stmt.{STMT_VAL_DECL, STMT_VAR_DECL, STMT_WHILE}
-use compiler.core.{stmt_get_body, stmt_get_expr, stmt_get_tag, stmt_get_type}
+use compiler.core.{stmt_get_body, stmt_get_expr, stmt_get_name, stmt_get_span, stmt_get_tag, stmt_get_type}
 use compiler.core.interpreter.eval.{EVAL_STMT_COMPTIME, EVAL_STMT_LAZY_VAL_DECL, EVAL_STMT_STATIC_FOR, coverage_owner_file, coverage_span_decision_id}
 use compiler.core.interpreter.eval.{eval_block, eval_break_label, eval_breaking, eval_continue_label, eval_continuing}
 use compiler.core.interpreter.eval.{eval_control_condition, eval_current_decl_id, eval_defer_depth, eval_defer_depths, eval_defer_eids}
@@ -81,19 +81,19 @@ pub fn eval_stmt(sid: i64) -> i64:
         if tag == STMT_BLOCK: return eval_stmt_block(sid)
         if tag == STMT_BREAK:
             eval_breaking = true
-            val break_lbl = stmt_get(sid).name
+            val break_lbl = stmt_get_name(sid)
             eval_break_label = break_lbl
             return val_make_nil()
         if tag == STMT_CONTINUE:
             eval_continuing = true
-            val cont_lbl = stmt_get(sid).name
+            val cont_lbl = stmt_get_name(sid)
             eval_continue_label = cont_lbl
             return val_make_nil()
         if tag == STMT_COMPOUND_ASSIGN: return eval_stmt_compound_assign(sid)
 
     # Rare (tags 14+): DEFER, ERRDEFER, LABELED_LOOP, STATIC_FOR, COMPTIME, RECEIVE, BIND, LAZY_VAL
     if tag == STMT_DEFER:
-        val defer_eid = stmt_get(sid).expr_idx
+        val defer_eid = stmt_get_expr(sid)
         # Block-form `defer:` (bug #172) is parsed (stmt_defer_block_stmt sets
         # EXPR to the -1 "no expr" sentinel and stores the body statements
         # instead), but this tree-walking interpreter's replay queue
@@ -111,7 +111,7 @@ pub fn eval_stmt(sid: i64) -> i64:
         eval_defer_depths.push(eval_defer_depth)
         return val_make_nil()
     if tag == STMT_ERRDEFER:
-        val errdefer_eid = stmt_get(sid).expr_idx
+        val errdefer_eid = stmt_get_expr(sid)
         if errdefer_eid == -1:
             eval_set_error("block-form 'errdefer:' is not supported by the interpreter (bin/simple run) -- use the single-line 'errdefer expr' form")
             return val_make_nil()
@@ -125,11 +125,10 @@ pub fn eval_stmt(sid: i64) -> i64:
     if tag == EVAL_STMT_LAZY_VAL_DECL: return eval_stmt_lazy_val_decl(sid)
 
     if tag == STMT_RECEIVE:
-        val s_node_recv = stmt_get(sid)
-        val recv_timeout_body = s_node_recv.type_tag
+        val recv_timeout_body = stmt_get_type(sid)
         if recv_timeout_body >= 0:
             return eval_stmt(recv_timeout_body)
-        val recv_arms = s_node_recv.body
+        val recv_arms = stmt_get_body(sid)
         if recv_arms.len() > 0:
             val first_arm_body = arm_get_body(recv_arms[0])
             var recv_last: i64 = val_make_nil()
@@ -141,9 +140,8 @@ pub fn eval_stmt(sid: i64) -> i64:
         return val_make_nil()
 
     if tag == STMT_BIND:
-        val s_node_bind = stmt_get(sid)
-        val bind_name = s_node_bind.name
-        val bind_rhs_idx = s_node_bind.expr_idx
+        val bind_name = stmt_get_name(sid)
+        val bind_rhs_idx = stmt_get_expr(sid)
         val bind_rhs_val = eval_expr(bind_rhs_idx)
         if eval_had_error: return -1
         val bind_is_nil = val_get_kind(bind_rhs_val) == 0
@@ -212,9 +210,8 @@ fn eval_tuple_destructure(name: text, init_val: i64) -> i64:
     init_val
 
 fn eval_stmt_val_decl(sid: i64) -> i64:
-    val s_node = stmt_get(sid)
-    val name = s_node.name
-    val init_eid = s_node.expr_idx
+    val name = stmt_get_name(sid)
+    val init_eid = stmt_get_expr(sid)
     var init_val = val_make_nil()
     if init_eid >= 0:
         init_val = eval_expr(init_eid)
@@ -247,9 +244,8 @@ fn eval_stmt_val_decl(sid: i64) -> i64:
     init_val
 
 fn eval_stmt_lazy_val_decl(sid: i64) -> i64:
-    val s_node = stmt_get(sid)
-    val name = s_node.name
-    val init_eid = s_node.expr_idx
+    val name = stmt_get_name(sid)
+    val init_eid = stmt_get_expr(sid)
     var thunk_val = val_make_nil()
     if init_eid >= 0:
         thunk_val = val_make_thunk(init_eid)
@@ -262,9 +258,8 @@ fn eval_stmt_lazy_val_decl(sid: i64) -> i64:
     thunk_val
 
 fn eval_stmt_var_decl(sid: i64) -> i64:
-    val s_node = stmt_get(sid)
-    val name = s_node.name
-    val init_eid = s_node.expr_idx
+    val name = stmt_get_name(sid)
+    val init_eid = stmt_get_expr(sid)
     var init_val = val_make_nil()
     if init_eid >= 0:
         init_val = eval_expr(init_eid)
@@ -411,7 +406,7 @@ fn eval_stmt_compound_assign(sid: i64) -> i64:
     -1
 
 fn eval_stmt_return(sid: i64) -> i64:
-    val value_eid = stmt_get(sid).expr_idx
+    val value_eid = stmt_get_expr(sid)
     var ret_val = val_make_nil()
     if value_eid >= 0:
         ret_val = eval_expr(value_eid)
@@ -421,7 +416,7 @@ fn eval_stmt_return(sid: i64) -> i64:
     ret_val
 
 fn record_stmt_control_decision(sid: i64, taken: bool):
-    val span_id = stmt_get(sid).span_id
+    val span_id = stmt_get_span(sid)
     var source_line = 0
     var source_column = 0
     if span_is_valid(span_id):
@@ -433,12 +428,12 @@ fn record_stmt_control_decision(sid: i64, taken: bool):
             span_start(span_id) + 1, taken)
 
 fn eval_stmt_if(sid: i64) -> i64:
-    val elif_idx = stmt_get(sid).type_tag
+    val elif_idx = stmt_get_type(sid)
     val cond_eid = elif_get_cond(elif_idx)
     val then_stmts = elif_get_body(elif_idx)
     val else_stmts = elif_get_else(elif_idx)
 
-    val cond_val = eval_control_condition(cond_eid, coverage_span_decision_id(stmt_get(sid).span_id))
+    val cond_val = eval_control_condition(cond_eid, coverage_span_decision_id(stmt_get_span(sid)))
     if eval_had_error: return -1
 
     val taken = val_is_truthy(cond_val)
@@ -468,10 +463,9 @@ fn eval_stmt_if(sid: i64) -> i64:
     val_make_nil()
 
 fn eval_stmt_for(sid: i64) -> i64:
-    val s_node = stmt_get(sid)
-    val iter_name = s_node.name
-    val iterable_eid = s_node.expr_idx
-    val body_stmts = s_node.body
+    val iter_name = stmt_get_name(sid)
+    val iterable_eid = stmt_get_expr(sid)
+    val body_stmts = stmt_get_body(sid)
 
     # Check if iterable is a range expression
     val iterable_tag = expr_get(iterable_eid).tag
@@ -603,10 +597,9 @@ fn eval_stmt_for(sid: i64) -> i64:
 # static_for — at interpreter level behaves like a regular for loop.
 # Compile-time unrolling is a future compiler-phase optimization.
 fn eval_stmt_static_for(sid: i64) -> i64:
-    val sf_node = stmt_get(sid)
-    val sf_iter_name = sf_node.name
-    val sf_iterable_eid = sf_node.expr_idx
-    val sf_body_stmts = sf_node.body
+    val sf_iter_name = stmt_get_name(sid)
+    val sf_iterable_eid = stmt_get_expr(sid)
+    val sf_body_stmts = stmt_get_body(sid)
 
     val sf_iterable = eval_expr(sf_iterable_eid)
     if eval_had_error: return -1
@@ -644,8 +637,7 @@ fn eval_stmt_static_for(sid: i64) -> i64:
 
 fn eval_stmt_comptime(sid: i64) -> i64:
     # Execute the body statements immediately (they run at module-load time)
-    val ct_node = stmt_get(sid)
-    val ct_body = ct_node.body
+    val ct_body = stmt_get_body(sid)
     var ct_last = val_make_nil()
     for ct_sid in ct_body:
         if eval_had_error: break
@@ -653,9 +645,8 @@ fn eval_stmt_comptime(sid: i64) -> i64:
     ct_last
 
 fn eval_stmt_while(sid: i64) -> i64:
-    val s_node = stmt_get(sid)
-    val cond_eid = s_node.expr_idx
-    val body_stmts = s_node.body
+    val cond_eid = stmt_get_expr(sid)
+    val body_stmts = stmt_get_body(sid)
     var last_val = val_make_nil()
     var iterations: i64 = 0
 
@@ -663,7 +654,7 @@ fn eval_stmt_while(sid: i64) -> i64:
         if eval_had_error: break
         if eval_returning: break
         if eval_breaking: break
-        val cond_val = eval_control_condition(cond_eid, coverage_span_decision_id(stmt_get(sid).span_id))
+        val cond_val = eval_control_condition(cond_eid, coverage_span_decision_id(stmt_get_span(sid)))
         if eval_had_error: break
         val taken = val_is_truthy(cond_val)
         record_stmt_control_decision(sid, taken)
@@ -693,9 +684,8 @@ fn eval_stmt_while(sid: i64) -> i64:
     last_val
 
 fn eval_stmt_match(sid: i64) -> i64:
-    val s_node = stmt_get(sid)
-    val scrutinee_eid = s_node.expr_idx
-    val arm_ids = s_node.body
+    val scrutinee_eid = stmt_get_expr(sid)
+    val arm_ids = stmt_get_body(sid)
 
     val scrutinee = eval_expr(scrutinee_eid)
     if eval_had_error: return -1
@@ -762,5 +752,5 @@ fn eval_stmt_match(sid: i64) -> i64:
     val_make_nil()
 
 fn eval_stmt_block(sid: i64) -> i64:
-    val body_stmts = stmt_get(sid).body
+    val body_stmts = stmt_get_body(sid)
     eval_block(body_stmts, -1)

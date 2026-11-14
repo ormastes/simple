@@ -1,0 +1,229 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# bug: doc/08_tracking/bug/core_interp_per_iteration_array_leak_2026-11-14.md
+#
+# The core interpreter's value arena used to give EVERY value slot two empty
+# struct rows (`val_struct_fields.push([])` + `val_struct_values.push([])`),
+# so each fresh int / float / text leaked two arrays on the seed JIT, which
+# never frees an array. Struct rows are now sparse: a slot holds a row id
+# (-1 = none) and a row exists only for a value that is actually a struct.
+# The colder statement paths (val/var decl, return, if, while, for, match,
+# block) also built a whole CoreStmt (four arrays) to read one field.
+#
+# This spec pins both: array counts per fresh value slot and per cold
+# statement, and the struct value semantics the sparse rows must keep exact.
+# The control example proves the counter observes array allocations here.
+#
+# @jit_spec_entry
+# The heap counters only observe runtime heap objects, i.e. the JIT lane.
+
+use std.spec.step
+
+use compiler.core.interpreter.mod.{core_interpret}
+use compiler.core.interpreter.eval.{eval_has_error}
+use compiler.core.interpreter.value.{val_reset, val_free, val_get_int, val_get_kind, val_is_struct}
+use compiler.core.interpreter.value.{val_make_int, val_make_float, val_make_text, val_make_struct}
+use compiler.core.interpreter.value.{val_get_struct_name, val_get_struct_fields, val_get_struct_values}
+use compiler.core.interpreter.value.{val_struct_get_field, val_struct_set_field, val_struct_upsert_field}
+use compiler.core.interpreter.value.{val_struct_get_field_idx, val_struct_set_field_idx}
+use compiler.core.interpreter.value.{val_struct_check_field_idx, val_struct_find_field_idx}
+
+extern fn rt_heap_live_count_by_kind(kind: i64) -> i64
+
+val HEAP_KIND_ARRAY: i64 = 2
+
+var kept_rows: [[i64]] = []
+
+fn live_arrays() -> i64:
+    rt_heap_live_count_by_kind(HEAP_KIND_ARRAY)
+
+fn interp_int(src: text, name: text) -> i64:
+    val result = core_interpret(src, name)
+    if eval_has_error(): return -999
+    val_get_int(result)
+
+describe "core interpreter value slots carry no struct rows unless they are structs":
+    it "control: 1,000 arrays held live are observed by the live-array counter":
+        step("Verify: the counter sees array allocations on this engine")
+        kept_rows = []
+        val before = live_arrays()
+        var j = 0
+        while j < 1000:
+            kept_rows.push([j, j + 1])
+            j = j + 1
+        expect(kept_rows.len()).to_equal(1000)
+        expect(live_arrays() - before >= 1000).to_equal(true)
+
+    it "a fresh int, float or text value slot allocates no array":
+        step("Verify: 3,000 non-cached scalar values leave the live-array count flat")
+        val_reset()
+        val before = live_arrays()
+        var j = 0
+        var sum = 0
+        while j < 1000:
+            # Above 255: the small-int cache must not hide the allocation.
+            val a = val_make_int(1000 + j)
+            val b = val_make_float(1.5)
+            val c = val_make_text("t")
+            sum = sum + val_get_int(a) + (c - b)
+            j = j + 1
+        val array_delta = live_arrays() - before
+        expect(sum).to_equal(1000 * 1000 + 499500 + 1000)
+        # Before the sparse rows: 6,000 (two rows per slot).
+        expect(array_delta).to_equal(0)
+
+    it "freeing and reusing a scalar slot allocates no array":
+        step("Verify: 1,000 alloc/free cycles on one recycled slot stay flat")
+        val_reset()
+        val warm = val_make_int(4000)
+        val_free(warm)
+        val before = live_arrays()
+        var j = 0
+        var same_slot = 0
+        while j < 1000:
+            val v = val_make_int(5000 + j)
+            if v == warm:
+                same_slot = same_slot + 1
+            val_free(v)
+            j = j + 1
+        val array_delta = live_arrays() - before
+        expect(same_slot).to_equal(1000)
+        # Before: 4,000 (`= []` twice in val_free and twice in val_alloc).
+        expect(array_delta).to_equal(0)
+
+describe "sparse struct rows keep struct value semantics exact":
+    it "a struct keeps its name, fields and values; scalars expose none":
+        val_reset()
+        val n = val_make_int(900)
+        val s = val_make_struct("Point", ["x", "y"], [val_make_int(301), val_make_int(302)])
+        expect(val_is_struct(s)).to_equal(true)
+        expect(val_get_struct_name(s)).to_equal("Point")
+        expect(val_get_struct_fields(s)).to_equal(["x", "y"])
+        expect(val_get_int(val_struct_get_field(s, "y"))).to_equal(302)
+        expect(val_struct_get_field(s, "z")).to_equal(-1)
+        expect(val_struct_find_field_idx(s, "y")).to_equal(1)
+        expect(val_struct_find_field_idx(s, "z")).to_equal(-1)
+        expect(val_struct_check_field_idx(s, 1, "y")).to_equal(true)
+        expect(val_struct_check_field_idx(s, 1, "x")).to_equal(false)
+        expect(val_struct_check_field_idx(s, 2, "y")).to_equal(false)
+        expect(val_get_int(val_struct_get_field_idx(s, 0))).to_equal(301)
+        expect(val_struct_get_field_idx(s, 2)).to_equal(-1)
+        # A scalar slot has no row: every reader answers "no fields".
+        expect(val_get_struct_fields(n).len()).to_equal(0)
+        expect(val_get_struct_values(n).len()).to_equal(0)
+        expect(val_struct_get_field(n, "x")).to_equal(-1)
+        expect(val_struct_find_field_idx(n, "x")).to_equal(-1)
+        expect(val_struct_check_field_idx(n, 0, "x")).to_equal(false)
+        expect(val_struct_get_field_idx(n, 0)).to_equal(-1)
+
+    it "writes land in the addressed struct only":
+        val_reset()
+        val a = val_make_struct("P", ["x", "y"], [val_make_int(301), val_make_int(302)])
+        val b = val_make_struct("P", ["x", "y"], [val_make_int(401), val_make_int(402)])
+        val n = val_make_int(900)
+        val_struct_set_field(a, "x", val_make_int(311))
+        val_struct_set_field_idx(b, 1, val_make_int(412))
+        val_struct_set_field(a, "missing", val_make_int(777))
+        val_struct_set_field_idx(a, 5, val_make_int(778))
+        # Writes to a slot with no row are dropped, not redirected.
+        val_struct_set_field(n, "x", val_make_int(779))
+        val_struct_set_field_idx(n, 0, val_make_int(780))
+        expect(val_get_int(val_struct_get_field(a, "x"))).to_equal(311)
+        expect(val_get_int(val_struct_get_field(a, "y"))).to_equal(302)
+        expect(val_get_int(val_struct_get_field(b, "x"))).to_equal(401)
+        expect(val_get_int(val_struct_get_field(b, "y"))).to_equal(412)
+        expect(val_get_struct_fields(a).len()).to_equal(2)
+        expect(val_get_struct_fields(n).len()).to_equal(0)
+        expect(val_get_int(n)).to_equal(900)
+
+    it "upsert adds a field to one struct and replaces an existing one":
+        val_reset()
+        val d = val_make_struct("__dict", [], [])
+        val e = val_make_struct("__dict", [], [])
+        val_struct_upsert_field(d, "k1", val_make_int(501))
+        val_struct_upsert_field(d, "k2", val_make_int(502))
+        val_struct_upsert_field(d, "k1", val_make_int(511))
+        val_struct_upsert_field(e, "k9", val_make_int(609))
+        expect(val_get_struct_fields(d)).to_equal(["k1", "k2"])
+        expect(val_get_int(val_struct_get_field(d, "k1"))).to_equal(511)
+        expect(val_get_int(val_struct_get_field(d, "k2"))).to_equal(502)
+        expect(val_get_struct_fields(e)).to_equal(["k9"])
+        expect(val_struct_get_field(e, "k1")).to_equal(-1)
+
+    it "structs built one after another own separate rows":
+        # Whether a struct aliases the caller's arrays is a lane property (the
+        # seed JIT aliases, before and after this change), so it is not pinned
+        # here; row independence between structs is.
+        val_reset()
+        val a = val_make_struct("P", ["x"], [val_make_int(301)])
+        val b = val_make_struct("P", ["x"], [val_make_int(401)])
+        val_struct_upsert_field(a, "w", val_make_int(303))
+        val_struct_set_field(b, "x", val_make_int(411))
+        expect(val_get_struct_fields(a)).to_equal(["x", "w"])
+        expect(val_get_struct_fields(b)).to_equal(["x"])
+        expect(val_get_int(val_struct_get_field(a, "x"))).to_equal(301)
+        expect(val_get_int(val_struct_get_field(b, "x"))).to_equal(411)
+
+    it "a freed struct's row is reused without leaking its old fields":
+        val_reset()
+        val old = val_make_struct("Old", ["a", "b", "c"], [val_make_int(701), val_make_int(702), val_make_int(703)])
+        val keep = val_make_struct("Keep", ["k"], [val_make_int(801)])
+        val_free(old)
+        # The recycled slot comes back as a scalar: no fields visible.
+        val n = val_make_int(900)
+        expect(n).to_equal(old)
+        expect(val_get_struct_fields(n).len()).to_equal(0)
+        expect(val_struct_get_field(n, "a")).to_equal(-1)
+        # The recycled ROW goes to the next struct, holding only its fields.
+        val fresh = val_make_struct("Fresh", ["p"], [val_make_int(811)])
+        expect(val_get_struct_fields(fresh)).to_equal(["p"])
+        expect(val_get_int(val_struct_get_field(fresh, "p"))).to_equal(811)
+        expect(val_struct_get_field(fresh, "a")).to_equal(-1)
+        expect(val_get_int(val_struct_get_field(keep, "k"))).to_equal(801)
+        expect(val_get_struct_fields(n).len()).to_equal(0)
+
+    it "the first upsert on a recycled row starts from an empty row":
+        val_reset()
+        val old = val_make_struct("Old", ["a", "b"], [val_make_int(701), val_make_int(702)])
+        val_free(old)
+        val n = val_make_int(900)
+        val_struct_upsert_field(n, "only", val_make_int(901))
+        expect(val_get_struct_fields(n)).to_equal(["only"])
+        expect(val_struct_get_field(n, "a")).to_equal(-1)
+        expect(val_get_kind(n)).to_equal(2)
+        expect(val_get_int(n)).to_equal(900)
+
+describe "core-interpreted struct programs keep their results":
+    it "create, field write, value copy, nested struct and struct in array":
+        val decl = "struct P:\n    x: i64\n    y: i64\n\nstruct Box:\n    p: P\n    n: i64\n\n"
+        expect(interp_int(decl + "val a = P(x: 300, y: 7)\na.x + a.y\n", "vsr_create.spl")).to_equal(307)
+        expect(interp_int(decl + "var a = P(x: 300, y: 7)\na.y = 50\na.x + a.y\n", "vsr_write.spl")).to_equal(350)
+        expect(interp_int(decl + "var a = P(x: 300, y: 7)\nvar b = a\nb.x = 500\na.x * 1000 + b.x\n", "vsr_copy.spl")).to_equal(300500)
+        expect(interp_int(decl + "var b = Box(p: P(x: 300, y: 7), n: 4)\nb.p.x + b.p.y + b.n\n", "vsr_nested.spl")).to_equal(311)
+        expect(interp_int(decl + "val ps = [P(x: 300, y: 1), P(x: 400, y: 2)]\nps[0].x + ps[1].x + ps[1].y\n", "vsr_array.spl")).to_equal(702)
+
+    it "a loop that builds a struct per iteration keeps every field":
+        val src = "struct P:\n    x: i64\n    y: i64\n\nvar acc: i64 = 0\nfor i in 0..2000:\n    val p = P(x: i, y: 1000)\n    acc = acc + p.x + p.y\nacc\n"
+        expect(interp_int(src, "vsr_loop_struct.spl")).to_equal(1999000 + 2000000)
+
+describe "cold statement paths do not build a CoreStmt per execution":
+    it "a range-for of `acc = acc + 1` allocates at most 3 arrays per iteration":
+        step("Verify: 10,000 iterations stay under 4 arrays per iteration")
+        # Measured 2026-11-14: 5 before the sparse rows (2 of them val_alloc).
+        val src = "var acc: i64 = 0\nfor i in 0..10000:\n    acc = acc + 1\nacc\n"
+        val before = live_arrays()
+        val result = core_interpret(src, "vsr_loop_bound.spl")
+        val per_iteration = (live_arrays() - before) / 10000
+        expect(eval_has_error()).to_equal(false)
+        expect(val_get_int(result)).to_equal(10000)
+        expect(per_iteration < 4).to_equal(true)
+
+    it "val decl, if and while statements stay under the pinned per-iteration bound":
+        step("Verify: 5,000 iterations of a decl + if + while body stay under the bound")
+        val src = "var acc: i64 = 0\nfor i in 0..5000:\n    val step = i + 300\n    var k: i64 = 0\n    while k < 2:\n        k = k + 1\n    if step > 0:\n        acc = acc + k\nacc\n"
+        val before = live_arrays()
+        val result = core_interpret(src, "vsr_cold_stmt_bound.spl")
+        val per_iteration = (live_arrays() - before) / 5000
+        expect(eval_has_error()).to_equal(false)
+        expect(val_get_int(result)).to_equal(10000)
+        # Measured 2026-11-14: 60 before (a CoreStmt per statement), 4 after.
+        expect(per_iteration < 8).to_equal(true)
