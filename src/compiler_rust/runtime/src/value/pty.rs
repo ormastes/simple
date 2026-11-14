@@ -82,6 +82,7 @@ pub fn reap_pty_child_since(pid: libc::pid_t, grace_start: std::time::Instant) -
         let mut status = 0;
         let result = unsafe { libc::waitpid(pid, &mut status, flags) };
         if result == pid {
+            record_pty_exit_status(pid, status);
             return Some(true);
         }
         if result < 0 {
@@ -134,6 +135,9 @@ pub enum PtyChildProbe {
 pub fn waitpid_nohang(pid: libc::pid_t) -> (libc::pid_t, Option<i32>) {
     let mut status = 0;
     let result = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+    if result == pid && pid > 0 {
+        record_pty_exit_status(pid, status);
+    }
     if result < 0 {
         (result, std::io::Error::last_os_error().raw_os_error())
     } else {
@@ -221,6 +225,248 @@ pub fn set_pty_fd_cloexec(fd: libc::c_int) {
         if flags >= 0 {
             libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC);
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Structured launch, literal bytes and exit status (both lanes share these).
+// ---------------------------------------------------------------------------
+
+#[cfg(unix)]
+lazy_static::lazy_static! {
+    /// master fd -> pid of the child spawned on it (kept after the child is
+    /// reaped, dropped at close) so `exit_code` can answer after exit.
+    static ref PTY_SPAWNED: std::sync::Mutex<std::collections::HashMap<i32, libc::pid_t>> =
+        std::sync::Mutex::new(std::collections::HashMap::new());
+    /// pid -> raw wait status, recorded by whichever waitpid reaped it.
+    static ref PTY_EXIT_STATUS: std::sync::Mutex<std::collections::HashMap<libc::pid_t, i32>> =
+        std::sync::Mutex::new(std::collections::HashMap::new());
+}
+
+#[cfg(unix)]
+fn record_pty_exit_status(pid: libc::pid_t, status: i32) {
+    // Only children still owned by an open master: a reap after close must
+    // not leave an entry nobody will remove.
+    let owned = PTY_SPAWNED.lock().map(|map| map.values().any(|p| *p == pid)).unwrap_or(false);
+    if !owned {
+        return;
+    }
+    if let Ok(mut map) = PTY_EXIT_STATUS.lock() {
+        map.insert(pid, status);
+    }
+}
+
+/// Remembers the child spawned on `master_fd` for `pty_exit_code`.
+#[cfg(unix)]
+pub fn note_pty_spawn(master_fd: i32, pid: libc::pid_t) {
+    if let Ok(mut map) = PTY_SPAWNED.lock() {
+        map.insert(master_fd, pid);
+    }
+}
+
+/// Drops the exit bookkeeping of a closed `master_fd`.
+#[cfg(unix)]
+pub fn forget_pty_spawn(master_fd: i32) {
+    let pid = PTY_SPAWNED.lock().ok().and_then(|mut map| map.remove(&master_fd));
+    if let Some(pid) = pid {
+        if let Ok(mut map) = PTY_EXIT_STATUS.lock() {
+            map.remove(&pid);
+        }
+    }
+}
+
+/// Exit status of the child spawned on `master_fd`: the exit code, 128+signal
+/// for a signalled child, -1 while it still runs, -2 for no child / no status.
+#[cfg(unix)]
+pub fn pty_exit_code(master_fd: i32) -> i64 {
+    let Some(pid) = PTY_SPAWNED.lock().ok().and_then(|map| map.get(&master_fd).copied()) else {
+        return -2;
+    };
+    let decode = |status: i32| -> i64 {
+        if libc::WIFEXITED(status) {
+            libc::WEXITSTATUS(status) as i64
+        } else if libc::WIFSIGNALED(status) {
+            128 + libc::WTERMSIG(status) as i64
+        } else {
+            -2
+        }
+    };
+    if let Some(status) = PTY_EXIT_STATUS.lock().ok().and_then(|map| map.get(&pid).copied()) {
+        return decode(status);
+    }
+    match probe_pty_child_with(pid, waitpid_nohang) {
+        PtyChildProbe::Running => -1,
+        PtyChildProbe::Gone => PTY_EXIT_STATUS
+            .lock()
+            .ok()
+            .and_then(|map| map.get(&pid).copied())
+            .map(decode)
+            .unwrap_or(-2),
+    }
+}
+
+/// Writes as many literal octets as the nonblocking master accepts: the count
+/// accepted (0 when the terminal queue is full), -1 on failure.
+#[cfg(unix)]
+pub fn pty_write_bytes_some(master_fd: i32, data: &[u8]) -> i64 {
+    if master_fd < 0 {
+        return -1;
+    }
+    if data.is_empty() {
+        return 0;
+    }
+    loop {
+        let written = unsafe { libc::write(master_fd, data.as_ptr().cast(), data.len()) };
+        if written >= 0 {
+            return written as i64;
+        }
+        match std::io::Error::last_os_error().raw_os_error() {
+            Some(libc::EINTR) => continue,
+            Some(libc::EAGAIN) => return 0,
+            _ => return -1,
+        }
+    }
+}
+
+/// A fully prepared structured exec: every C string is built before fork so
+/// the child only performs async-signal-safe calls.
+#[cfg(unix)]
+pub struct PtyExecRequest {
+    program: std::ffi::CString,
+    argv: Vec<std::ffi::CString>,
+    envp: Vec<std::ffi::CString>,
+    cwd: Option<std::ffi::CString>,
+}
+
+/// Builds a literal exec: `program` (resolved through the child's PATH when
+/// it has no '/'), `args` after argv[0], optional `cwd` ("" = inherit), and
+/// environment changes `+NAME=VALUE` (set) / `-NAME` (remove) applied to a
+/// copy of this process's environment. None for any invalid field.
+#[cfg(unix)]
+pub fn pty_exec_request(program: &str, args: &[String], cwd: &str, env: &[String]) -> Option<PtyExecRequest> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    if program.is_empty() {
+        return None;
+    }
+    let mut vars: Vec<(Vec<u8>, Vec<u8>)> = std::env::vars_os()
+        .map(|(k, v)| (k.as_bytes().to_vec(), v.as_bytes().to_vec()))
+        .collect();
+    for change in env {
+        let (op, rest) = change.split_at(change.chars().next()?.len_utf8());
+        match op {
+            "+" => {
+                let (name, value) = rest.split_once('=')?;
+                if name.is_empty() {
+                    return None;
+                }
+                vars.retain(|(k, _)| k.as_slice() != name.as_bytes());
+                vars.push((name.as_bytes().to_vec(), value.as_bytes().to_vec()));
+            }
+            "-" => {
+                if rest.is_empty() || rest.contains('=') {
+                    return None;
+                }
+                vars.retain(|(k, _)| k.as_slice() != rest.as_bytes());
+            }
+            _ => return None,
+        }
+    }
+    let resolved: Vec<u8> = if program.contains('/') {
+        program.as_bytes().to_vec()
+    } else {
+        let path = vars
+            .iter()
+            .find(|(k, _)| k.as_slice() == b"PATH")
+            .map(|(_, v)| v.clone())
+            .unwrap_or_else(|| b"/usr/bin:/bin".to_vec());
+        let mut found = None;
+        for dir in path.split(|b| *b == b':') {
+            let dir = if dir.is_empty() { b".".as_slice() } else { dir };
+            let mut candidate = dir.to_vec();
+            candidate.push(b'/');
+            candidate.extend_from_slice(program.as_bytes());
+            let c = CString::new(candidate.clone()).ok()?;
+            if unsafe { libc::access(c.as_ptr(), libc::X_OK) } == 0 {
+                found = Some(candidate);
+                break;
+            }
+        }
+        found?
+    };
+    let mut argv = Vec::with_capacity(args.len() + 1);
+    argv.push(CString::new(program).ok()?);
+    for arg in args {
+        argv.push(CString::new(arg.as_str()).ok()?);
+    }
+    let mut envp = Vec::with_capacity(vars.len());
+    for (k, v) in vars {
+        let mut entry = k;
+        entry.push(b'=');
+        entry.extend_from_slice(&v);
+        envp.push(CString::new(entry).ok()?);
+    }
+    let cwd = if cwd.is_empty() { None } else { Some(CString::new(cwd).ok()?) };
+    Some(PtyExecRequest {
+        program: CString::new(resolved).ok()?,
+        argv,
+        envp,
+        cwd,
+    })
+}
+
+/// Forks a session-leader child on `slave_fd` that execs `request` exactly
+/// (no shell fallback). The parent closes `slave_fd`. Returns the pid or -1.
+/// A child whose chdir or exec fails exits 127.
+#[cfg(unix)]
+pub fn fork_pty_exec(master_fd: i32, slave_fd: i32, request: &PtyExecRequest) -> libc::pid_t {
+    let argv: Vec<*const libc::c_char> = request
+        .argv
+        .iter()
+        .map(|a| a.as_ptr())
+        .chain(std::iter::once(std::ptr::null()))
+        .collect();
+    let envp: Vec<*const libc::c_char> = request
+        .envp
+        .iter()
+        .map(|e| e.as_ptr())
+        .chain(std::iter::once(std::ptr::null()))
+        .collect();
+    unsafe {
+        libc::fflush(std::ptr::null_mut());
+        let pid = libc::fork();
+        if pid < 0 {
+            return -1;
+        }
+        if pid == 0 {
+            if libc::setsid() < 0 {
+                libc::_exit(1);
+            }
+            libc::ioctl(slave_fd, libc::TIOCSCTTY as _, 0 as libc::c_int);
+            libc::dup2(slave_fd, libc::STDIN_FILENO);
+            libc::dup2(slave_fd, libc::STDOUT_FILENO);
+            libc::dup2(slave_fd, libc::STDERR_FILENO);
+            for std_fd in 0..=libc::STDERR_FILENO {
+                libc::fcntl(std_fd, libc::F_SETFD, 0);
+            }
+            if slave_fd > libc::STDERR_FILENO {
+                libc::close(slave_fd);
+            }
+            libc::close(master_fd);
+            libc::signal(libc::SIGINT, libc::SIG_DFL);
+            libc::signal(libc::SIGTERM, libc::SIG_DFL);
+            libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+            libc::signal(libc::SIGHUP, libc::SIG_DFL);
+            if let Some(cwd) = &request.cwd {
+                if libc::chdir(cwd.as_ptr()) != 0 {
+                    libc::_exit(127);
+                }
+            }
+            libc::execve(request.program.as_ptr(), argv.as_ptr(), envp.as_ptr());
+            libc::_exit(127);
+        }
+        libc::close(slave_fd);
+        pid
     }
 }
 
@@ -352,9 +598,30 @@ mod pty_process {
             if let Ok(mut table) = CHILD_TABLE.lock() {
                 table.insert(master_fd, super::PtyChildRecord::new(pid));
             }
+            super::note_pty_spawn(master_fd, pid);
 
             pid as i64
         }
+    }
+
+    /// Structured exec on `master_fd` (see `super::fork_pty_exec`).
+    pub(super) fn spawn_exec(master_fd: i32, request: &super::PtyExecRequest) -> i64 {
+        let slave_fd = match SLAVE_TABLE.lock().ok().and_then(|table| table.get(&master_fd).copied()) {
+            Some(fd) => fd,
+            None => return -1,
+        };
+        let pid = super::fork_pty_exec(master_fd, slave_fd, request);
+        if pid < 0 {
+            return -1;
+        }
+        if let Ok(mut table) = SLAVE_TABLE.lock() {
+            table.remove(&master_fd);
+        }
+        if let Ok(mut table) = CHILD_TABLE.lock() {
+            table.insert(master_fd, super::PtyChildRecord::new(pid));
+        }
+        super::note_pty_spawn(master_fd, pid);
+        pid as i64
     }
 
     pub(super) fn is_running(master_fd: i64) -> bool {
@@ -424,6 +691,7 @@ mod pty_process {
     /// Drops the fd's records and returns the still-unreaped child, if any, so
     /// the caller can reap it after closing the master.
     pub(super) fn forget(master_fd: i64) -> Option<super::PtyChildRecord> {
+        super::forget_pty_spawn(master_fd as i32);
         let child = CHILD_TABLE
             .lock()
             .ok()
@@ -1046,6 +1314,98 @@ pub extern "C" fn rt_pty_hangup(handle: i64) -> bool {
     }
 }
 
+#[cfg(unix)]
+unsafe fn runtime_text_array(array: RuntimeValue) -> Option<Vec<String>> {
+    let len = super::collections::rt_array_len(array);
+    if len < 0 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(len as usize);
+    for index in 0..len {
+        out.push(runtime_value_to_string(super::collections::rt_array_get(array, index))?);
+    }
+    Some(out)
+}
+
+/// `rt_pty_spawn_exec_v1(handle, program, args, cwd, env) -> pid | -1`.
+/// Literal exec on an opened, unspawned PTY: no shell, argv after argv[0],
+/// `cwd` "" inherits, `env` entries `+NAME=VALUE` / `-NAME` change a copy of
+/// the parent environment. Unsupported (-1) off Unix.
+#[no_mangle]
+pub unsafe extern "C" fn rt_pty_spawn_exec_v1(
+    master_fd: i32,
+    program: RuntimeValue,
+    args: RuntimeValue,
+    cwd: RuntimeValue,
+    env: RuntimeValue,
+) -> i64 {
+    #[cfg(unix)]
+    {
+        let (Some(program), Some(args), Some(cwd), Some(env)) = (
+            runtime_value_to_string(program),
+            runtime_text_array(args),
+            runtime_value_to_string(cwd),
+            runtime_text_array(env),
+        ) else {
+            return -1;
+        };
+        match pty_exec_request(&program, &args, &cwd, &env) {
+            Some(request) => pty_process::spawn_exec(master_fd, &request),
+            None => -1,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (master_fd, program, args, cwd, env);
+        -1
+    }
+}
+
+/// `rt_pty_write_bytes_v1(handle, bytes: [u8]) -> accepted | -1`: literal
+/// octets, nonblocking (0 = terminal queue full). -1 off Unix.
+#[no_mangle]
+pub extern "C" fn rt_pty_write_bytes_v1(handle: i64, data: RuntimeValue) -> i64 {
+    #[cfg(unix)]
+    {
+        let len = super::collections::rt_array_len(data);
+        if len < 0 || handle < 0 || handle > i32::MAX as i64 {
+            return -1;
+        }
+        let mut bytes = Vec::with_capacity(len as usize);
+        for index in 0..len {
+            let value = super::collections::rt_array_get(data, index).as_int();
+            if !(0..=255).contains(&value) {
+                return -1;
+            }
+            bytes.push(value as u8);
+        }
+        pty_write_bytes_some(handle as i32, &bytes)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (handle, data);
+        -1
+    }
+}
+
+/// `rt_pty_exit_code_v1(handle) -> code`: exit code, 128+signal, -1 still
+/// running, -2 no child or no status (always -2 off Unix).
+#[no_mangle]
+pub extern "C" fn rt_pty_exit_code_v1(handle: i64) -> i64 {
+    #[cfg(unix)]
+    {
+        if handle < 0 || handle > i32::MAX as i64 {
+            return -2;
+        }
+        pty_exit_code(handle as i32)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = handle;
+        -2
+    }
+}
+
 /// Changes the viewport of the child attached to `handle`. False for an unknown
 /// handle, a dimension the platform cannot represent, or a refused native call.
 #[no_mangle]
@@ -1238,6 +1598,62 @@ mod tests {
             assert_eq!(rt_pty_spawn(-1, RuntimeValue::from_raw(0x1001)), -1);
         }
         assert!(!rt_pty_hangup(-1));
+        assert_eq!(rt_pty_exit_code_v1(-1), -2);
+        assert_eq!(rt_pty_write_bytes_v1(-1, RuntimeValue::NIL), -1);
+    }
+
+    /// Structured exec is literal: shell metacharacters stay one argv entry,
+    /// cwd and env changes reach the child, the parent env is untouched, raw
+    /// octets pass through, and the exit status survives the reap.
+    #[test]
+    #[cfg(unix)]
+    fn pty_exec_request_is_literal_and_reports_exit_status() {
+        std::env::set_var("SIMPLE_PTY_EXEC_TEST_REMOVE", "erase-me");
+        let args = vec![
+            "-c".to_string(),
+            "test \"$1\" = '&echo X' || exit 2; case $(pwd -P) in /tmp|/private/tmp) ;; *) exit 3;; esac; test \"$SET_ME\" = 'v 한' || exit 4; test -z \"${SIMPLE_PTY_EXEC_TEST_REMOVE+x}\" || exit 5; head -c 3 | od -An -tx1 | tr -d ' \\n' | grep -q 0080ff || exit 6; exit 7".to_string(),
+            "sh".to_string(),
+            "&echo X".to_string(),
+        ];
+        let env = vec!["+SET_ME=v 한".to_string(), "-SIMPLE_PTY_EXEC_TEST_REMOVE".to_string()];
+        let request = pty_exec_request("sh", &args, "/tmp", &env).expect("request");
+        let handle = pty_process::open(24, 80);
+        assert!(handle >= 0);
+        // Raw mode so the octets reach `head` unchanged.
+        unsafe {
+            let mut tio: libc::termios = std::mem::zeroed();
+            assert_eq!(libc::tcgetattr(handle, &mut tio), 0);
+            libc::cfmakeraw(&mut tio);
+            assert_eq!(libc::tcsetattr(handle, libc::TCSANOW, &tio), 0);
+        }
+        let pid = pty_process::spawn_exec(handle, &request);
+        assert!(pid > 0);
+        assert_eq!(pty_write_bytes_some(handle, &[0u8, 0x80, 0xff]), 3);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut code = -1;
+        while std::time::Instant::now() < deadline {
+            code = pty_exit_code(handle);
+            if code != -1 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(code, 7);
+        assert_eq!(std::env::var("SIMPLE_PTY_EXEC_TEST_REMOVE").as_deref(), Ok("erase-me"));
+        let _ = rt_pty_close(handle as i64);
+        assert_eq!(rt_pty_exit_code_v1(handle as i64), -2);
+        std::env::remove_var("SIMPLE_PTY_EXEC_TEST_REMOVE");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn pty_exec_request_rejects_invalid_fields() {
+        assert!(pty_exec_request("", &[], "", &[]).is_none());
+        assert!(pty_exec_request("/bin/sh", &["a\0b".to_string()], "", &[]).is_none());
+        assert!(pty_exec_request("/bin/sh", &[], "", &["+=x".to_string()]).is_none());
+        assert!(pty_exec_request("/bin/sh", &[], "", &["-A=B".to_string()]).is_none());
+        assert!(pty_exec_request("/bin/sh", &[], "", &["?A".to_string()]).is_none());
+        assert!(pty_exec_request("no-such-program-simple-pty", &[], "", &[]).is_none());
     }
 
     #[test]

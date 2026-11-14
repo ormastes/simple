@@ -9,6 +9,11 @@ extern fn rt_pty_close(handle: i64) -> bool
 extern fn rt_pty_is_running(handle: i64) -> bool
 extern fn rt_pty_resize(handle: i64, rows: i32, cols: i32) -> bool
 extern fn rt_pty_hangup(handle: i64) -> bool
+# Unix structured launch / literal bytes / exit status (Rust lanes; the C lane
+# and Windows refuse with -1 / -2). env entries: "+NAME=VALUE" or "-NAME".
+extern fn rt_pty_spawn_exec_v1(handle: i32, program: text, args: [text], cwd: text, env: [text]) -> i64
+extern fn rt_pty_write_bytes_v1(handle: i64, data: [u8]) -> i64
+extern fn rt_pty_exit_code_v1(handle: i64) -> i64
 
 # HOST-OS DETECTOR CONSOLIDATION (2026-09-14): use the single canonical
 # rt_platform_name wrapper (std.sffi.platform), not a locally re-declared
@@ -18,23 +23,73 @@ use std.sffi.platform.{platform_name_raw}
 use std.sys.pty_input_codec.{pty_input_prefix}
 export use std.sys.pty_launch.{PtyLaunchV1, PtyLaunchModeV1, PtyEnvironmentChangeV1}
 
-# This legacy runtime ABI cannot carry argv, cwd or environment changes.
-# Refuse explicitly; never erase fields or synthesize a shell prefix.
+fn _pty_unix_host() -> bool:
+    not platform_name_raw().lower().contains("windows")
+
+fn _pty_env_entries(changes: [PtyEnvironmentChangeV1]) -> Result<[text], text>:
+    var entries: [text] = []
+    for change in changes:
+        match change:
+            case PtyEnvironmentChangeV1.Set(name, value):
+                if name == "" or name.contains("=") or name.contains("\0") or value.contains("\0"):
+                    return Err("invalid PTY environment assignment")
+                entries.push("+" + name + "=" + value)
+            case PtyEnvironmentChangeV1.Remove(name):
+                if name == "" or name.contains("=") or name.contains("\0"):
+                    return Err("invalid PTY environment removal")
+                entries.push("-" + name)
+    Ok(entries)
+
+# Unix structured launch: literal execve of Exec(executable, argv) with argv
+# after argv[0], optional cwd and environment changes applied to a copy of the
+# parent environment. Shell(command) is the SOSIX default shell's `-c`, the
+# POSIX meaning of a shell launch. Never a shell prefix around an Exec.
+# The portable Windows ABI cannot carry these fields and refuses explicitly.
 pub fn spawn_configured_v1(handle: i32, launch: PtyLaunchV1) -> Result<i64, text>:
-    Err("structured PTY launch unavailable in this runtime composition")
+    if handle < 0: return Err("invalid pty handle")
+    if not _pty_unix_host():
+        return Err("structured PTY launch unavailable in this runtime composition")
+    var program = ""
+    var args: [text] = []
+    match launch.mode:
+        case PtyLaunchModeV1.Exec(executable, argv):
+            program = executable
+            args = argv
+        case PtyLaunchModeV1.Shell(command):
+            program = platform_default_shell()
+            args = ["-c", command]
+    if program == "" or program.contains("\0"): return Err("invalid PTY executable")
+    for arg in args:
+        if arg.contains("\0"): return Err("PTY argument contains embedded NUL")
+    var directory = ""
+    if val cwd = launch.cwd:
+        if cwd == "" or cwd.contains("\0"): return Err("invalid PTY working directory")
+        directory = cwd
+    val entries = _pty_env_entries(launch.environment)?
+    val pid = rt_pty_spawn_exec_v1(handle, program, args, directory, entries)
+    if pid <= 0: return Err("structured PTY launch failed")
+    Ok(pid)
 
-# Startup effect contract, not a polling API. The selected native provider may
-# allocate/close one real PTY. Server admission stores its single observation.
-# This legacy ABI cannot represent structured launch, regardless of basic PTY.
+# Startup effect contract, not a polling API: one real PTY is opened and
+# closed. Success is availability, not proof a later spawn works.
 pub fn configured_launch_probe_v1() -> bool:
-    false
+    if not _pty_unix_host(): return false
+    val handle = open(1, 1)
+    if handle < 0: return false
+    close(handle)
 
-# The legacy UTF8-prefix/text ABI cannot preserve arbitrary channel octets.
+# Unix writes raw octets to the PTY master; the portable Windows ABI is the
+# UTF8-prefix/text path and cannot preserve arbitrary channel octets.
 pub fn literal_bytes_supported_v1() -> bool:
-    false
+    _pty_unix_host()
 
 pub fn write_literal_some_v1(handle: i32, data: [u8]) -> Result<i64, text>:
-    Err("literal PTY bytes unsupported in this runtime composition")
+    if handle < 0: return Err("invalid pty handle")
+    if not _pty_unix_host():
+        return Err("literal PTY bytes unsupported in this runtime composition")
+    val accepted = rt_pty_write_bytes_v1(handle as i64, data)
+    if accepted < 0: return Err("literal PTY write failed")
+    Ok(accepted)
 
 pub fn open(rows: i32, cols: i32) -> i32:
     if rows <= 0 or cols <= 0:
@@ -42,7 +97,13 @@ pub fn open(rows: i32, cols: i32) -> i32:
     rt_pty_open(rows, cols)
 
 pub fn exit_code(handle: i32) -> Result<i64, text>:
-    Err("PTY exit status unavailable in this runtime composition")
+    if handle < 0: return Err("invalid pty handle")
+    if not _pty_unix_host():
+        return Err("PTY exit status unavailable in this runtime composition")
+    val code = rt_pty_exit_code_v1(handle as i64)
+    if code == -1: return Err("PTY child still running")
+    if code < 0: return Err("PTY has no child exit status")
+    Ok(code)
 
 pub fn spawn(handle: i32, program: text) -> i64:
     if handle < 0 or program == "":

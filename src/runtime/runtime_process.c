@@ -4456,6 +4456,28 @@ bool rt_pty_hangup(int64_t handle) {
     return false;
 }
 
+/* C lane of the structured-launch / literal-byte / exit-status PTY family.
+ * Same scope as rt_pty_hangup above: the Rust lane spawns on the slave it
+ * recorded at rt_pty_open and owns the child/exit tables these answer from.
+ * This lane spawns no pty child and owns no such tables, so it refuses
+ * honestly (-1 spawn/write, -2 "no child") instead of exec'ing or writing on
+ * a handle it cannot resolve. std.sys.pty surfaces these as Err. */
+int64_t rt_pty_spawn_exec_v1(int32_t handle, const char* program, SplArray* args,
+                             const char* cwd, SplArray* env) {
+    (void)handle; (void)program; (void)args; (void)cwd; (void)env;
+    return -1;
+}
+
+int64_t rt_pty_write_bytes_v1(int64_t handle, SplArray* data) {
+    (void)handle; (void)data;
+    return -1;
+}
+
+int64_t rt_pty_exit_code_v1(int64_t handle) {
+    (void)handle;
+    return -2;
+}
+
 #include "runtime_piped_byte_endpoint_v1_impl.h"
 int64_t rt_process_validate_byte_endpoint_v1(int64_t generation,const char* binding,int64_t binding_bytes) {
     return byte_endpoint_validate_impl_v1(generation,binding,binding_bytes);

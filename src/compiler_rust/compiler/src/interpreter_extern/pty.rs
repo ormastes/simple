@@ -39,6 +39,91 @@ pub fn rt_pty_write(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Bool(pty_write_impl(handle, data.as_bytes())))
 }
 
+fn value_text_array(value: Option<&Value>) -> Option<Vec<String>> {
+    match value? {
+        Value::Array(items) => items
+            .iter()
+            .map(|item| match item {
+                Value::Str(text) => Some(text.as_str().to_string()),
+                _ => None,
+            })
+            .collect(),
+        _ => None,
+    }
+}
+
+/// `rt_pty_spawn_exec_v1(handle: i32, program: text, args: [text], cwd: text, env: [text]) -> i64`
+///
+/// Literal structured exec (no shell); same contract as the compiled lane's
+/// `simple_runtime::value::pty::rt_pty_spawn_exec_v1`. -1 off Unix.
+pub fn rt_pty_spawn_exec_v1(args: &[Value]) -> Result<Value, CompileError> {
+    let master_fd = args.first().and_then(|v| v.as_int().ok()).unwrap_or(-1) as i32;
+    let fields = (
+        match args.get(1) {
+            Some(Value::Str(text)) => Some(text.as_str().to_string()),
+            _ => None,
+        },
+        value_text_array(args.get(2)),
+        match args.get(3) {
+            Some(Value::Str(text)) => Some(text.as_str().to_string()),
+            _ => None,
+        },
+        value_text_array(args.get(4)),
+    );
+    let (Some(program), Some(argv), Some(cwd), Some(env)) = fields else {
+        return Ok(Value::Int(-1));
+    };
+    Ok(Value::Int(pty_spawn_exec_impl(master_fd, &program, &argv, &cwd, &env)))
+}
+
+/// `rt_pty_write_bytes_v1(handle: i64, data: [u8]) -> i64` — accepted count, 0 when full, -1 failure.
+pub fn rt_pty_write_bytes_v1(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = args.first().and_then(|v| v.as_int().ok()).unwrap_or(-1);
+    let bytes: Option<Vec<u8>> = match args.get(1) {
+        Some(Value::Array(items)) => items
+            .iter()
+            .map(|item| item.as_int().ok().filter(|b| (0..=255).contains(b)).map(|b| b as u8))
+            .collect(),
+        _ => None,
+    };
+    let Some(bytes) = bytes else {
+        return Ok(Value::Int(-1));
+    };
+    if handle < 0 || handle > i32::MAX as i64 {
+        return Ok(Value::Int(-1));
+    }
+    Ok(Value::Int(pty_write_bytes_impl(handle as i32, &bytes)))
+}
+
+/// `rt_pty_exit_code_v1(handle: i64) -> i64` — code, 128+signal, -1 running, -2 none.
+pub fn rt_pty_exit_code_v1(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = args.first().and_then(|v| v.as_int().ok()).unwrap_or(-1);
+    Ok(Value::Int(simple_runtime::value::pty::rt_pty_exit_code_v1(handle)))
+}
+
+#[cfg(unix)]
+fn pty_spawn_exec_impl(master_fd: i32, program: &str, argv: &[String], cwd: &str, env: &[String]) -> i64 {
+    match simple_runtime::value::pty::pty_exec_request(program, argv, cwd, env) {
+        Some(request) => unix_impl::pty_spawn_exec(master_fd, &request),
+        None => -1,
+    }
+}
+
+#[cfg(not(unix))]
+fn pty_spawn_exec_impl(_master_fd: i32, _program: &str, _argv: &[String], _cwd: &str, _env: &[String]) -> i64 {
+    -1
+}
+
+#[cfg(unix)]
+fn pty_write_bytes_impl(handle: i32, data: &[u8]) -> i64 {
+    simple_runtime::value::pty::pty_write_bytes_some(handle, data)
+}
+
+#[cfg(not(unix))]
+fn pty_write_bytes_impl(_handle: i32, _data: &[u8]) -> i64 {
+    -1
+}
+
 fn value_text(value: &Value) -> String {
     match value {
         Value::Str(text) => text.as_str().to_string(),
@@ -239,9 +324,32 @@ mod unix_impl {
             if let Ok(mut table) = CHILD_TABLE.lock() {
                 table.insert(master_fd, PtyChildRecord::new(pid));
             }
+            simple_runtime::value::pty::note_pty_spawn(master_fd, pid);
 
             pid as i64
         }
+    }
+
+    /// Structured literal exec (shared with the compiled lane:
+    /// `simple_runtime::value::pty::fork_pty_exec`), recorded in this lane's
+    /// child table so close/is_running/hangup own it.
+    pub(super) fn pty_spawn_exec(master_fd: i32, request: &simple_runtime::value::pty::PtyExecRequest) -> i64 {
+        let slave_fd = match SLAVE_TABLE.lock().ok().and_then(|t| t.get(&master_fd).copied()) {
+            Some(fd) => fd,
+            None => return -1,
+        };
+        let pid = simple_runtime::value::pty::fork_pty_exec(master_fd, slave_fd, request);
+        if pid < 0 {
+            return -1;
+        }
+        if let Ok(mut table) = SLAVE_TABLE.lock() {
+            table.remove(&master_fd);
+        }
+        if let Ok(mut table) = CHILD_TABLE.lock() {
+            table.insert(master_fd, PtyChildRecord::new(pid));
+        }
+        simple_runtime::value::pty::note_pty_spawn(master_fd, pid);
+        pid as i64
     }
 
     pub(super) fn pty_write(fd: i32, data: &[u8]) -> bool {
@@ -268,6 +376,7 @@ mod unix_impl {
 
     pub(super) fn pty_close(fd: i32) -> bool {
         simple_runtime::value::pty::forget_pty_utf8(fd as i64);
+        simple_runtime::value::pty::forget_pty_spawn(fd);
         if let Ok(mut table) = SLAVE_TABLE.lock() {
             if let Some(slave) = table.remove(&fd) {
                 unsafe {

@@ -50,8 +50,11 @@ synchronous owners unchanged — `sosix_file_read`/`sosix_file_write`,
 `sosix_getpid`, the `RetainedPrivateCredentialV1` family,
 `FileLockReleaseStateV2`, `HostHelperSettlementAckV1`, and (a seventh drift
 found while fixing, `api.spl:62`) `ContainerPrimaryAttachSessionV1` — and adds
-a synchronous `sosix_env_set` with the async facade's C-string admission (no
-NUL, key nonempty without `=`). `api.spl`, `server.spl`, `smux_remote.spl`
+a synchronous `sosix_env_set` with the NUL / key rules of the async facade's
+C-string admission (no NUL, key nonempty without `=`); it does not repeat the
+async facade's UTF-8 admission or environment-provider check. Boundary note:
+`ContainerPrimaryAttachSessionV1` is the first async-tier re-export inside
+`nogc_sync_mut/sosix/` (owner may prefer a sync home for that type). `api.spl`, `server.spl`, `smux_remote.spl`
 import only `std.sosix.host`. Spec unchanged.
 
 Before: `smux_sosix_boundary_spec` 2/3. After: 3/3; regression lanes
