@@ -487,6 +487,11 @@ static int64_t slang_model_load_locked(int64_t n_gpu_layers) {
     return 0;
 }
 
+/* Offload evidence: 1 when this llama.cpp build can place layers on a GPU
+ * device, and 1 when the resident model was loaded with layers requested there. */
+int64_t slang_ggml_gpu_offload_supported(void) { return llama_supports_gpu_offload() ? 1 : 0; }
+int64_t slang_ggml_model_offloaded(void) { return g_model_offloaded ? 1 : 0; }
+
 int64_t slang_ggml_model_load(int64_t n_gpu_layers) {
     SLANG_LOCK();
     int64_t result = slang_model_load_locked(n_gpu_layers);
