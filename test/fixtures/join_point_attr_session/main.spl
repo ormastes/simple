@@ -1,0 +1,48 @@
+# AUTHORED / UNRUN. Real core-C session teardown, not a simulated allocator.
+use compiler.frontend.join_point_attr_registry.*
+use std.nogc_sync_mut.sffi.transient.{rt_session_heap_begin, rt_session_heap_end,
+    transient_scope_begin, transient_scope_pause, transient_scope_end, transient_session_heap_id_v1}
+
+fn main() -> i32:
+    assert(transient_session_heap_id_v1() == 0u32)
+    var first: u32 = 0u32
+    unsafe(capabilities: [ffi]):
+        first = rt_session_heap_begin()
+    assert(first != 0u32)
+    val old = join_point_attr_begin_epoch_v2()
+    assert(old > 0)
+    join_point_attr_record("same.spl", "f", ["old"])
+    assert(join_point_attr_epoch_matches_v2("same.spl", "f", old))
+    var ended = false
+    unsafe(capabilities: [ffi]):
+        ended = rt_session_heap_end(first)
+    if not ended: panic("first native session teardown refused")
+    join_point_attr_reset_after_session_end_v3()
+    assert(join_point_attr_names_of("same.spl", "f").len() == 0)
+    assert(not join_point_attr_epoch_matches_v2("same.spl", "f", old))
+    var second: u32 = 0u32
+    unsafe(capabilities: [ffi]):
+        second = rt_session_heap_begin()
+    assert(second != 0u32 and second != first)
+    val fresh = join_point_attr_begin_epoch_v2()
+    assert(fresh > old)
+    assert(join_point_attr_names_of("same.spl", "f").len() == 0)
+    join_point_attr_record("same.spl", "f", ["new"])
+    assert(join_point_attr_names_of("same.spl", "f") == ["new"])
+    assert(not join_point_attr_epoch_matches_v2("same.spl", "f", old))
+    assert(join_point_attr_epoch_matches_v2("same.spl", "f", fresh))
+    assert(transient_scope_begin())
+    val active_refused = join_point_attr_begin_epoch_v2() == 0
+    val paused = transient_scope_pause()
+    val paused_refused = join_point_attr_begin_epoch_v2() == 0
+    val closed = transient_scope_end()
+    assert(active_refused and paused and paused_refused and closed)
+    val after_scope = join_point_attr_begin_epoch_v2()
+    assert(after_scope > fresh)
+    var second_ended = false
+    unsafe(capabilities: [ffi]):
+        second_ended = rt_session_heap_end(second)
+    if not second_ended: panic("second native session teardown refused")
+    join_point_attr_reset_after_session_end_v3()
+    assert(join_point_attr_names_of("same.spl", "f").len() == 0)
+    0
