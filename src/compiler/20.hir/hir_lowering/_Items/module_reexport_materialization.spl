@@ -1777,7 +1777,11 @@ impl HirLowering:
                         method_type = self.declared_imported_owner_callable_type(
                             method, imported_mod.module_name, local_owner, owner_type_params)
                     hir_phase_profile_add(HIR_PROF_RIS_SIGTYPE, sig_started)
-                    self.symbols.define(symbol_name, kind, method_type, import_span, Visibility.Public, false, local_owner_defining_module)
+                    val imported_method = self.symbols.define(symbol_name, kind, method_type, import_span, Visibility.Public, false, local_owner_defining_module)
+                    if method_type == nil and owner_dependencies_valid and owner_type_params.len() == 0:
+                        val declared_params = self.declared_imported_param_types_v1(
+                            method, imported_mod.module_name, Some(local_owner))
+                        self.symbols.mark_declared_callable_params_v1(imported_method, declared_params)
             # IMPLROWCACHE: `contains_key` IS the `has_trait_` test -- the index
             # stores a row only for impls that carry a trait -- so a trait whose
             # name projects to "" is still distinguished from "no trait".
@@ -1825,7 +1829,20 @@ impl HirLowering:
                                 val method_type = self.declared_imported_surface_callable_type(
                                     trait_method, trait_module.module_name,
                                     Some(local_owner))
-                                self.symbols.define(symbol_name, kind, method_type, import_span, Visibility.Public, false, local_owner_defining_module)
+                                val imported_method = self.symbols.define(symbol_name, kind, method_type, import_span, Visibility.Public, false, local_owner_defining_module)
+                                var owner_param_count = -1
+                                val owner_composite = module_surface_name_position(imported_mod.composite_names, imported_name)
+                                val owner_enum = module_surface_name_position(imported_mod.enum_names, imported_name)
+                                if owner_composite >= 0:
+                                    owner_param_count = imported_mod.composite_values[owner_composite].type_params.len()
+                                elif owner_enum >= 0:
+                                    owner_param_count = imported_mod.enum_values[owner_enum].type_params.len()
+                                # Trait binders require admitted substitution too;
+                                # a nongeneric implementor does not prove it.
+                                if method_type == nil and owner_param_count == 0 and trait_.type_params.len() == 0:
+                                    val declared_params = self.declared_imported_param_types_v1(
+                                        trait_method, trait_module.module_name, Some(local_owner))
+                                    self.symbols.mark_declared_callable_params_v1(imported_method, declared_params)
 
 # Probe budget for the retained impl-methods Dict carrier. Capped so a stage-3
 # run records the shape of the first rows without flooding the transcript.
