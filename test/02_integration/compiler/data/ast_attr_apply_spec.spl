@@ -1,0 +1,114 @@
+"""
+## Purpose and audience
+Applies node attributes to the REAL compiler AST pool behind an off-by-default
+switch. `expr_extra` (0.4% populated, so a hash candidate) may live in the owner
+array (off), a dense column store or a sparse hash store, selected by the config
+text `extra=<direct|column|sparse_hash>` (env SIMPLE_NODE_ATTR, read once per
+`expr_reset`). Readers are compiler authors and storage owners.
+Category: Infrastructure.
+## Operator workflow
+bin/simple test test/02_integration/compiler/data/ast_attr_apply_spec.spl
+## Compatibility and limitations
+Interpreter lane. Default off builds no store.
+## Verification guidance and troubleshooting
+A fingerprint mismatch between off and on means the store changed a parse result.
+"""
+# @req NODEATTR-APPLY-01 NODEATTR-APPLY-02 NODEATTR-APPLY-03
+# @manual_section: Node attributes applied to the real AST
+
+use std.spec.*
+use std.nogc_sync_mut.io.file_ops.{file_read}
+use std.nogc_sync_mut.io_runtime.{env_set}
+use compiler.core.types.{reset_all_pools}
+use compiler.core.parser.{parser_init_with_path}
+use compiler.core.parser_decls.{parse_module_body}
+use compiler.core.ast.{expr_attr_apply_config, expr_attr_extra_placement, expr_attr_extra_present, expr_count, expr_get_tag, expr_get_span, expr_get_int, expr_get_left, expr_get_right, expr_get_extra, expr_get_args, expr_get_str}
+
+val FIXED_INPUT = "src/compiler/00.common/data/data_schema_resolver.spl"
+# Fingerprint of the parse of FIXED_INPUT on the code BEFORE this change.
+val BASELINE_FINGERPRINT = 93698475
+
+fn fingerprint() -> i64:
+    var h = 7
+    val n = expr_count()
+    var i = 0
+    while i < n:
+        h = (h * 31 + expr_get_tag(i)) % 1000000007
+        h = (h * 31 + expr_get_span(i)) % 1000000007
+        h = (h * 31 + expr_get_int(i)) % 1000000007
+        h = (h * 31 + expr_get_left(i)) % 1000000007
+        h = (h * 31 + expr_get_right(i)) % 1000000007
+        h = (h * 31 + expr_get_extra(i) + 2) % 1000000007
+        h = (h * 31 + expr_get_args(i).len()) % 1000000007
+        h = (h * 31 + expr_get_str(i).len()) % 1000000007
+        i = i + 1
+    h
+
+fn parse_fixed():
+    reset_all_pools()
+    parser_init_with_path(file_read(FIXED_INPUT), FIXED_INPUT)
+    parse_module_body()
+
+fn extras() -> [i64]:
+    var out: [i64] = []
+    var i = 0
+    while i < expr_count():
+        out.push(expr_get_extra(i))
+        i = i + 1
+    out
+
+fn nondefault(values: [i64]) -> i64:
+    var n = 0
+    for v in values:
+        if v != -1:
+            n = n + 1
+    n
+
+fn parse_with(config: text) -> i64:
+    env_set("SIMPLE_NODE_ATTR", config)
+    parse_fixed()
+    fingerprint()
+
+describe "node attributes applied to the real AST":
+    it "keeps the parse identical to the pre-change fingerprint when the switch is off":
+        # @req NODEATTR-APPLY-01
+        step("Parse the fixed input with no attribute config")
+        expect(parse_with("")).to_equal(BASELINE_FINGERPRINT)
+        expect(expr_attr_extra_placement()).to_equal("direct")
+        expect(expr_attr_extra_present()).to_equal(-1)
+
+    it "answers identical values and presence for extra on the sparse hash":
+        # @req NODEATTR-APPLY-02
+        val off_fp = parse_with("")
+        val off_extras = extras()
+        expect(parse_with("extra=sparse_hash")).to_equal(off_fp)
+        expect(expr_attr_extra_placement()).to_equal("sparse_hash")
+        expect(extras()).to_equal(off_extras)
+        expect(expr_attr_extra_present()).to_equal(nondefault(off_extras))
+
+    it "answers identical values and presence for extra on the column":
+        val off_fp = parse_with("")
+        val off_extras = extras()
+        expect(parse_with("extra=column")).to_equal(off_fp)
+        expect(expr_attr_extra_placement()).to_equal("column")
+        expect(extras()).to_equal(off_extras)
+        expect(expr_attr_extra_present()).to_equal(nondefault(off_extras))
+
+    it "switches extra between array, hash and column by config alone with parity both ways":
+        # @req NODEATTR-APPLY-03
+        val a = parse_with("extra=column")
+        val ea = extras()
+        val b = parse_with("extra=sparse_hash")
+        val eb = extras()
+        val c = parse_with("extra=direct")
+        val ec = extras()
+        val d = parse_with("extra=column")
+        expect(a).to_equal(b)
+        expect(b).to_equal(c)
+        expect(c).to_equal(d)
+        expect(ea).to_equal(eb)
+        expect(eb).to_equal(ec)
+
+    it "rejects an unknown placement token and keeps the switch off":
+        expect(expr_attr_apply_config("extra=bogus").is_err()).to_equal(true)
+        expect(expr_attr_extra_placement()).to_equal("direct")

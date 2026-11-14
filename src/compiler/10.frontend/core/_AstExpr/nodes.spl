@@ -13,6 +13,7 @@ use std.nogc_sync_mut.io.process_ops.{eprint}
 use std.nogc_sync_mut.io_runtime.{env_get_nullable, env_set, env_remove_process}
 use compiler.core.types.{int_to_str}
 use compiler.frontend.core.flat_pool_codec.*
+use compiler.common.data.attribute_schema_v1.{AttributeStoreV1, AttrPlacementV1, attr_placement_from_token_v1, attr_store_detached_v1}
 use compiler.frontend.core.flat_pool_codec.{FlatPoolReader}  # explicit: a glob is not an import-origin for surface projection
 
 # ===== Expression Kind Tags =====
@@ -380,7 +381,92 @@ pub fn expr_owner_float(idx: i64) -> text: expr_f_val[idx]
 pub fn expr_owner_str(idx: i64) -> text: expr_s_val[idx]
 pub fn expr_owner_left(idx: i64) -> i64: expr_left[idx]
 pub fn expr_owner_right(idx: i64) -> i64: expr_right[idx]
-pub fn expr_owner_extra(idx: i64) -> i64: expr_extra[idx]
+# Node attribute `extra` (AttrId compiler.ast#extra): 0.4% populated in real
+# parses, so it may live in a column or sparse-hash store instead of the owner
+# array. Default OFF (mode 0): no store is built and accessors take the array path.
+# Config text `extra=<direct|column|sparse_hash>` (env SIMPLE_NODE_ATTR) is resolved
+# once per expr_reset into the mode slot (an array slot, so the value persists
+# across interpreter calls).
+var expr_attr_extra_mode: [i64] = [0]
+var expr_attr_extra_stores: [AttributeStoreV1<i64>] = []
+
+pub fn expr_attr_apply_config(spec: text) -> Result<bool, text>:
+    var mode = 0
+    for part in spec.split(","):
+        val kv = part.trim().split("=")
+        if kv.len() == 2 and kv[0].trim() == "extra":
+            match attr_placement_from_token_v1(kv[1].trim()):
+                case Ok(p):
+                    match p:
+                        case Embedded: mode = 0
+                        case Column: mode = 1
+                        case SparseHash: mode = 2
+                case Err(e):
+                    expr_attr_extra_mode[0] = 0
+                    expr_attr_extra_stores.clear()
+                    return Err(e)
+    expr_attr_extra_mode[0] = mode
+    expr_attr_extra_stores.clear()
+    if mode != 0:
+        val placement = if mode == 1: AttrPlacementV1.Column else: AttrPlacementV1.SparseHash
+        match attr_store_detached_v1("extra", placement):
+            case Ok(store): expr_attr_extra_stores.push(store)
+            case Err(e): return Err(e)
+    Ok(true)
+
+pub fn expr_attr_extra_placement() -> text:
+    if expr_attr_extra_mode[0] == 1: return "column"
+    if expr_attr_extra_mode[0] == 2: return "sparse_hash"
+    "direct"
+
+# Entries held by the extra store; -1 when the switch is off (no store exists).
+pub fn expr_attr_extra_present() -> i64:
+    if expr_attr_extra_mode[0] == 0: return -1
+    expr_attr_extra_stores[0].len()
+
+fn expr_extra_get(idx: i64) -> i64:
+    if expr_attr_extra_mode[0] == 0:
+        return expr_extra[idx]
+    match expr_attr_extra_stores[0].get(idx):
+        case Ok(v): v
+        case Err(_): -1
+
+fn expr_extra_put(idx: i64, value: i64):
+    if expr_attr_extra_mode[0] == 0:
+        expr_extra[idx] = value
+        return
+    if value == -1:
+        expr_attr_extra_stores[0].retire(idx)
+    else:
+        expr_attr_extra_stores[0].set(idx, value)
+
+# Dense array view for the pool snapshot codec.
+fn expr_extra_dense() -> [i64]:
+    if expr_attr_extra_mode[0] == 0:
+        return expr_extra
+    var out: [i64] = []
+    var i = 0
+    val n = expr_count_slot[0]
+    while i < n:
+        out.push(expr_extra_get(i))
+        i = i + 1
+    out
+
+fn expr_extra_load(values: [i64]):
+    if expr_attr_extra_mode[0] == 0:
+        expr_extra = values
+        return
+    expr_attr_apply_config(expr_attr_extra_placement_spec())
+    var i = 0
+    while i < values.len():
+        if values[i] != -1:
+            expr_attr_extra_stores[0].set(i, values[i])
+        i = i + 1
+
+fn expr_attr_extra_placement_spec() -> text:
+    "extra=" + expr_attr_extra_placement()
+
+pub fn expr_owner_extra(idx: i64) -> i64: expr_extra_get(idx)
 pub fn expr_owner_args(idx: i64) -> [i64]: expr_args[idx]
 pub fn expr_owner_arg_names(idx: i64) -> [text]: expr_arg_names[idx]
 fn expr_owner_asm_kinds(idx: i64) -> [text]: expr_asm_kinds[idx]
@@ -399,7 +485,7 @@ fn expr_owner_float_set(idx: i64, value: text):
 fn expr_owner_str_set(idx: i64, value: text):
     expr_s_val[idx] = value
 fn expr_owner_extra_set(idx: i64, value: i64):
-    expr_extra[idx] = value
+    expr_extra_put(idx, value)
 
 fn expr_owner_left_set(idx: i64, value: i64):
     expr_left[idx] = value
@@ -551,6 +637,7 @@ pub fn expr_reset():
     expr_left.clear()
     expr_right.clear()
     expr_extra.clear()
+    expr_attr_apply_config(env_get_nullable("SIMPLE_NODE_ATTR") ?? "")
     expr_args.clear()
     expr_call_type_args.clear()
     expr_arg_names.clear()
@@ -582,7 +669,8 @@ fn expr_alloc(tag: i64, span_id: i64) -> i64:
     expr_s_val.push("")
     expr_left.push(-1)
     expr_right.push(-1)
-    expr_extra.push(-1)
+    if expr_attr_extra_mode[0] == 0:
+        expr_extra.push(-1)
     expr_args.push(expr_empty_i64)
     expr_call_type_args.push(expr_empty_i64)
     expr_arg_names.push(expr_empty_text)
@@ -745,7 +833,7 @@ pub fn expr_if_expr(cond: i64, then_branch: i64, else_branch: i64, span_id: i64)
     expr_i64_set(idx, "LEFT", cond)
     expr_right[idx] = then_branch
     expr_i64_set(idx, "RIGHT", then_branch)
-    expr_extra[idx] = else_branch
+    expr_extra_put(idx, else_branch)
     expr_i64_set(idx, "EXTRA", else_branch)
     idx
 
@@ -997,7 +1085,7 @@ pub fn expr_slice(base: i64, start_expr: i64, end_expr: i64, span_id: i64) -> i6
     expr_i64_set(idx, "LEFT", base)
     expr_right[idx] = start_expr
     expr_i64_set(idx, "RIGHT", start_expr)
-    expr_extra[idx] = end_expr
+    expr_extra_put(idx, end_expr)
     expr_i64_set(idx, "EXTRA", end_expr)
     idx
 
@@ -1046,7 +1134,7 @@ fn expr_list_comp(iter_var: text, iterable: i64, body: i64, cond: i64, span_id: 
     expr_i64_set(idx, "LEFT", iterable)
     expr_right[idx] = body
     expr_i64_set(idx, "RIGHT", body)
-    expr_extra[idx] = cond
+    expr_extra_put(idx, cond)
     expr_i64_set(idx, "EXTRA", cond)
     idx
 
@@ -1057,7 +1145,7 @@ fn expr_dict_comp(iter_var: text, iterable: i64, key_body: i64, val_body: i64, c
     expr_text_set(idx, "S", iter_var)
     expr_left[idx] = iterable
     expr_i64_set(idx, "LEFT", iterable)
-    expr_extra[idx] = cond
+    expr_extra_put(idx, cond)
     expr_i64_set(idx, "EXTRA", cond)
     expr_args[idx] = [key_body, val_body]
     expr_list_set(idx, "ARGS", [key_body, val_body])
@@ -1124,7 +1212,7 @@ pub fn flat_expr_pools_dump() -> text:
     parts = parts.push(flat_pool_enc_text(expr_empty_text))
     flat_pool_type_trace_clear_next_v1()
     parts = parts.push(flat_pool_enc_i64(expr_env_mirror_high_slot))
-    parts = parts.push(flat_pool_enc_i64(expr_extra))
+    parts = parts.push(flat_pool_enc_i64(expr_extra_dense()))
     parts = parts.push(flat_pool_enc_text(expr_f_val))
     parts = parts.push(flat_pool_enc_i64(expr_i_val))
     parts = parts.push(flat_pool_enc_i64(expr_left))
@@ -1163,7 +1251,7 @@ pub fn flat_expr_pools_restore(r: FlatPoolReader) -> bool:
     expr_empty_i64 = flat_pool_dec_i64_into(expr_empty_i64, r)
     expr_empty_text = flat_pool_dec_text_into(expr_empty_text, r)
     expr_env_mirror_high_slot = flat_pool_dec_i64_into(expr_env_mirror_high_slot, r)
-    expr_extra = flat_pool_dec_i64_into(expr_extra, r)
+    expr_extra_load(flat_pool_dec_i64_into(expr_extra, r))
     expr_f_val = flat_pool_dec_text_into(expr_f_val, r)
     expr_i_val = flat_pool_dec_i64_into(expr_i_val, r)
     expr_left = flat_pool_dec_i64_into(expr_left, r)
@@ -1229,7 +1317,7 @@ pub fn expr_store_state_take() -> ExprStoreState:
         expr_s_val: expr_s_val,
         expr_left: expr_left,
         expr_right: expr_right,
-        expr_extra: expr_extra,
+        expr_extra: expr_extra_dense(),
         expr_args: expr_args,
         expr_call_type_args: expr_call_type_args,
         expr_arg_names: expr_arg_names,
@@ -1290,7 +1378,7 @@ pub fn expr_store_state_install(s: ExprStoreState):
     expr_s_val = s.expr_s_val
     expr_left = s.expr_left
     expr_right = s.expr_right
-    expr_extra = s.expr_extra
+    expr_extra_load(s.expr_extra)
     expr_args = s.expr_args
     expr_call_type_args = s.expr_call_type_args
     expr_arg_names = s.expr_arg_names
