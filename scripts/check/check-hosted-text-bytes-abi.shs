@@ -1,0 +1,23 @@
+#!/bin/sh
+# Linux hosted twin ABI regression against real providers in both link orders.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+case $(uname -s) in Linux) ;; *) echo "UNAVAILABLE: Linux ELF pair fixture"; exit 77 ;; esac
+work=$(mktemp -d "${TMPDIR:-/tmp}/simple-text-bytes.XXXXXX")
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+cc=${CC:-cc}
+for unit in runtime runtime_native runtime_memtrack; do
+    "$cc" -O1 -ffunction-sections -fdata-sections -DSIMPLE_RUNTIME_MEMORY_OWNER=1 \
+        -I "$root/src/runtime" -c "$root/src/runtime/$unit.c" -o "$work/$unit.o"
+done
+"$cc" -O1 -I "$root/src/runtime" -c "$root/scripts/check/fixtures/hosted-text-bytes-abi.c" -o "$work/test.o"
+for order in hosted-first native-first; do
+    if [ "$order" = hosted-first ]; then
+        set -- "$work/runtime.o" "$work/runtime_native.o"
+    else
+        set -- "$work/runtime_native.o" "$work/runtime.o"
+    fi
+    "$cc" -fuse-ld=lld -Wl,--gc-sections -Wl,--allow-multiple-definition \
+        "$work/test.o" "$@" "$work/runtime_memtrack.o" -lpthread -ldl -lm -o "$work/$order"
+    "$work/$order"
+done

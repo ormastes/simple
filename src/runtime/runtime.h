@@ -585,6 +585,8 @@ int64_t rt_host_memory_headroom_bytes_v1(void);
 int64_t rt_host_disk_headroom_bytes_v1(int64_t path);
 const char* rt_interp_cstr(int64_t value);
 int64_t  rt_string_bytes(int64_t string);
+/* Tagged text -> canonical byte-array handle; length preserves embedded NUL. */
+int64_t  rt_text_to_bytes(int64_t text_value);
 int64_t  rt_string_chars(int64_t string);
 int64_t  rt_string_builder_new(void);
 int64_t  rt_string_builder_push(int64_t handle, int64_t string);
