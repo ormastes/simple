@@ -1,0 +1,72 @@
+use std.spec.*
+use compiler.common.mir_target_context.{MirTargetContext, mir_target_context_from_explicit}
+use compiler.hir.target_hir.hir_snapshot.{hir_snapshot_id_new}
+use compiler.hir.target_hir.target_hir.{TargetHIR, target_hir_for_context, target_hir_target_id, target_hir_identity}
+use compiler.mir.mir_target_hir_select.{mir_target_hir_select_arm}
+use compiler.mir.mir_target_hir_simd.{mir_target_hir_simd_class}
+
+fn context_fixture() -> MirTargetContext:
+    mir_target_context_from_explicit("x86_64-unknown-linux-gnu", "llvm", 23).unwrap()
+
+fn view_fixture(target: MirTargetContext) -> TargetHIR:
+    target_hir_for_context(hir_snapshot_id_new("app.main", "body", 1).unwrap(), target, "function:main").unwrap()
+
+describe "TargetHIR complete target-context identity":
+    it "separates profiles that select different guard arms":
+        val debug = view_fixture(context_fixture())
+        var release_context = context_fixture()
+        release_context.build_profile = "release"
+        val release = view_fixture(release_context)
+        expect(mir_target_hir_select_arm(debug, debug.snapshot, ["debug", "release"], []).unwrap()).to_equal(0)
+        expect(mir_target_hir_select_arm(release, release.snapshot, ["debug", "release"], []).unwrap()).to_equal(1)
+        expect(target_hir_identity(debug) == target_hir_identity(release)).to_be(false)
+
+    it "separates CPU tiers that choose different SIMD classes":
+        val baseline = view_fixture(context_fixture())
+        var wide_context = context_fixture()
+        wide_context.cpu_tier = "x86-64-v4"
+        val wide = view_fixture(wide_context)
+        expect(mir_target_hir_simd_class(baseline, baseline.snapshot).unwrap()).to_equal("x86_sse")
+        expect(mir_target_hir_simd_class(wide, wide.snapshot).unwrap()).to_equal("x86_avx512")
+        expect(target_hir_identity(baseline) == target_hir_identity(wide)).to_be(false)
+
+    it "binds each context field and retains deterministic equality":
+        val original = target_hir_target_id(view_fixture(context_fixture()))
+        expect(target_hir_target_id(view_fixture(context_fixture()))).to_equal(original)
+        for changed_field in 0..13:
+            var target = context_fixture()
+            match changed_field:
+                case 0: target.arch = "x86"
+                case 1: target.os = "windows"
+                case 2: target.abi = "musl"
+                case 3: target.backend = "c"
+                case 4: target.version = 24
+                case 5: target.build_profile = "release"
+                case 6: target.subarch = "distinct-subarch"
+                case 7: target.cpu_tier = "x86-64-v3"
+                case 8: target.collection_policy = "different-policy"
+                case 9: target.collection_memory_budget_bytes = 1024
+                case 10: target.collection_opt_level = 2
+                case 11: target.collection_trace_active = true
+                case _: target.collection_target_admitted = false
+            expect(target_hir_target_id(view_fixture(target)) == original).to_be(false)
+
+    it "frames delimiter-bearing context fields without boundary collisions":
+        var left_context = context_fixture()
+        left_context.build_profile = "debug|tier:wide"
+        left_context.cpu_tier = "baseline"
+        var right_context = context_fixture()
+        right_context.build_profile = "debug"
+        right_context.cpu_tier = "tier:wide|baseline"
+        expect(target_hir_target_id(view_fixture(left_context)) == target_hir_target_id(view_fixture(right_context))).to_be(false)
+        var left_arch = context_fixture()
+        left_arch.arch = "x86_64-linux"
+        left_arch.os = "gnu"
+        var right_arch = context_fixture()
+        right_arch.os = "linux-gnu"
+        expect(target_hir_target_id(view_fixture(left_arch)) == target_hir_target_id(view_fixture(right_arch))).to_be(false)
+
+    it "invalidates old target ids even for the default context":
+        val current = target_hir_target_id(view_fixture(context_fixture()))
+        expect(current).to_start_with("target-hir-context-v2|")
+        expect(current == "x86_64-linux-gnu/llvm@23").to_be(false)
