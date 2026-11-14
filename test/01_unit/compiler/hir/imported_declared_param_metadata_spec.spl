@@ -14,12 +14,13 @@ use compiler.hir.hir_codec.{hir_module_encode, hir_module_decode}
 use compiler.mir.mir.*
 use compiler.mir._MirLoweringExpr.method_calls_literals.*
 use compiler.mir._MirLoweringExpr.expr_dispatch.*
+use compiler.mir._MirLowering.module_lowering.*
 
 fn declared_params_fixture() -> HirModule:
     val logger = Logger(level: 0)
     val kinds = "pub enum PrimitiveType:\n    F32\n    F64\n"
     val provider = "use params.kinds.\{PrimitiveType\}\npub class Builder:\n    handle: i64\n\nimpl Builder:\n    me emit_const_float(dest: text, ty: PrimitiveType, value: f64):\n        pass\n\npub fn emit_free(ty: PrimitiveType, value: f64):\n    pass\npub fn empty():\n    pass\npub fn unknown(value):\n    pass\n"
-    val consumer = "use params.owner.\{Builder, emit_free, empty, unknown\}\nstruct PrimitiveType:\n    decoy: i64\nfn main() -> i64:\n    0\n"
+    val consumer = "use params.owner.\{Builder, emit_free, empty, unknown\}\nstruct PrimitiveType:\n    decoy: i64\nfn main() -> i64:\n    empty()\n    0\n"
     var modules: Dict<text, ParserModule> = {}
     modules["params.kinds"] = parse_full_frontend(kinds, "params.kinds", "params.kinds", logger)
     modules["params.owner"] = parse_full_frontend(provider, "params.owner", "params.owner", logger)
@@ -33,12 +34,14 @@ fn declared_params_fixture() -> HirModule:
 
 fn declared_params_generic_trait_fixture() -> HirModule:
     val logger = Logger(level: 0)
-    val provider = "pub trait Emit<T>:\n    fn emit(value: T):\n        pass\n    fn marker() -> i64\n\npub class Concrete:\n    handle: i64\n\nimpl Emit<i64> for Concrete:\n    fn marker() -> i64:\n        0\n"
+    val traits = "pub trait Emit<T>:\n    fn emit(value: T):\n        pass\n    fn marker() -> i64\n"
+    val provider = "use params.traitdefs.\{Emit\}\npub class Concrete:\n    handle: i64\n\nimpl Emit<i64> for Concrete:\n    fn marker() -> i64:\n        0\n"
     # Ambient same-name T must not impersonate the trait's declaration binder.
     val consumer = "struct T:\n    decoy: i64\nuse params.traits.\{Concrete\}\nfn main() -> i64:\n    0\n"
     var modules: Dict<text, ParserModule> = {}
+    modules["params.traitdefs"] = parse_full_frontend(traits, "params.traitdefs", "params.traitdefs", logger)
     modules["params.traits"] = parse_full_frontend(provider, "params.traits", "params.traits", logger)
-    val surfaces = module_surfaces_from_modules(modules, [SourceFile(path: "params/traits.spl", content: provider, module_name: "params.traits")])
+    val surfaces = module_surfaces_from_modules(modules, [SourceFile(path: "params/traits.spl", content: provider, module_name: "params.traits"), SourceFile(path: "params/traitdefs.spl", content: traits, module_name: "params.traitdefs")])
     expect(surfaces.is_ok()).to_equal(true)
     var lowering = hirlowering_for_module("params.consumer", surfaces.unwrap())
     val hir = lowering.lower_module(parse_full_frontend(consumer, "params.consumer", "params.consumer", logger))
@@ -132,3 +135,27 @@ describe "imported callable declared parameter metadata":
         val symbol: HirSymbol = hir.symbols.get_symbol(id).unwrap()
         expect(symbol.type_ == nil).to_equal(true)
         expect(symbol.declared_param_types_v1 == nil).to_equal(true)
+
+    it "retains known-empty proof in the actual emitted direct-call signature":
+        val hir = declared_params_fixture()
+        var lowering = MirLowering.new(hir.symbols)
+        val mir = lowering.lower_module(hir)
+        expect(lowering.errors.len()).to_equal(0)
+        var checked = false
+        for function in mir.functions.values():
+            for block in function.blocks:
+                for instruction in block.instructions:
+                    match instruction.kind:
+                        case Call(_, callee, _):
+                            match callee.kind:
+                                case Const(Str(name), type_):
+                                    if name.ends_with(".empty") or name == "empty":
+                                        match type_.kind:
+                                            case FuncPtr(signature):
+                                                expect(signature.declared_params_known).to_equal(true)
+                                                expect(signature.declared_params.len()).to_equal(0)
+                                                checked = true
+                                            case _: expect(false).to_equal(true)
+                                case _: ()
+                        case _: ()
+        expect(checked).to_equal(true)
