@@ -30,8 +30,9 @@ binding mutation version. Same-ID rebinds need distinct versions; testing only
 symbol ID is insufficient. Per-spelling versions must retain tombstones across
 unbind/rebind. Scope now carries those versions at the four actual mutation
 owners; all independent scope-copy owners clone the version dictionary. Same-ID
-rebinds advance it, no-op bind-if-free and unrelated spellings do not. Codec
-union regeneration and route-map lifecycle integration are still pending.
+rebinds advance it, no-op bind-if-free and unrelated spellings do not. The actual union codec now preserves these versions under the distinct
+v21/canonical v11 schema. Requester route-map lifecycle integration is still
+pending; reset versions alone cannot invalidate a retained permission map.
 Internal
 materialization flags are not evidence of a user import: both explicit imports
 and dependency loading set `registering_import_symbols`.

@@ -8194,6 +8194,22 @@ fn _hc_enc_hir_symbol_body(w: HirCodecWriter, node: HirSymbol):
     w.put_text(node.declaration_source_path_v1)
     w.put_text(node.declaration_projection_key_v1)
     w.put_text(node.declaration_owner_v1)
+    if val o8 = node.declared_param_types_v1:
+        w.put_i64(1)
+        w.put_i64(if o8 == nil: 0 else: o8.len())
+        if not w.ok: return
+        for e9 in (o8 ?? []):
+            if not w.charge_work(1): return
+            if not w.ok: return
+            val enc_node_v10: HirType? = e9
+            if not enc_node_v10.?:
+                w.put_i64(0)
+            else:
+                w.put_i64(1)
+                if not w.ok: return
+                hc_enc_hir_type(w, enc_node_v10!)
+    else:
+        w.put_i64(0)
 
 fn hc_dec_hir_symbol(r: FlatPoolReader) -> HirSymbol:
     var f_id: SymbolId = SymbolId(id: -1)
@@ -8248,7 +8264,19 @@ fn hc_dec_hir_symbol(r: FlatPoolReader) -> HirSymbol:
     val f_declaration_projection_key_v1 = if raw10 == "\\N": "" else: flat_pool_unescape(raw10)
     val raw11 = r.next()
     val f_declaration_owner_v1 = if raw11 == "\\N": "" else: flat_pool_unescape(raw11)
-    HirSymbol(id: f_id, name: f_name, kind: f_kind, type_: f_type_, scope: f_scope, span: f_span, visibility: f_visibility, is_public: f_is_public, is_mutable: f_is_mutable, defining_module: f_defining_module, builtin_method_tag: f_builtin_method_tag, generic_param_count: f_generic_param_count, declaration_modifier_v1: f_declaration_modifier_v1, declaration_source_path_v1: f_declaration_source_path_v1, declaration_projection_key_v1: f_declaration_projection_key_v1, declaration_owner_v1: f_declaration_owner_v1)
+    var f_declared_param_types_v1: [HirType]? = nil
+    if r.next_i64() == 1:
+        var ov12: [HirType] = []
+        val n13 = r.next_len()
+        var i13 = 0
+        while i13 < n13:
+            var ev13: HirType? = nil
+            if r.next_i64() == 1:
+                ev13 = hc_dec_hir_type(r)
+            ov12.push(ev13)
+            i13 = i13 + 1
+        f_declared_param_types_v1 = Some(ov12)
+    HirSymbol(id: f_id, name: f_name, kind: f_kind, type_: f_type_, scope: f_scope, span: f_span, visibility: f_visibility, is_public: f_is_public, is_mutable: f_is_mutable, defining_module: f_defining_module, builtin_method_tag: f_builtin_method_tag, generic_param_count: f_generic_param_count, declaration_modifier_v1: f_declaration_modifier_v1, declaration_source_path_v1: f_declaration_source_path_v1, declaration_projection_key_v1: f_declaration_projection_key_v1, declaration_owner_v1: f_declaration_owner_v1, declared_param_types_v1: f_declared_param_types_v1)
 
 fn hc_enc_hir_trait(w: HirCodecWriter, node: HirTrait):
     if not w.enter_node(): return
@@ -9975,6 +10003,19 @@ fn _hc_enc_scope_body(w: HirCodecWriter, node: Scope):
         if not w.charge_work(1): return
         w.put_text(dk4)
         w.put_i64(node.symbols[dk4])
+    if not w.ok: return
+    var ks5: [text] = []
+    if node.binding_versions_v1 != nil:
+        if not w.account_key_snapshot(node.binding_versions_v1.len()): return
+        ks5 = node.binding_versions_v1.keys()
+    if not w.account_text_key_order(ks5): return
+    ks5 = hc_order_text_keys_v1(ks5)
+    w.put_i64(ks5.len())
+    if not w.ok: return
+    for dk5 in ks5:
+        if not w.charge_work(1): return
+        w.put_text(dk5)
+        w.put_i64(node.binding_versions_v1[dk5])
 
 fn hc_dec_scope(r: FlatPoolReader) -> Scope:
     var f_id: ScopeId = hc_placeholder_scope_id()
@@ -10003,7 +10044,21 @@ fn hc_dec_scope(r: FlatPoolReader) -> Scope:
             else:
                 f_symbols[dk1] = dv1
         i1 = i1 + 1
-    Scope(id: f_id, parent: f_parent, kind: f_kind, symbols: f_symbols)
+    var f_binding_versions_v1: Dict<text, i64> = {}
+    val n4 = r.next_len()
+    var i4 = 0
+    while i4 < n4:
+        val raw5 = r.next()
+        val dk4 = if raw5 == "\\N": nil else: flat_pool_unescape(raw5)
+        val value_pos4 = r.pos
+        val dv4: i64 = r.next_i64()
+        if r.ok:
+            if r.lines[value_pos4] != "{dv4}":
+                r.reject_malformed("integer_dictionary_value")
+            else:
+                f_binding_versions_v1[dk4] = dv4
+        i4 = i4 + 1
+    Scope(id: f_id, parent: f_parent, kind: f_kind, symbols: f_symbols, binding_versions_v1: f_binding_versions_v1)
 
 fn hc_enc_scope_id(w: HirCodecWriter, node: ScopeId):
     if not w.enter_node(): return

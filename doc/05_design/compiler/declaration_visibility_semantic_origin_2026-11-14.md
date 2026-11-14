@@ -89,7 +89,7 @@ visibility; full integration must separate them and never promote explicit pri.
 
 ## Codec generation and qualification
 
-HIR schema v20/canonical v10 rejects v19 records lacking source intent.
+The initial origin schema v20/canonical v10 rejected v19 records lacking source intent.
 Generated codec bytes came from the admitted native codec generator SHA256
 `2b78217c925aa434aa1c5c4c0846ecdffccbbbac05f395f500ee24073749319c`.
 Its generator source directory is unchanged from ecb2d505 to release73a1585.
@@ -107,3 +107,28 @@ schema or visibility behavior. No exhausted parser/LSP native lane was rerun.
 Authored regressions cover duplicate typed targets, enum synthetic nodes,
 omitted-vs-pri semantic identity, origin overwrite/alias protection, and real
 frontend/HIR/cache roundtrip with old-header rejection. They remain unexecuted.
+
+## Combined parameter and binding-version schema
+
+The feature explicitly stacks the SOURCE-reviewed, unlanded declared-parameter
+checkpoint `3f08e3cca3d4f14170f0aa9d5b661b0202fe2368` from draft #9247. This does
+not qualify or land that separate bug. Conflict resolution retains the four
+origin fields and independent parameter metadata in HirSymbol, rename and
+verification copies. Scope's per-spelling version dictionary participates in
+its actual codec and independently owned scope copies.
+
+The new headers are
+`spl-hircodec-v21-aspect-owner-declaration-intent-params-binding-versions` and
+`spl-hircodec-canonical-v11-aspect-owner-declaration-intent-params-binding-versions`.
+All predecessor layouts remain misses. Actual generator source is unchanged
+from ecb2d505 through this combined checkpoint. With the nine exact a6000e5
+schema inputs, one baseline execution matched the checked-in codec byte for
+byte: 99 declarations, 2.070 seconds, 568082432 bytes peak tree RSS. One union
+execution generated 99 declarations in 2.037 seconds, 564056064 bytes peak,
+SHA256 `82654905a6fd46aedf5433825a42a0ceac32641fb3e8e0d844f290652cc1332a`.
+Both stayed within 1 GiB/30 seconds; every borrowed input and the previous output
+were restored byte for byte in finally cleanup and checked afterward. Receipts,
+input snapshots and the exact unmodified generated output remain under
+`build/visibility-codec-union/`. The checked-in generated file is that output.
+This is generation/source evidence only: codec execution and all authored
+compiler/requester tests remain UNRUN. No exhausted native campaign resumed.
