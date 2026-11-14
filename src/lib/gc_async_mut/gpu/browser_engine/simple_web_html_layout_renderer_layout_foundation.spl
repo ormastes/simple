@@ -17,6 +17,7 @@ use std.common.encoding.utf8.{text_codepoints}
 use std.nogc_sync_mut.text_layout.font_provider.{browser_font_family_category}
 use std.nogc_sync_mut.text_layout.font_renderer.{resolve_font_metrics_with_language}
 use std.nogc_sync_mut.text_layout.font_provider.{browser_font_family_for_style}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{svg_view_box_milli}
 
 pub val SIMPLE_WEB_SUMMARY_MARKER_INLINE_WIDTH: i32 = 16
 
@@ -904,29 +905,67 @@ fn replaced_default_is_content_size(tag: text) -> bool:
     """
     tag != "audio" and replaced_default_box_w(tag) > 0
 
-fn replaced_auto_box_w(node: HNode, st: Style) -> i32:
-    """BORDER-BOX width of a replaced element whose CSS width is auto: the
-    `width` attribute, else the UA default (plus the element's own horizontal
-    padding and border when that default is a content size). Shared by the
-    final box and the inline pen prediction so they cannot disagree."""
+fn replaced_specified_box_h(st: Style) -> i32:
+    """BORDER-BOX height CSS gave a replaced element (the `height` attribute
+    arrives as CSS through `presentational_attr_decls`), or 0 when the height
+    is auto -- which includes a percentage the caller could not resolve."""
+    if st.height_px <= 0:
+        return 0
+    if st.border_box:
+        return st.height_px
+    st.height_px + st.pad_t + st.pad_b + st.border_t + st.border_b
+
+fn replaced_auto_box_w(node: HNode, st: Style, available_w: i32) -> i32:
+    """BORDER-BOX width of a replaced element whose CSS width is auto. Shared
+    by the final box and the inline pen prediction so they cannot disagree.
+
+    An `<svg>` with a valid viewBox has a ratio and no size (Chrome 159): a
+    specified height derives the width on the CONTENT box (`viewBox="0 0 24
+    24" style="height:1em"` is 16x16), and with the height auto too the width
+    is the available width (`viewBox="0 0 200 50"` in 900 px is 900x225).
+    Everything else: the `width` attribute, else the UA default, plus the
+    element's own horizontal padding and border when that default is a
+    content size.
+    """
     val attr_w = parse_int(attr_value(node.attrs_raw, "width"))
-    if attr_w > 0:
+    if attr_w > 0 and not attr_value(node.attrs_raw, "width").trim().ends_with("%"):
         return attr_w
+    val inset_x = st.pad_l + st.pad_r + st.border_l + st.border_r
+    if node.tag == "svg":
+        val view_box = svg_view_box_milli(node.attrs_raw)
+        if view_box.len() == 4:
+            val box_h = replaced_specified_box_h(st)
+            if box_h > 0:
+                var content_h = box_h - st.pad_t - st.pad_b - st.border_t - st.border_b
+                if content_h < 0:
+                    content_h = 0
+                return ((content_h.to_i64() * view_box[2] + view_box[3] / 2) / view_box[3]).to_i32() + inset_x
+            if available_w > 0:
+                return available_w
     val default_w = replaced_default_box_w(node.tag)
     if replaced_default_is_content_size(node.tag):
-        return default_w + st.pad_l + st.pad_r + st.border_l + st.border_r
+        return default_w + inset_x
     default_w
 
-fn replaced_auto_box_h(node: HNode, st: Style) -> i32:
-    """BORDER-BOX height of a replaced element whose CSS height is auto; the
-    height twin of `replaced_auto_box_w`. There is no ratio scaling: Chrome
-    159 gives `<video width=120>` 120x150 and `<video height=50>` 300x50."""
+fn replaced_auto_box_h(node: HNode, st: Style, box_w: i32) -> i32:
+    """BORDER-BOX height of a replaced element whose CSS height is auto, given
+    its used border-box width; the height twin of `replaced_auto_box_w`. An
+    `<svg>` with a valid viewBox follows its ratio from the content width;
+    nothing else scales (Chrome 159: `<video width=120>` is 120x150)."""
     val attr_h = parse_int(attr_value(node.attrs_raw, "height"))
-    if attr_h > 0:
+    if attr_h > 0 and not attr_value(node.attrs_raw, "height").trim().ends_with("%"):
         return attr_h
+    val inset_y = st.pad_t + st.pad_b + st.border_t + st.border_b
+    if node.tag == "svg":
+        val view_box = svg_view_box_milli(node.attrs_raw)
+        if view_box.len() == 4:
+            var content_w = box_w - st.pad_l - st.pad_r - st.border_l - st.border_r
+            if content_w < 0:
+                content_w = 0
+            return ((content_w.to_i64() * view_box[3] + view_box[2] / 2) / view_box[2]).to_i32() + inset_y
     val default_h = replaced_default_box_h(node.tag)
     if replaced_default_is_content_size(node.tag):
-        return default_h + st.pad_t + st.pad_b + st.border_t + st.border_b
+        return default_h + inset_y
     default_h
 
 

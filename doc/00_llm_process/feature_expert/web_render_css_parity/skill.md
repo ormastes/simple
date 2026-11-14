@@ -1138,3 +1138,22 @@ turns green in the same change, or the check FAILs as stale.
 - Measured: catalog `animation` 12.23% -> 7.36%; `forms-media` 6.38% unchanged;
   combo matrix unchanged (463 baselined ids, 0 new, 0 stale).
 - Residues: `doc/08_tracking/bug/web_replaced_media_residues_vs_chrome_159_2026-11-14.md`.
+
+## 2026-11-14 — svg viewBox / percentage / em sizing, self-closing foreign elements
+
+- A valid `viewBox` gives an `<svg>` a ratio and NO size: one specified axis
+  derives the other on the content box; with both auto the width is the
+  available width (`viewBox="0 0 200 50"` in 900 px -> 900x225). Owners:
+  `replaced_auto_box_w/h`, `svg_view_box_milli` (shared with the painter).
+- **Inline percentage trap:** `layout_with_style` receives the predicted pen
+  width for an inline child, so a percentage width must be resolved at the
+  inline-run site (`inline_media` in `layout_engine.spl`), not inside it.
+  A percentage height against an auto-height container computes to auto.
+- `width`/`height` in `em` went through `parse_int` (`height:1em` = 1 px);
+  they now use `_decl_font_relative_length_px` in BOTH declaration paths
+  (`decl_apply.spl` and the dispatch fast path in `declarations.spl`).
+- `html_tree_builder` honours the tokenizer's `self_closing` flag only in
+  svg/math foreign content (`_TreeStack.in_foreign_content`); `<div/>` stays
+  open, as in Chrome.
+- Still open: residues 6-10 in
+  `doc/08_tracking/bug/web_replaced_media_residues_vs_chrome_159_2026-11-14.md`.

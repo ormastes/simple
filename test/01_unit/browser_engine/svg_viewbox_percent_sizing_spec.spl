@@ -1,0 +1,140 @@
+"""
+## Purpose and audience
+Purpose: Pin the used size Chrome gives a replaced element whose size is NOT a
+plain pixel pair: an `<svg>` that takes its ratio from `viewBox`, a
+percentage width/height on svg/canvas/video, and an `em` width/height.
+Before this change a viewBox was ignored (300/150 defaults), a percentage
+axis collapsed to 1 px, and `height:1em` was read as `height:1px`.
+Audience: browser-engine layout maintainers.
+
+Chrome oracle (Chrome 159 headless shell, 900x760, `--dump-dom` of
+getBoundingClientRect; page `<!doctype html>`,
+`*{box-sizing:border-box}body{margin:0;font:16px/1.5 sans-serif}`, one parent
+`<div>` at the top of `<body>` with the style shown, no whitespace between
+siblings; VB is `viewBox="0 0 24 24"`):
+
+| parent style            | fixture                                         | x   | y   | w   | h   |
+|-------------------------|-------------------------------------------------|-----|-----|-----|-----|
+| (none)                  | row A `<svg VB style="height:1em">`             | 0   | 32  | 16  | 16  |
+| (none)                  | row A `<svg VB width=48>`                       | 16  | 0   | 48  | 48  |
+| (none)                  | row A `<svg VB height=48>`                      | 64  | 0   | 48  | 48  |
+| (none)                  | row A `<svg viewBox="0 0 200 50" style="width:100px">` | 112 | 23 | 100 | 25 |
+| (none)                  | row B `<svg viewBox="0 0 200 50">`              | 0   | 0   | 900 | 225 |
+| (none)                  | row C `<svg VB style="height:1em;border:2px solid red;padding:3px">` | 0 | 4 | 16 | 16 |
+| (none)                  | row C `<svg VB width=48 height=20>`             | 16  | 0   | 48  | 20  |
+| (none)                  | row C `<svg viewBox="0<TAB>0<LF>24 12" height=20>` | 64 | 0  | 40  | 20  |
+| (none)                  | row C `<svg viewBox="0 0 0 24" height=20>`      | 104 | 0   | 300 | 20  |
+| width:200px;height:100px| row D `<svg width="100%" height="100%">`        | 0   | 0   | 200 | 100 |
+| width:200px;height:100px| row E `<canvas style="width:100%;height:100%">` | 0   | 0   | 200 | 100 |
+| width:200px;height:100px| row F `<video style="width:50%;height:50%">`    | 0   | 0   | 100 | 50  |
+| width:200px             | row G `<svg width="100%" height="100%">`        | 0   | 0   | 200 | 150 |
+| width:400px;height:100px| row H `<svg width="50%">`                       | 0   | 0   | 200 | 150 |
+| width:400px;height:100px| row H `<svg style="height:50%">`                | 0   | 157 | 300 | 50  |
+| width:200px;height:100px| row I `<svg VB width="100%">`                   | 0   | 0   | 200 | 200 |
+| (none)                  | row J `<div style="height:2em;width:10em">`     | 0   | 0   | 160 | 32  |
+| (none)                  | row J `<div style="font-size:20px;height:1.5em">` | 0 | 32  | 900 | 30  |
+
+Rules the table pins:
+1. A valid viewBox (width and height > 0) gives the svg a ratio and NO size.
+   One specified axis derives the other on the CONTENT box (row C: height
+   16 px with 5 px border+padding per side is a 6x6 content box, 16x16
+   border box); with neither axis specified the width is the available width
+   (row B: 900) and the height follows. A zero-area viewBox is no viewBox.
+2. The viewBox numbers may be separated by any whitespace (tab, newline).
+3. A percentage width resolves against the container's content width, a
+   percentage height against its DEFINITE content height; with an auto-height
+   container the percentage height is `auto` (row G: 150).
+4. `em` lengths in `width`/`height` are the element's own font-size.
+
+Not asserted here: row H's second svg wraps in Chrome at y=157 (150 + 7 px
+strut descent) and at 156 here -- the strut residue already filed in
+doc/08_tracking/bug/web_replaced_media_residues_vs_chrome_159_2026-11-14.md --
+so only its size is asserted.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-REPLACED-005 — a replaced element resolves viewBox-ratio, percentage and em sizes like Chrome.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_foundation.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id
+}
+
+val VW: i32 = 900
+val VH: i32 = 760
+val HEAD: text = "<html><head><style>*{box-sizing:border-box}body{margin:0;font:16px/1.5 sans-serif}</style></head><body>"
+val VB: text = "viewBox=\"0 0 24 24\""
+val SIZED: text = "width:200px;height:100px"
+
+val ROW_A: text = "<svg id=\"a\" " + VB + " style=\"height:1em\"></svg><svg id=\"c\" " + VB + " width=\"48\"></svg><svg id=\"d\" " + VB + " height=\"48\"></svg><svg id=\"e\" viewBox=\"0 0 200 50\" style=\"width:100px\"></svg>"
+val ROW_B: text = "<svg id=\"b\" viewBox=\"0 0 200 50\"></svg>"
+val ROW_C: text = "<svg id=\"g\" " + VB + " style=\"height:1em;border:2px solid red;padding:3px\"></svg><svg id=\"h\" " + VB + " width=\"48\" height=\"20\"></svg><svg id=\"i\" viewBox=\"0\t0\n24 12\" height=\"20\"></svg><svg id=\"j\" viewBox=\"0 0 0 24\" height=\"20\"></svg>"
+val ROW_D: text = "<svg id=\"k\" width=\"100%\" height=\"100%\"></svg>"
+val ROW_E: text = "<canvas id=\"l\" style=\"width:100%;height:100%\"></canvas>"
+val ROW_F: text = "<video id=\"m\" style=\"width:50%;height:50%\"></video>"
+val ROW_H: text = "<svg id=\"o\" width=\"50%\"></svg><svg id=\"q\" style=\"height:50%\"></svg>"
+val ROW_I: text = "<svg id=\"r\" " + VB + " width=\"100%\"></svg>"
+val ROW_J: text = "<div id=\"s\" style=\"height:2em;width:10em\"></div><div id=\"t\" style=\"font-size:20px;height:1.5em\"></div>"
+
+fn probe(parent_style: text, inner: text, id: text, name: text) -> text:
+    simple_web_layout_debug_layout_by_id(
+        HEAD + "<div style=\"" + parent_style + "\">" + inner + "</div></body></html>", VW, VH, id, name)
+
+fn box_of(parent_style: text, inner: text, id: text) -> text:
+    probe(parent_style, inner, id, "x") + "," + probe(parent_style, inner, id, "y") + " " + probe(parent_style, inner, id, "w") + "x" + probe(parent_style, inner, id, "h")
+
+fn size_of(parent_style: text, inner: text, id: text) -> text:
+    probe(parent_style, inner, id, "w") + "x" + probe(parent_style, inner, id, "h")
+
+describe "a replaced element resolves viewBox, percentage and em sizes like Chrome":
+    it "AC-1: an svg with a viewBox and one specified axis takes the viewBox ratio":
+        step("Chrome: height:1em is 16x16; width=48 is 48x48; height=48 is 48x48; 200x50 viewBox at width:100px is 100x25")
+        expect(box_of("", ROW_A, "a")).to_equal("0,32 16x16")
+        expect(box_of("", ROW_A, "c")).to_equal("16,0 48x48")
+        expect(box_of("", ROW_A, "d")).to_equal("64,0 48x48")
+        expect(box_of("", ROW_A, "e")).to_equal("112,23 100x25")
+
+    it "AC-2: an svg with only a viewBox fills the available width":
+        step("Chrome: viewBox 200x50 in a 900 px container is 900x225")
+        expect(box_of("", ROW_B, "b")).to_equal("0,0 900x225")
+
+    it "AC-3: the ratio applies to the content box under border-box sizing":
+        step("Chrome: height 16 with 5 px border+padding per side is a 6x6 content box, 16x16 border box")
+        expect(box_of("", ROW_C, "g")).to_equal("0,4 16x16")
+
+    it "AC-4 (control): both axes specified ignore the viewBox ratio":
+        step("Chrome: width=48 height=20 stays 48x20")
+        expect(box_of("", ROW_C, "h")).to_equal("16,0 48x20")
+
+    it "AC-5: viewBox numbers separated by tab and newline still give the ratio":
+        step("Chrome: viewBox 24x12 at height=20 is 40x20")
+        expect(box_of("", ROW_C, "i")).to_equal("64,0 40x20")
+
+    it "AC-6 (control): a zero-area viewBox gives no ratio":
+        step("Chrome: viewBox=\"0 0 0 24\" height=20 is the 300 px default wide")
+        expect(box_of("", ROW_C, "j")).to_equal("104,0 300x20")
+
+    it "AC-7: percentage width and height resolve against a sized container":
+        step("Chrome: svg 100%/100% and canvas 100%/100% are 200x100; video 50%/50% is 100x50")
+        expect(box_of(SIZED, ROW_D, "k")).to_equal("0,0 200x100")
+        expect(box_of(SIZED, ROW_E, "l")).to_equal("0,0 200x100")
+        expect(box_of(SIZED, ROW_F, "m")).to_equal("0,0 100x50")
+
+    it "AC-8: a percentage height in an auto-height container is auto":
+        step("Chrome: svg 100%/100% in a width:200px container is 200x150")
+        expect(box_of("width:200px", ROW_D, "k")).to_equal("0,0 200x150")
+
+    it "AC-9: one percentage axis leaves the other at its default":
+        step("Chrome: width=50% of 400 is 200x150; height:50% of 100 is 300x50")
+        expect(box_of("width:400px;height:100px", ROW_H, "o")).to_equal("0,0 200x150")
+        expect(size_of("width:400px;height:100px", ROW_H, "q")).to_equal("300x50")
+
+    it "AC-10: a percentage width feeds the viewBox ratio":
+        step("Chrome: viewBox 24x24 at width=100% of 200 is 200x200")
+        expect(box_of(SIZED, ROW_I, "r")).to_equal("0,0 200x200")
+
+    it "AC-11: em widths and heights are the element's own font-size":
+        step("Chrome: height:2em;width:10em at 16 px is 160x32; height:1.5em at font-size:20px is 30")
+        expect(box_of("", ROW_J, "s")).to_equal("0,0 160x32")
+        expect(box_of("", ROW_J, "t")).to_equal("0,32 900x30")

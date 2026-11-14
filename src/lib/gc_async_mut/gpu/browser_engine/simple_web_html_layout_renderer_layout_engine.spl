@@ -279,12 +279,16 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
         # with the inline pen prediction below.
         if st.width_px == 0:
             out_bw[i] = constrained_outer_width(
-                node, st, replaced_auto_box_w(node, st)
+                node, st, replaced_auto_box_w(node, st, w)
             )
         val explicit_replaced_h = if legacy_widget_box or st.border_box: st.height_px else: st.height_px + st.pad_t + st.pad_b + border_y
         var replaced_h = explicit_replaced_h
-        if st.height_px == 0:
-            replaced_h = replaced_auto_box_h(node, st)
+        # A negative height is a percentage no caller could resolve (the
+        # containing block's height is auto): CSS 2.1 §10.5 computes it to
+        # `auto`. Chrome 159: `<svg height="100%">` in an auto-height div is
+        # 150 px tall.
+        if st.height_px <= 0:
+            replaced_h = replaced_auto_box_h(node, st, out_bw[i])
         replaced_h = constrained_outer_height(node, st, replaced_h)
         out_bh[i] = replaced_h
         return relative_layout_result(child_index, i, st, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, replaced_h)
@@ -1951,9 +1955,38 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
                 val inline_replaced = (
                     cst.display == "inline" and grid_item_is_replaced(nodes[c])
                 )
-                if inline_replaced and cst.width_px == 0:
+                # Percentages on a replaced MEDIA box resolve here, against
+                # this container: `layout_with_style` only receives the
+                # predicted pen width, so `width:100%` would otherwise be 100%
+                # of a 1 px prediction and a percentage height would stay an
+                # unresolved negative. Height first -- an svg's auto width may
+                # derive from it through the viewBox ratio. A percentage
+                # height against an auto-height container computes to auto
+                # (CSS 2.1 §10.5). Form controls in `grid_item_is_replaced`
+                # keep their own sizing path.
+                val inline_media = (
+                    inline_replaced and
+                    replaced_default_box_w(nodes[c].tag) > 0
+                )
+                if inline_media and cst.height_px < 0:
+                    resolved_inline_style = style_with_height(
+                        resolved_inline_style,
+                        if content_height_limit > 0: content_height_limit * (0 - cst.height_px) / 100 else: 0
+                    )
+                if inline_media and cst.width_px < 0:
+                    val media_percent_w = iw * (0 - cst.width_px) / 100
+                    resolved_inline_style = style_with_width(
+                        resolved_inline_style, media_percent_w
+                    )
+                    inline_w = css_outer_width(
+                        nodes[c], resolved_inline_style, media_percent_w
+                    )
+                elif inline_replaced and cst.width_px == 0:
                     val predicted_w = constrained_outer_width(
-                        nodes[c], cst, replaced_auto_box_w(nodes[c], cst)
+                        nodes[c], resolved_inline_style,
+                        replaced_auto_box_w(
+                            nodes[c], resolved_inline_style, iw
+                        )
                     )
                     if predicted_w > inline_w:
                         inline_w = predicted_w

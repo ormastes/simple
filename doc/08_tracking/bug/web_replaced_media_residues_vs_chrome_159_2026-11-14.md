@@ -83,3 +83,67 @@ below sit 1 px high per such line.
 
 Unblock: derive the strut ascent/descent from the resolved face metrics with
 Chrome's rounding instead of `style_line_h - strut_baseline_offset`.
+
+## Follow-up 2026-11-14 (review of PR #9101)
+
+Fixed and pinned by `test/01_unit/browser_engine/svg_viewbox_percent_sizing_spec.spl`
+and `test/01_unit/browser_engine/svg_foreign_content_paint_spec.spl`: the
+viewBox ratio on an auto axis, percentage width/height on svg/canvas/video,
+`em` width/height, self-closing elements in svg/math foreign content,
+`fill="currentColor"`, and a tab/newline-separated `viewBox`.
+
+Paint gaps found in that review and still open (Chrome 159 pixels, same page
+setup as above):
+
+### 6. `<rect>` percentage attributes
+
+`<svg width="40" height="40"><rect width="50%" height="50%" fill="#123456"/>`
+paints a 20x20 rect in Chrome (percentages of the viewport, or of the viewBox
+when there is one). `svg_number_milli` ignores the `%` suffix, so this renderer
+paints 50x50 user units, clipped to the 40x40 viewport. The same applies to
+`x`, `y`, `rx`, `ry`.
+
+Unblock: resolve `%` on x/width/rx against the viewBox (or viewport) width and
+on y/height/ry against its height in `_html_draw_ir_svg_shape_commands`.
+
+### 7. `fill` from a CSS rule, and `fill="url(...)"`
+
+`.g rect{fill:#00ffff}` with `<svg class="g"><rect width="20" height="20"/>`
+is cyan in Chrome and black here: the painter reads `fill` from the shape's
+`style` attribute and `fill` attribute only, because `Style` carries no `fill`
+field for the cascade to fill in. `fill="url(#gradient)"` (paint servers) is
+not supported either; `parse_color` returns 0 for it and nothing is painted,
+where Chrome paints the gradient or pattern.
+
+Unblock: a `fill` property in the cascade (`Style` field + `apply_decls`),
+read by the painter after the presentation attribute; paint servers need the
+gradient Draw IR command named in item 2.
+
+### 8. Nested `<svg>`
+
+`<svg width="40" height="40"><svg x="10" y="10" width="20" height="20"><rect
+width="100" height="100" fill="#654321"/></svg></svg>` paints the rect in the
+inner viewport only (Chrome: `#654321` at the centre, white at the outer
+svg's corners). The painter walks DIRECT `<rect>` children of the outermost
+svg, so the inner svg and its shapes are skipped and nothing is painted. `<g>`
+grouping is skipped the same way (item 1).
+
+Unblock: make the shape walk recursive with a viewport/transform stack, or
+land the resource channel of item 1 and delegate to the skia rasteriser.
+
+### 9. `em` lengths resolve against the font-size known when the declaration is applied
+
+`width`/`height` in `em` now use `_decl_font_relative_length_px`, like
+`min-width`/`max-width`. When one rule sets `height:2em` and a LATER-applied
+rule changes `font-size`, the height keeps the earlier font-size; Chrome
+resolves `em` against the final computed font-size.
+
+Unblock: store font-relative lengths unresolved and resolve them after the
+cascade.
+
+### 10. `foreignObject` and the foreign-content tag set
+
+The tree builder honours a self-closing start tag when the nearest open
+`svg`/`math` is reached before an open `foreignObject`. It does not implement
+the HTML "breakout" list (`<svg><div>` closing the svg) or the MathML text
+integration points.
