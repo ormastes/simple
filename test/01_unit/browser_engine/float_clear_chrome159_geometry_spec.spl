@@ -48,7 +48,8 @@ Traceability: REQ-BROWSER-ENGINE-FLOAT-CLEAR-CHROME159-001 — left/right floats
 # @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_engine.spl 1%
 use std.spec.*
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
-    simple_web_layout_debug_layout_by_id
+    simple_web_layout_debug_layout_by_id, HNode, LayoutResult, layout_selected,
+    parse_html, build_child_index, extract_css_vw, compute_styles
 }
 
 val VW: i32 = 900
@@ -64,6 +65,32 @@ fn field(inner: text, id: text, name: text) -> text:
 
 fn box(inner: text, id: text) -> text:
     field(inner, id, "x") + "," + field(inner, id, "y") + "," + field(inner, id, "w") + "," + field(inner, id, "h")
+
+fn contain_page(a_text: text) -> text:
+    "<div id=\"root\"><div id=\"c\" style=\"width:200px;height:80px\" contain=\"layout\"><div id=\"f\" style=\"float:left;width:60px;height:40px\"></div><div id=\"g\" style=\"float:left;width:60px;height:20px\"></div><div id=\"a\">" + a_text + "</div></div><div id=\"sibling\">s</div></div>"
+
+fn no_retained() -> LayoutResult:
+    LayoutResult(bx: [], by: [], bw: [], bh: [], wrap_starts: [], wrap_ends: [], intrinsic_widths: [], height: 0)
+
+fn node_structural_id(nodes: [HNode], target_id: text) -> i64:
+    var i = 0
+    while i < nodes.len():
+        if nodes[i].id_attr == target_id:
+            return (i + 1) as i64
+        i = i + 1
+    -1
+
+# Number of nodes whose box differs between two layouts (-1: different shape).
+fn boxes_differ(a: LayoutResult, b: LayoutResult) -> i32:
+    if a.bx.len() != b.bx.len():
+        return -1
+    var count = 0
+    var i = 0
+    while i < a.bx.len():
+        if a.bx[i] != b.bx[i] or a.by[i] != b.by[i] or a.bw[i] != b.bw[i] or a.bh[i] != b.bh[i]:
+            count = count + 1
+        i = i + 1
+    count
 
 describe "floats and clear match Chrome 159":
     it "AC-1: a block beside a left float keeps its own line height":
@@ -177,3 +204,22 @@ describe "floats and clear match Chrome 159":
         expect(field(page, "x", "x")).to_equal("60")
         expect(box(page, "b")).to_equal("0,24,400,24")
         expect(field(page, "y", "x")).to_equal("0")
+
+    it "AC-14: floats of a contain:layout subtree do not outlive a partial relayout":
+        step("layout_selected re-lays-out the boundary without layout(): two partial passes in a row must equal a full pass")
+        val before = contain_page("x")
+        val nodes_before = parse_html(before)
+        val index_before = build_child_index(nodes_before)
+        val styles_before = compute_styles(nodes_before, extract_css_vw(before, 400, false), index_before, false, true)
+        val retained = layout_selected(nodes_before, styles_before, index_before, [1], 400, 600, no_retained()).layout
+        val after = contain_page("y")
+        val nodes_after = parse_html(after)
+        val index_after = build_child_index(nodes_after)
+        val styles_after = compute_styles(nodes_after, extract_css_vw(after, 400, false), index_after, false, true)
+        val changed = node_structural_id(nodes_after, "a")
+        expect(changed > 0).to_equal(true)
+        val first = layout_selected(nodes_after, styles_after, index_after, [changed], 400, 600, retained)
+        val second = layout_selected(nodes_after, styles_after, index_after, [changed], 400, 600, first.layout)
+        val full = layout_selected(nodes_after, styles_after, index_after, [1], 400, 600, no_retained())
+        expect(second.fault).to_equal("")
+        expect(boxes_differ(second.layout, full.layout)).to_equal(0)

@@ -1378,3 +1378,24 @@ never cache an answer computed while exhausted) —
   items gives 141/141, Chrome 111.73/170.47), because `flex-basis: 0` and
   `auto` share the `flex_basis_px == 0` encoding.
 - Spec: `test/01_unit/browser_engine/flex_grow_definite_size_chrome159_spec.spl`.
+
+## 2026-11-14 — follow-ups to the float / sub-sup / flex-grow fixes
+
+- **Trap — `layout_selected` bypasses `layout()`.** The `contain: layout`
+  boundary is re-laid-out through `layout_with_style` directly, so any state
+  `layout()` resets must be scoped another way. Floats: a `contain: layout`
+  box is a formatting-context root in `float_ctx_establishes_bfc`; without
+  that, a second partial pass placed each float beside its own stale copy
+  (AC-14 of the float spec: 3 boxes differed from the full pass).
+- **Not modelled, sub/sup:** when `<sup>` follows a WRAPPED text run, the
+  reopened last line lowers its baseline for the sup but the run's own last
+  line (part of the tall text box) does not move, so words before and after a
+  footnote marker can differ by 2-3 px in paint. Element geometry matches
+  (`sup` at y=26 in a 200 px `<p>`, Chrome 26).
+- **Not modelled, flex:** `flex: 1` on an item that also has a `width` now
+  grows from that width; Chrome grows from basis 0. Equal widths give the
+  same result, unequal ones do not (`flex-basis: 0` and `auto` share one
+  encoding).
+- **Bitmap lane.** `check-simple-web-engine2d-js-bitmap-evidence.shs` refuses
+  the Rust seed (`simple_bin_status=forbidden`) and needs a self-hosted
+  `bin/simple`; on a host without one it reports `unavailable`, not a verdict.
