@@ -812,3 +812,19 @@ plain parameters still accept the same value silently. Red/green in about 30 s o
 `test/01_unit/compiler/mir/let_annotated_optional_join_spec.spl` (it also pins the three
 `HirStmtKind.Let` sites in `statements.spl`, lost once to a rebase). Record:
 `doc/08_tracking/bug/stage3_let_payload_unguarded_optional_arm_2026-11-14.md`.
+
+## 2026-11-14 — dict literal payloads, and what module coverage can show
+
+- HIR gives every dict literal the key type `Infer(0, 0)`; MIR must read that as "no
+  ascription" (`enum_payload_dict_key_is_ascribed`). Treating it as a key type refused every
+  inline `Enum.V({...})`. Seed-interpreted proof only; the `@workaround` sites stay until a
+  native Phase 2 lowers the inline form.
+- `enum_constructor_payload.spl` is unit-testable without a Stage 2: lower a small module,
+  then call the helpers on the `MirLowering` with a synthetic temp
+  (`test/01_unit/compiler/mir/enum_payload_local_evidence_spec.spl`). Add temps to
+  `lowering.builder` inline in the `it` body: a lowering passed to a helper function is not
+  updated in the caller. Private free functions come in through the module's wildcard import.
+- The seed collector never records an `if` / `match` in expression position (function tail,
+  match-arm tail), but the report counts those lines. This module tops out at 82.2% with
+  every recordable line hit. Record:
+  `doc/08_tracking/bug/coverage_expression_position_if_match_unrecorded_2026-11-14.md`.

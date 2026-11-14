@@ -74,17 +74,44 @@ once).
 | spec after | seed | 14 run, 14 passed |
 | source pin on the pinned `5fc681dfd66` `statements.spl` / on tip | seed | 3 / 0 |
 
-Line coverage of `enum_constructor_payload.spl` (seed, `spl-coverage module`): 30.0% (69/230)
-from the new spec alone, 48.6% (112/230) with the six neighbouring enum-payload specs. The
-module is below the 90% bar; closing that means testing its unrelated array / dict / numeric
-payload paths. Of the added code, lines 492-494, 498-499, 501, 503-504 and 508 are recorded
-hit. Seven
-neighbouring cases (6 in `contextual_enum_payload_spec`, 1 in
-`nil_singleton_type_pipeline_spec`) and the load of `generic_self_method_result_ctor_spec`
-fail identically with and without this change.
-
 The message change itself cannot be shown on the frozen Stage 2 (it is that binary's own
 compiler); the copy above shows the new code lowers there.
+
+## Coverage of `enum_constructor_payload.spl` (follow-up, same day)
+
+Measured on the seed with `spl-coverage module --file <9 artifacts> <module>`, the artifacts
+being `SIMPLE_COVERAGE=1` runs of `let_annotated_optional_join_spec`,
+`enum_payload_type_evidence_spec`, `enum_payload_local_evidence_spec` (the last two added
+for this) and `contextual_enum_payload_spec`, `nil_singleton_type_pipeline_spec`,
+`optional_enum_payload_owner_spec`, `enum_payload_inferred_carrier_spec`,
+`enum_payload_value_shapes_spec`, `nested_optional_text_nil_pattern_spec`:
+
+- before: 30.0% (69/230) from the first spec alone, 48.6% (112/230) with the neighbours;
+- after: **82.2% lines (190/231)**, decisions 87.6%, outcomes 93.8%. The three specs of
+  this change reach the same 190 on their own.
+
+90% is not reachable for this module with the current collector: the 41 missed lines are
+all `if` / `match` headers in expression position, which the collector never records
+(`coverage_expression_position_if_match_unrecorded_2026-11-14.md`, with the line list and
+the per-line proof of execution). Every line the collector can record is hit.
+
+Branches that source cannot reach and are driven directly on a `MirLowering` instead:
+a settled dict key or value ascription (HIR never writes one on a `DictLit`), a fixed-size
+array slot (source `[i64; 3]` with a two-element literal was not refused, not investigated), `None` in an undeclared
+non-generic slot, the "missing metadata" / "invalid kind" payload reasons, a module-less
+enum symbol, and two enum keys sharing a bare name (one module per harness run).
+
+## Neighbouring specs that failed before this follow-up
+
+| Spec | Failing line | Verdict |
+|---|---|---|
+| `test/01_unit/compiler/mir/contextual_enum_payload_spec.spl` | 5 dict-literal cases (`:31`, `:43`, `:49`, `:78`, `:133`), "enum payload dictionary key annotation mismatch" | **real defect on the tip**, `mir_enum_payload_inline_dict_literal_key_annotation_mismatch_2026-11-14.md`; fixed here |
+| same | `:157` "keeps nil valid for the declared optional record slot" | stale since `94aa0d6b804` (nil is unsafe-only); now asserts `None` |
+| `test/01_unit/compiler/type/nil_singleton_type_pipeline_spec.spl` | `:284` "keeps undeclared uppercase Nil erroring" | stale since `6bfa14881e1` (owner decision: bare `Nil` is the unit type); expectation flipped |
+| `test/01_unit/compiler/50.mir/generic_self_method_result_ctor_spec.spl` | `:29`, load error "private fn `hir_type_instantiates_to` ... is not visible" | neither: both seed binaries on this host predate `9cbce419747` (tests may import private fns). Not re-run on a current seed |
+
+After: contextual 25 of 25, nil-singleton 11 of 11. `nil_singleton_type_pipeline_spec.spl`
+also carries three lint errors (SPIPE001 at 258 / 268 / 278) that predate this change.
 
 ## Sweep (src/compiler, src/app, src/lib; 2026-11-14 tip `a91ccdb5f38`)
 

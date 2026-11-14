@@ -1,0 +1,185 @@
+# @req REQ-SSPEC-UNIT
+# @cover src/compiler/50.mir/_MirLoweringExpr/enum_constructor_payload.spl
+#
+# The type-comparison helpers behind `enum_payload_local_compatible`, called
+# directly: each declared slot kind gets an accepted and a refused carrier.
+# Symbols come from a real HIR lowering of a small module, so nominal owners
+# are genuine SymbolTable ids.
+# Record: doc/08_tracking/bug/stage3_let_payload_unguarded_optional_arm_2026-11-14.md
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.common.diagnostics.span.{Span}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir_data.*
+use compiler.mir._MirLoweringExpr.enum_constructor_payload.*
+
+fn ty(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: Span.empty())
+
+fn mty(kind: MirTypeKind) -> MirType:
+    MirType(kind: kind)
+
+fn ex(kind: HirExprKind) -> HirExpr:
+    HirExpr(kind: kind, has_type_: false, type_: ty(HirTypeKind.Unit), span: Span.empty())
+
+fn _symbols() -> SymbolTable:
+    val source = "struct HT:\n    kind: i64\nstruct Other:\n    kind: i64\nclass CT:\n    kind: i64\nenum Inner:\n    A\n    B(v: i64)\nfn helper() -> i64:\n    1\n"
+    val parsed = parse_full_frontend(source, "probe.spl", "probe.spl", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("probe.spl")
+    val hir = hir_lowering.lower_module(parsed)
+    hir.symbols
+
+fn _symbol_named(symbols: SymbolTable, name: text) -> SymbolId:
+    for key in symbols.symbols.keys():
+        val symbol: HirSymbol = symbols.symbols[key]
+        if symbol.name == name:
+            return SymbolId(id: key)
+    SymbolId(id: -1)
+
+fn _same(expected: HirType, actual: MirType) -> bool:
+    enum_payload_hir_mir_alias_compatible(expected, actual, SymbolTable.new(), {})
+
+describe "enum_payload_types_compatible":
+    it "converts within an integer or float family and never across":
+        val i64_t = ty(HirTypeKind.Int(64, true))
+        val i32_t = ty(HirTypeKind.Int(32, true))
+        val f64_t = ty(HirTypeKind.Float(64))
+        val f32_t = ty(HirTypeKind.Float(32))
+        expect(enum_payload_types_compatible(i64_t, i32_t)).to_equal(true)
+        expect(enum_payload_types_compatible(i64_t, f64_t)).to_equal(false)
+        expect(enum_payload_types_compatible(f64_t, f32_t)).to_equal(true)
+        expect(enum_payload_types_compatible(f64_t, i64_t)).to_equal(false)
+
+    it "takes anything for an erased slot and compares the rest exactly":
+        val bool_t = ty(HirTypeKind.Bool)
+        expect(enum_payload_types_compatible(ty(HirTypeKind.Any), bool_t)).to_equal(true)
+        expect(enum_payload_types_compatible(bool_t, bool_t)).to_equal(true)
+        expect(enum_payload_types_compatible(bool_t, ty(HirTypeKind.Str))).to_equal(false)
+
+describe "enum_payload_types_alias_compatible":
+    it "keeps scalar conversion at the top level and nominal identity below it":
+        val symbols = _symbols()
+        val ht = ty(HirTypeKind.Named(_symbol_named(symbols, "HT"), []))
+        val other = ty(HirTypeKind.Named(_symbol_named(symbols, "Other"), []))
+        val i64_t = ty(HirTypeKind.Int(64, true))
+        val i32_t = ty(HirTypeKind.Int(32, true))
+        expect(enum_payload_types_alias_compatible(i64_t, i32_t, symbols)).to_equal(true)
+        expect(enum_payload_types_alias_compatible(ht, ht, symbols)).to_equal(true)
+        expect(enum_payload_types_alias_compatible(ht, other, symbols)).to_equal(false)
+        expect(enum_payload_types_alias_compatible(ty(HirTypeKind.Array(i64_t, None)), ty(HirTypeKind.Array(i32_t, None)), symbols)).to_equal(false)
+
+describe "enum_payload_dict_key_is_ascribed":
+    it "treats the Infer placeholder of an unannotated literal as no ascription":
+        expect(enum_payload_dict_key_is_ascribed(ty(HirTypeKind.Infer(0, 0)))).to_equal(false)
+        expect(enum_payload_dict_key_is_ascribed(ty(HirTypeKind.Str))).to_equal(true)
+
+describe "enum_payload_nested_unit_nil_veto_v1":
+    it "vetoes nil at a declared unit leaf only":
+        val nil_e = ex(HirExprKind.NilLit)
+        val one = ex(HirExprKind.IntLit(1, None))
+        val unit_t = ty(HirTypeKind.Unit)
+        val i64_t = ty(HirTypeKind.Int(64, true))
+        expect(enum_payload_nested_unit_nil_veto_v1(unit_t, nil_e)).to_equal(true)
+        expect(enum_payload_nested_unit_nil_veto_v1(unit_t, one)).to_equal(false)
+        expect(enum_payload_nested_unit_nil_veto_v1(i64_t, nil_e)).to_equal(false)
+
+    it "walks a tuple literal against the declared tuple":
+        val nil_e = ex(HirExprKind.NilLit)
+        val one = ex(HirExprKind.IntLit(1, None))
+        val unit_t = ty(HirTypeKind.Unit)
+        val i64_t = ty(HirTypeKind.Int(64, true))
+        val pair = ty(HirTypeKind.Tuple([i64_t, unit_t]))
+        expect(enum_payload_nested_unit_nil_veto_v1(pair, ex(HirExprKind.TupleLit([one, nil_e])))).to_equal(true)
+        expect(enum_payload_nested_unit_nil_veto_v1(pair, ex(HirExprKind.TupleLit([one, one])))).to_equal(false)
+        expect(enum_payload_nested_unit_nil_veto_v1(pair, ex(HirExprKind.TupleLit([one])))).to_equal(false)
+        expect(enum_payload_nested_unit_nil_veto_v1(pair, one)).to_equal(false)
+        expect(enum_payload_nested_unit_nil_veto_v1(pair, nil_e)).to_equal(false)
+        expect(enum_payload_nested_unit_nil_veto_v1(ty(HirTypeKind.Tuple([])), nil_e)).to_equal(true)
+
+describe "enum_payload_hir_mir_alias_compatible":
+    it "matches each primitive slot to its MIR carrier":
+        expect(_same(ty(HirTypeKind.Bool), mty(MirTypeKind.Bool))).to_equal(true)
+        expect(_same(ty(HirTypeKind.Bool), mty(MirTypeKind.I64))).to_equal(false)
+        expect(_same(ty(HirTypeKind.Char), mty(MirTypeKind.Char))).to_equal(true)
+        expect(_same(ty(HirTypeKind.Char), mty(MirTypeKind.I64))).to_equal(false)
+        expect(_same(ty(HirTypeKind.Int(64, true)), mty(MirTypeKind.U8))).to_equal(true)
+        expect(_same(ty(HirTypeKind.Int(64, true)), mty(MirTypeKind.F64))).to_equal(false)
+        expect(_same(ty(HirTypeKind.Float(64)), mty(MirTypeKind.F32))).to_equal(true)
+        expect(_same(ty(HirTypeKind.Float(64)), mty(MirTypeKind.I64))).to_equal(false)
+        expect(_same(ty(HirTypeKind.Any), mty(MirTypeKind.I64))).to_equal(true)
+        expect(_same(ty(HirTypeKind.Result(ty(HirTypeKind.Bool), ty(HirTypeKind.Str))), mty(MirTypeKind.I64))).to_equal(false)
+
+    it "accepts both native text shapes and nothing else":
+        val str_t = ty(HirTypeKind.Str)
+        val fat = mty(MirTypeKind.Tuple([mty(MirTypeKind.Ptr(mty(MirTypeKind.U8), false)), mty(MirTypeKind.U64)]))
+        expect(_same(str_t, mty(MirTypeKind.Opaque("str")))).to_equal(true)
+        expect(_same(str_t, mty(MirTypeKind.Opaque("blob")))).to_equal(false)
+        expect(_same(str_t, fat)).to_equal(true)
+        expect(_same(str_t, mty(MirTypeKind.Tuple([mty(MirTypeKind.U64)])))).to_equal(false)
+        expect(_same(str_t, mty(MirTypeKind.Tuple([mty(MirTypeKind.Ptr(mty(MirTypeKind.U8), false)), mty(MirTypeKind.I64)])))).to_equal(false)
+        expect(_same(str_t, mty(MirTypeKind.Tuple([mty(MirTypeKind.I64), mty(MirTypeKind.U64)])))).to_equal(false)
+        expect(_same(str_t, mty(MirTypeKind.Tuple([mty(MirTypeKind.Ptr(mty(MirTypeKind.I64), false)), mty(MirTypeKind.U64)])))).to_equal(false)
+        expect(_same(str_t, mty(MirTypeKind.I64))).to_equal(false)
+
+    it "recurses through unit, array, slice and dict carriers":
+        val i64_t = ty(HirTypeKind.Int(64, true))
+        val bool_t = ty(HirTypeKind.Bool)
+        val unit_t = ty(HirTypeKind.Unit)
+        val i64_m = mty(MirTypeKind.I64)
+        val bool_m = mty(MirTypeKind.Bool)
+        expect(_same(unit_t, mty(MirTypeKind.Unit))).to_equal(true)
+        expect(_same(unit_t, mty(MirTypeKind.Tuple([])))).to_equal(true)
+        expect(_same(unit_t, mty(MirTypeKind.Tuple([i64_m])))).to_equal(false)
+        expect(_same(unit_t, i64_m)).to_equal(false)
+        expect(_same(ty(HirTypeKind.Array(i64_t, None)), mty(MirTypeKind.Array(i64_m, 0)))).to_equal(true)
+        expect(_same(ty(HirTypeKind.Array(i64_t, None)), mty(MirTypeKind.Slice(bool_m)))).to_equal(false)
+        expect(_same(ty(HirTypeKind.Array(i64_t, None)), i64_m)).to_equal(false)
+        expect(_same(ty(HirTypeKind.Slice(i64_t)), mty(MirTypeKind.Slice(i64_m)))).to_equal(true)
+        expect(_same(ty(HirTypeKind.Slice(i64_t)), i64_m)).to_equal(false)
+        expect(_same(ty(HirTypeKind.Dict(bool_t, i64_t)), mty(MirTypeKind.Dict(bool_m, i64_m)))).to_equal(true)
+        expect(_same(ty(HirTypeKind.Dict(bool_t, i64_t)), mty(MirTypeKind.Dict(bool_m, bool_m)))).to_equal(false)
+        expect(_same(ty(HirTypeKind.Dict(bool_t, i64_t)), i64_m)).to_equal(false)
+
+    it "compares tuples element by element":
+        val i64_t = ty(HirTypeKind.Int(64, true))
+        val bool_t = ty(HirTypeKind.Bool)
+        val i64_m = mty(MirTypeKind.I64)
+        val bool_m = mty(MirTypeKind.Bool)
+        val pair = ty(HirTypeKind.Tuple([i64_t, bool_t]))
+        expect(_same(pair, mty(MirTypeKind.Tuple([i64_m, bool_m])))).to_equal(true)
+        expect(_same(pair, mty(MirTypeKind.Tuple([i64_m, i64_m])))).to_equal(false)
+        expect(_same(pair, mty(MirTypeKind.Tuple([i64_m])))).to_equal(false)
+        expect(_same(pair, i64_m)).to_equal(false)
+
+    it "needs the presence slot and the inner owner for an optional":
+        val bool_t = ty(HirTypeKind.Bool)
+        val optional = ty(HirTypeKind.Optional(bool_t))
+        val bool_m = mty(MirTypeKind.Bool)
+        val i64_m = mty(MirTypeKind.I64)
+        expect(_same(optional, mty(MirTypeKind.Tuple([bool_m, bool_m])))).to_equal(true)
+        expect(_same(optional, mty(MirTypeKind.Tuple([bool_m, i64_m])))).to_equal(false)
+        expect(_same(optional, mty(MirTypeKind.Tuple([i64_m, bool_m])))).to_equal(false)
+        expect(_same(optional, mty(MirTypeKind.Tuple([bool_m])))).to_equal(false)
+        expect(_same(optional, bool_m)).to_equal(false)
+
+    it "binds a nominal slot by declaration owner, never by a bare id":
+        val symbols = _symbols()
+        val ht_id = _symbol_named(symbols, "HT")
+        val other_id = _symbol_named(symbols, "Other")
+        val helper_id = _symbol_named(symbols, "helper")
+        val ht = ty(HirTypeKind.Named(ht_id, []))
+        val no_owners: Dict<text, i64> = {}
+        var canonical: Dict<text, i64> = {}
+        canonical["probe.HT"] = 4242
+        expect(ht_id.id >= 0).to_equal(true)
+        expect(enum_payload_hir_mir_alias_compatible(ht, mty(MirTypeKind.Struct(ht_id)), symbols, no_owners)).to_equal(true)
+        expect(enum_payload_hir_mir_alias_compatible(ht, mty(MirTypeKind.Struct(other_id)), symbols, no_owners)).to_equal(false)
+        expect(enum_payload_hir_mir_alias_compatible(ht, mty(MirTypeKind.Struct(SymbolId(id: 4242))), symbols, canonical)).to_equal(true)
+        expect(enum_payload_hir_mir_alias_compatible(ht, mty(MirTypeKind.Struct(SymbolId(id: 4243))), symbols, canonical)).to_equal(false)
+        expect(enum_payload_hir_mir_alias_compatible(ht, mty(MirTypeKind.I64), symbols, canonical)).to_equal(false)
+        expect(enum_payload_hir_mir_alias_compatible(ty(HirTypeKind.Named(SymbolId(id: 987654), [])), mty(MirTypeKind.Struct(ht_id)), symbols, canonical)).to_equal(false)
+        expect(enum_payload_hir_mir_alias_compatible(ty(HirTypeKind.Named(helper_id, [])), mty(MirTypeKind.Struct(ht_id)), symbols, canonical)).to_equal(false)

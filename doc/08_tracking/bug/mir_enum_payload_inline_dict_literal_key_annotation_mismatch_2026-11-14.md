@@ -73,3 +73,23 @@ Fix the key-annotation check so an unannotated (or synthesized) `DictLit` key
 annotation is treated as absent, or compare by alias-equality against the
 declared `text`. Then remove the tagged workarounds and confirm the inline
 form lowers in a native-build of `src/app/llm_caret/main.spl`.
+
+## Root cause and fix (2026-11-14, seed-interpreted pure-Simple MIR; native proof pending)
+
+Demonstrated, not the `!= None` hypothesis above: since `9bb344bb1cf` (2026-10-21) HIR writes
+`HirType(kind: HirTypeKind.Infer(0, 0))` as the key type of EVERY dict literal
+(`src/compiler/20.hir/hir_lowering/_Expressions/expression_core.spl`, `ExprKind.DictLit`:
+"Infer(0, 0) denotes an unannotated type"). The MIR check predates that (`aad6de3fe10`,
+2026-10-10) and treated any non-None key as an ascription, so `text` was compared against
+`Infer` and every inline dict literal payload was refused.
+
+Fix: `enum_payload_dict_key_is_ascribed` in `enum_constructor_payload.spl` — an `Infer` key
+is no ascription. The literal then goes to `lower_dict_lit` with the declared key and value
+types, which still refuses a wrong key (`{1: 2}` into `Dict<text, i64>`: "enum payload
+dictionary key type mismatch") and a wrong value ("... value type mismatch").
+
+Evidence (seed, pure-Simple HIR + MIR): `contextual_enum_payload_spec.spl` 19 of 25 before,
+24 of 25 after (the five dict cases); `enum_payload_local_evidence_spec.spl` covers the
+accept / wrong-key / wrong-value cases and the settled-ascription refusals. NOT yet shown on
+a natively built compiler, so the tagged workarounds stay; remove them after a Phase 2
+binary built from this change lowers the inline form.
