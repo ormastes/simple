@@ -1,0 +1,161 @@
+# Deactivation hygiene (REQ-CARET-EXT-004, acceptance CU-007) + context keys.
+# After deactivate NOTHING an extension contributed may remain in any host
+# registry; re-activation must not duplicate; deactivation is registrations-only.
+
+use std.spec
+use std.spec.step
+use std.editor.extensions.host.{ExtensionHost}
+use std.editor.extensions.manifest_sdn.{extension_manifest_decode}
+use std.editor.extensions.context_keys.{context_when_eval}
+
+fn hyg_sdn() -> text:
+    "extension:\n" +
+    "  schema: simple.ide.extension/2\n" +
+    "  id: hyg.ext\n" +
+    "  version: 1.0.0\n" +
+    "  host: in_process\n" +
+    "activation:\n" +
+    '  events: ["onCommand:hyg.hello"]' + "\n" +
+    "contributes:\n" +
+    '  commands: [{id: "hyg.hello", title: "Hello", category: "Hyg"}]' + "\n" +
+    '  languages: [{id: "hyglang", extensions: [".hyg"]}]' + "\n" +
+    '  custom_editors: [{id: "hyg.editor", document_kind: "hyg.doc", priority: 2}]' + "\n" +
+    '  keybindings: [{command: "hyg.hello", key: "ctrl+9", when: ""}]' + "\n" +
+    '  themes: [{id: "hyg-dark", label: "Hyg", ui_theme: "dark", path: "t.sdn"}]' + "\n" +
+    '  debug_adapters: [{id: "hyg-dap", label: "Hyg", program: "bin/hyg"}]' + "\n" +
+    '  view_containers: [{id: "hyg.box", title: "Box", location: "activitybar", order: 1}]' + "\n" +
+    '  views: [{id: "hyg.view", kind: "tree", container: "hyg.box", provider: "hyg.p"}]' + "\n" +
+    '  panels: [{id: "hyg.panel", kind: "trace", default_dock: "bottom"}]' + "\n" +
+    '  status_items: [{id: "hyg.status", priority: 1}]' + "\n"
+
+fn hyg_handler(payload: text) -> Result<text, text>:
+    Ok("ok:" + payload)
+
+fn hyg_listener(payload: text):
+    pass_do_nothing
+
+# Host with the extension active, a handler, a listener and a pending runtime
+# invocation attached.
+fn hyg_active_host() -> ExtensionHost:
+    val host = ExtensionHost.new()
+    val load = extension_manifest_decode(hyg_sdn())
+    host.register_manifest(load.manifest, "<test>")
+    host.activate("hyg.ext")
+    host.register_command_handler("hyg.ext", "hyg.hello", "Hello", hyg_handler)
+    host.on_event("hyg.ext", "doc.saved", hyg_listener)
+    host
+
+describe "extension deactivation hygiene":
+
+    it "the fixture manifest decodes cleanly and activation populates every registry":
+        # @req REQ-CARET-EXT-004
+        step("activate")
+        val load = extension_manifest_decode(hyg_sdn())
+        expect(load.issues.len()).to_equal(0)
+        val host = hyg_active_host()
+        expect(host.command_registry.len()).to_equal(1)
+        expect(host.commands.entries.len()).to_equal(1)
+        expect(host.listeners.entries.len()).to_equal(1)
+        expect(host.language_index.entries.len()).to_equal(1)
+        expect(host.debug_adapter_registry.len()).to_equal(1)
+        expect(host.keybinding_registry.len()).to_equal(1)
+        expect(host.custom_editor_registry.len()).to_equal(1)
+        expect(host.theme_registry.len()).to_equal(1)
+        expect(host.view_container_registry.len()).to_equal(1)
+        expect(host.view_registry.len()).to_equal(1)
+        expect(host.panel_registry.len()).to_equal(1)
+        expect(host.status_item_registry.len()).to_equal(1)
+        expect(host.extension_leftover_count("hyg.ext") > 0).to_equal(true)
+
+    it "leaves zero leftovers overall":
+        # @req REQ-CARET-EXT-004
+        step("deactivate")
+        val host = hyg_active_host()
+        expect(host.deactivate("hyg.ext")).to_equal(true)
+        expect(host.extension_leftover_count("hyg.ext")).to_equal(0)
+
+    it "leaves no commands, handlers or keybindings":
+        # @req REQ-CARET-EXT-004
+        val host = hyg_active_host()
+        host.deactivate("hyg.ext")
+        expect(host.command_registry.len()).to_equal(0)
+        expect(host.command_handler_registered("hyg.hello")).to_equal(false)
+        expect(host.keybinding_registry.len()).to_equal(0)
+        expect(host.contributed_keybinding_command("ctrl+9", "normal")).to_equal("")
+
+    it "leaves no views or view containers":
+        # @req REQ-CARET-EXT-004
+        val host = hyg_active_host()
+        host.deactivate("hyg.ext")
+        expect(host.view_container_registry.len()).to_equal(0)
+        expect(host.view_registered("hyg.view")).to_equal(false)
+
+    it "leaves no panels or status items":
+        # @req REQ-CARET-EXT-004
+        val host = hyg_active_host()
+        host.deactivate("hyg.ext")
+        expect(host.panel_registered("hyg.panel")).to_equal(false)
+        expect(host.status_item_registered("hyg.status")).to_equal(false)
+
+    it "leaves no themes, custom editors or debug adapters":
+        # @req REQ-CARET-EXT-004
+        val host = hyg_active_host()
+        host.deactivate("hyg.ext")
+        expect(host.theme_registered("hyg-dark")).to_equal(false)
+        expect(host.custom_editor_registered("hyg.doc")).to_equal(false)
+        expect(host.debug_adapter_registered("hyg-dap")).to_equal(false)
+        expect(host.find_language_for_ext(".hyg")).to_equal("")
+
+    it "leaves no event subscriptions":
+        # @req REQ-CARET-EXT-004
+        val host = hyg_active_host()
+        host.deactivate("hyg.ext")
+        expect(host.listeners.entries.len()).to_equal(0)
+        expect(host.emit_event("doc.saved", "x")).to_equal(0)
+        expect(host.lifetime_disposable_count("hyg.ext")).to_equal(0)
+        expect(host.context_registry.len()).to_equal(0)
+
+    it "activate -> deactivate -> activate yields exactly one of each":
+        # @req REQ-CARET-EXT-004
+        step("cycle")
+        val host = hyg_active_host()
+        host.deactivate("hyg.ext")
+        expect(host.activate("hyg.ext")).to_equal(true)
+        expect(host.command_registry.len()).to_equal(1)
+        expect(host.keybinding_registry.len()).to_equal(1)
+        expect(host.view_container_registry.len()).to_equal(1)
+        expect(host.view_registry.len()).to_equal(1)
+        expect(host.panel_registry.len()).to_equal(1)
+        expect(host.status_item_registry.len()).to_equal(1)
+        expect(host.theme_registry.len()).to_equal(1)
+        expect(host.custom_editor_registry.len()).to_equal(1)
+        expect(host.debug_adapter_registry.len()).to_equal(1)
+        expect(host.language_index.entries.len()).to_equal(1)
+        expect(host.context_registry.len()).to_equal(1)
+        expect(host.activate("hyg.ext")).to_equal(false)
+        expect(host.view_registry.len()).to_equal(1)
+
+    it "deactivation drops registrations only and never other extensions' state":
+        # @req REQ-CARET-EXT-004
+        step("two extensions")
+        val host = hyg_active_host()
+        val other = extension_manifest_decode(hyg_sdn().replace("hyg.", "oth."))
+        host.register_manifest(other.manifest, "<test>")
+        host.activate("oth.ext")
+        host.deactivate("hyg.ext")
+        expect(host.extension_count()).to_equal(2)
+        expect(host.is_active("oth.ext")).to_equal(true)
+        expect(host.view_registered("oth.view")).to_equal(true)
+        expect(host.extension_leftover_count("oth.ext") > 0).to_equal(true)
+
+describe "context keys (when clauses)":
+
+    it "evaluates plain, negated, and/or clauses":
+        # @req REQ-CARET-EXT-003
+        val keys = ["caret.composerFocus", "caret.hasAttention"]
+        expect(context_when_eval("", keys)).to_equal(true)
+        expect(context_when_eval("caret.composerFocus", keys)).to_equal(true)
+        expect(context_when_eval("!caret.terminalFocus", keys)).to_equal(true)
+        expect(context_when_eval("caret.composerFocus && caret.terminalFocus", keys)).to_equal(false)
+        expect(context_when_eval("caret.terminalFocus || caret.hasAttention", keys)).to_equal(true)
+        expect(context_when_eval("a && !b || c", keys)).to_equal(false)
