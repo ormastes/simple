@@ -228,6 +228,7 @@ mod unix_impl {
         if let Ok(mut table) = SLAVE_TABLE.lock() {
             table.insert(master_fd, slave_fd);
         }
+        simple_runtime::value::pty::note_pty_owned(master_fd);
 
         master_fd
     }
@@ -377,6 +378,12 @@ mod unix_impl {
     }
 
     pub(super) fn pty_close(fd: i32) -> bool {
+        // Same ownership rule as the compiled lane: an fd we no longer own is
+        // already closed (idempotent success) and must not be closed again —
+        // its number may have been reused by an unrelated file.
+        if !simple_runtime::value::pty::take_pty_owned(fd) {
+            return true;
+        }
         simple_runtime::value::pty::forget_pty_utf8(fd as i64);
         simple_runtime::value::pty::forget_pty_spawn(fd);
         if let Ok(mut table) = SLAVE_TABLE.lock() {
@@ -578,7 +585,8 @@ mod tests {
             Value::Bool(false)
         );
         assert_eq!(rt_pty_read(&[Value::Int(-1), Value::Int(0)]).unwrap(), Value::text(""));
-        assert_eq!(rt_pty_close(&[Value::Int(-1)]).unwrap(), Value::Bool(false));
+        // Not an owned PTY: nothing to close, idempotent success (unix and windows).
+        assert_eq!(rt_pty_close(&[Value::Int(-1)]).unwrap(), Value::Bool(true));
         assert_eq!(rt_pty_is_running(&[Value::Int(-1)]).unwrap(), Value::Bool(false));
         assert_eq!(rt_pty_hangup(&[Value::Int(-1)]).unwrap(), Value::Bool(false));
         assert_eq!(
