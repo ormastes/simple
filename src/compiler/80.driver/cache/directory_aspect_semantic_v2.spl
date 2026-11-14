@@ -1,0 +1,144 @@
+# Capture while the real HIR owner is alive. No parser body hash, ordinary HIR
+# snapshot or imported-name guess supplies implementation identity here.
+use compiler.common.cache_contract.directory_aspect_draft_v2.{DirectoryAspectDraftV2, DirectoryAspectDeclarationV2}
+use compiler.common.cache_contract.directory_aspect_projection_v2.{DirectoryAspectHandlerV2, DirectoryAspectSemanticV2, DirectoryAspectObjectV2}
+use compiler.common.cache_contract.mir_initializer_plan_v1.{MirInitializerObjectReceiptV1}
+use compiler.common.cache_contract.physical_tld_v1.{three_payload_contract_digest_valid_v1}
+use compiler.common.cache_contract.directory_category_projection_v2.{DirectoryCategoryProjectionV2, directory_category_projection_valid_v2}
+use compiler.common.cache_contract.directory_source_epoch_v2.{DirectorySourceEpochV2, directory_source_epoch_equal_v2}
+use compiler.hir.hir_types.{HirModule, HirType, SymbolKind, SymbolId}
+use compiler.hir.abi_interface.{hir_abi_function_digest_v1, HirAbiInterfaceEncoderV1}
+use compiler.frontend.core.aop.{AdviceForm}
+use compiler.semantics.join_point_model.{join_point_kind_is_known, join_point_kind_is_prohibited, join_point_kind_is_measurable, join_point_mode_is_implemented}
+use std.common.crypto.sha256.{sha256_text}
+use compiler.driver.driver_types.{CompileContext}
+
+fn _directory_aspect_frame_v2(value: text) -> text:
+    value.byte_len().to_text() + ":" + value
+
+fn _directory_aspect_category_equal_v2(a: DirectoryCategoryProjectionV2, b: DirectoryCategoryProjectionV2) -> bool:
+    directory_category_projection_valid_v2(a) and directory_category_projection_valid_v2(b) and
+        a.canonical_path == b.canonical_path and a.source_identity == b.source_identity and
+        a.source_digest == b.source_digest and a.target_triple == b.target_triple and
+        a.preprocessed_digest == b.preprocessed_digest and a.cfg_decision_digest == b.cfg_decision_digest and
+        a.environment_policy_digest == b.environment_policy_digest and a.trait_root == b.trait_root and
+        a.extension_root == b.extension_root
+
+fn _directory_aspect_supported_v2(row: DirectoryAspectDeclarationV2) -> bool:
+    if row.handler == "" or row.selector == "" or row.mode != "static": return false
+    if row.family == "mir": return AdviceForm.from_text(row.form) != nil
+    if row.family != "logical": return false
+    join_point_kind_is_known(row.form) and not join_point_kind_is_prohibited(row.form) and
+        join_point_kind_is_measurable(row.form) and join_point_mode_is_implemented(row.mode) and
+        row.readonly and row.noalloc and row.bounded_time
+
+pub fn directory_aspect_semantic_capture_v2(draft: DirectoryAspectDraftV2,
+        current: DirectoryCategoryProjectionV2, epoch: DirectorySourceEpochV2,
+        module: HirModule, source_path: text) -> Result<DirectoryAspectSemanticV2, text>:
+    if not draft.inventory_complete or draft.coverage_schema != "current-parser-aop/v1" or
+            not directory_source_epoch_equal_v2(draft.epoch, epoch) or
+            not _directory_aspect_category_equal_v2(draft.source, current):
+        return Err("directory-aspect-draft-not-current")
+    if module == nil or source_path == "" or module.path != source_path or module.name == "":
+        return Err("directory-aspect-module-owner-mismatch")
+    if draft.declarations.len() > 1024 or module.functions.len() > 65536:
+        return Err("directory-aspect-semantic-budget")
+    var handlers: [DirectoryAspectHandlerV2] = []
+    var signatures: Dict<text, text> = {}
+    var effects: Dict<text, text> = {}
+    var functions: Dict<text, SymbolId> = {}
+    var ambiguous: Dict<text, bool> = {}
+    if draft.declarations.len() > 0:
+        for key in module.functions.keys():
+            val function = module.functions[key]
+            if key.id != function.symbol.id: return Err("directory-aspect-function-key-mismatch")
+            if functions.has(function.name): ambiguous[function.name] = true
+            else: functions[function.name] = key
+    var bytes = ""
+    for value in ["simple/local-aspect-interface/v2", draft.coverage_schema, module.name, current.cfg_decision_digest]:
+        if value.byte_len() > 1048576 - bytes.byte_len(): return Err("directory-aspect-interface-budget")
+        val framed = _directory_aspect_frame_v2(value)
+        if framed.byte_len() > 1048576 - bytes.byte_len(): return Err("directory-aspect-interface-budget")
+        bytes = bytes + framed
+    var mir_index: i64 = 0
+    var logical_index: i64 = 0
+    for row in draft.declarations:
+        if not _directory_aspect_supported_v2(row): return Err("directory-aspect-form-unavailable")
+        val expected = if row.family == "mir": mir_index else: logical_index
+        if row.family_inventory_index != expected: return Err("directory-aspect-family-order-invalid")
+        if row.family == "mir": mir_index = mir_index + 1
+        else: logical_index = logical_index + 1
+        if ambiguous.has(row.handler) or not functions.has(row.handler):
+            return Err("directory-aspect-handler-unresolved")
+        if not signatures.has(row.handler):
+            # Resolve only the actual owning module's unique local function.
+            val function = module.functions[functions[row.handler]]
+            if not module.symbols.symbols.has(function.symbol.id): return Err("directory-aspect-symbol-missing")
+            val symbol = module.symbols.symbols[function.symbol.id]
+            if symbol.defining_module == nil or symbol.defining_module.unwrap() != source_path or
+                    symbol.name != row.handler or symbol.kind != SymbolKind.Function or function.is_extern or
+                    function.is_method or function.is_async or function.type_params.len() != 0 or function.params.len() != 0:
+                return Err("directory-aspect-handler-owner-or-abi-unavailable")
+            match function.return_type:
+                case Unit: ()
+                case _: return Err("directory-aspect-handler-result-unavailable")
+            if function.effects.len() > 256: return Err("directory-aspect-effects-budget")
+            signatures[row.handler] = hir_abi_function_digest_v1(module, function)?
+            var encoder = HirAbiInterfaceEncoderV1.new(module)
+            val encoded = encoder.effects_identity(function.effects)
+            if encoder.error != "" or encoded.byte_len() > 65536: return Err("directory-aspect-effects-unavailable")
+            effects[row.handler] = sha256_text(_directory_aspect_frame_v2("simple/local-aspect-effects/v2") + encoded)
+        var row_bytes = ""
+        for field in [row.family, row.family_inventory_index.to_text(), row.handler, row.form, row.selector,
+                row.mode, row.priority.to_text(), row.readonly.to_text(), row.noalloc.to_text(),
+                row.bounded_time.to_text(), signatures[row.handler], effects[row.handler]]:
+            if field.byte_len() > 1048576 - row_bytes.byte_len(): return Err("directory-aspect-interface-budget")
+            val framed = _directory_aspect_frame_v2(field)
+            if framed.byte_len() > 1048576 - row_bytes.byte_len(): return Err("directory-aspect-interface-budget")
+            row_bytes = row_bytes + framed
+        val framed_row = _directory_aspect_frame_v2(row_bytes)
+        if framed_row.byte_len() > 1048576 - bytes.byte_len(): return Err("directory-aspect-interface-budget")
+        bytes = bytes + framed_row
+        handlers.push(DirectoryAspectHandlerV2(declaration: row,
+            signature_digest: signatures[row.handler], effects_digest: effects[row.handler]))
+    Ok(DirectoryAspectSemanticV2(source: current, source_epoch: epoch, module_identity: module.name,
+        coverage_schema: draft.coverage_schema, handlers: handlers, interface_digest: sha256_text(bytes)))
+
+# Called only inside an actual successful fresh lowering scope. A restored HIR
+# body cannot manufacture this observation; its retained receipt needs its own
+# current-source/provider/dependency admission.
+pub fn driver_directory_aspect_semantic_v2(ctx: CompileContext, module: HirModule,
+        source_path: text, source_content: text, lowering_errors: i64) -> DirectoryAspectSemanticV2?:
+    if lowering_errors != 0 or ctx.directory_source_epoch_v2 == nil or
+            not ctx.directory_aspect_drafts_v2.has(source_path) or
+            not ctx.directory_category_projections_v2.has(source_path): return nil
+    val source = ctx.directory_category_projections_v2[source_path]
+    if source.source_digest != sha256_text(source_content): return nil
+    val result = directory_aspect_semantic_capture_v2(ctx.directory_aspect_drafts_v2[source_path],
+        source, ctx.directory_source_epoch_v2.unwrap(), module, source_path)
+    if result.is_err(): return nil
+    Some(result.unwrap())
+
+# The caller supplies its current accepted object receipt, never a stored DTO
+# as self-authenticating input. Its scope/epoch and successful semantic compiler
+# path remain the publication authority.
+pub fn directory_aspect_object_observe_v2(semantic: DirectoryAspectSemanticV2,
+        object: MirInitializerObjectReceiptV1, epoch: DirectorySourceEpochV2) -> DirectoryAspectObjectV2?:
+    if not directory_source_epoch_equal_v2(semantic.source_epoch, epoch) or
+            not _directory_aspect_category_equal_v2(semantic.source, object.category) or
+            semantic.module_identity != object.module_identity or
+            semantic.source.canonical_path != object.source_path or
+            semantic.source.source_digest != object.source_digest or
+            semantic.source.target_triple != object.target_triple or
+            semantic.source.environment_policy_digest != object.environment_policy_digest or
+            object.object_size <= 0 or not three_payload_contract_digest_valid_v1(object.object_digest) or
+            not three_payload_contract_digest_valid_v1(object.capsule_identity_digest) or
+            not three_payload_contract_digest_valid_v1(object.executing_image_digest) or
+            not three_payload_contract_digest_valid_v1(semantic.interface_digest): return nil
+    var bytes = _directory_aspect_frame_v2("simple/local-aspect-whole-object/v2")
+    for value in [semantic.module_identity, semantic.interface_digest, object.object_digest,
+            object.capsule_identity_digest, object.executing_image_digest]:
+        bytes = bytes + _directory_aspect_frame_v2(value)
+    Some(DirectoryAspectObjectV2(semantic: semantic, object_digest: object.object_digest,
+        capsule_identity_digest: object.capsule_identity_digest,
+        executing_image_digest: object.executing_image_digest, implementation_digest: sha256_text(bytes)))

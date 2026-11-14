@@ -313,3 +313,22 @@ the actual semantic import resolver. The phase2 owner now retains the compact
 NoReads projection after successful surface insertion. Two added compact-receipt
 specs exercise source mismatch and local macro body changes; both are UNRUN.
 These phase2 hooks, ownership promotion and full pipeline remain unqualified.
+
+### Current local aspect semantic observation
+
+Fresh retained, streaming and uncached shard HIR lowering now resolves the sealed
+parser inventory against unique local function symbols before owner teardown.
+The compact observation retains actual ABI/effects and family-local descriptor
+order; unknown forms, imported or ambiguous handlers, stale source epochs and
+unsupported handler ABIs leave the category unavailable. Duplicate declarations
+reuse the handler projection. Known-empty inventories avoid function indexing.
+
+The observation is promoted with the owning scope and published only after its
+existing success gates; restored HIR does not manufacture a fresh receipt. It is
+not a final application or implementation identity: successful semantic checks
+remain required. The accepted native-object owner now joins exact source,
+category, epoch, capsule and image metadata, recording a separately domain-labeled
+whole-object implementation digest. This is conservatively sensitive to unrelated
+object edits, not a canonical function-body digest. Four real parser/HIR scenarios
+and two structural object-join scenarios are authored but UNRUN. No native or
+full pipeline claim is added by this source checkpoint.

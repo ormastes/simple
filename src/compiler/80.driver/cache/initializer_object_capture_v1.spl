@@ -1,3 +1,5 @@
+use compiler.common.cache_contract.directory_aspect_projection_v2.{DirectoryAspectObjectV2}
+use compiler.driver.cache.directory_aspect_semantic_v2.{directory_aspect_object_observe_v2}
 # Called only by the accepted native capsule owner after source revalidation.
 # Inputs are observations from that owner, not an application admission API.
 use compiler.driver.driver_types.{CompileContext}
@@ -12,6 +14,7 @@ use std.common.crypto.sha256.{sha256_text}
 pub fn driver_capture_initializer_object_v1(ctx: CompileContext, module_name: text,
         source_path: text, source_digest: text, object_path: text, object_digest: text, object_size: i64,
         capsule_identity: text) -> bool:
+    ctx.directory_aspect_objects_v2.remove(module_name)
     ctx.initializer_object_receipts_v1.remove(module_name)
     if not ctx.directory_category_projections_v2.has(source_path) or
             not ctx.mir_modules.has(module_name) or object_path == "" or object_size <= 0 or capsule_identity == "" or
@@ -44,13 +47,19 @@ pub fn driver_capture_initializer_object_v1(ctx: CompileContext, module_name: te
         target_triple: category.target_triple, environment_policy_digest: category.environment_policy_digest,
         executing_image_digest: image.sha256, capsule_identity_digest: sha256_text(capsule_identity),
         object_path: object_path, object_digest: object_digest, object_size: object_size, category: category, bodies: bodies)
+    val aspect_object: DirectoryAspectObjectV2? = if ctx.directory_source_epoch_v2 != nil and ctx.directory_aspect_semantics_v2.has(source_path):
+        directory_aspect_object_observe_v2(ctx.directory_aspect_semantics_v2[source_path],
+            receipt, ctx.directory_source_epoch_v2.unwrap())
+    else: nil
     if not driver_parse_transient_scope_pause_v1():
         if not driver_parse_transient_scope_end_v1():
             panic("initializer scratch scope close failed")
         return false
     val promoted = rt_transient_heap_promote(receipt)
+    val aspect_promoted = aspect_object == nil or rt_transient_heap_promote(aspect_object)
     val ended = driver_parse_transient_scope_end_v1()
-    if not promoted or not ended:
+    if not promoted or not aspect_promoted or not ended:
         panic("initializer receipt ownership failed")
     ctx.initializer_object_receipts_v1[module_name] = receipt
+    if val observed = aspect_object: ctx.directory_aspect_objects_v2[module_name] = observed
     true

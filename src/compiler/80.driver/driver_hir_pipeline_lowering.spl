@@ -1,3 +1,5 @@
+use compiler.common.cache_contract.directory_aspect_projection_v2.{DirectoryAspectSemanticV2}
+use compiler.driver.cache.directory_aspect_semantic_v2.{driver_directory_aspect_semantic_v2}
 use compiler.frontend.join_point_attr_registry.{join_point_attr_begin_epoch_v2}
 use compiler.driver.cache.directory_tldr_snapshot_capture_v2.{driver_aop_directory_snapshots_capture_v2}
 use compiler.frontend.core.parser_preprocessor.{pp_declare_parse_scope}
@@ -596,6 +598,7 @@ impl CompilerDriver:
         if proof != "": self.ctx.native_parsed_objectless_proofs[source.module_name] = proof
 
     me lower_retained_surface_module(lowering: HirLowering, module: ParserModule, source_path: text, is_entry: bool, source: SourceFile) -> Result<HirModule, text>:
+        self.ctx.directory_aspect_semantics_v2.remove(source.path)
         # @workaround bug=stage2_sanity_module_path_naming_probe_segv_2026_10_22 reason=trace_retained_hir_path_to_fault
         val nscope_trace = (env_get_opt("SIMPLE_NSCOPE_HIR_TRACE") ?? "") == "1"
         if nscope_trace: eprint("[nscope-hir] retained-enter path={source_path} entry={is_entry}")
@@ -609,12 +612,19 @@ impl CompilerDriver:
         val parsed_code_less = driver_native_parsed_module_has_no_runtime_body_v1(module)
         if nscope_trace: eprint("[nscope-hir] retained-pre-lower path={source_path}")
         val hir_module: HirModule = lowering.lower_parser_module_unstub(module, is_entry)
+        val aspect_semantic = driver_directory_aspect_semantic_v2(self.ctx, hir_module,
+            source.path, source.content, lowering.lowering_error_count())
         if nscope_trace: eprint("[nscope-hir] retained-lowered path={source_path}")
         if not rt_transient_array_scope_pause():
             driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
             val _ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
             return Err("transient HIR scope pause failed for {source_path}")
         if nscope_trace: eprint("[nscope-hir] retained-paused path={source_path}")
+        if aspect_semantic != nil and not rt_transient_heap_promote(aspect_semantic):
+            driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
+            if not driver_abort_reverse_reference_parse_scope_v1(reverse_token):
+                panic("aspect semantic scope close failed")
+            return Err("aspect semantic ownership promotion failed for {source.path}")
         if not rt_transient_heap_promote(hir_module):
             driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
             val _ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
@@ -664,10 +674,13 @@ impl CompilerDriver:
             return Err("transient HIR scope end failed for {source_path}")
         # The transient owner has ended successfully; the scalar classification
         # survives and all digest/map allocations now belong to the context.
+        if val observed = aspect_semantic:
+            self.ctx.directory_aspect_semantics_v2[source.path] = observed
         self.capture_native_parsed_objectless_v1(parsed_code_less, source)
         Ok(hir_module)
 
     me lower_streaming_surface_source(lowering: HirLowering, source: SourceFile, is_entry: bool) -> Result<HirModule, text>:
+        self.ctx.directory_aspect_semantics_v2.remove(source.path)
         # @workaround bug=stage2_sanity_module_path_naming_probe_segv_2026_10_22 reason=trace_noscope_hir_path_to_fault
         val nscope_trace = (env_get_opt("SIMPLE_NSCOPE_HIR_TRACE") ?? "") == "1"
         if nscope_trace: eprint("[nscope-hir] enter path={source.path} entry={is_entry}")
@@ -706,6 +719,8 @@ impl CompilerDriver:
         val flat_row_count_before = bootstrap_hir_module_count()
         val parsed_code_less = driver_native_parsed_module_has_no_runtime_body_v1(module)
         val hir_module: HirModule = lowering.lower_parser_module_unstub(module, is_entry)
+        val aspect_semantic = driver_directory_aspect_semantic_v2(self.ctx, hir_module,
+            source.path, source.content, lowering.lowering_error_count())
         if nscope_trace: eprint("[nscope-hir] lowered path={source.path}")
         # Keep the scope active through the complete lowering. The reparsed AST
         # and all lowering scratch graphs are transient; only the canonical HIR,
@@ -714,6 +729,11 @@ impl CompilerDriver:
             driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
             val _ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
             return Err("transient parser scope pause failed for {source.path}")
+        if aspect_semantic != nil and not rt_transient_heap_promote(aspect_semantic):
+            driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
+            if not driver_abort_reverse_reference_parse_scope_v1(reverse_token):
+                panic("aspect semantic scope close failed")
+            return Err("aspect semantic ownership promotion failed for {source.path}")
         if not rt_transient_heap_promote(hir_module):
             driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
             val _ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
@@ -743,6 +763,8 @@ impl CompilerDriver:
             driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
             return Err("transient parser scope end failed for {source.path}")
         # Never publish a proof from a failed lowering or a transient heap.
+        if val observed = aspect_semantic:
+            self.ctx.directory_aspect_semantics_v2[source.path] = observed
         self.capture_native_parsed_objectless_v1(parsed_code_less, source)
         Ok(hir_module)
 
@@ -759,6 +781,7 @@ impl CompilerDriver:
         archive_selection: DriverHirRuntimeStdArchiveSelectionV1?, source_index: i64,
         managed_selection: DriverHirManagedRuntimeSelectionV1? = nil
     ) -> DriverHirShardTransactionReceiptV1:
+        self.ctx.directory_aspect_semantics_v2.remove(source.path)
         val representation_contexts = representation_invocation_context_index_v1(self.ctx)
         # 0 = validated cache hit, 1 = published full HIR, 2 = source diagnostic,
         # 3 = codec-refused UNCACHED, -1 = infrastructure/ownership failure.
@@ -969,6 +992,11 @@ impl CompilerDriver:
                 else:
                     archived_body = Some(archived.unwrap())
 
+        val aspect_semantic: DirectoryAspectSemanticV2? = if not cached and errors.len() == 0 and infrastructure_error == "":
+            driver_directory_aspect_semantic_v2(self.ctx, module, source.path,
+                source.content, actual_lowering.lowering_error_count())
+        else: nil
+
         # Retain diagnostics and genuinely phase-wide memo/registry roots only.
         # Module bodies and their symbol-table snapshots stay transient, including
         # cache-hit decodes. A completed worker never needs these for MIR/codegen.
@@ -983,6 +1011,7 @@ impl CompilerDriver:
         val errors_owned = rt_transient_heap_promote(errors)
         val warnings_owned = rt_transient_heap_promote(warnings)
         val failure_owned = infrastructure_error == "" or rt_transient_heap_promote(infrastructure_error)
+        val aspect_owned = aspect_semantic == nil or rt_transient_heap_promote(aspect_semantic)
         val abi_owned = rt_transient_heap_promote(abi_receipt)
         val memos_owned = actual_lowering.promote_phase_memo_transient_owners()
         val cfg_owned = archive_input == nil or self.promote_target_cfg_receipt_v1(source.path)
@@ -1002,7 +1031,7 @@ impl CompilerDriver:
             actual_lowering.lowered_trait_count_value = 0
         hir_cache_clear_last_warnings()
         if not (errors_owned and warnings_owned and failure_owned and abi_owned and memos_owned and frontend_owned and
-                cache_reason_owned and archive_owned and cfg_owned):
+                cache_reason_owned and archive_owned and cfg_owned and aspect_owned):
             val ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
             # Partial root promotion cannot authorize another task in this
             # process. The parent records an incomplete infrastructure failure.
@@ -1029,6 +1058,8 @@ impl CompilerDriver:
         if not stored and not store_refused_codec:
             self.ctx.add_error("HIR shard completed without a durable module")
             return driver_hir_failed_shard_receipt_v1(-1)
+        if val observed = aspect_semantic:
+            self.ctx.directory_aspect_semantics_v2[source.path] = observed
         DriverHirShardTransactionReceiptV1(status: if cached: 0 elif stored: 1 else: 3,
             archive: archived_body)
 

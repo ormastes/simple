@@ -1,0 +1,115 @@
+# Actual parser and HIR owner scenarios. Authored, not executed or admitted as
+# evidence for the full source inventory/provider/object publication route.
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module_checked_reference_v1}
+use compiler.core.parser.{parser_initialization_generation_v1}
+use compiler.frontend.aspect_registry.{aspect_registry_seal_parser_inventory_v2}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_lowering.module_surface_declarations.{ModuleSurfaceParserOwner}
+use compiler.hir.hir_lowering.module_surface_semantic_projection.{module_surface_trait_root_v2, module_surface_extension_root_v2}
+use compiler.common.cache_contract.directory_source_epoch_v2.{DirectorySourceEpochV2}
+use compiler.common.cache_contract.directory_category_projection_v2.{DirectoryCategoryProjectionV2}
+use compiler.common.cache_contract.directory_aspect_draft_v2.{DirectoryAspectDraftV2}
+use compiler.driver.cache.directory_aspect_capture_v2.{directory_aspect_capture_v2}
+use compiler.driver.cache.directory_aspect_semantic_v2.{directory_aspect_semantic_capture_v2, directory_aspect_object_observe_v2}
+use compiler.common.cache_contract.directory_aspect_projection_v2.{DirectoryAspectSemanticV2}
+use compiler.common.cache_contract.mir_initializer_plan_v1.{MirInitializerObjectReceiptV1, MirInitializerBodyReceiptV1, MirInitializerPlanV1}
+
+fn aspect_semantic_fixture(source: text) -> (DirectoryAspectDraftV2, HirModule):
+    val before = parser_initialization_generation_v1()
+    val parsed = parse_and_build_module_checked_reference_v1(source, "pkg/aspects.spl").unwrap()
+    val after = parser_initialization_generation_v1()
+    expect(aspect_registry_seal_parser_inventory_v2("pkg/aspects.spl", true)).to_equal(true)
+    val category = DirectoryCategoryProjectionV2(canonical_path: "pkg/aspects.spl",
+        source_identity: "pkg/aspects.spl", source_digest: sha256_text(source),
+        target_triple: "aarch64-unknown-linux-gnu", preprocessed_digest: sha256_text(source),
+        cfg_decision_digest: sha256_text("fixture-without-cfg"),
+        environment_policy_digest: sha256_text("fixture-policy"),
+        trait_root: module_surface_trait_root_v2(parsed.traits),
+        extension_root: module_surface_extension_root_v2(parsed.impls, parsed.extend_enums))
+    val epoch = DirectorySourceEpochV2(driver_identity: 1, generation: 1)
+    val draft = directory_aspect_capture_v2(ModuleSurfaceParserOwner.new(parsed),
+        "pkg/aspects.spl", category, epoch, before, after).unwrap()
+    var lowering = HirLowering.with_filename("pkg/aspects.spl")
+    val module = lowering.lower_parser_module_unstub(parsed, false)
+    expect(lowering.lowering_error_count()).to_equal(0)
+    (draft, module)
+
+val ASPECT_SEMANTIC_SOURCE = "@advice(forward, submit)\n@readonly\n@noalloc\n@bounded_time\nfn observe():\n    return\n"
+
+# Structural join fixture only; its hashes are not evidence of emitted files.
+fn aspect_object_fixture(value: DirectoryAspectSemanticV2) -> MirInitializerObjectReceiptV1:
+    MirInitializerObjectReceiptV1(module_identity: value.module_identity,
+        source_path: value.source.canonical_path, source_digest: value.source.source_digest,
+        target_triple: value.source.target_triple, environment_policy_digest: value.source.environment_policy_digest,
+        executing_image_digest: sha256_text("fixture-image"), capsule_identity_digest: sha256_text("fixture-capsule"),
+        object_path: "fixture.o", object_digest: sha256_text("fixture-object"), object_size: 8,
+        category: value.source, bodies: MirInitializerBodyReceiptV1(
+            plan: MirInitializerPlanV1(module_identity: value.module_identity, bootstrap_module_index: 0,
+                ordered_steps: [], emitted_init_symbol: ""), initializer_body_digest: "", wrapper_body_digest: ""))
+
+describe "local aspect typed semantic observations":
+    it "captures the actual local handler ABI and effects":
+        val pair = aspect_semantic_fixture(ASPECT_SEMANTIC_SOURCE)
+        val result = directory_aspect_semantic_capture_v2(pair.0, pair.0.source,
+            pair.0.epoch, pair.1, "pkg/aspects.spl").unwrap()
+        expect(result.handlers.len()).to_equal(1)
+        expect(result.handlers[0].declaration.handler).to_equal("observe")
+        expect(result.handlers[0].signature_digest.byte_len()).to_equal(64)
+        expect(result.handlers[0].effects_digest.byte_len()).to_equal(64)
+        expect(result.interface_digest.byte_len()).to_equal(64)
+
+    it "distinguishes a complete empty inventory from an incomplete draft":
+        val pair = aspect_semantic_fixture("fn ordinary() -> i64:\n    7\n")
+        val result = directory_aspect_semantic_capture_v2(pair.0, pair.0.source,
+            pair.0.epoch, pair.1, "pkg/aspects.spl").unwrap()
+        expect(result.handlers.len()).to_equal(0)
+        var incomplete = pair.0
+        incomplete.inventory_complete = false
+        expect(directory_aspect_semantic_capture_v2(incomplete, pair.0.source,
+            pair.0.epoch, pair.1, "pkg/aspects.spl").is_err()).to_equal(true)
+
+    it "refuses a stale source epoch or source projection":
+        val pair = aspect_semantic_fixture(ASPECT_SEMANTIC_SOURCE)
+        val stale = DirectorySourceEpochV2(driver_identity: 1, generation: 2)
+        expect(directory_aspect_semantic_capture_v2(pair.0, pair.0.source,
+            stale, pair.1, "pkg/aspects.spl").is_err()).to_equal(true)
+        var changed = pair.0.source
+        changed.preprocessed_digest = sha256_text("different parser input")
+        expect(directory_aspect_semantic_capture_v2(pair.0, changed,
+            pair.0.epoch, pair.1, "pkg/aspects.spl").is_err()).to_equal(true)
+
+    it "refuses an imported handler even with an identical short name":
+        val pair = aspect_semantic_fixture(ASPECT_SEMANTIC_SOURCE)
+        var module = pair.1
+        for function in module.functions.values():
+            if function.name == "observe":
+                var symbol = module.symbols.symbols[function.symbol.id]
+                symbol.defining_module = Some("other/module.spl")
+                module.symbols.symbols[function.symbol.id] = symbol
+        expect(directory_aspect_semantic_capture_v2(pair.0, pair.0.source,
+            pair.0.epoch, module, "pkg/aspects.spl").is_err()).to_equal(true)
+
+    it "binds the whole object observation without changing the interface":
+        val pair = aspect_semantic_fixture(ASPECT_SEMANTIC_SOURCE)
+        val semantic = directory_aspect_semantic_capture_v2(pair.0, pair.0.source,
+            pair.0.epoch, pair.1, "pkg/aspects.spl").unwrap()
+        var object = aspect_object_fixture(semantic)
+        val before = directory_aspect_object_observe_v2(semantic, object, pair.0.epoch).unwrap()
+        object.object_digest = sha256_text("changed-whole-object")
+        val after = directory_aspect_object_observe_v2(semantic, object, pair.0.epoch).unwrap()
+        expect(before.semantic.interface_digest).to_equal(after.semantic.interface_digest)
+        expect(before.implementation_digest == after.implementation_digest).to_equal(false)
+
+    it "rejects object metadata from another source or generation":
+        val pair = aspect_semantic_fixture(ASPECT_SEMANTIC_SOURCE)
+        val semantic = directory_aspect_semantic_capture_v2(pair.0, pair.0.source,
+            pair.0.epoch, pair.1, "pkg/aspects.spl").unwrap()
+        var object = aspect_object_fixture(semantic)
+        val stale = DirectorySourceEpochV2(driver_identity: 1, generation: 2)
+        expect(directory_aspect_object_observe_v2(semantic, object, stale)).to_be_nil()
+        object.source_digest = sha256_text("other-source")
+        expect(directory_aspect_object_observe_v2(semantic, object, pair.0.epoch)).to_be_nil()
