@@ -13,9 +13,11 @@ user configuration or key is absent or invalid, provider admission fails with
 
 Project `simple.sdn`, command-line arguments, and plugin metadata cannot
 introduce or override this key. User-config location follows the platform's
-system-location policy. There is no generated default key and no network trust
-lookup. Provision the public key through the host user's trusted configuration
-before enabling a provider.
+system-location policy, including host-launcher `SIMPLE_SYS_USER_CONFIG`, XDG,
+or home settings. This is host-user configuration authority; it does not
+protect against a hostile launcher environment. There is no generated default
+key and no network trust lookup. Provision the public key through the host
+user's trusted configuration before enabling a provider.
 
 Example:
 
