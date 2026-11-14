@@ -1,0 +1,150 @@
+# Purpose and audience: regression evidence for capability-manager hardening that a stale merge dropped.
+# @req REQ-SSPEC-UNIT
+# bug: doc/08_tracking/bug/capability_hardening_clobbered_2026-11-15.md
+
+"""
+## Purpose and audience
+
+Purpose: pin the capability-manager security checks restored after the
+`e274cd33719` stale-snapshot clobber. Audience: kernel security engineers.
+
+## Operator workflow
+
+1. Run `bin/simple test test/01_unit/os/security/capability_hardening_restore_spec.spl`.
+2. Every scenario must pass; a failure means a hardening check regressed again.
+"""
+use std.spec.step
+use std.spec.{describe, it, expect}
+use os.kernel.types.task_types.{TaskId}
+use os.kernel.types.capability_types.{CapabilityToken, CapabilityKind, CapabilitySet}
+use os.kernel.ipc.capability.{CapabilityManager}
+
+fn _tok(kind: CapabilityKind, generation: u64, tid: u64, owner: u64) -> CapabilityToken:
+    CapabilityToken(kind: kind, generation: generation, owner: owner, token_id: tid, parent_token_id: 0u64, depth: 2)
+
+fn _read_set(prefix: text, owner: u64) -> CapabilitySet:
+    CapabilitySet(caps: [_tok(CapabilityKind.FileRead(path_prefix: prefix), 1u64, 1u64, owner)], is_pledged: true)
+
+fn _caps_len(mgr: CapabilityManager, task: TaskId) -> i64:
+    val o = mgr.capabilities_for_task(task)
+    if o == nil:
+        return -1
+    o.unwrap().caps.len()
+
+describe "unveil prefix matching requires a path-component boundary":
+    """Unveiling /data must not open /database."""
+
+    it "unveil /data allows /data and /data/x but denies /database":
+        # @req REQ-SSPEC-UNIT
+        step("unveil /data with root read authority, then probe siblings")
+        var mgr = CapabilityManager.new()
+        val t = TaskId(id: 20)
+        mgr.init_task(t, _read_set("/", 20u64))
+        mgr.unveil(t, "/data", "r")
+        expect(mgr.check_file_access(t, "/data", "r")).to_equal(true)
+        expect(mgr.check_file_access(t, "/data/x", "r")).to_equal(true)
+        expect(mgr.check_file_access(t, "/database", "r")).to_equal(false)
+        expect(mgr.check_file_access(t, "/dat", "r")).to_equal(false)
+
+    it "generalization: a trailing-slash unveil and nested siblings keep the boundary":
+        # @req REQ-SSPEC-UNIT
+        step("unveil /srv/app/ and probe nested and look-alike paths")
+        var mgr = CapabilityManager.new()
+        val t = TaskId(id: 21)
+        mgr.init_task(t, _read_set("/", 21u64))
+        mgr.unveil(t, "/srv/app/", "r")
+        expect(mgr.check_file_access(t, "/srv/app/main", "r")).to_equal(true)
+        expect(mgr.check_file_access(t, "/srv/application", "r")).to_equal(false)
+        expect(mgr.check_file_access(t, "/srv", "r")).to_equal(false)
+
+describe "check_file_access requires the matching capability per permission":
+    """Unveil alone is not authority: each requested permission needs its cap."""
+
+    it "a read-only task is denied write, exec, create, and unknown permissions":
+        # @req REQ-SSPEC-UNIT
+        step("init a task holding only FileRead(/) and probe each permission")
+        var mgr = CapabilityManager.new()
+        val t = TaskId(id: 22)
+        mgr.init_task(t, _read_set("/", 22u64))
+        expect(mgr.check_file_access(t, "/etc/x", "r")).to_equal(true)
+        expect(mgr.check_file_access(t, "/etc/x", "w")).to_equal(false)
+        expect(mgr.check_file_access(t, "/etc/x", "rw")).to_equal(false)
+        expect(mgr.check_file_access(t, "/etc/x", "x")).to_equal(false)
+        expect(mgr.check_file_access(t, "/etc/x", "c")).to_equal(false)
+        expect(mgr.check_file_access(t, "/etc/x", "")).to_equal(false)
+        expect(mgr.check_file_access(t, "/etc/x", "z")).to_equal(false)
+
+    it "read on a narrow prefix does not grant read outside it":
+        # @req REQ-SSPEC-UNIT
+        step("init a task holding FileRead(/home) and read /etc")
+        var mgr = CapabilityManager.new()
+        val t = TaskId(id: 23)
+        mgr.init_task(t, _read_set("/home", 23u64))
+        expect(mgr.check_file_access(t, "/home/u", "r")).to_equal(true)
+        expect(mgr.check_file_access(t, "/etc/passwd", "r")).to_equal(false)
+
+describe "init_task never grants ambient-full authority to a non-init task":
+    """An unpledged, empty set means ALL authority; only task 1 may hold it."""
+
+    it "a non-init task given CapabilitySet.full() holds nothing":
+        # @req REQ-SSPEC-UNIT
+        step("init task 30 with the ambient-full set")
+        var mgr = CapabilityManager.new()
+        val t = TaskId(id: 30)
+        mgr.init_task(t, CapabilitySet.full())
+        expect(mgr.check(t, CapabilityKind.NetRaw)).to_equal(false)
+        expect(mgr.check(t, CapabilityKind.ProcessSpawn)).to_equal(false)
+
+    it "init (task 1) keeps ambient-full authority":
+        # @req REQ-SSPEC-UNIT
+        step("init task 1 with the ambient-full set")
+        var mgr = CapabilityManager.new()
+        val t = TaskId(id: 1)
+        mgr.init_task(t, CapabilitySet.full())
+        expect(mgr.check(t, CapabilityKind.ProcessSpawn)).to_equal(true)
+
+describe "revoking the last token leaves deny-all, never ambient-full":
+    """An emptied set must become pledged so it does not read as full authority."""
+
+    it "revoke of the only token denies afterwards":
+        # @req REQ-SSPEC-UNIT
+        step("init with one token, revoke it, probe an unrelated cap")
+        var mgr = CapabilityManager.new()
+        val t = TaskId(id: 40)
+        val tok = _tok(CapabilityKind.FileRead(path_prefix: "/"), 1u64, 1u64, 40u64)
+        mgr.init_task(t, CapabilitySet(caps: [tok], is_pledged: true))
+        mgr.revoke(tok)
+        expect(mgr.check(t, CapabilityKind.FileRead(path_prefix: "/x"))).to_equal(false)
+        expect(mgr.check(t, CapabilityKind.NetRaw)).to_equal(false)
+
+    it "revoke_transitive of the only token denies afterwards":
+        # @req REQ-SSPEC-UNIT
+        step("init with one token, transitively revoke it, probe")
+        var mgr = CapabilityManager.new()
+        val t = TaskId(id: 41)
+        val tok = _tok(CapabilityKind.ProcessSpawn, 1u64, 9u64, 41u64)
+        mgr.init_task(t, CapabilitySet(caps: [tok], is_pledged: true))
+        mgr.revoke_transitive(9u64)
+        expect(mgr.check(t, CapabilityKind.ProcessSpawn)).to_equal(false)
+        expect(mgr.check(t, CapabilityKind.NetRaw)).to_equal(false)
+
+describe "sandbox-lowered tokens carry provenance":
+    """Every sandbox token gets a distinct token_id and the root depth budget."""
+
+    it "read/write/spawn/net tokens have unique nonzero ids and depth 2":
+        # @req REQ-SSPEC-UNIT
+        step("install a sandbox lowering naming four handle kinds")
+        var mgr = CapabilityManager.new()
+        val t = TaskId(id: 50)
+        mgr.install_sandbox_lowering(t, "ReadFile WriteFile ProcessSpawn NetworkEndpoint")
+        val o = mgr.capabilities_for_task(t)
+        expect(o != nil).to_equal(true)
+        val cs = o.unwrap()
+        expect(cs.caps.len()).to_equal(4)
+        var ids: [u64] = []
+        for c in cs.caps:
+            expect(c.token_id != 0u64).to_equal(true)
+            expect(c.depth).to_equal(2)
+            for prior in ids:
+                expect(prior != c.token_id).to_equal(true)
+            ids.push(c.token_id)

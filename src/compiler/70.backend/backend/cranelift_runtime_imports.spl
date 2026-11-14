@@ -64,6 +64,41 @@ fn cl_jit_refuse_call_abi(cl_module: i64, message: text) -> bool:
     _cl_import_ledger_abi_v1 = _cl_import_ledger_abi_v1.push(message)
     true
 
+# Call-ABI refusal record for one AOT module. A refused cross-module call is a
+# compile error of the MODULE being lowered, not of the compiler process: the
+# old panic aborted the single codegen worker and marked every module of the
+# build failed (Stage 3 run 32, 1664 modules for one refused call). The lowering
+# records the refusal, emits a placeholder and keeps going; the AOT entry
+# returns every recorded refusal as that module's CompileError BEFORE an object
+# is emitted, so a placeholder never reaches an object or a cache.
+# Kept apart from the JIT import ledger above, which also selects import
+# linkage: AOT modules keep plain import linkage.
+# One module is lowered at a time in a process (begin, lower, end): no lock.
+var _cl_aot_call_abi_module_v1: i64 = 0
+var _cl_aot_call_abi_errors_v1: [text] = []
+
+fn cl_aot_call_abi_begin(cl_module: i64):
+    _cl_aot_call_abi_module_v1 = cl_module
+    _cl_aot_call_abi_errors_v1 = []
+
+fn cl_aot_call_abi_end() -> [text]:
+    """The call-ABI refusals recorded since cl_aot_call_abi_begin, in order."""
+    val errors = _cl_aot_call_abi_errors_v1
+    _cl_aot_call_abi_module_v1 = 0
+    _cl_aot_call_abi_errors_v1 = []
+    errors
+
+fn cl_aot_refuse_call_abi(cl_module: i64, message: text) -> bool:
+    """Record a call-ABI refusal for the AOT module being compiled.
+
+    True when recorded: the caller emits a placeholder value and the AOT entry
+    fails the module with the refusal. False when no AOT record is open for
+    this module handle: the caller keeps the fail-closed panic."""
+    if cl_module == 0 or cl_module != _cl_aot_call_abi_module_v1:
+        return false
+    _cl_aot_call_abi_errors_v1 = _cl_aot_call_abi_errors_v1.push(message)
+    true
+
 fn cl_jit_import_refused(cl_module: i64, handle: i64) -> bool:
     """True when the provider refused an import of the JIT module being
     compiled (the ledger holds its name): the caller emits a placeholder value

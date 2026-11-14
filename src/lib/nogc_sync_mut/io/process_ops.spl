@@ -1120,22 +1120,32 @@ pub fn _process_run_raw(cmd: text, args: [text]) -> (text, text, i64):
     result
 
 pub fn _process_run_bounded_raw(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> (text, text, i64):
+    val scrub_env = _test_child_env_scrub_active()
+    val saved_env = if scrub_env: _test_child_env_scrub_take() else: _test_child_env_scrub_empty_save()
+    val result = process_run_bounded_spec_child(cmd, args, timeout_ms, max_output_bytes)
+    if scrub_env:
+        _test_child_env_scrub_restore(saved_env)
+    result
+
+pub fn process_run_bounded_spec_child(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> (text, text, i64):
+    """Bounded run that does NOT apply the test-child env scrub.
+
+    Only for a test runner spawning its OWN spec child: that child must keep
+    the SIMPLE_EXECUTION_MODE/SIMPLE_RUNTIME_MODE pins and the scrub marker
+    (it scrubs for its own grandchildren). Spawning it through the scrubbing
+    `_process_run_bounded_raw` silently dropped the pins, so the spec ran on
+    the default JIT engine and emitted no SPEC FILE VERDICT. Bug:
+    doc/08_tracking/bug/test_runner_spec_child_loses_mode_pins_2026-11-14.md"""
     val tool: (text, [text]) = _resolve_posix_tool(cmd, args)
     val native_command: text = host_path_native(tool.0 + "")
     val native_arguments: [text] = tool.1
     # @workaround bug=phase2_bounded_process_text_abi_2026_10_27 reason=Keep the command pointer and UTF8 byte extent explicit for native process capture until the deployed P2 ABI is qualified
     val interpreted = unsafe(capabilities: [ffi]): rt_is_interpreter_runtime()
     val jit = unsafe(capabilities: [ffi]): rt_is_jit_runtime()
-    val scrub_env = _test_child_env_scrub_active()
-    val saved_env = if scrub_env: _test_child_env_scrub_take() else: _test_child_env_scrub_empty_save()
-    val result: (text, text, i64) = if not interpreted and not jit:
-        process_capture_bounded_native(native_command, native_arguments, timeout_ms, max_output_bytes)
-    else:
-        unsafe(capabilities: [ffi]):
-            rt_process_run_bounded(native_command, native_arguments, timeout_ms, max_output_bytes)
-    if scrub_env:
-        _test_child_env_scrub_restore(saved_env)
-    result
+    if not interpreted and not jit:
+        return process_capture_bounded_native(native_command, native_arguments, timeout_ms, max_output_bytes)
+    unsafe(capabilities: [ffi]):
+        rt_process_run_bounded(native_command, native_arguments, timeout_ms, max_output_bytes)
 
 pub fn _process_is_running_raw(pid: i64) -> bool:
     unsafe(capabilities: [ffi]):

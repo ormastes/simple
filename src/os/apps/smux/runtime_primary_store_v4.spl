@@ -1,0 +1,39 @@
+# Primary request/plan archives share the existing protected publication owner;
+# namespaces and request digests remain distinct from output-follow V3.
+use os.apps.smux.runtime_primary_request_v4.*
+use os.apps.smux.runtime_binding_store_v3.{binding_artifact_path_v3, binding_artifact_store_v3}
+use std.common.contracts.container.primary_attach_v1.*
+use std.nogc_sync_mut.io.file_ops.file_read_regular_no_follow_bounded
+
+pub fn smux_primary_request_load_v4(root: text, uid: text) -> Result<SmuxRuntimePrimaryRequestV4, text>:
+    val request = smux_runtime_primary_request_decode_v4(file_read_regular_no_follow_bounded(
+        binding_artifact_path_v3(root, "primary-requests-v4", uid)?, 4096)?)?
+    if request.target.binding_uid != uid: return Err("primary-request-uid-mismatch")
+    Ok(request)
+
+pub fn smux_primary_plan_match_v4(request: SmuxRuntimePrimaryRequestV4,
+        plan: ContainerPrimaryAttachPlanV1) -> Result<(), text>:
+    if (plan.identity.binding_digest != smux_runtime_primary_request_digest_v4(request)? or
+            plan.identity.operation_id != request.target.helper_operation_id or
+            plan.identity.parent_operation_id != request.target.workload_operation_id or
+            plan.identity.parent_budget_digest != request.target.parent_budget_digest or
+            plan.terminal_mode != request.terminal_mode): return Err("primary-plan-request-mismatch")
+    Ok(())
+
+pub fn smux_primary_plan_store_v4(root: text, request: SmuxRuntimePrimaryRequestV4,
+        plan: ContainerPrimaryAttachPlanV1) -> Result<(), text>:
+    smux_primary_plan_match_v4(request, plan)?
+    binding_artifact_store_v3(root, "primary-requests-v4", request.target.binding_uid,
+        smux_runtime_primary_request_encode_v4(request)?, 4096)?
+    binding_artifact_store_v3(root, "primary-plans-v4", request.target.binding_uid,
+        container_primary_attach_plan_encode_v1(plan)?, 2097152)
+
+pub fn smux_primary_plan_load_v4(root: text,
+        request: SmuxRuntimePrimaryRequestV4) -> Result<ContainerPrimaryAttachPlanV1, text>:
+    val retained = smux_primary_request_load_v4(root, request.target.binding_uid)?
+    if smux_runtime_primary_request_encode_v4(retained)? != smux_runtime_primary_request_encode_v4(request)?:
+        return Err("primary-request-replay-conflict")
+    val plan = container_primary_attach_plan_decode_v1(file_read_regular_no_follow_bounded(
+        binding_artifact_path_v3(root, "primary-plans-v4", request.target.binding_uid)?, 2097152)?)?
+    smux_primary_plan_match_v4(request, plan)?
+    Ok(plan)

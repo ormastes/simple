@@ -1,7 +1,8 @@
 # Visibility error swallowed by the JIT -> interpreter fallback (2026-11-13)
 
 - **Ids:** `visibility_error_jit_fallback_fail_open_2026-11-13` (P2, fail-open),
-  follow-up `jit_main_lane_skips_private_import_visibility_2026-11-13` (P2, open).
+  follow-up `jit_main_lane_skips_private_import_visibility_2026-11-13` (P2, fixed
+  2026-11-14, see the end of this file).
 - **Found by:** PR #8961 (`private_import_visibility_sweep_2026-11-13.md`,
   "Pre-existing reds").
 - **Branch:** `work/visibility-error-fail-closed-20261113` on `release/1.0.0`
@@ -57,6 +58,15 @@ no fallback is involved. Porting the rule (baseline, same-directory and test
 exemptions) there turns currently-working JIT programs red on a release
 branch, so it is filed separately as
 `jit_main_lane_skips_private_import_visibility_2026-11-13`.
+
+**Fixed 2026-11-14** (`work/private-gate-residuals-20261114`): the JIT run
+lane now applies the CALL rule instead of porting the import rule. HIR
+lowering records every reference that binds to a private fn of another
+directory, and the driver rejects the program before executing `main` when
+`main` can reach one. Detail, census and the `pub` wave it needed:
+`private_call_gate_skips_import_bound_and_entry_calls_2026-11-14.md`,
+"Residuals closed". An unused braced import of a private fn is still not
+rejected by the JIT (the interpreter rejects it); every use of it is.
 
 ## Evidence
 

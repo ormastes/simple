@@ -5,6 +5,8 @@ use os.apps.smux.runtime_binding_state_v3.{SmuxRuntimeBindingOwnerV3, SmuxRuntim
     SmuxRuntimeBindingEntryV3, smux_runtime_binding_index_v3, smux_runtime_binding_reply_turn_v3,
     smux_runtime_binding_prune_released_v3}
 use os.apps.smux.runtime_binding_reply_v3.SmuxRuntimeBindingReplyV3
+use os.apps.smux.runtime_binding_state_v3.{SmuxRuntimeBindingDomainV4,
+    smux_binding_pending_add_v4, smux_binding_pending_resolve_v4, smux_primary_entry_blocks_v4}
 use os.apps.smux.runtime_binding_store_v3.{smux_binding_request_load_v3,
     smux_binding_plan_load_v3, smux_binding_receipt_load_v3}
 use os.apps.smux.api.{smux_owner_snapshot, smux_configuration_revision,
@@ -134,6 +136,9 @@ fn binding_inspect_entry_v3(owner: SmuxRuntimeBindingOwnerV3, index: int) -> Smu
 pub fn smux_runtime_binding_inspect_v3(owner: SmuxRuntimeBindingOwnerV3,
         binding_uid: text) -> SmuxRuntimeBindingTurnV3:
     var current = owner
+    for opposite in current.primary_entries:
+        if smux_primary_entry_blocks_v4(opposite, binding_uid):
+            return inspect_absent_v3(current, binding_uid, "rejected", "runtime-binding-uid-owned-by-primary")
     val index = smux_runtime_binding_index_v3(current, binding_uid)
     if index >= 0: return binding_inspect_entry_v3(current, index)
     val root = current.local.capacity.journal.root
@@ -170,11 +175,13 @@ pub fn smux_runtime_binding_inspect_v3(owner: SmuxRuntimeBindingOwnerV3,
             reply.code = "runtime-binding-recovery-unconfirmed"
             reply.stream_owned = false
             reply.host_release_pending = true
-            if not current.unresolved_uids.contains(binding_uid): current.unresolved_uids.push(binding_uid)
+            current.unresolved_uids = smux_binding_pending_add_v4(current.unresolved_uids,
+                SmuxRuntimeBindingDomainV4.OutputFollowV3, binding_uid)
         return smux_runtime_binding_reply_turn_v3(current, reply)
     current = smux_runtime_binding_prune_released_v3(current)
-    if current.entries.len() >= 8:
-        if not current.unresolved_uids.contains(binding_uid): current.unresolved_uids.push(binding_uid)
+    if current.entries.len() + current.primary_entries.len() >= 8:
+        current.unresolved_uids = smux_binding_pending_add_v4(current.unresolved_uids,
+            SmuxRuntimeBindingDomainV4.OutputFollowV3, binding_uid)
         reply.status = "unconfirmed"
         reply.code = "runtime-binding-recovery-capacity"
         reply.stream_owned = false
@@ -186,14 +193,16 @@ pub fn smux_runtime_binding_inspect_v3(owner: SmuxRuntimeBindingOwnerV3,
         reply.status = "unconfirmed"
         reply.code = "runtime-binding-recovery-correlation-failed"
         reply.stream_owned = false
-        if not current.unresolved_uids.contains(binding_uid): current.unresolved_uids.push(binding_uid)
+        current.unresolved_uids = smux_binding_pending_add_v4(current.unresolved_uids,
+            SmuxRuntimeBindingDomainV4.OutputFollowV3, binding_uid)
         return smux_runtime_binding_reply_turn_v3(current, reply)
     val proof = host_helper_execution_proof_load_typed_v1(root, restored.operation.id)
     if proof.is_err():
         reply.status = "unconfirmed"
         reply.code = "runtime-binding-retained-proof-unavailable"
         reply.stream_owned = false
-        if not current.unresolved_uids.contains(binding_uid): current.unresolved_uids.push(binding_uid)
+        current.unresolved_uids = smux_binding_pending_add_v4(current.unresolved_uids,
+            SmuxRuntimeBindingDomainV4.OutputFollowV3, binding_uid)
         return smux_runtime_binding_reply_turn_v3(current, reply)
     reply.committed = true
     reply.helper_grant_id = proof.unwrap().signed.grant.id
@@ -206,8 +215,6 @@ pub fn smux_runtime_binding_inspect_v3(owner: SmuxRuntimeBindingOwnerV3,
     reply.host_release_pending = true
     current.entries.push(SmuxRuntimeBindingEntryV3(request: request.unwrap(), plan: restored.output_plan,
         reply: reply, recovered: Some(restored)))
-    var pending: [text] = []
-    for uid in current.unresolved_uids:
-        if uid != binding_uid: pending.push(uid)
-    current.unresolved_uids = pending
+    current.unresolved_uids = smux_binding_pending_resolve_v4(current.unresolved_uids,
+        SmuxRuntimeBindingDomainV4.OutputFollowV3, binding_uid)
     binding_inspect_entry_v3(current, current.entries.len() - 1)

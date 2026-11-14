@@ -36,8 +36,13 @@ reads. `00.common/data/async_init_registry_v1.spl` wraps the existing
 type check (`E_ASYNC_INIT_TYPE`), an epoch fence (`E_ASYNC_INIT_STALE`) and a
 zero-slot guarantee for nodes with no pending field. Specs:
 `test/01_unit/compiler/data/async_init_registry_v1_spec.spl`,
-`test/01_unit/compiler/hir/async_ctor_arg_parse_spec.spl`. Open: readiness
-analysis (`E_ATTR_NOT_READY`), scheduler waiters, Rust seed parser.
+`test/01_unit/compiler/hir/async_ctor_arg_parse_spec.spl`. `E_ATTR_NOT_READY` (2026-11-15): an unawaited read `n.f` of a field bound with
+`f: async <expr>` at a construction of local `n` in the same function; error in
+every gate mode; implemented in the `RequiredInitCollectorV1` visitor of
+`required_field_init_v1.spl`, spec `test/01_unit/compiler/hir/attr_not_ready_v1_spec.spl`.
+Open (see `doc/08_tracking/bug/immutable_async_open_questions_2026-11-15.md`):
+`E_INIT_CAPABILITY_ESCAPE` ("region" undefined by the plan), non-await readiness
+proofs, alias flow, scheduler waiters, Rust seed parser.
 ## Immutable<T> read-only view (P2a, 2026-11-14)
 `Immutable<T>` lowers to `T`; the declaring param/local symbol is recorded in
 `HirLowering.immutable_view_symbols` and a field/index write rooted at it is

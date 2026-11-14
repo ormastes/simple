@@ -1,0 +1,107 @@
+"""Trace view text rendering (pure): one fixed-width line model shared by TUI and GUI.
+
+Every journey calls the canonical service and renders its result; nothing is re-derived.
+Register `trace_view_lines` as the trace view provider's renderer (no registry call site
+exists under src/app/traceability or src/app/editor outside the extension-owned files)."""
+# @req REQ-CARET-TRC-001 REQ-CARET-TRC-002 REQ-CARET-TRC-003
+use std.common.traceability.model.*
+use std.common.traceability.query.{query_trace_graph}
+use std.common.traceability.query_nodes_v1.{TraceNodeQueryV1}
+use std.common.traceability.query_refs_v1.{TraceReferenceQueryV1, TraceReferencePageV1, query_trace_references_v1}
+use app.traceability.ide_view_provider.*
+
+pub enum TraceViewState:
+    Ready
+    Stale
+    Cancelled
+    SourceMissing
+
+val ID_WIDTH = 28
+val TITLE_WIDTH = 32
+
+fn fit(s: text, width: i64) -> text:
+    var out = ""
+    var n = 0
+    for ch in s.chars():
+        if n < width:
+            out = out + ch.to_text()
+            n = n + 1
+    while n < width:
+        out = out + " "
+        n = n + 1
+    out
+
+pub fn render_row(id: text, title: text, badge: EvidenceBadge) -> text:
+    fit(id, ID_WIDTH) + " " + fit(title, TITLE_WIDTH) + " " + badge_label(badge)
+
+pub fn render_rows(rows: [TraceViewRow]) -> [text]:
+    var lines: [text] = []
+    for row in rows:
+        lines.push(render_row(row.id, row.title, row.badge))
+    lines
+
+pub fn view_state(current_snapshot: text, response_snapshot: text, cancelled: bool, source_present: bool) -> TraceViewState:
+    """Pure guard: a response is Ready only for the selected snapshot, uncancelled, with its source."""
+    if cancelled: return TraceViewState.Cancelled
+    if response_snapshot != current_snapshot: return TraceViewState.Stale
+    if not source_present: return TraceViewState.SourceMissing
+    TraceViewState.Ready
+
+pub fn view_state_lines(state: TraceViewState) -> [text]:
+    """Explicit state line; never any revision's content."""
+    match state:
+        case TraceViewState.Ready: []
+        case TraceViewState.Stale: ["stale: response is for a different snapshot; resync required"]
+        case TraceViewState.Cancelled: ["unavailable: request was cancelled"]
+        case TraceViewState.SourceMissing: ["unavailable: source blob is missing for this snapshot"]
+
+fn header(snapshot: text) -> [text]:
+    ["snapshot: " + snapshot]
+
+pub fn trace_view_lines(graph: TraceGraph, query: TraceNodeQueryV1, quals: [TraceQualification], snapshot: text) -> [text]:
+    """list / show: identity line, structural banner when non-empty, then rows."""
+    val state = view_state(snapshot, graph.subject.snapshot_id, false, true)
+    val qstate = view_state(snapshot, query.snapshot_id, false, true)
+    if state != TraceViewState.Ready: return view_state_lines(state)
+    if qstate != TraceViewState.Ready: return view_state_lines(qstate)
+    match view_query(graph, query, quals):
+        case Err(e): header(snapshot) + ["unavailable: " + e]
+        case Ok(rows): header(snapshot) + [view_banner(rows)] + render_rows(rows)
+
+fn refs_page_lines(page: TraceReferencePageV1, quals: [TraceQualification], snapshot: text) -> [text]:
+    var rows: [TraceViewRow] = []
+    for r in page.references:
+        rows.push(TraceViewRow(id: r.other_id, title: r.direction + " " + r.relation + " " + r.other_title,
+            badge: node_badge(r.other_id, quals)))
+    header(snapshot) + [view_banner(rows)] + ["selected: " + page.selected.id + " " + page.selected.title] + render_rows(rows)
+
+pub fn refs_view_lines(graph: TraceGraph, query: TraceReferenceQueryV1, quals: [TraceQualification], snapshot: text) -> [text]:
+    val state = view_state(snapshot, graph.subject.snapshot_id, false, true)
+    if state != TraceViewState.Ready: return view_state_lines(state)
+    match query_trace_references_v1(graph, query):
+        case Err(e): header(snapshot) + ["unavailable: " + e]
+        case Ok(page): refs_page_lines(page, quals, snapshot)
+
+pub fn file_refs_view_lines(page: Result<TraceReferencePageV1, text>, quals: [TraceQualification], snapshot: text) -> [text]:
+    """ref-file: caller runs trace_query_file_refs_v1; this renders its result through the shared rows."""
+    match page:
+        case Err(e): header(snapshot) + ["unavailable: " + e]
+        case Ok(p):
+            val state = view_state(snapshot, p.snapshot_id, false, true)
+            if state != TraceViewState.Ready: return view_state_lines(state)
+            refs_page_lines(p, quals, snapshot)
+
+pub fn impact_edges(graph: TraceGraph, selected_id: text, direction: text, limit: i64) -> Result<[TraceEdge], text>:
+    """Reverse impact: the service's edge list for one node, verbatim. direction: incoming | outgoing."""
+    val result = query_trace_graph(graph, TraceQuery(snapshot_id: graph.subject.snapshot_id,
+        selected_id: selected_id, direction: direction, limit: limit, cursor: ""))
+    if result.diagnostics.len() > 0 and result.nodes.len() == 0:
+        return Err(result.diagnostics[0].message)
+    Ok(result.edges)
+
+pub fn trace_unsupported_journeys() -> [text]:
+    """Plan 8.2 journeys the service does not implement yet."""
+    ["gaps", "multi-hop-impact", "changed-code-overlay", "commit-history", "why-blocked", "export"]
+
+pub fn unavailable_journey_lines(journey: text) -> [text]:
+    ["not available: " + journey]

@@ -61,10 +61,12 @@ for lane in 'per-file:fw=2' 'per-file:mono=1'; do
   fi
 done
 
-# Resume digest with SIMPLE_FILE_WORKERS=1 must equal the worker vector for
-# lane per-file:fw=1, minus the "--" separator and the admitted binary.
+# The resume slice computes the lane and the hashed vector; the worker, given
+# that same lane, must record the same vector (minus the "--" separator and
+# the admitted binary). The lane is read back from the resume slice, so a new
+# lane item cannot be added to one side only.
 {
-  printf '%s\n' 'set -eu' transcript=/fixture/transcript root=/fixture/root log=/fixture/log \
+  printf '%s\n' 'set -eu' transcript=/fixture/transcript "root='$repo'" log=/fixture/log \
     home=/fixture/home tmp=/fixture/tmp path=/usr/bin:/bin admitted=/fixture/admitted \
     platform=aarch64-apple-darwin stage2_backend=llvm stage3_threads=10 timeout_seconds=600 \
     "stage3_cache='/fixture/cache with space'" runtime=/fixture/runtime candidate=/fixture/candidate \
@@ -74,22 +76,61 @@ done
     resume_abi_policy=v1 stage2_admission=/fixture/admission "stage3_timeout_args='--timeout 600'"
   printf '%s\n' 'set -- --source /frozen/k1 --source "/frozen/cuda disabled" --source src/compiler --source src/app --source src/lib --entry-closure'
   cat "$tmp/lane"
+  printf '%s\n' 'printf "%s" "$stage3_lowering_lane" >"$LANE_RECORD"'
   printf '%s\n' 'bootstrap_stage3_args_sha256() { printf "%s\0" "$@" >"$CONTROL_RECORD"; }'
   cat "$tmp/digest"
 } >"$tmp/resume.sh"
-rc=0
-env -i PATH=/usr/bin:/bin CONTROL_RECORD="$tmp/expected" SIMPLE_FILE_WORKERS=1 \
-  sh -c "$(cat "$tmp/resume.sh")" lane-test >"$tmp/out" 2>"$tmp/err" || rc=$?
-wrc=0; run_worker 'per-file:fw=1' "$tmp/actual" || wrc=$?
-if [ "$rc" -eq 0 ] && [ "$wrc" -eq 0 ] && [ -e "$tmp/expected" ] && [ -e "$tmp/actual" ]; then
+
+# vector_case NAME EXPECTED_LANE EXPECTED_ENV_LINE [ENV...]
+vector_case() {
+  name=$1; want_lane=$2; want_env=$3; shift 3
+  rm -f "$tmp/expected" "$tmp/actual" "$tmp/lane.txt"
+  rc=0
+  env -i PATH=/usr/bin:/bin CONTROL_RECORD="$tmp/expected" LANE_RECORD="$tmp/lane.txt" "$@" \
+    sh -c "$(cat "$tmp/resume.sh")" lane-test >"$tmp/out" 2>"$tmp/err" || rc=$?
+  got_lane=$(cat "$tmp/lane.txt" 2>/dev/null || true)
+  wrc=0; run_worker "$got_lane" "$tmp/actual" || wrc=$?
+  if [ "$rc" -ne 0 ] || [ "$wrc" -ne 0 ] || [ ! -e "$tmp/expected" ] || [ ! -e "$tmp/actual" ]; then
+    echo "FAIL: $name resume rc=$rc worker rc=$wrc lane='$got_lane'" >&2; cat "$tmp/err" >&2; fail=1; return 0
+  fi
   tr '\0' '\n' <"$tmp/expected" >"$tmp/expected.txt"
   tr '\0' '\n' <"$tmp/actual" | awk 'skip > 0 { skip--; next } !done && $0 == "--" { done = 1; skip = 1; next } { print }' >"$tmp/actual.txt"
-  if cmp -s "$tmp/expected.txt" "$tmp/actual.txt" && grep -q 'SIMPLE_FILE_WORKERS=1' "$tmp/actual.txt"; then
-    echo "PASS: resume hash vector equals worker vector for per-file:fw=1"
+  if [ "$got_lane" = "$want_lane" ] && cmp -s "$tmp/expected.txt" "$tmp/actual.txt" &&
+     grep -q -x "$want_env" "$tmp/actual.txt"; then
+    echo "PASS: $name: resume hash vector equals worker vector for $got_lane"
   else
-    echo "FAIL: per-file:fw=1 vector mismatch" >&2; diff "$tmp/expected.txt" "$tmp/actual.txt" >&2 || true; fail=1
+    echo "FAIL: $name lane='$got_lane' (want '$want_lane', env line '$want_env')" >&2
+    diff "$tmp/expected.txt" "$tmp/actual.txt" >&2 || true; fail=1
   fi
-else
-  echo "FAIL: per-file:fw=1 resume rc=$rc worker rc=$wrc" >&2; cat "$tmp/err" >&2; fail=1
-fi
+}
+
+vector_case 'file workers on' 'per-file:fw=1:gte=1:msc=9' 'SIMPLE_FILE_WORKERS=1' SIMPLE_FILE_WORKERS=1
+# MIR shard count: one worker must never claim the whole closure. Default 9,
+# SIMPLE_BOOTSTRAP_STAGE3_MIR_SHARD_COUNT overrides it, the caller's
+# SIMPLE_MIR_SHARD_COUNT wins over both.
+vector_case 'default MIR shard count' 'per-file:fw=0:gte=1:msc=9' 'SIMPLE_MIR_SHARD_COUNT=9' SIMPLE_FILE_WORKERS=0
+vector_case 'stage knob' 'per-file:fw=0:gte=1:msc=5' 'SIMPLE_MIR_SHARD_COUNT=5' \
+  SIMPLE_FILE_WORKERS=0 SIMPLE_BOOTSTRAP_STAGE3_MIR_SHARD_COUNT=5
+vector_case 'caller wins' 'per-file:fw=0:gte=0:msc=4' 'SIMPLE_MIR_SHARD_COUNT=4' \
+  SIMPLE_FILE_WORKERS=0 SIMPLE_BOOTSTRAP_GO_TO_END=0 SIMPLE_BOOTSTRAP_STAGE3_MIR_SHARD_COUNT=5 SIMPLE_MIR_SHARD_COUNT=4
+
+for lane in 'per-file:msc=0' 'per-file:msc=x' 'per-file:msc=' 'per-file:msc=129' 'per-file:msc=09'; do
+  rc=0; run_worker "$lane" "$tmp/vec" || rc=$?
+  if [ "$rc" -eq 64 ] && grep -q 'invalid lowering lane' "$tmp/err" && [ ! -e "$tmp/vec" ]; then
+    echo "PASS: worker refuses lane '$lane' before recording"
+  else
+    echo "FAIL: lane '$lane' rc=$rc" >&2; cat "$tmp/err" >&2; fail=1
+  fi
+done
+
+for bad in 0 x 129 09 99999999999999999999; do
+  rc=0
+  env -i PATH=/usr/bin:/bin CONTROL_RECORD="$tmp/expected" LANE_RECORD="$tmp/lane.txt" SIMPLE_FILE_WORKERS=0 \
+    SIMPLE_BOOTSTRAP_STAGE3_MIR_SHARD_COUNT="$bad" sh -c "$(cat "$tmp/resume.sh")" lane-test >"$tmp/out" 2>"$tmp/err" || rc=$?
+  if [ "$rc" -eq 1 ] && grep -q 'MIR shard count' "$tmp/err"; then
+    echo "PASS: resume refuses MIR shard count '$bad'"
+  else
+    echo "FAIL: resume accepted MIR shard count '$bad' rc=$rc" >&2; cat "$tmp/err" >&2; fail=1
+  fi
+done
 exit "$fail"
