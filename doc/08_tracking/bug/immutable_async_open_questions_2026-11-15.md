@@ -40,3 +40,45 @@ reach the verifier as `HirExprKind.Await` (the fixture needed
 report nil in the spec harness. Cause not investigated; only that behaviour was
 observed. Needs a repro in the parser/lowering lane. Until fixed, a
 statement-position `await n.f` is a false positive of `E_ATTR_NOT_READY`.
+
+## 4. `E_INIT_CAPABILITY_ESCAPE` — PROVISIONAL region definition (2026-11-15, owner to ratify)
+
+An anchor exists, so a definition is proposed (not ratified). The borrow checker
+already has a region: the **short-borrow boundary**, enforced by
+`record_loan_escape` (`src/compiler/55.borrow/borrow_check/borrow_graph.spl`,
+call sites in `borrow_check/mod.spl`: stored in an aggregate field / global,
+captured by or sent to a spawned task, "retained in a promise body", sent to an
+actor mailbox, returned, exception payload).
+
+Proposed: the region is the constructing function's short-borrow boundary. An
+async producer (`f: async <expr>`, i.e. `async_init(<expr>)`) runs after that
+boundary, so a mutable alias captured by the producer escapes it.
+
+Implemented, default OFF, narrowest case: `SIMPLE_INIT_CAPABILITY_ESCAPE=on`
+makes a `var` local named directly as an argument of the `async_init(...)`
+producer of an authorized pending field an `E_INIT_CAPABILITY_ESCAPE` row
+(`required_field_init_v1.spl`, spec
+`test/01_unit/compiler/hir/init_capability_escape_v1_spec.spl`, 4/4; RED was 1
+failed of 4). Off emits nothing and the five neighbouring immutable/async specs
+are unchanged. Not covered, still undefined: captures nested inside producer
+sub-expressions, aliases, closures, `me`/`&mut` parameters, and whether returning
+the partially initialized node counts (section 3.1 says registration happens
+before it escapes, so returning it is assumed allowed). The check works on HIR
+only: the producer is an ordinary `async_init` call, so MIR/NLL never sees a
+promise body for it. Needed from the owner: ratify or replace the region, and say
+whether `me`/`&mut` parameters count.
+
+## 5. REV-01 / REV-02 hooks (W8)
+
+- REV-02 ("frozen serialization/reload -> identical, no pointers persisted"): the
+  pointer-free codec hook already exists (`canonical_file_ast_encode_v1` /
+  `canonical_file_ast_decode_v1`, `FileAstV1`) but had NO spec at all. Pinned now
+  by `test/01_unit/compiler/cache/rev02_frozen_file_ast_codec_spec.spl` (5/5,
+  GREEN on first run: no codec defect). It covers the FileAstV1 payload only;
+  a generic `FrozenImmutable<T>` codec kind for arbitrary `T` is undefined in the
+  plan and not implemented.
+- REV-01: the reclamation hook is the SCV per-reader lease. A single pinned
+  revision is GREEN; several pinned revisions in one process are RED, see
+  `rev01_one_lease_per_process_blocks_multi_revision_pin_2026-11-15.md`.
+  Undefined: how a `RevisionImmutable<T>` handle acquires a lease, and in-memory
+  reclamation.
