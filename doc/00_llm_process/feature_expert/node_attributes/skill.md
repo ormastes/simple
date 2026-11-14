@@ -19,3 +19,14 @@ runtime/native/XRay support from an enum, accepted annotation, authored spec or 
 different provider. Record admitted runtime lineage and source-matched execution.
 The source audit and test matrix explicitly distinguish existing components from
 missing integrated behavior and unexecuted acceptance tests.
+
+## Async registered initialization (P3, 2026-11-14)
+`async <expr>` in value position parses (self-hosted `primary_expr.spl`) as
+`async_init(<expr>)`, the producer binding the required-init verifier already
+reads. `00.common/data/async_init_registry_v1.spl` wraps the existing
+`phase_cell_*_v1` write-once cells (no second state machine) with a producer
+type check (`E_ASYNC_INIT_TYPE`), an epoch fence (`E_ASYNC_INIT_STALE`) and a
+zero-slot guarantee for nodes with no pending field. Specs:
+`test/01_unit/compiler/data/async_init_registry_v1_spec.spl`,
+`test/01_unit/compiler/hir/async_ctor_arg_parse_spec.spl`. Open: readiness
+analysis (`E_ATTR_NOT_READY`), scheduler waiters, Rust seed parser.
