@@ -170,6 +170,47 @@ pub fn extract_symbols_nm_checked_v1(obj_path: text) -> Result<[CompiledSymbol],
         return Err("admitted nm failed for '" + obj_path + "': " + stderr)
     Ok(extract_symbols_nm_output_v1(stdout))
 
+# Exact binding is required here; CompiledSymbol intentionally drops nm binding.
+pub fn xray_startup_nm_definition_count_v1(nm_out: text) -> Result<i64, text>:
+    var count = 0
+    for line in nm_out.split("\n"):
+        if line.trim() == "": continue
+        var fields: [text] = []
+        for field in line.replace("\t", " ").split(" "):
+            if field != "": fields.push(field)
+        if fields.len() != 2 and fields.len() != 3:
+            return Err("XRAY-E-STARTUP-SYMBOL: malformed nm row")
+        val kind = fields[fields.len() - 2]
+        val name = fields[fields.len() - 1]
+        if not ["A", "a", "B", "b", "C", "c", "D", "d", "G", "g", "I", "i", "N", "n", "p", "R", "r", "S", "s", "T", "t", "U", "u", "V", "v", "W", "w"].contains(kind):
+            return Err("XRAY-E-STARTUP-SYMBOL: unknown nm binding")
+        if name != "__simple_xray_resident_startup_v1": continue
+        if kind == "U": continue
+        if kind != "T" or fields.len() != 3:
+            return Err("XRAY-E-STARTUP-SYMBOL: consumer must have a strong global text definition")
+        if fields[0] == "":
+            return Err("XRAY-E-STARTUP-SYMBOL: missing definition address")
+        for digit in fields[0]:
+            if not "0123456789abcdefABCDEF".contains(digit):
+                return Err("XRAY-E-STARTUP-SYMBOL: malformed definition address")
+        count = count + 1
+    Ok(count)
+
+pub fn xray_startup_require_export_v1(user_objects: [text]) -> Result<bool, text>:
+    val nm: text = match native_tool_strict_resolve_v1("nm"):
+        case Ok(value): value
+        case Err(error): return Err(error)
+    var count = 0
+    for obj in user_objects:
+        val (stdout, stderr, code) = process_run(nm, [obj])
+        if code != 0:
+            return Err("XRAY-E-STARTUP-SYMBOL: admitted nm failed for '" + obj + "': " + stderr)
+        val found = xray_startup_nm_definition_count_v1(stdout)?
+        count = count + found
+        if count > 1: return Err("XRAY-E-STARTUP-SYMBOL: duplicate consumer definition")
+    if count != 1: return Err("XRAY-E-STARTUP-SYMBOL: missing strong consumer definition")
+    Ok(true)
+
 pub fn extract_symbols_nm_output_v1(nm_out: text) -> [CompiledSymbol]:
     var symbols: [CompiledSymbol] = []
     val lines = nm_out.split("\n")

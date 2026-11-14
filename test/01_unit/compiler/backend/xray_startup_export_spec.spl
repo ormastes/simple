@@ -1,0 +1,26 @@
+use std.spec.*
+use compiler.backend.llvm_backend_tools.{xray_startup_nm_definition_count_v1, xray_startup_require_export_v1}
+
+describe "XRay startup consumer exact strong export":
+    it "counts only the exact global function definition":
+        val rows = "00000000 T __simple_xray_resident_startup_v1\n                 U __simple_xray_resident_startup_v1\n00000020 T __simple_xray_resident_startup_v1_extra\n"
+        expect(xray_startup_nm_definition_count_v1(rows).unwrap()).to_equal(1)
+
+    it "does not treat an undefined reference as a definition":
+        expect(xray_startup_nm_definition_count_v1("U __simple_xray_resident_startup_v1\n").unwrap()).to_equal(0)
+
+    it "preserves duplicate definitions for the aggregate owner to reject":
+        val rows = "0000 T __simple_xray_resident_startup_v1\n0010 T __simple_xray_resident_startup_v1\n"
+        expect(xray_startup_nm_definition_count_v1(rows).unwrap()).to_equal(2)
+
+    it "rejects weak local and data bindings":
+        for kind in ["W", "w", "t", "D", "B", "R"]:
+            expect(xray_startup_nm_definition_count_v1("0000 {kind} __simple_xray_resident_startup_v1\n").is_err()).to_equal(true)
+
+    it "rejects malformed rows and missing definition addresses":
+        expect(xray_startup_nm_definition_count_v1("unexpected tool output with extra fields\n").is_err()).to_equal(true)
+        expect(xray_startup_nm_definition_count_v1("T __simple_xray_resident_startup_v1\n").is_err()).to_equal(true)
+        expect(xray_startup_nm_definition_count_v1("not-an-address T __simple_xray_resident_startup_v1\n").is_err()).to_equal(true)
+
+    it "refuses a real nonobject inspection input":
+        expect(xray_startup_require_export_v1(["test/fixtures/xray/not-an-object.txt"]).is_err()).to_equal(true)
