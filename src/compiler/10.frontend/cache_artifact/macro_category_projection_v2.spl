@@ -27,6 +27,20 @@ pub struct MacroCategoryImportV2:
     import_all: bool
     names: [MacroCategoryImportNameV2]
 
+# Definitions captured before semantic import winners are known. This type
+# cannot be passed to project_all; completion requires resolved import bindings.
+pub struct MacroCategoryDraftV2:
+    source: MacroModuleSourceV1
+    guards: [GuardEvalV1]
+    source_identity: text
+    source_digest: text
+    target_triple: text
+    preprocessed_digest: text
+    cfg_decision_digest: text
+    environment_policy_digest: text
+    executing_image_digest: text
+    source_epoch: DirectorySourceEpochV2
+
 pub struct MacroCategoryInputV2:
     source: MacroModuleSourceV1
     guards: [GuardEvalV1]
@@ -84,7 +98,11 @@ fn _macro_input_budget_v2(input: MacroCategoryInputV2, budget: ThreePayloadContr
             budget.add_text(name.origin_name, false)
             budget.add_text(name.visible_name, false)
             if not budget.ok: return budget
-    for definition in input.source.defs:
+    _macro_source_budget_v2(input.source, input.guards, budget)
+
+fn _macro_source_budget_v2(source: MacroModuleSourceV1, guards: [GuardEvalV1],
+        budget: ThreePayloadContractBudgetV1) -> ThreePayloadContractBudgetV1:
+    for definition in source.defs:
         budget.add_text(definition.def.name, false)
         budget.add_text(definition.body_text, true)
         budget.add_items(definition.nested_macro_names.len() + definition.declared_effects.len() +
@@ -103,7 +121,7 @@ fn _macro_input_budget_v2(input: MacroCategoryInputV2, budget: ThreePayloadContr
         for name in definition.nested_macro_names: budget.add_text(name, false)
         for effect in definition.declared_effects: budget.add_text(effect, false)
         if not budget.ok: return budget
-    for invocation in input.source.invocations:
+    for invocation in source.invocations:
         budget.add_text(invocation.invocation_text, true)
         budget.add_text(invocation.args_text, true)
         budget.add_text(invocation.requested_name, false)
@@ -112,7 +130,7 @@ fn _macro_input_budget_v2(input: MacroCategoryInputV2, budget: ThreePayloadContr
         budget.add_text(invocation.hygiene_scope_id, false)
         budget.add_text(invocation.active_guard_id, true)
         if not budget.ok: return budget
-    for guard in input.guards:
+    for guard in guards:
         budget.add_text(guard.guard.canonical_expr, false)
         budget.add_text(guard.guard.digest, false)
         if not budget.ok: return budget
@@ -158,13 +176,18 @@ fn _macro_inactive_coverage_v2(source: text, receipt: FrontendCfgDecisionReceipt
 
 # Call immediately after the owning successful full parse, before any other
 # parser enters. `source_id` is the resolved path; source_identity is inventory ID.
-pub fn macro_category_capture_v2(package: text, module_name: text, source_id: text,
+pub fn macro_category_capture_draft_v2(package: text, module_name: text, source_id: text,
         source_identity: text, source: text, receipt: FrontendCfgDecisionReceiptV1,
         target_triple: text, environment_policy_digest: text, executing_image_digest: text,
-        source_epoch: DirectorySourceEpochV2, imports: [MacroCategoryImportV2]) -> Result<MacroCategoryInputV2, text>:
+        source_epoch: DirectorySourceEpochV2) -> Result<MacroCategoryDraftV2, text>:
     if source.byte_len() > 65536 or source.split("\n").len() > 2048 or
-            macro_fact_def_count() > 256 or macro_fact_use_count() > 256 or imports.len() > 256:
+            macro_fact_def_count() > 256 or macro_fact_use_count() > 256:
         return Err("macro-category-capture-work-limit")
+    if not directory_source_epoch_valid_v2(source_epoch) or module_name == "" or
+            source_id == "" or source_identity == "" or target_triple == "" or
+            not three_payload_contract_digest_valid_v1(environment_policy_digest) or
+            not three_payload_contract_digest_valid_v1(executing_image_digest):
+        return Err("macro-category-draft-provenance-unavailable")
     val source_digest = sha256_text(source)
     if not frontend_cfg_receipt_valid_v1(receipt, source_identity, source_digest, target_triple):
         return Err("macro-category-cfg-receipt-mismatch")
@@ -208,14 +231,43 @@ pub fn macro_category_capture_v2(package: text, module_name: text, source_id: te
         definition_index = definition_index + 1
     val visible_source = MacroModuleSourceV1(package: captured.package, module: captured.module,
         source_id: captured.source_id, defs: definitions, invocations: captured.invocations)
-    val input = MacroCategoryInputV2(source: visible_source, guards: guards,
+    val budget = ThreePayloadContractBudgetV1(remaining_bytes: 65536,
+        remaining_items: 4096, used_bytes: 0, ok: true)
+    for field in [visible_source.source_id, visible_source.module, source_identity]:
+        budget.add_text(field, false)
+    budget.add_text(visible_source.package, true)
+    budget.add_items(visible_source.defs.len() + visible_source.invocations.len() + guards.len())
+    if not budget.ok or not _macro_source_budget_v2(visible_source, guards, budget).ok:
+        return Err("macro-category-draft-over-budget")
+    Ok(MacroCategoryDraftV2(source: visible_source, guards: guards,
         source_identity: source_identity, source_digest: source_digest,
         target_triple: target_triple, preprocessed_digest: receipt.preprocessed_digest,
         cfg_decision_digest: receipt.decision_digest, environment_policy_digest: environment_policy_digest,
-        executing_image_digest: executing_image_digest, source_epoch: source_epoch,
+        executing_image_digest: executing_image_digest, source_epoch: source_epoch))
+
+# Trusted semantic resolver boundary: imports must be the actual resolved
+# exposure set, including an explicitly established empty set.
+pub fn macro_category_complete_v2(draft: MacroCategoryDraftV2,
+        imports: [MacroCategoryImportV2]) -> Result<MacroCategoryInputV2, text>:
+    val input = MacroCategoryInputV2(source: draft.source, guards: draft.guards,
+        source_identity: draft.source_identity, source_digest: draft.source_digest,
+        target_triple: draft.target_triple, preprocessed_digest: draft.preprocessed_digest,
+        cfg_decision_digest: draft.cfg_decision_digest,
+        environment_policy_digest: draft.environment_policy_digest,
+        executing_image_digest: draft.executing_image_digest, source_epoch: draft.source_epoch,
         imports: imports)
     if not _macro_input_valid_v2(input): return Err("macro-category-input-invalid-or-over-budget")
     Ok(input)
+
+# Compatibility path for callers already holding resolved imports at parse time.
+pub fn macro_category_capture_v2(package: text, module_name: text, source_id: text,
+        source_identity: text, source: text, receipt: FrontendCfgDecisionReceiptV1,
+        target_triple: text, environment_policy_digest: text, executing_image_digest: text,
+        source_epoch: DirectorySourceEpochV2, imports: [MacroCategoryImportV2]) -> Result<MacroCategoryInputV2, text>:
+    val draft = macro_category_capture_draft_v2(package, module_name, source_id,
+        source_identity, source, receipt, target_triple, environment_policy_digest,
+        executing_image_digest, source_epoch)?
+    macro_category_complete_v2(draft, imports)
 
 fn _macro_import_sources_v2(imports: [MacroCategoryImportV2]) -> [text]:
     var sources: [text] = []

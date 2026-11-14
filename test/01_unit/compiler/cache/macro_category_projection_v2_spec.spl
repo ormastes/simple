@@ -6,7 +6,7 @@ use compiler.common.cache_contract.directory_source_epoch_v2.{DirectorySourceEpo
 use compiler.frontend.parser.macro_registry.{MacroDef}
 use compiler.frontend.cache_artifact.macro_reference_projector.{MacroModuleSourceV1,
     MacroSourceDefV1, MacroSourceInvocationV1}
-use compiler.frontend.cache_artifact.macro_category_projection_v2.{MacroCategoryInputV2, MacroCategoryImportV2, MacroCategoryImportNameV2, macro_category_project_all_v2, macro_category_capture_v2}
+use compiler.frontend.cache_artifact.macro_category_projection_v2.{MacroCategoryInputV2, MacroCategoryImportV2, MacroCategoryImportNameV2, macro_category_project_all_v2, macro_category_capture_v2, MacroCategoryDraftV2, macro_category_complete_v2}
 
 fn category_def(name: text, body: text = "x + x", nested: [text] = [], effects: [text] = []) -> MacroSourceDefV1:
     MacroSourceDefV1(def: MacroDef(name: name, params: ["x"], contract_intros: [], contract_injects: []),
@@ -251,3 +251,24 @@ describe "captured macro visibility":
         val private_result = capture_inactive_fixture("@when(false)\npri macro hidden(x: Int) -> (returns result: Int):\n    emit result:\n        x\n@end\n")
         expect(public_result.unwrap_err()).to_equal("macro-category-inactive-syntax-unavailable")
         expect(private_result.unwrap_err()).to_equal("macro-category-inactive-syntax-unavailable")
+
+
+describe "macro draft completion requires explicit resolved bindings":
+    it "retains provenance and exact alias bindings when completing a draft":
+        val source = category_input("consumer", [], [category_use("local")])
+        val draft = MacroCategoryDraftV2(source: source.source, guards: source.guards,
+            source_identity: source.source_identity, source_digest: source.source_digest,
+            target_triple: source.target_triple, preprocessed_digest: source.preprocessed_digest,
+            cfg_decision_digest: source.cfg_decision_digest,
+            environment_policy_digest: source.environment_policy_digest,
+            executing_image_digest: source.executing_image_digest, source_epoch: source.source_epoch)
+        val bindings = [MacroCategoryImportV2(source_id: "origin.spl", import_all: false,
+            names: [MacroCategoryImportNameV2(origin_name: "double", visible_name: "local")])]
+        val completed = macro_category_complete_v2(draft, bindings).unwrap()
+        expect(completed.imports[0].names[0].visible_name).to_equal("local")
+        expect(completed.source_epoch).to_equal(source.source_epoch)
+        expect(completed.executing_image_digest).to_equal(source.executing_image_digest)
+        # Completing the type does not pretend the dependency graph exists.
+        expect(macro_category_project_all_v2([completed]).is_err()).to_equal(true)
+        val invalid = MacroCategoryDraftV2(..draft, executing_image_digest: "")
+        expect(macro_category_complete_v2(invalid, bindings).is_err()).to_equal(true)
