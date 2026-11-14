@@ -1,0 +1,76 @@
+# AUTHORED / UNRUN. This checks the closed wire decoder, not native loading.
+use std.spec
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.encode.{sdn_encode_canonical}
+use compiler.loader.traversal_plugin_wire_v1.{traversal_plugin_wire_request_v1,
+    traversal_plugin_wire_response_v1}
+use compiler.common.cache_contract.aspect_match_shard_v1.{DirectoryJoinPointFactsV1,
+    JoinPointFactV1, PointcutSelectorV1, PointcutSelNodeV1, PointcutMatchShardV1}
+use compiler.common.cache_contract.aspect_traversal_v1.{DirTldrViewV1}
+
+fn wire_empty_view_v1() -> DirTldrViewV1:
+    val empty_text: [text] = []
+    val empty_facts: [JoinPointFactV1] = []
+    val empty_nodes: [PointcutSelNodeV1] = []
+    val facts = DirectoryJoinPointFactsV1(scope_id: "scope", sorted_member_files: empty_text,
+        sorted_join_points: empty_facts, sorted_child_roots: empty_text,
+        complete: false, negative_root: "", active_guard_root: "", facts_key: "")
+    val selector = PointcutSelectorV1(source: "", form: "", operand: "", supported: false,
+        nodes: empty_nodes, root: -1, needs_universe: false, selector_digest: "")
+    val shard = PointcutMatchShardV1(selector_digest: "", dir_facts_key: "",
+        sorted_matching_ids: empty_text, complete: false, match_digest: "")
+    val apply: Dict<text, text> = {}
+    DirTldrViewV1(scope_id: "scope", executing_image_digest: "", facts: facts,
+        selector: selector, shard: shard, apply: apply, previous: nil)
+
+fn wire_response_fixture_v1(request_digest: text) -> text:
+    var delta: Dict<text, SdnValue> = {}
+    delta["weave"] = SdnValue.Array([SdnValue.String("m::a")])
+    val empty_values: [SdnValue] = []
+    delta["unweave"] = SdnValue.Array(empty_values)
+    delta["reweave"] = SdnValue.Array(empty_values)
+    delta["reuse"] = SdnValue.Array(empty_values)
+    var response: Dict<text, SdnValue> = {}
+    response["schema"] = SdnValue.Int(1)
+    response["requestDigest"] = SdnValue.String(request_digest)
+    response["delta"] = SdnValue.Dict(delta)
+    sdn_encode_canonical(SdnValue.Dict(response)) + "\n"
+
+describe "traversal plugin wire response":
+    it "encodes a bounded request with its digest bound in the payload":
+        val view = wire_empty_view_v1()
+        val request = traversal_plugin_wire_request_v1("canonical-provider-identity",
+            view, view.selector).unwrap()
+        expect(request.payload.contains(request.request_digest)).to_equal(true)
+        expect(request.payload.byte_len() < 1048576).to_equal(true)
+
+    it "refuses oversized provider identity before encoding":
+        val view = wire_empty_view_v1()
+        expect(traversal_plugin_wire_request_v1("x".repeat(65537),
+            view, view.selector).is_err()).to_equal(true)
+
+    it "accepts a canonical response only for the exact request digest":
+        val digest = "sha256:" + "a".repeat(64)
+        val parsed = traversal_plugin_wire_response_v1(wire_response_fixture_v1(digest), digest)
+        expect(parsed.is_ok()).to_equal(true)
+        expect(parsed.unwrap().weave).to_equal(["m::a"])
+        expect(parsed.unwrap().unweave.len()).to_equal(0)
+
+    it "rejects mismatched request identity, unknown fields, and noncanonical input":
+        val digest = "sha256:" + "a".repeat(64)
+        val wrong = "sha256:" + "b".repeat(64)
+        expect(traversal_plugin_wire_response_v1(wire_response_fixture_v1(wrong), digest).is_err()).to_equal(true)
+        var response: Dict<text, SdnValue> = {}
+        response["schema"] = SdnValue.Int(1)
+        response["requestDigest"] = SdnValue.String(digest)
+        val empty_delta: Dict<text, SdnValue> = {}
+        response["delta"] = SdnValue.Dict(empty_delta)
+        response["extra"] = SdnValue.String("forbidden")
+        val unknown = sdn_encode_canonical(SdnValue.Dict(response)) + "\n"
+        expect(traversal_plugin_wire_response_v1(unknown, digest).is_err()).to_equal(true)
+        expect(traversal_plugin_wire_response_v1(" {\"schema\":1}", digest).is_err()).to_equal(true)
+
+    it "rejects delta items outside the closed string list shape":
+        val digest = "sha256:" + "a".repeat(64)
+        val source = wire_response_fixture_v1(digest).replace("[\"m::a\"]", "[1]")
+        expect(traversal_plugin_wire_response_v1(source, digest).is_err()).to_equal(true)

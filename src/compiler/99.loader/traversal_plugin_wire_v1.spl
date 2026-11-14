@@ -1,0 +1,305 @@
+# Bounded canonical SDN boundary for admitted traversal providers.
+# This is a source-level DTO codec, not a native ABI or admission authority.
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.encode.{sdn_encode_canonical}
+use std.common.sdn.strict_v1.{sdn_parse_strict_v1}
+use std.common.sdn.strict_types_v1.{SdnStrictLimitsV1}
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.cache_contract.aspect_match_shard_v1.{DirectoryJoinPointFactsV1,
+    JoinPointFactV1, PointcutSelectorV1, PointcutSelNodeV1,
+    PointcutMatchShardV1, WeavePlanDeltaV1}
+use compiler.common.cache_contract.aspect_traversal_v1.{DirTldrViewV1,
+    TraversalPriorStateV1}
+use compiler.common.cache.canonical_identity.{canonical_identity_sort_texts}
+
+pub val TRAVERSAL_PLUGIN_WIRE_MAX_BYTES_V1: i64 = 1048576
+pub val TRAVERSAL_PLUGIN_WIRE_MAX_DELTA_ITEMS_V1: i64 = 16384
+
+pub struct TraversalPluginWireRequestV1:
+    payload: text
+    request_digest: text
+
+fn _wire_obj_v1(fields: Dict<text, SdnValue>) -> SdnValue:
+    SdnValue.Dict(fields)
+
+fn _wire_str_v1(value: text) -> SdnValue:
+    SdnValue.String(value)
+
+fn _wire_bool_v1(value: bool) -> SdnValue:
+    SdnValue.Bool(value)
+
+fn _wire_int_v1(value: i64) -> SdnValue:
+    SdnValue.Int(value)
+
+fn _wire_strings_v1(values: [text]) -> SdnValue:
+    var result: [SdnValue] = []
+    for value in values: result.push(_wire_str_v1(value))
+    SdnValue.Array(result)
+
+fn _wire_text_dict_v1(values: Dict<text, text>) -> SdnValue:
+    # Apply keys can reach the 16K item limit. Serialize as sorted pairs so
+    # the shared canonical SDN encoder never receives an attacker-sized map.
+    var result: [SdnValue] = []
+    for key in canonical_identity_sort_texts(values.keys()):
+        result.push(SdnValue.Array([_wire_str_v1(key), _wire_str_v1(values[key])]))
+    SdnValue.Array(result)
+
+fn _wire_fact_v1(value: JoinPointFactV1) -> SdnValue:
+    var fields: Dict<text, SdnValue> = {}
+    fields["id"] = _wire_str_v1(value.id)
+    fields["kind"] = _wire_str_v1(value.kind)
+    fields["symbol"] = _wire_str_v1(value.symbol)
+    fields["attrs"] = _wire_strings_v1(value.attrs)
+    fields["ownerFile"] = _wire_str_v1(value.owner_file)
+    fields["baseBodyDigest"] = _wire_str_v1(value.base_body_digest)
+    _wire_obj_v1(fields)
+
+fn _wire_facts_v1(value: DirectoryJoinPointFactsV1) -> SdnValue:
+    var join_points: [SdnValue] = []
+    for fact in value.sorted_join_points: join_points.push(_wire_fact_v1(fact))
+    var fields: Dict<text, SdnValue> = {}
+    fields["scopeId"] = _wire_str_v1(value.scope_id)
+    fields["memberFiles"] = _wire_strings_v1(value.sorted_member_files)
+    fields["joinPoints"] = SdnValue.Array(join_points)
+    fields["childRoots"] = _wire_strings_v1(value.sorted_child_roots)
+    fields["complete"] = _wire_bool_v1(value.complete)
+    fields["negativeRoot"] = _wire_str_v1(value.negative_root)
+    fields["activeGuardRoot"] = _wire_str_v1(value.active_guard_root)
+    fields["factsKey"] = _wire_str_v1(value.facts_key)
+    _wire_obj_v1(fields)
+
+fn _wire_selector_v1(value: PointcutSelectorV1) -> SdnValue:
+    var nodes: [SdnValue] = []
+    for node in value.nodes:
+        var fields: Dict<text, SdnValue> = {}
+        fields["op"] = _wire_str_v1(node.op)
+        fields["form"] = _wire_str_v1(node.form)
+        fields["operand"] = _wire_str_v1(node.operand)
+        fields["left"] = _wire_int_v1(node.left)
+        fields["right"] = _wire_int_v1(node.right)
+        nodes.push(_wire_obj_v1(fields))
+    var fields: Dict<text, SdnValue> = {}
+    fields["source"] = _wire_str_v1(value.source)
+    fields["form"] = _wire_str_v1(value.form)
+    fields["operand"] = _wire_str_v1(value.operand)
+    fields["supported"] = _wire_bool_v1(value.supported)
+    fields["nodes"] = SdnValue.Array(nodes)
+    fields["root"] = _wire_int_v1(value.root)
+    fields["needsUniverse"] = _wire_bool_v1(value.needs_universe)
+    fields["selectorDigest"] = _wire_str_v1(value.selector_digest)
+    _wire_obj_v1(fields)
+
+fn _wire_shard_v1(value: PointcutMatchShardV1) -> SdnValue:
+    var fields: Dict<text, SdnValue> = {}
+    fields["selectorDigest"] = _wire_str_v1(value.selector_digest)
+    fields["dirFactsKey"] = _wire_str_v1(value.dir_facts_key)
+    fields["matchingIds"] = _wire_strings_v1(value.sorted_matching_ids)
+    fields["complete"] = _wire_bool_v1(value.complete)
+    fields["matchDigest"] = _wire_str_v1(value.match_digest)
+    _wire_obj_v1(fields)
+
+fn _wire_prior_v1(value: TraversalPriorStateV1) -> SdnValue:
+    var fields: Dict<text, SdnValue> = {}
+    fields["scopeId"] = _wire_str_v1(value.scope_id)
+    fields["executingImageDigest"] = _wire_str_v1(value.executing_image_digest)
+    fields["facts"] = _wire_facts_v1(value.facts)
+    fields["selector"] = _wire_selector_v1(value.selector)
+    fields["shard"] = _wire_shard_v1(value.shard)
+    fields["apply"] = _wire_text_dict_v1(value.apply)
+    _wire_obj_v1(fields)
+
+fn _wire_view_v1(value: DirTldrViewV1) -> SdnValue:
+    var fields: Dict<text, SdnValue> = {}
+    fields["scopeId"] = _wire_str_v1(value.scope_id)
+    fields["executingImageDigest"] = _wire_str_v1(value.executing_image_digest)
+    fields["facts"] = _wire_facts_v1(value.facts)
+    fields["selector"] = _wire_selector_v1(value.selector)
+    fields["shard"] = _wire_shard_v1(value.shard)
+    fields["apply"] = _wire_text_dict_v1(value.apply)
+    if value.previous == nil:
+        fields["previous"] = SdnValue.Null
+    else:
+        fields["previous"] = _wire_prior_v1(value.previous.unwrap())
+    _wire_obj_v1(fields)
+
+# Conservative preflight: six bytes per source byte covers quoted escapes;
+# fixed per-field overhead covers tags, keys and separators. This runs before
+# constructing the SdnValue graph or canonical text.
+fn _wire_size_text_v1(size: i64, value: text) -> i64:
+    if size < 0 or size > TRAVERSAL_PLUGIN_WIRE_MAX_BYTES_V1 - 32: return -1
+    val remaining = TRAVERSAL_PLUGIN_WIRE_MAX_BYTES_V1 - size - 32
+    if value.byte_len() > remaining / 6: return -1
+    size + value.byte_len() * 6 + 32
+
+fn _wire_size_strings_v1(size: i64, values: [text]) -> i64:
+    if values.len() > TRAVERSAL_PLUGIN_WIRE_MAX_DELTA_ITEMS_V1: return -1
+    var next_size = size
+    for value in values:
+        next_size = _wire_size_text_v1(next_size, value)
+        if next_size < 0: return -1
+    next_size
+
+fn _wire_size_facts_v1(size: i64, value: DirectoryJoinPointFactsV1) -> i64:
+    if value.sorted_join_points.len() > TRAVERSAL_PLUGIN_WIRE_MAX_DELTA_ITEMS_V1:
+        return -1
+    var next_size = _wire_size_text_v1(size, value.scope_id)
+    next_size = _wire_size_strings_v1(next_size, value.sorted_member_files)
+    next_size = _wire_size_strings_v1(next_size, value.sorted_child_roots)
+    next_size = _wire_size_text_v1(next_size, value.negative_root)
+    next_size = _wire_size_text_v1(next_size, value.active_guard_root)
+    next_size = _wire_size_text_v1(next_size, value.facts_key)
+    for fact in value.sorted_join_points:
+        next_size = _wire_size_text_v1(next_size, fact.id)
+        next_size = _wire_size_text_v1(next_size, fact.kind)
+        next_size = _wire_size_text_v1(next_size, fact.symbol)
+        next_size = _wire_size_strings_v1(next_size, fact.attrs)
+        next_size = _wire_size_text_v1(next_size, fact.owner_file)
+        next_size = _wire_size_text_v1(next_size, fact.base_body_digest)
+        if next_size < 0: return -1
+    next_size
+
+fn _wire_size_selector_v1(size: i64, value: PointcutSelectorV1) -> i64:
+    if value.nodes.len() > TRAVERSAL_PLUGIN_WIRE_MAX_DELTA_ITEMS_V1: return -1
+    var next_size = _wire_size_text_v1(size, value.source)
+    next_size = _wire_size_text_v1(next_size, value.form)
+    next_size = _wire_size_text_v1(next_size, value.operand)
+    next_size = _wire_size_text_v1(next_size, value.selector_digest)
+    for node in value.nodes:
+        next_size = _wire_size_text_v1(next_size, node.op)
+        next_size = _wire_size_text_v1(next_size, node.form)
+        next_size = _wire_size_text_v1(next_size, node.operand)
+        if next_size < 0: return -1
+    next_size
+
+fn _wire_size_shard_v1(size: i64, value: PointcutMatchShardV1) -> i64:
+    var next_size = _wire_size_text_v1(size, value.selector_digest)
+    next_size = _wire_size_text_v1(next_size, value.dir_facts_key)
+    next_size = _wire_size_strings_v1(next_size, value.sorted_matching_ids)
+    next_size = _wire_size_text_v1(next_size, value.match_digest)
+    next_size
+
+fn _wire_size_apply_v1(size: i64, value: Dict<text, text>) -> i64:
+    if value.len() > TRAVERSAL_PLUGIN_WIRE_MAX_DELTA_ITEMS_V1: return -1
+    var next_size = size
+    for key in value.keys():
+        next_size = _wire_size_text_v1(next_size, key)
+        next_size = _wire_size_text_v1(next_size, value[key])
+        if next_size < 0: return -1
+    next_size
+
+fn _wire_size_view_v1(size: i64, value: DirTldrViewV1) -> i64:
+    var next_size = _wire_size_text_v1(size, value.scope_id)
+    next_size = _wire_size_text_v1(next_size, value.executing_image_digest)
+    next_size = _wire_size_facts_v1(next_size, value.facts)
+    next_size = _wire_size_selector_v1(next_size, value.selector)
+    next_size = _wire_size_shard_v1(next_size, value.shard)
+    next_size = _wire_size_apply_v1(next_size, value.apply)
+    if value.previous != nil:
+        val prior = value.previous.unwrap()
+        next_size = _wire_size_text_v1(next_size, prior.scope_id)
+        next_size = _wire_size_text_v1(next_size, prior.executing_image_digest)
+        next_size = _wire_size_facts_v1(next_size, prior.facts)
+        next_size = _wire_size_selector_v1(next_size, prior.selector)
+        next_size = _wire_size_shard_v1(next_size, prior.shard)
+        next_size = _wire_size_apply_v1(next_size, prior.apply)
+    next_size
+
+# The digest covers the entire canonical request body before the digest field
+# is added. Provider code must echo it in its result; the driver then compares
+# the returned delta with the canonical builtin result before mutation.
+pub fn traversal_plugin_wire_request_v1(provider_identity: text,
+        view: DirTldrViewV1, selector: PointcutSelectorV1) -> Result<TraversalPluginWireRequestV1, text>:
+    if provider_identity == "" or provider_identity.byte_len() > 65536:
+        return Err("traversal-provider-wire-identity-invalid")
+    var preflight = _wire_size_text_v1(0, provider_identity)
+    preflight = _wire_size_view_v1(preflight, view)
+    preflight = _wire_size_selector_v1(preflight, selector)
+    if preflight < 0: return Err("traversal-provider-wire-request-budget")
+    var body_fields: Dict<text, SdnValue> = {}
+    body_fields["schema"] = _wire_int_v1(1)
+    body_fields["providerIdentity"] = _wire_str_v1(provider_identity)
+    body_fields["view"] = _wire_view_v1(view)
+    body_fields["selector"] = _wire_selector_v1(selector)
+    val body = sdn_encode_canonical(_wire_obj_v1(body_fields))
+    if body.byte_len() + 128 > TRAVERSAL_PLUGIN_WIRE_MAX_BYTES_V1:
+        return Err("traversal-provider-wire-request-budget")
+    val request_digest = "sha256:" + sha256_text(body)
+    body_fields["requestDigest"] = _wire_str_v1(request_digest)
+    val encoded = sdn_encode_canonical(_wire_obj_v1(body_fields)) + "\n"
+    if encoded.byte_len() > TRAVERSAL_PLUGIN_WIRE_MAX_BYTES_V1:
+        return Err("traversal-provider-wire-request-budget")
+    Ok(TraversalPluginWireRequestV1(payload: encoded, request_digest: request_digest))
+
+fn _wire_response_fields_v1(value: SdnValue) -> Result<Dict<text, SdnValue>, text>:
+    val fields = match value:
+        case SdnValue.Dict(items): items
+        case _: return Err("traversal-provider-wire-response-object-required")
+    for key in fields.keys():
+        if not ["schema", "requestDigest", "delta"].contains(key):
+            return Err("traversal-provider-wire-response-unknown-field")
+    if fields.len() != 3 or not fields.contains_key("schema") or
+            not fields.contains_key("requestDigest") or not fields.contains_key("delta"):
+        return Err("traversal-provider-wire-response-fields")
+    Ok(fields)
+
+fn _wire_get_text_v1(fields: Dict<text, SdnValue>, key: text) -> Result<text, text>:
+    if not fields.contains_key(key): return Err("traversal-provider-wire-field-missing:" + key)
+    match fields[key]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("traversal-provider-wire-field-type:" + key)
+
+fn _wire_get_delta_list_v1(fields: Dict<text, SdnValue>, key: text) -> Result<[text], text>:
+    if not fields.contains_key(key): return Err("traversal-provider-wire-delta-field-missing:" + key)
+    val raw = match fields[key]:
+        case SdnValue.Array(values): values
+        case _: return Err("traversal-provider-wire-delta-field-type:" + key)
+    if raw.len() > TRAVERSAL_PLUGIN_WIRE_MAX_DELTA_ITEMS_V1:
+        return Err("traversal-provider-wire-delta-budget")
+    var values: [text] = []
+    for item in raw:
+        match item:
+            case SdnValue.String(value): values.push(value)
+            case _: return Err("traversal-provider-wire-delta-item-type:" + key)
+    Ok(values)
+
+pub fn traversal_plugin_wire_response_v1(source: text,
+        expected_request_digest: text) -> Result<WeavePlanDeltaV1, text>:
+    if source == "" or source.byte_len() > TRAVERSAL_PLUGIN_WIRE_MAX_BYTES_V1:
+        return Err("traversal-provider-wire-response-budget")
+    val limits = SdnStrictLimitsV1(max_source_bytes: TRAVERSAL_PLUGIN_WIRE_MAX_BYTES_V1,
+        max_depth: 16, max_nodes: 65536, max_rows: 0, max_cells: 0, max_columns: 16)
+    val document = match sdn_parse_strict_v1(source, limits):
+        case Ok(value): value
+        case Err(_): return Err("traversal-provider-wire-response-syntax")
+    if document.consumed_bytes != source.byte_len():
+        return Err("traversal-provider-wire-response-trailing-data")
+    val fields = _wire_response_fields_v1(document.value)?
+    match fields["schema"]:
+        case SdnValue.Int(1): pass
+        case _: return Err("traversal-provider-wire-response-schema")
+    if _wire_get_text_v1(fields, "requestDigest")? != expected_request_digest:
+        return Err("traversal-provider-wire-response-request-mismatch")
+    val delta_fields = match fields["delta"]:
+        case SdnValue.Dict(items): items
+        case _: return Err("traversal-provider-wire-delta-object-required")
+    for key in delta_fields.keys():
+        if not ["weave", "unweave", "reweave", "reuse"].contains(key):
+            return Err("traversal-provider-wire-delta-unknown-field")
+    if delta_fields.len() != 4: return Err("traversal-provider-wire-delta-fields")
+    val weave = _wire_get_delta_list_v1(delta_fields, "weave")?
+    val unweave = _wire_get_delta_list_v1(delta_fields, "unweave")?
+    val reweave = _wire_get_delta_list_v1(delta_fields, "reweave")?
+    val reuse = _wire_get_delta_list_v1(delta_fields, "reuse")?
+    if weave.len() + unweave.len() + reweave.len() + reuse.len() >
+            TRAVERSAL_PLUGIN_WIRE_MAX_DELTA_ITEMS_V1:
+        return Err("traversal-provider-wire-delta-budget")
+    # Only canonicalize after closed field and cardinality checks. Otherwise
+    # a large untrusted map could trigger the encoder's quadratic key sort.
+    if sdn_encode_canonical(document.value) + "\n" != source:
+        return Err("traversal-provider-wire-response-noncanonical")
+    Ok(WeavePlanDeltaV1(weave: weave, unweave: unweave,
+        reweave: reweave, reuse: reuse))
+
+export TraversalPluginWireRequestV1, TRAVERSAL_PLUGIN_WIRE_MAX_BYTES_V1,
+    TRAVERSAL_PLUGIN_WIRE_MAX_DELTA_ITEMS_V1,
+    traversal_plugin_wire_request_v1, traversal_plugin_wire_response_v1
