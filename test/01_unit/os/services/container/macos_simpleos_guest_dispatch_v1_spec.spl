@@ -20,6 +20,9 @@ use os.kernel.scheduler.scheduler.{Scheduler}
 use os.kernel.ipc.ipc.{IpcManager}
 use os.kernel.types.task_types.{TaskPriority, TaskId}
 use os.kernel.arch.arch_context.{Architecture}
+use os.kernel.arch.mod.{get_arch}
+use test.helpers.host_arch_elf_fixture.{host_elf_machine, foreign_arch}
+
 
 val IMAGE_SHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 val POLICY_SHA = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
@@ -41,13 +44,13 @@ fn _u64(out: [u8], x: i64) -> [u8]:
     bytes = _u32(bytes, (x >> 32) & 0xFFFFFFFF)
     bytes
 
-fn _minimal_x86_64_elf() -> [u8]:
+fn _minimal_host_elf() -> [u8]:
     var bytes: [u8] = [0x7F.to_u8(), 0x45.to_u8(), 0x4C.to_u8(),
         0x46.to_u8(), 2.to_u8(), 1.to_u8(), 1.to_u8()]
     while bytes.len() < 16:
         bytes.push(0.to_u8())
     bytes = _u16(bytes, 2)
-    bytes = _u16(bytes, 62)
+    bytes = _u16(bytes, host_elf_machine())
     bytes = _u32(bytes, 1)
     bytes = _u64(bytes, 0x400080)
     bytes = _u64(bytes, 64)
@@ -116,7 +119,7 @@ fn _dispatcher_with_policy_digest(attempt: GuestContainerAttemptV1,
         workload_image_blake3_hash(bytes), 100u64, 64u64, 10u64, 4u64, [], false)
     expect(index).to_be_greater_than(-1)
     MacSimpleOsGuestDispatcherV1.new(attempt, "boot-1", IMAGE_SHA,
-        local_policy_sha256, _policy(bytes), Architecture.X86_64,
+        local_policy_sha256, _policy(bytes), get_arch(),
         ContainerRuntime.new(world), index)
 
 fn _dispatcher(attempt: GuestContainerAttemptV1,
@@ -132,14 +135,14 @@ fn _scheduler() -> Scheduler:
 
 describe "macOS SimpleOS guest dispatcher":
     it "publishes only the matching scheduler-observed task exit":
-        val bytes = _minimal_x86_64_elf()
+        val bytes = _minimal_host_elf()
         var dispatch = _dispatcher(_attempt(bytes), bytes)
         val scheduler = _scheduler()
         val parent = scheduler.get_task(scheduler.get_current())
         expect(parent != nil).to_be(true)
         val context = kernel_call_context_from_task(parent.unwrap())
         val started = dispatch.start(context, bytes,
-            Architecture.X86_64, [], [], TaskPriority.Normal, scheduler)
+            get_arch(), [], [], TaskPriority.Normal, scheduler)
         expect(started.status).to_equal("ok")
         expect(started.observation != nil).to_be(true)
         val running = started.observation.unwrap()
@@ -163,7 +166,7 @@ describe "macOS SimpleOS guest dispatcher":
         expect(dispatch.observe_exit(exited.scheduler, exited.ipc).status).to_equal("blocked")
 
     it "rejects mismatched boot and missing nonce before launch":
-        val bytes = _minimal_x86_64_elf()
+        val bytes = _minimal_host_elf()
         var stale = _attempt(bytes)
         stale.guest_boot_id = "old-boot"
         var dispatch = _dispatcher(stale, bytes)
@@ -172,21 +175,21 @@ describe "macOS SimpleOS guest dispatcher":
         expect(parent != nil).to_be(true)
         val context = kernel_call_context_from_task(parent.unwrap())
         val rejected = dispatch.start(context, bytes,
-            Architecture.X86_64, [], [], TaskPriority.Normal, scheduler)
+            get_arch(), [], [], TaskPriority.Normal, scheduler)
         expect(rejected.reason).to_equal("guest-binding-invalid")
         expect(rejected.observation).to_be_nil()
         val repeated = dispatch.start(context, bytes,
-            Architecture.X86_64, [], [], TaskPriority.Normal, rejected.scheduler)
+            get_arch(), [], [], TaskPriority.Normal, rejected.scheduler)
         expect(repeated.reason).to_equal("attempt-already-consumed")
         var missing_nonce = _attempt(bytes)
         missing_nonce.nonce = ""
         var nonce_dispatch = _dispatcher(missing_nonce, bytes)
         val denied = nonce_dispatch.start(context, bytes,
-            Architecture.X86_64, [], [], TaskPriority.Normal, scheduler)
+            get_arch(), [], [], TaskPriority.Normal, scheduler)
         expect(denied.reason).to_equal("guest-binding-invalid")
 
     it "rejects workload, image, policy, and architecture drift without a task":
-        val bytes = _minimal_x86_64_elf()
+        val bytes = _minimal_host_elf()
         val scheduler = _scheduler()
         val parent = scheduler.get_task(scheduler.get_current())
         expect(parent != nil).to_be(true)
@@ -195,23 +198,23 @@ describe "macOS SimpleOS guest dispatcher":
         wrong_workload.workload_sha256 = POLICY_SHA
         var workload_dispatch = _dispatcher(wrong_workload, bytes)
         val workload = workload_dispatch.start(context, bytes,
-            Architecture.X86_64, [], [], TaskPriority.Normal, scheduler)
+            get_arch(), [], [], TaskPriority.Normal, scheduler)
         expect(workload.reason).to_equal("workload-digest-mismatch")
         expect(workload.observation).to_be_nil()
         var wrong_image = _attempt(bytes)
         wrong_image.guest_image_sha256 = POLICY_SHA
         var image_dispatch = _dispatcher(wrong_image, bytes)
         val image = image_dispatch.start(context, bytes,
-            Architecture.X86_64, [], [], TaskPriority.Normal, scheduler)
+            get_arch(), [], [], TaskPriority.Normal, scheduler)
         expect(image.reason).to_equal("guest-measurement-mismatch")
         var policy_dispatch = _dispatcher_with_policy_digest(
             _attempt(bytes), bytes, IMAGE_SHA)
         val policy = policy_dispatch.start(context, bytes,
-            Architecture.X86_64, [], [], TaskPriority.Normal, scheduler)
+            get_arch(), [], [], TaskPriority.Normal, scheduler)
         expect(policy.reason).to_equal("guest-measurement-mismatch")
         expect(policy.observation).to_be_nil()
         var arch_dispatch = _dispatcher(_attempt(bytes), bytes)
         val arch = arch_dispatch.start(context, bytes,
-            Architecture.Arm64, [], [], TaskPriority.Normal, scheduler)
+            foreign_arch(), [], [], TaskPriority.Normal, scheduler)
         expect(arch.reason).to_equal("guest-architecture-mismatch")
         expect(MACOS_SIMPLEOS_GUEST_MAX_WORKLOAD_BYTES_V1).to_be_greater_than(bytes.len())
