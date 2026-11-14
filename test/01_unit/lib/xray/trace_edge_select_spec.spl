@@ -1,0 +1,156 @@
+# @cover src/lib/common/trace/trace_edge_select_v1.spl
+# @req REQ-XRAY-V1-EDGE-01
+"""
+# XRay cross-layer / cross-feature edge selection (V1)
+
+Selector extension `simple.trace/observer-v1.edges` -> site classification
+table -> pure fold over the raw-edge stream. Malformed selectors fail closed
+(Err, so the caller selects nothing and the session stays off).
+"""
+use std.spec.*
+use std.common.plugin.aspect_params.{AspectParamsV1}
+use std.common.plugin.iface_id.{ParamExt}
+use std.common.trace.observer_contract_v1.*
+use std.common.trace.xray_native_map_format_v1.*
+use std.common.trace.trace_edge_select_v1.*
+
+fn fn_row(id: u32, first: u32, name: text) -> XrayMapFunctionV1:
+    XrayMapFunctionV1(local_fn_id: id, first_site: first, site_count: 2, name: name)
+
+fn test_map() -> XrayMapV1:
+    XrayMapV1(isa: XRAY_MAP_ISA_X86_64_V1, abi_profile: 1, sled_abi_version: 1, build_id: [], text_base: 0,
+        functions: [fn_row(1, 0, "compiler.50.mir.lower.run"), fn_row(2, 2, "compiler.70.backend.emit.write"),
+            fn_row(3, 4, "std.common.text.trim"), fn_row(4, 6, "compiler.70.backend.emit.flush"),
+            fn_row(5, 8, "app.cli.main")],
+        sites: [])
+
+val SPEC_TEXT = "edge layer\nedge feature from=parse to=emit\nrule feature compiler.50.mir.lower=parse\nrule feature compiler.70.backend.emit=emit"
+
+fn ev(kind: TraceEventKindV1, function_id: u32, seq: u64, ts: u64) -> TraceEventV1:
+    TraceEventV1(kind: kind, flags: 0, generation: 1, module_instance: 1, function_id: function_id,
+        site_id: function_id, context_id: 1, sequence: seq, timestamp: ts, span_token: 0,
+        payload0: 0, payload1: 0, payload2: 0)
+
+fn enter(f: u32, seq: u64, ts: u64) -> TraceEventV1:
+    ev(TraceEventKindV1.Entry, f, seq, ts)
+
+fn leave(f: u32, seq: u64, ts: u64) -> TraceEventV1:
+    ev(TraceEventKindV1.Exit, f, seq, ts)
+
+fn is_err(r: Result<TraceEdgeSpecV1, TraceFailureV1>) -> bool:
+    match r:
+        case Ok(_): false
+        case Err(_): true
+
+describe "trace edge selector parsing":
+    it "parses edge selectors and classification rules":
+        val spec = trace_edge_spec_parse_v1(SPEC_TEXT).unwrap()
+        expect(spec.selectors.len()).to_equal(2)
+        expect(spec.selectors[1].from).to_equal("parse")
+        expect(spec.selectors[1].to).to_equal("emit")
+        expect(spec.rules.len()).to_equal(2)
+    it "fails closed on malformed selectors":
+        expect(is_err(trace_edge_spec_parse_v1(""))).to_equal(true)
+        expect(is_err(trace_edge_spec_parse_v1("rule layer a=b"))).to_equal(true)
+        expect(is_err(trace_edge_spec_parse_v1("edge module"))).to_equal(true)
+        expect(is_err(trace_edge_spec_parse_v1("edge layer from=a from=b"))).to_equal(true)
+        expect(is_err(trace_edge_spec_parse_v1("edge layer via=a"))).to_equal(true)
+        expect(is_err(trace_edge_spec_parse_v1("edge layer from="))).to_equal(true)
+        expect(is_err(trace_edge_spec_parse_v1("edge layer\nrule layer noequals"))).to_equal(true)
+        expect(is_err(trace_edge_spec_parse_v1("edge layer\nrule layer =x"))).to_equal(true)
+        expect(is_err(trace_edge_spec_parse_v1("edge layer\nbogus"))).to_equal(true)
+    it "reads the aspect extension and rejects duplicates and bad schema":
+        val none = AspectParamsV1.defaults()
+        expect(trace_aspect_edge_spec_v1(none).unwrap().is_none()).to_equal(true)
+        var ok = AspectParamsV1.defaults()
+        ok.ext.push(ParamExt(ASPECT_TRACE_EDGES_EXT_V1, 1, "edge layer".bytes(), TRACE_EDGES_SCHEMA_V1))
+        expect(trace_aspect_edge_spec_v1(ok).unwrap().unwrap().selectors.len()).to_equal(1)
+        var bad = AspectParamsV1.defaults()
+        bad.ext.push(ParamExt(ASPECT_TRACE_EDGES_EXT_V1, 1, "edge layer".bytes(), "wrong"))
+        expect(trace_aspect_edge_spec_v1(bad).is_err()).to_equal(true)
+        var dup = AspectParamsV1.defaults()
+        dup.ext.push(ParamExt(ASPECT_TRACE_EDGES_EXT_V1, 1, "edge layer".bytes(), TRACE_EDGES_SCHEMA_V1))
+        dup.ext.push(ParamExt(ASPECT_TRACE_EDGES_EXT_V1, 1, "edge layer".bytes(), TRACE_EDGES_SCHEMA_V1))
+        expect(trace_aspect_edge_spec_v1(dup).is_err()).to_equal(true)
+
+describe "trace edge site classification":
+    it "derives layers from module paths and features from rules":
+        val spec = trace_edge_spec_parse_v1(SPEC_TEXT).unwrap()
+        val table = trace_edge_table_v1(test_map(), spec)
+        expect(table.len()).to_equal(5)
+        expect(table[0].layer).to_equal("compiler.50.mir")
+        expect(table[1].layer).to_equal("compiler.70.backend")
+        expect(table[2].layer).to_equal("lib.common")
+        expect(table[4].layer).to_equal("app")
+        expect(table[0].feature).to_equal("parse")
+        expect(table[1].feature).to_equal("emit")
+        expect(table[2].feature).to_equal("?")
+    it "longest rule prefix wins":
+        val spec = trace_edge_spec_parse_v1("edge layer\nrule layer compiler.70=L7\nrule layer compiler.70.backend.emit=EMIT").unwrap()
+        val table = trace_edge_table_v1(test_map(), spec)
+        expect(table[1].layer).to_equal("EMIT")
+        expect(table[0].layer).to_equal("compiler.50.mir")
+    it "resolves callee and caller functions to selection names":
+        val spec = trace_edge_spec_parse_v1("edge layer from=compiler.50.mir to=compiler.70.backend").unwrap()
+        val names = trace_edge_selection_names_v1(test_map(), spec)
+        expect(names).to_equal(["compiler.50.mir.lower.run", "compiler.70.backend.emit.write", "compiler.70.backend.emit.flush"])
+        val any = trace_edge_spec_parse_v1("edge layer to=app").unwrap()
+        expect(trace_edge_selection_names_v1(test_map(), any).len()).to_equal(5)
+
+# run(1) { write(2) { trim(3) } ; flush(4) } ; main(5)
+fn nested_events() -> [TraceEventV1]:
+    [enter(1, 1, 100), enter(2, 2, 110), enter(3, 3, 115), leave(3, 4, 125), leave(2, 5, 140),
+     enter(4, 6, 150), leave(4, 7, 160), leave(1, 8, 200), enter(5, 9, 300), leave(5, 10, 310)]
+
+describe "trace edge fold":
+    it "counts cross-layer edges with inclusive and exclusive time":
+        val spec = trace_edge_spec_parse_v1("edge layer").unwrap()
+        val table = trace_edge_table_v1(test_map(), spec)
+        val profile = trace_edge_fold_v1(nested_events(), table, spec.selectors[0])
+        # rows in first-exit order. mir->backend: write (30 incl, 20 excl) + flush (10,10); backend->lib: trim (10,10); main is a root
+        expect(profile.rows.len()).to_equal(2)
+        expect(profile.rows[1].from).to_equal("compiler.50.mir")
+        expect(profile.rows[1].to).to_equal("compiler.70.backend")
+        expect(profile.rows[1].calls).to_equal(2u64)
+        expect(profile.rows[1].inclusive_ns).to_equal(40u64)
+        expect(profile.rows[1].exclusive_ns).to_equal(30u64)
+        expect(profile.rows[0].from).to_equal("compiler.70.backend")
+        expect(profile.rows[0].to).to_equal("lib.common")
+        expect(profile.rows[0].calls).to_equal(1u64)
+        expect(profile.unmatched_exits).to_equal(0u64)
+        expect(profile.open_entries).to_equal(0u64)
+    it "excludes same-layer calls":
+        val spec = trace_edge_spec_parse_v1("edge layer\nrule layer compiler=C").unwrap()
+        val table = trace_edge_table_v1(test_map(), spec)
+        val profile = trace_edge_fold_v1(nested_events(), table, spec.selectors[0])
+        expect(profile.rows.len()).to_equal(1)
+        expect(profile.rows[0].from).to_equal("C")
+        expect(profile.rows[0].to).to_equal("lib.common")
+    it "applies from/to filters":
+        val spec = trace_edge_spec_parse_v1("edge layer to=lib.common").unwrap()
+        val table = trace_edge_table_v1(test_map(), spec)
+        val profile = trace_edge_fold_v1(nested_events(), table, spec.selectors[0])
+        expect(profile.rows.len()).to_equal(1)
+        expect(profile.rows[0].to).to_equal("lib.common")
+    it "folds the feature dimension":
+        val spec = trace_edge_spec_parse_v1(SPEC_TEXT).unwrap()
+        val table = trace_edge_table_v1(test_map(), spec)
+        val profile = trace_edge_fold_v1(nested_events(), table, spec.selectors[1])
+        # parse -> emit: write + flush; emit -> ? (trim) is filtered out by from/to
+        expect(profile.rows.len()).to_equal(1)
+        expect(profile.rows[0].calls).to_equal(2u64)
+    it "counts unmatched exits and open entries instead of guessing":
+        val spec = trace_edge_spec_parse_v1("edge layer").unwrap()
+        val table = trace_edge_table_v1(test_map(), spec)
+        val profile = trace_edge_fold_v1([leave(2, 1, 5), enter(1, 2, 10), enter(2, 3, 12)], table, spec.selectors[0])
+        expect(profile.unmatched_exits).to_equal(1u64)
+        expect(profile.open_entries).to_equal(2u64)
+        expect(profile.rows.len()).to_equal(0)
+
+describe "trace edge log-profile output":
+    it "prints one line per edge (golden)":
+        val spec = trace_edge_spec_parse_v1("edge layer").unwrap()
+        val table = trace_edge_table_v1(test_map(), spec)
+        val profile = trace_edge_fold_v1(nested_events(), table, spec.selectors[0])
+        val golden = "edge layer compiler.70.backend->lib.common calls=1 inclusive_ns=10 exclusive_ns=10\nedge layer compiler.50.mir->compiler.70.backend calls=2 inclusive_ns=40 exclusive_ns=30"
+        expect(trace_edge_lines_v1(profile).join("\n")).to_equal(golden)
