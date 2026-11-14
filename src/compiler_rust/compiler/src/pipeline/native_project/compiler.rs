@@ -682,8 +682,14 @@ pub(crate) fn compile_file_to_object(
             ),
         )
     } else {
-        // Non-bootstrap: just normalize text? -> text for basic compat
-        source.replace("text?", "text")
+        // Non-bootstrap: keep `text?` intact whenever the pristine source
+        // parses. The unconditional `text?` -> `text` rewrite erased the
+        // optional, so `match s: case Some(v)` over a `text?` param/local hit
+        // SPL-PAT-001 ("expects Option<T>, found text") and every native-build
+        // whose closure reached such a site (devhub, llm_caret,
+        // mail_credentials via std.io.process_ops) failed. Same
+        // parse-first rule as the module loader.
+        normalize_text_opt_if_unparseable(source)
     };
     source = crate::pipeline::cfg_strip::strip_inactive_cfg_arch_globals(&source, effective_target().arch);
 
@@ -2296,5 +2302,15 @@ mod aggregate_layout_tests {
         assert!(error.contains("Shared"));
         assert_eq!(fields[0].owner_has_vtable, Some(false));
         assert_eq!(fields[0].nested[0].owner_has_vtable, None);
+    }
+}
+
+/// Non-bootstrap `text?` normalisation: keep the pristine source whenever it
+/// parses; only fall back to the legacy `text?` -> `text` rewrite on failure.
+pub(crate) fn normalize_text_opt_if_unparseable(source: &str) -> String {
+    if simple_parser::Parser::new(source).parse().is_ok() {
+        source.to_string()
+    } else {
+        source.replace("text?", "text")
     }
 }

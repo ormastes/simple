@@ -10225,3 +10225,17 @@ fn test_jitalias_module_alias_resolves_qualified_call() {
     let result = answer.locals.iter().find(|local| local.name == "result").unwrap();
     assert_eq!(result.ty, crate::hir::TypeId::I64);
 }
+
+#[test]
+fn text_opt_kept_when_source_parses() {
+    let src = "fn f(s: text?) -> i64:\n    match s:\n        case Some(v): 1\n        case None: 0\n";
+    assert_eq!(super::compiler::normalize_text_opt_if_unparseable(src), src);
+}
+
+#[test]
+fn text_opt_rewritten_when_source_unparseable() {
+    let src = "fn f(s: text?) -> ):\n";
+    let out = super::compiler::normalize_text_opt_if_unparseable(src);
+    assert_eq!(out, src.replace("text?", "text"));
+    assert!(!out.contains("text?"));
+}
