@@ -24,6 +24,11 @@
 #   sh scripts/check/check-chrome-catalog-pixel-diff.shs --diff-only --out DIR
 #   sh scripts/check/check-chrome-catalog-pixel-diff.shs --simple-only --out DIR
 #
+# --backend NAME selects the Engine2D backend for the Simple side (default
+# cpu_simd; e.g. vulkan). The backend is requested STRICT: a host that cannot
+# provide it fails the page instead of silently rendering on the CPU.
+# --width/--height take any size, e.g. 3840 2160 for the 4K lane.
+#
 # --baseline FILE is the per-page ratchet: lines of "<page> <mismatch_pct>".
 # A page whose mismatch exceeds its row by more than 0.25 points, or that has
 # no row, FAILs. Default: scripts/check/chrome_catalog_pixel_diff_baseline.
@@ -49,6 +54,7 @@ SELFTEST=0
 DIFF_ONLY=0
 SIMPLE_ONLY=0
 CHROME_TIMEOUT=90
+BACKEND="cpu_simd"
 BASELINE=""
 RATCHET_TOLERANCE="0.25"
 
@@ -63,6 +69,7 @@ while [ $# -gt 0 ]; do
         --simple-only) SIMPLE_ONLY=1; shift ;;
         --chrome-timeout) CHROME_TIMEOUT="$2"; shift 2 ;;
         --baseline) BASELINE="$2"; shift 2 ;;
+        --backend) BACKEND="$2"; shift 2 ;;
         *) echo "ERROR — nothing was checked (unknown argument $1)"; exit 2 ;;
     esac
 done
@@ -327,7 +334,7 @@ for page in $PAGES; do
             fi
         fi
         t2=$(now_ms)
-        SIMPLE_EXECUTION_MODE=interpreter SIMPLE_TIMEOUT_SECONDS=0 SIMPLE_2D_BACKEND=cpu_simd \
+        SIMPLE_EXECUTION_MODE=interpreter SIMPLE_TIMEOUT_SECONDS=0 SIMPLE_2D_BACKEND="$BACKEND" SIMPLE_2D_BACKEND_STRICT=1 \
             "$SIMPLE_BIN" run examples/06_io/ui/web_render_page_ppm.spl \
             "$html" "$OUT/$page.simple.ppm" "$WIDTH" "$HEIGHT" > "$OUT/$page.simple.log" 2>&1
         t3=$(now_ms)
@@ -338,7 +345,7 @@ for page in $PAGES; do
             sips -s format bmp "$OUT/$page.chrome.png" --out "$OUT/$page.chrome.bmp" >/dev/null 2>&1
         fi
         t2=$(now_ms)
-        SIMPLE_EXECUTION_MODE=interpreter SIMPLE_TIMEOUT_SECONDS=0 SIMPLE_2D_BACKEND=cpu_simd \
+        SIMPLE_EXECUTION_MODE=interpreter SIMPLE_TIMEOUT_SECONDS=0 SIMPLE_2D_BACKEND="$BACKEND" SIMPLE_2D_BACKEND_STRICT=1 \
             "$SIMPLE_BIN" run examples/06_io/ui/web_render_page_ppm.spl \
             "$html" "$OUT/$page.simple.ppm" "$WIDTH" "$HEIGHT" > "$OUT/$page.simple.log" 2>&1
         t3=$(now_ms)
@@ -401,7 +408,12 @@ if [ "$zero_count" -gt 0 ]; then
     exit 1
 fi
 
-[ -n "$BASELINE" ] || BASELINE="$repo_root/scripts/check/chrome_catalog_pixel_diff_baseline.$(uname -s)-$(uname -m).txt"
+# The default baseline describes the default lane only (900x760, cpu_simd);
+# another size or backend has its own file, so a 4K or Vulkan run is never
+# judged against rows it did not produce.
+lane=""
+[ "$WIDTH" = 900 ] && [ "$HEIGHT" = 760 ] && [ "$BACKEND" = cpu_simd ] || lane=".${WIDTH}x${HEIGHT}.$BACKEND"
+[ -n "$BASELINE" ] || BASELINE="$repo_root/scripts/check/chrome_catalog_pixel_diff_baseline.$(uname -s)-$(uname -m)$lane.txt"
 case "$verdict" in
     PASS*)
         if [ -f "$BASELINE" ]; then
