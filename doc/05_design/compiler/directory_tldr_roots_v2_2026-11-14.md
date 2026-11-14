@@ -241,3 +241,20 @@ actual object capture have not been executed. Existing codec/source-row checks d
 not qualify these additions. Full directory membership/category aggregation,
 object coverage and the final startup/output join remain required before publishing
 a complete PackageInit record.
+
+### Current-build initializer aggregate (source implementation, unrun)
+
+All four hosted final-link call sites now enter an optional observation wrapper.
+It requires a unique current module/category receipt for each selected object
+path, retains selected object order, rechecks object SHA before and after the
+fresh typed link, and requires the observed startup symbols to equal the complete
+expected set. The backend's actual startup order is retained unchanged. The
+aggregate binds final output SHA, current executing image, target and environment
+policy. Every attempt clears an earlier aggregate. Unsupported external, warm,
+objectless or incomplete coverage follows ordinary linking without an aggregate.
+No persisted receipt creates fresh authority.
+
+This join and two new pure symbol-set specifications remain unrun. It is a
+current-build initializer observation only; it does not publish PackageInit or
+replace the still-required macro/aspect/generic category and full-directory
+aggregation. The kernel-image memo qualification blocker remains applicable.
