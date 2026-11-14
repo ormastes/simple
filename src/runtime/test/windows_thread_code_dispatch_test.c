@@ -17,9 +17,11 @@
 /* No registered runtime closures in this regression: the registry answers
  * "not a closure" for every word (runtime_native.c contract), so dispatch
  * falls through to the raw-address / record paths under test. */
+#ifndef SIMPLE_TEST_CORE_RUNTIME /* c-runtime test kind: the real registry owner links */
 int64_t rt_closure_func_ptr(int64_t closure) { (void)closure; return 0; }
 int64_t rt_closure_retain(int64_t closure) { (void)closure; return 0; }
 int64_t rt_closure_release(int64_t closure) { (void)closure; return 0; }
+#endif
 
 static int64_t __attribute__((aligned(16))) raw_worker(int64_t data) {
     return data + 8;
