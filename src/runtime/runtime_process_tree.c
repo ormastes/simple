@@ -82,7 +82,18 @@ static int64_t ptree_enumerate(ptree_entry** out, size_t* out_count) {
         return -ENOMEM;
     }
     struct dirent* entry;
-    while ((entry = readdir(proc)) != NULL) {
+    for (;;) {
+        errno = 0;
+        entry = readdir(proc);
+        if (!entry) {
+            int saved = errno;
+            if (saved) {
+                free(list);
+                closedir(proc);
+                return -(int64_t)saved;
+            }
+            break;
+        }
         const char* name = entry->d_name;
         if (name[0] < '1' || name[0] > '9') continue;
         char* end = NULL;
@@ -91,7 +102,13 @@ static int64_t ptree_enumerate(ptree_entry** out, size_t* out_count) {
         if (errno != 0 || !end || *end != '\0' || value == 0 || value > INT32_MAX) continue;
         pid_t pid = (pid_t)value;
         pid_t sid = getsid(pid); /* ESRCH when it exited between readdir and here */
-        if (sid < 0) continue;
+        if (sid < 0) {
+            int saved = errno;
+            if (saved == ESRCH) continue;
+            free(list);
+            closedir(proc);
+            return -(int64_t)(saved ? saved : EIO);
+        }
         if (n == cap) {
             size_t new_cap = cap * 2;
             ptree_entry* grown = (ptree_entry*)realloc(list, new_cap * sizeof(*list));
@@ -139,7 +156,13 @@ static int64_t ptree_enumerate(ptree_entry** out, size_t* out_count) {
         for (int i = 0; i < filled; i++) {
             if (pids[i] <= 0) continue;
             pid_t sid = getsid(pids[i]);
-            if (sid < 0) continue;
+            if (sid < 0) {
+                int saved = errno;
+                if (saved == ESRCH) continue;
+                free(list);
+                free(pids);
+                return -(int64_t)(saved ? saved : EIO);
+            }
             list[n].pid = pids[i];
             list[n].sid = sid;
             n++;
