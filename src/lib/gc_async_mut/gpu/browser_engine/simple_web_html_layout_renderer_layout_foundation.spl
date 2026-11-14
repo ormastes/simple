@@ -191,6 +191,10 @@ class LayoutResult:
     # Filled by `layout()` from `g_text_first_line_dx`; read through
     # `text_first_line_dx_at`.
     first_line_dx: [i32] = []
+    # Per-node (dx, width) pairs for the lines of a wrapped `#text` run that
+    # floats shorten; empty when no run needs it. Filled by `layout()` from
+    # `g_text_line_boxes`; read through `text_line_box_dx` / `text_line_box_w`.
+    line_boxes: [[i32]] = []
 
 class LayoutSelectedResult:
     layout: LayoutResult
@@ -284,6 +288,53 @@ fn inline_line_baseline_offset(child_index: HtmlChildIndex, node_index: i32, st:
 fn inline_line_baseline_descent(st: Style) -> i32:
     style_line_h(st) - inline_line_strut_baseline_offset(st)
 
+# An inline non-replaced ELEMENT: the only kind of box whose `vertical-align:
+# sub | super` is modelled as a baseline shift.
+fn inline_box_is_plain_element(node: HNode, st: Style) -> bool:
+    node.tag != "#text" and st.display == "inline" and not grid_item_is_replaced(node)
+
+# Baseline shift of `vertical-align: sub | super`, positive = DOWN, rounded to
+# the nearest pixel. Chrome (Blink) lowers a `sub` box by a fifth of the
+# PARENT's font size plus 1 px and raises a `super` box by a third plus 1 px.
+fn vertical_align_baseline_shift(st: Style, parent_font_size: i32) -> i32:
+    if st.vertical_align == "sub":
+        return (parent_font_size * 2 + 15) / 10
+    if st.vertical_align == "super":
+        return 0 - (parent_font_size * 2 + 9) / 6
+    0
+
+# Distance from the top of an inline box's content area to its baseline.
+fn inline_content_area_ascent(st: Style) -> i32:
+    (inline_content_area_height(st) - st.font_size + 1) / 2 + style_baseline_offset(st)
+
+# Extent of an inline element's line-height box ABOVE its own baseline,
+# including the sub/super boxes nested in it: those are laid out inside the
+# element but still have to fit in the line box that holds it.
+fn inline_box_shifted_ascent(child_index: HtmlChildIndex, html_nodes: [HNode], styles: [Style], node_index: i32) -> i32:
+    val st = styles[node_index]
+    var ascent = inline_line_strut_baseline_offset(st)
+    var child = child_index.first_child[node_index]
+    while child >= 0:
+        if inline_box_is_plain_element(html_nodes[child], styles[child]):
+            val child_ascent = inline_box_shifted_ascent(child_index, html_nodes, styles, child) - vertical_align_baseline_shift(styles[child], st.font_size)
+            if child_ascent > ascent:
+                ascent = child_ascent
+        child = child_index.next_sibling[child]
+    ascent
+
+# The same extent BELOW the baseline.
+fn inline_box_shifted_descent(child_index: HtmlChildIndex, html_nodes: [HNode], styles: [Style], node_index: i32) -> i32:
+    val st = styles[node_index]
+    var descent = inline_line_baseline_descent(st)
+    var child = child_index.first_child[node_index]
+    while child >= 0:
+        if inline_box_is_plain_element(html_nodes[child], styles[child]):
+            val child_descent = inline_box_shifted_descent(child_index, html_nodes, styles, child) + vertical_align_baseline_shift(styles[child], st.font_size)
+            if child_descent > descent:
+                descent = child_descent
+        child = child_index.next_sibling[child]
+    descent
+
 fn align_inline_line_baselines(child_index: HtmlChildIndex, line_style: Style, html_nodes: [HNode], nodes: [i32], margin_ts: [i32], margin_bs: [i32], styles: [Style], line_y: i32, line_height: i32, bx: [i32], by: [i32], bh: [i32]) -> InlineLineAlignment:
     var out_bx = bx
     var out_by = by
@@ -301,18 +352,25 @@ fn align_inline_line_baselines(child_index: HtmlChildIndex, line_style: Style, h
         val widget_baseline = form_control_baseline_from_top(
             html_nodes[node_index], node_style, bh[node_index]
         )
-        val node_ascent = if widget_baseline >= 0:
+        var node_ascent = if widget_baseline >= 0:
             margin_ts[baseline_i] + widget_baseline
         else:
             inline_line_baseline_ascent(
                 child_index, node_index, node_style,
                 margin_ts[baseline_i], margin_bs[baseline_i], bh, node_replaced
             )
-        val node_descent = if widget_baseline >= 0:
+        var node_descent = if widget_baseline >= 0:
             bh[node_index] - widget_baseline + margin_bs[baseline_i]
         elif bottom_edge_baseline(
             child_index, node_index, node_style, node_replaced
         ): 0 else: inline_line_baseline_descent(node_style)
+        # A plain inline element reaches as far as the sub/super boxes nested
+        # in it, and a sub/super element is itself moved off the baseline --
+        # both have to fit in the line box, which grows to hold them.
+        if widget_baseline < 0 and inline_box_is_plain_element(html_nodes[node_index], node_style):
+            val node_line_shift = vertical_align_baseline_shift(node_style, line_style.font_size)
+            node_ascent = inline_box_shifted_ascent(child_index, html_nodes, styles, node_index) - node_line_shift
+            node_descent = inline_box_shifted_descent(child_index, html_nodes, styles, node_index) + node_line_shift
         if node_ascent > ascent:
             ascent = node_ascent
         if node_descent > descent:
@@ -380,7 +438,15 @@ fn align_inline_line_baselines(child_index: HtmlChildIndex, line_style: Style, h
             (style_line_h(styles[node_index]) - inline_content_area_height(styles[node_index])) / 2
         else:
             0
-        val shift_y = if node_is_half_leaded:
+        # A sub/super element hangs from the line's baseline by its shift; its
+        # box is its content area, so the content-area ascent places the top.
+        val node_baseline_shift = if inline_box_is_plain_element(html_nodes[node_index], styles[node_index]):
+            vertical_align_baseline_shift(styles[node_index], line_style.font_size)
+        else:
+            0
+        val shift_y = if node_baseline_shift != 0:
+            line_y + ascent + node_baseline_shift - inline_content_area_ascent(styles[node_index]) - out_by[node_index]
+        elif node_is_half_leaded:
             line_y + (resolved_height - bh[node_index]) / 2 - out_by[node_index]
         else:
             line_y + ascent - node_baseline_offset - out_by[node_index] + text_half_leading
@@ -483,6 +549,8 @@ class TextWrapCache:
     ends: [[i32]]
     # See LayoutResult.first_line_dx.
     first_line_dx: [i32] = []
+    # See LayoutResult.line_boxes.
+    line_boxes: [[i32]] = []
 
 class IntrinsicWidthResult:
     width: i32
@@ -1192,7 +1260,7 @@ fn flex_item_outer_height(node: HNode, st: Style) -> i32:
     constrained_outer_height(node, st, style_line_h(st))
 
 fn style_with_height_without_grid_fields(st: Style, height_px: i32) -> Style:
-    Style(bg: st.bg, background_gradient_from: st.background_gradient_from, background_gradient_to: st.background_gradient_to, background_gradient_stop_colors: st.background_gradient_stop_colors, background_gradient_stop_positions: st.background_gradient_stop_positions, background_gradient_angle_deg: st.background_gradient_angle_deg, background_gradient_is_radial: st.background_gradient_is_radial, background_repeat: st.background_repeat, background_size_w_px: st.background_size_w_px, background_size_h_px: st.background_size_h_px, background_position_x_px: st.background_position_x_px, background_position_y_px: st.background_position_y_px, background_clip: st.background_clip, background_origin: st.background_origin, background_attachment: st.background_attachment, background_image_uri: st.background_image_uri, fg: st.fg, font_size: st.font_size, font_family: st.font_family, resolved_font_identity: st.resolved_font_identity, resolved_font_advances: st.resolved_font_advances, resolved_font_width: st.resolved_font_width, resolved_font_line_height: st.resolved_font_line_height, line_height_px: st.line_height_px, width_px: st.width_px, height_px: height_px, border_box: st.border_box, min_width_px: st.min_width_px, max_width_px: st.max_width_px, min_height_px: st.min_height_px, max_height_px: st.max_height_px, min_height_vh: st.min_height_vh, flex_fill: st.flex_fill, flex_grow: st.flex_grow, flex_shrink: st.flex_shrink, flex_basis_px: st.flex_basis_px, order: st.order, flex_wrap: st.flex_wrap, justify_content: st.justify_content, align_items: st.align_items, align_self: st.align_self, align_content: st.align_content, pad_l: st.pad_l, pad_t: st.pad_t, pad_r: st.pad_r, pad_b: st.pad_b, border_w: st.border_w, border_color: st.border_color, border_l: st.border_l, border_t: st.border_t, border_r: st.border_r, border_b: st.border_b, border_color_l: st.border_color_l, border_color_t: st.border_color_t, border_color_r: st.border_color_r, border_color_b: st.border_color_b, border_style_l: st.border_style_l, border_style_r: st.border_style_r, outline_w: st.outline_w, outline_color: st.outline_color, outline_offset_px: st.outline_offset_px, box_shadow_x_px: st.box_shadow_x_px, box_shadow_y_px: st.box_shadow_y_px, box_shadow_color: st.box_shadow_color, box_shadow_blur_px: st.box_shadow_blur_px, box_shadow_alpha: st.box_shadow_alpha, box_shadow_raw: st.box_shadow_raw, bg_layers_raw: st.bg_layers_raw, backdrop_filter_raw: st.backdrop_filter_raw, border_radius_px: st.border_radius_px, border_radius_tl_px: st.border_radius_tl_px, border_radius_tr_px: st.border_radius_tr_px, border_radius_br_px: st.border_radius_br_px, border_radius_bl_px: st.border_radius_bl_px, gap_px: st.gap_px, row_gap_px: st.row_gap_px, column_gap_px: st.column_gap_px, margin_l: st.margin_l, margin_t: st.margin_t, margin_r: st.margin_r, margin_b: st.margin_b, margin_l_auto: st.margin_l_auto, margin_r_auto: st.margin_r_auto, margin_t_auto: st.margin_t_auto, margin_b_auto: st.margin_b_auto, display: st.display, overflow_hidden: st.overflow_hidden, overflow_auto_y: st.overflow_auto_y, overflow_scroll_y: st.overflow_scroll_y, scrollbar_thumb_color: st.scrollbar_thumb_color, scrollbar_track_color: st.scrollbar_track_color, text_overflow_ellipsis: st.text_overflow_ellipsis, visibility_hidden: st.visibility_hidden, content_visibility_hidden: st.content_visibility_hidden, will_change: st.will_change, color_adjust: st.color_adjust, forced_color_adjust: st.forced_color_adjust, print_color_adjust: st.print_color_adjust, orphans: st.orphans, widows: st.widows, position_relative: st.position_relative, position_absolute: st.position_absolute, position_sticky: st.position_sticky, position_fixed: st.position_fixed, left_px: st.left_px, top_px: st.top_px, right_px: st.right_px, bottom_px: st.bottom_px, z_index: st.z_index, opacity_pct: st.opacity_pct, flex_direction: st.flex_direction, text_align: st.text_align, text_align_last: st.text_align_last, text_justify: st.text_justify, text_transform: st.text_transform, text_indent_px: st.text_indent_px, letter_spacing_px: st.letter_spacing_px, word_spacing_px: st.word_spacing_px, font_size_adjust: st.font_size_adjust, font_palette: st.font_palette, font_feature_settings: st.font_feature_settings, font_language_override: st.font_language_override, font_variation_settings: st.font_variation_settings, font_variant: st.font_variant, font_variant_alternates: st.font_variant_alternates, font_variant_caps: st.font_variant_caps, font_variant_east_asian: st.font_variant_east_asian, font_variant_emoji: st.font_variant_emoji, font_variant_ligatures: st.font_variant_ligatures, font_variant_numeric: st.font_variant_numeric, font_variant_position: st.font_variant_position, font_style_italic: st.font_style_italic, font_kerning: st.font_kerning, font_optical_sizing: st.font_optical_sizing, font_stretch: st.font_stretch, font_width: st.font_width, font_synthesis: st.font_synthesis, font_synthesis_small_caps: st.font_synthesis_small_caps, font_synthesis_position: st.font_synthesis_position, font_synthesis_style: st.font_synthesis_style, font_synthesis_weight: st.font_synthesis_weight, direction_rtl: st.direction_rtl, writing_mode: st.writing_mode, text_orientation: st.text_orientation, text_combine_upright: st.text_combine_upright, text_shadow_x_px: st.text_shadow_x_px, text_shadow_y_px: st.text_shadow_y_px, text_shadow_color: st.text_shadow_color, text_decoration_color: st.text_decoration_color, text_decoration_underline: st.text_decoration_underline, text_decoration_style: st.text_decoration_style, text_decoration_thickness_px: st.text_decoration_thickness_px, text_underline_offset_px: st.text_underline_offset_px, text_underline_position: st.text_underline_position, white_space_nowrap: st.white_space_nowrap, white_space_pre: st.white_space_pre, overflow_wrap: st.overflow_wrap, line_break: st.line_break, hyphens: st.hyphens, word_break: st.word_break, cursor: st.cursor, resize: st.resize, table_layout: st.table_layout, border_collapse: st.border_collapse, border_spacing_x_px: st.border_spacing_x_px, border_spacing_y_px: st.border_spacing_y_px, caption_side: st.caption_side, vertical_align: st.vertical_align, caret_color: st.caret_color, accent_color: st.accent_color, tab_size: st.tab_size, unicode_bidi: st.unicode_bidi, transition_property: st.transition_property, transition_duration_ms: st.transition_duration_ms, transition_delay_ms: st.transition_delay_ms, transition_timing_function: st.transition_timing_function, animation_name: st.animation_name, animation_duration_ms: st.animation_duration_ms, animation_delay_ms: st.animation_delay_ms, animation_timing_function: st.animation_timing_function, animation_iteration_count: st.animation_iteration_count, animation_direction: st.animation_direction, animation_fill_mode: st.animation_fill_mode, animation_play_state: st.animation_play_state, transform_origin: st.transform_origin, transform_box: st.transform_box, transform_style: st.transform_style, image_rendering: st.image_rendering, object_fit: st.object_fit, object_position: st.object_position, bold: st.bold, float_mode: st.float_mode)
+    Style(bg: st.bg, background_gradient_from: st.background_gradient_from, background_gradient_to: st.background_gradient_to, background_gradient_stop_colors: st.background_gradient_stop_colors, background_gradient_stop_positions: st.background_gradient_stop_positions, background_gradient_angle_deg: st.background_gradient_angle_deg, background_gradient_is_radial: st.background_gradient_is_radial, background_repeat: st.background_repeat, background_size_w_px: st.background_size_w_px, background_size_h_px: st.background_size_h_px, background_position_x_px: st.background_position_x_px, background_position_y_px: st.background_position_y_px, background_clip: st.background_clip, background_origin: st.background_origin, background_attachment: st.background_attachment, background_image_uri: st.background_image_uri, fg: st.fg, font_size: st.font_size, font_family: st.font_family, resolved_font_identity: st.resolved_font_identity, resolved_font_advances: st.resolved_font_advances, resolved_font_width: st.resolved_font_width, resolved_font_line_height: st.resolved_font_line_height, line_height_px: st.line_height_px, width_px: st.width_px, height_px: height_px, border_box: st.border_box, min_width_px: st.min_width_px, max_width_px: st.max_width_px, min_height_px: st.min_height_px, max_height_px: st.max_height_px, min_height_vh: st.min_height_vh, flex_fill: st.flex_fill, flex_grow: st.flex_grow, flex_shrink: st.flex_shrink, flex_basis_px: st.flex_basis_px, flex_basis_zero: st.flex_basis_zero, min_width_set: st.min_width_set, order: st.order, flex_wrap: st.flex_wrap, justify_content: st.justify_content, align_items: st.align_items, align_self: st.align_self, align_content: st.align_content, pad_l: st.pad_l, pad_t: st.pad_t, pad_r: st.pad_r, pad_b: st.pad_b, border_w: st.border_w, border_color: st.border_color, border_l: st.border_l, border_t: st.border_t, border_r: st.border_r, border_b: st.border_b, border_color_l: st.border_color_l, border_color_t: st.border_color_t, border_color_r: st.border_color_r, border_color_b: st.border_color_b, border_style_l: st.border_style_l, border_style_r: st.border_style_r, outline_w: st.outline_w, outline_color: st.outline_color, outline_offset_px: st.outline_offset_px, box_shadow_x_px: st.box_shadow_x_px, box_shadow_y_px: st.box_shadow_y_px, box_shadow_color: st.box_shadow_color, box_shadow_blur_px: st.box_shadow_blur_px, box_shadow_alpha: st.box_shadow_alpha, box_shadow_raw: st.box_shadow_raw, bg_layers_raw: st.bg_layers_raw, backdrop_filter_raw: st.backdrop_filter_raw, border_radius_px: st.border_radius_px, border_radius_tl_px: st.border_radius_tl_px, border_radius_tr_px: st.border_radius_tr_px, border_radius_br_px: st.border_radius_br_px, border_radius_bl_px: st.border_radius_bl_px, gap_px: st.gap_px, row_gap_px: st.row_gap_px, column_gap_px: st.column_gap_px, margin_l: st.margin_l, margin_t: st.margin_t, margin_r: st.margin_r, margin_b: st.margin_b, margin_l_auto: st.margin_l_auto, margin_r_auto: st.margin_r_auto, margin_t_auto: st.margin_t_auto, margin_b_auto: st.margin_b_auto, display: st.display, overflow_hidden: st.overflow_hidden, overflow_auto_y: st.overflow_auto_y, overflow_scroll_y: st.overflow_scroll_y, scrollbar_thumb_color: st.scrollbar_thumb_color, scrollbar_track_color: st.scrollbar_track_color, text_overflow_ellipsis: st.text_overflow_ellipsis, visibility_hidden: st.visibility_hidden, content_visibility_hidden: st.content_visibility_hidden, will_change: st.will_change, color_adjust: st.color_adjust, forced_color_adjust: st.forced_color_adjust, print_color_adjust: st.print_color_adjust, orphans: st.orphans, widows: st.widows, position_relative: st.position_relative, position_absolute: st.position_absolute, position_sticky: st.position_sticky, position_fixed: st.position_fixed, left_px: st.left_px, top_px: st.top_px, right_px: st.right_px, bottom_px: st.bottom_px, z_index: st.z_index, opacity_pct: st.opacity_pct, flex_direction: st.flex_direction, text_align: st.text_align, text_align_set: st.text_align_set, text_align_last: st.text_align_last, text_justify: st.text_justify, text_transform: st.text_transform, text_indent_px: st.text_indent_px, letter_spacing_px: st.letter_spacing_px, word_spacing_px: st.word_spacing_px, font_size_adjust: st.font_size_adjust, font_palette: st.font_palette, font_feature_settings: st.font_feature_settings, font_language_override: st.font_language_override, font_variation_settings: st.font_variation_settings, font_variant: st.font_variant, font_variant_alternates: st.font_variant_alternates, font_variant_caps: st.font_variant_caps, font_variant_east_asian: st.font_variant_east_asian, font_variant_emoji: st.font_variant_emoji, font_variant_ligatures: st.font_variant_ligatures, font_variant_numeric: st.font_variant_numeric, font_variant_position: st.font_variant_position, font_style_italic: st.font_style_italic, font_kerning: st.font_kerning, font_optical_sizing: st.font_optical_sizing, font_stretch: st.font_stretch, font_width: st.font_width, font_synthesis: st.font_synthesis, font_synthesis_small_caps: st.font_synthesis_small_caps, font_synthesis_position: st.font_synthesis_position, font_synthesis_style: st.font_synthesis_style, font_synthesis_weight: st.font_synthesis_weight, direction_rtl: st.direction_rtl, writing_mode: st.writing_mode, text_orientation: st.text_orientation, text_combine_upright: st.text_combine_upright, text_shadow_x_px: st.text_shadow_x_px, text_shadow_y_px: st.text_shadow_y_px, text_shadow_color: st.text_shadow_color, text_decoration_color: st.text_decoration_color, text_decoration_underline: st.text_decoration_underline, text_decoration_style: st.text_decoration_style, text_decoration_thickness_px: st.text_decoration_thickness_px, text_underline_offset_px: st.text_underline_offset_px, text_underline_position: st.text_underline_position, white_space_nowrap: st.white_space_nowrap, white_space_pre: st.white_space_pre, overflow_wrap: st.overflow_wrap, line_break: st.line_break, hyphens: st.hyphens, word_break: st.word_break, cursor: st.cursor, resize: st.resize, table_layout: st.table_layout, border_collapse: st.border_collapse, border_spacing_x_px: st.border_spacing_x_px, border_spacing_y_px: st.border_spacing_y_px, caption_side: st.caption_side, vertical_align: st.vertical_align, caret_color: st.caret_color, accent_color: st.accent_color, tab_size: st.tab_size, unicode_bidi: st.unicode_bidi, transition_property: st.transition_property, transition_duration_ms: st.transition_duration_ms, transition_delay_ms: st.transition_delay_ms, transition_timing_function: st.transition_timing_function, animation_name: st.animation_name, animation_duration_ms: st.animation_duration_ms, animation_delay_ms: st.animation_delay_ms, animation_timing_function: st.animation_timing_function, animation_iteration_count: st.animation_iteration_count, animation_direction: st.animation_direction, animation_fill_mode: st.animation_fill_mode, animation_play_state: st.animation_play_state, transform_origin: st.transform_origin, transform_box: st.transform_box, transform_style: st.transform_style, image_rendering: st.image_rendering, object_fit: st.object_fit, object_position: st.object_position, bold: st.bold, float_mode: st.float_mode, clear_mode: st.clear_mode)
 
 fn style_with_height(st: Style, height_px: i32) -> Style:
     # Style gained Grid fields after this shared used-value clone was written.
@@ -1220,7 +1288,7 @@ fn style_with_height(st: Style, height_px: i32) -> Style:
 fn style_with_width_without_height_metadata(
     st: Style, width_px: i32
 ) -> Style:
-    Style(bg: st.bg, background_gradient_from: st.background_gradient_from, background_gradient_to: st.background_gradient_to, background_gradient_stop_colors: st.background_gradient_stop_colors, background_gradient_stop_positions: st.background_gradient_stop_positions, background_gradient_angle_deg: st.background_gradient_angle_deg, background_gradient_is_radial: st.background_gradient_is_radial, background_repeat: st.background_repeat, background_size_w_px: st.background_size_w_px, background_size_h_px: st.background_size_h_px, background_position_x_px: st.background_position_x_px, background_position_y_px: st.background_position_y_px, background_clip: st.background_clip, background_origin: st.background_origin, background_attachment: st.background_attachment, background_image_uri: st.background_image_uri, fg: st.fg, font_size: st.font_size, font_family: st.font_family, resolved_font_identity: st.resolved_font_identity, resolved_font_advances: st.resolved_font_advances, resolved_font_width: st.resolved_font_width, resolved_font_line_height: st.resolved_font_line_height, line_height_px: st.line_height_px, width_px: width_px, height_px: st.height_px, border_box: st.border_box, min_width_px: st.min_width_px, max_width_px: st.max_width_px, min_height_px: st.min_height_px, max_height_px: st.max_height_px, min_height_vh: st.min_height_vh, flex_fill: st.flex_fill, flex_grow: st.flex_grow, flex_shrink: st.flex_shrink, flex_basis_px: st.flex_basis_px, order: st.order, flex_wrap: st.flex_wrap, justify_content: st.justify_content, align_items: st.align_items, align_self: st.align_self, align_content: st.align_content, pad_l: st.pad_l, pad_t: st.pad_t, pad_r: st.pad_r, pad_b: st.pad_b, border_w: st.border_w, border_color: st.border_color, border_l: st.border_l, border_t: st.border_t, border_r: st.border_r, border_b: st.border_b, border_color_l: st.border_color_l, border_color_t: st.border_color_t, border_color_r: st.border_color_r, border_color_b: st.border_color_b, border_style_l: st.border_style_l, border_style_r: st.border_style_r, outline_w: st.outline_w, outline_color: st.outline_color, outline_offset_px: st.outline_offset_px, box_shadow_x_px: st.box_shadow_x_px, box_shadow_y_px: st.box_shadow_y_px, box_shadow_color: st.box_shadow_color, box_shadow_blur_px: st.box_shadow_blur_px, box_shadow_alpha: st.box_shadow_alpha, box_shadow_raw: st.box_shadow_raw, bg_layers_raw: st.bg_layers_raw, backdrop_filter_raw: st.backdrop_filter_raw, border_radius_px: st.border_radius_px, border_radius_tl_px: st.border_radius_tl_px, border_radius_tr_px: st.border_radius_tr_px, border_radius_br_px: st.border_radius_br_px, border_radius_bl_px: st.border_radius_bl_px, gap_px: st.gap_px, row_gap_px: st.row_gap_px, column_gap_px: st.column_gap_px, margin_l: st.margin_l, margin_t: st.margin_t, margin_r: st.margin_r, margin_b: st.margin_b, margin_l_auto: st.margin_l_auto, margin_r_auto: st.margin_r_auto, margin_t_auto: st.margin_t_auto, margin_b_auto: st.margin_b_auto, display: st.display, overflow_hidden: st.overflow_hidden, overflow_auto_y: st.overflow_auto_y, overflow_scroll_y: st.overflow_scroll_y, scrollbar_thumb_color: st.scrollbar_thumb_color, scrollbar_track_color: st.scrollbar_track_color, text_overflow_ellipsis: st.text_overflow_ellipsis, visibility_hidden: st.visibility_hidden, content_visibility_hidden: st.content_visibility_hidden, will_change: st.will_change, color_adjust: st.color_adjust, forced_color_adjust: st.forced_color_adjust, print_color_adjust: st.print_color_adjust, orphans: st.orphans, widows: st.widows, position_relative: st.position_relative, position_absolute: st.position_absolute, position_sticky: st.position_sticky, position_fixed: st.position_fixed, left_px: st.left_px, top_px: st.top_px, right_px: st.right_px, bottom_px: st.bottom_px, z_index: st.z_index, opacity_pct: st.opacity_pct, flex_direction: st.flex_direction, text_align: st.text_align, text_align_last: st.text_align_last, text_justify: st.text_justify, text_transform: st.text_transform, text_indent_px: st.text_indent_px, letter_spacing_px: st.letter_spacing_px, word_spacing_px: st.word_spacing_px, font_size_adjust: st.font_size_adjust, font_palette: st.font_palette, font_feature_settings: st.font_feature_settings, font_language_override: st.font_language_override, font_variation_settings: st.font_variation_settings, font_variant: st.font_variant, font_variant_alternates: st.font_variant_alternates, font_variant_caps: st.font_variant_caps, font_variant_east_asian: st.font_variant_east_asian, font_variant_emoji: st.font_variant_emoji, font_variant_ligatures: st.font_variant_ligatures, font_variant_numeric: st.font_variant_numeric, font_variant_position: st.font_variant_position, font_style_italic: st.font_style_italic, font_kerning: st.font_kerning, font_optical_sizing: st.font_optical_sizing, font_stretch: st.font_stretch, font_width: st.font_width, font_synthesis: st.font_synthesis, font_synthesis_small_caps: st.font_synthesis_small_caps, font_synthesis_position: st.font_synthesis_position, font_synthesis_style: st.font_synthesis_style, font_synthesis_weight: st.font_synthesis_weight, direction_rtl: st.direction_rtl, writing_mode: st.writing_mode, text_orientation: st.text_orientation, text_combine_upright: st.text_combine_upright, text_shadow_x_px: st.text_shadow_x_px, text_shadow_y_px: st.text_shadow_y_px, text_shadow_color: st.text_shadow_color, text_decoration_color: st.text_decoration_color, text_decoration_underline: st.text_decoration_underline, text_decoration_style: st.text_decoration_style, text_decoration_thickness_px: st.text_decoration_thickness_px, text_underline_offset_px: st.text_underline_offset_px, text_underline_position: st.text_underline_position, white_space_nowrap: st.white_space_nowrap, white_space_pre: st.white_space_pre, overflow_wrap: st.overflow_wrap, line_break: st.line_break, hyphens: st.hyphens, word_break: st.word_break, cursor: st.cursor, resize: st.resize, table_layout: st.table_layout, border_collapse: st.border_collapse, border_spacing_x_px: st.border_spacing_x_px, border_spacing_y_px: st.border_spacing_y_px, caption_side: st.caption_side, vertical_align: st.vertical_align, caret_color: st.caret_color, accent_color: st.accent_color, tab_size: st.tab_size, unicode_bidi: st.unicode_bidi, transition_property: st.transition_property, transition_duration_ms: st.transition_duration_ms, transition_delay_ms: st.transition_delay_ms, transition_timing_function: st.transition_timing_function, animation_name: st.animation_name, animation_duration_ms: st.animation_duration_ms, animation_delay_ms: st.animation_delay_ms, animation_timing_function: st.animation_timing_function, animation_iteration_count: st.animation_iteration_count, animation_direction: st.animation_direction, animation_fill_mode: st.animation_fill_mode, animation_play_state: st.animation_play_state, transform_origin: st.transform_origin, transform_box: st.transform_box, transform_style: st.transform_style, image_rendering: st.image_rendering, object_fit: st.object_fit, object_position: st.object_position, bold: st.bold, float_mode: st.float_mode)
+    Style(bg: st.bg, background_gradient_from: st.background_gradient_from, background_gradient_to: st.background_gradient_to, background_gradient_stop_colors: st.background_gradient_stop_colors, background_gradient_stop_positions: st.background_gradient_stop_positions, background_gradient_angle_deg: st.background_gradient_angle_deg, background_gradient_is_radial: st.background_gradient_is_radial, background_repeat: st.background_repeat, background_size_w_px: st.background_size_w_px, background_size_h_px: st.background_size_h_px, background_position_x_px: st.background_position_x_px, background_position_y_px: st.background_position_y_px, background_clip: st.background_clip, background_origin: st.background_origin, background_attachment: st.background_attachment, background_image_uri: st.background_image_uri, fg: st.fg, font_size: st.font_size, font_family: st.font_family, resolved_font_identity: st.resolved_font_identity, resolved_font_advances: st.resolved_font_advances, resolved_font_width: st.resolved_font_width, resolved_font_line_height: st.resolved_font_line_height, line_height_px: st.line_height_px, width_px: width_px, height_px: st.height_px, border_box: st.border_box, min_width_px: st.min_width_px, max_width_px: st.max_width_px, min_height_px: st.min_height_px, max_height_px: st.max_height_px, min_height_vh: st.min_height_vh, flex_fill: st.flex_fill, flex_grow: st.flex_grow, flex_shrink: st.flex_shrink, flex_basis_px: st.flex_basis_px, flex_basis_zero: st.flex_basis_zero, min_width_set: st.min_width_set, order: st.order, flex_wrap: st.flex_wrap, justify_content: st.justify_content, align_items: st.align_items, align_self: st.align_self, align_content: st.align_content, pad_l: st.pad_l, pad_t: st.pad_t, pad_r: st.pad_r, pad_b: st.pad_b, border_w: st.border_w, border_color: st.border_color, border_l: st.border_l, border_t: st.border_t, border_r: st.border_r, border_b: st.border_b, border_color_l: st.border_color_l, border_color_t: st.border_color_t, border_color_r: st.border_color_r, border_color_b: st.border_color_b, border_style_l: st.border_style_l, border_style_r: st.border_style_r, outline_w: st.outline_w, outline_color: st.outline_color, outline_offset_px: st.outline_offset_px, box_shadow_x_px: st.box_shadow_x_px, box_shadow_y_px: st.box_shadow_y_px, box_shadow_color: st.box_shadow_color, box_shadow_blur_px: st.box_shadow_blur_px, box_shadow_alpha: st.box_shadow_alpha, box_shadow_raw: st.box_shadow_raw, bg_layers_raw: st.bg_layers_raw, backdrop_filter_raw: st.backdrop_filter_raw, border_radius_px: st.border_radius_px, border_radius_tl_px: st.border_radius_tl_px, border_radius_tr_px: st.border_radius_tr_px, border_radius_br_px: st.border_radius_br_px, border_radius_bl_px: st.border_radius_bl_px, gap_px: st.gap_px, row_gap_px: st.row_gap_px, column_gap_px: st.column_gap_px, margin_l: st.margin_l, margin_t: st.margin_t, margin_r: st.margin_r, margin_b: st.margin_b, margin_l_auto: st.margin_l_auto, margin_r_auto: st.margin_r_auto, margin_t_auto: st.margin_t_auto, margin_b_auto: st.margin_b_auto, display: st.display, overflow_hidden: st.overflow_hidden, overflow_auto_y: st.overflow_auto_y, overflow_scroll_y: st.overflow_scroll_y, scrollbar_thumb_color: st.scrollbar_thumb_color, scrollbar_track_color: st.scrollbar_track_color, text_overflow_ellipsis: st.text_overflow_ellipsis, visibility_hidden: st.visibility_hidden, content_visibility_hidden: st.content_visibility_hidden, will_change: st.will_change, color_adjust: st.color_adjust, forced_color_adjust: st.forced_color_adjust, print_color_adjust: st.print_color_adjust, orphans: st.orphans, widows: st.widows, position_relative: st.position_relative, position_absolute: st.position_absolute, position_sticky: st.position_sticky, position_fixed: st.position_fixed, left_px: st.left_px, top_px: st.top_px, right_px: st.right_px, bottom_px: st.bottom_px, z_index: st.z_index, opacity_pct: st.opacity_pct, flex_direction: st.flex_direction, text_align: st.text_align, text_align_set: st.text_align_set, text_align_last: st.text_align_last, text_justify: st.text_justify, text_transform: st.text_transform, text_indent_px: st.text_indent_px, letter_spacing_px: st.letter_spacing_px, word_spacing_px: st.word_spacing_px, font_size_adjust: st.font_size_adjust, font_palette: st.font_palette, font_feature_settings: st.font_feature_settings, font_language_override: st.font_language_override, font_variation_settings: st.font_variation_settings, font_variant: st.font_variant, font_variant_alternates: st.font_variant_alternates, font_variant_caps: st.font_variant_caps, font_variant_east_asian: st.font_variant_east_asian, font_variant_emoji: st.font_variant_emoji, font_variant_ligatures: st.font_variant_ligatures, font_variant_numeric: st.font_variant_numeric, font_variant_position: st.font_variant_position, font_style_italic: st.font_style_italic, font_kerning: st.font_kerning, font_optical_sizing: st.font_optical_sizing, font_stretch: st.font_stretch, font_width: st.font_width, font_synthesis: st.font_synthesis, font_synthesis_small_caps: st.font_synthesis_small_caps, font_synthesis_position: st.font_synthesis_position, font_synthesis_style: st.font_synthesis_style, font_synthesis_weight: st.font_synthesis_weight, direction_rtl: st.direction_rtl, writing_mode: st.writing_mode, text_orientation: st.text_orientation, text_combine_upright: st.text_combine_upright, text_shadow_x_px: st.text_shadow_x_px, text_shadow_y_px: st.text_shadow_y_px, text_shadow_color: st.text_shadow_color, text_decoration_color: st.text_decoration_color, text_decoration_underline: st.text_decoration_underline, text_decoration_style: st.text_decoration_style, text_decoration_thickness_px: st.text_decoration_thickness_px, text_underline_offset_px: st.text_underline_offset_px, text_underline_position: st.text_underline_position, white_space_nowrap: st.white_space_nowrap, white_space_pre: st.white_space_pre, overflow_wrap: st.overflow_wrap, line_break: st.line_break, hyphens: st.hyphens, word_break: st.word_break, cursor: st.cursor, resize: st.resize, table_layout: st.table_layout, border_collapse: st.border_collapse, border_spacing_x_px: st.border_spacing_x_px, border_spacing_y_px: st.border_spacing_y_px, caption_side: st.caption_side, vertical_align: st.vertical_align, caret_color: st.caret_color, accent_color: st.accent_color, tab_size: st.tab_size, unicode_bidi: st.unicode_bidi, transition_property: st.transition_property, transition_duration_ms: st.transition_duration_ms, transition_delay_ms: st.transition_delay_ms, transition_timing_function: st.transition_timing_function, animation_name: st.animation_name, animation_duration_ms: st.animation_duration_ms, animation_delay_ms: st.animation_delay_ms, animation_timing_function: st.animation_timing_function, animation_iteration_count: st.animation_iteration_count, animation_direction: st.animation_direction, animation_fill_mode: st.animation_fill_mode, animation_play_state: st.animation_play_state, transform_origin: st.transform_origin, transform_box: st.transform_box, transform_style: st.transform_style, image_rendering: st.image_rendering, object_fit: st.object_fit, object_position: st.object_position, bold: st.bold, float_mode: st.float_mode, clear_mode: st.clear_mode)
 
 fn style_with_width(st: Style, width_px: i32) -> Style:
     val out = style_with_width_without_height_metadata(st, width_px)
@@ -1725,16 +1793,6 @@ fn _lay_ellipsize_text_for_width_inner(txt: text, start: i32, endv: i32, max_wid
         i = nexti
     out + ellipsis
 
-# --- Left-float exclusion band (bug browser_engine_float_no_inline_wrap_
-# beside_float_2026-08-19). Scope, stated honestly: a SINGLE left float per
-# band, default clear only. The band is recorded when a float:left child is
-# placed and expires by document y (text laid out below the band bottom is
-# unaffected), so it needs no per-frame teardown beyond the root reset in
-# layout(). Multiple simultaneous floats, float:right bands, and explicit
-# `clear` interaction are not modeled.
-pub var g_float_band_bottom: i32 = -2147483648
-pub var g_float_band_indent: i32 = 0
-
 # First-line inset of wrapped `#text` runs that start mid-line (see
 # LayoutResult.first_line_dx). `g_text_first_line_dx_pending` hands the inset
 # from the inline run loop to the `#text` branch of `layout_with_style` for the
@@ -1763,6 +1821,50 @@ fn text_first_line_dx_at(table: [i32], i: i32) -> i32:
         return 0
     table[i]
 
+# Per-line boxes of wrapped `#text` runs whose lines floats shorten (see
+# LayoutResult.line_boxes): for node `i` a flat list of (dx, width) pairs, one
+# pair per line, `dx` measured from the run's box left. Lines past the end of
+# the list span the whole box. EMPTY until a run needs it. A node has either
+# a first-line inset (mid-line run) or line boxes (float-shortened run),
+# never both.
+pub var g_text_line_boxes: [[i32]] = []
+# Hand-over from the inline run loop to the `#text` branch for the one run
+# laid out next: the line boxes it has to wrap into.
+pub var g_text_line_boxes_pending: [i32] = []
+
+fn text_line_boxes_reset():
+    g_text_line_boxes = []
+    g_text_line_boxes_pending = []
+
+# Record node `i`'s line boxes; called for every `#text` the run loop places
+# once the table exists, so a re-laid-out subtree leaves nothing stale.
+fn text_line_boxes_record(node_count: i32, i: i32, boxes: [i32]):
+    if g_text_line_boxes.len() == 0:
+        if boxes.len() == 0:
+            return
+        g_text_line_boxes = empty_i32_lists(node_count)
+    g_text_line_boxes[i] = boxes
+
+# THE decode for where a wrapped line starts and how wide its line box is.
+# Every reader of `first_line_dx` / `line_boxes` -- both raster loops, the
+# Draw IR commands, the geometry probe and the CPU layout execution port --
+# goes through these two functions.
+fn text_line_box_dx(first_dx: [i32], line_boxes: [[i32]], i: i32, line: i32) -> i32:
+    if i >= 0 and i < line_boxes.len() and line_boxes[i].len() > 0:
+        val pairs = line_boxes[i]
+        if line >= 0 and line * 2 + 1 < pairs.len():
+            return pairs[line * 2]
+        return 0
+    if line == 0: text_first_line_dx_at(first_dx, i) else: 0
+
+fn text_line_box_w(first_dx: [i32], line_boxes: [[i32]], i: i32, line: i32, box_w: i32) -> i32:
+    if i >= 0 and i < line_boxes.len() and line_boxes[i].len() > 0:
+        val pairs = line_boxes[i]
+        if line >= 0 and line * 2 + 1 < pairs.len():
+            return pairs[line * 2 + 1]
+        return box_w
+    box_w - text_line_box_dx(first_dx, line_boxes, i, line)
+
 # A run whose lines start at the line box's left edge: the only alignment for
 # which the mid-line first-line inset is modelled. Centred / right-aligned /
 # justified and RTL runs keep their existing placement.
@@ -1786,29 +1888,43 @@ fn text_last_line_advance(txt: text, st: Style, starts: [i32], ends: [i32]) -> i
         style_text_advance(st), style_space_advance(st)
     )
 
-# Float-band-aware text wrap: lines whose index falls inside the band wrap to
-# narrow_w; later lines wrap to full_w. Mirrors compute_style_wrap_ranges'
-# font-advance path with a cell-width fallback.
-fn compute_style_wrap_ranges_float_band(txt: text, full_w: i32, narrow_w: i32, narrow_lines: i32, st: Style) -> LineWrapRanges:
+# Wrap a run into per-line boxes: line `k` is as wide as `line_boxes[2k+1]`
+# (a line floats shorten), lines past the list as wide as `full_w`. A
+# shortened line that cannot take the next word stays EMPTY -- the word moves
+# down to the first line that fits it (CSS 2.2 9.5: a line box that does not
+# fit beside the floats is shifted downward). Font-advance path with a
+# cell-width fallback, like compute_style_wrap_ranges.
+fn compute_style_wrap_ranges_float_band(txt: text, full_w: i32, line_boxes: [i32], st: Style) -> LineWrapRanges:
     val n = txt.byte_len()
     if n == 0:
         return LineWrapRanges(starts: [0; 1], ends: [0; 1])
-    # Byte-indexed advances, for the same reason as
-    # `_lay_compute_style_wrap_ranges_inner`: `n` is a BYTE count and
-    # `resolved_font_advances` is per CODEPOINT, so the old arity check sent
-    # every non-ASCII run to the flat cell-width fallback.
     val by = style_run_byte_advances(st, txt)
     val tb = txt.bytes()
-    val use_font = st.resolved_font_identity != "" and by.len() == n and full_w > 0 and narrow_w > 0
+    val use_font = st.resolved_font_identity != "" and by.len() == n and full_w > 0
     val cw = style_char_w(st)
+    val shortened_lines = (line_boxes.len() as i32) / 2
+    val may_break_in_word = st.overflow_wrap == "break-word" or st.overflow_wrap == "anywhere" or st.word_break == "break-all"
     var starts: [i32] = []
     var ends: [i32] = []
     var start = 0
     var line = 0
     while start < n:
-        val max_width = if line < narrow_lines: narrow_w else: full_w
+        val shortened = line < shortened_lines and line_boxes[line * 2 + 1] < full_w
+        val max_width = if line < shortened_lines: line_boxes[line * 2 + 1] else: full_w
         var endv = start
         if use_font:
+            if shortened and not may_break_in_word:
+                # Width of the word that would open this line.
+                var word_w = 0
+                var word_i = start
+                while word_i < n and tb[word_i] != 32:
+                    word_w = word_w + by[word_i]
+                    word_i = word_i + 1
+                if word_w > max_width:
+                    starts.push(start)
+                    ends.push(start)
+                    line = line + 1
+                    continue
             var used = 0
             var last_space = -1
             while endv < n and used + by[endv] <= max_width:
@@ -1816,13 +1932,23 @@ fn compute_style_wrap_ranges_float_band(txt: text, full_w: i32, narrow_w: i32, n
                 if tb[endv] == 32:
                     last_space = endv
                 endv = endv + 1
+            # As in the normal wrap: break at the last space that fits; with
+            # no break opportunity on the line the whole word is taken and
+            # OVERFLOWS (overflow-wrap: normal), it is not chopped.
+            if endv < n and last_space > start:
+                endv = last_space
+            elif not may_break_in_word and endv < n:
+                endv = word_end_byte(tb, start, n)
             if endv == start:
                 endv = next_codepoint_start(txt, start)
-            elif endv < n and last_space > start:
-                endv = last_space
         else:
             var cpl = max_width / cw
             if cpl < 1:
+                if shortened:
+                    starts.push(start)
+                    ends.push(start)
+                    line = line + 1
+                    continue
                 cpl = 1
             endv = web_wrap_line_end(txt, start, cpl)
             if endv <= start:

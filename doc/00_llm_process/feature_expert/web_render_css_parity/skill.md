@@ -1076,7 +1076,7 @@ turns green in the same change, or the check FAILs as stale.
 - Open clusters, largest first (cells): form-control UA size, i.e. `button`
   and `input` have no UA border and `input` a different content width (78);
   table-cell residue: max-content width drops the spaces around an inline child (9), a `td` whose `display` is not `table-cell` is not laid out (8);
-  `sub`/`sup` (36); floats (34); `fieldset`/`legend` (24); `flex-grow` on an
+  `sub`/`sup` (36, CLOSED -- see the sub/sup section below); floats (34, CLOSED -- see the float section below); `fieldset`/`legend` (24); `flex-grow` on an (row/wrap CLOSED, see below)
   item with a definite width (17); monospace metrics for `code` (16); width /
   height / vertical padding applied to non-replaced inline boxes (15).
 - **`parse_int` drops the sign.** Any signed CSS integer read through it is
@@ -1286,3 +1286,245 @@ exhaustion must fail CLOSED everywhere (never negate an exhausted `:has()`,
 never cache an answer computed while exhausted) —
 `selector_sibling_complexity_spec.spl`. Known residual limits:
 `doc/08_tracking/bug/web_selector_budget_residual_limits_2026-11-14.md`.
+
+
+
+## 2026-11-14 — floats and `clear` (matrix 241 -> 205 mismatching cells)
+
+- **Model.** `simple_web_html_layout_renderer_layout_engine.spl` keeps a float
+  context: every placed float's MARGIN box in page coordinates
+  (`g_float_side/x0/x1/y0/y1`), queried by `float_ctx_left_edge` /
+  `float_ctx_right_edge` / `float_ctx_next_bottom` / `float_ctx_clear_bottom`.
+  `layout_with_style` is now a thin wrapper over `layout_with_style_flow`: a
+  box that establishes a block formatting context (`float_ctx_establishes_bfc`)
+  gets its own slice of the list (`g_float_base`) and drops it on exit, and its
+  auto height grows to enclose its floats.
+- **Placement** (`float_ctx_place_y`): not above the previous float's top,
+  below the floats `clear` names, then down past float bottoms until the
+  margin box fits. A cleared FLOAT keeps its top margin below the clearance; a
+  cleared BLOCK's border top sits at the clearance and its margin is absorbed.
+- **Line boxes.** The inline run loop refreshes `inline_start_x` / `line_iw`
+  from the float context at every line start (`inline_base_x` is the float-free
+  start). A float met inside an open run joins the line if it fits and moves
+  the boxes already on it (`line_nodes`) right.
+- **Trap — the old band narrowed by the RUN's width.** `node_w` in the `#text`
+  branch is the run's own box, so `node_w - indent` went to 1 px and `bb` beside
+  any left float wrapped to two lines (every `…-b` cell was 48 px tall). The
+  narrowed width comes from the run loop (now as per-line boxes, see the
+  "per-line text boxes" entry below).
+- **Trap — a `%` width float was resolved twice** (50% of 400 gave 100): pass
+  `style_with_width(cst, resolved)` like the inline-block arm does.
+- **Trap — page coordinates go stale when a subtree is translated.** The
+  margin-collapse re-top calls `float_ctx_shift`; any NEW
+  `offset_layout_subtree` on a non-BFC block that can hold floats must too.
+- **Not modelled:** a FLOAT is fitted at its top row only, not over its whole
+  height; a run that starts mid-line beside a float; `td` floats; the
+  collapsed space after an inline float is counted twice (`aa <float> bb`,
+  about 5 px). The full list is in the residue bug record.
+- **Found, not float-related:** a 100 px block wraps
+  `one two three four …` into 9 lines against Chrome's 7 (`one two three` is
+  96.95 px but does not fit 100); `<span>bb</span> cc <b>dd</b>` puts `dd` 6 px
+  right of Chrome.
+- Spec: `test/01_unit/browser_engine/float_clear_chrome159_geometry_spec.spl`.
+
+## 2026-11-14 — `<sub>` / `<sup>` join the line box (matrix 205 -> 167 cells)
+
+- **Cause.** A `vertical-align: sub | super` box was laid out at line top
+  +- font-size/4 and never entered `inline_baseline_nodes`, so the line box
+  could not grow (every block 3 px short, 5-6 px in a heading). `<sub>`/`<sup>`
+  also reset `line-height` to normal; html.css sets only `vertical-align` and
+  `font-size: smaller`.
+- **Model (Blink).** Baseline lowered by parent-font/5 + 1 (sub) or raised by
+  parent-font/3 + 1 (super): `vertical_align_baseline_shift`. In
+  `align_inline_line_baselines` a plain inline element's ascent/descent are
+  `inline_box_shifted_ascent/descent` -+ its own shift, which also walks the
+  sub/super boxes NESTED in it (`<b>x<sup>2</sup></b>` grows the line and
+  lowers `<b>`). The shifted box's top is `baseline + shift -
+  inline_content_area_ascent`.
+- **Two placements.** On a block's line the aligner places the box. Inside an
+  inline parent (`st.display == "inline"`) the run loop places it from the
+  parent's content-area top, because that parent's box must stay its content
+  area. Inline-block / replaced boxes with sub/super keep the flat nudge.
+- **Trap — integer metrics drift 1 px per term.** Deriving the top from
+  `strut offset` and `half-leading` separately lost 2 px; go through
+  `inline_content_area_ascent` once.
+- **Found, not fixed:** `line-height: normal` on a block does not override an
+  inherited unitless factor (block stays 24 px, Chrome 18-21); the
+  `td`/sub cells are the table-cell max-content residue, not sub/sup.
+- Spec: `test/01_unit/browser_engine/sub_sup_baseline_shift_chrome159_spec.spl`.
+
+## 2026-11-14 — `flex-grow` on an item with a definite width or basis (matrix 167 -> 152 cells)
+
+- **Cause.** The nowrap row pass split items into "explicit" (width or basis:
+  never grows) and "auto" (shares the remainder by weight). `flex-grow` on an
+  explicit item was ignored and the free space went to `justify-content`; a
+  basis + grow item with no auto sibling took the WHOLE remainder and pushed
+  its siblings out. The wrapping pass did compute a grown width but laid the
+  item out with its authored `width`, which won.
+- **Fix.** `grow_definite_total` collects flex-grow of definite-base items
+  (`flex_item_definite_base_w`); positive free space is split
+  `definite : auto` by grow weight (`definite_grow_space`), each definite item
+  gets `base + share` (cumulative rounding) and is laid out through
+  `style_with_width` so percentages inside it resolve against the used width.
+  `justify-content` gets no space when anything grows.
+- **Not fixed:** `flex-direction: column` ignores flex-grow (`.i flex-grow:1`
+  in a 90 px column stays 24, Chrome 42) and `column-reverse` is laid out as a
+  row; a wrapped line's items are not stretched to the line height
+  (`align-content: stretch`, 24 vs 45); a growing item with AUTO width still
+  starts from base 0 instead of its content width (`flex-grow:1` on two text
+  items gives 141/141, Chrome 111.73/170.47), because `flex-basis: 0` and
+  `auto` share the `flex_basis_px == 0` encoding.
+- Spec: `test/01_unit/browser_engine/flex_grow_definite_size_chrome159_spec.spl`.
+
+## 2026-11-14 — follow-ups to the float / sub-sup / flex-grow fixes
+
+- **Trap — `layout_selected` bypasses `layout()`.** The `contain: layout`
+  boundary is re-laid-out through `layout_with_style` directly, so any state
+  `layout()` resets must be scoped another way. Floats: a `contain: layout`
+  box is a formatting-context root in `float_ctx_establishes_bfc`; without
+  that, a second partial pass placed each float beside its own stale copy
+  (AC-14 of the float spec: 3 boxes differed from the full pass).
+- **Not modelled, sub/sup:** when `<sup>` follows a WRAPPED text run, the
+  reopened last line lowers its baseline for the sup but the run's own last
+  line (part of the tall text box) does not move, so words before and after a
+  footnote marker can differ by 2-3 px in paint. Element geometry matches
+  (`sup` at y=26 in a 200 px `<p>`, Chrome 26).
+- **Not modelled, flex:** `flex: 1` on an item that also has a `width` now
+  grows from that width; Chrome grows from basis 0. Equal widths give the
+  same result, unequal ones do not (`flex-basis: 0` and `auto` share one
+  encoding).
+- **Bitmap lane.** `check-simple-web-engine2d-js-bitmap-evidence.shs` refuses
+  the Rust seed (`simple_bin_status=forbidden`) and needs a self-hosted
+  `bin/simple`; on a host without one it reports `unavailable`, not a verdict.
+
+## 2026-11-14 — paint follows the float inset; an explicit zero flex-basis overrides width
+
+- **Per-line text boxes.** `LayoutResult.first_line_dx` is the mid-line inset
+  of line 0 and nothing else (never negative). A run whose lines floats
+  shorten has `LayoutResult.line_boxes[node]`: flat `(dx, width)` pairs, one
+  per line; lines past the list span the box. A node has one form or the
+  other. Read BOTH only through `text_line_box_dx` / `text_line_box_w`
+  (`..._layout_foundation.spl`); the readers are both raster loops, the Draw
+  IR first-line command and its `_line{n}` loop, the `text_line_x0` probe,
+  and the CPU layout execution port (`browser_cpu_line_box`, with
+  `browser_cpu_line_insets_from_boxes` recovering both forms). Any new
+  `LayoutResult(` / `TextWrapCache(` that feeds a painter must copy
+  `line_boxes` as well as `first_line_dx`. Specs:
+  `test/01_unit/browser_engine/float_band_text_paint_inset_spec.spl`,
+  `float_line_fit_chrome159_spec.spl`,
+  `test/01_unit/lib/gc_async_mut/gpu/browser_engine/cpu_execution_port_line_boxes_spec.spl`.
+- **Trap — do not pack a second meaning into an existing integer table.** A
+  first version encoded the float inset as a negative `first_line_dx` entry;
+  a reader outside the renderer files (the CPU execution port) read the table
+  raw and would have put line 0 about 65,000 px left. Grep `src/` for every
+  reader before changing what a shared field means.
+- **`Style.flex_basis_zero`.** `flex: <n>` / `flex: <n> <m>` / `flex-basis: 0`
+  / `0%` set it; `flex_basis_px` stays 0. EVERY such item, with or without a
+  `width`, has base size padding + border (`flex_item_zero_basis`), joins the
+  definite-grow share and is laid out via `style_with_width`.
+- **Automatic minimum size.** A zero-basis item never ends below
+  `flex_zero_basis_floor_w`: its min-content width (`flex_item_min_content_w`,
+  longest word from the RESOLVED advances), capped by a specified `width`;
+  no floor when `min-width` is declared (`Style.min_width_set`, true even for
+  `min-width: 0`) or the item clips. Nowrap rows freeze too-small shares at
+  the floor and redistribute (`zero_fixed_w`); with no free space every one
+  sits at its floor and takes no part in shrinking.
+- **Trap — `_table_text_min_content_width` is a flat cell estimate** (11 px
+  per character at 16 px): `Label` measured 55 against Chrome's 39.16. Use
+  the resolved per-byte advances for anything compared with Chrome.
+- **Trap — the old shorthand parser read numbers positionally**
+  (`parse_nth_int`): `flex: auto` set nothing, `flex: 1 200px` made shrink 200.
+  It is token-based now: unitless = grow, shrink; length or `auto` = basis.
+- This supersedes the "`flex: 1` on an item that also has a `width`" item in
+  the follow-ups section above.
+- Open residue (one record):
+  `doc/08_tracking/bug/web_combo_matrix_float_subsup_flex_residue_2026-11-14.md`.
+- Catalog pixel ratchet, 900x760 `cpu_simd`, measured at the tip of this
+  change: overview 2.88, html 15.98, css-layout 5.85 (row 6.11), css-paint
+  7.44 (row 9.28), forms-media 6.38, animation 7.09 (row 7.36), evidence 1.72,
+  tab-bar 0.68 (row 0.63, inside the tolerance, not raised). The three lower
+  rows were lowered. The same three values were measured before the paint and
+  zero-basis commits, so those two moved no catalog pixel.
+- `check-text-len-unit-mix.shs` at this tip: 0 new rows; it still FAILs on two
+  STALE baseline rows outside the renderer (`src/app/spipe/model/canonical.spl
+  _json_escape`, `src/compiler/80.driver/driver_compile_vhdl_source_map.spl
+  _json_escape`), present on the release tip as well.
+- Base comparison (release tip `c1099bb7897` vs this change, same seed
+  `sha256 08aba9746a813ee7…`, 59,635,056 bytes, 2026-11-14 09:32, `--simple-only`
+  over overview + evidence + css-layout): mismatch identical on all three
+  (2.88 / 1.72 / 5.85), so the float, sub/sup and flex changes move NO catalog
+  pixel and the lowered rows record improvements that were already on the
+  release tip. Render time 54.1 / 32.1 / 260.4 s base vs 54.5 / 32.7 / 259.2 s;
+  max RSS 814 MB vs 820 MB. The text-len check FAILs identically on the base
+  (0 new, the same 2 stale rows).
+- A float's auto width takes the wider of `flex_item_max_content_width` and
+  `intrinsic_text_width`: only the second sizes a replaced child
+  (`svg_viewbox_percent_sizing_spec` AC-13 went 1 px wide without it).
+
+## 2026-11-14 — review round: lines and blocks fit beside floats over their own extent
+
+- **Line start.** The run loop probes the floats over `[cy, cy +
+  line_probe_h)` (the block's line height), not one pixel row. An EMPTY line
+  that cannot take its first piece (`inline_first_fit_w`: first word, whole
+  nowrap run, or atomic box) moves to `float_ctx_next_bottom_span` and tries
+  again -- two half-width float columns followed by `<p>` no longer stack one
+  word per line. `<br>` with `clear` moves `cy` below the named floats.
+- **Wrapped run.** `float_ctx_line_boxes(y, line_h, left, right)` gives one
+  `(dx, width)` pair per line for as long as a float reaches below the line
+  top; `compute_style_wrap_ranges_float_band` wraps into them and leaves a
+  shortened line EMPTY when the next word does not fit it. The Draw IR text
+  command's y is the line top + 3 at 16px/1.5 (half-leading), the same number
+  Chrome's `Range.getClientRects()` reports.
+- **Formatting-context block.** Placed where the room over `[top, top +
+  height)` holds it; auto height comes from a trial `layout_with_style`
+  whose result is discarded (safe because the box scopes its own floats and
+  the text tables are re-recorded by the real pass).
+- **Alignment.** `block_sole_inflow_child` replaces `child_count == 1` for
+  the centred/right sole-text widening: a float sibling is not in flow. An
+  RTL box with no declared `text-align` gets `start`.
+- **Cost.** `g_float_max_y1` (lowest float bottom of the current context
+  slice, saved and restored by the `layout_with_style` wrapper) lets every
+  float query return at once for a row at or below it.
+- **Baseline arithmetic.** The ratchet lists element IDS, the gate table
+  counts CELLS; a cell has a slot id plus 1-3 element ids and is green only
+  when all of them match. 463 -> 263 ids (200 removed) is 241 -> 152 cells
+  (89 fixed). The gate FAILs on a mismatching id that is not baselined and on
+  a baselined id that matches, so its PASS line is the proof that no
+  still-mismatching id was dropped.
+- Residue: `doc/08_tracking/bug/web_combo_matrix_float_subsup_flex_residue_2026-11-14.md`.
+
+## 2026-11-14 — second review round: fallbacks, long words, wrap freeze, trial reuse
+
+- **Trap — a "whole run" fallback is a floor of the whole paragraph.**
+  `text_longest_word_advance` returned the run's advance when the style had
+  no per-byte table (`compute_styles(..., vector_fonts: false)`), so every
+  `flex:1` paragraph froze at its full width. A minimum must fall back to a
+  WORD in the unit that lane wraps with (`style_char_w` cells), never to the
+  run. Spec row AC-30 lays out with `vector_fonts: false`; keep a no-face row
+  for any measurement that feeds a floor.
+- **Trap — a specialised wrap must keep the general wrap's arms.**
+  `compute_style_wrap_ranges_float_band` lacked the `word_end_byte` arm
+  (long word overflows whole) and was entered whenever a float existed below
+  the line, shortened or not (`line_boxes_shorten` is the precondition now).
+- **Wrapping flex lines** freeze per line after measuring
+  (`wrap_frozen` / `wrap_line_of`): a frozen item leaves
+  `line_grow_totals` and `line_zero_excess`, the rest share the line.
+- **Trial reuse.** The formatting-context fit stashes its trial layout into
+  `out_*` and the scalars (`trial_height`, margins); the real layout is
+  skipped when `(x, y, w)` are unchanged. Without it nested
+  `overflow:hidden` + float cost 2^depth (22 levels did not finish).
+- **`Style.text_align_set`** (inherited with `text_align`) separates an
+  authored `left` from the initial value for the RTL `start` default.
+- **Rounding.** Definite grow shares round to the NEAREST pixel
+  cumulatively, which reproduces Chrome's rounded item edges (400 / 3 ->
+  0, 133, 267).
+- Still open (residue record): the exact float bottom for a word moved
+  down inside a run, integer flex factors, the eager `float_ctx_line_boxes`
+  list, `align="left"` under RTL, cell-estimate minimum without a face.
+- Filed after the third review (residue items 25-27, and 6): the faceless
+  float-aware wrap still chops long words (as the normal faceless wrap
+  does); one twice-layout case remains when the room over a
+  formatting-context box's height is narrower than at its top row;
+  `<td align="left" style="direction:rtl">` probably still aligns `start`;
+  the faceless cell wrap gives 6 lines where Chrome has 3 for the AC-30
+  paragraph.
