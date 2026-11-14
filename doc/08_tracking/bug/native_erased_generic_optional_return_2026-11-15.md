@@ -1,8 +1,11 @@
 # Native: erased generic class `T?` returns/params miscompile (2026-11-15)
 
-**Status:** open. Pre-existing: reproduces on the pre-fix Stage 2
-(`pinned-8220cfef5b8a/.../bootstrap-fable-33/.../stage2-admitted/simple`) and on
-the Stage 2 built from `81625788a20`. Involves no traits.
+**Status:** open. Pre-existing and involves no traits. The `Box<T>` and
+`G<T>` repros below were run on an older Stage 2 (run 33,
+`/home/yoon/dev/simple-boot-fable-20261112/build/bootstrap/pinned-src/pinned-8220cfef5b8a/build/bootstrap-fable-33/stage3/aarch64-unknown-linux-gnu/stage2-admitted/simple`)
+and on the Stage 2 built from `81625788a20`. The true pre-fix base is run 34
+(`.../pinned-43d59a399477/build/bootstrap-fable-34/stage3/aarch64-unknown-linux-gnu/stage2-admitted/simple`).
+The reviewer reproduced the trait-free SparseHash ÷8 below on it.
 
 ## Repro (`native-build main.spl --entry-closure`, SIMPLE_BOOTSTRAP=1)
 
@@ -66,15 +69,29 @@ Pre-fix Stage 2, cranelift: `set 1`.
 
 ## Observed on the real module (Stage 2 `81625788a20`, cranelift)
 
-A probe imports `attribute_schema_v1` and drives `AttributeStoreV1<i64>` with a
-local `impl AttrOwnerV1<i64>`, in direct, column and detached-embedded
-placements: has/get/set/retire/len, a None read, and a write-then-read.
+The real module returns WRONG i64 values natively; this is not limited to the
+`set` bool. Results by shape (reviewer probes in
+`build/review-trait/{real,real2,asnt,col_nt}`):
 
-- The output matches the seed on every line, including `9000000000` through
-  the owner, except `set` printing `1` for `Ok(true)` (the issue above).
-- The `-> T?` miscompile does not show up there. The module never returns `T?`
-  from a generic method to a concrete caller; reads go through
-  `owner_read` (trait dispatch) or `Result<T, text>`.
+- **SparseHash, ÷8 (`Dict<i64, T>` payload).** In the `nodes.spl` shape,
+  `9000000000 -> 1125000000` and `7 -> 0`. A trait-free copy of the store
+  shows the same ÷8 on the pre-fix (run 34) and post-fix Stage 2, which is the
+  3-bit runtime-tag shift.
+- **Embedded and Column, ×8 in a helper-parameter shape.** When the store
+  values pass through a helper's `Result<i64, text>` parameter,
+  `9000000000 -> 72000000000` and `-5 -> -40`.
+- **Correct:** Column in the `nodes.spl` shape, and every `text` store
+  (direct, column, sparse_hash).
+- My own narrower probe (direct/column, values read in place) printed correct
+  i64 values except `set` printing `1` for `Ok(true)`. That shape simply
+  missed the ÷8 and ×8 paths.
+
+Until this is fixed, `src/compiler/10.frontend/core/_AstExpr/nodes.spl`
+gates the non-direct `SIMPLE_NODE_ATTR` / `SIMPLE_NODE_ATTR_SDN` placements
+behind a fresh-store round-trip self-check. On a mismatch it prints
+`node-attr: <placement> store failed its round-trip self-check on this build;
+staying on direct storage (...)` and keeps mode 0.
+
 - **llvm:** the build fails in codegen for `sha256`, `sdn.parser`,
   `data_schema_resolver` and `data_schema_core_v1` (llc error: `'%lN' defined
   with type 'i64' but expected 'ptr'`). The same llc failure in `sha256` and
