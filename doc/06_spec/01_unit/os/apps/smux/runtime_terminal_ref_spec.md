@@ -2,6 +2,9 @@
 
 Source: `test/01_unit/os/apps/smux/runtime_terminal_ref_spec.spl`.
 Status: **AUTHORED_UNRUN**. This companion is authored, not generated evidence.
+The V4 source migration wraps existing output fixtures in the common tagged
+terminal session and preserves the V2/V3 output adapter assertions. That change
+is NOT_RUN and provides no primary native-session coverage.
 Native builds, test execution and docgen remain blocked pending admitted
 daemon/provider dependencies and a root-authorized build slot.
 

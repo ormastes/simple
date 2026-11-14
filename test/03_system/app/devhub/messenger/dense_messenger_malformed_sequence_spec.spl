@@ -1,0 +1,54 @@
+# Acceptance layer: history over a secured database whose stored rows are
+# well-formed SQLite but carry a non-integer sequence value.
+#
+# ONE production Messenger verb call over dense_multipage_malformed_rows.sqlcipher4,
+# made once at load (all nine pages decrypt, about 45 s each on the Phase 1 seed).
+# The generator replaced message 15's seq (room 1, the overflow-body row and the
+# LAST row in room 1's history order) with the text "invalid-sequence-outside-limit".
+# The file authenticates and decrypts; only the row content is wrong.
+# Lifecycle: doc/03_plan/agent_tasks/devhub_messenger_master.md ;
+# doc/05_design/app/devhub/messenger_sdn_and_api.md
+# @manual_section: messenger-malformed-sequence
+
+"""
+## Purpose and audience
+Purpose: as a DevHub user reading room 1 of a secured messenger store, when one
+stored message has a corrupt sequence number I want the history read to fail
+closed with a config error, even when I only asked for the first message and the
+corrupt row would not have been on that page, so that I never get a silently
+mis-ordered history.
+Audience: DevHub release reviewers who accept the encrypted Messenger read path.
+The passphrase is public synthetic test data from dense_ground_truth.json.
+"""
+
+use std.spec.*
+use test.support.devhub_messenger_dense.*
+use std.common.json.value.{JsonValue, json_value_field}
+use app.devhub.messenger.adapter.sqlcipher_reader.{messenger_sqlcipher4_history}
+
+val ms_truth = dense_truth()
+val ms_good = truth_passphrase(ms_truth)
+val _secret_ready = dense_set_secret(ms_good)
+val ms_target = dense_target_with(dense_path("dense_multipage_malformed_rows.sqlcipher4"), DENSE_REF, true)
+val ms_result = messenger_sqlcipher4_history(ms_target, "1", 1, "user")
+
+describe "history over a secured store with a non-integer sequence":
+    it "fails closed as a config error instead of returning a page":
+        # @req REQ-MSGR-DENSE-ACC-MALSEQ-001
+        step("Read room 1 with limit 1; the corrupt row sorts outside that page")
+        # @capture(protocol_json): history status, exit code and error for the malformed fixture
+        expect(ms_result.status).to_equal("config_error")
+        expect(ms_result.exit_code).to_equal(2)
+        expect(ms_result.error).to_equal("invalid history sequence metadata")
+
+    it "releases no message body and no secret in the failure":
+        # @req REQ-MSGR-DENSE-ACC-MALSEQ-002
+        step("Check payload and error for plaintext bodies and the passphrase")
+        expect(ms_result.payload).to_equal("")
+        expect(leaks_none(ms_result.error, [ms_good, "tie-first", "late-source-first", "invalid-sequence-outside-limit"])).to_equal(true)
+
+    it "leaves the malformed fixture byte-identical to the generator's digest":
+        # @req REQ-MSGR-DENSE-ACC-MALSEQ-003
+        step("Hash the fixture after the read and compare with dense_ground_truth.json")
+        val recorded = json_value_field(json_value_field(ms_truth, "files"), "dense_multipage_malformed_rows.sqlcipher4")
+        expect(dense_file_sha256("dense_multipage_malformed_rows.sqlcipher4")).to_equal(tf(recorded, "sha256"))

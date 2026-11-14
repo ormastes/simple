@@ -15,11 +15,16 @@ use std.sosix.entropy.sosix_random_hex
 pub struct SmuxRuntimeControlServiceTurnV1:
     owner: SmuxRuntimeControlOwnerV1
     reply: text
+    checked: SessionRuntimeControlLeaseV1? = nil
+    status: text = ""
+    reason: text = ""
+    nonce: text = ""
 
 fn control_reply(owner: SmuxRuntimeControlOwnerV1, request: SmuxRuntimeControlRequestV1,
         status: text, reason: text, revision: i64, lease: SessionRuntimeControlLeaseV1?, nonce: text) -> SmuxRuntimeControlServiceTurnV1:
     val encoded = smux_runtime_control_reply_v1(request, owner.service_incarnation, status, reason, revision, lease, nonce)
-    SmuxRuntimeControlServiceTurnV1(owner, if encoded.is_ok(): encoded.unwrap() else: "smux: control reply unavailable; inspect same binding and kind")
+    SmuxRuntimeControlServiceTurnV1(owner, if encoded.is_ok(): encoded.unwrap() else: "smux: control reply unavailable; inspect same binding and kind",
+        nil, status, reason, nonce)
 
 fn control_owner_reply(request: SmuxRuntimeControlRequestV1, turn: SmuxRuntimeControlTurnV1) -> SmuxRuntimeControlServiceTurnV1:
     if turn.error != "": return control_reply(turn.owner, request, "rejected", turn.error, turn.revision, nil, "")
@@ -41,7 +46,8 @@ pub fn smux_runtime_control_service_v1(binding: SmuxRuntimeBindingOwnerV3, owner
         if target_digest.is_err(): return control_reply(current, request, "rejected", "runtime-control-target-invalid", 0, nil, "")
         if request.action == "resolve":
             val encoded = smux_runtime_control_reply_v1(request, owner.service_incarnation, "resolved", "", 0, nil, "", target_digest.unwrap())
-            return SmuxRuntimeControlServiceTurnV1(current, if encoded.is_ok(): encoded.unwrap() else: "smux: control resolution unavailable")
+            return SmuxRuntimeControlServiceTurnV1(current, if encoded.is_ok(): encoded.unwrap() else: "smux: control resolution unavailable",
+                nil, "resolved", "", "")
         if request.expected_target_digest != target_digest.unwrap():
             return control_reply(current, request, "rejected", "runtime-control-target-changed", 0, nil, "")
         val fresh = sosix_random_hex(32)
@@ -76,11 +82,12 @@ pub fn smux_runtime_control_service_v1(binding: SmuxRuntimeBindingOwnerV3, owner
         return control_reply(current, request, if request.action == "inspect": "retired" else: "rejected",
             checked.error, checked.revision, checked.lease, "")
     if request.action == "inspect": return control_reply(current, request, "active", "", checked.revision, checked.lease, "")
-    # Both platform adapters currently expose output only. Never fall through
-    # to pane_send/client-size/raw stdin or infer a port from metadata rights.
-    # A future Container API port must consume this live check immediately and
-    # repeat its native clock/target fence at the actual effect boundary.
-    control_reply(current, request, "unsupported", "container-runtime-control-port-unavailable", checked.revision, checked.lease, "")
+    # V1 has no explicit attempt identity or partial-outcome reply. Its wire
+    # stays unsupported; the V4 adapter consumes this live check and repeats
+    # exact target/clock fences at the common session's native input gate.
+    var turn = control_reply(current, request, "unsupported", "container-runtime-control-port-unavailable", checked.revision, checked.lease, "")
+    turn.checked = checked.lease
+    turn
 
 pub fn smux_runtime_control_sweep_v1(binding: SmuxRuntimeBindingOwnerV3,
         owner: SmuxRuntimeControlOwnerV1) -> SmuxRuntimeControlOwnerV1:

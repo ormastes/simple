@@ -95,15 +95,23 @@ class RegionSlotTable:
     # Err("pending") while building at that generation, Err(reason) on
     # failure or when the generation it waited on is gone.
     fn await_slot(key: text, generation: i64) -> Result<text, text>:
-        match self.state(key):
+        val st = self.state(key)
+        match st:
+            case RegionSlotState.Empty:
+                return Err("region_slot_empty: " + key)
+            case _:
+                ()
+        # A retry may already be Ready or Failed when an old waiter resumes.
+        # Its generation must match before either terminal result is exposed.
+        if self.generation(key) != generation:
+            return Err("region_slot_stale_generation: " + key)
+        match st:
             case RegionSlotState.Ready(value):
                 return Ok(value)
             case RegionSlotState.Failed(reason):
                 return Err("region_slot_failed: " + reason)
             case RegionSlotState.Building(_):
-                if self.generation(key) == generation:
-                    return Err("pending")
-                return Err("region_slot_stale_generation: " + key)
+                return Err("pending")
             case _:
                 return Err("region_slot_empty: " + key)
 

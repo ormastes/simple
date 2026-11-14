@@ -1,0 +1,184 @@
+# Purpose and audience: executable specification for the Caret observer stall classifier (pure core).
+# @req REQ-CARET-OBS-001
+# @req REQ-CARET-OBS-002
+# Design: caret suite plan 2026-11-14 section 7.3 (stall table). Never an auto-kill.
+
+use std.spec
+use std.spec.step
+use app.llm_caret.observer.state_axes.*
+use app.llm_caret.observer.stall_classifier.*
+
+# Baseline: process alive, recent output, nothing else known.
+fn base() -> ObservationFacts:
+    var o = observation_unknown()
+    o.process_alive = Fact.Yes
+    o.last_output_age = age_known(1000)
+    o
+
+describe "observer stall classifier":
+    it "all facts unknown gives Unknown with unknown confidence":
+        # @req REQ-CARET-OBS-001
+        step("classify an empty observation")
+        val c = classify(observation_unknown(), policy_default())
+        expect(c.kind).to_equal(ClassKind.Unknown)
+        expect(c.confidence).to_equal(EvidenceConfidence.Unknown)
+
+    it "default policy thresholds are 2 and 5 minutes":
+        # @req REQ-CARET-OBS-002
+        step("read defaults")
+        val p = policy_default()
+        expect(p.quiet_ms).to_equal(120000)  # oracle: 2 minutes in ms
+        expect(p.stall_ms).to_equal(300000)  # oracle: 5 minutes in ms
+
+    it "structured approval gives NeedsUser high confidence":
+        # @req REQ-CARET-OBS-002
+        step("classify approval")
+        var o = base()
+        o.structured_approval = Fact.Yes
+        val c = classify(o, policy_default())
+        expect(c.kind).to_equal(ClassKind.NeedsUser)
+        expect(c.confidence).to_equal(EvidenceConfidence.StructuredOwner)
+        expect(c.attention).to_equal(Attention.Approval)
+
+    it "structured question gives NeedsUser with question attention":
+        # @req REQ-CARET-OBS-002
+        step("classify question")
+        var o = base()
+        o.structured_question = Fact.Yes
+        val c = classify(o, policy_default())
+        expect(c.kind).to_equal(ClassKind.NeedsUser)
+        expect(c.attention).to_equal(Attention.Question)
+
+    it "heuristic text-only prompt is not NeedsUser high confidence (CU-009)":
+        # @req REQ-CARET-OBS-002
+        step("classify screen-text prompt without structured event")
+        var o = base()
+        o.screen_prompt_text = Fact.Yes
+        val c = classify(o, policy_default())
+        expect(c.kind == ClassKind.NeedsUser).to_equal(false)
+        expect(c.confidence == EvidenceConfidence.StructuredOwner).to_equal(false)
+        expect(c.attention).to_equal(Attention.None)
+
+    it "advancing heartbeat with 10 minutes silent output is WorkingQuiet (CU-008)":
+        # @req REQ-CARET-OBS-002
+        step("classify long silence with fresh heartbeat")
+        var o = base()
+        o.last_output_age = age_known(600000)
+        o.heartbeat_age = age_known(5000)
+        o.heartbeat_expected = Fact.Yes
+        val c = classify(o, policy_default())
+        expect(c.kind).to_equal(ClassKind.WorkingQuiet)
+        expect(c.progress).to_equal(TaskProgress.Quiet)
+
+    it "alive, 3 minutes silent, no heartbeat expected is QuietObserve":
+        # @req REQ-CARET-OBS-002
+        step("classify quiet")
+        var o = base()
+        o.last_output_age = age_known(180000)
+        o.heartbeat_expected = Fact.No
+        val c = classify(o, policy_default())
+        expect(c.kind).to_equal(ClassKind.QuietObserve)
+
+    it "missed expected heartbeat for 5 minutes is SuspectedStall":
+        # @req REQ-CARET-OBS-002
+        step("classify missed heartbeat")
+        var o = base()
+        o.last_output_age = age_known(400000)
+        o.heartbeat_expected = Fact.Yes
+        o.heartbeat_age = age_known(310000)
+        val c = classify(o, policy_default())
+        expect(c.kind).to_equal(ClassKind.SuspectedStall)
+        expect(c.progress).to_equal(TaskProgress.SuspectedStall)
+
+    it "past tool deadline is SuspectedStall":
+        # @req REQ-CARET-OBS-002
+        step("classify deadline")
+        var o = base()
+        o.deadline_exceeded = Fact.Yes
+        val c = classify(o, policy_default())
+        expect(c.kind).to_equal(ClassKind.SuspectedStall)
+
+    it "unknown heartbeat age while expected is not a stall":
+        # @req REQ-CARET-OBS-002
+        step("classify expected heartbeat with no data")
+        var o = base()
+        o.heartbeat_expected = Fact.Yes
+        val c = classify(o, policy_default())
+        expect(c.kind == ClassKind.SuspectedStall).to_equal(false)
+
+    it "one hour of silence alone is QuietObserve, never a failure":
+        # @req REQ-CARET-OBS-002
+        step("classify one hour of silence")
+        var o = base()
+        o.last_output_age = age_known(3600000)
+        val c = classify(o, policy_default())
+        expect(c.kind).to_equal(ClassKind.QuietObserve)
+
+    it "CU-010: exit, rate limit, waiting children, disconnect are distinct":
+        # @req REQ-CARET-OBS-002
+        step("classify each distinct cause")
+        var exited = base()
+        exited.child_exited_or_crashed = Fact.Yes
+        var limited = base()
+        limited.rate_limit_reset_known = Fact.Yes
+        var waiting = base()
+        waiting.waiting_on_children = Fact.Yes
+        var gone = base()
+        gone.transport_disconnected = Fact.Yes
+        var timeout = base()
+        timeout.tool_timeout_confirmed = Fact.Yes
+        val p = policy_default()
+        expect(classify(exited, p).kind).to_equal(ClassKind.Failure)
+        expect(classify(timeout, p).kind).to_equal(ClassKind.Failure)
+        expect(classify(limited, p).kind).to_equal(ClassKind.QuotaWait)
+        expect(classify(limited, p).resource).to_equal(ResourceCondition.QuotaWait)
+        expect(classify(waiting, p).kind).to_equal(ClassKind.WaitingChildren)
+        expect(classify(gone, p).kind).to_equal(ClassKind.StateUnknown)
+        expect(classify(exited, p).attention).to_equal(Attention.Error)
+
+    it "precedence: disconnected beats approval":
+        # @req REQ-CARET-OBS-002
+        step("classify disconnected plus approval")
+        var o = base()
+        o.transport_disconnected = Fact.Yes
+        o.structured_approval = Fact.Yes
+        expect(classify(o, policy_default()).kind).to_equal(ClassKind.StateUnknown)
+
+    it "precedence: failure beats approval, approval beats rate limit, rate limit beats children":
+        # @req REQ-CARET-OBS-002
+        step("classify layered facts")
+        var o = base()
+        o.child_exited_or_crashed = Fact.Yes
+        o.structured_approval = Fact.Yes
+        expect(classify(o, policy_default()).kind).to_equal(ClassKind.Failure)
+        var p = base()
+        p.structured_approval = Fact.Yes
+        p.rate_limit_reset_known = Fact.Yes
+        p.waiting_on_children = Fact.Yes
+        expect(classify(p, policy_default()).kind).to_equal(ClassKind.NeedsUser)
+        var q = base()
+        q.rate_limit_reset_known = Fact.Yes
+        q.waiting_on_children = Fact.Yes
+        expect(classify(q, policy_default()).kind).to_equal(ClassKind.QuotaWait)
+
+    it "unknown process liveness is never promoted to Failure":
+        # @req REQ-CARET-OBS-001
+        step("classify unknown liveness with some data")
+        var o = observation_unknown()
+        o.last_output_age = age_known(1000)
+        val c = classify(o, policy_default())
+        expect(c.kind).to_equal(ClassKind.Unknown)
+
+    it "dead process without owner-detected exit is StateUnknown not Failure":
+        # @req REQ-CARET-OBS-001
+        step("classify process gone")
+        var o = base()
+        o.process_alive = Fact.No
+        expect(classify(o, policy_default()).kind).to_equal(ClassKind.StateUnknown)
+
+    it "alive with recent output is Working and reason names the evidence":
+        # @req REQ-CARET-OBS-002
+        step("classify default")
+        val c = classify(base(), policy_default())
+        expect(c.kind).to_equal(ClassKind.Working)
+        expect(c.reason.contains("output")).to_equal(true)

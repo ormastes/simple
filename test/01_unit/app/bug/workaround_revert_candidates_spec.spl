@@ -1,0 +1,54 @@
+# Executable specification: CU-016 expired workarounds (linked bug fixed or
+# closed) produce explicit revert-candidate rows; nothing is applied.
+# @req CU-016
+# @cover src/app/bug/workaround_revert.spl
+
+use std.spec.{describe, it, expect, step}
+use app.bug.workaround_index.{WorkaroundLink, WorkaroundIndex}
+use app.bug.workaround_revert.{workaround_revert_candidates, revert_candidate_message}
+use std.database.bug.{BugDatabase, bug_database_from_sdn}
+use std.database.core.{SdnDatabase, SdnTable, SdnRow}
+
+fn bug_fixture(status: text) -> BugDatabase:
+    val raw = SdnDatabase.new("unused-in-memory-fixture")
+    val active = SdnTable.new("bugs_active", ["id", "severity", "status", "title"])
+    val row = SdnRow.empty()
+    row.set("id", "bug_alpha")
+    row.set("severity", "P1")
+    row.set("status", status)
+    row.set("title", "fixture bug")
+    active.add_row(row)
+    raw.set_table("bugs_active", active)
+    bug_database_from_sdn(raw)
+
+fn index_of(links: [WorkaroundLink]) -> WorkaroundIndex:
+    WorkaroundIndex(revision: "abcdef0", complete: true, links: links)
+
+describe "workaround revert candidates":
+    it "emits a candidate only when the linked bug is fixed or closed":
+        # @req CU-016
+        step("open yields none; fixed and closed yield one")
+        val link = WorkaroundLink(bug_id: "bug_alpha", path: "src/a.spl", line: 7, recover: "abcdef0", reason: "temporary")
+        val idx = index_of([link])
+        expect(workaround_revert_candidates(idx, bug_fixture("open")).len()).to_equal(0)
+        expect(workaround_revert_candidates(idx, bug_fixture("fixed")).len()).to_equal(1)
+        val closed = workaround_revert_candidates(idx, bug_fixture("closed"))
+        expect(closed.len()).to_equal(1)
+        expect(closed[0].path).to_equal("src/a.spl")
+        expect(closed[0].line).to_equal(7)
+        expect(closed[0].trigger).to_equal("fix_landed")
+
+    it "never marks a candidate as authorized to apply":
+        # @req CU-016
+        step("authorization stays explicit")
+        val link = WorkaroundLink(bug_id: "bug_alpha", path: "src/a.spl", line: 7, recover: "", reason: "")
+        val c = workaround_revert_candidates(index_of([link]), bug_fixture("fixed"))[0]
+        expect(c.authorized).to_equal(false)
+        expect(revert_candidate_message(c)).to_contain("src/a.spl:7")
+        expect(revert_candidate_message(c)).to_contain("not applied")
+
+    it "skips unknown bugs":
+        # @req CU-016
+        step("missing bug is reported elsewhere")
+        val link = WorkaroundLink(bug_id: "missing_bug", path: "src/a.spl", line: 1, recover: "", reason: "")
+        expect(workaround_revert_candidates(index_of([link]), bug_fixture("fixed")).len()).to_equal(0)
