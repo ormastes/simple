@@ -1,7 +1,8 @@
 """
 REQ-CMUX-004/005/008: checked window rename through the persistent API owner.
-Authored NOT_RUN. No CoreMux network route is claimed. The child case requires
-the actual Windows ConPTY provider and observes child output and cleanup.
+No CoreMux network route is claimed. The child case requires the host's real
+SOSIX PTY provider (ConPTY on Windows, a Unix PTY elsewhere) and observes child
+output and cleanup.
 # @manual: primary
 # @capture: text
 """
@@ -15,6 +16,17 @@ use os.apps.smux.api.{smux_create_session, smux_new_window, smux_list_windows,
 use os.apps.smux.pane_presentation.{pane_presentation}
 use std.sosix.time.{sosix_sleep_ms, sosix_time_now_monotonic_ms}
 use std.sosix.process.{sosix_process_exists}
+use std.sosix.host.{sosix_platform_name}
+
+fn rename_shell() -> text:
+    if sosix_platform_name() == "windows": return "cmd.exe /Q"
+    return "/bin/sh -i"
+
+# Expected output is not present contiguously in the echoed command.
+fn rename_compute_command() -> text:
+    if sosix_platform_name() == "windows":
+        return "powershell.exe -NoProfile -Command \"Write-Output ('RENAME_' + (6*7))\""
+    return "echo RENAME_$((6*7))"
 
 fn rename_cleanup(session: text) -> bool:
     val deadline = sosix_time_now_monotonic_ms() + 5000
@@ -85,8 +97,7 @@ fn rename_child_checks(session: text, window: text, pane: text, pid: i64) -> Res
     if after.child_pid != pid or after.pty_fd != before.pty_fd or after.child_incarnation != before.child_incarnation:
         return Err("rename changed retained child authority")
     if not sosix_process_exists(pid): return Err("child disappeared during rename")
-    # Expected output is not present contiguously in the echoed command.
-    val _sent = smux_send_command(session, window, pane, "powershell.exe -NoProfile -Command \"Write-Output ('RENAME_' + (6*7))\"")?
+    val _sent = smux_send_command(session, window, pane, rename_compute_command())?
     val deadline = sosix_time_now_monotonic_ms() + 5000
     var attempts = 0
     while attempts < 200 and sosix_time_now_monotonic_ms() < deadline:
@@ -103,7 +114,7 @@ fn rename_native_scenario(session: text) -> Result<bool, text>:
     val panes = smux_list_panes(session, window.id)
     if panes.len() != 1: return Err("initial pane unavailable")
     val pane = panes[0]
-    val spawned = smux_pane_spawn_pty(session, window.id, pane.id, "cmd.exe /Q")
+    val spawned = smux_pane_spawn_pty(session, window.id, pane.id, rename_shell())
     if spawned.is_err(): return Err(spawned.unwrap_err())
     return rename_child_checks(session, window.id, pane.id, spawned.unwrap())
 
@@ -117,8 +128,8 @@ describe "RenameWindow persistent owner integration":
         expect(cleaned).to_equal(true)
         expect(outcome.is_ok()).to_equal(true)
 
-    it "renames a detached live ConPTY window without replacing its child":
-        step("Start a real Windows child in the persistent service owner")
+    it "renames a detached live PTY window without replacing its child":
+        step("Start a real shell child in the persistent service owner")
         val session = smux_create_session("rename-child")
         val outcome = if session.id == "": Err("session admission failed") else: rename_native_scenario(session.id)
         # Preserve actual retained child identities before checked cleanup,
