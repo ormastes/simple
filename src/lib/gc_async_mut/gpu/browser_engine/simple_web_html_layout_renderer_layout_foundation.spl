@@ -824,6 +824,41 @@ fn form_control_button_label_correction_px(nodes: [HNode], styles: [Style], chil
         t = child_index.next_sibling[t]
     extra
 
+# Inline-start inset of a <select>'s label inside its content box: the 20 px
+# interior is 4 px of start padding and a 16 px arrow column. Chrome 159 paints
+# `Alpha` 13 px in from the border edge of a `padding:8px;border:1px` select.
+pub val SELECT_LABEL_INLINE_START_PX: i32 = 4
+
+fn form_control_first_text_child(nodes: [HNode], child_index: HtmlChildIndex, i: i32) -> i32:
+    var t = child_index.first_child[i]
+    while t >= 0:  # cpu-lane-loop-ok: one pass over one control's direct children; bound is that child list
+        if nodes[t].tag == "#text" and nodes[t].text_trimmed.len() > 0:
+            return t
+        t = child_index.next_sibling[t]
+    -1
+
+fn form_control_label_text_node(nodes: [HNode], child_index: HtmlChildIndex, i: i32) -> i32:
+    """The one text node a `<textarea>` or `<select>` shows inside its own box:
+    a textarea's value, or the label of a select's `selected` option (else its
+    first option). -1 when there is none. Every OTHER descendant stays without
+    a box -- a select's options live in a popup, not in flow."""
+    if nodes[i].tag == "textarea":
+        return form_control_first_text_child(nodes, child_index, i)
+    if nodes[i].tag != "select":
+        return -1
+    var first_option = -1
+    var c = child_index.first_child[i]
+    while c >= 0:  # cpu-lane-loop-ok: one pass over a select's own option children; bound is that child list
+        if nodes[c].tag == "option":
+            if attr_present(nodes[c].attrs_raw, "selected"):
+                return form_control_first_text_child(nodes, child_index, c)
+            if first_option < 0:
+                first_option = c
+        c = child_index.next_sibling[c]
+    if first_option < 0:
+        return -1
+    form_control_first_text_child(nodes, child_index, first_option)
+
 fn form_control_baseline_from_top(node: HNode, st: Style, h: i32) -> i32:
     """Distance from a form control's border-box top to its baseline, or -1
     when `node` is not a control this rule covers.

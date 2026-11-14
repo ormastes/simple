@@ -43,3 +43,7 @@ Fixed and pinned by
 5. **Collapsed inter-element space before `<output>`** is dropped (x=165 vs
    168.9) and the `<output>` run sits 4 px high (y=334 vs 338.8, the button's
    own baseline is not modelled — it stays top-placed). Inline text lane.
+6. **Select paint**: the current option label is now laid out and painted, but
+   Chrome's `#efefef` menulist background and the drop-down chevron are not;
+   checkbox/radio are drawn as outlined boxes instead of Chrome's filled
+   accent glyphs; the `<summary>` disclosure triangle paints as a tofu box.
