@@ -145,3 +145,11 @@ only when all three hold, and the flip itself is an owner decision:
 
 Not assigned by this section: W6 three-family reference workload, W7 native
 field layouts, W8 cache identity (REV-01/02), W9 transactional live migration.
+
+## Revision hooks and capability escape (revhooks lane, 2026-11-15)
+
+| Item | IDs | State |
+|---|---|---|
+| REV-02 frozen reload | REV-02 | GREEN 5/5 (`test/01_unit/compiler/cache/rev02_frozen_file_ast_codec_spec.spl`): the existing `FileAstV1` codec round-trips byte-identically, is deterministic, rejects truncation/trailing bytes; it had no spec. Generic `FrozenImmutable<T>` codec kind still undefined |
+| REV-01 pinned reader reclamation | REV-01 | 1 GREEN / 1 RED (`test/01_unit/lib/scv/rev01_pinned_revision_lease_spec.spl`): SCV lease protects one pinned revision; one lease per process means several pinned revisions are unprotected. Bug `rev01_one_lease_per_process_blocks_multi_revision_pin_2026-11-15`, owner decision pending |
+| `E_INIT_CAPABILITY_ESCAPE` | P3 | PROVISIONAL region, default off (`SIMPLE_INIT_CAPABILITY_ESCAPE=on`), `init_capability_escape_v1_spec` RED 1 failed of 4 -> GREEN 4/4; owner to ratify (open-questions doc section 4) |
