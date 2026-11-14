@@ -1155,7 +1155,17 @@ turns green in the same change, or the check FAILs as stale.
 - `html_tree_builder` honours the tokenizer's `self_closing` flag only in
   svg/math foreign content (`_TreeStack.in_foreign_content`); `<div/>` stays
   open, as in Chrome.
-- Still open: residues 6-11 (11: a viewBox-only svg in a shrink-to-fit
-  container is 0x0 in Chrome, 300x300 here; 9: a rule `em` is resolved before
-  an inline `font-size`) in
+- **Ratio-only svg and shrink-to-fit:** it contributes 0 to min/max-content
+  (a specified height contributes `height x ratio`) and then fills the width
+  the container resolved to. `intrinsic_text_width` serves BOTH shrink-to-fit
+  and a span's pen prediction, so a span holding such an svg takes the line's
+  available width instead (`inline_box_holds_ratio_only_svg`). A floated or
+  absolute replaced box is not shrink-to-fit: size it with
+  `replaced_auto_box_w` against the available width.
+- **1 px box floor:** an empty inline-block is 1x1 here, 0x0 in Chrome; 0-wide
+  oracle rows are asserted at the floor. `display:inline-flex` is a full-width
+  flex row here.
+- Still open: residues 6-11 (9: a rule `em` is resolved before an inline
+  `font-size`; 11: the 1 px floor, inline-flex, percentage width in a
+  shrink-to-fit container) in
   `doc/08_tracking/bug/web_replaced_media_residues_vs_chrome_159_2026-11-14.md`.

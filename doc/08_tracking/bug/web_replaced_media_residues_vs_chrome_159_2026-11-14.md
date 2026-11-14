@@ -156,16 +156,43 @@ The tree builder honours a self-closing start tag when the nearest open
 the HTML "breakout" list (`<svg><div>` closing the svg) or the MathML text
 integration points.
 
-### 11. viewBox-only `<svg>` in a shrink-to-fit container
+### 11. viewBox-only `<svg>` in a shrink-to-fit container (mostly fixed)
 
-`<svg viewBox="0 0 24 24">` with no width/height contributes 0 to its
-container's intrinsic width: inside `<div style="display:inline-block">` or a
-`<button>` Chrome lays it out **0x0** (the div is 0x24, the button 16x21). In
-a block or flex container it fills the available width (900x900 in a 900 px
-flex row). This renderer gives 300x300 in the inline-block and the button (it
-was 300x150 before the viewBox ratio was applied): the available-width branch
-of `replaced_auto_box_w` cannot tell a shrink-to-fit measurement from a
-definite available width.
+Chrome 159 rule, measured (`viewBox="0 0 24 24"`, 900 px viewport): a
+ratio-only svg contributes 0 to its container's min/max-content width, a
+specified height contributes `height x ratio`, and the svg then fills the
+width the container resolved to.
 
-Unblock: pass the intrinsic-sizing mode to the replaced sizing helpers and
-return 0 for a ratio-only svg while measuring min/max-content.
+| case | Chrome | before (PR head `ee213029bb5`) | now |
+|---|---|---|---|
+| in `display:inline-block` | div 0, svg 0x0 | 300, 300x300 | 1, 1x1 |
+| in `<button>` | 16, 0x0 | 316, 300x300 | 17, 1x1 |
+| in `float:left` div | 0, 0x0 | 300, 300x300 | 1, 1x1 |
+| in `position:absolute` div | 0, 0x0 | 1, 1x1 | 1, 1x1 |
+| `height=48` in inline-block / float | 48, 48x48 | 300, 48x48 | 48, 48x48 |
+| `height=48` in `<button>` | 64, 48x48 | 316, 48x48 | 64, 48x48 |
+| inline-block with the text `hello` | 33.8, 33.8x33.8 | 334, 334x334 | 35, 35x35 |
+| the svg itself `float:left` | 900x900 | 1x1 | 900x900 |
+| the svg itself `position:absolute` in 500 px | 500x500 | 1x1 | 500x500 |
+| inside `<span>a..b</span>` | 900x900 | not measured | 900x900 |
+| block parent `width:400px` | 400x400 | 400x400 | 400x400 |
+| flex row beside an 8 px span | 892x892 | 892x892 | 892x892 |
+
+Owners: `inline_replaced_predicted_width`, `replaced_auto_box_w`,
+`inline_box_holds_ratio_only_svg`, `absolute_outer_width`, and the float arm
+of `layout_with_style`. Pinned by AC-12..AC-16 of
+`test/01_unit/browser_engine/svg_viewbox_percent_sizing_spec.spl`.
+
+Still open:
+
+- **1 px box floor.** Every box width is floored at 1 px, so an EMPTY
+  `display:inline-block` is 1x1 here and 0x0 in Chrome; the 0-wide rows above
+  land on that floor (button 17 instead of 16). Unblock: let shrink-to-fit
+  widths be 0 (about 25 `< 1` clamps in `layout_engine.spl`).
+- **`display:inline-flex` is laid out as a full-width flex row** (a text-only
+  inline-flex is 900 wide here, 33.8 in Chrome), so a ratio-only svg inside
+  one is 900x900 here and 0x24 in Chrome.
+- **Percentage width in a shrink-to-fit container**: `<svg viewBox
+  style="width:50%">` in an inline-block is 150x150 in Chrome (the percentage
+  falls back to the 300 px default for the container's intrinsic width) and
+  1x1 here.

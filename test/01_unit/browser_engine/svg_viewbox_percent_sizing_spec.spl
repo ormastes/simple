@@ -138,3 +138,82 @@ describe "a replaced element resolves viewBox, percentage and em sizes like Chro
         step("Chrome: height:2em;width:10em at 16 px is 160x32; height:1.5em at font-size:20px is 30")
         expect(box_of("", ROW_J, "s")).to_equal("0,0 160x32")
         expect(box_of("", ROW_J, "t")).to_equal("0,32 900x30")
+
+# Shrink-to-fit oracle (same Chrome 159 setup; each fixture is a direct child
+# of `<body>`; sizes are `w x h`):
+#
+# | container                         | svg                | container w | svg     |
+# |-----------------------------------|--------------------|-------------|---------|
+# | `<div style="width:400px">`       | VB                 | 400         | 400x400 |
+# | `<div style="display:inline-block">` | VB              | 0           | 0x0     |
+# | `<button>`                        | VB                 | 16          | 0x0     |
+# | `<div style="float:left">`        | VB                 | 0           | 0x0     |
+# | `<div style="position:absolute">` | VB                 | 0           | 0x0     |
+# | `<div style="display:flex">` + `<span>x</span>` | VB   | 900         | 892x892 |
+# | `<div style="display:inline-block">` | VB height=48    | 48          | 48x48   |
+# | `<button>`                        | VB height=48       | 64          | 48x48   |
+# | `<div style="float:left">`        | VB height=48       | 48          | 48x48   |
+# | `<div style="display:flex">` + `<span>x</span>` | VB height=48 | 900 | 48x48   |
+# | `<div style="display:inline-block">` | (no viewBox)    | 300         | 300x150 |
+#
+# | `<div style="overflow:hidden">`   | VB float:left (the svg floats)    | - | 900x900 |
+# | `<div style="position:relative;width:500px">` | VB position:absolute | - | 500x500 |
+# | `<span>a` .. `b</span>` in body   | VB                 | 900         | 900x900 |
+#
+# A ratio-only svg contributes 0 to its container's min/max-content width and
+# then fills whatever width the container resolved to.
+#
+# This engine floors every box width at 1 px (an EMPTY inline-block is 1x1
+# here and 0x0 in Chrome), so the 0-wide rows are asserted at that floor:
+# container 1 (button 17), svg 1x1. The floor is filed as residue 11 in
+# doc/08_tracking/bug/web_replaced_media_residues_vs_chrome_159_2026-11-14.md.
+val STF_BLOCK: text = "<div id=\"p\" style=\"width:400px\"><svg id=\"s\" " + VB + "></svg></div>"
+val STF_IB: text = "<div id=\"p\" style=\"display:inline-block\"><svg id=\"s\" " + VB + "></svg></div>"
+val STF_BUTTON: text = "<div><button id=\"p\"><svg id=\"s\" " + VB + "></svg></button></div>"
+val STF_FLOAT: text = "<div style=\"overflow:hidden\"><div id=\"p\" style=\"float:left\"><svg id=\"s\" " + VB + "></svg></div></div>"
+val STF_ABS: text = "<div style=\"position:relative;height:60px\"><div id=\"p\" style=\"position:absolute\"><svg id=\"s\" " + VB + "></svg></div></div>"
+val STF_FLEX: text = "<div id=\"p\" style=\"display:flex\"><svg id=\"s\" " + VB + "></svg><span>x</span></div>"
+val STF_IB_H: text = "<div id=\"p\" style=\"display:inline-block\"><svg id=\"s\" " + VB + " height=\"48\"></svg></div>"
+val STF_BUTTON_H: text = "<div><button id=\"p\"><svg id=\"s\" " + VB + " height=\"48\"></svg></button></div>"
+val STF_FLOAT_H: text = "<div style=\"overflow:hidden\"><div id=\"p\" style=\"float:left\"><svg id=\"s\" " + VB + " height=\"48\"></svg></div></div>"
+val STF_FLEX_H: text = "<div id=\"p\" style=\"display:flex\"><svg id=\"s\" " + VB + " height=\"48\"></svg><span>x</span></div>"
+val STF_SVG_FLOAT: text = "<div id=\"p\" style=\"overflow:hidden\"><svg id=\"s\" " + VB + " style=\"float:left\"></svg></div>"
+val STF_SVG_ABS: text = "<div id=\"p\" style=\"position:relative;height:60px;width:500px\"><svg id=\"s\" " + VB + " style=\"position:absolute\"></svg></div>"
+val STF_SPAN: text = "<span id=\"p\">a<svg id=\"s\" " + VB + "></svg>b</span>"
+val STF_IB_PLAIN: text = "<div id=\"p\" style=\"display:inline-block\"><svg id=\"s\"></svg></div>"
+
+fn page_probe(inner: text, id: text, name: text) -> text:
+    simple_web_layout_debug_layout_by_id(HEAD + inner + "</body></html>", VW, VH, id, name)
+
+fn stf(inner: text) -> text:
+    "container " + page_probe(inner, "p", "w") + " svg " + page_probe(inner, "s", "w") + "x" + page_probe(inner, "s", "h")
+
+describe "a ratio-only svg in a shrink-to-fit container":
+    it "AC-12: contributes 0 intrinsic width, so the container collapses to the 1 px floor":
+        step("Chrome: inline-block 0 wide, button 16, float 0, abspos 0, svg 0x0; here the 1 px box floor applies")
+        expect(stf(STF_IB)).to_equal("container 1 svg 1x1")
+        expect(stf(STF_BUTTON)).to_equal("container 17 svg 1x1")
+        expect(stf(STF_FLOAT)).to_equal("container 1 svg 1x1")
+        expect(stf(STF_ABS)).to_equal("container 1 svg 1x1")
+
+    it "AC-13: a specified height gives it an intrinsic width through the ratio":
+        step("Chrome: height=48 makes the svg 48x48 and the container 48 (button 64)")
+        expect(stf(STF_IB_H)).to_equal("container 48 svg 48x48")
+        expect(stf(STF_BUTTON_H)).to_equal("container 64 svg 48x48")
+        expect(stf(STF_FLOAT_H)).to_equal("container 48 svg 48x48")
+        expect(stf(STF_FLEX_H)).to_equal("container 900 svg 48x48")
+
+    it "AC-14: a definite available width is still filled":
+        step("Chrome: 400 px block parent gives 400x400; a flex row beside a 8 px span gives 892x892")
+        expect(stf(STF_BLOCK)).to_equal("container 400 svg 400x400")
+        expect(stf(STF_FLEX)).to_equal("container 900 svg 892x892")
+
+    it "AC-16: a floated, absolute or span-nested ratio-only svg fills its available width":
+        step("Chrome: float in 900 px is 900x900; absolute in a 500 px block is 500x500; inside a span it is 900x900")
+        expect(stf(STF_SVG_FLOAT)).to_equal("container 900 svg 900x900")
+        expect(stf(STF_SVG_ABS)).to_equal("container 500 svg 500x500")
+        expect(stf(STF_SPAN)).to_equal("container 900 svg 900x900")
+
+    it "AC-15: an svg without a viewBox keeps the 300x150 default":
+        step("Chrome: inline-block around a plain svg is 300 wide")
+        expect(stf(STF_IB_PLAIN)).to_equal("container 300 svg 300x150")
