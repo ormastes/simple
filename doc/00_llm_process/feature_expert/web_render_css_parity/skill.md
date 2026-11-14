@@ -1669,7 +1669,10 @@ never cache an answer computed while exhausted) —
   `gradient_corner_dir_q16`. Interpolation is premultiplied; stop positions
   never decrease. Emit a ramp a ROW at a time (`draw_image`): one
   `draw_rect_filled` per colour run cost the catalog `html` page 120 s.
-  Test with hex stops: `parse_color("red")` is #dc3232.
+  Test with hex stops: `parse_color("red")` is #dc3232. The corner codes
+  (>= 1000) share the angle slot, so every real angle must be reduced to
+  0..359 first (`3turn` painted as "to top left" until it was). Ramp
+  positions multiply by 1000: keep them in i64 past ~1073 px.
 - **Trap — a UA reset needs `inherit` to exist.** Resetting the control
   font exposed that NO font property resolved the `inherit` keyword
   (`font-family: inherit` stored the literal text; `font: inherit` cleared

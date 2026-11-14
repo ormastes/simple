@@ -157,5 +157,20 @@ max-content of mixed inline content, control UA font reset, `h6` margins
     between the pixel centres of the extreme corners, not the CSS gradient
     line length `|w sin a| + |h cos a|` the fb raster uses, so the two lanes
     disagree by up to a pixel's worth of ramp at the ends.
+  - The two lanes round a mixed stop's alpha differently (fb raster:
+    rounded Q16 weights; engine2d ramp: truncated permille), so a
+    translucent ramp can differ by 1 between them.
+  - The new gradient spec rows render through `cpu_simd` only; the engine2d
+    ramp `emu_draw_linear_gradient_stops` as used by the Vulkan / Draw IR
+    backends has no Chrome-numbered row of its own.
+  - `flex:1 1 100px;max-width:25%` (a growing item with a definite basis)
+    is not frozen at its max-width; only zero-basis items are.
   - `parse_color` maps the keyword `red` to #dc3232 (CSS: #ff0000), so every
     `red` in a page paints the wrong colour, gradients included.
+- **Fixed from the 5066a3eeae1 / 5ffa5564085 review:** an angle token is
+  reduced to 0..359 (`gradient_angle_token_deg`), so `3turn` / `1080deg`
+  no longer collide with the `to <corner>` codes (gradient spec AC-7, red
+  -> green). `emu_draw_linear_gradient_stops` computes the ramp position in
+  i64: `(t - t_min) * 1000` is about `2 * w * 1000 * 1000` at 90deg and
+  passed i32 for a box wider than ~1073 px (a 3840 px 4K header). Found by
+  arithmetic, not by a 4K render.
