@@ -149,6 +149,101 @@ fn mir_method_receiver_is_handle_word_v1(receiver: HirParam, provider_symbols: S
                     custom_primitive_underlying_type_tag_by_symbol(owner_symbol.id) >= 0
         case _: return false
     mir_method_receiver_handle_word_kind_v1(receiver.name, owner_kind, owner_custom)
+
+# Symbol-free ABI stand-in for a provider-local `Named` parameter type, read
+# from the DEFINING module's symbols: the handle word for a plain
+# class/struct/enum, the underlying scalar for a unit/newtype -- the register
+# class lower_type's Named arm gives the real type. Returned UNCHANGED (still
+# Named, so the registry rejects it) when the provider's table does not prove
+# either: an unknown id, another symbol kind, or a unit/newtype whose name- and
+# symbol-keyed records disagree (the symbol-keyed record is bound per name, so
+# a foreign table's id may collide).
+fn mir_abi_named_param_stand_in_v1(type_: HirType, symbol_id: i64, provider_symbols: SymbolTable) -> HirType:
+    if val owner = provider_symbols.get_symbol_raw(symbol_id):
+        val owner_info: HirSymbol = owner
+        var bare = owner_info.name
+        val colon = bare.last_index_of("::")
+        if colon >= 0: bare = bare.substring(colon + 2)
+        val dot = bare.last_index_of(".")
+        if dot >= 0: bare = bare.substring(dot + 1)
+        val name_custom = custom_primitive_is_name(bare)
+        val symbol_tag = custom_primitive_underlying_type_tag_by_symbol(symbol_id)
+        if name_custom or symbol_tag >= 0:
+            if not name_custom or symbol_tag != custom_primitive_underlying_type_tag_by_name(bare):
+                return type_
+            if symbol_tag == TYPE_BOOL:
+                return HirType(kind: HirTypeKind.Bool, span: type_.span)
+            if symbol_tag == TYPE_I64:
+                return HirType(kind: HirTypeKind.Int(64, true), span: type_.span)
+            if symbol_tag == TYPE_F64:
+                return HirType(kind: HirTypeKind.Float(64), span: type_.span)
+            return type_
+        match owner_info.kind:
+            case SymbolKind.Class | SymbolKind.Struct | SymbolKind.Enum:
+                return HirType(kind: HirTypeKind.Int(64, true), span: type_.span)
+            case _("any other symbol kind is unproven: the type stays Named and the registry rejects it"): ()
+    type_
+
+# Symbol-free ABI stand-in for one declared parameter type of a provider
+# callable. The name-keyed param registries cannot transport a provider-local
+# SymbolId, so one `Named` param made the whole record unknown and Cranelift
+# refused every float argument of that call (Stage 3 run 32:
+# `PtxBuilder.emit_const_float(dest: text, ty: PrimitiveType, value: f64)`).
+# Array/slice/optional keep their shape around a stood-in element: they are
+# pointer-class whatever they hold. Every other symbol-bearing shape is
+# returned unchanged and stays rejected (unknown, fail closed). The result is
+# for `declared_params` only -- never for argument slot lowering, which needs
+# the consumer's own nominal types.
+fn mir_abi_param_stand_in_v1(type_: HirType, provider_symbols: SymbolTable) -> HirType:
+    if hir_type_metadata_symbol_free(type_):
+        return type_
+    match type_.kind:
+        case HirTypeKind.Named(symbol, _):
+            return mir_abi_named_param_stand_in_v1(type_, symbol.id, provider_symbols)
+        case HirTypeKind.Array(element, size):
+            return HirType(kind: HirTypeKind.Array(
+                mir_abi_param_stand_in_v1(element, provider_symbols), size), span: type_.span)
+        case HirTypeKind.Slice(element):
+            return HirType(kind: HirTypeKind.Slice(
+                mir_abi_param_stand_in_v1(element, provider_symbols)), span: type_.span)
+        case HirTypeKind.Optional(inner):
+            return HirType(kind: HirTypeKind.Optional(
+                mir_abi_param_stand_in_v1(inner, provider_symbols)), span: type_.span)
+        case _("every other symbol-bearing shape is returned unchanged and stays rejected"): ()
+    type_
+
+fn mir_abi_param_stand_ins_v1(types: [HirType], start: i64, provider_symbols: SymbolTable) -> [HirType]:
+    var stand_ins: [HirType] = []
+    var index = start
+    while index < types.len():
+        stand_ins.push(mir_abi_param_stand_in_v1(types[index], provider_symbols))
+        index = index + 1
+    stand_ins
+
+# Publish the ABI param record of one provider callable whose importers see no
+# callable type (no `->`). An instance method of a plain class/struct owner
+# registers its params AFTER the receiver (the receiver is the handle word);
+# every other callable registers all of them. `link_name` is the admitted
+# link; the dashed spelling is registered as well because the importing table
+# sanitizes module segments.
+fn mir_register_callable_abi_params_v1(link_name: text, is_instance_method: bool,
+        receiver_is_handle_word: bool, param_types: [HirType], provider_symbols: SymbolTable):
+    val dotted = link_name.replace("::", ".")
+    val sanitized = dotted.replace("-", "_")
+    if is_instance_method:
+        if not receiver_is_handle_word: return
+        val tail = mir_abi_param_stand_ins_v1(param_types, 1, provider_symbols)
+        bootstrap_method_receiver_tail_params_register_v1(dotted, tail)
+        if sanitized != dotted:
+            bootstrap_method_receiver_tail_params_register_v1(sanitized, tail)
+        return
+    # Nothing crosses the call: no register class to state.
+    if param_types.len() == 0: return
+    val all_params = mir_abi_param_stand_ins_v1(param_types, 0, provider_symbols)
+    bootstrap_callable_abi_params_register_v1(dotted, all_params)
+    if sanitized != dotted:
+        bootstrap_callable_abi_params_register_v1(sanitized, all_params)
+
 fn mir_lower_trace_enabled() -> bool:
     val trace = mir_lower_env_get("SIMPLE_COMPILER_TRACE") ?? ""
     val phase = mir_lower_env_get("SIMPLE_COMPILER_PHASE_PROFILE") ?? ""
@@ -191,7 +286,7 @@ pub fn mir_dynamic_module_init_name(module_name_path: text, bootstrap_module_ind
     elif bootstrap_module_index >= 0:
         unique_name = unique_name + "_" + bootstrap_module_index.to_text()
     "__module_init_" + unique_name + "_dynamic"
-use compiler.frontend.core.types.{custom_primitive_underlying_type_tag_by_symbol, custom_primitive_is_name}
+use compiler.frontend.core.types.{custom_primitive_underlying_type_tag_by_symbol, custom_primitive_underlying_type_tag_by_name, custom_primitive_is_name}
 use compiler.core.interpreter.hashmap.{hm_hash_text}
 
 # Import struct definitions from types module
@@ -2313,29 +2408,23 @@ impl MirLowering:
             # Relocated callables use this exact admitted link, not the bare name.
             # Keep symbol-free admission and ambiguity checks in the registry.
             bootstrap_fn_param_hir_types_register(prescan_call_name, prescan_param_tys)
-            # Receiver-split METHOD signature (Stage 3 f64 call ABI, 2026-11-12).
-            # The list above starts with the receiver `self: Named(owner)` and is
-            # therefore always rejected as symbol-bearing, so an imported method
-            # whose surface type is nil (no `->`, module_callable_types.spl
-            # declared_surface_callable_type) reached Cranelift with no declared
-            # params and panicked on an f64 argument. Register the NON-receiver
-            # params under the receiver-tail key; the receiver itself is the
-            # handle word only for a plain class/struct owner (a unit/newtype owner
-            # may lower to F64 and is left unknown). The same symbol-free
-            # admission applies to the tail, so a symbol-bearing tail stays
-            # rejected (unknown) and keeps failing loudly.
-            if fn_is_method and not fn_is_static and fn_params.len() > 0:
-                if mir_method_receiver_is_handle_word_v1(fn_params[0], module_symbols):
-                    var prescan_tail_tys: [HirType] = []
-                    var prescan_tail_index = 1
-                    while prescan_tail_index < fn_params.len():
-                        prescan_tail_tys.push(fn_params[prescan_tail_index].type_)
-                        prescan_tail_index = prescan_tail_index + 1
-                    val prescan_tail_name = prescan_call_name.replace("::", ".")
-                    bootstrap_method_receiver_tail_params_register_v1(prescan_tail_name, prescan_tail_tys)
-                    val prescan_tail_sanitized = prescan_tail_name.replace("-", "_")
-                    if prescan_tail_sanitized != prescan_tail_name:
-                        bootstrap_method_receiver_tail_params_register_v1(prescan_tail_sanitized, prescan_tail_tys)
+            # ABI param record for importers that see no callable type (no `->`,
+            # module_callable_types.spl declared_imported_surface_callable_type
+            # returns nil). The lists above hold provider-local SymbolIds --
+            # always for a method (receiver `self: Named(owner)`), and for any
+            # callable with a nominal param -- so they are rejected and the call
+            # reached Cranelift with no declared params, which refuses every
+            # float argument. Publish symbol-free stand-ins resolved HERE,
+            # while `module_symbols` is the defining module's table: the
+            # receiver tail of an instance method (2026-11-12), every param of
+            # a static method or free function. What the table does not prove
+            # stays symbol-bearing, rejected, and fails loudly.
+            val prescan_instance_method = fn_is_method and not fn_is_static
+            var prescan_receiver_is_handle_word = false
+            if prescan_instance_method and fn_params.len() > 0:
+                prescan_receiver_is_handle_word = mir_method_receiver_is_handle_word_v1(fn_params[0], module_symbols)
+            mir_register_callable_abi_params_v1(prescan_call_name, prescan_instance_method,
+                prescan_receiver_is_handle_word, prescan_param_tys, module_symbols)
     me register_builtin_enum_seeds():
         """Register the built-in Result/Option variant and runtime-identity
         seeds. Extracted from lower_module's tail (2026-10-17) so lanes that
