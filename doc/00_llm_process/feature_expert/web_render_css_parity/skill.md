@@ -1,3 +1,4 @@
+(numbers pending: re-measured against Chrome 159 — see the baseline file)
 # Web Render CSS Parity Feature Expert
 
 ## Role
@@ -981,3 +982,132 @@ Round 24 measurements: `doc/10_metrics/ui/web_chrome_parity_round24_2026-09-14.m
   root in the same rows — Chrome's UA quotation marks, which Simple never emits.
 
 Round 25 measurements: `doc/10_metrics/ui/web_chrome_parity_round25_2026-09-14.md`.
+
+## Linux aarch64 pixel round — 2026-11-14 (Chromium 131, Playwright)
+
+Gate: `scripts/check/check-chrome-catalog-pixel-diff.shs`; ratchet rows in
+`scripts/check/chrome_catalog_pixel_diff_baseline.Linux-aarch64.txt`.
+
+| page | before | after |
+|---|---|---|
+| overview | 6.45 | 2.03 |
+| html | 26.94 | 15.77 |
+| css-layout | 17.19 | 5.89 |
+| css-paint | 18.26 | 7.46 |
+| forms-media | 18.76 | 8.64 |
+| animation | 33.89 | 23.98 |
+| evidence | 2.31 | 1.63 |
+| tab-bar | 0.61 | 0.61 |
+
+Oracle trap: playwright 1.49 pins Chromium 131, which still shrinks
+`section h1`; Chrome 159 does not. A sectioning-h1 rule added from the 131
+oracle was reverted the same day. Use the NEWEST Chromium the host has.
+
+Roots fixed, each pinned by a spec: Linux generic faces (Liberation Sans /
+DejaVu Sans Mono + real bold/italic faces — Linux used Noto Sans SC's wght=100
+master and reused the regular face for bold), list
+markers and link underlines never painted in Draw IR, staged glyph pen drifting
+from the measured advances (last glyph clipped), bare `#text` runs missing
+their half-leading.
+
+Traps measured this round:
+- **No Chrome on linux-arm64.** `npx playwright install chromium` is the no-root
+  path; the gate finds `~/.cache/ms-playwright/chromium-*/chrome-linux/chrome`
+  or takes `CHROME_BIN`. AppArmor-restricted userns hosts need
+  `CHROME_NO_SANDBOX=1`.
+- **`--headless=new --window-size=W,H` is a WINDOW size.** The viewport was
+  900x673 for 900x760 (87 rows of browser UI) and the screenshot pads below it,
+  so any page taller than 673 px compared Simple content against padding. The
+  gate probes the deficit and captures a taller window; `pixel_diff.spl` crops
+  only when told (`--ref-viewport-rows`). For hand oracles use
+  `chromium_headless_shell-*/chrome-linux/headless_shell` (viewport == window).
+- **A comparison is not a verdict.** The gate printed `PASS … worst=33.89`;
+  PASS meant "a diff ran". Without a baseline file the verdict now says
+  `compared, not judged`.
+- **One seed binary lies.** `src/compiler_rust/target/bootstrap/simple` (built
+  2026-11-05, bootstrap profile) returns `"760".to_i32() == 95` under its JIT; a
+  release seed built from current source is right. The two differ in age,
+  profile and features, so the cause is not isolated — record the binary with
+  any number and re-run on another before chasing an inexplicable value.
+- **Never edit the worktree while a render reads it.** `src/lib` is read as
+  source on every run; pages rendered across a cherry-pick are mixed-source.
+- CPU vs Vulkan on `overview`: 69 differing px, all at clipped run ends — a
+  cheap cross-backend probe that located the clip in the CPU lane.
+
+Open, in size order: `animation` (wrapped inline text continues under its own
+run start instead of the line box's left edge; canvas/svg/audio/video row not
+painted and over-tall), `html`, `forms-media`, `css-paint`, `css-layout`.
+
+## 2026-11-14 — mid-line text runs wrap into the line box, not their own column
+
+- **Model.** A `#text` that starts mid-line (after an inline sibling) and wraps
+  owns the WHOLE line box (`bx` = line left, `bw` = line width); only line 0 is
+  inset, by `LayoutResult.first_line_dx[node]` (empty when no run needs it).
+  Both painters add the inset to line 0 exactly where `text_indent_px` is
+  added; read it through `text_first_line_dx_at`. Any new `LayoutResult(` /
+  `TextWrapCache(` that feeds a painter MUST copy the field, or the old
+  hanging-indent paint silently returns on that path.
+- **Three arms** in the inline run loop (`..._layout_engine.spl`): first word
+  fits the remainder -> inset run; it does not -> break the line BEFORE the
+  run (as `<wbr>` does); inline content after a wrapped run continues on the
+  run's LAST line behind its tail.
+- **Not modelled:** an inline ELEMENT that starts mid-line and wraps
+  (`text <span>long …</span>`), centred/right/RTL runs, float-band lines.
+- **Trap — Chrome's text-node rect includes the collapsed leading space.**
+  `Range.getClientRects()` line 0 x is the pen BEFORE the space; the first
+  glyph (what the renderer's box reports) is one space advance further right.
+- **Trap — `.len()` on `text` is codepoints in current seeds, bytes in the
+  Nov-5 seed.** The wrap path indexes bytes; a `by.len() != txt.len()` arity
+  check silently drops every non-ASCII run to the flat estimate. Use
+  `byte_len()` for byte arity. Still open elsewhere in the style/metrics stage:
+  a lone `<p>— partial; values</p>` measures 160 px on the current seed vs 119.
+- Spec: `test/01_unit/browser_engine/inline_text_wrap_line_box_spec.spl`.
+## 2026-11-14 — combination matrix vs Chrome 159 (tag x tag, tag x CSS, CSS x CSS)
+
+`sh scripts/check/check-web-combo-matrix-chrome.shs` (about 45 s; set
+`SIMPLE_BIN`): 849 generated cells / 3415 element ids in
+`test/fixtures/browser/combo_matrix/` (generator:
+`scripts/generate/generate-web-combo-matrix.shs`), each cell in its own 400x140
+slot and compared slot-relative at 1 px. It is a RATCHET on
+`scripts/check/web_combo_matrix_baseline.txt`: a fix must delete the rows it
+turns green in the same change, or the check FAILs as stale.
+
+- Matching after the first three fixes: 544 / 849 cells (64.1%).
+- Open clusters, largest first (cells): form-control UA size, i.e. `button`
+  and `input` have no UA border and `input` a different content width (78);
+  table-cell residue: max-content width drops the spaces around an inline child (9), a `td` whose `display` is not `table-cell` is not laid out (8);
+  `sub`/`sup` (36); floats (34); `fieldset`/`legend` (24); `flex-grow` on an
+  item with a definite width (17); monospace metrics for `code` (16); width /
+  height / vertical padding applied to non-replaced inline boxes (15).
+- **`parse_int` drops the sign.** Any signed CSS integer read through it is
+  wrong for negatives; `left`/`top`/`order` were fixed, `right`/`bottom` are
+  not, because `right_px >= 0` doubles as "right is set".
+- **`left:10%` is read as 10 px**: offsets have no percentage form yet.
+- The Chrome harvest is `check-chrome-layout-geometry-diff.shs --harvest
+  <page> <out>`; rows now end in `id=<id>`. Use the headless shell under
+  `~/.cache/ms-playwright/chromium_headless_shell-*` (viewport == window); the
+  131 build has an outdated UA stylesheet.
+- Record: `doc/08_tracking/bug/web_combo_matrix_signed_offset_order_flex_basis_2026-11-14.md`.
+- Table UA defaults (`border-spacing:2px`, `td,th{padding:1px}`) landed with
+  the matrix; spacing is forced to 0 under `border-collapse:collapse` in the
+  layout, because the default is no longer 0. Record:
+  `doc/08_tracking/bug/web_table_ua_border_spacing_and_cell_padding_2026-11-14.md`.
+
+## State at landing (2026-11-14, Chrome 159.0.8154.6, Linux aarch64)
+
+- Catalog pixel gate, 900x760 `cpu_simd`: overview 2.88, html 15.98,
+  css-layout 6.11, css-paint 9.28, forms-media 6.38, animation 12.23,
+  evidence 1.72, tab-bar 0.68 (baseline row 0.63, inside the +0.25 tolerance).
+- Combination matrix: 608 of 849 cells match (71.6%); 463 element ids baselined.
+- **The matrix verdict depends on WHICH Chrome 159 binary runs it.** Full
+  Chrome (`chromium-1255/.../chrome`, `--headless=new`) gives 241 mismatching
+  cells; the headless shell gives 259 (21 `<code>` cells: generic `monospace`
+  is 192.66 px in full Chrome, 192.03 in the shell). The baseline is measured
+  with full Chrome; set `CHROME_BIN` to it.
+- **Two paint lanes, one layout.** The software-pixel lane paints text below
+  16 px with the 5x7 bitmap rasteriser; Draw IR lanes paint the resolved face.
+  `web_set_bitmap_paint_lane` keeps the bitmap advance clamp on for the
+  software entry points only. Dropping the clamp everywhere joins `ll` at 13 px.
+- 4K (3840x2160, Vulkan on llvmpipe): `overview` was 9.15% before the
+  clamped-width auto-margin fix; not re-measured after it. No 4K baseline yet.
+- Open review items: `doc/08_tracking/bug/web_render_chrome_lane_review_residue_2026-11-14.md`.

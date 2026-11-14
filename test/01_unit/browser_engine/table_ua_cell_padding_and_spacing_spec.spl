@@ -1,0 +1,112 @@
+"""
+## Purpose and audience
+Purpose: Prove that an unstyled table carries the UA defaults Chrome gives it:
+`border-spacing: 2px` on `table` and `padding: 1px` on `td` / `th`.
+Audience: browser-engine layout maintainers.
+
+The tag defaults set only `display` for `table`, `td` and `th`. A bare
+`<table>` was therefore laid out with its cells flush against each other and
+against the table edge: every cell 2 px too narrow and too short, and every
+cell after the first progressively further left and up.
+
+Found by the web combination matrix (the `tc-td-*` and `tt-td-*` cells).
+
+Chrome oracle (Chrome 159.0.8154.6 headless shell, 900x2000,
+getBoundingClientRect, `body{margin:0;font:16px/1.5 sans-serif}`):
+  <table><tr><td>aa</td><td>cd</td><td>bb</td></tr>
+         <tr><td>dd</td><th>ee</th><td>ff</td></tr></table>
+      table 0,0 67x58
+      row 1 cells x = 2, 24, 46   y = 2    each 20x26
+      row 2 cells x = 2, 24, 46   y = 30   each 20x26
+  same 2x2 with border-collapse:collapse
+      table 40x52; cells 0,0 / 20,0 / 0,26 / 20,26, each 20x26
+  border-spacing:0 on the table, padding:0 on the first cell
+      table 37x26; first cell 0,0 18x26; second cell 18,0 19x26
+  width:200px table of two cells
+      cells 2,2 99x26 and 103,2 95x26
+
+Known residual, asserted RED in table_fractional_column_width_spec.spl: Chrome sizes
+columns in fractional pixels (each cell is 19.8 px wide), Simple in whole
+pixels. The plain table is therefore 68 px wide where Chrome reports 67, and
+the 200 px table splits 100/94 where Chrome splits 99/95. The assertions
+below pin what the UA defaults decide: the 2 px outer and inner spacing, the
+1 px padding (cell height 26, cell width 20) and the outer edges.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-TABLE-UA-DEFAULTS-001 — unstyled tables use border-spacing 2px and cell padding 1px.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_declarations.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id
+}
+
+val VW: i32 = 900
+val VH: i32 = 2000
+
+val HEAD: text = (
+    "<html><head><style>body{margin:0;font:16px/1.5 sans-serif}" +
+    "</style></head><body>"
+)
+val TAIL: text = "</body></html>"
+
+val PLAIN: text = (
+    HEAD + "<table id=\"w\"><tr><td id=\"a\">aa</td><td id=\"t\">cd</td><td id=\"b\">bb</td></tr>" +
+    "<tr><td id=\"d\">dd</td><th id=\"e\">ee</th><td id=\"f\">ff</td></tr></table>" + TAIL
+)
+val COLLAPSED: text = (
+    HEAD + "<table id=\"w\" style=\"border-collapse:collapse\">" +
+    "<tr><td id=\"a\">aa</td><td id=\"t\">cd</td></tr>" +
+    "<tr><td id=\"d\">dd</td><td id=\"e\">ee</td></tr></table>" + TAIL
+)
+val AUTHOR_ZERO: text = (
+    HEAD + "<table id=\"w\" style=\"border-spacing:0\"><tr>" +
+    "<td id=\"a\" style=\"padding:0\">aa</td><td id=\"t\">cd</td></tr></table>" + TAIL
+)
+val FIXED_WIDTH: text = (
+    HEAD + "<table id=\"w\" style=\"width:200px\"><tr>" +
+    "<td id=\"a\">aa</td><td id=\"t\">cd</td></tr></table>" + TAIL
+)
+
+fn geom(html: text, id: text, field: text) -> text:
+    simple_web_layout_debug_layout_by_id(html, VW, VH, id, field)
+
+fn box_of(html: text, id: text) -> text:
+    (geom(html, id, "x") + "," + geom(html, id, "y") + "," +
+     geom(html, id, "w") + "," + geom(html, id, "h"))
+
+describe "an unstyled table uses the UA border-spacing and cell padding":
+    it "the table box starts at the origin and is 58 px tall, as Chrome reports":
+        expect(geom(PLAIN, "w", "x")).to_equal("0")
+        expect(geom(PLAIN, "w", "y")).to_equal("0")
+        expect(geom(PLAIN, "w", "h")).to_equal("58")
+
+    it "first-row cells are 20x26 and 2 px apart, starting 2 px in":
+        expect(box_of(PLAIN, "a")).to_equal("2,2,20,26")
+        expect(box_of(PLAIN, "t")).to_equal("24,2,20,26")
+        expect(box_of(PLAIN, "b")).to_equal("46,2,20,26")
+
+    it "second-row cells, a th among them, sit 2 px below the first row":
+        expect(box_of(PLAIN, "d")).to_equal("2,30,20,26")
+        expect(box_of(PLAIN, "e")).to_equal("24,30,20,26")
+        expect(box_of(PLAIN, "f")).to_equal("46,30,20,26")
+
+describe "generalization: the defaults give way to authored values":
+    it "border-collapse:collapse drops the spacing but keeps the cell padding":
+        expect(box_of(COLLAPSED, "w")).to_equal("0,0,40,52")
+        expect(box_of(COLLAPSED, "a")).to_equal("0,0,20,26")
+        expect(box_of(COLLAPSED, "t")).to_equal("20,0,20,26")
+        expect(box_of(COLLAPSED, "d")).to_equal("0,26,20,26")
+
+    it "authored border-spacing:0 and padding:0 override the defaults per element":
+        expect(box_of(AUTHOR_ZERO, "w")).to_equal("0,0,37,26")
+        expect(box_of(AUTHOR_ZERO, "a")).to_equal("0,0,18,26")
+        expect(box_of(AUTHOR_ZERO, "t")).to_equal("18,0,19,26")
+
+    it "a width:200px table keeps 2 px of spacing at both outer edges":
+        expect(geom(FIXED_WIDTH, "a", "x")).to_equal("2")
+        expect(geom(FIXED_WIDTH, "a", "y")).to_equal("2")
+        expect(geom(FIXED_WIDTH, "a", "h")).to_equal("26")
+        val t_right = geom(FIXED_WIDTH, "t", "x").to_i32() + geom(FIXED_WIDTH, "t", "w").to_i32()
+        expect(t_right).to_equal(198)

@@ -8,9 +8,17 @@
 # Usage:
 #   simple run src/app/ui/chrome_showcase/pixel_diff.spl <dir> <page> [page...]
 #   simple run src/app/ui/chrome_showcase/pixel_diff.spl --pair <a.png> <b.ppm>
+#   ... --ref-viewport-rows <n> ...   (before the other arguments)
 #
 # For each <page> it reads <dir>/<page>.chrome.png and <dir>/<page>.simple.ppm.
 # A pixel counts as a mismatch when any channel differs by more than TOLERANCE.
+#
+# --ref-viewport-rows <n>: `chrome --headless=new --window-size=W,H` gives the
+# page a viewport SHORTER than H (browser UI, 87 rows on Chrome 131) and pads
+# the screenshot below it. The gate therefore captures a taller window so the
+# viewport is exactly H, and states here that only the top <n> rows of the
+# reference are page. Without the option a taller reference stays a dimension
+# mismatch -- the crop is never inferred.
 
 use std.sffi.cli.{cli_get_args}
 use std.io_runtime.{file_exists}
@@ -118,7 +126,7 @@ fn _load_ppm(path: text) -> Result<([u32], i32, i32), text>:
     val img = decode_ppm_to_argb(file_read_bytes(path))?
     Ok((img.pixels, img.width, img.height))
 
-pub fn compare_pair(png_path: text, ppm_path: text) -> DiffResult:
+pub fn compare_pair(png_path: text, ppm_path: text, ref_viewport_rows: i32 = 0) -> DiffResult:
     val loaded_a = _load_reference(png_path)
     if val Err(e) = loaded_a:
         return DiffResult(ok: false, reason: e, pixels: 0, mismatch: 0, mismatch_pct_x100: 0, max_delta: 0)
@@ -127,6 +135,8 @@ pub fn compare_pair(png_path: text, ppm_path: text) -> DiffResult:
         return DiffResult(ok: false, reason: e2, pixels: 0, mismatch: 0, mismatch_pct_x100: 0, max_delta: 0)
     val a = loaded_a.unwrap()
     val b = loaded_b.unwrap()
+    if ref_viewport_rows > 0 and a.2 > ref_viewport_rows:
+        return diff_argb(a.0[0:(a.1 * ref_viewport_rows)], a.1, ref_viewport_rows, b.0, b.1, b.2)
     diff_argb(a.0, a.1, a.2, b.0, b.1, b.2)
 
 fn _emit(page: text, r: DiffResult) -> bool:
@@ -147,6 +157,7 @@ fn main():
     var dir = ""
     var pair_png = ""
     var pair_ppm = ""
+    var ref_rows = 0
     var i = 0
     while i < args.len():  # cpu-lane-loop-ok: one iteration per CLI argument
         val a = args[i]
@@ -155,6 +166,10 @@ fn main():
                 pair_png = args[i + 1]
                 pair_ppm = args[i + 2]
             i = i + 3
+        elif a == "--ref-viewport-rows":
+            if i + 1 < args.len():
+                ref_rows = args[i + 1].to_i32()
+            i = i + 2
         elif a.ends_with(".spl"):
             i = i + 1
         elif dir == "":
@@ -164,7 +179,7 @@ fn main():
             pages = pages + [a]
             i = i + 1
     if pair_png != "":
-        val r = compare_pair(pair_png, pair_ppm)
+        val r = compare_pair(pair_png, pair_ppm, ref_rows)
         if not _emit("pair", r):
             print("ERROR — nothing was checked (" + r.reason + ")")
             return
@@ -183,7 +198,7 @@ fn main():
         # otherwise.
         val bmp = dir + "/" + page + ".chrome.bmp"
         val reference = if file_exists(bmp): bmp else: dir + "/" + page + ".chrome.png"
-        val r = compare_pair(reference, dir + "/" + page + ".simple.ppm")
+        val r = compare_pair(reference, dir + "/" + page + ".simple.ppm", ref_rows)
         if _emit(page, r):
             compared = compared + 1
             if r.mismatch_pct_x100 > worst:

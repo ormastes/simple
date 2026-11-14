@@ -49,9 +49,13 @@ enum FontBackend:
 # wght=100 THIN master (the resolved identity says `axes=wght=100`), which is
 # where the sans runs' −7%/−12% deficit came from.
 #
+# On Linux Chrome maps `sans-serif` to "Arial" (fontconfig: Liberation Sans)
+# and `monospace` to "Monospace" (fontconfig: DejaVu Sans Mono); those faces
+# follow the macOS ones, so a host offers only what it actually has.
+#
 # These are PREPENDED to the bundled lists, never replacing them: a face is
-# offered only when its file is present, so Linux and CI keep exactly the
-# candidate order they had. `#N` selects a face of a TrueType collection.
+# offered only when its file is present, so a host without these files keeps
+# exactly the bundled candidate order. `#N` selects a face of a TrueType collection.
 fn _browser_present_platform_faces(specs: [text]) -> [text]:
     var out: [text] = []
     for spec in specs:
@@ -68,20 +72,37 @@ fn browser_platform_hangul_faces() -> [text]:
     _browser_present_platform_faces(["/System/Library/Fonts/Supplemental/AppleGothic.ttf"])
 
 fn browser_platform_mono_faces() -> [text]:
-    _browser_present_platform_faces(["/System/Library/Fonts/Menlo.ttc#0"])
+    _browser_present_platform_faces(["/System/Library/Fonts/Menlo.ttc#0", "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"])
 
 fn browser_platform_sans_faces() -> [text]:
-    _browser_present_platform_faces(["/System/Library/Fonts/Helvetica.ttc#0"])
+    _browser_present_platform_faces(["/System/Library/Fonts/Helvetica.ttc#0", "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"])
 
 # Weight >= 600 wants a real bold face, not a synthesised one. Helvetica.ttc
 # face 1 is Helvetica Bold; its `abcdefg` run is 61.34 px at 16 against the
 # regular face's 56.94, i.e. the +4 px delta Chrome shows and Simple measured
 # as 0 because both weights resolved to the same face.
 fn browser_platform_sans_bold_faces() -> [text]:
-    _browser_present_platform_faces(["/System/Library/Fonts/Helvetica.ttc#1"])
+    _browser_present_platform_faces(["/System/Library/Fonts/Helvetica.ttc#1", "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"])
 
 fn browser_platform_mono_bold_faces() -> [text]:
-    _browser_present_platform_faces(["/System/Library/Fonts/Menlo.ttc#1"])
+    _browser_present_platform_faces(["/System/Library/Fonts/Menlo.ttc#1", "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf"])
+
+# `font-style: italic` (UA `<em>`/`<i>`) wants the real italic face of the same
+# typeface, exactly like bold above. Linux paths only: Chrome's Linux defaults
+# are Liberation Sans Italic and DejaVu Sans Mono Oblique. The macOS
+# Helvetica.ttc / Menlo.ttc italic face indices are not verified here, so no
+# macOS entry is guessed; a host without the file keeps the upright face.
+fn browser_platform_sans_italic_faces() -> [text]:
+    _browser_present_platform_faces(["/usr/share/fonts/truetype/liberation/LiberationSans-Italic.ttf"])
+
+fn browser_platform_sans_bold_italic_faces() -> [text]:
+    _browser_present_platform_faces(["/usr/share/fonts/truetype/liberation/LiberationSans-BoldItalic.ttf"])
+
+fn browser_platform_mono_italic_faces() -> [text]:
+    _browser_present_platform_faces(["/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Oblique.ttf"])
+
+fn browser_platform_mono_bold_italic_faces() -> [text]:
+    _browser_present_platform_faces(["/usr/share/fonts/truetype/dejavu/DejaVuSansMono-BoldOblique.ttf"])
 
 # Bold routing rides the existing `__simple_font_face__|<source>|<family>`
 # channel, which `browser_font_candidates_for_family` already understands, so
@@ -116,6 +137,28 @@ fn browser_font_family_for_weight(family: text, bold: bool) -> text:
         []
     if faces.len() == 0:
         return family
+    "__simple_font_face__|" + faces[0] + "|" + family
+
+# Weight AND style routing, same rules as `browser_font_family_for_weight`:
+# only the generic sans/mono families, never a typeface swap. Italic picks the
+# italic (bold-italic) face; when the host has no italic face the result is
+# exactly the weight-only routing, so bold-italic degrades to bold, not regular.
+fn browser_font_family_for_style(family: text, bold: bool, italic: bool) -> text:
+    if not italic:
+        return browser_font_family_for_weight(family, bold)
+    if family.starts_with("__simple_font_face__|"):
+        return family
+    if browser_bundled_font_path_for_family(family) != "":
+        return family
+    val lower = family.to_lower()
+    val faces = if lower.contains("mono") or lower.contains("courier") or lower.contains("code") or lower.contains("console"):
+        if bold: browser_platform_mono_bold_italic_faces() else: browser_platform_mono_italic_faces()
+    elif lower.contains("sans") or lower.contains("arial") or lower.contains("helvetica") or lower.contains("system"):
+        if bold: browser_platform_sans_bold_italic_faces() else: browser_platform_sans_italic_faces()
+    else:
+        []
+    if faces.len() == 0:
+        return browser_font_family_for_weight(family, bold)
     "__simple_font_face__|" + faces[0] + "|" + family
 
 fn _browser_resolve_bundled_candidates(paths: [text]) -> [text]:
