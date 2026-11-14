@@ -391,15 +391,17 @@ fn simple_match(
 # `checked` attribute, or an <option> carrying `selected` (HTML "checkedness"
 # / "selectedness" as authored). Any other element never matches.
 fn _element_is_checked(tag: text, attrs: text) -> bool:
+    # Attribute names and the `type` keyword are ASCII case-insensitive.
+    val lowered = attrs.lower()
     if tag == "input":
-        if not attr_selector_matches(attrs, "checked"):
+        if not attr_selector_matches(lowered, "checked"):
             return false
         return (
-            attr_selector_matches(attrs, "type=checkbox") or
-            attr_selector_matches(attrs, "type=radio")
+            attr_selector_matches(lowered, "type=checkbox") or
+            attr_selector_matches(lowered, "type=radio")
         )
     if tag == "option":
-        return attr_selector_matches(attrs, "selected")
+        return attr_selector_matches(lowered, "selected")
     false
 
 # Interaction/UA-state pseudo-classes a static renderer must treat as
@@ -524,21 +526,35 @@ fn _nth_of_index(code: i32, opts: [text], nodes: [HNode], ctx: SelectorContext, 
     val parent = nodes[idx].parent as i32
     if parent < 0 or parent >= ctx.child_index.first_child.len():
         return if _any_option_matches_ctx(opts, nodes, ctx, idx): 1 else: 0 - 1
-    val list_key = opts.join(",")
-    val node_key = "o\x01" + list_key + "\x01" + idx.to_string()
+    # Length-prefixed selector list: no option text can imitate a key.
+    var list_key = "|"
+    for opt in opts:  # cpu-lane-loop-ok: the <=16 options of ONE `of S` selector list
+        list_key = list_key + opt.byte_len().to_string() + ":" + opt
+    val node_key = "o" + idx.to_string() + list_key
+    val total_key = "n" + parent.to_string() + list_key
     var position = _sel_cache_get(ctx, node_key)
-    val total_key = "n\x01" + list_key + "\x01" + parent.to_string()
     if position < 0:
+        var children: [i32] = []
+        var positions: [i32] = []
         var count = 0
         var c = ctx.child_index.first_child[parent]
-        while c >= 0:  # cpu-lane-loop-ok: one pass over ONE parent's children per (parent, S) per style pass
+        while c >= 0 and not _sel_step():  # cpu-lane-loop-ok: one pass over ONE parent's children per (parent, S) per style pass; also bounded by the step budget
             if nodes[c].tag != "#text":
+                children.push(c)
                 if _any_option_matches_ctx(opts, nodes, ctx, c):
                     count = count + 1
-                    _sel_cache_put("o\x01" + list_key + "\x01" + c.to_string(), count)
+                    positions.push(count)
                 else:
-                    _sel_cache_put("o\x01" + list_key + "\x01" + c.to_string(), 0)
+                    positions.push(0)
             c = ctx.child_index.next_sibling[c]
+        if _sel_budget_blown():
+            # Answers computed while exhausted are unknown, not "no match":
+            # never store them for a later rule to read.
+            return 0 - 1
+        var w = 0
+        while w < children.len():  # cpu-lane-loop-ok: writes the per-sibling positions computed above
+            _sel_cache_put("o" + children[w].to_string() + list_key, positions[w])
+            w = w + 1
         _sel_cache_put(total_key, count)
         position = _sel_cache_get(ctx, node_key)
     if position <= 0:
@@ -593,24 +609,26 @@ fn _relates_to_anchor(nodes: [HNode], ctx: SelectorContext, e: i32, anchor: i32,
         return ctx.prev_element[e] == anchor
     if comb == COMB_SUBSEQUENT_SIBLING:
         var s = ctx.prev_element[e]
-        while s >= 0:  # cpu-lane-loop-ok: walks the previous element siblings of ONE node; bound is its sibling count
+        while s >= 0 and not _sel_step():  # cpu-lane-loop-ok: walks the previous element siblings of ONE node; bound is its sibling count and the step budget
             if s == anchor:
                 return true
             s = ctx.prev_element[s]
         return false
     var a = nodes[e].parent as i32
-    while a >= 0:  # cpu-lane-loop-ok: walks the parent chain of ONE node; bound is its tree depth
+    while a >= 0 and not _sel_step():  # cpu-lane-loop-ok: walks the parent chain of ONE node; bound is its tree depth and the step budget
         if a == anchor:
             return true
         a = nodes[a].parent as i32
     false
 
 # Cache key for "does some sibling match parts[..j]": the selector prefix.
-fn _sel_prefix_key_text(parts: [text], j: i32) -> text:
-    var key = "t"
+# Keys are `<space><node>|` followed by length-prefixed parts, so no selector
+# text can imitate another key or its separators.
+fn _sel_prefix_key_text(parts: [text], j: i32, parent: i32) -> text:
+    var key = "t" + parent.to_string() + "|"
     var i = 0
     while i <= j:  # cpu-lane-loop-ok: joins the prefix parts of ONE selector group for a cache key
-        key = key + "\x01" + parts[i]
+        key = key + parts[i].byte_len().to_string() + ":" + parts[i]
         i = i + 1
     key
 
@@ -633,8 +651,13 @@ fn _chain_match_text(nodes: [HNode], ctx: SelectorContext, idx: i32, parts: [tex
     if _sel_step():
         return 4
     val nd = nodes[idx]
-    if not simple_match_ctx(parts[k], nd.tag, nd.class_attr, nd.class_words, nd.id_attr, nd.attrs_raw, nodes, ctx, idx):
-        return if _sel_budget_blown(): 4 else: 0
+    val compound_ok = simple_match_ctx(parts[k], nd.tag, nd.class_attr, nd.class_words, nd.id_attr, nd.attrs_raw, nodes, ctx, idx)
+    # Checked whether the compound matched or not: a nested :has() may have
+    # exhausted the budget inside it, and a "match" computed that way is void.
+    if _sel_budget_blown():
+        return 4
+    if not compound_ok:
+        return 0
     var comb = COMB_DESCENDANT
     var comb_tokens = 0
     var j = k - 1
@@ -669,11 +692,13 @@ fn _chain_match_text(nodes: [HNode], ctx: SelectorContext, idx: i32, parts: [tex
         return _chain_match_text(nodes, ctx, prev, parts, j, anchor)
     if comb == COMB_SUBSEQUENT_SIBLING:
         val parent = nd.parent as i32
-        if anchor < 0 and parent >= 0:
+        if parent < 0:
+            return 3
+        if anchor < 0:
             # `X ~ subject` only asks whether SOME earlier sibling matches X:
             # the earliest such sibling decides for every later one. Found
             # once per (parent, selector prefix) per style pass.
-            val key = _sel_prefix_key_text(parts, j) + "\x01" + parent.to_string()
+            val key = _sel_prefix_key_text(parts, j, parent)
             var earliest = _sel_cache_get(ctx, key)
             if earliest < 0:
                 earliest = 0
@@ -689,6 +714,8 @@ fn _chain_match_text(nodes: [HNode], ctx: SelectorContext, idx: i32, parts: [tex
                         if r == 2:
                             break
                     c = ctx.child_index.next_sibling[c]
+                if _sel_budget_blown():
+                    return 4
                 _sel_cache_put(key, earliest)
             return if earliest > 0 and earliest < ctx.element_position[idx]: 1 else: 3
         var s = ctx.prev_element[idx]
@@ -738,11 +765,15 @@ fn _has_scan_subtree(nodes: [HNode], ctx: SelectorContext, root: i32, include_ro
 # then a full complex selector) evaluated WITH sibling context for every
 # compound. Nested :has() shares the enclosing match's step budget.
 fn _has_option_matches(nodes: [HNode], ctx: SelectorContext, idx: i32, opt: text) -> bool:
-    if _sel_depth == 0:
+    val top = _sel_depth == 0
+    if top:
         _sel_steps = 0
     _sel_depth = _sel_depth + 1
-    val matched = _has_option_matches_inner(nodes, ctx, idx, opt)
+    val inner_matched = _has_option_matches_inner(nodes, ctx, idx, opt)
     _sel_depth = _sel_depth - 1
+    val matched = inner_matched and not _sel_budget_blown()
+    if top:
+        _sel_steps = 0
     matched
 
 fn _has_option_matches_inner(nodes: [HNode], ctx: SelectorContext, idx: i32, opt: text) -> bool:
@@ -839,6 +870,9 @@ fn _list_ctx_matches(negate: bool, opts: [text], nodes: [HNode], ctx: SelectorCo
             elif not negate and simple_match(opt, nd.tag, nd.class_attr, nd.class_words, nd.id_attr, nd.attrs_raw, 1):
                 matched = true
         j = j + 1
+    if _sel_budget_blown():
+        # Aborted: an exhausted option is unknown, not false. Never negate it.
+        return false
     if not any_ctx:
         return true
     if negate:
@@ -977,7 +1011,7 @@ fn _pseudo_ctx_matches(sel: text, nodes: [HNode], ctx: SelectorContext, idx: i32
             # The state pseudo-classes above were decided by simple_match();
             # any other name is unknown.
             return false
-    true
+    not _sel_budget_blown()
 
 # Full-context simple match: base match + pseudo-class positional check.
 fn simple_match_ctx(sel: text, tag: text, cls: text, class_words: [text], id: text, attrs: text, nodes: [HNode], ctx: SelectorContext, idx: i32) -> bool:
@@ -1571,7 +1605,7 @@ fn _pseudo_ctx_matches_parsed(
             if not matched:
                 return false
         pi = pi + 1
-    true
+    not _sel_budget_blown()
 
 fn simple_match_ctx_parsed(
     p: ParsedSel, tag: text, cls: text, class_words: [text], id: text,
@@ -1591,11 +1625,11 @@ fn selector_group_matches_node_parsed(
         return matched
     _selector_group_matches_node_parsed_inner(nodes, ctx, idx, parsed)
 
-fn _sel_prefix_key_parsed(parsed: [ParsedSel], j: i32) -> text:
-    var key = "p"
+fn _sel_prefix_key_parsed(parsed: [ParsedSel], j: i32, parent: i32) -> text:
+    var key = "p" + parent.to_string() + "|"
     var i = 0
     while i <= j:  # cpu-lane-loop-ok: joins the prefix parts of ONE selector group for a cache key
-        key = key + "\x01" + parsed[i].src
+        key = key + parsed[i].src.byte_len().to_string() + ":" + parsed[i].src
         i = i + 1
     key
 
@@ -1605,11 +1639,14 @@ fn _chain_match_parsed(nodes: [HNode], ctx: SelectorContext, idx: i32, parsed: [
     if _sel_step():
         return 4
     val nd = nodes[idx]
-    if not simple_match_ctx_parsed(
+    val compound_ok = simple_match_ctx_parsed(
         parsed[k], nd.tag, nd.class_attr, nd.class_words, nd.id_attr,
         nd.attrs_raw, nodes, ctx, idx
-    ):
-        return if _sel_budget_blown(): 4 else: 0
+    )
+    if _sel_budget_blown():
+        return 4
+    if not compound_ok:
+        return 0
     var comb = COMB_DESCENDANT
     var comb_tokens = 0
     var j = k - 1
@@ -1641,7 +1678,7 @@ fn _chain_match_parsed(nodes: [HNode], ctx: SelectorContext, idx: i32, parsed: [
         val parent = nd.parent as i32
         if parent < 0:
             return 3
-        val key = _sel_prefix_key_parsed(parsed, j) + "\x01" + parent.to_string()
+        val key = _sel_prefix_key_parsed(parsed, j, parent)
         var earliest = _sel_cache_get(ctx, key)
         if earliest < 0:
             earliest = 0
@@ -1657,6 +1694,8 @@ fn _chain_match_parsed(nodes: [HNode], ctx: SelectorContext, idx: i32, parsed: [
                     if r == 2:
                         break
                 c = ctx.child_index.next_sibling[c]
+            if _sel_budget_blown():
+                return 4
             _sel_cache_put(key, earliest)
         return if earliest > 0 and earliest < ctx.element_position[idx]: 1 else: 3
     var a = nd.parent as i32
@@ -1676,11 +1715,19 @@ fn _selector_group_matches_node_parsed_inner(
     if right < 0 or parsed[right].kind != 0:
         # Empty, or ends in a combinator (`div >`): invalid, matches nothing.
         return false
-    if _sel_depth == 0:
+    if parsed.len() > CSS_SELECTOR_PART_CAP:
+        return false
+    val top = _sel_depth == 0
+    if top:
         _sel_steps = 0
     _sel_depth = _sel_depth + 1
-    val matched = _chain_match_parsed(nodes, ctx, idx, parsed, right) == 1
+    val chain_matched = _chain_match_parsed(nodes, ctx, idx, parsed, right) == 1
     _sel_depth = _sel_depth - 1
+    # Exhaustion is sticky for the whole match: whatever negation or list the
+    # exhausted part sat in, the rule does not match.
+    val matched = chain_matched and not _sel_budget_blown()
+    if top:
+        _sel_steps = 0
     matched
 
 # ---------------------------------------------------------------------------
@@ -2346,11 +2393,19 @@ fn _selector_group_matches_node_parts_inner(nodes: [HNode], ctx: SelectorContext
     if right < 0 or _comb_code_of_part(parts[right]) >= 0:
         # Empty, or ends in a combinator (`div >`): invalid, matches nothing.
         return false
-    if _sel_depth == 0:
+    if parts.len() > CSS_SELECTOR_PART_CAP:
+        return false
+    val top = _sel_depth == 0
+    if top:
         _sel_steps = 0
     _sel_depth = _sel_depth + 1
-    val matched = _chain_match_text(nodes, ctx, idx, parts, right, 0 - 1) == 1
+    val chain_matched = _chain_match_text(nodes, ctx, idx, parts, right, 0 - 1) == 1
     _sel_depth = _sel_depth - 1
+    # Exhaustion is sticky for the whole match: whatever negation or list the
+    # exhausted part sat in, the rule does not match.
+    val matched = chain_matched and not _sel_budget_blown()
+    if top:
+        _sel_steps = 0
     matched
 
 # ---------------------------------------------------------------------------
