@@ -75,4 +75,70 @@ with that explicit runtime profile, not the default mixed-runtime bundle.
 Merkle/reader unit specs, physical binding execution and broad runtime checks
 remain unqualified. Astra source review found no P0/P1 in the scoped
 producer/comparator; that review does not replace those runtime checks or complete
-the selected A1/B3/H1 feature. No full compiler cache consumer is connected yet.
+the selected A1/B3/H1 feature. The subsequent source-bound consumer integration is described below; full PackageInit cache admission is still open.
+
+## Source-bound production consumer checkpoint
+
+The HIR pipeline now captures an immutable matching snapshot once per lowering
+context, including an empty failure result. Its supported provenance route is the
+checked native-group source loader. That route binds compiler producer, pinned
+inventory, SCV revision and tree; an ordinary working-tree/LSP compile without
+that authority falls back to the existing full live weave. No environment string
+alone grants a directory hit.
+
+`directory_tldr_snapshot_capture_v2` reopens the pinned source inventory and SCV
+snapshot through their existing readers, checks binding and generation, and
+requires the HIR/phase-1 source rows to cover every immediate inventory member.
+Aliases, duplicates, subsets, source SHA/length disagreement and missing/stale
+companions prevent capture. The companion's embedded source digest must match the
+phase-1 receipt. The source-row comparator is also called by the real producer.
+Capture retains at most 32 MiB of frozen source text; larger inputs conservatively
+miss. With no aspect claims it performs no snapshot reads.
+
+The attribute registry now distinguishes an absent/restored row from a known-empty
+row in the active lowering epoch. Epochs never wrap; resetting proof rows preserves
+the legacy attribute getter. The capturer requires fresh rows for selected forward
+functions, so restored HIR without attribute rehydration cannot acquire proof.
+Guards are evaluated from the same frozen source map. Target/profile disagreement
+or unevaluable guards prevents capture.
+
+Three actual HIR validation call sites pass these snapshots to the existing weave
+owner. The consumer uses captured facts directly, checks full held-module coverage,
+and calls the provider-bound builtin plugin adapter. Missing coverage, malformed
+transport or plugin errors trigger the existing whole-module traversal, preserving
+the live forward-shape check. This does not unweave or suppress a needed visit.
+The direct semantic-owner match API remains available without pretending it is a
+persisted directory admission route.
+
+This integrates the reviewed plugin-model dependency from PR #9172. The compiler
+provider names the builtin adapter code, not a source advice function. Directory
+configuration is scope data, never retained as instance configuration.
+
+The file-TLDR root hashes actual companion bytes. Source freshness and current
+companion framing do not establish which compiler produced that metadata; matching
+continues to use fresh HIR facts. Full PackageInit semantic admission still needs
+explicit companion producer/version evidence before trusting semantic contents.
+
+Verification: an exact source-row/attribute-epoch extraction compiled with admitted
+P2 SHA855f48 and explicit `core-c`, then passed 18 native assertions in
+`/tmp/dir-tldr-snapshot-probe-20261114/{compile.log,run.log}`. It covers complete and
+subset membership, aliases/duplicates/order, stale source digests/lengths, known
+empty/absent attributes and retired epochs. Six authored unit scenarios and three
+real-parser/HIR consumer scenarios supplement this probe; those specs and the full
+SCV/FileReader/HIR integrated route have not yet executed. The codec's earlier
+11-check pass is retained, not rerun.
+
+## Remaining full PackageInit projection
+
+The full end state still derives category roots from actual owners, not empty
+placeholders. Generic-template roots can consume
+`build_generic_template_section_v1` reached by the real module-artifact producer;
+macro roots can consume source-bound `macro_input_root_v1`/`macro_effect_surface_v1`
+with validated tagged-digest conversion. Compiled initializer digests exist in
+`cold_hir_package_outputs_from_driver_v1`, but directory initializer ordering still
+needs its explicit owner. Aspect catalog/advice-interface roots are currently
+broader than a directory and require scoped aggregation. Trait and extension
+category projections still need implementation; the whole frozen interface hash
+is not silently relabeled as either category. Missing sections require coverage
+proof before claiming an empty category. This work and B3 inline facts, traversal
+cutoff/publication and a complete acceptance run remain required.
