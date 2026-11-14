@@ -23,7 +23,7 @@ observer enablement and resolves automatic debug to Disabled.
 
 Compile caches frame profile identity separately from optimization and static
 XRay. The new schema invalidates old keys; the no-op cache re-resolves policy
-and binds the managed phase. Managed index/authority/readback and resume inputs
+and binds the managed phase. Native object namespaces and module witnesses bind the resolved policy plus independent static XRay and actual output format. Managed index/authority/readback and resume inputs
 must use the same normalization and reject old option sets. Producer identity
 remains separate. Source, ABI, and toolchain admission are unchanged.
 
@@ -47,7 +47,8 @@ process-group RSS bound and 120-second deadline; no address-space limit.
   release/XRay cannot produce a reusable identity. Its initial fixture extractor
   truncated a multiline declaration; that parse failure is retained.
 - Actual TraceConfig/defaults and observer-result policy boundary: six distinct presence/error cases PASS, 6.816 s. The existing SDN parser integration itself remains UNRUN.
-- Managed lane adds its own 30-case native profile/receipt projection evidence.
+- Actual native object policy identity and SHA implementation: PASS, 9.975 s; profile, static XRay, and Native/Both packaging separate keys; missing identity is refused. Full object-cache execution remains UNRUN.
+- Managed lane adds 30 native profile/receipt cases, two focused debug-info-default cases, and bound command-option checks.
 
 [Retained commands, exits, logs, provenance, and extraction scripts](evidence/target_profile_2026_11_14/).
 Core fixture regeneration: `python3 scripts/check/target-profile-projection.py
