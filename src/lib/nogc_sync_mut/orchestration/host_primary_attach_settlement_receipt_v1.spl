@@ -1,0 +1,53 @@
+# Cycle-free primary settlement evidence for the existing Host capacity hook.
+# No capacity owner, session decoder, cancellation, or implicit archive repair.
+use std.nogc_sync_mut.orchestration.host_primary_attach_record_v1.*
+use std.nogc_sync_mut.orchestration.host_helper_stream_record_v1.{host_helper_stream_path_v1,
+    HostHelperAdmissionContextV1}
+use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
+use std.common.contracts.distributed_control_codec_v2.distributed_encode_operation_v2
+use std.common.build_manager.grouped_execution_contract.GroupedActionLeaseV1
+use std.nogc_sync_mut.io.group_process_owner.{GroupProcessStreamOwnerV2,
+    group_process_stream_cleanup_proof_v2, group_process_stream_collect_reap_v2}
+use std.nogc_sync_mut.io.file_ops.file_read_regular_no_follow_bounded
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+
+pub fn host_primary_attach_grouped_lease_v1(consumed: HostPrimaryAttachConsumedV1,
+        context: HostHelperAdmissionContextV1, native: GroupProcessStreamOwnerV2) -> Result<GroupedActionLeaseV1, text>:
+    host_primary_attach_native_match_v1(consumed, native)?
+    val proof = group_process_stream_cleanup_proof_v2(native)?
+    if proof == "": return Err("host-primary-cleanup-proof-empty")
+    val template = consumed.primary_plan.launch_template
+    Ok(GroupedActionLeaseV1(group_id: context.request.plan.parent_operation_id,
+        action_id: context.request.operation.id, worker_id: context.request.operation.id,
+        generation: context.request.plan.scope.provider_generation,
+        lease_id: context.admission.receipt.receipt_digest, snapshot_digest: template.snapshot_digest,
+        cache_identity: template.cache_identity, completed: true))
+
+# A stored canonical reap must already exist. collect_reap independently checks
+# actual broker proof and exact lease; missing evidence cannot become success.
+pub fn host_primary_attach_settlement_expected_v1(root: text,
+        operation: OperationEnvelopeV2) -> Result<text, text>:
+    val consumed = host_primary_attach_consumed_load_v1(root, operation)?
+    val context = host_primary_attach_validate_record_v1(root, operation, consumed)?
+    val native = host_primary_attach_native_load_v1(root, operation)?
+    val lease = host_primary_attach_grouped_lease_v1(consumed, context, native)?
+    val stored = file_read_regular_no_follow_bounded(native.launch.root + "/tree-reaped.sdn", 16384)?
+    val reap = group_process_stream_collect_reap_v2(native, lease)?
+    if sha256_text(stored) != reap.tree_receipt_digest: return Err("host-primary-reap-digest-mismatch")
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "kind": SdnValue.String("host-primary-attach-settlement"),
+        "operationId": SdnValue.String(operation.id), "operationDigest": SdnValue.String(sha256_text(distributed_encode_operation_v2(operation)?)),
+        "requestDigest": SdnValue.String(consumed.primary_plan.request_digest),
+        "preparedReceiptDigest": SdnValue.String(consumed.prepared_receipt_digest),
+        "consumptionDigest": SdnValue.String(sha256_text(host_primary_attach_consumed_encode_v1(consumed)?)),
+        "nativeIdentityDigest": SdnValue.String(native.identity_digest), "treeReceiptDigest": SdnValue.String(reap.tree_receipt_digest)}
+    Ok(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
+
+pub fn host_primary_attach_settlement_evidence_v1(root: text,
+        operation: OperationEnvelopeV2) -> Result<text, text>:
+    val expected = host_primary_attach_settlement_expected_v1(root, operation)?
+    val actual = file_read_regular_no_follow_bounded(
+        host_helper_stream_path_v1(root, operation.id, "primary-settlement"), 8388608)?
+    if actual != expected: return Err("host-primary-settlement-retained-mismatch")
+    Ok(expected)

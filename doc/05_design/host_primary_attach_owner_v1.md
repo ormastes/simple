@@ -68,16 +68,21 @@ owner-opening scenarios.
 
 ## Remaining integration
 
-Primary cleanup/settlement must validate this distinct consumption/native
-domain against canonical broker cleanup proof, retire the exact native owner,
-and obtain Host journal settlement before releasing the helper charge. This
-implementation deliberately exposes no release or successful-settlement path.
+Primary cleanup/settlement now has a source implementation in
+`host_primary_attach_settlement_v1.spl`, described in
+`doc/05_design/host_primary_attach_settlement_v1.md`. It validates this distinct
+consumption/native domain against canonical broker cleanup proof and uses the
+existing Host journal settlement before releasing the helper charge. Runtime
+qualification and positive native cleanup/settlement coverage remain pending.
 
 smux must then retain the primary session throughout plan, bind, pane adoption,
 output polling, independently authorized input/geometry, stop, cleanup, and
 settlement. Its existing output-follow state and settlement cannot be relabeled
 as primary. Caret can migrate only after that composition works end to end.
 The current Caret `--container` path is preserved and is not migrated here.
+smux V3 replies require `outputMode = output-follow` and an exact output-only
+capability shape. Primary binding needs a versioned or explicitly negotiated
+protocol extension; changing the meaning of existing V3 replies is not valid.
 
 Windows Docker process primary attachment remains explicitly unavailable in
 the common provider. Its actual attach broker loop, process ownership, and

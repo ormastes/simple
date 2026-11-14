@@ -6,11 +6,12 @@ use std.common.contracts.container.primary_attach_v1.{ContainerPrimaryAttachPlan
 use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
 use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
 use std.common.build_manager.group_process_stream_protocol_v2.{group_process_stream_template_digest_v3,
-    group_process_stream_launch_encode_profiled_v3}
+    group_process_stream_launch_encode_profiled_v3, group_process_stream_launch_decode_profiled_v3}
 use std.nogc_sync_mut.orchestration.host_helper_stream_record_v1.{HostHelperAdmissionContextV1,
     host_helper_stream_fields_v1, host_helper_stream_text_v1, host_helper_stream_path_v1,
-    host_helper_stream_publish_v1, host_helper_retained_admission_v1}
-use std.nogc_sync_mut.io.group_process_owner.{GroupProcessStreamOwnerV2, group_process_stream_owner_validate_v2}
+    host_helper_stream_publish_v1, host_helper_retained_admission_v1, host_helper_archive_present_v1}
+use std.nogc_sync_mut.io.group_process_owner.{GroupProcessStreamOwnerV2, group_process_stream_owner_validate_v2,
+    group_process_stream_recover_v2}
 use std.nogc_sync_mut.io.file_ops.file_read_regular_no_follow_bounded
 use std.common.crypto.sha256.sha256_text
 use std.common.sdn.value.SdnValue
@@ -75,20 +76,57 @@ pub fn host_primary_attach_consumed_load_v1(root: text,
 
 # Archive only the real broker owner after matching the consumed primary plan.
 # The returned live session/cleanup carrier is retained independently by Host.
-pub fn host_primary_attach_native_store_v1(root: text, operation: OperationEnvelopeV2,
+pub fn host_primary_attach_native_match_v1(consumed: HostPrimaryAttachConsumedV1,
         native: GroupProcessStreamOwnerV2) -> Result<(), text>:
-    val consumed = host_primary_attach_consumed_load_v1(root, operation)?
     val invalid = group_process_stream_owner_validate_v2(native)
     if invalid != "": return Err(invalid)
     val template = consumed.primary_plan.launch_template
     if (group_process_stream_template_digest_v3(native.launch)? != group_process_stream_template_digest_v3(template)? or
             native.launch.request.launch_deadline_unix_ms != consumed.deadline_unix_ms or
-            native.launch.transport_generation <= 0 or native.launch.worker_id != operation.id or
+            native.launch.transport_generation <= 0 or native.launch.worker_id != consumed.operation_id or
             native.launch.generation != consumed.primary_plan.workload.provider_generation):
         return Err("host-primary-native-template-mismatch")
+    Ok(())
+
+pub fn host_primary_attach_native_store_v1(root: text, operation: OperationEnvelopeV2,
+        native: GroupProcessStreamOwnerV2) -> Result<(), text>:
+    val consumed = host_primary_attach_consumed_load_v1(root, operation)?
+    host_primary_attach_native_match_v1(consumed, native)?
     val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "kind": SdnValue.String("host-primary-attach-native"),
         "operationDigest": SdnValue.String(consumed.operation_digest),
         "consumptionDigest": SdnValue.String(sha256_text(host_primary_attach_consumed_encode_v1(consumed)?)),
         "identityDigest": SdnValue.String(native.identity_digest),
         "launch": SdnValue.String(group_process_stream_launch_encode_profiled_v3(native.launch))}
     host_helper_stream_publish_v1(root, operation.id, "primary-native", sdn_encode_canonical(SdnValue.Dict(fields)) + "\n", false)
+
+pub fn host_primary_attach_native_load_v1(root: text,
+        operation: OperationEnvelopeV2) -> Result<GroupProcessStreamOwnerV2, text>:
+    val consumed = host_primary_attach_consumed_load_v1(root, operation)?
+    val source = file_read_regular_no_follow_bounded(
+        host_helper_stream_path_v1(root, operation.id, "primary-native"), 8388608)?
+    val fields = host_helper_stream_fields_v1(source, "host-primary-attach-native",
+        ["version", "kind", "operationDigest", "consumptionDigest", "identityDigest", "launch"])?
+    if (host_helper_stream_text_v1(fields, "operationDigest")? != consumed.operation_digest or
+            host_helper_stream_text_v1(fields, "consumptionDigest")? != sha256_text(host_primary_attach_consumed_encode_v1(consumed)?)):
+        return Err("host-primary-native-consumption-mismatch")
+    val launch_bytes = host_helper_stream_text_v1(fields, "launch")?
+    val launch = group_process_stream_launch_decode_profiled_v3(launch_bytes)?
+    val native = group_process_stream_recover_v2(launch.root, host_helper_stream_text_v1(fields, "identityDigest")?)?
+    if group_process_stream_launch_encode_profiled_v3(native.launch) != launch_bytes:
+        return Err("host-primary-native-retained-launch-mismatch")
+    host_primary_attach_native_match_v1(consumed, native)?
+    Ok(native)
+
+# Repair absent archive metadata from the exact consumed broker root only.
+# Never decode a live session or overwrite a partial/dangling retained entry.
+pub fn host_primary_attach_native_recover_v1(root: text,
+        operation: OperationEnvelopeV2) -> Result<GroupProcessStreamOwnerV2, text>:
+    if host_helper_archive_present_v1(root, operation.id, "primary-native")?:
+        return host_primary_attach_native_load_v1(root, operation)
+    val consumed = host_primary_attach_consumed_load_v1(root, operation)?
+    val claimed_root = consumed.primary_plan.launch_template.root
+    val identity = file_read_regular_no_follow_bounded(claimed_root + "/broker.claim", 128)?
+    val native = group_process_stream_recover_v2(claimed_root, identity)?
+    host_primary_attach_native_match_v1(consumed, native)?
+    host_primary_attach_native_store_v1(root, operation, native)?
+    host_primary_attach_native_load_v1(root, operation)

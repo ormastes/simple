@@ -1,0 +1,238 @@
+# @req ORCH-02 HOST-02
+# Execution NOT_RUN. Evidence refusal only. Real helper signatures/journal;
+# synthetic broker claim/request never stand in for successful native cleanup.
+use std.spec.{describe, it, expect, step}
+use test.fixtures.orchestration.host_primary_attach_settlement_fixture_v1.*
+use test.fixtures.orchestration.host_helper_settlement_fixture_v1.{host_helper_settlement_fixture_v1, host_helper_settlement_metadata_v1}
+use std.nogc_sync_mut.orchestration.host_helper_settlement_receipt_v1.host_helper_settlement_evidence_v1
+use std.nogc_sync_mut.orchestration.host_primary_attach_record_v1.*
+use std.nogc_sync_mut.orchestration.host_primary_attach_recovery_v1.{host_primary_attach_recover_v1, host_primary_attach_settle_recovered_v1}
+use std.nogc_sync_mut.orchestration.host_primary_attach_settlement_receipt_v1.host_primary_attach_settlement_evidence_v1
+use std.nogc_sync_mut.orchestration.host_helper_settlement_domain_v1.host_helper_completion_evidence_v1
+use std.nogc_sync_mut.orchestration.host_helper_stream_record_v1.{host_helper_stream_path_v1, host_helper_stream_publish_v1}
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.{HostCapacityOwnerV1, host_capacity_owner_settle_v1, host_capacity_owner_close_v1}
+use std.common.contracts.orchestration.host_capacity_v1.host_available_capacity_v1
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_create_exclusive, file_read_regular_no_follow_bounded, file_remove}
+use std.nogc_sync_mut.io.snapshot_links.{snapshot_symlink_create_nofollow_v1, snapshot_symlink_match_nofollow_v1}
+use std.nogc_sync_mut.io_runtime.{dir_create, dir_remove}
+use std.common.contracts.orchestration.resource_v1.{parse_resource_document, as_dict}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.build_manager.group_process_stream_protocol_v2.group_process_stream_launch_encode_profiled_v3
+use std.common.crypto.sha256.sha256_text
+
+fn primary_settlement_finish_v1(fixture: HostPrimaryAttachSettlementFixtureV1, owner: HostCapacityOwnerV1):
+    assert(host_capacity_owner_close_v1(owner).unwrap())
+    assert(dir_remove(fixture.fixture.root, true))
+
+fn primary_settlement_assert_refusal_v1(fixture: HostPrimaryAttachSettlementFixtureV1):
+    val before = host_available_capacity_v1(fixture.owner.ledger).unwrap()
+    val turn = host_capacity_owner_settle_v1(fixture.owner, fixture.helper.operation)
+    expect(turn.settled).to_equal(false)
+    expect(turn.error == "").to_equal(false)
+    expect(turn.owner.journal.sequence).to_equal(fixture.owner.journal.sequence)
+    expect(turn.owner.ledger.revision).to_equal(fixture.owner.ledger.revision)
+    val after = host_available_capacity_v1(turn.owner.ledger).unwrap()
+    expect(after.cpu_millis).to_equal(before.cpu_millis)
+    expect(after.memory_bytes).to_equal(before.memory_bytes)
+    primary_settlement_finish_v1(fixture, turn.owner)
+
+fn primary_settlement_wire_v1(source: text, key: text, value: SdnValue) -> text:
+    val parsed = parse_resource_document(source).unwrap()
+    var fields = as_dict(parsed.0, "", parsed.1).unwrap()
+    fields[key] = value
+    sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+
+describe "Host primary attach settlement evidence refusal":
+    it "recovers primary metadata after a crash while retaining capacity without terminal proof":
+        step("recovers primary metadata after a crash while retaining capacity without terminal proof")
+        val fixture = host_primary_attach_settlement_fixture_v1()
+        # Crash boundary: broker claim/request exist, primary native archive has
+        # not yet been published. Recovery reconstructs metadata only.
+        val native = host_primary_attach_settlement_metadata_v1(fixture, false)
+        expect(file_exists(host_helper_stream_path_v1(fixture.fixture.root, fixture.helper.operation.id, "primary-native"))).to_equal(false)
+        val before = host_available_capacity_v1(fixture.owner.ledger).unwrap()
+        for field in ["authority_id", "boot_id", "provider_generation", "physical_host_id"]:
+            var changed_owner = fixture.owner
+            if field == "authority_id": changed_owner.ledger.capacity.authority_id = "substituted-authority"
+            if field == "boot_id": changed_owner.ledger.capacity.boot_id = "substituted-boot"
+            if field == "provider_generation":
+                changed_owner.ledger.capacity.provider_generation = changed_owner.ledger.capacity.provider_generation + 1
+            if field == "physical_host_id": changed_owner.ledger.capacity.physical_host_id = "substituted-host"
+            val mismatched = host_primary_attach_recover_v1(changed_owner, fixture.helper.operation.id)
+            expect(mismatched.recovered.?).to_equal(false)
+            expect(mismatched.error).to_equal("host-primary-recovery-capacity-mismatch")
+            expect(file_exists(host_helper_stream_path_v1(fixture.fixture.root, fixture.helper.operation.id, "primary-native"))).to_equal(false)
+            expect(mismatched.owner.journal.sequence).to_equal(fixture.owner.journal.sequence)
+            expect(mismatched.owner.ledger.revision).to_equal(fixture.owner.ledger.revision)
+            expect(mismatched.owner.ledger.reservations).to_equal(fixture.owner.ledger.reservations)
+            val preserved = host_available_capacity_v1(fixture.owner.ledger).unwrap()
+            expect(preserved.cpu_millis).to_equal(before.cpu_millis)
+            expect(preserved.memory_bytes).to_equal(before.memory_bytes)
+        val recovery = host_primary_attach_recover_v1(fixture.owner, fixture.helper.operation.id)
+        expect(recovery.error).to_equal("")
+        expect(recovery.recovered.?).to_equal(true)
+        val recovered = recovery.recovered.unwrap()
+        expect(recovered.operation).to_equal(fixture.helper.operation)
+        expect(recovered.primary_plan.request_digest).to_equal(fixture.primary_plan.request_digest)
+        expect(recovered.native.identity_digest).to_equal(native.identity_digest)
+        expect(recovered.consumption_digest).to_equal(sha256_text(host_primary_attach_consumed_encode_v1(fixture.consumed).unwrap()))
+        expect(recovery.owner.journal.sequence).to_equal(fixture.owner.journal.sequence)
+        expect(recovery.owner.ledger.revision).to_equal(fixture.owner.ledger.revision)
+        val refused = host_primary_attach_settle_recovered_v1(recovery.owner, recovered)
+        expect(refused.settled).to_equal(false)
+        expect(refused.ack.?).to_equal(false)
+        expect(refused.retained.?).to_equal(true)
+        expect(refused.retained.unwrap().consumption_digest).to_equal(recovered.consumption_digest)
+        expect(refused.error == "").to_equal(false)
+        expect(refused.owner.journal.sequence).to_equal(fixture.owner.journal.sequence)
+        expect(refused.owner.ledger.revision).to_equal(fixture.owner.ledger.revision)
+        var changed = refused.retained.unwrap()
+        changed.consumption_digest = "0".repeat(64)
+        val tampered = host_primary_attach_settle_recovered_v1(refused.owner, changed)
+        expect(tampered.settled).to_equal(false)
+        expect(tampered.ack.?).to_equal(false)
+        expect(tampered.retained.?).to_equal(true)
+        expect(tampered.error == "").to_equal(false)
+        expect(tampered.owner.journal.sequence).to_equal(fixture.owner.journal.sequence)
+        expect(tampered.owner.ledger.revision).to_equal(fixture.owner.ledger.revision)
+        val after = host_available_capacity_v1(tampered.owner.ledger).unwrap()
+        expect(after.cpu_millis).to_equal(before.cpu_millis)
+        expect(after.memory_bytes).to_equal(before.memory_bytes)
+        expect(file_exists(native.launch.root + "/tree-reaped.sdn")).to_equal(false)
+        primary_settlement_finish_v1(fixture, tampered.owner)
+
+    it "keeps output only dispatch on the existing validator and never falls back from corruption":
+        step("keeps output only dispatch on the existing validator and never falls back from corruption")
+        val fixture = host_helper_settlement_fixture_v1()
+        val _native = host_helper_settlement_metadata_v1(fixture)
+        val root = fixture.fixture.root
+        val operation = fixture.helper.operation
+        expect(host_helper_completion_evidence_v1(root, operation).unwrap_err()).to_equal(host_helper_settlement_evidence_v1(root, operation).unwrap_err())
+        val path = host_helper_stream_path_v1(root, operation.id, "consumed")
+        assert(file_remove(path))
+        assert(file_create_exclusive(path, "corrupt-output-consumed"))
+        expect(host_helper_completion_evidence_v1(root, operation).unwrap_err()).to_equal(host_helper_settlement_evidence_v1(root, operation).unwrap_err())
+        expect(file_exists(host_helper_stream_path_v1(root, operation.id, "primary-consumed"))).to_equal(false)
+        assert(host_capacity_owner_close_v1(fixture.owner).unwrap())
+        assert(dir_remove(root, true))
+
+    it "refuses missing domains and a corrupt selected primary marker without output fallback":
+        step("refuses missing domains and a corrupt selected primary marker without output fallback")
+        val fixture = host_primary_attach_settlement_fixture_v1()
+        val root = fixture.fixture.root
+        val operation = fixture.helper.operation
+        expect(host_helper_completion_evidence_v1(root, operation).unwrap_err()).to_equal("helper-settlement-domain-missing")
+        host_helper_stream_publish_v1(root, operation.id, "primary-consumed", "corrupt-primary-consumed", true).unwrap()
+        expect(host_helper_completion_evidence_v1(root, operation).unwrap_err()).to_equal(host_primary_attach_settlement_evidence_v1(root, operation).unwrap_err())
+        expect(file_exists(host_helper_stream_path_v1(root, operation.id, "consumed"))).to_equal(false)
+        primary_settlement_assert_refusal_v1(fixture)
+
+    it "correlates signed primary consumption and native metadata without releasing capacity":
+        step("correlates signed primary consumption and native metadata without releasing capacity")
+        val fixture = host_primary_attach_settlement_fixture_v1()
+        val native = host_primary_attach_settlement_metadata_v1(fixture)
+        val root = fixture.fixture.root
+        val operation = fixture.helper.operation
+        val consumed = host_primary_attach_consumed_load_v1(root, operation).unwrap()
+        expect(consumed.primary_plan.request_digest).to_equal(fixture.fixture.request.plan.request_digest)
+        expect(consumed.prepared_receipt_digest).to_equal(fixture.helper.receipt.receipt_digest)
+        expect(host_primary_attach_native_load_v1(root, operation).unwrap().identity_digest).to_equal(native.identity_digest)
+        expect(host_primary_attach_settlement_evidence_v1(root, operation).is_err()).to_equal(true)
+        expect(host_helper_completion_evidence_v1(root, operation).is_err()).to_equal(true)
+        expect(file_exists(native.launch.root + "/tree-reaped.sdn")).to_equal(false)
+        primary_settlement_assert_refusal_v1(fixture)
+
+    it "refuses ambiguous consumed domains even when the output marker is malformed":
+        step("refuses ambiguous consumed domains even when the output marker is malformed")
+        val fixture = host_primary_attach_settlement_fixture_v1()
+        val _native = host_primary_attach_settlement_metadata_v1(fixture)
+        val root = fixture.fixture.root
+        val operation = fixture.helper.operation
+        host_helper_stream_publish_v1(root, operation.id, "consumed", "malformed-output-marker", true).unwrap()
+        expect(host_helper_completion_evidence_v1(root, operation).unwrap_err()).to_equal("helper-settlement-domain-ambiguous")
+        expect(file_read_regular_no_follow_bounded(host_helper_stream_path_v1(root, operation.id, "consumed"), 128).unwrap()).to_equal("malformed-output-marker")
+        primary_settlement_assert_refusal_v1(fixture)
+
+    it "refuses missing native evidence without fabricating broker claim or archive":
+        step("refuses missing native evidence without fabricating broker claim or archive")
+        val fixture = host_primary_attach_settlement_fixture_v1()
+        val root = fixture.fixture.root
+        val operation = fixture.helper.operation
+        host_helper_stream_publish_v1(root, operation.id, "primary-consumed",
+            host_primary_attach_consumed_encode_v1(fixture.consumed).unwrap(), true).unwrap()
+        expect(host_primary_attach_native_load_v1(root, operation).is_err()).to_equal(true)
+        expect(host_primary_attach_native_recover_v1(root, operation).is_err()).to_equal(true)
+        expect(file_exists(host_helper_stream_path_v1(root, operation.id, "primary-native"))).to_equal(false)
+        expect(file_exists(fixture.primary_plan.launch_template.root + "/broker.claim")).to_equal(false)
+        primary_settlement_assert_refusal_v1(fixture)
+
+    it "preserves malformed partial and symlink native archives during failed recovery":
+        step("preserves malformed partial and symlink native archives during failed recovery")
+        for mode in ["malformed", "partial", "symlink", "dangling"]:
+            val fixture = host_primary_attach_settlement_fixture_v1()
+            val _native = host_primary_attach_settlement_metadata_v1(fixture, false)
+            val root = fixture.fixture.root
+            val operation = fixture.helper.operation
+            val directory = root + "/host-helper-stream-primary-native"
+            assert(dir_create(directory, true))
+            val path = host_helper_stream_path_v1(root, operation.id, "primary-native")
+            val bytes = if mode == "partial": "" else: "invalid-native-archive"
+            if mode == "malformed" or mode == "partial":
+                assert(file_create_exclusive(path, bytes))
+            else:
+                assert(file_create_exclusive(directory + "/target", "native-link-target"))
+                assert(snapshot_symlink_create_nofollow_v1(root, path, "target", 1))
+                assert(snapshot_symlink_match_nofollow_v1(root, path, "target", 1))
+                if mode == "dangling": assert(file_remove(directory + "/target"))
+            expect(host_primary_attach_native_load_v1(root, operation).is_err()).to_equal(true)
+            expect(host_primary_attach_native_recover_v1(root, operation).is_err()).to_equal(true)
+            if mode == "malformed" or mode == "partial":
+                expect(file_read_regular_no_follow_bounded(path, 128).unwrap()).to_equal(bytes)
+            else:
+                expect(file_create_exclusive(path, "must-not-overwrite-link")).to_equal(false)
+                if mode == "symlink":
+                    expect(snapshot_symlink_match_nofollow_v1(root, path, "target", 1)).to_equal(true)
+                    expect(file_read_regular_no_follow_bounded(directory + "/target", 128).unwrap()).to_equal("native-link-target")
+                else: expect(file_exists(directory + "/target")).to_equal(false)
+            primary_settlement_assert_refusal_v1(fixture)
+
+    it "refuses changed archived native identity and launch template":
+        step("refuses changed archived native identity and launch template")
+        for field in ["identityDigest", "launch"]:
+            val fixture = host_primary_attach_settlement_fixture_v1()
+            val native = host_primary_attach_settlement_metadata_v1(fixture)
+            val root = fixture.fixture.root
+            val operation = fixture.helper.operation
+            val path = host_helper_stream_path_v1(root, operation.id, "primary-native")
+            val original = file_read_regular_no_follow_bounded(path, 8388608).unwrap()
+            var changed_launch = native.launch
+            changed_launch.request.directory = "/substituted-directory"
+            val replacement = if field == "identityDigest": "0".repeat(64) else: group_process_stream_launch_encode_profiled_v3(changed_launch)
+            val changed = primary_settlement_wire_v1(original, field, SdnValue.String(replacement))
+            assert(file_remove(path))
+            assert(file_create_exclusive(path, changed))
+            expect(host_primary_attach_native_load_v1(root, operation).is_err()).to_equal(true)
+            expect(host_primary_attach_native_recover_v1(root, operation).is_err()).to_equal(true)
+            expect(file_read_regular_no_follow_bounded(path, 8388608).unwrap()).to_equal(changed)
+            primary_settlement_assert_refusal_v1(fixture)
+
+    it "refuses canonical forged settlement bytes without actual terminal cleanup proof":
+        step("refuses canonical forged settlement bytes without actual terminal cleanup proof")
+        val fixture = host_primary_attach_settlement_fixture_v1()
+        val native = host_primary_attach_settlement_metadata_v1(fixture)
+        val root = fixture.fixture.root
+        val operation = fixture.helper.operation
+        val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "kind": SdnValue.String("host-primary-attach-settlement"),
+            "operationId": SdnValue.String(operation.id), "operationDigest": SdnValue.String(fixture.consumed.operation_digest),
+            "requestDigest": SdnValue.String(fixture.primary_plan.request_digest),
+            "preparedReceiptDigest": SdnValue.String(fixture.consumed.prepared_receipt_digest),
+            "consumptionDigest": SdnValue.String(sha256_text(host_primary_attach_consumed_encode_v1(fixture.consumed).unwrap())),
+            "nativeIdentityDigest": SdnValue.String(native.identity_digest), "treeReceiptDigest": SdnValue.String("e".repeat(64))}
+        val forged = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+        host_helper_stream_publish_v1(root, operation.id, "primary-settlement", forged, false).unwrap()
+        expect(host_primary_attach_settlement_evidence_v1(root, operation).is_err()).to_equal(true)
+        expect(host_helper_completion_evidence_v1(root, operation).is_err()).to_equal(true)
+        expect(file_read_regular_no_follow_bounded(host_helper_stream_path_v1(root, operation.id, "primary-settlement"), 8388608).unwrap()).to_equal(forged)
+        expect(file_exists(native.launch.root + "/tree-reaped.sdn")).to_equal(false)
+        primary_settlement_assert_refusal_v1(fixture)
