@@ -9,6 +9,7 @@ use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.hir.hir_lowering.items.*
 use compiler.hir.hir_lowering.statements.*
 use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_symbol_table_methods.*
 use compiler.hir.hir_codec.{hir_module_encode, hir_module_decode, HIR_CODEC_VERSION}
 
 fn intent_codec_module() -> HirModule:
@@ -21,11 +22,21 @@ describe "source declaration intent in HIR cache":
     it "retains omitted, explicit private and ordinary public separately":
         step("Lower actual declarations and round-trip the generated codec")
         val original = intent_codec_module()
+        val local = original.symbols.lookup_or_invalid("local")
+        expect(local.is_valid()).to_equal(true)
+        original.symbols.rebind_local_type("local", local)
+        val version = original.symbols.lookup_binding_v1("local").version
+        expect(version).to_be_greater_than(1)
+        original.symbols.bind_local_type_if_free("removed_alias", local)
+        original.symbols.unbind_local_type("removed_alias")
         val wire = hir_module_encode(original)
         expect(wire != "").to_equal(true)
         val restored = hir_module_decode(wire)
         expect(restored.?).to_equal(true)
         val module = restored.unwrap()
+        expect(module.symbols.lookup_binding_v1("local").version).to_equal(version)
+        expect(module.symbols.binding_version_v1(0, "removed_alias")).to_equal(2)
+        expect(module.symbols.lookup_binding_v1("removed_alias").symbol_id).to_equal(-1)
         val expected = {"local": "omitted", "hidden": "pri", "visible": "public"}
         var retained = 0
         for raw_id in module.symbols.symbols.keys():

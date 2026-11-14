@@ -28,7 +28,11 @@ A source alias's route association must be attached at the actual binding write.
 Its identity includes scope, spelling, selected symbol, registry generation and
 binding mutation version. Same-ID rebinds need distinct versions; testing only
 symbol ID is insufficient. Per-spelling versions must retain tombstones across
-unbind/rebind. This mutation integration is not yet implemented. Internal
+unbind/rebind. Scope now carries those versions at the four actual mutation
+owners; all independent scope-copy owners clone the version dictionary. Same-ID
+rebinds advance it, no-op bind-if-free and unrelated spellings do not. Codec
+union regeneration and route-map lifecycle integration are still pending.
+Internal
 materialization flags are not evidence of a user import: both explicit imports
 and dependency loading set `registering_import_symbols`.
 

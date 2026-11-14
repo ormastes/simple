@@ -283,6 +283,9 @@ struct Scope:
     parent: ScopeId?
     kind: ScopeKind
     symbols: Dict<text, i64>
+    # Per-spelling mutation identity, including tombstones after unbind. A
+    # same-SymbolId rebind must invalidate the old selected facade route.
+    binding_versions_v1: Dict<text, i64> = {}
 
 """Kind of scope."""
 enum ScopeKind:
@@ -357,7 +360,8 @@ impl SymbolTable:
             id: ScopeId(id: 0),
             parent: nil,
             kind: ScopeKind.Module,
-            symbols: root_scope_symbols
+            symbols: root_scope_symbols,
+            binding_versions_v1: {}
         )
         table
 
@@ -383,7 +387,8 @@ impl SymbolTable:
         self.next_scope_id = 1
         self.scopes[0] = Scope(
             id: ScopeId(id: 0), parent: nil,
-            kind: ScopeKind.Module, symbols: self.root_scope_symbols)
+            kind: ScopeKind.Module, symbols: self.root_scope_symbols,
+            binding_versions_v1: {})
 
     fn module_snapshot() -> SymbolTable:
         """A distinct owner of this module's containers, for its HirModule.
@@ -540,6 +545,7 @@ impl SymbolTable:
         # Preserve the first unqualified spelling.  Qualified lookup reaches
         # the canonical declaration above, including aliases and re-exports.
         if bind_lexical and (not is_canonical_class or self.scopes[self.current_scope.id].symbols.get(name) == nil):
+            self.advance_binding_version_v1(self.current_scope.id, name)
             self.scopes[self.current_scope.id].symbols[name] = raw_id
 
         id
@@ -577,6 +583,7 @@ impl SymbolTable:
     me bind_local_type_if_free(name: text, id: SymbolId):
         """Publish a lexical alias without changing canonical ownership."""
         if self.scopes[self.current_scope.id].symbols.get(name) == nil:
+            self.advance_binding_version_v1(self.current_scope.id, name)
             self.scopes[self.current_scope.id].symbols[name] = id.id
 
     fn local_type_binding_raw(name: text) -> i64:
@@ -596,6 +603,7 @@ impl SymbolTable:
         also drops the name for every scope. Only call it at module scope
         (the declare pass), never from a nested scope."""
         if self.scopes[self.current_scope.id].symbols.get(name) != nil:
+            self.advance_binding_version_v1(self.current_scope.id, name)
             self.scopes[self.current_scope.id].symbols.remove(name)
             if self.current_scope.id == 0:
                 self.root_scope_symbols.remove(name)
@@ -604,6 +612,7 @@ impl SymbolTable:
 
     me rebind_local_type(name: text, id: SymbolId):
         """Make `id` the current scope's unqualified binding of `name`."""
+        self.advance_binding_version_v1(self.current_scope.id, name)
         self.scopes[self.current_scope.id].symbols[name] = id.id
         self.exact_symbols[name] = id.id
 
@@ -659,7 +668,8 @@ impl SymbolTable:
             id: id,
             parent: Some(self.current_scope),
             kind: kind,
-            symbols: {}
+            symbols: {},
+            binding_versions_v1: {}
         )
         self.next_scope_id = raw_id + 1
 
