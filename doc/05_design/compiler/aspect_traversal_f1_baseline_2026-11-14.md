@@ -142,7 +142,8 @@ can legitimately have bytes equal to an old woven output; byte equality does
 not replace this freshness authority. No output/baseline retention is claimed.
 
 The cold input owner encodes each module once for the complete ordered claim
-batch, retaining only coarse digests. Actual advice function resolution uses
+batch, retaining only coarse digests. The current cold implementation uses
+bounded ordinary-format bytes; canonical persistence remains separately gated. Actual advice function resolution uses
 registry owner path and function name with ambiguity refusal. Signature and
 effects come from the actual HIR ABI encoder; effects are encoded separately.
 The concrete forwarder weaver prepends static calls, so its facet is before /
@@ -164,7 +165,7 @@ The checked view currently recomputes the existing matcher to validate exact
 selection/apply coverage even after a shard-cache hit. This is a deliberate
 cold correctness check, not qualified match-scan avoidance or a warm speedup.
 A trusted prepared-view route and measured evidence are still needed for that
-optimization. The first capture limits are 1,024 modules, 8 MiB total canonical
+optimization. The first capture limits are 1,024 modules, 8 MiB total snapshot
 text and 65,536 function roots; the canonical codec also enforces its own
 allocation limits. The per-instance implementation map is capped at 256, like
 the existing descriptor pool. Canonical body bytes are transient, not retained
@@ -207,3 +208,21 @@ do not establish that this production cold path activates. The canonical gate
 is not bypassed or marked passed. A bounded ordinary-codec snapshot alternative
 is under architecture review; it must retain a distinct noncanonical contract
 and cannot claim canonical persistence or baseline restoration.
+
+### Reviewed cold-only ordinary snapshot update
+
+The follow-up `hir_module_encode_snapshot_bounded_v1` reuses the owning ordinary
+encoder with output/allocation/work/depth limits enforced during emission and
+header assembly. Capture passes the remaining batch output allowance before
+encoding each module. Overflow, unsupported bodies and representation metadata
+return an error with no usable partial snapshot. The canonical availability
+function remains unchanged and disabled.
+
+The application key now uses the distinct `simple/aop-ordinary-module/v1`
+domain. Exact ordinary bytes cover real bodies and may overinvalidate on
+incidental ordering differences; they are not called canonical portable bytes.
+No persisted warm-output/restoration key is authorized by this cold API. This
+source-level change removes the always-unavailable API choice from cold capture,
+but its real producer runtime behavior is still unqualified. Astra accepted the
+source contract; the independent canonical lane owns actual codec fixture
+preparation. The 13 pure-boundary results are unchanged and were not rerun.

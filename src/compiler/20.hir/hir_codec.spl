@@ -130,6 +130,31 @@ fn hir_module_encode_canonical(
         return Err(HirDecodeError.Malformed("canonical_encode_refused"))
     Ok(encoded)
 
+# Bounded ordinary-format snapshot for a cold, compile-local observation.
+# This does not admit canonical persistence or bypass its separate gate. The
+# ordinary codec covers the actual body; incidental order may overinvalidate.
+pub fn hir_module_encode_snapshot_bounded_v1(module: HirModule,
+        max_output_bytes: i64) -> Result<text, HirDecodeError>:
+    if module.representation_declarations.len() > 0:
+        return Err(HirDecodeError.Unavailable("E-MC-REP-004: representation metadata transport is unsupported"))
+    val limits = HirDecodeLimits.standard()
+    if max_output_bytes <= 0 or max_output_bytes > limits.max_input_bytes:
+        return Err(HirDecodeError.BoundsExceeded("snapshot_output_budget"))
+    var writer = HirCodecWriter.create_canonical_bounded(max_output_bytes,
+        limits.max_allocation_bytes, limits.max_work_units, limits.max_depth)
+    writer.canonical = false
+    hc_enc_hir_module(writer, module)
+    if not writer.ok:
+        if writer.failure_kind == "bounds":
+            return Err(HirDecodeError.BoundsExceeded(writer.unsupported))
+        return Err(HirDecodeError.Malformed("ordinary_snapshot_encode_refused"))
+    val encoded = writer.finish_with_header(hir_codec_header())
+    if not writer.ok:
+        if writer.failure_kind == "bounds":
+            return Err(HirDecodeError.BoundsExceeded(writer.unsupported))
+        return Err(HirDecodeError.Malformed("ordinary_snapshot_encode_refused"))
+    Ok(encoded)
+
 fn hir_module_encode_reason(module: HirModule) -> text:
     if module.representation_declarations.len() > 0:
         return "E-MC-REP-004: representation metadata transport is unsupported"
@@ -787,6 +812,7 @@ export hir_canonical_codec_identity_v1
 export hir_canonical_codec_generated_available_v1
 export HirDecodeLimits, HirDecodeAuditUsage, HirDecodeAuditObserver, HirDecodeError
 export hir_module_encode_calls
+export hir_module_encode_snapshot_bounded_v1
 export hir_decode_intern_lines, hir_decode_interned_texts
 export hir_module_encode, hir_module_encode_canonical, hir_module_encode_reason, hir_module_decode_reason
 export hir_module_has_rt_hal
