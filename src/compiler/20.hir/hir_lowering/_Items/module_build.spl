@@ -9,6 +9,9 @@ use compiler.hir.hir_lowering._Items.module_lowering.*
 # This module handles lowering of top-level items (functions, classes, structs, enums, traits, impls) from AST to HIR.
 
 use compiler.hir.hir_types.*
+use compiler.hir.hir_owner_name.{hir_symbol_owner_module}
+use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_canonical_path}
+use compiler.frontend.declaration_intent_v1.{parser_declaration_intent_index_v1}
 use compiler.hir.hir_definitions.*
 use compiler.frontend.parser_types.*
 use compiler.frontend.parser_types.{ParserFunction, ImportItem, Param}
@@ -79,6 +82,20 @@ fn hir_const_with_export_visibility(hir_const: HirConst, exported: Dict<text, bo
     lifted
 
 impl HirLowering:
+    me bind_source_declaration_origin_v1(intents: Dict<text, text>, id: SymbolId, category: text, source_name: text):
+        val key = category + ":" + source_name
+        if not intents.contains_key(key): return
+        # Standalone owner-less lowering has no canonical source authority.
+        # Keep it Unknown; the driver always installs an authenticated owner.
+        if self.module_filename == "": return
+        val owner = hir_symbol_owner_module(self.module_filename)
+        val bound = self.symbols.bind_declaration_origin_v1(id, owner, source_name,
+            intents[key], module_surface_canonical_path(self.module_filename), key)
+        if bound.is_err():
+            self.error(bound.unwrap_err(), Span.empty())
+        elif not bound.unwrap():
+            self.error("typed declaration did not retain its source identity: " + key, Span.empty())
+
     # Sub-plan P1 wiring (immutable_views_async_init_revisions_2026-11-13.md
     # section 3.2). Gate SIMPLE_REQUIRED_INIT_CHECK: off (default) | warning |
     # error, read once per process; a module raises it with
@@ -269,7 +286,7 @@ impl HirLowering:
             eprint("[enum-owner-trace] EMPTY-DEFINING-MODULE name={local_name} raw={raw}")
         owner
 
-    me lower_module_enum_definitions(module: ParserModule) -> Dict<SymbolId, HirEnum>:
+    me lower_module_enum_definitions(module: ParserModule, source_intents: Dict<text, text> = {}) -> Dict<SymbolId, HirEnum>:
         var lowered: Dict<SymbolId, HirEnum> = {}
         val imported_names = self.imported_enums.keys()
         var enum_idx = 0
@@ -296,6 +313,7 @@ impl HirLowering:
         while enum_idx < local_names.len():
             val local_name = local_names[enum_idx]
             val hir_enum = self.lower_enum(module.enums[local_name], hir_module_logical_name_from_path(module.name))
+            self.bind_source_declaration_origin_v1(source_intents, hir_enum.symbol, "enum", local_name)
             lowered[hir_enum.symbol] = hir_enum
             enum_idx = enum_idx + 1
         lowered
@@ -311,6 +329,14 @@ impl HirLowering:
         # strict flag into HIR and NOGC-POLICY-001 refused the cached module.
         # @workaround bug=stage2_sanity_module_path_naming_probe_segv_2026_10_22 reason=typed_rebind_before_scalar_limb_read
         val module_local: ParserModule = module
+        var source_intents: Dict<text, text> = {}
+        val source_intent_result = parser_declaration_intent_index_v1(module_local.source_declaration_intents_v1)
+        if source_intent_result.is_err():
+            self.error(source_intent_result.unwrap_err(), Span.empty())
+        elif module_local.source_declaration_intents_v1.len() > 0 and (module_local.source_declaration_digest_v1 == "" or (self.module_filename != "" and module_surface_canonical_path(module_local.name) != module_surface_canonical_path(self.module_filename))):
+            self.error("source declaration facts do not belong to this HIR module owner", Span.empty())
+        else:
+            source_intents = source_intent_result.unwrap()
         self.nogc_strict = module_local.nogc_strict
         # Probe MUST be eprint AND ungated (Traps A/C/D, bug doc iters 13-17).
         val bootstrap_mode = self.ambient_bootstrap_enabled()
@@ -576,6 +602,7 @@ impl HirLowering:
                 if bootstrap_diag:
                     eprint("[hir-lower] function:start module={module.name} name={bootstrap_fn.name} idx={lower_idx}")
                 val hir_fn = self.lower_function(bootstrap_fn)
+                self.bind_source_declaration_origin_v1(source_intents, hir_fn.symbol, "function", bootstrap_fn.name)
                 if hir_fn.is_gpu_kernel:
                     gpu_function_targets[hir_fn.name] = hir_fn.gpu_target
                     gpu_function_backend_orders[hir_fn.name] = hir_fn.gpu_backend_order
@@ -603,6 +630,7 @@ impl HirLowering:
                 val fn_: ParserFunction = lower_module_functions[name]
                 val prof_fn_started = hir_phase_profile_now()
                 val hir_fn = self.lower_function(fn_)
+                self.bind_source_declaration_origin_v1(source_intents, hir_fn.symbol, "function", fn_.name)
                 hir_phase_profile_add(HIR_PROF_FUNCTIONS, prof_fn_started)
                 if hir_fn.is_gpu_kernel:
                     gpu_function_targets[hir_fn.name] = hir_fn.gpu_target
@@ -670,6 +698,7 @@ impl HirLowering:
                 while bootstrap_class_idx < bootstrap_class_keys.len():
                     val bootstrap_class_: ParserClass = bootstrap_module_classes[bootstrap_class_keys[bootstrap_class_idx]]
                     val bootstrap_hir_class = self.lower_class(bootstrap_class_)
+                    self.bind_source_declaration_origin_v1(source_intents, bootstrap_hir_class.symbol, "class", bootstrap_class_.name)
                     classes[bootstrap_hir_class.symbol] = bootstrap_hir_class
                     bootstrap_class_idx = bootstrap_class_idx + 1
 
@@ -679,12 +708,13 @@ impl HirLowering:
                 while bootstrap_struct_idx < bootstrap_struct_keys.len():
                     val bootstrap_struct_: ParserStruct = bootstrap_module_structs[bootstrap_struct_keys[bootstrap_struct_idx]]
                     val bootstrap_hir_struct = self.lower_struct(bootstrap_struct_)
+                    self.bind_source_declaration_origin_v1(source_intents, bootstrap_hir_struct.symbol, "struct", bootstrap_struct_.name)
                     structs[bootstrap_hir_struct.symbol] = bootstrap_hir_struct
                     self.register_struct_field_types(bootstrap_hir_struct)
                     bootstrap_struct_idx = bootstrap_struct_idx + 1
 
                 val prof_enums_started = hir_phase_profile_now()
-                enums = self.lower_module_enum_definitions(module)
+                enums = self.lower_module_enum_definitions(module, source_intents)
                 hir_phase_profile_add(HIR_PROF_ENUMS, prof_enums_started)
 
                 val bootstrap_module_bitfields = module.bitfields
@@ -702,6 +732,7 @@ impl HirLowering:
                 while bootstrap_trait_idx < bootstrap_trait_keys.len():
                     val bootstrap_trait_: ParserTrait = bootstrap_module_traits[bootstrap_trait_keys[bootstrap_trait_idx]]
                     val bootstrap_hir_trait = self.lower_trait(bootstrap_trait_)
+                    self.bind_source_declaration_origin_v1(source_intents, bootstrap_hir_trait.symbol, "trait", bootstrap_trait_.name)
                     traits[bootstrap_hir_trait.symbol] = bootstrap_hir_trait
                     bootstrap_trait_idx = bootstrap_trait_idx + 1
 
@@ -736,6 +767,7 @@ impl HirLowering:
             while bootstrap_const_idx < bootstrap_const_names.len():
                 val bootstrap_const_src: ParserConst = module.constants[bootstrap_const_names[bootstrap_const_idx]]
                 val bootstrap_hir_const = hir_const_with_export_visibility(self.lower_hir_const_decl(bootstrap_const_src), bootstrap_exported_names)
+                self.bind_source_declaration_origin_v1(source_intents, bootstrap_hir_const.symbol, "constant", bootstrap_const_src.name)
                 bootstrap_constants[bootstrap_hir_const.symbol] = bootstrap_hir_const
                 bootstrap_const_idx = bootstrap_const_idx + 1
             if bootstrap_diag:
@@ -793,6 +825,7 @@ impl HirLowering:
             val name = lower_class_keys[lower_idx]
             val class_: ParserClass = lower_module_classes[name]
             val hir_class = self.lower_class(class_)
+            self.bind_source_declaration_origin_v1(source_intents, hir_class.symbol, "class", class_.name)
             classes[hir_class.symbol] = hir_class
             lower_idx = lower_idx + 1
 
@@ -803,12 +836,13 @@ impl HirLowering:
             val name = lower_struct_keys[lower_idx]
             val struct_: ParserStruct = lower_module_structs[name]
             val hir_struct = self.lower_struct(struct_)
+            self.bind_source_declaration_origin_v1(source_intents, hir_struct.symbol, "struct", struct_.name)
             structs[hir_struct.symbol] = hir_struct
             self.register_struct_field_types(hir_struct)
             lower_idx = lower_idx + 1
 
         val prof_enums_started = hir_phase_profile_now()
-        enums = self.lower_module_enum_definitions(module)
+        enums = self.lower_module_enum_definitions(module, source_intents)
         hir_phase_profile_add(HIR_PROF_ENUMS, prof_enums_started)
 
         val lower_module_bitfields = module.bitfields
@@ -828,6 +862,7 @@ impl HirLowering:
             val name = lower_trait_keys[lower_idx]
             val trait_: ParserTrait = lower_module_traits[name]
             val hir_trait = self.lower_trait(trait_)
+            self.bind_source_declaration_origin_v1(source_intents, hir_trait.symbol, "trait", trait_.name)
             traits[hir_trait.symbol] = hir_trait
             lower_idx = lower_idx + 1
 
@@ -850,6 +885,7 @@ impl HirLowering:
         while lower_idx < lower_const_names.len():
             val const_: ParserConst = module.constants[lower_const_names[lower_idx]]
             val hir_const = hir_const_with_export_visibility(self.lower_hir_const_decl(const_), exported_names)
+            self.bind_source_declaration_origin_v1(source_intents, hir_const.symbol, "constant", const_.name)
             constants[SymbolId(id: lower_idx)] = hir_const
             lower_idx = lower_idx + 1
 

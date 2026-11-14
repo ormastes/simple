@@ -25,6 +25,7 @@ use compiler.frontend.core._ParserDecls.enum_module_body.{
 use compiler.frontend.flat_ast_bridge.{parse_and_build_module,
     flat_pools_dump_all, flat_pools_restore_all, build_module_from_flat_pool_blob}
 use compiler.frontend.desugar.desugar_async.{desugar_module}
+use compiler.frontend.declaration_intent_v1.{parser_declaration_intent_index_v1}
 use compiler.frontend.parse_context.{parse_context_take, parse_context_install}
 use compiler.frontend.core.parser_preprocessor.{_pp_preprocess_conditionals}
 use compiler.hir.hir_lowering.module_surface_declarations.{ModuleSurfaceParserOwner, module_surface_owner_value}
@@ -188,3 +189,26 @@ describe "original source declaration visibility bindings":
         expect(parser_has_errors()).to_equal(false)
         expect(parsed.functions.contains_key("decorated")).to_equal(true)
         expect(parsed.source_declaration_intents_v1.len()).to_equal(0)
+
+    it "projects only the final typed dictionary owner of a duplicate name":
+        step("Parse two source declarations that write the same function entry")
+        val module = parse_and_build_module("pub fn same() -> i64:\n    1\npri fn same() -> i64:\n    2\n", BINDING_PATH)
+        expect(parser_has_errors()).to_equal(false)
+        expect(module.source_declaration_intents_v1.len()).to_equal(2)
+        expect(module.source_declaration_intents_v1[0].projection_key).to_equal("")
+        expect(module.source_declaration_intents_v1[1].projection_key).to_equal("function:same")
+        val index = parser_declaration_intent_index_v1(module.source_declaration_intents_v1)
+        expect(index.is_ok()).to_equal(true)
+        expect(index.unwrap()["function:same"]).to_equal("pri")
+
+    it "keeps enum ownership separate from its generated methods":
+        step("Project the production enum and its synthetic impl through the bridge")
+        val module = parse_and_build_module(BINDING_SOURCE, BINDING_PATH)
+        expect(parser_has_errors()).to_equal(false)
+        val index = parser_declaration_intent_index_v1(module.source_declaration_intents_v1)
+        expect(index.is_ok()).to_equal(true)
+        val targets = index.unwrap()
+        expect(targets["enum:Signal"]).to_equal("pri")
+        expect(targets["function:after"]).to_equal("public")
+        expect(targets.contains_key("function:Signal__code")).to_equal(false)
+        expect(targets.len()).to_equal(2)

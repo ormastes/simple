@@ -1,7 +1,7 @@
 use compiler.frontend.core.parser_preprocessor.{preprocess_conditionals}
 # Flat AST Bridge: module assembly (flat_ast_to_module, parse_and_build_module).
 use compiler.frontend.flat_ast_bridge.*
-use compiler.frontend._FlatAstBridge.declaration_intent_v1.{flat_declaration_intents_v1}
+use compiler.frontend._FlatAstBridge.declaration_intent_v1.{flat_project_declaration_intents_v1}
 use compiler.frontend.core._ParserDecls.enum_module_body.{
     parser_top_level_visibility_source_digest_v1,
     parser_top_level_visibility_source_matches_digest_v1,
@@ -331,6 +331,7 @@ fn flat_ast_to_module(path: text) -> ParserModule:
     # parses all 88 decls); never truncate here.
     if flat_bootstrap_enabled() and flat_bridge_trace_enabled():
         eprint("[flat-bridge] decl_count {decl_count}")
+    var declaration_target_ids: Dict<text, i64> = {}
     var functions: Dict<text, ParserFunction> = {}
     var function_headers: Dict<text, ParserFunctionHeader> = {}
     var function_order: [text] = []
@@ -403,6 +404,7 @@ fn flat_ast_to_module(path: text) -> ParserModule:
         if tag_text == "1":
             val fn_: ParserFunction = convert_decl_fn(idx)
             flat_module_trace_function("before", fn_)
+            declaration_target_ids["function:" + fn_.name] = idx
             functions[fn_.name] = fn_
             function_headers[fn_.name] = parser_function_header(fn_)
             function_order.push(fn_.name)
@@ -411,6 +413,7 @@ fn flat_ast_to_module(path: text) -> ParserModule:
         elif tag_text == "2":
             val fn_: ParserFunction = convert_decl_extern_fn(idx)
             flat_module_trace_function("before", fn_)
+            declaration_target_ids["function:" + fn_.name] = idx
             functions[fn_.name] = fn_
             function_headers[fn_.name] = parser_function_header(fn_)
             function_order.push(fn_.name)
@@ -427,6 +430,7 @@ fn flat_ast_to_module(path: text) -> ParserModule:
                 var t_methods: [ParserFunction] = []
                 for t_method_id in decl_get_body(idx):
                     t_methods.push(convert_decl_method_fn(t_method_id, s_name))
+                declaration_target_ids["trait:" + s_name] = idx
                 traits[s_name] = ParserTrait(
                     name: s_name,
                     type_params: convert_decl_function_type_params(idx, span),
@@ -475,6 +479,7 @@ fn flat_ast_to_module(path: text) -> ParserModule:
                         span: span
                     ))
                     fi = fi + 1
+                declaration_target_ids["bitfield:" + s_name] = idx
                 bitfields[s_name] = Bitfield(
                     name: s_name,
                     backing_type: Type(kind: TypeKind.Infer, span: span),
@@ -560,6 +565,7 @@ fn flat_ast_to_module(path: text) -> ParserModule:
                     # `methods` stays empty: class methods are carried via the
                     # synthesized `impl` block (tag_text == "9" below), the
                     # same mechanism plain structs already use.
+                    declaration_target_ids["class:" + s_name] = idx
                     classes[s_name] = ParserClass(
                         name: s_name,
                         type_params: s_type_params,
@@ -573,6 +579,7 @@ fn flat_ast_to_module(path: text) -> ParserModule:
                         span: s_span
                     )
                 else:
+                    declaration_target_ids["struct:" + s_name] = idx
                     structs[s_name] = ParserStruct(
                         name: s_name,
                         type_params: s_type_params,
@@ -709,6 +716,7 @@ fn flat_ast_to_module(path: text) -> ParserModule:
             # before default fragments are parsed by that conversion.
             val e_span = make_span()
             val e_type_params = convert_decl_function_type_params(idx, e_span)
+            declaration_target_ids["enum:" + e_name] = idx
             enums[e_name] = ParserEnum(
                 name: e_name,
                 type_params: e_type_params,
@@ -1081,6 +1089,7 @@ fn flat_ast_to_module(path: text) -> ParserModule:
                 top_level_stmt_consts.push(decl_const)
                 top_level_stmts.push(Stmt(kind: StmtKind.Expr(init), span: span))
             else:
+                declaration_target_ids["constant:" + c_name] = idx
                 constants[c_name] = decl_const
                 # If this file is later recognized as a script (it has bare
                 # expressions and no explicit main), replay its bindings in
@@ -1182,6 +1191,7 @@ fn flat_ast_to_module(path: text) -> ParserModule:
             # conversion used by other generic declarations.
             val ta_name = decl_get_name(idx)
             val ta_type = convert_flat_type(decl_get_ret_type(idx))
+            declaration_target_ids["type_alias:" + ta_name] = idx
             type_aliases[ta_name] = ParserTypeAlias(
                 name: ta_name,
                 type_params: convert_decl_function_type_params(idx, span),
@@ -1252,6 +1262,7 @@ fn flat_ast_to_module(path: text) -> ParserModule:
     if top_level_stmt_names.len() > 0:
         if not functions.contains("main"):
             val main_span = make_span()
+            declaration_target_ids["function:main"] = -1
             functions["main"] = parser_function_new(
                 "main",
                 [],
@@ -1281,6 +1292,7 @@ fn flat_ast_to_module(path: text) -> ParserModule:
             # `_expr_N` constants) to avoid any semantic change.
             var tsi = 0
             while tsi < top_level_stmt_names.len():
+                declaration_target_ids["constant:" + top_level_stmt_names[tsi]] = -1
                 constants[top_level_stmt_names[tsi]] = top_level_stmt_consts[tsi]
                 tsi = tsi + 1
 
@@ -1359,7 +1371,7 @@ fn flat_ast_to_module(path: text) -> ParserModule:
     built_module.required_init_mode = module_required_init_mode
     built_module.extend_enums = build_parser_extend_enums()
     built_module.representation_declarations = representation_parser_metadata_v1()
-    built_module.source_declaration_intents_v1 = flat_declaration_intents_v1()
+    built_module.source_declaration_intents_v1 = flat_project_declaration_intents_v1(declaration_target_ids)
     built_module.source_declaration_digest_v1 = parser_top_level_visibility_source_digest_v1()
     if flat_bridge_trace_enabled():
         print "[flat-bridge] built frontend module path={path}"

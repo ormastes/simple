@@ -9,5 +9,27 @@ pub struct ParserDeclarationIntentV1:
     modifier: text
     decl_kind: i64
     decl_name: text
+    # Exact surviving typed dictionary entry, assigned only by the bridge.
+    # Empty means no supported typed target; it grants no declaration policy.
+    projection_key: text = ""
 
-export ParserDeclarationIntentV1
+pub fn parser_declaration_intent_index_v1(rows: [ParserDeclarationIntentV1]) -> Result<Dict<text, text>, text>:
+    var modifiers: Dict<text, text> = {}
+    var source_ids: Dict<i64, bool> = {}
+    for row in rows:
+        if row.projection_key != "":
+            val separator = row.projection_key.index_of(":")
+            if separator <= 0 or row.projection_key.substring(separator + 1) != row.decl_name:
+                return Err("source declaration typed target name mismatches its original node")
+            val category = row.projection_key.substring(0, separator)
+            if not ["function", "class", "struct", "actor", "enum", "trait", "constant", "type_alias", "bitfield"].contains(category):
+                return Err("unsupported source declaration typed target category")
+            if row.raw_decl_id < 0 or modifiers.contains_key(row.projection_key) or source_ids.contains_key(row.raw_decl_id):
+                return Err("source declaration typed targets are not unique")
+            if not ["omitted", "pri", "public", "peer", "up", "internal", "package"].contains(row.modifier):
+                return Err("unknown source declaration modifier")
+            modifiers[row.projection_key] = row.modifier
+            source_ids[row.raw_decl_id] = true
+    Ok(modifiers)
+
+export ParserDeclarationIntentV1, parser_declaration_intent_index_v1

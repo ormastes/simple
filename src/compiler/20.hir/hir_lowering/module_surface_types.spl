@@ -162,92 +162,111 @@ struct ModuleSurfaceDeclarationAuthorityLookup:
     declaring_module: text
     source_name: text
     visibility: Visibility
+    source_modifier: text = ""
+    source_path: text = ""
+    projection_key: text = ""
 
 class ModuleSurfaceDeclarationAuthorityIndex:
     index_by_name: Dict<text, i64>
+    index_by_binding: Dict<text, i64>
     names: [text]
     declaring_modules: [text]
     source_names: [text]
     visibilities: [Visibility]
+    source_modifiers: [text]
+    source_paths: [text]
+    projection_keys: [text]
     frozen: bool
 
 pub(package) fn module_surface_declaration_authority_index_empty() -> ModuleSurfaceDeclarationAuthorityIndex:
     ModuleSurfaceDeclarationAuthorityIndex(
-        index_by_name: {}, names: [], declaring_modules: [],
-        source_names: [], visibilities: [], frozen: false)
+        index_by_name: {}, index_by_binding: {}, names: [], declaring_modules: [],
+        source_names: [], visibilities: [], source_modifiers: [],
+        source_paths: [], projection_keys: [], frozen: false)
+
+pub(package) fn module_surface_authority_category_v1(projection_key: text) -> text:
+    val split = projection_key.index_of(":")
+    if split < 0: "" else: projection_key.substring(0, split)
 
 pub(package) fn module_surface_declaration_authority_index_put(
     index: ModuleSurfaceDeclarationAuthorityIndex,
     name: text,
     declaring_module: text,
     source_name: text,
-    visibility: Visibility
+    visibility: Visibility,
+    source_modifier: text = "",
+    source_path: text = "",
+    projection_key: text = ""
 ) -> Result<(), text>:
     if index.frozen:
         return Err("module surface declaration authority index is frozen")
     if index.names.len() != index.declaring_modules.len() or
        index.names.len() != index.source_names.len() or
-       index.names.len() != index.visibilities.len():
+       index.names.len() != index.visibilities.len() or
+       index.names.len() != index.source_modifiers.len() or
+       index.names.len() != index.source_paths.len() or
+       index.names.len() != index.projection_keys.len():
         return Err("module surface declaration authority arrays are misaligned")
-    if index.index_by_name.contains_key(name):
-        val position = index.index_by_name[name]
+    val binding = module_surface_authority_category_v1(projection_key) + "|" + name
+    if index.index_by_binding.contains_key(binding):
+        val position = index.index_by_binding[binding]
         if position < 0 or position >= index.names.len() or index.names[position] != name:
             return Err("module surface declaration authority scalar index is invalid")
         index.declaring_modules[position] = declaring_module
         index.source_names[position] = source_name
         index.visibilities[position] = visibility
+        index.source_modifiers[position] = source_modifier
+        index.source_paths[position] = source_path
+        index.projection_keys[position] = projection_key
+        index.index_by_name[name] = position
         return Ok(())
     val position = index.names.len()
     index.index_by_name[name] = position
+    index.index_by_binding[binding] = position
     index.names = index.names.push(name)
     index.declaring_modules = index.declaring_modules.push(declaring_module)
     index.source_names = index.source_names.push(source_name)
     index.visibilities = index.visibilities.push(visibility)
+    index.source_modifiers = index.source_modifiers.push(source_modifier)
+    index.source_paths = index.source_paths.push(source_path)
+    index.projection_keys = index.projection_keys.push(projection_key)
     Ok(())
 
-pub fn module_surface_declaration_authority_lookup(
-    index: ModuleSurfaceDeclarationAuthorityIndex, name: text
-) -> ModuleSurfaceDeclarationAuthorityLookup:
-    if not index.frozen or not index.index_by_name.contains_key(name):
-        return ModuleSurfaceDeclarationAuthorityLookup(
-            found: false, declaring_module: "", source_name: "",
-            visibility: Visibility.Private)
-    val position = index.index_by_name[name]
-    if position < 0 or position >= index.names.len() or
-       position >= index.declaring_modules.len() or
-       position >= index.source_names.len() or
-       position >= index.visibilities.len() or index.names[position] != name:
-        return ModuleSurfaceDeclarationAuthorityLookup(
-            found: false, declaring_module: "", source_name: "",
-            visibility: Visibility.Private)
+fn module_surface_declaration_authority_missing_v1() -> ModuleSurfaceDeclarationAuthorityLookup:
     ModuleSurfaceDeclarationAuthorityLookup(
-        found: true,
-        declaring_module: index.declaring_modules[position],
-        source_name: index.source_names[position],
-        visibility: index.visibilities[position])
+        found: false, declaring_module: "", source_name: "", visibility: Visibility.Private)
 
-pub(package) fn module_surface_declaration_authority_lookup_building(
-    index: ModuleSurfaceDeclarationAuthorityIndex, name: text
-) -> ModuleSurfaceDeclarationAuthorityLookup:
-    # Construction-only twin of the public frozen lookup. Export resolution
-    # must bind facade aliases before the registry can be frozen.
-    if not index.index_by_name.contains_key(name):
-        return ModuleSurfaceDeclarationAuthorityLookup(
-            found: false, declaring_module: "", source_name: "",
-            visibility: Visibility.Private)
-    val position = index.index_by_name[name]
+fn module_surface_declaration_authority_row_v1(index: ModuleSurfaceDeclarationAuthorityIndex, position: i64, name: text) -> ModuleSurfaceDeclarationAuthorityLookup:
     if position < 0 or position >= index.names.len() or
-       position >= index.declaring_modules.len() or
-       position >= index.source_names.len() or
-       position >= index.visibilities.len() or index.names[position] != name:
-        return ModuleSurfaceDeclarationAuthorityLookup(
-            found: false, declaring_module: "", source_name: "",
-            visibility: Visibility.Private)
+       position >= index.declaring_modules.len() or position >= index.source_names.len() or
+       position >= index.visibilities.len() or position >= index.source_modifiers.len() or
+       position >= index.source_paths.len() or position >= index.projection_keys.len() or index.names[position] != name:
+        return module_surface_declaration_authority_missing_v1()
     ModuleSurfaceDeclarationAuthorityLookup(
-        found: true,
-        declaring_module: index.declaring_modules[position],
-        source_name: index.source_names[position],
-        visibility: index.visibilities[position])
+        found: true, declaring_module: index.declaring_modules[position],
+        source_name: index.source_names[position], visibility: index.visibilities[position],
+        source_modifier: index.source_modifiers[position], source_path: index.source_paths[position],
+        projection_key: index.projection_keys[position])
+
+pub fn module_surface_declaration_authority_lookup(index: ModuleSurfaceDeclarationAuthorityIndex, name: text) -> ModuleSurfaceDeclarationAuthorityLookup:
+    if not index.frozen: return module_surface_declaration_authority_missing_v1()
+    module_surface_declaration_authority_lookup_building(index, name)
+
+pub(package) fn module_surface_declaration_authority_lookup_building(index: ModuleSurfaceDeclarationAuthorityIndex, name: text) -> ModuleSurfaceDeclarationAuthorityLookup:
+    if not index.index_by_name.contains_key(name): return module_surface_declaration_authority_missing_v1()
+    module_surface_declaration_authority_row_v1(index, index.index_by_name[name], name)
+
+pub fn module_surface_declaration_authority_lookup_typed_v1(index: ModuleSurfaceDeclarationAuthorityIndex, name: text, category: text) -> ModuleSurfaceDeclarationAuthorityLookup:
+    if not index.frozen: return module_surface_declaration_authority_missing_v1()
+    module_surface_declaration_authority_lookup_typed_building_v1(index, name, category)
+
+pub(package) fn module_surface_declaration_authority_lookup_typed_building_v1(index: ModuleSurfaceDeclarationAuthorityIndex, name: text, category: text) -> ModuleSurfaceDeclarationAuthorityLookup:
+    val binding = category + "|" + name
+    if not index.index_by_binding.contains_key(binding): return module_surface_declaration_authority_missing_v1()
+    val row = module_surface_declaration_authority_row_v1(index, index.index_by_binding[binding], name)
+    if not row.found or module_surface_authority_category_v1(row.projection_key) != category:
+        return module_surface_declaration_authority_missing_v1()
+    row
 
 class ModuleSurfaceExportOriginIndex:
     origins: Dict<text, ModuleSurfaceExportOrigin>

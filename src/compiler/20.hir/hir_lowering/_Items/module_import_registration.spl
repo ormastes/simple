@@ -19,11 +19,12 @@ use compiler.common.diagnostics.span.{Span}
 use std.io_runtime.{hash_text}
 use std.nogc_sync_mut.io_runtime.{env_get_opt}
 use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_symbol_table_methods.{hir_symbol_declaration_category_v1}
 use compiler.hir.hir_lowering.type_aliases.*
 use compiler.hir.hir_lowering._Items.module_reexport_materialization.{hir_dependency_is_builtin_type, hir_dependency_type_name, hir_dependency_is_qualified_path}
 use compiler.hir.hir_lowering.context_helpers.*
 use compiler.hir.hir_lowering.module_surface.*
-use compiler.hir.hir_lowering.module_surface_types.{module_surface_export_origin_index_lookup, module_surface_name_position, ModuleSurfaceEnum, ModuleSurfaceTrait, ModuleSurfaceComposite}
+use compiler.hir.hir_lowering.module_surface_types.{module_surface_declaration_authority_lookup_typed_v1, module_surface_export_origin_index_lookup, module_surface_name_position, ModuleSurfaceEnum, ModuleSurfaceTrait, ModuleSurfaceComposite}
 use compiler.hir.hir_lowering._Items.module_reexport_materialization.{hir_dependency_is_builtin_container, hir_compilation_declares_nominal}
 use compiler.hir.hir_lowering._Items.module_import_resolution.{private_import_is_test_importer}
 use compiler.hir.hir_lowering.module_surface_registry_index.{module_surfaces_frozen_alignment}
@@ -355,6 +356,18 @@ impl HirLowering:
         self.register_imported_symbol_inner(
             imported_index, imported_mod_name, imported_name, local_name,
             import_span, materialize_enum)
+        val bound_symbol = self.import_binding_or_invalid(local_name)
+        if bound_symbol.is_valid() and self.symbols.symbols.has(bound_symbol.id):
+            val symbol: HirSymbol = self.symbols.symbols[bound_symbol.id]
+            val declaration_authority = module_surface_declaration_authority_lookup_typed_v1(
+                imported_mod.declaration_authority_index, imported_name, hir_symbol_declaration_category_v1(symbol))
+            if declaration_authority.found:
+                val bound_origin = self.symbols.bind_declaration_origin_v1(
+                    bound_symbol, declaration_authority.declaring_module,
+                    declaration_authority.source_name, declaration_authority.source_modifier,
+                    declaration_authority.source_path, declaration_authority.projection_key)
+                if bound_origin.is_err():
+                    self.error(bound_origin.unwrap_err(), import_span)
         # Record misses too. A changed binding state must replace the old
         # scalar memo state so a later scope pop still triggers registration.
         self.registered_import_memo_record(

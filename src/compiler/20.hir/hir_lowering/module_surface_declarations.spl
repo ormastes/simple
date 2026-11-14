@@ -2,7 +2,7 @@
 
 use compiler.common.driver_core_types.{SourceFile}
 use compiler.frontend.parser_types.*
-use compiler.frontend.declaration_intent_v1.{ParserDeclarationIntentV1}
+use compiler.frontend.declaration_intent_v1.{ParserDeclarationIntentV1, parser_declaration_intent_index_v1}
 use compiler.frontend.core.parser_preprocessor.{pp_declared_target, pp_ensure_marker_strip_decisions}
 # Class B (stage-1 run13): this module reaches parser_types_expr through a
 # TWO-HOP GLOB -- `use compiler.frontend.parser_types.*` here, and
@@ -512,36 +512,55 @@ pub fn module_surface_from_owner(
     var constant_values: [ModuleSurfaceConst] = []
     for name in constant_names:
         constant_values = constant_values.push(constants[name])
+    if module_local.source_declaration_intents_v1.len() > 0:
+        if module_surface_canonical_path(module_local.name) != module_surface_canonical_path(source.path) or module_local.source_declaration_digest_v1 == "":
+            return Err("source declaration facts do not belong to this module surface source")
+    val intent_result = parser_declaration_intent_index_v1(module_local.source_declaration_intents_v1)
+    if intent_result.is_err(): return Err(intent_result.unwrap_err())
+    val source_intents = intent_result.unwrap()
+    val declaration_source_path = module_surface_canonical_path(source.path)
     val declaration_authorities = module_surface_declaration_authority_index_empty()
     for name in callable_names:
         val result = module_surface_declaration_authority_index_put(
             declaration_authorities, name, source.module_name, name,
-            callables[name].visibility)
+            callables[name].visibility,
+            source_intents.get("function" + ":" + name) ?? "",
+            declaration_source_path, "function" + ":" + name)
         if result.is_err(): return Err(result.unwrap_err())
     for name in composite_names:
         val result = module_surface_declaration_authority_index_put(
             declaration_authorities, name, source.module_name, name,
-            composites[name].visibility)
+            composites[name].visibility,
+            source_intents.get(composites[name].kind + ":" + name) ?? "",
+            declaration_source_path, composites[name].kind + ":" + name)
         if result.is_err(): return Err(result.unwrap_err())
     for name in enum_names:
         val result = module_surface_declaration_authority_index_put(
             declaration_authorities, name, source.module_name, name,
-            enums[name].visibility)
+            enums[name].visibility,
+            source_intents.get("enum" + ":" + name) ?? "",
+            declaration_source_path, "enum" + ":" + name)
         if result.is_err(): return Err(result.unwrap_err())
     for name in trait_names:
         val result = module_surface_declaration_authority_index_put(
             declaration_authorities, name, source.module_name, name,
-            traits[name].visibility)
+            traits[name].visibility,
+            source_intents.get("trait" + ":" + name) ?? "",
+            declaration_source_path, "trait" + ":" + name)
         if result.is_err(): return Err(result.unwrap_err())
     for name in type_alias_names:
         val result = module_surface_declaration_authority_index_put(
             declaration_authorities, name, source.module_name, name,
-            type_aliases[name].visibility)
+            type_aliases[name].visibility,
+            source_intents.get("type_alias" + ":" + name) ?? "",
+            declaration_source_path, "type_alias" + ":" + name)
         if result.is_err(): return Err(result.unwrap_err())
     for name in constant_names:
         val result = module_surface_declaration_authority_index_put(
             declaration_authorities, name, source.module_name, name,
-            constants[name].visibility)
+            constants[name].visibility,
+            source_intents.get("constant" + ":" + name) ?? "",
+            declaration_source_path, "constant" + ":" + name)
         if result.is_err(): return Err(result.unwrap_err())
     # Flatten nested parser import items while this file's parser payload is
     # still alive. Freeze will clone these retained scalars into its own scope;
