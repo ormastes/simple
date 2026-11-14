@@ -1,8 +1,16 @@
 #!/usr/bin/env bash
-# Real curl/POP3-over-implicit-TLS interoperability against the pure-Simple
-# loopback server (loopback_pop3_server.spl). Disposable HOME and ports only.
+# Real curl/POP3 interoperability against the pure-Simple loopback server
+# (loopback_pop3_server.spl). Disposable HOME and ports only.
+# Usage: loopback_pop3_probe.shs [implicit|stls]  (default implicit TLS; `stls`
+# drives the STLS upgrade scenarios, curl --ssl-reqd over pop3://).
 # Requires: SIMPLE_BIN (runs the server) and MAIL_CONFIG_BIN (compiled SDN helper).
 set -uo pipefail
+transport=${1:-implicit}
+case "$transport" in
+  implicit) tls_mode=implicit; server_transport=() ;;
+  stls) tls_mode=starttls; server_transport=(stls) ;;
+  *) echo "unknown transport: $transport"; exit 2 ;;
+esac
 root=$(cd "$(dirname "$0")/../../../../.." && pwd)
 simple_bin=${SIMPLE_BIN:-$root/bin/simple}
 [ -x "$simple_bin" ] || [ -x "$simple_bin.exe" ] || { echo "SIMPLE_BIN missing"; exit 2; }
@@ -28,7 +36,7 @@ accounts:
     display_name: "Fixture"
     pop3_server: "localhost"
     pop3_port: "$port"
-    tls: implicit
+    tls: $tls_mode
     password_cmd: "printf loopback-fixture-password"
 SDN
 chmod 600 "$work/home/.config/devhub/email.sdn"
@@ -42,7 +50,8 @@ case "$(uname -s)" in
     export PATH="$work/shim:$PATH" ;;
 esac
 "$simple_bin" run "$root/test/01_unit/tools/mail_cli/fixtures/loopback_pop3_server.spl" \
-  "$port" "$ids/localhost.pem" "$ids/localhost-key.pem" "$work/mode" "$work/log" > "$work/server.out" 2>&1 &
+  "$port" "$ids/localhost.pem" "$ids/localhost-key.pem" "$work/mode" "$work/log" \
+  ${server_transport[@]+"${server_transport[@]}"} > "$work/server.out" 2>&1 &
 server_pid=$!
 for _ in $(seq 1 60); do grep -q '^listening' "$work/server.out" && break; sleep 1; done
 grep -q '^listening' "$work/server.out" || { echo "server did not start"; tail -3 "$work/server.out"; exit 2; }
@@ -57,6 +66,32 @@ run() { # sets out, err, rc
 count() { grep -c "^$1\$" "$work/log"; }
 fail=0
 check() { if [ "$2" = ok ]; then echo "$1: PASS"; else echo "$1: FAIL ($3)"; fail=1; fi; }
+
+if [ "$transport" = stls ]; then
+  run inbox --json
+  stls_at=$(grep -n '^PLAIN STLS$' "$work/log" | head -1 | cut -d: -f1)
+  pass_at=$(grep -n '^PASS$' "$work/log" | head -1 | cut -d: -f1)
+  if [ $rc -eq 0 ] && grep -q 'Loopback TLS message' "$work/out" && [ "$(count LIST)" -ge 1 ] \
+     && [ -n "$stls_at" ] && [ -n "$pass_at" ] && [ "$stls_at" -lt "$pass_at" ] \
+     && [ "$(count 'PLAIN USER')" -eq 0 ] && [ "$(count 'PLAIN PASS')" -eq 0 ]; then
+    check actual_curl_stls_upgrade_before_credentials ok
+  else
+    check actual_curl_stls_upgrade_before_credentials bad "rc=$rc stls_at=$stls_at pass_at=$pass_at $(head -c 200 "$work/err")"
+  fi
+
+  printf 'stls_reject\n' > "$work/mode"
+  stls_before=$(count 'PLAIN STLS'); users_before=$(count USER); passes_before=$(count PASS)
+  run inbox --json
+  # 64 = CURLE_USE_SSL_FAILED: curl gave up on the required upgrade.
+  if [ $rc -eq 64 ] && [ ! -s "$work/out" ] && [ "$(count 'PLAIN STLS')" -gt "$stls_before" ] \
+     && [ "$(count USER)" -eq "$users_before" ] && [ "$(count PASS)" -eq "$passes_before" ] \
+     && [ "$(count 'PLAIN USER')" -eq 0 ] && [ "$(count 'PLAIN PASS')" -eq 0 ]; then
+    check actual_curl_stls_failure_sends_no_credentials ok
+  else
+    check actual_curl_stls_failure_sends_no_credentials bad "rc=$rc stls=$(( $(count 'PLAIN STLS') - stls_before ))"
+  fi
+  exit $fail
+fi
 
 run inbox --json
 if [ $rc -eq 0 ] && grep -q 'Loopback TLS message' "$work/out" && grep -q 'pop3' "$work/out"; then

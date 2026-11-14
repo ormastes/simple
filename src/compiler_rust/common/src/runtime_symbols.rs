@@ -2274,6 +2274,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_tls_server_create_from_der",
     "rt_tls_server_read_checked",
     "rt_tls_server_shutdown",
+    "rt_tls_server_upgrade_tcp",
     "rt_tls_server_write",
     "rt_tls_server_write_bytes",
     "rt_tls_set",
