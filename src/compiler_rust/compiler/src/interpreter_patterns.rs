@@ -823,9 +823,17 @@ pub(crate) fn pattern_matches(
         }
 
         Pattern::Or(patterns) => {
+            // A callable-payload refusal recorded by a losing alternative is
+            // dropped when a later alternative matches, like its bindings.
+            let saved_refusal = MATCH_ARM_MODE
+                .with(|m| m.get())
+                .then(|| MATCH_ARM_REFUSAL.with(|r| r.borrow().clone()));
             for pat in patterns {
                 let mut temp_bindings = HashMap::new();
                 if pattern_matches(pat, orig, &mut temp_bindings, enums, classes)? {
+                    if let Some(saved) = saved_refusal {
+                        MATCH_ARM_REFUSAL.with(|r| *r.borrow_mut() = saved);
+                    }
                     bindings.extend(temp_bindings);
                     return Ok(true);
                 }
@@ -2240,12 +2248,21 @@ main = classify(0) + 10 * classify(5) + 100 * classify(42) + 1000 * classify(100
             let mut bindings = HashMap::new();
             assert!(match_arm_matches(&pattern, &wrapped, &mut bindings, &enums, &classes).unwrap());
         }
+        // `case (W(I8) | W(f), 0):` on `(W(Vec4f), 1)`: the matching `W(f)`
+        // drops the `I8` refusal, so the arm is a plain miss, not an error.
+        let or_then_miss = Pattern::Tuple(vec![
+            Pattern::Or(vec![w(i8()), w(Pattern::Identifier("f".to_string()))]),
+            Pattern::Literal(Box::new(Expr::Integer(0))),
+        ]);
+        let pair = Value::Tuple(vec![wrapped.clone(), Value::Int(1)]);
+        let mut bindings = HashMap::new();
+        assert!(!match_arm_matches(&or_then_miss, &pair, &mut bindings, &enums, &classes).unwrap());
         // Outside a match arm (`val`/`if val` destructuring) nothing changes,
         // and the arm mode does not leak out of `match_arm_matches`.
         let mut bindings = HashMap::new();
         assert!(pattern_matches(&w(i8()), &wrapped, &mut bindings, &enums, &classes).unwrap());
         assert!(matches!(bindings.get("I8"), Some(Value::Constructor { .. })));
-        assert!(!MATCH_ARM_MODE.with(|m| m.get()));
+        assert!(!super::MATCH_ARM_MODE.with(|m| m.get()));
     }
 
     // JIT residual of the same bug, interpreter twin: a callable bound to a
