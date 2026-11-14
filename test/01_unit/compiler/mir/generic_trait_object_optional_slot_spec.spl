@@ -33,6 +33,7 @@ use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.hir.hir_lowering.items.*
 use compiler.mir.mir.*
 use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir.mir_json.{serialize_mir_function}
 use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
 
@@ -122,3 +123,26 @@ describe "generic trait object in an optional slot":
     it "refuses a checked `as` downcast to a generic trait":
         val src = TRAIT + "trait Tag:\n    fn tag() -> i64\n\nfn probe(t: Tag) -> bool:\n    if val o = t as Owner<i64>:\n        return true\n    false\n"
         expect(joined(lower_errors(src, false))).to_contain("native trait cast target is generic")
+
+    it "marks a bootstrap-erased `T?` dispatch result as an Option (if val tests rt_is_some)":
+        # Bootstrap HIR erases the slot's declared `-> T?` to i64; the call
+        # result must still be read as the Option handle it is. Before the
+        # fix `has` tested it as a scalar (rt_value_int_wide + rt_native_eq).
+        val parsed = parse_and_build_module(TRAIT + STORE + CELLS, "generic_trait_mark.spl")
+        var hir_lowering = HirLowering.with_filename("generic_trait_mark.spl")
+        env_set("SIMPLE_BOOTSTRAP", "1")
+        env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "1")
+        val hir = hir_lowering.lower_module(parsed)
+        env_set("SIMPLE_BOOTSTRAP", "")
+        env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "")
+        var lowering = MirLowering.new(hir.symbols)
+        lowering.trait_impl_closure_complete = true
+        val mir = lowering.lower_module(hir)
+        var has_mir = ""
+        for function in mir.functions.values():
+            if function.name.ends_with("Store.has"):
+                has_mir = serialize_mir_function(function)
+        expect(has_mir.len() > 0).to_equal(true)
+        val after_dispatch = has_mir.substring(has_mir.find("CallIndirect"), has_mir.len())
+        expect(after_dispatch).to_contain("rt_is_some")
+        expect(after_dispatch.contains("rt_value_int_wide")).to_equal(false)
