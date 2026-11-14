@@ -49,9 +49,13 @@ enum FontBackend:
 # wght=100 THIN master (the resolved identity says `axes=wght=100`), which is
 # where the sans runs' −7%/−12% deficit came from.
 #
+# On Linux Chrome maps `sans-serif` to "Arial" (fontconfig: Liberation Sans)
+# and `monospace` to "Monospace" (fontconfig: DejaVu Sans Mono); those faces
+# follow the macOS ones, so a host offers only what it actually has.
+#
 # These are PREPENDED to the bundled lists, never replacing them: a face is
-# offered only when its file is present, so Linux and CI keep exactly the
-# candidate order they had. `#N` selects a face of a TrueType collection.
+# offered only when its file is present, so a host without these files keeps
+# exactly the bundled candidate order. `#N` selects a face of a TrueType collection.
 fn _browser_present_platform_faces(specs: [text]) -> [text]:
     var out: [text] = []
     for spec in specs:
@@ -68,20 +72,271 @@ fn browser_platform_hangul_faces() -> [text]:
     _browser_present_platform_faces(["/System/Library/Fonts/Supplemental/AppleGothic.ttf"])
 
 fn browser_platform_mono_faces() -> [text]:
-    _browser_present_platform_faces(["/System/Library/Fonts/Menlo.ttc#0"])
+    _browser_present_platform_faces(["/System/Library/Fonts/Menlo.ttc#0", "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"])
 
 fn browser_platform_sans_faces() -> [text]:
-    _browser_present_platform_faces(["/System/Library/Fonts/Helvetica.ttc#0"])
+    _browser_present_platform_faces(["/System/Library/Fonts/Helvetica.ttc#0", "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"])
 
 # Weight >= 600 wants a real bold face, not a synthesised one. Helvetica.ttc
 # face 1 is Helvetica Bold; its `abcdefg` run is 61.34 px at 16 against the
 # regular face's 56.94, i.e. the +4 px delta Chrome shows and Simple measured
 # as 0 because both weights resolved to the same face.
 fn browser_platform_sans_bold_faces() -> [text]:
-    _browser_present_platform_faces(["/System/Library/Fonts/Helvetica.ttc#1"])
+    _browser_present_platform_faces(["/System/Library/Fonts/Helvetica.ttc#1", "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"])
 
 fn browser_platform_mono_bold_faces() -> [text]:
-    _browser_present_platform_faces(["/System/Library/Fonts/Menlo.ttc#1"])
+    _browser_present_platform_faces(["/System/Library/Fonts/Menlo.ttc#1", "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf"])
+
+# `font-style: italic` (UA `<em>`/`<i>`) wants the real italic face of the same
+# typeface, exactly like bold above. Linux paths only: Chrome's Linux defaults
+# are Liberation Sans Italic and DejaVu Sans Mono Oblique. The macOS
+# Helvetica.ttc / Menlo.ttc italic face indices are not verified here, so no
+# macOS entry is guessed; a host without the file keeps the upright face.
+fn browser_platform_sans_italic_faces() -> [text]:
+    _browser_present_platform_faces(["/usr/share/fonts/truetype/liberation/LiberationSans-Italic.ttf"])
+
+fn browser_platform_sans_bold_italic_faces() -> [text]:
+    _browser_present_platform_faces(["/usr/share/fonts/truetype/liberation/LiberationSans-BoldItalic.ttf"])
+
+fn browser_platform_mono_italic_faces() -> [text]:
+    _browser_present_platform_faces(["/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Oblique.ttf"])
+
+fn browser_platform_mono_bold_italic_faces() -> [text]:
+    _browser_present_platform_faces(["/usr/share/fonts/truetype/dejavu/DejaVuSansMono-BoldOblique.ttf"])
+
+# ---------------------------------------------------------------------------
+# Family-LIST resolution (CSS Fonts 4 §5)
+#
+# `font-family` is an ordered, comma-separated list. The UA walks it and uses
+# the FIRST name it can serve; a name it cannot serve is skipped, and when no
+# name is served the UA default applies. Until 2026-11-14 every classifier in
+# this file (and the two mirrors in font_renderer.spl / the layout foundation)
+# instead ran substring tests over the WHOLE string, so:
+#
+#   `"Source Code Pro", Arial`  -> mono  (`contains("code")`); Chrome: Arial
+#   `Roboto` / `"Segoe UI"`     -> mono  (the unmatched default); Chrome: the
+#                                         default serif face
+#   `cursive`, `ui-monospace`   -> mono;  Chrome: default serif
+#
+# Oracle: Chrome 159 headless shell on Linux/fontconfig, width of
+# "Hamburgefonstiv 0123" (20 chars) at 16px in an inline-block span:
+#   Liberation Sans 160.98 | Liberation Serif 147.69 | Liberation Mono 192.03
+#   DejaVu Sans 183.91 (h19) | DejaVu Sans Mono 192.66 (h19)
+# Full table: test/01_unit/browser_engine/font_family_list_resolution_spec.spl.
+#
+# One resolver, used by every classifier, so they cannot disagree again.
+#
+# SCOPE. The per-name walk is applied only on a host that has the face set the
+# table above was measured on (Liberation Sans / Serif / Mono, no macOS system
+# faces). Every other host — macOS, a host with no Liberation faces, SimpleOS —
+# keeps the previous whole-value substring classification EXACTLY, including
+# its mono default, because nothing was measured there
+# (`_browser_resolve_family_legacy`).
+class BrowserResolvedFamily:
+    # "sans" | "mono" | "serif" | a bundled asset's category | "" (no name in
+    # the list is served: `default_category` decides the stack).
+    category: text
+    # The category without the legacy "system" substring rule. The decorated
+    # `@font-face` branch and the font_renderer category never applied that
+    # rule; on the per-name path this always equals `category`.
+    category_strict: text
+    # A specific host face this name maps to, or "" for the category's
+    # platform stack.
+    face: text
+    # Path of the bundled asset the served name IS, or "".
+    bundled: text
+    # The stack when no name is served: "serif" (Chrome's default face) on the
+    # per-name path, "mono" on the legacy path and for the non-CSS sentinels.
+    default_category: text
+
+# Bounded: a page can mint unlimited distinct family strings (inline styles),
+# and this table outlives the page.
+val BROWSER_RESOLVED_FAMILY_MEMO_LIMIT: i32 = 512
+var _browser_resolved_family_memo: Dict<text, BrowserResolvedFamily> = {}
+var _browser_resolved_family_memo_count: i32 = 0
+var _browser_host_is_macos_state: i32 = 0
+var _browser_host_linux_face_set_state: i32 = 0
+
+fn _browser_host_is_macos() -> bool:
+    if _browser_host_is_macos_state == 0:
+        _browser_host_is_macos_state = if file_exists("/System/Library/Fonts/Helvetica.ttc"): 1 else: 2
+    _browser_host_is_macos_state == 1
+
+# The host the Chrome 159 table was measured on.
+fn browser_host_has_measured_linux_face_set() -> bool:
+    if _browser_host_linux_face_set_state == 0:
+        val present = (
+            not _browser_host_is_macos() and
+            file_exists("/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf") and
+            file_exists("/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf") and
+            file_exists("/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf")
+        )
+        _browser_host_linux_face_set_state = if present: 1 else: 2
+    _browser_host_linux_face_set_state == 1
+
+fn _browser_host_face_or_empty(path: text) -> text:
+    if file_exists(path): path else: ""
+
+fn _browser_family_served(category: text, face: text, bundled: text) -> BrowserResolvedFamily:
+    BrowserResolvedFamily(category: category, category_strict: category, face: face, bundled: bundled, default_category: "serif")
+
+fn _browser_family_unserved(default_category: text) -> BrowserResolvedFamily:
+    BrowserResolvedFamily(category: "", category_strict: "", face: "", bundled: "", default_category: default_category)
+
+# The classification every host had before 2026-11-14, kept verbatim for the
+# hosts the per-name walk was not measured on: substring tests over the WHOLE
+# value (a decorated value's source path included), bundled lookup on the first
+# name only, mono as the unmatched default.
+fn _browser_resolve_family_legacy(family: text) -> BrowserResolvedFamily:
+    val lower = family.to_lower()
+    val families = family.split(",")
+    val first = if families.len() > 0: families[0].trim() else: family.trim()
+    val wanted = _strip_font_url_quotes(first).to_lower()
+    val whole = family.trim().to_lower()
+    var bundled = ""
+    var whole_category = ""
+    for asset in selected_font_asset_candidates():
+        val asset_family = asset.family.to_lower()
+        if bundled == "" and asset_family == wanted:
+            bundled = selected_font_asset_physical_path(asset.local_path)
+        if whole_category == "" and asset_family == whole:
+            whole_category = asset.category
+    val mono = lower.contains("mono") or lower.contains("courier") or lower.contains("code") or lower.contains("console")
+    val sans_strict = lower.contains("sans") or lower.contains("arial") or lower.contains("helvetica")
+    val serif = lower.contains("serif") or lower.contains("times") or lower.contains("georgia")
+    val category = if mono: "mono" elif sans_strict or lower.contains("system"): "sans" elif serif: "serif" else: ""
+    val substring_strict = if mono: "mono" elif sans_strict: "sans" elif serif: "serif" else: ""
+    val strict = if whole_category != "": whole_category else: substring_strict
+    BrowserResolvedFamily(category: category, category_strict: strict, face: "", bundled: bundled, default_category: "mono")
+
+# The family list of a `font-family` value. A decorated
+# `__simple_font_face__|<source>|<family>` value carries the page's list after
+# its second `|`; classifying the whole value would read the SOURCE PATH as a
+# family name (`.../DejaVuSansMono-Bold.ttf` contains "mono" and "sans").
+fn _browser_family_list_text(family: text) -> text:
+    val prefix = "__simple_font_face__|"
+    if not family.starts_with(prefix):
+        return family
+    val rest = family.slice(prefix.byte_len(), family.byte_len())
+    val pipe = rest.index_of("|")
+    if pipe < 0:
+        return ""
+    rest.slice(pipe + 1, rest.byte_len())
+
+# One name of the list -> what serves it, or `category == "" and bundled == ""`
+# when this host cannot serve it and the walk continues.
+fn _browser_resolve_family_name(raw: text) -> BrowserResolvedFamily:
+    val trimmed = raw.trim()
+    val name = _strip_font_url_quotes(trimmed).trim().to_lower()
+    val quoted = name != trimmed.to_lower()
+    if name == "":
+        return _browser_family_unserved("serif")
+    # A page that names a bundled face gets that face.
+    for asset in selected_font_asset_candidates():
+        if asset.family.to_lower() == name:
+            return _browser_family_served(asset.category, "", selected_font_asset_physical_path(asset.local_path))
+    # Generic keywords are keywords only when UNQUOTED: `"sans-serif"` is a
+    # family literally named sans-serif, which nothing serves (Chrome: 147.69).
+    if not quoted:
+        if name == "serif":
+            return _browser_family_served("serif", "", "")
+        if name == "sans-serif":
+            return _browser_family_served("sans", "", "")
+        if name == "monospace":
+            return _browser_family_served("mono", "", "")
+        if name == "system-ui":
+            # Chrome asks fontconfig for the UI font: DejaVu Sans here
+            # (183.91, h19), NOT the Arial alias.
+            return _browser_family_served("sans", _browser_host_face_or_empty("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"), "")
+        # `cursive`, `fantasy`, `math`, `fangsong`, `ui-serif`, `ui-sans-serif`,
+        # `ui-monospace`, `ui-rounded`, `-apple-system`, `BlinkMacSystemFont`:
+        # Chrome on Linux serves none of them (each measured 147.69, and
+        # `NoSuch, cursive, Arial` measured 160.98: the walk CONTINUES).
+    # Family names, quoted or not. Fontconfig aliases Arial/Helvetica to
+    # Liberation Sans, Times to Liberation Serif, Courier to Liberation Mono.
+    if name == "arial" or name == "helvetica" or name == "liberation sans":
+        return _browser_family_served("sans", "", "")
+    # Bare `sans` is NOT a CSS generic. Chrome resolves it through fontconfig
+    # to DejaVu Sans (183.91), but it is also the literal the non-web UI lanes
+    # pass (common/ui/panel2d.spl, widget_draw_ir.spl, window_scene_draw_ir.spl),
+    # which rendered on the sans stack before this resolver. It stays there.
+    if name == "sans":
+        return _browser_family_served("sans", "", "")
+    if name == "times new roman" or name == "times" or name == "liberation serif":
+        return _browser_family_served("serif", "", "")
+    if name == "courier new" or name == "courier" or name == "liberation mono":
+        # Liberation Mono (192.03, h18), not the generic stack's DejaVu Sans
+        # Mono (192.66, h19).
+        return _browser_family_served("mono", _browser_host_face_or_empty("/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf"), "")
+    # Installed-by-name host families: served only where the file exists.
+    if name == "dejavu sans":
+        val face = _browser_host_face_or_empty("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")
+        if face != "":
+            return _browser_family_served("sans", face, "")
+    if name == "dejavu sans mono" or name == "monospace":
+        val face = _browser_host_face_or_empty("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf")
+        if face != "":
+            return _browser_family_served("mono", face, "")
+    if name == "dejavu serif":
+        val face = _browser_host_face_or_empty("/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf")
+        if face != "":
+            return _browser_family_served("serif", face, "")
+    _browser_family_unserved("serif")
+
+fn _browser_resolve_family_uncached(family: text) -> BrowserResolvedFamily:
+    if not browser_host_has_measured_linux_face_set():
+        return _browser_resolve_family_legacy(family)
+    val list_text = _browser_family_list_text(family)
+    # Not CSS family lists: the empty value, and the `inherit` sentinel of
+    # common/ui/style.spl's FontProperties (a CSS-wide keyword never reaches
+    # font matching in a browser). Both keep the stack they had before.
+    val sentinel = list_text.trim().to_lower()
+    if sentinel == "" or sentinel == "inherit":
+        return _browser_family_unserved("mono")
+    var resolved = _browser_family_unserved("serif")
+    val names = list_text.split(",")
+    for raw in names:
+        if resolved.category == "" and resolved.bundled == "":
+            resolved = _browser_resolve_family_name(raw)
+    resolved
+
+# Walk the list in order; the first served name wins.
+fn browser_resolve_font_family(family: text) -> BrowserResolvedFamily:
+    if _browser_resolved_family_memo.has(family):
+        return _browser_resolved_family_memo[family]
+    val resolved = _browser_resolve_family_uncached(family)
+    if _browser_resolved_family_memo_count >= BROWSER_RESOLVED_FAMILY_MEMO_LIMIT:
+        _browser_resolved_family_memo = {}
+        _browser_resolved_family_memo_count = 0
+    _browser_resolved_family_memo[family] = resolved
+    _browser_resolved_family_memo_count = _browser_resolved_family_memo_count + 1
+    resolved
+
+# Entries currently memoised (bounded by BROWSER_RESOLVED_FAMILY_MEMO_LIMIT).
+fn browser_resolved_family_memo_len() -> i32:
+    _browser_resolved_family_memo_count
+
+# "mono" | "sans" | "serif" | a bundled category | "" (no name served). This
+# is the category the language/coverage matrix keys on.
+fn browser_font_family_category(family: text) -> text:
+    browser_resolve_font_family(family).category_strict
+
+# Whether the list resolves to a monospace face (the layout's content-area rule).
+fn browser_font_family_is_monospace(family: text) -> bool:
+    browser_resolve_font_family(family).category == "mono"
+
+# The bold / italic member of the SAME typeface as a specific host face, or ""
+# when the host has none (the caller then keeps the regular face: recorded, not
+# synthesised, and never a typeface swap).
+fn _browser_host_face_variant(face: text, bold: bool, italic: bool) -> text:
+    val regular_suffix = if face.ends_with("-Regular.ttf"): "-Regular.ttf" else: ".ttf"
+    val stem = face.slice(0, face.byte_len() - regular_suffix.byte_len())
+    val slant = if face.contains("/dejavu/DejaVuSans"): "Oblique" else: "Italic"
+    val style_name = if bold and italic: "Bold" + slant elif bold: "Bold" elif italic: slant else: ""
+    if style_name == "":
+        return face
+    val variant = stem + "-" + style_name + ".ttf"
+    if file_exists(variant): variant else: ""
 
 # Bold routing rides the existing `__simple_font_face__|<source>|<family>`
 # channel, which `browser_font_candidates_for_family` already understands, so
@@ -101,21 +356,51 @@ fn browser_font_family_for_weight(family: text, bold: bool) -> text:
         return family
     if family.starts_with("__simple_font_face__|"):
         return family
-    if browser_bundled_font_path_for_family(family) != "":
+    # The SAME per-name resolution as `browser_font_candidates_for_family`, so
+    # the bold face is the bold of the typeface the regular run resolved to.
+    val resolved = browser_resolve_font_family(family)
+    if resolved.bundled != "":
         return family
-    val lower = family.to_lower()
-    # The same substring tests, in the same order, as
-    # `browser_font_candidates_for_family` and `_resolved_font_category_uncached`.
-    # Three lists that disagree is exactly how round 10's `system-ui`-resolves-
-    # to-serif defect happened.
-    val faces = if lower.contains("mono") or lower.contains("courier") or lower.contains("code") or lower.contains("console"):
+    if resolved.face != "":
+        val variant = _browser_host_face_variant(resolved.face, true, false)
+        if variant == "":
+            return family
+        return "__simple_font_face__|" + variant + "|" + family
+    val faces = if resolved.category == "mono":
         browser_platform_mono_bold_faces()
-    elif lower.contains("sans") or lower.contains("arial") or lower.contains("helvetica") or lower.contains("system"):
+    elif resolved.category == "sans":
         browser_platform_sans_bold_faces()
     else:
         []
     if faces.len() == 0:
         return family
+    "__simple_font_face__|" + faces[0] + "|" + family
+
+# Weight AND style routing, same rules as `browser_font_family_for_weight`:
+# only the generic sans/mono families, never a typeface swap. Italic picks the
+# italic (bold-italic) face; when the host has no italic face the result is
+# exactly the weight-only routing, so bold-italic degrades to bold, not regular.
+fn browser_font_family_for_style(family: text, bold: bool, italic: bool) -> text:
+    if not italic:
+        return browser_font_family_for_weight(family, bold)
+    if family.starts_with("__simple_font_face__|"):
+        return family
+    val resolved = browser_resolve_font_family(family)
+    if resolved.bundled != "":
+        return family
+    if resolved.face != "":
+        val variant = _browser_host_face_variant(resolved.face, bold, true)
+        if variant == "":
+            return browser_font_family_for_weight(family, bold)
+        return "__simple_font_face__|" + variant + "|" + family
+    val faces = if resolved.category == "mono":
+        if bold: browser_platform_mono_bold_italic_faces() else: browser_platform_mono_italic_faces()
+    elif resolved.category == "sans":
+        if bold: browser_platform_sans_bold_italic_faces() else: browser_platform_sans_italic_faces()
+    else:
+        []
+    if faces.len() == 0:
+        return browser_font_family_for_weight(family, bold)
     "__simple_font_face__|" + faces[0] + "|" + family
 
 fn _browser_resolve_bundled_candidates(paths: [text]) -> [text]:
@@ -174,44 +459,38 @@ fn browser_mono_font_candidates() -> [text]:
         "/usr/share/fonts/opentype/urw-base35/NimbusMonoPS-Regular.otf"
     ])
 
+fn _browser_category_font_candidates(category: text) -> [text]:
+    if category == "mono":
+        return browser_mono_font_candidates()
+    if category == "sans":
+        return browser_sans_font_candidates()
+    browser_serif_font_candidates()
+
 fn browser_font_candidates_for_family(family: text) -> [text]:
     val face_source = browser_font_face_source_from_family_value(family)
-    val lower = family.to_lower()
+    val resolved = browser_resolve_font_family(family)
     if face_source != "":
-        if lower.contains("mono") or lower.contains("courier") or lower.contains("code") or lower.contains("console"):
-            return [face_source] + browser_mono_font_candidates()
-        if lower.contains("sans") or lower.contains("arial") or lower.contains("helvetica"):
-            return [face_source] + browser_sans_font_candidates()
-        return [face_source] + browser_serif_font_candidates()
-    val bundled = browser_bundled_font_path_for_family(family)
-    if bundled != "":
-        return [bundled]
-    if lower.contains("mono") or lower.contains("courier") or lower.contains("code") or lower.contains("console"):
-        return browser_mono_font_candidates()
-    # `system-ui` / `-apple-system` / `ui-sans-serif` are the UI SANS stack, not
-    # a serif one; they sat in the serif branch only because that branch tested
-    # `contains("system")`. A page whose whole stack is `system-ui` therefore
-    # measured against Noto Serif. Tested before the serif branch, and the serif
-    # branch no longer claims "system".
-    if lower.contains("sans") or lower.contains("arial") or lower.contains("helvetica") or lower.contains("system"):
-        return browser_sans_font_candidates()
-    if lower.contains("serif") or lower.contains("times") or lower.contains("georgia"):
-        return browser_serif_font_candidates()
-    # Unspecified / unmatched family default: bundled Noto Sans Mono.
-    browser_mono_font_candidates()
+        # An explicit face first, then the stack of the page's own list (serif
+        # when it names nothing served — on every host, as before).
+        return [face_source] + _browser_category_font_candidates(resolved.category_strict)
+    if resolved.bundled != "":
+        return [resolved.bundled]
+    if resolved.face != "":
+        return [resolved.face] + _browser_category_font_candidates(resolved.category)
+    if resolved.category == "":
+        # No name served. Chrome's default face is the serif one
+        # (`font-family: NoSuchFont` measures 147.69, Liberation Serif), so the
+        # per-name path answers serif; the legacy path keeps its mono default.
+        return _browser_category_font_candidates(resolved.default_category)
+    _browser_category_font_candidates(resolved.category)
 
+# The bundled asset serving this list, or "": the first SERVED name of the
+# list is a bundled family. (`Arial, Bungee` is Arial; `NoSuch, Bungee` is
+# Bungee.) A decorated `@font-face` value is never a bundled family.
 fn browser_bundled_font_path_for_family(family: text) -> text:
-    # Break the split/index/trim chain into typed intermediates: the seed
-    # compiler cannot resolve `.split(...)` when the whole chain sits in a
-    # nested call-argument position (erased-receiver method-resolution gap,
-    # see bug web_font_provider_split_nested_call_resolution_2026-07-14).
-    val families = family.split(",")
-    val first = if families.len() > 0: families[0].trim() else: family.trim()
-    val wanted = _strip_font_url_quotes(first).to_lower()
-    for asset in selected_font_asset_candidates():
-        if asset.family.to_lower() == wanted:
-            return selected_font_asset_physical_path(asset.local_path)
-    ""
+    if family.starts_with("__simple_font_face__|"):
+        return ""
+    browser_resolve_font_family(family).bundled
 
 fn browser_font_face_family_value(family: text, source_url: text) -> text:
     val source = browser_font_face_local_source_path(source_url)
@@ -223,7 +502,7 @@ fn browser_font_face_source_from_family_value(family: text) -> text:
     val prefix = "__simple_font_face__|"
     if not family.starts_with(prefix):
         return ""
-    val rest = family.slice(prefix.len(), family.byte_len())
+    val rest = family.slice(prefix.byte_len(), family.byte_len())
     val pipe = rest.index_of("|")
     if pipe < 0:
         return ""
@@ -371,11 +650,11 @@ fn _browser_font_face_urls_in_block(block: text) -> [text]:
     urls
 
 fn _strip_font_url_quotes(raw: text) -> text:
-    if raw.len() >= 2:
+    if raw.byte_len() >= 2:
         val first = raw.substring(0, 1)
         val last = raw.substring(raw.byte_len() - 1, raw.byte_len())
         if (first == "\"" and last == "\"") or (first == "'" and last == "'"):
-            return raw.substring(1, raw.len() - 1)
+            return raw.substring(1, raw.byte_len() - 1)
     raw
 
 fn _browser_font_source_is_remote(source_url: text) -> bool:
@@ -425,11 +704,13 @@ fn _browser_font_source_extension(source_url: text) -> text:
 fn browser_family_has_host_face(family: text) -> bool:
     if browser_font_face_source_from_family_value(family) != "":
         return true
-    if browser_bundled_font_path_for_family(family) != "":
+    val resolved = browser_resolve_font_family(family)
+    if resolved.bundled != "":
         return false
-    val lower = family.to_lower()
-    if lower.contains("mono") or lower.contains("courier") or lower.contains("code") or lower.contains("console"):
+    if resolved.face != "":
+        return true
+    if resolved.category == "mono":
         return browser_platform_mono_faces().len() > 0
-    if lower.contains("sans") or lower.contains("arial") or lower.contains("helvetica") or lower.contains("system"):
+    if resolved.category == "sans":
         return browser_platform_sans_faces().len() > 0
     false

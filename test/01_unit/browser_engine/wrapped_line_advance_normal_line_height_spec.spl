@@ -1,0 +1,51 @@
+"""
+## Purpose and audience
+Purpose: Pin the line advance Chrome uses for wrapped text under
+`line-height: normal`. Expected to FAIL until wrapped lines advance by the
+face's normal line height instead of the font size.
+Audience: browser-engine layout maintainers.
+
+Chrome oracle (Chrome 159.0.8154.6, Linux, device scale 1):
+  160x120 screenshot of the famous-site corpus page below: the fifth wrapped
+  line ("fixture") has ink at rows 82-93, so pixel (32,93) is 0xFF000000.
+  Simple paints that line at rows 74-85 and (32,93) is 0xFFFFFFFF.
+  getBoundingClientRect of the same text in an auto-height 120px block:
+    sans-serif / Arial   5 lines   120x90   (Simple: 120x80)
+    serif                4 lines   120x72   (Simple: 120x64)
+  i.e. 18px per line in Chrome, 16px (the font size) in Simple.
+
+The pixel probe was part of "paints famous-site corpus block geometry with
+Chrome default body margin" in
+test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_renderer_spec.spl,
+where ff2dc6ed375 had pinned it to white ("no text painted").
+"""
+# @tag:in-development
+# Tracks: doc/08_tracking/bug/web_wrapped_line_advance_16px_vs_chrome_18px_2026-11-14.md
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_foundation.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_html_to_pixels}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id
+}
+
+val CORPUS_TEXT: text = "Twitch commerce deterministic compatibility fixture"
+
+fn _block_height(family: text) -> text:
+    val html = (
+        "<html><body><div id='probe' style='width:120px;font-family:" + family + "'>" +
+        CORPUS_TEXT + "</div></body></html>"
+    )
+    simple_web_layout_debug_layout_by_id(html, 800, 900, "probe", "h")
+
+describe "wrapped line advance under line-height: normal":
+    it "paints the fifth corpus line where Chrome does":
+        val html = "<html><body><div data-font-corpus=\"known-site-fonts\" style='width: 120px; height: 40px; background-color: #7c3aed; font-family: \"IBM Plex Sans\", Arial, sans-serif'>" + CORPUS_TEXT + "</div></body></html>"
+        val pixels = simple_web_render_html_to_pixels(html, 160, 120)
+        expect(pixels.len()).to_equal(160 * 120)
+        expect(pixels[32 + 93 * 160]).to_equal(0xFF000000u32)
+
+    it "advances wrapped sans lines by 18px":
+        expect(_block_height("sans-serif")).to_equal("90")
+
+    it "advances wrapped serif lines by 18px":
+        expect(_block_height("serif")).to_equal("72")

@@ -136,3 +136,27 @@ default seed `run` (JIT) still prints `ret=0` / `list=3` on a miss. That is the 
 seed's own JIT, not this MIR lowering.
 
 Still pending: a Stage 2 native run that shows the abort.
+
+## Native RED on the pre-fix run-15 Stage 2 (2026-11-14)
+
+Binary: `simple-bootstrap/build/bootstrap-opus-15/stage2/aarch64-unknown-linux-gnu/simple`
+(mtime 2026-11-07 10:01 KST, `source_snapshot_sha256=01f2a519...` in its
+`bootstrap-preflight.env`; the u-optsink lane started 2026-11-07T06:57Z =
+15:57 KST, so this binary predates 330262efe86). Command:
+`SIMPLE_PROJECT_ROOT=<repo> SIMPLE_BOOTSTRAP=1 SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1 native-build f.spl -o f.bin`,
+`w = [10, 20]`, calls with i=1 then i=5:
+
+| fixture | native (run-15) | expected after the fix |
+|---|---|---|
+| `fn ret_typed(w: [i64], i: i64) -> i64: return w.get(i)` | `hit=20`, **`miss=3`**, rc 0 | `hit=20`, then abort `.unwrap() called on None` |
+| `fn tail_list(w: list, i: i64) -> i64: val x = w.get(i); x` | `hit=212553838455681`, `miss=212553838460065` | `hit=20`, then abort |
+
+The `list` row shows the predecessor bug
+(`native_list_any_get_i64_sink_returns_option_handle_2026-11-07`, also fixed
+after run-15), recorded as observed. Both `return` and tail sinks raise in the
+interpreter (table above), so the native trap matches it.
+
+**GREEN still pending.** A Stage 2 rebuild from release/1.0.0 was not run: the
+host had 6.3 GB disk and 27 GB RAM available (thresholds 20 GB / 30 GB). Still
+required: rebuild Stage 2, then the two fixtures above must print `hit=20` and
+then abort on the miss.

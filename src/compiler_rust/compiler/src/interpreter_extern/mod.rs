@@ -1773,6 +1773,10 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_http_get", network::rt_http_get);
     insert_simple!("rt_io_tcp_accept", interpreter_native_net::rt_io_tcp_accept_interp);
     insert_simple!(
+        "rt_tls_server_upgrade_tcp",
+        interpreter_native_net::rt_tls_server_upgrade_tcp_interp
+    );
+    insert_simple!(
         "rt_io_tcp_accept_timeout",
         interpreter_native_net::rt_io_tcp_accept_timeout_interp
     );

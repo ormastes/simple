@@ -67,10 +67,11 @@ class CssVarResolutionState:
         var probe_line_len: i64 = -1
         var probe_colon_io: i64 = -1
         var probe_colon_ff: i64 = -1
-        while pos < props.len() and guard < names.len():  # cpu-lane-loop-ok: walks the collected :root custom-property lines (one per newline), bounded by the 200-entry prop_names table; runs once per style invalidation inside extract_css, not per paint frame
+        val props_blen = props.byte_len()
+        while pos < props_blen and guard < names.len():  # cpu-lane-loop-ok: walks the collected :root custom-property lines (one per newline), bounded by the 200-entry prop_names table; runs once per style invalidation inside extract_css, not per paint frame
             guard = guard + 1
             val nl = find_from(props, "\n", pos)
-            val line_end = if nl < 0: props.len() else: nl
+            val line_end = if nl < 0: props_blen else: nl
             val line_raw = props.substring(pos, line_end)
             val line = line_raw.trim()
             # `index_of` is NOT usable here: in the baremetal/native lane it
@@ -84,16 +85,16 @@ class CssVarResolutionState:
             val colon = find_from(line, ":", 0)
             if guard == 1:
                 probe_raw_len = line_raw.len()
-                probe_line_len = line.len()
+                probe_line_len = line.byte_len()
                 probe_colon_io = line.index_of(":")
                 probe_colon_ff = colon
             if colon > 0:
                 names[prop_count] = line.substring(0, colon).trim()
                 values[prop_count] = line.substring(
-                    colon + 1, line.len()
+                    colon + 1, line.byte_len()
                 ).trim()
                 prop_count = prop_count + 1
-            pos = if nl < 0: props.len() else: nl + 1
+            pos = if nl < 0: props_blen else: nl + 1
         # STAGE 3 of the `props=0` chain, and the only stage that had never been
         # instrumented. `prop_count` is set solely inside `if colon > 0` above,
         # and the walk is bounded by `guard < names.len()` -- the `200` literal
@@ -111,7 +112,7 @@ class CssVarResolutionState:
         # never fires. The `raw_len`/`line_len`/`colon_index_of`/`colon_find_from`
         # fields exist to name which primitive is responsible.
         if props.len() > 0 and (prop_count == 0 or guard >= names.len()) and _web_style_trace_enabled():
-            print "[web-style-producer] css-props-stage3 props_len={props.len()} names_cap={names.len()} guard={guard} prop_count={prop_count} raw_len={probe_raw_len} line_len={probe_line_len} colon_index_of={probe_colon_io} colon_find_from={probe_colon_ff}"
+            print "[web-style-producer] css-props-stage3 props_len={props_blen} names_cap={names.len()} guard={guard} prop_count={prop_count} raw_len={probe_raw_len} line_len={probe_line_len} colon_index_of={probe_colon_io} colon_find_from={probe_colon_ff}"
         CssVarResolutionState(
             remaining: CSS_VAR_SUBSTITUTION_BUDGET,
             active_names: [""; 33],

@@ -23,8 +23,13 @@
 #define RAW_READ(b, n) read(0, (b), (n))
 #endif
 #ifndef FN_INC
-#define FN_INC "fn.inc"
-#endif
+/* Not runnable without the owner bodies extracted into fn.inc and piped
+ * stdin (header recipe). Exit 64 = needs its owning harness; never a pass. */
+int main(void) {
+    fputs("rt_stdin_read_char_raw_selfcheck: needs -DFN_INC=<extracted fn.inc> and piped stdin\n", stderr);
+    return 64;
+}
+#else
 
 static char g_last[64];
 static int64_t g_len;
@@ -59,3 +64,4 @@ int main(void) {
     puts("PASS");
     return 0;
 }
+#endif /* FN_INC */

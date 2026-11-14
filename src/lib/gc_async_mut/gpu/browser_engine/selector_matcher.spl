@@ -2,19 +2,21 @@
 #
 # Provides :not() selector matching used by fallback pixel path rendering.
 
+use std.gc_async_mut.gpu.browser_engine.css_nth.{css_nth_matches}
+
 fn _sel_attr_value(tag: text, attr: text) -> text:
     val key_dq = attr + "=\""
     val key_sq = attr + "='"
     val lo = tag.lower()
     val idx_dq = lo.index_of(key_dq)
     if idx_dq >= 0:
-        val after = tag.substring(idx_dq + key_dq.len(), tag.byte_len())
+        val after = tag.substring(idx_dq + key_dq.byte_len(), tag.byte_len())
         val close = after.index_of("\"")
         if close >= 0:
             return after.substring(0, close)
     val idx_sq = lo.index_of(key_sq)
     if idx_sq >= 0:
-        val after = tag.substring(idx_sq + key_sq.len(), tag.byte_len())
+        val after = tag.substring(idx_sq + key_sq.byte_len(), tag.byte_len())
         val close = after.index_of("'")
         if close >= 0:
             return after.substring(0, close)
@@ -72,7 +74,7 @@ pub fn br_selector_list_contains_not_self(selector: text, tag_name: text, tag: t
     val start = selector.index_of(marker)
     if start < 0:
         return false
-    val after = selector.substring(start + marker.len(), selector.byte_len())
+    val after = selector.substring(start + marker.byte_len(), selector.byte_len())
     val close = after.index_of(")")
     if close < 0:
         return false
@@ -103,7 +105,7 @@ fn _sel_name_char(ch: text) -> bool:
 # keeps every legitimate hit (".card", ".card:hover", ".card.primary",
 # "div.card", ".card p") and drops only the name-extension false positives.
 fn br_selector_list_contains_simple(selector: text, tag_name: text, tag: text) -> bool:
-    val want_len = tag_name.len()
+    val want_len = tag_name.byte_len()
     if want_len == 0:
         return false
     val sel_len = selector.byte_len()
@@ -128,17 +130,108 @@ fn br_selector_list_contains_attr_self(selector: text, tag_name: text, tag: text
 fn br_selector_list_contains_empty_self(selector: text, tag_name: text, tag: text) -> bool:
     selector.contains(":empty")
 
+# Does the compound selector that carries a pseudo-class (the text between
+# the previous combinator and the `:`) describe this element? Checks the type
+# selector, every `.class` and the `#id`; attribute parts are not evaluated.
+fn _sel_compound_matches_element(compound: text, tag_name: text, tag: text) -> bool:
+    val c = compound.trim()
+    var i = 0
+    val n = c.byte_len()
+    while i < n and _sel_name_char(c.substring(i, i + 1)):
+        i = i + 1
+    val type_name = c.substring(0, i).lower()
+    if type_name != "" and type_name != tag_name.lower():
+        return false
+    if type_name == "" and i < n and c.substring(i, i + 1) == "*":
+        i = i + 1
+    val classes = " " + _sel_attr_value(tag, "class").replace("\t", " ").replace("\n", " ") + " "
+    val id_value = _sel_attr_value(tag, "id")
+    while i < n:
+        val mark = c.substring(i, i + 1)
+        if mark != "." and mark != "#":
+            return true
+        var j = i + 1
+        while j < n and _sel_name_char(c.substring(j, j + 1)):
+            j = j + 1
+        val name = c.substring(i + 1, j)
+        if mark == "." and not classes.contains(" " + name + " "):
+            return false
+        if mark == "#" and id_value != name:
+            return false
+        i = j
+    true
+
+fn _sel_is_combinator_or_space(ch: text) -> bool:
+    ch == " " or ch == ">" or ch == "+" or ch == "~" or ch == "," or ch == "\t" or ch == "\n" or ch == "\r"
+
+# Is the text after a pseudo-class, up to the end of its selector, still the
+# same compound? `div:nth-child(1) p` continues with another compound, so the
+# pseudo-class belongs to an ancestor and must not style the div.
+fn _sel_rest_is_same_compound(rest: text) -> bool:
+    val comma = rest.index_of(",")
+    val raw = if comma >= 0: rest.substring(0, comma) else: rest
+    val tail = raw.trim()
+    if tail == "":
+        return true
+    # Anything after leading whitespace is a descendant; otherwise the rest
+    # (more pseudo-classes, attribute parts) must not contain a combinator.
+    if _sel_is_combinator_or_space(raw.substring(0, 1)):
+        return false
+    not (
+        tail.contains(" ") or tail.contains(">") or tail.contains("+") or
+        tail.contains("~") or tail.contains("\t") or tail.contains("\n")
+    )
+
+# True when one selector of the rule's selector list has `marker` on its
+# SUBJECT compound and that compound describes this element. For the
+# functional marker `:nth-child(` the An+B argument must also select 1-based
+# element-sibling index `nth` (shared evaluator, css_nth.spl). This used to be
+# a bare `selector.contains(marker)`, which applied `p:nth-child(2)` and
+# `div:first-child p` to every div.
+fn _sel_list_subject_pseudo(selector: text, marker: text, tag_name: text, tag: text, nth: i64) -> bool:
+    val functional = marker.ends_with("(")
+    var from = 0
+    val total = selector.byte_len()
+    while from < total:
+        val hit = selector.substring(from, total).index_of(marker)
+        if hit < 0:
+            return false
+        val at = from + hit
+        var end = at + marker.byte_len()
+        var arg_ok = true
+        if functional:
+            val after = selector.substring(end, total)
+            val close = after.index_of(")")
+            if close < 0:
+                return false
+            arg_ok = css_nth_matches(after.substring(0, close), nth)
+            end = end + close + 1
+        elif end < total and _sel_name_char(selector.substring(end, end + 1)):
+            arg_ok = false
+        var start = at
+        while start > 0 and not _sel_is_combinator_or_space(selector.substring(start - 1, start)):
+            start = start - 1
+        if (
+            arg_ok and _sel_rest_is_same_compound(selector.substring(end, total)) and
+            _sel_compound_matches_element(selector.substring(start, at), tag_name, tag)
+        ):
+            return true
+        from = end
+    false
+
 fn br_selector_list_contains_first_child_self(selector: text, tag_name: text, tag: text) -> bool:
-    selector.contains(":first-child")
+    _sel_list_subject_pseudo(selector, ":first-child", tag_name, tag, 0)
 
 fn br_selector_list_contains_last_child_self(selector: text, tag_name: text, tag: text) -> bool:
-    selector.contains(":last-child")
+    _sel_list_subject_pseudo(selector, ":last-child", tag_name, tag, 0)
 
 fn br_selector_list_contains_only_child_self(selector: text, tag_name: text, tag: text) -> bool:
-    selector.contains(":only-child")
+    _sel_list_subject_pseudo(selector, ":only-child", tag_name, tag, 0)
 
 fn br_selector_list_contains_nth_child_self(selector: text, tag_name: text, tag: text, nth: i64) -> bool:
-    selector.contains(":nth-child")
+    if nth <= 0:
+        return false
+    _sel_list_subject_pseudo(selector, ":nth-child(", tag_name, tag, nth)
 
 fn br_selector_list_contains_multi_class(selector: text, classes: [text]) -> bool:
     for cls in classes:

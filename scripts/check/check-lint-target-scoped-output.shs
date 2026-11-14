@@ -1,0 +1,142 @@
+#!/bin/sh
+# Fail-closed check: `lint <target>` reports only diagnostics about <target>.
+#
+# Runs the real linter (through scripts/check/lint-cached.shs, cache bypassed)
+# on a generated fixture that carries one known finding (REQC004) and asserts:
+#   1. every stdout finding line names the fixture, and the finding count
+#      equals the "Found <e> error(s), <w> warning(s)" summary;
+#   2. the default (scoped) run prints none of the seed loader's closure hints
+#      ('export use *', W-STR-BRACE-001, [gc-warning]) on stderr;
+#   3. SIMPLE_LINT_CLOSURE_DIAGNOSTICS=1 restores them (non-vacuity of 2);
+#   4. --json: every stdout line before the wrapper verdict is one JSON object
+#      naming the fixture.
+#
+# Where the remaining stderr comes from (measured 2026-11-14, release/1.0.0,
+# Rust seed bin/simple.exe). All of it is printed while the seed loads the
+# LINTER'S OWN import closure, eagerly, before lint_entry.spl's main runs;
+# setting an env var from main was tried and changes nothing (389 -> 389).
+#   gated by SIMPLE_NO_DEPRECATED_WARNINGS (set by lint-cached.shs):
+#     parser hints  pipeline/module_loader.rs display_parser_hints
+#                   ("Avoid 'export use *'", stmt_parsing/module_system.rs;
+#                   W-STR-BRACE-001, lexer/strings.rs)
+#     [gc-warning]  interpreter_module/module_loader.rs enforce_gc_boundary_policy
+#   NOT gated (need a seed change; suggested: suppress closure-load diagnostics
+#   when exec_core.rs source_is_lint_entry() matches, unless asked for):
+#     [visibility-warning]  interpreter_module/module_loader.rs check_private_use_names
+#                           (baselined pairs in scripts/check/private_import_baseline.txt)
+#     co-compiled summaries pipeline/module_loader.rs render_same_signature_summary /
+#                           differing-signature warning (SIMPLE_DIAG_SAME_SIGNATURE_COLLISION
+#                           only adds detail, never silences)
+#     [engine-demotion]     common/src/engine_receipt.rs record_demotion (by design unsilenceable)
+#     seed banner           driver/src/seed_warning.rs (SIMPLE_RUST_SEED_WARNING=0; left on:
+#                           it is a true statement about the tool, not a closure diagnostic)
+#
+# Usage: sh scripts/check/check-lint-target-scoped-output.shs [--selftest]
+# Verdict (last stdout line): PASS — ... exit 0 | FAIL — ... exit 1 | ERROR — nothing was checked exit 2
+case "$0" in */*) . "${0%/*}/../lib/recursion_guard.shs" ;; *) . ./scripts/lib/recursion_guard.shs ;; esac
+set -u
+
+repo_root="$(cd "$(dirname "$0")/../.." && pwd)"
+wrapper="$repo_root/scripts/check/lint-cached.shs"
+closure_re="Avoid 'export use \*'|W-STR-BRACE-001|\[gc-warning\]"
+
+# check_text_findings <stdout-file> <target-basename> -> prints reason, rc 0 ok / 1 bad
+check_text_findings() {
+    out="$1"; target="$2"
+    findings="$(grep -E ':[0-9]+:[0-9]+: (warning|error)\[' "$out")"
+    n="$(printf '%s\n' "$findings" | grep -c . )"
+    if [ "$n" -eq 0 ]; then echo "no finding lines"; return 1; fi
+    foreign="$(printf '%s\n' "$findings" | grep -v -F "$target" | head -1)"
+    if [ -n "$foreign" ]; then echo "finding about a non-target file: $foreign"; return 1; fi
+    summary="$(grep -E '^Found [0-9]+ error\(s\), [0-9]+ warning\(s\)' "$out" | head -1)"
+    if [ -z "$summary" ]; then echo "no summary line"; return 1; fi
+    e="$(printf '%s' "$summary" | sed -E 's/^Found ([0-9]+) error.*/\1/')"
+    w="$(printf '%s' "$summary" | sed -E 's/^Found [0-9]+ error\(s\), ([0-9]+) warning.*/\1/')"
+    if [ $((e + w)) -ne "$n" ]; then echo "summary says $((e + w)) finding(s), body has $n"; return 1; fi
+    echo "$n finding(s), all on $target, summary agrees"
+    return 0
+}
+
+# check_json_lines <stdout-file> <target-basename>
+check_json_lines() {
+    out="$1"; target="$2"
+    body="$(grep -v -E '^(PASS|FAIL|ERROR) — ' "$out" | grep -v '^[[:space:]]*$')"
+    n="$(printf '%s\n' "$body" | grep -c .)"
+    if [ "$n" -eq 0 ]; then echo "no json lines"; return 1; fi
+    bad="$(printf '%s\n' "$body" | grep -v -E '^\{.*\}[[:space:]]*$' | head -1)"
+    if [ -n "$bad" ]; then echo "non-JSON stdout line: $bad"; return 1; fi
+    foreign="$(printf '%s\n' "$body" | grep '"file":' | grep -v -F "$target" | head -1)"
+    if [ -n "$foreign" ]; then echo "json diagnostic about a non-target file: $foreign"; return 1; fi
+    echo "$n json line(s), all objects"
+    return 0
+}
+
+selftest() {
+    st="$(mktemp -d)"
+    printf 'a/t.spl:8:0: warning[REQC004]: x\n\nFound 0 error(s), 1 warning(s), 0 auto-fix(es) available\n' > "$st/good"
+    printf 'a/t.spl:8:0: warning[REQC004]: x\nsrc/lib/o.spl:3:0: warning[W0406]: y\nFound 0 error(s), 2 warning(s)\n' > "$st/foreign"
+    printf 'a/t.spl:8:0: warning[REQC004]: x\nFound 0 error(s), 2 warning(s)\n' > "$st/mismatch"
+    printf '{"file":"a/t.spl","code":"REQC004"}\nPASS — 1 file(s) checked\n' > "$st/jgood"
+    printf '{"file":"a/t.spl"}\nwarning: noise\n' > "$st/jbad"
+    rc=0
+    check_text_findings "$st/good" t.spl >/dev/null || { echo "selftest: good text rejected"; rc=1; }
+    check_text_findings "$st/foreign" t.spl >/dev/null && { echo "selftest: foreign finding accepted"; rc=1; }
+    check_text_findings "$st/mismatch" t.spl >/dev/null && { echo "selftest: summary mismatch accepted"; rc=1; }
+    check_json_lines "$st/jgood" t.spl >/dev/null || { echo "selftest: good json rejected"; rc=1; }
+    check_json_lines "$st/jbad" t.spl >/dev/null && { echo "selftest: polluted json accepted"; rc=1; }
+    rm -rf "$st"
+    return $rc
+}
+
+if ! selftest; then
+    echo "ERROR — nothing was checked (selftest failed)"
+    exit 2
+fi
+if [ "${1:-}" = "--selftest" ]; then
+    echo "PASS — selftest: 5 fixture(s) classified correctly"
+    exit 0
+fi
+if [ ! -f "$wrapper" ]; then
+    echo "ERROR — nothing was checked (missing $wrapper)"
+    exit 2
+fi
+
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+fixture="$work/scope_fixture.spl"
+printf 'enum Color:\n    Red\n    Green\n\nfn name_bare(c: Color) -> text:\n    match c:\n        case Color.Red: "red"\n        case _: "other"\n' > "$fixture"
+
+run() { # run <tag> [env...] -- lint args...
+    tag="$1"; shift
+    env "$@" > "$work/$tag.out" 2> "$work/$tag.err"
+    echo $?
+}
+
+unset SIMPLE_NO_DEPRECATED_WARNINGS
+rc_s="$(run scoped SIMPLE_LINT_CACHE=0 sh "$wrapper" "$fixture")"
+rc_c="$(run closure SIMPLE_LINT_CACHE=0 SIMPLE_LINT_CLOSURE_DIAGNOSTICS=1 sh "$wrapper" "$fixture")"
+rc_j="$(run json SIMPLE_LINT_CACHE=0 sh "$wrapper" --json "$fixture")"
+
+if ! grep -q 'REQC004' "$work/scoped.out"; then
+    echo "ERROR — nothing was checked (linter did not run: rc=$rc_s, no REQC004 in stdout; stderr tail: $(tail -1 "$work/scoped.err"))"
+    exit 2
+fi
+
+fails=""
+msg="$(check_text_findings "$work/scoped.out" scope_fixture.spl)" || fails="$fails; text: $msg"
+text_msg="$msg"
+leak="$(grep -c -E "$closure_re" "$work/scoped.err")"
+[ "$leak" -eq 0 ] || fails="$fails; scoped stderr still has $leak closure hint line(s)"
+restored="$(grep -c -E "$closure_re" "$work/closure.err")"
+[ "$restored" -gt 0 ] || fails="$fails; SIMPLE_LINT_CLOSURE_DIAGNOSTICS=1 did not restore closure hints"
+cmp -s "$work/scoped.out" "$work/closure.out" || fails="$fails; stdout differs between scoped and closure modes"
+jmsg="$(check_json_lines "$work/json.out" scope_fixture.spl)" || fails="$fails; json: $jmsg"
+
+s_err="$(wc -l < "$work/scoped.err" | tr -d ' ')"
+c_err="$(wc -l < "$work/closure.err" | tr -d ' ')"
+if [ -n "$fails" ]; then
+    echo "FAIL — 3 lint run(s) checked${fails}"
+    exit 1
+fi
+echo "PASS — 3 lint run(s) checked: $text_msg; $jmsg; stderr $s_err line(s) scoped vs $c_err with closure diagnostics ($restored closure hint line(s) restored)"
+exit 0

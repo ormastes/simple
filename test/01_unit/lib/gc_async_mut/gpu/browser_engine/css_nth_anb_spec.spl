@@ -1,0 +1,143 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-BROWSER_ENGINE
+# @cover src/lib/gc_async_mut/gpu/browser_engine/css_nth.spl 1%
+# @tag: unit, browser_engine, css, selectors
+#
+# The shared An+B evaluator. Oracle: Chrome 159.0.8154.6 (headless shell,
+# --dump-dom), six element children, `#box > :nth-child(ARG) {width:50px}`
+# over a 200px default, matched set read back with getComputedStyle:
+#
+# | ARG          | Chrome matches (1-based) |
+# |--------------|--------------------------|
+# | -n+3         | 1 2 3                    |
+# | 2n+1         | 1 3 5                    |
+# | ODD          | 1 3 5                    |
+# | even         | 2 4 6                    |
+# | 3            | 3                        |
+# | +3           | 3                        |
+# | n+4          | 4 5 6                    |
+# | -2n+5        | 1 3 5                    |
+# | 0n+2         | 2                        |
+# | 2n           | 2 4 6                    |
+# | " 2n + 1 "   | 1 3 5                    |
+# | "\t2n\n+ 1"  | 1 3 5                    |
+# | n            | 1 2 3 4 5 6              |
+# | -n           | (none)                   |
+# | -n+0         | (none)                   |
+# | 3n-1         | 2 5                      |
+# | 2N+1         | 1 3 5                    |
+# | 1 2          | (none, invalid)          |
+# | 2n+          | (none, invalid)          |
+
+use std.spec.{describe, context, it, expect}
+use std.gc_async_mut.gpu.browser_engine.css_nth.{
+    CssNth, css_nth_parse, css_nth_index_matches, css_nth_matches
+}
+
+fn _set(arg: text) -> text:
+    var out = ""
+    var i = 1
+    while i <= 6:
+        if css_nth_matches(arg, i):
+            out = out + "{i} "
+        i = i + 1
+    out.trim()
+
+describe "CSS An+B evaluator":
+
+    context "Chrome 159 matched sets over six siblings":
+
+        it "matches a descending range for negative A":
+            expect(_set("-n+3")).to_equal("1 2 3")
+            expect(_set("-2n+5")).to_equal("1 3 5")
+
+        it "matches nothing for -n and -n+0":
+            expect(_set("-n")).to_equal("")
+            expect(_set("-n+0")).to_equal("")
+
+        it "matches odd and even in any letter case":
+            expect(_set("ODD")).to_equal("1 3 5")
+            expect(_set("odd")).to_equal("1 3 5")
+            expect(_set("even")).to_equal("2 4 6")
+            expect(_set("Even")).to_equal("2 4 6")
+
+        it "matches a plain and a signed integer":
+            expect(_set("3")).to_equal("3")
+            expect(_set("+3")).to_equal("3")
+
+        it "matches An+B with positive, zero and negative offsets":
+            expect(_set("2n+1")).to_equal("1 3 5")
+            expect(_set("n+4")).to_equal("4 5 6")
+            expect(_set("0n+2")).to_equal("2")
+            expect(_set("2n")).to_equal("2 4 6")
+            expect(_set("n")).to_equal("1 2 3 4 5 6")
+            expect(_set("3n-1")).to_equal("2 5")
+            expect(_set("2N+1")).to_equal("1 3 5")
+
+        it "allows whitespace around the argument and around the sign after n":
+            expect(_set(" 2n + 1 ")).to_equal("1 3 5")
+            expect(_set("\t2n\n+ 1")).to_equal("1 3 5")
+
+        it "rejects invalid arguments instead of guessing":
+            expect(_set("1 2")).to_equal("")
+            expect(_set("2n+")).to_equal("")
+
+    context "grammar details":
+
+        it "reports odd and even as 2n+1 and 2n":
+            expect(css_nth_parse("odd").a).to_equal(2)
+            expect(css_nth_parse("odd").b).to_equal(1)
+            expect(css_nth_parse("even").a).to_equal(2)
+            expect(css_nth_parse("even").b).to_equal(0)
+
+        it "reads the sign of A and of B separately":
+            val p = css_nth_parse("-3n - 2")
+            expect(p.valid).to_equal(true)
+            expect(p.a).to_equal(-3)
+            expect(p.b).to_equal(-2)
+
+        it "rejects whitespace inside A, a detached leading sign and stray text":
+            expect(css_nth_parse("2 n").valid).to_equal(false)
+            expect(css_nth_parse("+ 3").valid).to_equal(false)
+            expect(css_nth_parse("2n 1").valid).to_equal(false)
+            expect(css_nth_parse("").valid).to_equal(false)
+            expect(css_nth_parse("banana").valid).to_equal(false)
+            expect(css_nth_parse("2n+x").valid).to_equal(false)
+            expect(css_nth_parse("n n").valid).to_equal(false)
+
+        it "never matches an index below one":
+            expect(css_nth_index_matches(1, 0, 0)).to_equal(false)
+            expect(css_nth_index_matches(-1, 3, 0)).to_equal(false)
+            expect(css_nth_index_matches(0, 0, 0)).to_equal(false)
+
+    # Chrome 159.0.8154.6, three siblings, `#box > :nth-child(ARG)`:
+    #   -n+1000000000      -> 1 2 3      1000000000        -> (none)
+    #   0n+00000000002     -> 2          000000000001n+1   -> 1 2 3
+    #   -n+2147483647, -n+2147483648, -n+99999999999, n-2147483648,
+    #   2147483647n+1, 4294967297n+1, -2147483648n+2 -> (none), all still
+    #   accepted by CSS.supports("selector(...)");
+    #   n-2147483649, n-99999999999 -> (none) and rejected by CSS.supports.
+    context "large integers (Chrome 159)":
+
+        it "accepts ten-digit values below the 32-bit limit":
+            expect(css_nth_matches("-n+1000000000", 1)).to_equal(true)
+            expect(css_nth_matches("-n+1000000000", 3)).to_equal(true)
+            expect(css_nth_matches("1000000000", 3)).to_equal(false)
+            expect(css_nth_parse("1000000000").valid).to_equal(true)
+
+        it "ignores leading zeros however long the literal":
+            expect(css_nth_matches("0n+00000000002", 2)).to_equal(true)
+            expect(css_nth_matches("0n+00000000002", 1)).to_equal(false)
+            expect(css_nth_matches("000000000001n+1", 3)).to_equal(true)
+
+        it "keeps a saturated A or B valid but matches nothing with it":
+            for arg in ["-n+2147483647", "-n+2147483648", "-n+99999999999", "n-2147483648", "2147483647n+1", "4294967297n+1", "-2147483648n+2"]:
+                expect(css_nth_parse(arg).valid).to_equal(true)
+                expect(css_nth_matches(arg, 1)).to_equal(false)
+                expect(css_nth_matches(arg, 2)).to_equal(false)
+                expect(css_nth_matches(arg, 3)).to_equal(false)
+
+        it "rejects a B below the 32-bit minimum":
+            expect(css_nth_parse("n-2147483649").valid).to_equal(false)
+            expect(css_nth_parse("n-99999999999").valid).to_equal(false)
+

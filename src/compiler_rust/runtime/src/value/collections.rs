@@ -6034,10 +6034,18 @@ pub extern "C" fn rt_string_split_limit(string: RuntimeValue, delimiter: Runtime
             return result;
         }
         if d.is_empty() {
+            // Codepoint units, matching the interpreter's bounded arm
+            // (interpreter_method/string.rs "split"): the first `limit - 1`
+            // characters, then the remainder. Slicing single bytes here
+            // panicked on multibyte text inside this `extern "C"` fn and
+            // aborted the process.
             let mut start = 0usize;
-            while start < s.len() && (start as i64) < limit - 1 {
-                let end = start + 1;
-                rt_array_push(result, rt_string_new(s[start..end].as_ptr(), 1));
+            for (taken, ch) in s.chars().enumerate() {
+                if taken as i64 >= limit - 1 {
+                    break;
+                }
+                let end = start + ch.len_utf8();
+                rt_array_push(result, rt_string_new(s[start..end].as_ptr(), (end - start) as u64));
                 start = end;
             }
             rt_array_push(result, rt_string_new(s[start..].as_ptr(), (s.len() - start) as u64));

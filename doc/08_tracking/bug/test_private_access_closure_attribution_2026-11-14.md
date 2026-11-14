@@ -175,8 +175,9 @@ fail-open, not test refusals, so this change leaves them alone:
 
 - `jit_main_lane_skips_private_import_visibility_2026-11-13` (P2, open). The
   product `fn main` row passes on the default lane.
-- `private_call_gate_skips_import_bound_and_entry_calls_2026-11-14` (P3, open,
-  new). The following pass with rc 0 on both lanes:
+- `private_call_gate_skips_import_bound_and_entry_calls_2026-11-14` (P3, fixed
+  later in its own change; see its own doc). The following passed with rc 0 on
+  both lanes:
   - a src function in another directory calling a private fn reached through a
     glob import (`[dupdispatch] import-bound` path: `gate_private_call` is not
     applied there);

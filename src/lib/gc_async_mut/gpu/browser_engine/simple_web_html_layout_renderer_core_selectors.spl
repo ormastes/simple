@@ -1,18 +1,19 @@
 export use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_core_types.{Rules, CssWrapperKind, CssRuleScan, CSS_SCAN_CANDIDATE_CAP, CSS_VAR_SUBSTITUTION_BUDGET, CSS_SELECTOR_GROUP_CAP, CSS_SELECTOR_PART_CAP, CssVarResolution, CssVarResolutionState, ParsedAttr, ParsedSel, RuleBuckets, sticky_top_inset_value, border_spacing_px, css_cascade_viewport_set, BackgroundShorthand, parse_supported_nonnegative_px, decl_tbl_get_last_valid_nonnegative_px, parse_supported_outline_shorthand_width_px, resolve_writing_mode_decls, normalized_grid_positive_int, grid_matching_paren, grid_top_level_comma, grid_expand_track_functions, normalized_grid_track_list, normalized_grid_placement, normalized_grid_area, normalized_grid_auto_flow, normalized_grid_template_areas, apply_grid_decls, apply_authored_style_metadata, apply_decls_on_writing_mode, apply_decls_without_display_on_writing_mode, apply_decls, FORM_CONTROL_UA_FONT_SIZE_PX, FORM_CONTROL_UA_LINE_HEIGHT_RATIO, tag_defaults, SIMPLE_WEB_STICKY_TOP_AUTO, Style, renderer_default_style, inherit_style_legacy, inherit_style, is_inline_tag, is_heading, is_non_rendered_tag, parse_font_shorthand_number, parse_font_shorthand_size_px, parse_font_shorthand_family, BoxShadowAgg, text_list_prefix, split_top_level_commas, parse_float_to_255, shadow_layer_alpha, shadow_length_prefix, paren_matching_close, BgLayers, parse_background_layers, parse_box_shadow_agg, CssDeclarationPrioritySplit, css_important_marker_start, css_declaration_priority_split, ComputedStyleHot, computed_style_hot_from, simple_web_style_hot_is_display_none, css_math_fn_name, css_math_args, css_math_primary, css_math_implied_max_px, css_math_implied_min_px, WEB_STYLE_CASCADE_MEMO_LIMIT, web_style_cascade_memo_reset, web_style_cascade_memo_hits, web_style_cascade_memo_misses, web_style_cascade_memo_lookup, web_style_cascade_memo_store, CSS_INTEGER_PX_INVALID, CSS_INTEGER_PX_ABS_MAX, CssCornerRadii, WebBoxShadowLayer, WebBoxShadowParseResult, parse_border_radius_shorthand, resolve_authored_border_radii, parse_box_shadow_layers, CSS_PROP_UNKNOWN, CSS_PROP_BOX_SIZING, CSS_PROP_COLOR, CSS_PROP_WIDTH, CSS_PROP_HEIGHT, CSS_PROP_MIN_HEIGHT, CSS_PROP_MARGIN_LEFT, CSS_PROP_Z_INDEX, CSS_PROP_DISPLAY, CSS_PROP_GRID_TEMPLATE_COLUMNS, CSS_PROP_GRID_TEMPLATE_ROWS, CSS_PROP_GRID_COLUMN, CSS_PROP_GRID_ROW, CSS_PROP_BORDER_COLLAPSE, CSS_PROP_JUSTIFY_CONTENT, CSS_PROP_ALIGN_ITEMS, CSS_PROP_GAP, CSS_PROP_FLEX_BASIS, CSS_PROP_TEXT_ALIGN, CSS_PROP_FONT_STYLE, CSS_PROP_CURSOR, CSS_PROP_OUTLINE, CSS_PROP_OVERFLOW, CSS_PROP_BOX_SHADOW, CSS_PROP_PADDING, CSS_PROP_MARGIN, CSS_PROP_BORDER_RADIUS, CSS_PROP_RADIUS_TL, CSS_PROP_RADIUS_TR, CSS_PROP_RADIUS_BR, CSS_PROP_RADIUS_BL, CSS_PROP_RADIUS_SS, CSS_PROP_RADIUS_SE, CSS_PROP_RADIUS_ES, CSS_PROP_RADIUS_EE, css_prop_id, css_prop_mask, css_prop_mask_has, css_prop_mask_has_radius_family, css_probe_reset, css_probe_note, css_probe_count}
 use std.gc_async_mut.gpu.browser_engine.style.supports.{eval_supports_query}
+use std.gc_async_mut.gpu.browser_engine.css_nth.{css_nth_parse, css_nth_index_matches, css_nth_matches}
 use std.nogc_sync_mut.text_layout.font_provider.{browser_font_family_for_weight}
 use std.gc_async_mut.io.mod_stub.{env_get}
 use std.common.ui.ui_frame_clock.{FrameClock}
 use std.nogc_sync_mut.ui.host_frame_clock.{default_frame_clock}
 fn unquote_css_attr_value(raw: text) -> text:
     val v = raw.trim()
-    if v.len() >= 2:
-        val first = v[0:0 + 1]
+    if v.byte_len() >= 2:
+        val first = v.substring(0, 0 + 1)
         # Exact last-byte slice: the quote characters being tested are
         # ASCII; a multi-byte final character simply never matches.
-        val last = v[v.len() - 1:v.len()]
+        val last = v.substring(v.byte_len() - 1, v.byte_len())
         if (first == "\"" and last == "\"") or (first == "'" and last == "'"):
-            return v.substring(1, v.len() - 1)
+            return v.substring(1, v.byte_len() - 1)
     v
 
 fn attr_selector_matches(attrs: text, expr: text) -> bool:
@@ -99,10 +100,10 @@ fn attr_selector_matches(attrs: text, expr: text) -> bool:
     attr_value(attrs, raw).len() > 0 or attr_name_present(attrs, raw)
 
 fn attr_name_present(attrs: text, name: text) -> bool:
-    val name_len = name.len()
+    val name_len = name.byte_len()
     if name_len == 0:
         return false
-    val attrs_len = attrs.len()
+    val attrs_len = attrs.byte_len()
     var pos = 0
     var guard = 0
     while guard < 200:  # cpu-lane-loop-ok: walks occurrences of ONE attribute name inside ONE tag's attribute text via native find_from, capped at 200 probes
@@ -113,13 +114,13 @@ fn attr_name_present(attrs: text, name: text) -> bool:
         val before_ok = if hit == 0:
             true
         else:
-            val b = attrs[hit - 1:hit - 1 + 1]
+            val b = attrs.substring(hit - 1, hit)
             b == " " or b == "\t" or b == "\n" or b == "\r"
         val after = hit + name_len
         val after_ok = if after >= attrs_len:
             true
         else:
-            val a = attrs[after:after + 1]
+            val a = attrs.substring(after, after + 1)
             a == " " or a == "\t" or a == "\n" or a == "\r" or a == "=" or a == "/" or a == ">"
         if before_ok and after_ok:
             return true
@@ -141,10 +142,10 @@ fn base_selector_matches(base: text, tag: text, cls: text, class_words: [text], 
     # universal selector (e.g. the `*, *::before, *::after` margin/padding reset)
     if base == "*":
         return true
-    if base[0:0 + 1] == ".":
+    if base.substring(0, 0 + 1) == ".":
         val want = base.substring(1, base.byte_len())
         return class_has_all(class_words, want)
-    if base[0:0 + 1] == "#":
+    if base.substring(0, 0 + 1) == "#":
         # #id or compound #id.class(.class...)
         val id_dot = find_from(base, ".", 1)
         if id_dot >= 0:
@@ -171,6 +172,17 @@ fn base_selector_matches(base: text, tag: text, cls: text, class_words: [text], 
 
 # Check :not(), :is(), :where() pseudo-class against this element's base properties.
 # Returns true if the selector pseudo condition is satisfied.
+# Does a :not()/:is()/:where() option carry a pseudo-class that needs the
+# node's sibling context (position or emptiness)? Such an option used to be
+# evaluated context-free, where positional pseudo-classes are skipped, so
+# `:not(:nth-child(2))` matched nothing and `:is(:first-child)` everything.
+fn _option_needs_ctx(opt: text) -> bool:
+    (
+        opt.contains(":nth-") or opt.contains(":first-child") or
+        opt.contains(":last-child") or opt.contains(":only-child") or
+        opt.contains(":empty")
+    )
+
 fn _pseudo_list_matches(
     pseudo: text, arg: text, tag: text, cls: text,
     class_words: [text], id: text, attrs: text,
@@ -183,10 +195,10 @@ fn _pseudo_list_matches(
     var opt_count = 0
     var depth = 0
     var i = 0
-    val arg_len = arg.len()
+    val arg_len = arg.byte_len()
     var option_start = 0
     while i < arg_len:  # cpu-lane-loop-ok: splits ONE :not()/:is()/:where() argument on top-level commas; bound is that argument's length
-        val ch = arg[i:i + 1]
+        val ch = arg.substring(i, i + 1)
         if ch == "(":
             depth = depth + 1
             if depth > 32:
@@ -220,8 +232,11 @@ fn _pseudo_list_matches(
         var j = 0
         while j < opt_count:  # cpu-lane-loop-ok: walks the <=16 parsed :not() options, returning false at the first option that matches
             val opt = options[j]
+            # An option with a positional pseudo-class cannot be decided
+            # without the node's sibling context; _list_ctx_matches() decides
+            # it in the context phase. Here it is left undecided (no match).
             if (
-                opt.len() > 0 and simple_match(
+                opt.len() > 0 and not _option_needs_ctx(opt) and simple_match(
                     opt, tag, cls, class_words, id, attrs,
                     recursion_depth
                 )
@@ -234,6 +249,8 @@ fn _pseudo_list_matches(
         var j = 0
         while j < opt_count:  # cpu-lane-loop-ok: walks the <=16 parsed :is()/:where() options, returning true at the first option that matches
             val opt = options[j]
+            if opt.len() > 0 and _option_needs_ctx(opt):
+                return true
             if (
                 opt.len() > 0 and simple_match(
                     opt, tag, cls, class_words, id, attrs,
@@ -299,27 +316,28 @@ fn simple_match(
         return true
     var pseudo_pos = colon
     var pseudo_count = 0
-    while pseudo_pos < sel.len():  # cpu-lane-loop-ok: walks the pseudo-class chain of ONE selector; bound is that selector's length with a hard pseudo_count cap of 32
+    val sel_blen = sel.byte_len()
+    while pseudo_pos < sel_blen:  # cpu-lane-loop-ok: walks the pseudo-class chain of ONE selector; bound is that selector's length with a hard pseudo_count cap of 32
         pseudo_count = pseudo_count + 1
-        if pseudo_count > 32 or sel[pseudo_pos:pseudo_pos + 1] != ":":
+        if pseudo_count > 32 or sel.substring(pseudo_pos, pseudo_pos + 1) != ":":
             return false
         val name_start = pseudo_pos + 1
         var name_end = name_start
         # cpu-lane-loop-ok: scans ONE pseudo-class NAME until `:`, `(` or `[`; bound is that name's length
         while (
-            name_end < sel.len() and sel[name_end:name_end + 1] != ":" and
-            sel[name_end:name_end + 1] != "(" and sel[name_end:name_end + 1] != "["
+            name_end < sel_blen and sel.substring(name_end, name_end + 1) != ":" and
+            sel.substring(name_end, name_end + 1) != "(" and sel.substring(name_end, name_end + 1) != "["
         ):
             name_end = name_end + 1
         val pseudo = sel.substring(name_start, name_end)
         if pseudo.len() == 0:
             return false
         var arg = ""
-        if name_end < sel.len() and sel[name_end:name_end + 1] == "(":
+        if name_end < sel_blen and sel.substring(name_end, name_end + 1) == "(":
             var functional_depth = 1
             var close = name_end + 1
-            while close < sel.len() and functional_depth > 0:  # cpu-lane-loop-ok: matches the closing paren of ONE functional pseudo-class argument; bound is the remaining selector length, paren depth capped at 32
-                val ch = sel[close:close + 1]
+            while close < sel_blen and functional_depth > 0:  # cpu-lane-loop-ok: matches the closing paren of ONE functional pseudo-class argument; bound is the remaining selector length, paren depth capped at 32
+                val ch = sel.substring(close, close + 1)
                 if ch == "(":
                     functional_depth = functional_depth + 1
                     if functional_depth > 32:
@@ -334,8 +352,8 @@ fn simple_match(
         else:
             pseudo_pos = name_end
             if (
-                pseudo == "root" and pseudo_pos < sel.len() and
-                sel[pseudo_pos:pseudo_pos + 1] == "["
+                pseudo == "root" and pseudo_pos < sel_blen and
+                sel.substring(pseudo_pos, pseudo_pos + 1) == "["
             ):
                 val attr_close = find_from(sel, "]", pseudo_pos + 1)
                 if attr_close < 0 or not attr_selector_matches(
@@ -357,7 +375,9 @@ fn simple_match(
         elif (
             pseudo != "empty" and pseudo != "first-child" and
             pseudo != "last-child" and pseudo != "only-child" and
-            pseudo != "nth-child" and pseudo != "has"
+            pseudo != "nth-child" and pseudo != "nth-last-child" and
+            pseudo != "nth-of-type" and pseudo != "nth-last-of-type" and
+            pseudo != "has"
         ):
             return false
     true
@@ -390,11 +410,11 @@ fn _is_interaction_state_pseudo(pseudo: text, attrs: text) -> bool:
     false
 
 fn class_has_all(words: [text], wants: text) -> bool:
-    val wants_len = wants.len()
+    val wants_len = wants.byte_len()
     var start = 0
     var i = 0
     while i <= wants_len:  # cpu-lane-loop-ok: splits a `.a.b.c` compound class selector on `.`; bound is that compound's text length
-        if i == wants_len or wants[i:i + 1] == ".":
+        if i == wants_len or wants.substring(i, i + 1) == ".":
             if i > start:
                 val want = wants.substring(start, i)
                 if not class_words_has(words, want):
@@ -418,28 +438,30 @@ fn _sibling_count(ctx: SelectorContext, idx: i32) -> i32:
         return 1
     ctx.element_sibling_count[idx]
 
-# Evaluate :nth-child(expr) where expr is odd, even, or an+b / n+b / b.
-fn _nth_child_matches(expr: text, pos: i32) -> bool:
-    val e = expr.trim()
-    if e == "odd":
-        return (pos % 2) == 1
-    if e == "even":
-        return (pos % 2) == 0
-    # Check for "an+b" or "n+b" or just "b"
-    val n_idx = text_index_of(e, "n")
-    if n_idx >= 0:
-        val a_str = e.substring(0, n_idx).trim()
-        val a = if a_str == "" or a_str == "+": 1 elif a_str == "-": -1 else: parse_int(a_str)
-        val after_n = e.substring(n_idx + 1, e.byte_len()).trim()
-        val b = if after_n.len() == 0: 0 else: parse_int(after_n)
-        if a == 0:
-            return pos == b
-        val rem = pos - b
-        if rem < 0:
-            return false
-        return (rem % a) == 0
-    # plain number
-    parse_int(e) == pos
+# 1-based position of node[idx] among the element siblings that share its tag
+# (precomputed per parent in build_selector_context).
+fn _type_position(ctx: SelectorContext, idx: i32) -> i32:
+    if idx < 0 or idx >= ctx.type_position.len():
+        return 1
+    ctx.type_position[idx]
+
+# Number of element siblings (including node[idx]) that share its tag.
+fn _type_count(ctx: SelectorContext, idx: i32) -> i32:
+    if idx < 0 or idx >= ctx.type_count.len():
+        return 1
+    ctx.type_count[idx]
+
+# The 1-based index an An+B argument is tested against for each structural
+# pseudo-class: from the start or the end, among all element siblings or only
+# those of the same type.
+fn _nth_index_for(code: i32, nodes: [HNode], ctx: SelectorContext, idx: i32) -> i32:
+    if code == PSEUDO_NTH_LAST_CHILD:
+        return _sibling_count(ctx, idx) - _child_position(ctx, idx) + 1
+    if code == PSEUDO_NTH_OF_TYPE:
+        return _type_position(ctx, idx)
+    if code == PSEUDO_NTH_LAST_OF_TYPE:
+        return _type_count(ctx, idx) - _type_position(ctx, idx) + 1
+    _child_position(ctx, idx)
 
 # Check whether any node that is a child of parent_idx matches simple selector sel_arg.
 fn _has_direct_child_match(nodes: [HNode], ctx: SelectorContext, parent_idx: i32, sel_arg: text) -> bool:
@@ -496,6 +518,31 @@ fn _node_is_empty(ctx: SelectorContext, idx: i32) -> bool:
         return true
     not ctx.has_content_child[idx]
 
+# Context phase of :not()/:is()/:where(): decides the options that need the
+# node's sibling context. Options without a positional pseudo-class were
+# already decided context-free; when no option needs context this is a no-op.
+fn _list_ctx_matches(negate: bool, opts: [text], nodes: [HNode], ctx: SelectorContext, idx: i32) -> bool:
+    val nd = nodes[idx]
+    var any_ctx = false
+    var matched = false
+    var j = 0
+    val opt_count = opts.len()
+    while j < opt_count:  # cpu-lane-loop-ok: walks the <=16 options of ONE :not()/:is()/:where() argument for one node
+        val opt = opts[j]
+        if opt.len() > 0:
+            if _option_needs_ctx(opt):
+                any_ctx = true
+                if simple_match_ctx(opt, nd.tag, nd.class_attr, nd.class_words, nd.id_attr, nd.attrs_raw, nodes, ctx, idx):
+                    matched = true
+            elif not negate and simple_match(opt, nd.tag, nd.class_attr, nd.class_words, nd.id_attr, nd.attrs_raw, 1):
+                matched = true
+        j = j + 1
+    if not any_ctx:
+        return true
+    if negate:
+        return not matched
+    matched
+
 # Full-context pseudo-class check. Called after simple_match() passes the base check.
 # Returns true if all pseudo-class conditions on sel are satisfied given node context.
 fn _pseudo_ctx_matches(sel: text, nodes: [HNode], ctx: SelectorContext, idx: i32) -> bool:
@@ -504,27 +551,28 @@ fn _pseudo_ctx_matches(sel: text, nodes: [HNode], ctx: SelectorContext, idx: i32
         return true
     var pseudo_pos = colon
     var pseudo_count = 0
-    while pseudo_pos < sel.len():  # cpu-lane-loop-ok: walks the pseudo-class chain of ONE selector in the positional-pseudo pass; bound is that selector's length, pseudo_count capped at 32
+    val sel_blen = sel.byte_len()
+    while pseudo_pos < sel_blen:  # cpu-lane-loop-ok: walks the pseudo-class chain of ONE selector in the positional-pseudo pass; bound is that selector's length, pseudo_count capped at 32
         pseudo_count = pseudo_count + 1
-        if pseudo_count > 32 or sel[pseudo_pos:pseudo_pos + 1] != ":":
+        if pseudo_count > 32 or sel.substring(pseudo_pos, pseudo_pos + 1) != ":":
             return false
         val name_start = pseudo_pos + 1
         var name_end = name_start
         # cpu-lane-loop-ok: scans ONE pseudo-class NAME until `:`, `(` or `[`; bound is that name's length
         while (
-            name_end < sel.len() and sel[name_end:name_end + 1] != ":" and
-            sel[name_end:name_end + 1] != "(" and sel[name_end:name_end + 1] != "["
+            name_end < sel_blen and sel.substring(name_end, name_end + 1) != ":" and
+            sel.substring(name_end, name_end + 1) != "(" and sel.substring(name_end, name_end + 1) != "["
         ):
             name_end = name_end + 1
         val pseudo = sel.substring(name_start, name_end)
         if pseudo.len() == 0:
             return false
         var arg = ""
-        if name_end < sel.len() and sel[name_end:name_end + 1] == "(":
+        if name_end < sel_blen and sel.substring(name_end, name_end + 1) == "(":
             var functional_depth = 1
             var close = name_end + 1
-            while close < sel.len() and functional_depth > 0:  # cpu-lane-loop-ok: matches the closing paren of ONE functional pseudo-class argument in the positional pass; paren depth capped at 32
-                val ch = sel[close:close + 1]
+            while close < sel_blen and functional_depth > 0:  # cpu-lane-loop-ok: matches the closing paren of ONE functional pseudo-class argument in the positional pass; paren depth capped at 32
+                val ch = sel.substring(close, close + 1)
                 if ch == "(":
                     functional_depth = functional_depth + 1
                     if functional_depth > 32:
@@ -539,8 +587,8 @@ fn _pseudo_ctx_matches(sel: text, nodes: [HNode], ctx: SelectorContext, idx: i32
         else:
             pseudo_pos = name_end
             if (
-                pseudo == "root" and pseudo_pos < sel.len() and
-                sel[pseudo_pos:pseudo_pos + 1] == "["
+                pseudo == "root" and pseudo_pos < sel_blen and
+                sel.substring(pseudo_pos, pseudo_pos + 1) == "["
             ):
                 val attr_close = find_from(sel, "]", pseudo_pos + 1)
                 if attr_close < 0:
@@ -558,8 +606,14 @@ fn _pseudo_ctx_matches(sel: text, nodes: [HNode], ctx: SelectorContext, idx: i32
         elif pseudo == "only-child":
             if _sibling_count(ctx, idx) != 1:
                 return false
-        elif pseudo == "nth-child":
-            if not _nth_child_matches(arg, _child_position(ctx, idx)):
+        elif (
+            pseudo == "nth-child" or pseudo == "nth-last-child" or
+            pseudo == "nth-of-type" or pseudo == "nth-last-of-type"
+        ):
+            if not css_nth_matches(arg, _nth_index_for(_pseudo_code_for(pseudo), nodes, ctx, idx) as i64):
+                return false
+        elif pseudo == "not" or pseudo == "is" or pseudo == "where":
+            if not _list_ctx_matches(pseudo == "not", _split_pseudo_options(arg), nodes, ctx, idx):
                 return false
         elif pseudo == "has":
             var opts: [text] = [""; 16]
@@ -567,8 +621,8 @@ fn _pseudo_ctx_matches(sel: text, nodes: [HNode], ctx: SelectorContext, idx: i32
             var depth = 0
             var i = 0
             var option_start = 0
-            while i < arg.len():  # cpu-lane-loop-ok: splits ONE :has() argument on top-level commas; bound is that argument's length
-                val ch = arg[i:i + 1]
+            while i < arg.byte_len():  # cpu-lane-loop-ok: splits ONE :has() argument on top-level commas; bound is that argument's length
+                val ch = arg.substring(i, i + 1)
                 if ch == "(":
                     depth = depth + 1
                     if depth > 32:
@@ -633,7 +687,7 @@ fn simple_match_ctx(sel: text, tag: text, cls: text, class_words: [text], id: te
 # `class_has_all`, `[...]` group walking, `^=`/`$=`/`=` probing inside
 # `attr_selector_matches`, the pseudo-class chain walk (twice -- once in
 # `simple_match`, once in `_pseudo_ctx_matches`), the `:not()/:is()/:where()`
-# and `:has()` comma splits, and `_nth_child_matches`' `an+b` parse. All of
+# and `:has()` comma splits, and the shared `css_nth_parse` An+B parse. All of
 # that is node-INDEPENDENT, and the catalog pages run it ~4000x per render.
 #
 # `parse_selector_part` derives the same information ONCE per selector part,
@@ -668,6 +722,9 @@ val PSEUDO_LAST_CHILD: i32 = 8
 val PSEUDO_ONLY_CHILD: i32 = 9
 val PSEUDO_NTH_CHILD: i32 = 10
 val PSEUDO_HAS: i32 = 11
+val PSEUDO_NTH_LAST_CHILD: i32 = 12
+val PSEUDO_NTH_OF_TYPE: i32 = 13
+val PSEUDO_NTH_LAST_OF_TYPE: i32 = 14
 
 # Attribute operators, in the order `attr_selector_matches` probes them.
 val ATTR_OP_PRESENT: i32 = 0     # bare [name]
@@ -689,12 +746,12 @@ fn _dead_parsed_sel() -> ParsedSel:
 # Split a `.a.b.c` compound class list exactly the way class_has_all() does:
 # on `.`, skipping empty segments (so "", ".", "a..b" behave identically).
 fn _split_class_wants(wants: text) -> [text]:
-    val wants_len = wants.len()
+    val wants_len = wants.byte_len()
     var out: [text] = []
     var start = 0
     var i = 0
     while i <= wants_len:  # cpu-lane-loop-ok: splits ONE compound class selector on `.` at parse time (once per selector part, never per node); bound is that compound's text length
-        if i == wants_len or wants[i:i + 1] == ".":
+        if i == wants_len or wants.substring(i, i + 1) == ".":
             if i > start:
                 out.push(wants.substring(start, i))
             start = i + 1
@@ -803,10 +860,10 @@ fn _split_pseudo_options(arg: text) -> [text]:
     var opt_count = 0
     var depth = 0
     var i = 0
-    val arg_len = arg.len()
+    val arg_len = arg.byte_len()
     var option_start = 0
     while i < arg_len:  # cpu-lane-loop-ok: splits ONE functional pseudo argument on top-level commas at parse time (once per selector part); bound is that argument's length
-        val ch = arg[i:i + 1]
+        val ch = arg.substring(i, i + 1)
         if ch == "(":
             depth = depth + 1
             if depth > 32:
@@ -850,6 +907,12 @@ fn _pseudo_code_for(name: text) -> i32:
         return PSEUDO_ONLY_CHILD
     if name == "nth-child":
         return PSEUDO_NTH_CHILD
+    if name == "nth-last-child":
+        return PSEUDO_NTH_LAST_CHILD
+    if name == "nth-of-type":
+        return PSEUDO_NTH_OF_TYPE
+    if name == "nth-last-of-type":
+        return PSEUDO_NTH_LAST_OF_TYPE
     if name == "has":
         return PSEUDO_HAS
     # hover/active/focus/focus-visible/focus-within/visited/target/checked/
@@ -870,35 +933,17 @@ fn _pseudo_code_for(name: text) -> i32:
     # than quietly "fixing" it; see the round 9 metrics record.
     0 - 1
 
-# Pre-decode an `:nth-child()` argument the way _nth_child_matches() reads it.
+# Pre-decode an An+B argument with the shared evaluator (css_nth.spl):
+# [kind, a, b] where kind 2 is a valid argument and -1 an invalid one, which
+# matches nothing.
 fn _parse_nth(expr: text) -> [i32]:
-    val e = expr.trim()
-    if e == "odd":
-        return [0, 0, 0]
-    if e == "even":
-        return [1, 0, 0]
-    val n_idx = text_index_of(e, "n")
-    if n_idx >= 0:
-        val a_str = e.substring(0, n_idx).trim()
-        val a = if a_str == "" or a_str == "+": 1 elif a_str == "-": 0 - 1 else: parse_int(a_str)
-        val after_n = e.substring(n_idx + 1, e.byte_len()).trim()
-        val b = if after_n.len() == 0: 0 else: parse_int(after_n)
-        return [2, a, b]
-    [3, 0, parse_int(e)]
+    val parsed = css_nth_parse(expr)
+    if not parsed.valid:
+        return [0 - 1, 0, 0]
+    [2, parsed.a as i32, parsed.b as i32]
 
 fn _nth_matches_parsed(kind: i32, a: i32, b: i32, pos: i32) -> bool:
-    if kind == 0:
-        return (pos % 2) == 1
-    if kind == 1:
-        return (pos % 2) == 0
-    if kind == 2:
-        if a == 0:
-            return pos == b
-        val rem = pos - b
-        if rem < 0:
-            return false
-        return (rem % a) == 0
-    b == pos
+    kind == 2 and css_nth_index_matches(a as i64, b as i64, pos as i64)
 
 # Derive the ParsedSel record for ONE selector-group part. Mirrors
 # simple_match()'s check order exactly; see the header comment above.
@@ -957,9 +1002,9 @@ fn parse_selector_part(part: text) -> ParsedSel:
     if node_base.len() == 0 or node_base == "*":
         # Universal / empty base: base_selector_matches returns true outright.
         var base_is_universal = true
-    elif node_base[0:0 + 1] == ".":
+    elif node_base.substring(0, 0 + 1) == ".":
         want_classes = _split_class_wants(node_base.substring(1, node_base.byte_len()))
-    elif node_base[0:0 + 1] == "#":
+    elif node_base.substring(0, 0 + 1) == "#":
         val id_dot = find_from(node_base, ".", 1)
         check_id = true
         if id_dot >= 0:
@@ -998,16 +1043,17 @@ fn parse_selector_part(part: text) -> ParsedSel:
     if colon >= 0:
         var pseudo_pos = colon
         var pseudo_count = 0
-        while pseudo_pos < sel.len():  # cpu-lane-loop-ok: walks the pseudo-class chain of ONE selector at parse time; bound is that selector's length, pseudo_count capped at 32
+        val sel_blen = sel.byte_len()
+        while pseudo_pos < sel_blen:  # cpu-lane-loop-ok: walks the pseudo-class chain of ONE selector at parse time; bound is that selector's length, pseudo_count capped at 32
             pseudo_count = pseudo_count + 1
-            if pseudo_count > 32 or sel[pseudo_pos:pseudo_pos + 1] != ":":
+            if pseudo_count > 32 or sel.substring(pseudo_pos, pseudo_pos + 1) != ":":
                 return _dead_parsed_sel()
             val name_start = pseudo_pos + 1
             var name_end = name_start
             # cpu-lane-loop-ok: scans ONE pseudo-class NAME until `:`, `(` or `[`; bound is that name's length
             while (
-                name_end < sel.len() and sel[name_end:name_end + 1] != ":" and
-                sel[name_end:name_end + 1] != "(" and sel[name_end:name_end + 1] != "["
+                name_end < sel_blen and sel.substring(name_end, name_end + 1) != ":" and
+                sel.substring(name_end, name_end + 1) != "(" and sel.substring(name_end, name_end + 1) != "["
             ):
                 name_end = name_end + 1
             val pseudo = sel.substring(name_start, name_end)
@@ -1019,11 +1065,11 @@ fn parse_selector_part(part: text) -> ParsedSel:
             # ignored by the text path, whose `root` arm checks only
             # `tag != "html"` -- so it must not become an attribute test here.
             var root_attr = ""
-            if name_end < sel.len() and sel[name_end:name_end + 1] == "(":
+            if name_end < sel_blen and sel.substring(name_end, name_end + 1) == "(":
                 var functional_depth = 1
                 var close = name_end + 1
-                while close < sel.len() and functional_depth > 0:  # cpu-lane-loop-ok: matches the closing paren of ONE functional pseudo argument at parse time; paren depth capped at 32
-                    val ch = sel[close:close + 1]
+                while close < sel_blen and functional_depth > 0:  # cpu-lane-loop-ok: matches the closing paren of ONE functional pseudo argument at parse time; paren depth capped at 32
+                    val ch = sel.substring(close, close + 1)
                     if ch == "(":
                         functional_depth = functional_depth + 1
                         if functional_depth > 32:
@@ -1038,8 +1084,8 @@ fn parse_selector_part(part: text) -> ParsedSel:
             else:
                 pseudo_pos = name_end
                 if (
-                    pseudo == "root" and pseudo_pos < sel.len() and
-                    sel[pseudo_pos:pseudo_pos + 1] == "["
+                    pseudo == "root" and pseudo_pos < sel_blen and
+                    sel.substring(pseudo_pos, pseudo_pos + 1) == "["
                 ):
                     val attr_close = find_from(sel, "]", pseudo_pos + 1)
                     if attr_close < 0:
@@ -1070,7 +1116,10 @@ fn parse_selector_part(part: text) -> ParsedSel:
             var nth_kind = 0
             var nth_a = 0
             var nth_b = 0
-            if code == PSEUDO_NTH_CHILD:
+            if (
+                code == PSEUDO_NTH_CHILD or code == PSEUDO_NTH_LAST_CHILD or
+                code == PSEUDO_NTH_OF_TYPE or code == PSEUDO_NTH_LAST_OF_TYPE
+            ):
                 val nth = _parse_nth(arg)
                 nth_kind = nth[0]
                 nth_a = nth[1]
@@ -1130,7 +1179,7 @@ fn simple_match_parsed(
             var j = 0
             val opt_count = opts.len()
             while j < opt_count:  # cpu-lane-loop-ok: walks the <=16 pre-split :not() options, returning false at the first that matches
-                if simple_match(opts[j], tag, cls, class_words, id, attrs, 1):
+                if not _option_needs_ctx(opts[j]) and simple_match(opts[j], tag, cls, class_words, id, attrs, 1):
                     return false
                 j = j + 1
         elif code == PSEUDO_ANY:
@@ -1139,7 +1188,7 @@ fn simple_match_parsed(
             var j = 0
             val opt_count = opts.len()
             while j < opt_count and not any_matched:  # cpu-lane-loop-ok: walks the <=16 pre-split :is()/:where() options, stopping at the first that matches
-                any_matched = simple_match(opts[j], tag, cls, class_words, id, attrs, 1)
+                any_matched = _option_needs_ctx(opts[j]) or simple_match(opts[j], tag, cls, class_words, id, attrs, 1)
                 j = j + 1
             if not any_matched:
                 return false
@@ -1174,11 +1223,17 @@ fn _pseudo_ctx_matches_parsed(
         elif code == PSEUDO_ONLY_CHILD:
             if _sibling_count(ctx, idx) != 1:
                 return false
-        elif code == PSEUDO_NTH_CHILD:
+        elif (
+            code == PSEUDO_NTH_CHILD or code == PSEUDO_NTH_LAST_CHILD or
+            code == PSEUDO_NTH_OF_TYPE or code == PSEUDO_NTH_LAST_OF_TYPE
+        ):
             if not _nth_matches_parsed(
                 p.pseudo_nth_kind[pi], p.pseudo_nth_a[pi], p.pseudo_nth_b[pi],
-                _child_position(ctx, idx)
+                _nth_index_for(code, nodes, ctx, idx)
             ):
+                return false
+        elif code == PSEUDO_NOT or code == PSEUDO_ANY:
+            if not _list_ctx_matches(code == PSEUDO_NOT, p.pseudo_opts[pi], nodes, ctx, idx):
                 return false
         elif code == PSEUDO_HAS:
             val opts = p.pseudo_opts[pi]
@@ -1240,7 +1295,7 @@ fn _selector_group_matches_node_parsed_inner(
                 if ancestor < 0:
                     return false
                 val anc = nodes[ancestor]
-                if simple_match_parsed(part, anc.tag, anc.class_attr, anc.class_words, anc.id_attr, anc.attrs_raw):
+                if simple_match_ctx_parsed(part, anc.tag, anc.class_attr, anc.class_words, anc.id_attr, anc.attrs_raw, nodes, ctx, ancestor as i32):
                     ancestor = anc.parent
                     require_direct = false
                 else:
@@ -1249,7 +1304,7 @@ fn _selector_group_matches_node_parsed_inner(
                 var found = false
                 while ancestor >= 0 and not found:  # cpu-lane-loop-ok: descendant-combinator ancestor walk up the parent chain of one node; bound is that node's tree depth
                     val anc = nodes[ancestor]
-                    if simple_match_parsed(part, anc.tag, anc.class_attr, anc.class_words, anc.id_attr, anc.attrs_raw):
+                    if simple_match_ctx_parsed(part, anc.tag, anc.class_attr, anc.class_words, anc.id_attr, anc.attrs_raw, nodes, ctx, ancestor as i32):
                         found = true
                     else:
                         ancestor = anc.parent
@@ -1325,11 +1380,11 @@ fn selector_ancestor_keys_present(counts: Dict<text, i32>, keys: [text]) -> bool
 fn split_selector_groups(sel: text) -> [text]:
     var depth = 0
     var i = 0
-    val sel_len = sel.len()
+    val sel_len = sel.byte_len()
     var group_count = 0
     var group_start = 0
     while i < sel_len:  # cpu-lane-loop-ok: counting pass over ONE selector's characters to size the comma-group array; bound is that selector's length
-        val ch = sel[i:i + 1]
+        val ch = sel.substring(i, i + 1)
         if ch == "(":
             depth = depth + 1
             if depth > 32:
@@ -1359,7 +1414,7 @@ fn split_selector_groups(sel: text) -> [text]:
     var group_i = 0
     group_start = 0
     while i < sel_len and group_i < group_count:  # cpu-lane-loop-ok: emit pass over the same selector, filling the <=CSS_SELECTOR_GROUP_CAP group array
-        val ch = sel[i:i + 1]
+        val ch = sel.substring(i, i + 1)
         if ch == "(":
             depth = depth + 1
         elif ch == ")":
@@ -1378,11 +1433,11 @@ fn split_selector_groups(sel: text) -> [text]:
 
 fn normalize_child_combinators(group: text) -> text:
     var i = 0
-    val group_len = group.len()
+    val group_len = group.byte_len()
     var depth = 0
     var combinator_count = 0
     while i < group_len and combinator_count <= CSS_SELECTOR_PART_CAP:  # cpu-lane-loop-ok: counting pass over ONE selector group's characters counting depth-0 `>` combinators, capped at CSS_SELECTOR_PART_CAP
-        val ch = group[i:i + 1]
+        val ch = group.substring(i, i + 1)
         if ch == "(":
             depth = depth + 1
         elif ch == ")":
@@ -1402,7 +1457,7 @@ fn normalize_child_combinators(group: text) -> text:
     i = 0
     depth = 0
     while i < group_len:  # cpu-lane-loop-ok: emit pass over the same group, splitting it around each depth-0 `>` combinator
-        val ch = group[i:i + 1]
+        val ch = group.substring(i, i + 1)
         if ch == "(":
             depth = depth + 1
         elif ch == ")":
@@ -1422,14 +1477,14 @@ fn selector_group_parts(group: text) -> [text]:
     # Split on spaces at depth-0 only: depth counts ( ) and [ ] so that spaces
     # inside :has(> .x) args and [attr='val with spaces'] are preserved.
     val normalized = normalize_child_combinators(group)
-    val norm_len = normalized.len()
+    val norm_len = normalized.byte_len()
     # First pass: count tokens
     var token_count = 0
     var depth = 0
     var in_token = false
     var pi = 0
     while pi < norm_len and token_count <= CSS_SELECTOR_PART_CAP:  # cpu-lane-loop-ok: token-counting pass over ONE normalized selector group; bound is that group's length, capped at CSS_SELECTOR_PART_CAP tokens
-        val ch = normalized[pi:pi + 1]
+        val ch = normalized.substring(pi, pi + 1)
         if ch == "(" or ch == "[":
             depth = depth + 1
             if not in_token:
@@ -1456,7 +1511,7 @@ fn selector_group_parts(group: text) -> [text]:
     var token_start = -1
     pi = 0
     while pi < norm_len:  # cpu-lane-loop-ok: token-emit pass over the same normalized group, slicing each depth-0 whitespace-separated part
-        val ch = normalized[pi:pi + 1]
+        val ch = normalized.substring(pi, pi + 1)
         if ch == "(" or ch == "[":
             if not in_token:
                 token_start = pi
@@ -1512,9 +1567,9 @@ fn selector_bucket_kind(part: text) -> text:
 fn selector_bucket_kind_from_base(base: text) -> text:
     if base.len() == 0 or base == "*":
         return "fallback"
-    if base[0:0 + 1] == "#":
+    if base.substring(0, 0 + 1) == "#":
         return "id"
-    if base[0:0 + 1] == ".":
+    if base.substring(0, 0 + 1) == ".":
         return "class"
     # tag#id compound: bucket as "id" so rules fire when node has that id
     val hash = text_index_of(base, "#")
@@ -1531,7 +1586,7 @@ fn selector_bucket_value(part: text) -> text:
 fn selector_bucket_value_from_base(base: text) -> text:
     if base.len() == 0:
         return ""
-    val first = base[0:0 + 1]
+    val first = base.substring(0, 0 + 1)
     if first == "#" or first == ".":
         val dot = find_from(base, ".", 1)
         if dot >= 0:
@@ -1920,7 +1975,7 @@ fn _selector_group_matches_node_parts_inner(nodes: [HNode], ctx: SelectorContext
                 if ancestor < 0:
                     return false
                 val anc = nodes[ancestor]
-                if simple_match(part, anc.tag, anc.class_attr, anc.class_words, anc.id_attr, anc.attrs_raw):
+                if simple_match_ctx(part, anc.tag, anc.class_attr, anc.class_words, anc.id_attr, anc.attrs_raw, nodes, ctx, ancestor as i32):
                     ancestor = anc.parent
                     require_direct = false
                 else:
@@ -1929,7 +1984,7 @@ fn _selector_group_matches_node_parts_inner(nodes: [HNode], ctx: SelectorContext
                 var found = false
                 while ancestor >= 0 and not found:  # cpu-lane-loop-ok: descendant-combinator ancestor walk up the parent chain of one node; bound is that node's tree depth
                     val anc = nodes[ancestor]
-                    if simple_match(part, anc.tag, anc.class_attr, anc.class_words, anc.id_attr, anc.attrs_raw):
+                    if simple_match_ctx(part, anc.tag, anc.class_attr, anc.class_words, anc.id_attr, anc.attrs_raw, nodes, ctx, ancestor as i32):
                         found = true
                     else:
                         ancestor = anc.parent
@@ -1955,28 +2010,29 @@ fn _part_specificity(
         base = base.substring(0, colon)
         var pseudo_pos = colon
         var pseudo_count = 0
-        while pseudo_pos < part.len():  # cpu-lane-loop-ok: walks the pseudo-class chain of ONE selector part while scoring specificity; pseudo_count capped at 32
+        val part_blen = part.byte_len()
+        while pseudo_pos < part_blen:  # cpu-lane-loop-ok: walks the pseudo-class chain of ONE selector part while scoring specificity; pseudo_count capped at 32
             pseudo_count = pseudo_count + 1
-            if pseudo_count > 32 or part[pseudo_pos:pseudo_pos + 1] != ":":
+            if pseudo_count > 32 or part.substring(pseudo_pos, pseudo_pos + 1) != ":":
                 return -1000000
             val name_start = pseudo_pos + 1
             var name_end = name_start
             # cpu-lane-loop-ok: scans ONE pseudo-class NAME until `:`, `(` or `[`; bound is that name's length
             while (
-                name_end < part.len() and
-                part[name_end:name_end + 1] != ":" and
-                part[name_end:name_end + 1] != "(" and
-                part[name_end:name_end + 1] != "["
+                name_end < part_blen and
+                part.substring(name_end, name_end + 1) != ":" and
+                part.substring(name_end, name_end + 1) != "(" and
+                part.substring(name_end, name_end + 1) != "["
             ):
                 name_end = name_end + 1
             val pseudo_name = part.substring(name_start, name_end)
             if pseudo_name.len() == 0:
                 return -1000000
-            if name_end < part.len() and part[name_end:name_end + 1] == "(":
+            if name_end < part_blen and part.substring(name_end, name_end + 1) == "(":
                 var functional_depth = 1
                 var close = name_end + 1
-                while close < part.len() and functional_depth > 0:  # cpu-lane-loop-ok: matches the closing paren of ONE functional pseudo-class argument while scoring specificity; paren depth capped at 32
-                    val ch = part[close:close + 1]
+                while close < part_blen and functional_depth > 0:  # cpu-lane-loop-ok: matches the closing paren of ONE functional pseudo-class argument while scoring specificity; paren depth capped at 32
+                    val ch = part.substring(close, close + 1)
                     if ch == "(":
                         functional_depth = functional_depth + 1
                         if functional_depth > 32:
@@ -2007,7 +2063,10 @@ fn _part_specificity(
                     pseudo_specificity = (
                         pseudo_specificity + max_option_specificity
                     )
-                elif pseudo_name == "nth-child":
+                elif (
+                    pseudo_name == "nth-child" or pseudo_name == "nth-last-child" or
+                    pseudo_name == "nth-of-type" or pseudo_name == "nth-last-of-type"
+                ):
                     pseudo_specificity = pseudo_specificity + 10
                 elif pseudo_name != "where":
                     return -1000000
@@ -2016,8 +2075,8 @@ fn _part_specificity(
                 pseudo_specificity = pseudo_specificity + 10
                 pseudo_pos = name_end
                 if (
-                    pseudo_name == "root" and pseudo_pos < part.len() and
-                    part[pseudo_pos:pseudo_pos + 1] == "["
+                    pseudo_name == "root" and pseudo_pos < part_blen and
+                    part.substring(pseudo_pos, pseudo_pos + 1) == "["
                 ):
                     val attr_close = find_from(
                         part, "]", pseudo_pos + 1
@@ -2028,7 +2087,7 @@ fn _part_specificity(
                     pseudo_pos = attr_close + 1
     var attribute_specificity = 0
     var attribute_scan = 0
-    while attribute_scan < base.len():  # cpu-lane-loop-ok: counts the `[attr]` selectors in ONE selector base via native find_from; bound is that base's length
+    while attribute_scan < base.byte_len():  # cpu-lane-loop-ok: counts the `[attr]` selectors in ONE selector base via native find_from; bound is that base's length
         val attribute_open = find_from(base, "[", attribute_scan)
         if attribute_open < 0:
             break
@@ -2043,18 +2102,18 @@ fn _part_specificity(
     var base_specificity = attribute_specificity
     if base.len() == 0 or base == "*":
         base_specificity = attribute_specificity
-    elif base[0:0 + 1] == "#":
+    elif base.substring(0, 0 + 1) == "#":
         val dot = find_from(base, ".", 1)
         if dot >= 0:
             base_specificity = 110 + attribute_specificity
         else:
             base_specificity = 100 + attribute_specificity
-    elif base[0:0 + 1] == ".":
+    elif base.substring(0, 0 + 1) == ".":
         var class_count = 1
         var i = 1
-        val base_len = base.len()
+        val base_len = base.byte_len()
         while i < base_len:  # cpu-lane-loop-ok: counts the `.` class separators in one `.a.b` compound base; bound is that base's length
-            if base[i:i + 1] == ".":
+            if base.substring(i, i + 1) == ".":
                 class_count = class_count + 1
             i = i + 1
         base_specificity = class_count * 10 + attribute_specificity
@@ -2069,9 +2128,9 @@ fn _part_specificity(
         val dot = text_index_of(base, ".")
         var class_count2 = 1
         var j = dot + 1
-        val base_len2 = base.len()
+        val base_len2 = base.byte_len()
         while j < base_len2:  # cpu-lane-loop-ok: counts the `.` class separators after the first dot in one `tag.a.b` compound base; bound is that base's length
-            if base[j:j + 1] == ".":
+            if base.substring(j, j + 1) == ".":
                 class_count2 = class_count2 + 1
             j = j + 1
         base_specificity = 1 + class_count2 * 10 + attribute_specificity

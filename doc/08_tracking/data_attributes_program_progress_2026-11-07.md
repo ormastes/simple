@@ -83,8 +83,63 @@ Pin: `origin/release/1.0.0` @ `9100f50e680`. Lane: `work/immutable-views-async-i
 |---|---|---|
 | P0 inventory | [symbol-to-requirement map + parser probes](../05_design/compiler/data/immutable_views_async_init_p0_inventory_2026-11-13.md) (`doc/08_tracking/` root is over the fan-out limit, so the map lives under `doc/05_design/compiler/data/`) | done 2026-11-13: no contract implemented; `async <expr>` ctor argument does not parse; `Immutable<T>`/`@support_async_immutable` accepted only by lenience; missing required field is nil/0-filled (`lower_struct_construct`), E1007 unused |
 | P1 verifier | SSpec ASY-03/04/05, ATTR-01/04 RED → GREEN; verifier as report over `src/compiler`+`src/lib`+`src/app`; offender count decides gate (warning / opt-in vs error) | landed in #8860 (`988f8ff6755`, spread fix `265b8f42fb3`). P2 review follow-ups landed in #8881 (`eb66cc8e5ed`): gate read once per process, MIR-shaped argument mapping, gate moved to the HIR cache key, `@required_init(error|warning)` module opt-in; spec 16/16. Gate defaults to `off` because the census is non-zero: all 1,291 compiler candidates give 146 rows / 58 sites / 26 classes (130 of all 149 rows are `# DESUGARED` `has_<f>` optional pairs); seeded 200-file samples give lib 1 row, app 0. Detail in plan §0a "P1 census and gate" |
-| P2 `Immutable<T>` | IMM-01/02; then revision/frozen handles | pending, after P1 review |
+| P2a `Immutable<T>` | IMM-01/02 | GREEN 2026-11-14 (`test/01_unit/compiler/semantics/immutable_view_write_spec.spl`, 8/8; RED was 3 failed of 6): `Immutable<T>` lowers to `T` (no more unresolved-type lowering error) and its param/local symbols are recorded in `HirLowering.immutable_view_symbols`; a field/index write rooted at one is `E_IMMUTABLE_WRITE` (`statements.spl` `flag_immutable_view_write`). No seed change: the seed already parses `Immutable<T>`. Not tracked yet: aliasing the view into another binding, mutating methods, `.immutable()` constructor, return/field positions |
+| P2b revision/frozen handles | IMM-03/04 | GREEN 2026-11-14 (`revision_frozen_immutable_spec`, 9/9; RED 4 failed of 9): `RevisionImmutable<T>`/`FrozenImmutable<T>` lower to `T`, writes through them are `E_IMMUTABLE_WRITE`, a `var` bound directly from one is `E_FROZEN_ALIAS`; struct bindings are detached copies so the pinned/frozen value is stable. Still W8: revision lease + cache identity (REV-01/02), a class-typed detached-copy producer (`snapshot()`/`frozen_copy()`), frozen payload codec kind (pointer-free, `file_ast_v1` pattern) |
 | P3 async-init gate | ASY-01/02/06/07/08 on `phase_cell_*_v1`; reference API `f8db9920671` landed on `release/1.0.0` via #8829 (`04f02062860`), so no longer blocked | pending, after P1 review |
 
 Authored plan text, reviewed source and executed runtime evidence remain
 different states; nothing above is complete because the plan exists.
+
+## Owner goal and lane assignment (2026-11-14)
+
+Owner direction, 2026-11-14 (SPipe + TDD; Windows and pure Simple first; perf
+measured at every step). Pin: `origin/release/1.0.0` @ `ab253ce1312`. This section
+records ASSIGNMENT only — every row below is "started", none is evidence.
+
+1. Check the pure-Simple XRay path and fix what is broken.
+2. Container profile switching by config (static and runtime), aspect dynload,
+   and log/profile tracing layer-to-layer and feature-to-feature must work on
+   Windows; implement what is missing.
+3. Node attributes fully implemented and applied to the compiler. Pure Simple
+   does the real storage; the Rust seed only has to accept the syntax without a
+   compile error. Each attribute is placed on the main node, in an id-indexed
+   array, or in a hash map, and array <-> hash is switchable by config. Applied
+   one attribute at a time. Finish the immutable-views / async-init sub-plan too.
+
+### Default-on rule (binding)
+
+Managed node-attribute storage stays **default OFF**. It may become default ON
+only when all three hold, and the flip itself is an owner decision:
+
+- every related spec is green on the pure-Simple lane (Windows first);
+- off-identity is proven for each applied attribute (off = today's behaviour);
+- bootstrap phase 3 completes with the storage enabled, with wall time and peak
+  RSS recorded against the same run with it disabled (PERF-01).
+
+### Lanes
+
+| Lane | Branch | Packages / IDs | Scope |
+|---|---|---|---|
+| xraychk | `work/xray-win-check-20261114` | W5b evidence | Run every XRay / trace / aspect / adaptive-container spec on Windows on the pure-Simple lane; classify and fix reds; back the unbacked `spl_ordered_key_cmp` / `spl_collection_capture_*` externs |
+| xraywin | `work/xray-win64-native-20261114` | W10, XRay stage 3 | Native-backend COFF sled emission + `.sxray`, Windows route admission (Simple backend, `--backend=native --xray` only), Windows module registration, in-process e2e lane. Detail in the [XRay status doc](../03_plan/compiler/aspect_dynload/xray_v1_integration_status_2026-11-03.md) § "Windows program lanes (2026-11-14)" |
+| tracesel | `work/trace-layer-feature-select-20261114` | W5b; P5 (PROF-01), P6 (PROF-02/03) | A: layer-to-layer / feature-to-feature edge selection and log profile as a fold over the raw-edge stream. B: static container selection by config/`.sprof`, then the opt-in runtime switch. P6 was deferred under W9; the owner direction above schedules its opt-in path, default off |
+| nodeattr | `work/node-attr-storage-20261114` | W1b, W2a, W3b, P4 (ATTR-02/03/05, PERF-02) | One `AttributeSchema` over embedded / column / sparse-hash with writes, construction and retirement; measured placement census of the AST node; apply attribute by attribute behind the off-by-default rule; then driver adoption C.2 |
+| immview | `work/immutable-views-async-init-2-20261114` | W2c, W2b P3 (IMM-01..04, ASY-01/02/06/07/08) | `Immutable<T>` projection, async registered init on `phase_cell_*_v1`, revision/frozen handle semantics, P1 census re-run |
+
+### Node-attribute application order (nodeattr lane)
+
+1. Baseline: existing resolver / pilot / lifecycle / snapshot specs executed on
+   Windows (the 25 V2 cases have never run), plus a seed-acceptance spec for
+   `@node_tree`, `@attr_storage` and the SDN rule.
+2. Unified schema with exact-value and presence parity across the three stores;
+   array <-> hash switch resolved once, zero per-access cost when off.
+3. Placement census — measured population density and access frequency per AST
+   field on real compiler inputs, classified main node / array / hash; table
+   recorded in [`node_tree_storage.md`](../05_design/compiler/data/node_tree_storage.md).
+4. Apply one attribute at a time (pilot pair `op` column and `inferred_type`
+   sparse hash first), each with a parity spec, off-identity proof and
+   before/after wall time and max RSS on a fixed input.
+5. Driver adoption, then the phase-3 run of the default-on rule above.
+
+Not assigned by this section: W6 three-family reference workload, W7 native
+field layouts, W8 cache identity (REV-01/02), W9 transactional live migration.

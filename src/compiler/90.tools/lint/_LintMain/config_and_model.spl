@@ -18,7 +18,7 @@ use std.log.{error, info}
 # Re-export-compatible enum identities must remain canonical to avoid
 # false-positive bare-name collisions when lint and tooling are both imported
 # by the same module (canonical failure mode: compiler.tools.lint.main).
-use std.tooling.easy_fix.types.{EasyFix, LintLevel, LintCategory}
+use std.tooling.easy_fix.types.{EasyFix, easyfix_is_effective, LintLevel, LintCategory}
 use compiler.semantics.lint.riscv_rtl_debuggability_lint.{lint_riscv_rtl_debuggability}
 use compiler.common.assurance.policy_names.{normalize_profile_name, deprecated_profile_alias_replacement}
 use compiler.common.assurance.warning_phase.{warning_phase_enabled_for_value,
@@ -1193,6 +1193,14 @@ impl LintDiag:
             uncertainty: self.uncertainty, evidence_tier: tier
         )
 
+    fn without_easy_fix() -> LintDiag:
+        LintDiag(
+            code: self.code, level: self.level, category: self.category,
+            message: self.message, fix_hint: self.fix_hint,
+            easy_fix: nil, evidence: self.evidence,
+            uncertainty: self.uncertainty, evidence_tier: self.evidence_tier
+        )
+
     fn with_level(level: LintLevel) -> LintDiag:
         LintDiag(
             code: self.code, level: level, category: self.category,
@@ -1336,6 +1344,21 @@ fn lint_run_result_apply_cli_policy(result: LintRunResult, deny_all: bool) -> Li
     LintRunResult.new(
         result.file_path, result.line, result.column,
         result.lint.with_level(effective_level))
+
+# Drops the "fix available" claim when the attached fix changes nothing in the
+# analysed source; the diagnostic itself is kept.
+fn lint_run_result_drop_noop_fix(result: LintRunResult, source: text) -> LintRunResult:
+    match result.lint.easy_fix:
+        case Some(fix):
+            var sources: Dict<text, text> = {}
+            sources[result.file_path] = source
+            if easyfix_is_effective(fix, sources):
+                return result
+            LintRunResult.new(
+                result.file_path, result.line, result.column,
+                result.lint.without_easy_fix())
+        case None:
+            result
 
 enum LintFileResult:
     LintFileOk([LintRunResult])

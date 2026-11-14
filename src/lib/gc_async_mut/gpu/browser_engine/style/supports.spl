@@ -2,6 +2,8 @@
 #![allow(REQC004)]
 #![allow(unnamed_duplicate_typed_args)]
 
+use std.gc_async_mut.gpu.browser_engine.css_nth.{css_nth_parse}
+
 pub fn known_properties() -> [text]:
     val props: [text] = [
         "display",
@@ -114,7 +116,8 @@ fn _eval_supports_query(
         return nil
     var paren_depth = 0
     var i = 0
-    while i < trimmed.len():
+    val trimmed_blen = trimmed.byte_len()
+    while i < trimmed_blen:
         val ch = trimmed.slice(i, i + 1)
         if ch == "(":
             paren_depth = paren_depth + 1
@@ -129,7 +132,7 @@ fn _eval_supports_query(
         return nil
 
     if trimmed.starts_with("not "):
-        val rest = trimmed.slice(4, trimmed.byte_len()).trim()
+        val rest = trimmed.slice(4, trimmed_blen).trim()
         if val supported = _eval_supports_in_parens(
             rest, recursion_depth
         ):
@@ -162,7 +165,7 @@ fn _eval_supports_chain(
         return _eval_supports_in_parens(query, recursion_depth)
     val left_text = query.slice(0, operator_pos).trim()
     val right_text = query.slice(
-        operator_pos + combinator.len(), query.len()
+        operator_pos + combinator.byte_len(), query.byte_len()
     ).trim()
     if left_text.len() == 0 or right_text.len() == 0:
         return nil
@@ -186,20 +189,21 @@ fn _eval_supports_in_parens(
     if trimmed.starts_with("(") and trimmed.ends_with(")"):
         var depth = 0
         var i = 0
-        while i < trimmed.len():
+        val trimmed_blen = trimmed.byte_len()
+        while i < trimmed_blen:
             val ch = trimmed.slice(i, i + 1)
             if ch == "(":
                 depth = depth + 1
             elif ch == ")":
                 depth = depth - 1
-                if depth == 0 and i != trimmed.len() - 1:
+                if depth == 0 and i != trimmed_blen - 1:
                     return nil
                 if depth < 0:
                     return nil
             i = i + 1
         if depth != 0:
             return nil
-        val inner = trimmed.slice(1, trimmed.byte_len() - 1).trim()
+        val inner = trimmed.slice(1, trimmed_blen - 1).trim()
         if inner.len() == 0:
             return nil
         if (
@@ -232,7 +236,7 @@ fn _eval_single(condition: text) -> bool?:
 
     val prop = condition.slice(0, colon_pos).trim().lower()
     val value = condition.slice(
-        colon_pos + 1, condition.len()
+        colon_pos + 1, condition.byte_len()
     ).trim().lower()
     if prop.len() == 0 or value.len() == 0:
         return nil
@@ -331,14 +335,15 @@ fn _eval_single(condition: text) -> bool?:
 fn _supports_identifier(value: text) -> bool:
     if value.len() == 0 or value == "-" or value == "--":
         return false
-    val first = value.char_at(0)
+    val first = value.substring(0, 1)
     if not (
         (first >= "a" and first <= "z") or first == "_" or first == "-"
     ):
         return false
     var i = 1
-    while i < value.len():
-        val ch = value.char_at(i)
+    val value_blen = value.byte_len()
+    while i < value_blen:
+        val ch = value.substring(i, i + 1)
         if not (
             (ch >= "a" and ch <= "z") or
             (ch >= "0" and ch <= "9") or ch == "_" or ch == "-"
@@ -355,13 +360,14 @@ fn _supports_general_enclosed(value: text) -> bool:
         return false
     var depth = 0
     var i = open
-    while i < value.len():
+    val value_blen = value.byte_len()
+    while i < value_blen:
         val ch = value.slice(i, i + 1)
         if ch == "(":
             depth = depth + 1
         elif ch == ")":
             depth = depth - 1
-            if depth == 0 and i != value.len() - 1:
+            if depth == 0 and i != value_blen - 1:
                 return false
             if depth < 0:
                 return false
@@ -374,8 +380,9 @@ fn _supports_general_enclosed_in_parentheses(value: text) -> bool:
     if _supports_general_enclosed(value):
         return true
     var name_end = 0
-    while name_end < value.len():
-        val ch = value.char_at(name_end)
+    val value_blen = value.byte_len()
+    while name_end < value_blen:
+        val ch = value.substring(name_end, name_end + 1)
         if (
             (ch >= "a" and ch <= "z") or
             (ch >= "0" and ch <= "9") or ch == "_" or ch == "-"
@@ -394,12 +401,13 @@ fn _supports_number(value: text) -> bool:
     if value.len() == 0:
         return false
     var i = 0
-    if value.char_at(0) == "+" or value.char_at(0) == "-":
+    if value.substring(0, 1) == "+" or value.substring(0, 1) == "-":
         i = 1
     var digits = 0
     var dots = 0
-    while i < value.len():
-        val ch = value.char_at(i)
+    val value_blen = value.byte_len()
+    while i < value_blen:
+        val ch = value.substring(i, i + 1)
         if ch >= "0" and ch <= "9":
             digits = digits + 1
         elif ch == ".":
@@ -418,21 +426,22 @@ fn _supports_dimension(value: text, allow_auto: bool) -> bool:
         return true
     val suffixes: [text] = ["px", "%", "em", "rem", "vw", "vh"]
     for suffix in suffixes:
-        if value.ends_with(suffix) and value.len() > suffix.len():
+        if value.ends_with(suffix) and value.byte_len() > suffix.byte_len():
             return _supports_number(
-                value.slice(0, value.len() - suffix.len())
+                value.slice(0, value.byte_len() - suffix.byte_len())
             )
     false
 
 fn _supports_hex_color(value: text) -> bool:
     if not value.starts_with("#"):
         return false
-    val digits = value.len() - 1
+    val digits = value.byte_len() - 1
     if digits != 3 and digits != 4 and digits != 6 and digits != 8:
         return false
     var i = 1
-    while i < value.len():
-        val ch = value.char_at(i)
+    val value_blen = value.byte_len()
+    while i < value_blen:
+        val ch = value.substring(i, i + 1)
         if not (
             (ch >= "0" and ch <= "9") or
             (ch >= "a" and ch <= "f")
@@ -456,14 +465,15 @@ fn _supports_color(value: text) -> bool:
         value.starts_with("hsl(") or value.starts_with("hsla(")
     ):
         return false
-    if not value.ends_with(")") or value.len() <= 5:
+    if not value.ends_with(")") or value.byte_len() <= 5:
         return false
     val inner = value.slice(value.index_of("(") + 1, value.byte_len() - 1)
     var numeric_tokens = 0
     var in_number = false
     var i = 0
-    while i < inner.len():
-        val ch = inner.char_at(i)
+    val inner_blen = inner.byte_len()
+    while i < inner_blen:
+        val ch = inner.substring(i, i + 1)
         if ch >= "0" and ch <= "9":
             if not in_number:
                 numeric_tokens = numeric_tokens + 1
@@ -491,9 +501,9 @@ fn _supports_transform(value: text) -> bool:
     if name == "rotate":
         val units: [text] = ["deg", "rad", "turn"]
         for unit in units:
-            if arg.ends_with(unit) and arg.len() > unit.len():
+            if arg.ends_with(unit) and arg.byte_len() > unit.byte_len():
                 return _supports_number(
-                    arg.slice(0, arg.len() - unit.len()).trim()
+                    arg.slice(0, arg.byte_len() - unit.byte_len()).trim()
                 )
         return false
     if name == "translatex" or name == "translatey":
@@ -536,18 +546,20 @@ fn _supports_selector(selector: text) -> Option<bool>:
     var depth = 0
     var bracket_depth = 0
     var open_positions: [i32] = [0; 33]
+    var open_is_nth: [bool] = [false; 33]
     var option_commas: [i32] = [0; 33]
     var option_starts: [i32] = [0; 33]
     var bracket_starts: [i32] = [0; 2]
     var top_level_commas = 0
     var group_start = 0
     var i = 0
-    while i < selector.len():
+    val selector_blen = selector.byte_len()
+    while i < selector_blen:
         val ch = selector.slice(i, i + 1)
         if ch == "(":
             var function_start = i
             while function_start > 0:
-                val function_ch = selector.char_at(function_start - 1)
+                val function_ch = selector.substring(function_start - 1, function_start)
                 if (
                     (function_ch >= "a" and function_ch <= "z") or
                     function_ch == "-"
@@ -557,19 +569,21 @@ fn _supports_selector(selector: text) -> Option<bool>:
                     break
             if (
                 function_start <= 0 or
-                selector.char_at(function_start - 1) != ":"
+                selector.substring(function_start - 1, function_start) != ":"
             ):
                 return nil
             val function_name = selector.slice(function_start, i)
             if (
                 function_name != "has" and function_name != "is" and
                 function_name != "where" and function_name != "not" and
-                function_name != "nth-child"
+                function_name != "nth-child" and function_name != "nth-last-child" and
+                function_name != "nth-of-type" and function_name != "nth-last-of-type"
             ):
                 supported = false
             depth = depth + 1
             if depth > 32:
                 return nil
+            open_is_nth[depth] = function_name.starts_with("nth-")
             open_positions[depth] = i
             option_commas[depth] = 0
             option_starts[depth] = i + 1
@@ -579,6 +593,9 @@ fn _supports_selector(selector: text) -> Option<bool>:
             val inner = selector.slice(option_starts[depth], i).trim()
             if inner.len() == 0:
                 return nil
+            # An nth-* argument must be a valid An+B (`1 2`, `2n+` are not).
+            if open_is_nth[depth] and not css_nth_parse(inner).valid:
+                supported = false
             depth = depth - 1
         elif ch == ",":
             if depth == 0:
@@ -615,11 +632,11 @@ fn _supports_selector(selector: text) -> Option<bool>:
         elif ch == "?":
             return nil
         elif ch == ":":
-            if i + 1 >= selector.len():
+            if i + 1 >= selector_blen:
                 return nil
             var name_end = i + 1
-            while name_end < selector.len():
-                val name_ch = selector.char_at(name_end)
+            while name_end < selector_blen:
+                val name_ch = selector.substring(name_end, name_end + 1)
                 if (
                     (name_ch >= "a" and name_ch <= "z") or
                     name_ch == "-"
@@ -629,12 +646,13 @@ fn _supports_selector(selector: text) -> Option<bool>:
                     break
             val name = selector.slice(i + 1, name_end)
             val functional = (
-                name_end < selector.len() and
-                selector.char_at(name_end) == "("
+                name_end < selector_blen and
+                selector.substring(name_end, name_end + 1) == "("
             )
             val allowed_function = (
                 name == "has" or name == "is" or name == "where" or
-                name == "not" or name == "nth-child"
+                name == "not" or name == "nth-child" or name == "nth-last-child" or
+                name == "nth-of-type" or name == "nth-last-of-type"
             )
             val allowed_ordinary = (
                 name == "empty" or name == "first-child" or
@@ -660,7 +678,7 @@ fn _supports_selector(selector: text) -> Option<bool>:
         i = i + 1
     if (
         depth != 0 or bracket_depth != 0 or
-        selector.slice(group_start, selector.byte_len()).trim().len() == 0
+        selector.slice(group_start, selector_blen).trim().len() == 0
     ):
         return nil
     Some(supported)
@@ -669,7 +687,7 @@ fn _find_combinator(s: text, combinator: text) -> i64:
     var depth = 0
     var i = 0
     val slen = s.byte_len()
-    val clen = combinator.len()
+    val clen = combinator.byte_len()
     while i < slen:
         val ch = s.slice(i, i + 1)
         if ch == "(":

@@ -274,6 +274,42 @@ impl SymbolTable:
             return self.symbols[raw]
         nil
 
+    me retract_symbol_rows_v1(ids: [i64]) -> i64:
+        """Drop the symbol rows `ids` plus every `qualified_types` /
+        `module_callables` row that resolves to one of them (the three maps
+        `define_with_binding(bind_lexical: false, defining_module: Some)`
+        writes). `next_symbol_id` is NOT rewound: a retracted id is never
+        reissued, so a stale holder resolves to nil, never to another symbol.
+        The maps are rebuilt without the keys -- the one Dict-removal form
+        both lanes agree on (doc/08_tracking/bug/
+        dict_remove_return_value_differs_native_vs_interpreter_2026-09-13.md).
+        Caller: MIR lowering, retracting the provider type copies it relocated
+        into a consumer table once the module's MIR is promoted
+        (stage2_compiler_cli_build_mir_shard_share_unbounded_2026-11-06, item 1).
+        Returns the number of symbol rows removed."""
+        var retract: Dict<i64, bool> = {}
+        for raw in ids:
+            if self.symbols.has(raw):
+                retract[raw] = true
+        if retract.len() == 0:
+            return 0
+        var kept_symbols: Dict<i64, HirSymbol> = {}
+        for raw in self.symbols.keys():
+            if not retract.has(raw):
+                kept_symbols[raw] = self.symbols[raw]
+        self.symbols = kept_symbols
+        var kept_types: Dict<text, i64> = {}
+        for key in self.qualified_types.keys():
+            if not retract.has(self.qualified_types[key]):
+                kept_types[key] = self.qualified_types[key]
+        self.qualified_types = kept_types
+        var kept_callables: Dict<text, i64> = {}
+        for key in self.module_callables.keys():
+            if not retract.has(self.module_callables[key]):
+                kept_callables[key] = self.module_callables[key]
+        self.module_callables = kept_callables
+        retract.len()
+
     fn symbol_name_scalar_raw(raw: i64) -> text:
         """Return a symbol name without transporting `HirSymbol?`.
 

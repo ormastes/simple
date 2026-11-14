@@ -27,7 +27,8 @@ a throwaway single-@cover copy of `simple_web_html_layout_renderer_coverage_spec
 zero/low-coverage PURE module-level helpers (no DOM-tree fixture needed) that
 were reachable only indirectly through full-document rendering before:
 `_css_root_prefix_is_preamble`, `_is_interaction_state_pseudo`,
-`_nth_child_matches`, `_part_specificity`, `_group_specificity`,
+`css_nth_matches` (the shared An+B evaluator that replaced
+`_nth_child_matches`), `_part_specificity`, `_group_specificity`,
 `_sort_candidates_by_specificity`, `_sort_positive_z_indices`,
 `_sort_style_order_indices`, `merge_two_sorted_rule_lists_unique`,
 `merge_sorted_rule_lists_unique_count`, `rule_lists_from_counts`,
@@ -54,7 +55,6 @@ use std.spec.{describe, it, expect}
 use gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_core.{
     _css_root_prefix_is_preamble,
     _is_interaction_state_pseudo,
-    _nth_child_matches,
     _part_specificity,
     _group_specificity,
     _sort_candidates_by_specificity,
@@ -74,6 +74,7 @@ use gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_core.{
     class_has_all,
     unquote_css_attr_value
 }
+use std.gc_async_mut.gpu.browser_engine.css_nth.{css_nth_matches}
 use gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{
     renderer_default_style
 }
@@ -139,48 +140,52 @@ describe "core.spl: _is_interaction_state_pseudo":
         step("Verify: rejects an unknown pseudo-class name")
         expect(_is_interaction_state_pseudo("nth-child", "")).to_equal(false)
 
-describe "core.spl: _nth_child_matches":
+describe "css_nth.spl: css_nth_matches (shared An+B evaluator used by core.spl)":
     it "matches the odd/even keywords":
         # @req: REQ-LIB-GC-ASYNC-MUT-001
         step("Verify: matches the odd/even keywords")
-        expect(_nth_child_matches("odd", 1)).to_equal(true)
-        expect(_nth_child_matches("odd", 2)).to_equal(false)
-        expect(_nth_child_matches("even", 2)).to_equal(true)
-        expect(_nth_child_matches("even", 3)).to_equal(false)
+        expect(css_nth_matches("odd", 1)).to_equal(true)
+        expect(css_nth_matches("odd", 2)).to_equal(false)
+        expect(css_nth_matches("even", 2)).to_equal(true)
+        expect(css_nth_matches("even", 3)).to_equal(false)
 
     it "matches an+b with positive a":
         # @req: REQ-LIB-GC-ASYNC-MUT-001
         step("Verify: matches an+b with positive a")
         # 2n+1 -> 1, 3, 5, ...
-        expect(_nth_child_matches("2n+1", 1)).to_equal(true)
-        expect(_nth_child_matches("2n+1", 2)).to_equal(false)
-        expect(_nth_child_matches("2n+1", 5)).to_equal(true)
+        expect(css_nth_matches("2n+1", 1)).to_equal(true)
+        expect(css_nth_matches("2n+1", 2)).to_equal(false)
+        expect(css_nth_matches("2n+1", 5)).to_equal(true)
 
     it "matches n+b with implicit a=1":
         # @req: REQ-LIB-GC-ASYNC-MUT-001
         step("Verify: matches n+b with implicit a=1")
-        expect(_nth_child_matches("n+3", 3)).to_equal(true)
-        expect(_nth_child_matches("n+3", 2)).to_equal(false)
+        expect(css_nth_matches("n+3", 3)).to_equal(true)
+        expect(css_nth_matches("n+3", 2)).to_equal(false)
 
     it "matches -n+b with implicit a=-1":
         # @req: REQ-LIB-GC-ASYNC-MUT-001
         step("Verify: matches -n+b with implicit a=-1")
-        # -n+3: rem = pos - 3; rem < 0 -> false (pos=2); rem >= 0 -> true
-        # (any rem is divisible by -1, so pos=3 and above all match)
-        expect(_nth_child_matches("-n+3", 3)).to_equal(true)
-        expect(_nth_child_matches("-n+3", 2)).to_equal(false)
+        # -n+3 selects the FIRST three siblings (Chrome 159: 1, 2, 3 of 6).
+        # This row used to pin the opposite (2 rejected, 3 and above
+        # accepted), which was the matcher's negative-A bug.
+        expect(css_nth_matches("-n+3", 1)).to_equal(true)
+        expect(css_nth_matches("-n+3", 2)).to_equal(true)
+        expect(css_nth_matches("-n+3", 3)).to_equal(true)
+        expect(css_nth_matches("-n+3", 4)).to_equal(false)
+        expect(css_nth_matches("-n+3", 5)).to_equal(false)
 
     it "matches a plain integer b":
         # @req: REQ-LIB-GC-ASYNC-MUT-001
         step("Verify: matches a plain integer b")
-        expect(_nth_child_matches("3", 3)).to_equal(true)
-        expect(_nth_child_matches("3", 4)).to_equal(false)
+        expect(css_nth_matches("3", 3)).to_equal(true)
+        expect(css_nth_matches("3", 4)).to_equal(false)
 
     it "rejects a negative remainder (rem < 0) case for an+b with a<>0":
         # @req: REQ-LIB-GC-ASYNC-MUT-001
         step("Verify: rejects a negative remainder (rem < 0) case for an+b with a<>0")
         # 2n+5, pos=1 -> rem = 1-5 = -4 < 0 -> false
-        expect(_nth_child_matches("2n+5", 1)).to_equal(false)
+        expect(css_nth_matches("2n+5", 1)).to_equal(false)
 
 describe "core.spl: _part_specificity":
     it "scores an id selector":

@@ -1,0 +1,169 @@
+"""
+## Purpose and audience
+Purpose: Pin three things Chrome does for inline `<svg>` content that the
+first svg painter got wrong: a self-closing `<rect/>` ends its element (so its
+next sibling is a sibling, not a dropped child), `fill="currentColor"` is the
+shape's computed `color`, and `viewBox` numbers may be separated by any
+whitespace. The self-closing flag is honoured ONLY in foreign content: on an
+HTML element (`<div/>`) Chrome ignores it.
+Audience: browser-engine parser and paint maintainers.
+
+Chrome oracle (Chrome for Testing 159, `--headless=old`, 900x760 screenshot,
+pixels probed from the PNG, boxes from getBoundingClientRect; page
+`<!doctype html>`, `*{box-sizing:border-box}body{margin:0;font:16px/1.5 sans-serif}`,
+one `<div>` at the top of `<body>`, no whitespace between siblings).
+
+The row, left to right, bottoms on one baseline at y=50:
+- s0 100x50 at (0,0): `<rect width=40 height=20 fill=#ff0000/>`,
+  `<rect x=50 y=10 width=40 height=20 fill=#0000ff/>`,
+  `<rect x=60 y=35 width=30 height=10 fill=#00ff00></rect>`
+- s1 60x30 at (100,20), `style="color:#ff00ff"`: `<rect width=30 height=30
+  fill=currentColor/>`, `<rect x=30 width=30 height=30 fill=currentcolor
+  style="color:#008000"/>`
+- s2 60x30 at (160,20), `viewBox="0<TAB>0<LF>120 60"`: `<rect width=60
+  height=60 fill=#ffa500/>`
+- s3 20x20 at (220,30) inside `<span style="color:#800000">`: `<rect width=20
+  height=20 fill=currentColor/>`
+- s4 `<svg width=30 height=30/>` at (240,20): self-closing, empty
+- s5 20x20 at (270,30): `<rect width=20 height=20 fill=#008080/>`
+
+| probe (x,y) | Chrome  | what                                              |
+|-------------|---------|---------------------------------------------------|
+| 20,10       | #ff0000 | first self-closing rect                           |
+| 45,10       | #ffffff | gap between the two rects                         |
+| 70,20       | #0000ff | SECOND self-closing rect (was dropped)            |
+| 95,20       | #ffffff | right of it                                       |
+| 75,40       | #00ff00 | third rect, after two self-closing siblings       |
+| 115,35      | #ff00ff | currentColor from the svg's `color`               |
+| 145,35      | #008000 | currentColor from the rect's own `color`          |
+| 170,35      | #ffa500 | tab/newline-separated viewBox scales 60 -> 30 px  |
+| 195,35      | #ffffff | right of that scaled rect                         |
+| 230,40      | #800000 | currentColor inherited from the surrounding span  |
+| 255,35      | #ffffff | the empty self-closing svg                        |
+| 280,40      | #008080 | the svg AFTER `<svg/>` is its sibling, not a child|
+
+Control, boxes: `<div id="x"/><span id="y">in</span>` -- Chrome keeps the div
+open, so the span is its child: x is 900x24 and y sits at y=3 inside it.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-REPLACED-006 — self-closing foreign elements, currentColor fills and whitespace-separated viewBox paint like Chrome.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/html_tree_builder.spl 1%
+use std.spec.*
+use std.common.ui.draw_ir.{DrawIrCommand, DRAW_IR_COMMAND_RECT}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_draw_ir, simple_web_layout_debug_layout_by_id
+}
+
+val HEAD: text = "<html><head><style>*{box-sizing:border-box}body{margin:0;font:16px/1.5 sans-serif}</style></head><body><div>"
+
+val ROW: text = "<svg width=\"100\" height=\"50\"><rect width=\"40\" height=\"20\" fill=\"#ff0000\"/><rect x=\"50\" y=\"10\" width=\"40\" height=\"20\" fill=\"#0000ff\"/><rect x=\"60\" y=\"35\" width=\"30\" height=\"10\" fill=\"#00ff00\"></rect></svg><svg width=\"60\" height=\"30\" style=\"color:#ff00ff\"><rect width=\"30\" height=\"30\" fill=\"currentColor\"/><rect x=\"30\" width=\"30\" height=\"30\" fill=\"currentcolor\" style=\"color:#008000\"/></svg><svg width=\"60\" height=\"30\" viewBox=\"0\t0\n120 60\"><rect width=\"60\" height=\"60\" fill=\"#ffa500\"/></svg><span style=\"color:#800000\"><svg width=\"20\" height=\"20\"><rect width=\"20\" height=\"20\" fill=\"currentColor\"/></svg></span><svg width=\"30\" height=\"30\"/><svg width=\"20\" height=\"20\"><rect width=\"20\" height=\"20\" fill=\"#008080\"/></svg>"
+val HTML_SELF_CLOSING: text = "<div id=\"x\"/><span id=\"y\">in</span>"
+
+fn commands_of(inner: text) -> [DrawIrCommand]:
+    val composition = simple_web_layout_render_html_draw_ir(HEAD + inner + "</div></body></html>", 900, 200)
+    var out: [DrawIrCommand] = []
+    for batch in composition.batches:
+        for command in batch.commands:
+            out.push(command)
+    out
+
+fn style_int(c: DrawIrCommand, key: text) -> i32:
+    for p in c.computed_style:
+        if p.key == key:
+            return p.value.to_i32()
+    0
+
+# True when pixel (px,py) lies inside the command's box rounded by `radius`
+# (pixel-centre test in doubled coordinates, so no fractions are needed).
+fn covers_rounded(c: DrawIrCommand, px: i32, py: i32, radius: i32) -> bool:
+    if px < c.x or py < c.y or px >= c.x + c.width or py >= c.y + c.height:
+        return false
+    var r = radius
+    if r * 2 > c.width:
+        r = c.width / 2
+    if r * 2 > c.height:
+        r = c.height / 2
+    if r <= 0:
+        return true
+    val cx2 = px * 2 + 1
+    val cy2 = py * 2 + 1
+    var ax2 = cx2
+    var ay2 = cy2
+    val left2 = (c.x + r) * 2
+    val right2 = (c.x + c.width - r) * 2
+    val top2 = (c.y + r) * 2
+    val bottom2 = (c.y + c.height - r) * 2
+    if cx2 < left2:
+        ax2 = left2
+    elif cx2 > right2:
+        ax2 = right2
+    if cy2 < top2:
+        ay2 = top2
+    elif cy2 > bottom2:
+        ay2 = bottom2
+    val dx = cx2 - ax2
+    val dy = cy2 - ay2
+    dx * dx + dy * dy <= (r * 2) * (r * 2)
+
+fn painted_at(cmds: [DrawIrCommand], px: i32, py: i32) -> text:
+    var color = 0u32
+    for c in cmds:
+        if c.kind != DRAW_IR_COMMAND_RECT:
+            continue
+        if c.clip_rect.present and (
+            px < c.clip_rect.x or py < c.clip_rect.y or
+            px >= c.clip_rect.x + c.clip_rect.width or
+            py >= c.clip_rect.y + c.clip_rect.height
+        ):
+            continue
+        if not covers_rounded(c, px, py, style_int(c, "border-radius")):
+            continue
+        if (c.color >> 24) == 255u32:
+            color = c.color
+    "{color & 0xFFFFFFu32}"
+
+fn rgb(r: i32, g: i32, b: i32) -> text:
+    "{r * 65536 + g * 256 + b}"
+
+fn probe(inner: text, id: text, name: text) -> text:
+    simple_web_layout_debug_layout_by_id(
+        HEAD + inner + "</div></body></html>", 900, 760, id, name)
+
+describe "inline svg foreign content is parsed and painted like Chrome":
+    it "AC-1: a self-closing <rect/> does not swallow its next sibling":
+        step("Chrome: red at (20,10), white gap at (45,10), the second rect's blue at (70,20), white at (95,20)")
+        val cmds = commands_of(ROW)
+        expect(painted_at(cmds, 20, 10)).to_equal(rgb(255, 0, 0))
+        expect(painted_at(cmds, 45, 10)).to_equal(rgb(255, 255, 255))
+        expect(painted_at(cmds, 70, 20)).to_equal(rgb(0, 0, 255))
+        expect(painted_at(cmds, 95, 20)).to_equal(rgb(255, 255, 255))
+
+    it "AC-2: an explicitly closed rect after self-closing siblings is painted":
+        step("Chrome: green at (75,40)")
+        expect(painted_at(commands_of(ROW), 75, 40)).to_equal(rgb(0, 255, 0))
+
+    it "AC-3: fill=currentColor is the shape's computed color, any letter case":
+        step("Chrome: the svg's #ff00ff at (115,35); the rect's own #008000 at (145,35); the span's #800000 at (230,40)")
+        val cmds = commands_of(ROW)
+        expect(painted_at(cmds, 115, 35)).to_equal(rgb(255, 0, 255))
+        expect(painted_at(cmds, 145, 35)).to_equal(rgb(0, 128, 0))
+        expect(painted_at(cmds, 230, 40)).to_equal(rgb(128, 0, 0))
+
+    it "AC-4: a viewBox separated by tab and newline still scales the shapes":
+        step("Chrome: orange at (170,35), white at (195,35) right of the 30 px wide scaled rect")
+        val cmds = commands_of(ROW)
+        expect(painted_at(cmds, 170, 35)).to_equal(rgb(255, 165, 0))
+        expect(painted_at(cmds, 195, 35)).to_equal(rgb(255, 255, 255))
+
+    it "AC-5: a self-closing <svg/> is empty and the next svg is its sibling":
+        step("Chrome: white at (255,35) inside the empty svg; teal at (280,40) in the svg after it")
+        val cmds = commands_of(ROW)
+        expect(painted_at(cmds, 255, 35)).to_equal(rgb(255, 255, 255))
+        expect(painted_at(cmds, 280, 40)).to_equal(rgb(0, 128, 128))
+
+    it "AC-6 (control): the self-closing flag is ignored on an HTML element":
+        step("Chrome: <div id=x/> stays open -- 900x24 with the span inside it at y=3")
+        expect(probe(HTML_SELF_CLOSING, "x", "w") + "x" + probe(HTML_SELF_CLOSING, "x", "h")).to_equal("900x24")
+        expect(probe(HTML_SELF_CLOSING, "y", "y")).to_equal("3")

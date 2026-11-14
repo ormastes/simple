@@ -768,7 +768,7 @@ emitting any `rt_*_free` from lowering; `emit_function_drops` is not a safe hook
 ## 2026-11-14 — JIT block-end array release (slice S1)
 
 - On the in-process JIT lane (`lower_to_mir_jit` only) lowering emits `rt_array_free(local)`
-  where a statement list falls through, for array locals with int/float/bool elements that
+  where a statement list falls through, for array locals with int/bool elements that
   `block_release_locals` (`mir/lower/array_move.rs`, `ReleaseScan`) proves have one holder.
   Design: `doc/05_design/compiler/jit_memory/seed_jit_array_reclamation.md`.
 - It is an allowlist. The only uses that keep a local eligible are `a[i]` reads yielding a
@@ -791,4 +791,42 @@ emitting any `rt_*_free` from lowering; `emit_function_drops` is not a safe hook
   It does not catch reads through Cranelift-inlined accessors.
 - Tests: `mir/lower/tests/array_release_tests.rs`, `runtime/src/value/transient_scope_state_tests.rs`,
   `test/01_unit/compiler_core/interpreter/jit_block_array_release_spec.spl` (9 release
-  forms, 26 escape forms that must stay unreleased).
+  forms, 27 forms that must stay unreleased incl. float arrays, one open-transient-scope case).
+- Float arrays are excluded: `from_float` heap-boxes each element, so a shallow free leaks
+  the boxes (2M-iteration `[1.5, 2.5, 3.5]` loop: 212 MB vs 39 MB empty loop).
+
+## Provider type relocation retraction (2026-11-14, opt-in)
+
+`relocate_provider_type_symbol` copies provider class/struct/enum/trait symbols
+into the CONSUMER's persistent HIR table (`self.symbols = module.symbols`); the
+per-consumer p1 native-trait walk makes even a facade retain every type a
+provider trait signature names (~955 KiB/module on the bootstrap_main closure).
+`SIMPLE_MIR_RETRACT_PROVIDER_TYPES=1` / `retract_provider_type_relocations`
+retracts the journaled copies (`provider_type_relocation_journal`) after
+`s5_scope_end` on the success path of `lower_module_transient_scoped`, via
+`SymbolTable.retract_symbol_rows_v1`. Default OFF until a Stage 2 run flips it
+(record: `stage2_compiler_cli_build_mir_shard_share_unbounded_2026-11-06.md`,
+"Item 1" section). Traps met:
+
+- **Byte-identical MIR means identical ids**: `mir_json` serializes
+  `Struct/Enum(symbol)` as the raw id, so any design that changes WHICH
+  provider types get relocated (demand-driven p1, a shared relocation table)
+  renumbers MIR. Only post-promotion retraction keeps the MIR unchanged.
+- **Demand-driven p1 is unsafe anyway**: `native_trait_conversion.spl` builds a
+  concrete type's runtime trait-cast dispatcher from ALL impls of that owner,
+  including traits the lowering module never names.
+- **Never rewind `next_symbol_id`** on a retraction: a reissued id would alias
+  a stale holder to a different symbol; a retired id can only miss.
+- **`Dict.remove` differs by lane** (returns a new dict interpreted, mutates
+  natively): rebuild the map without the keys, filtering by VALUE for the
+  text->id indexes (`qualified_types`, `module_callables`).
+- **No new `SymbolTable` field**: `20.hir/generated/hir_codec.spl` constructs it
+  literally; a field means regenerating the codec. Add methods instead.
+- **Journal fields follow the Stage 4 rule**: copy, push, store back; add the
+  field to `transient_owner.spl`'s promote inventory
+  (`check-mir-transient-scope-boundary.shs`) and hand it across the lifted-
+  lambda nested lowerer in both directions (`switch_operators_calls.spl`).
+- **`mir_module_canonical_fingerprint_v1` is not run-to-run stable on the seed
+  for type-defining modules** (`{t.kind}` struct Display, hash order) -- compare
+  serialized rows, not the fingerprint
+  (`mir_canonical_fingerprint_type_row_hash_order_seed_2026-11-14.md`).

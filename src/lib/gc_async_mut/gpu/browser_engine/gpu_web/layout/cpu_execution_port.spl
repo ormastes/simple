@@ -73,11 +73,18 @@ impl LayoutExecutionPort for BrowserCpuLayoutExecutionPort:
                 var line_index: i64 = 0
                 while line_index < line_count:
                     val line_height = self.prepared.styles[index].resolved_font_line_height
+                    # A run that starts mid-line insets its FIRST line only
+                    # (LayoutResult.first_line_dx); the line box carries that
+                    # inset so `browser_cpu_layout_reconstruct` can recover it.
+                    val line_dx: i64 = if line_index == 0 and index < selected.layout.first_line_dx.len():
+                        selected.layout.first_line_dx[index] as i64
+                    else:
+                        0
                     val line_box = layout_box(
                         structural_id,
-                        box.x,
+                        box.x + line_dx,
                         box.y + line_index * (line_height as i64),
-                        box.width,
+                        box.width - line_dx,
                         line_height as i64
                     )
                     line_boxes.push(layout_line_box(
@@ -139,16 +146,23 @@ fn browser_cpu_layout_reconstruct(
             bh[index] = box.height as i32
             starts[index] = []
             ends[index] = []
+    var first_line_dx: [i32] = []
     for line in snapshot.line_boxes:
         val index = line.node_id - 1
         if index >= 0 and index < prepared.nodes.len():
+            val line_dx = (line.box.x as i32) - bx[index]
+            if line.line_index == 0 and line_dx > 0:
+                if first_line_dx.len() == 0:
+                    first_line_dx = [0; node_count]
+                first_line_dx[index] = line_dx
             starts[index].push(line.text_start as i32)
             ends[index].push(line.text_end as i32)
     LayoutResult(
         bx: bx, by: by, bw: bw, bh: bh,
         wrap_starts: starts, wrap_ends: ends,
         intrinsic_widths: intrinsic,
-        height: if bh.len() > 0: bh[0] else: 0
+        height: if bh.len() > 0: bh[0] else: 0,
+        first_line_dx: first_line_dx
     )
 
 export BrowserCpuLayoutExecutionPort, browser_cpu_layout_execution_port

@@ -1,0 +1,71 @@
+# PTY shell kinds: which program a pane runs (design
+# doc/05_design/pty_shell_kinds_shs_default.md).
+#
+#   shs     the Simple shell (os.apps.shell ShellApp) — one command language
+#           on every OS; the ONLY kind on SimpleOS.
+#   native  the host's own shell (/bin/sh, cmd.exe); refused on SimpleOS,
+#           which has no interpreter for native scripts.
+#
+# Selection is text in, text out, so it runs unchanged on every host and is
+# spec'd without spawning anything. Spawning stays in std.sys.pty.
+use std.sffi.platform.{platform_name_raw}
+use std.nogc_sync_mut.sffi.env.{env_get_unchecked, env_cwd_raw}
+use std.nogc_sync_mut.io.file_ops.{file_exists}
+
+pub const PTY_SHELL_SHS = "shs"
+pub const PTY_SHELL_NATIVE = "native"
+pub const PTY_SHS_SIMPLEOS_COMMAND = "/sys/apps/shell"
+pub const PTY_SHS_HOSTED_ENTRY = "src/app/shs/main.spl"
+
+fn _is_simpleos(platform: text) -> bool:
+    platform.lower().contains("simpleos")
+
+# Pure: the command line that starts `kind` on `platform`. `shs_command` is
+# the hosted shs launcher, "" when none is known.
+pub fn pty_shell_command_for_v1(kind: text, platform: text, shs_command: text) -> Result<text, text>:
+    if kind == PTY_SHELL_NATIVE:
+        if _is_simpleos(platform): return Err("pty-shell-native-unavailable-on-simpleos")
+        if platform.lower().contains("windows"): return Ok("cmd.exe")
+        return Ok("/bin/sh")
+    if kind == PTY_SHELL_SHS:
+        if _is_simpleos(platform): return Ok(PTY_SHS_SIMPLEOS_COMMAND)
+        if shs_command == "": return Err("pty-shell-shs-launcher-unresolved")
+        return Ok(shs_command)
+    Err("pty-shell-kind-unknown")
+
+# Pure: the kind a pane gets when the caller names none. SimpleOS has only
+# shs. Hosts stay native until hosted shs can reach host files and programs
+# (design §5); `requested` (SIMPLE_PTY_SHELL) opts a host in.
+pub fn pty_shell_kind_for_v1(requested: text, platform: text) -> text:
+    if _is_simpleos(platform): return PTY_SHELL_SHS
+    if requested == PTY_SHELL_SHS: return PTY_SHELL_SHS
+    PTY_SHELL_NATIVE
+
+# Pure: default command with the host fallback. A host whose shs launcher is
+# unknown gets its native shell rather than a dead pane; SimpleOS never falls
+# back to native.
+pub fn pty_default_shell_for_v1(requested: text, platform: text, shs_command: text) -> text:
+    val chosen = pty_shell_command_for_v1(pty_shell_kind_for_v1(requested, platform), platform, shs_command)
+    if chosen.is_ok(): return chosen.unwrap()
+    pty_shell_command_for_v1(PTY_SHELL_NATIVE, platform, "").unwrap_or(PTY_SHS_SIMPLEOS_COMMAND)
+
+# Hosted shs launcher: SIMPLE_SHS_COMMAND verbatim, else
+# `$SIMPLE_BINARY <cwd>/src/app/shs/main.spl` when that entry exists.
+pub fn pty_shs_hosted_command_v1() -> text:
+    val explicit = env_get_unchecked("SIMPLE_SHS_COMMAND") ?? ""
+    if explicit != "": return explicit
+    val binary = env_get_unchecked("SIMPLE_BINARY") ?? ""
+    val entry = env_cwd_raw() + "/" + PTY_SHS_HOSTED_ENTRY
+    if binary == "" or not file_exists(entry): return ""
+    binary + " " + entry
+
+pub fn pty_shell_command_v1(kind: text) -> Result<text, text>:
+    pty_shell_command_for_v1(kind, platform_name_raw(), pty_shs_hosted_command_v1())
+
+pub fn pty_default_shell_v1() -> text:
+    pty_default_shell_for_v1(env_get_unchecked("SIMPLE_PTY_SHELL") ?? "", platform_name_raw(),
+        pty_shs_hosted_command_v1())
+
+export PTY_SHELL_SHS, PTY_SHELL_NATIVE, PTY_SHS_SIMPLEOS_COMMAND, PTY_SHS_HOSTED_ENTRY
+export pty_shell_command_for_v1, pty_shell_kind_for_v1, pty_default_shell_for_v1
+export pty_shs_hosted_command_v1, pty_shell_command_v1, pty_default_shell_v1

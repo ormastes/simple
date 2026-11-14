@@ -37,6 +37,20 @@ class _TreeStack:
     fn root_or(fallback: BeDomNode) -> BeDomNode:
         if self.length > 0: self.nodes[0] else: fallback
 
+    fn in_foreign_content() -> bool:
+        """True when the current node is SVG or MathML content: the nearest
+        open `svg`/`math` is reached before an open `foreignObject` (an HTML
+        integration point, whose children are HTML again)."""
+        var i = self.length - 1
+        while i >= 0:
+            val tag = be_dom_get_tag(self.nodes[i])
+            if tag == "foreignobject":
+                return false
+            if tag == "svg" or tag == "math":
+                return true
+            i = i - 1
+        false
+
     fn find_tag(tag: text) -> i32:
         var i = self.length - 1
         while i >= 0:
@@ -576,7 +590,15 @@ pub fn html_tree_builder_build_with_parse_limits(
                 val in_table_ctx = _is_table_context(top_tag)
                 val is_table_content = _is_table_content(t)
 
-                if _is_void(t):
+                # A self-closing start tag (`<rect/>`) ends its element at
+                # once in FOREIGN content, and on the `svg`/`math` root itself
+                # (HTML §13.2.6.5: "if the token has its self-closing flag
+                # set, pop the current node"). On an HTML element the flag is
+                # ignored -- `<div/>` stays open, as in Chrome.
+                val foreign_self_closing = tok.self_closing and not _is_void(t) and (
+                    t == "svg" or t == "math" or stack.in_foreign_content()
+                )
+                if _is_void(t) or foreign_self_closing:
                     val vn_raw = BeDomNode.element_with_id(next_node_id, t)
                     next_node_id = next_node_id + 1
                     val vnode = _apply_attrs(vn_raw, tok.attrs)

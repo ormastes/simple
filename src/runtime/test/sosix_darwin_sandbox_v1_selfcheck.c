@@ -88,6 +88,10 @@ int main(int argc, char** argv) {
 
     /* Parent-owned listeners: the attempt broker socket and a loopback port. */
     char sock[1200]; snprintf(sock, sizeof sock, "%s/ipc/broker.sock", att); unlink(sock);
+    /* strncpy below would silently truncate and bind a DIFFERENT path. */
+    if (strlen(sock) >= sizeof ((struct sockaddr_un*)0)->sun_path) {
+        fprintf(stderr, "state_root too long: broker socket path exceeds sun_path\n"); return 2;
+    }
     int ul = socket(AF_UNIX, SOCK_STREAM, 0);
     struct sockaddr_un ua; memset(&ua, 0, sizeof ua); ua.sun_family = AF_UNIX;
     strncpy(ua.sun_path, sock, sizeof ua.sun_path - 1);

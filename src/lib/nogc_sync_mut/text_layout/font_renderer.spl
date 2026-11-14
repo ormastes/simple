@@ -317,6 +317,7 @@ use std.nogc_sync_mut.text_layout.font_provider.{
     browser_font_dylib_candidates,
     browser_serif_font_candidates,
     browser_font_candidates_for_family,
+    browser_font_family_category,
     browser_family_has_host_face,
     browser_platform_hangul_faces,
     browser_bundled_font_path_for_family
@@ -2936,11 +2937,34 @@ class FontRenderer:
         self.stage_text_with_advances_configured(content, advance_widths, color, config)
         self.staged_batch()
 
+    # Per-codepoint integer glyph advances: the pen `_stage_text_active`'s
+    # no-layout fallback places quads with.
+    me _glyph_pen_advances(content: text, font_size: i32) -> [i32]:
+        val cps = text_codepoints(content)
+        var out: [i32] = [0; cps.len()]
+        var ci = 0
+        while ci < cps.len():
+            out[ci] = self.get_glyph(cps[ci] as i32, font_size).advance
+            ci = ci + 1
+        out
+
     me stage_text_with_advances_configured(content: text, advance_widths: [i32], color: u32, config: FontRenderConfig) -> i64:
         if not font_render_config_selection_supported(config) or not self._ensure_render_config_face(config):
             return self._stage_invalid_config(config)
         self._activate_render_config(config)
-        val natural_advances = self.measure_text_advances(content, config.size)
+        # `natural_advances` must describe the pen the quads were ACTUALLY
+        # staged at, or the re-layout shift carries the difference into the
+        # quads. When the rasterizer has no layout of its own,
+        # `_stage_text_active` walks the per-glyph INTEGER advances, while
+        # `measure_text_advances` snaps a FRACTIONAL cumulative pen; feeding
+        # the latter leaked the rounding gap into every glyph and accumulated
+        # (+4 px by the last glyph of a 31-glyph 24 px run, which the CPU
+        # lane's run-width clip then cut in half).
+        # test/01_unit/lib/nogc_sync_mut/text_layout/advance_staging_pen_drift_spec.spl
+        val natural_advances = if self.layout_text(content, config.size, 0).len() == 0:
+            self._glyph_pen_advances(content, config.size)
+        else:
+            self.measure_text_advances(content, config.size)
         self._stage_text_active(content, color, config.size)
         # The advance re-layout rewrites the staged quads IN PLACE (array
         # element assignment on a local, then one field store) instead of the
@@ -3239,18 +3263,10 @@ fn _resolved_font_category(family: text) -> text:
     computed
 
 fn _resolved_font_category_uncached(family: text) -> text:
-    val normalized = family.trim().lower()
-    for candidate in selected_font_asset_candidates():
-        if candidate.family.lower() == normalized:
-            return candidate.category
-    if (normalized.contains("mono") or normalized.contains("courier") or
-        normalized.contains("code") or normalized.contains("console")):
-        return "mono"
-    if normalized.contains("sans") or normalized.contains("arial") or normalized.contains("helvetica"):
-        return "sans"
-    if normalized.contains("serif") or normalized.contains("times") or normalized.contains("georgia"):
-        return "serif"
-    ""
+    # Per-name, in list order — the one resolver the candidate lists use
+    # (font_provider.spl § Family-LIST resolution), not a substring test over
+    # the whole value.
+    browser_font_family_category(family)
 
 fn _resolved_font_empty_shaped() -> _ResolvedShapedGlyphRun:
     _ResolvedShapedGlyphRun(valid: false, payload: draw_ir_empty_glyph_run_payload(), advances: [], width: 0)

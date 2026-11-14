@@ -154,3 +154,28 @@ nested_string_split_spec 5/5 PASS. Regression test:
 `cargo test -p simple-compiler --lib shared_method_static_split` (2 passed).
 The pure-Simple MIR fix in method_calls_literals.spl is unaffected (the seed never
 executes it). Evidence: build/review/p3fix-seedfix-20261110.sdn.
+
+## 2026-11-14 seed JIT re-check (Rust seed only; not an admitted binary)
+
+- The `run`/JIT lane on the 2026-11-06 seed ignored the limit entirely
+  (`"a:b:c".split(":", 2)` gave 3 parts) and raised
+  `Function 'str.split' not found` for `"abc".split("")`. A seed rebuilt from
+  `origin/release/1.0.0` (which carries `989a4151546`, 2026-11-10) honours the
+  limit for literal, variable, 1, 0, negative, larger-than-parts and
+  missing-separator cases, and the DevHub curl fixture
+  (`authority_tail.split("/", 2)[0]`) passes.
+- Remaining seed defect, fixed here: `rt_string_split_limit`
+  (`src/compiler_rust/runtime/src/value/collections.rs`) split an empty
+  separator into single BYTES, so `"é✓日".split("", 2)` panicked
+  ("not a char boundary") inside an `extern "C"` fn and aborted the process.
+  It now splits on codepoints, matching the interpreter's bounded arm:
+  `["é", "✓日"]`. Red/green: runtime test
+  `test_string_split_limit_matches_interpreter_bounded_split` (SIGABRT before,
+  pass after).
+- Still divergent and NOT changed here (owner decision): unbounded
+  `"abc".split("")` is `[a, b, c, ""]` in the seed runtime, `["", a, b, c, ""]`
+  in the seed interpreter (Rust `str::split`), and `[a, b, c]` in the C runtime
+  (`rt_string_chars`). The C runtime's bounded empty-separator arm also splits
+  bytes, not codepoints.
+- Status unchanged: still waits for the admitted pure-Simple
+  interpreter + native run named above.

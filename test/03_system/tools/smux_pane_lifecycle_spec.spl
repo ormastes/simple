@@ -1,8 +1,9 @@
 """
 REQ-CMUX-002/004/005/008/010: checked pane closure, focus and final-owner lifetime.
 Source-authored NOT_RUN. Pure state refusals are not native close-failure proof.
-The final three cases spawn real Windows children: the PID-presence case runs on
-Windows only; the piped and ConPTY cases also require Phase 3.
+The final three cases spawn real children: the PID-presence case runs on
+Windows only; the piped and PTY cases run the host shell (cmd.exe on Windows,
+where they also require Phase 3; the SOSIX default shell elsewhere).
 # @manual: primary
 # @capture: text
 """
@@ -21,7 +22,7 @@ use os.apps.smux.api.{smux_reset_for_test, smux_create_session, smux_new_window,
     smux_split_pane, smux_focus_pane, smux_focused_pane, smux_rollback_split,
     smux_pane_spawn, smux_pane_spawn_pty, smux_send_command, smux_capture}
 use std.sosix.time.{sosix_time_now_monotonic_ms, sosix_sleep_ms}
-use std.sosix.pty.{sosix_pty_cleanup_pending}
+use std.sosix.pty.{sosix_pty_cleanup_pending, sosix_pty_default_shell}
 use std.sosix.process.{sosix_process_exists}
 use std.platform.{is_windows}
 
@@ -59,6 +60,20 @@ fn pane_lifecycle_output(session: text, window: text, pane: text, marker: text) 
         attempts = attempts + 1
     return output
 
+# The closure contract is host-neutral; only the shell that computes the sums
+# differs. The sum is absent from the typed command, so echo is not an oracle.
+fn pane_lifecycle_shell_args() -> [text]:
+    if is_windows(): return ["/Q"]
+    return []
+
+fn pane_lifecycle_shell_line() -> text:
+    if is_windows(): return "cmd.exe /Q"
+    return sosix_pty_default_shell()
+
+fn pane_lifecycle_sum(left: text, right: text) -> text:
+    if is_windows(): return "set /a " + left + "+" + right
+    return "expr " + left + " + " + right
+
 fn pane_lifecycle_native_case(use_pty: bool):
     smux_reset_for_test()
     val session = smux_create_session("checked-pane")
@@ -66,11 +81,11 @@ fn pane_lifecycle_native_case(use_pty: bool):
     val first = smux_list_panes(session.id, window.id)[0]
     val second = smux_split_pane(session.id, window.id, first.id, "vertical").unwrap()
     step("Spawn two real owned children; observe actual command output before closing")
-    val target = if use_pty: smux_pane_spawn_pty(session.id, window.id, first.id, "cmd.exe /Q")
-        else: smux_pane_spawn(session.id, window.id, first.id, "cmd.exe", ["/Q"])
-    val survivor = if use_pty: smux_pane_spawn_pty(session.id, window.id, second.id, "cmd.exe /Q")
-        else: smux_pane_spawn(session.id, window.id, second.id, "cmd.exe", ["/Q"])
-    val first_sent = smux_send_command(session.id, window.id, first.id, "set /a 3141+2718")
+    val target = if use_pty: smux_pane_spawn_pty(session.id, window.id, first.id, pane_lifecycle_shell_line())
+        else: smux_pane_spawn(session.id, window.id, first.id, sosix_pty_default_shell(), pane_lifecycle_shell_args())
+    val survivor = if use_pty: smux_pane_spawn_pty(session.id, window.id, second.id, pane_lifecycle_shell_line())
+        else: smux_pane_spawn(session.id, window.id, second.id, sosix_pty_default_shell(), pane_lifecycle_shell_args())
+    val first_sent = smux_send_command(session.id, window.id, first.id, pane_lifecycle_sum("3141", "2718"))
     val first_output = pane_lifecycle_output(session.id, window.id, first.id, "5859")
     # These Windows providers return real OS PIDs. Query arbitrary-PID presence through the existing host owner,
     # independently of the pane/pipe registry that successful close removes.
@@ -87,7 +102,7 @@ fn pane_lifecycle_native_case(use_pty: bool):
         closed = smux_close_pane(session.id, window.id, first.id)
         attempts = attempts + 1
     val remaining = smux_list_panes(session.id, window.id)
-    val sent = smux_send_command(session.id, window.id, second.id, "set /a 1618+1414")
+    val sent = smux_send_command(session.id, window.id, second.id, pane_lifecycle_sum("1618", "1414"))
     val output = pane_lifecycle_output(session.id, window.id, second.id, "3032")
     val target_exists_after_close = target_pid > 0 and sosix_process_exists(target_pid)
     val survivor_exists_after_close = survivor_pid > 0 and sosix_process_exists(survivor_pid)

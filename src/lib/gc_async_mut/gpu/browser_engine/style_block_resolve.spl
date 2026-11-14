@@ -9,6 +9,7 @@
 #   - DOM traversal helpers for :has() (descendant/child)
 
 use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
+use std.gc_async_mut.gpu.browser_engine.css_nth.{css_nth_matches}
 use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
     be_dom_get_tag, be_dom_get_id, be_dom_get_classes, be_dom_get_children,
     be_dom_get_is_text, be_dom_get_text, be_dom_has_attr, be_dom_get_attr}
@@ -99,25 +100,25 @@ pub fn simple_selector_matches(selector: text, node: BeDomNode, nth: i32, siblin
 
     val pseudo_empty_pos = sb_find(sel, ":empty", 0)
     if pseudo_empty_pos > 0 and pseudo_empty_pos < 999999999:
-        if pseudo_empty_pos + 6 != sel.len():
+        if pseudo_empty_pos + 6 != sel.byte_len():
             return false
         val base = sel.slice(0, pseudo_empty_pos)
         return simple_selector_matches(base, node, nth, sibling_count) and node_is_empty(node)
     val pseudo_first_child_pos = sb_find(sel, ":first-child", 0)
     if pseudo_first_child_pos > 0 and pseudo_first_child_pos < 999999999:
-        if pseudo_first_child_pos + 12 != sel.len():
+        if pseudo_first_child_pos + 12 != sel.byte_len():
             return false
         val base2 = sel.slice(0, pseudo_first_child_pos)
         return simple_selector_matches(base2, node, nth, sibling_count) and nth == 1
     val pseudo_last_child_pos = sb_find(sel, ":last-child", 0)
     if pseudo_last_child_pos > 0 and pseudo_last_child_pos < 999999999:
-        if pseudo_last_child_pos + 11 != sel.len():
+        if pseudo_last_child_pos + 11 != sel.byte_len():
             return false
         val base3 = sel.slice(0, pseudo_last_child_pos)
         return simple_selector_matches(base3, node, nth, sibling_count) and nth == sibling_count
     val pseudo_only_child_pos = sb_find(sel, ":only-child", 0)
     if pseudo_only_child_pos > 0 and pseudo_only_child_pos < 999999999:
-        if pseudo_only_child_pos + 11 != sel.len():
+        if pseudo_only_child_pos + 11 != sel.byte_len():
             return false
         val base4 = sel.slice(0, pseudo_only_child_pos)
         return simple_selector_matches(base4, node, nth, sibling_count) and nth == 1 and sibling_count == 1
@@ -175,53 +176,14 @@ pub fn simple_selector_matches(selector: text, node: BeDomNode, nth: i32, siblin
     val ntag3 = be_dom_get_tag(node)
     ntag3 == sel
 
+# `:nth-child()` argument test. Delegates to the shared An+B evaluator
+# (css_nth.spl); this file used to carry its own copy that knew only 2n,
+# 2n+1, 2n-1, n+3 and -n+3, so e.g. `3n+1` matched nothing.
 fn nth_child_argument_matches(arg: text, nth: i32) -> bool:
-    val trimmed = nth_child_remove_ws(arg.trim().lower())
-    if trimmed == "odd":
-        return nth % 2 == 1
-    if trimmed == "even":
-        return nth % 2 == 0
-    val n_pos = sb_find(trimmed, "n", 0)
-    if n_pos < 999999999:
-        return nth_child_common_formula_matches(trimmed, nth)
-    val target_n = sb_parse_int(trimmed)
-    nth == target_n
-
-fn nth_child_common_formula_matches(formula: text, nth: i32) -> bool:
-    if formula == "2n" or formula == "even":
-        return nth % 2 == 0
-    if formula == "2n+1" or formula == "2n-1" or formula == "odd":
-        return nth % 2 == 1
-    if formula == "n+3":
-        return nth >= 3
-    if formula == "-n+3":
-        return nth <= 3
-    false
-
-fn nth_child_remove_ws(value: text) -> text:
-    # char_at() is character-indexed while slice()/len() are byte-indexed
-    # on the deployed seed; mixing char_at(i) with a byte-length loop
-    # bound silently stops matching once i exceeds the character count on
-    # non-ASCII input, and byte-by-byte reconstruction via `out = out +
-    # ch` shreds multi-byte content into U+FFFD fragments regardless.
-    # Whitespace bytes are all single ASCII bytes, so byte-stepping to
-    # find them is safe; copy whole runs via slice() between them. This
-    # also drops the O(i) per-call cost char_at() pays walking from the
-    # string start, so the scan is truly O(n) instead of O(n^2).
-    var out = ""
-    var seg_start = 0
-    var idx = 0
-    val len = value.byte_len()
-    while idx < len:
-        val ch = value.slice(idx, idx + 1)
-        if ch == " " or ch == "\t" or ch == "\n" or ch == "\r":
-            out = out + value.slice(seg_start, idx)
-            seg_start = idx + 1
-        idx = idx + 1
-    out + value.slice(seg_start, len)
+    css_nth_matches(arg, nth as i64)
 
 fn selector_class_chain_matches(selector: text, node: BeDomNode) -> bool:
-    # See nth_child_remove_ws above for why slice(i, i+1) (not char_at(i))
+    # slice(i, i+1) is byte-indexed like the loop bound; char_at(i) is not
     # is required here.
     val trimmed = selector.trim()
     if not trimmed.starts_with("."):
@@ -229,8 +191,9 @@ fn selector_class_chain_matches(selector: text, node: BeDomNode) -> bool:
     var saw_class = false
     var segment_start = 1
     var idx = 1
-    while idx <= trimmed.len():
-        if idx == trimmed.len() or trimmed.slice(idx, idx + 1) == ".":
+    val trimmed_blen = trimmed.byte_len()
+    while idx <= trimmed_blen:
+        if idx == trimmed_blen or trimmed.slice(idx, idx + 1) == ".":
             val cls = trimmed.slice(segment_start, idx).trim()
             if cls.len() == 0 or not sb_has_class(node, cls):
                 return false
@@ -289,7 +252,7 @@ fn attribute_selector_matches(selector: text, node: BeDomNode, nth: i32, sibling
 fn sb_attr_operator(body: text, eq_pos: i32) -> text:
     # eq_pos comes from sb_find(), which returns a BYTE offset; char_at()
     # is character-indexed, so it must not be used against a byte offset
-    # (see nth_child_remove_ws above).
+    # (byte-indexed slice, as above).
     if eq_pos > 0:
         val marker = body.slice(eq_pos - 1, eq_pos)
         if marker == "^" or marker == "$" or marker == "*" or marker == "~" or marker == "|":
@@ -337,7 +300,7 @@ fn sb_attr_token_contains(actual: text, expected: text) -> bool:
     false
 
 fn sb_unquote_attr_value(value: text) -> text:
-    if value.len() >= 2:
+    if value.byte_len() >= 2:
         if (value.starts_with("\"") and value.ends_with("\"")) or (value.starts_with("'") and value.ends_with("'")):
             return value.slice(1, value.byte_len() - 1)
     value

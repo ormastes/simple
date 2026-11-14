@@ -106,6 +106,7 @@ pub fn handle_int_methods(
                 env: captured,
             } = func
             {
+                let _closure_origin = crate::interpreter::interpreter_module::ClosureOriginGuard::enter_closure(&captured);
                 for i in 0..n.max(0) {
                     let mut local_env = Env::clone(&captured);
                     if let Some(param) = params.first() {
@@ -499,6 +500,7 @@ pub fn handle_bool_methods(
                     env: captured,
                 } = func
                 {
+                    let _closure_origin = crate::interpreter::interpreter_module::ClosureOriginGuard::enter_closure(&captured);
                     let mut local_env = Env::clone(&captured);
                     let result = evaluate_expr(&body, &mut local_env, functions, classes, enums, impl_methods)?;
                     return Ok(Some(Value::some(result)));
@@ -517,6 +519,7 @@ pub fn handle_bool_methods(
                 env: captured,
             } = func
             {
+                let _closure_origin = crate::interpreter::interpreter_module::ClosureOriginGuard::enter_closure(&captured);
                 let mut local_env = Env::clone(&captured);
                 return Ok(Some(evaluate_expr(
                     &body,

@@ -1,9 +1,9 @@
 # @cover src/os/apps/smux/api.spl 80%
 # @cover src/os/apps/smux/interactive_protocol.spl 80%
 # @cover src/lib/nogc_async_mut/sosix/host_facade.spl 80%
-"""Live Windows input proof: no implicit Enter and actual shell arithmetic.
-Requires native Windows, selected real providers and a qualified SSpec runner.
-No host bypass: another OS or unavailable ConPTY must fail. TEST_BLOCKED pending.
+"""Live input proof: no implicit Enter and actual shell arithmetic.
+Requires the host's real SOSIX PTY provider (ConPTY with cmd.exe on Windows, a
+Unix PTY with /bin/sh elsewhere). No host bypass: an unavailable PTY must fail.
 """
 # @manual: primary
 # @req REQ-SMUX-INTERACTIVE-002
@@ -15,18 +15,28 @@ use os.apps.smux.api.{smux_reset_for_test, smux_create_session, smux_list_window
     smux_select_layout}
 use os.apps.smux.interactive_protocol.{smux_interactive_dispatch}
 
-describe "Windows interactive exact input delivery":
+fn exact_input_shell() -> text:
+    if sosix_platform_name() == "windows": return "cmd.exe /d /q"
+    return "/bin/sh -i"
+
+# Hex of the arithmetic command without Enter; the sum 5859 is absent from it.
+fn exact_input_command_hex() -> text:
+    # set /a 3141+2718
+    if sosix_platform_name() == "windows": return "736574202f6120333134312b32373138"
+    # echo $((3141+2718))
+    return "6563686f20242828333134312b323731382929"
+
+describe "Interactive exact input delivery":
     it "waits for an explicit Enter byte before executing the shell command":
-        expect(sosix_platform_name()).to_equal("windows")
         smux_reset_for_test()
         val session = smux_create_session("keys")
         val window = smux_list_windows(session.id)[0]
         val pane = smux_list_panes(session.id, window.id)[0]
-        expect(smux_pane_spawn_pty(session.id, window.id, pane.id, "cmd.exe /d /q").is_ok()).to_equal(true)
+        expect(smux_pane_spawn_pty(session.id, window.id, pane.id, exact_input_shell()).is_ok()).to_equal(true)
         expect(smux_select_layout(session.id, window.id, "even-horizontal", 60, 12).is_ok()).to_equal(true)
         val address = "keys " + window.id + " " + pane.id
-        step("send set /a 3141+2718 without Enter through the production input RPC")
-        expect(smux_interactive_dispatch("input " + address + " 736574202f6120333134312b32373138")).to_equal("smux: input accepted")
+        step("send the arithmetic command without Enter through the production input RPC")
+        expect(smux_interactive_dispatch("input " + address + " " + exact_input_command_hex())).to_equal("smux: input accepted")
         var output = ""
         for attempt in 0..10:
             thread_sleep_ms(20)

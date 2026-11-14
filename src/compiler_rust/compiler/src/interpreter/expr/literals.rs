@@ -298,6 +298,16 @@ pub(super) fn eval_literal_expr(
             // Imported globals can change during a nested call, so refresh only
             // bindings with exact owner provenance at the point of each read.
             if let Some(val) = env.get(name) {
+                // An imported fn referenced by its own name is a use of it by
+                // this caller (a callback parameter is local and named apart).
+                if let Value::Function { def, .. } = val {
+                    if matches!(def.visibility, simple_parser::ast::Visibility::Private)
+                        && def.name == *name
+                        && !env.is_local(name)
+                    {
+                        crate::interpreter::interpreter_call::gate_private_call(&def.name, def)?;
+                    }
+                }
                 if !env.is_local(name) && env.is_refreshed_global(name) {
                     if let Some((owner, source_name)) = env.global_binding(name) {
                         if let Some(live) = crate::interpreter::owned_global(&owner, &source_name) {
@@ -341,6 +351,7 @@ pub(super) fn eval_literal_expr(
             // Then check functions for top-level function definitions
             // Return as Value::Function for first-class function usage
             if let Some(func) = functions.get(name).cloned() {
+                crate::interpreter::interpreter_call::gate_private_call(&func.name, &func)?;
                 return Ok(Some(Value::Function {
                     name: name.clone(),
                     def: func,

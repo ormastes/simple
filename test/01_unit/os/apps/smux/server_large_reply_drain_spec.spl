@@ -15,12 +15,19 @@ own diagnostics were the few hundred KB).
 
 Fixture: a real owner and one pane that prints 2000 lines of 200 columns
 (~400 KB). The capture must carry the first and the last line.
+
+The workspace reaches a smux owner only where its backend is smux (Windows).
+Elsewhere the second example starts the same owner program directly, so the
+reply path is exercised on every host.
 """
 use std.spec.*
-use app.io.mod.{process_run, dir_create_all, dir_remove_all, file_write, file_read, cwd}
+use app.io.mod.{process_run, dir_create_all, dir_remove_all, file_write, file_read, cwd,
+    process_spawn_async, process_is_running, process_kill, current_time_ms, sleep_ms}
+use app.io.cli_ops.{cli_current_exe_path}
+use std.nogc_sync_mut.sosix.entropy.sosix_random_hex
 use app.llm_caret.agent_workspace.{agent_workspace, workspace_backend, workspace_available, session_kill, agent_attach,
     wait_for_pane_text, capture_pane, workspace_server_address, workspace_server_token_path}
-use os.apps.smux.server.{smux_server_request_within}
+use os.apps.smux.server.{smux_server_request, smux_server_request_within}
 
 fn _fixture_repo(root: text) -> text:
     val repo = root + "/repo"
@@ -78,3 +85,64 @@ describe "smux owner reply delivery":
 
         session_kill(ws)
         dir_remove_all(root)
+
+    it "delivers a 400 KB pane history whole from an owner started without a workspace":
+        # @req REQ-SMUX-OWNER-REPLY-WHOLE
+        # @capture(statistics): reply length vs pane transcript on a real owner
+        if workspace_backend() == "smux":
+            pending("covered above: the workspace owner is this same owner")
+            return
+        val token = sosix_random_hex(16) ?? ""
+        val exe = cli_current_exe_path()
+        expect(token.len()).to_equal(32)
+        expect(exe != "").to_be(true)
+        val addr = "127.0.0.1:" + (20000 + current_time_ms() % 20000).to_text()
+
+        step("A real owner process serves a loopback address")
+        val owner = process_spawn_async(exe, ["run", "src/app/hosted_apps/smux_client.spl", "--serve", addr, token])
+        var up = false
+        val start_deadline = current_time_ms() + 240000
+        while owner > 0 and not up and current_time_ms() < start_deadline:
+            up = smux_server_request(addr, token, "list-sessions").is_ok()
+            if not up: sleep_ms(500)
+
+        step("A pane prints 2000 lines of 200 columns, then idles")
+        var row = ""
+        for column in 0..200: row = row + "x"
+        val script = "i=0; while [ $i -lt 2000 ]; do echo $i " + row + "; i=$((i+1)); done; echo END_BIG; exec sleep 300"
+        var created = false
+        var spawned = false
+        if up:
+            created = smux_server_request_within(addr, token, "new big", 30000).is_ok()
+            spawned = smux_server_request_within(addr, token, "spawn-window big a 500 50 sh -c '" + script + "'", 30000).is_ok()
+
+        step("The raw owner reply carries the middle and the last line in one length-framed message")
+        var reply = ""
+        var failure = ""
+        val read_deadline = current_time_ms() + 300000
+        while spawned and not reply.contains("\nEND_BIG") and failure == "" and current_time_ms() < read_deadline:
+            val r = smux_server_request_within(addr, token, "history-joined big 2000", 120000)
+            if r.is_err():
+                failure = r.unwrap_err()
+            else:
+                reply = r.unwrap()
+                if not reply.contains("\nEND_BIG"): sleep_ms(1000)
+
+        step("Stop the owner before asserting, so no assertion can leave it running")
+        if up:
+            val _stopped = smux_server_request_within(addr, token, "stop-server", 30000)
+        val stop_deadline = current_time_ms() + 10000
+        while owner > 0 and process_is_running(owner) and current_time_ms() < stop_deadline:
+            sleep_ms(200)
+        if owner > 0 and process_is_running(owner):
+            val _killed = process_kill(owner)
+        if failure != "":
+            print("[evidence] direct reply error: " + failure)
+        expect(up).to_be(true)
+        expect(created).to_be(true)
+        expect(spawned).to_be(true)
+        expect(failure).to_equal("")
+        expect(reply.contains("\n1000 xxxx")).to_be(true)
+        expect(reply.contains("\n1999 xxxx")).to_be(true)
+        expect(reply.contains("\nEND_BIG")).to_be(true)
+        expect(reply.len()).to_be_greater_than(400000)

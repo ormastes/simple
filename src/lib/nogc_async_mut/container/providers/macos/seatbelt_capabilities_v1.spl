@@ -137,9 +137,12 @@ pub fn seatbelt_capability_status_v1(manifest: SeatbeltCapabilityManifestV1,
     SeatbeltQualificationV1(status: SEATBELT_QUALIFIED_V1, missing: [], reason: "")
 
 # Decode the native probe transcript (sosix_darwin_sandbox_v1_selfcheck.c
-# prints `canary <id> allow|deny` per observation) into a manifest. Other
-# lines are ignored; an unknown id, duplicate or unknown verdict rejects the
-# whole transcript. Unreported canaries stay not-run, so the status check
+# prints `canary <id> allow|deny` per observation) into a manifest. The
+# transcript must carry `control unconfined-reachability ok`: without the
+# unconfined control a deny proves nothing (e.g. DNS "denied" while offline),
+# and the probe prints its canary lines even when the control failed. Any
+# `FAIL` line, an unknown id, duplicate or unknown verdict rejects the whole
+# transcript; other lines are ignored. Unreported canaries stay not-run, so the status check
 # keeps a partial probe unqualified.
 pub fn seatbelt_manifest_from_probe_v1(transcript: text, os_version: text, os_build: text,
         architecture: text, helper_digest: text, profile_digest: text,
@@ -147,7 +150,13 @@ pub fn seatbelt_manifest_from_probe_v1(transcript: text, os_version: text, os_bu
     val plan = seatbelt_qualification_plan_v1()
     var results = seatbelt_manifest_unprobed_v1().canaries
     var seen: [text] = []
+    var control_ok = false
     for line in transcript.split("\n"):
+        if line.starts_with("FAIL"): return Err("SCMAC-PLATFORM-001 probe-reported-failure")
+        if line.starts_with("control "):
+            if line.trim() != "control unconfined-reachability ok":
+                return Err("SCMAC-PLATFORM-001 probe-control-failed")
+            control_ok = true
         if not line.starts_with("canary "): continue
         val parts = line.trim().split(" ")
         if parts.len() != 3: return Err("SCMAC-PLATFORM-001 probe-line-malformed")
@@ -162,6 +171,7 @@ pub fn seatbelt_manifest_from_probe_v1(transcript: text, os_version: text, os_bu
         if index < 0: return Err("SCMAC-PLATFORM-001 probe-canary-unknown " + id)
         seen.push(id)
         results[index] = SeatbeltCanaryResultV1(id: id, observed: observed, evidence_digest: evidence_digest)
+    if not control_ok: return Err("SCMAC-PLATFORM-001 probe-control-missing")
     Ok(SeatbeltCapabilityManifestV1(schema: SEATBELT_MANIFEST_SCHEMA_V1, provenance: SEATBELT_PROBE_PROVENANCE_V1,
         os_version: os_version, os_build: os_build, architecture: architecture, helper_digest: helper_digest,
         runtime_abi: SEATBELT_RUNTIME_ABI_V1, profile_revision: SEATBELT_BASELINE_REVISION_V1,

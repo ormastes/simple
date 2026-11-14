@@ -1,0 +1,84 @@
+"""
+## Purpose and audience
+Purpose: Pin that a shrink-to-fit inline container (`<legend>`, UA
+inline-block) measures ALL of its inline content: an inline REPLACED child
+contributes its own width, and the single collapsed space between two inline
+items contributes one space advance. The intrinsic walk counted neither, so
+`<legend>ab <img width=40> ef</legend>` came out 35 px wide against Chrome's
+84; the image could not fit beside `ab`, each item took its own line, and the
+fieldset grew from Chrome's 79 px to 104.
+Audience: browser-engine inline-layout maintainers.
+
+Chrome oracle (Chrome 159 headless shell, getBoundingClientRect, page
+`body{margin:0;font:16px/1.5 sans-serif}`, wrapper
+`.s{position:relative;width:400px;height:140px;overflow:hidden}`,
+combo-matrix cells `tt-legend-img-*` / `tt-legend-code-*`):
+
+| element                         | x  | y | w   | h  |
+|---------------------------------|----|---|-----|----|
+| fieldset, legend holds an img   | 2  | 0 | 396 | 79 |
+| legend `ab <img 40x30> ef`      | 16 | 0 | 84  | 37 |
+| img                             | 40 | 0 | 40  | 30 |
+| legend `ab <code>cd</code> ef`  | 16 | 0 | 63  | 25 |
+| fieldset, legend holds a span   | 2  | 0 | 396 | 66 |
+| legend `ab <span>cd</span> ef`  | 16 | 0 | 61  | 24 |
+
+The legend is a "rendered legend": a shrink-to-fit block whose top is the
+fieldset's border-box top, with the fieldset's content below it. So the
+fieldset is `legend height + 6 padding + 24 (zz) + 10 padding + 2 border`
+= legend + 42: 66 for a 24 px legend, 79 for Chrome's 37 px image legend.
+The renderer's image line is 36 px (1 px under Chrome's 37, a line-height
+rounding outside this spec), so AC-3 pins the relation, not the literal 79.
+Widths are whole-pixel advances, 1 px over Chrome's fractional sums.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-SHRINK-TO-FIT-INLINE-CONTENT-001 — a shrink-to-fit inline container is as wide as its replaced children and inter-item spaces.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_foundation.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id
+}
+
+val VW: i32 = 900
+val VH: i32 = 760
+val HEAD: text = "<!doctype html><html><head><style>body{margin:0;font:16px/1.5 sans-serif}.s{position:relative;width:400px;height:140px;overflow:hidden}</style></head><body>"
+val IMG: text = "<div class=\"s\"><fieldset id=\"w\"><legend id=\"p\">ab <img id=\"c\" width=\"40\" height=\"30\" src=\"data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==\"> ef</legend>zz</fieldset></div>"
+val SPAN: text = "<div class=\"s\"><fieldset id=\"w\"><legend id=\"p\">ab <span id=\"c\">cd</span> ef</legend>zz</fieldset></div>"
+val CODE: text = "<div class=\"s\"><fieldset id=\"w\"><legend id=\"p\">ab <code id=\"c\">cd</code> ef</legend>zz</fieldset></div>"
+
+fn probe(inner: text, id: text, name: text) -> text:
+    simple_web_layout_debug_layout_by_id(
+        HEAD + inner + "</body></html>", VW, VH, id, name)
+
+describe "a shrink-to-fit legend is as wide as its inline content":
+    it "AC-1: the image stays on the first line, after `ab` and one space":
+        step("Chrome: img x=40 (legend 16 + pad 2 + `ab` 17.8 + space 4.45)")
+        expect(probe(IMG, "c", "x")).to_equal("41")
+
+    it "AC-2: the legend holds `ab`, the 40 px image and `ef` on one line":
+        step("Chrome: legend w=84")
+        expect(probe(IMG, "p", "w")).to_equal("85")
+
+    it "AC-3: the fieldset is the legend plus padding, one content line and border":
+        step("Chrome: fieldset 79 = legend 37 + 42")
+        expect(probe(IMG, "w", "h")).to_equal((probe(IMG, "p", "h").to_int() + 42).to_string())
+
+    it "AC-4: inter-item spaces count for a non-replaced inline child too":
+        step("Chrome: legend `ab <code>cd</code> ef` w=63")
+        expect(probe(CODE, "p", "w")).to_equal("64")
+
+describe "a fieldset's leading legend is a block on the fieldset's top edge":
+    it "AC-5: the legend's top is the fieldset's border-box top":
+        step("Chrome: legend y=0, fieldset y=0")
+        expect(probe(SPAN, "p", "y")).to_equal(probe(SPAN, "w", "y"))
+
+    it "AC-6: the legend is one line tall and as wide as its content":
+        step("Chrome: legend 61 x 24")
+        expect(probe(SPAN, "p", "h")).to_equal("24")
+        expect(probe(SPAN, "p", "w")).to_equal("62")
+
+    it "AC-7: the content after the legend is on its own line":
+        step("Chrome: fieldset h=66")
+        expect(probe(SPAN, "w", "h")).to_equal("66")
