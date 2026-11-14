@@ -21,6 +21,7 @@ NATIVE=$ROOT/src/runtime/runtime_native.c
 MEMORY=$ROOT/src/runtime/runtime_memory.c
 ADAPTER=$ROOT/src/runtime/xray/xray_llvm_adapter_linux.c
 FIXTURE=$ROOT/test/fixtures/xray/check-xray-thread-context-runtime.c
+STARTUP_FIXTURE=$ROOT/test/fixtures/xray/check-xray-startup-owned-threads.c
 
 mkdir -p "$OUT"
 
@@ -59,7 +60,7 @@ case "$(uname -m)" in
 esac
 command -v "$CC" >/dev/null 2>&1 || { echo "ERROR — missing compiler: $CC"; exit 2; }
 command -v "$NM" >/dev/null 2>&1 || { echo "ERROR — missing symbol tool: $NM"; exit 2; }
-for source in "$THREAD" "$NATIVE" "$MEMORY" "$ADAPTER" "$FIXTURE"; do
+for source in "$THREAD" "$NATIVE" "$MEMORY" "$ADAPTER" "$FIXTURE" "$STARTUP_FIXTURE"; do
     [ -f "$source" ] || fail "missing source: $source"
 done
 
@@ -68,7 +69,7 @@ done
     "$CC" --version | head -n 1
     printf 'compiler_path=%s\n' "$(command -v "$CC")"
     printf 'nm_path=%s\n' "$(command -v "$NM")"
-    printf 'fixture_scope=real runtime_thread + real resident adapter + real runtime_native/runtime_memory; compiler-rt APIs are fixture stand-ins; no sled patching'
+    printf 'fixture_scope=real runtime_thread + real resident adapter + real runtime_native/runtime_memory + real startup-owned-thread header/ledger; compiler-rt APIs are worker-fixture stand-ins; no sled patching'
 } > "$OUT/toolchain.txt" 2>&1
 sha256sum \
     "$THREAD" "$NATIVE" "$MEMORY" "$ADAPTER" "$FIXTURE" \
@@ -77,6 +78,7 @@ sha256sum \
     "$ROOT/src/runtime/xray/xray_thread_context_v1.h" \
     "$ROOT/src/runtime/xray/xray_channel_producer_v1.h" \
     "$ROOT/src/runtime/xray/xray_startup_owned_threads_v1.h" \
+    "$STARTUP_FIXTURE" \
     > "$OUT/sources.sha256" || fail "could not hash all source inputs"
 
 COMMON_FLAGS="-fPIC -O1 -ffunction-sections -fdata-sections -std=gnu11 -pthread -DSIMPLE_RUNTIME_MEMORY_OWNER=1 -DSIMPLE_RUNTIME_TIMESTAMP_OWNER=1 -DSIMPLE_RUNTIME_NO_RUST_ARRAY_PACKING=1 -DSIMPLE_CORE_C_STANDALONE=1 -DSIMPLE_RUNTIME_THREAD_CPU_COUNT_OWNER=1 -I$ROOT/src/runtime -I$ROOT/src/runtime/platform"
@@ -145,5 +147,41 @@ run_step fixture_run timeout "$STEP_TIMEOUT" \
     "$OUT/check-xray-thread-context-runtime" || exit 1
 grep -q '^PASS — ' "$OUT/fixture_run.stdout" || fail "fixture lacks final PASS verdict"
 cat "$OUT/fixture_run.stdout"
+
+# The startup ledger is a separate process-state contract fixture. Reuse the
+# exact real adapter object from the worker integration above; each test case
+# forks to get a fresh one-shot provider ledger.
+# shellcheck disable=SC2086
+run_step startup_fixture_compile timeout "$BUILD_TIMEOUT" "$CC" $COMMON_FLAGS \
+    -DSIMPLE_XRAY_CONTEXT_HOOKS_V1=1 -I"$ROOT/src/runtime/xray" \
+    -c "$STARTUP_FIXTURE" -o "$OUT/startup_fixture.o" || exit 1
+printf '%s\n' "timeout $BUILD_TIMEOUT $CC -pthread $OUT/startup_fixture.o $OUT/xray_adapter.o -Wl,--gc-sections -Wl,-Map=$OUT/startup-link.map -o $OUT/check-xray-startup-owned-threads" \
+    > "$OUT/startup-link.command"
+if timeout "$BUILD_TIMEOUT" "$CC" -pthread "$OUT/startup_fixture.o" "$OUT/xray_adapter.o" \
+    -Wl,--gc-sections -Wl,-Map="$OUT/startup-link.map" \
+    -o "$OUT/check-xray-startup-owned-threads" \
+    > "$OUT/startup-link.stdout" 2> "$OUT/startup-link.stderr"; then
+    printf '0\n' > "$OUT/startup-link.status"
+    echo "PASS startup-link"
+else
+    startup_link_status=$?
+    printf '%s\n' "$startup_link_status" > "$OUT/startup-link.status"
+    echo "FAIL — startup-link exited $startup_link_status"
+    cat "$OUT/startup-link.stdout"
+    cat "$OUT/startup-link.stderr"
+    exit 1
+fi
+for symbol in simple_xray_startup_no_owned_threads_begin_v1 \
+              simple_xray_startup_no_owned_threads_end_v1 \
+              simple_xray_startup_owned_spawn_admit_v1; do
+    grep -q "$symbol" "$OUT/startup-link.map" || fail "startup link map omits $symbol"
+done
+file "$OUT/check-xray-startup-owned-threads" > "$OUT/startup-binary.txt" 2>&1
+sha256sum "$OUT/check-xray-startup-owned-threads" > "$OUT/startup-binary.sha256"
+run_step startup_fixture_run timeout "$STEP_TIMEOUT" \
+    "$OUT/check-xray-startup-owned-threads" || exit 1
+grep -q '^PASS — ' "$OUT/startup_fixture_run.stdout" ||
+    fail "startup fixture lacks final PASS verdict"
+cat "$OUT/startup_fixture_run.stdout"
 echo "artifacts: $OUT"
-echo "PASS — runtime thread context fixture (hosted worker/adapter integration; compiler-rt sled patching not covered)"
+echo "PASS — runtime thread context and startup owned-thread fixtures (hosted worker/adapter integration; compiler-rt sled patching not covered)"
