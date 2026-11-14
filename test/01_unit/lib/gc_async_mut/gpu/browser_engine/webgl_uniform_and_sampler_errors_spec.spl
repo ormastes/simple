@@ -1,0 +1,227 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-BROWSER_ENGINE
+# @cover src/lib/gc_async_mut/gpu/browser_engine/webgl_context.spl 1%
+# @tag: unit, browser_engine, webgl
+#
+# WebGL error generation for the uniform setters and WebGL2 sampler objects,
+# as the WebGL 1.0 / OpenGL ES 3.0 specs define it: a setter whose type does
+# not match the uniform is INVALID_OPERATION (1282); a vector whose length is
+# not the uniform's component count is INVALID_VALUE (1281); transpose = true
+# is INVALID_VALUE; location -1 is silently ignored; no current program is
+# INVALID_OPERATION; an unknown enum is INVALID_ENUM (1280); everything on a
+# lost context reports CONTEXT_LOST_WEBGL (37442). getError returns the error
+# once and then NO_ERROR. A failed call must not append a render command.
+
+use std.spec.{describe, context, it, expect}
+use std.gc_async_mut.gpu.browser_engine.webgl_context.{
+    WebGLContext, webgl_create_context,
+    WEBGL_VERTEX_SHADER, WEBGL_FRAGMENT_SHADER
+}
+
+fn _program(vertex: text, fragment: text) -> WebGLContext:
+    var ctx = webgl_create_context(1, 64, 64)
+    val vs = ctx.create_shader(WEBGL_VERTEX_SHADER)
+    val fs = ctx.create_shader(WEBGL_FRAGMENT_SHADER)
+    ctx.shader_source(vs.id, vertex)
+    ctx.shader_source(fs.id, fragment)
+    ctx.compile_shader(vs.id)
+    ctx.compile_shader(fs.id)
+    val program = ctx.create_program()
+    ctx.attach_shader(program.id, vs.id)
+    ctx.attach_shader(program.id, fs.id)
+    ctx.link_program(program.id)
+    ctx.use_program(program.id)
+    ctx
+
+fn _int_ctx() -> WebGLContext:
+    _program("attribute vec4 position; uniform int layer; uniform ivec2 flags; uniform ivec3 range; void main() {{ gl_Position = position; }}",
+        "uniform ivec4 mask; void main() {{ gl_FragColor = vec4(1.0); }}")
+
+fn _float_ctx() -> WebGLContext:
+    _program("attribute vec4 position; uniform float opacity; uniform vec2 uvScale; uniform vec3 normalBias; uniform mat2 rot; uniform mat3 basis; void main() {{ gl_Position = position; }}",
+        "uniform vec4 tint; void main() {{ gl_FragColor = tint; }}")
+
+fn _loc(ctx: WebGLContext, name: text) -> i32:
+    ctx.get_uniform_location(ctx.current_program_id, name)
+
+describe "WebGL uniform setter and sampler errors":
+
+    context "getError":
+
+        it "returns an error once and then NO_ERROR":
+            var ctx = _int_ctx()
+            ctx.uniform_1iv(_loc(ctx, "layer"), [1, 2])
+            expect(ctx.get_error()).to_equal(1281)
+            expect(ctx.get_error()).to_equal(0)
+
+    context "integer vector setters":
+
+        it "accept the exact component count and record one command":
+            var ctx = _int_ctx()
+            val before = ctx.render_commands.len()
+            expect(ctx.uniform_1iv(_loc(ctx, "layer"), [7])).to_equal(true)
+            expect(ctx.uniform_2iv(_loc(ctx, "flags"), [1, 2])).to_equal(true)
+            expect(ctx.uniform_3iv(_loc(ctx, "range"), [1, 2, 3])).to_equal(true)
+            expect(ctx.uniform_4iv(_loc(ctx, "mask"), [1, 2, 3, 4])).to_equal(true)
+            expect(ctx.render_commands.len()).to_equal(before + 4)
+            expect(ctx.get_error()).to_equal(0)
+            expect(ctx.get_uniform(ctx.current_program_id, _loc(ctx, "range")).int_values).to_equal([1, 2, 3])
+
+        it "report INVALID_VALUE for the wrong component count and record nothing":
+            var ctx = _int_ctx()
+            val before = ctx.render_commands.len()
+            expect(ctx.uniform_2iv(_loc(ctx, "flags"), [1])).to_equal(false)
+            expect(ctx.get_error()).to_equal(1281)
+            expect(ctx.uniform_3iv(_loc(ctx, "range"), [1, 2, 3, 4])).to_equal(false)
+            expect(ctx.get_error()).to_equal(1281)
+            expect(ctx.uniform_4iv(_loc(ctx, "mask"), [])).to_equal(false)
+            expect(ctx.get_error()).to_equal(1281)
+            expect(ctx.render_commands.len()).to_equal(before)
+
+        it "report INVALID_OPERATION when the uniform has another type":
+            var ctx = _int_ctx()
+            expect(ctx.uniform_2iv(_loc(ctx, "layer"), [1, 2])).to_equal(false)
+            expect(ctx.get_error()).to_equal(1282)
+            expect(ctx.uniform_1iv(_loc(ctx, "flags"), [1])).to_equal(false)
+            expect(ctx.get_error()).to_equal(1282)
+            expect(ctx.uniform_3i(_loc(ctx, "mask"), 1, 2, 3)).to_equal(false)
+            expect(ctx.get_error()).to_equal(1282)
+            expect(ctx.uniform_4i(_loc(ctx, "range"), 1, 2, 3, 4)).to_equal(false)
+            expect(ctx.get_error()).to_equal(1282)
+
+        it "ignore location -1 without an error":
+            var ctx = _int_ctx()
+            val before = ctx.render_commands.len()
+            expect(_loc(ctx, "no_such_uniform")).to_equal(-1)
+            expect(ctx.uniform_1iv(-1, [1])).to_equal(true)
+            expect(ctx.uniform_4i(-1, 1, 2, 3, 4)).to_equal(true)
+            expect(ctx.get_error()).to_equal(0)
+            expect(ctx.render_commands.len()).to_equal(before)
+
+        it "report INVALID_OPERATION for a location the program does not have":
+            var ctx = _int_ctx()
+            expect(ctx.uniform_1iv(9999, [1])).to_equal(false)
+            expect(ctx.get_error()).to_equal(1282)
+
+    context "float vector and matrix setters":
+
+        it "accept the exact component count":
+            var ctx = _float_ctx()
+            expect(ctx.uniform_1fv(_loc(ctx, "opacity"), [0.5])).to_equal(true)
+            expect(ctx.uniform_2fv(_loc(ctx, "uvScale"), [1.0, 2.0])).to_equal(true)
+            expect(ctx.uniform_3fv(_loc(ctx, "normalBias"), [1.0, 2.0, 3.0])).to_equal(true)
+            expect(ctx.uniform_4fv(_loc(ctx, "tint"), [1.0, 0.5, 0.25, 1.0])).to_equal(true)
+            expect(ctx.uniform_matrix2fv(_loc(ctx, "rot"), false, [1.0, 0.0, 0.0, 1.0])).to_equal(true)
+            expect(ctx.uniform_matrix3fv(_loc(ctx, "basis"), false, [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0])).to_equal(true)
+            expect(ctx.get_error()).to_equal(0)
+            expect(ctx.get_uniform(ctx.current_program_id, _loc(ctx, "tint")).float_values).to_equal([1.0, 0.5, 0.25, 1.0])
+
+        it "report INVALID_VALUE for the wrong length":
+            var ctx = _float_ctx()
+            expect(ctx.uniform_2fv(_loc(ctx, "uvScale"), [1.0])).to_equal(false)
+            expect(ctx.get_error()).to_equal(1281)
+            expect(ctx.uniform_4fv(_loc(ctx, "tint"), [1.0, 2.0, 3.0])).to_equal(false)
+            expect(ctx.get_error()).to_equal(1281)
+            expect(ctx.uniform_matrix2fv(_loc(ctx, "rot"), false, [1.0, 0.0, 0.0])).to_equal(false)
+            expect(ctx.get_error()).to_equal(1281)
+            expect(ctx.uniform_matrix3fv(_loc(ctx, "basis"), false, [1.0, 0.0, 0.0, 1.0])).to_equal(false)
+            expect(ctx.get_error()).to_equal(1281)
+
+        it "report INVALID_VALUE for transpose = true":
+            var ctx = _float_ctx()
+            expect(ctx.uniform_matrix2fv(_loc(ctx, "rot"), true, [1.0, 0.0, 0.0, 1.0])).to_equal(false)
+            expect(ctx.get_error()).to_equal(1281)
+            expect(ctx.uniform_matrix3fv(_loc(ctx, "basis"), true, [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0])).to_equal(false)
+            expect(ctx.get_error()).to_equal(1281)
+
+        it "report INVALID_OPERATION for a type mismatch":
+            var ctx = _float_ctx()
+            expect(ctx.uniform_matrix2fv(_loc(ctx, "basis"), false, [1.0, 0.0, 0.0, 1.0])).to_equal(false)
+            expect(ctx.get_error()).to_equal(1282)
+            expect(ctx.uniform_3fv(_loc(ctx, "uvScale"), [1.0, 2.0, 3.0])).to_equal(false)
+            expect(ctx.get_error()).to_equal(1282)
+            expect(ctx.uniform_1iv(_loc(ctx, "opacity"), [1])).to_equal(false)
+            expect(ctx.get_error()).to_equal(1282)
+            expect(ctx.uniform_3f(_loc(ctx, "tint"), 1.0, 2.0, 3.0)).to_equal(false)
+            expect(ctx.get_error()).to_equal(1282)
+
+    context "no current program and lost context":
+
+        it "reports INVALID_OPERATION without a current program":
+            var ctx = webgl_create_context(1, 8, 8)
+            expect(ctx.uniform_1iv(0, [1])).to_equal(false)
+            expect(ctx.get_error()).to_equal(1282)
+            expect(ctx.uniform_matrix2fv(0, false, [1.0, 0.0, 0.0, 1.0])).to_equal(false)
+            expect(ctx.get_error()).to_equal(1282)
+
+        it "reports CONTEXT_LOST_WEBGL until the context is restored":
+            var ctx = _int_ctx()
+            val loc = _loc(ctx, "layer")
+            ctx.lose_context()
+            expect(ctx.uniform_1iv(loc, [1])).to_equal(false)
+            expect(ctx.get_error()).to_equal(37442)
+            expect(ctx.get_uniform_location(1, "layer")).to_equal(-1)
+            ctx.restore_context()
+            expect(ctx.get_error()).to_equal(0)
+
+    context "sampler objects":
+
+        it "do not exist in WebGL 1":
+            var ctx = webgl_create_context(1, 8, 8)
+            expect(ctx.create_sampler().valid).to_equal(false)
+            expect(ctx.get_error()).to_equal(1282)
+            expect(ctx.bind_sampler(0, -1)).to_equal(false)
+            expect(ctx.get_error()).to_equal(1282)
+            expect(ctx.sampler_parameter_i(1, 10241, 9728)).to_equal(false)
+            expect(ctx.get_error()).to_equal(1282)
+
+        it "store filter and wrap parameters in WebGL 2":
+            var ctx = webgl_create_context(2, 8, 8)
+            val s = ctx.create_sampler()
+            expect(s.valid).to_equal(true)
+            expect(ctx.sampler_parameter_i(s.id, 10241, 9728)).to_equal(true)
+            expect(ctx.sampler_parameter_i(s.id, 10240, 9729)).to_equal(true)
+            expect(ctx.sampler_parameter_i(s.id, 10242, 33071)).to_equal(true)
+            expect(ctx.sampler_parameter_i(s.id, 10243, 10497)).to_equal(true)
+            expect(ctx.get_sampler_parameter(s.id, 10241).int_value).to_equal(9728)
+            expect(ctx.get_sampler_parameter(s.id, 10240).int_value).to_equal(9729)
+            expect(ctx.get_sampler_parameter(s.id, 10242).int_value).to_equal(33071)
+            expect(ctx.get_sampler_parameter(s.id, 10243).int_value).to_equal(10497)
+            expect(ctx.get_error()).to_equal(0)
+
+        it "reject invalid enum values and unknown parameter names":
+            var ctx = webgl_create_context(2, 8, 8)
+            val s = ctx.create_sampler()
+            expect(ctx.sampler_parameter_i(s.id, 10241, 1)).to_equal(false)
+            expect(ctx.get_error()).to_equal(1280)
+            expect(ctx.sampler_parameter_i(s.id, 10240, 9987)).to_equal(false)
+            expect(ctx.get_error()).to_equal(1280)
+            expect(ctx.sampler_parameter_i(s.id, 10242, 9728)).to_equal(false)
+            expect(ctx.get_error()).to_equal(1280)
+            expect(ctx.sampler_parameter_i(s.id, 10243, 0)).to_equal(false)
+            expect(ctx.get_error()).to_equal(1280)
+            expect(ctx.sampler_parameter_i(s.id, 4242, 9728)).to_equal(false)
+            expect(ctx.get_error()).to_equal(1280)
+            expect(ctx.get_sampler_parameter(s.id, 4242).int_value).to_equal(0)
+            expect(ctx.get_error()).to_equal(1280)
+
+        it "reject an unknown sampler":
+            var ctx = webgl_create_context(2, 8, 8)
+            expect(ctx.sampler_parameter_i(77, 10241, 9728)).to_equal(false)
+            expect(ctx.get_error()).to_equal(1281)
+            expect(ctx.get_sampler_parameter(77, 10241).int_value).to_equal(0)
+            expect(ctx.get_error()).to_equal(1281)
+            expect(ctx.bind_sampler(0, 77)).to_equal(false)
+            expect(ctx.get_error()).to_equal(1281)
+
+        it "bind to a texture unit, unbind with -1 and reject a bad unit":
+            var ctx = webgl_create_context(2, 8, 8)
+            val s = ctx.create_sampler()
+            expect(ctx.bind_sampler(0, s.id)).to_equal(true)
+            expect(ctx.texture_units[0].sampler_id).to_equal(s.id)
+            expect(ctx.bind_sampler(0, -1)).to_equal(true)
+            expect(ctx.texture_units[0].sampler_id).to_equal(-1)
+            expect(ctx.bind_sampler(-1, s.id)).to_equal(false)
+            expect(ctx.get_error()).to_equal(1281)
+            expect(ctx.bind_sampler(4096, s.id)).to_equal(false)
+            expect(ctx.get_error()).to_equal(1281)
