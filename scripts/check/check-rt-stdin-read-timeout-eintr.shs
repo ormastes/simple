@@ -1,0 +1,85 @@
+#!/bin/sh
+# Deterministic Linux regression for EINTR restarting the full stdin timeout.
+set -u
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+CC=${CC:-clang}
+OUT=${RT_STDIN_TIMEOUT_OUT:-$ROOT/build/rt-stdin-timeout-eintr}
+TIMEOUT=${RT_STDIN_TIMEOUT_BUILD_TIMEOUT:-30}
+LEAF=$ROOT/src/runtime/runtime_core_io_exports.c
+FIXTURE=$ROOT/src/runtime/test/rt_stdin_read_timeout_eintr_selfcheck.c
+
+# When called by the path-scoped push/CI gate, avoid compiling unless the
+# outgoing range changes one of the implementation, fixture, or this runner.
+if [ "$#" -gt 0 ]; then
+    [ "$#" -eq 2 ] && [ "$1" = --range ] || {
+        echo "ERROR — usage: $0 [--range <base>..<tip>]" >&2
+        exit 2
+    }
+    RANGE=$2
+    changed=$(git -C "$ROOT" diff --name-only "$RANGE" -- \
+        src/runtime/runtime_core_io_exports.c \
+        src/runtime/test/rt_stdin_read_timeout_eintr_selfcheck.c \
+        scripts/check/check-rt-stdin-read-timeout-eintr.shs) || {
+        echo "ERROR — could not inspect changed paths in $RANGE" >&2
+        exit 2
+    }
+    if [ -z "$changed" ]; then
+        echo "SKIP — stdin timeout EINTR inputs unchanged in $RANGE"
+        exit 0
+    fi
+fi
+
+fail() {
+    echo "FAIL — $* (artifacts: $OUT)" >&2
+    exit 1
+}
+
+run_step() {
+    label=$1
+    shift
+    {
+        printf 'timeout %s' "$TIMEOUT"
+        for arg do printf ' %s' "$arg"; done
+        printf '\n'
+    } > "$OUT/$label.command"
+    timeout "$TIMEOUT" "$@" > "$OUT/$label.stdout" 2> "$OUT/$label.stderr"
+    status=$?
+    printf '%s\n' "$status" > "$OUT/$label.status"
+    if [ "$status" -ne 0 ]; then
+        cat "$OUT/$label.stdout" >&2
+        cat "$OUT/$label.stderr" >&2
+        fail "$label exited $status"
+    fi
+    echo "PASS $label"
+}
+
+[ "$(uname -s)" = Linux ] || fail "Linux host required"
+command -v "$CC" >/dev/null 2>&1 || fail "missing compiler: $CC"
+[ -f "$LEAF" ] && [ -f "$FIXTURE" ] || fail "missing source input"
+mkdir -p "$OUT"
+
+{
+    uname -a
+    "$CC" --version | head -n 1
+    printf 'compiler_path=%s\n' "$(command -v "$CC")"
+    printf 'fixture_scope=actual runtime_core_io_exports.c function; test-only rt_array_new/rt_array_push ABI stubs; unread pipe plus pthread_kill SIGUSR1 interruptions; no runtime executable claim\n'
+} > "$OUT/toolchain.txt" 2>&1
+sha256sum "$LEAF" "$FIXTURE" > "$OUT/sources.sha256" || fail "source hashing failed"
+
+run_step leaf_compile "$CC" -std=c11 -O1 -ffunction-sections -fdata-sections \
+    -I"$ROOT/src/runtime" -c "$LEAF" -o "$OUT/runtime_core_io_exports.o"
+run_step fixture_compile "$CC" -std=c11 -O1 -pthread -I"$ROOT/src/runtime" \
+    -c "$FIXTURE" -o "$OUT/fixture.o"
+run_step link "$CC" -pthread "$OUT/fixture.o" "$OUT/runtime_core_io_exports.o" \
+    -Wl,--gc-sections -Wl,--wrap=clock_gettime -Wl,--wrap=poll \
+    -Wl,-Map="$OUT/link.map" -o "$OUT/rt_stdin_timeout_eintr_selfcheck"
+
+file "$OUT/rt_stdin_timeout_eintr_selfcheck" > "$OUT/binary.txt" 2>&1
+sha256sum "$OUT/rt_stdin_timeout_eintr_selfcheck" > "$OUT/binary.sha256"
+run_step fixture_run "$OUT/rt_stdin_timeout_eintr_selfcheck"
+cat "$OUT/fixture_run.stdout"
+grep -q '^PASS — production stdin timeout EINTR deadline selfcheck$' \
+    "$OUT/fixture_run.stdout" || fail "fixture lacks final PASS verdict"
+echo "artifacts: $OUT"
+echo "PASS — bounded stdin EINTR deadline regression"
