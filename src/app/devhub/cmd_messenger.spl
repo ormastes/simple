@@ -243,14 +243,30 @@ fn _print_targets_human(config: MessengerConfig):
 
 
 fn _cmd_doctor(args: [text], json_mode: bool) -> i64:
+    if json_mode:
+        val record = messenger_doctor_record(args)
+        print record.1
+        return record.0
     val resolved = resolve_messenger_target(args)
     if resolved.0 == nil:
-        if json_mode:
-            print messenger_error_json("doctor", 2, resolved.2)
-        else:
-            print "error: {resolved.2}"
+        print "error: {resolved.2}"
         return 2
     val target = resolved.0.?
+    _print_doctor_human(target, resolved.1)
+    print "result {messenger_doctor_json(target, resolved.1, _doctor_extra(target))}"
+    0
+
+
+pub fn messenger_doctor_record(args: [text]) -> (i64, text):
+    """doctor verb body: (exit code, printed JSON record)."""
+    val resolved = resolve_messenger_target(args)
+    if resolved.0 == nil:
+        return (2, messenger_error_json_for(_extract_flag(args, "--target", ""), "doctor", 2, resolved.2))
+    val target = resolved.0.?
+    (0, messenger_doctor_json(target, resolved.1, _doctor_extra(target)))
+
+
+fn _doctor_extra(target: MessengerTarget) -> [text]:
     # Nonsecret IO finding: is the declared source file present? (bool only —
     # the path itself stays out of the record, §11.2)
     var extra: [text] = []
@@ -261,13 +277,7 @@ fn _cmd_doctor(args: [text], json_mode: bool) -> i64:
         else:
             if not file_exists(db.path):
                 extra = extra + ["declared source database is not present (authorized snapshot may be missing)"]
-    val payload = messenger_doctor_json(target, resolved.1, extra)
-    if json_mode:
-        print payload
-    else:
-        _print_doctor_human(target, resolved.1)
-        print "result {payload}"
-    0
+    extra
 
 
 fn _print_doctor_human(target: MessengerTarget, source: text):
@@ -314,13 +324,19 @@ fn _cmd_send_probe(args: [text], json_mode: bool) -> i64:
     gate is exercised end-to-end and the stub answers honestly. A denied
     send is PermissionDenied (3); a policy-passing send reaches the stub
     port and gets CapabilityUnavailable (4)."""
+    val record = messenger_send_record(args)
+    if json_mode:
+        print record.1
+    else:
+        print record.2
+    record.0
+
+
+pub fn messenger_send_record(args: [text]) -> (i64, text, text):
+    """send verb body: (exit code, JSON record, human line)."""
     val resolved = resolve_messenger_target(args)
     if resolved.0 == nil:
-        if json_mode:
-            print messenger_error_json("send", 2, resolved.2)
-        else:
-            print "error: {resolved.2}"
-        return 2
+        return (2, messenger_error_json_for(_extract_flag(args, "--target", ""), "send", 2, resolved.2), "error: {resolved.2}")
     val target = resolved.0.?
     val room = _extract_flag(args, "--room", "")
     val body = _extract_flag(args, "--text", "")
@@ -331,26 +347,15 @@ fn _cmd_send_probe(args: [text], json_mode: bool) -> i64:
             body_digest: messenger_body_digest(body), confirmed_by: "cli-user")
     val verdict = check_send(target, room, confirm)
     if not verdict.permitted:
-        if json_mode:
-            print messenger_error_json("send", verdict.exit_code, verdict.reason)
-        else:
-            print "error: {verdict.reason}"
-        return verdict.exit_code
+        return (verdict.exit_code, messenger_error_json_for(target.name, "send", verdict.exit_code, verdict.reason), "error: {verdict.reason}")
     val adapter = messenger_load_adapter(target.read_provider)
     if adapter == nil:
-        if json_mode:
-            print messenger_error_json("send", 4, "no adapter for send")
-        else:
-            print "error: no adapter for send"
-        return 4
+        return (4, messenger_error_json_for(target.name, "send", 4, "no adapter for send"), "error: no adapter for send")
     val result = port_call_send(adapter.?, target)
-    if json_mode:
-        print _lb() + "\"target\":\"{_json_escape(target.name)}\"," +
-            "\"action\":\"send\",\"status\":\"{result.status}\",\"code\":{result.exit_code}," +
-            "\"error\":\"{_json_escape(result.error)}\",\"warnings\":[]" + _rb()
-    else:
-        print "send: {result.status}: {result.error}"
-    result.exit_code
+    val json = _lb() + "\"target\":\"{_json_escape(target.name)}\"," +
+        "\"action\":\"send\",\"status\":\"{result.status}\",\"code\":{result.exit_code}," +
+        "\"error\":\"{_json_escape(result.error)}\",\"warnings\":[]" + _rb()
+    (result.exit_code, json, "send: {result.status}: {result.error}")
 
 
 fn _problems_text(problems: [text]) -> text:
