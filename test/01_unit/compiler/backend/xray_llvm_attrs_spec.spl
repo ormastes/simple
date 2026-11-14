@@ -74,9 +74,9 @@ describe "XRay LLVM function attributes":
         val ir = MirToLlvm.create("probe.attrs", CodegenTarget.X86_64, nil).translate_module(
             xray_attr_module([xray_attr_fn(1, "xr_tail", 2)]))
         if host_os() == "windows":
-            step("Windows host: host-default triple is windows, LLVM XRay sleds are Linux-only (A.5) -> explicit refusal naming the os")
-            expect(ir).to_contain("XRAY-E-UNSUPPORTED-TARGET")
-            expect(ir).to_contain("windows")
+            step("Windows host: host-default triple is windows -> flag-guard sleds, no compiler-rt attribute")
+            expect(ir.contains("XRAY-E-")).to_equal(false)
+            expect(ir).to_contain("@__simple_xray_slot_xr_tail")
         else:
             expect(ir.contains("XRAY-E-")).to_equal(false)
             expect(xray_define_line(ir, "xr_tail")).to_contain("\"function-instrument\"=\"xray-always\"")
@@ -159,3 +159,49 @@ describe "XRay trace.instrumentation SDN key":
     it "returns empty when the manifest has no trace block":
         val manifest = "package:\n  name: demo\nexecution:\n  instrumentation: dynamic\n"
         expect(xray_sdn_trace_instrumentation(manifest)).to_equal("")
+
+# Windows flag-guard route (xray_v1_integration_status "Replacement route"):
+# no code patching; each sled function loads a per-function activation slot at
+# entry and before every return and calls __simple_xray_edge_v1(site, kind)
+# when it is set. One exported descriptor lists the slots.
+fn xray_count_of(ir: text, needle: text) -> i64:
+    ir.split(needle).len() - 1
+
+describe "XRay LLVM flag-guard sleds (Windows)":
+    it "admits a windows target and emits no Linux function-instrument attribute":
+        step("Translate an xray_mode=2 function for windows")
+        val ir = xray_attr_translator("windows").translate_module(xray_attr_module([xray_attr_fn(1, "xr_tail", 2)]))
+        expect(ir.contains("XRAY-E-")).to_equal(false)
+        expect(ir.contains("function-instrument")).to_equal(false)
+
+    it "emits an activation slot, an entry guard and an exit guard":
+        step("One slot per sled function; guard = load slot, icmp, br, call edge")
+        val ir = xray_attr_translator("windows").translate_module(xray_attr_module([xray_attr_fn(1, "xr_tail", 2)]))
+        expect(ir).to_contain("@__simple_xray_slot_xr_tail = internal global i8 0")
+        step("The edge hook is DLL-local and calls through an exported pointer, so a Windows DLL links with no undefined host symbol")
+        expect(ir).to_contain("@__simple_xray_hook_v1 = dllexport global ptr null")
+        expect(ir).to_contain("define internal void @__simple_xray_edge_v1(i64 %site, i32 %kind)")
+        expect(ir.contains("declare void @__simple_xray_edge_v1")).to_equal(false)
+        expect(ir).to_contain("call void @__simple_xray_edge_v1(i64 0, i32 0)")
+        expect(ir).to_contain("call void @__simple_xray_edge_v1(i64 0, i32 1)")
+        expect(xray_count_of(ir, "load volatile i8, ptr @__simple_xray_slot_xr_tail")).to_equal(2)
+        step("A guarded function performs a call, so it must not stay readonly")
+        expect(xray_define_line(ir, "xr_tail").contains("readonly")).to_equal(false)
+
+    it "exports exactly one descriptor symbol listing every slot":
+        step("Two sled functions, one never-listed function")
+        val ir = xray_attr_translator("windows").translate_module(
+            xray_attr_module([xray_attr_fn(1, "xr_a", 2), xray_attr_fn(2, "xr_b", 2), xray_attr_fn(3, "xr_never", 0)]))
+        expect(xray_count_of(ir, "@__simple_xray_descriptor_v1 =")).to_equal(1)
+        expect(ir).to_contain("@__simple_xray_descriptor_v1 = dllexport constant { i64, [2 x ptr] }")
+        expect(ir.contains("@__simple_xray_slot_xr_never")).to_equal(false)
+
+    it "still rejects entry+exit-only mode 1 on windows":
+        val ir = xray_attr_translator("windows").translate_module(xray_attr_module([xray_attr_fn(1, "xr_exit", 1)]))
+        expect(ir).to_contain("XRAY-E-UNSUPPORTED-MODE")
+
+    it "leaves a windows module with xray off free of any xray text":
+        step("Off identity: all xray_mode=0 emits no slot, descriptor or edge call")
+        val ir = xray_attr_translator("windows").translate_module(xray_attr_module([xray_attr_fn(1, "xr_a", 0)]))
+        expect(ir.contains("xray")).to_equal(false)
+        expect(ir.contains("__simple_xray")).to_equal(false)

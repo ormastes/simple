@@ -33,3 +33,12 @@ green. The ELF-only OUT lanes (`check-xray-native-inprocess-e2e.shs`, `check-xra
 `XRAY-E-UNSUPPORTED-TARGET` refusal naming `windows`. Open seed gaps (no pure-Simple fix possible):
 `doc/08_tracking/bug/seed_interpreter_missing_spl_externs_adaptive_containers_2026-11-14.md`,
 `doc/08_tracking/bug/seed_jit_strict_unresolved_os_import_root_2026-11-14.md`.
+
+## Windows LLVM flag-guard IR (2026-11-14, lane xrayfg)
+`MirToLlvm` on a windows target with `xray_mode>0` emits flag-guard sleds instead of compiler-rt
+attributes: `@__simple_xray_slot_<sym>` i8 per function, volatile-load guard at entry (kind 0)
+and before each `ret` (kind 1), exported `@__simple_xray_descriptor_v1 {count,[N x ptr]}` and
+`@__simple_xray_hook_v1`; sled functions drop `readonly`. State is `xray_flag_guard`/`xray_site`
+in `_MirToLlvm/class_def.spl`; spec `xray_llvm_attrs_spec.spl`. Leaf and build-route admission
+are still open (decision doc under doc/08_tracking/bug/). Default off: no xray text when no
+function has `xray_mode>0`.

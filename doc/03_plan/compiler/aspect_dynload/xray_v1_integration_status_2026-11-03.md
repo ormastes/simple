@@ -508,3 +508,14 @@ Target matrix once these land (to be filled from executed runs only):
 | container switch | as above | as above | pending |
 | rollback / close_admission | as above | as above | pending |
 | layer / feature edge profile | not written | n/a (fold only) | pending |
+
+**xrayfg result (2026-11-14, `work/xray-win-flagguard-20261114`):** step 0 PASS (seed-attr, llvm
+backend, 3-function fixture: DLL exports `add1/scaled/traced`, 128 s, no zero-function receipt;
+PR #9153 fix holds). IR half of the flag-guard route DONE: `xray_llvm_attrs_spec.spl` 22/22
+(Windows sleds, slots, one exported descriptor, hook indirection, mode 1 still refused, off =
+no xray text); guard IR assembles at -O2 with llvm-mingw clang; off-identity DLL rebuilt: only
+the PE TimeDateStamp differs, disassembly identical. Not done: leaf, backend enum, admission,
+real run, on-vs-off timing — decisions listed in
+`doc/08_tracking/bug/xray_llvm_windows_flag_guard_leaf_and_admission_decisions_2026-11-14.md`.
+The release/1.0.0 tip needs a seed workaround to compile at all
+(`seed_bare_list_literal_after_match_parsed_as_index_2026-11-14.md`).

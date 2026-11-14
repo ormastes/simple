@@ -506,6 +506,9 @@ impl MirTextCodegen for MirToLlvm:
         # module's functions. Off leaves both empty.
         self.fn_xray_mode = {}
         self.xray_module_on = false
+        self.xray_flag_guard = false
+        self.xray_site = {}
+        self.xray_guard_seq = 0
         for fn_owner in mir_module_functions_sorted(module):
             # Source-facing runtime aliases can also have ordinary local bodies.
             # Remember their identity before emission: callers may sort before
@@ -564,13 +567,17 @@ impl MirTextCodegen for MirToLlvm:
         # no LLVM spelling; the debug-only bootstrap function table is not
         # keyed by this module's functions.
         if self.xray_module_on:
-            if not self.target_os.starts_with("linux"):
-                self.codegen_error("XRAY-E-UNSUPPORTED-TARGET: LLVM XRay sleds are admitted for Linux triples only (target os '{self.target_os}')")
+            # Windows: flag-guard sleds (no patching); Linux: compiler-rt sleds.
+            self.xray_flag_guard = self.target_os.starts_with("windows")
+            if not self.xray_flag_guard and not self.target_os.starts_with("linux"):
+                self.codegen_error("XRAY-E-UNSUPPORTED-TARGET: LLVM XRay sleds are admitted for Linux and Windows triples only (target os '{self.target_os}')")
             if self.bootstrap_string_globals_active:
                 self.codegen_error("XRAY-E-UNSUPPORTED-TARGET: LLVM XRay is not supported on the bootstrap translation path")
             for fn_mode in mir_module_functions_sorted(module):
                 if fn_mode.xray_mode == 1:
                     self.codegen_error("XRAY-E-UNSUPPORTED-MODE: LLVM cannot emit exit sleds without tail-exit sleds (xray_mode 1 in '{fn_mode.name}')")
+            if self.xray_flag_guard:
+                self.emit_xray_flag_guard_globals(module)
 
         # mutglobal lane (module-level `var` mutation storage, see
         # scratchpad/mutglobal_plan.md): emit real LLVM `@name = global ...`
@@ -1086,11 +1093,12 @@ impl MirTextCodegen for MirToLlvm:
         # noinline). Explicit @inline functions are never-listed (mode 0).
         val xray_mode = if self.fn_xray_mode.has(name): self.fn_xray_mode[name] else: 0
         var attrs = " nounwind" + placement_attrs
-        if is_readonly and not placement_naked:
+        if is_readonly and not placement_naked and not (self.xray_flag_guard and xray_mode > 0):
             attrs = attrs + " readonly"
         if ((is_small and xray_mode == 0) or self.fn_inline.has(name)) and not placement_naked:
             attrs = attrs + " alwaysinline"
-        attrs = attrs + llvm_xray_function_attrs(xray_mode, self.xray_module_on)
+        if not self.xray_flag_guard:
+            attrs = attrs + llvm_xray_function_attrs(xray_mode, self.xray_module_on)
         if ir_handle >= 0 or placement_naked or placement_suffix != "" or placement_prefix != "define":
             val param_str = params.join(", ")
             var dbg_suffix = ""
@@ -1123,6 +1131,9 @@ impl MirTextCodegen for MirToLlvm:
 
         val is_start = name == "_start"
         var block_i = 0
+        if self.xray_flag_guard and xray_mode > 0 and not placement_naked and body.blocks.len() > 0:
+            self.builder.emit_label("xray_entry")
+            self.emit_xray_flag_guard(name, 0, "bb{body.blocks[0].bootstrap_block_id_value()}")
         if placement_naked:
             # Design A.2 `@naked`: never run the generic block translator --
             # it materialises locals/params as allocas inside a prologue-free
@@ -1149,6 +1160,51 @@ impl MirTextCodegen for MirToLlvm:
             self.builder.end_function()
         if bootstrap_debug:
             print "[mir-to-llvm] function:done {name}"
+
+    me emit_xray_flag_guard_globals(module: MirModule):
+        """Windows flag-guard route: one activation slot per sled function, one
+        exported descriptor `{ count, [count x ptr] }` listing the slots in site
+        order, and the edge hook declaration. Site id = index in that order."""
+        var slots: [text] = []
+        var slot_names: [text] = []
+        for fn_slot in mir_module_functions_sorted(module):
+            if fn_slot.xray_mode > 0:
+                val symbol = self.llvm_function_symbol_name(fn_slot.name)
+                self.xray_site[symbol] = slots.len()
+                slots = slots.push("ptr @__simple_xray_slot_{symbol}")
+                slot_names = slot_names.push("@__simple_xray_slot_{symbol}")
+        self.builder.emit("")
+        self.builder.emit("; XRay flag-guard sleds (Windows)")
+        for slot_name in slot_names:
+            self.builder.emit("{slot_name} = internal global i8 0")
+        self.builder.emit("@__simple_xray_descriptor_v1 = dllexport constant {{ i64, [{slots.len()} x ptr] }} {{ i64 {slots.len()}, [{slots.len()} x ptr] [{slots.join(", ")}] }}")
+        self.builder.emit("@__simple_xray_hook_v1 = dllexport global ptr null")
+        self.builder.emit("define internal void @__simple_xray_edge_v1(i64 %site, i32 %kind) nounwind {{")
+        self.builder.emit("xe_entry:")
+        self.builder.emit("  %h = load volatile ptr, ptr @__simple_xray_hook_v1")
+        self.builder.emit("  %set = icmp ne ptr %h, null")
+        self.builder.emit("  br i1 %set, label %xe_call, label %xe_done")
+        self.builder.emit("xe_call:")
+        self.builder.emit("  call void %h(i64 %site, i32 %kind)")
+        self.builder.emit("  br label %xe_done")
+        self.builder.emit("xe_done:")
+        self.builder.emit("  ret void")
+        self.builder.emit("}}")
+
+    me emit_xray_flag_guard(symbol: text, kind: i64, continue_label: text):
+        """Load the slot; when set call the edge hook. Falls through to
+        `continue_label` (which this method emits when it is not an existing block)."""
+        val seq = self.xray_guard_seq
+        self.xray_guard_seq = seq + 1
+        val site = self.xray_site[symbol]
+        self.builder.emit("  %xg{seq} = load volatile i8, ptr @__simple_xray_slot_{symbol}")
+        self.builder.emit("  %xc{seq} = icmp ne i8 %xg{seq}, 0")
+        self.builder.emit("  br i1 %xc{seq}, label %xs{seq}, label %{continue_label}")
+        self.builder.emit_label("xs{seq}")
+        self.builder.emit("  call void @__simple_xray_edge_v1(i64 {site}, i32 {kind})")
+        self.builder.emit("  br label %{continue_label}")
+        if continue_label == "xr{seq}":
+            self.builder.emit_label(continue_label)
 
     me translate_naked_body(name: text, body: MirBody):
         """Design A.2 `@naked` (seed parity with compile_naked_function): the
@@ -1938,6 +1994,8 @@ impl MirTextCodegen for MirToLlvm:
             print "[mir-to-llvm] terminator:kind index={block_index}"
         match term:
             case Ret(_):
+                if self.xray_flag_guard and self.xray_site.has(self.current_function_name) and not self.fn_naked.has(self.current_function_name):
+                    self.emit_xray_flag_guard(self.current_function_name, 1, "xr{self.xray_guard_seq}")
                 val ret_kind = blocks[block_index].bootstrap_ret_kind()
                 if bootstrap_debug:
                     print "[mir-to-llvm] terminator:ret-scalar-kind index={block_index} kind={ret_kind}"

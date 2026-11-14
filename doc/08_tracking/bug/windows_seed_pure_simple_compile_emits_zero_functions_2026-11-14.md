@@ -1,7 +1,7 @@
 # Windows: pure-Simple `compile --native` run under the seed emits ZERO functions for any module (both backends)
 
 Date: 2026-11-14
-Status: open (found by lane xraywin2; BLOCKS the Windows flag-guard XRay lane at step 0)
+Status: verification-pending (fixed by PR #9153; re-verified 2026-11-14 by lane xrayfg: llvm backend, 3 functions exported)
 Related: `xray_llvm_simple_compiled_module_emits_zero_functions_2026-11-13.md` (Linux/aarch64, same
 symptom), `native_backend_no_win64_target_coff_emitter_2026-11-14.md`.
 
