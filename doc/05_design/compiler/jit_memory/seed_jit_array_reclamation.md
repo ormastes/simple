@@ -11,6 +11,21 @@
 
 Paths below are relative to the repo root; `rs/` abbreviates `src/compiler_rust/`.
 
+> **Status 2026-11-14: staging superseded.** The plan of record is
+> `doc/03_plan/compiler/memory_model/unified_memory_model_plan.md`; its evidence is
+> `doc/01_research/compiler/memory_model/engine_memory_model_study_2026-11-14.md`.
+> What changes for this document:
+>
+> - The measurements (section 2) and the Option A proof (section 4) stand.
+> - Slice S1 is the first slice of the plan's stage M2. Verdict: land with the
+>   conditions in the plan's section 7.
+> - S2 and S3 stay in M2. S4 is replaced by the rule "return transfers ownership"; S5
+>   moves to M3.
+> - The alias divergence (section 2.5) is no longer only a constraint: it is the same
+>   defect as the missing release and is fixed in M3. A fifteenth form was measured,
+>   dict `var d2 = d1`.
+> - Decisions D1-D7 below are restated, with five more (OD2, OD6, OD7, OD8, OD11), in section 6.1.
+
 ## 1. Summary
 
 The compiler synthesises a free at exactly one lowering site, and only for arrays. The
@@ -536,6 +551,33 @@ A `@jit_spec_entry` spec plus an RSS check, on a recorded seed sha256:
 - **D7. Explicit `rt_array_free` in Simple source.** The core front end already frees
   arrays by hand (section 2.2). Is that sanctioned practice for hot paths, or a
   workaround to be replaced by the compiler-proven release?
+
+### 6.1 Owner decisions still needed (2026-11-14, from the unified plan)
+
+Full text and reasons: plan section 8. Recommendation in italics.
+
+1. **OD1 (was D1).** Adopt the plan's twelve-rule contract; mark the "GC domain
+   (default)" of `memory.md` as not implemented. *Yes.*
+2. **OD2.** Class instances have counted, thread-confined shared ownership; the `class`
+   keyword is the explicit opt-in. Counts only in the self-hosted runtime. *Yes.*
+3. **OD3 (was D6).** A write through a plain parameter is an error for every value kind (class parameters stay writable for now);
+   `mut` makes it caller-visible. Lint, autofix, then error. *Yes, measure first.*
+4. **OD4 (was D2).** Fix the JIT's alias forms in the seed, by move first, each copy
+   paired with a release. *Yes.*
+5. **OD5 (was D3, D4).** Seed ceiling: arrays, dicts, tuples and structs get static
+   release; text, closures, enums and classes leak inside regions. *Yes.*
+6. **OD6.** No general destructor trait; a resource close hook plus `defer`. *Yes.*
+7. **OD7.** Text and closures are immutable and shared; counted in the self-hosted
+   runtime. *Yes.*
+8. **OD8.** Introspection: public read-only statistics, fenced raw externs, private
+   controls with a runtime-checked test capability; the test-path rule is not
+   narrowed. *Yes.*
+9. **OD9 (was D5).** The seed may lead for S1; the self-hosted twin is required before
+   each later slice. *Yes.*
+10. **OD10 (was D7).** Hand-written `rt_array_free` in Simple source is frozen by
+    ratchet and removed as the compiler-proven release covers each site. *Yes.*
+11. **OD11.** One owner contract for executable memory, including a remote mapper for
+    the JTAG lane; probe-visible types are flat, header-free and not classes. *Yes.*
 
 ## Appendix — probe sources
 
