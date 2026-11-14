@@ -395,11 +395,16 @@ fn flex_item_definite_base_w(node: HNode, st: Style, container_w: i32) -> i32:
         return st.flex_basis_px
     flex_item_authored_outer_w(node, st, container_w)
 
+# A flex item's percentage min-/max- sizes are of the flex container's
+# content box; an abspos child resolves its own in absolute_child_style.
+fn flex_item_percent_style(cst: Style, container_w: i32, container_h: i32) -> Style:
+    if cst.position_absolute: cst else: style_with_resolved_percent_min_max(cst, container_w, container_h)
+
 fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, x: i32, y: i32, w: i32, viewport_w: i32, viewport_h: i32, bx: [i32], by: [i32], bw: [i32], bh: [i32], wrap_starts: [[i32]], wrap_ends: [[i32]], intrinsic_widths: [i32], authored_st: Style) -> LayoutResult:
-    # A percentage min-/max- size no caller resolved (inline, float, flex,
-    # table paths) resolves against the available width; a height
-    # percentage here has no definite containing height and is `none`.
-    val st = style_with_resolved_percent_min_max(authored_st, w, 0)
+    # Callers resolve percentage min-/max- sizes against the real containing
+    # block (normal flow, inline atomic, float, abspos, flex). One still
+    # unresolved here (a table cell, which ignores max-width) is `none`.
+    val st = style_with_resolved_percent_min_max(authored_st, 0, 0)
     if not float_ctx_establishes_bfc(nodes, styles, i, st):
         return layout_with_style_flow(nodes, styles, child_index, i, x, y, w, viewport_w, viewport_h, bx, by, bw, bh, wrap_starts, wrap_ends, intrinsic_widths, st)
     val outer_base = g_float_base
@@ -903,6 +908,12 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
         val img_attr_h = parse_int(attr_value(node.attrs_raw, "height"))
         if img_attr_h > 0:
             img_auto_h = img_attr_h
+            # `height:auto` keeps the attribute aspect ratio at the used width
+            # (Chrome 159: width=300 height=150, max-width:100% in 100 px -> 100x50).
+            val img_ratio_w = parse_int(attr_value(node.attrs_raw, "width"))
+            val img_used_w = out_bw[i] - st.pad_l - st.pad_r - st.border_l - st.border_r
+            if img_ratio_w > 0 and img_used_w > 0:
+                img_auto_h = (img_attr_h * img_used_w + img_ratio_w / 2) / img_ratio_w
         val h = constrained_outer_height(node, st, if st.height_px > 0: explicit_node_h else: img_auto_h)
         out_bh[i] = h
         return relative_layout_result(child_index, i, st, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, h)
@@ -1455,7 +1466,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
             var fm_i = 0
             while fm_i < ordered_row_child_count:
                 val fm = ordered_row_children[fm_i]
-                val cst = styles[fm]
+                val cst = flex_item_percent_style(styles[fm], iw, content_height_limit)
                 if not cst.position_absolute:
                     val child_height_px = resolve_percent_height_px(cst.height_px, content_height_limit)
                     val resolved_cst = if child_height_px > 0 and child_height_px != cst.height_px:
@@ -1592,7 +1603,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
             var fc_wrap_i = 0
             while fc_wrap_i < ordered_row_child_count:
                 val fc_wrap = ordered_row_children[fc_wrap_i]
-                val cst = styles[fc_wrap]
+                val cst = flex_item_percent_style(styles[fc_wrap], iw, content_height_limit)
                 if cst.position_absolute:
                     val absolute_containing_h = content_height_limit + st.pad_t + st.pad_b
                     val ax = absolute_child_x(nodes, styles, child_index, fc_wrap, x, st, nodes[fc_wrap], cst, iw, viewport_w)
@@ -1756,11 +1767,12 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
         var zero_floor_w: [i32] = [0; ordered_flex_child_count]
         var zero_fixed_w: [i32] = [-1; ordered_flex_child_count]
         var zero_excess_total = 0
+        var zero_has_max = false
         var nonabs_count = 0
         var ps_i = 0
         while ps_i < ordered_flex_child_count:
             val ps = ordered_flex_children[ps_i]
-            val pcst = styles[ps]
+            val pcst = flex_item_percent_style(styles[ps], iw, content_height_limit)
             if not pcst.position_absolute:
                 val pml = resolve_horizontal_margin_px(pcst.margin_l, iw)
                 val pmr = resolve_horizontal_margin_px(pcst.margin_r, iw)
@@ -1775,6 +1787,8 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                         base_w = zero_floor_w[ps_i]
                     else:
                         zero_excess_total = zero_excess_total + zero_floor_w[ps_i] - base_w
+                        if pcst.max_width_px > 0:
+                            zero_has_max = true
                 if base_w > 0 or zero_item:
                     if pcst.flex_grow > 0:
                         grow_definite_total = grow_definite_total + pcst.flex_grow
@@ -1811,7 +1825,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
         # (CSS Flexbox 9.7 step 4, min violations): one whose share would be
         # smaller is frozen at that minimum and stops growing, and the rest
         # share what is left. With no room at all every one is frozen.
-        if zero_excess_total > 0:
+        if zero_excess_total > 0 or zero_has_max:
             val zero_freeze_all = sum_explicit + zero_excess_total + gaps_total > iw
             var zero_changed = true
             while zero_changed:
@@ -1821,12 +1835,21 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 val zero_space = if zero_free > 0 and zero_grow_now > 0: zero_free * zero_grow_now / (zero_grow_now + auto_weight) else: 0
                 var zk = 0
                 while zk < ordered_flex_child_count:
-                    val zst = styles[ordered_flex_children[zk]]
+                    val zc = ordered_flex_children[zk]
+                    val zst = flex_item_percent_style(styles[zc], iw, content_height_limit)
                     if not zst.position_absolute and flex_item_zero_basis(zst) and zst.flex_grow > 0 and zero_fixed_w[zk] < 0:
                         val zframe = flex_item_frame_w(zst)
-                        if zero_freeze_all or zframe + zero_space * zst.flex_grow / zero_grow_now < zero_floor_w[zk]:
+                        val zshare = zframe + zero_space * zst.flex_grow / zero_grow_now
+                        # ... and never above its max-width (max violations).
+                        val zmax = if zst.max_width_px > 0: constrained_outer_width(nodes[zc], zst, zshare) else: zshare
+                        if zero_freeze_all or zshare < zero_floor_w[zk]:
                             zero_fixed_w[zk] = zero_floor_w[zk]
                             sum_explicit = sum_explicit + zero_floor_w[zk] - zframe
+                            grow_definite_total = grow_definite_total - zst.flex_grow
+                            zero_changed = true
+                        elif zmax < zshare:
+                            zero_fixed_w[zk] = zmax
+                            sum_explicit = sum_explicit + zmax - zframe
                             grow_definite_total = grow_definite_total - zst.flex_grow
                             zero_changed = true
                     zk = zk + 1
@@ -1891,7 +1914,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
         var fc_i = 0
         while fc_i < ordered_flex_child_count:
             val fc = ordered_flex_children[fc_i]
-            val cst = styles[fc]
+            val cst = flex_item_percent_style(styles[fc], iw, content_height_limit)
             if cst.position_absolute:
                 val absolute_containing_h = content_height_limit + st.pad_t + st.pad_b
                 val ax = absolute_child_x(nodes, styles, child_index, fc, x, st, nodes[fc], cst, iw, viewport_w)
@@ -2179,7 +2202,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
         var flex_c = child_index.first_child[i]
         var flex_child_count_col = 0
         while flex_c >= 0:
-            val cst = styles[flex_c]
+            val cst = flex_item_percent_style(styles[flex_c], iw, content_height_limit)
             if cst.position_absolute:
                 val absolute_containing_h = content_height_limit + st.pad_t + st.pad_b
                 val ax = absolute_child_x(nodes, styles, child_index, flex_c, x, st, nodes[flex_c], cst, iw, viewport_w)
@@ -2387,14 +2410,15 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 val fmr = resolve_horizontal_margin_px(cst.margin_r, iw)
                 val fmt = resolve_vertical_margin_px(cst.margin_t, viewport_h)
                 val fmb = resolve_vertical_margin_px(cst.margin_b, viewport_h)
+                val fcst = style_with_resolved_percent_min_max(cst, iw, content_height_limit)
                 # Width: a px or % width as authored; `auto` is shrink-to-fit
                 # (CSS 2.2 10.3.5), the max-content width capped by the
                 # containing block -- the measurement absolute boxes use.
                 val float_percent_w = if cst.width_px < 0: iw * (0 - cst.width_px) / 100 else: 0
                 var float_w = if cst.width_px > 0:
-                    css_outer_width(nodes[c], cst, cst.width_px)
+                    css_outer_width(nodes[c], fcst, cst.width_px)
                 elif cst.width_px < 0:
-                    css_outer_width(nodes[c], cst, float_percent_w)
+                    css_outer_width(nodes[c], fcst, float_percent_w)
                 elif replaced_default_box_w(nodes[c].tag) > 0:
                     # A floated replaced box sizes against the float's
                     # available width (Chrome 159: a floated viewBox-only svg
@@ -2404,7 +2428,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                         inline_parent_containing_block(nodes, styles, i, false, out_bx, out_bw)[1]
                     else:
                         iw
-                    replaced_auto_box_w(nodes[c], cst, float_cb_w - fml - fmr)
+                    replaced_auto_box_w(nodes[c], fcst, float_cb_w - fml - fmr)
                 else:
                     # Two measurements, the wider wins: the block-aware one
                     # (child widths, own padding and border) and the inline
@@ -2417,8 +2441,8 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                         float_fit = float_inline_fit.width
                     if float_fit > iw - fml - fmr:
                         float_fit = iw - fml - fmr
-                    constrained_outer_width(nodes[c], cst, float_fit)
-                val float_style = if cst.width_px < 0: style_with_width(cst, float_percent_w) else: cst
+                    constrained_outer_width(nodes[c], fcst, float_fit)
+                val float_style = if cst.width_px < 0: style_with_width(fcst, float_percent_w) else: fcst
                 if float_w < 1:
                     float_w = 1
                 val float_outer_w = fml + float_w + fmr

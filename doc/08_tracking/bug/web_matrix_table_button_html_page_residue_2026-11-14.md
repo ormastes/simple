@@ -97,10 +97,16 @@ max-content of mixed inline content, control UA font reset, `h6` margins
 
 - **Item 18 fixed.** Percentage `min-width` / `max-width` / `min-height` /
   `max-height` are stored as the negative sentinel `width` uses and resolved
-  by `style_with_resolved_percent_min_max` against the containing block:
-  the normal-flow child site (content box width, definite content height),
-  the inline atomic site (line box width), and `layout_with_style` for every
-  other caller (available width; a height percentage is `none` there).
+  by `style_with_resolved_percent_min_max` against the containing block at
+  each site: normal flow (content box width, definite content height), the
+  inline atomic box (line box width), a float (content box), an abspos box
+  (`absolute_child_style` / `absolute_outer_width`: the padding box), and a
+  flex item (`flex_item_percent_style`: the container's content box; a
+  growing zero-basis item is frozen at its max-width, Flexbox 9.7). A
+  sentinel still unresolved in `layout_with_style` reads as `none`, never as
+  a percentage of the box's own width, so `td{max-width:10%}` is ignored as
+  in Chrome. `img{height:auto}` with width/height attributes keeps their
+  aspect ratio at the used width (300x150 at max-width:100% of 100 -> 100x50).
   Max-content contributions see the sentinel as `none`. Spec:
   `test/01_unit/browser_engine/percent_min_max_size_chrome159_spec.spl`.
   Still px-only: `min-/max-inline-size` and `min-/max-block-size` go through
@@ -115,3 +121,15 @@ max-content of mixed inline content, control UA font reset, `h6` margins
   `test/01_unit/browser_engine/linear_gradient_angle_cpu_raster_chrome159_spec.spl`.
   Cost: the page render goes from 212 s to about 330 s, filed as
   `web_angled_gradient_header_render_slowdown_2026-11-15.md`.
+- **Open, filed from the 9208a82f4e8 review:**
+  - `definite_content_height_limit` treats a parent's `min-height` as a
+    definite height. `<div style="min-height:200px"><div
+    style="height:300px;max-height:50%">` is 300 tall in Chrome 159 (the
+    percentage is `none`), 100 here.
+  - `max-width:0%` is stored as the sentinel `0 - 0 = 0`, which reads as
+    `none`; Chrome 159 makes the box 0 wide. The sentinel cannot carry 0 %.
+  - `max-width: calc(100% - 20px)` is still ignored (no calc in the
+    min/max slots).
+  - Flex distribution honours max-width only for growing zero-basis items
+    (`flex:1`); a growing item with a definite basis or an auto basis can
+    still grow past its max-width, px or percent.

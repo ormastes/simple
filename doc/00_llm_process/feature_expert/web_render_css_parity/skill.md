@@ -1651,10 +1651,15 @@ never cache an answer computed while exhausted) —
 - **Trap — `max-width: <percent>` used to be N px.** Percentage min-/max-
   sizes are now the negative sentinel (like `width`) and resolve in
   `style_with_resolved_percent_min_max`; every clamp reader tests `> 0`, so an
-  unresolved sentinel is `none`, which is what max-content needs. Resolve
-  BEFORE `layout_with_style` when the containing block differs from the width
-  the box is laid out in (inline atomic boxes are laid out in their own
-  predicted width: resolving there gave an input 16 px).
+  unresolved sentinel is `none`, which is what max-content needs. Resolve at
+  EACH call site against that site's containing block (normal flow, inline
+  atomic, float, abspos padding box, flex container); `layout_with_style`
+  only maps a leftover sentinel to `none`. Resolving there against the box's
+  own width was wrong everywhere it mattered: an inline input came out 16 px,
+  a float 193 instead of 200, an abspos 193 instead of 210, and
+  `td{max-width:10%}` (ignored by Chrome) shrank the cell to 13 px. A flex
+  item also needs the clamp INSIDE distribution (`flex:1;max-width:25%` of
+  400 is 100 / 300), not only on the final width.
 - **Trap — a UA reset needs `inherit` to exist.** Resetting the control
   font exposed that NO font property resolved the `inherit` keyword
   (`font-family: inherit` stored the literal text; `font: inherit` cleared

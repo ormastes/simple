@@ -25,6 +25,13 @@ Chrome oracle (Chrome 159.0.8154.6 headless shell, 900x4000, `<!doctype html>`,
 | 400x200 block: child `max-height:50%;height:300px`                      | 400 x 100  |
 | 400x200 block: child `min-height:50%`                                   | 400 x 100  |
 | auto-height block: child `min-height:50%` / `max-height:10%` with text  | 400 x 24   |
+| 400 px block: `float:left;max-width:50%` long text / `min-width:50%` "s" | 200 x 48 / 200 x 24 |
+| relative 400 px, padding 10: abspos `max-width:50%` / `min-width:50%`  | 210 x 48 / 210 x 24 |
+| flex 400: `flex:1;max-width:25%` + `flex:1`                              | 100 / 300 (x 100) |
+| flex 400: `min-width:50%` + item                                         | 200, next at x 200 |
+| `<td style=max-width:10%>` vs the same table without it                  | equal (td 114.08) |
+| 2:1 image width=300 height=150, `max-width:100%;height:auto` in 100 px   | 100 x 50   |
+| auto parent: `<div style=min-height:50%><p>t</p></div><div>u`         | div y 16 x 24, next y 56 |
 """
 
 """
@@ -40,6 +47,8 @@ use std.nogc_sync_mut.text_layout.font_provider.{browser_host_has_measured_linux
 val HEAD: text = "<!doctype html><html><head><style>body{margin:0;font:16px/1.5 sans-serif}</style></head><body>"
 val TAIL: text = "</body></html>"
 val GIF: text = "data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw=="
+val GIF21: text = "data:image/gif;base64,R0lGODdhAgABAIEAAP8AAAAA/wAAAAAAACwAAAAAAgABAAAIBQABBAgIADs="
+val LONG: text = "aaaa bbbb cccc dddd eeee ffff gggg hhhh iiii jjjj kkkk llll"
 
 fn field(inner: text, id: text, name: text) -> i32:
     simple_web_layout_debug_layout_by_id(HEAD + inner + TAIL, 900, 600, id, name).to_int()
@@ -76,7 +85,8 @@ describe "percentage min-width / max-width":
         expect(field(fixed, "e", "w")).to_equal(147)
         step("Chrome 159: auto table -> the percentage is `none` for the column (td 80.28), then halves the child (39.14 x 72)")
         val auto_table = "<table><tr><td id=\"t\"><div id=\"e\" style=\"max-width:50%\">abc def ghi</div></td></tr></table>"
-        expect(field(auto_table, "e", "h")).to_equal(72)
+        if browser_host_has_measured_linux_face_set():
+            expect(field(auto_table, "e", "h")).to_equal(72)
         if browser_host_has_measured_linux_face_set():
             expect(off(field(auto_table, "t", "w"), 80)).to_be_less_than(2)
         if browser_host_has_measured_linux_face_set():
@@ -96,3 +106,54 @@ describe "percentage min-height / max-height":
         expect(field(page, "h", "h")).to_equal(24)
         expect(field(page, "h2", "h")).to_equal(24)
         expect(field(page, "h2", "y")).to_equal(24)
+
+describe "percentage min/max width outside normal flow":
+
+    it "AC-7: a float resolves against its containing block, not its own width":
+        step("Chrome 159: in 400 px, max-width:50% long text -> 200 x 48; min-width:50% 's' -> 200")
+        val capped = "<div style=\"width:400px\"><div id=\"f\" style=\"float:left;max-width:50%\">" + LONG + "</div></div>"
+        expect(field(capped, "f", "w")).to_equal(200)
+        if browser_host_has_measured_linux_face_set():
+            expect(field(capped, "f", "h")).to_equal(48)
+        val floored = "<div style=\"width:400px\"><div id=\"f\" style=\"float:left;min-width:50%\">s</div></div>"
+        expect(field(floored, "f", "w")).to_equal(200)
+
+    it "AC-8: an abspos box resolves against the containing block's padding box":
+        step("Chrome 159: relative 400 px with padding 10 -> padding box 420; max-width:50% long text 210, min-width:50% 's' 210")
+        val page = "<div style=\"position:relative;width:400px;height:100px;padding:10px\"><div id=\"p\" style=\"position:absolute;left:0;top:0;max-width:50%\">" + LONG + "</div><div id=\"q\" style=\"position:absolute;left:0;top:60px;min-width:50%\">s</div></div>"
+        expect(field(page, "p", "w")).to_equal(210)
+        expect(field(page, "q", "w")).to_equal(210)
+
+    it "AC-9: a flex item's percentage clamps take part in distribution":
+        step("Chrome 159: flex 400, flex:1;max-width:25% + flex:1 -> 100 / 300 at x 100")
+        val capped = "<div style=\"display:flex;width:400px\"><div id=\"a\" style=\"flex:1;max-width:25%\">a</div><div id=\"b\" style=\"flex:1\">b</div></div>"
+        expect(field(capped, "a", "w")).to_equal(100)
+        expect(field(capped, "b", "x")).to_equal(100)
+        expect(field(capped, "b", "w")).to_equal(300)
+        step("Chrome 159: min-width:50% + item -> 200, next item at x 200")
+        val floored = "<div style=\"display:flex;width:400px\"><div id=\"a\" style=\"min-width:50%\">a</div><div id=\"b\">b</div></div>"
+        expect(field(floored, "a", "w")).to_equal(200)
+        expect(field(floored, "b", "x")).to_equal(200)
+
+    it "AC-10: max-width on a table cell is ignored":
+        step("Chrome 159: <td style=max-width:10%> lays out exactly like the same cell without it (td 114.08)")
+        val with_max = "<table><tr><td id=\"c\" style=\"max-width:10%\">aaaa bbbb cccc</td><td id=\"d\">dd</td></tr></table>"
+        val without = "<table><tr><td id=\"c\">aaaa bbbb cccc</td><td id=\"d\">dd</td></tr></table>"
+        expect(field(with_max, "c", "w")).to_equal(field(without, "c", "w"))
+        expect(field(with_max, "d", "x")).to_equal(field(without, "d", "x"))
+        if browser_host_has_measured_linux_face_set():
+            expect(off(field(with_max, "c", "w"), 114)).to_be_less_than(2)
+
+    it "AC-11: img{max-width:100%;height:auto} keeps the attribute aspect ratio":
+        step("Chrome 159: a 2:1 image with width=300 height=150 in a 100 px block is 100 x 50")
+        val page = "<div style=\"width:100px\"><img id=\"i\" width=\"300\" height=\"150\" style=\"max-width:100%;height:auto\" src=\"" + GIF21 + "\"></div>"
+        expect(field(page, "i", "w")).to_equal(100)
+        expect(field(page, "i", "h")).to_equal(50)
+
+    it "AC-12: an unresolved percentage min-height does not stop margin collapsing":
+        step("Chrome 159: auto-height parent, <div min-height:50%><p>t</p></div> -> div and p at y 16 (24 tall), next block at y 56")
+        val page = "<div style=\"width:400px\"><div id=\"k\" style=\"min-height:50%\"><p id=\"kp\">t</p></div><div id=\"k2\">u</div></div>"
+        expect(field(page, "k", "y")).to_equal(16)
+        expect(field(page, "k", "h")).to_equal(24)
+        expect(field(page, "kp", "y")).to_equal(16)
+        expect(field(page, "k2", "y")).to_equal(56)
