@@ -1,0 +1,110 @@
+# Inline structural table for PIT schema3. No source freshness or guard execution
+# is proved by these constructible facts. The current producer emits forward only.
+use compiler.common.cache_contract.aspect_match_shard_v1.{DirectoryJoinPointFactsV1,
+    JoinPointFactV1, directory_facts_key_v1}
+use compiler.common.cache_contract.hash_algorithm_registry_v1.{digest_v1_parse, HASH_ALGO_SHA256_V1}
+use compiler.common.cache_contract.physical_tld_v1.{ThreePayloadContractBudgetV1,
+    ThreePayloadContractReaderV1, three_payload_contract_put_text_v1,
+    three_payload_contract_put_texts_v1}
+use compiler.common.cache.canonical_identity.{canonical_identity_text_lt}
+use std.common.structural.wire.{wire_put_u32, wire_put_u8}
+
+fn _table_sha_v3(value: text) -> bool:
+    match digest_v1_parse(value):
+        case Some(digest): digest.algo_id == HASH_ALGO_SHA256_V1
+        case None: false
+
+fn _table_texts_v3(values: [text], budget: ThreePayloadContractBudgetV1) -> bool:
+    budget.add_bytes(4)
+    budget.add_items(values.len())
+    if not budget.ok: return false
+    var previous = ""
+    var first = true
+    for value in values:
+        if not first and not canonical_identity_text_lt(previous, value): return false
+        budget.add_text(value, false)
+        if not budget.ok: return false
+        previous = value
+        first = false
+    true
+
+# Charges the SAME budget as the containing PackageInit before any encoding.
+pub fn directory_join_point_table_budget_v3(facts: DirectoryJoinPointFactsV1,
+        budget: ThreePayloadContractBudgetV1) -> bool:
+    if not facts.complete: return false
+    budget.add_text(facts.scope_id, false)
+    if not _table_texts_v3(facts.sorted_member_files, budget): return false
+    var owners: Dict<text, bool> = {}
+    for member in facts.sorted_member_files: owners[member] = true
+    budget.add_bytes(4)
+    budget.add_items(facts.sorted_join_points.len())
+    if not budget.ok: return false
+    var previous = ""
+    var first = true
+    for point in facts.sorted_join_points:
+        if point.kind != "forward" or not owners.contains_key(point.owner_file) or
+                (not first and not canonical_identity_text_lt(previous, point.id)): return false
+        budget.add_text(point.id, false)
+        budget.add_text(point.kind, false)
+        budget.add_text(point.symbol, false)
+        if not _table_texts_v3(point.attrs, budget): return false
+        budget.add_text(point.owner_file, false)
+        budget.add_text(point.base_body_digest, true)
+        if not budget.ok: return false
+        previous = point.id
+        first = false
+    if not _table_texts_v3(facts.sorted_child_roots, budget): return false
+    for child in facts.sorted_child_roots:
+        if not _table_sha_v3(child): return false
+    budget.add_bytes(1)
+    for root in [facts.negative_root, facts.active_guard_root, facts.facts_key]:
+        budget.add_text(root, false)
+        if not budget.ok or not _table_sha_v3(root): return false
+    budget.ok and directory_facts_key_v1(facts) == facts.facts_key
+
+# Internal streaming primitive: caller first validates the whole package budget.
+pub fn directory_join_point_table_put_v3(out: [u8], facts: DirectoryJoinPointFactsV1) -> [u8]:
+    var bytes = three_payload_contract_put_text_v1(out, facts.scope_id)
+    bytes = three_payload_contract_put_texts_v1(bytes, facts.sorted_member_files)
+    bytes = wire_put_u32(bytes, facts.sorted_join_points.len())
+    for point in facts.sorted_join_points:
+        bytes = three_payload_contract_put_text_v1(bytes, point.id)
+        bytes = three_payload_contract_put_text_v1(bytes, point.kind)
+        bytes = three_payload_contract_put_text_v1(bytes, point.symbol)
+        bytes = three_payload_contract_put_texts_v1(bytes, point.attrs)
+        bytes = three_payload_contract_put_text_v1(bytes, point.owner_file)
+        bytes = three_payload_contract_put_text_v1(bytes, point.base_body_digest)
+    bytes = three_payload_contract_put_texts_v1(bytes, facts.sorted_child_roots)
+    bytes = wire_put_u8(bytes, 1)
+    bytes = three_payload_contract_put_text_v1(bytes, facts.negative_root)
+    bytes = three_payload_contract_put_text_v1(bytes, facts.active_guard_root)
+    three_payload_contract_put_text_v1(bytes, facts.facts_key)
+
+# The enclosing reader owns total bytes/text/items and final exhaustion. No
+# nested copy or new reader is allowed to reset those counters.
+pub fn directory_join_point_table_read_v3(reader: ThreePayloadContractReaderV1) -> DirectoryJoinPointFactsV1:
+    val scope = reader.read_text(false)
+    val members = reader.read_texts(false)
+    val count = reader.read_count()
+    var points: [JoinPointFactV1] = []
+    var index = 0
+    while reader.ok and index < count:
+        val id = reader.read_text(false)
+        val kind = reader.read_text(false)
+        val symbol = reader.read_text(false)
+        val attrs = reader.read_texts(false)
+        val owner = reader.read_text(false)
+        val body = reader.read_text(true)
+        if reader.ok:
+            points.push(JoinPointFactV1(id: id, kind: kind, symbol: symbol, attrs: attrs,
+                owner_file: owner, base_body_digest: body))
+        index = index + 1
+    val children = reader.read_texts(false)
+    val complete = reader.read_u8()
+    if complete != 1: reader.reject("inline_facts_incomplete")
+    val negative = reader.read_text(false)
+    val guards = reader.read_text(false)
+    val key = reader.read_text(false)
+    DirectoryJoinPointFactsV1(scope_id: scope, sorted_member_files: members,
+        sorted_join_points: points, sorted_child_roots: children, complete: complete == 1,
+        negative_root: negative, active_guard_root: guards, facts_key: key)
