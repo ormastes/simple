@@ -186,8 +186,9 @@ aspect claims and basic lineage validation. Unsupported observation yields no
 snapshot and full traversal. The builtin plugin code key uses the executing-image
 digest plus its stable entry/schema; configured producer roles are not assumed
 equal to the running worker. Missing executing-image transport is rejected.
-These are process-local inputs, not serialized admission tokens. The owner and
-new fallback spec are source-reviewed but unrun; no native qualification is added.
+These are process-local inputs, not serialized admission tokens. The owner has a separate admitted-P2-built Linux/AArch64 native probe recorded in
+`doc/01_research/local/kernel_image_digest_v1_native_probe_2026-11-14.md`. The new
+capture fallback spec and whole directory route remain unrun.
 
 
 ## Initializer plan ownership
@@ -213,3 +214,30 @@ order. The existing native link receipt owner already binds ordered object diges
 link options and output content after successful linking. Extending that explicit
 versioned owner with the actual startup receipt, then joining module plan coverage,
 is required before complete PackageInit publication or initializer reuse.
+
+### Initializer object/startup observation integration (implementation, unqualified)
+
+The actual accepted native capsule path now captures initializer-body observations
+before MIR eviction. It reuses the capsule owner's verified object digest/size,
+requires a matching full-parse category source/target/policy receipt, and observes
+the executing image lazily. Each attempted module capture clears its previous
+receipt; a new source lineage clears the table. Missing MIR or historical plan,
+stale source, unsupported image observation, and unavailable scratch ownership
+produce no receipt. Serializer scratch uses a transient scope; only the compact
+receipt survives. This is a compile-local partial object observation, not complete
+PackageInit authorization or a proof of preserved historical effect ordering.
+
+Typed backend wrappers preserve existing callers and carry checked startup names
+in their actual emitted order only when strict discovery and source/object byte
+observations succeed. The existing atomic link-receipt writer can persist the
+version-2 format with actual ordered input object digests and final output digest.
+Retained receipts remain explicitly unknown for fresh startup authority; callers
+requiring fresh observation bypass reuse. Old and unqualified backend routes
+remain unknown. Default XRay thread-context policy remains false; enabled policy
+is forwarded only through the admitted source-built runtime route.
+
+The new initializer finalizer, typed backend scenarios, codec specifications and
+actual object capture have not been executed. Existing codec/source-row checks do
+not qualify these additions. Full directory membership/category aggregation,
+object coverage and the final startup/output join remain required before publishing
+a complete PackageInit record.
