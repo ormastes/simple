@@ -2,7 +2,7 @@
 #   snapshot -> producers -> proposals -> staged validation -> preview -> apply -> reanalysis
 # Callers: `simple fix`, `simple code refactor`, lint --fix, LSP codeAction /
 # simple/refactor/closure, the LSP-MCP bridge. Nothing else writes source.
-use std.tooling.easy_fix.types.{EasyFix, FixReport, Replacement, easyfix_id, easyfix_description,
+use std.tooling.easy_fix.types.{EasyFix, FixReport, Replacement, easyfix_is_effective, easyfix_id, easyfix_description,
     easyfix_replacements, easyfix_code, easyfix_sort_replacements_descending}
 use std.tooling.easy_fix.snapshot.{SourceSnapshot, source_snapshot, snapshot_version, ValidationReport,
     validation_failed, validation_report_text}
@@ -111,7 +111,14 @@ pub fn fix_apply_outcome(outcome: FixOutcome, dry_run: bool) -> Result<FixReport
     if not outcome.report.ok:
         return Err(validation_report_text(outcome.report))
     var report = FixReport.empty()
-    report.applied = outcome.proposals.len()
+    var snapshot_sources: Dict<text, text> = {}
+    for path in outcome.snapshots.keys():
+        snapshot_sources[path] = outcome.snapshots[path].source
+    var effective_count = 0
+    for p in outcome.proposals:
+        if easyfix_is_effective(p, snapshot_sources):
+            effective_count = effective_count + 1
+    report.applied = effective_count
     val files = outcome.new_sources.keys()
     for file in files:
         if not file_exists(file) or file_read(file) != outcome.snapshots[file].source:
