@@ -27,6 +27,9 @@ use std.test_runner.test_runner_files.{discover_test_files, discover_test_files_
 use std.test_runner.mode_filter.{path_mode_matches}
 use std.spec.in_development.{source_is_in_development, in_development_explicitly_targeted, InDevelopmentOutcome, classify_in_development, in_development_skip_line, in_development_unexpected_pass_line, in_development_explicit_line, in_development_summary_line}
 use std.spec.requires_feature.{spec_required_features, feature_env_names, disabled_required_features, feature_skip_line, feature_skip_summary_line, feature_disabled_reason}
+use std.spec.platform_os.{platform_os_skip_reason, platform_skip_line, platform_skip_summary_line, is_platform_skip_reason}
+use std.test_runner.test_runner_files.{file_get_platform_tags}
+use std.io_runtime.{host_os}
 use std.test_runner.test_manifest.{MANIFEST_PATH, manifest_load, manifest_save, manifest_is_fresh}
 use std.test_runner.test_manifest_scanner.{manifest_full_scan}
 use std.nogc_sync_mut.test_runner.source_route.{source_has_bdd_structure}
@@ -627,7 +630,7 @@ fn run_tests(options: TestOptions) -> TestRunResult:
                 continue
 
         # Run test (or report it feature-gated without running it)
-        val result = if gate.off.len() > 0: feature_gated_result(file_path, gate.off) else: run_single_test(file_path, execution_options)
+        val result = if gate.os_skip != "": platform_skipped_result(file_path, gate.os_skip) else: (if gate.off.len() > 0: feature_gated_result(file_path, gate.off) else: run_single_test(file_path, execution_options))
         print_result(result, execution_options.format)
 
         # Record result in cache (system specs skip the cache entirely so
@@ -705,7 +708,9 @@ fn run_tests_parallel_mode(
         val gate = feature_gate_decision(file_path)
         if gate.declared:
             gate_declared_files.push(file_path)
-        if gate.off.len() > 0:
+        if gate.os_skip != "":
+            gated_results.push(platform_skipped_result(file_path, gate.os_skip))
+        elif gate.off.len() > 0:
             gated_results.push(feature_gated_result(file_path, gate.off))
         else:
             runnable_files.push(file_path)
@@ -1097,6 +1102,7 @@ fn print_in_development_summary(results: [TestFileResult]):
 struct FeatureGateDecision:
     declared: bool   # names a known `requires-<feature>` gate (never cached)
     off: [text]      # required features OFF for this build ([] = run it)
+    os_skip: text = ""  # non-empty: @platform OS tag excludes this host (not run)
 
 fn feature_gate_decision(file_path: text) -> FeatureGateDecision:
     """The ONE pre-run decision shared by the sequential and parallel paths.
@@ -1108,6 +1114,11 @@ fn feature_gate_decision(file_path: text) -> FeatureGateDecision:
     not consult this gate: there a tagged spec simply runs and reports its
     honest verdict, never a false pass. Bootstrap uses --no-session-daemon."""
     val source = file_read(file_path) ?? ""
+    val ptags = file_get_platform_tags(source)
+    if ptags.len() > 0:
+        val os_reason = platform_os_skip_reason(ptags, host_os())
+        if os_reason != "":
+            return FeatureGateDecision(declared: true, off: [], os_skip: os_reason)
     if spec_required_features(source).len() == 0:
         return FeatureGateDecision(declared: false, off: [])
     val home = env_get("HOME") ?? (env_get("USERPROFILE") ?? "")
@@ -1135,11 +1146,23 @@ fn print_feature_gate_summary(results: [TestFileResult]):
     """Count gated files (every gating path sets `feature_gated`; gated
     files are never cached). Printed whenever non-zero, never behind --verbose."""
     var files = 0
+    var platform_files = 0
     for r in results:
-        if r.feature_gated != "":
+        if is_platform_skip_reason(r.feature_gated):
+            platform_files = platform_files + 1
+        elif r.feature_gated != "":
             files = files + 1
     if files > 0:
         print feature_skip_summary_line(files)
+    if platform_files > 0:
+        print platform_skip_summary_line(platform_files)
+
+fn platform_skipped_result(file_path: text, reason: text) -> TestFileResult:
+    """Counted, reasoned skip for a spec whose `# @platform:` OS tag excludes
+    this host. Rides the `feature_gated` channel (reason prefixed
+    `platform:`) so every printer says SKIP and the DB row is never "passed"."""
+    print platform_skip_line(file_path, reason)
+    TestFileResult(path: file_path, passed: 0, failed: 0, skipped: 1, pending: 0, duration_ms: 0, setup_ms: 0, error: "", timed_out: false, cached: false, feature_gated: reason)
 
 # =========================================================================
 # Session Config Propagation
@@ -1362,8 +1385,13 @@ fn emit_spec_file_verdicts(results: [TestFileResult]):
         if test_file_result_outcome_class(r) == "ADMISSION":
             print "COVER FILE VERDICT: {r.path} executed=0 passed=0 failed=0 admission_failed=1"
         else:
-            print aggregate_spec_file_verdict_line(r.path, r.passed, r.failed,
+            val verdict = aggregate_spec_file_verdict_line(r.path, r.passed, r.failed,
                 r.in_development, r.error, r.degraded_reason, r.timed_out, r.duration_ms, r.blocked)
+            # A host-OS @platform skip says WHY it did not run, on the line sweeps parse.
+            if is_platform_skip_reason(r.feature_gated):
+                print verdict + " skipped=1 reason=platform-os-mismatch"
+            else:
+                print verdict
 
 fn summarize_test_results(results: [TestFileResult]) -> TestRunResult:
     var total_passed = 0
