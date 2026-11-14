@@ -981,3 +981,52 @@ Round 24 measurements: `doc/10_metrics/ui/web_chrome_parity_round24_2026-09-14.m
   root in the same rows — Chrome's UA quotation marks, which Simple never emits.
 
 Round 25 measurements: `doc/10_metrics/ui/web_chrome_parity_round25_2026-09-14.md`.
+
+## Linux aarch64 pixel round — 2026-11-14 (Chromium 131, Playwright)
+
+Gate: `scripts/check/check-chrome-catalog-pixel-diff.shs`; ratchet rows in
+`scripts/check/chrome_catalog_pixel_diff_baseline.Linux-aarch64.txt`.
+
+| page | before | after |
+|---|---|---|
+| overview | 6.45 | 2.03 |
+| html | 26.94 | 15.77 |
+| css-layout | 17.19 | 5.89 |
+| css-paint | 18.26 | 7.46 |
+| forms-media | 18.76 | 8.64 |
+| animation | 33.89 | 23.98 |
+| evidence | 2.31 | 1.63 |
+| tab-bar | 0.61 | 0.61 |
+
+Roots fixed, each pinned by a spec: Linux generic faces (Liberation Sans /
+DejaVu Sans Mono + real bold/italic faces — Linux used Noto Sans SC's wght=100
+master and reused the regular face for bold), sectioning `h1` UA levels, list
+markers and link underlines never painted in Draw IR, staged glyph pen drifting
+from the measured advances (last glyph clipped), bare `#text` runs missing
+their half-leading.
+
+Traps measured this round:
+- **No Chrome on linux-arm64.** `npx playwright install chromium` is the no-root
+  path; the gate finds `~/.cache/ms-playwright/chromium-*/chrome-linux/chrome`
+  or takes `CHROME_BIN`. AppArmor-restricted userns hosts need
+  `CHROME_NO_SANDBOX=1`.
+- **`--headless=new --window-size=W,H` is a WINDOW size.** The viewport was
+  900x673 for 900x760 (87 rows of browser UI) and the screenshot pads below it,
+  so any page taller than 673 px compared Simple content against padding. The
+  gate probes the deficit and captures a taller window; `pixel_diff.spl` crops
+  only when told (`--ref-viewport-rows`). For hand oracles use
+  `chromium_headless_shell-*/chrome-linux/headless_shell` (viewport == window).
+- **A comparison is not a verdict.** The gate printed `PASS … worst=33.89`;
+  PASS meant "a diff ran". Without a baseline file the verdict now says
+  `compared, not judged`.
+- **A stale seed lies.** The 2026-11-05 seed's JIT returned `"760".to_i32() ==
+  95`; a seed built from current source is right. Record the binary's build
+  date with any number, and rebuild before chasing an inexplicable value.
+- **Never edit the worktree while a render reads it.** `src/lib` is read as
+  source on every run; pages rendered across a cherry-pick are mixed-source.
+- CPU vs Vulkan on `overview`: 69 differing px, all at clipped run ends — a
+  cheap cross-backend probe that located the clip in the CPU lane.
+
+Open, in size order: `animation` (wrapped inline text continues under its own
+run start instead of the line box's left edge; canvas/svg/audio/video row not
+painted and over-tall), `html`, `forms-media`, `css-paint`, `css-layout`.

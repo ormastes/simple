@@ -79,3 +79,27 @@ or live RenderDoc/native-host artifact is unavailable.
 When record schema, facade capture, QEMU receipts, external bridges, or
 acceptance rules change, update this entry and the canonical guide in the same
 SPipe lane. Never replace explicit fail placeholders with false-green passes.
+
+## Linux aarch64, no root — 2026-11-14
+
+- RenderDoc v1.36 builds without root (clang/lld 23, Ninja; only
+  `libx11-xcb-dev` and `libxcb-keysyms1-dev` needed `apt-get download` +
+  `dpkg-deb -x`; lld 23 needs `-Wl,--undefined-version`). `renderdoccmd` then
+  drives `scripts/check/check-renderdoc-web-capture-lane.shs`.
+- **The lanes expect an INSTALLED tree.** `rdoc_capture_simple_vulkan` sets
+  `VK_LAYER_PATH`, which replaces loader discovery, from
+  `$RDOC_HOME/etc/vulkan/implicit_layer.d/renderdoc_capture.json`. A build tree
+  has no `etc/`, the layer never loads, and the in-app API still answers
+  `available=1 start=1` — the run ends `num_captures=0` with no cause named.
+  The helper now reports `missing-renderdoc-layer-manifest:<path>`.
+- **Start the capture after the device exists and keep the device alive.** A
+  start issued before the first `vkCreateDevice` returns 1 and captures
+  nothing; so does a start whose warm-up engine was already dropped.
+  `renderdoc_web_page_capture.spl` now follows `renderdoc_vulkan_capture.spl`.
+- **NVIDIA GB10 (driver 580.173) rejects `vkCreateDevice` with the RenderDoc
+  layer in the chain** (5 of 5 attempts, `VK_ERROR_INITIALIZATION_FAILED`);
+  llvmpipe accepts it. Capture with `VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.json`.
+  Measured: `overview.simple.rdc` 486756 bytes at 900x760.
+- `RDOC_WEB_CHROME_BIN` was honoured only in `RDOC_WEB_TOOL_SEARCH=isolated`
+  mode; fixed. The Chrome side still ends `vulkan-angle-unavailable` on a host
+  with no display and no Xvfb.
