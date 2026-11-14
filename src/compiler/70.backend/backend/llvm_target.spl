@@ -200,6 +200,21 @@ impl LlvmTargetTriple:
                     # 32-bit SimpleOS target before code generation.
                     ()
 
+        # Native macOS Mach-O object targets keep their Apple triple
+        # regardless of bare-metal/hosted mode or the compiler host.
+        val enum_is_macos = match target:
+            case CodegenTarget.AArch64_MacOS: true
+            case CodegenTarget.X86_64_MacOS: true
+            case _: false
+        if enum_is_macos:
+            match target:
+                case CodegenTarget.AArch64_MacOS:
+                    return LlvmTargetTriple(arch: "aarch64", vendor: "apple", os: "darwin", env: nil)
+                case CodegenTarget.X86_64_MacOS:
+                    return LlvmTargetTriple(arch: "x86_64", vendor: "apple", os: "darwin", env: nil)
+                case _:
+                    ()
+
         if bare_metal:
             # Bare-metal: No OS, EABI for ARM
             val os = "none"
@@ -228,9 +243,11 @@ impl LlvmTargetTriple:
                     LlvmTargetTriple(arch: "wasm64", vendor: "unknown", os: "wasi", env: nil)
                 case SimpleOS_X86_64:
                     LlvmTargetTriple(arch: "x86_64", vendor: "unknown", os: "simpleos", env: nil)
-                case Host:
+                case Host | Native:
                     val detected = detect_host_arch()
                     LlvmTargetTriple(arch: detected, vendor: vendor, os: os, env: env)
+                case _:
+                    panic("LlvmTargetTriple.from_target_with_mode: GPU (CudaPtx/HipHsaco/OpenClC/OpenClSpirv/VulkanSpirv) and mLLVM_QEMU (Avr/I8086) targets use their own backends, not LLVM target triples")
         else:
             # Hosted: Detect OS dynamically
             val detected_host_os = host_os()
@@ -286,10 +303,12 @@ impl LlvmTargetTriple:
                     LlvmTargetTriple(arch: "wasm64", vendor: "unknown", os: "wasi", env: nil)
                 case SimpleOS_X86_64:
                     LlvmTargetTriple(arch: "x86_64", vendor: "unknown", os: "simpleos", env: nil)
-                case Host:
+                case Host | Native:
                     # Detect host architecture
                     val detected = detect_host_arch()
                     LlvmTargetTriple(arch: detected, vendor: vendor_result, os: os_result, env: env_result)
+                case _:
+                    panic("LlvmTargetTriple.from_target_with_mode: GPU (CudaPtx/HipHsaco/OpenClC/OpenClSpirv/VulkanSpirv) and mLLVM_QEMU (Avr/I8086) targets use their own backends, not LLVM target triples")
 
     fn datalayout() -> text:
         """Return the LLVM target datalayout string for this architecture."""
@@ -587,7 +606,7 @@ impl LlvmTargetConfig:
                     abi: nil
                 )
 
-            case Host:
+            case Host | Native:
                 # Delegate to detected architecture
                 val detected = detect_host_arch()
                 if detected == "aarch64":
@@ -613,6 +632,25 @@ impl LlvmTargetConfig:
                         features: [],
                         abi: nil
                     )
+
+            case AArch64_MacOS:
+                LlvmTargetConfig(
+                    triple: triple,
+                    cpu: "generic",
+                    features: ["+neon", "+fp-armv8"],
+                    abi: nil
+                )
+
+            case X86_64_MacOS:
+                LlvmTargetConfig(
+                    triple: triple,
+                    cpu: "x86-64",
+                    features: [],
+                    abi: nil
+                )
+
+            case _:
+                panic("LlvmTargetConfig.for_target_with_mode: GPU (CudaPtx/HipHsaco/OpenClC/OpenClSpirv/VulkanSpirv) and mLLVM_QEMU (Avr/I8086) targets use their own backends, not LLVM target configs")
 
     static fn compatibility_build(target: CodegenTarget) -> LlvmTargetConfig:
         """
