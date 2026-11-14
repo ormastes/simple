@@ -515,6 +515,19 @@ pub(crate) fn exec_node(
                 if let Some(message) = crate::impl_duplicate_check::let_literal_mismatch(let_stmt) {
                     return Err(CompileError::semantic(message));
                 }
+                // A function/type value can never be an enum value: twin of
+                // the HIR typed-`val` check (reject_callable_for_enum_slot).
+                // Bug: match_on_callable_scrutinee_silently_takes_first_arm_2026-11-14
+                if let Some(e) =
+                    crate::interpreter::interpreter_call::reject_callable_for_enum_param(&value, type_annotation, enums)
+                {
+                    return Err(CompileError::semantic_with_context(
+                        format!("type mismatch: binding `{}` {}", get_var_name(&let_stmt.pattern), e),
+                        crate::error::ErrorContext::new()
+                            .with_code(crate::error::codes::TYPE_MISMATCH)
+                            .with_help("bind a variant of the enum; a function or type value can never be an enum value"),
+                    ));
+                }
                 // Validate and constrain value based on type annotation
                 let value = match type_annotation {
                     // `bool` locals take `.?` presence (see `coerce_to_declared_type`).
@@ -801,7 +814,8 @@ pub(crate) fn exec_node(
             let plain = Value::Function {
                 name: f.name.clone(),
                 def: Arc::new(f.clone()),
-                captured_env: Arc::new(env.clone()), // Capture current scope
+                // Capture current scope, stamped with its lexical origin.
+                captured_env: Arc::new(crate::interpreter::interpreter_module::capture_env_with_origin(env)),
             };
             env.insert(f.name.clone(), plain.clone());
             // A user-defined (non-directive) decorator rebinds the name to

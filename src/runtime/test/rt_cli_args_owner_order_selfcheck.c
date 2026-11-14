@@ -112,7 +112,7 @@ int main(int argc, char** argv) {
 #endif
     if (want < 2) {
         fprintf(stderr, "ERROR — nothing was checked (run with at least one argument)\n");
-        return 2;
+        return 64; /* EX_USAGE: the harness supplies argv */
     }
     if ((int64_t)rt_get_argc() != want) {
         fprintf(stderr, "FAIL rt_get_argc=%d want %lld\n", (int)rt_get_argc(), (long long)want);

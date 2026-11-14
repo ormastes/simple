@@ -14,10 +14,18 @@ fn main_body(src: &str) -> Vec<Node> {
     f.body.statements.clone()
 }
 
+/// Statement-form inline `if c: a else: b` is a spanned `Node::If` whose
+/// blocks each hold the one branch expression.
 fn tail_if(body: &[Node]) -> (&Expr, &Expr) {
-    match body.last() {
-        Some(Node::Expression(Expr::If { then_branch, else_branch: Some(e), .. })) => (then_branch, e),
-        other => panic!("expected tail inline if expr, got {:?}", other),
+    let Some(Node::If(stmt)) = body.last() else {
+        panic!("expected tail inline if statement, got {:?}", body.last())
+    };
+    assert!(stmt.span.line > 0, "inline if must keep its line: {:?}", stmt.span);
+    let then_stmts = stmt.then_block.statements.as_slice();
+    let else_stmts = stmt.else_block.as_ref().map(|b| b.statements.as_slice()).unwrap_or(&[]);
+    match (then_stmts, else_stmts) {
+        ([Node::Expression(t)], [Node::Expression(e)]) => (t, e),
+        other => panic!("expected one expression per branch, got {:?}", other),
     }
 }
 

@@ -11,7 +11,8 @@ use std.log.{error}
 use std.sffi.coverage.{coverage_dump_sdn, coverage_enabled, coverage_clear}
 use std.fs.{file_exists, read_to_string, file_write_text}
 use std.common.coverage_sdn.{parse_coverage_sdn, merge_many, render_coverage_sdn, ParsedCoverage}
-use std.common.coverage_module_report.{coverage_module_report, coverage_module_report_text}
+use std.common.coverage_module_report.{coverage_module_report, coverage_module_report_text, coverage_source_check,
+    coverage_source_rows, CoverageSourceRow}
 use std.platform.{host_os, host_arch}
 
 fn print_help():
@@ -33,8 +34,11 @@ fn print_help():
     print "  module    Per-module line % (executable-line denominator), decision,"
     print "            outcome and condition coverage from one or more artifacts."
     print "            Example: simple spl-coverage module --file a.sdn src/app/x.spl"
-    print "            --os/--arch override the host used for @when branches;"
+    print "            --os/--arch select the platform for @when branches (default: this host);"
     print "            --min <pct> exits 1 when any module's line or decision % is below it."
+    print "            Lines of @when bodies for another platform are excluded (foreign_excluded=N)."
+    print "            Artifacts recorded against another version of a module are refused;"
+    print "            ones without a source digest are scored as source=unverified."
     print ""
     print "Options:"
     print "  --file <path>   Read a persisted SDN coverage artifact from a prior"
@@ -195,16 +199,31 @@ fn cmd_rollup(args: [text]) -> i64:
         print "Error: rollup requires at least one --file <path>"
         return 1
 
+    # Source digests ride along so a rolled-up artifact stays checkable; one
+    # file recorded at two digests means two source versions -- refuse.
+    var digest_of: {text: text} = {}
+    var sources: [CoverageSourceRow] = []
     var parsed: [ParsedCoverage] = []
     for path in paths:
         val loaded = _load_coverage_file(path)
         if not loaded.ok:
             print "Error: rollup: {loaded.error}"
             return 1
+        for row in coverage_source_rows(loaded.sdn):
+            if not digest_of.contains_key(row.file):
+                digest_of[row.file] = row.crc32
+                sources.push(row)
+            elif digest_of[row.file] != row.crc32:
+                print "Error: rollup: {row.file} was recorded against two source versions (crc32 {digest_of[row.file]} and {row.crc32}, the latter in {path}); refusing to merge"
+                return 1
         parsed.push(parse_coverage_sdn(loaded.sdn))
 
     val combined = merge_many(parsed)
-    val rendered = render_coverage_sdn(combined)
+    var rendered = render_coverage_sdn(combined)
+    if sources.len() > 0:
+        rendered = rendered + "\nsources |file, crc32|\n"
+        for row in sources:
+            rendered = rendered + "    {row.file}, {row.crc32}\n"
 
     val out_path = get_arg(args, "--out", "")
     if out_path != "":
@@ -241,11 +260,13 @@ fn cmd_module(args: [text]) -> i64:
         print "Error: module requires at least one --file <artifact.sdn> and one <module.spl>"
         return 1
     var sdn = ""
+    var artifacts: [text] = []
     for f in files:
         val loaded = _load_coverage_file(f)
         if not loaded.ok:
             print "Error: {loaded.error}"
             return 1
+        artifacts.push(loaded.sdn)
         sdn = sdn + loaded.sdn + "\n"
     val os = get_arg(args, "--os", host_os())
     val arch = get_arg(args, "--arch", host_arch())
@@ -272,7 +293,17 @@ fn cmd_module(args: [text]) -> i64:
             case None:
                 print "Error: could not read module source: {p}"
                 return 1
-        val r = coverage_module_report(p, src, sdn, os, arch)
+        # Never merge artifacts recorded against another version of the
+        # source: their line numbers and decision ids do not line up.
+        val check = coverage_source_check(artifacts, files, p, src)
+        if not check.ok:
+            print "Error: {check.message}"
+            status = 1
+            continue
+        if check.message != "":
+            print check.message
+        var r = coverage_module_report(p, src, sdn, os, arch)
+        r.source_state = check.state
         print coverage_module_report_text(r)
         if min_pct >= 0:
             val line_ok = r.exec_lines > 0 and r.hit_lines * 100 >= min_pct * r.exec_lines

@@ -8,23 +8,30 @@
 # External kinds are enumerated and executed here:
 #   rust          -> cargo test over src/compiler_rust (workspace)
 #   shs-selftest  -> `sh <guard> --selftest` for scripts/check/*.shs that have one
-#   c-runtime     -> $CC (default clang) build + run of src/runtime/test/*.c
+#   c-runtime     -> $CC (default clang) build + run of src/runtime/test/*.c, linked
+#                    against the canonical core-C runtime archive (see link map)
 #
 # A missing tool (cargo, clang, sh) is reported as SKIP with its reason and
 # exit 7 (unsupported scenario) — never a silent pass. A C test that cannot be
-# built standalone is UNBUILT (exit 5, unverified), never counted as passed.
+# built is UNBUILT and one that exits 64 needs its owning harness (both exit 5,
+# unverified); neither is ever counted as passed. A unit with no main is a
+# FIXTURE linked into another harness, not a test program.
 # `--kind=<k> --list` enumerates without running; an explicit positional path
 # filters items by substring (for rust it is the cargo test-name filter).
 
-use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded, process_spawn_async, process_wait}
 use std.nogc_sync_mut.io.dir_ops.{dir_walk_native, dir_create_all, is_dir}
 use std.nogc_sync_mut.io.file_ops.{file_exists, file_read}
+use std.io_runtime.{file_write, file_delete, file_hash_sha256_or_empty}
 use std.nogc_sync_mut.fs.host_path.{host_is_windows_host}
-use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.nogc_sync_mut.io.env_ops.{env_get, env_set}
 use std.nogc_sync_mut.test_runner.rust_test_runner.{parse_cargo_test_output}
 
 val TEST_KIND_RUST_MANIFEST: text = "src/compiler_rust/Cargo.toml"
 val TEST_KIND_RUST_WINDOWS_TARGET: text = "x86_64-pc-windows-gnullvm"
+val TEST_KIND_RUST_WINDOWS_HOST: text = "x86_64-pc-windows-gnu"
+val TEST_KIND_RUST_TOOLCHAIN_FILE: text = "src/compiler_rust/rust-toolchain.toml"
+val TEST_KIND_RUST_WINDOWS_ENV_LIB: text = "scripts/check/lib/bootstrap-stage3/authority.shs"
 val TEST_KIND_SHS_DIR: text = "scripts/check"
 val TEST_KIND_C_DIR: text = "src/runtime/test"
 val TEST_KIND_PERF_DIR: text = "test/05_perf"
@@ -183,13 +190,58 @@ fn _test_kind_rust_target_skip() -> text:
     """"" when the Windows Rust target is installed (or not needed here), else the SKIP reason."""
     if not host_is_windows_host():
         return ""
-    val (target_out, target_err, target_code) = process_run_bounded("rustup", ["target", "list", "--installed"], 30000, 64 * 1024)
+    val toolchain = _test_kind_rust_windows_toolchain()
+    if toolchain == "":
+        return "cannot read the Rust channel from {TEST_KIND_RUST_TOOLCHAIN_FILE}"
+    val (list_out, list_err, list_code) = process_run_bounded("rustup", ["toolchain", "list"], 30000, 64 * 1024)
+    var installed = false
+    for line in list_out.split("\n"):
+        if line.trim() == toolchain or line.trim().starts_with(toolchain + " "):
+            installed = true
+    if not installed:
+        return "Rust host toolchain {toolchain} not installed (`rustup toolchain install {toolchain} --target {TEST_KIND_RUST_WINDOWS_TARGET}`); an msvc host needs MSVC link.exe, which is not a sanctioned lane"
+    val (target_out, target_err, target_code) = process_run_bounded("rustup", ["target", "list", "--installed", "--toolchain", toolchain], 30000, 64 * 1024)
     if target_code != 0:
-        return "cannot verify Rust target {TEST_KIND_RUST_WINDOWS_TARGET} (`rustup target list --installed` exit {target_code})"
+        return "cannot verify Rust target {TEST_KIND_RUST_WINDOWS_TARGET} (`rustup target list --installed --toolchain {toolchain}` exit {target_code})"
     for line in target_out.split("\n"):
         if line.trim() == TEST_KIND_RUST_WINDOWS_TARGET:
             return ""
-    "Rust target {TEST_KIND_RUST_WINDOWS_TARGET} not installed (`rustup target add {TEST_KIND_RUST_WINDOWS_TARGET}`)"
+    "Rust target {TEST_KIND_RUST_WINDOWS_TARGET} not installed (`rustup target add --toolchain {toolchain} {TEST_KIND_RUST_WINDOWS_TARGET}`)"
+
+fn _test_kind_rust_windows_toolchain() -> text:
+    """The pinned channel of src/compiler_rust/rust-toolchain.toml on a GNU host (the
+    bootstrap seed toolchain), or "" when the channel cannot be read. Cargo runs
+    from the repo root, so rustup would otherwise ignore that file and pick the
+    default (msvc) host, whose build scripts need MSVC link.exe."""
+    for line in (file_read(TEST_KIND_RUST_TOOLCHAIN_FILE) ?? "").split("\n"):
+        val t = line.trim()
+        if t.starts_with("channel"):
+            val eq = t.index_of("=")
+            if eq >= 0:
+                val channel = t.substring(eq + 1).trim().replace("\"", "")
+                if channel != "":
+                    return channel + "-" + TEST_KIND_RUST_WINDOWS_HOST
+    ""
+
+fn _test_kind_rust_windows_env() -> text:
+    """Apply the bootstrap's Windows GNU Cargo environment (shared helper
+    bootstrap_stage3_windows_gnu_cargo_env); "" on success, else the SKIP reason."""
+    val cc = test_kind_c_compiler()
+    val script = ". {TEST_KIND_RUST_WINDOWS_ENV_LIB} && bootstrap_stage3_windows_gnu_cargo_env \"$1\""
+    val (env_out, env_err, env_code) = process_run_bounded("sh", ["-c", script, "_", cc], 300000, 64 * 1024)
+    if env_code != 0:
+        return "no admitted llvm-mingw clang/lld Cargo authority for {TEST_KIND_RUST_WINDOWS_TARGET} (CC {cc}; bootstrap_stage3_windows_gnu_cargo_env exit {env_code})"
+    var applied = 0
+    for line in env_out.split("\n"):
+        val t = line.trim()
+        val eq = t.index_of("=")
+        if eq > 0:
+            val _ = env_set(t.substring(0, eq), t.substring(eq + 1))
+            applied = applied + 1
+    if applied == 0:
+        return "bootstrap_stage3_windows_gnu_cargo_env printed no Cargo environment"
+    val _ = env_set("RUSTUP_TOOLCHAIN", _test_kind_rust_windows_toolchain())
+    ""
 
 fn _test_kind_filtered(items: [text], filter: text) -> [text]:
     if filter == "":
@@ -203,6 +255,10 @@ fn _test_kind_filtered(items: [text], filter: text) -> [text]:
 fn _test_kind_run_rust(filter: text) -> i64:
     var args = ["test", "--manifest-path", TEST_KIND_RUST_MANIFEST]
     if host_is_windows_host():
+        val env_skip = _test_kind_rust_windows_env()
+        if env_skip != "":
+            print "SKIP — rust: {env_skip}; 1 item(s) not run"
+            return 7
         args.push("--target")
         args.push(TEST_KIND_RUST_WINDOWS_TARGET)
     if filter != "":
@@ -226,8 +282,300 @@ fn _test_kind_c_output(item: text) -> text:
         return "build/test_kinds/c_runtime/{name}.exe"
     "build/test_kinds/c_runtime/{name}"
 
-fn _test_kind_run_item(kind: text, item: text) -> text:
-    """PASS / FAIL / UNBUILT / SKIP verdict word for one item, with a printed line."""
+# ---------------------------------------------------------------------------
+# c-runtime link map. A selfcheck is a program over the C runtime ABI; it links
+# against the canonical core-C runtime, the same composition the native build
+# ships (runtime_core_c_sources_v1 / runtime_core_c_platform_sources_v1 in
+# TEST_KIND_C_RUNTIME_ROSTER). That roster is READ here, never copied, so the
+# test lane cannot drift from the shipped runtime. The objects are compiled
+# once into an archive keyed by the content of every owned runtime source and
+# header, the compiler, the flags and the roster; a warm run recompiles
+# nothing. A selfcheck that unity-includes an owner (`#include
+# "../runtime_native.c"`) links a per-test archive without that owner, so each
+# symbol is defined once. Archive members are pulled only for undefined
+# symbols, so a selfcheck that needs nothing from the runtime is unaffected.
+# ---------------------------------------------------------------------------
+
+val TEST_KIND_C_RUNTIME_ROSTER: text = "src/compiler/70.backend/backend/runtime_compiler.spl"
+val TEST_KIND_C_RUNTIME_DIR: text = "src/runtime"
+val TEST_KIND_C_CORE_DIR: text = "build/test_kinds/c_runtime/core_c"
+val TEST_KIND_C_JOBS: i64 = 4
+# Exit 64 (EX_USAGE): the program needs its owning harness's arguments or
+# setup (a provider library, a scratch root, a peer process). Not verified here.
+val TEST_KIND_C_EXIT_HARNESS: i64 = 64
+
+fn _test_kind_quoted(line: text) -> [text]:
+    """Every "..." literal on one line, in order."""
+    var out: [text] = []
+    var rest = line
+    var at = rest.index_of("\"")
+    while at >= 0:
+        val after = rest.substring(at + 1)
+        val close = after.index_of("\"")
+        if close < 0:
+            return out
+        out.push(after.substring(0, close))
+        rest = after.substring(close + 1)
+        at = rest.index_of("\"")
+    out
+
+fn _test_kind_roster_list(lines: [text], header: text, marker: text) -> [text]:
+    """The first `marker`-led list literal inside the function `header`."""
+    var inside = false
+    for line in lines:
+        if not inside:
+            if line.starts_with(header):
+                inside = true
+            continue
+        if line.starts_with("pub fn ") or line.starts_with("fn "):
+            return []
+        if line.trim().starts_with(marker):
+            return _test_kind_quoted(line)
+    []
+
+pub fn test_kind_c_core_sources(roster: text, windows: bool) -> [text]:
+    """Canonical core-C runtime sources (no `.c`), read from the shipped roster text."""
+    val lines = roster.split("\n")
+    var out = _test_kind_roster_list(lines, "pub fn runtime_core_c_sources_v1(", "[")
+    if out.len() == 0:
+        return out
+    if windows:
+        for name in _test_kind_roster_list(lines, "pub fn runtime_core_c_platform_sources_v1(", "return ["):
+            out.push(name)
+    out
+
+pub fn test_kind_c_unity_owners(source: text, owners: [text]) -> [text]:
+    """Roster owners a selfcheck already compiles in via `#include "../<owner>.c"`."""
+    var out: [text] = []
+    for raw in source.split("\n"):
+        val line = raw.trim()
+        if not line.starts_with("#include \""):
+            continue
+        val quoted = _test_kind_quoted(line)
+        if quoted.len() == 0 or not quoted[0].ends_with(".c"):
+            continue
+        var path = quoted[0].substring(0, quoted[0].byte_len() - 2)
+        while path.starts_with("../"):
+            path = path.substring(3)
+        for owner in owners:
+            if owner == path:
+                out.push(owner)
+    out
+
+fn _test_kind_c_tool_beside(cc: text, tool: text) -> text:
+    """`tool` from the compiler's own bin dir when it exists there, else bare `tool`."""
+    val norm = cc.replace("\\", "/")
+    val slash = norm.last_index_of("/")
+    if slash >= 0:
+        val dir = norm.substring(0, slash)
+        if file_exists("{dir}/{tool}.exe"):
+            return "{dir}/{tool}.exe"
+        if file_exists("{dir}/{tool}"):
+            return "{dir}/{tool}"
+    tool
+
+fn _test_kind_c_object_flags() -> [text]:
+    """compile_runtime_objects' core-C clang flags (ABI policy v1), host target."""
+    ["-c", "-O1", "-ffunction-sections", "-fdata-sections", "-std=gnu11",
+        "-DSIMPLE_ABI_VERSION=1", "-DSIMPLE_ABI_VERSION_DEFERRED=0",
+        "-DSIMPLE_RUNTIME_MEMORY_OWNER=1", "-DSIMPLE_RUNTIME_TIMESTAMP_OWNER=1",
+        "-DSIMPLE_RUNTIME_NO_RUST_ARRAY_PACKING=1", "-DSIMPLE_CORE_C_STANDALONE=1",
+        "-I", TEST_KIND_C_RUNTIME_DIR, "-I", TEST_KIND_C_RUNTIME_DIR + "/platform"]
+
+pub fn test_kind_c_link_libs(windows: bool) -> [text]:
+    """Host system libraries the core-C runtime imports (llvm-mingw UCRT on Windows)."""
+    if windows:
+        return ["-lpthread", "-lntdll", "-luserenv", "-lws2_32", "-lwinhttp", "-lmswsock",
+            "-ldbghelp", "-ladvapi32", "-lbcrypt", "-lpdh", "-lpsapi", "-lole32", "-lshell32",
+            "-lsynchronization", "-lcrypt32", "-lsecur32", "-liphlpapi", "-luser32", "-lgdi32",
+            "-lshlwapi", "-lwinmm"]
+    ["-lm", "-lpthread", "-ldl"]
+
+fn _test_kind_c_inputs_key(cc: text, sources: [text]) -> text:
+    """Content key over compiler, flags, roster and every owned runtime .c/.h."""
+    var manifest = "cc={cc}\nflags={_test_kind_c_object_flags().join(" ")}\nsources={sources.join(",")}\n"
+    val prefix = TEST_KIND_C_RUNTIME_DIR + "/"
+    var paths: [text] = []
+    for raw in dir_walk_native(TEST_KIND_C_RUNTIME_DIR):
+        val p = raw.replace("\\", "/")
+        val at = p.index_of(prefix)
+        if at < 0:
+            continue
+        val rel = p.substring(at + prefix.len())
+        if rel.starts_with("test/") or rel.starts_with("vendor/"):
+            continue
+        if rel.ends_with(".c") or rel.ends_with(".h"):
+            paths.push(prefix + rel)
+    for path in paths.sort():
+        manifest = manifest + path + " " + file_hash_sha256_or_empty(path) + "\n"
+    val manifest_path = TEST_KIND_C_CORE_DIR + "/inputs.txt"
+    if not file_write(manifest_path, manifest):
+        return ""
+    val digest = file_hash_sha256_or_empty(manifest_path)
+    if digest.len() < 16:
+        return ""
+    digest.substring(0, 16)
+
+fn _test_kind_c_object(dir: text, name: text) -> text:
+    val flat = name.replace("/", "_")
+    "{dir}/{flat}.o"
+
+fn _test_kind_c_archive(cc: text, archive: text, objects: [text]) -> text:
+    """"" on success, else the archiver's first error."""
+    val _ = file_delete(archive)
+    var args = ["rcs", archive]
+    for o in objects:
+        args.push(o)
+    val (ar_out, ar_err, ar_code) = process_run_bounded(_test_kind_c_tool_beside(cc, "llvm-ar"), args, 300000, 64 * 1024)
+    if ar_code != 0:
+        return "llvm-ar exit {ar_code}: {_test_kind_first_error(ar_err)}"
+    ""
+
+pub struct TestKindCCore:
+    dir: text
+    sources: [text]
+    archive: text
+    error: text
+
+fn _test_kind_c_core_fail(reason: text) -> TestKindCCore:
+    TestKindCCore(dir: "", sources: [], archive: "", error: reason)
+
+fn _test_kind_c_object_args(dir: text, name: text) -> [text]:
+    var args = _test_kind_c_object_flags()
+    args.push("-o")
+    args.push(_test_kind_c_object(dir, name))
+    args.push("{TEST_KIND_C_RUNTIME_DIR}/{name}.c")
+    args
+
+fn _test_kind_c_build_core(cc: text) -> TestKindCCore:
+    """Compile (or reuse) the canonical core-C runtime archive for this host."""
+    val roster = file_read(TEST_KIND_C_RUNTIME_ROSTER) ?? ""
+    val sources = test_kind_c_core_sources(roster, host_is_windows_host())
+    if sources.len() == 0:
+        return _test_kind_c_core_fail("no core-C roster (runtime_core_c_sources_v1) in {TEST_KIND_C_RUNTIME_ROSTER}")
+    val _ = dir_create_all(TEST_KIND_C_CORE_DIR)
+    val key = _test_kind_c_inputs_key(cc, sources)
+    if key == "":
+        return _test_kind_c_core_fail("cannot key the core-C runtime inputs")
+    val dir = "{TEST_KIND_C_CORE_DIR}/{key}"
+    val archive = "{dir}/libsimple_rt_core_c.a"
+    if file_exists(archive):
+        print "c-runtime: core-C runtime archive reused ({sources.len()} owners, key {key})"
+        return TestKindCCore(dir: dir, sources: sources, archive: archive, error: "")
+    val _ = dir_create_all(dir)
+    print "c-runtime: compiling core-C runtime archive ({sources.len()} owners, -j{TEST_KIND_C_JOBS}, key {key})"
+    var objects: [text] = []
+    var pending: [i64] = []
+    var pending_names: [text] = []
+    var failed: [text] = []
+    for name in sources:
+        objects.push(_test_kind_c_object(dir, name))
+        pending.push(process_spawn_async(cc, _test_kind_c_object_args(dir, name)))
+        pending_names.push(name)
+        if pending.len() >= TEST_KIND_C_JOBS:
+            if process_wait(pending[0], 600000) != 0:
+                failed.push(pending_names[0])
+            pending = pending.slice(1)
+            pending_names = pending_names.slice(1)
+    var i = 0
+    while i < pending.len():
+        if process_wait(pending[i], 600000) != 0:
+            failed.push(pending_names[i])
+        i = i + 1
+    if failed.len() > 0:
+        # Re-run the first failure in the foreground for its real diagnostic.
+        val (cc_out, cc_err, cc_code) = process_run_bounded(cc, _test_kind_c_object_args(dir, failed[0]), 600000, 256 * 1024)
+        return _test_kind_c_core_fail("core-C runtime owner {failed[0]}.c does not compile: {_test_kind_first_error(cc_err)}")
+    val ar_error = _test_kind_c_archive(cc, archive, objects)
+    if ar_error != "":
+        return _test_kind_c_core_fail(ar_error)
+    TestKindCCore(dir: dir, sources: sources, archive: archive, error: "")
+
+fn _test_kind_c_archive_for(core: TestKindCCore, cc: text, owned: [text], output: text) -> text:
+    """The core archive, or a per-test one without the `owned` (unity-included) owners."""
+    if owned.len() == 0:
+        return core.archive
+    var objects: [text] = []
+    for name in core.sources:
+        if not owned.contains(name):
+            objects.push(_test_kind_c_object(core.dir, name))
+    val archive = output + ".rt.a"
+    if _test_kind_c_archive(cc, archive, objects) != "":
+        return core.archive
+    archive
+
+pub fn test_kind_c_has_main(source: text, included: [text]) -> bool:
+    """A program defines `main`, in the unit itself or a unity-included test unit."""
+    if source.contains("int main(") or source.contains("int main (") or source.contains("wmain("):
+        return true
+    for other in included:
+        if other.contains("int main(") or other.contains("int main (") or other.contains("wmain("):
+            return true
+    false
+
+fn _test_kind_c_included_tests(item: text, source: text) -> [text]:
+    """Contents of sibling `#include "x.c"` units of the test dir (one level)."""
+    var out: [text] = []
+    for raw in source.split("\n"):
+        val line = raw.trim()
+        if not line.starts_with("#include \""):
+            continue
+        val quoted = _test_kind_quoted(line)
+        if quoted.len() == 0 or not quoted[0].ends_with(".c") or quoted[0].contains("/"):
+            continue
+        out.push(file_read(TEST_KIND_C_DIR + "/" + quoted[0]) ?? "")
+    out
+
+pub fn test_kind_c_is_fixture(link_err: text) -> bool:
+    """The unit has no program entry: a fixture linked into another harness."""
+    for raw in link_err.split("\n"):
+        val line = raw.trim()
+        if line.ends_with("undefined symbol: WinMain") or line.ends_with("undefined symbol: main") or line.ends_with("undefined symbol: _main"):
+            return true
+        if line.contains("undefined reference to `main'") or line.contains("undefined reference to `WinMain'"):
+            return true
+    false
+
+pub fn test_kind_c_self_gate(item: text, source: text, build_err: text) -> text:
+    """The directive when the FIRST error is the item's own `#error` host gate, else ""."""
+    val prefix = item + ":"
+    for raw in build_err.split("\n"):
+        val line = raw.trim().replace("\\", "/")
+        if not (line.contains(": error") or line.contains("fatal error")):
+            continue
+        if not line.starts_with(prefix):
+            return ""
+        val rest = line.substring(prefix.len())
+        val colon = rest.index_of(":")
+        if colon <= 0:
+            return ""
+        val line_no = rest.substring(0, colon).to_int()
+        val lines = source.split("\n")
+        if line_no < 1 or line_no > lines.len():
+            return ""
+        val directive = lines[line_no - 1].trim()
+        if directive.starts_with("#error") or directive.starts_with("# error"):
+            return directive
+        return ""
+    ""
+
+fn _test_kind_c_build_args(item: text, output: text, archive: text, owner_defines: bool) -> [text]:
+    var args = ["-std=gnu11", "-I", TEST_KIND_C_RUNTIME_DIR, "-I", TEST_KIND_C_DIR]
+    if owner_defines:
+        for flag in _test_kind_c_object_flags():
+            if flag.starts_with("-D"):
+                args.push(flag)
+    args.push(item)
+    if archive != "":
+        args.push(archive)
+        for lib in test_kind_c_link_libs(host_is_windows_host()):
+            args.push(lib)
+    args.push("-o")
+    args.push(output)
+    args
+
+fn _test_kind_run_item(kind: text, item: text, core: TestKindCCore) -> text:
+    """PASS / FAIL / UNBUILT / SKIP / HARNESS / FIXTURE verdict for one item, with a printed line."""
     if kind == "shs-selftest":
         val (sh_out, sh_err, code) = process_run_bounded("sh", [item, "--selftest"], 600000, 1024 * 1024)
         if code == 0:
@@ -235,10 +583,37 @@ fn _test_kind_run_item(kind: text, item: text) -> text:
             return "PASS"
         print "  FAIL     {item} (exit {code})"
         return "FAIL"
+    val source = file_read(item) ?? ""
+    if not test_kind_c_has_main(source, _test_kind_c_included_tests(item, source)):
+        print "  FIXTURE  {item} (no main: linked into another harness, not a program)"
+        return "FIXTURE"
     val output = _test_kind_c_output(item)
-    val (build_out, build_err, build_code) = process_run_bounded(test_kind_c_compiler(),
-        ["-std=gnu11", "-I", "src/runtime", "-I", TEST_KIND_C_DIR, item, "-o", output], 300000, 256 * 1024)
+    val cc = test_kind_c_compiler()
+    var owned: [text] = []
+    if core.error == "":
+        owned = test_kind_c_unity_owners(source, core.sources)
+    var archive = ""
+    if core.error == "":
+        archive = _test_kind_c_archive_for(core, cc, owned, output)
+    val (build_out, build_err, first_code) = process_run_bounded(cc,
+        _test_kind_c_build_args(item, output, archive, false), 300000, 256 * 1024)
+    var build_code = first_code
+    if build_code != 0 and owned.len() > 0:
+        # Second recipe for a unity-including selfcheck: compile its included
+        # owner exactly as the archive's owners are (same ownership macros),
+        # so the two halves agree on which TU defines each symbol.
+        val (retry_out, retry_err, retry_code) = process_run_bounded(cc,
+            _test_kind_c_build_args(item, output, archive, true), 300000, 256 * 1024)
+        if retry_code == 0:
+            build_code = 0
     if build_code != 0:
+        if test_kind_c_is_fixture(build_err):
+            print "  FIXTURE  {item} (no main: linked into another harness, not a program)"
+            return "FIXTURE"
+        val gate = test_kind_c_self_gate(item, file_read(item) ?? "", build_err)
+        if gate != "":
+            print "  SKIP     {item} (host-gated at compile time: {gate})"
+            return "SKIP"
         val first = _test_kind_first_error(build_err)
         print "  UNBUILT  {item}: {first}"
         return "UNBUILT"
@@ -250,6 +625,9 @@ fn _test_kind_run_item(kind: text, item: text) -> text:
         # Repo convention: exit 77 = SKIP (not applicable on this host). Never PASS.
         print "  SKIP     {item}"
         return "SKIP"
+    if run_code == TEST_KIND_C_EXIT_HARNESS:
+        print "  HARNESS  {item} (exit 64: needs its owning harness's arguments/setup; unverified)"
+        return "HARNESS"
     print "  FAIL     {item} (exit {run_code})"
     "FAIL"
 
@@ -281,26 +659,39 @@ pub fn run_external_test_kind(kind: text, filter: text, list_only: bool) -> i64:
         return 7
     if kind == "rust":
         return _test_kind_run_rust(filter)
+    var core = _test_kind_c_core_fail("")
     if kind == "c-runtime":
         val _ = dir_create_all("build/test_kinds/c_runtime")
+        core = _test_kind_c_build_core(test_kind_c_compiler())
+        if core.error != "":
+            print "c-runtime: no core-C runtime archive ({core.error}); items link standalone"
     var passed = 0
     var failed = 0
     var unbuilt = 0
     var skipped = 0
+    var harness = 0
+    var fixtures = 0
     for item in items:
-        val verdict = _test_kind_run_item(kind, item)
+        val verdict = _test_kind_run_item(kind, item, core)
         if verdict == "PASS":
             passed = passed + 1
         elif verdict == "SKIP":
             skipped = skipped + 1
         elif verdict == "FAIL":
             failed = failed + 1
+        elif verdict == "HARNESS":
+            harness = harness + 1
+        elif verdict == "FIXTURE":
+            fixtures = fixtures + 1
         else:
             unbuilt = unbuilt + 1
-    print "{kind}: {items.len()} item(s), {passed} passed, {failed} failed, {unbuilt} unbuilt, {skipped} skipped"
+    var summary = "{kind}: {items.len()} item(s), {passed} passed, {failed} failed, {unbuilt} unbuilt, {skipped} skipped"
+    if kind == "c-runtime":
+        summary = summary + ", {harness} need-harness, {fixtures} fixture(s)"
+    print summary
     if failed > 0:
         return 1
-    if unbuilt > 0:
+    if unbuilt > 0 or harness > 0 or core.error != "":
         return 5
     if passed == 0 and skipped > 0:
         return 7

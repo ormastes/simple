@@ -1,3 +1,8 @@
+#if defined(_WIN32)
+/* POSIX-only (BSD-socket loopback server helper): not applicable on Windows -> exit 77 (SKIP). */
+#include <stdio.h>
+int main(void) { puts("SKIP: POSIX-only BSD-socket loopback server helper"); return 77; }
+#else
 /* Loopback one-shot server for check-runtime-http-framing.shs (POSIX only).
  * usage: rt_http_framing_server PORT_FILE STRIDE WIRE_FILE
  * Binds 127.0.0.1:0, publishes the port, serves WIRE_FILE bytes in STRIDE-byte
@@ -55,3 +60,4 @@ int main(int argc, char **argv) {
     close(ls);
     return 0;
 }
+#endif /* !_WIN32 */

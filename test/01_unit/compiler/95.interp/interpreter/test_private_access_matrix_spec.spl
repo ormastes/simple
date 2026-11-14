@@ -1,0 +1,158 @@
+# Bug: test_private_access_closure_attribution_2026-11-14
+#
+# Owner rule (2026-11-13, "test can access private, if cant should fixed"):
+# code written in a test file may import and call a private `fn` of any
+# module, on every run lane. The import rule and the call rule both use the
+# seed's `is_test_caller` predicate (a `test/` prefix or a `/test/` path
+# component). Before the fix the call rule judged a closure body by the frame
+# that INVOKED it, so a test's `\: secret_helper()` handed to a `src/**`
+# helper was refused as a call from that helper.
+#
+# Each row writes a tiny `src/app/...` + `test/unit/...` tree under the temp
+# dir and runs one file with the seed. Product (non-test) rows must stay
+# refused: the exemption is lexical, never "a test is somewhere on the stack".
+# Needs the fixed seed: SIMPLE_BINARY=<seed built from this tree>.
+use std.spec.{describe, it, expect}
+use std.io_runtime.{write_file, file_exists, env_get, mkdir_p}
+use std.nogc_sync_mut.env.platform.{get_temp_dir}
+use app.io.process_ops.{process_run_timeout}
+
+fn binary() -> text:
+    val env_bin = env_get("SIMPLE_BINARY") ?? ""
+    if env_bin != "": return env_bin
+    if file_exists("bin/simple.exe"): "bin/simple.exe" else: "bin/simple"
+
+fn is_windows() -> bool:
+    file_exists("bin/simple.exe")
+
+fn fixture_root(tag: text) -> text:
+    val root = get_temp_dir().replace("\\", "/") + "/tpa_matrix_" + tag
+    for dir in ["/src/app/sub", "/src/app/runner", "/src/app/facade", "/src/app/other", "/test/unit"]:
+        val _ = mkdir_p(root + dir)
+    val _l = write_file(root + "/src/app/sub/lib_mod.spl", "fn secret_helper() -> i64:\n    42\npub fn open_api() -> i64:\n    secret_helper()\n")
+    val _f = write_file(root + "/src/app/sub/sub_facade.spl", "export use app.sub.lib_mod.{{secret_helper, open_api}}\n")
+    val _g = write_file(root + "/src/app/facade/glob_facade.spl", "export use app.sub.lib_mod.*\n")
+    val _r = write_file(root + "/src/app/runner/run.spl", "pub fn run_cb(f: fn() -> i64) -> i64:\n    f()\n")
+    val _k = write_file(root + "/src/app/runner/mk.spl", "use app.sub.lib_mod.*\npub fn make_cb() -> fn() -> i64:\n    \\: secret_helper()\npub fn make_fn() -> fn() -> i64:\n    fn inner() -> i64:\n        secret_helper()\n    inner\n")
+    # src helpers that run a caller's closure through the BDD block fast path,
+    # the decorator call arms, and an AOP join point.
+    val _d = write_file(root + "/src/app/runner/deco.spl", "pub fn apply_dec(dec: fn(fn() -> i64) -> fn() -> i64) -> i64:\n    @dec\n    fn inner() -> i64:\n        1\n    inner()\n")
+    val _b = write_file(root + "/src/app/runner/bddh.spl", "pub fn shared_it(blk):\n    describe \"shared\":\n        it \"x\", blk\n")
+    val _j = write_file(root + "/src/app/runner/jp.spl", "pub fn call_target() -> i64:\n    target_fn()\n")
+    val _a = write_file(root + "/src/app/runner/aopsrc.spl", "pub fn with_advice(f: fn() -> i64):\n    describe \"s\":\n        it \"y\":\n            fn adv():\n                val _ = secret_helper()\n            on pc{{ execution(* target_fn(..)) }} use adv before priority 1\n            print f()\n")
+    root
+
+# The fixture root itself must not look like a test path, or every product
+# row would be exempt and the negative rows would pass vacuously.
+fn root_is_not_test_path(root: text) -> bool:
+    not root.starts_with("test/") and not root.contains("/test/")
+
+# Runs `rel` on one lane; returns (stdout, stderr, rc).
+fn run_lane(root: text, rel: text, src: text, lane: text) -> (text, text, i64):
+    val path = root + "/" + rel
+    val _ = write_file(path, src)
+    if lane == "interpret":
+        return process_run_timeout("/usr/bin/env", ["SIMPLE_EXECUTION_MODE=interpret", binary(), path], 300000)
+    process_run_timeout(binary(), [path], 300000)
+
+fn lanes() -> [text]:
+    if is_windows(): ["default"] else: ["default", "interpret"]
+
+fn allowed_on_every_lane(tag: text, rel: text, src: text) -> bool:
+    allowed_with_marker(tag, rel, src, "42")
+
+# `marker` must appear on stdout: proves the row's private call really ran.
+fn allowed_with_marker(tag: text, rel: text, src: text, marker: text) -> bool:
+    val root = fixture_root(tag)
+    var ok = root_is_not_test_path(root)
+    for lane in lanes():
+        val (out, err, rc) = run_lane(root, rel, src, lane)
+        if rc != 0 or not out.contains(marker) or (out + err).contains("is not visible"):
+            print "[{tag}/{lane}] rc={rc} out={out.trim()} err={err.trim()}"
+            ok = false
+    ok
+
+fn refused_on_every_lane(tag: text, rel: text, src: text) -> bool:
+    val root = fixture_root(tag)
+    var ok = root_is_not_test_path(root)
+    for lane in lanes():
+        val (out, err, rc) = run_lane(root, rel, src, lane)
+        if rc == 0 or out.contains("42") or not err.contains("private fn `secret_helper`"):
+            print "[{tag}/{lane}] expected refusal: rc={rc} out={out.trim()}"
+            ok = false
+    ok
+
+# Same as refused_on_every_lane, for a fixture whose refusal surfaces inside
+# a BDD example: the spec runner prints the example failure on stdout.
+fn refused_in_example_on_every_lane(tag: text, rel: text, src: text) -> bool:
+    val root = fixture_root(tag)
+    var ok = root_is_not_test_path(root)
+    for lane in lanes():
+        val (out, err, rc) = run_lane(root, rel, src, lane)
+        if rc == 0 or out.contains("42") or not (out + err).contains("private fn `secret_helper`"):
+            print "[{tag}/{lane}] expected refusal: rc={rc} out={out.trim()}"
+            ok = false
+    ok
+
+val T_BRACED = "use app.sub.lib_mod.{{secret_helper}}\n"
+val T_RUNNER = "use app.runner.run.{{run_cb}}\n"
+
+describe "a test file can call private fns on every lane":
+    it "braced import, top level":
+        expect(allowed_on_every_lane("braced", "test/unit/braced_spec.spl", T_BRACED + "print secret_helper()\n")).to_equal(true)
+
+    it "braced import, fn main":
+        expect(allowed_on_every_lane("main", "test/unit/main_spec.spl", T_BRACED + "fn main():\n    print secret_helper()\n")).to_equal(true)
+
+    it "glob import":
+        expect(allowed_on_every_lane("glob", "test/unit/glob_spec.spl", "use app.sub.lib_mod.*\nprint secret_helper()\n")).to_equal(true)
+
+    it "braced import through an `export use m.*` facade":
+        expect(allowed_on_every_lane("globfacade", "test/unit/globfacade_spec.spl", "use app.facade.glob_facade.{{secret_helper}}\nprint secret_helper()\n")).to_equal(true)
+
+    it "braced import through a braced `export use` facade":
+        expect(allowed_on_every_lane("bracefacade", "test/unit/bracefacade_spec.spl", "use app.sub.sub_facade.{{secret_helper}}\nprint secret_helper()\n")).to_equal(true)
+
+    it "module-qualified call":
+        expect(allowed_on_every_lane("qualified", "test/unit/qualified_spec.spl", "use app.sub.lib_mod\nprint lib_mod.secret_helper()\n")).to_equal(true)
+
+    it "test lambda run by a src helper (was refused as a call from the helper)":
+        expect(allowed_on_every_lane("lambda", "test/unit/lambda_spec.spl", T_BRACED + T_RUNNER + "print run_cb(\\: secret_helper())\n")).to_equal(true)
+
+    it "test lambda written inside a test fn, run by a src helper":
+        expect(allowed_on_every_lane("fnlambda", "test/unit/fnlambda_spec.spl", T_BRACED + T_RUNNER + "fn helper() -> i64:\n    run_cb(\\: secret_helper())\nprint helper()\n")).to_equal(true)
+
+    it "test lambda written inside an `it` block, run by a src helper":
+        expect(allowed_on_every_lane("itlambda", "test/unit/itlambda_spec.spl", T_BRACED + T_RUNNER + "describe \"p\":\n    it \"x\":\n        print run_cb(\\: secret_helper())\n")).to_equal(true)
+
+    it "nested fn written in a test fn, handed to a src helper":
+        expect(allowed_on_every_lane("nestedfn", "test/unit/nestedfn_spec.spl", T_BRACED + T_RUNNER + "fn outer() -> i64:\n    fn inner() -> i64:\n        secret_helper()\n    run_cb(inner)\nprint outer()\n")).to_equal(true)
+
+    it "test block handed to `it` by a src helper (BDD block fast path)":
+        expect(allowed_on_every_lane("bddblock", "test/unit/bddblock_spec.spl", T_BRACED + "use app.runner.bddh.{{shared_it}}\nshared_it(fn():\n    print secret_helper()\n)\n")).to_equal(true)
+
+    it "test fn applied as a decorator inside a src helper":
+        expect(allowed_on_every_lane("decofn", "test/unit/decofn_spec.spl", T_BRACED + "use app.runner.deco.{{apply_dec}}\nfn mk(f: fn() -> i64) -> fn() -> i64:\n    val x = secret_helper()\n    return \\: x\nprint apply_dec(mk)\n")).to_equal(true)
+
+    it "test lambda applied as a decorator inside a src helper":
+        expect(allowed_on_every_lane("decolambda", "test/unit/decolambda_spec.spl", T_BRACED + "use app.runner.deco.{{apply_dec}}\nprint apply_dec(\\f: if secret_helper() == 42: (\\: 42) else: f)\n")).to_equal(true)
+
+    it "owner-less test advice fired at a join point inside a src function":
+        # The advice prints 4200, so the row cannot pass without it firing.
+        expect(allowed_with_marker("advice", "test/unit/advice_spec.spl", T_BRACED + "use app.runner.jp.{{call_target}}\nfn target_fn() -> i64:\n    42\ndescribe \"d\":\n    it \"x\":\n        fn adv():\n            print secret_helper() * 100\n        on pc{{ execution(* target_fn(..)) }} use adv before priority 1\n        print call_target()\n", "4200")).to_equal(true)
+
+describe "product code stays refused (the exemption is lexical)":
+    it "a src-written lambda run by a src helper, from a test entry":
+        expect(refused_on_every_lane("srclambda", "test/unit/srclambda_spec.spl", "use app.runner.mk.{{make_cb}}\n" + T_RUNNER + "print run_cb(make_cb())\n")).to_equal(true)
+
+    it "a src-written nested fn called inside a test closure body":
+        expect(refused_on_every_lane("srcnested", "test/unit/srcnested_spec.spl", "use app.runner.mk.{{make_fn}}\n" + T_RUNNER + "print run_cb(\\: make_fn()())\n")).to_equal(true)
+
+    it "a product file importing the private fn":
+        expect(refused_on_every_lane("prodbraced", "src/app/other/prod_braced.spl", T_BRACED + "print secret_helper()\n")).to_equal(true)
+
+    it "a product lambda run by a src helper":
+        expect(refused_on_every_lane("prodlambda", "src/app/other/prod_lambda.spl", "use app.sub.lib_mod.*\n" + T_RUNNER + "print run_cb(\\: secret_helper())\n")).to_equal(true)
+
+    it "owner-less src advice fired inside a test closure body (judged where declared)":
+        expect(refused_in_example_on_every_lane("srcadvice", "test/unit/srcadvice_spec.spl", T_BRACED + "use app.runner.aopsrc.{{with_advice}}\nfn target_fn() -> i64:\n    42\nwith_advice(\\: target_fn())\n")).to_equal(true)

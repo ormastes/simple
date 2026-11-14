@@ -5673,7 +5673,7 @@ pub(crate) fn exec_match_core(
 
     for arm in match_stmt.arms.iter() {
         let mut bindings = HashMap::new();
-        if pattern_matches(&arm.pattern, &subject, &mut bindings, enums, classes)? {
+        if crate::interpreter::interpreter_patterns::match_arm_matches(&arm.pattern, &subject, &mut bindings, enums, classes)? {
             if let Some(guard) = &arm.guard {
                 let mut guard_env = env.clone();
                 for (name, value) in &bindings {

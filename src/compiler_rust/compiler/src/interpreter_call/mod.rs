@@ -5,6 +5,7 @@ mod block_execution;
 mod builtins;
 mod core;
 pub(crate) use core::arg_binding::present_value_as_bool_arg;
+pub(crate) use core::arg_binding::reject_callable_for_enum_param;
 pub(crate) use core::arg_binding::non_bool_literal_arg_kind;
 pub(crate) use core::aop_runtime;
 mod mock;
@@ -220,7 +221,7 @@ fn gate_private_call(name: &str, func: &Arc<FunctionDef>) -> Result<(), CompileE
 /// Identity-keyed lookup into `FUNCTION_MODULE_OWNER` (see its doc comment):
 /// `None` when this candidate's owning module was never recorded (e.g. a
 /// struct's mangled static-method overload registration doesn't tag one).
-fn function_module_owner(func: &Arc<FunctionDef>) -> Option<Arc<str>> {
+pub(crate) fn function_module_owner(func: &Arc<FunctionDef>) -> Option<Arc<str>> {
     let key = Arc::as_ptr(func) as usize;
     FUNCTION_MODULE_OWNER
         .with(|cell| cell.borrow().get(&key).cloned())
@@ -2062,6 +2063,8 @@ pub(crate) fn evaluate_call(
         }
         Value::BlockClosure { nodes, env: captured } => {
             let captured_clone = Env::clone(&captured);
+            let _closure_origin =
+                crate::interpreter::interpreter_module::ClosureOriginGuard::enter(Some(captured.closure_in_test()));
             block_execution::exec_block_closure(&nodes, &captured_clone, functions, classes, enums, impl_methods)
         }
         Value::Function { def, captured_env, .. } => {

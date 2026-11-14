@@ -4247,7 +4247,14 @@ int64_t rt_value_as_int(int64_t value) {
         }
         return rt_string_to_int_lenient(value);
     }
-    return rt_value_as_int_wide(value);
+    /* NOT rt_value_as_int_wide: that unbox passes any TAG_HEAP-shaped word
+     * through verbatim (container-read contract), which turned the RAW odd
+     * operands above (P4: 4097 -> 4097, 1 -> 1) into their own value instead
+     * of the bare shift. Same order as the Rust twin (value_ops.rs
+     * rt_value_as_int): a registered wide-int box decodes, else `>> 3`. */
+    RtCoreWideInt* wide = rt_core_as_heap_int(value);
+    if (wide) return wide->value;
+    return value >> 3;
 }
 
 /* Box an f64 into the tagged RuntimeValue representation. Floats are
@@ -14882,12 +14889,23 @@ bool rt_io_file_flush(int64_t fd) {
 bool rt_io_file_set_permissions(int64_t fd, bool readonly) {
     if (fd < 0 || fd > INT_MAX) return false;
 #if defined(_WIN32)
-    /* No fd-level readonly toggle in the Win32 CRT; report failure rather
-     * than silently doing nothing. The Rust reference is unix-only here
-     * (io_file.rs uses std::fs::Permissions, whose readonly semantics on
-     * Windows differ entirely from the Unix mode bits mirrored above). */
-    (void)readonly;
-    return false;
+    /* Same contract as the Rust twin (interpreter_extern/io_file.rs:
+     * Permissions::set_readonly + File::set_permissions), which on Windows
+     * toggles FILE_ATTRIBUTE_READONLY on the open handle through
+     * SetFileInformationByHandle(FileBasicInfo). Zeroed timestamps mean
+     * "unchanged"; a CRT write-mode fd carries FILE_WRITE_ATTRIBUTES. */
+    HANDLE handle = (HANDLE)_get_osfhandle((int)fd);
+    if (handle == INVALID_HANDLE_VALUE || handle == NULL) return false;
+    FILE_BASIC_INFO basic;
+    if (!GetFileInformationByHandleEx(handle, FileBasicInfo, &basic, sizeof(basic))) return false;
+    DWORD attributes = basic.FileAttributes;
+    if (readonly) attributes |= FILE_ATTRIBUTE_READONLY;
+    else attributes &= ~(DWORD)FILE_ATTRIBUTE_READONLY;
+    if (attributes == 0) attributes = FILE_ATTRIBUTE_NORMAL;
+    FILE_BASIC_INFO update;
+    memset(&update, 0, sizeof(update));
+    update.FileAttributes = attributes;
+    return SetFileInformationByHandle(handle, FileBasicInfo, &update, sizeof(update)) != 0;
 #else
     struct stat st;
     if (fstat((int)fd, &st) != 0) return false;

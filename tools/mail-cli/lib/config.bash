@@ -569,21 +569,20 @@ mail_resolve_account() {
   fi
   [ "$provider" = outlook_imap ] && provider=outlook
   MAIL_ACCT_NAME="$name"
-  MAIL_ACCT_EMAIL=$(echo "$acc" | jq -r '.email')
-  MAIL_ACCT_USERNAME=$(echo "$acc" | jq -r '.username // .email')
-  MAIL_ACCT_DISPLAY=$(echo "$acc" | jq -r '.display_name // .email')
-  MAIL_ACCT_IMAP_SERVER=$(echo "$acc" | jq -r '.imap_server // empty')
-  MAIL_ACCT_IMAP_PORT=$(echo "$acc" | jq -r '.imap_port // empty')
-  MAIL_ACCT_SMTP_SERVER=$(echo "$acc" | jq -r '.smtp_server // empty')
-  MAIL_ACCT_SMTP_PORT=$(echo "$acc" | jq -r '.smtp_port // empty')
+  # One jq process for every account field (process spawns dominate on hosts
+  # where fork is slow). Unit separator keeps empty fields positional.
+  IFS=$'\x1f' read -r MAIL_ACCT_EMAIL MAIL_ACCT_USERNAME MAIL_ACCT_DISPLAY \
+    MAIL_ACCT_IMAP_SERVER MAIL_ACCT_IMAP_PORT MAIL_ACCT_SMTP_SERVER MAIL_ACCT_SMTP_PORT \
+    MAIL_ACCT_TLS MAIL_ACCT_PROTOCOL MAIL_ACCT_POP3_SERVER MAIL_ACCT_POP3_PORT < <(
+    printf '%s' "$acc" | jq -r '[(.email // "null"), (.username // .email // "null"), (.display_name // .email // "null"),
+      (.imap_server // ""), (.imap_port // ""), (.smtp_server // ""), (.smtp_port // ""),
+      (.tls // "implicit"), (.protocol // "imap"), (.pop3_server // ""), (.pop3_port // "")
+      | tostring] | join("\u001f")')
+  MAIL_ACCT_POP3_PORT=${MAIL_ACCT_POP3_PORT%$'\r'}  # jq on Windows ends lines with CRLF
   [ -n "$MAIL_ACCT_IMAP_SERVER" ] || MAIL_ACCT_IMAP_SERVER=$(mail_preset "$provider" imap)
   [ -n "$MAIL_ACCT_IMAP_PORT" ] || MAIL_ACCT_IMAP_PORT=$(mail_preset "$provider" imap_port)
   [ -n "$MAIL_ACCT_SMTP_SERVER" ] || MAIL_ACCT_SMTP_SERVER=$(mail_preset "$provider" smtp)
   [ -n "$MAIL_ACCT_SMTP_PORT" ] || MAIL_ACCT_SMTP_PORT=$(mail_preset "$provider" smtp_port)
-  MAIL_ACCT_TLS=$(echo "$acc" | jq -r '.tls // "implicit"')
-  MAIL_ACCT_PROTOCOL=$(printf '%s' "$acc" | jq -r '.protocol // "imap"')
-  MAIL_ACCT_POP3_SERVER=$(printf '%s' "$acc" | jq -r '.pop3_server // empty')
-  MAIL_ACCT_POP3_PORT=$(printf '%s' "$acc" | jq -r '.pop3_port // empty')
   if [ -z "$MAIL_ACCT_POP3_PORT" ]; then
     if [ "$MAIL_ACCT_TLS" = starttls ]; then MAIL_ACCT_POP3_PORT=110; else MAIL_ACCT_POP3_PORT=995; fi
   fi

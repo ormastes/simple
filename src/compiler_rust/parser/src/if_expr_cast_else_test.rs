@@ -50,7 +50,9 @@ mod if_expr_cast_else {
         let src = "fn f(a: i64, r: i32) -> i32:\n    val x = if r > 0:\n        if a > 0: a as i32 else: r * 1000\n    else:\n        7\n    x\n";
         let dump = ast(src);
         assert!(!dump.contains("CastElse"), "{dump}");
-        assert_eq!(dump.matches("else_branch: Some").count(), 2, "both ifs keep their else: {dump}");
+        // The statement-position inner if is an `IfStmt` (`else_block`).
+        let kept = dump.matches("else_branch: Some").count() + dump.matches("else_block: Some").count();
+        assert_eq!(kept, 2, "both ifs keep their else: {dump}");
     }
 
     /// Generalisation: a bare statement-level inline `if` with a cast branch.
@@ -59,7 +61,7 @@ mod if_expr_cast_else {
         let src = "fn f(a: i64) -> i32:\n    if a > 0: a as i32 else: 0\n";
         let dump = ast(src);
         assert!(!dump.contains("CastElse"), "{dump}");
-        assert!(dump.contains("else_branch: Some"), "{dump}");
+        assert!(dump.contains("else_block: Some"), "{dump}");
     }
 
     #[test]

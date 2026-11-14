@@ -19,6 +19,18 @@ describe "Engine2D rendering parity adapter (CPU path)":
         expect(output.valid).to_be(true)
         expect(output.rgba).to_equal([0xFFu8, 0xFFu8, 0xFFu8, 0x80u8, 0u8, 0u8, 0u8, 0u8])
 
+    it "composites half-alpha red over an opaque blue background with the real blend path":
+        var cpu = CpuBackend.create()
+        expect(cpu.init(2, 1)).to_be(true)
+        cpu.clear(0xFF0000FFu32)
+        cpu.draw_rect_blend(0, 0, 1, 1, 0x80FF0000u32)
+        val readback = cpu.read_pixels_with_source()
+        val output = engine2d_rendering_parity_canonicalize(readback, 2, 1, "cpu", "cpu", ENGINE2D_CPU_ALPHA_MODE)
+        expect(output.valid).to_be(true)
+        # straight src-over: r=(255*128)/255=128, g=0, b=(255*127)/255=127, a=255;
+        # the untouched second pixel keeps the opaque blue clear colour.
+        expect(output.rgba).to_equal([0x80u8, 0x00u8, 0x7Fu8, 0xFFu8, 0x00u8, 0x00u8, 0xFFu8, 0xFFu8])
+
     it "converts ARGB words to tightly packed straight RGBA bytes":
         val readback = engine2d_readback([0x80123456u32, 0xFFABCDEFu32], "cpu_mirror")
         val output = engine2d_rendering_parity_canonicalize(readback, 2, 1, "cpu", "cpu", ENGINE2D_CPU_ALPHA_MODE)
@@ -35,7 +47,8 @@ describe "Engine2D rendering parity adapter (CPU path)":
         val readback = engine2d_readback([0x80404040u32], "cpu_mirror")
         val output = engine2d_rendering_parity_canonicalize(readback, 1, 1, "cpu", "cpu", "premultiplied")
         expect(output.valid).to_be(true)
-        expect(output.rgba[0]).to_be_greater_than(0x40u8)
+        # (0x40 * 255 + 0x80 / 2) / 0x80 = 128 for each colour channel.
+        expect(output.rgba).to_equal([0x80u8, 0x80u8, 0x80u8, 0x80u8])
 
     it "rejects fallback and forged GPU provenance":
         val cpu = engine2d_readback([0xFFFFFFFFu32], "cpu_mirror")

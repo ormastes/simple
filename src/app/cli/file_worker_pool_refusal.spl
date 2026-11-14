@@ -3,14 +3,16 @@
 # (host memory, the running image's pointer width) are thin wrappers over them.
 # "" = admitted (>= 2 workers fit); otherwise the stderr error text naming the
 # cause: HIR sharding disabled (hir_disabled_by names the switch), a single
-# requested worker (threads <= 1), or memory (usable memory is 60% of free, so
-# 2 workers need 2 * budget / 0.6 free; the guarded parallel floor,
+# requested worker (threads <= 1), or memory (the host term is 60% of free, so
+# 2 workers need 2 * budget / 0.6 free -- HIR admission additionally applies the
+# tree-budget clamp min(declared, cap, free - reserve); the guarded parallel floor,
 # shard_threads_guarded_floor_v1, instead needs 2 * budget + the coordinator
 # base inside an ENFORCING tree RSS cap -- both figures are named).
 use app.cli.shard_mem_clamp.{SHARD_FLOOR_UNKNOWN_PARENT_KB_V1, SHARD_MIR_WORKER_KB_V1,
     SHARD_MIR_WORKER_FLOOR_KB_V1, SHARD_MIR_WORKER_PER_MODULE_KB_V1, SHARD_HIR_WORKER_KB_V1,
     shard_worker_budget_kb, shard_mem_available_kb, shard_mem_available_kb_from_field,
-    shard_host_worker_budget_kb, shard_cgroup_memory_max_kb, shard_tree_budget_kb_for}
+    shard_host_worker_budget_kb, shard_cgroup_memory_max_kb, shard_tree_budget_kb_for,
+    shard_pool_effective_budget_for_v1, shard_tree_headroom_kib_v1}
 use app.io.env_ops.{env_get}
 use app.io.process_ops.{process_run_timeout}
 use app.io.cli_ops.{cli_kernel_executable_path}
@@ -77,6 +79,11 @@ pub fn file_worker_pool_mir_price_kb_v1(modules: i64) -> i64:
 # that peak plus a ~15% margin.
 pub const FILE_WORKER_POOL_SCALED_FLOOR_KB_V1: i64 = 6815744
 
+# Free-memory drift a scaled price absorbs (1 GiB): pricing and admission read
+# MemAvailable separately, and a budget of exactly usable / 2 refuses again on
+# any drop between the two reads.
+pub const FILE_WORKER_POOL_SCALED_DRIFT_KB_V1: i64 = 1048576
+
 # Memory the workers may use: 60% of the tighter of host free memory and the
 # enclosing tree budget (the same 60/40 split as shard_threads_cap_for),
 # divided first so no i64 input overflows. Unknown (<= 0) on both sides is 0.
@@ -86,6 +93,20 @@ pub fn file_worker_pool_usable_kb_v1(avail_kb: i64, tree_kb: i64) -> i64:
     if base <= 0: return 0
     return (base / 10) * 6 + ((base % 10) * 6) / 10
 
+# Memory the HIR pool admission really grants: min(usable, effective), the
+# 60% host/tree term (usable) and the tree-budget clamp's effective budget
+# min(declared, cap, host-free - reserve) through the SAME shared function
+# admission uses (shard_pool_effective_budget_for_v1). Pricing from usable
+# alone kept 9 GB on run 28 (60% x 40 GB fits 2 x 9 GB) while admission's
+# 40 GB - 24 GiB reserve = 14.9 GB fit one worker: refused. An unknown clamp
+# (-1) leaves usable; a reserve-exhausted host (0) prices nothing lower.
+pub fn file_worker_pool_admission_usable_kb_v1(avail_kb: i64, declared_kb: i64, cgroup_kb: i64,
+        rss_cap_kb: i64, headroom_kb: i64) -> i64:
+    val usable = file_worker_pool_usable_kb_v1(avail_kb, shard_tree_budget_kb_for(declared_kb, cgroup_kb))
+    val effective = shard_pool_effective_budget_for_v1(avail_kb, declared_kb, cgroup_kb, rss_cap_kb, headroom_kb)
+    if effective < 0 or (usable > 0 and usable <= effective): return usable
+    return effective
+
 # A valid phase env value (SIMPLE_HIR/MIR_SHARD_WORKER_KB) or the host config
 # key worker_mem_mib is an explicit override; explicit budgets are never scaled.
 pub fn file_worker_pool_budget_explicit_v1(env_field: text, host_mib_field: text) -> bool:
@@ -93,15 +114,17 @@ pub fn file_worker_pool_budget_explicit_v1(env_field: text, host_mib_field: text
 
 # Scale to host: when 2 workers fit at the 9 GB default, the budget is
 # unchanged (big hosts behave exactly as before). Otherwise it drops toward
-# usable / 2 -- the largest budget that still admits 2 workers -- but never
+# (usable - drift) / 2 -- 2 workers still fit after free memory falls by up
+# to FILE_WORKER_POOL_SCALED_DRIFT_KB_V1 between this price and the admission
+# probe (run 28 lost 206 MB between two consecutive reads) -- but never
 # below FILE_WORKER_POOL_SCALED_FLOOR_KB_V1; a host where even the floor does
 # not fit 2 workers is refused by admission, not priced lower. Never raises a
 # budget, and an explicit, unknown or non-positive input is returned as is.
 pub fn file_worker_pool_scaled_budget_kb_v1(budget_kb: i64, usable_kb: i64, explicit: bool) -> i64:
     if explicit or budget_kb <= 0 or usable_kb <= 0: return budget_kb
-    val half = usable_kb / 2
-    if half >= SHARD_HIR_WORKER_KB_V1: return budget_kb
+    if usable_kb / 2 >= SHARD_HIR_WORKER_KB_V1: return budget_kb
     var target = FILE_WORKER_POOL_SCALED_FLOOR_KB_V1
+    val half = (usable_kb - FILE_WORKER_POOL_SCALED_DRIFT_KB_V1) / 2
     if half > target: target = half
     if target < budget_kb: return target
     return budget_kb
@@ -118,11 +141,19 @@ pub fn file_worker_pool_live_usable_kb_v1() -> i64:
     val declared_kb = shard_mem_available_kb_from_field(env_get("SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB") ?? "")
     return file_worker_pool_usable_kb_v1(avail_kb, shard_tree_budget_kb_for(declared_kb, shard_cgroup_memory_max_kb()))
 
-# Live HIR per-worker budget (override > host worker_mem_mib > scaled 9 GB default).
+# Live admission usable: the same probes shard_threads_mem_cap reads.
+pub fn file_worker_pool_live_admission_usable_kb_v1() -> i64:
+    val avail_kb = if (env_get("SIMPLE_SHARD_MEM_CLAMP") ?? "") != "0": shard_mem_available_kb() else: 0
+    val declared_kb = shard_mem_available_kb_from_field(env_get("SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB") ?? "")
+    val rss_cap_kb = shard_mem_available_kb_from_field(env_get("SIMPLE_PROCESS_TREE_RSS_CAP_KIB") ?? "")
+    return file_worker_pool_admission_usable_kb_v1(avail_kb, declared_kb, shard_cgroup_memory_max_kb(), rss_cap_kb, shard_tree_headroom_kib_v1())
+
+# Live HIR per-worker budget (override > host worker_mem_mib > scaled 9 GB
+# default), priced from what HIR admission grants, not from 60% of free.
 pub fn file_worker_pool_hir_budget_kb_v1() -> i64:
     val explicit = file_worker_pool_budget_explicit_v1(env_get("SIMPLE_HIR_SHARD_WORKER_KB") ?? "", host_limit_value("worker_mem_mib"))
     val budget = shard_worker_budget_kb("SIMPLE_HIR_SHARD_WORKER_KB", SHARD_HIR_WORKER_KB_V1)
-    return file_worker_pool_phase_budget_kb_v1(budget, explicit, file_worker_pool_live_usable_kb_v1(), file_worker_pool_host_pointer_bits_v1())
+    return file_worker_pool_phase_budget_kb_v1(budget, explicit, file_worker_pool_live_admission_usable_kb_v1(), file_worker_pool_host_pointer_bits_v1())
 
 # Live MIR per-worker budget for a closure of `modules`. `scale` is true only
 # for the per-file pool, whose worker peak is the measured 5.04-5.65 GiB; a MIR
