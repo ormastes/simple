@@ -1,0 +1,218 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+"""
+# HIR imports: from an import spelling to a registered module key
+
+Module surfaces are registered under path-derived names, while import lines
+spell the same module many ways. These examples pin how a spelling is turned
+into the registered key, and when the answer is "no such module":
+
+- an absolute spelling tries the literal key, the package facade
+  (`.__init__`), the `lib.` mirror, the `std.` -> `lib.` swap and the
+  concurrency-tier directories, in that order;
+- a relative spelling is resolved against the module it appears in; a
+  spelling made only of dots names nothing;
+- under a library mode a generic `std.` import resolves only to that mode's
+  key -- never to an ordinary module of the same name;
+- a file facade that shares its spelling with a directory package is
+  redirected to the package only for that proven self-collision;
+- a qualified type annotation (`owner.Type`) resolves in its owner module and
+  never falls back to a same-named local type.
+"""
+
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.common.diagnostics.span.{Span}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{
+    module_surfaces_from_modules,
+    ModuleSurface,
+    ModuleSurfacesByName
+}
+
+fn named_registry(names: [text]) -> ModuleSurfacesByName:
+    """One empty surface per name, registered under exactly that name."""
+    var surfaces: [ModuleSurface] = []
+    var index_by_name: Dict<text, i64> = {}
+    var ordered_indices: [i64] = []
+    var i = 0
+    while i < names.len():
+        var surface = ModuleSurface.empty(names[i])
+        surface.content_hash = i + 1
+        surfaces = surfaces.push(surface)
+        index_by_name[names[i]] = i
+        ordered_indices = ordered_indices.push(i)
+        i = i + 1
+    ModuleSurfacesByName.from_parts(surfaces, index_by_name, names, ordered_indices).unwrap()
+
+fn lowering_over(names: [text]) -> HirLowering:
+    hirlowering_for_module("app/main.spl", named_registry(names))
+
+fn aliased_facade_registry() -> ModuleSurfacesByName:
+    """`pkg.io` and `pkg.io.__init__` are two names of ONE physical surface."""
+    var facade = ModuleSurface.empty("pkg.io")
+    ModuleSurfacesByName.from_parts(
+        [facade], {"pkg.io": 0, "pkg.io.__init__": 0},
+        ["pkg.io", "pkg.io.__init__"], [0, 0]).unwrap()
+
+val keys_a_src = "pub struct Point:\n    x: i64\n"
+
+fn typed_lowering() -> HirLowering:
+    val log = Logger(level: 0)
+    var modules: Dict<text, Module> = {}
+    modules["lib.a"] = parse_full_frontend(keys_a_src, "lib/a.spl", "lib.a", log)
+    val sources = [SourceFile(path: "lib/a.spl", content: keys_a_src, module_name: "lib.a")]
+    var lowering = hirlowering_for_module("app/main.spl", module_surfaces_from_modules(modules, sources).unwrap())
+    lowering.begin_module("app/main.spl")
+    lowering
+
+describe "absolute module key resolution":
+    it "returns a spelling that is itself a registered key":
+        var lowering = lowering_over(["pkg.mod"])
+        expect(lowering.resolve_module_key("pkg.mod")).to_equal("pkg.mod")
+
+    it "finds the package facade of a directory spelling":
+        var lowering = lowering_over(["pkg.dir.__init__"])
+        expect(lowering.resolve_module_key("pkg.dir")).to_equal("pkg.dir.__init__")
+
+    it "finds the lib mirror and its package facade":
+        var lowering = lowering_over(["lib.pkg.mod", "lib.pkg.dir.__init__"])
+        expect(lowering.resolve_module_key("pkg.mod")).to_equal("lib.pkg.mod")
+        expect(lowering.resolve_module_key("pkg.dir")).to_equal("lib.pkg.dir.__init__")
+
+    it "swaps a std spelling to its lib registration":
+        var lowering = lowering_over(["lib.common.json", "lib.common.text.__init__"])
+        expect(lowering.resolve_module_key("std.common.json")).to_equal("lib.common.json")
+        expect(lowering.resolve_module_key("std.common.text")).to_equal("lib.common.text.__init__")
+
+    it "flattens the concurrency-tier directory of a std spelling":
+        var lowering = lowering_over(["lib.nogc_sync_mut.io_runtime", "std.nogc_sync_mut.simd", "lib.gc_async_mut.torch.__init__"])
+        expect(lowering.resolve_module_key("std.io_runtime")).to_equal("lib.nogc_sync_mut.io_runtime")
+        expect(lowering.resolve_module_key("std.simd")).to_equal("std.nogc_sync_mut.simd")
+        expect(lowering.resolve_module_key("std.torch")).to_equal("lib.gc_async_mut.torch.__init__")
+
+    it "prefers the literal key over any mirror":
+        var lowering = lowering_over(["lib.pkg.mod", "pkg.mod"])
+        expect(lowering.resolve_module_key("pkg.mod")).to_equal("pkg.mod")
+
+    it "answers the empty key for a module that is not loaded":
+        var lowering = lowering_over(["pkg.mod"])
+        expect(lowering.resolve_module_key("pkg.other")).to_equal("")
+        expect(lowering.resolve_module_key("std.other")).to_equal("")
+
+describe "relative module key resolution":
+    it "resolves an absolute spelling exactly like the absolute resolver":
+        var lowering = lowering_over(["pkg.facade", "pkg.leaf"])
+        expect(lowering.resolve_module_key_relative("pkg.leaf", "pkg.facade")).to_equal("pkg.leaf")
+        expect(lowering.resolve_module_key_relative("pkg.gone", "pkg.facade")).to_equal("")
+
+    it "resolves a single-dot sibling against the module it appears in":
+        var lowering = lowering_over(["pkg.facade", "pkg.leaf"])
+        expect(lowering.resolve_module_key_relative(".leaf", "pkg.facade")).to_equal("pkg.leaf")
+
+    it "resolves a sibling of a package facade inside the package":
+        var lowering = lowering_over(["pkg.tool.__init__", "pkg.tool.types"])
+        expect(lowering.resolve_module_key_relative(".types", "pkg.tool.__init__")).to_equal("pkg.tool.types")
+
+    it "climbs one package per extra leading dot":
+        var lowering = lowering_over(["pkg.sub.facade", "pkg.leaf"])
+        expect(lowering.resolve_module_key_relative("..leaf", "pkg.sub.facade")).to_equal("pkg.leaf")
+
+    it "names nothing when the spelling is only dots":
+        var lowering = lowering_over(["pkg.facade", "pkg.leaf"])
+        expect(lowering.resolve_module_key_relative(".", "pkg.facade")).to_equal("")
+        expect(lowering.resolve_module_key_relative("..", "pkg.facade")).to_equal("")
+
+    it "answers the empty key for a sibling that is not loaded":
+        var lowering = lowering_over(["pkg.facade", "pkg.leaf"])
+        expect(lowering.resolve_module_key_relative(".gone", "pkg.facade")).to_equal("")
+
+describe "library-mode module key resolution":
+    it "resolves a generic std import to the selected mode's key":
+        val mode_key = "__library_mode_v1.nogc_sync_mut.nogc_sync_mut.std.io_runtime"
+        var lowering = lowering_over([mode_key, "lib.nogc_sync_mut.io_runtime"])
+        lowering.library_mode = "nogc-sync-mut"
+        expect(lowering.resolve_module_key_relative("std.io_runtime", "app.main")).to_equal(mode_key)
+
+    it "never falls back to an ordinary module when the mode key is not loaded":
+        var lowering = lowering_over(["lib.nogc_sync_mut.io_runtime"])
+        lowering.library_mode = "nogc-sync-mut"
+        expect(lowering.resolve_module_key_relative("std.io_runtime", "app.main")).to_equal("")
+
+    it "leaves a non-generic import on the ordinary path":
+        var lowering = lowering_over(["lib.common.json", "pkg.mod"])
+        lowering.library_mode = "nogc-sync-mut"
+        expect(lowering.resolve_module_key_relative("std.common.json", "app.main")).to_equal("lib.common.json")
+        expect(lowering.resolve_module_key_relative("pkg.mod", "app.main")).to_equal("pkg.mod")
+
+    it "uses the ordinary path when no library mode is selected":
+        var lowering = lowering_over(["lib.nogc_sync_mut.io_runtime"])
+        expect(lowering.resolve_module_key_relative("std.io_runtime", "app.main")).to_equal("lib.nogc_sync_mut.io_runtime")
+
+describe "re-export module key resolution":
+    it "returns an ordinary import of another module unchanged":
+        var lowering = lowering_over(["pkg.facade", "pkg.leaf"])
+        val facade = lowering.module_surfaces.surfaces[0]
+        expect(lowering.resolve_reexport_module_key("pkg.leaf", "pkg.facade", facade)).to_equal("pkg.leaf")
+
+    it "answers the empty key when the import names no loaded module":
+        var lowering = lowering_over(["pkg.facade", "pkg.leaf"])
+        val facade = lowering.module_surfaces.surfaces[0]
+        expect(lowering.resolve_reexport_module_key("pkg.gone", "pkg.facade", facade)).to_equal("")
+
+    it "redirects a file facade that imports its own spelling to the directory package":
+        var lowering = lowering_over(["pkg.io", "pkg.io.__init__"])
+        val file_facade = lowering.module_surfaces.surfaces[0]
+        expect(lowering.resolve_reexport_module_key("pkg.io", "pkg.io", file_facade)).to_equal("pkg.io.__init__")
+
+    it "keeps the self spelling when there is no directory package":
+        var lowering = lowering_over(["pkg.io", "pkg.leaf"])
+        val file_facade = lowering.module_surfaces.surfaces[0]
+        expect(lowering.resolve_reexport_module_key("pkg.io", "pkg.io", file_facade)).to_equal("pkg.io")
+
+    it "keeps the self spelling when the package name is the same physical surface":
+        var lowering = hirlowering_for_module("app/main.spl", aliased_facade_registry())
+        val facade = lowering.module_surfaces.surfaces[0]
+        expect(lowering.resolve_reexport_module_key("pkg.io", "pkg.io", facade)).to_equal("pkg.io")
+
+describe "qualified type annotation resolution":
+    it "registers the type in its owner module and returns its id":
+        var lowering = typed_lowering()
+        val resolved = lowering.resolve_qualified_named_type("lib.a.Point", Span.empty())
+        expect(resolved >= 0).to_equal(true)
+        expect(lowering.symbols.lookup_qualified_type_raw("lib.a", "Point")).to_equal(resolved)
+        # The qualified spelling does not claim the bare name.
+        expect(lowering.symbols.lookup_or_invalid("Point").is_valid()).to_equal(false)
+
+    it "returns the same id for a repeated annotation":
+        var lowering = typed_lowering()
+        val first = lowering.resolve_qualified_named_type("lib.a.Point", Span.empty())
+        expect(lowering.resolve_qualified_named_type("lib.a.Point", Span.empty())).to_equal(first)
+        expect(lowering.symbols.next_symbol_id).to_equal(1)
+
+    it "restores the caller's import-registration flag":
+        var lowering = typed_lowering()
+        lowering.registering_import_symbols = false
+        lowering.resolve_qualified_named_type("lib.a.Point", Span.empty())
+        expect(lowering.registering_import_symbols).to_equal(false)
+
+    it "rejects a spelling with no owner or no member":
+        var lowering = typed_lowering()
+        expect(lowering.resolve_qualified_named_type("Point", Span.empty())).to_equal(-1)
+        expect(lowering.resolve_qualified_named_type(".Point", Span.empty())).to_equal(-1)
+        expect(lowering.resolve_qualified_named_type("lib.a.", Span.empty())).to_equal(-1)
+
+    it "rejects an owner that is not a loaded module":
+        var lowering = typed_lowering()
+        expect(lowering.resolve_qualified_named_type("lib.zz.Point", Span.empty())).to_equal(-1)
+        expect(lowering.symbols.next_symbol_id).to_equal(0)
+
+    it "does not invent a type its owner does not declare":
+        var lowering = typed_lowering()
+        expect(lowering.resolve_qualified_named_type("lib.a.Missing", Span.empty())).to_equal(-1)
+        expect(lowering.symbols.lookup_qualified_type_raw("lib.a", "Missing")).to_equal(-1)
