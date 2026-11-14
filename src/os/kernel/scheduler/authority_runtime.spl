@@ -760,6 +760,42 @@ pub fn sched_resource_descendant_count(
         index = index + 1
     count
 
+pub fn sched_resource_process_admits(
+    tasks: [TaskControlBlock?],
+    caller: TaskId
+) -> bool:
+    """Return false when one more child of `caller` would exceed a bound
+    process limit anywhere on the caller's resource-domain ancestry.
+
+    Each domain owner whose limits are bound charges its whole subtree
+    (`sched_resource_descendant_count`), so a grandchild cannot bypass an
+    ancestor's budget.
+    """
+    val caller_slot = _authority_slot(tasks, caller)
+    if caller_slot < 0:
+        return true
+    val caller_entry = tasks[caller_slot]
+    if caller_entry == nil:
+        return true
+    var domain = caller_entry.security.resource_domain_id
+    var steps = 0
+    while domain != 0u64 and steps <= tasks.len():
+        var index = 0
+        while index < tasks.len():
+            val entry = tasks[index]
+            if entry != nil:
+                val owner = entry
+                if owner.id.id == domain and owner.state != TaskState.Zombie and
+                    owner.security.resource_domain_id == domain and
+                    owner.security.resource_limits_bound:
+                    if sched_resource_descendant_count(tasks, owner.id) >=
+                        owner.security.process_limit:
+                        return false
+            index = index + 1
+        domain = _resource_domain_parent(tasks, domain)
+        steps = steps + 1
+    true
+
 fn _resource_domain_memory_limit(
     tasks: [TaskControlBlock?],
     domain_id: u64

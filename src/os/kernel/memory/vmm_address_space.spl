@@ -35,6 +35,14 @@ extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
 
 var g_staged_user_as_root: u64 = 0u64
 var g_staged_user_as_id: u64 = 0u64
+# Set only by a hosted (non-baremetal) user address-space model, e.g. the
+# arm64 model in user_address_space.spl. Hosted `[u8]` values are not the
+# freestanding packed array header, so the bulk memcpy below would read a
+# garbage source pointer; copy element-wise instead.
+var g_vmm_hosted_elementwise_copy: bool = false
+
+pub fn vmm_enable_hosted_elementwise_copy():
+    g_vmm_hosted_elementwise_copy = true
 
 # ============================================================================
 # Address Space Management
@@ -443,6 +451,12 @@ fn vmm_copy_bytes_to_phys(dst_phys: u64, src: [u8], src_offset: u64, len: u64):
     if len == 0:
         return
     val dst_virt = _phys_to_virt(dst_phys)
+    if g_vmm_hosted_elementwise_copy:
+        var i: u64 = 0
+        while i < len:
+            mmio_write8(dst_virt + i, src[(src_offset + i) as i64])
+            i = i + 1
+        return
     val src_hdr = unsafe_addr_of(src)
     val src_data = mmio_read64(src_hdr)
     rt_memcpy(dst_virt.to_i64(), (src_data + src_offset).to_i64(), len.to_i64())
