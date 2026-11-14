@@ -198,6 +198,20 @@ fn float_ctx_establishes_bfc(nodes: [HNode], styles: [Style], i: i32, st: Style)
     val parent_display = styles[parent].display
     parent_display == "flex" or parent_display == "inline-flex" or parent_display == "grid" or parent_display == "inline-grid"
 
+# Outer base size of a flex item whose main size is definite: its
+# `flex-basis`, else its `width` (px or % of the container), 0 when both are
+# auto and the base size has to come from the content.
+fn flex_item_definite_base_w(node: HNode, st: Style, container_w: i32) -> i32:
+    if st.flex_basis_px > 0:
+        return st.flex_basis_px
+    if st.width_px > 0:
+        if node.has_widget_class or node.has_icon_image_class or st.border_box:
+            return st.width_px
+        return st.width_px + st.pad_l + st.pad_r + st.border_l + st.border_r
+    if st.width_px < 0:
+        return container_w * (0 - st.width_px) / 100
+    0
+
 fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, x: i32, y: i32, w: i32, viewport_w: i32, viewport_h: i32, bx: [i32], by: [i32], bw: [i32], bh: [i32], wrap_starts: [[i32]], wrap_ends: [[i32]], intrinsic_widths: [i32], st: Style) -> LayoutResult:
     if not float_ctx_establishes_bfc(nodes, styles, i, st):
         return layout_with_style_flow(nodes, styles, child_index, i, x, y, w, viewport_w, viewport_h, bx, by, bw, bh, wrap_starts, wrap_ends, intrinsic_widths, st)
@@ -1441,10 +1455,15 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                         grow_acc_wrap = grow_acc_wrap + cst.flex_grow
                         val grow_after = free_on_line * grow_acc_wrap / grow_total_wrap
                         base_w_wrap = base_w_wrap + grow_after - grow_before
+                    # A grown item that also has a `width` is laid out in its
+                    # USED width; its authored width would win otherwise.
+                    var wrap_item_style = resolved_cst
+                    if base_w_wrap > 0 and cst.width_px != 0 and cst.flex_grow > 0 and base_w_wrap != flex_item_definite_base_w(nodes[fc_wrap], cst, iw):
+                        wrap_item_style = style_with_width(resolved_cst, if nodes[fc_wrap].has_widget_class or nodes[fc_wrap].has_icon_image_class or cst.border_box: base_w_wrap else: base_w_wrap - cst.pad_l - cst.pad_r - cst.border_l - cst.border_r)
                     var remaining_w = base_w_wrap
                     if remaining_w < 1:
                         remaining_w = 1
-                    val child = layout_with_style(nodes, styles, child_index, fc_wrap, cx_wrap, cy_wrap + resolved_cst.margin_t, remaining_w, viewport_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, resolved_cst)
+                    val child = layout_with_style(nodes, styles, child_index, fc_wrap, cx_wrap, cy_wrap + resolved_cst.margin_t, remaining_w, viewport_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, wrap_item_style)
                     out_bx = child.bx
                     out_by = child.by
                     out_bw = child.bw
@@ -1493,6 +1512,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
         var auto_weight = 0
         var auto_main_margin_count = 0
         var shrink_scaled_total = 0
+        var grow_definite_total = 0
         var nonabs_count = 0
         var ps_i = 0
         while ps_i < ordered_flex_child_count:
@@ -1502,14 +1522,10 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 val pml = resolve_horizontal_margin_px(pcst.margin_l, iw)
                 val pmr = resolve_horizontal_margin_px(pcst.margin_r, iw)
                 nonabs_count = nonabs_count + 1
-                var base_w = 0
-                if pcst.flex_basis_px > 0:
-                    base_w = pcst.flex_basis_px
-                elif pcst.width_px > 0:
-                    base_w = if nodes[ps].has_widget_class or nodes[ps].has_icon_image_class or pcst.border_box: pcst.width_px else: pcst.width_px + pcst.pad_l + pcst.pad_r + pcst.border_l + pcst.border_r
-                elif pcst.width_px < 0:
-                    base_w = iw * (0 - pcst.width_px) / 100
+                var base_w = flex_item_definite_base_w(nodes[ps], pcst, iw)
                 if base_w > 0:
+                    if pcst.flex_grow > 0:
+                        grow_definite_total = grow_definite_total + pcst.flex_grow
                     sum_explicit = sum_explicit + base_w
                     val shrink_factor = if pcst.flex_shrink > 0: pcst.flex_shrink else: 0
                     shrink_scaled_total = shrink_scaled_total + (shrink_factor * base_w)
@@ -1540,10 +1556,18 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
         val main_free_space = iw - sum_explicit - gaps_total
         val shrink_deficit = if sum_explicit + gaps_total > iw: sum_explicit + gaps_total - iw else: 0
         var auto_avail = iw - sum_explicit - gaps_total
+        # CSS Flexbox 9.7: positive free space is shared among ALL growing
+        # items in proportion to flex-grow. The part that goes to the items
+        # with a definite base size is set aside here; the auto-size growing
+        # items split what is left.
+        var definite_grow_space = 0
+        if shrink_deficit == 0 and main_free_space > 0 and grow_definite_total > 0:
+            definite_grow_space = main_free_space * grow_definite_total / (grow_definite_total + auto_weight)
+            auto_avail = auto_avail - definite_grow_space
         if auto_avail < auto_weight:
             auto_avail = auto_weight
         val distributable_space = if (
-            shrink_deficit == 0 and auto_weight == 0 and main_free_space > 0
+            shrink_deficit == 0 and auto_weight == 0 and grow_definite_total == 0 and main_free_space > 0
         ):
             main_free_space
         else:
@@ -1562,6 +1586,8 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
         var flex_child_count = 0
         var flex_weight_used = 0
         var flex_width_assigned = 0
+        var grow_definite_used = 0
+        var grow_definite_assigned = 0
         var shrink_scaled_used = 0
         var shrink_width_assigned = 0
         var max_baseline = 0
@@ -1613,7 +1639,18 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 # the container inner width; px-width children ignore this.
                 var remaining_w = iw - (cx - ix) - cmr
                 var force_used_w = false
-                if shrink_deficit > 0 and shrink_scaled_total > 0 and (cst.width_px != 0 or cst.flex_basis_px > 0):
+                # A growing item with a definite base size: base + its share
+                # of the free space, rounded cumulatively so the shares sum to
+                # the space exactly. Its content is laid out in that width.
+                var grown_outer_w = 0
+                if definite_grow_space > 0 and cst.flex_grow > 0 and flex_item_definite_base_w(nodes[fc], cst, iw) > 0:
+                    val grow_share_after = definite_grow_space * (grow_definite_used + cst.flex_grow) / grow_definite_total
+                    grown_outer_w = flex_item_definite_base_w(nodes[fc], cst, iw) + grow_share_after - grow_definite_assigned
+                    grow_definite_used = grow_definite_used + cst.flex_grow
+                    grow_definite_assigned = grow_share_after
+                    remaining_w = grown_outer_w
+                    force_used_w = true
+                elif shrink_deficit > 0 and shrink_scaled_total > 0 and (cst.width_px != 0 or cst.flex_basis_px > 0):
                     # width_px < 0 is the percentage sentinel: a %-width flex item
                     # (e.g. width:100% taskbar pills in a row) must shrink from the
                     # same base the measuring loop used, not take the full inner
@@ -1693,6 +1730,8 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                     style_with_height(cst, child_height_px)
                 else:
                     cst
+                if grown_outer_w > 0:
+                    resolved_cst = style_with_width(resolved_cst, if nodes[fc].has_widget_class or nodes[fc].has_icon_image_class or resolved_cst.border_box: grown_outer_w else: grown_outer_w - resolved_cst.pad_l - resolved_cst.pad_r - resolved_cst.border_l - resolved_cst.border_r)
                 val item_align = effective_item_align(st, resolved_cst)
                 var child_y = y + st.border_t + st.pad_t + resolved_cst.margin_t
                 val container_cross_auto = if st.height_px > 0:

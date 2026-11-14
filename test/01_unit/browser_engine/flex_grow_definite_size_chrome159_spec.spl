@@ -1,0 +1,145 @@
+"""
+## Purpose and audience
+Purpose: Pin `flex-grow` on a flex item that has a DEFINITE main size (a
+`width` or a `flex-basis`) against Chrome 159. The row flex pass treated every
+item with a width or basis as fixed: its `flex-grow` was ignored, the free
+space was handed to `justify-content` instead, and a basis + grow item took
+the whole remainder and pushed its siblings out of the container. Where a
+used width was computed (the wrapping pass) the item was still laid out at its
+authored `width`, so the result was thrown away.
+Audience: browser-engine layout maintainers.
+
+Model (CSS Flexbox 9.7, no min/max violation): free space = container main
+size - sum of base sizes - margins - gaps; when it is positive each item gets
+`base + free * grow / sum(grow)`.
+
+Chrome oracle (Chrome 159.0.8154.6 headless shell, 900x2000,
+`body{margin:0;font:16px/1.5 sans-serif}`, container
+`display:flex;width:300px;height:90px`, `.i{width:50px}`, `.j{width:120px}`,
+getBoundingClientRect relative to the container, `x,y,w,h`). Items are
+`a`, `t`, `b` in source order; only `t` carries the style shown unless noted.
+
+| container extra / item style                                  | a           | t             | b            |
+|---------------------------------------------------------------|-------------|---------------|--------------|
+| `.i` / `.i flex-grow:1` / `.i`                                | 0,0,50,90   | 50,0,200,90   | 250,0,50,90  |
+| a `.i flex-grow:1`, t `.i flex-grow:3`                        | 0,0,87.5,90 | 87.5,0,162.5  | 250,0,50,90  |
+| `gap:10px`, t `.i flex-grow:1`                                | 0,0,50,90   | 60,0,180,90   | 250,0,50,90  |
+| t `flex-basis:80px;flex-grow:1` (no width)                    | 0,0,50,90   | 50,0,200,90   | 250,0,50,90  |
+| t `.i flex-grow:1;padding:0 10px;border:2px solid`            | 0,0,50,90   | 50,0,200,90   | 250,0,50,90  |
+| t `.i flex-grow:1;padding:0 10px;box-sizing:border-box`       | 0,0,50,90   | 50,0,200,90   | 250,0,50,90  |
+| a `flex-grow:1` (empty, no width), t `.i flex-grow:1`         | 0,0,100,90  | 100,0,150,90  | 250,0,50,90  |
+| `justify-content:center;align-items:center`, t `.i flex-grow:1` | 0,33,50,24 | 50,33,200,24  | 250,33,50,24 |
+| `flex-direction:row-reverse`, t `.i flex-grow:1`              | 250,0,50,90 | 50,0,200,90   | 0,0,50,90    |
+| t `.i flex-grow:1;margin:0 10px`                              | 0,0,50,90   | 60,0,180,90   | 250,0,50,90  |
+| t `.i flex-grow:1` holding `<div style="width:50%">`          |             | 50,0,200,90   | child w 100  |
+| `flex-wrap:wrap`, all `.j`, t `flex-grow:1`                   | x 0, w 120  | x 120, w 180  | x 0, w 120   |
+| a `width:200px`, t `width:200px;flex-grow:1` (control: shrink) | 0,0,150,90 | 150,0,150,90  |              |
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-FLEX-GROW-DEFINITE-SIZE-001 — a flex item with a width or flex-basis grows by its share of the positive free space, as in Chrome 159.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_engine.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id
+}
+
+val VW: i32 = 900
+val VH: i32 = 2000
+val HEAD: text = "<html><head><style>body{margin:0;font:16px/1.5 sans-serif}.i{width:50px}.j{width:120px}.f{display:flex;width:300px;height:90px}</style></head><body>"
+val TAIL: text = "</body></html>"
+
+fn row(extra: text, a_attr: text, t_attr: text, t_inner: text) -> text:
+    HEAD + "<div class=\"f\" style=\"" + extra + "\"><div id=\"a\" " + a_attr + ">aa</div><div id=\"t\" " + t_attr + ">" + t_inner + "</div><div id=\"b\" class=\"i\">bb</div></div>" + TAIL
+
+fn field(page: text, id: text, name: text) -> text:
+    simple_web_layout_debug_layout_by_id(page, VW, VH, id, name)
+
+fn box(page: text, id: text) -> text:
+    field(page, id, "x") + "," + field(page, id, "y") + "," + field(page, id, "w") + "," + field(page, id, "h")
+
+describe "flex-grow on an item with a definite main size":
+    it "AC-1: a width item with flex-grow takes the free space":
+        step("Chrome 159: 300 - 3*50 = 150 free -> t is 200 wide, b at x=250")
+        val page = row("", "class=\"i\"", "class=\"i\" style=\"flex-grow:1\"", "cd")
+        expect(box(page, "a")).to_equal("0,0,50,90")
+        expect(box(page, "t")).to_equal("50,0,200,90")
+        expect(box(page, "b")).to_equal("250,0,50,90")
+
+    it "AC-2: free space is shared in proportion to flex-grow":
+        step("Chrome 159: grow 1 and 3 share 150 px -> 87.5 and 162.5 wide")
+        val page = row("", "class=\"i\" style=\"flex-grow:1\"", "class=\"i\" style=\"flex-grow:3\"", "cd")
+        expect(field(page, "a", "w").to_int()).to_be_greater_than(86)
+        expect(field(page, "a", "w").to_int()).to_be_less_than(89)
+        expect(field(page, "t", "w").to_int()).to_be_greater_than(161)
+        expect(field(page, "t", "w").to_int()).to_be_less_than(164)
+        expect(box(page, "b")).to_equal("250,0,50,90")
+
+    it "AC-3: gaps and margins come out of the free space first":
+        step("Chrome 159: gap:10px -> t 60,0,180,90")
+        val gap = row("gap:10px", "class=\"i\"", "class=\"i\" style=\"flex-grow:1\"", "cd")
+        expect(box(gap, "t")).to_equal("60,0,180,90")
+        expect(box(gap, "b")).to_equal("250,0,50,90")
+        step("Chrome 159: margin:0 10px on the item -> t 60,0,180,90")
+        val margin = row("", "class=\"i\"", "class=\"i\" style=\"flex-grow:1;margin:0 10px\"", "cd")
+        expect(box(margin, "t")).to_equal("60,0,180,90")
+        expect(box(margin, "b")).to_equal("250,0,50,90")
+
+    it "AC-4: a flex-basis item with flex-grow grows from its basis":
+        step("Chrome 159: basis 80 + 120 free -> t 50,0,200,90; b stays inside at x=250")
+        val page = row("", "class=\"i\"", "style=\"flex-basis:80px;flex-grow:1\"", "cd")
+        expect(box(page, "t")).to_equal("50,0,200,90")
+        expect(box(page, "b")).to_equal("250,0,50,90")
+
+    it "AC-5: the base size is the item's outer size in either box-sizing":
+        step("Chrome 159: content-box width 50 + 24 px of padding and border still ends 200 wide")
+        val content_box = row("", "class=\"i\"", "class=\"i\" style=\"flex-grow:1;padding:0 10px;border:2px solid\"", "cd")
+        expect(box(content_box, "t")).to_equal("50,0,200,90")
+        expect(box(content_box, "b")).to_equal("250,0,50,90")
+        step("Chrome 159: border-box width 50 ends 200 wide")
+        val border_box = row("", "class=\"i\"", "class=\"i\" style=\"flex-grow:1;padding:0 10px;box-sizing:border-box\"", "cd")
+        expect(box(border_box, "t")).to_equal("50,0,200,90")
+        expect(box(border_box, "b")).to_equal("250,0,50,90")
+
+    it "AC-6: definite and auto-size growing items share one free space":
+        step("Chrome 159: empty grow item 100 wide, the 50 px grow item 150 wide")
+        val page = HEAD + "<div class=\"f\"><div id=\"a\" style=\"flex-grow:1\"></div><div id=\"t\" class=\"i\" style=\"flex-grow:1\">cd</div><div id=\"b\" class=\"i\">bb</div></div>" + TAIL
+        expect(box(page, "a")).to_equal("0,0,100,90")
+        expect(box(page, "t")).to_equal("100,0,150,90")
+        expect(box(page, "b")).to_equal("250,0,50,90")
+
+    it "AC-7: growth leaves nothing for justify-content; cross alignment still applies":
+        step("Chrome 159: justify-content:center;align-items:center -> a at x=0, t 50,33,200,24")
+        val page = row("justify-content:center;align-items:center", "class=\"i\"", "class=\"i\" style=\"flex-grow:1\"", "cd")
+        expect(box(page, "a")).to_equal("0,33,50,24")
+        expect(box(page, "t")).to_equal("50,33,200,24")
+        expect(box(page, "b")).to_equal("250,33,50,24")
+
+    it "AC-8: row-reverse grows the same item, mirrored":
+        step("Chrome 159: a 250,0,50,90  t 50,0,200,90  b 0,0,50,90")
+        val page = row("flex-direction:row-reverse", "class=\"i\"", "class=\"i\" style=\"flex-grow:1\"", "cd")
+        expect(box(page, "a")).to_equal("250,0,50,90")
+        expect(box(page, "t")).to_equal("50,0,200,90")
+        expect(box(page, "b")).to_equal("0,0,50,90")
+
+    it "AC-9: the item's content is laid out in the grown width":
+        step("Chrome 159: a width:50% child of the 200 px item is 100 px wide")
+        val page = row("", "class=\"i\"", "class=\"i\" style=\"flex-grow:1\"", "<div id=\"c\" style=\"width:50%\">x</div>")
+        expect(box(page, "t")).to_equal("50,0,200,90")
+        expect(field(page, "c", "w")).to_equal("100")
+
+    it "AC-10: a wrapping line grows its width item too":
+        step("Chrome 159: line 1 holds 120 + 120, the grow item ends 180 wide; b wraps to x=0")
+        val page = HEAD + "<div class=\"f\" style=\"flex-wrap:wrap\"><div id=\"a\" class=\"j\">aa</div><div id=\"t\" class=\"j\" style=\"flex-grow:1\">cd</div><div id=\"b\" class=\"j\">bb</div></div>" + TAIL
+        expect(field(page, "a", "w")).to_equal("120")
+        expect(field(page, "t", "x")).to_equal("120")
+        expect(field(page, "t", "w")).to_equal("180")
+        expect(field(page, "b", "x")).to_equal("0")
+        expect(field(page, "b", "w")).to_equal("120")
+
+    it "AC-11: control — with no free space flex-grow changes nothing":
+        step("Chrome 159: two 200 px items in 300 px shrink to 150 each")
+        val page = HEAD + "<div class=\"f\"><div id=\"a\" style=\"width:200px\">aa</div><div id=\"t\" style=\"width:200px;flex-grow:1\">cd</div></div>" + TAIL
+        expect(box(page, "a")).to_equal("0,0,150,90")
+        expect(box(page, "t")).to_equal("150,0,150,90")

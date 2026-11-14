@@ -1076,7 +1076,7 @@ turns green in the same change, or the check FAILs as stale.
 - Open clusters, largest first (cells): form-control UA size, i.e. `button`
   and `input` have no UA border and `input` a different content width (78);
   table-cell residue: max-content width drops the spaces around an inline child (9), a `td` whose `display` is not `table-cell` is not laid out (8);
-  `sub`/`sup` (36, CLOSED -- see the sub/sup section below); floats (34, CLOSED -- see the float section below); `fieldset`/`legend` (24); `flex-grow` on an
+  `sub`/`sup` (36, CLOSED -- see the sub/sup section below); floats (34, CLOSED -- see the float section below); `fieldset`/`legend` (24); `flex-grow` on an (row/wrap CLOSED, see below)
   item with a definite width (17); monospace metrics for `code` (16); width /
   height / vertical padding applied to non-replaced inline boxes (15).
 - **`parse_int` drops the sign.** Any signed CSS integer read through it is
@@ -1355,3 +1355,26 @@ never cache an answer computed while exhausted) —
   inherited unitless factor (block stays 24 px, Chrome 18-21); the
   `td`/sub cells are the table-cell max-content residue, not sub/sup.
 - Spec: `test/01_unit/browser_engine/sub_sup_baseline_shift_chrome159_spec.spl`.
+
+## 2026-11-14 — `flex-grow` on an item with a definite width or basis (matrix 167 -> 152 cells)
+
+- **Cause.** The nowrap row pass split items into "explicit" (width or basis:
+  never grows) and "auto" (shares the remainder by weight). `flex-grow` on an
+  explicit item was ignored and the free space went to `justify-content`; a
+  basis + grow item with no auto sibling took the WHOLE remainder and pushed
+  its siblings out. The wrapping pass did compute a grown width but laid the
+  item out with its authored `width`, which won.
+- **Fix.** `grow_definite_total` collects flex-grow of definite-base items
+  (`flex_item_definite_base_w`); positive free space is split
+  `definite : auto` by grow weight (`definite_grow_space`), each definite item
+  gets `base + share` (cumulative rounding) and is laid out through
+  `style_with_width` so percentages inside it resolve against the used width.
+  `justify-content` gets no space when anything grows.
+- **Not fixed:** `flex-direction: column` ignores flex-grow (`.i flex-grow:1`
+  in a 90 px column stays 24, Chrome 42) and `column-reverse` is laid out as a
+  row; a wrapped line's items are not stretched to the line height
+  (`align-content: stretch`, 24 vs 45); a growing item with AUTO width still
+  starts from base 0 instead of its content width (`flex-grow:1` on two text
+  items gives 141/141, Chrome 111.73/170.47), because `flex-basis: 0` and
+  `auto` share the `flex_basis_px == 0` encoding.
+- Spec: `test/01_unit/browser_engine/flex_grow_definite_size_chrome159_spec.spl`.
