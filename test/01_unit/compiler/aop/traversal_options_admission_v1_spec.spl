@@ -1,0 +1,72 @@
+# AUTHORED / UNRUN. Consistency/cache identity only; no signed plugin admission.
+use std.spec
+use compiler.common.driver_compile_options.{CompileOptions, driver_core_compile_options_default,
+    traversal_plugin_provider_request_v1}
+use compiler.common.cache_contract.traversal_plugin_selection_v1.*
+use compiler.common.cache_contract.aspect_plugin_model_v1.*
+use compiler.common.cache_contract.aspect_traversal_v1.*
+use compiler.common.cache_contract.aspect_match_shard_v1.{PointcutSelectorV1, WeavePlanDeltaV1}
+use compiler.driver.cache.traversal_options_admission_v1.*
+use compiler.driver.cache.compile_options_hash.{compile_options_hash_compute}
+use compiler.driver.cache.native_noop_admission.{native_noop_normalized_invocation_v1}
+
+fn options_test_callback(token: i64, dir: DirTldrViewV1,
+        sel: PointcutSelectorV1) -> Result<WeavePlanDeltaV1, text>:
+    BuiltinForwardTraversalV1(instance_key: "options-fixture").visit_checked(dir, sel)
+
+fn options_test_selection() -> TraversalPluginSelectionV1:
+    val code = "sha256:" + "1".repeat(64)
+    val instance = plugin_instance_descriptor_v1(PluginDefinitionV1(code_digest: code,
+        fields: []), []).unwrap()
+    TraversalPluginSelectionV1(provider_id: "fixture", provider_code_digest: code,
+        entry_identity: "visit", abi_schema: "fixture/v1", policy_identity: "sha256:" + "2".repeat(64),
+        instance: instance, provider_token: 1, invoke: options_test_callback)
+
+fn options_test_requested() -> CompileOptions:
+    var options = driver_core_compile_options_default()
+    options.backend = "llvm"
+    options.release = true
+    options.traversal_plugin_request_v1 = Some(traversal_plugin_provider_request_v1(
+        "fixture", "/trusted/policy.sdn", "/trusted/policy.sig").unwrap())
+    options
+
+describe "provider options consistency before cache lookup":
+    it "rejects unresolved explicit requests and unexpected selections":
+        val builtin = driver_core_compile_options_default()
+        val selected = options_test_selection()
+        expect(traversal_options_selection_identity_v1(builtin, nil).unwrap()).to_equal("")
+        expect(traversal_options_selection_identity_v1(builtin, Some(selected)).is_err()).to_equal(true)
+        val requested = options_test_requested()
+        expect(traversal_options_selection_identity_v1(requested, nil).is_err()).to_equal(true)
+        expect(traversal_options_hash_identity_v1(requested).is_err()).to_equal(true)
+        expect(native_noop_normalized_invocation_v1(requested, "output")).to_equal("")
+
+    it "crosschecks signed provider identity before context creation":
+        var options = options_test_requested()
+        val selected = options_test_selection()
+        options.traversal_plugin_resolved_identity_v1 = traversal_selection_identity_v1(selected).unwrap()
+        expect(traversal_options_selection_identity_v1(options, Some(selected)).unwrap()).to_equal(
+            options.traversal_plugin_resolved_identity_v1)
+        val different_id = TraversalPluginSelectionV1(..selected, provider_id: "other")
+        expect(traversal_options_selection_identity_v1(options, Some(different_id)).is_err()).to_equal(true)
+        val different_policy = TraversalPluginSelectionV1(..selected, policy_identity: "sha256:" + "3".repeat(64))
+        expect(traversal_options_selection_identity_v1(options, Some(different_policy)).is_err()).to_equal(true)
+
+    it "changes real options and no-op keys when verified policy identity changes":
+        var options = options_test_requested()
+        val selected = options_test_selection()
+        val first = traversal_selection_identity_v1(selected).unwrap()
+        val second = traversal_selection_identity_v1(TraversalPluginSelectionV1(..selected,
+            policy_identity: "sha256:" + "4".repeat(64))).unwrap()
+        val first_hash = compile_options_hash_compute("llvm", 0, true, false, false, "default", [],
+            [], [], [], "moderate", -1, "", "", "", false, "", first)
+        val second_hash = compile_options_hash_compute("llvm", 0, true, false, false, "default", [],
+            [], [], [], "moderate", -1, "", "", "", false, "", second)
+        expect(first_hash.hash == second_hash.hash).to_equal(false)
+        options.traversal_plugin_resolved_identity_v1 = first
+        val first_noop = native_noop_normalized_invocation_v1(options, "output")
+        options.traversal_plugin_resolved_identity_v1 = second
+        val second_noop = native_noop_normalized_invocation_v1(options, "output")
+        expect(first_noop == "").to_equal(false)
+        expect(second_noop == "").to_equal(false)
+        expect(first_noop == second_noop).to_equal(false)

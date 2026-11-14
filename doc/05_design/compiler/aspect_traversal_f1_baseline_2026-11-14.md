@@ -346,3 +346,39 @@ owner directly, reducing dependency on the full compiler context for bounded
 native qualification. The full parser/context fixture remains separate from
 any projected coordinator fixture. This is an authored source refactor, not a
 new runtime PASS or cross-session lifetime guarantee.
+
+## Checked external provider composition (source integration in progress)
+
+The additive `CheckedTraversalPluginV2` preserves V1's source signature while
+making provider invocation refusal explicit. `TraversalPluginSelectionV1`
+carries an admitted descriptor, provider code/entry/ABI, signed policy identity,
+and a loader-owned scalar token plus static checked callback. These ordinary
+compiler records do not authenticate code. The H5 loader must derive and
+crosscheck them, validate the pinned token on every invocation, and expose a
+separate bounded native wire ABI. Callback addresses/tokens are not semantic IDs.
+
+The warm owner threads the same selection through preparation and completion.
+An explicit external selection cannot use the builtin incomplete-proof
+fallback. Its canonical identity frames the entire ordered-claim identity and
+therefore apply/output keys. Signed policy identity binds both exact canonical
+allowlist bytes and the public trust-root fingerprint; no private key or path
+is hashed as a substitute. All-reuse still invokes the checked provider before
+restoring retained output, so a revoked/stale token cannot use a warm hit.
+
+The existing semantic delta is the validation oracle for all four returned ID
+lists. Invalid or failing provider results abort the compile before subsequent
+weaving; no rollback of arbitrary native side effects is promised. The actual
+existing ordered weaver additionally consumes the returned current-module set
+(weave + reweave + reuse), excluding unweave after baseline restoration. This
+is not another matcher or body-rewriter.
+
+The builtin absent-selection identity and behavior remain unchanged. External
+selection must also be resolved before options/config/noop cache lookup; late
+HIR-only injection is insufficient. The checked driver factory now crosschecks request provider ID, resolved identity
+and selection before context construction; the context config, options hash
+and production native no-op invocation include the canonical identity. H5 CLI
+early action keys and the host-owned trust-root/admission composition remain
+separate integration work. The new structural tests
+and checked-callback coordinator fixture are authored/unrun and do not qualify
+native loading, signature policy, ABI transport, full imports, warm runtime or
+performance. Per-directory normalization and validation costs remain unmeasured.
