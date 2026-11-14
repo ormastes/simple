@@ -1,7 +1,7 @@
 # SCV source manifest membership rejects non-ASCII paths
 
 **Bug ID:** `source_manifest_membership_unicode_byte_slice_2026_11_14`
-**Status:** fixing
+**Status:** fix-implemented-verification-pending
 **Severity:** P2
 
 ## Symptom
