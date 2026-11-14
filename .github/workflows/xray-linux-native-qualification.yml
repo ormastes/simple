@@ -1,4 +1,4 @@
-name: XRay Linux native locator qualification (experimental)
+name: XRay Linux native observer qualification (experimental)
 
 # Scoped Linux qualification only. This does not change ordinary Windows
 # builds or advertise production Simple observer support.
@@ -14,6 +14,7 @@ on:
       - src/runtime/runtime_memory.c
       - test/fixtures/xray/**
       - scripts/check/check-xray-llvm-image-locator.shs
+      - scripts/check/check-xray-llvm-adapter-e2e.shs
       - scripts/check/check-xray-thread-context-runtime.shs
 
 permissions:
@@ -39,13 +40,13 @@ jobs:
         run: |
           set -eu
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends clang-18 libclang-rt-18-dev lld-18
+          sudo apt-get install -y --no-install-recommends clang-18 libclang-rt-18-dev lld-18 llvm-18
       - name: Record actual toolchain and source identities
         run: |
           set -eu
           mkdir -p build/xray-image-locator
           clang-18 --version > build/xray-image-locator/compiler-version.txt
-          dpkg-query -W clang-18 libclang-rt-18-dev lld-18 > build/xray-image-locator/packages.txt
+          dpkg-query -W clang-18 libclang-rt-18-dev lld-18 llvm-18 > build/xray-image-locator/packages.txt
           ld.lld-18 --version > build/xray-image-locator/linker-version.txt
           linker=$(readlink -f "$(command -v ld.lld-18)")
           compiler=$(readlink -f "$(command -v clang-18)")
@@ -66,6 +67,33 @@ jobs:
           status=0
           sh scripts/check/check-xray-llvm-image-locator.shs > build/xray-image-locator/execution.log 2>&1 || status=$?
           cat build/xray-image-locator/execution.log
+          exit "$status"
+      - name: Run actual compiler-rt resident path under enforced limits
+        run: |
+          set -eu
+          mkdir -p build/xray-image-locator/adapter
+          sha256sum src/runtime/xray/xray_llvm_adapter_linux.c src/runtime/xray/xray_resident_admission_v1.h src/runtime/xray/xray_resident_descriptor_v1.h src/runtime/xray/xray_thread_context_v1.h src/runtime/xray/xray_channel_producer_v1.h src/runtime/xray/xray_startup_owned_threads_v1.h test/fixtures/xray/xray_adapter_e2e_main.c test/fixtures/xray/xray_adapter_resident_case.h test/fixtures/xray/xray_adapter_targets.ll scripts/check/check-xray-llvm-adapter-e2e.shs > build/xray-image-locator/adapter-sources.sha256
+          status=0
+          sudo systemd-run --unit="xray-adapter-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --wait --pipe --collect \
+            -p Type=exec -p "WorkingDirectory=$GITHUB_WORKSPACE" \
+            -p MemoryMax=2147483648 -p MemorySwapMax=0 \
+            -p RuntimeMaxSec=180 -p TimeoutStopSec=5 -p KillMode=control-group \
+            /bin/sh -c '
+              set -eu
+              out=build/xray-image-locator
+              IFS=: read -r hierarchy controllers group < /proc/self/cgroup
+              test "$hierarchy" = 0
+              test -z "$controllers"
+              test -n "$group"
+              cat "/sys/fs/cgroup$group/memory.max" > "$out/adapter-memory.max"
+              cat "/sys/fs/cgroup$group/memory.swap.max" > "$out/adapter-memory.swap.max"
+              test "$(cat "$out/adapter-memory.max")" = 2147483648
+              test "$(cat "$out/adapter-memory.swap.max")" = 0
+              exec env CLANG=/usr/bin/clang-18 LLVM_OBJDUMP=/usr/bin/llvm-objdump-18 LLVM_READELF=/usr/bin/llvm-readelf-18 LLVM_NM=/usr/bin/llvm-nm-18 XRAY_E2E_LD=/usr/bin/ld.lld-18 XRAY_E2E_TIMEOUT=30 TMPDIR="$(pwd)/$out/adapter" sh scripts/check/check-xray-llvm-adapter-e2e.shs --keep
+            ' > build/xray-image-locator/adapter-execution.log 2>&1 || status=$?
+          cat build/xray-image-locator/adapter-execution.log
+          printf '%s\n' "$status" > build/xray-image-locator/adapter-execution.status
           exit "$status"
       - name: Retain native qualification evidence
         if: always()
