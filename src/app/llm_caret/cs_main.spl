@@ -20,7 +20,8 @@ use app.llm_caret.cs_dashboard.{CsDashboard, cs_dashboard_new, cs_refresh,
     cs_render, cs_handle_command, cs_apply_action, cs_frame_rows,
     cs_poll_screens, cs_resize_agents, cs_agent_area}
 use app.llm_caret.workbench.key_resolver.{KeyEvent, KeyFocus, KeyRoute, KeyRouteKind,
-    key_event, resolve_key, resolve_leader_name, leader_switch_target}
+    key_event, leader_switch_target}
+use app.llm_caret.workbench.tui_entry.{route_workbench_key, key_route_status}
 use app.llm_caret.workbench.leader_keys.{new_leader_state}
 use std.nogc_sync_mut.cli.cli_util.{get_cli_args}
 use std.io_runtime.{env_get, time_now_unix_micros, time_now_monotonic_ms}
@@ -216,6 +217,9 @@ fn _cs_leader_apply(d: CsDashboard, route: KeyRoute) -> CsDashboard:
     if n > 0:
         val (next, outcome, _quit) = _cs_step(d, "/switch " + n.to_text())
         return _logged_outcome(next, outcome)
+    val status = key_route_status(route)
+    if status != "":
+        return _logged_outcome(d, status)
     _logged_outcome(d, "leader action not available yet")
 
 # Requires raw mode to be on already; always leaves it off and the alternate
@@ -233,7 +237,6 @@ fn cs_run_live(session: text) -> CaretLoopResult:
     var instant_empty = 0
     var reason = "quit"
     var running = true
-    val leader = resolve_leader_name(env_get("CARET_LEADER_KEY") ?? "")
     var leader_state = new_leader_state()
     while running:
         val size = _live_size()
@@ -291,14 +294,14 @@ fn cs_run_live(session: text) -> CaretLoopResult:
         # F10 leader (CARET_LEADER_KEY=f10) is routed through the resolver.
         if chunk.starts_with("\x1b") and chunk != "\x1b":
             if chunk == "\x1b[21~":
-                val fr = resolve_key(leader, leader_state, key_event("f10", chunk.bytes()), KeyFocus.NativeView)
+                val fr = route_workbench_key(leader_state, key_event("f10", chunk.bytes()), KeyFocus.NativeView)
                 leader_state = fr.state
                 d = _cs_leader_apply(d, fr.route)
             continue
         for ch in chunk.chars():
             if not running:
                 break
-            val kr = resolve_key(leader, leader_state, _cs_char_key(ch), KeyFocus.NativeView)
+            val kr = route_workbench_key(leader_state, _cs_char_key(ch), KeyFocus.NativeView)
             leader_state = kr.state
             if kr.route.kind != KeyRouteKind.Widget:
                 d = _cs_leader_apply(d, kr.route)
