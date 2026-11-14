@@ -1,0 +1,58 @@
+"""
+Regression: a guest `use compiler.core.<module>` must load under the
+pure-Simple core interpreter.
+
+`core` is not a numbered layer (`src/compiler/NN.core`); it is a package nested
+inside one (`src/compiler/10.frontend/core`). The resolver only tried a direct
+child and an `NN.segment` layer for each intermediate segment, so
+`compiler.core.lexer` fell through to the unresolved `compiler/core/lexer.spl`
+and the import failed with `failed to load module: compiler.core.lexer`
+(doc/08_tracking/bug/core_interp_guest_compiler_core_import_unresolved_2026-11-14.md).
+"""
+# @cover src/compiler/10.frontend/core/interpreter/module_loader_resolve.spl
+
+use std.spec.{describe, it, expect}
+use compiler.core.interpreter.mod.{core_jit_interpret}
+use compiler.core.interpreter.eval.{eval_has_error, eval_get_error}
+use compiler.core.interpreter.value.{val_is_int, val_get_int}
+use compiler.core.interpreter.module_loader_resolve.{resolve_module_path, module_resolve_cache_reset}
+
+extern fn rt_file_read_text(path: text) -> text?
+
+val GUEST_FILE = "nested_numbered_layer_guest.spl"
+val FIXTURES = "test/fixtures/compiler/core_module_load"
+
+describe "core interpreter resolves packages nested inside a numbered layer":
+    it "maps compiler.core.<module> to src/compiler/10.frontend/core":
+        module_resolve_cache_reset()
+        expect(resolve_module_path("compiler.core.lexer_chars", GUEST_FILE)).to_equal("src/compiler/10.frontend/core/lexer_chars.spl")
+        expect(resolve_module_path("compiler.core.ast_expr", GUEST_FILE)).to_equal("src/compiler/10.frontend/core/ast_expr.spl")
+
+    it "keeps the explicit layer spelling resolving to the same file":
+        module_resolve_cache_reset()
+        expect(resolve_module_path("compiler.frontend.core.lexer_chars", GUEST_FILE)).to_equal("src/compiler/10.frontend/core/lexer_chars.spl")
+
+    it "reaches a _-transparent folder through the nested package":
+        module_resolve_cache_reset()
+        expect(resolve_module_path("compiler.core.decl_nodes", GUEST_FILE)).to_equal("src/compiler/10.frontend/core/_Ast/decl_nodes.spl")
+
+    it "still misses a module that exists in no layer":
+        module_resolve_cache_reset()
+        expect(resolve_module_path("compiler.core.no_such_module_zz", GUEST_FILE)).to_equal("compiler/core/no_such_module_zz.spl")
+        expect(resolve_module_path("compiler.no_such_package_zz.lexer_chars", GUEST_FILE)).to_equal("compiler/no_such_package_zz/lexer_chars.spl")
+
+    it "loads and calls a compiler.core module from a guest program":
+        val source = rt_file_read_text(FIXTURES + "/nested_layer_guest.spl") ?? ""
+        expect(source.len() > 0).to_equal(true)
+        val result = core_jit_interpret(source, GUEST_FILE, 999999)
+        expect(eval_get_error()).to_equal("")
+        expect(eval_has_error()).to_equal(false)
+        expect(val_is_int(result)).to_equal(true)
+        if val_is_int(result): expect(val_get_int(result)).to_equal(0)
+
+    it "fails closed when a guest imports a missing compiler.core module":
+        val source = rt_file_read_text(FIXTURES + "/missing_module_guest.spl") ?? ""
+        expect(source.len() > 0).to_equal(true)
+        val _ = core_jit_interpret(source, GUEST_FILE, 999999)
+        expect(eval_has_error()).to_equal(true)
+        expect(eval_get_error().contains("failed to load module: compiler.core.no_such_module_zz")).to_equal(true)

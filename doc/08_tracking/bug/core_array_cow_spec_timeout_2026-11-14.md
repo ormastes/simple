@@ -2,7 +2,7 @@
 
 - **Date:** 2026-11-14
 - **Severity:** P3 as filed (spec timeout); the underlying defect is a silent wrong value in the pure-Simple core interpreter
-- **Status:** fixed (timeout and wrong value); one unrelated example still red, see "Residuals"
+- **Status:** fixed (timeout and wrong value); the last red example was fixed separately, see "Residuals" (spec is 25 of 25)
 - **Spec:** `test/01_unit/compiler/interpreter/core_array_cow_spec.spl`
 - **Regression spec:** `test/01_unit/compiler_core/interpreter/eval/local_compound_assign_fast_slot_spec.spl`
 
@@ -77,13 +77,13 @@ revision differs only by dropping an unreachable error branch.
 
 ## Residuals
 
-1. **Still red, different cause:** "isolates real ExprStoreState constructor getter and
+1. **Fixed 2026-11-14** in `core_interp_guest_compiler_core_import_unresolved_2026-11-14.md` (was red, different cause): "isolates real ExprStoreState constructor getter and
    installed nested snapshots". The guest fixture
    `test/fixtures/compiler/core_array_cow/expr_store_state.spl` does
    `use compiler.core.ast_expr.{...}` and the core interpreter's guest module loader
    answers `failed to load module: compiler.core.ast_expr`. A guest containing only
    `use compiler.core.lexer.{lex_init}` fails the same way, so this is resolution of
-   `compiler.core.*` from a guest, not something inside `ast_expr`. Not fixed here.
+   `compiler.core.*` from a guest, not something inside `ast_expr`. The resolver lacked the nested-in-a-numbered-layer strategy.
 2. **Review note, no reproduction:** `resolve_stmt` recurses into a statement's `body`
    as statement ids although declaration and assignment statements keep expression ids
    there. A stale slot on an identifier whose name is shadowed in its own function could
