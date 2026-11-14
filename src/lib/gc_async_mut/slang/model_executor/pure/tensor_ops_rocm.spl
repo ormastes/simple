@@ -1,0 +1,177 @@
+# @gc — module uses GC runtime
+#
+# tensor_ops_rocm — ROCm (AMD GPU) provider for the pure runner's compute seam.
+#
+# Mirrors the function shapes of tensor_ops.spl (the CPU `[f64]` provider) over
+# device-resident f32 tensors. Weights are uploaded once with
+# rocm_tensor_upload and stay resident; each op returns a new device tensor and
+# only rocm_tensor_download moves data back. Numerical contract per op is the
+# CPU op's, computed in f32 (compare with ~1e-4 relative tolerance). Every
+# status is surfaced as Result<_, text>.
+#
+# Not on the device yet: softmax, rope, argmax, kv_write, row lookup.
+
+use std.gc_async_mut.gpu.rocm.hip_compute.{RocmDevice, rocm_open_at, rocm_bin_default, rocm_buffer_alloc, rocm_buffer_free, rocm_upload_f32, rocm_download_f32, rocm_kernel, rocm_launch, rocm_sync, rocm_f32_word}
+use std.gc_async_mut.slang.model_executor.pure.tensor_ops.{PureTensor, tensor_from_values}
+
+pub struct RocmTensor:
+    ptr: i64
+    n: i64
+    shape: [i64]
+
+pub class RocmOps:
+    dev: RocmDevice
+
+val _SRC_MATVEC = r"""extern "C" __global__ void sgemv_rows(const float* A, const float* x, float* y, int M, int K) {
+  int row = blockIdx.x;
+  float acc = 0.0f;
+  for (int k = threadIdx.x; k < K; k += blockDim.x) acc += A[(long)row * K + k] * x[k];
+  __shared__ float red[256];
+  red[threadIdx.x] = acc;
+  __syncthreads();
+  for (int s = blockDim.x / 2; s > 0; s >>= 1) { if (threadIdx.x < s) red[threadIdx.x] += red[threadIdx.x + s]; __syncthreads(); }
+  if (threadIdx.x == 0) y[row] = red[0];
+}
+"""
+
+val _SRC_RMSNORM = r"""extern "C" __global__ void rmsnorm_f32(const float* x, const float* w, float* out, int n, float eps) {
+  float acc = 0.0f;
+  for (int i = threadIdx.x; i < n; i += blockDim.x) acc += x[i] * x[i];
+  __shared__ float red[256];
+  red[threadIdx.x] = acc;
+  __syncthreads();
+  for (int s = blockDim.x / 2; s > 0; s >>= 1) { if (threadIdx.x < s) red[threadIdx.x] += red[threadIdx.x + s]; __syncthreads(); }
+  float scale = 1.0f / sqrtf(red[0] / (float)n + eps);
+  for (int i = threadIdx.x; i < n; i += blockDim.x) out[i] = x[i] * scale * w[i];
+}
+"""
+
+val _SRC_ADD = r"""extern "C" __global__ void add_f32(const float* a, const float* b, float* out, int n) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i < n) out[i] = a[i] + b[i];
+}
+"""
+
+val _SRC_MUL = r"""extern "C" __global__ void mul_f32(const float* a, const float* b, float* out, int n) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i < n) out[i] = a[i] * b[i];
+}
+"""
+
+val _SRC_SILU = r"""extern "C" __global__ void silu_f32(const float* x, float* out, int n) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i < n) out[i] = x[i] / (1.0f + expf(-x[i]));
+}
+"""
+
+# One block per head. Scores live in shared memory, so n_pos <= 1024.
+val _SRC_ATTENTION = r"""extern "C" __global__ void attention_f32(const float* q, const float* kb, const float* vb, float* out, int n_pos, int head_dim, int dim) {
+  int h = blockIdx.x;
+  int hb = h * head_dim;
+  float scale = 1.0f / sqrtf((float)head_dim);
+  __shared__ float sc[1024];
+  for (int t = threadIdx.x; t < n_pos; t += blockDim.x) {
+    float dot = 0.0f;
+    for (int i = 0; i < head_dim; i++) dot += q[hb + i] * kb[(long)t * dim + hb + i];
+    sc[t] = dot * scale;
+  }
+  __syncthreads();
+  __shared__ float total[1];
+  if (threadIdx.x == 0) {
+    float mx = sc[0];
+    for (int t = 1; t < n_pos; t++) if (sc[t] > mx) mx = sc[t];
+    float s = 0.0f;
+    for (int t = 0; t < n_pos; t++) { sc[t] = expf(sc[t] - mx); s += sc[t]; }
+    total[0] = s;
+  }
+  __syncthreads();
+  float inv = 1.0f / total[0];
+  for (int i = threadIdx.x; i < head_dim; i += blockDim.x) {
+    float acc = 0.0f;
+    for (int t = 0; t < n_pos; t++) acc += sc[t] * vb[(long)t * dim + hb + i];
+    out[hb + i] = acc * inv;
+  }
+}
+"""
+
+pub fn rocm_ops_open_at(bin_dir: text) -> Result<RocmOps, text>:
+    val dev = rocm_open_at(bin_dir)?
+    Ok(RocmOps(dev: dev))
+
+pub fn rocm_ops_open() -> Result<RocmOps, text>:
+    rocm_ops_open_at(rocm_bin_default())
+
+pub fn rocm_ops_device_name(ops: RocmOps) -> text:
+    ops.dev.name
+
+fn _numel(shape: [i64]) -> i64:
+    var n: i64 = 1
+    for d in shape:
+        n = n * d
+    n
+
+# Upload a host tensor (weights: call once, keep the handle).
+pub fn rocm_tensor_upload(ops: RocmOps, t: PureTensor) -> Result<RocmTensor, text>:
+    val n = t.data.len()
+    val ptr = rocm_buffer_alloc(ops.dev, n)?
+    rocm_upload_f32(ops.dev, ptr, t.data)?
+    Ok(RocmTensor(ptr: ptr, n: n, shape: t.shape))
+
+pub fn rocm_tensor_download(ops: RocmOps, t: RocmTensor) -> Result<PureTensor, text>:
+    rocm_sync(ops.dev)?
+    val values = rocm_download_f32(ops.dev, t.ptr, t.n)?
+    Ok(tensor_from_values(values, t.shape))
+
+pub fn rocm_tensor_free(ops: RocmOps, t: RocmTensor) -> Result<i64, text>:
+    rocm_buffer_free(ops.dev, t.ptr)
+
+pub fn rocm_tensor_numel(t: RocmTensor) -> i64:
+    t.n
+
+fn _out_like(ops: RocmOps, shape: [i64]) -> Result<RocmTensor, text>:
+    val n = _numel(shape)
+    val ptr = rocm_buffer_alloc(ops.dev, n)?
+    Ok(RocmTensor(ptr: ptr, n: n, shape: shape))
+
+# y = W x for W stored [out, in].
+pub fn rocm_tensor_matvec(ops: RocmOps, w: RocmTensor, x: RocmTensor) -> Result<RocmTensor, text>:
+    val rows = w.shape[0]
+    val cols = w.shape[1]
+    val k = rocm_kernel(ops.dev, "sgemv_rows", _SRC_MATVEC)?
+    val out = _out_like(ops, [rows])?
+    rocm_launch(ops.dev, k, rows, 256, [w.ptr, x.ptr, out.ptr], [rows, cols])?
+    Ok(out)
+
+pub fn rocm_tensor_rmsnorm(ops: RocmOps, x: RocmTensor, w: RocmTensor, eps: f64) -> Result<RocmTensor, text>:
+    val k = rocm_kernel(ops.dev, "rmsnorm_f32", _SRC_RMSNORM)?
+    val out = _out_like(ops, x.shape)?
+    rocm_launch(ops.dev, k, 1, 256, [x.ptr, w.ptr, out.ptr], [x.n, rocm_f32_word(eps)])?
+    Ok(out)
+
+fn _elementwise2(ops: RocmOps, name: text, src: text, a: RocmTensor, b: RocmTensor) -> Result<RocmTensor, text>:
+    val k = rocm_kernel(ops.dev, name, src)?
+    val out = _out_like(ops, a.shape)?
+    rocm_launch(ops.dev, k, (a.n + 255) / 256, 256, [a.ptr, b.ptr, out.ptr], [a.n])?
+    Ok(out)
+
+pub fn rocm_tensor_add(ops: RocmOps, a: RocmTensor, b: RocmTensor) -> Result<RocmTensor, text>:
+    _elementwise2(ops, "add_f32", _SRC_ADD, a, b)
+
+pub fn rocm_tensor_mul(ops: RocmOps, a: RocmTensor, b: RocmTensor) -> Result<RocmTensor, text>:
+    _elementwise2(ops, "mul_f32", _SRC_MUL, a, b)
+
+pub fn rocm_tensor_silu(ops: RocmOps, x: RocmTensor) -> Result<RocmTensor, text>:
+    val k = rocm_kernel(ops.dev, "silu_f32", _SRC_SILU)?
+    val out = _out_like(ops, x.shape)?
+    rocm_launch(ops.dev, k, (x.n + 255) / 256, 256, [x.ptr, out.ptr], [x.n])?
+    Ok(out)
+
+# Causal multi-head attention for one query against KV rows [0, n_pos).
+pub fn rocm_tensor_attention(ops: RocmOps, q: RocmTensor, k_buf: RocmTensor, v_buf: RocmTensor, n_pos: i64, n_heads: i64, head_dim: i64) -> Result<RocmTensor, text>:
+    if n_pos > 1024 or n_pos < 1:
+        return Err("ROCm attention: n_pos {n_pos} outside 1..1024")
+    val dim = n_heads * head_dim
+    val k = rocm_kernel(ops.dev, "attention_f32", _SRC_ATTENTION)?
+    val out = _out_like(ops, [dim])?
+    rocm_launch(ops.dev, k, n_heads, 128, [q.ptr, k_buf.ptr, v_buf.ptr, out.ptr], [n_pos, head_dim, dim])?
+    Ok(out)

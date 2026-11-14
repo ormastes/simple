@@ -1,0 +1,241 @@
+# @gc — module uses GC runtime
+#
+# hip_compute — ROCm (AMD HIP) compute backend of the GPU API.
+#
+# Layering: slang -> pure LLM runner -> GPU API -> CUDA / ROCm. This module is
+# the ROCm leg: device init, f32 device buffers, host<->device copy, runtime
+# kernel compile through hipRTC (cached per device by kernel name), kernel
+# launch, synchronize. The HIP and hipRTC libraries are loaded with the same
+# dynamic helper slang's backend.spl uses (spl_dlopen / spl_dlsym /
+# spl_wffi_call_i64); every HIP status other than 0 surfaces as Err(text).
+#
+# Launch uses hipDrvLaunchKernelEx (4 integer arguments), so no wide-arity C
+# forwarder is needed. Kernel parameter convention: device pointers first
+# (8 bytes each), then 32-bit words (ints, or float bit patterns).
+
+use std.nogc_sync_mut.sffi.dynamic.{spl_dlopen, spl_dlsym, spl_wffi_call_i64}
+use std.common.binary_io.{f32_from_bits, f32_to_bits}
+use std.io_runtime.{file_exists}
+
+extern fn rt_alloc(size: i64) -> i64
+extern fn rt_free(ptr: i64)
+extern fn rt_ptr_read_i32(addr: i64, offset: i64) -> i32
+extern fn rt_ptr_read_i64(addr: i64, offset: i64) -> i64
+extern fn rt_ptr_write_i32(addr: i64, offset: i64, value: i32)
+extern fn rt_ptr_write_i64(addr: i64, offset: i64, value: i64)
+extern fn rt_cstring_to_text(ptr: i64) -> text
+extern fn spl_str_ptr(value: text) -> i64
+
+val ROCM_BIN_DEFAULT = "C:\\Program Files\\AMD\\ROCm\\7.2\\bin"
+val HIP_DLL = "amdhip64_7.dll"
+val HIPRTC_DLL = "hiprtc0702.dll"
+
+# Directory holding the HIP DLLs: SLANG_ROCM_BIN override is read by callers
+# through rocm_open_at; this is the install default.
+pub fn rocm_bin_default() -> text:
+    ROCM_BIN_DEFAULT
+
+pub fn rocm_available_at(bin_dir: text) -> bool:
+    file_exists(bin_dir + "\\" + HIP_DLL) and file_exists(bin_dir + "\\" + HIPRTC_DLL)
+
+pub class RocmDevice:
+    name: text
+    f_malloc: i64
+    f_free: i64
+    f_htod: i64
+    f_dtoh: i64
+    f_sync: i64
+    f_modload: i64
+    f_getfn: i64
+    f_launch: i64
+    f_rtc_create: i64
+    f_rtc_compile: i64
+    f_rtc_log_size: i64
+    f_rtc_log: i64
+    f_rtc_code_size: i64
+    f_rtc_code: i64
+    f_rtc_destroy: i64
+    scratch: i64
+    kernels: Dict<text, i64>
+
+fn _need(lib: i64, sym: text) -> Result<i64, text>:
+    val f = spl_dlsym(lib, sym)
+    if f == 0:
+        return Err("ROCm: missing symbol {sym}")
+    Ok(f)
+
+fn _hip_err(what: text, rc: i64) -> text:
+    "ROCm: {what} failed rc={rc}"
+
+# Load HIP + hipRTC from `bin_dir`, initialise HIP, and read the device name.
+pub fn rocm_open_at(bin_dir: text) -> Result<RocmDevice, text>:
+    if not rocm_available_at(bin_dir):
+        return Err("ROCm: {HIP_DLL}/{HIPRTC_DLL} not found in {bin_dir}")
+    val ucrt = spl_dlopen("ucrtbase.dll")
+    val hip = spl_dlopen(bin_dir + "\\" + HIP_DLL)
+    val rtc = spl_dlopen(bin_dir + "\\" + HIPRTC_DLL)
+    if hip == 0 or rtc == 0:
+        return Err("ROCm: dlopen failed for HIP or hipRTC")
+    val f_init = _need(hip, "hipInit")?
+    val f_name = _need(hip, "hipDeviceGetName")?
+    val dev = RocmDevice(
+        name: "",
+        f_malloc: _need(hip, "hipMalloc")?,
+        f_free: _need(hip, "hipFree")?,
+        f_htod: _need(hip, "hipMemcpyHtoD")?,
+        f_dtoh: _need(hip, "hipMemcpyDtoH")?,
+        f_sync: _need(hip, "hipDeviceSynchronize")?,
+        f_modload: _need(hip, "hipModuleLoadData")?,
+        f_getfn: _need(hip, "hipModuleGetFunction")?,
+        f_launch: _need(hip, "hipDrvLaunchKernelEx")?,
+        f_rtc_create: _need(rtc, "hiprtcCreateProgram")?,
+        f_rtc_compile: _need(rtc, "hiprtcCompileProgram")?,
+        f_rtc_log_size: _need(rtc, "hiprtcGetProgramLogSize")?,
+        f_rtc_log: _need(rtc, "hiprtcGetProgramLog")?,
+        f_rtc_code_size: _need(rtc, "hiprtcGetCodeSize")?,
+        f_rtc_code: _need(rtc, "hiprtcGetCode")?,
+        f_rtc_destroy: _need(rtc, "hiprtcDestroyProgram")?,
+        scratch: rt_alloc(512),
+        kernels: {}
+    )
+    val rc_init = spl_wffi_call_i64(f_init, [0], 1)
+    if rc_init != 0:
+        return Err(_hip_err("hipInit", rc_init))
+    val name_buf = rt_alloc(256)
+    val rc_name = spl_wffi_call_i64(f_name, [name_buf, 256, 0], 3)
+    if rc_name != 0:
+        rt_free(name_buf)
+        return Err(_hip_err("hipDeviceGetName", rc_name))
+    val name = rt_cstring_to_text(name_buf)
+    rt_free(name_buf)
+    dev.name = name
+    Ok(dev)
+
+# Device buffer of `n_floats` f32 values.
+pub fn rocm_buffer_alloc(dev: RocmDevice, n_floats: i64) -> Result<i64, text>:
+    val rc = spl_wffi_call_i64(dev.f_malloc, [dev.scratch, n_floats * 4], 2)
+    if rc != 0:
+        return Err(_hip_err("hipMalloc", rc))
+    Ok(rt_ptr_read_i64(dev.scratch, 0))
+
+pub fn rocm_buffer_free(dev: RocmDevice, ptr: i64) -> Result<i64, text>:
+    val rc = spl_wffi_call_i64(dev.f_free, [ptr], 1)
+    if rc != 0:
+        return Err(_hip_err("hipFree", rc))
+    Ok(0)
+
+# Host f64 -> device f32. Staged through one malloc'd host block.
+pub fn rocm_upload_f32(dev: RocmDevice, dptr: i64, values: [f64]) -> Result<i64, text>:
+    val n = values.len()
+    val host = rt_alloc(n * 4 + 8)
+    var i: i64 = 0
+    while i < n:
+        rt_ptr_write_i32(host, i * 4, f32_to_bits(values[i] as f32) as i32)
+        i = i + 1
+    val rc = spl_wffi_call_i64(dev.f_htod, [dptr, host, n * 4], 3)
+    rt_free(host)
+    if rc != 0:
+        return Err(_hip_err("hipMemcpyHtoD", rc))
+    Ok(n)
+
+# Device f32 -> host f64.
+pub fn rocm_download_f32(dev: RocmDevice, dptr: i64, n: i64) -> Result<[f64], text>:
+    val host = rt_alloc(n * 4 + 8)
+    val rc = spl_wffi_call_i64(dev.f_dtoh, [host, dptr, n * 4], 3)
+    if rc != 0:
+        rt_free(host)
+        return Err(_hip_err("hipMemcpyDtoH", rc))
+    var out: [f64] = []
+    var i: i64 = 0
+    while i < n:
+        out.push(f32_from_bits(rt_ptr_read_i32(host, i * 4) as u32) as f64)
+        i = i + 1
+    rt_free(host)
+    Ok(out)
+
+pub fn rocm_sync(dev: RocmDevice) -> Result<i64, text>:
+    val rc = spl_wffi_call_i64(dev.f_sync, [], 0)
+    if rc != 0:
+        return Err(_hip_err("hipDeviceSynchronize", rc))
+    Ok(0)
+
+# Compile `source` with hipRTC, load the code object, return the kernel
+# function handle for `kernel`. Cached per device by `kernel`: the second call
+# for the same name returns the cached handle without compiling.
+pub fn rocm_kernel(dev: RocmDevice, kernel: text, source: text) -> Result<i64, text>:
+    val cached = dev.kernels.get(kernel)
+    if cached.is_some():
+        return Ok(cached.unwrap())
+    val s = dev.scratch
+    val rc_create = spl_wffi_call_i64(dev.f_rtc_create, [s, spl_str_ptr(source), spl_str_ptr(kernel + ".hip"), 0, 0, 0], 6)
+    if rc_create != 0:
+        return Err(_hip_err("hiprtcCreateProgram", rc_create))
+    val prog = rt_ptr_read_i64(s, 0)
+    val rc_compile = spl_wffi_call_i64(dev.f_rtc_compile, [prog, 0, 0], 3)
+    if rc_compile != 0:
+        spl_wffi_call_i64(dev.f_rtc_log_size, [prog, s], 2)
+        val log_n = rt_ptr_read_i64(s, 0)
+        val log_buf = rt_alloc(log_n + 8)
+        spl_wffi_call_i64(dev.f_rtc_log, [prog, log_buf], 2)
+        val log = rt_cstring_to_text(log_buf)
+        rt_free(log_buf)
+        spl_wffi_call_i64(dev.f_rtc_destroy, [s], 1)
+        return Err("ROCm: hiprtc compile of {kernel} failed rc={rc_compile}: {log}")
+    spl_wffi_call_i64(dev.f_rtc_code_size, [prog, s], 2)
+    val code_n = rt_ptr_read_i64(s, 0)
+    val code = rt_alloc(code_n + 8)
+    spl_wffi_call_i64(dev.f_rtc_code, [prog, code], 2)
+    val rc_load = spl_wffi_call_i64(dev.f_modload, [s, code], 2)
+    if rc_load != 0:
+        rt_free(code)
+        return Err(_hip_err("hipModuleLoadData", rc_load))
+    val module = rt_ptr_read_i64(s, 0)
+    val rc_fn = spl_wffi_call_i64(dev.f_getfn, [s, module, spl_str_ptr(kernel)], 3)
+    if rc_fn != 0:
+        return Err(_hip_err("hipModuleGetFunction({kernel})", rc_fn))
+    val kfn = rt_ptr_read_i64(s, 0)
+    dev.kernels[kernel] = kfn
+    Ok(kfn)
+
+# f32 bit pattern of `v`, as the i32 word a kernel `float` parameter receives.
+pub fn rocm_f32_word(v: f64) -> i64:
+    (f32_to_bits(v as f32) as i64) & 4294967295
+
+# Launch `kfn` on a 1-D grid. `ptr_args` are device pointers, `word_args` are
+# 32-bit words (ints or rocm_f32_word values), in kernel parameter order.
+# Asynchronous: call rocm_sync before reading results.
+pub fn rocm_launch(dev: RocmDevice, kfn: i64, grid_x: i64, block_x: i64, ptr_args: [i64], word_args: [i64]) -> Result<i64, text>:
+    val np = ptr_args.len()
+    val nw = word_args.len()
+    val argv = rt_alloc(8 * (np + nw) + 8)
+    val params = rt_alloc(8 * (np + nw) + 8)
+    val cfg = rt_alloc(64)
+    var i: i64 = 0
+    while i < np:
+        rt_ptr_write_i64(argv, i * 8, ptr_args[i])
+        rt_ptr_write_i64(params, i * 8, argv + i * 8)
+        i = i + 1
+    var j: i64 = 0
+    while j < nw:
+        val off = np * 8 + j * 4
+        rt_ptr_write_i32(argv, off, word_args[j] as i32)
+        rt_ptr_write_i64(params, (np + j) * 8, argv + off)
+        j = j + 1
+    rt_ptr_write_i32(cfg, 0, grid_x as i32)
+    rt_ptr_write_i32(cfg, 4, 1)
+    rt_ptr_write_i32(cfg, 8, 1)
+    rt_ptr_write_i32(cfg, 12, block_x as i32)
+    rt_ptr_write_i32(cfg, 16, 1)
+    rt_ptr_write_i32(cfg, 20, 1)
+    rt_ptr_write_i32(cfg, 24, 0)
+    rt_ptr_write_i32(cfg, 28, 0)
+    rt_ptr_write_i64(cfg, 32, 0)
+    rt_ptr_write_i64(cfg, 40, 0)
+    rt_ptr_write_i64(cfg, 48, 0)
+    val rc = spl_wffi_call_i64(dev.f_launch, [cfg, kfn, params, 0], 4)
+    rt_free(argv)
+    rt_free(params)
+    rt_free(cfg)
+    if rc != 0:
+        return Err(_hip_err("hipDrvLaunchKernelEx", rc))
+    Ok(0)
