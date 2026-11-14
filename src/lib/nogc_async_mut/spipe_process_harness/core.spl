@@ -10,7 +10,7 @@ use std.nogc_async_mut.spipe_process_harness.types.{
 
 # Case-insensitive, whitespace-trimmed substring match. Precedence is
 # claude, codex, gemini, kimi; anything else (including "") is Unknown.
-fn normalize_provider(provider: text) -> Provider:
+pub fn normalize_provider(provider: text) -> Provider:
     val p = provider.lower().trim()
     if p.contains("claude"):
         return Provider.Claude
@@ -22,7 +22,7 @@ fn normalize_provider(provider: text) -> Provider:
         return Provider.Kimi
     Provider.Unknown
 
-fn provider_slug(provider: Provider) -> text:
+pub fn provider_slug(provider: Provider) -> text:
     match provider:
         case Provider.Claude: "claude"
         case Provider.Codex: "codex"
@@ -35,13 +35,13 @@ fn feature_dir(slug: FeatureSlug) -> text:
         return "spipe-process-harness"
     slug.value.trim()
 
-fn state_path(feature: FeatureSlug) -> text:
+pub fn state_path(feature: FeatureSlug) -> text:
     ".spipe/{feature_dir(feature)}/state.md"
 
-fn event_log_path(feature: FeatureSlug) -> text:
+pub fn event_log_path(feature: FeatureSlug) -> text:
     ".spipe/{feature_dir(feature)}/events.jsonl"
 
-fn provider_hook_events(provider: Provider) -> [text]:
+pub fn provider_hook_events(provider: Provider) -> [text]:
     match provider:
         case Provider.Claude:
             [
@@ -58,17 +58,17 @@ fn provider_hook_events(provider: Provider) -> [text]:
         case Provider.Unknown:
             []
 
-fn hook_command(provider: Provider) -> text:
+pub fn hook_command(provider: Provider) -> text:
     "bin/simple spipe-process-harness hook --provider {provider_slug(provider)}"
 
-fn hook_jsonl(provider: Provider, event: text, session_id: HookSessionId, model: ModelName, raw_payload: text) -> text:
+pub fn hook_jsonl(provider: Provider, event: text, session_id: HookSessionId, model: ModelName, raw_payload: text) -> text:
     val p = provider_slug(provider)
     "{\"type\":\"spipe_hook\",\"provider\":\"{p}\",\"event\":\"{event}\",\"session_id\":\"{session_id.value}\",\"model\":\"{model.value}\",\"raw\":{json_string(raw_payload)}}"
 
 fn json_string(value: text) -> text:
     "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n") + "\""
 
-fn gate_from_state(state: text, require_approval: bool) -> GateDecision:
+pub fn gate_from_state(state: text, require_approval: bool) -> GateDecision:
     if state.trim() == "":
         return GateDecision(verdict: GateVerdict.Block, reason: "missing SPipe state")
     if require_approval and not state.contains("User Approved: true"):
@@ -77,15 +77,15 @@ fn gate_from_state(state: text, require_approval: bool) -> GateDecision:
         return GateDecision(verdict: GateVerdict.Block, reason: "SPipe prevention gate is blocking")
     GateDecision(verdict: GateVerdict.Allow, reason: "allow")
 
-fn render_state(feature: FeatureSlug, request: text, goal: text, approved: bool) -> text:
+pub fn render_state(feature: FeatureSlug, request: text, goal: text, approved: bool) -> text:
     val approval = if approved: "true" else: "false"
     val name = feature.value
     "# SPipe State: {name}\n\n## User Request\n> {request}\n\n## Refined Goal\n> {goal}\n\n## Harness\n- User Approved: {approval}\n- Prevent: allow\n- Hook Providers: codex, claude, gemini, kimi (advisory)\n- Event Log: {event_log_path(feature)}\n\n## Acceptance Criteria\n- [ ] AC-1: Common hook envelopes are normalized for Codex, Claude, Gemini, and Kimi (advisory).\n- [ ] AC-2: Provider hooks feed one shared event log and gate path.\n- [ ] AC-3: The HUD shows model, jj worktree, commit, hours remaining, week remaining, and goal.\n- [ ] AC-4: Skill deploy output documents provider hook snippets.\n- [ ] AC-5: Prevention blocks when approval/state gates fail.\n"
 
-fn render_hud(snapshot: HudSnapshot) -> text:
+pub fn render_hud(snapshot: HudSnapshot) -> text:
     "model={snapshot.model} | jj={snapshot.jj_worktree} | commit={snapshot.commit_id} | hr={snapshot.hours_remaining} | week={snapshot.week_remaining} | goal={snapshot.goal}"
 
-fn deploy_snippets() -> [HookDeploySnippet]:
+pub fn deploy_snippets() -> [HookDeploySnippet]:
     [
         HookDeploySnippet(provider: Provider.Claude, path: ".spipe/hook-deploy/claude-settings-hooks.json", content: claude_hook_snippet()),
         HookDeploySnippet(provider: Provider.Codex, path: ".spipe/hook-deploy/codex-hook.sdn", content: codex_hook_snippet()),
@@ -93,17 +93,17 @@ fn deploy_snippets() -> [HookDeploySnippet]:
         HookDeploySnippet(provider: Provider.Kimi, path: ".spipe/hook-deploy/kimi-advisory.sdn", content: kimi_hook_snippet())
     ]
 
-fn claude_hook_snippet() -> text:
+pub fn claude_hook_snippet() -> text:
     "{\"hooks\":{\"PreToolUse\":[{\"matcher\":\".*\",\"hooks\":[{\"type\":\"command\",\"command\":\"bin/simple spipe-process-harness hook --provider claude\"}]}],\"PostToolUse\":[{\"matcher\":\".*\",\"hooks\":[{\"type\":\"command\",\"command\":\"bin/simple spipe-process-harness hook --provider claude\"}]}],\"SessionStart\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"bin/simple spipe-process-harness hook --provider claude\"}]}],\"Stop\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"bin/simple spipe-process-harness hook --provider claude\"}]}]}}"
 
-fn codex_hook_snippet() -> text:
+pub fn codex_hook_snippet() -> text:
     "provider: codex\ncommand: \"bin/simple spipe-process-harness hook --provider codex\"\nevents: [session_start, tool_start, tool_finish, turn_finish, session_end]\n"
 
-fn gemini_hook_snippet() -> text:
+pub fn gemini_hook_snippet() -> text:
     "{\"hooks\":{\"session_start\":\"bin/simple spipe-process-harness hook --provider gemini\",\"tool_start\":\"bin/simple spipe-process-harness hook --provider gemini\",\"tool_finish\":\"bin/simple spipe-process-harness hook --provider gemini\",\"session_end\":\"bin/simple spipe-process-harness hook --provider gemini\"}}"
 
 # Advisory only: states repo-documented facts (Kimi Code auto-discovers the
 # project .mcp.json; the hook command can be run by hand). It names no Kimi
 # config key or file because none is documented here.
-fn kimi_hook_snippet() -> text:
+pub fn kimi_hook_snippet() -> text:
     "provider: kimi\nmode: advisory\nnative_hooks: none\nmcp: project .mcp.json (auto-discovered by Kimi Code)\ncommand: \"bin/simple spipe-process-harness hook --provider kimi\"\nevents: []\n"
