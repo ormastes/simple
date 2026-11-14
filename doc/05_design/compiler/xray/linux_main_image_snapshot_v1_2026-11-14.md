@@ -1,6 +1,6 @@
 # Linux main-image snapshot V1
 
-Status: implementation and native fixture authored; qualification pending. This
+Status: native Linux AArch64 locator fixture passed; provider integration pending. This
 private locator does not admit the public LLVM observer capability.
 
 The resident provider serializes the cold create operation and uses the opaque
@@ -33,3 +33,20 @@ LLVM XRay target separately from the uninstrumented cold leaf and links a SHA1
 build ID. Present and absent section executables test the OS/runtime boundary;
 owned note buffers exercise malformed-note rejection. These tests do not prove
 a Simple-generated binary or a fully admitted capture session.
+
+## Native evidence
+
+Source a8611b15cec68abe932fc562992e57ee6d519493 passed 33 present-section
+checks and three absent-section checks on Linux AArch64. Clang 23.1.0 revision
+ea7d852a70e8bdfaf601d6626a760f9771b2c4b4 linked compiler-rt XRay archive SHA256
+64319290b7b1264c34b497da2ab86f85877883eac8805af06047efc48c80da4d.
+The single qualification cycle compiled and executed inside a 1 GiB cgroup with
+swap disabled and a 60-second bound. Both executables exited zero. Logs and
+artifacts are retained in `/tmp/xray-image-locator-native-20261114/`.
+
+Astra preflight requested an explicit function-table alignment invariant; it is
+now enforced by _Alignas and a static offsetof assertion. The existing preceding
+range-array layout already provided alignment, so this is hardening rather than
+a reproduced defect. The platform guard explicitly requires little-endian LP64.
+No x86-64 native run, malformed foreign mapping experiment, concurrent creation,
+Simple-generated executable or full provider session is claimed by this fixture.
