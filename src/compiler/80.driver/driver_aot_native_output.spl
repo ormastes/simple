@@ -1,3 +1,4 @@
+use compiler.driver.cache.initializer_object_capture_v1.{driver_capture_initializer_object_v1}
 use std.common.bytes.concat_copy_v1.{bytes_concat_copy_v1}
 use std.nogc_sync_mut.io.disk_bound.{disk_bound_keep_newest_dirs, disk_bound_cap_bytes}
 use std.common.cache_host_authority_v1.{CacheRootAuthorityV1, CacheObjectAuthorityV1, CacheTempAuthorityV1,
@@ -2811,6 +2812,7 @@ impl CompilerDriver:
             # objects at this stable path, so reconstruct from uncached_names.
             var reconstructed_outputs: [text] = []
             for name in uncached_names:
+                ctx.initializer_object_receipts_v1.remove(name)
                 val capsule = frozen_native_capsule_batch_find_v1(capsules, name)
                 val obj_path = if capsule.ok: capsule.object_path else: ""
                 # Evaluate the receipt invariant EXACTLY ONCE per unit. Deciding
@@ -2870,6 +2872,12 @@ impl CompilerDriver:
                             and driver_native_disk_source_identity(
                                 capsule.cache_source) == capsule.source_identity
                         if source_unchanged:
+                            val (initializer_object_digest, initializer_object_size) = match capsule_admission:
+                                case Ok(value): value
+                                case Err(reason): return CompileResult.CodegenError(reason)
+                            val _initializer_observed = driver_capture_initializer_object_v1(
+                                ctx, name, capsule.cache_source, capsule.source_identity,
+                                initializer_object_digest, initializer_object_size, capsule.capsule_identity)
                             if val src_fp = FileFingerprint.from_file(capsule.cache_source):
                                 build_cache.update_entry(capsule.cache_source, src_fp,
                                     [], [obj_path], capsule.module_witness)
