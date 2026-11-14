@@ -117,3 +117,9 @@ retains configured route bytes and selected predecessor facts even for incomplet
 surfaces; only the reusable surface digest is withheld. An unavailable unrelated
 category therefore cannot erase an intermediate route change from transitive
 identity. The authored regression covers that case without claiming execution.
+
+The fresh per-surface root-carrier promotion result now propagates through its
+sole caller before scope teardown/publication. Historical false results for
+individual already-retained fields are not reused as an excuse to ignore this
+fresh batch result. Actual injected native promotion-failure testing is pending;
+the authored source ratchet checks the return and caller wiring only.
