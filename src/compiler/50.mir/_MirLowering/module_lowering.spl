@@ -2549,8 +2549,16 @@ impl MirLowering:
             val _ended = transient_array_scope_end_v1()
             if scope_trace: eprint(mir_scope_decision_trace_line_v1(scope_decisions, 1))
             return Err("transient MIR scope reverse-reference owner unavailable for {module.name}")
+        # Provider type copies relocated into this module's table during THIS
+        # lowering; retracted after s5 when opted in (see the field comment in
+        # mir_lowering_types.spl). Read the knob once per module.
+        self.provider_type_relocation_journal = []
+        val retract_provider_types = self.retract_provider_type_relocations or
+            (mir_lower_env_get("SIMPLE_MIR_RETRACT_PROVIDER_TYPES") ?? "") == "1"
+        self.journal_provider_type_relocations = retract_provider_types
         val lowered: MirModule = self.lower_module(module, providers, is_entry_module, scoped_archive_symbols,
             scoped_archive_globals, scoped_archive_thunks)
+        self.journal_provider_type_relocations = false
         mir_section_profile_mark("s1_lowered", module.name)
         # Function-local lookup tables are scratch. The completed MIR owns its
         # locals/blocks, while cross-module declaration/default/layout facts
@@ -2700,6 +2708,14 @@ impl MirLowering:
             return Err("reverse-reference publication failed for {module.name}")
         scope_decisions = scope_decisions | 256
         mir_section_profile_mark("s5_scope_end", module.name)
+        # Success path only, after the scope has ended: the MirModule already
+        # holds the relocated ids, and the rebuilt maps must be persistent.
+        # The unscoped fallback above and every Err return keep the copies
+        # (a re-lower then reuses them exactly as before).
+        if retract_provider_types and self.provider_type_relocation_journal.len() > 0:
+            val retracted = self.symbols.retract_symbol_rows_v1(self.provider_type_relocation_journal)
+            if scope_trace: eprint("[mir-scope] retracted {retracted} relocated provider type symbol(s) from {module.name}; next_symbol_id={self.symbols.next_symbol_id}")
+            self.provider_type_relocation_journal = []
         if scope_trace: eprint(mir_scope_decision_trace_line_v1(scope_decisions, 10))
         Ok(lowered)
 
