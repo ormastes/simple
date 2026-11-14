@@ -50,13 +50,14 @@ and cache integration remain unqualified. Generated accessors are not enabled:
 receiver retention across advice still needs an actual runtime/backend lifetime
 contract. Returning the receiver in a helper tuple is not sufficient proof.
 
-The directory lane wires source-authority capture to the actual traversal
+At the earlier feature checkpoint, the directory lane wired source-authority capture to the actual traversal
 adapter on the cold path. The full HIR producer/SCV route remains unrun;
 bounded ordinary F1 activation is not runtime-proven. Initializer-plan transport is implemented in the
 feature branch; final native-link binding and complete category aggregation
 remain open. Warm restoration, generated traversal and signed-provider admission
-are not established. The canonical codec gate remains closed: the real-import
-qualification attempt hit its 4 GiB RSS bound before producing an executable.
+were not established. The canonical codec gate remains closed: the two real-import
+qualification attempts hit their 4 GiB and 8 GiB bounds before producing an executable
+or runtime golden evidence.
 Ordinary bounded snapshots must not be described as canonical qualification.
 
 The Linux current-image identity factory passed a real imported-module native
