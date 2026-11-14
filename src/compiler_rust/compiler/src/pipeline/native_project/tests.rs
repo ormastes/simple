@@ -5451,8 +5451,8 @@ fn native_project_fs_platform_aliases_keep_the_sync_path_owner() {
         src_root.join("lib/nogc_async_mut/path.spl"),
         src_root.join("lib/nogc_async_mut/platform.spl"),
         src_root.join("lib/platform.spl"),
-        src_root.join("lib/nogc_sync_mut/fs.spl"),
-        src_root.join("lib/nogc_async_mut/fs.spl"),
+        src_root.join("lib/nogc_sync_mut/fs/flat.spl"),
+        src_root.join("lib/nogc_async_mut/fs/flat.spl"),
     ];
     let file_sources = paths
         .iter()
@@ -9564,6 +9564,19 @@ fn test_linker_fails_closed_on_undefined_runtime_symbol() {
     }
     if let Some(v) = prev_boot {
         std::env::set_var("SIMPLE_BOOTSTRAP", v);
+    }
+    // On a platform whose final link rejects undefined symbols (windows-gnu:
+    // `tolerates_unresolved_symbols() == false`) the preflight verdict is
+    // deliberately deferred to that authoritative link (stubs.rs, WA-s2n7,
+    // 2026-11-08, doc/08_tracking/bug/stage2_windows_gnu_112_undefined_rt_symbols_2026-11-08.md),
+    // so there is nothing for this preflight to reject there.
+    let target = super::effective_target();
+    if !simple_common::platform::link_config::PlatformLinkConfig::for_target(&target).tolerates_unresolved_symbols() {
+        assert!(
+            result.is_ok(),
+            "strict-final-link platforms defer the undefined-rt_* verdict to the linker; got: {result:?}"
+        );
+        return;
     }
     let err = result.expect_err("undefined rt_* symbol must be a hard link error, not a silent stub");
     assert!(
