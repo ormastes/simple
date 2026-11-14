@@ -1,0 +1,44 @@
+"""
+Regression guard for bug `u64_shift_signed_outside_typed_fn_2026-09-03`.
+
+A `val big: u64 = 18446744073709551615` binding used to leak to i64 outside a
+`-> u64` typed function: `to_string()` printed `-1`, `<< 1` printed `-2` and
+`>> 1` was an ARITHMETIC shift (`-1`) instead of a logical one. The declared
+`u64` of a `val`/`var` binding must carry into display and shifts, the same
+way a declared `-> u64` return type does. Negative vectors pin that `i64`
+bindings stay signed (arithmetic `>>`, `-1` display) and that the typed-fn
+route is unchanged. For compiler/interpreter engineers changing numeric
+type propagation.
+"""
+use std.spipe.*
+
+fn shr_lane(x: u64, s: i32) -> u64:
+    return x >> s
+
+describe "u64 val binding stays unsigned outside typed fns":
+    it "u64 val displays unsigned":
+        val big: u64 = 18446744073709551615
+        expect(big.to_string()).to_equal("18446744073709551615")
+
+    it "u64 val shl wraps unsigned":
+        val big: u64 = 18446744073709551615
+        expect((big << 1).to_string()).to_equal("18446744073709551614")
+
+    it "u64 val shr is logical":
+        val big: u64 = 18446744073709551615
+        expect((big >> 1).to_string()).to_equal("9223372036854775807")
+
+    it "u64 var shr is logical":
+        var big: u64 = 18446744073709551615
+        big = big >> 4
+        expect(big.to_string()).to_equal("1152921504606846975")
+
+    it "typed-fn route is unchanged":
+        val big: u64 = 18446744073709551615
+        expect(shr_lane(big, 1).to_string()).to_equal("9223372036854775807")
+
+    it "i64 val stays signed: display and arithmetic shr":
+        val neg: i64 = -1
+        expect(neg.to_string()).to_equal("-1")
+        expect((neg >> 1).to_string()).to_equal("-1")
+        expect((neg << 1).to_string()).to_equal("-2")

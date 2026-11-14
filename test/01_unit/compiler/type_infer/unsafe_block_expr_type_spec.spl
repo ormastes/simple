@@ -1,0 +1,72 @@
+"""
+Regression guard for bug `unsafe_block_expression_rhs_2026-08-22`.
+
+`bin/simple check` rejected every `unsafe(capabilities: [...]):` block —
+both the statement form and `val x = unsafe(...): tail` — with
+`unsupported expression kind: HirExprKind::UnsafeBlock(...)`, because the
+pure-Simple HM checker (`inference_expr.spl` synthesize_expr) had no arm for
+`HirExprKind.UnsafeBlock`. An unsafe block is a normal block expression whose
+value is its tail expression; the checker must type it exactly like a plain
+`Block`. Negative vectors pin that the tail type is still enforced (a mismatch
+stays a mismatch) and that an empty unsafe block is unit, not a wildcard.
+For compiler engineers changing type inference of block expressions.
+"""
+use compiler.types.type_infer_types.*
+use compiler.types.type_infer.context.*
+use compiler.types.type_infer.core.*
+use compiler.types.type_infer.inference_expr.*
+use compiler.types.type_infer.inference_control.*
+use compiler.hir.hir.*
+use compiler.frontend.core.lexer.*
+use compiler.common.diagnostics.span.{Span}
+
+fn ub_sp() -> Span:
+    lex_span_empty()
+
+fn ub_ty(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: ub_sp())
+
+fn ub_int(v: i64) -> HirExpr:
+    HirExpr(kind: HirExprKind.IntLit(v, nil), type_: nil, span: ub_sp())
+
+fn ub_unsafe_tail(tail: HirExpr) -> HirExpr:
+    val body = HirBlock(stmts: [], has: true, value: tail, span: ub_sp(), unsafe_caps: ["ffi"])
+    HirExpr(kind: HirExprKind.UnsafeBlock(body), type_: nil, span: ub_sp())
+
+fn ub_unsafe_empty() -> HirExpr:
+    val body = HirBlock(stmts: [], has: false, value: ub_int(0), span: ub_sp(), unsafe_caps: ["ffi"])
+    HirExpr(kind: HirExprKind.UnsafeBlock(body), type_: nil, span: ub_sp())
+
+fn ub_kind_name(t: HirType) -> text:
+    match t.kind:
+        case HirTypeKind.Int(_, _): "int"
+        case HirTypeKind.Str: "text"
+        case HirTypeKind.Unit: "unit"
+        case _: "other"
+
+fn ub_synth(expr: HirExpr) -> text:
+    var ctx = HmInferContext.new()
+    match ctx.infer_expr(expr, InferMode.Synthesize):
+        case Ok(t): ub_kind_name(ctx.resolve(t))
+        case Err(TypeInferError.Mismatch(_, _, _)): "mismatch"
+        case Err(_): "other-error"
+
+fn ub_check(expr: HirExpr, expected: HirType) -> text:
+    var ctx = HmInferContext.new()
+    match ctx.infer_expr(expr, InferMode.Check(expected)):
+        case Ok(_): "ok"
+        case Err(TypeInferError.Mismatch(_, _, _)): "mismatch"
+        case Err(_): "other-error"
+
+describe "unsafe block is a typed block expression (HM checker)":
+    it "unsafe block with an int tail synthesizes int":
+        expect(ub_synth(ub_unsafe_tail(ub_int(7)))).to_equal("int")
+
+    it "unsafe block with an int tail checks against i64":
+        expect(ub_check(ub_unsafe_tail(ub_int(7)), ub_ty(HirTypeKind.Int(64, true)))).to_equal("ok")
+
+    it "unsafe block with an int tail is rejected against text (tail type still enforced)":
+        expect(ub_check(ub_unsafe_tail(ub_int(7)), ub_ty(HirTypeKind.Str))).to_equal("mismatch")
+
+    it "unsafe block with no tail is unit, not a wildcard":
+        expect(ub_synth(ub_unsafe_empty())).to_equal("unit")
