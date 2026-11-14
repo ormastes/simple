@@ -1,0 +1,90 @@
+# Actual owned WAL/signatures/private archive. Container facts remain scripted;
+# no live exec/native absence or positive cancellation receipt is fabricated.
+use std.spec.expect
+use test.fixtures.orchestration.host_runtime_exec_begin_fixture_v3.*
+use test.fixtures.orchestration.host_authorized_execution_fixture_v2.host_execution_clock_v2
+use std.common.contracts.distributed_authority_v2.{DistributedSignedGrantV2, DistributedSignedApprovalV2}
+use std.common.contracts.distributed_authority_codec_v2.*
+use std.common.contracts.distributed_control_codec_v2.{distributed_encode_operation_v2, distributed_grant_digest_v2}
+use std.common.contracts.orchestration.host_runtime_exec_v3.{HostRuntimeExecRequestV3, host_runtime_exec_request_encode_v3, host_runtime_exec_intent_digest_v3}
+use std.nogc_sync_mut.orchestration.host_local_root_v1.HostLocalRootV1
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.HostReservationAuthorizationContextV1
+use std.nogc_sync_mut.orchestration.host_runtime_exec_no_begin_cancel_owner_v3.*
+use std.nogc_sync_mut.orchestration.host_exec_private_publication_v3.host_exec_private_publish_v3
+use std.nogc_sync_mut.daemon_sdk.operation_dispatch_v2.daemon_operation_admit_v2
+use std.nogc_sync_mut.daemon_sdk.distributed_authority_snapshot_v2.distributed_verify_grant_approval_from_snapshot_v2
+use std.nogc_sync_mut.daemon_sdk.distributed_grant_verification_v2.{distributed_grant_signature_message_v2, distributed_approval_signature_message_v2}
+use std.common.crypto.ed25519.pure_ed25519_sign_from_seed_v1
+use std.common.crypto.sha256.sha256_text
+use std.nogc_sync_mut.io.path_identity.path_entry_present
+
+pub struct NoBeginCancelFixtureV3:
+    begin: ExecBeginFixtureV3
+    signed: DistributedSignedGrantV2
+    approval: DistributedSignedApprovalV2
+
+pub fn no_begin_cancel_fixture_v3(key_expires_at: Option<i64> = nil) -> NoBeginCancelFixtureV3:
+    var begin = exec_begin_fixture_v3("resolver-success",
+        ["host_exec_control_install_v3", "host_execute_v1", "host_runtime_exec_v3", "host_cleanup_v1"], key_expires_at)
+    begin.local = no_begin_cancel_archive_admit_v3(begin.local, begin.packet)
+    val packet = begin.packet
+    val policy = begin.local.policy
+    var cleanup = packet.parent_binding.host_operation
+    cleanup.operation = "host_cleanup_v1"
+    var signed = packet.signed
+    signed.grant.operations = ["host_cleanup_v1"]
+    signed.signature = pure_ed25519_sign_from_seed_v1(exec_begin_signing_seed_v3(1), distributed_grant_signature_message_v2(signed).unwrap()).signature
+    var approval = packet.approval
+    approval.grant_digest = distributed_grant_digest_v2(signed.grant).unwrap()
+    approval.request_digest = sha256_text(distributed_encode_operation_v2(cleanup).unwrap())
+    approval.signature = pure_ed25519_sign_from_seed_v1(exec_begin_signing_seed_v3(65), distributed_approval_signature_message_v2(approval).unwrap()).signature
+    assert(distributed_verify_grant_approval_from_snapshot_v2(policy.snapshot, signed, approval, cleanup, 100, 7, 4, 2, 3).is_ok())
+    NoBeginCancelFixtureV3(begin: begin, signed: signed, approval: approval)
+
+pub fn no_begin_cancel_archive_admit_v3(local: HostLocalRootV1, packet: HostRuntimeExecRequestV3) -> HostLocalRootV1:
+    var current = local
+    val policy = current.policy
+    val guard = fn() -> Result<HostReservationAuthorizationContextV1, text>:
+        val verified = distributed_verify_grant_approval_from_snapshot_v2(policy.snapshot, packet.signed, packet.approval,
+            packet.operation, 100, 7, 4, 2, 3)?
+        Ok(host_execution_clock_v2())
+    val archived = host_exec_private_publish_v3(current.capacity.journal.root, "host-runtime-exec-requests",
+        sha256_text(packet.operation.id) + ".sdn", host_runtime_exec_request_encode_v3(packet).unwrap(), guard)
+    expect(archived.error).to_equal("")
+    expect(archived.published_new).to_equal(true)
+    current.capacity.journal = daemon_operation_admit_v2(current.capacity.journal, packet.operation).unwrap().journal
+    current.capacity.ledger.revision = current.capacity.journal.sequence + 1
+    current
+
+pub fn no_begin_cancel_sibling_v3(fixture: NoBeginCancelFixtureV3, local: HostLocalRootV1) -> HostLocalRootV1:
+    var packet = fixture.begin.packet
+    packet.intent.request.operation_id = "sibling-child"
+    packet.intent.request.nonce = "d".repeat(64)
+    packet.operation.id = "sibling-child"
+    packet.operation.payload_digest = host_runtime_exec_intent_digest_v3(packet.intent).unwrap()
+    packet.approval.request_digest = sha256_text(distributed_encode_operation_v2(packet.operation).unwrap())
+    packet.approval.signature = pure_ed25519_sign_from_seed_v1(exec_begin_signing_seed_v3(65), distributed_approval_signature_message_v2(packet.approval).unwrap()).signature
+    no_begin_cancel_archive_admit_v3(local, packet)
+
+pub fn no_begin_cancel_run_v3(fixture: NoBeginCancelFixtureV3) -> HostRuntimeExecAdmittedCancelTurnV3:
+    host_runtime_exec_cancel_admitted_v3(fixture.begin.local, fixture.begin.packet.parent_binding.host_operation.id,
+        fixture.begin.packet.operation.id, fixture.signed, fixture.approval, host_execution_clock_v2(), host_execution_clock_v2)
+
+# Actual published artifact selects a failed clock sample AFTER the private
+# publisher returns. No callback counter or fake successful native probe.
+pub fn no_begin_cancel_pending_v3(fixture: NoBeginCancelFixtureV3) -> HostRuntimeExecAdmittedCancelTurnV3:
+    val directory = fixture.begin.local.capacity.journal.root + "/host-runtime-exec-no-begin-cancellations"
+    val path = directory + "/" + sha256_text(fixture.begin.packet.operation.id) + ".sdn"
+    val refresh = fn() -> HostReservationAuthorizationContextV1:
+        if path_entry_present(directory).unwrap() and path_entry_present(path).unwrap():
+            return HostReservationAuthorizationContextV1(-1, -1, 4, 2, 3)
+        host_execution_clock_v2()
+    val turn = host_runtime_exec_cancel_admitted_v3(fixture.begin.local, fixture.begin.packet.parent_binding.host_operation.id,
+        fixture.begin.packet.operation.id, fixture.signed, fixture.approval, host_execution_clock_v2(), refresh)
+    expect(turn.cancelled).to_equal(false)
+    expect(turn.error).to_equal("host-exec-no-begin-clock-regressed")
+    assert(turn.receipt.is_some())
+    turn
+
+pub fn no_begin_cancel_fixture_close_v3(fixture: NoBeginCancelFixtureV3, local: HostLocalRootV1):
+    exec_begin_fixture_close_v3(fixture.begin, local)

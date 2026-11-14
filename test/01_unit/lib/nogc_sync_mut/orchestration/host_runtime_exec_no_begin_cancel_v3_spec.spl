@@ -1,0 +1,227 @@
+# @req HOST-02 ORCH-02
+# NOT_RUN. Real signatures/owned WAL/private files; Container observations are
+# scripted. Protocol-fault generic transitions create no lease/native process.
+use std.spec.{describe, it, expect}
+use std.spec.step
+use test.fixtures.orchestration.host_runtime_exec_no_begin_cancel_fixture_v3.*
+use test.fixtures.orchestration.host_runtime_exec_begin_fixture_v3.exec_begin_signing_seed_v3
+use test.fixtures.orchestration.host_authorized_execution_fixture_v2.{host_execution_clock_v2, host_execution_expired_clock_v2}
+use test.fixtures.orchestration.host_local_resolver_fixture_v2.host_local_resolver_consumed_fixture_v2
+use std.nogc_sync_mut.orchestration.host_runtime_exec_no_begin_cancel_owner_v3.*
+use std.nogc_sync_mut.orchestration.host_runtime_exec_no_begin_cancel_evidence_v3.*
+use std.nogc_sync_mut.orchestration.host_runtime_exec_cancellation_interlock_v3.host_runtime_exec_cancellation_clear_v3
+use std.nogc_sync_mut.orchestration.host_local_root_v1.HostLocalRootV1
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.HostReservationAuthorizationContextV1
+use std.common.contracts.orchestration.host_runtime_exec_no_begin_cancel_v3.*
+use std.common.contracts.orchestration.host_capacity_v1.HostReservationStateV1
+use std.common.contracts.distributed_control_codec_v2.distributed_grant_digest_v2
+use std.common.task_runner.distributed_operation_journal_v2.{distributed_operation_journal_history_batch_v2, distributed_operation_journal_recover_execution_v2}
+use std.nogc_sync_mut.daemon_sdk.operation_dispatch_v2.{daemon_operation_begin_v2, daemon_operation_record_outcome_v2}
+use std.nogc_sync_mut.daemon_sdk.distributed_grant_verification_v2.{distributed_grant_signature_message_v2, distributed_approval_signature_message_v2}
+use std.common.crypto.ed25519.pure_ed25519_sign_from_seed_v1
+use std.common.crypto.sha256.sha256_text
+use std.nogc_sync_mut.sffi.fs.file_atomic_write_mode
+use std.nogc_sync_mut.io.path_identity.path_entry_present
+use std.nogc_sync_mut.io.dir_entry_ops.directory_create_private
+use std.nogc_sync_mut.io_runtime.read_file_text_result
+
+fn no_begin_before_clock_v3() -> HostReservationAuthorizationContextV1:
+    HostReservationAuthorizationContextV1(99, 9, 4, 2, 3)
+
+fn no_begin_receipt_path_v3(local: HostLocalRootV1, id: text) -> text:
+    local.capacity.journal.root + "/host-runtime-exec-no-begin-cancellations/" + sha256_text(id) + ".sdn"
+
+fn no_begin_fault_cancel_v3(local: HostLocalRootV1, fixture: NoBeginCancelFixtureV3,
+        receipt: HostRuntimeExecNoBeginCancelReceiptV3) -> HostLocalRootV1:
+    # Explicit protocol/storage corruption fixture, NOT a positive receipt
+    # producer. Used to ensure canonical history rejects forbidden origins.
+    var current = local
+    val bytes = host_runtime_exec_no_begin_cancel_receipt_encode_v3(receipt).unwrap()
+    assert(file_atomic_write_mode(no_begin_receipt_path_v3(current, fixture.begin.packet.operation.id), bytes, 0o600))
+    current.capacity.journal = daemon_operation_record_outcome_v2(current.capacity.journal,
+        fixture.begin.packet.operation, "cancelled", sha256_text(bytes)).unwrap()
+    current.capacity.ledger.revision = current.capacity.journal.sequence + 1
+    current
+
+describe "Qualified cancellation of an admitted child with no Host BEGIN":
+    it "publishes a real receipt before an admitted cancellation and retains parent charges":
+        step("Invoke the actual signed producer and validate its exact canonical history")
+        val fixture = no_begin_cancel_fixture_v3()
+        val consumed = host_local_resolver_consumed_fixture_v2(fixture.begin.local.container)
+        val before = fixture.begin.local.capacity.journal.sequence
+        val turn = no_begin_cancel_run_v3(fixture)
+        expect(turn.error).to_equal("")
+        expect(turn.cancelled).to_equal(true)
+        expect(turn.recovery_required).to_equal(false)
+        val receipt = turn.receipt.unwrap()
+        val child = fixture.begin.packet.operation
+        expect(turn.local.capacity.journal.sequence).to_equal(before + 1)
+        expect(turn.local.capacity.journal.operations[child.id].state).to_equal("cancelled")
+        expect(turn.local.capacity.journal.operations[child.id].outcome_digest).to_equal(host_runtime_exec_no_begin_cancel_receipt_digest_v3(receipt).unwrap())
+        val history = distributed_operation_journal_history_batch_v2(turn.local.capacity.journal).unwrap()
+        expect(history.operations[child.id].last_from_state).to_equal("admitted")
+        expect(host_runtime_exec_no_begin_cancel_validate_v3(turn.local.capacity.journal, turn.local.capacity.ledger.capacity, child, history).unwrap()).to_equal(true)
+        expect(turn.local.capacity.ledger.reservations.len()).to_equal(1)
+        expect(turn.local.capacity.ledger.reservations[0].state).to_equal(HostReservationStateV1.Executing)
+        expect(host_local_resolver_consumed_fixture_v2(turn.local.container)).to_equal(consumed)
+        no_begin_cancel_fixture_close_v3(fixture, turn.local)
+
+    it "round trips bounded strict receipt data without turning decoding into authority":
+        step("Use an actual produced receipt and corrupt canonical bytes and digest fields")
+        val fixture = no_begin_cancel_fixture_v3()
+        val turn = no_begin_cancel_run_v3(fixture)
+        val receipt = turn.receipt.unwrap()
+        val bytes = host_runtime_exec_no_begin_cancel_receipt_encode_v3(receipt).unwrap()
+        expect(host_runtime_exec_no_begin_cancel_receipt_encode_v3(host_runtime_exec_no_begin_cancel_receipt_decode_v3(bytes).unwrap()).unwrap()).to_equal(bytes)
+        expect(host_runtime_exec_no_begin_cancel_receipt_decode_v3(bytes + "\n").is_err()).to_equal(true)
+        expect(host_runtime_exec_no_begin_cancel_receipt_decode_v3("é".repeat(2097153)).is_err()).to_equal(true)
+        var changed = receipt
+        changed.child_packet_digest = "invalid"
+        expect(host_runtime_exec_no_begin_cancel_receipt_encode_v3(changed).is_err()).to_equal(true)
+        changed = receipt
+        changed.child_packet_digest = "f".repeat(64)
+        expect(host_runtime_exec_no_begin_cancel_match_v3(turn.local.capacity.journal, turn.local.capacity.ledger.capacity,
+            fixture.begin.packet.operation, changed).unwrap_err()).to_equal("host-exec-no-begin-original-binding")
+        changed = receipt
+        changed.scope.service_scope_id = "other-service"
+        expect(host_runtime_exec_no_begin_cancel_match_v3(turn.local.capacity.journal, turn.local.capacity.ledger.capacity,
+            fixture.begin.packet.operation, changed).unwrap_err()).to_equal("host-exec-no-begin-original-binding")
+        no_begin_cancel_fixture_close_v3(fixture, turn.local)
+
+    it "keeps receipt-before-outcome clock failure admitted and blocks later BEGIN":
+        step("Sample an unavailable clock only after the actual fixed final file appears")
+        val fixture = no_begin_cancel_fixture_v3()
+        val turn = no_begin_cancel_pending_v3(fixture)
+        val child = fixture.begin.packet.operation
+        expect(turn.recovery_required).to_equal(true)
+        expect(turn.local.capacity.journal.operations[child.id].state).to_equal("admitted")
+        expect(host_runtime_exec_cancellation_clear_v3(turn.local.capacity.journal, child).is_err()).to_equal(true)
+        val history = distributed_operation_journal_history_batch_v2(turn.local.capacity.journal).unwrap()
+        expect(host_runtime_exec_no_begin_cancel_validate_v3(turn.local.capacity.journal, turn.local.capacity.ledger.capacity, child, history).unwrap()).to_equal(false)
+        no_begin_cancel_fixture_close_v3(fixture, turn.local)
+
+    it "resumes identical fresh proof across unrelated appends and rejects stale history":
+        step("Admit a real signed sibling between receipt and cancellation without replaying per parent")
+        val fixture = no_begin_cancel_fixture_v3()
+        val pending = no_begin_cancel_pending_v3(fixture)
+        val stale = distributed_operation_journal_history_batch_v2(pending.local.capacity.journal).unwrap()
+        var current = no_begin_cancel_sibling_v3(fixture, pending.local)
+        val turn = host_runtime_exec_cancel_admitted_v3(current, fixture.begin.packet.parent_binding.host_operation.id,
+            fixture.begin.packet.operation.id, fixture.signed, fixture.approval, host_execution_clock_v2(), host_execution_clock_v2)
+        expect(turn.cancelled).to_equal(true)
+        expect(host_runtime_exec_no_begin_cancel_validate_v3(turn.local.capacity.journal, turn.local.capacity.ledger.capacity,
+            fixture.begin.packet.operation, stale).unwrap_err()).to_equal("host-exec-no-begin-history-stale")
+        val history = distributed_operation_journal_history_batch_v2(turn.local.capacity.journal).unwrap()
+        expect(host_runtime_exec_no_begin_cancel_validate_v3(turn.local.capacity.journal, turn.local.capacity.ledger.capacity,
+            fixture.begin.packet.operation, history).unwrap()).to_equal(true)
+        expect(turn.local.capacity.journal.operations["sibling-child"].state).to_equal("admitted")
+        expect(turn.local.capacity.ledger.reservations[0].state).to_equal(HostReservationStateV1.Executing)
+        no_begin_cancel_fixture_close_v3(fixture, turn.local)
+
+    it "rejects generic executing and unknown cancellation labels despite an actual receipt":
+        step("Create protocol-fault canonical BEGIN/unknown edges without a native lease or process")
+        for unknown in [false, true]:
+            val fixture = no_begin_cancel_fixture_v3()
+            val pending = no_begin_cancel_pending_v3(fixture)
+            var current = pending.local
+            current.capacity.journal = daemon_operation_begin_v2(current.capacity.journal, fixture.begin.packet.operation).unwrap()
+            if unknown: current.capacity.journal = distributed_operation_journal_recover_execution_v2(current.capacity.journal, fixture.begin.packet.operation.id).unwrap()
+            current = no_begin_fault_cancel_v3(current, fixture, pending.receipt.unwrap())
+            val history = distributed_operation_journal_history_batch_v2(current.capacity.journal).unwrap()
+            expect(host_runtime_exec_no_begin_cancel_validate_v3(current.capacity.journal, current.capacity.ledger.capacity,
+                fixture.begin.packet.operation, history).unwrap_err()).to_equal("host-exec-no-begin-origin-not-admitted")
+            no_begin_cancel_fixture_close_v3(fixture, current)
+
+    it "rejects forged or wrong-sequence pre-cancel revision endpoints":
+        step("Keep actual admitted origin but corrupt private prefix evidence under a fault fixture")
+        for fork in [true, false]:
+            val fixture = no_begin_cancel_fixture_v3()
+            val pending = no_begin_cancel_pending_v3(fixture)
+            var receipt = pending.receipt.unwrap()
+            receipt.before_commit_digest = "f".repeat(64)
+            if not fork:
+                val history = distributed_operation_journal_history_batch_v2(pending.local.capacity.journal).unwrap()
+                for commit in history.revision_endpoints.keys():
+                    if history.revision_endpoints[commit] == 2: receipt.before_commit_digest = commit
+            val current = no_begin_fault_cancel_v3(pending.local, fixture, receipt)
+            val history = distributed_operation_journal_history_batch_v2(current.capacity.journal).unwrap()
+            expect(host_runtime_exec_no_begin_cancel_validate_v3(current.capacity.journal, current.capacity.ledger.capacity,
+                fixture.begin.packet.operation, history).unwrap_err()).to_equal("host-exec-no-begin-prefix-not-ancestor")
+            no_begin_cancel_fixture_close_v3(fixture, current)
+
+    it "refuses proof expired at recorded authorization time":
+        step("Corrupt recorded time while preserving original signed frames and admitted origin")
+        val fixture = no_begin_cancel_fixture_v3()
+        val pending = no_begin_cancel_pending_v3(fixture)
+        var receipt = pending.receipt.unwrap()
+        receipt.authorized_unix_ms = receipt.approval.expires_at
+        val current = no_begin_fault_cancel_v3(pending.local, fixture, receipt)
+        val history = distributed_operation_journal_history_batch_v2(current.capacity.journal).unwrap()
+        expect(host_runtime_exec_no_begin_cancel_validate_v3(current.capacity.journal, current.capacity.ledger.capacity,
+            fixture.begin.packet.operation, history).unwrap_err()).to_equal("APPROVAL_EXPIRED")
+        no_begin_cancel_fixture_close_v3(fixture, current)
+
+    it "refuses clock rollback below the already accepted immutable receipt":
+        step("Retry an actual pending receipt with Unix and same-boot monotonic clocks below its recorded floor")
+        val fixture = no_begin_cancel_fixture_v3()
+        val pending = no_begin_cancel_pending_v3(fixture)
+        val turn = host_runtime_exec_cancel_admitted_v3(pending.local, fixture.begin.packet.parent_binding.host_operation.id,
+            fixture.begin.packet.operation.id, fixture.signed, fixture.approval, no_begin_before_clock_v3(), no_begin_before_clock_v3)
+        expect(turn.error).to_equal("host-exec-no-begin-recorded-clock-regressed")
+        expect(turn.cancelled).to_equal(false)
+        expect(turn.local.capacity.journal.operations[fixture.begin.packet.operation.id].state).to_equal("admitted")
+        expect(host_runtime_exec_no_begin_cancel_load_v3(turn.local.capacity.journal, fixture.begin.packet.operation).unwrap().authorized_unix_ms).to_equal(100)
+        no_begin_cancel_fixture_close_v3(fixture, turn.local)
+
+    it "refuses expired or different renewed proof without overwriting the receipt":
+        step("Keep the original private proof and reject new grant bytes even when separately valid")
+        val fixture = no_begin_cancel_fixture_v3()
+        val pending = no_begin_cancel_pending_v3(fixture)
+        val expired = host_runtime_exec_cancel_admitted_v3(pending.local, fixture.begin.packet.parent_binding.host_operation.id,
+            fixture.begin.packet.operation.id, fixture.signed, fixture.approval, host_execution_expired_clock_v2(), host_execution_expired_clock_v2)
+        expect(expired.error).to_equal("APPROVAL_EXPIRED")
+        var signed = fixture.signed
+        signed.grant.expires_at = 250
+        signed.signature = pure_ed25519_sign_from_seed_v1(exec_begin_signing_seed_v3(1), distributed_grant_signature_message_v2(signed).unwrap()).signature
+        var approval = fixture.approval
+        approval.expires_at = 240
+        approval.grant_digest = distributed_grant_digest_v2(signed.grant).unwrap()
+        approval.signature = pure_ed25519_sign_from_seed_v1(exec_begin_signing_seed_v3(65), distributed_approval_signature_message_v2(approval).unwrap()).signature
+        val renewed = host_runtime_exec_cancel_admitted_v3(pending.local, fixture.begin.packet.parent_binding.host_operation.id,
+            fixture.begin.packet.operation.id, signed, approval, host_execution_clock_v2(), host_execution_clock_v2)
+        expect(renewed.error).to_equal("host-exec-no-begin-fixed-proof-mismatch")
+        expect(renewed.local.capacity.journal.operations[fixture.begin.packet.operation.id].state).to_equal("admitted")
+        expect(host_runtime_exec_no_begin_cancel_load_v3(renewed.local.capacity.journal, fixture.begin.packet.operation).unwrap().approval.expires_at).to_equal(190)
+        no_begin_cancel_fixture_close_v3(fixture, renewed.local)
+
+    it "does not inherit child launch authority as parent cleanup permission":
+        step("Supply the genuine signed child proof to the separately derived parent cleanup verifier")
+        val fixture = no_begin_cancel_fixture_v3()
+        val turn = host_runtime_exec_cancel_admitted_v3(fixture.begin.local, fixture.begin.packet.parent_binding.host_operation.id,
+            fixture.begin.packet.operation.id, fixture.begin.packet.signed, fixture.begin.packet.approval, host_execution_clock_v2(), host_execution_clock_v2)
+        expect(turn.error != "").to_equal(true)
+        expect(turn.cancelled).to_equal(false)
+        expect(turn.local.capacity.journal.operations[fixture.begin.packet.operation.id].state).to_equal("admitted")
+        no_begin_cancel_fixture_close_v3(fixture, turn.local)
+
+    it "refuses contradictory delegation artifacts without native inspection or release":
+        step("Retain an owned malformed delegation entry rather than treating it as absence")
+        val fixture = no_begin_cancel_fixture_v3()
+        val directory = fixture.begin.local.capacity.journal.root + "/host-runtime-exec-delegations"
+        assert(directory_create_private(directory))
+        assert(file_atomic_write_mode(directory + "/" + sha256_text(fixture.begin.packet.operation.id) + ".sdn", "contradiction", 0o600))
+        val turn = no_begin_cancel_run_v3(fixture)
+        expect(turn.error).to_equal("host-exec-no-begin-delegation-present")
+        expect(turn.cancelled).to_equal(false)
+        no_begin_cancel_fixture_close_v3(fixture, turn.local)
+
+    it "keeps the receipt validator cycle-free and producer free of native or release effects":
+        step("Supplement actual WAL cases with architecture recurrence checks")
+        val evidence = read_file_text_result("src/lib/nogc_sync_mut/orchestration/host_runtime_exec_no_begin_cancel_evidence_v3.spl").unwrap()
+        for forbidden in ["use std.nogc_sync_mut.orchestration.host_local_root", "use std.nogc_sync_mut.orchestration.host_capacity_owner", "time_sample", "simple_container_"]:
+            expect(evidence.contains(forbidden)).to_equal(false)
+        val owner = read_file_text_result("src/lib/nogc_sync_mut/orchestration/host_runtime_exec_no_begin_cancel_owner_v3.spl").unwrap()
+        for forbidden in ["simple_container_", "host_cleanup_v1(", "process_run", "file_delete", "dir_remove", "host_capacity_owner_settle"]:
+            expect(owner.contains(forbidden)).to_equal(false)
+        expect(owner.contains("host_exec_private_publish_v3(")).to_equal(true)
+        expect(owner.contains("no_begin_admitted_v3(journal, child)?")).to_equal(true)

@@ -1,10 +1,11 @@
 # Read-only same-journal child barriers. No effect, new ledger, native lookup,
 # decoded lease or inferred teardown. Labels/object absence are not discharge.
-use std.common.task_runner.distributed_operation_journal_v2.{DistributedOperationJournalV2, distributed_operation_journal_lookup_v2}
+use std.common.task_runner.distributed_operation_journal_v2.{DistributedOperationJournalV2, DistributedOperationJournalHistoryBatchV2, distributed_operation_journal_lookup_v2, distributed_operation_journal_history_batch_v2}
 use std.common.contracts.orchestration.host_capacity_v1.HostCapacityV1
 use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
 use std.common.contracts.distributed_control_codec_v2.{distributed_decode_operation_v2, distributed_encode_operation_v2}
 use std.nogc_sync_mut.orchestration.host_runtime_exec_projection_v3.host_runtime_exec_child_packet_v3
+use std.nogc_sync_mut.orchestration.host_runtime_exec_no_begin_cancel_evidence_v3.host_runtime_exec_no_begin_cancel_validate_v3
 
 # Built once for a fixed projection; not caller-supplied permission. Every child
 # is validated before its parent ID is trusted. Missing/corrupt provenance fails
@@ -15,14 +16,25 @@ pub fn host_runtime_exec_cleanup_index_v3(journal: DistributedOperationJournalV2
     if current.is_ok() or current.unwrap_err() != "OPERATION_NOT_FOUND": return Err("host-child-cleanup-journal-not-current")
     if journal.operations.len() > 4096: return Err("host-child-cleanup-history-full")
     var barriers: Dict<text, text> = {}
+    # This owner-produced snapshot never crosses an input/wire boundary. One
+    # canonical replay serves all cancelled candidates in this fixed index.
+    var history: Option<DistributedOperationJournalHistoryBatchV2> = nil
     for id in journal.operations.keys():
         val row = distributed_operation_journal_lookup_v2(journal, id)?
         val operation = distributed_decode_operation_v2(row.envelope)?
         if operation.operation != "host_runtime_exec_v3": continue
         val packet = host_runtime_exec_child_packet_v3(journal, capacity, operation)?
-        # ALL labels, including admitted/cancelled/completed/failed, remain
-        # barriers until a qualified no-effect/contained teardown owner exists.
-        # running=false and parent object absence do not establish that proof.
+        if row.state == "cancelled":
+            if history.is_none():
+                history = Some(distributed_operation_journal_history_batch_v2(journal)?)
+            # Only exact retained authorization + canonical admitted-to-cancelled
+            # origin and ancestor endpoint discharge this one child. Missing
+            # optional receipt remains a barrier; malformed/ambiguous proof is
+            # an error, never permission to skip provenance or sibling checks.
+            val qualified = host_runtime_exec_no_begin_cancel_validate_v3(journal, capacity, operation, history.unwrap())?
+            if qualified: continue
+        # Every other label remains a barrier without qualified contained-child
+        # teardown. running=false and parent object absence are insufficient.
         barriers[packet.parent_binding.host_operation.id] = operation.id
     Ok(barriers)
 
