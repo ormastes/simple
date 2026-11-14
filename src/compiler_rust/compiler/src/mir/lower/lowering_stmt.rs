@@ -435,6 +435,13 @@ impl<'a> MirLowerer<'a> {
                     } else {
                         vreg
                     };
+                    // S1 block-end release: the register that holds a buffer
+                    // no other binding can reach (a fresh literal, or the
+                    // private copy just emitted). The slot is released only
+                    // if this exact register is what gets stored below.
+                    let fresh_array_vreg = (is_array_place_alias
+                        || matches!(val.kind, HirExprKind::Array(_) | HirExprKind::ArrayRepeat { .. }))
+                    .then_some(vreg);
 
                     // Wrap value in union if assigning to a union type
                     let vreg = self.emit_union_wrap_if_needed(effective_declared_ty, value_ty, vreg)?;
@@ -491,6 +498,13 @@ impl<'a> MirLowerer<'a> {
                     } else {
                         vreg
                     };
+
+                    if self.block_array_release
+                        && fresh_array_vreg == Some(vreg)
+                        && self.array_move_sites.block_release_locals.contains(&local_idx)
+                    {
+                        self.block_release_ready.insert(local_idx, effective_declared_ty);
+                    }
 
                     self.with_func(|func, current_block| {
                         let dest = func.new_vreg();
@@ -1586,6 +1600,7 @@ impl<'a> MirLowerer<'a> {
                 for stmt in then_block {
                     self.lower_stmt(stmt, contract)?;
                 }
+                self.emit_block_array_releases(then_block)?;
                 let then_value = self.last_expr_value;
                 // Store then value in temp local BEFORE finalize (current block may be inner merge)
                 if let Some(tv) = then_value {
@@ -1614,6 +1629,7 @@ impl<'a> MirLowerer<'a> {
                     for stmt in else_stmts {
                         self.lower_stmt(stmt, contract)?;
                     }
+                    self.emit_block_array_releases(else_stmts)?;
                 }
                 let else_value = self.last_expr_value;
                 // Store else value in temp local BEFORE finalize
@@ -1834,6 +1850,7 @@ impl<'a> MirLowerer<'a> {
                 for stmt in body {
                     self.lower_stmt(stmt, contract)?;
                 }
+                self.emit_block_array_releases(body)?;
                 if hoisted_append_ptrs.is_some() {
                     self.active_array_append_ptrs.pop();
                 }
@@ -1903,6 +1920,7 @@ impl<'a> MirLowerer<'a> {
                 for stmt in body {
                     self.lower_stmt(stmt, contract)?;
                 }
+                self.emit_block_array_releases(body)?;
                 self.finalize_block_jump(body_id)?;
 
                 // Pop loop context
@@ -2435,6 +2453,7 @@ impl<'a> MirLowerer<'a> {
                 for stmt in body {
                     self.lower_stmt(stmt, contract)?;
                 }
+                self.emit_block_array_releases(body)?;
 
                 // Body falls through to increment block
                 self.finalize_block_jump(increment_id)?;
@@ -2686,6 +2705,47 @@ impl<'a> MirLowerer<'a> {
     ///
     /// This is called before return statements to ensure all locals are properly
     /// cleaned up. For scope-level drops (e.g., block exit), use emit_scope_drops.
+    /// S1 block-end release (`array_move.rs`, design doc
+    /// `doc/05_design/compiler/jit_memory/seed_jit_array_reclamation.md`):
+    /// called when the statement list `stmts` falls through. Frees each array
+    /// local declared DIRECTLY in `stmts` that the analysis proved unique
+    /// (`block_release_locals`) and whose `Let` stored a fresh buffer raw into
+    /// the slot (`block_release_ready`). The proof guarantees the `Let` ran on
+    /// this entry of the list and that nothing reads the slot afterwards.
+    pub(super) fn emit_block_array_releases(&mut self, stmts: &[HirStmt]) -> MirLowerResult<()> {
+        if !self.block_array_release || self.block_release_ready.is_empty() {
+            return Ok(());
+        }
+        for stmt in stmts {
+            let HirStmt::Let { local_index, .. } = stmt else {
+                continue;
+            };
+            let local_index = *local_index;
+            if !self.array_move_sites.block_release_locals.contains(&local_index) {
+                continue;
+            }
+            let Some(ty) = self.block_release_ready.get(&local_index).copied() else {
+                continue;
+            };
+            self.with_func(|func, current_block| {
+                let addr = func.new_vreg();
+                let value = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::LocalAddr {
+                    dest: addr,
+                    local_index,
+                });
+                block.instructions.push(MirInst::Load { dest: value, addr, ty });
+                block.instructions.push(MirInst::Call {
+                    dest: None,
+                    target: CallTarget::from_name("rt_array_free"),
+                    args: vec![value],
+                });
+            })?;
+        }
+        Ok(())
+    }
+
     pub(super) fn emit_function_drops(&mut self) -> MirLowerResult<()> {
         // First, collect information about which locals need dropping
         let locals_to_drop: Vec<(usize, crate::hir::TypeId)> = self.with_func(|func, _| {
@@ -2901,6 +2961,7 @@ impl<'a> MirLowerer<'a> {
         for stmt in body {
             self.lower_stmt(stmt, contract)?;
         }
+        self.emit_block_array_releases(body)?;
 
         // Body falls through to increment block
         self.finalize_block_jump(increment_id)?;

@@ -324,3 +324,90 @@ fn transient_scope_end_batch_erases_cross_chunk_duplicate_once() {
         unsafe { dealloc_erased_transient(ptr, kind) };
     }
 }
+
+fn scope_tracks_addr(addr: usize) -> bool {
+    TRANSIENT_HEAP_SCOPE.with(|scope| {
+        scope
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .objects
+            .iter()
+            .any(|object| object.is_heap() && object.as_heap_ptr() as usize == addr)
+    })
+}
+
+/// `rt_array_free` inside an open scope must erase the scope's entry. A stale
+/// entry would let scope end free whatever object the allocator later puts at
+/// that address, including one allocated while the scope is paused (which the
+/// scope does not own). doc/05_design/compiler/jit_memory/seed_jit_array_reclamation.md
+#[test]
+fn array_free_inside_scope_untracks_so_scope_end_spares_a_paused_allocation() {
+    assert!(rt_transient_array_scope_begin());
+    let freed = rt_array_new(4);
+    let freed_addr = freed.as_heap_ptr() as usize;
+    assert!(scope_tracks_addr(freed_addr));
+    rt_array_free(freed);
+    assert!(!scope_tracks_addr(freed_addr), "freed array must leave the scope");
+
+    assert!(rt_transient_array_scope_pause());
+    // Allocated while paused: not scope-owned. The allocator normally hands
+    // the just-freed header straight back, which is the hazardous reuse.
+    let mut survivors = Vec::new();
+    for i in 0..64 {
+        let survivor = rt_array_new(4);
+        assert!(rt_array_push(survivor, RuntimeValue::from_int(i)));
+        survivors.push(survivor);
+    }
+    assert!(rt_transient_array_scope_end());
+    for (i, survivor) in survivors.iter().enumerate() {
+        assert!(
+            super::super::heap::is_registered_heap_ptr(survivor.as_heap_ptr()),
+            "paused allocation {i} was freed by scope end"
+        );
+        assert_eq!(rt_array_len(*survivor), 1);
+        rt_array_free(*survivor);
+    }
+}
+
+/// Far-back entries (outside the untrack scan window) are found through the
+/// scope index, and a free of an array the scope never tracked is a no-op.
+#[test]
+fn array_free_untracks_an_old_scope_entry_and_ignores_untracked_arrays() {
+    let outside = rt_array_new(1);
+    assert!(rt_transient_array_scope_begin());
+    let old = rt_array_new(1);
+    let old_addr = old.as_heap_ptr() as usize;
+    let mut younger = Vec::new();
+    for _ in 0..(TRANSIENT_UNTRACK_WINDOW * 3) {
+        younger.push(rt_array_new(1));
+    }
+    rt_array_free(old);
+    assert!(!scope_tracks_addr(old_addr));
+    rt_array_free(outside);
+    for object in &younger {
+        assert!(scope_tracks_addr(object.as_heap_ptr() as usize));
+    }
+    assert!(rt_transient_array_scope_end());
+    for object in &younger {
+        assert!(!super::super::heap::is_registered_heap_ptr(object.as_heap_ptr()));
+    }
+}
+
+/// Same rule for a session: a freed array leaves `owned`, and session end
+/// frees only what is still owned.
+#[test]
+fn array_free_inside_session_drops_ownership() {
+    let session_id = rt_session_heap_begin();
+    assert_ne!(session_id, 0);
+    let freed = rt_array_new(4);
+    let kept = rt_array_new(4);
+    let freed_addr = freed.as_heap_ptr() as usize;
+    let owns = |addr: usize| SESSION_HEAP.with(|session| session.borrow().as_ref().unwrap().owned.contains(&addr));
+    assert!(owns(freed_addr));
+    rt_array_free(freed);
+    assert!(!owns(freed_addr), "freed array must leave the session");
+    assert!(owns(kept.as_heap_ptr() as usize));
+    assert!(rt_session_heap_end(session_id));
+    assert!(!super::super::heap::is_registered_heap_ptr(kept.as_heap_ptr()));
+}

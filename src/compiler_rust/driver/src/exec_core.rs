@@ -805,7 +805,7 @@ impl ExecCore {
         use simple_compiler::codegen::JitCompiler;
         use simple_compiler::hir;
         use simple_compiler::interpreter::evaluate_module;
-        use simple_compiler::mir::lower_to_mir;
+        use simple_compiler::mir::lower_to_mir_jit as lower_to_mir;
         use simple_parser::Parser;
 
         // Parse the same cfg-filtered text used for diagnostics and lowering.
@@ -1185,7 +1185,7 @@ impl ExecCore {
         use simple_compiler::codegen::{ExecutionManager, LocalExecutionManager, JitBackend};
         use simple_compiler::hir;
         use simple_compiler::interpreter::{evaluate_module, set_current_file};
-        use simple_compiler::mir::lower_to_mir;
+        use simple_compiler::mir::lower_to_mir_jit as lower_to_mir;
         use simple_compiler::pipeline::module_loader::load_module_with_imports;
         use std::collections::HashSet;
 
