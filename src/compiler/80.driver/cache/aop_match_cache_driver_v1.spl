@@ -273,6 +273,7 @@ pub fn aop_weave_with_match_cache_v1(state: AopMatchDriverStateV1,
     if claims.len() == 0: return woven
     var dirs: [DirectoryJoinPointFactsV1] = []
     var snapshot_coverage_complete = true
+    var snapshot_providers: Dict<text, text> = {}
     if snapshots == nil:
         dirs = aop_directory_facts_from_hir_v1(modules, state.sources)
     else:
@@ -284,6 +285,7 @@ pub fn aop_weave_with_match_cache_v1(state: AopMatchDriverStateV1,
                 snapshot_coverage_complete = false
                 continue
             covered_dirs[snapshot.scope_id] = true
+            snapshot_providers[snapshot.scope_id] = snapshot.provider_digest
             for path in snapshot.facts.sorted_member_files:
                 if covered_files.contains_key(path) or _dir_of(path) != snapshot.scope_id:
                     snapshot_coverage_complete = false
@@ -297,18 +299,22 @@ pub fn aop_weave_with_match_cache_v1(state: AopMatchDriverStateV1,
     for claim in claims:
         var visit: Dict<text, bool> = {}
         var fallback = not snapshot_coverage_complete
+        if fallback: state.fallbacks = state.fallbacks + 1
         for facts in dirs:
-            # Some([]) is an explicit production miss. nil preserves the direct
-            # semantic-owner API used by callers that do not request TLDR reuse.
-            if snapshots != nil:
-                var accepted = false
-                for snapshot in snapshots.unwrap():
-                    if aop_directory_snapshot_matches_v2(snapshot, facts): accepted = true
-                if not accepted:
-                    fallback = true
-                    state.fallbacks = state.fallbacks + 1
-                    continue
-            val shard = aop_match_shard_acquire_v1(state, claim.selector, facts, claim.registry_key)
+            var selected_shard: PointcutMatchShardV1? = nil
+            if snapshots == nil:
+                selected_shard = Some(aop_match_shard_acquire_v1(state, claim.selector, facts, claim.registry_key))
+            elif snapshot_providers.contains_key(facts.scope_id):
+                match aop_builtin_forward_match_acquire_v1(state,
+                        snapshot_providers[facts.scope_id], claim.selector, facts, claim.registry_key):
+                    case Ok(acquired): selected_shard = Some(acquired.shard)
+                    case Err(_):
+                        fallback = true
+                        state.fallbacks = state.fallbacks + 1
+            if selected_shard == nil:
+                fallback = true
+                continue
+            val shard = selected_shard.unwrap()
             if not shard.complete: fallback = true
             for id in shard.sorted_matching_ids:
                 val sep = id.rfind("::")
