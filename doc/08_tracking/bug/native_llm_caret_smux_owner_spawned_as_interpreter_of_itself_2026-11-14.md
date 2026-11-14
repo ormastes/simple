@@ -138,3 +138,23 @@ the system specs could run): native and interpreted
 `workspace_cli_system_spec.spl`, native `caret_cli_help_system_spec`. The
 unblock condition above is therefore still open. A native caret still needs
 `SIMPLE_BINARY` pointing at a simple interpreter.
+
+## Verification run 2026-11-15 (run-only, no rebuild)
+
+Worktree at `9bffbf8ef3a` (PR #9238 fix). Seed `src/compiler_rust/target/bootstrap/simple.exe`
+built from that commit; `build/nb/llm_caret.exe` native-built from it. `SIMPLE_BINARY=$SEED`,
+`claude` removed from PATH (`command -v claude` empty).
+
+- native `workspace_cli_system_spec.spl` (`LLM_CARET_NATIVE_BIN=build/nb/llm_caret.exe`):
+  `Results: 4 total, 3 passed, 1 failed` (exit 1)
+- interpreted `workspace_cli_system_spec.spl` on `$SEED` (seed copied over `bin/simple.exe`):
+  `Results: 0 total, 0 passed, 0 failed` (exit 5; `SPEC FILE VERDICT: ... timeout=1 reason=child-timeout budget_ms=900000`)
+- native `caret_cli_help_system_spec.spl`:
+  `Results: 4 total, 4 passed, 0 failed` (exit 0)
+
+Next defect: in native mode, step `attaches three agents, isolates their worktrees,
+broadcasts, and tears down` still fails for agent-1/2/3 with
+`expected error new_session_failed smux owner did not start to contain window cli-team:agent-N`;
+then `session cli-team alive=false`. The native owner still does not come up via
+`process_spawn_async`. The interpreted run exceeds the 900 s child budget.
+Status stays verification-pending.
