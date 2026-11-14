@@ -180,6 +180,8 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
         print "[LLVM-LINK] pid={pid}"
 
     val stage4_requested = (env_get("SIMPLE_BOOTSTRAP_STAGE4") ?? "") == "1"
+    if options.xray_thread_context_v1 and stage4_requested:
+        return Err("XRAY-E-CONTEXT-RUNTIME: thread hooks reject Stage4 runtime providers")
     val stage4_entry = env_get("SIMPLE_NATIVE_BUILD_ENTRY") ?? ""
     val stage4_entry_closure = env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? ""
     val stage4_entry_allowed = (
@@ -190,21 +192,29 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
         return Err("Stage4 strict profile requires an authorized compiler entry with entry closure")
 
     if is_simpleos_x86_64_link(user_objects, output):
+        if options.xray_thread_context_v1:
+            return Err("XRAY-E-CONTEXT-RUNTIME: thread hooks require a hosted source-built runtime")
         if stage4_requested:
             return Err("Stage4 strict profile does not support SimpleOS link routes")
         return link_simpleos_x86_64(user_objects, output, verbose, options.opt_level)
 
     if is_simpleos_arm64_link(output):
+        if options.xray_thread_context_v1:
+            return Err("XRAY-E-CONTEXT-RUNTIME: thread hooks require a hosted source-built runtime")
         if stage4_requested:
             return Err("Stage4 strict profile does not support SimpleOS link routes")
         return link_simpleos_arm64(user_objects, output, verbose, options.opt_level)
 
     if is_simpleos_riscv64_link(user_objects, output):
+        if options.xray_thread_context_v1:
+            return Err("XRAY-E-CONTEXT-RUNTIME: thread hooks require a hosted source-built runtime")
         if stage4_requested:
             return Err("Stage4 strict profile does not support SimpleOS link routes")
         return link_simpleos_riscv64(user_objects, output, verbose)
 
     if is_simpleos_riscv32_link(user_objects, output):
+        if options.xray_thread_context_v1:
+            return Err("XRAY-E-CONTEXT-RUNTIME: thread hooks require a hosted source-built runtime")
         if stage4_requested:
             return Err("Stage4 strict profile does not support SimpleOS link routes")
         return link_simpleos_riscv32(user_objects, output, verbose)
@@ -256,6 +266,8 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
     val bootstrap_native_all = _llvm_bootstrap_native_all_path(
         stage4_requested, runtime_path, runtime_bundle,
         hosted_plan.requires_cross, hosted_os, _is_mingw())
+    if options.xray_thread_context_v1 and (runtime_path != "" or bootstrap_native_all != ""):
+        return Err("XRAY-E-CONTEXT-RUNTIME: thread hooks reject prebuilt runtime archives")
     if native_tool_strict_requested_v1() and bootstrap_native_all != "":
         val _admitted = native_runtime_strict_archives_v1(runtime_path, [bootstrap_native_all])?
     # One owner per rt_* symbol (--runtime-owner / SIMPLE_RUNTIME_OWNER).
@@ -304,7 +316,8 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
         llvm_hosted_runtime_compile_bundle(runtime_bundle, bootstrap_native_all, hosted_os, hosted_target, stage4_requested),
         bootstrap_native_all, coff_native_all)
     val rt_result = compile_runtime_objects(verbose, options.opt_level, bootstrap_native_all == "", hosted_cc, stage4_requested, runtime_compile_bundle,
-        llvm_runtime_owner_compile_owner_v1(runtime_owner, bootstrap_native_all, coff_native_all))
+        llvm_runtime_owner_compile_owner_v1(runtime_owner, bootstrap_native_all, coff_native_all),
+        options.xray_thread_context_v1)
     if trace:
         print "[LLVM-LINK] compile_runtime_objects returned"
     val runtime_objects: [text] = match rt_result:
@@ -333,7 +346,7 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
     # Step 2: Generate and compile entry point
     if trace:
         print "[LLVM-LINK] step 2: compile entry point..."
-    val c_result = compile_entry_point_c(user_objects, pid, verbose, options.opt_level, hosted_cc)
+    val c_result = compile_entry_point_c(user_objects, pid, verbose, options.opt_level, hosted_cc, "", options.xray_thread_context_v1)
     if trace:
         print "[LLVM-LINK] entry point compiled"
     val entry_obj_path = match c_result:

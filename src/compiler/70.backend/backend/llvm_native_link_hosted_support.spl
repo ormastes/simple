@@ -50,6 +50,7 @@ struct NativeLinkOptions:
     libraries: [text] = []
     library_paths: [text] = []
     linker_flags: [text] = []
+    xray_thread_context_v1: bool = false
 
 impl NativeLinkOptions:
     static fn default() -> NativeLinkOptions:
@@ -122,7 +123,7 @@ pub fn entry_point_c_target_args(target_triple: text) -> [text]:
         args.push("-mabi=lp64d")
     args
 
-pub fn compile_entry_point_c(user_objects: [text], pid: i64, verbose: bool, opt_level: i64, compiler: text = "", target_triple: text = "") -> Result<text, text>:
+pub fn compile_entry_point_c(user_objects: [text], pid: i64, verbose: bool, opt_level: i64, compiler: text = "", target_triple: text = "", xray_thread_context_v1: bool = false) -> Result<text, text>:
     """Compile entry point as C source (no llc needed)."""
     # @workaround bug=stage2_try_unwrap_text_typed_as_i64_2026-11-02 reason=frozen stage2 ef0681fc0e1 decodes a `?`-unwrapped Result<text,_> payload as an i64 local (handle rendered as digits / compared as int); bind through a typed match
     var cc: text = ""
@@ -172,6 +173,8 @@ pub fn compile_entry_point_c(user_objects: [text], pid: i64, verbose: bool, opt_
     c_source = c_source + "extern int __simple_startup_before_main(int argc, char** argv) __attribute__((weak));\n"
     c_source = c_source + "#endif\n"
     c_source = c_source + "extern void __simple_runtime_init(void);\n"
+    if xray_thread_context_v1:
+        c_source = c_source + "extern void simple_xray_resident_runtime_ready_v1(void);\n"
     c_source = c_source + "extern long long __simple_main(void);\n"
     c_source = c_source + "extern void __simple_runtime_shutdown(void);\n"
     for name in init_names:
@@ -198,6 +201,10 @@ pub fn compile_entry_point_c(user_objects: [text], pid: i64, verbose: bool, opt_
     c_source = c_source + "    __simple_runtime_init();\n"
     for name in init_names:
         c_source = c_source + "    {name}();\n"
+    # Readiness follows runtime/TLS and all mandatory initializer calls.
+    # It grants neither observer capability nor quiescence.
+    if xray_thread_context_v1:
+        c_source = c_source + "    simple_xray_resident_runtime_ready_v1();\n"
     c_source = c_source + "    long long result = __simple_main();\n"
     c_source = c_source + "    __simple_runtime_shutdown();\n"
     c_source = c_source + "    return (int)result;\n"
