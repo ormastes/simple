@@ -1984,7 +1984,7 @@ pub(crate) fn evaluate_method_call(
 
     // UFCS Fallback: Try to find a free function with the method name
     // This allows both len(x) and x.len() syntax to work
-    if let Some(func) = functions.get(method).cloned() {
+    if let Some(func) = crate::interpreter::interpreter_call::caller_bound_function(method, functions) {
         crate::interpreter::interpreter_call::gate_private_call(&func.name, &func)?;
         // Evaluate all arguments to values
         let mut arg_values = vec![recv_val.clone()]; // Receiver becomes first argument
@@ -2303,7 +2303,7 @@ pub(crate) fn evaluate_method_call_with_self_update(
             return Ok((result, None));
         }
         // UFCS Fallback: Try to find a free function with the method name
-        if let Some(func) = functions.get(method).cloned() {
+        if let Some(func) = crate::interpreter::interpreter_call::caller_bound_function(method, functions) {
             crate::interpreter::interpreter_call::gate_private_call(&func.name, &func)?;
             // Evaluate all arguments to values
             let mut arg_values = vec![recv_val.clone()]; // Receiver becomes first argument

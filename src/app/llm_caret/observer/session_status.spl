@@ -1,0 +1,43 @@
+# Caret observer -- per-session status for the TUI roster and GUI page.
+# Folds the live log plus the owner-known process lifecycle of the SessionView
+# (ProcessAlive / ProcessExit); no evidence at all classifies as unknown.
+
+use app.llm_caret.observer.observation_builder.*
+use app.llm_caret.observer.attention_inbox.*
+use app.llm_caret.observer.stall_classifier.{policy_default}
+use app.llm_caret.observer.status_text.*
+use app.llm_caret.observer.observer_log.{observer_events, observer_inbox}
+use app.llm_caret.workbench.session_contract.{SessionView, ProcessLifecycle}
+use std.nogc_sync_mut.io.time_ops.{current_time_ms}
+
+fn _lifecycle_events(view: SessionView, now_ms: i64) -> [ObserverEvent]:
+    val id = view.id.value
+    val gen = view.id.generation
+    match view.lifecycle:
+        case ProcessLifecycle.Running: [observer_event(id, gen, "lifecycle", 0, now_ms, ObserverEventKind.ProcessAlive, "process running")]
+        case ProcessLifecycle.Exited: [observer_event(id, gen, "lifecycle", 0, now_ms, ObserverEventKind.ProcessExit, "process exited")]
+        case ProcessLifecycle.Failed: [observer_event(id, gen, "lifecycle", 0, now_ms, ObserverEventKind.ProcessExit, "process failed")]
+        case _: []
+
+fn _observe(view: SessionView, now_ms: i64) -> SessionObservation:
+    val events = observer_events() + _lifecycle_events(view, now_ms)
+    observe_session(observer_inbox(), events, view.id.value, view.id.generation, now_ms, policy_default())
+
+fn session_status_text(view: SessionView) -> text:
+    classification_status_text(_observe(view, current_time_ms()).classification)
+
+fn session_status_label(view: SessionView) -> text:
+    class_label(_observe(view, current_time_ms()).classification.kind)
+
+fn _unread_for(view: SessionView) -> i64:
+    var n = 0
+    for e in attention_unread(observer_inbox()):
+        if e.session_id == view.id.value and e.generation == view.id.generation:
+            n = n + 1
+    n
+
+# The view's own flag OR an unread inbox entry for exactly this generation.
+fn session_needs_attention(view: SessionView) -> bool:
+    view.needs_attention or _unread_for(view) > 0
+
+export session_status_text, session_status_label, session_needs_attention

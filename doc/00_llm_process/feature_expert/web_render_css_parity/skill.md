@@ -1065,7 +1065,7 @@ painted and over-tall), `html`, `forms-media`, `css-paint`, `css-layout`.
 ## 2026-11-14 — combination matrix vs Chrome 159 (tag x tag, tag x CSS, CSS x CSS)
 
 `sh scripts/check/check-web-combo-matrix-chrome.shs` (about 45 s; set
-`SIMPLE_BIN`): 849 generated cells / 3415 element ids in
+`SIMPLE_BIN`): 979 generated cells / 3880 element ids (849 / 3415 before the `lh_normal` page) in
 `test/fixtures/browser/combo_matrix/` (generator:
 `scripts/generate/generate-web-combo-matrix.shs`), each cell in its own 400x140
 slot and compared slot-relative at 1 px. It is a RATCHET on
@@ -1528,3 +1528,147 @@ never cache an answer computed while exhausted) —
   `<td align="left" style="direction:rtl">` probably still aligns `start`;
   the faceless cell wrap gives 6 lines where Chrome has 3 for the AC-30
   paragraph.
+
+## 2026-11-14 — combined tip check (floats + line-height normal + selector combinators) and the `lh_normal` matrix page
+
+- **No interaction regression.** At `2d9344c6eae` (three separately gated
+  lanes merged) the matrix is 152 / 849 cells with 263 ids, 0 new and 0
+  stale; the 8 catalog pages measure exactly their rows (tab-bar 0.68 against
+  0.63, inside the tolerance). Nothing to tighten in either baseline.
+- **Spec sweep.** 118 specs in `test/01_unit/browser_engine` plus the CPU
+  port spec: 107 green. The 11 red ones fail the SAME cases at the pre-lane
+  base `00afc10545b` (browser_renderer_utils closure 21/22, dom_identity_index
+  5/6, fractional_advance_accumulation 4/11, html5lib_tokenizer 7/11,
+  html_tree_builder_hardening 11/13, html_tree_builder 8/37, js_integration
+  0/12, kern_pair_advance_accumulation 1/9, platform_system_face_metrics
+  15/25, declarations closure 52/54, table_fractional_column_width 0/2).
+  `corpus_fifth_line_exact_pixel_spec` (0/1) is `@tag:in-development` and
+  documents its own expected failure.
+- **`lh_normal.html`** (generator `page_begin` takes the body font as a third
+  argument): 130 cells / 465 ids under `font: 16px sans-serif`, i.e. the
+  initial `line-height: normal`, which no fixture covered -- every other page
+  sets `16px/1.5`. Groups: tag-tag (7 parents x 10 children), font,
+  font-inline, line-height, line-height-inherit, line-height-reset, wrap,
+  box. Matrix is now 979 cells / 3880 ids.
+- **Found and fixed through it:** a percentage or `em` `line-height` was
+  stored as a factor, so a 24 px child of `line-height:150%` got 36 px
+  (Chrome 24). It computes to a LENGTH against the declaring element's own
+  font-size and is inherited as that length; only a unitless number stays a
+  factor. Spec:
+  `test/01_unit/browser_engine/line_height_percent_em_inherits_length_spec.spl`.
+- **Trap — the length needs the element's FINAL font-size.** Declarations
+  are applied once per matching rule, so `.a{line-height:1.5em}` plus an
+  inline `font-size:32px` saw the stale 16 px when the length was computed
+  at parse time (24 where Chrome has 48). The factor is kept on the Style as
+  `line_height_em_milli` (thousandths, so `112.5%` survives), converted to
+  `line_height_px` at the end of EVERY declaration application, reset by
+  `inherit_from` / never passed by `inherit_style`, so children get only the
+  length. Any other value that depends on a property which can cascade in
+  later needs the same pending form.
+- **Baselined clusters on the new page (17 cells, 27 ids):** `td` parents
+  (10 cells: the known table-cell max-content residue, the cell wraps to two
+  lines); inline button / small in `h1` / `h3` (3: baseline alignment of a
+  smaller or atomic inline in a heading, same as the 1.5 page); `pre` with
+  button / input (2: monospace form-control width, same as the 1.5 page);
+  `<span style="font-size:10px">` sits 2 px high (1: a smaller inline font's
+  baseline under the normal line height); `position:absolute` without
+  offsets is placed at the container top instead of its static position
+  (1: y 0 where Chrome has 18).
+- **Trap — `rem` is not `em`.** `_decl_line_height_own_font_milli` tests
+  `ends_with("em")` and must exclude `rem`, which still goes through the old
+  factor parse.
+- **4K lane (3840x2160, Vulkan on llvmpipe) fits in 8 GB:** 16 min 52 s,
+  max RSS 4.5 GB for all 8 pages. Measured at this tip: overview 0.24, html
+  2.77, css-layout 2.09, css-paint 2.47 (row 2.50), forms-media 1.96,
+  animation 2.23 (row 2.63), evidence 0.15, tab-bar 0.05. The two lower rows
+  were lowered. Run it with
+  `VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.json … --width 3840
+  --height 2160 --backend vulkan`.
+
+## 2026-11-14 — matrix clusters: inline button baseline, max-content of mixed inline content, control UA font (169 -> 106 cells)
+
+- **Cluster census at 169 cells / 290 ids (by root cause, largest first):**
+  inline `<button>` position (about 44 cells: every `*/button` child cell and
+  most `button/*` cells); non-replaced inline boxes taking `width` / `height`
+  / `min-*` and vertical padding/border growing the line (about 20: `span/*`,
+  `display:inline` cells); `td` parents (24 cells on two pages); controls
+  inheriting the parent font (9); `td` with a non-`table-cell` display or
+  out-of-flow position (9); flex column / column-reverse / wrapped-line
+  stretch (18); `display:inline-flex` (10); `width: min-content |
+  max-content` and `white-space: pre-wrap` (8); percentage / negative
+  offsets (5).
+- **Inline button.** A `<button>` is an inline-block WITH a text child, so the
+  run loop's baseline-set test (`display == "inline" or child_count == 0`)
+  skipped it and it stayed at the line top. It is now in the set and
+  `inline_widget_baseline_from_top` gives its baseline: the LAST label
+  line's (Chrome: a three-line 51 px button sits at the top of a 52 px
+  line), the label block centred in the content box; an empty button aligns
+  on its content-box bottom. Margins take part through the existing
+  `margin_ts` / `margin_bs`.
+- **Max-content.** `flex_item_max_content_width` (auto table columns,
+  absolute / float / flex shrink-to-fit) now mirrors `intrinsic_text_width`
+  for inline content: a collapsible space between pieces counts, `<br>` ends
+  the measured line, replaced inline children use
+  `inline_replaced_predicted_width`, text controls
+  `text_control_auto_outer_w`.
+- **Control font.** `font: -webkit-small-control` is a whole shorthand: the
+  tag defaults for `button` / `input` / `select` reset family
+  (`sans-serif`), weight and style, not only size and line height.
+- **Trap — whole-pixel pieces drift.** `ab <button>cd</button> ef` in a `td`
+  is 78 px where Chrome has 76.13: five pieces each rounded to a pixel. The
+  matrix keeps `tt-td-button-w/-p` baselined for it.
+- **Heading margins.** `h6` carried 26 px margins; 2.33em of its 10.72 px
+  font is 24.98. The others were already right.
+- **`html` catalog page (15.98%) by area, 900x760:** rows 124-219 are 10.8
+  of the 15.98 points -- the article's `<header>` has
+  `background: linear-gradient(120deg, #173b7a, #6d28d9)` and the CPU raster
+  lane paints it FLAT (`#173b7a`): `fb_style_background_opacity_clip` only
+  knows the two-colour vertical form (`background_gradient_from/to`), while
+  an angled or N-stop gradient is carried as stop lists for the Draw IR
+  lane. A paint defect, not geometry. Text rows 240-760 are about 4.6
+  points (glyph raster differences); the rest 0.6. Element geometry inside
+  the viewport matches Chrome; the first geometry delta on the page is the
+  `h6` example at y = 4534 (fixed above), then `<q>` without quotation marks
+  (10 px narrower) and a `tbody` 2 px low.
+- **Trap — the geometry differ's default Chrome run has a 15 px scrollbar.**
+  Without `GEOM_DIFF_CHROME_EXTRA_FLAGS="--hide-scrollbars
+  --force-device-scale-factor=1"` every block on a page taller than the
+  viewport reports `dw = 15` and the real deltas drown (357 "mismatches"
+  against 162 with the flag).
+- Specs: `inline_button_baseline_chrome159_spec`,
+  `table_cell_max_content_inline_chrome159_spec`,
+  `form_control_ua_font_reset_chrome159_spec`,
+  `heading_ua_margins_chrome159_spec` (all in `test/01_unit/browser_engine`).
+- Residue: `doc/08_tracking/bug/web_matrix_table_button_html_page_residue_2026-11-14.md`.
+- **Trap — an atomic inline box keeps its edge spaces inside.**
+  `inline_subtree_edge_is_space` follows an inline element's first / last
+  text to find a space on the line; it must not be asked about an
+  inline-block, button or replaced child (`ab<button> cd </button>ef` is as
+  wide as `ab<button>cd</button>ef`). The call sites gate on
+  `display == "inline"` and not replaced. `white-space: nowrap` still
+  collapses (only `pre` keeps spaces), so a nowrap cell keeps the
+  inter-inline space in max-content.
+- **Trap — `max-width: <percent>` used to be N px.** The clamp slot is
+  px-only; a percentage is now `none` (residue item 18).
+- **Trap — a UA reset needs `inherit` to exist.** Resetting the control
+  font exposed that NO font property resolved the `inherit` keyword
+  (`font-family: inherit` stored the literal text; `font: inherit` cleared
+  weight and style). It only looked right while controls inherited by
+  default; `button, input { font: inherit }` (normalize, Tailwind preflight)
+  would have rendered every control in the UA font. `Style.inherit_font_*`
+  / `inherit_bold` / `inherit_italic` / `inherit_line_height_px` capture the
+  PARENT's computed values in `inherit_from` and `inherit_style`; `font`,
+  `font-family`, `font-size`, `font-weight`, `font-style` and `line-height`
+  read them for `inherit`. Before adding any tag default that replaces an
+  inherited value, check that `inherit` restores it.
+- **Button baseline, any content.** With auto height the content fills the
+  content box, so the last line's baseline is `h - border_b - pad_b -
+  descent` whatever the content is (a label in `<b>`, `ab<br>cd`, an image).
+  Only an explicit height needs the centring lead, and that path still looks
+  for a direct text child.
+- **Max-content, spaces.** One collapsible space counts between inline
+  pieces wherever it sits: a whitespace-only text node (`<a>Edit</a>
+  <a>Del</a>`), the end of the previous element's text (`<span>ab
+  </span>cd`), or the start of the next (`inline_subtree_edge_is_space`).
+  Text controls are clamped by min/max-width (`constrained_outer_width`)
+  and atomic inline boxes carry their horizontal margins.

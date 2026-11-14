@@ -92,6 +92,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -113,6 +114,7 @@ static SRWLOCK core_io_stdout_write_lock = SRWLOCK_INIT;
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <poll.h>
 #endif
 
 /* ---- shared decode/build helpers (all static) ---- */
@@ -224,6 +226,76 @@ int64_t rt_stdin_read(int64_t size) {
         : (int64_t)(uintptr_t)rt_array_new(0);
     free(buf);
     return result;
+}
+
+/* Bounded poll + ONE partial read of up to `size` bytes -> [u8]. Empty on
+ * timeout, EOF or error; timeout clamped to 0..60000 ms. Windows refuses
+ * (empty) like the Rust lane: no Unix fd-0 console contract there. */
+int64_t rt_stdin_read_timeout_v1(int64_t size, int64_t timeout_ms) {
+    if (size <= 0) return (int64_t)(uintptr_t)rt_array_new(0);
+#ifdef _WIN32
+    (void)timeout_ms;
+    return (int64_t)(uintptr_t)rt_array_new(0);
+#else
+    if (size > (int64_t)(16u * 1024u * 1024u)) size = (int64_t)(16u * 1024u * 1024u);
+    if (timeout_ms < 0) timeout_ms = 0;
+    if (timeout_ms > 60000) timeout_ms = 60000;
+    struct timespec deadline;
+    if (clock_gettime(CLOCK_MONOTONIC, &deadline) != 0)
+        return (int64_t)(uintptr_t)rt_array_new(0);
+    int64_t seconds_to_add = timeout_ms / 1000;
+    long deadline_nsec = deadline.tv_nsec + (long)(timeout_ms % 1000) * 1000000L;
+    if (deadline_nsec >= 1000000000L) {
+        ++seconds_to_add;
+        deadline_nsec -= 1000000000L;
+    }
+    int64_t deadline_sec = (int64_t)deadline.tv_sec;
+    if (deadline_sec > INT64_MAX - seconds_to_add)
+        return (int64_t)(uintptr_t)rt_array_new(0);
+    int64_t deadline_sec_sum = deadline_sec + seconds_to_add;
+    time_t converted_deadline_sec = (time_t)deadline_sec_sum;
+    if ((int64_t)converted_deadline_sec != deadline_sec_sum)
+        return (int64_t)(uintptr_t)rt_array_new(0);
+    deadline.tv_sec = converted_deadline_sec;
+    deadline.tv_nsec = deadline_nsec;
+    struct pollfd pfd;
+    pfd.fd = 0;
+    pfd.events = POLLIN;
+    pfd.revents = 0;
+    int ready;
+    int wait_ms = (int)timeout_ms;
+    for (;;) {
+        ready = poll(&pfd, 1, wait_ms);
+        if (ready >= 0 || errno != EINTR) break;
+        struct timespec now;
+        if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
+            ready = 0;
+            break;
+        }
+        int64_t remaining_ns =
+            (int64_t)(deadline.tv_sec - now.tv_sec) * INT64_C(1000000000) +
+            (int64_t)(deadline.tv_nsec - now.tv_nsec);
+        if (remaining_ns <= 0) {
+            ready = 0;
+            break;
+        }
+        /* Round up so poll does not report timeout before the deadline. */
+        wait_ms = (int)((remaining_ns + 999999) / 1000000);
+    }
+    if (ready <= 0 || (pfd.revents & (POLLIN | POLLHUP)) == 0)
+        return (int64_t)(uintptr_t)rt_array_new(0);
+    uint8_t* buf = (uint8_t*)malloc((size_t)size);
+    if (!buf) return (int64_t)(uintptr_t)rt_array_new(0);
+    ssize_t n;
+    do {
+        n = read(0, buf, (size_t)size);
+    } while (n < 0 && errno == EINTR);
+    int64_t result = (n > 0)
+        ? core_io_bytes_to_array(buf, (size_t)n)
+        : (int64_t)(uintptr_t)rt_array_new(0);
+    free(buf);
+    return result;
+#endif
 }
 
 /* Read stdin to EOF -> [u8]. */

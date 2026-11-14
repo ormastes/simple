@@ -34,12 +34,13 @@ pub fn pty_shell_command_for_v1(kind: text, platform: text, shs_command: text) -
     Err("pty-shell-kind-unknown")
 
 # Pure: the kind a pane gets when the caller names none. SimpleOS has only
-# shs. Hosts stay native until hosted shs can reach host files and programs
-# (design §5); `requested` (SIMPLE_PTY_SHELL) opts a host in.
+# shs. Hosts default to shs too now that hosted shs reaches host files,
+# programs and environment (os.apps.shell.shell_host, design §5);
+# `requested` == "native" (SIMPLE_PTY_SHELL=native) opts a host out.
 pub fn pty_shell_kind_for_v1(requested: text, platform: text) -> text:
     if _is_simpleos(platform): return PTY_SHELL_SHS
-    if requested == PTY_SHELL_SHS: return PTY_SHELL_SHS
-    PTY_SHELL_NATIVE
+    if requested == PTY_SHELL_NATIVE: return PTY_SHELL_NATIVE
+    PTY_SHELL_SHS
 
 # Pure: default command with the host fallback. A host whose shs launcher is
 # unknown gets its native shell rather than a dead pane; SimpleOS never falls
@@ -66,6 +67,27 @@ pub fn pty_default_shell_v1() -> text:
     pty_default_shell_for_v1(env_get_unchecked("SIMPLE_PTY_SHELL") ?? "", platform_name_raw(),
         pty_shs_hosted_command_v1())
 
+# Pure: argv for a ONE-SHOT command (no PTY) under `kind`: native is
+# `/bin/sh -c <cmd>` or `cmd.exe /d /s /c <cmd>`. shs has no `-c` entry yet,
+# so it is refused rather than silently swapped for the native shell.
+pub fn pty_shell_exec_argv_for_v1(kind: text, platform: text, command: text) -> Result<[text], text>:
+    if kind == PTY_SHELL_SHS: return Err("pty-shell-shs-exec-unsupported")
+    val shell = pty_shell_command_for_v1(kind, platform, "")
+    if shell.is_err(): return Err(shell.unwrap_err())
+    val program = shell.unwrap()
+    if program == "cmd.exe": return Ok([program, "/d", "/s", "/c", command])
+    Ok([program, "-c", command])
+
+pub fn pty_shell_exec_argv_v1(kind: text, command: text) -> Result<[text], text>:
+    pty_shell_exec_argv_for_v1(kind, platform_name_raw(), command)
+
+# Native one-shot argv with the kind bound here, so callers need no kind
+# constant (re-exported const aliases resolve to nil across modules in the
+# seed interpreter).
+pub fn pty_shell_native_exec_argv_v1(command: text) -> Result<[text], text>:
+    pty_shell_exec_argv_v1(PTY_SHELL_NATIVE, command)
+
+export pty_shell_exec_argv_for_v1, pty_shell_exec_argv_v1, pty_shell_native_exec_argv_v1
 export PTY_SHELL_SHS, PTY_SHELL_NATIVE, PTY_SHS_SIMPLEOS_COMMAND, PTY_SHS_HOSTED_ENTRY
 export pty_shell_command_for_v1, pty_shell_kind_for_v1, pty_default_shell_for_v1
 export pty_shs_hosted_command_v1, pty_shell_command_v1, pty_default_shell_v1

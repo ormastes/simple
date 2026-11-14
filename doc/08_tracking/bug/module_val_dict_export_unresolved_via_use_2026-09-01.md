@@ -117,3 +117,26 @@ for this doc.
 ## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
 
 **FIXED (confirmed)** — ne15: 8/9 on the fresh seed (was 0/9); all file.* namespace calls through use patterns resolve. Residual 1/9 is a separate dir.create/dir.exist Windows fs-layer issue (lead for a new stdlib-fs row; not chased in this doc).
+
+## Addendum 2026-11-15 — residual still red on Linux; one repro recorded
+
+`test/01_unit/lib/std/shell/file_system_spec.spl` is still 8/9 on a
+release/1.0.0 seed on Linux aarch64 ("should create and remove directory"),
+so the residual is not Windows-specific. The row stays open.
+
+Separate observation, not yet shown to be the cause of that failure: calling a
+function stored in a module-level dict by dot syntax fails on the default lane.
+
+```simple
+# lib_a.spl
+pub fn exist_pub(p: text) -> bool:
+    true
+# main.spl
+use lib_a.{exist_pub}
+val ns = {"q": exist_pub}
+fn main():
+    print "q={ns.q("x")}"   # Runtime error: Function 'q' not found
+```
+
+Observed on seeds built from release/1.0.0 on 2026-11-14 and 2026-11-15; the
+direct call `exist_pub("x")` works.

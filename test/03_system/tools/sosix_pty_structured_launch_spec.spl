@@ -1,0 +1,88 @@
+# @manual: primary
+# @capture: text
+"""
+# SOSIX PTY structured launch on Unix
+
+A configured PTY launch hands the child exactly the argv, working directory and
+environment changes it was given, with no shell in between, accepts raw input
+octets, and reports the child's real exit status. Windows' portable provider
+cannot carry these fields and must refuse them explicitly instead.
+"""
+use std.spec.{describe, it, expect, step}
+use app.io.mod.{env_get}
+use std.sosix.host.{sosix_platform_name, sosix_env_set}
+use std.sosix.pty.{PtyLaunchV1, PtyLaunchModeV1, PtyEnvironmentChangeV1, sosix_pty_open,
+    sosix_pty_spawn_configured_v1, sosix_pty_read, sosix_pty_write_literal_some_v1,
+    sosix_pty_exit_code, sosix_pty_close, sosix_pty_literal_bytes_supported_v1}
+use std.sosix.time.{sosix_sleep_ms}
+
+val CHILD_SCRIPT = "stty raw -echo; test \"$1\" = '&echo NOT_SHELL' || exit 2; case $(pwd -P) in /tmp|/private/tmp) ;; *) exit 3;; esac; test \"$SOSIX_PTY_SET\" = 'value 한글' || exit 4; test -z \"$\{SOSIX_PTY_REMOVE+x}\" || exit 5; printf 'CHILD_READY\\r\\n'; b=$(head -c 3 | od -An -tx1 | tr -d ' \\n'); test \"$b\" = 0080ff || exit 6; exit 7"
+
+fn structured_launch() -> PtyLaunchV1:
+    PtyLaunchV1(mode: PtyLaunchModeV1.Exec("/bin/sh", ["-c", CHILD_SCRIPT, "sh", "&echo NOT_SHELL"]),
+        cwd: Some("/tmp"), environment: [PtyEnvironmentChangeV1.Set("SOSIX_PTY_SET", "value 한글"),
+            PtyEnvironmentChangeV1.Remove("SOSIX_PTY_REMOVE")])
+
+fn wait_for_exit(handle: i32) -> i64:
+    var attempts = 0
+    var output = ""
+    while attempts < 400:
+        output = output + sosix_pty_read(handle, 10)
+        val code = sosix_pty_exit_code(handle)
+        if code.is_ok(): return code.unwrap()
+        sosix_sleep_ms(10)
+        attempts = attempts + 1
+    -1
+
+describe "SOSIX PTY structured launch":
+    it "delivers literal argv, cwd, environment changes and raw octets, then the exit status":
+        val windows = sosix_platform_name().lower().contains("windows")
+        step("Set a parent variable the launch removes only for the child")
+        expect(sosix_env_set("SOSIX_PTY_REMOVE", "parent-kept")).to_equal(true)
+        val handle = sosix_pty_open(24, 80)
+        expect(handle >= 0).to_equal(true)
+        val spawned = sosix_pty_spawn_configured_v1(handle, structured_launch())
+        if windows:
+            step("The portable Windows provider refuses instead of erasing fields")
+            expect(spawned.is_err()).to_equal(true)
+            expect(sosix_pty_literal_bytes_supported_v1()).to_equal(false)
+        else:
+            step("Wait for the child to verify its fields, then send NUL 0x80 0xff")
+            expect(spawned.is_ok()).to_equal(true)
+            var ready = false
+            var seen = ""
+            var attempts = 0
+            while spawned.is_ok() and not ready and attempts < 400:
+                seen = seen + sosix_pty_read(handle, 10)
+                ready = seen.contains("CHILD_READY")
+                attempts = attempts + 1
+            expect(ready).to_equal(true)
+            expect(sosix_pty_literal_bytes_supported_v1()).to_equal(true)
+            val sent = sosix_pty_write_literal_some_v1(handle, [0u8, 128u8, 255u8])
+            expect(sent.is_ok() and sent.unwrap() == 3).to_equal(true)
+            step("The child computed exit 7 only if every field and octet arrived intact")
+            expect(wait_for_exit(handle)).to_equal(7)
+        expect(sosix_pty_close(handle)).to_equal(true)
+        expect(env_get("SOSIX_PTY_REMOVE")).to_equal("parent-kept")
+
+    it "refuses a launch whose program or working directory cannot be reached":
+        val windows = sosix_platform_name().lower().contains("windows")
+        val handle = sosix_pty_open(24, 80)
+        expect(handle >= 0).to_equal(true)
+        val missing_cwd = sosix_pty_spawn_configured_v1(handle,
+            PtyLaunchV1(mode: PtyLaunchModeV1.Exec("/bin/sh", []), cwd: Some("/no/such/sosix-pty-dir"), environment: []))
+        expect(missing_cwd.is_err()).to_equal(true)
+        val missing_program = sosix_pty_spawn_configured_v1(handle,
+            PtyLaunchV1(mode: PtyLaunchModeV1.Exec("/no/such/sosix-pty-program", []), cwd: nil, environment: []))
+        expect(missing_program.is_err()).to_equal(true)
+        val bad_env = sosix_pty_spawn_configured_v1(handle,
+            PtyLaunchV1(mode: PtyLaunchModeV1.Exec("/bin/sh", []), cwd: nil,
+                environment: [PtyEnvironmentChangeV1.Set("A=B", "x")]))
+        expect(bad_env.is_err()).to_equal(true)
+        if not windows:
+            step("The same PTY still accepts a valid launch after the refusals")
+            val ok = sosix_pty_spawn_configured_v1(handle,
+                PtyLaunchV1(mode: PtyLaunchModeV1.Shell("exit 3"), cwd: nil, environment: []))
+            expect(ok.is_ok()).to_equal(true)
+            expect(wait_for_exit(handle)).to_equal(3)
+        expect(sosix_pty_close(handle)).to_equal(true)

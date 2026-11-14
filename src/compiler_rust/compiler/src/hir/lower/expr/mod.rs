@@ -499,6 +499,7 @@ impl Lowerer {
                 .or_else(|| self.globals.get(&symbol).copied())?;
             Some((symbol, ty))
         }) {
+            self.gate_private_fn_ref(name);
             Ok(HirExpr {
                 kind: HirExprKind::Global(symbol),
                 ty,
@@ -544,6 +545,7 @@ impl Lowerer {
                 .or_else(|| self.globals.get(&source).copied())?;
             Some((source, ty))
         }) {
+            self.gate_private_fn_ref(name);
             Ok(HirExpr {
                 kind: HirExprKind::Global(source),
                 ty,
@@ -554,6 +556,7 @@ impl Lowerer {
             // was typed from `f` but still emitted `Global("g")` -- a symbol
             // nothing defines, because flattening merges the import under its
             // ORIGINAL name. Emit the symbol whose type we just took.
+            self.gate_private_fn_ref(name);
             let symbol = self.import_alias_symbol(name);
             Ok(HirExpr {
                 kind: HirExprKind::Global(symbol),
@@ -565,6 +568,7 @@ impl Lowerer {
             // global typed under the ALIAS name, so `use m.{f as g}` whose
             // target is not inlined into `module.functions` landed here and
             // emitted `Global("g")` -- unresolved at link time.
+            self.gate_private_fn_ref(name);
             let symbol = self.import_alias_symbol(name);
             Ok(HirExpr {
                 kind: HirExprKind::Global(symbol),
@@ -1035,21 +1039,25 @@ impl Lowerer {
         }))
     }
 
-    /// Declared trait dispatch of `base.field`, when `base` is a local of a
-    /// class/struct whose `field` was authored with a trait type name.
-    pub(super) fn trait_field_dispatch(&self, base: &Expr, field: &str, ctx: &FunctionContext) -> Option<crate::hir::HirTraitDispatch> {
+    /// Recover the authored field type only through the receiver's declared
+    /// struct/class owner. No method-name or same-field-name search is allowed.
+    pub(super) fn receiver_field_declared_type(&self, base: &Expr, field: &str, ctx: &FunctionContext) -> Option<(&str, &ast::Type)> {
         let Expr::Identifier(name) = base else { return None };
         let idx = ctx.lookup(name)?;
         let mut ty = ctx.locals.get(idx)?.ty;
         if let Some(HirType::Pointer { inner, .. }) = self.module.types.get(ty) {
             ty = *inner;
         }
-        let owner = match self.module.types.get(ty)? {
-            HirType::Struct { name, .. } => name.clone(),
-            _ => return None,
-        };
-        let trait_name = self.struct_field_type_names.get(&owner)?.get(field)?;
-        self.trait_declaration_for_current_owner(trait_name)
+        if !matches!(self.module.types.get(ty)?, HirType::Struct { .. }) { return None; }
+        let (owner, fields) = self.struct_field_declared_types.get(&ty)?.as_ref()?;
+        Some((owner.as_str(), fields.get(field)?))
+    }
+
+    /// Direct trait fields may dispatch through their declaration. Optional
+    /// fields deliberately return None: their carrier has Option semantics.
+    pub(super) fn trait_field_dispatch(&self, base: &Expr, field: &str, ctx: &FunctionContext) -> Option<crate::hir::HirTraitDispatch> {
+        let (owner, declared) = self.receiver_field_declared_type(base, field, ctx)?;
+        self.declared_trait_dispatch_in_owner(declared, owner)
     }
 
     /// Resolved callback parameter types for the lambda arguments of a
@@ -1145,6 +1153,7 @@ impl Lowerer {
                 // which codegen rejects and the program left the JIT.
                 // doc/08_tracking/bug/jit_module_namespace_member_access_unresolved_2026-11-13.md
                 if let Some(target) = self.resolve_flatten_namespace_callable(recv_name, method) {
+                    self.gate_private_namespace_ref(recv_name, method);
                     let args_hir = self.lower_call_args(args, ctx)?;
                     let ret_ty = self.named_callable_return_type(&target).unwrap_or(TypeId::ANY);
                     return Ok(HirExpr {

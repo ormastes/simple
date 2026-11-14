@@ -1,0 +1,110 @@
+# Context index generation cache — pure decision logic.
+#
+# `simple_ctx_search` / `simple_ctx_batch_execute` keep the prepared index of
+# `.simple/ctx/chunks.sdn` for the life of the process, tagged with the
+# generation key the store had when it was read. Before every search the
+# caller reads the store's CURRENT key (path, presence, byte length, SHA-256
+# digest — computed natively, ~10 ms for a 4.5 MB / 3,713-chunk store) and
+# asks `ctx_cache_decide` whether the cached index may be reused.
+#
+# Only an identical key is a hit. mtime is deliberately not part of the key:
+# the plan (§3.4) allows it only as an advisory fast path, never as a trust
+# proof, and the digest is cheap enough to compute on every call. A present
+# store whose digest could not be computed is never a hit.
+#
+# No I/O here: the key is read by `main_lazy_ctx_tools`, so this module is
+# unit-testable without the MCP server or a store on disk.
+
+# Store file path the key was taken from (`<ctx_store_dir>/chunks.sdn`).
+struct CtxStorePath:
+    value: text
+
+# Store size in bytes at the time the key was taken.
+struct CtxStoreLength:
+    bytes: i64
+
+# Lowercase hex SHA-256 of the store content; empty when it could not be read.
+struct CtxStoreDigest:
+    sha256: text
+
+enum CtxStorePresence:
+    Missing
+    Present
+
+struct CtxGenerationKey:
+    path: CtxStorePath
+    presence: CtxStorePresence
+    length: CtxStoreLength
+    digest: CtxStoreDigest
+
+# Why the cached index was (not) reused. Every variant except Hit rebuilds.
+enum CtxCacheDecision:
+    Hit
+    ColdStart
+    StoreMoved
+    StoreCreated
+    StoreDeleted
+    StoreGrew
+    StoreShrank
+    StoreRewritten
+    DigestUnavailable
+
+# Number of index rebuilds performed by this process (probe for specs/stats).
+struct CtxCacheRebuildCount:
+    count: i64
+
+const _CTX_SHA256_HEX_LEN: i64 = 64
+
+pub fn ctx_generation_key_missing(path: CtxStorePath) -> CtxGenerationKey:
+    CtxGenerationKey(path: path, presence: CtxStorePresence.Missing, length: CtxStoreLength(bytes: 0), digest: CtxStoreDigest(sha256: ""))
+
+pub fn ctx_generation_key_present(path: CtxStorePath, length: CtxStoreLength, digest: CtxStoreDigest) -> CtxGenerationKey:
+    CtxGenerationKey(path: path, presence: CtxStorePresence.Present, length: length, digest: digest)
+
+fn _ctx_key_is_missing(key: CtxGenerationKey) -> bool:
+    match key.presence:
+        case Missing: true
+        case Present: false
+
+fn _ctx_key_digest_usable(key: CtxGenerationKey) -> bool:
+    key.digest.sha256.len() == _CTX_SHA256_HEX_LEN
+
+pub fn ctx_cache_decide(cached: CtxGenerationKey?, current: CtxGenerationKey) -> CtxCacheDecision:
+    if not _ctx_key_is_missing(current) and not _ctx_key_digest_usable(current):
+        return CtxCacheDecision.DigestUnavailable
+    val prev = match cached:
+        case Some(k): k
+        case None: return CtxCacheDecision.ColdStart
+    if prev.path.value != current.path.value:
+        return CtxCacheDecision.StoreMoved
+    val prev_missing = _ctx_key_is_missing(prev)
+    val cur_missing = _ctx_key_is_missing(current)
+    if prev_missing and cur_missing:
+        return CtxCacheDecision.Hit
+    if cur_missing:
+        return CtxCacheDecision.StoreDeleted
+    if prev_missing:
+        return CtxCacheDecision.StoreCreated
+    if current.length.bytes > prev.length.bytes:
+        return CtxCacheDecision.StoreGrew
+    if current.length.bytes < prev.length.bytes:
+        return CtxCacheDecision.StoreShrank
+    if current.digest.sha256 != prev.digest.sha256:
+        return CtxCacheDecision.StoreRewritten
+    CtxCacheDecision.Hit
+
+# Stable snake_case label of a decision (used in specs and diagnostics).
+pub fn ctx_cache_decision_label(decision: CtxCacheDecision) -> text:
+    match decision:
+        case Hit: "hit"
+        case ColdStart: "cold_start"
+        case StoreMoved: "store_moved"
+        case StoreCreated: "store_created"
+        case StoreDeleted: "store_deleted"
+        case StoreGrew: "store_grew"
+        case StoreShrank: "store_shrank"
+        case StoreRewritten: "store_rewritten"
+        case DigestUnavailable: "digest_unavailable"
+
+pub fn ctx_cache_rebuild_count_next(prev: CtxCacheRebuildCount) -> CtxCacheRebuildCount:
+    CtxCacheRebuildCount(count: prev.count + 1)

@@ -5,7 +5,7 @@ use os.apps.smux.service.{ServiceState, PaneRecord}
 use std.sosix.pty.{sosix_pty_close, sosix_pty_hangup}
 use std.sosix.process.{sosix_process_close_piped}
 use std.sosix.process.sosix_process_close_piped_ref_v1
-use std.sosix.process.sosix_process_cleanup_piped_owned_v2
+use std.nogc_async_mut.container.terminal_session_v1.container_terminal_cleanup_v1
 
 pub struct PaneResetPreparationV2:
     state: ServiceState
@@ -17,7 +17,7 @@ pub fn prepare_pane_reset_v2(before: ServiceState) -> PaneResetPreparationV2:
     var index = 0
     while index < before.pane_count:
         val pane = before.get_pane(index)
-        if pane.owned_terminal_transfer != nil or pane.helper_cleaned_awaiting_release:
+        if pane.owned_terminal_session != nil or pane.helper_cleaned_awaiting_release:
             return PaneResetPreparationV2(state: before, may_reset: false)
         index = index + 1
     var released = before
@@ -46,7 +46,7 @@ fn _pane_in_scope(pane: PaneRecord, session_id: text, window_id: text, pane_id: 
 
 # Exactly the panes close_owned_children below ends with sosix_pty_close.
 fn _plain_pty_close(pane: PaneRecord) -> bool:
-    pane.owned_terminal_transfer == nil and not pane.helper_cleaned_awaiting_release and pane.terminal_ref == nil and pane.pty_fd >= 0
+    pane.owned_terminal_session == nil and not pane.helper_cleaned_awaiting_release and pane.terminal_ref == nil and pane.pty_fd >= 0
 
 # Hangs every plain PTY child in scope up before any is closed, so children
 # that ignore SIGHUP share one ~1 s close grace period instead of paying one
@@ -76,15 +76,16 @@ pub fn close_owned_children(st0: ServiceState, session_id: text, window_id: text
         val pane = st.get_pane(i)
         if pane.pane.session_id == session_id and (window_id == "" or pane.pane.window_id == window_id) and (pane_id == "" or pane.pane.id == pane_id):
             var closed = true
-            if val transfer = pane.owned_terminal_transfer:
+            if val terminal = pane.owned_terminal_session:
                 # Even successful helper cleanup is not host budget release.
                 # Publish the one-shot flag while retaining the complete bundle.
                 closed = false
                 if not pane.helper_cleaned_awaiting_release:
-                    if sosix_process_cleanup_piped_owned_v2(transfer.owner, transfer.reference).is_ok():
-                        var retained = pane
-                        retained.helper_cleaned_awaiting_release = true
-                        st = st.replace_pane(i, retained)
+                    val cleaned = container_terminal_cleanup_v1(terminal)
+                    var retained = pane
+                    retained.owned_terminal_session = Some(cleaned.session)
+                    retained.helper_cleaned_awaiting_release = cleaned.cleaned
+                    st = st.replace_pane(i, retained)
             elif pane.helper_cleaned_awaiting_release:
                 closed = false
             elif pane.terminal_ref != nil:

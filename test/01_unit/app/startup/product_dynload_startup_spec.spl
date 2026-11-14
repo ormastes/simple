@@ -20,10 +20,11 @@ observational counters do not invent latency or max-RSS admission.
 use std.spec.step
 
 use std.spec.{describe, it, expect, step}
+use test.helpers.dynsmf_admitted_startup_fixture.{dynsmf_admitted_startup_fixture}
 use os.smf.dynsmf_session.{
+    dynsmf_session_new,
+    dynsmf_session_load_admitted,
     DynSmfManifestEntry,
-    DynSmfLoadedLibrary,
-    DynSmfSession,
     dynsmf_policy_default
 }
 use os.smf.dynsmf_lifecycle.{dynsmf_session_close}
@@ -91,33 +92,32 @@ describe "product dynload startup config cutover":
         # @req REQ-SSPEC-APP
         step("closes checked handles in reverse load order")
         step("Verify: one-pass close walks last-loaded first")
-        val session = DynSmfSession(
-            session_id: "spec-reverse-close",
-            generation: 2,
-            next_handle: 3,
-            policy: dynsmf_policy_default(),
-            loaded: [
-                DynSmfLoadedLibrary(id: "first", handle: 101, generation: 1,
-                    status: "loaded", symbol_registry: "", path: "", abi_version: "", content_hash: ""),
-                DynSmfLoadedLibrary(id: "second", handle: 102, generation: 2,
-                    status: "loaded", symbol_registry: "", path: "", abi_version: "", content_hash: "")
-            ],
-            evidence: [],
-            _next_facet_token: 1,
-            _issued_facet_refs: {},
-            _issued_facet_tokens_by_library: {},
-            _issued_facet_ref_count: 0,
-            _trusted_facet_bindings: {},
-            _trusted_facet_keys_by_library: {})
+        # Real admitted fixtures: the V3 owner gate rejects fabricated handles.
+        val fixture_a = dynsmf_admitted_startup_fixture("first",
+            "build/dynsmf/product_startup_first.smf", "test.product.first", "1",
+            "run_first", false)
+        val fixture_b = dynsmf_admitted_startup_fixture("second",
+            "build/dynsmf/product_startup_second.smf", "test.product.second", "1",
+            "run_second", false)
+        val loaded_a = dynsmf_session_load_admitted(
+            dynsmf_session_new("spec-reverse-close", dynsmf_policy_default()),
+            "first", fixture_a.request, fixture_a.artifact_bytes)
+        val session = dynsmf_session_load_admitted(
+            loaded_a, "second", fixture_b.request, fixture_b.artifact_bytes)
+        expect(session.loaded.len()).to_equal(2)
+        expect(session.loaded[0].status).to_equal("loaded")
+        expect(session.loaded[1].status).to_equal("loaded")
+        val before_evidence = session.evidence.len()
+        val before_generation = session.generation
         val closed = dynsmf_session_close(session)
-        expect(closed.evidence.len()).to_equal(2)
-        expect(closed.evidence[0].library_id).to_equal("second")
-        expect(closed.evidence[1].library_id).to_equal("first")
-        expect(closed.evidence[0].status).to_equal("unloaded")
-        expect(closed.evidence[1].status).to_equal("unloaded")
+        expect(closed.evidence.len()).to_equal(before_evidence + 2)
+        expect(closed.evidence[before_evidence].library_id).to_equal("second")
+        expect(closed.evidence[before_evidence + 1].library_id).to_equal("first")
+        expect(closed.evidence[before_evidence].status).to_equal("unloaded")
+        expect(closed.evidence[before_evidence + 1].status).to_equal("unloaded")
         expect(closed.loaded[0].status).to_equal("unloaded")
         expect(closed.loaded[1].status).to_equal("unloaded")
-        expect(closed.generation).to_equal(4)
+        expect(closed.generation).to_equal(before_generation + 2)
 
     it "reports latency targets while leaving RSS to outer-harness evidence":
         # @req REQ-SSPEC-APP
