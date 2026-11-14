@@ -38,10 +38,12 @@ Caret is a specialized profile of Simple IDE, not a new IDE. smux is the single 
 - Terminal-state specs must wait for a child-computed marker, not text the PTY echoes (`doc/08_tracking/bug/caret_smux_multi_launch_spec_marker_matched_pty_echo_2026-11-14.md`).
 - Slop is a real source slice but native display and graph performance are unqualified.
 - `workbench/gui_page.spl` keeps an `Option<SessionView>` compiler workaround; remove only with a regression test once the compiler bug is fixed.
-- Also: `session_source.spl` hardcodes provider `"process"`; `pane_source.spl` pane may not be the manager's child; `tui_view.spl` `_put_str` slices bytes; `ide --tui` ignores `--profile`; `Ctrl+B` belongs to smux.
+- Fixed in waves 1-3 (2026-11-15): real provider/generation in `session_source`, cell-aware `_put_str`, `ide --tui --profile`, smux owner argv. Still open: `cs` publishes generation 1 only (no restart detection); `bridge_worker` observer log is process-local; editor `view.show` passes no trace snapshot; `Ctrl+B` belongs to smux.
+- Seams to reuse: `workbench/key_chunker.spl` (terminal passthrough), `workbench/roster_order.spl`, `workbench/capability_checklist.spl` (`/capabilities`), `observer/observer_log.spl` + `session_status.spl`, `app/editor/trace_view_host.spl`, `app/bug_resolve/close_gate.spl`, `app/bug/workaround_revert.spl`.
+- Adding a `use app.<dir>` from compiler-reachable code requires listing `<dir>` in `scripts/bootstrap/stage2-build-input-app-dirs.txt` (required gate).
 
 ## Update Rule
 
-After research, requirements, design, implementation, verification, or release work changes this feature, refresh the links and lane status here and in the plan doc. Lane PRs at 2026-11-14: #9200 binding, #9201 ide tui profile, #9202 cell writer, #9203 observer core.
+After research, requirements, design, implementation, verification, or release work changes this feature, refresh the links and lane status here and in the plan doc. CU-001..CU-020 status lives in the plan doc ("Acceptance CU-001..CU-020"). Lane PRs: wave 1 #9200-#9221, wave 2 #9233/#9234/#9237/#9242/#9243/#9287, wave 3 #9294/#9295/#9301/#9313/#9315/#9317.
 
 Template: [feature_skill.md](../../template/feature_skill.md)

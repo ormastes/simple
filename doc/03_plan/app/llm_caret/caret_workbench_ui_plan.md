@@ -25,7 +25,50 @@ Status as of 2026-11-14 after landing. "landed (pure core)" means the unit-teste
 | observer (core) | 6 | REQ-CARET-OBS-001..003 | landed (pure core); no IO wiring | #9203 |
 | trace-view-provider | 7 | REQ-CARET-TRC-001..003 | landed (pure core); no IDE view wiring | #9214 |
 
-Not started, still open TODO: P6 (review and CI gates), P7 (fleet and skills) and P8 (release qualification). Nothing in this program is release-qualified; the open PRs above are unmerged work and no acceptance row CU-001..CU-020 has execution evidence recorded here.
+### Waves 2-3 (2026-11-15) — wiring into production callers
+
+| Lane | Requirements | Status | PR |
+|---|---|---|---|
+| session identity | REQ-CARET-UI-001/002 | landed; real provider, restart ledger bumps generation, stale drafts rejected, terminal label from binding | #9233, #9287 |
+| key resolver | REQ-CARET-UI-004 | landed; `cs` keys routed through `route_workbench_key`, leader n/p/1-9 -> `/switch` | #9234 |
+| observer adapters | REQ-CARET-OBS-* | landed; observation builder, provider adapters, status text | #9237 |
+| extension lifecycle | REQ-CARET-EXT-* | landed; deactivate drops pending invocations, context keys, builtin caret ext | #9242 |
+| trace view render | REQ-CARET-TRC-* | landed; `trace_view_lines`, view state, impact edges | #9243 |
+| observer live (F) | CU-008/009/010 | landed; hook_bridge -> observer log -> TUI/GUI status; bridge_worker is a separate process (log not shared) | #9294 |
+| cs terminal surface (G) | CU-005 | landed; leader m, byte-safe chunk carry, guarded raw send | #9295 |
+| IDE trace views (H) | CU-006/011 | landed; `view.show trace.explorer`, keybinding `when`, caret.* -> `/switch`; controller holds no snapshot yet | #9301 |
+| roster (I) | CU-001/004 | landed; pin/MRU/fuzzy `/switch`, detach keeps real children alive | #9313 |
+| P6 gates (J) | CU-015/016 | bug-resolve + MCP close gate; workaround revert candidates in `check_dbs` | #9315 |
+| P7 checklist (K) | CU-020 | `/capabilities` in `cs` from live probes; remote/fleet blocked | #9317 |
+
+### Acceptance CU-001..CU-020 (2026-11-15)
+
+All evidence is the seed interpreter on Windows. **No row is native-verified; every row is at best "met (interpreter)" and the program is not release-qualified.** P8 (release qualification) is open.
+
+| CU | Status | Evidence / gap | Resume |
+|---|---|---|---|
+| CU-001 | partial | `roster_order_spec` 8/8; no 50-agent/5-host scale run, no attention grouping | scale spec on a Linux host with fleet transport |
+| CU-002 | partial | `send_draft_guarded` + `input_target_allowed` specs; no 1,000-op randomized run | add property spec over switch/draft ops |
+| CU-003 | met (interpreter) | `caret_workbench_e2e_spec` 2/2 ("unbound terminal"), `caret_workbench_prod_spec` 2/2 | native run with `LLM_CARET_NATIVE_BIN` |
+| CU-004 | met (interpreter) | `caret_workbench_detach_spec` 1/1 (real children survive detach/switch) | native run |
+| CU-005 | partial | `key_chunker_spec` 10/10; never driven against a live smux pane | live `cs` + smux pane capture |
+| CU-006 | partial | `caret_profile_views_spec` 5/5; view/command `when` not evaluated (keybindings only) | add `when` to ExtensionView/Command |
+| CU-007 | met (interpreter) | `deactivation_hygiene_spec` 10/10 | native run |
+| CU-008 | partial | `observer_live_spec` 3/3, `observer_builder_spec` 13/13; no 10-minute live quiet-build run | timed live run |
+| CU-009 | met (interpreter) | `observer_live_spec` approval -> "needs you" in TUI+GUI, replay no dup | native run |
+| CU-010 | partial | lifecycle folded at render; disconnected host not observable (no fleet) | blocked on fleet transport |
+| CU-011 | partial | `trace_view_host_spec` 4/4, `ide_view_render_spec` 10/10; controller passes no snapshot | load snapshot in `editor_controller.spl` |
+| CU-012 | met (interpreter) | `ide_view_provider` badge rollup specs | native run |
+| CU-013 | partial | `impact_edges` render; no end-to-end exact-edge corpus check | corpus spec |
+| CU-014 | partial | missing-blob line shown; stale async request path untested | async cancel spec |
+| CU-015 | partial | `bug_close_gate_spec` 5/5 on CLI (+ MCP per #9315); CI-side gate absent | CI job on bug_db diff |
+| CU-016 | partial | `workaround_revert_candidates_spec` 3/3; no `expires=` date trigger | extend `@workaround` grammar |
+| CU-017 | blocked | no 80x24/120x40/high-DPI/screen-reader user-event captures | needs GUI capture host |
+| CU-018 | blocked | no cold/warm CPU/RSS/frame measurements | perf lane on native build |
+| CU-019 | partial | restart ledger + stale-draft rejection specs; no reconnect race on real restart in `cs` (generation fixed at 1) | wire manager generation into cs |
+| CU-020 | partial | `capability_checklist_spec` 7/7; no loaded-skill provider state, no hint decay | provider skill reporting |
+
+Open TODOs: the visibility-blocked specs (`activation_hook_spec`, `capability_truth_spec`, `chat_tui_runtime_spec`, `bug_linked_workarounds_spec`) still execute 0; pre-existing base failures in `agent_workspace_spec` (2/9), `lifecycle_spec` (1), `runtime_security_spec` (1).
 
 ## Plan sections 12 to 14
 
