@@ -39,6 +39,12 @@ green. The ELF-only OUT lanes (`check-xray-native-inprocess-e2e.shs`, `check-xra
 attributes: `@__simple_xray_slot_<sym>` i8 per function, volatile-load guard at entry (kind 0)
 and before each `ret` (kind 1), exported `@__simple_xray_descriptor_v1 {count,[N x ptr]}` and
 `@__simple_xray_hook_v1`; sled functions drop `readonly`. State is `xray_flag_guard`/`xray_site`
-in `_MirToLlvm/class_def.spl`; spec `xray_llvm_attrs_spec.spl`. Leaf and build-route admission
-are still open (decision doc under doc/08_tracking/bug/). Default off: no xray text when no
+in `_MirToLlvm/class_def.spl`; spec `xray_llvm_attrs_spec.spl`. Default off: no xray text when no
 function has `xray_mode>0`.
+2026-11-15 (lane xrayleaf, PROVISIONAL decisions in the decision doc): `@__simple_xray_names_v1`
+(same shape as the descriptor, C-string Simple names). Leaf `nogc_sync_mut/trace/xray_win_flag_leaf_v1.spl`
+(`XrayWinFlagLeafV1`, sled_kind Llvm; slots via `rt_ptr_write_u8`, symbols via
+`rt_host_dynlib_symbol`; adapter id = site + 1). Route `WindowsLlvmFlagGuardCandidate` (x86_64
+windows gnu/msvc, Dynamic, Llvm/Auto), admitted only with `--xray` + backend llvm. Blocker: no
+C-callable address for the Simple handler `xray_win_edge_record_v1` from an interpreted host, so the
+dynlib port's `handler_address()` is 0 and install fails closed.

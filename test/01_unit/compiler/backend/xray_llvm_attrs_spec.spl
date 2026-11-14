@@ -196,6 +196,24 @@ describe "XRay LLVM flag-guard sleds (Windows)":
         expect(ir).to_contain("@__simple_xray_descriptor_v1 = dllexport constant { i64, [2 x ptr] }")
         expect(ir.contains("@__simple_xray_slot_xr_never")).to_equal(false)
 
+    # @req REQ-XRAY-V1-API-01
+    it "exports a names table parallel to the descriptor, in site order":
+        """Site id -> Simple function name for the profile: `__simple_xray_names_v1`
+        has the descriptor's shape, and entry i names the function of slot i."""
+        step("Two sled functions and one never-listed function")
+        val ir = xray_attr_translator("windows").translate_module(
+            xray_attr_module([xray_attr_fn(1, "xr_a", 2), xray_attr_fn(2, "xr_b", 2), xray_attr_fn(3, "xr_never", 0)]))
+        expect(xray_count_of(ir, "@__simple_xray_names_v1 =")).to_equal(1)
+        expect(ir).to_contain("@__simple_xray_names_v1 = dllexport constant { i64, [2 x ptr] } { i64 2, [2 x ptr] [ptr @__simple_xray_name_0, ptr @__simple_xray_name_1] }")
+        step("Each entry is a private NUL-terminated C string holding the Simple name")
+        expect(ir).to_contain("@__simple_xray_name_0 = private unnamed_addr constant [5 x i8] c\"xr_a\\00\"")
+        expect(ir).to_contain("@__simple_xray_name_1 = private unnamed_addr constant [5 x i8] c\"xr_b\\00\"")
+        expect(ir.contains("xr_never\\00")).to_equal(false)
+
+    it "escapes quote and backslash bytes in a names-table entry":
+        val ir = xray_attr_translator("windows").translate_module(xray_attr_module([xray_attr_fn(1, "a\"b\\c", 2)]))
+        expect(ir).to_contain("@__simple_xray_name_0 = private unnamed_addr constant [6 x i8] c\"a\\22b\\5Cc\\00\"")
+
     it "still rejects entry+exit-only mode 1 on windows":
         val ir = xray_attr_translator("windows").translate_module(xray_attr_module([xray_attr_fn(1, "xr_exit", 1)]))
         expect(ir).to_contain("XRAY-E-UNSUPPORTED-MODE")
