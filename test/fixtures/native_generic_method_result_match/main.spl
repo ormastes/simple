@@ -1,0 +1,96 @@
+# Native oracle: a generic class method's declared Result<T, E> owns bare
+# Ok/Err arms (match subject, if-val .ok, let binding, unwrap_or, `?`), for
+# receivers read out of a module-level array (`int_stores[0].get(i)`) and a
+# typed local, with T = i64 and T = text, including after `set`.
+# Shape of compiler.frontend.core._AstExpr.nodes:509/560 (expr_extra_get /
+# expr_s_val_get over [AttributeStoreV1<T>]); spec guard:
+# test/01_unit/compiler/mir/generic_method_result_match_subject_spec.spl.
+# Build: SIMPLE_BOOTSTRAP=1 native-build main.spl --entry-closure (cranelift, llvm).
+# Expected stdout (seed `simple run main.spl`):
+# -1
+# 42
+# -1
+# <none>
+# hello
+# dflt
+# 42
+# -2
+# 42
+# -3
+# 1042
+# -7
+# ok 43
+# err absent: no extra entry for node 4
+# 1
+# probe other
+
+use store.{Store, store_new}
+
+# A second enum declaring Ok/Err makes a bare arm ambiguous unless the
+# subject's declared Result owns it (as in the full compiler closure).
+enum Probe:
+    Ok
+    Err
+    Other
+
+var int_stores: [Store<i64>] = []
+var text_stores: [Store<text>] = []
+
+fn int_get(idx: i64) -> i64:
+    match int_stores[0].get(idx):
+        case Ok(v): v
+        case Err(_): -1
+
+fn text_get(idx: i64) -> text:
+    match text_stores[0].get(idx):
+        case Ok(v): v
+        case Err(_): "<none>"
+
+fn local_get(t: Store<i64>, idx: i64) -> i64:
+    match t.get(idx):
+        case Ok(v): v
+        case Err(_): -2
+
+fn int_ok_field(idx: i64) -> i64:
+    if val r = int_stores[0].get(idx).ok:
+        return r
+    -3
+
+fn int_bound(idx: i64) -> i64:
+    val q = int_stores[0].get(idx)
+    match q:
+        case Ok(v): v + 1000
+        case Err(_): int_stores[0].get(idx).unwrap_or(-7)
+
+fn int_try(idx: i64) -> Result<i64, text>:
+    val v = int_stores[0].get(idx)?
+    Ok(v + 1)
+
+fn try_text(idx: i64) -> text:
+    match int_try(idx):
+        case Ok(v): "ok {v}"
+        case Err(e): "err {e}"
+
+fn main():
+    int_stores.push(store_new<i64>("extra"))
+    text_stores.push(store_new<text>("s_val"))
+    print(int_get(2))
+    int_stores[0].set(2, 42)
+    print(int_get(2))
+    print(int_get(1))
+    print(text_get(0))
+    text_stores[0].set(0, "hello")
+    print(text_get(0))
+    print(text_stores[0].get(5).unwrap_or("dflt"))
+    print(local_get(int_stores[0], 2))
+    print(local_get(int_stores[0], 9))
+    print(int_ok_field(2))
+    print(int_ok_field(3))
+    print(int_bound(2))
+    print(int_bound(3))
+    print(try_text(2))
+    print(try_text(4))
+    print(int_stores[0].len())
+    match Probe.Other:
+        case Probe.Ok: print("probe ok")
+        case _: print("probe other")

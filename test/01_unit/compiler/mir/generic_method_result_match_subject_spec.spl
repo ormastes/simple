@@ -1,0 +1,88 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+"""
+A generic class method's declared `Result<T, E>` owns bare `Ok`/`Err` arms.
+
+Failure (Stage 3 native build, compiler.frontend.core._AstExpr.nodes:509):
+`match expr_attr_extra_stores[0].get(idx): case Ok(v): ... case Err(_): ...`
+with `expr_attr_extra_stores: [AttributeStoreV1<i64>]` reported
+"bare variant 'Ok' is ambiguous ... subject method call unknown
+receiver.get() has type unresolved". Two independent gaps:
+
+1. MIR (enum_match_expr_type): the RTI query for a MethodCall subject got
+   its receiver type from receiver_declared_type only, which has no arm for
+   an element read (`xs[0]`). RTI then answered E-RTI-001 and no owner
+   arguments were substituted. enum_match_method_receiver_type now also
+   admits the declared nominal element of a declared container.
+2. HIR (lower_function): a method of a generic owner is predeclared untyped
+   (its owner's binders are not in scope at prescan), and under
+   SIMPLE_BOOTSTRAP=1 HirFunction.return_type is erased to i64, so the RTI
+   row said `get` returns i64 even for a typed local receiver. The method's
+   semantic signature is now published on its symbol, as it already was for
+   generic free functions.
+
+The bootstrap rows lower HIR with SIMPLE_BOOTSTRAP=1 and
+SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE=1 (how native-build declares a module's own
+types) and MIR without them. The native oracle is
+test/fixtures/native_generic_method_result_match/main.spl.
+"""
+
+use std.spec
+use std.io_runtime.{env_set}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir.mir_json.{serialize_mir_function}
+
+val SOURCE: text = "class Store<T>:\n    name: text\n    slots: [T?]\n\n" +
+    "impl Store<T>:\n    fn get(node: i64) -> Result<T, text>:\n" +
+    "        if node >= 0 and node < self.slots.len():\n            match self.slots[node]:\n" +
+    "                case Some(v): return Ok(v)\n                case None: pass\n" +
+    "        Err(\"absent\")\n\n" +
+    "enum Probe:\n    Ok\n    Err\n\n" +
+    "fn int_get(xs: [Store<i64>], i: i64) -> i64:\n    match xs[0].get(i):\n        case Ok(v): v\n        case Err(_): -1\n\n" +
+    "fn text_get(xs: [Store<text>], i: i64) -> text:\n    match xs[0].get(i):\n        case Ok(v): v\n        case Err(_): \"<none>\"\n\n" +
+    "fn local_get(t: Store<i64>, i: i64) -> i64:\n    match t.get(i):\n        case Ok(v): v\n        case Err(_): -1\n\n" +
+    "fn bound_get(xs: [Store<i64>], i: i64) -> i64:\n    val q = xs[0].get(i)\n    match q:\n        case Ok(v): v\n        case Err(_): xs[0].get(i).unwrap_or(-7)\n\n" +
+    "fn try_get(xs: [Store<i64>], i: i64) -> Result<i64, text>:\n    val v = xs[0].get(i)?\n    Ok(v + 1)\n"
+
+fn lower_errors_and_mir(bootstrap_hir: bool) -> (Dict<text, text>, [text]):
+    val module = parse_and_build_module(SOURCE, "generic_match.spl")
+    var hir_lowering = HirLowering.with_filename("generic_match.spl")
+    if bootstrap_hir:
+        env_set("SIMPLE_BOOTSTRAP", "1")
+        env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "1")
+    val hir = hir_lowering.lower_module(module)
+    if bootstrap_hir:
+        env_set("SIMPLE_BOOTSTRAP", "")
+        env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "")
+    var errors: [text] = []
+    for error in hir_lowering.errors:
+        errors.push("hir: " + error.message)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    for error in mir_lowering.errors:
+        errors.push("mir: " + error.message)
+    var out: Dict<text, text> = {}
+    for function in mir.functions.values():
+        val dot = function.name.rfind(".")
+        val short = if dot >= 0: function.name.substring(dot + 1, function.name.len()) else: function.name
+        out[short] = serialize_mir_function(function)
+    (out, errors)
+
+fn expect_owned_arms(bootstrap_hir: bool):
+    val (fns, errors) = lower_errors_and_mir(bootstrap_hir)
+    expect(errors.join(" | ")).to_equal("")
+    for name in ["int_get", "text_get", "local_get", "bound_get"]:
+        val mir = fns[name] ?? ""
+        expect(mir.len() > 0).to_equal(true)
+        expect(mir).to_contain("rt_enum_payload")
+
+describe "generic class method Result subject owns bare Ok/Err arms":
+    it "lowers indexed and typed-local receivers (ordinary HIR)":
+        expect_owned_arms(false)
+
+    it "lowers indexed and typed-local receivers (bootstrap HIR erases the declared return)":
+        expect_owned_arms(true)
