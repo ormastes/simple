@@ -124,12 +124,16 @@ fn releases_bool_elements() {
     releases("", "        val a = [true, false]\n        if a[0]:\n            acc = acc + 1\n");
 }
 
-/// Float elements are heap-boxed; a shallow free would leak the boxes, so
-/// float arrays are not on the allowlist (unified plan, S1 condition 4).
+/// Float and u64 elements are heap-boxed; a shallow free would leak the
+/// boxes, so those arrays are not on the allowlist (unified plan, S1
+/// condition 4).
 #[test]
-fn keeps_float_element_arrays() {
+fn keeps_float_and_u64_element_arrays() {
     keeps("", "        val a = [1.5, 2.5]\n        if a[0] > 1.0:\n            acc = acc + 1\n");
     keeps("", "        val a: [f32] = [1.5, 2.5]\n        if a[0] > 1.0:\n            acc = acc + 1\n");
+    keeps("", "        val a: [u64] = [1, 2]\n        if a[0] > 0:\n            acc = acc + 1\n");
+    // Control: the same shape with i32 elements is released.
+    releases("", "        val a: [i32] = [1, 2]\n        if a[0] > 0:\n            acc = acc + 1\n");
 }
 
 #[test]
@@ -348,7 +352,10 @@ fn keeps_local_whose_use_site_type_differs_from_its_declared_type() {
 /// `len_local_sources` is keyed by function-scoped local indices. Function
 /// `a` records "local 1 is the length of local 0"; `b` reuses both indices
 /// for plain integers and must not hoist an array data pointer from slot 0.
-/// The bound proof needs an unsigned index, so both loops use `u64`.
+/// The bound proof needs an unsigned index, so both loops use `u64`. The pin
+/// relies on params `p`/`q` and `n`/`m` getting local indices 0 and 1; if
+/// local numbering changes, re-check that it still fails with the per-function
+/// clear in `lower_function` removed.
 #[test]
 fn length_source_map_does_not_leak_into_the_next_function() {
     let source = "fn a(p: [i64]) -> i64:\n    val n: u64 = p.len().to_u64()\n    var i: u64 = 0\n    var acc = 0\n    while i < n:\n        acc = acc + p[i]\n        i = i + 1\n    acc\n\nfn b(q: u64, m: u64) -> u64:\n    var i: u64 = 0\n    var acc: u64 = 0\n    while i < m:\n        acc = acc + q\n        i = i + 1\n    acc\n";

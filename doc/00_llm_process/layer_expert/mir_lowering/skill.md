@@ -792,8 +792,8 @@ emitting any `rt_*_free` from lowering; `emit_function_drops` is not a safe hook
 - Tests: `mir/lower/tests/array_release_tests.rs`, `runtime/src/value/transient_scope_state_tests.rs`,
   `test/01_unit/compiler_core/interpreter/jit_block_array_release_spec.spl` (9 release
   forms, 27 forms that must stay unreleased incl. float arrays, one open-transient-scope case).
-- Float arrays are excluded: `from_float` heap-boxes each element, so a shallow free leaks
-  the boxes (2M-iteration `[1.5, 2.5, 3.5]` loop: 212 MB vs 39 MB empty loop).
+- Float and u64 arrays are excluded: `from_float` / `from_u64` heap-box each element, so a
+  shallow free leaks the boxes (2M-iteration `[1.5, 2.5, 3.5]` loop: 212 MB vs 39 MB empty loop).
 
 ## Provider type relocation retraction (2026-11-14, opt-in)
 
