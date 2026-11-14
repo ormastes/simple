@@ -1,0 +1,55 @@
+# Typed declaration admission for requested generated field accessors.
+# The coordinator supplies the already-resolved declaration, authoritative
+# module identity and original source access scope. This does not perform
+# source lookup, open a module route or interpret a selector.
+# Success is declaration admission only: the later physical-plan owner must
+# additionally prove reference-receiver state, non-atomic representation,
+# target ABI, and receiver liveness. HirField alone cannot prove those facts.
+use compiler.hir.hir_definitions.{HirClass, HirField}
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId}
+use compiler.common.dependency.{MemberAccessScope, member_visibility_allows}
+
+struct HirAccessorFieldV1:
+    owner_module: text
+    owner_name: text
+    owner_symbol: SymbolId
+    field_name: text
+    field_symbol: SymbolId
+    field_index: i64
+    receiver_type: HirType
+    field_type: HirType
+
+# This initial profile is intentionally smaller than the complete accessor
+# design. Unsupported requested fields fail instead of falling back to a raw
+# load/store that would silently omit advice.
+pub fn hir_accessor_field_admit_v1(owner: HirClass, owner_module: text,
+    field_name: text, scope: MemberAccessScope) -> Result<HirAccessorFieldV1, text>:
+    if owner_module == "" or owner.name == "" or not owner.symbol.is_valid():
+        return Err("E-AOP-FIELD-OWNER: accessor requires a resolved declaration owner")
+    if not member_visibility_allows(owner.visibility, scope):
+        return Err("E-AOP-FIELD-ACCESS: containing type is not accessible from the original site")
+    if owner.type_params.len() != 0 or owner.is_generic_template or owner.has_specialization_of:
+        return Err("E-AOP-FIELD-PROFILE: instantiated accessor identity is not yet admitted")
+    if owner.has_layout_attr:
+        return Err("E-AOP-FIELD-PROFILE: attributed physical layouts require a qualified accessor plan")
+    for field_index in 0..owner.fields.len():
+        val field: HirField = owner.fields[field_index]
+        if field.name == field_name:
+            if not field.symbol.is_valid():
+                return Err("E-AOP-FIELD-OWNER: field declaration has no symbol identity")
+            if not member_visibility_allows(field.visibility, scope):
+                return Err("E-AOP-FIELD-ACCESS: field is not accessible from the original site")
+            if field.is_volatile or field.has_bits_attr or field.has_fixed_address:
+                return Err("E-AOP-FIELD-PROFILE: volatile, packed and fixed-address fields are not admitted")
+            val scalar = match field.type_.kind:
+                case HirTypeKind.Bool: true
+                case HirTypeKind.Int(bits, _): bits == 8 or bits == 16 or bits == 32 or bits == 64
+                case _: false
+            if not scalar:
+                return Err("E-AOP-FIELD-PROFILE: initial accessor profile requires a bool or integer field")
+            return Ok(HirAccessorFieldV1(owner_module: owner_module, owner_name: owner.name,
+                owner_symbol: owner.symbol, field_name: field.name, field_symbol: field.symbol,
+                field_index: field_index,
+                receiver_type: HirType(kind: HirTypeKind.Named(owner.symbol, []), span: owner.span),
+                field_type: field.type_))
+    Err("E-AOP-FIELD-OWNER: selected field does not belong to the resolved declaration")
