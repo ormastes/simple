@@ -12,6 +12,9 @@ use os.kernel.scheduler.scheduler.{Scheduler}
 use os.kernel.ipc.ipc.{IpcManager}
 use os.kernel.types.task_types.{TaskPriority, TaskId}
 use os.kernel.arch.arch_context.{Architecture}
+use os.kernel.arch.mod.{get_arch}
+use test.helpers.host_arch_elf_fixture.{host_elf_machine}
+
 use os.services.workload.workload_manifest.{
     WorkloadIdentitySpec, ImageSpec, AuthorityRequest, IsolationSpec,
     ResourceBudget, LifecyclePolicy, ObservabilityPolicy, WorkloadManifest,
@@ -38,7 +41,7 @@ fn _push_u64(buf: [u8], value: i64) -> [u8]:
     out = _push_u32(out, (value >> 32) & 0xFFFFFFFF)
     out
 
-fn _minimal_x86_64_elf() -> [u8]:
+fn _minimal_host_elf() -> [u8]:
     var bytes: [u8] = []
     bytes.push(0x7F.to_u8())
     bytes.push(0x45.to_u8())
@@ -52,7 +55,7 @@ fn _minimal_x86_64_elf() -> [u8]:
     while bytes.len() < 16:
         bytes.push(0.to_u8())
     bytes = _push_u16(bytes, 2)
-    bytes = _push_u16(bytes, 62)
+    bytes = _push_u16(bytes, host_elf_machine())
     bytes = _push_u32(bytes, 1)
     bytes = _push_u64(bytes, 0x400000)
     bytes = _push_u64(bytes, 64)
@@ -158,7 +161,7 @@ fn expect_reconciled_exit(result: SimpleOsContainerExitV1,
 
 describe "SimpleOS managed container provider adapter":
     it "binds a real task and reconciles only its kernel-observed exit":
-        val bytes = _minimal_x86_64_elf()
+        val bytes = _minimal_host_elf()
         val policy = given_compiled_container_policy(bytes, "/container/worker")
         var provider = _provider_for_image(workload_image_blake3_hash(bytes))
         val scheduler = _live_parent_scheduler()
@@ -166,11 +169,11 @@ describe "SimpleOS managed container provider adapter":
         expect(parent != nil).to_be(true)
         val context = kernel_call_context_from_task(parent.unwrap())
         val started = provider.start_into_scheduler(context, policy, bytes,
-            Architecture.X86_64, [], [], TaskPriority.Normal, scheduler)
+            get_arch(), [], [], TaskPriority.Normal, scheduler)
         expect_runtime_task_binding(started)
         val native_id = started.operation.state.identity.native_id
         val duplicate = provider.start_into_scheduler(context, policy, bytes,
-            Architecture.X86_64, [], [], TaskPriority.Normal, started.scheduler)
+            get_arch(), [], [], TaskPriority.Normal, started.scheduler)
         expect(duplicate.operation.reason).to_equal("attempt-already-started")
         var ipc = IpcManager.new()
         val pid = native_id.to_i64() ?? -1
@@ -188,7 +191,7 @@ describe "SimpleOS managed container provider adapter":
         expect(repeated.operation.state.exit_code).to_equal(23)
 
     it "rejects image and filesystem-policy drift without claiming a launch":
-        val bytes = _minimal_x86_64_elf()
+        val bytes = _minimal_host_elf()
         val policy = given_compiled_container_policy(bytes, "/container/worker")
         val scheduler = _live_parent_scheduler()
         val parent = scheduler.get_task(scheduler.get_current())
@@ -196,14 +199,14 @@ describe "SimpleOS managed container provider adapter":
         val context = kernel_call_context_from_task(parent.unwrap())
         var wrong_image = _provider_for_image("blake3:wrong-image")
         val rejected = wrong_image.start_into_scheduler(context, policy, bytes,
-            Architecture.X86_64, [], [], TaskPriority.Normal, scheduler)
+            get_arch(), [], [], TaskPriority.Normal, scheduler)
         expect(rejected.operation.status).to_equal("rejected")
         expect(rejected.operation.reason).to_equal("container image/policy hash mismatch")
         expect(rejected.operation.state.phase).to_equal("unknown")
         val wide = given_compiled_container_policy(bytes, "/")
         var provider = _provider_for_image(workload_image_blake3_hash(bytes))
         val denied = provider.start_into_scheduler(context, wide, bytes,
-            Architecture.X86_64, [], [], TaskPriority.Normal, rejected.scheduler)
+            get_arch(), [], [], TaskPriority.Normal, rejected.scheduler)
         expect(denied.operation.reason).to_equal("container filesystem/policy root mismatch")
         expect(denied.operation.state.identity.native_id).to_equal("")
 

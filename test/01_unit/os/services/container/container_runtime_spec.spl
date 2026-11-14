@@ -8,6 +8,9 @@ use os.kernel.scheduler.scheduler.{Scheduler}
 use os.kernel.ipc.ipc.{IpcManager}
 use os.kernel.types.task_types.{TaskPriority, TaskId}
 use os.kernel.arch.arch_context.{Architecture}
+use os.kernel.arch.mod.{get_arch}
+use test.helpers.host_arch_elf_fixture.{host_elf_machine}
+
 use os.services.workload.workload_manifest.{
     WorkloadIdentitySpec, ImageSpec, AuthorityRequest, IsolationSpec,
     ResourceBudget, LifecyclePolicy, ObservabilityPolicy, WorkloadManifest,
@@ -34,7 +37,7 @@ fn _push_u64(buf: [u8], value: i64) -> [u8]:
     out = _push_u32(out, (value >> 32) & 0xFFFFFFFF)
     out
 
-fn _minimal_x86_64_elf() -> [u8]:
+fn _minimal_host_elf() -> [u8]:
     var bytes: [u8] = []
     bytes.push(0x7F.to_u8())
     bytes.push(0x45.to_u8())
@@ -48,7 +51,7 @@ fn _minimal_x86_64_elf() -> [u8]:
     while bytes.len() < 16:
         bytes.push(0.to_u8())
     bytes = _push_u16(bytes, 2)
-    bytes = _push_u16(bytes, 62)
+    bytes = _push_u16(bytes, host_elf_machine())
     bytes = _push_u32(bytes, 1)
     bytes = _push_u64(bytes, 0x400080)
     bytes = _push_u64(bytes, 64)
@@ -127,7 +130,7 @@ describe "container runtime bridge":
         expect(runtime.runtime_pid_of(idx)).to_equal(0)
 
     it "rejects a policy that is not bound to the container image":
-        val bytes = _minimal_x86_64_elf()
+        val bytes = _minimal_host_elf()
         val compiled = compile_workload_manifest(_policy(bytes))
         var world = ContainerWorld.new()
         val idx = world.sys_create(
@@ -141,14 +144,14 @@ describe "container runtime bridge":
         if parent != nil and compiled.is_ok():
             val started = runtime.start_into_scheduler(
                 idx, kernel_call_context_from_task(parent), compiled.unwrap(), bytes,
-                Architecture.X86_64, [], [], TaskPriority.Normal, scheduler)
+                get_arch(), [], [], TaskPriority.Normal, scheduler)
             expect(started.pid).to_equal(-13)
             expect(started.reason).to_equal("container image/policy hash mismatch")
             expect(runtime.is_live(idx)).to_equal(false)
             expect(world.lifecycle_state(idx)).to_equal("created")
 
     it "rejects a policy filesystem root wider than the container view":
-        val bytes = _minimal_x86_64_elf()
+        val bytes = _minimal_host_elf()
         var policy = _policy(bytes)
         policy.isolation.filesystem_view = "/"
         val compiled = compile_workload_manifest(policy)
@@ -163,13 +166,13 @@ describe "container runtime bridge":
         if parent != nil and compiled.is_ok():
             val started = runtime.start_into_scheduler(
                 idx, kernel_call_context_from_task(parent), compiled.unwrap(), bytes,
-                Architecture.X86_64, [], [], TaskPriority.Normal, scheduler)
+                get_arch(), [], [], TaskPriority.Normal, scheduler)
             expect(started.pid).to_equal(-13)
             expect(started.reason).to_equal("container filesystem/policy root mismatch")
             expect(runtime.is_live(idx)).to_equal(false)
 
     it "marks running only after a hash-bound policy creates a live task":
-        val bytes = _minimal_x86_64_elf()
+        val bytes = _minimal_host_elf()
         val policy = _policy(bytes)
         val compiled = compile_workload_manifest(policy)
         var world = ContainerWorld.new()
@@ -183,7 +186,7 @@ describe "container runtime bridge":
         if parent != nil and compiled.is_ok():
             val started = runtime.start_into_scheduler(
                 idx, kernel_call_context_from_task(parent), compiled.unwrap(), bytes,
-                Architecture.X86_64, [], [], TaskPriority.Normal, scheduler)
+                get_arch(), [], [], TaskPriority.Normal, scheduler)
             expect(started.pid).to_be_greater_than(0)
             expect(started.reason).to_equal("")
             expect(runtime.is_live(idx)).to_equal(true)

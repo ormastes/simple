@@ -19,3 +19,56 @@ Choose one: (a) the specs build a minimal ELF for `get_arch()`; or (b) the owner
 approves an arch tag (only `# @platform:` OS tags exist). Do not skip these specs
 without approval. Separately, the cleanup `CloseFailed` after an arch rejection
 should be checked; a rejected adoption should release cleanly.
+
+## Update 2026-11-15 (work/container-launch-host-arch-20261115)
+Fixed (this change):
+- Spec fixtures now build an ELF whose `e_machine` matches `get_arch()`
+  (`_minimal_host_elf` / `_host_elf_machine`) and launch with `get_arch()`;
+  the guest-dispatch drift case uses `_foreign_arch()`. Assertions unchanged.
+- Product: arm64 arch text mismatch. `managed_image_authority_v1.spl` emitted
+  `"arm64"` and `scheduler_executable_adoption.spl:140` expected `"arm64"`,
+  but the loader contract (`executable_load_plan_v1.spl:146`,
+  `artifact_manifest.spl:255`) only accepts `"aarch64"`, so every arm64
+  managed issue failed with -8. Both now use `"aarch64"`.
+- Product (arch-independent): `managed_image_authority_v1.spl` handed adoption
+  an already-`Validated` consumer; `executable_prepare_image_v1` re-plans and
+  requires `Ready`, so it always failed `InvalidConsumer`. It now validates a
+  plan but returns the Ready consumer. The earlier claim that an x86_64 host
+  "would reach publication" was unverified and is withdrawn.
+
+Cleanup bug FIXED (follow-up, same branch):
+- Root cause refined: drivers are value structs in `DriverInstance`; a driver
+  method that mutates scalar state (RamFS `next_fd`, `fd_table` reassignment)
+  on the matched copy was lost. `open_for_execute` / `open_stable_snapshot`
+  additionally ran every driver call on a `val entry = self.mounts[i]` copy, so
+  the execute fd never reached the mounted driver and `close` returned
+  `InvalidArg` -> loader `CloseFailed`.
+- Fix: mutating dispatch functions in
+  `src/lib/nogc_async_mut/fs_driver/mount_driver_dispatch.spl` now return
+  `(DriverInstance, Result)`; `MountTable._wb_*` helpers
+  (`mount_table.spl`) store the updated driver back into `mounts[i].driver`.
+  All 36 call sites go through them, including the two `entry` copy blocks and
+  `close_stable_snapshot`.
+- Specs: reproducer + generalization
+  `test/01_unit/lib/fs_driver/mount_table_driver_writeback_spec.spl`
+  (execute open->close, ordinary open/double-close, mkdir persistence, two
+  independent execute handles): 2/4 before -> 4/4 after. Arch/consumer fixes:
+  `test/01_unit/os/kernel/loader/managed_image_authority_host_arch_spec.spl`
+  3/3. Shared fixture: `test/helpers/host_arch_elf_fixture.spl`.
+- After the fix a rejected launch releases cleanly (`release -> Ok(())`).
+- fs_driver specs (`test/01_unit/fs_driver/*`, `test/01_unit/lib/fs_driver/*`):
+  identical verdicts before/after except the new spec; pre-existing failures
+  unchanged (mount_table_test 15/27, mount_table_resolve_test 1/6,
+  mount_table_execute_path_open 6/10, stable_file_snapshot 9/11,
+  nvfs_pure_simple 7/12, nvfs_streaming_ingest_adapter 0/5 and _source 0/1,
+  file_block_device_owner_contract 0/3, fat32_cache and file_block_device
+  0 executed).
+
+Still open (next blocker, arm64 hosted only):
+- The four launch specs now fail at `AddressSpaceUnavailable`:
+  `scheduler_executable_adoption.spl` `_address_space_can_map(space)` after
+  `create_user_address_space()`, which on `@cfg(arm64)`
+  (`src/os/kernel/memory/user_address_space.spl:46`) calls the kernel extern
+  `rt_arm64_user_as_create`, which has no hosted backing. Unblock: a hosted
+  arm64 user-address-space provider (like the x86_64 `vmm` path), or run these
+  specs on an x86_64 host. Verdicts unchanged at 2/5, 4/5, 2/3, 2/3.

@@ -10,6 +10,9 @@ use os.kernel.security.execution_context.{kernel_call_context_from_task}
 use os.kernel.scheduler.scheduler.{Scheduler}
 use os.kernel.types.task_types.{BlockReason, TaskId, TaskPriority}
 use os.kernel.arch.arch_context.{Architecture}
+use os.kernel.arch.mod.{get_arch}
+use test.helpers.host_arch_elf_fixture.{host_elf_machine}
+
 use os.services.workload.workload_manifest.{
     WorkloadIdentitySpec, ImageSpec, AuthorityRequest, IsolationSpec,
     ResourceBudget, LifecyclePolicy, ObservabilityPolicy, WorkloadManifest,
@@ -38,7 +41,7 @@ fn _push_u64(buf: [u8], value: i64) -> [u8]:
 
 # One page-aligned R-X PT_LOAD so the staged image passes the authenticated
 # load-plan checks (file_offset and virtual_address must agree modulo 4096).
-fn _minimal_x86_64_elf() -> [u8]:
+fn _minimal_host_elf() -> [u8]:
     var bytes: [u8] = []
     bytes.push(0x7F.to_u8())
     bytes.push(0x45.to_u8())
@@ -52,7 +55,7 @@ fn _minimal_x86_64_elf() -> [u8]:
     while bytes.len() < 16:
         bytes.push(0.to_u8())
     bytes = _push_u16(bytes, 2)
-    bytes = _push_u16(bytes, 62)
+    bytes = _push_u16(bytes, host_elf_machine())
     bytes = _push_u32(bytes, 1)
     bytes = _push_u64(bytes, 0x400000)
     bytes = _push_u64(bytes, 64)
@@ -80,8 +83,8 @@ fn _minimal_x86_64_elf() -> [u8]:
     bytes.push(0x90.to_u8())
     bytes
 
-fn _tampered_x86_64_elf() -> [u8]:
-    var bytes = _minimal_x86_64_elf()
+fn _tampered_host_elf() -> [u8]:
+    var bytes = _minimal_host_elf()
     bytes[0x1000] = 0xCC.to_u8()
     bytes
 
@@ -128,7 +131,7 @@ fn _ensure_authority_registry():
 describe "managed workload launch":
     it "creates a managed child from a compiled policy through one-use loader authority":
         _ensure_authority_registry()
-        val bytes = _minimal_x86_64_elf()
+        val bytes = _minimal_host_elf()
         val compiled = compile_workload_manifest(_policy(bytes))
         expect(compiled.is_ok()).to_equal(true)
         var scheduler = _live_parent_scheduler()
@@ -136,7 +139,7 @@ describe "managed workload launch":
         if parent != nil and compiled.is_ok():
             val prepared = launch_compiled_workload_into_scheduler(
                 kernel_call_context_from_task(parent), compiled.unwrap(), bytes,
-                Architecture.X86_64, [], [], TaskPriority.Normal, scheduler)
+                get_arch(), [], [], TaskPriority.Normal, scheduler)
             expect(prepared.pid).to_be_greater_than(0)
             val child = prepared.scheduler.get_task(TaskId(id: prepared.pid as u64))
             if child != nil:
@@ -152,7 +155,7 @@ describe "managed workload launch":
 
     it "rejects a policy whose binding is changed after compilation":
         _ensure_authority_registry()
-        val bytes = _minimal_x86_64_elf()
+        val bytes = _minimal_host_elf()
         val compiled = compile_workload_manifest(_policy(bytes))
         var scheduler = _live_parent_scheduler()
         val parent = scheduler.get_task(scheduler.get_current())
@@ -161,42 +164,42 @@ describe "managed workload launch":
             policy.spawn_spec.image_hash = "blake3:0000000000000000000000000000000000000000000000000000000000000000"
             val prepared = launch_compiled_workload_into_scheduler(
                 kernel_call_context_from_task(parent), policy, bytes,
-                Architecture.X86_64, [], [], TaskPriority.Normal, scheduler)
+                get_arch(), [], [], TaskPriority.Normal, scheduler)
             expect(prepared.pid).to_equal(-13)
 
     it "rejects bytes that do not match the compiled spawn_spec digest":
         _ensure_authority_registry()
-        val bytes = _minimal_x86_64_elf()
+        val bytes = _minimal_host_elf()
         val compiled = compile_workload_manifest(_policy(bytes))
         var scheduler = _live_parent_scheduler()
         val parent = scheduler.get_task(scheduler.get_current())
         if parent != nil and compiled.is_ok():
             val prepared = launch_compiled_workload_into_scheduler(
                 kernel_call_context_from_task(parent), compiled.unwrap(),
-                _tampered_x86_64_elf(),
-                Architecture.X86_64, [], [], TaskPriority.Normal, scheduler)
+                _tampered_host_elf(),
+                get_arch(), [], [], TaskPriority.Normal, scheduler)
             expect(prepared.pid).to_equal(-13)
 
     it "issues an independent one-use authority per launch attempt":
         _ensure_authority_registry()
-        val bytes = _minimal_x86_64_elf()
+        val bytes = _minimal_host_elf()
         val compiled = compile_workload_manifest(_policy(bytes))
         var scheduler = _live_parent_scheduler()
         val parent = scheduler.get_task(scheduler.get_current())
         if parent != nil and compiled.is_ok():
             val first = launch_compiled_workload_into_scheduler(
                 kernel_call_context_from_task(parent), compiled.unwrap(), bytes,
-                Architecture.X86_64, [], [], TaskPriority.Normal, scheduler)
+                get_arch(), [], [], TaskPriority.Normal, scheduler)
             expect(first.pid).to_be_greater_than(0)
             val second = launch_compiled_workload_into_scheduler(
                 kernel_call_context_from_task(parent), compiled.unwrap(), bytes,
-                Architecture.X86_64, [], [], TaskPriority.Normal, first.scheduler)
+                get_arch(), [], [], TaskPriority.Normal, first.scheduler)
             expect(second.pid).to_be_greater_than(0)
             expect(second.pid).to_not_equal(first.pid)
 
     it "charges descendants against the managed workload process limit":
         _ensure_authority_registry()
-        val bytes = _minimal_x86_64_elf()
+        val bytes = _minimal_host_elf()
         val compiled = compile_workload_manifest(_policy_with_limit(bytes, 1u64))
         var scheduler = _live_parent_scheduler()
         val root_id = scheduler.get_current()
@@ -204,7 +207,7 @@ describe "managed workload launch":
         if root != nil and compiled.is_ok():
             val first = launch_compiled_workload_into_scheduler(
                 kernel_call_context_from_task(root), compiled.unwrap(), bytes,
-                Architecture.X86_64, [], [], TaskPriority.High, scheduler)
+                get_arch(), [], [], TaskPriority.High, scheduler)
             expect(first.pid).to_be_greater_than(0)
             var child_scheduler = first.scheduler
             child_scheduler.block_task(root_id, BlockReason.Sleep(until_ns: 99u64))
@@ -214,9 +217,9 @@ describe "managed workload launch":
                 expect(child.id.id).to_equal(first.pid as u64)
                 val one = launch_compiled_workload_into_scheduler(
                     kernel_call_context_from_task(child), compiled.unwrap(), bytes,
-                    Architecture.X86_64, [], [], TaskPriority.Normal, child_scheduler)
+                    get_arch(), [], [], TaskPriority.Normal, child_scheduler)
                 expect(one.pid).to_be_greater_than(0)
                 val two = launch_compiled_workload_into_scheduler(
                     kernel_call_context_from_task(child), compiled.unwrap(), bytes,
-                    Architecture.X86_64, [], [], TaskPriority.Normal, one.scheduler)
+                    get_arch(), [], [], TaskPriority.Normal, one.scheduler)
                 expect(two.pid).to_equal(-11)
