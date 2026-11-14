@@ -21,6 +21,7 @@ New externs, both Rust lanes, one shared implementation in
 |---|---|
 | `rt_pty_spawn_exec_v1(handle, program, args, cwd, env) -> pid` | literal `execve` (no shell fallback); argv after argv[0]; `cwd` "" inherits; env `+NAME=VALUE`/`-NAME` applied to a copy (parent env untouched); all C strings built before `fork`; chdir/exec failure exits 127 |
 | `rt_pty_write_bytes_v1(handle, [u8]) -> n` | nonblocking raw write; 0 = queue full, -1 failure |
+| (spawn failure) | a close-on-exec status pipe carries the child's chdir/exec errno; the parent reaps that child and returns -1, so no pane is published for a child that never reached its program |
 | `rt_pty_exit_code_v1(handle) -> code` | exit code / 128+signal, -1 running, -2 no child; status is captured by whichever `waitpid` reaps it |
 
 - Compiled lane: `rt_pty_*_v1` `#[no_mangle]` in `runtime/src/value/pty.rs`.
@@ -44,12 +45,20 @@ New externs, both Rust lanes, one shared implementation in
 | `smux_configured_launch_spec.spl` | 0/3 | 1/3 (Shell case green) |
 | `smux_literal_input_spec.spl` | 0/3 | 0/3 |
 
-Reproducing: the configured Shell example. Generalization (Rust):
+| `sosix_pty_structured_launch_spec.spl` (new) | — | 2/2 |
+
+Reproducing: the configured Shell example. Generalization (Simple, interpreter
+lane): `test/03_system/tools/sosix_pty_structured_launch_spec.spl` — Exec with
+a metacharacter argv, cwd, env Set + Remove, raw NUL/0x80/0xff, exit code 7;
+and refusal of a missing cwd / program / invalid env name with the PTY still
+spawnable afterwards. It caught a second defect: the interpreter passes `[u8]`
+as packed `Value::ByteArray`, which the first cut rejected (-1). Generalization (Rust):
 `value::pty::tests::pty_exec_request_is_literal_and_reports_exit_status`
 (metacharacter argv, cwd, env set/remove, parent env untouched, raw
 0x00/0x80/0xff through the PTY, exit code 7 after reap) and
-`pty_exec_request_rejects_invalid_fields`. `cargo test -p simple-runtime --lib
-value::pty`: 11 passed.
+`pty_exec_request_rejects_invalid_fields`,
+`pty_spawn_exec_reports_chdir_and_exec_failure`. `cargo test -p simple-runtime
+--lib value::pty`: 12 passed. Windows cfg arms were not compiled here.
 
 ## Remaining (unblock conditions)
 

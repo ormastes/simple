@@ -416,10 +416,64 @@ pub fn pty_exec_request(program: &str, args: &[String], cwd: &str, env: &[String
 }
 
 /// Forks a session-leader child on `slave_fd` that execs `request` exactly
-/// (no shell fallback). The parent closes `slave_fd`. Returns the pid or -1.
-/// A child whose chdir or exec fails exits 127.
+/// (no shell fallback). Returns the pid, or -1 when fork, chdir or exec
+/// failed: a close-on-exec status pipe carries the child's errno, and a child
+/// that never reached its program is reaped here, so no pane is published for
+/// it. On success the parent closes `slave_fd`; on failure it stays open for
+/// the caller's close.
 #[cfg(unix)]
 pub fn fork_pty_exec(master_fd: i32, slave_fd: i32, request: &PtyExecRequest) -> libc::pid_t {
+    let mut status_pipe = [-1 as libc::c_int; 2];
+    if unsafe { libc::pipe(status_pipe.as_mut_ptr()) } != 0 {
+        return -1;
+    }
+    set_pty_fd_cloexec(status_pipe[0]);
+    set_pty_fd_cloexec(status_pipe[1]);
+    let pid = fork_pty_exec_with_status(master_fd, slave_fd, request, status_pipe[1]);
+    unsafe {
+        libc::close(status_pipe[1]);
+    }
+    if pid < 0 {
+        unsafe {
+            libc::close(status_pipe[0]);
+        }
+        return -1;
+    }
+    let mut errno_bytes = [0u8; 4];
+    let read = loop {
+        let n = unsafe { libc::read(status_pipe[0], errno_bytes.as_mut_ptr().cast(), errno_bytes.len()) };
+        if n < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+            continue;
+        }
+        break n;
+    };
+    unsafe {
+        libc::close(status_pipe[0]);
+    }
+    if read == 0 {
+        // EOF: exec succeeded and closed the close-on-exec write end.
+        unsafe {
+            libc::close(slave_fd);
+        }
+        return pid;
+    }
+    loop {
+        let mut status = 0;
+        let waited = unsafe { libc::waitpid(pid, &mut status, 0) };
+        if waited == pid || (waited < 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR)) {
+            break;
+        }
+    }
+    -1
+}
+
+#[cfg(unix)]
+fn fork_pty_exec_with_status(
+    master_fd: i32,
+    slave_fd: i32,
+    request: &PtyExecRequest,
+    status_fd: libc::c_int,
+) -> libc::pid_t {
     let argv: Vec<*const libc::c_char> = request
         .argv
         .iter()
@@ -457,16 +511,38 @@ pub fn fork_pty_exec(master_fd: i32, slave_fd: i32, request: &PtyExecRequest) ->
             libc::signal(libc::SIGTERM, libc::SIG_DFL);
             libc::signal(libc::SIGPIPE, libc::SIG_DFL);
             libc::signal(libc::SIGHUP, libc::SIG_DFL);
+            let report = |status_fd: libc::c_int| {
+                let errno = *libc_errno_location();
+                let bytes = errno.to_ne_bytes();
+                libc::write(status_fd, bytes.as_ptr().cast(), bytes.len());
+                libc::_exit(127);
+            };
             if let Some(cwd) = &request.cwd {
                 if libc::chdir(cwd.as_ptr()) != 0 {
-                    libc::_exit(127);
+                    report(status_fd);
                 }
             }
             libc::execve(request.program.as_ptr(), argv.as_ptr(), envp.as_ptr());
-            libc::_exit(127);
+            report(status_fd);
         }
-        libc::close(slave_fd);
         pid
+    }
+}
+
+#[cfg(all(unix, any(target_os = "macos", target_os = "ios", target_os = "freebsd")))]
+unsafe fn libc_errno_location() -> *mut libc::c_int {
+    libc::__error()
+}
+
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "freebsd"))))]
+unsafe fn libc_errno_location() -> *mut libc::c_int {
+    #[cfg(any(target_os = "openbsd", target_os = "netbsd", target_os = "android"))]
+    {
+        libc::__errno()
+    }
+    #[cfg(not(any(target_os = "openbsd", target_os = "netbsd", target_os = "android")))]
+    {
+        libc::__errno_location()
     }
 }
 
@@ -1654,6 +1730,23 @@ mod tests {
         assert!(pty_exec_request("/bin/sh", &[], "", &["-A=B".to_string()]).is_none());
         assert!(pty_exec_request("/bin/sh", &[], "", &["?A".to_string()]).is_none());
         assert!(pty_exec_request("no-such-program-simple-pty", &[], "", &[]).is_none());
+    }
+
+    /// A child that cannot reach its program is a failed spawn (-1), reaped,
+    /// never a published pid whose child exits 127; the PTY stays spawnable.
+    #[test]
+    #[cfg(unix)]
+    fn pty_spawn_exec_reports_chdir_and_exec_failure() {
+        let handle = pty_process::open(24, 80);
+        assert!(handle >= 0);
+        let bad_cwd = pty_exec_request("/bin/sh", &[], "/no/such/dir/simple-pty", &[]).expect("request");
+        assert_eq!(pty_process::spawn_exec(handle, &bad_cwd), -1);
+        let bad_exec = pty_exec_request("/no/such/simple-pty-program", &[], "", &[]).expect("request");
+        assert_eq!(pty_process::spawn_exec(handle, &bad_exec), -1);
+        assert_eq!(pty_exit_code(handle), -2);
+        let good = pty_exec_request("/bin/sh", &["-c".to_string(), "exit 3".to_string()], "", &[]).expect("request");
+        assert!(pty_process::spawn_exec(handle, &good) > 0);
+        let _ = rt_pty_close(handle as i64);
     }
 
     #[test]

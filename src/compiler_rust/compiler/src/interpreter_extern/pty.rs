@@ -80,6 +80,8 @@ pub fn rt_pty_spawn_exec_v1(args: &[Value]) -> Result<Value, CompileError> {
 pub fn rt_pty_write_bytes_v1(args: &[Value]) -> Result<Value, CompileError> {
     let handle = args.first().and_then(|v| v.as_int().ok()).unwrap_or(-1);
     let bytes: Option<Vec<u8>> = match args.get(1) {
+        // `[u8]` is usually the packed byte representation in the interpreter.
+        Some(Value::ByteArray(packed)) | Some(Value::FrozenByteArray(packed)) => Some(packed.as_slice().to_vec()),
         Some(Value::Array(items)) => items
             .iter()
             .map(|item| item.as_int().ok().filter(|b| (0..=255).contains(b)).map(|b| b as u8))
