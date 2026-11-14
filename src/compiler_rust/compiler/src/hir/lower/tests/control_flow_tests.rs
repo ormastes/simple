@@ -1552,6 +1552,40 @@ fn test_statement_match_without_wildcard_stays_silent() {
     );
 }
 
+/// The implicit tail `match` of a function with a declared non-void return is
+/// its return value, so exhausting the arms fails closed like the `val` form
+/// (the doc's original repro, `fn pick(s: text) -> i64: match s: ..`,
+/// printed 0 rc=0). seed_value_match_no_arm_yields_nil_2026-11-02.
+#[test]
+fn test_tail_match_without_wildcard_fails_closed() {
+    let source = "fn pick(s: text) -> i64:\n    match s:\n        case \"a\": 1\n        case \"b\": 2\n";
+    let module = parse_and_lower(source).unwrap();
+    let func = module.functions.iter().find(|f| f.name == "pick").unwrap();
+    let repr = format!("{:?}", func.body);
+    assert!(
+        repr.contains("rt_panic") && repr.contains("match expression exhausted"),
+        "exhausted tail match must lower to rt_panic: {repr}"
+    );
+}
+
+/// A tail match with a wildcard never reaches the exhaustion path, and a tail
+/// match of a function with no declared return keeps the silent fall-through.
+#[test]
+fn test_tail_match_with_wildcard_or_void_has_no_exhaustion_panic() {
+    for source in [
+        "fn pick(s: text) -> i64:\n    match s:\n        case \"a\": 1\n        case _: 0\n",
+        "fn run(n: i64):\n    match n:\n        case 1: print \"one\"\n",
+    ] {
+        let module = parse_and_lower(source).unwrap();
+        let func = module.functions.iter().find(|f| f.name == "pick" || f.name == "run").unwrap();
+        let repr = format!("{:?}", func.body);
+        assert!(
+            !repr.contains("match expression exhausted"),
+            "tail match must not carry an exhaustion panic here: {repr}"
+        );
+    }
+}
+
 /// `?.` used to fall through the lenient catch-all and lower to a bare `Nil`
 /// under the JIT, so every safe-navigation read answered nil. It must lower
 /// to a subject binding plus a presence-tested `If` whose else edge is nil.

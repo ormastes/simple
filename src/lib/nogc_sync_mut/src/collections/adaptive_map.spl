@@ -15,6 +15,20 @@ use std.nogc_sync_mut.src.collections.adaptive_text_set.{
     adaptive_set_workload_profile_matches
 }
 
+# Typed-param identities (callable-return-loss workaround, same shape as
+# simple_ring.spl's _as_*_result_v1): the mono-specialized
+# `self.hash_entries.entries()` / `self.storage_entries()` calls carry no
+# computed type, so a plain annotated binding loses its annotation and the
+# for-in sees an I64 placeholder iterable. The typed parameter types the
+# argument expression. FREE fns, not methods: a method on the generic struct
+# is itself a mono-specialized generic-method call and loses the type the
+# same way (measured: method wrapper still fails, f4-boot probe).
+fn as_entry_pairs_v1<K, V>(pairs: [(K, V)]) -> [(K, V)]:
+    pairs
+
+fn as_entries_v1<K, V>(entries: [OrderedMapEntry<K, V>]) -> [OrderedMapEntry<K, V>]:
+    entries
+
 struct AdaptiveMap<K, V> where K: Hash + Eq + Ord:
     profile: AdaptiveSetProfile
     attribute: AdaptiveSetAttribute
@@ -218,7 +232,8 @@ struct AdaptiveMap<K, V> where K: Hash + Eq + Ord:
             case AdaptiveSetAlgorithm.Ordered: return self.ordered_entries.entries()
             case AdaptiveSetAlgorithm.Hash:
                 var result: [OrderedMapEntry<K, V>] = []
-                for pair in self.hash_entries.entries():
+                val pairs = as_entry_pairs_v1(self.hash_entries.entries())
+                for pair in pairs:
                     result.push(OrderedMapEntry(key: pair[0], value: pair[1]))
                 return result
         []
@@ -233,7 +248,7 @@ struct AdaptiveMap<K, V> where K: Hash + Eq + Ord:
             for entry in self.fallback_order_entries:
                 keys.push(entry.key)
             return keys
-        val entries = self.storage_entries()
+        val entries = as_entries_v1(self.storage_entries())
         for entry in entries:
             if not ordered_key_native_usable(entry.key):
                 # Native order cannot compare this key. Keep iteration usable
@@ -270,7 +285,7 @@ struct AdaptiveMap<K, V> where K: Hash + Eq + Ord:
             for entry in self.fallback_order_entries:
                 ordered_fallback.push(entry)
             return ordered_fallback
-        val entries = self.storage_entries()
+        val entries = as_entries_v1(self.storage_entries())
         for entry in entries:
             if not ordered_key_native_usable(entry.key):
                 return entries
@@ -422,7 +437,8 @@ struct AdaptiveMap<K, V> where K: Hash + Eq + Ord:
             self.fallback_order_entries = order
             if replaced_unsupported_key and key_has_native_order:
                 var unsupported_remains = false
-                for entry in self.storage_entries():
+                val entries = as_entries_v1(self.storage_entries())
+                for entry in entries:
                     if not ordered_key_native_usable(entry.key):
                         unsupported_remains = true
                         break
@@ -451,7 +467,8 @@ struct AdaptiveMap<K, V> where K: Hash + Eq + Ord:
                     removed_unsupported_key = not ordered_key_native_usable(current.key)
                     break
         elif self.ordered_key_rejected:
-            for entry in self.storage_entries():
+            val entries = as_entries_v1(self.storage_entries())
+            for entry in entries:
                 if entry.key == key:
                     removed_unsupported_key = not ordered_key_native_usable(entry.key)
                     break
@@ -473,7 +490,8 @@ struct AdaptiveMap<K, V> where K: Hash + Eq + Ord:
         self.size = self.size - 1
         var unsupported_remains = false
         if removed_unsupported_key:
-            for entry in self.storage_entries():
+            val entries = as_entries_v1(self.storage_entries())
+            for entry in entries:
                 if not ordered_key_native_usable(entry.key):
                     unsupported_remains = true
                     break
@@ -605,7 +623,8 @@ struct AdaptiveMap<K, V> where K: Hash + Eq + Ord:
                 not self.prefer_hash_from_profile:
             return
         var rebuilt: Map<K, V> = Map.new()
-        for entry in self.storage_entries():
+        val rebuilt_entries = as_entries_v1(self.storage_entries())
+        for entry in rebuilt_entries:
             rebuilt.insert(entry.key, entry.value)
         self.hash_entries = rebuilt
         self.linear_entries = []
@@ -620,7 +639,7 @@ struct AdaptiveMap<K, V> where K: Hash + Eq + Ord:
             return
         if self.attribute == AdaptiveSetAttribute.Auto and self.ordered_key_rejected:
             return
-        val entries = self.storage_entries()
+        val entries = as_entries_v1(self.storage_entries())
         for entry in entries:
             if not ordered_key_native_usable(entry.key):
                 if self.attribute == AdaptiveSetAttribute.Auto:

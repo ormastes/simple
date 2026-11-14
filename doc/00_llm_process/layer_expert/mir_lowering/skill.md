@@ -751,3 +751,16 @@ that only reads `Const` operands sees a plain local there. The s3_fable44
 (cranelift + llvm). Spec `test/01_unit/compiler/50.mir/struct_i64_field_ctor_spec.spl`;
 native twin `test/fixtures/compiler/struct_i64_field_ctor_native.spl`; bug
 `native_struct_i64_field_ctor_reads_wrong_value_2026-11-05`.
+
+## 2026-11-14 — seed JIT reclamation design (options, not implemented)
+
+The seed JIT frees heap objects at one lowering site only (`lowering_stmt.rs`, the
+`array_move.rs` field-release proof); every other array, string, dict, tuple, closure,
+enum and `rt_alloc` struct block lives until exit, and struct blocks are invisible to the
+`rt_heap_*` counters. The JIT also aliases arrays where the interpreter copies (call
+return, struct-literal argument, capture, global write, push into an outer array, plain
+assign, tuple, and seven more measured forms), so a release is safe only for a proven-unique local. Measured per-operation
+leak table, the aliasing matrix, the options (proven-unique block-end release, refcount,
+regions, do nothing, tracing GC) and the recommended first slice are in
+`doc/05_design/compiler/jit_memory/seed_jit_array_reclamation.md`. Read it before
+emitting any `rt_*_free` from lowering; `emit_function_drops` is not a safe hook.
