@@ -248,14 +248,25 @@ fn overload_score(func: &FunctionDef, values: &[Value]) -> Option<usize> {
 }
 
 /// Reject a call that reaches a private top-level `fn` of another directory.
-fn gate_private_call(name: &str, func: &Arc<FunctionDef>) -> Result<(), CompileError> {
+/// Applied wherever the CALLER names the function (bare, import-bound,
+/// module-qualified), never at callee entry: a module may hand its own
+/// private fn to anyone as a value. The caller is `private_call_caller()`:
+/// a module top level, a function's owner, or the entry file
+/// (private_call_gate_skips_import_bound_and_entry_calls_2026-11-14).
+pub(crate) fn gate_private_call(name: &str, func: &Arc<FunctionDef>) -> Result<(), CompileError> {
     if !matches!(func.visibility, simple_parser::ast::Visibility::Private) {
         return Ok(());
     }
-    if let (Some(owner), Some(cur)) = (function_module_owner(func), CURRENT_EXEC_MODULE.with(|c| c.borrow().clone())) {
-        crate::interpreter::interpreter_module::check_private_call_visibility(name, &owner, &cur)?;
+    let Some(owner) = function_module_owner(func) else {
+        return Ok(());
+    };
+    // The entry's own fns are never in the private registry; skip the
+    // caller lookup on that hot path.
+    if &*owner == "<entry>" {
+        return Ok(());
     }
-    Ok(())
+    let cur = crate::interpreter::interpreter_module::private_call_caller();
+    crate::interpreter::interpreter_module::check_private_call_visibility(name, &owner, &cur)
 }
 
 /// Identity-keyed lookup into `FUNCTION_MODULE_OWNER` (see its doc comment):
@@ -970,6 +981,10 @@ pub(crate) fn evaluate_call(
                 // call to m's definition; only when no such binding resolves
                 // does the historical score/tie selection below apply.
                 if let Some(func) = import_bound_candidate(name, functions, &evaluated_args) {
+                    // A glob import binds the name; it does not make it visible.
+                    // Judge the definition the binding resolved to (its own
+                    // name), not the call-site spelling.
+                    gate_private_call(&func.name, &func)?;
                     return core::exec_function_with_values_and_writeback(
                         &func,
                         evaluated_args,
@@ -1079,6 +1094,12 @@ pub(crate) fn evaluate_call(
         let env_fn_binding_shadows_flat = matches!(env.get(name), Some(Value::Function { .. }));
         if env_fn_binding_shadows_flat {
             if let Some(val) = env.get(name).cloned() {
+                // An env-bound import (notably `use m.{secret as s}`, which
+                // never enters FUNCTION_OVERLOADS) is gated by the def's own
+                // name; nested fns have no owner and pass.
+                if let Value::Function { def, .. } = &val {
+                    gate_private_call(&def.name, def)?;
+                }
                 if let Some(result) =
                     call_value_as_callable(val, args, env, functions, classes, enums, impl_methods)?
                 {
@@ -1202,6 +1223,8 @@ pub(crate) fn evaluate_call(
                 // Look up function in the module's exports
                 if let Some(func_val) = crate::interpreter::module_dict_get(&module_dict, field) {
                     if let Value::Function { def, captured_env, .. } = func_val {
+                        // Qualifying a private fn does not make it visible.
+                        gate_private_call(&def.name, &def)?;
                         let mut captured_env_clone = Env::clone(&captured_env);
                         return core::exec_function_with_captured_env(
                             &def,
@@ -2104,7 +2127,7 @@ pub(crate) fn evaluate_call(
         Value::BlockClosure { nodes, env: captured } => {
             let captured_clone = Env::clone(&captured);
             let _closure_origin =
-                crate::interpreter::interpreter_module::ClosureOriginGuard::enter(Some(captured.closure_in_test()));
+                crate::interpreter::interpreter_module::ClosureOriginGuard::enter_closure(&captured);
             block_execution::exec_block_closure(&nodes, &captured_clone, functions, classes, enums, impl_methods)
         }
         Value::Function { def, captured_env, .. } => {

@@ -1256,6 +1256,9 @@ pub(super) fn eval_call_expr(
                     _ => {
                         // Check if this is a key in the dict (module namespace access)
                         if let Some(value) = crate::interpreter::module_dict_get(map, field) {
+                            if let Value::Function { def, .. } = &value {
+                                crate::interpreter::interpreter_call::gate_private_call(&def.name, def)?;
+                            }
                             Ok(value)
                         } else {
                             // Try calling as a no-arg method (e.g., dict.keys, dict.values)

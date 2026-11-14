@@ -63,6 +63,7 @@ where
         env: captured,
     } = func
     {
+        let _closure_origin = crate::interpreter::interpreter_module::ClosureOriginGuard::enter_closure(&captured);
         process(&params, &body, &captured)
     } else {
         Err(crate::error::factory::expects_lambda(operation))
@@ -155,6 +156,7 @@ pub(crate) fn eval_array_reduce(
             body,
             env: captured,
         } => {
+            let _closure_origin = crate::interpreter::interpreter_module::ClosureOriginGuard::enter_closure(&captured);
             let mut acc = init;
             for item in arr {
                 crate::interpreter::check_execution_limit()?;
@@ -336,6 +338,7 @@ where
         env: captured,
     } = func
     {
+        let _closure_origin = crate::interpreter::interpreter_module::ClosureOriginGuard::enter_closure(&captured);
         process(&params, &body, &captured)
     } else {
         Err(crate::error::factory::expects_lambda(operation))
@@ -429,6 +432,7 @@ pub(crate) fn eval_dict_for_each(
         Value::Lambda { params, body, env } => (params, body, env),
         _ => return Err(crate::error::factory::expects_lambda("for_each")),
     };
+    let _closure_origin = crate::interpreter::interpreter_module::ClosureOriginGuard::enter_closure(&captured);
 
     // Layer in captured names the caller's scope does not already bind, so the
     // body can still READ its closure environment. A name the caller already
