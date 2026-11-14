@@ -1274,3 +1274,15 @@ Skia-vs-Simple-2D comparison sites write both buffers to
 (side by side -> tabs -> fit/scrollbars). New comparison code should call
 `compare_view_inspect` from `std.nogc_sync_mut.ui.compare_view_host`.
 Design and migrated sites: `doc/05_design/ui/web_diff/compare_view_inspection.md`.
+
+## 2026-11-14 — selector combinators, `:has()` with context, and the step budget
+The layout matcher (`simple_web_html_layout_renderer_core_selectors.spl`) has
+ONE An+B evaluator (`css_nth.spl`), `+` / `~` combinators, `:nth-*` (incl.
+`An+B of S`), contextual `:has()` and a backtracking right-to-left walk, on
+both the text and pre-parsed paths; every row is pinned against Chrome 159 in
+`test/01_unit/browser_engine/{structural_pseudo_class,nth_child_of_selector,selector_hardening}_chrome_parity_spec.spl`.
+Trap: CSS is untrusted, so one match is capped at 100,000 compound steps and
+exhaustion must fail CLOSED everywhere (never negate an exhausted `:has()`,
+never cache an answer computed while exhausted) —
+`selector_sibling_complexity_spec.spl`. Known residual limits:
+`doc/08_tracking/bug/web_selector_budget_residual_limits_2026-11-14.md`.
