@@ -168,6 +168,19 @@ cd <worktree> && SIMPLE_RUST_SEED_WARNING=0 SIMPLE_TIMEOUT_SECONDS=0 \
   is needed. A missing sibling shows up only as "backend library could not be opened".
 - **Compiler trap:** a bare `clang` on PATH may target MSVC (ROCm ships one);
   the script uses `$SIMPLE_MINGW_ROOT/bin/clang.exe` and checks `-dumpmachine`.
+## Pure-Simple runner (no llama.cpp)
+
+`src/lib/gc_async_mut/slang/model_executor/pure/`: `weights.spl` (safetensors),
+`tensor_ops.spl` (the single compute seam; a GPU provider replaces only this),
+`llama_forward.spl` (Llama-2 forward), `kv_cache.spl` (KvSession: per-layer K/V
+rows, prefix reuse, `positions_evaluated` counter), `tokenizer.spl`
+(SentencePiece-BPE from tokenizer.json). Not wired into the engine/server yet.
+Measured on the seed interpreter, stories15M, "Once upon a time": generated
+text matches llama.cpp greedy; about 0.12 tokens/s. Fixture
+`test/fixtures/slang_pure/stories15m_generate.spl`; system spec
+`slang_pure_kv_cache_spec.spl`.
+Seed pitfalls found: an f64 carried through `Result` + `?` is mis-unboxed (parse
+numbers after the `?`); tokenizer.json escapes include `\r`.
 
 ## Related
 
