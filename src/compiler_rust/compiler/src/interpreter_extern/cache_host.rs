@@ -467,6 +467,7 @@ mod tests {
         assert!(dispatch("rt_cache_host_authenticate_peer_v1", &[Value::Int(0)]).is_err());
     }
 
+    #[cfg(unix)]
     #[test]
     fn opens_a_real_root_and_reads_it_through_a_pinned_file_view() {
         let temp = tempfile::tempdir().unwrap();
@@ -511,6 +512,19 @@ mod tests {
         assert!(matches!(closed, Value::Bool(true)));
         let bad = dispatch("rt_file_view_pread_exact_v1", &[Value::Int(-1), Value::Int(0), Value::Int(0)]).unwrap();
         assert!(matches!(bad, Value::Nil));
+    }
+
+    /// Windows has only the ABI-complete fail-closed seam
+    /// (`windows_unsupported` in runtime/src/cache_host_authority_v1.rs): the
+    /// descriptor-anchored root cannot be opened, so even a real directory is
+    /// refused rather than emulated by pathname.
+    #[cfg(windows)]
+    #[test]
+    fn windows_open_root_fails_closed_even_for_a_real_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let root_text = temp.path().canonicalize().unwrap().to_string_lossy().to_string();
+        let handle = dispatch("rt_cache_host_open_root_v1", &[Value::text(root_text)]).unwrap();
+        assert_eq!(handle.as_int().unwrap(), -1);
     }
 
     #[test]
