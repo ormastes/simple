@@ -1,0 +1,55 @@
+# LLVM's native tuple ABI differs from the process provider's SplArray result.
+# Adapt only an explicitly declared, constant foreign process contract. Source
+# functions and unknown/indirect calls retain their original symbol authority.
+use compiler.mir.mir_instruction_support.{MirOperand, MirOperandKind, MirCallOrigin}
+use compiler.mir.mir_types.{MirType, MirTypeKind, MirConstValue, MirSignature}
+
+fn llvm_process_text_type_v1(type_: MirType) -> bool:
+    match type_.kind:
+        case MirTypeKind.Opaque(name): name == "str"
+        case _: false
+
+fn llvm_process_text_array_type_v1(type_: MirType) -> bool:
+    match type_.kind:
+        case MirTypeKind.Array(element, size):
+            size == 0 and llvm_process_text_type_v1(element)
+        case _: false
+
+fn llvm_process_logical_params_v1(parameters: [MirType], timed: bool) -> bool:
+    if parameters.len() != (if timed: 3 else: 2): return false
+    if not llvm_process_text_type_v1(parameters[0]): return false
+    if not llvm_process_text_array_type_v1(parameters[1]): return false
+    if timed and parameters[2].kind != MirTypeKind.I64: return false
+    true
+
+fn llvm_process_tuple_result_v1(type_: MirType) -> bool:
+    match type_.kind:
+        case MirTypeKind.Tuple(elements):
+            if elements.len() != 3: return false
+            if not llvm_process_text_type_v1(elements[0]): return false
+            if not llvm_process_text_type_v1(elements[1]): return false
+            elements[2].kind == MirTypeKind.I32 or elements[2].kind == MirTypeKind.I64
+        case _: false
+
+pub fn llvm_foreign_process_tuple_facade_v1(operand: MirOperand, physical_arguments: i64) -> text:
+    if operand.call_origin != MirCallOrigin.Foreign: return ""
+    match operand.kind:
+        case MirOperandKind.Const(MirConstValue.Str(name), type_):
+            if name != "rt_process_run" and name != "rt_process_run_timeout": return ""
+            val timed = name == "rt_process_run_timeout"
+            if physical_arguments != (if timed: 4 else: 3): return ""
+            match type_.kind:
+                case MirTypeKind.FuncPtr(signature):
+                    if signature.is_variadic or not llvm_process_tuple_result_v1(signature.return_type): return ""
+                    # The declared list is semantic text/[text]/timeout. The
+                    # call operands already contain the extra text length word.
+                    if signature.declared_params_known:
+                        if not llvm_process_logical_params_v1(signature.declared_params, timed): return ""
+                        if signature.params_known and not llvm_process_logical_params_v1(signature.params, timed): return ""
+                    elif signature.params_known:
+                        if not llvm_process_logical_params_v1(signature.params, timed): return ""
+                    else:
+                        return ""
+                    if timed: "rt_process_run_timeout_tuple" else: "rt_process_run_tuple"
+                case _: ""
+        case _: ""

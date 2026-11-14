@@ -1,0 +1,44 @@
+use std.spec.*
+use compiler.backend.llvm_foreign_process_tuple_v1.{llvm_foreign_process_tuple_facade_v1}
+use compiler.mir.mir_instruction_support.{MirOperand, MirOperandKind, MirCallOrigin}
+use compiler.mir.mir_types.{MirType, MirTypeKind, MirConstValue, MirSignature, LocalId}
+
+fn process_text_type() -> MirType:
+    MirType(kind: MirTypeKind.Opaque("str"))
+
+fn process_tuple_type() -> MirType:
+    MirType(kind: MirTypeKind.Tuple([process_text_type(), process_text_type(), MirType(kind: MirTypeKind.I32)]))
+
+fn process_params() -> [MirType]:
+    [process_text_type(), MirType(kind: MirTypeKind.Array(process_text_type(), 0)), MirType(kind: MirTypeKind.I64)]
+
+fn process_operand(name: text, origin: MirCallOrigin, result: MirType,
+        parameters: [MirType], known: bool, variadic: bool) -> MirOperand:
+    val signature = MirSignature(params: [], return_type: result, is_variadic: variadic,
+        declared_params: parameters, declared_params_known: known)
+    MirOperand(kind: MirOperandKind.Const(MirConstValue.Str(name), MirType(kind: MirTypeKind.FuncPtr(signature))), call_origin: origin)
+
+describe "LLVM foreign process tuple contract":
+    it "adapts the declared timed process tuple":
+        val operand = process_operand("rt_process_run_timeout", MirCallOrigin.Foreign, process_tuple_type(), process_params(), true, false)
+        expect(llvm_foreign_process_tuple_facade_v1(operand, 4)).to_equal("rt_process_run_timeout_tuple")
+        expect(llvm_foreign_process_tuple_facade_v1(operand, 3)).to_equal("")
+
+    it "preserves source runtime unknown and indirect authority":
+        for origin in [MirCallOrigin.Source, MirCallOrigin.Runtime, MirCallOrigin.Unknown]:
+            val operand = process_operand("rt_process_run_timeout", origin, process_tuple_type(), process_params(), true, false)
+            expect(llvm_foreign_process_tuple_facade_v1(operand, 4)).to_equal("")
+        val indirect = MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0)), call_origin: MirCallOrigin.Foreign)
+        expect(llvm_foreign_process_tuple_facade_v1(indirect, 4)).to_equal("")
+
+    it "requires exact symbol signature and native tuple result":
+        for name in ["local.rt_process_run_timeout", "rt_process_run_timeout_tuple", "rt_process_run_bounded"]:
+            expect(llvm_foreign_process_tuple_facade_v1(process_operand(name, MirCallOrigin.Foreign, process_tuple_type(), process_params(), true, false), 4)).to_equal("")
+        expect(llvm_foreign_process_tuple_facade_v1(process_operand("rt_process_run_timeout", MirCallOrigin.Foreign, MirType(kind: MirTypeKind.I64), process_params(), true, false), 4)).to_equal("")
+        expect(llvm_foreign_process_tuple_facade_v1(process_operand("rt_process_run_timeout", MirCallOrigin.Foreign, process_tuple_type(), process_params(), false, false), 4)).to_equal("")
+        expect(llvm_foreign_process_tuple_facade_v1(process_operand("rt_process_run_timeout", MirCallOrigin.Foreign, process_tuple_type(), process_params(), true, true), 4)).to_equal("")
+
+    it "accepts untimed i64 status without accepting a raw scalar return":
+        val result = MirType(kind: MirTypeKind.Tuple([process_text_type(), process_text_type(), MirType(kind: MirTypeKind.I64)]))
+        val parameters = [process_text_type(), MirType(kind: MirTypeKind.Array(process_text_type(), 0))]
+        expect(llvm_foreign_process_tuple_facade_v1(process_operand("rt_process_run", MirCallOrigin.Foreign, result, parameters, true, false), 3)).to_equal("rt_process_run_tuple")
