@@ -26,6 +26,8 @@ use compiler.driver.cache.action_key.{canon_str, canon_nat, canon_field, canon_s
 use std.io_runtime.{dir_create_all}
 use std.env.platform.{get_cache_location}
 use std.nogc_sync_mut.io_runtime.{file_read_nullable}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded}
+use std.common.encoding.sha256_contract.{sha256_lower_hex_valid}
 
 @unsafe(reason: "raw CAS file write status ABI", capabilities: [ffi])
 extern fn rt_file_write_text(path: text, content: text) -> bool
@@ -181,6 +183,19 @@ fn cas_get(root: text, digest: text) -> text?:
             return nil
         return Some(content)
     nil
+
+# Additive bounded reader for retained metadata. The trusted caller chooses
+# the cache root; only a validated digest chooses a blob within that owner.
+# Do not quarantine here: a refusal leaves the existing cache untouched.
+fn cas_get_bounded_v1(root: text, digest: text, max_bytes: i64) -> text?:
+    if root == "" or not sha256_lower_hex_valid(digest) or
+            max_bytes < 1 or max_bytes > 8388608:
+        return nil
+    match file_read_regular_no_follow_bounded(cas_blob_path(root, digest), max_bytes):
+        case Err(_): nil
+        case Ok(content):
+            if sha256_text(content) != digest: return nil
+            Some(content)
 
 # Stamp-fast existence check (no verification — strict path is cas_get).
 fn cas_has(root: text, digest: text) -> bool:
@@ -348,7 +363,7 @@ fn result_manifest_get(root: text, action_digest: text) -> ResultManifest?:
             return nil
 
 export ActionManifest, ResultManifest
-export cas_root, cas_open, cas_put, cas_get, cas_has, cas_quarantine
+export cas_root, cas_open, cas_put, cas_get, cas_get_bounded_v1, cas_has, cas_quarantine
 export cas_blob_path, cas_action_path, cas_parent_dir
 export action_manifest_serialize, action_manifest_parse, action_put, action_get
 export result_manifest_encode, result_manifest_serialize, result_manifest_parse
