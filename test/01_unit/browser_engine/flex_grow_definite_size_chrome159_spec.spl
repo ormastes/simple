@@ -42,7 +42,8 @@ Traceability: REQ-BROWSER-ENGINE-FLEX-GROW-DEFINITE-SIZE-001 — a flex item wit
 # @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_engine.spl 1%
 use std.spec.*
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
-    simple_web_layout_debug_layout_by_id
+    simple_web_layout_debug_layout_by_id, HNode, LayoutResult, layout_selected,
+    parse_html, build_child_index, extract_css_vw, compute_styles
 }
 
 val VW: i32 = 900
@@ -311,3 +312,68 @@ describe "zero-basis flex items: uniform basis and the automatic minimum size":
         expect(widths(trio("300px", "flex:1.5;width:10px", "aa", "flex:1;width:10px", ""))).to_equal("200/100")
         step("flex-grow:0.4 still grows (a positive factor below 1 becomes 1): 150 / 150 beside flex-grow:1")
         expect(widths(trio("300px", "flex-grow:0.4;flex-basis:0", "aa", "flex-grow:1;flex-basis:0", ""))).to_equal("150/150")
+
+# Second review round. Chrome 159 (same harness), widths unless noted:
+#
+# | container        | items                                                        | Chrome                          |
+# |------------------|--------------------------------------------------------------|---------------------------------|
+# | 300              | `width:100px` "s", `flex:1` 14-word paragraph                 | 100 / 200, paragraph 72 tall    |
+# | 300 wrap         | `flex:1` "Supercalifragilisticexpialidocious", `flex:1` b, c  | 229.45 / 35.27 / 35.28, one line |
+# | 200 wrap         | `flex:1` same word, `flex:1` "b"                              | 229.45 at y=0; 200 at y=24      |
+# | 400              | three `flex:1`                                                | x 0 / 133.33 / 266.67           |
+# | 200              | `flex:1;white-space:nowrap` "aaaa bbbb cccc dddd", `width:150px;flex-shrink:0` | 152.13 / 150 |
+# | 200              | `flex:1` holding `width:80px;padding:0 10px;box-sizing:border-box`, `width:190px;flex-shrink:0` | 80 / 190 |
+# | 200              | same child, content-box                                      | 100 / 190                       |
+fn id_index(nodes: [HNode], id: text) -> i32:
+    var i = 0
+    while i < nodes.len():
+        if nodes[i].id_attr == id:
+            return i as i32
+        i = i + 1
+    -1
+
+describe "zero-basis flex minimum: fallbacks and wrapping lines":
+    it "AC-30: without a resolved face the minimum is still one WORD, not the whole run":
+        step("no vector fonts: the cell estimate must give a longest-word floor, so the paragraph column is 200 wide and wraps")
+        val html = "<html><body style=\"margin:0\"><div style=\"display:flex;width:300px\"><div id=\"a\" style=\"width:100px\">s</div><div id=\"t\" style=\"flex:1\">one two three four five six seven eight nine ten eleven twelve thirteen fourteen</div></div></body></html>"
+        val nodes = parse_html(html)
+        val child_index = build_child_index(nodes)
+        val styles = compute_styles(nodes, extract_css_vw(html, 900, false), child_index, false, false)
+        val boxes = layout_selected(nodes, styles, child_index, [1], 900, 600, LayoutResult(bx: [], by: [], bw: [], bh: [], wrap_starts: [], wrap_ends: [], intrinsic_widths: [], height: 0)).layout
+        val t = id_index(nodes, "t")
+        expect(boxes.bw[id_index(nodes, "a")]).to_equal(100)
+        expect(boxes.bx[t]).to_equal(100)
+        expect(boxes.bw[t]).to_equal(200)
+        expect(boxes.bh[t]).to_be_greater_than(boxes.bh[id_index(nodes, "a")])
+
+    it "AC-31: a wrapping line redistributes what a frozen item cannot take":
+        step("Chrome 159: the long word keeps 229.45; b and c share the remaining 70.55 on the same line")
+        val one_line = HEAD + "<div style=\"display:flex;flex-wrap:wrap;width:300px\"><div id=\"a\" style=\"flex:1\">Supercalifragilisticexpialidocious</div><div id=\"t\" style=\"flex:1\">b</div><div id=\"b\" style=\"flex:1\">c</div></div>" + TAIL
+        expect(near(one_line, "a", 229)).to_equal(true)
+        expect(near(one_line, "t", 35)).to_equal(true)
+        expect(near(one_line, "b", 35)).to_equal(true)
+        expect(field(one_line, "b", "y")).to_equal("0")
+        expect(field(one_line, "a", "w").to_int() + field(one_line, "t", "w").to_int() + field(one_line, "b", "w").to_int()).to_equal(300)
+        step("Chrome 159: in 200 px the word overflows alone on line 1 and `b` fills line 2")
+        val two_lines = HEAD + "<div style=\"display:flex;flex-wrap:wrap;width:200px\"><div id=\"a\" style=\"flex:1\">Supercalifragilisticexpialidocious</div><div id=\"t\" style=\"flex:1\">b</div></div>" + TAIL
+        expect(near(two_lines, "a", 229)).to_equal(true)
+        expect(field(two_lines, "t", "w")).to_equal("200")
+        expect(field(two_lines, "t", "y")).to_equal("24")
+
+    it "AC-32: three flex:1 items land on Chrome's rounded positions":
+        step("Chrome 159: x 0 / 133.33 / 266.67 -> 0 / 133 / 267")
+        val page = HEAD + "<div style=\"display:flex;width:400px\"><div id=\"a\" style=\"flex:1\">a</div><div id=\"t\" style=\"flex:1\">b</div><div id=\"b\" style=\"flex:1\">c</div></div>" + TAIL
+        expect(field(page, "a", "x")).to_equal("0")
+        expect(field(page, "t", "x")).to_equal("133")
+        expect(field(page, "b", "x")).to_equal("267")
+        expect(field(page, "b", "x").to_int() + field(page, "b", "w").to_int()).to_equal(400)
+
+    it "AC-33: a nowrap item's minimum is its whole run":
+        step("Chrome 159: `aaaa bbbb cccc dddd` nowrap keeps 152.13 beside an unshrinkable 150 px item")
+        val page = trio("200px", "flex:1;white-space:nowrap", "aaaa bbbb cccc dddd", "width:150px;flex-shrink:0", "")
+        expect(near(page, "a", 152)).to_equal(true)
+
+    it "AC-34: a child's width counts once, in its own box-sizing":
+        step("Chrome 159: border-box child 80 wide -> floor 80; content-box child 80 + 20 padding -> floor 100")
+        expect(widths(trio("200px", "flex:1", "<div style=\"width:80px;padding:0 10px;box-sizing:border-box\">x</div>", "width:190px;flex-shrink:0", ""))).to_equal("80/190")
+        expect(widths(trio("200px", "flex:1", "<div style=\"width:80px;padding:0 10px\">x</div>", "width:190px;flex-shrink:0", ""))).to_equal("100/190")

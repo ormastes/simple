@@ -225,6 +225,28 @@ fn float_ctx_line_boxes(y: i32, line_h: i32, cb_left: i32, cb_right: i32) -> [i3
         guard = guard - 1
     pairs
 
+# True when any line box in `pairs` is inset or narrower than `full_w`.
+fn line_boxes_shorten(pairs: [i32], full_w: i32) -> bool:
+    var k = 0
+    while k + 1 < pairs.len():
+        if pairs[k] > 0 or pairs[k + 1] < full_w:
+            return true
+        k = k + 2
+    false
+
+# The (dx, width) pairs of the first `lines` lines: what a run that wrapped
+# to `lines` lines actually uses, so a short run beside a tall float does not
+# keep a pair for every line down to the float's bottom.
+fn line_boxes_prefix(pairs: [i32], lines: i32) -> [i32]:
+    if pairs.len() <= lines * 2:
+        return pairs
+    var out: [i32] = []
+    var k = 0
+    while k < lines * 2:
+        out = out.push(pairs[k])
+        k = k + 1
+    out
+
 # Width the first unbreakable piece of inline child `c` needs on a line: the
 # first word of a text run (the whole run under nowrap), descending into
 # plain inline elements; `atomic_w` for an atomic box.
@@ -286,15 +308,17 @@ fn flex_item_zero_basis(st: Style) -> bool:
 fn flex_item_frame_w(st: Style) -> i32:
     st.pad_l + st.pad_r + st.border_l + st.border_r
 
-# Advance of the longest word of a run, from the resolved per-byte advances
-# (the whole run when the style has no such table).
+# Advance of the longest word of a run: from the resolved per-byte advances,
+# or -- when the style has no such table (no resolved face) -- from the cell
+# width layout itself wraps with (`style_char_w`), one cell per codepoint.
+# Never the whole run: a paragraph's minimum is one word.
 fn text_longest_word_advance(txt: text, st: Style) -> i32:
     val n = txt.byte_len()
     if n == 0:
         return 0
     val by = style_run_byte_advances(st, txt)
-    if by.len() != n:
-        return style_measured_run_advance(txt, n, st)
+    val measured = by.len() == n
+    val cell = style_char_w(st)
     val tb = txt.bytes()
     var longest = 0
     var cur = 0
@@ -303,28 +327,32 @@ fn text_longest_word_advance(txt: text, st: Style) -> i32:
         if tb[k] == 32 or tb[k] == 9 or tb[k] == 10:
             cur = 0
         else:
-            cur = cur + by[k]
+            cur = cur + (if measured: by[k] else: cell)
             if cur > longest:
                 longest = cur
-        k = k + 1
+        k = if measured: k + 1 else: next_codepoint_start(txt, k)
     longest
 
-# Min-content OUTER width of a flex item: its longest word or widest child,
-# plus its own padding and border. Scope: each text run and child is taken on
-# its own (adjacent inline boxes are not joined into one word), and a
-# replaced child without a width counts as its padding and border.
+# Min-content OUTER width of a flex item: its longest word (the whole run
+# under `white-space: nowrap | pre`) or widest child, plus its own padding
+# and border. Scope: each text run and child is taken on its own (adjacent
+# inline boxes are not joined into one word), and a replaced child without a
+# width counts as its padding and border.
 fn flex_item_min_content_w(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32) -> i32:
     var widest = 0
     var c = child_index.first_child[i]
     while c >= 0:  # cpu-lane-loop-ok: one pass over a flex item's subtree while sizing its row, not on any paint path
         val cst = styles[c]
         if nodes[c].tag == "#text":
-            val word_w = text_longest_word_advance(nodes[c].text_trimmed, cst)
+            val word_w = if cst.white_space_nowrap or cst.white_space_pre:
+                inline_text_advance_width(nodes[c], cst)
+            else:
+                text_longest_word_advance(nodes[c].text_trimmed, cst)
             if word_w > widest:
                 widest = word_w
         elif cst.display != "none" and cst.display != "marker" and not cst.position_absolute:
             val child_w = if cst.width_px > 0:
-                cst.width_px + flex_item_frame_w(cst)
+                css_outer_width(nodes[c], cst, cst.width_px)
             else:
                 flex_item_min_content_w(nodes, styles, child_index, c)
             if child_w > widest:
@@ -1409,6 +1437,11 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
             # base size (padding + border) in the measured line width.
             var line_zero_excess: [i32] = [0; children_for_i_count]
             var zero_excess_measure = 0
+            # Per ordered item: its line, its measured base width, and whether
+            # it was frozen at its automatic minimum (see the freeze pass).
+            var wrap_line_of: [i32] = [-1; ordered_row_child_count]
+            var wrap_zero_floor: [i32] = [0; ordered_row_child_count]
+            var wrap_frozen: [i32] = [0; ordered_row_child_count]
             var line_count = 0
             var total_line_h = 0
             var cx_measure = 0
@@ -1457,6 +1490,8 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                     val used_h = resolved_cst.margin_t + flex_item_outer_height(nodes[fm], resolved_cst) + resolved_cst.margin_b
                     if used_h > line_h_measure:
                         line_h_measure = used_h
+                    wrap_line_of[fm_i] = line_count
+                    wrap_zero_floor[fm_i] = base_w_wrap
                     child_count_measure = child_count_measure + 1
                     auto_margin_count_measure = (
                         auto_margin_count_measure + item_auto_margins
@@ -1475,6 +1510,30 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 line_zero_excess[line_count] = zero_excess_measure
                 line_count = line_count + 1
                 total_line_h = total_line_h + line_h_measure
+            # A growing zero-basis item never ends below its automatic minimum
+            # (CSS Flexbox 9.7 step 4): one whose share of its line's free
+            # space would be smaller is frozen at that minimum, leaves the
+            # line's grow total, and the others share what is left.
+            var freeze_line = 0
+            while freeze_line < line_count:
+                var freeze_changed = line_zero_excess[freeze_line] > 0
+                while freeze_changed:
+                    freeze_changed = false
+                    val freeze_free = iw - line_widths[freeze_line] + line_zero_excess[freeze_line]
+                    val freeze_grow = line_grow_totals[freeze_line]
+                    var zi = 0
+                    while zi < ordered_row_child_count:
+                        val zst = styles[ordered_row_children[zi]]
+                        if wrap_line_of[zi] == freeze_line and wrap_frozen[zi] == 0 and flex_item_zero_basis(zst) and zst.flex_grow > 0:
+                            val zframe = flex_item_frame_w(zst)
+                            val zshare = if freeze_free > 0 and freeze_grow > 0: freeze_free * zst.flex_grow / freeze_grow else: 0
+                            if zframe + zshare < wrap_zero_floor[zi]:
+                                wrap_frozen[zi] = 1
+                                line_zero_excess[freeze_line] = line_zero_excess[freeze_line] - (wrap_zero_floor[zi] - zframe)
+                                line_grow_totals[freeze_line] = line_grow_totals[freeze_line] - zst.flex_grow
+                                freeze_changed = true
+                        zi = zi + 1
+                freeze_line = freeze_line + 1
             if line_count > 1:
                 total_line_h = total_line_h + row_wrap_row_gap * (line_count - 1)
             val explicit_content_h = if st.height_px > 0:
@@ -1612,7 +1671,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                     # 900 px line where Chrome makes them 444 px, and the
                     # second card was displaced by the same 219 px.
                     if (
-                        cst.flex_grow > 0 and line_index_wrap < line_count and
+                        cst.flex_grow > 0 and wrap_frozen[fc_wrap_i] == 0 and line_index_wrap < line_count and
                         line_grow_totals[line_index_wrap] > 0
                     ):
                         val grow_total_wrap = line_grow_totals[line_index_wrap]
@@ -1858,7 +1917,9 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 # the space exactly. Its content is laid out in that width.
                 var grown_outer_w = 0
                 if definite_grow_space > 0 and cst.flex_grow > 0 and zero_fixed_w[fc_i] < 0 and (flex_item_definite_base_w(nodes[fc], cst, iw) > 0 or flex_item_zero_basis(cst)):
-                    val grow_share_after = definite_grow_space * (grow_definite_used + cst.flex_grow) / grow_definite_total
+                    # Cumulative share rounded to the NEAREST pixel, so item edges
+                    # land where Chrome rounds them (400 / 3: 0, 133, 267).
+                    val grow_share_after = (definite_grow_space * (grow_definite_used + cst.flex_grow) + grow_definite_total / 2) / grow_definite_total
                     grown_outer_w = flex_item_definite_base_w(nodes[fc], cst, iw) + grow_share_after - grow_definite_assigned
                     grow_definite_used = grow_definite_used + cst.flex_grow
                     grow_definite_assigned = grow_share_after
@@ -2802,8 +2863,12 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                     not cst.white_space_nowrap and not cst.white_space_pre and
                     text_advance_w > line_iw - inline_start_x
                 ):
-                    text_line_boxes = float_ctx_line_boxes(cy, style_line_h(cst), ix + inline_base_x, ix + iw)
-                    if text_line_boxes.len() > 0:
+                    # Only when some line really is shortened: floats that do
+                    # not reach this block's lines leave the normal wrap (and
+                    # its long-word overflow) in charge.
+                    val float_line_boxes = float_ctx_line_boxes(cy, style_line_h(cst), ix + inline_base_x, ix + iw)
+                    if line_boxes_shorten(float_line_boxes, iw - inline_base_x):
+                        text_line_boxes = float_line_boxes
                         inline_box_x = ix + inline_base_x
                         inline_w = iw - inline_base_x
                         g_text_line_boxes_pending = text_line_boxes
@@ -2827,7 +2892,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                     g_text_first_line_dx_pending = 0
                     text_first_line_dx_record(nodes.len() as i32, c, text_first_dx)
                     g_text_line_boxes_pending = []
-                    text_line_boxes_record(nodes.len() as i32, c, text_line_boxes)
+                    text_line_boxes_record(nodes.len() as i32, c, line_boxes_prefix(text_line_boxes, text_lines))
                     # Inline content FOLLOWING a wrapped run continues on the
                     # run's LAST line, after its tail (Chrome, 300 px `<p>`:
                     # `<b>Bold</b> some … here <b>tail</b> end` puts `tail`
@@ -3022,9 +3087,16 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
             # 9.5): it takes the room the floats leave over [top, top +
             # height) -- narrowed when its width is auto -- or moves below
             # the nearest float bottom and tries again. An auto height is
-            # measured by laying the box out at the candidate position
-            # (results discarded); it is not re-measured after narrowing.
+            # measured by laying the box out at the candidate position; that
+            # trial is kept as the final layout when the box stays there.
             var child_x = ix + cml + auto_offset
+            var trial_valid = false
+            var trial_x = 0
+            var trial_y = 0
+            var trial_w = 0
+            var trial_height = 0
+            var trial_leading_margin_t = 0
+            var trial_trailing_margin_b = 0
             if float_ctx_count() > g_float_base and cy < g_float_max_y1 and float_ctx_establishes_bfc(nodes, styles, c, cst):
                 val beside_x0 = child_x
                 val beside_w0 = child_w
@@ -3040,6 +3112,20 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                         else:
                             val beside_try_w = if cst.width_px == 0: top_right - top_left else: beside_w0
                             val beside_try = layout_with_style(nodes, styles, child_index, c, top_left, cy, beside_try_w, viewport_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, resolved_cst)
+                            out_bx = beside_try.bx
+                            out_by = beside_try.by
+                            out_bw = beside_try.bw
+                            out_bh = beside_try.bh
+                            out_wrap_starts = beside_try.wrap_starts
+                            out_wrap_ends = beside_try.wrap_ends
+                            out_intrinsic_widths = beside_try.intrinsic_widths
+                            trial_valid = true
+                            trial_x = top_left
+                            trial_y = cy
+                            trial_w = beside_try_w
+                            trial_height = beside_try.height
+                            trial_leading_margin_t = beside_try.leading_margin_t
+                            trial_trailing_margin_b = beside_try.trailing_margin_b
                             beside_h = beside_try.height
                             if beside_h < 1:
                                 beside_h = 1
@@ -3062,25 +3148,35 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 if child_w < 1:
                     child_w = 1
             val floats_before_child = float_ctx_count()
-            val child = layout_with_style(nodes, styles, child_index, c, child_x, cy, child_w, viewport_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, resolved_cst)
-            out_bx = child.bx
-            out_by = child.by
-            out_bw = child.bw
-            out_bh = child.bh
-            out_wrap_starts = child.wrap_starts
-            out_wrap_ends = child.wrap_ends
-            out_intrinsic_widths = child.intrinsic_widths
+            # The trial layout made while fitting the box beside floats IS the
+            # layout when the box ends where it was tried; laying the subtree
+            # out again would double the work at every nesting level.
+            var child_height = trial_height
+            var child_leading_margin_t = trial_leading_margin_t
+            var child_trailing_margin_b = trial_trailing_margin_b
+            if not (trial_valid and trial_x == child_x and trial_y == cy and trial_w == child_w):
+                val child = layout_with_style(nodes, styles, child_index, c, child_x, cy, child_w, viewport_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, resolved_cst)
+                out_bx = child.bx
+                out_by = child.by
+                out_bw = child.bw
+                out_bh = child.bh
+                out_wrap_starts = child.wrap_starts
+                out_wrap_ends = child.wrap_ends
+                out_intrinsic_widths = child.intrinsic_widths
+                child_height = child.height
+                child_leading_margin_t = child.leading_margin_t
+                child_trailing_margin_b = child.trailing_margin_b
             # CSS 2.2 8.3.1 leading half. The child's EFFECTIVE top margin is
             # its declared margin-top collapsed with whatever margin escaped
-            # through its own top edge (child.leading_margin_t), and that is
+            # through its own top edge (child_leading_margin_t), and that is
             # only known after the child is laid out -- the advance above was
             # computed from the declared value alone. Correct the difference by
             # translating the child subtree, which is the same two-phase
             # mechanics offset_layout_subtree already serves elsewhere.
             val effective_cst_margin_t = collapse_margins_signed(
-                resolved_cst_margin_t, child.leading_margin_t)
+                resolved_cst_margin_t, child_leading_margin_t)
             var corrected_top_advance = child_top_advance
-            if child.leading_margin_t != 0:
+            if child_leading_margin_t != 0:
                 if child_count == 0 and nodes[i].tag == "body" and st.border_t == 0 and st.pad_t == 0:
                     val body_margin_t = resolve_vertical_margin_px(st.margin_t, viewport_h)
                     corrected_top_advance = collapse_margins_signed(
@@ -3108,7 +3204,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 cy = cy + (corrected_top_advance - child_top_advance)
                 float_ctx_shift(floats_before_child, 0, corrected_top_advance - child_top_advance)
                 child_top_advance = corrected_top_advance
-            cy = cy + child.height
+            cy = cy + child_height
             val resolved_cst_margin_b = resolve_vertical_margin_px(cst.margin_b, viewport_h)
             # CSS 2.2 §8.3.1 self-collapsing block: an in-flow block with no
             # border, padding, height, or content collapses its own top and
@@ -3120,7 +3216,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
             # child.height <= 1: an empty block is floored to 1px by the
             # min-size clamp, so 0 and 1 both mean "no content"; a real 1px
             # box declares height:1px and is excluded by height_px == 0.
-            val self_collapsing = child.height <= 1 and
+            val self_collapsing = child_height <= 1 and
                 nodes[c].tag != "#text" and
                 cst.border_t == 0 and cst.border_b == 0 and
                 cst.pad_t == 0 and cst.pad_b == 0 and
@@ -3128,7 +3224,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
             if self_collapsing:
                 # Pull back the top-margin advance and carry the collapsed
                 # (prev_bottom, own top, own bottom) margin to the next sibling.
-                cy = cy - child_top_advance - child.height
+                cy = cy - child_top_advance - child_height
                 if cy < clearance_y:
                     cy = clearance_y
                 out_by[c] = cy
@@ -3137,14 +3233,14 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                     collapse_margins_signed(
                         resolved_cst_margin_t,
                         collapse_margins_signed(
-                            resolved_cst_margin_b, child.trailing_margin_b)))
+                            resolved_cst_margin_b, child_trailing_margin_b)))
             else:
                 # The child's own trailing margin (one that collapsed through
                 # it, CSS 2.2 8.3.1) collapses with the child's declared
                 # bottom margin and becomes what separates it from the next
                 # sibling.
                 prev_margin_b = collapse_margins_signed(
-                    resolved_cst_margin_b, child.trailing_margin_b)
+                    resolved_cst_margin_b, child_trailing_margin_b)
             child_count = child_count + 1
         c = child_index.next_sibling[c]
     if child_count > 0:
