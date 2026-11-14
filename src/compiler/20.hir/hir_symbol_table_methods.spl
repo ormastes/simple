@@ -51,6 +51,14 @@ pub fn hir_symbol_declaration_category_v1(symbol: HirSymbol) -> text:
         case _: ""
     category
 
+# Request-local selection, never a reusable authorization receipt. Canonical
+# symbols can be shared by aliases; the actual lexical binding owns the route.
+# Kept outside the serialized HIR model: no policy bit or cache schema change.
+pub class HirLexicalBindingV1:
+    scope_id: i64
+    spelling: text
+    symbol_id: i64
+
 impl SymbolTable:
     me bind_declaration_origin_v1(id: SymbolId, owner: text, source_name: text, modifier: text, source_path: text, projection_key: text) -> Result<bool, text>:
         if modifier == "": return Ok(false)
@@ -175,8 +183,12 @@ impl SymbolTable:
             case SymbolKind.Class | SymbolKind.Struct | SymbolKind.Enum | SymbolKind.Trait: raw_id
             case _: -1
 
-    fn lookup(name: text) -> SymbolId?:
-        """Look up a symbol by name, searching up scope chain."""
+    fn lookup_binding_scope_raw_v1(name: text) -> i64:
+        """Return the actual lexical binding scope, or -1 on miss.
+
+        This scalar walk is shared with legacy lookups and allocates no receipt.
+        It deliberately does not return the canonical symbol's declaring scope.
+        """
         var scope_id = self.current_scope
 
         loop:
@@ -224,8 +236,7 @@ impl SymbolTable:
             # the self-hosted native path. The runtime-owner predicate plus a
             # bracket read keeps the value type-directed and untagged.
             if rt_dict_contains(scope.symbols, name):
-                val found: i64 = scope.symbols[name]
-                return SymbolId(id: found)
+                return scope_id.id
 
             match scope.parent:
                 case Some(parent):
@@ -233,7 +244,31 @@ impl SymbolTable:
                 case None:
                     break
 
-        nil
+        -1
+
+    fn lookup(name: text) -> SymbolId?:
+        """Look up a symbol by name, searching up scope chain."""
+        val scope_id = self.lookup_binding_scope_raw_v1(name)
+        if scope_id < 0: return nil
+        val scope: Scope = self.scopes[scope_id]
+        val found: i64 = scope.symbols[name]
+        SymbolId(id: found)
+
+    fn lookup_binding_v1(name: text) -> HirLexicalBindingV1:
+        """Select a live lexical binding for an immediate requester decision.
+
+        Callers must not retain this result as permission across mutation/reset.
+        A stale nearest binding is a miss; it never falls through to an outer
+        binding that the source expression did not select.
+        """
+        val scope_id = self.lookup_binding_scope_raw_v1(name)
+        if scope_id < 0:
+            return HirLexicalBindingV1(scope_id: -1, spelling: name, symbol_id: -1)
+        val scope: Scope = self.scopes[scope_id]
+        val found: i64 = scope.symbols[name]
+        if found < 0 or found >= self.next_symbol_id:
+            return HirLexicalBindingV1(scope_id: scope_id, spelling: name, symbol_id: -1)
+        HirLexicalBindingV1(scope_id: scope_id, spelling: name, symbol_id: found)
 
     fn lookup_local_or_invalid(name: text) -> SymbolId:
         """Look up only the current lexical scope, preserving outer shadowing."""
@@ -249,33 +284,14 @@ impl SymbolTable:
 
     fn lookup_or_invalid(name: text) -> SymbolId:
         """Look up a symbol by name, returning an invalid id when missing."""
-        var scope_id = self.current_scope
-
-        loop:
-            # See lookup()'s matching comment: do NOT re-add an
-            # `rt_dict_contains(self.scopes, scope_id.id)` guard here -- it
-            # under-reports membership on this struct-valued dict and breaks
-            # the Stage 3 self-host via unbounded HIR recursion. Use the same
-            # Dict-free `next_scope_id` range check instead (exact substitute
-            # for membership -- see lookup()'s full comment).
-            if scope_id.id < 0 or scope_id.id >= self.next_scope_id:
-                break
-            val scope = self.scopes[scope_id.id]
-            if rt_dict_contains(scope.symbols, name):
-                val found: i64 = scope.symbols[name]
-                # A name binding outside the live allocation interval is stale
-                # module state. Never let it alias a newly-issued SymbolId.
-                if found < 0 or found >= self.next_symbol_id:
-                    return SymbolId(id: -1)
-                return SymbolId(id: found)
-
-            match scope.parent:
-                case Some(parent):
-                    scope_id = parent
-                case None:
-                    break
-
-        SymbolId(id: -1)
+        val scope_id = self.lookup_binding_scope_raw_v1(name)
+        if scope_id < 0: return SymbolId(id: -1)
+        val scope: Scope = self.scopes[scope_id]
+        val found: i64 = scope.symbols[name]
+        # Preserve the live interval check without a struct-valued Dict probe.
+        if found < 0 or found >= self.next_symbol_id:
+            return SymbolId(id: -1)
+        SymbolId(id: found)
 
     fn get_symbol(id: SymbolId?) -> HirSymbol?:
         """Get symbol by ID.
