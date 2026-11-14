@@ -111,3 +111,9 @@ Retention explicitly promotes the selected-index carrier plus its scalar arrays,
 replacement legacy origin carrier/map/arrays, and extended declaration-authority
 children. An old registry or surface raw carrier is not assumed to traverse newly
 allocated children. Actual transient-lifetime execution remains UNRUN.
+
+Raw route identity and completeness are separate. The registry snapshot digest
+retains configured route bytes and selected predecessor facts even for incomplete
+surfaces; only the reusable surface digest is withheld. An unavailable unrelated
+category therefore cannot erase an intermediate route change from transitive
+identity. The authored regression covers that case without claiming execution.

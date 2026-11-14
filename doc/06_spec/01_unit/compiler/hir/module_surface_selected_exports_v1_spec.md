@@ -17,6 +17,8 @@ and calls the typed selection and hop APIs. It checks:
 8. Out-of-range hops, corrupt windows and stale generations fail closed.
 9. Incomplete bitfield source retention cannot prove bitfield absence.
 10. Selected-only folder membership does not establish complete sibling lookup.
+11. Raw transitive digest changes with intermediate routes despite an unrelated
+    unavailable category, and excludes allocation generation.
 
 The pre-existing same-folder plain-export fixture remains an additional open
 compatibility requirement until actual sibling-selection authority is integrated.
