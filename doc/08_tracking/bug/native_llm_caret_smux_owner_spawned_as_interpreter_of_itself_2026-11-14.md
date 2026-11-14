@@ -244,3 +244,21 @@ red `function smux_owner_start not found` -> green `Results: 1 total, 1 passed, 
 
 Manual, `SIMPLE_BINARY` unset, `llm_caret.exe workspace x attach agent-1` (rc=1):
 `error new_session_failed smux owner did not start: SIMPLE_BINARY not set (native llm_caret.exe needs a simple interpreter)`
+
+## Phase-1 seed at tip re-verification (2026-11-15)
+
+- Seed: Rust seed rebuilt cold at `release/1.0.0` tip `5dd7e582c2b`
+  (`cargo build --profile bootstrap --bin simple`, clang-cl, LLVM 23.1.1 activation,
+  6m03s, no errors). `--version`: `Simple Language v1.0.0-rc.1`.
+- Native builds with that seed (llvm-mingw UCRT, `SIMPLE_NATIVE_INCREMENTAL=1`, shared `build/nb/cache`):
+  - devhub: `[native-incremental] 0 reused / 300 rebuilt`, 12.3s compile + 19.1s link, 5775 KB
+  - llm_caret: `[native-incremental] 0 reused / 712 rebuilt`, 38.9s compile + 18.0s link, 13992 KB
+- Specs (sequential, `Anthropic.ClaudeCode` stripped from PATH, `command -v claude` empty):
+  - messenger_read_verbs_history_edges: `Results: 8 total, 8 passed, 0 failed`
+  - messenger_read_verbs_damaged_store: `Results: 7 total, 7 passed, 0 failed`
+  - native_binary_sqlcipher_read: `Results: 2 total, 2 passed, 0 failed`
+  - native_binary_sqlcipher_open: `Results: 4 total, 4 passed, 0 failed`
+  - workspace_cli_system: `Results: 4 total, 4 passed, 0 failed`
+  - workspace_recovery_system: `Results: 12 total, 12 passed, 0 failed`
+  - caret_cli_help_system: `Results: 4 total, 4 passed, 0 failed`
+- Status unchanged (verification-pending); this is seed-at-tip evidence, not a status move.
