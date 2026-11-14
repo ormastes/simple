@@ -451,11 +451,33 @@ impl MethodResolver:
             case Block(inner_block):
                 HirStmtKind.Block(self.resolve_block(inner_block))
 
+            case AsmAssert(spec):
+                # Compile-time target guard: carries no expressions to resolve.
+                HirStmtKind.AsmAssert(spec)
+
         HirStmt(kind: kind, span: stmt.span)
 
     # ========================================================================
     # Expression Resolution
     # ========================================================================
+
+    me resolve_asm(asm_node: HirAsm) -> HirAsm:
+        """Resolve method calls inside inline-assembly operand expressions."""
+        var out = asm_node
+        var resolved_constraints: [HirAsmConstraint] = []
+        for constraint in asm_node.constraints:
+            val typed_constraint: HirAsmConstraint = constraint
+            var resolved_constraint = typed_constraint
+            resolved_constraint.value = self.resolve_expr(typed_constraint.value)
+            val resolved_output = match typed_constraint.output_value:
+                case Some(output_expr):
+                    Some(self.resolve_expr(output_expr))
+                case None:
+                    None
+            resolved_constraint.output_value = resolved_output
+            resolved_constraints = resolved_constraints.push(resolved_constraint)
+        out.constraints = resolved_constraints
+        out
 
     me resolve_expr(expr: HirExpr) -> HirExpr:
         """Resolve method calls in an expression."""
@@ -622,6 +644,11 @@ impl MethodResolver:
                     type_args
                 )
 
+            # Static calls - resolution was fixed at HIR lowering; only the
+            # argument expressions need recursive resolution.
+            case StaticCall(type_, method, call_args, resolution):
+                HirExprKind.StaticCall(type_, method, self.resolve_call_args(call_args), resolution)
+
             # Literals - no resolution needed
             case IntLit(_, _): expr.kind
             case FloatLit(_, _): expr.kind
@@ -685,6 +712,12 @@ impl MethodResolver:
                 for (k, v) in entries:
                     resolved = resolved.push((self.resolve_expr(k), self.resolve_expr(v)))
                 HirExprKind.DictLit(resolved, key_type, value_type)
+
+            case SetLit(elements, elem_type):
+                var resolved: [HirExpr] = []
+                for e in elements:
+                    resolved = resolved.push(self.resolve_expr(e))
+                HirExprKind.SetLit(resolved, elem_type)
 
             # Optional operations
             case OptionalChain(base, field):
@@ -755,6 +788,18 @@ impl MethodResolver:
             case For(var_, iter, body, label):
                 HirExprKind.For(var_, self.resolve_expr(iter), self.resolve_block(body), label)
 
+            case With(items, body):
+                var resolved_items: [HirWithItem] = []
+                for item in items:
+                    val typed_item: HirWithItem = item
+                    resolved_items = resolved_items.push(HirWithItem(
+                        context_expr: self.resolve_expr(typed_item.context_expr),
+                        has_target: typed_item.has_target,
+                        target: typed_item.target,
+                        span: typed_item.span
+                    ))
+                HirExprKind.With(resolved_items, self.resolve_block(body))
+
             # Closures
             case Lambda(params, body, captures):
                 HirExprKind.Lambda(params, self.resolve_expr(body), captures)
@@ -795,6 +840,25 @@ impl MethodResolver:
 
             case Try(e):
                 HirExprKind.Try(self.resolve_expr(e))
+
+            case TryCatch(body, clauses, finally_):
+                var resolved_clauses: [HirCatchClause] = []
+                for clause in clauses:
+                    val typed_clause: HirCatchClause = clause
+                    resolved_clauses = resolved_clauses.push(HirCatchClause(
+                        has_pattern: typed_clause.has_pattern,
+                        pattern: typed_clause.pattern,
+                        has_type_: typed_clause.has_type_,
+                        type_: typed_clause.type_,
+                        body: self.resolve_block(typed_clause.body),
+                        span: typed_clause.span
+                    ))
+                val resolved_finally = match finally_:
+                    case Some(finally_block):
+                        Some(self.resolve_block(finally_block))
+                    case None:
+                        None
+                HirExprKind.TryCatch(self.resolve_block(body), resolved_clauses, resolved_finally)
 
             # Async
             case Await(e):
@@ -845,6 +909,9 @@ impl MethodResolver:
             case ConvertCall(e, target):
                 HirExprKind.ConvertCall(self.resolve_expr(e), target)
 
+            case TypeTest(value, type_name):
+                HirExprKind.TypeTest(self.resolve_expr(value), type_name)
+
             # Range
             case Range(start, end, inclusive, step):
                 val resolved_start = match start:
@@ -881,6 +948,36 @@ impl MethodResolver:
 
             case NogradBlock(body):
                 HirExprKind.NogradBlock(self.resolve_block(body))
+
+            case UnsafeBlock(body):
+                HirExprKind.UnsafeBlock(self.resolve_block(body))
+
+            # Inline assembly - operand expressions can name methods too.
+            case InlineAsm(asm_node):
+                HirExprKind.InlineAsm(self.resolve_asm(asm_node))
+
+            case InlineAsmMatch(arms):
+                var resolved_asm_arms: [HirAsmMatchArm] = []
+                for asm_arm in arms:
+                    val typed_arm: HirAsmMatchArm = asm_arm
+                    var resolved_arm = typed_arm
+                    if typed_arm.has_asm_body:
+                        resolved_arm.asm_body = self.resolve_asm(typed_arm.asm_body)
+                    resolved_asm_arms = resolved_asm_arms.push(resolved_arm)
+                HirExprKind.InlineAsmMatch(resolved_asm_arms)
+
+            # Target-neutral cfg select: every arm is kept with its condition
+            # text; resolve each arm body (HIR never selects).
+            case CfgSelect(conds, arms, else_):
+                var resolved_arms: [HirBlock] = []
+                for arm in arms:
+                    resolved_arms = resolved_arms.push(self.resolve_block(arm))
+                val resolved_else = match else_:
+                    case Some(else_block):
+                        Some(self.resolve_block(else_block))
+                    case None:
+                        None
+                HirExprKind.CfgSelect(conds, resolved_arms, resolved_else)
 
             # Error
             case Error: expr.kind
