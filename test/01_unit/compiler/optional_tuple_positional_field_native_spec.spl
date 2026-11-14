@@ -1,0 +1,68 @@
+# Purpose and audience: regression spec for `.0` / `.1` positional reads on a
+# `(A, B)?` local after a nil check. The interpreter auto-unwrapped the boxed
+# `Some` payload; the native lane indexed the Option enum object's own slots
+# (`.0` -> "", `.1` -> nil), so every CREATE TABLE column name parsed by
+# std.database.sqlite_format.schema._read_ident came back empty and the devhub
+# messenger verbs reported `schema column missing in table 'room'` natively.
+# Runs under both lanes; the native verdict is the one that matters.
+# @req REQ-SSPEC-UNIT
+# Bug: doc/08_tracking/bug/devhub_native_sqlcipher_schema_column_missing_2026-11-14.md
+# Fix: src/compiler_rust/compiler/src/hir/lower/expr/control.rs
+#      (optional_struct_inner_type admits a Tuple payload).
+
+use std.spec
+use std.database.sqlite_format.schema.{parse_create_table_columns}
+
+fn read_word(s: text, i: i64) -> (text, i64)?:
+    if i >= s.len():
+        return nil
+    var j = i
+    var out = ""
+    while j < s.len() and s[j] != " ":
+        out = out + s[j]
+        j = j + 1
+    Some((out, j))
+
+fn first_word_via_dot(s: text) -> text:
+    val tok = read_word(s, 0)
+    if tok == nil:
+        return "<nil>"
+    tok.0
+
+fn first_word_end_via_dot(s: text) -> i64:
+    val tok = read_word(s, 0)
+    if tok == nil:
+        return -1
+    tok.1
+
+fn first_word_via_match(s: text) -> text:
+    match read_word(s, 0):
+        Some(t):
+            t.0
+        None:
+            "<nil>"
+
+describe("positional field read on an optional tuple local"):
+    it("reads .0 and .1 after a nil check exactly like the match unwrap"):
+        assert_equal(first_word_via_match("room TEXT"), "room")
+        assert_equal(first_word_via_dot("room TEXT"), "room")
+        assert_equal(first_word_end_via_dot("room TEXT"), 4)
+
+    it("keeps the nil arm intact"):
+        assert_equal(first_word_via_dot(""), "<nil>")
+        assert_equal(first_word_end_via_dot(""), -1)
+
+    it("pushes the unwrapped element into a typed array"):
+        var cols: [text] = []
+        val tok = read_word("id INTEGER", 0)
+        if tok != nil:
+            cols.push(tok.0)
+        assert_equal(cols.join("|"), "id")
+
+describe("sqlite_format schema column names through the same path"):
+    it("parses non-empty column names from CREATE TABLE"):
+        match parse_create_table_columns("CREATE TABLE room (id TEXT PRIMARY KEY, title TEXT, created_at INTEGER)"):
+            Ok(cols):
+                assert_equal(cols.join("|"), "id|title|created_at")
+            Err(_):
+                assert_equal("parse failed", "")

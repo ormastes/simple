@@ -1,6 +1,6 @@
 # devhub native: `messenger rooms` fails with "schema column missing in table 'room'"
 
-Status: open
+Status: verification-pending
 Priority: P1
 Date: 2026-11-14
 
@@ -29,3 +29,11 @@ Native `devhub.exe messenger rooms --target dense --json` exits 2 and prints:
     bin/simple.exe test test/03_system/app/devhub/messenger/native_binary_sqlcipher_read_spec.spl
 
 Covered by the in-development spec `native_binary_sqlcipher_read_spec.spl`.
+
+Fix: `optional_struct_inner_type` admits Tuple payloads (control.rs) and
+`lower_tuple_index` (access.rs) projects the Some payload via
+`rt_unwrap_or_self` before the positional Index (the `.0` form is
+Expr::TupleIndex, not FieldAccess). Evidence: native probe `.0/.1` on
+`(text,i64)?` prints `dot0=` / `dot1=nil` unfixed, `dot0=room` / `dot1=4` fixed;
+native devhub rebuilt with the fixed seed passes native_binary_sqlcipher_read_spec
+(2/2) and open_spec (4/4). Awaiting independent native verification.

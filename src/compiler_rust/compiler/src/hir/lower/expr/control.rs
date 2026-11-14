@@ -53,15 +53,30 @@ fn is_placeholder_lambda_param_name(name: &str) -> bool {
 }
 
 impl Lowerer {
-    /// The struct/class payload type of a `T?` (represented in HIR as a shared
-    /// pointer to `T`), or None for every other type.
+    /// The struct/class or tuple payload type of a `T?` (represented in HIR
+    /// as a shared pointer to `T`), or None for every other type.
+    ///
+    /// Tuples are admitted alongside structs because `.0`/`.1` on a
+    /// `(A, B)?` local read after a nil check hits the same boxed-`Some`
+    /// receiver: without the payload projection the positional Index ran
+    /// over the Option enum object's own slots, so
+    /// `sqlite_format.schema._read_ident(...).0` yielded "" and `.1` nil in
+    /// the native lane (every CREATE TABLE column name came back empty and
+    /// devhub reported `schema column missing in table 'room'`), while the
+    /// interpreter auto-unwrapped.
     pub(super) fn optional_struct_inner_type(&self, ty: TypeId) -> Option<TypeId> {
         match self.module.types.get(ty) {
             Some(HirType::Pointer {
                 kind: PointerKind::Shared,
                 inner,
                 ..
-            }) if matches!(self.module.types.get(*inner), Some(HirType::Struct { .. })) => Some(*inner),
+            }) if matches!(
+                self.module.types.get(*inner),
+                Some(HirType::Struct { .. }) | Some(HirType::Tuple(_))
+            ) =>
+            {
+                Some(*inner)
+            }
             _ => None,
         }
     }
