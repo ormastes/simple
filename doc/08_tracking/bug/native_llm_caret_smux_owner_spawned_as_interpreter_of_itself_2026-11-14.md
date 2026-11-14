@@ -218,3 +218,16 @@ so the next failing run names its cause.
 
 Native rebuild not required for this conclusion. Close-out needs the unblock condition's
 `workspace_recovery` native run, and a re-run of the 3/4 environment if it recurs.
+
+## Owner-start error causes + native recovery run (2026-11-15, lane `work/owner-start-error-causes-20261115`)
+
+Status stays verification-pending. `_smux_owner_up` is now `smux_owner_start(ws, exe) -> text`
+and each failure names its cause after the unchanged `smux owner did not start` prefix:
+`SIMPLE_BINARY not set (native <exe> needs a simple interpreter)`, `launcher failed`,
+`not ready after 240 s`, `owner file setup failed`.
+Spec `test/01_unit/app/llm_caret/smux_owner_start_error_spec.spl` (interpreted, seed):
+red `function smux_owner_start not found` -> green `Results: 1 total, 1 passed, 0 failed`.
+
+- native `workspace_recovery_system_spec.spl` (`LLM_CARET_NATIVE_BIN=build/nb/llm_caret.exe`,
+  existing exe from 2026-11-14 22:52, no rebuild, `SIMPLE_BINARY`=seed):
+  `Results: 12 total, 12 passed, 0 failed` (exit 0)
