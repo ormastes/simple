@@ -351,11 +351,13 @@ new runtime PASS or cross-session lifetime guarantee.
 
 The additive `CheckedTraversalPluginV2` preserves V1's source signature while
 making provider invocation refusal explicit. `TraversalPluginSelectionV1`
-carries an admitted descriptor, provider code/entry/ABI, signed policy identity,
-and a loader-owned scalar token plus static checked callback. These ordinary
-compiler records do not authenticate code. The H5 loader must derive and
-crosscheck them, validate the pinned token on every invocation, and expose a
-separate bounded native wire ABI. Callback addresses/tokens are not semantic IDs.
+carries only a loader-issued token and canonical semantic identity. The separate
+`TraversalPluginDescriptorV1` contains provider code/entry/ABI, signed policy
+identity and the normalized instance descriptor. These ordinary records do not
+authenticate code. Fixed `99.loader` validation resolves the token to its live
+admitted descriptor before context/cache construction; fixed dispatch repeats
+that check before invocation. There is no caller-supplied callback. The loader
+owns its bounded native wire ABI and retained lifetime. Tokens are not semantic IDs.
 
 The warm owner threads the same selection through preparation and completion.
 An explicit external selection cannot use the builtin incomplete-proof
@@ -388,6 +390,6 @@ context or panic substitutes for rejection. The context config, options hash
 and production native no-op invocation include the canonical identity. H5 CLI
 early action keys and the host-owned trust-root/admission composition remain
 separate integration work. The new structural tests
-and checked-callback coordinator fixture are authored/unrun and do not qualify
+and real coordinator forged-token refusal fixture are authored/unrun and do not qualify
 native loading, signature policy, ABI transport, full imports, warm runtime or
 performance. Per-directory normalization and validation costs remain unmeasured.

@@ -10,17 +10,18 @@ use compiler.driver.cache.traversal_options_admission_v1.*
 use compiler.driver.cache.compile_options_hash.{compile_options_hash_compute}
 use compiler.driver.cache.native_noop_admission.{native_noop_normalized_invocation_v1}
 
-fn options_test_callback(token: i64, dir: DirTldrViewV1,
-        sel: PointcutSelectorV1) -> Result<WeavePlanDeltaV1, text>:
-    BuiltinForwardTraversalV1(instance_key: "options-fixture").visit_checked(dir, sel)
-
-fn options_test_selection() -> TraversalPluginSelectionV1:
+fn options_test_descriptor() -> TraversalPluginDescriptorV1:
     val code = "sha256:" + "1".repeat(64)
     val instance = plugin_instance_descriptor_v1(PluginDefinitionV1(code_digest: code,
         fields: []), []).unwrap()
-    TraversalPluginSelectionV1(provider_id: "fixture", provider_code_digest: code,
+    TraversalPluginDescriptorV1(provider_id: "fixture", provider_code_digest: code,
         entry_identity: "visit", abi_schema: "fixture/v1", policy_identity: "sha256:" + "2".repeat(64),
-        instance: instance, provider_token: 1, invoke: options_test_callback)
+        instance: instance)
+
+# No loader has minted this token. Correct canonical bytes cannot grant admission.
+fn options_test_selection() -> TraversalPluginSelectionV1:
+    TraversalPluginSelectionV1(provider_token: 1,
+        canonical_identity: traversal_descriptor_identity_v1(options_test_descriptor()).unwrap())
 
 fn options_test_requested() -> CompileOptions:
     var options = driver_core_compile_options_default()
@@ -41,22 +42,19 @@ describe "provider options consistency before cache lookup":
         expect(traversal_options_hash_identity_v1(requested).is_err()).to_equal(true)
         expect(native_noop_normalized_invocation_v1(requested, "output")).to_equal("")
 
-    it "crosschecks signed provider identity before context creation":
+    it "rejects a fabricated token even when options repeat canonical descriptor bytes":
         var options = options_test_requested()
         val selected = options_test_selection()
-        options.traversal_plugin_resolved_identity_v1 = traversal_selection_identity_v1(selected).unwrap()
-        expect(traversal_options_selection_identity_v1(options, Some(selected)).unwrap()).to_equal(
-            options.traversal_plugin_resolved_identity_v1)
-        val different_id = TraversalPluginSelectionV1(..selected, provider_id: "other")
-        expect(traversal_options_selection_identity_v1(options, Some(different_id)).is_err()).to_equal(true)
-        val different_policy = TraversalPluginSelectionV1(..selected, policy_identity: "sha256:" + "3".repeat(64))
-        expect(traversal_options_selection_identity_v1(options, Some(different_policy)).is_err()).to_equal(true)
+        options.traversal_plugin_resolved_identity_v1 = selected.canonical_identity
+        expect(traversal_options_selection_identity_v1(options, Some(selected)).is_err()).to_equal(true)
+        val changed = TraversalPluginSelectionV1(..selected, canonical_identity: "forged")
+        expect(traversal_options_selection_identity_v1(options, Some(changed)).is_err()).to_equal(true)
 
-    it "changes real options and no-op keys when verified policy identity changes":
+    it "binds supplied policy bytes in key construction without granting token admission":
         var options = options_test_requested()
-        val selected = options_test_selection()
-        val first = traversal_selection_identity_v1(selected).unwrap()
-        val second = traversal_selection_identity_v1(TraversalPluginSelectionV1(..selected,
+        val selected = options_test_descriptor()
+        val first = traversal_descriptor_identity_v1(selected).unwrap()
+        val second = traversal_descriptor_identity_v1(TraversalPluginDescriptorV1(..selected,
             policy_identity: "sha256:" + "4".repeat(64))).unwrap()
         val first_hash = compile_options_hash_compute("llvm", 0, true, false, false, "default", [],
             [], [], [], "moderate", -1, "", "", "", false, "", first)

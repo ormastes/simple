@@ -1,6 +1,6 @@
-# AUTHORED / UNRUN. Exact production warm coordinator with an injected checked
-# callback. This tests the driver boundary; no native pack/signature admission,
-# native ABI transport or loader lifetime qualification is claimed.
+# AUTHORED / UNRUN. Fixed loader-registry refusal through the real coordinator.
+# No injected callback or fabricated admitted provider. Positive signed loading,
+# stale admitted tokens and native ABI transport require the H5 owner fixture.
 # AUTHORED / UNRUN. Calls the actual production coordinator and validator with
 # real HIR records. Parser/CompileContext wiring and managed admission are NOT
 # executed by this bounded fixture. No codec or matcher variant is substituted.
@@ -75,23 +75,6 @@ fn snapshots_for(modules: Dict<text, HirModule>, image: text) -> [DirectoryTldrS
     rows
 
 use compiler.common.cache_contract.traversal_plugin_selection_v1.{TraversalPluginSelectionV1}
-use compiler.common.cache_contract.aspect_plugin_model_v1.{PluginDefinitionV1,
-    PluginConfigFieldV1, PluginFieldRoleV1, PluginConfigValueV1, plugin_instance_descriptor_v1}
-use compiler.common.cache_contract.aspect_traversal_v1.{DirTldrViewV1, BuiltinForwardTraversalV1,
-    CheckedTraversalPluginV2}
-use compiler.common.cache_contract.aspect_match_shard_v1.{PointcutSelectorV1, WeavePlanDeltaV1}
-
-var provider_calls: i64 = 0
-var provider_mode: i64 = 0
-
-fn checked_fixture_invoke(token: i64, view: DirTldrViewV1,
-        selector: PointcutSelectorV1) -> Result<WeavePlanDeltaV1, text>:
-    provider_calls = provider_calls + 1
-    if token != 17: return Err("fixture-provider-token-invalid")
-    if provider_mode == 1: return Err("fixture-provider-error")
-    if provider_mode == 2:
-        return Ok(WeavePlanDeltaV1(weave: ["unowned::forged"], unweave: [], reweave: [], reuse: []))
-    BuiltinForwardTraversalV1(instance_key: "checked-fixture").visit_checked(view, selector)
 
 fn main() -> i32:
     val image = kernel_image_digest_v1().unwrap()
@@ -106,41 +89,14 @@ fn main() -> i32:
     aspect_registry_reset()
     aspect_registry_declare("warm/fixture.spl", "observe", "forward", "facade", "static", true, true, true)
     val snapshots = snapshots_for(modules, image.sha256)
-    val code = "sha256:" + image.sha256
-    val instance = plugin_instance_descriptor_v1(PluginDefinitionV1(code_digest: code,
-        fields: [PluginConfigFieldV1(name: "entry", role: PluginFieldRoleV1.Instance)]),
-        [PluginConfigValueV1(name: "entry", value: "checked_fixture_invoke")]).unwrap()
-    val selected = Some(TraversalPluginSelectionV1(provider_id: "fixture", provider_code_digest: code,
-        entry_identity: "checked_fixture_invoke", abi_schema: "fixture.checked/v1",
-        policy_identity: "sha256:" + sha256_text("explicit test policy; not signed admission"),
-        instance: instance, provider_token: 17, invoke: checked_fixture_invoke))
-    val prepared = aop_traversal_prepare_visit_v1(state, modules, snapshots, selected).unwrap()
-    assert(validate_aspect_contracts(modules).len() == 0)
-    assert(aop_traversal_finish_visit_v1(state, modules, snapshots, prepared, selected).unwrap() == 1)
-    assert(module.functions[SymbolId(id: 20)].body.stmts.len() == 1)
-    assert(provider_calls == 1)
-    val warm = aop_traversal_prepare_visit_v1(state, modules, snapshots, selected).unwrap()
-    assert(validate_aspect_contracts(modules).len() == 0)
-    assert(aop_traversal_finish_visit_v1(state, modules, snapshots, warm, selected).unwrap() == 0)
-    assert(state.reuse_hits == 1 and provider_calls == 2)
-    provider_mode = 1
-    val refused = aop_traversal_prepare_visit_v1(state, modules, snapshots, selected).unwrap()
+    val forged = Some(TraversalPluginSelectionV1(provider_token: 17,
+        canonical_identity: "unissued provider identity"))
+    assert(aop_traversal_prepare_visit_v1(state, modules, snapshots, forged).is_err())
     assert(module.functions[SymbolId(id: 20)].body.stmts.len() == 0)
-    assert(aop_traversal_finish_visit_v1(state, modules, snapshots, refused, selected).unwrap_err() == "fixture-provider-error")
-    assert(module.functions[SymbolId(id: 20)].body.stmts.len() == 0)
-    assert(aop_traversal_prepare_visit_v1(state, modules, snapshots, selected).is_err())
-    # Genuinely fresh test HIR, never certify the failed/woven graph as a base.
-    assert(state.begin_epoch(join_point_attr_begin_epoch_v2()))
-    val clean_module = module_fixture()
-    val clean = {"fixture": clean_module}
-    val clean_snapshots = snapshots_for(clean, image.sha256)
-    provider_mode = 2
-    val bad = aop_traversal_prepare_visit_v1(state, clean, clean_snapshots, selected).unwrap()
-    assert(aop_traversal_finish_visit_v1(state, clean, clean_snapshots, bad, selected).unwrap_err() == "traversal-provider-delta-mismatch")
-    assert(clean_module.functions[SymbolId(id: 20)].body.stmts.len() == 0)
+    assert(state.reuse_hits == 0)
     aop_match_driver_reset_before_session_end_v1()
     var ended = false
     unsafe(capabilities: [ffi]):
         ended = rt_session_heap_end(session)
-    if not ended: panic("native provider fixture session end refused")
+    if not ended: panic("native provider refusal fixture session end refused")
     0
