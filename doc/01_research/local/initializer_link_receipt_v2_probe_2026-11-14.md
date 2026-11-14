@@ -46,3 +46,10 @@ Execution receipt: `execution.sdn` links the prepared extraction manifest to
 the exact tracked source, producer, logs, cap and executable. The original
 `prepared_not_executed` extraction status is retained as preparation provenance.
 Executed binary SHA256: `e58d00d8438e680bd2277cd9ba21d761c135ac637bc47bbfa0216224c5ddd1d7`.
+
+After execution, the push unit-consistency gate required
+`_link_receipt_field_v2` to use `prefix.byte_len()` rather than `prefix.len()`
+for its byte-indexed substring. All production prefixes are fixed ASCII, so
+values are identical for the executed corpus. This one-line correction was
+source-reviewed; the native probe was not rerun and its extraction hashes
+continue to identify the exact pre-correction executed source.
