@@ -138,6 +138,23 @@ record what the parser accepts today (`Immutable<T>` types,
 `await x.field`). The library-level `AsyncInit<T>`/`InitProducer<T>` fallback of
 §3.1 is the default assumption until a probe proves otherwise.
 
+### Lane assignment (2026-11-14)
+
+Owner direction 2026-11-14: complete this plan together with the node-attribute
+program, SPipe + TDD, Windows and pure Simple first. Assignments only; state is
+tracked in the progress file's "Owner goal and lane assignment (2026-11-14)".
+
+| Phase | Lane / branch | Order and limits |
+|---|---|---|
+| P2 `Immutable<T>` (IMM-01/02) | immview, `work/immutable-views-async-init-2-20261114` | First. Real grammar and type support, not lenience; a write through the projection is a named compile error. The seed must accept the syntax; a seed change is reported, not rebuilt by the lane |
+| P3 async registered init (ASY-01/02/06/07/08) | immview | Second. On `phase_cell_*_v1` by name; includes parsing `async <expr>` as a constructor argument |
+| P2 `RevisionImmutable<T>` / `FrozenImmutable<T>` (IMM-03/04) | immview | Third. Handle semantics only; REV-01/02 cache identity stays with W8 and the missing hook is named |
+| P1 census re-run | immview | The 2026-11-13 figures predate the named/positional mapping fix; re-run for `src/compiler`. The gate default stays `off` |
+| P4 storage backend unification | nodeattr, `work/node-attr-storage-20261114` | One `AttributeSchema`; array <-> hash switch by tag or SDN rule; default off |
+| P5 static profile-guided selection (PROF-01) | tracesel, `work/trace-layer-feature-select-20261114` | After the layer/feature trace fold |
+| P6 opt-in runtime switching (PROF-02/03) | tracesel | Opt-in path only, default off. Previously "not scheduled by this plan"; scheduled by the owner direction above |
+| P7 | program | Includes the default-on rule: phase 3 must complete with managed storage enabled before any default flip |
+
 
 ## 0. Executive decision
 

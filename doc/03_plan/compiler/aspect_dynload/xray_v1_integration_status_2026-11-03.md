@@ -459,3 +459,35 @@ clang_rt.xray + adapter link (PR4) is not wired.
   `compiler.backend.linker.elf_writer`). The two specs that do reach the native writer fail
   identically on base `30382bc764e` and on this branch: `native_compile_elf_spec` 1/2,
   `comdat_instance_dedup_spec` 3/5 (bug `seed_reexport_cycle_loses_owner_bindings_2026-11-13.md`).
+
+## Windows program lanes (2026-11-14)
+
+Owner direction 2026-11-14: check and fix the pure-Simple XRay path, and make
+container switching, aspect dynload and log/profile tracing work on Windows,
+implementing what is missing. Pin `origin/release/1.0.0` @ `ab253ce1312`. This
+supersedes two earlier decisions for the **Simple backend only**: "Windows tracing
+stays off through stages 1–2" and the coordinator decision that the W3 build route
+refuses every Windows target. LLVM-on-Windows and Windows ARM64 stay refused;
+SimpleOS XRay stays off. Rows below are assignments, not evidence.
+
+| Lane | Branch | Deliverable |
+| --- | --- | --- |
+| xraychk | `work/xray-win-check-20261114` | Every XRay / trace / aspect / adaptive spec run on a Windows host on the pure-Simple lane, with a per-spec table (passed/failed, classification: real defect, Windows defect, seed defect, Linux-only with explicit BLOCKED). Fixes for the first two classes. The adaptive sibling reds (`spl_ordered_key_cmp`, `spl_collection_capture_*`, `Dict.capacity`) are in scope, not accepted as pre-existing |
+| xraywin | `work/xray-win64-native-20261114` | (1) native-backend COFF sled emission: V1 `X64Rel32` sled, `.sxray` with ADDR32NB text_base, `.pdata` consistent with the entry-sled admission rule; (2) one change admitting `x86_64-pc-windows-*` + backend Simple in `observer_build_route_v1.spl` and `driver_xray_policy.spl` with their specs, and the win64 resident runtime linked only into `--xray` DLLs; (3) Windows module registration through the PE locator; (4) `scripts/check/check-xray-native-win64-inprocess-e2e.shs` and Windows rows in `xray_spy_program_out_spec.spl`; (5) off identity: COFF objects byte-identical with `--xray` off |
+| tracesel | `work/trace-layer-feature-select-20261114` | Layer-to-layer and feature-to-feature tracing: a selector for call edges whose caller and callee differ in layer (or feature), a site-id -> (layer, feature) table, and a fold over the existing raw-edge stream giving count and inclusive/exclusive time per pair, with a log-profile line format. No new machine hook, no per-entry-point gate. Then container selection by config: static (`StoragePolicyId`, `.sprof`) and the opt-in runtime switch |
+
+Known risk for xraywin: the Windows self-dlsym / PE-export gap. The lane probes
+`rt_host_dynlib_open` / symbol lookup on a small DLL first; if that fails it is
+the lane's blocker and is filed, not worked around.
+
+Target matrix once these land (to be filled from executed runs only):
+
+| feature | Simple-win64 IN | objects | real run |
+| --- | --- | --- | --- |
+| runtime log on/off | 2026-11-13: PASS on Linux host (48/48 suite); Windows host pending | static check PASS on Linux; COFF emission pending | pending |
+| re-enable / reselect | as above | as above | pending |
+| profile + exclusive fold | as above | as above | pending |
+| aspect dynload | as above | as above | pending |
+| container switch | as above | as above | pending |
+| rollback / close_admission | as above | as above | pending |
+| layer / feature edge profile | not written | n/a (fold only) | pending |
