@@ -1,0 +1,42 @@
+use std.spec.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.hir.hir_types.{SymbolId, HirType, HirTypeKind}
+use compiler.hir.hir_definitions.{HirField, HirExpr, HirExprKind}
+use compiler.types.type_layout.{compute_struct_layout, layoutattr_default_, layoutattr_c_repr, layoutattr_packed}
+use compiler.types.layout_field_identity_v1.{layout_field_offsets_by_declaration_v1}
+
+fn identity_field(name: text, bits: i64) -> HirField:
+    val span = Span.empty()
+    val type_ = HirType(kind: HirTypeKind.Int(bits, false), span: span)
+    HirField(symbol: SymbolId(id: bits), name: name, type_: type_, has_default: false,
+        default: HirExpr(kind: HirExprKind.UnitLit, has_type_: false, type_: type_, span: span),
+        visibility: Visibility.Public, is_public: true, is_volatile: false,
+        has_bits_attr: false, bits_width: 0, has_fixed_address: false, fixed_address: 0, span: span)
+
+describe "Physical layout association preserves declared field identity":
+    it "maps both mixed-size declaration permutations using actual default layouts":
+        val fields = [identity_field("small", 8), identity_field("wide", 64)]
+        val layout = compute_struct_layout(fields, layoutattr_default_())
+        expect(layout.fields[0].name).to_equal("wide")
+        expect(layout_field_offsets_by_declaration_v1(layout, fields)).to_equal(Ok([8, 0]))
+        val reversed = [fields[1], fields[0]]
+        expect(layout_field_offsets_by_declaration_v1(compute_struct_layout(reversed, layoutattr_default_()), reversed)).to_equal(Ok([0, 8]))
+        expect(layout.size).to_equal(16)
+
+    it "preserves C and packed policy outputs without recomputing placement":
+        val fields = [identity_field("small", 8), identity_field("wide", 64)]
+        expect(layout_field_offsets_by_declaration_v1(compute_struct_layout(fields, layoutattr_c_repr()), fields)).to_equal(Ok([0, 8]))
+        val packed = compute_struct_layout(fields, layoutattr_packed())
+        expect(layout_field_offsets_by_declaration_v1(packed, fields)).to_equal(Ok([0, 1]))
+        expect(packed.size).to_equal(9)
+
+    it "rejects duplicate missing and extra identities":
+        val fields = [identity_field("small", 8), identity_field("wide", 64)]
+        val layout = compute_struct_layout(fields, layoutattr_default_())
+        expect(layout_field_offsets_by_declaration_v1(layout, [fields[0]]).is_err()).to_equal(true)
+        expect(layout_field_offsets_by_declaration_v1(layout, [fields[0], fields[0]]).is_err()).to_equal(true)
+        expect(layout_field_offsets_by_declaration_v1(layout, [fields[0], identity_field("absent", 64)]).is_err()).to_equal(true)
+        var duplicate = layout
+        duplicate.fields = [layout.fields[0], layout.fields[0]]
+        expect(layout_field_offsets_by_declaration_v1(duplicate, fields).is_err()).to_equal(true)

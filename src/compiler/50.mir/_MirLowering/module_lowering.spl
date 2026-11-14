@@ -79,6 +79,7 @@ use compiler.common.attributes.{FunctionAttr}
 use compiler.blocks.value.BlockValue
 use compiler.types.type_layout.{layoutattr_default_, FieldLayout, TypeLayout}
 use compiler.types.type_layout.{LayoutAttr}
+use compiler.types.layout_field_identity_v1.{layout_field_offsets_by_declaration_v1}
 use std.common.crypto.sha256.{sha256_text}
 use compiler.common.native_layout_trace.{MirExternalLayoutTraceV1}
 use compiler.common._Attributes.decl_attrs.{DriverManifestAttr, DriverManifestAttrKind, vhdl_hardware_metadata_default}
@@ -4179,13 +4180,17 @@ impl MirLowering:
         else:
             layoutattr_default_()
         val layout = self.lowering_struct_layout(struct_def.name, struct_def.fields, layout_attr)
+        val associated = layout_field_offsets_by_declaration_v1(layout, struct_def.fields)
+        if associated.is_err():
+            self.error_fatal("MIR struct layout {struct_def.name}: {associated.unwrap_err()}", Some(struct_def.span))
+            return
+        val declared_offsets = associated.unwrap()
 
         var fields: [MirFieldDef] = []
         var fi = 0
         while fi < struct_def.fields.len():
             val hir_field: HirField = struct_def.fields[fi]
-            val field_layout: FieldLayout = layout.fields[fi]
-            val field_offset: i64 = field_layout.offset
+            val field_offset: i64 = declared_offsets[fi]
             val errors_before = self.errors.len()
             val lowered_field_type = self.lower_type(hir_field.type_)
             if self.errors.len() > errors_before:
@@ -4225,13 +4230,17 @@ impl MirLowering:
         else:
             layoutattr_default_()
         val layout = self.lowering_struct_layout(class_def.name, class_def.fields, layout_attr)
+        val associated = layout_field_offsets_by_declaration_v1(layout, class_def.fields)
+        if associated.is_err():
+            self.error_fatal("MIR class layout {class_def.name}: {associated.unwrap_err()}", Some(class_def.span))
+            return
+        val declared_offsets = associated.unwrap()
 
         var fields: [MirFieldDef] = []
         var fi = 0
         while fi < class_def.fields.len():
             val hir_field: HirField = class_def.fields[fi]
-            val field_layout: FieldLayout = layout.fields[fi]
-            val field_offset: i64 = field_layout.offset
+            val field_offset: i64 = declared_offsets[fi]
             fields.push(MirFieldDef(
                 name: hir_field.name,
                 type_: self.lower_type(hir_field.type_),

@@ -3,6 +3,7 @@
 
 use compiler.backend.backend.backend_types.{BackendKind}
 use plugins.backend_cuda.cuda_backend.{CudaBackend}
+use compiler.backend.backend.cuda_backend.{CudaBackend as LegacyCudaBackend}
 use plugins.backend_cuda.cuda.ptx_builder.{PtxBuilder}
 use compiler.common.attributes.{vhdl_hardware_metadata_default}
 use compiler.common.diagnostics.span.{Span}
@@ -931,6 +932,93 @@ describe "CUDA backend intensive MIR contract":
         expect(ptx).to_contain("st.local.u64 [%r0+8], %r2;")
         expect(ptx).to_contain(", 24;")
         expect(ptx.contains("WARN:")).to_equal(false)
+
+    it "uses maximum physical field end for reordered struct stride":
+        val symbol = SymbolId(id: 181)
+        val fields = [
+            MirFieldDef(name: "small", type_: cuda_u8(), offset: 8, has_bits_attr: false, bits_width: 0),
+            MirFieldDef(name: "wide", type_: cuda_u64(), offset: 0, has_bits_attr: false, bits_width: 0)
+        ]
+        var backend = CudaBackend.create((8, 6))
+        expect(backend.cuda_struct_size(fields).unwrap()).to_equal(16)
+        expect(backend.cuda_struct_size([fields[1], fields[0]]).unwrap()).to_equal(16)
+        expect(backend.cuda_struct_size([]).unwrap()).to_equal(0)
+        expect(backend.struct_field_layout(fields, 0).unwrap().0).to_equal(8)
+        expect(backend.struct_field_layout(fields, 1).unwrap().0).to_equal(0)
+
+    it "constructs reordered fields at canonical offsets in both CUDA consumers":
+        val symbol = SymbolId(id: 183)
+        val aggregate = MirType(kind: MirTypeKind.Struct(symbol))
+        val fields = [
+            MirFieldDef(name: "small", type_: cuda_u8(), offset: 8, has_bits_attr: false, bits_width: 0),
+            MirFieldDef(name: "wide", type_: cuda_u64(), offset: 0, has_bits_attr: false, bits_width: 0)
+        ]
+        val types: Dict<SymbolId, MirTypeDef> = {
+            symbol: MirTypeDef(symbol: symbol, name: "Reordered", kind: MirTypeDefKind.Struct(fields), is_export_c: false, export_name: "")
+        }
+        val fn_ = cuda_function(183, "construct_reordered", [cuda_u8(), cuda_u64()], MirType.unit(), [
+            cuda_arg(0, 0, "small", cuda_u8()), cuda_arg(1, 1, "wide", cuda_u64()), cuda_temp(2, aggregate)
+        ], [], false)
+        val operands = [MirOperand.copy(LocalId(id: 0)), MirOperand.copy(LocalId(id: 1))]
+        var backend = CudaBackend.create((8, 6))
+        backend.type_defs = types
+        var legacy = LegacyCudaBackend.create((8, 6))
+        legacy.type_defs = types
+        expect(legacy.cuda_struct_size(fields).unwrap()).to_equal(16)
+        val current_builder = PtxBuilder.create((8, 6))
+        val legacy_builder = PtxBuilder.create((8, 6))
+        expect(backend.compile_aggregate(current_builder, LocalId(id: 2), AggregateKind.Struct(symbol), operands, fn_).is_ok()).to_equal(true)
+        expect(legacy.compile_aggregate(legacy_builder, LocalId(id: 2), AggregateKind.Struct(symbol), operands, fn_).is_ok()).to_equal(true)
+        expect(current_builder.build()).to_contain("st.local.u8 [%r2+8], %r0;")
+        expect(current_builder.build()).to_contain("st.local.u64 [%r2+0], %r1;")
+        expect(legacy_builder.build()).to_contain("st.local.u8 [%r2+8], %r0;")
+        expect(legacy_builder.build()).to_contain("st.local.u64 [%r2+0], %r1;")
+
+    it "rejects overflowing field strides before direct load or store output":
+        val array = MirType(kind: MirTypeKind.Array(cuda_u64(), 9223372036854775807))
+        val fn_ = cuda_function(184, "overflow_field", [array, cuda_u64()], MirType.unit(), [
+            cuda_arg(0, 0, "array", array), cuda_arg(1, 1, "value", cuda_u64()), cuda_temp(2, cuda_u64())
+        ], [], false)
+        val base = MirOperand.copy(LocalId(id: 0))
+        val value = MirOperand.copy(LocalId(id: 1))
+        val index = 1152921504606846976
+        var backend = CudaBackend.create((8, 6))
+        var legacy = LegacyCudaBackend.create((8, 6))
+        val builder = PtxBuilder.create((8, 6))
+        expect(backend.compile_get_field(builder, LocalId(id: 2), base, index, fn_).is_err()).to_equal(true)
+        expect(backend.compile_set_field(builder, base, index, value, fn_).is_err()).to_equal(true)
+        expect(legacy.compile_get_field(builder, LocalId(id: 2), base, index, fn_).is_err()).to_equal(true)
+        expect(legacy.compile_set_field(builder, base, index, value, fn_).is_err()).to_equal(true)
+        expect(builder.build().contains("ld.local")).to_equal(false)
+        expect(builder.build().contains("st.local")).to_equal(false)
+
+    it "propagates struct extent overflow through direct GEP and module compilation":
+        val symbol = SymbolId(id: 182)
+        val aggregate = MirType(kind: MirTypeKind.Struct(symbol))
+        val pointer = MirType.ptr(aggregate, true)
+        val types: Dict<SymbolId, MirTypeDef> = {
+            symbol: MirTypeDef(symbol: symbol, name: "Overflow", kind: MirTypeDefKind.Struct([
+                MirFieldDef(name: "wide", type_: cuda_u64(), offset: 9223372036854775807, has_bits_attr: false, bits_width: 0)
+            ]), is_export_c: false, export_name: "")
+        }
+        val base = MirOperand.copy(LocalId(id: 0))
+        val indices = [MirOperand.copy(LocalId(id: 1))]
+        val block = MirBlock(id: BlockId.entry(), label: Some("entry"), instructions: [
+            MirInst(kind: MirInstKind.GetElementPtr(LocalId(id: 2), base, indices), span: nil)
+        ], terminator: MirTerminator.Ret(nil))
+        val function = cuda_function(182, "cuda_overflow", [pointer, cuda_u64()], MirType.unit(), [
+            cuda_arg(0, 0, "base", pointer), cuda_arg(1, 1, "index", cuda_u64()), cuda_temp(2, pointer)
+        ], [block], true)
+        var backend = CudaBackend.create((8, 6))
+        backend.type_defs = types
+        val builder = PtxBuilder.create((8, 6))
+        val direct = backend.compile_gep(builder, LocalId(id: 2), base, indices, function)
+        expect(direct.is_err()).to_equal(true)
+        expect(direct.unwrap_err().message).to_contain("overflowing extent")
+        expect(builder.build().contains("mul.lo.u64")).to_equal(false)
+        val compiled = backend.compile(cuda_module_with_types([function], types))
+        expect(compiled.is_err()).to_equal(true)
+        expect(compiled.unwrap_err().message).to_contain("overflowing extent")
 
     it "rejects missing nested wrong kind and cyclic by value layouts":
         val symbol = SymbolId(id: 170)

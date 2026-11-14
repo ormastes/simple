@@ -26,12 +26,7 @@ use compiler.mir.mir_types.{LocalId}  # explicit: a glob is not an import-origin
 # Layout helpers
 # ============================================================================
 
-fn cuda_align_to(offset: i64, align: i64) -> i64:
-    """Round offset up to the given alignment (align <= 1 is a no-op)."""
-    if align <= 1:
-        offset
-    else:
-        ((offset + align - 1) / align) * align
+use compiler.backend.common.cuda_layout_extent_v1.*
 
 fn cuda_mapper_can_size(ty: MirType) -> bool:
     """
@@ -479,14 +474,14 @@ class CudaBackend:
 
             case Aggregate(dest, kind, operands):
                 self.pointer_spaces.remove(dest.id)
-                self.compile_aggregate(builder, dest, kind, operands, func)
+                self.compile_aggregate(builder, dest, kind, operands, func)?
 
             case GetField(dest, base, field):
                 self.pointer_spaces.remove(dest.id)
-                self.compile_get_field(builder, dest, base, field, func)
+                self.compile_get_field(builder, dest, base, field, func)?
 
             case SetField(base, field, value):
-                self.compile_set_field(builder, base, field, value, func)
+                self.compile_set_field(builder, base, field, value, func)?
 
             # --- Cast Operations ---
 
@@ -529,7 +524,7 @@ class CudaBackend:
 
             case GetElementPtr(dest, base, indices):
                 val base_space = self.pointer_memory_space(base, self.pointer_spaces)?
-                self.compile_gep(builder, dest, base, indices, func)
+                self.compile_gep(builder, dest, base, indices, func)?
                 self.pointer_spaces[dest.id] = base_space
 
             # --- Checked Arithmetic ---
@@ -882,67 +877,84 @@ class CudaBackend:
             builder.emit_call_void(func_name, arg_regs, arg_types)
         Ok(())
 
-    me compile_aggregate(builder: PtxBuilder, dest: LocalId, kind: AggregateKind, operands: [MirOperand], func: MirFunction):
-        """Compile aggregate construction via local memory using real field layout."""
-        val dest_reg = "%r{dest.id}"
-        # Store each field to local memory at its aligned offset
-        builder.emit_comment("aggregate construct -> {dest_reg}")
-        var offset = 0
-        for operand in operands:
-            val src_reg = self.operand_to_reg(builder, operand)
-            var stored = false
-            match self.operand_mir_type(func, operand):
-                case Ok(field_ty):
-                    if self.cuda_can_size(field_ty):
-                        offset = cuda_align_to(offset, self.cuda_type_align(field_ty))
-                        val st_ty = self.ptx_mem_type(field_ty)
-                        builder.emit_line("st.local{st_ty} [{dest_reg}+{offset}], {src_reg};")
-                        offset = offset + self.cuda_type_size(field_ty)
-                        stored = true
-                case Err(_): ()
-            if not stored:
-                # FALLBACK: the operand's MIR type is not resolvable/sizable here.
-                # Known Struct(SymbolId)/Enum(SymbolId) now resolve via
-                # self.cuda_can_size/self.type_defs; this only fires for a
-                # symbol genuinely absent from the module's type table.
-                # Legacy 8-byte slot — WRONG for sub-8-byte fields; kept loud so
-                # bad layout is visible in the emitted PTX.
-                builder.emit_comment("WARN: unresolved aggregate field type; falling back to 8-byte slot")
-                builder.emit_line("st.local.u64 [{dest_reg}+{offset}], {src_reg};")
-                offset = offset + 8
+    fn cuda_scalar_memory_type(ty: MirType) -> bool:
+        match ty.kind:
+            case MirTypeKind.I64 | MirTypeKind.U64 | MirTypeKind.F64 | MirTypeKind.I32 | MirTypeKind.U32 | MirTypeKind.F32 | MirTypeKind.I16 | MirTypeKind.U16 | MirTypeKind.I8 | MirTypeKind.U8 | MirTypeKind.Bool | MirTypeKind.Ptr(_, _): true
+            case _: false
 
-    me compile_get_field(builder: PtxBuilder, dest: LocalId, base: MirOperand, field: i64, func: MirFunction):
-        """Compile field access via offset load using real field layout."""
+    me compile_aggregate(builder: PtxBuilder, dest: LocalId, kind: AggregateKind, operands: [MirOperand], func: MirFunction) -> Result<(), CompileError>:
+        """Construct aggregates only from the destination's canonical field layout."""
+        val dest_ty = self.operand_mir_type(func, MirOperand.copy(dest))?
+        if not self.cuda_can_size(dest_ty):
+            return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA layout: aggregate type is not sizable"))
+        val _ = self.cuda_type_size(dest_ty)?
+        val expected_count = match dest_ty.kind:
+            case Struct(symbol):
+                match kind:
+                    case AggregateKind.Struct(actual):
+                        if actual != symbol:
+                            return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA layout: aggregate kind does not match destination"))
+                    case _:
+                        return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA layout: aggregate kind does not match destination"))
+                val definition: MirTypeDef = self.type_defs[symbol]
+                match definition.kind:
+                    case MirTypeDefKind.Struct(fields): fields.len()
+                    case _: return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA layout: invalid struct definition"))
+            case Tuple(elements):
+                match kind:
+                    case AggregateKind.Tuple: ()
+                    case _: return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA layout: aggregate kind does not match destination"))
+                elements.len()
+            case Array(element, count):
+                match kind:
+                    case AggregateKind.Array(actual):
+                        if actual.kind != element.kind:
+                            return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA layout: aggregate element type mismatch"))
+                    case _: return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA layout: aggregate kind does not match destination"))
+                count
+            case _: return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA layout: unsupported aggregate destination"))
+        if expected_count != operands.len():
+            return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA layout: aggregate operand count mismatch"))
+        val dest_reg = "%r{dest.id}"
+        var field = 0
+        for operand in operands:
+            val layout = self.field_layout(func, MirOperand.copy(dest), field)?
+            val operand_ty = self.operand_mir_type(func, operand)?
+            if not self.cuda_scalar_memory_type(layout.1):
+                return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA layout: compound field transfer is unsupported"))
+            if operand_ty.kind != layout.1.kind:
+                return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA layout: aggregate field type mismatch"))
+            val src_reg = self.operand_to_reg(builder, operand)
+            val st_ty = self.ptx_mem_type(layout.1)
+            builder.emit_line("st.local{st_ty} [{dest_reg}+{layout.0}], {src_reg};")
+            field = field + 1
+        Ok(())
+
+    me compile_get_field(builder: PtxBuilder, dest: LocalId, base: MirOperand, field: i64, func: MirFunction) -> Result<(), CompileError>:
+        val layout = self.field_layout(func, base, field)?
+        if not self.cuda_scalar_memory_type(layout.1):
+            return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA layout: compound field transfer is unsupported"))
+        val dest_ty = self.operand_mir_type(func, MirOperand.copy(dest))?
+        if dest_ty.kind != layout.1.kind:
+            return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA layout: field load destination type mismatch"))
         val dest_reg = "%r{dest.id}"
         val base_reg = self.operand_to_reg(builder, base)
-        match self.field_layout(func, base, field):
-            case Ok(layout):
-                val offset = layout.0
-                val ld_ty = self.ptx_mem_type(layout.1)
-                builder.emit_line("ld.local{ld_ty} {dest_reg}, [{base_reg}+{offset}];")
-            case Err(_):
-                # FALLBACK: aggregate layout not resolvable at this call site
-                # (base type opaque, or a Struct(SymbolId) absent from
-                # self.type_defs — known struct symbols resolve in field_layout).
-                # Legacy 8-byte slots — matches compile_aggregate's fallback path.
-                builder.emit_comment("WARN: unresolved aggregate layout; using legacy 8-byte field slots")
-                val offset = field * 8
-                builder.emit_line("ld.local.u64 {dest_reg}, [{base_reg}+{offset}];")
+        val ld_ty = self.ptx_mem_type(layout.1)
+        builder.emit_line("ld.local{ld_ty} {dest_reg}, [{base_reg}+{layout.0}];")
+        Ok(())
 
-    me compile_set_field(builder: PtxBuilder, base: MirOperand, field: i64, value: MirOperand, func: MirFunction):
-        """Compile field write via offset store using real field layout."""
+    me compile_set_field(builder: PtxBuilder, base: MirOperand, field: i64, value: MirOperand, func: MirFunction) -> Result<(), CompileError>:
+        val layout = self.field_layout(func, base, field)?
+        if not self.cuda_scalar_memory_type(layout.1):
+            return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA layout: compound field transfer is unsupported"))
+        val value_ty = self.operand_mir_type(func, value)?
+        if value_ty.kind != layout.1.kind:
+            return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA layout: field store value type mismatch"))
         val base_reg = self.operand_to_reg(builder, base)
         val value_reg = self.operand_to_reg(builder, value)
-        match self.field_layout(func, base, field):
-            case Ok(layout):
-                val offset = layout.0
-                val st_ty = self.ptx_mem_type(layout.1)
-                builder.emit_line("st.local{st_ty} [{base_reg}+{offset}], {value_reg};")
-            case Err(_):
-                # FALLBACK: see compile_get_field — legacy 8-byte slots.
-                builder.emit_comment("WARN: unresolved aggregate layout; using legacy 8-byte field slots")
-                val offset = field * 8
-                builder.emit_line("st.local.u64 [{base_reg}+{offset}], {value_reg};")
+        val st_ty = self.ptx_mem_type(layout.1)
+        builder.emit_line("st.local{st_ty} [{base_reg}+{layout.0}], {value_reg};")
+        Ok(())
 
     me compile_cast(builder: PtxBuilder, dest: LocalId, operand: MirOperand, target: MirType, func: MirFunction):
         """Compile type conversion using PTX cvt instruction."""
@@ -968,7 +980,7 @@ class CudaBackend:
         # Load address of local allocation into dest register
         builder.emit_line("mov.u64 {dest_reg}, {alloc_name};")
 
-    me compile_gep(builder: PtxBuilder, dest: LocalId, base: MirOperand, indices: [MirOperand], func: MirFunction):
+    me compile_gep(builder: PtxBuilder, dest: LocalId, base: MirOperand, indices: [MirOperand], func: MirFunction) -> Result<(), CompileError>:
         """Compile GetElementPtr - pointer arithmetic with indices."""
         val dest_reg = "%r{dest.id}"
         val base_reg = self.operand_to_reg(builder, base)
@@ -982,19 +994,19 @@ class CudaBackend:
                     match base_ty.kind:
                         case Ptr(pointee, _):
                             if self.cuda_can_size(pointee):
-                                elem_size = self.cuda_type_size(pointee)
+                                elem_size = self.cuda_type_size(pointee)?
                                 resolved = true
                         case Ref(referent, _):
                             if self.cuda_can_size(referent):
-                                elem_size = self.cuda_type_size(referent)
+                                elem_size = self.cuda_type_size(referent)?
                                 resolved = true
                         case Array(elem, _):
                             if self.cuda_can_size(elem):
-                                elem_size = self.cuda_type_size(elem)
+                                elem_size = self.cuda_type_size(elem)?
                                 resolved = true
                         case Slice(selem):
                             if self.cuda_can_size(selem):
-                                elem_size = self.cuda_type_size(selem)
+                                elem_size = self.cuda_type_size(selem)?
                                 resolved = true
                         case _: ()
                 case Err(_): ()
@@ -1009,6 +1021,7 @@ class CudaBackend:
             builder.emit_line("add.u64 {dest_reg}, {base_reg}, {tmp};")
         else:
             builder.emit_line("mov.u64 {dest_reg}, {base_reg};")
+        Ok(())
 
     me compile_bounds_check(builder: PtxBuilder, args: [MirOperand], func: MirFunction) -> Result<(), CompileError>:
         val index_mir_type = self.operand_mir_type(func, args[0])?
@@ -1454,7 +1467,7 @@ class CudaBackend:
                 true
             case _: cuda_mapper_can_size(ty)
 
-    me cuda_type_size(ty: MirType) -> i64:
+    me cuda_type_size(ty: MirType) -> Result<i64, CompileError>:
         """
         Byte size of ty for CUDA layout purposes. Struct(SymbolId)/
         Enum(SymbolId) resolve against self.type_defs; everything else
@@ -1470,24 +1483,24 @@ class CudaBackend:
                     val type_def: MirTypeDef = self.type_defs[symbol]
                     match type_def.kind:
                         case MirTypeDefKind.Struct(fields): self.cuda_struct_size(fields)
-                        case _: 8
+                        case _: Ok(8)
                 else:
-                    8
+                    Ok(8)
             case Enum(symbol):
                 if self.type_defs.contains_key(symbol):
                     val type_def: MirTypeDef = self.type_defs[symbol]
                     match type_def.kind:
                         case MirTypeDefKind.Enum(variants): self.cuda_enum_size(variants)
-                        case _: 8
+                        case _: Ok(8)
                 else:
-                    8
-            case Array(elem, size): self.cuda_type_size(elem) * size
+                    Ok(8)
+            case Array(elem, size): cuda_checked_extent_product_v1(self.cuda_type_size(elem)?, size)
             case Tuple(elements):
                 var total = 0
                 for e in elements:
-                    total = total + self.cuda_type_size(e)
-                total
-            case _: self.type_mapper.size_of(ty)
+                    total = cuda_checked_extent_add_v1(total, self.cuda_type_size(e)?)?
+                Ok(total)
+            case _: cuda_checked_extent_add_v1(0, self.type_mapper.size_of(ty))
 
     me cuda_type_align(ty: MirType) -> i64:
         """Alignment in bytes of ty, resolving Struct/Enum the same way as cuda_type_size."""
@@ -1521,18 +1534,22 @@ class CudaBackend:
                     best
             case _: self.type_mapper.align_of(ty)
 
-    me cuda_struct_size(fields: [MirFieldDef]) -> i64:
+    me cuda_struct_size(fields: [MirFieldDef]) -> Result<i64, CompileError>:
         """
-        Total struct size: the last field's precomputed offset plus its own
-        size, rounded up to the struct's alignment. Offsets are trusted as
+        Total struct size: maximum precomputed field end, rounded up to the
+        struct's alignment. Declaration order need not be physical order.
+        Offsets are trusted as
         computed by MIR lowering (compute_struct_layout in module_lowering.spl)
         rather than re-derived here.
         """
         if fields.len() == 0:
-            return 0
-        val last = fields[fields.len() - 1]
-        val end = last.offset + self.cuda_type_size(last.type_)
-        cuda_align_to(end, self.cuda_struct_align(fields))
+            return Ok(0)
+        var offsets: [i64] = []
+        var sizes: [i64] = []
+        for field in fields:
+            offsets.push(field.offset)
+            sizes.push(self.cuda_type_size(field.type_)?)
+        cuda_checked_struct_extent_v1(offsets, sizes, self.cuda_struct_align(fields))
 
     me cuda_struct_align(fields: [MirFieldDef]) -> i64:
         if fields.len() == 0:
@@ -1544,17 +1561,17 @@ class CudaBackend:
                 best = a
         best
 
-    me cuda_enum_size(variants: [MirVariantDef]) -> i64:
+    me cuda_enum_size(variants: [MirVariantDef]) -> Result<i64, CompileError>:
         """Tagged-union layout: 8-byte discriminant + largest payload, aligned to the widest member."""
         var payload_max = 0
         for v in variants:
             match v.payload:
                 case Some(p):
-                    val sz = self.cuda_type_size(p)
+                    val sz = self.cuda_type_size(p)?
                     if sz > payload_max:
                         payload_max = sz
                 case None: ()
-        cuda_align_to(8 + payload_max, self.cuda_enum_align(variants))
+        cuda_checked_extent_align_v1(cuda_checked_extent_add_v1(8, payload_max)?, self.cuda_enum_align(variants))
 
     me cuda_enum_align(variants: [MirVariantDef]) -> i64:
         var best = 8
@@ -1595,7 +1612,7 @@ class CudaBackend:
             case Array(elem, _):
                 if not self.cuda_can_size(elem):
                     return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA layout: array element type is not sizable"))
-                Ok((field * self.cuda_type_size(elem), elem))
+                Ok((cuda_checked_extent_product_v1(self.cuda_type_size(elem)?, field)?, elem))
             case _:
                 Err(compileerror_backend_error(BackendKind.Cuda, "CUDA layout: aggregate type not resolvable at this call site"))
 
@@ -1620,10 +1637,10 @@ class CudaBackend:
             val ft = elements[i]
             if not self.cuda_can_size(ft):
                 return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA layout: field type is not sizable"))
-            offset = cuda_align_to(offset, self.cuda_type_align(ft))
+            offset = cuda_checked_extent_align_v1(offset, self.cuda_type_align(ft))?
             if i == field:
                 return Ok((offset, ft))
-            offset = offset + self.cuda_type_size(ft)
+            offset = cuda_checked_extent_add_v1(offset, self.cuda_type_size(ft)?)?
             i = i + 1
         Err(compileerror_backend_error(BackendKind.Cuda, "CUDA layout: field walk failed"))
 
