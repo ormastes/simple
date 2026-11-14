@@ -1,0 +1,122 @@
+# Qualification entry: imports the real generated codec and every production
+# dependency. Internal codec evidence does not open the public canonical gate.
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.hir.hir_types.{HirModule, SymbolTable, HirSymbol, SymbolId, ScopeId, SymbolKind, HirType, HirTypeKind}
+use compiler.hir.hir_definitions.{HirConst, HirExpr, HirExprKind}
+use compiler.hir.generated.hir_codec.{hc_enc_hir_module, hc_dec_hir_module}
+use compiler.hir.hir_codec_support.{HirCodecWriter}
+use compiler.frontend.core.flat_pool_codec.{FlatPoolReader}
+use std.common.encoding.utf8.{text_byte_len}
+use std.nogc_sync_mut.io.file_ops.{file_write}
+
+fn fixture(order: [i64], names: [text]) -> HirModule:
+    var table = SymbolTable.new()
+    var constants: Dict<SymbolId, HirConst> = {}
+    val integer = HirType(kind: HirTypeKind.Int(64, true), span: Span.empty())
+    for key in order:
+        table.symbols[key] = HirSymbol(id: SymbolId(id: key), name: "symbol{key}",
+            kind: SymbolKind.Variable, type_: nil, scope: ScopeId(id: 0),
+            span: Span.empty(), visibility: Visibility.Private,
+            is_public: false, is_mutable: false, defining_module: nil,
+            builtin_method_tag: key)
+        val literal = HirExpr(kind: HirExprKind.IntLit(key, nil),
+            has_type_: true, type_: integer, span: Span.empty())
+        constants[SymbolId(id: key)] = HirConst(symbol: SymbolId(id: key),
+            name: "constant{key}", type_: integer, value: literal,
+            is_mutable: false, visibility: Visibility.Private, is_public: false,
+            is_volatile: false, has_fixed_address: false, fixed_address: 0,
+            span: Span.empty())
+    table.next_symbol_id = 4
+    var targets: Dict<text, text> = {}
+    for name in names:
+        targets[name] = "target:" + name
+    HirModule(name: "canonical\n한글\\fixture", path: "codec/fixture.spl",
+        imports: [], exports: [], domain_blocks: [], symbols: table,
+        functions: {}, gpu_function_targets: targets, gpu_function_backend_orders: {},
+        classes: {}, structs: {}, enums: {}, bitfields: {}, traits: {}, impls: [],
+        constants: constants, static_asserts: [], aop_advices: [], di_bindings: [],
+        arch_rules: [], mock_decls: [], types: [], extend_enums: [])
+
+fn raw_canonical(module: HirModule) -> text:
+    var writer = HirCodecWriter.create_canonical()
+    hc_enc_hir_module(writer, module)
+    assert(writer.ok)
+    writer.finish()
+
+fn raw_reader(blob: text, nodes: i64, depth: i64) -> FlatPoolReader:
+    FlatPoolReader.new_bounded(blob, 8388608, 134217728, nodes, depth, 1000000)
+
+fn main() -> i64:
+    val first = fixture([3, -7, 0, 12], ["한", "é", "z", "a"])
+    val second = fixture([12, 0, -7, 3], ["a", "z", "é", "한"])
+    val before_symbols = first.symbols.symbols.keys()
+    val before_targets = first.gpu_function_targets.keys()
+    val blob = raw_canonical(first)
+    assert(blob.len() > 0)
+    assert(blob == raw_canonical(second))
+    assert(first.symbols.symbols.keys() == before_symbols)
+    assert(first.gpu_function_targets.keys() == before_targets)
+    assert(blob.contains("a\ntarget:a\nz\ntarget:z\né\ntarget:é\n한\ntarget:한\n"))
+    print "PASS insertion-order, unsigned-UTF8 order, source immutability"
+
+    var reader = raw_reader(blob, 65536, 128)
+    val decoded = hc_dec_hir_module(reader)
+    assert(reader.ok)
+    assert(reader.pos == reader.lines.len() - 1)
+    assert(reader.lines[reader.pos] == "")
+    assert(raw_canonical(decoded) == blob)
+    assert(decoded.name == first.name)
+    assert(decoded.symbols.symbols[3].builtin_method_tag == 3)
+    assert(decoded.symbols.symbols[-7].name == "symbol-7")
+    assert(decoded.constants.len() == 4)
+    print "PASS real-HIR roundtrip, signed keys, integer-three, escaped text"
+
+    var truncated = raw_reader(blob.substring(0, blob.len() / 2), 65536, 128)
+    val truncated_module = hc_dec_hir_module(truncated)
+    assert(not truncated.ok)
+    var shallow = raw_reader(blob, 65536, 1)
+    val shallow_module = hc_dec_hir_module(shallow)
+    assert(not shallow.ok)
+    assert(shallow.failure_kind == "bounds")
+    var few_nodes = raw_reader(blob, 1, 128)
+    val limited_module = hc_dec_hir_module(few_nodes)
+    assert(not few_nodes.ok)
+    assert(few_nodes.failure_kind == "bounds")
+    print "PASS truncated input, decoder depth and node budgets"
+
+    var trailing = raw_reader(blob + "0\n", 65536, 128)
+    val trailing_module = hc_dec_hir_module(trailing)
+    assert(trailing.ok)
+    assert(trailing.pos != trailing.lines.len() - 1)
+    val swapped = blob.replace("a\ntarget:a\nz\ntarget:z\n", "z\ntarget:z\na\ntarget:a\n")
+    assert(swapped != blob)
+    var permutation = raw_reader(swapped, 65536, 128)
+    val permuted_module = hc_dec_hir_module(permutation)
+    assert(permutation.ok)
+    assert(raw_canonical(permuted_module) != swapped)
+    val duplicate = blob.replace("z\ntarget:z\n", "a\ntarget:z\n")
+    assert(duplicate != blob)
+    var repeated = raw_reader(duplicate, 65536, 128)
+    val repeated_module = hc_dec_hir_module(repeated)
+    assert(not repeated.ok)
+    print "PASS duplicate-key rejection; trailing/permuted bytes detectable for admission"
+
+    var output_limited = HirCodecWriter.create_canonical_bounded(1, 134217728, 1000000)
+    hc_enc_hir_module(output_limited, first)
+    assert(not output_limited.ok)
+    assert(output_limited.failure_kind == "bounds")
+    var work_limited = HirCodecWriter.create_canonical_bounded(8388608, 134217728, 1)
+    hc_enc_hir_module(work_limited, first)
+    assert(not work_limited.ok)
+    assert(work_limited.failure_kind == "bounds")
+    var allocation_limited = HirCodecWriter.create_canonical_bounded(8388608, 1, 1000000)
+    hc_enc_hir_module(allocation_limited, first)
+    assert(not allocation_limited.ok)
+    assert(allocation_limited.failure_kind == "bounds")
+    print "PASS writer output, work and allocation budgets"
+
+    assert(file_write("build/hir-canonical-qualification.raw.golden", blob))
+    print "GOLDEN actual generated-codec bytes={text_byte_len(blob)}"
+    print "SCOPE raw internal codec only; public gate remains closed"
+    0
