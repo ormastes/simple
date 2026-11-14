@@ -60,6 +60,7 @@ verification, not feature completion or runtime tracing admission.
 
 A separate old-producer defect was exposed: a named seventeenth argument after
 omitted default arguments is silently dropped. The nine-line text reproducer
-and failing native exits are retained; a separate repair lane owns that bug.
+and failing native exits are retained; the separate bug
+`named_default_tail_argument_misbind_2026_11_14` owns that repair.
 The positional production call was already the real call shape. This profile
 repair does not claim to repair the compiler's named-argument lowering.
