@@ -69,3 +69,19 @@ launches unknown commands as host programs through the SOSIX process facade.
 A host whose shs launcher cannot be resolved (no `SIMPLE_SHS_COMMAND`, no
 `SIMPLE_BINARY` + `src/app/shs/main.spl`) falls back to the native shell.
 Details: `doc/05_design/pty_shell_kinds_shs_default.md`.
+
+### One-shot commands (no PTY)
+
+Caret runs non-interactive commands (the agent `bash` tool, the agent manager
+view, tmux pane wrappers) through `sosix_pty_native_exec_argv(cmd)`, the
+native case of `sosix_pty_shell_exec_argv_v1(kind, cmd)`,
+which returns `/bin/sh -c <cmd>` or `cmd.exe /d /s /c <cmd>` for `native`.
+`shs` has no `-c` entry yet and is refused (`pty-shell-shs-exec-unsupported`),
+as is `native` on SimpleOS. The `bash` tool's timeout is enforced by the process
+runner, not by a `timeout` binary. `test/01_unit/app/llm_caret/caret_shell_routing_spec.spl`
+keeps `/bin/sh` literals out of the routed files.
+
+Still direct, on purpose: the Windows smux pane path in `agent_workspace.spl`
+runs a POSIX script through `sh` on PATH (cmd.exe cannot parse it), and the
+Windows owner launch uses PowerShell `Start-Process` for a hidden detached
+start. tmux remains the POSIX pane backend binary, not a shell.

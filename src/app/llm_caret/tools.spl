@@ -31,7 +31,9 @@
 # Runtime externs
 # ============================================================================
 
-use app.io.mod.{process_run}
+use app.io.mod.{process_run, process_run_timeout}
+use std.nogc_async_mut.sosix.pty.{sosix_pty_native_exec_argv}
+use std.nogc_async_mut.sosix.{sosix_which}
 use std.io_runtime.{read_file_text}
 use std.io_runtime.{file_write}
 use std.io_runtime.{file_exists}
@@ -323,13 +325,25 @@ fn exec_bash(workspace_root: text, input: text) -> ToolResult:
     var timeout_ms = _json_get_int(input, "timeout_ms", 120000)
     if timeout_ms <= 0:
         timeout_ms = 120000
-    var secs = timeout_ms / 1000
-    if secs < 1:
-        secs = 1
-    var wrapped = "timeout " + secs.to_text() + " /bin/sh -c " + _sq(command)
+    # The shell comes from the SOSIX PTY facade (native: /bin/sh or cmd.exe);
+    # the timeout is enforced by the process runner, not a `timeout` binary.
+    val probe = sosix_pty_native_exec_argv("")
+    if not probe.is_ok():
+        return new_tool_error("", "bash: no native shell on this platform")
+    val native_shell: text = probe.unwrap()[0]
+    # Agent commands are POSIX: on Windows prefer `sh` on PATH (as Caret's
+    # panes do) and fall back to the facade's cmd.exe.
+    val posix = native_shell != "cmd.exe" or sosix_which("sh") != ""
+    var wrapped = command
     if workspace_root != "":
-        wrapped = "cd " + _sq(workspace_root) + " && " + wrapped
-    val (out, errout, code) = process_run("/bin/sh", ["-c", wrapped])
+        if posix:
+            wrapped = "cd " + _sq(workspace_root) + " && " + command
+        else:
+            wrapped = "cd /d \"" + workspace_root + "\" && " + command
+    var argv = sosix_pty_native_exec_argv(wrapped).unwrap_or([])
+    if posix and argv[0] == "cmd.exe":
+        argv = ["sh", "-c", wrapped]
+    val (out, errout, code) = process_run_timeout(argv[0], argv[1:], timeout_ms)
     val stdout = out ?? ""
     val stderr = errout ?? ""
     var content = stdout

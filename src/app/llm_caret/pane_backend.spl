@@ -14,6 +14,7 @@
 # its panes live as long as the dashboard process does.
 
 use std.nogc_async_mut.sosix.{sosix_platform, sosix_run, sosix_which}
+use std.nogc_async_mut.sosix.pty.{sosix_pty_native_exec_argv}
 use os.apps.smux.api.{smux_create_session, smux_list_sessions,
     smux_list_windows, smux_list_panes, smux_split_pane, smux_focus_pane, smux_toggle_zoom, smux_zoomed_pane,
     smux_focused_pane, smux_close_pane, smux_pane_close_pty, smux_pane_spawn_pty, smux_pane_alive, smux_resize,
@@ -134,7 +135,11 @@ fn posix_pane_launcher_create(cmd: text, args: [text], stderr_path: text) -> tex
     # consume stdin, which belongs exclusively to the requested child.
     # Keep the private directory reserved until parent cleanup; releasing its
     # name here lets another process substitute a path before pane close.
-    val script = ("#!/bin/sh\n/bin/rm -f -- " + posix_quote_arg(path) + " || exit 126\n" +
+    val shell = (sosix_pty_native_exec_argv("").unwrap_or([""]))[0]
+    if shell == "":
+        posix_pane_launcher_remove(directory)
+        return ""
+    val script = ("#!" + shell + "\n/bin/rm -f -- " + posix_quote_arg(path) + " || exit 126\n" +
         posix_exec_line("env", ["-u", "TMUX", "-u", "TMUX_PANE",
             "TERM=xterm-256color", cmd] + args, stderr_path) + "\n")
     if not file_write(path, script) or not set_permissions(path, 0o700):
@@ -556,7 +561,8 @@ fn pane_spawn_at(session: text, title: text, cmd: text, args: [text], cols: i64,
     else:
         argv = ["split-window", "-d", "-t", session, "-P", "-F", "#{{pane_id}}"]
     if stderr_path != "":
-        argv = argv + ["/bin/sh", "-c", posix_exec_line(cmd, args, stderr_path)]
+        argv = argv + sosix_pty_native_exec_argv(posix_exec_line(cmd, args,
+            stderr_path)).unwrap_or([])
     else:
         argv = argv + [cmd] + args
     val result = sosix_run("tmux", argv)
