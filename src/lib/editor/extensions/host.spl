@@ -597,9 +597,71 @@ impl ExtensionHost:
                 me._unregister_contributions(entry.manifest.name)
                 me._unregister_context(entry.manifest.name)
                 me._dispose_lifetime(entry.manifest.name)
+                me._drop_pending_invocations(entry.manifest.name)
                 return true
             i = i + 1
         false
+
+    # A deactivated extension must not be dispatched later by a queued
+    # runtime invocation; completed records stay as history.
+    me _drop_pending_invocations(name: text):
+        var kept: [ExtensionCommandInvocation] = []
+        for invocation in me.invocation_queue:
+            if not (invocation.extension_name == name and invocation.status == "pending-runtime"):
+                kept.push(invocation)
+        me.invocation_queue = kept
+
+    # Number of registrations still owned by `name` across every registry
+    # (commands, handlers, languages, debug adapters, keybindings, custom
+    # editors, themes, view containers, views, panels, status items, context /
+    # event subscriptions, lifetime disposables, pending invocations).
+    # 0 after deactivate. Deactivation only ever drops registrations; it never
+    # touches sessions, worktrees or user files (no such handle exists here).
+    fn extension_leftover_count(name: text) -> i64:
+        var n = 0
+        for e in me.command_registry:
+            if e.extension_name == name:
+                n = n + 1
+        for e in me.commands.entries:
+            if e.owner == name:
+                n = n + 1
+        for e in me.listeners.entries:
+            if e.owner == name:
+                n = n + 1
+        for e in me.language_index.entries:
+            if e.owner == name:
+                n = n + 1
+        for e in me.debug_adapter_registry:
+            if e.extension_name == name:
+                n = n + 1
+        for e in me.keybinding_registry:
+            if e.extension_name == name:
+                n = n + 1
+        for e in me.custom_editor_registry:
+            if e.extension_name == name:
+                n = n + 1
+        for e in me.theme_registry:
+            if e.extension_name == name:
+                n = n + 1
+        for e in me.view_container_registry:
+            if e.extension_name == name:
+                n = n + 1
+        for e in me.view_registry:
+            if e.extension_name == name:
+                n = n + 1
+        for e in me.panel_registry:
+            if e.extension_name == name:
+                n = n + 1
+        for e in me.status_item_registry:
+            if e.extension_name == name:
+                n = n + 1
+        for e in me.context_registry:
+            if e.extension_name == name:
+                n = n + 1
+        for e in me.invocation_queue:
+            if e.extension_name == name and e.status == "pending-runtime":
+                n = n + 1
+        n + me.lifetime_disposable_count(name)
 
     # Dispose every registration the extension's lifetime owns.
     me _dispose_lifetime(name: text):
