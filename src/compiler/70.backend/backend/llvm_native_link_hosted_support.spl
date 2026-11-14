@@ -1,3 +1,6 @@
+use compiler.common.cache_contract.native_initializer_result_v2.{NativeInitializerStartupV2, NativeEntryObjectV2, native_initializer_startup_observe_v2}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io.file_ops.{file_hash_sha256}
 # LLVM Native Link Orchestrator
 #
 # Orchestrates the full native executable linking pipeline for LLVM backend:
@@ -50,6 +53,7 @@ struct NativeLinkOptions:
     libraries: [text] = []
     library_paths: [text] = []
     linker_flags: [text] = []
+    xray_thread_context_v1: bool = false
 
 impl NativeLinkOptions:
     static fn default() -> NativeLinkOptions:
@@ -123,6 +127,11 @@ pub fn entry_point_c_target_args(target_triple: text) -> [text]:
     args
 
 pub fn compile_entry_point_c(user_objects: [text], pid: i64, verbose: bool, opt_level: i64, compiler: text = "", target_triple: text = "") -> Result<text, text>:
+    match compile_entry_point_c_with_receipt_v2(user_objects, pid, verbose, opt_level, compiler, target_triple):
+        case Ok(value): Ok(value.object_path)
+        case Err(message): Err(message)
+
+pub fn compile_entry_point_c_with_receipt_v2(user_objects: [text], pid: i64, verbose: bool, opt_level: i64, compiler: text = "", target_triple: text = "", xray_thread_context_v1: bool = false) -> Result<NativeEntryObjectV2, text>:
     """Compile entry point as C source (no llc needed)."""
     # @workaround bug=stage2_try_unwrap_text_typed_as_i64_2026-11-02 reason=frozen stage2 ef0681fc0e1 decodes a `?`-unwrapped Result<text,_> payload as an i64 local (handle rendered as digits / compared as int); bind through a typed match
     var cc: text = ""
@@ -148,7 +157,8 @@ pub fn compile_entry_point_c(user_objects: [text], pid: i64, verbose: bool, opt_
     dir_create_all(entry_dir)
     val entry_c = "{entry_dir}/simple_entry.c"
     val entry_o = "{entry_dir}/simple_entry{ext}"
-    val init_names = if native_tool_strict_requested_v1():
+    val startup_discovery_complete = native_tool_strict_requested_v1()
+    val init_names = if startup_discovery_complete:
         simpleos_module_init_symbols_checked_v1(user_objects)?
     else: simpleos_module_init_symbols(user_objects)
     var c_source = "extern void spl_init_args(int argc, char** argv);\n"
@@ -172,6 +182,8 @@ pub fn compile_entry_point_c(user_objects: [text], pid: i64, verbose: bool, opt_
     c_source = c_source + "extern int __simple_startup_before_main(int argc, char** argv) __attribute__((weak));\n"
     c_source = c_source + "#endif\n"
     c_source = c_source + "extern void __simple_runtime_init(void);\n"
+    if xray_thread_context_v1:
+        c_source = c_source + "extern void simple_xray_resident_runtime_ready_v1(void);\n"
     c_source = c_source + "extern long long __simple_main(void);\n"
     c_source = c_source + "extern void __simple_runtime_shutdown(void);\n"
     for name in init_names:
@@ -198,11 +210,19 @@ pub fn compile_entry_point_c(user_objects: [text], pid: i64, verbose: bool, opt_
     c_source = c_source + "    __simple_runtime_init();\n"
     for name in init_names:
         c_source = c_source + "    {name}();\n"
+    # Readiness follows runtime/TLS and all mandatory initializer calls.
+    # It does not load observers, grant capability, or establish quiescence.
+    if xray_thread_context_v1:
+        c_source = c_source + "    simple_xray_resident_runtime_ready_v1();\n"
     c_source = c_source + "    long long result = __simple_main();\n"
     c_source = c_source + "    __simple_runtime_shutdown();\n"
     c_source = c_source + "    return (int)result;\n"
     c_source = c_source + "}\n"
-    file_write(entry_c, c_source)
+    val entry_source_written = file_write(entry_c, c_source)
+    val expected_source_digest = if startup_discovery_complete: sha256_text(c_source) else: ""
+    val written_source_digest = if startup_discovery_complete and entry_source_written:
+        file_hash_sha256(entry_c)
+    else: nil
 
     val use_msvc = _is_msvc_cc(cc)
     var comp_args: [text] = []
@@ -236,10 +256,19 @@ pub fn compile_entry_point_c(user_objects: [text], pid: i64, verbose: bool, opt_
         comp_args.push(entry_c)
 
     val (ep_out, ep_err, ep_code) = process_run(cc, comp_args)
+    val compiled_source_digest = if startup_discovery_complete and entry_source_written:
+        file_hash_sha256(entry_c)
+    else: nil
     file_delete(entry_c)
     if ep_code != 0:
         return Err("Entry point compilation failed: {ep_out}{ep_err}")
-    Ok(entry_o)
+    val object_digest = if startup_discovery_complete and entry_source_written:
+        file_hash_sha256(entry_o) ?? ""
+    else: ""
+    val startup = native_initializer_startup_observe_v2(startup_discovery_complete,
+        entry_source_written, expected_source_digest, written_source_digest ?? "",
+        compiled_source_digest ?? "", object_digest, init_names)
+    Ok(NativeEntryObjectV2(object_path: entry_o, startup: startup))
 
 # Narrow core runtime lanes must never acquire the Rust hosted archive merely
 # because SIMPLE_RUNTIME_PATH points at the bootstrap directory.

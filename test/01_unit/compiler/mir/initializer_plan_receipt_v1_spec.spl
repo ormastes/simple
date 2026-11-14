@@ -1,3 +1,4 @@
+use compiler.mir.mir_initializer_receipt_v1.{mir_initializer_plan_finalize_v1}
 # @req REQ-DTA-A1 REQ-DTA-H1
 use std.spec.*
 use compiler.common.config.{Logger}
@@ -24,8 +25,10 @@ describe "initializer plan captured by actual MIR lowering":
         val plan = fresh.initializer_plan_v1.unwrap()
         expect(plan.ordered_steps.len()).to_equal(0)
         expect(plan.emitted_init_symbol).to_equal("")
+        expect(mir_initializer_plan_finalize_v1(fresh).is_ok()).to_equal(true)
         val restored = MirModule(name: "plan", functions: {}, statics: {}, constants: {}, types: {})
         expect(restored.initializer_plan_v1 == nil).to_equal(true)
+        expect(mir_initializer_plan_finalize_v1(restored).is_err()).to_equal(true)
 
     it "records the actual declaration order and emitted initializer symbol":
         val mir = lower_plan_source("fn seed() -> i64: 4\nval first = seed()\nval second: i64 = first + 1\nfn main():\n    pass\n")
@@ -39,3 +42,16 @@ describe "initializer plan captured by actual MIR lowering":
             if function.name == plan.emitted_init_symbol:
                 emitted = function.is_export_c and function.export_name == plan.emitted_init_symbol
         expect(emitted).to_equal(true)
+        expect(mir_initializer_plan_finalize_v1(mir).is_ok()).to_equal(true)
+
+    it "rejects transformed initializer export ABI instead of trusting the old plan":
+        var mir = lower_plan_source("fn seed() -> i64: 4\nval first = seed()\nfn main():\n    pass\n")
+        expect(mir_initializer_plan_finalize_v1(mir).is_ok()).to_equal(true)
+        var functions = mir.functions
+        for symbol in functions.keys():
+            var function = functions[symbol]
+            if function.name == mir.initializer_plan_v1.unwrap().emitted_init_symbol:
+                function.is_export_c = false
+                functions[symbol] = function
+        mir.functions = functions
+        expect(mir_initializer_plan_finalize_v1(mir).is_err()).to_equal(true)
