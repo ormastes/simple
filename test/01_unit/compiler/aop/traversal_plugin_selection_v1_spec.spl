@@ -5,44 +5,41 @@ use compiler.common.cache_contract.aspect_plugin_model_v1.*
 use compiler.common.cache_contract.aspect_traversal_v1.*
 use compiler.common.cache_contract.aspect_match_shard_v1.{PointcutSelectorV1, WeavePlanDeltaV1}
 
-fn selection_test_invoke(token: i64, dir: DirTldrViewV1,
-        sel: PointcutSelectorV1) -> Result<WeavePlanDeltaV1, text>:
-    BuiltinForwardTraversalV1(instance_key: "structural-fixture").visit_checked(dir, sel)
-
-fn selection_test_value() -> TraversalPluginSelectionV1:
+fn selection_test_value() -> TraversalPluginDescriptorV1:
     val code = "sha256:" + "1".repeat(64)
     val instance = plugin_instance_descriptor_v1(PluginDefinitionV1(code_digest: code,
         fields: [PluginConfigFieldV1(name: "entry", role: PluginFieldRoleV1.Instance)]),
         [PluginConfigValueV1(name: "entry", value: "fixture.visit")]).unwrap()
-    TraversalPluginSelectionV1(provider_id: "fixture", provider_code_digest: code, entry_identity: "fixture.visit",
-        abi_schema: "fixture.checked/v1", policy_identity: "sha256:" + "3".repeat(64), instance: instance, provider_token: 1,
-        invoke: selection_test_invoke)
+    TraversalPluginDescriptorV1(provider_id: "fixture", provider_code_digest: code, entry_identity: "fixture.visit",
+        abi_schema: "fixture.checked/v1", policy_identity: "sha256:" + "3".repeat(64), instance: instance)
 
 describe "checked traversal selection identity":
     it "binds provider entry ABI and full instance identity but not runtime token":
         val value = selection_test_value()
-        val identity = traversal_selection_identity_v1(value).unwrap()
-        expect(traversal_selection_identity_v1(TraversalPluginSelectionV1(..value,
-            provider_token: 2)).unwrap()).to_equal(identity)
-        expect(traversal_selection_identity_v1(TraversalPluginSelectionV1(..value,
+        val identity = traversal_descriptor_identity_v1(value).unwrap()
+        val first = TraversalPluginSelectionV1(provider_token: 1, canonical_identity: identity)
+        val second = TraversalPluginSelectionV1(provider_token: 2, canonical_identity: identity)
+        expect(traversal_selection_identity_v1(first).unwrap()).to_equal(
+            traversal_selection_identity_v1(second).unwrap())
+        expect(traversal_descriptor_identity_v1(TraversalPluginDescriptorV1(..value,
             entry_identity: "fixture.other")).unwrap() == identity).to_equal(false)
-        expect(traversal_selection_identity_v1(TraversalPluginSelectionV1(..value,
+        expect(traversal_descriptor_identity_v1(TraversalPluginDescriptorV1(..value,
             abi_schema: "fixture.checked/v2")).unwrap() == identity).to_equal(false)
-        expect(traversal_selection_identity_v1(TraversalPluginSelectionV1(..value,
+        expect(traversal_descriptor_identity_v1(TraversalPluginDescriptorV1(..value,
             provider_code_digest: "sha256:" + "2".repeat(64))).unwrap() == identity).to_equal(false)
         expect(traversal_bind_ordered_identity_v1("ordered", nil).unwrap()).to_equal("ordered")
-        expect(traversal_bind_ordered_identity_v1("ordered", Some(value)).unwrap() == "ordered").to_equal(false)
+        expect(traversal_bind_ordered_identity_v1("ordered", Some(first)).unwrap() == "ordered").to_equal(false)
 
     it "rejects corrupt descriptor identity and invalid or oversized fields":
         val value = selection_test_value()
         val corrupt = PluginInstanceDescriptorV1(..value.instance, canonical_identity: "changed")
-        expect(traversal_selection_identity_v1(TraversalPluginSelectionV1(..value,
+        expect(traversal_descriptor_identity_v1(TraversalPluginDescriptorV1(..value,
             instance: corrupt)).is_err()).to_equal(true)
-        expect(traversal_selection_identity_v1(TraversalPluginSelectionV1(..value,
-            provider_token: 0)).is_err()).to_equal(true)
-        expect(traversal_selection_identity_v1(TraversalPluginSelectionV1(..value,
+        expect(traversal_selection_identity_v1(TraversalPluginSelectionV1(
+            provider_token: 0, canonical_identity: "forged")).is_err()).to_equal(true)
+        expect(traversal_descriptor_identity_v1(TraversalPluginDescriptorV1(..value,
             entry_identity: "")).is_err()).to_equal(true)
-        expect(traversal_selection_identity_v1(TraversalPluginSelectionV1(..value,
+        expect(traversal_descriptor_identity_v1(TraversalPluginDescriptorV1(..value,
             abi_schema: "x".repeat(65537))).is_err()).to_equal(true)
 
     it "requires exact complete delta lists rather than just a matching count":
