@@ -30,7 +30,7 @@ use compiler.common.cache_contract.macro_reference_manifest_v1.{MacroDefIdV1,
     macro_def_id_canonical_v1, macro_def_key_v1, macro_expand_key_v1,
     macro_absence_witness_v1, macro_hash_v1, macro_use_identity_v1,
     macro_use_status_tag_v1, macro_reference_schema_v1,
-    package_macro_name_index_build_v1, macro_effect_admitted_v1, macro_content_digest_v1}
+    package_macro_name_index_build_v1, macro_effect_admitted_v1, macro_content_digest_v1, macro_reference_max_items_v1}
 
 pub struct MacroSourceDefV1:
     def: MacroDef
@@ -57,6 +57,11 @@ pub struct MacroModuleSourceV1:
     source_id: text
     defs: [MacroSourceDefV1]
     invocations: [MacroSourceInvocationV1]
+
+# Imported visible name is a binding, never a rewrite of the origin definition.
+pub struct MacroImportBindingV2:
+    visible_name: text
+    origin_def_id: text
 
 pub struct MacroDefKeyEntryV1:
     def_id: text
@@ -142,12 +147,26 @@ class _KeyCtxV1:
     evals: [GuardEvalV1]
     visiting: [text]
     cyclic: [text]
+    bindings: [MacroImportBindingV2]? = nil
 
 fn _local_def_id(src: MacroModuleSourceV1, d: MacroSourceDefV1) -> MacroDefIdV1:
     MacroDefIdV1(package: src.package, module: src.module, namespace: d.namespace, binder: d.def.name)
 
-fn _imported_candidates(imported: [MacroModuleProjectionV1], name: text) -> [_CandidateV1]:
+fn _imported_candidates(imported: [MacroModuleProjectionV1], name: text,
+        bindings: [MacroImportBindingV2]? = nil) -> [_CandidateV1]:
     var out: [_CandidateV1] = []
+    if bindings != nil:
+        for binding in bindings.unwrap():
+            if binding.visible_name != name: continue
+            for p in imported:
+                for e in p.def_table.entries:
+                    val id = macro_def_id_canonical_v1(e.def_id)
+                    if e.is_public and id == binding.origin_def_id:
+                        for k in p.def_keys:
+                            if k.def_id == id:
+                                out.push(_CandidateV1(def_id: id, key: k.key,
+                                    member_names: e.generated_member_names, member_root: e.generated_member_root))
+        return out
     for p in imported:
         for e in p.def_table.entries:
             if e.macro_name == name and e.is_public:
@@ -166,25 +185,27 @@ fn _local_index(src: MacroModuleSourceV1, name: text) -> i64:
         i = i + 1
     -1
 
-fn _scope_root(src: MacroModuleSourceV1, imported: [MacroModuleProjectionV1]) -> text:
+fn _scope_root(src: MacroModuleSourceV1, imported: [MacroModuleProjectionV1],
+        bindings: [MacroImportBindingV2]? = nil) -> text:
     var local: [text] = []
     for d in src.defs:
         local.push(d.def.name)
-    val index = package_macro_name_index_v1(src.package, imported)
+    val index = if bindings == nil: package_macro_name_index_v1(src.package, imported)
+        else: macro_bound_name_index_v2(src.package, bindings.unwrap())
     macro_hash_v1("macro-scope/v1", [index.candidate_root] + _sorted_unique(local))
 
 fn _member_root(names: [text]) -> text:
     macro_hash_v1("macro-generated-members/v1", names)
 
 fn _entry_without_keys(src: MacroModuleSourceV1, imported: [MacroModuleProjectionV1],
-        d: MacroSourceDefV1) -> MacroDefinitionEntryV1:
+        d: MacroSourceDefV1, bindings: [MacroImportBindingV2]? = nil) -> MacroDefinitionEntryV1:
     var deps: [text] = []
     for n in d.nested_macro_names:
         val li = _local_index(src, n)
         if li >= 0:
             deps.push(macro_def_id_canonical_v1(_local_def_id(src, src.defs[li])))
         else:
-            val cands = _imported_candidates(imported, n)
+            val cands = _imported_candidates(imported, n, bindings)
             if cands.len() == 1: deps.push(cands[0].def_id)
     val members = macro_def_generated_public_names(d.def)
     val contract = macro_def_contract_canonical_text(d.def)
@@ -218,13 +239,13 @@ fn _key_of_local(ctx: _KeyCtxV1, idx: i64) -> text:
         if li >= 0:
             reads.push("key:" + _key_of_local(ctx, li))
         else:
-            val cands = _imported_candidates(ctx.imported, n)
+            val cands = _imported_candidates(ctx.imported, n, ctx.bindings)
             if cands.len() == 1:
                 reads.push("key:" + cands[0].key)
             else:
-                reads.push("absent:" + macro_absence_witness_v1(n, _scope_root(ctx.src, ctx.imported)))
+                reads.push("absent:" + macro_absence_witness_v1(n, _scope_root(ctx.src, ctx.imported, ctx.bindings)))
     val root = macro_hash_v1("macro-nested-read/v1", _sorted_unique(reads))
-    val key = macro_def_key_v1(_entry_without_keys(ctx.src, ctx.imported, d), root)
+    val key = macro_def_key_v1(_entry_without_keys(ctx.src, ctx.imported, d, ctx.bindings), root)
     ctx.visiting.pop()
     ctx.names.push(d.def.name)
     ctx.keys.push(key)
@@ -254,9 +275,9 @@ pub fn project_macro_module_v1(src: MacroModuleSourceV1,
 # `evals` come from the guard evaluator (aop_source_guard_evals_v1 once landed).
 fn _project_active_v1(src: MacroModuleSourceV1,
         imported: [MacroModuleProjectionV1], profile_digest: text,
-        evals: [GuardEvalV1]) -> MacroModuleProjectionV1:
+        evals: [GuardEvalV1], bindings: [MacroImportBindingV2]? = nil) -> MacroModuleProjectionV1:
     var ctx = _KeyCtxV1(src: src, imported: imported, names: [], keys: [], visiting: [],
-        cyclic: [], guard_root: active_guard_root_v1(profile_digest, evals), evals: evals)
+        cyclic: [], guard_root: active_guard_root_v1(profile_digest, evals), evals: evals, bindings: bindings)
     # Definitions, sorted by canonical scoped id.
     var ids: [text] = []
     for d in src.defs:
@@ -267,7 +288,7 @@ fn _project_active_v1(src: MacroModuleSourceV1,
     for sid in sorted_ids:
         val idx = _index_of(ids, sid)
         val d = src.defs[idx]
-        entries.push(_entry_without_keys(src, imported, d))
+        entries.push(_entry_without_keys(src, imported, d, bindings))
         def_keys.push(MacroDefKeyEntryV1(def_id: sid, macro_name: d.def.name,
             key: _key_of_local(ctx, idx)))
     val uncacheable = _uncacheable_names(src, imported, ctx)
@@ -275,7 +296,7 @@ fn _project_active_v1(src: MacroModuleSourceV1,
     for n in uncacheable:
         uncacheable_ids.push(macro_def_id_canonical_v1(_local_def_id(src, src.defs[_local_index(src, n)])))
     # Uses, sorted by (source, region).
-    val scope_root = _scope_root(src, imported)
+    val scope_root = _scope_root(src, imported, bindings)
     var use_ids: [text] = []
     var uses: [MacroUseV1] = []
     var generated: [text] = []
@@ -287,7 +308,7 @@ fn _project_active_v1(src: MacroModuleSourceV1,
         use_ids.push(macro_use_identity_v1(u))
         uses.push(u)
         if macro_use_status_tag_v1(u.status) == "resolved":
-            for n in _members_of(src, imported, inv.requested_name):
+            for n in _members_of(src, imported, inv.requested_name, bindings):
                 generated.push(n)
     var sorted_uses: [MacroUseV1] = []
     for uid in _sorted_unique(use_ids):
@@ -305,10 +326,11 @@ fn _project_active_v1(src: MacroModuleSourceV1,
         diagnostics: _module_diagnostics(src, ctx, sorted_uses, imported),
         uncacheable_def_ids: _sorted_unique(uncacheable_ids))
 
-fn _members_of(src: MacroModuleSourceV1, imported: [MacroModuleProjectionV1], name: text) -> [text]:
+fn _members_of(src: MacroModuleSourceV1, imported: [MacroModuleProjectionV1], name: text,
+        bindings: [MacroImportBindingV2]? = nil) -> [text]:
     val li = _local_index(src, name)
     if li >= 0: return macro_def_generated_public_names(src.defs[li].def)
-    val cands = _imported_candidates(imported, name)
+    val cands = _imported_candidates(imported, name, bindings)
     if cands.len() == 1: return cands[0].member_names
     []
 
@@ -338,7 +360,7 @@ fn _use_of(src: MacroModuleSourceV1, imported: [MacroModuleProjectionV1], ctx: _
             key = _key_of_local(ctx, li)
             member_root = _member_root(macro_def_generated_public_names(src.defs[li].def))
         else:
-            val cands = _imported_candidates(imported, inv.requested_name)
+            val cands = _imported_candidates(imported, inv.requested_name, ctx.bindings)
             candidates = cands.len()
             if candidates == 1:
                 def_id = cands[0].def_id
@@ -482,7 +504,7 @@ fn _uncacheable_names(src: MacroModuleSourceV1, imported: [MacroModuleProjection
             for n in d.nested_macro_names:
                 var tainted = _contains(out, n)
                 if not tainted and _local_index(src, n) < 0:
-                    val cands = _imported_candidates(imported, n)
+                    val cands = _imported_candidates(imported, n, ctx.bindings)
                     if cands.len() == 1: tainted = _imported_uncacheable(imported, cands[0].def_id)
                 if tainted:
                     out.push(d.def.name)
@@ -510,7 +532,7 @@ fn _module_diagnostics(src: MacroModuleSourceV1, ctx: _KeyCtxV1, uses: [MacroUse
     var owner: [text] = []
     for u in uses:
         if not u.has_resolved_def: continue
-        for n in _members_of(src, imported, u.requested_scoped_name):
+        for n in _members_of(src, imported, u.requested_scoped_name, ctx.bindings):
             val i = _index_of(seen, n)
             if i < 0:
                 seen.push(n)
@@ -556,6 +578,11 @@ fn _def_inactive(d: MacroSourceDefV1, evals: [GuardEvalV1]) -> bool:
 pub fn project_macro_module_guarded_v1(src: MacroModuleSourceV1,
         imported: [MacroModuleProjectionV1], profile_digest: text,
         evals: [GuardEvalV1]) -> MacroModuleProjectionV1:
+    _project_macro_module_bound_v2(src, imported, profile_digest, evals, nil)
+
+fn _project_macro_module_bound_v2(src: MacroModuleSourceV1,
+        imported: [MacroModuleProjectionV1], profile_digest: text,
+        evals: [GuardEvalV1], bindings: [MacroImportBindingV2]?) -> MacroModuleProjectionV1:
     var active_defs: [MacroSourceDefV1] = []
     var inactive_defs: [MacroSourceDefV1] = []
     for d in src.defs:
@@ -563,7 +590,7 @@ pub fn project_macro_module_guarded_v1(src: MacroModuleSourceV1,
         else: active_defs.push(d)
     val active_src = MacroModuleSourceV1(package: src.package, module: src.module,
         source_id: src.source_id, defs: active_defs, invocations: src.invocations)
-    val p = _project_active_v1(active_src, imported, profile_digest, evals)
+    val p = _project_active_v1(active_src, imported, profile_digest, evals, bindings)
     if inactive_defs.len() == 0:
         return p
     var ids: [text] = []
@@ -575,7 +602,7 @@ pub fn project_macro_module_guarded_v1(src: MacroModuleSourceV1,
     for k in p.def_keys:
         keys.push(k)
     for d in inactive_defs:
-        var e = _entry_without_keys(active_src, imported, d)
+        var e = _entry_without_keys(active_src, imported, d, bindings)
         e.is_public = false
         ids.push(macro_def_id_canonical_v1(e.def_id))
         entries.push(e)
@@ -595,3 +622,97 @@ pub fn project_macro_module_guarded_v1(src: MacroModuleSourceV1,
         generated_public_names: p.generated_public_names,
         generated_public_surface_digest: p.generated_public_surface_digest,
         diagnostics: p.diagnostics, uncacheable_def_ids: p.uncacheable_def_ids)
+
+# Build the exact visible macro namespace while preserving canonical origins.
+pub fn macro_bound_name_index_v2(package: text, bindings: [MacroImportBindingV2]) -> PackageMacroNameIndexV1:
+    var names: [text] = []
+    for binding in bindings: names.push(binding.visible_name)
+    var entries: [MacroNameMembershipV1] = []
+    for name in _sorted_unique(names):
+        var ids: [text] = []
+        for binding in bindings:
+            if binding.visible_name == name: ids.push(binding.origin_def_id)
+        entries.push(MacroNameMembershipV1(scoped_name: name, def_ids: _sorted_unique(ids)))
+    package_macro_name_index_build_v1(package, entries)
+
+# Conservative V2 admission before the legacy recursive/key/name-index owner.
+# Local dependency depth is computed iteratively; V1 callers retain old policy.
+pub fn macro_bound_projection_work_v2(src: MacroModuleSourceV1,
+        imported: [MacroModuleProjectionV1], bindings: [MacroImportBindingV2]) -> Result<i64, text>:
+    if src.defs.len() > 256 or src.invocations.len() > 256 or imported.len() > 256 or bindings.len() > 256:
+        return Err("macro-binding-work-limit")
+    var imported_count = 0
+    for module in imported:
+        imported_count = imported_count + module.def_table.entries.len() + module.def_keys.len()
+        if imported_count > 512: return Err("macro-binding-work-limit")
+    var names: Dict<text, i64> = {}
+    var index = 0
+    var edges = 0
+    for definition in src.defs:
+        if names.has(definition.def.name): return Err("macro-binding-local-ambiguous")
+        names[definition.def.name] = index
+        index = index + 1
+        edges = edges + definition.nested_macro_names.len()
+        if edges > 1024: return Err("macro-binding-work-limit")
+    var depths: Dict<text, i64> = {}
+    var changed = true
+    var rounds = 0
+    while changed and depths.len() < src.defs.len():
+        changed = false
+        rounds = rounds + 1
+        if rounds > 33: return Err("macro-binding-local-depth")
+        for definition in src.defs:
+            if depths.has(definition.def.name): continue
+            var ready = true
+            var depth = 1
+            for dependency in definition.nested_macro_names:
+                if not names.has(dependency): continue
+                if not depths.has(dependency):
+                    ready = false
+                elif depths[dependency] + 1 > depth:
+                    depth = depths[dependency] + 1
+            if ready:
+                if depth > 32: return Err("macro-binding-local-depth")
+                depths[definition.def.name] = depth
+                changed = true
+    if depths.len() != src.defs.len(): return Err("macro-binding-local-cycle")
+    val candidates = src.defs.len() + imported_count + bindings.len() + 1
+    # Namespace construction and repeated candidate scans are charged, including
+    # nested reads even when there are no current invocations.
+    val operations = (src.defs.len() + src.invocations.len() + edges + 1) * candidates * (bindings.len() + 1)
+    if operations > 1000000: return Err("macro-binding-work-limit")
+    Ok(operations)
+
+pub fn project_macro_module_bound_v2(src: MacroModuleSourceV1,
+        imported: [MacroModuleProjectionV1], bindings: [MacroImportBindingV2],
+        profile_digest: text, evals: [GuardEvalV1]) -> Result<MacroModuleProjectionV1, text>:
+    val work = macro_bound_projection_work_v2(src, imported, bindings)
+    if work.is_err(): return Err(work.unwrap_err())
+    if bindings.len() > macro_reference_max_items_v1() or imported.len() > macro_reference_max_items_v1():
+        return Err("macro-binding-bounds")
+    var origins: Dict<text, bool> = {}
+    var count = 0
+    for module in imported:
+        count = count + module.def_keys.len() + module.def_table.entries.len()
+        if count > macro_reference_max_items_v1(): return Err("macro-binding-bounds")
+        var keys: Dict<text, text> = {}
+        for key in module.def_keys:
+            if keys.has(key.def_id) or key.key == "": return Err("macro-binding-origin-key-invalid")
+            keys[key.def_id] = key.key
+        for entry in module.def_table.entries:
+            if not entry.is_public: continue
+            val id = macro_def_id_canonical_v1(entry.def_id)
+            if origins.has(id) or not keys.has(id): return Err("macro-binding-origin-unavailable")
+            origins[id] = true
+    var seen: Dict<text, bool> = {}
+    var visible_origins: Dict<text, text> = {}
+    for binding in bindings:
+        if binding.visible_name == "" or binding.origin_def_id == "": return Err("macro-binding-empty")
+        if visible_origins.has(binding.visible_name) and visible_origins[binding.visible_name] != binding.origin_def_id:
+            return Err("macro-binding-ambiguous")
+        visible_origins[binding.visible_name] = binding.origin_def_id
+        val pair = macro_hash_v1("macro-import-binding/v2", [binding.visible_name, binding.origin_def_id])
+        if seen.has(pair): return Err("macro-binding-duplicate")
+        seen[pair] = true
+        if not origins.has(binding.origin_def_id): return Err("macro-binding-origin-unavailable")
+    Ok(_project_macro_module_bound_v2(src, imported, profile_digest, evals, Some(bindings)))
