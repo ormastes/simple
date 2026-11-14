@@ -167,6 +167,14 @@ mod unix_impl {
             Err(_) => return -1,
         };
 
+        // A command LINE ("/bin/sh -i") is not a path. Windows hands the line to
+        // CreateProcess; here it is run through /bin/sh when the direct exec fails,
+        // so one PTY interface takes the same command text on every platform.
+        let line_cstr = match CString::new(format!("exec {}", shell)) {
+            Ok(value) => value,
+            Err(_) => return -1,
+        };
+
         unsafe {
             // Flush stdio before fork to avoid double output.
             libc::fflush(std::ptr::null_mut());
@@ -214,6 +222,9 @@ mod unix_impl {
                 // exec shell — argv = [argv0, NULL]
                 let argv: &[*const libc::c_char] = &[argv0_cstr.as_ptr(), std::ptr::null()];
                 libc::execvp(shell_cstr.as_ptr(), argv.as_ptr());
+                let sh_argv: &[*const libc::c_char] =
+                    &[c"sh".as_ptr(), c"-c".as_ptr(), line_cstr.as_ptr(), std::ptr::null()];
+                libc::execv(c"/bin/sh".as_ptr(), sh_argv.as_ptr());
 
                 // exec failed.
                 libc::_exit(127);
