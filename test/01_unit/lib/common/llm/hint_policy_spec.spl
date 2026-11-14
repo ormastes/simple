@@ -1,0 +1,180 @@
+use std.spec.{describe, it, expect, step}
+use std.common.llm.hint_policy.{HintTimestamp, HintSchemaVersion, HintLevel, HintEvent, HintState, new_hint_state, decide_hint}
+
+"""
+Progressive hint policy
+
+Purpose: prove that the pure MCP progressive-hint policy shows one full
+explanation on first use, a brief tip on second use, and silence afterwards,
+while still re-hinting on the plan's thresholds (3 errors in 10 minutes,
+5 failed attempts, 30 days since the last hint, a schema/command version
+change) and always honouring an explicit help request.
+
+Audience: MCP tool authors wiring `simple_help` / `simple_hint_status`, and
+reviewers checking that hints never spam an agent's context.
+"""
+
+val TEN_MINUTES = 600
+val THIRTY_DAYS = 2592000
+
+fn at(seconds: i64) -> HintTimestamp:
+    HintTimestamp(seconds: seconds)
+
+fn v1() -> HintSchemaVersion:
+    HintSchemaVersion(id: "trace/1")
+
+fn v2() -> HintSchemaVersion:
+    HintSchemaVersion(id: "trace/2")
+
+fn after_ok(state: HintState, now: i64) -> HintState:
+    val (_, next) = decide_hint(state, HintEvent.ToolSucceeded, at(now), v1())
+    next
+
+fn level_of(state: HintState, event: HintEvent, now: i64, version: HintSchemaVersion) -> HintLevel:
+    val (level, _) = decide_hint(state, event, at(now), version)
+    level
+
+fn state_after_failures(times: [i64]) -> HintState:
+    var state = after_ok(after_ok(after_ok(new_hint_state(), 0), 1), 2)
+    for t in times:
+        val (_, next) = decide_hint(state, HintEvent.ToolFailed, at(t), v1())
+        state = next
+    state
+
+describe "progressive MCP hint policy":
+    """
+    An agent using a Simple MCP capability sees guidance shrink as it gains
+    experience, and sees it again only when a plan threshold is crossed or it
+    asks for help.
+    """
+    it "shows full guidance on first use, a brief tip on second use, then stays quiet":
+        # @req HINT-001
+        # @req HINT-002
+        # @req HINT-003
+        step("Use a capability for the first time in a fresh session")
+        val (first, s1) = decide_hint(new_hint_state(), HintEvent.ToolSucceeded, at(100), v1())
+        expect(first).to_equal(HintLevel.Full)
+        expect(s1.seen_count.value).to_equal(1)
+        expect(s1.success_count.value).to_equal(1)
+        step("Use it a second time")
+        val (second, s2) = decide_hint(s1, HintEvent.ToolSucceeded, at(200), v1())
+        expect(second).to_equal(HintLevel.Brief)
+        step("Use it a third and fourth time")
+        val (third, s3) = decide_hint(s2, HintEvent.ToolSucceeded, at(300), v1())
+        expect(third).to_equal(HintLevel.Quiet)
+        val (fourth, s4) = decide_hint(s3, HintEvent.ToolSucceeded, at(400), v1())
+        expect(fourth).to_equal(HintLevel.Quiet)
+        expect(s4.seen_count.value).to_equal(4)
+        step("Quiet uses do not move the last hint time")
+        if val Some(last) = s4.last_hint_time:
+            expect(last.seconds).to_equal(200)
+        else:
+            expect("last_hint_time missing").to_equal("last_hint_time present")
+
+    it "gives a corrective mini-hint after 3 errors within 10 minutes, but not for 2 or spread-out errors":
+        # @req HINT-004
+        step("Two errors inside the window stay quiet")
+        val two = state_after_failures([1000, 1100])
+        expect(two.recent_errors.times.len()).to_equal(2)
+        expect(level_of(state_after_failures([1000]), HintEvent.ToolFailed, 1100, v1())).to_equal(HintLevel.Quiet)
+        step("A third error just under 10 minutes after the first triggers a corrective hint")
+        expect(level_of(two, HintEvent.ToolFailed, 1000 + TEN_MINUTES - 1, v1())).to_equal(HintLevel.Corrective)
+        step("A third error exactly 10 minutes after the first falls outside the window")
+        expect(level_of(two, HintEvent.ToolFailed, 1000 + TEN_MINUTES, v1())).to_equal(HintLevel.Quiet)
+
+    it "fires the corrective hint once and suppresses repeats for the window":
+        # @req HINT-004
+        step("Trigger the corrective hint")
+        val two = state_after_failures([1000, 1100])
+        val (level, corrected) = decide_hint(two, HintEvent.ToolFailed, at(1200), v1())
+        expect(level).to_equal(HintLevel.Corrective)
+        if val Some(until) = corrected.suppressed_until:
+            expect(until.seconds).to_equal(1200 + TEN_MINUTES)
+        else:
+            expect("suppressed_until missing").to_equal("suppressed_until set")
+        step("A fourth matching error inside the window does not repeat it")
+        val (fourth, _) = decide_hint(corrected, HintEvent.ToolFailed, at(1300), v1())
+        expect(fourth).to_equal(HintLevel.Quiet)
+
+    it "re-hints in full after 30 days since the last hint":
+        # @req HINT-005
+        val seasoned = after_ok(after_ok(after_ok(new_hint_state(), 0), 50), 60)
+        step("One second short of 30 days stays quiet")
+        expect(level_of(seasoned, HintEvent.ToolSucceeded, 50 + THIRTY_DAYS - 1, v1())).to_equal(HintLevel.Quiet)
+        step("Exactly 30 days after the last hint re-hints once")
+        val (level, rehinted) = decide_hint(seasoned, HintEvent.ToolSucceeded, at(50 + THIRTY_DAYS), v1())
+        expect(level).to_equal(HintLevel.Full)
+        expect(level_of(rehinted, HintEvent.ToolSucceeded, 60 + THIRTY_DAYS, v1())).to_equal(HintLevel.Quiet)
+
+    it "re-hints in full once when the schema or command version changes":
+        # @req HINT-006
+        val seasoned = after_ok(after_ok(after_ok(new_hint_state(), 0), 10), 20)
+        step("Same version stays quiet")
+        expect(level_of(seasoned, HintEvent.ToolSucceeded, 30, v1())).to_equal(HintLevel.Quiet)
+        step("A changed version re-hints in full")
+        val (level, upgraded) = decide_hint(seasoned, HintEvent.ToolSucceeded, at(30), v2())
+        expect(level).to_equal(HintLevel.Full)
+        step("The next use on the new version is quiet again")
+        expect(level_of(upgraded, HintEvent.ToolSucceeded, 40, v2())).to_equal(HintLevel.Quiet)
+
+    it "always answers an explicit help request in full, even while suppressed":
+        # @req HINT-007
+        step("Help on a seasoned capability is full")
+        val seasoned = after_ok(after_ok(after_ok(new_hint_state(), 0), 10), 20)
+        expect(level_of(seasoned, HintEvent.HelpRequested, 30, v1())).to_equal(HintLevel.Full)
+        step("Help while a corrective suppression is active is still full")
+        val (_, suppressed) = decide_hint(state_after_failures([1000, 1100]), HintEvent.ToolFailed, at(1200), v1())
+        expect(level_of(suppressed, HintEvent.HelpRequested, 1300, v1())).to_equal(HintLevel.Full)
+        step("Help is not counted as a use or a success")
+        val (_, after_help) = decide_hint(seasoned, HintEvent.HelpRequested, at(30), v1())
+        expect(after_help.seen_count.value).to_equal(seasoned.seen_count.value)
+        expect(after_help.success_count.value).to_equal(seasoned.success_count.value)
+
+    it "keeps quiet while suppressed_until is in the future, even on a version change":
+        # @req HINT-007
+        step("Build a state whose suppression ends in the future")
+        val (_, suppressed) = decide_hint(state_after_failures([1000, 1100]), HintEvent.ToolFailed, at(1200), v1())
+        step("A version change inside the suppression window stays quiet")
+        expect(level_of(suppressed, HintEvent.ToolSucceeded, 1300, v2())).to_equal(HintLevel.Quiet)
+        step("Once the suppression ends the pending version re-hint fires")
+        expect(level_of(suppressed, HintEvent.ToolSucceeded, 1200 + TEN_MINUTES, v2())).to_equal(HintLevel.Full)
+
+    it "re-hints in full after 5 failed attempts and only once":
+        # @req HINT-008
+        val spaced = [0, 1000, 2000, 3000]
+        step("Four spaced-out failures stay quiet")
+        val four = state_after_failures(spaced)
+        expect(four.recent_errors.times.len()).to_equal(4)
+        step("The fifth failure re-hints in full")
+        val (level, rehinted) = decide_hint(four, HintEvent.ToolFailed, at(4000), v1())
+        expect(level).to_equal(HintLevel.Full)
+        expect(rehinted.recent_errors.times.len()).to_equal(0)
+        step("The sixth failure does not re-fire")
+        expect(level_of(rehinted, HintEvent.ToolFailed, 5000, v1())).to_equal(HintLevel.Quiet)
+
+    it "never counts a failed or malformed call as a success, and success resets the failure run":
+        # @req HINT-008
+        step("A failure leaves success_count unchanged")
+        val failed = state_after_failures([1000])
+        expect(failed.success_count.value).to_equal(3)
+        expect(failed.seen_count.value).to_equal(4)
+        step("A success clears the recent error run")
+        val recovered = after_ok(failed, 1100)
+        expect(recovered.success_count.value).to_equal(4)
+        expect(recovered.recent_errors.times.len()).to_equal(0)
+
+    it "isolates per-session state as pure values":
+        # @req HINT-008
+        step("Fork two sessions from one parent that already holds errors")
+        val parent = state_after_failures([1000, 1100])
+        val (_, session_a) = decide_hint(parent, HintEvent.ToolFailed, at(1200), v1())
+        val (_, session_b) = decide_hint(parent, HintEvent.ToolSucceeded, at(1200), v1())
+        step("Advancing one session leaves the parent and the sibling untouched")
+        expect(parent.recent_errors.times.len()).to_equal(2)
+        expect(parent.seen_count.value).to_equal(5)
+        expect(session_a.recent_errors.times.len()).to_equal(3)
+        expect(session_b.recent_errors.times.len()).to_equal(0)
+        expect(session_a.success_count.value).to_equal(3)
+        expect(session_b.success_count.value).to_equal(4)
+        step("A brand-new session starts at full guidance regardless of other sessions")
+        expect(level_of(new_hint_state(), HintEvent.ToolSucceeded, 1300, v1())).to_equal(HintLevel.Full)
