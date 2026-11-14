@@ -3,6 +3,7 @@
 # catch-all (including nested matches); a match without one still warns.
 use std.spec
 use std.spec.step
+use std.tooling.easy_fix.types.{EasyFix, FixConfidence}
 use std.nogc_sync_mut.tooling.easy_fix.rules.{check_non_exhaustive_match}
 use compiler.tools.fix.rules.impl_.lint_code.{check_non_exhaustive_match_with_lines}
 
@@ -22,7 +23,7 @@ describe "non_exhaustive_match catch-all detection":
         val src = "fn f(x: i64) -> bool:\n    match x:\n        1: true\n        2: false\n"
         val fixes = check_non_exhaustive_match(src, "t.spl")
         expect(fixes.len()).to_equal(1)
-        expect(fixes[0].replacements[0].new_text).to_contain("_:")
+        expect(fixes[0].replacements[0].new_text).to_contain("_(\"")
 
     it "warns only for the inner match when the outer has a catch-all":
         step("inner match lacks a catch-all")
@@ -54,3 +55,64 @@ describe "non_exhaustive_match catch-all detection (compiler lint path)":
         step("compiler lint copy, rationale catch-all")
         val lines = "match x:\n    case 1: \"one\"\n    case _(\"all other values share one label\"): \"many\"\nval y = 0\n".split("\n")
         expect(check_non_exhaustive_match_with_lines("t.spl", lines).len()).to_equal(0)
+
+# The inserted catch-all must not trade this finding for REQC004 (wildcard
+# without rationale) or REQC003 (one-string todo), must re-detect as a
+# catch-all, must carry coordinates the fix validator accepts, and is only
+# Likely: the arm is a placeholder the author has to replace.
+fn splice_first_fix(src: text, fixes: [EasyFix]) -> text:
+    val rep = fixes[0].replacements[0]
+    src.slice(0, rep.start) + rep.new_text + src.slice(rep.end)
+
+fn line_start_of(src: text, line: i64) -> i64:
+    var offset = 0
+    var n = 1
+    for l in src.split("\n"):
+        if n == line:
+            return offset
+        offset = offset + l.len() + 1
+        n = n + 1
+    offset
+
+describe "non_exhaustive_match inserted catch-all":
+    it "emits the REQC004 rationale spelling and a two-string todo at Likely confidence":
+        step("bare and case-style fixes")
+        val bare = check_non_exhaustive_match("fn f(x: i64) -> bool:\n    match x:\n        1: true\n        2: false\n", "t.spl")
+        expect(bare[0].replacements[0].new_text).to_contain("        _(\"remaining cases are not handled yet\"):")
+        expect(bare[0].replacements[0].new_text).to_contain("todo(\"handle remaining cases\", \"replace this catch-all with explicit arms\")")
+        expect(bare[0].confidence == FixConfidence.Likely).to_equal(true)
+        val cased = check_non_exhaustive_match("match x:\n    case 1: \"one\"\n    case 2: \"two\"\nval y = 0\n", "t.spl")
+        expect(cased[0].replacements[0].new_text).to_contain("    case _(\"remaining cases are not handled yet\"):")
+        expect(cased[0].confidence == FixConfidence.Likely).to_equal(true)
+
+    it "treats a bare `_(\"why\"):` rationale arm as a catch-all":
+        step("bare rationale catch-all")
+        val src = "fn f(x: i64) -> bool:\n    match x:\n        1: true\n        _(\"all other values are false\"): false\n"
+        expect(check_non_exhaustive_match(src, "t.spl").len()).to_equal(0)
+        expect(check_non_exhaustive_match_with_lines("t.spl", src.split("\n")).len()).to_equal(0)
+
+    it "is idempotent: applying the fix leaves nothing to fix":
+        step("splice the fix back and rerun both copies")
+        val bare_src = "fn f(x: i64) -> bool:\n    match x:\n        1: true\n        2: false\n"
+        val case_src = "match x:\n    case 1: \"one\"\n    case 2: \"two\"\nval y = 0\n"
+        for src in [bare_src, case_src]:
+            val fixed = splice_first_fix(src, check_non_exhaustive_match(src, "t.spl"))
+            expect(check_non_exhaustive_match(fixed, "t.spl").len()).to_equal(0)
+            val fixed_lines = splice_first_fix(src, check_non_exhaustive_match_with_lines("t.spl", src.split("\n")))
+            expect(check_non_exhaustive_match_with_lines("t.spl", fixed_lines.split("\n")).len()).to_equal(0)
+
+    it "carries a column that matches its offset (the fix validator rejects a mismatch)":
+        step("column = end of the last arm line + 1")
+        val src = "fn f(x: i64) -> bool:\n    match x:\n        1: true\n        2: false\n"
+        for fixes in [check_non_exhaustive_match(src, "t.spl"), check_non_exhaustive_match_with_lines("t.spl", src.split("\n"))]:
+            val rep = fixes[0].replacements[0]
+            expect(rep.line).to_equal(4)
+            expect(line_start_of(src, rep.line) + rep.column - 1).to_equal(rep.start)
+
+    it "inserts after the whole last arm body, not after its `case` header":
+        step("multi-line case arm body")
+        val src = "fn f(x: i64):\n    match x:\n        case 1:\n            a()\n        case 2:\n            b()\n            c()\n"
+        val fixes = check_non_exhaustive_match(src, "t.spl")
+        expect(fixes[0].replacements[0].line).to_equal(7)
+        val lfixes = check_non_exhaustive_match_with_lines("t.spl", src.split("\n"))
+        expect(lfixes[0].replacements[0].line).to_equal(7)
