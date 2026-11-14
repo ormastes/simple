@@ -1,3 +1,6 @@
+use compiler.driver.cache.traversal_options_admission_v1.{traversal_options_selection_identity_v1,
+    traversal_options_hash_identity_v1}
+use compiler.common.cache_contract.traversal_plugin_selection_v1.{TraversalPluginSelectionV1}
 use compiler.common.cache_contract.traversal_session_state_v1.{TraversalSessionStateV1}
 use compiler.common.cache_contract.directory_tldr_snapshot_v2.{DirectoryTldrSourceSnapshotV2}
 # Driver Types - heavyweight driver-only types and context wiring.
@@ -392,6 +395,8 @@ class CompileContext:
     aop_source_epoch_v2: i64 = 0
     # Sole mutable traversal owner, advanced only at real lowering boundaries.
     aop_traversal_session_v1: TraversalSessionStateV1 = TraversalSessionStateV1.create()
+    # Set only by the explicit admitted loader composition path; nil is builtin.
+    aop_traversal_plugin_selection_v1: TraversalPluginSelectionV1? = nil
     aop_snapshot_captured_v2: bool = false
     aop_directory_snapshots_v2: [DirectoryTldrSourceSnapshotV2] = []
     options: CompileOptions
@@ -582,10 +587,17 @@ class CompileContext:
     # Last `extreme_public_api` guard decision of this compile; nil = not run.
     api_publication_decision: ApiPublicationDecisionV1? = nil
 
-    static fn create(options: CompileOptions) -> CompileContext:
+    static fn create(options: CompileOptions,
+            traversal_selection: TraversalPluginSelectionV1? = nil) -> CompileContext:
         val normalized_options = compileoptions_normalize_mir_optimization(options)
+        # The public checked factory surfaces ordinary errors before creation.
+        # Direct/internal misuse fails closed before config or cache authority.
+        val checked_traversal = traversal_options_selection_identity_v1(normalized_options, traversal_selection)
+        if checked_traversal.is_err(): panic("unadmitted traversal provider: {checked_traversal.unwrap_err()}")
+        val traversal_identity = checked_traversal.unwrap()
         # Load config
         var config: Dict<text, text> = {}
+        if traversal_identity != "": config["traversal_plugin_identity_v1"] = traversal_identity
         # Keep the receiver layout explicit: the bootstrap producer can lose
         # the imported static call's return type and select CompileOptions'
         # same-named fields at offsets outside this smaller allocation.
@@ -694,6 +706,7 @@ class CompileContext:
             BootLogger.from_env()
 
         CompileContext(
+            aop_traversal_plugin_selection_v1: traversal_selection,
             session: build_session_inactive(),
             options: normalized_options,
             native_target: normalized_options.native_target,
@@ -1523,11 +1536,17 @@ class CompileContext:
 # Compile Options Hash Helper
 # ============================================================================
 
-fn compute_options_hash(opts: CompileOptions) -> CompileOptionsHash:
+pub fn compute_options_hash_checked_v2(opts: CompileOptions) -> Result<CompileOptionsHash, text>:
     val normalized = compileoptions_normalize_mir_optimization(opts)
     val opt_level = compileoptions_effective_mir_opt_level(normalized)
     val target_identity = driver_target_profile_identity_v1(normalized).unwrap_or("invalid-target-profile-v1")
-    compile_options_hash_compute(normalized.backend, opt_level, normalized.release, normalized.debug_info, normalized.gc_off, normalized.profile, normalized.allowed_families, normalized.native_libraries, normalized.native_library_paths, normalized.native_linker_flags, normalized.collection_policy, normalized.collection_memory_budget_bytes, normalized.native_target, representation_contexts_identity_v1(normalized.representation_sources), normalized.library_mode, normalized.xray_enabled, target_identity)
+    val traversal_identity = traversal_options_hash_identity_v1(normalized)?
+    Ok(compile_options_hash_compute(normalized.backend, opt_level, normalized.release, normalized.debug_info, normalized.gc_off, normalized.profile, normalized.allowed_families, normalized.native_libraries, normalized.native_library_paths, normalized.native_linker_flags, normalized.collection_policy, normalized.collection_memory_budget_bytes, normalized.native_target, representation_contexts_identity_v1(normalized.representation_sources), normalized.library_mode, normalized.xray_enabled, target_identity, traversal_identity))
+
+fn compute_options_hash(opts: CompileOptions) -> CompileOptionsHash:
+    match compute_options_hash_checked_v2(opts):
+        case Ok(identity): identity
+        case Err(reason): panic("unadmitted traversal cache identity: {reason}")
 
 # ============================================================================
 # Exports

@@ -1,3 +1,4 @@
+use compiler.common.cache_contract.traversal_plugin_selection_v1.{TraversalPluginSelectionV1, traversal_selection_identity_v1}
 use compiler.common.cache_contract.aspect_traversal_v1.{CheckedTraversalPluginV2,
     BuiltinForwardTraversalV1, traversal_dir_view_v1}
 use compiler.common.cache_contract.aspect_match_shard_v1.{advice_apply_key_v1}
@@ -285,6 +286,20 @@ pub fn aop_builtin_forward_match_acquire_v1(state: AopMatchDriverStateV1,
         PluginConfigValueV1(name: "directory", value: facts.scope_id)]
     aop_plugin_match_shard_acquire_v1(state, definition, config, selector, facts, request_id)
 
+# External provider identity remains distinct from the executing compiler image.
+# The admitted factory owns authentication; this owner reuses the existing
+# descriptor pool and pointcut matcher with a closed shared-instance schema.
+pub fn aop_selected_traversal_match_acquire_v1(state: AopMatchDriverStateV1,
+        selection: TraversalPluginSelectionV1, selector: text,
+        facts: DirectoryJoinPointFactsV1, request_id: text) -> Result<AopPluginMatchAcquireV1, text>:
+    val identity = traversal_selection_identity_v1(selection)?
+    val definition = PluginDefinitionV1(code_digest: selection.provider_code_digest,
+        fields: [PluginConfigFieldV1(name: "provider", role: PluginFieldRoleV1.Instance),
+            PluginConfigFieldV1(name: "directory", role: PluginFieldRoleV1.Scope)])
+    val config = [PluginConfigValueV1(name: "provider", value: identity),
+        PluginConfigValueV1(name: "directory", value: facts.scope_id)]
+    aop_plugin_match_shard_acquire_v1(state, definition, config, selector, facts, request_id)
+
 # Called only for fresh lowering and a complete code-authorizing snapshot.
 # The pool retains one stateless implementation per bounded descriptor key,
 # never the first directory or selector used by that implementation.
@@ -327,7 +342,8 @@ fn _aop_traversal_cold_ids_v1(state: AopMatchDriverStateV1,
 pub fn aop_weave_with_match_cache_v1(state: AopMatchDriverStateV1,
         modules: Dict<text, HirModule>,
         snapshots: [DirectoryTldrSourceSnapshotV2]? = nil,
-        captured_inputs: AopTraversalInputsV1? = nil) -> i64:
+        captured_inputs: AopTraversalInputsV1? = nil,
+        admitted_modules: [text]? = nil) -> i64:
     var woven: i64 = 0
     val module_ids = aspect_module_identity_index(modules)
     val claims = aspect_forward_weave_claims_v1(module_ids, forward_join_points(modules))
@@ -402,6 +418,9 @@ pub fn aop_weave_with_match_cache_v1(state: AopMatchDriverStateV1,
                 val sep = id.rfind("::")
                 if sep != nil: visit[id.slice(0, sep!)] = true
         for module_key in modules.keys():
+            # A checked external delta is an additional visit boundary. Even
+            # legacy-proof fallback cannot broaden it after native invocation.
+            if admitted_modules != nil and not admitted_modules.unwrap().contains(module_key): continue
             if not fallback and not visit.contains_key(module_key): continue
             val (module, n) = weave_forward_advice_claim_in_module_v1(
                 module_key, modules[module_key], module_ids, claim)
@@ -446,8 +465,9 @@ pub fn aop_match_driver_current_state_v1() -> AopMatchDriverStateV1:
 
 pub fn aop_weave_forward_advice_cached_v1(modules: Dict<text, HirModule>,
         snapshots: [DirectoryTldrSourceSnapshotV2]? = nil,
-        captured_inputs: AopTraversalInputsV1? = nil) -> i64:
-    aop_weave_with_match_cache_v1(aop_match_driver_current_state_v1(), modules, snapshots, captured_inputs)
+        captured_inputs: AopTraversalInputsV1? = nil,
+        admitted_modules: [text]? = nil) -> i64:
+    aop_weave_with_match_cache_v1(aop_match_driver_current_state_v1(), modules, snapshots, captured_inputs, admitted_modules)
 
 export aop_weave_forward_advice_cached_v1, aop_match_driver_reset_before_session_end_v1
 export aop_match_driver_current_state_v1
