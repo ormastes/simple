@@ -1,0 +1,102 @@
+# F1: pure delta adapter. The caller owns frozen source/body authority; these
+# records and consistency checks do not authenticate a compiler or a producer.
+use compiler.common.cache_contract.aspect_match_shard_v1.{DirectoryJoinPointFactsV1,
+    PointcutSelectorV1, PointcutMatchShardV1, WeavePlanDeltaV1,
+    directory_facts_key_v1, pointcut_match_shard_compute_v1, aspect_weave_plan_delta_v1}
+use compiler.common.cache.canonical_identity.{canonical_identity_text_lt}
+use compiler.common.cache_contract.hash_algorithm_registry_v1.{digest_v1_parse, HASH_ALGO_SHA256_V1}
+
+pub struct TraversalPriorStateV1:
+    scope_id: text
+    executing_image_digest: text
+    facts: DirectoryJoinPointFactsV1
+    selector: PointcutSelectorV1
+    shard: PointcutMatchShardV1
+    apply: Dict<text, text>
+
+pub struct DirTldrViewV1:
+    scope_id: text
+    executing_image_digest: text
+    facts: DirectoryJoinPointFactsV1
+    selector: PointcutSelectorV1
+    shard: PointcutMatchShardV1
+    apply: Dict<text, text>
+    previous: TraversalPriorStateV1?
+
+pub trait TraversalPlugin:
+    fn visit(dir: DirTldrViewV1, sel: PointcutSelectorV1) -> WeavePlanDeltaV1
+
+fn _traversal_sha256_v1(value: text) -> bool:
+    match digest_v1_parse(value):
+        case Some(digest): digest.algo_id == HASH_ALGO_SHA256_V1
+        case None: false
+
+# Reuses the one matcher to verify the complete selected set. This is an
+# admission-time correctness check, not a second matcher or a hot-path cache
+# optimization. The bounded driver owner retains the resulting immutable view.
+fn _traversal_selection_valid_v1(facts: DirectoryJoinPointFactsV1,
+        selector: PointcutSelectorV1, shard: PointcutMatchShardV1,
+        apply: Dict<text, text>) -> bool:
+    if not facts.complete or not selector.supported or not shard.complete:
+        return false
+    if facts.scope_id == "" or not _traversal_sha256_v1(facts.facts_key) or
+            not _traversal_sha256_v1(selector.selector_digest): return false
+    if directory_facts_key_v1(facts) != facts.facts_key: return false
+    val expected = pointcut_match_shard_compute_v1(selector, facts)
+    if shard.selector_digest != expected.selector_digest or
+            shard.dir_facts_key != expected.dir_facts_key or
+            shard.match_digest != expected.match_digest or
+            shard.sorted_matching_ids != expected.sorted_matching_ids:
+        return false
+    if apply.len() != shard.sorted_matching_ids.len(): return false
+    var previous_id = ""
+    var first = true
+    for id in shard.sorted_matching_ids:
+        if id == "" or (not first and not canonical_identity_text_lt(previous_id, id)): return false
+        first = false
+        previous_id = id
+        if not apply.contains_key(id) or not _traversal_sha256_v1(apply[id]): return false
+    true
+
+# Selector inputs must come from the existing parser or its validated cache;
+# this boundary is not a validator for arbitrary forged node graphs whose
+# supported flag was manually set. The driver passes its canonical parsed plan.
+# apply keys must be produced from actual immutable body/advice identities by
+# the driver owner. Valid digest spelling alone does not establish that fact.
+pub fn traversal_dir_view_v1(scope_id: text, executing_image_digest: text,
+        facts: DirectoryJoinPointFactsV1, selector: PointcutSelectorV1,
+        shard: PointcutMatchShardV1, apply: Dict<text, text>,
+        previous: TraversalPriorStateV1?) -> Result<DirTldrViewV1, text>:
+    if scope_id != facts.scope_id or not _traversal_sha256_v1(executing_image_digest):
+        return Err("traversal-scope-or-image-invalid")
+    if not _traversal_selection_valid_v1(facts, selector, shard, apply):
+        return Err("traversal-current-selection-invalid")
+    if previous != nil:
+        val prior = previous.unwrap()
+        if prior.scope_id != scope_id or prior.facts.scope_id != scope_id or
+                prior.executing_image_digest != executing_image_digest:
+            return Err("traversal-prior-scope-or-image-changed")
+        if not _traversal_selection_valid_v1(prior.facts, prior.selector, prior.shard, prior.apply):
+            return Err("traversal-prior-selection-invalid")
+    Ok(DirTldrViewV1(scope_id: scope_id, executing_image_digest: executing_image_digest,
+        facts: facts, selector: selector, shard: shard, apply: apply, previous: previous))
+
+pub fn traversal_prior_v1(view: DirTldrViewV1) -> TraversalPriorStateV1:
+    TraversalPriorStateV1(scope_id: view.scope_id, executing_image_digest: view.executing_image_digest,
+        facts: view.facts, selector: view.selector, shard: view.shard, apply: view.apply)
+
+# Stateless compiled implementation. Its shared instance may retain code
+# identity, but never a first directory, selector or mutable prior view.
+pub class BuiltinForwardTraversalV1:
+    instance_key: text
+
+impl TraversalPlugin for BuiltinForwardTraversalV1:
+    fn visit(dir: DirTldrViewV1, sel: PointcutSelectorV1) -> WeavePlanDeltaV1:
+        # Internal precondition: views come from traversal_dir_view_v1 and are
+        # immutable for this visit. A caller mismatch fails, never an empty plan.
+        if sel != dir.selector: panic("traversal-selector-view-mismatch")
+        if dir.previous == nil:
+            return WeavePlanDeltaV1(weave: dir.shard.sorted_matching_ids,
+                unweave: [], reweave: [], reuse: [])
+        val prior = dir.previous.unwrap()
+        aspect_weave_plan_delta_v1(prior.shard, prior.apply, dir.shard, dir.apply)

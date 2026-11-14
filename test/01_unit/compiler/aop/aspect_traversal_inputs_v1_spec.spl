@@ -1,0 +1,63 @@
+# F1 actual-source integration. Authored; runtime qualification is tracked in
+# the F1 plan independently from the earlier six descriptor/MIR probe cycles.
+use std.spec.{describe, it, expect}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.aspect_registry.{aspect_registry_reset}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.statements.*
+use compiler.hir.hir_types.{HirModule}
+use compiler.semantics.aspect_validation.{aspect_module_identity_index, validate_aspect_contracts}
+use compiler.semantics.join_point_model.{forward_join_points}
+use compiler.semantics.aspect_weave.{aspect_forward_weave_claims_v1, weave_forward_advice_claim_in_module_v1}
+use compiler.driver.cache.aop_traversal_inputs_v1.{aop_traversal_inputs_capture_v1, aop_traversal_base_key_v1}
+
+fn traversal_input_modules(value: text) -> Dict<text, HirModule>:
+    aspect_registry_reset()
+    val source = "fn target(n: i64) -> i64:\n    n + 1\n\nfn forwarder(n: i64) -> i64:\n    target(n)\n\n@advice(forward, forwarder)\n@readonly\n@noalloc\n@bounded_time\nfn observe():\n    val marker: i64 = " + value + "\n"
+    val parsed = parse_full_frontend(source, "fixture/input.spl", "fixture", Logger(level: 0))
+    var lowering = HirLowering.with_filename("fixture/input.spl")
+    {"fixture": lowering.lower_module(parsed)}
+
+describe "F1 real canonical input capture":
+    it "keeps original digest facts after the existing weaver mutates HIR":
+        val modules = traversal_input_modules("0")
+        expect(validate_aspect_contracts(modules).len()).to_equal(0)
+        val identities = aspect_module_identity_index(modules)
+        val claims = aspect_forward_weave_claims_v1(identities, forward_join_points(modules))
+        expect(claims.len()).to_equal(1)
+        val captured = aop_traversal_inputs_capture_v1(modules, claims, 16, 8388608).unwrap()
+        val before = captured.module_roots["fixture"]
+        val base = aop_traversal_base_key_v1(captured, "fixture", "forwarder").unwrap()
+        val (woven, count) = weave_forward_advice_claim_in_module_v1("fixture", modules["fixture"], identities, claims[0])
+        expect(count).to_equal(1)
+        modules["fixture"] = woven
+        val after = aop_traversal_inputs_capture_v1(modules, claims, 16, 8388608).unwrap()
+        expect(after.module_roots["fixture"] == before).to_equal(false)
+        expect(captured.module_roots["fixture"]).to_equal(before)
+        expect(aop_traversal_base_key_v1(captured, "fixture", "forwarder").unwrap()).to_equal(base)
+
+    it "binds advice body edits while retaining unchanged real ABI and effects":
+        val first = traversal_input_modules("0")
+        val first_claims = aspect_forward_weave_claims_v1(aspect_module_identity_index(first), forward_join_points(first))
+        expect(first_claims.len()).to_equal(1)
+        val first_input = aop_traversal_inputs_capture_v1(first, first_claims, 16, 8388608).unwrap()
+        val old = first_input.advice_facets[first_claims[0].registry_key]
+        val second = traversal_input_modules("1")
+        val second_claims = aspect_forward_weave_claims_v1(aspect_module_identity_index(second), forward_join_points(second))
+        expect(second_claims.len()).to_equal(1)
+        val second_input = aop_traversal_inputs_capture_v1(second, second_claims, 16, 8388608).unwrap()
+        val changed = second_input.advice_facets[second_claims[0].registry_key]
+        expect(changed.body_digest == old.body_digest).to_equal(false)
+        expect(changed.signature_digest).to_equal(old.signature_digest)
+        expect(changed.effects_digest).to_equal(old.effects_digest)
+        expect(changed.mode).to_equal("before")
+        expect(changed.activation).to_equal("static")
+
+    it "refuses insufficient capture budgets and missing baseline owners":
+        val modules = traversal_input_modules("0")
+        expect(aop_traversal_inputs_capture_v1(modules, [], 0, 8388608).is_err()).to_equal(true)
+        expect(aop_traversal_inputs_capture_v1(modules, [], 16, 1).is_err()).to_equal(true)
+        val captured = aop_traversal_inputs_capture_v1(modules, [], 16, 8388608).unwrap()
+        expect(aop_traversal_base_key_v1(captured, "missing", "forwarder").is_err()).to_equal(true)

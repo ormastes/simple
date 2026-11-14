@@ -1,3 +1,8 @@
+use compiler.common.cache_contract.aspect_traversal_v1.{TraversalPlugin,
+    BuiltinForwardTraversalV1, traversal_dir_view_v1}
+use compiler.common.cache_contract.aspect_match_shard_v1.{advice_apply_key_v1}
+use compiler.driver.cache.aop_traversal_inputs_v1.{AopTraversalInputsV1,
+    aop_traversal_inputs_capture_v1, aop_traversal_base_key_v1}
 use compiler.common.cache_contract.directory_tldr_snapshot_v2.{DirectoryTldrSourceSnapshotV2}
 use compiler.common.cache_contract.aspect_match_shard_v1.{directory_facts_key_v1}
 use compiler.common.cache_contract.physical_tld_v1.{three_payload_contract_digest_valid_v1}
@@ -60,6 +65,7 @@ class AopMatchDriverStateV1:
     selector_plan_hits: i64
     selector_plan_evictions: i64
     plugin_instances: PluginInstancePoolV1
+    traversal_instances: Dict<text, BuiltinForwardTraversalV1>
 
     static fn create() -> AopMatchDriverStateV1:
         AopMatchDriverStateV1.create_with_selector_capacity(256).unwrap()
@@ -72,7 +78,7 @@ class AopMatchDriverStateV1:
             shard_hits: 0, shard_misses: 0, fallbacks: 0, sources: {},
             selector_plans: {}, selector_plan_keys: [], selector_plan_capacity: capacity,
             selector_parse_count: 0, selector_plan_hits: 0, selector_plan_evictions: 0,
-            plugin_instances: PluginInstancePoolV1.create(256).unwrap()))
+            plugin_instances: PluginInstancePoolV1.create(256).unwrap(), traversal_instances: {}))
 
 fn _selector_plan_key(source: text) -> text:
     "aop-selector-runtime/v1\u0000" + source
@@ -263,6 +269,43 @@ pub fn aop_builtin_forward_match_acquire_v1(state: AopMatchDriverStateV1,
         PluginConfigValueV1(name: "directory", value: facts.scope_id)]
     aop_plugin_match_shard_acquire_v1(state, definition, config, selector, facts, request_id)
 
+# Called only for fresh lowering and a complete code-authorizing snapshot.
+# The pool retains one stateless implementation per bounded descriptor key,
+# never the first directory or selector used by that implementation.
+fn _aop_traversal_cold_ids_v1(state: AopMatchDriverStateV1,
+        acquired: AopPluginMatchAcquireV1, executing_image_digest: text,
+        selector: PointcutSelectorV1, facts: DirectoryJoinPointFactsV1,
+        inputs: AopTraversalInputsV1, registry_key: text) -> Result<[text], text>:
+    if not inputs.advice_facets.contains_key(registry_key):
+        return Err("traversal-advice-facets-missing")
+    var points: [JoinPointFactV1] = []
+    for point in facts.sorted_join_points:
+        val sep = point.id.rfind("::")
+        if sep == nil or point.id.slice(sep! + 2) != point.symbol:
+            return Err("traversal-fact-symbol-mismatch")
+        val base = aop_traversal_base_key_v1(inputs, point.id.slice(0, sep!), point.symbol)?
+        points.push(JoinPointFactV1(..point, base_body_digest: base))
+    val body_facts = DirectoryJoinPointFactsV1(..facts, sorted_join_points: points)
+    var apply: Dict<text, text> = {}
+    for id in acquired.shard.sorted_matching_ids:
+        val sep = id.rfind("::")
+        if sep == nil: return Err("traversal-qualified-id-invalid")
+        val base = aop_traversal_base_key_v1(inputs, id.slice(0, sep!), id.slice(sep! + 2))?
+        apply[id] = advice_apply_key_v1(acquired.shard.match_digest,
+            inputs.advice_facets[registry_key], base)
+    val view = traversal_dir_view_v1(facts.scope_id, "sha256:" + executing_image_digest,
+        body_facts, selector, acquired.shard, apply, nil)?
+    val key = acquired.instance.key
+    if not state.traversal_instances.contains_key(key):
+        # Descriptor acquisition already enforces the same process-owned cap.
+        if state.traversal_instances.len() >= 256: return Err("traversal-instance-budget")
+        state.traversal_instances[key] = BuiltinForwardTraversalV1(instance_key: key)
+    val delta = state.traversal_instances[key].visit(view, selector)
+    # prior=None is cold, so any non-weave operation would violate this contract.
+    if delta.unweave.len() != 0 or delta.reweave.len() != 0 or delta.reuse.len() != 0:
+        return Err("traversal-cold-delta-invalid")
+    Ok(delta.weave)
+
 # Cached replacement for aspect_weave.weave_forward_advice: same claims, same
 # per-module weaver, but module visits are driven by the matched shard ids.
 pub fn aop_weave_with_match_cache_v1(state: AopMatchDriverStateV1,
@@ -297,18 +340,36 @@ pub fn aop_weave_with_match_cache_v1(state: AopMatchDriverStateV1,
             val module: HirModule = modules[key]
             if not covered_files.contains_key(_module_file(key, module)):
                 snapshot_coverage_complete = false
+    # One immutable coarse body capture for the full ordered claim batch.
+    # Failed authority/encoding never publishes a reusable or empty-success plan.
+    var traversal_inputs: AopTraversalInputsV1? = nil
+    if snapshots != nil and snapshot_coverage_complete:
+        match aop_traversal_inputs_capture_v1(modules, claims, 1024, 8388608):
+            case Ok(inputs): traversal_inputs = Some(inputs)
+            case Err(_): pass
     for claim in claims:
         var visit: Dict<text, bool> = {}
-        var fallback = not snapshot_coverage_complete
+        var fallback = not snapshot_coverage_complete or (snapshots != nil and traversal_inputs == nil)
         if fallback: state.fallbacks = state.fallbacks + 1
         for facts in dirs:
             var selected_shard: PointcutMatchShardV1? = nil
+            var selected_ids: [text] = []
             if snapshots == nil:
                 selected_shard = Some(aop_match_shard_acquire_v1(state, claim.selector, facts, claim.registry_key))
             elif snapshot_providers.contains_key(facts.scope_id):
                 match aop_builtin_forward_match_acquire_v1(state,
                         snapshot_providers[facts.scope_id], claim.selector, facts, claim.registry_key):
-                    case Ok(acquired): selected_shard = Some(acquired.shard)
+                    case Ok(acquired):
+                        selected_shard = Some(acquired.shard)
+                        if not fallback and traversal_inputs != nil:
+                            val selector = aop_selector_plan_acquire_v1(state, claim.selector)
+                            match _aop_traversal_cold_ids_v1(state, acquired,
+                                    snapshot_providers[facts.scope_id], selector, facts,
+                                    traversal_inputs.unwrap(), claim.registry_key):
+                                case Ok(ids): selected_ids = ids
+                                case Err(_):
+                                    fallback = true
+                                    state.fallbacks = state.fallbacks + 1
                     case Err(_):
                         fallback = true
                         state.fallbacks = state.fallbacks + 1
@@ -317,7 +378,10 @@ pub fn aop_weave_with_match_cache_v1(state: AopMatchDriverStateV1,
                 continue
             val shard = selected_shard.unwrap()
             if not shard.complete: fallback = true
-            for id in shard.sorted_matching_ids:
+            if snapshots == nil: selected_ids = shard.sorted_matching_ids
+            # The production snapshot path consumes the callable plugin delta,
+            # while the separate legacy pure API preserves its original route.
+            for id in selected_ids:
                 val sep = id.rfind("::")
                 if sep != nil: visit[id.slice(0, sep!)] = true
         for module_key in modules.keys():
