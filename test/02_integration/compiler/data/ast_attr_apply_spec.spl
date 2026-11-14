@@ -22,7 +22,7 @@ use std.nogc_sync_mut.io_runtime.{env_set}
 use compiler.core.types.{reset_all_pools}
 use compiler.core.parser.{parser_init_with_path}
 use compiler.core.parser_decls.{parse_module_body}
-use compiler.core.ast.{expr_attr_apply_config, expr_attr_extra_placement, expr_attr_extra_present, expr_count, expr_get_tag, expr_get_span, expr_get_int, expr_get_left, expr_get_right, expr_get_extra, expr_get_args, expr_get_str}
+use compiler.core.ast.{expr_attr_apply_config, expr_attr_extra_placement, expr_attr_extra_present, expr_attr_s_val_placement, expr_attr_s_val_present, expr_count, expr_get_tag, expr_get_span, expr_get_int, expr_get_left, expr_get_right, expr_get_extra, expr_get_args, expr_get_str}
 
 val FIXED_INPUT = "src/compiler/00.common/data/data_schema_resolver.spl"
 # Fingerprint of the parse of FIXED_INPUT on the code BEFORE this change.
@@ -112,3 +112,35 @@ describe "node attributes applied to the real AST":
     it "rejects an unknown placement token and keeps the switch off":
         expect(expr_attr_apply_config("extra=bogus").is_err()).to_equal(true)
         expect(expr_attr_extra_placement()).to_equal("direct")
+
+fn strs() -> [text]:
+    var out: [text] = []
+    var i = 0
+    while i < expr_count():
+        out.push(expr_get_str(i))
+        i = i + 1
+    out
+
+fn nonempty(values: [text]) -> i64:
+    var n = 0
+    for v in values:
+        if v != "":
+            n = n + 1
+    n
+
+describe "s_val applied to the real AST":
+    it "answers identical text and presence on column and sparse hash and switches back":
+        # @req NODEATTR-APPLY-04
+        val off_fp = parse_with("")
+        val off_strs = strs()
+        expect(expr_attr_s_val_present()).to_equal(-1)
+        for cfg in ["s_val=column", "s_val=sparse_hash", "s_val=direct", "s_val=sparse_hash", "s_val=column"]:
+            expect(parse_with(cfg)).to_equal(off_fp)
+            expect(strs()).to_equal(off_strs)
+            if cfg != "s_val=direct":
+                expect(expr_attr_s_val_present()).to_equal(nonempty(off_strs))
+    it "applies extra and s_val together with the same fingerprint":
+        val off_fp = parse_with("")
+        expect(parse_with("extra=sparse_hash,s_val=column")).to_equal(off_fp)
+        expect(expr_attr_extra_placement()).to_equal("sparse_hash")
+        expect(expr_attr_s_val_placement()).to_equal("column")
