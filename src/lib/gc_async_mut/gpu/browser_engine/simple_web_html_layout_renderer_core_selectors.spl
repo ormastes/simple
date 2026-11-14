@@ -454,6 +454,45 @@ fn _type_count(ctx: SelectorContext, idx: i32) -> i32:
         return 1
     ctx.type_count[idx]
 
+# Does node i match any option of a selector list (with sibling context)?
+fn _any_option_matches_ctx(opts: [text], nodes: [HNode], ctx: SelectorContext, i: i32) -> bool:
+    val nd = nodes[i]
+    var j = 0
+    val opt_count = opts.len()
+    while j < opt_count:  # cpu-lane-loop-ok: walks the <=16 options of ONE `of S` selector list for one node
+        if opts[j].len() > 0 and simple_match_ctx(opts[j], nd.tag, nd.class_attr, nd.class_words, nd.id_attr, nd.attrs_raw, nodes, ctx, i):
+            return true
+        j = j + 1
+    false
+
+# Index for `:nth-child(An+B of S)` / `:nth-last-child(An+B of S)`: the
+# 1-based position of node idx among the element siblings that match S,
+# counted from the start or the end; -1 when the node itself does not match S.
+fn _nth_of_index(code: i32, opts: [text], nodes: [HNode], ctx: SelectorContext, idx: i32) -> i32:
+    if not _any_option_matches_ctx(opts, nodes, ctx, idx):
+        return 0 - 1
+    var count = 1
+    if code == PSEUDO_NTH_LAST_CHILD:
+        var s = ctx.child_index.next_sibling[idx]
+        while s >= 0:  # cpu-lane-loop-ok: following siblings of ONE node for :nth-last-child(.. of S); bound is its sibling count
+            if nodes[s].tag != "#text" and _any_option_matches_ctx(opts, nodes, ctx, s):
+                count = count + 1
+            s = ctx.child_index.next_sibling[s]
+        return count
+    var s = ctx.prev_element[idx]
+    while s >= 0:  # cpu-lane-loop-ok: previous element siblings of ONE node for :nth-child(.. of S); bound is its sibling count
+        if _any_option_matches_ctx(opts, nodes, ctx, s):
+            count = count + 1
+        s = ctx.prev_element[s]
+    count
+
+# Byte offset of the ` of ` keyword in an :nth-child()/:nth-last-child()
+# argument, or -1. Chrome requires whitespace before a lower-case `of`.
+fn _nth_of_offset(code: i32, arg: text) -> i32:
+    if code != PSEUDO_NTH_CHILD and code != PSEUDO_NTH_LAST_CHILD:
+        return 0 - 1
+    text_index_of(arg, " of ") as i32
+
 # The 1-based index an An+B argument is tested against for each structural
 # pseudo-class: from the start or the end, among all element siblings or only
 # those of the same type.
@@ -728,7 +767,13 @@ fn _pseudo_ctx_matches(sel: text, nodes: [HNode], ctx: SelectorContext, idx: i32
             pseudo == "nth-child" or pseudo == "nth-last-child" or
             pseudo == "nth-of-type" or pseudo == "nth-last-of-type"
         ):
-            if not css_nth_matches(arg, _nth_index_for(_pseudo_code_for(pseudo), nodes, ctx, idx) as i64):
+            val nth_code = _pseudo_code_for(pseudo)
+            val of_at = _nth_of_offset(nth_code, arg)
+            if of_at >= 0:
+                val of_opts = _split_pseudo_options(arg.substring(of_at + 4, arg.byte_len()).trim())
+                if not css_nth_matches(arg.substring(0, of_at), _nth_of_index(nth_code, of_opts, nodes, ctx, idx) as i64):
+                    return false
+            elif not css_nth_matches(arg, _nth_index_for(nth_code, nodes, ctx, idx) as i64):
                 return false
         elif pseudo == "not" or pseudo == "is" or pseudo == "where":
             if not _list_ctx_matches(pseudo == "not", _split_pseudo_options(arg), nodes, ctx, idx):
@@ -1232,10 +1277,19 @@ fn parse_selector_part(part: text) -> ParsedSel:
                 code == PSEUDO_NTH_CHILD or code == PSEUDO_NTH_LAST_CHILD or
                 code == PSEUDO_NTH_OF_TYPE or code == PSEUDO_NTH_LAST_OF_TYPE
             ):
-                val nth = _parse_nth(arg)
+                # `An+B of S`: the An+B part is pre-parsed and S's options
+                # ride in pseudo_opts (empty for the plain form).
+                val of_at = _nth_of_offset(code, arg)
+                var anb = arg
+                if of_at >= 0:
+                    anb = arg.substring(0, of_at)
+                    opts = _split_pseudo_options(arg.substring(of_at + 4, arg.byte_len()).trim())
+                val nth = _parse_nth(anb)
                 nth_kind = nth[0]
                 nth_a = nth[1]
                 nth_b = nth[2]
+                if of_at >= 0 and opts.len() == 0:
+                    nth_kind = 0 - 1
             pseudo_codes.push(code)
             pseudo_root_attrs.push(root_attr)
             pseudo_opts.push(opts)
@@ -1342,9 +1396,11 @@ fn _pseudo_ctx_matches_parsed(
             code == PSEUDO_NTH_CHILD or code == PSEUDO_NTH_LAST_CHILD or
             code == PSEUDO_NTH_OF_TYPE or code == PSEUDO_NTH_LAST_OF_TYPE
         ):
+            val of_opts = p.pseudo_opts[pi]
+            val nth_index = if of_opts.len() > 0: _nth_of_index(code, of_opts, nodes, ctx, idx) else: _nth_index_for(code, nodes, ctx, idx)
             if not _nth_matches_parsed(
                 p.pseudo_nth_kind[pi], p.pseudo_nth_a[pi], p.pseudo_nth_b[pi],
-                _nth_index_for(code, nodes, ctx, idx)
+                nth_index
             ):
                 return false
         elif code == PSEUDO_NOT or code == PSEUDO_ANY:

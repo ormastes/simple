@@ -1,0 +1,139 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-BROWSER_ENGINE
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_core_selectors.spl 1%
+# @tag: unit, browser_engine, css, selectors
+#
+# `:nth-child(An+B of S)` / `:nth-last-child(An+B of S)` (Selectors 4) in the
+# layout renderer, against Chrome 159.0.8154.6. Page: `#box` with children
+# `i#b1.a  b#b2  i#b3.a.k  i#b4  b#b5.a  i#b6.k`; base
+# `#box > * {display:block; width:200px}`, probe `#box > SELECTOR {width:50px}`;
+# matched ids by getComputedStyle width, and CSS.supports("selector(SELECTOR)").
+#
+# | selector | Chrome 159 matches | CSS.supports |
+# |---|---|---|
+# | `:nth-child(2 of .a)` | b3 | true |
+# | `:nth-child(odd of .a)` | b1 b5 | true |
+# | `:nth-child(-n+2 of .a)` | b1 b3 | true |
+# | `:nth-last-child(1 of .a)` | b5 | true |
+# | `:nth-last-child(2 of i)` | b4 | true |
+# | `:nth-child(1 of .a, .k)` | b1 | true |
+# | `i:nth-child(2 of .a)` | b3 | true |
+# | `:nth-child(2 of .zz)` | (none) | true |
+# | `:nth-child(n of .k)` | b3 b6 | true |
+# | `:nth-child(2 OF .a)` | (none) | false |
+# | `:nth-child(2of .a)` | (none) | false |
+# | `:nth-child(2 of)` | (none) | false |
+# | `:nth-child(-2147483649)` | (none) | true |
+# | `:nth-child(-2147483648)` | (none) | true |
+#
+# `of` must be lower-case and preceded by whitespace in Chrome. @supports
+# lower-cases its condition before parsing here, so the `2 OF .a` supports row
+# is not asserted.
+
+use std.spec.{describe, context, it, expect}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_core.{
+    simple_web_layout_debug_style_by_id, simple_web_layout_debug_selector_parse_equivalence
+}
+use std.gc_async_mut.gpu.browser_engine.style.supports.{eval_supports_query}
+
+fn _page(css: text) -> text:
+    "<html><head><style>#box > * {{ display:block; width:200px; height:2px }} " + css + "</style></head><body><div id=\"box\"><i id=\"b1\" class=\"a\"></i><b id=\"b2\"></b><i id=\"b3\" class=\"a k\"></i><i id=\"b4\"></i><b id=\"b5\" class=\"a\"></b><i id=\"b6\" class=\"k\"></i></div></body></html>"
+
+fn _matched(selector: text) -> text:
+    val html = _page("#box > " + selector + " {{ width:50px }}")
+    var out = ""
+    for id in ["b1", "b2", "b3", "b4", "b5", "b6"]:
+        if simple_web_layout_debug_style_by_id(html, id, "width") == "50":
+            out = out + id + ","
+    out
+
+describe ":nth-child(An+B of S) vs Chrome 159":
+
+    context "matched sets":
+
+        it ":nth-child(2 of .a) -> b3":
+            expect(_matched(":nth-child(2 of .a)")).to_equal("b3,")
+
+        it ":nth-child(odd of .a) -> b1 b5":
+            expect(_matched(":nth-child(odd of .a)")).to_equal("b1,b5,")
+
+        it ":nth-child(-n+2 of .a) -> b1 b3":
+            expect(_matched(":nth-child(-n+2 of .a)")).to_equal("b1,b3,")
+
+        it ":nth-last-child(1 of .a) -> b5":
+            expect(_matched(":nth-last-child(1 of .a)")).to_equal("b5,")
+
+        it ":nth-last-child(2 of i) -> b4":
+            expect(_matched(":nth-last-child(2 of i)")).to_equal("b4,")
+
+        it ":nth-child(1 of .a, .k) -> b1":
+            expect(_matched(":nth-child(1 of .a, .k)")).to_equal("b1,")
+
+        it "i:nth-child(2 of .a) -> b3":
+            expect(_matched("i:nth-child(2 of .a)")).to_equal("b3,")
+
+        it ":nth-child(2 of .zz) -> none":
+            expect(_matched(":nth-child(2 of .zz)")).to_equal("")
+
+        it ":nth-child(n of .k) -> b3 b6":
+            expect(_matched(":nth-child(n of .k)")).to_equal("b3,b6,")
+
+        it ":nth-child(2 OF .a) -> none":
+            expect(_matched(":nth-child(2 OF .a)")).to_equal("")
+
+        it ":nth-child(2of .a) -> none":
+            expect(_matched(":nth-child(2of .a)")).to_equal("")
+
+        it ":nth-child(2 of) -> none":
+            expect(_matched(":nth-child(2 of)")).to_equal("")
+
+        it ":nth-child(-2147483649) -> none":
+            expect(_matched(":nth-child(-2147483649)")).to_equal("")
+
+        it ":nth-child(-2147483648) -> none":
+            expect(_matched(":nth-child(-2147483648)")).to_equal("")
+
+        it "text and pre-parsed paths agree on every row":
+            expect(simple_web_layout_debug_selector_parse_equivalence(_page("#box > :nth-child(2 of .a) {{ width:50px }} #box > :nth-child(odd of .a) {{ width:50px }} #box > :nth-child(-n+2 of .a) {{ width:50px }} #box > :nth-last-child(1 of .a) {{ width:50px }} #box > :nth-last-child(2 of i) {{ width:50px }} #box > :nth-child(1 of .a, .k) {{ width:50px }} #box > i:nth-child(2 of .a) {{ width:50px }} #box > :nth-child(2 of .zz) {{ width:50px }} #box > :nth-child(n of .k) {{ width:50px }} #box > :nth-child(2 OF .a) {{ width:50px }} #box > :nth-child(2of .a) {{ width:50px }} #box > :nth-child(2 of) {{ width:50px }} #box > :nth-child(-2147483649) {{ width:50px }} #box > :nth-child(-2147483648) {{ width:50px }}"), 0 - 1).starts_with("ok ")).to_equal(true)
+
+    context "@supports selector()":
+
+        it "selector(:nth-child(2 of .a)) is true":
+            expect(eval_supports_query("selector(:nth-child(2 of .a))")).to_equal(true)
+
+        it "selector(:nth-child(odd of .a)) is true":
+            expect(eval_supports_query("selector(:nth-child(odd of .a))")).to_equal(true)
+
+        it "selector(:nth-child(-n+2 of .a)) is true":
+            expect(eval_supports_query("selector(:nth-child(-n+2 of .a))")).to_equal(true)
+
+        it "selector(:nth-last-child(1 of .a)) is true":
+            expect(eval_supports_query("selector(:nth-last-child(1 of .a))")).to_equal(true)
+
+        it "selector(:nth-last-child(2 of i)) is true":
+            expect(eval_supports_query("selector(:nth-last-child(2 of i))")).to_equal(true)
+
+        it "selector(:nth-child(1 of .a, .k)) is true":
+            expect(eval_supports_query("selector(:nth-child(1 of .a, .k))")).to_equal(true)
+
+        it "selector(i:nth-child(2 of .a)) is true":
+            expect(eval_supports_query("selector(i:nth-child(2 of .a))")).to_equal(true)
+
+        it "selector(:nth-child(2 of .zz)) is true":
+            expect(eval_supports_query("selector(:nth-child(2 of .zz))")).to_equal(true)
+
+        it "selector(:nth-child(n of .k)) is true":
+            expect(eval_supports_query("selector(:nth-child(n of .k))")).to_equal(true)
+
+        it "selector(:nth-child(2of .a)) is false":
+            expect(eval_supports_query("selector(:nth-child(2of .a))")).to_equal(false)
+
+        it "selector(:nth-child(2 of)) is false":
+            expect(eval_supports_query("selector(:nth-child(2 of))")).to_equal(false)
+
+        it "selector(:nth-child(-2147483649)) is true":
+            expect(eval_supports_query("selector(:nth-child(-2147483649))")).to_equal(true)
+
+        it "selector(:nth-child(-2147483648)) is true":
+            expect(eval_supports_query("selector(:nth-child(-2147483648))")).to_equal(true)
+

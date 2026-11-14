@@ -547,6 +547,7 @@ fn _supports_selector(selector: text) -> Option<bool>:
     var bracket_depth = 0
     var open_positions: [i32] = [0; 33]
     var open_is_nth: [bool] = [false; 33]
+    var open_allows_of: [bool] = [false; 33]
     var option_commas: [i32] = [0; 33]
     var option_starts: [i32] = [0; 33]
     var bracket_starts: [i32] = [0; 2]
@@ -584,6 +585,7 @@ fn _supports_selector(selector: text) -> Option<bool>:
             if depth > 32:
                 return nil
             open_is_nth[depth] = function_name.starts_with("nth-")
+            open_allows_of[depth] = function_name == "nth-child" or function_name == "nth-last-child"
             open_positions[depth] = i
             option_commas[depth] = 0
             option_starts[depth] = i + 1
@@ -594,8 +596,18 @@ fn _supports_selector(selector: text) -> Option<bool>:
             if inner.len() == 0:
                 return nil
             # An nth-* argument must be a valid An+B (`1 2`, `2n+` are not).
-            if open_is_nth[depth] and not css_nth_parse(inner).valid:
-                supported = false
+            if open_is_nth[depth]:
+                # `An+B of S` is valid for :nth-child / :nth-last-child only.
+                val nth_arg = selector.slice(open_positions[depth] + 1, i).trim()
+                val of_at = nth_arg.index_of(" of ") ?? -1
+                if of_at >= 0 and open_allows_of[depth]:
+                    if (
+                        not css_nth_parse(nth_arg.slice(0, of_at)).valid or
+                        nth_arg.slice(of_at + 4, nth_arg.byte_len()).trim().byte_len() == 0
+                    ):
+                        supported = false
+                elif not css_nth_parse(nth_arg).valid:
+                    supported = false
             depth = depth - 1
         elif ch == ",":
             if depth == 0:
