@@ -1,3 +1,4 @@
+use app.cli.bootstrap_focused_native_build_args.{focused_native_build_target_profile_v1}
 #![allow(REQC004)]
 # CLI compile — target backends (simpleos/c/cuda/opencl/vhdl/native)
 use app.io._CliCompile.compile_options.{cli_native_default_opt_level, cli_parse_opt_level, cli_print_shared_opt_level_help, cli_print_shared_optimization_inventory}
@@ -393,7 +394,7 @@ fn cli_native_build_option_error(args: [text], require_entry: bool = false) -> t
                 return log_error
             i = i + 2
             continue
-        if arg == "--backend" or arg == "--runtime-bundle" or arg == "--runtime-owner" or arg == "--runtime-path" or arg == "--linker-script" or arg == "--entry" or arg == "--source" or arg == "-o" or arg == "--output" or arg == "--mode" or arg == "--build-mode" or arg == "--cache-dir" or arg == "--target" or arg == "--cpu" or arg == "--opt-level" or arg == "--collection-profile" or arg == "--collection-workload" or arg == "--collection-target" or arg == "--collection-policy" or arg == "--collection-memory-budget" or cli_native_build_policy_value_flag(arg):
+        if arg == "--backend" or arg == "--runtime-bundle" or arg == "--runtime-owner" or arg == "--runtime-path" or arg == "--linker-script" or arg == "--entry" or arg == "--source" or arg == "-o" or arg == "--output" or arg == "--mode" or arg == "--build-mode" or arg == "--cache-dir" or arg == "--target" or arg == "--cpu" or arg == "--opt-level" or arg == "--profile" or arg == "--managed-build-phase" or arg == "--collection-profile" or arg == "--collection-workload" or arg == "--collection-target" or arg == "--collection-policy" or arg == "--collection-memory-budget" or cli_native_build_policy_value_flag(arg):
             val error = cli_native_build_value_error(args, i, arg, false)
             if error != "":
                 return error
@@ -463,6 +464,8 @@ fn cli_native_build_option_error(args: [text], require_entry: bool = false) -> t
         elif arg.starts_with("--collection-policy=") or arg.starts_with("--collection-memory-budget="):
             # Validated by the shared semantic parser above.
             pass
+        elif arg.starts_with("--profile=") or arg.starts_with("--managed-build-phase="):
+            pass  # Shared target profile intake validates values.
         elif arg.starts_with("--collection-profile="):
             val error = cli_native_build_inline_value_error(arg, "--collection-profile=", "--collection-profile", false)
             if error != "": return error
@@ -768,6 +771,8 @@ struct CliNativeBuildParsedOptionsV1:
     source_dirs: [text] = []
     entry_closure: bool = false
     release: bool = false
+    profile: text = "prod"
+    managed_build_phase: text = ""
     opt_level: i64 = 0
     native_target: text = ""
     native_cpu: text = ""
@@ -810,7 +815,12 @@ fn cli_native_build_parse_options_v1(args: [text]) -> CliNativeBuildParsedOption
     var emit_shared = false
     var source_dirs: [text] = []
     var entry_closure = false
-    var release = true
+    val target_selection = focused_native_build_target_profile_v1(args)
+    if target_selection.is_err():
+        _cli_eprint(target_selection.unwrap_err())
+        return cli_native_build_parse_failure_v1()
+    val target_profile = target_selection.unwrap()
+    var release = target_profile.release
     var opt_level = cli_native_default_opt_level()
     var native_target = ""
     var native_cpu = ""
@@ -1006,9 +1016,13 @@ fn cli_native_build_parse_options_v1(args: [text]) -> CliNativeBuildParsedOption
                 return cli_native_build_parse_failure_v1()
             j = j + 1
             native_cpu = args[j]
+        elif a == "--profile" or a == "--managed-build-phase":
+            j = j + 1
+        elif a.starts_with("--profile=") or a.starts_with("--managed-build-phase="):
+            pass  # Shared intake above validated and selected this policy.
         elif a == "--release":
             release = true
-            if opt_level < 2:
+            if not optimization_requested:
                 opt_level = 2
             optimization_requested = true
         elif a == "--release-optimized":
@@ -1027,7 +1041,6 @@ fn cli_native_build_parse_options_v1(args: [text]) -> CliNativeBuildParsedOption
                 nil:
                     _cli_eprint("Error: invalid --opt-level value '{opt_text}'")
                     return cli_native_build_parse_failure_v1()
-            release = opt_level > 0
             optimization_requested = true
         elif a == "--opt-level":
             if j + 1 >= args.len():
@@ -1045,7 +1058,6 @@ fn cli_native_build_parse_options_v1(args: [text]) -> CliNativeBuildParsedOption
                 nil:
                     _cli_eprint("Error: invalid --opt-level value '{opt_text}'")
                     return cli_native_build_parse_failure_v1()
-            release = opt_level > 0
             optimization_requested = true
         elif a == "--no-mangle":
             no_mangle = true
@@ -1130,6 +1142,8 @@ fn cli_native_build_parse_options_v1(args: [text]) -> CliNativeBuildParsedOption
         source_dirs: source_dirs,
         entry_closure: entry_closure,
         release: release,
+        profile: target_profile.profile,
+        managed_build_phase: target_profile.managed_build_phase,
         opt_level: opt_level,
         native_target: native_target,
         native_cpu: native_cpu,
@@ -1170,7 +1184,9 @@ fn cli_native_build_print_help_v1() -> i64:
     print "  --collection-target <name>    Matching target profile"
     print "  --collection-policy <name>    moderate, strict, robust, or critical"
     print "  --collection-memory-budget <bytes>  Proven extra-storage budget"
-    print "  --release            Release build (standard optimization profile)"
+    print "  --release            Release target profile (optimization is independent)"
+    print "  --profile <dev|prod>  Native target profile (default: prod)"
+    print "  --managed-build-phase <phase3|phase4>  Managed target policy; never admission authority"
     print "  --release-optimized  Max optimization: -O3 + x86-64-v3 + ThinLTO"
     cli_print_shared_opt_level_help()
     print "  --list-optimizations Print implemented optimization groups and levels"
@@ -1359,6 +1375,8 @@ fn _cli_native_build(
         var source_dirs: [text] = parsed.source_dirs
         var entry_closure: bool = parsed.entry_closure
         var release: bool = parsed.release
+        val target_profile = parsed.profile
+        val managed_build_phase = parsed.managed_build_phase
         var opt_level: i64 = parsed.opt_level
         var native_target: text = parsed.native_target
         var native_cpu: text = parsed.native_cpu
@@ -1534,7 +1552,6 @@ fn _cli_native_build(
             env_set("SIMPLE_RUNTIME_PATH", runtime_path)
             env_set("SIMPLE_CORE_RUNTIME_PATH", runtime_path)
         if not optimization_requested:
-            release = true
             opt_level = cli_native_default_opt_level()
 
         driver_entry_scan_cache_reset()
@@ -1655,6 +1672,8 @@ fn _cli_native_build(
             options.backend = backend
             options.native_target = native_target
             options.release = release
+            options.profile = target_profile
+            options.managed_build_phase = managed_build_phase
             options.strip_output = strip
             options.opt_level = opt_level
             options.collection_policy = collection_planner.policy
@@ -1709,6 +1728,8 @@ fn _cli_native_build(
             options.backend = backend
             options.native_target = native_target
             options.release = release
+            options.profile = target_profile
+            options.managed_build_phase = managed_build_phase
             options.strip_output = strip
             options.opt_level = opt_level
             options.collection_policy = collection_planner.policy

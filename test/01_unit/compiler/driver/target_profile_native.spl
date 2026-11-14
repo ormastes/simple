@@ -1,0 +1,59 @@
+use compiler.common.driver_compile_options.*
+use compiler.driver.driver_xray_policy.{driver_target_trace_capability_v1, driver_target_profile_identity_v1}
+use app.cli.bootstrap_focused_native_build_args.{focused_native_build_target_profile_v1}
+
+fn target_profile_native_check() -> text:
+    for level in [0, 1, 2, 3]:
+        var original = driver_core_compile_options_default()
+        original.opt_level = Some(level)
+        val normalized = compileoptions_normalize_mir_optimization(original)
+        if normalized.release or normalized.profile != "dev" or normalized.build_mode != "debug" or normalized.opt_level != Some(level):
+            return "optimized development changed profile"
+    var production = driver_core_compile_options_default()
+    production.profile = "prod"
+    production.opt_level = Some(0)
+    val prod = compileoptions_normalize_mir_optimization(production)
+    if not prod.release or prod.profile != "prod" or prod.build_mode != "release" or prod.opt_level != Some(0):
+        return "unoptimized release changed profile"
+    var dev = driver_core_compile_options_default()
+    dev.managed_build_phase = "phase3"
+    dev.backend = "llvm"
+    dev.native_target = "aarch64-unknown-linux-gnu"
+    match compileoptions_target_profile_v1(dev, driver_target_trace_capability_v1(dev)):
+        case Ok(policy):
+            if policy.profile != TargetBuildProfileV1.Development: return "wrong phase3 profile"
+            match policy.trace_resolution:
+                case Unavailable(reason):
+                    if reason != "llvm-observer-link-handler-not-admitted-v1": return "wrong capability reason"
+                case _: return "unadmitted phase3 debug claimed available"
+        case Err(reason): return reason
+    var phase4 = prod
+    phase4.managed_build_phase = "phase4"
+    match compileoptions_target_profile_v1(phase4, driver_target_trace_capability_v1(phase4)):
+        case Ok(policy):
+            if policy.trace_resolution != TargetTraceResolutionV1.Disabled: return "phase4 debug enabled"
+        case Err(reason): return reason
+    dev.target_debug_request = TargetDebugRequestV1.Enabled
+    if compileoptions_target_profile_v1(dev, driver_target_trace_capability_v1(dev)).is_ok(): return "explicit unavailable request accepted"
+    phase4.xray_enabled = true
+    if compileoptions_target_profile_v1(phase4, driver_target_trace_capability_v1(phase4)).is_ok(): return "release static XRay accepted"
+    for args in [["--profile=dev", "--opt-level=aggressive"], ["--managed-build-phase", "phase3"]]:
+        match focused_native_build_target_profile_v1(args):
+            case Ok(selected):
+                if selected.release or selected.profile != "dev": return "CLI development selection lost"
+            case Err(reason): return reason
+    match focused_native_build_target_profile_v1(["--opt-level=none"]):
+        case Ok(selected):
+            if not selected.release: return "native default release changed by optimization"
+        case Err(reason): return reason
+    for args in [["--profile=dev", "--release"], ["--release", "--profile=dev"], ["--managed-build-phase=phase3", "--profile=prod"], ["--managed-build-phase=phase4", "--profile=dev"], ["--managed-build-phase=unknown"]]:
+        if focused_native_build_target_profile_v1(args).is_ok(): return "contradictory CLI policy accepted"
+    ""
+
+fn main() -> i64:
+    val error = target_profile_native_check()
+    if error != "":
+        print error
+        return 1
+    print "PASS actual target profiles, optimization independence, capability refusal, and CLI policy"
+    0

@@ -84,3 +84,54 @@ pub fn focused_native_build_opt_level(args: [text]) -> i64:
         2
     else:
         3
+
+# Target policy intake is shared by positional and source-root native builds.
+# Packaging --mode is deliberately unrelated to this development/release profile.
+pub struct FocusedNativeTargetProfileV1:
+    release: bool
+    profile: text
+    managed_build_phase: text
+
+pub fn focused_native_build_target_profile_v1(args: [text], default_release: bool = true) -> Result<FocusedNativeTargetProfileV1, text>:
+    var explicit_profile = ""
+    var phase = ""
+    var release_requested = false
+    var index = 0
+    while index < args.len():
+        val arg = args[index]
+        var profile_value = ""
+        var phase_value = ""
+        if arg == "--release" or arg == "--release-optimized":
+            release_requested = true
+        elif arg == "--profile" or arg == "--managed-build-phase":
+            if index + 1 >= args.len() or args[index + 1].starts_with("--"):
+                return Err("TARGET-PROFILE-E-ARG: missing value for " + arg)
+            index = index + 1
+            if arg == "--profile": profile_value = args[index]
+            else: phase_value = args[index]
+        elif arg.starts_with("--profile="):
+            profile_value = arg.substring(10)
+            if profile_value == "": return Err("TARGET-PROFILE-E-ARG: empty profile")
+        elif arg.starts_with("--managed-build-phase="):
+            phase_value = arg.substring(22)
+            if phase_value == "": return Err("TARGET-PROFILE-E-ARG: empty managed phase")
+        if profile_value != "":
+            if profile_value != "dev" and profile_value != "prod":
+                return Err("TARGET-PROFILE-E-ARG: native profile must be dev or prod")
+            if explicit_profile != "" and explicit_profile != profile_value:
+                return Err("TARGET-PROFILE-E-CONFLICT: conflicting explicit profiles")
+            explicit_profile = profile_value
+        if phase_value != "":
+            if phase_value != "phase3" and phase_value != "phase4":
+                return Err("TARGET-PROFILE-E-PHASE: unknown managed build phase")
+            if phase != "" and phase != phase_value:
+                return Err("TARGET-PROFILE-E-CONFLICT: conflicting managed phases")
+            phase = phase_value
+        index = index + 1
+    val phase_profile = if phase == "phase3": "dev" else: if phase == "phase4": "prod" else: ""
+    if phase_profile != "" and explicit_profile != "" and phase_profile != explicit_profile:
+        return Err("TARGET-PROFILE-E-CONFLICT: managed phase and explicit profile differ")
+    val selected = if explicit_profile != "": explicit_profile else: if phase_profile != "": phase_profile else: if default_release or release_requested: "prod" else: "dev"
+    if release_requested and selected == "dev":
+        return Err("TARGET-PROFILE-E-CONFLICT: release and development both requested")
+    Ok(FocusedNativeTargetProfileV1(selected == "prod", selected, phase))

@@ -5,7 +5,7 @@
 # compiler graph.
 
 export use compiler.common.driver_core_types.*
-use compiler.common.driver_compile_options.{CompileOptions}
+use compiler.common.driver_compile_options.{CompileOptions, compileoptions_normalize_mir_optimization}
 use compiler.common.assurance.representation_context_v1.{RepresentationSourceContextV1, representation_contexts_identity_v1}
 use compiler.driver.native_aot_artifacts.{native_aot_object_path_v1}
 use compiler.driver.cache.native_object_source_key_v1.{native_object_source_key_v1}
@@ -20,7 +20,7 @@ use std.nogc_sync_mut.sffi.transient.{
     transient_scope_begin, transient_scope_pause, transient_scope_end,
     transient_promote}
 use compiler.driver.compile_failure_policy.{compile_fail_fast_requested}
-use compiler.driver.driver_xray_policy.{xray_policy_resolve, xray_observer_request_error_for_build}
+use compiler.driver.driver_xray_policy.{xray_policy_resolve, xray_observer_request_error_for_build, driver_target_profile_identity_v1}
 use compiler.driver.session.build_session.{BuildSession, build_session_inactive}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 
@@ -569,6 +569,7 @@ class CompileContext:
     api_publication_decision: ApiPublicationDecisionV1? = nil
 
     static fn create(options: CompileOptions) -> CompileContext:
+        val normalized_options = compileoptions_normalize_mir_optimization(options)
         # Load config
         var config: Dict<text, text> = {}
         # Keep the receiver layout explicit: the bootstrap producer can lose
@@ -581,21 +582,21 @@ class CompileContext:
         # CompileOptions is the real CLI-to-driver boundary. Apply its values
         # after environment loading so command-line authority wins without a
         # process-global env write that could leak into concurrent compiles.
-        if options.mcdc_mode_text != "":
-            if val cli_mcdc_mode = mcdc_mode_from_text(options.mcdc_mode_text):
+        if normalized_options.mcdc_mode_text != "":
+            if val cli_mcdc_mode = mcdc_mode_from_text(normalized_options.mcdc_mode_text):
                 compiler_config.mcdc_mode = cli_mcdc_mode
             else:
-                config["mcdc_config_error"] = "MCDC-E-MODE: unknown MC/DC mode '{options.mcdc_mode_text}'"
-        if options.mcdc_owner_bytes > 0:
-            compiler_config.mcdc_owner_bytes = options.mcdc_owner_bytes
-        if options.mcdc_global_bytes > 0:
-            if options.mcdc_global_bytes >= compiler_config.mcdc_owner_bytes:
-                compiler_config.mcdc_global_bytes = options.mcdc_global_bytes
+                config["mcdc_config_error"] = "MCDC-E-MODE: unknown MC/DC mode '{normalized_options.mcdc_mode_text}'"
+        if normalized_options.mcdc_owner_bytes > 0:
+            compiler_config.mcdc_owner_bytes = normalized_options.mcdc_owner_bytes
+        if normalized_options.mcdc_global_bytes > 0:
+            if normalized_options.mcdc_global_bytes >= compiler_config.mcdc_owner_bytes:
+                compiler_config.mcdc_global_bytes = normalized_options.mcdc_global_bytes
             else:
-                config["mcdc_config_error"] = "MC/DC global byte budget must be at least the owner byte budget (owner={compiler_config.mcdc_owner_bytes}, global={options.mcdc_global_bytes})"
+                config["mcdc_config_error"] = "MC/DC global byte budget must be at least the owner byte budget (owner={compiler_config.mcdc_owner_bytes}, global={normalized_options.mcdc_global_bytes})"
         if compiler_config.mcdc_global_bytes < compiler_config.mcdc_owner_bytes:
             config["mcdc_config_error"] = "MC/DC global byte budget must be at least the owner byte budget (owner={compiler_config.mcdc_owner_bytes}, global={compiler_config.mcdc_global_bytes})"
-        if compiler_config.coverage_enabled or options.coverage_enabled:
+        if compiler_config.coverage_enabled or normalized_options.coverage_enabled:
             config["coverage"] = "1"
         config["mcdc_mode"] = mcdc_mode_name(compiler_config.mcdc_mode)
         config["mcdc_owner_bytes"] = compiler_config.mcdc_owner_bytes.to_text()
@@ -607,20 +608,24 @@ class CompileContext:
         # Standalone native CLI transports its requested mode through the
         # stable text field because the enum field can be corrupted by the
         # aggregate argument copy into this function.
-        var selected_mode_text = options.mode.to_text()
-        if options.cli_mode_text != "":
-            selected_mode_text = options.cli_mode_text
+        var selected_mode_text = normalized_options.mode.to_text()
+        if normalized_options.cli_mode_text != "":
+            selected_mode_text = normalized_options.cli_mode_text
+        # Re-resolve requested target policy before cache/codegen admission.
+        match driver_target_profile_identity_v1(normalized_options):
+            case Ok(identity): config["target_profile_identity_v1"] = identity
+            case Err(reason): config["xray_config_error"] = reason
         # XRay static switch: the single resolution point (driver_xray_policy).
         # Off never writes a key, so the default config is unchanged.
-        if options.xray_enabled:
-            match xray_policy_resolve(true, selected_mode_text, options.backend, options.release, options.output_format.to_text()):
+        if normalized_options.xray_enabled:
+            match xray_policy_resolve(true, selected_mode_text, normalized_options.backend, normalized_options.release, normalized_options.output_format.to_text()):
                 case Ok(_): config["xray"] = "on"
                 case Err(reason): config["xray_config_error"] = reason
         # Observer aspect-param request: same single decision point. Admitted
         # (absent/explicit-Off) writes nothing, so the default config is unchanged.
         if not config.contains_key("xray_config_error"):
-            val observer_error = xray_observer_request_error_for_build(options.aspect_params, options.native_target,
-                (config.get("xray") ?? "") == "on", options.backend)
+            val observer_error = xray_observer_request_error_for_build(normalized_options.aspect_params, normalized_options.native_target,
+                (config.get("xray") ?? "") == "on", normalized_options.backend)
             if observer_error != "":
                 config["xray_config_error"] = observer_error
 
@@ -642,7 +647,7 @@ class CompileContext:
                 target_triple_fn: fn(): "native-jit"
             )
         elif selected_mode_text == "aot":
-            val output = options.output_file ?? _driver_types_default_output(options.input_files)
+            val output = normalized_options.output_file ?? _driver_types_default_output(normalized_options.input_files)
             BackendPort(
                 name: "aot",
                 run_fn: fn(m): k1_jit_lane_process_hir_aot_v1(m, output),
@@ -666,18 +671,18 @@ class CompileContext:
             )
 
         # Setup extensions container for plugin/extension use (Feature 5)
-        val extensions = DiContainer(profile: options.profile, locked: false)
+        val extensions = DiContainer(profile: normalized_options.profile, locked: false)
 
         # Setup logger from env var (SIMPLE_LOG=debug|trace|info|warn|error)
-        val logger = if options.verbose:
+        val logger = if normalized_options.verbose:
             BootLogger(level: 10)  # verbose flag forces debug level
         else:
             BootLogger.from_env()
 
         CompileContext(
             session: build_session_inactive(),
-            options: options,
-            native_target: options.native_target,
+            options: normalized_options,
+            native_target: normalized_options.native_target,
             frontend_advisory_policy: FrontendAdvisoryPreprocessPolicyV1.Reference,
             environment_variant_policy_digest: "",
             environment_variant_frontend_owner_id: 0u64,
@@ -1504,8 +1509,10 @@ class CompileContext:
 # ============================================================================
 
 fn compute_options_hash(opts: CompileOptions) -> CompileOptionsHash:
-    val opt_level = compileoptions_effective_mir_opt_level(opts)
-    compile_options_hash_compute(opts.backend, opt_level, opts.release, opts.debug_info, opts.gc_off, opts.profile, opts.allowed_families, opts.native_libraries, opts.native_library_paths, opts.native_linker_flags, opts.collection_policy, opts.collection_memory_budget_bytes, opts.native_target, representation_contexts_identity_v1(opts.representation_sources), opts.library_mode, opts.xray_enabled)
+    val normalized = compileoptions_normalize_mir_optimization(opts)
+    val opt_level = compileoptions_effective_mir_opt_level(normalized)
+    val target_identity = driver_target_profile_identity_v1(normalized).unwrap_or("invalid-target-profile-v1")
+    compile_options_hash_compute(normalized.backend, opt_level, normalized.release, normalized.debug_info, normalized.gc_off, normalized.profile, normalized.allowed_families, normalized.native_libraries, normalized.native_library_paths, normalized.native_linker_flags, normalized.collection_policy, normalized.collection_memory_budget_bytes, normalized.native_target, representation_contexts_identity_v1(normalized.representation_sources), normalized.library_mode, normalized.xray_enabled, target_identity)
 
 # ============================================================================
 # Exports
