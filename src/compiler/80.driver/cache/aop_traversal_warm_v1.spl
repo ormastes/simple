@@ -1,5 +1,7 @@
+use compiler.loader.traversal_plugin_selection_owner_v1.{traversal_plugin_selection_validate_v1,
+    traversal_plugin_selection_dispatch_v1}
 use compiler.common.cache_contract.traversal_plugin_selection_v1.{TraversalPluginSelectionV1,
-    traversal_selection_identity_v1, traversal_bind_ordered_identity_v1, traversal_delta_equal_v1}
+    traversal_descriptor_identity_v1, traversal_bind_ordered_identity_v1, traversal_delta_equal_v1}
 # Session-local two-phase driver owner. Prepare restores certified baseline
 # before contract validation; finish uses the existing ordered forward weaver.
 use compiler.common.cache_contract.traversal_session_state_v1.{TraversalSessionStateV1}
@@ -23,6 +25,10 @@ use compiler.driver.cache.aop_match_cache_driver_v1.{aop_weave_forward_advice_ca
 use compiler.common.cache_contract.aspect_match_shard_v1.{JoinPointFactV1, DirectoryJoinPointFactsV1}
 use compiler.common.cache_contract.aspect_traversal_v1.{CheckedTraversalPluginV2, TraversalPriorStateV1,
     BuiltinForwardTraversalV1, traversal_dir_view_v1, traversal_prior_v1}
+
+fn _aop_live_selection_identity_v1(selection: TraversalPluginSelectionV1) -> Result<text, text>:
+    val descriptor = traversal_plugin_selection_validate_v1(selection)?
+    traversal_descriptor_identity_v1(descriptor)
 
 struct TraversalBatchDeltaV1:
     priors: [TraversalPriorStateV1]
@@ -83,7 +89,7 @@ fn _aop_traversal_batch_delta_v1(modules: Dict<text, HirModule>,
         if selection != nil:
             val provider = selection.unwrap()
             # Loader validates the live pinned token again on every call.
-            delta = provider.invoke(provider.provider_token, view, selector)?
+            delta = traversal_plugin_selection_dispatch_v1(provider, view, selector)?
             if not traversal_delta_equal_v1(delta, expected):
                 return Err("traversal-provider-delta-mismatch")
         for ids in [delta.weave, delta.reweave, delta.reuse]:
@@ -126,7 +132,7 @@ pub fn aop_traversal_prepare_visit_v1(state: TraversalSessionStateV1,
         modules: Dict<text, HirModule>, snapshots: [DirectoryTldrSourceSnapshotV2],
         selection: TraversalPluginSelectionV1? = nil) -> Result<TraversalVisitPreparationV1?, text>:
     if not state.epoch_admitted or state.source_epoch <= 0: return Err("traversal-lowering-epoch-unavailable")
-    val provider_identity = if selection == nil: "" else: traversal_selection_identity_v1(selection.unwrap())?
+    val provider_identity = if selection == nil: "" else: _aop_live_selection_identity_v1(selection.unwrap())?
     val repeated = state.started_epoch != 0
     val owner_result = _aop_traversal_state_owner_v1(state)
     if owner_result.is_err():
@@ -196,7 +202,7 @@ pub fn aop_traversal_finish_visit_v1(state: TraversalSessionStateV1,
     if state.cache_initialized and
             state.cache_session != aop_traversal_session_id_v1():
         return Err("traversal-session-ended-during-validation")
-    val provider_identity = if selection == nil: "" else: traversal_selection_identity_v1(selection.unwrap())?
+    val provider_identity = if selection == nil: "" else: _aop_live_selection_identity_v1(selection.unwrap())?
     if selection != nil and prepared == nil:
         return Err("traversal-provider-prepared-view-required")
     if prepared != nil and prepared.unwrap().provider_identity != provider_identity:
