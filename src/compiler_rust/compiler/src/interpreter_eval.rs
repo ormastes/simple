@@ -1909,15 +1909,27 @@ fn evaluate_module_items(module_items: ModuleItems<'_>) -> Result<i32, CompileEr
                                 enums.insert(prefixed_name, Arc::clone(&arc_e));
                                 enums.insert(e.name.clone(), arc_e);
 
-                                // Add enum variants to module dict as constructors
+                                // Add enum variants to the module dict: a unit variant
+                                // is its enum value, a payload variant a constructor
+                                // (same rule as `Enum.Variant` in interpreter/expr/calls.rs).
+                                // Storing unit variants as constructors made `X.F32`
+                                // unequal to itself and unmatchable
+                                // (match_on_callable_scrutinee_silently_takes_first_arm_2026-11-14).
                                 for variant in &e.variants {
-                                    module_dict.insert(
-                                        variant.name.clone(),
+                                    let has_fields = variant.fields.as_ref().is_some_and(|f| !f.is_empty());
+                                    let value = if has_fields {
                                         Value::EnumVariantConstructor {
                                             enum_name: e.name.clone(),
                                             variant_name: variant.name.clone(),
-                                        },
-                                    );
+                                        }
+                                    } else {
+                                        Value::Enum {
+                                            enum_name: e.name.clone(),
+                                            variant: variant.name.clone(),
+                                            payload: None,
+                                        }
+                                    };
+                                    module_dict.insert(variant.name.clone(), value);
                                 }
                             }
                             Node::Const(c) => {

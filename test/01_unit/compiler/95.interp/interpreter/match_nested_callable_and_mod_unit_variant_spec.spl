@@ -1,0 +1,165 @@
+# @tag: unit, language, interpreter, enum
+# Bugs: residuals of match_on_callable_scrutinee_silently_takes_first_arm_2026-11-14
+#
+# 1. A NESTED variant-spelled sub-pattern (`case W(I8):`) over a callable
+#    payload bound the callable silently; #9042 only checked the top-level arm.
+#    `name_of(Wrap.W(Vec4f))` answered "i8" with exit 0.
+# 2. Unit variants of an enum declared inside a `mod X:` block were stored in
+#    the module dict as `EnumVariantConstructor`, so `X.F32` was a constructor
+#    value, not an enum value, and a match on it errored.
+#
+# Each case runs a fixture through the compiler binary (`SIMPLE_BINARY` or
+# `bin/simple`) in interpreter mode, because the failure is a process exit.
+use std.spec
+use std.io_runtime.{process_run, file_write, dir_create_all, env_get, env_set}
+
+fn work_dir() -> text:
+    val tmp = env_get("TMPDIR")
+    val root = if tmp != "": tmp else: "/tmp"
+    val dir = root + "/simple-spec-match-nested-callable-mod-unit"
+    dir_create_all(dir)
+    dir
+
+fn run_interp(name: text, source: text) -> (text, text, i64):
+    val path = work_dir() + "/" + name + ".spl"
+    assert_true(file_write(path, source))
+    env_set("SIMPLE_EXECUTION_MODE", "interpret")
+    env_set("SIMPLE_RUST_SEED_WARNING", "0")
+    env_set("SIMPLE_TIMEOUT_SECONDS", "0")
+    val configured = env_get("SIMPLE_BINARY")
+    val bin = if configured == "": "bin/simple" else: configured
+    val ran = process_run(bin, ["run", path])
+    (ran[0].trim(), ran[1], ran[2])
+
+describe "nested variant sub-pattern over a callable payload":
+    it "refuses a constructor payload instead of binding it":
+        val (out, err, rc) = run_interp("nested_ctor", """class Vec4f:
+    x: i64
+
+enum Kind:
+    I8
+    F32
+
+enum Wrap:
+    W(k)
+
+fn name_of(w) -> text:
+    match w:
+        case W(I8): "i8"
+        case W(F32): "f32"
+        case _: "other"
+
+fn main():
+    print(name_of(Wrap.W(Vec4f)))
+""")
+        assert_true(rc != 0)
+        assert_true(out != "i8")
+        assert_true(err.contains("constructor value"))
+        assert_true(err.contains("can never match it"))
+
+    it "refuses a function payload behind Some":
+        val (out, err, rc) = run_interp("nested_fn_some", """enum Kind:
+    I8
+    F32
+
+fn helper() -> i64:
+    1
+
+fn name_of(o) -> text:
+    match o:
+        case Some(I8): "i8"
+        case _: "other"
+
+fn main():
+    print(name_of(Some(helper)))
+""")
+        assert_true(rc != 0)
+        assert_true(out != "i8")
+        assert_true(err.contains("function value"))
+        assert_true(err.contains("can never match it"))
+
+    it "still matches real nested variants and lowercase binders":
+        val (out, err, rc) = run_interp("nested_control", """class Vec4f:
+    x: i64
+
+enum Kind:
+    I8
+    F32
+
+enum Wrap:
+    W(k)
+
+fn name_of(w) -> text:
+    match w:
+        case W(I8): "i8"
+        case W(F32): "f32"
+        case _: "other"
+
+fn bound(w) -> text:
+    match w:
+        case W(f): "bound"
+        case _: "other"
+
+fn either(w) -> text:
+    match w:
+        case W(I8 | f): "either"
+        case _: "other"
+
+fn outer_or(w) -> text:
+    match w:
+        case W(I8) | _: "outer"
+
+fn main():
+    print(name_of(Wrap.W(Kind.F32)))
+    print(name_of(Wrap.W(Kind.I8)))
+    print(bound(Wrap.W(Vec4f)))
+    print(either(Wrap.W(Vec4f)))
+    print(outer_or(Wrap.W(Vec4f)))
+""")
+        assert_equal(rc, 0)
+        assert_equal(out, "f32\ni8\nbound\neither\nouter")
+
+describe "unit variants of an enum declared inside mod":
+    it "are enum values that match their arm":
+        val (out, err, rc) = run_interp("mod_unit", """mod X:
+    enum Kind:
+        I8
+        F32
+        Pay(v: i64)
+
+fn code(k) -> text:
+    match k:
+        case I8: "i8"
+        case F32: "f32"
+        case _: "other"
+
+val f = X.F32
+val i = X.I8
+val same = X.F32 == X.F32
+val differ = X.F32 == X.I8
+print(code(f))
+print(code(i))
+print(same)
+print(differ)
+""")
+        assert_equal(rc, 0)
+        assert_equal(out, "f32\ni8\ntrue\nfalse")
+
+    it "keeps payload variants as constructors and mod constants and fns intact":
+        val (out, err, rc) = run_interp("mod_control", """mod X:
+    enum Kind:
+        I8
+        Pay(v: i64)
+    const LIMIT = 9
+    fn twice(n: i64) -> i64:
+        n * 2
+
+val ctor = X.Pay
+val limit = X.LIMIT
+val doubled = X.twice(4)
+print(ctor)
+print(limit)
+print(doubled)
+""")
+        assert_equal(rc, 0)
+        assert_equal(out, "<enum_variant_constructor>\n9\n8")
