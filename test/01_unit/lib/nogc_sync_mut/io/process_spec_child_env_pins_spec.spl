@@ -1,0 +1,54 @@
+"""
+Purpose and audience: test-runner maintainers. A runner pins
+SIMPLE_EXECUTION_MODE/SIMPLE_RUNTIME_MODE and sets the
+SIMPLE_TEST_CHILD_ENV_SCRUB marker before spawning its spec child. The spec
+child must receive the pins and the marker; only processes spawned by the spec
+child's examples are scrubbed. Bug:
+doc/08_tracking/bug/test_runner_spec_child_loses_mode_pins_2026-11-14.md
+"""
+# @req REQ-SSPEC-UNIT
+
+use std.spec.*
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded_spec_child, _process_run_bounded_raw, _process_run_raw, SIMPLE_TEST_CHILD_ENV_SCRUB_ENV}
+use std.io_runtime.{env_set, env_remove_process}
+
+fn _with_pins_env() -> text:
+    val _ = env_set("SIMPLE_EXECUTION_MODE", "interpret")
+    val _ = env_set("SIMPLE_RUNTIME_MODE", "interpreter")
+    val _ = env_set(SIMPLE_TEST_CHILD_ENV_SCRUB_ENV, "1")
+    ""
+
+fn _clear_marker():
+    val _ = env_remove_process(SIMPLE_TEST_CHILD_ENV_SCRUB_ENV)
+
+describe "spec child env pins":
+    it "keeps both mode pins and the marker for the runner's own spec child":
+        _with_pins_env()
+        val (out, _err, code) = process_run_bounded_spec_child("/usr/bin/env", [], 10000, 1000000)
+        _clear_marker()
+        expect(code).to_equal(0)
+        expect(out).to_contain("SIMPLE_EXECUTION_MODE=interpret")
+        expect(out).to_contain("SIMPLE_RUNTIME_MODE=interpreter")
+        expect(out).to_contain("SIMPLE_TEST_CHILD_ENV_SCRUB=1")
+
+    it "still scrubs pins and marker for example-spawned grandchildren (bounded facade)":
+        _with_pins_env()
+        val (out, _err, code) = _process_run_bounded_raw("/usr/bin/env", [], 10000, 1000000)
+        _clear_marker()
+        expect(code).to_equal(0)
+        assert_false(out.contains("SIMPLE_EXECUTION_MODE="))
+        assert_false(out.contains("SIMPLE_TEST_CHILD_ENV_SCRUB="))
+
+    it "still scrubs for the unbounded facade too":
+        _with_pins_env()
+        val (out, _err, code) = _process_run_raw("/usr/bin/env", [])
+        _clear_marker()
+        expect(code).to_equal(0)
+        assert_false(out.contains("SIMPLE_RUNTIME_MODE="))
+
+    it "restores the caller's pins after a scrubbing spawn":
+        _with_pins_env()
+        val _ = _process_run_bounded_raw("/usr/bin/env", [], 10000, 1000000)
+        val (out, _err, _code) = process_run_bounded_spec_child("/usr/bin/env", [], 10000, 1000000)
+        _clear_marker()
+        expect(out).to_contain("SIMPLE_EXECUTION_MODE=interpret")
