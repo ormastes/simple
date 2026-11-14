@@ -360,6 +360,7 @@ fn flat_ast_to_module(path: text) -> ParserModule:
     var exports: [Export] = []
     var domain_blocks: [DomainBlock] = []
     var manifest_facts = ParserManifestVisibilityV1()
+    var manifest_child_ids: [i64] = []
     var impls: [Impl] = []
     var aop_advices: [AopAdvice] = []
     var di_bindings: [DiBinding] = []
@@ -1128,6 +1129,7 @@ fn flat_ast_to_module(path: text) -> ParserModule:
                 else:
                     manifest_facts.child_names.push(child_name)
                     manifest_facts.child_visibilities.push(decl_get_visibility_text(idx))
+                    manifest_child_ids.push(idx)
             val items_list = decl_get_imports(idx)
             var import_items: [ImportItem] = []
             var ii = 0
@@ -1394,7 +1396,6 @@ fn flat_ast_to_module(path: text) -> ParserModule:
     if parser_has_errors():
         manifest_facts.valid = false
         decl_manifest_roles_refuse_v1()
-    built_module.manifest_visibility_v1 = manifest_facts
     built_module.function_headers = function_headers
     built_module.nogc_strict = module_nogc_strict
     built_module.required_init_mode = module_required_init_mode
@@ -1402,6 +1403,29 @@ fn flat_ast_to_module(path: text) -> ParserModule:
     built_module.representation_declarations = representation_parser_metadata_v1()
     built_module.source_declaration_intents_v1 = flat_project_declaration_intents_v1(declaration_target_ids)
     built_module.source_declaration_digest_v1 = parser_top_level_visibility_source_digest_v1()
+    # Exact modifier comes from the source-bound raw declaration observation,
+    # not the legacy visibility string (private conflates omitted and pri).
+    var manifest_intent_rows: Dict<i64, i64> = {}
+    val manifest_intents = built_module.source_declaration_intents_v1
+    for row_index in 0..manifest_intents.len():
+        val raw_id = manifest_intents[row_index].raw_decl_id
+        if manifest_intent_rows.contains_key(raw_id):
+            manifest_intent_rows[raw_id] = -1
+        else:
+            manifest_intent_rows[raw_id] = row_index
+    for child_id in manifest_child_ids:
+        var modifier = "unknown"
+        var matched = false
+        if manifest_intent_rows.contains_key(child_id):
+            val row_index = manifest_intent_rows[child_id]
+            if row_index >= 0:
+                val observation = manifest_intents[row_index]
+                if observation.decl_kind == 6 and observation.decl_name == decl_get_name(child_id):
+                    modifier = observation.modifier
+                    matched = true
+        if not matched: manifest_facts.valid = false
+        manifest_facts.child_modifiers.push(modifier)
+    built_module.manifest_visibility_v1 = manifest_facts
     if flat_bridge_trace_enabled():
         print "[flat-bridge] built frontend module path={path}"
     frontend_compiler_trace_scope_exit(saved_compiler_trace_scope)

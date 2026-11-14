@@ -1,3 +1,8 @@
+use compiler.common.cache.visibility_manifest_policy_v1.{VisibilityManifestPolicyV1}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded}
+use compiler.driver.driver_entry_closure_core.{DriverEntryResolverIndexV1,
+    DriverEntryResolverOutcomeV1, DriverEntryResolverSelectionKindV1,
+    driver_entry_resolver_index_prepare_v1, driver_resolve_relative_entry_import_indexed_v1}
 use compiler.common.cache.visibility_manifest_read_v1.{VisibilityManifestReadV1,
     VisibilityManifestEvidenceV1, visibility_manifest_reads_v1}
 use compiler.common.driver_source_file.{source_file_with_manifest_evidence_v1}
@@ -48,7 +53,7 @@ use compiler.driver.driver_source_loading.{
 use compiler.driver.driver_preclosed_source_aliases.{driver_preclosed_source_aliases_v1}
 use compiler.common.library_mode_policy_v1.{library_mode_closure_digest_v1,
     library_mode_options_error_v1, library_mode_import_key_v1}
-use compiler.driver.driver_library_mode_resolution_v1.{driver_library_mode_selected_v1,
+use compiler.driver.driver_library_mode_resolution_v1.{driver_library_mode_selected_v1, driver_library_mode_resolve_v1,
     driver_library_mode_native_owner_v1}
 use compiler.driver.driver_phase_gates.{driver_explicit_source_entry}
 use compiler.driver.driver_build.native_group_request.{native_group_request_path_v1,
@@ -144,7 +149,8 @@ fn driver_visibility_evidence_copy_v1(source: VisibilityManifestEvidenceV1) -> V
             driver_source_owner_text_copy(row.snapshot_id)))
     VisibilityManifestEvidenceV1(root: driver_source_owner_text_copy(source.root),
         snapshot_id: driver_source_owner_text_copy(source.snapshot_id),
-        complete: source.complete, reason: driver_source_owner_text_copy(source.reason), reads: rows)
+        complete: source.complete, reason: driver_source_owner_text_copy(source.reason),
+        reads: rows, policies: source.policies)
 
 fn _driver_source_has_rt_annotation(content: text) -> bool:
     # `@rt` is common in attribute documentation. Parse only a genuine
@@ -171,6 +177,60 @@ fn _driver_source_has_rt_annotation(content: text) -> bool:
     false
 
 impl CompilerDriver:
+    # Positive manifests are authenticated policy inputs, not implicit compile
+    # dependencies. Their ordinary imports are never walked by this producer.
+    me load_visibility_manifest_policy_v1(observation: VisibilityManifestReadV1,
+            coverage_root: text, index: DriverEntryResolverIndexV1, selected: Dict<text, text>
+    ) -> Result<VisibilityManifestPolicyV1, text>:
+        val path = observation.manifest_path
+        if not observation.exists or path != observation.directory_path + "/__init__.spl" or
+                not path.starts_with(coverage_root + "/") or observation.snapshot_id == "" or
+                observation.snapshot_id != index.snapshot_id or
+                not coverage_root.starts_with(index.snapshot_root + "/") or
+                not selected.contains_key(path) or selected[path] != observation.content_sha256:
+            return Err("manifest policy snapshot membership missing: " + path)
+        val read = file_read_regular_no_follow_bounded(path, 64 * 1024 * 1024)
+        if read.is_err(): return Err("manifest policy source unreadable: " + path)
+        val content = read.unwrap()
+        if sha256_text(content) != observation.content_sha256:
+            return Err("manifest policy source digest mismatch: " + path)
+        # Policy projection never reads alias/import owners; the existing lexical
+        # module label is only frontend context, never a permission target.
+        val module_name = _driver_module_name_from_path(path)
+        val parsed = self.parse_visibility_manifest_policy_v1(content, observation, coverage_root, module_name)
+        if parsed.is_err(): return Err(parsed.unwrap_err())
+        val policy = parsed.unwrap()
+        # The production planner observes only the admitted complete inventory.
+        # Exact winner path/digest must also belong to this selected snapshot.
+        for child in policy.child_names:
+            var target = ""
+            var digest = ""
+            var kind = ""
+            var outcome = "missing"
+            val resolved = driver_resolve_relative_entry_import_indexed_v1(
+                "." + child, observation.directory_path, index)
+            match resolved:
+                case Err(reason): outcome = "resolver-error:" + reason
+                case Ok(selection):
+                    match selection:
+                        case DriverEntryResolverOutcomeV1.Missing: ()
+                        case DriverEntryResolverOutcomeV1.Ambiguous(reason): outcome = "ambiguous:" + reason
+                        case DriverEntryResolverOutcomeV1.Found(found):
+                            if selected.contains_key(found.path) and selected[found.path] == found.digest:
+                                target = found.path
+                                digest = found.digest
+                                kind = match found.kind:
+                                    case DriverEntryResolverSelectionKindV1.SourceFile: "source-file"
+                                    case DriverEntryResolverSelectionKindV1.DirectoryInterface: "directory-interface"
+                                outcome = "snapshot-selected"
+                            else:
+                                outcome = "outside-snapshot"
+            policy.child_target_paths = policy.child_target_paths.push(target)
+            policy.child_target_sha256 = policy.child_target_sha256.push(digest)
+            policy.child_target_kinds = policy.child_target_kinds.push(kind)
+            policy.child_resolution_outcomes = policy.child_resolution_outcomes.push(outcome)
+        Ok(policy)
+
     # --------------------------------------------------------------------------
     # Phase 1: Load sources (with optional cache-aware skipping)
     # --------------------------------------------------------------------------
@@ -281,7 +341,9 @@ impl CompilerDriver:
         var admitted_preclosed: NativeEntryClosureSelectionV1? = nil
         var preclosed_snapshot_root = ""
         var visibility_inventory: Dict<text, text> = {}
+        var visibility_snapshot_selected: Dict<text, text> = {}
         var visibility_snapshot_id = ""
+        var visibility_resolver_index: DriverEntryResolverIndexV1? = nil
         var preclosed_row_by_identity: Dict<text, i64> = {}
         # Nil guard, not `if val`: binding a struct-payload optional that is nil
         # copied a payload out of nil on the native lane (SEGV in
@@ -314,7 +376,15 @@ impl CompilerDriver:
                 driver_entry_scan_cache_release()
                 return (self.ctx, false)
             visibility_inventory = manifest_maps.unwrap().0
+            visibility_snapshot_selected = manifest_maps.unwrap().1
             visibility_snapshot_id = request.snapshot.revision_id + ":" + request.snapshot.inventory_digest
+            val prepared_visibility_index = driver_entry_resolver_index_prepare_v1(
+                preclosed_snapshot_root, visibility_snapshot_id, visibility_inventory)
+            if prepared_visibility_index.is_err():
+                self.ctx.add_error(prepared_visibility_index.unwrap_err())
+                driver_entry_scan_cache_release()
+                return (self.ctx, false)
+            visibility_resolver_index = Some(prepared_visibility_index.unwrap())
             driver_inputs = []
             var selected_row = 0
             for identity in selected.unwrap().identities:
@@ -1426,24 +1496,53 @@ impl CompilerDriver:
         self.ctx.source_content_hashes_owner = owned_content_hashes
         self.ctx.source_identities_owner = owned_identities
         self.ctx.source_module_names_owner = owned_module_names
-        # Freeze negative reads only under the authenticated complete inventory.
-        # The positive map below comes from actual byte-checked loaded sources,
-        # so a manifest omitted from the worker selection cannot authorize use.
-        var visibility_selected: Dict<text, text> = {}
-        for source_row in 0..owned_paths.len():
-            visibility_selected[owned_paths[source_row]] = owned_identities[source_row]
+        # The complete inventory proves negatives. Positive policy source
+        # bytes are bounded-read and SHA-checked independently of compile
+        # sources, then parsed once and shared through reference owners.
+        if visibility_snapshot_id != "":
+            for source_row in 0..owned_paths.len():
+                val path = owned_paths[source_row]
+                if not visibility_snapshot_selected.contains_key(path) or
+                        visibility_snapshot_selected[path] != owned_identities[source_row]:
+                    self.ctx.add_error("manifest observation source digest mismatch: " + path)
+                    driver_entry_scan_cache_release()
+                    return (self.ctx, false)
+        var visibility_policies: Dict<text, VisibilityManifestPolicyV1> = {}
         var visibility_evidence: [VisibilityManifestEvidenceV1] = []
         for source_row in 0..owned_paths.len():
             var evidence = VisibilityManifestEvidenceV1()
             if visibility_snapshot_id != "":
                 val observed = visibility_manifest_reads_v1(owned_paths[source_row],
                     preclosed_snapshot_root, owned_resolution_roots, visibility_snapshot_id,
-                    visibility_inventory, visibility_selected)
+                    visibility_inventory, visibility_snapshot_selected)
                 if observed.is_err():
                     self.ctx.add_error(observed.unwrap_err())
                     driver_entry_scan_cache_release()
                     return (self.ctx, false)
-                evidence = driver_visibility_evidence_copy_v1(observed.unwrap())
+                val observations = observed.unwrap()
+                for row in observations.reads:
+                    if not row.exists: continue
+                    if not visibility_policies.contains_key(row.manifest_path):
+                        if visibility_resolver_index == nil:
+                            self.ctx.add_error("manifest resolver index unavailable")
+                            driver_entry_scan_cache_release()
+                            return (self.ctx, false)
+                        val loaded = self.load_visibility_manifest_policy_v1(row,
+                            observations.root, visibility_resolver_index!, visibility_snapshot_selected)
+                        if loaded.is_err():
+                            self.ctx.add_error(loaded.unwrap_err())
+                            driver_entry_scan_cache_release()
+                            return (self.ctx, false)
+                        visibility_policies[row.manifest_path] = loaded.unwrap()
+                    val policy = visibility_policies[row.manifest_path]
+                    if policy.content_sha256 != row.content_sha256 or
+                            policy.snapshot_id != row.snapshot_id or policy.coverage_root != observations.root or
+                            policy.directory_path != row.directory_path:
+                        self.ctx.add_error("manifest policy observation join mismatch: " + row.manifest_path)
+                        driver_entry_scan_cache_release()
+                        return (self.ctx, false)
+                    observations.policies = observations.policies.push(policy)
+                evidence = driver_visibility_evidence_copy_v1(observations)
             visibility_evidence.push(evidence)
             all_sources[source_row] = source_file_with_manifest_evidence_v1(all_sources[source_row], evidence)
         self.ctx.source_manifest_evidence_owner_v1 = visibility_evidence

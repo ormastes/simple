@@ -1,3 +1,4 @@
+use compiler.common.cache.visibility_manifest_policy_v1.{VisibilityManifestPolicyV1}
 use compiler.common.source_inventory_families_v1.{compiler_inventory_family_v1}
 # Source observations. A complete readset is issued only by an authenticated
 # inventory owner; neither an empty list nor live filesystem absence is proof.
@@ -18,6 +19,7 @@ pub class VisibilityManifestEvidenceV1:
     complete: bool = false
     reason: text = "authority-unavailable"
     reads: [VisibilityManifestReadV1] = []
+    policies: [VisibilityManifestPolicyV1] = []
 
 pub fn visibility_manifest_path_valid_v1(path: text) -> bool:
     if path == "" or path.contains("\\") or path.contains("\n") or path.contains("\r"):
@@ -42,9 +44,9 @@ pub fn visibility_manifest_parent_v1(path: text) -> text:
 
 # Pure projection under a caller-owned complete inventory. Both maps use exact
 # canonical absolute spelling. `inventory` is the complete source universe;
-# `selected` only proves positive membership in this frozen compilation.
-# Overlapping declared roots choose the outer root so adding a nested source
-# selector cannot silently discard an already observed ancestor.
+# `selected` only proves positive membership in this frozen snapshot.
+# Declared roots retain routing provenance. Observation always reaches the
+# complete canonical inventory family, including ancestors above those roots.
 pub fn visibility_manifest_reads_v1(source: text, snapshot_root: text,
         roots: [text], snapshot_id: text, inventory: Dict<text, text>,
         selected: Dict<text, text>) -> Result<VisibilityManifestEvidenceV1, text>:
@@ -55,22 +57,19 @@ pub fn visibility_manifest_reads_v1(source: text, snapshot_root: text,
     if not inventory.contains_key(source) or inventory[source] != selected[source] or
             not builder_digest_valid_v1(selected[source]):
         return Err("visibility-manifest-source-inventory-mismatch")
-    var declared_root = ""
+    if roots.len() == 0: return Err("visibility-manifest-source-root-missing")
     for candidate in roots:
         if not visibility_manifest_path_valid_v1(candidate) or
                 not candidate.starts_with(snapshot_root + "/"):
             return Err("visibility-manifest-root-invalid")
-        val root = if candidate.ends_with(".spl"): visibility_manifest_parent_v1(candidate) else: candidate
-        if source.starts_with(root + "/") and (declared_root == "" or root.len() < declared_root.len()):
-            declared_root = root
-    if declared_root == "": return Err("visibility-manifest-source-root-missing")
-    # Canonical event families are directory-complete by their inventory
-    # owner contract. Extra file/directory selectors currently carry no sealed
-    # coverage receipt: their missing rows are unknown, never negative proof.
-    if declared_root == snapshot_root or compiler_inventory_family_v1(
-            declared_root.substring(snapshot_root.byte_len() + 1)) == "":
-        return Ok(VisibilityManifestEvidenceV1(root: declared_root,
-            snapshot_id: snapshot_id, complete: false, reason: "extra-family-coverage-unproven", reads: []))
+    # Routing selectors do not terminate visibility ancestry. The actual
+    # inventory producer guarantees complete observation through its canonical
+    # family root, including ancestors above a narrow --source selector.
+    val family = compiler_inventory_family_v1(source.substring(snapshot_root.byte_len() + 1))
+    if family == "":
+        return Ok(VisibilityManifestEvidenceV1(snapshot_id: snapshot_id,
+            complete: false, reason: "extra-family-coverage-unproven", reads: []))
+    val declared_root = snapshot_root + "/" + family
     var reads: [VisibilityManifestReadV1] = []
     var directory = visibility_manifest_parent_v1(source)
     while directory != "":

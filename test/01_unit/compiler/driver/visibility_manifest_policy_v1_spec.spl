@@ -1,0 +1,223 @@
+"""
+Actual policy-only driver parser/read/resolver regressions. Authored UNRUN;
+fixture maps test positive byte binding, not SCV authentication or permission
+admission. The production owner supplies authenticated snapshot maps.
+"""
+use std.spec.*
+use app.io.file_ops.{path_absolute}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded}
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.cache.visibility_manifest_read_v1.{VisibilityManifestReadV1, visibility_manifest_parent_v1}
+use compiler.driver.driver_types.{CompileContext}
+use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.driver.driver_source_pipeline_loading.*
+use compiler.driver.driver_entry_closure_core.{DriverEntryResolverIndexV1,
+    driver_entry_resolver_index_prepare_v1}
+use compiler.driver.driver_source_parse_selected.*
+use compiler.common.driver_compile_options.{driver_core_compile_options_default}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.common.config.{Logger}
+
+fn policy_fixture_path_v1(relative: text) -> text:
+    path_absolute("test/fixtures/visibility_manifest_policy_v1/" + relative).replace("\\", "/")
+
+fn policy_fixture_text_v1(path: text) -> text:
+    val read = file_read_regular_no_follow_bounded(path, 1024 * 1024)
+    expect(read.is_ok()).to_equal(true)
+    read.unwrap()
+
+fn policy_fixture_observation_v1(path: text) -> VisibilityManifestReadV1:
+    val body = policy_fixture_text_v1(path)
+    VisibilityManifestReadV1(path, visibility_manifest_parent_v1(path), path,
+        true, sha256_text(body), "test-positive-input")
+
+# Contract records are supplied to the actual indexed resolver. This helper
+# does not claim these unit inputs were authenticated by SCV.
+fn policy_fixture_index_v1(complete: Dict<text, text>) -> DriverEntryResolverIndexV1:
+    val prepared = driver_entry_resolver_index_prepare_v1(path_absolute("."),
+        "test-positive-input", complete)
+    expect(prepared.is_ok()).to_equal(true)
+    prepared.unwrap()
+
+fn policy_fixture_driver_v1() -> CompilerDriver:
+    CompilerDriver(ctx: CompileContext.create(driver_core_compile_options_default()))
+
+describe "REQ-VIS-MANIFEST policy-only actual parser":
+    it "retains comments-only present policy after scratch closes without implicit openness":
+        val path = policy_fixture_path_v1("closed/__init__.spl")
+        val observation = policy_fixture_observation_v1(path)
+        val selected: Dict<text, text> = {path: observation.content_sha256}
+        val driver = policy_fixture_driver_v1()
+        val before = driver.ctx.sources.len()
+        val result = driver.load_visibility_manifest_policy_v1(observation,
+            path_absolute("test"), policy_fixture_index_v1(selected), selected)
+        expect(result.is_ok()).to_equal(true)
+        val policy = result.unwrap()
+        expect(policy.valid).to_equal(true)
+        expect(policy.has_arch).to_equal(false)
+        expect(policy.child_names.len()).to_equal(0)
+        expect(policy.content_sha256).to_equal(sha256_text(policy_fixture_text_v1(path)))
+        expect(policy.directory_path).to_equal(visibility_manifest_parent_v1(path))
+        expect(policy.frontend_identity == "").to_equal(false)
+        expect(policy.parser_provider_id).to_equal("parser.simple.legacy-reference")
+        expect(policy.frontend_route).to_equal("advisory-selected")
+        expect(policy.advisory_policy).to_equal("reference")
+        expect(policy.advisory_identity).to_equal(driver.ctx.environment_variant_frontend_cache_identity)
+        expect(policy.target_triple).to_equal(driver.ctx.native_target)
+        expect(policy.cfg_receipt_present).to_equal(false)
+        val parsed_source = parse_full_frontend(policy_fixture_text_v1(path), path, "closed", Logger(level: 0))
+        expect(policy.preprocessed_source_sha256).to_equal(parsed_source.source_declaration_digest_v1)
+        expect(driver.ctx.sources.len()).to_equal(before)
+        step("Parse a second policy to prove the first owns its text after scratch reset")
+        val alias_path = policy_fixture_path_v1("alias/__init__.spl")
+        val alias_observation = policy_fixture_observation_v1(alias_path)
+        val alias_selected: Dict<text, text> = {alias_path: alias_observation.content_sha256}
+        expect(driver.load_visibility_manifest_policy_v1(alias_observation,
+            path_absolute("test"), policy_fixture_index_v1(alias_selected), alias_selected).is_ok()).to_equal(true)
+        expect(policy.source_path).to_equal(path)
+        expect(policy.child_names.len()).to_equal(0)
+        expect(policy.valid).to_equal(true)
+
+    it "refuses numbered selection without authenticated directory coverage":
+        val path = policy_fixture_path_v1("open/__init__.spl")
+        val child = policy_fixture_path_v1("open/02.child/__init__.spl")
+        val observation = policy_fixture_observation_v1(path)
+        val selected: Dict<text, text> = {path: observation.content_sha256,
+            child: sha256_text(policy_fixture_text_v1(child))}
+        val driver = policy_fixture_driver_v1()
+        val before = driver.ctx.sources.len()
+        val result = driver.load_visibility_manifest_policy_v1(observation,
+            path_absolute("test"), policy_fixture_index_v1(selected), selected)
+        expect(result.is_ok()).to_equal(true)
+        val policy = result.unwrap()
+        expect(policy.child_names).to_equal(["child"])
+        expect(policy.child_visibilities).to_equal(["public"])
+        expect(policy.child_modifiers).to_equal(["pub"])
+        expect(policy.child_target_paths).to_equal([""])
+        expect(policy.child_target_sha256).to_equal([""])
+        expect(policy.child_target_kinds).to_equal([""])
+        expect(policy.child_resolution_outcomes).to_equal(["ambiguous:ENTRY_RESOLVER_INDEX_DIRECTORY_COVERAGE_UNAVAILABLE"])
+        step("The unrelated imported/exported implementation never becomes a compile source")
+        expect(driver.ctx.sources.len()).to_equal(before)
+
+    it "retains no target when a real resolver result is outside admitted snapshot membership":
+        val path = policy_fixture_path_v1("file/__init__.spl")
+        val observation = policy_fixture_observation_v1(path)
+        val selected: Dict<text, text> = {path: observation.content_sha256}
+        val child = policy_fixture_path_v1("file/sibling.spl")
+        val complete: Dict<text, text> = {path: observation.content_sha256,
+            child: sha256_text(policy_fixture_text_v1(child))}
+        val driver = policy_fixture_driver_v1()
+        val result = driver.load_visibility_manifest_policy_v1(observation,
+            path_absolute("test"), policy_fixture_index_v1(complete), selected)
+        expect(result.is_ok()).to_equal(true)
+        expect(result.unwrap().child_target_paths).to_equal([""])
+        expect(result.unwrap().child_target_sha256).to_equal([""])
+        expect(result.unwrap().child_target_kinds).to_equal([""])
+        expect(result.unwrap().child_resolution_outcomes).to_equal(["outside-snapshot"])
+
+    it "does not turn a metadata-only named export into a direct child permission":
+        val path = policy_fixture_path_v1("alias/__init__.spl")
+        val observation = policy_fixture_observation_v1(path)
+        val selected: Dict<text, text> = {path: observation.content_sha256}
+        val driver = policy_fixture_driver_v1()
+        val result = driver.load_visibility_manifest_policy_v1(observation,
+            path_absolute("test"), policy_fixture_index_v1(selected), selected)
+        expect(result.is_ok()).to_equal(true)
+        expect(result.unwrap().child_names.len()).to_equal(0)
+        expect(result.unwrap().child_target_paths.len()).to_equal(0)
+        step("An actually selected facade still exposes its real named import/export rows")
+        val ordinary = parse_full_frontend(policy_fixture_text_v1(path), path, "alias", Logger(level: 0))
+        expect(ordinary.imports[0].items[0].name).to_equal("value")
+        expect(ordinary.imports[0].items[0].alias).to_equal("exposed")
+        expect(ordinary.exports[0].items).to_equal(["exposed"])
+
+    it "refuses a substituted policy digest before parsing and remains usable afterward":
+        val path = policy_fixture_path_v1("closed/__init__.spl")
+        var observation = policy_fixture_observation_v1(path)
+        observation.content_sha256 = sha256_text("pub mod child\n")
+        val selected: Dict<text, text> = {path: observation.content_sha256}
+        val driver = policy_fixture_driver_v1()
+        val result = driver.load_visibility_manifest_policy_v1(observation,
+            path_absolute("test"), policy_fixture_index_v1(selected), selected)
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_contain("digest mismatch")
+        val actual = policy_fixture_observation_v1(path)
+        val actual_selected: Dict<text, text> = {path: actual.content_sha256}
+        expect(driver.load_visibility_manifest_policy_v1(actual,
+            path_absolute("test"), policy_fixture_index_v1(actual_selected), actual_selected).is_ok()).to_equal(true)
+
+    it "closes policy parser scratch after a real syntax error before the next parse":
+        val broken = policy_fixture_path_v1("malformed/__init__.spl")
+        val broken_observation = policy_fixture_observation_v1(broken)
+        val broken_selected: Dict<text, text> = {broken: broken_observation.content_sha256}
+        val driver = policy_fixture_driver_v1()
+        expect(driver.load_visibility_manifest_policy_v1(broken_observation,
+            path_absolute("test"), policy_fixture_index_v1(broken_selected), broken_selected).is_err()).to_equal(true)
+        val valid_path = policy_fixture_path_v1("closed/__init__.spl")
+        val valid_observation = policy_fixture_observation_v1(valid_path)
+        val valid_selected: Dict<text, text> = {valid_path: valid_observation.content_sha256}
+        val valid_result = driver.load_visibility_manifest_policy_v1(valid_observation,
+            path_absolute("test"), policy_fixture_index_v1(valid_selected), valid_selected)
+        expect(valid_result.is_ok()).to_equal(true)
+        expect(valid_result.unwrap().valid).to_equal(true)
+        expect(valid_result.unwrap().source_path).to_equal(valid_path)
+
+    it "retains the actual source-file selection branch separately from a directory interface":
+        val path = policy_fixture_path_v1("file/__init__.spl")
+        val child = policy_fixture_path_v1("file/sibling.spl")
+        val observation = policy_fixture_observation_v1(path)
+        val selected: Dict<text, text> = {path: observation.content_sha256,
+            child: sha256_text(policy_fixture_text_v1(child))}
+        val driver = policy_fixture_driver_v1()
+        val result = driver.load_visibility_manifest_policy_v1(observation,
+            path_absolute("test"), policy_fixture_index_v1(selected), selected)
+        expect(result.is_ok()).to_equal(true)
+        expect(result.unwrap().child_target_paths).to_equal([child])
+        expect(result.unwrap().child_target_kinds).to_equal(["source-file"])
+        expect(result.unwrap().child_resolution_outcomes).to_equal(["snapshot-selected"])
+
+    it "refuses a selected child SHA that differs from the frozen planner winner":
+        val path = policy_fixture_path_v1("file/__init__.spl")
+        val child = policy_fixture_path_v1("file/sibling.spl")
+        val observation = policy_fixture_observation_v1(path)
+        val complete: Dict<text, text> = {path: observation.content_sha256,
+            child: sha256_text(policy_fixture_text_v1(child))}
+        val substituted: Dict<text, text> = {path: observation.content_sha256,
+            child: sha256_text("pub fn substituted(): 0\n")}
+        val driver = policy_fixture_driver_v1()
+        val result = driver.load_visibility_manifest_policy_v1(observation,
+            path_absolute("test"), policy_fixture_index_v1(complete), substituted)
+        expect(result.is_ok()).to_equal(true)
+        expect(result.unwrap().child_target_paths).to_equal([""])
+        expect(result.unwrap().child_target_sha256).to_equal([""])
+        expect(result.unwrap().child_target_kinds).to_equal([""])
+        expect(result.unwrap().child_resolution_outcomes).to_equal(["outside-snapshot"])
+
+    it "retains a fixed directory-interface branch proved before numbered enumeration":
+        val path = policy_fixture_path_v1("direct/__init__.spl")
+        val child = policy_fixture_path_v1("direct/child/__init__.spl")
+        val observation = policy_fixture_observation_v1(path)
+        val selected: Dict<text, text> = {path: observation.content_sha256,
+            child: sha256_text(policy_fixture_text_v1(child))}
+        val driver = policy_fixture_driver_v1()
+        val result = driver.load_visibility_manifest_policy_v1(observation,
+            path_absolute("test"), policy_fixture_index_v1(selected), selected)
+        expect(result.is_ok()).to_equal(true)
+        expect(result.unwrap().child_target_paths).to_equal([child])
+        expect(result.unwrap().child_target_kinds).to_equal(["directory-interface"])
+        expect(result.unwrap().child_resolution_outcomes).to_equal(["snapshot-selected"])
+
+    it "does not select a real on-disk file absent from the supplied frozen source universe":
+        val path = policy_fixture_path_v1("file/__init__.spl")
+        val child = policy_fixture_path_v1("file/sibling.spl")
+        expect(policy_fixture_text_v1(child)).to_contain("sibling_value")
+        val observation = policy_fixture_observation_v1(path)
+        val selected: Dict<text, text> = {path: observation.content_sha256}
+        val driver = policy_fixture_driver_v1()
+        val result = driver.load_visibility_manifest_policy_v1(observation,
+            path_absolute("test"), policy_fixture_index_v1(selected), selected)
+        expect(result.is_ok()).to_equal(true)
+        expect(result.unwrap().child_target_paths).to_equal([""])
+        expect(result.unwrap().child_resolution_outcomes).to_equal([
+            "ambiguous:ENTRY_RESOLVER_INDEX_DIRECTORY_COVERAGE_UNAVAILABLE"])
