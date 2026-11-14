@@ -196,3 +196,14 @@ canonical codec, ABI/effect and existing-weaver behavior. It is authored but
 **unrun**, so real producer/body-capture runtime qualification remains open.
 The previous descriptor/MIR work package's six attempts remain exhausted;
 these distinct F1 criteria do not reopen or repeat those passing checks.
+
+### Canonical codec blocker discovered before producer execution
+
+The current `hir_canonical_codec_generated_available_v1()` deliberately returns
+false until its own admitted regeneration/golden-byte gate is completed. Thus
+the first cold capture implementation returns unavailable on this base and the
+actual driver safely executes its full-visit fallback. The 13 boundary checks
+do not establish that this production cold path activates. The canonical gate
+is not bypassed or marked passed. A bounded ordinary-codec snapshot alternative
+is under architecture review; it must retain a distinct noncanonical contract
+and cannot claim canonical persistence or baseline restoration.
