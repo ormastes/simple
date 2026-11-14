@@ -1,0 +1,179 @@
+# The driver is the sole publication/allocator owner. Workers only receive
+# validated snapshots; no helper identity is invented by a field consumer.
+use compiler.driver.driver_types.{CompileContext}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+use compiler.common.mir_target_context.{mir_collection_target_is_supported}
+use compiler.hir.hir_definitions.{HirModule}
+use compiler.hir.hir_codec.{hir_module_encode_canonical}
+use compiler.mir.mir_instructions.{MirModule}
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLoweringExpr.accessor_sites_v1.*
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir.mir_accessor_plan_set_v1.*
+use compiler.mir.mir_accessor_plan_v1.{MirAccessorOperationV1}
+use compiler.driver.driver_accessor_freeze_v1.{accessor_helper_key_v1}
+use compiler.driver.cache.action_key.{canon_str, canon_nat, canon_field, canon_seq, action_key_sort_texts}
+use compiler.frontend.core.aop_predicate_parser.{aop_predicate_tokens}
+use std.common.crypto.sha256.{sha256_text}
+
+pub fn driver_accessor_inventory_has_requests_v1(ctx: CompileContext) -> bool:
+    for module_name in ctx.hir_modules.keys():
+        val module = ctx.hir_modules[module_name]
+        for advice in module.aop_advices:
+            val tokens = aop_predicate_tokens(advice.predicate_text)
+            for index in 0..tokens.len():
+                if index + 1 < tokens.len() and tokens[index + 1] == "(" and
+                        (tokens[index] == "get" or tokens[index] == "set"):
+                    return true
+    false
+
+# Called once by the coordinator before canonical HIR snapshots and before
+# worker fork. Reserve allocator space too, so later synthetic/lambda symbols
+# cannot collide with helpers even if they were absent at selection time.
+pub fn driver_reserve_accessor_symbols_v1(ctx: CompileContext, count: i64) -> Result<i64, text>:
+    if count < 0: return Err("E-AOP-FIELD-SYMBOL: negative helper reservation")
+    var first = 0
+    for module_name in ctx.hir_modules.keys():
+        val module = ctx.hir_modules[module_name]
+        if module.symbols.next_symbol_id > first: first = module.symbols.next_symbol_id
+    if first < 0 or count > 9223372036854775807 - first:
+        return Err("E-AOP-FIELD-SYMBOL: helper symbol reservation exhausted")
+    if count == 0: return Ok(first)
+    val limit = first + count
+    for module_name in ctx.hir_modules.keys():
+        val module = ctx.hir_modules[module_name]
+        module.symbols.next_symbol_id = limit
+    Ok(first)
+
+fn driver_accessor_source_identity_v1(ctx: CompileContext, name: text) -> Result<text, text>:
+    var identity = ""
+    for index in 0..ctx.source_module_names_owner.len():
+        if ctx.source_module_names_owner[index] == name:
+            if index >= ctx.source_identities_owner.len() or ctx.source_identities_owner[index] == "":
+                return Err("E-AOP-FIELD-SNAPSHOT: source identity is unavailable")
+            val found = ctx.source_identities_owner[index]
+            if identity != "" and identity != found:
+                return Err("E-AOP-FIELD-SNAPSHOT: module has ambiguous source identity")
+            identity = found
+    if identity == "": return Err("E-AOP-FIELD-SNAPSHOT: no admitted source owns the plan module")
+    Ok(identity)
+
+pub fn driver_accessor_plan_digest_v1(plan: AccessorPlanSetV1) -> text:
+    var functions: [text] = []
+    for function in plan.covered_functions:
+        functions.push(canon_seq([canon_str(function.canonical_identity), canon_nat(function.symbol.id)]))
+    var helpers: [text] = []
+    for helper in plan.helpers:
+        val actual_key = match accessor_helper_key_v1(helper.plan):
+            case Ok(key): canon_field("resolved", canon_str(key))
+            case Err(message): canon_field("invalid", canon_str(message))
+        var advice_symbols: [text] = []
+        for advice in helper.plan.ordered_advice:
+            advice_symbols.push(canon_nat(advice.symbol.id))
+        helpers.push(canon_seq([canon_str(helper.canonical_key), actual_key,
+            canon_str(helper.content_digest), canon_str(helper.helper_name),
+            canon_nat(helper.helper_symbol.id), canon_str(helper.emission_owner),
+            canon_nat(helper.plan.declaration.owner_symbol.id),
+            canon_nat(helper.plan.declaration.field_symbol.id), canon_seq(advice_symbols)]))
+    var sites: [text] = []
+    for row in plan.sites:
+        val operation_tag = match row.site.operation:
+            case MirAccessorOperationV1.Read: "read"
+            case MirAccessorOperationV1.Write: "write"
+        val decision = match row.decision:
+            case AccessorSiteDecisionV1.Unmatched: canon_field("unmatched", "")
+            case AccessorSiteDecisionV1.Unsupported(message): canon_field("unsupported", canon_str(message))
+            case AccessorSiteDecisionV1.Prepared(index):
+                if index >= 0 and index < plan.helpers.len():
+                    canon_field("prepared", canon_str(plan.helpers[index].canonical_key))
+                else: canon_field("invalidHelperIndex", canon_nat(index))
+        sites.push(canon_seq([canon_str(row.site.module_identity), canon_str(row.site.function_identity),
+            canon_nat(row.site.start), canon_nat(row.site.end), canon_nat(row.site.line), canon_nat(row.site.col),
+            canon_str(operation_tag), decision]))
+    sha256_text(canon_field("simple/accessor-plan-set/v1", canon_seq([
+        canon_str(plan.source_snapshot), canon_str(plan.hir_snapshot), canon_str(plan.module_identity),
+        canon_seq(action_key_sort_texts(functions)), canon_seq(action_key_sort_texts(helpers)),
+        canon_seq(action_key_sort_texts(sites))])))
+
+pub fn driver_publish_accessor_plans_v1(ctx: CompileContext, plans: [AccessorPlanSetV1]) -> Result<bool, text>:
+    ctx.accessor_plan_sets_v1 = {}
+    ctx.accessor_inventory_checked_v1 = false
+    ctx.accessor_no_field_aspects_v1 = false
+    # Conservative explicit admission; auto/default backend resolution is not
+    # evidence that an arbitrary serializer preserves private MIR bindings.
+    if plans.len() > 0:
+        val target = driver_mir_target_context(ctx.options)
+        if ctx.options.backend != "llvm" or target.backend != "llvm" or target.os != "linux" or not mir_collection_target_is_supported(target):
+            return Err("E-AOP-FIELD-TRANSPORT: accessor plans require admitted LLVM Linux target context")
+    var published: Dict<text, AccessorPlanSetV1> = {}
+    var helpers_by_name: Dict<text, AccessorPreparedHelperV1> = {}
+    var definition_counts: Dict<text, i64> = {}
+    for draft in plans:
+        val plan = AccessorPlanSetV1(..draft, plan_digest: driver_accessor_plan_digest_v1(draft))
+        val checked = accessor_plan_set_validate_v1(plan)?
+        if published.has(plan.module_identity) or not ctx.hir_modules.has(plan.module_identity):
+            return Err("E-AOP-FIELD-PUBLISH: duplicate or unavailable module owner")
+        val source_identity = driver_accessor_source_identity_v1(ctx, plan.module_identity)?
+        if plan.source_snapshot != source_identity:
+            return Err("E-AOP-FIELD-SNAPSHOT: source changed before plan publication")
+        val module = ctx.hir_modules[plan.module_identity]
+        val encoded = match hir_module_encode_canonical(module):
+            case Ok(bytes): bytes
+            case Err(_): return Err("E-AOP-FIELD-SNAPSHOT: canonical HIR encoding refused publication")
+        if sha256_text(encoded) != plan.hir_snapshot:
+            return Err("E-AOP-FIELD-SNAPSHOT: HIR changed before plan publication")
+        for helper in plan.helpers:
+            val key = accessor_helper_key_v1(helper.plan)?
+            val digest = sha256_text(key)
+            if key != helper.canonical_key or digest != helper.content_digest or
+                    helper.helper_name != "__simple_accessor_" + digest:
+                return Err("E-AOP-FIELD-KEY: helper key/index differs from its resolved typed plan")
+            if helpers_by_name.has(helper.helper_name):
+                val prior = helpers_by_name[helper.helper_name]
+                if prior.canonical_key != helper.canonical_key or prior.helper_symbol.id != helper.helper_symbol.id or
+                        prior.plan.signature != helper.plan.signature or prior.emission_owner != helper.emission_owner:
+                    return Err("E-AOP-FIELD-PUBLISH: callers disagree on a shared helper identity or signature")
+            else:
+                helpers_by_name[helper.helper_name] = helper
+            if helper.emission_owner == plan.module_identity:
+                definition_counts[helper.helper_name] = (definition_counts[helper.helper_name] ?? 0) + 1
+        published[plan.module_identity] = plan
+    for helper_name in helpers_by_name.keys():
+        val helper = helpers_by_name[helper_name]
+        if (definition_counts[helper_name] ?? 0) != 1:
+            return Err("E-AOP-FIELD-PUBLISH: helper needs exactly one admitted emitting module")
+        for module_name in ctx.hir_modules.keys():
+            val module = ctx.hir_modules[module_name]
+            if module.symbols.symbols.has(helper.helper_symbol.id) or module.symbols.next_symbol_id <= helper.helper_symbol.id:
+                return Err("E-AOP-FIELD-SYMBOL: helper range was not reserved against source and future synthetic symbols")
+    # One assignment publishes a completely checked snapshot. The old plan
+    # was invalidated before validation, so failure cannot retain old advice.
+    ctx.accessor_plan_sets_v1 = published
+    Ok(true)
+
+pub fn driver_lower_module_with_accessors_v1(ctx: CompileContext, mut lowering: MirLowering,
+    module: HirModule, providers: [HirModule], is_entry: bool, module_name: text) -> Result<MirModule, text>:
+    if ctx.accessor_plan_sets_v1.has(module_name):
+        val plan = ctx.accessor_plan_sets_v1[module_name]
+        # Re-derive nested typed content at the driver boundary. DTO/array
+        # sharing is not an immutable-owner guarantee.
+        for helper in plan.helpers:
+            val actual_key = accessor_helper_key_v1(helper.plan)?
+            val actual_digest = sha256_text(actual_key)
+            if actual_key != helper.canonical_key or actual_digest != helper.content_digest or
+                    helper.helper_name != "__simple_accessor_" + actual_digest or
+                    helper.emission_owner != helper.plan.physical.emission_owner:
+                return Err("E-AOP-FIELD-SNAPSHOT: resolved helper changed after publication")
+        val source_identity = driver_accessor_source_identity_v1(ctx, module_name)?
+        val encoded = match hir_module_encode_canonical(module):
+            case Ok(bytes): bytes
+            case Err(_): return Err("E-AOP-FIELD-SNAPSHOT: current HIR identity is unavailable")
+        if driver_accessor_plan_digest_v1(plan) != plan.plan_digest:
+            return Err("E-AOP-FIELD-SNAPSHOT: frozen field decisions changed before lowering")
+        val installed = lowering.install_accessor_plan_v1(Some(plan), module.name, source_identity,
+            sha256_text(encoded), false)?
+    else:
+        if not ctx.accessor_inventory_checked_v1 or not ctx.accessor_no_field_aspects_v1:
+            return Err("E1507: field accessor selection has no qualified frozen plan")
+        val cleared = lowering.install_accessor_plan_v1(None, module.name, "", "", true)?
+    lowering.lower_module_transient_scoped(module, providers, is_entry)

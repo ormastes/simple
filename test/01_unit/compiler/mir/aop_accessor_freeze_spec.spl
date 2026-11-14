@@ -1,0 +1,135 @@
+# Authored coordinator unit tests; no native helper execution is claimed.
+use compiler.driver.driver_accessor_freeze_v1.{accessor_helper_key_v1, freeze_accessor_helpers_v1}
+use compiler.hir.hir_accessor_field_v1.{HirAccessorFieldV1}
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId}
+use compiler.common.diagnostics.span.{Span}
+use compiler.mir.mir_types.{MirType, MirTypeKind, MirSignature}
+use compiler.frontend.core.aop.{AdviceForm}
+use compiler.mir.mir_accessor_plan_v1.*
+use compiler.mir.mir_accessor_plan_set_v1.*
+use compiler.driver.driver_accessor_publication_v1.{driver_accessor_plan_digest_v1}
+
+fn freeze_field() -> HirAccessorFieldV1:
+    HirAccessorFieldV1(owner_module: "app.box", owner_name: "Box",
+        owner_symbol: SymbolId.new(10), field_name: "count", field_symbol: SymbolId.new(11),
+        field_index: 1,
+        receiver_type: HirType(kind: HirTypeKind.Named(SymbolId.new(10), []), span: Span.empty()),
+        field_type: HirType(kind: HirTypeKind.Int(32, false), span: Span.empty()))
+
+fn freeze_physical() -> MirAccessorPhysicalV1:
+    MirAccessorPhysicalV1(owner_module: "app.box", owner_name: "Box",
+        receiver_type: MirType(kind: MirTypeKind.Struct(SymbolId.new(10))),
+        field_type: MirType(kind: MirTypeKind.U32), field_order: ["flag", "count"],
+        layout_identity: "layout-v1", provider_identity: "provider-a",
+        target_abi: "test-abi", emission_owner: "app.box",
+        place: MirAccessorPlaceV1.DirectReference, writable: true,
+        nullable: false, atomic: false, volatile: false,
+        memory_profile: MirAccessorMemoryProfileV1.NoGcSynchronous)
+
+fn freeze_advice(name: text) -> MirAccessorAdviceV1:
+    MirAccessorAdviceV1(aspect_module: "app.trace", aspect_name: "Trace",
+        symbol: SymbolId.new(20), function_name: name,
+        signature: MirSignature(params: [], return_type: MirType.unit(),
+            is_variadic: false, params_known: true), form: AdviceForm.Before,
+        interface_digest: "iface", body_digest: name, effects_digest: "effects",
+        selector_digest: "selector", selection_scope_digest: "scope")
+
+fn freeze_plan(operation: MirAccessorOperationV1, advice: [MirAccessorAdviceV1]) -> MirAccessorPlanV1:
+    mir_accessor_prepare_v1(freeze_field(), freeze_physical(), operation, advice).unwrap()
+
+describe "driver-owned accessor helper freeze":
+    it "deduplicates identical plans and assigns stable names and symbols independent of input order":
+        val getter = freeze_plan(MirAccessorOperationV1.Read, [])
+        val setter = freeze_plan(MirAccessorOperationV1.Write, [])
+        val first = freeze_accessor_helpers_v1([getter, setter, getter], 100).unwrap()
+        val second = freeze_accessor_helpers_v1([setter, getter], 100).unwrap()
+        expect(first.len()).to_equal(2)
+        expect(second.len()).to_equal(2)
+        for index in 0..first.len():
+            expect(first[index].canonical_key).to_equal(second[index].canonical_key)
+            expect(first[index].helper_name).to_equal(second[index].helper_name)
+            expect(first[index].helper_symbol.id).to_equal(100 + index)
+            expect(second[index].helper_symbol.id).to_equal(100 + index)
+            expect(first[index].emission_owner).to_equal("app.box")
+
+    it "retains advice ordering and binds selector scope and effect identities":
+        val one = freeze_advice("one")
+        val two = freeze_advice("two")
+        val original = freeze_plan(MirAccessorOperationV1.Read, [one, two])
+        val reversed = freeze_plan(MirAccessorOperationV1.Read, [two, one])
+        val scoped = freeze_plan(MirAccessorOperationV1.Read,
+            [MirAccessorAdviceV1(..one, selection_scope_digest: "other-scope"), two])
+        val effected = freeze_plan(MirAccessorOperationV1.Read,
+            [MirAccessorAdviceV1(..one, effects_digest: "other-effects"), two])
+        val selected = freeze_plan(MirAccessorOperationV1.Read,
+            [MirAccessorAdviceV1(..one, selector_digest: "other-selector"), two])
+        val key = accessor_helper_key_v1(original).unwrap()
+        expect(key == accessor_helper_key_v1(reversed).unwrap()).to_equal(false)
+        expect(key == accessor_helper_key_v1(scoped).unwrap()).to_equal(false)
+        expect(key == accessor_helper_key_v1(effected).unwrap()).to_equal(false)
+        expect(key == accessor_helper_key_v1(selected).unwrap()).to_equal(false)
+        val frozen = freeze_accessor_helpers_v1([original], 100).unwrap()
+        expect(frozen[0].plan.ordered_advice[0].function_name).to_equal("one")
+        expect(frozen[0].plan.ordered_advice[1].function_name).to_equal("two")
+
+    it "binds provider layout and target ABI to the helper key":
+        val original = freeze_plan(MirAccessorOperationV1.Read, [])
+        val provider = mir_accessor_prepare_v1(freeze_field(),
+            MirAccessorPhysicalV1(..freeze_physical(), provider_identity: "provider-b"),
+            MirAccessorOperationV1.Read, []).unwrap()
+        val layout = mir_accessor_prepare_v1(freeze_field(),
+            MirAccessorPhysicalV1(..freeze_physical(), layout_identity: "layout-v2"),
+            MirAccessorOperationV1.Read, []).unwrap()
+        val target = mir_accessor_prepare_v1(freeze_field(),
+            MirAccessorPhysicalV1(..freeze_physical(), target_abi: "another-abi"),
+            MirAccessorOperationV1.Read, []).unwrap()
+        val key = accessor_helper_key_v1(original).unwrap()
+        expect(key == accessor_helper_key_v1(provider).unwrap()).to_equal(false)
+        expect(key == accessor_helper_key_v1(layout).unwrap()).to_equal(false)
+        expect(key == accessor_helper_key_v1(target).unwrap()).to_equal(false)
+
+    it "excludes transient symbol numbers from canonical content but rejects conflicting resolutions in one freeze":
+        val original = freeze_plan(MirAccessorOperationV1.Read, [])
+        val relocated_field = HirAccessorFieldV1(..freeze_field(),
+            owner_symbol: SymbolId.new(40), field_symbol: SymbolId.new(41),
+            receiver_type: HirType(kind: HirTypeKind.Named(SymbolId.new(40), []), span: Span.empty()))
+        val relocated = mir_accessor_prepare_v1(relocated_field,
+            MirAccessorPhysicalV1(..freeze_physical(), receiver_type: MirType(kind: MirTypeKind.Struct(SymbolId.new(40)))),
+            MirAccessorOperationV1.Read, []).unwrap()
+        expect(accessor_helper_key_v1(original).unwrap()).to_equal(accessor_helper_key_v1(relocated).unwrap())
+        expect(freeze_accessor_helpers_v1([original, relocated], 100).is_err()).to_equal(true)
+
+    it "rejects negative and exhausted reserved symbol ranges without producing helpers":
+        val getter = freeze_plan(MirAccessorOperationV1.Read, [])
+        val setter = freeze_plan(MirAccessorOperationV1.Write, [])
+        expect(freeze_accessor_helpers_v1([getter], -1).is_err()).to_equal(true)
+        expect(freeze_accessor_helpers_v1([getter, setter], 9223372036854775807).is_err()).to_equal(true)
+
+    it "revalidates a caller-modified helper signature before keying":
+        val original = freeze_plan(MirAccessorOperationV1.Read, [])
+        val corrupted = MirAccessorPlanV1(..original,
+            signature: MirSignature(params: [], return_type: MirType.unit(), is_variadic: false))
+        expect(accessor_helper_key_v1(corrupted).is_err()).to_equal(true)
+
+    it "binds nested resolved advice and helper linkage in the installed snapshot":
+        val request = freeze_plan(MirAccessorOperationV1.Read, [freeze_advice("one")])
+        val helper = freeze_accessor_helpers_v1([request], 100).unwrap()[0]
+        val original = AccessorPlanSetV1(source_snapshot: "source", hir_snapshot: "hir",
+            plan_digest: "pending", module_identity: "app.box", covered_functions: [],
+            sites: [], helpers: [helper])
+        val key = driver_accessor_plan_digest_v1(original)
+        val altered_advice = MirAccessorAdviceV1(..request.ordered_advice[0], function_name: "changed")
+        val changed_plan = MirAccessorPlanV1(..request, ordered_advice: [altered_advice])
+        val changed_nested = AccessorPreparedHelperV1(..helper, plan: changed_plan)
+        expect(driver_accessor_plan_digest_v1(AccessorPlanSetV1(..original,
+            helpers: [changed_nested])) == key).to_equal(false)
+        val changed_symbol = AccessorPreparedHelperV1(..helper, helper_symbol: SymbolId.new(101))
+        expect(driver_accessor_plan_digest_v1(AccessorPlanSetV1(..original,
+            helpers: [changed_symbol])) == key).to_equal(false)
+        val changed_name = AccessorPreparedHelperV1(..helper, helper_name: "__simple_accessor_other")
+        expect(driver_accessor_plan_digest_v1(AccessorPlanSetV1(..original,
+            helpers: [changed_name])) == key).to_equal(false)
+        val changed_advice_symbol = MirAccessorAdviceV1(..request.ordered_advice[0], symbol: SymbolId.new(21))
+        val relocated = MirAccessorPlanV1(..request, ordered_advice: [changed_advice_symbol])
+        expect(driver_accessor_plan_digest_v1(AccessorPlanSetV1(..original,
+            helpers: [AccessorPreparedHelperV1(..helper, plan: relocated)])) == key).to_equal(false)
