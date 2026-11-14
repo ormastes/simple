@@ -26,12 +26,18 @@ The trigger is the implicit tail of any function declared `-> T?`. An explicit
 | shape (current Stage 2) | cranelift | llvm |
 |---|---|---|
 | `-> f64?` tail `Some(x)`, or a match/if tail | verifier refusal (`return f64` vs sig `i64`) | silent: returns `fptosi(payload)`, prints a denormal |
-| `-> f32?` tail `Some(x)` | verifier refusal (`bitcast 64 bits ... expected 32`) | n/a |
-| `-> i64?` tail `Some(x)` | compiles; returns the raw payload, not a handle | same |
-| `-> i64?` tail `None` | compiles; caller sees `some 3` | same |
-| `-> i64?` if/else tail, `None` arm | runtime abort `.unwrap() called on None` | same |
-| `return Some(x)` (explicit) | correct | correct |
+| `-> f32?` tail `Some(x)` | verifier refusal (`bitcast 64 bits ... expected 32`) | llc refusal (`bitcast i64 to float`) |
+| `-> i64?` tail `Some(3)` / bare tail `x` = 3 | compiles; returns the raw payload; `match` reads `None` | same |
+| `-> i64?` if/else or match tail, `None` arm | runtime abort `.unwrap() called on None` | same |
+| `-> i64?` tail `Some(9000000000)`, `bool?` `Some(false)`, `text?`, bare `nil` | correct output (raw word happens to read right) | same |
+| explicit `return Some(x)` / `return x` / `return nil` / `return None` | correct callee (disassembly: `rt_enum_new(1, disc, ..)`) | correct |
 | `f64?` struct field, `[f64]?` tail, `Some(f64)` as argument | correct | correct |
+
+A separate caller-side defect turned up while checking. `if val a = <i64? None>`
+prints `some 3` on both backends: a local `val o: i64? = None`, `rn()` and
+`return nil` callees alike. `match` and `.?` on the same value answer None.
+That bug is not in the return path and is not fixed here, so the fixtures use
+`match`.
 
 The disassembly of `fn f(x: f64) -> f64?: Some(x)` (LLVM object) is
 `rt_enum_new` -> `rt_unwrap_or_trap` -> `fmov d0,x0` -> `fcvtzs`. The handle is
@@ -62,7 +68,8 @@ misdispatching.
 
 - Spec: `test/01_unit/compiler/mir/implicit_tail_optional_return_handle_spec.spl`
   (source row red -> green; MIR rows pin the handle shape on the seed).
-- Native oracle: `test/fixtures/native_option_f64_enum_payload/main.spl`
-  (expected stdout is in its header). Run it with both backends on a Stage 2
-  built from the fix. In the disassembly, `as_f64` must contain `rt_enum_new`
-  and no `rt_unwrap_or_trap`.
+- Native oracles: `test/fixtures/native_option_f64_enum_payload/main.spl` and
+  `test/fixtures/native_option_scalar_tail_siblings/main.spl` (expected stdout
+  is in each header). Run both with both backends on a Stage 2 built from the
+  fix. In the disassembly, `as_f64` must contain `rt_enum_new` and no
+  `rt_unwrap_or_trap`.
