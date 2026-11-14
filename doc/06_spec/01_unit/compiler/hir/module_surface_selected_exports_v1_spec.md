@@ -15,9 +15,11 @@ and calls the typed selection and hop APIs. It checks:
 6. Function/type collisions remain typed; legacy name-only lookup is unavailable.
 7. Explicit private cannot be promoted; cycles cannot invent terminals.
 8. Out-of-range hops, corrupt windows and stale generations fail closed.
-9. Stable identity excludes allocation generation but includes changed intermediate routes.
+9. Incomplete bitfield source retention cannot prove bitfield absence.
 10. Selected-only folder membership does not establish complete sibling lookup.
 
 The pre-existing same-folder plain-export fixture remains an additional open
 compatibility requirement until actual sibling-selection authority is integrated.
 No runtime, compiler, or protocol qualification is claimed by this manual.
+
+Stable/transitive digest runtime qualification remains pending complete category evidence.

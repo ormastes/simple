@@ -100,3 +100,9 @@ candidate file for implicit sibling selection. Closure membership alone is not
 that inventory. Reuse the existing HIR sibling namespace owner once its coverage
 and declaration facts are authoritative; do not infer completeness from this
 selected registry. This lane intentionally does not scan additional files.
+
+Bitfield source-authority retention remains incomplete. A missing bitfield
+projection is Unavailable rather than proof of absence. This conservatively
+keeps affected name-only compatibility results and whole-surface cache identity
+unavailable until the real producer retains those declarations/absence facts.
+Typed available categories remain queryable; no complete-registry claim is made.
