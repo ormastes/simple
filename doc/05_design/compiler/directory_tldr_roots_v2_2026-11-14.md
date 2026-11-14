@@ -142,3 +142,17 @@ category projections still need implementation; the whole frozen interface hash
 is not silently relabeled as either category. Missing sections require coverage
 proof before claiming an empty category. This work and B3 inline facts, traversal
 cutoff/publication and a complete acceptance run remain required.
+
+## Executing image versus declared producer
+
+Snapshots now carry `executing_image_digest` and `declared_producer_digest`
+separately. The latter remains checked managed inventory lineage. The former
+comes from the lazy typed `CompileContext.kernel_image_digest_provider`, which
+observes the Linux kernel executable image, caches success/unavailability once
+per process, and has no environment/argv fallback. Capture requests it only after
+aspect claims and basic lineage validation. Unsupported observation yields no
+snapshot and full traversal. The builtin plugin code key uses the executing-image
+digest plus its stable entry/schema; configured producer roles are not assumed
+equal to the running worker. Missing executing-image transport is rejected.
+These are process-local inputs, not serialized admission tokens. The owner and
+new fallback spec are source-reviewed but unrun; no native qualification is added.
