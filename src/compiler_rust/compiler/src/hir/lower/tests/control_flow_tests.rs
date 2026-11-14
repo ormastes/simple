@@ -1539,16 +1539,16 @@ fn test_value_match_with_wildcard_has_no_exhaustion_panic() {
 }
 
 /// Statement-position matches (value discarded) with no matching arm and no
-/// wildcard stay a silent fall-through: self-hosted compiler code relies on it.
+/// wildcard fail closed too (owner decision 2026-11-14): no silent fall-through.
 #[test]
-fn test_statement_match_without_wildcard_stays_silent() {
+fn test_statement_match_without_wildcard_fails_closed() {
     let source = "fn run(n: i64):\n    match n:\n        case 1: print \"one\"\n    print \"done\"\n";
     let module = parse_and_lower(source).unwrap();
     let func = module.functions.iter().find(|f| f.name == "run").unwrap();
     let repr = format!("{:?}", func.body);
     assert!(
-        !repr.contains("match expression exhausted"),
-        "statement-position match must not carry an exhaustion panic: {repr}"
+        repr.contains("rt_panic") && repr.contains("match statement exhausted without matching any pattern"),
+        "statement-position match must lower to an exhaustion rt_panic: {repr}"
     );
 }
 
@@ -1568,22 +1568,30 @@ fn test_tail_match_without_wildcard_fails_closed() {
     );
 }
 
-/// A tail match with a wildcard never reaches the exhaustion path, and a tail
-/// match of a function with no declared return keeps the silent fall-through.
+/// A tail match with a wildcard never reaches the exhaustion path. A tail
+/// match of a function with no declared return is a plain statement match: it
+/// fails closed too (owner decision 2026-11-14), reported as the statement form.
 #[test]
-fn test_tail_match_with_wildcard_or_void_has_no_exhaustion_panic() {
-    for source in [
-        "fn pick(s: text) -> i64:\n    match s:\n        case \"a\": 1\n        case _: 0\n",
-        "fn run(n: i64):\n    match n:\n        case 1: print \"one\"\n",
-    ] {
+fn test_tail_match_with_wildcard_has_no_panic_and_void_tail_is_statement_form() {
+    let lower = |source: &str| {
         let module = parse_and_lower(source).unwrap();
         let func = module.functions.iter().find(|f| f.name == "pick" || f.name == "run").unwrap();
-        let repr = format!("{:?}", func.body);
-        assert!(
-            !repr.contains("match expression exhausted"),
-            "tail match must not carry an exhaustion panic here: {repr}"
-        );
-    }
+        format!("{:?}", func.body)
+    };
+    let wildcard = lower("fn pick(s: text) -> i64:\n    match s:\n        case \"a\": 1\n        case _: 0\n");
+    assert!(
+        !wildcard.contains("exhausted without matching any pattern"),
+        "wildcard tail match must not carry an exhaustion panic: {wildcard}"
+    );
+    let void_tail = lower("fn run(n: i64):\n    match n:\n        case 1: print \"one\"\n");
+    assert!(
+        void_tail.contains("rt_panic") && void_tail.contains("match statement exhausted without matching any pattern"),
+        "void tail match must fail closed as a statement match: {void_tail}"
+    );
+    assert!(
+        !void_tail.contains("match expression exhausted"),
+        "void tail match is not value-position: {void_tail}"
+    );
 }
 
 /// `?.` used to fall through the lenient catch-all and lower to a bare `Nil`
