@@ -1,0 +1,111 @@
+# Primary adoption and Host ACK publication in the existing sole pane registry.
+use os.apps.smux.service.{ServiceState, PaneRecord}
+use os.apps.smux.service_revision.ServiceRevisionState
+use os.apps.smux.terminal_adoption_service_v2.terminal_transport_admit_v2
+use os.apps.smux.child_lifecycle.close_owned_children
+use std.nogc_async_mut.container.terminal_session_v1.*
+use std.nogc_sync_mut.orchestration.host_helper_settlement_commit_v1.HostHelperSettlementAckV1
+use std.common.build_manager.contracts.builder_digest_valid_v1
+
+# Explicit helper cleanup; the API publishes the returned canonical pane state.
+pub fn terminal_primary_cleanup_v4(before: ServiceState, pane_id: text, expected_identity: text) -> Result<ServiceState, text>:
+    val pi = before.find_pane_idx(pane_id)
+    if pi < 0: return Err("primary pane missing")
+    val pane = before.get_pane(pi)
+    val session = match pane.owned_terminal_session:
+        case Some(ContainerOwnedTerminalSessionV1.PrimaryAttach(value)): value
+        case _: return Err("primary pane owner missing")
+    if container_primary_attach_identity_v1(session) != expected_identity: return Err("primary pane identity changed")
+    Ok(close_owned_children(before, pane.pane.session_id, pane.pane.window_id, pane_id))
+
+# Pure progress rule consumed only after actual pane/session identity checks.
+# Metadata arguments grant no native control or permission to publish a pane.
+pub fn terminal_primary_progress_metadata_v4(previous: ContainerPrimaryAttachAdoptionV1,
+        incoming: ContainerPrimaryAttachAdoptionV1, before_cleaned: bool, after_cleaned: bool) -> Result<(), text>:
+    if (previous.binding_uid != incoming.binding_uid or previous.service_incarnation != incoming.service_incarnation or
+            previous.session_id != incoming.session_id or previous.window_id != incoming.window_id or
+            previous.pane_id != incoming.pane_id or previous.service_epoch != incoming.service_epoch or
+            previous.child_incarnation != incoming.child_incarnation):
+        return Err("primary pane adoption changed")
+    if before_cleaned and not after_cleaned: return Err("primary pane cleanup progress regressed")
+    Ok(())
+
+fn primary_current_adoption_v4(pane: PaneRecord, clock: ServiceRevisionState,
+        session: ContainerPrimaryAttachSessionV1) -> Result<ContainerPrimaryAttachAdoptionV1, text>:
+    val adoption = match container_primary_attach_adoption_v1(session):
+        case Some(value): value
+        case nil: return Err("primary pane adoption missing")
+    if (clock.epoch > 9223372036854775807 or pane.child_incarnation > 9223372036854775807 or
+            adoption.session_id != pane.pane.session_id or adoption.window_id != pane.pane.window_id or
+            adoption.pane_id != pane.pane.id or adoption.service_epoch != clock.epoch as i64 or
+            adoption.child_incarnation != pane.child_incarnation as i64):
+        return Err("primary pane adoption changed")
+    Ok(adoption)
+
+pub fn terminal_primary_adopt_v4(before: ServiceState, clock: ServiceRevisionState,
+        closing: bool, session_id: text, window_id: text, pane_id: text,
+        expected_epoch: u64, expected_revision: u64, expected_child_incarnation: u64,
+        binding_uid: text, service_incarnation: text,
+        session: ContainerPrimaryAttachSessionV1) -> Result<ServiceState, text>:
+    if container_primary_attach_adoption_v1(session) != nil: return Err("primary session already adopted")
+    val terminal = ContainerOwnedTerminalSessionV1.PrimaryAttach(session)
+    val reference = container_terminal_reference_v1(terminal)?
+    val pi = terminal_transport_admit_v2(before, clock, closing, session_id, window_id, pane_id,
+        expected_epoch, expected_revision, expected_child_incarnation, reference)?
+    if expected_epoch > 9223372036854775807 or expected_child_incarnation >= 9223372036854775807:
+        return Err("primary adoption incarnation bound")
+    val adopted = container_primary_attach_adopt_v1(session, ContainerPrimaryAttachAdoptionV1(
+        binding_uid: binding_uid, service_incarnation: service_incarnation, session_id: session_id,
+        window_id: window_id, pane_id: pane_id, service_epoch: expected_epoch as i64,
+        child_incarnation: (expected_child_incarnation + 1) as i64))
+    if adopted.error != "": return Err(adopted.error)
+    Ok(before.replace_pane(pi, before.get_pane(pi).with_owned_terminal_session(
+        ContainerOwnedTerminalSessionV1.PrimaryAttach(adopted.session), reference)))
+
+# Returned session progress is published even when Host settlement later fails.
+pub fn terminal_primary_progress_v4(before: ServiceState, clock: ServiceRevisionState, pane_id: text,
+        expected_identity: text, session: ContainerPrimaryAttachSessionV1) -> Result<ServiceState, text>:
+    val pi = before.find_pane_idx(pane_id)
+    if pi < 0: return Err("primary pane missing")
+    var pane = before.get_pane(pi)
+    val current = match pane.owned_terminal_session:
+        case Some(ContainerOwnedTerminalSessionV1.PrimaryAttach(value)): value
+        case _: return Err("primary pane owner missing")
+    if (container_primary_attach_identity_v1(current) != expected_identity or
+            container_primary_attach_identity_v1(session) != expected_identity):
+        return Err("primary pane identity changed")
+    val previous = primary_current_adoption_v4(pane, clock, current)?
+    val incoming = primary_current_adoption_v4(pane, clock, session)?
+    terminal_primary_progress_metadata_v4(previous, incoming,
+        pane.helper_cleaned_awaiting_release or container_primary_attach_native_cleaned_v1(current),
+        container_primary_attach_native_cleaned_v1(session))?
+    pane.owned_terminal_session = Some(ContainerOwnedTerminalSessionV1.PrimaryAttach(session))
+    pane.helper_cleaned_awaiting_release = container_primary_attach_native_cleaned_v1(session)
+    Ok(before.replace_pane(pi, pane))
+
+pub fn terminal_primary_settle_v4(before: ServiceState, clock: ServiceRevisionState, pane_id: text, expected_identity: text,
+        helper_native_identity: text, ack: HostHelperSettlementAckV1) -> Result<ServiceState, text>:
+    val pi = before.find_pane_idx(pane_id)
+    if pi < 0: return Err("primary pane missing")
+    var pane = before.get_pane(pi)
+    val session = match pane.owned_terminal_session:
+        case Some(ContainerOwnedTerminalSessionV1.PrimaryAttach(value)): value
+        case _: return Err("primary pane owner missing")
+    val plan = container_primary_attach_plan_v1(session)
+    val adoption = primary_current_adoption_v4(pane, clock, session)?
+    if (container_primary_attach_identity_v1(session) != expected_identity or
+            not container_primary_attach_native_cleaned_v1(session) or not pane.helper_cleaned_awaiting_release or
+            ack.operation_id != plan.identity.operation_id or ack.request_digest != plan.request_digest or
+            ack.native_identity_digest != helper_native_identity):
+        return Err("primary settlement acknowledgement mismatch")
+    if pane.terminal_ref == nil or pane.terminal_ref.unwrap().group_identity != helper_native_identity:
+        return Err("primary settlement native correlation mismatch")
+    for digest in [helper_native_identity, ack.request_digest, ack.prepared_receipt_digest,
+            ack.tree_receipt_digest, ack.outcome_digest, ack.journal_revision]:
+        if not builder_digest_valid_v1(digest): return Err("primary settlement digest invalid")
+    if ack.journal_sequence <= 0: return Err("primary settlement journal invalid")
+    pane.owned_terminal_session = nil
+    pane.terminal_ref = nil
+    pane.helper_cleaned_awaiting_release = false
+    pane.child_pid = -1
+    Ok(before.replace_pane(pi, pane))

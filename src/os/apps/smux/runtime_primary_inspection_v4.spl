@@ -1,0 +1,210 @@
+# Inspection never spawns, reads output, or implicitly cancels a helper. Explicit
+# cleanup uses the canonical pane or exact recovered Host native owner.
+use os.apps.smux.runtime_binding_state_v3.{SmuxRuntimeBindingOwnerV3, SmuxRuntimeBindingTurnV3,
+    smux_runtime_binding_prune_released_v3, smux_output_entry_blocks_v4,
+    SmuxRuntimeBindingDomainV4, smux_binding_pending_add_v4, smux_binding_pending_resolve_v4}
+use os.apps.smux.runtime_primary_state_v4.*
+use os.apps.smux.runtime_primary_store_v4.*
+use os.apps.smux.runtime_primary_reply_v4.*
+use os.apps.smux.api.{smux_owner_snapshot, smux_configuration_revision, smux_pane_cleanup_primary_v4,
+    smux_pane_primary_progress_v4, smux_pane_primary_settlement_v4}
+use std.nogc_async_mut.container.terminal_session_v1.*
+use std.nogc_sync_mut.orchestration.host_primary_attach_owner_v1.HostPrimaryAttachTurnV1
+use std.nogc_sync_mut.orchestration.host_primary_attach_settlement_v1.{host_primary_attach_cleanup_v1,
+    host_primary_attach_settle_v1}
+use std.nogc_sync_mut.orchestration.host_primary_attach_recovery_v1.{host_primary_attach_recover_v1,
+    host_primary_attach_settle_recovered_v1}
+use std.nogc_sync_mut.orchestration.host_helper_request_v1.host_helper_request_load_v1
+use std.nogc_sync_mut.daemon_sdk.operation_dispatch_v2.daemon_operation_exact_v2
+use std.nogc_sync_mut.io.process_ops.process_cleanup_piped_owned_v2
+use std.common.contracts.container.primary_attach_v1.container_primary_attach_plan_encode_v1
+
+fn primary_remember_v4(owner: SmuxRuntimeBindingOwnerV3, index: int,
+        entry: SmuxRuntimePrimaryEntryV4) -> SmuxRuntimeBindingTurnV3:
+    var current = owner
+    current.primary_entries[index] = entry
+    smux_primary_entry_reply_v4(current, entry)
+
+fn primary_pane_session_v4(owner: SmuxRuntimeBindingOwnerV3,
+        entry: SmuxRuntimePrimaryEntryV4) -> Result<ContainerPrimaryAttachSessionV1, text>:
+    val request = entry.request.target
+    val snapshot = smux_owner_snapshot()
+    val pi = snapshot.find_pane_idx(request.pane_id)
+    if pi < 0: return Err("primary-pane-missing")
+    val pane = snapshot.get_pane(pi)
+    val session = match pane.owned_terminal_session:
+        case Some(ContainerOwnedTerminalSessionV1.PrimaryAttach(value)): value
+        case _: return Err("primary-pane-owner-missing")
+    val adoption = match container_primary_attach_adoption_v1(session):
+        case Some(value): value
+        case nil: return Err("primary-pane-adoption-missing")
+    if (container_primary_attach_identity_v1(session) != entry.session_identity or
+            pane.pane.session_id != request.session_id or pane.pane.window_id != request.window_id or
+            adoption.binding_uid != request.binding_uid or adoption.service_incarnation != owner.service_incarnation or
+            adoption.session_id != request.session_id or adoption.window_id != request.window_id or adoption.pane_id != request.pane_id or
+            adoption.service_epoch != smux_configuration_revision().epoch as i64 or
+            adoption.child_incarnation != pane.child_incarnation as i64 or
+            pane.child_incarnation != request.expected_child_incarnation + 1):
+        return Err("primary-pane-owner-mismatch")
+    Ok(session)
+
+fn primary_inspect_entry_v4(owner: SmuxRuntimeBindingOwnerV3, index: int,
+        cleanup: bool) -> SmuxRuntimeBindingTurnV3:
+    var current = owner
+    var entry = current.primary_entries[index]
+    if entry.status == "released": return smux_primary_entry_reply_v4(current, entry)
+    val request = entry.request.target
+    if entry.adopted:
+        # Only a cleaned session awaiting publication can be pending here;
+        # it is never read or independently cleaned by the binding owner.
+        if entry.session != nil:
+            val published = smux_pane_primary_progress_v4(request.pane_id, entry.session_identity, entry.session.unwrap())
+            if published.is_err():
+                entry.code = published.unwrap_err()
+                return primary_remember_v4(current, index, entry)
+            entry.session = nil
+        val observed = primary_pane_session_v4(current, entry)
+        if observed.is_err():
+            entry.code = observed.unwrap_err()
+            return primary_remember_v4(current, index, entry)
+        if cleanup and not container_primary_attach_native_cleaned_v1(observed.unwrap()):
+            val cleaned = smux_pane_cleanup_primary_v4(request.pane_id, entry.session_identity)
+            if cleaned.is_err() or not cleaned.unwrap():
+                entry.code = "primary-pane-cleanup-pending"
+                return primary_remember_v4(current, index, entry)
+        val session = primary_pane_session_v4(current, entry)
+        if session.is_err():
+            entry.code = session.unwrap_err()
+            return primary_remember_v4(current, index, entry)
+        if not container_primary_attach_native_cleaned_v1(session.unwrap()):
+            return primary_remember_v4(current, index, entry)
+        if entry.helper == nil:
+            entry.code = "primary-helper-provenance-missing"
+            return primary_remember_v4(current, index, entry)
+        if entry.settlement_ack == nil:
+            val retained = HostPrimaryAttachTurnV1(local: current.local, helper: entry.helper.unwrap(), plan: entry.plan,
+                session: Some(session.unwrap()), consumption_attempted: true)
+            val settled = host_primary_attach_settle_v1(retained)
+            current.local = settled.retained.local
+            entry.session = settled.retained.session
+            entry.status = "helper-cleaned-awaiting-release"
+            entry.code = settled.error
+            if settled.settled: entry.settlement_ack = settled.ack
+            if entry.session != nil:
+                val published = smux_pane_primary_progress_v4(request.pane_id, entry.session_identity, entry.session.unwrap())
+                if published.is_err():
+                    entry.code = published.unwrap_err()
+                    return primary_remember_v4(current, index, entry)
+                entry.session = nil
+        if entry.settlement_ack == nil: return primary_remember_v4(current, index, entry)
+        val acknowledged = smux_pane_primary_settlement_v4(request.pane_id, entry.session_identity,
+            entry.native_identity, entry.settlement_ack.unwrap())
+        if acknowledged.is_err():
+            entry.code = acknowledged.unwrap_err()
+            return primary_remember_v4(current, index, entry)
+        entry.adopted = false
+    elif entry.recovered != nil:
+        # Refresh metadata/current journal before any explicit recovered cleanup.
+        val recovered = host_primary_attach_recover_v1(current.local.capacity, request.helper_operation_id)
+        current.local.capacity = recovered.owner
+        if recovered.recovered == nil:
+            entry.code = recovered.error
+            return primary_remember_v4(current, index, entry)
+        val exact = recovered.recovered.unwrap()
+        if (exact.consumption_digest != entry.recovered.unwrap().consumption_digest or
+                exact.native.identity_digest != entry.native_identity):
+            entry.code = "primary-recovery-changed"
+            return primary_remember_v4(current, index, entry)
+        entry.recovered = Some(exact)
+        if cleanup:
+            val cleaned = process_cleanup_piped_owned_v2(exact.native, nil)
+            if cleaned.is_err():
+                entry.code = cleaned.unwrap_err()
+                return primary_remember_v4(current, index, entry)
+        val settled = host_primary_attach_settle_recovered_v1(current.local.capacity, exact)
+        current.local.capacity = settled.owner
+        entry.recovered = settled.retained
+        if not settled.settled or settled.ack == nil:
+            entry.code = settled.error
+            return primary_remember_v4(current, index, entry)
+        entry.settlement_ack = settled.ack
+    elif entry.helper != nil:
+        var retained = HostPrimaryAttachTurnV1(local: current.local, helper: entry.helper.unwrap(), plan: entry.plan,
+            session: entry.session, cleanup_spawn: entry.cleanup_spawn, consumption_attempted: true)
+        if cleanup:
+            val cleaned = host_primary_attach_cleanup_v1(retained)
+            retained = cleaned.retained
+            current.local = retained.local
+            entry.session = retained.session
+            entry.cleanup_spawn = retained.cleanup_spawn
+            if not cleaned.cleaned:
+                entry.code = cleaned.error
+                return primary_remember_v4(current, index, entry)
+        val settled = host_primary_attach_settle_v1(retained)
+        current.local = settled.retained.local
+        entry.session = settled.retained.session
+        entry.cleanup_spawn = settled.retained.cleanup_spawn
+        if not settled.settled or settled.ack == nil:
+            entry.code = settled.error
+            return primary_remember_v4(current, index, entry)
+        entry.settlement_ack = settled.ack
+    else:
+        entry.code = "primary-host-reconciliation-required"
+        return primary_remember_v4(current, index, entry)
+    entry.status = "released"
+    entry.code = "primary-helper-host-settlement-acknowledged"
+    entry.helper = nil
+    entry.session = nil
+    entry.cleanup_spawn = nil
+    entry.recovered = nil
+    primary_remember_v4(current, index, entry)
+
+pub fn smux_primary_inspect_v4(owner: SmuxRuntimeBindingOwnerV3, uid: text,
+        cleanup: bool = false) -> SmuxRuntimeBindingTurnV3:
+    var current = owner
+    for opposite in current.entries:
+        if smux_output_entry_blocks_v4(opposite, uid):
+            return smux_primary_reply_v4(current, uid, "rejected", "primary-uid-owned-by-output")
+    val index = smux_primary_index_v4(current.primary_entries, uid)
+    if index >= 0: return primary_inspect_entry_v4(current, index, cleanup)
+    val request = smux_primary_request_load_v4(current.local.capacity.journal.root, uid)
+    if request.is_err(): return smux_primary_reply_v4(current, uid, "not-found", request.unwrap_err())
+    val planned = smux_primary_plan_load_v4(current.local.capacity.journal.root, request.unwrap())
+    if planned.is_err(): return smux_primary_reply_v4(current, uid, "unconfirmed", planned.unwrap_err())
+    val recovered = host_primary_attach_recover_v1(current.local.capacity, request.unwrap().target.helper_operation_id)
+    current.local.capacity = recovered.owner
+    if recovered.recovered == nil:
+        if not current.local.capacity.journal.operations.contains_key(request.unwrap().target.helper_operation_id):
+            return smux_primary_reply_v4(current, uid, "planned", "primary-helper-not-prepared",
+                planned.unwrap().request_digest, planned.unwrap().identity.binding_digest)
+        val helper = host_helper_request_load_v1(current.local.capacity.journal.root, request.unwrap().target.helper_operation_id)
+        if helper.is_ok():
+            val state = daemon_operation_exact_v2(current.local.capacity.journal, helper.unwrap().operation)
+            if (state.is_ok() and state.unwrap().state == "admitted" and
+                    helper.unwrap().plan.request_digest == planned.unwrap().request_digest and
+                    helper.unwrap().plan.parent_operation_id == request.unwrap().target.workload_operation_id and
+                    helper.unwrap().plan.parent_budget_digest == request.unwrap().target.parent_budget_digest):
+                return smux_primary_reply_v4(current, uid, "helper-prepared", "primary-no-transport-begun",
+                    planned.unwrap().request_digest, planned.unwrap().identity.binding_digest, false, true)
+        current.unresolved_uids = smux_binding_pending_add_v4(current.unresolved_uids,
+            SmuxRuntimeBindingDomainV4.PrimaryAttachV4, uid)
+        return smux_primary_reply_v4(current, uid, "unconfirmed", recovered.error,
+            planned.unwrap().request_digest, planned.unwrap().identity.binding_digest, false, true)
+    val exact = recovered.recovered.unwrap()
+    val original = container_primary_attach_plan_encode_v1(planned.unwrap())
+    val restored = container_primary_attach_plan_encode_v1(exact.primary_plan)
+    if original.is_err() or restored.is_err() or original.unwrap() != restored.unwrap():
+        current.unresolved_uids = smux_binding_pending_add_v4(current.unresolved_uids,
+            SmuxRuntimeBindingDomainV4.PrimaryAttachV4, uid)
+        return smux_primary_reply_v4(current, uid, "unconfirmed", "primary-recovery-plan-mismatch")
+    current = smux_runtime_binding_prune_released_v3(current)
+    if current.entries.len() + current.primary_entries.len() >= 8:
+        current.unresolved_uids = smux_binding_pending_add_v4(current.unresolved_uids,
+            SmuxRuntimeBindingDomainV4.PrimaryAttachV4, uid)
+        return smux_primary_reply_v4(current, uid, "unconfirmed", "runtime-binding-owner-capacity")
+    current.primary_entries.push(SmuxRuntimePrimaryEntryV4(request: request.unwrap(), plan: exact.primary_plan,
+        recovered: Some(exact), native_identity: exact.native.identity_digest, status: "cleanup-required",
+        code: "primary-recovered-without-live-session"))
+    current.unresolved_uids = smux_binding_pending_resolve_v4(current.unresolved_uids,
+        SmuxRuntimeBindingDomainV4.PrimaryAttachV4, uid)
+    primary_inspect_entry_v4(current, current.primary_entries.len() - 1, cleanup)

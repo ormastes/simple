@@ -1,0 +1,125 @@
+# Execution NOT_RUN. Pure codec contract; no socket, process, or authority proof.
+use std.spec.{describe, it, expect, step}
+use os.apps.smux.runtime_primary_request_v4.*
+use os.apps.smux.runtime_binding_request_v3.{SmuxRuntimeBindRequestV3, smux_runtime_bind_request_encode_v3,
+    smux_runtime_bind_request_decode_v3, smux_runtime_bind_request_digest_v3, smux_runtime_bind_request_token_v3}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.contracts.orchestration.resource_v1.{parse_resource_document, as_dict}
+use std.common.base_encoding.base64.base64url_encode
+use std.common.crypto.sha256.sha256_text
+
+fn primary_request_fixture_v4() -> SmuxRuntimePrimaryRequestV4:
+    SmuxRuntimePrimaryRequestV4(terminal_mode: "stdin", target: SmuxRuntimeBindRequestV3(
+        binding_uid: "bind-a", workload_operation_id: "workload-a", helper_operation_id: "helper-a",
+        parent_budget_digest: "a".repeat(64), service_incarnation: "b".repeat(32),
+        session_id: "s", window_id: "w", pane_id: "p", expected_epoch: 1u64,
+        expected_revision: 9223372036854775808u64, expected_child_incarnation: 18446744073709551615u64))
+
+fn primary_request_fields_v4(source: text) -> Dict<text, SdnValue>:
+    val parsed = parse_resource_document(source).unwrap()
+    as_dict(parsed.0, "", parsed.1).unwrap()
+
+fn primary_request_wire_v4(source: text, key: text, value: SdnValue) -> text:
+    var fields = primary_request_fields_v4(source)
+    fields[key] = value
+    sdn_encode_canonical(SdnValue.Dict(fields))
+
+describe "immutable smux primary request V4":
+    it "round trips both modes with full width V3 target fences and exact wire fields":
+        step("round trips both modes with full width V3 target fences and exact wire fields")
+        for mode in ["stdin", "tty"]:
+            var request = primary_request_fixture_v4()
+            request.terminal_mode = mode
+            val bytes = smux_runtime_primary_request_encode_v4(request).unwrap()
+            val decoded = smux_runtime_primary_request_decode_v4(bytes).unwrap()
+            expect(decoded.terminal_mode).to_equal(mode)
+            expect(decoded.target).to_equal(request.target)
+            expect(decoded.target.expected_revision).to_equal(9223372036854775808u64)
+            expect(decoded.target.expected_child_incarnation).to_equal(18446744073709551615u64)
+            expect(smux_runtime_primary_request_encode_v4(decoded).unwrap()).to_equal(bytes)
+            val fields = primary_request_fields_v4(bytes)
+            expect(fields.len()).to_equal(4)
+            expect(fields["version"]).to_equal(SdnValue.Int(4))
+            expect(fields["kind"]).to_equal(SdnValue.String("smux-primary-binding-request"))
+            expect(fields["terminalMode"]).to_equal(SdnValue.String(mode))
+            expect(fields["targetRequest"]).to_equal(SdnValue.String(smux_runtime_bind_request_encode_v3(request.target).unwrap()))
+
+    it "keeps V3 incompatible and binds digest to the complete primary mode and target":
+        step("keeps V3 incompatible and binds digest to the complete primary mode and target")
+        val request = primary_request_fixture_v4()
+        val bytes = smux_runtime_primary_request_encode_v4(request).unwrap()
+        val v3_bytes = smux_runtime_bind_request_encode_v3(request.target).unwrap()
+        expect(smux_runtime_primary_request_decode_v4(v3_bytes).is_err()).to_equal(true)
+        expect(smux_runtime_bind_request_decode_v3(bytes).is_err()).to_equal(true)
+        expect(smux_runtime_primary_request_from_token_v4(smux_runtime_bind_request_token_v3(request.target).unwrap()).is_err()).to_equal(true)
+        val digest = smux_runtime_primary_request_digest_v4(request).unwrap()
+        expect(digest).to_equal(sha256_text(bytes))
+        expect(digest == smux_runtime_bind_request_digest_v3(request.target).unwrap()).to_equal(false)
+        var changed = request
+        changed.terminal_mode = "tty"
+        expect(smux_runtime_primary_request_digest_v4(changed).unwrap() == digest).to_equal(false)
+        changed = request
+        changed.target.binding_uid = "bind-b"
+        expect(smux_runtime_primary_request_digest_v4(changed).unwrap() == digest).to_equal(false)
+
+    it "rejects unknown duplicate missing and mistyped outer fields":
+        step("rejects unknown duplicate missing and mistyped outer fields")
+        val bytes = smux_runtime_primary_request_encode_v4(primary_request_fixture_v4()).unwrap()
+        for key in ["root", "grant", "argv", "inputAuthorized"]:
+            expect(smux_runtime_primary_request_decode_v4(primary_request_wire_v4(bytes, key, SdnValue.String("caller-value"))).is_err()).to_equal(true)
+        val original = primary_request_fields_v4(bytes)
+        for missing in ["version", "kind", "terminalMode", "targetRequest"]:
+            var retained: Dict<text, SdnValue> = {}
+            for key in original.keys():
+                if key != missing: retained[key] = original[key]
+            expect(smux_runtime_primary_request_decode_v4(sdn_encode_canonical(SdnValue.Dict(retained))).is_err()).to_equal(true)
+        for key in ["kind", "terminalMode", "targetRequest"]:
+            expect(smux_runtime_primary_request_decode_v4(primary_request_wire_v4(bytes, key, SdnValue.Int(4))).is_err()).to_equal(true)
+        expect(smux_runtime_primary_request_decode_v4(primary_request_wire_v4(bytes, "version", SdnValue.String("4"))).is_err()).to_equal(true)
+        expect(smux_runtime_primary_request_decode_v4(primary_request_wire_v4(bytes, "version", SdnValue.Int(3))).is_err()).to_equal(true)
+        expect(smux_runtime_primary_request_decode_v4(primary_request_wire_v4(bytes, "kind", SdnValue.String("smux-runtime-binding-request"))).is_err()).to_equal(true)
+        val duplicate = bytes.slice(0, bytes.len() - 1) + ", version: 4}"
+        expect(smux_runtime_primary_request_decode_v4(duplicate).is_err()).to_equal(true)
+
+    it "refuses reordered noncanonical nonobject and oversized source":
+        step("refuses reordered noncanonical nonobject and oversized source")
+        val request = primary_request_fixture_v4()
+        val bytes = smux_runtime_primary_request_encode_v4(request).unwrap()
+        val fields = primary_request_fields_v4(bytes)
+        val reordered = "{version: 4, terminalMode: " + sdn_encode_canonical(fields["terminalMode"]) +
+            ", targetRequest: " + sdn_encode_canonical(fields["targetRequest"]) +
+            ", kind: " + sdn_encode_canonical(fields["kind"]) + "}"
+        expect(smux_runtime_primary_request_decode_v4(reordered).is_err()).to_equal(true)
+        for bad in ["", "[]", "4", " " + bytes, bytes + "\n", bytes + " ", "x".repeat(4097), "é".repeat(2049)]:
+            expect(smux_runtime_primary_request_decode_v4(bad).is_err()).to_equal(true)
+
+    it "delegates nested target validity and canonicality and refuses unsupported modes":
+        step("delegates nested target validity and canonicality and refuses unsupported modes")
+        val request = primary_request_fixture_v4()
+        val bytes = smux_runtime_primary_request_encode_v4(request).unwrap()
+        val target_bytes = smux_runtime_bind_request_encode_v3(request.target).unwrap()
+        val invalid_target = primary_request_wire_v4(target_bytes, "helperOperationId", SdnValue.String(request.target.workload_operation_id))
+        expect(smux_runtime_primary_request_decode_v4(primary_request_wire_v4(bytes, "targetRequest", SdnValue.String(invalid_target))).is_err()).to_equal(true)
+        for nested in [target_bytes + "\n", "{}", "", target_bytes.slice(0, target_bytes.len() - 1) + ", version: 3}"]:
+            expect(smux_runtime_primary_request_decode_v4(primary_request_wire_v4(bytes, "targetRequest", SdnValue.String(nested))).is_err()).to_equal(true)
+        var changed = request
+        changed.target.expected_revision = 0u64
+        expect(smux_runtime_primary_request_encode_v4(changed).is_err()).to_equal(true)
+        for mode in ["", "output-follow", "STDIN", "raw"]:
+            changed = request
+            changed.terminal_mode = mode
+            expect(smux_runtime_primary_request_encode_v4(changed).is_err()).to_equal(true)
+            expect(smux_runtime_primary_request_decode_v4(primary_request_wire_v4(bytes, "terminalMode", SdnValue.String(mode))).is_err()).to_equal(true)
+
+    it "uses canonical bounded base64url tokens and refuses alternate textual forms":
+        step("uses canonical bounded base64url tokens and refuses alternate textual forms")
+        val request = primary_request_fixture_v4()
+        val bytes = smux_runtime_primary_request_encode_v4(request).unwrap()
+        val token = smux_runtime_primary_request_token_v4(request).unwrap()
+        expect(token).to_equal(base64url_encode(bytes))
+        expect(smux_runtime_primary_request_from_token_v4(token).unwrap()).to_equal(request)
+        for bad in ["", token + "=", " " + token, token + "\n", "%%%", "a".repeat(5463)]:
+            expect(smux_runtime_primary_request_from_token_v4(bad).is_err()).to_equal(true)
+        expect(smux_runtime_primary_request_from_token_v4(base64url_encode(bytes + "\n")).is_err()).to_equal(true)
+        expect(smux_runtime_primary_request_from_token_v4(base64url_encode("x".repeat(4097))).is_err()).to_equal(true)

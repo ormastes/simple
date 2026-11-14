@@ -1,0 +1,117 @@
+# Execution NOT_RUN. Metadata and real signed helper/journal guards only;
+# no live session, native attachment, cleanup success, or full binding replay.
+use std.spec.{describe, it, expect, step}
+use os.apps.smux.terminal_primary_service_v4.terminal_primary_progress_metadata_v4
+use os.apps.smux.runtime_primary_bind_v4.smux_primary_begin_retryable_v4
+use std.nogc_async_mut.container.terminal_session_v1.ContainerPrimaryAttachAdoptionV1
+use test.fixtures.orchestration.host_helper_fixture_v1.{host_helper_fixture_v1, host_helper_clock_v1}
+use std.nogc_sync_mut.orchestration.host_helper_owner_v1.{host_helper_prepare_v1, host_helper_begin_v1}
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.host_capacity_owner_close_v1
+use std.common.task_runner.distributed_operation_journal_v2.distributed_operation_journal_lookup_v2
+use std.common.contracts.orchestration.host_capacity_v1.host_available_capacity_v1
+use std.nogc_sync_mut.io_runtime.dir_remove
+use os.apps.smux.runtime_binding_state_v3.{SmuxRuntimeBindingDomainV4,
+    smux_binding_pending_add_v4, smux_binding_pending_resolve_v4, smux_binding_entry_blocks_v4}
+
+fn primary_guard_adoption_v4() -> ContainerPrimaryAttachAdoptionV1:
+    ContainerPrimaryAttachAdoptionV1(binding_uid: "primary-a", service_incarnation: "a".repeat(32),
+        session_id: "session-a", window_id: "window-a", pane_id: "pane-a", service_epoch: 2,
+        child_incarnation: 3)
+
+describe "smux primary lifecycle prevention guards V4":
+    it "permits same UID recovery past released tombstones but preserves retained uncertainty":
+        step("permits same UID recovery past released tombstones but preserves retained uncertainty")
+        val uid = "shared-binding"
+        expect(smux_binding_entry_blocks_v4(uid, uid, "released", false, false)).to_equal(false)
+        for status in ["adopted-opening", "cleanup-required", "unconfirmed", "helper-cleaned-awaiting-release"]:
+            expect(smux_binding_entry_blocks_v4(uid, uid, status, false, false)).to_equal(true)
+        for retained in [false, true]:
+            for pending in [false, true]:
+                if retained or pending:
+                    expect(smux_binding_entry_blocks_v4(uid, uid, "released", retained, pending)).to_equal(true)
+                expect(smux_binding_entry_blocks_v4(uid, "other-binding", "unconfirmed", retained, pending)).to_equal(false)
+
+    it "resolves primary uncertainty without clearing the same UID in output follow":
+        step("resolves primary uncertainty without clearing the same UID in output follow")
+        val uid = "shared-binding"
+        val output = smux_binding_pending_add_v4([], SmuxRuntimeBindingDomainV4.OutputFollowV3, uid)
+        val both = smux_binding_pending_add_v4(output, SmuxRuntimeBindingDomainV4.PrimaryAttachV4, uid)
+        expect(both.len()).to_equal(2)
+        expect(smux_binding_pending_add_v4(both, SmuxRuntimeBindingDomainV4.PrimaryAttachV4, uid)).to_equal(both)
+        val remaining = smux_binding_pending_resolve_v4(both, SmuxRuntimeBindingDomainV4.PrimaryAttachV4, uid)
+        expect(remaining).to_equal(output)
+        expect(remaining.len()).to_equal(1)
+        expect(smux_binding_pending_resolve_v4(remaining, SmuxRuntimeBindingDomainV4.PrimaryAttachV4, uid)).to_equal(remaining)
+        expect(smux_binding_pending_resolve_v4(remaining, SmuxRuntimeBindingDomainV4.OutputFollowV3, uid).len()).to_equal(0)
+
+    it "resolves output uncertainty without clearing the same UID in primary attach":
+        step("resolves output uncertainty without clearing the same UID in primary attach")
+        val uid = "shared-binding"
+        val primary = smux_binding_pending_add_v4([], SmuxRuntimeBindingDomainV4.PrimaryAttachV4, uid)
+        val both = smux_binding_pending_add_v4(primary, SmuxRuntimeBindingDomainV4.OutputFollowV3, uid)
+        expect(both.len()).to_equal(2)
+        expect(smux_binding_pending_add_v4(both, SmuxRuntimeBindingDomainV4.OutputFollowV3, uid)).to_equal(both)
+        val remaining = smux_binding_pending_resolve_v4(both, SmuxRuntimeBindingDomainV4.OutputFollowV3, uid)
+        expect(remaining).to_equal(primary)
+        expect(remaining.len()).to_equal(1)
+        expect(smux_binding_pending_resolve_v4(remaining, SmuxRuntimeBindingDomainV4.OutputFollowV3, uid)).to_equal(remaining)
+        expect(smux_binding_pending_resolve_v4(remaining, SmuxRuntimeBindingDomainV4.PrimaryAttachV4, uid).len()).to_equal(0)
+
+    it "allows unchanged adoption and monotonic cleanup metadata while refusing regression":
+        step("allows unchanged adoption and monotonic cleanup metadata while refusing regression")
+        val adoption = primary_guard_adoption_v4()
+        expect(terminal_primary_progress_metadata_v4(adoption, adoption, false, false).is_ok()).to_equal(true)
+        expect(terminal_primary_progress_metadata_v4(adoption, adoption, false, true).is_ok()).to_equal(true)
+        expect(terminal_primary_progress_metadata_v4(adoption, adoption, true, true).is_ok()).to_equal(true)
+        expect(terminal_primary_progress_metadata_v4(adoption, adoption, true, false).unwrap_err()).to_equal("primary pane cleanup progress regressed")
+
+    it "refuses every changed adoption field before accepting cleanup progress or replay":
+        step("refuses every changed adoption field before accepting cleanup progress or replay")
+        val adoption = primary_guard_adoption_v4()
+        for field in ["binding", "service", "session", "window", "pane", "epoch", "child"]:
+            var changed = adoption
+            if field == "binding": changed.binding_uid = "primary-b"
+            if field == "service": changed.service_incarnation = "b".repeat(32)
+            if field == "session": changed.session_id = "session-b"
+            if field == "window": changed.window_id = "window-b"
+            if field == "pane": changed.pane_id = "pane-b"
+            if field == "epoch": changed.service_epoch = adoption.service_epoch + 1
+            if field == "child": changed.child_incarnation = adoption.child_incarnation + 1
+            expect(terminal_primary_progress_metadata_v4(adoption, changed, false, false).unwrap_err()).to_equal("primary pane adoption changed")
+            expect(terminal_primary_progress_metadata_v4(adoption, changed, false, true).unwrap_err()).to_equal("primary pane adoption changed")
+            expect(terminal_primary_progress_metadata_v4(adoption, changed, true, true).unwrap_err()).to_equal("primary pane adoption changed")
+
+    it "permits begin retry only for the exact admitted envelope and blocks executing replay":
+        step("permits begin retry only for the exact admitted envelope and blocks executing replay")
+        val fixture = host_helper_fixture_v1()
+        val operation = fixture.request.operation
+        expect(smux_primary_begin_retryable_v4(fixture.owner, operation)).to_equal(false)
+        val prepared = host_helper_prepare_v1(fixture.owner, fixture.request, fixture.policy, fixture.scope,
+            host_helper_clock_v1(), host_helper_clock_v1)
+        expect(prepared.error).to_equal("")
+        expect(prepared.receipt.?).to_equal(true)
+        expect(distributed_operation_journal_lookup_v2(prepared.owner.journal, operation.id).unwrap().state).to_equal("admitted")
+        expect(smux_primary_begin_retryable_v4(prepared.owner, operation)).to_equal(true)
+        for field in ["payload", "duration", "identity"]:
+            var changed = operation
+            if field == "payload": changed.payload_digest = "0".repeat(64)
+            if field == "duration": changed.duration_ms = operation.duration_ms + 1
+            if field == "identity": changed.id = "another-helper"
+            expect(smux_primary_begin_retryable_v4(prepared.owner, changed)).to_equal(false)
+        expect(distributed_operation_journal_lookup_v2(prepared.owner.journal, operation.id).unwrap().state).to_equal("admitted")
+        val before = host_available_capacity_v1(prepared.owner.ledger).unwrap()
+        val begun = host_helper_begin_v1(prepared.owner, fixture.request, prepared.receipt.unwrap(),
+            fixture.execution_signed, fixture.execution_approval, fixture.policy, fixture.scope,
+            host_helper_clock_v1(), host_helper_clock_v1)
+        expect(begun.error).to_equal("")
+        expect(begun.lease.?).to_equal(true)
+        val sequence = begun.owner.journal.sequence
+        val revision = begun.owner.ledger.revision
+        expect(distributed_operation_journal_lookup_v2(begun.owner.journal, operation.id).unwrap().state).to_equal("executing")
+        expect(smux_primary_begin_retryable_v4(begun.owner, operation)).to_equal(false)
+        expect(begun.owner.journal.sequence).to_equal(sequence)
+        expect(begun.owner.ledger.revision).to_equal(revision)
+        expect(host_available_capacity_v1(begun.owner.ledger).unwrap().cpu_millis).to_equal(before.cpu_millis)
+        expect(host_available_capacity_v1(begun.owner.ledger).unwrap().memory_bytes).to_equal(before.memory_bytes)
+        expect(host_capacity_owner_close_v1(begun.owner).unwrap()).to_equal(true)
+        expect(dir_remove(fixture.root, true)).to_equal(true)
