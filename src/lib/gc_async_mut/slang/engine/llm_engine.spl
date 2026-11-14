@@ -15,7 +15,7 @@
 # one model and refuses a switch it cannot afford, rather than letting an HTTP
 # handler decide.
 
-use std.gc_async_mut.slang.model_executor.backend.{GgmlBackend, BackendError, BackendGenerationRequest, PrefixCacheStats, INVALID_NONNEGATIVE_I64_TEXT, parse_nonnegative_i64_text_exact, backend_error_text, open_backend, load_model, configure_matched_cpu_context, open_context, generate_observed_request, configure_prefix_cache, prefix_cache_stats, physical_page_provider_status, physical_page_allocated_bytes, physical_page_bytes, close_backend}
+use std.gc_async_mut.slang.model_executor.backend.{GgmlBackend, BackendError, BackendGenerationRequest, PrefixCacheStats, INVALID_NONNEGATIVE_I64_TEXT, parse_nonnegative_i64_text_exact, backend_error_text, open_backend, load_model, configure_matched_cpu_context, open_context, generate_observed_request, configure_prefix_cache, prefix_cache_stats, gpu_offload_supported, model_offloaded, physical_page_provider_status, physical_page_allocated_bytes, physical_page_bytes, close_backend}
 use std.gc_async_mut.slang.model_executor.paged_backend.{PhysicalModelSupport, PhysicalPageActivation, KvExecutionMode, physical_page_activation, kv_execution_mode, kv_execution_mode_text, physical_page_activation_text}
 use std.gc_async_mut.slang.model_executor.paged_executor.{PagedGenerationRequest, paged_executor_error_text, paged_executor_active, paged_executor_pool, paged_executor_telemetry, paged_executor_bind_backend, paged_executor_clear_pending_backend, paged_executor_activate_config, paged_executor_configuration_text, paged_executor_shutdown, paged_executor_generate_observed_request}
 use std.gc_async_mut.slang.model_executor.model_loader.native_formats.{NativeModel, describe_model, scan_model_root}
@@ -32,6 +32,8 @@ var ENGINE_LIB_PATH = ""
 var ENGINE_PINNED_ID = ""
 var ENGINE_N_CTX = 4096
 var ENGINE_MATCHED_CPU_THREADS = -1
+# -1 = offload every layer (default); 0 = keep the model on the CPU.
+var ENGINE_GPU_LAYERS = -1
 var ENGINE_PREFIX_CACHE_ENTRIES = 4
 var ENGINE_PREFIX_CACHE_BYTES = 2147483648
 var ENGINE_PHYSICAL_PAGES_ENABLED = false
@@ -62,6 +64,19 @@ fn engine_set_n_ctx_text(value: text) -> bool:
     if parsed <= 0:
         return false
     ENGINE_N_CTX = parsed
+    true
+
+# Negative text means "all layers"; only applies to the next model load.
+fn engine_set_gpu_layers_text(value: text) -> bool:
+    if ENGINE_BACKEND != nil:
+        return false
+    if value == "-1":
+        ENGINE_GPU_LAYERS = -1
+        return true
+    val layers = parse_nonnegative_i64_text_exact(value)
+    if layers == INVALID_NONNEGATIVE_I64_TEXT:
+        return false
+    ENGINE_GPU_LAYERS = layers
     true
 
 fn engine_set_matched_cpu_threads_text(value: text) -> bool:
@@ -122,6 +137,13 @@ fn engine_backend_available() -> bool:
 
 fn engine_loaded_model() -> text:
     ENGINE_LOADED_ID
+
+# Offload evidence read from the resident shim: (supported, model_offloaded).
+fn engine_gpu_offload_status() -> (bool, bool)?:
+    if ENGINE_BACKEND == nil:
+        return nil
+    val b = ENGINE_BACKEND!
+    (gpu_offload_supported(b), model_offloaded(b))
 
 fn engine_prefix_cache_stats() -> PrefixCacheStats?:
     if ENGINE_BACKEND == nil:
@@ -236,7 +258,7 @@ fn engine_ensure_loaded(model: NativeModel) -> Result<(), text>:
         Err(e):
             return Err("backend unavailable at " + lib_path + ": " + backend_error_text(e))
         Ok(b):
-            val gpu_layers = if ENGINE_PHYSICAL_PAGES_ENABLED or ENGINE_MATCHED_CPU_THREADS > 0: 0 else: -1
+            val gpu_layers = if ENGINE_PHYSICAL_PAGES_ENABLED or ENGINE_MATCHED_CPU_THREADS > 0: 0 else: ENGINE_GPU_LAYERS
             match load_model(b, model.entry_path, gpu_layers):
                 Err(e):
                     close_backend(b)
@@ -387,7 +409,7 @@ fn engine_complete_chat(model_root: text, model_id: text, framed: text, max_toke
         Ok(observed): Ok(observed.output)
 
 export engine_preload, engine_complete_chat
-export engine_set_lib_path, engine_set_n_ctx_text, engine_set_matched_cpu_threads_text, engine_set_physical_pages_config, engine_set_prefix_cache_limits, engine_lib_path, engine_backend_available
+export engine_set_lib_path, engine_set_gpu_layers_text, engine_gpu_offload_status, engine_set_n_ctx_text, engine_set_matched_cpu_threads_text, engine_set_physical_pages_config, engine_set_prefix_cache_limits, engine_lib_path, engine_backend_available
 export engine_loaded_model, engine_prefix_cache_stats, engine_unload, engine_ensure_loaded, engine_generate, engine_complete
 export EngineGenerationObservation, EngineGenerationRequest, engine_generate_observed, engine_generate_observed_request
 export engine_physical_page_allocated_bytes, engine_physical_page_bytes

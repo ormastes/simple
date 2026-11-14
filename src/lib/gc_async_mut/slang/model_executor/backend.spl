@@ -125,6 +125,8 @@ struct GgmlBackend:
     f_prefix_rejected_bytes: i64
     f_prefix_restore_failures: i64
     f_context_profile_configure: i64
+    f_gpu_offload_supported: i64
+    f_model_offloaded: i64
     f_request_chat_render: i64
     f_request_configure: i64
     f_request_create: i64
@@ -272,7 +274,7 @@ fn _preload_windows_dll_siblings(lib_path: text):
         # llvm-mingw builds name the llama DLL libllama.dll and import the
         # mingw C++ runtime DLLs; MSVC builds name it llama.dll.
         for dep in ["libwinpthread-1.dll", "libunwind.dll", "libc++.dll",
-                    "ggml-base.dll", "ggml-cpu.dll", "ggml.dll", "llama.dll", "libllama.dll"]:
+                    "ggml-base.dll", "ggml-cpu.dll", "ggml-vulkan.dll", "ggml.dll", "llama.dll", "libllama.dll"]:
             if file_exists(dir + dep):
                 spl_dlopen(dir + dep)
 
@@ -308,7 +310,8 @@ fn open_backend(lib_path: text) -> Result<GgmlBackend, BackendError>:
         "slang_ggml_prefix_resident_bytes", "slang_ggml_prefix_rejected_bytes",
         "slang_ggml_prefix_restore_failures",
         "slang_ggml_context_profile_configure",
-        "slang_ggml_request_chat_render"
+        "slang_ggml_request_chat_render",
+        "slang_ggml_gpu_offload_supported", "slang_ggml_model_offloaded"
     ]
     var optional: [i64] = []
     for n in optional_names:
@@ -392,6 +395,7 @@ fn open_backend(lib_path: text) -> Result<GgmlBackend, BackendError>:
         f_prefix_restore_failures: optional[6],
         f_context_profile_configure: optional[7],
         f_request_chat_render: optional[8],
+        f_gpu_offload_supported: optional[9], f_model_offloaded: optional[10],
         f_request_configure: request_addrs[0], f_request_create: request_addrs[1],
         f_request_close: request_addrs[2], f_request_cancel: request_addrs[3],
         f_request_str_reset: request_addrs[4], f_request_str_push: request_addrs[5],
@@ -681,6 +685,13 @@ fn prefix_cache_stats(b: GgmlBackend) -> PrefixCacheStats:
         restore_failures: _optional_call0(b.f_prefix_restore_failures)
     )
 
+# 1 when the shim reports real GPU offload support / a model loaded with offload; 0 when absent.
+fn gpu_offload_supported(b: GgmlBackend) -> bool:
+    _optional_call0(b.f_gpu_offload_supported) == 1
+
+fn model_offloaded(b: GgmlBackend) -> bool:
+    _optional_call0(b.f_model_offloaded) == 1
+
 fn configure_prefix_cache(b: GgmlBackend, entries: i64, bytes: i64) -> bool:
     if b.f_prefix_configure == 0:
         return false
@@ -899,6 +910,7 @@ export chat_frame
 export GgmlRequest, open_backend, load_model, open_context, open_request, close_backend_request, cancel_backend_request
 export open_physical_request, prepare_request_tokens, request_token_at
 export request_sample, request_is_eog, request_piece
+export gpu_offload_supported, model_offloaded
 export generate, generate_observed, generate_observed_request, configure_prefix_cache, prefix_cache_stats, configure_matched_cpu_context, close_backend
 export physical_page_version_probe_is_authorized, physical_page_group_status_from_probe
 export physical_page_provider_status

@@ -174,3 +174,19 @@ cd <worktree> && SIMPLE_RUST_SEED_WARNING=0 SIMPLE_TIMEOUT_SECONDS=0 \
 `doc/05_design/ml/slang/slang_master_plan.md`,
 `doc/07_guide/app/llm/local_llm_slang_caret_setup.md`,
 `doc/08_tracking/bug/caret_slang_local_inference_provider_missing_2026-08-21.md`.
+
+## GPU (Vulkan, AMD)
+
+Build and run the shim against a Vulkan llama.cpp (llvm-mingw, Radeon 8065S verified 2026-11-15):
+
+```bash
+LLAMA_ROOT=/c/dev/tools/llama.cpp LLAMA_BUILD_DIR=$LLAMA_ROOT/build-mingw-vulkan \
+  SLANG_SHIM_OUT_DIR=$PWD/build/sffi-vulkan sh scripts/check/build-slang-ggml-shim.shs
+SLANG_LIVE=1 SLANG_GPU=1 SLANG_MODEL_ROOT=C:/dev/model SLANG_GGML_LIB=build/sffi-vulkan/slang_ggml.dll \
+  bin/simple test test/03_system/lib/slang/feature/slang_gpu_offload_live_spec.spl
+```
+
+- `ggml-vulkan.dll` is copied beside the shim and preloaded by `_preload_windows_dll_siblings`.
+- Engine default is all layers on the GPU; `engine_set_gpu_layers_text("0")` (before load) keeps the CPU lane.
+- Evidence: shim `slang_ggml_gpu_offload_supported` / `slang_ggml_model_offloaded`, surfaced as `engine_gpu_offload_status()`; the llama log shows `using device Vulkan0` and `offloaded 29/29 layers to GPU`.
+- On GPU the prefix cache restores only partly (988 -> 512 re-prefilled tokens on exact repeat; first-micro-batch workaround), and wall time is noisy.
