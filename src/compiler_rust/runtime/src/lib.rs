@@ -71,6 +71,7 @@ pub mod cache_host_authority_v1;
 pub mod fork_shared_heap_v1;
 pub mod cuda_runtime;
 pub mod process_observation_v4_twins;
+pub mod process_tree_observation_v1;
 pub mod debug;
 pub mod directx_submission_twins;
 pub mod executor;
