@@ -53,11 +53,11 @@ extern fn rt_linux_group_start_v1(program: text, digest: text, args: [text],
 extern fn rt_linux_group_launch_broker_v1(program: text, digest: text,
     args: [text]) -> [i64]
 @unsafe(reason: "Linux pidfd and cgroup-v2 tree poll", capabilities: [ffi])
-extern fn rt_linux_group_poll_v1(token: i64) -> [i64]
+extern fn rt_linux_group_poll_v1(token: i64) -> [i64]?
 @unsafe(reason: "Linux cgroup.kill cancellation", capabilities: [ffi])
 extern fn rt_linux_group_cancel_v1(token: i64) -> i64
 @unsafe(reason: "Linux exact leader/cgroup cleanup", capabilities: [ffi])
-extern fn rt_linux_group_collect_v1(token: i64) -> [i64]
+extern fn rt_linux_group_collect_v1(token: i64) -> [i64]?
 @unsafe(reason: "Linux meminfo/cgroup and statvfs capacity snapshot", capabilities: [ffi])
 extern fn rt_linux_group_available_capacity_v1(path: text) -> [i64]
 @unsafe(reason: "explicit fresh empty cgroup parent acquisition", capabilities: [ffi])
@@ -172,6 +172,14 @@ fn linux_process_poll_decode_v1(fields: [i64]) -> Result<LinuxProcessPollV1, tex
         return Err("Linux terminal observation lacks complete tree reap")
     Ok(observed)
 
+# Poll, collection and its immutable recovery projection allocate a receipt.
+# Absence proves neither completion nor native absence: retain the same lease
+# so the broker can query the actual collected state on a subsequent turn.
+pub fn linux_process_observation_decode_v2(raw: [i64]?) -> Result<LinuxProcessPollV1, text>:
+    match raw:
+        case None: Err("Linux process observation receipt unavailable; lease retained")
+        case Some(fields): linux_process_poll_decode_v1(fields)
+
 fn linux_process_start_with_memory_v1(request: LinuxProcessRequestV1,
         memory_limit_bytes: i64, root: text,
         identity: text) -> Result<LinuxProcessLeaseV1, text>:
@@ -196,7 +204,7 @@ fn linux_process_start_with_memory_v1(request: LinuxProcessRequestV1,
 
 fn linux_process_poll_v1(lease: LinuxProcessLeaseV1) -> Result<LinuxProcessPollV1, text>:
     val fields = unsafe(capabilities: [ffi]): rt_linux_group_poll_v1(lease.token)
-    linux_process_poll_decode_v1(fields)
+    linux_process_observation_decode_v2(fields)
 
 fn linux_process_cancel_v1(lease: LinuxProcessLeaseV1) -> Result<bool, text>:
     val code = unsafe(capabilities: [ffi]): rt_linux_group_cancel_v1(lease.token)
@@ -209,7 +217,7 @@ fn linux_process_peak_memory_v1(lease: LinuxProcessLeaseV1) -> Result<i64, text>
 
 fn linux_process_collect_v1(lease: LinuxProcessLeaseV1) -> Result<LinuxProcessPollV1, text>:
     val fields = unsafe(capabilities: [ffi]): rt_linux_group_collect_v1(lease.token)
-    linux_process_poll_decode_v1(fields)
+    linux_process_observation_decode_v2(fields)
 
 fn linux_available_capacity_v1(path: text) -> Result<(i64, i64), text>:
     if not linux_process_absolute_v1(path): return Err("Linux capacity path must be absolute")
@@ -352,13 +360,13 @@ export LinuxProcessStreamStartV2, linux_process_stream_admit_v2
 export linux_process_launch_stream_broker_v2, linux_process_stream_start_v2
 
 @unsafe(reason: "immutable projection of the same genuinely collected cgroup receipt; no OS access", capabilities: [ffi])
-extern fn rt_linux_group_collected_stream_v2(token: i64) -> [i64]
+extern fn rt_linux_group_collected_stream_v2(token: i64) -> [i64]?
 @unsafe(reason: "release inherited stream endpoints only when this broker has no live native group lease", capabilities: [ffi])
 extern fn rt_linux_group_stream_release_inherited_v2() -> i64
 
 fn linux_process_collected_stream_v2(lease: LinuxProcessLeaseV1) -> Result<LinuxProcessPollV1, text>:
     val fields = unsafe(capabilities: [ffi]): rt_linux_group_collected_stream_v2(lease.token)
-    linux_process_poll_decode_v1(fields)
+    linux_process_observation_decode_v2(fields)
 
 fn linux_process_stream_release_inherited_v2() -> Result<(), text>:
     val status = unsafe(capabilities: [ffi]): rt_linux_group_stream_release_inherited_v2()
