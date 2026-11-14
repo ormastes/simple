@@ -104,3 +104,11 @@ SPipe lane. Never replace explicit fail placeholders with false-green passes.
 - `RDOC_WEB_CHROME_BIN` was honoured only in `RDOC_WEB_TOOL_SEARCH=isolated`
   mode; fixed. The Chrome side still ends `vulkan-angle-unavailable` on a host
   with no display and no Xvfb.
+- **The replay inspector reads command names from `<chunk …>` opening tags
+  only** (`_chunk_tags`, one `split` pass). It used to count `name="vkCmd…"`
+  anywhere, so `<metadata name="vkCmdDispatch">` passed as a dispatch.
+  Real capture check (web7 `overview.simple.rdc` → 1.8 MB XML, 1637 chunks):
+  pass, 205 dispatches, 5 pipelines, 5 shaders, 33 resources, 8.8 s wall.
+- `renderdoc_simple_gate_spec` needs a runnable inspector binary: in a
+  worktree with no `bin/simple` set `RDOC_REPLAY_SIMPLE_BIN`, otherwise every
+  replay reason is `simple-replay-inspector-missing`.
