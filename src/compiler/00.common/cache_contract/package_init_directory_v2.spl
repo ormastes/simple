@@ -7,7 +7,7 @@ use std.common.structural.wire.{wire_put_u64}
 use compiler.common.cache.canonical_identity.{canonical_identity_text_lt}
 use compiler.common.cache_contract.package_init_tld_v1.{PackageInitTldV1,
     package_init_tld_valid_v1, package_init_tld_schema_v1,
-    package_init_tld_encode_v1, package_init_tagged_sha256_valid_v2}
+    package_init_tld_encode_v1, package_init_tld_encode_v3, package_init_tagged_sha256_valid_v2}
 use compiler.common.cache_contract.physical_tld_v1.{
     three_payload_contract_digest_valid_v1, three_payload_contract_text_valid_v1,
     three_payload_contract_max_items_v1, three_payload_contract_budget_v1,
@@ -122,6 +122,7 @@ fn _directory_facts_match_v2(value: PackageInitTldV1, facts: DirectoryJoinPointF
 pub fn package_init_directory_produce_v2(base: PackageInitTldV1,
         members: [FileTldrDigestV2], facts: DirectoryJoinPointFactsV1,
         compiler_provider_id: text) -> Result<PackageInitTldV1, text>:
+    if base.inline_join_point_facts != nil: return Err("directory-v2-inline-facts-unsupported")
     if not package_init_tld_valid_v1(base): return Err("directory-package-invalid")
     if not three_payload_contract_text_valid_v1(compiler_provider_id, false):
         return Err("directory-provider-missing")
@@ -162,6 +163,48 @@ pub fn package_init_directory_identity_v2(value: PackageInitTldV1) -> text?:
     bytes = three_payload_contract_put_text_v1(bytes, "directory-tldr-identity/v2")
     bytes = three_payload_contract_put_text_v1(bytes, value.package_id)
     # Explicit absence is distinct from any real parent scope digest.
+    bytes = three_payload_contract_put_text_v1(bytes, value.parent_scope_digest ?? "")
+    bytes = three_payload_contract_put_digest_v1(bytes, value.membership_root_digest)
+    bytes = three_payload_contract_put_text_v1(bytes, value.compiler_provider_id.unwrap())
+    bytes = three_payload_contract_put_text_v1(bytes, value.active_guard_root_digest.unwrap())
+    Some(sha256_u8_hex(bytes))
+
+
+# Schema 3 extends the existing producer; it does not manufacture missing
+# category coverage. The caller still supplies a complete, fresh base contract.
+pub fn package_init_directory_produce_v3(base: PackageInitTldV1,
+        members: [FileTldrDigestV2], facts: DirectoryJoinPointFactsV1,
+        compiler_provider_id: text) -> Result<PackageInitTldV1, text>:
+    if not package_init_tld_valid_v1(base): return Err("directory-package-invalid")
+    val without_inline = PackageInitTldV1(..base, inline_join_point_facts: nil)
+    val rooted = package_init_directory_produce_v2(without_inline, members, facts,
+        compiler_provider_id)?
+    val result = PackageInitTldV1(..rooted, inline_join_point_facts: Some(facts))
+    if package_init_tld_schema_v1(result) != 3 or not package_init_tld_valid_v1(result):
+        return Err("directory-inline-facts-noncanonical-or-over-budget")
+    Ok(result)
+
+# A stored complete flag never establishes current source authority. expected
+# and facts must be supplied by the trusted current semantic producer. Compare
+# the entire inline record, including body facets excluded from selection keys.
+pub fn package_init_directory_compare_v3(stored: PackageInitTldV1,
+        expected: PackageInitTldV1, facts: DirectoryJoinPointFactsV1) -> DirectoryTldrViewV2?:
+    if package_init_tld_schema_v1(stored) != 3 or package_init_tld_schema_v1(expected) != 3 or
+            not package_init_tld_valid_v1(stored) or not package_init_tld_valid_v1(expected): return nil
+    if not _directory_facts_match_v2(expected, facts): return nil
+    val expected_bytes = package_init_tld_encode_v3(expected)
+    if expected_bytes.len() == 0: return nil
+    val current = PackageInitTldV1(..expected, inline_join_point_facts: Some(facts))
+    if package_init_tld_encode_v3(current) != expected_bytes or
+            package_init_tld_encode_v3(stored) != expected_bytes: return nil
+    Some(DirectoryTldrViewV2(package: stored, facts: facts,
+        output_digest: sha256_u8_hex(expected_bytes)))
+
+pub fn package_init_directory_identity_v3(value: PackageInitTldV1) -> text?:
+    if package_init_tld_schema_v1(value) != 3 or not package_init_tld_valid_v1(value): return nil
+    var bytes: [u8] = []
+    bytes = three_payload_contract_put_text_v1(bytes, "directory-tldr-identity/v3")
+    bytes = three_payload_contract_put_text_v1(bytes, value.package_id)
     bytes = three_payload_contract_put_text_v1(bytes, value.parent_scope_digest ?? "")
     bytes = three_payload_contract_put_digest_v1(bytes, value.membership_root_digest)
     bytes = three_payload_contract_put_text_v1(bytes, value.compiler_provider_id.unwrap())
