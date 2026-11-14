@@ -230,7 +230,7 @@ if ! run_selftest; then
     exit 2
 fi
 if [ "$SELFTEST" -eq 1 ]; then
-    echo "PASS — 5 selftest fixture(s) checked, differ discriminates and zero-pixel-render is named"
+    echo "PASS — 7 selftest fixture(s) checked, differ discriminates, zero-pixel-render is named, ratchet names regressions"
     exit 0
 fi
 
@@ -244,6 +244,25 @@ if [ "$DIFF_ONLY" -eq 0 ] && [ "$SIMPLE_ONLY" -eq 0 ]; then
         echo "ERROR — nothing was checked (no Chrome at /Applications/Google Chrome.app/Contents/MacOS/Google Chrome, /usr/bin/google-chrome or /usr/bin/chromium)"
         exit 2
     }
+    # `--headless=new --window-size=W,H` sizes the WINDOW; the page viewport is
+    # shorter by the browser UI (measured 87 rows on Chromium 131: inner 900x673
+    # for 900x760) and the screenshot pads the rest. A page taller than the
+    # viewport then compares Simple content against padding. Probe the deficit
+    # and capture a window that much taller so the viewport is exactly H; the
+    # differ is told the top H rows are page (--ref-viewport-rows).
+    probe="$OUT/.viewport-probe.html"
+    printf '<body><script>document.body.append("inner_h="+innerHeight)</script>' > "$probe"
+    inner_h=$(perl -e 'alarm shift; exec @ARGV' "$CHROME_TIMEOUT" \
+        "$CHROME_BIN" --headless=new --disable-gpu ${CHROME_NO_SANDBOX:+--no-sandbox} \
+        --user-data-dir="$OUT/.viewport-probe-profile" --window-size="$WIDTH,$HEIGHT" \
+        --dump-dom "file://$(cd "$OUT" && pwd)/.viewport-probe.html" 2>/dev/null \
+        | sed -n 's/.*inner_h=\([0-9][0-9]*\).*/\1/p' | tail -1)
+    case "$inner_h" in
+        '') echo "ERROR — nothing was checked (Chrome viewport probe returned no inner height)"; exit 2 ;;
+    esac
+    VIEWPORT_DEFICIT=$((HEIGHT - inner_h))
+    [ "$VIEWPORT_DEFICIT" -ge 0 ] || VIEWPORT_DEFICIT=0
+    echo "chrome_viewport_deficit=$VIEWPORT_DEFICIT window=${WIDTH}x$((HEIGHT + VIEWPORT_DEFICIT)) viewport=${WIDTH}x$HEIGHT"
 fi
 
 captured=0
@@ -273,7 +292,7 @@ for page in $PAGES; do
             --no-first-run --no-default-browser-check --disable-extensions \
             --force-device-scale-factor=1 --virtual-time-budget=3000 \
             --user-data-dir="$c_profile" \
-            --window-size="$WIDTH,$HEIGHT" \
+            --window-size="$WIDTH,$((HEIGHT + VIEWPORT_DEFICIT))" \
             --screenshot="$c_shot" "$c_url" >/dev/null 2>&1
         chrome_rc=$?
         if [ ! -s "$OUT/$page.chrome.png" ]; then
@@ -321,7 +340,7 @@ fi
 # ---------------------------------------------------------------------------
 # Diff
 # ---------------------------------------------------------------------------
-diff_out=$("$SIMPLE_BIN" run src/app/ui/chrome_showcase/pixel_diff.spl "$OUT" $PAGES 2>/dev/null)
+diff_out=$("$SIMPLE_BIN" run src/app/ui/chrome_showcase/pixel_diff.spl --ref-viewport-rows "$HEIGHT" "$OUT" $PAGES 2>/dev/null)
 diff_rc=$?
 if [ "$diff_rc" -ne 0 ]; then
     echo "ERROR — nothing was checked (differ exited $diff_rc)"
