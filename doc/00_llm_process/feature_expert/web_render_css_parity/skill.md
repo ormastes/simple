@@ -1701,3 +1701,12 @@ never cache an answer computed while exhausted) —
   table. A shortcut keyword above the table (`red` = #dc3232 survived
   for months) silently repaints every page; pin new forms in
   `css_color_parse_chrome159_spec.spl` against `getComputedStyle`.
+- **Trap — a collapsed cell's box overlaps its neighbour.** In
+  `border-collapse: collapse` the tracks hold half of each shared border, so
+  the cell box is laid out from `cell_x - (b+1)/2` to `cell_right + b/2`
+  (layout_engine table loop) and paints its full border with the ordinary
+  paint path. Moving the border paint instead of the box leaves the content
+  one pixel off (seen and reverted). Column edges round half up in both
+  `table_distribute_auto_columns` and the fixed split; probe a fraction
+  >= .5 when pinning one, or floor passes too
+  (`table_collapsed_border_paint_chrome159_spec.spl`).

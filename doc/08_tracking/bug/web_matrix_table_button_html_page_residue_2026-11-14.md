@@ -183,3 +183,23 @@ max-content of mixed inline content, control UA font reset, `h6` margins
   the alpha of `rgb(r,g,b,a)` and `hsl(120deg ...)` (was no colour). A
   `box-shadow` colour accepted only `black` / `white` / `red` as keywords
   and now takes any CSS colour. Spec: `css_color_parse_chrome159_spec.spl`.
+- **Collapsed table geometry fixed (2026-11-15, paint-page lane).** A
+  `border-collapse: collapse` cell box sat inside its whole border, so every
+  shared edge painted as two lines one pixel apart and the outer edges and
+  the content sat one pixel right of / below Chrome's; the grid filled the
+  whole table width instead of 0.5px in from each side, and the column
+  distributor handed the integer leftover to the first column (Chrome's
+  170.38px edge painted at 171). Cell boxes now reach over the outer half
+  of their own borders ((b+1)/2 before, b/2 after) so neighbours overlap on
+  one line, the grid is `iw - (b+1)/2 - b/2` wide, and auto and fixed
+  column edges round half up. Spec:
+  `table_collapsed_border_paint_chrome159_spec.spl` (5 ACs, red at
+  b8af2f7b53e). In-development `table_fractional_column_width_spec.spl`
+  gained its `width:200px` 99/95 row (the 3x2 67px row still fails).
+- **Open: a collapsed table with a `colspan` cell (or a min/max-width cell)
+  takes no table geometry at all.** `explicit_auto_table_column_offsets`
+  returns `[]` for those without authored spacing, and a collapsed table
+  has no spacing, so the rows lay out as plain blocks: Chrome paints
+  `<tr><td colspan=2>`+`<tr><td><td>` in a 400px table with lines at
+  y = 0, 41, 82 and x = 0, 170, 399; Simple at y = 0, 41, 42, 83, 84, 125
+  and no middle column line (unchanged by this lane).

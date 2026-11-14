@@ -1,0 +1,128 @@
+"""
+## Purpose and audience
+Purpose: Pin the geometry of a `border-collapse: collapse` table on Chrome's
+pixels. Every cell box sat inside its own whole border, so each shared edge
+painted as two lines one pixel apart, the outer edges and the cell content sat
+one pixel right of and below Chrome's, the grid was one pixel too wide for the
+table, and a fractional column edge was rounded by handing the leftover pixel
+to the first column. On the catalog `css-paint` page that table was the
+largest non-glyph mismatch (about 4,000 px).
+Audience: browser-engine table layout maintainers.
+
+Chrome oracle (Chrome 159.0.8154.6 headless shell, `--hide-scrollbars
+--force-device-scale-factor=1 --window-size=420,140`, `body{margin:0;
+background:#fff}`, `table{width:400px;border-collapse:collapse}`,
+`td{padding:8px;border:1px solid #cbd5e1}`, screenshot pixels, listed as
+`position:colour` wherever the colour changes):
+
+Page 1: three rows of two cells holding a 100px (#112233) and a 140px
+(#445566) wide, 24px tall block, then a 10px #778899 block after the table.
+| probe            | Chrome |
+|------------------|--------|
+| row y = 20       | 0:cbd5e1 1:ffffff 9:112233 109:ffffff 170:cbd5e1 171:ffffff 179:445566 319:ffffff 399:cbd5e1 400:ffffff |
+| column x = 60    | 0:cbd5e1 1:ffffff 9:112233 33:ffffff 41:cbd5e1 42:ffffff 50:112233 74:ffffff 82:cbd5e1 83:ffffff 91:112233 115:ffffff 123:cbd5e1 124:778899 134:ffffff |
+
+The same page with a leading empty `<p>` (the text-document Draw IR lane) is
+byte-identical in Chrome.
+
+Page 2: two rows of three cells holding 50px, 80px and 30px wide blocks. The
+column edges are at 126.70 and 310.12 px, so round-half-up and floor differ:
+| probe            | Chrome |
+|------------------|--------|
+| row y = 20       | non-white at x = 0, 127, 310, 399 |
+
+Page 3: page 1 with `table-layout:fixed`. The 399px grid splits at 199.5 px:
+| probe            | Chrome |
+|------------------|--------|
+| row y = 20       | 0:cbd5e1 1:ffffff 9:112233 109:ffffff 200:cbd5e1 201:ffffff 209:445566 349:ffffff 399:cbd5e1 400:ffffff |
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-TABLE-COLLAPSED-BORDER-PAINT-001 — collapsed table cells share one border line per edge and place their content where Chrome 159 does.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_engine.spl 1%
+# @cover src/lib/gc_async_mut/gpu/browser_engine/layout_table.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_html_to_pixels_with_engine2d_backend}
+
+val PAGE: text = "<!doctype html><html><head><style>body{{margin:0;background:#fff}}table{{width:400px;border-collapse:collapse}}td{{padding:8px;border:1px solid #cbd5e1}}</style></head><body><table><tr><td><div style=\"width:100px;height:24px;background:#112233\"></div></td><td><div style=\"width:140px;height:24px;background:#445566\"></div></td></tr><tr><td><div style=\"width:100px;height:24px;background:#112233\"></div></td><td><div style=\"width:140px;height:24px;background:#445566\"></div></td></tr><tr><td><div style=\"width:100px;height:24px;background:#112233\"></div></td><td><div style=\"width:140px;height:24px;background:#445566\"></div></td></tr></table><div style=\"height:10px;background:#778899\"></div></body></html>"
+
+val PAGE_TEXT_DOC: text = "<!doctype html><html><head><style>body{{margin:0;background:#fff}}table{{width:400px;border-collapse:collapse}}td{{padding:8px;border:1px solid #cbd5e1}}</style></head><body><p style=\"margin:0;height:0\"></p><table><tr><td><div style=\"width:100px;height:24px;background:#112233\"></div></td><td><div style=\"width:140px;height:24px;background:#445566\"></div></td></tr><tr><td><div style=\"width:100px;height:24px;background:#112233\"></div></td><td><div style=\"width:140px;height:24px;background:#445566\"></div></td></tr><tr><td><div style=\"width:100px;height:24px;background:#112233\"></div></td><td><div style=\"width:140px;height:24px;background:#445566\"></div></td></tr></table><div style=\"height:10px;background:#778899\"></div></body></html>"
+
+val PAGE_FIXED: text = "<!doctype html><html><head><style>body{{margin:0;background:#fff}}table{{width:400px;border-collapse:collapse;table-layout:fixed}}td{{padding:8px;border:1px solid #cbd5e1}}</style></head><body><table><tr><td><div style=\"width:100px;height:24px;background:#112233\"></div></td><td><div style=\"width:140px;height:24px;background:#445566\"></div></td></tr><tr><td><div style=\"width:100px;height:24px;background:#112233\"></div></td><td><div style=\"width:140px;height:24px;background:#445566\"></div></td></tr><tr><td><div style=\"width:100px;height:24px;background:#112233\"></div></td><td><div style=\"width:140px;height:24px;background:#445566\"></div></td></tr></table><div style=\"height:10px;background:#778899\"></div></body></html>"
+
+val PAGE_THREE: text = "<!doctype html><html><head><style>body{{margin:0;background:#fff}}table{{width:400px;border-collapse:collapse}}td{{padding:8px;border:1px solid #cbd5e1}}</style></head><body><table><tr><td><div style=\"width:50px;height:24px\"></div></td><td><div style=\"width:80px;height:24px\"></div></td><td><div style=\"width:30px;height:24px\"></div></td></tr><tr><td><div style=\"width:50px;height:24px\"></div></td><td><div style=\"width:80px;height:24px\"></div></td><td><div style=\"width:30px;height:24px\"></div></td></tr></table></body></html>"
+
+fn hex6(c: u32) -> text:
+    val digits = "0123456789abcdef"
+    var out = ""
+    var shift = 20
+    while shift >= 0:
+        val d = ((c >> (shift as u32)) & 15u32) as i32
+        out = out + digits.substring(d, d + 1)
+        shift = shift - 4
+    out
+
+# `position:colour` at every colour change along row y (or column x).
+fn row_runs(px: [u32], y: i32) -> text:
+    var out = ""
+    var prev = 0x1000000u32
+    var x = 0
+    while x < 420:
+        val c = px[x + y * 420] & 0xFFFFFFu32
+        if c != prev:
+            out = out + " " + x.to_text() + ":" + hex6(c)
+            prev = c
+        x = x + 1
+    out
+
+fn column_runs(px: [u32], x: i32) -> text:
+    var out = ""
+    var prev = 0x1000000u32
+    var y = 0
+    while y < 140:
+        val c = px[x + y * 420] & 0xFFFFFFu32
+        if c != prev:
+            out = out + " " + y.to_text() + ":" + hex6(c)
+            prev = c
+        y = y + 1
+    out
+
+fn row_hits(px: [u32], y: i32) -> text:
+    var out = ""
+    var x = 0
+    while x < 420:
+        if (px[x + y * 420] & 0xFFFFFFu32) != 0xFFFFFFu32:
+            out = out + " " + x.to_text()
+        x = x + 1
+    out
+
+val CHROME_ROW: text = " 0:cbd5e1 1:ffffff 9:112233 109:ffffff 170:cbd5e1 171:ffffff 179:445566 319:ffffff 399:cbd5e1 400:ffffff"
+val CHROME_COLUMN: text = " 0:cbd5e1 1:ffffff 9:112233 33:ffffff 41:cbd5e1 42:ffffff 50:112233 74:ffffff 82:cbd5e1 83:ffffff 91:112233 115:ffffff 123:cbd5e1 124:778899 134:ffffff"
+
+describe "collapsed table geometry":
+    it "AC-1: rows share one border line, content and the next block sit on Chrome's rows":
+        val px = simple_web_render_html_to_pixels_with_engine2d_backend(PAGE, 420, 140, "cpu_simd")
+        step("Chrome 159: lines at y = 0, 41, 82, 123; content from y = 9, 50, 91; the next block at y = 124")
+        expect(column_runs(px, 60)).to_equal(CHROME_COLUMN)
+
+    it "AC-2: columns share one border line inside the 400px table, content on Chrome's columns":
+        val px = simple_web_render_html_to_pixels_with_engine2d_backend(PAGE, 420, 140, "cpu_simd")
+        step("Chrome 159: lines at x = 0, 170, 399; content from x = 9 and 179")
+        expect(row_runs(px, 20)).to_equal(CHROME_ROW)
+
+    it "AC-3: the text-document Draw IR lane lays the table out the same":
+        val px = simple_web_render_html_to_pixels_with_engine2d_backend(PAGE_TEXT_DOC, 420, 140, "cpu_simd")
+        step("Chrome 159: byte-identical to the page without the leading <p>")
+        expect(column_runs(px, 60)).to_equal(CHROME_COLUMN)
+        expect(row_runs(px, 20)).to_equal(CHROME_ROW)
+
+    it "AC-4: a fractional column edge rounds half up, not to the first column":
+        val px = simple_web_render_html_to_pixels_with_engine2d_backend(PAGE_THREE, 420, 140, "cpu_simd")
+        step("Chrome 159: edges at 126.70 and 310.12 px paint at x = 127 and 310")
+        expect(row_hits(px, 20)).to_equal(" 0 127 310 399")
+
+    it "AC-5: a fixed-layout collapsed table splits its 399px grid at Chrome's 200":
+        val px = simple_web_render_html_to_pixels_with_engine2d_backend(PAGE_FIXED, 420, 140, "cpu_simd")
+        step("Chrome 159: the 199.5px column edge paints at x = 200, content from x = 209")
+        expect(row_runs(px, 20)).to_equal(" 0:cbd5e1 1:ffffff 9:112233 109:ffffff 200:cbd5e1 201:ffffff 209:445566 349:ffffff 399:cbd5e1 400:ffffff")
