@@ -1,20 +1,80 @@
-"""Stable interactive console capability. Select a qualified native provider."""
+"""Stable interactive console capability. Select a qualified native provider.
+
+Unix provider: the controlling console is the process's own stdin/stdout tty.
+open() takes exclusive ownership and enters raw mode (cfmakeraw via the
+runtime's saved-termios owner); close() restores the saved termios. Windows
+has no provider in this composition and keeps refusing open().
+See doc/08_tracking/bug/terminal_console_no_unix_provider_2026-11-14.md.
+"""
+use std.nogc_sync_mut.io_runtime.{platform_name}
+
+@unsafe(reason: "raw runtime ABI: stdin termios raw mode", capabilities: [ffi])
+extern fn rt_terminal_enable_raw_mode() -> bool
+@unsafe(reason: "raw runtime ABI: restore saved stdin termios", capabilities: [ffi])
+extern fn rt_terminal_disable_raw_mode() -> bool
+@unsafe(reason: "raw runtime ABI: stdin is a tty", capabilities: [ffi])
+extern fn rt_terminal_is_tty() -> bool
+@unsafe(reason: "raw runtime ABI: terminal size", capabilities: [ffi])
+extern fn rt_terminal_get_size() -> (i64, i64)
+@unsafe(reason: "raw runtime ABI: partial binary stdin read", capabilities: [ffi])
+extern fn rt_stdin_read(size: i64) -> [u8]
+@unsafe(reason: "raw runtime ABI: terminal write", capabilities: [ffi])
+extern fn rt_term_write(data: text) -> i64
+@unsafe(reason: "raw runtime ABI: terminal flush", capabilities: [ffi])
+extern fn rt_term_flush() -> i32
+
+val UNAVAILABLE = "interactive console provider unavailable in this runtime composition"
+val UNIX_HANDLE: i64 = 1
+
+# Single exclusive owner: 0 = free, UNIX_HANDLE = opened and in raw mode.
+var console_owner: i64 = 0
+
+fn unix_provider() -> bool:
+    not platform_name().lower().contains("windows")
+
+fn owns(handle: i64) -> bool:
+    console_owner != 0 and handle == console_owner
 
 pub fn open() -> Result<i64, text>:
-    Err("interactive console provider unavailable in this runtime composition")
+    if not unix_provider(): return Err(UNAVAILABLE)
+    if console_owner != 0: return Err("interactive console already owned")
+    unsafe(capabilities: [ffi]):
+        if not rt_terminal_is_tty(): return Err("stdin is not a terminal")
+        if not rt_terminal_enable_raw_mode(): return Err("failed to enter raw mode")
+    console_owner = UNIX_HANDLE
+    Ok(UNIX_HANDLE)
 
 pub fn read(handle: i64, max_bytes: i64) -> Result<[u8], text>:
-    Err("interactive console provider unavailable in this runtime composition")
+    if not owns(handle): return Err("invalid console handle")
+    if max_bytes <= 0: return Ok([])
+    unsafe(capabilities: [ffi]):
+        return Ok(rt_stdin_read(max_bytes))
 
 pub fn size(handle: i64) -> Result<[i64], text>:
-    Err("interactive console provider unavailable in this runtime composition")
+    if not owns(handle): return Err("invalid console handle")
+    unsafe(capabilities: [ffi]):
+        val (cols, rows) = rt_terminal_get_size()
+        if cols <= 0 or rows <= 0: return Err("terminal size unavailable")
+        return Ok([cols, rows])
 
 pub fn write(handle: i64, data: text) -> Result<bool, text>:
-    Err("interactive console provider unavailable in this runtime composition")
+    if not owns(handle): return Err("invalid console handle")
+    unsafe(capabilities: [ffi]):
+        if data.len() > 0 and rt_term_write(data) <= 0: return Err("console write failed")
+        if rt_term_flush() != 0: return Err("console flush failed")
+    Ok(true)
 
-pub fn close(handle: i64) -> bool: false
+pub fn close(handle: i64) -> bool:
+    if not owns(handle): return false
+    var restored = false
+    unsafe(capabilities: [ffi]):
+        restored = rt_terminal_disable_raw_mode()
+    if restored: console_owner = 0
+    restored
 
-pub fn cleanup() -> bool: true
+pub fn cleanup() -> bool:
+    if console_owner == 0: return true
+    close(console_owner)
 
 pub fn clipboard_write(handle: i64, data: text) -> Result<bool, text>:
     Err("interactive clipboard provider unavailable in this runtime composition")
