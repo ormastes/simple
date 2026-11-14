@@ -1,0 +1,58 @@
+"""
+## smux pane running the Simple shell (shs)
+
+A pane started with the `shs` shell kind takes the same commands on every host
+(`echo`, `pwd`, `expr`), so one script drives a pane on Windows, macOS, Linux
+and SimpleOS without a per-platform branch. This spec runs the hosted shs
+through the real SOSIX PTY and reads the answers off the pane.
+
+Design: doc/05_design/pty_shell_kinds_shs_default.md
+"""
+use std.spec
+use os.apps.smux.api.{smux_reset_for_test, smux_create_session, smux_list_windows, smux_list_panes,
+    smux_resize, smux_pane_spawn_pty, smux_pane_close_pty, smux_send_command, smux_capture_history}
+use std.sosix.pty.{sosix_pty_shell_command_v1, sosix_pty_default_shell, SOSIX_PTY_SHELL_SHS,
+    SOSIX_PTY_SHELL_NATIVE}
+use std.sosix.environment.{sosix_env_set, sosix_env_remove}
+use std.sosix.time.{sosix_sleep_ms, sosix_time_now_monotonic_ms}
+use app.io.cli_ops.{cli_current_exe_path}
+use std.nogc_sync_mut.sffi.env.{env_cwd_raw}
+
+fn _shs_launcher() -> text:
+    cli_current_exe_path() + " " + env_cwd_raw() + "/src/app/shs/main.spl"
+
+fn _wait_for(session: text, window: text, pane: text, needle: text, budget_ms: i64) -> bool:
+    val deadline = sosix_time_now_monotonic_ms() + budget_ms
+    while sosix_time_now_monotonic_ms() < deadline:
+        val cap = smux_capture_history(session, window, pane, 200, true)
+        if cap.is_ok() and cap.unwrap().content.contains(needle): return true
+        sosix_sleep_ms(50)
+    false
+
+describe "smux pane with the shs shell kind":
+    it "selects shs only when asked on a host, and keeps the native shell otherwise":
+        val _clear = sosix_env_remove("SIMPLE_PTY_SHELL")
+        val _set = sosix_env_set("SIMPLE_SHS_COMMAND", _shs_launcher())
+        expect(sosix_pty_default_shell()).to_equal(sosix_pty_shell_command_v1(SOSIX_PTY_SHELL_NATIVE).unwrap())
+        val _ask = sosix_env_set("SIMPLE_PTY_SHELL", "shs")
+        expect(sosix_pty_default_shell()).to_equal(_shs_launcher())
+        val _done = sosix_env_remove("SIMPLE_PTY_SHELL")
+
+    it "answers common commands in a real PTY pane and exits cleanly":
+        step("start a pane on the hosted shs through the SOSIX PTY")
+        val _set = sosix_env_set("SIMPLE_SHS_COMMAND", _shs_launcher())
+        smux_reset_for_test()
+        val s = smux_create_session("shs")
+        val w = smux_list_windows(s.id)[0]
+        val p = smux_list_panes(s.id, w.id)[0]
+        val _r = smux_resize(s.id, w.id, p.id, 120, 24)
+        val shell = sosix_pty_shell_command_v1(SOSIX_PTY_SHELL_SHS).unwrap()
+        expect(smux_pane_spawn_pty(s.id, w.id, p.id, shell).is_ok()).to_equal(true)
+        expect(_wait_for(s.id, w.id, p.id, "SimpleOS Shell", 60000)).to_equal(true)
+        step("send the same commands any host would send")
+        # The answer 42 never appears in the typed text, so PTY echo cannot satisfy it.
+        expect(smux_send_command(s.id, w.id, p.id, "expr 40 + 2").is_ok()).to_equal(true)
+        expect(_wait_for(s.id, w.id, p.id, "\n42", 20000)).to_equal(true)
+        expect(smux_send_command(s.id, w.id, p.id, "exit").is_ok()).to_equal(true)
+        expect(_wait_for(s.id, w.id, p.id, "logout", 20000)).to_equal(true)
+        val _cp = smux_pane_close_pty(s.id, w.id, p.id)

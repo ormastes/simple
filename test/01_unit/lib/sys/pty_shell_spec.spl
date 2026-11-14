@@ -1,0 +1,45 @@
+"""
+## PTY shell kinds
+
+A pane runs one of two shell kinds: `shs`, the Simple shell with the same
+commands on every OS, or `native`, the host's own shell. This spec pins which
+command line each kind resolves to per platform, for maintainers of smux,
+Caret and the SOSIX PTY facade.
+
+Design: doc/05_design/pty_shell_kinds_shs_default.md
+"""
+use std.spec
+use std.sys.pty_shell.{pty_shell_command_for_v1, pty_shell_kind_for_v1, pty_default_shell_for_v1,
+    PTY_SHELL_SHS, PTY_SHELL_NATIVE, PTY_SHS_SIMPLEOS_COMMAND}
+
+describe "PTY shell kinds":
+    it "resolves the native shell per host and refuses it on SimpleOS":
+        expect(pty_shell_command_for_v1(PTY_SHELL_NATIVE, "macos", "").unwrap()).to_equal("/bin/sh")
+        expect(pty_shell_command_for_v1(PTY_SHELL_NATIVE, "linux", "").unwrap()).to_equal("/bin/sh")
+        expect(pty_shell_command_for_v1(PTY_SHELL_NATIVE, "freebsd", "").unwrap()).to_equal("/bin/sh")
+        expect(pty_shell_command_for_v1(PTY_SHELL_NATIVE, "Windows", "").unwrap()).to_equal("cmd.exe")
+        expect(pty_shell_command_for_v1(PTY_SHELL_NATIVE, "simpleos", "x").unwrap_err()).to_equal(
+            "pty-shell-native-unavailable-on-simpleos")
+
+    it "resolves shs to the hosted launcher on hosts and the built-in shell on SimpleOS":
+        expect(pty_shell_command_for_v1(PTY_SHELL_SHS, "macos", "simple shs.spl").unwrap()).to_equal("simple shs.spl")
+        expect(pty_shell_command_for_v1(PTY_SHELL_SHS, "windows", "simple.exe shs.spl").unwrap()).to_equal(
+            "simple.exe shs.spl")
+        expect(pty_shell_command_for_v1(PTY_SHELL_SHS, "simpleos", "").unwrap()).to_equal(PTY_SHS_SIMPLEOS_COMMAND)
+        expect(pty_shell_command_for_v1(PTY_SHELL_SHS, "linux", "").unwrap_err()).to_equal(
+            "pty-shell-shs-launcher-unresolved")
+        expect(pty_shell_command_for_v1("fish", "linux", "x").unwrap_err()).to_equal("pty-shell-kind-unknown")
+
+    it "defaults SimpleOS to shs and hosts to native unless shs is requested":
+        expect(pty_shell_kind_for_v1("", "simpleos")).to_equal(PTY_SHELL_SHS)
+        expect(pty_shell_kind_for_v1("native", "simpleos")).to_equal(PTY_SHELL_SHS)
+        expect(pty_shell_kind_for_v1("", "macos")).to_equal(PTY_SHELL_NATIVE)
+        expect(pty_shell_kind_for_v1("shs", "windows")).to_equal(PTY_SHELL_SHS)
+        expect(pty_shell_kind_for_v1("garbage", "linux")).to_equal(PTY_SHELL_NATIVE)
+
+    it "falls back to the native shell on a host whose shs launcher is unknown, never on SimpleOS":
+        expect(pty_default_shell_for_v1("shs", "macos", "simple shs.spl")).to_equal("simple shs.spl")
+        expect(pty_default_shell_for_v1("shs", "macos", "")).to_equal("/bin/sh")
+        expect(pty_default_shell_for_v1("shs", "windows", "")).to_equal("cmd.exe")
+        expect(pty_default_shell_for_v1("", "linux", "simple shs.spl")).to_equal("/bin/sh")
+        expect(pty_default_shell_for_v1("native", "simpleos", "")).to_equal(PTY_SHS_SIMPLEOS_COMMAND)
