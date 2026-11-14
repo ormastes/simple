@@ -484,6 +484,35 @@ impl HirLowering:
 
     # A discard is an assignment target, never a variable read. Keep this
     # shared by structured statements and the flat parser's expression form.
+    # E_IMMUTABLE_WRITE (IMM-01): a write whose place roots at a symbol declared
+    # `Immutable<T>` (field / index chain, transitively). A plain rebinding of
+    # the symbol itself is not a write through the view and stays a separate rule.
+    me flag_immutable_view_write(lhs: HirExpr, span: Span):
+        if self.immutable_view_symbols.len() == 0:
+            return
+        var cursor = lhs
+        var through_member = false
+        var steps = 0
+        while steps < 64:
+            steps = steps + 1
+            match cursor.kind:
+                case HirExprKind.Field(fbase, _, _):
+                    cursor = fbase
+                    through_member = true
+                case HirExprKind.Index(ibase, _):
+                    cursor = ibase
+                    through_member = true
+                case HirExprKind.NamedVar(rsym, rname):
+                    if through_member and self.immutable_view_symbols.contains_key(rsym.id):
+                        self.error("E_IMMUTABLE_WRITE: cannot write through read-only view `{rname}: Immutable<T>`; write via a mutable alias of the object instead", span)
+                    return
+                case HirExprKind.Var(rsym2):
+                    if through_member and self.immutable_view_symbols.contains_key(rsym2.id):
+                        self.error("E_IMMUTABLE_WRITE: cannot write through a read-only `Immutable<T>` view; write via a mutable alias of the object instead", span)
+                    return
+                case _:
+                    return
+
     me lower_hir_assignment_kind(target: Expr, op: AssignOp?, value: Expr, span: Span) -> HirStmtKind:
         val discard = match target.kind:
             case ExprKind.Ident(name): name == "_"
@@ -518,9 +547,11 @@ impl HirLowering:
                         if val acc_call = self.lower_accessor_write(acc_hir_base, acc_name, acc_rhs, hir_op, span):
                             return acc_call
                         val acc_lhs = self.lower_hir_expr(target)
+                        self.flag_immutable_view_write(acc_lhs, span)
                         return HirStmtKind.Assign(acc_lhs, hir_op, acc_rhs)
                 case _: ()
         val lhs = self.lower_hir_expr(target)
+        self.flag_immutable_view_write(lhs, span)
         val rhs = self.lower_hir_expr(value)
         # Preserve the optional operator through the declared optional slot:
         # absence means a plain write; presence means a compound assignment.
@@ -1052,6 +1083,8 @@ impl HirLowering:
                     case _: v_sym_type = inferred
             val v_symbol = self.symbols.define(v_name, SymbolKind.Variable, v_sym_type, s.span, Visibility.Private, false, nil)
             self.local_annotation_provenance[v_symbol.id] = v_has_annotation
+            if v_has_annotation and parser_type_kind_named_name(v_ast_type.kind) == "Immutable":
+                self.immutable_view_symbols[v_symbol.id] = true
             self.mark_optional_call_init(v_symbol.id, v_init, v_has_annotation, s.bind_optional_payload, v_sym_type)
             self.try_register_local_struct_type(v_symbol, v_init)
             self.try_register_local_tuple_type(v_symbol, v_init)
@@ -1109,6 +1142,8 @@ impl HirLowering:
                     case _: vr_sym_type = inferred
             val vr_symbol = self.symbols.define(vr_name, SymbolKind.Variable, vr_sym_type, s.span, Visibility.Private, true, nil)
             self.local_annotation_provenance[vr_symbol.id] = vr_has_annotation
+            if vr_has_annotation and parser_type_kind_named_name(vr_ast_type.kind) == "Immutable":
+                self.immutable_view_symbols[vr_symbol.id] = true
             if val vr_init_present = vr_init:
                 self.mark_optional_call_init(vr_symbol.id, vr_init_present, vr_has_annotation, s.bind_optional_payload, vr_sym_type)
                 self.try_register_local_struct_type(vr_symbol, vr_init_present)
