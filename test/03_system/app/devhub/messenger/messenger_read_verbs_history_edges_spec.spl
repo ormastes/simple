@@ -1,0 +1,118 @@
+# System test: `devhub messenger messages` edge cases over the encrypted (sqlcipher4)
+# dense fixture: limit boundaries, a body stored on overflow pages, a table spread
+# over several b-tree pages, non-ASCII bodies, an unknown room, a missing flag.
+# Runs through the interpreter, or the native binary when DEVHUB_NATIVE_BIN is set.
+# Passphrase is public synthetic data (dense_ground_truth.json).
+# @manual_section: messenger-read-verbs-history-edges
+
+"""
+## Purpose and audience
+Purpose: reading history from an encrypted store returns exactly the stored messages,
+in order, whatever the limit and however the rows are laid out on disk. Expected
+payloads come from dense_ground_truth.json, which Python's sqlite3/json wrote when the
+fixture was generated; nothing is compared with a value the reader itself produced.
+Audience: DevHub release reviewers.
+
+## Layout facts the cases rely on (from the generator)
+- Room 1 has five messages; id 15 has an 11,221-byte body that spans overflow pages;
+  id 14 has Hangul, accented Latin, a check mark, quotes, a backslash and a newline.
+- Room 2 has enough filler rows that the messages table needs an interior b-tree page.
+"""
+
+use std.spec.*
+use std.spec.step
+use test.support.devhub_messenger_dense.*
+use test.support.devhub_messenger_cli.*
+use std.common.json.value.{json_value_field, json_value_len}
+
+# The JSON payload line of a run, "" when the command printed none.
+fn history_line(out: text) -> text:
+    for line in out.split("\n"):
+        val clean = line.trim()
+        if clean.starts_with(lb() + "\"room\":"):
+            return clean
+    ""
+
+fn messages(room: text, limit: text) -> (text, text, i64):
+    if limit == "":
+        return cli_devhub(["messenger", "messages", "--target", "dense", "--room", room, "--json"])
+    cli_devhub(["messenger", "messages", "--target", "dense", "--room", room, "--limit", limit, "--json"])
+
+val he_truth = dense_truth()
+val he_pass = truth_passphrase(he_truth)
+val he_home = cli_prepare_home("build/he/home")
+val he_secret = dense_set_secret(he_pass)
+val he_room2_total = json_value_len(json_value_field(json_value_field(he_truth, "history_order"), "2"))
+
+val he_zero = messages("1", "0")
+val he_over = messages("1", "99")
+val he_room2 = messages("2", "")
+val he_room2_three = messages("2", "3")
+val he_unknown = messages("404", "")
+val he_no_room = cli_devhub(["messenger", "messages", "--target", "dense", "--json"])
+
+describe "history limit boundaries on the encrypted store":
+    it "treats --limit 0 as no explicit limit and returns the whole room":
+        # @req REQ-MSGR-READVERB-010
+        step("Run `messages --room 1 --limit 0`")
+        expect(he_zero.2).to_equal(0)
+        step("The payload is the ground-truth history of all five messages")
+        expect(history_line(he_zero.0)).to_equal(expected_history(he_truth, "1", 5))
+
+    it "returns every message once when the limit exceeds the room size":
+        # @req REQ-MSGR-READVERB-011
+        step("Run `messages --room 1 --limit 99`")
+        expect(he_over.2).to_equal(0)
+        step("Count is the real five, not the requested 99, in ground-truth order")
+        expect(payload_count(history_line(he_over.0))).to_equal(5)
+        expect(history_ids(history_line(he_over.0))).to_equal(expected_ids(he_truth, "1", 99))
+        expect(history_line(he_over.0)).to_equal(expected_history(he_truth, "1", 99))
+
+    it "cuts a multi-page room at the requested limit":
+        # @req REQ-MSGR-READVERB-012
+        step("Run `messages --room 2 --limit 3`")
+        expect(he_room2_three.2).to_equal(0)
+        step("Exactly the first three ground-truth messages come back")
+        expect(history_line(he_room2_three.0)).to_equal(expected_history(he_truth, "2", 3))
+
+describe "rows that do not fit one page":
+    it "returns the 11,221-byte body stored on overflow pages byte for byte":
+        # @req REQ-MSGR-READVERB-013
+        step("Take message 15 from the room 1 history")
+        val body = history_body(history_line(he_over.0), "15")
+        step("It equals the generator's overflow body")
+        expect(body).to_equal(expected_overflow_body(json_value_field(he_truth, "overflow")))
+
+    it "returns every message of a table spread over several b-tree pages":
+        # @req REQ-MSGR-READVERB-014
+        step("Run `messages --room 2` with the default limit")
+        expect(he_room2.2).to_equal(0)
+        step("All room 2 messages arrive in ground-truth order and none from room 1")
+        expect(he_room2_total > 20).to_equal(true)
+        expect(payload_count(history_line(he_room2.0))).to_equal(he_room2_total)
+        expect(history_line(he_room2.0)).to_equal(expected_history(he_truth, "2", he_room2_total))
+        expect(he_room2.0.contains("tie-first")).to_equal(false)
+
+describe "text that is not ASCII":
+    it "returns Hangul, accents, quotes, a backslash and a newline unchanged":
+        # @req REQ-MSGR-READVERB-015
+        step("Take message 14 from the room 1 history and decode its JSON body")
+        val body = history_body(history_line(he_over.0), "14")
+        step("It equals the stored text")
+        expect(body).to_equal(tf(he_truth, "unicode_body"))
+        step("On the wire the body is the JSON escaping Python produced")
+        expect(he_over.0.contains(tf(he_truth, "escaped_body_json"))).to_equal(true)
+
+describe "requests that name nothing readable":
+    it "answers an unknown room with an empty list, not an error":
+        # @req REQ-MSGR-READVERB-016
+        step("Run `messages --room 404`")
+        expect(he_unknown.2).to_equal(0)
+        expect(history_line(he_unknown.0)).to_equal(lb() + "\"room\":\"404\",\"messages\":[],\"count\":0" + rb())
+
+    it "refuses to read history without --room and prints no message":
+        # @req REQ-MSGR-READVERB-017
+        step("Run `messages` with no --room")
+        expect(he_no_room.2).to_equal(2)
+        expect(he_no_room.0.contains("messages requires --room")).to_equal(true)
+        expect(leaks_none(he_no_room.0 + he_no_room.1, [he_pass, "tie-first", "other-room-only"])).to_equal(true)

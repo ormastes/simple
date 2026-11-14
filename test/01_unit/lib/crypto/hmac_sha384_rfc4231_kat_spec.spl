@@ -1,0 +1,80 @@
+# HMAC-SHA-384 known-answer tests from RFC 4231 section 4.
+# @req REQ-SSPEC-LIB
+# @manual_section: crypto-hmac-sha384-kat
+
+"""
+## Purpose and audience
+Purpose: a message tag made with HMAC-SHA-384 must equal the tag any other
+implementation makes, for short keys, keys at and beyond the 128-byte block, and
+data longer than one block. Expected values are the published RFC 4231 vectors.
+HMAC-SHA-384 is the sibling of the HMAC-SHA-512 that authenticates SQLCipher pages;
+they share the SHA-512 compression function and the 128-byte block.
+Audience: crypto reviewers and anyone changing `std.common.crypto.hmac`.
+
+## Not covered
+RFC 4231 test case 5 (tag truncated to 128 bits): the API returns the full tag only.
+"""
+
+use std.spec.*
+use std.spec.step
+use std.crypto.hmac.{hmac_sha384_bytes}
+use std.crypto.types.{bytes_to_hex}
+use std.common.text_bytes.{text_to_utf8_bytes}
+
+fn ascii(value: text) -> [i64]:
+    var out: [i64] = []
+    for b in text_to_utf8_bytes(value):
+        out.push(b.to_i64())
+    out
+
+fn repeated(byte: i64, count: i64) -> [i64]:
+    var out: [i64] = []
+    var i = 0
+    while i < count:
+        out.push(byte)
+        i = i + 1
+    out
+
+# 0x01, 0x02, ... 0x19 (RFC 4231 test case 4 key).
+fn counting_key() -> [i64]:
+    var out: [i64] = []
+    var i = 1
+    while i <= 25:
+        out.push(i)
+        i = i + 1
+    out
+
+describe "HMAC-SHA-384 produces the RFC 4231 tags":
+    it "tags 'Hi There' under a 20-byte key":
+        step("Tag with key 20 x 0x0b (test case 1)")
+        val tag = hmac_sha384_bytes(repeated(0x0b, 20), ascii("Hi There"))
+        expect(tag.len()).to_equal(48)
+        expect(bytes_to_hex(tag)).to_equal("afd03944d84895626b0825f4ab46907f15f9dadbe4101ec682aa034c7cebc59cfaea9ea9076ede7f4af152e8b2fa9cb6")
+
+    it "tags under a key shorter than the hash output":
+        step("Tag 'what do ya want for nothing?' with key 'Jefe' (test case 2)")
+        val tag = hmac_sha384_bytes(ascii("Jefe"), ascii("what do ya want for nothing?"))
+        expect(bytes_to_hex(tag)).to_equal("af45d2e376484031617f78d2b58a6b1b9c7ef464f5a01b47e42ec3736322445e8e2240ca5e69e2c78b3239ecfab21649")
+
+    it "tags high-bit key and data bytes without sign errors":
+        step("Tag 50 x 0xdd with key 20 x 0xaa (test case 3)")
+        val tag = hmac_sha384_bytes(repeated(0xaa, 20), repeated(0xdd, 50))
+        expect(bytes_to_hex(tag)).to_equal("88062608d3e6ad8a0aa2ace014c8a86f0aa635d947ac9febe83ef4e55966144b2a5ab39dc13814b94e3ab6e101a34f27")
+
+    it "tags under a 25-byte counting key":
+        step("Tag 50 x 0xcd with key 0x01..0x19 (test case 4)")
+        val tag = hmac_sha384_bytes(counting_key(), repeated(0xcd, 50))
+        expect(bytes_to_hex(tag)).to_equal("3e8a69b7783c25851933ab6290af6ca77a9981480850009cc5577c6e1f573b4e6801dd23c4a7d679ccf8a386c674cffb")
+
+    it "hashes a key longer than the 128-byte block before using it":
+        step("Tag with key 131 x 0xaa (test case 6)")
+        val tag = hmac_sha384_bytes(repeated(0xaa, 131),
+            ascii("Test Using Larger Than Block-Size Key - Hash Key First"))
+        expect(bytes_to_hex(tag)).to_equal("4ece084485813e9088d2c63a041bc5b44f9ef1012a2b588f3cd11f05033ac4c60c2ef6ab4030fe8296248df163f44952")
+
+    it "tags data longer than one block under a key longer than one block":
+        step("Tag the 152-byte message with key 131 x 0xaa (test case 7)")
+        val data = ascii("This is a test using a larger than block-size key and a larger than block-size data. The key needs to be hashed before being used by the HMAC algorithm.")
+        expect(data.len()).to_equal(152)
+        val tag = hmac_sha384_bytes(repeated(0xaa, 131), data)
+        expect(bytes_to_hex(tag)).to_equal("6617178e941f020d351e2f254e8fd32c602420feb0b8fb9adccebb82461e99c5a678cc31e799176d3860e6110c46523e")
