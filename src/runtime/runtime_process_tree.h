@@ -69,6 +69,14 @@ int64_t rt_process_session_wait(int64_t pid, int64_t timeout_ms);
  * Never reaps: the exit status stays for rt_process_session_wait. */
 int64_t rt_process_session_is_running(int64_t pid);
 
+/* Observe this process's still-waitable child without consuming its status.
+ *   1  our child is running       0  our child exited and remains unreaped
+ *   -errno (including -ECHILD) / RT_PTREE_UNSUPPORTED  ownership unavailable
+ * Unlike the legacy is_running API, never falls back to numeric-PID liveness.
+ * The caller must be the sole reaper and retain the child until its owned
+ * session is drained; this observation is not itself a session-empty proof. */
+int64_t rt_process_owned_child_state(int64_t pid);
+
 /* Send signo to every live process whose session id is sid, except the caller.
  *   >= 0  number of processes signalled (0 is a valid answer: nothing left)
  *   -EINVAL  sid <= 1, or sid is the caller's own session

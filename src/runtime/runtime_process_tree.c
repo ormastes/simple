@@ -355,6 +355,25 @@ int64_t rt_process_session_wait(int64_t pid, int64_t timeout_ms) {
 #endif
 }
 
+int64_t rt_process_owned_child_state(int64_t pid) {
+#if !RT_PTREE_HAVE_OWNER
+    (void)pid;
+    return RT_PTREE_UNSUPPORTED;
+#else
+    if (pid <= 1 || pid > INT32_MAX) return -EINVAL;
+    siginfo_t info;
+    memset(&info, 0, sizeof(info));
+    int rc;
+    do {
+        rc = waitid(P_PID, (id_t)pid, &info, WEXITED | WNOHANG | WNOWAIT);
+    } while (rc < 0 && errno == EINTR);
+    if (rc < 0) return -(int64_t)(errno ? errno : EIO);
+    if (info.si_pid == (pid_t)pid) return 0;
+    if (info.si_pid == 0) return 1;
+    return -EIO;
+#endif
+}
+
 int64_t rt_process_session_is_running(int64_t pid) {
 #if !RT_PTREE_HAVE_OWNER
     (void)pid;
