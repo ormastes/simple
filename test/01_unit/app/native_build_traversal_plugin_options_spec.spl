@@ -1,0 +1,38 @@
+use std.spec.{describe, it, expect}
+use app.io._CliCompile.compile_targets.{cli_native_build_parse_options_v1, cli_native_build_option_error}
+
+describe "Native-build traversal plugin provider request":
+    it "keeps ordinary builds on the builtin traversal path":
+        val parsed = cli_native_build_parse_options_v1(["native-build", "main.spl"])
+        expect(parsed.ok).to_equal(true)
+        expect(parsed.traversal_plugin_request_v1).to_be_nil()
+
+    it "preserves a complete explicit signed-policy request":
+        val args = ["native-build", "--traversal-plugin-provider", "sample.traversal",
+            "--traversal-plugin-allowlist", "/etc/simple/plugins.sdn",
+            "--traversal-plugin-signature", "/etc/simple/plugins.sdn.sig", "main.spl"]
+        expect(cli_native_build_option_error(args)).to_equal("")
+        val parsed = cli_native_build_parse_options_v1(args)
+        expect(parsed.ok).to_equal(true)
+        expect(parsed.traversal_plugin_request_v1.unwrap().provider_id).to_equal("sample.traversal")
+        expect(parsed.traversal_plugin_request_v1.unwrap().allowlist_path).to_equal("/etc/simple/plugins.sdn")
+        expect(parsed.traversal_plugin_request_v1.unwrap().signature_path).to_equal("/etc/simple/plugins.sdn.sig")
+
+    it "accepts canonical inline option spellings and rejects incomplete requests":
+        val args = ["native-build", "--traversal-plugin-provider=sample.traversal",
+            "--traversal-plugin-allowlist=/etc/simple/plugins.sdn",
+            "--traversal-plugin-signature=/etc/simple/plugins.sdn.sig", "main.spl"]
+        expect(cli_native_build_option_error(args)).to_equal("")
+        val parsed = cli_native_build_parse_options_v1(args)
+        expect(parsed.ok).to_equal(true)
+        expect(parsed.traversal_plugin_request_v1.unwrap().provider_id).to_equal("sample.traversal")
+        val partial = ["native-build", "--traversal-plugin-provider=sample.traversal", "main.spl"]
+        expect(cli_native_build_option_error(partial)).to_equal("")
+        expect(cli_native_build_parse_options_v1(partial).ok).to_equal(false)
+
+    it "rejects empty provider identity and missing path values":
+        val empty_id = ["native-build", "--traversal-plugin-provider=", "--traversal-plugin-allowlist=a.sdn",
+            "--traversal-plugin-signature=a.sig", "main.spl"]
+        expect(cli_native_build_parse_options_v1(empty_id).ok).to_equal(false)
+        expect(cli_native_build_option_error(["native-build", "--traversal-plugin-allowlist", "main.spl"])
+            .starts_with("--traversal-plugin-allowlist requires")).to_equal(true)

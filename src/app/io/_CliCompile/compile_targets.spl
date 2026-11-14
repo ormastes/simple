@@ -62,7 +62,10 @@ use std.nogc_sync_mut.src.collections.hashmap.{HashMap}
 # interpreter (evaluation_helpers.rs:588 loads it immediately), so both edges were
 # paid in full at module-bootstrap time: app/compile/native.spl alone retained
 # 10,910 export bindings and cost 692ms. Removed as dead imports.
-use compiler.common.driver_core_types (CompileOptions, CompileMode, CompileResult, driver_core_compile_options_default, compile_result_errors, compileoptions_normalize_mir_optimization)
+use compiler.common.driver_core_types (CompileOptions, CompileMode, CompileResult,
+    TraversalPluginProviderRequestV1, traversal_plugin_provider_request_v1,
+    driver_core_compile_options_default, compile_result_errors,
+    compileoptions_normalize_mir_optimization)
 use app.cli.native_build_output_plan.{native_build_is_standalone_flag_v1,
     native_build_output_format_v1, native_build_apply_failure_policy_v1}
 use app.startup.launch_metadata.{launch_metadata_for_native_build, launch_metadata_sidecar_path, render_launch_metadata_sidecar}
@@ -394,7 +397,7 @@ fn cli_native_build_option_error(args: [text], require_entry: bool = false) -> t
                 return log_error
             i = i + 2
             continue
-        if arg == "--backend" or arg == "--runtime-bundle" or arg == "--runtime-owner" or arg == "--runtime-path" or arg == "--linker-script" or arg == "--entry" or arg == "--source" or arg == "-o" or arg == "--output" or arg == "--mode" or arg == "--build-mode" or arg == "--cache-dir" or arg == "--target" or arg == "--cpu" or arg == "--opt-level" or arg == "--profile" or arg == "--managed-build-phase" or arg == "--collection-profile" or arg == "--collection-workload" or arg == "--collection-target" or arg == "--collection-policy" or arg == "--collection-memory-budget" or cli_native_build_policy_value_flag(arg):
+        if arg == "--backend" or arg == "--runtime-bundle" or arg == "--runtime-owner" or arg == "--runtime-path" or arg == "--linker-script" or arg == "--entry" or arg == "--source" or arg == "-o" or arg == "--output" or arg == "--mode" or arg == "--build-mode" or arg == "--cache-dir" or arg == "--target" or arg == "--cpu" or arg == "--opt-level" or arg == "--profile" or arg == "--managed-build-phase" or arg == "--collection-profile" or arg == "--collection-workload" or arg == "--collection-target" or arg == "--collection-policy" or arg == "--collection-memory-budget" or arg == "--traversal-plugin-provider" or arg == "--traversal-plugin-allowlist" or arg == "--traversal-plugin-signature" or cli_native_build_policy_value_flag(arg):
             val error = cli_native_build_value_error(args, i, arg, false)
             if error != "":
                 return error
@@ -448,6 +451,15 @@ fn cli_native_build_option_error(args: [text], require_entry: bool = false) -> t
             if error != "": return error
         elif arg.starts_with("--jobs="):
             val error = cli_native_build_inline_value_error(arg, "--jobs=", "--jobs", true)
+            if error != "": return error
+        elif arg.starts_with("--traversal-plugin-provider="):
+            val error = cli_native_build_inline_value_error(arg, "--traversal-plugin-provider=", "--traversal-plugin-provider", false)
+            if error != "": return error
+        elif arg.starts_with("--traversal-plugin-allowlist="):
+            val error = cli_native_build_inline_value_error(arg, "--traversal-plugin-allowlist=", "--traversal-plugin-allowlist", false)
+            if error != "": return error
+        elif arg.starts_with("--traversal-plugin-signature="):
+            val error = cli_native_build_inline_value_error(arg, "--traversal-plugin-signature=", "--traversal-plugin-signature", false)
             if error != "": return error
         elif arg.starts_with("--timeout="):
             if not cli_native_build_is_nonnegative_decimal(arg.substring(10)):
@@ -772,6 +784,7 @@ struct CliNativeBuildParsedOptionsV1:
     entry_closure: bool = false
     release: bool = false
     xray_enabled: bool = false
+    traversal_plugin_request_v1: TraversalPluginProviderRequestV1? = nil
     profile: text = "prod"
     managed_build_phase: text = ""
     opt_level: i64 = 0
@@ -823,6 +836,9 @@ fn cli_native_build_parse_options_v1(args: [text]) -> CliNativeBuildParsedOption
     val target_profile = target_selection.unwrap()
     var release = target_profile.release
     var xray_enabled = false
+    var traversal_plugin_provider = ""
+    var traversal_plugin_allowlist = ""
+    var traversal_plugin_signature = ""
     var opt_level = cli_native_default_opt_level()
     var native_target = ""
     var native_cpu = ""
@@ -1024,6 +1040,30 @@ fn cli_native_build_parse_options_v1(args: [text]) -> CliNativeBuildParsedOption
             pass  # Shared intake above validated and selected this policy.
         elif a == "--xray":
             xray_enabled = true
+        elif a == "--traversal-plugin-provider":
+            if j + 1 >= args.len() or args[j + 1].starts_with("-"):
+                _cli_eprint("Error: --traversal-plugin-provider requires an id")
+                return cli_native_build_parse_failure_v1()
+            j = j + 1
+            traversal_plugin_provider = args[j]
+        elif a.starts_with("--traversal-plugin-provider="):
+            traversal_plugin_provider = a.substring("--traversal-plugin-provider=".len())
+        elif a == "--traversal-plugin-allowlist":
+            if j + 1 >= args.len() or args[j + 1].starts_with("-"):
+                _cli_eprint("Error: --traversal-plugin-allowlist requires a path")
+                return cli_native_build_parse_failure_v1()
+            j = j + 1
+            traversal_plugin_allowlist = args[j]
+        elif a.starts_with("--traversal-plugin-allowlist="):
+            traversal_plugin_allowlist = a.substring("--traversal-plugin-allowlist=".len())
+        elif a == "--traversal-plugin-signature":
+            if j + 1 >= args.len() or args[j + 1].starts_with("-"):
+                _cli_eprint("Error: --traversal-plugin-signature requires a path")
+                return cli_native_build_parse_failure_v1()
+            j = j + 1
+            traversal_plugin_signature = args[j]
+        elif a.starts_with("--traversal-plugin-signature="):
+            traversal_plugin_signature = a.substring("--traversal-plugin-signature=".len())
         elif a == "--release":
             release = true
             if not optimization_requested:
@@ -1131,6 +1171,17 @@ fn cli_native_build_parse_options_v1(args: [text]) -> CliNativeBuildParsedOption
         elif not a.starts_with("-") and entry_point == "":
             entry_point = a
         j = j + 1
+    val traversal_plugin_requested = traversal_plugin_provider != "" or
+        traversal_plugin_allowlist != "" or traversal_plugin_signature != ""
+    var traversal_plugin_request_v1: TraversalPluginProviderRequestV1? = nil
+    if traversal_plugin_requested:
+        val request = traversal_plugin_provider_request_v1(traversal_plugin_provider,
+            traversal_plugin_allowlist, traversal_plugin_signature)
+        match request:
+            case Ok(value): traversal_plugin_request_v1 = Some(value)
+            case Err(reason):
+                _cli_eprint("Error: invalid traversal plugin request: " + reason)
+                return cli_native_build_parse_failure_v1()
     CliNativeBuildParsedOptionsV1(
         ok: true, status: 0,
         entry_point: entry_point,
@@ -1147,6 +1198,7 @@ fn cli_native_build_parse_options_v1(args: [text]) -> CliNativeBuildParsedOption
         entry_closure: entry_closure,
         release: release,
         xray_enabled: xray_enabled,
+        traversal_plugin_request_v1: traversal_plugin_request_v1,
         profile: target_profile.profile,
         managed_build_phase: target_profile.managed_build_phase,
         opt_level: opt_level,
@@ -1192,6 +1244,9 @@ fn cli_native_build_print_help_v1() -> i64:
     print "  --release            Release target profile (optimization is independent)"
     print "  --profile <dev|prod>  Native target profile (default: prod)"
     print "  --xray               Request XRay instrumentation (requires --profile dev --mode one-binary and a supported backend/target)"
+    print "  --traversal-plugin-provider <id>  Select a signed local traversal provider"
+    print "  --traversal-plugin-allowlist <path>  Signed canonical SDN allowlist"
+    print "  --traversal-plugin-signature <path>  Detached Ed25519 signature for the allowlist"
     print "  --managed-build-phase <phase3|phase4>  Managed target policy; never admission authority"
     print "  --release-optimized  Max optimization: -O3 + x86-64-v3 + ThinLTO"
     cli_print_shared_opt_level_help()
@@ -1680,6 +1735,7 @@ fn _cli_native_build(
             options.native_target = native_target
             options.release = release
             options.xray_enabled = xray_enabled
+            options.traversal_plugin_request_v1 = parsed.traversal_plugin_request_v1
             options.profile = target_profile
             options.managed_build_phase = managed_build_phase
             options.strip_output = strip
@@ -1737,6 +1793,7 @@ fn _cli_native_build(
             options.native_target = native_target
             options.release = release
             options.xray_enabled = xray_enabled
+            options.traversal_plugin_request_v1 = parsed.traversal_plugin_request_v1
             options.profile = target_profile
             options.managed_build_phase = managed_build_phase
             options.strip_output = strip
