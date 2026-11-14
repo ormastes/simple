@@ -13,6 +13,7 @@ use common.ui.draw_ir.{
     draw_ir_style_prop
 }
 use std.nogc_async_mut.gpu.engine2d.simd_kernels.{engine2d_simd_fill_rows_u32, engine2d_simd_fill_row_u32, blit_rect}
+use std.gc_async_mut.gpu.engine2d.backend_emu.{gradient_corner_dir_q16}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_core.*
 
 fn web_glyph_scale(fs: i32) -> i32:
@@ -988,15 +989,22 @@ fn gradient_angle_sin_cos_q16(deg: i32) -> [i64]:
         return [0 - s, 0 - c]
     [0 - c, s]
 
-fn _gradient_mix_channel(a: u32, b: u32, shift: u32, f16: i64) -> u32:
+# One colour channel mixed in PREMULTIPLIED space (CSS Images 4 §3.4.1):
+# weights are each stop's alpha times its share, so a transparent stop
+# contributes no colour (blue -> transparent stays blue while it fades).
+# With equal alphas this is the plain straight-alpha mix, bit for bit.
+fn _gradient_mix_channel(a: u32, b: u32, shift: u32, wa: i64, wb: i64) -> u32:
     val ca = ((a >> shift) & 255u32) as i64
     val cb = ((b >> shift) & 255u32) as i64
-    val v = (ca * (65536 - f16) + cb * f16 + 32768) / 65536
+    val ws = wa + wb
+    if ws <= 0:
+        return 0u32
+    val v = (ca * wa + cb * wb + ws / 2) / ws
     (v as u32) << shift
 
 # Color of the gradient line at `t16` (0..65536 from start to end) through
-# the stop list (positions in permille, ascending as `parse_gradient_stops`
-# leaves them).
+# the stop list (positions in permille; `parse_gradient_stops` clamps each
+# one up to the largest before it, so they never decrease).
 fn linear_gradient_color_at(colors: [u32], positions: [i32], t16: i64) -> u32:
     val n = colors.len()
     val first = (positions[0] as i64) * 65536 / 1000
@@ -1012,7 +1020,10 @@ fn linear_gradient_color_at(colors: [u32], positions: [i32], t16: i64) -> u32:
             val f16 = (t16 - p0) * 65536 / (p1 - p0)
             val a = colors[i]
             val b = colors[i + 1]
-            return _gradient_mix_channel(a, b, 24u32, f16) | _gradient_mix_channel(a, b, 16u32, f16) | _gradient_mix_channel(a, b, 8u32, f16) | _gradient_mix_channel(a, b, 0u32, f16)
+            val wa = ((a >> 24) & 255u32) as i64 * (65536 - f16)
+            val wb = ((b >> 24) & 255u32) as i64 * f16
+            val alpha = ((wa + wb + 32768) / 65536) as u32
+            return (alpha << 24) | _gradient_mix_channel(a, b, 16u32, wa, wb) | _gradient_mix_channel(a, b, 8u32, wa, wb) | _gradient_mix_channel(a, b, 0u32, wa, wb)
         i = i + 1
     colors[n - 1]
 
@@ -1024,7 +1035,10 @@ fn fb_linear_gradient_general_clip(fb: [u32], fbw: i32, fbh: i32, bg_x: i32, bg_
     var out = fb
     if tile_w <= 0 or tile_h <= 0:
         return out
-    val sc = gradient_angle_sin_cos_q16(st.background_gradient_angle_deg)
+    val sc = if st.background_gradient_angle_deg >= 1000:
+        gradient_corner_dir_q16(st.background_gradient_angle_deg, tile_w, tile_h)
+    else:
+        gradient_angle_sin_cos_q16(st.background_gradient_angle_deg)
     val s = sc[0]
     val c = sc[1]
     val sw = if s < 0: 0 - s else: s

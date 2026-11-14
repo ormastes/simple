@@ -1349,7 +1349,11 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 ) and
                 grid_child_style.height_px == 0
             )
-            var resolved_grid_child_style = grid_child_style
+            # Percentage min-/max- sizes are of the grid area.
+            var resolved_grid_child_style = style_with_resolved_percent_min_max(grid_child_style, grid_child_width, 0)
+            var grid_item_w = grid_child_width
+            if grid_child_style.width_px == 0 and (grid_child_style.min_width_px < 0 or grid_child_style.max_width_px < 0):
+                grid_item_w = constrained_outer_width(nodes[grid_child], resolved_grid_child_style, grid_child_width)
             # This bounded Grid slice does not size spanning rows. Stretch
             # only an auto-size, non-replaced item occupying one row and one
             # column, when block-axis auto margins do not own the free space.
@@ -1382,11 +1386,11 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 if grid_stretch_style_h < 1:
                     grid_stretch_style_h = 1
                 resolved_grid_child_style = style_with_height(
-                    grid_child_style, grid_stretch_style_h
+                    resolved_grid_child_style, grid_stretch_style_h
                 )
             val grid_result = layout_with_style(
                 nodes, styles, child_index, grid_child,
-                grid_child_x, grid_child_y, grid_child_width, viewport_w, viewport_h,
+                grid_child_x, grid_child_y, grid_item_w, viewport_w, viewport_h,
                 out_bx, out_by, out_bw, out_bh,
                 out_wrap_starts, out_wrap_ends, out_intrinsic_widths,
                 resolved_grid_child_style
@@ -1457,6 +1461,8 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
             var wrap_line_of: [i32] = [-1; ordered_row_child_count]
             var wrap_zero_floor: [i32] = [0; ordered_row_child_count]
             var wrap_frozen: [i32] = [0; ordered_row_child_count]
+            # Width of an item frozen at its max-width (`wrap_frozen` 2).
+            var wrap_max_w: [i32] = [0; ordered_row_child_count]
             var line_count = 0
             var total_line_h = 0
             var cx_measure = 0
@@ -1531,20 +1537,29 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
             # line's grow total, and the others share what is left.
             var freeze_line = 0
             while freeze_line < line_count:
-                var freeze_changed = line_zero_excess[freeze_line] > 0
+                var freeze_changed = true
                 while freeze_changed:
                     freeze_changed = false
                     val freeze_free = iw - line_widths[freeze_line] + line_zero_excess[freeze_line]
                     val freeze_grow = line_grow_totals[freeze_line]
                     var zi = 0
                     while zi < ordered_row_child_count:
-                        val zst = styles[ordered_row_children[zi]]
+                        val zrow = ordered_row_children[zi]
+                        val zst = flex_item_percent_style(styles[zrow], iw, content_height_limit)
                         if wrap_line_of[zi] == freeze_line and wrap_frozen[zi] == 0 and flex_item_zero_basis(zst) and zst.flex_grow > 0:
                             val zframe = flex_item_frame_w(zst)
                             val zshare = if freeze_free > 0 and freeze_grow > 0: freeze_free * zst.flex_grow / freeze_grow else: 0
+                            val zmax = if zst.max_width_px > 0: constrained_outer_width(nodes[zrow], zst, zframe + zshare) else: zframe + zshare
                             if zframe + zshare < wrap_zero_floor[zi]:
                                 wrap_frozen[zi] = 1
                                 line_zero_excess[freeze_line] = line_zero_excess[freeze_line] - (wrap_zero_floor[zi] - zframe)
+                                line_grow_totals[freeze_line] = line_grow_totals[freeze_line] - zst.flex_grow
+                                freeze_changed = true
+                            elif zmax < zframe + zshare:
+                                # Max violation: frozen at its max-width.
+                                wrap_frozen[zi] = 2
+                                wrap_max_w[zi] = zmax
+                                line_zero_excess[freeze_line] = line_zero_excess[freeze_line] - (zmax - zframe)
                                 line_grow_totals[freeze_line] = line_grow_totals[freeze_line] - zst.flex_grow
                                 freeze_changed = true
                         zi = zi + 1
@@ -1704,6 +1719,8 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                         val grown_w_wrap = grow_from_w + grow_after - grow_before
                         if grown_w_wrap > base_w_wrap or not flex_item_zero_basis(cst):
                             base_w_wrap = grown_w_wrap
+                    if wrap_frozen[fc_wrap_i] == 2:
+                        base_w_wrap = wrap_max_w[fc_wrap_i]
                     # A grown item that also has a `width` is laid out in its
                     # USED width; its authored width would win otherwise.
                     var wrap_item_style = resolved_cst
@@ -2643,11 +2660,13 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                     inline_w = css_outer_width(nodes[c], cst, cst.width_px)
                 elif inline_block and cst.width_px < 0:
                     val percent_content_w = iw * (0 - cst.width_px) / 100
-                    inline_w = css_outer_width(
+                    val percent_outer_w = css_outer_width(
                         nodes[c], cst, percent_content_w
                     )
+                    # The used width keeps the (resolved) min-/max-width clamp.
+                    inline_w = constrained_outer_width(nodes[c], resolved_inline_style, percent_outer_w)
                     resolved_inline_style = style_with_width(
-                        cst, percent_content_w
+                        resolved_inline_style, percent_content_w + inline_w - percent_outer_w
                     )
                 # A replaced box contributes its OWN width to the line, not the
                 # intrinsic width of an inline text walk that never reaches

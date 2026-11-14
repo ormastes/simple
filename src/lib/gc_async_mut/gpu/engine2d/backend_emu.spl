@@ -1090,13 +1090,43 @@ fn _emu_gradient_color_at(colors: [u32], positions_permille: [i32], pos_permille
             val t = pos_permille - p0
             val c0 = colors[i - 1]
             val c1 = colors[i]
+            val a0 = color_a(c0)
+            val a1 = color_a(c1)
+            val a = a0 + (a1 - a0) * t / span
+            if a0 != a1:
+                # CSS Images 4 §3.4.1: interpolate in premultiplied colour.
+                val wa = a0 * (span - t)
+                val wb = a1 * t
+                val ws = _emu_max(wa + wb, 1)
+                val pr = (color_r(c0) * wa + color_r(c1) * wb + ws / 2) / ws
+                val pg = (color_g(c0) * wa + color_g(c1) * wb + ws / 2) / ws
+                val pb = (color_b(c0) * wa + color_b(c1) * wb + ws / 2) / ws
+                return rgba(pr, pg, pb, a)
             val r = color_r(c0) + (color_r(c1) - color_r(c0)) * t / span
             val g = color_g(c0) + (color_g(c1) - color_g(c0)) * t / span
             val b = color_b(c0) + (color_b(c1) - color_b(c0)) * t / span
-            val a = color_a(c0) + (color_a(c1) - color_a(c0)) * t / span
             return rgba(r, g, b, a)
         i = i + 1
     colors[n - 1]
+
+# A `to <corner>` linear gradient's angle depends on the box (CSS Images 3
+# §3.1.1: the other two corners lie on the 50% line). The parser stores it
+# as 1000 + its square-box angle (1045 top right, 1135 bottom right, 1225
+# bottom left, 1315 top left); this returns [sin, cos] of the real angle in
+# Q16 for a w x h box.
+fn gradient_corner_dir_q16(code: i32, w: i32, h: i32) -> [i64]:
+    val ww: i64 = if w > 0: w as i64 else: 1
+    val hh: i64 = if h > 0: h as i64 else: 1
+    val len_q16 = _emu_isqrt_i64((ww * ww + hh * hh) * 4294967296)
+    val s = hh * 4294967296 / len_q16
+    val c = ww * 4294967296 / len_q16
+    if code == 1045:
+        return [s, c]
+    if code == 1135:
+        return [s, 0 - c]
+    if code == 1225:
+        return [0 - s, 0 - c]
+    [0 - s, c]
 
 fn emu_draw_linear_gradient_stops(mut core: RenderBackend, x: i32, y: i32, w: i32, h: i32, colors: [u32], positions_permille: [i32], angle_deg: i32):
     if w <= 0 or h <= 0 or colors.len() == 0:
@@ -1104,8 +1134,12 @@ fn emu_draw_linear_gradient_stops(mut core: RenderBackend, x: i32, y: i32, w: i3
     if colors.len() == 1:
         core.draw_rect_filled(x, y, w, h, colors[0])
         return
-    val dx1000 = _emu_sin_approx(angle_deg)
-    val dy1000 = 0 - _emu_cos_approx(angle_deg)
+    var dx1000 = _emu_sin_approx(angle_deg)
+    var dy1000 = 0 - _emu_cos_approx(angle_deg)
+    if angle_deg >= 1000:
+        val corner = gradient_corner_dir_q16(angle_deg, w, h)
+        dx1000 = (corner[0] * 1000 / 65536) as i32
+        dy1000 = (0 - corner[1] * 1000 / 65536) as i32
     val hw = w - 1
     val hh = h - 1
     val t00 = (0 - hw) * dx1000 + (0 - hh) * dy1000

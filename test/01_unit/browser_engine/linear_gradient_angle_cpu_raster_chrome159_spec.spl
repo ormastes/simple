@@ -30,6 +30,30 @@ three stacked 200x100 boxes, screenshot pixels):
 |                                                             | (100, 250)| #808080 |
 |                                                             | (100, 299)| #fefefe |
 
+Second page (`--window-size=200,600`, `body{margin:0;background:#fff}`,
+six stacked 200x100 boxes):
+| box                                                         | (x, y)    | Chrome  |
+|-------------------------------------------------------------|-----------|---------|
+| `linear-gradient(#ff0000, #0000ff, transparent)` over white | (100, 25) | #7d0082 |
+|                                                             | (100, 75) | #8282ff |
+|                                                             | (100, 99) | #fdfdff |
+| `linear-gradient(to right, #ff0000, #00ff00 60%, #0000ff 30%, #ffffff)` | (60, 150) | #7e8000 |
+|                                                             | (110, 150)| #14ea00 |
+|                                                             | (121, 150)| #0505ff |
+|                                                             | (160, 150)| #8181ff |
+| `linear-gradient(0.25turn, #000, #fff)`                     | (0, 250)  | #000000 |
+|                                                             | (100, 250)| #808080 |
+|                                                             | (199, 250)| #ffffff |
+| `linear-gradient(to bottom right, #000, #fff)`              | (0, 300)  | #000000 |
+|                                                             | (199, 300)| #808080 |
+|                                                             | (0, 399)  | #7f7f7f |
+|                                                             | (199, 399)| #fefefe |
+| `linear-gradient(1.5708rad, #000, #fff)`                    | (0, 450)  | #000000 |
+|                                                             | (199, 450)| #ffffff |
+| `linear-gradient(100grad, #000, #fff)`                      | (0, 550)  | #000000 |
+|                                                             | (199, 550)| #ffffff |
+Hex stops, not `red` / `lime`: this renderer's `parse_color` maps `red` to
+#dc3232 (filed in the residue record), which is not what these rows test.
 Each channel is asserted within 6 (the catalog differ counts a pixel as
 mismatching above 8; the ramps are dithered on both sides).
 """
@@ -42,6 +66,8 @@ use std.spec.*
 use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_html_to_pixels_with_engine2d_backend}
 
 val PAGE: text = "<!doctype html><html><head><style>body{{margin:0}}</style></head><body><div style=\"width:200px;height:100px;background:linear-gradient(120deg, #173b7a, #6d28d9)\"></div><div style=\"width:200px;height:100px;background-image:linear-gradient(to right, #ff0000, #00ff00 50%, #0000ff)\"></div><div style=\"width:200px;height:100px;background:linear-gradient(#000000, #ffffff)\"></div></body></html>"
+
+val PAGE2: text = "<!doctype html><html><head><style>body{{margin:0;background:#fff}}div{{width:200px;height:100px}}</style></head><body><div style=\"background:linear-gradient(#ff0000, #0000ff, transparent)\"></div><div style=\"background:linear-gradient(to right, #ff0000, #00ff00 60%, #0000ff 30%, #ffffff)\"></div><div style=\"background:linear-gradient(0.25turn, #000, #fff)\"></div><div style=\"background:linear-gradient(to bottom right, #000, #fff)\"></div><div style=\"background:linear-gradient(1.5708rad, #000, #fff)\"></div><div style=\"background:linear-gradient(100grad, #000, #fff)\"></div></body></html>"
 
 fn channel_off(a: u32, b: u32, shift: u32) -> i32:
     val ca = ((a >> shift) & 255u32) as i32
@@ -87,3 +113,35 @@ describe "CPU raster linear-gradient":
         expect(worst(px, 100, 200, 0x010101u32)).to_be_less_than(7)
         expect(worst(px, 100, 250, 0x808080u32)).to_be_less_than(7)
         expect(worst(px, 100, 299, 0xfefefeu32)).to_be_less_than(7)
+
+    it "AC-4: stops interpolate in premultiplied colour":
+        val px = simple_web_render_html_to_pixels_with_engine2d_backend(PAGE2, 200, 600, "cpu_simd")
+        step("Chrome 159: halfway from blue to transparent over white is #8282ff, not the straight-alpha #8080bf")
+        expect(worst(px, 100, 25, 0x7d0082u32)).to_be_less_than(7)
+        expect(worst(px, 100, 75, 0x8282ffu32)).to_be_less_than(7)
+        expect(worst(px, 100, 99, 0xfdfdffu32)).to_be_less_than(7)
+
+    it "AC-5: a stop position below an earlier one is clamped up to it":
+        val px = simple_web_render_html_to_pixels_with_engine2d_backend(PAGE2, 200, 600, "cpu_simd")
+        step("Chrome 159: `blue 30%` after `lime 60%` sits at 60%: a hard lime -> blue edge at x = 120")
+        expect(worst(px, 60, 150, 0x7e8000u32)).to_be_less_than(7)
+        expect(worst(px, 110, 150, 0x14ea00u32)).to_be_less_than(7)
+        expect(worst(px, 121, 150, 0x0505ffu32)).to_be_less_than(7)
+        expect(worst(px, 160, 150, 0x8181ffu32)).to_be_less_than(7)
+
+    it "AC-6: turn / rad / grad angles and corner keywords":
+        val px = simple_web_render_html_to_pixels_with_engine2d_backend(PAGE2, 200, 600, "cpu_simd")
+        step("Chrome 159: 0.25turn = to right")
+        expect(worst(px, 0, 250, 0x000000u32)).to_be_less_than(7)
+        expect(worst(px, 100, 250, 0x808080u32)).to_be_less_than(7)
+        expect(worst(px, 199, 250, 0xffffffu32)).to_be_less_than(7)
+        step("Chrome 159: `to bottom right` in 200x100 -- the other two corners sit on the 50% line")
+        expect(worst(px, 0, 300, 0x000000u32)).to_be_less_than(7)
+        expect(worst(px, 199, 300, 0x808080u32)).to_be_less_than(7)
+        expect(worst(px, 0, 399, 0x7f7f7fu32)).to_be_less_than(7)
+        expect(worst(px, 199, 399, 0xfefefeu32)).to_be_less_than(7)
+        step("Chrome 159: 1.5708rad and 100grad = to right")
+        expect(worst(px, 0, 450, 0x000000u32)).to_be_less_than(7)
+        expect(worst(px, 199, 450, 0xffffffu32)).to_be_less_than(7)
+        expect(worst(px, 0, 550, 0x000000u32)).to_be_less_than(7)
+        expect(worst(px, 199, 550, 0xffffffu32)).to_be_less_than(7)

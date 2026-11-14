@@ -132,5 +132,30 @@ max-content of mixed inline content, control UA font reset, `h6` margins
   - `max-width: calc(100% - 20px)` is still ignored (no calc in the
     min/max slots).
   - Flex distribution honours max-width only for growing zero-basis items
-    (`flex:1`); a growing item with a definite basis or an auto basis can
-    still grow past its max-width, px or percent.
+    (`flex:1`, single-line and wrapped lines); a growing item with a
+    definite basis or an auto basis can still grow past its max-width, px
+    or percent. A zero-basis item's min-content floor also wins over its
+    max-width (CSS clamps min over max only for an authored min-width).
+  - A float with an explicit `width` ignores a percentage max-/min-width
+    (the `cst.width_px > 0` branch of the float width takes `css_outer_width`
+    unclamped).
+- **Fixed from the d6a5999dba7 review:** grid items resolve percentages
+  against the grid area (and are clamped there); an inline-block with a
+  percentage width keeps its resolved clamp in the used width; a wrapped
+  flex line freezes a zero-basis item at its max-width. Spec rows AC-13..15.
+- **Gradients, fixed from the 80b945990d9 review:** stops interpolate in
+  premultiplied colour (both the fb raster and the engine2d ramp); a stop
+  below an earlier position is clamped up to it (`parse_gradient_stops`);
+  `turn` / `rad` / `grad` angles and `to <corner>` keywords (stored as
+  1000 + the square angle, resolved per box by `gradient_corner_dir_q16`).
+  A positioned second stop (`#0f0 60%`) no longer stops the shorthand from
+  being typed. Spec rows AC-4..6 of the gradient spec.
+- **Gradients, open:**
+  - px stop positions (`red 20px`) are not parsed; the stop takes the
+    evenly spaced default.
+  - The engine2d ramp (`emu_draw_linear_gradient_stops`) spans the line
+    between the pixel centres of the extreme corners, not the CSS gradient
+    line length `|w sin a| + |h cos a|` the fb raster uses, so the two lanes
+    disagree by up to a pixel's worth of ramp at the ends.
+  - `parse_color` maps the keyword `red` to #dc3232 (CSS: #ff0000), so every
+    `red` in a page paints the wrong colour, gradients included.
