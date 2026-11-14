@@ -25,9 +25,11 @@ Pixel evidence, 160x120 render of the corpus page used by
 ("paints famous-site corpus block geometry with Chrome default body margin"):
 the fifth line ("fixture") has ink at rows 82-93 in Chrome and rows 74-85 in Simple, so pixel (32,93) is `0xFF000000` in Chrome and `0xFFFFFFFF` in Simple.
 
-## What that spec does about it
+## Pinned by
 
-The (32,93) probe was pinned to white by `ff2dc6ed375`, when the renderer painted no text at all. Chrome contradicts white, and black is red today, so the probe was removed from the example and this record filed. Restore it as `0xFF000000` when the advance is fixed.
+`test/01_unit/browser_engine/wrapped_line_advance_normal_line_height_spec.spl`, tagged `@tag:in-development` (expected to fail, counted, skipped in whole-suite runs). It holds the (32,93) = `0xFF000000` pixel probe and the two block heights above.
+
+The (32,93) probe used to sit in the block-geometry example of `simple_web_renderer_spec.spl`, pinned to white by `ff2dc6ed375` when the renderer painted no text at all. Chrome contradicts white, so it moved to the in-development spec with Chrome's value. Remove the tag when the advance is fixed.
 
 ## Suspected cause (not verified)
 

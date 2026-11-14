@@ -1174,3 +1174,54 @@ turns green in the same change, or the check FAILs as stale.
   `font-size`; 11: the 1 px floor, inline-flex, percentage width in a
   shrink-to-fit container) in
   `doc/08_tracking/bug/web_replaced_media_residues_vs_chrome_159_2026-11-14.md`.
+## 2026-11-14 — `font-family` is a LIST, resolved name by name
+
+`font_provider.spl` used to classify the whole `font-family` value by substring
+(`mono`, `code`, `sans`, `arial`, ...) with the mono stack as the unmatched
+default. One resolver, `browser_resolve_font_family`, now walks the list in
+order (CSS Fonts 4 §5) and feeds every consumer: the candidate list,
+bold/italic routing, the bundled lookup, the host-face test, the
+`font_renderer.spl` category and the layout `style_font_is_monospace` test.
+
+Chrome 159.0.8154.6 (Linux), width of `Hamburgefonstiv 0123` at 16px in an
+inline-block span — the width identifies the face:
+
+| font-family | Chrome | Simple before | after |
+|---|---|---|---|
+| `"IBM Plex Sans", Arial, sans-serif`, `Arial`, `Helvetica`, `sans-serif` | 160.98 (Liberation Sans) | 161 | 161 |
+| `serif`, `"Times New Roman"`, `Times` | 147.69 (Liberation Serif) | 148 | 148 |
+| `NoSuchFont`, `Roboto`, `"Segoe UI"`, `Verdana`, `cursive`, `fantasy`, `ui-monospace` | 147.69 | 193 | 148 |
+| `ui-sans-serif`, `-apple-system` | 147.69 | 161 | 148 |
+| `"Source Code Pro", Arial` | 160.98 | 193 | 161 |
+| `system-ui`, `"DejaVu Sans"` | 183.91 (DejaVu Sans) | 161 | 184 |
+| `"Courier New"`, `Courier` | 192.03 (Liberation Mono) | 193 | 192 |
+| `monospace` | 192.66 (DejaVu Sans Mono) | 193 | 193 |
+
+Traps:
+
+- **Which Chrome.** Generic `monospace` is 192.66 in full Chrome and 192.03 in
+  `chrome-headless-shell` of the same version (no fixed-font preference, so
+  Blink's "Courier New" default). The combo-matrix baseline is full Chrome:
+  the headless shell reports 259 mismatching cells where full Chrome reports
+  241, all of the difference in `<code>` cells.
+- **The blocky text in `web_render_page_ppm.spl` output is not a family bug.**
+  The `cpu_simd` lane paints every family with the 5x7 bitmap face at
+  `font_size / 8` scale (`fb_text_thin_scaled_clip_range`). Measure widths with
+  `simple_web_layout_debug_layout_by_id`, or render through
+  `simple_web_render_html_to_pixels`, before blaming resolution.
+- **Scope gate.** The per-name walk runs only where the measured face set
+  exists (`browser_host_has_measured_linux_face_set`: Liberation Sans, Serif
+  and Mono, no macOS system faces). **macOS is unmeasured** and keeps the old
+  substring classification verbatim (`_browser_resolve_family_legacy`), as does
+  any host without Liberation.
+- **Non-CSS literals.** `""`, `inherit` (common/ui/style.spl) and bare `sans`
+  (panel2d, widget_draw_ir, window_scene_draw_ir) are not CSS lists and keep
+  the stack they had. Chrome resolves bare `Sans` to DejaVu Sans; Simple does
+  not follow it for that reason.
+- Wrapped lines advance 16px where Chrome advances 18px. Separate defect:
+  `doc/08_tracking/bug/web_wrapped_line_advance_16px_vs_chrome_18px_2026-11-14.md`,
+  pinned by the in-development
+  `test/01_unit/browser_engine/wrapped_line_advance_normal_line_height_spec.spl`.
+
+Specs: `test/01_unit/browser_engine/font_family_list_resolution_spec.spl`,
+`font_family_generic_classification_spec.spl`.
