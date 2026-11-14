@@ -971,7 +971,11 @@ pub(super) fn exec_block_closure_into(
                     }
                 }
                 if !matched {
-                    last_value = Value::Nil;
+                    return Err(crate::interpreter::interpreter_control::match_no_arm_error(
+                        "statement",
+                        &subject,
+                        &match_stmt.arms,
+                    ));
                 }
             }
             Node::Function(f) => {
@@ -1947,7 +1951,11 @@ fn exec_block_closure_mut_inner(
                     }
                 }
                 if !matched {
-                    last_value = Value::Nil;
+                    return Err(crate::interpreter::interpreter_control::match_no_arm_error(
+                        "statement",
+                        &subject,
+                        &match_stmt.arms,
+                    ));
                 }
             }
             Node::With(with_stmt) => {

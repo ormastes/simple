@@ -1534,13 +1534,14 @@ impl Lowerer {
                 if let Some(stmts) = self.try_lower_bdd_statement(expr, ctx)? {
                     return Ok(stmts);
                 }
-                // Statement-position match: value discarded, so exhausting
-                // every arm stays a silent fall-through (no exhaustion panic).
-                // The implicit tail of a non-void function is NOT discarded —
-                // it is the return value — so it fails closed like `val r = match`.
+                // A match in statement position fails closed when no arm
+                // matches, exactly like a value-position one (owner decision
+                // 2026-11-14). The implicit tail of a non-void function IS the
+                // return value, so its failure is reported as the expression form.
                 let hir_expr = if let Expr::Match { subject, arms } = expr {
                     let is_value_tail = self.value_tail_match == Some(node as *const Node as usize);
-                    self.lower_match_with(subject, arms, is_value_tail, ctx)?
+                    let form = if is_value_tail { "expression" } else { "statement" };
+                    self.lower_match_with(subject, arms, form, ctx)?
                 } else {
                     self.lower_expr(expr, ctx)?
                 };
@@ -1989,46 +1990,20 @@ impl Lowerer {
         };
 
         // Build the chain of If-Else statements from the arms
-        let mut if_chain = self.lower_match_arms_stmt(subject_idx, subject_ty, &match_stmt.arms, ctx)?;
-
-        // Implicit tail of a non-void function: the match value IS the return
-        // value, so exhausting every arm fails closed (same message as the
-        // expression form in expr/control.rs) instead of returning whatever
-        // `last_expr_value` held. Only without an unguarded wildcard: then the
-        // arm chain is a pure `If`/else-`If` spine whose last `else` is empty.
-        // The panic is typed as the declared return so the tail merge type and
-        // `validate_implicit_return_type` see the real arms' type.
-        let has_catch_all = match_stmt
-            .arms
-            .iter()
-            .any(|arm| matches!(arm.pattern, Pattern::Wildcard) && arm.guard.is_none());
-        if value_tail && !has_catch_all {
-            let mut tail = &mut if_chain;
-            loop {
-                match tail.as_mut_slice() {
-                    [HirStmt::If { else_block, .. }] => match else_block {
-                        Some(next) => tail = next,
-                        None => {
-                            *else_block = Some(vec![HirStmt::Expr(HirExpr {
-                                kind: HirExprKind::BuiltinCall {
-                                    name: "rt_panic".to_string(),
-                                    args: vec![HirExpr {
-                                        kind: HirExprKind::String(
-                                            "invalid pattern: match expression exhausted without matching any pattern"
-                                                .to_string(),
-                                        ),
-                                        ty: TypeId::STRING,
-                                    }],
-                                },
-                                ty: ctx.return_type,
-                            })]);
-                            break;
-                        }
-                    },
-                    _ => break,
-                }
-            }
-        }
+        // No arm matched and no unguarded wildcard: the chain ends in an
+        // `rt_panic` (owner decision 2026-11-14). For the implicit tail of a
+        // non-void function the match value IS the return value, so the panic
+        // is reported as the expression form and typed as the declared return:
+        // the tail merge type and `validate_implicit_return_type` then see the
+        // real arms' type.
+        let (form, exhaust_ty) = if value_tail {
+            ("expression", ctx.return_type)
+        } else {
+            ("statement", TypeId::NIL)
+        };
+        let exhaust_msg = super::expr::control::match_exhausted_message(form, Some(("match", match_stmt.span.line)));
+        let if_chain =
+            self.lower_match_arms_stmt(subject_idx, subject_ty, &match_stmt.arms, &exhaust_msg, exhaust_ty, ctx)?;
 
         let mut result = vec![store_stmt];
         result.extend(if_chain);
@@ -3263,10 +3238,16 @@ impl Lowerer {
         subject_idx: usize,
         subject_ty: TypeId,
         arms: &[ast::MatchArm],
+        exhaust_msg: &str,
+        exhaust_ty: TypeId,
         ctx: &mut FunctionContext,
     ) -> LowerResult<Vec<HirStmt>> {
         if arms.is_empty() {
-            return Ok(Vec::new());
+            // No arm matched and no wildcard: fail closed at runtime, like the
+            // interpreter and value-position matches (owner decision 2026-11-14).
+            let mut panic = super::expr::control::match_exhausted_panic(exhaust_msg);
+            panic.ty = exhaust_ty;
+            return Ok(vec![HirStmt::Expr(panic)]);
         }
 
         let arm = &arms[0];
@@ -3307,7 +3288,7 @@ impl Lowerer {
         self.restore_match_bindings(previous_bindings, ctx);
 
         // Recursively build the else branch from remaining arms
-        let else_block = self.lower_match_arms_stmt(subject_idx, subject_ty, remaining_arms, ctx)?;
+        let else_block = self.lower_match_arms_stmt(subject_idx, subject_ty, remaining_arms, exhaust_msg, exhaust_ty, ctx)?;
 
         // Build an If statement
         let if_stmt = HirStmt::If {
