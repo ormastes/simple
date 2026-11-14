@@ -1,6 +1,12 @@
 use compiler.frontend.core.parser_preprocessor.{preprocess_conditionals}
 # Flat AST Bridge: module assembly (flat_ast_to_module, parse_and_build_module).
 use compiler.frontend.flat_ast_bridge.*
+use compiler.frontend._FlatAstBridge.declaration_intent_v1.{flat_declaration_intents_v1}
+use compiler.frontend.core._ParserDecls.enum_module_body.{
+    parser_top_level_visibility_source_digest_v1,
+    parser_top_level_visibility_source_matches_digest_v1,
+    parser_top_level_visibility_admit_restored_bindings_v1,
+    parser_top_level_visibility_intent_clear_v1}
 use compiler.core.frontend.{ParserProviderV1, ParserProviderAdmissionV1, parser_provider_v1_admit, parser_provider_v1_default, parser_provider_v1_same}
 use compiler.frontend.trace_policy.{
     frontend_compiler_trace_enabled,
@@ -1135,12 +1141,17 @@ fn flat_ast_to_module(path: text) -> ParserModule:
             var aop_priority_text = "0"
             if aop_data.len() > 2:
                 aop_priority_text = aop_data[2]
+            var aop_aspect_name = ""
+            if aop_data.len() > 3:
+                aop_aspect_name = aop_data[3]
             aop_advices.push(AopAdvice(
                 pointcut: aop_pointcut,
                 form: aop_form,
                 handler: decl_get_name(idx),
                 priority: text_parse_int_simple(aop_priority_text),
-                span: span
+                span: span,
+                aspect_name: aop_aspect_name,
+                aspect_module: ""
             ))
         elif tag_text == "15":
             val di_data = decl_get_imports(idx)
@@ -1348,6 +1359,8 @@ fn flat_ast_to_module(path: text) -> ParserModule:
     built_module.required_init_mode = module_required_init_mode
     built_module.extend_enums = build_parser_extend_enums()
     built_module.representation_declarations = representation_parser_metadata_v1()
+    built_module.source_declaration_intents_v1 = flat_declaration_intents_v1()
+    built_module.source_declaration_digest_v1 = parser_top_level_visibility_source_digest_v1()
     if flat_bridge_trace_enabled():
         print "[flat-bridge] built frontend module path={path}"
     frontend_compiler_trace_scope_exit(saved_compiler_trace_scope)
@@ -1438,6 +1451,7 @@ pub fn flat_pools_restore_all(blob: text) -> bool:
 # stream of a packed .spab blob (FlatPoolReader.from_tokens).
 pub fn flat_pools_restore_reader_v1(r: FlatPoolReader) -> bool:
     representation_parser_refuse_restored_metadata_v1()
+    parser_top_level_visibility_intent_clear_v1()
     val version = r.next()
     if version != FLAT_POOL_CODEC_VERSION:
         return false
@@ -1449,8 +1463,15 @@ pub fn flat_pools_restore_reader_v1(r: FlatPoolReader) -> bool:
     val ok_ext = flat_extend_pools_restore(r)
     val ok_pend = flat_pending_pools_restore(r)
     val ok_lock = flat_lock_level_pools_restore(r)
-    (ok_decl and ok_expr and ok_stmt and ok_type and ok_par and ok_ext and ok_pend and ok_lock and
+    val restored = (ok_decl and ok_expr and ok_stmt and ok_type and ok_par and ok_ext and ok_pend and ok_lock and
         r.finish_canonical_frame() and flat_decl_pools_consistent())
+    if not restored:
+        parser_top_level_visibility_intent_clear_v1()
+        return false
+    if not parser_top_level_visibility_admit_restored_bindings_v1():
+        parser_top_level_visibility_intent_clear_v1()
+        return false
+    true
 
 var _fab_roundtrip_cached: i64 = -1
 fn flat_roundtrip_enabled() -> bool:
@@ -1621,6 +1642,7 @@ fn _build_module_from_cache_v1(blob: text, packed: SpabViewV1?, source: text, pa
     val saved_lex_path = _sffi_env_get("SIMPLE_BOOTSTRAP_LEX_PATH") ?? ""
     reset_all_pools()
     parser_init_with_path(source, path)
+    val expected_source_digest = parser_top_level_visibility_source_digest_v1()
     val _hp_t1 = if fab_phase_prof_enabled(): _sffi_time_now_unix_micros() else: 0
     var blob_usable = false
     if val view = packed:
@@ -1629,6 +1651,8 @@ fn _build_module_from_cache_v1(blob: text, packed: SpabViewV1?, source: text, pa
             FlatPoolReader.from_tokens(tokens.kinds, tokens.ints, tokens.texts))
     else:
         blob_usable = flat_pools_restore_all(blob)
+    if blob_usable and not parser_top_level_visibility_source_matches_digest_v1(expected_source_digest, path):
+        blob_usable = false
     # A blob stored at a permissive SIMPLE_CAPTURE_WRITE_CHECK level, or by a
     # compiler without the check (phase-2 import, shared store), must not come
     # back as a clean hit: treat it as a miss so the fresh parse reports it.
