@@ -10,10 +10,11 @@ use compiler.frontend.core.ast_expr.*
 use std.string_core.{char_code}
 use compiler.frontend.trace_policy.{frontend_trace_suppressed}
 use std.nogc_sync_mut.io.process_ops.{eprint}
-use std.nogc_sync_mut.io_runtime.{env_get_nullable, env_set, env_remove_process}
+use std.nogc_sync_mut.io_runtime.{env_get_nullable, env_set, env_remove_process, file_read_nullable}
 use compiler.core.types.{int_to_str}
 use compiler.frontend.core.flat_pool_codec.*
 use compiler.common.data.attribute_schema_v1.{AttributeStoreV1, AttrPlacementV1, attr_placement_from_token_v1, attr_store_detached_v1}
+use compiler.common.data.data_schema_resolver.{data_attr_storage_resolve_v1, data_policy_rules_from_sdn_v1}
 use compiler.frontend.core.flat_pool_codec.{FlatPoolReader}  # explicit: a glob is not an import-origin for surface projection
 
 # ===== Expression Kind Tags =====
@@ -452,6 +453,46 @@ pub fn expr_attr_apply_config(spec: text) -> Result<bool, text>:
             case Err(e): return Err(e)
     Ok(true)
 
+pub val EXPR_ATTR_TREE: text = "compiler.ast"
+pub val EXPR_ATTR_VIEW: text = "compiler.ast.Expr"
+
+# Placement selected by SDN `data_policy.rules` layout rows (subject
+# `compiler.ast.Expr.<attr>` site, `compiler.ast.Expr` type, `compiler.ast`
+# module or project), resolved through data_attr_storage_resolve_v1. The
+# `override_spec` (env SIMPLE_NODE_ATTR text) is applied after the rules, so it wins.
+# No rules and an empty override is the off identity. Any error leaves the switch off.
+pub fn expr_attr_apply_sdn(source: text, path: text, override_spec: text) -> Result<bool, text>:
+    var spec = ""
+    if source.trim() != "":
+        match data_policy_rules_from_sdn_v1(source, path, EXPR_ATTR_TREE):
+            case Ok(rules):
+                for attr in ["extra", "s_val"]:
+                    match data_attr_storage_resolve_v1(EXPR_ATTR_TREE, EXPR_ATTR_VIEW, attr, rules, "direct"):
+                        case Ok(choice): spec = spec + attr + "=" + choice.choice + ","
+                        case Err(d):
+                            expr_attr_apply_config("")
+                            return Err("{d.subject}: {d.message}")
+            case Err(diags):
+                expr_attr_apply_config("")
+                var parts: [text] = []
+                for d in diags:
+                    parts.push("{d.subject}: {d.message}")
+                return Err(parts.join("; "))
+    expr_attr_apply_config(spec + override_spec)
+
+# expr_reset entry: rule file from env SIMPLE_NODE_ATTR_SDN (optional), then the
+# SIMPLE_NODE_ATTR override. Both unset is the off identity.
+fn expr_attr_apply_env() -> Result<bool, text>:
+    val override_spec = env_get_nullable("SIMPLE_NODE_ATTR") ?? ""
+    val sdn_path = env_get_nullable("SIMPLE_NODE_ATTR_SDN") ?? ""
+    if sdn_path == "":
+        return expr_attr_apply_config(override_spec)
+    match file_read_nullable(sdn_path):
+        case Some(source): expr_attr_apply_sdn(source, sdn_path, override_spec)
+        case None:
+            expr_attr_apply_config("")
+            Err("SIMPLE_NODE_ATTR_SDN file not readable: {sdn_path}")
+
 pub fn expr_attr_extra_placement() -> text:
     if expr_attr_extra_mode[0] == 1: return "column"
     if expr_attr_extra_mode[0] == 2: return "sparse_hash"
@@ -725,7 +766,7 @@ pub fn expr_reset():
     expr_left.clear()
     expr_right.clear()
     expr_extra.clear()
-    expr_attr_apply_config(env_get_nullable("SIMPLE_NODE_ATTR") ?? "")
+    expr_attr_apply_env()
     expr_args.clear()
     expr_call_type_args.clear()
     expr_arg_names.clear()
