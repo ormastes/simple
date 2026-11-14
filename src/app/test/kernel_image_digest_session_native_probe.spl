@@ -1,28 +1,26 @@
 # Fresh-process lifetime probe for the production kernel-image memo owner.
-# The hash is captured while BuildSession's explicit publish allocation is
-# active, then read again after the real session heap has been ended.
+# The hash is captured while the runtime's explicit session allocation is
+# active, then read again after the real session heap has been ended. This
+# exercises the runtime session owner, not compiler BuildSession reset logic.
 
-use std.io_runtime.{env_set, platform_name}
+use std.io_runtime.{platform_name}
 use std.nogc_sync_mut.io.kernel_image_digest_v1.{kernel_image_digest_v1}
 use std.nogc_sync_mut.sffi.rc_graph.{rt_rc_count}
-use compiler.driver.session.build_session.{
-    build_session_inactive, session_kept_begin
+use std.nogc_sync_mut.sffi.transient.{
+    transient_session_heap_begin_v1, transient_session_alloc_begin_v1,
+    transient_session_alloc_end_v1, transient_session_heap_end_v1
 }
 
 fn main() -> i64:
     if platform_name() != "linux":
         print "FAIL: probe requires the supported Linux image owner"
         return 2
-    if not env_set("SIMPLE_BUILD_SESSION", "1") or
-            not env_set("SIMPLE_BUILD_SESSION_END", "1"):
-        print "FAIL: session environment setup failed"
-        return 3
-    var session = build_session_inactive()
-    if not session.begin():
-        print "FAIL: real BuildSession begin failed"
+    val session = transient_session_heap_begin_v1()
+    if session == 0u32:
+        print "FAIL: real runtime session heap begin failed"
         return 4
-    if not session.publish_alloc_begin():
-        print "FAIL: real BuildSession publish allocation begin failed"
+    if not transient_session_alloc_begin_v1():
+        print "FAIL: real runtime session allocation begin failed"
         return 5
     var first_digest = ""
     var capture_ok = false
@@ -32,13 +30,13 @@ fn main() -> i64:
             capture_ok = true
         case Err(reason):
             print "FAIL: first capture unavailable: {reason}"
-    val allocation_ended = session.publish_alloc_end()
+    val allocation_ended = transient_session_alloc_end_v1()
     val session_ended = allocation_ended and
-        session.end(session_kept_begin(session))
+        transient_session_heap_end_v1(session)
     if not capture_ok:
         return 6
     if not allocation_ended or not session_ended:
-        print "FAIL: real BuildSession teardown failed"
+        print "FAIL: real runtime session teardown failed"
         return 7
     val root_count = unsafe(capabilities: [ffi]): rt_rc_count(first_digest)
     if root_count != 1:
