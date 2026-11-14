@@ -1310,20 +1310,17 @@ never cache an answer computed while exhausted) —
 - **Trap — the old band narrowed by the RUN's width.** `node_w` in the `#text`
   branch is the run's own box, so `node_w - indent` went to 1 px and `bb` beside
   any left float wrapped to two lines (every `…-b` cell was 48 px tall). The
-  narrowed width now comes from the run loop via
-  `g_text_float_narrow_w_pending` / `g_text_float_lines_pending`.
+  narrowed width comes from the run loop (now as per-line boxes, see the
+  "per-line text boxes" entry below).
 - **Trap — a `%` width float was resolved twice** (50% of 400 gave 100): pass
   `style_with_width(cst, resolved)` like the inline-block arm does.
 - **Trap — page coordinates go stale when a subtree is translated.** The
   margin-collapse re-top calls `float_ctx_shift`; any NEW
   `offset_layout_subtree` on a non-BFC block that can hold floats must too.
-- **Not modelled:** paint x of a wrapped run's lines that outlast a LEFT float
-  (lines beside the float are wrapped narrow but painted from the block's left
-  edge unless every line stays beside the float); a float is fitted at its top
-  row only, not over its whole height; a run that starts mid-line beside a
-  float; floats inside flex/grid containers' own height; `td` floats; the
+- **Not modelled:** a FLOAT is fitted at its top row only, not over its whole
+  height; a run that starts mid-line beside a float; `td` floats; the
   collapsed space after an inline float is counted twice (`aa <float> bb`,
-  about 5 px).
+  about 5 px). The full list is in the residue bug record.
 - **Found, not float-related:** a 100 px block wraps
   `one two three four …` into 9 lines against Chrome's 7 (`one two three` is
   96.95 px but does not fit 100); `<span>bb</span> cc <b>dd</b>` puts `dd` 6 px
@@ -1402,24 +1399,39 @@ never cache an answer computed while exhausted) —
 
 ## 2026-11-14 — paint follows the float inset; an explicit zero flex-basis overrides width
 
-- **Per-line text inset.** `LayoutResult.first_line_dx` carries two forms: a
-  positive entry insets line 0 (mid-line run); a NEGATIVE entry
-  `-(lines * 65536 + dx)` insets the first `lines` lines by `dx` (lines a left
-  float shortened and the run outlasted). Read it ONLY through
-  `text_line_inset_at(table, node, line)`; the five readers are both raster
-  loops, the Draw IR first-line command, its `_line{n}` loop, and the
-  `text_line_x0` probe. Narrow the line box width with the inset as well.
-  This supersedes the "paint x of a wrapped run's lines that outlast a LEFT
-  float" item under "Not modelled" above. Spec (software ink columns + Draw
-  IR x): `test/01_unit/browser_engine/float_band_text_paint_inset_spec.spl`.
+- **Per-line text boxes.** `LayoutResult.first_line_dx` is the mid-line inset
+  of line 0 and nothing else (never negative). A run whose lines floats
+  shorten has `LayoutResult.line_boxes[node]`: flat `(dx, width)` pairs, one
+  per line; lines past the list span the box. A node has one form or the
+  other. Read BOTH only through `text_line_box_dx` / `text_line_box_w`
+  (`..._layout_foundation.spl`); the readers are both raster loops, the Draw
+  IR first-line command and its `_line{n}` loop, the `text_line_x0` probe,
+  and the CPU layout execution port (`browser_cpu_line_box`, with
+  `browser_cpu_line_insets_from_boxes` recovering both forms). Any new
+  `LayoutResult(` / `TextWrapCache(` that feeds a painter must copy
+  `line_boxes` as well as `first_line_dx`. Specs:
+  `test/01_unit/browser_engine/float_band_text_paint_inset_spec.spl`,
+  `float_line_fit_chrome159_spec.spl`,
+  `test/01_unit/lib/gc_async_mut/gpu/browser_engine/cpu_execution_port_line_boxes_spec.spl`.
+- **Trap — do not pack a second meaning into an existing integer table.** A
+  first version encoded the float inset as a negative `first_line_dx` entry;
+  a reader outside the renderer files (the CPU execution port) read the table
+  raw and would have put line 0 about 65,000 px left. Grep `src/` for every
+  reader before changing what a shared field means.
 - **`Style.flex_basis_zero`.** `flex: <n>` / `flex: <n> <m>` / `flex-basis: 0`
-  set it; `flex_basis_px` stays 0, so every pre-existing `== 0` / `> 0` test
-  behaves as before. The layout acts on it only through
-  `flex_item_zero_basis(st)` = zero basis AND a `width`: base size is padding
-  + border, the item joins the definite-grow share, and it is laid out via
-  `style_with_width`. A zero-basis item WITHOUT a width keeps the old
-  weight-share path, deliberately (pinned widget scenes use `flex: 1`
-  without widths; that path is unchanged by construction).
+  / `0%` set it; `flex_basis_px` stays 0. EVERY such item, with or without a
+  `width`, has base size padding + border (`flex_item_zero_basis`), joins the
+  definite-grow share and is laid out via `style_with_width`.
+- **Automatic minimum size.** A zero-basis item never ends below
+  `flex_zero_basis_floor_w`: its min-content width (`flex_item_min_content_w`,
+  longest word from the RESOLVED advances), capped by a specified `width`;
+  no floor when `min-width` is declared (`Style.min_width_set`, true even for
+  `min-width: 0`) or the item clips. Nowrap rows freeze too-small shares at
+  the floor and redistribute (`zero_fixed_w`); with no free space every one
+  sits at its floor and takes no part in shrinking.
+- **Trap — `_table_text_min_content_width` is a flat cell estimate** (11 px
+  per character at 16 px): `Label` measured 55 against Chrome's 39.16. Use
+  the resolved per-byte advances for anything compared with Chrome.
 - **Trap — the old shorthand parser read numbers positionally**
   (`parse_nth_int`): `flex: auto` set nothing, `flex: 1 200px` made shrink 200.
   It is token-based now: unitless = grow, shrink; length or `auto` = basis.
@@ -1448,3 +1460,35 @@ never cache an answer computed while exhausted) —
 - A float's auto width takes the wider of `flex_item_max_content_width` and
   `intrinsic_text_width`: only the second sizes a replaced child
   (`svg_viewbox_percent_sizing_spec` AC-13 went 1 px wide without it).
+
+## 2026-11-14 — review round: lines and blocks fit beside floats over their own extent
+
+- **Line start.** The run loop probes the floats over `[cy, cy +
+  line_probe_h)` (the block's line height), not one pixel row. An EMPTY line
+  that cannot take its first piece (`inline_first_fit_w`: first word, whole
+  nowrap run, or atomic box) moves to `float_ctx_next_bottom_span` and tries
+  again -- two half-width float columns followed by `<p>` no longer stack one
+  word per line. `<br>` with `clear` moves `cy` below the named floats.
+- **Wrapped run.** `float_ctx_line_boxes(y, line_h, left, right)` gives one
+  `(dx, width)` pair per line for as long as a float reaches below the line
+  top; `compute_style_wrap_ranges_float_band` wraps into them and leaves a
+  shortened line EMPTY when the next word does not fit it. The Draw IR text
+  command's y is the line top + 3 at 16px/1.5 (half-leading), the same number
+  Chrome's `Range.getClientRects()` reports.
+- **Formatting-context block.** Placed where the room over `[top, top +
+  height)` holds it; auto height comes from a trial `layout_with_style`
+  whose result is discarded (safe because the box scopes its own floats and
+  the text tables are re-recorded by the real pass).
+- **Alignment.** `block_sole_inflow_child` replaces `child_count == 1` for
+  the centred/right sole-text widening: a float sibling is not in flow. An
+  RTL box with no declared `text-align` gets `start`.
+- **Cost.** `g_float_max_y1` (lowest float bottom of the current context
+  slice, saved and restored by the `layout_with_style` wrapper) lets every
+  float query return at once for a row at or below it.
+- **Baseline arithmetic.** The ratchet lists element IDS, the gate table
+  counts CELLS; a cell has a slot id plus 1-3 element ids and is green only
+  when all of them match. 463 -> 263 ids (200 removed) is 241 -> 152 cells
+  (89 fixed). The gate FAILs on a mismatching id that is not baselined and on
+  a baselined id that matches, so its PASS line is the proof that no
+  still-mismatching id was dropped.
+- Residue: `doc/08_tracking/bug/web_combo_matrix_float_subsup_flex_residue_2026-11-14.md`.
