@@ -428,3 +428,33 @@ Findings that change the plan:
 - `args`/`arg_names`/`stmts`/`extra`/`call_type_args` are each < 15% populated and
   hold list/text refs: first hash candidates after the two pilot attributes.
 - Not yet censused: decl columns, `asm_*` expr columns, HIR/MIR nodes.
+
+### 7.5 Node attributes applied to the real AST pool (2026-11-14, step 4)
+
+Switch: env `SIMPLE_NODE_ATTR=extra=<token>,s_val=<token>` (tokens `direct`,
+`column`, `sparse_hash`), read ONCE per `expr_reset` by `expr_attr_apply_config` in
+`10.frontend/core/_AstExpr/nodes.spl`; per access only an `[i64]` mode slot is read, no
+string compare. Unset/`direct` = today's owner arrays, no store constructed. An unknown
+token returns Err and leaves everything off. The switch does NOT yet flow through the SDN
+rule / `data_attr_storage_resolve_v1` (env-only).
+
+Applied (real `ExprStore` owner arrays `expr_extra`, `expr_s_val`; `inferred_type` has no
+owner in the real AST pool, so the 0.4%-dense `extra` is the sparse-hash candidate and
+69%-dense `s_val` the dense-column candidate). `op` was NOT applied (7.9% dense).
+Writes go through `expr_*_put`, reads through `expr_*_get`; the flat snapshot codec
+uses `*_dense()` / `*_load()`.
+
+Evidence (seed-tip interpreter, Windows, `ast_attr_apply_spec` 7/7): off-identity
+(parse fingerprint equals the pre-change constant), value+presence parity for extra on
+hash and column, s_val (text) on column and hash, array<->hash<->column switching by
+config alone with parity both ways, combined extra+s_val identical fingerprint.
+Regressions: `ast_pool_snapshot_spec` 5/5, `ast_node_pool_pilot_spec` 6/6,
+`attribute_schema_v1_spec` 9/9.
+
+Perf (parse-only of `mir_lowering_stmts.spl`, 12,266 exprs, 2 rounds alternating,
+parse_ms): extra direct 139424/134025, hash 149614/131478, column 135562/135697;
+s_val direct 136022/136287, column 143757/134590, hash 134580/131719. Noise-level, no
+measurable difference. `memory_usage()` (current RSS, not max RSS, units unrecorded):
+~6455 off vs ~6491-6496 on (+36..41). Only 2 rounds, not 3.
+Caveats: static fan-in of `expr_get_extra(` is 23 sites/10 files; dynamic read counters
+need a product hook and were not added. Default stays off.
