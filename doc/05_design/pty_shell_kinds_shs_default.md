@@ -63,10 +63,22 @@ flip is one line in `pty_shell_kind_for_v1` once phase 2 lands.
    through the real PTY; `exit` fixed (it called a method `OsExecutor` never had).
 2. **Open — host parity for shs.** A host-backed VFS for `ShellApp.with_vfs`
    and host program launch through SOSIX process, then flip the host default.
-3. **Open — SimpleOS PTY provider.** `rt_pty_*` exists only in the host Rust
-   lane. SimpleOS needs a provider under the same `std.sys.pty` surface that
-   attaches `ShellApp` to a pane; it must be shown on QEMU real firmware and on
-   the board (`.claude/rules/board-runnable.md`). Not started.
+3. **Provider landed, hosted-tested only (2026-11-14); QEMU/board unverified.**
+   `rt_pty_*` exists only in the host Rust lane. `src/os/apps/shell/pty_provider.spl`
+   exposes the `std.sys.pty` surface (`open`, `spawn`/`spawn_v1`, `write`,
+   `read`, `is_running`, `close`, `platform_default_shell`) over a handle table
+   of in-process `ShellApp`s. `spawn` admits only `PTY_SHS_SIMPLEOS_COMMAND`
+   (`/sys/apps/shell`); any other program is
+   `Err("pty-native-spawn-unavailable-on-simpleos: ...")` — SimpleOS has no
+   native-script interpreter. `write` -> `feed_remote_input`, `read` ->
+   `take_remote_output` (non-blocking; the shell runs synchronously inside
+   `write`, so `timeout_ms` is not waited on), shell `exit` -> `is_running`
+   false and later writes refused. It lives in the OS layer, not `src/lib`,
+   because std must not import `os.apps.*`; a SimpleOS image selects it by
+   importing it in place of `std.sys.pty`. Open: a SimpleOS pane consumer wired
+   to it, resize, and the QEMU real-firmware (OVMF) and board runs required by
+   `.claude/rules/board-runnable.md` — tracked in
+   `doc/08_tracking/todo/simpleos_pty_provider_unverified_2026-11-14.md`.
 
 ## 6. Tests
 
@@ -74,3 +86,6 @@ flip is one line in `pty_shell_kind_for_v1` once phase 2 lands.
   SimpleOS refusal, host fallback.
 - `test/03_system/tools/smux_shs_pane_spec.spl` — a real smux pane on hosted
   shs: `expr 40 + 2` -> `42`, `exit` -> `logout`.
+- `test/01_unit/os/apps/shell/pty_provider_spec.spl` — the SimpleOS provider
+  driven on host: spawn `/sys/apps/shell`, `expr 40 + 2` -> `42`, `exit`
+  stops the handle; other programs refused.
