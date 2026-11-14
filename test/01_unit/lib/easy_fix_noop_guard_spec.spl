@@ -1,0 +1,46 @@
+# @cover src/lib/nogc_sync_mut/tooling/easy_fix/types.spl
+# No-op edit guard: identity replacements are not effective fixes.
+
+use std.nogc_sync_mut.tooling.easy_fix.types.*
+
+fn rep(start: Int, end: Int, text_: String) -> Replacement:
+    Replacement.create("a.spl", start, end, 1, 1, text_)
+
+fn fix_of(r: Replacement) -> EasyFix:
+    var f = EasyFix.create("W0406:1", "d", FixConfidence.Certain)
+    f.add_replacement(r)
+    f
+
+describe "easyfix no-op guard":
+    val src = "use std.text.*\nfn a(): 1\n"
+    val sources: Dict<String, String> = {"a.spl": "use std.text.*\nfn a(): 1\n"}
+
+    it "identity replacement is not effective":
+        expect(easyfix_replacement_is_effective(rep(0, 3, "use"), src)).to_equal(false)
+
+    it "empty range with empty text is not effective":
+        expect(easyfix_replacement_is_effective(rep(4, 4, ""), src)).to_equal(false)
+
+    it "real replacement is effective":
+        expect(easyfix_replacement_is_effective(rep(0, 3, "pub"), src)).to_equal(true)
+
+    it "pure insertion is effective":
+        expect(easyfix_replacement_is_effective(rep(4, 4, "x"), src)).to_equal(true)
+
+    it "fix with only identity edits is not effective":
+        expect(easyfix_is_effective(fix_of(rep(0, 3, "use")), sources)).to_equal(false)
+
+    it "fix with a real edit is effective":
+        expect(easyfix_is_effective(fix_of(rep(0, 3, "pub")), sources)).to_equal(true)
+
+    it "applicator output is unchanged for identity edits":
+        val out = FixApplicator.apply([fix_of(rep(0, 3, "use"))], sources)
+        match out:
+            case Ok(m): expect(m.len()).to_equal(0)
+            case Err(_): expect(false).to_equal(true)
+
+    it "applicator still applies real edits next to identity edits":
+        val out = FixApplicator.apply([fix_of(rep(0, 3, "use")), fix_of(rep(15, 17, "FN"))], sources)
+        match out:
+            case Ok(m): expect(m["a.spl"]).to_equal("use std.text.*\nFN a(): 1\n")
+            case Err(_): expect(false).to_equal(true)
