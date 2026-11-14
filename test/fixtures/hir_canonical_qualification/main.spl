@@ -7,6 +7,7 @@ use compiler.hir.hir_definitions.{HirConst, HirExpr, HirExprKind, HirAopAdvice}
 use compiler.blocks.value.{BlockValue}
 use compiler.hir.generated.hir_codec.{hc_enc_hir_module, hc_dec_hir_module}
 use compiler.hir.hir_codec_support.{HirCodecWriter}
+use compiler.hir.hir_codec.{hir_canonical_codec_header}
 use compiler.frontend.core.flat_pool_codec.{FlatPoolReader}
 use std.common.encoding.utf8.{text_byte_len}
 use std.nogc_sync_mut.io.file_ops.{file_write}
@@ -47,7 +48,9 @@ fn raw_canonical(module: HirModule) -> text:
     var writer = HirCodecWriter.create_canonical()
     hc_enc_hir_module(writer, module)
     assert(writer.ok)
-    writer.finish()
+    val encoded = writer.finish()
+    assert(writer.ok)
+    encoded
 
 fn raw_reader(blob: text, nodes: i64, depth: i64) -> FlatPoolReader:
     FlatPoolReader.new_bounded(blob, 8388608, 134217728, nodes, depth, 1000000)
@@ -63,6 +66,12 @@ fn main() -> i64:
     assert(first.symbols.symbols.keys() == before_symbols)
     assert(first.gpu_function_targets.keys() == before_targets)
     assert(blob.contains("a\ntarget:a\nz\ntarget:z\né\ntarget:é\n한\ntarget:한\n"))
+    assert(blob.index_of("symbol-7\n") < blob.index_of("symbol0\n"))
+    assert(blob.index_of("symbol0\n") < blob.index_of("symbol3\n"))
+    assert(blob.index_of("symbol3\n") < blob.index_of("symbol12\n"))
+    assert(blob.index_of("constant-7\n") < blob.index_of("constant0\n"))
+    assert(blob.index_of("constant0\n") < blob.index_of("constant3\n"))
+    assert(blob.index_of("constant3\n") < blob.index_of("constant12\n"))
     print "PASS insertion-order, unsigned-UTF8 order, source immutability"
 
     var reader = raw_reader(blob, 65536, 128)
@@ -137,7 +146,27 @@ fn main() -> i64:
     hc_enc_hir_module(allocation_limited, first)
     assert(not allocation_limited.ok)
     assert(allocation_limited.failure_kind == "bounds")
-    print "PASS writer output, work and allocation budgets"
+    var depth_limited = HirCodecWriter.create_canonical_bounded(8388608, 134217728, 1000000, 1)
+    hc_enc_hir_module(depth_limited, first)
+    assert(not depth_limited.ok)
+    assert(depth_limited.unsupported == "writer_depth")
+    print "PASS writer output, work, allocation and depth budgets"
+
+    val header = hir_canonical_codec_header()
+    val framed = header + "\n" + blob
+    val exact_bytes = text_byte_len(framed)
+    var exact = HirCodecWriter.create_canonical_bounded(exact_bytes, 134217728, 1000000)
+    hc_enc_hir_module(exact, first)
+    val exact_frame = exact.finish_with_header(header)
+    assert(exact.ok)
+    assert(exact_frame == framed)
+    var one_short = HirCodecWriter.create_canonical_bounded(exact_bytes - 1, 134217728, 1000000)
+    hc_enc_hir_module(one_short, first)
+    val refused_frame = one_short.finish_with_header(header)
+    assert(not one_short.ok)
+    assert(one_short.failure_kind == "bounds")
+    assert(refused_frame == "")
+    print "PASS header-inclusive exact output budget and one-byte-short refusal"
 
     var unsupported = fixture([3], [])
     var constant = unsupported.constants[SymbolId(id: 3)]
@@ -151,6 +180,7 @@ fn main() -> i64:
     print "PASS actual unsupported opaque HIR payload refused"
 
     assert(file_write("build/hir-canonical-qualification.raw.golden", blob))
+    assert(file_write("build/hir-canonical-qualification.framed.golden", framed))
     print "GOLDEN actual generated-codec bytes={text_byte_len(blob)}"
     print "SCOPE raw internal codec only; public gate remains closed"
     0
