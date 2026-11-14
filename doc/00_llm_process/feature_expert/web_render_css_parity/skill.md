@@ -1427,3 +1427,13 @@ never cache an answer computed while exhausted) —
   the follow-ups section above.
 - Open residue (one record):
   `doc/08_tracking/bug/web_combo_matrix_float_subsup_flex_residue_2026-11-14.md`.
+- Catalog pixel ratchet, 900x760 `cpu_simd`, measured at the tip of this
+  change: overview 2.88, html 15.98, css-layout 5.85 (row 6.11), css-paint
+  7.44 (row 9.28), forms-media 6.38, animation 7.09 (row 7.36), evidence 1.72,
+  tab-bar 0.68 (row 0.63, inside the tolerance, not raised). The three lower
+  rows were lowered. The same three values were measured before the paint and
+  zero-basis commits, so those two moved no catalog pixel.
+- `check-text-len-unit-mix.shs` at this tip: 0 new rows; it still FAILs on two
+  STALE baseline rows outside the renderer (`src/app/spipe/model/canonical.spl
+  _json_escape`, `src/compiler/80.driver/driver_compile_vhdl_source_map.spl
+  _json_escape`), present on the release tip as well.
