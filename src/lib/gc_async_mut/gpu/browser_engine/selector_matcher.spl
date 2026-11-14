@@ -2,6 +2,8 @@
 #
 # Provides :not() selector matching used by fallback pixel path rendering.
 
+use std.gc_async_mut.gpu.browser_engine.css_nth.{css_nth_matches}
+
 fn _sel_attr_value(tag: text, attr: text) -> text:
     val key_dq = attr + "=\""
     val key_sq = attr + "='"
@@ -137,63 +139,70 @@ fn br_selector_list_contains_last_child_self(selector: text, tag_name: text, tag
 fn br_selector_list_contains_only_child_self(selector: text, tag_name: text, tag: text) -> bool:
     selector.contains(":only-child")
 
-# One signed integer of an An+B term; "" and "+" mean `fallback`, "-" means
-# its negation. Returns nil for anything that is not an integer.
-fn _sel_nth_int(raw: text, fallback: i64) -> i64?:
-    val t = raw.trim()
-    if t == "" or t == "+":
-        return fallback
-    if t == "-":
-        return 0 - fallback
-    val digits = if t.starts_with("+"): t.substring(1, t.byte_len()) else: t
-    digits.to_i64()
-
-# Does 1-based sibling index `nth` satisfy one `:nth-child()` argument
-# (integer, odd, even or An+B; Selectors 4 section 14.4.1)?
-fn _sel_nth_arg_matches(raw: text, nth: i64) -> bool:
-    val arg = raw.replace(" ", "").lower()
-    if arg == "odd":
-        return nth % 2 == 1
-    if arg == "even":
-        return nth % 2 == 0
-    val n_at = arg.index_of("n")
-    if n_at < 0:
-        val exact = _sel_nth_int(arg, 0)
-        if exact == nil:
-            return false
-        return nth == (exact ?? 0)
-    val step_opt = _sel_nth_int(arg.substring(0, n_at), 1)
-    val offset_opt = _sel_nth_int(arg.substring(n_at + 1, arg.byte_len()), 0)
-    if step_opt == nil or offset_opt == nil:
+# Does the compound selector that carries a pseudo-class (the text between
+# the previous combinator and the `:`) describe this element? Checks the type
+# selector, every `.class` and the `#id`; attribute parts are not evaluated.
+fn _sel_compound_matches_element(compound: text, tag_name: text, tag: text) -> bool:
+    val c = compound.trim()
+    var i = 0
+    val n = c.byte_len()
+    while i < n and _sel_name_char(c.substring(i, i + 1)):
+        i = i + 1
+    val type_name = c.substring(0, i).lower()
+    if type_name != "" and type_name != tag_name.lower():
         return false
-    val step = step_opt ?? 0
-    val delta = nth - (offset_opt ?? 0)
-    if step == 0:
-        return delta == 0
-    if step > 0:
-        return delta >= 0 and delta % step == 0
-    delta <= 0 and (0 - delta) % (0 - step) == 0
+    if type_name == "" and i < n and c.substring(i, i + 1) == "*":
+        i = i + 1
+    val classes = " " + _sel_attr_value(tag, "class").replace("\t", " ").replace("\n", " ") + " "
+    val id_value = _sel_attr_value(tag, "id")
+    while i < n:
+        val mark = c.substring(i, i + 1)
+        if mark != "." and mark != "#":
+            return true
+        var j = i + 1
+        while j < n and _sel_name_char(c.substring(j, j + 1)):
+            j = j + 1
+        val name = c.substring(i + 1, j)
+        if mark == "." and not classes.contains(" " + name + " "):
+            return false
+        if mark == "#" and id_value != name:
+            return false
+        i = j
+    true
 
-# True when the rule's selector list carries a `:nth-child(...)` whose
-# argument selects sibling index `nth`. This used to be a bare
-# `selector.contains(":nth-child")`, which applied an `:nth-child(2)` rule to
-# every sibling.
+fn _sel_is_combinator_or_space(ch: text) -> bool:
+    ch == " " or ch == ">" or ch == "+" or ch == "~" or ch == "," or ch == "\t" or ch == "\n" or ch == "\r"
+
+# True when one selector of the rule's selector list ends in a compound that
+# describes this element and carries `:nth-child(An+B)` with an argument that
+# selects 1-based element-sibling index `nth`. The argument is evaluated by
+# the shared An+B evaluator (css_nth.spl). This used to be a bare
+# `selector.contains(":nth-child")`, which applied `p:nth-child(2)` to every
+# div.
 fn br_selector_list_contains_nth_child_self(selector: text, tag_name: text, tag: text, nth: i64) -> bool:
     if nth <= 0:
         return false
     val marker = ":nth-child("
-    var rest = selector
-    while true:
-        val start = rest.index_of(marker)
-        if start < 0:
+    var from = 0
+    val total = selector.byte_len()
+    while from < total:
+        val hit = selector.substring(from, total).index_of(marker)
+        if hit < 0:
             return false
-        val after = rest.substring(start + marker.byte_len(), rest.byte_len())
+        val at = from + hit
+        val after = selector.substring(at + marker.byte_len(), total)
         val close = after.index_of(")")
         if close < 0:
             return false
-        if _sel_nth_arg_matches(after.substring(0, close), nth):
+        var start = at
+        while start > 0 and not _sel_is_combinator_or_space(selector.substring(start - 1, start)):
+            start = start - 1
+        if (
+            css_nth_matches(after.substring(0, close), nth) and
+            _sel_compound_matches_element(selector.substring(start, at), tag_name, tag)
+        ):
             return true
-        rest = after.substring(close + 1, after.byte_len())
+        from = at + marker.byte_len() + close + 1
     false
 
 fn br_selector_list_contains_multi_class(selector: text, classes: [text]) -> bool:

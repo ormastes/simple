@@ -736,6 +736,57 @@ fn br_style_block_rule_for_selector(html: text, selector: text) -> text:
 # Content helpers used by empty_self
 # =========================================================================
 
+# 1-based index of the element whose tag opens at `tag_pos` among the ELEMENT
+# children of its parent — what `:nth-child()` counts. Walks the markup before
+# it keeping one child counter per open element; comments, doctype and the
+# raw text of <style>/<script> are skipped, void and self-closed elements count
+# as siblings without opening a level.
+fn br_element_sibling_index(html: text, tag_pos: i64) -> i32:
+    if tag_pos < 0:
+        return 0
+    val lower = html.lower()
+    var counts: [i32] = [0]
+    var pos: i64 = 0
+    while pos < tag_pos:
+        val open = br_find_str(lower, "<", pos)
+        if open >= 999999999 or open >= tag_pos:
+            break
+        if lower.slice(open, open + 4) == "<!--":
+            val comment_end = br_find_str(lower, "-->", open + 4)
+            if comment_end >= 999999999:
+                break
+            pos = comment_end + 3
+            continue
+        val close = browser_renderer_find_char(html, ">", open)
+        if close >= 999999999:
+            break
+        val content = lower.slice(open + 1, close).trim()
+        pos = close + 1
+        if content.starts_with("!") or content.starts_with("?") or content.len() == 0:
+            continue
+        if content.starts_with("/"):
+            if counts.len() > 1:
+                counts.pop()
+            continue
+        counts[counts.len() - 1] = counts[counts.len() - 1] + 1
+        var name_end = 0
+        while name_end < content.len() and content.slice(name_end, name_end + 1) != " " and content.slice(name_end, name_end + 1) != "/":
+            name_end = name_end + 1
+        val name = content.slice(0, name_end)
+        if browser_renderer_is_void_element(name) or content.ends_with("/"):
+            continue
+        if name == "style" or name == "script":
+            val raw_end = br_find_str(lower, "</" + name, pos)
+            if raw_end >= 999999999:
+                break
+            val raw_close = browser_renderer_find_char(html, ">", raw_end)
+            if raw_close >= 999999999:
+                break
+            pos = raw_close + 1
+            continue
+        counts.push(0)
+    counts[counts.len() - 1] + 1
+
 fn br_div_content_is_empty(html: text, content_start: i64) -> bool:
     val lower = html.lower()
     val close_pos = br_find_str(lower, "</div", content_start)

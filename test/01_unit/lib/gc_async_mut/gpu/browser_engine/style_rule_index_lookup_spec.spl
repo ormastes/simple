@@ -21,7 +21,8 @@ use std.gc_async_mut.gpu.browser_engine.style_rule_index.{
     br_parent_tag_content_before_pos, br_style_block_rule_for_body_child_div,
     br_style_block_rule_for_first_child_self, br_style_block_rule_for_last_child_self,
     br_style_block_rule_for_only_child_self, br_style_block_rule_for_nth_child_self,
-    br_style_block_rule_for_multi_class, br_div_content_is_empty
+    br_style_block_rule_for_multi_class, br_div_content_is_empty,
+    br_element_sibling_index
 }
 use std.gc_async_mut.gpu.browser_engine.selector_matcher.{br_selector_list_contains_nth_child_self}
 
@@ -140,6 +141,21 @@ describe "Fallback stylesheet rule lookup":
             expect(_nth(" 2n + 1 ", 3)).to_equal("clear: both;")
             expect(_nth(" 2n + 1 ", 2)).to_equal("")
 
+        it "allows tab and newline as whitespace":
+            expect(_nth("\t2n\n+ 1", 3)).to_equal("clear: both;")
+            expect(_nth("\t2n\n+ 1", 4)).to_equal("")
+            expect(_nth("\n2\t", 2)).to_equal("clear: both;")
+
+        it "matches nothing for an invalid argument":
+            expect(_nth("1 2", 1)).to_equal("")
+            expect(_nth("1 2", 2)).to_equal("")
+            expect(_nth("2n+", 2)).to_equal("")
+            expect(_nth("2 n", 2)).to_equal("")
+
+        it "ignores letter case in keywords":
+            expect(_nth("ODD", 3)).to_equal("clear: both;")
+            expect(_nth("2N+1", 3)).to_equal("clear: both;")
+
         it "returns nothing for a non-positive index or an unparsable argument":
             expect(_nth("2", 0)).to_equal("")
             expect(_nth("banana", 2)).to_equal("")
@@ -147,3 +163,49 @@ describe "Fallback stylesheet rule lookup":
         it "ignores a rule without :nth-child":
             expect(br_selector_list_contains_nth_child_self("div.a ", "div", "div", 2)).to_equal(false)
             expect(br_selector_list_contains_nth_child_self("div:nth-child(2) ", "div", "div", 2)).to_equal(true)
+
+    context ":nth-child subject":
+
+        it "applies a rule for another element type to no div":
+            val html = _doc("p:nth-child(2) {{ clear: both; }}")
+            expect(br_style_block_rule_for_nth_child_self(html, "div", "div", 2)).to_equal("")
+            expect(br_selector_list_contains_nth_child_self("p:nth-child(2) ", "div", "div", 2)).to_equal(false)
+
+        it "applies a type-less, universal or same-type rule":
+            expect(br_selector_list_contains_nth_child_self(":nth-child(2) ", "div", "div", 2)).to_equal(true)
+            expect(br_selector_list_contains_nth_child_self("*:nth-child(2) ", "div", "div", 2)).to_equal(true)
+            expect(br_selector_list_contains_nth_child_self("section > div:nth-child(2) ", "div", "div", 2)).to_equal(true)
+            expect(br_selector_list_contains_nth_child_self("DIV:nth-child(2) ", "div", "div", 2)).to_equal(true)
+
+        it "checks the class and id of the compound against the element":
+            expect(br_selector_list_contains_nth_child_self(".a:nth-child(2) ", "div", "div class=\"a b\"", 2)).to_equal(true)
+            expect(br_selector_list_contains_nth_child_self(".c:nth-child(2) ", "div", "div class=\"a b\"", 2)).to_equal(false)
+            expect(br_selector_list_contains_nth_child_self("div.a.b:nth-child(2) ", "div", "div class=\"a b\"", 2)).to_equal(true)
+            expect(br_selector_list_contains_nth_child_self("div#x:nth-child(2) ", "div", "div id=\"x\"", 2)).to_equal(true)
+            expect(br_selector_list_contains_nth_child_self("div#y:nth-child(2) ", "div", "div id=\"x\"", 2)).to_equal(false)
+
+        it "tries every selector of a list":
+            expect(br_selector_list_contains_nth_child_self("p:nth-child(2), div:nth-child(3) ", "div", "div", 3)).to_equal(true)
+            expect(br_selector_list_contains_nth_child_self("p:nth-child(3), div:nth-child(2) ", "div", "div", 3)).to_equal(false)
+
+    context "element sibling index":
+
+        it "counts every element sibling, not only divs":
+            val html = "<html><head><style>p {{ color: red; }}</style></head><body><p>one</p><div id=\"a\">t</div><section><span>s</span><div id=\"b\"></div></section><!-- <div> in a comment --><br><div id=\"c\"></div></body></html>"
+            expect(br_element_sibling_index(html, html.index_of("<div id=\"a\"") ?? -1)).to_equal(2)
+            expect(br_element_sibling_index(html, html.index_of("<div id=\"b\"") ?? -1)).to_equal(2)
+            expect(br_element_sibling_index(html, html.index_of("<div id=\"c\"") ?? -1)).to_equal(5)
+
+        it "is 1 for a first child and ignores text before it":
+            val html = "<body>text<div id=\"a\"></div></body>"
+            expect(br_element_sibling_index(html, html.index_of("<div") ?? -1)).to_equal(1)
+
+        it "selects the rule Chrome applies to the second element child":
+            # Chrome 159: in <body><p/><div#a/><div#b/></body>, div:nth-child(2)
+            # matches #a (the second ELEMENT child), not #b (the second div).
+            val html = "<html><head><style>div:nth-child(2) {{ clear: both; }}</style></head><body><p>x</p><div id=\"a\"></div><div id=\"b\"></div></body></html>"
+            val a = br_element_sibling_index(html, html.index_of("<div id=\"a\"") ?? -1)
+            val b = br_element_sibling_index(html, html.index_of("<div id=\"b\"") ?? -1)
+            expect(br_style_block_rule_for_nth_child_self(html, "div", "div id=\"a\"", a)).to_equal("clear: both;")
+            expect(br_style_block_rule_for_nth_child_self(html, "div", "div id=\"b\"", b)).to_equal("")
+
