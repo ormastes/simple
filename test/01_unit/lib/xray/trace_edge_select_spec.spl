@@ -147,6 +147,63 @@ describe "trace edge fold":
         expect(profile.open_entries).to_equal(2u64)
         expect(profile.rows.len()).to_equal(0)
 
+describe "trace edge discontinuities":
+    it "does not time frames across loss, transition, unmatched or truncated records":
+        val spec = trace_edge_spec_parse_v1("edge layer").unwrap()
+        val table = trace_edge_table_v1(test_map(), spec)
+        for marker in [TraceEventKindV1.Loss, TraceEventKindV1.Transition, TraceEventKindV1.UnmatchedEdge, TraceEventKindV1.TruncatedSpan]:
+            val profile = trace_edge_fold_v1([enter(1, 1, 100), enter(2, 2, 110),
+                ev(marker, 0, 3, 115), leave(2, 4, 140), leave(1, 5, 150)], table, spec.selectors[0])
+            expect(profile.rows.len()).to_equal(0)
+            expect(profile.open_entries).to_equal(2u64)
+            expect(profile.unmatched_exits).to_equal(2u64)
+    it "conservatively resets all contexts when a marker has no defined scope":
+        val spec = trace_edge_spec_parse_v1("edge layer").unwrap()
+        val table = trace_edge_table_v1(test_map(), spec)
+        var other_entry = enter(2, 1, 110)
+        other_entry.context_id = 2u64
+        var other_exit = leave(2, 2, 140)
+        other_exit.context_id = 2u64
+        val profile = trace_edge_fold_v1([enter(1, 1, 100), other_entry,
+            ev(TraceEventKindV1.Loss, 0, 2, 115), leave(1, 3, 150), other_exit], table, spec.selectors[0])
+        expect(profile.rows.len()).to_equal(0)
+        expect(profile.open_entries).to_equal(2u64)
+        expect(profile.unmatched_exits).to_equal(2u64)
+    it "starts a fresh observed root after a gap and retains completed rows":
+        val spec = trace_edge_spec_parse_v1("edge layer").unwrap()
+        val table = trace_edge_table_v1(test_map(), spec)
+        val profile = trace_edge_fold_v1([enter(1, 1, 100), enter(2, 2, 110), leave(2, 3, 120),
+            ev(TraceEventKindV1.Loss, 0, 4, 125), enter(2, 5, 130), enter(3, 6, 140),
+            leave(3, 7, 145), leave(2, 8, 150)], table, spec.selectors[0])
+        expect(profile.rows.len()).to_equal(2)
+        expect(profile.rows[0].calls).to_equal(1u64)
+        expect(profile.rows[0].inclusive_ns).to_equal(10u64)
+        expect(profile.rows[1].from).to_equal("compiler.70.backend")
+        expect(profile.rows[1].to).to_equal("lib.common")
+        expect(profile.rows[1].inclusive_ns).to_equal(5u64)
+        expect(profile.open_entries).to_equal(1u64)
+        expect(profile.unmatched_exits).to_equal(0u64)
+    it "does not pair a matching function and context from another generation":
+        val spec = trace_edge_spec_parse_v1("edge layer").unwrap()
+        val table = trace_edge_table_v1(test_map(), spec)
+        var next_exit = leave(2, 3, 140)
+        next_exit.generation = 2u64
+        val profile = trace_edge_fold_v1([enter(1, 1, 100), enter(2, 2, 110), next_exit], table, spec.selectors[0])
+        expect(profile.rows.len()).to_equal(0)
+        expect(profile.open_entries).to_equal(2u64)
+        expect(profile.unmatched_exits).to_equal(1u64)
+    it "does not infer an old generation caller for a new generation entry":
+        val spec = trace_edge_spec_parse_v1("edge layer").unwrap()
+        val table = trace_edge_table_v1(test_map(), spec)
+        var next_entry = enter(2, 2, 110)
+        next_entry.generation = 2u64
+        var next_exit = leave(2, 3, 140)
+        next_exit.generation = 2u64
+        val profile = trace_edge_fold_v1([enter(1, 1, 100), next_entry, next_exit], table, spec.selectors[0])
+        expect(profile.rows.len()).to_equal(0)
+        expect(profile.open_entries).to_equal(1u64)
+        expect(profile.unmatched_exits).to_equal(0u64)
+
 describe "trace edge log-profile output":
     it "prints one line per edge (golden)":
         val spec = trace_edge_spec_parse_v1("edge layer").unwrap()
