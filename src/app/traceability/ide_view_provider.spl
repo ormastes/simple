@@ -1,0 +1,98 @@
+"""Traceability IDE view provider (pure core): unflattened evidence badges and trace-query parity."""
+# @req REQ-CARET-TRC-001 REQ-CARET-TRC-002 REQ-CARET-TRC-003
+use std.common.traceability.model.*
+use std.common.traceability.evidence_model.*
+use std.common.traceability.query_nodes_v1.{TraceNodeQueryV1, query_trace_nodes_v1}
+
+pub enum EvidenceBadge:
+    Linked
+    Missing
+    NotRun
+    Pass
+    Fail
+    Stale
+    Incomplete
+    Waived
+
+pub struct TraceViewRow:
+    id: text
+    title: text
+    badge: EvidenceBadge
+
+pub fn badge_for(status: TraceQualificationStatus) -> EvidenceBadge:
+    """Map a qualification status; NotApplicable is never green, so it reads as Incomplete."""
+    match status:
+        case TraceQualificationStatus.Verified: EvidenceBadge.Pass
+        case TraceQualificationStatus.Failed: EvidenceBadge.Fail
+        case TraceQualificationStatus.Incomplete: EvidenceBadge.Incomplete
+        case TraceQualificationStatus.NotRun: EvidenceBadge.NotRun
+        case TraceQualificationStatus.Stale: EvidenceBadge.Stale
+        case TraceQualificationStatus.NotApplicable: EvidenceBadge.Incomplete
+
+pub fn badge_label(b: EvidenceBadge) -> text:
+    match b:
+        case EvidenceBadge.Linked: "LINKED"
+        case EvidenceBadge.Missing: "MISSING"
+        case EvidenceBadge.NotRun: "NOT RUN"
+        case EvidenceBadge.Pass: "PASS"
+        case EvidenceBadge.Fail: "FAIL"
+        case EvidenceBadge.Stale: "STALE"
+        case EvidenceBadge.Incomplete: "INCOMPLETE"
+        case EvidenceBadge.Waived: "WAIVED"
+
+pub fn badge_is_green(b: EvidenceBadge) -> bool:
+    match b:
+        case EvidenceBadge.Pass: true
+        case _: false
+
+fn badge_strength(b: EvidenceBadge) -> i64:
+    """Lower is weaker."""
+    match b:
+        case EvidenceBadge.Fail: 0
+        case EvidenceBadge.Missing: 1
+        case EvidenceBadge.Stale: 2
+        case EvidenceBadge.Incomplete: 3
+        case EvidenceBadge.NotRun: 4
+        case EvidenceBadge.Linked: 5
+        case EvidenceBadge.Waived: 6
+        case EvidenceBadge.Pass: 7
+
+pub fn rollup(badges: [EvidenceBadge]) -> EvidenceBadge:
+    """Weakest child wins; no children is Missing, never green."""
+    if badges.len() == 0:
+        return EvidenceBadge.Missing
+    var weakest = badges[0]
+    for b in badges:
+        if badge_strength(b) < badge_strength(weakest):
+            weakest = b
+    weakest
+
+fn node_badge(node_id: text, quals: [TraceQualification]) -> EvidenceBadge:
+    var found: [EvidenceBadge] = []
+    for q in quals:
+        for r in q.results:
+            if r.requirement_id == node_id:
+                found.push(badge_for(r.status))
+    if found.len() == 0:
+        return EvidenceBadge.Linked
+    rollup(found)
+
+pub fn view_rows(result: TraceQueryResult, quals: [TraceQualification]) -> [TraceViewRow]:
+    """One row per query-result node, same order; no re-derivation of the query."""
+    var rows: [TraceViewRow] = []
+    for node in result.nodes:
+        rows.push(TraceViewRow(id: node.id, title: node.title, badge: node_badge(node.id, quals)))
+    rows
+
+pub fn view_query(graph: TraceGraph, query: TraceNodeQueryV1, quals: [TraceQualification]) -> Result<[TraceViewRow], text>:
+    val result = query_trace_nodes_v1(graph, query)?
+    Ok(view_rows(result, quals))
+
+pub fn view_banner(rows: [TraceViewRow]) -> text:
+    """Non-empty exactly when no row carries executed evidence (Pass or Fail)."""
+    for row in rows:
+        match row.badge:
+            case EvidenceBadge.Pass: return ""
+            case EvidenceBadge.Fail: return ""
+            case _: ()
+    "Structural only - not executed"
