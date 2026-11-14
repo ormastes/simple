@@ -1,30 +1,58 @@
-# Pure-Simple implicit-TLS POP3 loopback fixture for mail-cli interoperability.
-# Usage: loopback_pop3_server.spl PORT CERT KEY MODEFILE LOGFILE
-# MODEFILE holds one of: normal | empty | reject_list | truncated (re-read per
-# accepted connection). LOGFILE receives one command verb per line; arguments
-# (credentials) are never recorded. Runs until killed by the driver.
+# Pure-Simple TLS POP3 loopback fixture for mail-cli interoperability.
+# Usage: loopback_pop3_server.spl PORT CERT KEY MODEFILE LOGFILE [stls]
+# Without `stls` PORT speaks implicit TLS. With `stls` PORT starts in plaintext
+# and the session continues over TLS after the STLS command; credentials are
+# refused before the upgrade.
+# MODEFILE holds one of: normal | empty | reject_list | truncated | stls_reject
+# (re-read per accepted connection). LOGFILE receives one command verb per
+# line, prefixed `PLAIN ` when it arrived before TLS; arguments (credentials)
+# are never recorded. Runs until killed by the driver.
 use app.io.args_ops.{get_args}
 use std.nogc_sync_mut.io.file_ops.{file_read, file_append}
 
 extern fn rt_tls_server_create(port: i64, cert_path: text, key_path: text) -> i64
 extern fn rt_tls_server_accept(server: i64) -> i64
+extern fn rt_tls_server_upgrade_tcp(server: i64, tcp_fd: i64) -> i64
 extern fn rt_tls_server_write(conn: i64, data: text) -> i64
 extern fn rt_tls_server_read_checked(conn: i64, max_bytes: i64) -> text?
 extern fn rt_tls_server_close_connection(conn: i64) -> bool
+extern fn rt_io_tcp_bind(addr: text) -> i64
+extern fn rt_io_tcp_accept(fd: i64) -> i64
+extern fn rt_io_tcp_read_line(fd: i64) -> text?
+extern fn rt_io_tcp_write_text(fd: i64, data: text) -> i64
+extern fn rt_io_tcp_close(fd: i64) -> bool
 
 val MESSAGE_WIRE = "From: sender@example.test\r\nTo: alice@example.test\r\nSubject: Loopback TLS message\r\nContent-Type: text/plain\r\n\r\nLoopback body.\r\n..Leading dot\r\n..\r\n"
 
-fn serve_connection(conn: i64, mode: text, logfile: text):
-    rt_tls_server_write(conn, "+OK disposable POP3 fixture ready\r\n")
+fn send(secure: bool, channel: i64, data: text):
+    if secure:
+        rt_tls_server_write(channel, data)
+    else:
+        rt_io_tcp_write_text(channel, data)
+
+fn receive(secure: bool, channel: i64) -> text?:
+    if secure:
+        return rt_tls_server_read_checked(channel, 4096)
+    rt_io_tcp_read_line(channel)
+
+# `accepted` is a TLS connection when `implicit_tls`, otherwise a plaintext TCP
+# stream that `server`'s identity upgrades on STLS.
+fn serve_connection(server: i64, implicit_tls: bool, accepted: i64, mode: text, logfile: text):
+    var secure = implicit_tls
+    var channel = accepted
+    send(secure, channel, "+OK disposable POP3 fixture ready\r\n")
     var pending = ""
     var authenticated = false
     var open = true
     while open:
-        val chunk = rt_tls_server_read_checked(conn, 4096)
-        if chunk == nil:
+        val chunk = receive(secure, channel)
+        var received = ""
+        if chunk != nil:
+            received = chunk.unwrap()
+        if received.len() == 0:
             open = false
         else:
-            pending = pending + chunk.unwrap()
+            pending = pending + received
             var eol = pending.index_of("\r\n")
             while open and eol >= 0:
                 val line = pending.substring(0, eol)
@@ -36,53 +64,92 @@ fn serve_connection(conn: i64, mode: text, logfile: text):
                     verb = line.substring(0, space)
                     arg = line.substring(space + 1)
                 verb = verb.upper()
-                file_append(logfile, verb + "\n")
+                if secure:
+                    file_append(logfile, verb + "\n")
+                else:
+                    file_append(logfile, "PLAIN " + verb + "\n")
                 if verb == "CAPA":
-                    rt_tls_server_write(conn, "+OK capabilities\r\nUSER\r\n.\r\n")
+                    if secure:
+                        send(secure, channel, "+OK capabilities\r\nUSER\r\n.\r\n")
+                    else:
+                        send(secure, channel, "+OK capabilities\r\nSTLS\r\n.\r\n")
+                elif verb == "QUIT":
+                    send(secure, channel, "+OK bye\r\n")
+                    open = false
+                elif not secure:
+                    if verb == "STLS" and mode != "stls_reject":
+                        send(secure, channel, "+OK begin TLS negotiation\r\n")
+                        val upgraded = rt_tls_server_upgrade_tcp(server, channel)
+                        if upgraded < 0:
+                            open = false
+                        else:
+                            channel = upgraded
+                            secure = true
+                            # Plaintext pipelined behind STLS must never be read as TLS-protected input.
+                            pending = ""
+                    elif verb == "STLS":
+                        send(secure, channel, "-ERR TLS unavailable\r\n")
+                    else:
+                        send(secure, channel, "-ERR STLS required\r\n")
                 elif verb == "USER":
-                    rt_tls_server_write(conn, "+OK user\r\n")
+                    send(secure, channel, "+OK user\r\n")
                 elif verb == "PASS":
                     authenticated = arg == "loopback-fixture-password"
                     if authenticated:
-                        rt_tls_server_write(conn, "+OK authenticated\r\n")
+                        send(secure, channel, "+OK authenticated\r\n")
                     else:
-                        rt_tls_server_write(conn, "-ERR rejected\r\n")
-                elif verb == "QUIT":
-                    rt_tls_server_write(conn, "+OK bye\r\n")
-                    open = false
+                        send(secure, channel, "-ERR rejected\r\n")
                 elif not authenticated:
-                    rt_tls_server_write(conn, "-ERR authenticate first\r\n")
+                    send(secure, channel, "-ERR authenticate first\r\n")
                 elif verb == "LIST":
                     if mode == "empty":
-                        rt_tls_server_write(conn, "+OK listing\r\n.\r\n")
+                        send(secure, channel, "+OK listing\r\n.\r\n")
                     elif mode == "reject_list":
-                        rt_tls_server_write(conn, "-ERR listing unavailable\r\n")
+                        send(secure, channel, "-ERR listing unavailable\r\n")
                     else:
-                        rt_tls_server_write(conn, "+OK listing\r\n1 {MESSAGE_WIRE.len()}\r\n.\r\n")
+                        send(secure, channel, "+OK listing\r\n1 {MESSAGE_WIRE.len()}\r\n.\r\n")
                 elif verb == "RETR" and arg == "1":
-                    rt_tls_server_write(conn, "+OK message\r\n" + MESSAGE_WIRE)
+                    send(secure, channel, "+OK message\r\n" + MESSAGE_WIRE)
                     if mode == "truncated":
                         open = false
                     else:
-                        rt_tls_server_write(conn, ".\r\n")
+                        send(secure, channel, ".\r\n")
                 elif verb == "NOOP":
-                    rt_tls_server_write(conn, "+OK\r\n")
+                    send(secure, channel, "+OK\r\n")
                 else:
-                    rt_tls_server_write(conn, "-ERR unsupported\r\n")
+                    send(secure, channel, "-ERR unsupported\r\n")
                 eol = pending.index_of("\r\n")
-    rt_tls_server_close_connection(conn)
+    if secure:
+        rt_tls_server_close_connection(channel)
+    else:
+        rt_io_tcp_close(channel)
 
 fn main():
     val args = get_args()
     if args.len() < 6:
-        panic("loopback_pop3_server: expected PORT CERT KEY MODEFILE LOGFILE")
-    val server = rt_tls_server_create(args[1].to_int(), args[2], args[3])
+        panic("loopback_pop3_server: expected PORT CERT KEY MODEFILE LOGFILE [stls]")
+    val stls = args.len() > 6 and args[6] == "stls"
+    # In STLS transport the TLS listener only carries the identity; port 0 keeps it off PORT.
+    var tls_port = args[1].to_int()
+    if stls:
+        tls_port = 0
+    val server = rt_tls_server_create(tls_port, args[2], args[3])
     if server < 0:
         panic("loopback_pop3_server: TLS listener create failed")
+    var plain_listener = -1
+    if stls:
+        plain_listener = rt_io_tcp_bind("127.0.0.1:" + args[1])
+        if plain_listener < 0:
+            panic("loopback_pop3_server: plaintext listener bind failed")
     print("listening")
     while true:
-        val conn = rt_tls_server_accept(server)
-        if conn >= 0:
-            serve_connection(conn, file_read(args[4]).trim(), args[5])
+        if stls:
+            val fd = rt_io_tcp_accept(plain_listener)
+            if fd >= 0:
+                serve_connection(server, false, fd, file_read(args[4]).trim(), args[5])
+        else:
+            val conn = rt_tls_server_accept(server)
+            if conn >= 0:
+                serve_connection(server, true, conn, file_read(args[4]).trim(), args[5])
 
 main()

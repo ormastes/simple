@@ -606,6 +606,23 @@ pub fn rt_io_tcp_accept_interp(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
+/// `rt_tls_server_upgrade_tcp(server, tcp_fd) -> i64`: interpreter TCP handles
+/// live in `SOCKET_HANDLES`, not the runtime socket registry, so the stream is
+/// handed to the runtime's rustls server here. The TCP handle is released only
+/// when the runtime accepted the stream.
+pub fn rt_tls_server_upgrade_tcp_interp(args: &[Value]) -> Result<Value, CompileError> {
+    let server = extract_handle(args, 0)?;
+    let tcp = extract_handle(args, 1)?;
+    let Ok(stream) = with_tcp_stream(tcp, |stream| stream.try_clone()) else {
+        return Ok(Value::Int(-1));
+    };
+    let conn = simple_runtime::value::net::tls_server_upgrade_stream(server, stream);
+    if conn >= 0 {
+        release_socket(tcp);
+    }
+    Ok(Value::Int(conn))
+}
+
 pub fn rt_io_tcp_accept_timeout_interp(args: &[Value]) -> Result<Value, CompileError> {
     let handle = extract_handle(args, 0)?;
     let timeout_ms = args
@@ -1508,6 +1525,19 @@ mod tcp_read_contract_tests {
         let mut got = String::new();
         client.read_to_string(&mut got).expect("client read");
         assert_eq!(got, "served");
+    }
+
+    #[test]
+    fn refused_tls_upgrade_keeps_the_interpreter_tcp_handle() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let _client = TcpStream::connect(listener.local_addr().expect("local addr")).expect("connect");
+        let (accepted, _) = listener.accept().expect("accept");
+        let id = allocate_socket(SocketHandle::TcpStream(accepted));
+        let unknown_server = rt_tls_server_upgrade_tcp_interp(&[Value::Int(-1), Value::Int(id)]);
+        assert!(matches!(unknown_server, Ok(Value::Int(-1))));
+        assert!(release_socket(id), "a refused upgrade must leave the plaintext handle open");
+        let unknown_stream = rt_tls_server_upgrade_tcp_interp(&[Value::Int(-1), Value::Int(-1)]);
+        assert!(matches!(unknown_stream, Ok(Value::Int(-1))));
     }
 
     #[test]

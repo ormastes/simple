@@ -40,6 +40,8 @@ extern fn rt_tls_client_close(conn: i64) -> bool
 extern fn rt_tls_server_create(port: i64, cert_path: text, key_path: text) -> i64
 @unsafe(reason: "raw rustls accept-handle ABI; negative sentinel means invalid listener or accept failure", capabilities: [ffi])
 extern fn rt_tls_server_accept(server: i64) -> i64  # Returns client connection
+@unsafe(reason: "raw rustls upgrade-handle ABI; negative sentinel means invalid listener or not an open TCP stream, and leaves the TCP handle untouched", capabilities: [ffi])
+extern fn rt_tls_server_upgrade_tcp(server: i64, tcp_fd: i64) -> i64  # Consumes tcp_fd, returns client connection
 @unsafe(reason: "raw rustls write-count ABI; negative sentinel means contract or I/O failure", capabilities: [ffi])
 extern fn rt_tls_server_write(conn: i64, data: text) -> i64
 @unsafe(reason: "raw rustls byte-write count ABI; negative sentinel means contract or I/O failure", capabilities: [ffi])
@@ -228,6 +230,26 @@ fn tls_server_accept(server: TlsServer) -> Result<TlsServerConnection, text>:
         return Err("TLS accept failed")
     Ok(TlsServerConnection(handle: handle, is_valid: true))
 
+fn tls_server_upgrade_tcp(server: TlsServer, tcp_fd: i64) -> Result<TlsServerConnection, text>:
+    """Upgrade an accepted plaintext TCP connection to TLS (STARTTLS/STLS).
+
+    Uses the certificate and key of `server`. On success `tcp_fd` is consumed
+    and must not be used again; on failure it is left open. Send the
+    plaintext go-ahead reply and discard any buffered plaintext input before
+    calling: the TLS handshake starts with the next bytes on the wire.
+
+    Example:
+        fd = rt_io_tcp_accept(listener)
+        conn = tls_server_upgrade_tcp(server, fd)
+    """
+    if is_invalid_handle(server.handle):
+        return Err("TLS upgrade: invalid server handle")
+
+    val handle = rt_tls_server_upgrade_tcp(server.handle, tcp_fd)
+    if is_invalid_handle(handle):
+        return Err("TLS upgrade failed")
+    Ok(TlsServerConnection(handle: handle, is_valid: true))
+
 fn tls_server_write(conn: TlsServerConnection, data: text) -> Result<i64, text>:
     """Write data to client connection"""
     if is_invalid_handle(conn.handle):
@@ -312,7 +334,7 @@ export TlsClientConnection, TlsServerConnection, TlsServer
 export TlsConnectionInfo
 export tls_connect, tls_connect_with_sni, tls_write, tls_read, tls_read_timeout, tls_close
 export tls_server_create, tls_server_accept, tls_server_write, tls_server_read
-export tls_server_close_connection, tls_server_shutdown
+export tls_server_close_connection, tls_server_shutdown, tls_server_upgrade_tcp
 export tls_get_connection_info, tls_is_handshake_complete
 export rt_tls_client_connect, rt_tls_client_connect_with_sni
 export rt_tls_client_connect_address_with_sni_timeout
@@ -321,4 +343,4 @@ export rt_tls_client_read_checked, rt_tls_client_read_timeout_checked, rt_tls_cl
 export rt_tls_client_close, rt_tls_get_protocol_version
 export rt_tls_server_create, rt_tls_server_accept, rt_tls_server_write
 export rt_tls_server_read_checked, rt_tls_server_write_bytes, rt_tls_server_close_connection
-export rt_tls_server_shutdown
+export rt_tls_server_shutdown, rt_tls_server_upgrade_tcp

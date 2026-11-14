@@ -5,9 +5,10 @@
 // Both server and client paths use real TLS via rustls 0.23 (ring crypto
 // provider; aws-lc-rs is not vendored).
 //
-// Server: `rt_tls_server_create/accept/read/write/close/shutdown`.
-// Listeners own a `std::net::TcpListener` + an `Arc<rustls::ServerConfig>`;
-// per-connection state is a `(ServerConnection, TcpStream)` pair protected by
+// Server: `rt_tls_server_create/accept/upgrade_tcp/read/write/close/shutdown`.
+// Listeners own a `std::net::TcpListener` + an `Arc<rustls::ServerConfig>`
+// (immutable, shared without a lock, so a blocked accept never delays an
+// `upgrade_tcp` on the same identity); per-connection state is a `(ServerConnection, TcpStream)` pair protected by
 // a fine-grained mutex so the per-connection thread_spawn_with_args pattern in
 // `src/app/ui.web/tls_serve_loop.spl` can serve multiple TLS clients in
 // parallel.
@@ -93,7 +94,7 @@ struct TlsConnEntry {
 }
 
 lazy_static::lazy_static! {
-    static ref TLS_LISTENERS: std::sync::Mutex<HashMap<i64, std::sync::Arc<std::sync::Mutex<TlsListenerEntry>>>> =
+    static ref TLS_LISTENERS: std::sync::Mutex<HashMap<i64, std::sync::Arc<TlsListenerEntry>>> =
         std::sync::Mutex::new(HashMap::new());
     static ref TLS_CONNS: std::sync::Mutex<HashMap<i64, std::sync::Arc<std::sync::Mutex<TlsConnEntry>>>> =
         std::sync::Mutex::new(HashMap::new());
@@ -565,10 +566,10 @@ pub extern "C" fn rt_tls_server_create_from_der(
     let handle = next_rustls_listener_handle();
     TLS_LISTENERS.lock().unwrap().insert(
         handle,
-        std::sync::Arc::new(std::sync::Mutex::new(TlsListenerEntry {
+        std::sync::Arc::new(TlsListenerEntry {
             listener,
             config: std::sync::Arc::new(config),
-        })),
+        }),
     );
     handle
 }
@@ -635,10 +636,10 @@ fn tls_server_create_on_impl(
     let handle = next_rustls_listener_handle();
     TLS_LISTENERS.lock().unwrap().insert(
         handle,
-        std::sync::Arc::new(std::sync::Mutex::new(TlsListenerEntry {
+        std::sync::Arc::new(TlsListenerEntry {
             listener,
             config: std::sync::Arc::new(config),
-        })),
+        }),
     );
     handle
 }
@@ -649,23 +650,60 @@ pub extern "C" fn rt_tls_server_accept(server: i64) -> i64 {
         let guard = TLS_LISTENERS.lock().unwrap();
         match guard.get(&server) { Some(a) => a.clone(), None => return -1 }
     };
-    let (stream, config) = {
-        let entry = entry_arc.lock().unwrap();
-        let accept_result = entry.listener.accept();
-        let config = entry.config.clone();
-        drop(entry);
-        match accept_result { Ok((s, _)) => (s, config), Err(_) => return -1 }
-    };
-    let conn = match rustls::ServerConnection::new(config) {
+    let stream = match entry_arc.listener.accept() { Ok((s, _)) => s, Err(_) => return -1 };
+    let conn = match rustls::ServerConnection::new(entry_arc.config.clone()) {
         Ok(c) => c,
         Err(_) => return -1,
     };
+    register_tls_server_conn(conn, stream)
+}
+
+fn register_tls_server_conn(conn: rustls::ServerConnection, stream: std::net::TcpStream) -> i64 {
     let handle = next_rustls_conn_handle();
     TLS_CONNS.lock().unwrap().insert(
         handle,
         std::sync::Arc::new(std::sync::Mutex::new(TlsConnEntry { conn, stream })),
     );
     handle
+}
+
+/// New server-side TLS session using the identity of listener `server`.
+fn tls_server_session(server: i64) -> Option<rustls::ServerConnection> {
+    let config = TLS_LISTENERS.lock().unwrap().get(&server)?.config.clone();
+    rustls::ServerConnection::new(config).ok()
+}
+
+/// STARTTLS-style upgrade for a stream owned outside the runtime socket
+/// registry (the interpreter keeps its own TCP handle table). The handshake
+/// runs on the first read/write of the returned connection, exactly as after
+/// `rt_tls_server_accept`. Returns -1 and drops `stream` for an unknown server.
+pub fn tls_server_upgrade_stream(server: i64, stream: std::net::TcpStream) -> i64 {
+    match tls_server_session(server) {
+        Some(conn) => register_tls_server_conn(conn, stream),
+        None => -1,
+    }
+}
+
+/// Upgrade an accepted plaintext TCP connection (`rt_io_tcp_accept` handle) to
+/// TLS with the identity of listener `server`. On success the TCP handle is
+/// consumed and the result is a connection handle for `rt_tls_server_read_checked`
+/// / `write` / `close_connection`. Returns -1, leaving the TCP handle open,
+/// when `server` is unknown or `tcp_handle` is not an open TCP stream.
+#[no_mangle]
+pub extern "C" fn rt_tls_server_upgrade_tcp(server: i64, tcp_handle: i64) -> i64 {
+    let Some(conn) = tls_server_session(server) else { return -1; };
+    let stream = {
+        let mut registry = SOCKET_REGISTRY.lock().unwrap();
+        match registry.remove(&tcp_handle) {
+            Some(SocketEntry::TcpStream(stream)) => stream,
+            Some(other) => {
+                registry.insert(tcp_handle, other);
+                return -1;
+            }
+            None => return -1,
+        }
+    };
+    register_tls_server_conn(conn, stream)
 }
 
 #[no_mangle]
@@ -888,5 +926,156 @@ mod platform_trust_tests {
         assert!(rt_tls_get_cipher_suite(-1).is_nil());
         assert!(rt_tls_get_negotiated_alpn(-1).is_nil());
         assert!(rt_tls_is_handshake_complete(-1).is_nil());
+    }
+}
+
+#[cfg(test)]
+mod server_upgrade_tests {
+    use super::{
+        register_tcp_listener, rt_io_tcp_accept, rt_io_tcp_close, rt_io_tcp_read_line, rt_io_tcp_write_text,
+        rt_tls_get_protocol_version, rt_tls_server_accept, rt_tls_server_close_connection,
+        rt_tls_server_create_on, rt_tls_server_read_checked, rt_tls_server_shutdown, rt_tls_server_upgrade_tcp,
+        rt_tls_server_write,
+    };
+    use crate::value::RuntimeValue;
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+
+    const IDENTITY_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/browser_tls_identity");
+
+    fn text(s: &str) -> RuntimeValue {
+        unsafe { crate::value::collections::rt_string_new(s.as_ptr(), s.len() as u64) }
+    }
+
+    #[allow(unused_unsafe)]
+    fn text_out(value: RuntimeValue) -> String {
+        assert!(!value.is_nil(), "expected text, got nil");
+        let len = unsafe { crate::value::rt_string_len(value) } as usize;
+        let data = unsafe { crate::value::rt_string_data(value) };
+        String::from_utf8(unsafe { std::slice::from_raw_parts(data, len) }.to_vec()).unwrap()
+    }
+
+    fn identity_server(port: i64) -> i64 {
+        let server = rt_tls_server_create_on(
+            text("127.0.0.1"),
+            port,
+            text(&format!("{IDENTITY_DIR}/localhost.pem")),
+            text(&format!("{IDENTITY_DIR}/localhost-key.pem")),
+        );
+        assert!(server > 0, "fixture identity must load");
+        server
+    }
+
+    fn fixture_ca_client_config() -> std::sync::Arc<rustls::ClientConfig> {
+        let pem = std::fs::read(format!("{IDENTITY_DIR}/ca.pem")).unwrap();
+        let mut roots = rustls::RootCertStore::empty();
+        for cert in rustls_pemfile::certs(&mut &pem[..]) {
+            roots.add(cert.unwrap()).unwrap();
+        }
+        let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
+        std::sync::Arc::new(
+            rustls::ClientConfig::builder_with_provider(provider)
+                .with_safe_default_protocol_versions()
+                .unwrap()
+                .with_root_certificates(roots)
+                .with_no_client_auth(),
+        )
+    }
+
+    /// Plain loopback listener in the TCP registry, plus the address a client dials.
+    fn plain_listener() -> (i64, std::net::SocketAddr) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        (register_tcp_listener(listener), addr)
+    }
+
+    #[test]
+    fn accepted_plain_connection_upgrades_to_tls_and_echoes() {
+        let server = identity_server(0);
+        let (listener, addr) = plain_listener();
+
+        let client = std::thread::spawn(move || {
+            let mut stream = TcpStream::connect(addr).unwrap();
+            let mut greeting = [0u8; 11];
+            stream.read_exact(&mut greeting).unwrap();
+            assert_eq!(&greeting, b"+OK ready\r\n");
+            stream.write_all(b"STLS\r\n").unwrap();
+            let mut go_ahead = [0u8; 5];
+            stream.read_exact(&mut go_ahead).unwrap();
+            assert_eq!(&go_ahead, b"+OK\r\n");
+            let name = rustls::pki_types::ServerName::try_from("localhost").unwrap();
+            let mut conn = rustls::ClientConnection::new(fixture_ca_client_config(), name).unwrap();
+            let mut tls = rustls::Stream::new(&mut conn, &mut stream);
+            tls.write_all(b"ping").unwrap();
+            let mut reply = [0u8; 9];
+            tls.read_exact(&mut reply).unwrap();
+            reply.to_vec()
+        });
+
+        let plain = rt_io_tcp_accept(listener);
+        assert!(plain > 0);
+        assert_eq!(rt_io_tcp_write_text(plain, text("+OK ready\r\n")), 11);
+        assert_eq!(text_out(rt_io_tcp_read_line(plain)), "STLS\r\n");
+        assert_eq!(rt_io_tcp_write_text(plain, text("+OK\r\n")), 5);
+
+        let conn = rt_tls_server_upgrade_tcp(server, plain);
+        assert!(conn > 0, "upgrade must yield a TLS connection handle");
+        assert!(!rt_io_tcp_close(plain), "the plaintext handle is consumed by the upgrade");
+        assert_eq!(text_out(rt_tls_server_read_checked(conn, 64)), "ping");
+        assert_eq!(rt_tls_server_write(conn, text("pong:ping")), 9);
+        assert_eq!(client.join().unwrap(), b"pong:ping");
+        assert!(text_out(rt_tls_get_protocol_version(conn)).starts_with("TLSv1."));
+
+        assert!(rt_tls_server_close_connection(conn));
+        assert!(rt_tls_server_shutdown(server));
+        assert!(rt_io_tcp_close(listener));
+    }
+
+    #[test]
+    fn refused_upgrade_returns_minus_one_and_keeps_the_plain_connection() {
+        assert_eq!(rt_tls_server_upgrade_tcp(-1, -1), -1);
+        let server = identity_server(0);
+        assert_eq!(rt_tls_server_upgrade_tcp(server, -1), -1);
+
+        let (listener, addr) = plain_listener();
+        assert_eq!(rt_tls_server_upgrade_tcp(server, listener), -1, "a listener is not a connection");
+        let _peer = TcpStream::connect(addr).unwrap();
+        let plain = rt_io_tcp_accept(listener);
+        assert!(plain > 0);
+        assert_eq!(rt_tls_server_upgrade_tcp(-1, plain), -1, "unknown TLS server");
+        assert!(rt_io_tcp_close(plain), "a refused upgrade leaves the plaintext connection open");
+        assert!(rt_io_tcp_close(listener), "a refused upgrade leaves the listener registered");
+        assert!(rt_tls_server_shutdown(server));
+    }
+
+    #[test]
+    fn upgrade_does_not_wait_for_a_blocked_implicit_tls_accept() {
+        // Reserve a loopback port, then hand it to the TLS listener so the test can unblock accept.
+        let reserved = TcpListener::bind("127.0.0.1:0").unwrap();
+        let tls_port = reserved.local_addr().unwrap().port();
+        drop(reserved);
+        let server = identity_server(tls_port as i64);
+        let accepting = std::thread::spawn(move || rt_tls_server_accept(server));
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        let (listener, addr) = plain_listener();
+        let _peer = TcpStream::connect(addr).unwrap();
+        let plain = rt_io_tcp_accept(listener);
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done_tx.send(rt_tls_server_upgrade_tcp(server, plain));
+        });
+        let conn = done_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("upgrade must not block behind a pending rt_tls_server_accept");
+        assert!(conn > 0);
+
+        let _unblock = TcpStream::connect(("127.0.0.1", tls_port)).unwrap();
+        let implicit = accepting.join().unwrap();
+        assert!(implicit > 0);
+        assert!(rt_tls_server_close_connection(implicit));
+        assert!(rt_tls_server_close_connection(conn));
+        assert!(rt_tls_server_shutdown(server));
+        assert!(rt_io_tcp_close(listener));
     }
 }
