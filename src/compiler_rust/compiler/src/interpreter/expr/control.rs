@@ -70,7 +70,7 @@ pub(super) fn eval_control_expr(
                 let used: HashSet<String> = used.iter().map(|s| s.to_string()).collect();
                 env.project_preserving_bindings(&used)
             };
-            captured.set_closure_in_test(crate::interpreter::interpreter_module::closure_created_in_test());
+            crate::interpreter::interpreter_module::stamp_closure_origin(&mut captured);
             let captured_env = Arc::new(captured);
             Ok(Some(Value::Lambda {
                 params: names,
@@ -461,7 +461,7 @@ pub(super) fn eval_control_expr(
         }
         Expr::DoBlock(nodes) => {
             let mut captured = env.clone();
-            captured.set_closure_in_test(crate::interpreter::interpreter_module::closure_created_in_test());
+            crate::interpreter::interpreter_module::stamp_closure_origin(&mut captured);
             Ok(Some(Value::BlockClosure {
                 nodes: nodes.clone(),
                 env: Arc::new(captured),

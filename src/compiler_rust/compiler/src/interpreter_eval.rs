@@ -203,7 +203,7 @@ pub(crate) fn call_value_with_args(
             body,
             env: captured,
         } => {
-            let _closure_origin = ClosureOriginGuard::enter(Some(captured.closure_in_test()));
+            let _closure_origin = ClosureOriginGuard::enter_closure(&captured);
             // Execute lambda with given args
             let mut local_env = Env::clone(captured);
             for (i, param) in params.iter().enumerate() {
@@ -216,11 +216,10 @@ pub(crate) fn call_value_with_args(
         Value::Function { def, captured_env, .. } => {
             // An owned fn is written in its owner module; an owner-less one
             // (a nested `fn` value) where its captured env was stamped.
-            let origin = match super::interpreter_call::function_module_owner(def) {
-                Some(owner) => owner_written_in_test(Some(&owner)),
-                None => captured_env.closure_in_test(),
+            let _closure_origin = match super::interpreter_call::function_module_owner(def) {
+                Some(owner) => ClosureOriginGuard::enter_owned(&owner),
+                None => ClosureOriginGuard::enter_closure(captured_env),
             };
-            let _closure_origin = ClosureOriginGuard::enter(Some(origin));
             // Execute function with given args, using the captured environment for closure
             let mut local_env = Env::clone(captured_env);
             for (i, param) in def.params.iter().enumerate() {

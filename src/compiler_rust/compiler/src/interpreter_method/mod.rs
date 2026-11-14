@@ -466,6 +466,8 @@ pub(crate) fn evaluate_method_call(
             receiver_is_enum,
         ) {
             if let Some(func) = functions.get(method).cloned() {
+                // A bare-name call spelled `m.f()`: same visibility rule.
+                crate::interpreter::interpreter_call::gate_private_call(&func.name, &func)?;
                 return exec_function(&func, args, env, functions, classes, enums, impl_methods, None);
             }
             if classes.contains_key(method) {
@@ -531,6 +533,9 @@ pub(crate) fn evaluate_method_call(
         };
         if let Some(func_val) = lookup(method) {
             if let Value::Function { def, captured_env, .. } = &func_val {
+                // `m.f()` names `f` exactly like a bare call does; qualifying
+                // it does not make a private fn visible.
+                crate::interpreter::interpreter_call::gate_private_call(&def.name, def)?;
                 let mut captured_env_clone = Env::clone(captured_env);
                 return exec_function_with_captured_env(
                     def,
@@ -1977,6 +1982,7 @@ pub(crate) fn evaluate_method_call(
     // UFCS Fallback: Try to find a free function with the method name
     // This allows both len(x) and x.len() syntax to work
     if let Some(func) = functions.get(method).cloned() {
+        crate::interpreter::interpreter_call::gate_private_call(&func.name, &func)?;
         // Evaluate all arguments to values
         let mut arg_values = vec![recv_val.clone()]; // Receiver becomes first argument
         for arg in args {
@@ -2294,6 +2300,7 @@ pub(crate) fn evaluate_method_call_with_self_update(
         }
         // UFCS Fallback: Try to find a free function with the method name
         if let Some(func) = functions.get(method).cloned() {
+            crate::interpreter::interpreter_call::gate_private_call(&func.name, &func)?;
             // Evaluate all arguments to values
             let mut arg_values = vec![recv_val.clone()]; // Receiver becomes first argument
             for arg in args {

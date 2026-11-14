@@ -601,6 +601,7 @@ pub(super) fn eval_op_expr(
                                     // Try looking up function by name
                                     if let Expr::Identifier(name) = callee.as_ref() {
                                         if let Some(func_def) = functions.get(name).cloned() {
+                                            crate::interpreter::interpreter_call::gate_private_call(&func_def.name, &func_def)?;
                                             let mut env_clone = env.clone();
                                             return Ok(Some(super::super::exec_function_with_values(
                                                 &func_def,
@@ -656,6 +657,7 @@ pub(super) fn eval_op_expr(
                                     // Try looking up function by name from the right expression
                                     if let Expr::Identifier(name) = right.as_ref() {
                                         if let Some(func_def) = functions.get(name).cloned() {
+                                            crate::interpreter::interpreter_call::gate_private_call(&func_def.name, &func_def)?;
                                             let mut env_clone = env.clone();
                                             return Ok(Some(super::super::exec_function_with_values(
                                                 &func_def,

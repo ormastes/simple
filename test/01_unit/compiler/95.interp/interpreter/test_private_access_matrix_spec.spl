@@ -29,7 +29,7 @@ fn fixture_root(tag: text) -> text:
     val root = get_temp_dir().replace("\\", "/") + "/tpa_matrix_" + tag
     for dir in ["/src/app/sub", "/src/app/runner", "/src/app/facade", "/src/app/other", "/test/unit"]:
         val _ = mkdir_p(root + dir)
-    val _l = write_file(root + "/src/app/sub/lib_mod.spl", "fn secret_helper() -> i64:\n    42\npub fn open_api() -> i64:\n    secret_helper()\n")
+    val _l = write_file(root + "/src/app/sub/lib_mod.spl", "fn secret_inc(x: i64) -> i64:\n    x + 1\nfn secret_helper() -> i64:\n    42\npub fn open_api() -> i64:\n    secret_helper()\n")
     val _f = write_file(root + "/src/app/sub/sub_facade.spl", "export use app.sub.lib_mod.{{secret_helper, open_api}}\n")
     val _g = write_file(root + "/src/app/facade/glob_facade.spl", "export use app.sub.lib_mod.*\n")
     val _r = write_file(root + "/src/app/runner/run.spl", "pub fn run_cb(f: fn() -> i64) -> i64:\n    f()\n")
@@ -40,6 +40,22 @@ fn fixture_root(tag: text) -> text:
     val _b = write_file(root + "/src/app/runner/bddh.spl", "pub fn shared_it(blk):\n    describe \"shared\":\n        it \"x\", blk\n")
     val _j = write_file(root + "/src/app/runner/jp.spl", "pub fn call_target() -> i64:\n    target_fn()\n")
     val _a = write_file(root + "/src/app/runner/aopsrc.spl", "pub fn with_advice(f: fn() -> i64):\n    describe \"s\":\n        it \"y\":\n            fn adv():\n                val _ = secret_helper()\n            on pc{{ execution(* target_fn(..)) }} use adv before priority 1\n            print f()\n")
+    # src functions in another directory reaching the private fn by glob,
+    # by a glob facade, and qualified; a module handing its OWN private fn
+    # to a helper as a value.
+    val _gc = write_file(root + "/src/app/other/glob_caller.spl", "use app.sub.lib_mod.*\npub fn call_glob() -> i64:\n    secret_helper()\n")
+    val _fc = write_file(root + "/src/app/other/facade_caller.spl", "use app.facade.glob_facade.*\npub fn call_facade() -> i64:\n    secret_helper()\n")
+    val _qc = write_file(root + "/src/app/other/qual_caller.spl", "use app.sub.lib_mod\npub fn call_qual() -> i64:\n    lib_mod.secret_helper()\n")
+    val _cb = write_file(root + "/src/app/sub/cb_user.spl", "use app.runner.run.{{run_cb}}\nfn own() -> i64:\n    42\npub fn via_cb() -> i64:\n    run_cb(own)\n")
+    # A sub-dir lambda / decorator calling sub's OWN private fn, run from other
+    # dirs (judged as its writer); a sub lambda calling another dir's fn that
+    # leaks (the writer must not stick to that named frame); and other-dir
+    # code reaching the private fn as a value, by UFCS or by pipeline.
+    val _lk = write_file(root + "/src/app/other/leaky.spl", "use app.sub.lib_mod.*\npub fn leak() -> i64:\n    secret_helper()\n")
+    val _ll = write_file(root + "/src/app/sub/lamlib.spl", "use app.other.leaky.{{leak}}\nfn own2() -> i64:\n    42\npub fn make_lam() -> fn() -> i64:\n    \\: own2()\npub fn make_leak_lam() -> fn() -> i64:\n    \\: leak()\npub fn deco(f: fn() -> i64) -> fn() -> i64:\n    val k = own2()\n    return f\n")
+    val _lf = write_file(root + "/src/app/other/lamfn.spl", "use app.sub.lamlib.{{make_lam}}\npub fn call_lam() -> i64:\n    val g = make_lam()\n    g()\n")
+    val _vf = write_file(root + "/src/app/other/vf.spl", "use app.sub.lib_mod.*\nuse app.runner.run.{{run_cb}}\npub fn vf_cb() -> i64:\n    run_cb(secret_helper)\npub fn vf_val() -> i64:\n    val f = secret_helper\n    f()\npub fn uf() -> i64:\n    val x = 41\n    x.secret_inc()\npub fn pipe() -> i64:\n    41 |> secret_inc\n")
+    val _vq = write_file(root + "/src/app/other/vq.spl", "use app.sub.lib_mod\npub fn vq() -> i64:\n    val f = lib_mod.secret_helper\n    f()\n")
     root
 
 # The fixture root itself must not look like a test path, or every product
@@ -73,11 +89,14 @@ fn allowed_with_marker(tag: text, rel: text, src: text, marker: text) -> bool:
     ok
 
 fn refused_on_every_lane(tag: text, rel: text, src: text) -> bool:
+    refused_fn_on_every_lane(tag, rel, src, "secret_helper")
+
+fn refused_fn_on_every_lane(tag: text, rel: text, src: text, fname: text) -> bool:
     val root = fixture_root(tag)
     var ok = root_is_not_test_path(root)
     for lane in lanes():
         val (out, err, rc) = run_lane(root, rel, src, lane)
-        if rc == 0 or out.contains("42") or not err.contains("private fn `secret_helper`"):
+        if rc == 0 or out.contains("42") or not err.contains("private fn `{fname}`"):
             print "[{tag}/{lane}] expected refusal: rc={rc} out={out.trim()}"
             ok = false
     ok
@@ -156,3 +175,74 @@ describe "product code stays refused (the exemption is lexical)":
 
     it "owner-less src advice fired inside a test closure body (judged where declared)":
         expect(refused_in_example_on_every_lane("srcadvice", "test/unit/srcadvice_spec.spl", T_BRACED + "use app.runner.aopsrc.{{with_advice}}\nfn target_fn() -> i64:\n    42\nwith_advice(\\: target_fn())\n")).to_equal(true)
+
+# private_call_gate_skips_import_bound_and_entry_calls_2026-11-14: a glob
+# import, a facade or a qualified name binds a private fn; it does not make
+# it visible. Entry rows use top-level code: an entry `fn main` on the
+# default (JIT) lane is the separate jit_main_lane_skips_private_import_visibility.
+describe "product code reaching a private fn by glob, facade or qualified name is refused":
+    it "a src fn calling it through a glob import (import-bound dispatch)":
+        expect(refused_on_every_lane("srcglob", "src/app/main_srcglob.spl", "use app.other.glob_caller.{{call_glob}}\nprint call_glob()\n")).to_equal(true)
+
+    it "a src fn calling it through an `export use m.*` facade":
+        expect(refused_on_every_lane("srcfacade", "src/app/main_srcfacade.spl", "use app.other.facade_caller.{{call_facade}}\nprint call_facade()\n")).to_equal(true)
+
+    it "a src fn calling it module-qualified":
+        expect(refused_on_every_lane("srcqual", "src/app/main_srcqual.spl", "use app.other.qual_caller.{{call_qual}}\nprint call_qual()\n")).to_equal(true)
+
+    it "a product entry calling it through a glob import":
+        expect(refused_on_every_lane("entryglob", "src/app/other/entry_glob.spl", "use app.sub.lib_mod.*\nprint secret_helper()\n")).to_equal(true)
+
+    it "a product entry calling it through a glob facade":
+        expect(refused_on_every_lane("entryfacade", "src/app/other/entry_facade.spl", "use app.facade.glob_facade.*\nprint secret_helper()\n")).to_equal(true)
+
+    it "a product entry calling it through a braced facade import":
+        expect(refused_on_every_lane("entrybfacade", "src/app/other/entry_bfacade.spl", "use app.sub.sub_facade.{{secret_helper}}\nprint secret_helper()\n")).to_equal(true)
+
+    it "a product entry calling it module-qualified":
+        expect(refused_on_every_lane("entryqual", "src/app/other/entry_qual.spl", "use app.sub.lib_mod\nprint lib_mod.secret_helper()\n")).to_equal(true)
+
+describe "the tightened gate keeps its exemptions":
+    it "a same-directory product entry (glob and qualified)":
+        expect(allowed_on_every_lane("samedirglob", "src/app/sub/entry_same.spl", "use app.sub.lib_mod.*\nprint secret_helper()\n")).to_equal(true)
+        expect(allowed_on_every_lane("samedirqual", "src/app/sub/entry_same_q.spl", "use app.sub.lib_mod\nprint lib_mod.secret_helper()\n")).to_equal(true)
+
+    it "a module handing its own private fn to another directory's helper as a value":
+        expect(allowed_on_every_lane("owncb", "src/app/main_owncb.spl", "use app.sub.cb_user.{{via_cb}}\nprint via_cb()\n")).to_equal(true)
+
+    it "a product entry calling its own private fn":
+        expect(allowed_on_every_lane("ownpriv", "src/app/other/entry_own.spl", "fn mine() -> i64:\n    42\nprint mine()\n")).to_equal(true)
+
+    it "a test entry through a glob facade and qualified inside fn main":
+        expect(allowed_on_every_lane("testglobfacade", "test/unit/globfacade2_spec.spl", "use app.facade.glob_facade.*\nprint secret_helper()\n")).to_equal(true)
+        expect(allowed_on_every_lane("testqualmain", "test/unit/qualmain_spec.spl", "use app.sub.lib_mod\nfn main():\n    print lib_mod.secret_helper()\n")).to_equal(true)
+
+# Reviewer P1s on the same gap: a private fn taken as a VALUE, by UFCS, or by
+# pipeline is a use by the code that names it; a closure body is judged as
+# the module that WROTE it, not whoever invokes it.
+describe "product code reaching a private fn as a value, by UFCS or by pipeline is refused":
+    it "passing it as a callback and binding it to a local":
+        expect(refused_on_every_lane("valuecb", "src/app/main_valuecb.spl", "use app.other.vf.{{vf_cb}}\nprint vf_cb()\n")).to_equal(true)
+        expect(refused_on_every_lane("valueval", "src/app/main_valueval.spl", "use app.other.vf.{{vf_val}}\nprint vf_val()\n")).to_equal(true)
+
+    it "binding it module-qualified":
+        expect(refused_on_every_lane("valuequal", "src/app/main_valuequal.spl", "use app.other.vq.{{vq}}\nprint vq()\n")).to_equal(true)
+
+    it "calling it by UFCS and by pipeline":
+        expect(refused_fn_on_every_lane("ufcs", "src/app/main_ufcs.spl", "use app.other.vf.{{uf}}\nprint uf()\n", "secret_inc")).to_equal(true)
+        expect(refused_fn_on_every_lane("pipe", "src/app/main_pipe.spl", "use app.other.vf.{{pipe}}\nprint pipe()\n", "secret_inc")).to_equal(true)
+
+    it "a sub lambda calling another dir's fn that reaches it (no writer leak into named frames)":
+        expect(refused_on_every_lane("lamleak", "src/app/other/entry_lamleak.spl", "use app.sub.lamlib.{{make_leak_lam}}\nval f = make_leak_lam()\nprint f()\n")).to_equal(true)
+
+describe "a closure or decorator runs as the module that wrote it":
+    it "a lambda calling its writer's private fn, invoked from an entry, a fn and a helper":
+        expect(allowed_on_every_lane("lamentry", "src/app/other/entry_lam.spl", "use app.sub.lamlib.{{make_lam}}\nval f = make_lam()\nprint f()\n")).to_equal(true)
+        expect(allowed_on_every_lane("lamfn", "src/app/main_lamfn.spl", "use app.other.lamfn.{{call_lam}}\nprint call_lam()\n")).to_equal(true)
+        expect(allowed_on_every_lane("lamcb", "src/app/other/entry_lamcb.spl", "use app.sub.lamlib.{{make_lam}}\nuse app.runner.run.{{run_cb}}\nprint run_cb(make_lam())\n")).to_equal(true)
+
+    it "a decorator fn calling its owner's private fn, applied in another dir":
+        expect(allowed_on_every_lane("decoentry", "src/app/other/entry_deco.spl", "use app.sub.lamlib.{{deco}}\nfn outer() -> i64:\n    @deco\n    fn inner() -> i64:\n        return 42\n    inner()\nprint outer()\n")).to_equal(true)
+
+    it "an entry-defined decorator calling another dir's private fn stays refused":
+        expect(refused_on_every_lane("entrydeco", "src/app/other/entry_deco2.spl", "use app.sub.lib_mod\nfn deco(f: fn() -> i64) -> fn() -> i64:\n    val k = lib_mod.secret_helper()\n    return f\nfn outer() -> i64:\n    @deco\n    fn inner() -> i64:\n        return 7\n    inner()\nprint outer()\n")).to_equal(true)
