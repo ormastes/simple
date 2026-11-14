@@ -92,3 +92,17 @@ max-content of mixed inline content, control UA font reset, `h6` margins
 20. **AC-9 of `form_control_ua_font_reset_chrome159_spec` asserts the
     `font-family: inherit` input only one-sided** (narrower than the sans
     input). Chrome has 176; it becomes an exact row when item 14 lands.
+
+## 2026-11-15 follow-up
+
+- **Item 18 fixed.** Percentage `min-width` / `max-width` / `min-height` /
+  `max-height` are stored as the negative sentinel `width` uses and resolved
+  by `style_with_resolved_percent_min_max` against the containing block:
+  the normal-flow child site (content box width, definite content height),
+  the inline atomic site (line box width), and `layout_with_style` for every
+  other caller (available width; a height percentage is `none` there).
+  Max-content contributions see the sentinel as `none`. Spec:
+  `test/01_unit/browser_engine/percent_min_max_size_chrome159_spec.spl`.
+  Still px-only: `min-/max-inline-size` and `min-/max-block-size` go through
+  `parse_int`, and a flex / grid item's percentage height clamp resolves
+  against nothing (the flex paths read `min_height_px > 0` on the raw style).

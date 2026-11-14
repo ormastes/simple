@@ -794,22 +794,22 @@ fn _apply_decls_without_grid_inner(
     val min_width = decl_tbl_get_p(decl_tbl, decl_present, "min-width")
     val min_width_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "min-width")
     if min_width.len() > 0:
-        min_width_v = _decl_font_relative_length_px(min_width, font_size_v)
+        min_width_v = _decl_percent_sentinel_or_length_px(min_width, font_size_v)
         min_width_set_v = min_width.trim() != "auto"
     val max_width = decl_tbl_get_p(decl_tbl, decl_present, "max-width")
     val max_width_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "max-width")
     if max_width.len() > 0:
-        # The clamp slot is px-only. A percentage has no px form here and was
-        # read as that many px (`max-width:100%` clamped a control to 100 px);
-        # it is left unset (`none`) until the slot can carry a percentage.
-        max_width_v = if max_width.trim().ends_with("%"): 0 else: _decl_font_relative_length_px(max_width, font_size_v)
+        # A percentage is stored as the negative sentinel `width` uses and
+        # resolved against the containing block at layout time
+        # (`style_with_resolved_percent_min_max`); it was read as that many px.
+        max_width_v = _decl_percent_sentinel_or_length_px(max_width, font_size_v)
     # min()/max()/clamp() on `width` desugar to the clamp slots (see
     # css_math_primary): they only fill a slot the author left unset.
     val width_implied_max = css_math_implied_max_px(width_raw)
     val width_implied_min = css_math_implied_min_px(width_raw)
-    if width_implied_max > 0 and max_width_v <= 0:
+    if width_implied_max > 0 and max_width_v == 0:
         max_width_v = width_implied_max
-    if width_implied_min > 0 and min_width_v <= 0:
+    if width_implied_min > 0 and min_width_v == 0:
         min_width_v = width_implied_min
     val min_height = decl_tbl_get_p(decl_tbl, decl_present, "min-height")
     val min_height_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "min-height")
@@ -818,11 +818,11 @@ fn _apply_decls_without_grid_inner(
             min_height_vh_v = true
         else:
             min_height_vh_v = false
-            min_height_v = parse_int(min_height)
+            min_height_v = _decl_percent_sentinel_or_px(min_height)
     val max_height = decl_tbl_get_p(decl_tbl, decl_present, "max-height")
     val max_height_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "max-height")
     if max_height.len() > 0:
-        max_height_v = parse_int(max_height)
+        max_height_v = _decl_percent_sentinel_or_px(max_height)
     val min_inline_size = decl_tbl_get_p(decl_tbl, decl_present, "min-inline-size")
     val min_inline_size_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "min-inline-size")
     if min_inline_size.len() > 0:
@@ -2545,6 +2545,20 @@ fn _apply_decls_without_grid_inner(
 # computed font-size; rem uses the 16px root, matching the font-size rem rule
 # in _apply_decls_dispatch. Every other unit keeps the previous parse_int
 # reading unchanged.
+# A `min-` / `max-` size: a percentage as the negative sentinel (`-50` for
+# `50%`, resolved at layout time), anything else as a px length.
+fn _decl_percent_sentinel_or_length_px(raw: text, font_px: i32) -> i32:
+    if raw.trim().ends_with("%"):
+        val p = parse_int(raw)
+        return if p > 0: 0 - p else: 0
+    _decl_font_relative_length_px(raw, font_px)
+
+fn _decl_percent_sentinel_or_px(raw: text) -> i32:
+    if raw.trim().ends_with("%"):
+        val p = parse_int(raw)
+        return if p > 0: 0 - p else: 0
+    parse_int(raw)
+
 fn _decl_font_relative_length_px(raw: text, font_px: i32) -> i32:
     val v = raw.trim().lower()
     if v.ends_with("rem"):

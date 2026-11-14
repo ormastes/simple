@@ -1648,8 +1648,13 @@ never cache an answer computed while exhausted) —
   `display == "inline"` and not replaced. `white-space: nowrap` still
   collapses (only `pre` keeps spaces), so a nowrap cell keeps the
   inter-inline space in max-content.
-- **Trap — `max-width: <percent>` used to be N px.** The clamp slot is
-  px-only; a percentage is now `none` (residue item 18).
+- **Trap — `max-width: <percent>` used to be N px.** Percentage min-/max-
+  sizes are now the negative sentinel (like `width`) and resolve in
+  `style_with_resolved_percent_min_max`; every clamp reader tests `> 0`, so an
+  unresolved sentinel is `none`, which is what max-content needs. Resolve
+  BEFORE `layout_with_style` when the containing block differs from the width
+  the box is laid out in (inline atomic boxes are laid out in their own
+  predicted width: resolving there gave an input 16 px).
 - **Trap — a UA reset needs `inherit` to exist.** Resetting the control
   font exposed that NO font property resolved the `inherit` keyword
   (`font-family: inherit` stored the literal text; `font: inherit` cleared
