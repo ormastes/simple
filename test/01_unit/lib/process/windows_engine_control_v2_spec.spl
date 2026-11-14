@@ -1,0 +1,355 @@
+# AUTHORED SOURCE-ONLY NOT_RUN. Metadata consistency is not native authority.
+use std.spec.*
+use std.common.process.windows_engine_control_v2.*
+
+fn control_value_v2() -> WindowsEnginePipeControlV2:
+    WindowsEnginePipeControlV2(target_digest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        binding_digest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        kind: "input", nonce_digest: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        revision: 1, expires_monotonic_ns: 1000)
+
+fn control_binding_v2() -> WindowsEnginePipeControlBindingV2:
+    WindowsEnginePipeControlBindingV2(target_digest: control_value_v2().binding_digest,
+        kind: "input", payload_digest: "")
+
+fn control_attempt_v2() -> WindowsEnginePipeAttemptV2:
+    WindowsEnginePipeAttemptV2(control: control_value_v2(), sequence: 1, frame_sequence: 1,
+        payload_digest: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        payload_bytes: 8, offset: 0, requested_bytes: 8)
+
+fn control_state_v2() -> WindowsEnginePipeControlStateV2:
+    WindowsEnginePipeControlStateV2(binding: control_binding_v2(), current: control_value_v2(),
+        active: true, last: nil, pending: false)
+
+fn completed_state_v2(accepted: i64) -> WindowsEnginePipeControlStateV2:
+    var state = control_state_v2()
+    state.last = WindowsEnginePipeWriteReceiptV2(attempt: control_attempt_v2(),
+        status: WindowsEnginePipeWriteStatusV2.Completed, accepted_bytes: accepted)
+    state
+
+fn refuse_attempt_v2(state: WindowsEnginePipeControlStateV2, attempt: WindowsEnginePipeAttemptV2,
+        now: i64 = 1):
+    expect(windows_engine_control_attempt_reason_v2(state, attempt, now).len()).to_be_greater_than(0)
+
+describe "Windows Engine control metadata checks":
+    it "admits an exact live first attempt without changing supplied state":
+        step("Validate a bound input tuple at sequence one and offset zero")
+        val state = control_state_v2()
+        expect(windows_engine_control_binding_reason_v2(control_binding_v2())).to_equal("")
+        expect(windows_engine_control_reason_v2(control_value_v2())).to_equal("")
+        expect(windows_engine_control_attempt_reason_v2(state, control_attempt_v2(), 1)).to_equal("")
+        expect(state.last.?).to_equal(false)
+        expect(state.pending).to_equal(false)
+
+    it "requires strictly lowercase 64hex digests and exact binding kinds":
+        step("Reject uppercase, short and nonhex target identities and inappropriate payload binding")
+        for digest in ["", "abc", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                "gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg"]:
+            var binding = control_binding_v2()
+            binding.target_digest = digest
+            expect(windows_engine_control_binding_reason_v2(binding).len()).to_be_greater_than(0)
+        var binding = control_binding_v2()
+        binding.payload_digest = control_attempt_v2().payload_digest
+        expect(windows_engine_control_binding_reason_v2(binding).len()).to_be_greater_than(0)
+        binding = control_binding_v2()
+        binding.kind = "geometry"
+        expect(windows_engine_control_binding_reason_v2(binding).len()).to_be_greater_than(0)
+        binding.payload_digest = control_attempt_v2().payload_digest
+        expect(windows_engine_control_binding_reason_v2(binding)).to_equal("")
+        binding.kind = "resize"
+        expect(windows_engine_control_binding_reason_v2(binding).len()).to_be_greater_than(0)
+
+    it "validates every control field and compares the complete immutable tuple":
+        step("Mutate full target, stable binding, kind, nonce, revision and monotonic deadline independently")
+        val original = control_value_v2()
+        expect(windows_engine_control_equal_v2(original, original)).to_equal(true)
+        for field in ["target", "binding", "kind", "nonce", "revision", "expiry"]:
+            var changed = original
+            if field == "target": changed.target_digest = ""
+            elif field == "binding": changed.binding_digest = ""
+            elif field == "kind": changed.kind = "resize"
+            elif field == "nonce": changed.nonce_digest = ""
+            elif field == "revision": changed.revision = 0
+            else: changed.expires_monotonic_ns = 0
+            expect(windows_engine_control_equal_v2(original, changed)).to_equal(false)
+            expect(windows_engine_control_reason_v2(changed).len()).to_be_greater_than(0)
+        var changed = original
+        changed.revision = -1
+        expect(windows_engine_control_reason_v2(changed).len()).to_be_greater_than(0)
+        changed = original
+        changed.expires_monotonic_ns = -1
+        expect(windows_engine_control_reason_v2(changed).len()).to_be_greater_than(0)
+
+    it "requires binding current control active state and exact current tuple":
+        step("Reject missing or revoked state, foreign binding and an altered current control")
+        val attempt = control_attempt_v2()
+        var state = control_state_v2()
+        state.binding = nil
+        refuse_attempt_v2(state, attempt)
+        state = control_state_v2()
+        state.current = nil
+        refuse_attempt_v2(state, attempt)
+        state = control_state_v2()
+        state.active = false
+        refuse_attempt_v2(state, attempt)
+        state = control_state_v2()
+        var binding = control_binding_v2()
+        binding.target_digest = attempt.payload_digest
+        state.binding = binding
+        refuse_attempt_v2(state, attempt)
+        state = control_state_v2()
+        var current = control_value_v2()
+        current.revision = 2
+        state.current = current
+        refuse_attempt_v2(state, attempt)
+
+    it "accepts only positive monotonic time strictly before the deadline":
+        step("Check the expiry boundary without substituting wall clock time")
+        val state = control_state_v2()
+        val attempt = control_attempt_v2()
+        expect(windows_engine_control_attempt_reason_v2(state, attempt, 999)).to_equal("")
+        for now in [-1, 0, 1000, 1001, 9223372036854775807]:
+            refuse_attempt_v2(state, attempt, now)
+
+    it "bounds payload requests and subtraction-safe offset ranges":
+        step("Reject invalid byte ranges including maximum signed offsets before arithmetic")
+        val state = control_state_v2()
+        for size in [-1, 0, 131073, 9223372036854775807]:
+            var attempt = control_attempt_v2()
+            attempt.payload_bytes = size
+            refuse_attempt_v2(state, attempt)
+        for size in [-1, 0, 65537, 9223372036854775807]:
+            var attempt = control_attempt_v2()
+            attempt.requested_bytes = size
+            refuse_attempt_v2(state, attempt)
+        for offset in [-1, 1, 8, 9223372036854775807]:
+            var attempt = control_attempt_v2()
+            attempt.offset = offset
+            refuse_attempt_v2(state, attempt)
+        var maximum = control_attempt_v2()
+        maximum.payload_bytes = 131072
+        maximum.requested_bytes = 65536
+        expect(windows_engine_control_attempt_reason_v2(state, maximum, 1)).to_equal("")
+        var minimum = control_attempt_v2()
+        minimum.payload_bytes = 1
+        minimum.requested_bytes = 1
+        expect(windows_engine_control_attempt_reason_v2(state, minimum, 1)).to_equal("")
+
+    it "starts attempt and frame sequences at one with zero initial offset":
+        step("Refuse initial gaps, nonpositive sequence and an unexplained input prefix")
+        for field in ["sequence", "frame", "offset", "digest"]:
+            var attempt = control_attempt_v2()
+            if field == "sequence": attempt.sequence = 2
+            elif field == "frame": attempt.frame_sequence = 2
+            elif field == "offset":
+                attempt.offset = 1
+                attempt.requested_bytes = 1
+            else: attempt.payload_digest = "invalid"
+            refuse_attempt_v2(control_state_v2(), attempt)
+        var attempt = control_attempt_v2()
+        attempt.sequence = 0
+        refuse_attempt_v2(control_state_v2(), attempt)
+        attempt = control_attempt_v2()
+        attempt.frame_sequence = -1
+        refuse_attempt_v2(control_state_v2(), attempt)
+
+    it "continues a completed partial write only at the exact accepted prefix":
+        step("Use the returned prefix rather than the requested length or a restarted offset")
+        val state = completed_state_v2(3)
+        var next = control_attempt_v2()
+        next.sequence = 2
+        next.offset = 3
+        next.requested_bytes = 5
+        expect(windows_engine_control_attempt_reason_v2(state, next, 1)).to_equal("")
+        for offset in [0, 2, 4]:
+            var changed = next
+            changed.offset = offset
+            changed.requested_bytes = 1
+            refuse_attempt_v2(state, changed)
+        next.sequence = 3
+        refuse_attempt_v2(state, next)
+
+    it "preserves payload identity and refuses changed same-revision control for a continued frame":
+        step("Refuse a changed digest, length or nonce without a higher current revision")
+        val state = completed_state_v2(3)
+        var next = control_attempt_v2()
+        next.sequence = 2
+        next.offset = 3
+        next.requested_bytes = 1
+        var changed = next
+        changed.payload_digest = next.control.target_digest
+        refuse_attempt_v2(state, changed)
+        changed = next
+        changed.payload_bytes = 9
+        refuse_attempt_v2(state, changed)
+        var newer_state = state
+        var newer_control = control_value_v2()
+        newer_control.nonce_digest = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        newer_state.current = newer_control
+        changed = next
+        changed.control = newer_control
+        refuse_attempt_v2(newer_state, changed)
+
+    it "allows a renewed current lease to continue only the exact known suffix":
+        step("Renew after known partial completion while preserving the old native receipt and refusing replay")
+        var state = completed_state_v2(3)
+        var renewed = control_value_v2()
+        renewed.revision = 3
+        renewed.target_digest = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        renewed.nonce_digest = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        renewed.expires_monotonic_ns = 2000
+        state.current = renewed
+        var suffix = control_attempt_v2()
+        suffix.control = renewed
+        suffix.sequence = 2
+        suffix.offset = 3
+        suffix.requested_bytes = 5
+        expect(windows_engine_control_attempt_reason_v2(state, suffix, 1001)).to_equal("")
+        expect(state.last.unwrap().attempt.control.revision).to_equal(1)
+        expect(state.last.unwrap().accepted_bytes).to_equal(3)
+        var changed = suffix
+        changed.offset = 0
+        refuse_attempt_v2(state, changed, 1001)
+        changed = suffix
+        changed.payload_digest = renewed.target_digest
+        refuse_attempt_v2(state, changed, 1001)
+        changed = suffix
+        changed.payload_bytes = 9
+        refuse_attempt_v2(state, changed, 1001)
+        changed = suffix
+        changed.sequence = 3
+        refuse_attempt_v2(state, changed, 1001)
+        for revision in [1, 2]:
+            var prior = control_attempt_v2()
+            prior.control.revision = 2
+            var rejected_state = state
+            rejected_state.last = WindowsEnginePipeWriteReceiptV2(attempt: prior,
+                status: WindowsEnginePipeWriteStatusV2.Completed, accepted_bytes: 3)
+            var rejected_control = renewed
+            rejected_control.revision = revision
+            rejected_state.current = rejected_control
+            var rejected_attempt = suffix
+            rejected_attempt.control = rejected_control
+            refuse_attempt_v2(rejected_state, rejected_attempt, 1001)
+        for status in [WindowsEnginePipeWriteStatusV2.Unknown, WindowsEnginePipeWriteStatusV2.Queued]:
+            var frozen = state
+            frozen.last = WindowsEnginePipeWriteReceiptV2(attempt: control_attempt_v2(),
+                status: status, accepted_bytes: 3)
+            refuse_attempt_v2(frozen, suffix, 1001)
+        var completed = state
+        completed.last = WindowsEnginePipeWriteReceiptV2(attempt: control_attempt_v2(),
+            status: WindowsEnginePipeWriteStatusV2.Completed, accepted_bytes: 8)
+        refuse_attempt_v2(completed, suffix, 1001)
+
+    it "admits exactly the next frame after full completion including a newly current revision":
+        step("Finish the prior payload then start a distinct frame at offset zero")
+        var state = completed_state_v2(8)
+        var next = control_attempt_v2()
+        next.sequence = 2
+        next.frame_sequence = 2
+        next.payload_digest = next.control.target_digest
+        expect(windows_engine_control_attempt_reason_v2(state, next, 1)).to_equal("")
+        var current = control_value_v2()
+        current.revision = 2
+        state.current = current
+        next.control = current
+        expect(windows_engine_control_attempt_reason_v2(state, next, 1)).to_equal("")
+        next.frame_sequence = 3
+        refuse_attempt_v2(state, next)
+        next.frame_sequence = 2
+        next.offset = 1
+        next.requested_bytes = 1
+        refuse_attempt_v2(state, next)
+
+    it "allows attachment target rotation across completed frames only within the stable runtime binding":
+        step("Install a higher revision with a new full target but retain the adopted runtime and pane identity")
+        var state = completed_state_v2(8)
+        var rotated = control_value_v2()
+        rotated.revision = 2
+        rotated.target_digest = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        rotated.nonce_digest = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        state.current = rotated
+        var next = control_attempt_v2()
+        next.control = rotated
+        next.sequence = 2
+        next.frame_sequence = 2
+        expect(windows_engine_control_attempt_reason_v2(state, next, 1)).to_equal("")
+        rotated.binding_digest = rotated.target_digest
+        state.current = rotated
+        next.control = rotated
+        refuse_attempt_v2(state, next)
+        var changed_binding = control_binding_v2()
+        changed_binding.target_digest = rotated.binding_digest
+        state.binding = changed_binding
+        refuse_attempt_v2(state, next)
+
+    it "rejects premature next frames and restarting a fully completed frame":
+        step("Do not let frame numbering bypass an unfinished payload or replay completed data")
+        var next = control_attempt_v2()
+        next.sequence = 2
+        next.frame_sequence = 2
+        refuse_attempt_v2(completed_state_v2(3), next)
+        next.frame_sequence = 1
+        refuse_attempt_v2(completed_state_v2(8), next)
+
+    it "freezes pending queued and unknown outcomes regardless of retained accepted prefix":
+        step("Require known completion before any new attempt even when a pending flag is stale")
+        var next = control_attempt_v2()
+        next.sequence = 2
+        next.offset = 3
+        next.requested_bytes = 5
+        var state = completed_state_v2(3)
+        state.pending = true
+        refuse_attempt_v2(state, next)
+        for status in [WindowsEnginePipeWriteStatusV2.Queued, WindowsEnginePipeWriteStatusV2.Unknown]:
+            state = control_state_v2()
+            state.last = WindowsEnginePipeWriteReceiptV2(attempt: control_attempt_v2(), status: status, accepted_bytes: 3)
+            refuse_attempt_v2(state, next)
+
+    it "rejects malformed retained receipts before addition and never wraps sequence counters":
+        step("Bound previous shape and accepted bytes before computing the next prefix or sequence")
+        var next = control_attempt_v2()
+        next.sequence = 2
+        next.frame_sequence = 2
+        for accepted in [-1, 9, 9223372036854775807]:
+            refuse_attempt_v2(completed_state_v2(accepted), next)
+        for field in ["offset", "payload", "request", "sequence", "frame"]:
+            var prior = control_attempt_v2()
+            if field == "offset": prior.offset = 9223372036854775807
+            elif field == "payload": prior.payload_bytes = 9223372036854775807
+            elif field == "request": prior.requested_bytes = 9223372036854775807
+            elif field == "sequence": prior.sequence = 9223372036854775807
+            else: prior.frame_sequence = 9223372036854775807
+            var state = control_state_v2()
+            state.last = WindowsEnginePipeWriteReceiptV2(attempt: prior,
+                status: WindowsEnginePipeWriteStatusV2.Completed, accepted_bytes: 8)
+            refuse_attempt_v2(state, next)
+
+    it "binds geometry to one exact payload and only frame one":
+        step("Allow a partial geometry continuation while refusing payload substitution and any later frame")
+        var control = control_value_v2()
+        control.kind = "geometry"
+        var binding = control_binding_v2()
+        binding.kind = "geometry"
+        binding.payload_digest = control_attempt_v2().payload_digest
+        var state = WindowsEnginePipeControlStateV2(binding: binding, current: control,
+            active: true, last: nil, pending: false)
+        var first = control_attempt_v2()
+        first.control = control
+        expect(windows_engine_control_attempt_reason_v2(state, first, 1)).to_equal("")
+        var changed = first
+        changed.payload_digest = control.target_digest
+        refuse_attempt_v2(state, changed)
+        state.last = WindowsEnginePipeWriteReceiptV2(attempt: first,
+            status: WindowsEnginePipeWriteStatusV2.Completed, accepted_bytes: 3)
+        var next = first
+        next.sequence = 2
+        next.offset = 3
+        next.requested_bytes = 5
+        expect(windows_engine_control_attempt_reason_v2(state, next, 1)).to_equal("")
+        state.last = WindowsEnginePipeWriteReceiptV2(attempt: first,
+            status: WindowsEnginePipeWriteStatusV2.Completed, accepted_bytes: 8)
+        next = first
+        next.sequence = 2
+        next.frame_sequence = 2
+        refuse_attempt_v2(state, next)
