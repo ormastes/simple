@@ -9569,7 +9569,7 @@ fn test_linker_fails_closed_on_undefined_runtime_symbol() {
     // `tolerates_unresolved_symbols() == false`) the preflight verdict is
     // deliberately deferred to that authoritative link (stubs.rs, WA-s2n7,
     // 2026-11-08, doc/08_tracking/bug/stage2_windows_gnu_112_undefined_rt_symbols_2026-11-08.md),
-    // 2026-11-08), so there is nothing for this preflight to reject there.
+    // so there is nothing for this preflight to reject there.
     let target = super::effective_target();
     if !simple_common::platform::link_config::PlatformLinkConfig::for_target(&target).tolerates_unresolved_symbols() {
         assert!(
