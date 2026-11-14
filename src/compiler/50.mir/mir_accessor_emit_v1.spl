@@ -1,0 +1,67 @@
+# Actual typed helper-body generation. Publication and source-site rewriting
+# remain the compilation coordinator's responsibility; this function cannot
+# enable get/set selectors or manufacture source visibility.
+use compiler.hir.hir_types.{SymbolId}
+use compiler.common.diagnostics.span.{Span}
+use compiler.mir.mir_types.{LocalId, LocalKind, MirLocal}
+use compiler.mir.mir_instructions.{MirFunction}
+use compiler.mir.mir_instruction_support.{mir_operand_copy}
+use compiler.mir.mir_data.{MirBuilder}
+use compiler.mir.mir_accessor_plan_v1.{MirAccessorPlanV1, MirAccessorOperationV1, mir_accessor_prepare_v1}
+use compiler.mir.mir_aop_injection.{Placement, StaticAspectPlacementV1, AspectPlacementKindV1}
+use compiler.frontend.core.aop.{AdviceForm}
+
+fn mir_accessor_argument_v1(builder: MirBuilder, index: i64) -> Result<LocalId, text>:
+    # begin_function may reserve a return local before its arguments. Never
+    # assume the receiver is local zero or infer parameter IDs from offsets.
+    for raw_local in builder.locals:
+        val local: MirLocal = raw_local
+        match local.kind:
+            case LocalKind.Arg(position):
+                if position == index: return Ok(local.id)
+            case _: ()
+    Err("E-AOP-FIELD-EMIT: generated helper is missing a typed argument local")
+
+pub fn mir_accessor_emit_v1(request: MirAccessorPlanV1, helper_symbol: SymbolId,
+    helper_name: text, span: Span) -> Result<MirFunction, text>:
+    if not helper_symbol.is_valid() or not helper_name.starts_with("__simple_accessor_"):
+        return Err("E-AOP-FIELD-EMIT: helper requires a reserved coordinator identity")
+    # Revalidate typed facts at the effectful boundary; do not trust a caller
+    # to have retained the signature of the originally prepared record.
+    val plan = mir_accessor_prepare_v1(request.declaration, request.physical,
+        request.operation, request.ordered_advice)?
+    var builder = MirBuilder.new()
+    builder.begin_function(helper_symbol, helper_name, plan.signature, span)
+    val receiver = mir_accessor_argument_v1(builder, 0)?
+    if plan.operation == MirAccessorOperationV1.Read:
+        val raw_value = builder.emit_get_field(mir_operand_copy(receiver),
+            plan.declaration.field_index, plan.physical.field_type)
+        # Ret refers to this exact loaded local through after_success advice.
+        # An alias mutation in that advice never triggers a second load.
+        builder.terminate_return(Some(mir_operand_copy(raw_value)))
+    else:
+        val value = mir_accessor_argument_v1(builder, 1)?
+        builder.emit_set_field(mir_operand_copy(receiver), plan.declaration.field_index,
+            mir_operand_copy(value))
+        builder.terminate_return(None)
+    var helper = builder.end_function()
+    # Reuse the existing validated placement consumer. Appended exit calls
+    # preserve order; entry prepends are applied in reverse to preserve it.
+    for advice in plan.ordered_advice:
+        if advice.form == AdviceForm.AfterSuccess:
+            val placement = StaticAspectPlacementV1(kind: AspectPlacementKindV1.AfterSuccess,
+                advice_function: advice.function_name, block_id: helper.entry_block.id,
+                instruction_index: 0, before: false)
+            helper = placement.apply(helper)?
+    var index = plan.ordered_advice.len() - 1
+    while index >= 0:
+        val advice = plan.ordered_advice[index]
+        if advice.form == AdviceForm.Before:
+            val placement = StaticAspectPlacementV1(kind: AspectPlacementKindV1.Before,
+                advice_function: advice.function_name, block_id: helper.entry_block.id,
+                instruction_index: 0, before: true)
+            helper = placement.apply(helper)?
+        index = index - 1
+    helper.is_export_c = false
+    helper.export_name = ""
+    Ok(helper)

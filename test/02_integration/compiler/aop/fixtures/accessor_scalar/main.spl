@@ -1,0 +1,63 @@
+# Qualification fixture; currently expected to reject get/set with E1507.
+# Run only after real field-site consumers are connected and under test.
+pub class ReadBox:
+    pub value: i32
+
+pub class WriteBox:
+    pub value: i32
+
+var read_box = ReadBox(value: 7)
+var write_box = WriteBox(value: 0)
+var events: [text] = []
+
+fn churn():
+    var scratch: [text] = []
+    for index in 0..128:
+        scratch.push("allocation-{index}")
+
+fn before_read():
+    events.push("before-read")
+    churn()
+
+fn after_read():
+    events.push("after-read")
+    churn()
+    # Setter advice selects WriteBox only; this must not recurse.
+    read_box.value = 99
+
+fn before_write():
+    events.push("before-write")
+    churn()
+
+fn after_write():
+    if write_box.value == 17:
+        events.push("after-write-committed")
+    else:
+        events.push("after-write-uncommitted")
+    churn()
+
+aspect ReadObservation:
+    on pc{ get(main.ReadBox.value) } use before_read before
+    on pc{ get(main.ReadBox.value) } use after_read after_success
+
+aspect WriteObservation:
+    on pc{ set(main.WriteBox.value) } use before_write before
+    on pc{ set(main.WriteBox.value) } use after_write after_success
+
+fn right_hand_side() -> i32:
+    events.push("rhs")
+    17
+
+fn write_receiver() -> WriteBox:
+    events.push("receiver")
+    write_box
+
+fn main() -> i32:
+    val saved = read_box.value
+    write_receiver().value = right_hand_side()
+    if saved != 7: return 1
+    if write_box.value != 17: return 2
+    print(saved)
+    for event in events:
+        print(event)
+    0

@@ -1,0 +1,144 @@
+# Typed-plan unit tests. These do not execute a generated helper or establish
+# collector lifetime/physical emission support.
+use compiler.hir.hir_accessor_field_v1.{HirAccessorFieldV1}
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId}
+use compiler.common.diagnostics.span.{Span}
+use compiler.mir.mir_types.{MirType, MirTypeKind, MirSignature}
+use compiler.frontend.core.aop.{AdviceForm}
+use compiler.mir.mir_accessor_plan_v1.*
+use compiler.mir.mir_accessor_emit_v1.{mir_accessor_emit_v1}
+use compiler.mir.mir_instructions.{MirInstKind, MirTerminator}
+use compiler.mir.mir_instruction_support.{MirOperandKind}
+use compiler.mir.mir_types.{MirConstValue}
+
+fn selected_field() -> HirAccessorFieldV1:
+    HirAccessorFieldV1(owner_module: "app.box", owner_name: "Box",
+        owner_symbol: SymbolId.new(10), field_name: "count", field_symbol: SymbolId.new(11),
+        field_index: 1,
+        receiver_type: HirType(kind: HirTypeKind.Named(SymbolId.new(10), []), span: Span.empty()),
+        field_type: HirType(kind: HirTypeKind.Int(32, false), span: Span.empty()))
+
+fn selected_physical() -> MirAccessorPhysicalV1:
+    MirAccessorPhysicalV1(owner_module: "app.box", owner_name: "Box",
+        receiver_type: MirType(kind: MirTypeKind.Struct(SymbolId.new(10))),
+        field_type: MirType(kind: MirTypeKind.U32), field_order: ["flag", "count"],
+        layout_identity: "layout-v1", provider_identity: "provider-a",
+        target_abi: "test-abi", emission_owner: "app.box.accessors",
+        place: MirAccessorPlaceV1.DirectReference, writable: true,
+        nullable: false, atomic: false, volatile: false,
+        memory_profile: MirAccessorMemoryProfileV1.NoGcSynchronous)
+
+fn selected_advice(name: text, form: AdviceForm) -> MirAccessorAdviceV1:
+    MirAccessorAdviceV1(aspect_module: "app.trace", aspect_name: "Trace",
+        symbol: SymbolId.new(20), function_name: name,
+        signature: MirSignature(params: [], return_type: MirType.unit(),
+            is_variadic: false, params_known: true), form: form,
+        interface_digest: "iface", body_digest: name, effects_digest: "effects")
+
+describe "typed accessor MIR preparation":
+    it "retains the exact unsigned scalar return and ordered advice":
+        val advice = [selected_advice("first", AdviceForm.Before), selected_advice("second", AdviceForm.AfterSuccess)]
+        val plan = mir_accessor_prepare_v1(selected_field(), selected_physical(), MirAccessorOperationV1.Read, advice).unwrap()
+        expect(plan.signature.params.len()).to_equal(1)
+        expect(plan.signature.params_known).to_equal(true)
+        expect(plan.signature.return_type.kind).to_equal(MirTypeKind.U32)
+        expect(plan.ordered_advice[0].function_name).to_equal("first")
+        expect(plan.ordered_advice[1].function_name).to_equal("second")
+
+    it "gives setters one typed receiver and value and no result capture":
+        val plan = mir_accessor_prepare_v1(selected_field(), selected_physical(), MirAccessorOperationV1.Write, []).unwrap()
+        expect(plan.signature.params.len()).to_equal(2)
+        expect(plan.signature.params[1].kind).to_equal(MirTypeKind.U32)
+        expect(plan.signature.return_type.kind).to_equal(MirTypeKind.Unit)
+
+    it "rejects a read-only setter place":
+        val physical = MirAccessorPhysicalV1(..selected_physical(), writable: false)
+        expect(mir_accessor_prepare_v1(selected_field(), physical, MirAccessorOperationV1.Write, []).is_err()).to_equal(true)
+
+    it "does not admit another same-named module's physical layout":
+        val physical = MirAccessorPhysicalV1(..selected_physical(), owner_module: "other.box")
+        expect(mir_accessor_prepare_v1(selected_field(), physical, MirAccessorOperationV1.Read, []).is_err()).to_equal(true)
+
+    it "rejects an ordinal that names a different field":
+        val physical = MirAccessorPhysicalV1(..selected_physical(), field_order: ["count", "flag"])
+        expect(mir_accessor_prepare_v1(selected_field(), physical, MirAccessorOperationV1.Read, []).is_err()).to_equal(true)
+
+    it "rejects an erased or incorrectly signed field ABI":
+        val physical = MirAccessorPhysicalV1(..selected_physical(), field_type: MirType.i64())
+        expect(mir_accessor_prepare_v1(selected_field(), physical, MirAccessorOperationV1.Read, []).is_err()).to_equal(true)
+
+    it "rejects atomic and compound places rather than dropping their semantics":
+        val atomic = MirAccessorPhysicalV1(..selected_physical(), atomic: true)
+        val compound = MirAccessorPhysicalV1(..selected_physical(), place: MirAccessorPlaceV1.ReadModifyWrite)
+        expect(mir_accessor_prepare_v1(selected_field(), atomic, MirAccessorOperationV1.Read, []).is_err()).to_equal(true)
+        expect(mir_accessor_prepare_v1(selected_field(), compound, MirAccessorOperationV1.Write, []).is_err()).to_equal(true)
+
+    it "rejects unknown advice signatures and unsupported advice forms":
+        val unknown = MirAccessorAdviceV1(..selected_advice("trace", AdviceForm.Before),
+            signature: MirSignature(params: [], return_type: MirType.unit(), is_variadic: false))
+        val around = selected_advice("around_trace", AdviceForm.Around)
+        expect(mir_accessor_prepare_v1(selected_field(), selected_physical(), MirAccessorOperationV1.Read, [unknown]).is_err()).to_equal(true)
+        expect(mir_accessor_prepare_v1(selected_field(), selected_physical(), MirAccessorOperationV1.Read, [around]).is_err()).to_equal(true)
+
+    it "rejects contradictory authoritative advice parameters":
+        val contradictory = MirAccessorAdviceV1(..selected_advice("trace", AdviceForm.Before),
+            signature: MirSignature(params: [], return_type: MirType.unit(), is_variadic: false,
+                params_known: true, declared_params_known: true, declared_params: [MirType.i64()]))
+        expect(mir_accessor_prepare_v1(selected_field(), selected_physical(), MirAccessorOperationV1.Read, [contradictory]).is_err()).to_equal(true)
+
+    it "rejects invalid declaration identities and unqualified memory providers":
+        val missing = HirAccessorFieldV1(..selected_field(), owner_symbol: SymbolId.new(-1))
+        val physical = MirAccessorPhysicalV1(..selected_physical(), memory_profile: MirAccessorMemoryProfileV1.Unqualified)
+        expect(mir_accessor_prepare_v1(missing, selected_physical(), MirAccessorOperationV1.Read, []).is_err()).to_equal(true)
+        expect(mir_accessor_prepare_v1(selected_field(), physical, MirAccessorOperationV1.Read, []).is_err()).to_equal(true)
+
+    it "emits one getter load and returns that saved local after ordered advice":
+        val advice = [selected_advice("before_a", AdviceForm.Before),
+            selected_advice("before_b", AdviceForm.Before),
+            selected_advice("after_a", AdviceForm.AfterSuccess)]
+        val plan = mir_accessor_prepare_v1(selected_field(), selected_physical(), MirAccessorOperationV1.Read, advice).unwrap()
+        val helper = mir_accessor_emit_v1(plan, SymbolId.new(50), "__simple_accessor_get_count", Span.empty()).unwrap()
+        var events: [text] = []
+        var loaded = -1
+        var returned = -2
+        for block in helper.blocks:
+            for inst in block.instructions:
+                match inst.kind:
+                    case MirInstKind.GetField(dest, _, index):
+                        events.push("load")
+                        loaded = dest.id
+                        expect(index).to_equal(1)
+                    case MirInstKind.Call(_, callee, args):
+                        expect(args.len()).to_equal(0)
+                        match callee.kind:
+                            case MirOperandKind.Const(MirConstValue.Str(name), _): events.push(name)
+                            case _: events.push("unexpected-call")
+                    case _: events.push("unexpected-instruction")
+            match block.terminator:
+                case MirTerminator.Ret(Some(value)):
+                    match value.kind:
+                        case MirOperandKind.Copy(local): returned = local.id
+                        case _: ()
+                case _: ()
+        expect(events).to_equal(["before_a", "before_b", "load", "after_a"])
+        expect(loaded).to_be_greater_than(-1)
+        expect(returned).to_equal(loaded)
+        expect(helper.is_export_c).to_equal(false)
+
+    it "emits setter store before success advice without copying the object":
+        val plan = mir_accessor_prepare_v1(selected_field(), selected_physical(), MirAccessorOperationV1.Write,
+            [selected_advice("after_store", AdviceForm.AfterSuccess)]).unwrap()
+        val helper = mir_accessor_emit_v1(plan, SymbolId.new(51), "__simple_accessor_set_count", Span.empty()).unwrap()
+        var events: [text] = []
+        for block in helper.blocks:
+            for inst in block.instructions:
+                match inst.kind:
+                    case MirInstKind.SetField(_, index, _):
+                        events.push("store")
+                        expect(index).to_equal(1)
+                    case MirInstKind.Call(_, _, args):
+                        events.push("advice")
+                        expect(args.len()).to_equal(0)
+                    case _: events.push("unexpected-copy-or-instruction")
+            expect(block.terminator).to_equal(MirTerminator.Ret(None))
+        expect(events).to_equal(["store", "advice"])
