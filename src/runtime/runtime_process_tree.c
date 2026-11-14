@@ -82,7 +82,18 @@ static int64_t ptree_enumerate(ptree_entry** out, size_t* out_count) {
         return -ENOMEM;
     }
     struct dirent* entry;
-    while ((entry = readdir(proc)) != NULL) {
+    for (;;) {
+        errno = 0;
+        entry = readdir(proc);
+        if (!entry) {
+            int saved = errno;
+            if (saved) {
+                free(list);
+                closedir(proc);
+                return -(int64_t)saved;
+            }
+            break;
+        }
         const char* name = entry->d_name;
         if (name[0] < '1' || name[0] > '9') continue;
         char* end = NULL;
@@ -91,7 +102,13 @@ static int64_t ptree_enumerate(ptree_entry** out, size_t* out_count) {
         if (errno != 0 || !end || *end != '\0' || value == 0 || value > INT32_MAX) continue;
         pid_t pid = (pid_t)value;
         pid_t sid = getsid(pid); /* ESRCH when it exited between readdir and here */
-        if (sid < 0) continue;
+        if (sid < 0) {
+            int saved = errno;
+            if (saved == ESRCH) continue;
+            free(list);
+            closedir(proc);
+            return -(int64_t)(saved ? saved : EIO);
+        }
         if (n == cap) {
             size_t new_cap = cap * 2;
             ptree_entry* grown = (ptree_entry*)realloc(list, new_cap * sizeof(*list));
@@ -139,7 +156,13 @@ static int64_t ptree_enumerate(ptree_entry** out, size_t* out_count) {
         for (int i = 0; i < filled; i++) {
             if (pids[i] <= 0) continue;
             pid_t sid = getsid(pids[i]);
-            if (sid < 0) continue;
+            if (sid < 0) {
+                int saved = errno;
+                if (saved == ESRCH) continue;
+                free(list);
+                free(pids);
+                return -(int64_t)(saved ? saved : EIO);
+            }
             list[n].pid = pids[i];
             list[n].sid = sid;
             n++;
@@ -352,6 +375,25 @@ int64_t rt_process_session_wait(int64_t pid, int64_t timeout_ms) {
         ptree_sleep_ms(sleep_ms);
         if (sleep_ms < 10) sleep_ms++;
     }
+#endif
+}
+
+int64_t rt_process_owned_child_state(int64_t pid) {
+#if !RT_PTREE_HAVE_OWNER
+    (void)pid;
+    return RT_PTREE_UNSUPPORTED;
+#else
+    if (pid <= 1 || pid > INT32_MAX) return -EINVAL;
+    siginfo_t info;
+    memset(&info, 0, sizeof(info));
+    int rc;
+    do {
+        rc = waitid(P_PID, (id_t)pid, &info, WEXITED | WNOHANG | WNOWAIT);
+    } while (rc < 0 && errno == EINTR);
+    if (rc < 0) return -(int64_t)(errno ? errno : EIO);
+    if (info.si_pid == (pid_t)pid) return 0;
+    if (info.si_pid == 0) return 1;
+    return -EIO;
 #endif
 }
 
