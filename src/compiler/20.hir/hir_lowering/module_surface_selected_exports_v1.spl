@@ -494,6 +494,7 @@ pub fn module_surface_selected_export_hop_v1(registry: ModuleSurfacesByName, sel
 pub(package) fn module_surface_selected_exports_project_v1(registry: ModuleSurfacesByName) -> Result<(), text>:
     val index = registry.selected_exports_v1
     if not selected_arrays_aligned_v1(index): return Err("selected export backing arrays are misaligned")
+    var surface_complete: [bool] = []
     var source = 0
     while source < registry.surfaces.len():
         val surface = registry.surfaces[source]
@@ -504,6 +505,26 @@ pub(package) fn module_surface_selected_exports_project_v1(registry: ModuleSurfa
         var digest = module_surface_semantic_state()
         digest = module_surface_semantic_mix(digest, "schema", "selected-typed-export-v1")
         var complete = true
+        # Keep configured route bytes even when a category is unavailable.
+        # Completeness controls reuse, not whether semantic changes are hashed.
+        var raw_route = 0
+        while raw_route < surface.export_route_sources.len():
+            digest = module_surface_semantic_mix(digest, "raw-export-source", surface.export_route_sources[raw_route])
+            digest = module_surface_semantic_mix(digest, "raw-export-local", surface.export_route_locals[raw_route])
+            digest = module_surface_semantic_mix(digest, "raw-export-target", surface.export_route_target_names[raw_route])
+            digest = module_surface_semantic_mix(digest, "raw-export-glob", "{surface.export_route_is_glob[raw_route]}")
+            raw_route = raw_route + 1
+        raw_route = 0
+        while raw_route < surface.imports.len():
+            digest = module_surface_semantic_mix(digest, "raw-import-source", surface.imports[raw_route].module)
+            digest = module_surface_semantic_mix(digest, "raw-import-target", surface.import_target_names[raw_route])
+            var raw_item = surface.import_item_offsets[raw_route]
+            while raw_item < surface.import_item_offsets[raw_route + 1]:
+                digest = module_surface_semantic_mix(digest, "raw-import-item", surface.import_item_names[raw_item])
+                digest = module_surface_semantic_mix(digest, "raw-import-alias", surface.import_item_aliases[raw_item])
+                digest = module_surface_semantic_mix(digest, "raw-import-has-alias", "{surface.import_item_has_alias[raw_item]}")
+                raw_item = raw_item + 1
+            raw_route = raw_route + 1
         # Sorted keys make declaration ordering irrelevant. Edge order preserves
         # exact source item positions, which are part of route semantics.
         for row in index.lookup_rows:
@@ -560,7 +581,8 @@ pub(package) fn module_surface_selected_exports_project_v1(registry: ModuleSurfa
             val terminal = registry.surfaces[index.terminal_surfaces[row]]
             module_surface_export_origin_index_put(surface.export_origin_index, name, terminal.preferred_registry_name, index.terminal_names[row], "selected-typed-v1")?
         surface.export_origins = surface.export_origin_index.origins
-        index.surface_digests = index.surface_digests.push(if complete: module_surface_semantic_finish(digest) else: "")
+        index.surface_digests = index.surface_digests.push(module_surface_semantic_finish(digest))
+        surface_complete.push(complete)
         source = source + 1
     # Conservative transitive identity: a changed intermediate route must
     # invalidate a root even when its terminal stays the same. A later tested
@@ -576,12 +598,15 @@ pub(package) fn module_surface_selected_exports_project_v1(registry: ModuleSurfa
     for item in selected_keys_sorted_v1(snapshot_rows):
         snapshot = module_surface_semantic_mix(snapshot, "selected-surface", item)
     val snapshot_digest = module_surface_semantic_finish(snapshot)
+    index.snapshot_digest = snapshot_digest
     source = 0
     while source < index.surface_digests.len():
-        if index.surface_digests[source].byte_len() == 64:
+        if surface_complete[source] and index.surface_digests[source].byte_len() == 64:
             var digest = module_surface_semantic_state()
             digest = module_surface_semantic_mix(digest, "selected-snapshot", snapshot_digest)
             digest = module_surface_semantic_mix(digest, "selected-surface", index.surface_digests[source])
             index.surface_digests[source] = module_surface_semantic_finish(digest)
+        else:
+            index.surface_digests[source] = ""
         source = source + 1
     Ok(())
