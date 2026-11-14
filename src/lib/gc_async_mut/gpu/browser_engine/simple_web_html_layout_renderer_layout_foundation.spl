@@ -915,6 +915,49 @@ fn replaced_specified_box_h(st: Style) -> i32:
         return st.height_px
     st.height_px + st.pad_t + st.pad_b + st.border_t + st.border_b
 
+# Largest box size a viewBox ratio may derive. Chrome 159 stops at its
+# largest layout unit: `viewBox="0 0 1000000 0.001" height=100` is
+# 33554432x100. Unbounded, the product wrapped in `.to_i32()`.
+val SVG_RATIO_MAX_BOX_PX: i64 = 33554432
+
+fn svg_ratio_view_box_milli(attrs_raw: text) -> [i64]:
+    """`svg_view_box_milli` for SIZING, empty when Chrome 159 does not use the
+    ratio: a viewBox narrower than one unit whose height is more than 10^7
+    times its width (`viewBox="0 0 0.001 1000000" width=100` is 100x150 and
+    with no size 300x150, the plain defaults). A wide ratio is always used
+    (`0 0 1000000 0.001` saturates the width), and so is a tall one at least
+    one unit wide (`0 0 1 10000000000`)."""
+    val view_box = svg_view_box_milli(attrs_raw)
+    if view_box.len() != 4:
+        return []
+    if view_box[2] < 1000 and view_box[3] / 10000000 >= view_box[2]:
+        return []
+    view_box
+
+fn svg_ratio_scaled_px(len: i32, num: i64, den: i64) -> i32:
+    """`len * num / den` rounded, saturated at `SVG_RATIO_MAX_BOX_PX`; `num`
+    and `den` are the positive milli-units of `svg_view_box_milli`."""
+    if len <= 0:
+        return 0
+    var l = len.to_i64()
+    if l > SVG_RATIO_MAX_BOX_PX:
+        l = SVG_RATIO_MAX_BOX_PX
+    # Keep `l * n + d / 2` inside i64: reduce both terms together until
+    # n <= 2^37 (so l * n <= 2^62) and d <= 2^62 (so d / 2 <= 2^61).
+    var n = num
+    var d = den
+    while n > 137438953472 or d > 4611686018427387904:
+        n = n / 1024
+        d = d / 1024
+    if n <= 0:
+        return 0
+    if d <= 0:
+        return SVG_RATIO_MAX_BOX_PX.to_i32()
+    val scaled = (l * n + d / 2) / d
+    if scaled > SVG_RATIO_MAX_BOX_PX:
+        return SVG_RATIO_MAX_BOX_PX.to_i32()
+    scaled.to_i32()
+
 fn replaced_auto_box_w(node: HNode, st: Style, available_w: i32) -> i32:
     """BORDER-BOX width of a replaced element whose CSS width is auto. Shared
     by the final box and the inline pen prediction so they cannot disagree.
@@ -932,14 +975,14 @@ fn replaced_auto_box_w(node: HNode, st: Style, available_w: i32) -> i32:
         return attr_w
     val inset_x = st.pad_l + st.pad_r + st.border_l + st.border_r
     if node.tag == "svg":
-        val view_box = svg_view_box_milli(node.attrs_raw)
+        val view_box = svg_ratio_view_box_milli(node.attrs_raw)
         if view_box.len() == 4:
             val box_h = replaced_specified_box_h(st)
             if box_h > 0:
                 var content_h = box_h - st.pad_t - st.pad_b - st.border_t - st.border_b
                 if content_h < 0:
                     content_h = 0
-                return ((content_h.to_i64() * view_box[2] + view_box[3] / 2) / view_box[3]).to_i32() + inset_x
+                return svg_ratio_scaled_px(content_h, view_box[2], view_box[3]) + inset_x
             # Ratio only: fill the available width, even when a shrink-to-fit
             # container resolved it to 0 (Chrome 159: 0x0 in an empty
             # inline-block, button, float or abspos box).
@@ -961,12 +1004,12 @@ fn replaced_auto_box_h(node: HNode, st: Style, box_w: i32) -> i32:
         return attr_h
     val inset_y = st.pad_t + st.pad_b + st.border_t + st.border_b
     if node.tag == "svg":
-        val view_box = svg_view_box_milli(node.attrs_raw)
+        val view_box = svg_ratio_view_box_milli(node.attrs_raw)
         if view_box.len() == 4:
             var content_w = box_w - st.pad_l - st.pad_r - st.border_l - st.border_r
             if content_w < 0:
                 content_w = 0
-            return ((content_w.to_i64() * view_box[3] + view_box[2] / 2) / view_box[2]).to_i32() + inset_y
+            return svg_ratio_scaled_px(content_w, view_box[3], view_box[2]) + inset_y
     val default_h = replaced_default_box_h(node.tag)
     if replaced_default_is_content_size(node.tag):
         return default_h + inset_y
@@ -1159,6 +1202,7 @@ fn style_with_height(st: Style, height_px: i32) -> Style:
     out.top_auto = st.top_auto
     out.align_items_authored = st.align_items_authored
     out.scrollbar_width_none = st.scrollbar_width_none
+    out.display_inline_flex_authored = st.display_inline_flex_authored
     out.contain_size = st.contain_size
     out.contain_intrinsic_w_px = st.contain_intrinsic_w_px
     out.contain_intrinsic_h_px = st.contain_intrinsic_h_px
@@ -1176,6 +1220,7 @@ fn style_with_width(st: Style, width_px: i32) -> Style:
     out.top_auto = st.top_auto
     out.align_items_authored = st.align_items_authored
     out.scrollbar_width_none = st.scrollbar_width_none
+    out.display_inline_flex_authored = st.display_inline_flex_authored
     out.contain_size = st.contain_size
     out.contain_intrinsic_w_px = st.contain_intrinsic_w_px
     out.contain_intrinsic_h_px = st.contain_intrinsic_h_px
@@ -1192,7 +1237,7 @@ fn inline_replaced_predicted_width(node: HNode, st: Style) -> i32:
     if st.width_px < 0:
         return 0
     val attr_w = parse_int(attr_value(node.attrs_raw, "width"))
-    if attr_w <= 0 and node.tag == "svg" and svg_view_box_milli(node.attrs_raw).len() == 4:
+    if attr_w <= 0 and node.tag == "svg" and svg_ratio_view_box_milli(node.attrs_raw).len() == 4:
         # An svg with a ratio and no width contributes its height-derived
         # width, or nothing: `replaced_auto_box_w` with no available width.
         return constrained_outer_width(node, st, replaced_auto_box_w(node, st, 0))
@@ -1200,27 +1245,36 @@ fn inline_replaced_predicted_width(node: HNode, st: Style) -> i32:
         node, st, if attr_w > 0: attr_w else: replaced_default_box_w(node.tag)
     )
 
-# True when an inline box holds, through inline boxes only, an `<svg>` that has
-# a viewBox ratio and no size. Such an svg fills the line's available width
-# (Chrome 159: `<span>a<svg viewBox="0 0 24 24"></svg>b</span>` in 900 px is a
-# 900x900 svg), so the span's pen prediction cannot be its intrinsic width,
-# to which the svg contributes 0.
-fn inline_box_holds_ratio_only_svg(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32) -> bool:
+# Extra width an inline box needs, beyond its intrinsic width, for the
+# IN-FLOW `<svg>`s it holds (through inline boxes only) that have a viewBox
+# ratio and no size. Such an svg contributes 0 to the intrinsic width but
+# fills the line's available width up to its min/max-width (Chrome 159:
+# `<span>a<svg viewBox="0 0 24 24"></svg>b</span>` in 900 px holds a 900x900
+# svg; with `max-width:24px` the svg is 24x24 and the span 41.8). A floated
+# or absolutely positioned svg is out of flow and adds nothing.
+fn inline_box_ratio_only_svg_fill_w(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, available_w: i32) -> i32:
+    var extra = 0
     var c = child_index.first_child[i]
     while c >= 0:
-        if styles[c].display == "inline":
+        val cst = styles[c]
+        if cst.display == "inline" and nodes[c].tag != "#text":
             if nodes[c].tag == "svg":
                 if (
-                    styles[c].width_px == 0 and
+                    cst.width_px == 0 and cst.float_mode == 0 and
+                    not cst.position_absolute and not cst.position_fixed and
                     parse_int(attr_value(nodes[c].attrs_raw, "width")) <= 0 and
-                    replaced_specified_box_h(styles[c]) == 0 and
-                    svg_view_box_milli(nodes[c].attrs_raw).len() == 4
+                    replaced_specified_box_h(cst) == 0 and
+                    svg_ratio_view_box_milli(nodes[c].attrs_raw).len() == 4
                 ):
-                    return true
-            elif nodes[c].tag != "#text" and inline_box_holds_ratio_only_svg(nodes, styles, child_index, c):
-                return true
+                    extra = extra + constrained_outer_width(
+                        nodes[c], cst, replaced_auto_box_w(nodes[c], cst, available_w)
+                    ) - constrained_outer_width(
+                        nodes[c], cst, replaced_auto_box_w(nodes[c], cst, 0)
+                    )
+            elif child_index.first_child[c] >= 0:
+                extra = extra + inline_box_ratio_only_svg_fill_w(nodes, styles, child_index, c, available_w)
         c = child_index.next_sibling[c]
-    false
+    extra
 
 fn _lay_intrinsic_text_width_inner(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, widths: [i32]) -> IntrinsicWidthResult:
     if widths[i] >= 0:
@@ -1263,7 +1317,15 @@ fn _lay_intrinsic_text_width_inner(nodes: [HNode], styles: [Style], child_index:
             # `<legend>ab <img width=40> ef</legend>` is 84 px; Simple
             # measured 35 and wrapped the image onto its own line.
             var child_w = child.width
-            val replaced_w = inline_replaced_predicted_width(nodes[c], styles[c])
+            # ... unless it is out of flow inside an inline box: a floated or
+            # absolutely positioned box never widens the span around it
+            # (Chrome 159: `<span>a<canvas style="position:absolute">
+            # </canvas>b</span>` is 17.8 px wide).
+            val out_of_flow_in_span = styles[i].display == "inline" and (
+                styles[c].float_mode != 0 or styles[c].position_absolute or
+                styles[c].position_fixed
+            )
+            val replaced_w = if out_of_flow_in_span: 0 else: inline_replaced_predicted_width(nodes[c], styles[c])
             if replaced_w > child_w:
                 child_w = replaced_w
             if child_w > 0:

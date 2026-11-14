@@ -1170,6 +1170,27 @@ turns green in the same change, or the check FAILs as stale.
   `apply_authored_style_metadata` only sees INLINE styles: stylesheet rules
   are applied without display, so set display-derived flags beside
   `_final_authored_display` in `core.spl`.
+- **Self-closing flag:** a `/` before `>` is the flag only when it is not
+  the tail of an UNQUOTED attribute value (`<a href=/x/>` has `href="/x/"`);
+  `_trailing_slash_self_closes` in `html_tokenizer.spl`. HTML integration
+  points (`foreignObject`, `desc`, `mi/mo/mn/ms/mtext`, `annotation-xml` with
+  an HTML encoding) end foreign content in `_TreeStack.in_foreign_content`.
+- **Span holding a ratio-only svg:** `inline_box_ratio_only_svg_fill_w` adds
+  the svg's constrained fill width to the span's intrinsic width; it skips
+  out-of-flow svgs and is scanned once per inline subtree. Derived viewBox
+  sizes saturate at 33554432 px (`svg_ratio_scaled_px`).
+- **Out-of-flow child of a span:** `iw` inside a span is the span's own
+  width, so a float / absolute REPLACED child is sized through
+  `inline_parent_containing_block` (nearest block container; for an absolute
+  box the nearest positioned ancestor, tested on EVERY ancestor including
+  inline ones, with insets and percentages resolved against it), and `intrinsic_text_width` skips out-of-flow children
+  of an inline box. `svg_ratio_view_box_milli` is the viewBox for SIZING (it
+  drops Chrome's unusable sub-unit-wide ratios); the painter keeps
+  `svg_view_box_milli`.
+- `style_rule_index.spl` scans raw markup on its own; its self-closing test
+  is the tokenizer's `html_start_tag_content_self_closes`, not `ends_with("/")`.
+- Open from follow-up 2: residues 12-14 (non-replaced absolute box in a span;
+  svg `title` dropped; the exact-10^7 ratio boundary).
 - Still open: residues 6-11 (9: a rule `em` is resolved before an inline
   `font-size`; 11: the 1 px floor, inline-flex, percentage width in a
   shrink-to-fit container) in
