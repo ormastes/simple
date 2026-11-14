@@ -82,6 +82,16 @@ pub struct Lowerer {
     /// statements declare are private to that module and must not become
     /// names of the module being lowered (see `materialize_import_aliases`).
     pub(super) dependency_import_depth: usize,
+    /// Bare enum name -> declaring file of the enum the module being lowered
+    /// imported explicitly. Any later load (incl. dependency-only) of a same-named
+    /// enum from another file must not replace it in the bare-name registry.
+    pub(super) direct_enum_owners: HashMap<String, PathBuf>,
+    /// Enum names some `use` of the module being lowered requests explicitly.
+    pub(super) direct_enum_wanted: HashSet<String>,
+    /// Active `load_imported_types` import keys, outermost first.
+    pub(super) import_key_stack: Vec<(PathBuf, String)>,
+    /// Per import key: every enum registered while that import was loading.
+    pub(super) enum_loads: HashMap<(PathBuf, String), Vec<(String, super::super::types::HirType, PathBuf)>>,
     /// Memory safety warning collector
     pub(super) memory_warnings: MemoryWarningCollector,
     /// Lifetime inference context for tracking reference lifetimes
@@ -351,6 +361,10 @@ impl Lowerer {
             import_cycles: Vec::new(),
             loaded_import_targets: HashSet::new(),
             dependency_import_depth: 0,
+            direct_enum_owners: HashMap::new(),
+            direct_enum_wanted: HashSet::new(),
+            import_key_stack: Vec::new(),
+            enum_loads: HashMap::new(),
             memory_warnings: MemoryWarningCollector::strict(), // STRICT mode for Rust-level safety
             lifetime_context: LifetimeContext::new(),
             capability_env: CapabilityEnv::new(),
@@ -438,6 +452,10 @@ impl Lowerer {
             import_cycles: Vec::new(),
             loaded_import_targets: HashSet::new(),
             dependency_import_depth: 0,
+            direct_enum_owners: HashMap::new(),
+            direct_enum_wanted: HashSet::new(),
+            import_key_stack: Vec::new(),
+            enum_loads: HashMap::new(),
             memory_warnings: MemoryWarningCollector::strict(), // STRICT by default
             lifetime_context: LifetimeContext::new(),
             capability_env: CapabilityEnv::new(),
@@ -548,6 +566,10 @@ impl Lowerer {
             import_cycles: Vec::new(),
             loaded_import_targets: HashSet::new(),
             dependency_import_depth: 0,
+            direct_enum_owners: HashMap::new(),
+            direct_enum_wanted: HashSet::new(),
+            import_key_stack: Vec::new(),
+            enum_loads: HashMap::new(),
             memory_warnings: MemoryWarningCollector::new(), // Lenient mode (warnings only)
             lifetime_context: LifetimeContext::new(),
             capability_env: CapabilityEnv::new(),
