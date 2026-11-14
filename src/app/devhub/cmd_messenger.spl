@@ -248,10 +248,11 @@ fn _cmd_doctor(args: [text], json_mode: bool) -> i64:
         print record.1
         return record.0
     val resolved = resolve_messenger_target(args)
-    if resolved.0 == nil:
-        print "error: {resolved.2}"
-        return 2
-    val target = resolved.0.?
+    val target = match resolved.0:
+        case Some(t): t
+        case None:
+            print "error: {resolved.2}"
+            return 2
     _print_doctor_human(target, resolved.1)
     print "result {messenger_doctor_json(target, resolved.1, _doctor_extra(target))}"
     0
@@ -260,9 +261,10 @@ fn _cmd_doctor(args: [text], json_mode: bool) -> i64:
 pub fn messenger_doctor_record(args: [text]) -> (i64, text):
     """doctor verb body: (exit code, printed JSON record)."""
     val resolved = resolve_messenger_target(args)
-    if resolved.0 == nil:
-        return (2, messenger_error_json_for(_extract_flag(args, "--target", ""), "doctor", 2, resolved.2))
-    val target = resolved.0.?
+    val target = match resolved.0:
+        case Some(t): t
+        case None:
+            return (2, messenger_error_json_for(_extract_flag(args, "--target", ""), "doctor", 2, resolved.2))
     (0, messenger_doctor_json(target, resolved.1, _doctor_extra(target)))
 
 
@@ -270,8 +272,7 @@ fn _doctor_extra(target: MessengerTarget) -> [text]:
     # Nonsecret IO finding: is the declared source file present? (bool only —
     # the path itself stays out of the record, §11.2)
     var extra: [text] = []
-    if target.db != nil:
-        val db = target.db.?
+    if val db = target.db:
         if db.path == "":
             extra = extra + ["db path is empty"]
         else:
@@ -335,9 +336,10 @@ fn _cmd_send_probe(args: [text], json_mode: bool) -> i64:
 pub fn messenger_send_record(args: [text]) -> (i64, text, text):
     """send verb body: (exit code, JSON record, human line)."""
     val resolved = resolve_messenger_target(args)
-    if resolved.0 == nil:
-        return (2, messenger_error_json_for(_extract_flag(args, "--target", ""), "send", 2, resolved.2), "error: {resolved.2}")
-    val target = resolved.0.?
+    val target = match resolved.0:
+        case Some(t): t
+        case None:
+            return (2, messenger_error_json_for(_extract_flag(args, "--target", ""), "send", 2, resolved.2), "error: {resolved.2}")
     val room = _extract_flag(args, "--room", "")
     val body = _extract_flag(args, "--text", "")
     var confirm: SendConfirmReceipt? = nil
@@ -349,9 +351,11 @@ pub fn messenger_send_record(args: [text]) -> (i64, text, text):
     if not verdict.permitted:
         return (verdict.exit_code, messenger_error_json_for(target.name, "send", verdict.exit_code, verdict.reason), "error: {verdict.reason}")
     val adapter = messenger_load_adapter(target.read_provider)
-    if adapter == nil:
-        return (4, messenger_error_json_for(target.name, "send", 4, "no adapter for send"), "error: no adapter for send")
-    val result = port_call_send(adapter.?, target)
+    val port = match adapter:
+        case Some(a): a
+        case None:
+            return (4, messenger_error_json_for(target.name, "send", 4, "no adapter for send"), "error: no adapter for send")
+    val result = port_call_send(port, target)
     val json = _lb() + "\"target\":\"{_json_escape(target.name)}\"," +
         "\"action\":\"send\",\"status\":\"{result.status}\",\"code\":{result.exit_code}," +
         "\"error\":\"{_json_escape(result.error)}\",\"warnings\":[]" + _rb()
