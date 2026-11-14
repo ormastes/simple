@@ -1,0 +1,78 @@
+# Native ownership regression; requires real session heap runtime support.
+# Assertions run after teardown so their own allocations survive the session.
+use std.spec
+use compiler.driver.cache.aop_match_cache_driver_v1.{aop_match_driver_current_state_v1,
+    aop_match_driver_reset_before_session_end_v1, aop_selector_plan_acquire_v1}
+use std.nogc_sync_mut.sffi.transient.{rt_session_heap_begin, rt_session_heap_end,
+    transient_session_heap_id_v1}
+
+fn exercise_aop_session_epoch() -> (i64, i64):
+    val state = aop_match_driver_current_state_v1()
+    val before = state.selector_parse_count
+    val _first = aop_selector_plan_acquire_v1(state, "example.target")
+    val _second = aop_selector_plan_acquire_v1(state, "example.target")
+    (before, state.selector_parse_count)
+
+describe "AOP native build-session ownership":
+    it "does not inherit selector graph references across two real heap epochs":
+        # Running inside another owner's session is not an admitted test setup.
+        expect(transient_session_heap_id_v1()).to_equal(0u32)
+        aop_match_driver_reset_before_session_end_v1()
+        var first: u32 = 0u32
+        unsafe(capabilities: [ffi]):
+            first = rt_session_heap_begin()
+        if first == 0u32: panic("native build-session runtime unavailable")
+        val (first_before, first_after) = exercise_aop_session_epoch()
+        aop_match_driver_reset_before_session_end_v1()
+        var first_ended = false
+        unsafe(capabilities: [ffi]):
+            first_ended = rt_session_heap_end(first)
+        if not first_ended: panic("native first build-session teardown refused")
+        var second: u32 = 0u32
+        unsafe(capabilities: [ffi]):
+            second = rt_session_heap_begin()
+        if second == 0u32: panic("native second build-session unavailable")
+        val (second_before, second_after) = exercise_aop_session_epoch()
+        aop_match_driver_reset_before_session_end_v1()
+        var second_ended = false
+        unsafe(capabilities: [ffi]):
+            second_ended = rt_session_heap_end(second)
+        if not second_ended: panic("native second build-session teardown refused")
+        expect(first_before).to_equal(0)
+        expect(first_after).to_equal(1)
+        expect(second_before).to_equal(0)
+        expect(second_after).to_equal(1)
+        expect(transient_session_heap_id_v1()).to_equal(0u32)
+
+use compiler.driver.session.build_session.{SessionEndPort, SessionKept, build_session_inactive}
+
+var _aop_cache_count_at_end_v1: i64 = -1
+
+fn inspect_aop_cache_at_end_v1(heap: u32) -> bool:
+    _aop_cache_count_at_end_v1 = aop_match_driver_current_state_v1().selector_parse_count
+    true
+
+describe "BuildSession AOP teardown ordering":
+    it "clears the cache before invoking the heap owner":
+        aop_match_driver_reset_before_session_end_v1()
+        val state = aop_match_driver_current_state_v1()
+        val _parsed = aop_selector_plan_acquire_v1(state, "example.target")
+        var session = build_session_inactive()
+        session.heap = 7u32
+        val ended = session.end_with(SessionKept(all_ok: true, session_active: true),
+            SessionEndPort(heap_end: inspect_aop_cache_at_end_v1))
+        expect(ended).to_equal(true)
+        expect(_aop_cache_count_at_end_v1).to_equal(0)
+        aop_match_driver_reset_before_session_end_v1()
+
+    it "keeps the still-live cache when sharing fails before teardown":
+        aop_match_driver_reset_before_session_end_v1()
+        val state = aop_match_driver_current_state_v1()
+        val _parsed = aop_selector_plan_acquire_v1(state, "example.target")
+        var session = build_session_inactive()
+        session.heap = 7u32
+        val ended = session.end_with(SessionKept(all_ok: false, session_active: true),
+            SessionEndPort(heap_end: inspect_aop_cache_at_end_v1))
+        expect(ended).to_equal(false)
+        expect(aop_match_driver_current_state_v1().selector_parse_count).to_equal(1)
+        aop_match_driver_reset_before_session_end_v1()

@@ -395,13 +395,41 @@ pub fn aop_weave_with_match_cache_v1(state: AopMatchDriverStateV1,
 export AopMatchDriverStateV1, aop_directory_facts_from_hir_v1
 export aop_selector_plan_acquire_v1, aop_match_shard_acquire_v1, aop_weave_with_match_cache_v1
 
-# Driver-loop-owned state: shards survive across compiles in one process
-# (daemon / LSP / watch), so a later advice-body or pointcut edit reuses every
-# unaffected directory shard.
-var _aop_match_driver_state_v1 = AopMatchDriverStateV1.create()
+# Event-loop-owned state, retained only within the current allocation session.
+# The scalar owner is inspected before the optional graph: session teardown can
+# invalidate every table reachable from that graph. A different session never
+# inherits descriptor, shard, flight, or traversal-instance references.
+use std.nogc_sync_mut.sffi.transient.{transient_session_heap_id_v1}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+var _aop_match_driver_state_v1: AopMatchDriverStateV1? = nil
+var _aop_match_driver_session_v1: u32 = 0u32
+var _aop_match_driver_initialized_v1: bool = false
+
+# Called before the allocation owner frees its graph. No allocations, traversal,
+# or replacement empty dictionaries are permitted in this teardown callback.
+# Do not even allocate a boxed None: the stale slot remains unread until the
+# next owner replaces it, guarded by the independent initialized scalar.
+pub fn aop_match_driver_reset_before_session_end_v1():
+    _aop_match_driver_initialized_v1 = false
+    _aop_match_driver_session_v1 = 0u32
+
+pub fn aop_match_driver_current_state_v1() -> AopMatchDriverStateV1:
+    # This owner must never retain tables allocated in borrowed scratch. The
+    # production caller closes its validation scopes before entering here.
+    if transient_array_scope_state_v1() != 0:
+        panic("AOP session cache requires an inactive transient scope")
+    val session = transient_session_heap_id_v1()
+    if session != _aop_match_driver_session_v1:
+        _aop_match_driver_initialized_v1 = false
+        _aop_match_driver_session_v1 = session
+    if not _aop_match_driver_initialized_v1:
+        _aop_match_driver_state_v1 = Some(AopMatchDriverStateV1.create())
+        _aop_match_driver_initialized_v1 = true
+    _aop_match_driver_state_v1.unwrap()
 
 pub fn aop_weave_forward_advice_cached_v1(modules: Dict<text, HirModule>,
         snapshots: [DirectoryTldrSourceSnapshotV2]? = nil) -> i64:
-    aop_weave_with_match_cache_v1(_aop_match_driver_state_v1, modules, snapshots)
+    aop_weave_with_match_cache_v1(aop_match_driver_current_state_v1(), modules, snapshots)
 
-export aop_weave_forward_advice_cached_v1
+export aop_weave_forward_advice_cached_v1, aop_match_driver_reset_before_session_end_v1
+export aop_match_driver_current_state_v1
