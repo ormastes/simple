@@ -10,12 +10,15 @@ pthread attachments, distinct arenas, same-pool idempotence, cross-pool
 rejection, no-reuse exhaustion, malformed extent/schema rejection, bounded
 unattached-loss accounting, and close/drain behavior.
 
-`runtime_thread.c` now contains opt-in hook source, but this fixture does not
-compile that object or verify hook/link activation. The alternate
+`runtime_thread.c` now contains opt-in hook source and scheduler task-root
+refresh calls at direct/isolated entry and the native runtime-thread pool's
+outer task dispatch. Synchronous fallback work keeps the caller's existing
+session attachment; it does not migrate from inside a user frame. This fixture
+does not compile that object or verify hook/link activation. The alternate
 `runtime_pool.c` owner is not covered. The fixture also does not verify event
 production or retention, a concurrent close/acquire race, Windows behavior,
-automatic attachment of foreign threads or workers created before a session,
-or forced termination cleanup.
+automatic attachment of foreign threads, forced termination, or asynchronous
+cancellation cleanup.
 
 ## Source provenance
 

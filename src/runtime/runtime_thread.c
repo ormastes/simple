@@ -54,6 +54,7 @@
 #error "SIMPLE_XRAY_CONTEXT_HOOKS_V1 is supported only by Linux GNU C runtime_thread builds"
 #endif
 extern int64_t simple_xray_thread_attach_v1(void);
+extern int64_t simple_xray_thread_task_root_v1(void);
 extern void simple_xray_thread_detach_v1(void);
 
 typedef struct {
@@ -66,6 +67,13 @@ static void rt_xray_thread_attachment_cleanup_v1(void *raw) {
         simple_xray_thread_detach_v1();
         attachment->attached = 0;
     }
+}
+
+static int64_t rt_xray_thread_task_root_v1(void) {
+    /* This is a cold scheduler boundary, not a traced callback. The provider
+     * is idempotent within a session and migrates stale per-thread TLS only at
+     * this controlled root. */
+    return simple_xray_thread_task_root_v1();
 }
 
 typedef struct {
@@ -86,6 +94,8 @@ static void *rt_xray_thread_entry_v1(void *raw) {
     void *result = NULL;
     launch->attachment.attached = simple_xray_thread_attach_v1() == 1;
     pthread_cleanup_push(rt_xray_thread_launch_cleanup_v1, launch);
+    if (rt_xray_thread_task_root_v1() == 1)
+        launch->attachment.attached = 1;
     result = launch->entry_point(launch->argument);
     pthread_cleanup_pop(1);
     return result;
@@ -624,6 +634,7 @@ static void* rt_isolated_wrapper(void* raw) {
     RtXrayThreadAttachmentV1 attachment = {
         .attached = simple_xray_thread_attach_v1() == 1};
     pthread_cleanup_push(rt_xray_thread_attachment_cleanup_v1, &attachment);
+    if (rt_xray_thread_task_root_v1() == 1) attachment.attached = 1;
 #endif
     if (td->arity == 2) {
         int64_t arg1 = rt_native_worker_arg(td->data1, td->raw_worker_args);
@@ -1364,6 +1375,9 @@ static void* rt_pool_worker_main(void* raw) {
     for (;;) {
         RtPoolTask* task = rt_pool_pop_task(worker_id);
         if (task && task->entry) {
+#if defined(SIMPLE_XRAY_CONTEXT_HOOKS_V1)
+            if (rt_xray_thread_task_root_v1() == 1) attachment.attached = 1;
+#endif
             rt_pool_complete_task(task, task->entry(task->closure_ptr));
         }
     }
