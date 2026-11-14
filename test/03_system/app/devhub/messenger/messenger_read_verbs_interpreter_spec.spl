@@ -1,0 +1,55 @@
+# System test: `devhub messenger rooms|messages` run through the interpreter against
+# the encrypted (sqlcipher4) dense fixture. Native twin: native_binary_sqlcipher_open_spec.spl.
+# Passphrase is public synthetic data (dense_ground_truth.json).
+# @manual_section: messenger-read-verbs
+
+"""
+## Purpose and audience
+Purpose: the read verbs return the ground-truth rooms and message bodies from the encrypted store,
+and a wrong passphrase yields a non-zero exit with no row data and no passphrase in the output.
+Audience: DevHub release reviewers.
+"""
+
+use std.spec.*
+use std.io_runtime.{process_run}
+use test.support.devhub_messenger_dense.*
+use test.support.devhub_messenger_cli.*
+use std.common.json.value.{json_value_field}
+
+val rv_truth = dense_truth()
+val rv_pass = truth_passphrase(rv_truth)
+val rv_ok_home = cli_prepare_home("build/rv/home")
+val rv_set_good = dense_set_secret(rv_pass)
+val rv_rooms = process_run("bin/simple.exe", ["run", "src/app/devhub/main.spl", "messenger", "rooms", "--target", "dense", "--json"])
+val rv_msgs = process_run("bin/simple.exe", ["run", "src/app/devhub/main.spl", "messenger", "messages", "--target", "dense", "--room", "1", "--limit", "1", "--json"])
+val rv_set_bad = dense_set_secret("wrong-passphrase-not-the-secret")
+val rv_bad = process_run("bin/simple.exe", ["run", "src/app/devhub/main.spl", "messenger", "rooms", "--target", "dense", "--json"])
+
+describe "devhub messenger read verbs over the sqlcipher4 fixture":
+    it "rooms returns the two ground-truth rooms":
+        # @req REQ-MSGR-READVERB-001
+        step("Run `devhub messenger rooms --target dense --json` with the correct passphrase")
+        expect(rv_rooms.2).to_equal(0)
+        step("Compare the payload with the ground-truth rooms payload")
+        expect(rv_rooms.0.contains(tf(rv_truth, "rooms_payload"))).to_equal(true)
+        expect(payload_count(tf(rv_truth, "rooms_payload"))).to_equal(2)
+
+    it "messages returns the first ground-truth message of room 1 with its body":
+        # @req REQ-MSGR-READVERB-002
+        step("Run `devhub messenger messages --room 1 --limit 1 --json`")
+        expect(rv_msgs.2).to_equal(0)
+        step("The first message in ground-truth order is id 12, body tie-first")
+        expect(rv_msgs.0.contains(expected_history(rv_truth, "1", 1))).to_equal(true)
+        expect(rv_msgs.0.contains("tie-first")).to_equal(true)
+        expect(rv_msgs.0.contains("tie-second")).to_equal(false)
+
+    it "a wrong passphrase exits non-zero with no row data and no passphrase":
+        # @req REQ-MSGR-READVERB-003
+        step("Run rooms again with a wrong passphrase in the secret env")
+        expect(rv_bad.2 != 0).to_equal(true)
+        step("Output holds no room names and neither passphrase")
+        val all = rv_bad.0 + rv_bad.1
+        expect(all.contains("other room")).to_equal(false)
+        expect(all.contains("fresh general")).to_equal(false)
+        expect(all.contains(rv_pass)).to_equal(false)
+        expect(all.contains("wrong-passphrase-not-the-secret")).to_equal(false)
