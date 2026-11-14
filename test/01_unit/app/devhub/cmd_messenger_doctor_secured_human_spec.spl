@@ -1,0 +1,96 @@
+# cmd_messenger_doctor_secured_human_spec
+"""As a person running `devhub messenger doctor` from source against my
+encrypted (sqlcipher4) store, I want the readable view and the JSON record to
+tell me plainly whether the store is healthy, my passphrase is wrong, or the
+store file is missing — and never to echo my passphrase. The passphrase is
+public synthetic data from dense_ground_truth.json."""
+
+use std.spec
+use std.io_runtime.{process_run, file_write}
+use std.env.{env_set}
+use test.support.devhub_messenger_dense.*
+use test.support.devhub_messenger_cli.*
+use app.devhub.cmd_messenger.{messenger_doctor_human_record, messenger_doctor_record}
+use app.devhub.messenger.adapter.sqlcipher_reader.{messenger_register_sqlcipher4_adapter}
+
+fn ds_sdn(db_path: text) -> text:
+    val header = "messenger:\n    schema_version: 1\n    default_target: dense\n\n"
+    val gone_db = db_path.replace(DENSE_BASE, "missing_doctor_human.sqlcipher4")
+    val gone = cli_sdn_text(gone_db).replace(header, "").replace("messenger.dense", "messenger.gone")
+    val secured = cli_sdn_text(db_path).replace(header, "").replace("messenger.dense", "messenger.secured")
+    header.replace("default_target: dense", "default_target: secured") + secured + "\n" + gone
+
+fn ds_prepare(home: text) -> bool:
+    val _mk = process_run("mkdir", ["-p", home + "/.config/devhub"])
+    val cwd = process_run("pwd", []).0.trim()
+    val _f = file_write(home + "/.config/devhub/messenger.sdn", ds_sdn(cwd + "/" + dense_path(DENSE_BASE)))
+    val _h = env_set("HOME", cwd + "/" + home)
+    val _p = env_set("USERPROFILE", cwd + "/" + home)
+    true
+
+fn ds_joined(lines: [text]) -> text:
+    var out = ""
+    for l in lines:
+        out = out + l + "\n"
+    out
+
+val ds_truth = dense_truth()
+val ds_pass = truth_passphrase(ds_truth)
+val ds_wrong = "wrong-" + ds_pass
+# Same command-time registration seam the CLI dispatcher runs before doctor.
+val _reg = messenger_register_sqlcipher4_adapter()
+val _home = ds_prepare("build/tmp/devhub_doctor_human_secured_home")
+val _s = env_set(DENSE_ENV, ds_pass)
+val ok_h = messenger_doctor_human_record(["doctor", "--target", "secured"])
+val ok_j = messenger_doctor_record(["doctor", "--target", "secured", "--json"])
+val gone_h = messenger_doctor_human_record(["doctor", "--target", "gone"])
+val gone_j = messenger_doctor_record(["doctor", "--target", "gone", "--json"])
+val _w = env_set(DENSE_ENV, ds_wrong)
+val bad_h = messenger_doctor_human_record(["doctor", "--target", "secured"])
+val bad_j = messenger_doctor_record(["doctor", "--target", "secured", "--json"])
+
+fn ds_expect_summary(lines: [text], target: text):
+    expect(lines[0]).to_equal("doctor: target '{target}' (resolved from --target flag)")
+    expect(lines[1]).to_equal("  read_provider: sqlcipher4_database")
+    expect(lines[2]).to_equal("  read_only: true")
+    expect(lines[3]).to_equal("  schema fingerprint: 62672319")
+    expect(lines[4]).to_equal("  (machine record below)")
+    expect(lines[5]).to_start_with("result {{\"target\":\"{target}\",\"action\":\"doctor\",\"status\":\"ok\"")
+
+describe "devhub messenger doctor (from source) over a secured sqlcipher4 store":
+
+    it "reports a healthy store as ready with no probe or missing-store warning":
+        step("run doctor for the secured target with the correct passphrase")
+        expect(ok_h.0).to_equal(0)
+        expect(ok_h.1.len()).to_equal(6)
+        ds_expect_summary(ok_h.1, "secured")
+        step("the human result line and the JSON record agree and show a ready adapter")
+        expect(ok_j.0).to_equal(0)
+        expect(ok_h.1[5]).to_equal("result " + ok_j.1)
+        expect(ok_j.1).to_contain("\"adapter_status\":\"ready\"")
+        expect(ok_j.1).not_to_contain("store open probe failed")
+        expect(ok_j.1).not_to_contain("declared source database is not present")
+
+    it "warns that the store cannot be opened when the passphrase is wrong":
+        step("run doctor for the secured target with a wrong passphrase")
+        expect(bad_h.0).to_equal(0)
+        ds_expect_summary(bad_h.1, "secured")
+        expect(bad_h.1[5]).to_equal("result " + bad_j.1)
+        expect(bad_j.1).to_contain("store open probe failed: config_error: authentication-failed (wrong key or modified database)")
+        expect(bad_j.1).not_to_contain("declared source database is not present")
+        expect(bad_j.1 == ok_j.1).to_be(false)
+
+    it "warns that the store is missing, distinct from a wrong key":
+        step("run doctor for a target whose store file does not exist")
+        expect(gone_h.0).to_equal(0)
+        ds_expect_summary(gone_h.1, "gone")
+        expect(gone_h.1[5]).to_equal("result " + gone_j.1)
+        expect(gone_j.1).to_contain("declared source database is not present (authorized snapshot may be missing)")
+        expect(gone_j.1).not_to_contain("store open probe failed")
+
+    it "never prints either passphrase in human or JSON output":
+        step("search every doctor output for the correct and the wrong passphrase")
+        expect(ds_pass.len() > 0).to_be(true)
+        val all = ds_joined(ok_h.1) + ok_j.1 + ds_joined(bad_h.1) + bad_j.1 + ds_joined(gone_h.1) + gone_j.1
+        expect(all).not_to_contain(ds_pass)
+        expect(all).not_to_contain(ds_wrong)
