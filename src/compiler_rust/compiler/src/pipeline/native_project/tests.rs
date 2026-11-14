@@ -2218,6 +2218,56 @@ fn test_native_hir_loads_common_imported_struct_fields_from_lib_root() {
     assert_eq!(function.return_type, crate::hir::TypeId::STRING);
 }
 
+/// doc/08_tracking/bug/native_user_class_imported_trait_vtable_missing_2026-11-15.md
+/// `class Buf with Transport:` where `Transport` is IMPORTED must record a
+/// HirImpl (and so a vtable_impls entry), or the native link stubs
+/// `__vtable__..Buf__for__Transport` and the first cross-module trait call
+/// segfaults.
+#[test]
+fn test_native_class_with_imported_trait_records_impl_and_vtable() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_root = temp.path().join("project");
+    let src_root = project_root.join("src");
+    let lib_root = src_root.join("lib");
+    let owner = lib_root.join("nogc_sync_mut/xt/transport.spl");
+    let consumer = src_root.join("app/xt/main.spl");
+    std::fs::create_dir_all(owner.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(consumer.parent().unwrap()).unwrap();
+    std::fs::write(
+        &owner,
+        "trait Transport:\n    fn read_message() -> text?\n    fn write_message(msg: text)\n    fn close()\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &consumer,
+        "use std.xt.transport.{Transport}\n\nclass Buf with Transport:\n    closed: bool\n    static fn new() -> Buf:\n        Buf(closed: false)\n    fn read_message() -> text?:\n        nil\n    fn write_message(msg: text):\n        print msg\n    fn close():\n        print \"c\"\n",
+    )
+    .unwrap();
+
+    let source = std::fs::read_to_string(&consumer).unwrap();
+    let ast = simple_parser::Parser::new(&source).parse().unwrap();
+    let resolver = crate::module_resolver::ModuleResolver::new(project_root, lib_root.clone())
+        .with_extra_source_roots(vec![src_root, lib_root]);
+    let mut lowerer = crate::hir::Lowerer::with_module_resolver(resolver, consumer);
+    lowerer.set_strict_mode(false);
+    lowerer.set_lenient_types(true);
+    let hir = lowerer.lower_module(&ast).expect("consumer must lower");
+    assert!(
+        hir.impls
+            .iter()
+            .any(|i| i.type_name == "Buf" && i.trait_name.as_deref() == Some("Transport")),
+        "no HirImpl for Buf with imported Transport; impls={:?}",
+        hir.impls.iter().map(|i| (&i.type_name, &i.trait_name)).collect::<Vec<_>>()
+    );
+    let mir = crate::mir::lower_to_mir(&hir).expect("consumer must lower to MIR");
+    let entry = mir
+        .vtable_impls
+        .iter()
+        .find(|(_, owner, sym, _, _)| owner == "Buf" && sym.ends_with("__for__Transport"))
+        .expect("no vtable_impls entry for Buf/Transport");
+    assert_eq!(entry.3.iter().filter(|slot| slot.is_some()).count(), 3, "slots: {:?}", entry.3);
+}
+
 #[test]
 fn test_incremental_cache_dir_custom() {
     let config = NativeBuildConfig {
