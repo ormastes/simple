@@ -1,0 +1,60 @@
+# Host-owned trust root for external traversal providers.
+# This source reads only the user's Simple configuration location through the
+# system-location owner. It never consults project config, CLI arguments, or
+# plugin data.
+
+use std.common.sdn.parser.{parse}
+use std.common.sdn.value.{SdnValue}
+use std.common.binary_inspect.{hex_to_bytes, bytes_to_hex_canonical}
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use std.nogc_sync_mut.env.system_location.{SystemLocationKind,
+    system_location_resolve}
+use app.io.file_ops.{file_exists, file_read_regular_no_follow_bounded}
+
+pub const TRAVERSAL_PLUGIN_HOST_CONFIG_MAX_BYTES_V1: i64 = 65536
+
+pub struct TraversalPluginHostTrustRootV1:
+    public_key: [u8]
+    public_key_fingerprint: text
+    source_digest: text
+
+pub fn traversal_plugin_host_trust_root_parse_user_config_v1(
+        source: text) -> Result<TraversalPluginHostTrustRootV1, text>:
+    if source == "" or source.byte_len() > TRAVERSAL_PLUGIN_HOST_CONFIG_MAX_BYTES_V1:
+        return Err("traversal-provider-trust-config-size")
+    val config = match parse(source):
+        case Ok(value): value
+        case Err(_): return Err("traversal-provider-trust-config-invalid")
+    val root_key = match config.get_path("traversal_plugins.trust_root_ed25519"):
+        case Some(value):
+            match value:
+                case SdnValue.String(encoded): encoded
+                case _: return Err("traversal-provider-trust-root-invalid")
+        case None: return Err("traversal-provider-trust-root-unavailable")
+    if root_key.len() != 64: return Err("traversal-provider-trust-root-invalid")
+    val decoded = hex_to_bytes(root_key)
+    if decoded.len() != 32 or bytes_to_hex_canonical(decoded) != root_key:
+        return Err("traversal-provider-trust-root-invalid")
+    var public_key: [u8] = []
+    for byte in decoded: public_key.push(byte as u8)
+    Ok(TraversalPluginHostTrustRootV1(public_key: public_key,
+        public_key_fingerprint: "sha256:" + sha256_u8_hex(public_key),
+        source_digest: "sha256:" + sha256_text(source)))
+
+pub fn traversal_plugin_host_trust_root_resolve_v1(
+    ) -> Result<TraversalPluginHostTrustRootV1, text>:
+    val user_config_root = match system_location_resolve(SystemLocationKind.UserConfig):
+        case Ok(path): path
+        case Err(_): return Err("traversal-provider-trust-root-unavailable")
+    val config_path = user_config_root + "/simple/config.sdn"
+    if not file_exists(config_path): return Err("traversal-provider-trust-root-unavailable")
+    val source = match file_read_regular_no_follow_bounded(
+            config_path, TRAVERSAL_PLUGIN_HOST_CONFIG_MAX_BYTES_V1):
+        case Ok(value): value
+        case Err(_): return Err("traversal-provider-trust-config-unreadable")
+    traversal_plugin_host_trust_root_parse_user_config_v1(source)
+
+export TRAVERSAL_PLUGIN_HOST_CONFIG_MAX_BYTES_V1,
+    TraversalPluginHostTrustRootV1,
+    traversal_plugin_host_trust_root_parse_user_config_v1,
+    traversal_plugin_host_trust_root_resolve_v1
