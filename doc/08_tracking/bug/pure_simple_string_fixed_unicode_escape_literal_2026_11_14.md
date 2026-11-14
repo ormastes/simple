@@ -1,7 +1,8 @@
 # Fixed-width Unicode string escapes survive as literal text
 
-Status: observed on pinned producer; current-source repair authored, independent
-review and execution pending. No current-compiler execution or fix PASS claimed.
+Status: source repair independently reviewed; actual lexer projection passed
+nine groups and failed one inherited provider group. Full execution remains
+nonpassing. No repaired-compiler or full fix PASS claimed.
 
 The facts-key probe compiled by producer SHA256
 `855f48d3c9f9d915be2c8d732d4da3186caa0fb49f55ba3c780a47a1bb7efd42`
@@ -63,11 +64,38 @@ the unchanged char gate. The native fixture
 `test/fixtures/compiler/double_quoted_unicode_escape_native_probe.spl`
 checks final compiled bytes and interpolation. Both remain **UNRUN**.
 
-The required first execution is an exact current-lexer function projection,
-under explicit bounded resource admission. That qualifies the exercised source
-functions only. An updated compiler and the unchanged facts-key golden must
-still execute before claiming repaired-producer behavior. No build is started
-without the parent's concrete source/probe review.
+## One authorized actual-function execution
+
+Source repair commit: `c1a5b77c74d`. The independently reviewed projection is
+`/tmp/simple-unicode-escape-lexer-probe-20261115`, fixture
+`4d5dff0561ab4640a7e508b7ea88ae28c76be432`. It retains exact production scanner,
+helper, character and raw-string methods and actual character/environment
+providers. It omits unrelated token dispatch and does not replace decoding.
+The source SHA256 is
+`658ef92b0294d45280c93c56e732f67ebf9d92b104a9f3f05a1e4174e4b32e65`;
+the resulting executable SHA256 is
+`1f521a93ef0284cdcdfc885b2b16e48857bf2c6c052fb71a71d4c4ddd67cf649`.
+
+Compile exit was 0; execution exit was **1**. Nine groups passed: NUL bytes,
+ASCII/multibyte bytes, exact fixed width, braced scalars, raw/doubled backslash,
+interpolation token spelling, malformed rejection, source coordinates, and
+unchanged char grammar. The sole failing group preserved the independent
+numeric oracle for provider control characters 11 and 12.
+
+The actual `char_from_code_inline` provider special-cases those values with
+fixed-width Unicode string constants. When compiled by defective producer
+855f48d3, these constants retain the same literal-escape defect. This is an
+additional bootstrap dependency, not permission to weaken that oracle. The
+parent assigned a separate production-provider repair through its existing
+byte-based scalar conversion owner.
+
+`execution.sdn`, `scope.sdn`, `watchdog.sdn`, `command.sdn`, `compile.log` and
+`run.log` retain the single attempt. Cgroup memory was 2 GiB, swap 0; available
+memory at launch was 64,266,686,464 bytes, peak scope memory 751,144,960 bytes,
+elapsed watchdog time 9.218 seconds, under a 90-second deadline. No failed or
+green criterion was rerun. SSpec and the committed full native fixture remain
+UNRUN; direct scanner evidence is not a full compiler test. An updated compiler
+and unchanged facts-key golden must execute before producer qualification.
 
 ## Required qualification
 
