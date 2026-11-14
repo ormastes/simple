@@ -105,6 +105,27 @@ resolution, trait dispatch, full driver execution or loaded-plugin instances.
 The build warning that automatic dynload aspect packaging was unavailable is
 retained in the compile log and does not become a packaging success.
 
+The same newer producer/core-c bundle then passed fifteen native checks of a
+projected production driver API closure: real selector/trait wrapper, facts and
+guards, SHA/XXH3, persistent match cache, descriptor pool and single-flight
+join/complete/forget. Assertions cover independent directory keys, expected
+matched IDs, parse/shard/pool counters, retired flight state, refusal of
+unsupported or incomplete/unevaluable-guard facts, and fact-change invalidation.
+Both hash fallback flags remained false. The first compile exposed two omitted
+XXH3 byte-load helpers in the fixture; including their exact production bodies
+resolved it. Evidence: `/tmp/aspect-plugin-driver-probe-20261114`.
+
+This projection excludes unused HIR driver integration, semantic-query manifest
+production and the single-flight Future method; one private guard hash helper
+was alpha-renamed to preserve its module namespace in the flattened fixture.
+No matcher, hash or cache behavior was substituted. These results exercise the
+new API but do not qualify whole-module import resolution or its connection to
+an authoritative directory snapshot. Existing HIR-derived completeness covers
+the compilation's module set, not necessarily every file in a directory; it
+cannot alone authorize traversal cutoff or unweaving. A production bridge must
+bind membership, attributes, guards and TLDR digests to the same frozen source
+epoch. That producer/caller integration and full SSpec execution remain open.
+
 Performance remains unqualified. The new convenience API canonicalizes and
 hashes configuration on each acquisition. The eventual producer should obtain
 the descriptor at its configuration boundary and carry it across directory
