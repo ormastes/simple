@@ -90,6 +90,21 @@ The evidence directory is `/tmp/aspect-plugin-canonical-probe-20261114`;
 producer SHA-256 is
 `3b38223677dd46f92c29c12f20566dc9e65c6b65b1456c9c89c95907b5e106ec`.
 
+A subsequent exact-production extraction added the complete descriptor/pool,
+SHA implementation and its dependency helpers. Sixteen native checks passed
+on AArch64 using pure-Simple Stage 2 producer SHA-256
+`855f48d3c9f9d915be2c8d732d4da3186caa0fb49f55ba3c780a47a1bb7efd42`
+and the explicit `core-c` runtime bundle. Checks include published empty/abc
+SHA vectors, an independently pinned canonical descriptor digest, scoped and
+reordered pool hits, code/config separation, capacity refusal preserving hits,
+injected canonical-identity collision rejection, malformed fields and bounds.
+The runtime SHA provider was used; its fallback flag remained false. Evidence
+and exact extraction provenance: `/tmp/aspect-plugin-pool-probe-20261114`.
+This qualifies the extracted descriptor/pool behavior, not module-import
+resolution, trait dispatch, full driver execution or loaded-plugin instances.
+The build warning that automatic dynload aspect packaging was unavailable is
+retained in the compile log and does not become a packaging success.
+
 Performance remains unqualified. The new convenience API canonicalizes and
 hashes configuration on each acquisition. The eventual producer should obtain
 the descriptor at its configuration boundary and carry it across directory
