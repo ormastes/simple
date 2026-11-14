@@ -106,3 +106,12 @@ max-content of mixed inline content, control UA font reset, `h6` margins
   Still px-only: `min-/max-inline-size` and `min-/max-block-size` go through
   `parse_int`, and a flex / grid item's percentage height clamp resolves
   against nothing (the flex paths read `min_height_px > 0` on the raw style).
+- **Item 1 fixed.** A single-layer `background:` shorthand gradient is now
+  typed (it was only typed for the two-layer form), and
+  `fb_style_background_opacity_clip` hands angled or N-stop gradients to
+  `fb_linear_gradient_general_clip` (Q16 angle, 1025-entry colour LUT). The
+  two-colour vertical form keeps its old path. The `html` page drops from
+  15.98 % to 5.25 %. Spec:
+  `test/01_unit/browser_engine/linear_gradient_angle_cpu_raster_chrome159_spec.spl`.
+  Cost: the page render goes from 212 s to about 330 s, filed as
+  `web_angled_gradient_header_render_slowdown_2026-11-15.md`.
