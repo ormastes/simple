@@ -7,6 +7,27 @@ use std.common.ui.ui_frame_clock.{FrameClock}
 use std.nogc_sync_mut.ui.host_frame_clock.{default_frame_clock}
 use common.ui.glyph_bitmap_5x7.{glyph_row_bits, glyph_index_for_char_code}
 
+fn form_control_ua_box_decls(node: HNode) -> text:
+    """UA-sheet box declarations for a form control (Chrome html.css), or ""
+    for any other element. The border colour is Chrome's light-scheme control
+    border."""
+    if node.tag == "input":
+        val input_type = attr_value(node.attrs_raw, "type").trim().lower()
+        if input_type == "checkbox":
+            return "margin:3px 3px 3px 4px"
+        if input_type == "radio":
+            return "margin:3px 3px 0 5px"
+        if input_type == "hidden":
+            return ""
+        return "border:2px solid #767676"
+    if node.tag == "button":
+        return "border:2px solid #767676"
+    if node.tag == "select":
+        return "border:1px solid #767676"
+    if node.tag == "textarea":
+        return "border:1px solid #767676;padding:2px"
+    ""
+
 # Inked pixel width of the built-in 5x7 bitmap cell for one codepoint, at
 # the rasterizer's scale (web_glyph_scale of the font size). The
 # framebuffer text rasterizer (fb_glyph_thin_scaled_clip in
@@ -535,6 +556,18 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
         if trace_stages:
             print "[layout-trace] style_stage=em-base-ready index={i} em={em_base}"
         st = tag_defaults(st, nd.tag)
+        # Chrome's UA sheet for form controls, the part `tag_defaults` cannot
+        # express because it needs the `type` attribute or a border: text
+        # `<input>` and `<button>` carry a 2 px border, `<select>` and
+        # `<textarea>` 1 px (textarea also `padding: 2px`), and checkbox/radio
+        # carry margins instead of a border. Applied here, ahead of every
+        # author declaration, so `border`/`margin`/`padding` in a stylesheet
+        # still win. Chrome 159: `<input>` 185x21, `<select>` 19 tall,
+        # `<textarea>` 181x36, checkbox `margin: 3px 3px 3px 4px`, radio
+        # `margin: 3px 3px 0 5px`.
+        val ua_control_decls = form_control_ua_box_decls(nd)
+        if ua_control_decls != "":
+            st = apply_decls(st, ua_control_decls, em_base)
         # HTML UA stylesheet, the `dir dir, dir dl, ... ul ul` descendant block
         # in Chrome's html.css: a list CONTAINER with a list-container ANCESTOR
         # has zero block margins. tag_defaults() sees only the tag, so the rule
@@ -821,6 +854,10 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
             # <ul>'s cached 16 px margin straight back over the UA zeroing, which
             # is why `ul` inside `ul` was the one nesting that stayed broken
             # while `ol`/`dl` combinations were already fixed.
+            # `ua_control_decls` is the same kind of input: it reads the `type`
+            # ATTRIBUTE, so a checkbox and a text <input> under one parent
+            # share every other key part and the checkbox copied the text
+            # input's cached style back over its UA margins.
             # A hit is copied field-for-field OUT of the cache and
             # a miss is copied field-for-field IN (web_style_cascade_memo_store),
             # because everything below this point mutates `st` in place.
@@ -831,7 +868,7 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
             # memo entirely rather than sharing an ambiguous key.
             val memo_usable = nd.parent < 0 or memo_parent >= 0
             val memo_key = if memo_usable:
-                "{memo_parent}\n{nd.tag}\n{nested_list_ua}\n{em_base}\n" +
+                "{memo_parent}\n{nd.tag}\n{nested_list_ua}\n{ua_control_decls}\n{em_base}\n" +
                     "{logical_writing_mode}\n" +
                     "{viewport_w}x{viewport_h}\n" +
                     "{pres_decls.len()}:{pres_decls}\n{combined_decls}"
@@ -1119,7 +1156,15 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
                     while ai < metrics.advances.len():  # cpu-lane-loop-ok: one pass over the resolved per-codepoint advances of THIS node's own metric string, clamping each to its glyph's inked bitmap width (scale 1 only) and folding in letter/word spacing; bound is that string's codepoint count
                         var a = metrics.advances[ai]
                         val cp = metric_cps[ai]
-                        if metric_scale == 1:
+                        # `font_size <= 8`, NOT `metric_scale == 1`:
+                        # `web_glyph_scale` is `fs / 8`, which is 1 for every
+                        # size up to 15, so keying on the scale also clamped
+                        # 9..15 px runs -- sizes at which the resolved face is
+                        # what gets painted. There Liberation Sans's `l`
+                        # (3 px at 13) was widened to the bitmap cell's 4 and a
+                        # 13 px `Alpha` measured 34 for a 33 px run
+                        # (form_control_chrome159_geometry_spec).
+                        if metric_scale == 1 and st.font_size <= 8:
                             val inked = _glyph_inked_width_for_paint(cp, metric_scale)
                             if a < inked:
                                 a = inked

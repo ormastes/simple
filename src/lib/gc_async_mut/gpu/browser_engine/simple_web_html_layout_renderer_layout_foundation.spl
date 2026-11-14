@@ -14,6 +14,8 @@ use std.gc_async_mut.gpu.browser_engine.layout_m14_types.{collapse_margins_signe
 # See doc/08_tracking/bug/live_lane_inline_text_measure_counts_utf8_bytes_2026-08-11.md
 use std.common.layout.text_metrics.{codepoint_cells, text_cell_width}
 use std.common.encoding.utf8.{text_codepoints}
+use std.nogc_sync_mut.text_layout.font_renderer.{resolve_font_metrics_with_language}
+use std.nogc_sync_mut.text_layout.font_provider.{browser_font_family_for_style}
 
 pub val SIMPLE_WEB_SUMMARY_MARKER_INLINE_WIDTH: i32 = 16
 
@@ -293,11 +295,19 @@ fn align_inline_line_baselines(child_index: HtmlChildIndex, line_style: Style, h
         val node_index = nodes[baseline_i]
         val node_style = styles[node_index]
         val node_replaced = replaced_media_bottom_edge_tag(html_nodes[node_index].tag)
-        val node_ascent = inline_line_baseline_ascent(
-            child_index, node_index, node_style,
-            margin_ts[baseline_i], margin_bs[baseline_i], bh, node_replaced
+        val widget_baseline = form_control_baseline_from_top(
+            html_nodes[node_index], node_style, bh[node_index]
         )
-        val node_descent = if bottom_edge_baseline(
+        val node_ascent = if widget_baseline >= 0:
+            margin_ts[baseline_i] + widget_baseline
+        else:
+            inline_line_baseline_ascent(
+                child_index, node_index, node_style,
+                margin_ts[baseline_i], margin_bs[baseline_i], bh, node_replaced
+            )
+        val node_descent = if widget_baseline >= 0:
+            bh[node_index] - widget_baseline + margin_bs[baseline_i]
+        elif bottom_edge_baseline(
             child_index, node_index, node_style, node_replaced
         ): 0 else: inline_line_baseline_descent(node_style)
         if node_ascent > ascent:
@@ -311,11 +321,17 @@ fn align_inline_line_baselines(child_index: HtmlChildIndex, line_style: Style, h
     baseline_i = 0
     while baseline_i < nodes.len():
         val node_index = nodes[baseline_i]
-        val node_baseline_offset = inline_line_baseline_offset(
-            child_index, node_index, styles[node_index],
-            margin_bs[baseline_i], bh,
-            replaced_media_bottom_edge_tag(html_nodes[node_index].tag)
+        val node_widget_baseline = form_control_baseline_from_top(
+            html_nodes[node_index], styles[node_index], bh[node_index]
         )
+        val node_baseline_offset = if node_widget_baseline >= 0:
+            node_widget_baseline
+        else:
+            inline_line_baseline_offset(
+                child_index, node_index, styles[node_index],
+                margin_bs[baseline_i], bh,
+                replaced_media_bottom_edge_tag(html_nodes[node_index].tag)
+            )
         # An inline non-replaced box sits in the line box by HALF-LEADING: its
         # content area is centred, so its top is line_y + (line_h - content_h)/2
         # rather than line_y. Every other participant (inline-block, replaced,
@@ -716,12 +732,122 @@ fn replaced_default_box_h(tag: text) -> i32:
         return 150
     0
 
-# Width Chrome's UA reserves for a <select>'s drop-down arrow, on top of the
-# widest option label. Derived against Chrome 152 on the catalog's forms-media
-# page: Chrome's select border box is 73 px there, and this engine's
-# max-content width for the same `<option>` set (label + the select's own
-# padding 16 and border 2) is 51, so the arrow region is 22.
-pub val SELECT_ARROW_WIDTH_PX: i32 = 22
+# Width Chrome's UA reserves inside a <select> beside its widest option label
+# (inner start padding plus the drop-down arrow). Chrome 159: an EMPTY select
+# is exactly 20 px + its padding + its border, with the UA box (22) and with
+# the catalog's `padding:8px;border:1px` (38) alike, and every labelled select
+# measured is `ceil(label) + 20` on top of that. It was 22 while it was fitted
+# on ONE label: the extra 2 px was text under-measure (13 px instead of the
+# UA's 13.3333 px, rounded instead of ceiled), not arrow.
+pub val SELECT_ARROW_WIDTH_PX: i32 = 20
+
+# Block padding Chrome's menulist puts INSIDE a <select>'s content box, above
+# and below its one line (1 px each): the UA select is 19 px tall on a 15 px
+# line with a 1 px border, 21 at 16 px, 40 at 32 px.
+pub val SELECT_INNER_BLOCK_PADDING_PX: i32 = 2
+
+# The UA control font is `13.3333px` = 40/3 px (10 pt). The cascade carries
+# integer px, so a control's `font_size` is 13 (FORM_CONTROL_UA_FONT_SIZE_PX in
+# ..._declarations.spl); a label is MEASURED at the real size by resolving its
+# run at an integer multiple of 40/3 and dividing, which keeps the sub-pixel
+# part that decides `ceil` (`Alpha`: 34.09 px -> 35, 33 at a truncated 13 px).
+val FORM_CONTROL_UA_FONT_TRUNCATED_PX: i32 = 13
+val FORM_CONTROL_UA_FONT_NUM: i32 = 40
+val FORM_CONTROL_UA_FONT_DEN: i32 = 3
+# Largest size the font resolver accepts is 512 px.
+val FORM_CONTROL_MEASURE_MAX_PX: i32 = 512
+val FORM_CONTROL_MEASURE_OVERSAMPLE: i32 = 10
+
+fn form_control_label_width_px(st: Style, label: text) -> i32:
+    """Width, in whole px rounded UP, of one control label (`<option>` or
+    `<button>` text) at the control's real font size. `st` is the label text
+    node's style. Chrome sizes a control from the ceiling of its label's
+    fractional width."""
+    if label.len() == 0:
+        return 0
+    var num = st.font_size
+    var den = 1
+    if st.font_size == FORM_CONTROL_UA_FONT_TRUNCATED_PX:
+        num = FORM_CONTROL_UA_FONT_NUM
+        den = FORM_CONTROL_UA_FONT_DEN
+    var over = FORM_CONTROL_MEASURE_OVERSAMPLE
+    if num * over > FORM_CONTROL_MEASURE_MAX_PX:
+        over = FORM_CONTROL_MEASURE_MAX_PX / num
+    if over < 1:
+        return st.resolved_font_width
+    val family = browser_font_family_for_style(st.font_family, st.bold, st.font_style_italic)
+    val metrics = resolve_font_metrics_with_language(family, label, num * over, "")
+    if not metrics.valid or metrics.width <= 0:
+        return st.resolved_font_width
+    val scale = den * over
+    (metrics.width + scale - 1) / scale
+
+fn form_control_widest_option_label_px(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, select_i: i32) -> i32:
+    """Widest `<option>` label of a `<select>`, including options nested in an
+    `<optgroup>`, each measured at the real control font size."""
+    var widest = 0
+    var c = child_index.first_child[select_i]
+    while c >= 0:  # cpu-lane-loop-ok: one pass over a select's own option children during its intrinsic sizing; bound is that child list
+        if nodes[c].tag == "optgroup":
+            val nested = form_control_widest_option_label_px(nodes, styles, child_index, c)
+            if nested > widest:
+                widest = nested
+        elif nodes[c].tag == "option":
+            val label_w = form_control_text_children_label_px(nodes, styles, child_index, c)
+            if label_w > widest:
+                widest = label_w
+        c = child_index.next_sibling[c]
+    widest
+
+fn form_control_text_children_label_px(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32) -> i32:
+    """Sum of the real-size label widths of `i`'s direct text children."""
+    var total = 0
+    var t = child_index.first_child[i]
+    while t >= 0:  # cpu-lane-loop-ok: one pass over one option/button's direct children; bound is that child list
+        if nodes[t].tag == "#text":
+            total = total + form_control_label_width_px(styles[t], nodes[t].text_trimmed)
+        t = child_index.next_sibling[t]
+    total
+
+fn form_control_button_label_correction_px(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, button_i: i32) -> i32:
+    """What a `<button>`'s shrink-to-fit width gains when its direct text is
+    measured at the real control font size instead of the truncated integer
+    size the run is painted at. Chrome 159: `Exercise controls` is 101.48 px at
+    13.3333 px, 99 at 13."""
+    var extra = 0
+    var t = child_index.first_child[button_i]
+    while t >= 0:  # cpu-lane-loop-ok: one pass over one button's direct children; bound is that child list
+        if nodes[t].tag == "#text" and styles[t].resolved_font_width > 0:
+            val real_w = form_control_label_width_px(styles[t], nodes[t].text_trimmed)
+            if real_w > styles[t].resolved_font_width:
+                extra = extra + real_w - styles[t].resolved_font_width
+        t = child_index.next_sibling[t]
+    extra
+
+fn form_control_baseline_from_top(node: HNode, st: Style, h: i32) -> i32:
+    """Distance from a form control's border-box top to its baseline, or -1
+    when `node` is not a control this rule covers.
+
+    A text `<input>` or `<select>` aligns on its INNER text baseline: border +
+    padding + the leading that centres its one line in the content box + that
+    line's own baseline. Hanging the control from a font strut at its top edge
+    instead put every padded control 6 px below the top of its line. Checkbox
+    and radio align on their bottom border edge and `<textarea>` on its bottom
+    edge (Chrome 159: a 13x13 checkbox sits 4 px into a 24 px line; a 48 px
+    textarea makes its label 55 = 48 + the line's descent)."""
+    if node.tag == "textarea":
+        return h
+    if node.tag == "input":
+        val input_type = attr_value(node.attrs_raw, "type").trim().lower()
+        if input_type == "checkbox" or input_type == "radio":
+            return h
+    elif node.tag != "select":
+        return -1
+    val line = style_line_h(st)
+    var lead = (h - st.border_t - st.border_b - st.pad_t - st.pad_b - line) / 2
+    if lead < 0:
+        lead = 0
+    st.border_t + st.pad_t + lead + inline_line_strut_baseline_offset(st)
 
 # Per-column advance and content-box intercept Chrome's UA uses to turn a text
 # control's `size`/`cols` attribute into an intrinsic CONTENT width. These are
@@ -754,14 +880,43 @@ val INPUT_CONTENT_INTERCEPT_PX: i32 = 5
 val TEXTAREA_COL_ADVANCE_PX: i32 = 8
 val TEXTAREA_CONTENT_INTERCEPT_PX: i32 = 17
 
+# The numbers above are the Helvetica / Menlo ones. They are FACE metrics, not
+# browser constants: Chrome's rule (LayoutTextControl) is
+#
+#   <input size=N>     content = (N - 1) * round(avgCharWidth) + round(maxCharWidth)
+#   <textarea cols=N>  content = N * round(avgCharWidth) + scrollbar(15)
+#
+# with `avgCharWidth` the face's OS/2 xAvgCharWidth and `maxCharWidth` its
+# bounding-box width. On Linux Chrome's `Arial` is Liberation Sans
+# (xAvgCharWidth 1187/2048 em -> 7.73 px at 13.3333 -> 8; bbox 3780/2048 em ->
+# 24.6 -> 25), so `<input>` content is `8N + 17`; its `monospace` is DejaVu
+# Sans Mono (1233/2048 em -> 8.03 -> 8), so `<textarea>` content is `8N + 15`.
+# Chrome 159 fits both exactly on N = 1, 5, 10, 20, 40. This engine has no
+# OS/2 / head table reader, so the two faces are keyed by resolved identity.
+val INPUT_COL_ADVANCE_LIBERATION_SANS_PX: i32 = 8
+val INPUT_CONTENT_INTERCEPT_LIBERATION_SANS_PX: i32 = 17
+val TEXTAREA_COL_ADVANCE_DEJAVU_MONO_PX: i32 = 8
+val TEXTAREA_CONTENT_INTERCEPT_DEJAVU_MONO_PX: i32 = 15
+
+fn form_control_face_identity(st: Style) -> text:
+    """Resolved identity of the face a text control's own font selects."""
+    val family = browser_font_family_for_style(st.font_family, st.bold, st.font_style_italic)
+    val metrics = resolve_font_metrics_with_language(family, "0", st.font_size, "")
+    if metrics.valid: metrics.identity else: ""
+
 fn form_control_intrinsic_content_w(node: HNode, st: Style, cols: i32) -> i32:
     """Content-box width Chrome's UA gives a text control from its `size` /
     `cols` attribute: a per-column advance plus a fixed font-derived
     intercept. `<textarea>` and `<input>` carry different UA fonts and a
     different intercept, so they are separate arms rather than one formula."""
     val scale = web_glyph_scale(st.font_size)
+    val face = form_control_face_identity(st)
     if node.tag == "textarea":
+        if face.contains("DejaVuSansMono"):
+            return cols * TEXTAREA_COL_ADVANCE_DEJAVU_MONO_PX * scale + TEXTAREA_CONTENT_INTERCEPT_DEJAVU_MONO_PX * scale
         return cols * TEXTAREA_COL_ADVANCE_PX * scale + TEXTAREA_CONTENT_INTERCEPT_PX * scale
+    if face.contains("LiberationSans"):
+        return cols * INPUT_COL_ADVANCE_LIBERATION_SANS_PX * scale + INPUT_CONTENT_INTERCEPT_LIBERATION_SANS_PX * scale
     cols * INPUT_COL_ADVANCE_PX * scale + INPUT_CONTENT_INTERCEPT_PX * scale
 
 fn form_control_rows(node: HNode) -> i32:

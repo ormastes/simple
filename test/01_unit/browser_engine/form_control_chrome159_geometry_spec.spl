@@ -1,0 +1,212 @@
+"""
+Form-control geometry against Chrome 159 (headless shell 1255, Linux arm64,
+`--force-device-scale-factor=1 --window-size=900,760`), where Chrome's control
+font `13.3333px Arial` resolves to Liberation Sans and `monospace` to DejaVu
+Sans Mono — the same faces this engine loads on Linux.
+
+Every expected number below is a Chrome 159 `getBoundingClientRect()` value on
+the fixture in that row; nothing is fitted to this engine's output.
+
+ROOTS this spec pins (each was red before its fix):
+
+1. **A 5x7 bitmap-cell clamp leaked into real-face metrics.** The style stage
+   clamped every resolved advance up to the inked width of the built-in bitmap
+   glyph whenever `web_glyph_scale(font_size) == 1`. That is every size 8..15,
+   not the `font_size <= 8` its comment promises, so at the 13 px control font
+   Liberation Sans's `l` (3 px) became 4 and `Alpha` measured 34 instead of 33.
+   `form_control_widget_box_spec` AC-12 went 73 -> 74 the day Linux
+   `sans-serif` started resolving to Liberation Sans (whose `l` is narrower
+   than the previous face's).
+
+2. **`<select>` width is `ceil(widest label) + 20`, measured at the REAL
+   control font size.** The old `SELECT_ARROW_WIDTH_PX = 22` was fitted on one
+   label and silently absorbed two pixels of text under-measure (13 px instead
+   of 13.3333 px, rounded instead of ceiled). Chrome's interior is exactly 20:
+   an empty select is 20 + padding + border with or without author padding.
+
+   | fixture                               | label px (Chrome span) | Chrome w |
+   |---------------------------------------|------------------------|----------|
+   | catalog CSS, `Alpha`/`Beta`           | 34.09                  | 73       |
+   | catalog CSS, `A`                      |  8.89                  | 47       |
+   | catalog CSS, `Alphabetical order`     | 107.44                 | 146      |
+   | catalog CSS, `iiii`                   | 11.86                  | 50       |
+   | catalog CSS, no option                |  0                     | 38       |
+   | UA only, `Alpha`/`Beta`               | 34.09                  | 57       |
+   | UA only, no option                    |  0                     | 22       |
+   | UA only, `font-size:16px`, `Alpha`    | 40.92                  | 63       |
+
+3. **`<select>` height carries 2 px of internal block padding**: 19 on a 15 px
+   line with the UA's 1 px border, 35 with the catalog's `padding:8px`, 21 at
+   16 px (17 px content area).
+
+4. **Text-control width comes from the control FACE's metrics, not from one
+   platform's fit.** Chrome's rule is `(size - 1) * round(avgCharWidth) +
+   round(maxCharWidth)` for `<input>` and `cols * round(avgCharWidth) +
+   scrollbar(15)` for `<textarea>`. For Liberation Sans at 13.3333 px that is
+   `8N + 17` (xAvgCharWidth 1187/2048 em -> 7.73 -> 8; bbox 3780/2048 em ->
+   24.6 -> 25) and for DejaVu Sans Mono `8N + 15`. The previous `7N + 5` /
+   `8N + 17` were the Helvetica/Menlo numbers and stay in force on that host.
+
+   | fixture                  | Chrome w |
+   |--------------------------|----------|
+   | UA `<input>` (size 20)   | 185      |
+   | UA `<input size=10>`     | 105      |
+   | UA `<input size=1>`      |  33      |
+   | UA `<input size=40>`     | 345      |
+   | catalog `<input>`        | 195      |
+   | UA `<textarea>` (cols 20)| 181      |
+   | UA `<textarea cols=10>`  | 101      |
+   | UA `<textarea cols=40>`  | 341      |
+   | catalog `<textarea>`     | 193      |
+
+5. **A control's baseline is its INNER text baseline**, not a font strut hung
+   from the top of its border box. Modelling it as the latter dropped every
+   padded control 6 px below the top of its own line (input at y=14 in a label
+   whose line starts at y=8; Chrome: 8).
+
+6. **`<button>` width is its label at the real control font size** (Chrome
+   119.48 for `Exercise controls`; this engine has integer boxes, so 120), and
+   a button adds nothing to its line: the stale `+ 3` that outlived the removed
+   UA margin made the last form line 36 where Chrome has 33.
+
+7. **Checkbox and radio carry the UA margins** `3px 3px 3px 4px` and
+   `3px 3px 0 5px`, so they start 4 / 5 px into their label.
+
+STATED RESIDUE (measured, not fixed here, see
+doc/08_tracking/bug/web_form_control_chrome159_residue_2026-11-14.md):
+
+- An author `font-size:13px` on a control is indistinguishable from the UA's
+  13.3333 px (the cascade carries integer px), so that select is 57 against
+  Chrome's 56.
+- Checkbox/radio sit 1 px low (y=13 vs 12) and a textarea's label is 54 vs 55:
+  both are the LINE strut baseline (18 here, 17 in Chrome, whose content area
+  for Liberation Sans 16 px is 17 px, not 16), which belongs to inline text.
+- `<input>` at author font sizes other than the UA's: Chrome's 16 px row (215)
+  does not fit the rule above; only the UA size is pinned.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-FORMS-003 — form-control boxes match Chrome 159 on the Linux system faces: select = ceil(label) + 20 wide and line + 2 tall, text controls size from the control face's average/maximum character width, controls align on their inner text baseline.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_engine.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id
+}
+
+val VW: i32 = 900
+val VH: i32 = 760
+val CAT: text = "<html><head><style>*{box-sizing:border-box}body{margin:0;font:16px/1.5 sans-serif}label{display:block;margin:8px 0}input,select,textarea,button{padding:8px;border:1px solid #94a3b8}</style></head><body><form>"
+val UA: text = "<html><head><style>body{margin:0;font:16px/1.5 sans-serif}</style></head><body><form>"
+
+fn cat(inner: text, prop: text) -> text:
+    simple_web_layout_debug_layout_by_id(CAT + inner + "</form></body></html>", VW, VH, "x", prop)
+
+fn ua(inner: text, prop: text) -> text:
+    simple_web_layout_debug_layout_by_id(UA + inner + "</form></body></html>", VW, VH, "x", prop)
+
+describe "select width is ceil(widest label) + 20 at the real control font":
+    it "sizes the catalog select from its widest option":
+        step("Alpha is 34.09 px at 13.3333 px: 35 + 20 + 16 + 2")
+        expect(cat("<select id=\"x\"><option>Alpha</option><option>Beta</option></select>", "w")).to_equal("73")
+
+    it "sizes a one-glyph label":
+        step("A is 8.89 px: 9 + 20 + 18")
+        expect(cat("<select id=\"x\"><option>A</option></select>", "w")).to_equal("47")
+
+    it "sizes a long label without drifting":
+        step("107.44 px: 108 + 20 + 18 — a fitted constant is off by one here")
+        expect(cat("<select id=\"x\"><option>Alphabetical order</option></select>", "w")).to_equal("146")
+
+    it "sizes a label made only of narrow glyphs":
+        step("iiii is 11.86 px; the bitmap-cell clamp made each i a pixel wider")
+        expect(cat("<select id=\"x\"><option>iiii</option></select>", "w")).to_equal("50")
+
+    it "gives an empty select exactly the 20 px interior":
+        expect(cat("<select id=\"x\"></select>", "w")).to_equal("38")
+
+    it "keeps the same interior with only the UA border":
+        expect(ua("<select id=\"x\"><option>Alpha</option><option>Beta</option></select>", "w")).to_equal("57")
+        expect(ua("<select id=\"x\"></select>", "w")).to_equal("22")
+
+    it "follows an author font size on the select":
+        step("Alpha is 40.92 px at 16 px: 41 + 20 + 2")
+        expect(ua("<select id=\"x\" style=\"font-size:16px\"><option>Alpha</option></select>", "w")).to_equal("63")
+
+describe "select height is its line plus 2 px of internal padding":
+    it "is 35 with the catalog padding":
+        expect(cat("<select id=\"x\"><option>Alpha</option><option>Beta</option></select>", "h")).to_equal("35")
+
+    it "is 19 with only the UA border":
+        expect(ua("<select id=\"x\"><option>Alpha</option><option>Beta</option></select>", "h")).to_equal("19")
+
+    it "grows its label to 35":
+        expect(cat("<label id=\"x\">Choice <select><option>Alpha</option><option>Beta</option></select></label>", "h")).to_equal("35")
+
+describe "text controls size from the control face's metrics":
+    it "gives the UA <input> its 20 columns":
+        step("19 x 8 + 25 content, 4 padding, 4 border")
+        expect(ua("<input id=\"x\">", "w")).to_equal("185")
+        expect(ua("<input id=\"x\">", "h")).to_equal("21")
+
+    it "scales with the size attribute":
+        expect(ua("<input id=\"x\" size=\"10\">", "w")).to_equal("105")
+        expect(ua("<input id=\"x\" size=\"1\">", "w")).to_equal("33")
+        expect(ua("<input id=\"x\" size=\"40\">", "w")).to_equal("345")
+
+    it "gives the catalog <input> Chrome's 195":
+        expect(cat("<label>Name <input id=\"x\" value=\"Simple\"></label>", "w")).to_equal("195")
+
+    it "gives the UA <textarea> its 20 columns and scrollbar gutter":
+        step("20 x 8 + 15 content, 4 padding, 2 border; two 15 px rows")
+        expect(ua("<textarea id=\"x\"></textarea>", "w")).to_equal("181")
+        expect(ua("<textarea id=\"x\"></textarea>", "h")).to_equal("36")
+
+    it "scales with the cols attribute":
+        expect(ua("<textarea id=\"x\" cols=\"10\"></textarea>", "w")).to_equal("101")
+        expect(ua("<textarea id=\"x\" cols=\"40\"></textarea>", "w")).to_equal("341")
+
+    it "gives the catalog <textarea> Chrome's 193":
+        expect(cat("<label>Notes <textarea id=\"x\">Editable text</textarea></label>", "w")).to_equal("193")
+
+describe "a control aligns on its inner text baseline":
+    it "puts a padded <input> at the top of its label line":
+        step("was 14: the control hung from a 13 px font strut, 6 px low")
+        expect(cat("<label>Name <input id=\"x\" value=\"Simple\"></label>", "y")).to_equal("8")
+        expect(cat("<label id=\"x\">Name <input value=\"Simple\"></label>", "h")).to_equal("33")
+
+    it "puts a padded <select> at the top of its label line":
+        expect(cat("<label>Choice <select id=\"x\"><option>Alpha</option><option>Beta</option></select></label>", "y")).to_equal("8")
+
+    it "puts a <textarea> at the top of its label line":
+        expect(cat("<label>Notes <textarea id=\"x\">Editable text</textarea></label>", "y")).to_equal("8")
+
+describe "button box":
+    it "is as wide as its label at the control font size":
+        step("Chrome 119.48: label 101.48 + 16 + 2; integer boxes ceil the label")
+        expect(cat("<button id=\"x\" type=\"button\">Exercise controls</button>", "w")).to_equal("120")
+        expect(cat("<button id=\"x\" type=\"button\">Exercise controls</button>", "h")).to_equal("33")
+
+    it "keeps its label on one line inside that box":
+        expect(cat("<button id=\"x\" type=\"button\">Exercise controls</button>", "text_h")).to_equal("15")
+
+    it "adds nothing to the height of its line":
+        step("was 36: a stale + 3 from a UA margin that no longer exists")
+        expect(cat("<button type=\"button\">Exercise controls</button><output>Not exercised</output><div id=\"x\">after</div>", "y")).to_equal("33")
+
+describe "checkbox and radio UA margins":
+    it "starts a checkbox 4 px into its label":
+        expect(cat("<label><input id=\"x\" type=\"checkbox\" checked> Enabled</label>", "x")).to_equal("4")
+
+    it "starts a radio 5 px into its label":
+        expect(cat("<label><input id=\"x\" type=\"radio\" checked> Light</label>", "x")).to_equal("5")
+
+    it "keeps each control's own UA margins when several inputs share a parent":
+        step("the cascade memo keyed on the tag alone handed the checkbox the text input's style")
+        expect(cat("<input value=\"a\"><input id=\"x\" type=\"checkbox\"><input type=\"radio\">", "x")).to_equal("199")
+        expect(cat("<input value=\"a\"><input type=\"checkbox\"><input id=\"x\" type=\"radio\">", "x")).to_equal("220")
+
+    it "keeps both at 13x13 and their label at one 24 px line":
+        expect(cat("<label><input id=\"x\" type=\"checkbox\" checked> Enabled</label>", "w")).to_equal("13")
+        expect(cat("<label><input id=\"x\" type=\"radio\" checked> Light</label>", "h")).to_equal("13")
+        expect(cat("<label id=\"x\"><input type=\"checkbox\" checked> Enabled</label>", "h")).to_equal("24")
