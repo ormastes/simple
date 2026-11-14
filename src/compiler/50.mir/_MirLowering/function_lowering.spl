@@ -1147,35 +1147,41 @@ impl MirLowering:
                 var returned_tail_local = tail_local
                 if fn_.body.has:
                     returned_tail_local = self.coerce_native_trait_object(tail_local, fn_.body.value, fn_.return_type)
-                match fn_.return_type.kind:
-                    case HirTypeKind.Any | HirTypeKind.TypeParam(_, _):
-                        # `-> Any` and `-> T` (erased generic) share the tagged
-                        # ABI boundary. A raw scalar tail must be boxed before
-                        # the caller records the result as a RuntimeValue local.
-                        returned_tail_local = self.box_runtime_value(tail_local)
-                    case HirTypeKind.Optional(_):
-                        # `-> T?` implicit tail: the same canonical-handle
-                        # promotion the explicit `return` path applies
-                        # (lower_return_expr). Without it a `-> i64?` body
-                        # ending in a raw scalar, a nil literal or an untyped
-                        # value returned the raw word, so the caller's
-                        # presence test read payload bits against the nil
-                        # sentinel (3 -> None, nil -> ... whatever the word
-                        # was). Already-boxed tails pass through unchanged.
-                        returned_tail_local = self.ensure_option_handle(tail_local, fn_.return_type)
-                    case HirTypeKind.Int(_, _) | HirTypeKind.Float(_) | HirTypeKind.Bool | HirTypeKind.Char:
-                        # Scalar tail that is a scalar Optional local (`v`
-                        # after `if v == nil: return ..`): return the payload,
-                        # exactly as `return v` does. Bool included: a tail
-                        # already coerced to a presence predicate (`opt.?`)
-                        # is a fresh Bool temp, not an Optional local, and is
-                        # returned unchanged by the helper.
-                        returned_tail_local = self.option_payload_for_int_sink(returned_tail_local, fn_.return_type)
-                        if val tail_hir = self.find_local_hir_type(returned_tail_local.id):
-                            if self.local_needs_erased_decode(returned_tail_local.id, tail_hir):
-                                returned_tail_local = self.decode_runtime_value(returned_tail_local, return_type)
-                    case _:
-                        ()
+                # @workaround bug=stage2_implicit_tail_optional_return_takes_scalar_arm_2026-11-15 reason=Stage 2 dispatched a `-> T?` tail into the Int|Float|Bool|Char arm of a broad `match fn_.return_type.kind` (disassembly: rt_enum_new then rt_unwrap_or_trap); predispatch on the discriminant, the idiom lower_type uses for Optional
+                val tail_return_disc = _sffi_hir_type_discriminant(fn_.return_type.kind)
+                val tail_optional_disc = _sffi_hir_type_discriminant(HirTypeKind.Optional(fn_.return_type))
+                val tail_any_disc = _sffi_hir_type_discriminant(HirTypeKind.Any)
+                val tail_type_param_disc = _sffi_hir_type_discriminant(HirTypeKind.TypeParam("", []))
+                val tail_int_disc = _sffi_hir_type_discriminant(HirTypeKind.Int(64, true))
+                val tail_float_disc = _sffi_hir_type_discriminant(HirTypeKind.Float(64))
+                val tail_bool_disc = _sffi_hir_type_discriminant(HirTypeKind.Bool)
+                val tail_char_disc = _sffi_hir_type_discriminant(HirTypeKind.Char)
+                if tail_return_disc == tail_any_disc or tail_return_disc == tail_type_param_disc:
+                    # `-> Any` and `-> T` (erased generic) share the tagged
+                    # ABI boundary. A raw scalar tail must be boxed before
+                    # the caller records the result as a RuntimeValue local.
+                    returned_tail_local = self.box_runtime_value(tail_local)
+                elif tail_return_disc == tail_optional_disc:
+                    # `-> T?` implicit tail: the same canonical-handle
+                    # promotion the explicit `return` path applies
+                    # (lower_return_expr). Without it a `-> i64?` body
+                    # ending in a raw scalar, a nil literal or an untyped
+                    # value returned the raw word, so the caller's
+                    # presence test read payload bits against the nil
+                    # sentinel (3 -> None, nil -> ... whatever the word
+                    # was). Already-boxed tails pass through unchanged.
+                    returned_tail_local = self.ensure_option_handle(tail_local, fn_.return_type)
+                elif tail_return_disc == tail_int_disc or tail_return_disc == tail_float_disc or tail_return_disc == tail_bool_disc or tail_return_disc == tail_char_disc:
+                    # Scalar tail that is a scalar Optional local (`v`
+                    # after `if v == nil: return ..`): return the payload,
+                    # exactly as `return v` does. Bool included: a tail
+                    # already coerced to a presence predicate (`opt.?`)
+                    # is a fresh Bool temp, not an Optional local, and is
+                    # returned unchanged by the helper.
+                    returned_tail_local = self.option_payload_for_int_sink(returned_tail_local, fn_.return_type)
+                    if val tail_hir = self.find_local_hir_type(returned_tail_local.id):
+                        if self.local_needs_erased_decode(returned_tail_local.id, tail_hir):
+                            returned_tail_local = self.decode_runtime_value(returned_tail_local, return_type)
                 # WP-E: the function's own tail value moves the resource out
                 # to the caller on this exit -- exclude it from the drop
                 # sweep (see emit_pending_resource_drops's `returned_local`).
