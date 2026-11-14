@@ -155,12 +155,13 @@ int main(void) {
     REQUIRE(simple_xray_thread_attach_pool_v1(&bad_schema, sizeof(bad_schema)) == -3);
     REQUIRE(simple_xray_thread_attach_pool_v1(header_a, 63) == -3);
 
-    /* Unattached-event loss counting is bounded, saturating atomic state. */
+    /* The counter is exact below the sentinel and sticky-inexact at UINT64_MAX. */
     for (int i = 0; i < 12; ++i)
         simple_xray_thread_note_unattached_v1(header_a);
     REQUIRE(__atomic_load_n(&header_a->unattached_lost, __ATOMIC_RELAXED) == 12);
     __atomic_store_n(&header_a->unattached_lost, UINT64_MAX - 1u, __ATOMIC_RELAXED);
     simple_xray_thread_note_unattached_v1(header_a);
+    REQUIRE(__atomic_load_n(&header_a->unattached_lost, __ATOMIC_RELAXED) == UINT64_MAX);
     simple_xray_thread_note_unattached_v1(header_a);
     REQUIRE(__atomic_load_n(&header_a->unattached_lost, __ATOMIC_RELAXED) == UINT64_MAX);
 

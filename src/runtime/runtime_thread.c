@@ -44,6 +44,54 @@
     #endif
 #endif
 
+/* XRay thread-context integration is opt-in for the source-built Linux GNU
+ * core-C runtime_thread object only. The adapter symbols are linked only by
+ * that XRay-enabled path; ordinary, Windows and nativeAll builds retain no
+ * dependency on them. */
+#if defined(SIMPLE_XRAY_CONTEXT_HOOKS_V1)
+#if !defined(__linux__) || !(defined(__GNUC__) || defined(__clang__)) || \
+        defined(_WIN32) || defined(_WIN64)
+#error "SIMPLE_XRAY_CONTEXT_HOOKS_V1 is supported only by Linux GNU C runtime_thread builds"
+#endif
+extern int64_t simple_xray_thread_attach_v1(void);
+extern void simple_xray_thread_detach_v1(void);
+
+typedef struct {
+    int attached;
+} RtXrayThreadAttachmentV1;
+
+static void rt_xray_thread_attachment_cleanup_v1(void *raw) {
+    RtXrayThreadAttachmentV1 *attachment = (RtXrayThreadAttachmentV1 *)raw;
+    if (attachment && attachment->attached) {
+        simple_xray_thread_detach_v1();
+        attachment->attached = 0;
+    }
+}
+
+typedef struct {
+    void *(*entry_point)(void *);
+    void *argument;
+    RtXrayThreadAttachmentV1 attachment;
+} RtXrayThreadLaunchV1;
+
+static void rt_xray_thread_launch_cleanup_v1(void *raw) {
+    RtXrayThreadLaunchV1 *launch = (RtXrayThreadLaunchV1 *)raw;
+    if (!launch) return;
+    rt_xray_thread_attachment_cleanup_v1(&launch->attachment);
+    SPL_FREE(launch);
+}
+
+static void *rt_xray_thread_entry_v1(void *raw) {
+    RtXrayThreadLaunchV1 *launch = (RtXrayThreadLaunchV1 *)raw;
+    void *result = NULL;
+    launch->attachment.attached = simple_xray_thread_attach_v1() == 1;
+    pthread_cleanup_push(rt_xray_thread_launch_cleanup_v1, launch);
+    result = launch->entry_point(launch->argument);
+    pthread_cleanup_pop(1);
+    return result;
+}
+#endif
+
 /* ================================================================
  * Internal Handle Storage
  * ================================================================ */
@@ -324,10 +372,27 @@ spl_thread_handle spl_thread_create(void* (*entry_point)(void*), void* arg) {
 
     SPL_NOTE_USER_THREADS();
 
+#if defined(SIMPLE_XRAY_CONTEXT_HOOKS_V1)
+    RtXrayThreadLaunchV1 *launch = (RtXrayThreadLaunchV1 *)SPL_MALLOC(
+        sizeof(RtXrayThreadLaunchV1), "xray_thread_launch");
+    if (!launch) {
+        SPL_FREE(thread);
+        return 0;
+    }
+    launch->entry_point = entry_point;
+    launch->argument = arg;
+    launch->attachment.attached = 0;
+    if (pthread_create(thread, NULL, rt_xray_thread_entry_v1, launch) != 0) {
+        SPL_FREE(launch);
+        SPL_FREE(thread);
+        return 0;
+    }
+#else
     if (pthread_create(thread, NULL, entry_point, arg) != 0) {
         SPL_FREE(thread);
         return 0;
     }
+#endif
 
     return alloc_handle(HANDLE_THREAD, thread);
 
@@ -555,6 +620,11 @@ static int64_t rt_native_worker_arg(int64_t value, int raw_worker_args) {
 
 static void* rt_isolated_wrapper(void* raw) {
     RtThreadData* td = (RtThreadData*)raw;
+#if defined(SIMPLE_XRAY_CONTEXT_HOOKS_V1)
+    RtXrayThreadAttachmentV1 attachment = {
+        .attached = simple_xray_thread_attach_v1() == 1};
+    pthread_cleanup_push(rt_xray_thread_attachment_cleanup_v1, &attachment);
+#endif
     if (td->arity == 2) {
         int64_t arg1 = rt_native_worker_arg(td->data1, td->raw_worker_args);
         int64_t arg2 = rt_native_worker_arg(td->data2, td->raw_worker_args);
@@ -568,6 +638,9 @@ static void* rt_isolated_wrapper(void* raw) {
     } else {
         td->result = td->entry(rt_native_worker_arg(td->data1, td->raw_worker_args));
     }
+#if defined(SIMPLE_XRAY_CONTEXT_HOOKS_V1)
+    pthread_cleanup_pop(1);
+#endif
     td->done = 1;
     if (rt_thread_data_release(td)) spl_thread_data_free(td);
     return NULL;
@@ -1281,6 +1354,11 @@ static void* rt_pool_worker_main(void* raw) {
     RtPoolWorkerArg* arg = (RtPoolWorkerArg*)raw;
     int worker_id = arg ? arg->worker_id : 0;
     if (arg) SPL_FREE(arg);
+#if defined(SIMPLE_XRAY_CONTEXT_HOOKS_V1)
+    RtXrayThreadAttachmentV1 attachment = {
+        .attached = simple_xray_thread_attach_v1() == 1};
+    pthread_cleanup_push(rt_xray_thread_attachment_cleanup_v1, &attachment);
+#endif
     g_pool_worker_tls = 1;
     g_pool_worker_blocked_tls = 0;
     for (;;) {
@@ -1289,6 +1367,9 @@ static void* rt_pool_worker_main(void* raw) {
             rt_pool_complete_task(task, task->entry(task->closure_ptr));
         }
     }
+#if defined(SIMPLE_XRAY_CONTEXT_HOOKS_V1)
+    pthread_cleanup_pop(1);
+#endif
     return NULL;
 }
 
@@ -2493,12 +2574,20 @@ static bool worker_loop_entry_available(void) {
 #ifdef SPL_THREAD_PTHREAD
 static void* worker_thread_wrapper(void* arg) {
     int64_t pool_id = (int64_t)(intptr_t)arg;
+#if defined(SIMPLE_XRAY_CONTEXT_HOOKS_V1)
+    RtXrayThreadAttachmentV1 attachment = {
+        .attached = simple_xray_thread_attach_v1() == 1};
+    pthread_cleanup_push(rt_xray_thread_attachment_cleanup_v1, &attachment);
+#endif
 
     /* Call Simple worker function if linked */
     if (worker_loop_entry_available()) {
         worker_loop_entry(pool_id);
     }
 
+#if defined(SIMPLE_XRAY_CONTEXT_HOOKS_V1)
+    pthread_cleanup_pop(1);
+#endif
     return NULL;
 }
 #else  /* Windows */
