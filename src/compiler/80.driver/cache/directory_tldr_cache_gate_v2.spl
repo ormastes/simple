@@ -1,0 +1,80 @@
+# H1/H2/H3/H4 serial compile-parent admission. The actual caller owns fresh
+# authority and freezes its source epoch through revalidation and publication.
+# First actual use is post-link after child joins. Prelaunch reuse requires a
+# separately authenticated retained complete receipt. Callbacks cannot reenter.
+# Singleflight here is leader bookkeeping, NOT asynchronous waiter coalescing.
+use compiler.driver.cache.directory_tldr_store_v2.{DirectoryTldrStoreV2,
+    DirectoryTldrExpectedV2, DirectoryTldrPinnedGenerationV2,
+    directory_tldr_expected_identity_v2}
+use compiler.common.cache_contract.physical_tld_v1.{PhysicalTldObjectV1}
+use compiler.driver.cache.daemon.cache_single_flight_v1.{cache_single_flight_key_v1,
+    SINGLE_FLIGHT_LEADER_V1}
+
+export DirectoryTldrExpectedV2
+
+pub enum DirectoryTldrGateOutcomeV2:
+    Hit(DirectoryTldrPinnedGenerationV2)
+    FullVisit(text)
+
+fn directory_tldr_revalidate_v2(expected_identity: text,
+        revalidate: fn() -> Result<DirectoryTldrExpectedV2, text>) -> bool:
+    val fresh = revalidate()
+    fresh.is_ok() and directory_tldr_expected_identity_v2(fresh.unwrap()) == Some(expected_identity)
+
+pub fn directory_tldr_cache_gate_v2(store: DirectoryTldrStoreV2,
+        expected_result: Result<DirectoryTldrExpectedV2, text>,
+        revalidate: fn() -> Result<DirectoryTldrExpectedV2, text>,
+        rebuild: fn() -> Result<PhysicalTldObjectV1, text>) -> DirectoryTldrGateOutcomeV2:
+    if expected_result.is_err(): return DirectoryTldrGateOutcomeV2.FullVisit("directory-fresh-authority-unavailable")
+    if store.busy or store.flights.inflight_count() != 0:
+        return DirectoryTldrGateOutcomeV2.FullVisit("directory-serial-route-reentered")
+    val expected = expected_result.unwrap()
+    val identity = directory_tldr_expected_identity_v2(expected)
+    if identity == nil or expected.source_epoch.driver_identity != store.driver_identity:
+        return DirectoryTldrGateOutcomeV2.FullVisit("directory-fresh-authority-invalid")
+    store.busy = true
+    val outcome = directory_tldr_gate_serial_v2(store, expected, identity!, revalidate, rebuild)
+    store.busy = false
+    outcome
+
+fn directory_tldr_gate_serial_v2(store: DirectoryTldrStoreV2,
+        expected: DirectoryTldrExpectedV2, identity: text,
+        revalidate: fn() -> Result<DirectoryTldrExpectedV2, text>,
+        rebuild: fn() -> Result<PhysicalTldObjectV1, text>) -> DirectoryTldrGateOutcomeV2:
+    val candidate = store.read_pin(expected)
+    if candidate.is_ok():
+        val pin = candidate.unwrap()
+        if directory_tldr_revalidate_v2(identity, revalidate) and
+                directory_tldr_expected_identity_v2(expected) == Some(identity) and store.validate_pin(pin):
+            return DirectoryTldrGateOutcomeV2.Hit(pin)
+        val _ = store.release_pin(pin)
+        return DirectoryTldrGateOutcomeV2.FullVisit("directory-hit-snapshot-changed")
+    val parent = store.observed_generation
+    val request_id = store.allocate_id()
+    if request_id.is_err(): return DirectoryTldrGateOutcomeV2.FullVisit(request_id.unwrap_err())
+    val key = cache_single_flight_key_v1("directory-tldr/v3", identity)
+    val joined = store.flights.join(key, request_id.unwrap())
+    if joined.0 != SINGLE_FLIGHT_LEADER_V1:
+        # A serial parent cannot have a waiter; do not consume an old result.
+        return DirectoryTldrGateOutcomeV2.FullVisit("directory-serial-flight-overlap")
+    val rebuilt = rebuild()
+    if rebuilt.is_err() or not directory_tldr_revalidate_v2(identity, revalidate) or
+            directory_tldr_expected_identity_v2(expected) != Some(identity):
+        val _ = store.flights.complete(key, request_id.unwrap(), nil)
+        return DirectoryTldrGateOutcomeV2.FullVisit("directory-rebuild-or-revalidation-failed")
+    if store.flights.leader_of(key) != request_id.unwrap():
+        return DirectoryTldrGateOutcomeV2.FullVisit("directory-flight-ownership-lost")
+    # The caller's frozen epoch remains held across this atomic publication.
+    val published = store.publish(expected, rebuilt.unwrap(), parent)
+    if published.is_err():
+        val _ = store.flights.complete(key, request_id.unwrap(), nil)
+        return DirectoryTldrGateOutcomeV2.FullVisit(published.unwrap_err())
+    val pinned = store.read_pin(expected)
+    val _ = store.flights.complete(key, request_id.unwrap(), nil)
+    if pinned.is_err(): return DirectoryTldrGateOutcomeV2.FullVisit(pinned.unwrap_err())
+    val pin = pinned.unwrap()
+    if not directory_tldr_revalidate_v2(identity, revalidate) or
+            directory_tldr_expected_identity_v2(expected) != Some(identity) or not store.validate_pin(pin):
+        val _ = store.release_pin(pin)
+        return DirectoryTldrGateOutcomeV2.FullVisit("directory-published-snapshot-changed")
+    DirectoryTldrGateOutcomeV2.Hit(pin)
