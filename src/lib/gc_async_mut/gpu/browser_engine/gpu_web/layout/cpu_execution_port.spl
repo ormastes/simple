@@ -8,6 +8,7 @@ use std.common.structural.layout.{
 }
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     LayoutResult, SimpleWebRetainedLayoutPreparation, empty_i32_lists,
+    text_line_box_dx, text_line_box_w,
     layout_selected
 }
 
@@ -26,6 +27,55 @@ fn _browser_cpu_selected(request: LayoutExecutionRequest, node_id: i64) -> bool:
                 if member_id == node_id:
                     return true
     false
+
+# The line box of wrapped line `line_index` of node `structural_id`: where the
+# line starts and how wide it is. A mid-line run insets line 0
+# (LayoutResult.first_line_dx); a run beside floats has per-line boxes
+# (LayoutResult.line_boxes). One decode for both, shared with the painters;
+# `browser_cpu_line_insets_from_boxes` recovers them.
+fn browser_cpu_line_box(layout: LayoutResult, structural_id: i64, line_index: i64, box: LayoutBox, line_height: i64) -> LayoutBox:
+    val index = (structural_id - 1) as i32
+    val line_dx = text_line_box_dx(layout.first_line_dx, layout.line_boxes, index, line_index as i32) as i64
+    val line_w = text_line_box_w(layout.first_line_dx, layout.line_boxes, index, line_index as i32, box.width as i32) as i64
+    layout_box(structural_id, box.x + line_dx, box.y + line_index * line_height, line_w, line_height)
+
+class BrowserCpuLineInsets:
+    first_line_dx: [i32]
+    line_boxes: [[i32]]
+
+# Recover the two inset forms from line boxes. A node whose only deviation is
+# line 0 starting `dx` right and ending at the box edge is a mid-line run
+# (first_line_dx); any other deviation -- a later line inset, or a line
+# narrower than the box -- is a float-shortened run and gets its (dx, width)
+# pairs back (line_boxes). Both tables stay empty when no node needs them.
+fn browser_cpu_line_insets_from_boxes(node_count: i32, bx: [i32], bw: [i32], lines: [LayoutLineBox]) -> BrowserCpuLineInsets:
+    var line_form: [i32] = [0; node_count]
+    for line in lines:
+        val index = (line.node_id - 1) as i32
+        if index >= 0 and index < node_count:
+            val line_dx = (line.box.x as i32) - bx[index]
+            val line_w = line.box.width as i32
+            if line.line_index == 0 and line_dx > 0 and line_w == bw[index] - line_dx:
+                if line_form[index] == 0:
+                    line_form[index] = 1
+            elif line_dx != 0 or line_w != bw[index]:
+                line_form[index] = 2
+    var first_line_dx: [i32] = []
+    var line_boxes: [[i32]] = []
+    for line in lines:
+        val index = (line.node_id - 1) as i32
+        if index >= 0 and index < node_count:
+            val line_dx = (line.box.x as i32) - bx[index]
+            if line_form[index] == 1 and line.line_index == 0:
+                if first_line_dx.len() == 0:
+                    first_line_dx = [0; node_count]
+                first_line_dx[index] = line_dx
+            elif line_form[index] == 2:
+                if line_boxes.len() == 0:
+                    line_boxes = empty_i32_lists(node_count)
+                line_boxes[index].push(line_dx)
+                line_boxes[index].push(line.box.width as i32)
+    BrowserCpuLineInsets(first_line_dx: first_line_dx, line_boxes: line_boxes)
 
 fn _browser_cpu_box(result: LayoutResult, structural_id: i64) -> LayoutBox:
     val index = structural_id - 1
@@ -73,18 +123,8 @@ impl LayoutExecutionPort for BrowserCpuLayoutExecutionPort:
                 var line_index: i64 = 0
                 while line_index < line_count:
                     val line_height = self.prepared.styles[index].resolved_font_line_height
-                    # A run that starts mid-line insets its FIRST line only
-                    # (LayoutResult.first_line_dx); the line box carries that
-                    # inset so `browser_cpu_layout_reconstruct` can recover it.
-                    val line_dx: i64 = if line_index == 0 and index < selected.layout.first_line_dx.len():
-                        selected.layout.first_line_dx[index] as i64
-                    else:
-                        0
-                    val line_box = layout_box(
-                        structural_id,
-                        box.x + line_dx,
-                        box.y + line_index * (line_height as i64),
-                        box.width - line_dx,
+                    val line_box = browser_cpu_line_box(
+                        selected.layout, structural_id, line_index, box,
                         line_height as i64
                     )
                     line_boxes.push(layout_line_box(
@@ -146,15 +186,10 @@ fn browser_cpu_layout_reconstruct(
             bh[index] = box.height as i32
             starts[index] = []
             ends[index] = []
-    var first_line_dx: [i32] = []
+    val insets = browser_cpu_line_insets_from_boxes(node_count, bx, bw, snapshot.line_boxes)
     for line in snapshot.line_boxes:
         val index = line.node_id - 1
         if index >= 0 and index < prepared.nodes.len():
-            val line_dx = (line.box.x as i32) - bx[index]
-            if line.line_index == 0 and line_dx > 0:
-                if first_line_dx.len() == 0:
-                    first_line_dx = [0; node_count]
-                first_line_dx[index] = line_dx
             starts[index].push(line.text_start as i32)
             ends[index].push(line.text_end as i32)
     LayoutResult(
@@ -162,8 +197,10 @@ fn browser_cpu_layout_reconstruct(
         wrap_starts: starts, wrap_ends: ends,
         intrinsic_widths: intrinsic,
         height: if bh.len() > 0: bh[0] else: 0,
-        first_line_dx: first_line_dx
+        first_line_dx: insets.first_line_dx,
+        line_boxes: insets.line_boxes
     )
 
 export BrowserCpuLayoutExecutionPort, browser_cpu_layout_execution_port
 export browser_cpu_layout_full, browser_cpu_layout_reconstruct
+export BrowserCpuLineInsets, browser_cpu_line_box, browser_cpu_line_insets_from_boxes

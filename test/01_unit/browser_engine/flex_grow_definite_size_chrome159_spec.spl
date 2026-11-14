@@ -235,3 +235,79 @@ describe "an explicit zero flex-basis overrides width":
         step("Chrome 159: `.g{flex:1;width:50px}` and `.h{flex:1;width:150px}` -> 150 / 150")
         val page = HEAD + "<style>.g{flex:1;width:50px}.h{flex:1;width:150px}</style><div class=\"f\"><div id=\"a\" class=\"g\">aa</div><div id=\"t\" class=\"h\">cd</div></div>" + TAIL
         expect(widths(page)).to_equal("150/150")
+
+# Every `flex: <number>` item has a ZERO basis, with or without a `width`, and
+# no flex item ends below its automatic minimum size (`min-width: auto`: its
+# min-content width, capped by a specified width) unless `min-width` is
+# declared or the item clips. Chrome 159, widths `a / t` (`/ b`):
+#
+# | container | a                                  | t                         | Chrome              |
+# |-----------|------------------------------------|---------------------------|---------------------|
+# | 400       | `span flex:1;width:100px` "Label"  | `input width:400px`       | 39.16 / 360.84      |
+# | 400       | `flex:1;padding:10px;width:50px`   | `flex:1;padding:10px`     | 200 / 200           |
+# | 400       | `flex:1;padding:0 30px`            | `flex:1`                  | 230 / 170           |
+# | 300       | `flex:1` 34-letter word (226.78)   | `flex:1`, b `flex:1`      | 226.78 / 36.61 / 36.61 |
+# | 300       | `flex:1`                           | `flex:2`, b `width:60px`  | 80 / 160 / 60       |
+# | 300       | `flex:1;width:100px` "one two three" | `width:290px;flex-shrink:0` | 36.47 / 290 (longest word) |
+# | 300       | `flex:1;min-width:0;width:100px`   | `width:290px;flex-shrink:0` | 10 / 290          |
+# | 300 wrap  | `flex:1` "aaaa bbbb"               | `flex:1`                  | 150 / 150, one line |
+# | 300       | `flex:1.5;width:10px`              | `flex:1;width:10px`       | 180 / 120           |
+#
+# Flex factors are stored as integers here: `flex: 1.5` is rounded to 2 (half
+# up; a positive factor below 1 becomes 1), so the last row shares 2:1 and
+# gives 200 / 100. The row pins that documented behaviour, not Chrome's.
+fn trio(width: text, a_style: text, a_inner: text, t_style: text, b_style: text) -> text:
+    val tail_item = if b_style == "": "" else: "<div id=\"b\" style=\"" + b_style + "\">ee</div>"
+    HEAD + "<div style=\"display:flex;width:" + width + "\"><div id=\"a\" style=\"" + a_style + "\">" + a_inner + "</div><div id=\"t\" style=\"" + t_style + "\">cd</div>" + tail_item + "</div>" + TAIL
+
+fn near(page: text, id: text, chrome: i32) -> bool:
+    val w = field(page, id, "w").to_int()
+    w >= chrome - 1 and w <= chrome + 1
+
+describe "zero-basis flex items: uniform basis and the automatic minimum size":
+    it "AC-22: with no free space a flex:1 item keeps its min-content width":
+        step("Chrome 159: Label 39.16, the 400 px input shrinks to 360.84 -- never a 1 px label")
+        val page = HEAD + "<div style=\"display:flex;width:400px\"><span id=\"a\" style=\"flex:1;width:100px\">Label</span><input id=\"t\" style=\"width:400px\"></div>" + TAIL
+        expect(near(page, "a", 39)).to_equal(true)
+        expect(near(page, "t", 361)).to_equal(true)
+        expect(field(page, "t", "x").to_int()).to_be_greater_than(37)
+
+    it "AC-23: flex:1 siblings are equal whether or not one has a width":
+        step("Chrome 159: padding 10 px each, one with width:50px -> 200 / 200")
+        expect(widths(trio("400px", "flex:1;padding:10px;width:50px", "aa", "flex:1;padding:10px", ""))).to_equal("200/200")
+
+    it "AC-24: padding is added to the zero base, so unequal padding gives unequal widths":
+        step("Chrome 159: 60 px of padding on one item -> 230 / 170")
+        expect(widths(trio("400px", "flex:1;padding:0 30px", "aa", "flex:1", ""))).to_equal("230/170")
+
+    it "AC-25: an item frozen at its min-content leaves the rest to its siblings":
+        step("Chrome 159: the long word keeps 226.78; the other two share 73.22 -> 36.61 each")
+        val page = trio("300px", "flex:1", "supercalifragilisticexpialidocious", "flex:1", "flex:1")
+        expect(near(page, "a", 227)).to_equal(true)
+        expect(near(page, "t", 37)).to_equal(true)
+        expect(near(page, "b", 37)).to_equal(true)
+        expect(field(page, "a", "w").to_int() + field(page, "t", "w").to_int() + field(page, "b", "w").to_int()).to_equal(300)
+
+    it "AC-26: flex factors share the space left by a fixed sibling":
+        step("Chrome 159: flex:1 / flex:2 beside width:60px -> 80 / 160 / 60")
+        val page = trio("300px", "flex:1", "aa", "flex:2", "width:60px")
+        expect(widths(page)).to_equal("80/160")
+        expect(field(page, "b", "x")).to_equal("240")
+
+    it "AC-27: the minimum is the longest word, and min-width:0 removes it":
+        step("Chrome 159: `one two three` beside an unshrinkable 290 px item -> 36.47 (the word `three`)")
+        expect(near(trio("300px", "flex:1;width:100px", "one two three", "width:290px;flex-shrink:0", ""), "a", 36)).to_equal(true)
+        step("Chrome 159: with min-width:0 the item takes the 10 px that are left")
+        expect(widths(trio("300px", "flex:1;min-width:0;width:100px", "Label", "width:290px;flex-shrink:0", ""))).to_equal("10/290")
+
+    it "AC-28: a wrapping container measures zero-basis items at their minimum and grows them from zero":
+        step("Chrome 159: `aaaa bbbb` and `cd`, both flex:1, in 300 px -> one line, 150 / 150")
+        val page = HEAD + "<div style=\"display:flex;flex-wrap:wrap;width:300px\"><div id=\"a\" style=\"flex:1\">aaaa bbbb</div><div id=\"t\" style=\"flex:1\">cd</div></div>" + TAIL
+        expect(widths(page)).to_equal("150/150")
+        expect(field(page, "t", "y")).to_equal("0")
+
+    it "AC-29: a fractional flex factor is rounded to the nearest integer":
+        step("Chrome 159 gives 180 / 120 for 1.5 : 1; factors are integers here, 1.5 -> 2, so 200 / 100")
+        expect(widths(trio("300px", "flex:1.5;width:10px", "aa", "flex:1;width:10px", ""))).to_equal("200/100")
+        step("flex-grow:0.4 still grows (a positive factor below 1 becomes 1): 150 / 150 beside flex-grow:1")
+        expect(widths(trio("300px", "flex-grow:0.4;flex-basis:0", "aa", "flex-grow:1;flex-basis:0", ""))).to_equal("150/150")
