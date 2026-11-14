@@ -262,3 +262,13 @@ Manual, `SIMPLE_BINARY` unset, `llm_caret.exe workspace x attach agent-1` (rc=1)
   - workspace_recovery_system: `Results: 12 total, 12 passed, 0 failed`
   - caret_cli_help_system: `Results: 4 total, 4 passed, 0 failed`
 - Status unchanged (verification-pending); this is seed-at-tip evidence, not a status move.
+
+## Flake hunt 2026-11-15 (3 sequential native runs)
+
+`LLM_CARET_NATIVE_BIN=/c/dev/wt/sqlcov-20261114/build/nb/llm_caret.exe SIMPLE_BINARY=<seed-tip.exe> seed-tip.exe test test/03_system/app/llm_caret/workspace_cli_system_spec.spl`, base origin/release/1.0.0, Windows host:
+
+- run 1: rc=0, `Results: 4 total, 4 passed, 0 failed`
+- run 2: rc=0, `Results: 4 total, 4 passed, 0 failed`
+- run 3: rc=0, `Results: 4 total, 4 passed, 0 failed`
+
+The earlier 3/4 "smux owner did not start" did not reproduce in 3 runs, so no #9298 step-named cause text was captured. Status remains verification-pending; the flake stays unexplained (intermittent, or load-dependent).
