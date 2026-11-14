@@ -503,7 +503,7 @@ pub fn module_surface_promote(surface: ModuleSurface) -> bool:
     roots.push(ModuleSurfaceRoot.Surface(surface))
     module_surface_promote_roots(roots)
 
-fn module_surface_promote_fields(surface: ModuleSurface):
+fn module_surface_promote_fields(surface: ModuleSurface) -> bool:
     """Promote every retained surface field. No per-field verdict is decidable.
 
     From `6a49e75efe0`: the 24-way `promote(a) or promote(b) or ...` chain this
@@ -536,12 +536,11 @@ fn module_surface_promote_fields(surface: ModuleSurface):
     on the very first field of the very first surface — measured on macOS run
     34 as `field composite_names of surface[0]`.
 
-    So the promotes are the work and stay; no per-field failure signal exists to
-    report. Fail-closed coverage is not lost: the registry root carrier below is
-    a freshly built `[ModuleSurfaceRoot]` whose promote verdict IS meaningful, and the driver
-    runs `module_surfaces_retained_alignment_error` AFTER
-    `_sffi_transient_array_scope_end()`, which reads the names back out of the
-    dead scope — the real post-condition, at the only moment it means anything.
+    Individual already-retained fields still do not supply a failure signal.
+    The batched fields carrier, however, is freshly allocated in this scope.
+    Its promotion result is meaningful and must reach the caller: the later
+    registry carrier can prune old parents and cannot prove these new children
+    survived. The driver also checks retained alignment after scope teardown.
 
     Linux S3-1 (2026-09-14, doc/08_tracking/bug/
     stage3_phase2_surface_stall_after_huffman_46gb_2026-09-14.md): on the real
@@ -615,7 +614,7 @@ fn module_surface_promote_fields(surface: ModuleSurface):
     fields.push(ModuleSurfaceRoot.Texts(authority.source_modifiers))
     fields.push(ModuleSurfaceRoot.Texts(authority.source_paths))
     fields.push(ModuleSurfaceRoot.Texts(authority.projection_keys))
-    val _promoted = rt_transient_heap_promote(fields)
+    rt_transient_heap_promote(fields)
 
 fn module_surface_promote_scope_sentinel() -> bool:
     """Promote a freshly built carrier to tell a scope/linkage fault from a field fault.
@@ -659,7 +658,8 @@ pub fn module_surfaces_promote_reason(registry: ModuleSurfacesByName) -> text:
     var surface_index = 0
     while surface_index < registry.surfaces.len():
         val surface = registry.surfaces[surface_index]
-        module_surface_promote_fields(surface)
+        if not module_surface_promote_fields(surface):
+            return "surface field root carrier failed: index={surface_index}"
         module_surface_promote_freeze_names(surface)
         surface_index = surface_index + 1
     if registry.library_mode != "": roots.push(ModuleSurfaceRoot.Texts([registry.library_mode]))
