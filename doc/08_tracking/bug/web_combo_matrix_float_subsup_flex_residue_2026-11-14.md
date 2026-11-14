@@ -87,3 +87,14 @@ Owner file for every layout item:
     (`simple_bin_status=forbidden`) and reports `unavailable`. The wiki makes
     that lane a hard bit-exact requirement after every renderer edit, so on
     such a host the requirement is unverifiable rather than met.
+
+## Added after review
+
+19. **`flex` shorthand: a basis the parser cannot size is treated as `auto`.**
+    `flex: 1 1 50%`, `12rem`, `calc(...)` leave the basis auto (never zero), so
+    the item grows from its width instead of from the percentage. A fractional
+    factor (`flex: 1.5`) is not a recognised number and is ignored whole.
+20. **An auto-width float takes the wider of two max-content measurements**
+    (`flex_item_max_content_width`, `intrinsic_text_width`) because neither
+    covers both block children and replaced boxes. One shrink-to-fit
+    measurement that knows both would replace the pair.
