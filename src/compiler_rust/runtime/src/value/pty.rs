@@ -296,6 +296,14 @@ mod pty_process {
             Err(_) => return -1,
         };
 
+        // A command LINE ("/bin/sh -i") is not a path. Windows hands the line to
+        // CreateProcess; here it is run through /bin/sh when the direct exec fails,
+        // so one PTY interface takes the same command text on every platform.
+        let line_cstr = match CString::new(format!("exec {}", shell)) {
+            Ok(value) => value,
+            Err(_) => return -1,
+        };
+
         unsafe {
             libc::fflush(std::ptr::null_mut());
 
@@ -330,6 +338,9 @@ mod pty_process {
 
                 let argv: &[*const libc::c_char] = &[argv0_cstr.as_ptr(), std::ptr::null()];
                 libc::execvp(shell_cstr.as_ptr(), argv.as_ptr());
+                let sh_argv: &[*const libc::c_char] =
+                    &[c"sh".as_ptr(), c"-c".as_ptr(), line_cstr.as_ptr(), std::ptr::null()];
+                libc::execv(c"/bin/sh".as_ptr(), sh_argv.as_ptr());
                 libc::_exit(127);
             }
 
@@ -1078,6 +1089,20 @@ mod tests {
         let err = std::io::Error::last_os_error().raw_os_error();
         assert!(result == -1 && err == Some(libc::ECHILD), "child {pid} not reaped by close");
         assert_eq!(unsafe { libc::kill(pid as libc::pid_t, 0) }, -1);
+    }
+
+    /// A command LINE with arguments must spawn on Unix as it does on Windows:
+    /// the whole text used to be exec'd as one path, so `/bin/sh -i` died 127.
+    #[test]
+    #[cfg(unix)]
+    fn rt_pty_spawn_accepts_a_command_line_with_arguments() {
+        let handle = pty_process::open(24, 80);
+        assert!(handle >= 0);
+        let pid = pty_process::spawn(handle, "/bin/sh -c 'echo spawn_$((40+2)); sleep 5'");
+        assert!(pid > 0);
+        assert!(wait_for_output(handle, "spawn_42", 5000), "command line with arguments did not run");
+        assert!(pty_process::is_running(handle as i64));
+        assert_eq!(rt_pty_close(handle as i64), RuntimeValue::TRUE);
     }
 
     /// True once `needle` appeared on the master within `timeout_ms`.
