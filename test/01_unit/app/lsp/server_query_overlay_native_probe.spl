@@ -5,6 +5,23 @@ use std.nogc_sync_mut.io.dir_ops.{dir_remove_all}
 use std.nogc_sync_mut.lsp.lsp_document_sync.{lsp_document_sync_apply}
 use std.nogc_sync_mut.lsp.lsp_handlers.{lsp_handle_document_symbol, lsp_handle_did_close}
 use app.lsp.visibility_provider_v1.{lsp_install_visibility_provider_v1}
+use std.common.json.value.{JsonValue, json_value_object_from, json_value_serialize}
+
+fn probe_document_body(uri: text) -> text:
+    val document = json_value_object_from([("uri", JsonValue.Str(uri))])
+    json_value_serialize(json_value_object_from([("textDocument", document)]))
+
+fn probe_open_body(uri: text, version: i64, source: text) -> text:
+    val document = json_value_object_from([("uri", JsonValue.Str(uri)),
+        ("languageId", JsonValue.Str("simple")), ("version", JsonValue.Int(version)),
+        ("text", JsonValue.Str(source))])
+    json_value_serialize(json_value_object_from([("textDocument", document)]))
+
+fn probe_change_body(uri: text, version: i64, source: text) -> text:
+    val document = json_value_object_from([("uri", JsonValue.Str(uri)), ("version", JsonValue.Int(version))])
+    val change = json_value_object_from([("text", JsonValue.Str(source))])
+    json_value_serialize(json_value_object_from([("textDocument", document),
+        ("contentChanges", JsonValue.Array([change]))]))
 
 fn main() -> i64:
     val root = secure_temp_dir("/tmp", "simple-lsp-overlay-native-probe-").unwrap()
@@ -14,20 +31,24 @@ fn main() -> i64:
     if not file_write(path, saved): return 1
     lsp_install_visibility_provider_v1()
     val uri = "file://" + path
-    val opened = "{\"textDocument\":{\"uri\":\"{uri}\",\"languageId\":\"simple\",\"version\":1,\"text\":\"{saved}\"}}"
-    val changed = "{\"textDocument\":{\"uri\":\"{uri}\",\"version\":2},\"contentChanges\":[{\"text\":\"{unsaved}\"}]}"
+    val opened = probe_open_body(uri, 1, saved)
+    val changed = probe_change_body(uri, 2, unsaved)
     if not lsp_document_sync_apply("textDocument/didOpen", opened): return 2
     if not lsp_document_sync_apply("textDocument/didChange", changed): return 3
-    val reply = lsp_handle_document_symbol("1", "{\"textDocument\":{\"uri\":\"{uri}\"}}")
+    val reply = lsp_handle_document_symbol("1", probe_document_body(uri))
     val disk = file_read(path)
-    lsp_handle_did_close("{\"textDocument\":{\"uri\":\"{uri}\"}}")
-    val closed_reply = lsp_handle_document_symbol("2", "{\"textDocument\":{\"uri\":\"{uri}\"}}")
+    lsp_handle_did_close(probe_document_body(uri))
+    val closed_reply = lsp_handle_document_symbol("2", probe_document_body(uri))
+    if not lsp_document_sync_apply("textDocument/didOpen", probe_open_body(uri, -2, unsaved)): return 9
+    val negative_reply = lsp_handle_document_symbol("3", probe_document_body(uri))
+    lsp_handle_did_close(probe_document_body(uri))
     dir_remove_all(root)
     if not reply.contains("overlay_only_probe_v1"): return 4
     if reply.contains("disk_only_probe_v1"): return 5
     if disk != saved: return 6
     if not closed_reply.contains("disk_only_probe_v1"): return 7
     if closed_reply.contains("overlay_only_probe_v1"): return 8
+    if not negative_reply.contains("overlay_only_probe_v1") or negative_reply.contains("disk_only_probe_v1"): return 10
     print "LSP_OVERLAY_PROBE_PASS"
     # A zero-return stub cannot satisfy both the output and this sentinel.
     77

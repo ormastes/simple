@@ -7,7 +7,8 @@ use std.common.json.array_ops.{json_array_get, json_array_length}
 use std.common.json.types.{json_get_type, json_to_number, json_to_string}
 use std.nogc_sync_mut.lsp.lsp_handlers.{lsp_handle_definition, lsp_handle_references,
     lsp_handle_did_open, lsp_handle_did_change, lsp_handle_did_close, lsp_handle_document_symbol}
-use std.nogc_sync_mut.lsp.lsp_document_sync.{lsp_visibility_dependencies_current_v1}
+use std.nogc_sync_mut.lsp.lsp_document_sync.{lsp_visibility_dependencies_current_v1, lsp_document_sync_apply}
+use std.common.json.value.{JsonValue, json_value_object_from, json_value_serialize}
 use std.nogc_sync_mut.lsp.lsp_visibility_provider_v1.{LspVisibilitySourceStatusV1,
     LspVisibilitySourceV1, LspVisibilitySourceReaderV1, LspVisibilityQueryStatusV1}
 use app.lsp.visibility_provider_v1.{lsp_install_visibility_provider_v1}
@@ -17,6 +18,22 @@ use std.io_runtime.{file_exists}
 
 var stale_manifest_path_v1 = ""
 var stale_target_path_v1 = ""
+
+fn overlay_document_body_v1(uri: text) -> text:
+    val document = json_value_object_from([("uri", JsonValue.Str(uri))])
+    json_value_serialize(json_value_object_from([("textDocument", document)]))
+
+fn overlay_open_body_v1(uri: text, version: i64, source: text) -> text:
+    val document = json_value_object_from([("uri", JsonValue.Str(uri)),
+        ("languageId", JsonValue.Str("simple")), ("version", JsonValue.Int(version)),
+        ("text", JsonValue.Str(source))])
+    json_value_serialize(json_value_object_from([("textDocument", document)]))
+
+fn overlay_change_body_v1(uri: text, version: i64, source: text) -> text:
+    val document = json_value_object_from([("uri", JsonValue.Str(uri)), ("version", JsonValue.Int(version))])
+    val change = json_value_object_from([("text", JsonValue.Str(source))])
+    json_value_serialize(json_value_object_from([("textDocument", document),
+        ("contentChanges", JsonValue.Array([change]))]))
 
 fn wrong_owner_source_v1(path: text) -> LspVisibilitySourceV1:
     LspVisibilitySourceV1(LspVisibilitySourceStatusV1.Ready, path + ".wrong", "",
@@ -105,12 +122,12 @@ describe "LSP server query integration":
         expect(file_write(path, saved)).to_equal(true)
         lsp_install_visibility_provider_v1()
         val uri = "file://" + path
-        lsp_handle_did_open("{\"textDocument\":{\"uri\":\"{uri}\",\"languageId\":\"simple\",\"version\":1,\"text\":\"{opened}\"}}")
-        lsp_handle_did_change("{\"textDocument\":{\"uri\":\"{uri}\",\"version\":2},\"contentChanges\":[{\"text\":\"{unsaved}\"}]}")
-        val reply = lsp_handle_document_symbol("91", "{\"textDocument\":{\"uri\":\"{uri}\"}}")
+        lsp_handle_did_open(overlay_open_body_v1(uri, 1, opened))
+        lsp_handle_did_change(overlay_change_body_v1(uri, 2, unsaved))
+        val reply = lsp_handle_document_symbol("91", overlay_document_body_v1(uri))
         val disk_after = file_read(path)
-        lsp_handle_did_close("{\"textDocument\":{\"uri\":\"{uri}\"}}")
-        val closed_reply = lsp_handle_document_symbol("92", "{\"textDocument\":{\"uri\":\"{uri}\"}}")
+        lsp_handle_did_close(overlay_document_body_v1(uri))
+        val closed_reply = lsp_handle_document_symbol("92", overlay_document_body_v1(uri))
         dir_remove_all(root)
         val symbols = server_query_response_result_v1(reply, 91.0)
         val closed_symbols = server_query_response_result_v1(closed_reply, 92.0)
@@ -150,6 +167,23 @@ describe "LSP server query integration":
         dir_remove_all(root)
         expect(result.status).to_equal(LspVisibilityQueryStatusV1.Ready)
         expect(dependencies_current).to_equal(false)
+
+    it "uses an open overlay with a valid negative document version":
+        step("Open a document at signed version minus two and request its symbols")
+        val root = secure_temp_dir("/tmp", "simple-lsp-negative-version-v1-").unwrap()
+        val path = root + "/fixture.spl"
+        val uri = "file://" + path
+        expect(file_write(path, "fn disk_negative_fixture_v1(): 1")).to_equal(true)
+        lsp_install_visibility_provider_v1()
+        expect(lsp_document_sync_apply("textDocument/didOpen",
+            overlay_open_body_v1(uri, -2, "fn live_negative_fixture_v1(): 2"))).to_equal(true)
+        val reply = lsp_handle_document_symbol("93", overlay_document_body_v1(uri))
+        lsp_handle_did_close(overlay_document_body_v1(uri))
+        dir_remove_all(root)
+        val symbols = server_query_response_result_v1(reply, 93.0)
+        expect(json_get_type(symbols)).to_equal("array")
+        expect(reply).to_contain("live_negative_fixture_v1")
+        expect(reply.contains("disk_negative_fixture_v1")).to_equal(false)
 
     it "keeps definition and references attached to the selected local symbol":
         step("Decode actual LSP responses for a shadowed symbol, including declaration context")

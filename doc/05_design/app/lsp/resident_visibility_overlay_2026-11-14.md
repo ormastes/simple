@@ -28,6 +28,8 @@ affects boundary classification.
 
 Before returning, the handler verifies the target and global overlay generation.
 Overlay dependencies must still match URI, version, lifetime and content.
+Document versions are signed integers; only the lifetime marker distinguishes
+closed disk snapshots. Negative versions remain valid for open documents.
 Disk dependencies are reread and compared to the consumed content; missing
 dependencies must still be absent. Closed targets additionally retain their
 initial source text. Stale results return an error, never a cached permission
@@ -71,3 +73,21 @@ explicit serial workers, core-c runtime, private cache, and a 300-second/4-GiB
 process-tree RSS watchdog. No address-space limit, fabricated estimates, or
 speculative refresh flag is used. The full compiler/tooling checks, generated
 manual and native qualification remain pending; this checkpoint is draft-only.
+
+Attempt 5 passed normal source admission and completed all 129 MIR/AOP modules.
+It reached native code generation, then stopped at the real process-tree RSS
+cap after 186.129 seconds (peak sample 4,306,477,056 bytes; exit -15). No executable
+was produced. The cache retains 115 native objects/capsule receipts and 129
+frontend cache files. Logs and receipt are under
+`build/lsp-overlay-supervised-20261114/` in the isolated worktree.
+
+Review during that run identified two additional issues: negative document
+versions were incorrectly treated as disk markers, and handwritten interpolated
+JSON in the new fixtures was subject to the compiler's documented doubled-brace
+decoding. The corrected sources discriminate by lifetime and use the canonical
+JSON serializer. The native probe now includes a valid negative-version overlay.
+
+Attempt 6 is the final allowed cycle, using the same real producer, 4-GiB/300-second
+limits and retained cache after committing these fixes. No further automatic
+retry, budget increase or attempt-history reset is authorized. Native acceptance
+still requires actual probe execution and its output/exit sentinel.
