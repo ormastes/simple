@@ -1,0 +1,67 @@
+# @req REQ-DTA-A1 REQ-DTA-B3
+# Authored real parser/projector scenarios; not runtime-qualified yet.
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.config.{Logger}
+use compiler.common.cache_contract.directory_source_epoch_v2.{DirectorySourceEpochV2}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.frontend_target_cfg_receipt_v1.{FrontendCfgDecisionReceiptV1, frontend_cfg_decision_digest_v1}
+use compiler.frontend.core.parser_preprocessor.{_pp_preprocess_conditionals_target_receipted_v1}
+use compiler.frontend.cache_artifact.macro_category_projection_v2.{MacroCategoryDraftV2,
+    macro_category_capture_draft_v2, macro_category_project_all_v2}
+use compiler.frontend.cache_artifact.macro_namespace_read_coverage_v2.{macro_category_complete_no_reads_v2,
+    MacroNamespaceReadCoverageV2}
+
+fn no_read_draft(source: text) -> MacroCategoryDraftV2:
+    val processed = _pp_preprocess_conditionals_target_receipted_v1(source, "linux", "aarch64").unwrap()
+    val receipt = FrontendCfgDecisionReceiptV1(source_identity: "fixture/current", source_digest: sha256_text(source),
+        target_triple: "aarch64-unknown-linux-gnu", target_os: "linux", target_arch: "aarch64",
+        preprocessed_digest: sha256_text(processed.source), decisions: processed.decisions,
+        decision_digest: frontend_cfg_decision_digest_v1(processed.decisions))
+    val parsed = parse_full_frontend(processed.source, "macro_coverage.spl", "macro_coverage", Logger(level: 0))
+    macro_category_capture_draft_v2("fixture", "macro_coverage", "macro_coverage.spl", "fixture/current", source,
+        receipt, "aarch64-unknown-linux-gnu", sha256_text("policy"), sha256_text("compiler"),
+        DirectorySourceEpochV2(driver_identity: 1, generation: 1)).unwrap()
+
+describe "macro namespace no-read coverage":
+    it "does not require unrelated ordinary import resolution when no macro names are read":
+        val draft = no_read_draft("use unrelated.module\nfn value() -> Int:\n    1\n")
+        val completed = macro_category_complete_no_reads_v2(draft).unwrap()
+        val is_no_reads = match completed.coverage:
+            case NoReads: true
+            case ResolvedReads: false
+        expect(is_no_reads).to_equal(true)
+        expect(completed.input.imports.len()).to_equal(0)
+        expect(completed.input.source_digest).to_equal(draft.source_digest)
+        expect(completed.input.source_epoch.driver_identity).to_equal(1)
+        val projection = macro_category_project_all_v2([completed.input]).unwrap()[0]
+        expect(projection.projection.use_table.uses.len()).to_equal(0)
+        expect(projection.projection.def_table.entries.len()).to_equal(0)
+
+    it "retains actual local definition identity without claiming an imported namespace":
+        val draft = no_read_draft("pub macro identity(x: Int) -> (returns result: Int):\n    emit result:\n        x\n")
+        val completed = macro_category_complete_no_reads_v2(draft).unwrap()
+        val projection = macro_category_project_all_v2([completed.input]).unwrap()[0]
+        expect(projection.projection.def_table.entries.len()).to_equal(1)
+        expect(projection.projection.use_table.uses.len()).to_equal(0)
+        expect(projection.definition_root.starts_with("sha256:")).to_equal(true)
+
+    it "requires access receipts for an actual invocation":
+        val draft = no_read_draft("fn invoke() -> Int:\n    missing!(1)\n")
+        expect(draft.source.invocations.len()).to_equal(1)
+        expect(macro_category_complete_no_reads_v2(draft).unwrap_err()).to_equal("macro-namespace-access-receipts-required")
+
+    it "requires access receipts for nested reads in an unused exported definition":
+        val draft = no_read_draft("pub macro twice(x: Int) -> (returns result: Int):\n    emit result:\n        imported!(x)\n")
+        expect(draft.source.defs[0].nested_macro_names.len()).to_be_greater_than(0)
+        expect(macro_category_complete_no_reads_v2(draft).unwrap_err()).to_equal("macro-namespace-access-receipts-required")
+
+    it "does not turn an inactive invocation into no-read evidence":
+        val draft = no_read_draft("@when(false)\nfn inactive() -> Int:\n    imported!(1)\n@end\n")
+        expect(draft.source.invocations.len()).to_be_greater_than(0)
+        expect(macro_category_complete_no_reads_v2(draft).unwrap_err()).to_equal("macro-namespace-access-receipts-required")
+
+    it "keeps the existing completed-input validation gate":
+        var draft = no_read_draft("fn value() -> Int:\n    1\n")
+        draft.source_digest = "invalid"
+        expect(macro_category_complete_no_reads_v2(draft).is_err()).to_equal(true)
