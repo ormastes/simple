@@ -1,0 +1,136 @@
+# Transient typed preparation for generated accessor helpers. This module
+# emits no instructions and grants no executable/lifetime admission.
+# Inputs are resolved by compiler owners, not source annotations or plugins.
+use compiler.hir.hir_accessor_field_v1.{HirAccessorFieldV1}
+use compiler.hir.hir_types.{HirTypeKind, SymbolId}
+use compiler.mir.mir_types.{MirType, MirTypeKind, MirSignature}
+use compiler.frontend.core.aop.{AdviceForm}
+
+enum MirAccessorOperationV1:
+    Read
+    Write
+
+enum MirAccessorMemoryProfileV1:
+    Unqualified
+    NoGcSynchronous
+
+enum MirAccessorPlaceV1:
+    DirectReference
+    ReadModifyWrite
+    Initialization
+    ValueAggregate
+    BorrowedProjection
+    Computed
+
+# Provenance must come from the declaring layout/provider, never the
+# identity-only HirModule.imported_layouts row or an unqualified short name.
+struct MirAccessorPhysicalV1:
+    owner_module: text
+    owner_name: text
+    receiver_type: MirType
+    field_type: MirType
+    field_order: [text]
+    layout_identity: text
+    provider_identity: text
+    target_abi: text
+    emission_owner: text
+    place: MirAccessorPlaceV1
+    writable: bool
+    nullable: bool
+    atomic: bool
+    volatile: bool
+    memory_profile: MirAccessorMemoryProfileV1 = MirAccessorMemoryProfileV1.Unqualified
+
+struct MirAccessorAdviceV1:
+    aspect_module: text
+    aspect_name: text
+    symbol: SymbolId
+    function_name: text
+    signature: MirSignature
+    form: AdviceForm
+    interface_digest: text
+    body_digest: text
+    effects_digest: text
+
+struct MirAccessorPlanV1:
+    declaration: HirAccessorFieldV1
+    physical: MirAccessorPhysicalV1
+    operation: MirAccessorOperationV1
+    signature: MirSignature
+    # This sequence is semantic. No sorting/deduplication after preparation.
+    ordered_advice: [MirAccessorAdviceV1]
+    # No helper symbol or executable admission is issued here. The emission
+    # coordinator must bind the full ordered plan to its canonical key and
+    # obtain a separately reviewed lifetime contract before emitting code.
+
+fn mir_accessor_scalar_type_v1(kind: HirTypeKind) -> Result<MirType, text>:
+    match kind:
+        case HirTypeKind.Bool: Ok(MirType(kind: MirTypeKind.Bool))
+        case HirTypeKind.Int(bits, signed):
+            if signed:
+                if bits == 8: return Ok(MirType(kind: MirTypeKind.I8))
+                if bits == 16: return Ok(MirType(kind: MirTypeKind.I16))
+                if bits == 32: return Ok(MirType(kind: MirTypeKind.I32))
+                if bits == 64: return Ok(MirType(kind: MirTypeKind.I64))
+            else:
+                if bits == 8: return Ok(MirType(kind: MirTypeKind.U8))
+                if bits == 16: return Ok(MirType(kind: MirTypeKind.U16))
+                if bits == 32: return Ok(MirType(kind: MirTypeKind.U32))
+                if bits == 64: return Ok(MirType(kind: MirTypeKind.U64))
+            Err("E-AOP-FIELD-PROFILE: unsupported integer width")
+        case _: Err("E-AOP-FIELD-PROFILE: field is not a supported scalar")
+
+pub fn mir_accessor_prepare_v1(declaration: HirAccessorFieldV1,
+    physical: MirAccessorPhysicalV1, operation: MirAccessorOperationV1,
+    ordered_advice: [MirAccessorAdviceV1]) -> Result<MirAccessorPlanV1, text>:
+    if not declaration.owner_symbol.is_valid() or not declaration.field_symbol.is_valid():
+        return Err("E-AOP-FIELD-OWNER: invalid declaration symbol identity")
+    if physical.memory_profile != MirAccessorMemoryProfileV1.NoGcSynchronous:
+        return Err("E-AOP-FIELD-PROFILE: memory provider is not qualified for synchronous accessor borrowing")
+    if declaration.owner_module == "" or physical.owner_module != declaration.owner_module or
+            physical.owner_name != declaration.owner_name:
+        return Err("E-AOP-FIELD-PLAN: physical owner differs from the resolved declaration")
+    if physical.layout_identity == "" or physical.provider_identity == "" or
+            physical.target_abi == "" or physical.emission_owner == "":
+        return Err("E-AOP-FIELD-PLAN: incomplete layout, provider, ABI or emission ownership")
+    if physical.place != MirAccessorPlaceV1.DirectReference or physical.nullable or
+            physical.atomic or physical.volatile:
+        return Err("E-AOP-FIELD-PROFILE: selected place requires a different qualified lowering")
+    if operation == MirAccessorOperationV1.Write and not physical.writable:
+        return Err("E-AOP-FIELD-ACCESS: original setter place is not writable")
+    match physical.receiver_type.kind:
+        case MirTypeKind.Struct(symbol):
+            if symbol.id != declaration.owner_symbol.id:
+                return Err("E-AOP-FIELD-PLAN: receiver type names a different declaration")
+        case _: return Err("E-AOP-FIELD-PROFILE: receiver ABI is not the resolved reference class")
+    val field_index = declaration.field_index
+    if field_index < 0 or field_index >= physical.field_order.len():
+        return Err("E-AOP-FIELD-PLAN: field ordinal is outside the declaring layout")
+    if physical.field_order[field_index] != declaration.field_name:
+        return Err("E-AOP-FIELD-PLAN: field ordinal does not name the selected declaration")
+    val exact_field_type = mir_accessor_scalar_type_v1(declaration.field_type.kind)?
+    if physical.field_type.kind != exact_field_type.kind:
+        return Err("E-AOP-FIELD-PLAN: physical field type differs from its declared scalar ABI")
+    for advice in ordered_advice:
+        if advice.aspect_module == "" or advice.aspect_name == "" or
+                not advice.symbol.is_valid() or advice.function_name == "":
+            return Err("E-AOP-FIELD-ADVICE: unresolved named aspect or advice identity")
+        if advice.form != AdviceForm.Before and advice.form != AdviceForm.AfterSuccess:
+            return Err("E-AOP-FIELD-ADVICE: accessor pilot supports before and after_success only")
+        if not advice.signature.params_known or advice.signature.params.len() != 0 or
+                advice.signature.return_type.kind != MirTypeKind.Unit or advice.signature.is_variadic:
+            return Err("E-AOP-FIELD-ADVICE: advice must have a resolved parameterless unit signature")
+        if advice.signature.declared_params_known and advice.signature.declared_params.len() != 0:
+            return Err("E-AOP-FIELD-ADVICE: declared advice signature contradicts parameterless ABI")
+        if advice.interface_digest == "" or advice.body_digest == "" or advice.effects_digest == "":
+            return Err("E-AOP-FIELD-ADVICE: incomplete advice identity or effects")
+    var params: [MirType] = [physical.receiver_type]
+    var return_type = exact_field_type
+    if operation == MirAccessorOperationV1.Write:
+        params.push(exact_field_type)
+        return_type = MirType.unit()
+    val signature = MirSignature(params: params, return_type: return_type,
+        is_variadic: false, params_known: true, declared_params: params,
+        declared_params_known: true)
+    Ok(MirAccessorPlanV1(declaration: declaration, physical: physical,
+        operation: operation, signature: signature, ordered_advice: ordered_advice))
