@@ -1,0 +1,101 @@
+# Real HIR semantic owner; tests are authored, not native qualification.
+use std.spec.*
+use compiler.common.cache_contract.generic_type_binder_v2.*
+use compiler.common.data.data_semantic_type_identity_v1.{data_semantic_type_identity_v1}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module_checked_reference_v1}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_symbol_table_methods.*
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
+use compiler.hir.hir_lowering.context_helpers.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.data_semantic_type_identity_v1.*
+
+fn generic_identity_owner_v2() -> HirLowering:
+    val source = "fn ordinary() -> i64:\n    1\n"
+    val parsed = parse_and_build_module_checked_reference_v1(source, "pkg/generic.spl").unwrap()
+    val surfaces = module_surfaces_from_modules({"pkg.generic": parsed},
+        [SourceFile(path: "pkg/generic.spl", content: source, module_name: "pkg.generic")]).unwrap()
+    var owner = hirlowering_for_module("pkg/generic.spl", surfaces)
+    owner.begin_module("pkg/generic.spl")
+    owner
+
+fn generic_identity_binder_v2(owner: HirLowering, name: text, depth: i64, index: i64) -> (HirLowering, GenericTypeBinderV2):
+    var updated = owner
+    var symbols = updated.symbols
+    val id = symbols.define(name, SymbolKind.TypeParam, nil, Span.empty(), Visibility.Private, false, Some("pkg/generic.spl"))
+    updated.symbols = symbols
+    (updated, GenericTypeBinderV2(symbol_id: id.id, source_name: name, scope_depth: depth, index: index, kind: "type"))
+
+fn generic_identity_type_v2(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: Span.empty())
+
+describe "Binder-aware generic semantic type identity":
+    it "normalizes binder spelling and process-local symbol numbering":
+        var first = generic_identity_owner_v2()
+        val (t_owner, t) = generic_identity_binder_v2(first, "T", 0, 0)
+        first = t_owner
+        var second = generic_identity_owner_v2()
+        val (padding_owner, padding) = generic_identity_binder_v2(second, "Unrelated", 1, 0)
+        second = padding_owner
+        val (u_owner, u) = generic_identity_binder_v2(second, "U", 0, 0)
+        second = u_owner
+        expect(t.symbol_id == u.symbol_id).to_equal(false)
+        val left = first.generic_type_canonical_v2(generic_identity_type_v2(HirTypeKind.TypeParam("T", [])), [t]).unwrap()
+        val right = second.generic_type_canonical_v2(generic_identity_type_v2(HirTypeKind.TypeParam("U", [])), [u]).unwrap()
+        expect(left).to_equal(right)
+        expect(data_semantic_type_identity_v1(left).is_err()).to_equal(true)
+
+    it "resolves Named type parameters by actual semantic symbol identity":
+        var owner = generic_identity_owner_v2()
+        val (binder_owner, binder) = generic_identity_binder_v2(owner, "T", 0, 0)
+        owner = binder_owner
+        val named = generic_identity_type_v2(HirTypeKind.Named(SymbolId(id: binder.symbol_id), []))
+        val direct = generic_identity_type_v2(HirTypeKind.TypeParam("T", []))
+        expect(owner.generic_type_canonical_v2(named, [binder]).unwrap()).to_equal(owner.generic_type_canonical_v2(direct, [binder]).unwrap())
+        expect(owner.data_type_identity_v1(direct).is_err()).to_equal(true)
+
+    it "preserves isolation and reference mutability around binder types":
+        var owner = generic_identity_owner_v2()
+        val (binder_owner, binder) = generic_identity_binder_v2(owner, "T", 0, 0)
+        owner = binder_owner
+        val parameter = generic_identity_type_v2(HirTypeKind.TypeParam("T", []))
+        val isolated = generic_identity_type_v2(HirTypeKind.Isolated(parameter))
+        val plain = generic_identity_type_v2(HirTypeKind.Ref(parameter, false))
+        val retained = generic_identity_type_v2(HirTypeKind.Ref(isolated, false))
+        val mutable = generic_identity_type_v2(HirTypeKind.Ref(isolated, true))
+        val key = owner.generic_type_canonical_v2(retained, [binder]).unwrap()
+        expect(key == owner.generic_type_canonical_v2(plain, [binder]).unwrap()).to_equal(false)
+        expect(key == owner.generic_type_canonical_v2(mutable, [binder]).unwrap()).to_equal(false)
+
+    it "uses lexical coordinates independently of context array order":
+        var owner = generic_identity_owner_v2()
+        val (outer_owner, outer) = generic_identity_binder_v2(owner, "Outer", 1, 0)
+        owner = outer_owner
+        val (inner_owner, inner) = generic_identity_binder_v2(owner, "Inner", 0, 0)
+        owner = inner_owner
+        val pair = generic_identity_type_v2(HirTypeKind.Tuple([
+            generic_identity_type_v2(HirTypeKind.TypeParam("Inner", [])),
+            generic_identity_type_v2(HirTypeKind.TypeParam("Outer", []))]))
+        expect(owner.generic_type_canonical_v2(pair, [outer, inner]).unwrap()).to_equal(owner.generic_type_canonical_v2(pair, [inner, outer]).unwrap())
+
+    it "rejects duplicate coordinates stale names and unrepresented const binders":
+        var owner = generic_identity_owner_v2()
+        val (binder_owner, binder) = generic_identity_binder_v2(owner, "T", 0, 0)
+        owner = binder_owner
+        val parameter = generic_identity_type_v2(HirTypeKind.TypeParam("T", []))
+        expect(owner.generic_type_canonical_v2(parameter, [binder, binder]).is_err()).to_equal(true)
+        var stale = binder
+        stale.source_name = "Wrong"
+        expect(owner.generic_type_canonical_v2(parameter, [stale]).is_err()).to_equal(true)
+        var constant = binder
+        constant.kind = "const"
+        expect(owner.generic_type_canonical_v2(parameter, [constant]).is_err()).to_equal(true)
+        expect(owner.generic_type_canonical_v2(generic_identity_type_v2(HirTypeKind.TypeParam("Free", [])), [binder]).is_err()).to_equal(true)
+
+    it "rejects unresolved and erased types instead of declaring them concrete":
+        var owner = generic_identity_owner_v2()
+        expect(owner.generic_type_canonical_v2(generic_identity_type_v2(HirTypeKind.Any), []).is_err()).to_equal(true)
+        expect(owner.generic_type_canonical_v2(generic_identity_type_v2(HirTypeKind.Error), []).is_err()).to_equal(true)

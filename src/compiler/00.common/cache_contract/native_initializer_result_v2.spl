@@ -1,0 +1,47 @@
+use compiler.common.cache_contract.physical_tld_v1.{three_payload_contract_digest_valid_v1}
+# Successful backend observations, not complete PackageInit admission.
+pub struct NativeInitializerStartupV2:
+    ordered_init_symbols: [text]
+    entry_source_digest: text
+    entry_object_digest: text
+
+pub struct NativeEntryObjectV2:
+    object_path: text
+    startup: NativeInitializerStartupV2?
+
+pub struct NativeLinkedArtifactV2:
+    output_path: text
+    startup: NativeInitializerStartupV2?
+
+# Legacy/nonhosted results carry no startup completeness claim.
+pub fn native_link_without_startup_v2(result: Result<text, text>) -> Result<NativeLinkedArtifactV2, text>:
+    match result:
+        case Ok(path): Ok(NativeLinkedArtifactV2(output_path: path, startup: nil))
+        case Err(message): Err(message)
+
+
+# Pure consistency gate. Its observations are supplied by the actual backend;
+# callers cannot turn a constructible DTO into authenticated compilation proof.
+pub fn native_initializer_startup_observe_v2(discovery_complete: bool, source_written: bool,
+        expected_source: text, source_before: text, source_after: text,
+        object_digest: text, ordered_names: [text]) -> NativeInitializerStartupV2?:
+    if not discovery_complete or not source_written or
+            not three_payload_contract_digest_valid_v1(expected_source) or
+            source_before != expected_source or source_after != expected_source or
+            not three_payload_contract_digest_valid_v1(object_digest): return nil
+    Some(NativeInitializerStartupV2(ordered_init_symbols: ordered_names,
+        entry_source_digest: expected_source, entry_object_digest: object_digest))
+
+# Compare complete discovered symbol sets without reordering the actual backend
+# sequence. Empty is valid only when both owning observations are complete.
+pub fn native_initializer_symbol_sets_match_v2(expected: [text], actual: [text]) -> bool:
+    if expected.len() != actual.len(): return false
+    var members: Dict<text, bool> = {}
+    for name in expected:
+        if name == "" or members.has(name): return false
+        members[name] = true
+    var seen: Dict<text, bool> = {}
+    for name in actual:
+        if not members.has(name) or seen.has(name): return false
+        seen[name] = true
+    true

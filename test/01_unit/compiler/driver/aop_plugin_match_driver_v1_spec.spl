@@ -1,0 +1,60 @@
+use std.spec.{describe, it, expect}
+use compiler.common.cache_contract.aspect_plugin_model_v1.*
+use compiler.common.cache_contract.aspect_match_shard_v1.{JoinPointFactV1,
+    directory_join_point_facts_v1, pointcut_selector_parse_v1, pointcut_match_key_v1}
+use compiler.driver.cache.aop_match_cache_driver_v1.{AopMatchDriverStateV1, aop_plugin_match_shard_acquire_v1}
+
+describe "admitted-caller plugin match driver API":
+    it "reuses the instance while directory results retain their existing match keys":
+        val state = AopMatchDriverStateV1.create()
+        val definition = PluginDefinitionV1(code_digest: "sha256:" + "1".repeat(64), fields: [
+            PluginConfigFieldV1(name: "path", role: PluginFieldRoleV1.Scope)])
+        val a = directory_join_point_facts_v1("a", ["a/main.spl"], [
+            JoinPointFactV1(id: "a::f", kind: "forward", symbol: "f", attrs: ["logged"],
+                owner_file: "a/main.spl", base_body_digest: "")], [], true)
+        val b = directory_join_point_facts_v1("b", ["b/main.spl"], [
+            JoinPointFactV1(id: "b::g", kind: "forward", symbol: "g", attrs: [],
+                owner_file: "b/main.spl", base_body_digest: "")], [], true)
+        val first = aop_plugin_match_shard_acquire_v1(state, definition,
+            [PluginConfigValueV1(name: "path", value: "a")], "attr(logged)", a, "a1").unwrap()
+        val second = aop_plugin_match_shard_acquire_v1(state, definition,
+            [PluginConfigValueV1(name: "path", value: "b")], "attr(logged)", b, "b1").unwrap()
+        val repeat = aop_plugin_match_shard_acquire_v1(state, definition,
+            [PluginConfigValueV1(name: "path", value: "a")], "attr(logged)", a, "a2").unwrap()
+        expect(first.shard.sorted_matching_ids).to_equal(["a::f"])
+        expect(second.shard.sorted_matching_ids).to_equal([])
+        expect(first.match_key).to_equal(pointcut_match_key_v1(pointcut_selector_parse_v1("attr(logged)"), a))
+        expect(first.match_key == second.match_key).to_equal(false)
+        expect(repeat.match_key).to_equal(first.match_key)
+        expect(second.instance.key).to_equal(first.instance.key)
+        expect(state.plugin_instances.created_count).to_equal(1)
+        expect(state.shard_misses).to_equal(2)
+        expect(state.shard_hits).to_equal(1)
+
+    it "refuses partial facts and unsupported predicates without creating an instance":
+        val state = AopMatchDriverStateV1.create()
+        val definition = PluginDefinitionV1(code_digest: "sha256:" + "1".repeat(64), fields: [])
+        val partial = directory_join_point_facts_v1("a", [], [], [], false)
+        val complete = directory_join_point_facts_v1("a", [], [], [], true)
+        expect(aop_plugin_match_shard_acquire_v1(state, definition, [], "attr(a)", partial, "p").is_err()).to_equal(true)
+        expect(aop_plugin_match_shard_acquire_v1(state, definition, [], "call(f)", complete, "u").is_err()).to_equal(true)
+        expect(state.plugin_instances.created_count).to_equal(0)
+        expect(state.shard_misses).to_equal(0)
+
+use compiler.driver.cache.aop_match_cache_driver_v1.{aop_builtin_forward_match_acquire_v1}
+
+describe "checked builtin forward adapter identity":
+    it "requires a real provider digest and shares the compiled builtin across directory scopes":
+        val state = AopMatchDriverStateV1.create()
+        val a = directory_join_point_facts_v1("a", [], [], [], true)
+        val b = directory_join_point_facts_v1("b", [], [], [], true)
+        expect(aop_builtin_forward_match_acquire_v1(state, "", "attr(logged)", a, "invalid").is_err()).to_equal(true)
+        expect(state.plugin_instances.created_count).to_equal(0)
+        val first = aop_builtin_forward_match_acquire_v1(state, "1".repeat(64), "attr(logged)", a, "first").unwrap()
+        val second = aop_builtin_forward_match_acquire_v1(state, "1".repeat(64), "attr(logged)", b, "second").unwrap()
+        expect(first.instance.key).to_equal(second.instance.key)
+        expect(second.instance_hit).to_equal(true)
+        expect(second.instance.values.len()).to_equal(1)
+        expect(second.instance.values[0].value).to_equal("simple.compiler.static-forward/v1")
+        val changed = aop_builtin_forward_match_acquire_v1(state, "2".repeat(64), "attr(logged)", b, "changed").unwrap()
+        expect(changed.instance.key == first.instance.key).to_equal(false)

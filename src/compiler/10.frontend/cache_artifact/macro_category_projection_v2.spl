@@ -1,0 +1,427 @@
+# Current full-parse capture and target-bound macro projection. These records
+# require trusted caller provenance; they are not public admission capabilities.
+# Parent phase2 owns exclusive parser access and promotion before scope release.
+use compiler.common.cache_contract.directory_source_epoch_v2.{DirectorySourceEpochV2,
+    directory_source_epoch_valid_v2, directory_source_epoch_equal_v2}
+use compiler.common.cache_contract.guard_id_v1.{GuardEvalV1, active_guard_root_v1, active_guard_root_admissible_v1}
+use compiler.common.cache_contract.physical_tld_v1.{three_payload_contract_budget_v1,
+    three_payload_contract_digest_valid_v1, three_payload_contract_max_items_v1, ThreePayloadContractBudgetV1}
+use compiler.common.cache.canonical_identity.{canonical_identity_sort_texts}
+use compiler.common.cache_contract.macro_reference_manifest_v1.{macro_hash_v1,
+    macro_definition_table_valid_v1, macro_def_id_canonical_v1}
+use compiler.common.cache_contract.macro_rr_contract_v1.{macro_input_root_v1, macro_effect_surface_v1}
+use compiler.frontend.frontend_target_cfg_receipt_v1.{FrontendCfgDecisionReceiptV1, frontend_cfg_receipt_valid_v1}
+use compiler.frontend.core.parser_preprocessor.{PreprocessorState, preprocessor_state_take, preprocessor_state_install}
+use compiler.frontend.cache_artifact.macro_source_from_parse_v1.{MacroGuardScanV1, macro_guard_scan_v1, macro_module_source_from_scan_v2}
+use compiler.frontend.cache_artifact.macro_reference_projector.{MacroModuleSourceV1,
+    MacroModuleProjectionV1, MacroImportBindingV2, project_macro_module_bound_v2, macro_bound_projection_work_v2}
+use compiler.frontend.core._Ast.decl_nodes.{macro_fact_def_count, macro_fact_use_count, macro_fact_def_visibility_at, macro_fact_def_name_at}
+use std.common.crypto.sha256.{sha256_text}
+
+pub struct MacroCategoryImportNameV2:
+    origin_name: text
+    visible_name: text
+
+pub struct MacroCategoryImportV2:
+    source_id: text
+    import_all: bool
+    names: [MacroCategoryImportNameV2]
+
+# Definitions captured before semantic import winners are known. This type
+# cannot be passed to project_all; completion requires resolved import bindings.
+pub struct MacroCategoryDraftV2:
+    source: MacroModuleSourceV1
+    guards: [GuardEvalV1]
+    source_identity: text
+    source_digest: text
+    target_triple: text
+    preprocessed_digest: text
+    cfg_decision_digest: text
+    environment_policy_digest: text
+    executing_image_digest: text
+    source_epoch: DirectorySourceEpochV2
+
+pub struct MacroCategoryInputV2:
+    source: MacroModuleSourceV1
+    guards: [GuardEvalV1]
+    source_identity: text
+    source_digest: text
+    target_triple: text
+    preprocessed_digest: text
+    cfg_decision_digest: text
+    environment_policy_digest: text
+    executing_image_digest: text
+    source_epoch: DirectorySourceEpochV2
+    imports: [MacroCategoryImportV2]
+
+pub struct MacroCategoryProjectionV2:
+    input: MacroCategoryInputV2
+    projection: MacroModuleProjectionV1
+    definition_root: text
+    input_root: text
+    effect_surface: text
+    active_guard_root: text
+    category_root: text
+
+fn _macro_input_valid_v2(input: MacroCategoryInputV2) -> bool:
+    if input.source.defs.len() > 256 or input.source.invocations.len() > 256 or input.imports.len() > 256:
+        return false
+    var names = 0
+    for binding in input.imports:
+        names = names + binding.names.len()
+        if names > 256: return false
+    if not directory_source_epoch_valid_v2(input.source_epoch) or input.source.source_id == "" or
+            input.source.module == "" or input.source_identity == "" or input.target_triple == "" or
+            not three_payload_contract_digest_valid_v1(input.source_digest) or
+            not three_payload_contract_digest_valid_v1(input.preprocessed_digest) or
+            not three_payload_contract_digest_valid_v1(input.cfg_decision_digest) or
+            not three_payload_contract_digest_valid_v1(input.environment_policy_digest) or
+            not three_payload_contract_digest_valid_v1(input.executing_image_digest): return false
+    _macro_input_budget_v2(input, ThreePayloadContractBudgetV1(remaining_bytes: 65536,
+        remaining_items: 4096, used_bytes: 0, ok: true)).ok
+
+fn _macro_input_budget_v2(input: MacroCategoryInputV2, budget: ThreePayloadContractBudgetV1) -> ThreePayloadContractBudgetV1:
+    budget.add_text(input.source.source_id, false)
+    budget.add_text(input.source.module, false)
+    budget.add_text(input.source.package, true)
+    budget.add_text(input.source_identity, false)
+    budget.add_items(input.source.defs.len() + input.source.invocations.len() + input.guards.len() + input.imports.len())
+    if not budget.ok: return budget
+    for import_binding in input.imports:
+        if import_binding.source_id == "" or (import_binding.import_all and import_binding.names.len() != 0):
+            budget.ok = false
+            return budget
+        budget.add_text(import_binding.source_id, false)
+        budget.add_items(import_binding.names.len())
+        if not budget.ok: return budget
+        for name in import_binding.names:
+            budget.add_text(name.origin_name, false)
+            budget.add_text(name.visible_name, false)
+            if not budget.ok: return budget
+    _macro_source_budget_v2(input.source, input.guards, budget)
+
+fn _macro_source_budget_v2(source: MacroModuleSourceV1, guards: [GuardEvalV1],
+        budget: ThreePayloadContractBudgetV1) -> ThreePayloadContractBudgetV1:
+    for definition in source.defs:
+        budget.add_text(definition.def.name, false)
+        budget.add_text(definition.body_text, true)
+        budget.add_items(definition.nested_macro_names.len() + definition.declared_effects.len() +
+            definition.def.params.len() + definition.def.contract_intros.len() + definition.guard_ids.len() +
+            definition.def.contract_injects.len())
+        if not budget.ok: return budget
+        for parameter in definition.def.params: budget.add_text(parameter, false)
+        for intro in definition.def.contract_intros:
+            budget.add_text(intro.kind, false)
+            budget.add_text(intro.name_pattern, false)
+            if intro.type_pattern != nil: budget.add_text(intro.type_pattern.unwrap(), false)
+        for inject in definition.def.contract_injects: budget.add_text(inject.label, false)
+        for guard in definition.guard_ids:
+            budget.add_text(guard.canonical_expr, false)
+            budget.add_text(guard.digest, false)
+        for name in definition.nested_macro_names: budget.add_text(name, false)
+        for effect in definition.declared_effects: budget.add_text(effect, false)
+        if not budget.ok: return budget
+    for invocation in source.invocations:
+        budget.add_text(invocation.invocation_text, true)
+        budget.add_text(invocation.args_text, true)
+        budget.add_text(invocation.requested_name, false)
+        budget.add_text(invocation.region_id, false)
+        budget.add_text(invocation.stable_invocation_id, false)
+        budget.add_text(invocation.hygiene_scope_id, false)
+        budget.add_text(invocation.active_guard_id, true)
+        if not budget.ok: return budget
+    for guard in guards:
+        budget.add_text(guard.guard.canonical_expr, false)
+        budget.add_text(guard.guard.digest, false)
+        if not budget.ok: return budget
+    budget
+
+# The legacy scanner cannot reconstruct multi-line inactive headers or @cfg
+# macro declarations. Refuse those forms rather than proving false absence.
+fn _macro_inactive_coverage_v2(source: text, receipt: FrontendCfgDecisionReceiptV1,
+        scan: MacroGuardScanV1) -> bool:
+    val lines = source.split("\n")
+    if scan.line_guard.len() != lines.len(): return false
+    var line_no = 0
+    for line in lines:
+        line_no = line_no + 1
+        val trimmed = line.trim()
+        val plain_macro = trimmed.starts_with("macro ")
+        val prefixed_macro = (trimmed.starts_with("pub") or trimmed.starts_with("pri")) and trimmed.contains("macro ")
+        if not plain_macro and not prefixed_macro: continue
+        var inactive = false
+        val guard_id = scan.line_guard[line_no - 1]
+        for evaluation in scan.evals:
+            if evaluation.guard.digest == guard_id and evaluation.evaluable and not evaluation.active:
+                inactive = true
+        if inactive:
+            if prefixed_macro: return false
+            if not scan.inactive_defs.lines.contains(line_no) or not trimmed.ends_with(":"): return false
+            var balance = 0
+            var position = 0
+            while position < trimmed.byte_len():
+                val ch = trimmed.substring(position, position + 1)
+                if ch == "(": balance = balance + 1
+                elif ch == ")": balance = balance - 1
+                if balance < 0: return false
+                position = position + 1
+            if balance != 0: return false
+        # @cfg declaration guards are outside the legacy @when scanner's
+        # grammar. The target receipt supplies exact excluded declaration spans.
+        for decision in receipt.decisions:
+            if decision.directive_kind == "cfg" and not decision.effective_active and
+                    line_no >= decision.excluded_start_line and line_no <= decision.excluded_end_line:
+                return false
+    true
+
+# Call immediately after the owning successful full parse, before any other
+# parser enters. `source_id` is the resolved path; source_identity is inventory ID.
+pub fn macro_category_capture_draft_v2(package: text, module_name: text, source_id: text,
+        source_identity: text, source: text, receipt: FrontendCfgDecisionReceiptV1,
+        target_triple: text, environment_policy_digest: text, executing_image_digest: text,
+        source_epoch: DirectorySourceEpochV2) -> Result<MacroCategoryDraftV2, text>:
+    if source.byte_len() > 65536 or source.split("\n").len() > 2048 or
+            macro_fact_def_count() > 256 or macro_fact_use_count() > 256:
+        return Err("macro-category-capture-work-limit")
+    if not directory_source_epoch_valid_v2(source_epoch) or module_name == "" or
+            source_id == "" or source_identity == "" or target_triple == "" or
+            not three_payload_contract_digest_valid_v1(environment_policy_digest) or
+            not three_payload_contract_digest_valid_v1(executing_image_digest):
+        return Err("macro-category-draft-provenance-unavailable")
+    val source_digest = sha256_text(source)
+    if not frontend_cfg_receipt_valid_v1(receipt, source_identity, source_digest, target_triple):
+        return Err("macro-category-cfg-receipt-mismatch")
+    # No callback/yield/concurrent use while borrowing this serialized owner.
+    val previous = preprocessor_state_take()
+    preprocessor_state_install(PreprocessorState(_pp_tokens: [], _pp_pos: 0,
+        _pp_target_mode: true, _pp_target_os: receipt.target_os,
+        _pp_target_arch: receipt.target_arch, _pp_target_error: "", _pp_target_decisions: []))
+    val scan = macro_guard_scan_v1(source)
+    if not _macro_inactive_coverage_v2(source, receipt, scan):
+        val _evaluated = preprocessor_state_take()
+        preprocessor_state_install(previous)
+        return Err("macro-category-inactive-syntax-unavailable")
+    if scan.inactive_defs.lines.len() + macro_fact_def_count() > 256 or
+            scan.inactive_use_names.len() + macro_fact_use_count() > 256 or scan.evals.len() > 256:
+        val _evaluated = preprocessor_state_take()
+        preprocessor_state_install(previous)
+        return Err("macro-category-capture-work-limit")
+    val (captured, guards) = macro_module_source_from_scan_v2(package, module_name, source_id, scan)
+    val evaluated = preprocessor_state_take()
+    preprocessor_state_install(previous)
+    if evaluated._pp_target_error != "": return Err("macro-category-target-evaluation: " + evaluated._pp_target_error)
+    # The legacy companion adapter marks every definition public. V2 must use
+    # the real active parser pool visibility and must not widen scoped access.
+    var definitions = captured.defs
+    var definition_index = 0
+    while definition_index < definitions.len():
+        var definition = definitions[definition_index]
+        if definition_index < macro_fact_def_count():
+            if definition.def.name != macro_fact_def_name_at(definition_index):
+                return Err("macro-category-pool-identity-mismatch")
+            val visibility = macro_fact_def_visibility_at(definition_index)
+            if visibility != "public" and visibility != "private":
+                return Err("macro-category-scoped-visibility-unavailable")
+            definition.is_public = visibility == "public"
+        else:
+            # Only plain inactive headers are admitted; their declaration
+            # default is private, matching parse_macro_decl("private").
+            definition.is_public = false
+        definitions[definition_index] = definition
+        definition_index = definition_index + 1
+    val visible_source = MacroModuleSourceV1(package: captured.package, module: captured.module,
+        source_id: captured.source_id, defs: definitions, invocations: captured.invocations)
+    val budget = ThreePayloadContractBudgetV1(remaining_bytes: 65536,
+        remaining_items: 4096, used_bytes: 0, ok: true)
+    for field in [visible_source.source_id, visible_source.module, source_identity]:
+        budget.add_text(field, false)
+    budget.add_text(visible_source.package, true)
+    budget.add_items(visible_source.defs.len() + visible_source.invocations.len() + guards.len())
+    if not budget.ok or not _macro_source_budget_v2(visible_source, guards, budget).ok:
+        return Err("macro-category-draft-over-budget")
+    Ok(MacroCategoryDraftV2(source: visible_source, guards: guards,
+        source_identity: source_identity, source_digest: source_digest,
+        target_triple: target_triple, preprocessed_digest: receipt.preprocessed_digest,
+        cfg_decision_digest: receipt.decision_digest, environment_policy_digest: environment_policy_digest,
+        executing_image_digest: executing_image_digest, source_epoch: source_epoch))
+
+# Trusted semantic resolver boundary: imports must be the actual resolved
+# exposure set, including an explicitly established empty set.
+pub fn macro_category_complete_v2(draft: MacroCategoryDraftV2,
+        imports: [MacroCategoryImportV2]) -> Result<MacroCategoryInputV2, text>:
+    val input = MacroCategoryInputV2(source: draft.source, guards: draft.guards,
+        source_identity: draft.source_identity, source_digest: draft.source_digest,
+        target_triple: draft.target_triple, preprocessed_digest: draft.preprocessed_digest,
+        cfg_decision_digest: draft.cfg_decision_digest,
+        environment_policy_digest: draft.environment_policy_digest,
+        executing_image_digest: draft.executing_image_digest, source_epoch: draft.source_epoch,
+        imports: imports)
+    if not _macro_input_valid_v2(input): return Err("macro-category-input-invalid-or-over-budget")
+    Ok(input)
+
+# Compatibility path for callers already holding resolved imports at parse time.
+pub fn macro_category_capture_v2(package: text, module_name: text, source_id: text,
+        source_identity: text, source: text, receipt: FrontendCfgDecisionReceiptV1,
+        target_triple: text, environment_policy_digest: text, executing_image_digest: text,
+        source_epoch: DirectorySourceEpochV2, imports: [MacroCategoryImportV2]) -> Result<MacroCategoryInputV2, text>:
+    val draft = macro_category_capture_draft_v2(package, module_name, source_id,
+        source_identity, source, receipt, target_triple, environment_policy_digest,
+        executing_image_digest, source_epoch)?
+    macro_category_complete_v2(draft, imports)
+
+fn _macro_import_sources_v2(imports: [MacroCategoryImportV2]) -> [text]:
+    var sources: [text] = []
+    for binding in imports:
+        if not sources.contains(binding.source_id): sources = sources.push(binding.source_id)
+    canonical_identity_sort_texts(sources)
+
+fn _macro_visible_bindings_v2(imports: [MacroCategoryImportV2],
+        modules: [MacroModuleProjectionV1]) -> Result<[MacroImportBindingV2], text>:
+    var out: [MacroImportBindingV2] = []
+    var seen: Dict<text, bool> = {}
+    for binding in imports:
+        var found = false
+        for module in modules:
+            if module.source_id != binding.source_id: continue
+            if found: return Err("macro-import-source-ambiguous")
+            found = true
+            for entry in module.def_table.entries:
+                if not entry.is_public: continue
+                var exposed: [text] = []
+                if binding.import_all: exposed = exposed.push(entry.macro_name)
+                else:
+                    for name in binding.names:
+                        if name.origin_name == entry.macro_name: exposed = exposed.push(name.visible_name)
+                for visible in exposed:
+                    val id = macro_def_id_canonical_v1(entry.def_id)
+                    val identity = macro_hash_v1("macro-import-binding/v2", [visible, id])
+                    if not seen.has(identity):
+                        seen[identity] = true
+                        out = out.push(MacroImportBindingV2(visible_name: visible, origin_def_id: id))
+                    if out.len() > 256: return Err("macro-binding-work-limit")
+        if not found: return Err("macro-import-source-unavailable")
+    Ok(out)
+
+fn _macro_needs_imports_v2(input: MacroCategoryInputV2) -> bool:
+    if input.source.invocations.len() > 0: return true
+    # Exported definitions can be invoked by future consumers. Nested reads
+    # matter even when this module itself has no invocation.
+    for definition in input.source.defs:
+        if definition.nested_macro_names.len() > 0: return true
+    false
+
+fn _macro_project_one_v2(input: MacroCategoryInputV2,
+        imported: [MacroModuleProjectionV1]) -> Result<MacroCategoryProjectionV2, text>:
+    for definition in input.source.defs:
+        for effect in definition.declared_effects:
+            if effect.starts_with("ctfe:"): return Err("macro-category-ctfe-read-closure-unavailable")
+    val profile = macro_hash_v1("macro-category-profile/v2", [input.target_triple,
+        input.environment_policy_digest, input.executing_image_digest, input.cfg_decision_digest])
+    val guards = active_guard_root_v1(profile, input.guards)
+    if not active_guard_root_admissible_v1(guards): return Err("macro-category-guards-incomplete")
+    val bound = _macro_visible_bindings_v2(if _macro_needs_imports_v2(input): input.imports else: [], imported)
+    if bound.is_err(): return Err(bound.unwrap_err())
+    val projected = project_macro_module_bound_v2(input.source, imported, bound.unwrap(), profile, input.guards)
+    if projected.is_err(): return Err(projected.unwrap_err())
+    val projection = projected.unwrap()
+    if projection.diagnostics.len() > 0 or projection.uncacheable_def_ids.len() > 0 or
+            not macro_definition_table_valid_v1(projection.def_table) or
+            projection.def_keys.len() != projection.def_table.entries.len():
+        return Err("macro-category-projection-incomplete")
+    val root = macro_input_root_v1(projection.use_table.uses)
+    if not root.known or not root.complete: return Err("macro-category-input-root-incomplete")
+    var keys: [text] = []
+    var seen: Dict<text, bool> = {}
+    for entry in projection.def_table.entries:
+        val id = macro_def_id_canonical_v1(entry.def_id)
+        if seen.has(id): return Err("macro-category-duplicate-definition")
+        seen[id] = true
+        var found = false
+        for key in projection.def_keys:
+            if key.def_id == id:
+                if found or key.key == "": return Err("macro-category-definition-key-invalid")
+                found = true
+                keys = keys.push(macro_hash_v1("macro-category-definition/v2", [id, key.key]))
+        if not found: return Err("macro-category-definition-key-missing")
+    val definitions = macro_hash_v1("macro-category-definitions/v2", canonical_identity_sort_texts(keys))
+    val effect = macro_effect_surface_v1(projection.def_table, projection.generated_public_names)
+    val category = macro_hash_v1("macro-category/v2", [input.source.package, input.source.module,
+        definitions, root.root, effect, guards.root_digest])
+    Ok(MacroCategoryProjectionV2(input: input, projection: projection, definition_root: definitions,
+        input_root: root.root, effect_surface: effect, active_guard_root: guards.root_digest, category_root: category))
+
+# Bounded deterministic Kahn traversal. A missing needed source or unresolved
+# cycle refuses the complete graph; it never reads legacy companion metadata.
+pub fn macro_category_project_all_v2(inputs: [MacroCategoryInputV2]) -> Result<[MacroCategoryProjectionV2], text>:
+    if inputs.len() == 0 or inputs.len() > 128: return Err("macro-category-graph-bounds")
+    val first = inputs[0]
+    var by_source: Dict<text, MacroCategoryInputV2> = {}
+    var identities: Dict<text, bool> = {}
+    var modules: Dict<text, bool> = {}
+    var source_ids: [text] = []
+    var edge_count = 0
+    var graph_budget = three_payload_contract_budget_v1()
+    for input in inputs:
+        graph_budget = _macro_input_budget_v2(input, graph_budget)
+        if not graph_budget.ok: return Err("macro-category-total-budget")
+        if not _macro_input_valid_v2(input) or
+                not directory_source_epoch_equal_v2(input.source_epoch, first.source_epoch) or
+                input.target_triple != first.target_triple or
+                input.environment_policy_digest != first.environment_policy_digest or
+                input.executing_image_digest != first.executing_image_digest:
+            return Err("macro-category-source-generation-mismatch")
+        val id = input.source.source_id
+        val module_key = macro_hash_v1("macro-category-module-id/v2", [input.source.package, input.source.module])
+        if by_source.has(id) or identities.has(input.source_identity) or modules.has(module_key):
+            return Err("macro-category-duplicate-module")
+        by_source[id] = input
+        identities[input.source_identity] = true
+        modules[module_key] = true
+        source_ids = source_ids.push(id)
+        if _macro_needs_imports_v2(input): edge_count = edge_count + _macro_import_sources_v2(input.imports).len()
+        if edge_count > three_payload_contract_max_items_v1(): return Err("macro-category-edge-bounds")
+    source_ids = canonical_identity_sort_texts(source_ids)
+    var remaining: Dict<text, i64> = {}
+    var users: Dict<text, [text]> = {}
+    var ready: [text] = []
+    for id in source_ids:
+        val input = by_source[id]
+        val deps = if _macro_needs_imports_v2(input): _macro_import_sources_v2(input.imports) else: []
+        remaining[id] = deps.len()
+        if deps.len() == 0: ready = ready.push(id)
+        for dependency in deps:
+            if not by_source.has(dependency): return Err("macro-category-import-unavailable: " + dependency)
+            var dependent_ids: [text] = if users.has(dependency): users[dependency] else: []
+            dependent_ids = dependent_ids.push(id)
+            users[dependency] = dependent_ids
+    var projected: Dict<text, MacroCategoryProjectionV2> = {}
+    var work_remaining = 1000000
+    var cursor = 0
+    while cursor < ready.len():
+        val id = ready[cursor]
+        cursor = cursor + 1
+        val input = by_source[id]
+        var imports: [MacroModuleProjectionV1] = []
+        if _macro_needs_imports_v2(input):
+            for dependency in _macro_import_sources_v2(input.imports):
+                if not projected.has(dependency): return Err("macro-category-order-invalid")
+                imports = imports.push(projected[dependency].projection)
+        val preliminary_work = macro_bound_projection_work_v2(input.source, imports, [])
+        if preliminary_work.is_err(): return Err(preliminary_work.unwrap_err())
+        val visible = _macro_visible_bindings_v2(if _macro_needs_imports_v2(input): input.imports else: [], imports)
+        if visible.is_err(): return Err(visible.unwrap_err())
+        val work = macro_bound_projection_work_v2(input.source, imports, visible.unwrap())
+        if work.is_err(): return Err(work.unwrap_err())
+        if work.unwrap() > work_remaining: return Err("macro-category-graph-work-limit")
+        work_remaining = work_remaining - work.unwrap()
+        val result = _macro_project_one_v2(input, imports)
+        if result.is_err(): return Err(result.unwrap_err())
+        projected[id] = result.unwrap()
+        if users.has(id):
+            for user in users[id]:
+                remaining[user] = remaining[user] - 1
+                if remaining[user] == 0: ready = ready.push(user)
+    if projected.len() != inputs.len(): return Err("macro-category-import-cycle")
+    var output: [MacroCategoryProjectionV2] = []
+    for id in source_ids: output = output.push(projected[id])
+    Ok(output)

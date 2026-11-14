@@ -26,6 +26,7 @@
 # as the old `bootstrap_mir_registries_promote` did.
 
 use compiler.mir.mir_instructions.{MirFunction}
+use compiler.common.cache_contract.mir_initializer_plan_v1.{MirInitializerStepV1, MirInitializerPlanV1}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 
 @unsafe(reason: "raw process termination ABI", capabilities: [ffi])
@@ -88,7 +89,7 @@ fn bootstrap_mir_store_fail(message: text):
     panic("rt_exit returned after bootstrap MIR store rejection")
 
 # Number of outer containers `promote_legacy` walks per call.
-val BOOTSTRAP_MIR_STORE_OUTER_COUNT: i64 = 20
+val BOOTSTRAP_MIR_STORE_OUTER_COUNT: i64 = 21
 
 class BootstrapMirStore:
     port: MirPublishPort
@@ -103,6 +104,7 @@ class BootstrapMirStore:
     function_param_counts: [i64]
     function_param_type_tags: [i64]
     module_count: i64
+    initializer_plans: [MirInitializerPlanV1]
     # Committed static rows (parallel).
     static_modules: [i64]
     static_symbol_ids: [i64]
@@ -131,6 +133,7 @@ class BootstrapMirStore:
     pending_param_counts: [i64]
     pending_param_type_tags: [i64]
     pending_module_count: i64
+    pending_initializer_plans: [MirInitializerPlanV1]
     pending_static_modules: [i64]
     pending_static_symbol_ids: [i64]
     pending_static_names: [text]
@@ -231,6 +234,29 @@ class BootstrapMirStore:
         if index < self.committed_static_count: return self.static_externals[index]
         self.pending_static_externals[index - self.committed_static_count]
 
+    # Receipts are committed-only, unlike function-row read-through. Missing,
+    # wrong-owner and duplicate rows never imply a successful empty plan.
+    fn initializer_plan_at(module_index: i64, module_identity: text) -> MirInitializerPlanV1?:
+        if module_index < 0 or module_index >= self.module_count or module_identity == "":
+            return nil
+        var found: MirInitializerPlanV1? = nil
+        var matches = 0
+        for raw_plan in self.initializer_plans:
+            val plan: MirInitializerPlanV1 = raw_plan
+            if plan.bootstrap_module_index == module_index:
+                matches = matches + 1
+                if plan.module_identity == module_identity:
+                    found = Some(plan)
+        if matches != 1: return nil
+        found
+
+    me add_initializer_plan(plan: MirInitializerPlanV1):
+        if self.staging():
+            self.has_pending = true
+            self.pending_initializer_plans = self.pending_initializer_plans.push(plan)
+            return
+        self.initializer_plans = self.initializer_plans.push(plan)
+
     # ---- writes ----
     me clear_pending():
         self.has_pending = false
@@ -243,6 +269,7 @@ class BootstrapMirStore:
         self.pending_param_counts = []
         self.pending_param_type_tags = []
         self.pending_module_count = -1
+        self.pending_initializer_plans = []
         self.pending_static_modules = []
         self.pending_static_symbol_ids = []
         self.pending_static_names = []
@@ -278,6 +305,7 @@ class BootstrapMirStore:
         self.function_param_counts = []
         self.function_param_type_tags = []
         self.module_count = 0
+        self.initializer_plans = []
         self.static_modules = []
         self.static_symbol_ids = []
         self.static_names = []
@@ -446,9 +474,28 @@ class BootstrapMirStore:
             if not adopt_text(self.pending_static_names[s]): return false
             if not adopt_text(self.pending_static_init_payloads[s]): return false
             s = s + 1
+        for raw_plan in self.pending_initializer_plans:
+            val plan: MirInitializerPlanV1 = raw_plan
+            if not adopt_text(plan.module_identity): return false
+            if not adopt_text(plan.emitted_init_symbol): return false
+            for raw_step in plan.ordered_steps:
+                val step: MirInitializerStepV1 = raw_step
+                if not adopt_text(step.name): return false
         val alloc_begin = self.port.alloc_begin
         if not alloc_begin():
             return false
+        # Rebuild nested arrays/records while allocations belong to the session.
+        # Only adopted text and primitive IDs cross from the pending graph.
+        for raw_plan in self.pending_initializer_plans:
+            val plan: MirInitializerPlanV1 = raw_plan
+            var steps: [MirInitializerStepV1] = []
+            for raw_step in plan.ordered_steps:
+                val step: MirInitializerStepV1 = raw_step
+                steps = steps.push(MirInitializerStepV1(symbol_id: step.symbol_id, name: step.name))
+            val committed = MirInitializerPlanV1(module_identity: plan.module_identity,
+                bootstrap_module_index: plan.bootstrap_module_index,
+                ordered_steps: steps, emitted_init_symbol: plan.emitted_init_symbol)
+            self.initializer_plans = self.initializer_plans.push(committed)
         # Committed counts stay at their old values until every owner below
         # holds the new rows; append_* advance them last.
         val tag_base = self.function_param_type_tags.len()
@@ -481,6 +528,7 @@ class BootstrapMirStore:
     # pre-session `bootstrap_mir_registries_promote` did.
     me promote_legacy() -> bool:
         self.legacy_outer_walks = self.legacy_outer_walks + BOOTSTRAP_MIR_STORE_OUTER_COUNT
+        val plans_ok = _mir_store_promote(self.initializer_plans)
         val fns_ok = _mir_store_promote(self.functions)
         val names_ok = _mir_store_promote(self.function_names)
         val modules_ok = _mir_store_promote(self.function_modules)
@@ -501,7 +549,7 @@ class BootstrapMirStore:
         val value_names_ok = _mir_store_promote(self.function_value_names)
         val callable_links_ok = _mir_store_promote(self.callable_link_names)
         val callable_text_abi_ok = _mir_store_promote(self.callable_text_value_abi)
-        fns_ok and names_ok and modules_ok and ret_tags_ok and ret_unsigned_ok and
+        plans_ok and fns_ok and names_ok and modules_ok and ret_tags_ok and ret_unsigned_ok and
             p_starts_ok and p_counts_ok and p_tags_ok and static_modules_ok and
             static_symbol_ids_ok and static_names_ok and static_type_tags_ok and
             static_init_kinds_ok and static_init_payloads_ok and
@@ -519,14 +567,14 @@ fn bootstrap_mir_store_with_port(port: MirPublishPort) -> BootstrapMirStore:
     BootstrapMirStore(port: port, session_on: false, functions: [], function_names: [],
         function_modules: [], function_return_type_tags: [], function_return_unsigned: [],
         function_param_starts: [], function_param_counts: [], function_param_type_tags: [],
-        module_count: 0, static_modules: [], static_symbol_ids: [], static_names: [],
+        module_count: 0, initializer_plans: [], static_modules: [], static_symbol_ids: [], static_names: [],
         static_type_tags: [], static_init_kinds: [], static_init_payloads: [],
         static_alignments: [], static_visibilities: [], static_externals: [],
         function_value_names: [], callable_link_names: {}, callable_text_value_abi: {},
         committed_function_count: 0, committed_static_count: 0, has_pending: false,
         pending_functions: [], pending_function_names: [], pending_function_modules: [],
         pending_return_type_tags: [], pending_return_unsigned: [], pending_param_starts: [],
-        pending_param_counts: [], pending_param_type_tags: [], pending_module_count: -1,
+        pending_param_counts: [], pending_param_type_tags: [], pending_module_count: -1, pending_initializer_plans: [],
         pending_static_modules: [], pending_static_symbol_ids: [], pending_static_names: [],
         pending_static_type_tags: [], pending_static_init_kinds: [],
         pending_static_init_payloads: [], pending_static_alignments: [],
@@ -644,3 +692,10 @@ fn bootstrap_mir_store_static_external_at(index: i64) -> bool:
 fn bootstrap_mir_store_lens_diag() -> text:
     val s = _bootstrap_mir_store
     "[acc-lens] fns={s.functions.len()} names={s.function_names.len()} modules={s.function_modules.len()} ret_tags={s.function_return_type_tags.len()} ret_unsigned={s.function_return_unsigned.len()} p_starts={s.function_param_starts.len()} p_counts={s.function_param_counts.len()} p_tags={s.function_param_type_tags.len()} statics={s.static_names.len()} pending_fns={s.pending_functions.len()} pending_statics={s.pending_static_names.len()}"
+
+# Transport only: these rows do not establish source/compiler freshness.
+fn bootstrap_mir_store_add_initializer_plan(plan: MirInitializerPlanV1):
+    _bootstrap_mir_store.add_initializer_plan(plan)
+
+fn bootstrap_mir_store_initializer_plan_at(module_index: i64, module_identity: text) -> MirInitializerPlanV1?:
+    _bootstrap_mir_store.initializer_plan_at(module_index, module_identity)

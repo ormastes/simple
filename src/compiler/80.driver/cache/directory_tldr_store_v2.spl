@@ -1,0 +1,260 @@
+# H1/H3/H4: compile-parent-owned immutable directory generations.
+# Expected values are structural DTOs. Only the real fresh producer/caller may
+# supply their authority; neither this store nor cache bytes invent completeness.
+use std.common.crypto.sha256.{sha256_u8_hex, sha256_text}
+use std.common.encoding.sha256_contract.{sha256_lower_hex_valid}
+use std.common.base_encoding.base64.{base64_encode_bytes, base64_decode_bytes}
+use compiler.common.cache_contract.package_init_tld_v1.{PackageInitTldV1,
+    package_init_tld_encode_v3, package_init_tld_decode_v3,
+    package_init_tld_schema_v1, package_init_tld_physical_binding_valid_v1}
+use compiler.common.cache_contract.package_init_directory_v2.{DirectoryTldrViewV2,
+    package_init_directory_compare_v3}
+use compiler.common.cache_contract.aspect_match_shard_v1.{DirectoryJoinPointFactsV1}
+use compiler.common.cache_contract.directory_source_epoch_v2.{DirectorySourceEpochV2,
+    directory_source_epoch_valid_v2}
+use compiler.common.cache_contract.physical_tld_v1.{PhysicalTldObjectV1,
+    physical_tld_object_encode_v1, physical_tld_object_decode_bounded_v1, physical_tld_header_encode_v1,
+    three_payload_contract_put_text_v1}
+use compiler.driver.cache.package_tldr_metadata.{ConfigVariantKeyV1,
+    config_variant_encode_v1, config_variant_digest_v1}
+use compiler.driver.cache.shared_generation_store.{shared_generation_prepare_root_v2,
+    shared_generation_process_owner_v2, shared_generation_store_incarnation_v2,
+    shared_generation_pin_current_owned_bounded_v2, shared_generation_release_v1,
+    shared_generation_lease_matches_v2, shared_generation_quarantine_v2,
+    shared_generation_publish_bounded_v1, shared_generation_encoded_bound_v2}
+use compiler.driver.cache.daemon.cache_single_flight_v1.{CacheSingleFlightV1}
+
+pub val DIRECTORY_TLDR_FRAME_LIMIT_V2: i64 = 16777216
+# Fixed ASCII prefix + variant digest + frame digest + three newlines.
+val DIRECTORY_TLDR_TRANSPORT_PREFIX_V2: text = "directory-tldr-store/v2"
+pub fn directory_tldr_transport_limit_v2() -> i64:
+    DIRECTORY_TLDR_TRANSPORT_PREFIX_V2.len() + 64 + 64 + 3 +
+        ((DIRECTORY_TLDR_FRAME_LIMIT_V2 + 2) / 3) * 4
+
+pub struct DirectoryTldrExpectedV2:
+    package: PackageInitTldV1
+    facts: DirectoryJoinPointFactsV1
+    variant: ConfigVariantKeyV1
+    source_epoch: DirectorySourceEpochV2
+
+pub struct DirectoryTldrPinnedGenerationV2:
+    view: DirectoryTldrViewV2
+    generation: text
+    pin_id: text
+    canonical_bytes_digest: text
+    variant: ConfigVariantKeyV1
+    semantic_variant_identity: text
+
+struct DirectoryTldrHeldPinV2:
+    root: text
+    lease_id: text
+    canonical_view_identity: text
+    cleanup_identity: text
+
+pub fn directory_tldr_expected_identity_v2(expected: DirectoryTldrExpectedV2) -> text?:
+    if not directory_source_epoch_valid_v2(expected.source_epoch) or
+            package_init_tld_schema_v1(expected.package) != 3 or
+            package_init_directory_compare_v3(expected.package, expected.package, expected.facts) == nil:
+        return nil
+    val variant = config_variant_encode_v1(expected.variant)
+    val bytes = package_init_tld_encode_v3(expected.package)
+    if variant == "" or bytes.len() == 0 or bytes.len() > DIRECTORY_TLDR_FRAME_LIMIT_V2: return nil
+    var identity: [u8] = []
+    for field in ["directory-tldr-expected/v3", sha256_u8_hex(bytes), variant,
+            "{expected.source_epoch.driver_identity}", "{expected.source_epoch.generation}"]:
+        identity = three_payload_contract_put_text_v1(identity, field)
+    Some(sha256_u8_hex(identity))
+
+fn directory_tldr_scope_v2(expected: DirectoryTldrExpectedV2) -> text:
+    var bytes: [u8] = []
+    for field in ["directory-tldr-store-scope/v3", expected.package.package_id,
+            expected.package.parent_scope_digest ?? "", expected.package.compiler_provider_id ?? "",
+            config_variant_digest_v1(expected.variant)]:
+        bytes = three_payload_contract_put_text_v1(bytes, field)
+    sha256_u8_hex(bytes)
+
+fn directory_tldr_frame_bounded_v2(object: PhysicalTldObjectV1) -> bool:
+    if object.header.sections.len() > 4096 or object.canonical_sections.len() > 4096 or
+            object.header.payload_bytes < 0 or object.header.payload_bytes > DIRECTORY_TLDR_FRAME_LIMIT_V2:
+        return false
+    var total = 0
+    for body in object.canonical_sections:
+        if body.len() > DIRECTORY_TLDR_FRAME_LIMIT_V2 - total: return false
+        total = total + body.len()
+    if total != object.header.payload_bytes: return false
+    for section in object.header.sections:
+        if section.kind.len() > 1024 or section.encoding_profile.len() > 1024: return false
+        if section.kind.bytes().len() > 1024 or section.encoding_profile.bytes().len() > 1024: return false
+    val header = physical_tld_header_encode_v1(object.header)
+    header.len() > 0 and header.len() <= DIRECTORY_TLDR_FRAME_LIMIT_V2 and
+        total <= DIRECTORY_TLDR_FRAME_LIMIT_V2 - header.len()
+
+# Scalar snapshot survives shallow copies of nested package/facts/variant arrays.
+# Recompute from the presented view; never compare two potentially aliased DTOs.
+fn directory_tldr_pin_cleanup_identity_v2(pin: DirectoryTldrPinnedGenerationV2) -> text:
+    var bytes: [u8] = []
+    for field in ["directory-pin-cleanup/v2", pin.pin_id, pin.generation,
+            pin.canonical_bytes_digest, pin.semantic_variant_identity]:
+        bytes = three_payload_contract_put_text_v1(bytes, field)
+    sha256_u8_hex(bytes)
+
+fn directory_tldr_pin_view_identity_v2(pin: DirectoryTldrPinnedGenerationV2) -> text?:
+    val compared = package_init_directory_compare_v3(pin.view.package, pin.view.package, pin.view.facts)
+    if compared == nil or pin.view.output_digest != compared!.output_digest: return nil
+    val variant = config_variant_encode_v1(pin.variant)
+    if variant == "" or config_variant_digest_v1(pin.variant) != pin.semantic_variant_identity: return nil
+    val package_bytes = package_init_tld_encode_v3(pin.view.package)
+    if package_bytes.len() == 0 or package_bytes.len() > DIRECTORY_TLDR_FRAME_LIMIT_V2: return nil
+    var bytes: [u8] = []
+    for field in ["directory-pin-view/v3", sha256_u8_hex(package_bytes), variant,
+            pin.view.output_digest, pin.generation, pin.pin_id, pin.canonical_bytes_digest]:
+        bytes = three_payload_contract_put_text_v1(bytes, field)
+    Some(sha256_u8_hex(bytes))
+
+pub fn directory_tldr_frame_view_v2(object: PhysicalTldObjectV1,
+        expected: DirectoryTldrExpectedV2) -> DirectoryTldrViewV2?:
+    if not directory_tldr_frame_bounded_v2(object) or
+            directory_tldr_expected_identity_v2(expected) == nil or
+            not package_init_tld_physical_binding_valid_v1(object): return nil
+    for section in object.header.sections:
+        if section.kind == "package_init_v1":
+            val decoded = package_init_tld_decode_v3(object.canonical_sections[section.section_index])
+            if not decoded.ok or decoded.value == nil: return nil
+            return package_init_directory_compare_v3(decoded.value!, expected.package, expected.facts)
+    nil
+
+# Serialization is storage transport around the existing complete physical
+# frame, not an alternate PackageInit codec. Canonical base64 rejects lenient
+# decoder aliases; all limits are checked before decoding/retention.
+fn directory_tldr_transport_v2(bytes: [u8], variant_digest: text) -> text:
+    DIRECTORY_TLDR_TRANSPORT_PREFIX_V2 + "\n" + variant_digest + "\n" +
+        sha256_u8_hex(bytes) + "\n" + base64_encode_bytes(bytes)
+
+fn directory_tldr_transport_decode_v2(payload: text, variant_digest: text) -> Result<[u8], text>:
+    if payload.len() > directory_tldr_transport_limit_v2(): return Err("directory-transport-bounds")
+    # Three fixed ASCII header lines; never split untrusted payload into an
+    # attacker-controlled number of retained strings before checking its shape.
+    val prefix = DIRECTORY_TLDR_TRANSPORT_PREFIX_V2 + "\n" + variant_digest + "\n"
+    if not payload.starts_with(prefix) or payload.len() <= prefix.len() + 65:
+        return Err("directory-transport-frame-or-variant")
+    val digest = payload[prefix.len():prefix.len() + 64]
+    if not sha256_lower_hex_valid(digest) or payload[prefix.len() + 64:prefix.len() + 65] != "\n":
+        return Err("directory-transport-digest-header")
+    val encoded = payload[prefix.len() + 65:]
+    if encoded.len() > ((DIRECTORY_TLDR_FRAME_LIMIT_V2 + 2) / 3) * 4:
+        return Err("directory-transport-bounds")
+    val bytes = base64_decode_bytes(encoded)
+    if bytes.len() == 0 or bytes.len() > DIRECTORY_TLDR_FRAME_LIMIT_V2 or
+            base64_encode_bytes(bytes) != encoded or sha256_u8_hex(bytes) != digest:
+        return Err("directory-transport-digest")
+    Ok(bytes)
+
+pub class DirectoryTldrStoreV2:
+    root: text
+    process_owner: text
+    incarnation: text
+    driver_identity: i64
+    next_serial: i64
+    busy: bool
+    flights: CacheSingleFlightV1
+    held: Dict<text, DirectoryTldrHeldPinV2>
+    observed_generation: text
+
+    static fn create(root: text, driver_identity: i64) -> Result<DirectoryTldrStoreV2, text>:
+        if driver_identity <= 0 or not shared_generation_prepare_root_v2(root):
+            return Err("directory-store-unavailable")
+        val owner = shared_generation_process_owner_v2()
+        if owner == nil: return Err("directory-store-process-unavailable")
+        val incarnation = shared_generation_store_incarnation_v2(root, owner!)
+        if incarnation == nil: return Err("directory-store-incarnation-unavailable")
+        Ok(DirectoryTldrStoreV2(root: root, process_owner: owner!, incarnation: incarnation!,
+            driver_identity: driver_identity, next_serial: 1, busy: false,
+            flights: CacheSingleFlightV1.create(), held: {}, observed_generation: ""))
+
+    me allocate_id() -> Result<text, text>:
+        if self.next_serial == 9223372036854775807: return Err("directory-store-ids-exhausted")
+        val id = sha256_text("{self.incarnation}:{self.next_serial}")
+        self.next_serial = self.next_serial + 1
+        Ok(id)
+
+    fn validate_pin(pin: DirectoryTldrPinnedGenerationV2) -> bool:
+        if not self.held.contains_key(pin.pin_id): return false
+        val held = self.held[pin.pin_id]
+        val identity = directory_tldr_pin_view_identity_v2(pin)
+        if identity == nil or identity! != held.canonical_view_identity: return false
+        shared_generation_lease_matches_v2(held.root, held.lease_id, pin.generation, self.process_owner)
+
+    me release_pin(pin: DirectoryTldrPinnedGenerationV2) -> Result<(), text>:
+        # Terminal cleanup authority is independent of mutable view contents.
+        if not self.held.contains_key(pin.pin_id): return Err("directory-pin-invalid-or-released")
+        val held = self.held[pin.pin_id]
+        if directory_tldr_pin_cleanup_identity_v2(pin) != held.cleanup_identity or
+                not shared_generation_lease_matches_v2(held.root, held.lease_id, pin.generation, self.process_owner):
+            return Err("directory-pin-cleanup-identity-invalid")
+        if not shared_generation_release_v1(held.root, held.lease_id): return Err("directory-pin-release-failed")
+        self.held.remove(pin.pin_id)
+        Ok(())
+
+    # Called only inside the busy serial gate. Each operation reads CURRENT once;
+    # a successful handle thereafter refers to its retained immutable generation.
+    me read_pin(expected: DirectoryTldrExpectedV2) -> Result<DirectoryTldrPinnedGenerationV2, text>:
+        self.observed_generation = ""
+        if not self.busy or expected.source_epoch.driver_identity != self.driver_identity or
+                directory_tldr_expected_identity_v2(expected) == nil: return Err("directory-expected-unavailable")
+        val root = "{self.root}/{directory_tldr_scope_v2(expected)}"
+        if not shared_generation_prepare_root_v2(root): return Err("directory-store-unavailable")
+        val pin_id = self.allocate_id()?
+        val read = shared_generation_pin_current_owned_bounded_v2(root, pin_id, self.process_owner,
+            9223372036854775807, shared_generation_encoded_bound_v2(directory_tldr_transport_limit_v2()))
+        self.observed_generation = read.generation
+        if not read.valid:
+            if read.generation != "" and read.reason == "pinned-generation-invalid":
+                val quarantined = shared_generation_quarantine_v2(root, read.generation)
+                if quarantined.is_ok(): self.observed_generation = ""
+            return Err(read.reason)
+        val bytes = directory_tldr_transport_decode_v2(read.payload, config_variant_digest_v1(expected.variant))
+        if bytes.is_err():
+            val _ = shared_generation_release_v1(root, pin_id)
+            val quarantined = shared_generation_quarantine_v2(root, read.generation)
+            if quarantined.is_ok(): self.observed_generation = ""
+            return Err(bytes.unwrap_err())
+        val decoded = physical_tld_object_decode_bounded_v1(bytes.unwrap(), 4096, DIRECTORY_TLDR_FRAME_LIMIT_V2)
+        if not decoded.ok or decoded.value == nil:
+            val _ = shared_generation_release_v1(root, pin_id)
+            val quarantined = shared_generation_quarantine_v2(root, read.generation)
+            if quarantined.is_ok(): self.observed_generation = ""
+            return Err("directory-physical-frame-invalid")
+        if not package_init_tld_physical_binding_valid_v1(decoded.value!) or
+                physical_tld_object_encode_v1(decoded.value!) != bytes.unwrap():
+            val _ = shared_generation_release_v1(root, pin_id)
+            val quarantined = shared_generation_quarantine_v2(root, read.generation)
+            if quarantined.is_ok(): self.observed_generation = ""
+            return Err("directory-physical-binding-invalid")
+        val view = directory_tldr_frame_view_v2(decoded.value!, expected)
+        if view == nil:
+            val _ = shared_generation_release_v1(root, pin_id)
+            return Err("directory-stale-or-incompatible")
+        val pin = DirectoryTldrPinnedGenerationV2(view: view!, generation: read.generation,
+            pin_id: pin_id, canonical_bytes_digest: sha256_u8_hex(bytes.unwrap()),
+            variant: expected.variant, semantic_variant_identity: config_variant_digest_v1(expected.variant))
+        val view_identity = directory_tldr_pin_view_identity_v2(pin)
+        if view_identity == nil:
+            val _ = shared_generation_release_v1(root, pin_id)
+            return Err("directory-pin-view-invalid")
+        self.held[pin_id] = DirectoryTldrHeldPinV2(root: root, lease_id: pin_id,
+            canonical_view_identity: view_identity!, cleanup_identity: directory_tldr_pin_cleanup_identity_v2(pin))
+        Ok(pin)
+
+    me publish(expected: DirectoryTldrExpectedV2, object: PhysicalTldObjectV1,
+            expected_parent: text) -> Result<text, text>:
+        if not self.busy or expected.source_epoch.driver_identity != self.driver_identity or
+                directory_tldr_frame_view_v2(object, expected) == nil: return Err("directory-candidate-invalid")
+        val bytes = physical_tld_object_encode_v1(object)
+        if bytes.len() == 0 or bytes.len() > DIRECTORY_TLDR_FRAME_LIMIT_V2: return Err("directory-frame-bounds")
+        val payload = directory_tldr_transport_v2(bytes, config_variant_digest_v1(expected.variant))
+        if payload.len() > directory_tldr_transport_limit_v2(): return Err("directory-transport-bounds")
+        val root = "{self.root}/{directory_tldr_scope_v2(expected)}"
+        val generation = shared_generation_publish_bounded_v1(root, expected_parent, self.next_serial,
+            payload, 268435456)
+        if not sha256_lower_hex_valid(generation): return Err(generation)
+        Ok(generation)

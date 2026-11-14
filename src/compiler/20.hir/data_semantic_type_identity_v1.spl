@@ -3,6 +3,7 @@ use compiler.common.data.data_semantic_type_identity_v1.{
     DataSemanticTypeIdentityV1, data_semantic_type_bounded_node_v1,
     data_semantic_type_identity_v1, DATA_SEMANTIC_TYPE_MAX_DEPTH_V1,
     DATA_SEMANTIC_TYPE_MAX_BYTES_V1, DATA_SEMANTIC_TYPE_MAX_NODES_V1}
+use compiler.common.cache_contract.generic_type_binder_v2.{GenericTypeBinderV2, generic_type_binders_valid_v2}
 use compiler.hir.hir_types.*
 use compiler.hir.hir_owner_name.{hir_symbol_owner_module}
 use compiler.hir.hir_lowering.types.{HirLowering}
@@ -65,13 +66,13 @@ impl HirLowering:
                 return Ok(hir_payload_terminal_identity(origin.module_name, origin.item_name, origin.item_kind).split("::"))
         return Err("type identity imported nominal origin is not retained by its semantic owner")
 
-    me data_type_children_v1(values: [HirType], depth: i64, remaining: i64, allow_any: bool) -> Result<DataTypeChildrenProjectionV1, text>:
+    me data_type_children_v1(values: [HirType], depth: i64, remaining: i64, allow_any: bool, binders: [GenericTypeBinderV2] = []) -> Result<DataTypeChildrenProjectionV1, text>:
         if values.len() > 256: return Err("semantic type child count bound")
         var children: [text] = []
         var nodes: i64 = 0
         var bytes: i64 = 0
         for value in values:
-            val child = self.data_type_node_v1(value, depth + 1, remaining - nodes, allow_any)?
+            val child = self.data_type_node_v1(value, depth + 1, remaining - nodes, allow_any, binders)?
             val count = child.canonical.bytes().len()
             if count > DATA_SEMANTIC_TYPE_MAX_BYTES_V1 - bytes: return Err("semantic type aggregate child byte bound")
             bytes = bytes + count
@@ -79,7 +80,7 @@ impl HirLowering:
             children = children.push(child.canonical)
         Ok(DataTypeChildrenProjectionV1(children: children, nodes: nodes, byte_len: bytes))
 
-    me data_type_node_v1(value: HirType, depth: i64, remaining: i64, allow_any: bool) -> Result<DataTypeProjectionV1, text>:
+    me data_type_node_v1(value: HirType, depth: i64, remaining: i64, allow_any: bool, binders: [GenericTypeBinderV2] = []) -> Result<DataTypeProjectionV1, text>:
         if depth > DATA_SEMANTIC_TYPE_MAX_DEPTH_V1: return Err("semantic type nesting exceeds identity depth bound")
         if remaining < 1: return Err("semantic type aggregate node bound")
         var tag = ""
@@ -102,7 +103,20 @@ impl HirLowering:
             case HirTypeKind.Any:
                 if not allow_any: return Err("concrete schema binding cannot admit Any or erased type information")
                 tag = "any"
+            case HirTypeKind.TypeParam(name, _):
+                if binders.len() == 0: return Err("semantic type is unresolved or outside the versioned identity vocabulary")
+                val binder = self.generic_type_binder_by_name_v2(name, binders)?
+                tag = "generic.binder/v2"
+                fields = [binder.kind, "{binder.scope_depth}", "{binder.index}"]
             case HirTypeKind.Named(symbol, arguments):
+                if binders.len() > 0 and self.symbols.symbols.has(symbol.id):
+                    val declaration = self.symbols.symbols[symbol.id]
+                    if declaration.kind == SymbolKind.TypeParam:
+                        if arguments.len() != 0: return Err("generic type binder cannot have nominal arguments")
+                        val binder = self.generic_type_binder_by_symbol_v2(symbol.id, binders)?
+                        val canonical = data_semantic_type_bounded_node_v1("generic.binder/v2",
+                            [binder.kind, "{binder.scope_depth}", "{binder.index}"], [])?
+                        return Ok(DataTypeProjectionV1(canonical: canonical, nodes: 1))
                 tag = "named"
                 fields = self.data_nominal_type_fields_v1(symbol)?
                 child_types = arguments
@@ -161,7 +175,7 @@ impl HirLowering:
                 fields = ["{parameters.len()}"]
                 declared_effects = effects
             case _: return Err("semantic type is unresolved or outside the versioned identity vocabulary")
-        val projected = self.data_type_children_v1(child_types, depth, remaining - 1, allow_any)?
+        val projected = self.data_type_children_v1(child_types, depth, remaining - 1, allow_any, binders)?
         var children = projected.children
         var nodes = 1 + projected.nodes
         var emitted_bytes = projected.byte_len
@@ -179,7 +193,7 @@ impl HirLowering:
                 case EffectKind.Allocates: effect_tag = "effect.allocates"
                 case EffectKind.Throws(error_type):
                     effect_tag = "effect.throws"
-                    val child = self.data_type_node_v1(error_type, depth + 2, remaining - nodes, allow_any)?
+                    val child = self.data_type_node_v1(error_type, depth + 2, remaining - nodes, allow_any, binders)?
                     nodes = nodes + child.nodes
                     effect_children = [child.canonical]
                 case _: return Err("semantic function effect is unresolved or has no bound identity")
@@ -211,3 +225,45 @@ impl HirLowering:
         if self.errors.len() != 0: return Err("semantic type owner has unresolved diagnostics")
         val projected = self.data_type_node_v1(value, 0, DATA_SEMANTIC_TYPE_MAX_NODES_V1, false)?
         data_semantic_type_identity_v1(projected.canonical)
+
+    # The finalizer supplies binders from the actual declaration in the same
+    # source epoch. Symbol-table checks below detect stale/cross-owner rows;
+    # they do not make this constructible context an authorization token.
+    me generic_type_binder_by_symbol_v2(symbol_id: i64, binders: [GenericTypeBinderV2]) -> Result<GenericTypeBinderV2, text>:
+        for binder in binders:
+            if binder.symbol_id == symbol_id: return Ok(binder)
+        Err("generic type references a free or unbound symbol")
+
+    me generic_type_binder_by_name_v2(name: text, binders: [GenericTypeBinderV2]) -> Result<GenericTypeBinderV2, text>:
+        var found: GenericTypeBinderV2? = nil
+        var nearest: i64 = 33
+        for binder in binders:
+            if binder.source_name == name and binder.scope_depth < nearest:
+                found = Some(binder)
+                nearest = binder.scope_depth
+        if found == nil: return Err("generic type references a free type parameter")
+        Ok(found.unwrap())
+
+    # Type-reference shape only, not a complete bounded generic declaration.
+    # The finalizer separately projects the actual HirTypeParam bounds/defaults
+    # under this same validated scope. TypeParam(name, bounds) carries a copy
+    # of constraints; the reference leaf denotes the declared binder, not a
+    # second constraint declaration. The caller must project name-form HIR in
+    # its original declaration's lexical context; Named(symbol) keeps precise
+    # outer bindings even when an inner scope shadows the source spelling.
+    me generic_type_canonical_v2(value: HirType, binders: [GenericTypeBinderV2]) -> Result<text, text>:
+        if self.errors.len() != 0: return Err("generic type owner has unresolved diagnostics")
+        if not generic_type_binders_valid_v2(binders): return Err("generic binder context is invalid or ambiguous")
+        for binder in binders:
+            # Current HirTypeParam represents type binders only. Do not turn
+            # an unrepresented const binder into a type binder silently.
+            if binder.kind != "type": return Err("HIR const binder provenance is unavailable")
+            if not self.symbols.symbols.has(binder.symbol_id): return Err("generic binder is absent from current semantic owner")
+            val declaration = self.symbols.symbols[binder.symbol_id]
+            if declaration.id.id != binder.symbol_id or declaration.kind != SymbolKind.TypeParam or declaration.name != binder.source_name:
+                return Err("generic binder does not match current semantic declaration")
+        # Reserve one node/level for the explicit generic domain wrapper.
+        val projected = self.data_type_node_v1(value, 1, DATA_SEMANTIC_TYPE_MAX_NODES_V1 - 1, false, binders)?
+        # Never construct DataSemanticTypeIdentityV1 for this open generic
+        # tree: its concrete vocabulary deliberately excludes binder leaves.
+        data_semantic_type_bounded_node_v1("generic-type/v2", [], [projected.canonical])

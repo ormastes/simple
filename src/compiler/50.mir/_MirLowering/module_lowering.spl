@@ -1,3 +1,4 @@
+use compiler.common.cache_contract.mir_initializer_plan_v1.{MirInitializerStepV1, MirInitializerPlanV1}
 use compiler.mir._MirLowering.verification_calls_v1.*
 use compiler.mir._MirLowering.declaration_enum_metadata_v1.*
 use compiler.mir._MirLoweringExpr.result_err_record_owner.*
@@ -3647,6 +3648,7 @@ impl MirLowering:
             for symbol in primary.statics.keys(): statics[symbol] = primary.statics[symbol]
             output_module.constants = constants
             output_module.statics = statics
+            output_module.initializer_plan_v1 = primary.initializer_plan_v1
             module_builder.module = output_module
             self.builder = module_builder
             for raw_const in const_vals:
@@ -4030,6 +4032,12 @@ impl MirLowering:
         # Bootstrap helpers invoke this entry before lower_function, and its
         # initializer bodies lower expressions directly.
         self.begin_expr_trace_session()
+        val initializer_errors_before = self.errors.len()
+        var unplanned_builder = self.builder
+        var unplanned_module = unplanned_builder.module
+        unplanned_module.initializer_plan_v1 = nil
+        unplanned_builder.module = unplanned_module
+        self.builder = unplanned_builder
         reverse_reference_owner_mark_known_v1("initializer-dependent")
         var dynamic = runtime_module_initializers_in_declaration_order(consts)
         # Function-pointer slots need the same runtime-initialized global
@@ -4050,7 +4058,19 @@ impl MirLowering:
                         slot_already = true
                 if not slot_already:
                     dynamic = dynamic.push(slot_const)
+        var initializer_steps: [MirInitializerStepV1] = []
+        for raw_planned in dynamic:
+            val planned: HirConst = raw_planned
+            initializer_steps.push(MirInitializerStepV1(symbol_id: planned.symbol.id, name: planned.name))
         if dynamic.len() == 0:
+            if self.errors.len() == initializer_errors_before:
+                var empty_builder = self.builder
+                var empty_module = empty_builder.module
+                empty_module.initializer_plan_v1 = Some(MirInitializerPlanV1(
+                    module_identity: module_name_raw, bootstrap_module_index: bootstrap_module_index,
+                    ordered_steps: [], emitted_init_symbol: ""))
+                empty_builder.module = empty_module
+                self.builder = empty_builder
             return
         var init_index = 1
         while init_index < dynamic.len():
@@ -4154,6 +4174,14 @@ impl MirLowering:
         if bootstrap_module_index >= 0:
             bootstrap_mir_functions_add(init_function.name, init_function, bootstrap_module_index)
         self.lower_global_initializer_wrapper(module_name_raw, init_name, bootstrap_module_index)
+        if self.errors.len() == initializer_errors_before:
+            var planned_builder = self.builder
+            var planned_module = planned_builder.module
+            planned_module.initializer_plan_v1 = Some(MirInitializerPlanV1(
+                module_identity: module_name_raw, bootstrap_module_index: bootstrap_module_index,
+                ordered_steps: initializer_steps, emitted_init_symbol: init_name))
+            planned_builder.module = planned_module
+            self.builder = planned_builder
 
     me lowering_struct_layout(type_name: text, fields: [HirField], layout_attr: LayoutAttr) -> TypeLayout:
         """Lowering-target layout (legacy LP64 table on 64-bit targets, arch

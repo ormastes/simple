@@ -1,3 +1,4 @@
+use compiler.common.cache_contract.directory_tldr_snapshot_v2.{DirectoryTldrSourceSnapshotV2}
 """P4/P6: the real forward weave reuses per-directory pointcut match shards."""
 
 use std.spec.{describe, it, expect}
@@ -88,3 +89,48 @@ describe "aop_weave_with_match_cache_v1":
             if not d.complete:
                 incomplete = incomplete + 1
         expect(incomplete).to_equal(1)
+
+    it "visits the full existing weave when production capture is unavailable":
+        val state = AopMatchDriverStateV1.create()
+        state.sources = no_guards()
+        val modules = modules_with(ADVICE_V1, OTHER)
+        expect(aop_weave_with_match_cache_v1(state, modules, Some([]))).to_equal(1)
+        expect(state.shard_misses).to_equal(0)
+        expect(state.shard_hits).to_equal(0)
+
+    it "consumes captured facts without rereading a changed guard source":
+        val state = AopMatchDriverStateV1.create()
+        val modules = modules_with(ADVICE_V1, OTHER)
+        val facts = aop_directory_facts_from_hir_v1(modules, no_guards())
+        var snapshots: [DirectoryTldrSourceSnapshotV2] = []
+        for directory in facts:
+            snapshots.push(DirectoryTldrSourceSnapshotV2(scope_id: directory.scope_id,
+                inventory_digest: "a".repeat(64), declared_producer_digest: "b".repeat(64), executing_image_digest: "e".repeat(64),
+                file_tldr_root_digest: "c".repeat(64), facts: directory))
+        # The capture owner has already frozen source input. The consumer must
+        # not rebuild a different semantic snapshot from this mutable map.
+        state.sources = {"a/am_a.spl": "@when(unknown_atom):\nfn g():\n    pass\n@end\n"}
+        expect(aop_weave_with_match_cache_v1(state, modules, Some(snapshots))).to_equal(1)
+        expect(state.fallbacks).to_equal(0)
+
+    it "does not treat a directory subset as complete snapshot coverage":
+        val state = AopMatchDriverStateV1.create()
+        val modules = modules_with(ADVICE_V1, OTHER)
+        val facts = aop_directory_facts_from_hir_v1(modules, no_guards())
+        val partial = DirectoryTldrSourceSnapshotV2(scope_id: facts[0].scope_id,
+            inventory_digest: "a".repeat(64), declared_producer_digest: "b".repeat(64), executing_image_digest: "e".repeat(64),
+            file_tldr_root_digest: "c".repeat(64), facts: facts[0])
+        expect(aop_weave_with_match_cache_v1(state, modules, Some([partial]))).to_equal(1)
+
+    it "falls back when a snapshot lacks executing-image identity":
+        val state = AopMatchDriverStateV1.create()
+        val modules = modules_with(ADVICE_V1, OTHER)
+        val facts = aop_directory_facts_from_hir_v1(modules, no_guards())
+        var snapshots: [DirectoryTldrSourceSnapshotV2] = []
+        for directory in facts:
+            snapshots.push(DirectoryTldrSourceSnapshotV2(scope_id: directory.scope_id,
+                inventory_digest: "a".repeat(64), declared_producer_digest: "b".repeat(64),
+                executing_image_digest: "", file_tldr_root_digest: "c".repeat(64), facts: directory))
+        expect(aop_weave_with_match_cache_v1(state, modules, Some(snapshots))).to_equal(1)
+        expect(state.shard_misses).to_equal(0)
+        expect(state.fallbacks > 0).to_equal(true)

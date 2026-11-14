@@ -1,0 +1,150 @@
+# @req REQ-DTA-A1 REQ-DTA-B3
+# Real registry/parser calls; source qualification only until executed.
+use std.spec.*
+use compiler.frontend.aspect_registry.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+
+fn inventory_record(handler: text, selector: text = "target"):
+    aspect_registry_record_parser_declaration_v2(handler, "forward", selector, "", true, true, true)
+
+describe "parser advice declaration inventory":
+    it "does not certify absent or merely reset inventories":
+        aspect_registry_reset()
+        expect(aspect_registry_parser_inventory_v2("a").advice_family_complete).to_equal(false)
+        expect(aspect_registry_seal_parser_inventory_v2("a", true)).to_equal(false)
+        aspect_registry_reset_module("a")
+        expect(aspect_registry_parser_inventory_v2("a").advice_family_complete).to_equal(false)
+        expect(aspect_registry_seal_parser_inventory_v2("a", true)).to_equal(true)
+        val inventory = aspect_registry_parser_inventory_v2("a")
+        expect(inventory.advice_family_complete).to_equal(true)
+        expect(inventory.rows.len()).to_equal(0)
+
+    it "preserves repeated declarations and their family order":
+        aspect_registry_reset()
+        aspect_registry_reset_module("a|b.spl")
+        inventory_record("handler", "first")
+        inventory_record("handler", "second")
+        expect(aspect_registry_seal_parser_inventory_v2("a|b.spl", true)).to_equal(true)
+        val rows = aspect_registry_parser_inventory_v2("a|b.spl").rows
+        expect(rows.len()).to_equal(2)
+        expect(rows[0].path).to_equal("a|b.spl")
+        expect(rows[0].family_inventory_index).to_equal(0)
+        expect(rows[1].family_inventory_index).to_equal(1)
+        expect(rows[1].selector).to_equal("second")
+        expect(rows[1].mode).to_equal("static")
+
+    it "keeps effective marker replay separate from parser declarations":
+        aspect_registry_reset()
+        aspect_registry_reset_module("a")
+        inventory_record("handler", "source")
+        aspect_registry_declare("a", "handler", "forward", "replay1", "", true, true, true)
+        aspect_registry_declare("a", "handler", "forward", "replay2", "", true, true, true)
+        expect(aspect_registry_parser_inventory_v2("a").rows.len()).to_equal(1)
+        expect(aspect_registry_selector_of("a", "handler")).to_equal("replay2")
+
+    it "resets exactly the typed path rather than a claim-key prefix":
+        aspect_registry_reset()
+        aspect_registry_reset_module("a|b")
+        inventory_record("nested")
+        aspect_registry_seal_parser_inventory_v2("a|b", true)
+        aspect_registry_reset_module("a")
+        inventory_record("outer")
+        aspect_registry_reset_module("a")
+        expect(aspect_registry_parser_inventory_v2("a").rows.len()).to_equal(0)
+        expect(aspect_registry_parser_inventory_v2("a|b").rows[0].handler).to_equal("nested")
+        expect(aspect_registry_parser_inventory_v2("a|b").advice_family_complete).to_equal(true)
+
+    it "keeps failure sticky until a new owning parse reset":
+        aspect_registry_reset()
+        aspect_registry_reset_module("a")
+        inventory_record("handler")
+        expect(aspect_registry_seal_parser_inventory_v2("a", false)).to_equal(false)
+        expect(aspect_registry_seal_parser_inventory_v2("a", true)).to_equal(false)
+        aspect_registry_reset_module("a")
+        expect(aspect_registry_seal_parser_inventory_v2("a", true)).to_equal(true)
+        inventory_record("late")
+        expect(aspect_registry_parser_inventory_v2("a").advice_family_complete).to_equal(false)
+
+    it "refuses per-path row overflow without claiming dropped declarations complete":
+        aspect_registry_reset()
+        aspect_registry_reset_module("a")
+        var index = 0
+        while index < 257:
+            inventory_record("handler{index}")
+            index = index + 1
+        expect(aspect_registry_parser_inventory_v2("a").rows.len()).to_equal(256)
+        expect(aspect_registry_seal_parser_inventory_v2("a", true)).to_equal(false)
+
+    it "refuses oversized byte input before appending":
+        aspect_registry_reset()
+        aspect_registry_reset_module("a")
+        var large = "x"
+        var index = 0
+        while index < 19:
+            large = large + large
+            index = index + 1
+        inventory_record("handler", large)
+        expect(aspect_registry_parser_inventory_v2("a").rows.len()).to_equal(0)
+        expect(aspect_registry_seal_parser_inventory_v2("a", true)).to_equal(false)
+
+    it "restores original roots and statuses after isolated replay":
+        aspect_registry_reset()
+        aspect_registry_reset_module("original")
+        inventory_record("before")
+        aspect_registry_seal_parser_inventory_v2("original", true)
+        val owner = aspect_registry_owner_snapshot_v1()
+        aspect_registry_reset()
+        aspect_registry_reset_module("replay")
+        inventory_record("temporary")
+        aspect_registry_owner_restore_v1(owner)
+        expect(aspect_registry_parser_inventory_v2("original").rows[0].handler).to_equal("before")
+        expect(aspect_registry_parser_inventory_v2("original").advice_family_complete).to_equal(true)
+        expect(aspect_registry_parser_inventory_v2("replay").rows.len()).to_equal(0)
+
+    it "records the actual parser decorator emission without bridge duplication":
+        aspect_registry_reset()
+        val source = "@advice(forward, submit)\n@readonly\n@noalloc\n@bounded_time\nfn observe():\n    pass\n"
+        val parsed = parse_full_frontend(source, "inventory.spl", "inventory", Logger(level: 0))
+        val inventory = aspect_registry_parser_inventory_v2("inventory.spl")
+        expect(inventory.rows.len()).to_equal(1)
+        expect(inventory.rows[0].handler).to_equal("observe")
+        expect(inventory.rows[0].readonly).to_equal(true)
+        expect(inventory.rows[0].noalloc).to_equal(true)
+        expect(inventory.rows[0].bounded_time).to_equal(true)
+        # Only the parent validated full-parse owner seals success.
+        expect(inventory.advice_family_complete).to_equal(false)
+
+    it "keeps global row overflow sticky across per-path reset":
+        aspect_registry_reset()
+        var module_index = 0
+        while module_index < 16:
+            val path = "module{module_index}"
+            aspect_registry_reset_module(path)
+            var row_index = 0
+            while row_index < 256:
+                inventory_record("h{row_index}")
+                row_index = row_index + 1
+            expect(aspect_registry_seal_parser_inventory_v2(path, true)).to_equal(true)
+            module_index = module_index + 1
+        aspect_registry_reset_module("overflow")
+        inventory_record("excess")
+        expect(aspect_registry_seal_parser_inventory_v2("overflow", true)).to_equal(false)
+        expect(aspect_registry_parser_inventory_v2("module0").advice_family_complete).to_equal(false)
+        aspect_registry_reset_module("module0")
+        expect(aspect_registry_seal_parser_inventory_v2("module0", true)).to_equal(false)
+        aspect_registry_reset()
+        aspect_registry_reset_module("fresh")
+        expect(aspect_registry_seal_parser_inventory_v2("fresh", true)).to_equal(true)
+
+    it "bounds known-empty path bookkeeping before inserting another path":
+        aspect_registry_reset()
+        var index = 0
+        while index < 1024:
+            val path = "path{index}"
+            aspect_registry_reset_module(path)
+            expect(aspect_registry_seal_parser_inventory_v2(path, true)).to_equal(true)
+            index = index + 1
+        aspect_registry_reset_module("extra")
+        expect(aspect_registry_seal_parser_inventory_v2("extra", true)).to_equal(false)
+        expect(aspect_registry_parser_inventory_v2("path0").advice_family_complete).to_equal(false)

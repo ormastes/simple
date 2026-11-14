@@ -1,3 +1,12 @@
+use compiler.common.cache_contract.directory_aspect_projection_v2.{DirectoryAspectSemanticV2, DirectoryAspectObjectV2}
+use compiler.common.cache_contract.directory_macro_projection_v2.{DirectoryMacroProjectionV2}
+use compiler.frontend.cache_artifact.macro_category_projection_v2.{MacroCategoryDraftV2}
+use compiler.common.cache_contract.directory_aspect_draft_v2.{DirectoryAspectDraftV2}
+use compiler.driver.cache.package_tldr_metadata.{ConfigVariantKeyV1}
+use compiler.common.cache_contract.directory_source_epoch_v2.{DirectorySourceEpochV2}
+use compiler.common.cache_contract.mir_initializer_plan_v1.{MirInitializerObjectReceiptV1, MirInitializerBuildReceiptV1}
+use compiler.common.cache_contract.directory_category_projection_v2.{DirectoryCategoryProjectionV2}
+use compiler.common.cache_contract.directory_tldr_snapshot_v2.{DirectoryTldrSourceSnapshotV2}
 # Driver Types - heavyweight driver-only types and context wiring.
 #
 # Lightweight public types now live in driver_core_types.spl so external
@@ -23,6 +32,9 @@ use compiler.driver.compile_failure_policy.{compile_fail_fast_requested}
 use compiler.driver.driver_xray_policy.{xray_policy_resolve, xray_observer_request_error_for_build, driver_target_profile_identity_v1}
 use compiler.driver.session.build_session.{BuildSession, build_session_inactive}
 use std.nogc_sync_mut.io.process_ops.{eprint}
+use std.nogc_sync_mut.io.kernel_image_digest_v1.{
+    KernelImageDigestV1, kernel_image_digest_v1
+}
 
 # Formation probe for the diagnostics array. `== nil` is NOT usable here: the
 # nil sentinel is raw 3, so a ZEROED array reports "present" to every `!= nil`
@@ -384,8 +396,28 @@ struct RuntimeStdFullInventorySelectionV1:
     source_inventory_digest: text
 
 class CompileContext:
+    directory_source_generation_v2: i64 = 0
+    directory_source_epoch_v2: DirectorySourceEpochV2? = nil
+    # Supplied only by the admitted full-inventory request, never inferred
+    # from absent cache metadata or unchecked environment configuration.
+    directory_semantic_variant_v3: ConfigVariantKeyV1? = nil
+    directory_category_projections_v2: Dict<text, DirectoryCategoryProjectionV2> = {}
+    directory_aspect_objects_v2: Dict<text, DirectoryAspectObjectV2> = {}
+    directory_aspect_semantics_v2: Dict<text, DirectoryAspectSemanticV2> = {}
+    directory_aspect_drafts_v2: Dict<text, DirectoryAspectDraftV2> = {}
+    directory_macro_drafts_v2: Dict<text, MacroCategoryDraftV2> = {}
+    directory_macro_projections_v2: Dict<text, DirectoryMacroProjectionV2> = {}
+    initializer_object_receipts_v1: Dict<text, MirInitializerObjectReceiptV1> = {}
+    initializer_build_receipt_v1: MirInitializerBuildReceiptV1? = nil
+    aop_source_epoch_v2: i64 = 0
+    aop_snapshot_captured_v2: bool = false
+    aop_directory_snapshots_v2: [DirectoryTldrSourceSnapshotV2] = []
     options: CompileOptions
     native_target: text
+    # Lazy current-host executable observation. Call only when an authoritative
+    # feature needs it; target and configured producer authority remain
+    # separately admitted.
+    kernel_image_digest_provider: fn() -> Result<KernelImageDigestV1, text>
     # Resolved once by the composition root. Per-source parsing consumes this
     # typed projection and never reconstructs CLI/environment precedence.
     frontend_advisory_policy: FrontendAdvisoryPreprocessPolicyV1
@@ -683,6 +715,7 @@ class CompileContext:
             session: build_session_inactive(),
             options: normalized_options,
             native_target: normalized_options.native_target,
+            kernel_image_digest_provider: kernel_image_digest_v1,
             frontend_advisory_policy: FrontendAdvisoryPreprocessPolicyV1.Reference,
             environment_variant_policy_digest: "",
             environment_variant_frontend_owner_id: 0u64,

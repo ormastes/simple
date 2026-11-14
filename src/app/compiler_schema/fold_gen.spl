@@ -402,26 +402,52 @@ fn _semantic_struct_lines(u: DeclUniverse, decl: NodeDecl, indent: text) -> text
         idx = idx + 3
     out
 
+fn _semantic_bounded_encoder_lines_v2(input: text) -> text:
+    var out = ""
+    for line in input.split("\n"):
+        if line == "": continue
+        val trimmed = line.trim()
+        var indent_len = 0
+        while indent_len < line.byte_len() and line.byte_at(indent_len) == 32: indent_len = indent_len + 1
+        val indent = line.substring(0, indent_len)
+        if trimmed.starts_with("for ") and trimmed.ends_with(":"):
+            var marker = -1
+            var scan = 0
+            while scan + 4 <= line.byte_len():
+                if line.substring(scan, scan + 4) == " in ":
+                    marker = scan
+                    break
+                scan = scan + 1
+            if marker >= 0:
+                val value = line.substring(marker + 4, line.byte_len() - 1)
+                out = out + indent + "state = _ast_semantic_sequence_v2(state, " + value + ".len())\n"
+                out = out + indent + "if state.bounded_v2 and not state.cacheable: return _ast_semantic_leave_v2(state)\n"
+        out = out + line + "\n"
+        if trimmed.starts_with("state = "):
+            out = out + indent + "if state.bounded_v2 and not state.cacheable: return _ast_semantic_leave_v2(state)\n"
+    out
+
 fn emit_one_ast_semantic_encoder(u: DeclUniverse, name: text) -> text:
     val row = d_carrier_row(dialect_ast(), name)
     var out = "fn " + _semantic_fn(name) + "(node: " + name + ", initial: AstSemanticHash) -> AstSemanticHash:\n"
-    out = out + "    if node == nil:\n        return _ast_semantic_mix_tag(initial, \"nil:" + name + "\")\n"
-    out = out + "    var state = _ast_semantic_mix_tag(initial, \"" + name + "\")\n"
+    out = out + "    val entered = _ast_semantic_enter_v2(initial)\n    if entered.bounded_v2 and not entered.cacheable: return entered\n"
+    out = out + "    if node == nil:\n        return _ast_semantic_leave_v2(_ast_semantic_mix_tag(entered, \"nil:" + name + "\"))\n"
+    out = out + "    var state = _ast_semantic_mix_tag(entered, \"" + name + "\")\n"
     if row.len() > 0 and row[0] != "":
         out = out + _semantic_struct_lines(u, u.decl_of(name), "    ")
         out = out + "    var handled = false\n    match node.kind:\n"
         out = out + _semantic_enum_arms(u, u.decl_of(row[1]), "        ")
         out = out + "        case _:\n            handled = false\n"
         out = out + "    if not handled:\n        _ast_semantic_unhandled(\"" + row[1] + "\", \"" + _semantic_fn(name) + "\")\n"
-        return out + "    state\n"
+        return _semantic_bounded_encoder_lines_v2(out + "    _ast_semantic_leave_v2(state)\n")
     val decl = u.decl_of(name)
     if decl.is_enum:
         out = out + "    var handled = false\n    match node:\n"
         out = out + _semantic_enum_arms(u, decl, "        ")
         out = out + "        case _:\n            handled = false\n"
         out = out + "    if not handled:\n        _ast_semantic_unhandled(\"" + name + "\", \"" + _semantic_fn(name) + "\")\n"
-        return out + "    state\n"
-    out + _semantic_struct_lines(u, decl, "    ") + "    state\n"
+        return _semantic_bounded_encoder_lines_v2(out + "    _ast_semantic_leave_v2(state)\n")
+    _semantic_bounded_encoder_lines_v2(out + _semantic_struct_lines(u, decl, "    ") + "    _ast_semantic_leave_v2(state)\n")
 
 fn emit_ast_semantic_file(u: DeclUniverse) -> text:
     var out = "# GENERATED — do not edit; regenerate with: bin/simple run src/app/compiler_schema/main.spl folds\n"
@@ -432,18 +458,9 @@ fn emit_ast_semantic_file(u: DeclUniverse) -> text:
     out = out + "use std.common.binary_io.{{f32_to_bits, f64_to_bits}}\n"
     out = out + "use std.common.crypto.sha256.{{Sha256StreamV1, sha256_stream_v1_new}}\n"
     out = out + "use std.nogc_sync_mut.io_runtime.{{exit}}\n\n"
-    out = out + "class AstSemanticHash:\n    var stream: Sha256StreamV1\n    scratch: [u8]\n    units: i64\n    cacheable: bool\n\n"
-    out = out + "fn ast_semantic_hash_seed() -> AstSemanticHash:\n    AstSemanticHash(sha256_stream_v1_new(), [0u8; 8], 0, true)\n\n"
-    out = out + "fn _ast_semantic_mix_i64(input: AstSemanticHash, value: i64) -> AstSemanticHash:\n    var state = input\n    var shift = 0\n    while shift < 64:\n        state.scratch[shift / 8] = ((value >> shift) & 255) as u8\n        shift = shift + 8\n    # The update MUST be written back: on the seed interpreter a class read\n    # from a field into a local is a copy, so updating only the local left\n    # every AstSemanticHash at the empty-input digest (all type/expr digests\n    # equal; module_surface_projection_blind_to_primitive_param_types_2026-10-24).\n    # @workaround bug=native_method_result_overwrites_receiver_slot_2026_10_21 reason=old_producer_field_writeback_uses_bool_result\n    val stream: Sha256StreamV1 = state.stream\n    val updated = stream.update(state.scratch)\n    state.stream = stream\n    if not updated: state.cacheable = false\n    state.units = state.units + 1\n    state\n\n"
-    out = out + "fn _ast_semantic_mix_text(state: AstSemanticHash, value: text) -> AstSemanticHash:\n    val byte_len = value.byte_len()\n    var result = _ast_semantic_mix_i64(state, byte_len)\n    var i = 0\n    while i < byte_len:\n        result = _ast_semantic_mix_i64(result, value.byte_at(i) as i64)\n        i = i + 1\n    result\n\n"
-    out = out + "fn _ast_semantic_mix_tag(state: AstSemanticHash, tag: text) -> AstSemanticHash:\n    _ast_semantic_mix_text(state, tag)\n\n"
-    out = out + "fn _ast_semantic_mix_scalar_i64(state: AstSemanticHash, width_tag: text, value: i64) -> AstSemanticHash:\n    var result = _ast_semantic_mix_tag(state, width_tag)\n    _ast_semantic_mix_i64(result, value)\n\n"
-    out = out + "fn _ast_semantic_mix_scalar_text(state: AstSemanticHash, width_tag: text, value: text) -> AstSemanticHash:\n    var result = _ast_semantic_mix_tag(state, width_tag)\n    _ast_semantic_mix_text(result, value)\n\n"
-    out = out + "fn _ast_semantic_mark_uncacheable(state: AstSemanticHash, reason: text) -> AstSemanticHash:\n    state.cacheable = false\n    _ast_semantic_mix_tag(state, reason)\n\n"
-    out = out + "fn ast_semantic_hash_finish(input: AstSemanticHash) -> text:\n    var state = input\n    if not state.cacheable: return \"\"\n    # @workaround bug=seed_coalesce_stateful_operand_twice_2026_10_12 recover=fcc1d91ea1b92992c7ebd7ba50f44379999bab4e reason=seed_coalesce_evaluates_stateful_operand_twice\n    val stream: Sha256StreamV1 = state.stream\n    val digest = stream.finish_hex()\n    digest ?? \"\"\n\n"
-    out = out + "fn _ast_semantic_unhandled(kind: text, where_: text):\n    print \"E-AST-SEMANTIC-UNHANDLED: {{kind}} at {{where_}}; regenerate encoder\"\n    exit(1)\n\n"
+    out = out + "class AstSemanticHash:\n    var stream: Sha256StreamV1\n    scratch: [u8]\n    units: i64\n    cacheable: bool\n    bounded_v2: bool = false\n    remaining_nodes_v2: i64 = 0\n    remaining_bytes_v2: i64 = 0\n    max_depth_v2: i64 = 0\n    depth_v2: i64 = 0\n\nfn ast_semantic_hash_seed() -> AstSemanticHash:\n    AstSemanticHash(sha256_stream_v1_new(), [0u8; 8], 0, true)\n\n# V2 bounds apply to the encoded stream, including eight-byte scalar framing.\n# A sequence cardinality check reserves no nodes: it refuses implausibly large\n# loops, while child encoders consume nodes and scalar writes consume bytes.\nval AST_SEMANTIC_MAX_NODES_V2: i64 = 4096\nval AST_SEMANTIC_MAX_DEPTH_V2: i64 = 32\nval AST_SEMANTIC_MAX_BYTES_V2: i64 = 1048576\n\nfn ast_semantic_hash_seed_bounded_v2(nodes: i64, depth: i64, bytes: i64) -> AstSemanticHash:\n    var state = ast_semantic_hash_seed()\n    state.bounded_v2 = true\n    state.remaining_nodes_v2 = nodes\n    state.remaining_bytes_v2 = bytes\n    state.max_depth_v2 = depth\n    if nodes < 0 or nodes > AST_SEMANTIC_MAX_NODES_V2 or depth < 1 or depth > AST_SEMANTIC_MAX_DEPTH_V2 or bytes < 0 or bytes > AST_SEMANTIC_MAX_BYTES_V2:\n        state.cacheable = false\n    state\n\nfn _ast_semantic_enter_v2(input: AstSemanticHash) -> AstSemanticHash:\n    var state = input\n    if not state.bounded_v2: return state\n    if not state.cacheable or state.remaining_nodes_v2 <= 0 or state.depth_v2 >= state.max_depth_v2:\n        state.cacheable = false\n        return state\n    state.remaining_nodes_v2 = state.remaining_nodes_v2 - 1\n    state.depth_v2 = state.depth_v2 + 1\n    state\n\nfn _ast_semantic_leave_v2(input: AstSemanticHash) -> AstSemanticHash:\n    var state = input\n    if state.bounded_v2: state.depth_v2 = state.depth_v2 - 1\n    state\n\nfn _ast_semantic_sequence_v2(input: AstSemanticHash, count: i64) -> AstSemanticHash:\n    var state = input\n    if state.bounded_v2 and (count < 0 or count > state.remaining_nodes_v2 or count > state.remaining_bytes_v2 / 8):\n        state.cacheable = false\n    state\n\nfn _ast_semantic_mix_i64(input: AstSemanticHash, value: i64) -> AstSemanticHash:\n    var state = input\n    if state.bounded_v2:\n        if not state.cacheable or state.remaining_bytes_v2 < 8:\n            state.cacheable = false\n            return state\n        state.remaining_bytes_v2 = state.remaining_bytes_v2 - 8\n    var shift = 0\n    while shift < 64:\n        state.scratch[shift / 8] = ((value >> shift) & 255) as u8\n        shift = shift + 8\n    # The update MUST be written back: on the seed interpreter a class read\n    # from a field into a local is a copy, so updating only the local left\n    # every AstSemanticHash at the empty-input digest (all type/expr digests\n    # equal; module_surface_projection_blind_to_primitive_param_types_2026-10-24).\n    # @workaround bug=native_method_result_overwrites_receiver_slot_2026_10_21 reason=old_producer_field_writeback_uses_bool_result\n    val stream: Sha256StreamV1 = state.stream\n    val updated = stream.update(state.scratch)\n    state.stream = stream\n    if not updated: state.cacheable = false\n    state.units = state.units + 1\n    state\n\nfn _ast_semantic_mix_text(state: AstSemanticHash, value: text) -> AstSemanticHash:\n    val byte_len = value.byte_len()\n    if state.bounded_v2 and (not state.cacheable or state.remaining_bytes_v2 < 8 or byte_len > (state.remaining_bytes_v2 - 8) / 8):\n        state.cacheable = false\n        return state\n    var result = _ast_semantic_mix_i64(state, byte_len)\n    var i = 0\n    while i < byte_len:\n        result = _ast_semantic_mix_i64(result, value.byte_at(i) as i64)\n        i = i + 1\n    result\n\nfn _ast_semantic_mix_tag(state: AstSemanticHash, tag: text) -> AstSemanticHash:\n    _ast_semantic_mix_text(state, tag)\n\nfn _ast_semantic_mix_scalar_i64(state: AstSemanticHash, width_tag: text, value: i64) -> AstSemanticHash:\n    var result = _ast_semantic_mix_tag(state, width_tag)\n    _ast_semantic_mix_i64(result, value)\n\nfn _ast_semantic_mix_scalar_text(state: AstSemanticHash, width_tag: text, value: text) -> AstSemanticHash:\n    var result = _ast_semantic_mix_tag(state, width_tag)\n    _ast_semantic_mix_text(result, value)\n\nfn _ast_semantic_mark_uncacheable(state: AstSemanticHash, reason: text) -> AstSemanticHash:\n    state.cacheable = false\n    _ast_semantic_mix_tag(state, reason)\n\nfn ast_semantic_hash_finish(input: AstSemanticHash) -> text:\n    var state = input\n    if not state.cacheable: return \"\"\n    # @workaround bug=seed_coalesce_stateful_operand_twice_2026_10_12 recover=fcc1d91ea1b92992c7ebd7ba50f44379999bab4e reason=seed_coalesce_evaluates_stateful_operand_twice\n    val stream: Sha256StreamV1 = state.stream\n    val digest = stream.finish_hex()\n    digest ?? \"\"\n\nfn _ast_semantic_unhandled(kind: text, where_: text):\n    print \"E-AST-SEMANTIC-UNHANDLED: {{kind}} at {{where_}}; regenerate encoder\"\n    exit(1)\n\n"
     for name in ast_semantic_emit_order(u): out = out + emit_one_ast_semantic_encoder(u, name) + "\n"
-    out = out + "export AstSemanticHash, ast_semantic_hash_seed, ast_semantic_hash_finish\n"
+    out = out + "export AstSemanticHash, ast_semantic_hash_seed, ast_semantic_hash_finish, ast_semantic_hash_seed_bounded_v2\nexport AST_SEMANTIC_MAX_NODES_V2, AST_SEMANTIC_MAX_DEPTH_V2, AST_SEMANTIC_MAX_BYTES_V2\n"
     var names: [text] = []
     for name in ast_semantic_roots(): names.push(_semantic_fn(name))
     out + "export " + _join(names, ", ") + "\n"
