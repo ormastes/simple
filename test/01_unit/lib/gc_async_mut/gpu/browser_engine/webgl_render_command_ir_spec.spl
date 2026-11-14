@@ -1,0 +1,142 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-BROWSER_ENGINE
+# @cover src/lib/gc_async_mut/gpu/browser_engine/webgl_render_commands.spl 30%
+# @tag: unit, browser_engine, webgl
+#
+# The WebGL render-command IR is flat data: each constructor must put its
+# arguments in the documented field and leave every other field at the neutral
+# default (0 / 0.0 / -1 for object ids / empty arrays). A constructor that
+# drops or swaps an argument produces a wrong draw with no error, so each case
+# asserts the kind tag AND the exact field each argument lands in.
+
+use std.spec.{describe, context, it, expect}
+use std.gc_async_mut.gpu.browser_engine.webgl_render_commands.{
+    WebGLRenderCommand,
+    webgl_render_command_viewport, webgl_render_command_scissor,
+    webgl_render_command_clear_color, webgl_render_command_clear_depth,
+    webgl_render_command_depth_range, webgl_render_command_clear_stencil,
+    webgl_render_command_clear, webgl_render_command_flush, webgl_render_command_finish,
+    webgl_render_command_draw_arrays, webgl_render_command_draw_elements,
+    webgl_render_command_draw_arrays_instanced, webgl_render_command_draw_elements_instanced,
+    webgl_render_command_draw_buffers, webgl_render_command_read_buffer
+}
+
+describe "WebGL render command IR":
+
+    context "rectangle state":
+
+        it "viewport carries x, y, width, height and neutral defaults":
+            val c = webgl_render_command_viewport(3, 5, 640, 480)
+            expect(c.kind).to_equal("viewport")
+            expect(c.x).to_equal(3)
+            expect(c.y).to_equal(5)
+            expect(c.width).to_equal(640)
+            expect(c.height).to_equal(480)
+            expect(c.program_id).to_equal(-1)
+            expect(c.buffer_id).to_equal(-1)
+            expect(c.texture_id).to_equal(-1)
+            expect(c.mask).to_equal(0)
+            expect(c.int_values.len()).to_equal(0)
+            expect(c.float_values.len()).to_equal(0)
+
+        it "scissor uses the same rectangle fields under its own kind":
+            val c = webgl_render_command_scissor(10, 20, 30, 40)
+            expect(c.kind).to_equal("scissor")
+            expect(c.x).to_equal(10)
+            expect(c.y).to_equal(20)
+            expect(c.width).to_equal(30)
+            expect(c.height).to_equal(40)
+
+    context "clear state":
+
+        it "clear-color keeps the four channels in order":
+            val c = webgl_render_command_clear_color(0.25, 0.5, 0.75, 1.0)
+            expect(c.kind).to_equal("clear-color")
+            expect(c.red).to_equal(0.25)
+            expect(c.green).to_equal(0.5)
+            expect(c.blue).to_equal(0.75)
+            expect(c.alpha).to_equal(1.0)
+            expect(c.width).to_equal(0)
+
+        it "clear-depth stores the depth in the first float slot":
+            val c = webgl_render_command_clear_depth(0.5)
+            expect(c.kind).to_equal("clear-depth")
+            expect(c.red).to_equal(0.5)
+            expect(c.green).to_equal(0.0)
+
+        it "depth-range stores near then far":
+            val c = webgl_render_command_depth_range(0.125, 0.875)
+            expect(c.kind).to_equal("depth-range")
+            expect(c.red).to_equal(0.125)
+            expect(c.green).to_equal(0.875)
+
+        it "clear-stencil and clear carry their integer in mask":
+            val s = webgl_render_command_clear_stencil(7)
+            expect(s.kind).to_equal("clear-stencil")
+            expect(s.mask).to_equal(7)
+            val c = webgl_render_command_clear(16640)
+            expect(c.kind).to_equal("clear")
+            expect(c.mask).to_equal(16640)
+
+        it "flush and finish are distinct argument-free commands":
+            expect(webgl_render_command_flush().kind).to_equal("flush")
+            expect(webgl_render_command_finish().kind).to_equal("finish")
+            expect(webgl_render_command_flush().count).to_equal(0)
+
+    context "draw calls":
+
+        it "draw-arrays carries mode, first and count":
+            val c = webgl_render_command_draw_arrays(4, 6, 36)
+            expect(c.kind).to_equal("draw-arrays")
+            expect(c.mode).to_equal(4)
+            expect(c.first).to_equal(6)
+            expect(c.count).to_equal(36)
+            expect(c.mask).to_equal(0)
+
+        it "draw-elements carries mode, count, element type and offset":
+            val c = webgl_render_command_draw_elements(4, 12, 5123, 24)
+            expect(c.kind).to_equal("draw-elements")
+            expect(c.mode).to_equal(4)
+            expect(c.first).to_equal(0)
+            expect(c.count).to_equal(12)
+            expect(c.element_type).to_equal(5123)
+            expect(c.offset).to_equal(24)
+
+        it "instanced draw-arrays keeps the instance count in mask":
+            val c = webgl_render_command_draw_arrays_instanced(5, 2, 4, 100)
+            expect(c.kind).to_equal("draw-arrays-instanced")
+            expect(c.mode).to_equal(5)
+            expect(c.first).to_equal(2)
+            expect(c.count).to_equal(4)
+            expect(c.mask).to_equal(100)
+
+        it "instanced draw-elements keeps offset and instance count apart":
+            val c = webgl_render_command_draw_elements_instanced(4, 6, 5125, 48, 9)
+            expect(c.kind).to_equal("draw-elements-instanced")
+            expect(c.count).to_equal(6)
+            expect(c.element_type).to_equal(5125)
+            expect(c.offset).to_equal(48)
+            expect(c.mask).to_equal(9)
+
+    context "framebuffer attachments":
+
+        it "draw-buffers copies the attachment list and counts it":
+            var attachments: [i32] = [36064, 36065, 0]
+            val c = webgl_render_command_draw_buffers(attachments)
+            expect(c.kind).to_equal("draw-buffers")
+            expect(c.count).to_equal(3)
+            expect(c.int_values.len()).to_equal(3)
+            expect(c.int_values[0]).to_equal(36064)
+            expect(c.int_values[1]).to_equal(36065)
+            expect(c.int_values[2]).to_equal(0)
+
+        it "draw-buffers is unaffected by later edits of the caller's list":
+            var attachments: [i32] = [36064]
+            val c = webgl_render_command_draw_buffers(attachments)
+            attachments.push(36065)
+            expect(c.int_values.len()).to_equal(1)
+
+        it "read-buffer stores its source in target":
+            val c = webgl_render_command_read_buffer(1029)
+            expect(c.kind).to_equal("read-buffer")
+            expect(c.target).to_equal(1029)

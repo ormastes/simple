@@ -1,0 +1,159 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# @cover src/lib/gc_async_mut/gpu/engine2d/host_gpu_event_queue.spl 80%
+# @tag: unit, engine2d, gpu, host-gpu-queue
+#
+# Packet lifecycle accounting of the host<->GPU queue as seen through the
+# engine2d_host_gpu_host_* and engine2d_host_gpu_runtime_* observers:
+# emit -> submit -> complete -> drain. A packet must be counted exactly once in
+# each phase, in_flight must be submitted minus completed, and the "last
+# packet" observers publish the backend handle at submit and the payload only
+# once the packet completes (drain completes in-flight and queued packets).
+# host_gpu_event_queue_spec.spl covers the typed queue wrappers; the raw
+# counters and the status-name table were not asserted anywhere.
+
+use std.spec.{describe, context, it, expect}
+use std.gc_async_mut.gpu.engine2d.host_gpu_event_queue.{
+    ENGINE2D_HOST_GPU_HIT_QUERY_MISS,
+    engine2d_host_gpu_runtime_reset,
+    engine2d_host_gpu_host_emit_payload_text,
+    engine2d_host_gpu_host_submit, engine2d_host_gpu_host_complete,
+    engine2d_host_gpu_host_drain_packets,
+    engine2d_host_gpu_host_submitted_count, engine2d_host_gpu_host_completed_count,
+    engine2d_host_gpu_host_in_flight_count, engine2d_host_gpu_host_last_status,
+    engine2d_host_gpu_host_last_backend_handle, engine2d_host_gpu_host_last_payload_size,
+    engine2d_host_gpu_host_last_payload_hash, engine2d_host_gpu_host_last_payload_text,
+    engine2d_host_gpu_runtime_emit_payload_text,
+    engine2d_host_gpu_runtime_submit, engine2d_host_gpu_runtime_complete,
+    engine2d_host_gpu_runtime_drain_packets,
+    engine2d_host_gpu_runtime_submitted_count, engine2d_host_gpu_runtime_completed_count,
+    engine2d_host_gpu_runtime_in_flight_count, engine2d_host_gpu_runtime_last_status,
+    engine2d_host_gpu_runtime_last_backend_handle, engine2d_host_gpu_runtime_last_payload_size,
+    engine2d_host_gpu_runtime_last_payload_hash, engine2d_host_gpu_runtime_last_payload_text,
+    engine2d_host_gpu_runtime_status_name,
+    engine2d_host_gpu_hit_query_readback_miss
+}
+
+describe "Host GPU queue packet accounting":
+
+    context "status names":
+
+        it "names the five runtime status codes":
+            expect(engine2d_host_gpu_runtime_status_name(0)).to_equal("empty")
+            expect(engine2d_host_gpu_runtime_status_name(1)).to_equal("queued")
+            expect(engine2d_host_gpu_runtime_status_name(2)).to_equal("submitted")
+            expect(engine2d_host_gpu_runtime_status_name(3)).to_equal("completed")
+            expect(engine2d_host_gpu_runtime_status_name(4)).to_equal("typed_unavailable")
+
+        it "labels any other code unknown":
+            expect(engine2d_host_gpu_runtime_status_name(5)).to_equal("unknown")
+            expect(engine2d_host_gpu_runtime_status_name(-1)).to_equal("unknown")
+
+    context "hit query miss readback":
+
+        it "carries the miss sentinel and the query identity":
+            val r = engine2d_host_gpu_hit_query_readback_miss("evt-9", 42)
+            expect(r.event_id).to_equal("evt-9")
+            expect(r.generation).to_equal(42)
+            expect(r.node_id).to_equal(ENGINE2D_HOST_GPU_HIT_QUERY_MISS)
+            expect(r.node_id).to_equal(-1)
+            expect(r.hit).to_equal(false)
+            expect(r.diagnostic).to_equal("miss")
+
+    context "host observers over one packet":
+
+        it "starts empty after reset":
+            engine2d_host_gpu_runtime_reset()
+            expect(engine2d_host_gpu_host_submitted_count()).to_equal(0)
+            expect(engine2d_host_gpu_host_completed_count()).to_equal(0)
+            expect(engine2d_host_gpu_host_in_flight_count()).to_equal(0)
+            expect(engine2d_host_gpu_host_last_status()).to_equal(0)
+
+        it "queues a packet without publishing its payload yet":
+            engine2d_host_gpu_runtime_reset()
+            val packet_id = engine2d_host_gpu_host_emit_payload_text(2, 1, 64, 77, 123456, "draw-ir:frame-1")
+            expect(packet_id > 0).to_equal(true)
+            expect(engine2d_host_gpu_host_last_status()).to_equal(1)
+            expect(engine2d_host_gpu_host_submitted_count()).to_equal(0)
+            expect(engine2d_host_gpu_host_last_payload_size()).to_equal(0)
+            expect(engine2d_host_gpu_host_last_payload_text()).to_equal("")
+
+        it "publishes the backend handle at submit and the payload at completion":
+            engine2d_host_gpu_runtime_reset()
+            engine2d_host_gpu_host_emit_payload_text(2, 1, 64, 77, 123456, "draw-ir:frame-1")
+            expect(engine2d_host_gpu_host_submit(8)).to_equal(1)
+            expect(engine2d_host_gpu_host_last_backend_handle()).to_equal(77)
+            expect(engine2d_host_gpu_host_last_payload_size()).to_equal(0)
+            expect(engine2d_host_gpu_host_complete(8)).to_equal(1)
+            expect(engine2d_host_gpu_host_last_backend_handle()).to_equal(77)
+            expect(engine2d_host_gpu_host_last_payload_size()).to_equal(64)
+            expect(engine2d_host_gpu_host_last_payload_hash()).to_equal(123456)
+            expect(engine2d_host_gpu_host_last_payload_text()).to_equal("draw-ir:frame-1")
+
+        it "moves the packet through submit and complete exactly once":
+            engine2d_host_gpu_runtime_reset()
+            engine2d_host_gpu_host_emit_payload_text(2, 1, 64, 77, 123456, "draw-ir:frame-1")
+            expect(engine2d_host_gpu_host_submit(8)).to_equal(1)
+            expect(engine2d_host_gpu_host_submitted_count()).to_equal(1)
+            expect(engine2d_host_gpu_host_in_flight_count()).to_equal(1)
+            expect(engine2d_host_gpu_host_last_status()).to_equal(2)
+            expect(engine2d_host_gpu_host_submit(8)).to_equal(0)
+            expect(engine2d_host_gpu_host_complete(8)).to_equal(1)
+            expect(engine2d_host_gpu_host_completed_count()).to_equal(1)
+            expect(engine2d_host_gpu_host_in_flight_count()).to_equal(0)
+            expect(engine2d_host_gpu_host_last_status()).to_equal(3)
+            expect(engine2d_host_gpu_host_complete(8)).to_equal(0)
+            expect(engine2d_host_gpu_host_drain_packets(8)).to_equal(0)
+
+        it "drain submits and completes a queued packet in one step":
+            engine2d_host_gpu_runtime_reset()
+            engine2d_host_gpu_host_emit_payload_text(2, 1, 32, 55, 9, "queued-only")
+            expect(engine2d_host_gpu_host_drain_packets(8)).to_equal(1)
+            expect(engine2d_host_gpu_host_submitted_count()).to_equal(1)
+            expect(engine2d_host_gpu_host_completed_count()).to_equal(1)
+            expect(engine2d_host_gpu_host_in_flight_count()).to_equal(0)
+            expect(engine2d_host_gpu_host_last_payload_text()).to_equal("queued-only")
+            expect(engine2d_host_gpu_host_last_status()).to_equal(3)
+
+        it "reports typed-unavailable for a GPU-lane packet with no backend handle":
+            engine2d_host_gpu_runtime_reset()
+            engine2d_host_gpu_host_emit_payload_text(2, 1, 32, 0, 9, "no-backend")
+            expect(engine2d_host_gpu_host_drain_packets(8)).to_equal(1)
+            expect(engine2d_host_gpu_host_last_status()).to_equal(4)
+
+        it "limits a phase to max_packets":
+            engine2d_host_gpu_runtime_reset()
+            engine2d_host_gpu_host_emit_payload_text(2, 1, 8, 77, 1, "a")
+            engine2d_host_gpu_host_emit_payload_text(2, 1, 8, 77, 2, "b")
+            engine2d_host_gpu_host_emit_payload_text(2, 1, 8, 77, 3, "c")
+            expect(engine2d_host_gpu_host_submit(2)).to_equal(2)
+            expect(engine2d_host_gpu_host_in_flight_count()).to_equal(2)
+            expect(engine2d_host_gpu_host_submit(2)).to_equal(1)
+            expect(engine2d_host_gpu_host_submitted_count()).to_equal(3)
+            expect(engine2d_host_gpu_host_complete(1)).to_equal(1)
+            expect(engine2d_host_gpu_host_in_flight_count()).to_equal(2)
+            expect(engine2d_host_gpu_host_completed_count()).to_equal(1)
+
+    context "runtime observers agree with the host observers":
+
+        it "reports the same lifecycle through the runtime names":
+            engine2d_host_gpu_runtime_reset()
+            val packet_id = engine2d_host_gpu_runtime_emit_payload_text(2, 2, 16, 91, 555, "hit-query:evt-1")
+            expect(packet_id > 0).to_equal(true)
+            expect(engine2d_host_gpu_runtime_last_status()).to_equal(1)
+            expect(engine2d_host_gpu_runtime_submit(4)).to_equal(1)
+            expect(engine2d_host_gpu_runtime_submitted_count()).to_equal(1)
+            expect(engine2d_host_gpu_host_submitted_count()).to_equal(1)
+            expect(engine2d_host_gpu_runtime_in_flight_count()).to_equal(1)
+            expect(engine2d_host_gpu_runtime_last_backend_handle()).to_equal(91)
+            expect(engine2d_host_gpu_runtime_complete(4)).to_equal(1)
+            expect(engine2d_host_gpu_runtime_completed_count()).to_equal(1)
+            expect(engine2d_host_gpu_runtime_in_flight_count()).to_equal(0)
+            expect(engine2d_host_gpu_runtime_last_status()).to_equal(3)
+            expect(engine2d_host_gpu_runtime_last_payload_size()).to_equal(16)
+            expect(engine2d_host_gpu_runtime_last_payload_hash()).to_equal(555)
+            expect(engine2d_host_gpu_runtime_last_payload_text()).to_equal("hit-query:evt-1")
+            expect(engine2d_host_gpu_runtime_drain_packets(4)).to_equal(0)
+            engine2d_host_gpu_runtime_reset()
+            expect(engine2d_host_gpu_runtime_completed_count()).to_equal(0)
+            expect(engine2d_host_gpu_runtime_last_payload_text()).to_equal("")

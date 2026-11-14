@@ -1,0 +1,163 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-BROWSER_ENGINE
+# @cover src/lib/gc_async_mut/gpu/browser_engine/dom_color.spl 60%
+# @tag: unit, browser_engine, css, color
+#
+# CSS <color> value forms accepted by the Simple web colour parser, checked
+# against CSS Color 4 expected sRGB values (packed 0xRRGGBBAA): hex in its four
+# lengths, legacy and modern rgb()/rgba(), hsl() at the primaries, named
+# colours, the failure signal (nil) of the checked entry point and the
+# opaque-black / transparent fallbacks of the unchecked one, plus CSS comment
+# stripping. Expected values come from the CSS definitions, not from the
+# implementation.
+
+use std.spec.{describe, context, it, expect}
+use std.gc_async_mut.gpu.browser_engine.dom_color.{
+    parse_color_value, parse_color_value_checked, strip_css_comments,
+    dom_find_str, dom_parse_hex_color, parse_rgb_unified, named_color_to_u32,
+    dom_split_ws, split_comma, parse_int_clamped, css_hex_byte
+}
+
+fn _rgba_text(c: u32) -> text:
+    val v = c as i64
+    val r = (v / 16777216) % 256
+    val g = (v / 65536) % 256
+    val b = (v / 256) % 256
+    val a = v % 256
+    "{r},{g},{b},{a}"
+
+fn _checked_text(s: text) -> text:
+    val c = parse_color_value_checked(s)
+    if c == nil:
+        return "nil"
+    _rgba_text(c ?? 0)
+
+describe "CSS colour value forms":
+
+    context "hex notation":
+
+        it "expands #RGB by doubling each digit":
+            expect(_checked_text("#f80")).to_equal("255,136,0,255")
+
+        it "expands #RGBA including alpha":
+            expect(_checked_text("#F808")).to_equal("255,136,0,136")
+
+        it "reads #RRGGBB as opaque":
+            expect(_checked_text("#102030")).to_equal("16,32,48,255")
+
+        it "reads #RRGGBBAA with trailing alpha":
+            expect(_checked_text("#10203040")).to_equal("16,32,48,64")
+
+        it "reports nil for malformed hex":
+            expect(_checked_text("#gg")).to_equal("nil")
+            expect(_checked_text("#12345")).to_equal("nil")
+            expect(_checked_text("#")).to_equal("nil")
+
+        it "the unchecked hex helper answers opaque black for an unsupported length":
+            expect(_rgba_text(dom_parse_hex_color("#12345"))).to_equal("0,0,0,255")
+            expect(_rgba_text(dom_parse_hex_color("#0a0B0c"))).to_equal("10,11,12,255")
+
+    context "rgb functions":
+
+        it "parses legacy comma syntax":
+            expect(_checked_text("rgb(255, 0, 128)")).to_equal("255,0,128,255")
+
+        it "parses modern space syntax":
+            expect(_checked_text("rgb(12 34 56)")).to_equal("12,34,56,255")
+
+        it "parses rgba with a zero and a one alpha":
+            expect(_checked_text("rgba(1, 2, 3, 0)")).to_equal("1,2,3,0")
+            expect(_checked_text("rgba(1, 2, 3, 1)")).to_equal("1,2,3,255")
+
+        it "accepts an upper-case function name":
+            expect(_checked_text("RGB(1, 2, 3)")).to_equal("1,2,3,255")
+
+        it "clamps components above 255":
+            expect(_checked_text("rgb(300, 0, 0)")).to_equal("255,0,0,255")
+
+        it "reports nil for an unterminated function":
+            expect(_checked_text("rgb(1, 2, 3")).to_equal("nil")
+
+        it "exposes the argument parser directly":
+            expect(_rgba_text(parse_rgb_unified("9, 8, 7"))).to_equal("9,8,7,255")
+
+    context "hsl functions":
+
+        it "maps the primaries":
+            expect(_checked_text("hsl(0, 100%, 50%)")).to_equal("255,0,0,255")
+            expect(_checked_text("hsl(120, 100%, 50%)")).to_equal("0,255,0,255")
+            expect(_checked_text("hsl(240, 100%, 50%)")).to_equal("0,0,255,255")
+
+        it "maps zero and full lightness to black and white":
+            expect(_checked_text("hsl(0, 100%, 0%)")).to_equal("0,0,0,255")
+            expect(_checked_text("hsl(0, 100%, 100%)")).to_equal("255,255,255,255")
+
+        it "applies hsla alpha":
+            expect(_checked_text("hsla(0, 100%, 50%, 0)")).to_equal("255,0,0,0")
+
+    context "named colours and keywords":
+
+        it "resolves basic and extended names":
+            expect(_checked_text("red")).to_equal("255,0,0,255")
+            expect(_checked_text("rebeccapurple")).to_equal("102,51,153,255")
+            expect(_checked_text("cornflowerblue")).to_equal("100,149,237,255")
+
+        it "resolves transparent to zero alpha":
+            expect(_checked_text("transparent")).to_equal("0,0,0,0")
+
+        it "treats currentColor as the opaque-black sentinel":
+            expect(_checked_text("currentColor")).to_equal("0,0,0,255")
+
+        it "reports nil for an unknown name through both entry points":
+            expect(_checked_text("notacolour")).to_equal("nil")
+            expect(named_color_to_u32("notacolour") == nil).to_equal(true)
+
+    context "unchecked entry point fallbacks":
+
+        it "falls back to opaque black for an unparsable value":
+            expect(_rgba_text(parse_color_value("notacolour"))).to_equal("0,0,0,255")
+
+        it "returns fully transparent for an unresolved var()":
+            expect(_rgba_text(parse_color_value("var(--accent)"))).to_equal("0,0,0,0")
+
+        it "trims whitespace and ignores comments around a value":
+            expect(_rgba_text(parse_color_value("  /* brand */ #102030  "))).to_equal("16,32,48,255")
+
+        it "reports nil for an empty value when checked":
+            expect(_checked_text("")).to_equal("nil")
+            expect(_checked_text("   ")).to_equal("nil")
+
+    context "comment stripping and scanning":
+
+        it "removes a comment in the middle of a token run":
+            expect(strip_css_comments("re/* x */d")).to_equal("red")
+
+        it "removes several comments":
+            expect(strip_css_comments("/*a*/1/*b*/2/*c*/")).to_equal("12")
+
+        it "drops everything after an unterminated comment":
+            expect(strip_css_comments("blue /* never closed")).to_equal("blue ")
+
+        it "leaves comment-free text unchanged":
+            expect(strip_css_comments("rgb(1, 2, 3)")).to_equal("rgb(1, 2, 3)")
+
+        it "finds a needle from a start offset and reports the miss sentinel":
+            expect(dom_find_str("a*/b*/", "*/", 0)).to_equal(1)
+            expect(dom_find_str("a*/b*/", "*/", 2)).to_equal(4)
+            expect(dom_find_str("abc", "*/", 0)).to_equal(999999999)
+
+    context "token helpers":
+
+        it "splits on runs of whitespace":
+            expect(dom_split_ws("  12   34 56 ")).to_equal(["12", "34", "56"])
+
+        it "splits on commas and leaves trimming to the caller":
+            expect(split_comma("1, 2 ,3")).to_equal(["1", " 2 ", "3"])
+
+        it "clamps integers into a range":
+            expect(parse_int_clamped("300", 0, 255) as i64).to_equal(255)
+            expect(parse_int_clamped("42", 0, 255) as i64).to_equal(42)
+
+        it "reads a two-digit hex byte in either case":
+            expect(css_hex_byte("fF") as i64).to_equal(255)
+            expect(css_hex_byte("1a") as i64).to_equal(26)
