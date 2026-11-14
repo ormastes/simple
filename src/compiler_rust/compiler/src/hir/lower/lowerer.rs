@@ -55,6 +55,12 @@ pub struct Lowerer {
     /// `option_pattern_shape_diag` can name a source location instead of only
     /// the run. `Pattern` itself carries no span; `MatchArm` and `IfStmt` do.
     pub(super) current_pattern_span: Option<(usize, usize)>,
+    /// Address of the AST node that is the implicit tail of the function body
+    /// being lowered, when that tail is a `match` and the function declares a
+    /// non-void return: its value is the return value, so a fall-through must
+    /// fail closed like a `val`-position match. Compared by address only.
+    /// doc/08_tracking/bug/seed_value_match_no_arm_yields_nil_2026-11-02.md
+    pub(super) value_tail_match: Option<usize>,
     /// Module resolver for loading types from imports (optional for backward compatibility)
     pub(super) module_resolver: Option<ModuleResolver>,
     /// Current file being compiled (for resolving relative imports)
@@ -354,6 +360,7 @@ impl Lowerer {
             current_function_name: None,
             current_function_line: None,
             current_pattern_span: None,
+            value_tail_match: None,
             module_resolver: None,
             current_file: None,
             loaded_modules: HashSet::new(),
@@ -445,6 +452,7 @@ impl Lowerer {
             current_function_name: None,
             current_function_line: None,
             current_pattern_span: None,
+            value_tail_match: None,
             module_resolver: Some(module_resolver),
             current_file: Some(current_file),
             loaded_modules: HashSet::new(),
@@ -559,6 +567,7 @@ impl Lowerer {
             current_function_name: None,
             current_function_line: None,
             current_pattern_span: None,
+            value_tail_match: None,
             module_resolver: None,
             current_file: None,
             loaded_modules: HashSet::new(),
