@@ -1,0 +1,85 @@
+use std.spec.{describe, it, expect, fail}
+use app.bootstrap_builder.native_group_index_variant.{native_group_index_variant_profile_v1}
+use compiler.driver.cache.native_full_index_variant_v1.{native_full_index_variant_admit_v1}
+use compiler.driver.cache.package_tldr_metadata.{ConfigVariantKeyV1}
+
+describe "full-index supplied semantic variant binding":
+    it "accepts the actual admitted producer variant":
+        match native_group_index_variant_profile_v1("phase4", "llvm",
+                "x86_64-pc-windows-msvc", "release", "simple-v1"):
+            Ok(profile):
+                expect(native_full_index_variant_admit_v1(
+                    "phase4", profile.variant).is_ok()).to_equal(true)
+            Err(reason): fail(reason)
+
+    it "rejects target and build identity substitutions":
+        match native_group_index_variant_profile_v1("phase4", "llvm",
+                "x86_64-pc-windows-msvc", "release", "simple-v1"):
+            Ok(profile):
+                val v = profile.variant
+                val target = ConfigVariantKeyV1("aarch64-unknown-linux-gnu",
+                    v.backend, v.features, v.build_mode, v.language_abi,
+                    v.normalized_options, v.environment_inputs)
+                expect(native_full_index_variant_admit_v1("phase4", target).is_ok()).to_equal(false)
+                val mode = ConfigVariantKeyV1(v.target_triple, v.backend,
+                    v.features, "debug", v.language_abi, v.normalized_options,
+                    v.environment_inputs)
+                expect(native_full_index_variant_admit_v1("phase4", mode).is_ok()).to_equal(false)
+            Err(reason): fail(reason)
+
+    it "rejects missing or changed normalized options":
+        match native_group_index_variant_profile_v1("phase4", "llvm",
+                "x86_64-pc-windows-msvc", "release", "simple-v1"):
+            Ok(profile):
+                val v = profile.variant
+                val absent = ConfigVariantKeyV1(v.target_triple, v.backend,
+                    v.features, v.build_mode, v.language_abi, [], v.environment_inputs)
+                expect(native_full_index_variant_admit_v1("phase4", absent).is_ok()).to_equal(false)
+                val changed = ConfigVariantKeyV1(v.target_triple, v.backend,
+                    v.features, v.build_mode, v.language_abi, ["opt_level=0"], v.environment_inputs)
+                expect(native_full_index_variant_admit_v1("phase4", changed).is_ok()).to_equal(false)
+            Err(reason): fail(reason)
+
+    it "rejects unprojected features and environment":
+        match native_group_index_variant_profile_v1("phase4", "llvm",
+                "x86_64-pc-windows-msvc", "release", "simple-v1"):
+            Ok(profile):
+                val v = profile.variant
+                val features = ConfigVariantKeyV1(v.target_triple, v.backend,
+                    ["avx2"], v.build_mode, v.language_abi, v.normalized_options, [])
+                expect(native_full_index_variant_admit_v1("phase4", features).is_ok()).to_equal(false)
+                val environment = ConfigVariantKeyV1(v.target_triple, v.backend,
+                    [], v.build_mode, v.language_abi, v.normalized_options, ["TZ=UTC"])
+                expect(native_full_index_variant_admit_v1("phase4", environment).is_ok()).to_equal(false)
+            Err(reason): fail(reason)
+
+    it "rejects unsupported backend and ABI substitutions":
+        match native_group_index_variant_profile_v1("phase4", "llvm",
+                "x86_64-pc-windows-msvc", "release", "simple-v1"):
+            Ok(profile):
+                val v = profile.variant
+                val backend = ConfigVariantKeyV1(v.target_triple, "unknown-backend",
+                    v.features, v.build_mode, v.language_abi, v.normalized_options, v.environment_inputs)
+                expect(native_full_index_variant_admit_v1("phase4", backend).is_ok()).to_equal(false)
+                val abi = ConfigVariantKeyV1(v.target_triple, v.backend,
+                    v.features, v.build_mode, "simple-v2", v.normalized_options, v.environment_inputs)
+                expect(native_full_index_variant_admit_v1("phase4", abi).is_ok()).to_equal(false)
+            Err(reason): fail(reason)
+
+    it "reconstructs supported options instead of accepting mutated caller options":
+        match native_group_index_variant_profile_v1("phase4", "llvm",
+                "x86_64-pc-windows-msvc", "release", "simple-v1"):
+            Ok(profile):
+                var altered = profile.options
+                altered.gc_off = true
+                altered.backend_plugin_path = "/foreign/provider.so"
+                altered.native_library_paths = ["/foreign/lib"]
+                # The semantic request accepts phase+variant only; mutated
+                # CompileOptions cannot cross that boundary.
+                match native_full_index_variant_admit_v1("phase4", profile.variant):
+                    Ok(admitted):
+                        expect(admitted.options.gc_off).to_equal(false)
+                        expect(admitted.options.backend_plugin_path).to_equal("")
+                        expect(admitted.options.native_library_paths.len()).to_equal(0)
+                    Err(reason): fail(reason)
+            Err(reason): fail(reason)
