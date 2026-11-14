@@ -85,12 +85,34 @@ err() {
     exit 2
 }
 
+# CHROME_BIN wins when set. Otherwise the system browsers, then the NEWEST
+# Playwright build under ~/.cache/ms-playwright (a headless shell is preferred
+# over a full browser: its viewport equals --window-size).
+# CHROME_NO_SANDBOX is accepted for symmetry with the pixel differ; this
+# harvest has always passed --no-sandbox, the pages being repo-owned file://
+# fixtures. GEOM_DIFF_CHROME_EXTRA_FLAGS appends flags to the command line.
 CHROME=""
-for c in "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
-         /usr/bin/google-chrome /usr/bin/google-chrome-stable \
-         /usr/bin/chromium /usr/bin/chromium-browser; do
-    [ -x "$c" ] && { CHROME="$c"; break; }
-done
+if [ -n "${CHROME_BIN:-}" ] && [ -x "${CHROME_BIN}" ]; then
+    CHROME="$CHROME_BIN"
+fi
+if [ -z "$CHROME" ]; then
+    for c in "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+             /usr/bin/google-chrome /usr/bin/google-chrome-stable \
+             /usr/bin/chromium /usr/bin/chromium-browser; do
+        [ -x "$c" ] && { CHROME="$c"; break; }
+    done
+fi
+if [ -z "$CHROME" ]; then
+    # Globs expand in name order; the highest build number that sorts last
+    # wins within each kind, and any headless shell beats any full browser.
+    for c in "$HOME"/.cache/ms-playwright/chromium-*/chrome-linux*/chrome \
+             "$HOME"/.cache/ms-playwright/chromium_headless_shell-*/chrome-headless-shell-linux*/chrome-headless-shell; do
+        [ -x "$c" ] && CHROME="$c"
+    done
+fi
+# The headless shell has no "new headless" mode to select.
+HEADLESS_FLAG="--headless=new"
+case "$CHROME" in *chrome-headless-shell) HEADLESS_FLAG="" ;; esac
 
 if [ "${1:-}" = "--selftest" ]; then
     # The differ owns the three geometry fixtures (identical / one dy / missing
@@ -123,7 +145,25 @@ if [ "${1:-}" = "--selftest" ]; then
     exit 0
 fi
 
+# --harvest <page.html> <out.geom>: write Chrome's GEOM rows for ONE page and
+# stop, without running the nth-path differ. The Simple side is not needed.
+HARVEST_ONLY=0
+HARVEST_OUT=""
+if [ "${1:-}" = "--harvest" ]; then
+    [ "$#" -eq 3 ] || err "usage: --harvest <page.html> <out.geom>"
+    HARVEST_ONLY=1
+    PAGES="$2"
+    HARVEST_OUT="$3"
+    SIMPLE_BIN="${SIMPLE_BIN:-/bin/true}"
+fi
+
 [ -n "$CHROME" ] || err "no Chrome/Chromium found"
+# --print-chrome: the binary this script would harvest with, so a caller can
+# record its version without repeating the discovery above.
+if [ "${1:-}" = "--print-chrome" ]; then
+    echo "$CHROME"
+    exit 0
+fi
 CHROME_TIMEOUT=""
 if command -v timeout >/dev/null 2>&1; then
     CHROME_TIMEOUT="timeout ${GEOM_DIFF_CHROME_TIMEOUT_SECS:-25}"
@@ -199,6 +239,9 @@ cat >"$WALKER" <<'JSEOF'
     // content-visibility:hidden subtree, and stays TRUE for visibility:hidden
     // and opacity:0, which DO occupy layout space and must keep being compared.
     f.push("rendered=" + (el.checkVisibility() ? "true" : "false"));
+    // LAST field, so every positional consumer of this row is untouched; an
+    // id-keyed consumer reads it instead of re-deriving the nth-path.
+    f.push("id=" + el.id);
     lines.push(["GEOM", k, el.tagName.toLowerCase(),
       Math.round(r.left + window.scrollX), Math.round(r.top + window.scrollY),
       Math.round(r.width), Math.round(r.height)].concat(f).join("|"));
@@ -242,7 +285,8 @@ for page in $PAGES; do
     # writes the DOM and then lingers, so the harvest must be time-bounded or
     # the whole gate hangs on the first page. The DOM is already complete when
     # the timeout fires.
-    $CHROME_TIMEOUT "$CHROME" --headless=new --disable-gpu --no-sandbox \
+    $CHROME_TIMEOUT "$CHROME" $HEADLESS_FLAG --disable-gpu --no-sandbox \
+        ${GEOM_DIFF_CHROME_EXTRA_FLAGS:-} \
         --user-data-dir="$profile" \
         --window-size="$WIDTH,$HEIGHT" --virtual-time-budget=2000 \
         --dump-dom "file://$ROOT_DIR/$probe" >"$dom" 2>"$BUILD_DIR/$page.chrome.log"
@@ -259,10 +303,23 @@ for page in $PAGES; do
     # 2026-09-14 therefore compared every element EXCEPT the one that matters
     # most for a global offset, and reported it as `missing_in_chrome: 1
     # path:(body)` -- a Simple-only box -- which reads like a Simple defect.
-    sed -e 's/&lt;/</g' -e 's/&gt;/>/g' -e 's/&amp;/\&/g' \
+    # The LAST row has the mirror-image problem: `...|id=x</pre></body></html>`
+    # shares its line with the closing tags, which made the final field of the
+    # final element unreadable. The walker's text is entity-escaped, so a
+    # literal `</pre>` can only be the real closing tag; cut it before
+    # un-escaping.
+    sed -e 's/<\/pre>.*$//' -e 's/&lt;/</g' -e 's/&gt;/>/g' -e 's/&amp;/\&/g' \
         -e 's/^.*<pre id="__geom__">GEOM|/GEOM|/' "$dom" \
         | grep '^GEOM|' >"$geom" || true
     n_chrome="$(grep -c '^GEOM|' "$geom" 2>/dev/null || echo 0)"
+    # --harvest: the Chrome rows are the whole product; an id-keyed consumer
+    # does its own comparison. 0 rows is ERROR here exactly as below.
+    if [ "$HARVEST_ONLY" = "1" ]; then
+        [ "$n_chrome" -gt 0 ] || err "Chrome produced 0 GEOM rows for $src"
+        cp "$geom" "$HARVEST_OUT"
+        echo "harvested=$n_chrome"
+        exit 0
+    fi
     if [ "$n_chrome" -eq 0 ]; then
         echo "$page	0	0	chrome-empty" >>"$SUMMARY"
         SKIPPED_PAGES=$((SKIPPED_PAGES + 1))

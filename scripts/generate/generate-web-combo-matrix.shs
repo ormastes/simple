@@ -1,0 +1,363 @@
+#!/bin/sh
+# Generates the web-renderer COMBINATION MATRIX fixtures: tag x tag nesting,
+# tag x CSS declaration, and the CSS x CSS pairs most likely to interact.
+#
+#   sh scripts/generate/generate-web-combo-matrix.shs [out_dir]
+#
+# out_dir defaults to test/fixtures/browser/combo_matrix. The output is
+# deterministic (no dates, no host state) and committed; the matrix check
+# regenerates into a temp dir and refuses to run when the committed copy has
+# drifted from this generator.
+#
+# Output:
+#   tag_tag.html  tag_css.html  css_css.html   one page per matrix axis
+#   cells.tsv     <element id> TAB <slot id> TAB <group> TAB <cell label>
+#
+# Every cell lives in its own SLOT: a 400x140 `overflow:hidden;
+# position:relative` box. The slot is a block formatting context with a fixed
+# height, so a cell that is laid out wrongly cannot move the cells after it,
+# and the check compares each element RELATIVE to its slot origin. The slot
+# itself is compared absolutely, as its own `slot` group.
+#
+# Element ids are derived from the cell NAME (never an ordinal), so adding a
+# cell does not rename any other and the ratchet baseline stays stable:
+#   <cell id>-s  slot      -t target   -p parent   -c child
+#   -w wrapper             -a sibling before       -b sibling after
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+OUT="${1:-$ROOT_DIR/test/fixtures/browser/combo_matrix}"
+mkdir -p "$OUT"
+
+# 1x1 transparent GIF; the img cells are sized by their width/height attributes.
+IMG_SRC='data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw=='
+
+MANIFEST="$OUT/cells.tsv"
+: >"$MANIFEST"
+PAGE=""
+
+page_begin() {
+    PAGE="$OUT/$1"
+    {
+        printf '<!doctype html>\n<html><head><meta charset="utf-8"><title>%s</title>\n' "$2"
+        printf '<style>\n'
+        printf 'body{margin:0;font:16px/1.5 sans-serif}\n'
+        printf '.s{position:relative;width:400px;height:140px;overflow:hidden}\n'
+        printf '.i{width:50px}\n'
+        printf '.j{width:120px}\n'
+        printf '</style></head><body>\n'
+    } >"$PAGE"
+}
+
+page_end() {
+    printf '</body></html>\n' >>"$PAGE"
+}
+
+# cell <group> <label> <cell id> <roles> <body html>
+cell() {
+    c_group="$1"; c_label="$2"; c_id="$3"; c_roles="$4"; c_body="$5"
+    printf '<div class="s" id="%s-s">%s</div>\n' "$c_id" "$c_body" >>"$PAGE"
+    printf '%s-s\t-\tslot\t%s\n' "$c_id" "$c_label" >>"$MANIFEST"
+    for c_role in $c_roles; do
+        printf '%s-%s\t%s-s\t%s\t%s\n' "$c_id" "$c_role" "$c_id" "$c_group" "$c_label" >>"$MANIFEST"
+    done
+}
+
+# ---------------------------------------------------------------- tag x tag
+# child_html <child tag> <id>
+child_html() {
+    case "$1" in
+        br)     printf 'ab<br id="%s">cd' "$2" ;;
+        img)    printf 'ab <img id="%s" width="40" height="30" src="%s"> ef' "$2" "$IMG_SRC" ;;
+        input)  printf 'ab <input id="%s" value="cd"> ef' "$2" ;;
+        a)      printf 'ab <a id="%s" href="#">cd</a> ef' "$2" ;;
+        *)      printf 'ab <%s id="%s">cd</%s> ef' "$1" "$2" "$1" ;;
+    esac
+}
+
+# parent_html <parent kind> <cell id> <child html>; sets PH_ROLES
+parent_html() {
+    ph_k="$1"; ph_c="$2"; ph_x="$3"
+    PH_ROLES="p c"
+    case "$ph_k" in
+        ul-li|ol-li)
+            ph_t="${ph_k%-li}"; PH_ROLES="w p c"
+            printf '<%s id="%s-w"><li id="%s-p">%s</li></%s>' "$ph_t" "$ph_c" "$ph_c" "$ph_x" "$ph_t" ;;
+        dt) PH_ROLES="w p c"
+            printf '<dl id="%s-w"><dt id="%s-p">%s</dt><dd>zz</dd></dl>' "$ph_c" "$ph_c" "$ph_x" ;;
+        dd) PH_ROLES="w p c"
+            printf '<dl id="%s-w"><dt>zz</dt><dd id="%s-p">%s</dd></dl>' "$ph_c" "$ph_c" "$ph_x" ;;
+        td) PH_ROLES="w p c"
+            printf '<table id="%s-w"><tr><td id="%s-p">%s</td></tr></table>' "$ph_c" "$ph_c" "$ph_x" ;;
+        summary) PH_ROLES="w p c"
+            printf '<details open id="%s-w"><summary id="%s-p">%s</summary>zz</details>' "$ph_c" "$ph_c" "$ph_x" ;;
+        details)
+            printf '<details open id="%s-p"><summary>zz</summary>%s</details>' "$ph_c" "$ph_x" ;;
+        legend) PH_ROLES="w p c"
+            printf '<fieldset id="%s-w"><legend id="%s-p">%s</legend>zz</fieldset>' "$ph_c" "$ph_c" "$ph_x" ;;
+        fieldset)
+            printf '<fieldset id="%s-p"><legend>zz</legend>%s</fieldset>' "$ph_c" "$ph_x" ;;
+        figcaption) PH_ROLES="w p c"
+            printf '<figure id="%s-w"><figcaption id="%s-p">%s</figcaption></figure>' "$ph_c" "$ph_c" "$ph_x" ;;
+        *)
+            printf '<%s id="%s-p">%s</%s>' "$ph_k" "$ph_c" "$ph_x" "$ph_k" ;;
+    esac
+}
+
+parent_roles() {
+    case "$1" in
+        ul-li|ol-li|dt|dd|td|summary|legend|figcaption) echo "w p c" ;;
+        *) echo "p c" ;;
+    esac
+}
+
+TT_PARENTS="div section article p blockquote pre h1 h2 h3 figure ul-li ol-li dt dd td summary details legend fieldset figcaption"
+TT_CHILDREN="span a strong em code mark small sub sup br img button input label"
+
+page_begin tag_tag.html "combo matrix: tag x tag"
+for tp in $TT_PARENTS; do
+    for tch in $TT_CHILDREN; do
+        cid="tt-$tp-$tch"
+        body="$(parent_html "$tp" "$cid" "$(child_html "$tch" "$cid-c")")"
+        cell "tag-tag" "$tp/$tch" "$cid" "$(parent_roles "$tp")" "$body"
+    done
+done
+page_end
+
+# ---------------------------------------------------------------- tag x css
+# One row per declaration: <group suffix>|<slug>|<declaration>
+TC_DECLS='display|d-block|display:block
+display|d-inline|display:inline
+display|d-iblock|display:inline-block
+display|d-flex|display:flex
+display|d-grid|display:grid
+display|d-none|display:none
+box|margin10|margin:10px
+box|padding10|padding:10px
+box|border5|border:5px solid
+box|bsbb|box-sizing:border-box;width:120px;padding:10px
+box|w120|width:120px
+box|h40|height:40px
+box|minw150|min-width:150px
+box|maxw30|max-width:30px
+box|minh50|min-height:50px
+box|maxh10|max-height:10px
+box|wpct50|width:50%
+box|hpct50|height:50%
+position|rel|position:relative;left:10px;top:5px
+position|abs-lt|position:absolute;left:10px;top:5px
+position|abs-rb|position:absolute;right:10px;bottom:5px
+overflow|ov-hidden|overflow:hidden
+overflow|ov-auto|overflow:auto
+float|fl-left|float:left
+float|fl-right|float:right
+float|clear-both|clear:both
+text|ta-center|text-align:center
+text|ta-right|text-align:right
+text|lh2|line-height:2
+text|lh30|line-height:30px
+text|ws-nowrap|white-space:nowrap
+text|ws-pre|white-space:pre
+text|fs2em|font-size:2em
+text|fs24|font-size:24px
+text|fw-bold|font-weight:bold
+text|tt-upper|text-transform:uppercase
+flex-item|grow1|flex-grow:1
+flex-item|shrink0|flex-shrink:0
+flex-item|basis100|flex-basis:100px
+flex-item|as-center|align-self:center
+flex-item|order1|order:1'
+
+# tc_target <tag> <cell id> <decl>
+tc_target() {
+    case "$1" in
+        img) printf '<img id="%s-t" width="40" height="30" src="%s" style="%s">' "$2" "$IMG_SRC" "$3" ;;
+        *)   printf '<%s id="%s-t" style="%s">cd</%s>' "$1" "$2" "$3" "$1" ;;
+    esac
+}
+
+# tc_body <tag> <cell id> <decl> <flex-item?>; sets nothing, roles via tc_roles
+tc_body() {
+    tb_t="$1"; tb_c="$2"; tb_d="$3"; tb_flex="$4"
+    tb_x="$(tc_target "$tb_t" "$tb_c" "$tb_d")"
+    if [ "$tb_flex" = "1" ]; then
+        case "$tb_t" in
+            li) printf '<ul id="%s-w" style="display:flex;width:300px;height:60px"><li id="%s-a">aa</li>%s<li id="%s-b">bb</li></ul>' "$tb_c" "$tb_c" "$tb_x" "$tb_c" ;;
+            *)  printf '<div id="%s-w" style="display:flex;width:300px;height:60px"><div id="%s-a">aa</div>%s<div id="%s-b">bb</div></div>' "$tb_c" "$tb_c" "$tb_x" "$tb_c" ;;
+        esac
+        return 0
+    fi
+    case "$tb_t" in
+        div|p)
+            printf '<div id="%s-a">aa</div>%s<div id="%s-b">bb</div>' "$tb_c" "$tb_x" "$tb_c" ;;
+        li)
+            printf '<ul id="%s-w"><li id="%s-a">aa</li>%s<li id="%s-b">bb</li></ul>' "$tb_c" "$tb_c" "$tb_x" "$tb_c" ;;
+        td)
+            printf '<table id="%s-w"><tr><td id="%s-a">aa</td>%s<td id="%s-b">bb</td></tr></table>' "$tb_c" "$tb_c" "$tb_x" "$tb_c" ;;
+        *)
+            printf '<div id="%s-w">aa %s bb</div><div id="%s-b">bb</div>' "$tb_c" "$tb_x" "$tb_c" ;;
+    esac
+}
+
+tc_roles() {
+    if [ "$2" = "1" ]; then echo "w a t b"; return 0; fi
+    case "$1" in
+        div|p) echo "a t b" ;;
+        li|td) echo "w a t b" ;;
+        *)     echo "w t b" ;;
+    esac
+}
+
+TC_TAGS="div p span li td button img"
+
+page_begin tag_css.html "combo matrix: tag x css"
+for tt in $TC_TAGS; do
+    printf '%s\n' "$TC_DECLS" | while IFS='|' read -r dg ds dd; do
+        flex=0
+        [ "$dg" = "flex-item" ] && flex=1
+        # A <td> cannot be a direct child of a flex <div>: the HTML parser
+        # drops the start tag, so that cell would test the parser, not flex.
+        if [ "$flex" = "1" ] && [ "$tt" = "td" ]; then continue; fi
+        cid="tc-$tt-$ds"
+        cell "tag-css/$dg" "$tt/$dd" "$cid" "$(tc_roles "$tt" "$flex")" "$(tc_body "$tt" "$cid" "$dd" "$flex")"
+    done
+done
+page_end
+
+# ---------------------------------------------------------------- css x css
+page_begin css_css.html "combo matrix: css x css"
+
+# display x width
+for el in div span; do
+    for d in block inline inline-block flex inline-flex grid; do
+        for w in "auto|" "w100|width:100px" "wpct50|width:50%" "minw200|min-width:200px" "maxw20|max-width:20px"; do
+            ws="${w%%|*}"; wd="${w#*|}"
+            cid="cc-dw-$el-$d-$ws"
+            decl="display:$d"
+            [ -n "$wd" ] && decl="$decl;$wd"
+            cell "css-css/display-width" "$el/$decl" "$cid" "w t b" \
+                "<div id=\"$cid-w\">aa <$el id=\"$cid-t\" style=\"$decl\">cd</$el> bb</div><div id=\"$cid-b\">bb</div>"
+        done
+    done
+done
+
+# box-sizing x padding/border x size
+for bs in content-box border-box; do
+    for p in "pad|padding:10px" "bord|border:5px solid" "padbord|padding:10px;border:5px solid"; do
+        for sz in "wh|width:100px;height:40px" "wpct|width:50%" "maxw|max-width:100px"; do
+            cid="cc-bs-$bs-${p%%|*}-${sz%%|*}"
+            decl="box-sizing:$bs;${p#*|};${sz#*|}"
+            cell "css-css/box-sizing" "div/$decl" "$cid" "t b" \
+                "<div id=\"$cid-t\" style=\"$decl\">cd</div><div id=\"$cid-b\">bb</div>"
+        done
+    done
+done
+
+# position x offsets
+for pos in static relative absolute; do
+    for o in "lt|left:10px;top:5px" "rb|right:10px;bottom:5px" "pct|left:10%;top:10%" "lr0|left:0;right:0" "neg|top:-5px;left:-5px"; do
+        cid="cc-po-$pos-${o%%|*}"
+        decl="position:$pos;${o#*|}"
+        cell "css-css/position-offsets" "div/$decl" "$cid" "w t b" \
+            "<div id=\"$cid-w\" style=\"position:relative;width:300px;height:80px\"><div id=\"$cid-t\" style=\"$decl\">cd</div><div id=\"$cid-b\">bb</div></div>"
+    done
+done
+
+# flex container x item
+FLEX_CONT='fd-row|flex-direction:row|i
+fd-col|flex-direction:column|i
+fd-rowrev|flex-direction:row-reverse|i
+fd-colrev|flex-direction:column-reverse|i
+fw-nowrap|flex-wrap:nowrap|j
+fw-wrap|flex-wrap:wrap|j
+jc-start|justify-content:flex-start|i
+jc-center|justify-content:center|i
+jc-end|justify-content:flex-end|i
+jc-between|justify-content:space-between|i
+jc-around|justify-content:space-around|i
+jc-evenly|justify-content:space-evenly|i
+ai-stretch|align-items:stretch|i
+ai-start|align-items:flex-start|i
+ai-center|align-items:center|i
+ai-end|align-items:flex-end|i
+ai-baseline|align-items:baseline|i
+gap10|gap:10px|i'
+FLEX_ITEM='none|
+grow1|flex-grow:1
+shrink0|flex-shrink:0
+basis100|flex-basis:100px
+as-end|align-self:flex-end
+order-1|order:-1
+ml-auto|margin-left:auto'
+
+printf '%s\n' "$FLEX_CONT" | while IFS='|' read -r cs cdl ccls; do
+    printf '%s\n' "$FLEX_ITEM" | while IFS='|' read -r is idl; do
+        cid="cc-fx-$cs-$is"
+        istyle=""
+        [ -n "$idl" ] && istyle=" style=\"$idl\""
+        cell "css-css/flex" "$cdl/${idl:-none}" "$cid" "w a t b" \
+            "<div id=\"$cid-w\" style=\"display:flex;width:300px;height:90px;$cdl\"><div id=\"$cid-a\" class=\"$ccls\">aa</div><div id=\"$cid-t\" class=\"$ccls\"$istyle>cd</div><div id=\"$cid-b\" class=\"$ccls\">bb</div></div>"
+    done
+done
+
+# margin collapsing: adjacent siblings
+for ma in 10px 20px -5px; do
+    for mb in 10px 30px -8px; do
+        cid="cc-mc-sib-$(printf '%s' "$ma" | tr -- '-' 'n')-$(printf '%s' "$mb" | tr -- '-' 'n')"
+        cell "css-css/margin-collapse" "sibling margin-bottom:$ma/margin-top:$mb" "$cid" "a t" \
+            "<div id=\"$cid-a\" style=\"margin-bottom:$ma\">aa</div><div id=\"$cid-t\" style=\"margin-top:$mb\">cd</div>"
+    done
+done
+# margin collapsing: parent / first child
+for pp in "none|" "padtop|padding-top:1px" "bordtop|border-top:1px solid" "ovhidden|overflow:hidden" "flowroot|display:flow-root" "flex|display:flex"; do
+    cid="cc-mc-top-${pp%%|*}"
+    cell "css-css/margin-collapse" "parent-top ${pp#*|}/child margin-top:20px" "$cid" "a w t b" \
+        "<div id=\"$cid-a\">aa</div><div id=\"$cid-w\" style=\"margin-top:10px;${pp#*|}\"><div id=\"$cid-t\" style=\"margin-top:20px\">cd</div></div><div id=\"$cid-b\">bb</div>"
+done
+# margin collapsing: parent / last child
+for pp in "none|" "padbot|padding-bottom:1px" "bordbot|border-bottom:1px solid" "h40|height:40px" "minh10|min-height:10px" "ovhidden|overflow:hidden"; do
+    cid="cc-mc-bot-${pp%%|*}"
+    cell "css-css/margin-collapse" "parent-bottom ${pp#*|}/child margin-bottom:20px" "$cid" "w t b" \
+        "<div id=\"$cid-w\" style=\"margin-bottom:10px;${pp#*|}\"><div id=\"$cid-t\" style=\"margin-bottom:20px\">cd</div></div><div id=\"$cid-b\">bb</div>"
+done
+# margin collapsing: through an empty block
+for ee in "empty|" "h0|height:0" "minh1|min-height:1px"; do
+    cid="cc-mc-thru-${ee%%|*}"
+    cell "css-css/margin-collapse" "empty-block ${ee#*|}/margins 20px+30px" "$cid" "a t b" \
+        "<div id=\"$cid-a\" style=\"margin-bottom:10px\">aa</div><div id=\"$cid-t\" style=\"margin-top:20px;margin-bottom:30px;${ee#*|}\"></div><div id=\"$cid-b\" style=\"margin-top:5px\">bb</div>"
+done
+
+# float x clear
+for fl in left right; do
+    for cl in none left right both; do
+        for k in "block|" "fleft|float:left;width:60px" "fright|float:right;width:60px"; do
+            cid="cc-fc-$fl-$cl-${k%%|*}"
+            decl="clear:$cl"
+            [ -n "${k#*|}" ] && decl="$decl;${k#*|}"
+            cell "css-css/float-clear" "float:$fl/$decl" "$cid" "a t b" \
+                "<div id=\"$cid-a\" style=\"float:$fl;width:60px;height:40px\">aa</div><div id=\"$cid-t\" style=\"$decl\">cd</div><div id=\"$cid-b\">bb</div>"
+        done
+    done
+done
+
+# white-space x width (the text carries a doubled space and a newline)
+for wsp in normal nowrap pre pre-wrap pre-line; do
+    for w in "auto|" "w60|width:60px" "maxc|width:max-content" "minc|width:min-content"; do
+        cid="cc-ws-$wsp-${w%%|*}"
+        decl="white-space:$wsp"
+        [ -n "${w#*|}" ] && decl="$decl;${w#*|}"
+        cell "css-css/white-space-width" "div/$decl" "$cid" "t b" \
+            "<div id=\"$cid-t\" style=\"$decl\">aa bb  cc
+dd ee ff gg hh</div><div id=\"$cid-b\">bb</div>"
+    done
+done
+page_end
+
+cells="$(grep -c '	slot	' "$MANIFEST")"
+ids="$(wc -l <"$MANIFEST" | tr -d ' ')"
+dup="$(cut -f1 "$MANIFEST" | LC_ALL=C sort | uniq -d | wc -l | tr -d ' ')"
+if [ "$dup" -ne 0 ]; then
+    echo "ERROR — generator produced $dup duplicate element id(s)"
+    exit 2
+fi
+echo "generated $cells cell(s), $ids element id(s) in $OUT"
