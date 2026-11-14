@@ -82,9 +82,22 @@ only, NOT qualified on a Mac):
   &err)` + `sandbox_free_error`, a preallocated receipt, Simple-side profile
   admission and error sanitization, no unrestricted fallback, and
   `Unsupported` on every non-Darwin host without entering native code.
-- Pending Mac qualification: run `src/runtime/test/local_unix_v1_selfcheck.c`
-  (Darwin branch) and a disposable-child activation/deny probe before either
-  surface is advertised as a capability.
+- Mac-qualified 2026-11-14 (macOS 26.5, arm64; build recipe from
+  `doc/06_spec/01_unit/lib/io/local_ipc_v1_native_evidence.sdn` plus Darwin
+  `-Wl,-dead_strip -Wl,-undefined,dynamic_lookup`):
+  `local_unix_v1_selfcheck.c` prints `PASS Darwin local Unix
+  bytes/peer(getpeereid+audit token)/path/ancillary/shutdown/close/listener
+  contract; separate-UID accept NOT_RUN`. The disposable-child probe
+  `src/runtime/test/sosix_darwin_sandbox_v1_selfcheck.c <profile> <root> <key>`,
+  fed the exact text `seatbelt_profile_compile_v1(seatbelt_attempt_policy_v1(...,
+  "endpoint-v1"))` emits, passes 12/12: unconfined control reads host-scope;
+  after activation workspace read and output create are allowed, workspace
+  write, private/host-scope/sibling-attempt/`/private/etc` reads, loopback inet
+  connect and `fork` are denied, and only the attempt broker socket connects.
+  Launch step 7 is therefore `qualified-darwin-native`; steps 2-6, 8-10 and
+  fresh-worker admission stay unsupported, so the adapter still blocks with
+  `darwin-worker-admission-unwired`. BSD: the probe is Darwin-only (exit 77
+  elsewhere); no FreeBSD path changes.
 
 Sources and code map:
 [domain research](../01_research/domain/native_macos_simple_container_2026-09-27.md),
