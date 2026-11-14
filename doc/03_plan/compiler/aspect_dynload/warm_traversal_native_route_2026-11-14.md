@@ -86,6 +86,12 @@ or automatic resource escalation. No compile is authorized by this plan itself.
 - Physical allocation evidence: codec allocation reservations are modeled
   accounting, not process-RSS bounds. Eight restore attempts/session is a
   conservative staging limit, not the full scalability goal.
+  The existing `rt_heap_graph_bytes` is not yet a replacement proof: its
+  core-C owner accepts registered tagged heap roots, not arbitrary native
+  struct/Result ABI aggregates. It includes the explicit root before applying
+  child-scope filtering and excludes independently RC-owned children. A real
+  typed restore-result call-path/ownership probe must precede using it as an
+  exact promoted-body charge; source inspection alone is insufficient.
 - Generated traversal/plugin interface completion and admitted loading where
   selected requirements demand it; a builtin descriptor is not a loaded pack.
 - Same-profile build, MCP/LSP smoke, latency/RSS and end-to-end feature evidence.
