@@ -30,13 +30,24 @@ Red (6 of 6 failing) -> green (6 of 6 passing).
 - **Whole-pixel column widths.** Chrome's cells are 19.8 px wide, Simple's 20:
   the plain table is 68 px wide where Chrome reports 67, and a `width:200px`
   two-cell table splits 100/94 where Chrome splits 99/95. Within the matrix's
-  1 px tolerance; the spec pins edges and heights rather than these sums.
+  1 px tolerance. Chrome-exact assertions are kept RED in
+  `test/01_unit/browser_engine/table_fractional_column_width_spec.spl`
+  (`# @tag:in-development`, 2 of 2 failing). Where: column widths are whole
+  `i32` pixels in `explicit_auto_table_column_offsets`
+  (`simple_web_html_layout_renderer_layout_foundation.spl:1550`). Unblock:
+  size table columns in sub-pixel units and round only the final box edges;
+  then delete the tag line from that spec.
 - **A cell's max-content width drops the spaces around an inline child.**
   `<td>ab <span>cd</span> ef</td>`: Chrome 59 px, Simple 50 px (two spaces).
-  14 `tt-td-*` matrix cells.
-- **`cellspacing` / `cellpadding` attributes are ignored.**
-  `<table cellspacing="0" cellpadding="4">` of two cells: Chrome 51x32, Simple
-  as if the attributes were absent.
+  9 `tt-td-*` matrix cells.
+- **`cellspacing` / `cellpadding` attributes are ignored — and `=0` now shows.**
+  They were ignored before this change too, but with defaults of 0 a table
+  written `cellspacing="0" cellpadding="0"` happened to match Chrome; it is
+  now 2 px / 1 px off. `<table cellspacing="0" cellpadding="4">` of two
+  cells: Chrome 51x32. No HTML fixture or catalog page in the repo uses either
+  attribute (checked `examples/` and `test/fixtures/`). Where:
+  `presentational_attr_decls` and its `html_has_presentational_attr` precheck
+  know neither name; `cellpadding` also needs the cell to see its table.
 - **A `td` whose `display` is not `table-cell` is not laid out.**
   `<td style="display:block">` (also `inline`, `inline-block`, `flex`, `grid`)
   between two ordinary cells: Chrome 24,2 19x26 inside a 67 px table; Simple

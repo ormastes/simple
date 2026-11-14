@@ -25,7 +25,9 @@ explicit `+`, unchanged positives, mixed orders -2/-1/0/1). Red (5 of 8 failing)
 Not fixed, same family: a negative `right` / `bottom`. The layout reads
 `right_px >= 0` as "right is set", so the sign cannot be kept without a
 separate is-set flag. Chrome: `position:absolute;right:-10px;bottom:-6px` in a
-300x80 box is at x=293,y=62 (17x24); Simple puts it at 273,50.
+300x80 box is at x=293,y=62 (17x24); Simple puts it at 273,50. The `inset`,
+`inset-inline-*` and `inset-block-*` longhands and shorthand also still go
+through the unsigned parsers (`parse_nth_box_int`, `parse_int`).
 
 ## 2. `flex-basis` without `width` and without `flex-grow`
 

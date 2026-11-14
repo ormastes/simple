@@ -1,0 +1,61 @@
+"""
+## Purpose and audience
+Purpose: Pin the table widths Chrome reports when its columns are a fractional
+number of pixels wide. Expected to FAIL until table columns are sized in
+sub-pixel units.
+Audience: browser-engine layout maintainers.
+
+Chrome sizes each text cell of the tables below at 19.8 px (17.8 px of text
+plus 1 px of padding each side) and rounds only the final box edges. Simple
+sizes every column in whole pixels (20 px), so the sums drift by a pixel.
+
+Chrome oracle (Chrome 159.0.8154.6 headless shell, 900x2000,
+getBoundingClientRect, `body{margin:0;font:16px/1.5 sans-serif}`):
+  <table> of 3x2 two-letter cells          table 0,0 67x58   (Simple: 68x58)
+  <table style="width:200px"> of two cells cells 2,2 99x26 and 103,2 95x26
+                                           (Simple: 2,2 100x26 and 104,2 94x26)
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-TABLE-UA-DEFAULTS-001 — unstyled tables use border-spacing 2px and cell padding 1px.
+"""
+# @tag:in-development
+# Tracks: doc/08_tracking/bug/web_table_ua_border_spacing_and_cell_padding_2026-11-14.md (residual "Whole-pixel column widths")
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_engine.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id
+}
+
+val VW: i32 = 900
+val VH: i32 = 2000
+
+val HEAD: text = (
+    "<html><head><style>body{margin:0;font:16px/1.5 sans-serif}" +
+    "</style></head><body>"
+)
+val TAIL: text = "</body></html>"
+
+val PLAIN: text = (
+    HEAD + "<table id=\"w\"><tr><td id=\"a\">aa</td><td id=\"t\">cd</td><td id=\"b\">bb</td></tr>" +
+    "<tr><td id=\"d\">dd</td><th id=\"e\">ee</th><td id=\"f\">ff</td></tr></table>" + TAIL
+)
+val FIXED_WIDTH: text = (
+    HEAD + "<table id=\"w\" style=\"width:200px\"><tr>" +
+    "<td id=\"a\">aa</td><td id=\"t\">cd</td></tr></table>" + TAIL
+)
+
+fn geom(html: text, id: text, field: text) -> text:
+    simple_web_layout_debug_layout_by_id(html, VW, VH, id, field)
+
+fn box_of(html: text, id: text) -> text:
+    (geom(html, id, "x") + "," + geom(html, id, "y") + "," +
+     geom(html, id, "w") + "," + geom(html, id, "h"))
+
+describe "table widths with fractional-pixel columns":
+    it "a 3x2 table of two-letter cells is 67 px wide, as Chrome reports":
+        expect(box_of(PLAIN, "w")).to_equal("0,0,67,58")
+
+    it "a width:200px table splits its two cells 99 / 95, as Chrome reports":
+        expect(box_of(FIXED_WIDTH, "a")).to_equal("2,2,99,26")
+        expect(box_of(FIXED_WIDTH, "t")).to_equal("103,2,95,26")
