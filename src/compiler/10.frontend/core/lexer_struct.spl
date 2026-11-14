@@ -947,6 +947,29 @@ impl CoreLexer:
             p = p + 1
         true
 
+    # Called just after the u in a double-quoted string escape. Negative means
+    # malformed syntax or a non-scalar; zero is a valid embedded NUL. Consume
+    # bounded hex digits, never a surrogate pair or a following source token.
+    me scan_double_quoted_unicode_escape_v1() -> i64:
+        val braced = self.peek() == "{{"
+        if braced: self.advance()
+        val limit = if braced: 6 else: 4
+        var count: i64 = 0
+        var value: i64 = 0
+        while count < limit:
+            val digit = lex_escape_hex_value(self.peek())
+            if digit < 0: break
+            value = value * 16 + digit
+            self.advance()
+            count = count + 1
+        if braced:
+            if count == 0 or self.peek() != "}": return -1
+            self.advance()
+        elif count != 4:
+            return -1
+        if value > 0x10FFFF or (value >= 0xD800 and value <= 0xDFFF): return -1
+        value
+
     me scan_string_suffix() -> text:
         if self.peek() != "_" or not is_alpha(self.peek_next()):
             return ""
@@ -1024,6 +1047,9 @@ impl CoreLexer:
                 self.advance()
                 done = true
             elif c == "\\":
+                val escape_start = self.pos
+                val escape_line = self.line
+                val escape_col = self.col
                 self.advance()
                 val esc: text = self.advance()
                 if esc == "n":
@@ -1055,7 +1081,15 @@ impl CoreLexer:
                         parts.push("\\")
                         parts.push("x")
                 elif esc == "u":
-                    if self.peek() == "{{":
+                    if quote == "\"":
+                        val scalar = self.scan_double_quoted_unicode_escape_v1()
+                        if scalar < 0:
+                            self.cur_start = escape_start
+                            self.make_token(191, "invalid unicode escape in string literal", escape_line, escape_col)
+                            return
+                        if scalar == 0: has_nul = true
+                        parts.push(char_from_code(scalar))
+                    elif self.peek() == "{{":
                         self.advance()
                         var uv: i64 = 0
                         for j in 0..8:

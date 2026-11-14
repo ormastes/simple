@@ -1,0 +1,57 @@
+# Actual CoreLexer regressions. Authored UNRUN; no native qualification claim.
+use std.spec.*
+use compiler.frontend.core.lexer_struct.{make_core_lexer_char_mode, core_lexer_next_token}
+
+fn unicode_string_token_bytes_v1(source: text) -> [i64]:
+    val first = core_lexer_next_token(make_core_lexer_char_mode(source, true))
+    expect(first.1).to_equal(3)
+    val value = first.0.cur_text
+    var bytes: [i64] = []
+    for index in 0..value.byte_len(): bytes.push(value.byte_at(index) as i64)
+    bytes
+
+fn unicode_string_source_v1(escape: text) -> text:
+    "\"" + escape + "\""
+
+describe "double-quoted Unicode escape decoding":
+    it "decodes fixed-width NUL and Unicode into exact UTF8 bytes":
+        expect(unicode_string_token_bytes_v1(unicode_string_source_v1(r"a\u0000z"))).to_equal([97, 0, 122])
+        expect(unicode_string_token_bytes_v1(unicode_string_source_v1(r"\u0041\u00e9\uD55C"))).to_equal([65, 195, 169, 237, 149, 156])
+        expect(unicode_string_token_bytes_v1(unicode_string_source_v1(r"\u0041F"))).to_equal([65, 70])
+
+    it "retains bounded braced Unicode scalar support":
+        expect(unicode_string_token_bytes_v1(unicode_string_source_v1(r"\u{0}\u{1F600}"))).to_equal([0, 240, 159, 152, 128])
+        expect(unicode_string_token_bytes_v1(unicode_string_source_v1(r"\u{10FFFF}"))).to_equal([244, 143, 191, 191])
+
+    it "preserves raw and doubled-backslash spelling without recursive decoding":
+        val raw_source = "r\"" + r"\u0000" + "\""
+        expect(unicode_string_token_bytes_v1(raw_source)).to_equal([92, 117, 48, 48, 48, 48])
+        expect(unicode_string_token_bytes_v1(unicode_string_source_v1(r"\\u0000"))).to_equal([92, 117, 48, 48, 48, 48])
+
+    it "retains interpolation spelling while decoding adjacent literal escapes":
+        val source = unicode_string_source_v1(r"{name}\u0000")
+        expect(unicode_string_token_bytes_v1(source)).to_equal([123, 110, 97, 109, 101, 125, 0])
+
+    it "refuses truncated malformed surrogate and out-of-range escapes":
+        for escape in [r"\u", r"\u0", r"\u000", r"\u00G0", r"\uD800", r"\uDFFF",
+                r"\uD83D\uDE00", r"\u{}", r"\u{123", r"\u{GG}", r"\u{110000}", r"\u{0000000}"]:
+            val first = core_lexer_next_token(make_core_lexer_char_mode(unicode_string_source_v1(escape), true))
+            expect(first.1).to_equal(191)
+            expect(first.0.cur_text).to_equal("invalid unicode escape in string literal")
+        val truncated = core_lexer_next_token(make_core_lexer_char_mode("\"" + r"\u00", true))
+        expect(truncated.1).to_equal(191)
+
+    it "locates a malformed escape after Unicode prefix in source coordinates":
+        val first = core_lexer_next_token(make_core_lexer_char_mode(unicode_string_source_v1("é" + r"\u00Z0"), true))
+        expect(first.1).to_equal(191)
+        expect(first.0.cur_start).to_equal(2)
+        expect(first.0.cur_line).to_equal(1)
+        expect(first.0.cur_col).to_equal(3)
+        expect(first.0.pos).to_equal(6)
+
+    it "does not widen the staged single-quoted char grammar":
+        val fixed = core_lexer_next_token(make_core_lexer_char_mode("'" + r"\u0041" + "'", true))
+        expect(fixed.1).to_equal(191)
+        val braced = core_lexer_next_token(make_core_lexer_char_mode("'" + r"\u{41}" + "'", true))
+        expect(braced.1).to_equal(9)
+        expect(braced.0.cur_text).to_equal("A")
