@@ -27,7 +27,9 @@ use app.devhub.messenger.policy.{
 use app.devhub.messenger.plugin_access.{
     messenger_load_adapter, port_call_send, MESSENGER_PORT_CAPABILITY_UNAVAILABLE
 }
-use app.devhub.messenger.adapter.sqlcipher_reader.{messenger_register_sqlcipher4_adapter}
+use app.devhub.messenger.adapter.sqlcipher_reader.{
+    messenger_register_sqlcipher4_adapter, messenger_sqlcipher4_list_rooms, messenger_sqlcipher4_history
+}
 use app.devhub.messenger.adapter.sqlite_reader.{messenger_register_sqlite3_adapter}
 use app.devhub.messenger.schema_profile.{schema_profile_fingerprint}
 use app.devhub.flags.{_extract_flag, _has_flag}
@@ -172,6 +174,8 @@ fn _usage() -> text:
     "Verbs (first slice):\n" +
     "  targets               list declared messenger targets (redacted)\n" +
     "  doctor --target T     nonsecret diagnostics for one target\n" +
+    "  rooms --target T      list rooms from the read adapter (JSON payload)\n" +
+    "  messages --target T --room R [--limit N]   room history from the read adapter\n" +
     "  send --target T --room R --text ... --confirm   policy-gated send probe (stub port)\n" +
     "Flags:\n" +
     "  --target NAME         target selector (highest precedence rung)\n" +
@@ -197,6 +201,8 @@ fn handle_messenger(args: [text]) -> i64:
         return _cmd_targets(json_mode)
     if verb == "doctor":
         return _cmd_doctor(args, json_mode)
+    if verb == "rooms" or verb == "messages":
+        return _cmd_read(verb, args)
     if verb == "send":
         # Explicitly gated preview of the send path: policy verdict first,
         # then the stub port. No send ever executes in this lane.
@@ -267,6 +273,31 @@ fn _print_doctor_human(target: MessengerTarget, source: text):
         val profile = target.schema.?
         print "  schema fingerprint: {schema_profile_fingerprint(profile)}"
     print "  (machine record below)"
+
+
+fn _cmd_read(verb: text, args: [text]) -> i64:
+    """Read-only rooms/messages through the registered sqlcipher4 adapter
+    (the same decrypt path the adapter specs cover). The payload is already
+    JSON; on failure only the typed status/error is printed, never row data
+    or secrets. Exit code is the port result's (0 ok, 3 denied, 4 unsupported)."""
+    val resolved = resolve_messenger_target(args)
+    if resolved.0 == nil:
+        print messenger_error_json(verb, 2, resolved.2)
+        return 2
+    val target = resolved.0.?
+    var result = messenger_sqlcipher4_list_rooms(target, "user")
+    if verb == "messages":
+        val room = _extract_flag(args, "--room", "")
+        if room == "":
+            print messenger_error_json(verb, 2, "messages requires --room")
+            return 2
+        val limit = _extract_flag(args, "--limit", "50").to_i64() ?? 50
+        result = messenger_sqlcipher4_history(target, room, limit, "user")
+    if result.exit_code != 0:
+        print messenger_error_json(verb, result.exit_code, "{result.status}: {result.error}")
+        return result.exit_code
+    print result.payload
+    0
 
 
 fn _cmd_send_probe(args: [text], json_mode: bool) -> i64:
