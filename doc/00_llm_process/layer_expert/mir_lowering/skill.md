@@ -764,3 +764,31 @@ leak table, the aliasing matrix, the options (proven-unique block-end release, r
 regions, do nothing, tracing GC) and the recommended first slice are in
 `doc/05_design/compiler/jit_memory/seed_jit_array_reclamation.md`. Read it before
 emitting any `rt_*_free` from lowering; `emit_function_drops` is not a safe hook.
+
+## 2026-11-14 — JIT block-end array release (slice S1)
+
+- On the in-process JIT lane (`lower_to_mir_jit` only) lowering emits `rt_array_free(local)`
+  where a statement list falls through, for array locals with int/float/bool elements that
+  `block_release_locals` (`mir/lower/array_move.rs`, `ReleaseScan`) proves have one holder.
+  Design: `doc/05_design/compiler/jit_memory/seed_jit_array_reclamation.md`.
+- It is an allowlist. The only uses that keep a local eligible are `a[i]` reads yielding a
+  scalar, `a[i] = scalar`, and `a.len()`, each with the receiver typed exactly as the local.
+  Any other mention disqualifies it, because the JIT aliases arrays where the interpreter
+  copies (call results, struct-literal args, captures, assigns, `for r in rows`, and more).
+- Two gates must both hold: the analysis, and `block_release_ready`, which the `Let`
+  lowering sets only when it stored a fresh literal or an emitted `rt_array_copy` result.
+- Trap: lambda bodies lower in the enclosing function's local index space, so every local
+  a lambda mentions is disqualified. A list containing `return`/`break`/`continue` after
+  the declaration is skipped whole; `Defer`/`Yield`/`Await` disqualify the function.
+- Trap: `len_local_sources` and `array_capacity_local_sources` are keyed by function-scoped
+  indices and are now cleared in `lower_function`. A stale entry makes a loop pre-header
+  read a slot with no HIR `Local` mention, which the analysis cannot see.
+- Trap: the freed handle stays in the slot. `MirInst::Drop` is a no-op today; making it
+  real would double-free these locals.
+- Runtime: `rt_array_free` now removes the array from the open transient scope and session
+  (`transient_untrack_freed`). `SIMPLE_ARRAY_FREE_QUARANTINE=1` keeps freed headers
+  unregistered and aborts on a registry lookup of one; it prints `quarantined=<n>` at exit.
+  It does not catch reads through Cranelift-inlined accessors.
+- Tests: `mir/lower/tests/array_release_tests.rs`, `runtime/src/value/transient_scope_state_tests.rs`,
+  `test/01_unit/compiler_core/interpreter/jit_block_array_release_spec.spl` (9 release
+  forms, 26 escape forms that must stay unreleased).
