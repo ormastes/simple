@@ -4,7 +4,7 @@
 # scalar limbs.
 
 use compiler.frontend.parser_types.*
-use compiler.frontend.generated.ast_semantic_value.{ast_semantic_hash_seed, ast_semantic_hash_finish, ast_semantic_encode_expr, ast_semantic_encode_stmt, ast_semantic_encode_type}
+use compiler.frontend.generated.ast_semantic_value.{ast_semantic_hash_seed, ast_semantic_hash_seed_bounded_v2, AST_SEMANTIC_MAX_NODES_V2, AST_SEMANTIC_MAX_DEPTH_V2, AST_SEMANTIC_MAX_BYTES_V2, ast_semantic_hash_finish, ast_semantic_encode_expr, ast_semantic_encode_stmt, ast_semantic_encode_type}
 use compiler.common.dependency.visibility.{Visibility}
 use std.common.crypto.sha256.{Sha256StreamV1, sha256_stream_v1_new}
 
@@ -12,13 +12,34 @@ pub(package) class ModuleSurfaceProjectionState:
     var stream: Sha256StreamV1
     scratch: [u8]
     cacheable: bool
+    bounded_v2: bool = false
+    remaining_nodes_v2: i64 = 0
+    remaining_bytes_v2: i64 = 0
 
 fn _surface_state() -> ModuleSurfaceProjectionState:
     ModuleSurfaceProjectionState(
         stream: sha256_stream_v1_new(), scratch: [0u8; 8], cacheable: true)
 
+fn _surface_state_bounded_v2() -> ModuleSurfaceProjectionState:
+    var state = _surface_state()
+    state.bounded_v2 = true
+    state.remaining_nodes_v2 = AST_SEMANTIC_MAX_NODES_V2
+    state.remaining_bytes_v2 = AST_SEMANTIC_MAX_BYTES_V2
+    state
+
+fn _surface_sequence_v2(input: ModuleSurfaceProjectionState, count: i64) -> ModuleSurfaceProjectionState:
+    var state = input
+    if state.bounded_v2 and (count < 0 or count > state.remaining_nodes_v2 or count > state.remaining_bytes_v2 / 8):
+        state.cacheable = false
+    state
+
 fn _surface_mix_i64(input: ModuleSurfaceProjectionState, value: i64) -> ModuleSurfaceProjectionState:
     var state = input
+    if state.bounded_v2:
+        if not state.cacheable or state.remaining_bytes_v2 < 8:
+            state.cacheable = false
+            return state
+        state.remaining_bytes_v2 = state.remaining_bytes_v2 - 8
     var shift = 0
     while shift < 64:
         state.scratch[shift / 8] = ((value >> shift) & 255) as u8
@@ -27,6 +48,9 @@ fn _surface_mix_i64(input: ModuleSurfaceProjectionState, value: i64) -> ModuleSu
     state
 
 fn _surface_mix_text(state: ModuleSurfaceProjectionState, value: text) -> ModuleSurfaceProjectionState:
+    if state.bounded_v2 and (not state.cacheable or state.remaining_bytes_v2 < 8 or value.byte_len() > (state.remaining_bytes_v2 - 8) / 8):
+        state.cacheable = false
+        return state
     var result = _surface_mix_i64(state, value.byte_len())
     var i = 0
     while i < value.byte_len():
@@ -110,93 +134,181 @@ fn _surface_sorted(values: [text]) -> [text]:
         _surface_sift_down(result, 0, end)
     result
 
-fn _surface_expr_digest(value: Expr) -> text:
-    ast_semantic_hash_finish(ast_semantic_encode_expr(value, ast_semantic_hash_seed()))
+fn _surface_fold_expr_v2(input: ModuleSurfaceProjectionState, tag: text, value: Expr) -> ModuleSurfaceProjectionState:
+    var state = input
+    if state.bounded_v2 and not state.cacheable: return state
+    var child = if state.bounded_v2:
+        ast_semantic_hash_seed_bounded_v2(state.remaining_nodes_v2, AST_SEMANTIC_MAX_DEPTH_V2, state.remaining_bytes_v2)
+    else:
+        ast_semantic_hash_seed()
+    child = ast_semantic_encode_expr(value, child)
+    if state.bounded_v2:
+        state.remaining_nodes_v2 = child.remaining_nodes_v2
+        state.remaining_bytes_v2 = child.remaining_bytes_v2
+        if not child.cacheable: state.cacheable = false
+    _surface_fold_digest(state, tag, ast_semantic_hash_finish(child))
 
-fn _surface_type_digest(value: Type) -> text:
-    ast_semantic_hash_finish(ast_semantic_encode_type(value, ast_semantic_hash_seed()))
+fn _surface_fold_type_v2(input: ModuleSurfaceProjectionState, tag: text, value: Type) -> ModuleSurfaceProjectionState:
+    var state = input
+    if state.bounded_v2 and not state.cacheable: return state
+    var child = if state.bounded_v2:
+        ast_semantic_hash_seed_bounded_v2(state.remaining_nodes_v2, AST_SEMANTIC_MAX_DEPTH_V2, state.remaining_bytes_v2)
+    else:
+        ast_semantic_hash_seed()
+    child = ast_semantic_encode_type(value, child)
+    if state.bounded_v2:
+        state.remaining_nodes_v2 = child.remaining_nodes_v2
+        state.remaining_bytes_v2 = child.remaining_bytes_v2
+        if not child.cacheable: state.cacheable = false
+    _surface_fold_digest(state, tag, ast_semantic_hash_finish(child))
 
-fn _surface_block_digest(value: Block) -> text:
-    var state = ast_semantic_hash_seed()
+fn _surface_fold_block_v2(input: ModuleSurfaceProjectionState, tag: text, value: Block) -> ModuleSurfaceProjectionState:
+    var state = input
+    if state.bounded_v2 and not state.cacheable: return state
+    var child = if state.bounded_v2:
+        ast_semantic_hash_seed_bounded_v2(state.remaining_nodes_v2, AST_SEMANTIC_MAX_DEPTH_V2, state.remaining_bytes_v2)
+    else:
+        ast_semantic_hash_seed()
+    if state.bounded_v2:
+        state = _surface_sequence_v2(state, value.stmts.len())
+        if not state.cacheable: return state
     for stmt in value.stmts:
-        state = ast_semantic_encode_stmt(stmt, state)
-    ast_semantic_hash_finish(state)
+        child = ast_semantic_encode_stmt(stmt, child)
+        if child.bounded_v2 and not child.cacheable: break
+    if state.bounded_v2:
+        state.remaining_nodes_v2 = child.remaining_nodes_v2
+        state.remaining_bytes_v2 = child.remaining_bytes_v2
+        if not child.cacheable: state.cacheable = false
+    _surface_fold_digest(state, tag, ast_semantic_hash_finish(child))
 
 fn _surface_type_params(seed: ModuleSurfaceProjectionState, values: [ParserTypeParam]) -> ModuleSurfaceProjectionState:
-    var digest = _surface_fold(seed, "type-param-count", "{values.len()}")
+    val admitted = _surface_sequence_v2(seed, values.len())
+    if admitted.bounded_v2 and not admitted.cacheable: return admitted
+    var digest = _surface_fold(admitted, "type-param-count", "{values.len()}")
+    if digest.bounded_v2 and not digest.cacheable: return digest
     for value in values:
         # ANY-transport hazard sweep round 3: annotated rebind of the
         # composite element before field reads.
         val value_typed: ParserTypeParam = value
         digest = _surface_fold(digest, "type-param-name", value_typed.name)
+        if digest.bounded_v2 and not digest.cacheable: return digest
         digest = _surface_fold(digest, "type-param-bound-count", "{value_typed.bounds.len()}")
+        if digest.bounded_v2 and not digest.cacheable: return digest
+        digest = _surface_sequence_v2(digest, value_typed.bounds.len())
+        if digest.bounded_v2 and not digest.cacheable: return digest
         for bound in value_typed.bounds:
-            digest = _surface_fold_digest(digest, "type-param-bound", _surface_type_digest(bound))
+            digest = _surface_fold_type_v2(digest, "type-param-bound", bound)
+            if digest.bounded_v2 and not digest.cacheable: return digest
         digest = _surface_fold(digest, "type-param-has-default", _surface_bool(value.has_default))
+        if digest.bounded_v2 and not digest.cacheable: return digest
         if value.has_default:
-            digest = _surface_fold_digest(digest, "type-param-default", _surface_type_digest(value.default))
+            digest = _surface_fold_type_v2(digest, "type-param-default", value.default)
+            if digest.bounded_v2 and not digest.cacheable: return digest
     digest
 
 fn _surface_attributes(seed: ModuleSurfaceProjectionState, values: [Attribute]) -> ModuleSurfaceProjectionState:
-    var digest = _surface_fold(seed, "attribute-count", "{values.len()}")
+    val admitted = _surface_sequence_v2(seed, values.len())
+    if admitted.bounded_v2 and not admitted.cacheable: return admitted
+    var digest = _surface_fold(admitted, "attribute-count", "{values.len()}")
+    if digest.bounded_v2 and not digest.cacheable: return digest
     for value in values:
         val value_typed: Attribute = value
         digest = _surface_fold(digest, "attribute-name", value_typed.name)
+        if digest.bounded_v2 and not digest.cacheable: return digest
         digest = _surface_fold(digest, "attribute-arg-count", "{value_typed.args.len()}")
+        if digest.bounded_v2 and not digest.cacheable: return digest
+        digest = _surface_sequence_v2(digest, value.args.len())
+        if digest.bounded_v2 and not digest.cacheable: return digest
         for arg in value.args:
-            digest = _surface_fold_digest(digest, "attribute-arg", _surface_expr_digest(arg))
+            digest = _surface_fold_expr_v2(digest, "attribute-arg", arg)
+            if digest.bounded_v2 and not digest.cacheable: return digest
     digest
 
 fn _surface_param(seed: ModuleSurfaceProjectionState, value: Param) -> ModuleSurfaceProjectionState:
     var digest = _surface_fold(seed, "param-name", value.name)
+    if digest.bounded_v2 and not digest.cacheable: return digest
     digest = _surface_fold(digest, "param-has-type", _surface_bool(value.has_type_))
-    if value.has_type_: digest = _surface_fold_digest(digest, "param-type", _surface_type_digest(value.type_))
+    if digest.bounded_v2 and not digest.cacheable: return digest
+    if value.has_type_: digest = _surface_fold_type_v2(digest, "param-type", value.type_)
     digest = _surface_fold(digest, "param-has-default", _surface_bool(value.has_default))
-    if value.has_default: digest = _surface_fold_digest(digest, "param-default", _surface_expr_digest(value.default))
+    if digest.bounded_v2 and not digest.cacheable: return digest
+    if value.has_default: digest = _surface_fold_expr_v2(digest, "param-default", value.default)
     _surface_fold(digest, "param-mutable", _surface_bool(value.is_mutable))
 
 fn _surface_contract_clauses(seed: ModuleSurfaceProjectionState, clauses: [ContractClause]) -> ModuleSurfaceProjectionState:
-    var digest = _surface_fold(seed, "contract-clause-count", "{clauses.len()}")
+    val admitted = _surface_sequence_v2(seed, clauses.len())
+    if admitted.bounded_v2 and not admitted.cacheable: return admitted
+    var digest = _surface_fold(admitted, "contract-clause-count", "{clauses.len()}")
+    if digest.bounded_v2 and not digest.cacheable: return digest
     for clause in clauses:
         val clause_typed: ContractClause = clause
-        digest = _surface_fold_digest(digest, "contract-clause", _surface_expr_digest(clause_typed.expr))
+        digest = _surface_fold_expr_v2(digest, "contract-clause", clause_typed.expr)
+        if digest.bounded_v2 and not digest.cacheable: return digest
     digest
 
 fn _surface_contract(seed: ModuleSurfaceProjectionState, value: ContractBlock) -> ModuleSurfaceProjectionState:
     var digest = _surface_contract_clauses(seed, value.preconditions)
+    if digest.bounded_v2 and not digest.cacheable: return digest
     digest = _surface_contract_clauses(digest, value.invariants)
+    if digest.bounded_v2 and not digest.cacheable: return digest
     digest = _surface_contract_clauses(digest, value.postconditions)
+    if digest.bounded_v2 and not digest.cacheable: return digest
     digest = _surface_contract_clauses(digest, value.error_postconditions)
+    if digest.bounded_v2 and not digest.cacheable: return digest
     digest = _surface_fold(digest, "contract-has-decrease", _surface_bool(value.decrease_measure != nil))
+    if digest.bounded_v2 and not digest.cacheable: return digest
     if val decrease = value.decrease_measure:
-        digest = _surface_fold_digest(digest, "contract-decrease", _surface_expr_digest(decrease.expr))
+        digest = _surface_fold_expr_v2(digest, "contract-decrease", decrease.expr)
+        if digest.bounded_v2 and not digest.cacheable: return digest
     digest = _surface_fold(digest, "contract-post-binding", value.postcondition_binding)
+    if digest.bounded_v2 and not digest.cacheable: return digest
     digest = _surface_fold(digest, "contract-error-binding", value.error_binding)
+    if digest.bounded_v2 and not digest.cacheable: return digest
     _surface_fold(digest, "contract-proof-uses", value.proof_uses)
 
 fn _surface_function(seed: ModuleSurfaceProjectionState, value: ParserFunction, include_body: bool) -> ModuleSurfaceProjectionState:
-    var digest = _surface_fold(seed, "function", value.name)
+    var admitted = seed
+    admitted = _surface_sequence_v2(admitted, value.type_params.len())
+    admitted = _surface_sequence_v2(admitted, value.params.len())
+    admitted = _surface_sequence_v2(admitted, value.attributes.len())
+    if admitted.bounded_v2 and not admitted.cacheable: return admitted
+    var digest = _surface_fold(admitted, "function", value.name)
+    if digest.bounded_v2 and not digest.cacheable: return digest
     digest = _surface_type_params(digest, value.type_params)
+    if digest.bounded_v2 and not digest.cacheable: return digest
     digest = _surface_fold(digest, "param-count", "{value.params.len()}")
-    for param in value.params: digest = _surface_param(digest, param)
+    if digest.bounded_v2 and not digest.cacheable: return digest
+    for param in value.params:
+        digest = _surface_param(digest, param)
+        if digest.bounded_v2 and not digest.cacheable: return digest
     digest = _surface_fold(digest, "has-return", _surface_bool(value.has_return_type))
-    if value.has_return_type: digest = _surface_fold_digest(digest, "return", _surface_type_digest(value.return_type))
+    if digest.bounded_v2 and not digest.cacheable: return digest
+    if value.has_return_type: digest = _surface_fold_type_v2(digest, "return", value.return_type)
     digest = _surface_fold(digest, "visibility", _surface_visibility(value.visibility))
+    if digest.bounded_v2 and not digest.cacheable: return digest
     for flag in [_surface_bool(value.is_async), _surface_bool(value.is_static), _surface_bool(value.is_public), _surface_bool(value.is_method), _surface_bool(value.is_mutable), _surface_bool(value.is_const), _surface_bool(value.is_kernel), _surface_bool(value.is_extern)]:
         digest = _surface_fold(digest, "function-flag", flag)
+        if digest.bounded_v2 and not digest.cacheable: return digest
     digest = _surface_attributes(digest, value.attributes)
+    if digest.bounded_v2 and not digest.cacheable: return digest
     digest = _surface_contract(digest, value.contract)
-    if include_body: digest = _surface_fold_digest(digest, "default-body", _surface_block_digest(value.body))
+    if digest.bounded_v2 and not digest.cacheable: return digest
+    if include_body: digest = _surface_fold_block_v2(digest, "default-body", value.body)
     digest
 
 fn _surface_field(seed: ModuleSurfaceProjectionState, value: ParserField) -> ModuleSurfaceProjectionState:
     var digest = _surface_fold(seed, "field", value.name)
-    digest = _surface_fold_digest(digest, "field-type", _surface_type_digest(value.type_))
+    if digest.bounded_v2 and not digest.cacheable: return digest
+    digest = _surface_fold_type_v2(digest, "field-type", value.type_)
+    if digest.bounded_v2 and not digest.cacheable: return digest
     digest = _surface_fold(digest, "field-has-default", _surface_bool(value.has_default))
-    if value.has_default: digest = _surface_fold_digest(digest, "field-default", _surface_expr_digest(value.default))
+    if digest.bounded_v2 and not digest.cacheable: return digest
+    if value.has_default: digest = _surface_fold_expr_v2(digest, "field-default", value.default)
     digest = _surface_fold(digest, "field-visibility", _surface_visibility(value.visibility))
+    if digest.bounded_v2 and not digest.cacheable: return digest
     for flag in [_surface_bool(value.is_public), _surface_bool(value.is_volatile), _surface_bool(value.has_bits), _surface_bool(value.has_fixed_address)]:
         digest = _surface_fold(digest, "field-flag", flag)
+        if digest.bounded_v2 and not digest.cacheable: return digest
     if value.has_bits: digest = _surface_fold(digest, "field-bits", "{value.bits}")
     if value.has_fixed_address: digest = _surface_fold(digest, "field-address", "{value.fixed_address}")
     digest
@@ -209,23 +321,23 @@ fn _surface_variant(seed: ModuleSurfaceProjectionState, value: Variant) -> Modul
         case VariantKind.Tuple(types):
             digest = _surface_fold(digest, "variant-kind", "tuple")
             digest = _surface_fold(digest, "variant-arity", "{types.len()}")
-            for type_ in types: digest = _surface_fold_digest(digest, "variant-type", _surface_type_digest(type_))
+            for type_ in types: digest = _surface_fold_type_v2(digest, "variant-type", type_)
         case VariantKind.Struct(fields):
             digest = _surface_fold(digest, "variant-kind", "struct")
             digest = _surface_fold(digest, "variant-arity", "{fields.len()}")
             for field in fields: digest = _surface_field(digest, field)
     digest = _surface_fold(digest, "variant-has-discriminant", _surface_bool(value.has_discriminant))
-    if value.has_discriminant: digest = _surface_fold_digest(digest, "variant-discriminant", _surface_expr_digest(value.discriminant))
+    if value.has_discriminant: digest = _surface_fold_expr_v2(digest, "variant-discriminant", value.discriminant)
     digest
 
 fn _surface_assoc_type(seed: ModuleSurfaceProjectionState, value: AssocTypeDecl) -> ModuleSurfaceProjectionState:
     var digest = _surface_fold(seed, "assoc-type", value.name)
     digest = _surface_fold(digest, "assoc-bound-count", "{value.bounds.len()}")
     for bound in value.bounds:
-        digest = _surface_fold_digest(digest, "assoc-bound", _surface_type_digest(bound))
+        digest = _surface_fold_type_v2(digest, "assoc-bound", bound)
     digest = _surface_fold(digest, "assoc-has-default", _surface_bool(value.has_default))
     if value.has_default:
-        digest = _surface_fold_digest(digest, "assoc-default", _surface_type_digest(value.default))
+        digest = _surface_fold_type_v2(digest, "assoc-default", value.default)
     digest
 
 fn _surface_traits_v2(seed: ModuleSurfaceProjectionState, traits: Dict<text, ParserTrait>) -> ModuleSurfaceProjectionState:
@@ -234,10 +346,10 @@ fn _surface_traits_v2(seed: ModuleSurfaceProjectionState, traits: Dict<text, Par
         val value: ParserTrait = traits[name]
         digest = _surface_fold(digest, "trait", value.name)
         digest = _surface_type_params(digest, value.type_params)
-        for type_ in value.super_traits: digest = _surface_fold_digest(digest, "super", _surface_type_digest(type_))
+        for type_ in value.super_traits: digest = _surface_fold_type_v2(digest, "super", type_)
         for bound in value.where_clause:
             digest = _surface_fold(digest, "where-name", bound.type_param)
-            digest = _surface_fold_digest(digest, "where-type", _surface_type_digest(bound.trait_))
+            digest = _surface_fold_type_v2(digest, "where-type", bound.trait_)
         for method in value.methods: digest = _surface_function(digest, method, not method.body.stmts.is_empty())
         for assoc in value.assoc_types: digest = _surface_assoc_type(digest, assoc)
         digest = _surface_fold(digest, "visibility", _surface_visibility(value.visibility))
@@ -249,13 +361,13 @@ fn _surface_impls_v2(seed: ModuleSurfaceProjectionState, impls: [Impl]) -> Modul
     for raw_value in impls:
         # ANY-transport hazard sweep round 3: annotated rebind.
         val value: Impl = raw_value
-        digest = _surface_fold_digest(digest, "impl-type", _surface_type_digest(value.type_))
+        digest = _surface_fold_type_v2(digest, "impl-type", value.type_)
         digest = _surface_fold(digest, "impl-has-trait", _surface_bool(value.has_trait_))
-        if value.has_trait_: digest = _surface_fold_digest(digest, "impl-trait", _surface_type_digest(value.trait_))
+        if value.has_trait_: digest = _surface_fold_type_v2(digest, "impl-trait", value.trait_)
         digest = _surface_type_params(digest, value.type_params)
         for bound in value.where_clause:
             digest = _surface_fold(digest, "impl-where-name", bound.type_param)
-            digest = _surface_fold_digest(digest, "impl-where-type", _surface_type_digest(bound.trait_))
+            digest = _surface_fold_type_v2(digest, "impl-where-type", bound.trait_)
         for method_name in _surface_sorted(value.methods.keys()):
             digest = _surface_function(digest, value.methods[method_name], false)
         for assoc in value.assoc_types: digest = _surface_assoc_type(digest, assoc)
@@ -273,7 +385,7 @@ fn _surface_enum_extensions_v2(seed: ModuleSurfaceProjectionState, extensions: [
             digest = _surface_fold(digest, "extend-name", constructor.name)
             digest = _surface_fold(digest, "extend-payload-count", "{constructor.payload_types.len()}")
             for payload_type in constructor.payload_types:
-                digest = _surface_fold_digest(digest, "extend-payload", _surface_type_digest(payload_type))
+                digest = _surface_fold_type_v2(digest, "extend-payload", payload_type)
     digest
 
 # Category projections reuse the whole-surface encoding, including trait default
@@ -290,34 +402,61 @@ pub fn module_surface_extension_root_v2(impls: [Impl], extensions: [ParserExtend
     module_surface_semantic_finish(_surface_enum_extensions_v2(digest, extensions))
 
 fn _surface_class_v2(seed: ModuleSurfaceProjectionState, value: ParserClass, include_body: bool) -> ModuleSurfaceProjectionState:
-    var digest = seed
+    var admitted = seed
+    admitted = _surface_sequence_v2(admitted, value.type_params.len())
+    admitted = _surface_sequence_v2(admitted, value.fields.len())
+    admitted = _surface_sequence_v2(admitted, value.methods.len())
+    admitted = _surface_sequence_v2(admitted, value.attributes.len())
+    if admitted.bounded_v2 and not admitted.cacheable: return admitted
+    var digest = admitted
+    if digest.bounded_v2 and not digest.cacheable: return digest
     digest = _surface_fold(digest, "class", value.name)
+    if digest.bounded_v2 and not digest.cacheable: return digest
     digest = _surface_type_params(digest, value.type_params)
-    for field in value.fields: digest = _surface_field(digest, field)
+    if digest.bounded_v2 and not digest.cacheable: return digest
+    for field in value.fields:
+        digest = _surface_field(digest, field)
+        if digest.bounded_v2 and not digest.cacheable: return digest
     for method_name in _surface_sorted(value.methods.keys()):
         digest = _surface_function(digest, value.methods[method_name], include_body)
+        if digest.bounded_v2 and not digest.cacheable: return digest
     digest = _surface_attributes(digest, value.attributes)
+    if digest.bounded_v2 and not digest.cacheable: return digest
     digest = _surface_fold(digest, "visibility", _surface_visibility(value.visibility))
+    if digest.bounded_v2 and not digest.cacheable: return digest
     digest
 
 fn _surface_struct_v2(seed: ModuleSurfaceProjectionState, value: ParserStruct) -> ModuleSurfaceProjectionState:
-    var digest = seed
+    var admitted = seed
+    admitted = _surface_sequence_v2(admitted, value.type_params.len())
+    admitted = _surface_sequence_v2(admitted, value.fields.len())
+    admitted = _surface_sequence_v2(admitted, value.attributes.len())
+    if admitted.bounded_v2 and not admitted.cacheable: return admitted
+    var digest = admitted
+    if digest.bounded_v2 and not digest.cacheable: return digest
     digest = _surface_fold(digest, "struct", value.name)
+    if digest.bounded_v2 and not digest.cacheable: return digest
     digest = _surface_type_params(digest, value.type_params)
-    for field in value.fields: digest = _surface_field(digest, field)
+    if digest.bounded_v2 and not digest.cacheable: return digest
+    for field in value.fields:
+        digest = _surface_field(digest, field)
+        if digest.bounded_v2 and not digest.cacheable: return digest
     digest = _surface_attributes(digest, value.attributes)
+    if digest.bounded_v2 and not digest.cacheable: return digest
     digest = _surface_fold(digest, "visibility", _surface_visibility(value.visibility))
+    if digest.bounded_v2 and not digest.cacheable: return digest
     digest
 
 # Parser-owned drafts only: these roots preserve syntax semantics, but do not
 # establish resolved captures, declaration coverage or a final generic facet.
+
 pub fn module_surface_class_draft_root_v2(value: ParserClass, include_body: bool) -> text:
     val domain = if include_body: "module-class-body-draft-v2" else: "module-class-interface-draft-v2"
-    val seed = _surface_fold(_surface_state(), "schema", domain)
+    val seed = _surface_fold(_surface_state_bounded_v2(), "schema", domain)
     module_surface_semantic_finish(_surface_class_v2(seed, value, include_body))
 
 pub fn module_surface_struct_draft_root_v2(value: ParserStruct) -> text:
-    val seed = _surface_fold(_surface_state(), "schema", "module-struct-interface-draft-v2")
+    val seed = _surface_fold(_surface_state_bounded_v2(), "schema", "module-struct-interface-draft-v2")
     module_surface_semantic_finish(_surface_struct_v2(seed, value))
 
 pub(package) fn module_surface_semantic_projection(module: ParserModule) -> text:
@@ -358,8 +497,8 @@ pub(package) fn module_surface_semantic_projection(module: ParserModule) -> text
         val value: ParserConst = module.constants[name]
         digest = _surface_fold(digest, "const", value.name)
         digest = _surface_fold(digest, "const-has-type", _surface_bool(value.has_type_))
-        if value.has_type_: digest = _surface_fold_digest(digest, "const-type", _surface_type_digest(value.type_))
-        digest = _surface_fold_digest(digest, "const-value", _surface_expr_digest(value.value))
+        if value.has_type_: digest = _surface_fold_type_v2(digest, "const-type", value.type_)
+        digest = _surface_fold_expr_v2(digest, "const-value", value.value)
         for flag in [_surface_bool(value.is_mutable), _surface_bool(value.is_public), _surface_bool(value.is_volatile), _surface_bool(value.has_fixed_address)]:
             digest = _surface_fold(digest, "const-flag", flag)
         if value.has_fixed_address: digest = _surface_fold(digest, "const-address", "{value.fixed_address}")
@@ -368,12 +507,12 @@ pub(package) fn module_surface_semantic_projection(module: ParserModule) -> text
         val value: ParserTypeAlias = module.type_aliases[name]
         digest = _surface_fold(digest, "alias", value.name)
         digest = _surface_type_params(digest, value.type_params)
-        digest = _surface_fold_digest(digest, "alias-type", _surface_type_digest(value.type_))
+        digest = _surface_fold_type_v2(digest, "alias-type", value.type_)
         digest = _surface_fold(digest, "visibility", _surface_visibility(value.visibility))
     for name in _surface_sorted(module.bitfields.keys()):
         val value: Bitfield = module.bitfields[name]
         digest = _surface_fold(digest, "bitfield", value.name)
-        digest = _surface_fold_digest(digest, "bitfield-backing", _surface_type_digest(value.backing_type))
+        digest = _surface_fold_type_v2(digest, "bitfield-backing", value.backing_type)
         digest = _surface_fold(digest, "bitfield-visibility", _surface_visibility(value.visibility))
         digest = _surface_fold(digest, "bitfield-public", _surface_bool(value.is_public))
         digest = _surface_attributes(digest, value.attributes)
@@ -383,7 +522,7 @@ pub(package) fn module_surface_semantic_projection(module: ParserModule) -> text
             val field: BitfieldField = raw_field
             digest = _surface_fold(digest, "bitfield-field", field.name)
             digest = _surface_fold(digest, "bitfield-has-type", _surface_bool(field.has_type_))
-            if field.has_type_: digest = _surface_fold_digest(digest, "bitfield-type", _surface_type_digest(field.type_))
+            if field.has_type_: digest = _surface_fold_type_v2(digest, "bitfield-type", field.type_)
             digest = _surface_fold(digest, "bitfield-has-bits", _surface_bool(field.has_bits))
             if field.has_bits: digest = _surface_fold(digest, "bitfield-bits", "{field.bits}")
             digest = _surface_fold(digest, "bitfield-reserved", _surface_bool(field.is_reserved))
@@ -409,5 +548,5 @@ pub(package) fn module_surface_semantic_hex_limb(hex: text, limb: i64) -> i64:
 # Retain the existing typed-AST encoding and invalid-child propagation.
 pub fn module_surface_callable_draft_root_v2(value: ParserFunction, include_body: bool) -> text:
     val domain = if include_body: "module-callable-body-draft-v2" else: "module-callable-interface-draft-v2"
-    val seed = _surface_fold(_surface_state(), "schema", domain)
+    val seed = _surface_fold(_surface_state_bounded_v2(), "schema", domain)
     module_surface_semantic_finish(_surface_function(seed, value, include_body))
