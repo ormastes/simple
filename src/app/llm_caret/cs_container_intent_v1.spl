@@ -1,0 +1,50 @@
+# Unresolved Caret app metadata only. This is neither LocalContainerRequestV1
+# nor host authority. A local provider must independently resolve host/guest
+# profiles and validate every field before producing an admitted request.
+use app.llm_caret.cs_container.CsContainerRequest
+use std.common.contracts.container.local_session_v1.LocalContainerMountV1
+
+pub struct CaretLocalContainerIntentV1:
+    image: text
+    host_executable: text
+    argv: [text]
+    repository: text
+    workspace: text
+    mounts: [LocalContainerMountV1]
+    environment: [text]
+    network: text
+
+fn caret_intent_text_size_v1(value: text) -> Result<i64, text>:
+    if value.byte_len() > 16384: return Err("caret-local-intent-text-size")
+    Ok(value.byte_len())
+
+# Copy only authored/parsed intent. No executable/repository mounts, HOME
+# rewrite, engine argv, backend selection, path lookup or host effects occur.
+# Bounds limit copied text, not a canonical wire format or resource admission.
+pub fn caret_local_container_intent_v1(request: CsContainerRequest, host_executable: text,
+        argv: [text], repository: text) -> Result<CaretLocalContainerIntentV1, text>:
+    if request.error != "": return Err("caret-local-intent-parse-error:" + request.error)
+    if request.image == "": return Err("caret-local-intent-image-required")
+    if host_executable == "" or host_executable.contains("\0"):
+        return Err("caret-local-intent-host-executable-invalid")
+    if repository == "" or repository.contains("\0"):
+        return Err("caret-local-intent-repository-invalid")
+    if argv.len() > 128 or request.env.len() > 128 or request.mounts.len() > 64:
+        return Err("caret-local-intent-field-count")
+    var size: i64 = 0
+    for value in [request.image, host_executable, repository, request.workspace, request.network]:
+        size = size + caret_intent_text_size_v1(value)?
+    for argument in argv:
+        if argument.contains("\0"): return Err("caret-local-intent-argument-invalid")
+        size = size + caret_intent_text_size_v1(argument)?
+    for assignment in request.env:
+        size = size + caret_intent_text_size_v1(assignment)?
+    var mounts: [LocalContainerMountV1] = []
+    for mount in request.mounts:
+        size = size + caret_intent_text_size_v1(mount.source)?
+        size = size + caret_intent_text_size_v1(mount.target)?
+        mounts.push(LocalContainerMountV1(host_path: mount.source, guest_path: mount.target, read_only: mount.read_only))
+    if size > 1048576: return Err("caret-local-intent-text-total")
+    Ok(CaretLocalContainerIntentV1(image: request.image, host_executable: host_executable,
+        argv: argv, repository: repository, workspace: request.workspace, mounts: mounts,
+        environment: request.env, network: request.network))
