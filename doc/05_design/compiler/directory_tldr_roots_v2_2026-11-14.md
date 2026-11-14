@@ -258,3 +258,14 @@ This join and two new pure symbol-set specifications remain unrun. It is a
 current-build initializer observation only; it does not publish PackageInit or
 replace the still-required macro/aspect/generic category and full-directory
 aggregation. The kernel-image memo qualification blocker remains applicable.
+
+### Source-load epoch for category drafts
+
+`DirectorySourceEpochV2` correlates phase2 draft capture with later HIR category
+finalization. The actual source-load owner advances its checked generation and
+binds the driver identity after clearing prior projection/aggregate state, before
+any new source work. Exhaustion leaves the epoch unavailable and never wraps.
+This is not source/provider authorization and is not serialized as semantic
+identity. Existing AOP-lowering and diagnostic traversal generations remain
+separate. Two focused epoch specs are authored, unrun. Full native qualification
+is planned in `doc/03_plan/compiler/aspect_dynload/directory_tldr_native_qualification_2026-11-14.md`.
