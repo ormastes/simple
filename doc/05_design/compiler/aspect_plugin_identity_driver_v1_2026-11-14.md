@@ -62,7 +62,9 @@ or incomplete facts are rejected by the new entry point.
 
 Persisted directory inputs must first pass the directory-TLDR owner's
 admission factory; the API is not proof that arbitrary public facts were
-admitted. The parallel TLDR work owns `DirectoryTldrViewV2`. A future F1
+admitted. That factory compares caller-supplied trusted expectations and
+facts; it does not turn a public DTO into an unforgeable admission token or
+authenticate a producer. The parallel TLDR work owns `DirectoryTldrViewV2`. A future F1
 planner view may combine that admitted view with immutable prior shard/apply
 state, but this slice creates no competing `DirTldrView` or on-disk format.
 
