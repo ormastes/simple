@@ -1,0 +1,44 @@
+#!/bin/sh
+# bin/caret source fallback must honour CARET_ENTRY (exported by bin/cs).
+# Hermetic: copies the launcher into a fixture repo; fake runtime echoes args.
+set -eu
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT INT TERM
+mkdir -p "$tmp/repo/bin" "$tmp/repo/src/app/llm_caret" "$tmp/repo/src/other"
+cp "$ROOT/bin/caret" "$tmp/repo/bin/caret"
+: >"$tmp/repo/src/app/llm_caret/main.spl"
+: >"$tmp/repo/src/app/llm_caret/cs_main.spl"
+: >"$tmp/repo/src/other/x.spl"
+printf '#!/bin/sh\necho "RAN $*"\n' >"$tmp/runtime"
+chmod +x "$tmp/runtime"
+run() { SIMPLE_BINARY="$tmp/runtime" SIMPLE_CARET_ALLOW_SOURCE_FALLBACK=1 \
+  sh "$tmp/repo/bin/caret" arg1 2>&1; }
+fail=0
+check() { # name expected-substring actual
+  case "$3" in *"$2"*) echo "PASS $1" ;; *) echo "FAIL $1: got: $3"; fail=1 ;; esac
+}
+
+out=$(run || true)
+check default-entry "run $tmp/repo/src/app/llm_caret/main.spl arg1" "$out"
+
+out=$(CARET_ENTRY=src/app/llm_caret/cs_main.spl run || true)
+check relative-entry "run $tmp/repo/src/app/llm_caret/cs_main.spl arg1" "$out"
+
+out=$(CARET_ENTRY="$tmp/repo/src/app/llm_caret/cs_main.spl" run || true)
+check absolute-entry "run $tmp/repo/src/app/llm_caret/cs_main.spl arg1" "$out"
+
+out=$(CARET_ENTRY=src/app/llm_caret/missing.spl run || true)
+check missing-entry-errors "CARET_ENTRY" "$out"
+case "$out" in *RAN*) echo "FAIL missing-entry-ran"; fail=1 ;; esac
+
+out=$(CARET_ENTRY=src/other/x.spl run || true)
+check outside-entry-errors "CARET_ENTRY" "$out"
+case "$out" in *RAN*) echo "FAIL outside-entry-ran"; fail=1 ;; esac
+
+out=$(CARET_ENTRY=src/app/llm_caret/../other/x.spl run || true)
+check dotdot-entry-errors "CARET_ENTRY" "$out"
+case "$out" in *RAN*) echo "FAIL dotdot-entry-ran"; fail=1 ;; esac
+
+[ "$fail" = 0 ] || exit 1
+echo "PASS caret launcher entry spec"
