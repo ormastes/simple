@@ -85,7 +85,26 @@ an irrefutable presence test before this change.
 
 ## Evidence
 
-CENSUS_PLACEHOLDER
+Seeds: base `fdd57145ebe`, fix = this change; after merging release/1.0.0 the
+merged seed was rebuilt and everything below except the census was re-run on it
+(aarch64).
+
+- Red -> green: `optional_enum_some_variant_match_spec.spl` is 1/7 on the base
+  seed (6 failed) and 7/7 on the merged seed.
+- Neighbours on the merged seed, all green at their full counts:
+  `match_callable_scrutinee_no_silent_first_arm_spec` 3/3,
+  `match_nested_callable_and_mod_unit_variant_spec` 5/5,
+  `enum_param_rejects_callable_value_spec` 10/10, `inline_mod_block_spec` 12/12.
+- Rust: `cargo test -p simple-compiler --release --lib interpreter_patterns` 41
+  passed, `--test optional_enum_some_variant_match_parity` 2 passed.
+- Census (pre-merge seeds, serial, each spec through `simple test` and through
+  `SIMPLE_EXECUTION_MODE=jit simple run`): the 535 specs under `test/` whose
+  path matches `enum|match|pattern|option`. Base: 428 runner-green, 426
+  JIT-green. Fix: 534 of 535 rows byte-identical to base (same verdict line, JIT rc and pass/fail counts), 0 base-green rows red.
+  The one differing row, `tuple_pattern_binder_and_if_match_type_spec.spl`
+  (JIT 5/5 base, 0/5 fix in the census), did not reproduce: 10/10 JIT runs green
+  on the fix seed and 10/10 on the base seed, so it is recorded as a one-off
+  under host load, not a regression.
 
 ## Review (independent Opus reviewer)
 
@@ -103,7 +122,37 @@ CENSUS_PLACEHOLDER
   `case I8: 1` answers 7, was 1). The JIT already answered 7, and this is the
   same flat-Option rule the interpreter applies to bare scalars.
 
+## Review after merging release/1.0.0 (independent Fable reviewer, diff only)
+
+No P0/P1. Confirmed by reading: the look-through fires only on `Value::Enum`, so
+it cannot bypass or double-record the #9058 callable refusal (probe:
+`g(Box.Hold(Kind.Wrap))` against `case Some(Hold(I8))` still raises `invalid
+pattern` in the interpreter); arm bindings are fresh per arm; the HIR subject is
+a local, so nothing is evaluated twice. P2 findings, recorded as residuals below:
+the `Tok?` case where the payload enum declares `None`, the definition-visibility
+dependence of `enum_declares_option_variant`, and JIT coverage gaps. The
+own-`Some` test now also pins `u(Opt.Some(6)) u(Opt.Missing) == 1 99` on the
+interpreter.
+
 ## Residuals (open)
+
+- `case Some(x)` over a NON-optional `k: Kind` (or a user `MyRes.Ok(1)`) now
+  matches in the interpreter (P3 above; the JIT always did). Plain variant arms
+  over `k: Kind` are unchanged and pinned by the spec. The matcher has no slot
+  type, so this cannot be gated there; a type-check diagnostic is the real fix.
+- An optional whose payload enum declares its own `None`/`Some`
+  (`enum Tok: None | Num(i64)`, `fn f(t: Tok?)`, `case Some(Num(1))` /
+  `case Some(Num(n))` / `case _`): both engines opt out of the fix, so
+  `f(Tok.Num(5))` still answers 9 (interpreter) and 1 (JIT). Not measured, from
+  review.
+- `enum_declares_option_variant` reads `enums` and `BLOCK_SCOPED_ENUMS` only. An
+  enum declaring `Some` that is visible through neither would let
+  `Opt.Missing` match `case Some(x)`. A `mod M:` enum was probed and is found
+  (`u(M.Opt.Some(5)) u(M.Opt.Some(6)) u(M.Opt.Missing)` = `55 1 99`); imported
+  enums were not probed.
+- No JIT spec coverage for `Some(I8) | Some(F32)`, guards, f64 literals,
+  top-level `Some((0, b))` / `Some(Point(0, y))`, or `Option<Kind>` spelling;
+  `Option<(i64, i64)>` stays presence-only on the JIT.
 
 - Untyped (ANY) subjects stay presence-only on the JIT: `fn b(k)` with
   `case Some(I8): 1` / `case Some(F32): 2` answers 1 for `Kind.F32` (interpreter
@@ -121,4 +170,14 @@ CENSUS_PLACEHOLDER
   in-process caller must clear it (the integration tests do; the
   `interpreter_patterns` unit harness did not). A same-named function from a
   previous module on the thread wins over the new module's definition.
+- Triple-qualified patterns over a `mod`-scoped enum (`case M.K.A:` for
+  `mod M: enum K`) match nothing in the interpreter, with or without `Some(...)`
+  (`d(M.K.B) d(M.K.A) d(M.K.P(4))` answers `other other other`); the strict JIT
+  refuses the module (`struct 'ANY' field 'B'`). Unqualified `case Some(A):` /
+  `Some(P(n))` over `M.K?` is correct (`b a p4 none`). Pre-existing, belongs to the
+  `mod X:` lane (#9074).
+- JIT: a callable payload under a nested variant pattern
+  (`g(Box.Hold(Kind.Wrap))` against `case Some(Hold(Wrap(n)))`) prints
+  `h-wrapnil`; the interpreter raises the #9058 `invalid pattern` error, also
+  through the new look-through. Pre-existing JIT gap.
 - Native-build: not measured. It shares the HIR lowering with the JIT.
