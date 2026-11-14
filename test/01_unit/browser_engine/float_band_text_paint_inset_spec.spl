@@ -1,0 +1,105 @@
+"""
+## Purpose and audience
+Purpose: Pin that PAINT places the lines of a wrapped text run where LAYOUT
+wrapped them when a left float shortens only the run's first lines. Layout
+wrapped those lines to the width the float leaves, but both painters drew every
+line from the block's left edge, so the lines beside the float were painted
+over it.
+Audience: browser-engine layout and paint maintainers.
+
+Chrome oracle (Chrome 159.0.8154.6 headless shell, 900x760,
+`body{margin:0;font:16px/24px sans-serif}`, `Range.getClientRects()` of the
+text node): a 200 px block holding an empty `float:left;width:60px;height:30px`
+box and four one-word lines.
+
+| line | word           | x  | top |
+|------|----------------|----|-----|
+| 0    | `mmmmmmmm`     | 60 | 3   |
+| 1    | `nnnnnnnnnnnn` | 60 | 27  |
+| 2    | `oooooooooooo` | 0  | 51  |
+| 3    | `pppppppppppp` | 0  | 75  |
+
+The block is 96 px tall. Lines 0 and 1 overlap the float (bottom at 30); lines
+2 and 3 are below it and use the whole width again.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-FLOAT-BAND-TEXT-PAINT-001 — both paint lanes inset exactly the lines layout shortened beside a left float.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_raster.spl 1%
+use std.spec.*
+use std.common.ui.draw_ir.{DRAW_IR_COMMAND_TEXT}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id, simple_web_layout_render_html_draw_ir,
+    simple_web_layout_render_html_software_pixels
+}
+
+val W: i32 = 240
+val H: i32 = 110
+val HEAD: text = "<html><body style=\"margin:0;background:#fff;color:#000;font:16px/24px sans-serif\">"
+val TAIL: text = "</body></html>"
+val WORDS: text = "mmmmmmmm nnnnnnnnnnnn oooooooooooo pppppppppppp"
+val FLOATED: text = "<div id=\"w\" style=\"width:200px\"><div style=\"float:left;width:60px;height:30px\"></div>" + WORDS + "</div>"
+val PLAIN: text = "<div id=\"w\" style=\"width:200px\">" + WORDS + "</div>"
+
+# First dark column in the row band [y0, y1), or -1 when the band has no ink.
+fn first_ink_column(inner: text, y0: i32, y1: i32) -> i32:
+    val px = simple_web_layout_render_html_software_pixels(HEAD + inner + TAIL, W, H)
+    var x = 0
+    while x < W:
+        var y = y0
+        while y < y1:
+            if ((px[y * W + x] >> 8) & 255) < 128:
+                return x
+            y = y + 1
+        x = x + 1
+    -1
+
+# x of the first Draw IR text command whose text contains `needle`.
+fn draw_ir_text_x(inner: text, needle: text) -> i32:
+    val composition = simple_web_layout_render_html_draw_ir(HEAD + inner + TAIL, W, H)
+    for batch in composition.batches:
+        for command in batch.commands:
+            if command.kind == DRAW_IR_COMMAND_TEXT and command.text_value.contains(needle):
+                return command.x
+    -1
+
+describe "text lines beside a left float are painted where layout wrapped them":
+    it "AC-1: layout wraps the run to four lines in a 96 px block":
+        step("Chrome 159: four line rects, block 200x96")
+        expect(simple_web_layout_debug_layout_by_id(HEAD + FLOATED + TAIL, W, H, "w", "text_lines")).to_equal("4")
+        expect(simple_web_layout_debug_layout_by_id(HEAD + FLOATED + TAIL, W, H, "w", "h")).to_equal("96")
+        expect(simple_web_layout_debug_layout_by_id(HEAD + FLOATED + TAIL, W, H, "w", "text_line_x0")).to_equal("60")
+
+    it "AC-2: software lane — the two lines beside the float have no ink left of x=60":
+        step("Chrome 159: lines 0 and 1 start at x=60")
+        val line0 = first_ink_column(FLOATED, 0, 24)
+        val line1 = first_ink_column(FLOATED, 24, 48)
+        expect(line0).to_be_greater_than(59)
+        expect(line0).to_be_less_than(65)
+        expect(line1).to_be_greater_than(59)
+        expect(line1).to_be_less_than(65)
+
+    it "AC-3: software lane — the lines below the float start at the block's left edge":
+        step("Chrome 159: lines 2 and 3 start at x=0")
+        val line2 = first_ink_column(FLOATED, 48, 72)
+        val line3 = first_ink_column(FLOATED, 72, 96)
+        expect(line2).to_be_greater_than(-1)
+        expect(line2).to_be_less_than(5)
+        expect(line3).to_be_greater_than(-1)
+        expect(line3).to_be_less_than(5)
+
+    it "AC-4: Draw IR lane — the same per-line x":
+        step("Chrome 159: 60, 60, 0, 0")
+        expect(draw_ir_text_x(FLOATED, "mmmmmmmm")).to_equal(60)
+        expect(draw_ir_text_x(FLOATED, "nnnnnnnnnnnn")).to_equal(60)
+        expect(draw_ir_text_x(FLOATED, "oooooooooooo")).to_equal(0)
+        expect(draw_ir_text_x(FLOATED, "pppppppppppp")).to_equal(0)
+
+    it "AC-5: control — without a float every line starts at the left edge in both lanes":
+        step("No float: all four lines at x=0")
+        val line0 = first_ink_column(PLAIN, 0, 24)
+        expect(line0).to_be_greater_than(-1)
+        expect(line0).to_be_less_than(5)
+        expect(draw_ir_text_x(PLAIN, "mmmmmmmm")).to_equal(0)
+        expect(draw_ir_text_x(PLAIN, "nnnnnnnnnnnn")).to_equal(0)
