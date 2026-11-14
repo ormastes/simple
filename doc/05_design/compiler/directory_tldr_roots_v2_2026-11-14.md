@@ -52,10 +52,27 @@ Merkle roots. Test presence is not evidence of execution.
 
 ## Verification checkpoint
 
-The exact codec and helper extraction compiles with the retained pure P2, but
-native execution fails in the text-byte provider before legacy encoding. An
-unchanged release-codec control reproduces the same failure. See
+The first retained pure-P2/default-runtime probe failed in the text-byte provider
+before legacy encoding; an unchanged release-codec control reproduced it. See
 [producer-bound report](../../bug_report/p2_text_bytes_codec_probe_2026_11_14.md).
-Schema-2 runtime roundtrip, Merkle/reader unit specs and broad runtime checks remain
-unqualified. Astra source review found no P0/P1 in the scoped producer/comparator;
-that review does not replace runtime evidence or complete the selected feature.
+
+Cycle 5 used the newer admitted pure-P2 SHA256
+`855f48d3c9f9d915be2c8d732d4da3186caa0fb49f55ba3c780a47a1bb7efd42`
+with the supported explicit `--runtime-bundle core-c`. The unchanged exact feature
+codec/helper extraction compiled and passed 11 native checks: legacy encode,
+decode and roundtrip; schema-2 encode, decode and roundtrip; legacy envelope reader
+rejection of schema 2; provider identity preservation; partial extension rejection;
+schema disagreement rejection; and trailing-byte rejection. The production codec
+block SHA256 is `1f634ccfc7d22122bf52f239c4c245802b7fd529b59dfd50cd7376400f3c6be1`.
+The extracted source SHA256 remains
+`d3eb2fcee40238e11ce8547ebbbb906524db0bf6c2a5b44ae509a5e2faab9396`.
+
+Evidence: `/tmp/dir-tldr-codec-probe-20261114/compile5.log` and `run5.log`,
+with the command from the bug report plus `--runtime-bundle core-c`, private
+`cache-core-c`, and output `codec-probe-core-c`. This qualifies the codec roundtrip
+with that explicit runtime profile, not the default mixed-runtime bundle.
+
+Merkle/reader unit specs, physical binding execution and broad runtime checks
+remain unqualified. Astra source review found no P0/P1 in the scoped
+producer/comparator; that review does not replace those runtime checks or complete
+the selected A1/B3/H1 feature. No full compiler cache consumer is connected yet.

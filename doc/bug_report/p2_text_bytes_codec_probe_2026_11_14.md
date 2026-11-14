@@ -50,3 +50,14 @@ cache was private; producer logs still showed its default global HIR cache path.
 Next diagnostic: inspect generated call/return representation for the exact
 provider and reproduce with the normal imported owner under an admitted newer
 producer. Do not change production codec semantics merely to hide this failure.
+
+## Matching-runtime control (cycle 5)
+
+The unchanged feature codec source passed all 11 native codec checks with the newer
+admitted P2 (`855f48d3c9f9d915be2c8d732d4da3186caa0fb49f55ba3c780a47a1bb7efd42`)
+and supported `--runtime-bundle core-c`. Producer path:
+`/home/yoon/dev/simple-jit-free-s1-20261114/build/bootstrap/pinned-src/pinned-33bc5c6d1d80/build/bootstrap-jitfree-s1/stage3/aarch64-unknown-linux-gnu/stage2-admitted/simple`.
+Logs: `compile5.log`, `run5.log` in the retained evidence directory. This is a
+controlled runtime-profile success, not closure of the default-bundle ABI bug.
+The native default-bundle owner diagnosis/fix is a separate lane. Five total codec
+compile attempts; no unchanged green checks were repeated.
