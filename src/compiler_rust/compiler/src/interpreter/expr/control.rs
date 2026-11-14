@@ -340,6 +340,19 @@ pub(super) fn eval_control_expr(
                         // Use the *_core variants so explicit `return` statements inside the arm
                         // propagate upward rather than being collapsed into a value.
                         if is_last {
+                            // COVERAGE: the arm-tail `if`/`match` below run
+                            // through exec_if_core / exec_match_core, not
+                            // exec_node, so the header of the last statement
+                            // of an arm of a value-position `match`
+                            // (`val r = match`, `return match`) ran unrecorded
+                            // -- the twin of the tail record in exec_block_fn.
+                            // Only for If/Match: any other tail falls through to
+                            // exec_node below, which records it itself (under the
+                            // invoker inside a closure body, which would put a
+                            // lambda line in a second file).
+                            if matches!(stmt, Node::If(_) | Node::Match(_)) {
+                                crate::interpreter::coverage_helpers::record_node_coverage_lexical(stmt);
+                            }
                             match stmt {
                                 Node::Expression(expr) => {
                                     result =

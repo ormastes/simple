@@ -417,6 +417,9 @@ pub(super) fn exec_block_closure_into(
 
     for node in nodes {
         crate::interpreter::set_current_node_span(node.span().map(Into::into));
+        // COVERAGE: this executor interprets every statement kind itself and
+        // never reaches exec_node, the only other place a line is recorded.
+        crate::interpreter::coverage_helpers::record_node_coverage_lexical(node);
         match node {
             Node::Expression(expr) => {
                 // Handle functional update (e.g., list->append(3))
@@ -1565,6 +1568,9 @@ fn exec_block_closure_mut_inner(
 
     for node in nodes {
         crate::interpreter::set_current_node_span(node.span().map(Into::into));
+        // COVERAGE: this executor interprets every statement kind itself and
+        // never reaches exec_node, the only other place a line is recorded.
+        crate::interpreter::coverage_helpers::record_node_coverage_lexical(node);
         match node {
             Node::Expression(expr) => {
                 // Handle self-updating method calls (e.g., arr.append(3))
