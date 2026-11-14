@@ -374,8 +374,17 @@ is not another matcher or body-rewriter.
 
 The builtin absent-selection identity and behavior remain unchanged. External
 selection must also be resolved before options/config/noop cache lookup; late
-HIR-only injection is insufficient. The checked driver factory now crosschecks request provider ID, resolved identity
-and selection before context construction; the context config, options hash
+HIR-only injection is insufficient. All three options-taking constructors (`CompileContext.create`,
+`CompilerDriver.create`, and `compiler_driver_create`) now return `Result`.
+Their shared checked owner crosschecks request provider ID, resolved identity
+and fixed-registry selection before context construction. The fixed loader also
+binds the token to its original acquisition request (provider ID and resolved
+policy/signature paths); repeating another policy request with the same provider
+ID is not admission. This provenance check stays separate from semantic cache
+identity, which binds signed bytes and the host trust root. This is an intentional
+source/API change: production callers propagate or map failure before using a
+context, and ordinary test setup explicitly unwraps valid options. No error
+context or panic substitutes for rejection. The context config, options hash
 and production native no-op invocation include the canonical identity. H5 CLI
 early action keys and the host-owned trust-root/admission composition remain
 separate integration work. The new structural tests
