@@ -1,0 +1,218 @@
+# Capture only during the actual successful full-parse owner epoch, before AST
+# eviction. This function checks structural coverage; the driver proves that
+# source/cfg/target/import inputs and epoch belong to that parse. No AST escapes.
+use compiler.frontend.parser_types.*
+use compiler.hir.hir_lowering.module_surface_declarations.{ModuleSurfaceParserOwner}
+use compiler.hir.hir_lowering.module_surface_semantic_projection.{module_surface_callable_draft_root_v2, module_surface_class_draft_root_v2, module_surface_struct_draft_root_v2, module_surface_sorted_names_v2, module_surface_semantic_state, module_surface_semantic_mix, module_surface_semantic_finish}
+use compiler.common.cache_contract.directory_source_epoch_v2.{DirectorySourceEpochV2, directory_source_epoch_valid_v2}
+use compiler.common.cache_contract.directory_category_projection_v2.{DirectoryCategoryProjectionV2, directory_category_projection_valid_v2}
+use compiler.common.cache_contract.generic_category_projection_v2.{GenericBinderDraftV2, GenericDeclarationDraftV2, GenericProjectionDraftV2}
+use compiler.common.cache_contract.physical_tld_v1.{three_payload_contract_digest_valid_v1}
+use std.common.crypto.sha256.{sha256_text}
+
+fn _generic_draft_frame_v2(value: text) -> text:
+    "{value.byte_len()}:" + value
+
+class GenericDraftWorkV2:
+    rows: i64 = 0
+    binders: i64 = 0
+    name_bytes: i64 = 0
+    valid: bool = true
+
+fn _generic_draft_charge_v2(input: GenericDraftWorkV2, name: text, params: [ParserTypeParam]) -> GenericDraftWorkV2:
+    var state = input
+    if not state.valid: return state
+    if state.rows >= 1024 or params.len() > 1024 or params.len() > 4096 - state.binders or name.byte_len() > 65536 - state.name_bytes:
+        state.valid = false
+        return state
+    state.rows = state.rows + 1
+    state.binders = state.binders + params.len()
+    state.name_bytes = state.name_bytes + name.byte_len()
+    var seen: Dict<text, bool> = {}
+    for param in params:
+        if param.name == "" or seen.contains_key(param.name) or param.name.byte_len() > 65536 - state.name_bytes:
+            state.valid = false
+            return state
+        seen[param.name] = true
+        state.name_bytes = state.name_bytes + param.name.byte_len()
+    state
+
+fn _generic_draft_keys_v2(input: GenericDraftWorkV2, keys: [text]) -> GenericDraftWorkV2:
+    var state = input
+    for key in keys:
+        if key.byte_len() > 65536 - state.name_bytes:
+            state.valid = false
+            return state
+        state.name_bytes = state.name_bytes + key.byte_len()
+    state
+
+fn _generic_draft_outer_work_v2(input: GenericDraftWorkV2, outer: [ParserTypeParam], count: i64, owner_name: text) -> GenericDraftWorkV2:
+    var state = input
+    if not state.valid or count == 0: return state
+    if count < 0 or count > 1024 - state.rows or outer.len() > (4096 - state.binders) / count:
+        state.valid = false
+        return state
+    var bytes: i64 = owner_name.byte_len()
+    for param in outer: bytes = bytes + param.name.byte_len()
+    if bytes > (65536 - state.name_bytes) / count:
+        state.valid = false
+        return state
+    state.binders = state.binders + outer.len() * count
+    state.name_bytes = state.name_bytes + bytes * count
+    state
+
+fn _generic_draft_preflight_v2(owner: ModuleSurfaceParserOwner) -> bool:
+    val count = owner.functions.len() + owner.function_headers.len() + owner.classes.len() + owner.structs.len() + owner.enums.len() + owner.traits.len() + owner.actors.len() + owner.impls.len() + owner.type_aliases.len()
+    if count > 1024: return false
+    var state = GenericDraftWorkV2()
+    state = _generic_draft_keys_v2(state, owner.function_headers.keys())
+    if not state.valid: return false
+    for key in owner.function_headers.keys():
+        if not owner.functions.contains_key(key): return false
+    for value in owner.functions.values():
+        state = _generic_draft_charge_v2(state, value.name, value.type_params)
+        if not state.valid: return false
+    for value in owner.structs.values():
+        state = _generic_draft_charge_v2(state, value.name, value.type_params)
+        if not state.valid: return false
+    for value in owner.enums.values():
+        state = _generic_draft_charge_v2(state, value.name, value.type_params)
+        if not state.valid: return false
+    for value in owner.type_aliases.values():
+        state = _generic_draft_charge_v2(state, value.name, value.type_params)
+        if not state.valid: return false
+    for value in owner.classes.values():
+        if value.methods.len() > 1024 - state.rows: return false
+        state = _generic_draft_charge_v2(state, value.name, value.type_params)
+        if not state.valid: return false
+        state = _generic_draft_outer_work_v2(state, value.type_params, value.methods.len(), value.name)
+        if not state.valid: return false
+        for method in value.methods.values():
+            state = _generic_draft_charge_v2(state, method.name, method.type_params)
+            if not state.valid: return false
+    for value in owner.actors.values():
+        if value.methods.len() > 1024 - state.rows: return false
+        state = _generic_draft_charge_v2(state, value.name, value.type_params)
+        if not state.valid: return false
+        state = _generic_draft_outer_work_v2(state, value.type_params, value.methods.len(), value.name)
+        if not state.valid: return false
+        for method in value.methods.values():
+            state = _generic_draft_charge_v2(state, method.name, method.type_params)
+            if not state.valid: return false
+    for value in owner.traits.values():
+        if value.methods.len() > 1024 - state.rows: return false
+        state = _generic_draft_charge_v2(state, value.name, value.type_params)
+        if not state.valid: return false
+        state = _generic_draft_outer_work_v2(state, value.type_params, value.methods.len(), value.name)
+        if not state.valid: return false
+        for method in value.methods:
+            state = _generic_draft_charge_v2(state, method.name, method.type_params)
+            if not state.valid: return false
+    for value in owner.impls:
+        if value.methods.len() > 1024 - state.rows: return false
+        state = _generic_draft_charge_v2(state, "impl", value.type_params)
+        if not state.valid: return false
+        state = _generic_draft_outer_work_v2(state, value.type_params, value.methods.len(), "impl")
+        if not state.valid: return false
+        for method in value.methods.values():
+            state = _generic_draft_charge_v2(state, method.name, method.type_params)
+            if not state.valid: return false
+    for keys in [owner.functions.keys(), owner.classes.keys(), owner.structs.keys(), owner.enums.keys(), owner.traits.keys(), owner.actors.keys(), owner.type_aliases.keys()]:
+        state = _generic_draft_keys_v2(state, keys)
+    state.valid
+
+fn _generic_draft_binders_v2(inner: [ParserTypeParam], outer: [ParserTypeParam]) -> [GenericBinderDraftV2]:
+    var result: [GenericBinderDraftV2] = []
+    var index = 0
+    for param in inner:
+        result.push(GenericBinderDraftV2(kind: "type", source_name: param.name, index: index, scope_depth: 0))
+        index = index + 1
+    index = 0
+    val outer_depth = if inner.is_empty(): 0 else: 1
+    for param in outer:
+        result.push(GenericBinderDraftV2(kind: "type", source_name: param.name, index: index, scope_depth: outer_depth))
+        index = index + 1
+    result
+
+fn _generic_draft_row_v2(kind: text, qualified: text, binders: [GenericBinderDraftV2], signature: text, body: text, has_body: bool, reason: text, source: DirectoryCategoryProjectionV2) -> GenericDeclarationDraftV2:
+    var coverage = reason
+    if coverage == "" and (not three_payload_contract_digest_valid_v1(signature) or (has_body and not three_payload_contract_digest_valid_v1(body))):
+        coverage = "parser-projection-unavailable"
+    var identity = ""
+    if coverage == "":
+        identity = sha256_text(_generic_draft_frame_v2("generic-declaration-draft/v2") + _generic_draft_frame_v2(source.source_identity) + _generic_draft_frame_v2(kind) + _generic_draft_frame_v2(qualified) + _generic_draft_frame_v2(signature))
+    GenericDeclarationDraftV2(declaration_identity: identity, declaration_kind: kind, qualified_name: qualified, binders: binders, parser_signature_digest: signature, body_digest: body, has_body: has_body, coverage_reason: coverage)
+
+fn _generic_function_draft_v2(value: ParserFunction, qualified: text, outer: [ParserTypeParam], source: DirectoryCategoryProjectionV2) -> GenericDeclarationDraftV2:
+    val has_body = not value.is_extern
+    val signature = module_surface_callable_draft_root_v2(value, false)
+    val body = if has_body: module_surface_callable_draft_root_v2(value, true) else: ""
+    _generic_draft_row_v2("function", qualified, _generic_draft_binders_v2(value.type_params, outer), signature, body, has_body, "", source)
+
+# Concrete producer of compact parser drafts. Unsupported generic kinds stay
+# visible and incomplete; ordinary non-generic declarations do not block empty.
+pub fn generic_projection_draft_from_owner_v2(owner: ModuleSurfaceParserOwner, source: DirectoryCategoryProjectionV2, epoch: DirectorySourceEpochV2, module_identity: text) -> Result<GenericProjectionDraftV2, text>:
+    if not directory_source_epoch_valid_v2(epoch) or not directory_category_projection_valid_v2(source): return Err("invalid parse provenance shape")
+    if module_identity == "" or module_identity.byte_len() > 4096 or source.source_identity.byte_len() > 4096 or source.canonical_path.byte_len() > 4096 or source.target_triple.byte_len() > 4096: return Err("draft identity bound exceeded")
+    if not _generic_draft_preflight_v2(owner): return Err("incomplete or oversized parser inventory")
+    var rows: [GenericDeclarationDraftV2] = []
+    var coverage = ""
+    if not owner.domain_blocks.is_empty() or not owner.mock_decls.is_empty() or not owner.representation_declarations.is_empty(): coverage = "unclassified declaration container"
+    for value in owner.functions.values():
+        if not value.type_params.is_empty(): rows.push(_generic_function_draft_v2(value, module_identity + "." + value.name, [], source))
+    for value in owner.structs.values():
+        if not value.type_params.is_empty():
+            rows.push(_generic_draft_row_v2("struct", module_identity + "." + value.name, _generic_draft_binders_v2(value.type_params, []), module_surface_struct_draft_root_v2(value), "", false, "", source))
+    for value in owner.classes.values():
+        val qualified = module_identity + "." + value.name
+        if not value.type_params.is_empty():
+            rows.push(_generic_draft_row_v2("class", qualified, _generic_draft_binders_v2(value.type_params, []), module_surface_class_draft_root_v2(value, false), module_surface_class_draft_root_v2(value, true), true, "", source))
+        for method in value.methods.values():
+            if not method.type_params.is_empty() or not value.type_params.is_empty(): rows.push(_generic_function_draft_v2(method, qualified + "." + method.name, value.type_params, source))
+    for value in owner.enums.values():
+        if not value.type_params.is_empty(): rows.push(_generic_draft_row_v2("enum", module_identity + "." + value.name, _generic_draft_binders_v2(value.type_params, []), "", "", false, "generic enum finalizer unavailable", source))
+    for value in owner.type_aliases.values():
+        if not value.type_params.is_empty(): rows.push(_generic_draft_row_v2("alias", module_identity + "." + value.name, _generic_draft_binders_v2(value.type_params, []), "", "", false, "generic alias finalizer unavailable", source))
+    for value in owner.traits.values():
+        if not value.type_params.is_empty(): rows.push(_generic_draft_row_v2("trait", module_identity + "." + value.name, _generic_draft_binders_v2(value.type_params, []), "", "", false, "generic trait finalizer unavailable", source))
+        for method in value.methods:
+            if not method.type_params.is_empty(): rows.push(_generic_draft_row_v2("trait-method", module_identity + "." + value.name + "." + method.name, _generic_draft_binders_v2(method.type_params, value.type_params), "", "", false, "generic trait method finalizer unavailable", source))
+    for value in owner.actors.values():
+        if not value.type_params.is_empty(): rows.push(_generic_draft_row_v2("actor", module_identity + "." + value.name, _generic_draft_binders_v2(value.type_params, []), "", "", false, "generic actor finalizer unavailable", source))
+        for method in value.methods.values():
+            if not method.type_params.is_empty(): rows.push(_generic_draft_row_v2("actor-method", module_identity + "." + value.name + "." + method.name, _generic_draft_binders_v2(method.type_params, value.type_params), "", "", false, "generic actor method finalizer unavailable", source))
+    for value in owner.impls:
+        if not value.type_params.is_empty(): rows.push(_generic_draft_row_v2("impl", module_identity, _generic_draft_binders_v2(value.type_params, []), "", "", false, "generic impl finalizer unavailable", source))
+        for method in value.methods.values():
+            if not method.type_params.is_empty(): rows.push(_generic_draft_row_v2("impl-method", module_identity + "." + method.name, _generic_draft_binders_v2(method.type_params, value.type_params), "", "", false, "generic impl method finalizer unavailable", source))
+    # Hash each complete byte-framed row through the existing streaming owner,
+    # then sort fixed-width row digests. No growing source-sized concatenation.
+    var encoded: [text] = []
+    var identities: Dict<text, bool> = {}
+    for row in rows:
+        if row.coverage_reason != "": coverage = "generic declaration unavailable"
+        if row.declaration_identity != "":
+            if identities.contains_key(row.declaration_identity): return Err("ambiguous parser declaration identity")
+            identities[row.declaration_identity] = true
+        var row_state = module_surface_semantic_state()
+        row_state = module_surface_semantic_mix(row_state, "schema", "generic-draft-row/v2")
+        for value in [row.declaration_identity, row.declaration_kind, row.qualified_name, row.parser_signature_digest, row.body_digest, if row.has_body: "1" else: "0", row.coverage_reason]:
+            row_state = module_surface_semantic_mix(row_state, "field", value)
+        row_state = module_surface_semantic_mix(row_state, "binder-count", "{row.binders.len()}")
+        for binder in row.binders:
+            for value in [binder.kind, binder.source_name, "{binder.scope_depth}", "{binder.index}"]:
+                row_state = module_surface_semantic_mix(row_state, "binder-field", value)
+        val digest = module_surface_semantic_finish(row_state)
+        if not three_payload_contract_digest_valid_v1(digest): return Err("draft row hashing unavailable")
+        encoded.push(digest)
+    val sorted_result = module_surface_sorted_names_v2(encoded)
+    if sorted_result.is_err(): return Err("draft inventory bound exceeded")
+    var material = module_surface_semantic_state()
+    material = module_surface_semantic_mix(material, "schema", "generic-draft-inventory/v2")
+    for value in [module_identity, source.source_identity, source.source_digest, source.target_triple, source.preprocessed_digest, source.cfg_decision_digest, source.environment_policy_digest, "{epoch.driver_identity}", "{epoch.generation}", coverage]:
+        material = module_surface_semantic_mix(material, "provenance", value)
+    material = module_surface_semantic_mix(material, "row-count", "{rows.len()}")
+    for data in sorted_result.unwrap(): material = module_surface_semantic_mix(material, "row", data)
+    val inventory = module_surface_semantic_finish(material)
+    if not three_payload_contract_digest_valid_v1(inventory): return Err("draft inventory hashing unavailable")
+    Ok(GenericProjectionDraftV2(source_epoch: epoch, source: source, module_identity: module_identity, declarations: rows, inventory_digest: inventory, inventory_complete: coverage == "", coverage_reason: coverage))
