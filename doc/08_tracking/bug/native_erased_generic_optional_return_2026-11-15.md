@@ -49,11 +49,33 @@ heap-boxed), while concrete `X?` readers decode the payload *raw*
 was reverted. A real fix must pick one payload representation at the erased ↔
 concrete boundary: either convert at call/return, or monomorphize.
 
-## Impact
+## Same family: bool payload in a generic method's `Result`
 
-`src/compiler/00.common/data/attribute_schema_v1.spl` `AttributeStoreV1<T>`
-(`-> T?` methods, `slots: [T?]`, `Dict<i64, T>`) is affected natively,
-independent of the `AttrOwnerV1<T>` trait-object fix (`f6fa77f4789`,
-`81625788a20`). The trait part is verified on both backends by
-`test/fixtures/native_generic_trait_object_optional_field/main.spl`, which uses
-non-generic holders.
+```
+class G<T>:
+    n: i64
+impl G<T>:
+    me set(value: T) -> Result<bool, text>:
+        Ok(true)
+var g: G<i64> = G(n: 0)
+match g.set(5):
+    case Ok(b): print "set {b}"     # expect "set true"; native prints "set 1"
+```
+
+Pre-fix Stage 2, cranelift: `set 1`.
+
+## Observed on the real module (Stage 2 `81625788a20`, cranelift)
+
+A probe imports `attribute_schema_v1` and drives `AttributeStoreV1<i64>` with a
+local `impl AttrOwnerV1<i64>`, in direct, column and detached-embedded
+placements: has/get/set/retire/len, a None read, and a write-then-read.
+
+- The output matches the seed on every line, including `9000000000` through
+  the owner, except `set` printing `1` for `Ok(true)` (the issue above).
+- The `-> T?` miscompile does not show up there. The module never returns `T?`
+  from a generic method to a concrete caller; reads go through
+  `owner_read` (trait dispatch) or `Result<T, text>`.
+- **llvm:** the build fails in codegen for `sha256`, `sdn.parser`,
+  `data_schema_resolver` and `data_schema_core_v1` (llc error: `'%lN' defined
+  with type 'i64' but expected 'ptr'`). The same llc failure in `sha256` and
+  `sdn.parser` reproduces on the pre-fix Stage 2 with a trivial importer.
