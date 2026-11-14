@@ -8,6 +8,8 @@ use std.common.traceability.model.{TraceGraph, TraceQualification}
 use std.common.traceability.query_nodes_v1.{TraceNodeQueryV1}
 use std.common.traceability.query_refs_v1.{TraceReferenceQueryV1}
 use app.traceability.ide_view_render.{trace_view_lines, refs_view_lines, view_state_lines, TraceViewState}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded}
 use app.traceability.query_options_v1.{TraceQueryOptionsV1}
 use app.traceability.query_snapshot_v1.{trace_query_build_snapshot_v1}
 
@@ -41,9 +43,28 @@ fn view_host_load_input() -> Result<TraceViewInput, text>:
     val options = TraceQueryOptionsV1(operation: "list", kind: "requirements", snapshot: "worktree")
     val build = trace_query_build_snapshot_v1(options)?
     val snapshot = build.graph.subject.snapshot_id
-    Ok(TraceViewInput(graph: build.graph,
-        query: TraceNodeQueryV1(snapshot_id: snapshot, operation: "list", kind: "requirements", limit: 100),
-        quals: [], snapshot: snapshot))
+    val query = TraceNodeQueryV1(snapshot_id: snapshot, operation: "list", kind: "requirements", limit: 100)
+    # The request was issued against the graph just built.
+    Ok(view_host_input_from_graph(build.graph, ".", build.graph.generation_id, query))
+
+# True when every file locator's pinned blob is still readable under `root`
+# with exactly the recorded content hash (a deleted or changed blob is missing).
+fn trace_source_blobs_present(graph: TraceGraph, root: text) -> bool:
+    for loc in graph.locators:
+        if loc.blob_id == "":
+            continue
+        match file_read_regular_no_follow_bounded(root + "/" + loc.path, 1048576):
+            case Ok(content):
+                if "sha256:" + sha256_text(content) != loc.blob_id:
+                    return false
+            case Err(_): return false
+    true
+
+# Producer for `source_present` (locator blobs vs the worktree at `root`) and
+# `expected_generation` (the generation the request was issued against).
+fn view_host_input_from_graph(graph: TraceGraph, root: text, requested_generation: text, query: TraceNodeQueryV1) -> TraceViewInput:
+    TraceViewInput(graph: graph, query: query, quals: [], snapshot: graph.subject.snapshot_id,
+        source_present: trace_source_blobs_present(graph, root), expected_generation: requested_generation)
 
 fn _input_guard(i: TraceViewInput) -> [text]:
     if not i.source_present:
@@ -71,4 +92,4 @@ fn view_host_render(host: ExtensionHost, view_id: text, input: TraceViewInput?) 
         return trace_view_lines(i.graph, i.query, i.quals, i.snapshot)
     view_state_lines(TraceViewState.SourceMissing)
 
-export TraceViewInput, view_host_render, view_host_uses_trace, view_host_load_input
+export TraceViewInput, view_host_render, view_host_uses_trace, view_host_load_input, view_host_input_from_graph
