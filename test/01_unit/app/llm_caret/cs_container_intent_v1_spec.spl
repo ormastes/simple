@@ -1,0 +1,135 @@
+# AUTHORED_NOT_RUN. Production pure parser/intent functions; no launch/backend.
+# @req REQ-CARET-LOCAL-INTENT-001
+# @req REQ-CARET-LOCAL-INTENT-002
+# @req REQ-CARET-LOCAL-INTENT-003
+use std.spec.{describe, it, expect, step}
+use app.llm_caret.cs_container.{CsContainerRequest, cs_container_request}
+use app.llm_caret.cs_container_intent_v1.*
+
+fn caret_local_intent_fixture_v1() -> CsContainerRequest:
+    cs_container_request(["--container", "simple/dev:1", "--container-network", "none",
+        "--container-mount", "/host/input:/guest/input:ro", "--container-mount", "/host/output:/guest/output:rw",
+        "--container-env", "HOME=C:\\User Home", "--container-env", "VALUE=a=b=c", "--container-env", "EMPTY=",
+        "--workspace", "C:\\Agent Work", "--verbose"])
+
+fn caret_local_intent_text_fixture_v1(size: i64) -> text:
+    var value = ""
+    var block = "x"
+    var remaining = size
+    while remaining > 0:
+        if remaining % 2 == 1: value = value + block
+        remaining = remaining / 2
+        if remaining > 0: block = block + block
+    value
+
+describe "Caret unresolved local container intent v1":
+    it "preserves exact argv and keeps the Windows host executable distinct from guest intent":
+        step("Parse existing Caret options and supply complete unsplit argv")
+        val request = caret_local_intent_fixture_v1()
+        expect(request.error).to_equal("")
+        val executable = "C:\\Program Files\\Simple\\simple.exe"
+        val repository = "C:\\Repository Work"
+        val arguments = ["", "two words", "--workspace", "C:\\Agent Work", "quote\"slash\\", "λ"]
+        val intent = caret_local_container_intent_v1(request, executable, arguments, repository).unwrap()
+        step("Retain the host path without inventing a guest executable or mapping")
+        expect(intent.host_executable).to_equal(executable)
+        expect(intent.argv).to_equal(arguments)
+        expect(intent.repository).to_equal(repository)
+        expect(intent.workspace).to_equal("C:\\Agent Work")
+        expect(intent.image).to_equal("simple/dev:1")
+        expect(intent.network).to_equal("none")
+        expect(intent.mounts.len()).to_equal(2)
+        expect(intent.mounts[0].guest_path).to_equal("/guest/input")
+        expect(intent.mounts[1].guest_path).to_equal("/guest/output")
+
+    it "copies parsed mounts environment and network without inserting automatic policy":
+        step("Convert parsed source and target fields into the typed mount metadata")
+        val request = caret_local_intent_fixture_v1()
+        val intent = caret_local_container_intent_v1(request, "simple", [], "repo-relative").unwrap()
+        expect(intent.mounts.len()).to_equal(request.mounts.len())
+        for index in 0..request.mounts.len():
+            expect(intent.mounts[index].host_path).to_equal(request.mounts[index].source)
+            expect(intent.mounts[index].guest_path).to_equal(request.mounts[index].target)
+            expect(intent.mounts[index].read_only).to_equal(request.mounts[index].read_only)
+        step("Preserve HOME, empty values and embedded equals exactly as parsed")
+        expect(intent.environment).to_equal(request.env)
+        expect(intent.environment).to_equal(["HOME=C:\\User Home", "VALUE=a=b=c", "EMPTY="])
+        expect(intent.network).to_equal(request.network)
+        expect(intent.repository).to_equal("repo-relative")
+        expect(intent.host_executable).to_equal("simple")
+
+    it "leaves absent mounts environment and workspace absent":
+        step("Preserve a minimal request without automatic repo or executable mounts")
+        val request = cs_container_request(["--container", "simple/dev:1"])
+        val intent = caret_local_container_intent_v1(request, "/outside/simple", [""], "/repository").unwrap()
+        expect(intent.mounts.len()).to_equal(0)
+        expect(intent.environment).to_equal([])
+        expect(intent.workspace).to_equal("")
+        expect(intent.network).to_equal("host")
+        expect(intent.argv).to_equal([""])
+
+    it "refuses real parser errors before constructing app intent":
+        step("Pass incomplete image invalid network and malformed mount inputs through the real parser")
+        for extras in [["--container"], ["--container", "image", "--container-network", "bridge"],
+                ["--container", "image", "--container-mount", "relative:/guest"],
+                ["--container", "image", "--container-env", "MISSING_EQUALS"]]:
+            val request = cs_container_request(extras)
+            expect(request.error == "").to_equal(false)
+            expect(caret_local_container_intent_v1(request, "simple", [], "/repo").unwrap_err()).to_equal(
+                "caret-local-intent-parse-error:" + request.error)
+        step("Refuse the parser's ordinary no-container result because it has no image")
+        val plain = cs_container_request(["--workspace", "/work"])
+        expect(plain.error).to_equal("")
+        expect(caret_local_container_intent_v1(plain, "simple", [], "/repo").unwrap_err()).to_equal("caret-local-intent-image-required")
+
+    it "rejects empty or NUL host identities and NUL argv without resolving paths":
+        step("Require complete host executable and repository strings")
+        val request = caret_local_intent_fixture_v1()
+        for executable in ["", "simple\0hidden"]:
+            expect(caret_local_container_intent_v1(request, executable, [], "/repo").unwrap_err()).to_equal("caret-local-intent-host-executable-invalid")
+        for repository in ["", "/repo\0hidden"]:
+            expect(caret_local_container_intent_v1(request, "simple", [], repository).unwrap_err()).to_equal("caret-local-intent-repository-invalid")
+        step("Reject native argument truncation while preserving ordinary empty arguments")
+        expect(caret_local_container_intent_v1(request, "simple", ["valid", "bad\0hidden"], "/repo").unwrap_err()).to_equal("caret-local-intent-argument-invalid")
+        expect(caret_local_container_intent_v1(request, "relative-executable", ["", "two words"], "relative-repo").is_ok()).to_equal(true)
+
+    it "bounds copied text bytes and aggregate size without treating intent as a wire request":
+        step("Admit exactly 16384 bytes in one field and reject the next byte")
+        val request = caret_local_intent_fixture_v1()
+        val maximum = caret_local_intent_text_fixture_v1(16384)
+        expect(caret_local_container_intent_v1(request, maximum, [], "/repo").is_ok()).to_equal(true)
+        expect(caret_local_container_intent_v1(request, maximum + "x", [], "/repo").unwrap_err()).to_equal("caret-local-intent-text-size")
+        expect(caret_local_container_intent_v1(request, "simple", [maximum + "x"], "/repo").unwrap_err()).to_equal("caret-local-intent-text-size")
+        expect(caret_local_container_intent_v1(request, "simple", [], maximum + "x").unwrap_err()).to_equal("caret-local-intent-text-size")
+        step("Refuse more than one MiB of copied text even though each argument is bounded")
+        var arguments: [text] = []
+        for index in 0..64: arguments.push(maximum)
+        expect(caret_local_container_intent_v1(request, "simple", arguments, "/repo").unwrap_err()).to_equal("caret-local-intent-text-total")
+
+    it "bounds arguments environment entries and parsed mounts before copying":
+        step("Admit maximum argv and environment counts then reject each next entry")
+        var request = caret_local_intent_fixture_v1()
+        var arguments: [text] = []
+        request.env = []
+        for index in 0..128:
+            arguments.push("")
+            request.env.push("KEY_{index}=value")
+        expect(caret_local_container_intent_v1(request, "simple", arguments, "/repo").is_ok()).to_equal(true)
+        arguments.push("")
+        expect(caret_local_container_intent_v1(request, "simple", arguments, "/repo").unwrap_err()).to_equal("caret-local-intent-field-count")
+        request.env.push("EXTRA=value")
+        expect(caret_local_container_intent_v1(request, "simple", [], "/repo").unwrap_err()).to_equal("caret-local-intent-field-count")
+        step("Bound mounts obtained from the real existing option parser")
+        var extras = ["--container", "simple/dev:1"]
+        for index in 0..64:
+            extras.push("--container-mount")
+            extras.push("/host/{index}:/guest/{index}:ro")
+        val maximum = cs_container_request(extras)
+        expect(maximum.error).to_equal("")
+        val maximum_intent = caret_local_container_intent_v1(maximum, "simple", [], "/repo").unwrap()
+        expect(maximum_intent.mounts.len()).to_equal(64)
+        extras.push("--container-mount")
+        extras.push("/host/extra:/guest/extra:ro")
+        val excessive = cs_container_request(extras)
+        expect(excessive.error).to_equal("")
+        expect(caret_local_container_intent_v1(excessive, "simple", [], "/repo").unwrap_err()).to_equal("caret-local-intent-field-count")
