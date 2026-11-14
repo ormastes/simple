@@ -183,6 +183,32 @@ describe "transitive bare type bindings":
         expect(lowering.transitive_bare_names.len()).to_equal(0)
         lowering.symbols.pop_scope()
 
+describe "transitive rows after the importer changes without a module reset":
+    it "starts the next importer with no stale row ids":
+        # No begin_module on either side: only the registration wrapper
+        # notices that `module_filename` names another importer.
+        var lowering = hirlowering_for_module("app/one.spl", bare_registry())
+        lowering = import_one(lowering, "lib.a", "HolderA", "HolderA")
+        expect(lowering.transitive_bare_ids.len()).to_equal(1)
+        lowering.module_filename = "app/two.spl"
+        lowering = import_one(lowering, "lib.g", "LeafHolderG", "LeafHolderG")
+        expect(lowering.transitive_bare_names).to_equal(["Leaf"])
+        expect(lowering.transitive_bare_owners).to_equal(["lib.g"])
+        expect(lowering.transitive_bare_ids).to_equal([qualified(lowering, "lib.g", "Leaf")])
+
+    it "still makes a name ambiguous for the next importer":
+        var lowering = hirlowering_for_module("app/one.spl", bare_registry())
+        lowering = import_one(lowering, "lib.a", "HolderA", "HolderA")
+        lowering.module_filename = "app/two.spl"
+        lowering = import_one(lowering, "lib.g", "LeafHolderG", "LeafHolderG")
+        expect(owner_of(lowering, "Leaf")).to_equal("lib.g")
+        lowering = import_one(lowering, "lib.h", "LeafHolderH", "LeafHolderH")
+        # A stale id in row 0 made this look like a foreign binding and
+        # left `Leaf` bound to lib.g.
+        expect(bound(lowering, "Leaf")).to_equal(false)
+        expect(lowering.transitive_bare_owners).to_equal([""])
+        expect(qualified(lowering, "lib.g", "Leaf") == qualified(lowering, "lib.h", "Leaf")).to_equal(false)
+
 describe "field dependency reached through the owner's aliased import":
     it "binds the alias in the holder's module scope to the declaration":
         val lowering = import_one(importer(), "lib.e", "AliasHolder", "AliasHolder")
