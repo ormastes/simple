@@ -1,0 +1,123 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-BROWSER_ENGINE
+# @cover src/lib/gc_async_mut/gpu/browser_engine/style/transform.spl 80%
+# @tag: unit, browser_engine, css, transform
+#
+# CSS `transform` value parsing and matrix composition (CSS Transforms 1):
+# function list order, unit handling (px, deg, rad, turn), the one-argument
+# scale() shorthand and the rule that a transform list multiplies left to
+# right, so `translate(10px, 20px) scale(2)` maps (1,1) to (12,22) while
+# `scale(2) translate(10px, 20px)` maps it to (22,42). Matrix cells are
+# row-major with the translation in the fourth column; values are compared in
+# thousandths to keep trigonometric results exact enough.
+
+use std.spec.{describe, context, it, expect}
+use std.common.render_scene.matrix4.{Matrix4}
+use std.gc_async_mut.gpu.browser_engine.style.transform.{
+    TransformFunction, parse_transform, transforms_to_matrix, tf_arg_at
+}
+
+fn _milli(v: f64) -> i64:
+    if v >= 0.0:
+        return (v * 1000.0 + 0.5).to_i64()
+    0 - ((0.0 - v) * 1000.0 + 0.5).to_i64()
+
+fn _cell(value: text, index: i64) -> i64:
+    val m = transforms_to_matrix(parse_transform(value))
+    _milli(m.m[index])
+
+describe "CSS transform function list":
+
+    context "parsing":
+
+        it "returns no functions for none and for an empty value":
+            expect(parse_transform("none").len()).to_equal(0)
+            expect(parse_transform("").len()).to_equal(0)
+            expect(parse_transform("   ").len()).to_equal(0)
+
+        it "keeps functions in source order with their arguments":
+            val fns = parse_transform("rotate(45deg) translate(10px, 20px)")
+            expect(fns.len()).to_equal(2)
+            expect(fns[0].name).to_equal("rotate")
+            expect(_milli(tf_arg_at(fns[0], 0))).to_equal(45000)
+            expect(fns[1].name).to_equal("translate")
+            expect(_milli(tf_arg_at(fns[1], 0))).to_equal(10000)
+            expect(_milli(tf_arg_at(fns[1], 1))).to_equal(20000)
+
+        it "reads a missing argument as zero through the accessor":
+            val fns = parse_transform("translateX(7px)")
+            expect(fns.len()).to_equal(1)
+            expect(_milli(tf_arg_at(fns[0], 0))).to_equal(7000)
+            expect(_milli(tf_arg_at(fns[0], 1))).to_equal(0)
+
+        it "converts turn and rad angles to degrees":
+            expect(_milli(tf_arg_at(parse_transform("rotate(0.5turn)")[0], 0))).to_equal(180000)
+            expect(_milli(tf_arg_at(parse_transform("rotate(3.141592653589793rad)")[0], 0))).to_equal(180000)
+
+        it "accepts negative and fractional lengths":
+            val fns = parse_transform("translate(-2.5px, 0.25px)")
+            expect(_milli(tf_arg_at(fns[0], 0))).to_equal(-2500)
+            expect(_milli(tf_arg_at(fns[0], 1))).to_equal(250)
+
+    context "single-function matrices":
+
+        it "is the identity for none":
+            expect(_cell("none", 0)).to_equal(1000)
+            expect(_cell("none", 5)).to_equal(1000)
+            expect(_cell("none", 3)).to_equal(0)
+            expect(_cell("none", 7)).to_equal(0)
+
+        it "puts translate in the fourth column":
+            expect(_cell("translate(10px, 20px)", 3)).to_equal(10000)
+            expect(_cell("translate(10px, 20px)", 7)).to_equal(20000)
+            expect(_cell("translate(10px, 20px)", 0)).to_equal(1000)
+
+        it "translates one axis only for translateX and translateY":
+            expect(_cell("translateX(4px)", 3)).to_equal(4000)
+            expect(_cell("translateX(4px)", 7)).to_equal(0)
+            expect(_cell("translateY(6px)", 3)).to_equal(0)
+            expect(_cell("translateY(6px)", 7)).to_equal(6000)
+
+        it "uses one scale argument for both axes":
+            expect(_cell("scale(2)", 0)).to_equal(2000)
+            expect(_cell("scale(2)", 5)).to_equal(2000)
+
+        it "uses two scale arguments independently":
+            expect(_cell("scale(2, 3)", 0)).to_equal(2000)
+            expect(_cell("scale(2, 3)", 5)).to_equal(3000)
+            expect(_cell("scaleX(4)", 0)).to_equal(4000)
+            expect(_cell("scaleX(4)", 5)).to_equal(1000)
+            expect(_cell("scaleY(5)", 0)).to_equal(1000)
+            expect(_cell("scaleY(5)", 5)).to_equal(5000)
+
+        it "rotates the x axis onto the y axis for 90 degrees":
+            expect(_cell("rotate(90deg)", 0)).to_equal(0)
+            expect(_cell("rotate(90deg)", 1)).to_equal(-1000)
+            expect(_cell("rotate(90deg)", 4)).to_equal(1000)
+            expect(_cell("rotate(90deg)", 5)).to_equal(0)
+
+        it "shears x by tan of the skewX angle":
+            expect(_cell("skewX(45deg)", 1)).to_equal(1000)
+            expect(_cell("skewX(45deg)", 4)).to_equal(0)
+            expect(_cell("skewY(45deg)", 4)).to_equal(1000)
+            expect(_cell("skewY(45deg)", 1)).to_equal(0)
+
+        it "treats an unknown function as the identity":
+            expect(_cell("wobble(3)", 0)).to_equal(1000)
+            expect(_cell("wobble(3)", 3)).to_equal(0)
+
+    context "composition order":
+
+        it "applies the rightmost function to the point first":
+            expect(_cell("translate(10px, 20px) scale(2)", 0)).to_equal(2000)
+            expect(_cell("translate(10px, 20px) scale(2)", 3)).to_equal(10000)
+            expect(_cell("translate(10px, 20px) scale(2)", 7)).to_equal(20000)
+
+        it "scales a later translation":
+            expect(_cell("scale(2) translate(10px, 20px)", 0)).to_equal(2000)
+            expect(_cell("scale(2) translate(10px, 20px)", 3)).to_equal(20000)
+            expect(_cell("scale(2) translate(10px, 20px)", 7)).to_equal(40000)
+
+        it "accumulates repeated translations":
+            expect(_cell("translate(1px, 2px) translate(3px, 4px)", 3)).to_equal(4000)
+            expect(_cell("translate(1px, 2px) translate(3px, 4px)", 7)).to_equal(6000)
