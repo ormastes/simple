@@ -22,9 +22,12 @@ use std.gc_async_mut.gpu.browser_engine.style_rule_index.{
     br_style_block_rule_for_first_child_self, br_style_block_rule_for_last_child_self,
     br_style_block_rule_for_only_child_self, br_style_block_rule_for_nth_child_self,
     br_style_block_rule_for_multi_class, br_div_content_is_empty,
-    br_element_sibling_index
+    br_element_sibling_index, br_element_sibling_count
 }
-use std.gc_async_mut.gpu.browser_engine.selector_matcher.{br_selector_list_contains_nth_child_self}
+use std.gc_async_mut.gpu.browser_engine.selector_matcher.{
+    br_selector_list_contains_nth_child_self, br_selector_list_contains_first_child_self,
+    br_selector_list_contains_last_child_self, br_selector_list_contains_only_child_self
+}
 
 fn _doc(css: text) -> text:
     "<html><head><style>" + css + "</style></head><body><p>one</p><div class=\"a b\" id=\"x\">t</div><section><div class=\"a\"><span>s</span></div></section></body></html>"
@@ -208,4 +211,41 @@ describe "Fallback stylesheet rule lookup":
             val b = br_element_sibling_index(html, html.index_of("<div id=\"b\"") ?? -1)
             expect(br_style_block_rule_for_nth_child_self(html, "div", "div id=\"a\"", a)).to_equal("clear: both;")
             expect(br_style_block_rule_for_nth_child_self(html, "div", "div id=\"b\"", b)).to_equal("")
+
+    # Chrome 159.0.8154.6 on <div#fb><p#fp/><div#fa><p#fap/></div><div#fbb/><span#fs/></div>
+    # and <div#solo><div#only1/></div>:
+    #   #fb > div:first-child / :last-child / :only-child -> (none)
+    #   #solo > div:first-child / :last-child / :only-child -> only1
+    #   #fb > div:nth-child(2) -> fa ; #fb > div:nth-child(2) p -> fap (not fa)
+    context "subject compound and element-sibling position":
+
+        it "does not treat a pseudo-class on an ancestor compound as the subject's":
+            expect(br_selector_list_contains_nth_child_self("div:nth-child(1) p ", "div", "div", 1)).to_equal(false)
+            expect(br_selector_list_contains_nth_child_self("div:nth-child(1) > p ", "div", "div", 1)).to_equal(false)
+            expect(br_selector_list_contains_nth_child_self("section div:nth-child(1) ", "div", "div", 1)).to_equal(true)
+            expect(br_selector_list_contains_nth_child_self("div:nth-child(1) p, div:nth-child(1) ", "div", "div", 1)).to_equal(true)
+            expect(br_selector_list_contains_first_child_self("div:first-child p ", "div", "div")).to_equal(false)
+            expect(br_selector_list_contains_last_child_self("div:last-child p ", "div", "div")).to_equal(false)
+            expect(br_selector_list_contains_only_child_self("div:only-child p ", "div", "div")).to_equal(false)
+
+        it "honours the type of a :first-child / :last-child / :only-child compound":
+            expect(br_selector_list_contains_first_child_self("p:first-child ", "div", "div")).to_equal(false)
+            expect(br_selector_list_contains_first_child_self("div:first-child ", "div", "div")).to_equal(true)
+            expect(br_selector_list_contains_first_child_self(":first-child ", "div", "div")).to_equal(true)
+            expect(br_selector_list_contains_last_child_self("span:last-child ", "div", "div")).to_equal(false)
+            expect(br_selector_list_contains_last_child_self("div:last-child ", "div", "div")).to_equal(true)
+            expect(br_selector_list_contains_only_child_self("p:only-child ", "div", "div")).to_equal(false)
+            expect(br_selector_list_contains_only_child_self("div:only-child ", "div", "div")).to_equal(true)
+
+        it "counts the element siblings of the parent":
+            val html = "<html><body><div id=\"fb\"><p id=\"fp\">x</p><div id=\"fa\"><p id=\"fap\"></p></div><div id=\"fbb\"></div><span id=\"fs\"></span></div><div id=\"solo\"><div id=\"only1\"></div></div></body></html>"
+            val fa = html.index_of("<div id=\"fa\"") ?? -1
+            val fbb = html.index_of("<div id=\"fbb\"") ?? -1
+            val only1 = html.index_of("<div id=\"only1\"") ?? -1
+            expect(br_element_sibling_index(html, fa)).to_equal(2)
+            expect(br_element_sibling_count(html, fa)).to_equal(4)
+            expect(br_element_sibling_index(html, fbb)).to_equal(3)
+            expect(br_element_sibling_count(html, fbb)).to_equal(4)
+            expect(br_element_sibling_index(html, only1)).to_equal(1)
+            expect(br_element_sibling_count(html, only1)).to_equal(1)
 

@@ -130,15 +130,6 @@ fn br_selector_list_contains_attr_self(selector: text, tag_name: text, tag: text
 fn br_selector_list_contains_empty_self(selector: text, tag_name: text, tag: text) -> bool:
     selector.contains(":empty")
 
-fn br_selector_list_contains_first_child_self(selector: text, tag_name: text, tag: text) -> bool:
-    selector.contains(":first-child")
-
-fn br_selector_list_contains_last_child_self(selector: text, tag_name: text, tag: text) -> bool:
-    selector.contains(":last-child")
-
-fn br_selector_list_contains_only_child_self(selector: text, tag_name: text, tag: text) -> bool:
-    selector.contains(":only-child")
-
 # Does the compound selector that carries a pseudo-class (the text between
 # the previous combinator and the `:`) describe this element? Checks the type
 # selector, every `.class` and the `#id`; attribute parts are not evaluated.
@@ -173,16 +164,32 @@ fn _sel_compound_matches_element(compound: text, tag_name: text, tag: text) -> b
 fn _sel_is_combinator_or_space(ch: text) -> bool:
     ch == " " or ch == ">" or ch == "+" or ch == "~" or ch == "," or ch == "\t" or ch == "\n" or ch == "\r"
 
-# True when one selector of the rule's selector list ends in a compound that
-# describes this element and carries `:nth-child(An+B)` with an argument that
-# selects 1-based element-sibling index `nth`. The argument is evaluated by
-# the shared An+B evaluator (css_nth.spl). This used to be a bare
-# `selector.contains(":nth-child")`, which applied `p:nth-child(2)` to every
-# div.
-fn br_selector_list_contains_nth_child_self(selector: text, tag_name: text, tag: text, nth: i64) -> bool:
-    if nth <= 0:
+# Is the text after a pseudo-class, up to the end of its selector, still the
+# same compound? `div:nth-child(1) p` continues with another compound, so the
+# pseudo-class belongs to an ancestor and must not style the div.
+fn _sel_rest_is_same_compound(rest: text) -> bool:
+    val comma = rest.index_of(",")
+    val raw = if comma >= 0: rest.substring(0, comma) else: rest
+    val tail = raw.trim()
+    if tail == "":
+        return true
+    # Anything after leading whitespace is a descendant; otherwise the rest
+    # (more pseudo-classes, attribute parts) must not contain a combinator.
+    if _sel_is_combinator_or_space(raw.substring(0, 1)):
         return false
-    val marker = ":nth-child("
+    not (
+        tail.contains(" ") or tail.contains(">") or tail.contains("+") or
+        tail.contains("~") or tail.contains("\t") or tail.contains("\n")
+    )
+
+# True when one selector of the rule's selector list has `marker` on its
+# SUBJECT compound and that compound describes this element. For the
+# functional marker `:nth-child(` the An+B argument must also select 1-based
+# element-sibling index `nth` (shared evaluator, css_nth.spl). This used to be
+# a bare `selector.contains(marker)`, which applied `p:nth-child(2)` and
+# `div:first-child p` to every div.
+fn _sel_list_subject_pseudo(selector: text, marker: text, tag_name: text, tag: text, nth: i64) -> bool:
+    val functional = marker.ends_with("(")
     var from = 0
     val total = selector.byte_len()
     while from < total:
@@ -190,20 +197,41 @@ fn br_selector_list_contains_nth_child_self(selector: text, tag_name: text, tag:
         if hit < 0:
             return false
         val at = from + hit
-        val after = selector.substring(at + marker.byte_len(), total)
-        val close = after.index_of(")")
-        if close < 0:
-            return false
+        var end = at + marker.byte_len()
+        var arg_ok = true
+        if functional:
+            val after = selector.substring(end, total)
+            val close = after.index_of(")")
+            if close < 0:
+                return false
+            arg_ok = css_nth_matches(after.substring(0, close), nth)
+            end = end + close + 1
+        elif end < total and _sel_name_char(selector.substring(end, end + 1)):
+            arg_ok = false
         var start = at
         while start > 0 and not _sel_is_combinator_or_space(selector.substring(start - 1, start)):
             start = start - 1
         if (
-            css_nth_matches(after.substring(0, close), nth) and
+            arg_ok and _sel_rest_is_same_compound(selector.substring(end, total)) and
             _sel_compound_matches_element(selector.substring(start, at), tag_name, tag)
         ):
             return true
-        from = at + marker.byte_len() + close + 1
+        from = end
     false
+
+fn br_selector_list_contains_first_child_self(selector: text, tag_name: text, tag: text) -> bool:
+    _sel_list_subject_pseudo(selector, ":first-child", tag_name, tag, 0)
+
+fn br_selector_list_contains_last_child_self(selector: text, tag_name: text, tag: text) -> bool:
+    _sel_list_subject_pseudo(selector, ":last-child", tag_name, tag, 0)
+
+fn br_selector_list_contains_only_child_self(selector: text, tag_name: text, tag: text) -> bool:
+    _sel_list_subject_pseudo(selector, ":only-child", tag_name, tag, 0)
+
+fn br_selector_list_contains_nth_child_self(selector: text, tag_name: text, tag: text, nth: i64) -> bool:
+    if nth <= 0:
+        return false
+    _sel_list_subject_pseudo(selector, ":nth-child(", tag_name, tag, nth)
 
 fn br_selector_list_contains_multi_class(selector: text, classes: [text]) -> bool:
     for cls in classes:
