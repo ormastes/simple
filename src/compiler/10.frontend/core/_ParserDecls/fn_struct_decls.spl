@@ -1,3 +1,5 @@
+use compiler.core.ast.{decl_set_manifest_role_v1, decl_set_manifest_facts_v1}
+use compiler.frontend.core.manifest_metadata_v1.{parser_manifest_arch_tokens_v1}
 use compiler.core.parser.{parser_lexical_scope_enter, parser_lexical_scope_leave, parser_lexical_bind_value}
 # Declaration parsing: fn, extern fn, struct/class, type params, domain blocks.
 use compiler.frontend.core.parser_decls.*
@@ -300,6 +302,8 @@ fn parse_raw_domain_block_payload(kind: text) -> text:
 fn parse_module_domain_block_decl(loop_index: i64, kind: text) -> i64:
     parser_advance()
     var payload = ""
+    var metadata_kinds: [i64] = []
+    var metadata_values: [text] = []
     if is_metadata_block_kind(kind):
         # Metadata/config blocks are compile-time declarations. Consume their
         # balanced token region rather than source-slicing it: token offsets
@@ -312,9 +316,30 @@ fn parse_module_domain_block_decl(loop_index: i64, kind: text) -> i64:
                 depth = depth + 1
             elif par_kind_get() == TOK_RBRACE:
                 depth = depth - 1
+            if depth > 0 and kind == "arch":
+                metadata_kinds.push(par_kind_get())
+                metadata_values.push(par_text_get())
             parser_advance()
         if depth > 0:
             parser_error("unterminated {kind}{...} metadata block")
+        # Retain normalized token payload, including quoted string tokens. No
+        # lexer character offset is ever reused as a byte slicing offset.
+        var pieces: [text] = []
+        for token_index in 0..metadata_kinds.len():
+            val token_text = metadata_values[token_index]
+            if metadata_kinds[token_index] == TOK_STRING_LIT:
+                pieces.push("\"" + token_text.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n") + "\"")
+            elif metadata_kinds[token_index] == TOK_LBRACE: pieces.push("{")
+            elif metadata_kinds[token_index] == TOK_RBRACE: pieces.push("}")
+            elif metadata_kinds[token_index] == TOK_LBRACKET: pieces.push("[")
+            elif metadata_kinds[token_index] == TOK_RBRACKET: pieces.push("]")
+            elif metadata_kinds[token_index] == TOK_ASSIGN: pieces.push("=")
+            elif metadata_kinds[token_index] == TOK_COMMA: pieces.push(",")
+            elif metadata_kinds[token_index] == TOK_SEMICOLON: pieces.push(";")
+            elif metadata_kinds[token_index] == TOK_NEWLINE: pieces.push("\n")
+            else:
+                pieces.push(token_text)
+        payload = pieces.join(" ")
     else:
         payload = parse_raw_domain_block_payload(kind)
     val helper = expr_ident("__domain_block", 0)
@@ -322,7 +347,14 @@ fn parse_module_domain_block_decl(loop_index: i64, kind: text) -> i64:
     args.push(expr_string_lit(kind, 0))
     args.push(expr_string_lit(payload, 0))
     val marker = expr_call(helper, args, 0)
-    decl_val_binding("_expr_" + int_to_str(loop_index), -1, marker, -1)
+    val declaration = decl_val_binding("_expr_" + int_to_str(loop_index), -1, marker, -1)
+    decl_set_manifest_role_v1(declaration, "domain")
+    if kind == "arch":
+        val facts = parser_manifest_arch_tokens_v1(metadata_kinds, metadata_values)
+        var fields: [text] = [if facts.valid: "valid" else: "invalid", facts.dimension, facts.layer]
+        for path in facts.expose_paths: fields.push(path)
+        decl_set_manifest_facts_v1(declaration, fields)
+    declaration
 
 # ===== Generic Type Parameter Parsing =====
 

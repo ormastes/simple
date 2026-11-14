@@ -1,0 +1,28 @@
+# Authored UNRUN: real inventory record selector seam, no SCV admission claim.
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use std.scv.compile_source_inventory_core.{CompileSourceInventoryEntryV1, CompileSourceInventoryV1}
+use app.compiler_entrypoint.source_authority.{compiler_source_authority_file_manifest_selectors_v1}
+
+fn visibility_selector_entry_v1(path: text, content: text) -> CompileSourceInventoryEntryV1:
+    val digest = sha256_text(content)
+    CompileSourceInventoryEntryV1(path, digest, digest, digest, digest, digest, content.byte_len())
+
+describe "REQ-VIS-MANIFEST frozen file selectors":
+    it "includes admitted sibling metadata without widening source routing roots":
+        val inventory = CompileSourceInventoryV1(1, 7, [
+            visibility_selector_entry_v1("src/pkg/body.spl", "pub fn value(): 1\n"),
+            visibility_selector_entry_v1("src/pkg/__init__.spl", "pub mod body\n")])
+        val roots = ["src/pkg/body.spl"]
+        val selected = compiler_source_authority_file_manifest_selectors_v1(roots, inventory)
+        expect(selected).to_equal(["src/pkg/body.spl", "src/pkg/__init__.spl"])
+        expect(roots).to_equal(["src/pkg/body.spl"])
+
+    it "does not invent a missing manifest or claim extra-root directory coverage":
+        val inventory = CompileSourceInventoryV1(1, 7, [
+            visibility_selector_entry_v1("src/pkg/body.spl", "pub fn value(): 1\n"),
+            visibility_selector_entry_v1("custom/body.spl", "pub fn value(): 2\n")])
+        expect(compiler_source_authority_file_manifest_selectors_v1(
+            ["src/pkg/body.spl"], inventory)).to_equal(["src/pkg/body.spl"])
+        expect(compiler_source_authority_file_manifest_selectors_v1(
+            ["custom/body.spl"], inventory)).to_equal(["custom/body.spl"])

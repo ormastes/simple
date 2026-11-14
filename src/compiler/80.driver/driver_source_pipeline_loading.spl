@@ -1,3 +1,7 @@
+use compiler.common.cache.visibility_manifest_read_v1.{VisibilityManifestReadV1,
+    VisibilityManifestEvidenceV1, visibility_manifest_reads_v1}
+use compiler.common.driver_source_file.{source_file_with_manifest_evidence_v1}
+use compiler.driver.driver_build.native_entry_closure_owner.{native_entry_closure_visibility_maps_v1}
 # CompilerDriver phase-1 source loading.
 #
 # The main driver retains parsing, HIR, and later compilation phases.
@@ -128,6 +132,19 @@ fn driver_source_owner_text_copy(value: text) -> text:
     # value.bytes() -> rt_bytes_to_text round-trip returned empty for a live
     # 51-byte source path, so it cannot establish the source owner inventory.
     rt_string_substr_from(value, 0)
+
+fn driver_visibility_evidence_copy_v1(source: VisibilityManifestEvidenceV1) -> VisibilityManifestEvidenceV1:
+    var rows: [VisibilityManifestReadV1] = []
+    for row in source.reads:
+        rows.push(VisibilityManifestReadV1(
+            driver_source_owner_text_copy(row.source_path),
+            driver_source_owner_text_copy(row.directory_path),
+            driver_source_owner_text_copy(row.manifest_path), row.exists,
+            driver_source_owner_text_copy(row.content_sha256),
+            driver_source_owner_text_copy(row.snapshot_id)))
+    VisibilityManifestEvidenceV1(root: driver_source_owner_text_copy(source.root),
+        snapshot_id: driver_source_owner_text_copy(source.snapshot_id),
+        complete: source.complete, reason: driver_source_owner_text_copy(source.reason), reads: rows)
 
 fn _driver_source_has_rt_annotation(content: text) -> bool:
     # `@rt` is common in attribute documentation. Parse only a genuine
@@ -263,6 +280,8 @@ impl CompilerDriver:
                     return (self.ctx, false)
         var admitted_preclosed: NativeEntryClosureSelectionV1? = nil
         var preclosed_snapshot_root = ""
+        var visibility_inventory: Dict<text, text> = {}
+        var visibility_snapshot_id = ""
         var preclosed_row_by_identity: Dict<text, i64> = {}
         # Nil guard, not `if val`: binding a struct-payload optional that is nil
         # copied a payload out of nil on the native lane (SEGV in
@@ -289,6 +308,13 @@ impl CompilerDriver:
                     return (self.ctx, false)
             admitted_preclosed = Some(selected.unwrap())
             preclosed_snapshot_root = request.snapshot.snapshot_root
+            val manifest_maps = native_entry_closure_visibility_maps_v1(request)
+            if manifest_maps.is_err():
+                self.ctx.add_error(manifest_maps.unwrap_err())
+                driver_entry_scan_cache_release()
+                return (self.ctx, false)
+            visibility_inventory = manifest_maps.unwrap().0
+            visibility_snapshot_id = request.snapshot.revision_id + ":" + request.snapshot.inventory_digest
             driver_inputs = []
             var selected_row = 0
             for identity in selected.unwrap().identities:
@@ -1400,6 +1426,28 @@ impl CompilerDriver:
         self.ctx.source_content_hashes_owner = owned_content_hashes
         self.ctx.source_identities_owner = owned_identities
         self.ctx.source_module_names_owner = owned_module_names
+        # Freeze negative reads only under the authenticated complete inventory.
+        # The positive map below comes from actual byte-checked loaded sources,
+        # so a manifest omitted from the worker selection cannot authorize use.
+        var visibility_selected: Dict<text, text> = {}
+        for source_row in 0..owned_paths.len():
+            visibility_selected[owned_paths[source_row]] = owned_identities[source_row]
+        var visibility_evidence: [VisibilityManifestEvidenceV1] = []
+        for source_row in 0..owned_paths.len():
+            var evidence = VisibilityManifestEvidenceV1()
+            if visibility_snapshot_id != "":
+                val observed = visibility_manifest_reads_v1(owned_paths[source_row],
+                    preclosed_snapshot_root, owned_resolution_roots, visibility_snapshot_id,
+                    visibility_inventory, visibility_selected)
+                if observed.is_err():
+                    self.ctx.add_error(observed.unwrap_err())
+                    driver_entry_scan_cache_release()
+                    return (self.ctx, false)
+                evidence = driver_visibility_evidence_copy_v1(observed.unwrap())
+            visibility_evidence.push(evidence)
+            all_sources[source_row] = source_file_with_manifest_evidence_v1(all_sources[source_row], evidence)
+        self.ctx.source_manifest_evidence_owner_v1 = visibility_evidence
+        self.ctx.sources = all_sources
         # Capture compact public facets from the actual admitted source list,
         # before either boxed or streaming source buffers are reclaimed. The
         # adapter validates raw alias ambiguity and reuses phase-1 SHA owners.
