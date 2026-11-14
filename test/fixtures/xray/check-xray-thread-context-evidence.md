@@ -10,9 +10,12 @@ pthread attachments, distinct arenas, same-pool idempotence, cross-pool
 rejection, no-reuse exhaustion, malformed extent/schema rejection, bounded
 unattached-loss accounting, and close/drain behavior.
 
-It does not verify `runtime_thread.c` opt-in hooks, event production or
-retention, a concurrent close/acquire race, Windows behavior, external-thread
-automatic attachment, or forced termination cleanup.
+`runtime_thread.c` now contains opt-in hook source, but this fixture does not
+compile that object or verify hook/link activation. The alternate
+`runtime_pool.c` owner is not covered. The fixture also does not verify event
+production or retention, a concurrent close/acquire race, Windows behavior,
+automatic attachment of foreign threads or workers created before a session,
+or forced termination cleanup.
 
 ## Source provenance
 
@@ -24,8 +27,7 @@ ee59909ceb6ce691e60963ea6642b8440ed46678a1d4485629029eaaba95eb2d
 ```
 
 The context table implementation is
-`src/runtime/xray/xray_thread_context_v1.h` in this branch. Fixture source
-SHA-256: `00f4b0d4102be8f4aad7d0ce709d672a79705148fd95b017a9f927194034a9f3`.
+`src/runtime/xray/xray_thread_context_v1.h` in this branch.
 
 ## Run record
 
@@ -36,7 +38,7 @@ reserve its 8 GiB virtual address range, so linking failed before an executable
 was produced. This was a harness-limit mistake, not a fixture or product
 failure. No retry used that command.
 
-The corrected single attempt ran under the required process-tree cgroup cap:
+The first corrected attempt ran under the required process-tree cgroup cap:
 
 ```sh
 CAP_MEM_MAX=256M CAP_REQUIRE=1 scripts/resource/run_capped.shs timeout 30s sh -c \
@@ -51,4 +53,15 @@ completed in under one second. `CAP_REQUIRE=1` ensures the runner fails rather
 than silently falling back when the systemd cgroup cap is unavailable. The
 compiler and fixture ran sequentially as one compiler worker.
 
-Executable SHA-256: `63961d97fe439000549f969d926c4dd23501db8daa5d32b141b15cb8f32139ce`.
+After Astra-approved accounting assertions were added, one targeted rerun used
+the same cgroup cap and command. It passed the sticky inexact-counter behavior:
+`UINT64_MAX-1` transitions to the `UINT64_MAX` unknown-total sentinel, and later
+increments leave the sentinel unchanged. The eight-CAS-failure fallback was
+reviewed but not deterministically exercised.
+
+Current thread-context header SHA-256:
+`7d105c7ec09af9593c57a7d6b19a40ac785969ef3806d3a1b25e6c488db75303`.
+Current fixture source SHA-256:
+`0940d91f030e136a9fe12c379a0d56a091c543fc0ebadd160541fa605f980f50`.
+Final executable SHA-256:
+`61cb34e0786a734f70547fc669597b10544bd6aa68e0a0da98f2a63e6f7e0f0b`.
