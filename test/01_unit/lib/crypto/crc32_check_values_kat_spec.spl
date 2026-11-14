@@ -1,0 +1,93 @@
+# CRC-32 (IEEE 802.3) and CRC-32C (Castagnoli) known-answer tests.
+# @req REQ-SSPEC-LIB
+# @manual_section: crypto-crc32-kat
+
+"""
+## Purpose and audience
+Purpose: a checksum computed here must equal the one zlib/PNG/gzip (CRC-32) and
+iSCSI/ext4 (CRC-32C) compute for the same bytes. Expected values are the catalogue
+check values for "123456789" and the RFC 3720 appendix B.4 CRC-32C vectors; the
+remaining CRC-32 values were cross-checked against zlib.
+Audience: reviewers of `std.common.crypto.crc32` and of the sealed-file and
+compression code that depends on it.
+"""
+
+use std.spec.*
+use std.spec.step
+use std.common.crypto.crc32.{
+    crc32, crc32_init, crc32_update, crc32_finalize,
+    crc32c, crc32c_init, crc32c_update, crc32c_finalize
+}
+use std.common.text_bytes.{text_to_utf8_bytes}
+
+fn filled(byte: u8, count: i64) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < count:
+        out.push(byte)
+        i = i + 1
+    out
+
+fn ascending32() -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < 32:
+        out.push(i.to_u8())
+        i = i + 1
+    out
+
+fn descending32() -> [u8]:
+    var out: [u8] = []
+    var i = 31
+    while i >= 0:
+        out.push(i.to_u8())
+        i = i - 1
+    out
+
+describe "CRC-32 matches the IEEE 802.3 reference values":
+    it "returns zero for no input":
+        step("Checksum the empty byte string")
+        val none: [u8] = []
+        expect(crc32(none).to_i64()).to_equal(0)
+
+    it "returns the catalogue check value for 123456789":
+        step("Checksum the nine ASCII digits")
+        expect(crc32(text_to_utf8_bytes("123456789")).to_i64()).to_equal(0xCBF43926)
+
+    it "matches zlib for a single byte and for a sentence":
+        step("Checksum 'a'")
+        expect(crc32(text_to_utf8_bytes("a")).to_i64()).to_equal(0xE8B7BE43)
+        step("Checksum the quick-brown-fox sentence")
+        expect(crc32(text_to_utf8_bytes("The quick brown fox jumps over the lazy dog")).to_i64()).to_equal(0x414FA339)
+
+    it "matches zlib for 32 bytes of 0x00 and of 0xFF":
+        step("Checksum the two constant blocks")
+        expect(crc32(filled(0u8, 32)).to_i64()).to_equal(0x190A55AD)
+        expect(crc32(filled(255u8, 32)).to_i64()).to_equal(0xFF6CAB0B)
+
+    it "gives the same checksum when the input arrives in two pieces":
+        step("Feed '1234' then '56789' through init/update/finalize")
+        val first = crc32_update(crc32_init(), text_to_utf8_bytes("1234"))
+        val both = crc32_update(first, text_to_utf8_bytes("56789"))
+        expect(crc32_finalize(both).to_i64()).to_equal(0xCBF43926)
+
+describe "CRC-32C matches the Castagnoli reference values":
+    it "returns the catalogue check value for 123456789":
+        step("Checksum the nine ASCII digits")
+        expect(crc32c(text_to_utf8_bytes("123456789")).to_i64()).to_equal(0xE3069283)
+
+    it "matches RFC 3720 B.4 for 32 bytes of zeroes and of ones":
+        step("Checksum the two constant blocks")
+        expect(crc32c(filled(0u8, 32)).to_i64()).to_equal(0x8A9136AA)
+        expect(crc32c(filled(255u8, 32)).to_i64()).to_equal(0x62A8AB43)
+
+    it "matches RFC 3720 B.4 for 32 incrementing and 32 decrementing bytes":
+        step("Checksum 0x00..0x1f and 0x1f..0x00")
+        expect(crc32c(ascending32()).to_i64()).to_equal(0x46DD794E)
+        expect(crc32c(descending32()).to_i64()).to_equal(0x113FDB5C)
+
+    it "gives the same checksum when the input arrives in two pieces":
+        step("Feed '1234' then '56789' through init/update/finalize")
+        val first = crc32c_update(crc32c_init(), text_to_utf8_bytes("1234"))
+        val both = crc32c_update(first, text_to_utf8_bytes("56789"))
+        expect(crc32c_finalize(both).to_i64()).to_equal(0xE3069283)

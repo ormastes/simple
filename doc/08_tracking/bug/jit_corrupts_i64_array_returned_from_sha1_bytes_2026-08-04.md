@@ -4,8 +4,37 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** OPEN
+**Status:** verification-pending — library mitigation for `sha1_bytes` only (2026-11-14, below). The compiler root cause (untyped `list` returns on compiled engines) is NOT fixed and stays open.
 **Found:** 2026-08-04
+
+## 2026-11-14 — also reproduces under `native-build` (AOT); library mitigation
+
+The same corruption reaches AOT binaries, so HMAC-SHA-1 and PBKDF2-HMAC-SHA-1
+were wrong in any native tool. Repro (seed build-commit `97728d94d5f1`, Windows,
+llvm-mingw): native-build a `main` that prints
+`bytes_to_hex(sha1_bytes(ascii("abc")))` and the RFC 2202 / RFC 6070 vectors
+(`test/fixtures/devhub/native_sha1_kat/main.spl`):
+
+```
+SIMPLE_NATIVE_BUILD_RUST=1 simple native-build test/fixtures/devhub/native_sha1_kat/main.spl -o build/nb/sha1kat.exe --cache-dir build/nb/cache
+```
+
+Before (native): `sha1_abc a21b7b11a21b79f1a21b7931a21b7d81a21b7a81`,
+`pbkdf2_sha1_c2 00069d4000069e900006a9500006ac000006abc0`
+(want `a9993e36…d0d89d`, `ea6c014d…de8957`). Before (`simple run`, JIT):
+`sha1_abc d447bfc1d44714e1d44716a1d447c521d447b1c1`. The interpreter was correct
+throughout, which is why every spec stayed green.
+
+Mitigation: `src/lib/common/crypto/sha1.spl` — `sha1_bytes` now runs through
+`sha1_finish`, whose pad / compress / emit helpers are typed `[i64]` and index
+with `[]`. After: native and JIT both print the published digests. Pinned by
+`test/01_unit/lib/crypto/sha1_compiled_engine_kat_fixture_spec.spl` (runs the
+fixture as a compiled program; `SHA1_KAT_NATIVE_BIN` points it at an AOT build).
+
+Not fixed: the tuple streaming API (`sha1_tuple_*`) and the x4 path in the same
+file still return untyped `list`, and the compiler still mis-tags such returns.
+The SQLCipher path (SHA-256/512, HMAC-SHA-512, PBKDF2-SHA-512, AES-256-CBC) was
+checked natively against published vectors and does not diverge.
 
 ## Symptom
 
