@@ -40,6 +40,11 @@ fn hir_type_env_get(key: text) -> text?:
 # guarded by `name.len() == 1`. ASCII 'A'..'Z' only -- deliberately NOT a
 # Unicode-uppercase test, so a non-ASCII single-character type name still
 # reaches the strict unresolved-type gate instead of being erased to Any.
+# Read-only handle annotations (immutable-views plan section 2): `Immutable<T>`
+# live view, `RevisionImmutable<T>` pinned revision, `FrozenImmutable<T>` permanent.
+fn is_read_only_handle_name(name: text) -> bool:
+    name == "Immutable" or name == "RevisionImmutable" or name == "FrozenImmutable"
+
 fn _seed_parity_is_ascii_upper(name: text) -> bool:
     val code = name.char_code_at(0)
     code >= 65 and code <= 90
@@ -74,9 +79,11 @@ type HirLocalTupleTypes = {i64: [HirType]}
 class HirLowering:
     symbols: SymbolTable
     local_annotation_provenance: Dict<i64, bool> = {}
-    # Symbols declared `Immutable<T>` (live read-only projection, immutable-views
-    # plan P2a). A write whose place roots at one of these is E_IMMUTABLE_WRITE.
-    immutable_view_symbols: Dict<i64, bool> = {}
+    # Symbols declared `Immutable<T>` / `RevisionImmutable<T>` / `FrozenImmutable<T>`
+    # (read-only handles, immutable-views plan P2), mapped to the handle name. A
+    # write whose place roots at one is E_IMMUTABLE_WRITE; a mutable alias derived
+    # from a revision/frozen handle is E_FROZEN_ALIAS.
+    immutable_view_symbols: Dict<i64, text> = {}
     # Diagnostic-only: unannotated locals whose initialiser is a call of a
     # function declared to return `T?` but whose symbol type stayed unknown
     # (a generic `T?` is never substituted into the symbol slot). Read only
@@ -1355,11 +1362,11 @@ impl HirLowering:
         # `Option` (the parser only threads i64/f64/text/bool inners through
         # dedicated tags; every other `T?` collapses to plain TYPE_OPTION)
         # deliberately keeps the pre-existing fall-through behavior.
-        # `Immutable<T>` is a read-only capability over `T`, not a new storage
+        # `Immutable<T>`, `RevisionImmutable<T>` and `FrozenImmutable<T>` are read-only capabilities over `T`, not a new storage
         # type: it lowers to `T` and the declaring symbol is recorded in
         # `immutable_view_symbols` (param / let sites) so writes through it are
         # rejected. Other mutable aliases of the object are unaffected.
-        if name == "Immutable" and hir_args.len() == 1:
+        if is_read_only_handle_name(name) and hir_args.len() == 1:
             return hir_args[0].kind
         if name == "Option":
             if hir_args.len() == 1:

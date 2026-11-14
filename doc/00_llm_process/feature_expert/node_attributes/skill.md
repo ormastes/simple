@@ -27,3 +27,11 @@ missing integrated behavior and unexecuted acceptance tests.
 Other mutable aliases still write and the live view sees it (IMM-02). Spec:
 `test/01_unit/compiler/semantics/immutable_view_write_spec.spl`. Untracked yet:
 view aliasing, mutating methods, `.immutable()`, return/field positions.
+
+## RevisionImmutable<T> / FrozenImmutable<T> handles (P2b, 2026-11-14)
+Same lowering as `Immutable<T>` (`is_read_only_handle_name`, symbol -> handle
+name in `immutable_view_symbols`). Writes are `E_IMMUTABLE_WRITE`; a `var` bound
+directly from a revision/frozen handle is `E_FROZEN_ALIAS`. Spec:
+`test/01_unit/compiler/semantics/revision_frozen_immutable_spec.spl`. W8 still
+owns revision lease/cache identity, class detached-copy producers and the frozen
+codec kind.
