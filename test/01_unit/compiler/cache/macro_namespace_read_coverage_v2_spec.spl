@@ -65,3 +65,34 @@ describe "macro namespace no-read coverage":
         var draft = no_read_draft("fn value() -> Int:\n    1\n")
         draft.source_digest = "invalid"
         expect(macro_category_complete_no_reads_v2(draft).is_err()).to_equal(true)
+
+
+use compiler.common.cache_contract.directory_category_projection_v2.{DirectoryCategoryProjectionV2}
+use compiler.driver.cache.directory_macro_capture_v2.{directory_macro_capture_no_reads_v2}
+use compiler.hir.hir_lowering.module_surface_semantic_projection.{module_surface_trait_root_v2, module_surface_extension_root_v2}
+
+fn macro_source_category(draft: MacroCategoryDraftV2) -> DirectoryCategoryProjectionV2:
+    DirectoryCategoryProjectionV2(canonical_path: "macro_coverage.spl",
+        source_identity: draft.source_identity, source_digest: draft.source_digest,
+        target_triple: draft.target_triple, preprocessed_digest: draft.preprocessed_digest,
+        cfg_decision_digest: draft.cfg_decision_digest,
+        environment_policy_digest: draft.environment_policy_digest,
+        trait_root: module_surface_trait_root_v2({}), extension_root: module_surface_extension_root_v2([], []))
+
+describe "actual macro projector compact directory receipt":
+    it "retains a current no-read result and rejects a different source projection":
+        val draft = no_read_draft("use unrelated.module\nfn value() -> Int:\n    1\n")
+        val source = macro_source_category(draft)
+        val result = directory_macro_capture_no_reads_v2(draft, source).unwrap()
+        expect(result.category_root.starts_with("sha256:")).to_equal(true)
+        expect(result.source.source_digest).to_equal(draft.source_digest)
+        expect(result.read_coverage).to_equal("no-namespace-reads/v2")
+        val stale = DirectoryCategoryProjectionV2(..source, source_digest: sha256_text("changed source"))
+        expect(directory_macro_capture_no_reads_v2(draft, stale).is_err()).to_equal(true)
+
+    it "changes the actual definition root when a captured local macro body changes":
+        val before = no_read_draft("pub macro identity(x: Int) -> (returns result: Int):\n    emit result:\n        x\n")
+        val first = directory_macro_capture_no_reads_v2(before, macro_source_category(before)).unwrap()
+        val after = no_read_draft("pub macro identity(x: Int) -> (returns result: Int):\n    emit result:\n        x + 1\n")
+        val second = directory_macro_capture_no_reads_v2(after, macro_source_category(after)).unwrap()
+        expect(first.definition_root == second.definition_root).to_equal(false)

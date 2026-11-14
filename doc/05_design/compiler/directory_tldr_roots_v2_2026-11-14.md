@@ -269,3 +269,47 @@ This is not source/provider authorization and is not serialized as semantic
 identity. Existing AOP-lowering and diagnostic traversal generations remain
 separate. Two focused epoch specs are authored, unrun. Full native qualification
 is planned in `doc/03_plan/compiler/aspect_dynload/directory_tldr_native_qualification_2026-11-14.md`.
+
+
+### Schema3 inline facts and current producer adapters (2026-11-15)
+
+The existing PackageInit owner now has explicit schema3 encoding with a bounded,
+canonical inline facts table. Schemas1/2 retain their bytes; legacy encoders
+refuse an inline table instead of dropping it. The v3 producer and SourceReader
+adapter reuse the real file-TLDR root owner and attach current facts. The v3
+comparator requires identical complete canonical bytes, including body facets
+excluded from selector keys. Retained schema2 records cannot satisfy this gate.
+These are trusted-input production/comparison functions, not self-authenticating
+public values. Complete fresh category aggregation remains required.
+
+The underlying point facts identity now uses byte-framed fields and versioned
+semantic domains; native tests reproduced the old wrong cache hit and passed
+13 repaired checks. The independent Unicode golden remains blocked on the pinned
+P2's literal Unicode-escape handling. Five matcher specs, ten schema3 specs and
+three adapter specs are authored but unrun as full SSpec suites. These results do
+not establish actual store publication, full-source compiler reuse or production
+qualification. The separate bug report retains exact producer and probe evidence.
+
+### Pending parser-owned category retention
+
+Logical advice inventory is now captured at the real parser emission, separately
+from the effective replay registry. Exact-path resets begin pending; only a
+validated fresh full parse seals the family. Ordered typed records retain
+multiplicity and avoid parsing paths from delimiter-bearing map keys. The coverage tag `current-parser-aop/v1` covers the current physical advice
+rows and logical parser declarations; actual HIR binding remains a separate
+completeness obligation. Draft capture retains descriptors only. Signature and
+implementation facets come from later semantic/object owners, avoiding repeated
+parser body hashing for duplicate advice declarations.
+
+Macro retention is being split into nonprojectable draft and resolved-input
+records. Source/cfg/epoch/image facts are captured while the real parser pool is
+alive, promoted before scope release, and discarded at source-lineage reset.
+The draft retains the existing empty-package/module/source namespace policy;
+it does not invent package authority or treat unresolved imports as an empty
+resolved namespace. An explicit `NoReads` completion can project the local graph
+when the exhaustive parser inventory proves no macro namespace reads; it does
+not assert that the imported namespace is empty. Positive reads still require
+the actual semantic import resolver. The phase2 owner now retains the compact
+NoReads projection after successful surface insertion. Two added compact-receipt
+specs exercise source mismatch and local macro body changes; both are UNRUN.
+These phase2 hooks, ownership promotion and full pipeline remain unqualified.
