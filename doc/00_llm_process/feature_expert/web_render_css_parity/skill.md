@@ -1239,10 +1239,30 @@ Traps:
   (panel2d, widget_draw_ir, window_scene_draw_ir) are not CSS lists and keep
   the stack they had. Chrome resolves bare `Sans` to DejaVu Sans; Simple does
   not follow it for that reason.
-- Wrapped lines advance 16px where Chrome advances 18px. Separate defect:
-  `doc/08_tracking/bug/web_wrapped_line_advance_16px_vs_chrome_18px_2026-11-14.md`,
-  pinned by the in-development
-  `test/01_unit/browser_engine/wrapped_line_advance_normal_line_height_spec.spl`.
+- **`line-height: normal` is the face's own metric, for text AND elements.**
+  A #text style used the resolved metric (`font_size` on the pure-Simple
+  outline lane) and an element style used `9 * (font_size / 8)`; `style_line_h`
+  now asks one source, `browser_normal_line_height_px` (font_renderer.spl):
+  ascent, descent and line gap, each scaled and rounded ON ITS OWN, then
+  summed (rounding the sum gives Liberation Serif 14 at 12px; Chrome says 15).
+  Chrome 159 at 12/16/24/32px: Liberation Sans 14/18/28/37, Liberation Serif
+  15/18/27/37, DejaVu Sans Mono 14/19/28/38. Source is the `OS/2` typo metrics
+  when USE_TYPO_METRICS is set (Chrome honours it: Pagul 17/34/68), else `hhea`.
+  Measured-Linux-host only; `ResolvedFontMetrics.line_height` (non-web text) is
+  untouched everywhere.
+- **Gates that do not move are not evidence.** The combo matrix and the 8-page
+  catalog all declare `font: 16px/1.5`, so neither exercises `line-height:
+  normal`; prove a line-height change with a page that uses it
+  (`wrapped_line_advance_normal_line_height_spec.spl`).
+- **A test page with no `font-family` is SERIF in Chrome and sans in Simple**
+  (Style default). Set the family in every oracle page or the numbers compare
+  two faces.
+- `line-height: 150%` was 150x and `line-height: normal` could not override an
+  inherited factor; both fixed with the above. Residuals are listed in
+  `doc/08_tracking/bug/web_wrapped_line_advance_16px_vs_chrome_18px_2026-11-14.md`.
+- The legacy (unmeasured-host) classification is pinned on every host by
+  `font_family_legacy_classification_spec.spl`, which calls
+  `_browser_resolve_family_legacy` directly.
 
 Specs: `test/01_unit/browser_engine/font_family_list_resolution_spec.spl`,
 `font_family_generic_classification_spec.spl`.
