@@ -759,7 +759,7 @@ The seed JIT frees heap objects at one lowering site only (`lowering_stmt.rs`, t
 enum and `rt_alloc` struct block lives until exit, and struct blocks are invisible to the
 `rt_heap_*` counters. The JIT also aliases arrays where the interpreter copies (call
 return, struct-literal argument, capture, global write, push into an outer array, plain
-assign, tuple), so a release is safe only for a proven-unique local. Measured per-operation
+assign, tuple, and seven more measured forms), so a release is safe only for a proven-unique local. Measured per-operation
 leak table, the aliasing matrix, the options (proven-unique block-end release, refcount,
 regions, do nothing, tracing GC) and the recommended first slice are in
 `doc/05_design/compiler/jit_memory/seed_jit_array_reclamation.md`. Read it before

@@ -56,7 +56,7 @@ collector to the seed.
 | `rt_array_free_deep` frees a graph of arrays and unshared strings, and refuses on any alias, cycle or other element kind. | `collections.rs:3917-4005`, `:3851-3878` |
 | Counters are always on. `total_allocs` / `total_frees` / `kind_live_count` move only in `register_heap_ptr` / `unregister_heap_ptr*`. | `heap.rs:346-377`, `:428-454`, `:539`, `:565`, `:599` |
 | Every validated accessor checks the registry, so a stale handle yields the accessor's default, not a crash, until the address is reused. | `heap.rs:812-828` |
-| The only `rt_array_free` the JIT emits: `local.field = v` where the field is an array and `array_move.rs` proved the struct local is the only holder. | `rs/compiler/src/mir/lower/lowering_stmt.rs:708-765` |
+| The only `rt_array_free` that lowering synthesises: `local.field = v` where the field is an array and `array_move.rs` proved the struct local is the only holder. | `rs/compiler/src/mir/lower/lowering_stmt.rs:708-765` |
 | `MirInst::Drop` is emitted only before `Return`, for every non-parameter local. The cranelift arm is a no-op. | `lowering_stmt.rs:1331`, `:2685-2731`; `rs/compiler/src/codegen/instr/mod.rs:1494-1529` |
 | `MirInst::EndScope` is a no-op. Its emitter helper `emit_end_scope` (`lowering_stmt.rs:2737`) is called only from a test. | `rs/compiler/src/mir/lower/tests/branch_coverage/misc_coverage.rs:619`; `rs/compiler/src/codegen/cranelift_emitter.rs:697` |
 | Simple source can call `rt_array_free` directly as an extern; 14 `.spl` files under `src/compiler`, `src/lib`, `src/app` mention it. | e.g. `src/compiler/10.frontend/core/lexer.spl:39-44`, `src/compiler/10.frontend/core/types.spl:1737-1753` |
@@ -161,8 +161,7 @@ are one-off frees in per-call setup, not loop reclamation. **Their source was no
 attributed.** There are two candidates: the lowering site `lowering_stmt.rs:762`, and
 explicit `rt_array_free` extern calls in the core front end that `core_interpret` runs
 (`lexer.spl:39-44`, `types.spl:1737-1753`). `total_frees` also counts any kind of object,
-not only arrays. A per-call constant fits lexer and type setup better than the lowering
-site.
+not only arrays.
 Alloc totals are lower than the bug's 700,504 because PR #9068 removed allocation sites;
 about 5 arrays per iteration remain.
 
@@ -193,7 +192,8 @@ Each row mutates one name and reads the other. "copy" means the other name is un
 | A19 | `mut_index(rows[0])` (element as argument) | copy | **alias** |
 | A20 | `o = Some(a); a[0] = 9` | copy | **alias** |
 
-Rows A14-A20 were found and run by the independent reviewer on the same seed. Slices and
+Rows A14-A20 were found by the independent reviewer and re-run here on the same seed. In
+A18 the interpreter prints the value `a` had when it was stored. Slices and
 tuple destructuring copy in both lanes. The matrix is a sample, not a complete list.
 
 Consequences for any reclamation design:
@@ -248,8 +248,13 @@ Consequences for any reclamation design:
    frame was rejected as unsound without escape analysis
    (`native_build_worker_interpreter_heap_grows_unbounded_2026-08-17.md:329-342`).
 8. **No widening of nil.** A stale handle currently reads as the accessor default
-   (section 2.2). A wrong release would therefore surface as a silent nil or zero, not a
-   crash. Verification must make that loud (section 4, "Verification common to all").
+   (section 2.2). On those validated paths a wrong release would surface as a silent nil
+   or zero, not a crash. Generic index reads and writes are validated runtime calls
+   (`rt_index_get` / `rt_index_set`, `rs/compiler/src/codegen/instr/collections.rs:345-386`).
+   Typed `u8` / `u32` index fast paths (`lowering_stmt.rs:772` onward) and inline byte
+   accessors (`exec_core.rs:1397-1400`) were not audited; a stale handle there may be a
+   raw read of freed memory.
+   Verification must make both loud (section 4, "Verification common to all").
 
 ## 4. Options
 
@@ -438,9 +443,9 @@ verification are not developed; if D1 selects GC, this needs its own design.
   `validate_heap_obj` aborts with a message when asked about a quarantined address.
   Because accessors already consult the registry (`heap.rs:821`), this turns every
   use-after-free on a validated path into a deterministic abort instead of a silent
-  default value. **Coverage gap:** whether cranelift inlines array element loads without
-  calling a validated accessor was not established here. That is the main failure mode
-  for S1's scalar arrays, so the S1 change must either prove index reads go through
+  default value. **Coverage gap:** the typed and inline paths named in constraint 8 do not
+  call a validated accessor, or were not audited. That is the main failure mode
+  for S1's scalar arrays, so the S1 change must either prove its index reads go through
   `rt_*` accessors or add a poison pattern that inlined loads would trip on (for example
   a null data pointer, which `rt_array_free` already sets, `collections.rs:3825`).
 - **Differential.** The section 2.5 matrix and the existing cross-engine specs, both
@@ -470,10 +475,14 @@ Release at fall-through block end, for an array local when all hold:
 3. every mention of the local is on the allowlist of Option A: scalar index read, scalar
    index store, receiver of a non-escaping builtin method. Anything else disqualifies,
    explicitly including the function or block tail expression, `return`, struct-literal
-   argument, any call argument, capture, and use as the source of another `Let`;
+   argument, any call argument, capture, and use as the source of another `Let` (S1 is
+   deliberately stricter than the Option A allowlist here);
 4. the local is not a move source or hand-over source (requires exporting those sets);
 5. no `break`, `continue`, `return` or `?` occurs in the declaring statement list after
-   the declaration, at any depth, and the function is not poisoned.
+   the declaration, at any depth, and the function is not poisoned;
+6. the local is not mentioned outside its declaring statement list. On this seed such a
+   mention fails to compile on both lanes (measured: `val a` in one `if` body read in a
+   sibling body), but the release must not depend on that.
 
 Ship the quarantine mode in the same change, since it is the acceptance tool.
 
