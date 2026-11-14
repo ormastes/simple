@@ -44,6 +44,9 @@ Status as of 2026-11-14 after landing. "landed (pure core)" means the unit-teste
 | editor snapshot (M) | CU-011/014 | lazy canonical snapshot in `view.show` | #9329 |
 | when + expires (N) | CU-006/016 | `when` on views/commands; `expires=` workarounds; check_dbs passes today | #9334 |
 | TUI captures (O) | CU-017 | cell-width captures; 3 visibility-blocked specs now execute | #9332 |
+| shell views (P) | CU-006 | TUI/GUI shells use `visible_view_ids` | #9343 |
+| trace staleness (Q) | CU-013/014 | staleness producers + exact-edge corpus | #9342 |
+| CI close gate (R) | CU-015 | blocking `check-bug-close-evidence.shs` | #9341 |
 
 ### Acceptance CU-001..CU-020 (2026-11-15)
 
@@ -56,21 +59,21 @@ All evidence is the seed interpreter on Windows. **No row is native-verified; ev
 | CU-003 | met (interpreter) | `caret_workbench_e2e_spec` 2/2 ("unbound terminal"), `caret_workbench_prod_spec` 2/2 | native run with `LLM_CARET_NATIVE_BIN` |
 | CU-004 | met (interpreter) | `caret_workbench_detach_spec` 1/1 (real children survive detach/switch) | native run |
 | CU-005 | partial | `key_chunker_spec` 10/10; never driven against a live smux pane | live `cs` + smux pane capture |
-| CU-006 | partial | `when_contribution_spec` 5/5 (view/command `when` via context keys, #9334); no shell builds its view list from `visible_view_ids()` | wire TUI/GUI shells to `visible_view_ids` |
+| CU-006 | met (interpreter) | `caret_shell_visible_views_spec` 3/3: TUI and GUI shells list the same ids via `visible_view_ids`, false `when` hides in both, no eager load (#9343); `when_contribution_spec` 5/5 | native run; production `set_context_keys` caller |
 | CU-007 | met (interpreter) | `deactivation_hygiene_spec` 10/10 | native run |
 | CU-008 | partial | `observer_live_spec` 3/3, `observer_builder_spec` 13/13; no 10-minute live quiet-build run | timed live run |
 | CU-009 | met (interpreter) | `observer_live_spec` approval -> "needs you" in TUI+GUI, replay no dup | native run |
 | CU-010 | partial | lifecycle folded at render; disconnected host not observable (no fleet) | blocked on fleet transport |
 | CU-011 | met (interpreter) | `trace_view_snapshot_spec` 9/9: list/show/refs equal the canonical service for the same snapshot (#9329) | native run; UI selection of show/refs |
 | CU-012 | met (interpreter) | `ide_view_provider` badge rollup specs | native run |
-| CU-013 | partial | `impact_edges` render; no end-to-end exact-edge corpus check | corpus spec |
-| CU-014 | partial | `trace_view_snapshot_spec`: missing blob, delta mismatch, stale list/refs show explicit lines (#9329); `source_present`/`expected_generation` have no production producer | feed them from the trace service |
-| CU-015 | partial | `bug_close_gate_spec` 5/5 on CLI (+ MCP per #9315); CI-side gate absent | CI job on bug_db diff |
+| CU-013 | met (interpreter) | `impact_corpus_spec` 3/3: exact incoming/outgoing reverse-impact edges over a feature→req→design→spec→code→bug corpus (#9342) | native run |
+| CU-014 | met (interpreter) | `trace_view_producer_spec` 4/4: `source_present` from pinned blob sha, `expected_generation` from the built graph; deleted/changed blob and bumped graph show one explicit line, no other-revision content (#9342) | native run; git-index/commit snapshots; reload path |
+| CU-015 | met (interpreter) | CLI + MCP gate (`bug_close_gate_spec` 5/5, `bugdb_close_gate_spec` 3/3, #9315) and blocking CI/push gate `check-bug-close-evidence.shs` with 8 selftest fixtures (#9341) | native run |
 | CU-016 | met (interpreter) | `workaround_revert_candidates_spec` 5/5 incl. `expires=` (#9334), `bug_linked_workarounds_spec` 10/10; candidates never applied | native run |
 | CU-017 | partial | `caret_workbench_tui_cells_spec` 4/4: 80x24 + 120x40 Korean/emoji, real key routing, captures in `build/test-artifacts/caret_workbench/` (#9332); high-DPI desktop + screen reader blocked | GUI capture host |
 | CU-018 | blocked | no cold/warm CPU/RSS/frame measurements | perf lane on native build |
 | CU-019 | met (interpreter) | `caret_workbench_generation_spec`: real child restart bumps generation; gen-1 approval/draft/command receipts rejected (#9330) | native run |
-| CU-020 | partial | `capability_checklist_spec` 7/7; no loaded-skill provider state, no hint decay | provider skill reporting |
+| CU-020 | blocked | `capability_checklist_spec` 7/7; no provider reports loaded skills (Claude SessionStart payload carries none) and the workbench has no first-use hint surface | provider skill reporting upstream |
 
 Open TODOs: `activation_hook_spec` now executes (8/10) with 2 genuine failures — `doc/08_tracking/bug/activation_hook_builtin_registry_unreachable_2026-11-15.md`; `capability_truth_spec` 11/11 and `chat_tui_runtime_spec` 21/21 now execute. P8 release qualification is open: it needs a native/self-hosted build (resume: the sanctioned `scripts/bootstrap/bootstrap-from-scratch.sh`, then rerun every row above with the native binary). Pre-existing base failures in `agent_workspace_spec` (2/9), `lifecycle_spec` (1), `runtime_security_spec` (1).
 
