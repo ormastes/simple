@@ -149,10 +149,16 @@ Base seed sha256 `f30ba4d66d443a3c…`, changed seed `820b3886088da71c…`.
 |---|---|---|
 | `jit_block_array_release_spec.spl` (9 release forms, 26 escape forms) | 26 passed, 9 failed | 35/35, also 35/35 under `SIMPLE_ARRAY_FREE_QUARANTINE=1` |
 | loop probe, 1,000 iterations of `val a = [i, i + 1, i + 2]` | 1,000 live arrays | 0 live arrays |
-| 157 JIT fixtures and specs, base / changed / changed + quarantine | — | same exit code and verdict on every file except the new spec; 0 quarantine hits; 10 files performed frees (10,152 in total) |
+| 2,000,000 iterations of the same loop, peak RSS | 191,576 KB (2.53 s) | 25,760–39,140 KB over 3 runs (0.3 s); empty loop 25,744–38,864 KB |
+| 157 fixtures and specs with `jit` in the path or under `compiler_core/interpreter`, forced JIT, base / changed / changed + quarantine | 43 of 157 fail on base | same exit code and verdict on 155; the other two are the new spec and `vulkan_jit_hello_spec`, which flips on base alone when rerun; 0 quarantine hits; 10 files performed frees (10,152 in total). 20 files had a differing output hash; rerun and diffed, the differences are diagnostic ordering and timing lines |
+| 177 specs in `test/01_unit/compiler/interpreter`, forced JIT, changed + quarantine | — | 0 quarantine hits; 18 files performed frees (47,240 in total); 3 crashes, each identical on base (`fast_local_assign_expr`, `field_array_mutation_in_place`, `nested_fn_enclosing_var_mutation`). Exit codes were compared with base for those three only |
 | `stmt_for_comprehension…_spec.spl`, peak RSS | 2.97–3.03 GB | 2.97–3.02 GB |
-| same spec, wall time, 4 alternating runs each under host load 20 | 18.5–29.6 s | 21.2–29.2 s |
+| same spec, wall time, 4 alternating runs each under host load 20 (no measurable change; the noise is larger than any difference) | 18.5–29.6 s | 21.2–29.2 s |
 
 The core-interpreter workload itself does not shrink: its per-iteration arrays escape
 through calls and struct fields, which S1 deliberately leaves alone. Stages S2 and later
 in the design cover those.
+
+Known limits of the quarantine mode: a stale `len()` on a freed array reads `i64::MAX`
+instead of aborting (stale element reads and writes do fault). The self-hosted
+`mir_array_move.spl` has no port of this release yet.
