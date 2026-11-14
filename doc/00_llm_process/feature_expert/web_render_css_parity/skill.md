@@ -1072,12 +1072,12 @@ slot and compared slot-relative at 1 px. It is a RATCHET on
 `scripts/check/web_combo_matrix_baseline.txt`: a fix must delete the rows it
 turns green in the same change, or the check FAILs as stale.
 
-- Matching after the first two fixes: 518 / 849 cells (61.0%).
+- Matching after the first three fixes: 544 / 849 cells (64.1%).
 - Open clusters, largest first (cells): form-control UA size, i.e. `button`
   and `input` have no UA border and `input` a different content width (78);
-  table UA defaults, no `border-spacing:2px` and no `td{padding:1px}` (48);
-  `sub`/`sup` (34); floats (34); `fieldset`/`legend` (24); `flex-grow` on an
-  item with a definite width (17); monospace metrics for `code` (15); width /
+  table-cell residue: max-content width drops the spaces around an inline child (9), a `td` whose `display` is not `table-cell` is not laid out (8);
+  `sub`/`sup` (36); floats (34); `fieldset`/`legend` (24); `flex-grow` on an
+  item with a definite width (17); monospace metrics for `code` (16); width /
   height / vertical padding applied to non-replaced inline boxes (15).
 - **`parse_int` drops the sign.** Any signed CSS integer read through it is
   wrong for negatives; `left`/`top`/`order` were fixed, `right`/`bottom` are
@@ -1088,3 +1088,7 @@ turns green in the same change, or the check FAILs as stale.
   `~/.cache/ms-playwright/chromium_headless_shell-*` (viewport == window); the
   131 build has an outdated UA stylesheet.
 - Record: `doc/08_tracking/bug/web_combo_matrix_signed_offset_order_flex_basis_2026-11-14.md`.
+- Table UA defaults (`border-spacing:2px`, `td,th{padding:1px}`) landed with
+  the matrix; spacing is forced to 0 under `border-collapse:collapse` in the
+  layout, because the default is no longer 0. Record:
+  `doc/08_tracking/bug/web_table_ua_border_spacing_and_cell_padding_2026-11-14.md`.
