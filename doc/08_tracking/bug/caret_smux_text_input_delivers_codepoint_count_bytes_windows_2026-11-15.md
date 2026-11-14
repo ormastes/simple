@@ -1,6 +1,6 @@
 # smux text input on Windows delivers only as many bytes as code points; the tail stays queued
 
-Date: 2026-11-15. Status: open (CU-005 spec RED, not weakened).
+Date: 2026-11-15. Status: fix landed, verification-pending (native).
 
 ## Repro
 `test/03_system/app/llm_caret/caret_terminal_bytes_live_spec.spl` drives
@@ -36,3 +36,15 @@ smux is not a caret file, so no production edit was made in this lane.
 
 ## Not claimed
 Windows seed-interpreter lane only; Linux/macOS/board not run.
+
+## Fix (2026-11-15)
+
+Root cause was not in the smux queue: `process_write_stdin_some`
+(`src/lib/nogc_sync_mut/io/process_ops.spl`) passed `data.len()` (code points)
+as the byte limit to `rt_process_write_stdin_some`. 13 bytes / 8 code points ->
+bytes 0..8 written, then offset == limit forever (`queued:5`). New
+`process_stdin_data_len` returns the byte length (`str_len`).
+
+- Repro + generalization: `test/01_unit/lib/nogc_sync_mut/io/process_stdin_data_len_spec.spl`
+  (RED 1/4 -> GREEN 4/4); `test/01_unit/os/apps/smux/input_queue_spec.spl` 12/12.
+- Live: `caret_terminal_bytes_live_spec.spl` RED 0/1 -> GREEN 1/1 on Windows seed interpreter with the fix.
