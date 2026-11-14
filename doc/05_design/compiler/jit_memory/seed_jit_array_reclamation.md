@@ -277,7 +277,7 @@ holder:
 
 The release proof therefore uses an allowlist. A local qualifies only if every mention
 is one of: index read yielding a scalar, index store of a scalar, a receiver of a method
-in `NON_ESCAPING_ARRAY_METHODS` (`:87-91`), or the initializer of a copied place `Let`
+in `NON_ESCAPING_ARRAY_METHODS` (`:87-90`), or the initializer of a copied place `Let`
 that is not turned into a move. Every other context disqualifies, including `Return`,
 `StructArg`, any call argument, and being a move or hand-over source.
 
@@ -303,6 +303,9 @@ arrays, apart from the quarantine mode.
 | Loop-body slot reuse | The single `Let` re-initialises the slot before any use in the next iteration, so one release per allocation. |
 | `defer`, generators, actors, `await` | Already poison the function (`:491`, `:558-567`). |
 | Runtime retains the handle | Only allowlisted builtin methods may read the local. |
+| Free inside an open transient scope (read from code, not reproduced) | `rt_array_new` records the handle in the open scope (`collections.rs:240-247`); `rt_array_free` does not remove that entry (`:3814-3830`). If the address is reused by an allocation the scope does not track (made while paused, or adopted by a session heap), scope end would free a live object. This already applies to the existing free site. The S1 change must make `rt_array_free` untrack the handle from the open scope and session, with a spec: free inside a scope, allocate under pause, end the scope, read the survivor. |
+| Module-level bindings | Not verified whether a top-level array can be a `Let` local of the module-init function while other functions read it as a global. S1 excludes module-init functions and any local that is also a global. |
+| Scalar tail expression (`a[0]` as the block or function value) | The release is emitted after the tail value is computed and, at function level, before the `Return` terminator. |
 
 `emit_function_drops` is not a usable shortcut. It reloads every non-parameter slot once
 before `Return`, so it would free only the last value of a loop-body local, and would
@@ -482,7 +485,11 @@ Release at fall-through block end, for an array local when all hold:
    the declaration, at any depth, and the function is not poisoned;
 6. the local is not mentioned outside its declaring statement list. On this seed such a
    mention fails to compile on both lanes (measured: `val a` in one `if` body read in a
-   sibling body), but the release must not depend on that.
+   sibling body), but the release must not depend on that;
+7. the function is not a module-init function and the local is not also a global.
+
+The same change makes `rt_array_free` remove the handle from any open transient scope or
+session (risk table, Option A).
 
 Ship the quarantine mode in the same change, since it is the acceptance tool.
 
@@ -506,6 +513,8 @@ A `@jit_spec_entry` spec plus an RSS check, on a recorded seed sha256:
 - The spec above and `test/01_unit/compiler/interpreter` under quarantine mode with zero
   aborts.
 - Rust unit pins in `array_move_tests.rs` for each disqualifying context.
+- Transient-scope spec: free inside a scope, allocate under pause, end the scope, read
+  the survivor.
 
 ## 6. Open owner decisions
 
