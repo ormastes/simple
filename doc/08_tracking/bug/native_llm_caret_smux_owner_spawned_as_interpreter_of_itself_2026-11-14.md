@@ -158,3 +158,63 @@ broadcasts, and tears down` still fails for agent-1/2/3 with
 then `session cli-team alive=false`. The native owner still does not come up via
 `process_spawn_async`. The interpreted run exceeds the 900 s child budget.
 Status stays verification-pending.
+
+## Root cause analysis 2026-11-15
+
+Status stays verification-pending. Run-only lane (no build, host disk ~4 GB free),
+worktree branch `work/native-owner-start-20261115` at `8eaed4c6d1b`, binaries reused:
+`build/nb/llm_caret.exe` (2026-11-14T22:52:30, 14244864 B) and seed
+`src/compiler_rust/target/bootstrap/simple.exe` (2026-11-14T22:42:11). `claude` off PATH.
+
+### Static trace (native caret)
+
+`_smux_owner_up` (`agent_workspace.spl:336`): fast path `list-sessions`; else writes
+`<session> <token>` to `%LOCALAPPDATA%/simple/caret_smux/<session>-<hash(repo)>.owner`,
+`smux_owner_argv(exe, env SIMPLE_BINARY, <root>/src/app/hosted_apps/smux_client.spl, <file>)`
+-> `[SIMPLE_BINARY, run, <client>, --serve-owner-file, <file>]` (native exe base is
+`llm_caret.exe`, so `SIMPLE_BINARY` empty => immediate `false`, same error text, no wait).
+`SIMPLE_BINARY` is cleared for the spawn and restored after. `start_outliving_process(root, argv)`
+runs `process_spawn_async("powershell", ["-NoProfile","-NonInteractive","-Command",
+"Start-Process -WindowStyle Hidden -WorkingDirectory '<root>' -FilePath '<SIMPLE_BINARY>'
+-ArgumentList '\"run\"','\"<client>\"','\"--serve-owner-file\"','\"<file>\"'"])`
+(C `win_process_spawn_async_owned_environment_v1`: no job, NUL std handles,
+`CREATE_NO_WINDOW`, inherited env, cwd = caller's) and requires `process_wait(hop, 30000) == 0`.
+Readiness: `_smux_req(ws, "list-sessions") != nil` every 500 ms for 240000 ms; the owner
+rewrites the file to `<id> <addr> <token> <pid>` once bound.
+
+### Measured
+
+- Standalone `llm_caret.exe workspace rca1 attach agent-1 --repo <fresh repo>`
+  (`SIMPLE_BINARY=$SEED`), 04:58:25 -> 04:58:59, rc=0:
+  `window rca1:agent-1` / `ok smux: created window id6`. Owner process seen:
+  `"...\bootstrap\simple.exe" "run" "C:/dev/wt/sqlcov-20261114/src/app/hosted_apps/smux_client.spl" "--serve-owner-file" "C:/Users/user/AppData/Local/simple/caret_smux/rca1-941330179.owner"`;
+  owner file in four-field form `rca1 127.0.0.1:65189 <tok> 22160` within ~34 s. `workspace rca1 kill` -> `ok`, owner gone.
+- Native `workspace_cli_system_spec.spl` (`LLM_CARET_NATIVE_BIN=build/nb/llm_caret.exe`,
+  `SIMPLE_BINARY=$SEED`, run by `$SEED test`), twice:
+  `SPEC FILE VERDICT: ... outcome=OK declared>=4 executed=4 passed=4 failed=0` /
+  `Results: 4 total, 4 passed, 0 failed` (first run 05:02:34 -> 05:03:36). During the team
+  scenario the owner for `cli-team-947543512.owner` was the seed interpreter, parent chain
+  outside any kill-on-close job, and it bound and served all three attaches.
+
+### Conclusion
+
+The spawn path (#9211 argv + #9238 `process_spawn_async` hop) is correct with these
+binaries: the owner starts, outlives the hop, binds, and the readiness probe sees it.
+The 2026-11-15 `3/4` failure is NOT reproduced with the same binaries. Likely causes of
+that run, neither proven: (a) `SIMPLE_BINARY` not reaching the caret (gives the same
+`smux owner did not start` text instantly), or (b) owner interpreter start exceeding the
+240 s budget under host load (one owner start = full interpreter boot of `smux_client.spl`;
+~34 s idle here). Stale owner files from other runs (`cli-team-899123459.owner`,
+`cli-team-979861953.owner`, different repo hashes) were present and did not interfere.
+
+### Minimal fix proposal
+
+No code fix is justified by evidence. Proposed diagnostic-only follow-up (not done here):
+make `_smux_owner_up` distinguish its three failure exits in the error text
+(`SIMPLE_BINARY unset`, `Start-Process hop failed rc=<n>`, `owner not ready after 240 s`)
+so the next failing run names its cause.
+
+### Still needed
+
+Native rebuild not required for this conclusion. Close-out needs the unblock condition's
+`workspace_recovery` native run, and a re-run of the 3/4 environment if it recurs.
