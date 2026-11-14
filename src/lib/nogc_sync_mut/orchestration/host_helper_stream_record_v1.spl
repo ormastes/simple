@@ -31,6 +31,14 @@ pub struct HostHelperStreamContextV1:
     proof: HostHelperExecutionProofV1
     admission: ContainerHelperAdmissionV2
 
+# Shared retained admission correlation. Output-follow and primary-attach keep
+# distinct plan/consumption domains, but use the same signed request archive.
+# This is historical correlation, not a new verifier or a decoded live lease.
+pub struct HostHelperAdmissionContextV1:
+    request: HostHelperRequestV1
+    proof: HostHelperExecutionProofV1
+    admission: ContainerHelperAdmissionV2
+
 pub fn host_helper_stream_path_v1(root: text, operation_id: text, category: text) -> text:
     root + "/host-helper-stream-" + category + "/" + sha256_text(operation_id) + ".sdn"
 
@@ -114,26 +122,36 @@ pub fn host_helper_stream_context_v1(root: text, operation: OperationEnvelopeV2)
 
 pub fn host_helper_stream_validate_record_v1(root: text, operation: OperationEnvelopeV2,
         consumed: HostHelperStreamConsumedV1) -> Result<HostHelperStreamContextV1, text>:
-    if consumed.operation_id != operation.id or consumed.operation_digest != sha256_text(distributed_encode_operation_v2(operation)?):
+    val context = host_helper_retained_admission_v1(root, operation, consumed.operation_id,
+        consumed.operation_digest, consumed.packet_digest, consumed.execution_proof_digest,
+        consumed.prepared_receipt_digest, consumed.deadline_unix_ms)?
+    val matching = container_output_admission_validate_v2(consumed.output_plan, context.admission)?
+    Ok(HostHelperStreamContextV1(consumed: consumed, request: context.request,
+        proof: context.proof, admission: context.admission))
+
+pub fn host_helper_retained_admission_v1(root: text, operation: OperationEnvelopeV2,
+        operation_id: text, operation_digest: text, packet_digest: text,
+        execution_proof_digest: text, prepared_receipt_digest: text,
+        deadline_unix_ms: i64) -> Result<HostHelperAdmissionContextV1, text>:
+    if operation_id != operation.id or operation_digest != sha256_text(distributed_encode_operation_v2(operation)?):
         return Err("helper-stream-original-operation-mismatch")
     val request = host_helper_request_load_v1(root, operation.id)?
     if distributed_encode_operation_v2(request.operation)? != distributed_encode_operation_v2(operation)?:
         return Err("helper-stream-retained-operation-mismatch")
-    if sha256_text(host_helper_request_encode_v1(request)?) != consumed.packet_digest:
+    if sha256_text(host_helper_request_encode_v1(request)?) != packet_digest:
         return Err("helper-stream-retained-request-mismatch")
     val proof_bytes = host_helper_execution_proof_load_v1(root, operation.id)?
-    if sha256_text(proof_bytes) != consumed.execution_proof_digest: return Err("helper-stream-execution-proof-mismatch")
+    if sha256_text(proof_bytes) != execution_proof_digest: return Err("helper-stream-execution-proof-mismatch")
     val proof = host_helper_execution_proof_load_typed_v1(root, operation.id)?
     val receipt = host_helper_reservation_receipt_v1(request.intent, request.operation)?
-    if receipt.receipt_digest != consumed.prepared_receipt_digest: return Err("helper-stream-prepared-receipt-mismatch")
+    if receipt.receipt_digest != prepared_receipt_digest: return Err("helper-stream-prepared-receipt-mismatch")
     var expiry = proof.signed.grant.expires_at
     for bound in [proof.approval.expires_at, request.budget_proof.signed.grant.expires_at, request.budget_proof.approval.expires_at]:
         if bound < expiry: expiry = bound
-    if expiry != consumed.deadline_unix_ms: return Err("helper-stream-retained-deadline-mismatch")
+    if expiry != deadline_unix_ms: return Err("helper-stream-retained-deadline-mismatch")
     val deadline = container_effect_deadline_v1(request.plan.request_digest, operation.id, ["attach"], expiry)?
     val admission = ContainerHelperAdmissionV2(intent: request.intent, plan: request.plan, operation: request.operation, receipt: receipt,
         deadline: deadline, grant_id: proof.signed.grant.id, issuer_id: proof.signed.issuer_id,
         approver_id: proof.approval.approver_id, cpu_millis: request.intent.reservation.cpu_millis,
         memory_bytes: request.intent.reservation.memory_bytes)
-    val matching = container_output_admission_validate_v2(consumed.output_plan, admission)?
-    Ok(HostHelperStreamContextV1(consumed: consumed, request: request, proof: proof, admission: admission))
+    Ok(HostHelperAdmissionContextV1(request: request, proof: proof, admission: admission))
