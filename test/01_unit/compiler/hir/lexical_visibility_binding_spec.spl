@@ -1,0 +1,59 @@
+"""
+Requester routing uses the selected lexical binding, independently of the
+canonical declaration scope. These tests exercise the production owner.
+"""
+use std.spec.*
+use compiler.hir.hir_types.{SymbolTable, SymbolKind, ScopeKind, SymbolId}
+use compiler.hir.hir_symbol_table_methods.*
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.diagnostics.span.{Span}
+
+describe "lexical visibility binding selection":
+    it "distinguishes a facade binding from its canonical declaration scope":
+        step("Publish one target under aliases in two lexical scopes")
+        val symbols = SymbolTable.new()
+        val target = symbols.define("Target", SymbolKind.Struct, nil, Span.empty(), Visibility.Public, false, Some("implementation"))
+        symbols.bind_local_type_if_free("Facade", target)
+        val child = symbols.push_scope(ScopeKind.Block)
+        symbols.bind_local_type_if_free("LocalFacade", target)
+        val outer = symbols.lookup_binding_v1("Facade")
+        val inner = symbols.lookup_binding_v1("LocalFacade")
+        expect(outer.scope_id).to_equal(0)
+        expect(inner.scope_id).to_equal(child.id)
+        expect(outer.symbol_id).to_equal(target.id)
+        expect(inner.symbol_id).to_equal(target.id)
+        expect(outer.spelling).to_equal("Facade")
+        expect(inner.spelling).to_equal("LocalFacade")
+        expect(symbols.get_symbol(target).unwrap().scope.id).to_equal(0)
+        expect(symbols.lookup("LocalFacade").unwrap().id).to_equal(target.id)
+        expect(symbols.lookup_or_invalid("Facade").id).to_equal(target.id)
+
+    it "selects the current shadow and observes later rebindings freshly":
+        step("Shadow an outer spelling then rebind the same inner spelling")
+        val symbols = SymbolTable.new()
+        val first = symbols.define("Value", SymbolKind.Const, nil, Span.empty(), Visibility.Public, false, Some("one"))
+        val child = symbols.push_scope(ScopeKind.Block)
+        val second = symbols.define("Value", SymbolKind.Const, nil, Span.empty(), Visibility.Private, false, Some("two"))
+        expect(symbols.lookup_binding_v1("Value").symbol_id).to_equal(second.id)
+        expect(symbols.lookup_binding_v1("Value").scope_id).to_equal(child.id)
+        symbols.rebind_local_type("Value", first)
+        expect(symbols.lookup_binding_v1("Value").symbol_id).to_equal(first.id)
+        expect(symbols.lookup_binding_v1("Value").scope_id).to_equal(child.id)
+        symbols.pop_scope()
+        expect(symbols.lookup_binding_v1("Value").scope_id).to_equal(0)
+
+    it "does not bypass a stale nearest binding or retain a previous module":
+        step("Place an invalid nearest binding above a valid outer declaration")
+        val symbols = SymbolTable.new()
+        val target = symbols.define("Value", SymbolKind.Const, nil, Span.empty(), Visibility.Public, false, Some("one"))
+        val child = symbols.push_scope(ScopeKind.Block)
+        symbols.rebind_local_type("Value", SymbolId(id: target.id + 100))
+        val stale = symbols.lookup_binding_v1("Value")
+        expect(stale.scope_id).to_equal(child.id)
+        expect(stale.symbol_id).to_equal(-1)
+        expect(symbols.lookup_or_invalid("Value").id).to_equal(-1)
+        symbols.reset_module()
+        val missing = symbols.lookup_binding_v1("Value")
+        expect(missing.scope_id).to_equal(-1)
+        expect(missing.symbol_id).to_equal(-1)
+        expect(symbols.lookup("Value")).to_be_nil()

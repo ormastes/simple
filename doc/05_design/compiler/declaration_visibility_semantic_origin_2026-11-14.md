@@ -1,6 +1,6 @@
 # Declaration intent through typed AST and HIR
 
-Status: implementation in progress; source review pending; runtime unqualified.
+Status: semantic-origin groundwork source-reviewed; requester integration in progress; runtime unqualified.
 Base: `239ca96084d`, the combined original-source binding checkpoint rebased
 without patch changes onto release `73a1585dc654`.
 
@@ -12,6 +12,24 @@ of ancestor manifests preserves open-module public handling; incomplete
 readsets remain unavailable. Layer promotion belongs to a resolved export binding,
 never to the original declaration. Scoped and member rules remain separate.
 Legacy Private records cannot be reinterpreted as omitted source syntax.
+
+## Directory interfaces and source migration
+
+A present `__init__.spl` is a closed directory interface, including an empty or
+comments-only file. It exports nothing unless an explicit legal route opens it.
+A `pub mod child` route and a selected named-export binding are alternatives:
+the selected binding can expose a legal declaration without publishing its
+implementation module. Neither route can promote explicit `pri`.
+Authenticated complete absence of a manifest retains the existing open public
+module route. Missing or incomplete evidence cannot be treated as absence.
+
+This changes source-facing access in trees with existing empty initializer
+files. For example, `src/compiler/__init__.spl` describes auto-discovery in a
+comment; discovery establishes lookup, not permission. Cross-boundary clients
+will need explicit public child routes or selected facade exports. The compiler
+must diagnose that migration rather than grant access from the old comment.
+Source routing selectors do not truncate the ancestor chain; observation
+continues to the authenticated inventory family boundary.
 
 ## Exact source origin
 
