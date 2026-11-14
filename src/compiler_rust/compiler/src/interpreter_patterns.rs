@@ -220,6 +220,66 @@ fn has_binder_or_wildcard_alternative(pattern: &Pattern) -> bool {
     }
 }
 
+/// A variant-shaped pattern NODE (not looking through `|`/`: T`, which recurse
+/// on their own) that can never match a callable or type value.
+fn variant_node_over_callable(pattern: &Pattern) -> Option<String> {
+    match pattern {
+        Pattern::Identifier(_) | Pattern::Enum { .. } => variant_arm_over_callable(pattern),
+        _ => None,
+    }
+}
+
+thread_local! {
+    /// True while [`match_arm_matches`] is testing an arm. Only then does
+    /// [`pattern_matches`] refuse a variant-spelled SUB-pattern over a callable
+    /// payload; `val`/`if val`/`for` destructuring keeps binding it.
+    static MATCH_ARM_MODE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The first sub-pattern refused under [`MATCH_ARM_MODE`] in the current arm.
+    static MATCH_ARM_REFUSAL: std::cell::RefCell<Option<(String, String)>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Enters arm mode with no recorded refusal; restores the previous state on
+/// drop, including on `?` error paths.
+struct MatchArmModeGuard {
+    prev_mode: bool,
+    prev_refusal: Option<(String, String)>,
+}
+
+impl MatchArmModeGuard {
+    fn enter() -> Self {
+        let prev_mode = MATCH_ARM_MODE.with(|m| m.replace(true));
+        let prev_refusal = MATCH_ARM_REFUSAL.with(|r| r.borrow_mut().take());
+        Self { prev_mode, prev_refusal }
+    }
+
+    fn take_refusal(&self) -> Option<(String, String)> {
+        MATCH_ARM_REFUSAL.with(|r| r.borrow_mut().take())
+    }
+}
+
+impl Drop for MatchArmModeGuard {
+    fn drop(&mut self) {
+        MATCH_ARM_MODE.with(|m| m.set(self.prev_mode));
+        let prev = self.prev_refusal.take();
+        MATCH_ARM_REFUSAL.with(|r| *r.borrow_mut() = prev);
+    }
+}
+
+/// `value` is pre-rendered as "<type_name> value <display>".
+fn callable_scrutinee_error(subject: &str, value: &str, arm: &str) -> CompileError {
+    let ctx = crate::error::ErrorContext::new()
+        .with_code(crate::error::codes::INVALID_PATTERN)
+        .with_help("the scrutinee should be an enum value; check that the enum variant expression did not resolve to a same-named class, function or type");
+    CompileError::semantic_with_context(
+        format!("invalid pattern: {subject} is a {value}, not an enum value; {arm} can never match it"),
+        ctx,
+    )
+}
+
+fn describe_callable(value: &Value) -> String {
+    format!("{} value {}", value.type_name(), value.to_display_string())
+}
+
 /// Match one `match` arm. Identical to [`pattern_matches`] except that a
 /// variant-shaped arm reached with a constructor/function/type scrutinee is a
 /// runtime error instead of a silent answer: `case I8:` used to bind such a
@@ -227,6 +287,12 @@ fn has_binder_or_wildcard_alternative(pattern: &Pattern) -> bool {
 /// (match_on_callable_scrutinee_silently_takes_first_arm_2026-11-14). Only the
 /// match-arm loops call this; `val`/`if val`/`for` binding keeps
 /// [`pattern_matches`], where `val Handler = some_fn` is a legitimate binding.
+///
+/// The same holds for a variant-spelled SUB-pattern (`case W(I8):`,
+/// `case Some(I8):`) reached with a callable payload: under arm mode it fails
+/// to match and is recorded, and the arm errors if it then does not match at
+/// all. An alternative that does match (`case W(I8 | f):`, `case W(I8) | _:`)
+/// still wins, as at the top level.
 pub(crate) fn match_arm_matches(
     pattern: &Pattern,
     value: &Value,
@@ -238,21 +304,25 @@ pub(crate) fn match_arm_matches(
     // still matches anything.
     if is_callable_or_type_value(value) && !has_binder_or_wildcard_alternative(pattern) {
         if let Some(arm) = variant_arm_over_callable(pattern) {
-            let ctx = crate::error::ErrorContext::new()
-                .with_code(crate::error::codes::INVALID_PATTERN)
-                .with_help("the scrutinee should be an enum value; check that the enum variant expression did not resolve to a same-named class, function or type");
-            return Err(CompileError::semantic_with_context(
-                format!(
-                    "invalid pattern: match scrutinee is a {} value {}, not an enum value; arm `case {}:` can never match it",
-                    value.type_name(),
-                    value.to_display_string(),
-                    arm
-                ),
-                ctx,
+            return Err(callable_scrutinee_error(
+                "match scrutinee",
+                &describe_callable(value),
+                &format!("arm `case {arm}:`"),
             ));
         }
     }
-    pattern_matches(pattern, value, bindings, enums, classes)
+    let guard = MatchArmModeGuard::enter();
+    let matched = pattern_matches(pattern, value, bindings, enums, classes)?;
+    if !matched {
+        if let Some((sub, payload)) = guard.take_refusal() {
+            return Err(callable_scrutinee_error(
+                "match payload",
+                &payload,
+                &format!("sub-pattern `{sub}`"),
+            ));
+        }
+    }
+    Ok(matched)
 }
 
 /// Check if a pattern matches a value, populating bindings.
@@ -281,6 +351,21 @@ pub(crate) fn pattern_matches(
     } else {
         value
     };
+    // Inside a `match` arm, a variant-spelled sub-pattern over a callable
+    // payload (`case W(I8):` on `W(Vec4f)`) does not bind: it fails and is
+    // recorded, and `match_arm_matches` errors if the whole arm then fails.
+    // Value shape first, so data values never pay the thread-local read.
+    if is_callable_or_type_value(orig) && MATCH_ARM_MODE.with(|m| m.get()) {
+        if let Some(sub) = variant_node_over_callable(pattern) {
+            MATCH_ARM_REFUSAL.with(|r| {
+                let mut slot = r.borrow_mut();
+                if slot.is_none() {
+                    *slot = Some((sub, describe_callable(orig)));
+                }
+            });
+            return Ok(false);
+        }
+    }
     match pattern {
         Pattern::Wildcard => Ok(true),
 
@@ -738,9 +823,17 @@ pub(crate) fn pattern_matches(
         }
 
         Pattern::Or(patterns) => {
+            // A callable-payload refusal recorded by a losing alternative is
+            // dropped when a later alternative matches, like its bindings.
+            let saved_refusal = MATCH_ARM_MODE
+                .with(|m| m.get())
+                .then(|| MATCH_ARM_REFUSAL.with(|r| r.borrow().clone()));
             for pat in patterns {
                 let mut temp_bindings = HashMap::new();
                 if pattern_matches(pat, orig, &mut temp_bindings, enums, classes)? {
+                    if let Some(saved) = saved_refusal {
+                        MATCH_ARM_REFUSAL.with(|r| *r.borrow_mut() = saved);
+                    }
                     bindings.extend(temp_bindings);
                     return Ok(true);
                 }
@@ -2117,6 +2210,59 @@ main = classify(0) + 10 * classify(5) + 100 * classify(42) + 1000 * classify(100
         assert!(match_arm_matches(&some_f, &ctor, &mut bindings, &enums, &classes).unwrap());
         assert!(match_arm_matches(&pattern, &Value::Int(2), &mut bindings, &enums, &classes).unwrap());
         assert!(pattern_matches(&Pattern::Identifier("Handler".to_string()), &ctor, &mut bindings, &enums, &classes).unwrap());
+    }
+
+    // Residual: a variant-spelled SUB-pattern over a callable payload
+    // (`case W(I8):` on `W(Vec4f)`) bound it silently.
+    #[test]
+    fn nested_variant_sub_pattern_over_callable_payload_is_refused() {
+        let enums = HashMap::new();
+        let classes = HashMap::new();
+        let ctor = Value::Constructor { class_name: "Vec4f".to_string() };
+        let wrapped = Value::Enum {
+            enum_name: "Wrap".to_string(),
+            variant: "W".to_string(),
+            payload: Some(Box::new(ctor.clone())),
+        };
+        let w = |p: Pattern| Pattern::Enum { name: "_".to_string(), variant: "W".to_string(), payload: Some(vec![p]) };
+        let some = |p: Pattern| Pattern::Enum { name: "Option".to_string(), variant: "Some".to_string(), payload: Some(vec![p]) };
+        let i8 = || Pattern::Identifier("I8".to_string());
+        let qualified = Pattern::Enum { name: "Kind".to_string(), variant: "I8".to_string(), payload: None };
+        for (pattern, value) in [
+            (w(i8()), &wrapped),
+            (w(qualified), &wrapped),
+            (some(i8()), &ctor),
+            (Pattern::Tuple(vec![i8(), Pattern::Wildcard]), &Value::Tuple(vec![ctor.clone(), Value::Int(1)])),
+        ] {
+            let mut bindings = HashMap::new();
+            let err = match_arm_matches(&pattern, value, &mut bindings, &enums, &classes).unwrap_err();
+            assert!(format!("{err:?}").contains("sub-pattern `"), "{err:?}");
+            assert!(bindings.is_empty());
+        }
+        // A matching alternative still wins; binders still bind.
+        for pattern in [
+            w(Pattern::Or(vec![i8(), Pattern::Identifier("f".to_string())])),
+            Pattern::Or(vec![w(i8()), Pattern::Wildcard]),
+            w(Pattern::Identifier("f".to_string())),
+        ] {
+            let mut bindings = HashMap::new();
+            assert!(match_arm_matches(&pattern, &wrapped, &mut bindings, &enums, &classes).unwrap());
+        }
+        // `case (W(I8) | W(f), 0):` on `(W(Vec4f), 1)`: the matching `W(f)`
+        // drops the `I8` refusal, so the arm is a plain miss, not an error.
+        let or_then_miss = Pattern::Tuple(vec![
+            Pattern::Or(vec![w(i8()), w(Pattern::Identifier("f".to_string()))]),
+            Pattern::Literal(Box::new(Expr::Integer(0))),
+        ]);
+        let pair = Value::Tuple(vec![wrapped.clone(), Value::Int(1)]);
+        let mut bindings = HashMap::new();
+        assert!(!match_arm_matches(&or_then_miss, &pair, &mut bindings, &enums, &classes).unwrap());
+        // Outside a match arm (`val`/`if val` destructuring) nothing changes,
+        // and the arm mode does not leak out of `match_arm_matches`.
+        let mut bindings = HashMap::new();
+        assert!(pattern_matches(&w(i8()), &wrapped, &mut bindings, &enums, &classes).unwrap());
+        assert!(matches!(bindings.get("I8"), Some(Value::Constructor { .. })));
+        assert!(!super::MATCH_ARM_MODE.with(|m| m.get()));
     }
 
     // JIT residual of the same bug, interpreter twin: a callable bound to a
