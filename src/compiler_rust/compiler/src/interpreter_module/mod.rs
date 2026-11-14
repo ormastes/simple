@@ -26,6 +26,7 @@ pub use module_evaluator::evaluate_module_exports;
 pub use module_loader::{get_import_alias, load_and_merge_module};
 pub(crate) use module_loader::{
     capture_env_with_origin, check_private_call_visibility, closure_created_in_test, owner_written_in_test,
+    register_module_private_fns,
     stamp_closure_origin,
     private_call_caller,
     ClosureOriginGuard,

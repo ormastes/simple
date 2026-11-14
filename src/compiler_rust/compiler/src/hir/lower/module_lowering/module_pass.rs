@@ -1952,6 +1952,19 @@ impl Lowerer {
                 || self.global_init_functions.contains_key(&name)
                 || self.global_init_structs.contains_key(&name);
             if has_static_init {
+                // `val G = imported_fn` is stored as a static fn slot and its
+                // initializer is never lowered: judge the reference here, as
+                // module-level code of the declaring module.
+                if let Expr::Identifier(target) = value {
+                    if self.global_init_functions.contains_key(&name) {
+                        let owner = self.flatten_global_symbol_owners.get(&name).cloned().flatten().or(declaring_owner);
+                        let previous = std::mem::replace(&mut self.current_function_owner, owner);
+                        let previous_name = self.current_function_name.take();
+                        self.gate_private_fn_ref(target);
+                        self.current_function_name = previous_name;
+                        self.current_function_owner = previous;
+                    }
+                }
                 continue;
             }
             let global_ty = *self.globals.get(&name).unwrap_or(&TypeId::ANY);

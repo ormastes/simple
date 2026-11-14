@@ -202,7 +202,7 @@ pub use module_cache::clear_module_cache_selective;
 pub(crate) use module_cache::normalize_path_key;
 pub(crate) use module_cache::{
     filter_functions_from_value, module_dict_contains, module_dict_flat, module_dict_for_each_visible, module_dict_get,
-    module_dict_len, module_dict_make_mut, layered_view as module_dict_layers,
+    module_dict_len, module_dict_make_mut, layered_view as module_dict_layers, is_module_namespace_dict,
 };
 
 // Module loading and resolution

@@ -1723,8 +1723,17 @@ pub fn handle_dict_methods(
         "get" => {
             let key_val = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
             let key = key_val.to_key_string();
-            map.get(&key)
-                .cloned()
+            let stored = map.get(&key).cloned();
+            // `m.get("f")` on a module namespace names `f` like `m["f"]`.
+            if let Some(Value::Function { def, .. }) = &stored {
+                if matches!(def.visibility, simple_parser::ast::Visibility::Private)
+                    && def.name == key
+                    && crate::interpreter::is_module_namespace_dict(map)
+                {
+                    crate::interpreter::interpreter_call::gate_private_call(&def.name, def)?;
+                }
+            }
+            stored
                 .map(|stored| Value::unwrap_dict_entry(&key_val, stored))
                 .unwrap_or(Value::Nil)
         }

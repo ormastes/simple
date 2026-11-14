@@ -499,6 +499,7 @@ impl Lowerer {
                 .or_else(|| self.globals.get(&symbol).copied())?;
             Some((symbol, ty))
         }) {
+            self.gate_private_fn_ref(name);
             Ok(HirExpr {
                 kind: HirExprKind::Global(symbol),
                 ty,
@@ -544,6 +545,7 @@ impl Lowerer {
                 .or_else(|| self.globals.get(&source).copied())?;
             Some((source, ty))
         }) {
+            self.gate_private_fn_ref(name);
             Ok(HirExpr {
                 kind: HirExprKind::Global(source),
                 ty,
@@ -554,6 +556,7 @@ impl Lowerer {
             // was typed from `f` but still emitted `Global("g")` -- a symbol
             // nothing defines, because flattening merges the import under its
             // ORIGINAL name. Emit the symbol whose type we just took.
+            self.gate_private_fn_ref(name);
             let symbol = self.import_alias_symbol(name);
             Ok(HirExpr {
                 kind: HirExprKind::Global(symbol),
@@ -565,6 +568,7 @@ impl Lowerer {
             // global typed under the ALIAS name, so `use m.{f as g}` whose
             // target is not inlined into `module.functions` landed here and
             // emitted `Global("g")` -- unresolved at link time.
+            self.gate_private_fn_ref(name);
             let symbol = self.import_alias_symbol(name);
             Ok(HirExpr {
                 kind: HirExprKind::Global(symbol),
@@ -1145,6 +1149,7 @@ impl Lowerer {
                 // which codegen rejects and the program left the JIT.
                 // doc/08_tracking/bug/jit_module_namespace_member_access_unresolved_2026-11-13.md
                 if let Some(target) = self.resolve_flatten_namespace_callable(recv_name, method) {
+                    self.gate_private_namespace_ref(recv_name, method);
                     let args_hir = self.lower_call_args(args, ctx)?;
                     let ret_ty = self.named_callable_return_type(&target).unwrap_or(TypeId::ANY);
                     return Ok(HirExpr {

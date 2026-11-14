@@ -17,7 +17,7 @@ mod type_resolver;
 pub use deprecation_warning::{DeprecationWarning, DeprecationWarningCollector};
 pub use error::{LowerError, LowerResult};
 pub use memory_warning::{MemoryWarning, MemoryWarningCode, MemoryWarningCollector, WarningSummary};
-pub use lowerer::Lowerer;
+pub use lowerer::{take_private_ref_violations, Lowerer, PrivateRefViolation};
 pub use module_lowering::module_with_hoisted_defs;
 pub(crate) use module_lowering::dynamic_module_initializer_name;
 pub(crate) use module_lowering::block_uses_self;
@@ -212,6 +212,10 @@ pub fn lower_with_context_lenient_project_hint_and_duplicate_structs(
     lowerer.set_strict_mode(false);
     lowerer.set_lenient_types(true);
     lowerer.set_duplicate_global_struct_defs(std::sync::Arc::new(duplicate_struct_defs));
+    // This is the JIT run lane: product code must fail closed on a private fn
+    // of another directory here too. The caller drains the findings with
+    // `take_private_ref_violations` whether or not lowering succeeds.
+    lowerer::arm_private_ref_gate();
     lowerer.lower_module(module)
 }
 
