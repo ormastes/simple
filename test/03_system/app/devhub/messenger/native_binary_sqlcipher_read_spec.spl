@@ -1,0 +1,44 @@
+# System test: native devhub binary reads rows from the encrypted (sqlcipher4) store.
+# Known red: doc/08_tracking/bug/devhub_native_sqlcipher_schema_column_missing_2026-11-14.md
+# Binary comes from env DEVHUB_NATIVE_BIN.
+# @manual_section: messenger-native-binary-read
+
+"""
+## Purpose and audience
+Purpose: the native devhub binary decrypts the dense fixture and returns ground-truth rooms and message bodies.
+Audience: DevHub release reviewers. Passphrase is public synthetic data.
+"""
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get_opt}
+use std.env.{env_set}
+use test.support.devhub_messenger_dense.*
+use test.support.devhub_messenger_cli.*
+
+fn native_bin() -> text:
+    match env_get_opt("DEVHUB_NATIVE_BIN"):
+        case Some(v): v
+        case None: ""
+
+val nb_bin = native_bin()
+val nb_truth = dense_truth()
+val _home = cli_prepare_home("build/nb/home")
+val _s = env_set(DENSE_ENV, truth_passphrase(nb_truth))
+val nb_rooms = if nb_bin == "": ("", "", -1) else: process_run(nb_bin, ["messenger", "rooms", "--target", "dense", "--json"])
+val nb_msgs = if nb_bin == "": ("", "", -1) else: process_run(nb_bin, ["messenger", "messages", "--target", "dense", "--room", "1", "--limit", "1", "--json"])
+
+describe "native devhub binary read verbs over the sqlcipher4 messenger fixture":
+    it "rooms decrypts the store and returns the ground-truth rooms":
+        # @req REQ-MSGR-NATIVE-004
+        step("Run `devhub messenger rooms --target dense --json` with the correct passphrase")
+        expect(nb_rooms.2).to_equal(0)
+        step("Assert the room payload equals the ground truth (two rooms)")
+        expect(nb_rooms.0.contains(tf(nb_truth, "rooms_payload"))).to_equal(true)
+
+    it "messages returns the ground-truth first message body of room 1":
+        # @req REQ-MSGR-NATIVE-005
+        step("Run `devhub messenger messages --room 1 --limit 1 --json`")
+        expect(nb_msgs.2).to_equal(0)
+        step("Assert the decrypted payload equals the ground-truth history for limit 1")
+        expect(nb_msgs.0.contains(expected_history(nb_truth, "1", 1))).to_equal(true)
+        expect(nb_msgs.0.contains("tie-first")).to_equal(true)

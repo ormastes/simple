@@ -559,7 +559,20 @@ mod tests {
         assert!(text_fns.contains(&"rt_vulkan_get_last_error"));
     }
 
+    /// On Windows the runtime's `#[no_mangle]` symbols are not in the PE export
+    /// table, so `dlsym_self_compat` (GetProcAddress on the running module)
+    /// cannot see them: the entry point is refused with the explicit
+    /// "not linked" error, never silently returned as an integer.
+    /// Open bug: doc/08_tracking/bug/seed_windows_dlsym_self_no_pe_exports_2026-11-14.md
+    #[cfg(windows)]
+    #[test]
+    fn windows_text_return_fails_closed_when_symbol_not_exported() {
+        let err = dispatch("rt_vulkan_get_last_error", &[]).expect_err("not exported on a PE binary");
+        assert!(format!("{err:?}").contains("not linked into this binary"), "got {err:?}");
+    }
+
     /// A text-returning entry point yields text, never an integer.
+    #[cfg(unix)]
     #[test]
     fn text_return_is_text_not_int() {
         let value = dispatch("rt_vulkan_get_last_error", &[]).expect("linked symbol");

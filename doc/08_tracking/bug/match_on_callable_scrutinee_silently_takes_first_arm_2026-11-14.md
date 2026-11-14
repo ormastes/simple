@@ -203,11 +203,13 @@ Open after this fix:
   cap before. Not changed.
 - Found while writing the controls (pre-existing, not caused by this change):
   - Interpreter `fn opt(k: Kind?)` called with `Kind.F32` does not match
-    `case Some(F32):` (answers the wildcard); the JIT matches it. Engine
-    divergence on `T?` parameters receiving a bare enum value.
+    `case Some(F32):` (answers the wildcard). The JIT was wrong too (it took
+    the first `Some(...)` arm for any non-nil value). Fixed 2026-11-14, see
+    `optional_enum_some_variant_match_engine_divergence_2026-11-14.md`.
   - The Rust unit harness (`evaluate_module`, `main = code(Kind.I8)`) takes
-    `case _:` for a real `Kind.I8`, even through an untyped parameter, while the
-    CLI answers the `I8` arm. Harness-only divergence; not investigated.
+    `case _:` for a real `Kind.I8`. Cause: the harness reused thread-local
+    interpreter state, so an earlier snippet's `fn code` answered. Fixed in the
+    same change.
 
 ## Nested sub-patterns and `mod` unit variants (residuals, fixed 2026-11-14)
 

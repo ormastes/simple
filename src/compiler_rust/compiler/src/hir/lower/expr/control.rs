@@ -53,15 +53,30 @@ fn is_placeholder_lambda_param_name(name: &str) -> bool {
 }
 
 impl Lowerer {
-    /// The struct/class payload type of a `T?` (represented in HIR as a shared
-    /// pointer to `T`), or None for every other type.
+    /// The struct/class or tuple payload type of a `T?` (represented in HIR
+    /// as a shared pointer to `T`), or None for every other type.
+    ///
+    /// Tuples are admitted alongside structs because `.0`/`.1` on a
+    /// `(A, B)?` local read after a nil check hits the same boxed-`Some`
+    /// receiver: without the payload projection the positional Index ran
+    /// over the Option enum object's own slots, so
+    /// `sqlite_format.schema._read_ident(...).0` yielded "" and `.1` nil in
+    /// the native lane (every CREATE TABLE column name came back empty and
+    /// devhub reported `schema column missing in table 'room'`), while the
+    /// interpreter auto-unwrapped.
     pub(super) fn optional_struct_inner_type(&self, ty: TypeId) -> Option<TypeId> {
         match self.module.types.get(ty) {
             Some(HirType::Pointer {
                 kind: PointerKind::Shared,
                 inner,
                 ..
-            }) if matches!(self.module.types.get(*inner), Some(HirType::Struct { .. })) => Some(*inner),
+            }) if matches!(
+                self.module.types.get(*inner),
+                Some(HirType::Struct { .. }) | Some(HirType::Tuple(_))
+            ) =>
+            {
+                Some(*inner)
+            }
             _ => None,
         }
     }
@@ -825,15 +840,10 @@ impl Lowerer {
                         ty: TypeId::BOOL,
                     });
                 }
-                // Special handling for Some - check not-none
+                // Special handling for Some - presence AND payload sub-patterns
+                // (see `optional_some_condition`).
                 if variant == "Some" && !subject_enum_owns_variant {
-                    return Ok(HirExpr {
-                        kind: HirExprKind::BuiltinCall {
-                            name: "rt_is_some".to_string(),
-                            args: vec![subject_ref],
-                        },
-                        ty: TypeId::BOOL,
-                    });
+                    return Ok(self.optional_some_condition(pattern, subject_ty, subject_ref, ctx));
                 }
 
                 // Positional class/struct pattern: `case ClassName(a, b, c)` where the
@@ -984,6 +994,64 @@ impl Lowerer {
                 if variants.iter().any(|(v, _)| v == variant)
                     && !(name == "Option" && !generic_params.is_empty()))
         })
+    }
+
+    /// Arm test for a top-level builtin-optional `case Some(p):`: presence
+    /// (`rt_is_some`) AND the refutable payload sub-patterns, read through the
+    /// same dual-representation slot as the nested `Ok(Some(..))` path in
+    /// `subpattern_condition_typed`. Presence alone made the first
+    /// `Some(I8)` arm match `Kind.F32` / `Kind.Wrap(7)` in a `Kind?` slot.
+    /// Shared by the statement and expression forms.
+    ///
+    /// The payload test is emitted only when the subject is statically a
+    /// `T?` / `Option<T>` whose payload type is not itself an enum declaring
+    /// `Some`/`None`. For an untyped (ANY) subject, or an `Opt?` where `Opt`
+    /// owns `Some`, the raw slot would be the user enum itself (e.g.
+    /// `Opt.Some(5)`, not `5`) while the binder reads its payload, so those
+    /// keep the presence-only test they had before.
+    /// optional_enum_some_variant_match_engine_divergence_2026-11-14
+    pub(crate) fn optional_some_condition(
+        &mut self,
+        pattern: &Pattern,
+        subject_ty: TypeId,
+        subject_ref: HirExpr,
+        ctx: &mut FunctionContext,
+    ) -> HirExpr {
+        let inner_ty = self
+            .optional_enum_payload_inner(subject_ty)
+            .or_else(|| self.module.types.optional_inner(subject_ty));
+        let inner_owns_option_variant = inner_ty.is_some_and(|t| {
+            matches!(self.module.types.get(t), Some(HirType::Enum { variants, .. })
+                if variants.iter().any(|(n, _)| n == "Some" || n == "None"))
+        });
+        let deeper = match pattern {
+            Pattern::Enum {
+                name,
+                payload: Some(inner),
+                ..
+            } if inner_ty.is_some() && !inner_owns_option_variant => {
+                self.nested_payload_condition(name, "Some", subject_ty, &subject_ref, inner, ctx)
+            }
+            _ => None,
+        };
+        let presence = HirExpr {
+            kind: HirExprKind::BuiltinCall {
+                name: "rt_is_some".to_string(),
+                args: vec![subject_ref],
+            },
+            ty: TypeId::BOOL,
+        };
+        match deeper {
+            None => presence,
+            Some(inner_test) => HirExpr {
+                kind: HirExprKind::Binary {
+                    op: BinOp::And,
+                    left: Box::new(presence),
+                    right: Box::new(inner_test),
+                },
+                ty: TypeId::BOOL,
+            },
+        }
     }
 
     /// Build the refutability test for an enum variant pattern's payload

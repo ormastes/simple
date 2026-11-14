@@ -108,3 +108,31 @@ Spec: `test/01_unit/compiler/mir/option_int_sink_miss_traps_spec.spl` (red
 2/3 before, green after); `list_any_get_scalar_sink_unwrap_spec.spl` updated
 to the trap symbol. Still required: a Stage 2 native run showing a MISS into
 `-> i64` aborts with ".unwrap() called on None".
+
+## Re-verification 2026-11-14 (origin/release/1.0.0 bc9b18b3106)
+
+Defect 1 is fixed in source and nothing more was changed. `option_payload_for_int_sink`
+emits `rt_unwrap_or_trap` (`switch_operators_calls.spl:975`), and all three
+integer sinks route through it: the tail return (`function_lowering.spl:1173`),
+`return` (`expr_dispatch.spl:3786`) and `val y: i64 =` (`mir_lowering_stmts.spl:1450`).
+`rt_unwrap_or_trap` is backed in `runtime_native.c:21491` (it aborts with
+`.unwrap() called on None`) and in `objects.rs:622`. The seed
+(`seed-try-target/release/simple test`) runs
+`list_any_get_scalar_sink_unwrap_spec` 7/7 and `option_int_sink_miss_traps_spec` 2/2.
+
+Interpreter reference (`SIMPLE_EXECUTION_MODE=interpret`, the same seed), a MISS on `[10, 20].get(5)`:
+
+| sink | interpreter | native after the fix |
+|---|---|---|
+| tail `w.get(i)` with `-> i64`, both `[i64]` and `list` | raises `nil is forbidden by the non-optional return contract` | traps |
+| `return w.get(i)` | raises (same) | traps |
+| `val y: i64 = w.get(i)` | **binds `y = nil` and does not raise**; `y + 1` gives 1, and only a later `-> i64` return raises | traps at the binding |
+| `w.get(i) ?? -1` | -1 | -1 (unchanged) |
+
+Open divergence: the interpreter does not enforce a declared `i64` annotation on
+`val` against nil. Native is now stricter, and the interpreter is the side that
+should move. That is a separate interpreter item and is not changed here. The
+default seed `run` (JIT) still prints `ret=0` / `list=3` on a miss. That is the Rust
+seed's own JIT, not this MIR lowering.
+
+Still pending: a Stage 2 native run that shows the abort.

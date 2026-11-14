@@ -33,8 +33,15 @@ var array_storage_free: [i64] = []
 var array_cow_copies: i64 = 0
 var array_cow_slots: i64 = 0
 var val_struct_names: [text] = []   # struct type name
-var val_struct_fields: [[text]] = []  # struct field names
-var val_struct_values: [[i64]] = []   # struct field value_ids
+# Struct rows are SPARSE: a value slot holds only a row id (-1 = no row), and
+# a row is minted when a struct value is actually created (val_make_struct) or
+# first upserted. Giving every value slot its own two empty rows leaked two
+# arrays per fresh int/text/bool on the seed JIT, which never frees arrays
+# (doc/08_tracking/bug/core_interp_per_iteration_array_leak_2026-11-14.md).
+var val_struct_rows: [i64] = []       # value slot -> struct row id, -1 = none
+var struct_row_fields: [[text]] = []  # struct field names, by row id
+var struct_row_values: [[i64]] = []   # struct field value_ids, by row id
+var struct_row_free: [i64] = []       # released row ids (contents stale until reuse)
 var val_func_names: [text] = []     # function name (for VAL_FUNCTION → decl lookup)
 var val_func_decls: [i64] = []      # function decl_id
 var val_thunk_expr_ids: [i64] = []  # expression id for VAL_THUNK (deferred eval)
@@ -79,8 +86,10 @@ fn val_reset():
     array_cow_copies = 0
     array_cow_slots = 0
     val_struct_names = []
-    val_struct_fields = []
-    val_struct_values = []
+    val_struct_rows = []
+    struct_row_fields = []
+    struct_row_values = []
+    struct_row_free = []
     val_func_names = []
     val_func_decls = []
     val_thunk_expr_ids = []
@@ -128,8 +137,7 @@ fn val_alloc(kind: i64) -> i64:
         val_texts[idx] = ""
         val_array_backings[idx] = -1
         val_struct_names[idx] = ""
-        val_struct_fields[idx] = []
-        val_struct_values[idx] = []
+        val_struct_row_release(idx)
         val_func_names[idx] = ""
         val_func_decls[idx] = -1
         val_thunk_expr_ids[idx] = -1
@@ -141,8 +149,7 @@ fn val_alloc(kind: i64) -> i64:
     val_texts.push("")
     val_array_backings.push(-1)
     val_struct_names.push("")
-    val_struct_fields.push([])
-    val_struct_values.push([])
+    val_struct_rows.push(-1)
     val_func_names.push("")
     val_func_decls.push(-1)
     val_thunk_expr_ids.push(-1)
@@ -162,10 +169,40 @@ pub fn val_free(vid: i64):
     val_texts[vid] = ""
     val_array_backings[vid] = -1
     val_struct_names[vid] = ""
-    val_struct_fields[vid] = []
-    val_struct_values[vid] = []
+    val_struct_row_release(vid)
     val_func_names[vid] = ""
     val_free_list.push(vid)
+
+# ===== Sparse Struct Rows =====
+# All row access stays in this file. A released row keeps its stale contents
+# and is overwritten by ASSIGNMENT when reused: clearing it in place could
+# mutate an array the row still shares with a caller.
+
+# An out-of-range vid has no row. Indexing val_struct_rows with it instead could
+# yield a row id that belongs to another struct on an engine that does not trap.
+fn val_struct_row(vid: i64) -> i64:
+    if vid < 0 or vid >= val_struct_rows.len(): return -1
+    val_struct_rows[vid]
+
+fn val_struct_row_attach(vid: i64, field_names: [text], field_values: [i64]):
+    if struct_row_free.len() > 0:
+        val row = struct_row_free[struct_row_free.len() - 1]
+        struct_row_free.pop()
+        struct_row_fields[row] = field_names
+        struct_row_values[row] = field_values
+        val_struct_rows[vid] = row
+        return
+    val fresh = struct_row_fields.len()
+    struct_row_fields.push(field_names)
+    struct_row_values.push(field_values)
+    val_struct_rows[vid] = fresh
+
+fn val_struct_row_release(vid: i64):
+    val row = val_struct_rows[vid]
+    if row < 0: return
+    struct_row_free.push(row)
+    val_struct_rows[vid] = -1
+
 
 # ===== Value Constructors =====
 
@@ -318,8 +355,7 @@ pub fn val_array_at(vid: i64, index: i64) -> i64:
 pub fn val_make_struct(type_name: text, field_names: [text], field_values: [i64]) -> i64:
     val idx = val_alloc(VAL_STRUCT)
     val_struct_names[idx] = type_name
-    val_struct_fields[idx] = field_names
-    val_struct_values[idx] = field_values
+    val_struct_row_attach(idx, field_names, field_values)
     idx
 
 pub fn val_make_function(name: text, decl_id: i64) -> i64:
@@ -404,10 +440,14 @@ pub fn val_get_struct_name(vid: i64) -> text:
     val_struct_names[vid]
 
 pub fn val_get_struct_fields(vid: i64) -> [text]:
-    val_struct_fields[vid]
+    val row = val_struct_row(vid)
+    if row < 0: return []
+    struct_row_fields[row]
 
 pub fn val_get_struct_values(vid: i64) -> [i64]:
-    val_struct_values[vid]
+    val row = val_struct_row(vid)
+    if row < 0: return []
+    struct_row_values[row]
 
 fn val_get_func_name(vid: i64) -> text:
     val_func_names[vid]
@@ -418,12 +458,15 @@ pub fn val_get_func_decl(vid: i64) -> i64:
 # ===== Struct Field Access =====
 
 pub fn val_struct_get_field(vid: i64, field_name: text) -> i64:
-    val fields = val_struct_fields[vid]
-    val values = val_struct_values[vid]
+    # Read through the owner: `val fields = struct_row_fields[row]` copies the
+    # row, and the seed JIT never frees that copy.
+    val row = val_struct_row(vid)
+    if row < 0: return VAL_NONE
+    val count = struct_row_fields[row].len()
     var i: i64 = 0
-    for name in fields:
-        if name == field_name:
-            return values[i]
+    while i < count:
+        if struct_row_fields[row][i] == field_name:
+            return struct_row_values[row][i]
         i = i + 1
     VAL_NONE
 
@@ -437,11 +480,13 @@ pub fn val_iterable_array(vid: i64) -> i64:
     VAL_NONE
 
 fn val_struct_set_field(vid: i64, field_name: text, new_val: i64):
-    # Mutate through the owner (val_struct_values[vid][i] = ...): a temp alias
+    # Mutate through the owner (struct_row_values[row][i] = ...): a temp alias
     # deep-copies the whole values array per write under COW value semantics.
     val idx = val_struct_find_field_idx(vid, field_name)
     if idx >= 0:
-        val_struct_values[vid][idx] = new_val
+        val row = val_struct_row(vid)
+        if row >= 0:
+            struct_row_values[row][idx] = new_val
 
 pub fn val_struct_upsert_field(vid: i64, field_name: text, new_val: i64):
     val idx = val_struct_find_field_idx(vid, field_name)
@@ -450,31 +495,42 @@ pub fn val_struct_upsert_field(vid: i64, field_name: text, new_val: i64):
         return
     # Owner push: `var f = fields[vid]; f.push(x); fields[vid] = f` copies both
     # arrays on EVERY insert, making "__dict" construction O(n^2).
-    val_struct_fields[vid].push(field_name)
-    val_struct_values[vid].push(new_val)
+    var row = val_struct_row(vid)
+    if row < 0:
+        # First field on a slot that has no row yet: mint an empty one.
+        val_struct_row_attach(vid, [], [])
+        row = val_struct_row(vid)
+    struct_row_fields[row].push(field_name)
+    struct_row_values[row].push(new_val)
 
 # ===== Indexed Struct Field Access (inline cache) =====
 
 pub fn val_struct_get_field_idx(vid: i64, idx: i64) -> i64:
-    val values = val_struct_values[vid]
-    if idx < values.len():
-        return values[idx]
+    val row = val_struct_row(vid)
+    if row < 0: return VAL_NONE
+    if idx < struct_row_values[row].len():
+        return struct_row_values[row][idx]
     VAL_NONE
 
 pub fn val_struct_set_field_idx(vid: i64, idx: i64, new_val: i64):
-    if idx < val_struct_values[vid].len():
-        val_struct_values[vid][idx] = new_val
+    val row = val_struct_row(vid)
+    if row < 0: return
+    if idx < struct_row_values[row].len():
+        struct_row_values[row][idx] = new_val
 
 pub fn val_struct_check_field_idx(vid: i64, idx: i64, expected_name: text) -> bool:
-    val fields = val_struct_fields[vid]
-    if idx >= fields.len(): return false
-    fields[idx] == expected_name
+    val row = val_struct_row(vid)
+    if row < 0: return false
+    if idx >= struct_row_fields[row].len(): return false
+    struct_row_fields[row][idx] == expected_name
 
 pub fn val_struct_find_field_idx(vid: i64, field_name: text) -> i64:
-    val fields = val_struct_fields[vid]
+    val row = val_struct_row(vid)
+    if row < 0: return -1
+    val count = struct_row_fields[row].len()
     var i: i64 = 0
-    for name in fields:
-        if name == field_name:
+    while i < count:
+        if struct_row_fields[row][i] == field_name:
             return i
         i = i + 1
     -1

@@ -2211,7 +2211,7 @@ impl Lowerer {
     /// tagged word by name + type); anything else (an unresolved
     /// `Option<ANY>`) keeps the subject type so the value is not retyped on a
     /// guess. `None` for any subject that is not this Option form.
-    fn optional_enum_payload_inner(&self, subject_ty: TypeId) -> Option<TypeId> {
+    pub(crate) fn optional_enum_payload_inner(&self, subject_ty: TypeId) -> Option<TypeId> {
         let Some(HirType::Enum { name, variants, .. }) = self.module.types.get(subject_ty) else {
             return None;
         };
@@ -3661,15 +3661,12 @@ impl Lowerer {
                         ty: TypeId::BOOL,
                     });
                 }
-                // Special handling for Some - check not-none
+                // Special handling for Some - check not-none, AND the payload
+                // sub-patterns. Testing presence alone made `case Some(I8):`
+                // match every non-nil `Kind?` (the first `Some(...)` arm won).
+                // optional_enum_some_variant_match_engine_divergence_2026-11-14
                 if variant == "Some" && !subject_enum_owns_variant {
-                    return Ok(HirExpr {
-                        kind: HirExprKind::BuiltinCall {
-                            name: "rt_is_some".to_string(),
-                            args: vec![subject_ref],
-                        },
-                        ty: TypeId::BOOL,
-                    });
+                    return Ok(self.optional_some_condition(pattern, subject_ty, subject_ref, ctx));
                 }
 
                 // Positional class/struct pattern: `case ClassName(a, b, c)` where the

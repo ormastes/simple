@@ -1,6 +1,6 @@
 # System test: the NATIVE devhub binary against the encrypted (sqlcipher4) messenger fixture.
 # Binary comes from env DEVHUB_NATIVE_BIN; build command is in the blocked message.
-# Scope: the CLI exposes only targets/doctor/send (no read verb), so reads are not driven here.
+# Scope: doctor plus the read verbs rooms/messages, which decrypt the store inside the native binary.
 # @manual_section: messenger-native-binary
 
 """
@@ -15,6 +15,7 @@ use std.io_runtime.{process_run, env_get_opt, file_write}
 use std.env.{env_set}
 use std.nogc_sync_mut.io.file_ops.{file_read}
 use test.support.devhub_messenger_dense.*
+use test.support.devhub_messenger_cli.*
 
 val BUILD_CMD: text = "SIMPLE_NATIVE_BUILD_RUST=1 SIMPLE_NATIVE_INCREMENTAL=1 bin/simple.exe native-build src/app/devhub/main.spl -o build/nb/devhub.exe --cache-dir build/nb/cache"
 
@@ -26,26 +27,16 @@ fn native_bin() -> text:
 fn blocked_msg() -> text:
     "BLOCKED: DEVHUB_NATIVE_BIN is unset or missing; build it with: {BUILD_CMD}"
 
-fn sdn_text(db_path: text) -> text:
-    "messenger:\n    schema_version: 1\n    default_target: dense\n\n" +
-    "messenger.dense:\n    read_provider: sqlcipher4_database\n    send_provider: none\n    send_enabled: false\n    cache_mode: none\n    sync_policy: on_demand\n\n" +
-    "messenger.dense.db:\n    path: {db_path}\n    format: sqlcipher4\n    access: read_only\n    snapshot_mode: frozen_snapshot\n    profile: sqlcipher4_4k_sha512\n    key_kind: passphrase\n    secret_ref: {DENSE_REF}\n    cipher_page_size: 4096\n    cipher_kdf_iter: 256000\n    cipher_kdf_algorithm: pbkdf2_hmac_sha512\n    cipher_hmac_algorithm: hmac_sha512\n    cipher_page_hmac: true\n    cipher_hmac_pgno: little_endian\n    cipher_reserved_bytes: 80\n    cipher_plaintext_header_bytes: 0\n    immutable: true\n\n" +
-    "messenger.dense.schema:\n    profile_id: dense_v1\n    room_table: room\n    room_id: id\n    room_name: title\n    room_created_at: created_at\n    member_table: room_member\n    member_room_id: room_id\n    member_identity_id: user_id\n    member_joined_at: joined_at\n    message_table: messages\n    message_id: id\n    message_room_id: room_id\n    message_sender_id: sender_id\n    message_body: body\n    message_created_at: created_at\n    message_sequence: seq\n    message_reply_to_id: reply_to_id\n    timestamp_unit: s\n    sequence_kind: monotonic_within_room\n"
-
 val nb_bin = native_bin()
 val nb_truth = dense_truth()
 val nb_pass = truth_passphrase(nb_truth)
 val nb_home = "build/nb/home"
-val _mk = process_run("mkdir", ["-p", nb_home + "/.config/devhub"])
-val nb_cwd_db = process_run("pwd", [])
-val nb_db = nb_cwd_db.0.trim() + "/" + dense_path(DENSE_BASE)
-val _w = file_write(nb_home + "/.config/devhub/messenger.sdn", sdn_text(nb_db))
-val _h = env_set("HOME", nb_cwd_db.0.trim() + "/" + nb_home)
-val _p = env_set("USERPROFILE", nb_cwd_db.0.trim() + "/" + nb_home)
+val _home = cli_prepare_home(nb_home)
 val _s = env_set(DENSE_ENV, nb_pass)
 val nb_doctor = if nb_bin == "": ("", "", -1) else: process_run(nb_bin, ["messenger", "doctor", "--target", "dense", "--json"])
 val _s2 = env_set(DENSE_ENV, "wrong-passphrase-not-the-secret")
 val nb_wrong = if nb_bin == "": ("", "", -1) else: process_run(nb_bin, ["messenger", "doctor", "--target", "dense", "--json"])
+val nb_bad_rooms = if nb_bin == "": ("", "", -1) else: process_run(nb_bin, ["messenger", "rooms", "--target", "dense", "--json"])
 
 describe "native devhub binary over the sqlcipher4 messenger fixture":
     it "is available through DEVHUB_NATIVE_BIN":
@@ -71,3 +62,14 @@ describe "native devhub binary over the sqlcipher4 messenger fixture":
         expect(nb_wrong.0.contains(nb_pass)).to_equal(false)
         expect(nb_wrong.0.contains("wrong-passphrase-not-the-secret")).to_equal(false)
         expect(nb_doctor.0.contains(nb_pass)).to_equal(false)
+    it "a wrong passphrase exits non-zero with no row data and no passphrase":
+        # @req REQ-MSGR-NATIVE-006
+        # Only meaningful once the native read path works (see the in-development read spec): until then rooms fails for an unrelated reason.
+        step("Run rooms with a wrong passphrase in the secret env")
+        expect(nb_bad_rooms.2 != 0).to_equal(true)
+        step("Assert no room names and neither passphrase appear in stdout or stderr")
+        val all = nb_bad_rooms.0 + nb_bad_rooms.1
+        expect(all.contains("other room")).to_equal(false)
+        expect(all.contains("fresh general")).to_equal(false)
+        expect(all.contains(nb_pass)).to_equal(false)
+        expect(all.contains("wrong-passphrase-not-the-secret")).to_equal(false)
