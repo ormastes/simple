@@ -1,0 +1,156 @@
+"""
+## Purpose and audience
+Purpose: Pin three Draw IR paint features Chromium draws on the web catalog
+`overview` page and Simple did not: outside list markers (`1.` / disc),
+italic faces for `<em>`/`<i>`, and the `<a href>` underline.
+Audience: browser-engine paint (Draw IR producer) maintainers.
+
+Chrome oracle (Chromium 131 headless --headless=new, Linux, Liberation Sans,
+page `*{box-sizing:border-box}body{margin:0;font:16px/1.5 sans-serif}`,
+`ol,ul,p{margin:0}`; pixels probed from the screenshot, boxes from
+getBoundingClientRect):
+
+| feature                   | 16px                         | 24px                         |
+|---------------------------|------------------------------|------------------------------|
+| li content x              | 40                           | 40                           |
+| decimal marker "1. " ink  | x 23..34 (right edge = 40)   | x 14..31                     |
+| disc ink                  | 5x5, x 24..28, y line+10     | 7x7, x 19..25, y line+16     |
+| a underline               | 1px at line top+18, #0000ee  | 2px at line top+28           |
+
+The disc follows Chrome's `ListMarker` symbol metrics: ascent a =
+round(0.905 fs), o = a*2/3, side = (o+1)/2, x = content - o - 7,
+y = text top + 3(a-o)/2. The decimal marker is the text "N. " ending at the
+li's content edge.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-LIST-MARKER-PAINT-001 — outside list markers, italic faces and link underlines reach Draw IR.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_layout.spl 1%
+use std.spec.*
+use std.common.ui.draw_ir.{DrawIrCommand, DRAW_IR_COMMAND_TEXT, DRAW_IR_COMMAND_RECT}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_draw_ir
+}
+use std.nogc_sync_mut.sffi.io.{file_exists}
+
+val HEAD: text = r"<html><head><style>*{box-sizing:border-box}body{margin:0;font:16px/1.5 sans-serif;color:#000}ol,ul,p{margin:0}</style></head><body>"
+val LIB_ITALIC: text = "/usr/share/fonts/truetype/liberation/LiberationSans-Italic.ttf"
+
+fn commands_of(inner: text) -> [DrawIrCommand]:
+    val composition = simple_web_layout_render_html_draw_ir(HEAD + inner + "</body></html>", 900, 400)
+    var out: [DrawIrCommand] = []
+    for batch in composition.batches:
+        for command in batch.commands:
+            out.push(command)
+    out
+
+fn text_command(cmds: [DrawIrCommand], value: text) -> i32:
+    var i = 0
+    while i < cmds.len() as i32:
+        if cmds[i].kind == DRAW_IR_COMMAND_TEXT and cmds[i].text_value == value:
+            return i
+        i = i + 1
+    -1
+
+fn marker_rects(cmds: [DrawIrCommand]) -> [DrawIrCommand]:
+    var out: [DrawIrCommand] = []
+    for c in cmds:
+        if c.kind == DRAW_IR_COMMAND_RECT and c.component_id.ends_with("::marker-disc"):
+            out.push(c)
+    out
+
+fn style_value(c: DrawIrCommand, key: text) -> text:
+    for p in c.computed_style:
+        if p.key == key:
+            return p.value
+    ""
+
+describe "outside list markers are painted":
+    it "AC-1: an ol li paints the decimal marker 'N. ' ending at the content edge":
+        step("Chrome: '1. ' ink x 23..34, li content x 40")
+        val cmds = commands_of("<ol><li>Ordered item</li><li>Second item</li></ol>")
+        val one = text_command(cmds, "1. ")
+        val two = text_command(cmds, "2. ")
+        expect(one >= 0).to_equal(true)
+        expect(two >= 0).to_equal(true)
+        expect(cmds[one].x + cmds[one].width).to_equal(40)
+        expect(cmds[one].y).to_equal(3)
+        expect(cmds[two].y - cmds[one].y).to_equal(24)
+
+    it "AC-2: a ul li paints a 5x5 disc at x 24, line top + 10":
+        step("Chrome: disc ink 5x5 at x 24..28, y 10..14 of a 24px line")
+        val discs = marker_rects(commands_of("<ul><li>Unordered item</li></ul>"))
+        expect(discs.len()).to_equal(1)
+        expect(discs[0].x).to_equal(24)
+        expect(discs[0].y).to_equal(10)
+        expect(discs[0].width).to_equal(5)
+        expect(discs[0].height).to_equal(5)
+
+    it "AC-3: the disc scales with the font (24px: 7x7 at x 19)":
+        step("Chrome: 24px disc ink 7x7 at x 19..25, y 16..22 of a 36px line")
+        val discs = marker_rects(commands_of("<ul style=\"font-size:24px\"><li>Unordered</li></ul>"))
+        expect(discs.len()).to_equal(1)
+        expect(discs[0].x).to_equal(19)
+        expect(discs[0].y).to_equal(16)
+        expect(discs[0].width).to_equal(7)
+
+    it "AC-4: list-style:none paints no marker":
+        val cmds = commands_of("<ul style=\"list-style:none\"><li>a</li></ul><ol style=\"list-style-type:none\"><li>b</li></ol>")
+        expect(marker_rects(cmds).len()).to_equal(0)
+        expect(text_command(cmds, "1. ")).to_equal(-1)
+
+describe "em and i resolve the italic face of a generic family":
+    it "AC-5: <em> text resolves to Liberation Sans Italic on Linux":
+        if not file_exists(LIB_ITALIC) or file_exists("/System/Library/Fonts/Helvetica.ttc"):
+            pending("BLOCKED: host has no Liberation Sans Italic")
+            return
+        val cmds = commands_of("<p>a <em>emphasis</em> <i>idiomatic</i></p>")
+        val em = text_command(cmds, "emphasis")
+        val it_cmd = text_command(cmds, "idiomatic")
+        assert_true(em >= 0)
+        assert_true(it_cmd >= 0)
+        assert_true(style_value(cmds[em], "font-identity").contains("LiberationSans-Italic"))
+        assert_true(style_value(cmds[it_cmd], "font-identity").contains("LiberationSans-Italic"))
+
+    it "AC-6: control — upright text keeps the regular face":
+        if not file_exists(LIB_ITALIC) or file_exists("/System/Library/Fonts/Helvetica.ttc"):
+            pending("BLOCKED: host has no Liberation Sans Italic")
+            return
+        val cmds = commands_of("<p>upright</p>")
+        val up = text_command(cmds, "upright")
+        assert_true(up >= 0)
+        assert_true(not style_value(cmds[up], "font-identity").contains("Italic"))
+
+describe "a link is underlined":
+    it "AC-7: <a href> paints a 1px #0000ee rule under its text at line top + 18":
+        step("Chrome: underline row 122 for a line box at 104 (16px), x spans the text")
+        val cmds = commands_of("<p><a href=\"#x\">working anchor</a></p>")
+        val t = text_command(cmds, "working anchor")
+        assert_true(t >= 0)
+        var found = -1
+        var i = 0
+        while i < cmds.len() as i32:
+            if cmds[i].kind == DRAW_IR_COMMAND_RECT and cmds[i].component_id.ends_with("::underline"):
+                found = i
+            i = i + 1
+        assert_true(found >= 0)
+        val u = cmds[found]
+        expect(u.y).to_equal(18)
+        expect(u.height).to_equal(1)
+        expect(u.x).to_equal(cmds[t].x)
+        expect(u.width).to_equal(cmds[t].width)
+        expect(u.color).to_equal(0xff0000eeu32)
+
+    it "AC-8: the rule thickens with the font (24px: 2px at line top + 28)":
+        val cmds = commands_of("<p style=\"font-size:24px\"><a href=\"#x\">anchor</a></p>")
+        val t = text_command(cmds, "anchor")
+        var found = -1
+        var i = 0
+        while i < cmds.len() as i32:
+            if cmds[i].kind == DRAW_IR_COMMAND_RECT and cmds[i].component_id.ends_with("::underline"):
+                found = i
+            i = i + 1
+        assert_true(t >= 0 and found >= 0)
+        expect(cmds[found].y).to_equal(28)
+        expect(cmds[found].height).to_equal(2)

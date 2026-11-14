@@ -34,7 +34,7 @@ use common.ui.draw_ir.{
     draw_ir_rect_bounds, draw_ir_rect_clipped, draw_ir_style_prop, draw_ir_text_styled_clipped
 }
 use std.gc_async_mut.gpu.browser_engine.containment.{contain_value_contains_paint}
-use std.nogc_sync_mut.text_layout.font_provider.{browser_font_family_for_weight}
+use std.nogc_sync_mut.text_layout.font_provider.{browser_font_family_for_style}
 fn _html_draw_ir_component_id(node: HNode, i: i32) -> text:
     if node.id_attr != "":
         return node.id_attr
@@ -314,7 +314,7 @@ fn _html_draw_ir_style_props(node: HNode, st: Style) -> [DrawIrStyleProp]:
         draw_ir_style_prop("text-shadow", if st.text_shadow_color != 0u32: "{st.text_shadow_x_px}px {st.text_shadow_y_px}px {st.text_shadow_color}" else: "none"),
         draw_ir_style_prop("text-transform", st.text_transform),
         draw_ir_style_prop("text-decoration-style", st.text_decoration_style),
-        draw_ir_style_prop("text-decoration-thickness", "{st.text_decoration_thickness_px}px"),
+        draw_ir_style_prop("text-decoration-thickness", if st.text_decoration_thickness_px > 0: "{st.text_decoration_thickness_px}px" else: "auto"),
         draw_ir_style_prop("text-underline-offset", "{st.text_underline_offset_px}px"),
         draw_ir_style_prop("text-underline-position", st.text_underline_position),
         draw_ir_style_prop("text-align", st.text_align),
@@ -488,7 +488,7 @@ fn _html_draw_ir_resolved_text_command(
     # gate as every counter around it and reads no clock when unarmed.
     val _cr_t0 = if _wsc_on: _wsc_now_us() else: 0
     val metrics = resolve_font_metrics_with_language(
-        browser_font_family_for_weight(st.font_family, st.bold), txt, st.font_size,
+        browser_font_family_for_style(st.font_family, st.bold, st.font_style_italic), txt, st.font_size,
         _html_text_language(nodes, i, st)
     )
     if _wsc_on:
@@ -1255,6 +1255,124 @@ fn _html_draw_ir_summary_marker_command(
     marker.parent_id = _html_draw_ir_component_id(node, i)
     marker
 
+# Vertical font metrics Chrome uses for the generic sans face (Arial /
+# Liberation Sans / Helvetica share them): ascent 0.905em, descent 0.212em,
+# both rounded to whole pixels as Skia's FontMetrics are. Used only to place
+# list-marker symbols and text-decoration rules the way Chrome does.
+fn _html_draw_ir_chrome_ascent(font_size: i32) -> i32:
+    (font_size * 905 + 500) / 1000
+
+fn _html_draw_ir_chrome_descent(font_size: i32) -> i32:
+    (font_size * 212 + 500) / 1000
+
+# Chrome's half-leading text top inside a line box: the y where a run of this
+# font starts when the line box is `lh` tall.
+fn _html_draw_ir_chrome_text_top(line_top: i32, lh: i32, font_size: i32) -> i32:
+    (2 * line_top + lh - _html_draw_ir_chrome_ascent(font_size) -
+        _html_draw_ir_chrome_descent(font_size)) / 2
+
+# list-style-position: outside markers for the synthesized `::marker` boxes
+# (parse/style/geometry: bug browser_engine_no_list_marker_boxes_2026-08-19;
+# that change stopped at geometry, so nothing was painted). Chrome 131:
+# - `ol` (decimal): the text "N. " in the li's font, its end on the li's
+#   content edge (16px: "1." ink x 23..34 for content x 40).
+# - `ul`/`menu` (disc): a filled circle from ListMarker's symbol metrics,
+#   a = ascent, o = a*2/3, side = (o+1)/2, x = content - o - 7,
+#   y = text top + 3(a-o)/2 (16px: 5x5 at x 24, line top + 10).
+# Scope: disc/decimal defaults only. Nested-list circle/square, other
+# list-style-type values, and the ol `start`/`reversed`/li `value` attributes
+# are not implemented (the ordinal is the li's index among its li siblings).
+fn _html_draw_ir_list_marker_commands(
+    nodes: [HNode], styles: [Style], boxes: LayoutResult, i: i32,
+    clip: ClipRect, vector_fonts: bool
+) -> [DrawIrCommand]:
+    var out: [DrawIrCommand] = []
+    val node = nodes[i]
+    val st = styles[i]
+    if node.tag != "::marker" or st.display != "marker":
+        return out
+    val li = node.parent as i32
+    if li < 0:
+        return out
+    val list = nodes[li].parent as i32
+    if list < 0:
+        return out
+    val li_st = styles[li]
+    val content_x = boxes.bx[li] + li_st.border_l + li_st.pad_l
+    val line_top = boxes.by[li] + li_st.border_t + li_st.pad_t
+    val lh = style_line_h(li_st)
+    val fs = st.font_size
+    val text_top = _html_draw_ir_chrome_text_top(line_top, lh, fs)
+    val clip_rect = draw_ir_rect_bounds(
+        clip.x0, clip.y0, clip.x1 - clip.x0, clip.y1 - clip.y0
+    )
+    if nodes[list].tag == "ol":
+        var ordinal = 1
+        var j = list + 1
+        # cpu-lane-loop-ok: counts the li's preceding li siblings; bound is the list's subtree before this li
+        while j < li:
+            if nodes[j].parent as i32 == list and nodes[j].tag == "li":
+                ordinal = ordinal + 1
+            j = j + 1
+        val label = "{ordinal}. "
+        var marker = _html_draw_ir_resolved_text_command(
+            nodes, i, node, st, _html_draw_ir_component_id(node, i) + "-text",
+            content_x, text_top, label, _html_draw_ir_style_props(node, st),
+            clip_rect, vector_fonts
+        )
+        val label_w = if marker.width > 0:
+            marker.width
+        else:
+            style_text_line_advance_width_with(
+                style_run_byte_advances(st, label), label, 0, label.len(),
+                style_text_advance(st), style_space_advance(st)
+            )
+        marker.x = content_x - label_w
+        out.push(marker)
+        return out
+    val ascent = _html_draw_ir_chrome_ascent(fs)
+    val offset = ascent * 2 / 3
+    val side = (offset + 1) / 2
+    if side <= 0:
+        return out
+    val disc_rect = draw_ir_rect_bounds(content_x - offset - 7, text_top + 3 * (ascent - offset) / 2, side, side)
+    out.push(draw_ir_box_with_style(
+        _html_draw_ir_component_id(node, i) + "::marker-disc",
+        disc_rect.x, disc_rect.y, side, side, st.fg,
+        disc_rect, disc_rect, disc_rect, clip_rect,
+        [draw_ir_style_prop("border-radius", "{side / 2}")]
+    ))
+    out
+
+# `text-decoration-line: underline` for a #text node's emitted text runs (UA
+# `a:link` and authored underlines). The Draw IR text command carries the
+# decoration only as a style prop, which no Engine2D executor reads, so the
+# rule is emitted as its own rect under each run. Placement follows Chrome:
+# top = baseline + round(0.106em - thickness/2), thickness = round(0.0733em)
+# (min 1) unless `text-decoration-thickness` is set; the baseline is the run's
+# y plus the ascent, i.e. relative to where the glyphs are drawn.
+fn _html_draw_ir_underline_commands(
+    node: HNode, st: Style, runs: [DrawIrCommand]
+) -> [DrawIrCommand]:
+    var out: [DrawIrCommand] = []
+    if node.tag != "#text" or not st.text_decoration_underline:
+        return out
+    val fs = st.font_size
+    var thickness = if st.text_decoration_thickness_px > 0: st.text_decoration_thickness_px else: (fs * 733 + 5000) / 10000
+    if thickness < 1:
+        thickness = 1
+    val below = (fs * 1060 - thickness * 5000 + 5000) / 10000
+    val color = if st.text_decoration_color != 0u32: st.text_decoration_color else: st.fg
+    # cpu-lane-loop-ok: one rule per emitted text line of this node; bound is the node's wrapped line count
+    for run in runs:
+        if run.kind == "text" and run.width > 0:
+            out.push(draw_ir_rect_clipped(
+                run.component_id + "::underline", run.x,
+                run.y + _html_draw_ir_chrome_ascent(fs) + below + st.text_underline_offset_px,
+                run.width, thickness, color, run.clip_rect
+            ))
+    out
+
 fn _html_draw_ir_abs_i32(value: i32) -> i64:
     if value < 0: 0 - value.to_i64() else: value.to_i64()
 
@@ -1672,6 +1790,7 @@ fn _html_draw_ir_commands(
             node_command.parent_id = parent_id
             commands.push(node_command)
             owner_nodes.push(i)
+            var text_runs: [DrawIrCommand] = [node_command]
             # cpu-lane-loop-ok: pushes the Draw IR text commands for wrapped
             # lines 2..N of one #text node; bound is that node's own
             # layout-precomputed wrap-line count (see
@@ -1683,6 +1802,21 @@ fn _html_draw_ir_commands(
                 var extra_line = extra_line_command
                 extra_line.parent_id = parent_id
                 commands.push(extra_line)
+                owner_nodes.push(i)
+                text_runs.push(extra_line)
+            # cpu-lane-loop-ok: underline rules for this #text node's runs; bound is its line count
+            for underline_command in _html_draw_ir_underline_commands(nodes[i], styles[i], text_runs):
+                var underline = underline_command
+                underline.parent_id = parent_id
+                commands.push(underline)
+                owner_nodes.push(i)
+            # cpu-lane-loop-ok: at most one marker command for a ::marker node, none otherwise
+            for list_marker_command in _html_draw_ir_list_marker_commands(
+                nodes, styles, boxes, i, node_clip, vector_fonts
+            ):
+                var list_marker = list_marker_command
+                list_marker.parent_id = component_id
+                commands.push(list_marker)
                 owner_nodes.push(i)
             if val summary_marker = _html_draw_ir_summary_marker_command(
                 nodes, styles, boxes, i, node_clip
