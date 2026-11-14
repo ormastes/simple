@@ -58,10 +58,10 @@ All evidence is the seed interpreter on Windows. **No row is native-verified; ev
 | CU-002 | met (interpreter) | `caret_workbench_generation_spec`: 1,000 seeded ops, 3 sessions, >20 restarts, 0 wrong sends (#9330) | native run |
 | CU-003 | met (interpreter) | `caret_workbench_e2e_spec` 2/2 ("unbound terminal"), `caret_workbench_prod_spec` 2/2 | native run with `LLM_CARET_NATIVE_BIN` |
 | CU-004 | met (interpreter) | `caret_workbench_detach_spec` 1/1 (real children survive detach/switch) | native run |
-| CU-005 | partial | `key_chunker_spec` 10/10; never driven against a live smux pane | live `cs` + smux pane capture |
+| CU-005 | met (interpreter) | `caret_terminal_bytes_live_spec` 1/1: ESC[A, Ctrl+B, Hangul, emoji, unknown chord through the production cs path onto a real Windows smux pane, child-computed hex exact (#9352); was RED on a stdin code-point/byte limit bug, fixed in #9353 | native run |
 | CU-006 | met (interpreter) | `caret_shell_visible_views_spec` 3/3: TUI and GUI shells list the same ids via `visible_view_ids`, false `when` hides in both, no eager load (#9343); `when_contribution_spec` 5/5 | native run; production `set_context_keys` caller |
 | CU-007 | met (interpreter) | `deactivation_hygiene_spec` 10/10 | native run |
-| CU-008 | partial | `observer_live_spec` 3/3, `observer_builder_spec` 13/13; no 10-minute live quiet-build run | timed live run |
+| CU-008 | met (interpreter) | `caret_observer_silent_child_live_spec` (slow) 1/1, 626 s: real silent child with 22 heartbeats never classified as hang, ends "quiet" (#9352); heartbeats folded directly — `provider_adapters` has no heartbeat hook mapping | native run; heartbeat hook mapping |
 | CU-009 | met (interpreter) | `observer_live_spec` approval -> "needs you" in TUI+GUI, replay no dup | native run |
 | CU-010 | partial | lifecycle folded at render; disconnected host not observable (no fleet) | blocked on fleet transport |
 | CU-011 | met (interpreter) | `trace_view_snapshot_spec` 9/9: list/show/refs equal the canonical service for the same snapshot (#9329) | native run; UI selection of show/refs |

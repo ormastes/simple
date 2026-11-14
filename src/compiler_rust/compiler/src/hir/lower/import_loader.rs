@@ -1466,7 +1466,7 @@ impl Lowerer {
         }
     }
 
-    fn should_import_symbol(&self, name: &str, target: &ImportTarget) -> bool {
+    pub(super) fn should_import_symbol(&self, name: &str, target: &ImportTarget) -> bool {
         match target {
             ImportTarget::Glob => !name.starts_with('_'),
             ImportTarget::Single(n) => n == name, // Import if matches
