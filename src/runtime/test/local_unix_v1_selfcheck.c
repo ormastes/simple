@@ -3,7 +3,7 @@
 #include <stdio.h>
 int main(void) { puts("SKIP: local_unix_v1_selfcheck is POSIX-only; no Windows build"); return 77; }
 #else
-/* New actual Linux local-socket contract witness. Raw listeners, descriptor
+/* Actual Linux (and, under __APPLE__, Darwin) local-socket contract witness. Raw listeners, descriptor
  * inspection and teardown belong ONLY to this test harness. Link normal CoreC
  * providers; do not compile runtime_socket_nonblock.c separately as included. */
 #if defined(__linux__) && !defined(_GNU_SOURCE)
@@ -11,7 +11,91 @@ int main(void) { puts("SKIP: local_unix_v1_selfcheck is POSIX-only; no Windows b
 #endif
 #include "../runtime_socket_nonblock.c"
 #include <assert.h>
-#if !defined(__linux__)
+#if defined(__APPLE__)
+/* Darwin witness (C7). Runs on a Mac only; on every other host this branch is
+ * not compiled. Paths use /private/tmp because /tmp is a symlink on macOS and
+ * the owner deliberately refuses symlinked ancestors. */
+#include <dirent.h>
+#include <sys/un.h>
+static int64_t dword(SplArray* a,int index){assert(a&&rt_array_len(a)>index);return rt_value_as_int(rt_array_get(a,index));}
+static int ddescriptors(void) {
+    DIR* d=opendir("/dev/fd");assert(d);int count=0;
+    while(readdir(d))count++;assert(closedir(d)==0);return count;
+}
+static int raw_accept(int listener) {
+    int fd=accept(listener,NULL,NULL);assert(fd>=0);int on=1;
+    assert(setsockopt(fd,SOL_SOCKET,SO_NOSIGPIPE,&on,sizeof(on))==0);return fd;
+}
+int main(void) {
+    alarm(15);char root[]="/private/tmp/simple-unix-v1-XXXXXX";assert(mkdtemp(root));assert(chmod(root,0700)==0);
+    char path[104];assert(snprintf(path,sizeof(path),"%s/socket",root)>0);
+    int listener=socket(AF_UNIX,SOCK_STREAM,0);assert(listener>=0);
+    struct sockaddr_un address={0};address.sun_family=AF_UNIX;strcpy(address.sun_path,path);
+    assert(bind(listener,(struct sockaddr*)&address,sizeof(address))==0&&listen(listener,8)==0);
+    SplArray* a=rt_local_unix_connect_v1(path,strlen(path),geteuid(),lu_clock_v1(CLOCK_MONOTONIC)+500);
+    /* Peer identity: getpeereid uid/gid + audit-token PID, both this process. */
+    assert(dword(a,0)==0&&dword(a,1)>0&&dword(a,2)==geteuid()&&dword(a,3)==getegid()&&dword(a,4)==getpid());
+    int64_t token=dword(a,1);rt_array_free(a);int peer=raw_accept(listener);
+    int status;LuSlotV1* locked=lu_lock_v1(token,&status);assert(locked&&status==0);
+    int on=0;socklen_t on_size=sizeof(on);
+    assert((fcntl(locked->fd,F_GETFD)&FD_CLOEXEC)!=0&&(fcntl(locked->fd,F_GETFL)&O_NONBLOCK)!=0);
+    assert(getsockopt(locked->fd,SOL_SOCKET,SO_NOSIGPIPE,&on,&on_size)==0&&on);
+    pthread_mutex_unlock(&locked->operation);
+    a=rt_local_unix_peer_v1(token);assert(dword(a,0)==0&&dword(a,1)==geteuid()&&dword(a,3)==getpid());rt_array_free(a);
+    SplArray* data=lu_receipt_v1(16);assert(data);lu_word_v1(data,0,'A');
+    a=rt_local_unix_write_some_v1(token,data,0,1,lu_clock_v1(CLOCK_MONOTONIC)+100);
+    assert(dword(a,0)==0&&dword(a,1)==1);rt_array_free(a);char b=0;assert(recv(peer,&b,1,0)==1&&b=='A');
+    assert(send(peer,"BC",2,0)==2);
+    a=rt_local_unix_read_v1(token,16,lu_clock_v1(CLOCK_MONOTONIC)+100);
+    assert(dword(a,0)==0&&!dword(a,1)&&dword(a,2)==2&&dword(a,3)=='B'&&dword(a,4)=='C');rt_array_free(a);
+    a=rt_local_unix_read_now_v1(token,1);assert(dword(a,0)==-11);rt_array_free(a);
+    /* Unrequested SCM_RIGHTS is rejected and every received FD is disposed. */
+    int before=ddescriptors(),p[2];assert(pipe(p)==0);
+    union {struct cmsghdr align;unsigned char bytes[CMSG_SPACE(sizeof(int))];} control;memset(&control,0,sizeof(control));
+    char x='X';struct iovec io={&x,1};struct msghdr msg={0};msg.msg_iov=&io;msg.msg_iovlen=1;
+    msg.msg_control=control.bytes;msg.msg_controllen=sizeof(control.bytes);
+    struct cmsghdr* c=CMSG_FIRSTHDR(&msg);c->cmsg_level=SOL_SOCKET;c->cmsg_type=SCM_RIGHTS;c->cmsg_len=CMSG_LEN(sizeof(int));
+    memcpy(CMSG_DATA(c),&p[0],sizeof(int));assert(sendmsg(peer,&msg,0)==1);close(p[0]);close(p[1]);
+    a=rt_local_unix_read_v1(token,16,lu_clock_v1(CLOCK_MONOTONIC)+100);
+    assert(dword(a,0)==-9&&dword(a,2)==1&&dword(a,3)=='X');rt_array_free(a);assert(ddescriptors()==before);
+    /* A rejected ancillary never starts a handoff. */
+    a=rt_local_unix_handoff_state_v1(token);assert(dword(a,0)==0&&dword(a,1)==0);rt_array_free(a);
+    a=rt_local_unix_shutdown_write_v1(token);assert(dword(a,0)==0&&dword(a,1)==1);rt_array_free(a);
+    assert(recv(peer,&b,1,0)==0);
+    close(peer);
+    a=rt_local_unix_poll_v1(token,1,0);assert(dword(a,0)==0&&dword(a,1)==1);rt_array_free(a);
+    a=rt_local_unix_close_v1(token);assert(dword(a,0)==0&&dword(a,1)==1);rt_array_free(a);
+    a=rt_local_unix_close_v1(token);assert(dword(a,0)==-2&&!dword(a,1));rt_array_free(a);
+    /* Path policy: symlinked ancestor, long sun_path, writable parent, wrong UID. */
+    char alias[104],alias_socket[104];snprintf(alias,sizeof(alias),"%s/alias",root);assert(symlink(".",alias)==0);
+    snprintf(alias_socket,sizeof(alias_socket),"%s/alias/socket",root);
+    a=rt_local_unix_connect_v1(alias_socket,strlen(alias_socket),geteuid(),lu_clock_v1(CLOCK_MONOTONIC)+100);assert(dword(a,0)!=0&&!dword(a,1));rt_array_free(a);assert(unlink(alias)==0);
+    a=rt_local_unix_connect_v1("/tmp/simple-unix-v1-socket",26,geteuid(),lu_clock_v1(CLOCK_MONOTONIC)+100);assert(dword(a,0)==-1);rt_array_free(a);
+    /* A real socket whose absolute path cannot fit Darwin's 104-byte sun_path
+     * (bound relative to the root) is refused rather than truncated. */
+    char leaf[81];memset(leaf,'a',80);leaf[80]=0;char longer[200];
+    assert(snprintf(longer,sizeof(longer),"%s/%s",root,leaf)>=104);
+    int far=socket(AF_UNIX,SOCK_STREAM,0);assert(far>=0&&chdir(root)==0);
+    struct sockaddr_un relative={0};relative.sun_family=AF_UNIX;strcpy(relative.sun_path,leaf);
+    assert(bind(far,(struct sockaddr*)&relative,sizeof(relative))==0&&listen(far,1)==0&&chdir("/")==0);
+    a=rt_local_unix_connect_v1(longer,strlen(longer),geteuid(),lu_clock_v1(CLOCK_MONOTONIC)+100);assert(dword(a,0)==-1&&!dword(a,1));rt_array_free(a);
+    close(far);assert(unlink(longer)==0);
+    a=rt_local_unix_connect_v1(path,strlen(path),(int64_t)geteuid()+1,lu_clock_v1(CLOCK_MONOTONIC)+100);assert(dword(a,0)!=0&&!dword(a,1));rt_array_free(a);
+    assert(chmod(root,0777)==0);a=rt_local_unix_connect_v1(path,strlen(path),geteuid(),lu_clock_v1(CLOCK_MONOTONIC)+100);assert(dword(a,0)==-1);rt_array_free(a);assert(chmod(root,0700)==0);
+    close(listener);assert(unlink(path)==0);
+    /* Owned listener: bind, explicit 0666 mode, same-UID accept refused by the
+     * distinct-UID invariant, exact unlink on close. */
+    a=rt_local_unix_listen_v1(path,strlen(path),geteuid(),4);assert(dword(a,0)==0&&dword(a,1)>0);
+    int64_t owned=dword(a,1);rt_array_free(a);struct stat node;
+    assert(lstat(path,&node)==0&&S_ISSOCK(node.st_mode)&&(node.st_mode&0777)==0666);
+    a=rt_local_unix_accept_v1(owned,geteuid());assert(dword(a,0)==-1);rt_array_free(a);
+    a=rt_local_unix_listener_close_v1(owned);assert(dword(a,0)==0&&dword(a,1)==1);rt_array_free(a);
+    assert(lstat(path,&node)!=0&&errno==ENOENT);
+    rt_array_free(data);assert(rmdir(root)==0);
+    puts("PASS Darwin local Unix bytes/peer(getpeereid+audit token)/path/ancillary/shutdown/close/listener contract; separate-UID accept NOT_RUN");
+    return 0;
+}
+#elif !defined(__linux__)
 int main(void){return 77;}
 #else
 #include <dirent.h>

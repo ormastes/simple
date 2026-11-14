@@ -68,7 +68,7 @@ SplArray* rt_local_unix_claim_request_v1(int64_t t,const char* r,int64_t n) { re
 
 /* Private cross-owner origin check; no descriptor or allocator is exposed. */
 int simple_local_unix_origin_v1(void) {
-#if defined(__linux__)
+#if LUV1_POSIX
     return lu_origin_v1();
 #else
     return 0;

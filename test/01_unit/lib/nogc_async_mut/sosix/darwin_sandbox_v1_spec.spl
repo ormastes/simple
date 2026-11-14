@@ -1,0 +1,64 @@
+# SOSIX Darwin Seatbelt activation ABI (design §9.1/§15.2, C7). Host-portable:
+# admission, sanitization and receipt decoding are pure Simple; the activation
+# itself is irreversible, so this spec NEVER applies a profile to the test
+# process. Real activation is Mac qualification work in a disposable child.
+use std.spec.{describe, it, expect}
+use std.nogc_async_mut.sosix.darwin_sandbox_v1.*
+
+fn receipt_v1(status: i64, error: [i64]) -> [i64]:
+    var words: [i64] = [status, error.len()]
+    for i in 0..512:
+        if i < error.len():
+            words.push(error[i])
+        else:
+            words.push(0)
+    words
+
+describe "SOSIX Darwin sandbox ABI":
+    it "refuses on a non-Darwin host without entering native code":
+        @when(os="macos"):
+        # Applying here would confine the test runner itself.
+        expect(true).to_equal(true)
+        @else:
+        val result = sosix_darwin_sandbox_apply_v1([40u8, 118u8, 101u8, 114u8, 115u8, 105u8, 111u8, 110u8, 32u8, 49u8, 41u8])
+        assert(result.status == SosixDarwinSandboxStatusV1.Unsupported)
+        expect(result.error).to_equal("sandbox_unsupported_host")
+        val empty = sosix_darwin_sandbox_apply_v1([])
+        assert(empty.status == SosixDarwinSandboxStatusV1.Unsupported)
+        @end
+
+    it "admits only non-empty bounded NUL-free profiles":
+        assert(not sosix_darwin_sandbox_profile_admissible_v1([]))
+        assert(not sosix_darwin_sandbox_profile_admissible_v1([40u8, 0u8, 41u8]))
+        assert(sosix_darwin_sandbox_profile_admissible_v1([40u8, 41u8]))
+
+    it "sanitizes platform error text to bounded printable ASCII":
+        expect(sosix_darwin_sandbox_sanitize_error_v1([111, 107, 10, 27, 200, 33])).to_equal("ok???!")
+        var long: [i64] = []
+        for i in 0..600:
+            long.push(65)
+        expect(sosix_darwin_sandbox_sanitize_error_v1(long).len()).to_equal(512)
+
+    it "decodes applied refused and unsupported receipts without fallback":
+        val applied = sosix_darwin_sandbox_decode_v1(Some(receipt_v1(0, [])))
+        assert(applied.status == SosixDarwinSandboxStatusV1.Applied)
+        expect(applied.error).to_equal("")
+        val refused = sosix_darwin_sandbox_decode_v1(Some(receipt_v1(-3, [98, 97, 100, 10])))
+        assert(refused.status == SosixDarwinSandboxStatusV1.Refused)
+        expect(refused.error).to_equal("sandbox_init_refused: bad?")
+        val silent = sosix_darwin_sandbox_decode_v1(Some(receipt_v1(-3, [])))
+        expect(silent.error).to_equal("sandbox_init_refused")
+        val host = sosix_darwin_sandbox_decode_v1(Some(receipt_v1(-4, [])))
+        assert(host.status == SosixDarwinSandboxStatusV1.Unsupported)
+        val profile = sosix_darwin_sandbox_decode_v1(Some(receipt_v1(-1, [])))
+        assert(profile.status == SosixDarwinSandboxStatusV1.InvalidProfile)
+
+    it "treats absent or malformed receipts as unknown, never applied":
+        val absent = sosix_darwin_sandbox_decode_v1(None)
+        assert(absent.status == SosixDarwinSandboxStatusV1.ReceiptUnavailable)
+        val short = sosix_darwin_sandbox_decode_v1(Some([0, 0]))
+        assert(short.status == SosixDarwinSandboxStatusV1.ReceiptInvalid)
+        val applied_with_error = sosix_darwin_sandbox_decode_v1(Some(receipt_v1(0, [65])))
+        assert(applied_with_error.status == SosixDarwinSandboxStatusV1.ReceiptInvalid)
+        val unknown = sosix_darwin_sandbox_decode_v1(Some(receipt_v1(7, [])))
+        assert(unknown.status == SosixDarwinSandboxStatusV1.ReceiptInvalid)
