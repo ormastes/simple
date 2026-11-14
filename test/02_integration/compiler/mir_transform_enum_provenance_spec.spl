@@ -1,0 +1,54 @@
+# Actual pass integration regression. Full compiler test runtime: UNRUN.
+# Native constructor probes separately cover all eight repaired reconstruction sites.
+use std.spec.{describe, it, expect}
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.common.diagnostics.span.{Span}
+use compiler.driver.driver.{CompilerDriver}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.hir.hir_definitions.{HirAopAdvice}
+use compiler.mir.mir_instruction_graph.{MirModule}
+use compiler.mir.mir_enum_semantic_types.{MirEnumDeclarationIdentityV1, MirEnumVariantSlotsV1}
+use compiler.mir.mir_debug_trace_injection.{inject_debug_trace}
+use compiler.mir_opt.simd_lowering.{run_simd_lowering}
+use compiler.mir_opt.auto_vectorize.{run_auto_vectorization}
+
+fn provenance_module() -> MirModule:
+    val variant = MirEnumVariantSlotsV1(discriminant: 7,
+        source_variant: SymbolId(id: 31), slot_types: [], slot_names: ["payload"])
+    val record = MirEnumDeclarationIdentityV1(owner: SymbolId(id: 11),
+        source_owner: SymbolId(id: 21), runtime_name: "app.Choice",
+        runtime_identity: 314, variants: [variant])
+    MirModule(name: "app", functions: {}, statics: {}, constants: {}, types: {},
+        enum_semantic_declarations: [record])
+
+fn expect_provenance(module: MirModule):
+    expect(module.enum_semantic_declarations.len()).to_equal(1)
+    val record = module.enum_semantic_declarations[0]
+    expect(record.owner.id).to_equal(11)
+    expect(record.source_owner.id).to_equal(21)
+    expect(record.runtime_name).to_equal("app.Choice")
+    expect(record.runtime_identity).to_equal(314)
+    expect(record.variants.len()).to_equal(1)
+    expect(record.variants[0].discriminant).to_equal(7)
+    expect(record.variants[0].source_variant.id).to_equal(31)
+    expect(record.variants[0].slot_names).to_equal(["payload"])
+
+describe "MIR transforms retain enum declaration provenance":
+    it "preserves records through enabled AOP module reconstruction":
+        var driver = CompilerDriver.create(driver_core_compile_options_default())
+        driver.ctx.mir_modules = {"app": provenance_module()}
+        driver.ctx.hir_aop_advices_saved = [HirAopAdvice(
+            predicate_text: "execution(* target(..))", advice_function: "observer",
+            form: "before", priority: 0,
+            span: Span(start: 0, end: 1, line: 1, col: 1,
+                file: "app.spl", length: 1))]
+        driver.weave_aop_for_explicit_compilation()
+        expect(driver.ctx.has_errors()).to_equal(false)
+        expect_provenance(driver.ctx.mir_modules["app"])
+
+    it "preserves records through enabled debug tracing":
+        expect_provenance(inject_debug_trace(provenance_module(), "functions"))
+
+    it "preserves records through SIMD and automatic vectorization":
+        expect_provenance(run_simd_lowering(provenance_module()))
+        expect_provenance(run_auto_vectorization(provenance_module()))
