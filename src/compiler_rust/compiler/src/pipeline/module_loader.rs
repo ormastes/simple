@@ -859,6 +859,27 @@ fn strip_flattened_import_nodes(module: Module, module_path: &Path) -> Module {
                 items.push(declaration);
                 next_global_already_tagged = false;
             }
+            Node::ModDecl(mut mod_decl) => {
+                // An inline `mod X:` block is a global of its declaring file;
+                // the owner attribute lets the interpreter record it under
+                // that file instead of the entry script.
+                if mod_decl.body.is_some()
+                    && !mod_decl
+                        .attributes
+                        .iter()
+                        .any(|attribute| attribute.name.starts_with(FLATTEN_MODULE_OWNER_ATTR_PREFIX))
+                {
+                    mod_decl.attributes.push(simple_parser::ast::Attribute {
+                        span: mod_decl.span,
+                        name: format!("{FLATTEN_MODULE_OWNER_ATTR_PREFIX}{owner_name}"),
+                        value: None,
+                        args: None,
+                        named_args: None,
+                    });
+                }
+                items.push(Node::ModDecl(mod_decl));
+                next_global_already_tagged = false;
+            }
             other => {
                 if matches!(
                     other,

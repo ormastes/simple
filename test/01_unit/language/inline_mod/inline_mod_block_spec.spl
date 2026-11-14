@@ -23,13 +23,16 @@ fn work_dir() -> text:
 fn run_interp(name: text, source: text) -> (text, text, i64):
     val path = work_dir() + "/" + name + ".spl"
     assert_true(file_write(path, source))
+    val ran = run_path(path)
+    (ran[0].trim(), ran[1], ran[2])
+
+fn run_path(path: text) -> (text, text, i64):
     env_set("SIMPLE_EXECUTION_MODE", "interpret")
     env_set("SIMPLE_RUST_SEED_WARNING", "0")
     env_set("SIMPLE_TIMEOUT_SECONDS", "0")
     val configured = env_get("SIMPLE_BINARY")
     val bin = if configured == "": "bin/simple" else: configured
-    val ran = process_run(bin, ["run", path])
-    (ran[0].trim(), ran[1], ran[2])
+    process_run(bin, ["run", path])
 
 describe "a mod block named from a function body":
     it "is visible in a function declared after it":
@@ -177,7 +180,7 @@ print(twice(4))
 print(LIMIT)
 """)
         assert_true(rc2 != 0)
-        assert_true(err2.contains("LIMIT"))
+        assert_true(err2.contains("variable `LIMIT` not found"))
 
     it "still reports an unknown block member":
         val (out, err, rc) = run_interp("unknown_member", """mod X:
@@ -204,12 +207,53 @@ fn main():
     print(Kind.I8)
     print(Kind.Pay(3))
     print(Kind.Pay)
-    print(X.LIMIT)
 
 main()
+print(X.LIMIT)
 """)
         assert_equal(rc, 0)
         assert_equal(out, "Kind::I8\nKind::Pay(3)\n<enum_variant_constructor>\n9")
+
+    it "keeps each imported file's own block when two files name it the same":
+        val dir = work_dir() + "/twolibs"
+        dir_create_all(dir)
+        assert_true(file_write(dir + "/liba.spl", """mod Util:
+    const V = 1
+
+fn a_v() -> i64:
+    Util.V
+"""))
+        assert_true(file_write(dir + "/libb.spl", """mod Util:
+    const V = 2
+
+fn b_v() -> i64:
+    Util.V
+"""))
+        assert_true(file_write(dir + "/main.spl", """use liba.{a_v}
+use libb.{b_v}
+
+print(a_v())
+print(b_v())
+"""))
+        val ran = run_path(dir + "/main.spl")
+        assert_equal(ran[2], 0)
+        assert_equal(ran[0].trim(), "1\n2")
+
+    it "keeps a variant of an earlier enum that is spelled like a later enum":
+        val (out, err, rc) = run_interp("variant_named_like_enum", """mod X:
+    enum A:
+        Kind
+        Other
+    enum Kind:
+        P
+        Q
+
+print(X.Kind)
+print(X.Kind == X.Kind)
+print(X.P)
+""")
+        assert_equal(rc, 0)
+        assert_equal(out, "A::Kind\ntrue\nKind::P")
 
     it "keeps a file-level module's enum and functions as they were":
         val dir = work_dir() + "/filemod"
@@ -235,11 +279,6 @@ print(area(Shape.Circle(3)))
 print(area(Shape.Dot))
 print(inner_limit())
 """))
-        env_set("SIMPLE_EXECUTION_MODE", "interpret")
-        env_set("SIMPLE_RUST_SEED_WARNING", "0")
-        env_set("SIMPLE_TIMEOUT_SECONDS", "0")
-        val configured = env_get("SIMPLE_BINARY")
-        val bin = if configured == "": "bin/simple" else: configured
-        val ran = process_run(bin, ["run", dir + "/main.spl"])
+        val ran = run_path(dir + "/main.spl")
         assert_equal(ran[2], 0)
         assert_equal(ran[0].trim(), "9\n0\n9")
