@@ -1697,10 +1697,11 @@ never cache an answer computed while exhausted) —
   and atomic inline boxes carry their horizontal margins.
 - **Trap — one colour parser, CSS Color 4 values.** `parse_color` and
   `parse_color_alpha` hand `rgb()` / `hsl()` and keywords to dom_color's
-  `parse_color_value_checked`; only legacy comma `rgb()` in `parse_color`
-  is forced opaque. 0 means "transparent or invalid" to every caller, so an
-  invalid value must be rejected (never read as 0 = black) and an invalid
-  colour longhand is dropped in `_decl_table_build_inner`. A shortcut keyword above the table (`red` = #dc3232 survived
+  `parse_color_value_checked`, alpha kept in every syntax. 0 means
+  "transparent or invalid" to every caller, so an invalid value must be
+  rejected (never read as 0 = black), and a colour longhand OR shorthand
+  (`background`, `border*`, `outline`) holding a malformed colour function
+  is dropped whole in `_decl_table_build_inner`. A shortcut keyword above the table (`red` = #dc3232 survived
   for months) silently repaints every page; pin new forms in
   `css_color_parse_chrome159_spec.spl` against `getComputedStyle`.
 - **Trap — a collapsed cell's box overlaps its neighbour.** In

@@ -195,11 +195,31 @@ max-content of mixed inline content, control UA font reset, `h6` margins
   the declaration table so the earlier value wins (Chrome); a translucent
   border blends instead of being stored raw. Spec rows AC-7..AC-9 of
   `css_color_parse_chrome159_spec.spl`.
-- **Open: a transparent `border-color` (`transparent`, or any alpha-0
-  colour) keeps the earlier border colour.** Every colour parser answers 0
-  for both "transparent" and "not a colour", and the border appliers treat
-  0 as "keep" (`decl_apply.spl` border-color block). Chrome paints nothing.
-  Pre-existing; unchanged at `00dd0a5da9d`.
+- **Colour review round 2 (2026-11-15).** A shorthand holding a malformed
+  colour function (`background: rgb(1,2)`, `border: 3px solid hsl(foo,1%,2%)`,
+  `border-top`, `outline`) is now dropped whole, like the longhands (it used
+  to win as last and reset the earlier colour). Legacy comma `rgba()` keeps
+  its alpha in `parse_color` like `hsla()`; `color` with an alpha-0 colour
+  paints no text; `parse_color_any` finds `hsl()` inside a shorthand
+  (`border-left: 4px solid hsl(...)` painted no border); a translucent side
+  next to an unpainted side fills its corner. Spec rows AC-10..AC-13; 3px
+  collapsed borders pinned by the table spec's AC-8 (already Chrome-exact).
+- **Open: alpha 0 is "not a colour".** `_parse_color_delegated` answers 0
+  for any alpha-0 colour, the same value as invalid input, and the
+  appliers read 0 as "keep the earlier value": `border-color: transparent`
+  or `hsla(0,0%,0%,0)` keeps the earlier border colour, and
+  `background: rgba(255,0,0,0)` goes down the raw-layers path. `color` is
+  special-cased (`_color_alpha_zero`). Needs a distinct transparent value
+  through every applier; pre-existing, unchanged at `00dd0a5da9d`.
+- **Open: partial text alpha.** `color: rgba(0,0,0,.5)` now carries its
+  alpha into `fg`; whether every text paint path blends by it is not
+  verified (alpha 0 is handled above).
+- **Open: an unclosed function at the end of a style attribute.**
+  `style="background:rgb(0,255,0"` paints green in Chrome (CSS closes open
+  blocks at end of input) and nothing in Simple, for the longhand too. The
+  declaration table would accept it; the value is lost before it, where the
+  inline style is merged with the rule declarations
+  (`simple_web_html_layout_renderer_core.spl` compute_styles).
 - **Open: exponents in colour channels.** `rgb(1e2, 0, 0)` reads its channel
   as 1 (the exponent is consumed and dropped); Chrome reads 100. The value is
   pinned by `dom_color_alpha_normalization_spec.spl`

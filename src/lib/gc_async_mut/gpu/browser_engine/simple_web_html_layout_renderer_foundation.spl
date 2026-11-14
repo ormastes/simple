@@ -1560,14 +1560,9 @@ fn parse_color(raw: text) -> u32:
             val b = hex_val(s.substring(3, 4)) * 17
             return web_argb(r, g, b)
         return 0u32
-    if text_matches_at(s, "rgb", 0) and text_index_of(s, ",") >= 0:
-        # Legacy comma rgb()/rgba() has always answered opaque here (alpha
-        # dropped); every other function form keeps its alpha through the
-        # delegate below. Invalid input is 0 -- not a colour -- so the
-        # declaration is dropped instead of painting black.
-        if val rgba = parse_color_value_checked(s):
-            return 0xFF000000u32 | ((rgba >> 8) & 0xFFFFFFu32)
-        return 0u32
+    # rgb()/rgba()/hsl()/hsla() in every syntax keep their alpha through the
+    # delegate (legacy comma rgba() was forced opaque here until 2026-11-15);
+    # invalid input is 0 -- not a colour -- never black.
     _parse_color_delegated(s)
 
 fn _parse_color_delegated(lowered: text) -> u32:
@@ -1599,7 +1594,11 @@ fn parse_color_any(raw: text) -> u32:
     if direct != 0u32:
         return direct
     val lower = raw.lower()
-    val rgb = text_index_of(lower, "rgb")
+    # The first colour function inside a shorthand (`4px solid hsl(...)`):
+    # rgb()/rgba() and hsl()/hsla() alike.
+    val rgb_at = text_index_of(lower, "rgb")
+    val hsl_at = text_index_of(lower, "hsl")
+    val rgb = if rgb_at < 0 or (hsl_at >= 0 and hsl_at < rgb_at): hsl_at else: rgb_at
     if rgb >= 0:
         val rp = find_from(raw, ")", rgb)
         if rp >= 0:
@@ -3001,33 +3000,51 @@ fn _decl_table_build_inner(decls: text) -> [text]:
         pos = semi + 1
     tbl
 
-# A colour longhand whose value is a malformed rgb()/rgba()/hsl()/hsla() is an
-# invalid declaration: CSS drops it, so the earlier (or inherited) value stays.
-# Leaving it in the table let the last-wins lookup read it as "no colour" and
-# lose the earlier one (`background-color: hsl(foo, bar, baz)` after a valid
-# colour painted nothing; css_color_parse_chrome159_spec.spl AC-9).
+# A colour property whose value holds a malformed rgb()/rgba()/hsl()/hsla()
+# is an invalid declaration: CSS drops it whole, so the earlier (or
+# inherited) value stays. Leaving it in the table let the last-wins lookup
+# read it as "no colour" and lose the earlier one -- for a longhand
+# (`background-color: hsl(foo, bar, baz)`) and for a shorthand
+# (`background: rgb(1,2)`, `border: 3px solid hsl(foo,1%,2%)`), which also
+# resets its other longhands (css_color_parse_chrome159_spec.spl AC-9, AC-10).
 fn _decl_invalid_color_function(prop: text, value: text) -> bool:
     if not (
         prop == "color" or prop == "background-color" or
-        prop == "border-color" or prop == "border-top-color" or
+        prop == "background" or prop == "border" or
+        prop == "border-color" or prop == "border-top" or
+        prop == "border-right" or prop == "border-bottom" or
+        prop == "border-left" or prop == "border-top-color" or
         prop == "border-right-color" or prop == "border-bottom-color" or
-        prop == "border-left-color" or prop == "outline-color" or
-        prop == "text-decoration-color" or prop == "caret-color"
+        prop == "border-left-color" or prop == "outline" or
+        prop == "outline-color" or prop == "text-decoration-color" or
+        prop == "caret-color"
     ):
         return false
-    var v = value.lower()
-    val bang = text_index_of(v, "!")
-    if bang >= 0:
-        v = v.substring(0, bang).trim()
-    if not (v.starts_with("rgb") or v.starts_with("hsl")) or not v.ends_with(")"):
+    val v = value.lower()
+    # Nothing a later stage substitutes is judged here.
+    if text_index_of(v, "var(") >= 0 or text_index_of(v, "calc(") >= 0 or text_index_of(v, "env(") >= 0 or text_index_of(v, "attr(") >= 0:
         return false
-    # One function token only (a multi-value border-color is not judged here),
-    # and nothing a later stage substitutes.
-    if text_index_of(v, "var(") >= 0 or text_index_of(v, "calc(") >= 0 or text_index_of(v, "env(") >= 0:
-        return false
-    if find_from(v, "(", text_index_of(v, "(") + 1) >= 0:
-        return false
-    parse_color_value_checked(v) == nil
+    var i = 0
+    val n = v.byte_len()
+    while i < n:
+        val lp = find_from(v, "(", i)
+        if lp < 0:
+            return false
+        var start = lp
+        while start > 0 and _decl_ident_char(v.substring(start - 1, start)):
+            start = start - 1
+        val name = v.substring(start, lp)
+        val rp = find_from(v, ")", lp)
+        if rp < 0:
+            return false
+        if name == "rgb" or name == "rgba" or name == "hsl" or name == "hsla":
+            if parse_color_value_checked(v.substring(start, rp + 1)) == nil:
+                return true
+        i = rp + 1
+    false
+
+fn _decl_ident_char(ch: text) -> bool:
+    (ch >= "a" and ch <= "z") or ch == "-"
 
 # ---------------------------------------------------------------------------
 # Presence set over a declaration table.
