@@ -1,0 +1,40 @@
+use std.spec.{describe, it, expect}
+use compiler.common.driver_compile_options.{driver_core_compile_options_default, compileoptions_normalize_mir_optimization}
+use compiler.common.driver_core_modes.{driver_output_format_native}
+use compiler.driver.driver_xray_policy.{xray_startup_consumer_request_error_v1, xray_startup_consumer_identity_suffix_v1}
+
+describe "Explicit XRay startup consumer request":
+    it "leaves defaults and disabled cache identities unchanged":
+        val options = driver_core_compile_options_default()
+        expect(options.xray_startup_consumer_v1).to_equal(false)
+        expect(xray_startup_consumer_request_error_v1(options)).to_equal("")
+        expect(xray_startup_consumer_identity_suffix_v1(false)).to_equal("")
+
+    it "preserves a valid request without granting observer capability":
+        var options = driver_core_compile_options_default()
+        options.xray_enabled = true
+        options.xray_startup_consumer_v1 = true
+        options.backend = "llvm"
+        options.native_target = "aarch64-unknown-linux-gnu"
+        options.cli_mode_text = "aot"
+        options.output_format = driver_output_format_native()
+        val normalized = compileoptions_normalize_mir_optimization(options)
+        expect(normalized.xray_startup_consumer_v1).to_equal(true)
+        expect(xray_startup_consumer_request_error_v1(normalized)).to_equal("")
+        expect(xray_startup_consumer_identity_suffix_v1(true)).to_equal("|xray-startup-consumer-v1=on")
+
+    it "rejects absent sled intent and unsupported backend or target":
+        var options = driver_core_compile_options_default()
+        options.xray_startup_consumer_v1 = true
+        expect(xray_startup_consumer_request_error_v1(options) != "").to_equal(true)
+        options.xray_enabled = true
+        options.backend = "native"
+        expect(xray_startup_consumer_request_error_v1(options) != "").to_equal(true)
+        options.backend = "llvm"
+        options.native_target = "aarch64-pc-windows-msvc"
+        expect(xray_startup_consumer_request_error_v1(options) != "").to_equal(true)
+        options.native_target = "aarch64-unknown-linux-gnu"
+        options.cli_mode_text = "aot"
+        options.output_format = driver_output_format_native()
+        options.release = true
+        expect(xray_startup_consumer_request_error_v1(options) != "").to_equal(true)
