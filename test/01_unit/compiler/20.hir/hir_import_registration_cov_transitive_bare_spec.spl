@@ -1,0 +1,176 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+"""
+# HIR imports: who owns a bare name the importer never wrote
+
+A composite FIELD dependency is transitive: the importer named the holder,
+not the field's type. It gets the bare name only while that name is free.
+These examples drive the registration directly, one import at a time, and pin
+the ownership rules for the bare name:
+
+- a second transitive owner of the same bare name makes it ambiguous: the
+  bare binding is dropped and each owner stays reachable under its
+  module-qualified name;
+- an explicit import claims an ambiguous name and then keeps it against any
+  later transitive pull;
+- the importing module's own declaration is never unbound, neither by a
+  conflicting transitive pull nor by an explicit import of the same name;
+- nothing is recorded for a name pulled from a function scope.
+"""
+
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules, ModuleSurfacesByName}
+
+val bare_a_src = "pub struct Gap:\n    a: i64\n\npub struct HolderA:\n    gap: Gap\n\npub struct Point:\n    x: i64\n"
+val bare_b_src = "pub struct Gap:\n    b: i64\n\npub struct HolderB:\n    gap: Gap\n"
+val bare_c_src = "pub struct Gap:\n    c: i64\n\npub struct HolderC:\n    gap: Gap\n"
+val bare_d_src = "pub struct Gap:\n    d: i64\n\npub struct HolderD:\n    gap: Gap\n"
+val bare_e_src = "use lib.a.\{Point as Pt\}\n\npub struct AliasHolder:\n    p: Pt\n"
+
+fn bare_registry() -> ModuleSurfacesByName:
+    val names = ["lib.a", "lib.b", "lib.c", "lib.d", "lib.e"]
+    val srcs = [bare_a_src, bare_b_src, bare_c_src, bare_d_src, bare_e_src]
+    val log = Logger(level: 0)
+    var modules: Dict<text, Module> = {}
+    var sources: [SourceFile] = []
+    var i = 0
+    while i < names.len():
+        val path = names[i].replace(".", "/") + ".spl"
+        modules[names[i]] = parse_full_frontend(srcs[i], path, names[i], log)
+        sources.push(SourceFile(path: path, content: srcs[i], module_name: names[i]))
+        i = i + 1
+    module_surfaces_from_modules(modules, sources).unwrap()
+
+fn importer() -> HirLowering:
+    var lowering = hirlowering_for_module("app/main.spl", bare_registry())
+    lowering.begin_module("app/main.spl")
+    lowering
+
+fn import_one(lowering: HirLowering, owner: text, name: text, local_name: text) -> HirLowering:
+    var target = lowering
+    val index = target.module_surfaces.index_by_name[owner]
+    target.register_imported_symbol(index, owner, name, local_name, Span.empty(), true)
+    target
+
+fn declare_own_struct(lowering: HirLowering, name: text) -> HirLowering:
+    """What the declare pass does for the module's own `struct name`: the
+    declaration replaces whatever import held the bare name."""
+    var target = lowering
+    target.symbols.unbind_local_type(name)
+    target.symbols.define(name, SymbolKind.Struct, nil, Span.empty(), Visibility.Public, false, Some("app.main"))
+    target
+
+fn bound(lowering: HirLowering, local_name: text) -> bool:
+    lowering.symbols.lookup_or_invalid(local_name).is_valid()
+
+fn owner_of(lowering: HirLowering, local_name: text) -> text:
+    val symbol: HirSymbol = lowering.symbols.symbols[lowering.symbols.lookup_or_invalid(local_name).id]
+    symbol.defining_module ?? ""
+
+fn qualified(lowering: HirLowering, owner: text, name: text) -> i64:
+    lowering.symbols.lookup_qualified_type_raw(owner, name)
+
+describe "transitive bare type bindings":
+    it "gives a field dependency the bare name while that name is free":
+        val lowering = import_one(importer(), "lib.a", "HolderA", "HolderA")
+        expect(bound(lowering, "Gap")).to_equal(true)
+        expect(owner_of(lowering, "Gap")).to_equal("lib.a")
+        expect(lowering.transitive_bare_names).to_equal(["Gap"])
+        expect(lowering.transitive_bare_owners).to_equal(["lib.a"])
+        expect(lowering.transitive_bare_ids).to_equal([qualified(lowering, "lib.a", "Gap")])
+
+    it "drops the bare name when a second owner pulls it, keeping both reachable":
+        var lowering = import_one(importer(), "lib.a", "HolderA", "HolderA")
+        lowering = import_one(lowering, "lib.b", "HolderB", "HolderB")
+        expect(bound(lowering, "Gap")).to_equal(false)
+        val first = qualified(lowering, "lib.a", "Gap")
+        val second = qualified(lowering, "lib.b", "Gap")
+        expect(first >= 0).to_equal(true)
+        expect(second >= 0).to_equal(true)
+        expect(first == second).to_equal(false)
+        expect(lowering.transitive_bare_owners).to_equal([""])
+        expect(lowering.errors.len()).to_equal(0)
+
+    it "keeps every further conflicting owner reachable under its qualified name":
+        var lowering = import_one(importer(), "lib.a", "HolderA", "HolderA")
+        lowering = import_one(lowering, "lib.b", "HolderB", "HolderB")
+        lowering = import_one(lowering, "lib.c", "HolderC", "HolderC")
+        val third = qualified(lowering, "lib.c", "Gap")
+        expect(third >= 0).to_equal(true)
+        expect(third == qualified(lowering, "lib.a", "Gap")).to_equal(false)
+        expect(third == qualified(lowering, "lib.b", "Gap")).to_equal(false)
+        expect(lowering.transitive_bare_names).to_equal(["Gap"])
+        expect(lowering.errors.len()).to_equal(0)
+
+    it "lets an explicit import claim a name left ambiguous":
+        var lowering = import_one(importer(), "lib.a", "HolderA", "HolderA")
+        lowering = import_one(lowering, "lib.b", "HolderB", "HolderB")
+        lowering = import_one(lowering, "lib.c", "Gap", "Gap")
+        expect(bound(lowering, "Gap")).to_equal(true)
+        expect(owner_of(lowering, "Gap")).to_equal("lib.c")
+        expect(lowering.transitive_bare_owners).to_equal(["!"])
+
+    it "keeps an explicit import against a later transitive pull":
+        var lowering = import_one(importer(), "lib.a", "HolderA", "HolderA")
+        lowering = import_one(lowering, "lib.b", "HolderB", "HolderB")
+        lowering = import_one(lowering, "lib.c", "Gap", "Gap")
+        lowering = import_one(lowering, "lib.d", "HolderD", "HolderD")
+        expect(owner_of(lowering, "Gap")).to_equal("lib.c")
+        expect(qualified(lowering, "lib.d", "Gap") >= 0).to_equal(true)
+        expect(lowering.transitive_bare_owners).to_equal(["!"])
+
+    it "replaces a transitive binding with an explicit import of the same name":
+        var lowering = import_one(importer(), "lib.a", "HolderA", "HolderA")
+        lowering = import_one(lowering, "lib.b", "Gap", "Gap")
+        expect(owner_of(lowering, "Gap")).to_equal("lib.b")
+        expect(qualified(lowering, "lib.a", "Gap") >= 0).to_equal(true)
+        expect(lowering.transitive_bare_owners).to_equal(["!"])
+
+    it "keeps the module's own declaration against a conflicting transitive pull":
+        var lowering = import_one(importer(), "lib.a", "HolderA", "HolderA")
+        lowering = declare_own_struct(lowering, "Gap")
+        val own = lowering.symbols.local_type_binding_raw("Gap")
+        expect(own == qualified(lowering, "lib.a", "Gap")).to_equal(false)
+        lowering = import_one(lowering, "lib.b", "HolderB", "HolderB")
+        expect(lowering.symbols.local_type_binding_raw("Gap")).to_equal(own)
+        expect(owner_of(lowering, "Gap")).to_equal("app.main")
+        expect(qualified(lowering, "lib.b", "Gap") >= 0).to_equal(true)
+        expect(lowering.transitive_bare_owners).to_equal(["!"])
+
+    it "keeps the module's own declaration when the same name is imported explicitly":
+        var lowering = import_one(importer(), "lib.a", "HolderA", "HolderA")
+        lowering = declare_own_struct(lowering, "Gap")
+        val own = lowering.symbols.local_type_binding_raw("Gap")
+        lowering = import_one(lowering, "lib.b", "Gap", "Gap")
+        expect(lowering.symbols.local_type_binding_raw("Gap")).to_equal(own)
+        expect(owner_of(lowering, "Gap")).to_equal("app.main")
+        # The explicit import is still reachable, under its owner's name.
+        val imported = qualified(lowering, "lib.b", "Gap")
+        expect(imported >= 0).to_equal(true)
+        expect(imported == own).to_equal(false)
+
+    it "records nothing for a name pulled from a function scope":
+        var lowering = importer()
+        lowering.symbols.push_scope(ScopeKind.Function)
+        lowering = import_one(lowering, "lib.a", "HolderA", "HolderA")
+        expect(bound(lowering, "Gap")).to_equal(true)
+        expect(lowering.transitive_bare_names.len()).to_equal(0)
+        lowering.symbols.pop_scope()
+
+describe "field dependency reached through the owner's aliased import":
+    it "binds the alias in the holder's module scope to the declaration":
+        val lowering = import_one(importer(), "lib.e", "AliasHolder", "AliasHolder")
+        expect(bound(lowering, "AliasHolder")).to_equal(true)
+        val declared = qualified(lowering, "lib.a", "Point")
+        expect(declared >= 0).to_equal(true)
+        expect(qualified(lowering, "lib.e", "Pt")).to_equal(declared)
+        expect(lowering.errors.len()).to_equal(0)

@@ -1,0 +1,145 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+"""
+# HIR imports: resolving one unbound name through the importer's globs
+
+`use m.*` expands only what `m` declares. A name the importer reaches through
+a glob but that was never expanded is resolved lazily, one name at a time, by
+`try_register_glob_reachable_symbol`; `try_register_bootstrap_global_symbol`
+tries that route first and then falls back to "exactly one loaded module
+declares it". These examples pin which routes exist:
+
+- a glob target that declares the name, or re-exports it from the module that
+  does, binds it; the symbol always belongs to the DECLARING module;
+- a selective import (`use m.{x}`) and a glob whose target is not loaded are
+  not routes;
+- the unique-owner fallback needs no import at all, and gives up when two
+  modules declare the name.
+"""
+
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.common.diagnostics.span.{Span}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering._Items.module_lowering.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules, ModuleSurfacesByName}
+
+val glob_a_src = "pub struct Point:\n    x: i64\n\npub class Box:\n    n: i64\n\npub enum Color:\n    Red\n    Green\n\npub trait Shape:\n    fn area() -> i64\n\ntype Pairs = [Point]\n\npub val LIMIT: i64 = 7\n\npub struct Twin:\n    a: i64\n\npub fn make() -> i64:\n    1\n"
+val glob_b_src = "pub struct Twin:\n    b: i64\n"
+val glob_facade_src = "export use lib.a.*\n"
+val glob_direct_src = "use lib.a.*\n\nfn f() -> i64:\n    1\n"
+val glob_via_facade_src = "use lib.g.*\n\nfn f() -> i64:\n    1\n"
+val glob_selective_src = "use lib.a.\{make\}\n\nfn f() -> i64:\n    1\n"
+val glob_unloaded_src = "use nowhere.mod.*\n\nfn f() -> i64:\n    1\n"
+
+fn glob_registry() -> ModuleSurfacesByName:
+    val names = ["lib.a", "lib.b", "lib.g", "app.direct", "app.viafacade", "app.selective", "app.unloaded"]
+    val srcs = [glob_a_src, glob_b_src, glob_facade_src, glob_direct_src, glob_via_facade_src, glob_selective_src, glob_unloaded_src]
+    val log = Logger(level: 0)
+    var modules: Dict<text, Module> = {}
+    var sources: [SourceFile] = []
+    var i = 0
+    while i < names.len():
+        val path = names[i].replace(".", "/") + ".spl"
+        modules[names[i]] = parse_full_frontend(srcs[i], path, names[i], log)
+        sources.push(SourceFile(path: path, content: srcs[i], module_name: names[i]))
+        i = i + 1
+    module_surfaces_from_modules(modules, sources).unwrap()
+
+fn importer_at(path: text) -> HirLowering:
+    var lowering = hirlowering_for_module(path, glob_registry())
+    lowering.begin_module(path)
+    lowering
+
+fn bound(lowering: HirLowering, local_name: text) -> bool:
+    lowering.symbols.lookup_or_invalid(local_name).is_valid()
+
+fn owner_of(lowering: HirLowering, local_name: text) -> text:
+    val symbol: HirSymbol = lowering.symbols.symbols[lowering.symbols.lookup_or_invalid(local_name).id]
+    symbol.defining_module ?? ""
+
+describe "glob-reachable name resolution":
+    it "binds a name the glob target declares":
+        var lowering = importer_at("app/direct.spl")
+        expect(lowering.try_register_glob_reachable_symbol("Box", Span.empty())).to_equal(true)
+        expect(bound(lowering, "Box")).to_equal(true)
+        expect(owner_of(lowering, "Box")).to_equal("lib.a")
+        expect(lowering.glob_reachable_scan_count).to_equal(1)
+        expect(lowering.errors.len()).to_equal(0)
+
+    it "follows a re-exporting glob target to the declaring module":
+        var lowering = importer_at("app/viafacade.spl")
+        expect(lowering.try_register_glob_reachable_symbol("Box", Span.empty())).to_equal(true)
+        expect(bound(lowering, "Box")).to_equal(true)
+        expect(owner_of(lowering, "Box")).to_equal("lib.a")
+        expect(lowering.symbols.lookup_qualified_type_raw("lib.a", "Box") >= 0).to_equal(true)
+
+    it "answers an already bound name without another sweep":
+        var lowering = importer_at("app/direct.spl")
+        lowering.try_register_glob_reachable_symbol("Box", Span.empty())
+        expect(lowering.try_register_glob_reachable_symbol("Box", Span.empty())).to_equal(true)
+        expect(lowering.glob_reachable_scan_count).to_equal(1)
+
+    it "does not treat a selective import as a route to unnamed declarations":
+        var lowering = importer_at("app/selective.spl")
+        expect(lowering.try_register_glob_reachable_symbol("Box", Span.empty())).to_equal(false)
+        expect(bound(lowering, "Box")).to_equal(false)
+        expect(lowering.glob_reachable_scan_count).to_equal(1)
+
+    it "skips a glob whose target module is not loaded":
+        var lowering = importer_at("app/unloaded.spl")
+        expect(lowering.try_register_glob_reachable_symbol("Box", Span.empty())).to_equal(false)
+        expect(bound(lowering, "Box")).to_equal(false)
+        expect(lowering.errors.len()).to_equal(0)
+
+    it "finds no route for a name no glob target declares or re-exports":
+        var lowering = importer_at("app/viafacade.spl")
+        expect(lowering.try_register_glob_reachable_symbol("Nowhere", Span.empty())).to_equal(false)
+        expect(lowering.try_register_glob_reachable_symbol("Nowhere", Span.empty())).to_equal(false)
+        # The second question is answered from the miss memo.
+        expect(lowering.glob_reachable_scan_count).to_equal(1)
+        expect(bound(lowering, "Nowhere")).to_equal(false)
+
+    it "has no route when the importer is not a loaded module":
+        var lowering = importer_at("app/stranger.spl")
+        expect(lowering.try_register_glob_reachable_symbol("Box", Span.empty())).to_equal(false)
+        expect(lowering.glob_reachable_scan_count).to_equal(0)
+
+describe "closure-wide unique-owner fallback":
+    it "takes the importer's glob route first":
+        var lowering = importer_at("app/direct.spl")
+        expect(lowering.try_register_bootstrap_global_symbol("Twin", Span.empty())).to_equal(true)
+        # `Twin` has two owners, so only the glob can have chosen lib.a.
+        expect(owner_of(lowering, "Twin")).to_equal("lib.a")
+
+    it "binds a uniquely owned declaration the importer never imported":
+        var lowering = importer_at("app/selective.spl")
+        expect(lowering.try_register_bootstrap_global_symbol("Box", Span.empty())).to_equal(true)
+        expect(owner_of(lowering, "Box")).to_equal("lib.a")
+
+    it "gives up on a name two modules declare":
+        var lowering = importer_at("app/selective.spl")
+        expect(lowering.try_register_bootstrap_global_symbol("Twin", Span.empty())).to_equal(false)
+        expect(bound(lowering, "Twin")).to_equal(false)
+
+    it "gives up on a name no module declares":
+        var lowering = importer_at("app/selective.spl")
+        expect(lowering.try_register_bootstrap_global_symbol("Nowhere", Span.empty())).to_equal(false)
+        expect(lowering.errors.len()).to_equal(0)
+
+describe "indexed declaration probe":
+    it "agrees with the linear predicate for every declaration kind":
+        var lowering = importer_at("app/selective.spl")
+        val surface = lowering.module_surfaces.surfaces[lowering.module_surfaces.index_by_name["lib.a"]]
+        for name in ["make", "Box", "Color", "Shape", "Pairs", "LIMIT"]:
+            expect(lowering.surface_declares_item_indexed(surface, name)).to_equal(true)
+            expect(hir_module_declares_item(surface, name)).to_equal(true)
+        expect(lowering.surface_declares_item_indexed(surface, "Nowhere")).to_equal(false)
+        expect(hir_module_declares_item(surface, "Nowhere")).to_equal(false)
+        # One index per frozen surface, however many names are asked.
+        expect(lowering.name_index_build_count).to_equal(1)

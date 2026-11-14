@@ -28,7 +28,7 @@ use compiler.hir.hir_lowering._Items.module_reexport_materialization.{hir_depend
 use compiler.hir.hir_lowering._Items.module_import_resolution.{private_import_is_test_importer}
 use compiler.hir.hir_lowering.module_surface_registry_index.{module_surfaces_frozen_alignment}
 use compiler.hir.hir_lowering.expressions.*
-use compiler.common.attributes.{parse_layout_attrs, parse_function_attrs, parse_export_attrs, parse_driver_manifest_attrs, parse_platform_attrs, parse_vhdl_hardware_attrs, vhdl_hardware_metadata_default, FunctionAttr, ExportAttr, DriverManifestAttr, DriverManifestAttrKind, VhdlHardwareMetadata}
+use compiler.common.attributes.{parse_function_attrs, parse_export_attrs, parse_driver_manifest_attrs, parse_platform_attrs, parse_vhdl_hardware_attrs, vhdl_hardware_metadata_default, FunctionAttr, ExportAttr, DriverManifestAttr, DriverManifestAttrKind, VhdlHardwareMetadata}
 use compiler.types.type_layout.{LayoutAttr, TypeLayoutKind, PlatformParseResult, PlatformDiagnosticLevel, PlatformLayoutDiagnostic}
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.common.dependency.{member_access_scope_for_modules, member_visibility_allows, aggregate_constructor_visibility_allows}
@@ -48,50 +48,7 @@ use compiler.frontend.core.types.{primitive_integer_bit_width_from_name, custom_
 use compiler.core.{int_to_str}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 
-fn hir_imported_struct_layout(symbol: SymbolId, composite: ModuleSurfaceComposite, field_types: Dict<text, HirType>) -> HirStruct:
-    """Non-owning layout of an imported struct (HirModule.imported_layouts).
-    Field types are the importer-projected surface types. Fields carry no
-    importer symbol and no default body: the declaring module owns both."""
-    var fields: [HirField] = []
-    for raw_field in composite.fields:
-        val field: ModuleSurfaceField = raw_field
-        fields = fields.push(HirField(
-            symbol: SymbolId(id: -1),
-            name: field.name,
-            type_: field_types[field.name],
-            has_default: false,
-            default: HirExpr(kind: HirExprKind.NilLit, has_type_: true, type_: HirType(kind: HirTypeKind.Unit, span: composite.span), span: composite.span),
-            visibility: field.visibility,
-            is_public: field.visibility == Visibility.Public,
-            is_volatile: false,
-            has_bits_attr: false,
-            bits_width: 0,
-            has_fixed_address: false,
-            fixed_address: 0,
-            span: composite.span
-        ))
-    HirStruct(
-        symbol: symbol,
-        name: composite.name,
-        type_params: [],
-        fields: fields,
-        visibility: composite.visibility,
-        is_public: composite.is_public,
-        has_doc_comment: false,
-        doc_comment: "",
-        span: composite.span,
-        has_layout_attr: false,
-        layout_attr: parse_layout_attrs([]),
-        has_platform_attr: false,
-        platform_has_error: false,
-        platform_has_warning: false,
-        platform_diagnostic_message: "",
-        platform_diagnostic_line: 0,
-        is_generic_template: composite.type_params.len() > 0,
-        has_specialization_of: false,
-        specialization_of: "",
-        type_bindings: {}
-    )
+use compiler.hir.hir_lowering.imported_layout_row_v1.{hir_imported_struct_row_v1}
 
 impl HirLowering:
     me resolve_qualified_named_type(name: text, span: Span) -> i64:
@@ -803,10 +760,12 @@ impl HirLowering:
             val canonical_composite_name = imported_mod.module_name + "." + imported_name
             self.struct_field_types_by_name[canonical_composite_name] = imported_field_types
             # bug=hir_imported_nominal_return_layout_not_transported_2026-11-12:
-            # carry the declaring surface's layout in the NON-owning side table.
+            # record the imported struct in the NON-owning side table. The row
+            # is identity-only (imported_layout_row_v1.spl): a per-importer copy
+            # of every field was 30% of the encoded HIR and had no reader.
             if kind == SymbolKind.Struct:
-                self.imported_layouts[imported_type] = hir_imported_struct_layout(
-                    imported_type, composite, imported_field_types)
+                self.imported_layouts[imported_type] = hir_imported_struct_row_v1(
+                    imported_type, composite)
             var imported_type_param_names: [text] = []
             for raw_imported_tp in composite.type_params:
                 val imported_tp: ParserTypeParam = raw_imported_tp
