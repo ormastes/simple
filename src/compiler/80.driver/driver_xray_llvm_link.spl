@@ -30,6 +30,32 @@ pub fn xray_llvm_link_libraries_v1(libraries: [text]) -> [text]:
         if not result.contains(library): result.push(library)
     result
 
+# NativeLinkOptions carries direct-linker arguments. The hosted CC fallback
+# translates these exact options; Clang-only flags must never reach ld/lld.
+pub fn xray_llvm_semantic_link_flags_v1(flags: [text]) -> Result<[text], text>:
+    var result: [text] = []
+    var at = 0
+    while at < flags.len():
+        val flag = flags[at]
+        if flag.contains("--build-id"):
+            if flag != "--build-id=sha1" and flag != "-Wl,--build-id=sha1":
+                return Err("XRAY-E-IMAGE-ID: observer requires an explicit SHA1 ELF build-id")
+        elif flag.contains("nostart-stop-gc"):
+            return Err("XRAY-E-SEMANTIC-GC: start/stop references must not retain dead functions")
+        elif flag == "-z" and at + 1 < flags.len() and flags[at + 1] == "start-stop-gc":
+            at = at + 1
+        elif flag == "-zstart-stop-gc" or flag == "-Wl,-z,start-stop-gc":
+            pass
+        elif flag.contains("start-stop-gc"):
+            return Err("XRAY-E-SEMANTIC-GC: unsupported combined start/stop option")
+        else:
+            result.push(flag)
+        at = at + 1
+    result.push("--build-id=sha1")
+    result.push("-z")
+    result.push("start-stop-gc")
+    Ok(result)
+
 pub fn xray_llvm_adapter_flags_v1(target: text) -> [text]:
     var flags = ["--target={target}", "-O2", "-fPIC", "-mgeneral-regs-only"]
     if target == "aarch64-unknown-linux-gnu": flags.push("-mno-outline-atomics")

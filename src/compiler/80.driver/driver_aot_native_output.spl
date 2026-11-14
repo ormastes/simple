@@ -79,7 +79,7 @@ use compiler.backend.linker.linker_wrapper.{
 use compiler.backend.llvm_native_link.{NativeLinkOptions}
 use compiler.driver.driver_build.native_link_receipt_v1.{native_link_with_receipt_v1, native_shared_link_with_receipt_v1}
 use compiler.driver.driver_xray_link.{xray_link_with_runtime_v1}
-use compiler.driver.driver_xray_llvm_link.{xray_llvm_link_needed_v1, xray_llvm_link_objects_v1, xray_llvm_link_libraries_v1}
+use compiler.driver.driver_xray_llvm_link.{xray_llvm_link_needed_v1, xray_llvm_link_objects_v1, xray_llvm_link_libraries_v1, xray_llvm_semantic_link_flags_v1}
 use compiler.driver.smf_writer.{Target}
 use compiler.driver.smf_group_object_adapter.{smf_group_object_from_bytes_v1}
 use compiler.driver.smf.runtime_std_package_membership_v1.{
@@ -1928,6 +1928,8 @@ pub fn compile_bootstrap_context_to_native(ctx: CompileContext, backend_name: te
             if effective_backend == "llvm" or effective_backend == "llvm-lib":
                 var llvm_objects = direct_objects
                 var llvm_libraries = ctx.options.native_libraries
+            var llvm_linker_flags = ctx.options.native_linker_flags
+                var llvm_linker_flags = ctx.options.native_linker_flags
                 match xray_llvm_link_needed_v1(ctx.options.xray_enabled, effective_backend, ctx.native_target, false):
                     case Err(reason):
                         return driver_native_collection_link_cleanup_error_v1(direct_link_input_dir, CompileResult.CodegenError(reason))
@@ -1938,10 +1940,18 @@ pub fn compile_bootstrap_context_to_native(ctx: CompileContext, backend_name: te
                                     return driver_native_collection_link_cleanup_error_v1(direct_link_input_dir, CompileResult.CodegenError(reason))
                                 case Ok(linked): llvm_objects = linked
                             llvm_libraries = xray_llvm_link_libraries_v1(llvm_libraries)
+                        match xray_llvm_semantic_link_flags_v1(llvm_linker_flags):
+                            case Ok(flags): llvm_linker_flags = flags
+                            case Err(reason):
+                                return driver_native_collection_link_cleanup_error_v1(collection_link_input_dir, CompileResult.CodegenError(reason))
+                            match xray_llvm_semantic_link_flags_v1(llvm_linker_flags):
+                                case Ok(flags): llvm_linker_flags = flags
+                                case Err(reason):
+                                    return driver_native_collection_link_cleanup_error_v1(direct_link_input_dir, CompileResult.CodegenError(reason))
                 val llvm_opts = NativeLinkOptions(
                     libraries: llvm_libraries,
                     library_paths: ctx.options.native_library_paths,
-                    linker_flags: ctx.options.native_linker_flags,
+                    linker_flags: llvm_linker_flags,
                     debug: ctx.options.debug_info,
                     verbose: ctx.options.verbose,
                     pie: true,
@@ -1967,7 +1977,7 @@ pub fn compile_bootstrap_context_to_native(ctx: CompileContext, backend_name: te
             val hosted_opts = NativeLinkOptions(
                 libraries: ctx.options.native_libraries,
                 library_paths: ctx.options.native_library_paths,
-                linker_flags: ctx.options.native_linker_flags,
+                linker_flags: llvm_linker_flags,
                 debug: ctx.options.debug_info,
                 strip_output: ctx.options.strip_output,
                 verbose: ctx.options.verbose,

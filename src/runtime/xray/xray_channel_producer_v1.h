@@ -18,6 +18,7 @@
 #define SIMPLE_XRAY_CHANNEL_PRODUCER_V1_H
 
 #include <stdint.h>
+#include <stddef.h>
 
 /* observer_native_channel_v1 layout, in i64 words. */
 #define CH_GATE 0          /* 0 open, 1 open+producer, 2 closed, 3 closed+producer */
@@ -72,9 +73,9 @@ SIMPLE_XRAY_NEVER_INSTRUMENT static inline uint64_t simple_xray_timestamp(void) 
  * and returns. Never blocks, spins without bound, allocates or calls out.
  * `kind` is the TraceEventKindV1 code (1 entry, 2 exit, 3 tail exit);
  * `function_site` is function_id | site_id << 32. */
-SIMPLE_XRAY_NEVER_INSTRUMENT static inline void simple_xray_channel_produce_v1(
+SIMPLE_XRAY_NEVER_INSTRUMENT static inline void simple_xray_channel_produce_selected_sequence_v1(
     int64_t *base, uint64_t kind, uint64_t module_instance, uint64_t function_site,
-    uint64_t *sequence_cell) {
+    uint64_t *sequence_cell, uint64_t supplied_sequence) {
     int64_t state = simple_xray_cas(&base[CH_GATE], 0, 1);
     if ((state & 2) != 0) return; /* closed: not loss, admission is over */
     if (state != 0) {
@@ -103,7 +104,8 @@ SIMPLE_XRAY_NEVER_INSTRUMENT static inline void simple_xray_channel_produce_v1(
      * sequence cell across generations (the stage-1 handler: one per process;
      * stage 2: one per --xray module runtime); per-context order is the V1
      * guarantee. */
-    uint64_t sequence = __atomic_add_fetch(sequence_cell, 1, __ATOMIC_RELAXED);
+    uint64_t sequence = sequence_cell != NULL ?
+        __atomic_add_fetch(sequence_cell, 1, __ATOMIC_RELAXED) : supplied_sequence;
     int64_t *slot = base + CH_HEADER_WORDS + (write % capacity) * CH_RECORD_WORDS;
     slot[0] = (int64_t)(CH_RECORD_HEADER | (kind << 32));
     slot[1] = base[CH_GENERATION];
@@ -119,6 +121,16 @@ SIMPLE_XRAY_NEVER_INSTRUMENT static inline void simple_xray_channel_produce_v1(
     slot[11] = 0;
     __atomic_exchange_n(&base[CH_WRITE], write + 1, __ATOMIC_SEQ_CST);
     __atomic_add_fetch(&base[CH_GATE], -1, __ATOMIC_SEQ_CST);
+}
+
+/* Existing native/legacy observers keep their exact accepted-record sequence
+ * semantics. The resident provider supplies its per-context attempted-event
+ * sequence separately, including gaps caused by full rings. */
+SIMPLE_XRAY_NEVER_INSTRUMENT static inline void simple_xray_channel_produce_v1(
+    int64_t *base, uint64_t kind, uint64_t module_instance, uint64_t function_site,
+    uint64_t *sequence_cell) {
+    simple_xray_channel_produce_selected_sequence_v1(base, kind, module_instance,
+        function_site, sequence_cell, 0);
 }
 
 #endif /* SIMPLE_XRAY_CHANNEL_PRODUCER_V1_H */

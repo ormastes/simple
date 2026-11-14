@@ -1,0 +1,13 @@
+# Linux LLVM resident provider integration checkpoint
+
+Status: implementation in progress; public LLVM/Auto observer admission remains closed.
+
+The compiler semantic-row producer is integrated. The decoder copies/validates the byte-aligned row contract, rejects overflow and ambiguous identities, sorts semantic keys before issuing manifest-local IDs, and binds those keys to actual LLVM addresses. Final linker options require SHA1 build identity and start/stop GC; both executable routes use the same policy, including the real Clang fallback conversion. Off remains unchanged.
+
+The actual C adapter now has a separate resident mode, process control admission, immutable canonical map lookup, bounded thread attachment, per-context attempted-event sequence, and mandatory initial context transition. Thread entry and outer worker task-root hooks are selected by a default-false source-runtime option. The legacy private harness mode is mutually exclusive. This source is not yet a qualified observer provider.
+
+Evidence retained at `/tmp/xray-resident-map-probe-20261114`: first attempt rejected a truncated fixture extraction; corrected second attempt compiled and ran39 assertions; Astra then identified semantic ordering and overflow gaps. Third changed-source attempt compiled in6.96s and ran57 real native assertions with exit0, including those fixes and actual linker normalization owners. All extracted production bodies were checked byte-for-byte. Synthetic addresses test decoder/binder semantics, not loaded-image registration. Core-C producer SHA256 is `855f48d3c9f9d915be2c8d732d4da3186caa0fb49f55ba3c780a47a1bb7efd42`. Each compile was bounded to60s and2GiB process-tree RSS; no Rust seed was used. The authored SSpecs have not run through the full runner.
+
+The C adapter passes Clang18 syntax validation only. Its new dispatcher still requires real native event, loss, lifecycle, register-preservation and disassembly tests. The separate thread-header fixture proves actual packed admission plus two-thread attachment only; it does not establish runtime hook/provider integration.
+
+Remaining work: complete the actual ELF snapshot leaf and its Simple caller; finish singleton `TraceObserverV1` session ownership and allocator accounting; wire typed runtime options and runtime-ready startup; test a real Simple-generated instrumented image through the normal driver/facade. The cold metadata reservation in the image wrapper is provisional and requires actual runtime-carrier memory qualification; it is not a proved process-memory bound. No external-writer immutability, hot unload, task-local spans, cross-platform support, or full feature completion is claimed.

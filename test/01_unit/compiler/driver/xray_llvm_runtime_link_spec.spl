@@ -1,6 +1,6 @@
 """Linux LLVM runtime link planning; no profile admission is inferred."""
 use std.spec.*
-use compiler.driver.driver_xray_llvm_link.{xray_llvm_link_needed_v1, xray_llvm_link_libraries_v1, xray_llvm_adapter_flags_v1, xray_llvm_runtime_query_args_v1, xray_llvm_runtime_archive_path_valid_v1, xray_llvm_resident_args_v1}
+use compiler.driver.driver_xray_llvm_link.{xray_llvm_link_needed_v1, xray_llvm_link_libraries_v1, xray_llvm_adapter_flags_v1, xray_llvm_runtime_query_args_v1, xray_llvm_runtime_archive_path_valid_v1, xray_llvm_resident_args_v1, xray_llvm_semantic_link_flags_v1}
 
 describe "LLVM XRay executable runtime link":
     it "does not inspect an unresolved target for Off or native backend":
@@ -49,3 +49,14 @@ describe "LLVM XRay executable runtime link":
         val linked = xray_llvm_link_libraries_v1(original)
         expect(original).to_equal(["custom"])
         expect(linked).to_equal(["custom", "pthread", "rt", "m", "dl"])
+
+    it "normalizes equivalent semantic image flags without changing caller inputs":
+        val original = ["--hash-style=gnu", "-Wl,--build-id=sha1", "-zstart-stop-gc"]
+        expect(xray_llvm_semantic_link_flags_v1(original).unwrap()).to_equal(["--hash-style=gnu", "--build-id=sha1", "-z", "start-stop-gc"])
+        expect(original).to_equal(["--hash-style=gnu", "-Wl,--build-id=sha1", "-zstart-stop-gc"])
+        expect(xray_llvm_semantic_link_flags_v1(["--build-id=sha1", "-z", "start-stop-gc", "-Wl,-z,start-stop-gc"]).unwrap()).to_equal(["--build-id=sha1", "-z", "start-stop-gc"])
+
+    it "rejects incompatible image identity and retention options":
+        for flag in ["--build-id", "--build-id=none", "--build-id=uuid", "-Wl,--build-id=sha1,--gc-sections", "-znostart-stop-gc", "-Wl,-z,nostart-stop-gc", "-Wl,-z,start-stop-gc,--gc-sections"]:
+            expect(xray_llvm_semantic_link_flags_v1([flag]).is_err()).to_equal(true)
+        expect(xray_llvm_semantic_link_flags_v1(["-z", "nostart-stop-gc"]).is_err()).to_equal(true)

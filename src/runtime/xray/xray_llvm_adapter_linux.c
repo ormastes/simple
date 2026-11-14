@@ -41,6 +41,9 @@
 
 #ifdef SIMPLE_XRAY_LLVM_SUPPORTED
 
+#include "xray_resident_admission_v1.h"
+#include "xray_resident_descriptor_v1.h"
+
 /* compiler-rt include/xray/xray_interface.h (LLVM 23.1.0), declared locally so
  * a host without the clang resource headers can still syntax-check this TU. */
 enum XRayEntryType {
@@ -70,18 +73,113 @@ static int64_t *g_simple_xray_arena;
 static uint64_t g_simple_xray_module_instance;
 static uint64_t g_simple_xray_sequence;
 
+
+/* One process owner; legacy tests/native adapter cannot replace this handler
+ * once the resident provider claims mode2. All reachable storage is resident. */
+static simple_xray_resident_admission_v1 g_resident_admission = SIMPLE_XRAY_RESIDENT_ADMISSION_INIT_V1;
+static uint64_t g_xray_handler_mode;
+static uint64_t g_xray_control;
+static uint64_t g_xray_last_generation;
+static uint64_t g_xray_admission_lost;
+static __thread __attribute__((tls_model("initial-exec"))) int g_xray_control_owned;
+static __thread __attribute__((tls_model("initial-exec"))) int g_xray_in_handler;
+static __thread __attribute__((tls_model("initial-exec"))) uint64_t g_xray_context_sequence;
+
+int64_t simple_xray_resident_control_enter_v1(void) {
+    uint64_t expected = 0;
+    if (g_xray_in_handler || g_xray_control_owned ||
+        !__atomic_compare_exchange_n(&g_xray_control, &expected, 1, 0,
+                                     __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) return 0;
+    g_xray_control_owned = 1;
+    return 1;
+}
+void simple_xray_resident_control_leave_v1(void) {
+    if (!g_xray_control_owned) return;
+    g_xray_control_owned = 0;
+    __atomic_store_n(&g_xray_control, 0, __ATOMIC_RELEASE);
+}
+static int64_t simple_xray_thread_attach_internal_v1(int cold_root) {
+    if (g_xray_in_handler) return -1;
+    g_xray_in_handler = 1;
+    SimpleXrayResidentDescriptorV1 *descriptor = simple_xray_resident_acquire_v1(&g_resident_admission);
+    if (!descriptor) { g_xray_in_handler = 0; return -1; }
+    const void *pool = (const void *)(uintptr_t)descriptor->pool;
+    int already = simple_xray_thread_current_pool_v1 == pool && simple_xray_thread_current_slot_v1 != NULL;
+    if (cold_root && !already && simple_xray_thread_current_slot_v1 != NULL)
+        (void)simple_xray_thread_detach_pool_v1();
+    int64_t status = simple_xray_thread_attach_pool_v1(pool, descriptor->pool_bytes);
+    if (status == 1 && !already) {
+        g_xray_context_sequence = 1;
+        int64_t *arena = (void *)(intptr_t)simple_xray_thread_current_arena_v1(pool);
+        /* Mandatory context/generation transition precedes its first data.
+         * New, exclusively claimed arenas are empty before this publication. */
+        simple_xray_channel_produce_selected_sequence_v1(arena, 4,
+            descriptor->module_instance, 0, NULL, g_xray_context_sequence);
+    }
+    simple_xray_resident_release_v1(&g_resident_admission);
+    g_xray_in_handler = 0;
+    return status;
+}
+int64_t simple_xray_thread_attach_v1(void) {
+    return simple_xray_thread_attach_internal_v1(0);
+}
+void simple_xray_thread_detach_v1(void) {
+    (void)simple_xray_thread_detach_pool_v1();
+}
+
+__attribute__((always_inline)) static inline void simple_xray_resident_event_v1(
+        int32_t fid, uint64_t kind) {
+    if (g_xray_in_handler) {
+        simple_xray_thread_note_unattached_v1(simple_xray_thread_current_pool_v1);
+        return;
+    }
+    g_xray_in_handler = 1;
+    SimpleXrayResidentDescriptorV1 *descriptor = simple_xray_resident_acquire_v1(&g_resident_admission);
+    if (!descriptor) {
+        if ((atomic_load_explicit(&g_resident_admission.gate, memory_order_relaxed) & 1u) == 0)
+            __atomic_store_n(&g_xray_admission_lost, UINT64_MAX, __ATOMIC_RELAXED);
+        g_xray_in_handler = 0;
+        return;
+    }
+    const SimpleXrayResidentBindingV1 *binding = simple_xray_resident_find_v1(descriptor, (uint64_t)fid);
+    if (binding && (descriptor->event_mask & (UINT64_C(1) << (kind - 1)))) {
+        const void *pool = (const void *)(uintptr_t)descriptor->pool;
+        int64_t arena = simple_xray_thread_current_arena_v1(pool);
+        if (arena == 0) {
+            simple_xray_thread_note_unattached_v1((const SimpleXrayThreadContextHeaderV1 *)pool);
+        } else {
+            int64_t *base = (int64_t *)(intptr_t)arena;
+            if (g_xray_context_sequence == UINT64_MAX) {
+                simple_xray_loss(base);
+                __atomic_fetch_or(&base[CH_GATE], INT64_C(2), __ATOMIC_SEQ_CST);
+            } else {
+                ++g_xray_context_sequence; /* after map/mask, before queue admission */
+                simple_xray_channel_produce_selected_sequence_v1(base, kind,
+                    descriptor->module_instance, binding->function_site, NULL, g_xray_context_sequence);
+            }
+        }
+    }
+    simple_xray_resident_release_v1(&g_resident_admission);
+    g_xray_in_handler = 0;
+}
+
 /* The handler registered with compiler-rt: map the compiler-rt id and entry
  * type, then the shared producer (xray_channel_producer_v1.h). */
 __attribute__((xray_never_instrument, used)) static void simple_xray_handler(int32_t fid,
                                                                      enum XRayEntryType type) {
-    int64_t *base = __atomic_load_n(&g_simple_xray_arena, __ATOMIC_ACQUIRE);
-    if (base == NULL || fid <= 0 || fid > XRAY_MAIN_OBJECT_MAX_ID) return; /* DSO ids: not ours */
+    if (fid <= 0 || fid > XRAY_MAIN_OBJECT_MAX_ID) return;
     uint64_t kind;
     if (type == ENTRY) kind = 1;
     else if (type == EXIT) kind = 2;
     else if (type == TAIL) kind = 3;
     else return;
-    /* Stage 1: dense site id == LLVM function id (one image). */
+    if (__atomic_load_n(&g_xray_handler_mode, __ATOMIC_ACQUIRE) == 2) {
+        simple_xray_resident_event_v1(fid, kind);
+        return;
+    }
+    int64_t *base = __atomic_load_n(&g_simple_xray_arena, __ATOMIC_ACQUIRE);
+    if (base == NULL) return;
+    /* Legacy private harness path: dense site id == LLVM function id (one image). */
     uint64_t id = (uint64_t)(uint32_t)fid;
     simple_xray_channel_produce_v1(base, kind,
                                    __atomic_load_n(&g_simple_xray_module_instance, __ATOMIC_RELAXED),
@@ -93,6 +191,100 @@ int64_t simple_xray_llvm_max_function_id(void) {
     if (max_id > (size_t)XRAY_MAIN_OBJECT_MAX_ID) return 0; /* would alias a DSO object id */
     return (int64_t)max_id;
 }
+
+/* Caller supplies only its own resident allocations, never arbitrary
+ * application pointers. Check arithmetic/layout before following each level. */
+static int simple_xray_resident_range_v1(uint64_t address, uint64_t size) {
+    return address != 0 && (address & 7u) == 0 && size != 0 &&
+           size <= INT64_MAX && address <= (uint64_t)INT64_MAX - size;
+}
+static int simple_xray_resident_overlap_v1(uint64_t a, uint64_t as, uint64_t b, uint64_t bs) {
+    return a <= b ? b - a < as : a - b < bs;
+}
+static int simple_xray_resident_descriptor_valid_v1(SimpleXrayResidentDescriptorV1 *d) {
+    if (!simple_xray_resident_range_v1((uintptr_t)d, 80) || d->schema != 1 ||
+        d->actual_bytes != 80 || d->generation == 0 || d->generation > INT64_MAX ||
+        d->module_instance == 0 || d->module_instance > INT64_MAX ||
+        d->reserved_zero != 0 || (d->event_mask & ~UINT64_C(7)) != 0 ||
+        d->map_count == 0 || d->map_count > 4096 ||
+        !simple_xray_resident_range_v1(d->map, d->map_count * 16) ||
+        !simple_xray_resident_range_v1(d->pool, d->pool_bytes) || d->pool_bytes < 64)
+        return 0;
+    SimpleXrayThreadContextHeaderV1 *pool = (void *)(uintptr_t)d->pool;
+    if (pool->magic != SIMPLE_XRAY_THREAD_CONTEXT_MAGIC_V1 || pool->schema != 1 ||
+        pool->generation != d->generation || pool->actual_bytes != d->pool_bytes ||
+        pool->max_slots == 0 || pool->max_slots > 128 || pool->slots_offset != 64 ||
+        pool->reserved_zero != 0 || pool->unattached_lost != 0 ||
+        d->pool_bytes != 64 + pool->max_slots * 32) return 0;
+    if (simple_xray_resident_overlap_v1((uintptr_t)d, 80, d->pool, d->pool_bytes) ||
+        simple_xray_resident_overlap_v1((uintptr_t)d, 80, d->map, d->map_count * 16) ||
+        simple_xray_resident_overlap_v1(d->pool, d->pool_bytes, d->map, d->map_count * 16)) return 0;
+    SimpleXrayThreadContextSlotV1 *slots = (void *)((uint8_t *)pool + 64);
+    for (uint64_t i = 0; i < pool->max_slots; ++i) {
+        SimpleXrayThreadContextSlotV1 *slot = &slots[i];
+        if (!simple_xray_resident_range_v1(slot->arena, slot->bytes) || slot->bytes < 128 ||
+            slot->context_id == 0 || slot->context_id > INT64_MAX || slot->state != 0) return 0;
+        int64_t *arena = (void *)(uintptr_t)slot->arena;
+        if (arena[CH_CAPACITY] < 1 || arena[CH_CAPACITY] > CH_MAX_RECORDS ||
+            slot->bytes != (uint64_t)(128 + arena[CH_CAPACITY] * 96) ||
+            arena[CH_ARENA_BYTES] != (int64_t)slot->bytes ||
+            arena[CH_GENERATION] != (int64_t)d->generation ||
+            arena[CH_CONTEXT] != (int64_t)slot->context_id ||
+            __atomic_load_n(&arena[CH_GATE], __ATOMIC_ACQUIRE) != 0) return 0;
+        if (simple_xray_resident_overlap_v1(slot->arena, slot->bytes, (uintptr_t)d, 80) ||
+            simple_xray_resident_overlap_v1(slot->arena, slot->bytes, d->pool, d->pool_bytes) ||
+            simple_xray_resident_overlap_v1(slot->arena, slot->bytes, d->map, d->map_count * 16)) return 0;
+        for (uint64_t j = 0; j < i; ++j)
+            if (slots[j].context_id == slot->context_id ||
+                simple_xray_resident_overlap_v1(slot->arena, slot->bytes, slots[j].arena, slots[j].bytes)) return 0;
+    }
+    const SimpleXrayResidentBindingV1 *map = (void *)(uintptr_t)d->map;
+    uint64_t previous = 0, maximum = (uint64_t)simple_xray_llvm_max_function_id();
+    for (uint64_t i = 0; i < d->map_count; ++i) {
+        uint32_t function = (uint32_t)map[i].function_site;
+        uint32_t site = (uint32_t)(map[i].function_site >> 32);
+        if (map[i].llvm_id <= previous || map[i].llvm_id > maximum || function == 0 || site == 0) return 0;
+        previous = map[i].llvm_id;
+        for (uint64_t j = 0; j < i; ++j)
+            if ((uint32_t)map[j].function_site == function ||
+                (uint32_t)(map[j].function_site >> 32) == site) return 0;
+    }
+    return 1;
+}
+int64_t simple_xray_llvm_resident_publish_v1(int64_t descriptor) {
+    if (!g_xray_control_owned || !simple_xray_resident_drained_v1(&g_resident_admission)) return 0;
+    SimpleXrayResidentDescriptorV1 *d = (void *)(intptr_t)descriptor;
+    if (!simple_xray_resident_descriptor_valid_v1(d) ||
+        d->generation <= g_xray_last_generation) return 0;
+    uint64_t mode = __atomic_load_n(&g_xray_handler_mode, __ATOMIC_ACQUIRE);
+    if (mode == 0) {
+        uint64_t expected = 0;
+        if (!__atomic_compare_exchange_n(&g_xray_handler_mode, &expected, 2, 0,
+                                        __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) mode = expected;
+        else mode = 2;
+    }
+    if (mode != 2 || __xray_set_handler(simple_xray_handler) != 1) return 0;
+    if (!simple_xray_resident_publish_v1(&g_resident_admission, d)) return 0;
+    g_xray_last_generation = d->generation;
+    return 1;
+}
+int64_t simple_xray_llvm_resident_close_v1(void) {
+    if (!g_xray_control_owned) return 0;
+    simple_xray_resident_close_v1(&g_resident_admission);
+    return 1;
+}
+int64_t simple_xray_llvm_resident_drained_v1(void) {
+    return simple_xray_resident_drained_v1(&g_resident_admission);
+}
+int64_t simple_xray_llvm_resident_loss_inexact_v1(void) {
+    return __atomic_load_n(&g_xray_admission_lost, __ATOMIC_RELAXED) == UINT64_MAX;
+}
+/* Only a runtime-owned task root may replace a stale session attachment;
+ * no selected user frame may be active at this cold boundary. */
+int64_t simple_xray_thread_task_root_v1(void) {
+    return simple_xray_thread_attach_internal_v1(1);
+}
+
 
 /* Publish an initialized, open, resident channel arena (owned by the Simple
  * session owner until process exit), then register the handler. Returns 1 on
@@ -111,6 +303,14 @@ int64_t simple_xray_llvm_install(int64_t arena, int64_t generation, int64_t cont
     if (base[CH_GENERATION] != generation || base[CH_CONTEXT] != context) return 0;
     if (base[CH_ARENA_BYTES] != (CH_HEADER_WORDS + capacity * CH_RECORD_WORDS) * 8) return 0;
     if (__atomic_load_n(&base[CH_GATE], __ATOMIC_SEQ_CST) != 0) return 0;
+    uint64_t mode = __atomic_load_n(&g_xray_handler_mode, __ATOMIC_ACQUIRE);
+    if (mode == 0) {
+        uint64_t expected = 0;
+        if (!__atomic_compare_exchange_n(&g_xray_handler_mode, &expected, 1, 0,
+                                        __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) mode = expected;
+        else mode = 1;
+    }
+    if (mode != 1) return 0;
     int64_t *previous = __atomic_load_n(&g_simple_xray_arena, __ATOMIC_ACQUIRE);
     __atomic_store_n(&g_simple_xray_module_instance, (uint64_t)module_instance, __ATOMIC_RELAXED);
     __atomic_store_n(&g_simple_xray_arena, base, __ATOMIC_RELEASE);
