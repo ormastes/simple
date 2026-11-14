@@ -1,39 +1,67 @@
 # Linux dlopen may match an already loaded object by the pathname
-# /proc/self/fd/<number>. Reusing a descriptor number while that object is
-# still mapped can return the old object for different sealed bytes. A bounded
-# process-lifetime registry keeps every pathname offered to dlopen unique for
-# this process, including unsuccessful loads whose loader retention is unknown.
-# Callable/mapping retirement is owned separately by dynlib_lifetime_owner_v1
-# and native_callable_owner_v1. Exhaustion refuses new admission.
+# /proc/self/fd/<number>. Reusing an fd number while that object is still
+# mapped can return old bytes. This bounded process-lifetime registry keeps
+# every offered pathname unique, including failed loads with uncertain loader
+# retention. Exhaustion refuses admission.
 
-# Integer-sentinel exclusion gates use the non-generic runtime-equivalent owner.
-# @workaround bug=mutex_lock_return_only_generic_needs_call_type_2026-10-10
-use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new, mutex_lock_gate, mutex_unlock}
+use std.nogc_sync_mut.concurrent.mutex.{
+    mutex_new_gate_handle_v1, mutex_lock_gate_handle_v1,
+    mutex_unlock_gate_handle_v1
+}
+use std.nogc_sync_mut.sffi.rc_graph.{rt_rc_share, rt_rc_count}
 
 const _DYNLIB_SNAPSHOT_CAPACITY_V1: i64 = 4096
+const _DYNLIB_SNAPSHOT_EMPTY_SENTINEL_V1: i64 = -1
 
-# Exclusion gate only; the descriptor list stays Simple-side (same fix as
-# dynlib_lifetime_owner_v1): a struct protected value comes back nil through
-# the interpreter's rt_mutex value bridge, the update faults with the real
-# lock held, and every later pin call blocks forever.
-var _dynlib_snapshot_registry_gate_v1: Mutex = mutex_new(0)
-var _dynlib_snapshot_registry_descriptors_v1: [i64] = []
+fn _sffi_snapshot_rc_share_v1<T>(value: T) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_rc_share(value)
 
-# The caller owns a newly opened sealed descriptor until this returns true.
-# Once accepted, the descriptor belongs to this process-lifetime registry and
-# must never be closed or reused before process exit. Reserve before dlopen.
+fn _sffi_snapshot_rc_count_v1<T>(value: T) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_rc_count(value)
+
+# Keep the process state as module-level scalar/array owners. A mutable Mutex
+# wrapper or its Array field may otherwise point into the build session that
+# first initialized the module. The sentinel ensures the process table is a
+# real retainable array before any fd is admitted.
+val _dynlib_snapshot_registry_gate_handle_v1: i64 = mutex_new_gate_handle_v1(0)
+var _dynlib_snapshot_registry_descriptors_v1: [i64] = [_DYNLIB_SNAPSHOT_EMPTY_SENTINEL_V1]
+
+fn _dynlib_snapshot_registry_initialize_v1() -> bool:
+    if _dynlib_snapshot_registry_gate_handle_v1 <= 0:
+        panic("E-SFFI-DYNLIB-SNAPSHOT-001: process gate allocation failed")
+    if not _sffi_snapshot_rc_share_v1(_dynlib_snapshot_registry_descriptors_v1):
+        panic("E-SFFI-DYNLIB-SNAPSHOT-002: process descriptor-table root refused")
+    if _sffi_snapshot_rc_count_v1(_dynlib_snapshot_registry_descriptors_v1) != 1:
+        panic("E-SFFI-DYNLIB-SNAPSHOT-003: process descriptor-table root count is not one")
+    true
+
+# Module initialization establishes the native gate and RC root exactly once;
+# calls do not lazily race to initialize either resource.
+val _dynlib_snapshot_registry_process_owner_ready_v1 = _dynlib_snapshot_registry_initialize_v1()
+
+# The caller owns a newly opened sealed descriptor until true. Once accepted,
+# this process-lifetime registry owns it; it must never be closed or reused.
 pub(package) fn dynlib_snapshot_pin_process_v1(fd: i64) -> bool:
-    if fd < 0 or fd > 2147483647:
+    if fd < 0 or fd > 2147483647: return false
+    if not _dynlib_snapshot_registry_process_owner_ready_v1: return false
+    if not mutex_lock_gate_handle_v1(_dynlib_snapshot_registry_gate_handle_v1):
         return false
-    val _ = mutex_lock_gate(_dynlib_snapshot_registry_gate_v1)
     var accepted = false
-    if _dynlib_snapshot_registry_descriptors_v1.len() < _DYNLIB_SNAPSHOT_CAPACITY_V1:
+    if _dynlib_snapshot_registry_descriptors_v1.len() - 1 < _DYNLIB_SNAPSHOT_CAPACITY_V1:
         var duplicate = false
-        for existing in _dynlib_snapshot_registry_descriptors_v1:
-            if existing == fd:
+        var i = 1
+        while i < _dynlib_snapshot_registry_descriptors_v1.len():
+            if _dynlib_snapshot_registry_descriptors_v1[i] == fd:
                 duplicate = true
+            i = i + 1
         if not duplicate:
+            val previous_len = _dynlib_snapshot_registry_descriptors_v1.len()
             _dynlib_snapshot_registry_descriptors_v1.push(fd)
+            if _dynlib_snapshot_registry_descriptors_v1.len() != previous_len + 1:
+                panic("E-SFFI-DYNLIB-SNAPSHOT-004: process descriptor append failed")
             accepted = true
-    val _ = mutex_unlock(_dynlib_snapshot_registry_gate_v1, 0)
+    if not mutex_unlock_gate_handle_v1(_dynlib_snapshot_registry_gate_handle_v1, 0):
+        panic("E-SFFI-DYNLIB-SNAPSHOT-005: process gate unlock failed")
     accepted

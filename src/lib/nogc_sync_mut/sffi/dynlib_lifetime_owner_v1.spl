@@ -1,143 +1,265 @@
-# One lifetime authority for copied DynLib values and cached integer slots.
-# A call borrows the mapping under the owner lock, then executes outside it.
-# Closing any library copy revokes new borrows and defers dlclose until the
-# last admitted call returns. Identities never repeat within this process.
+# One process-owned lifetime authority for copied DynLib values and cached
+# integer slots. Calls reserve a mapping under the gate, execute outside it,
+# and release their lease afterward. Closing retires the mapping and defers
+# dlclose until the last admitted call returns. Identities never repeat.
+#
+# The registry is a flat [i64] array, not an array of structs. Every stored
+# word is a <=32-bit tagged immediate, including split 64-bit ids, handles,
+# lease counts and digest limbs. Appends therefore add no session-owned heap
+# children to the RC-rooted process table.
 
-# Integer-sentinel exclusion gates use the non-generic runtime-equivalent owner.
-# @workaround bug=mutex_lock_return_only_generic_needs_call_type_2026-10-10
-use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new, mutex_lock_gate, mutex_unlock}
+use std.nogc_sync_mut.concurrent.mutex.{
+    mutex_new_gate_handle_v1, mutex_lock_gate_handle_v1,
+    mutex_unlock_gate_handle_v1
+}
+use std.nogc_sync_mut.sffi.rc_graph.{rt_rc_share, rt_rc_count}
 
 @unsafe(reason: "releases the native library after its final admitted use", capabilities: [ffi])
 extern fn spl_dlclose(handle: i64) -> i64
 
 const _DYNLIB_LIFETIME_CAPACITY_V1: i64 = 4096
+const _DYNLIB_LIFETIME_ROW_WORDS_V1: i64 = 16
 const _DYNLIB_LIFETIME_MAX_ID_V1: u64 = 18446744073709551615u64
+const _DYNLIB_LIFETIME_U32_MASK_V1: u64 = 4294967295u64
 
-struct _DynlibLifetimeEntryV1:
-    identity: u64
-    handle: i64
-    active_uses: i64
-    retiring: bool
+fn _sffi_rc_share<T>(value: T) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_rc_share(value)
 
-struct _DynlibLifetimeStateV1:
-    next_identity: u64
-    entries: [_DynlibLifetimeEntryV1]
-    result_identity: u64
-    result_handle: i64
-    result_accepted: bool
+fn _sffi_rc_count<T>(value: T) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_rc_count(value)
 
-fn _dynlib_lifetime_initial_v1() -> _DynlibLifetimeStateV1:
-    _DynlibLifetimeStateV1(next_identity: 1u64, entries: [],
-        result_identity: 0u64, result_handle: 0, result_accepted: false)
+fn _dynlib_lifetime_low_v1(value: u64) -> i64:
+    (value & _DYNLIB_LIFETIME_U32_MASK_V1) as i64
 
-# Exclusion gate only; the state stays Simple-side (same fix as
-# nvfs_device_identity_owner_v1): a struct protected value comes back nil
-# through the interpreter's rt_mutex value bridge, which can fault with the
-# real lock held and block every later owner call.
-var _dynlib_lifetime_gate_v1: Mutex = mutex_new(0)
-var _dynlib_lifetime_state_v1: _DynlibLifetimeStateV1 = _dynlib_lifetime_initial_v1()
+fn _dynlib_lifetime_high_v1(value: u64) -> i64:
+    (value >> 32) as i64
 
-fn _dynlib_lifetime_index_v1(state: _DynlibLifetimeStateV1, identity: u64) -> i64:
-    var first = 0
-    var past_last = state.entries.len()
+fn _dynlib_lifetime_join_v1(high: i64, low: i64) -> u64:
+    ((high as u64) << 32) | (low as u64)
+
+# Row layout: identity hi/lo, handle hi/lo, active-use count hi/lo,
+# retiring flag, bound flag, then four digest limbs each hi/lo. Row zero is
+# a permanent sentinel; monotone ids keep remaining rows sorted.
+val _dynlib_lifetime_gate_handle_v1: i64 = mutex_new_gate_handle_v1(0)
+var _dynlib_lifetime_entries_v1: [i64] = [
+    0, 0, 0, 0, 0, 0, 1, 0,
+    0, 0, 0, 0, 0, 0, 0, 0
+]
+var _dynlib_lifetime_next_identity_v1: u64 = 1u64
+
+fn _dynlib_lifetime_initialize_process_owner_v1() -> bool:
+    if _dynlib_lifetime_gate_handle_v1 <= 0:
+        panic("E-SFFI-DYNLIB-OWNER-001: process gate allocation failed")
+    if not _sffi_rc_share(_dynlib_lifetime_entries_v1):
+        panic("E-SFFI-DYNLIB-OWNER-002: process entry-table root refused")
+    if _sffi_rc_count(_dynlib_lifetime_entries_v1) != 1:
+        panic("E-SFFI-DYNLIB-OWNER-003: process entry-table root count is not one")
+    true
+
+# Module initialization roots the scalar table before owner functions are
+# callable. Future rows contain only tagged immediate values, never references.
+val _dynlib_lifetime_process_owner_ready_v1 = _dynlib_lifetime_initialize_process_owner_v1()
+
+fn _dynlib_lifetime_lock_v1() -> bool:
+    if not _dynlib_lifetime_process_owner_ready_v1: return false
+    mutex_lock_gate_handle_v1(_dynlib_lifetime_gate_handle_v1)
+
+fn _dynlib_lifetime_unlock_v1():
+    if not mutex_unlock_gate_handle_v1(_dynlib_lifetime_gate_handle_v1, 0):
+        panic("E-SFFI-DYNLIB-OWNER-004: process gate unlock failed")
+
+fn _dynlib_lifetime_word_v1(row: i64, word: i64) -> i64:
+    _dynlib_lifetime_entries_v1[row * _DYNLIB_LIFETIME_ROW_WORDS_V1 + word]
+
+fn _dynlib_lifetime_set_word_v1(row: i64, word: i64, value: u64):
+    val low = _dynlib_lifetime_low_v1(value)
+    if value > _DYNLIB_LIFETIME_U32_MASK_V1:
+        panic("E-SFFI-DYNLIB-OWNER-005: non-immediate row word")
+    _dynlib_lifetime_entries_v1[row * _DYNLIB_LIFETIME_ROW_WORDS_V1 + word] = low
+
+fn _dynlib_lifetime_get64_v1(row: i64, word: i64) -> u64:
+    _dynlib_lifetime_join_v1(
+        _dynlib_lifetime_word_v1(row, word),
+        _dynlib_lifetime_word_v1(row, word + 1))
+
+fn _dynlib_lifetime_set64_v1(row: i64, word: i64, value: u64):
+    _dynlib_lifetime_set_word_v1(row, word, value >> 32)
+    _dynlib_lifetime_set_word_v1(row, word + 1, value & _DYNLIB_LIFETIME_U32_MASK_V1)
+
+fn _dynlib_lifetime_index_v1(identity: u64) -> i64:
+    if identity == 0u64: return -1
+    var first = 1
+    var past_last = _dynlib_lifetime_entries_v1.len() / _DYNLIB_LIFETIME_ROW_WORDS_V1
+    val wanted_high = _dynlib_lifetime_high_v1(identity)
+    val wanted_low = _dynlib_lifetime_low_v1(identity)
     while first < past_last:
         val middle = first + (past_last - first) / 2
-        val candidate = state.entries[middle].identity
-        if candidate == identity: return middle
-        if candidate < identity: first = middle + 1
-        else: past_last = middle
+        val candidate_high = _dynlib_lifetime_word_v1(middle, 0)
+        val candidate_low = _dynlib_lifetime_word_v1(middle, 1)
+        if candidate_high == wanted_high and candidate_low == wanted_low:
+            return middle
+        if candidate_high < wanted_high or
+           (candidate_high == wanted_high and candidate_low < wanted_low):
+            first = middle + 1
+        else:
+            past_last = middle
     -1
 
-# Zero means no ownership was accepted. The caller must close the raw handle.
-pub(package) fn dynlib_lifetime_register_v1(handle: i64) -> u64:
+fn _dynlib_lifetime_digest_matches_v1(
+    row: i64, check_identity: bool,
+    digest0: u64, digest1: u64, digest2: u64, digest3: u64
+) -> bool:
+    not check_identity or (
+        _dynlib_lifetime_word_v1(row, 7) == 1 and
+        _dynlib_lifetime_get64_v1(row, 8) == digest0 and
+        _dynlib_lifetime_get64_v1(row, 10) == digest1 and
+        _dynlib_lifetime_get64_v1(row, 12) == digest2 and
+        _dynlib_lifetime_get64_v1(row, 14) == digest3)
+
+fn _dynlib_lifetime_register_impl_v1(
+    handle: i64, identity_bound: bool,
+    digest0: u64, digest1: u64, digest2: u64, digest3: u64
+) -> u64:
     if handle <= 0: return 0u64
-    val _ = mutex_lock_gate(_dynlib_lifetime_gate_v1)
-    var state: _DynlibLifetimeStateV1 = _dynlib_lifetime_state_v1
-    state.result_identity = 0u64
-    if state.next_identity != 0u64 and
-       state.entries.len() < _DYNLIB_LIFETIME_CAPACITY_V1:
-        val identity = state.next_identity
-        state.next_identity = if identity == _DYNLIB_LIFETIME_MAX_ID_V1:
+    if not _dynlib_lifetime_lock_v1(): return 0u64
+    var identity = 0u64
+    val row_count = _dynlib_lifetime_entries_v1.len() / _DYNLIB_LIFETIME_ROW_WORDS_V1
+    if _dynlib_lifetime_next_identity_v1 != 0u64 and
+       row_count - 1 < _DYNLIB_LIFETIME_CAPACITY_V1:
+        identity = _dynlib_lifetime_next_identity_v1
+        _dynlib_lifetime_next_identity_v1 = if identity == _DYNLIB_LIFETIME_MAX_ID_V1:
             0u64
         else:
             identity + 1u64
-        state.entries.push(_DynlibLifetimeEntryV1(
-            identity: identity, handle: handle, active_uses: 0,
-            retiring: false))
-        state.result_identity = identity
-    _dynlib_lifetime_state_v1 = state
-    val _ = mutex_unlock(_dynlib_lifetime_gate_v1, 0)
-    state.result_identity
+        val previous_len = _dynlib_lifetime_entries_v1.len()
+        _dynlib_lifetime_entries_v1.push(_dynlib_lifetime_high_v1(identity))
+        _dynlib_lifetime_entries_v1.push(_dynlib_lifetime_low_v1(identity))
+        val handle_bits = handle as u64
+        _dynlib_lifetime_entries_v1.push(_dynlib_lifetime_high_v1(handle_bits))
+        _dynlib_lifetime_entries_v1.push(_dynlib_lifetime_low_v1(handle_bits))
+        _dynlib_lifetime_entries_v1.push(0)
+        _dynlib_lifetime_entries_v1.push(0)
+        _dynlib_lifetime_entries_v1.push(0)
+        _dynlib_lifetime_entries_v1.push(if identity_bound: 1 else: 0)
+        _dynlib_lifetime_entries_v1.push(_dynlib_lifetime_high_v1(digest0))
+        _dynlib_lifetime_entries_v1.push(_dynlib_lifetime_low_v1(digest0))
+        _dynlib_lifetime_entries_v1.push(_dynlib_lifetime_high_v1(digest1))
+        _dynlib_lifetime_entries_v1.push(_dynlib_lifetime_low_v1(digest1))
+        _dynlib_lifetime_entries_v1.push(_dynlib_lifetime_high_v1(digest2))
+        _dynlib_lifetime_entries_v1.push(_dynlib_lifetime_low_v1(digest2))
+        _dynlib_lifetime_entries_v1.push(_dynlib_lifetime_high_v1(digest3))
+        _dynlib_lifetime_entries_v1.push(_dynlib_lifetime_low_v1(digest3))
+        if _dynlib_lifetime_entries_v1.len() != previous_len + _DYNLIB_LIFETIME_ROW_WORDS_V1:
+            panic("E-SFFI-DYNLIB-OWNER-006: process entry-table append failed")
+    _dynlib_lifetime_unlock_v1()
+    identity
+
+# Zero means no ownership was accepted; the caller must close the raw handle.
+pub(package) fn dynlib_lifetime_register_v1(handle: i64) -> u64:
+    _dynlib_lifetime_register_impl_v1(handle, false, 0u64, 0u64, 0u64, 0u64)
+
+# Bound registration associates caller-supplied identity words with the
+# mapping in the same critical section that allocates its generation. It does
+# not verify signatures, artifacts, requests, or policy.
+pub(package) fn dynlib_lifetime_register_bound_v1(
+    handle: i64, digest0: u64, digest1: u64, digest2: u64, digest3: u64
+) -> u64:
+    _dynlib_lifetime_register_impl_v1(handle, true, digest0, digest1, digest2, digest3)
+
+fn _dynlib_lifetime_begin_impl_v1(
+    identity: u64, check_identity: bool,
+    digest0: u64, digest1: u64, digest2: u64, digest3: u64
+) -> i64:
+    if identity == 0u64: return 0
+    if not _dynlib_lifetime_lock_v1(): return 0
+    var handle = 0
+    val index = _dynlib_lifetime_index_v1(identity)
+    if index >= 1 and _dynlib_lifetime_digest_matches_v1(
+        index, check_identity, digest0, digest1, digest2, digest3):
+        val uses = _dynlib_lifetime_get64_v1(index, 4)
+        if _dynlib_lifetime_word_v1(index, 6) == 0 and uses < 9223372036854775807u64:
+            _dynlib_lifetime_set64_v1(index, 4, uses + 1u64)
+            handle = _dynlib_lifetime_get64_v1(index, 2) as i64
+    _dynlib_lifetime_unlock_v1()
+    handle
 
 # Returns the native handle only after reserving one use. Zero refuses stale
-# identities and prevents callers from resolving or invoking an unloaded map.
+# identities and prevents resolving or invoking an unloaded mapping.
 pub(package) fn dynlib_lifetime_begin_v1(identity: u64) -> i64:
-    val _ = mutex_lock_gate(_dynlib_lifetime_gate_v1)
-    var state: _DynlibLifetimeStateV1 = _dynlib_lifetime_state_v1
-    state.result_handle = 0
-    val index = _dynlib_lifetime_index_v1(state, identity)
-    if index >= 0:
-        var entry = state.entries[index]
-        if not entry.retiring and entry.active_uses < 9223372036854775807:
-            entry.active_uses = entry.active_uses + 1
-            state.entries[index] = entry
-            state.result_handle = entry.handle
-    _dynlib_lifetime_state_v1 = state
-    val _ = mutex_unlock(_dynlib_lifetime_gate_v1, 0)
-    state.result_handle
+    _dynlib_lifetime_begin_impl_v1(identity, false, 0u64, 0u64, 0u64, 0u64)
 
-pub(package) fn dynlib_lifetime_end_v1(identity: u64):
-    val _ = mutex_lock_gate(_dynlib_lifetime_gate_v1)
-    var state: _DynlibLifetimeStateV1 = _dynlib_lifetime_state_v1
-    state.result_handle = 0
-    val index = _dynlib_lifetime_index_v1(state, identity)
-    if index >= 0:
-        var entry = state.entries[index]
-        if entry.active_uses > 0:
-            entry.active_uses = entry.active_uses - 1
-            if entry.retiring and entry.active_uses == 0:
-                state.result_handle = entry.handle
-                state.entries.remove(index)
-            else:
-                state.entries[index] = entry
-    _dynlib_lifetime_state_v1 = state
-    val _ = mutex_unlock(_dynlib_lifetime_gate_v1, 0)
-    if state.result_handle > 0:
+pub(package) fn dynlib_lifetime_begin_bound_v1(
+    identity: u64, digest0: u64, digest1: u64, digest2: u64, digest3: u64
+) -> i64:
+    _dynlib_lifetime_begin_impl_v1(identity, true, digest0, digest1, digest2, digest3)
+
+fn _dynlib_lifetime_remove_v1(row: i64):
+    val base = row * _DYNLIB_LIFETIME_ROW_WORDS_V1
+    val previous_len = _dynlib_lifetime_entries_v1.len()
+    var word = 0
+    while word < _DYNLIB_LIFETIME_ROW_WORDS_V1:
+        _ = _dynlib_lifetime_entries_v1.remove(base)
+        word = word + 1
+    if _dynlib_lifetime_entries_v1.len() != previous_len - _DYNLIB_LIFETIME_ROW_WORDS_V1:
+        panic("E-SFFI-DYNLIB-OWNER-007: retired entry removal failed")
+
+# Returns true exactly when this end operation removed a retired entry and
+# completed the final-use handoff. Descriptor data lives in a separate owner.
+pub(package) fn dynlib_lifetime_end_v1(identity: u64) -> bool:
+    if identity == 0u64: return false
+    if not _dynlib_lifetime_lock_v1(): return false
+    var close_handle = 0
+    var completed = false
+    val index = _dynlib_lifetime_index_v1(identity)
+    if index >= 1:
+        val uses = _dynlib_lifetime_get64_v1(index, 4)
+        if uses > 0u64:
+            val remaining = uses - 1u64
+            _dynlib_lifetime_set64_v1(index, 4, remaining)
+            if _dynlib_lifetime_word_v1(index, 6) == 1 and remaining == 0u64:
+                close_handle = _dynlib_lifetime_get64_v1(index, 2) as i64
+                _dynlib_lifetime_remove_v1(index)
+                completed = true
+    _dynlib_lifetime_unlock_v1()
+    if close_handle > 0:
         unsafe(capabilities: [ffi]):
-            spl_dlclose(state.result_handle)
+            spl_dlclose(close_handle)
+    completed
 
-# True only for the first live-to-retiring transition. A later close through
-# another DynLib copy cannot close the same native handle twice.
+# True only for the first live-to-retiring transition.
 pub(package) fn dynlib_lifetime_retire_v1(identity: u64) -> bool:
-    val _ = mutex_lock_gate(_dynlib_lifetime_gate_v1)
-    var state: _DynlibLifetimeStateV1 = _dynlib_lifetime_state_v1
-    state.result_handle = 0
-    state.result_accepted = false
-    val index = _dynlib_lifetime_index_v1(state, identity)
-    if index >= 0:
-        var entry = state.entries[index]
-        if not entry.retiring:
-            entry.retiring = true
-            state.result_accepted = true
-            if entry.active_uses == 0:
-                state.result_handle = entry.handle
-                state.entries.remove(index)
-            else:
-                state.entries[index] = entry
-    _dynlib_lifetime_state_v1 = state
-    val _ = mutex_unlock(_dynlib_lifetime_gate_v1, 0)
-    if state.result_handle > 0:
+    if identity == 0u64: return false
+    if not _dynlib_lifetime_lock_v1(): return false
+    var close_handle = 0
+    var accepted = false
+    val index = _dynlib_lifetime_index_v1(identity)
+    if index >= 1 and _dynlib_lifetime_word_v1(index, 6) == 0:
+        accepted = true
+        if _dynlib_lifetime_get64_v1(index, 4) == 0u64:
+            close_handle = _dynlib_lifetime_get64_v1(index, 2) as i64
+            _dynlib_lifetime_remove_v1(index)
+        else:
+            _dynlib_lifetime_set_word_v1(index, 6, 1u64)
+    _dynlib_lifetime_unlock_v1()
+    if close_handle > 0:
         unsafe(capabilities: [ffi]):
-            spl_dlclose(state.result_handle)
-    state.result_accepted
+            spl_dlclose(close_handle)
+    accepted
 
 pub(package) fn dynlib_lifetime_live_v1(identity: u64) -> bool:
-    val _ = mutex_lock_gate(_dynlib_lifetime_gate_v1)
-    var state: _DynlibLifetimeStateV1 = _dynlib_lifetime_state_v1
-    state.result_accepted = false
-    val index = _dynlib_lifetime_index_v1(state, identity)
-    if index >= 0 and not state.entries[index].retiring:
-        state.result_accepted = true
-    _dynlib_lifetime_state_v1 = state
-    val _ = mutex_unlock(_dynlib_lifetime_gate_v1, 0)
-    state.result_accepted
+    if identity == 0u64: return false
+    if not _dynlib_lifetime_lock_v1(): return false
+    val index = _dynlib_lifetime_index_v1(identity)
+    val live = index >= 1 and _dynlib_lifetime_word_v1(index, 6) == 0
+    _dynlib_lifetime_unlock_v1()
+    live
+
+# True only after the entry is gone, enabling separate descriptor reclamation.
+pub(package) fn dynlib_lifetime_closed_v1(identity: u64) -> bool:
+    if identity == 0u64: return true
+    if not _dynlib_lifetime_lock_v1(): return false
+    val closed = _dynlib_lifetime_index_v1(identity) < 1
+    _dynlib_lifetime_unlock_v1()
+    closed

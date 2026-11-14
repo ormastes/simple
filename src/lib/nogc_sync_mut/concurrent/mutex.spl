@@ -109,6 +109,40 @@ fn mutex_new<T>(initial: T) -> Mutex:
         rt_mutex_new(initial)
     Mutex(_handle: handle)
 
+# Process-owned registries must not retain this managed Mutex wrapper in a
+# module global: its class object can belong to the first build session that
+# initializes the module. Keep only the runtime-owned scalar handle and use
+# these checked forms around the same existing runtime ABI.
+pub(package) fn mutex_new_gate_handle_v1(initial: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_mutex_new(initial)
+
+pub(package) fn mutex_lock_gate_handle_v1(handle: i64) -> bool:
+    if handle <= 0: return false
+    val protected: i64? = unsafe(capabilities: [ffi]):
+        rt_mutex_lock(handle)
+    protected != None
+
+pub(package) fn mutex_unlock_gate_handle_v1(handle: i64, new_value: i64) -> bool:
+    if handle <= 0: return false
+    val released = unsafe(capabilities: [ffi]):
+        rt_mutex_unlock(handle, new_value)
+    released == 1
+
+# Process-state owners may keep this raw runtime handle in a scalar global
+# instead of retaining a managed Mutex wrapper allocated in a compile session.
+@unsafe(reason: "creates a raw process mutex gate handle", capabilities: [ffi])
+pub fn process_gate_new_v1() -> i64:
+    mutex_new_gate_handle_v1(0)
+
+@unsafe(reason: "locks a raw process mutex gate handle", capabilities: [ffi])
+pub fn process_gate_lock_v1(handle: i64) -> bool:
+    mutex_lock_gate_handle_v1(handle)
+
+@unsafe(reason: "unlocks a raw process mutex gate handle", capabilities: [ffi])
+pub fn process_gate_unlock_v1(handle: i64) -> bool:
+    mutex_unlock_gate_handle_v1(handle, 0)
+
 # Free-function forms keep the Mutex value in an explicit argument. Use these
 # in pure-native paths until method-call lowering reliably preserves receivers.
 
@@ -200,3 +234,4 @@ fn mutex_unlock_gate(mutex: Mutex, new_value: i64) -> i64:
 
 export Mutex
 export mutex_new, mutex_with_lock
+export process_gate_new_v1, process_gate_lock_v1, process_gate_unlock_v1
