@@ -41,3 +41,8 @@ Actual scope evidence:
 memory.max: 2147483648
 memory.swap.max: 0
 ```
+
+Execution receipt: `execution.sdn` links the prepared extraction manifest to
+the exact tracked source, producer, logs, cap and executable. The original
+`prepared_not_executed` extraction status is retained as preparation provenance.
+Executed binary SHA256: `e58d00d8438e680bd2277cd9ba21d761c135ac637bc47bbfa0216224c5ddd1d7`.
