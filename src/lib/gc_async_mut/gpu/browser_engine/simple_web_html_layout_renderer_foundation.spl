@@ -732,6 +732,10 @@ class SelectorContext:
     element_position: [i32]
     element_sibling_count: [i32]
     has_content_child: [bool]
+    # 1-based position among same-tag element siblings, and how many there are.
+    # Built once per style pass so :nth-of-type / :nth-last-of-type are lookups.
+    type_position: [i32]
+    type_count: [i32]
 
 class ClassFlags:
     has_widget_class: bool
@@ -768,9 +772,12 @@ fn build_selector_context(nodes: [HNode], child_index: HtmlChildIndex) -> Select
     var element_position: [i32] = [1; node_count]
     var element_sibling_count: [i32] = [1; node_count]
     var has_content_child: [bool] = [false; node_count]
+    var type_position: [i32] = [1; node_count]
+    var type_count: [i32] = [1; node_count]
     var parent = 0
     while parent < node_count:
         var element_count = 0
+        var type_seen: Dict<text, i32> = {}
         var child = child_index.first_child[parent]
         while child >= 0:
             val nd = nodes[child]
@@ -781,14 +788,18 @@ fn build_selector_context(nodes: [HNode], child_index: HtmlChildIndex) -> Select
                 has_content_child[parent] = true
                 element_count = element_count + 1
                 element_position[child] = element_count
+                val seen = (type_seen.get(nd.tag) ?? 0) + 1
+                type_seen[nd.tag] = seen
+                type_position[child] = seen
             child = child_index.next_sibling[child]
         child = child_index.first_child[parent]
         while child >= 0:
             if nodes[child].tag != "#text":
                 element_sibling_count[child] = element_count
+                type_count[child] = type_seen.get(nodes[child].tag) ?? 1
             child = child_index.next_sibling[child]
         parent = parent + 1
-    SelectorContext(child_index: child_index, element_position: element_position, element_sibling_count: element_sibling_count, has_content_child: has_content_child)
+    SelectorContext(child_index: child_index, element_position: element_position, element_sibling_count: element_sibling_count, has_content_child: has_content_child, type_position: type_position, type_count: type_count)
 
 # ---------------------------------------------------------------------------
 # Position-aware string find (works around index_of(needle,pos) ignoring pos)
