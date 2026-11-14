@@ -1,0 +1,90 @@
+# Private cold allocator. One contiguous allocation per generation, retained
+# through process exit even after failed activation. No callback allocates.
+use std.common.trace.observer_contract_v1.*
+use std.common.trace.xray_llvm_semantic_map_v1.*
+use std.nogc_sync_mut.trace.observer_native_channel_v1.*
+use std.nogc_sync_mut.ptr.raw.{rt_ptr_write_i64}
+use std.nogc_sync_mut.sffi.allocation_owner.{allocation_owner_identity_v1, AllocationOwnerDomainV1}
+
+extern fn rt_alloc(size: i64) -> i64
+
+pub fn trace_resident_process_owner_v1() -> bool:
+    match allocation_owner_identity_v1():
+        case Ok(identity): identity.domain == AllocationOwnerDomainV1.Process and identity.incarnation == 0
+        case Err(_): false
+
+pub const TRACE_RESIDENT_BYTES_LIMIT_V1: i64 = 67108864
+pub const TRACE_RESIDENT_GENERATIONS_V1: i64 = 16
+pub const TRACE_RESIDENT_CONTEXTS_V1: i64 = 64
+
+pub struct TraceResidentStorageV1:
+    base: i64
+    bytes: i64
+    pool: i64
+    scratch: i64
+    arenas: [i64]
+
+pub fn trace_resident_storage_bytes_v1(config: TraceConfigV1, sites: i64
+        ) -> Result<i64, TraceFailureV1>:
+    if (sites <= 0 or sites > 4096 or config.max_contexts == 0 or
+            config.max_contexts > 64 or config.buffer_bytes < 96 or
+            config.buffer_bytes > 393216 or config.max_resident_generations == 0 or
+            config.max_resident_generations > 16):
+        return Err(TraceFailureV1.ResourceExhausted)
+    val channel = trace_native_channel_bytes_v1((config.buffer_bytes / 96u64) as i64)
+    Ok(80 + 64 + (config.max_contexts as i64) * (32 + channel) + sites * 16 + 96)
+
+# The owner charges the entire size BEFORE this call. Even initialization
+# failure retains the allocation and its budget; no address can be recycled.
+pub fn trace_resident_storage_allocate_v1(config: TraceConfigV1,
+        manifest: XrayLlvmBoundManifestV1, generation: u64
+        ) -> Result<TraceResidentStorageV1, TraceFailureV1>:
+    if not trace_resident_process_owner_v1(): return Err(TraceFailureV1.Busy)
+    val bytes = trace_resident_storage_bytes_v1(config, manifest.bindings.len())?
+    val base = rt_alloc(bytes)
+    if base <= 0 or base % 8 != 0 or base > 9223372036854775807 - bytes:
+        return Err(TraceFailureV1.ResourceExhausted)
+    val pool = base + 80
+    val pool_bytes = 64 + (config.max_contexts as i64) * 32
+    val mapping = pool + pool_bytes
+    val first_arena = mapping + manifest.bindings.len() * 16
+    val capacity = (config.buffer_bytes / 96u64) as i64
+    val arena_bytes = trace_native_channel_bytes_v1(capacity)
+    var arenas: [i64] = []
+    var ordered: [XrayLlvmBindingV1] = []
+    for binding in manifest.bindings:
+        ordered.push(binding)
+        var index = ordered.len() - 1
+        while index > 0 and ordered[index - 1].llvm_id > ordered[index].llvm_id:
+            val previous = ordered[index - 1]
+            ordered[index - 1] = ordered[index]
+            ordered[index] = previous
+            index = index - 1
+    unsafe(capabilities: [ffi]):
+        for word in 0..(bytes / 8): rt_ptr_write_i64(base, word * 8, 0)
+        val descriptor = [1, 80, generation as i64, manifest.module_instance as i64,
+            pool, pool_bytes, mapping, ordered.len(), config.event_mask as i64, 0]
+        for index in 0..10: rt_ptr_write_i64(base, index * 8, descriptor[index])
+        rt_ptr_write_i64(pool, 0, 13887211229632595)
+        rt_ptr_write_i64(pool, 8, 1)
+        rt_ptr_write_i64(pool, 16, pool_bytes)
+        rt_ptr_write_i64(pool, 24, config.max_contexts as i64)
+        rt_ptr_write_i64(pool, 32, generation as i64)
+        rt_ptr_write_i64(pool, 40, 64)
+        for index in 0..ordered.len():
+            val binding = ordered[index]
+            rt_ptr_write_i64(mapping, index * 16, binding.llvm_id)
+            val packed = (binding.function_id as u64) | ((binding.site_id as u64) << 32)
+            rt_ptr_write_i64(mapping, index * 16 + 8, packed as i64)
+        for index in 0..(config.max_contexts as i64):
+            val arena = first_arena + index * arena_bytes
+            if trace_native_channel_initialize_v1(arena, arena_bytes, capacity,
+                    generation, (index + 1) as u64) != 1:
+                return Err(TraceFailureV1.BackendFailure)
+            arenas.push(arena)
+            val slot = 64 + index * 32
+            rt_ptr_write_i64(pool, slot, arena)
+            rt_ptr_write_i64(pool, slot + 8, arena_bytes)
+            rt_ptr_write_i64(pool, slot + 16, index + 1)
+    Ok(TraceResidentStorageV1(base: base, bytes: bytes, pool: pool,
+        scratch: base + bytes - 96, arenas: arenas))
