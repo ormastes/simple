@@ -130,10 +130,10 @@ fn releases_bool_elements() {
 #[test]
 fn keeps_float_and_u64_element_arrays() {
     keeps("", "        val a = [1.5, 2.5]\n        if a[0] > 1.0:\n            acc = acc + 1\n");
-    keeps("", "        val a: [f32] = [1.5, 2.5]\n        if a[0] > 1.0:\n            acc = acc + 1\n");
-    keeps("", "        val a: [u64] = [1, 2]\n        if a[0] > 0:\n            acc = acc + 1\n");
-    // Control: the same shape with i32 elements is released.
-    releases("", "        val a: [i32] = [1, 2]\n        if a[0] > 0:\n            acc = acc + 1\n");
+    keeps("    val h: f32 = 1.5\n", "        val a = [h, h]\n        if a[0] > 1.0:\n            acc = acc + 1\n");
+    keeps("    val u: u64 = 1\n", "        val a = [u, u]\n        if a[0] > 0:\n            acc = acc + 1\n");
+    // Control: the same shape with i64 elements is released.
+    releases("", "        val a = [1, 2]\n        if a[0] > 0:\n            acc = acc + 1\n");
 }
 
 #[test]
@@ -358,7 +358,7 @@ fn keeps_local_whose_use_site_type_differs_from_its_declared_type() {
 /// clear in `lower_function` removed.
 #[test]
 fn length_source_map_does_not_leak_into_the_next_function() {
-    let source = "fn a(p: [i64]) -> i64:\n    val n: u64 = p.len().to_u64()\n    var i: u64 = 0\n    var acc = 0\n    while i < n:\n        acc = acc + p[i]\n        i = i + 1\n    acc\n\nfn b(q: u64, m: u64) -> u64:\n    var i: u64 = 0\n    var acc: u64 = 0\n    while i < m:\n        acc = acc + q\n        i = i + 1\n    acc\n";
+    let source = "fn a(p: [i64]) -> i64:\n    val n: u64 = p.len().to_u64()\n    var i: u64 = 0\n    var acc = 0\n    while i < n:\n        acc = acc + p[i]\n        i = i + 1\n    acc\n\nfn b(q: u64, m: u64) -> u64:\n    var i: u64 = 0\n    var acc: u64 = 0\n    while i < m:\n        acc = acc + i\n        i = i + 1\n    acc + q\n";
     let mir = lower(source, true);
     // Control: the proof fires in `a`, so the map entry exists.
     assert!(calls_in(&mir, "a", "rt_array_data_ptr") >= 1);
