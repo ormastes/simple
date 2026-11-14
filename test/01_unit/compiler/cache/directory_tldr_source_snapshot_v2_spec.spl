@@ -1,0 +1,57 @@
+# @req REQ-DTA-A1 REQ-DTA-H1 REQ-DTA-H2
+use std.spec.*
+use compiler.common.cache_contract.directory_tldr_source_rows_v2.{DirectoryTldrSourceRowV2,
+    directory_tldr_source_rows_match_v2}
+use compiler.frontend.join_point_attr_registry.{join_point_attr_begin_epoch_v2,
+    join_point_attr_epoch_matches_v2, join_point_attr_record, join_point_attr_names_of}
+
+fn row(path: text, digest: text = "a", size: i64 = 4) -> DirectoryTldrSourceRowV2:
+    DirectoryTldrSourceRowV2(path: path, content_digest: digest.repeat(64), byte_count: size)
+
+describe "directory snapshot source and lowering epoch correspondence":
+    it "accepts complete ordered source witnesses including a zero-byte file":
+        val rows = [row("src/a.spl"), row("src/b.spl", "b", 0)]
+        expect(directory_tldr_source_rows_match_v2(rows, rows)).to_equal(true)
+
+    it "rejects group subsets and extra HIR members":
+        val rows = [row("src/a.spl"), row("src/b.spl")]
+        expect(directory_tldr_source_rows_match_v2(rows, [rows[0]])).to_equal(false)
+        expect(directory_tldr_source_rows_match_v2([rows[0]], rows)).to_equal(false)
+        expect(directory_tldr_source_rows_match_v2([], [])).to_equal(false)
+
+    it "rejects aliases, duplicate and unsorted membership":
+        val rows = [row("src/a.spl"), row("src/b.spl")]
+        expect(directory_tldr_source_rows_match_v2(rows, [row("src/./a.spl"), rows[1]])).to_equal(false)
+        expect(directory_tldr_source_rows_match_v2([rows[0], rows[0]], [rows[0], rows[0]])).to_equal(false)
+        expect(directory_tldr_source_rows_match_v2([rows[1], rows[0]], [rows[1], rows[0]])).to_equal(false)
+
+    it "rejects stale content, lengths and malformed source receipts":
+        val expected = [row("src/a.spl")]
+        expect(directory_tldr_source_rows_match_v2(expected, [row("src/a.spl", "b")])).to_equal(false)
+        expect(directory_tldr_source_rows_match_v2(expected, [row("src/a.spl", "a", 5)])).to_equal(false)
+        val malformed = DirectoryTldrSourceRowV2(path: "src/a.spl", content_digest: "bad", byte_count: 4)
+        expect(directory_tldr_source_rows_match_v2([malformed], [malformed])).to_equal(false)
+        val negative = row("src/a.spl", "a", -1)
+        expect(directory_tldr_source_rows_match_v2([negative], [negative])).to_equal(false)
+
+    it "distinguishes fresh known-empty attributes from absent restored HIR":
+        val epoch = join_point_attr_begin_epoch_v2()
+        expect(epoch > 0).to_equal(true)
+        expect(join_point_attr_epoch_matches_v2("src/a.spl", "f", epoch)).to_equal(false)
+        join_point_attr_record("src/a.spl", "f", [])
+        expect(join_point_attr_epoch_matches_v2("src/a.spl", "f", epoch)).to_equal(true)
+        expect(join_point_attr_names_of("src/a.spl", "f")).to_equal([])
+        expect(join_point_attr_epoch_matches_v2("src/a.spl", "other", epoch)).to_equal(false)
+
+    it "does not reuse previous compile proof and preserves the legacy getter":
+        val old = join_point_attr_begin_epoch_v2()
+        join_point_attr_record("src/a.spl", "f", ["trace"])
+        val current = join_point_attr_begin_epoch_v2()
+        expect(current > old).to_equal(true)
+        expect(join_point_attr_epoch_matches_v2("src/a.spl", "f", old)).to_equal(false)
+        expect(join_point_attr_epoch_matches_v2("src/a.spl", "f", current)).to_equal(false)
+        expect(join_point_attr_names_of("src/a.spl", "f")).to_equal(["trace"])
+        join_point_attr_record("src/a.spl", "f", [])
+        expect(join_point_attr_epoch_matches_v2("src/a.spl", "f", current)).to_equal(true)
+        expect(join_point_attr_names_of("src/a.spl", "f")).to_equal([])
+        expect(join_point_attr_epoch_matches_v2("src/a.spl", "f", 0)).to_equal(false)
