@@ -139,3 +139,24 @@ Authored frontend/HIR regressions cover public alias to pri Target, nested
 private targets, private defaults/bounds/intermediate aliases, neutral formal
 shadowing, caller-private generic arguments, public targets and direct
 selective import of pri Target. All remain UNRUN.
+
+## Frozen manifest inputs
+
+ModuleSurface construction deep-copies the producer's completed evidence,
+including every policy array, into a registry-owned reference. Explicit
+promotion roots retain the read records, policy objects, scalar text and array
+children. The complete-chain validator checks source/snapshot/root joins,
+ordered immediate-to-family ancestry, positive policy SHA/provenance and child
+array alignment; it does not manufacture authenticated inventory authority.
+The frozen semantic digest now includes positive and negative observations,
+parser/configuration provenance, exact child target inputs and existing friend
+plus internal-export inputs. Incomplete evidence remains explicitly incomplete;
+hashing it is not an access grant. Invalid complete evidence is uncacheable.
+
+The configured import owner still needs exact module-child traversal receipts.
+A matching physical child target is insufficient to select a public route when
+another private alias reaches that same target. Actual module binding selection
+must retain those hops before the requester consumer can authorize crossing a
+closed interface. The manifest parser's lexical module label is not that route
+identity. Selected symbol/export chains already retain their actual typed
+predecessors; module routes and source-use receipts remain separate work.
