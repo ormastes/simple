@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+# Real curl/POP3-over-implicit-TLS interoperability against the pure-Simple
+# loopback server (loopback_pop3_server.spl). Disposable HOME and ports only.
+# Requires: SIMPLE_BIN (runs the server) and MAIL_CONFIG_BIN (compiled SDN helper).
+set -uo pipefail
+root=$(cd "$(dirname "$0")/../../../../.." && pwd)
+simple_bin=${SIMPLE_BIN:-$root/bin/simple}
+[ -x "$simple_bin" ] || [ -x "$simple_bin.exe" ] || { echo "SIMPLE_BIN missing"; exit 2; }
+[ -n "${MAIL_CONFIG_BIN:-}" ] || { echo "MAIL_CONFIG_BIN missing"; exit 2; }
+ids="$root/src/compiler_rust/runtime/tests/fixtures/browser_tls_identity"
+unrelated_ca="$root/test/fixtures/crypto/x25519mlkem768/localhost_ed25519_cert.pem"
+work=$(mktemp -d)
+server_pid=
+cleanup() { [ -n "$server_pid" ] && kill "$server_pid" 2>/dev/null; rm -rf "$work"; }
+trap cleanup EXIT
+port=$((39100 + $$ % 800))
+mkdir -p "$work/home/.config/devhub" "$work/shim"
+printf 'normal\n' > "$work/mode"; : > "$work/log"
+cat > "$work/home/.config/devhub/email.sdn" <<SDN
+default_account: "loopback"
+
+accounts:
+  loopback:
+    provider: other
+    protocol: pop3
+    email: "alice@example.test"
+    username: "alice@example.test"
+    display_name: "Fixture"
+    pop3_server: "localhost"
+    pop3_port: "$port"
+    tls: implicit
+    password_cmd: "printf loopback-fixture-password"
+SDN
+chmod 600 "$work/home/.config/devhub/email.sdn"
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*)
+    # Schannel cannot reach a CRL/OCSP for the private fixture CA; the real curl still
+    # performs the full TLS verification, only the revocation lookup is waived.
+    real=$(command -v curl)
+    printf '#!/usr/bin/env bash\nexec "%s" "$@" --ssl-no-revoke\n' "$real" > "$work/shim/curl"
+    chmod +x "$work/shim/curl"
+    export PATH="$work/shim:$PATH" ;;
+esac
+"$simple_bin" run "$root/test/01_unit/tools/mail_cli/fixtures/loopback_pop3_server.spl" \
+  "$port" "$ids/localhost.pem" "$ids/localhost-key.pem" "$work/mode" "$work/log" > "$work/server.out" 2>&1 &
+server_pid=$!
+for _ in $(seq 1 60); do grep -q '^listening' "$work/server.out" && break; sleep 1; done
+grep -q '^listening' "$work/server.out" || { echo "server did not start"; tail -3 "$work/server.out"; exit 2; }
+
+export MAIL_NONINTERACTIVE=1 MAIL_CURL_MAX_RETRIES=1 NO_PROXY=localhost
+unset MAIL_PASSWORD_FILE MAIL_PASSWORD_COMMAND MAIL_ACCOUNT MAIL_CONFIG_FILE MAIL_CONFIG_DIR
+client="$root/tools/mail-cli/bin/mail"
+run() { # sets out, err, rc
+  HOME="$work/home" CURL_CA_BUNDLE="${CA:-$ids/ca.pem}" bash "$client" "$@" > "$work/out" 2> "$work/err"
+  rc=$?
+}
+count() { grep -c "^$1\$" "$work/log"; }
+fail=0
+check() { if [ "$2" = ok ]; then echo "$1: PASS"; else echo "$1: FAIL ($3)"; fail=1; fi; }
+
+run inbox --json
+if [ $rc -eq 0 ] && grep -q 'Loopback TLS message' "$work/out" && grep -q 'pop3' "$work/out"; then
+  check actual_curl_tls_pop3_list ok; else check actual_curl_tls_pop3_list bad "rc=$rc $(head -c 200 "$work/err")"; fi
+
+retr_before=$(count RETR)
+run read 1 --raw
+if [ $rc -eq 0 ] && grep -q '^Loopback body\.' "$work/out" && [ "$(count RETR)" -gt "$retr_before" ] \
+   && [ "$(count LIST)" -ge 1 ] && [ "$(count DELE)" -eq 0 ]; then
+  check actual_curl_tls_pop3_retrieve_without_mutation ok; else check actual_curl_tls_pop3_retrieve_without_mutation bad "rc=$rc"; fi
+if grep -qx '\.Leading dot' "$work/out" && grep -qx '\.' "$work/out" && ! grep -q '\.\.Leading dot' "$work/out"; then
+  check actual_curl_pop3_dot_unstuffing ok; else check actual_curl_pop3_dot_unstuffing bad "stuffed lines not decoded"; fi
+
+printf 'empty\n' > "$work/mode"; run inbox --json
+if [ $rc -eq 0 ] && [ "$(tr -d '[:space:]' < "$work/out")" = "[]" ]; then
+  check actual_curl_pop3_empty_mailbox ok; else check actual_curl_pop3_empty_mailbox bad "rc=$rc out=$(head -c 100 "$work/out")"; fi
+
+printf 'reject_list\n' > "$work/mode"; run inbox --json
+if [ $rc -ne 0 ] && [ ! -s "$work/out" ]; then
+  check actual_curl_pop3_list_error_propagated ok; else check actual_curl_pop3_list_error_propagated bad "rc=$rc"; fi
+
+printf 'truncated\n' > "$work/mode"; run read 1 --raw
+if [ $rc -ne 0 ] && [ ! -s "$work/out" ]; then
+  check actual_curl_pop3_truncated_message_rejected ok; else check actual_curl_pop3_truncated_message_rejected bad "rc=$rc"; fi
+
+printf 'normal\n' > "$work/mode"
+before=$(count PASS)
+printf 'wrong-fixture-password\n' > "$work/wrong"
+run read 1 --raw --password-file "$work/wrong"
+if [ $rc -eq 67 ] && [ "$(count PASS)" -eq $((before + 1)) ] && grep -q 'mail auth password' "$work/err"; then
+  check actual_curl_authentication_rejected_once ok; else check actual_curl_authentication_rejected_once bad "rc=$rc passes=$(( $(count PASS) - before ))"; fi
+
+CA="$unrelated_ca" run read 1 --raw
+if [ $rc -eq 60 ]; then
+  check actual_curl_untrusted_certificate_rejected ok; else check actual_curl_untrusted_certificate_rejected bad "rc=$rc"; fi
+
+[ "$(count DELE)" -eq 0 ] || { echo "mutation observed: FAIL"; fail=1; }
+exit $fail
