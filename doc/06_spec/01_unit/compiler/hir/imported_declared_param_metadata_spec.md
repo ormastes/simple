@@ -19,5 +19,8 @@ Status: authored, UNRUN with the changed compiler. Codec generation alone passed
 6. Reject generic-trait parameter metadata even for a nongeneric implementor; an
    ambient same-name type must not substitute for the declaring trait binder.
 
+7. Lower a real call to the known-empty import and inspect its emitted direct-call
+   signature: declared_params_known remains true with zero parameters.
+
 Public tracing, bootstrap admission, inferred return types and instantiated generic
 callable ABI qualification are not established by these scenarios.
