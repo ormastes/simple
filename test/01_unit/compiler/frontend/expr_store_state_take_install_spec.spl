@@ -1,5 +1,10 @@
 use std.spec.{describe, it, expect}
 use compiler.frontend.core._AstExpr.nodes.{expr_store_state_take, expr_store_state_install}
+use compiler.frontend.core._AstExpr.nodes.{expr_reset, expr_attr_apply_config,
+    expr_attr_extra_placement, expr_attr_s_val_placement,
+    expr_attr_extra_present, expr_attr_s_val_present,
+    expr_int_lit, expr_string_lit, expr_if_expr}
+use compiler.frontend.core._AstExpr.accessors.{expr_get_str, expr_get_extra}
 
 describe "ExprStoreState ParseContext snapshot (stage 1)":
     it "take leaves fresh stores and install restores the snapshot":
@@ -10,3 +15,39 @@ describe "ExprStoreState ParseContext snapshot (stage 1)":
         val again = expr_store_state_take()
         expect(again.expr_tag.len()).to_equal(a.expr_tag.len())
         expr_store_state_install(again)
+
+    it "starts empty detached stores after take and preserves both interleaved snapshots":
+        # bug=node_attr_expr_take_reuses_detached_values_2026_11_14
+        for placement in ["direct", "column", "sparse_hash"]:
+            expr_reset()
+            expect(expr_attr_apply_config("extra={placement},s_val={placement}").is_ok()).to_equal(true)
+            val old_text = expr_string_lit("outer", 0)
+            val old_if = expr_if_expr(0, 0, 37, 0)
+            val outer = expr_store_state_take()
+            expect(outer.expr_s_val[old_text]).to_equal("outer")
+            expect(outer.expr_extra[old_if]).to_equal(37)
+            expect(expr_attr_extra_placement()).to_equal(placement)
+            expect(expr_attr_s_val_placement()).to_equal(placement)
+            if placement != "direct":
+                expect(expr_attr_extra_present()).to_equal(0)
+                expect(expr_attr_s_val_present()).to_equal(0)
+            # No expr_reset: take itself must have installed fresh owners.
+            val fresh_zero = expr_int_lit(9, 0)
+            val fresh_one = expr_int_lit(10, 0)
+            expect(fresh_zero).to_equal(old_text)
+            expect(fresh_one).to_equal(old_if)
+            expect(expr_get_str(fresh_zero)).to_equal("")
+            expect(expr_get_extra(fresh_one)).to_equal(-1)
+            val inner_text = expr_string_lit("inner", 0)
+            val inner_if = expr_if_expr(0, 0, 73, 0)
+            val inner = expr_store_state_take()
+            expr_store_state_install(outer)
+            expect(expr_get_str(old_text)).to_equal("outer")
+            expect(expr_get_extra(old_if)).to_equal(37)
+            expr_store_state_install(inner)
+            expect(expr_get_str(fresh_zero)).to_equal("")
+            expect(expr_get_extra(fresh_one)).to_equal(-1)
+            expect(expr_get_str(inner_text)).to_equal("inner")
+            expect(expr_get_extra(inner_if)).to_equal(73)
+        # Restore the configured test environment after exercising all modes.
+        expr_reset()
