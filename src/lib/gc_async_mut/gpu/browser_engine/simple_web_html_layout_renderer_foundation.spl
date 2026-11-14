@@ -820,8 +820,8 @@ fn text_matches_at(haystack: text, needle: text, offset: i32) -> bool:
     # residual item 3), which is what collapsed `_html_scan_events` to zero
     # events in the guest while the host produced a full DOM. It also avoids
     # the per-character heap string `char_at` would allocate.
-    val needle_len = needle.len() as i32
-    if (offset < 0) or offset + needle_len > (haystack.len() as i32):
+    val needle_len = needle.byte_len() as i32
+    if (offset < 0) or offset + needle_len > (haystack.byte_len() as i32):
         return false
     if needle_len == 0:
         return true
@@ -848,7 +848,7 @@ fn skip_wrap_spaces(txt: text, off: i32) -> i32:
     # byte index — `char_code_at` here returned a character index that callers
     # then cut on, truncating any string containing multi-byte text.
     var out = off
-    val n = txt.len() as i32
+    val n = txt.byte_len() as i32
     if out >= n:
         return out
     val b = txt.bytes()
@@ -874,7 +874,7 @@ fn find_from(s: text, needle: text, pos: i32) -> i32:
     # so the edge cases answer exactly as before (an empty needle returns
     # `start` even past the end, which native index_of would clamp).
     val start = if pos < 0: 0 else: pos
-    val nlen = needle.len() as i32
+    val nlen = needle.byte_len() as i32
     if nlen == 0:
         return start
     val slen = s.byte_len() as i32
@@ -978,13 +978,14 @@ fn attr_present(inner: text, name: text) -> bool:
         if token_start:
             var matched = true
             var j = 0
-            while j < name.len():
+            val name_blen = name.byte_len()
+            while j < name_blen:
                 if not html_attr_name_byte_equal(ib[i + j], nb[j]):
                     matched = false
                     break
                 j = j + 1
             if matched:
-                val end = i + name.len()
+                val end = i + name_blen
                 if end >= inner.byte_len():
                     return true
                 val next = ib[end]
@@ -1048,7 +1049,7 @@ pub fn html_has_presentational_attr(inner: text) -> bool:
 
 fn _html_attr_name_at(ib: [u8], inner_len: i64, at: i64, name: text) -> bool:
     val nb = name.bytes()
-    val name_len = name.len()
+    val name_len = name.byte_len()
     if at + name_len > inner_len:
         return false
     var j = 0
@@ -1071,7 +1072,7 @@ fn attr_value(inner: text, name: text) -> text:
     attr_value_by_key(inner, key)
 
 fn attr_value_by_key(inner: text, key: text) -> text:
-    val key_len = key.len()
+    val key_len = key.byte_len()
     val kpos = attr_key_index(inner, key, key_len)
     if kpos < 0:
         return ""
@@ -1201,37 +1202,37 @@ fn _decode_numeric_entities(s: text) -> text:
     var start = find_from(s, "&#", 0)
     if start < 0:
         return s
-    val n = s.len()
+    val n = s.byte_len()
     var out = ""
     var i = 0
     while start >= 0:
         out = out + s.substring(i, start)
         var j = start + 2
         var is_hex = false
-        if j < n and (s[j] == "x" or s[j] == "X"):
+        if j < n and (s.substring(j, j + 1) == "x" or s.substring(j, j + 1) == "X"):
             is_hex = true
             j = j + 1
         var cp = 0i64
         var digits = 0
         var valid = true
         while j < n and digits <= 7:
-            val c = s[j]
+            val c = s.substring(j, j + 1)
             if c == ";":
                 break
             var d = -1
             if c >= "0" and c <= "9":
-                d = c.char_code_at(0) - 48
+                d = c.byte_at(0) - 48
             elif is_hex and c >= "a" and c <= "f":
-                d = c.char_code_at(0) - 87
+                d = c.byte_at(0) - 87
             elif is_hex and c >= "A" and c <= "F":
-                d = c.char_code_at(0) - 55
+                d = c.byte_at(0) - 55
             if d < 0:
                 valid = false
                 break
             cp = cp * (if is_hex: 16 else: 10) + d
             digits = digits + 1
             j = j + 1
-        if valid and digits > 0 and j < n and s[j] == ";":
+        if valid and digits > 0 and j < n and s.substring(j, j + 1) == ";":
             out = out + _codepoint_to_text(cp)
             i = j + 1
         else:
@@ -1475,7 +1476,7 @@ fn parse_int_range(s: text, start: i32, end: i32) -> i32:
     var v = 0
     var matched_any_digit = false
     while i < end:
-        val c = s.char_at(i)
+        val c = s.substring(i, i + 1)
         val digit = dec_val(c)
         if digit < 10:
             v = v * 10 + digit
@@ -1502,7 +1503,7 @@ fn parse_color(raw: text) -> u32:
         var depth = 0
         var i = 0
         while i < inner.byte_len():
-            val ch = inner.char_at(i)
+            val ch = inner.substring(i, i + 1)
             if ch == "(":
                 depth = depth + 1
             elif ch == ")":
@@ -1511,29 +1512,29 @@ fn parse_color(raw: text) -> u32:
                 return parse_color(inner.slice(0, i))
             i = i + 1
         return 0u32
-    if s.char_at(0) == "#":
+    if s.substring(0, 1) == "#":
         val h_len = s.byte_len() - 1
         if h_len == 8:
-            val r = hex_val(s.char_at(1)) * 16 + hex_val(s.char_at(2))
-            val g = hex_val(s.char_at(3)) * 16 + hex_val(s.char_at(4))
-            val b = hex_val(s.char_at(5)) * 16 + hex_val(s.char_at(6))
-            val a = hex_val(s.char_at(7)) * 16 + hex_val(s.char_at(8))
+            val r = hex_val(s.substring(1, 2)) * 16 + hex_val(s.substring(2, 3))
+            val g = hex_val(s.substring(3, 4)) * 16 + hex_val(s.substring(4, 5))
+            val b = hex_val(s.substring(5, 6)) * 16 + hex_val(s.substring(6, 7))
+            val a = hex_val(s.substring(7, 8)) * 16 + hex_val(s.substring(8, 9))
             return (a.to_u32() << 24) | (r.to_u32() << 16) | (g.to_u32() << 8) | b.to_u32()
         if h_len >= 6:
-            val r = hex_val(s.char_at(1)) * 16 + hex_val(s.char_at(2))
-            val g = hex_val(s.char_at(3)) * 16 + hex_val(s.char_at(4))
-            val b = hex_val(s.char_at(5)) * 16 + hex_val(s.char_at(6))
+            val r = hex_val(s.substring(1, 2)) * 16 + hex_val(s.substring(2, 3))
+            val g = hex_val(s.substring(3, 4)) * 16 + hex_val(s.substring(4, 5))
+            val b = hex_val(s.substring(5, 6)) * 16 + hex_val(s.substring(6, 7))
             return web_argb(r, g, b)
         if h_len == 4:
-            val r = hex_val(s.char_at(1)) * 17
-            val g = hex_val(s.char_at(2)) * 17
-            val b = hex_val(s.char_at(3)) * 17
-            val a = hex_val(s.char_at(4)) * 17
+            val r = hex_val(s.substring(1, 2)) * 17
+            val g = hex_val(s.substring(2, 3)) * 17
+            val b = hex_val(s.substring(3, 4)) * 17
+            val a = hex_val(s.substring(4, 5)) * 17
             return (a.to_u32() << 24) | (r.to_u32() << 16) | (g.to_u32() << 8) | b.to_u32()
         if h_len == 3:
-            val r = hex_val(s.char_at(1)) * 17
-            val g = hex_val(s.char_at(2)) * 17
-            val b = hex_val(s.char_at(3)) * 17
+            val r = hex_val(s.substring(1, 2)) * 17
+            val g = hex_val(s.substring(2, 3)) * 17
+            val b = hex_val(s.substring(3, 4)) * 17
             return web_argb(r, g, b)
         return 0u32
     if s.byte_len() >= 3 and text_matches_at(s, "rgb", 0):
@@ -1555,7 +1556,7 @@ fn _parse_color_delegated(lowered: text) -> u32:
     delegate would silently answer opaque black."""
     if lowered == "currentcolor":
         return 0u32
-    val first = if lowered.len() > 0: lowered.char_at(0) else: ""
+    val first = if lowered.len() > 0: lowered.substring(0, 1) else: ""
     if dec_val(first) < 10 or first == ".":
         # The delegate ends with a bare `parse_i64`, so `1` would come back as
         # a nonzero "color". No CSS color starts with a digit or a dot, and
@@ -1596,7 +1597,7 @@ fn parse_alpha_fraction_range(s: text, start: i32, end: i32) -> i32:
     var seen_digit = false
     var in_frac = false
     while i < end:
-        val c = s.char_at(i)
+        val c = s.substring(i, i + 1)
         val d = dec_val(c)
         if d < 10:
             seen_digit = true
@@ -1646,11 +1647,11 @@ fn is_gradient_angle_token(s: text) -> bool:
     if n == 0:
         return false
     var i = 0
-    if s.char_at(0) == "-" or s.char_at(0) == "+":
+    if s.substring(0, 1) == "-" or s.substring(0, 1) == "+":
         i = 1
     var saw_digit = false
     while i < n:
-        val c = s.char_at(i)
+        val c = s.substring(i, i + 1)
         val d = dec_val(c)
         if d < 10:
             saw_digit = true
@@ -1811,7 +1812,7 @@ fn find_last_top_level_space(s: text) -> i32:
     var i = 0
     val n = s.byte_len()
     while i < n:
-        val c = s.char_at(i)
+        val c = s.substring(i, i + 1)
         if c == "(":
             depth = depth + 1
         elif c == ")":
@@ -1825,7 +1826,7 @@ fn find_last_top_level_space(s: text) -> i32:
 # percentage (no explicit stop position given).
 fn parse_percent_permille(s: text) -> i32:
     val n = s.byte_len()
-    if n == 0 or s.char_at(n - 1) != "%":
+    if n == 0 or s.substring(n - 1, n) != "%":
         return -1
     var i = 0
     var int_part = 0
@@ -1834,7 +1835,7 @@ fn parse_percent_permille(s: text) -> i32:
     var seen_digit = false
     var in_frac = false
     while i < n - 1:
-        val c = s.char_at(i)
+        val c = s.substring(i, i + 1)
         val d = dec_val(c)
         if d < 10:
             seen_digit = true
@@ -1872,14 +1873,14 @@ fn gradient_stop_position_or_neg1(part: text) -> i32:
 fn parse_signed_leading_int(s: text) -> i32:
     var i = 0
     var neg = false
-    if s.len() > 0 and s.char_at(0) == "-":
+    if s.len() > 0 and s.substring(0, 1) == "-":
         neg = true
         i = 1
-    elif s.len() > 0 and s.char_at(0) == "+":
+    elif s.len() > 0 and s.substring(0, 1) == "+":
         i = 1
     var v = 0
     while i < s.byte_len():
-        val d = dec_val(s.char_at(i))
+        val d = dec_val(s.substring(i, i + 1))
         if d < 10:
             v = v * 10 + d
             i = i + 1
@@ -1977,7 +1978,7 @@ fn parse_int(s: text) -> i32:
     var matched_any_digit = false
     val s_len = s.byte_len()
     while i < s_len:
-        val c = s.char_at(i)
+        val c = s.substring(i, i + 1)
         val digit = dec_val(c)
         if digit < 10:
             v = v * 10 + digit
@@ -1993,11 +1994,11 @@ fn parse_nth_int(s: text, target: i32) -> i32:
     var seen = 0
     val s_len = s.byte_len()
     while i < s_len:
-        val c = s.char_at(i)
+        val c = s.substring(i, i + 1)
         if dec_val(c) < 10:
             var v = 0
             while i < s_len:
-                val d = s.char_at(i)
+                val d = s.substring(i, i + 1)
                 val digit = dec_val(d)
                 if digit >= 10:
                     break
@@ -2016,13 +2017,13 @@ fn parse_signed_nth_int(s: text, target: i32) -> i32:
     val s_len = s.byte_len()
     while i < s_len:
         var sign = 1
-        if s.char_at(i) == "-":
+        if s.substring(i, i + 1) == "-":
             sign = -1
             i = i + 1
-        if i < s_len and dec_val(s.char_at(i)) < 10:
+        if i < s_len and dec_val(s.substring(i, i + 1)) < 10:
             var v = 0
             while i < s_len:
-                val digit = dec_val(s.char_at(i))
+                val digit = dec_val(s.substring(i, i + 1))
                 if digit >= 10:
                     break
                 v = v * 10 + digit
@@ -2047,19 +2048,19 @@ fn parse_signed_nth_length(s: text, target: i32, basis: i32) -> i32:
     val s_len = s.byte_len()
     while i < s_len:
         var sign = 1
-        if s.char_at(i) == "-":
+        if s.substring(i, i + 1) == "-":
             sign = -1
             i = i + 1
-        if i < s_len and dec_val(s.char_at(i)) < 10:
+        if i < s_len and dec_val(s.substring(i, i + 1)) < 10:
             var v = 0
             while i < s_len:
-                val digit = dec_val(s.char_at(i))
+                val digit = dec_val(s.substring(i, i + 1))
                 if digit >= 10:
                     break
                 v = v * 10 + digit
                 i = i + 1
             if seen == target:
-                if i < s_len and s.char_at(i) == "%":
+                if i < s_len and s.substring(i, i + 1) == "%":
                     return (v * sign * basis) / 100
                 return v * sign
             seen = seen + 1
@@ -2181,7 +2182,7 @@ fn parse_opacity_pct(raw: text) -> i32:
         var i = dot + 1
         val t_len = t.byte_len()
         while i < t_len and scale < 100:
-            val d = t.char_at(i)
+            val d = t.substring(i, i + 1)
             if d < "0" or d > "9":
                 break
             frac = frac * 10 + hex_val(d)
@@ -2235,7 +2236,7 @@ fn parse_css_time_ms(raw: text) -> i32:
     var i = dot + 1
     val magnitude_len = magnitude.byte_len()
     while i < magnitude_len:
-        val c = magnitude.char_at(i)
+        val c = magnitude.substring(i, i + 1)
         if c < "0" or c > "9":
             break
         frac = frac * 10 + dec_val(c)
@@ -2266,7 +2267,7 @@ val CSS_TIMING_TOKEN_MAX_COUNT: i32 = 16
 # excessively nested functions, and oversized token streams fail closed.
 fn css_timing_shorthand_tokens(raw: text) -> [text]:
     var tokens: [text] = []
-    if raw.len() == 0 or raw.len() > CSS_TIMING_TOKEN_MAX_BYTES:
+    if raw.len() == 0 or raw.byte_len() > CSS_TIMING_TOKEN_MAX_BYTES:
         return tokens
     val bytes = raw.bytes()
     var depth = 0
@@ -2348,7 +2349,7 @@ fn animation_number_token_is_valid(raw: text) -> bool:
     var exponent_at = -1
     var scan = number_start
     while scan < token.byte_len():
-        val c = token.char_at(scan)
+        val c = token.substring(scan, scan + 1)
         if c == "e":
             if exponent_at >= 0:
                 return false
@@ -2360,14 +2361,14 @@ fn animation_number_token_is_valid(raw: text) -> bool:
         if exponent_i >= token.byte_len():
             return false
         if (
-            token.char_at(exponent_i) == "+" or
-            token.char_at(exponent_i) == "-"
+            token.substring(exponent_i, exponent_i + 1) == "+" or
+            token.substring(exponent_i, exponent_i + 1) == "-"
         ):
             exponent_i = exponent_i + 1
         if exponent_i >= token.byte_len():
             return false
         while exponent_i < token.byte_len():
-            val digit = dec_val(token.char_at(exponent_i))
+            val digit = dec_val(token.substring(exponent_i, exponent_i + 1))
             if digit >= 10:
                 return false
             exponent_i = exponent_i + 1
@@ -2377,7 +2378,7 @@ fn animation_number_token_is_valid(raw: text) -> bool:
     var digit_after_dot = false
     var i = number_start
     while i < number_end:
-        val c = token.char_at(i)
+        val c = token.substring(i, i + 1)
         if c == "." and not saw_dot:
             saw_dot = true
         else:
@@ -2398,9 +2399,9 @@ fn parse_animation_iteration_number_token(raw: text) -> f64?:
         var mantissa_i = 1
         while (
             mantissa_i < token.byte_len() and
-            token.char_at(mantissa_i) != "e"
+            token.substring(mantissa_i, mantissa_i + 1) != "e"
         ):
-            val digit = dec_val(token.char_at(mantissa_i))
+            val digit = dec_val(token.substring(mantissa_i, mantissa_i + 1))
             if digit > 0 and digit < 10:
                 return nil
             mantissa_i = mantissa_i + 1
@@ -2415,12 +2416,12 @@ fn parse_animation_iteration_number_token(raw: text) -> f64?:
 fn animation_token_looks_numeric(token: text) -> bool:
     if token.len() == 0:
         return false
-    val first = token.char_at(0)
+    val first = token.substring(0, 1)
     if first == "." or first == "+" or dec_val(first) < 10:
         return true
     (
         first == "-" and token.byte_len() > 1 and
-        (token.char_at(1) == "." or dec_val(token.char_at(1)) < 10)
+        (token.substring(1, 2) == "." or dec_val(token.substring(1, 2)) < 10)
     )
 
 fn parse_animation_name(raw: text) -> text:

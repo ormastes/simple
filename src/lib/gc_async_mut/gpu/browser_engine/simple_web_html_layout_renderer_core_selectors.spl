@@ -6,13 +6,13 @@ use std.common.ui.ui_frame_clock.{FrameClock}
 use std.nogc_sync_mut.ui.host_frame_clock.{default_frame_clock}
 fn unquote_css_attr_value(raw: text) -> text:
     val v = raw.trim()
-    if v.len() >= 2:
-        val first = v[0:0 + 1]
+    if v.byte_len() >= 2:
+        val first = v.substring(0, 0 + 1)
         # Exact last-byte slice: the quote characters being tested are
         # ASCII; a multi-byte final character simply never matches.
-        val last = v[v.len() - 1:v.len()]
+        val last = v.substring(v.byte_len() - 1, v.byte_len())
         if (first == "\"" and last == "\"") or (first == "'" and last == "'"):
-            return v.substring(1, v.len() - 1)
+            return v.substring(1, v.byte_len() - 1)
     v
 
 fn attr_selector_matches(attrs: text, expr: text) -> bool:
@@ -99,10 +99,10 @@ fn attr_selector_matches(attrs: text, expr: text) -> bool:
     attr_value(attrs, raw).len() > 0 or attr_name_present(attrs, raw)
 
 fn attr_name_present(attrs: text, name: text) -> bool:
-    val name_len = name.len()
+    val name_len = name.byte_len()
     if name_len == 0:
         return false
-    val attrs_len = attrs.len()
+    val attrs_len = attrs.byte_len()
     var pos = 0
     var guard = 0
     while guard < 200:  # cpu-lane-loop-ok: walks occurrences of ONE attribute name inside ONE tag's attribute text via native find_from, capped at 200 probes
@@ -113,13 +113,13 @@ fn attr_name_present(attrs: text, name: text) -> bool:
         val before_ok = if hit == 0:
             true
         else:
-            val b = attrs[hit - 1:hit - 1 + 1]
+            val b = attrs.substring(hit - 1, hit)
             b == " " or b == "\t" or b == "\n" or b == "\r"
         val after = hit + name_len
         val after_ok = if after >= attrs_len:
             true
         else:
-            val a = attrs[after:after + 1]
+            val a = attrs.substring(after, after + 1)
             a == " " or a == "\t" or a == "\n" or a == "\r" or a == "=" or a == "/" or a == ">"
         if before_ok and after_ok:
             return true
@@ -141,10 +141,10 @@ fn base_selector_matches(base: text, tag: text, cls: text, class_words: [text], 
     # universal selector (e.g. the `*, *::before, *::after` margin/padding reset)
     if base == "*":
         return true
-    if base[0:0 + 1] == ".":
+    if base.substring(0, 0 + 1) == ".":
         val want = base.substring(1, base.byte_len())
         return class_has_all(class_words, want)
-    if base[0:0 + 1] == "#":
+    if base.substring(0, 0 + 1) == "#":
         # #id or compound #id.class(.class...)
         val id_dot = find_from(base, ".", 1)
         if id_dot >= 0:
@@ -183,10 +183,10 @@ fn _pseudo_list_matches(
     var opt_count = 0
     var depth = 0
     var i = 0
-    val arg_len = arg.len()
+    val arg_len = arg.byte_len()
     var option_start = 0
     while i < arg_len:  # cpu-lane-loop-ok: splits ONE :not()/:is()/:where() argument on top-level commas; bound is that argument's length
-        val ch = arg[i:i + 1]
+        val ch = arg.substring(i, i + 1)
         if ch == "(":
             depth = depth + 1
             if depth > 32:
@@ -299,27 +299,28 @@ fn simple_match(
         return true
     var pseudo_pos = colon
     var pseudo_count = 0
-    while pseudo_pos < sel.len():  # cpu-lane-loop-ok: walks the pseudo-class chain of ONE selector; bound is that selector's length with a hard pseudo_count cap of 32
+    val sel_blen = sel.byte_len()
+    while pseudo_pos < sel_blen:  # cpu-lane-loop-ok: walks the pseudo-class chain of ONE selector; bound is that selector's length with a hard pseudo_count cap of 32
         pseudo_count = pseudo_count + 1
-        if pseudo_count > 32 or sel[pseudo_pos:pseudo_pos + 1] != ":":
+        if pseudo_count > 32 or sel.substring(pseudo_pos, pseudo_pos + 1) != ":":
             return false
         val name_start = pseudo_pos + 1
         var name_end = name_start
         # cpu-lane-loop-ok: scans ONE pseudo-class NAME until `:`, `(` or `[`; bound is that name's length
         while (
-            name_end < sel.len() and sel[name_end:name_end + 1] != ":" and
-            sel[name_end:name_end + 1] != "(" and sel[name_end:name_end + 1] != "["
+            name_end < sel_blen and sel.substring(name_end, name_end + 1) != ":" and
+            sel.substring(name_end, name_end + 1) != "(" and sel.substring(name_end, name_end + 1) != "["
         ):
             name_end = name_end + 1
         val pseudo = sel.substring(name_start, name_end)
         if pseudo.len() == 0:
             return false
         var arg = ""
-        if name_end < sel.len() and sel[name_end:name_end + 1] == "(":
+        if name_end < sel_blen and sel.substring(name_end, name_end + 1) == "(":
             var functional_depth = 1
             var close = name_end + 1
-            while close < sel.len() and functional_depth > 0:  # cpu-lane-loop-ok: matches the closing paren of ONE functional pseudo-class argument; bound is the remaining selector length, paren depth capped at 32
-                val ch = sel[close:close + 1]
+            while close < sel_blen and functional_depth > 0:  # cpu-lane-loop-ok: matches the closing paren of ONE functional pseudo-class argument; bound is the remaining selector length, paren depth capped at 32
+                val ch = sel.substring(close, close + 1)
                 if ch == "(":
                     functional_depth = functional_depth + 1
                     if functional_depth > 32:
@@ -334,8 +335,8 @@ fn simple_match(
         else:
             pseudo_pos = name_end
             if (
-                pseudo == "root" and pseudo_pos < sel.len() and
-                sel[pseudo_pos:pseudo_pos + 1] == "["
+                pseudo == "root" and pseudo_pos < sel_blen and
+                sel.substring(pseudo_pos, pseudo_pos + 1) == "["
             ):
                 val attr_close = find_from(sel, "]", pseudo_pos + 1)
                 if attr_close < 0 or not attr_selector_matches(
@@ -390,11 +391,11 @@ fn _is_interaction_state_pseudo(pseudo: text, attrs: text) -> bool:
     false
 
 fn class_has_all(words: [text], wants: text) -> bool:
-    val wants_len = wants.len()
+    val wants_len = wants.byte_len()
     var start = 0
     var i = 0
     while i <= wants_len:  # cpu-lane-loop-ok: splits a `.a.b.c` compound class selector on `.`; bound is that compound's text length
-        if i == wants_len or wants[i:i + 1] == ".":
+        if i == wants_len or wants.substring(i, i + 1) == ".":
             if i > start:
                 val want = wants.substring(start, i)
                 if not class_words_has(words, want):
@@ -504,27 +505,28 @@ fn _pseudo_ctx_matches(sel: text, nodes: [HNode], ctx: SelectorContext, idx: i32
         return true
     var pseudo_pos = colon
     var pseudo_count = 0
-    while pseudo_pos < sel.len():  # cpu-lane-loop-ok: walks the pseudo-class chain of ONE selector in the positional-pseudo pass; bound is that selector's length, pseudo_count capped at 32
+    val sel_blen = sel.byte_len()
+    while pseudo_pos < sel_blen:  # cpu-lane-loop-ok: walks the pseudo-class chain of ONE selector in the positional-pseudo pass; bound is that selector's length, pseudo_count capped at 32
         pseudo_count = pseudo_count + 1
-        if pseudo_count > 32 or sel[pseudo_pos:pseudo_pos + 1] != ":":
+        if pseudo_count > 32 or sel.substring(pseudo_pos, pseudo_pos + 1) != ":":
             return false
         val name_start = pseudo_pos + 1
         var name_end = name_start
         # cpu-lane-loop-ok: scans ONE pseudo-class NAME until `:`, `(` or `[`; bound is that name's length
         while (
-            name_end < sel.len() and sel[name_end:name_end + 1] != ":" and
-            sel[name_end:name_end + 1] != "(" and sel[name_end:name_end + 1] != "["
+            name_end < sel_blen and sel.substring(name_end, name_end + 1) != ":" and
+            sel.substring(name_end, name_end + 1) != "(" and sel.substring(name_end, name_end + 1) != "["
         ):
             name_end = name_end + 1
         val pseudo = sel.substring(name_start, name_end)
         if pseudo.len() == 0:
             return false
         var arg = ""
-        if name_end < sel.len() and sel[name_end:name_end + 1] == "(":
+        if name_end < sel_blen and sel.substring(name_end, name_end + 1) == "(":
             var functional_depth = 1
             var close = name_end + 1
-            while close < sel.len() and functional_depth > 0:  # cpu-lane-loop-ok: matches the closing paren of ONE functional pseudo-class argument in the positional pass; paren depth capped at 32
-                val ch = sel[close:close + 1]
+            while close < sel_blen and functional_depth > 0:  # cpu-lane-loop-ok: matches the closing paren of ONE functional pseudo-class argument in the positional pass; paren depth capped at 32
+                val ch = sel.substring(close, close + 1)
                 if ch == "(":
                     functional_depth = functional_depth + 1
                     if functional_depth > 32:
@@ -539,8 +541,8 @@ fn _pseudo_ctx_matches(sel: text, nodes: [HNode], ctx: SelectorContext, idx: i32
         else:
             pseudo_pos = name_end
             if (
-                pseudo == "root" and pseudo_pos < sel.len() and
-                sel[pseudo_pos:pseudo_pos + 1] == "["
+                pseudo == "root" and pseudo_pos < sel_blen and
+                sel.substring(pseudo_pos, pseudo_pos + 1) == "["
             ):
                 val attr_close = find_from(sel, "]", pseudo_pos + 1)
                 if attr_close < 0:
@@ -567,8 +569,8 @@ fn _pseudo_ctx_matches(sel: text, nodes: [HNode], ctx: SelectorContext, idx: i32
             var depth = 0
             var i = 0
             var option_start = 0
-            while i < arg.len():  # cpu-lane-loop-ok: splits ONE :has() argument on top-level commas; bound is that argument's length
-                val ch = arg[i:i + 1]
+            while i < arg.byte_len():  # cpu-lane-loop-ok: splits ONE :has() argument on top-level commas; bound is that argument's length
+                val ch = arg.substring(i, i + 1)
                 if ch == "(":
                     depth = depth + 1
                     if depth > 32:
@@ -689,12 +691,12 @@ fn _dead_parsed_sel() -> ParsedSel:
 # Split a `.a.b.c` compound class list exactly the way class_has_all() does:
 # on `.`, skipping empty segments (so "", ".", "a..b" behave identically).
 fn _split_class_wants(wants: text) -> [text]:
-    val wants_len = wants.len()
+    val wants_len = wants.byte_len()
     var out: [text] = []
     var start = 0
     var i = 0
     while i <= wants_len:  # cpu-lane-loop-ok: splits ONE compound class selector on `.` at parse time (once per selector part, never per node); bound is that compound's text length
-        if i == wants_len or wants[i:i + 1] == ".":
+        if i == wants_len or wants.substring(i, i + 1) == ".":
             if i > start:
                 out.push(wants.substring(start, i))
             start = i + 1
@@ -803,10 +805,10 @@ fn _split_pseudo_options(arg: text) -> [text]:
     var opt_count = 0
     var depth = 0
     var i = 0
-    val arg_len = arg.len()
+    val arg_len = arg.byte_len()
     var option_start = 0
     while i < arg_len:  # cpu-lane-loop-ok: splits ONE functional pseudo argument on top-level commas at parse time (once per selector part); bound is that argument's length
-        val ch = arg[i:i + 1]
+        val ch = arg.substring(i, i + 1)
         if ch == "(":
             depth = depth + 1
             if depth > 32:
@@ -957,9 +959,9 @@ fn parse_selector_part(part: text) -> ParsedSel:
     if node_base.len() == 0 or node_base == "*":
         # Universal / empty base: base_selector_matches returns true outright.
         var base_is_universal = true
-    elif node_base[0:0 + 1] == ".":
+    elif node_base.substring(0, 0 + 1) == ".":
         want_classes = _split_class_wants(node_base.substring(1, node_base.byte_len()))
-    elif node_base[0:0 + 1] == "#":
+    elif node_base.substring(0, 0 + 1) == "#":
         val id_dot = find_from(node_base, ".", 1)
         check_id = true
         if id_dot >= 0:
@@ -998,16 +1000,17 @@ fn parse_selector_part(part: text) -> ParsedSel:
     if colon >= 0:
         var pseudo_pos = colon
         var pseudo_count = 0
-        while pseudo_pos < sel.len():  # cpu-lane-loop-ok: walks the pseudo-class chain of ONE selector at parse time; bound is that selector's length, pseudo_count capped at 32
+        val sel_blen = sel.byte_len()
+        while pseudo_pos < sel_blen:  # cpu-lane-loop-ok: walks the pseudo-class chain of ONE selector at parse time; bound is that selector's length, pseudo_count capped at 32
             pseudo_count = pseudo_count + 1
-            if pseudo_count > 32 or sel[pseudo_pos:pseudo_pos + 1] != ":":
+            if pseudo_count > 32 or sel.substring(pseudo_pos, pseudo_pos + 1) != ":":
                 return _dead_parsed_sel()
             val name_start = pseudo_pos + 1
             var name_end = name_start
             # cpu-lane-loop-ok: scans ONE pseudo-class NAME until `:`, `(` or `[`; bound is that name's length
             while (
-                name_end < sel.len() and sel[name_end:name_end + 1] != ":" and
-                sel[name_end:name_end + 1] != "(" and sel[name_end:name_end + 1] != "["
+                name_end < sel_blen and sel.substring(name_end, name_end + 1) != ":" and
+                sel.substring(name_end, name_end + 1) != "(" and sel.substring(name_end, name_end + 1) != "["
             ):
                 name_end = name_end + 1
             val pseudo = sel.substring(name_start, name_end)
@@ -1019,11 +1022,11 @@ fn parse_selector_part(part: text) -> ParsedSel:
             # ignored by the text path, whose `root` arm checks only
             # `tag != "html"` -- so it must not become an attribute test here.
             var root_attr = ""
-            if name_end < sel.len() and sel[name_end:name_end + 1] == "(":
+            if name_end < sel_blen and sel.substring(name_end, name_end + 1) == "(":
                 var functional_depth = 1
                 var close = name_end + 1
-                while close < sel.len() and functional_depth > 0:  # cpu-lane-loop-ok: matches the closing paren of ONE functional pseudo argument at parse time; paren depth capped at 32
-                    val ch = sel[close:close + 1]
+                while close < sel_blen and functional_depth > 0:  # cpu-lane-loop-ok: matches the closing paren of ONE functional pseudo argument at parse time; paren depth capped at 32
+                    val ch = sel.substring(close, close + 1)
                     if ch == "(":
                         functional_depth = functional_depth + 1
                         if functional_depth > 32:
@@ -1038,8 +1041,8 @@ fn parse_selector_part(part: text) -> ParsedSel:
             else:
                 pseudo_pos = name_end
                 if (
-                    pseudo == "root" and pseudo_pos < sel.len() and
-                    sel[pseudo_pos:pseudo_pos + 1] == "["
+                    pseudo == "root" and pseudo_pos < sel_blen and
+                    sel.substring(pseudo_pos, pseudo_pos + 1) == "["
                 ):
                     val attr_close = find_from(sel, "]", pseudo_pos + 1)
                     if attr_close < 0:
@@ -1325,11 +1328,11 @@ fn selector_ancestor_keys_present(counts: Dict<text, i32>, keys: [text]) -> bool
 fn split_selector_groups(sel: text) -> [text]:
     var depth = 0
     var i = 0
-    val sel_len = sel.len()
+    val sel_len = sel.byte_len()
     var group_count = 0
     var group_start = 0
     while i < sel_len:  # cpu-lane-loop-ok: counting pass over ONE selector's characters to size the comma-group array; bound is that selector's length
-        val ch = sel[i:i + 1]
+        val ch = sel.substring(i, i + 1)
         if ch == "(":
             depth = depth + 1
             if depth > 32:
@@ -1359,7 +1362,7 @@ fn split_selector_groups(sel: text) -> [text]:
     var group_i = 0
     group_start = 0
     while i < sel_len and group_i < group_count:  # cpu-lane-loop-ok: emit pass over the same selector, filling the <=CSS_SELECTOR_GROUP_CAP group array
-        val ch = sel[i:i + 1]
+        val ch = sel.substring(i, i + 1)
         if ch == "(":
             depth = depth + 1
         elif ch == ")":
@@ -1378,11 +1381,11 @@ fn split_selector_groups(sel: text) -> [text]:
 
 fn normalize_child_combinators(group: text) -> text:
     var i = 0
-    val group_len = group.len()
+    val group_len = group.byte_len()
     var depth = 0
     var combinator_count = 0
     while i < group_len and combinator_count <= CSS_SELECTOR_PART_CAP:  # cpu-lane-loop-ok: counting pass over ONE selector group's characters counting depth-0 `>` combinators, capped at CSS_SELECTOR_PART_CAP
-        val ch = group[i:i + 1]
+        val ch = group.substring(i, i + 1)
         if ch == "(":
             depth = depth + 1
         elif ch == ")":
@@ -1402,7 +1405,7 @@ fn normalize_child_combinators(group: text) -> text:
     i = 0
     depth = 0
     while i < group_len:  # cpu-lane-loop-ok: emit pass over the same group, splitting it around each depth-0 `>` combinator
-        val ch = group[i:i + 1]
+        val ch = group.substring(i, i + 1)
         if ch == "(":
             depth = depth + 1
         elif ch == ")":
@@ -1422,14 +1425,14 @@ fn selector_group_parts(group: text) -> [text]:
     # Split on spaces at depth-0 only: depth counts ( ) and [ ] so that spaces
     # inside :has(> .x) args and [attr='val with spaces'] are preserved.
     val normalized = normalize_child_combinators(group)
-    val norm_len = normalized.len()
+    val norm_len = normalized.byte_len()
     # First pass: count tokens
     var token_count = 0
     var depth = 0
     var in_token = false
     var pi = 0
     while pi < norm_len and token_count <= CSS_SELECTOR_PART_CAP:  # cpu-lane-loop-ok: token-counting pass over ONE normalized selector group; bound is that group's length, capped at CSS_SELECTOR_PART_CAP tokens
-        val ch = normalized[pi:pi + 1]
+        val ch = normalized.substring(pi, pi + 1)
         if ch == "(" or ch == "[":
             depth = depth + 1
             if not in_token:
@@ -1456,7 +1459,7 @@ fn selector_group_parts(group: text) -> [text]:
     var token_start = -1
     pi = 0
     while pi < norm_len:  # cpu-lane-loop-ok: token-emit pass over the same normalized group, slicing each depth-0 whitespace-separated part
-        val ch = normalized[pi:pi + 1]
+        val ch = normalized.substring(pi, pi + 1)
         if ch == "(" or ch == "[":
             if not in_token:
                 token_start = pi
@@ -1512,9 +1515,9 @@ fn selector_bucket_kind(part: text) -> text:
 fn selector_bucket_kind_from_base(base: text) -> text:
     if base.len() == 0 or base == "*":
         return "fallback"
-    if base[0:0 + 1] == "#":
+    if base.substring(0, 0 + 1) == "#":
         return "id"
-    if base[0:0 + 1] == ".":
+    if base.substring(0, 0 + 1) == ".":
         return "class"
     # tag#id compound: bucket as "id" so rules fire when node has that id
     val hash = text_index_of(base, "#")
@@ -1531,7 +1534,7 @@ fn selector_bucket_value(part: text) -> text:
 fn selector_bucket_value_from_base(base: text) -> text:
     if base.len() == 0:
         return ""
-    val first = base[0:0 + 1]
+    val first = base.substring(0, 0 + 1)
     if first == "#" or first == ".":
         val dot = find_from(base, ".", 1)
         if dot >= 0:
@@ -1955,28 +1958,29 @@ fn _part_specificity(
         base = base.substring(0, colon)
         var pseudo_pos = colon
         var pseudo_count = 0
-        while pseudo_pos < part.len():  # cpu-lane-loop-ok: walks the pseudo-class chain of ONE selector part while scoring specificity; pseudo_count capped at 32
+        val part_blen = part.byte_len()
+        while pseudo_pos < part_blen:  # cpu-lane-loop-ok: walks the pseudo-class chain of ONE selector part while scoring specificity; pseudo_count capped at 32
             pseudo_count = pseudo_count + 1
-            if pseudo_count > 32 or part[pseudo_pos:pseudo_pos + 1] != ":":
+            if pseudo_count > 32 or part.substring(pseudo_pos, pseudo_pos + 1) != ":":
                 return -1000000
             val name_start = pseudo_pos + 1
             var name_end = name_start
             # cpu-lane-loop-ok: scans ONE pseudo-class NAME until `:`, `(` or `[`; bound is that name's length
             while (
-                name_end < part.len() and
-                part[name_end:name_end + 1] != ":" and
-                part[name_end:name_end + 1] != "(" and
-                part[name_end:name_end + 1] != "["
+                name_end < part_blen and
+                part.substring(name_end, name_end + 1) != ":" and
+                part.substring(name_end, name_end + 1) != "(" and
+                part.substring(name_end, name_end + 1) != "["
             ):
                 name_end = name_end + 1
             val pseudo_name = part.substring(name_start, name_end)
             if pseudo_name.len() == 0:
                 return -1000000
-            if name_end < part.len() and part[name_end:name_end + 1] == "(":
+            if name_end < part_blen and part.substring(name_end, name_end + 1) == "(":
                 var functional_depth = 1
                 var close = name_end + 1
-                while close < part.len() and functional_depth > 0:  # cpu-lane-loop-ok: matches the closing paren of ONE functional pseudo-class argument while scoring specificity; paren depth capped at 32
-                    val ch = part[close:close + 1]
+                while close < part_blen and functional_depth > 0:  # cpu-lane-loop-ok: matches the closing paren of ONE functional pseudo-class argument while scoring specificity; paren depth capped at 32
+                    val ch = part.substring(close, close + 1)
                     if ch == "(":
                         functional_depth = functional_depth + 1
                         if functional_depth > 32:
@@ -2016,8 +2020,8 @@ fn _part_specificity(
                 pseudo_specificity = pseudo_specificity + 10
                 pseudo_pos = name_end
                 if (
-                    pseudo_name == "root" and pseudo_pos < part.len() and
-                    part[pseudo_pos:pseudo_pos + 1] == "["
+                    pseudo_name == "root" and pseudo_pos < part_blen and
+                    part.substring(pseudo_pos, pseudo_pos + 1) == "["
                 ):
                     val attr_close = find_from(
                         part, "]", pseudo_pos + 1
@@ -2028,7 +2032,7 @@ fn _part_specificity(
                     pseudo_pos = attr_close + 1
     var attribute_specificity = 0
     var attribute_scan = 0
-    while attribute_scan < base.len():  # cpu-lane-loop-ok: counts the `[attr]` selectors in ONE selector base via native find_from; bound is that base's length
+    while attribute_scan < base.byte_len():  # cpu-lane-loop-ok: counts the `[attr]` selectors in ONE selector base via native find_from; bound is that base's length
         val attribute_open = find_from(base, "[", attribute_scan)
         if attribute_open < 0:
             break
@@ -2043,18 +2047,18 @@ fn _part_specificity(
     var base_specificity = attribute_specificity
     if base.len() == 0 or base == "*":
         base_specificity = attribute_specificity
-    elif base[0:0 + 1] == "#":
+    elif base.substring(0, 0 + 1) == "#":
         val dot = find_from(base, ".", 1)
         if dot >= 0:
             base_specificity = 110 + attribute_specificity
         else:
             base_specificity = 100 + attribute_specificity
-    elif base[0:0 + 1] == ".":
+    elif base.substring(0, 0 + 1) == ".":
         var class_count = 1
         var i = 1
-        val base_len = base.len()
+        val base_len = base.byte_len()
         while i < base_len:  # cpu-lane-loop-ok: counts the `.` class separators in one `.a.b` compound base; bound is that base's length
-            if base[i:i + 1] == ".":
+            if base.substring(i, i + 1) == ".":
                 class_count = class_count + 1
             i = i + 1
         base_specificity = class_count * 10 + attribute_specificity
@@ -2069,9 +2073,9 @@ fn _part_specificity(
         val dot = text_index_of(base, ".")
         var class_count2 = 1
         var j = dot + 1
-        val base_len2 = base.len()
+        val base_len2 = base.byte_len()
         while j < base_len2:  # cpu-lane-loop-ok: counts the `.` class separators after the first dot in one `tag.a.b` compound base; bound is that base's length
-            if base[j:j + 1] == ".":
+            if base.substring(j, j + 1) == ".":
                 class_count2 = class_count2 + 1
             j = j + 1
         base_specificity = 1 + class_count2 * 10 + attribute_specificity
