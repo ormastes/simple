@@ -1,0 +1,62 @@
+# @gc — module uses GC runtime
+#
+# weights — load a safetensors checkpoint into named PureTensor values,
+# decoded once at load time. Header parsing reuses model_loader.safetensors;
+# file bytes come through std.io_runtime (the same owner loader.spl uses).
+# Supported payload dtypes: F32 and BF16.
+
+use std.gc_async_mut.slang.model_executor.model_loader.safetensors.{parse_safetensors_header}
+use std.gc_async_mut.slang.model_executor.model_loader.weight_utils.{Dtype}
+use std.gc_async_mut.slang.model_executor.pure.tensor_ops.{PureTensor, tensor_decode_f32_le, tensor_decode_bf16_le}
+use std.io_runtime.{file_exists, file_read_bytes}
+
+pub struct PureWeights:
+    names: [text]
+    tensors: [PureTensor]
+
+fn _numel(shape: [i64]) -> i64:
+    var n: i64 = 1
+    for d in shape:
+        n = n * d
+    n
+
+# Decode every tensor of an in-memory safetensors buffer.
+pub fn pure_weights_from_bytes(bytes: [u8]) -> Result<PureWeights, text>:
+    val parsed = parse_safetensors_header(bytes)
+    if parsed.is_err():
+        return Err("safetensors header invalid")
+    val header = parsed.unwrap()
+    val payload = 8 + header.header_byte_len
+    var names: [text] = []
+    var tensors: [PureTensor] = []
+    for e in header.tensors:
+        val count = _numel(e.shape)
+        match e.dtype_tag:
+            Dtype.F32:
+                if count * 4 != e.length:
+                    return Err("tensor {e.name}: F32 byte length mismatch")
+                tensors.push(tensor_decode_f32_le(bytes, payload + e.offset, count, e.shape))
+            Dtype.Bf16:
+                if count * 2 != e.length:
+                    return Err("tensor {e.name}: BF16 byte length mismatch")
+                tensors.push(tensor_decode_bf16_le(bytes, payload + e.offset, count, e.shape))
+            _:
+                return Err("tensor {e.name}: unsupported dtype {e.dtype}")
+        names.push(e.name)
+    Ok(PureWeights(names: names, tensors: tensors))
+
+pub fn pure_weights_load(path: text) -> Result<PureWeights, text>:
+    if not file_exists(path):
+        return Err("weights file not found: {path}")
+    pure_weights_from_bytes(file_read_bytes(path))
+
+pub fn pure_weights_find(w: PureWeights, name: text) -> Option<PureTensor>:
+    var i: i64 = 0
+    while i < w.names.len():
+        if w.names[i] == name:
+            return Some(w.tensors[i])
+        i = i + 1
+    None
+
+pub fn pure_weights_count(w: PureWeights) -> i64:
+    w.names.len()
