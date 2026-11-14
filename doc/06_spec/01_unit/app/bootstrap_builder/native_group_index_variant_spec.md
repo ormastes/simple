@@ -8,5 +8,7 @@ Unavailable debug capability, typed round trips, unknown knobs, unsupported
 inputs, phase/profile mismatches and rejection of pre-profile-schema receipts.
 Producer identity remains separate from target profile.
 
-Status: updated specification authored; execution not yet performed for this
-change. No Phase3/Phase4 build or provider qualification is implied.
+Status: updated SSpec authored, full SSpec execution UNRUN. The separate exact
+production-function native projection passed 30 policy/digest/admission scenarios
+(see managed target-profile design evidence). No Phase3/Phase4 build, actual
+manager resume or provider qualification is implied.
