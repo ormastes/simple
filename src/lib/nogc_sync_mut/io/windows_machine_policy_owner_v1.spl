@@ -1,0 +1,468 @@
+# Actual installed-policy provenance, not configuration proof or host capacity.
+# SOURCE_AUTHORED_NOT_RUN: unsafe source and linker route need independent review.
+# Public owners carry private slot/generation only; no root/path/native HANDLE
+# or constructor/factory accepting caller-controlled filesystem data is exposed.
+
+pub class WindowsMachinePolicyOwnerV1:
+    slot: i64
+    generation: i64
+
+    pub fn read_policy_v1() -> Result<[u8], text>:
+        @when(os="windows"):
+        machine_read_v1(self.slot, self.generation)
+        @else:
+        Err("windows-machine-policy-host-unsupported")
+        @end
+
+    pub fn close_v1() -> text:
+        @when(os="windows"):
+        machine_close_v1(self.slot, self.generation)
+        @else:
+        "stale"
+        @end
+
+pub enum WindowsMachinePolicyOpenV1:
+    Rejected(reason: text)
+    CleanupRequired(owner: WindowsMachinePolicyOwnerV1, reason: text)
+    Ready(owner: WindowsMachinePolicyOwnerV1)
+
+pub fn windows_machine_policy_open_v1() -> WindowsMachinePolicyOpenV1:
+    @when(os="windows"):
+    machine_open_v1()
+    @else:
+    WindowsMachinePolicyOpenV1.Rejected("windows-machine-policy-host-unsupported")
+    @end
+
+@when(os="windows"):
+use std.nogc_sync_mut.io.windows_machine_policy_abi_v1.*
+use std.nogc_sync_mut.io.volatile_ops.{volatile_read_u8, volatile_read_u16, volatile_read_u32,
+    volatile_read_u64, volatile_write_u8, volatile_write_u16, volatile_write_u32, volatile_write_u64}
+
+# Win64 arena layout: GUID0..15, shell-out16, handle-out24, IOSB32..47,
+# UNICODE_STRING48..63, OBJECT_ATTRIBUTES64..111, attribute/tag112..119,
+# FILE_STANDARD_INFO128..151, security owner160/DACL168/descriptor176,
+# control184/revision188, ACL_SIZE_INFORMATION192..203, ACE-out208,
+# ReadFile-count224, FILE_BASIC_INFO232..271, token-out280,
+# FILE_FS_DEVICE_INFORMATION304..311 (IOSB32..47 reused synchronously),
+# native name512..66033 (32760 units plus terminator), read66048..1114623.
+struct MachinePolicyStateV1:
+    generation: i64
+    heap: i64
+    arena: i64 = 0
+    known_folder: i64 = 0
+    descriptor: i64 = 0
+    impersonation_token: i64 = 0
+    handles: [i64] = []
+    strict_start: i64 = 0
+    file_index: i64 = -1
+    ready: bool = false
+    closing: bool = false
+    closed: bool = false
+
+# Slots never reused. All methods reload authoritative state; copied owners
+# cannot resurrect native resources or overwrite a newer cleanup snapshot.
+var machine_slots_v1: [MachinePolicyStateV1] = []
+var machine_active_v1: i64 = 0
+
+fn machine_entry_v1() -> Result<(), text>:
+    val status = unsafe(capabilities: [ffi]): rt_windows_pty_owner_thread_guard_v1()
+    if status != 1: return Err("windows-machine-policy-canonical-thread-required")
+    Ok(())
+
+fn machine_slot_v1(slot: i64, generation: i64) -> Result<MachinePolicyStateV1, text>:
+    if slot < 0 or slot >= machine_slots_v1.len(): return Err("windows-machine-policy-owner-stale")
+    val state = machine_slots_v1[slot]
+    if state.generation != generation or state.closed: return Err("windows-machine-policy-owner-stale")
+    Ok(state)
+
+fn machine_failure_v1(slot: i64, reason: text) -> WindowsMachinePolicyOpenV1:
+    var state = machine_slots_v1[slot]
+    state.ready = false
+    state.closing = true
+    machine_slots_v1[slot] = state
+    WindowsMachinePolicyOpenV1.CleanupRequired(WindowsMachinePolicyOwnerV1(slot: slot, generation: state.generation), reason)
+
+@unsafe(reason: "record any thread-token output before interpreting status; only exact ERROR_NO_TOKEN admits process context", capabilities: [ffi, raw_ptr])
+fn machine_process_context_v1(slot: i64) -> Result<(), text>:
+    var state = machine_slots_v1[slot]
+    if state.impersonation_token != 0: return Err("windows-machine-policy-thread-token-cleanup-required")
+    volatile_write_u64(state.arena + 280, 0)
+    val status = OpenThreadToken(GetCurrentThread(), 8u32, 1, state.arena + 280)
+    val error = GetLastError()
+    state.impersonation_token = volatile_read_u64(state.arena + 280)
+    machine_slots_v1[slot] = state
+    if state.impersonation_token != 0 or status != 0:
+        return Err("windows-machine-policy-impersonation-refused")
+    if error != 1008u32: return Err("windows-machine-policy-thread-token-observation-failed")
+    Ok(())
+
+@unsafe(reason: "bounds native UTF16 without UTF8 conversion; refuse ambiguous or nonliteral child components", capabilities: [ffi, raw_ptr])
+fn machine_component_v1(pointer: i64, start: i64, count: i64) -> bool:
+    if count < 1 or count > 32760: return false
+    val first = volatile_read_u16(pointer + start * 2)
+    if count == 1 and first == 46: return false
+    if count == 2 and first == 46 and volatile_read_u16(pointer + (start + 1) * 2) == 46: return false
+    val last = volatile_read_u16(pointer + (start + count - 1) * 2)
+    if last == 46 or last == 32: return false
+    var index = start
+    while index < start + count:
+        val unit = volatile_read_u16(pointer + index * 2)
+        if (unit < 32 or (unit >= 127 and unit <= 159) or unit == 58 or unit == 47 or unit == 92 or
+                unit == 34 or unit == 60 or unit == 62 or unit == 124 or unit == 42 or unit == 63): return false
+        if unit >= 55296 and unit <= 56319:
+            if index + 1 >= start + count: return false
+            val low = volatile_read_u16(pointer + (index + 1) * 2)
+            if low < 56320 or low > 57343: return false
+            index = index + 1
+        elif unit >= 56320 and unit <= 57343:
+            return false
+        index = index + 1
+    true
+
+@unsafe(reason: "bounded exact SYSTEM/Administrators SID classification inside the retained OS descriptor", capabilities: [ffi, raw_ptr])
+fn machine_sid_v1(sid: i64, descriptor: i64, length: i64) -> Result<(bool, i64), text>:
+    if sid < descriptor or sid > descriptor + length - 8: return Err("windows-machine-policy-sid-storage")
+    if volatile_read_u8(sid) != 1: return Err("windows-machine-policy-sid-revision")
+    val count = volatile_read_u8(sid + 1)
+    val size = 8 + count * 4
+    if count > 15 or sid > descriptor + length - size: return Err("windows-machine-policy-sid-bound")
+    if IsValidSid(sid) == 0: return Err("windows-machine-policy-sid-invalid")
+    Ok((IsWellKnownSid(sid, 22) != 0 or IsWellKnownSid(sid, 26) != 0, size))
+
+# Ancestors may grant CREATE_FILE/CREATE_SUBDIRECTORY to ordinary principals,
+# but never delete/replace an existing child, alter owner/DACL, EA or attributes.
+# Installed Simple/Container and the file additionally forbid data/append and
+# require protected DACLs. Current user SID is never a trusted trustee.
+@unsafe(reason: "inspect actual retained HANDLE owner and bounded DACL; retain LocalAlloc descriptor on every failure", capabilities: [ffi, raw_ptr])
+fn machine_security_v1(slot: i64, handle: i64, strict: bool) -> Result<(), text>:
+    var state = machine_slots_v1[slot]
+    if state.descriptor != 0: return Err("windows-machine-policy-security-cleanup-required")
+    for offset in [160, 168, 176]: volatile_write_u64(state.arena + offset, 0)
+    val status = GetSecurityInfo(handle, 1, 5u32, state.arena + 160, 0, state.arena + 168, 0, state.arena + 176)
+    state.descriptor = volatile_read_u64(state.arena + 176)
+    machine_slots_v1[slot] = state
+    if status != 0u32 or state.descriptor <= 0: return Err("windows-machine-policy-security-unavailable")
+    val descriptor = state.descriptor
+    val length = GetSecurityDescriptorLength(descriptor) as i64
+    if length < 20 or length > 1048576 or descriptor > 9223372036854775807 - length:
+        return Err("windows-machine-policy-security-bound")
+    if GetSecurityDescriptorControl(descriptor, state.arena + 184, state.arena + 188) == 0:
+        return Err("windows-machine-policy-security-control")
+    val control = volatile_read_u16(state.arena + 184)
+    if (control & 4) == 0 or (control & 32768) == 0 or (strict and (control & 4096) == 0):
+        return Err("windows-machine-policy-present-protected-dacl-required")
+    val owner = machine_sid_v1(volatile_read_u64(state.arena + 160), descriptor, length)?
+    if not owner.0: return Err("windows-machine-policy-system-admin-owner-required")
+    val acl = volatile_read_u64(state.arena + 168)
+    if acl < descriptor or acl > descriptor + length - 8: return Err("windows-machine-policy-dacl-storage")
+    val acl_size = volatile_read_u16(acl + 2)
+    if acl_size < 8 or acl > descriptor + length - acl_size or IsValidAcl(acl) == 0:
+        return Err("windows-machine-policy-dacl-bound")
+    if GetAclInformation(acl, state.arena + 192, 12u32, 2) == 0:
+        return Err("windows-machine-policy-dacl-information")
+    val count = volatile_read_u32(state.arena + 192) as i64
+    val used = volatile_read_u32(state.arena + 196) as i64
+    if count > 256 or count != volatile_read_u16(acl + 4) or used < 8 or used > acl_size:
+        return Err("windows-machine-policy-dacl-count")
+    val forbidden = if strict: 0x520D0156 else: 0x520D0150
+    for index in 0..count:
+        volatile_write_u64(state.arena + 208, 0)
+        if GetAce(acl, index as u32, state.arena + 208) == 0: return Err("windows-machine-policy-ace-unavailable")
+        val ace = volatile_read_u64(state.arena + 208)
+        if ace < acl + 8 or ace > acl + used - 16: return Err("windows-machine-policy-ace-storage")
+        val size = volatile_read_u16(ace + 2)
+        if size < 16 or ace > acl + used - size: return Err("windows-machine-policy-ace-bound")
+        val kind = volatile_read_u8(ace)
+        if kind != 0 and kind != 1: return Err("windows-machine-policy-ace-kind-unsupported")
+        val trustee = machine_sid_v1(ace + 8, descriptor, length)?
+        if trustee.1 > size - 8: return Err("windows-machine-policy-ace-sid-bound")
+        val flags = volatile_read_u8(ace + 1)
+        val applies = strict or (flags & 8) == 0
+        if kind == 0 and applies and not trustee.0 and (volatile_read_u32(ace + 4) & forbidden) != 0:
+            return Err("windows-machine-policy-untrusted-mutation-rights")
+    if LocalFree(descriptor) != 0: return Err("windows-machine-policy-security-release-retained")
+    state.descriptor = 0
+    machine_slots_v1[slot] = state
+    Ok(())
+
+@unsafe(reason: "verify type no-reparse and file size on the exact retained HANDLE", capabilities: [ffi, raw_ptr])
+fn machine_metadata_v1(slot: i64, handle: i64, directory: bool) -> Result<i64, text>:
+    val state = machine_slots_v1[slot]
+    if GetFileType(handle) != 1u32: return Err("windows-machine-policy-disk-handle-required")
+    if GetFileInformationByHandleEx(handle, 9, state.arena + 112, 8u32) == 0:
+        return Err("windows-machine-policy-attribute-information")
+    val attributes = volatile_read_u32(state.arena + 112)
+    if (attributes & 1024) != 0 or ((attributes & 16) != 0) != directory:
+        return Err("windows-machine-policy-reparse-or-type-refused")
+    if GetFileInformationByHandleEx(handle, 1, state.arena + 128, 24u32) == 0:
+        return Err("windows-machine-policy-standard-information")
+    if volatile_read_u8(state.arena + 148) != 0 or (volatile_read_u8(state.arena + 149) != 0) != directory:
+        return Err("windows-machine-policy-delete-pending-or-type-refused")
+    if directory: return Ok(0)
+    val size = volatile_read_u64(state.arena + 136)
+    if size < 0 or size > 1048576 or volatile_read_u32(state.arena + 144) != 1:
+        return Err("windows-machine-policy-file-size-or-hardlinks")
+    Ok(size)
+
+@unsafe(reason: "bound actual root volume query; GetFileType DISK alone also admits remote files", capabilities: [ffi, raw_ptr])
+fn machine_root_volume_v1(slot: i64, root: i64) -> Result<(), text>:
+    val arena = machine_slots_v1[slot].arena
+    for offset in [32, 40, 304]: volatile_write_u64(arena + offset, 0)
+    # FILE_FS_DEVICE_INFORMATION class4, DeviceType0/Characteristics4, size8.
+    # https://learn.microsoft.com/openspecs/windows_protocols/ms-fscc/616b66d5-b335-4e1c-8f87-b4a55e8d3e4a
+    val status = NtQueryVolumeInformationFile(root, arena + 32, arena + 304, 8u32, 4)
+    if status != 0 or volatile_read_u32(arena + 32) != 0 or volatile_read_u64(arena + 40) != 8:
+        return Err("windows-machine-policy-volume-information-unavailable")
+    if volatile_read_u32(arena + 304) != 7 or (volatile_read_u32(arena + 308) & 16) != 0:
+        return Err("windows-machine-policy-local-disk-volume-required")
+    # FILE_DEVICE_DISK and no FILE_REMOTE_DEVICE establish this local-disk
+    # predicate, not nonremovability, physical hardware identity or capacity.
+    Ok(())
+
+@unsafe(reason: "open only explicit machine-global DOS drive namespace; no local device-map lookup or normal-path reopen", capabilities: [ffi, raw_ptr])
+fn machine_open_root_v1(slot: i64, drive: i64) -> Result<(), text>:
+    val process = machine_process_context_v1(slot)?
+    var state = machine_slots_v1[slot]
+    val name = state.arena + 512
+    # Counted native literal \GLOBAL??\<OS-discovered-drive>:\. Using \?? or
+    # Win32 C:\ would allow a process-local DOS shadow to select another root.
+    val units: [i64] = [92, 71, 76, 79, 66, 65, 76, 63, 63, 92, drive, 58, 92]
+    for index in 0..13: volatile_write_u16(name + index * 2, units[index])
+    volatile_write_u16(name + 26, 0)
+    val arena = state.arena
+    for offset in [24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104]: volatile_write_u64(arena + offset, 0)
+    volatile_write_u16(arena + 48, 26)
+    volatile_write_u16(arena + 50, 26)
+    volatile_write_u64(arena + 56, name)
+    volatile_write_u32(arena + 64, 48)
+    volatile_write_u64(arena + 72, 0)
+    volatile_write_u64(arena + 80, arena + 48)
+    volatile_write_u32(arena + 88, 0x40)
+    # FILE_OPEN, SYNCHRONOUS_IO_NONALERT|OPEN_REPARSE_POINT|DIRECTORY_FILE,
+    # SYNCHRONIZE access, READ|WRITE sharing and no DELETE sharing.
+    val status = NtCreateFile(arena + 24, 0x1200A1u32, arena + 64, arena + 32, 0, 0u32,
+        3u32, 1u32, 0x200021u32, 0, 0u32)
+    val handle = volatile_read_u64(arena + 24)
+    if handle != 0 and handle != -1: state.handles.push(handle)
+    machine_slots_v1[slot] = state
+    if status != 0 or handle == 0 or handle == -1 or volatile_read_u32(arena + 32) != 0:
+        return Err("windows-machine-policy-global-drive-root-open-failed")
+    val metadata = machine_metadata_v1(slot, handle, true)?
+    val volume = machine_root_volume_v1(slot, handle)?
+    machine_security_v1(slot, handle, false)
+
+@unsafe(reason: "synchronous no-create relative single-child open; record every HANDLE output before status checks", capabilities: [ffi, raw_ptr])
+fn machine_open_name_v1(slot: i64, parent: i64, name: i64, units: i64,
+        directory: bool, strict: bool) -> Result<(), text>:
+    var state = machine_slots_v1[slot]
+    if parent <= 0 or units < 1 or units > 32760 or state.handles.len() >= 256:
+        return Err("windows-machine-policy-path-bound")
+    val process = machine_process_context_v1(slot)?
+    state = machine_slots_v1[slot]
+    val arena = state.arena
+    for offset in [24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104]: volatile_write_u64(arena + offset, 0)
+    # UNICODE_STRING Length/MaximumLength/Buffer = 0/2/8, size16.
+    volatile_write_u16(arena + 48, units * 2)
+    volatile_write_u16(arena + 50, units * 2)
+    volatile_write_u64(arena + 56, name)
+    # OBJECT_ATTRIBUTES Length0, RootDirectory8, ObjectName16, Attributes24,
+    # SecurityDescriptor32, SecurityQualityOfService40, Win64 size48.
+    volatile_write_u32(arena + 64, 48)
+    volatile_write_u64(arena + 72, parent)
+    volatile_write_u64(arena + 80, arena + 48)
+    # OBJ_CASE_INSENSITIVE only. User-mode object namespace flags are not a
+    # filesystem nofollow proof; each relative name is exactly one component.
+    volatile_write_u32(arena + 88, 0x40)
+    val access = if directory: 0x1200A1u32 else: 0x120081u32
+    val share = if directory: 3u32 else: 1u32
+    # FILE_OPEN=1 only; SYNCHRONOUS_IO_NONALERT|OPEN_REPARSE_POINT plus
+    # DIRECTORY_FILE or NON_DIRECTORY_FILE. Never follow a final reparse point.
+    val options = if directory: 0x200021u32 else: 0x200060u32
+    val status = NtCreateFile(arena + 24, access, arena + 64, arena + 32, 0, 0u32,
+        share, 1u32, options, 0, 0u32)
+    val handle = volatile_read_u64(arena + 24)
+    if handle != 0 and handle != -1: state.handles.push(handle)
+    machine_slots_v1[slot] = state
+    if status != 0 or handle == 0 or handle == -1 or volatile_read_u32(arena + 32) != 0:
+        return Err("windows-machine-policy-native-open-failed")
+    val metadata = machine_metadata_v1(slot, handle, directory)?
+    machine_security_v1(slot, handle, strict)
+
+@unsafe(reason: "write fixed ASCII child names into already retained UTF16 arena; no allocation", capabilities: [ffi, raw_ptr])
+fn machine_fixed_name_v1(slot: i64, name: text) -> i64:
+    val pointer = machine_slots_v1[slot].arena + 512
+    for index in 0..name.byte_len(): volatile_write_u16(pointer + index * 2, name.byte_at(index))
+    volatile_write_u16(pointer + name.byte_len() * 2, 0)
+    pointer
+
+@unsafe(reason: "discover actual ProgramData without env/caller roots, hold every ancestor and fixed installed child", capabilities: [ffi, raw_ptr])
+fn machine_open_v1() -> WindowsMachinePolicyOpenV1:
+    val entry = machine_entry_v1()
+    if entry.is_err(): return WindowsMachinePolicyOpenV1.Rejected(entry.unwrap_err())
+    if machine_slots_v1.len() >= 100000 or machine_active_v1 >= 32:
+        return WindowsMachinePolicyOpenV1.Rejected("windows-machine-policy-owner-bound")
+    val heap = GetProcessHeap()
+    if heap == 0: return WindowsMachinePolicyOpenV1.Rejected("windows-machine-policy-process-heap-unavailable")
+    val slot = machine_slots_v1.len()
+    var state = MachinePolicyStateV1(generation: slot + 1, heap: heap)
+    machine_slots_v1.push(state)
+    machine_active_v1 = machine_active_v1 + 1
+    state.arena = HeapAlloc(heap, 8u32, 1114624u64)
+    machine_slots_v1[slot] = state
+    if state.arena == 0: return machine_failure_v1(slot, "windows-machine-policy-arena-allocation-failed")
+    val process = machine_process_context_v1(slot)
+    if process.is_err(): return machine_failure_v1(slot, process.unwrap_err())
+    state = machine_slots_v1[slot]
+    # FOLDERID_ProgramData {62AB5D82-FDC1-4DC3-A9DD-070D1D495D97}.
+    volatile_write_u32(state.arena, 0x62AB5D82)
+    volatile_write_u16(state.arena + 4, 0xFDC1)
+    volatile_write_u16(state.arena + 6, 0x4DC3)
+    val tail: [i64] = [0xA9, 0xDD, 0x07, 0x0D, 0x1D, 0x49, 0x5D, 0x97]
+    for index in 0..8: volatile_write_u8(state.arena + 8 + index, tail[index])
+    volatile_write_u64(state.arena + 16, 0)
+    val status = SHGetKnownFolderPath(state.arena, 0u32, 0, state.arena + 16)
+    state.known_folder = volatile_read_u64(state.arena + 16)
+    machine_slots_v1[slot] = state
+    if status != 0 or state.known_folder <= 0 or state.known_folder > 9223372036854775807 - 65522:
+        return machine_failure_v1(slot, "windows-machine-policy-known-folder-unavailable")
+    val path = state.known_folder
+    var units = 0
+    while units <= 32760 and volatile_read_u16(path + units * 2) != 0: units = units + 1
+    # Leave room for fixed \Simple\Container\machine-policy.sdn (36 units).
+    if units < 3 or units > 32724: return machine_failure_v1(slot, "windows-machine-policy-known-folder-bound")
+    val drive = volatile_read_u16(path)
+    if (not ((drive >= 65 and drive <= 90) or (drive >= 97 and drive <= 122)) or
+            volatile_read_u16(path + 2) != 58 or volatile_read_u16(path + 4) != 92):
+        return machine_failure_v1(slot, "windows-machine-policy-drive-rooted-known-folder-required")
+    val opened_root = machine_open_root_v1(slot, drive)
+    if opened_root.is_err(): return machine_failure_v1(slot, opened_root.unwrap_err())
+    var start = 3
+    var cursor = 3
+    while cursor <= units:
+        if cursor == units or volatile_read_u16(path + cursor * 2) == 92:
+            val count = cursor - start
+            # A drive root is allowed; empty/trailing components otherwise fail.
+            if count == 0:
+                if units != 3: return machine_failure_v1(slot, "windows-machine-policy-component-invalid")
+            else:
+                if not machine_component_v1(path, start, count):
+                    return machine_failure_v1(slot, "windows-machine-policy-component-invalid")
+                state = machine_slots_v1[slot]
+                val parent = state.handles[state.handles.len() - 1]
+                val opened = machine_open_name_v1(slot, parent, path + start * 2, count, true, false)
+                if opened.is_err(): return machine_failure_v1(slot, opened.unwrap_err())
+            start = cursor + 1
+        cursor = cursor + 1
+    state = machine_slots_v1[slot]
+    state.strict_start = state.handles.len()
+    machine_slots_v1[slot] = state
+    for name in ["Simple", "Container", "machine-policy.sdn"]:
+        state = machine_slots_v1[slot]
+        val parent = state.handles[state.handles.len() - 1]
+        val pointer = machine_fixed_name_v1(slot, name)
+        val opened = machine_open_name_v1(slot, parent, pointer, name.byte_len(), name != "machine-policy.sdn", true)
+        if opened.is_err(): return machine_failure_v1(slot, opened.unwrap_err())
+    state = machine_slots_v1[slot]
+    state.file_index = state.handles.len() - 1
+    # All path components now have retained handles. Free only shell storage.
+    CoTaskMemFree(state.known_folder)
+    state.known_folder = 0
+    state.ready = true
+    machine_slots_v1[slot] = state
+    # A valid handle is insufficient: consume actual retained bytes before
+    # returning Ready. The same reader rechecks every ancestor and file ACL.
+    val observed = machine_read_v1(slot, state.generation)
+    if observed.is_err(): return machine_failure_v1(slot, observed.unwrap_err())
+    val policy_bytes = observed.unwrap()
+    if policy_bytes.len() == 0: return machine_failure_v1(slot, "windows-machine-policy-empty-file")
+    WindowsMachinePolicyOpenV1.Ready(WindowsMachinePolicyOwnerV1(slot: slot, generation: state.generation))
+
+fn machine_recheck_v1(slot: i64) -> Result<i64, text>:
+    val process = machine_process_context_v1(slot)?
+    val state = machine_slots_v1[slot]
+    var size = 0
+    for index in 0..state.handles.len():
+        size = machine_metadata_v1(slot, state.handles[index], index != state.file_index)?
+        if index == 0:
+            val volume = machine_root_volume_v1(slot, state.handles[index])?
+        val checked = machine_security_v1(slot, state.handles[index], index >= state.strict_start)?
+    Ok(size)
+
+fn machine_read_failure_v1(slot: i64, reason: text) -> Result<[u8], text>:
+    var state = machine_slots_v1[slot]
+    state.ready = false
+    state.closing = true
+    machine_slots_v1[slot] = state
+    Err(reason)
+
+@unsafe(reason: "recheck all held identities and security, seek offset zero, read bounded bytes from the same nonshared-for-write file", capabilities: [ffi, raw_ptr])
+fn machine_read_v1(slot: i64, generation: i64) -> Result<[u8], text>:
+    val entry = machine_entry_v1()?
+    val state = machine_slot_v1(slot, generation)?
+    if not state.ready or state.closing: return Err("windows-machine-policy-owner-not-ready")
+    val checked = machine_recheck_v1(slot)
+    if checked.is_err(): return machine_read_failure_v1(slot, checked.unwrap_err())
+    val size = checked.unwrap()
+    val file = state.handles[state.file_index]
+    if GetFileInformationByHandleEx(file, 0, state.arena + 232, 40u32) == 0:
+        return machine_read_failure_v1(slot, "windows-machine-policy-basic-information")
+    val before_write = volatile_read_u64(state.arena + 248)
+    val before_change = volatile_read_u64(state.arena + 256)
+    if SetFilePointerEx(file, 0, 0, 0u32) == 0:
+        return machine_read_failure_v1(slot, "windows-machine-policy-seek-zero-failed")
+    var offset = 0
+    while offset < size:
+        val amount = if size - offset > 65536: 65536 else: size - offset
+        volatile_write_u32(state.arena + 224, 0)
+        val status = ReadFile(file, state.arena + 66048 + offset, amount as u32, state.arena + 224, 0)
+        val count = volatile_read_u32(state.arena + 224) as i64
+        if status == 0 or count <= 0 or count > amount:
+            return machine_read_failure_v1(slot, "windows-machine-policy-read-incomplete")
+        offset = offset + count
+    val after = machine_recheck_v1(slot)
+    if after.is_err(): return machine_read_failure_v1(slot, after.unwrap_err())
+    if after.unwrap() != size or GetFileInformationByHandleEx(file, 0, state.arena + 232, 40u32) == 0:
+        return machine_read_failure_v1(slot, "windows-machine-policy-size-changed-or-observation-failed")
+    if volatile_read_u64(state.arena + 248) != before_write or volatile_read_u64(state.arena + 256) != before_change:
+        return machine_read_failure_v1(slot, "windows-machine-policy-content-metadata-changed")
+    var bytes: [u8] = []
+    for index in 0..size: bytes.push(volatile_read_u8(state.arena + 66048 + index) as u8)
+    Ok(bytes)
+
+@unsafe(reason: "same-thread canonical close clears each resource only after its exact native release succeeds", capabilities: [ffi, raw_ptr])
+fn machine_close_v1(slot: i64, generation: i64) -> text:
+    if machine_entry_v1().is_err(): return "retained"
+    val loaded = machine_slot_v1(slot, generation)
+    if loaded.is_err(): return "stale"
+    var state = loaded.unwrap()
+    state.ready = false
+    state.closing = true
+    machine_slots_v1[slot] = state
+    if state.descriptor != 0:
+        if LocalFree(state.descriptor) != 0: return "retained"
+        state.descriptor = 0
+        machine_slots_v1[slot] = state
+    if state.impersonation_token != 0:
+        if CloseHandle(state.impersonation_token) == 0: return "retained"
+        state.impersonation_token = 0
+        machine_slots_v1[slot] = state
+    var index = state.handles.len() - 1
+    while index >= 0:
+        if state.handles[index] != 0:
+            if CloseHandle(state.handles[index]) == 0: return "retained"
+            state.handles[index] = 0
+            machine_slots_v1[slot] = state
+        index = index - 1
+    if state.known_folder != 0:
+        CoTaskMemFree(state.known_folder)
+        state.known_folder = 0
+        machine_slots_v1[slot] = state
+    if state.arena != 0:
+        if HeapFree(state.heap, 0u32, state.arena) == 0: return "retained"
+        state.arena = 0
+        machine_slots_v1[slot] = state
+    state.closed = true
+    machine_slots_v1[slot] = state
+    machine_active_v1 = machine_active_v1 - 1
+    "released"
+@end
