@@ -89,6 +89,10 @@ Neighbour set (10 specs, `simple test`, before/after): see the PR body.
   1M fixtures' separate-process peaks (6.8 + 6.8 + 2.7 GB): the core interpreter's value arena
   is not reclaimed between `core_interpret` calls in one process. This is engine-independent
   and pre-existing. The tree-walked run would accumulate the same memory.
+  **Update 2026-11-14:** that diagnosis was wrong. The seed JIT never frees arrays at all,
+  and the core interpreter minted about 33 arrays per loop iteration. The allocation sites
+  are now removed: the peak drops from 15.2 GB to 4.8 GB and the wall time from 183 s to
+  35 s. The root cause is still open. See `core_interp_per_iteration_array_leak_2026-11-14.md`.
 - **Spec entry is not the default.** Flipping it needs a wide JIT/interpreter verdict-parity
   sample first.
 - **Pre-existing:** a runtime panic inside JIT'd code is caught by `run_file_with_args`'s
