@@ -312,12 +312,14 @@ fn _adv_cache_store(identity: text, font_size: i32, codepoint: i32, advance: i32
     _adv_overflow_val[_adv_overflow_cursor] = advance
     _adv_overflow_cursor = (_adv_overflow_cursor + 1) % _ADV_OVERFLOW_CAP
 use std.nogc_sync_mut.sffi.spl_fonts.{FontRasterizer, LayoutGlyph, SubpixelGlyphBitmap}
-use std.common.encoding.sfnt.{font_unmanaged_identity_face_spec}
+use std.common.encoding.sfnt.{font_unmanaged_identity_face_spec, font_face_spec_path}
 use std.nogc_sync_mut.text_layout.font_provider.{
     browser_font_dylib_candidates,
     browser_serif_font_candidates,
     browser_font_candidates_for_family,
     browser_font_family_category,
+    browser_font_family_for_style,
+    browser_host_has_measured_linux_face_set,
     browser_family_has_host_face,
     browser_platform_hangul_faces,
     browser_bundled_font_path_for_family
@@ -334,7 +336,7 @@ use std.nogc_sync_mut.text_layout.font_rasterizer.{
 use std.nogc_sync_mut.text_layout.font_vector_data.{vf_glyph_commands, vf_glyph_width}
 use std.nogc_sync_mut.text_layout.font_advance_layout.{font_batch_apply_advances}
 use std.nogc_sync_mut.io.font_sffi.{font_face_ascent, free_font, font_face_identity, font_face_is_live, load_font}
-use std.nogc_sync_mut.sffi.io.{file_read_bytes}
+use std.nogc_sync_mut.sffi.io.{file_read_bytes, file_exists}
 use std.nogc_sync_mut.io.env_ops.{env_get}
 use std.nogc_sync_mut.io.time_ops.{rt_time_now_micros}
 # Glyph iteration is by CODEPOINT. `text.len()` is a UTF-8 BYTE count while
@@ -346,7 +348,7 @@ use std.common.encoding.utf8.{text_codepoints}
 use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_PROGRAM_VERSION}
 use std.common.encoding.sfnt_glyf.{SFNT_GLYPH_SELECTOR_CODEPOINT, SFNT_GLYPH_SELECTOR_INDEX, sfnt_blob_glyph_advances_into, sfnt_blob_glyph_ids_into, sfnt_glyph_advance_into, sfnt_measure_glyph_into, sfnt_render_glyph_into}
 use std.common.encoding.font_registry.{FontAssetCandidate, selected_font_asset_candidates, selected_font_asset_candidate_for_path, selected_font_asset_candidate_for_identity, selected_font_asset_for_language_category, selected_font_asset_identity, selected_font_asset_identity_for_path, selected_font_asset_local_path_for_identity, selected_font_asset_physical_path, selected_font_language_ranks, selected_font_simple_tuple_accepted, validate_selected_font_asset}
-use std.common.encoding.sfnt_kern.{sfnt_blob_kern_pair_milli_px}
+use std.common.encoding.sfnt_kern.{sfnt_blob_kern_pair_milli_px, sfnt_blob_line_metric_units, sfnt_line_metric_units_normal_line_height_px}
 use std.common.encoding.utf8.{text_codepoints}
 use std.common.ui.draw_ir.{DrawIrGlyphRunPayload, draw_ir_empty_glyph_run_payload, draw_ir_glyph_run_payload}
 use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new, mutex_lock_gate, mutex_unlock}
@@ -3254,6 +3256,77 @@ fn _resolved_font_complex_script(codepoints: [i64]) -> i32:
                 return 3
             complex_script = next
     complex_script
+
+# ---------------------------------------------------------------------------
+# `line-height: normal`
+#
+# ONE source for the web renderer's text AND element styles
+# (`style_line_h`): the normal line height of the face the family list
+# resolves to, from that face's own metrics. Before 2026-11-14 a #text style
+# used `ResolvedFontMetrics.line_height` — which is `font_size` whenever the
+# foreign line metric answers 0, as it does on the pure-Simple outline lane —
+# and an element style used `9 * (font_size / 8)`: 9/18/27/36 at
+# 12/16/24/32px where Chrome's Liberation Sans is 14/18/28/37.
+#
+# SCOPE: only the host the numbers were measured on
+# (`browser_host_has_measured_linux_face_set`). Elsewhere this answers 0 and
+# every caller keeps the value it had. `ResolvedFontMetrics.line_height` is
+# deliberately NOT changed, so non-web consumers (common/ui/draw_ir.spl text
+# height, widget and window-scene text) are untouched on every host.
+#
+# A candidate whose file is a TrueType COLLECTION (`path#N`, macOS .ttc) has a
+# `ttcf` header, not an offset table: its units row is empty and the walk moves
+# to the next candidate. No collection is in the measured Linux stacks.
+val BROWSER_NORMAL_LINE_MEMO_LIMIT: i32 = 2048
+var _browser_normal_line_px_memo: Dict<text, i32> = {}
+var _browser_normal_line_px_memo_count: i32 = 0
+var _browser_face_line_units_memo: Dict<text, [i64]> = {}
+var _browser_face_line_units_memo_count: i32 = 0
+
+fn _browser_face_line_units(path: text) -> [i64]:
+    if _browser_face_line_units_memo.has(path):
+        return _browser_face_line_units_memo[path]
+    val blob = file_read_bytes(path)
+    val units = sfnt_blob_line_metric_units(blob)
+    if units.len() == 0:
+        return units
+    if _browser_face_line_units_memo_count >= 256:
+        _browser_face_line_units_memo = {}
+        _browser_face_line_units_memo_count = 0
+    _browser_face_line_units_memo[path] = units
+    _browser_face_line_units_memo_count = _browser_face_line_units_memo_count + 1
+    units
+
+fn browser_normal_line_height_px(family: text, bold: bool, italic: bool, font_size: i32) -> i32:
+    if font_size <= 0 or font_size > 512:
+        return 0
+    if not browser_host_has_measured_linux_face_set():
+        return 0
+    val style_key = if bold and italic: "|bi|" elif bold: "|b|" elif italic: "|i|" else: "|r|"
+    val key = family + style_key + font_size.to_string()
+    # A bundled family's face path depends on SIMPLE_ASSET_ROOT, which a
+    # process can change, so its pixel value is never memoised (the per-path
+    # units row still is, and a path is its own identity).
+    val memoisable = browser_bundled_font_path_for_family(family) == ""
+    if memoisable and _browser_normal_line_px_memo.has(key):
+        return _browser_normal_line_px_memo[key]
+    var px = 0
+    val candidates = browser_font_candidates_for_family(browser_font_family_for_style(family, bold, italic))
+    for candidate in candidates:
+        if px == 0:
+            val path = font_face_spec_path(candidate)
+            if file_exists(path):
+                val units = _browser_face_line_units(path)
+                px = sfnt_line_metric_units_normal_line_height_px(units, font_size.to_i64()) as i32
+    # 0 is "no face answered" (a file that was not there yet, a collection):
+    # never memoised, so a later call can still succeed.
+    if memoisable and px > 0:
+        if _browser_normal_line_px_memo_count >= BROWSER_NORMAL_LINE_MEMO_LIMIT:
+            _browser_normal_line_px_memo = {}
+            _browser_normal_line_px_memo_count = 0
+        _browser_normal_line_px_memo[key] = px
+        _browser_normal_line_px_memo_count = _browser_normal_line_px_memo_count + 1
+    px
 
 fn _resolved_font_category(family: text) -> text:
     if _resolved_font_category_memo.has(family):

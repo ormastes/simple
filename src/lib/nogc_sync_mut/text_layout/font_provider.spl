@@ -143,7 +143,10 @@ class BrowserResolvedFamily:
     # A specific host face this name maps to, or "" for the category's
     # platform stack.
     face: text
-    # Path of the bundled asset the served name IS, or "".
+    # LOGICAL path (`assets/fonts/...`) of the bundled asset the served name
+    # IS, or "". Never the physical path: that depends on SIMPLE_ASSET_ROOT,
+    # which a process can change (specs do), and this value is memoised.
+    # `_browser_bundled_physical_path` resolves it at the point of use.
     bundled: text
     # The stack when no name is served: "serif" (Chrome's default face) on the
     # per-name path, "mono" on the legacy path and for the non-CSS sentinels.
@@ -198,7 +201,7 @@ fn _browser_resolve_family_legacy(family: text) -> BrowserResolvedFamily:
     for asset in selected_font_asset_candidates():
         val asset_family = asset.family.to_lower()
         if bundled == "" and asset_family == wanted:
-            bundled = selected_font_asset_physical_path(asset.local_path)
+            bundled = asset.local_path
         if whole_category == "" and asset_family == whole:
             whole_category = asset.category
     val mono = lower.contains("mono") or lower.contains("courier") or lower.contains("code") or lower.contains("console")
@@ -234,7 +237,7 @@ fn _browser_resolve_family_name(raw: text) -> BrowserResolvedFamily:
     # A page that names a bundled face gets that face.
     for asset in selected_font_asset_candidates():
         if asset.family.to_lower() == name:
-            return _browser_family_served(asset.category, "", selected_font_asset_physical_path(asset.local_path))
+            return _browser_family_served(asset.category, "", asset.local_path)
     # Generic keywords are keywords only when UNQUOTED: `"sans-serif"` is a
     # family literally named sans-serif, which nothing serves (Chrome: 147.69).
     if not quoted:
@@ -474,7 +477,7 @@ fn browser_font_candidates_for_family(family: text) -> [text]:
         # when it names nothing served — on every host, as before).
         return [face_source] + _browser_category_font_candidates(resolved.category_strict)
     if resolved.bundled != "":
-        return [resolved.bundled]
+        return [_browser_bundled_physical_path(resolved)]
     if resolved.face != "":
         return [resolved.face] + _browser_category_font_candidates(resolved.category)
     if resolved.category == "":
@@ -490,7 +493,14 @@ fn browser_font_candidates_for_family(family: text) -> [text]:
 fn browser_bundled_font_path_for_family(family: text) -> text:
     if family.starts_with("__simple_font_face__|"):
         return ""
-    browser_resolve_font_family(family).bundled
+    _browser_bundled_physical_path(browser_resolve_font_family(family))
+
+# The memo is independent of SIMPLE_ASSET_ROOT; the root is applied here, on
+# every call, exactly as the unmemoised lookup did.
+fn _browser_bundled_physical_path(resolved: BrowserResolvedFamily) -> text:
+    if resolved.bundled == "":
+        return ""
+    selected_font_asset_physical_path(resolved.bundled)
 
 fn browser_font_face_family_value(family: text, source_url: text) -> text:
     val source = browser_font_face_local_source_path(source_url)

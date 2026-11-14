@@ -3086,7 +3086,36 @@ fn nth_box_token(raw: text, index: i32) -> text:
         return parts[index]
     ""
 
+# A `line-height` value as the Style encoding: > 0 is a length in px, < 0 is a
+# factor times ten negated (1.6 -> -16), 0 is "not a value this parser takes".
+# `normal` is NOT handled here (0 already means that in Style): the caller
+# tests `line_height_value_is_normal` first.
+#
+# A percentage is a factor of the element's font size: `150%` is 1.5x. Until
+# 2026-11-14 it fell into the unitless branch and became 150x (`-1500`).
+# Precision is one decimal, as for a unitless number: 125% is 1.2x.
+# `em` is taken as a factor too (`1.5em` -> -15).
+fn line_height_value_is_normal(raw: text) -> bool:
+    raw.trim().lower() == "normal"
+
+# The Style line-height after a `normal` keyword (`line-height: normal`, or a
+# `font` shorthand, which resets line-height to normal).
+#
+# On the measured host `normal` is 0, the Style encoding the face metric is
+# read for. Every other host keeps `current` — exactly what this renderer did
+# before `normal` was honoured, when the keyword was dropped. That matters for
+# a form control, whose UA line height is carried as an inherited-looking
+# factor: `<input style="line-height:normal">` must stay on it there, not fall
+# to the 9 * scale element fallback.
+fn line_height_after_normal_keyword(current: i32, measured_host: bool) -> i32:
+    if measured_host: 0 else: current
+
 fn parse_line_height_value(raw: text) -> i32:
+    if raw.contains("%"):
+        val tenths = parse_decimal_x10(raw) / 100
+        if tenths > 0:
+            return 0 - tenths
+        return 0
     if raw.contains("px"):
         val lh = parse_int(raw)
         if lh > 0:
