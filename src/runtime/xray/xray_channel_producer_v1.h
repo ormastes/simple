@@ -73,7 +73,8 @@ SIMPLE_XRAY_NEVER_INSTRUMENT static inline uint64_t simple_xray_timestamp(void) 
  * and returns. Never blocks, spins without bound, allocates or calls out.
  * `kind` is the TraceEventKindV1 code (1 entry, 2 exit, 3 tail exit);
  * `function_site` is function_id | site_id << 32. */
-SIMPLE_XRAY_NEVER_INSTRUMENT static inline void simple_xray_channel_produce_selected_sequence_v1(
+/* Required by the hidden handler ABI: ordinary inline is only a hint. */
+SIMPLE_XRAY_NEVER_INSTRUMENT __attribute__((always_inline)) static inline void simple_xray_channel_produce_selected_sequence_v1(
     int64_t *base, uint64_t kind, uint64_t module_instance, uint64_t function_site,
     uint64_t *sequence_cell, uint64_t supplied_sequence) {
     int64_t state = simple_xray_cas(&base[CH_GATE], 0, 1);

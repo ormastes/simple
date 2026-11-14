@@ -203,7 +203,8 @@ static inline int64_t simple_xray_thread_current_arena_v1(const void *pinned_poo
  * Values 0..UINT64_MAX-1 are exact; UINT64_MAX is a sticky "count inexact;
  * numeric total unavailable" sentinel. Readers must not treat it as a
  * numeric lower bound or as evidence that capture was lossless. */
-static inline void simple_xray_thread_note_unattached_v1(
+/* The hidden handler must not acquire an out-of-line call boundary. */
+__attribute__((always_inline)) static inline void simple_xray_thread_note_unattached_v1(
     const SimpleXrayThreadContextHeaderV1 *header) {
     if (header == NULL) return;
     uint64_t *cell = (uint64_t *)((uint8_t *)header + SIMPLE_XRAY_CTX_H_UNATTACHED_LOST);
