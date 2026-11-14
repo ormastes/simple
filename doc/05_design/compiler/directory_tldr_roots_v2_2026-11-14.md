@@ -188,3 +188,28 @@ digest plus its stable entry/schema; configured producer roles are not assumed
 equal to the running worker. Missing executing-image transport is rejected.
 These are process-local inputs, not serialized admission tokens. The owner and
 new fallback spec are source-reviewed but unrun; no native qualification is added.
+
+
+## Initializer plan ownership
+
+The actual `lower_runtime_module_initializers_named` owner now captures the
+ordered globals after its declaration-order selection and function-slot append.
+It records compact symbol/name steps and the emitted initializer symbol on
+`MirModule.initializer_plan_v1` only after successful wrapper generation. It clears
+prior state on entry. `Some` with an empty plan means the owner actually ran and
+found no runtime work; `nil` means unavailable. The borrowed primary-globals route
+preserves the first emission's plan alongside the reused initializer MIR.
+
+AOP, debug tracing, XRay and the inspected optimizer reconstruction paths preserve
+this historical plan. Preservation does not establish the final transformed body.
+The bootstrap flattening store transports it through its existing ownership and
+publication protocol. Parser/HIR/MIR plan scenarios and bootstrap ownership
+scenarios are authored but unrun. No initializer wire roundtrip is claimed.
+
+Finalization still must join this plan to the actual post-transform MIR, checked
+emitted objects and the backend's actual startup sequence. That sequence currently
+sorts/deduplicates defined module-init symbols; it is not a newly inferred dependency
+order. The existing native link receipt owner already binds ordered object digests,
+link options and output content after successful linking. Extending that explicit
+versioned owner with the actual startup receipt, then joining module plan coverage,
+is required before complete PackageInit publication or initializer reuse.
