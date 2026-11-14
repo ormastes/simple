@@ -1076,7 +1076,7 @@ turns green in the same change, or the check FAILs as stale.
 - Open clusters, largest first (cells): form-control UA size, i.e. `button`
   and `input` have no UA border and `input` a different content width (78);
   table-cell residue: max-content width drops the spaces around an inline child (9), a `td` whose `display` is not `table-cell` is not laid out (8);
-  `sub`/`sup` (36); floats (34); `fieldset`/`legend` (24); `flex-grow` on an
+  `sub`/`sup` (36); floats (34, CLOSED -- see the float section below); `fieldset`/`legend` (24); `flex-grow` on an
   item with a definite width (17); monospace metrics for `code` (16); width /
   height / vertical padding applied to non-replaced inline boxes (15).
 - **`parse_int` drops the sign.** Any signed CSS integer read through it is
@@ -1286,3 +1286,46 @@ exhaustion must fail CLOSED everywhere (never negate an exhausted `:has()`,
 never cache an answer computed while exhausted) —
 `selector_sibling_complexity_spec.spl`. Known residual limits:
 `doc/08_tracking/bug/web_selector_budget_residual_limits_2026-11-14.md`.
+
+
+
+## 2026-11-14 — floats and `clear` (matrix 241 -> 205 mismatching cells)
+
+- **Model.** `simple_web_html_layout_renderer_layout_engine.spl` keeps a float
+  context: every placed float's MARGIN box in page coordinates
+  (`g_float_side/x0/x1/y0/y1`), queried by `float_ctx_left_edge` /
+  `float_ctx_right_edge` / `float_ctx_next_bottom` / `float_ctx_clear_bottom`.
+  `layout_with_style` is now a thin wrapper over `layout_with_style_flow`: a
+  box that establishes a block formatting context (`float_ctx_establishes_bfc`)
+  gets its own slice of the list (`g_float_base`) and drops it on exit, and its
+  auto height grows to enclose its floats.
+- **Placement** (`float_ctx_place_y`): not above the previous float's top,
+  below the floats `clear` names, then down past float bottoms until the
+  margin box fits. A cleared FLOAT keeps its top margin below the clearance; a
+  cleared BLOCK's border top sits at the clearance and its margin is absorbed.
+- **Line boxes.** The inline run loop refreshes `inline_start_x` / `line_iw`
+  from the float context at every line start (`inline_base_x` is the float-free
+  start). A float met inside an open run joins the line if it fits and moves
+  the boxes already on it (`line_nodes`) right.
+- **Trap — the old band narrowed by the RUN's width.** `node_w` in the `#text`
+  branch is the run's own box, so `node_w - indent` went to 1 px and `bb` beside
+  any left float wrapped to two lines (every `…-b` cell was 48 px tall). The
+  narrowed width now comes from the run loop via
+  `g_text_float_narrow_w_pending` / `g_text_float_lines_pending`.
+- **Trap — a `%` width float was resolved twice** (50% of 400 gave 100): pass
+  `style_with_width(cst, resolved)` like the inline-block arm does.
+- **Trap — page coordinates go stale when a subtree is translated.** The
+  margin-collapse re-top calls `float_ctx_shift`; any NEW
+  `offset_layout_subtree` on a non-BFC block that can hold floats must too.
+- **Not modelled:** paint x of a wrapped run's lines that outlast a LEFT float
+  (lines beside the float are wrapped narrow but painted from the block's left
+  edge unless every line stays beside the float); a float is fitted at its top
+  row only, not over its whole height; a run that starts mid-line beside a
+  float; floats inside flex/grid containers' own height; `td` floats; the
+  collapsed space after an inline float is counted twice (`aa <float> bb`,
+  about 5 px).
+- **Found, not float-related:** a 100 px block wraps
+  `one two three four …` into 9 lines against Chrome's 7 (`one two three` is
+  96.95 px but does not fit 100); `<span>bb</span> cc <b>dd</b>` puts `dd` 6 px
+  right of Chrome.
+- Spec: `test/01_unit/browser_engine/float_clear_chrome159_geometry_spec.spl`.

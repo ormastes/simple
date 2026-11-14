@@ -1,0 +1,179 @@
+"""
+## Purpose and audience
+Purpose: Pin CSS 2.2 section 9.5 float placement and `clear` against Chrome 159.
+The layout engine modelled one `float:left` box as a global indent band and
+nothing else: `float:right` fell through to the block path, a second float
+replaced the first one's band, `clear` was not parsed, a float inside an inline
+run did not touch the open line, and the band narrowed a text run by the RUN's
+own width (so `bb` beside a 60 px float wrapped to two lines and the block
+came out 48 px tall instead of 24).
+Audience: browser-engine layout maintainers.
+
+Chrome oracle (Chrome 159.0.8154.6 headless shell, 900x2000,
+`body{margin:0;font:16px/1.5 sans-serif}`, every case inside a
+`width:400px;height:140px;position:relative;overflow:hidden` slot,
+getBoundingClientRect relative to the slot, `x,y,w,h`). `FL` is
+`float:left;width:60px;height:40px`, `FR` the same with `float:right`.
+
+| case | markup (inside the slot)                                              | Chrome                                   |
+|------|-----------------------------------------------------------------------|------------------------------------------|
+| 1    | `[float:left 60x10]` `<div b>bb</div>` `<div c>cc</div>`              | b 0,0,400,24  c 0,24,400,24              |
+| 2    | `FL` `<div b><span x>bb</span> cc</div>`                              | b 0,0,400,24  x.x = 60                   |
+| 2    | `[float:left 60x30]` `<div b width:200px>` 13 words                   | b 0,0,200,96                             |
+| 3    | `FL` `<div t float:right;width:60px>` `<div b>bb</div>`               | t 340,0,60,24  b 0,0,400,24              |
+| 3    | `FR` `<div t>cd</div>` `<div b>bb</div>`                              | a 340,0,60,40  t 0,0,400,24  b 0,24      |
+| 4    | `FL` `<div t float:left;width:60px>`                                  | t 60,0,60,24                             |
+| 4    | `FR` `<div t float:right;width:60px>`                                 | t 280,0,60,24                            |
+| 5    | left floats 150x40, 150x30, 150 wide, then a right float 150 wide    | 3rd 150,30,150,24  4th 250,54,150,24     |
+| 5    | `[left 300x40]` `[right 150x20]` `[left 50]`                          | right 250,40,150,20  left 0,40,50,24     |
+| 6    | `FL` `<div t clear:left>` `<div b>`                                   | t 0,40,400,24  b 0,64,400,24             |
+| 6    | `FL` `<div t clear:right>` `<div b>`                                  | t 0,0,400,24  b 0,24,400,24              |
+| 6    | `FL;margin:5px` `<div t clear:left;margin-top:10px>`                  | t 0,50,400,24                            |
+| 7    | `FL` `<div t clear:both;float:right;width:60px>` `<div b>`            | t 340,40,60,24  b 0,0,400,24             |
+| 7    | `FR` `<div t clear:right;float:right;width:60px>`                     | t 340,40,60,24                           |
+| 7    | `FL` `<div t float:left;width:60px;clear:left;margin-top:8px>` `<div b clear:left>` | t 0,48,60,24  b 0,72,400,24 |
+| 8    | `<div w>aa bb <span t float:left 60x40>cd</span> <i>cc</i></div>` `<div b>` | t 0,0,60,40  w 0,0,400,24  b 0,24,400,24 |
+| 8    | `FL` `<div w margin-left:100px><span x>bb</span><div t float:left 30x10></div></div>` | t 100,0,30,10  x.x = 130 |
+| 9    | `<p a margin:0 0 16px>aa</p>` `FL t` `<div b>bb</div>`                | t 0,40,60,40  b 0,40,400,24              |
+| 10   | `<div w overflow:hidden>FL</div>` `<div b>bb</div>`                   | w 0,0,400,40  b 0,40,400,24              |
+| 10   | `<div w padding:5px;border:1px solid>FR a, [left 60x20] t, <div b clear:both>` | w 0,0,400,76  a 334,6,60,40  t 6,6,60,20  b 6,46,388,24 |
+| 11   | `FL` `<div t overflow:hidden>cd</div>` `<div b>bb</div>`              | t 60,0,340,24  b 0,24,400,24             |
+| 12   | `FL` `<div w margin-left:20px;padding-left:10px><span x>bb</span></div>` | w 20,0,380,24  x.x = 60               |
+| 13   | `FL` `<span x>bb</span>` `<div b>cc</div>` `<span y>dd</span>`        | x.x = 60  b 0,24,400,24  y.x = 0         |
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-FLOAT-CLEAR-CHROME159-001 — left/right floats, float stacking, `clear`, and line boxes shortened by floats match Chrome 159.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_engine.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id
+}
+
+val VW: i32 = 900
+val VH: i32 = 2000
+val HEAD: text = "<html><head><style>body{margin:0;font:16px/1.5 sans-serif}.s{position:relative;width:400px;height:140px;overflow:hidden}</style></head><body><div class=\"s\">"
+val TAIL: text = "</div></body></html>"
+val FL: text = "<div id=\"a\" style=\"float:left;width:60px;height:40px\">aa</div>"
+val FR: text = "<div id=\"a\" style=\"float:right;width:60px;height:40px\">aa</div>"
+val WORDS: text = "one two three four five six seven eight nine ten eleven twelve thirteen"
+
+fn field(inner: text, id: text, name: text) -> text:
+    simple_web_layout_debug_layout_by_id(HEAD + inner + TAIL, VW, VH, id, name)
+
+fn box(inner: text, id: text) -> text:
+    field(inner, id, "x") + "," + field(inner, id, "y") + "," + field(inner, id, "w") + "," + field(inner, id, "h")
+
+describe "floats and clear match Chrome 159":
+    it "AC-1: a block beside a left float keeps its own line height":
+        step("Chrome 159: `bb` beside a 60x10 left float is one 24 px line")
+        val page = "<div id=\"t\" style=\"float:left;width:60px;height:10px\">cd</div><div id=\"b\">bb</div><div id=\"c\">cc</div>"
+        expect(box(page, "b")).to_equal("0,0,400,24")
+        expect(box(page, "c")).to_equal("0,24,400,24")
+
+    it "AC-2: line boxes beside a left float start at the float's right edge":
+        step("Chrome 159: the first inline box sits at x=60; the block box is not shifted")
+        val page = FL + "<div id=\"b\"><span id=\"x\">bb</span> cc</div>"
+        expect(box(page, "b")).to_equal("0,0,400,24")
+        expect(field(page, "x", "x")).to_equal("60")
+        step("Chrome 159: 13 words in 200 px beside a 60x30 float wrap to 4 lines")
+        val wrap = "<div id=\"a\" style=\"float:left;width:60px;height:30px\">aa</div><div id=\"b\" style=\"width:200px\">" + WORDS + "</div>"
+        expect(box(wrap, "b")).to_equal("0,0,200,96")
+
+    it "AC-3: float:right is placed against the right content edge, out of flow":
+        step("Chrome 159: right float at x=340; the following block stays at y=0")
+        val both = FL + "<div id=\"t\" style=\"float:right;width:60px\">cd</div><div id=\"b\">bb</div>"
+        expect(box(both, "t")).to_equal("340,0,60,24")
+        expect(box(both, "b")).to_equal("0,0,400,24")
+        val right = FR + "<div id=\"t\">cd</div><div id=\"b\">bb</div>"
+        expect(box(right, "a")).to_equal("340,0,60,40")
+        expect(box(right, "t")).to_equal("0,0,400,24")
+        expect(box(right, "b")).to_equal("0,24,400,24")
+
+    it "AC-4: floats on the same side stack horizontally":
+        step("Chrome 159: second left float at x=60, second right float at x=280")
+        expect(box(FL + "<div id=\"t\" style=\"float:left;width:60px\">cd</div>", "t")).to_equal("60,0,60,24")
+        expect(box(FR + "<div id=\"t\" style=\"float:right;width:60px\">cd</div>", "t")).to_equal("280,0,60,24")
+
+    it "AC-5: a float that does not fit drops below the floats in its way":
+        step("Chrome 159: third 150 px left float drops to y=30, the right float to y=54")
+        val drop = "<div style=\"float:left;width:150px;height:40px\">aa</div><div style=\"float:left;width:150px;height:30px\">cd</div><div id=\"b\" style=\"float:left;width:150px\">bb</div><div id=\"c\" style=\"float:right;width:150px\">bb</div>"
+        expect(box(drop, "b")).to_equal("150,30,150,24")
+        expect(box(drop, "c")).to_equal("250,54,150,24")
+        step("Chrome 159: a later float is never above an earlier float's top")
+        val later = "<div style=\"float:left;width:300px;height:40px\">aa</div><div id=\"t\" style=\"float:right;width:150px;height:20px\">cd</div><div id=\"b\" style=\"float:left;width:50px\">bb</div>"
+        expect(box(later, "t")).to_equal("250,40,150,20")
+        expect(box(later, "b")).to_equal("0,40,50,24")
+
+    it "AC-6: clear moves a block below the floats on the named side":
+        step("Chrome 159: clear:left after a 40 px left float -> y=40")
+        val left = FL + "<div id=\"t\" style=\"clear:left\">cd</div><div id=\"b\">bb</div>"
+        expect(box(left, "t")).to_equal("0,40,400,24")
+        expect(box(left, "b")).to_equal("0,64,400,24")
+        step("Chrome 159: clear:right ignores a left float")
+        val other = FL + "<div id=\"t\" style=\"clear:right\">cd</div><div id=\"b\">bb</div>"
+        expect(box(other, "t")).to_equal("0,0,400,24")
+        expect(box(other, "b")).to_equal("0,24,400,24")
+        step("Chrome 159: clearance reaches the float's MARGIN box; the block's own top margin is absorbed")
+        val margin = "<div style=\"float:left;width:60px;height:40px;margin:5px\">aa</div><div id=\"t\" style=\"clear:left;margin-top:10px\">cd</div>"
+        expect(box(margin, "t")).to_equal("0,50,400,24")
+
+    it "AC-7: clear on a float moves the float, not the flow":
+        step("Chrome 159: clear:both right float at y=40; following block still at y=0")
+        val both = FL + "<div id=\"t\" style=\"clear:both;float:right;width:60px\">cd</div><div id=\"b\">bb</div>"
+        expect(box(both, "t")).to_equal("340,40,60,24")
+        expect(box(both, "b")).to_equal("0,0,400,24")
+        expect(box(FR + "<div id=\"t\" style=\"clear:right;float:right;width:60px\">cd</div>", "t")).to_equal("340,40,60,24")
+        step("Chrome 159: a cleared float keeps its own top margin below the clearance")
+        val margin = FL + "<div id=\"t\" style=\"float:left;width:60px;clear:left;margin-top:8px\">cd</div><div id=\"b\" style=\"clear:left\">bb</div>"
+        expect(box(margin, "t")).to_equal("0,48,60,24")
+        expect(box(margin, "b")).to_equal("0,72,400,24")
+
+    it "AC-8: a float inside an inline run leaves the line and shortens it":
+        step("Chrome 159: the float sits at the line's left edge; the line stays 24 px")
+        val run = "<div id=\"w\">aa bb <span id=\"t\" style=\"float:left;width:60px;height:40px\">cd</span> <i id=\"x\">cc</i></div><div id=\"b\">bb</div>"
+        expect(box(run, "t")).to_equal("0,0,60,40")
+        expect(box(run, "w")).to_equal("0,0,400,24")
+        expect(box(run, "b")).to_equal("0,24,400,24")
+        step("Chrome 159: content already on the line moves right of the new float")
+        val shift = FL + "<div id=\"w\" style=\"margin-left:100px\"><span id=\"x\">bb</span><div id=\"t\" style=\"float:left;width:30px;height:10px\"></div></div>"
+        expect(box(shift, "t")).to_equal("100,0,30,10")
+        expect(field(shift, "x", "x")).to_equal("130")
+
+    it "AC-9: a float after a block starts below that block's bottom margin":
+        step("Chrome 159: 16 px bottom margin -> float and following block both at y=40")
+        val page = "<p id=\"p\" style=\"margin:0 0 16px\">aa</p><div id=\"t\" style=\"float:left;width:60px;height:40px\">cd</div><div id=\"b\">bb</div>"
+        expect(box(page, "t")).to_equal("0,40,60,40")
+        expect(box(page, "b")).to_equal("0,40,400,24")
+
+    it "AC-10: a block formatting context root grows to contain its floats":
+        step("Chrome 159: overflow:hidden wrapper is 40 px tall; the next block starts below it")
+        val bfc = "<div id=\"w\" style=\"overflow:hidden\">" + FL + "</div><div id=\"b\">bb</div>"
+        expect(box(bfc, "w")).to_equal("0,0,400,40")
+        expect(box(bfc, "b")).to_equal("0,40,400,24")
+        step("Chrome 159: floats use the padded content box; clear:both ends below both")
+        val padded = "<div id=\"w\" style=\"padding:5px;border:1px solid\">" + FR + "<div id=\"t\" style=\"float:left;width:60px;height:20px\">cd</div><div id=\"b\" style=\"clear:both\">bb</div></div>"
+        expect(box(padded, "w")).to_equal("0,0,400,76")
+        expect(box(padded, "a")).to_equal("334,6,60,40")
+        expect(box(padded, "t")).to_equal("6,6,60,20")
+        expect(box(padded, "b")).to_equal("6,46,388,24")
+
+    it "AC-11: a block that establishes a formatting context sits beside the float":
+        step("Chrome 159: overflow:hidden block is 340 px wide at x=60")
+        val page = FL + "<div id=\"t\" style=\"overflow:hidden\">cd</div><div id=\"b\">bb</div>"
+        expect(box(page, "t")).to_equal("60,0,340,24")
+        expect(box(page, "b")).to_equal("0,24,400,24")
+
+    it "AC-12: the float edge is measured in page space, not from the block's own edge":
+        step("Chrome 159: a block inset 30 px still starts its line at the float edge x=60")
+        val page = FL + "<div id=\"w\" style=\"margin-left:20px;padding-left:10px\"><span id=\"x\">bb</span></div>"
+        expect(box(page, "w")).to_equal("20,0,380,24")
+        expect(field(page, "x", "x")).to_equal("60")
+
+    it "AC-13: lines below the float's bottom use the full width again":
+        step("Chrome 159: line at y=0 starts at 60, the line at y=48 starts at 0")
+        val page = FL + "<span id=\"x\">bb</span><div id=\"b\">cc</div><span id=\"y\">dd</span>"
+        expect(field(page, "x", "x")).to_equal("60")
+        expect(box(page, "b")).to_equal("0,24,400,24")
+        expect(field(page, "y", "x")).to_equal("0")
