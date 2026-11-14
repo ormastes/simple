@@ -1,6 +1,6 @@
 # Executable authority registry loses its issued slot: commit returns InvalidToken
 
-- **Status:** open (2026-11-15)
+- **Status:** closed (2026-11-15) - fixed in the seed interpreter; see "Fix"
 - **Where:** `src/os/kernel/loader/executable_authority_registry.spl`
   `executable_authority_issue_verified` (store at `_authority_registry_state = Some(state)`)
 - **Reproducer:** `test/01_unit/os/kernel/loader/managed_workload_launch_spec.spl`
@@ -31,3 +31,34 @@ was tried once and did not turn the spec green. It was not separately probed, an
 ## Also
 `container_runtime_spec` never calls `executable_loader_authority_owner_initialize`
 (owner lookup -> `InvalidRegistry`). The reference spec does this in `_ensure_authority_registry()`.
+
+## Root cause (2026-11-15)
+Seed interpreter, `src/compiler_rust/compiler/src/interpreter_patterns.rs`
+`merge_match_arm_subject_bindings`. After a match arm runs, the interpreter merges
+container fields from the payload binding (`current`) back into the match subject
+place (`_authority_registry_state`). The arm had already stored a new value into
+that place. The merge then copied the stale binding's empty `slots` array over it.
+Scalar fields were not merged, which is why `next_nonce_counter` survived.
+
+Minimal repro, no `os.*` imports: in a fn, `match g: case Some(cur): var s = cur;
+s.xs.push(x); g = Some(s)`. Reading back gives `len=0`. The registry code was correct.
+
+## Fix
+When the subject place's post-arm value differs from the pre-arm subject, the arm
+stored to it explicitly. That store wins, and the payload merge is skipped.
+The merge still runs when the arm only mutated through the binding.
+
+- Rust test: `match_arm_store_into_subject_global_is_not_rewound_by_payload_merge`
+  (`interpreter_patterns::tests`, 41/41 pass).
+- Repro + generalization spec:
+  `test/01_unit/interpreter/match_arm_subject_store_not_rewound_spec.spl`.
+  Old seed: 2/3 (repro RED). Rebuilt seed: 3/3.
+- Registry probe: `token_index` now reads `slots=1` after issue. It read `slots=0` before.
+
+## Not this bug (still RED on macOS arm64)
+After the fix, the launch specs still return -13. The cause is now different:
+adoption fails with `RollbackUnavailable`, because `get_arch()` is Arm64 on this
+host and the specs hand it an x86_64 ELF with `Architecture.X86_64`. Filed as
+`managed_workload_launch_specs_x86_64_only_on_arm64_host_2026-11-15.md`.
+Also: `vmm_new_process_space` was private but imported through the `vmm` facade
+by `syscall_spm.spl`, so the specs failed to load. It is now `pub`.
