@@ -40,7 +40,7 @@ use std.common.contracts.container.primary_attach_v1.{ContainerPrimaryAttachPlan
 use std.common.contracts.container.exec_installed_v3.{ContainerExecInstalledV3, container_exec_installed_match_v3}
 use std.common.contracts.container.exec_admission_v3.ContainerExecAdmissionV3
 use std.common.contracts.container.exec_control_v3.ContainerExecControlObservationV3
-use std.nogc_async_mut.container.providers.linux.installed_policy_v3.linux_oci_installed_policy_decode_v3
+use std.nogc_async_mut.container.providers.linux.installed_policy_v3.{LinuxOciInstalledPolicyV3, linux_oci_installed_policy_decode_v3}
 use std.nogc_async_mut.container.providers.linux.engine_exec_owner_v3.{LinuxOciEngineExecOwnerV3, LinuxOciEngineExecTurnV3}
 use std.nogc_async_mut.container.providers.linux.installed_containment_policy_v1.linux_oci_installed_containment_policy_decode_v1
 use std.nogc_async_mut.container.providers.linux.containment_observer_v1.{LinuxOciContainmentObservationV1,
@@ -103,6 +103,23 @@ pub class LinuxSimpleContainerAdapterV2:
     _duration_cap_ms: i64
 
 impl LinuxSimpleContainerAdapterV2:
+    # Protected local configuration, not a wire endpoint. The actual retained
+    # provider baseline is correlated again against Engine info by the owner.
+    pub fn primary_geometry_context_v1(plan: ContainerPrimaryAttachPlanV1,
+            policy_bytes: text) -> Result<(LinuxOciInstalledPolicyV3, LinuxOciEngineObservationV1), text>:
+        if (self.provider.scripted or self.provider.containment_policy != nil or
+                self.provider.engine_policy == nil or self.provider.engine_baseline == nil or
+                plan.terminal_mode != "tty" or plan.workload.backend != "linux-podman"):
+            return Err("primary-geometry-managed-podman-tty-required")
+        val policy = linux_oci_installed_policy_decode_v3(policy_bytes)?
+        if linux_oci_engine_policy_digest_v1(policy.cli_policy)? != linux_oci_engine_policy_digest_v1(self.provider.engine_policy.unwrap())?:
+            return Err("primary-geometry-cli-policy-mismatch")
+        val baseline = self.provider.engine_baseline.unwrap()
+        if (plan.provider_identity_digest != baseline.identity_digest or
+                plan.provider_identity_digest != self._observed_host.provider_identity_digest):
+            return Err("primary-geometry-provider-changed")
+        Ok((policy, baseline))
+
     pub static fn observe_containment_v1(policy_bytes: text) -> Result<LinuxOciContainmentHostObservationV1, text>:
         val policy = linux_oci_installed_containment_policy_decode_v1(policy_bytes)?
         val actual = linux_oci_containment_observe_v1(policy, 5000)?

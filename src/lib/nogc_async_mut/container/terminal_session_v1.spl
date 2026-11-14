@@ -25,6 +25,25 @@ use std.common.contracts.mux.session_runtime_control_v1.{SessionRuntimeControlTa
     session_runtime_control_target_digest_v1}
 use std.common.contracts.container.primary_input_v1.{container_primary_input_plan_match_v1, container_primary_input_deadline_v1}
 use std.nogc_sync_mut.io.time_ops.time_sample_monotonic_nanos_or_failure
+use std.common.contracts.container.primary_geometry_v1.{ContainerPrimaryGeometryRequestV1, container_primary_geometry_request_check_v1}
+
+# A geometry right is independent from input; this port returns only the
+# already retained plan after exact current adoption/lease correlation.
+pub fn container_primary_geometry_authorized_v1(session: ContainerPrimaryAttachSessionV1,
+        request: ContainerPrimaryGeometryRequestV1) -> Result<ContainerPrimaryAttachPlanV1, text>:
+    if session.native_cleaned or session.plan.terminal_mode != "tty": return Err("primary-geometry-live-tty-required")
+    val adoption = match session.adoption:
+        case Some(value): value
+        case None: return Err("primary-geometry-adoption-required")
+    val target = request.target
+    if (adoption.binding_uid != target.binding_uid or adoption.service_incarnation != target.service_incarnation or
+            adoption.session_id != target.session_id or adoption.window_id != target.window_id or
+            adoption.pane_id != target.pane_id or adoption.service_epoch != target.service_epoch or
+            adoption.child_incarnation != target.child_incarnation): return Err("primary-geometry-adoption-changed")
+    container_primary_input_plan_match_v1(session.plan, target)?
+    container_primary_geometry_request_check_v1(request, time_sample_monotonic_nanos_or_failure() / 1000000)?
+    container_terminal_validate_v1(ContainerOwnedTerminalSessionV1.PrimaryAttach(session))?
+    Ok(session.plan)
 
 pub struct ContainerPrimaryInputWriteV1:
     disposition: ProcessInputWriteDispositionV1

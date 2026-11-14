@@ -1,0 +1,91 @@
+# Advance at most one authorized IO step per bounded server turn. Cancellation
+# retains every native connection until its actual common close is confirmed.
+use os.apps.smux.runtime_binding_state_v3.SmuxRuntimeBindingOwnerV3
+use os.apps.smux.smux_runtime_control_owner_v1.{SmuxRuntimeControlOwnerV1,
+    smux_runtime_control_find_v1, smux_runtime_control_check_v1, smux_runtime_control_revoke_v1}
+use os.apps.smux.runtime_control_target_v1.smux_runtime_control_target_v1
+use os.apps.smux.runtime_primary_geometry_state_v4.*
+use os.apps.smux.runtime_primary_input_sync_v4.smux_primary_input_sync_v4
+use std.common.contracts.container.primary_geometry_v1.ContainerPrimaryGeometryRequestV1
+use std.common.contracts.mux.session_runtime_control_v1.SessionRuntimeControlKindV1
+use std.nogc_async_mut.container.primary_geometry_v1.*
+use std.nogc_async_mut.container.terminal_session_v1.container_primary_attach_identity_v1
+use std.sosix.time.sosix_time_now_monotonic_ms
+
+pub fn smux_geometry_record_turn_v4(record: SmuxPrimaryGeometryRecordV4,
+        turn: ContainerPrimaryGeometryTurnV1) -> SmuxPrimaryGeometryRecordV4:
+    var retained = record
+    retained.exchange = turn.owner
+    retained.phase = turn.phase
+    retained.disposition = turn.disposition
+    retained.error = turn.error
+    if turn.phase == "done" and not turn.cleanup_pending: retained.exchange = nil
+    retained
+
+pub fn smux_geometry_progress_v4(binding: SmuxRuntimeBindingOwnerV3,
+        owner: SmuxRuntimeControlOwnerV1, index: int, advance: bool) -> SmuxRuntimeControlOwnerV1:
+    var current = owner
+    val record = current.geometry_records[index]
+    if record.exchange == nil: return current
+    var reason = ""
+    val entry = smux_runtime_control_find_v1(current, record.binding_uid, SessionRuntimeControlKindV1.Geometry)
+    if entry == nil or not entry.unwrap().active or entry.unwrap().lease.revision != record.revision:
+        reason = "primary-geometry-lease-retired"
+    else:
+        val holder = entry.unwrap()
+        val resolved = smux_runtime_control_target_v1(binding, record.binding_uid, holder.lease.target.client_id, holder.attachment_token)
+        if resolved.is_err() or resolved.unwrap().primary == nil:
+            reason = "primary-geometry-target-unavailable"
+            current = smux_runtime_control_revoke_v1(current, record.binding_uid, SessionRuntimeControlKindV1.Geometry,
+                record.revision, sosix_time_now_monotonic_ms()).owner
+        else:
+            val checked = smux_runtime_control_check_v1(current, record.binding_uid, SessionRuntimeControlKindV1.Geometry,
+                record.request.control.nonce, record.revision, resolved.unwrap().target, sosix_time_now_monotonic_ms())
+            current = checked.owner
+            if checked.error != "" or checked.lease == nil:
+                reason = if checked.error != "": checked.error else: "primary-geometry-lease-check-failed"
+            elif container_primary_attach_identity_v1(resolved.unwrap().primary.unwrap()) != record.session_identity:
+                reason = "primary-geometry-session-changed"
+            elif advance:
+                val request = ContainerPrimaryGeometryRequestV1(lease: checked.lease.unwrap(), target: resolved.unwrap().target,
+                    principal: current.policy.principal_id, nonce: record.request.control.nonce,
+                    attempt_sequence: record.sequence, columns: record.request.control.columns,
+                    rows: record.request.control.rows, request_digest: record.request_digest)
+                val turn = simple_container_primary_geometry_step_v1(binding.local.container, resolved.unwrap().primary.unwrap(),
+                    record.exchange.unwrap(), request, 25)
+                current.geometry_records[index] = smux_geometry_record_turn_v4(record, turn)
+                return current
+    if reason != "":
+        val turn = simple_container_primary_geometry_cancel_v1(record.exchange.unwrap(), reason)
+        current.geometry_records[index] = smux_geometry_record_turn_v4(record, turn)
+    current
+
+pub fn smux_primary_geometry_sweep_v4(binding: SmuxRuntimeBindingOwnerV3,
+        owner: SmuxRuntimeControlOwnerV1, advance: bool = true) -> SmuxRuntimeControlOwnerV1:
+    var current = owner
+    var index = 0
+    # Retire invalid targets/leases before any optional progress; never step an
+    # old holder merely because another valid request keeps the server busy.
+    while index < current.geometry_records.len():
+        current = smux_geometry_progress_v4(binding, current, index, false)
+        index = index + 1
+    if not advance or current.geometry_records.len() == 0: return current
+    if current.geometry_cursor >= current.geometry_records.len(): current.geometry_cursor = 0
+    val start = current.geometry_cursor
+    var checked = 0
+    while checked < current.geometry_records.len():
+        index = (start + checked) % current.geometry_records.len()
+        if current.geometry_records[index].exchange != nil:
+            current.geometry_cursor = (index + 1) % current.geometry_records.len()
+            return smux_geometry_progress_v4(binding, current, index, true)
+        checked = checked + 1
+    current
+
+pub fn smux_primary_geometry_stop_allowed_v4(owner: SmuxRuntimeControlOwnerV1) -> bool:
+    for record in owner.geometry_records:
+        if record.exchange != nil or ["pending", "unknown"].contains(record.disposition): return false
+    true
+
+pub fn smux_primary_controls_sync_v4(binding: SmuxRuntimeBindingOwnerV3,
+        owner: SmuxRuntimeControlOwnerV1, advance: bool = false) -> SmuxRuntimeControlOwnerV1:
+    smux_primary_geometry_sweep_v4(binding, smux_primary_input_sync_v4(binding, owner), advance)

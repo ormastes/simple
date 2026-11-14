@@ -18,7 +18,7 @@ The authenticated foreground server now dispatches these explicit V4 commands:
 | `bind-primary-runtime-v4 TOKEN` | Begin the admitted helper, open through Host, and adopt into the pane. |
 | `inspect-primary-binding-v4 UID` | Observe progress and settle only with canonical cleanup proof. |
 | `cleanup-primary-binding-v4 UID` | Explicitly clean the exact helper transport, then attempt settlement. |
-| `runtime-primary-control-v4 TOKEN` | Use the existing issuer and explicit attempt protocol for session-bound primary input. |
+| `runtime-primary-control-v4 TOKEN` | Use the existing issuer and explicit attempts for independent primary input or Linux container geometry. |
 
 Discovery, requests, and replies use separate V4 SDN schemas. The request wraps
 the unchanged V3 target request plus `terminalMode` (`stdin` or `tty`); its
@@ -35,8 +35,9 @@ callers must fit the complete frame. Oversized requests are refused.
 
 `inputSupported`, `geometrySupported`, and `interactive` are false in global V4
 capabilities and binding replies. The separate V4 control reply can report
-input only after the exact live lease is installed in the actual native gate;
-geometry and interactive remain false. A primary plan can still be refused by the actual
+input only after the exact live lease is installed in the actual native gate.
+The later Geometry reply requires an actual endpoint acknowledgement and current
+lease; global readiness and interactive remain false. A primary plan can still be refused by the actual
 provider; configured planning is not a claim of Windows attachment support.
 
 ## One Host writer and one pane reader
@@ -118,8 +119,8 @@ recovered settlement are **NOT_COVERED** by these source specs. The retry
 predicate fixture does not execute the full failed-begin server transaction.
 Performance and cross-platform behavior remain unqualified.
 
-The subsequent primary input port consumes independent lease and native
-revision/fence checks in source. Next work must qualify it and implement actual
-provider resize, then migrate Caret's current launch and cleanup registry
+The subsequent primary input and Linux geometry ports consume independent
+leases and native/provider fences in source. Next work must qualify those
+effects, then migrate Caret's current launch and cleanup registry
 through the qualified lifecycle. Windows needs its real Docker
 attach broker loop. Existing Caret `--container` behavior remains in place.

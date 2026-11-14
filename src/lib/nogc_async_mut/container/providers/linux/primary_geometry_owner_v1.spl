@@ -1,0 +1,159 @@
+# One incremental owned exchange. No helper, exec route, retry, or scheduler.
+use std.common.contracts.container.primary_geometry_v1.*
+use std.common.contracts.container.primary_attach_v1.ContainerPrimaryAttachPlanV1
+use std.nogc_async_mut.container.providers.linux.installed_policy_v3.*
+use std.nogc_async_mut.container.providers.linux.installed_observer_v3.linux_oci_installed_correlate_v3
+use std.nogc_async_mut.container.providers.linux.engine_policy_v1.LinuxOciEngineObservationV1
+use std.nogc_async_mut.container.providers.linux.engine_exec_http_v3.linux_engine_info_http_request_v3
+use std.nogc_async_mut.container.providers.linux.primary_geometry_http_v1.*
+use std.nogc_sync_mut.io.local_ipc_v1.*
+use std.nogc_sync_mut.io.time_ops.{time_sample_monotonic_nanos_or_failure, time_sample_unix_micros_or_failure}
+
+pub struct LinuxPrimaryGeometryTurnV1:
+    owner: LinuxPrimaryGeometryOwnerV1
+    phase: text
+    disposition: text
+    cleanup_pending: bool
+    error: text
+
+pub fn linux_primary_geometry_step_deadline_v1(now: i64, expires: i64, budget: i64) -> Result<i64, text>:
+    if now <= 0 or expires <= now or budget < 1 or budget > 25 or now > 9223372036854775807 - budget:
+        return Err("primary-geometry-deadline")
+    Ok(if now + budget < expires: now + budget else: expires)
+
+pub fn linux_primary_geometry_same_peer_v1(left: LocalUnixPeerV1, right: LocalUnixPeerV1) -> bool:
+    left.uid == right.uid and left.gid == right.gid and left.pid == right.pid and
+        left.socket_device == right.socket_device and left.socket_inode == right.socket_inode
+
+pub fn linux_primary_geometry_failure_disposition_v1(attempted: bool, previous: text) -> text:
+    if previous == "acknowledged": "acknowledged" else: if attempted: "unknown" else: "rejected"
+
+pub class LinuxPrimaryGeometryOwnerV1:
+    plan: ContainerPrimaryAttachPlanV1
+    request: ContainerPrimaryGeometryRequestV1
+    policy: LinuxOciInstalledPolicyV3
+    baseline: LinuxOciEngineObservationV1
+    connection: LocalUnixConnectionV1? = nil
+    peer: LocalUnixPeerV1? = nil
+    service_peer: LocalUnixPeerV1? = nil
+    exchange: text = "info"
+    stage: text = "connect"
+    outgoing: [u8] = []
+    offset: i64 = 0
+    wire: [u8] = []
+    # Set before invoking the first resize send, not after receiving its receipt.
+    resize_attempted: bool = false
+    disposition: text = "pending"
+    error: text = ""
+
+impl LinuxPrimaryGeometryOwnerV1:
+    fn _turn() -> LinuxPrimaryGeometryTurnV1:
+        LinuxPrimaryGeometryTurnV1(self, self.stage, self.disposition, self.connection != nil, self.error)
+
+    me _fail(reason: text):
+        self.error = reason
+        self.disposition = linux_primary_geometry_failure_disposition_v1(self.resize_attempted, self.disposition)
+        self.stage = "cleanup"
+
+    # Cleanup is allowed after authority expiry. It never opens or sends again.
+    pub me cancel(reason: text) -> LinuxPrimaryGeometryTurnV1:
+        if self.stage != "done": self._fail(reason)
+        self.close()
+
+    pub me close() -> LinuxPrimaryGeometryTurnV1:
+        if self.connection != nil:
+            val closed = local_unix_close_v1(self.connection.unwrap())
+            self.connection = closed.owner
+            if closed.error != "" or not closed.closed or closed.owner != nil:
+                val reason = if self.error != "": self.error else:
+                    if closed.error != "": closed.error else: "primary-geometry-close-unconfirmed"
+                self._fail(reason)
+                return self._turn()
+        if self.stage == "cleanup" or self.disposition != "pending": self.stage = "done"
+        elif self.exchange == "info":
+            self.exchange = "inspect"
+            self.stage = "connect"
+            self.outgoing = linux_primary_geometry_http_request_v1("inspect", self.plan.runtime.native_id, 0, 0).unwrap()
+        elif self.exchange == "inspect":
+            self.exchange = "resize"
+            self.stage = "connect"
+            self.outgoing = linux_primary_geometry_http_request_v1("resize", self.plan.runtime.native_id,
+                self.request.columns, self.request.rows).unwrap()
+        else: self.stage = "done"
+        self.offset = 0
+        self.wire = []
+        self._turn()
+
+    # Caller refreshes the live issuer/adoption before EACH step. The transport
+    # checks this fixed monotonic expiry at every actual send under its slot lock.
+    pub me step(budget_ms: i64) -> LinuxPrimaryGeometryTurnV1:
+        if self.stage == "done": return self._turn()
+        if self.stage == "cleanup" or self.stage == "close": return self.close()
+        val now = time_sample_monotonic_nanos_or_failure() / 1000000
+        val deadline = linux_primary_geometry_step_deadline_v1(now, self.request.lease.expires_monotonic_ms, budget_ms)
+        if deadline.is_err():
+            self._fail(deadline.unwrap_err())
+            return self._turn()
+        var io_error = ""
+        if self.stage == "connect":
+            val connected = local_unix_connect_v1(self.policy.socket_path, self.policy.expected_service_uid, deadline.unwrap())
+            self.connection = connected.owner
+            self.peer = connected.peer
+            io_error = connected.error
+            if io_error == "":
+                if self.connection == nil or self.peer == nil: io_error = "primary-geometry-connect-unconfirmed"
+                elif self.service_peer != nil and not linux_primary_geometry_same_peer_v1(self.service_peer.unwrap(), self.peer.unwrap()):
+                    io_error = "primary-geometry-peer-changed"
+                else: self.stage = "write"
+        elif self.stage == "write":
+            val remaining = self.outgoing.len() - self.offset
+            val maximum = if remaining < 65536: remaining else: 65536
+            if self.exchange == "resize": self.resize_attempted = true
+            val written = local_unix_write_some_v1(self.connection.unwrap(), self.outgoing, self.offset, maximum, deadline.unwrap())
+            self.connection = Some(written.owner)
+            io_error = written.error
+            if written.accepted_bytes < 0 or written.accepted_bytes > maximum:
+                io_error = "primary-geometry-write-unconfirmed"
+            else:
+                self.offset = self.offset + written.accepted_bytes
+                if self.offset == self.outgoing.len(): self.stage = "read"
+                elif written.accepted_bytes == 0 and io_error == "": io_error = "primary-geometry-no-write-progress"
+        elif self.stage == "read":
+            val remaining = 2113537 - self.wire.len()
+            val read = local_unix_read_v1(self.connection.unwrap(), if remaining < 65536: remaining else: 65536, deadline.unwrap())
+            self.connection = Some(read.owner)
+            for byte in read.bytes: self.wire.push(byte)
+            io_error = read.error
+            if self.wire.len() > 2113536: io_error = "primary-geometry-response-bound"
+            if io_error == "" and read.eof:
+                if self.exchange == "info":
+                    val observed = linux_oci_installed_correlate_v3(self.policy, self.baseline, self.peer.unwrap(),
+                        self.wire, time_sample_unix_micros_or_failure() / 1000)
+                    if observed.is_err(): io_error = observed.unwrap_err()
+                    else: self.service_peer = Some(observed.unwrap().peer)
+                else:
+                    val decoded = linux_primary_geometry_http_decode_v1(self.exchange, self.wire)
+                    if decoded.is_err(): io_error = decoded.unwrap_err()
+                    elif self.exchange == "inspect":
+                        val checked = linux_primary_geometry_inspect_match_v1(decoded.unwrap(), self.plan.runtime)
+                        if checked.is_err(): io_error = checked.unwrap_err()
+                    else: self.disposition = "acknowledged"
+                if io_error == "": self.stage = "close"
+            elif io_error == "" and read.bytes.len() == 0: io_error = "primary-geometry-no-read-progress"
+        else: io_error = "primary-geometry-stage-invalid"
+        # Only an ordinary read timeout can continue the same retained exchange.
+        # An ambiguous write receipt never sends that prefix a second time.
+        if io_error == "local_unix_timeout" and self.stage == "read" and
+                time_sample_monotonic_nanos_or_failure() / 1000000 < self.request.lease.expires_monotonic_ms:
+            return self._turn()
+        if io_error != "": self._fail(io_error)
+        self._turn()
+
+pub fn linux_primary_geometry_new_v1(plan: ContainerPrimaryAttachPlanV1,
+        request: ContainerPrimaryGeometryRequestV1, policy: LinuxOciInstalledPolicyV3,
+        baseline: LinuxOciEngineObservationV1) -> Result<LinuxPrimaryGeometryOwnerV1, text>:
+    if plan.terminal_mode != "tty": return Err("primary-geometry-tty-required")
+    container_primary_geometry_request_check_v1(request, time_sample_monotonic_nanos_or_failure() / 1000000)?
+    val checked = linux_primary_geometry_http_request_v1("resize", plan.runtime.native_id, request.columns, request.rows)?
+    Ok(LinuxPrimaryGeometryOwnerV1(plan: plan, request: request, policy: policy, baseline: baseline,
+        outgoing: linux_engine_info_http_request_v3()))
