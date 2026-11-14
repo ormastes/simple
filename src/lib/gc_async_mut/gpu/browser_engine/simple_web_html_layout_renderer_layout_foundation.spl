@@ -765,6 +765,14 @@ fn form_control_label_width_px(st: Style, label: text) -> i32:
     fractional width."""
     if label.len() == 0:
         return 0
+    if st.resolved_font_identity == "" or st.resolved_font_width <= 0:
+        # The style stage resolved no face for this run (font-less host, or a
+        # lane that lays out without vector fonts): keep the bitmap-cell
+        # estimate every other width in that lane uses, and do not reach for
+        # the font resolver from layout.
+        val glyph_w = style_char_w(st)
+        val ink_w = if glyph_w > 1: glyph_w - 1 else: glyph_w
+        return (text_cell_width(label) as i32) * ink_w
     var num = st.font_size
     var den = 1
     if st.font_size == FORM_CONTROL_UA_FONT_TRUNCATED_PX:
@@ -1113,6 +1121,10 @@ fn _lay_intrinsic_text_width_inner(nodes: [HNode], styles: [Style], child_index:
         c = child_index.next_sibling[c]
     if nodes[i].tag != "#text":
         width = width + styles[i].pad_l + styles[i].pad_r + styles[i].border_l + styles[i].border_r
+    if nodes[i].tag == "button":
+        # The label is painted at the truncated 13 px control size but Chrome
+        # sizes the button from it at 13.3333 px.
+        width = width + form_control_button_label_correction_px(nodes, styles, child_index, i)
     out_widths[i] = width
     IntrinsicWidthResult(width: width, widths: out_widths)
 
@@ -1157,6 +1169,10 @@ fn _lay_flex_item_max_content_width_inner(nodes: [HNode], styles: [Style], child
         c = child_index.next_sibling[c]
     if inline_run > widest:
         widest = inline_run
+    if nodes[i].tag == "button":
+        # Same real-size label rule as `intrinsic_text_width`, for a button
+        # that is a flex / grid / table-cell item.
+        widest = widest + form_control_button_label_correction_px(nodes, styles, child_index, i)
     widest + styles[i].pad_l + styles[i].pad_r + styles[i].border_l + styles[i].border_r
 
 # Max-content width of a table CELL — CSS 2.1 §17.5.2.2's per-cell input to
