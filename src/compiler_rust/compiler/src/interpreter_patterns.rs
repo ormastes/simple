@@ -1180,6 +1180,14 @@ pub(crate) fn merge_match_arm_subject_bindings(
     let mut current = subject_place
         .and_then(|place| crate::interpreter::place::place_slot_ref(env, place).cloned())
         .unwrap_or_else(|| subject_fallback.clone());
+    // The arm itself stored a new value into the subject place (e.g.
+    // `case Some(cur): var s = cur; s.xs.push(x); g = Some(s)`). That explicit
+    // store is the newer truth: merging the stale payload binding's containers
+    // over it would rewind the store. See
+    // doc/08_tracking/bug/executable_authority_registry_slots_lost_on_store_2026-11-15.md.
+    if subject_place.is_some() && current != *subject_fallback {
+        return;
+    }
     let mut changed = false;
     for (name, steps) in &paths {
         let Some((_, binding)) = binding_values.iter().find(|(n, _)| n == name) else {
@@ -1326,6 +1334,44 @@ mod tests {
     // Each asserts a VALUE, not just that an arm was taken: a test that only
     // checked "the Some arm fired" would pass even if the binding were garbage,
     // which is exactly the mistake the original report made about the JIT.
+
+    /// An arm that copies the payload, grows it, and stores it back into the
+    /// matched global must keep the store: the post-arm payload merge must not
+    /// overwrite it with the stale binding's (empty) array.
+    #[test]
+    fn match_arm_store_into_subject_global_is_not_rewound_by_payload_merge() {
+        let src = r#"
+struct S:
+    n: i64
+    xs: [i64]
+
+var g: S? = nil
+
+fn reset():
+    g = Some(S(n: 0, xs: []))
+
+fn add(x: i64):
+    match g:
+        case Some(cur):
+            var s = cur
+            s.xs.push(x)
+            s.n = s.n + 1
+            g = Some(s)
+        case None:
+            pass
+
+fn len_of() -> i64:
+    match g:
+        case Some(c): c.xs.len() * 10 + c.n
+        case None: -1
+
+reset()
+add(5)
+add(6)
+main = len_of() - 22
+"#;
+        assert_eq!(run(src), 0);
+    }
 
     #[test]
     fn some_pattern_matches_bare_value_at_nullable_param_and_binds_it() {

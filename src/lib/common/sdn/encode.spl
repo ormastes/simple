@@ -133,29 +133,39 @@ fn _sdn_enc_is_int(s: text) -> bool:
     true
 
 
+# Linear: unescaped runs are copied as one slice and all pieces joined once.
+# Appending per byte (`out = out + ch`) re-copied the whole prefix every
+# step — quadratic time and memory, OOM-killed on a 2 MB string
+# (doc/08_tracking/bug/sdn_encode_escape_quadratic_2mb_string_2026-11-15.md).
 fn _sdn_enc_escape(s: text) -> text:
-    var out = ""
+    val n = s.byte_len()
+    var parts: [text] = []
+    var run_start = 0
     var i = 0
-    while i < s.byte_len():
-        val ch = s.substring(i, i + 1)
-        if ch == "\\":
-            out = out + "\\\\"
-        else:
-            if ch == "\"":
-                out = out + "\\\""
-            else:
-                if ch == "\n":
-                    out = out + "\\n"
-                else:
-                    if ch == "\t":
-                        out = out + "\\t"
-                    else:
-                        if ch == "\r":
-                            out = out + "\\r"
-                        else:
-                            out = out + ch
+    while i < n:
+        val b = s.byte_at(i)
+        var esc = ""
+        if b == 92:
+            esc = "\\\\"
+        elif b == 34:
+            esc = "\\\""
+        elif b == 10:
+            esc = "\\n"
+        elif b == 9:
+            esc = "\\t"
+        elif b == 13:
+            esc = "\\r"
+        if esc != "":
+            if i > run_start:
+                parts.push(s.substring(run_start, i))
+            parts.push(esc)
+            run_start = i + 1
         i = i + 1
-    out
+    if run_start == 0:
+        return s
+    if n > run_start:
+        parts.push(s.substring(run_start, n))
+    parts.join("")
 
 # ---- key ordering ----
 
