@@ -10,9 +10,22 @@ Evidence retained at `/tmp/xray-resident-map-probe-20261114`: first attempt reje
 
 The C adapter passes Clang 18 syntax validation only. Its new dispatcher still requires real native event, loss, lifecycle, register-preservation and disassembly tests. The separate thread-header fixture proves actual packed admission plus two-thread attachment only; it does not establish runtime hook/provider integration.
 
-Remaining work: complete the actual ELF snapshot leaf and its Simple caller; finish singleton `TraceObserverV1` session ownership and allocator accounting; wire typed runtime options and runtime-ready startup; test a real Simple-generated instrumented image through the normal driver/facade. The cold metadata reservation in the image wrapper is provisional and requires actual runtime-carrier memory qualification; it is not a proved process-memory bound. No external-writer immutability, hot unload, task-local spans, cross-platform support, or full feature completion is claimed.
+The actual ELF snapshot leaf, Simple caller and singleton session source are now integrated. Remaining work: qualify session allocation and lifecycle, complete typed runtime-option/readiness integration, and test a real Simple-generated instrumented image through the normal driver/facade. The cold metadata reservation in the image wrapper is provisional and requires actual runtime-carrier memory qualification; it is not a proved process-memory bound. No external-writer immutability, hot unload, task-local spans, cross-platform support, or full feature completion is claimed.
 
 
 The first changed-adapter check did not execute a binary: Clang 23 rejected deprecated `ATOMIC_VAR_INIT` under `-Werror`. The initializer now uses ordinary C atomic aggregate constants, accepted by Astra as a protocol-preserving source change. The first launch wrapper also failed to stop after its memory precheck rejected the run; this wrapper error was reported and corrected. A later separate precheck returned failure with 31,232,336 KiB available, and no compiler ran. Native retry requires the root owner's 36 GiB admission threshold.
 
 The actual Linux image locator passed 33 present-image and three absent-image checks on native AArch64 with LLVM 23. That evidence is separate from the new manual Linux x64/LLVM 18 workflow, which has not executed. The singleton Simple session candidate remains source-only and requires its public admission entry to reject every unqualified profile; a private candidate name is not authority to activate it.
+
+
+## Next end-to-end qualification route
+
+Public `prepare` and `start` now consult one closed qualification authority before native control acquisition. The candidate profile string cannot authorize activation. This is a temporary safety gate, not the completed feature.
+
+1. Freeze an integrated compiler source containing semantic-row emission, actual runtime link inputs, typed thread-runtime option and post-initializer readiness marker. Build/admit that producer through the bootstrap owner; the older producer's `--xray` rejection cannot exercise this source.
+2. Compile a small real Simple application with a selected callee through the normal LLVM driver. Retain command/receipt, LLVM instrumentation and semantic rows, GNU build identity, linked adapter/runtime objects, and executable identity. Check its arguments/results before interpreting trace evidence.
+3. Exercise the actual session implementation with validated main-image metadata and an owner-established startup quiescent handoff. The private qualification route must use the same decoder, allocation, publication, patch, collector and drain implementations; it must not substitute aliases, synthetic IDs or hand-edited IR. Runtime-ready alone is not that handoff.
+4. Qualify the resident handler ABI and bounded allocation on that target, including precreated worker attachment, restart at cold task roots, loss and stop/drain races. Establish module-global initialization ownership and actual Simple metadata-carrier memory costs.
+5. Replace the closed authority only for the resulting qualified target/toolchain/profile, using the real main-image registration and owned quiescence state. Repeat the application operator scenario through public `TraceObserverV1`: prepare, start, poll canonical transitions/edges, stop, drain and release. Unsupported profiles and forged handles must still fail explicitly.
+
+Steps 1–5 are pending. The locator C fixture, projected map tests and source reviews do not substitute for this final public-facade scenario. LLVM stage 1 completion remains separate from native Linux stage 2, Windows stage 3, folder-policy consumers, and the broader visibility/accessor/plugin plan.
