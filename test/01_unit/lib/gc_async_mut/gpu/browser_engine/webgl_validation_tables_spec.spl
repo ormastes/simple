@@ -1,0 +1,183 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-BROWSER_ENGINE
+# @cover src/lib/gc_async_mut/gpu/browser_engine/webgl_context.spl 5%
+# @tag: unit, browser_engine, webgl
+#
+# The pure validation tables behind the WebGL context: which enum values a
+# call accepts and how many bytes a pixel upload needs. Every number below is
+# the Khronos OpenGL ES 2.0 / WebGL 1.0 enum value or the UNPACK_ALIGNMENT row
+# rule written out by hand (e.g. TRIANGLES = 4, UNSIGNED_SHORT = 0x1403 = 5123,
+# CONSTANT_COLOR = 0x8001 = 32769), so a renumbered or dropped table entry in
+# the implementation fails here instead of silently rejecting valid calls.
+
+use std.spec.{describe, context, it, expect}
+use std.gc_async_mut.gpu.browser_engine.webgl_context.{
+    webgl_is_supported_context_name, webgl_context_version_for_name,
+    webgl_vertex_attrib_type_bytes, webgl_valid_draw_mode, webgl_valid_clear_mask,
+    webgl_valid_depth_func, webgl_valid_blend_equation,
+    webgl_blend_factor_uses_constant_color, webgl_blend_factor_uses_constant_alpha,
+    webgl_blend_factor_mixes_constant_color_and_alpha,
+    webgl_power_of_two, webgl_clamp_f64,
+    webgl_texture_format_bytes, webgl_texture_pixel_bytes,
+    webgl_aligned_row_stride, webgl_required_texture_bytes,
+    webgl_glsl_type_enum, webgl_clean_glsl_name
+}
+
+describe "WebGL validation tables":
+
+    context "context names":
+
+        it "accepts the three canvas context ids case-insensitively":
+            expect(webgl_is_supported_context_name("webgl")).to_equal(true)
+            expect(webgl_is_supported_context_name("experimental-webgl")).to_equal(true)
+            expect(webgl_is_supported_context_name("WebGL2")).to_equal(true)
+
+        it "rejects other context ids":
+            expect(webgl_is_supported_context_name("2d")).to_equal(false)
+            expect(webgl_is_supported_context_name("webgpu")).to_equal(false)
+            expect(webgl_is_supported_context_name("webgl3")).to_equal(false)
+
+        it "maps names to API versions":
+            expect(webgl_context_version_for_name("webgl")).to_equal(1)
+            expect(webgl_context_version_for_name("experimental-webgl")).to_equal(1)
+            expect(webgl_context_version_for_name("webgl2")).to_equal(2)
+            expect(webgl_context_version_for_name("2d")).to_equal(0)
+
+    context "vertex attribute component sizes":
+
+        it "sizes BYTE/UNSIGNED_BYTE, SHORT/UNSIGNED_SHORT and FLOAT":
+            expect(webgl_vertex_attrib_type_bytes(5120)).to_equal(1)
+            expect(webgl_vertex_attrib_type_bytes(5121)).to_equal(1)
+            expect(webgl_vertex_attrib_type_bytes(5122)).to_equal(2)
+            expect(webgl_vertex_attrib_type_bytes(5123)).to_equal(2)
+            expect(webgl_vertex_attrib_type_bytes(5126)).to_equal(4)
+
+        it "reports zero for a type that is not a WebGL 1 attribute type":
+            expect(webgl_vertex_attrib_type_bytes(5130)).to_equal(0)
+            expect(webgl_vertex_attrib_type_bytes(0)).to_equal(0)
+
+    context "draw, clear and depth enums":
+
+        it "accepts POINTS through TRIANGLE_FAN only":
+            var accepted = 0
+            var mode = 0
+            while mode <= 6:
+                if webgl_valid_draw_mode(mode):
+                    accepted = accepted + 1
+                mode = mode + 1
+            expect(accepted).to_equal(7)
+            expect(webgl_valid_draw_mode(7)).to_equal(false)
+            expect(webgl_valid_draw_mode(-1)).to_equal(false)
+
+        it "accepts any non-empty combination of the three buffer bits":
+            expect(webgl_valid_clear_mask(16384)).to_equal(true)
+            expect(webgl_valid_clear_mask(256)).to_equal(true)
+            expect(webgl_valid_clear_mask(1024)).to_equal(true)
+            expect(webgl_valid_clear_mask(17664)).to_equal(true)
+
+        it "rejects an empty mask and stray bits":
+            expect(webgl_valid_clear_mask(0)).to_equal(false)
+            expect(webgl_valid_clear_mask(1)).to_equal(false)
+            expect(webgl_valid_clear_mask(16385)).to_equal(false)
+
+        it "accepts NEVER through ALWAYS as depth functions":
+            expect(webgl_valid_depth_func(512)).to_equal(true)
+            expect(webgl_valid_depth_func(513)).to_equal(true)
+            expect(webgl_valid_depth_func(515)).to_equal(true)
+            expect(webgl_valid_depth_func(519)).to_equal(true)
+            expect(webgl_valid_depth_func(520)).to_equal(false)
+            expect(webgl_valid_depth_func(511)).to_equal(false)
+
+    context "blend state":
+
+        it "accepts FUNC_ADD, FUNC_SUBTRACT and FUNC_REVERSE_SUBTRACT":
+            expect(webgl_valid_blend_equation(32774)).to_equal(true)
+            expect(webgl_valid_blend_equation(32778)).to_equal(true)
+            expect(webgl_valid_blend_equation(32779)).to_equal(true)
+            expect(webgl_valid_blend_equation(770)).to_equal(false)
+
+        it "classifies constant-colour and constant-alpha factors":
+            expect(webgl_blend_factor_uses_constant_color(32769)).to_equal(true)
+            expect(webgl_blend_factor_uses_constant_color(32770)).to_equal(true)
+            expect(webgl_blend_factor_uses_constant_color(32771)).to_equal(false)
+            expect(webgl_blend_factor_uses_constant_alpha(32771)).to_equal(true)
+            expect(webgl_blend_factor_uses_constant_alpha(32772)).to_equal(true)
+            expect(webgl_blend_factor_uses_constant_alpha(770)).to_equal(false)
+
+        it "flags the WebGL-forbidden mix of constant colour and constant alpha":
+            expect(webgl_blend_factor_mixes_constant_color_and_alpha(32769, 32771, 1, 0)).to_equal(true)
+            expect(webgl_blend_factor_mixes_constant_color_and_alpha(770, 771, 32770, 32772)).to_equal(true)
+
+        it "allows constant colour alone, constant alpha alone and neither":
+            expect(webgl_blend_factor_mixes_constant_color_and_alpha(32769, 32770, 1, 0)).to_equal(false)
+            expect(webgl_blend_factor_mixes_constant_color_and_alpha(32771, 32772, 1, 0)).to_equal(false)
+            expect(webgl_blend_factor_mixes_constant_color_and_alpha(770, 771, 1, 0)).to_equal(false)
+
+    context "numeric helpers":
+
+        it "recognises powers of two":
+            expect(webgl_power_of_two(1)).to_equal(true)
+            expect(webgl_power_of_two(64)).to_equal(true)
+            expect(webgl_power_of_two(4096)).to_equal(true)
+
+        it "rejects zero, negatives and non-powers":
+            expect(webgl_power_of_two(0)).to_equal(false)
+            expect(webgl_power_of_two(-8)).to_equal(false)
+            expect(webgl_power_of_two(100)).to_equal(false)
+            expect(webgl_power_of_two(4095)).to_equal(false)
+
+        it "clamps to a closed range":
+            expect(webgl_clamp_f64(1.5, 0.0, 1.0)).to_equal(1.0)
+            expect(webgl_clamp_f64(-0.25, 0.0, 1.0)).to_equal(0.0)
+            expect(webgl_clamp_f64(0.375, 0.0, 1.0)).to_equal(0.375)
+
+    context "pixel upload sizes":
+
+        it "sizes RGB and RGBA unsigned-byte pixels":
+            expect(webgl_texture_format_bytes(6407)).to_equal(3)
+            expect(webgl_texture_format_bytes(6408)).to_equal(4)
+            expect(webgl_texture_format_bytes(6406)).to_equal(0)
+            expect(webgl_texture_pixel_bytes(6407, 5121)).to_equal(3)
+            expect(webgl_texture_pixel_bytes(6408, 5121)).to_equal(4)
+
+        it "sizes the packed 16-bit pixel types for their own format only":
+            expect(webgl_texture_pixel_bytes(6407, 33635)).to_equal(2)
+            expect(webgl_texture_pixel_bytes(6408, 32819)).to_equal(2)
+            expect(webgl_texture_pixel_bytes(6408, 32820)).to_equal(2)
+            expect(webgl_texture_pixel_bytes(6408, 33635)).to_equal(0)
+            expect(webgl_texture_pixel_bytes(6407, 32819)).to_equal(0)
+
+        it "pads a row up to UNPACK_ALIGNMENT":
+            expect(webgl_aligned_row_stride(3, 3, 4)).to_equal(12)
+            expect(webgl_aligned_row_stride(5, 3, 4)).to_equal(16)
+            expect(webgl_aligned_row_stride(4, 4, 4)).to_equal(16)
+            expect(webgl_aligned_row_stride(1, 1, 8)).to_equal(8)
+            expect(webgl_aligned_row_stride(5, 3, 1)).to_equal(15)
+
+        it "needs no bytes for an empty image and -1 for invalid input":
+            expect(webgl_required_texture_bytes(0, 8, 4, 4)).to_equal(0)
+            expect(webgl_required_texture_bytes(8, 0, 4, 4)).to_equal(0)
+            expect(webgl_required_texture_bytes(-1, 8, 4, 4)).to_equal(-1)
+            expect(webgl_required_texture_bytes(8, 8, 0, 4)).to_equal(-1)
+            expect(webgl_required_texture_bytes(8, 8, 4, 0)).to_equal(-1)
+
+        it "needs width*height*bpp when rows are already aligned":
+            expect(webgl_required_texture_bytes(4, 4, 4, 4)).to_equal(64)
+            expect(webgl_required_texture_bytes(1, 1, 4, 4)).to_equal(4)
+
+    context "GLSL declarations":
+
+        it "maps GLSL type names to active-info enums":
+            expect(webgl_glsl_type_enum("float")).to_equal(5126)
+            expect(webgl_glsl_type_enum("int")).to_equal(5124)
+            expect(webgl_glsl_type_enum("bool")).to_equal(35670)
+            expect(webgl_glsl_type_enum("bvec2")).to_equal(35671)
+            expect(webgl_glsl_type_enum("vec2")).to_equal(35664)
+            expect(webgl_glsl_type_enum("vec3")).to_equal(35665)
+            expect(webgl_glsl_type_enum("vec4")).to_equal(35666)
+            expect(webgl_glsl_type_enum("mat4")).to_equal(35676)
+            expect(webgl_glsl_type_enum("sampler2D")).to_equal(35678)
+
+        it "strips an array suffix and surrounding blanks from a declarator":
+            expect(webgl_clean_glsl_name(" u_lights[4] ")).to_equal("u_lights")
+            expect(webgl_clean_glsl_name("a_position")).to_equal("a_position")
