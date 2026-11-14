@@ -44,10 +44,14 @@ high-water measurement.
 
 ## Qualification remains open
 
-- Public capabilities advertise no admitted backend/profile. The private
-  candidate requires `llvm-resident-candidate-v1`, dynamic instrumentation,
-  raw edges, and caller-established quiescence. Paired spans/live patching are
-  rejected. No arbitrary plugin callback runs in a hook.
+- `observer_resident_admission_v1.spl` is the shared public authority.
+  Capabilities advertise no admitted backend/profile; both public prepare and
+  start return UnsupportedProfile before touching native/runtime state.
+  The former candidate profile string no longer authorizes anything. Start
+  also requires a runtime-owned quiescent handoff, currently explicitly
+  unavailable. Neither runtime readiness nor a config enum proves quiescence.
+  The private owner mechanisms remain source candidates with dynamic/raw-edge
+  restrictions; no public route can invoke them to activate instrumentation.
 - Native integration and compiler-generated ABI execution have not run for
   these files. No native build is authorized while the concurrent bootstrap
   holds its memory reservation.
@@ -66,6 +70,10 @@ high-water measurement.
 Focused allocation-budget specs cover complete layout accounting, extreme
 unsigned inputs and per-generation bounds. They are source candidates until
 run by an admitted self-hosted tool. Astra accepted the corrected source-only
-checkpoint with public admission closed, explicitly retaining the initializer
+checkpoint under an incorrect assumption that the candidate route was private.
+Follow-up review found the callable public profile-string bypass; the shared
+closed admission authority above corrects it. Tests now exercise the actual
+public prepare/start refusal for the former magic profile and guessed handles.
+The checkpoint explicitly retains the initializer
 ownership, actual quiescence and native qualification gaps. No release/merge
 readiness is claimed.

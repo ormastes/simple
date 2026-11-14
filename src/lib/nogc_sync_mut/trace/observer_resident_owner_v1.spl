@@ -1,7 +1,9 @@
-# Process singleton control owner. This candidate is linked only by the private
-# LLVM qualification route; public backend admission remains closed. All calls
-# enter the native nonblocking control guard before reading module state.
+# Process singleton control owner with public candidate discovery factories.
+# Factories may register the live image; public prepare/start refuse activation
+# through the shared closed admission owner before entering native state.
+# Admitted cold operations serialize before reading mutable module state.
 use std.common.trace.observer_contract_v1.*
+use std.common.trace.observer_resident_admission_v1.*
 use std.common.trace.observer_config_v1.{trace_config_validate_v1}
 use std.common.trace.observer_event_codec_v1.{trace_event_decode_v1}
 use std.common.trace.xray_llvm_semantic_map_v1.*
@@ -71,7 +73,6 @@ impl TraceResidentOwnerV1:
             return Err(TraceFailureV1.InstrumentationAbsent)
         if config.consistency != TraceConsistencyV1.RawEdges or config.patch_mode != TracePatchModeV1.Quiescent or (config.event_mask & 256u64) != 0:
             return Err(TraceFailureV1.UnsupportedConsistency)
-        if config.abi_profile != "llvm-resident-candidate-v1": return Err(TraceFailureV1.UnsupportedProfile)
         if self.retained.len() >= 16 or self.retained.len() as u64 >= config.max_resident_generations:
             return Err(TraceFailureV1.ResourceExhausted)
         self.register()?
@@ -283,13 +284,10 @@ pub fn trace_resident_selection_candidate_v1(owner_name: text, keys: [text]
 
 impl TraceObserverV1 for TraceResidentObserverV1:
     fn capabilities() -> TraceCapabilitiesV1:
-        TraceCapabilitiesV1(backend: TraceBackendV1.None, target: "unqualified",
-            abi_profiles: [], event_mask: 0, live_patching: false, paired_spans: false,
-            instrumentation_present: false, max_buffer_bytes: 0, max_contexts: 0,
-            max_depth: 0, max_resident_generations: 0,
-            diagnostic: "private resident candidate; metadata carrier, ABI and runtime integration qualification pending")
+        trace_resident_capabilities_v1()
 
     me prepare(config: TraceConfigV1, selection: TraceSelectionV1) -> Result<TracePreparedV1, TraceFailureV1>:
+        trace_resident_require_qualified_v1()?
         trace_resident_enter_v1()?
         var owner = _trace_resident_owner_v1[0]
         val result = owner.prepare(config, selection)
@@ -298,6 +296,8 @@ impl TraceObserverV1 for TraceResidentObserverV1:
         result
 
     me start(prepared: TracePreparedV1) -> Result<TraceSessionV1, TraceFailureV1>:
+        trace_resident_require_qualified_v1()?
+        trace_resident_require_quiescent_handoff_v1()?
         trace_resident_enter_v1()?
         var owner = _trace_resident_owner_v1[0]
         val result = owner.start(prepared)
