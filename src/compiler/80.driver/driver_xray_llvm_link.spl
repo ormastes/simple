@@ -64,6 +64,22 @@ pub fn xray_llvm_adapter_flags_v1(target: text) -> [text]:
 pub fn xray_llvm_runtime_query_args_v1(target: text) -> [text]:
     ["--target={target}", "--print-file-name=libclang_rt.xray.a"]
 
+# LLVM 18 uses architecture-suffixed Linux archives; newer toolchains may
+# return a per-target directory containing the unsuffixed archive. Query the
+# same selected compiler and exact target, never scan ambient runtime paths.
+pub fn xray_llvm_runtime_arch_name_v1(target: text) -> Result<text, text>:
+    match target:
+        case "aarch64-unknown-linux-gnu": Ok("libclang_rt.xray-aarch64.a")
+        case "x86_64-unknown-linux-gnu": Ok("libclang_rt.xray-x86_64.a")
+        case _: Err("XRAY-E-LLVM-TARGET: unsupported runtime archive target")
+
+pub fn xray_llvm_runtime_arch_path_valid_v1(path: text, target: text) -> bool:
+    match xray_llvm_runtime_arch_name_v1(target):
+        case Err(_): false
+        case Ok(name):
+            path.starts_with("/") and path.ends_with("/" + name) and
+                not path.contains("\n") and not path.contains("\r")
+
 pub fn xray_llvm_runtime_archive_path_valid_v1(path: text) -> bool:
     path.starts_with("/") and path.ends_with("/libclang_rt.xray.a") and
         not path.contains("\n") and not path.contains("\r")
@@ -95,9 +111,20 @@ fn xray_llvm_materialize_runtime_v1(objects: [text], target: text, compiler: tex
         source: text, image_source: text, output_root: text) -> Result<[text], text>:
     val (archive_out, archive_error, archive_code) = process_run_timeout(
         compiler, xray_llvm_runtime_query_args_v1(target), 10000)
-    val archive = archive_out.trim()
-    if archive_code != 0 or not xray_llvm_runtime_archive_path_valid_v1(archive) or not is_file(archive):
-        return Err("XRAY-E-LLVM-RUNTIME: matching compiler-rt archive unavailable: {archive_error}")
+    var archive = archive_out.trim()
+    if archive_code != 0:
+        return Err("XRAY-E-LLVM-RUNTIME: compiler runtime query failed: {archive_error}")
+    if archive == "libclang_rt.xray.a":
+        val arch_name = xray_llvm_runtime_arch_name_v1(target)?
+        val (arch_out, arch_error, arch_code) = process_run_timeout(compiler,
+            ["--target={target}", "--print-file-name={arch_name}"], 10000)
+        archive = arch_out.trim()
+        if arch_code != 0 or not xray_llvm_runtime_arch_path_valid_v1(archive, target):
+            return Err("XRAY-E-LLVM-RUNTIME: matching architecture archive unavailable: {arch_error}")
+    elif not xray_llvm_runtime_archive_path_valid_v1(archive):
+        return Err("XRAY-E-LLVM-RUNTIME: unexpected compiler runtime archive path")
+    if not is_file(archive):
+        return Err("XRAY-E-LLVM-RUNTIME: matching compiler-rt archive file absent")
     if not is_file(source):
         return Err("XRAY-E-LLVM-SOURCE: {source} not found")
     if not is_file(image_source):
