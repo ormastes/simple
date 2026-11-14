@@ -1,9 +1,20 @@
 name: XRay Linux native locator qualification (experimental)
 
-# Explicit operator qualification only. This does not change ordinary Windows
+# Scoped Linux qualification only. This does not change ordinary Windows
 # builds or advertise production Simple observer support.
 on:
   workflow_dispatch:
+  pull_request:
+    branches: [release/1.0.0]
+    paths:
+      - .github/workflows/xray-linux-native-qualification.yml
+      - src/runtime/xray/**
+      - src/runtime/runtime_thread.c
+      - src/runtime/runtime_native.c
+      - src/runtime/runtime_memory.c
+      - test/fixtures/xray/**
+      - scripts/check/check-xray-llvm-image-locator.shs
+      - scripts/check/check-xray-thread-context-runtime.shs
 
 permissions:
   contents: read
@@ -62,5 +73,65 @@ jobs:
         with:
           name: xray-linux-x64-locator-${{ github.sha }}
           path: build/xray-image-locator/
+          if-no-files-found: warn
+          retention-days: 14
+
+  linux-x64-worker-context:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            scripts/check
+            src/runtime
+            test/fixtures/xray
+      - name: Install explicit Linux compiler
+        run: |
+          set -eu
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends clang-18
+      - name: Record checked source and tool identity
+        env:
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -eu
+          mkdir -p build/xray-thread-context-runtime
+          compiler=$(readlink -f "$(command -v clang-18)")
+          sha256sum "$compiler" > build/xray-thread-context-runtime/compiler.sha256
+          dpkg-query -W clang-18 > build/xray-thread-context-runtime/packages.txt
+          printf 'schema: xray_worker_context_ci_v1\nchecked_commit: "%s"\npr_head: "%s"\nsled_patching_qualified: false\npublic_observer_admission: false\n' "$(git rev-parse HEAD)" "$PR_HEAD" > build/xray-thread-context-runtime/provenance.sdn
+      - name: Run real worker and resident callback fixture under enforced limits
+        run: |
+          set -eu
+          status=0
+          sudo systemd-run --unit="xray-worker-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --wait --pipe --collect \
+            -p Type=exec -p "WorkingDirectory=$GITHUB_WORKSPACE" \
+            -p MemoryMax=2147483648 -p MemorySwapMax=0 \
+            -p RuntimeMaxSec=180 -p TimeoutStopSec=5 -p KillMode=control-group \
+            /bin/sh -c '
+              set -eu
+              out=build/xray-thread-context-runtime
+              IFS=: read -r hierarchy controllers group < /proc/self/cgroup
+              test "$hierarchy" = 0
+              test -z "$controllers"
+              test -n "$group"
+              cat "/sys/fs/cgroup$group/memory.max" > "$out/memory.max"
+              cat "/sys/fs/cgroup$group/memory.swap.max" > "$out/memory.swap.max"
+              test "$(cat "$out/memory.max")" = 2147483648
+              test "$(cat "$out/memory.swap.max")" = 0
+              exec env CLANG=/usr/bin/clang-18 sh scripts/check/check-xray-thread-context-runtime.shs
+            ' > build/xray-thread-context-runtime/execution.log 2>&1 || status=$?
+          cat build/xray-thread-context-runtime/execution.log
+          printf '%s\n' "$status" > build/xray-thread-context-runtime/execution.status
+          exit "$status"
+      - name: Retain worker qualification evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: xray-linux-x64-worker-context-${{ github.sha }}
+          path: build/xray-thread-context-runtime/
           if-no-files-found: warn
           retention-days: 14
