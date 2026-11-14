@@ -887,6 +887,35 @@ Tests are classified by platform compatibility:
 
 A test is shared (`# @platform: all`) when it has zero imports, uses only built-in `describe`/`context`/`it`/`expect` matchers, uses only core language features, and does NOT use file I/O, networking, threading, or timers.
 
+### Host-OS Platform Tags
+
+A spec that can only run on one host OS declares it in its header:
+
+| Tag | Runs on host |
+|-----|--------------|
+| `# @platform: windows` | Windows |
+| `# @platform: macos` | macOS |
+| `# @platform: linux` | Linux |
+| `# @platform: freebsd` | FreeBSD |
+| `# @platform: unix` | any non-Windows host |
+
+- Several OS tags (separate lines or `linux, freebsd`): runs if ANY matches.
+- Mixed with mode tags (`native`, `interpreter`, ...): BOTH must match. Mode
+  tags filter at discovery; OS tags never filter silently.
+- On a non-matching host the file is NOT run and is COUNTED: per-file
+  `PLATFORM SKIP <path> (platform: requires os=..., host=...)`, a
+  `skipped=1 reason=platform-os-mismatch` suffix on its `SPEC FILE VERDICT:`
+  line, and a `Platform-skipped: <n> file(s)` summary row. An explicitly named
+  file on the wrong host is skipped the same way and exits 0.
+- Host name comes from `std.io_runtime.host_os()`; rules live in
+  `src/lib/nogc_sync_mut/spec/platform_os.spl`
+  (spec: `test/01_unit/lib/spec/platform_os_tag_spec.spl`).
+- Do not tag specs that pick a shell per host and pass everywhere.
+- Implemented identically in every lane: the full runner
+  (`test_runner_main.spl`), the single-file/directory lane `bin/simple test
+  <file>` dispatches to (`test_runner_single.spl`), and the Rust seed runner
+  (`SIMPLE_TEST_RUNNER_RUST=1`, `driver/src/cli/test_runner/runner.rs`).
+
 ### Runtime Skip Helpers
 
 ```text
