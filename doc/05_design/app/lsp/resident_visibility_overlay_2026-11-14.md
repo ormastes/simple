@@ -87,7 +87,30 @@ JSON in the new fixtures was subject to the compiler's documented doubled-brace
 decoding. The corrected sources discriminate by lifetime and use the canonical
 JSON serializer. The native probe now includes a valid negative-version overlay.
 
-Attempt 6 is the final allowed cycle, using the same real producer, 4-GiB/300-second
-limits and retained cache after committing these fixes. No further automatic
-retry, budget increase or attempt-history reset is authorized. Native acceptance
-still requires actual probe execution and its output/exit sentinel.
+Attempt 6 used source commit `d7d9657e8f9a9e0a9fe8ad760d6207fb92f2155e`,
+the same real producer, 4-GiB/300-second limits and retained cache. It passed
+normal source admission and completed all 129 MIR/AOP modules, then stopped
+at the process-tree RSS cap after 161.265 seconds (peak sampled RSS
+4,308,099,072 bytes; exit -15). Native code generation again reported 115
+uncached modules despite the retained objects; effective native cache reuse
+has not been demonstrated. There is no executable or runtime PASS.
+
+The exact invocation, log and watchdog receipt are retained as
+`command_attempt6.txt`, `build_attempt6.log` and `build_receipt_attempt6.sdn`
+under the evidence directory above. Source roots were `src/compiler`,
+`src/app`, `src/lib` and `test/01_unit/app/lsp`; the entry was
+`test/01_unit/app/lsp/server_query_overlay_native_probe.spl`, with
+`--entry-closure --runtime-bundle core-c --threads 1` and an explicit private
+cache/output. The watchdog measured the actual descendant process tree and
+terminated only owned processes; no address-space cap or worker-memory estimate
+override was used.
+
+All six cycles are exhausted. No retry, budget increase, manual link bypass or
+attempt-history reset is authorized. Qualification remains **UNQUALIFIED**.
+Future qualification requires an admitted producer capable of completing this
+production import closure, preserving this attempt history. Investigate native
+code-generation RSS and the failure to reuse retained objects before resuming;
+these are observed limitations, not a measured regression against a baseline.
+Native acceptance still requires actual probe execution and its output/exit
+sentinel, followed by the pending full tooling checks and request performance
+measurements. This source checkpoint remains draft-only.
