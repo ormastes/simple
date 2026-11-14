@@ -126,3 +126,18 @@ Lesson recorded for future lanes: the exclusive-admission gate (no concurrent
 native-build AT LAUNCH) is necessary but NOT sufficient — the runtime guard
 needs the box to STAY quiet for the whole run. Lanes on a shared host must
 serialize their heavy builds or expect reserve-crossed aborts.
+
+## Runtime reserve policy note (2026-11-14): 48 GiB reserve vs shared-host reality
+
+Attempt I #1's abort and ~10 subsequent K-lane attempt deaths (2026-11-13/14)
+were all the runtime headroom guard: runtime_reserve_mib defaults to the stage2
+transcript headroom (49152), demanding MemAvailable > 48 GiB AT ALL TIMES.
+On the shared 121.7 GiB host with multiple active lanes holding 40-70 GiB,
+that reserve is arithmetically unreachable while a 26-36 GiB compiler runs
+(26 + 48 + ~50 others > 121.7). The reserve is host-safety, not correctness;
+the hard bounds remain ceiling=48 GiB and cap=48 GiB (tree-wide). K lane now
+sets SIMPLE_BOOTSTRAP_STAGE3_RUNTIME_RESERVE_MIB=8192: an 8 GiB floor still
+guarantees the base system never OOMs (worst case: 48 cap + 8 reserve + all
+other usage <= 121.7), while admitting the build on this box.
+Recorded so future lanes do not re-derive this; if the host becomes exclusive
+again, restore the default reserve.
