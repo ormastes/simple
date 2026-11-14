@@ -39,7 +39,44 @@ fn _structural_union_preferred_id(name: text) -> i64:
             h = 0 - h
     900000000 + (h % 100000000)
 
+pub fn hir_symbol_declaration_category_v1(symbol: HirSymbol) -> text:
+    val category = match symbol.kind:
+        case SymbolKind.Function: "function"
+        case SymbolKind.Class: "class"
+        case SymbolKind.Struct: "struct"
+        case SymbolKind.Enum: "enum"
+        case SymbolKind.Trait: "trait"
+        case SymbolKind.TypeAlias: "type_alias"
+        case SymbolKind.Const: "constant"
+        case _: ""
+    category
+
 impl SymbolTable:
+    me bind_declaration_origin_v1(id: SymbolId, owner: text, source_name: text, modifier: text, source_path: text, projection_key: text) -> Result<bool, text>:
+        if modifier == "": return Ok(false)
+        if not ["omitted", "pri", "public", "peer", "up", "internal", "package"].contains(modifier):
+            return Err("invalid source declaration modifier")
+        if source_path == "" or owner == "" or not self.symbols.has(id.id):
+            return Err("source declaration origin has no live owner")
+        val canonical_owner = _hir_symbol_owner_module(owner)
+        var symbol: HirSymbol = self.symbols[id.id]
+        # A transparent type alias can share the target's canonical SymbolId.
+        # Its binding policy must not replace the target declaration's origin.
+        if projection_key != hir_symbol_declaration_category_v1(symbol) + ":" + source_name or (symbol.name != source_name and symbol.name != owner + "." + source_name and symbol.name != canonical_owner + "." + source_name):
+            return Ok(false)
+        if _hir_symbol_owner_module(symbol.defining_module ?? "") != canonical_owner:
+            return Err("source declaration origin mismatches the symbol owner")
+        if symbol.declaration_modifier_v1 != "":
+            if symbol.declaration_modifier_v1 != modifier or symbol.declaration_source_path_v1 != source_path or symbol.declaration_projection_key_v1 != projection_key or symbol.declaration_owner_v1 != canonical_owner:
+                return Err("cannot overwrite a bound source declaration origin")
+            return Ok(true)
+        symbol.declaration_modifier_v1 = modifier
+        symbol.declaration_source_path_v1 = source_path
+        symbol.declaration_projection_key_v1 = projection_key
+        symbol.declaration_owner_v1 = canonical_owner
+        self.symbols[id.id] = symbol
+        Ok(true)
+
     me structural_union_symbol(name: text, _preferred: i64) -> SymbolId:
         """Return one module-local collision-free ID for a canonical union or
         variant identity. Preferred IDs remain byte-compatible when free.
@@ -474,7 +511,11 @@ impl SymbolTable:
                     is_mutable: sym.is_mutable,
                     defining_module: sym.defining_module,
                     builtin_method_tag: hir_builtin_method_tag(new_name),
-                    generic_param_count: sym.generic_param_count
+                    generic_param_count: sym.generic_param_count,
+                    declaration_modifier_v1: sym.declaration_modifier_v1,
+                    declaration_source_path_v1: sym.declaration_source_path_v1,
+                    declaration_projection_key_v1: sym.declaration_projection_key_v1,
+                    declaration_owner_v1: sym.declaration_owner_v1
                 )
                 self.symbols[raw] = renamed
                 if not self.exact_symbols.has(new_name):

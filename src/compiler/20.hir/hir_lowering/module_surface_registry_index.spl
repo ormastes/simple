@@ -1,11 +1,11 @@
 # Frozen registry indexes and import/export route projections.
 use compiler.common.library_mode_policy_v1.{library_mode_generic_import_v1, library_mode_import_key_v1}
 
-use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface, ModuleSurfacesByName, module_surface_allocate_generation, module_surface_export_origin_index_position}
+use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface, ModuleSurfacesByName, module_surface_allocate_generation, module_surface_export_origin_index_position, module_surface_declaration_authority_lookup_typed_v1, module_surface_authority_category_v1}
 use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_logical_name_from_path, module_surface_fold_std_alias, module_surface_package_name_from_name}
 use compiler.hir.hir_lowering.module_surface_semantic_projection.{module_surface_semantic_hex_limb, module_surface_semantic_state, module_surface_semantic_mix, module_surface_semantic_finish}
 use compiler.common.cache.native_resolution_trace.{NativeResolutionProbeV1, NativeResolutionTraceV1}
-use compiler.common.module_path_naming.{module_relative_name_from_path}
+use compiler.common.module_path_naming.{module_relative_name_from_path, module_source_relative_path}
 use std.common.crypto.sha256.{sha256_text}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 use std.nogc_sync_mut.io_runtime.{env_get_opt}
@@ -98,6 +98,26 @@ fn _module_surface_final_semantic_digest(surface: ModuleSurface) -> text:
         digest = module_surface_semantic_mix(digest, "origin-source", surface.export_origin_index.source_names[row])
         digest = module_surface_semantic_mix(digest, "origin-kind", surface.export_origin_index.resolution_kinds[row])
         i = i + 1
+    # A resolved facade retains the terminal declaration's policy. Export
+    # topology and declaration intent are separate semantic inputs; this does
+    # not promote the declaration or infer requester permission.
+    digest = module_surface_semantic_mix(digest, "authority-schema", "source-intent-v1")
+    val authority_index = surface.declaration_authority_index
+    val authority_bindings = module_surface_resolution_rows_sorted_v1(authority_index.index_by_binding.keys())
+    for binding in authority_bindings:
+        val row = authority_index.index_by_binding[binding]
+        if row < 0 or row >= authority_index.names.len() or row >= authority_index.projection_keys.len(): return ""
+        val local_name = authority_index.names[row]
+        val category = module_surface_authority_category_v1(authority_index.projection_keys[row])
+        if binding != category + "|" + local_name: return ""
+        val authority = module_surface_declaration_authority_lookup_typed_v1(authority_index, local_name, category)
+        if not authority.found: return ""
+        digest = module_surface_semantic_mix(digest, "authority-binding", binding)
+        digest = module_surface_semantic_mix(digest, "authority-owner", authority.declaring_module)
+        digest = module_surface_semantic_mix(digest, "authority-source", authority.source_name)
+        digest = module_surface_semantic_mix(digest, "authority-target", authority.projection_key)
+        digest = module_surface_semantic_mix(digest, "authority-modifier", authority.source_modifier)
+        digest = module_surface_semantic_mix(digest, "authority-path", module_source_relative_path(authority.source_path))
     module_surface_semantic_finish(digest)
 
 fn module_surface_stable_resolution_generation_v1(registry: ModuleSurfacesByName) -> text:

@@ -1,7 +1,7 @@
 use compiler.common.library_mode_policy_v1.{library_mode_import_key_v1}
 # Export-origin indexes and facade resolution.
 
-use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface, ModuleSurfaceBuilder, module_surface_name_position, ModuleSurfaceExportOriginIndex, ModuleSurfaceOriginResolution, module_surface_declaration_authority_index_put, module_surface_declaration_authority_lookup_building, module_surface_export_origin_index_empty, module_surface_export_origin_index_lookup, module_surface_export_origin_index_position, module_surface_export_origin_index_put, module_surface_validate_owner_index}
+use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface, ModuleSurfaceBuilder, module_surface_name_position, ModuleSurfaceExportOriginIndex, ModuleSurfaceOriginResolution, module_surface_declaration_authority_index_put, module_surface_declaration_authority_lookup_typed_building_v1, module_surface_export_origin_index_empty, module_surface_export_origin_index_lookup, module_surface_export_origin_index_position, module_surface_export_origin_index_put, module_surface_validate_owner_index}
 use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_package_name}
 use std.nogc_sync_mut.io_runtime.{env_get_opt}
 
@@ -456,16 +456,22 @@ impl ModuleSurfaceBuilder:
                         name_index, origin.owner_module)
                     if terminal_index >= 0 and terminal_index < self.surfaces.len():
                         val terminal_surface: ModuleSurface = self.surfaces[terminal_index]
-                        val authority = module_surface_declaration_authority_lookup_building(
-                            terminal_surface.declaration_authority_index,
-                            origin.source_name)
-                        if authority.found:
-                            val put_result = module_surface_declaration_authority_index_put(
-                                authority_surface.declaration_authority_index,
-                                local_name, authority.declaring_module,
-                                authority.source_name, authority.visibility)
-                            if put_result.is_err():
-                                return Err(put_result.unwrap_err())
+                        # Export spelling can exist in more than one namespace.
+                        # Retain each exact target; the selected resolver category
+                        # chooses the row later, never dictionary overwrite order.
+                        for category in ["function", "struct", "class", "actor", "enum", "trait", "type_alias", "constant", "bitfield", ""]:
+                            val authority = module_surface_declaration_authority_lookup_typed_building_v1(
+                                terminal_surface.declaration_authority_index,
+                                origin.source_name, category)
+                            if authority.found:
+                                val put_result = module_surface_declaration_authority_index_put(
+                                    authority_surface.declaration_authority_index,
+                                    local_name, authority.declaring_module,
+                                    authority.source_name, authority.visibility,
+                                    authority.source_modifier, authority.source_path,
+                                    authority.projection_key)
+                                if put_result.is_err():
+                                    return Err(put_result.unwrap_err())
                 authority_name_index = authority_name_index + 1
             self.surfaces[authority_surface_index] = authority_surface
             authority_surface_index = authority_surface_index + 1
