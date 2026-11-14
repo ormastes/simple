@@ -367,10 +367,17 @@ impl Lowerer {
                 }
             }
 
-            if self.dependency_import_depth == 0 {
-                if let Some(symbol_ty) = self.globals.get(&original_name).copied() {
-                    self.globals.insert(alias_name.clone(), symbol_ty);
-                }
+            // A dependency's own alias (`use m.{f as g}` inside an imported
+            // module) is private to that module. Publishing its callable
+            // metadata under the bare alias retyped the lowered module's own
+            // `g`: `crypto_text_to_bytes as text_to_bytes` (`[i64]`) in a
+            // dependency made an explicitly imported `text_to_bytes` (`[u8]`)
+            // read packed bytes as 8-byte words.
+            if self.dependency_import_depth > 0 {
+                continue;
+            }
+            if let Some(symbol_ty) = self.globals.get(&original_name).copied() {
+                self.globals.insert(alias_name.clone(), symbol_ty);
             }
             if let Some(return_ty) = self.method_return_types.get(&original_name).copied() {
                 self.method_return_types.insert(alias_name.clone(), return_ty);

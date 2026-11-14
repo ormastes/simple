@@ -1,7 +1,56 @@
 # Native: `for b in text_to_bytes(s)` yields packed 8-byte words once `app.llm_caret.agent_workspace` is in the unit
 
-Status: open
+Status: verification-pending
 Severity: P1 (native-only wrong result, silent)
+
+## Root cause (2026-11-14, lane `work/caret-native-defects-20261114`)
+
+Not the two same-signature `text_to_bytes` definitions. A dependency's
+PRIVATE function alias leaked into the importing module.
+
+`materialize_import_aliases`
+(`src/compiler_rust/compiler/src/hir/lower/import_loader.rs`) guarded only the
+`globals` row with `dependency_import_depth == 0`; `method_return_types`,
+`declared_function_returns`, the function-alias map,
+`imported_function_names`, `imported_function_value_types`, `extern_fn_names`
+and `pure_functions` were written under the bare alias name at every depth.
+Several modules in the `agent_workspace` closure do
+`use std.common.crypto.types.{crypto_text_to_bytes as text_to_bytes}` (a
+`[i64]` function), so the lowered module's own, explicitly imported
+`text_to_bytes` was retyped. Instrumented seed, call site in the probe:
+
+```
+name=text_to_bytes ... mrt=Array { element: TypeId(5) /*i64*/ } globals=Array { element: TypeId(6) /*u8*/ }
+```
+
+The call still bound the real `[u8]` function, but the for-loop / index read
+was lowered as `rt_typed_words_i64_at` over a packed byte buffer.
+
+Four-module repro (no llm_caret):
+
+```simple
+use std.common.string_core.{text_to_bytes}
+use std.common.crypto.constant_time.{black_box}   # privately aliases crypto_text_to_bytes as text_to_bytes
+
+fn main() -> i64:
+    for b in text_to_bytes("a-1"):
+        print "loop=" + b.to_i64().to_text()
+    0
+```
+
+Seed-tip `97728d94d5f`: `loop=3222881 / loop=0 / loop=0`.
+
+Fix: a dependency-depth alias publishes nothing but its type-level alias
+(which its own signatures need). Tests:
+`hir/lower/tests/fn_alias_import_scope_tests.rs` (both import orders, RED
+`["rt_typed_words_i64_at"]` -> GREEN `["rt_typed_bytes_u8_at"]`) and
+`test/01_unit/compiler/dependency_fn_alias_return_type_native_spec.spl`.
+
+Not covered: a dependency's NON-aliased same-named function still overwrites
+the bare-name return type last-wins (`Node::Function` arm, no owner claim like
+`claim_imported_enum_name`). Harmless here because both `text_to_bytes`
+definitions return `[u8]`; it is the family behind the `join_path` "2
+co-compiled definitions with 2 differing signatures" warning.
 Found: 2026-11-14, lane `work/caret-native-knob-20261114`
 Seed: `/c/dev/wt/seed-tip/simple.exe`, build-commit `97728d94d5f11890bac2e0a5e8d41ce65139047b`
 Host: Windows 11, llvm-mingw 20260922 UCRT, `SIMPLE_NATIVE_BUILD_RUST=1 SIMPLE_NATIVE_INCREMENTAL=1`
@@ -81,6 +130,10 @@ co-compiled. Not yet isolated which module flips it.
 
 ## Unblock condition
 
-The repro prints `97 / 45 / 49` natively, and
+The repro prints `97 / 45 / 49` natively (met), and
 `workspace_cli_system_spec.spl` passes 4/4 with `LLM_CARET_NATIVE_BIN` set.
 No caret-side workaround was applied.
+
+Update 2026-11-14: `attach agent-1` no longer returns `invalid_name` natively,
+but the spec is still 3/4 for a different reason, filed as
+`native_llm_caret_smux_owner_spawned_as_interpreter_of_itself_2026-11-14.md`.

@@ -1,7 +1,45 @@
 # Native `llm_caret` ignores `--config` `claude_cli.cli_path` and spawns the real `claude`
 
-Status: open
+Status: verification-pending
 Severity: P1 (native-only; a fixture-only spec reaches a real provider CLI)
+
+## Root cause (2026-11-14, lane `work/caret-native-defects-20261114`)
+
+A caret source bug, independent of the `text_to_bytes` defect.
+`parse_config_text` (`src/app/llm_caret/config.spl`) wrapped
+`trimmed.index_of(":")` in an untyped helper that pattern-matched it as an
+Option:
+
+```simple
+fn _unwrap_idx_cfg(opt) -> i64:
+    match opt:
+        Some(i): return i
+        nil: return -1
+```
+
+`text.index_of` returns a raw `i64` (`-1` on miss), not an Option
+(`doc/07_guide/quick_reference/syntax_quick_reference.md`). With a typed
+subject this is `error[SPL-PAT-001]`; the untyped parameter erased the type.
+The interpreter leniently binds `i` to the integer; the native lane matches
+`Some(i)` against the boxed integer and yields `3` for every input, hit or
+miss. Single-file repro, native:
+
+```
+any_index_of=3      # unwrap_any("provider: x".index_of(":")), expected 8
+any_missing=3       # unwrap_any(s.index_of("zz")), expected -1
+typed_index_of=8
+```
+
+So every line was split at byte 3: `cli_path: X` became key `cli`, no key
+matched, and `CLAUDE_CLI_PATH` kept its default `"claude"`.
+
+Fix: use the `i64` directly in `config.spl` and in the same helper in
+`server.spl` (`_extract_json_string`).
+
+Not covered (compiler residual, not fixed here): the native lane neither
+rejects nor falls through a `Some(i)` arm whose erased subject is a plain
+integer; it binds `3`. The interpreter binds the integer. Both lanes accept a
+program the typed checker rejects.
 Found: 2026-11-14, lane `work/caret-native-knob-20261114`
 Seed: `/c/dev/wt/seed-tip/simple.exe`, build-commit `97728d94d5f11890bac2e0a5e8d41ce65139047b`
 Host: Windows 11, llvm-mingw 20260922 UCRT

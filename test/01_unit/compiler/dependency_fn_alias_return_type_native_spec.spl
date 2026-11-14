@@ -1,0 +1,35 @@
+# Purpose and audience: regression spec for compiler maintainers. A function I
+# import by name must keep its own return type even when a module I also import
+# privately aliases a DIFFERENT function to that same name. Here
+# `std.common.crypto.constant_time` does
+# `use std.common.crypto.types.{crypto_text_to_bytes as text_to_bytes}` (a
+# `[i64]` function); the native lane leaked that private alias into this file,
+# typed my `text_to_bytes(...)` call `[i64]`, and read the packed `[u8]` buffer
+# eight bytes at a time ("a-1" -> 3222881, garbage, 0).
+# Runs under both lanes; the native verdict is the one that matters.
+# @req REQ-SSPEC-UNIT
+# Bug: doc/08_tracking/bug/native_text_to_bytes_for_loop_reads_packed_words_when_agent_workspace_linked_2026-11-14.md
+# Fix: src/compiler_rust/compiler/src/hir/lower/import_loader.rs
+#      (materialize_import_aliases keeps a dependency's function alias private).
+
+use std.spec
+use std.common.string_core.{text_to_bytes}
+use std.common.crypto.constant_time.{black_box}
+
+fn loop_values(s: text) -> text:
+    var parts: [text] = []
+    for b in text_to_bytes(s):
+        parts.push(b.to_i64().to_text())
+    parts.join("|")
+
+fn indexed_first(s: text) -> i64:
+    val bytes = text_to_bytes(s)
+    bytes[0].to_i64()
+
+describe("imported byte function next to a dependency that aliases its name"):
+    it("iterates one byte per element"):
+        assert_equal(black_box(7), 7)
+        assert_equal(loop_values("a-1"), "97|45|49")
+
+    it("indexes a single byte"):
+        assert_equal(indexed_first("a-1"), 97)
