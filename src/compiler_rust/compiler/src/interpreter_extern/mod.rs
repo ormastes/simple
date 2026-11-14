@@ -79,6 +79,7 @@ pub mod terminal;
 pub mod torch;
 pub mod atomic;
 pub mod concurrency;
+pub mod collection_capture;
 #[cfg(feature = "tui")]
 pub mod tui;
 pub mod repl;
@@ -2499,6 +2500,19 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
         "rt_thread_available_parallelism",
         concurrency::rt_thread_available_parallelism
     );
+    insert_simple!("spl_ordered_key_cmp", collection_capture::spl_ordered_key_cmp);
+    insert_simple!("spl_collection_capture_begin", collection_capture::capture_begin);
+    insert_simple!("spl_collection_capture_note_size", collection_capture::capture_note_size);
+    insert_simple!("spl_collection_capture_note_lookup", collection_capture::capture_note_lookup);
+    insert_simple!(
+        "spl_collection_capture_note_materialization",
+        collection_capture::capture_note_materialization
+    );
+    insert_simple!("spl_collection_capture_note_hash_probe", collection_capture::capture_note_hash_probe);
+    insert_simple!("spl_collection_capture_note_filter", collection_capture::capture_note_filter);
+    insert_simple!("spl_collection_capture_note_loop", collection_capture::capture_note_loop);
+    insert_simple!("spl_collection_capture_finish", collection_capture::capture_finish);
+    insert_simple!("spl_collection_capture_abort", collection_capture::capture_abort);
     insert_simple!("spl_thread_cpu_count", concurrency::rt_thread_available_parallelism);
     insert_simple!(
         "spl_thread_pool_spawn_worker",
