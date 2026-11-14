@@ -1,7 +1,9 @@
 # Stage 2: implicit `-> T?` tail return takes the scalar-sink arm (2026-11-15)
 
-Status: second source fix committed on `work/p3-cranelift-option-f64-20261115`.
-Native confirmation still needs a Stage 2 built from that branch.
+Status: fixed by `fd5056ec44e`. Confirmed natively with a Stage 2 built from
+that commit: `test/fixtures/native_option_f64_enum_payload` and
+`test/fixtures/native_option_scalar_tail_siblings` build and run on cranelift
+and llvm with stdout equal to the seed interpreter's.
 
 ## Symptom
 
