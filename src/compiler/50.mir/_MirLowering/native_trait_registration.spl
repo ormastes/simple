@@ -109,7 +109,7 @@ impl MirLowering:
             val concrete_result = self.native_trait_signature_type_key(concrete.result)
             val result_param = self.native_trait_optional_param_payload(slot.result)
             if result_param != "":
-                val bound_result = self.native_trait_bind_optional_param(result_param, concrete_result, bound_names, bound_keys)
+                val bound_result = self.native_trait_bind_optional_param(result_param, concrete.result, bound_names, bound_keys)
                 if bound_result != "": return "method {method}: return type {bound_result}"
                 bound_names.push(result_param)
                 bound_keys.push(concrete_result)
@@ -125,7 +125,7 @@ impl MirLowering:
                 val concrete_key = self.native_trait_signature_type_key(concrete.params[argument])
                 val argument_param = self.native_trait_optional_param_payload(slot.params[argument])
                 if argument_param != "":
-                    val bound_argument = self.native_trait_bind_optional_param(argument_param, concrete_key, bound_names, bound_keys)
+                    val bound_argument = self.native_trait_bind_optional_param(argument_param, concrete.params[argument], bound_names, bound_keys)
                     if bound_argument != "": return "method {method} parameter {argument}: type {bound_argument}"
                     bound_names.push(argument_param)
                     bound_keys.push(concrete_key)
@@ -374,17 +374,41 @@ impl MirLowering:
                     case _: ()
         erased
 
-    fn native_trait_bind_optional_param(name: text, concrete_key: text,
+    fn native_trait_bind_optional_param(name: text, concrete: HirType,
             bound_names: [text], bound_keys: [text]) -> text:
         """"" when the concrete type is an Option agreeing with any earlier
-        binding of `name`; otherwise the mismatch, for the rejection text."""
-        if not concrete_key.starts_with("optional["): return "expected={name}? actual={concrete_key}"
+        binding of `name`; otherwise the mismatch, for the rejection text.
+        The dispatch result keeps the declared `T?` (T is not substituted at
+        the call site), so a consumer decodes the payload by its runtime
+        word: only i64, text and f64 payloads read back correctly. Any other
+        argument (`[i64]`, `bool`, a struct) is refused here, before a trait
+        object can exist."""
+        val concrete_key = self.native_trait_signature_type_key(concrete)
+        if not concrete_key.starts_with("optional["): return "expected={name}? actual={self.native_trait_type_label(concrete)}"
+        if concrete_key != "optional[int:64:true]" and concrete_key != "optional[text]" and concrete_key != "optional[float:64]":
+            return "argument {name}={self.native_trait_type_label(concrete)} is not supported through a generic trait slot natively (only i64, text, f64)"
         var index = 0
         while index < bound_names.len():
             if bound_names[index] == name and bound_keys[index] != concrete_key:
                 return "expected={bound_keys[index]} (bound {name}) actual={concrete_key}"
             index = index + 1
         ""
+
+    fn native_trait_type_label(type_: HirType) -> text:
+        """Diagnostic spelling: the signature key, else a best-effort name."""
+        val key = self.native_trait_signature_type_key(type_)
+        if key != "": return key
+        match type_.kind:
+            case HirTypeKind.Optional(inner): return "optional[" + self.native_trait_type_label(inner) + "]"
+            case HirTypeKind.Named(symbol, _):
+                if val present = self.symbols.get_symbol_raw(symbol.id):
+                    return "named:" + present.name
+                return "<unresolved symbol {symbol.id}>"
+            case HirTypeKind.Infer(_, _): return "<inferred type>"
+            case HirTypeKind.Error: return "<error type>"
+            case HirTypeKind.TypeParam(name, _): return "<type parameter {name}>"
+            case _: ()
+        "<unkeyed type>"
 
     fn native_trait_optional_param_payload(type_: HirType) -> text:
         """`T` for a slot type `T?` whose payload is a type parameter, else ""."""
