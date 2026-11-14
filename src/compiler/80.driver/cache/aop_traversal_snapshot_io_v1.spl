@@ -1,0 +1,144 @@
+# Effectful ownership leaves for the session-local traversal cache. No global
+# cache holds a session-promoted graph. Callers check scalar session identity
+# before inspecting any previously retained cache pointer.
+use compiler.hir.hir_types.{HirModule, SymbolId}
+use compiler.hir.hir_definitions.{HirBlock, HirFunction}
+use compiler.hir.hir_codec.{hir_module_decode_snapshot_bounded_v1, hir_module_encode_snapshot_bounded_v1, HirDecodeLimits}
+use compiler.common.cache_contract.traversal_output_cache_v1.{TraversalModuleSnapshotV1,
+    TraversalBatchStateV1, TraversalOutputCacheV1, TraversalCachePublishV1, TraversalRetentionLedgerV1,
+    traversal_output_cache_new_v1, traversal_output_cache_append_v1}
+use compiler.driver.cache.aop_traversal_inputs_v1.{aop_traversal_snapshot_digest_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause,
+    transient_scope_end, transient_promote, transient_session_heap_id_v1}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+
+pub struct TraversalRestoredModuleV1:
+    module_key: text
+    functions: Dict<SymbolId, HirFunction>
+    symbols: [SymbolId]
+
+pub fn aop_traversal_session_id_v1() -> i64:
+    transient_session_heap_id_v1() as i64
+
+pub fn aop_traversal_cache_create_v1(session: i64) -> Result<TraversalOutputCacheV1, text>:
+    if session <= 0 or session != aop_traversal_session_id_v1():
+        return Err("traversal-cache-session-unavailable")
+    if transient_array_scope_state_v1() != 0 or not transient_scope_begin():
+        return Err("traversal-cache-scope-unavailable")
+    var result = traversal_output_cache_new_v1(session, 4, 33554432)
+    val paused = transient_scope_pause()
+    val promoted = if paused: transient_promote(result) else: false
+    val ended = transient_scope_end()
+    if not paused or not promoted or not ended: panic("AOP traversal cache creation ownership failed")
+    result
+
+pub fn aop_traversal_cache_publish_v1(cache: TraversalOutputCacheV1,
+        entry: TraversalBatchStateV1) -> Result<TraversalCachePublishV1, text>:
+    if cache.session_id <= 0 or cache.session_id != aop_traversal_session_id_v1():
+        return Err("traversal-cache-session-changed")
+    if transient_array_scope_state_v1() != 0 or not transient_scope_begin():
+        return Err("traversal-cache-scope-unavailable")
+    var result = traversal_output_cache_append_v1(cache, entry)
+    val paused = transient_scope_pause()
+    val promoted = if paused: transient_promote(result) else: false
+    val ended = transient_scope_end()
+    if not paused or not promoted or not ended: panic("AOP traversal cache publication ownership failed")
+    result
+
+fn _aop_traversal_restore_module_owned_v1(row: TraversalModuleSnapshotV1,
+        current: HirModule, limits: HirDecodeLimits) -> Result<TraversalRestoredModuleV1, text>:
+    if row.digest != aop_traversal_snapshot_digest_v1(row.module_key, row.blob):
+        return Err("traversal-snapshot-digest-mismatch")
+    val decoded = hir_module_decode_snapshot_bounded_v1(row.blob, limits)
+    if decoded.is_err(): return Err("traversal-snapshot-decode-refused")
+    val restored = decoded.unwrap()
+    if restored.name != row.module_name or restored.path != row.module_path or
+            current.name != row.module_name or current.path != row.module_path:
+        return Err("traversal-snapshot-module-mismatch")
+    if restored.functions.len() != current.functions.len():
+        return Err("traversal-snapshot-function-set-mismatch")
+    var functions: Dict<SymbolId, HirFunction> = {}
+    val symbols = current.functions.keys()
+    for symbol in symbols:
+        if not restored.functions.contains_key(symbol):
+            return Err("traversal-snapshot-function-set-mismatch")
+        val before = current.functions[symbol]
+        val after = restored.functions[symbol]
+        if before.name != after.name or before.symbol != after.symbol:
+            return Err("traversal-snapshot-function-identity-mismatch")
+        functions[symbol] = HirFunction(..before, body: after.body)
+    # Only the actual mutation footprint escapes, not decoded layout metadata.
+    Ok(TraversalRestoredModuleV1(module_key: row.module_key, functions: functions, symbols: symbols))
+
+fn _aop_traversal_restore_module_v1(row: TraversalModuleSnapshotV1,
+        current: HirModule, ledger: TraversalRetentionLedgerV1) -> Result<TraversalRestoredModuleV1, text>:
+    if ledger.session_id != aop_traversal_session_id_v1():
+        return Err("traversal-restore-session-changed")
+    # Conservatively charge the entire admitted decoder modeled-allocation ceiling;
+    # never refund on a later module or publication failure.
+    val limits = HirDecodeLimits.standard()
+    limits.max_allocation_bytes = 16777216
+    if not ledger.reserve_restore(limits.max_allocation_bytes):
+        return Err("traversal-restore-allocation-budget")
+    if transient_array_scope_state_v1() != 0 or not transient_scope_begin():
+        return Err("traversal-restore-scope-unavailable")
+    var result = _aop_traversal_restore_module_owned_v1(row, current, limits)
+    val paused = transient_scope_pause()
+    val promoted = if paused: transient_promote(result) else: false
+    val ended = transient_scope_end()
+    if not paused or not promoted or not ended: panic("AOP traversal restored body ownership failed")
+    result
+
+pub fn aop_traversal_restore_prepare_v1(modules: Dict<text, HirModule>,
+        rows: [TraversalModuleSnapshotV1], ledger: TraversalRetentionLedgerV1) -> Result<[TraversalRestoredModuleV1], text>:
+    if rows.len() != modules.len(): return Err("traversal-restore-module-set-mismatch")
+    var seen: Dict<text, bool> = {}
+    var prepared: [TraversalRestoredModuleV1] = []
+    for row in rows:
+        if seen.contains_key(row.module_key) or not modules.contains_key(row.module_key):
+            return Err("traversal-restore-module-set-mismatch")
+        seen[row.module_key] = true
+        prepared.push(_aop_traversal_restore_module_v1(row, modules[row.module_key], ledger)?)
+    Ok(prepared)
+
+# Caller holds the driver mutation owner. Every checked decode/identity failure
+# has already happened before this loop; preserve existing dictionary aliases.
+pub fn aop_traversal_restore_publish_v1(modules: Dict<text, HirModule>,
+        prepared: [TraversalRestoredModuleV1]):
+    for row in prepared:
+        val module = modules[row.module_key]
+        for symbol in row.symbols:
+            module.functions[symbol] = row.functions[symbol]
+
+# Exact-hit comparisons retain no new body bytes. The expected row is an
+# immutable parent loan; encode, compare and discard all scratch per module.
+fn _aop_traversal_snapshot_matches_module_v1(module: HirModule,
+        row: TraversalModuleSnapshotV1) -> Result<bool, text>:
+    if transient_array_scope_state_v1() != 0 or not transient_scope_begin():
+        return Err("traversal-compare-scope-unavailable")
+    val encoded = hir_module_encode_snapshot_bounded_v1(module, 8388608)
+    var result: Result<bool, text> = Err("traversal-compare-encode-refused")
+    if encoded.is_ok():
+        result = Ok(module.name == row.module_name and module.path == row.module_path and
+            encoded.unwrap() == row.blob and
+            row.digest == aop_traversal_snapshot_digest_v1(row.module_key, row.blob))
+    val paused = transient_scope_pause()
+    val promoted = if paused: transient_promote(result) else: false
+    val ended = transient_scope_end()
+    if not paused or not promoted or not ended: panic("AOP traversal comparison ownership failed")
+    result
+
+pub fn aop_traversal_snapshots_match_v1(modules: Dict<text, HirModule>,
+        rows: [TraversalModuleSnapshotV1]) -> Result<bool, text>:
+    if modules.len() != rows.len(): return Ok(false)
+    var seen: Dict<text, bool> = {}
+    var bytes: i64 = 0
+    for row in rows:
+        if seen.contains_key(row.module_key) or not modules.contains_key(row.module_key):
+            return Ok(false)
+        if row.blob.byte_len() > 8388608 - bytes: return Err("traversal-compare-batch-budget")
+        bytes = bytes + row.blob.byte_len()
+        seen[row.module_key] = true
+        val same = _aop_traversal_snapshot_matches_module_v1(modules[row.module_key], row)?
+        if not same: return Ok(false)
+    Ok(true)

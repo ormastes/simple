@@ -6,11 +6,12 @@ use compiler.hir.hir_codec.{hir_module_encode_snapshot_bounded_v1}
 use compiler.hir.abi_interface.{hir_abi_function_digest_v1, HirAbiInterfaceEncoderV1}
 use compiler.semantics.aspect_validation.{aspect_contract_claims_v1}
 use compiler.semantics.aspect_weave.{AspectForwardWeaveClaimV1}
-use compiler.common.cache.canonical_identity.{canon_str, canon_field, canon_seq}
+use compiler.common.cache.canonical_identity.{canon_str, canon_field, canon_seq, canonical_identity_sort_texts}
 use compiler.common.cache_contract.aspect_match_shard_v1.{AdviceFacetsV1}
+use compiler.common.cache_contract.traversal_output_cache_v1.{TraversalModuleSnapshotV1, TraversalRetentionLedgerV1}
 use std.common.crypto.sha256.{sha256_text}
 use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause,
-    transient_scope_end, transient_promote}
+    transient_scope_end, transient_promote, transient_session_heap_id_v1}
 use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
 
 pub struct AopTraversalInputsV1:
@@ -18,15 +19,24 @@ pub struct AopTraversalInputsV1:
     function_roots: Dict<text, text>
     advice_facets: Dict<text, AdviceFacetsV1>
 
+pub struct AopTraversalCapturedBatchV1:
+    inputs: AopTraversalInputsV1
+    snapshots: [TraversalModuleSnapshotV1]
+    byte_count: i64
+
 struct AopTraversalModuleInputV1:
     root: text
     function_roots: Dict<text, text>
     byte_count: i64
+    snapshot: TraversalModuleSnapshotV1?
 
 fn _traversal_content_key_v1(domain: text, fields: [text]) -> text:
     var values: [text] = []
     for field in fields: values.push(canon_str(field))
     "sha256:" + sha256_text(canon_field(domain, canon_seq(values)))
+
+pub fn aop_traversal_snapshot_digest_v1(module_key: text, blob: text) -> text:
+    _traversal_content_key_v1("simple/aop-ordinary-module/v1", [module_key, blob])
 
 pub fn aop_traversal_base_key_v1(inputs: AopTraversalInputsV1,
         module_key: text, symbol: text) -> Result<text, text>:
@@ -36,14 +46,14 @@ pub fn aop_traversal_base_key_v1(inputs: AopTraversalInputsV1,
     Ok(inputs.function_roots[id])
 
 fn _aop_traversal_module_capture_owned_v1(key: text, module: HirModule,
-        max_bytes: i64, max_functions: i64) -> Result<AopTraversalModuleInputV1, text>:
+        max_bytes: i64, max_functions: i64, keep_bytes: bool) -> Result<AopTraversalModuleInputV1, text>:
     if module.functions.len() > max_functions: return Err("traversal-function-budget")
     val encoded = hir_module_encode_snapshot_bounded_v1(module, max_bytes)
     if encoded.is_err(): return Err("traversal-module-snapshot-unavailable")
     val bytes = encoded.unwrap()
     val byte_count = bytes.byte_len()
     if byte_count > max_bytes: return Err("traversal-capture-budget")
-    val root = _traversal_content_key_v1("simple/aop-ordinary-module/v1", [key, bytes])
+    val root = aop_traversal_snapshot_digest_v1(key, bytes)
     var functions: Dict<text, text> = {}
     for symbol in module.functions.keys():
         val function = module.functions[symbol]
@@ -52,15 +62,31 @@ fn _aop_traversal_module_capture_owned_v1(key: text, module: HirModule,
             return Err("traversal-base-function-ambiguous")
         functions[id] = _traversal_content_key_v1("simple/aop-module-base/v1",
             [key, function.name, root])
-    Ok(AopTraversalModuleInputV1(root: root, function_roots: functions, byte_count: byte_count))
+    var snapshot: TraversalModuleSnapshotV1? = nil
+    if keep_bytes:
+        snapshot = Some(TraversalModuleSnapshotV1(module_key: key, module_name: module.name,
+            module_path: module.path, blob: bytes, digest: root))
+    Ok(AopTraversalModuleInputV1(root: root, function_roots: functions,
+        byte_count: byte_count, snapshot: snapshot))
 
 # Scope EACH module, rather than retaining every encoder's scratch until the
 # batch ends. Inputs are read-only parent loans; only compact roots escape.
 fn _aop_traversal_module_capture_v1(key: text, module: HirModule,
-        max_bytes: i64, max_functions: i64) -> Result<AopTraversalModuleInputV1, text>:
+        max_bytes: i64, max_functions: i64, keep_bytes: bool,
+        ledger: TraversalRetentionLedgerV1?) -> Result<AopTraversalModuleInputV1, text>:
+    var admitted_bytes = max_bytes
+    if keep_bytes:
+        if ledger == nil or ledger.unwrap().session_id != (transient_session_heap_id_v1() as i64):
+            return Err("traversal-retention-session-unavailable")
+        if ledger.unwrap().blob_remaining() < admitted_bytes:
+            admitted_bytes = ledger.unwrap().blob_remaining()
+        if admitted_bytes <= 0: return Err("traversal-retention-blob-budget")
     if transient_array_scope_state_v1() != 0: return Err("traversal-capture-scope-occupied")
     if not transient_scope_begin(): return Err("traversal-capture-scope-unavailable")
-    var result = _aop_traversal_module_capture_owned_v1(key, module, max_bytes, max_functions)
+    var result = _aop_traversal_module_capture_owned_v1(key, module, admitted_bytes, max_functions, keep_bytes)
+    if keep_bytes and result.is_ok():
+        if not ledger.unwrap().charge_blob(result.unwrap().byte_count):
+            result = Err("traversal-retention-blob-budget")
     val paused = transient_scope_pause()
     val promoted = if paused: transient_promote(result) else: false
     # Always close, including ordinary refusal and failed promotion.
@@ -106,6 +132,19 @@ fn _aop_traversal_advice_capture_v1(owner: HirModule, advice_fn: text,
 pub fn aop_traversal_inputs_capture_v1(modules: Dict<text, HirModule>,
         claims: [AspectForwardWeaveClaimV1], max_modules: i64,
         max_snapshot_bytes: i64) -> Result<AopTraversalInputsV1, text>:
+    val captured = _aop_traversal_batch_capture_v1(modules, claims, max_modules,
+        max_snapshot_bytes, false, nil)?
+    Ok(captured.inputs)
+
+pub fn aop_traversal_batch_capture_v1(modules: Dict<text, HirModule>,
+        claims: [AspectForwardWeaveClaimV1], max_modules: i64,
+        max_snapshot_bytes: i64, ledger: TraversalRetentionLedgerV1) -> Result<AopTraversalCapturedBatchV1, text>:
+    _aop_traversal_batch_capture_v1(modules, claims, max_modules, max_snapshot_bytes, true, Some(ledger))
+
+fn _aop_traversal_batch_capture_v1(modules: Dict<text, HirModule>,
+        claims: [AspectForwardWeaveClaimV1], max_modules: i64,
+        max_snapshot_bytes: i64, keep_bytes: bool,
+        ledger: TraversalRetentionLedgerV1?) -> Result<AopTraversalCapturedBatchV1, text>:
     if max_modules <= 0 or max_snapshot_bytes <= 0 or modules.len() > max_modules:
         return Err("traversal-capture-budget")
     if claims.len() > 1024: return Err("traversal-claim-budget")
@@ -115,11 +154,13 @@ pub fn aop_traversal_inputs_capture_v1(modules: Dict<text, HirModule>,
     var roots: Dict<text, text> = {}
     var total: i64 = 0
     var functions: Dict<text, text> = {}
-    for key in modules.keys():
+    var snapshots: [TraversalModuleSnapshotV1] = []
+    for key in canonical_identity_sort_texts(modules.keys()):
         val captured = _aop_traversal_module_capture_v1(key, modules[key],
-            max_snapshot_bytes - total, 65536 - functions.len())?
+            max_snapshot_bytes - total, 65536 - functions.len(), keep_bytes, ledger)?
         total = total + captured.byte_count
         roots[key] = captured.root
+        if captured.snapshot != nil: snapshots.push(captured.snapshot.unwrap())
         for id in captured.function_roots.keys():
             if functions.contains_key(id): return Err("traversal-base-function-ambiguous")
             functions[id] = captured.function_roots[id]
@@ -149,4 +190,5 @@ pub fn aop_traversal_inputs_capture_v1(modules: Dict<text, HirModule>,
         facets[claim.registry_key] = _aop_traversal_advice_capture_v1(modules[owner_key],
             claim.advice_fn, roots[owner_key], order)?
         order = order + 1
-    Ok(AopTraversalInputsV1(module_roots: roots, function_roots: functions, advice_facets: facets))
+    Ok(AopTraversalCapturedBatchV1(inputs: AopTraversalInputsV1(module_roots: roots,
+        function_roots: functions, advice_facets: facets), snapshots: snapshots, byte_count: total))

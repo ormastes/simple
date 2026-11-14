@@ -42,6 +42,8 @@ use compiler.driver.cache.driver_hir_post_validation_gate_facts_v1.{
     driver_hir_gate_rt_report_v1, driver_print_post_hir_validation_fatal}
 use compiler.semantics.aspect_validation.{validate_aspect_contracts}
 use compiler.driver.cache.aop_match_cache_driver_v1.{aop_weave_forward_advice_cached_v1}
+use compiler.driver.cache.aop_traversal_warm_v1.{TraversalVisitPreparationV1,
+    aop_traversal_prepare_visit_v1, aop_traversal_finish_visit_v1}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
 use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause,
@@ -637,6 +639,14 @@ pub fn driver_validate_value_struct_layout_declarations_v1(
     aop_context: CompileContext? = nil
 ) -> [text]:
     var errors: [text] = []
+    var traversal_prepared: TraversalVisitPreparationV1? = nil
+    if aop_context != nil:
+        match aop_traversal_prepare_visit_v1(aop_context.unwrap(), hir_modules, aop_snapshots ?? []):
+            case Ok(prepared): traversal_prepared = prepared
+            case Err(reason):
+                errors.push("AOP traversal: {reason}")
+                driver_print_post_hir_validation_fatal(errors)
+                return errors
     # One receipt per sub-pass: the Stage-3 worker died between the last
     # hir:file:done and streaming_source_reclaim:done four times on
     # 2026-09-05 without naming a step. Gated like every other log_phase
@@ -684,21 +694,13 @@ pub fn driver_validate_value_struct_layout_declarations_v1(
     log_phase("phase3:hir:validate:aspects:done errors={errors.len()}")
     if aspect_errors.len() == 0:
         log_phase("phase3:hir:validate:weave:start")
-        # Cold F1 has no retained immutable restoration baseline yet. Only the
-        # real lowering epoch certifies fresh input, including zero-claim input.
-        var may_weave = true
-        if aop_context != nil:
-            val context = aop_context.unwrap()
-            if context.aop_source_epoch_v2 <= 0 or context.aop_traversal_started_epoch_v1 != 0:
-                errors = errors.push("AOP traversal requires fresh lowering; repeated epoch has no certified baseline")
-                may_weave = false
-            else:
-                context.aop_traversal_started_epoch_v1 = context.aop_source_epoch_v2
-        if may_weave:
+        if aop_context == nil:
             val _woven = aop_weave_forward_advice_cached_v1(hir_modules, Some(aop_snapshots ?? []))
-            if aop_context != nil:
-                val context = aop_context.unwrap()
-                context.aop_traversal_completed_epoch_v1 = context.aop_source_epoch_v2
+        else:
+            match aop_traversal_finish_visit_v1(aop_context.unwrap(), hir_modules,
+                    aop_snapshots ?? [], traversal_prepared):
+                case Ok(_): pass
+                case Err(reason): errors.push("AOP traversal: {reason}")
         log_phase("phase3:hir:validate:weave:done")
     driver_print_post_hir_validation_fatal(errors)
     errors

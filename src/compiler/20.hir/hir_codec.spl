@@ -688,6 +688,39 @@ fn _decode_error(r: FlatPoolReader) -> HirDecodeError:
         return HirDecodeError.BoundsExceeded(r.failure_detail)
     HirDecodeError.Malformed(r.failure_detail)
 
+# Process-local ordinary snapshots have their own bounded roundtrip contract.
+# They do not claim canonical persistence and cannot open the canonical gate.
+pub fn hir_module_decode_snapshot_bounded_v1(blob: text,
+        limits: HirDecodeLimits) -> Result<HirModule, HirDecodeError>:
+    var reader = FlatPoolReader.new_bounded(blob, limits.max_input_bytes,
+        limits.max_allocation_bytes, limits.max_nodes, limits.max_depth, limits.max_work_units)
+    if not reader.ok: return Err(_decode_error(reader))
+    val header = reader.next()
+    if not reader.ok: return Err(_decode_error(reader))
+    if header != hir_codec_header(): return Err(HirDecodeError.Malformed("ordinary_snapshot_header"))
+    val module = hc_dec_hir_module(reader)
+    if not reader.ok: return Err(_decode_error(reader))
+    if module == nil: return Err(HirDecodeError.Malformed("ordinary_snapshot_nil_module"))
+    if module.representation_declarations.len() > 0:
+        return Err(HirDecodeError.Unavailable("E-MC-REP-004: representation metadata transport is unsupported"))
+    if reader.pos != reader.lines.len() - 1 or reader.lines[reader.pos] != "":
+        return Err(HirDecodeError.Malformed("ordinary_snapshot_trailing_or_missing_frame"))
+    val remaining_allocation = limits.max_allocation_bytes - reader.live_reserved_bytes
+    val remaining_work = limits.max_work_units - reader.charged_work_units
+    var writer = HirCodecWriter.create_canonical_bounded(text_byte_len(blob),
+        remaining_allocation, remaining_work, limits.max_depth)
+    writer.canonical = false
+    hc_enc_hir_module(writer, module)
+    if not writer.ok:
+        if writer.failure_kind == "bounds": return Err(HirDecodeError.BoundsExceeded(writer.unsupported))
+        return Err(HirDecodeError.Malformed("ordinary_snapshot_reencode_refused"))
+    val encoded = writer.finish_with_header(hir_codec_header())
+    if not writer.ok:
+        if writer.failure_kind == "bounds": return Err(HirDecodeError.BoundsExceeded(writer.unsupported))
+        return Err(HirDecodeError.Malformed("ordinary_snapshot_reencode_refused"))
+    if encoded != blob: return Err(HirDecodeError.Malformed("ordinary_snapshot_roundtrip_changed"))
+    Ok(module)
+
 fn _hir_module_decode_bounded_impl(
     blob: text,
     limits: HirDecodeLimits,
@@ -812,7 +845,7 @@ export hir_canonical_codec_identity_v1
 export hir_canonical_codec_generated_available_v1
 export HirDecodeLimits, HirDecodeAuditUsage, HirDecodeAuditObserver, HirDecodeError
 export hir_module_encode_calls
-export hir_module_encode_snapshot_bounded_v1
+export hir_module_encode_snapshot_bounded_v1, hir_module_decode_snapshot_bounded_v1
 export hir_decode_intern_lines, hir_decode_interned_texts
 export hir_module_encode, hir_module_encode_canonical, hir_module_encode_reason, hir_module_decode_reason
 export hir_module_has_rt_hal

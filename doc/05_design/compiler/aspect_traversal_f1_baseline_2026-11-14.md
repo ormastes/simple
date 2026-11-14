@@ -259,14 +259,16 @@ but unrun. No peak-RSS or performance PASS is claimed. Future warm blobs and
 restored module graphs need their own explicit promotion; global references to
 borrowed temporary allocations are not allowed.
 
-## Next warm implementation: process-local ordinary snapshots
+## Session-local warm implementation (authored; unrun)
 
 The approved direction does not wait for canonical persistence qualification.
 `TraversalModuleSnapshotV1` holds immutable ordinary base/output bytes and
-digests, module identity, source epoch/lineage and executing-image identity.
+digests and module identity. The batch binds source epoch/lineage and
+executing-image identity through the admitted snapshot lineage.
 `TraversalBatchStateV1` adds the complete ordered claim identity and aggregate
 per-directory prior views. `TraversalOutputCacheV1` bounds entry count and all
-retained UTF-8 payload bytes. These remain proposed source interfaces.
+retained UTF-8 payload bytes. These source interfaces now exist, attached to
+CompileContext with an independently checked scalar session owner.
 
 A bounded ordinary decoder must check the ordinary header, complete consumption,
 resource budgets and exact re-encoding before any restored module is published.
@@ -287,5 +289,50 @@ work; the third returns a checked re-lower error. Fresh-owner provenance takes
 precedence over incidental equality with old output bytes. Unchanged aggregate
 deltas may reuse a complete retained batch; any change conservatively restores
 and rewrites the whole batch through the existing ordered live-forwarder loop.
-No new per-function partial weaver is introduced. This warm path is not yet
-implemented or qualified.
+No new per-function partial weaver is introduced. The actual HIR validation
+caller now prepares/restores before aspect validation and finishes afterward;
+this new source has not been executed or qualified.
+
+
+The implementation retains at most four cache entries and 32 MiB of UTF-8 cache
+payload. A separate monotonic session ledger charges every promoted candidate
+blob, including candidates whose later append fails, against 32 MiB. Each body
+restore reserves its full 16 MiB ordinary decoder modeled-allocation ceiling against a
+128 MiB session reservation budget; reservations are not refunded on refusal or
+partial preparation. These are conservative logical bounds, not a measured
+process-RSS ceiling. Larger decodes and exhausted owners refuse restoration and
+require fresh lowering. Candidate metadata/container overhead and temporary
+encoder peak must still be measured before a memory/performance acceptance claim.
+
+Restore prepares replacement function records and symbol arrays before any
+publication. Only the function bodies come from decoded snapshots; current
+metadata and existing functions-dictionary aliases remain intact. In particular,
+identity-only imported layout rows are not mistaken for complete layouts.
+An exact output comparison encodes within a disposable scope and retains only a
+Boolean result, not another body blob. A reusable aggregate delta restores the
+already-retained output and keeps its lease; changed and empty claim batches
+restore the baseline and invoke the existing ordered rewrite.
+
+Current reuse is within the same certified lowering epoch and live session.
+New epochs run the cold path; cross-epoch lookup and cross-session persistent
+semantic/instance caches remain required follow-up work. Session-owned graphs
+must never be advertised as process-persistent. The source also invalidates the
+old global match-cache scalar before BuildSession heap teardown; its distinct
+native two-session regression remains unrun.
+
+No warm fixture, actual ordinary decoder execution, alias/atomic-publication
+runtime test, whole-import compiler run, MCP/LSP smoke, or performance gate has
+passed for this source. The two canonical-owner full-import attempts exhausted
+4 GiB/8 GiB respectively without an executable; they do not qualify this path.
+The canonical codec gate remains closed. Existing cold projection evidence is
+not reused as warm evidence, and no prior green probe was rerun.
+
+Two additional native fixture entries are authored and unrun:
+`test/fixtures/aspect_traversal_warm_io/main.spl` uses real typed HIR records for
+alias preservation and failed-second-module atomicity;
+`test/fixtures/aspect_traversal_warm_driver/main.spl` parses real advice/forwarder
+source and invokes the actual validation caller for cold, unchanged reuse,
+empty-registry removal, mutated-output refusal, and missing-lease refusal. The latter observes the real
+executing image but supplies a closed test-universe snapshot DTO; it is not a
+test of managed inventory admission. Neither fixture opens the canonical gate
+or establishes runtime, full pipeline, or performance readiness before execution.

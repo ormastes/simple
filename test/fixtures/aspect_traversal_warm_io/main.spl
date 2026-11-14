@@ -1,0 +1,220 @@
+# AUTHORED / UNRUN. Actual HIR/ordinary-codec ownership and publication fixture.
+# Constructors copied from canonical fixture bb7405d1ca81026fd1ea33b601deb4fd06436b41.
+# This is not canonical qualification or full driver/authority evidence.
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.attributes.{FunctionAttr}
+use compiler.types.type_layout.{layoutattr_default_}
+use compiler.hir.hir_types.{HirModule, SymbolTable, HirSymbol, SymbolId, ScopeId, Scope, ScopeKind, SymbolKind, HirType, HirTypeKind}
+use compiler.hir.hir_definitions.{HirConst, HirExpr, HirExprKind, HirAopAdvice,
+    HirFunction, HirParam, HirStmt, HirStmtKind, HirBlock, HirField, HirStruct,
+    HirClass, HirTrait, HirAssocTypeDecl}
+use compiler.hir.hir_operators.{HirBinOp}
+use compiler.blocks.value.{BlockValue}
+use compiler.driver.cache.aop_traversal_inputs_v1.{aop_traversal_batch_capture_v1}
+use compiler.driver.cache.aop_traversal_snapshot_io_v1.{aop_traversal_snapshots_match_v1,
+    aop_traversal_restore_prepare_v1, aop_traversal_restore_publish_v1}
+use compiler.common.cache_contract.traversal_output_cache_v1.{TraversalRetentionLedgerV1,
+    TraversalModuleSnapshotV1}
+use std.nogc_sync_mut.sffi.transient.{rt_session_heap_begin, rt_session_heap_end}
+
+fn integer_type() -> HirType:
+    HirType(kind: HirTypeKind.Int(64, true), span: Span.empty())
+
+fn typed(kind: HirExprKind, type_: HirType) -> HirExpr:
+    HirExpr(kind: kind, has_type_: true, type_: type_, span: Span.empty())
+
+fn integer(value: i64) -> HirExpr:
+    typed(HirExprKind.IntLit(value, nil), integer_type())
+
+fn value_block(value: HirExpr) -> HirBlock:
+    HirBlock(stmts: [], has: true, value: value, span: Span.empty())
+
+# Same production constructor shape used by portable_hir_semantic_profile_v1_spec.
+# Body: val saved = value; if saved > 0: saved + 1 else: -1.
+fn typed_function(id: i64, name: text, method: bool) -> HirFunction:
+    val parameter = SymbolId(id: id + 1)
+    val local = SymbolId(id: id + 2)
+    val local_value = typed(HirExprKind.Var(local), integer_type())
+    val condition = typed(HirExprKind.Binary(HirBinOp.Gt, local_value, integer(0)),
+        HirType(kind: HirTypeKind.Bool, span: Span.empty()))
+    val incremented = typed(HirExprKind.Binary(HirBinOp.Add, local_value, integer(1)), integer_type())
+    val branch = typed(HirExprKind.If(condition, value_block(incremented),
+        Some(value_block(integer(-1)))), integer_type())
+    val statement = HirStmt(kind: HirStmtKind.Let(local, integer_type(),
+        typed(HirExprKind.Var(parameter), integer_type())), span: Span.empty())
+    val body = HirBlock(stmts: [statement], has: true, value: branch, span: Span.empty())
+    HirFunction(symbol: SymbolId(id: id), name: name, type_params: [],
+        params: [HirParam(symbol: parameter, name: "value", type_: integer_type(),
+            has_default: false, default: nil, span: Span.empty(), is_mutable: false)],
+        return_type: integer_type(), body: body, effects: [], visibility: Visibility.Public,
+        is_async: false, is_static: method, is_public: true, is_method: method,
+        is_mutable: false, is_const: false, is_extern: false,
+        func_attr: FunctionAttr.default(), has_export_attr: false, export_attr: nil,
+        has_driver_manifest_attr: false, driver_manifest_attr: nil,
+        has_suspension: false, has_vhdl_metadata: false, vhdl_metadata: nil,
+        has_doc_comment: true, doc_comment: "typed corpus: " + name, span: Span.empty(),
+        is_gpu_kernel: false, gpu_target: "", gpu_backend_order: "",
+        verification_contract: nil, is_generic_template: false)
+
+fn typed_field(id: i64, name: text, type_: HirType) -> HirField:
+    HirField(symbol: SymbolId(id: id), name: name, type_: type_,
+        has_default: false, default: nil, visibility: Visibility.Public,
+        is_public: true, is_volatile: false, has_bits_attr: false, bits_width: 0,
+        has_fixed_address: false, fixed_address: 0, span: Span.empty())
+
+fn record_symbol(table: SymbolTable, id: i64, name: text, kind: SymbolKind,
+        type_: HirType, scope: i64):
+    table.symbols[id] = HirSymbol(id: SymbolId(id: id), name: name, kind: kind,
+        type_: Some(type_), scope: ScopeId(id: scope), span: Span.empty(),
+        visibility: if scope == 0: Visibility.Public else: Visibility.Private,
+        is_public: scope == 0, is_mutable: false,
+        defining_module: Some("canonical.fixture"), builtin_method_tag: 0)
+
+fn function_symbols(table: SymbolTable, function: HirFunction, scope: i64):
+    val id = function.symbol.id
+    record_symbol(table, id, function.name,
+        if function.is_method: SymbolKind.Method else: SymbolKind.Function,
+        HirType(kind: HirTypeKind.Function([integer_type()], integer_type(), []), span: Span.empty()), 0)
+    record_symbol(table, id + 1, "value", SymbolKind.Parameter, integer_type(), scope)
+    record_symbol(table, id + 2, "saved", SymbolKind.Variable, integer_type(), scope)
+    table.scopes[scope] = Scope(id: ScopeId(id: scope), parent: Some(ScopeId(id: 0)),
+        kind: ScopeKind.Function, symbols: {"value": id + 1, "saved": id + 2})
+
+fn add_typed_declarations(module: HirModule) -> HirModule:
+    var result = module
+    val function = typed_function(100, "choose", false)
+    val method = typed_function(110, "choose_method", true)
+    val default_method = typed_function(120, "choose_default", true)
+    result.functions[function.symbol] = function
+    result.functions[method.symbol] = method
+    function_symbols(result.symbols, function, 1)
+    function_symbols(result.symbols, method, 2)
+    function_symbols(result.symbols, default_method, 3)
+    result.symbols.next_symbol_id = 123
+    result.symbols.next_scope_id = 4
+    val field = typed_field(51, "count", integer_type())
+    result.structs[SymbolId(id: 50)] = HirStruct(symbol: SymbolId(id: 50), name: "CounterRow",
+        type_params: [], fields: [field], visibility: Visibility.Public, is_public: true,
+        has_doc_comment: true, doc_comment: "typed struct", span: Span.empty(),
+        has_layout_attr: true, layout_attr: layoutattr_default_(), has_platform_attr: false,
+        platform_has_error: false, platform_has_warning: false,
+        platform_diagnostic_message: "", platform_diagnostic_line: 0,
+        is_generic_template: false, has_specialization_of: false, specialization_of: "",
+        type_bindings: {})
+    result.classes[SymbolId(id: 60)] = HirClass(symbol: SymbolId(id: 60), name: "Counter",
+        type_params: [], fields: [typed_field(61, "enabled",
+            HirType(kind: HirTypeKind.Bool, span: Span.empty()))],
+        methods: {"choose_method": method.symbol}, visibility: Visibility.Public, is_public: true,
+        has_doc_comment: true, doc_comment: "typed class", span: Span.empty(),
+        has_layout_attr: true, layout_attr: layoutattr_default_(),
+        has_export_attr: false, export_attr: nil, has_platform_attr: false,
+        platform_has_error: false, platform_has_warning: false,
+        platform_diagnostic_message: "", platform_diagnostic_line: 0,
+        is_generic_template: false, has_specialization_of: false, specialization_of: "",
+        type_bindings: {})
+    result.traits[SymbolId(id: 70)] = HirTrait(symbol: SymbolId(id: 70), name: "Choose",
+        type_params: [], methods: [default_method], supertraits: [], defaults: [default_method],
+        where_clause: [], assoc_types: [HirAssocTypeDecl(name: "Item", bounds: [],
+            has_default: true, default: integer_type(), span: Span.empty())],
+        visibility: Visibility.Public, is_public: true, has_doc_comment: true,
+        doc_comment: "typed trait", span: Span.empty(), is_generic_template: false,
+        has_specialization_of: false, specialization_of: "", type_bindings: {})
+    record_symbol(result.symbols, 50, "CounterRow", SymbolKind.Struct,
+        HirType(kind: HirTypeKind.Named(SymbolId(id: 50), []), span: Span.empty()), 0)
+    record_symbol(result.symbols, 51, "count", SymbolKind.Field, integer_type(), 0)
+    record_symbol(result.symbols, 60, "Counter", SymbolKind.Class,
+        HirType(kind: HirTypeKind.Named(SymbolId(id: 60), []), span: Span.empty()), 0)
+    record_symbol(result.symbols, 61, "enabled", SymbolKind.Field,
+        HirType(kind: HirTypeKind.Bool, span: Span.empty()), 0)
+    record_symbol(result.symbols, 70, "Choose", SymbolKind.Trait,
+        HirType(kind: HirTypeKind.Named(SymbolId(id: 70), []), span: Span.empty()), 0)
+    var root_names: Dict<text, i64> = {}
+    for id in result.symbols.symbols.keys():
+        val symbol = result.symbols.symbols[id]
+        if symbol.scope.id == 0:
+            root_names[symbol.name] = id
+    result.symbols.root_scope_symbols = root_names
+    result.symbols.scopes[0] = Scope(id: ScopeId(id: 0), parent: nil,
+        kind: ScopeKind.Module, symbols: root_names)
+    result
+
+fn fixture(order: [i64], names: [text]) -> HirModule:
+    var table = SymbolTable.new()
+    var constants: Dict<SymbolId, HirConst> = {}
+    val integer = HirType(kind: HirTypeKind.Int(64, true), span: Span.empty())
+    for key in order:
+        table.symbols[key] = HirSymbol(id: SymbolId(id: key), name: "symbol{key}",
+            kind: SymbolKind.Variable, type_: nil, scope: ScopeId(id: 0),
+            span: Span.empty(), visibility: Visibility.Private,
+            is_public: false, is_mutable: false, defining_module: nil,
+            builtin_method_tag: key)
+        val literal = HirExpr(kind: HirExprKind.IntLit(key, nil),
+            has_type_: true, type_: integer, span: Span.empty())
+        constants[SymbolId(id: key)] = HirConst(symbol: SymbolId(id: key),
+            name: "constant{key}", type_: integer, value: literal,
+            is_mutable: false, visibility: Visibility.Private, is_public: false,
+            is_volatile: false, has_fixed_address: false, fixed_address: 0,
+            span: Span.empty())
+    table.next_symbol_id = 4
+    var targets: Dict<text, text> = {}
+    for name in names:
+        targets[name] = "target:" + name
+    val module = HirModule(name: "canonical\n한글\\fixture", path: "codec/fixture.spl",
+        imports: [], exports: [], domain_blocks: [], symbols: table,
+        functions: {}, gpu_function_targets: targets, gpu_function_backend_orders: {},
+        classes: {}, structs: {}, enums: {}, bitfields: {}, traits: {}, impls: [],
+        constants: constants, static_asserts: [],
+        aop_advices: [HirAopAdvice(predicate_text: "execution(* target(..))",
+            advice_function: "trace", form: "before", priority: 3,
+            span: Span.empty(), aspect_module: "app.owner", aspect_name: "Trace")],
+        di_bindings: [],
+        arch_rules: [], mock_decls: [], types: [], extend_enums: [])
+    add_typed_declarations(module)
+
+fn replace_body(module: HirModule, value: i64):
+    val id = SymbolId(id: 100)
+    val before = module.functions[id]
+    module.functions[id] = HirFunction(..before, body: value_block(integer(value)))
+
+fn main() -> i32:
+    var session: u32 = 0u32
+    unsafe(capabilities: [ffi]):
+        session = rt_session_heap_begin()
+    assert(session != 0u32)
+    val ledger = TraversalRetentionLedgerV1.create(session as i64, 33554432, 134217728).unwrap()
+    val module = fixture([1, 2], ["alpha", "beta"])
+    var modules: Dict<text, HirModule> = {"fixture": module}
+    val original = aop_traversal_batch_capture_v1(modules, [], 4, 8388608, ledger).unwrap()
+    val retained_before_comparison = ledger.promoted_blob_bytes
+    assert(aop_traversal_snapshots_match_v1(modules, original.snapshots).unwrap())
+    assert(aop_traversal_snapshots_match_v1(modules, original.snapshots).unwrap())
+    assert(ledger.promoted_blob_bytes == retained_before_comparison)
+    # Keep the actual shared functions dictionary as an alias across restore.
+    val alias = module.functions
+    replace_body(module, 999)
+    assert(alias[SymbolId(id: 100)].body.stmts.len() == 0)
+    assert(not aop_traversal_snapshots_match_v1(modules, original.snapshots).unwrap())
+    val ready = aop_traversal_restore_prepare_v1(modules, original.snapshots, ledger).unwrap()
+    assert(alias[SymbolId(id: 100)].body.stmts.len() == 0)
+    aop_traversal_restore_publish_v1(modules, ready)
+    assert(alias[SymbolId(id: 100)].body.stmts.len() == 1)
+    assert(aop_traversal_snapshots_match_v1(modules, original.snapshots).unwrap())
+    # Failure in the second module cannot publish the prepared first module.
+    val other = fixture([2, 1], ["beta", "alpha"])
+    modules["second"] = other
+    val pair = aop_traversal_batch_capture_v1(modules, [], 4, 8388608, ledger).unwrap()
+    replace_body(module, 1000)
+    replace_body(other, 2000)
+    val second = pair.snapshots[1]
+    val corrupted = TraversalModuleSnapshotV1(..second, blob: "corrupt")
+    val refused = aop_traversal_restore_prepare_v1(modules, [pair.snapshots[0], corrupted], ledger)
+    assert(refused.is_err())
+    assert(module.functions[SymbolId(id: 100)].body.stmts.len() == 0)
+    assert(other.functions[SymbolId(id: 100)].body.stmts.len() == 0)
+    # All observations precede freeing the actual session-owned graph.
+    var ended = false
+    unsafe(capabilities: [ffi]):
+        ended = rt_session_heap_end(session)
+    assert(ended)
+    0

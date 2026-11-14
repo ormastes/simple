@@ -1,0 +1,77 @@
+# Aggregate ordered registry identity for the existing forward/static weaver.
+# Zero-match claims remain in the identity; this does not invent a new weaver.
+use compiler.hir.hir_types.{HirModule}
+use compiler.semantics.aspect_validation.{aspect_contract_claims_v1, aspect_module_identity_index}
+use compiler.semantics.aspect_weave.{AspectForwardWeaveClaimV1}
+use compiler.driver.cache.aop_traversal_inputs_v1.{AopTraversalInputsV1}
+use compiler.common.cache_contract.directory_tldr_snapshot_v2.{DirectoryTldrSourceSnapshotV2}
+use compiler.common.cache.canonical_identity.{canon_str, canon_field, canon_seq, canonical_identity_sort_texts}
+use compiler.common.cache_contract.physical_tld_v1.{three_payload_contract_digest_valid_v1}
+use std.common.crypto.sha256.{sha256_text}
+
+fn batch_text(domain: text, values: [text]) -> text:
+    var framed: [text] = []
+    for value in values: framed.push(canon_str(value))
+    canon_field(domain, canon_seq(framed))
+
+fn batch_key(domain: text, values: [text]) -> text:
+    "sha256:" + sha256_text(batch_text(domain, values))
+
+pub fn aop_traversal_all_claims_v1(modules: Dict<text, HirModule>) -> [AspectForwardWeaveClaimV1]:
+    val owners = aspect_module_identity_index(modules)
+    var result: [AspectForwardWeaveClaimV1] = []
+    for contract in aspect_contract_claims_v1():
+        if owners.contains_key(contract.path) and contract.kind == "forward" and
+                contract.mode == "static" and contract.selector != "" and contract.advice_fn != "":
+            result.push(AspectForwardWeaveClaimV1(registry_key: contract.registry_key,
+                selector: contract.selector, advice_fn: contract.advice_fn))
+    result
+
+pub fn aop_traversal_ordered_identity_v1(claims: [AspectForwardWeaveClaimV1],
+        inputs: AopTraversalInputsV1) -> Result<text, text>:
+    var values: [text] = []
+    val contracts = aspect_contract_claims_v1()
+    for claim in claims:
+        if not inputs.advice_facets.contains_key(claim.registry_key):
+            return Err("traversal-ordered-advice-facets-missing")
+        val facet = inputs.advice_facets[claim.registry_key]
+        var found: i64 = 0
+        for contract in contracts:
+            if contract.registry_key == claim.registry_key:
+                found = found + 1
+                values.push(batch_text("simple/aop-ordered-claim/v1", [claim.registry_key,
+                    contract.path, contract.advice_fn, contract.kind, contract.selector,
+                    contract.mode, "{contract.readonly}", "{contract.noalloc}", "{contract.bounded_time}",
+                    facet.advice_fn, facet.mode, facet.activation, facet.signature_digest,
+                    facet.effects_digest, facet.body_digest, "{facet.order}"]))
+        if found != 1: return Err("traversal-ordered-claim-ambiguous")
+    Ok(batch_text("simple/aop-ordered-batch/v1", values))
+
+pub fn aop_traversal_source_lineage_v1(snapshots: [DirectoryTldrSourceSnapshotV2]) -> Result<text, text>:
+    if snapshots.len() == 0: return Err("traversal-source-lineage-unavailable")
+    var scopes: Dict<text, text> = {}
+    for snapshot in snapshots:
+        if scopes.contains_key(snapshot.scope_id) or snapshot.scope_id == "" or not snapshot.facts.complete:
+            return Err("traversal-source-lineage-incomplete")
+        for digest in [snapshot.inventory_digest, snapshot.declared_producer_digest,
+                snapshot.executing_image_digest, snapshot.file_tldr_root_digest]:
+            if not three_payload_contract_digest_valid_v1(digest):
+                return Err("traversal-source-lineage-invalid")
+        scopes[snapshot.scope_id] = batch_text("simple/aop-source-directory/v1",
+            [snapshot.scope_id, snapshot.inventory_digest, snapshot.declared_producer_digest,
+                snapshot.executing_image_digest, snapshot.file_tldr_root_digest, snapshot.facts.facts_key])
+    var values: [text] = []
+    for scope in canonical_identity_sort_texts(scopes.keys()): values.push(scopes[scope])
+    Ok(batch_text("simple/aop-source-batch/v1", values))
+
+pub fn aop_traversal_union_selector_v1(claims: [AspectForwardWeaveClaimV1]) -> text:
+    if claims.len() == 0: return "__simple_empty__ & !__simple_empty__"
+    var result = ""
+    for claim in claims:
+        if result != "": result = result + " | "
+        result = result + "(" + claim.selector + ")"
+    result
+
+pub fn aop_traversal_batch_apply_key_v1(match_digest: text, ordered_claim_identity: text,
+        base: text, image: text) -> text:
+    batch_key("simple/aop-ordered-batch-apply/v1", [match_digest, ordered_claim_identity, base, image])
