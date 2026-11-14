@@ -1399,3 +1399,31 @@ never cache an answer computed while exhausted) —
 - **Bitmap lane.** `check-simple-web-engine2d-js-bitmap-evidence.shs` refuses
   the Rust seed (`simple_bin_status=forbidden`) and needs a self-hosted
   `bin/simple`; on a host without one it reports `unavailable`, not a verdict.
+
+## 2026-11-14 — paint follows the float inset; an explicit zero flex-basis overrides width
+
+- **Per-line text inset.** `LayoutResult.first_line_dx` carries two forms: a
+  positive entry insets line 0 (mid-line run); a NEGATIVE entry
+  `-(lines * 65536 + dx)` insets the first `lines` lines by `dx` (lines a left
+  float shortened and the run outlasted). Read it ONLY through
+  `text_line_inset_at(table, node, line)`; the five readers are both raster
+  loops, the Draw IR first-line command, its `_line{n}` loop, and the
+  `text_line_x0` probe. Narrow the line box width with the inset as well.
+  This supersedes the "paint x of a wrapped run's lines that outlast a LEFT
+  float" item under "Not modelled" above. Spec (software ink columns + Draw
+  IR x): `test/01_unit/browser_engine/float_band_text_paint_inset_spec.spl`.
+- **`Style.flex_basis_zero`.** `flex: <n>` / `flex: <n> <m>` / `flex-basis: 0`
+  set it; `flex_basis_px` stays 0, so every pre-existing `== 0` / `> 0` test
+  behaves as before. The layout acts on it only through
+  `flex_item_zero_basis(st)` = zero basis AND a `width`: base size is padding
+  + border, the item joins the definite-grow share, and it is laid out via
+  `style_with_width`. A zero-basis item WITHOUT a width keeps the old
+  weight-share path, deliberately (pinned widget scenes use `flex: 1`
+  without widths; that path is unchanged by construction).
+- **Trap — the old shorthand parser read numbers positionally**
+  (`parse_nth_int`): `flex: auto` set nothing, `flex: 1 200px` made shrink 200.
+  It is token-based now: unitless = grow, shrink; length or `auto` = basis.
+- This supersedes the "`flex: 1` on an item that also has a `width`" item in
+  the follow-ups section above.
+- Open residue (one record):
+  `doc/08_tracking/bug/web_combo_matrix_float_subsup_flex_residue_2026-11-14.md`.

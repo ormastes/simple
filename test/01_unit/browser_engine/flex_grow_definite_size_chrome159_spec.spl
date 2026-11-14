@@ -143,3 +143,84 @@ describe "flex-grow on an item with a definite main size":
         val page = HEAD + "<div class=\"f\"><div id=\"a\" style=\"width:200px\">aa</div><div id=\"t\" style=\"width:200px;flex-grow:1\">cd</div></div>" + TAIL
         expect(box(page, "a")).to_equal("0,0,150,90")
         expect(box(page, "t")).to_equal("150,0,150,90")
+
+# `flex: <number>` is `flex: <number> 1 0%`: an explicit zero flex-basis, which
+# overrides `width` (the flex base size is taken from flex-basis unless it is
+# `auto`). Chrome 159, same container (`display:flex;width:300px;height:90px`),
+# items `a` then `t`, widths as `a / t`:
+#
+# | a style                                         | t style                  | a / t         |
+# |-------------------------------------------------|--------------------------|---------------|
+# | `flex:1;width:50px`                             | `flex:1;width:150px`     | 150 / 150     |
+# | `flex:2;width:10px`                             | `flex:1;width:200px`     | 200 / 100     |
+# | `flex:1;width:150px`                            | `width:60px`             | 240 / 60      |
+# | `flex:1;width:150px;padding:0 10px;border:2px solid` | `flex:1;width:20px` | 162 / 138     |
+# | `flex-grow:1;flex-basis:0;width:150px`          | same, `width:50px`       | 150 / 150     |
+# | `flex:1 1 0;width:150px`                        | `flex:1 1 0px;width:50px`| 150 / 150     |
+# | `flex:1 1 auto;width:150px`                     | `flex:1 1 auto;width:50px` | 200 / 100   |
+# | `flex:auto;width:150px`                         | `flex:auto;width:50px`   | 200 / 100     |
+# | `flex:none;width:150px`                         | `flex:none;width:50px`   | 150 / 50      |
+# | `flex:1 1 40px;width:150px`                     | `flex:1 1 20px;width:50px` | 160 / 140   |
+# | `flex:0;width:150px` (text `aa`, 17.8 px)       | `flex:1;width:50px`      | 17.8 / 282.2  |
+# | `flex:1;width:150px` holding `width:50%` child  | `flex:3;width:50px`      | 75 / 225, child 37.5 |
+# | `flex:1;min-width:120px;width:10px`             | `flex:1;width:50px`      | 150 / 150     |
+# | wrap container: `flex:1;width:200px`            | `flex:1;width:200px`     | 150 / 150, one line |
+fn pair(extra: text, a_style: text, t_style: text, a_inner: text) -> text:
+    HEAD + "<div class=\"f\" style=\"" + extra + "\"><div id=\"a\" style=\"" + a_style + "\">" + a_inner + "</div><div id=\"t\" style=\"" + t_style + "\">cd</div></div>" + TAIL
+
+fn widths(page: text) -> text:
+    field(page, "a", "w") + "/" + field(page, "t", "w")
+
+describe "an explicit zero flex-basis overrides width":
+    it "AC-12: flex:1 items with unequal widths end equal":
+        step("Chrome 159: width 50 and 150, both flex:1 -> 150 / 150")
+        val page = pair("", "flex:1;width:50px", "flex:1;width:150px", "aa")
+        expect(widths(page)).to_equal("150/150")
+        expect(field(page, "t", "x")).to_equal("150")
+
+    it "AC-13: the free space is shared by the flex factor alone":
+        step("Chrome 159: flex:2 / flex:1 -> 200 / 100 whatever the widths")
+        expect(widths(pair("", "flex:2;width:10px", "flex:1;width:200px", "aa"))).to_equal("200/100")
+        step("Chrome 159: a width sibling keeps its width; flex:1 takes the rest")
+        expect(widths(pair("", "flex:1;width:150px", "width:60px", "aa"))).to_equal("240/60")
+
+    it "AC-14: padding and border are added to the zero base":
+        step("Chrome 159: 24 px of padding and border -> 162 / 138")
+        expect(widths(pair("", "flex:1;width:150px;padding:0 10px;border:2px solid", "flex:1;width:20px", "aa"))).to_equal("162/138")
+
+    it "AC-15: flex-basis:0 and the three-value shorthand behave the same":
+        step("Chrome 159: 150 / 150 for both spellings")
+        expect(widths(pair("", "flex-grow:1;flex-basis:0;width:150px", "flex-grow:1;flex-basis:0;width:50px", "aa"))).to_equal("150/150")
+        expect(widths(pair("", "flex:1 1 0;width:150px", "flex:1 1 0px;width:50px", "aa"))).to_equal("150/150")
+
+    it "AC-16: an auto basis still grows from the width":
+        step("Chrome 159: flex:1 1 auto and flex:auto -> 200 / 100; flex:none -> 150 / 50")
+        expect(widths(pair("", "flex:1 1 auto;width:150px", "flex:1 1 auto;width:50px", "aa"))).to_equal("200/100")
+        expect(widths(pair("", "flex:auto;width:150px", "flex:auto;width:50px", "aa"))).to_equal("200/100")
+        expect(widths(pair("", "flex:none;width:150px", "flex:none;width:50px", "aa"))).to_equal("150/50")
+        step("Chrome 159: a px basis overrides width too -> 160 / 140")
+        expect(widths(pair("", "flex:1 1 40px;width:150px", "flex:1 1 20px;width:50px", "aa"))).to_equal("160/140")
+
+    it "AC-17: flex:0 collapses to the content, not to the width":
+        step("Chrome 159: `aa` is 17.8 px -> 17.8 / 282.2")
+        val page = pair("", "flex:0;width:150px", "flex:1;width:50px", "aa")
+        expect(field(page, "a", "w").to_int()).to_be_greater_than(16)
+        expect(field(page, "a", "w").to_int()).to_be_less_than(20)
+        expect(field(page, "t", "w").to_int()).to_be_greater_than(280)
+        expect(field(page, "t", "w").to_int()).to_be_less_than(284)
+
+    it "AC-18: content resolves against the used width, and min-width still holds":
+        step("Chrome 159: 75 / 225; a width:50% child of the 75 px item is 37.5")
+        val page = pair("", "flex:1;width:150px", "flex:3;width:50px", "<div id=\"c\" style=\"width:50%\">x</div>")
+        expect(widths(page)).to_equal("75/225")
+        expect(field(page, "c", "w").to_int()).to_be_greater_than(36)
+        expect(field(page, "c", "w").to_int()).to_be_less_than(39)
+        step("Chrome 159: min-width:120px is already met at 150 -> 150 / 150")
+        expect(widths(pair("", "flex:1;min-width:120px;width:10px", "flex:1;width:50px", "aa"))).to_equal("150/150")
+
+    it "AC-19: a wrapping container measures the zero base, so both fit one line":
+        step("Chrome 159: two flex:1;width:200px items in 300 px -> 150 / 150 on one line")
+        val page = pair("flex-wrap:wrap", "flex:1;width:200px", "flex:1;width:200px", "aa")
+        expect(widths(page)).to_equal("150/150")
+        expect(field(page, "t", "x")).to_equal("150")
+        expect(field(page, "t", "y")).to_equal("0")
