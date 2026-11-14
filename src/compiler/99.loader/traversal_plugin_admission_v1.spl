@@ -1,0 +1,249 @@
+# H5: externally authorized, signed traversal-plugin allowlist.
+#
+# The policy is supplied by the trusted compiler composition root. The
+# signature covers the exact canonical SDN bytes; neither the plugin nor its
+# own manifest may supply/adopt the trust root. This module only validates
+# policy and returns a typed entry. Effectful loading is a separate owner.
+
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.strict_v1.{sdn_parse_strict_v1}
+use std.common.sdn.strict_types_v1.{SdnStrictLimitsV1}
+use std.common.sdn.encode.{sdn_encode_canonical}
+use std.common.crypto.ed25519.{pure_ed25519_verify}
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use std.common.string_core.{text_to_bytes}
+use compiler.common.cache_contract.hash_algorithm_registry_v1.{
+    DigestV1, HASH_ALGO_SHA256_V1, digest_v1_parse, digest_v1_text
+}
+use std.nogc_sync_mut.io_runtime.{platform_name, host_arch}
+use compiler.frontend.core.cfg_platform.{cfg_normalize_arch}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded}
+use std.nogc_sync_mut.sffi.dynlib_exact_admission_v1.{
+    DynlibAdmissionErrorV1, dynlib_admit_exact_v1,
+    dynlib_symbol_address_v1, dynlib_admitted_close_v1
+}
+use compiler.loader.traversal_plugin_elf_gate_v1.{traversal_plugin_elf_gate_v1}
+
+pub val TRAVERSAL_PLUGIN_ALLOWLIST_MAX_SOURCE_BYTES_V1: i64 = 65536
+pub val TRAVERSAL_PLUGIN_ALLOWLIST_MAX_ENTRIES_V1: i64 = 128
+pub val TRAVERSAL_PLUGIN_ARTIFACT_MAX_BYTES_V1: i64 = 67108864
+pub val TRAVERSAL_PLUGIN_ENTRY_SYMBOL_V1: text = "simple_traversal_plugin_v1"
+pub val TRAVERSAL_PLUGIN_ABI_ID_V1: text = "simple-traversal-plugin/v1"
+
+pub struct TraversalPluginAllowlistEntryV1:
+    provider_id: text
+    artifact_path: text
+    code_digest: DigestV1
+    abi_fingerprint: text
+    entry_symbol: text
+
+pub struct VerifiedTraversalPluginAllowlistV1:
+    entries: [TraversalPluginAllowlistEntryV1]
+    source_digest: text
+    host_abi_fingerprint: text
+
+pub class AdmittedTraversalPluginProviderV1:
+    provider_id: text
+    code_digest: text
+    abi_fingerprint: text
+    artifact_path: text
+    library_handle: i64
+    entry_symbol_address: i64
+
+fn _traversal_allowlist_fields_v1(value: SdnValue,
+        allowed: [text]) -> Result<Dict<text, SdnValue>, text>:
+    val fields = match value:
+        case SdnValue.Dict(items): items
+        case _: return Err("traversal-allowlist-object-required")
+    for name in fields.keys():
+        if not allowed.contains(name):
+            return Err("traversal-allowlist-unknown-field:" + name)
+    for name in allowed:
+        if not fields.contains_key(name):
+            return Err("traversal-allowlist-missing-field:" + name)
+    Ok(fields)
+
+fn _traversal_allowlist_text_v1(fields: Dict<text, SdnValue>,
+        name: text) -> Result<text, text>:
+    match fields[name]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("traversal-allowlist-text-required:" + name)
+
+fn _traversal_allowlist_int_v1(fields: Dict<text, SdnValue>,
+        name: text) -> Result<i64, text>:
+    match fields[name]:
+        case SdnValue.Int(value): Ok(value)
+        case _: Err("traversal-allowlist-integer-required:" + name)
+
+fn _traversal_allowlist_provider_id_valid_v1(value: text) -> bool:
+    if value == "" or value.byte_len() > 128: return false
+    for ch in value.chars():
+        if not ((ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or
+                (ch >= "0" and ch <= "9") or ch == "." or ch == "_" or ch == "-"):
+            return false
+    true
+
+fn _traversal_allowlist_path_valid_v1(path: text) -> bool:
+    if path == "" or path.byte_len() > 4096 or not path.starts_with("/") or
+            path.contains("\0") or path.contains("\n") or path.contains("\r") or
+            path.contains("://") or path.ends_with("/"):
+        return false
+    for component in path.split("/"):
+        if component == ".." or component == ".": return false
+    true
+
+pub fn traversal_plugin_host_abi_fingerprint_v1() -> text:
+    if platform_name() != "linux": return ""
+    val arch = cfg_normalize_arch(host_arch())
+    if arch == "x86_64": return "linux-x86_64-elf64-le-sysv-v1"
+    if arch == "aarch64": return "linux-aarch64-elf64-le-aapcs64-v1"
+    ""
+
+fn _traversal_allowlist_entry_v1(value: SdnValue,
+        host_abi: text) -> Result<TraversalPluginAllowlistEntryV1, text>:
+    val fields = _traversal_allowlist_fields_v1(value,
+        ["providerId", "artifactPath", "codeDigest", "abi", "entry", "hostAbi", "dependencies"])?
+    val provider_id = _traversal_allowlist_text_v1(fields, "providerId")?
+    if not _traversal_allowlist_provider_id_valid_v1(provider_id):
+        return Err("traversal-allowlist-provider-id-invalid")
+    val artifact_path = _traversal_allowlist_text_v1(fields, "artifactPath")?
+    if not _traversal_allowlist_path_valid_v1(artifact_path):
+        return Err("traversal-allowlist-artifact-path-invalid")
+    val digest_text = _traversal_allowlist_text_v1(fields, "codeDigest")?
+    val digest = match digest_v1_parse(digest_text):
+        case Some(value): value
+        case None: return Err("traversal-allowlist-code-digest-invalid")
+    if digest.algo_id != HASH_ALGO_SHA256_V1 or digest_v1_text(digest) != digest_text:
+        return Err("traversal-allowlist-code-digest-invalid")
+    if _traversal_allowlist_text_v1(fields, "abi")? != TRAVERSAL_PLUGIN_ABI_ID_V1:
+        return Err("traversal-allowlist-abi-unsupported")
+    if _traversal_allowlist_text_v1(fields, "entry")? != TRAVERSAL_PLUGIN_ENTRY_SYMBOL_V1:
+        return Err("traversal-allowlist-entry-unsupported")
+    if _traversal_allowlist_text_v1(fields, "hostAbi")? != host_abi:
+        return Err("traversal-allowlist-host-abi-mismatch")
+    # v1 accepts only dependency-free images. Do not permit the policy to
+    # broaden loader resolution or authorize dependencies transitively.
+    match fields["dependencies"]:
+        case SdnValue.Array(values):
+            if values.len() != 0: return Err("traversal-allowlist-dependencies-unsupported")
+        case _: return Err("traversal-allowlist-dependencies-array-required")
+    Ok(TraversalPluginAllowlistEntryV1(provider_id: provider_id,
+        artifact_path: artifact_path, code_digest: digest,
+        abi_fingerprint: host_abi, entry_symbol: TRAVERSAL_PLUGIN_ENTRY_SYMBOL_V1))
+
+pub fn traversal_plugin_allowlist_verify_decode_v1(source: text,
+        signature: [u8], external_trust_root: [u8]) -> Result<VerifiedTraversalPluginAllowlistV1, text>:
+    """Verify detached Ed25519 signature before parsing or admitting a plugin.
+
+    `external_trust_root` is provisioned by the trusted application
+    composition root through a channel independent of the plugin and policy.
+    An absent root, unsigned policy or malformed signature is always a refusal.
+    """
+    if source == "" or source.byte_len() > TRAVERSAL_PLUGIN_ALLOWLIST_MAX_SOURCE_BYTES_V1:
+        return Err("traversal-allowlist-source-size")
+    if external_trust_root.len() != 32:
+        return Err("traversal-provider-trust-root-unavailable")
+    if signature.len() != 64:
+        return Err("traversal-allowlist-signature-required")
+    val canonical_bytes = text_to_bytes(source)
+    if not pure_ed25519_verify(external_trust_root, canonical_bytes, signature):
+        return Err("traversal-allowlist-signature-invalid")
+    val limits = SdnStrictLimitsV1(max_source_bytes: TRAVERSAL_PLUGIN_ALLOWLIST_MAX_SOURCE_BYTES_V1,
+        max_depth: 4, max_nodes: 4096, max_rows: 0, max_cells: 0, max_columns: 16)
+    val document = match sdn_parse_strict_v1(source, limits):
+        case Ok(value): value
+        case Err(issue): return Err("traversal-allowlist-syntax:" + issue.code)
+    if sdn_encode_canonical(document.value) + "\n" != source:
+        return Err("traversal-allowlist-noncanonical")
+    val fields = _traversal_allowlist_fields_v1(document.value,
+        ["version", "kind", "hostAbi", "plugins"])?
+    if _traversal_allowlist_int_v1(fields, "version")? != 1 or
+            _traversal_allowlist_text_v1(fields, "kind")? != "simple-traversal-plugin-allowlist":
+        return Err("traversal-allowlist-version")
+    val host_abi = traversal_plugin_host_abi_fingerprint_v1()
+    if host_abi == "": return Err("traversal-provider-host-unsupported")
+    if _traversal_allowlist_text_v1(fields, "hostAbi")? != host_abi:
+        return Err("traversal-allowlist-host-abi-mismatch")
+    val raw_entries = match fields["plugins"]:
+        case SdnValue.Array(values): values
+        case _: return Err("traversal-allowlist-plugins-array-required")
+    if raw_entries.len() == 0 or raw_entries.len() > TRAVERSAL_PLUGIN_ALLOWLIST_MAX_ENTRIES_V1:
+        return Err("traversal-allowlist-entry-count")
+    var entries: [TraversalPluginAllowlistEntryV1] = []
+    var prior_id = ""
+    for raw_entry in raw_entries:
+        val entry = _traversal_allowlist_entry_v1(raw_entry, host_abi)?
+        if prior_id != "" and entry.provider_id <= prior_id:
+            return Err("traversal-allowlist-entry-order-or-duplicate")
+        prior_id = entry.provider_id
+        entries.push(entry)
+    Ok(VerifiedTraversalPluginAllowlistV1(entries: entries,
+        source_digest: "sha256:" + sha256_text(source), host_abi_fingerprint: host_abi))
+
+pub fn traversal_plugin_allowlist_select_v1(policy: VerifiedTraversalPluginAllowlistV1,
+        provider_id: text) -> Result<TraversalPluginAllowlistEntryV1, text>:
+    for entry in policy.entries:
+        if entry.provider_id == provider_id: return Ok(entry)
+    Err("traversal-provider-not-admitted")
+
+@unsafe(reason: "loads only a signed, SHA-pinned, dependency-free traversal provider", capabilities: [ffi, raw_ptr])
+pub fn traversal_plugin_provider_load_v1(source: text, signature: [u8],
+        external_trust_root: [u8], provider_id: text) -> Result<AdmittedTraversalPluginProviderV1, text>:
+    """Verify signed local policy and exact bytes before any loader effect.
+
+    This v1 profile is Linux ELF64 x86-64/AArch64 only. It rejects imported
+    dependencies, constructors and all unknown dynamic features, then loads
+    the sealed digest-checked snapshot and resolves one fixed entry symbol.
+    The returned mapping is held for process lifetime; callers must retain the
+    provider object through every synchronous call.
+    """
+    val policy = traversal_plugin_allowlist_verify_decode_v1(source, signature,
+        external_trust_root)?
+    val entry = traversal_plugin_allowlist_select_v1(policy, provider_id)?
+    val arch = cfg_normalize_arch(host_arch())
+    val artifact = match file_read_regular_no_follow_bounded(entry.artifact_path,
+            TRAVERSAL_PLUGIN_ARTIFACT_MAX_BYTES_V1):
+        case Ok(bytes): bytes
+        case Err(_): return Err("traversal-provider-artifact-unreadable")
+    if sha256_u8_hex(artifact) != entry.code_digest.hex:
+        return Err("traversal-provider-digest-mismatch")
+    val elf_error = traversal_plugin_elf_gate_v1(artifact, arch, entry.entry_symbol)
+    if elf_error != "": return Err(elf_error)
+    val admitted = unsafe(capabilities: [ffi, raw_ptr]):
+        dynlib_admit_exact_v1(entry.artifact_path, entry.code_digest.hex)
+    val admitted_handle = match admitted:
+        case Ok(handle): handle
+        case Err(error):
+            match error:
+                case DynlibAdmissionErrorV1.PlatformUnavailable:
+                    return Err("traversal-provider-host-unsupported")
+                case DynlibAdmissionErrorV1.ArtifactAbsent:
+                    return Err("traversal-provider-artifact-unreadable")
+                case DynlibAdmissionErrorV1.DigestUnreadable:
+                    return Err("traversal-provider-sealed-digest-unreadable")
+                case DynlibAdmissionErrorV1.DigestMismatch:
+                    return Err("traversal-provider-digest-mismatch")
+                case DynlibAdmissionErrorV1.LoadFailed:
+                    return Err("traversal-provider-load-failed")
+                case DynlibAdmissionErrorV1.SwappedDuringLoad:
+                    return Err("traversal-provider-image-changed-during-load")
+    val symbol = unsafe(capabilities: [ffi, raw_ptr]):
+        dynlib_symbol_address_v1(admitted_handle, entry.entry_symbol)
+    if symbol <= 0:
+        unsafe(capabilities: [ffi]):
+            dynlib_admitted_close_v1(admitted_handle)
+        return Err("traversal-provider-entry-symbol-missing")
+    Ok(AdmittedTraversalPluginProviderV1(provider_id: entry.provider_id,
+        code_digest: digest_v1_text(entry.code_digest),
+        abi_fingerprint: entry.abi_fingerprint, artifact_path: entry.artifact_path,
+        library_handle: admitted_handle, entry_symbol_address: symbol))
+
+export TRAVERSAL_PLUGIN_ALLOWLIST_MAX_SOURCE_BYTES_V1,
+    TRAVERSAL_PLUGIN_ALLOWLIST_MAX_ENTRIES_V1,
+    TRAVERSAL_PLUGIN_ARTIFACT_MAX_BYTES_V1,
+    TRAVERSAL_PLUGIN_ENTRY_SYMBOL_V1, TRAVERSAL_PLUGIN_ABI_ID_V1
+export TraversalPluginAllowlistEntryV1, VerifiedTraversalPluginAllowlistV1
+export AdmittedTraversalPluginProviderV1
+export traversal_plugin_host_abi_fingerprint_v1
+export traversal_plugin_allowlist_verify_decode_v1, traversal_plugin_allowlist_select_v1
+export traversal_plugin_provider_load_v1

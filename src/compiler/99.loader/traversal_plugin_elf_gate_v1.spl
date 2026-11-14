@@ -1,0 +1,297 @@
+# Linux x86-64/AArch64 dependency-free traversal-plugin artifact profile.
+#
+# This is deliberately a closed subset of ELF64: an admitted image has no
+# dependency/constructor/import/TLS/IFUNC path that can execute code other than
+# the exact digest-pinned provider. Unknown dynamic tags are unsupported.
+use std.common.elf.elf_image_v1.{elf_image_header_v1,
+    elf_image_u16_le_v1, elf_image_u32_le_v1, elf_image_u64_le_v1,
+    ELF_IMAGE_HEADER_BYTES_V1, ELF_IMAGE_PHDR_BYTES_V1}
+use std.common.string_core.{bytes_to_text}
+
+val _TRAVERSAL_ELF_ET_DYN_V1: i64 = 3
+val _TRAVERSAL_ELF_PT_LOAD_V1: i64 = 1
+val _TRAVERSAL_ELF_PT_DYNAMIC_V1: i64 = 2
+val _TRAVERSAL_ELF_PT_INTERP_V1: i64 = 3
+val _TRAVERSAL_ELF_PT_TLS_V1: i64 = 7
+val _TRAVERSAL_ELF_DT_NULL_V1: i64 = 0
+val _TRAVERSAL_ELF_DT_HASH_V1: i64 = 4
+val _TRAVERSAL_ELF_DT_STRTAB_V1: i64 = 5
+val _TRAVERSAL_ELF_DT_SYMTAB_V1: i64 = 6
+val _TRAVERSAL_ELF_DT_STRSZ_V1: i64 = 10
+val _TRAVERSAL_ELF_DT_SYMENT_V1: i64 = 11
+val _TRAVERSAL_ELF_DT_INIT_V1: i64 = 12
+val _TRAVERSAL_ELF_DT_FINI_V1: i64 = 13
+val _TRAVERSAL_ELF_DT_SONAME_V1: i64 = 14
+val _TRAVERSAL_ELF_DT_RPATH_V1: i64 = 15
+val _TRAVERSAL_ELF_DT_DEBUG_V1: i64 = 21
+val _TRAVERSAL_ELF_DT_TEXTREL_V1: i64 = 22
+val _TRAVERSAL_ELF_DT_JMPREL_V1: i64 = 23
+val _TRAVERSAL_ELF_DT_BIND_NOW_V1: i64 = 24
+val _TRAVERSAL_ELF_DT_INIT_ARRAY_V1: i64 = 25
+val _TRAVERSAL_ELF_DT_FINI_ARRAY_V1: i64 = 26
+val _TRAVERSAL_ELF_DT_INIT_ARRAYSZ_V1: i64 = 27
+val _TRAVERSAL_ELF_DT_FINI_ARRAYSZ_V1: i64 = 28
+val _TRAVERSAL_ELF_DT_RUNPATH_V1: i64 = 29
+val _TRAVERSAL_ELF_DT_FLAGS_V1: i64 = 30
+val _TRAVERSAL_ELF_DT_PREINIT_ARRAY_V1: i64 = 32
+val _TRAVERSAL_ELF_DT_PREINIT_ARRAYSZ_V1: i64 = 33
+val _TRAVERSAL_ELF_STT_TLS_V1: i64 = 6
+val _TRAVERSAL_ELF_STT_GNU_IFUNC_V1: i64 = 10
+
+struct TraversalElfLoadSegmentV1:
+    offset: i64
+    virtual_address: i64
+    file_size: i64
+    memory_size: i64
+    flags: i64
+
+fn _traversal_elf_range_v1(bytes: [u8], offset: i64, size: i64) -> bool:
+    offset >= 0 and size >= 0 and offset <= bytes.len() and size <= bytes.len() - offset
+
+fn _traversal_elf_vaddr_offset_v1(bytes: [u8], phoff: i64, phnum: i64,
+        address: i64, size: i64) -> i64:
+    var index = 0
+    while index < phnum:
+        val ph = phoff + index * ELF_IMAGE_PHDR_BYTES_V1
+        if elf_image_u32_le_v1(bytes, ph) == _TRAVERSAL_ELF_PT_LOAD_V1:
+            val file_offset = elf_image_u64_le_v1(bytes, ph + 8)
+            val virtual_address = elf_image_u64_le_v1(bytes, ph + 16)
+            val file_size = elf_image_u64_le_v1(bytes, ph + 32)
+            if file_offset >= 0 and virtual_address >= 0 and file_size >= 0 and address >= virtual_address:
+                val delta = address - virtual_address
+                if delta <= file_size and size >= 0 and size <= file_size - delta:
+                    val result = file_offset + delta
+                    if _traversal_elf_range_v1(bytes, result, size): return result
+        index = index + 1
+    -1
+
+fn _traversal_elf_cstr_equals_v1(bytes: [u8], offset: i64,
+        length: i64, wanted: text) -> bool:
+    if offset < 0 or length <= 0 or offset >= bytes.len() or length > bytes.len() - offset:
+        return false
+    var index = 0
+    while index < length:
+        if bytes[offset + index] == 0u8:
+            return wanted.byte_len() == index and bytes_to_text(bytes.slice(offset, offset + index)) == wanted
+        index = index + 1
+    false
+
+fn _traversal_elf_load_segment_contains_v1(segments: [TraversalElfLoadSegmentV1],
+        address: i64, size: i64, required_flags: i64) -> bool:
+    for segment in segments:
+        if (address >= segment.virtual_address and size >= 0 and
+                address - segment.virtual_address <= segment.memory_size and
+                size <= segment.memory_size - (address - segment.virtual_address) and
+                (segment.flags & required_flags) == required_flags):
+            return true
+    false
+
+fn _traversal_elf_dynamic_mapped_v1(segments: [TraversalElfLoadSegmentV1],
+        file_offset: i64, virtual_address: i64, size: i64) -> bool:
+    if file_offset < 0 or virtual_address < 0 or size < 0: return false
+    for segment in segments:
+        if file_offset >= segment.offset and virtual_address >= segment.virtual_address:
+            val file_delta = file_offset - segment.offset
+            val virtual_delta = virtual_address - segment.virtual_address
+            if file_delta == virtual_delta and file_delta <= segment.file_size and
+                    size <= segment.file_size - file_delta:
+                return true
+    false
+
+fn _traversal_elf_symbol_name_valid_v1(bytes: [u8], strings_offset: i64,
+        strings_size: i64, name_offset: i64) -> bool:
+    if name_offset < 0 or name_offset >= strings_size: return false
+    if name_offset == 0: return true
+    var cursor = name_offset
+    while cursor < strings_size:
+        if bytes[strings_offset + cursor] == 0u8: return true
+        cursor = cursor + 1
+    false
+
+# Return empty on acceptance, otherwise a stable refusal code.
+pub fn traversal_plugin_elf_gate_v1(bytes: [u8], expected_arch: text,
+        expected_entry_symbol: text) -> text:
+    if bytes.len() < ELF_IMAGE_HEADER_BYTES_V1 or bytes.len() > 67108864:
+        return "traversal-provider-image-size"
+    val header = match elf_image_header_v1(bytes):
+        case Some(value): value
+        case None: return "traversal-provider-elf64-little-endian-required"
+    if header.e_type != _TRAVERSAL_ELF_ET_DYN_V1:
+        return "traversal-provider-et-dyn-required"
+    if bytes[7] != 0u8 and bytes[7] != 3u8:
+        return "traversal-provider-elf-osabi-unsupported"
+    val expected_machine = if expected_arch == "x86_64": 62 else if expected_arch == "aarch64": 183 else: 0
+    if expected_machine == 0 or header.e_machine != expected_machine:
+        return "traversal-provider-host-architecture-mismatch"
+    if header.e_phentsize != ELF_IMAGE_PHDR_BYTES_V1 or header.e_phnum <= 0 or
+            header.e_phoff < ELF_IMAGE_HEADER_BYTES_V1 or
+            header.e_phoff > bytes.len() or
+            header.e_phnum > (bytes.len() - header.e_phoff) / ELF_IMAGE_PHDR_BYTES_V1:
+        return "traversal-provider-program-header-invalid"
+    var segments: [TraversalElfLoadSegmentV1] = []
+    var dynamic_offset = -1
+    var dynamic_address = -1
+    var dynamic_size = 0
+    var dynamic_count = 0
+    var index = 0
+    while index < header.e_phnum:
+        val ph = header.e_phoff + index * ELF_IMAGE_PHDR_BYTES_V1
+        val kind = elf_image_u32_le_v1(bytes, ph)
+        val file_offset = elf_image_u64_le_v1(bytes, ph + 8)
+        val virtual_address = elf_image_u64_le_v1(bytes, ph + 16)
+        val size = elf_image_u64_le_v1(bytes, ph + 32)
+        if kind == _TRAVERSAL_ELF_PT_INTERP_V1 or kind == _TRAVERSAL_ELF_PT_TLS_V1:
+            return "traversal-provider-interpreter-or-tls-unsupported"
+        if kind == _TRAVERSAL_ELF_PT_DYNAMIC_V1:
+            dynamic_count = dynamic_count + 1
+            dynamic_offset = file_offset
+            dynamic_address = virtual_address
+            dynamic_size = size
+        if kind == _TRAVERSAL_ELF_PT_LOAD_V1:
+            val memory_size = elf_image_u64_le_v1(bytes, ph + 40)
+            val flags = elf_image_u32_le_v1(bytes, ph + 4)
+            if file_offset < 0 or virtual_address < 0 or size <= 0 or memory_size < size or
+                    memory_size > 9223372036854775807 - virtual_address or
+                    not _traversal_elf_range_v1(bytes, file_offset, size) or
+                    (flags & 0xfffffff8) != 0 or ((flags & 2) != 0 and (flags & 1) != 0):
+                return "traversal-provider-load-segment-invalid"
+            for previous in segments:
+                if (virtual_address < previous.virtual_address + previous.memory_size and
+                        previous.virtual_address < virtual_address + memory_size):
+                    return "traversal-provider-overlapping-load-segments"
+                if (file_offset < previous.offset + previous.file_size and
+                        previous.offset < file_offset + size):
+                    return "traversal-provider-overlapping-file-segments"
+            segments.push(TraversalElfLoadSegmentV1(offset: file_offset,
+                virtual_address: virtual_address, file_size: size,
+                memory_size: memory_size, flags: flags))
+        index = index + 1
+    if segments.len() == 0 or dynamic_count != 1 or dynamic_size <= 0 or dynamic_size > 1048576 or dynamic_size % 16 != 0 or
+            not _traversal_elf_range_v1(bytes, dynamic_offset, dynamic_size):
+        return "traversal-provider-dynamic-segment-invalid"
+    if not _traversal_elf_dynamic_mapped_v1(segments, dynamic_offset,
+            dynamic_address, dynamic_size):
+        return "traversal-provider-dynamic-segment-not-load-mapped"
+    var hash_address = -1
+    var strtab_address = -1
+    var strtab_size = -1
+    var symtab_address = -1
+    var syment = -1
+    var soname_offset = -1
+    var seen_tags: Dict<i64, bool> = {}
+    var found_null = false
+    var cursor = dynamic_offset
+    val dynamic_end = dynamic_offset + dynamic_size
+    while cursor + 16 <= dynamic_end:
+        val tag = elf_image_u64_le_v1(bytes, cursor)
+        val value = elf_image_u64_le_v1(bytes, cursor + 8)
+        if tag == _TRAVERSAL_ELF_DT_NULL_V1:
+            found_null = true
+            cursor = cursor + 16
+            while cursor + 16 <= dynamic_end:
+                if elf_image_u64_le_v1(bytes, cursor) != 0 or
+                        elf_image_u64_le_v1(bytes, cursor + 8) != 0:
+                    return "traversal-provider-dynamic-trailing-data"
+                cursor = cursor + 16
+        else:
+            if tag < 0 or value < 0: return "traversal-provider-dynamic-field-out-of-range"
+            if seen_tags.contains_key(tag): return "traversal-provider-duplicate-dynamic-tag"
+            seen_tags[tag] = true
+            if tag == _TRAVERSAL_ELF_DT_HASH_V1: hash_address = value
+            else if tag == _TRAVERSAL_ELF_DT_STRTAB_V1: strtab_address = value
+            else if tag == _TRAVERSAL_ELF_DT_STRSZ_V1: strtab_size = value
+            else if tag == _TRAVERSAL_ELF_DT_SYMTAB_V1: symtab_address = value
+            else if tag == _TRAVERSAL_ELF_DT_SYMENT_V1: syment = value
+            else if tag == _TRAVERSAL_ELF_DT_SONAME_V1: soname_offset = value
+            else if tag == _TRAVERSAL_ELF_DT_BIND_NOW_V1:
+                if value != 0: return "traversal-provider-bind-now-value-invalid"
+            else:
+                # Includes DT_NEEDED, init/fini hooks and arrays, REL/PLT,
+                # text relocations, runpaths, audit/filter hooks and unknowns.
+                return "traversal-provider-dynamic-feature-unsupported"
+            cursor = cursor + 16
+    if not found_null or hash_address < 0 or strtab_address < 0 or strtab_size <= 0 or
+            symtab_address < 0 or syment != 24:
+        return "traversal-provider-dynamic-symbol-table-invalid"
+    if strtab_size > 16777216:
+        return "traversal-provider-dynamic-table-size-invalid"
+    val hash_offset = _traversal_elf_vaddr_offset_v1(bytes, header.e_phoff,
+        header.e_phnum, hash_address, 8)
+    if hash_offset < 0: return "traversal-provider-hash-table-invalid"
+    val bucket_count = elf_image_u32_le_v1(bytes, hash_offset)
+    val symbol_count = elf_image_u32_le_v1(bytes, hash_offset + 4)
+    if bucket_count <= 0 or bucket_count > 65536 or symbol_count <= 0 or symbol_count > 65536:
+        return "traversal-provider-symbol-count-invalid"
+    val buckets_size = (2 + bucket_count + symbol_count) * 4
+    if _traversal_elf_vaddr_offset_v1(bytes, header.e_phoff, header.e_phnum,
+            hash_address, buckets_size) < 0:
+        return "traversal-provider-hash-table-invalid"
+    val buckets_offset = hash_offset + 8
+    val chains_offset = buckets_offset + bucket_count * 4
+    var bucket_index = 0
+    var chain_work = 0
+    while bucket_index < bucket_count:
+        var symbol_link = elf_image_u32_le_v1(bytes, buckets_offset + bucket_index * 4)
+        if symbol_link >= symbol_count: return "traversal-provider-hash-bucket-invalid"
+        var steps = 0
+        while symbol_link != 0:
+            if symbol_link >= symbol_count or steps >= symbol_count:
+                return "traversal-provider-hash-chain-invalid"
+            symbol_link = elf_image_u32_le_v1(bytes, chains_offset + symbol_link * 4)
+            steps = steps + 1
+            chain_work = chain_work + 1
+            if chain_work > 1048576: return "traversal-provider-hash-work-limit"
+        bucket_index = bucket_index + 1
+    var chain_index = 0
+    while chain_index < symbol_count:
+        if elf_image_u32_le_v1(bytes, chains_offset + chain_index * 4) >= symbol_count:
+            return "traversal-provider-hash-chain-index-invalid"
+        chain_index = chain_index + 1
+    val strings_offset = _traversal_elf_vaddr_offset_v1(bytes, header.e_phoff,
+        header.e_phnum, strtab_address, strtab_size)
+    val symbols_offset = _traversal_elf_vaddr_offset_v1(bytes, header.e_phoff,
+        header.e_phnum, symtab_address, symbol_count * 24)
+    if strings_offset < 0 or symbols_offset < 0:
+        return "traversal-provider-symbol-table-range-invalid"
+    if soname_offset >= 0 and not _traversal_elf_symbol_name_valid_v1(bytes,
+            strings_offset, strtab_size, soname_offset):
+        return "traversal-provider-soname-invalid"
+    var found_entry = false
+    var entry_count = 0
+    var symbol_index = 0
+    while symbol_index < symbol_count:
+        val symbol = symbols_offset + symbol_index * 24
+        val name_offset = elf_image_u32_le_v1(bytes, symbol)
+        val info = bytes[symbol + 4] as i64
+        val symbol_type = info & 15
+        val section_index = elf_image_u16_le_v1(bytes, symbol + 6)
+        if not _traversal_elf_symbol_name_valid_v1(bytes, strings_offset,
+                strtab_size, name_offset):
+            return "traversal-provider-symbol-name-invalid"
+        if symbol_type == _TRAVERSAL_ELF_STT_TLS_V1 or
+                symbol_type == _TRAVERSAL_ELF_STT_GNU_IFUNC_V1:
+            return "traversal-provider-tls-or-ifunc-symbol-unsupported"
+        if symbol_index > 0 and section_index == 0:
+            return "traversal-provider-undefined-symbol-unsupported"
+        if name_offset > 0 and _traversal_elf_cstr_equals_v1(bytes,
+                strings_offset + name_offset, strtab_size - name_offset,
+                expected_entry_symbol):
+            val binding = info >> 4
+            val visibility = bytes[symbol + 5] as i64 & 3
+            val symbol_value = elf_image_u64_le_v1(bytes, symbol + 8)
+            val symbol_size = elf_image_u64_le_v1(bytes, symbol + 16)
+            if section_index == 0 or section_index == 0xfff1 or section_index == 0xffff or
+                    symbol_type != 2 or binding != 1 or symbol_size <= 0 or
+                    (visibility != 0 and visibility != 3):
+                return "traversal-provider-entry-symbol-invalid"
+            if not _traversal_elf_load_segment_contains_v1(segments,
+                    symbol_value, symbol_size, 1):
+                return "traversal-provider-entry-not-executable-mapped"
+            found_entry = true
+            entry_count = entry_count + 1
+        symbol_index = symbol_index + 1
+    if not found_entry: return "traversal-provider-entry-symbol-missing"
+    if entry_count != 1: return "traversal-provider-entry-symbol-ambiguous"
+    ""
+
+export traversal_plugin_elf_gate_v1

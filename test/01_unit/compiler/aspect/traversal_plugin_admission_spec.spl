@@ -1,0 +1,73 @@
+use std.spec.{describe, it, expect}
+use compiler.loader.traversal_plugin_admission_v1.{
+    traversal_plugin_host_abi_fingerprint_v1,
+    traversal_plugin_allowlist_verify_decode_v1,
+    traversal_plugin_allowlist_select_v1,
+    TRAVERSAL_PLUGIN_ENTRY_SYMBOL_V1, TRAVERSAL_PLUGIN_ABI_ID_V1
+}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.crypto.ed25519.{pure_ed25519_keypair_from_seed, pure_ed25519_sign}
+use std.common.string_core.text_to_bytes
+
+fn traversal_plugin_test_key_v1() -> ([u8], [u8]):
+    pure_ed25519_keypair_from_seed([0u8, 1u8, 2u8, 3u8, 4u8, 5u8, 6u8, 7u8,
+        8u8, 9u8, 10u8, 11u8, 12u8, 13u8, 14u8, 15u8, 16u8, 17u8, 18u8,
+        19u8, 20u8, 21u8, 22u8, 23u8, 24u8, 25u8, 26u8, 27u8, 28u8, 29u8, 30u8, 31u8])
+
+fn traversal_plugin_test_policy_v1(host_abi: text, dependencies: [SdnValue]) -> text:
+    val entry = SdnValue.Dict({
+        "providerId": SdnValue.String("test.traversal"),
+        "artifactPath": SdnValue.String("/opt/simple/plugins/traversal.so"),
+        "codeDigest": SdnValue.String("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        "abi": SdnValue.String(TRAVERSAL_PLUGIN_ABI_ID_V1),
+        "entry": SdnValue.String(TRAVERSAL_PLUGIN_ENTRY_SYMBOL_V1),
+        "hostAbi": SdnValue.String(host_abi),
+        "dependencies": SdnValue.Array(dependencies)
+    })
+    sdn_encode_canonical(SdnValue.Dict({
+        "version": SdnValue.Int(1),
+        "kind": SdnValue.String("simple-traversal-plugin-allowlist"),
+        "hostAbi": SdnValue.String(host_abi),
+        "plugins": SdnValue.Array([entry])
+    })) + "\n"
+
+fn traversal_plugin_test_signed_source_v1(source: text) -> ([u8], [u8], [u8]):
+    val (seed, public_key) = traversal_plugin_test_key_v1()
+    val signature = pure_ed25519_sign(seed, public_key, text_to_bytes(source))
+    (seed, public_key, signature)
+
+describe "H5 signed traversal provider admission policy":
+    it "requires a separately supplied trust root before any plugin is selected":
+        val host_abi = traversal_plugin_host_abi_fingerprint_v1()
+        val source = traversal_plugin_test_policy_v1(host_abi, [])
+        val (_, _, signature) = traversal_plugin_test_signed_source_v1(source)
+        expect(traversal_plugin_allowlist_verify_decode_v1(source, signature, []).is_err()).to_equal(true)
+
+    it "rejects missing and altered detached signatures":
+        val host_abi = traversal_plugin_host_abi_fingerprint_v1()
+        val source = traversal_plugin_test_policy_v1(host_abi, [])
+        val (_, public_key, signature) = traversal_plugin_test_signed_source_v1(source)
+        expect(traversal_plugin_allowlist_verify_decode_v1(source, [], public_key).is_err()).to_equal(true)
+        val altered = source.replace("test.traversal", "test.changed")
+        expect(traversal_plugin_allowlist_verify_decode_v1(altered, signature, public_key).is_err()).to_equal(true)
+
+    it "admits only the exact signed provider identity and digest policy":
+        val host_abi = traversal_plugin_host_abi_fingerprint_v1()
+        if host_abi == "":
+            expect(traversal_plugin_allowlist_verify_decode_v1("{}\n", [], []).is_err()).to_equal(true)
+        else:
+            val source = traversal_plugin_test_policy_v1(host_abi, [])
+            val (_, public_key, signature) = traversal_plugin_test_signed_source_v1(source)
+            val policy = traversal_plugin_allowlist_verify_decode_v1(source, signature, public_key).unwrap()
+            val admitted = traversal_plugin_allowlist_select_v1(policy, "test.traversal").unwrap()
+            expect(admitted.provider_id).to_equal("test.traversal")
+            expect(admitted.code_digest.hex).to_equal("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+            expect(traversal_plugin_allowlist_select_v1(policy, "test.other").is_err()).to_equal(true)
+
+    it "rejects unsigned, unknown, and dependency-bearing policy entries":
+        val host_abi = traversal_plugin_host_abi_fingerprint_v1()
+        val source = traversal_plugin_test_policy_v1(host_abi, [SdnValue.String("libuntrusted.so")])
+        val (_, public_key, signature) = traversal_plugin_test_signed_source_v1(source)
+        expect(traversal_plugin_allowlist_verify_decode_v1(source, signature, public_key).is_err()).to_equal(true)
+        expect(traversal_plugin_allowlist_verify_decode_v1(source, [], public_key).is_err()).to_equal(true)
