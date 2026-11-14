@@ -303,6 +303,10 @@ val TEST_KIND_C_JOBS: i64 = 4
 # Exit 64 (EX_USAGE): the program needs its owning harness's arguments or
 # setup (a provider library, a scratch root, a peer process). Not verified here.
 val TEST_KIND_C_EXIT_HARNESS: i64 = 64
+# Defined for every item linked against the core-C archive. A selfcheck whose
+# standalone recipe carries libc stand-ins for runtime owners (spl_panic,
+# spl_strdup, ...) guards them with it, so the archive's real owner links.
+val TEST_KIND_C_CORE_DEFINE: text = "-DSIMPLE_TEST_CORE_RUNTIME=1"
 
 fn _test_kind_quoted(line: text) -> [text]:
     """Every "..." literal on one line, in order."""
@@ -559,12 +563,28 @@ pub fn test_kind_c_self_gate(item: text, source: text, build_err: text) -> text:
         return ""
     ""
 
+fn _test_kind_c_compiled_owners(cc: text, item: text, owned: [text]) -> [text]:
+    """The text-scanned unity owners the preprocessor really includes: an
+    `#include "../<owner>.c"` under an inactive `#if` keeps its owner in the archive."""
+    val (deps, dep_err, code) = process_run_bounded(cc, ["-MM", "-std=gnu11", "-I", TEST_KIND_C_RUNTIME_DIR,
+        "-I", TEST_KIND_C_DIR, TEST_KIND_C_CORE_DEFINE, item], 300000, 1024 * 1024)
+    if code != 0:
+        return owned
+    val flat = deps.replace("\\", "/").replace("/test/../", "/")
+    var out: [text] = []
+    for owner in owned:
+        if flat.contains("{TEST_KIND_C_RUNTIME_DIR}/{owner}.c"):
+            out.push(owner)
+    out
+
 fn _test_kind_c_build_args(item: text, output: text, archive: text, owner_defines: bool) -> [text]:
     var args = ["-std=gnu11", "-I", TEST_KIND_C_RUNTIME_DIR, "-I", TEST_KIND_C_DIR]
     if owner_defines:
         for flag in _test_kind_c_object_flags():
             if flag.starts_with("-D"):
                 args.push(flag)
+    if archive != "":
+        args.push(TEST_KIND_C_CORE_DEFINE)
     args.push(item)
     if archive != "":
         args.push(archive)
@@ -592,12 +612,15 @@ fn _test_kind_run_item(kind: text, item: text, core: TestKindCCore) -> text:
     var owned: [text] = []
     if core.error == "":
         owned = test_kind_c_unity_owners(source, core.sources)
+    if owned.len() > 0:
+        owned = _test_kind_c_compiled_owners(cc, item, owned)
     var archive = ""
     if core.error == "":
         archive = _test_kind_c_archive_for(core, cc, owned, output)
     val (build_out, build_err, first_code) = process_run_bounded(cc,
         _test_kind_c_build_args(item, output, archive, false), 300000, 256 * 1024)
     var build_code = first_code
+    var last_err = build_err
     if build_code != 0 and owned.len() > 0:
         # Second recipe for a unity-including selfcheck: compile its included
         # owner exactly as the archive's owners are (same ownership macros),
@@ -606,6 +629,7 @@ fn _test_kind_run_item(kind: text, item: text, core: TestKindCCore) -> text:
             _test_kind_c_build_args(item, output, archive, true), 300000, 256 * 1024)
         if retry_code == 0:
             build_code = 0
+        last_err = retry_err
     if build_code != 0:
         if test_kind_c_is_fixture(build_err):
             print "  FIXTURE  {item} (no main: linked into another harness, not a program)"
@@ -614,7 +638,7 @@ fn _test_kind_run_item(kind: text, item: text, core: TestKindCCore) -> text:
         if gate != "":
             print "  SKIP     {item} (host-gated at compile time: {gate})"
             return "SKIP"
-        val first = _test_kind_first_error(build_err)
+        val first = _test_kind_first_error(last_err)
         print "  UNBUILT  {item}: {first}"
         return "UNBUILT"
     val (run_out, run_err, run_code) = process_run_bounded(output, [], 300000, 1024 * 1024)
