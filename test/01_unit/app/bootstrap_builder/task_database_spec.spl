@@ -63,3 +63,29 @@ describe "BuildRunner admitted task database identity":
             build_runner_environment_digest_v1(changed, "attempt-b").unwrap()).to_equal(false)
         expect(build_runner_environment_digest_v1(first, "wrong-root").is_err()).to_equal(true)
         expect(build_runner_environment_digest_v1([first[1], first[0]], "attempt-a").is_err()).to_equal(true)
+
+    it "rejects unsupported backends, malformed digests and noncanonical context frames":
+        val digest = sha256_text("valid")
+        expect(build_runner_context_encode_v1(BuildRunnerTaskContextV1("wasm", digest, digest, digest)).is_err()).to_equal(true)
+        expect(build_runner_context_encode_v1(BuildRunnerTaskContextV1("llvm", "bad", digest, digest)).is_err()).to_equal(true)
+        val payload = build_runner_context_encode_v1(BuildRunnerTaskContextV1("cranelift", digest, digest, digest)).unwrap()
+        expect(build_runner_context_decode_v1(payload).unwrap().backend).to_equal("cranelift")
+        expect(build_runner_context_decode_v1(payload.replace("cranelift", "wasm")).is_err()).to_equal(true)
+        expect(build_runner_context_decode_v1(payload + "\n").is_err()).to_equal(true)
+
+    it "rejects duplicate admitted context entries even when their hashes match":
+        val payload = context_fixture_payload("env-a")
+        var task = context_fixture_task(payload)
+        task.inputs = task.inputs.push(BuildInputV1("task-context/compiler-a.sdn", sha256_text(payload)))
+        expect(build_runner_task_identity_v1(task, payload).is_err()).to_equal(true)
+
+    it "rejects duplicate environment keys and forged owned cache paths":
+        val duplicate = [ProcessObservationEnvironmentV4("FEATURE", "on"),
+            ProcessObservationEnvironmentV4("FEATURE", "off")]
+        expect(build_runner_environment_digest_v1(duplicate, "attempt").is_err()).to_equal(true)
+        val forged = [ProcessObservationEnvironmentV4("SIMPLE_HIR_CACHE_DIR", "attempt/work/.builder-cache/runtime")]
+        expect(build_runner_environment_digest_v1(forged, "attempt").is_err()).to_equal(true)
+        val original = [ProcessObservationEnvironmentV4("FEATURE", "a:b")]
+        val changed = [ProcessObservationEnvironmentV4("FEATURE", "a:c")]
+        expect(build_runner_environment_digest_v1(original, "attempt").unwrap() ==
+            build_runner_environment_digest_v1(changed, "attempt").unwrap()).to_equal(false)
