@@ -239,8 +239,39 @@ open.
   selected for `--os`/`--arch` (default host) leave the line denominator.
 - Trap: the seed enables collection whenever `SIMPLE_COVERAGE` is PRESENT,
   even empty (`init_coverage_from_env`); unset it to turn coverage off.
-- Still open: closures/lambda bodies (`exec_block_closure_into`) record no
-  line hits.
+- Closures/lambda bodies (`exec_block_closure_into`) recorded no line hits
+  until 2026-11-14 (next section).
+
+## 2026-11-14: value-`match` arm tails, lambda bodies, lexical file
+
+- **Rule:** a line is recorded in `exec_node`; a line is lost wherever an
+  executor runs a statement without it. Three such executors existed:
+  `exec_block_fn`'s tail (fixed 2026-11-13), the arm loop of `Expr::Match`
+  (`interpreter/expr/control.rs`: arm-tail `if`/`match` of `val r = match`,
+  `return match`) and the block-closure executors
+  (`interpreter_call/block_execution.rs`: every statement of a multi-line
+  lambda / block-closure body, at any depth). The last two now call
+  `record_node_coverage_lexical`. Audit a new miss by asking which executor
+  ran the statement, not by its syntax: `Expr::If`/`Expr::Match` have no
+  span, but a line starting with `if `/`match ` outside brackets is a spanned
+  statement.
+- **Lexical file.** A closure body inherits `CURRENT_EXEC_MODULE` from its
+  invoker, so `current_coverage_file` files a lambda's hits under the module
+  that CALLED it. The new records use `private_call_caller` (the closure's
+  origin stamp). `exec_node` records and decision rows inside a closure still
+  use the invoker's file:
+  `doc/08_tracking/bug/coverage_closure_body_hits_filed_under_invoker_2026-11-14.md`.
+- **Check the seed before blaming the collector.** `enum_constructor_payload.spl`
+  read 82.2% (190/231) only because the measuring seed predated the
+  2026-11-13 fix; the same nine artifacts read 231/231 on a current seed. An
+  artifact with no `sources |file, crc32|` table (`source=unverified`) came
+  from a collector older than that fix.
+- Pin: `test/fixtures/coverage/covexpr_fixture.spl` + `covexpr_helper.spl`
+  (base seed 14/31, fixed 26/31; the helper keeps exactly its own two lines).
+  Record: `doc/08_tracking/bug/coverage_value_match_arm_tail_and_lambda_body_unrecorded_2026-11-14.md`.
+- Still open: an `if`/`match` that starts its own line inside brackets (call
+  argument, field initializer) is a continuation line -- unrecorded and not in
+  the denominator.
 
 ## Update Rule
 
