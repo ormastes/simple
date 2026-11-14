@@ -37,6 +37,7 @@ describe "REQ-VIS-MANIFEST producer":
         expect(facts.expose_paths).to_equal(["./ports", "./é"])
         expect(facts.child_names).to_equal(["open_child", "closed_child"])
         expect(facts.child_visibilities).to_equal(["public", "private"])
+        expect(facts.child_modifiers).to_equal(["pub", "omitted"])
         expect(parsed.domain_blocks.len()).to_equal(1)
         expect(parsed.domain_blocks[0].payload).to_contain("\"feature\"")
         expect(manifest_roles_v1()).to_equal(["domain", "child", "child"])
@@ -54,6 +55,7 @@ describe "REQ-VIS-MANIFEST producer":
         val retained = desugar_module(module_surface_owner_value(ModuleSurfaceParserOwner.new(restored.unwrap())))
         expect(retained.manifest_visibility_v1.expose_paths).to_equal(parsed.manifest_visibility_v1.expose_paths)
         expect(retained.manifest_visibility_v1.child_names).to_equal(["open_child", "closed_child"])
+        expect(retained.manifest_visibility_v1.child_modifiers).to_equal(["pub", "omitted"])
         expect(retained.manifest_visibility_v1.valid).to_equal(true)
         step("Reject the old cache schema and clear role admission")
         expect(flat_pools_restore_all(encoded.replace(FLAT_POOL_CODEC_VERSION,
@@ -111,3 +113,17 @@ describe "REQ-VIS-MANIFEST producer":
         expect(dotted.manifest_visibility_v1.valid).to_equal(false)
         expect(dotted.manifest_visibility_v1.child_names.len()).to_equal(0)
         expect(dotted.imports[0].module).to_equal(".bar")
+
+    it "retains exact omitted and pri child modifiers despite identical legacy visibility":
+        val parsed = parse_and_build_module("mod folder_child\npri mod file_child\npub mod public_child\n", MANIFEST_PATH_V1)
+        expect(parser_has_errors()).to_equal(false)
+        val facts = parsed.manifest_visibility_v1
+        expect(facts.valid).to_equal(true)
+        expect(facts.child_names).to_equal(["folder_child", "file_child", "public_child"])
+        expect(facts.child_visibilities).to_equal(["private", "private", "public"])
+        expect(facts.child_modifiers).to_equal(["omitted", "pri", "pub"])
+        val restored = build_module_from_flat_pool_blob(flat_pools_dump_all(),
+            "mod folder_child\npri mod file_child\npub mod public_child\n", MANIFEST_PATH_V1)
+        expect(restored.?).to_equal(true)
+        val owned = module_surface_owner_value(ModuleSurfaceParserOwner.new(restored.unwrap()))
+        expect(owned.manifest_visibility_v1.child_modifiers).to_equal(["omitted", "pri", "pub"])
