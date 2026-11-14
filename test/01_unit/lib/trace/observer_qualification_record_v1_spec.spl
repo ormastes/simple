@@ -1,0 +1,68 @@
+use std.spec.*
+use std.common.trace.observer_qualification_record_v1.*
+
+# Synthetic codec input ONLY. The digest bytes are not evidence and this test
+# never calls a profile issuer, enables capabilities or patches an image.
+fn synthetic_record_shape_v1() -> TraceQualificationRecordV1:
+    var digests: [[u8]] = []
+    for slot in 0..11:
+        var digest: [u8] = []
+        for byte in 0..32: digest.push(((slot * 32 + byte) % 256) as u8)
+        digests.push(digest)
+    TraceQualificationRecordV1(target: 1, profile: 1, evidence_mask: 255,
+        max_contexts: 64, buffer_bytes: 393216, resident_bytes: 67108864,
+        max_generations: 1, metadata_reserve: 33554432, word_bytes: 8,
+        digests: digests)
+
+describe "qualification record wire shape is not authority":
+    it "encodes exact little endian header and ordered raw digest slots":
+        val bytes = trace_qualification_record_encode_v1(synthetic_record_shape_v1()).unwrap()
+        expect(bytes.len()).to_equal(480)
+        val magic: [u8] = [83u8, 88u8, 82u8, 80u8, 81u8, 86u8, 49u8, 0u8]
+        for index in 0..8: expect(bytes[index]).to_equal(magic[index])
+        expect(bytes[16]).to_equal(224u8)
+        expect(bytes[17]).to_equal(1u8)
+        expect(bytes[40]).to_equal(255u8)
+        expect(bytes[128]).to_equal(0u8)
+        expect(bytes[159]).to_equal(31u8)
+        expect(bytes[160]).to_equal(32u8)
+        expect(bytes[479]).to_equal(95u8)
+        val decoded = trace_qualification_record_decode_v1(bytes).unwrap()
+        expect(decoded.digests).to_equal(synthetic_record_shape_v1().digests)
+        expect(decoded.max_contexts).to_equal(64u64)
+        expect(trace_qualification_record_encode_v1(decoded).unwrap()).to_equal(bytes)
+
+    it "rejects header changes truncation reserved bytes and missing declarations":
+        val encoded = trace_qualification_record_encode_v1(synthetic_record_shape_v1()).unwrap()
+        for offset in [0, 8, 16, 24, 32, 40, 72, 88, 96, 127]:
+            var changed: [u8] = []
+            for byte in encoded: changed.push(byte)
+            changed[offset] = changed[offset] ^ 1u8
+            expect(trace_qualification_record_decode_v1(changed).is_err()).to_equal(true)
+        var truncated: [u8] = []
+        for index in 0..479: truncated.push(encoded[index])
+        expect(trace_qualification_record_decode_v1(truncated).is_err()).to_equal(true)
+        var missing_digest = synthetic_record_shape_v1()
+        missing_digest.digests = []
+        expect(trace_qualification_record_encode_v1(missing_digest).is_err()).to_equal(true)
+        var zero_digest = synthetic_record_shape_v1()
+        var zeros: [u8] = []
+        for index in 0..32: zeros.push(0u8)
+        zero_digest.digests[7] = zeros
+        expect(trace_qualification_record_encode_v1(zero_digest).is_err()).to_equal(true)
+
+    it "checks actual resident allocation bounds before arithmetic":
+        var record = synthetic_record_shape_v1()
+        record.max_contexts = 18446744073709551615u64
+        expect(trace_qualification_record_validate_shape_v1(record).is_err()).to_equal(true)
+        record = synthetic_record_shape_v1()
+        record.buffer_bytes = 393215
+        expect(trace_qualification_record_validate_shape_v1(record).is_err()).to_equal(true)
+        record = synthetic_record_shape_v1()
+        # 32 MiB metadata reservation plus max-map and actual 64-channel layout.
+        record.resident_bytes = 58796271
+        expect(trace_qualification_record_validate_shape_v1(record).is_err()).to_equal(true)
+        record.resident_bytes = 58796272
+        expect(trace_qualification_record_validate_shape_v1(record).unwrap()).to_equal(true)
+        record.metadata_reserve = 0
+        expect(trace_qualification_record_validate_shape_v1(record).is_err()).to_equal(true)
