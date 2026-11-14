@@ -7,7 +7,6 @@ use compiler.common.module_path_naming.{module_logical_name_from_path, module_ca
 use compiler.common.source_root_resolution.{SourceRootResolutionV1,
     source_root_numbered_candidate_v1, source_root_numbered_match_v1,
     source_root_std_family_order_v1}
-use compiler.common.cache.canonical_identity.{canonical_identity_sort_texts}
 use compiler.common.cache.visibility_manifest_read_v1.{visibility_manifest_path_valid_v1}
 use compiler.core.interpreter.hashmap.{hm_hash_text}
 use std.nogc_sync_mut.io.process_ops.{eprint}
@@ -1232,8 +1231,6 @@ pub class DriverEntryResolverIndexV1:
     snapshot_root: text
     snapshot_id: text
     files: Dict<text, text>
-    directories: Dict<text, bool>
-    children: Dict<text, [text]>
 
 pub enum DriverEntryResolverObservationV1:
     Live
@@ -1259,9 +1256,6 @@ pub fn driver_entry_resolver_index_prepare_v1(snapshot_root: text, snapshot_id: 
         return Err("ENTRY_RESOLVER_INDEX_INVENTORY_LIMIT")
     var files: Dict<text, text> = {}
     var seen_paths: Dict<text, bool> = {}
-    var directories: Dict<text, bool> = {}
-    var children: Dict<text, [text]> = {}
-    directories[root] = true
     var total_bytes: i64 = 0
     for path, digest in complete:
         total_bytes = total_bytes + path.byte_len() + digest.byte_len()
@@ -1277,22 +1271,12 @@ pub fn driver_entry_resolver_index_prepare_v1(snapshot_root: text, snapshot_id: 
         if seen_paths.contains_key(normalized):
             return Err("ENTRY_RESOLVER_INDEX_PATH_ALIAS: " + path)
         seen_paths[normalized] = true
-        var parent = _driver_entry_import_dirname(normalized)
-        while parent.starts_with(root + "/"):
-            directories[parent] = true
-            val parent_of_parent = _driver_entry_import_dirname(parent)
-            val child_name = parent.substring(parent_of_parent.byte_len() + 1)
-            var names = children[parent_of_parent] ?? []
-            if not names.contains(child_name): names = names.push(child_name)
-            children[parent_of_parent] = names
-            if parent_of_parent == parent: break
-            parent = parent_of_parent
         if normalized.ends_with(".spl"):
             files[normalized] = digest
     if files.len() == 0: return Err("ENTRY_RESOLVER_INDEX_NO_SOURCE_FILES")
-    for key, names in children:
-        children[key] = canonical_identity_sort_texts(names)
-    Ok(DriverEntryResolverIndexV1(root, snapshot_id, files, directories, children))
+    # Fixed candidate probes need only exact source membership. Directory
+    # topology is unqualified, so never allocate inferred prefix/child graphs.
+    Ok(DriverEntryResolverIndexV1(root, snapshot_id, files))
 
 fn _driver_resolver_observed_file_v1(path: text, observation: DriverEntryResolverObservationV1) -> bool:
     match observation:
@@ -1304,16 +1288,14 @@ fn _driver_resolver_observed_file_v1(path: text, observation: DriverEntryResolve
 fn _driver_resolver_observed_dir_v1(path: text, observation: DriverEntryResolverObservationV1) -> bool:
     match observation:
         case DriverEntryResolverObservationV1.Live: dir_exists(path)
-        case DriverEntryResolverObservationV1.Indexed(index): index.directories.contains_key(path)
+        case DriverEntryResolverObservationV1.Indexed(_): false
 
 fn _driver_resolver_observed_children_v1(path: text,
         observation: DriverEntryResolverObservationV1) -> [text]?:
     match observation:
         case DriverEntryResolverObservationV1.Live:
             unsafe(capabilities: [ffi]): rt_dir_list(path)
-        case DriverEntryResolverObservationV1.Indexed(index):
-            if not index.directories.contains_key(path): return nil
-            Some(index.children[path] ?? [])
+        case DriverEntryResolverObservationV1.Indexed(_): nil
 
 fn _driver_numbered_child_dir_observed_v1(parent: text, segment: text,
         observation: DriverEntryResolverObservationV1) -> SourceRootResolutionV1:
@@ -1343,6 +1325,11 @@ pub fn _driver_try_numbered_entry_import_rel_checked_v1(root: text, rel: text) -
 
 fn _driver_try_numbered_entry_import_rel_observed_v1(root: text, rel: text,
         observation: DriverEntryResolverObservationV1) -> DriverEntryResolverNumberedOutcomeV1:
+    match observation:
+        case DriverEntryResolverObservationV1.Indexed(_):
+            return DriverEntryResolverNumberedOutcomeV1.Ambiguous(
+                "ENTRY_RESOLVER_INDEX_DIRECTORY_COVERAGE_UNAVAILABLE")
+        case DriverEntryResolverObservationV1.Live: ()
     val parts = rel.split("/")
     if parts.len() == 0: return DriverEntryResolverNumberedOutcomeV1.Missing
     var current = root
