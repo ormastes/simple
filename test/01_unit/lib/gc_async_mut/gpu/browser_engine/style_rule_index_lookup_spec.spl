@@ -1,0 +1,149 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-BROWSER_ENGINE
+# @cover src/lib/gc_async_mut/gpu/browser_engine/style_rule_index.spl 1%
+# @cover src/lib/gc_async_mut/gpu/browser_engine/selector_matcher.spl 1%
+# @tag: unit, browser_engine, css, selectors
+#
+# The fallback renderer's stylesheet lookup: given a document with a <style>
+# block, return the declarations of the rule a selector names. Covers compound
+# selectors (tag.class, tag#id), combinators asked for explicitly, structural
+# position helpers on the HTML text, the structural pseudo-classes and
+# :nth-child(An+B) index matching (Selectors 4 section 14.4.1: an element
+# matches when its 1-based index equals A*k+B for some k >= 0).
+
+use std.spec.{describe, context, it, expect}
+use std.gc_async_mut.gpu.browser_engine.style_rule_index.{
+    br_style_block_rule_for_id, br_style_block_rule_for_universal,
+    br_style_block_rule_for_tag_class, br_style_block_rule_for_tag_id,
+    br_style_block_rule_for_descendant, br_style_block_rule_for_child,
+    br_style_block_rule_for_selector, br_style_block_rule_for_class,
+    br_is_direct_body_child, br_previous_direct_body_child_tag_content,
+    br_parent_tag_content_before_pos, br_style_block_rule_for_body_child_div,
+    br_style_block_rule_for_first_child_self, br_style_block_rule_for_last_child_self,
+    br_style_block_rule_for_only_child_self, br_style_block_rule_for_nth_child_self,
+    br_style_block_rule_for_multi_class, br_div_content_is_empty
+}
+use std.gc_async_mut.gpu.browser_engine.selector_matcher.{br_selector_list_contains_nth_child_self}
+
+fn _doc(css: text) -> text:
+    "<html><head><style>" + css + "</style></head><body><p>one</p><div class=\"a b\" id=\"x\">t</div><section><div class=\"a\"><span>s</span></div></section></body></html>"
+
+fn _css() -> text:
+    "#x {{ width: 10px; }} * {{ box-sizing: border-box; }} div.a {{ height: 2px; }} div#x {{ top: 3px; }} section div {{ left: 4px; }} body > div {{ right: 5px; }} p + div {{ bottom: 6px; }} .a.b {{ order: 8; }}"
+
+fn _nth(arg: text, index: i32) -> text:
+    br_style_block_rule_for_nth_child_self(_doc("div:nth-child(" + arg + ") {{ clear: both; }}"), "div", "div", index)
+
+describe "Fallback stylesheet rule lookup":
+
+    context "simple and compound selectors":
+
+        it "finds the universal rule":
+            expect(br_style_block_rule_for_universal(_doc(_css()))).to_equal("box-sizing: border-box;")
+
+        it "finds tag.class and tag#id rules":
+            expect(br_style_block_rule_for_tag_class(_doc(_css()), "div", "a")).to_equal("height: 2px;")
+            expect(br_style_block_rule_for_tag_id(_doc(_css()), "div", "x")).to_equal("top: 3px;")
+
+        it "merges every rule that names the id":
+            expect(br_style_block_rule_for_id(_doc(_css()), "x")).to_equal("width: 10px;;top: 3px;")
+
+        it "finds a rule by its exact selector text":
+            expect(br_style_block_rule_for_selector(_doc(_css()), "p + div")).to_equal("bottom: 6px;")
+
+        it "returns nothing for a selector no rule uses":
+            expect(br_style_block_rule_for_selector(_doc(_css()), ".nope")).to_equal("")
+            expect(br_style_block_rule_for_class(_doc(_css()), "nope")).to_equal("")
+            expect(br_style_block_rule_for_id(_doc(_css()), "nope")).to_equal("")
+
+        it "returns nothing for a document without a style block":
+            expect(br_style_block_rule_for_universal("<html><body><div>x</div></body></html>")).to_equal("")
+
+        it "requires every class of a multi-class selector":
+            expect(br_style_block_rule_for_multi_class(_doc(_css()), "a b")).to_equal("order: 8;")
+            expect(br_style_block_rule_for_multi_class(_doc(_css()), "a")).to_equal("")
+
+    context "combinators":
+
+        it "finds descendant and child rules by their two sides":
+            expect(br_style_block_rule_for_descendant(_doc(_css()), "section", "div")).to_equal("left: 4px;")
+            expect(br_style_block_rule_for_child(_doc(_css()), "body", "div")).to_equal("right: 5px;")
+
+        it "does not confuse the two combinators":
+            expect(br_style_block_rule_for_child(_doc(_css()), "section", "div")).to_equal("")
+            expect(br_style_block_rule_for_descendant(_doc(_css()), "body", "div")).to_equal("")
+
+    context "position in the HTML text":
+
+        it "tells a direct body child from a nested element":
+            val html = _doc(_css())
+            expect(br_is_direct_body_child(html, html.index_of("<div class=\"a b\"") ?? -1)).to_equal(true)
+            expect(br_is_direct_body_child(html, html.index_of("<div class=\"a\">") ?? -1)).to_equal(false)
+
+        it "names the previous body-level sibling and the parent":
+            val html = _doc(_css())
+            expect(br_previous_direct_body_child_tag_content(html, html.index_of("<div class=\"a b\"") ?? -1)).to_equal("p")
+            expect(br_parent_tag_content_before_pos(html, html.index_of("<div class=\"a\">") ?? -1)).to_equal("section")
+
+        it "applies body > div only to a direct body child":
+            val html = _doc(_css())
+            expect(br_style_block_rule_for_body_child_div(html, html.index_of("<div class=\"a b\"") ?? -1, "a b", "x")).to_equal("right: 5px;")
+            expect(br_style_block_rule_for_body_child_div(html, html.index_of("<div class=\"a\">") ?? -1, "a", "")).to_equal("")
+
+        it "treats whitespace-only content as not empty":
+            val html = "<div></div><div> x </div>"
+            expect(br_div_content_is_empty(html, 5)).to_equal(true)
+            expect(br_div_content_is_empty(html, 16)).to_equal(false)
+
+    context "structural pseudo-classes":
+
+        it "applies :first-child only when the element is first":
+            val html = _doc("div:first-child {{ gap: 9px; }}")
+            expect(br_style_block_rule_for_first_child_self(html, "div", "div", true)).to_equal("gap: 9px;")
+            expect(br_style_block_rule_for_first_child_self(html, "div", "div", false)).to_equal("")
+
+        it "applies :last-child and :only-child on their flags":
+            val html = _doc("div:last-child {{ flex: 1; }} div:only-child {{ float: left; }}")
+            expect(br_style_block_rule_for_last_child_self(html, "div", "div", true)).to_equal("flex: 1;")
+            expect(br_style_block_rule_for_last_child_self(html, "div", "div", false)).to_equal("")
+            expect(br_style_block_rule_for_only_child_self(html, "div", "div", true)).to_equal("float: left;")
+            expect(br_style_block_rule_for_only_child_self(html, "div", "div", false)).to_equal("")
+
+    context ":nth-child index matching":
+
+        it "matches an integer argument at that index only":
+            expect(_nth("2", 2)).to_equal("clear: both;")
+            expect(_nth("2", 1)).to_equal("")
+            expect(_nth("2", 3)).to_equal("")
+
+        it "matches odd and even keywords":
+            expect(_nth("odd", 1)).to_equal("clear: both;")
+            expect(_nth("odd", 2)).to_equal("")
+            expect(_nth("even", 4)).to_equal("clear: both;")
+            expect(_nth("even", 3)).to_equal("")
+
+        it "matches An+B":
+            expect(_nth("3n", 6)).to_equal("clear: both;")
+            expect(_nth("3n", 4)).to_equal("")
+            expect(_nth("2n+1", 5)).to_equal("clear: both;")
+            expect(_nth("2n+1", 4)).to_equal("")
+            expect(_nth("n+3", 2)).to_equal("")
+            expect(_nth("n+3", 3)).to_equal("clear: both;")
+            expect(_nth("n+3", 9)).to_equal("clear: both;")
+
+        it "matches a descending -n+B range":
+            expect(_nth("-n+2", 1)).to_equal("clear: both;")
+            expect(_nth("-n+2", 2)).to_equal("clear: both;")
+            expect(_nth("-n+2", 3)).to_equal("")
+
+        it "tolerates spaces inside the argument":
+            expect(_nth(" 2n + 1 ", 3)).to_equal("clear: both;")
+            expect(_nth(" 2n + 1 ", 2)).to_equal("")
+
+        it "returns nothing for a non-positive index or an unparsable argument":
+            expect(_nth("2", 0)).to_equal("")
+            expect(_nth("banana", 2)).to_equal("")
+
+        it "ignores a rule without :nth-child":
+            expect(br_selector_list_contains_nth_child_self("div.a ", "div", "div", 2)).to_equal(false)
+            expect(br_selector_list_contains_nth_child_self("div:nth-child(2) ", "div", "div", 2)).to_equal(true)
