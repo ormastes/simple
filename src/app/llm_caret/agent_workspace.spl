@@ -17,7 +17,7 @@ use std.nogc_async_mut.sosix.{sosix_platform, sosix_which}
 use std.common.string_core.{text_to_bytes}
 use os.apps.smux.server.{smux_server_request, smux_server_request_within}
 use os.apps.smux.smux_remote.{smux_remote_reply_ok}
-use app.llm_caret.pane_backend.{pane_backend_name, windows_spawn_command_line, posix_quote_arg}
+use app.llm_caret.pane_backend.{pane_backend_name, windows_spawn_command_line, posix_quote_arg, smux_owner_argv}
 
 # Recursion protection. Anything this module spawns (agent commands, the caret
 # suite) carries LLM_CARET_WORKSPACE_DEPTH=<n+1>; at MAX_DEPTH a launch is
@@ -343,13 +343,18 @@ fn _smux_owner_up(ws: AgentWorkspace) -> bool:
     if not file_create_exclusive(path, ws.session + " " + token + "\n"):
         return false
     # Start-Process joins -ArgumentList with spaces, so each element is double-quoted.
+    val pinned = env_get("SIMPLE_BINARY")
+    val argv_r = smux_owner_argv(exe, pinned,root + "/" + SMUX_CLIENT, path)
+    if argv_r.is_err():
+        _smux_retire(path, token)
+        return false
+    val argv = argv_r.unwrap()
     var arglist: [text] = []
-    for a in ["run", root + "/" + SMUX_CLIENT, "--serve-owner-file", path]:
+    for a in argv[1:]:
         arglist.push(_ps_quote("\"" + a + "\""))
     val start = "Start-Process -WindowStyle Hidden -WorkingDirectory " + _ps_quote(root) +
-        " -FilePath " + _ps_quote(exe) + " -ArgumentList " + arglist.join(",")
+        " -FilePath " + _ps_quote(argv[0]) + " -ArgumentList " + arglist.join(",")
     # The spawn inherits this process environment: clear SIMPLE_BINARY for it, then restore.
-    val pinned = env_get("SIMPLE_BINARY")
     env_set("SIMPLE_BINARY", "")
     val (_o, _e, code) = process_run_timeout("powershell", ["-NoProfile", "-NonInteractive", "-Command", start], 30000)
     env_set("SIMPLE_BINARY", pinned)
