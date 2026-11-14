@@ -17,9 +17,10 @@ Plan: `simple_traceability_spipe_bug_mcp_skills_improvement_plan_2026-11-14.md` 
 ## Contracts to keep
 - No `--profile` means `worktree` and byte-identical output to before (spec: "keeps the default evaluation").
 - Exit codes: 0 satisfied, 1 violations, 2 incomplete or usage error. Only `worktree` is evaluated; every other profile reports `TRC-PROFILE-UNAVAILABLE` with exit 2 because the producer captures the working tree only. Never certify a profile from the wrong input.
-- Relation orientation: for `implemented_by` and `verified_by` the REQUIREMENT is the `from` end (`schema.spl` `trace_endpoint_kinds_valid`). A requirement is verified directly, through `decomposes_to` a criterion that has `accepted_by`/`verified_by`, or by a `--spec-root` `# @req` sidecar `verified_by` row.
+- Relation orientation: for `implemented_by` and `verified_by` the REQUIREMENT is the `from` end (`schema.spl` `trace_endpoint_kinds_valid`). A requirement is linked to verification directly, through `decomposes_to` a criterion that has `accepted_by`/`verified_by`, or by a `--spec-root` `# @req` sidecar `verified_by` row.
+- `trace missing` never emits `Verified` or `Tested`: it has no run evidence, so a structural verifying link is `Linked` (plan §6 separates linked/tested/verified). A requirement is omitted only when implementation and verification are both `Linked`.
 - In an incomplete graph an absent link is `Unknown`, not `Missing`.
-- New public fns avoid bare `i64`/`bool` (primitive_api lint); counts live in struct fields.
+- Result structs use domain types (`TraceRequirementIdV1`, `TraceSnapshotIdV1`, `TraceRequirementCountV1`, `TraceGraphCompletenessV1`); `title` stays `text` as display text.
 
 ## Verify
 `bin/simple test test/01_unit/app/cli/traceability_command_spec.spl test/01_unit/app/traceability/trace_node_query_spec.spl`

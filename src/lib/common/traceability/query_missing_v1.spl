@@ -15,17 +15,30 @@ pub enum TraceLinkStatus:
     Blocked
     NotApplicableReviewed
 
+pub struct TraceRequirementIdV1:
+    value: text
+
+pub struct TraceSnapshotIdV1:
+    value: text
+
+pub struct TraceRequirementCountV1:
+    value: i64
+
+pub enum TraceGraphCompletenessV1:
+    Complete
+    Incomplete
+
 pub struct TraceMissingEntryV1:
-    requirement_id: text
-    title: text
+    requirement_id: TraceRequirementIdV1
+    title: text    # display text copied from the node; not an id, count or flag
     implementation: TraceLinkStatus
     verification: TraceLinkStatus
 
 pub struct TraceMissingResultV1:
-    snapshot_id: text
+    snapshot_id: TraceSnapshotIdV1
     entries: [TraceMissingEntryV1]
-    total_requirements: i64
-    complete: bool
+    total_requirements: TraceRequirementCountV1
+    completeness: TraceGraphCompletenessV1
 
 pub fn trace_link_status_name_v1(status: TraceLinkStatus) -> text:
     match status:
@@ -41,10 +54,12 @@ pub fn trace_link_status_name_v1(status: TraceLinkStatus) -> text:
 pub fn trace_missing_requirements_v1(graph: TraceGraph, sidecar: [TraceSidecarReferenceV1]) -> TraceMissingResultV1:
     """List requirements with no implementing and/or no verifying link, sorted by id.
 
-    A requirement counts as verified through a direct verified_by edge, through a
-    decomposed criterion with an accepted_by/verified_by edge, or through a
-    spec-header verified_by sidecar row. In an incomplete graph an absent link is
-    Unknown, never Missing: absence proves nothing about unread inputs.
+    A structural verifying link (a direct verified_by edge, a decomposed criterion
+    with an accepted_by/verified_by edge, or a spec-header verified_by sidecar row)
+    yields Linked, never Verified or Tested: this function has no run evidence, and
+    a link is not an execution result. A requirement is omitted only when both
+    implementation and verification are Linked. In an incomplete graph an absent
+    link is Unknown, never Missing: absence proves nothing about unread inputs.
     """
     var implemented: Dict<text, bool> = {}
     var verified: Dict<text, bool> = {}
@@ -71,17 +86,19 @@ pub fn trace_missing_requirements_v1(graph: TraceGraph, sidecar: [TraceSidecarRe
             continue
         total = total + 1
         val implementation = if implemented.contains_key(node.id): TraceLinkStatus.Linked else: absent
-        val verification = if verified.contains_key(node.id): TraceLinkStatus.Verified else: absent
-        if implementation == TraceLinkStatus.Linked and verification == TraceLinkStatus.Verified:
+        val verification = if verified.contains_key(node.id): TraceLinkStatus.Linked else: absent
+        if implementation == TraceLinkStatus.Linked and verification == TraceLinkStatus.Linked:
             continue
-        by_id[node.id] = TraceMissingEntryV1(requirement_id: node.id, title: node.title,
+        by_id[node.id] = TraceMissingEntryV1(requirement_id: TraceRequirementIdV1(value: node.id), title: node.title,
             implementation: implementation, verification: verification)
         ids.push(node.id)
     var entries: [TraceMissingEntryV1] = []
     for id in trace_sorted_ids(ids):
         entries.push(by_id[id])
-    TraceMissingResultV1(snapshot_id: graph.subject.snapshot_id, entries: entries,
-        total_requirements: total, complete: graph.complete)
+    val completeness = if graph.complete: TraceGraphCompletenessV1.Complete else: TraceGraphCompletenessV1.Incomplete
+    TraceMissingResultV1(snapshot_id: TraceSnapshotIdV1(value: graph.subject.snapshot_id), entries: entries,
+        total_requirements: TraceRequirementCountV1(value: total), completeness: completeness)
 
 export TraceLinkStatus, TraceMissingEntryV1, TraceMissingResultV1
+export TraceRequirementIdV1, TraceSnapshotIdV1, TraceRequirementCountV1, TraceGraphCompletenessV1
 export trace_link_status_name_v1, trace_missing_requirements_v1

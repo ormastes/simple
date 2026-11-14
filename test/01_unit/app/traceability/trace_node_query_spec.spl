@@ -3,7 +3,7 @@
 use std.spec.*
 use std.common.traceability.model.*
 use std.common.traceability.query_nodes_v1.{TraceNodeQueryV1, query_trace_nodes_v1}
-use std.common.traceability.query_missing_v1.{TraceLinkStatus, TraceMissingEntryV1, TraceMissingResultV1, trace_missing_requirements_v1}
+use std.common.traceability.query_missing_v1.{TraceLinkStatus, TraceGraphCompletenessV1, TraceMissingEntryV1, TraceMissingResultV1, trace_link_status_name_v1, trace_missing_requirements_v1}
 use std.common.traceability.sidecar_v1.{TraceSidecarReferenceV1}
 use std.spec.step
 use app.traceability.query_options_v1.{trace_query_options_parse_v1, TraceQueryOptionsV1, trace_query_sdn_requested_v1}
@@ -171,7 +171,7 @@ fn missing_graph() -> TraceGraph:
 
 fn missing_ids(result: TraceMissingResultV1) -> [text]:
     var ids: [text] = []
-    for entry in result.entries: ids.push(entry.requirement_id)
+    for entry in result.entries: ids.push(entry.requirement_id.value)
     ids
 
 describe "trace missing":
@@ -186,7 +186,7 @@ describe "trace missing":
         step("A requirement with both edges, and one verified through its criterion, are omitted")
         expect(ids.contains("req:linked")).to_be(false)
         expect(ids.contains("req:via-criterion")).to_be(false)
-        expect(result.total_requirements).to_equal(4)
+        expect(result.total_requirements.value).to_equal(4)
         expect(result.entries.len()).to_equal(2)
 
     it "reports which half is missing with a typed status":
@@ -194,7 +194,7 @@ describe "trace missing":
         step("Inspect the per-half statuses")
         val result = trace_missing_requirements_v1(missing_graph(), [])
         var by_id: Dict<text, TraceMissingEntryV1> = {}
-        for entry in result.entries: by_id[entry.requirement_id] = entry
+        for entry in result.entries: by_id[entry.requirement_id.value] = entry
         expect(by_id["req:unlinked"].implementation).to_equal(TraceLinkStatus.Missing)
         expect(by_id["req:unlinked"].verification).to_equal(TraceLinkStatus.Missing)
         expect(by_id["req:impl-only"].implementation).to_equal(TraceLinkStatus.Linked)
@@ -222,10 +222,10 @@ describe "trace missing":
         var graph = missing_graph()
         graph.complete = false
         val result = trace_missing_requirements_v1(graph, [])
-        expect(result.complete).to_be(false)
+        expect(result.completeness).to_equal(TraceGraphCompletenessV1.Incomplete)
         var unlinked = TraceLinkStatus.Linked
         for entry in result.entries:
-            if entry.requirement_id == "req:unlinked": unlinked = entry.implementation
+            if entry.requirement_id.value == "req:unlinked": unlinked = entry.implementation
         expect(unlinked).to_equal(TraceLinkStatus.Unknown)
 
     it "parses the missing operation and rejects other kinds and paging":
@@ -237,3 +237,18 @@ describe "trace missing":
         expect(trace_query_options_parse_v1(["missing", "bugs"]).is_err()).to_be(true)
         expect(trace_query_options_parse_v1(["missing", "--cursor=x"]).is_err()).to_be(true)
         expect(trace_query_options_parse_v1(["missing", "--prefix=req:"]).is_err()).to_be(true)
+
+describe "trace missing verification honesty":
+    it "reports a verified_by edge as linked, never verified or tested":
+        # @req TRACE-005
+        step("Add a verified_by edge to a requirement with no implementation")
+        var graph = missing_graph()
+        graph.edges.push(TraceEdge(id: "e8", from_id: "req:unlinked", relation: TraceRelation.VerifiedBy, to_id: "case:a"))
+        val result = trace_missing_requirements_v1(graph, [])
+        var verification = TraceLinkStatus.Missing
+        for entry in result.entries:
+            if entry.requirement_id.value == "req:unlinked": verification = entry.verification
+        step("The structural link is Linked and renders as the word linked")
+        expect(verification).to_equal(TraceLinkStatus.Linked)
+        expect(trace_link_status_name_v1(verification)).to_equal("linked")
+        expect(trace_link_status_name_v1(verification) == "verified").to_be(false)
