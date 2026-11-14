@@ -1,0 +1,84 @@
+# @req REQ-LINT-SOURCE-BOUND-FIX
+# L:export_outside_init / L:init_boundary_violation emit real edits or none:
+# a same-file `export` of local fns becomes `pub fn` + export-line removal;
+# everything else stays a diagnostic with no replacement (never an identity edit).
+use std.spec.{describe, it, expect, step, assert_true, expect_not}
+use std.tooling.easy_fix.{EasyFix, Replacement, FixConfidence}
+use compiler.tools.fix.source_edits.{validated_fix_sources}
+use compiler.tools.fix.rules.impl_.lint_module.{check_export_outside_init, check_init_boundary_violation}
+
+fn eoi_apply(fixes: [EasyFix], path: text, source: text) -> text:
+    val result = validated_fix_sources(fixes, {path: source})
+    assert_true(result.is_ok())
+    result.unwrap()[path]
+
+fn eoi_identity_count(fixes: [EasyFix], source: text) -> i64:
+    var count = 0
+    for fix in fixes:
+        for r in fix.replacements:
+            if source.slice(r.start, r.end) == r.new_text: count = count + 1
+    count
+
+fn eoi_edit_count(fixes: [EasyFix]) -> i64:
+    var count = 0
+    for fix in fixes: count = count + fix.replacements.len()
+    count
+
+describe "L:export_outside_init fix":
+    """Same-file fn exports become pub; every other form is diagnostic-only."""
+    it "removes a same-file export and makes the fns pub":
+        step("Every exported name is a local top-level fn")
+        val path = "pkg/mod.spl"
+        val source = "fn alpha() -> i64:\n    1\n\nfn beta() -> i64:\n    2\n\nexport alpha, beta\n"
+        val fixes = check_export_outside_init(source, path)
+        expect(fixes.len()).to_equal(1)
+        assert_true(fixes[0].is_safe())
+        expect(fixes[0].replacements[0].line).to_equal(7)
+        expect(eoi_identity_count(fixes, source)).to_equal(0)
+        val fixed = eoi_apply(fixes, path: path, source: source)
+        expect(fixed).to_equal("pub fn alpha() -> i64:\n    1\n\npub fn beta() -> i64:\n    2\n\n")
+        expect(check_export_outside_init(fixed, path).len()).to_equal(0)
+
+    it "only deletes the export line when the fn is already pub":
+        step("Already-pub definitions are not touched")
+        val path = "pkg/mod.spl"
+        val source = "export gamma\npub fn gamma() -> i64:\n    3"
+        val fixes = check_export_outside_init(source, path)
+        expect(fixes.len()).to_equal(1)
+        expect(fixes[0].replacements.len()).to_equal(1)
+        expect(eoi_apply(fixes, path: path, source: source)).to_equal("pub fn gamma() -> i64:\n    3")
+
+    it "deletes a final export line without a trailing newline":
+        val path = "pkg/mod.spl"
+        val source = "fn delta() -> i64:\n    4\nexport delta"
+        val fixed = eoi_apply(check_export_outside_init(source, path), path: path, source: source)
+        expect(fixed).to_equal("pub fn delta() -> i64:\n    4\n")
+
+    it "emits no edit for cross-file, val, rt_, extern and re-export cases":
+        step("Each line stays an Uncertain diagnostic with zero replacements")
+        val path = "pkg/mod.spl"
+        val source = "use pkg.other.{{remote}\nval LIMIT = 3\nextern fn rt_thing() -> i64\nfn local() -> i64:\n    1\nexport remote\nexport LIMIT\nexport rt_thing\nexport local, remote\nexport use pkg.other.*\nexport pkg.other.name\n"
+        val fixes = check_export_outside_init(source, path)
+        expect(fixes.len()).to_equal(6)
+        for fix in fixes:
+            expect_not(fix.is_safe())
+            expect(fix.replacements.len()).to_equal(0)
+
+    it "emits no edit when a name is exported twice":
+        val path = "pkg/mod.spl"
+        val source = "fn twice() -> i64:\n    1\nexport twice\nexport twice\n"
+        val fixes = check_export_outside_init(source, path)
+        expect(fixes.len()).to_equal(2)
+        expect(eoi_edit_count(fixes)).to_equal(0)
+
+    it "ignores __init__.spl files":
+        expect(check_export_outside_init("fn a():\n    pass\nexport a\n", "pkg/__init__.spl").len()).to_equal(0)
+
+describe "L:init_boundary_violation fix":
+    """Facade choice is a resolver decision, so no edit is offered."""
+    it "stays diagnostic-only with no identity edit":
+        val source = "use pkg.internal.thing.{{x}\n"
+        val fixes = check_init_boundary_violation(source, "pkg/user.spl")
+        expect(fixes.len()).to_equal(1)
+        expect_not(fixes[0].is_safe())
+        expect(fixes[0].replacements.len()).to_equal(0)

@@ -12,8 +12,16 @@ use compiler.tools.fix.rules.helpers.*
 # ============================================================================
 # Rule: export_outside_init
 # Detects `export` statements in files that are NOT __init__.spl.
-# Confidence: Certain (syntactic match + file name check)
 # Level: Deny
+#
+# Edit (Safe) only for the mechanical subset: a single-line `export a, b` of
+# bare names where every name is a top-level `fn` defined exactly once in this
+# file, exported by no other line, not `rt_*` and not `extern`. The edit deletes
+# the export line and prefixes each non-pub definition with `pub `.
+# `pub val` alone does not export (module_system.md E0410), so vals/consts,
+# names defined elsewhere, `export use`, dotted/star/braced forms and anything
+# else stay a diagnostic with no replacement (Uncertain): moving to
+# __init__.spl is a cross-file decision (see PR #9006 decision rules).
 # ============================================================================
 
 fn check_export_outside_init(source: text, file: text) -> [EasyFix]:
@@ -28,28 +36,109 @@ fn check_export_outside_init_with_view(file: text, lines: [text], contexts: [Lin
     if _is_forwarding_pub_use_shim_lines(lines):
         return []
 
-    var fixes: [EasyFix] = []
+    var export_ctxs: [LineContext] = []
     for raw_ctx in contexts:
         val ctx: LineContext = raw_ctx
-
         # Match lines starting with `export ` (not `# export` comments)
         if ctx.trimmed.starts_with("export "):
-            var fix = EasyFix.create(
+            export_ctxs.push(ctx)
+    if export_ctxs.is_empty():
+        return []
+
+    # How many export lines name each bare identifier, and where each
+    # top-level fn is defined (count, context index, already pub).
+    var export_counts: Dict<text, i64> = {}
+    for ctx in export_ctxs:
+        for name in _export_bare_names(ctx.trimmed):
+            export_counts[name] = (export_counts.get(name) ?? 0) + 1
+    var def_counts: Dict<text, i64> = {}
+    var def_index: Dict<text, i64> = {}
+    var def_is_pub: Dict<text, bool> = {}
+    var i = 0
+    while i < contexts.len():
+        val ctx: LineContext = contexts[i]
+        if ctx.indent == 0:
+            val is_pub = ctx.trimmed.starts_with("pub ")
+            val decl = if is_pub: ctx.trimmed.slice(4).trim() else: ctx.trimmed
+            if decl.starts_with("fn "):
+                val name = _leading_identifier(decl.slice(3).trim())
+                if name != "" and export_counts.has(name):
+                    def_counts[name] = (def_counts.get(name) ?? 0) + 1
+                    def_index[name] = i
+                    def_is_pub[name] = is_pub
+        i = i + 1
+
+    val last: LineContext = contexts[contexts.len() - 1]
+    val source_len = last.byte_offset + last.line.len()
+    var fixes: [EasyFix] = []
+    for ctx in export_ctxs:
+        val names = _export_bare_names(ctx.trimmed)
+        var mechanical = ctx.indent == 0 and names.len() > 0
+        for name in names:
+            if name.starts_with("rt_") or (export_counts.get(name) ?? 0) != 1 or (def_counts.get(name) ?? 0) != 1:
+                mechanical = false
+        if not mechanical:
+            fixes.push(EasyFix.create(
                 id: "L:export_outside_init:{ctx.line_num}",
-                description: "export statement outside __init__.spl — move to __init__.spl or use pub",
-                confidence: FixConfidence.Certain
-            )
-            fix.add_replacement(Replacement.create(
-                file: file,
-                start: ctx.byte_offset + ctx.indent,
-                end: ctx.byte_offset + ctx.line.len(),
-                line: ctx.line_num,
-                column: ctx.indent + 1,
-                new_text: ctx.line
+                description: "export statement outside __init__.spl — move it to the package __init__.spl as `export use` (no automatic edit: not every name is a local fn)",
+                confidence: FixConfidence.Uncertain
             ))
-            fixes.push(fix)
+            continue
+        var fix = EasyFix.create(
+            id: "L:export_outside_init:{ctx.line_num}",
+            description: "export statement outside __init__.spl — remove it and mark the exported fn(s) pub",
+            confidence: FixConfidence.Safe
+        )
+        # Deletion first: lint takes the diagnostic line from replacements[0].
+        var del_end = ctx.byte_offset + ctx.line.len() + 1
+        if del_end > source_len:
+            del_end = source_len
+        fix.add_replacement(Replacement.create(
+            file: file,
+            start: ctx.byte_offset,
+            end: del_end,
+            line: ctx.line_num,
+            column: 1,
+            new_text: ""
+        ))
+        for name in names:
+            if not (def_is_pub.get(name) ?? false):
+                val def_ctx: LineContext = contexts[def_index[name]]
+                fix.add_replacement(Replacement.create(
+                    file: file,
+                    start: def_ctx.byte_offset,
+                    end: def_ctx.byte_offset,
+                    line: def_ctx.line_num,
+                    column: 1,
+                    new_text: "pub "
+                ))
+        fixes.push(fix)
 
     fixes
+
+fn _export_bare_names(trimmed: text) -> [text]:
+    """Names of a single-line `export a, b` of bare identifiers; [] for any other form."""
+    val rest = trimmed.slice(7).trim()
+    if rest == "" or rest.starts_with("use ") or rest.contains("#"):
+        return []
+    var names: [text] = []
+    for part in rest.split(","):
+        val name = part.trim()
+        if name == "" or _leading_identifier(name) != name:
+            return []
+        names.push(name)
+    names
+
+fn _leading_identifier(value: text) -> text:
+    var end = 0
+    for ch in value.chars():
+        val is_alpha = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or ch == "_"
+        val is_digit = ch >= "0" and ch <= "9"
+        if is_alpha or (is_digit and end > 0):
+            end = end + 1
+        else:
+            break
+    value.slice(0, end)
 
 fn _is_forwarding_pub_use_shim(source: text) -> bool:
     _is_forwarding_pub_use_shim_lines(source.split("\n"))
@@ -127,20 +216,13 @@ fn check_init_boundary_violation_with_contexts(file: text, contexts: [LineContex
                         has_internal = true
 
                 if has_internal:
-                    var fix = EasyFix.create(
+                    # Diagnostic only: the facade path is a resolver decision,
+                    # so there is no edit (never an identity replacement).
+                    fixes.push(EasyFix.create(
                         id: "L:init_boundary_violation:{ctx.line_num}",
                         description: "import path '{import_path}' reaches into internal module — use the public __init__.spl facade instead",
                         confidence: FixConfidence.Uncertain
-                    )
-                    fix.add_replacement(Replacement.create(
-                        file: file,
-                        start: ctx.byte_offset + ctx.indent,
-                        end: ctx.byte_offset + ctx.line.len(),
-                        line: ctx.line_num,
-                        column: ctx.indent + 1,
-                        new_text: ctx.line
                     ))
-                    fixes.push(fix)
 
     fixes
 
